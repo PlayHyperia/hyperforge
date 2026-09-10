@@ -9,6 +9,13 @@ on `codex/duel-arena-launch-assets`. It changes only `manifests/world-config.jso
 and requires the corresponding game algorithm implementation. No deployment or
 main merge is included; this is not a standalone asset-only release.
 
+The game implementation was committed and pushed as
+`f4b6a069f021d4b05db15e847c8dd5a954a3efc4` on `codex/sol-duel-stream-launch`.
+Both exact remote refs and GitHub author/committer `dreaminglucid` are verified.
+Staged and committed secret scans are clear; all 125 probe11 pins remain identical
+after the normal formatting hook. Unrelated mode/binary changes and external
+authoring/capture archives are excluded. Neither push is visual or release approval.
+
 ## Implementation
 
 - A versioned `compact-island-sculpt-v1` algorithm / `compact-duel-island-v2`

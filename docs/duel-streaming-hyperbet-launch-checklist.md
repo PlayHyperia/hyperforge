@@ -42,6 +42,12 @@ rock formations, differentiated PBR ground, connected paths and grouped foliage.
 See the game repository's `docs/compact-island-environment-art-brief.md`. The new
 imagegen reference is concept art only; it is not a game capture or approval.
 
+- [x] Push the scoped development checkpoint: game implementation
+  `f4b6a069f021d4b05db15e847c8dd5a954a3efc4`, paired runtime assets
+  `1545350745e7110ddc4d3a39f2dbf7856432ad10`. Exact remote refs and GitHub
+  author/committer `dreaminglucid` verified; staged/commit secret scans clear.
+  All 125 probe11 pins still match after the normal commit hook. Unrelated
+  work and local authoring/capture archives are not included in this checkpoint.
 - [x] Build the compact-v2 candidate with a shared authored landform, continuous
   coast, one forest biome and unchanged station/arena coordinates. Main-thread,
   actual worker and assembled geometry regressions pass. The final shared run
