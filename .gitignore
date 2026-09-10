@@ -151,3 +151,26 @@ packages/server/scripts/test_*.ts
 
 # Local server state
 packages/server/.hyperia-storage.json
+
+# Local recovery copies (not project source or dependencies)
+*.dataless-backup*
+*.icloud-backup*
+*.fileprovider-backup*
+*.client-stage-backup*
+*.camera-prep*-backup*
+*.offloaded-*
+icloud-placeholders-*/
+*.recovery-attempt-*
+/packages/shared/node_modules 2/
+/packages/shared/build.declarations-*/
+/packages/plugin-hyperia/dist.partial-*/
+/packages/procgen/src.head-*/
+/bun 2.lock
+
+# Generated diagnostic runs: retain locally; commit reviewed summaries separately
+/artifacts/
+/progress-videos/
+
+# Additional local persistence locations
+/.hyperia-storage.json
+/packages/server/world/.hyperia-storage.json
