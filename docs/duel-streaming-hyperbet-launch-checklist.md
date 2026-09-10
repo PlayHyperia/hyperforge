@@ -237,6 +237,34 @@ was tested after capture and does not change the captured single-map fit math.
 Owned Chrome/stack cleaned up; source body, maps/defaults and deferred grips
 remain untouched. [Full results and retained failures](../../asset-studio/game-test-integration/world-lighting-review01/RESULT.md).
 
+### G02/G04/G05/G07 populated preparation checkpoint01 — 2026-09-10
+
+- [x] Add explicit preparation-broadcast admission for real NPCs, resources,
+  stations and vegetation, and focus detailed terrain near the actual agents.
+  Default arena behavior is unchanged. The focused shared suite passes30/30.
+- [x] Exercise shared sky-derived outdoor illumination on actual world and kit
+  materials in Chrome/Metal WebGPU at1280×720/DPR1:42 day/night comparisons,
+  84 paired PNGs, real visible trees and14 equipment attach/remove roundtrips.
+  Resource cleanup completes with no retained page/GPU/HTTP/native errors.
+- [ ] Qualify the harness correction: the run's outer camera comparison failed
+  because it compared two moving director poses; the study's atomic restore
+  matched acquisition exactly. Retain the failed result; source-only correction
+  is not a passed rerun.14 canonical dagger fit-metadata console errors remain.
+- [ ] Replace the coarse/washed-out preparation terrain and improve grounding,
+  scale, composition and materials. The16×16 vertices across minimum100m chunks
+  are too coarse for2m pond-bank transitions. Measure actual triangle heights,
+  model bases and interaction surfaces before changing placement.
+- [ ] Finish coherent lighting and art: the candidate removes cyan but leaves
+  near-black night armor, inconsistently bright NPCs, oversized clustered trees,
+  questionable contact and HUD-obscured views. This candidate is rejected for
+  defaults; no complete fit, performance, stream or production gate is closed.
+
+Main source checkpoint:50a75f204; operational/checklist checkpoint:446b8d1bd.
+Both are pushed to codex/sol-duel-stream-launch under dreaminglucid. Client/plugin
+checks pass; the strict server typecheck remains an explicitly documented open
+gate. Hyperbet/assets/authoring backup completion is tracked separately.
+
+
 ### G02/G07 shared-world checkpoint31 — 2026-09-10
 
 - [x] Implement default-preserving shared terrain/grass palette nodes, shared
