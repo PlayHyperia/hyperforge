@@ -48,6 +48,10 @@ describe("SkillsSystem fractional XP", () => {
   it("preserves exact manifest fractions and rejects invalid XP events", async () => {
     const fixture = createFixture();
     const system = new SkillsSystem(fixture.world as unknown as World);
+    const skillUpdates: Array<{ persistence?: "already_committed" }> = [];
+    fixture.eventBus.subscribe(EventType.SKILLS_UPDATED, (event) => {
+      skillUpdates.push(event.data as { persistence?: "already_committed" });
+    });
     await system.init();
 
     fixture.eventBus.emitEvent(
@@ -60,6 +64,8 @@ describe("SkillsSystem fractional XP", () => {
       "test",
     );
     expect(fixture.stats.smithing.xp).toBe(12.5);
+    expect(skillUpdates).toHaveLength(1);
+    expect(skillUpdates[0]?.persistence).toBeUndefined();
 
     for (const amount of [Number.NaN, -1, 0, 1_000_001]) {
       fixture.eventBus.emitEvent(

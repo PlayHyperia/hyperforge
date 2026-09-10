@@ -49,7 +49,9 @@ RUN bun run build
 FROM oven/bun:1.3.14-alpine AS runtime
 
 # Install runtime dependencies for native modules
-RUN apk add --no-cache python3 py3-setuptools make g++ pkgconfig cairo-dev pango-dev jpeg-dev giflib-dev
+RUN apk add --no-cache python3 py3-setuptools make g++ pkgconfig cairo-dev pango-dev jpeg-dev giflib-dev ffmpeg
+
+RUN ffmpeg -version && ffprobe -version
 
 WORKDIR /app
 

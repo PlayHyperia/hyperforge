@@ -30,6 +30,7 @@ export interface InventoryActionContext {
 export interface ActionResult {
   success: boolean;
   message?: string;
+  operationId?: string;
 }
 
 /** Actions that are intentionally no-ops (don't warn) */
@@ -79,14 +80,24 @@ export function dispatchInventoryAction(
       return { success: true };
 
     case "drop": {
-      // Optimistic: remove the item from UI immediately
-      network?.applyOptimisticRemoval(localPlayer.id, slot, quantity);
-      if (world.network?.dropItem) {
-        world.network.dropItem(itemId, slot, quantity);
-      } else {
-        world.network?.send("dropItem", { itemId, slot, quantity });
+      if (!network?.dropItem) {
+        return {
+          success: false,
+          message: "Authoritative item dropping is unavailable",
+        };
       }
-      return { success: true };
+      try {
+        // ClientNetwork binds the intent to a secure durable identity before
+        // sending. Only after that succeeds may the UI hide the local item.
+        const operationId = network.dropItem(itemId, slot, quantity);
+        network.applyOptimisticRemoval(localPlayer.id, slot, quantity);
+        return { success: true, operationId };
+      } catch {
+        return {
+          success: false,
+          message: "Could not create an authoritative drop operation",
+        };
+      }
     }
 
     case "examine": {

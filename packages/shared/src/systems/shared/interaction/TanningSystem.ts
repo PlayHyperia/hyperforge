@@ -28,6 +28,12 @@ import type {
   InventorySystem,
 } from "../character/InventorySystem";
 import { SystemBase } from "../infrastructure/SystemBase";
+import {
+  clearProcessingInteractionPresentation,
+  publishProcessingInteractionPresentation,
+} from "./ProcessingInteractionPresentation";
+import type { PlayerProcessingQuiescenceSystem } from "./ProcessingQuiescence";
+import { canPlayerPerformPreparationAction } from "./ProcessingStationAuthority";
 
 interface PositionLike {
   x: number;
@@ -55,6 +61,7 @@ interface PendingTanningAction {
   state: "in_flight" | "retry_wait" | "settled";
   receipt: AtomicProcessingActionReceipt | null;
   disconnected: boolean;
+  presentationCancelled: boolean;
   requestId?: string;
 }
 
@@ -74,7 +81,10 @@ interface TannerEntityLike {
   };
 }
 
-export class TanningSystem extends SystemBase {
+export class TanningSystem
+  extends SystemBase
+  implements PlayerProcessingQuiescenceSystem
+{
   private readonly activeSessions = new Map<string, TannerSession>();
   private readonly pendingActions = new Map<string, PendingTanningAction>();
   private lastProcessedTick = -1;
@@ -116,18 +126,50 @@ export class TanningSystem extends SystemBase {
       targetPosition: { x: number; y: number; z: number };
     }>(EventType.MOVEMENT_CLICK_TO_MOVE, (data) => {
       this.activeSessions.delete(data.playerId);
+      const pending = this.pendingActions.get(data.playerId);
+      if (pending) {
+        pending.presentationCancelled = true;
+        clearProcessingInteractionPresentation(
+          this.world,
+          data.playerId,
+          "tanning",
+        );
+      }
     });
     this.subscribe(
       EventType.COMBAT_STARTED,
       (data: { attackerId: string; targetId: string }) => {
         this.activeSessions.delete(data.attackerId);
         this.activeSessions.delete(data.targetId);
+        const attackerPending = this.pendingActions.get(data.attackerId);
+        const targetPending = this.pendingActions.get(data.targetId);
+        if (attackerPending) {
+          attackerPending.presentationCancelled = true;
+          clearProcessingInteractionPresentation(
+            this.world,
+            data.attackerId,
+            "tanning",
+          );
+        }
+        if (targetPending) {
+          targetPending.presentationCancelled = true;
+          clearProcessingInteractionPresentation(
+            this.world,
+            data.targetId,
+            "tanning",
+          );
+        }
       },
     );
     this.subscribe(
       EventType.PLAYER_UNREGISTERED,
       (data: { playerId: string }) => {
         this.activeSessions.delete(data.playerId);
+        clearProcessingInteractionPresentation(
+          this.world,
+          data.playerId,
+          "tanning",
+        );
         const pending = this.pendingActions.get(data.playerId);
         if (pending) pending.disconnected = true;
       },
@@ -374,9 +416,15 @@ export class TanningSystem extends SystemBase {
       state: "in_flight",
       receipt: null,
       disconnected: false,
+      presentationCancelled: false,
       requestId: data.requestId,
     };
     this.pendingActions.set(playerId, pending);
+    publishProcessingInteractionPresentation(this.world, {
+      playerId,
+      skill: "tanning",
+      targetEntityId: pending.npcEntityId,
+    });
     this.reportProcessingRequestProgress(
       playerId,
       data.requestId,
@@ -464,6 +512,11 @@ export class TanningSystem extends SystemBase {
           continue;
         }
         this.pendingActions.delete(pending.playerId);
+        clearProcessingInteractionPresentation(
+          this.world,
+          pending.playerId,
+          "tanning",
+        );
         this.rejectProcessingRequest(
           pending.playerId,
           pending.requestId,
@@ -494,6 +547,11 @@ export class TanningSystem extends SystemBase {
       if (!receipt.liveInventoryApplied) {
         if (pending.disconnected) {
           this.pendingActions.delete(pending.playerId);
+          clearProcessingInteractionPresentation(
+            this.world,
+            pending.playerId,
+            "tanning",
+          );
         } else {
           this.scheduleRetry(pending);
         }
@@ -501,8 +559,12 @@ export class TanningSystem extends SystemBase {
       }
 
       this.pendingActions.delete(pending.playerId);
+      clearProcessingInteractionPresentation(
+        this.world,
+        pending.playerId,
+        "tanning",
+      );
       this.finishProcessingRequest(pending.requestId);
-      if (pending.disconnected) continue;
       Logger.system("TanningSystem", "tanning_complete", {
         playerId: pending.playerId,
         operationId: pending.operationId,
@@ -513,6 +575,17 @@ export class TanningSystem extends SystemBase {
         currentCoins: receipt.currentCoins,
         replayed: receipt.replayed,
       });
+      if (!pending.disconnected) {
+        this.emitTypedEvent(EventType.TANNING_COMPLETE, {
+          playerId: pending.playerId,
+          inputItemId: pending.inputItemId,
+          outputItemId: pending.outputItemId,
+          totalTanned: pending.quantity,
+          totalCost: pending.totalCost,
+          ...(pending.requestId ? { requestId: pending.requestId } : {}),
+        });
+      }
+      if (pending.disconnected || pending.presentationCancelled) continue;
       this.emitTypedEvent(EventType.UI_MESSAGE, {
         playerId: pending.playerId,
         message:
@@ -520,14 +593,6 @@ export class TanningSystem extends SystemBase {
             ? `The Tanner turns your hide into ${pending.itemName}.`
             : `The Tanner turns ${pending.quantity} hides into ${pending.itemName}.`,
         type: "success",
-      });
-      this.emitTypedEvent(EventType.TANNING_COMPLETE, {
-        playerId: pending.playerId,
-        inputItemId: pending.inputItemId,
-        outputItemId: pending.outputItemId,
-        totalTanned: pending.quantity,
-        totalCost: pending.totalCost,
-        ...(pending.requestId ? { requestId: pending.requestId } : {}),
       });
     }
   }
@@ -538,6 +603,7 @@ export class TanningSystem extends SystemBase {
     npcEntityId: string,
     expectedNpcId?: string,
   ): boolean {
+    if (!canPlayerPerformPreparationAction(this.world, playerId)) return false;
     const player =
       this.world.getPlayer(playerId) ?? this.world.entities.get(playerId);
     const tanner = this.world.entities.get(npcEntityId) as unknown as
@@ -626,6 +692,20 @@ export class TanningSystem extends SystemBase {
     };
   }
 
+  requestPlayerProcessingQuiescence(playerId: string): void {
+    this.activeSessions.delete(playerId);
+    const pending = this.pendingActions.get(playerId);
+    if (!pending) return;
+    pending.presentationCancelled = true;
+    clearProcessingInteractionPresentation(this.world, playerId, "tanning");
+  }
+
+  isPlayerProcessingQuiescent(playerId: string): boolean {
+    return (
+      !this.activeSessions.has(playerId) && !this.pendingActions.has(playerId)
+    );
+  }
+
   update(_dt: number): void {
     if (!this.world.isServer) return;
     const currentTick = this.world.currentTick ?? 0;
@@ -636,6 +716,9 @@ export class TanningSystem extends SystemBase {
 
   destroy(): void {
     this.destroyed = true;
+    for (const playerId of this.pendingActions.keys()) {
+      clearProcessingInteractionPresentation(this.world, playerId, "tanning");
+    }
     this.activeSessions.clear();
     this.pendingActions.clear();
   }

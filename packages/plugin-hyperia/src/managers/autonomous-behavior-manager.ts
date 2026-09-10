@@ -550,8 +550,11 @@ export class AutonomousBehaviorManager {
   private duelPrepPhase = false;
   private duelPrepStartedAt = 0;
   private duelPrepOpponentName: string | null = null;
+  private duelPrepPreparationId: string | null = null;
+  private serverAuthoritativeDuel = false;
   private duelPrepStep:
     | "idle"
+    | "server_authoritative"
     | "moving_to_bank"
     | "banking"
     | "withdrawing_food"
@@ -638,7 +641,13 @@ export class AutonomousBehaviorManager {
   /** Whether duel event handlers have been registered */
   private duelEventHandlerRegistered = false;
   private readonly duelOnDeckEventHandler = (data: unknown): void => {
-    this.onDuelOnDeck(data as { opponentId?: string; opponentName?: string });
+    this.onDuelOnDeck(
+      data as {
+        preparationId?: string;
+        opponentId?: string;
+        opponentName?: string;
+      },
+    );
   };
   private readonly duelSessionStartedEventHandler = (data: unknown): void => {
     this.onDuelSessionStarted(data);
@@ -651,6 +660,27 @@ export class AutonomousBehaviorManager {
   };
   private readonly duelCancelledEventHandler = (): void => {
     this.onDuelCancelled();
+  };
+  private readonly duelPreparationRevokedEventHandler = (): void => {
+    this.cancelDuelPrep("authoritative host lease revoked");
+  };
+  private readonly duelPreparationStatusEventHandler = (
+    data: unknown,
+  ): void => {
+    const event = data as { preparationId?: string; status?: string };
+    if (
+      !this.duelPrepPhase ||
+      !this.duelPrepPreparationId ||
+      event.preparationId !== this.duelPrepPreparationId
+    ) {
+      return;
+    }
+    if (event.status === "ready") {
+      this.duelPrepStep = "ready";
+      this.nextTickFast = true;
+    } else if (event.status === "failed") {
+      this.cancelDuelPrep("authoritative loadout validation failed");
+    }
   };
 
   /**
@@ -866,6 +896,14 @@ export class AutonomousBehaviorManager {
         "DUEL_CANCELLED",
         this.duelCancelledEventHandler,
       );
+      this.service.onGameEvent(
+        "DUEL_PREPARATION_REVOKED",
+        this.duelPreparationRevokedEventHandler,
+      );
+      this.service.onGameEvent(
+        "DUEL_PREPARATION_STATUS",
+        this.duelPreparationStatusEventHandler,
+      );
       this.duelEventHandlerRegistered = true;
       logger.info("[AutonomousBehavior] Registered duel event handlers");
     }
@@ -913,6 +951,8 @@ export class AutonomousBehaviorManager {
     this.bankWithdrawalInProgress = false;
     this.duelPrepPhase = false;
     this.duelPrepStep = "idle";
+    this.duelPrepPreparationId = null;
+    this.serverAuthoritativeDuel = false;
     this.duelPhase = null;
     this.duelModeEnteredAt = 0;
     this.duelOpponentId = null;
@@ -954,6 +994,14 @@ export class AutonomousBehaviorManager {
       this.service.offGameEvent(
         "DUEL_CANCELLED",
         this.duelCancelledEventHandler,
+      );
+      this.service.offGameEvent(
+        "DUEL_PREPARATION_REVOKED",
+        this.duelPreparationRevokedEventHandler,
+      );
+      this.service.offGameEvent(
+        "DUEL_PREPARATION_STATUS",
+        this.duelPreparationStatusEventHandler,
       );
       this.duelEventHandlerRegistered = false;
     }
@@ -1277,6 +1325,7 @@ export class AutonomousBehaviorManager {
         this.duelOpponentId = null;
         this.duelOpponentName = null;
         this.duelId = null;
+        this.serverAuthoritativeDuel = false;
         this.resetDuelCombatState();
         const restoredDuelTimeout = this.popGoal();
         if (restoredDuelTimeout) {
@@ -1304,6 +1353,7 @@ export class AutonomousBehaviorManager {
     // Duel combat loop — runs independently of canAct() guard
     // (canAct() returns false during duels to block open-world behavior)
     if (this.duelPhase === "fighting") {
+      if (this.serverAuthoritativeDuel) return;
       await this.duelCombatTick();
       return;
     }
@@ -6919,6 +6969,7 @@ export class AutonomousBehaviorManager {
    * Begins the preparation state machine: bank → withdraw food → move to lobby.
    */
   private onDuelOnDeck(data: {
+    preparationId?: string;
     opponentId?: string;
     opponentName?: string;
   }): void {
@@ -6942,9 +6993,12 @@ export class AutonomousBehaviorManager {
     );
 
     this.duelPrepPhase = true;
-    this.duelPrepStep = "idle";
+    const serverAuthoritative = typeof data.preparationId === "string";
+    this.serverAuthoritativeDuel = serverAuthoritative;
+    this.duelPrepStep = serverAuthoritative ? "server_authoritative" : "idle";
     this.duelPrepStartedAt = Date.now();
     this.duelPrepOpponentName = opponentName;
+    this.duelPrepPreparationId = data.preparationId ?? null;
 
     // Save current goal for restoration after prep
     if (this.currentGoal) {
@@ -6954,7 +7008,9 @@ export class AutonomousBehaviorManager {
     // Set a prep goal
     this.currentGoal = {
       type: "banking",
-      description: `Duel prep: banking and withdrawing food before fighting ${opponentName}`,
+      description: serverAuthoritative
+        ? `Duel prep: waiting for the authoritative frozen loadout against ${opponentName}`
+        : `Duel prep: banking and withdrawing food before fighting ${opponentName}`,
       target: 1,
       progress: 0,
       startedAt: Date.now(),
@@ -6977,8 +7033,13 @@ export class AutonomousBehaviorManager {
       return;
     }
 
-    // Safety timeout: 4 minutes max for prep
-    if (Date.now() - this.duelPrepStartedAt > 240_000) {
+    // The durable private session owns its exact expiry and must never fall
+    // back into the legacy location-based bank path. Legacy/manual prep keeps
+    // its old bounded timeout.
+    if (
+      this.duelPrepStep !== "server_authoritative" &&
+      Date.now() - this.duelPrepStartedAt > 240_000
+    ) {
       logger.warn(
         "[AutonomousBehavior] Duel prep timeout (4 min) — skipping to lobby",
       );
@@ -6986,6 +7047,13 @@ export class AutonomousBehaviorManager {
     }
 
     switch (this.duelPrepStep) {
+      case "server_authoritative": {
+        // The server privately opens, plans, atomically commits, and validates
+        // the frozen loadout. The plugin keeps ordinary autonomy suspended and
+        // never sees bank contents or mutates custody through legacy actions.
+        break;
+      }
+
       case "idle": {
         // Start moving to duel arena bank
         logger.info("[AutonomousBehavior] Prep: Moving to duel arena bank");
@@ -7215,6 +7283,8 @@ export class AutonomousBehaviorManager {
     this.duelPrepStep = "idle";
     this.duelPrepStartedAt = 0;
     this.duelPrepOpponentName = null;
+    this.duelPrepPreparationId = null;
+    this.serverAuthoritativeDuel = false;
     this.actionLock = null;
 
     const restored = this.popGoal();
@@ -7243,6 +7313,7 @@ export class AutonomousBehaviorManager {
       this.duelPrepStep = "idle";
       this.duelPrepStartedAt = 0;
       this.duelPrepOpponentName = null;
+      this.duelPrepPreparationId = null;
       this.actionLock = null;
       logger.info(
         "[AutonomousBehavior] Transitioning from duel prep → duel session",
@@ -7313,7 +7384,7 @@ export class AutonomousBehaviorManager {
 
     // Fire one-shot LLM fight plan (background — defaults handle combat until it resolves)
     const player = this.service?.getPlayerEntity();
-    if (player) {
+    if (player && !this.serverAuthoritativeDuel) {
       this.planDuelCombatOnce(player);
     }
 
@@ -7376,6 +7447,7 @@ export class AutonomousBehaviorManager {
     this.duelOpponentId = null;
     this.duelOpponentName = null;
     this.duelId = null;
+    this.serverAuthoritativeDuel = false;
     this.resetDuelCombatState();
 
     // Generate post-duel assessment and adjust strategy
@@ -7414,6 +7486,7 @@ export class AutonomousBehaviorManager {
     // Clear any lingering prep state
     this.duelPrepPhase = false;
     this.duelPrepStep = "idle";
+    this.duelPrepPreparationId = null;
 
     logger.info(
       "[AutonomousBehavior] ⚔️ Duel cancelled — resuming normal behavior",
@@ -7425,6 +7498,7 @@ export class AutonomousBehaviorManager {
     this.duelOpponentId = null;
     this.duelOpponentName = null;
     this.duelId = null;
+    this.serverAuthoritativeDuel = false;
     this.resetDuelCombatState();
 
     const player = this.service?.getPlayerEntity();

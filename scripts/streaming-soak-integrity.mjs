@@ -8,7 +8,10 @@ const ACTIVE_PHASES = Object.freeze([
 const PHASE_INDEX = new Map(
   ACTIVE_PHASES.map((phase, index) => [phase, index]),
 );
-const PHASE_COVERAGE_START_TOLERANCE_MS = 2_000;
+// Public streaming state is deliberately delayed and a fresh qualification
+// process still needs a short endpoint warmup. Five seconds admits only the
+// beginning of ANNOUNCEMENT while preserving meaningful full-phase coverage.
+const PHASE_COVERAGE_START_TOLERANCE_MS = 5_000;
 
 function isFiniteNumber(value) {
   return typeof value === "number" && Number.isFinite(value);

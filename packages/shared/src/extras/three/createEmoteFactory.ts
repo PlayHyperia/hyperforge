@@ -46,13 +46,24 @@ type KeyframeTrackLike = THREE.KeyframeTrack & {
   values?: ArrayLike<number>;
 };
 
+function splitTrackName(trackName: string) {
+  const propertySeparator = trackName.lastIndexOf(".");
+  if (propertySeparator <= 0 || propertySeparator === trackName.length - 1) {
+    return { boneName: trackName, propertyName: "" };
+  }
+  return {
+    boneName: trackName.slice(0, propertySeparator),
+    propertyName: trackName.slice(propertySeparator + 1),
+  };
+}
+
 function isVectorTrack(
   track: THREE.KeyframeTrack,
 ): track is THREE.VectorKeyframeTrack {
   const candidate = track as KeyframeTrackLike;
   if (candidate.ValueTypeName === "vector") return true;
-  const property = track.name.split(".")[1];
-  return property === "position" || property === "scale";
+  const { propertyName } = splitTrackName(track.name);
+  return propertyName === "position" || propertyName === "scale";
 }
 
 function isQuaternionTrack(
@@ -60,7 +71,7 @@ function isQuaternionTrack(
 ): track is THREE.QuaternionKeyframeTrack {
   const candidate = track as KeyframeTrackLike;
   if (candidate.ValueTypeName === "quaternion") return true;
-  return track.name.split(".")[1] === "quaternion";
+  return splitTrackName(track.name).propertyName === "quaternion";
 }
 
 /**
@@ -73,17 +84,17 @@ function isQuaternionTrack(
  * @returns Factory object with toClip() method
  */
 /**
- * HYBRID APPROACH: Normalized Bones for Automatic A-pose Handling
+ * Normalized animation targets
  *
- * Previously, we manually compensated for A-pose vs T-pose differences with offsets.
- * Now, we use the VRM library's normalized bone system which handles this automatically.
+ * The VRM normalized rig compensates source bone axes, not arbitrary anatomical
+ * A-rest poses. Such assets need a separately validated target-pose calibration.
  *
  * How it works:
  * 1. Animation targets normalized bones (Normalized_Hips, etc.)
  * 2. vrm.humanoid.update() propagates normalized → raw bones with inverse bind transforms
- * 3. Works for any VRM bind pose (A-pose, T-pose, etc.) automatically
+ * 3. The target avatar must supply a compatible T-rest or explicit calibration
  *
- * No manual compensation needed!
+ * Do not apply additional global or unverified per-avatar rotation offsets here.
  */
 
 export function createEmoteFactory(glb: GLBData, url: string) {
@@ -114,14 +125,17 @@ export function createEmoteFactory(glb: GLBData, url: string) {
 
   clip.tracks = clip.tracks.filter((track) => {
     if (isVectorTrack(track)) {
-      const [name, type] = track.name.split(".");
+      const { boneName: name, propertyName: type } = splitTrackName(track.name);
       if (type !== "position") return;
       // we need both root and hip bones
       if (name === "Root") {
         _haveRoot = true;
         return true;
       }
-      if (name === "mixamorigHips") {
+      if (
+        (normalizedBoneNames as Record<string, string | undefined>)[name] ===
+        "hips"
+      ) {
         return true;
       }
       return false;
@@ -134,8 +148,7 @@ export function createEmoteFactory(glb: GLBData, url: string) {
   // fix new mixamo update normalized bones
   // see: https://github.com/pixiv/three-vrm/pull/1032/files
   clip.tracks.forEach((track) => {
-    const trackSplitted = track.name.split(".");
-    const mixamoRigName = trackSplitted[0];
+    const { boneName: mixamoRigName } = splitTrackName(track.name);
     const mixamoRigNode = glb.scene.getObjectByName(mixamoRigName);
     if (!mixamoRigNode || !mixamoRigNode.parent) {
       console.warn(`Mixamo rig node not found: ${mixamoRigName}`);
@@ -191,7 +204,7 @@ export function createEmoteFactory(glb: GLBData, url: string) {
   type EmoteRetargetOptions = {
     rootToHips?: number;
     version?: string;
-    getBoneName?: (name: string) => string;
+    getBoneName?: (name: string) => string | undefined;
   };
 
   return {
@@ -212,8 +225,9 @@ export function createEmoteFactory(glb: GLBData, url: string) {
       const _resultQuat = new THREE.Quaternion();
 
       clip.tracks.forEach((track) => {
-        const trackSplitted = track.name.split(".");
-        const ogBoneName = trackSplitted[0];
+        const { boneName: ogBoneName, propertyName } = splitTrackName(
+          track.name,
+        );
         const vrmBoneName = (normalizedBoneNames as Record<string, string>)[
           ogBoneName
         ];
@@ -230,8 +244,6 @@ export function createEmoteFactory(glb: GLBData, url: string) {
         const _scaler = height * scale;
 
         if (vrmNodeName !== undefined) {
-          const propertyName = trackSplitted[1];
-
           if (isQuaternionTrack(track)) {
             let values = track.values;
 
@@ -240,8 +252,8 @@ export function createEmoteFactory(glb: GLBData, url: string) {
               values = values.map((v, i) => (i % 2 === 0 ? -v : v));
             }
 
-            // No A-pose compensation needed - normalized bones handle this automatically!
-            // The VRM library's vrm.humanoid.update() applies the correct inverse bind transforms
+            // Anatomical rest calibration, when explicitly required, is applied
+            // to the owned target clip by its avatar factory, not the shared source.
 
             tracks.push(
               new THREE.QuaternionKeyframeTrack(
@@ -300,6 +312,7 @@ const normalizedBoneNames = {
   leftUpperArm: "leftUpperArm",
   leftLowerArm: "leftLowerArm",
   leftHand: "leftHand",
+  leftThumbMetacarpal: "leftThumbMetacarpal",
   leftThumbProximal: "leftThumbProximal",
   leftThumbIntermediate: "leftThumbIntermediate",
   leftThumbDistal: "leftThumbDistal",
@@ -319,6 +332,7 @@ const normalizedBoneNames = {
   rightUpperArm: "rightUpperArm",
   rightLowerArm: "rightLowerArm",
   rightHand: "rightHand",
+  rightThumbMetacarpal: "rightThumbMetacarpal",
   rightLittleProximal: "rightLittleProximal",
   rightLittleIntermediate: "rightLittleIntermediate",
   rightLittleDistal: "rightLittleDistal",
@@ -342,6 +356,89 @@ const normalizedBoneNames = {
   rightLowerLeg: "rightLowerLeg",
   rightFoot: "rightFoot",
   rightToes: "rightToes",
+  // KayKit Rig_Medium names. The wrist nodes are the anatomical hand roots;
+  // their hand/handslot children remain attachment helpers, not humanoid bones.
+  "upperarm.l": "leftUpperArm",
+  "lowerarm.l": "leftLowerArm",
+  "wrist.l": "leftHand",
+  "upperarm.r": "rightUpperArm",
+  "lowerarm.r": "rightLowerArm",
+  "wrist.r": "rightHand",
+  "upperleg.l": "leftUpperLeg",
+  "lowerleg.l": "leftLowerLeg",
+  "foot.l": "leftFoot",
+  "toes.l": "leftToes",
+  "upperleg.r": "rightUpperLeg",
+  "lowerleg.r": "rightLowerLeg",
+  "foot.r": "rightFoot",
+  "toes.r": "rightToes",
+  // GLTFLoader sanitizes periods out of animation target node names.
+  upperarml: "leftUpperArm",
+  lowerarml: "leftLowerArm",
+  wristl: "leftHand",
+  upperarmr: "rightUpperArm",
+  lowerarmr: "rightLowerArm",
+  wristr: "rightHand",
+  upperlegl: "leftUpperLeg",
+  lowerlegl: "leftLowerLeg",
+  footl: "leftFoot",
+  toesl: "leftToes",
+  upperlegr: "rightUpperLeg",
+  lowerlegr: "rightLowerLeg",
+  footr: "rightFoot",
+  toesr: "rightToes",
+  // Quaternius Universal humanoid names.
+  pelvis: "hips",
+  spine_01: "spine",
+  spine_02: "chest",
+  spine_03: "upperChest",
+  neck_01: "neck",
+  clavicle_l: "leftShoulder",
+  upperarm_l: "leftUpperArm",
+  lowerarm_l: "leftLowerArm",
+  hand_l: "leftHand",
+  thumb_01_l: "leftThumbMetacarpal",
+  thumb_02_l: "leftThumbProximal",
+  thumb_03_l: "leftThumbDistal",
+  index_01_l: "leftIndexProximal",
+  index_02_l: "leftIndexIntermediate",
+  index_03_l: "leftIndexDistal",
+  middle_01_l: "leftMiddleProximal",
+  middle_02_l: "leftMiddleIntermediate",
+  middle_03_l: "leftMiddleDistal",
+  ring_01_l: "leftRingProximal",
+  ring_02_l: "leftRingIntermediate",
+  ring_03_l: "leftRingDistal",
+  pinky_01_l: "leftLittleProximal",
+  pinky_02_l: "leftLittleIntermediate",
+  pinky_03_l: "leftLittleDistal",
+  clavicle_r: "rightShoulder",
+  upperarm_r: "rightUpperArm",
+  lowerarm_r: "rightLowerArm",
+  hand_r: "rightHand",
+  thumb_01_r: "rightThumbMetacarpal",
+  thumb_02_r: "rightThumbProximal",
+  thumb_03_r: "rightThumbDistal",
+  index_01_r: "rightIndexProximal",
+  index_02_r: "rightIndexIntermediate",
+  index_03_r: "rightIndexDistal",
+  middle_01_r: "rightMiddleProximal",
+  middle_02_r: "rightMiddleIntermediate",
+  middle_03_r: "rightMiddleDistal",
+  ring_01_r: "rightRingProximal",
+  ring_02_r: "rightRingIntermediate",
+  ring_03_r: "rightRingDistal",
+  pinky_01_r: "rightLittleProximal",
+  pinky_02_r: "rightLittleIntermediate",
+  pinky_03_r: "rightLittleDistal",
+  thigh_l: "leftUpperLeg",
+  calf_l: "leftLowerLeg",
+  foot_l: "leftFoot",
+  ball_l: "leftToes",
+  thigh_r: "rightUpperLeg",
+  calf_r: "rightLowerLeg",
+  foot_r: "rightFoot",
+  ball_r: "rightToes",
   // vrm uploaded to mixamo
   // these are latest mixamo bone names
   Hips: "hips",

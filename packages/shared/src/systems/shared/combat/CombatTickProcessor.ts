@@ -28,7 +28,6 @@ import {
   worldToTile,
 } from "../movement/TileSystem";
 import { isMobEntity } from "../../../utils/typeGuards";
-import { getGameRng } from "../../../utils/SeededRandom";
 import { GameEventType } from "../EventStore";
 import type { CombatData } from "./CombatStateService";
 import type { CombatAttackContext } from "./handlers/AttackContext";
@@ -96,22 +95,33 @@ export class CombatTickProcessor {
   };
 
   private readonly _damageDealtPayload = {
+    projectileId: undefined as string | undefined,
     attackerId: "",
     targetId: "",
     damage: 0,
+    attackType: AttackType.MELEE as AttackType | undefined,
     targetType: "mob" as "player" | "mob" | undefined,
     position: { x: 0, y: 0, z: 0 } as
-      | { x: number; y: number; z: number }
-      | undefined,
+      { x: number; y: number; z: number } | undefined,
   };
   private readonly _damageDealtPositionBuffer = { x: 0, y: 0, z: 0 };
 
   private readonly _projectileHitPayload = {
+    projectileId: "",
     attackerId: "",
     targetId: "",
     damage: 0,
     projectileType: "",
     position: null as { x: number; y: number; z: number } | null,
+  };
+
+  private readonly _projectileCancelledPayload = {
+    projectileId: "",
+    attackerId: "",
+    targetId: "",
+    projectileType: "arrow" as "arrow" | "spell",
+    reason: "combat_state_missing" as
+      "combat_state_missing" | "entity_died" | "projectile_expired",
   };
 
   private readonly _clearFaceTargetPayload = {
@@ -354,15 +364,25 @@ export class CombatTickProcessor {
   private processProjectileHits(tickNumber: number): void {
     const result = this.ctx.projectileService.processTick(tickNumber);
 
+    for (const projectile of result.expired) {
+      this.emitProjectileCancelled(projectile, "projectile_expired");
+    }
+
     for (const projectile of result.hits) {
       const target =
         this.ctx.entityResolver.resolve(projectile.targetId, "mob") ??
         this.ctx.entityResolver.resolve(projectile.targetId, "player");
 
-      if (!target) continue;
+      if (!target) {
+        this.emitProjectileCancelled(projectile, "combat_state_missing");
+        continue;
+      }
 
       const targetType = isMobEntity(target) ? "mob" : "player";
-      if (!this.ctx.entityResolver.isAlive(target, targetType)) continue;
+      if (!this.ctx.entityResolver.isAlive(target, targetType)) {
+        this.emitProjectileCancelled(projectile, "entity_died");
+        continue;
+      }
 
       const currentHealth = this.ctx.entityResolver.getHealth(target);
       const damage = Math.min(projectile.damage, currentHealth);
@@ -376,9 +396,13 @@ export class CombatTickProcessor {
 
       // Emit damage event using pre-allocated payload (zero allocation)
       const targetPosition = getEntityPosition(target);
+      this._damageDealtPayload.projectileId = projectile.id;
       this._damageDealtPayload.attackerId = projectile.attackerId;
       this._damageDealtPayload.targetId = projectile.targetId;
       this._damageDealtPayload.damage = damage;
+      this._damageDealtPayload.attackType = projectile.spellId
+        ? AttackType.MAGIC
+        : AttackType.RANGED;
       this._damageDealtPayload.targetType = targetType;
       if (targetPosition) {
         this._damageDealtPositionBuffer.x = targetPosition.x;
@@ -394,6 +418,7 @@ export class CombatTickProcessor {
       );
 
       // Emit projectile hit using pre-allocated payload
+      this._projectileHitPayload.projectileId = projectile.id;
       this._projectileHitPayload.attackerId = projectile.attackerId;
       this._projectileHitPayload.targetId = projectile.targetId;
       this._projectileHitPayload.damage = damage;
@@ -406,24 +431,21 @@ export class CombatTickProcessor {
         this._projectileHitPayload,
       );
 
-      // classic MMORPG arrow recovery: 80% drop to ground, 20% destroyed
-      if (projectile.arrowId && this.ctx.groundItemSystem) {
-        const rng = getGameRng();
-        if (rng.random() >= 0.2) {
-          const arrowDropPos = getEntityPosition(target);
-          if (arrowDropPos) {
-            this.ctx.groundItemSystem.spawnGroundItem(
-              projectile.arrowId,
-              1,
-              arrowDropPos,
-              {
-                despawnTime: 120000,
-                droppedBy: projectile.attackerId,
-                lootProtection: 0,
-              },
+      if (projectile.ammunitionRecovery && this.ctx.groundItemSystem) {
+        void this.ctx.groundItemSystem
+          .exposeCommittedDurableSource(projectile.ammunitionRecovery)
+          .then((exposed) => {
+            if (!exposed) {
+              console.error(
+                `[CombatTickProcessor] Recovered-arrow custody rejected for ${projectile.id}`,
+              );
+            }
+          })
+          .catch((error) => {
+            console.error(
+              `[CombatTickProcessor] Recovered-arrow custody failed for ${projectile.id}: ${String(error)}`,
             );
-          }
-        }
+          });
       }
 
       this.ctx.recordCombatEvent(
@@ -446,6 +468,28 @@ export class CombatTickProcessor {
         });
       }
     }
+  }
+
+  private emitProjectileCancelled(
+    projectile: {
+      id: string;
+      attackerId: string;
+      targetId: string;
+      spellId?: string;
+    },
+    reason: "combat_state_missing" | "entity_died" | "projectile_expired",
+  ): void {
+    this._projectileCancelledPayload.projectileId = projectile.id;
+    this._projectileCancelledPayload.attackerId = projectile.attackerId;
+    this._projectileCancelledPayload.targetId = projectile.targetId;
+    this._projectileCancelledPayload.projectileType = projectile.spellId
+      ? "spell"
+      : "arrow";
+    this._projectileCancelledPayload.reason = reason;
+    this.ctx.emitTypedEvent(
+      EventType.COMBAT_PROJECTILE_CANCELLED,
+      this._projectileCancelledPayload,
+    );
   }
 
   private async processAutoAttackOnTick(
@@ -623,9 +667,11 @@ export class CombatTickProcessor {
 
     // Emit damage event using pre-allocated payload (zero allocation)
     const targetPosition = getEntityPosition(target);
+    this._damageDealtPayload.projectileId = undefined;
     this._damageDealtPayload.attackerId = attackerId;
     this._damageDealtPayload.targetId = targetId;
     this._damageDealtPayload.damage = damage;
+    this._damageDealtPayload.attackType = AttackType.MELEE;
     this._damageDealtPayload.targetType = combatState.targetType;
     if (targetPosition) {
       this._damageDealtPositionBuffer.x = targetPosition.x;

@@ -6,6 +6,7 @@
  */
 
 import React, { useEffect, useMemo, useRef, useState } from "react";
+import { parseStreamingDuelStrategySummary } from "@hyperforge/shared";
 import type {
   AgentInfo,
   FrozenStreamingCombatLoadout,
@@ -426,6 +427,10 @@ export const AgentStatsDisplay = React.memo(function AgentStatsDisplay({
       }),
     [agent.combatLoadouts],
   );
+  const strategySummary = useMemo(
+    () => parseStreamingDuelStrategySummary(agent.strategySummary),
+    [agent.strategySummary],
+  );
   const exactPrayerPoints =
     typeof agent.prayerPointUnits === "number" &&
     Number.isSafeInteger(agent.prayerPointUnits) &&
@@ -488,7 +493,7 @@ export const AgentStatsDisplay = React.memo(function AgentStatsDisplay({
             className="streaming-agent-name"
             style={{
               color: "#fff",
-              fontSize: "clamp(1rem, 2vw, 1.4rem)",
+              fontSize: "clamp(0.95rem, 1.6vw, 1.2rem)",
               fontWeight: 900,
               letterSpacing: 1,
               textShadow: "2px 2px 0 #000, -1px -1px 0 #000, 1px -1px 0 #000",
@@ -564,6 +569,54 @@ export const AgentStatsDisplay = React.memo(function AgentStatsDisplay({
           <span className="streaming-agent-active-role-label">Active</span>
           <strong>{formatStreamingCombatRole(activeCombatRole)}</strong>
         </div>
+      ) : null}
+
+      {showFrozenLoadouts && agent.loadoutFrozen && strategySummary ? (
+        <section
+          className={`streaming-frozen-strategy streaming-frozen-strategy--${side}`}
+          aria-label={`${agent.name} committed strategy. ${humanizeStreamingIdentifier(strategySummary.approach)} approach using ${humanizeStreamingIdentifier(strategySummary.tacticalMacro)} movement and ${humanizeStreamingIdentifier(strategySummary.attackStyle)} attacks. Recover at ${strategySummary.foodThreshold} percent health and defend at ${strategySummary.switchDefensiveAt} percent health.`}
+          data-strategy-schema={strategySummary.schemaVersion}
+          data-strategy-policy={strategySummary.policyVersion}
+        >
+          <div className="streaming-frozen-strategy-header">
+            <span>Committed strategy</span>
+            <span className="streaming-frozen-strategy-source">
+              {strategySummary.source === "model"
+                ? "Agent-planned"
+                : strategySummary.source === "deterministic"
+                  ? "Rules fallback"
+                  : "Local test"}
+            </span>
+          </div>
+          <div className="streaming-frozen-strategy-primary">
+            <strong>
+              {humanizeStreamingIdentifier(strategySummary.approach)}
+            </strong>
+            <span aria-hidden="true">·</span>
+            <strong>
+              {humanizeStreamingIdentifier(strategySummary.tacticalMacro)}
+            </strong>
+          </div>
+          <div className="streaming-frozen-strategy-details">
+            <span>
+              {humanizeStreamingIdentifier(strategySummary.attackStyle)} attacks
+            </span>
+            <span>
+              {strategySummary.preferredCombatRole
+                ? `Prefer ${humanizeStreamingIdentifier(strategySummary.preferredCombatRole)}`
+                : "Adaptive roles"}
+            </span>
+            <span>
+              {strategySummary.prayer
+                ? humanizeStreamingIdentifier(strategySummary.prayer)
+                : "No Prayer plan"}
+            </span>
+          </div>
+          <div className="streaming-frozen-strategy-thresholds">
+            <span>Recover {strategySummary.foodThreshold}%</span>
+            <span>Defend {strategySummary.switchDefensiveAt}%</span>
+          </div>
+        </section>
       ) : null}
 
       {showFrozenLoadouts && agent.loadoutFrozen ? (

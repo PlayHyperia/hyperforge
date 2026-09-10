@@ -289,17 +289,26 @@ export function createClientWorld() {
   // Renders heightmap-based terrain with LOD
 
   world.register("terrain", TerrainSystem);
-  world.register("bridges", BridgeSystem);
+  if (viewportProfile.enableExplorationScenery) {
+    world.register("bridges", BridgeSystem);
+  }
 
   // ============================================================================
   // VEGETATION SYSTEM
   // ============================================================================
-  // GPU-instanced vegetation (trees, bushes, grass, rocks, flowers)
-  // Must be registered after terrain (listens to TERRAIN_TILE_GENERATED)
-  // Must be registered BEFORE towns (listens to TERRAIN_TILE_REGENERATED when
-  // flat zones modify terrain heights - grass needs to regenerate)
-
-  world.register("vegetation", VegetationSystem);
+  // GPU-instanced exploration vegetation (trees, bushes, grass, rocks, flowers)
+  // is part of the interactive world, but not the authored arena broadcast set.
+  // It must be registered after terrain and before towns so it can respond to
+  // terrain generation and flat-zone regeneration events. Stream/spectator
+  // viewports retain DuelArenaVisualsSystem's deliberate set dressing while
+  // avoiding world-scale procedural meshes that never contribute to the duel.
+  if (viewportProfile.enableExplorationVegetation) {
+    world.register("vegetation", VegetationSystem);
+  } else {
+    console.log(
+      "[createClientWorld] Skipping exploration vegetation for stream/spectator viewport",
+    );
+  }
 
   // ============================================================================
   // TOWN AND ROAD SYSTEMS
@@ -377,7 +386,9 @@ export function createClientWorld() {
   // ============================================================================
   // DOCK SYSTEM
   // ============================================================================
-  world.register("docks", ProceduralDocks);
+  if (viewportProfile.enableExplorationScenery) {
+    world.register("docks", ProceduralDocks);
+  }
 
   // ============================================================================
   // THREE.JS SETUP
@@ -426,7 +437,12 @@ export function createClientWorld() {
       if (traceInit) {
         console.log("[createClientWorld] -> registerSystems");
       }
-      await registerSystems(world, "client");
+      await registerSystems(world, "client", {
+        enableExplorationResourceNodes:
+          viewportProfile.enableExplorationResourceNodes,
+        enableExplorationWorldEntities:
+          viewportProfile.enableExplorationWorldEntities,
+      });
       if (traceInit) {
         console.log("[createClientWorld] <- registerSystems");
       }

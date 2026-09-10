@@ -7,6 +7,7 @@ import pg from "pg";
 
 import * as schema from "../src/database/schema.js";
 import { DatabaseSystem } from "../src/systems/DatabaseSystem/index.js";
+import { canonicalCompetitiveSnapshotJson } from "../src/systems/StreamingDuelScheduler/competitive-snapshot.js";
 import type { DuelPreparationPlanCommitRequest } from "../src/shared/types/index.js";
 
 const execFileAsync = promisify(execFile);
@@ -20,6 +21,8 @@ const RECOVERY_EVIDENCE = {
   agentPolicyFingerprint:
     "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
   availableStyles: ["ranged"],
+  decisionLatencyMs: 0,
+  decisionOutcome: "deterministic_runtime_unavailable",
   model: "deterministic",
   modelProvider: "deterministic",
   planningPolicyVersion: "duel-preparation-v1",
@@ -89,7 +92,7 @@ const requestFor = (
     selectedSpell: null,
   },
   recoveryEvidence: forgeRecoveryEvidence
-    ? { ...RECOVERY_EVIDENCE, primaryStyle: "melee" }
+    ? { ...RECOVERY_EVIDENCE, decisionOutcome: "deterministic_model_failed" }
     : RECOVERY_EVIDENCE,
 });
 
@@ -407,8 +410,8 @@ async function runParent(): Promise<void> {
     if (
       recoveredEvent.event !== "committed" ||
       recoveredEvent.replayed !== true ||
-      JSON.stringify(recoveredEvent.recoveryEvidence) !==
-        JSON.stringify(RECOVERY_EVIDENCE)
+      canonicalCompetitiveSnapshotJson(recoveredEvent.recoveryEvidence) !==
+        canonicalCompetitiveSnapshotJson(RECOVERY_EVIDENCE)
     ) {
       throw new Error(
         `post-kill recovery receipt was not exact: ${JSON.stringify(recoveredEvent)}`,

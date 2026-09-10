@@ -61,6 +61,9 @@ function createActiveService() {
   systems.set("database", {
     acknowledgeProcessingRequestAsync: vi.fn().mockResolvedValue(true),
     beginProcessingRequestAsync: vi.fn().mockResolvedValue("accepted"),
+    getProcessingActionCommitStatusAsync: vi
+      .fn()
+      .mockResolvedValue("committed"),
   });
 
   return { service, world, entities, systems };
@@ -330,6 +333,18 @@ describe("EmbeddedHyperiaService RPG methods", () => {
       });
 
       await expect(service.executeTan("cowhide", 1)).resolves.toBe(false);
+      expect(world.emit).not.toHaveBeenCalled();
+    });
+
+    it("rejects an autonomy-bound tanning batch that cannot be replayed exactly", async () => {
+      const { service, world } = createActiveService();
+      await expect(
+        service.executeTan(
+          "cowhide",
+          2,
+          "44444444-4444-4444-8444-444444444444",
+        ),
+      ).resolves.toBe(false);
       expect(world.emit).not.toHaveBeenCalled();
     });
   });
@@ -951,7 +966,14 @@ describe("EmbeddedHyperiaService RPG methods", () => {
     });
 
     it("ends immediately only for the exact correlated rejection", async () => {
-      const { service, world } = createActiveService();
+      const { service, world, systems } = createActiveService();
+      systems.set("database", {
+        acknowledgeProcessingRequestAsync: vi.fn().mockResolvedValue(true),
+        beginProcessingRequestAsync: vi.fn().mockResolvedValue("accepted"),
+        getProcessingActionCommitStatusAsync: vi
+          .fn()
+          .mockResolvedValue("rejected"),
+      });
       const pending = service.executeFletch("arrow_shaft", 1);
       const requestId = await emittedRequestId(
         world,
@@ -1001,11 +1023,19 @@ describe("EmbeddedHyperiaService RPG methods", () => {
       );
     });
 
-    it("reports an authoritative zero-work completion as failure", async () => {
+    it("reconciles a zero-work completion packet against durable rejection", async () => {
       const { service, world, entities, systems } = createActiveService();
       systems.set("smelting", {
         canPlayerUseFurnace: () => true,
         canPlayerUseActiveFurnace: () => true,
+      });
+      const getProcessingActionCommitStatusAsync = vi
+        .fn()
+        .mockResolvedValue("rejected");
+      systems.set("database", {
+        acknowledgeProcessingRequestAsync: vi.fn().mockResolvedValue(true),
+        beginProcessingRequestAsync: vi.fn().mockResolvedValue("accepted"),
+        getProcessingActionCommitStatusAsync,
       });
       entities.set("furnace-live", {
         id: "furnace-live",
@@ -1027,6 +1057,242 @@ describe("EmbeddedHyperiaService RPG methods", () => {
       });
 
       await expect(pending).resolves.toBe(false);
+      expect(getProcessingActionCommitStatusAsync).toHaveBeenCalledWith(
+        "agent-1",
+        `processing-request:smelting:${requestId}`,
+      );
+    });
+
+    it("preserves committed truth across a zero-work completion packet", async () => {
+      const { service, world, entities, systems } = createActiveService();
+      systems.set("smelting", {
+        canPlayerUseFurnace: () => true,
+        canPlayerUseActiveFurnace: () => true,
+      });
+      systems.set("database", {
+        acknowledgeProcessingRequestAsync: vi.fn().mockResolvedValue(true),
+        beginProcessingRequestAsync: vi.fn().mockResolvedValue("accepted"),
+        getProcessingActionCommitStatusAsync: vi
+          .fn()
+          .mockResolvedValue("committed"),
+      });
+      entities.set("furnace-live", {
+        id: "furnace-live",
+        entityType: "furnace",
+      });
+
+      const pending = service.executeSmelt("bronze_bar");
+      const requestId = await emittedRequestId(
+        world,
+        EventType.PROCESSING_SMELTING_REQUEST,
+      );
+      world.emit(EventType.SMELTING_COMPLETE, {
+        playerId: "agent-1",
+        barItemId: "bronze_bar",
+        totalSmelted: 0,
+        totalFailed: 0,
+        totalXp: 0,
+        requestId,
+      });
+
+      await expect(pending).resolves.toBe(true);
+    });
+
+    it("preserves committed truth across a late rejection packet", async () => {
+      const { service, world, systems } = createActiveService();
+      systems.set("database", {
+        acknowledgeProcessingRequestAsync: vi.fn().mockResolvedValue(true),
+        beginProcessingRequestAsync: vi.fn().mockResolvedValue("accepted"),
+        getProcessingActionCommitStatusAsync: vi
+          .fn()
+          .mockResolvedValue("committed"),
+      });
+      const pending = service.executeFletch("arrow_shaft", 1);
+      const requestId = await emittedRequestId(
+        world,
+        EventType.PROCESSING_FLETCHING_REQUEST,
+      );
+
+      world.emit(EventType.PROCESSING_REQUEST_REJECTED, {
+        playerId: "agent-1",
+        requestId,
+        skill: "fletching",
+        reason: "busy",
+        retryable: true,
+      });
+
+      await expect(pending).resolves.toBe(true);
+    });
+
+    it("awaits the durable quest projection before exposing a committed action", async () => {
+      const { service, world, systems } = createActiveService();
+      let releaseProjection!: () => void;
+      const reconcileDurableProgress = vi.fn(
+        () =>
+          new Promise<void>((resolve) => {
+            releaseProjection = resolve;
+          }),
+      );
+      systems.set("quest", { reconcileDurableProgress });
+
+      const pending = service.executeFletch("arrow_shaft", 1);
+      const requestId = await emittedRequestId(
+        world,
+        EventType.PROCESSING_FLETCHING_REQUEST,
+      );
+      world.emit(EventType.PROCESSING_REQUEST_PROGRESS, {
+        playerId: "agent-1",
+        requestId,
+        skill: "fletching",
+        phase: "committed",
+      });
+
+      let settled = false;
+      void pending.finally(() => {
+        settled = true;
+      });
+      await Promise.resolve();
+      expect(reconcileDurableProgress).toHaveBeenCalledWith("agent-1");
+      expect(settled).toBe(false);
+
+      releaseProjection();
+      await expect(pending).resolves.toBe(true);
+    });
+
+    it("uses an exact caller-supplied autonomy attempt as the durable request identity", async () => {
+      const { service, world, systems } = createActiveService();
+      const attemptId = "33333333-3333-4333-8333-333333333333";
+      const database = systems.get("database") as {
+        beginProcessingRequestAsync: ReturnType<typeof vi.fn>;
+      };
+
+      const pending = service.executeFletch("arrow_shaft", 1, attemptId);
+      expect(
+        await emittedRequestId(world, EventType.PROCESSING_FLETCHING_REQUEST),
+      ).toBe(attemptId);
+      expect(database.beginProcessingRequestAsync).toHaveBeenCalledWith(
+        "agent-1",
+        `processing-request:fletching:${attemptId}`,
+        attemptId,
+        "fletching",
+        {
+          skill: "fletching",
+          recipeId: "arrow_shaft",
+          quantity: 1,
+        },
+      );
+
+      world.emit(EventType.FLETCHING_COMPLETE, {
+        playerId: "agent-1",
+        recipeId: "arrow_shaft",
+        outputItemId: "arrow_shaft",
+        totalCrafted: 1,
+        totalXp: 5,
+        requestId: attemptId,
+      });
+      await expect(pending).resolves.toBe(true);
+    });
+
+    it("preserves committed truth and single-flight authority across a transient terminal acknowledgement loss", async () => {
+      vi.useFakeTimers();
+      try {
+        const { service, world, systems } = createActiveService();
+        const firstAttemptId = "55555555-5555-4555-8555-555555555555";
+        const secondAttemptId = "66666666-6666-4666-8666-666666666666";
+        const acknowledgeProcessingRequestAsync = vi
+          .fn()
+          .mockRejectedValueOnce(new Error("database response lost"))
+          .mockResolvedValue(true);
+        const beginProcessingRequestAsync = vi
+          .fn()
+          .mockResolvedValueOnce("accepted")
+          .mockResolvedValueOnce("busy");
+        systems.set("database", {
+          acknowledgeProcessingRequestAsync,
+          beginProcessingRequestAsync,
+          getProcessingActionCommitStatusAsync: vi
+            .fn()
+            .mockResolvedValue("committed"),
+        });
+
+        const committed = service.executeFletch(
+          "arrow_shaft",
+          1,
+          firstAttemptId,
+        );
+        expect(
+          await emittedRequestId(world, EventType.PROCESSING_FLETCHING_REQUEST),
+        ).toBe(firstAttemptId);
+        world.emit(EventType.FLETCHING_COMPLETE, {
+          playerId: "agent-1",
+          recipeId: "arrow_shaft",
+          outputItemId: "arrow_shaft",
+          totalCrafted: 1,
+          totalXp: 5,
+          requestId: firstAttemptId,
+        });
+        await Promise.resolve();
+        await Promise.resolve();
+        expect(acknowledgeProcessingRequestAsync).toHaveBeenCalledTimes(1);
+
+        await expect(
+          service.executeFletch("shortbow_u", 1, secondAttemptId),
+        ).resolves.toBe(false);
+        expect(beginProcessingRequestAsync).toHaveBeenCalledTimes(1);
+
+        await vi.advanceTimersByTimeAsync(5_000);
+        await expect(committed).resolves.toBe(true);
+        expect(acknowledgeProcessingRequestAsync).toHaveBeenCalledTimes(2);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("wakes terminal acknowledgement retry on service stop without downgrading committed truth", async () => {
+      const { service, world, systems } = createActiveService();
+      const attemptId = "77777777-7777-4777-8777-777777777777";
+      const acknowledgeProcessingRequestAsync = vi
+        .fn()
+        .mockRejectedValue(new Error("database unavailable"));
+      systems.set("database", {
+        acknowledgeProcessingRequestAsync,
+        beginProcessingRequestAsync: vi.fn().mockResolvedValue("accepted"),
+        getProcessingActionCommitStatusAsync: vi
+          .fn()
+          .mockResolvedValue("committed"),
+      });
+
+      const committed = service.executeFletch("arrow_shaft", 1, attemptId);
+      expect(
+        await emittedRequestId(world, EventType.PROCESSING_FLETCHING_REQUEST),
+      ).toBe(attemptId);
+      world.emit(EventType.FLETCHING_COMPLETE, {
+        playerId: "agent-1",
+        recipeId: "arrow_shaft",
+        outputItemId: "arrow_shaft",
+        totalCrafted: 1,
+        totalXp: 5,
+        requestId: attemptId,
+      });
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(acknowledgeProcessingRequestAsync).toHaveBeenCalledOnce();
+
+      await service.stop();
+      await expect(committed).resolves.toBe(true);
+    });
+
+    it("rejects a malformed caller-supplied processing identity before submission", async () => {
+      const { service, world, systems } = createActiveService();
+      const database = systems.get("database") as {
+        beginProcessingRequestAsync: ReturnType<typeof vi.fn>;
+      };
+
+      await expect(
+        service.executeFletch("arrow_shaft", 1, "not-an-attempt"),
+      ).resolves.toBe(false);
+      expect(database.beginProcessingRequestAsync).not.toHaveBeenCalled();
+      expect(world.emit).not.toHaveBeenCalled();
     });
 
     it("serializes processing actions and fails closed after a durable receipt miss", async () => {
@@ -1091,7 +1357,8 @@ describe("EmbeddedHyperiaService RPG methods", () => {
           beginProcessingRequestAsync,
           getProcessingActionCommitStatusAsync: vi
             .fn()
-            .mockResolvedValue("interrupted"),
+            .mockResolvedValueOnce("interrupted")
+            .mockResolvedValue("committed"),
         });
 
         const pending = service.executeFletch("arrow_shaft", 1);
@@ -1211,7 +1478,10 @@ describe("EmbeddedHyperiaService RPG methods", () => {
         const pendingStatus = new Promise<"not_found">((resolve) => {
           resolveStatus = resolve;
         });
-        const getStatus = vi.fn(() => pendingStatus);
+        const getStatus = vi
+          .fn()
+          .mockImplementationOnce(() => pendingStatus)
+          .mockResolvedValue("committed");
         systems.set("database", {
           acknowledgeProcessingRequestAsync: vi.fn().mockResolvedValue(true),
           beginProcessingRequestAsync: vi.fn().mockResolvedValue("accepted"),
@@ -1406,6 +1676,119 @@ describe("EmbeddedHyperiaService RPG methods", () => {
   });
 
   describe("combat advanced", () => {
+    it("holds an exact preparation combat fence until its owner releases it", () => {
+      const { service, systems } = createActiveService();
+      const beginDuelPreparationCombatFence = vi.fn(() => true);
+      const endDuelPreparationCombatFence = vi.fn(() => true);
+      systems.set("combat", {
+        beginDuelPreparationCombatFence,
+        endDuelPreparationCombatFence,
+      });
+
+      expect(service.beginDuelPreparationCombatFence("preparation-a")).toBe(
+        true,
+      );
+      expect(service.beginDuelPreparationCombatFence("preparation-a")).toBe(
+        true,
+      );
+      expect(service.beginDuelPreparationCombatFence("preparation-b")).toBe(
+        false,
+      );
+      expect(beginDuelPreparationCombatFence).toHaveBeenCalledTimes(2);
+
+      service.revokeDuelPreparationBankAccess("preparation-a");
+      expect(endDuelPreparationCombatFence).not.toHaveBeenCalled();
+      expect(service.endDuelPreparationCombatFence("preparation-b")).toBe(
+        false,
+      );
+      expect(service.endDuelPreparationCombatFence("preparation-a")).toBe(true);
+      expect(endDuelPreparationCombatFence).toHaveBeenCalledOnce();
+      expect(endDuelPreparationCombatFence).toHaveBeenCalledWith(
+        "agent-1",
+        "preparation-a",
+      );
+      expect(service.endDuelPreparationCombatFence("preparation-a")).toBe(
+        false,
+      );
+    });
+
+    it("fails closed when no combat system can install the fence", () => {
+      const { service } = createActiveService();
+
+      expect(service.beginDuelPreparationCombatFence("preparation-a")).toBe(
+        false,
+      );
+    });
+
+    it("waits for projectile custody to settle before preparation can inspect the bank", async () => {
+      const { service, systems, entities } = createActiveService();
+      let arrowQuantity = 500;
+      let runeQuantity = 500;
+      systems.set("equipment", {
+        getPlayerEquipment: () => ({
+          weapon: { itemId: "shortbow", quantity: 1 },
+          arrows: { itemId: "bronze_arrow", quantity: arrowQuantity },
+        }),
+      });
+      systems.set("inventory", {
+        getInventory: () => ({
+          items: [
+            {
+              slot: 0,
+              itemId: "fire_rune",
+              quantity: runeQuantity,
+              item: { id: "fire_rune", name: "Fire rune", type: "misc" },
+            },
+          ],
+        }),
+      });
+      expect(service.getGameState()).toMatchObject({
+        equipment: {
+          arrows: { itemId: "bronze_arrow", quantity: 500 },
+        },
+        inventory: [{ itemId: "fire_rune", quantity: 500 }],
+      });
+      let releaseCustody!: () => void;
+      const pendingCustody = new Promise<void>((resolve) => {
+        releaseCustody = resolve;
+      });
+      const forceEndCombat = vi.fn();
+      const waitForProjectileCustodySettlements = vi.fn(() => pendingCustody);
+      systems.set("combat", {
+        forceEndCombat,
+        waitForProjectileCustodySettlements,
+      });
+
+      let stopped = false;
+      const stop = service.executeStop().then((result) => {
+        stopped = true;
+        return result;
+      });
+      await vi.waitFor(() => expect(forceEndCombat).toHaveBeenCalledOnce());
+
+      expect(waitForProjectileCustodySettlements).toHaveBeenCalledOnce();
+      expect(stopped).toBe(false);
+      expect(entities.get("agent-1").data.inCombat).not.toBe(false);
+
+      arrowQuantity = 498;
+      runeQuantity = 496;
+      releaseCustody();
+      await expect(stop).resolves.toBe(true);
+      expect(entities.get("agent-1").data).toMatchObject({
+        combatTarget: null,
+        inCombat: false,
+        ct: null,
+        c: false,
+        attackTarget: null,
+      });
+      expect(service.getGameState()).toMatchObject({
+        equipment: {
+          arrows: { itemId: "bronze_arrow", quantity: 498 },
+        },
+        inventory: [{ itemId: "fire_rune", quantity: 496 }],
+      });
+    });
+
     it("executeEquip awaits and returns the authoritative equipment receipt", async () => {
       const { service, systems, world } = createActiveService();
       const receipt = {
@@ -1546,11 +1929,37 @@ describe("EmbeddedHyperiaService RPG methods", () => {
       expect(await service.executeUnequip("")).toBe(false);
     });
 
-    it("executeUnequip emits event", async () => {
-      const { service, world } = createActiveService();
+    it("executeUnequip delegates to the authoritative conserved receipt", async () => {
+      const { service, systems, world } = createActiveService();
+      const unequipOwnedItem = vi.fn(async () => ({
+        ok: true as const,
+        playerId: "agent-1",
+        itemId: "shortbow",
+        slot: "weapon",
+        changed: true,
+      }));
+      systems.set("equipment", { unequipOwnedItem });
+
       const result = await service.executeUnequip("weapon");
       expect(result).toBe(true);
-      expect(world.emit).toHaveBeenCalled();
+      expect(unequipOwnedItem).toHaveBeenCalledWith("agent-1", "weapon");
+      expect(world.emit).not.toHaveBeenCalled();
+    });
+
+    it("executeUnequip propagates authoritative rejection", async () => {
+      const { service, systems } = createActiveService();
+      systems.set("equipment", {
+        unequipOwnedItem: vi.fn(async () => ({
+          ok: false as const,
+          playerId: "agent-1",
+          itemId: "shortbow",
+          slot: "weapon",
+          changed: false,
+          reason: "unequip_rejected" as const,
+        })),
+      });
+
+      await expect(service.executeUnequip("weapon")).resolves.toBe(false);
     });
 
     it("executeSetAutoRetaliate sets entity data", async () => {
@@ -1613,7 +2022,9 @@ describe("EmbeddedHyperiaService RPG methods", () => {
 
   describe("utility", () => {
     it("executeFollow moves to target entity", async () => {
-      const { service, entities, world } = createActiveService();
+      const { service, entities, systems } = createActiveService();
+      const requestServerMove = vi.fn(() => true);
+      systems.set("network", { requestServerMove });
       entities.set("target-1", {
         data: {
           position: [100, 10, 100],
@@ -1623,12 +2034,64 @@ describe("EmbeddedHyperiaService RPG methods", () => {
 
       const result = await service.executeFollow("target-1");
       expect(result).toBe(true);
+      expect(requestServerMove).toHaveBeenCalledWith(
+        "agent-1",
+        [100, 10, 100],
+        {
+          runMode: true,
+          interactionArrival: undefined,
+        },
+      );
+    });
+
+    it("executeFollow propagates authoritative movement rejection", async () => {
+      const { service, entities, systems } = createActiveService();
+      systems.set("network", { requestServerMove: vi.fn(() => false) });
+      entities.set("target-1", {
+        data: { position: [100, 10, 100] },
+        position: { x: 100, y: 10, z: 100 },
+      });
+
+      await expect(service.executeFollow("target-1")).resolves.toBe(false);
     });
 
     it("executeFollow returns false for nonexistent target", async () => {
       const { service } = createActiveService();
       const result = await service.executeFollow("nonexistent");
       expect(result).toBe(false);
+    });
+
+    it("executeRespawn awaits exact player-death authority completion", async () => {
+      const { service, systems, world } = createActiveService();
+      const requestPlayerRespawn = vi.fn(async () => true);
+      systems.set("player-death", { requestPlayerRespawn });
+
+      await expect(service.executeRespawn()).resolves.toBe(true);
+      expect(requestPlayerRespawn).toHaveBeenCalledOnce();
+      expect(requestPlayerRespawn).toHaveBeenCalledWith("agent-1");
+      expect(world.emit).not.toHaveBeenCalledWith(
+        EventType.PLAYER_RESPAWN_REQUEST,
+        expect.anything(),
+      );
+    });
+
+    it("executeRespawn propagates authoritative rejection", async () => {
+      const { service, systems } = createActiveService();
+      systems.set("player-death", {
+        requestPlayerRespawn: vi.fn(async () => false),
+      });
+
+      await expect(service.executeRespawn()).resolves.toBe(false);
+    });
+
+    it("executeRespawn fails closed without respawn authority", async () => {
+      const { service, world } = createActiveService();
+
+      await expect(service.executeRespawn()).resolves.toBe(false);
+      expect(world.emit).not.toHaveBeenCalledWith(
+        EventType.PLAYER_RESPAWN_REQUEST,
+        expect.anything(),
+      );
     });
   });
 

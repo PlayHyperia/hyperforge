@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "title": "KayKit supported one-hand sword plus shield loadout",
+  "equipments": [
+    {
+      "asset": "fitted-role-kit/kaykit-sword-1h-fitted.glb",
+      "itemId": "kaykit_sword_1h",
+      "avatarId": "kaykit-knight",
+      "slot": "weapon",
+      "grip": "one-hand"
+    },
+    {
+      "asset": "fitted-role-kit/kaykit-round-shield-fitted.glb",
+      "itemId": "kaykit_round_shield",
+      "avatarId": "kaykit-knight",
+      "slot": "shield",
+      "grip": "one-hand"
+    }
+  ]
+}

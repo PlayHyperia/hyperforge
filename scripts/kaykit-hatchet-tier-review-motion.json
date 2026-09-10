@@ -1,0 +1,12 @@
+{
+  "schemaVersion": 1,
+  "title": "KayKit exact hatchet tier review",
+  "motions": [
+    {
+      "id": "woodcutting",
+      "name": "Woodcutting contact and silhouette",
+      "asset": "motions/kaykit-woodcutting.glb",
+      "sampleRatio": 0.55
+    }
+  ]
+}

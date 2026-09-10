@@ -1,0 +1,10 @@
+[extend]
+useDefault = true
+
+# This public protocol discriminator names an authentication method. It is not
+# a wallet signature, API key, credential, session token or private key.
+# Match the complete field expression; do not ignore auth files or test folders.
+[[allowlists]]
+description = "Public versioned Solana authentication-method discriminator"
+regexTarget = "match"
+regexes = ['''^authMethod:\s*"sol-wallet-signature-v1"$''']

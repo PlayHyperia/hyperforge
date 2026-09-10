@@ -293,6 +293,58 @@ describe("terrain generation intent", () => {
     expect(centers[1].position).toBe(humanPosition);
   });
 
+  it("retains only exact launch-preparation manifest tiles", () => {
+    vi.stubEnv("STREAMING_DUEL_ENABLED", "true");
+    const terrain = new TerrainSystem({} as never) as unknown as {
+      runtimeIsServer: boolean;
+      getServerLaunchPreparationAreas(): Array<{
+        bounds: { minX: number; maxX: number; minZ: number; maxZ: number };
+      }>;
+      addServerLaunchPreparationTiles(tileKeys: Set<string>): void;
+    };
+    terrain.runtimeIsServer = true;
+    terrain.getServerLaunchPreparationAreas = () => [
+      { bounds: { minX: -36, maxX: 36, minZ: -36, maxZ: 36 } },
+    ];
+    const tileKeys = new Set(["3_3"]);
+
+    terrain.addServerLaunchPreparationTiles(tileKeys);
+
+    expect(tileKeys).toEqual(new Set(["3_3", "0_0"]));
+  });
+
+  it("bakes manifest preparation terrain during initial duel-server loading", () => {
+    vi.stubEnv("STREAMING_DUEL_ENABLED", "true");
+    const generateTile = vi.fn(() => ({}));
+    const terrain = new TerrainSystem({
+      getPlayers: () => [],
+    } as never) as unknown as {
+      runtimeIsServer: boolean;
+      coreChunkRange: number;
+      ringChunkRange: number;
+      terrainOnlyChunkRange: number;
+      terrainTiles: Map<string, unknown>;
+      generateTile: typeof generateTile;
+      getServerLaunchPreparationAreas(): Array<{
+        bounds: { minX: number; maxX: number; minZ: number; maxZ: number };
+      }>;
+      loadInitialTiles(): void;
+    };
+    terrain.runtimeIsServer = true;
+    terrain.coreChunkRange = 0;
+    terrain.ringChunkRange = 0;
+    terrain.terrainOnlyChunkRange = 0;
+    terrain.terrainTiles = new Map();
+    terrain.generateTile = generateTile;
+    terrain.getServerLaunchPreparationAreas = () => [
+      { bounds: { minX: -36, maxX: 36, minZ: -36, maxZ: 36 } },
+    ];
+
+    terrain.loadInitialTiles();
+
+    expect(generateTile).toHaveBeenCalledWith(0, 0, true);
+  });
+
   it("keeps stream-page terrain pinned to authoritative arena positions during cleanup teleports", () => {
     const remotePosition = { x: 2_500, y: 0, z: -1_900 };
     const fakeWindow = {
@@ -336,6 +388,71 @@ describe("terrain generation intent", () => {
 
     expect(cleanup[0].id).toBe("streaming-arena-focus");
     expect(cleanup[0].position).toMatchObject({ x: 350, y: 1, z: 410 });
+  });
+
+  it("keeps both active preparation and arena terrain resident for a seamless broadcast handoff", () => {
+    const agentA = {
+      position: { x: -8.75, y: 28.08, z: -10.75 },
+      data: {
+        gatheringToolPresentation: { revision: 1, itemId: "harpoon" },
+      },
+    };
+    const agentB = {
+      position: { x: -1.75, y: 28.08, z: -12.5 },
+      data: {
+        gatheringToolPresentation: { revision: 1, itemId: "harpoon" },
+      },
+    };
+    vi.stubGlobal("window", {
+      location: { pathname: "/stream.html", search: "" },
+      __HYPERIA_STREAM_STATE__: {
+        cycle: {
+          phase: "IDLE",
+          agent1: { id: "agent-a" },
+          agent2: { id: "agent-b" },
+          arenaPositions: {
+            agent1: [350, 1, 405],
+            agent2: [350, 1, 415],
+          },
+        },
+      },
+    });
+
+    const entities = new Map<string, unknown>([
+      ["agent-a", agentA],
+      ["agent-b", agentB],
+    ]);
+    const terrain = new TerrainSystem({
+      getPlayer: () => null,
+      entities: { get: (id: string) => entities.get(id) },
+    } as never) as unknown as {
+      runtimeIsClient: boolean;
+      getTerrainCenters(): Array<{
+        id: string;
+        position: { x: number; y: number; z: number };
+      }>;
+    };
+    terrain.runtimeIsClient = true;
+
+    expect(terrain.getTerrainCenters()).toMatchObject([
+      {
+        id: "streaming-preparation-focus",
+        position: { x: -5.25, y: 28.08, z: -11.625 },
+      },
+      {
+        id: "streaming-arena-focus",
+        position: { x: 350, y: 1, z: 410 },
+      },
+    ]);
+
+    agentA.data.gatheringToolPresentation.itemId = null as never;
+    agentB.data.gatheringToolPresentation.itemId = null as never;
+    expect(terrain.getTerrainCenters()).toMatchObject([
+      {
+        id: "streaming-arena-focus",
+        position: { x: 350, y: 1, z: 410 },
+      },
+    ]);
   });
 
   it("generates deterministic biome-mob positions for a tile", () => {

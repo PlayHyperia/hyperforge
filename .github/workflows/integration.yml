@@ -170,3 +170,25 @@ jobs:
 
       - name: Install, build, launch, render, verify, and clean up
         run: bun run duel:smoke:clean
+
+  server-container-smoke:
+    name: Canonical server container smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+        with:
+          submodules: recursive
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version-file: .node-version
+
+      - name: Verify Docker
+        run: docker info
+
+      - name: Build, migrate, probe, stop, and clean the production image
+        run: node scripts/smoke-server-container.mjs

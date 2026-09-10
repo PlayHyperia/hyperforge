@@ -108,7 +108,9 @@ describe("ordinary agent prayer training", () => {
       reason: "item_missing",
     }));
     await expect(
-      executeOrdinaryBoneBurial(makeInstance(executeBury), "bones", null),
+      executeOrdinaryBoneBurial(makeInstance(executeBury), "bones", {
+        attemptId: "dce573d7-2817-4af5-8f79-06eec7e53d67",
+      } as never),
     ).resolves.toMatchObject({
       settled: true,
       applied: false,

@@ -1,4 +1,8 @@
 import { eq, sql } from "drizzle-orm";
+import type {
+  StreamingDuelPublicPreparationActivity,
+  StreamingDuelPublicPreparationMode,
+} from "@hyperforge/shared";
 
 import type { Database } from "../database/client.js";
 import {
@@ -9,7 +13,10 @@ import type {
   AgentGoal,
   EmbeddedBehaviorAction,
 } from "./managers/AgentBehaviorTicker.js";
-import type { RuntimeAgentActionOutcome } from "./agentAutonomyCheckpoint.js";
+import {
+  AGENT_AUTONOMY_ACTION_TYPES,
+  type RuntimeAgentActionOutcome,
+} from "./agentAutonomyCheckpoint.js";
 
 export const AGENT_AUTONOMY_LIFECYCLE_STATES = [
   "goal_selection",
@@ -28,6 +35,24 @@ export type AgentAutonomyLifecycleEventSource =
   "runtime" | "restart_recovery" | "restart_reconciliation";
 type NonIdleActionType = Exclude<EmbeddedBehaviorAction["type"], "idle">;
 type LifecycleHead = typeof agentAutonomyLifecycleHeads.$inferSelect;
+
+export interface AgentAutonomyLifecycleHeadSnapshot {
+  state: AgentAutonomyLifecycleState;
+  latestActionType: NonIdleActionType | null;
+  latestActionStartedAt: number | null;
+  headRevision: number;
+  updatedAt: number;
+}
+
+const LIFECYCLE_STATES = new Set<string>(AGENT_AUTONOMY_LIFECYCLE_STATES);
+const NON_IDLE_ACTION_TYPES = new Set<string>(
+  AGENT_AUTONOMY_ACTION_TYPES.filter((actionType) => actionType !== "idle"),
+);
+const TRAVEL_ACTION_TYPES = new Set<NonIdleActionType>([
+  "move",
+  "navigateTo",
+  "homeTeleport",
+]);
 
 export interface AgentAutonomyLifecycleAttempt {
   attemptId: string;
@@ -52,6 +77,7 @@ const PROVISIONING_ACTIONS = new Set<NonIdleActionType>([
   "storeBuy",
   "use",
   "equip",
+  "setAutocast",
   "bankDepositAll",
   "bankWithdraw",
 ]);
@@ -97,6 +123,75 @@ export function deriveAgentAutonomyLifecycleState(
   }
 }
 
+/** Map durable internal lifecycle state to the only category exposed publicly. */
+export function toPublicPreparationActivity(
+  state: AgentAutonomyLifecycleState,
+): StreamingDuelPublicPreparationActivity {
+  if (state === "goal_selection") return "planning";
+  if (state === "reassessment") return "reassessing";
+  return state;
+}
+
+/**
+ * Derive the only public movement dimension from bounded durable state. The
+ * exact action remains private; goal selection and reassessment never inherit
+ * a stale travel label from the prior operational action.
+ */
+export function toPublicPreparationMode(
+  state: AgentAutonomyLifecycleState,
+  latestActionType: NonIdleActionType | null,
+): StreamingDuelPublicPreparationMode {
+  if (state === "goal_selection" || state === "reassessment") {
+    return "working";
+  }
+  return latestActionType !== null && TRAVEL_ACTION_TYPES.has(latestActionType)
+    ? "traveling"
+    : "working";
+}
+
+/** Read and validate the durable lifecycle head used by public presentation. */
+export async function loadAgentAutonomyLifecycleHead(
+  db: Database,
+  characterId: string,
+): Promise<AgentAutonomyLifecycleHeadSnapshot | null> {
+  const rows = await db
+    .select({
+      state: agentAutonomyLifecycleHeads.currentState,
+      latestActionType: agentAutonomyLifecycleHeads.latestActionType,
+      latestActionStartedAt: agentAutonomyLifecycleHeads.latestActionStartedAt,
+      headRevision: agentAutonomyLifecycleHeads.headRevision,
+      updatedAt: agentAutonomyLifecycleHeads.updatedAt,
+    })
+    .from(agentAutonomyLifecycleHeads)
+    .where(eq(agentAutonomyLifecycleHeads.characterId, characterId))
+    .limit(1);
+  const head = rows[0];
+  if (!head) return null;
+  if (
+    !LIFECYCLE_STATES.has(head.state) ||
+    (head.latestActionType !== null &&
+      !NON_IDLE_ACTION_TYPES.has(head.latestActionType)) ||
+    (head.latestActionStartedAt !== null &&
+      (!Number.isSafeInteger(head.latestActionStartedAt) ||
+        head.latestActionStartedAt < 0)) ||
+    (head.latestActionType === null) !==
+      (head.latestActionStartedAt === null) ||
+    !Number.isSafeInteger(head.headRevision) ||
+    head.headRevision < 0 ||
+    !Number.isSafeInteger(head.updatedAt) ||
+    head.updatedAt < 0
+  ) {
+    throw new Error("agent_autonomy_lifecycle_head_invalid");
+  }
+  return Object.freeze({
+    state: head.state as AgentAutonomyLifecycleState,
+    latestActionType: head.latestActionType as NonIdleActionType | null,
+    latestActionStartedAt: head.latestActionStartedAt,
+    headRevision: head.headRevision,
+    updatedAt: head.updatedAt,
+  });
+}
+
 async function lockLifecycleHead(
   db: Database,
   characterId: string,
@@ -123,13 +218,20 @@ async function updateLifecycleHead(
   currentGoalType: AgentGoal["type"] | null,
   transitionCount: number,
   occurredAt: number,
+  latestActionType?: NonIdleActionType,
 ): Promise<void> {
-  if (transitionCount === 0) return;
+  if (transitionCount === 0 && latestActionType === undefined) return;
   const rows = await db
     .update(agentAutonomyLifecycleHeads)
     .set({
       currentState,
       currentGoalType,
+      ...(latestActionType === undefined
+        ? {}
+        : {
+            latestActionType,
+            latestActionStartedAt: occurredAt,
+          }),
       headRevision: sql`${agentAutonomyLifecycleHeads.headRevision} + ${transitionCount}`,
       updatedAt: sql`GREATEST(${agentAutonomyLifecycleHeads.updatedAt}, ${occurredAt})`,
     })
@@ -201,6 +303,7 @@ export async function recordAgentAutonomyLifecycleStart(
     currentGoalType,
     transitionCount,
     occurredAt,
+    attempt.actionType,
   );
 }
 

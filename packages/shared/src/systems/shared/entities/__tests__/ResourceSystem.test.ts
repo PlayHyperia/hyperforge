@@ -109,7 +109,7 @@ describe("ResourceSystem", () => {
       subType?: string;
     }>;
     expect(spawnPoints).toContainEqual({
-      position: { x: -8.5, y: 28.2, z: -16 },
+      position: { x: -9.5, y: 28.2, z: -13 },
       type: "fish",
       subType: "net",
     });

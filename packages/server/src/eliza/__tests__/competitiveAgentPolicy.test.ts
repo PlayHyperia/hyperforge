@@ -48,6 +48,8 @@ function binding(overrides: Record<string, unknown> = {}) {
       source: "character",
     },
     runtimeConfigSignature: "private-runtime-config-with-secret",
+    authenticatedExternalDecision: false,
+    externalExecutableBuildId: null,
     executableBuildId: "11".repeat(32),
     combatControllerEnabled: true,
     ...overrides,
@@ -61,8 +63,37 @@ describe("competitive agent policy binding", () => {
       provider: "openai",
       model: "provider/model-a",
       runtime,
+      decisionRuntime: "embedded",
       combatControllerEnabled: true,
     });
+  });
+
+  it("labels authenticated external decisions without claiming remote model attestation", () => {
+    expect(
+      binding({
+        runtime: null,
+        runtimeInfo: null,
+        runtimeConfigSignature: undefined,
+        authenticatedExternalDecision: true,
+        externalExecutableBuildId: "33".repeat(32),
+      }),
+    ).toMatchObject({
+      provider: "external-elizaos",
+      model: "authenticated-remote-strategy-v5",
+      runtime: null,
+      decisionRuntime: "authenticated_external",
+    });
+    expect(() => binding({ authenticatedExternalDecision: true })).toThrow(
+      "multiple decision runtimes",
+    );
+    expect(() =>
+      binding({
+        runtime: null,
+        runtimeInfo: null,
+        authenticatedExternalDecision: true,
+        externalExecutableBuildId: null,
+      }),
+    ).toThrow("external executable build identity is inconsistent");
   });
 
   it("changes for every runtime or executor control that can alter combat", () => {
@@ -73,6 +104,20 @@ describe("competitive agent policy binding", () => {
       binding({ runtimeConfigSignature: "different-private-runtime-config" })
         .fingerprint,
       binding({ executableBuildId: "22".repeat(32) }).fingerprint,
+      binding({
+        runtime: null,
+        runtimeInfo: null,
+        runtimeConfigSignature: undefined,
+        authenticatedExternalDecision: true,
+        externalExecutableBuildId: "33".repeat(32),
+      }).fingerprint,
+      binding({
+        runtime: null,
+        runtimeInfo: null,
+        runtimeConfigSignature: undefined,
+        authenticatedExternalDecision: true,
+        externalExecutableBuildId: "44".repeat(32),
+      }).fingerprint,
       binding({ combatControllerEnabled: false }).fingerprint,
       binding({
         runtimeInfo: {

@@ -13,6 +13,15 @@
  * **Referenced by**: DatabaseSystem, repositories, save managers
  */
 
+import type {
+  StreamingDuelDamageObservationContext,
+  StreamingDuelExecutorObservationContext,
+  StreamingDuelFoodObservationContext,
+  StreamingDuelPrayerObservationContext,
+  StreamingDuelRoleSwitchObservationContext,
+  StreamingDuelStyleObservationContext,
+} from "@hyperforge/shared";
+
 // Re-export database utilities from shared
 export { dbHelpers, isDatabaseInstance } from "@hyperforge/shared";
 export type { SystemDatabase } from "@hyperforge/shared";
@@ -90,6 +99,7 @@ export interface PlayerRow {
 /** Generic saves cannot mutate atomic Prayer progression or resource custody. */
 export type PlayerPersistenceUpdate = Omit<
   Partial<PlayerRow>,
+  | "attackStyle"
   | "prayerLevel"
   | "prayerXp"
   | "prayerPoints"
@@ -268,6 +278,7 @@ export interface CombatLoadoutCommitRequest {
   requestFingerprint: string;
   expected: CombatLoadoutPersistenceSnapshot;
   committed: CombatLoadoutPersistenceSnapshot;
+  publicActionObservation?: StreamingDuelRoleSwitchObservationContext;
 }
 
 export interface CombatLoadoutCommitReceipt {
@@ -344,6 +355,282 @@ export interface InventoryDebitCommitReceipt {
   }>;
 }
 
+export type ProjectileRuneCostOperationStatus =
+  "pending" | "fired" | "resolved" | "cancelled";
+export type ProjectileRuneCostRefundDestination =
+  "inventory" | "bank" | "mixed";
+export interface ProjectileRuneCostCommitRequest extends InventoryDebitCommitRequest {}
+export interface ProjectileRuneCostSettlementRequest {
+  operationId: string;
+  playerId: string;
+  requestFingerprint: string;
+}
+export interface ProjectileRuneCostCommitReceipt {
+  operationId: string;
+  playerId: string;
+  requestFingerprint: string;
+  replayed: boolean;
+  requirements: InventoryDebitRequirement[];
+  status: ProjectileRuneCostOperationStatus;
+  committed: InventorySaveItem[];
+  refundDestination: ProjectileRuneCostRefundDestination | null;
+}
+
+export type GroundItemSourceStatus = "active" | "claimed" | "expired";
+
+export interface GroundItemSourceState {
+  sourceId: string;
+  status: GroundItemSourceStatus;
+  itemId: string;
+  quantity: number;
+  stackable: boolean;
+  position: { x: number; y: number; z: number };
+  tile: { x: number; z: number };
+  droppedBy: string | null;
+  createdAt: number;
+  updatedAt: number;
+  expiresAt: number;
+  lootProtectionExpiresAt: number | null;
+  version: number;
+}
+
+export interface GroundItemSourceRegistrationRequest {
+  contributionId: string;
+  preferredSourceId: string;
+  requestFingerprint: string;
+  itemId: string;
+  quantity: number;
+  stackable: boolean;
+  position: { x: number; y: number; z: number };
+  tile: { x: number; z: number };
+  droppedBy: string | null;
+  lifetimeMs: number;
+  lootProtectionMs: number;
+  allowMerge: boolean;
+}
+
+export interface GroundItemSourceRegistrationReceipt extends GroundItemSourceState {
+  contributionId: string;
+  requestFingerprint: string;
+  replayed: boolean;
+}
+
+export interface GroundItemDropCommitRequest {
+  operationId: string;
+  playerId: string;
+  requestFingerprint: string;
+  itemId: string;
+  quantity: number;
+  slotIndex: number | null;
+  source: GroundItemSourceRegistrationRequest;
+}
+
+export interface GroundItemDropCommitReceipt {
+  operationId: string;
+  playerId: string;
+  requestFingerprint: string;
+  replayed: boolean;
+  itemId: string;
+  quantity: number;
+  slotIndex: number | null;
+  operationCommittedCoins: number | null;
+  currentCoins: number;
+  committed: InventorySaveItem[];
+  source: GroundItemSourceRegistrationReceipt;
+}
+
+export interface GroundItemDeathCommitRequest {
+  operationId: string;
+  playerId: string;
+  requestFingerprint: string;
+  deathTimestamp: number;
+  position: { x: number; y: number; z: number };
+  killedBy: string;
+  zoneType: "wilderness" | "pvp_zone";
+  sources: GroundItemSourceRegistrationRequest[];
+}
+
+export interface GroundItemDeathCommitReceipt {
+  operationId: string;
+  playerId: string;
+  requestFingerprint: string;
+  replayed: boolean;
+  deathTimestamp: number;
+  position: { x: number; y: number; z: number };
+  killedBy: string;
+  zoneType: "wilderness" | "pvp_zone";
+  dropped: Array<{ itemId: string; quantity: number }>;
+  sources: GroundItemSourceRegistrationReceipt[];
+}
+
+export interface GroundItemMobLootCommitRequest {
+  operationId: string;
+  killedBy: string;
+  requestFingerprint: string;
+  mobId: string;
+  mobType: string;
+  deathTimestamp: number;
+  position: { x: number; y: number; z: number };
+  killToken: string;
+  /** Exact combat style used by the lethal authoritative hit. */
+  attackStyle: string;
+  /** Existing kill-XP authority: the defeated mob's full health value. */
+  damageDealt: number;
+  sources: GroundItemSourceRegistrationRequest[];
+}
+
+export type MobCombatProgressSkill =
+  "attack" | "strength" | "defense" | "constitution" | "ranged" | "magic";
+
+/** Durable result for one combat-skill component of a mob death. */
+export interface MobCombatProgressReceipt {
+  skill: MobCombatProgressSkill;
+  xpAmount: number;
+  awardedXp: number;
+  operationCommittedXp: number;
+  currentXp: number;
+  currentLevel: number;
+}
+
+/** Durable combat progression returned by a lethal competitive duel hit. */
+export type DuelCombatProgressReceipt = MobCombatProgressReceipt;
+
+export interface GroundItemMobLootCommitReceipt {
+  operationId: string;
+  killedBy: string;
+  requestFingerprint: string;
+  replayed: boolean;
+  mobId: string;
+  mobType: string;
+  deathTimestamp: number;
+  position: { x: number; y: number; z: number };
+  killToken: string;
+  attackStyle: string;
+  damageDealt: number;
+  combatProgress: MobCombatProgressReceipt[];
+  dropped: Array<{ itemId: string; quantity: number }>;
+  sources: GroundItemSourceRegistrationReceipt[];
+}
+
+export interface GroundItemPickupCommitRequest {
+  operationId: string;
+  playerId: string;
+  requestFingerprint: string;
+  sourceEntityId: string;
+  itemId: string;
+  quantity: number;
+}
+
+export interface GroundItemPickupCommitReceipt {
+  operationId: string;
+  playerId: string;
+  requestFingerprint: string;
+  replayed: boolean;
+  sourceEntityId: string;
+  itemId: string;
+  quantity: number;
+  stackable: boolean;
+  operationCommittedCoins: number | null;
+  currentCoins: number;
+  committed: Array<{
+    itemId: string;
+    quantity: number;
+    slotIndex: number;
+    metadata: Record<string, string | number | boolean> | null;
+  }>;
+}
+
+export type FoodConsumptionOperationStatus = "pending" | "completed";
+
+export type FoodConsumptionCompletionReason =
+  "player_not_alive" | "full_health";
+
+export interface FoodConsumptionCommitRequest {
+  operationId: string;
+  playerId: string;
+  requestFingerprint: string;
+  itemId: string;
+  healAmount: number;
+  publicActionObservation?: StreamingDuelFoodObservationContext;
+}
+
+export interface FoodConsumptionCompleteRequest {
+  operationId: string;
+  playerId: string;
+  requestFingerprint: string;
+}
+
+export interface FoodConsumptionCommitReceipt {
+  operationId: string;
+  playerId: string;
+  requestFingerprint: string;
+  replayed: boolean;
+  itemId: string;
+  healAmount: number;
+  status: FoodConsumptionOperationStatus;
+  healedAmount: number;
+  healthAfter: number | null;
+  completionReason?: FoodConsumptionCompletionReason;
+  committed: Array<{
+    itemId: string;
+    quantity: number;
+    slotIndex: number;
+    metadata: Record<string, string | number | boolean> | null;
+  }>;
+}
+
+export interface DuelDamageCompetitiveAuthority {
+  preparationId: string;
+  fencingToken: string;
+  snapshotDigest: string;
+}
+
+export interface DuelDamageCompetitiveTerminal {
+  outcome: "win";
+  winnerId: string;
+  loserId: string;
+  winReason: "kill";
+  terminalAt: number;
+  seed: string;
+  replayHash: string;
+}
+
+export interface DuelDamageProjectileCostAuthority {
+  operationType: "ammunition_shot" | "projectile_rune_cost";
+  operationId: string;
+  playerId: string;
+  requestFingerprint: string;
+}
+
+export interface DuelDamageCommitRequest {
+  operationId: string;
+  attackerId: string;
+  targetPlayerId: string;
+  requestFingerprint: string;
+  requestedDamage: number;
+  /** Exact existing PvP kill-XP style frozen at the lethal hit boundary. */
+  attackStyle: string;
+  publicActionObservation: StreamingDuelDamageObservationContext;
+  competitiveAuthority?: DuelDamageCompetitiveAuthority;
+  projectileCost?: DuelDamageProjectileCostAuthority;
+}
+
+export interface DuelDamageCommitReceipt {
+  operationId: string;
+  attackerId: string;
+  targetPlayerId: string;
+  requestFingerprint: string;
+  requestedDamage: number;
+  replayed: boolean;
+  appliedDamage: number;
+  healthBefore: number;
+  healthAfter: number;
+  targetDied: boolean;
+  xpDamageAuthority: number | null;
+  combatProgress: DuelCombatProgressReceipt[];
+  competitiveTerminal: DuelDamageCompetitiveTerminal | null;
+}
+
 export interface BoneBurialCommitRequest {
   operationId: string;
   playerId: string;
@@ -365,6 +652,107 @@ export interface BoneBurialCommitReceipt {
   operationCommittedXp: number;
   currentXp: number;
   currentLevel: number;
+  committed: Array<{
+    itemId: string;
+    quantity: number;
+    slotIndex: number;
+    metadata: Record<string, string | number | boolean> | null;
+  }>;
+}
+
+export type QuestRewardSkill =
+  | "attack"
+  | "strength"
+  | "defense"
+  | "constitution"
+  | "ranged"
+  | "magic"
+  | "prayer"
+  | "woodcutting"
+  | "mining"
+  | "fishing"
+  | "firemaking"
+  | "cooking"
+  | "smithing"
+  | "agility"
+  | "crafting"
+  | "fletching"
+  | "runecrafting";
+
+export interface QuestCompletionRewardItem {
+  itemId: string;
+  quantity: number;
+  stackable: boolean;
+}
+
+export interface QuestStartRewardItem {
+  itemId: string;
+  quantity: number;
+  stackable: boolean;
+}
+
+export interface QuestStartCommitRequest {
+  operationId: string;
+  playerId: string;
+  requestFingerprint: string;
+  questId: string;
+  questStartedAt: number;
+  initialStage: string;
+  items: QuestStartRewardItem[];
+}
+
+export interface QuestStartCommitReceipt extends QuestStartCommitRequest {
+  replayed: boolean;
+  committed: Array<{
+    itemId: string;
+    quantity: number;
+    slotIndex: number;
+    metadata: Record<string, string | number | boolean> | null;
+  }>;
+}
+
+export interface QuestCompletionRewardXp {
+  skill: QuestRewardSkill;
+  xpAmount: number;
+}
+
+export interface QuestCompletionProgressReceipt extends QuestCompletionRewardXp {
+  awardedXp: number;
+  operationCommittedXp: number;
+  currentXp: number;
+  currentLevel: number;
+}
+
+export interface QuestCompletionCommitRequest {
+  operationId: string;
+  playerId: string;
+  requestFingerprint: string;
+  questId: string;
+  questStartedAt: number;
+  expectedStage: string;
+  expectedProgress: Record<string, number>;
+  questPoints: number;
+  items: QuestCompletionRewardItem[];
+  xp: QuestCompletionRewardXp[];
+}
+
+export interface QuestCompletionCommitReceipt {
+  operationId: string;
+  playerId: string;
+  requestFingerprint: string;
+  replayed: boolean;
+  questId: string;
+  questStartedAt: number;
+  expectedStage: string;
+  expectedProgress: Record<string, number>;
+  completedAt: number;
+  questPoints: number;
+  operationCommittedQuestPoints: number;
+  currentQuestPoints: number;
+  items: QuestCompletionRewardItem[];
+  xp: QuestCompletionRewardXp[];
+  progress: QuestCompletionProgressReceipt[];
+  prayer: PrayerPersistenceSnapshot | null;
   committed: Array<{
     itemId: string;
     quantity: number;
@@ -469,6 +857,30 @@ export interface ProcessingActionFireEffect {
 
 export interface ActiveProcessingFire extends ProcessingActionFireEffect {
   playerId: string;
+  databaseObservedAt?: number;
+}
+
+export interface ProcessingFireExtinguishCommitRequest {
+  operationId: string;
+  fireId: string;
+  playerId: string;
+  requestFingerprint: string;
+  position: { x: number; y: number; z: number };
+  expiresAt: number;
+  source: GroundItemSourceRegistrationRequest;
+}
+
+export interface ProcessingFireExtinguishCommitReceipt {
+  operationId: string;
+  fireId: string;
+  playerId: string;
+  requestFingerprint: string;
+  replayed: boolean;
+  position: { x: number; y: number; z: number };
+  expiresAt: number;
+  extinguishedAt: number;
+  sourceRequest: GroundItemSourceRegistrationRequest;
+  source: GroundItemSourceRegistrationReceipt;
 }
 
 export interface ProcessingActionCommitRequest {
@@ -538,6 +950,111 @@ export interface EquipmentStackDebitCommitReceipt {
   }>;
 }
 
+export type AmmunitionRecoveryDisposition = "recovered" | "destroyed";
+export type AmmunitionShotOperationStatus =
+  "pending" | "fired" | "resolved" | "cancelled";
+export type AmmunitionShotRefundDestination =
+  "equipment" | "inventory" | "bank";
+
+export interface AmmunitionShotCommitRequest {
+  operationId: string;
+  playerId: string;
+  requestFingerprint: string;
+  itemId: string;
+  quantity: 1;
+  recoveryDisposition: AmmunitionRecoveryDisposition;
+  source: GroundItemSourceRegistrationRequest | null;
+}
+
+export interface AmmunitionShotCommitReceipt {
+  operationId: string;
+  playerId: string;
+  requestFingerprint: string;
+  replayed: boolean;
+  itemId: string;
+  quantity: 1;
+  recoveryDisposition: AmmunitionRecoveryDisposition;
+  status: AmmunitionShotOperationStatus;
+  committed: Array<{
+    slotType: string;
+    itemId: string;
+    quantity: number;
+  }>;
+  committedInventory: Array<{
+    itemId: string;
+    quantity: number;
+    slotIndex: number;
+    metadata: Record<string, string | number | boolean> | null;
+  }>;
+  refundDestination: AmmunitionShotRefundDestination | null;
+  sourceRequest: GroundItemSourceRegistrationRequest | null;
+  source: GroundItemSourceRegistrationReceipt | null;
+}
+
+export interface AmmunitionShotSettlementRequest {
+  operationId: string;
+  playerId: string;
+  requestFingerprint: string;
+}
+
+export interface AttackStyleCommitRequest {
+  operationId: string;
+  playerId: string;
+  requestFingerprint: string;
+  requestedStyle: string;
+  publicActionObservation?: StreamingDuelStyleObservationContext;
+}
+
+export interface AttackStyleCommitReceipt {
+  operationId: string;
+  playerId: string;
+  requestFingerprint: string;
+  requestedStyle: string;
+  replayed: boolean;
+  operationCommittedStyle: string;
+  currentStyle: string;
+}
+
+export type StreamingDuelExecutorCommand =
+  | Readonly<{
+      kind: "movement";
+      mode: "ground";
+      target: readonly [number, number, number];
+      runMode: boolean;
+    }>
+  | Readonly<{
+      kind: "movement";
+      mode: "combat_approach";
+      targetId: string;
+      targetType: "player";
+    }>
+  | Readonly<{
+      kind: "engagement";
+      targetId: string;
+      targetType: "player";
+    }>;
+
+export type StreamingDuelExecutorCommandOutcome =
+  "accepted" | "rejected" | "error";
+
+export interface StreamingDuelExecutorCommandRequest {
+  operationId: string;
+  playerId: string;
+  requestFingerprint: string;
+  publicActionObservation: StreamingDuelExecutorObservationContext;
+  command: StreamingDuelExecutorCommand;
+}
+
+export interface StreamingDuelExecutorCommandCompletionRequest extends StreamingDuelExecutorCommandRequest {
+  outcome: StreamingDuelExecutorCommandOutcome;
+}
+
+export interface StreamingDuelExecutorCommandReceipt extends StreamingDuelExecutorCommandRequest {
+  replayed: boolean;
+  completed: boolean;
+  outcome: StreamingDuelExecutorCommandOutcome | null;
+}
+
 export interface PrayerPersistenceSnapshot {
   pointUnits: number;
   maxPoints: number;
@@ -554,6 +1071,7 @@ export interface PrayerStateCommitRequest {
   transition: PrayerStateTransitionKind;
   expected: PrayerPersistenceSnapshot;
   committed: PrayerPersistenceSnapshot;
+  publicActionObservation?: StreamingDuelPrayerObservationContext;
 }
 
 export interface PrayerStateCommitReceipt {
@@ -584,6 +1102,18 @@ export interface DatabaseSystemOperations {
     }>
   >;
   getPlayerEquipmentAsync?: (playerId: string) => Promise<EquipmentRow[]>;
+  commitAttackStyleOperationAsync?: (
+    request: AttackStyleCommitRequest,
+  ) => Promise<AttackStyleCommitReceipt>;
+  stageStreamingDuelExecutorCommandAsync?: (
+    request: StreamingDuelExecutorCommandRequest,
+  ) => Promise<StreamingDuelExecutorCommandReceipt>;
+  completeStreamingDuelExecutorCommandAsync?: (
+    request: StreamingDuelExecutorCommandCompletionRequest,
+  ) => Promise<StreamingDuelExecutorCommandReceipt>;
+  listPendingStreamingDuelExecutorCommandsAsync?: (
+    cycleId: string,
+  ) => Promise<StreamingDuelExecutorCommandReceipt[]>;
   commitCombatLoadoutOperationAsync?: (
     request: CombatLoadoutCommitRequest,
   ) => Promise<CombatLoadoutCommitReceipt>;
@@ -596,9 +1126,59 @@ export interface DatabaseSystemOperations {
   commitInventoryDebitOperationAsync?: (
     request: InventoryDebitCommitRequest,
   ) => Promise<InventoryDebitCommitReceipt>;
+  commitProjectileRuneCostOperationAsync?: (
+    request: ProjectileRuneCostCommitRequest,
+  ) => Promise<ProjectileRuneCostCommitReceipt>;
+  completeProjectileRuneCostOperationAsync?: (
+    request: ProjectileRuneCostSettlementRequest,
+  ) => Promise<ProjectileRuneCostCommitReceipt>;
+  cancelProjectileRuneCostOperationAsync?: (
+    request: ProjectileRuneCostSettlementRequest,
+  ) => Promise<ProjectileRuneCostCommitReceipt>;
+  recoverPendingProjectileRuneCostOperationsAsync?: (
+    playerId: string,
+  ) => Promise<ProjectileRuneCostCommitReceipt[]>;
+  registerGroundItemSourceAsync?: (
+    request: GroundItemSourceRegistrationRequest,
+  ) => Promise<GroundItemSourceRegistrationReceipt>;
+  registerGroundItemSourcesAsync?: (
+    requests: GroundItemSourceRegistrationRequest[],
+  ) => Promise<GroundItemSourceRegistrationReceipt[]>;
+  commitGroundItemDropOperationAsync?: (
+    request: GroundItemDropCommitRequest,
+  ) => Promise<GroundItemDropCommitReceipt>;
+  commitGroundItemDeathOperationAsync?: (
+    request: GroundItemDeathCommitRequest,
+  ) => Promise<GroundItemDeathCommitReceipt>;
+  commitGroundItemMobLootOperationAsync?: (
+    request: GroundItemMobLootCommitRequest,
+  ) => Promise<GroundItemMobLootCommitReceipt>;
+  listActiveGroundItemSourcesAsync?: () => Promise<GroundItemSourceState[]>;
+  expireGroundItemSourceAsync?: (sourceId: string) => Promise<boolean>;
+  commitGroundItemPickupOperationAsync?: (
+    request: GroundItemPickupCommitRequest,
+  ) => Promise<GroundItemPickupCommitReceipt>;
+  commitFoodConsumptionOperationAsync?: (
+    request: FoodConsumptionCommitRequest,
+  ) => Promise<FoodConsumptionCommitReceipt>;
+  completeFoodConsumptionOperationAsync?: (
+    request: FoodConsumptionCompleteRequest,
+  ) => Promise<FoodConsumptionCommitReceipt>;
+  recoverPendingFoodConsumptionOperationsAsync?: (
+    playerId: string,
+  ) => Promise<FoodConsumptionCommitReceipt[]>;
+  commitDuelDamageOperationAsync?: (
+    request: DuelDamageCommitRequest,
+  ) => Promise<DuelDamageCommitReceipt>;
   commitBoneBurialOperationAsync?: (
     request: BoneBurialCommitRequest,
   ) => Promise<BoneBurialCommitReceipt>;
+  commitQuestStartOperationAsync?: (
+    request: QuestStartCommitRequest,
+  ) => Promise<QuestStartCommitReceipt>;
+  commitQuestCompletionOperationAsync?: (
+    request: QuestCompletionCommitRequest,
+  ) => Promise<QuestCompletionCommitReceipt>;
   commitGatheringRewardOperationAsync?: (
     request: GatheringRewardCommitRequest,
   ) => Promise<GatheringRewardCommitReceipt>;
@@ -613,10 +1193,24 @@ export interface DatabaseSystemOperations {
     operationId: string,
   ) => Promise<"committed" | "not_found">;
   getActiveProcessingFiresAsync?: () => Promise<ActiveProcessingFire[]>;
-  markProcessingFireExtinguishedAsync?: (fireId: string) => Promise<boolean>;
+  commitProcessingFireExtinguishOperationAsync?: (
+    request: ProcessingFireExtinguishCommitRequest,
+  ) => Promise<ProcessingFireExtinguishCommitReceipt>;
   commitEquipmentStackDebitOperationAsync?: (
     request: EquipmentStackDebitCommitRequest,
   ) => Promise<EquipmentStackDebitCommitReceipt>;
+  commitAmmunitionShotOperationAsync?: (
+    request: AmmunitionShotCommitRequest,
+  ) => Promise<AmmunitionShotCommitReceipt>;
+  completeAmmunitionShotOperationAsync?: (
+    request: AmmunitionShotSettlementRequest,
+  ) => Promise<AmmunitionShotCommitReceipt>;
+  cancelAmmunitionShotOperationAsync?: (
+    request: AmmunitionShotSettlementRequest,
+  ) => Promise<AmmunitionShotCommitReceipt>;
+  recoverPendingAmmunitionShotOperationsAsync?: (
+    playerId: string,
+  ) => Promise<AmmunitionShotCommitReceipt[]>;
   commitPrayerStateOperationAsync?: (
     request: PrayerStateCommitRequest,
   ) => Promise<PrayerStateCommitReceipt>;

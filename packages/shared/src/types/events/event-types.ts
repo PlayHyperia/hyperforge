@@ -195,6 +195,7 @@ export enum EventType {
   COMBAT_MAGIC_ATTACK = "combat:magic_attack",
   COMBAT_PROJECTILE_LAUNCHED = "combat:projectile_launched",
   COMBAT_PROJECTILE_HIT = "combat:projectile_hit",
+  COMBAT_PROJECTILE_CANCELLED = "combat:projectile_cancelled",
   COMBAT_SPELL_CAST = "combat:spell_cast",
   COMBAT_AUTOCAST_SET = "combat:autocast_set",
   PLAYER_SET_AUTOCAST = "player:set_autocast",
@@ -259,7 +260,9 @@ export enum EventType {
   ITEM_RESPAWN_SHOPS = "item:respawn_shops",
   ITEM_DROPPED = "item:dropped",
   ITEM_DROP = "item:drop",
+  ITEM_DROP_RESULT = "item:drop_result",
   LOOT_DROPPED = "loot:dropped",
+  MOB_LOOT_COMMITTED = "mob_loot:committed",
   ITEM_PICKUP = "item:picked_up",
   ITEM_PICKUP_REQUEST = "item:pickup_request",
   ITEM_USED = "item:used",
@@ -303,6 +306,7 @@ export enum EventType {
   QUEST_START_DECLINED = "quest:start_declined", // Player declined quest
   QUEST_STARTED = "quest:started",
   QUEST_PROGRESSED = "quest:progressed",
+  QUEST_COMPLETION_COMMITTED = "quest:completion_committed",
   QUEST_COMPLETED = "quest:completed",
   QUEST_ABANDONED = "quest:abandoned",
 
@@ -387,9 +391,13 @@ export enum EventType {
   // Gathering Tool Visuals (show tool in hand during gathering, like classic MMORPG fishing)
   GATHERING_TOOL_SHOW = "gathering:tool:show",
   GATHERING_TOOL_HIDE = "gathering:tool:hide",
+  FISHING_INTERACTION_PRESENTATION = "fishing:interaction:presentation",
+  PROCESSING_INTERACTION_PRESENTATION = "processing:interaction:presentation",
 
   // Skills & XP System
   SKILLS_XP_GAINED = "skills:xp_gained",
+  SKILLS_PROGRESS_COMMITTED = "skills:progress_committed",
+  DUEL_COMBAT_PROGRESS_COMMITTED = "duel:combat_progress_committed",
   SKILLS_LEVEL_UP = "skills:level_up",
   SKILLS_UPDATED = "skills:updated",
   SKILLS_ACTION = "skills:action",

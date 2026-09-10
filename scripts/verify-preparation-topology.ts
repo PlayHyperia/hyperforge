@@ -15,6 +15,7 @@ import {
   TICK_DURATION_MS,
   TILES_PER_TICK_RUN,
   TILES_PER_TICK_WALK,
+  tileToWorld,
   worldToTile,
 } from "../packages/shared/src/systems/shared/movement/TileSystem";
 import { TerrainSystem } from "../packages/shared/src/systems/shared/world/TerrainSystem";
@@ -46,6 +47,14 @@ type RouteTarget = {
 const isFishingResource = (resourceId: string): boolean =>
   resourceId.startsWith("fishing_spot_");
 
+const REQUIRED_PREPARATION_FISHING_SPOT_TYPES = new Set([
+  "fishing_spot_net",
+  "fishing_spot_bait",
+  "fishing_spot_fly",
+  "fishing_spot_cage",
+  "fishing_spot_harpoon",
+]);
+
 type TerrainInternals = {
   waterBodyRegistry: WaterBodyRegistry;
   ensureNoiseInitialized(): void;
@@ -61,18 +70,23 @@ type TerrainInternals = {
 // iteration emergency ceiling so asset drift fails CI before it becomes an
 // event-loop or movement-latency problem in production.
 const MAX_ROUTE_REQUESTS = 1;
-const MAX_ROUTE_ITERATIONS = 3_500;
+const MAX_ROUTE_ITERATIONS = 3_600;
 // A route request can arrive just after an authoritative movement tick, so the
 // worst-case wall clock includes one scheduling tick before path consumption.
 // Physical clicks may walk; embedded preparation agents always run. Keep both
 // paths bounded below the 20-tick PendingGather timeout with explicit margin.
 const MAX_WALK_ROUTE_WALL_CLOCK_MS = 10_800;
 const MAX_AGENT_RUN_ROUTE_WALL_CLOCK_MS = 6_000;
+// The active harpoon strike first reaches 0.312m below the avatar's footing at
+// its impact sample. Keep every possible bank within that proven contact
+// envelope, with a small tolerance for terrain interpolation.
+const MAX_FISHING_FOOT_HEIGHT_ABOVE_WATER = 0.3;
+const MIN_FISHING_WATER_DEPTH_AT_TARGET = 0.75;
 
 function createApproachTiles(
   target: Tile,
   radius: number,
-  collision: CollisionMatrix,
+  isWalkable: (tile: Tile) => boolean,
   mode: RouteTarget["approachMode"],
 ): Tile[] {
   if (mode === "cardinal") {
@@ -81,17 +95,17 @@ function createApproachTiles(
       { x: target.x, z: target.z - 1 },
       { x: target.x, z: target.z + 1 },
       { x: target.x + 1, z: target.z },
-    ].filter((tile) => collision.isWalkable(tile.x, tile.z));
+    ].filter(isWalkable);
   }
   if (mode === "nearest") {
-    if (collision.isWalkable(target.x, target.z)) return [target];
+    if (isWalkable(target)) return [target];
     for (let searchRadius = 1; searchRadius <= radius; searchRadius++) {
       const candidates: Array<{ tile: Tile; distance: number }> = [];
       for (let dx = -searchRadius; dx <= searchRadius; dx++) {
         for (let dz = -searchRadius; dz <= searchRadius; dz++) {
           if (Math.max(Math.abs(dx), Math.abs(dz)) !== searchRadius) continue;
           const tile = { x: target.x + dx, z: target.z + dz };
-          if (!collision.isWalkable(tile.x, tile.z)) continue;
+          if (!isWalkable(tile)) continue;
           candidates.push({
             tile,
             distance: Math.sqrt(dx * dx + dz * dz),
@@ -108,7 +122,7 @@ function createApproachTiles(
     for (let dz = -radius; dz <= radius; dz++) {
       if (Math.max(Math.abs(dx), Math.abs(dz)) > radius) continue;
       const tile = { x: target.x + dx, z: target.z + dz };
-      if (collision.isWalkable(tile.x, tile.z)) destinations.push(tile);
+      if (isWalkable(tile)) destinations.push(tile);
     }
   }
   return destinations;
@@ -172,6 +186,25 @@ for (let tileX = minTileX; tileX <= maxTileX; tileX++) {
   }
 }
 
+// Match TileMovementManager's ground-floor authority: collision is the fast
+// rejection path, while live terrain still rejects locally submerged or
+// over-steep tiles that have no baked flag. There are no bridge, dock, or
+// building-floor overrides inside this audited preparation complex.
+const terrainWalkabilityCache = new Map<string, boolean>();
+const isRuntimeWalkable = (tile: Tile): boolean => {
+  if (!collision.isWalkable(tile.x, tile.z)) return false;
+  const key = `${tile.x},${tile.z}`;
+  const cached = terrainWalkabilityCache.get(key);
+  if (cached !== undefined) return cached;
+  const worldPosition = tileToWorld(tile);
+  const walkable = terrain.isPositionWalkableFast(
+    worldPosition.x,
+    worldPosition.z,
+  );
+  terrainWalkabilityCache.set(key, walkable);
+  return walkable;
+};
+
 const failures: string[] = [];
 const staticTileOwners = new Map<string, string>();
 const registerStaticFootprint = (
@@ -189,7 +222,7 @@ const registerStaticFootprint = (
         z: center.z + dz - offsetZ,
       };
       const key = `${tile.x},${tile.z}`;
-      if (!collision.isWalkable(tile.x, tile.z)) {
+      if (!isRuntimeWalkable(tile)) {
         failures.push(
           `${owner} occupies blocked terrain at (${tile.x}, ${tile.z})`,
         );
@@ -236,7 +269,7 @@ const start = worldToTile(
   (hub.bounds.minX + hub.bounds.maxX) / 2,
   (hub.bounds.minZ + hub.bounds.maxZ) / 2,
 );
-if (!collision.isWalkable(start.x, start.z)) {
+if (!isRuntimeWalkable(start)) {
   failures.push(`spawn tile (${start.x}, ${start.z}) is not walkable`);
 }
 
@@ -291,11 +324,22 @@ const allShorePoints = findFishingSpotTiles(
   pond.bounds,
   terrain.getHeightAt.bind(terrain),
   waterRegistry.getWaterSurfaceAt.bind(waterRegistry),
-  6,
+  GATHERING_CONSTANTS.FISHING_SPOT_MOVE.shoreMinSpacing,
 );
 const authoredFishingResources = (pond.resources ?? []).filter((resource) =>
   isFishingResource(resource.resourceId),
 );
+const configuredFishingSpotTypes = new Set([
+  ...authoredFishingResources.map((resource) => resource.resourceId),
+  ...(pond.fishing?.spotTypes ?? []),
+]);
+for (const requiredSpotType of REQUIRED_PREPARATION_FISHING_SPOT_TYPES) {
+  if (!configuredFishingSpotTypes.has(requiredSpotType)) {
+    failures.push(
+      `haven_pond does not expose required preparation method ${requiredSpotType}`,
+    );
+  }
+}
 const authoredFishingTiles = new Set(
   authoredFishingResources.map((resource) => {
     const tile = worldToTile(resource.position.x, resource.position.z);
@@ -380,12 +424,13 @@ for (
   for (let spotIndex = 0; spotIndex < selection.length; spotIndex++) {
     const spot = selection[spotIndex];
     const occupiedTiles = new Set(
-      selection
-        .filter((_, index) => index !== spotIndex)
-        .map((other) => {
-          const tile = worldToTile(other.x, other.z);
-          return `${tile.x},${tile.z}`;
-        }),
+      [
+        ...authoredFishingResources.map((resource) => resource.position),
+        ...selection.filter((_, index) => index !== spotIndex),
+      ].map((other) => {
+        const tile = worldToTile(other.x, other.z);
+        return `${tile.x},${tile.z}`;
+      }),
     );
     const localCandidates = findFishingSpotTiles(
       collision,
@@ -397,7 +442,7 @@ for (
       },
       terrain.getHeightAt.bind(terrain),
       waterRegistry.getWaterSurfaceAt.bind(waterRegistry),
-      6,
+      GATHERING_CONSTANTS.FISHING_SPOT_MOVE.shoreMinSpacing,
     ).filter((candidate) => {
       const distance = Math.hypot(candidate.x - spot.x, candidate.z - spot.z);
       const tile = worldToTile(candidate.x, candidate.z);
@@ -449,6 +494,9 @@ const routeEvidence: Array<{
   pathTiles: number;
   segments: number;
   iterations: number;
+  fishingInteractionDistance?: number;
+  fishingFootHeightAboveWater?: number;
+  fishingWaterDepthAtTarget?: number;
   walkTicks: number;
   walkWallClockMs: number;
   runTicks: number;
@@ -459,12 +507,13 @@ let maxWalkTicks = 0;
 let maxWalkWallClockMs = 0;
 let maxRunTicks = 0;
 let maxRunWallClockMs = 0;
+let maxFishingInteractionDistance = 0;
+let minFishingFootHeightAboveWater = Number.POSITIVE_INFINITY;
+let maxFishingFootHeightAboveWater = Number.NEGATIVE_INFINITY;
+let minFishingWaterDepthAtTarget = Number.POSITIVE_INFINITY;
 for (const target of routeTargets) {
   const targetTile = worldToTile(target.position.x, target.position.z);
-  if (
-    target.mustOccupyWalkableTile &&
-    !collision.isWalkable(targetTile.x, targetTile.z)
-  ) {
+  if (target.mustOccupyWalkableTile && !isRuntimeWalkable(targetTile)) {
     failures.push(
       `${target.kind} ${target.id} occupies blocked terrain at (${targetTile.x}, ${targetTile.z})`,
     );
@@ -473,7 +522,7 @@ for (const target of routeTargets) {
   const destinations = createApproachTiles(
     targetTile,
     target.approachRadius,
-    collision,
+    isRuntimeWalkable,
     target.approachMode,
   );
   if (destinations.length === 0) {
@@ -495,6 +544,66 @@ for (const target of routeTargets) {
     }
   }
 
+  let fishingInteractionDistance: number | undefined;
+  let fishingFootHeightAboveWater: number | undefined;
+  let fishingWaterDepthAtTarget: number | undefined;
+  if (target.kind === "fishing") {
+    const approachWorld = tileToWorld(destinations[0]);
+    const waterSurfaceY = waterRegistry.getWaterSurfaceAt(
+      target.position.x,
+      target.position.z,
+    );
+    const targetTerrainY = terrain.getHeightAt(
+      target.position.x,
+      target.position.z,
+    );
+    fishingInteractionDistance = Math.hypot(
+      approachWorld.x - target.position.x,
+      approachWorld.z - target.position.z,
+    );
+    fishingFootHeightAboveWater =
+      terrain.getHeightAt(approachWorld.x, approachWorld.z) - waterSurfaceY;
+    fishingWaterDepthAtTarget = waterSurfaceY - targetTerrainY;
+    maxFishingInteractionDistance = Math.max(
+      maxFishingInteractionDistance,
+      fishingInteractionDistance,
+    );
+    minFishingFootHeightAboveWater = Math.min(
+      minFishingFootHeightAboveWater,
+      fishingFootHeightAboveWater,
+    );
+    maxFishingFootHeightAboveWater = Math.max(
+      maxFishingFootHeightAboveWater,
+      fishingFootHeightAboveWater,
+    );
+    minFishingWaterDepthAtTarget = Math.min(
+      minFishingWaterDepthAtTarget,
+      fishingWaterDepthAtTarget,
+    );
+    if (
+      fishingInteractionDistance > GATHERING_CONSTANTS.FISHING_INTERACTION_RANGE
+    ) {
+      failures.push(
+        `fishing ${target.id} requires ${fishingInteractionDistance.toFixed(3)}m reach, exceeding ${GATHERING_CONSTANTS.FISHING_INTERACTION_RANGE}m`,
+      );
+    }
+    if (fishingFootHeightAboveWater < 0) {
+      failures.push(
+        `fishing ${target.id} approach is ${Math.abs(fishingFootHeightAboveWater).toFixed(3)}m below the water surface`,
+      );
+    }
+    if (fishingFootHeightAboveWater > MAX_FISHING_FOOT_HEIGHT_ABOVE_WATER) {
+      failures.push(
+        `fishing ${target.id} bank is ${fishingFootHeightAboveWater.toFixed(3)}m above water, exceeding the ${MAX_FISHING_FOOT_HEIGHT_ABOVE_WATER}m motion-contact envelope`,
+      );
+    }
+    if (fishingWaterDepthAtTarget < MIN_FISHING_WATER_DEPTH_AT_TARGET) {
+      failures.push(
+        `fishing ${target.id} exposes only ${fishingWaterDepthAtTarget.toFixed(3)}m visible depth; ${MIN_FISHING_WATER_DEPTH_AT_TARGET}m is required`,
+      );
+    }
+  }
+
   let current = start;
   let reached = destinations.some(
     (tile) => tile.x === current.x && tile.z === current.z,
@@ -507,7 +616,7 @@ for (const target of routeTargets) {
     const path = pathfinder.findPathToAny(
       current,
       destinations,
-      (tile) => collision.isWalkable(tile.x, tile.z),
+      isRuntimeWalkable,
       MAX_ROUTE_ITERATIONS,
     );
     routeSegments++;
@@ -563,6 +672,9 @@ for (const target of routeTargets) {
     pathTiles: routeTiles,
     segments: routeSegments,
     iterations: routeMaxIterations,
+    fishingInteractionDistance,
+    fishingFootHeightAboveWater,
+    fishingWaterDepthAtTarget,
     walkTicks,
     walkWallClockMs,
     runTicks,
@@ -581,7 +693,7 @@ for (const spawn of training.mobSpawns ?? []) {
   for (const position of deterministicMobPositions(spawn)) {
     validatedMobInstances++;
     const tile = worldToTile(position.x, position.z);
-    if (!collision.isWalkable(tile.x, tile.z)) {
+    if (!isRuntimeWalkable(tile)) {
       failures.push(
         `training mob ${spawn.mobId} instance lands on blocked terrain at (${tile.x}, ${tile.z})`,
       );
@@ -604,7 +716,7 @@ let totalTiles = 0;
 for (let x = Math.floor(minX); x < Math.ceil(maxX); x++) {
   for (let z = Math.floor(minZ); z < Math.ceil(maxZ); z++) {
     totalTiles++;
-    if (collision.isWalkable(x, z)) walkableTiles++;
+    if (isRuntimeWalkable({ x, z })) walkableTiles++;
   }
 }
 
@@ -625,6 +737,10 @@ if (failures.length > 0) {
         fishingSpawnSelections: fishingSelections.length,
         fishingRelocationPositions: relocationPositions.size,
         minFishingRelocationCandidates,
+        maxFishingInteractionDistance,
+        minFishingFootHeightAboveWater,
+        maxFishingFootHeightAboveWater,
+        minFishingWaterDepthAtTarget,
         validatedMobInstances,
         staticOccupiedTiles: staticTileOwners.size,
         uniqueGatherApproachTiles: gatherApproachTiles.size,
@@ -650,6 +766,10 @@ if (failures.length > 0) {
       fishingSpawnSelections: fishingSelections.length,
       fishingRelocationPositions: relocationPositions.size,
       minFishingRelocationCandidates,
+      maxFishingInteractionDistance,
+      minFishingFootHeightAboveWater,
+      maxFishingFootHeightAboveWater,
+      minFishingWaterDepthAtTarget,
       validatedMobInstances,
       staticOccupiedTiles: staticTileOwners.size,
       uniqueGatherApproachTiles: gatherApproachTiles.size,

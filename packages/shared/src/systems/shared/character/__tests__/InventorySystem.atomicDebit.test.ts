@@ -5,6 +5,9 @@ import type {
   InventoryDebitCommitRequest,
   InventoryDebitCommitReceipt,
   InventorySaveItem,
+  ProjectileRuneCostCommitRequest,
+  ProjectileRuneCostCommitReceipt,
+  ProjectileRuneCostSettlementRequest,
 } from "../../../../types/network/database";
 import { EventBus } from "../../infrastructure/EventBus";
 import { InventorySystem } from "../InventorySystem";
@@ -23,8 +26,30 @@ function createFixture(
   commit: (
     request: InventoryDebitCommitRequest,
   ) => Promise<InventoryDebitCommitReceipt>,
+  projectile?: {
+    stage: (
+      request: ProjectileRuneCostCommitRequest,
+    ) => Promise<ProjectileRuneCostCommitReceipt>;
+    complete: (
+      request: ProjectileRuneCostSettlementRequest,
+    ) => Promise<ProjectileRuneCostCommitReceipt>;
+    cancel: (
+      request: ProjectileRuneCostSettlementRequest,
+    ) => Promise<ProjectileRuneCostCommitReceipt>;
+  },
 ) {
-  const database = { commitInventoryDebitOperationAsync: vi.fn(commit) };
+  const database = {
+    commitInventoryDebitOperationAsync: vi.fn(commit),
+    commitProjectileRuneCostOperationAsync: projectile
+      ? vi.fn(projectile.stage)
+      : undefined,
+    completeProjectileRuneCostOperationAsync: projectile
+      ? vi.fn(projectile.complete)
+      : undefined,
+    cancelProjectileRuneCostOperationAsync: projectile
+      ? vi.fn(projectile.cancel)
+      : undefined,
+  };
   const eventBus = new EventBus();
   const world = {
     $eventBus: eventBus,
@@ -246,5 +271,119 @@ describe("InventorySystem atomic inventory debit", () => {
       fixture.database.commitInventoryDebitOperationAsync,
     ).not.toHaveBeenCalled();
     expect(quantities(fixture.inventory).air_rune).toBe(10);
+  });
+
+  it("stages, finalizes, and refunds projectile rune custody from exact receipts", async () => {
+    let stagedRequest: ProjectileRuneCostCommitRequest | null = null;
+    let completedOperationId: string | null = null;
+    const projectile = {
+      stage: vi.fn(async (request: ProjectileRuneCostCommitRequest) => {
+        stagedRequest = request;
+        return {
+          ...request,
+          replayed: false,
+          status: "pending" as const,
+          committed: inventoryRows(8, 4, 3),
+          refundDestination: null,
+        };
+      }),
+      complete: vi.fn(async (request: ProjectileRuneCostSettlementRequest) => {
+        completedOperationId = request.operationId;
+        return {
+          ...request,
+          replayed: false,
+          requirements: stagedRequest!.requirements,
+          status: "fired" as const,
+          committed: inventoryRows(8, 4, 3),
+          refundDestination: null,
+        };
+      }),
+      cancel: vi.fn(async (request: ProjectileRuneCostSettlementRequest) =>
+        request.operationId === completedOperationId
+          ? {
+              ...request,
+              replayed: false,
+              requirements: stagedRequest!.requirements,
+              status: "resolved" as const,
+              committed: inventoryRows(8, 4, 3),
+              refundDestination: null,
+            }
+          : {
+              ...request,
+              replayed: false,
+              requirements: stagedRequest!.requirements,
+              status: "cancelled" as const,
+              committed: inventoryRows(),
+              refundDestination: "inventory" as const,
+            },
+      ),
+    };
+    const fixture = createFixture(
+      async (request) => ({
+        ...request,
+        replayed: false,
+        committed: inventoryRows(),
+      }),
+      projectile,
+    );
+    const staged = await fixture.inventory.stageProjectileRuneCostAtomic(
+      PLAYER_ID,
+      "spell-runes:1234567890abcdefghij",
+      [
+        { itemId: "mind_rune", quantity: 1 },
+        { itemId: "air_rune", quantity: 2 },
+      ],
+    );
+    expect(staged).toMatchObject({ ok: true, status: "pending" });
+    expect(quantities(fixture.inventory)).toMatchObject({
+      air_rune: 8,
+      mind_rune: 4,
+    });
+    if (!staged.ok) throw new Error("expected staged rune cost");
+    const handle = {
+      operationId: staged.operationId,
+      playerId: staged.playerId,
+      requestFingerprint: staged.requestFingerprint,
+      requirements: staged.requirements,
+    };
+    await expect(
+      fixture.inventory.completeProjectileRuneCostAtomic(handle),
+    ).resolves.toMatchObject({ ok: true, status: "fired" });
+    expect(quantities(fixture.inventory)).toMatchObject({
+      air_rune: 8,
+      mind_rune: 4,
+    });
+    await expect(
+      fixture.inventory.cancelProjectileRuneCostAtomic(handle),
+    ).resolves.toMatchObject({ ok: true, status: "resolved" });
+    expect(quantities(fixture.inventory)).toMatchObject({
+      air_rune: 8,
+      mind_rune: 4,
+    });
+
+    // A second staged operation demonstrates the cancellation/refund terminal.
+    const cancelledStage =
+      await fixture.inventory.stageProjectileRuneCostAtomic(
+        PLAYER_ID,
+        "spell-runes:abcdefghij1234567890",
+        [
+          { itemId: "mind_rune", quantity: 1 },
+          { itemId: "air_rune", quantity: 2 },
+        ],
+      );
+    if (!cancelledStage.ok) throw new Error("expected staged rune cost");
+    await expect(
+      fixture.inventory.cancelProjectileRuneCostAtomic({
+        operationId: cancelledStage.operationId,
+        playerId: cancelledStage.playerId,
+        requestFingerprint: cancelledStage.requestFingerprint,
+        requirements: cancelledStage.requirements,
+      }),
+    ).resolves.toMatchObject({ ok: true, status: "cancelled" });
+    expect(quantities(fixture.inventory)).toEqual({
+      air_rune: 10,
+      mind_rune: 5,
+      water_rune: 3,
+    });
   });
 });

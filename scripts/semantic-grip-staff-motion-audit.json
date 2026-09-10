@@ -1,0 +1,121 @@
+{
+  "schemaVersion": 1,
+  "title": "Certified staff semantic-grip and direction review",
+  "framing": "avatar-and-equipment",
+  "motions": [
+    {
+      "id": "idle-front",
+      "name": "Staff idle · front",
+      "asset": "emotes/emote-idle.glb",
+      "sampleRatio": 0.35,
+      "cameraYawDegrees": 0,
+      "cameraPitchDegrees": 6
+    },
+    {
+      "id": "idle-left",
+      "name": "Staff idle · left",
+      "asset": "emotes/emote-idle.glb",
+      "sampleRatio": 0.35,
+      "cameraYawDegrees": -90,
+      "cameraPitchDegrees": 6
+    },
+    {
+      "id": "idle-rear",
+      "name": "Staff idle · rear",
+      "asset": "emotes/emote-idle.glb",
+      "sampleRatio": 0.35,
+      "cameraYawDegrees": 180,
+      "cameraPitchDegrees": 6
+    },
+    {
+      "id": "idle-right",
+      "name": "Staff idle · right",
+      "asset": "emotes/emote-idle.glb",
+      "sampleRatio": 0.35,
+      "cameraYawDegrees": 90,
+      "cameraPitchDegrees": 6
+    },
+    {
+      "id": "walk-front",
+      "name": "Staff walk · front",
+      "asset": "emotes/emote-walk.glb",
+      "sampleRatio": 0.25,
+      "cameraYawDegrees": 0,
+      "cameraPitchDegrees": 6
+    },
+    {
+      "id": "walk-profile",
+      "name": "Staff walk · profile",
+      "asset": "emotes/emote-walk.glb",
+      "sampleRatio": 0.75,
+      "cameraYawDegrees": 90,
+      "cameraPitchDegrees": 6
+    },
+    {
+      "id": "run-front",
+      "name": "Staff run · front",
+      "asset": "emotes/emote-run.glb",
+      "sampleRatio": 0.25,
+      "cameraYawDegrees": 0,
+      "cameraPitchDegrees": 6
+    },
+    {
+      "id": "run-rear",
+      "name": "Staff run · rear",
+      "asset": "emotes/emote-run.glb",
+      "sampleRatio": 0.75,
+      "cameraYawDegrees": 180,
+      "cameraPitchDegrees": 6
+    },
+    {
+      "id": "cast-front",
+      "name": "Staff cast · front",
+      "asset": "emotes/emote-spell-cast.glb",
+      "sampleRatio": 0.35,
+      "cameraYawDegrees": 0,
+      "cameraPitchDegrees": 6
+    },
+    {
+      "id": "cast-left",
+      "name": "Staff cast · left",
+      "asset": "emotes/emote-spell-cast.glb",
+      "sampleRatio": 0.55,
+      "cameraYawDegrees": -90,
+      "cameraPitchDegrees": 6
+    },
+    {
+      "id": "cast-rear",
+      "name": "Staff cast · rear",
+      "asset": "emotes/emote-spell-cast.glb",
+      "sampleRatio": 0.7,
+      "cameraYawDegrees": 180,
+      "cameraPitchDegrees": 6
+    },
+    {
+      "id": "cast-right",
+      "name": "Staff cast · right",
+      "asset": "emotes/emote-spell-cast.glb",
+      "sampleRatio": 0.7,
+      "cameraYawDegrees": 90,
+      "cameraPitchDegrees": 6
+    },
+    {
+      "id": "reaction-front",
+      "name": "Staff hit reaction · front",
+      "asset": "emotes/emote-idle.glb",
+      "sampleRatio": 0.35,
+      "cameraYawDegrees": 0,
+      "cameraPitchDegrees": 6,
+      "hitReaction": { "intensity": 1, "side": 1, "elapsedSeconds": 0.0504 }
+    },
+    {
+      "id": "reaction-profile",
+      "name": "Staff hit reaction · profile",
+      "asset": "emotes/emote-idle.glb",
+      "sampleRatio": 0.35,
+      "cameraYawDegrees": 90,
+      "cameraPitchDegrees": 6,
+      "hitReaction": { "intensity": 1, "side": -1, "elapsedSeconds": 0.0504 }
+    }
+  ]
+}

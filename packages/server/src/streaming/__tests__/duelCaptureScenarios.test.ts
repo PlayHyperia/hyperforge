@@ -73,7 +73,10 @@ function scene(overrides: Record<string, unknown> = {}) {
       facingTargetErrorDegrees: 0,
       avatarReady: true,
       ndcPosition: [-0.25, 0.1, 0.5],
+      ndcHeadPosition: [-0.25, 0.48, 0.49],
       insideCombatArena: true,
+      insideAssignedCombatArena: true,
+      cameraLineOfSight: { head: true, torso: true, lowerBody: true },
       visible: true,
       active: true,
     },
@@ -87,7 +90,10 @@ function scene(overrides: Record<string, unknown> = {}) {
       facingTargetErrorDegrees: 0,
       avatarReady: true,
       ndcPosition: [0.25, 0.1, 0.5],
+      ndcHeadPosition: [0.25, 0.48, 0.49],
       insideCombatArena: true,
+      insideAssignedCombatArena: true,
+      cameraLineOfSight: { head: true, torso: true, lowerBody: true },
       visible: true,
       active: true,
     },
@@ -133,6 +139,146 @@ function presentation(overrides: Record<string, unknown> = {}) {
 }
 
 describe("duel arena capture scenarios", () => {
+  it("preserves assigned-arena and camera line-of-sight evidence", () => {
+    const normalized = normalizeDuelSceneDiagnostics(scene());
+
+    expect(normalized?.agents[0]).toMatchObject({
+      insideAssignedCombatArena: true,
+      cameraLineOfSight: { head: true, torso: true, lowerBody: true },
+    });
+    expect(normalized?.agents[1]).toMatchObject({
+      insideAssignedCombatArena: true,
+      cameraLineOfSight: { head: true, torso: true, lowerBody: true },
+    });
+  });
+
+  it("rejects missing or malformed spatial-observability evidence", () => {
+    const agents = scene().agents as Array<Record<string, unknown>>;
+    const { insideAssignedCombatArena: _missing, ...missingAssigned } =
+      agents[0];
+
+    expect(
+      normalizeDuelSceneDiagnostics({
+        ...scene(),
+        agents: [missingAssigned, agents[1]],
+      }),
+    ).toBeNull();
+    expect(
+      normalizeDuelSceneDiagnostics({
+        ...scene(),
+        agents: [
+          {
+            ...agents[0],
+            cameraLineOfSight: {
+              head: true,
+              torso: "yes",
+              lowerBody: true,
+            },
+          },
+          agents[1],
+        ],
+      }),
+    ).toBeNull();
+  });
+
+  it("preserves an avatar's exact authored hit-reaction bone requirement", () => {
+    const agents = scene().agents as Array<Record<string, unknown>>;
+    const normalized = normalizeDuelSceneDiagnostics({
+      ...scene(),
+      agents: [
+        {
+          ...agents[0],
+          hitReaction: {
+            schemaVersion: 1,
+            requiredBoneCount: 3,
+            availableBoneCount: 3,
+            triggerCount: 2,
+            active: true,
+            elapsedSeconds: 0.1,
+            currentWeight: 0.7,
+            lastIntensity: 0.8,
+            lastSide: -1,
+          },
+        },
+        agents[1],
+      ],
+    });
+
+    expect(normalized?.agents[0]?.hitReaction).toMatchObject({
+      requiredBoneCount: 3,
+      availableBoneCount: 3,
+    });
+  });
+
+  it("rejects impossible authored hit-reaction bone requirements", () => {
+    const agents = scene().agents as Array<Record<string, unknown>>;
+    expect(
+      normalizeDuelSceneDiagnostics({
+        ...scene(),
+        agents: [
+          {
+            ...agents[0],
+            hitReaction: {
+              schemaVersion: 1,
+              requiredBoneCount: 6,
+              availableBoneCount: 3,
+              triggerCount: 0,
+              active: false,
+              elapsedSeconds: null,
+              currentWeight: 0,
+              lastIntensity: 0,
+              lastSide: 1,
+            },
+          },
+          agents[1],
+        ],
+      }),
+    ).toBeNull();
+  });
+
+  it("preserves bounded authored mixer evidence and rejects query-bearing action URLs", () => {
+    const agents = scene().agents as Array<Record<string, unknown>>;
+    const authoredMotion = {
+      schemaVersion: 1,
+      overflow: false,
+      invalidActionCount: 0,
+      actions: [
+        {
+          url: "asset://emotes/emote_sword_swing.glb",
+          running: true,
+          paused: false,
+          effectiveWeight: 0.65,
+        },
+      ],
+    };
+    const normalized = normalizeDuelSceneDiagnostics({
+      ...scene(),
+      agents: [{ ...agents[0], authoredMotion }, agents[1]],
+    });
+    expect(normalized?.agents[0]?.authoredMotion).toEqual(authoredMotion);
+
+    expect(
+      normalizeDuelSceneDiagnostics({
+        ...scene(),
+        agents: [
+          {
+            ...agents[0],
+            authoredMotion: {
+              ...authoredMotion,
+              actions: [
+                {
+                  ...authoredMotion.actions[0],
+                  url: "asset://emotes/emote_sword_swing.glb?token=private",
+                },
+              ],
+            },
+          },
+          agents[1],
+        ],
+      }),
+    ).toBeNull();
+  });
+
   it("gates screenshots on DOM presentation, HTTP responses, and terminal handoff", () => {
     expect(captureRunnerSource).toContain("evaluateDuelPresentationCapture(");
     expect(captureRunnerSource).toContain("evaluateDuelSafeCrop(");
@@ -141,6 +287,27 @@ describe("duel arena capture scenarios", () => {
       "missingTerminalHandoffs.length === 0",
     );
     expect(captureRunnerSource).toContain("advanceDuelTerminalHandoff(");
+  });
+
+  it("pins outcome evidence to a fresh immutable 60 FPS browser run", () => {
+    expect(captureRunnerSource).toContain("assertByteCompleteLaunchAssets();");
+    expect(captureRunnerSource).toContain(
+      "scripts/validate-duel-launch-assets.mjs",
+    );
+    expect(captureRunnerSource).toContain("process.execPath");
+    expect(captureRunnerSource).toContain("applyCaptureFrameRateToUrl(");
+    expect(captureRunnerSource).toContain('serviceWorkers: "block"');
+    expect(captureRunnerSource).toContain('"Network.setCacheDisabled"');
+    expect(captureRunnerSource).toContain('"Network.emulateNetworkConditions"');
+    expect(captureRunnerSource).toContain('"Emulation.setCPUThrottlingRate"');
+    expect(captureRunnerSource).toContain(
+      "const stateBearerToken = distinctStateBearerToken || viewerToken",
+    );
+    expect(captureRunnerSource).toContain("await access(manifestPath)");
+    expect(captureRunnerSource).toContain(
+      "refusing to overwrite existing evidence",
+    );
+    expect(captureRunnerSource).toContain("browserConditionError === null");
   });
 
   it("adds a viewer token only to the URL fragment", () => {
@@ -542,7 +709,10 @@ describe("duel arena capture scenarios", () => {
       facingTargetErrorDegrees: null,
       avatarReady: true,
       ndcPosition: [2.5, 1.8, 1.5],
+      ndcHeadPosition: null,
       insideCombatArena: false,
+      insideAssignedCombatArena: null,
+      cameraLineOfSight: null,
       visible: false,
       active: true,
     }));

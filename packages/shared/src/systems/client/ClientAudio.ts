@@ -91,6 +91,25 @@ import type { World, AudioGroupGains } from "../../types";
 const up = new THREE.Vector3(0, 1, 0);
 const v1 = new THREE.Vector3();
 
+type SilentSinkAudioContext = {
+  setSinkId?: (sinkId: { type: "none" }) => Promise<void>;
+};
+
+/**
+ * Route a dedicated streaming AudioContext to Chrome's clocked, inaudible
+ * output sink. A normal device-backed context can report `running` while its
+ * currentTime and AudioWorklets remain stalled in an automated browser.
+ */
+export async function activateSilentStreamingAudioSink(
+  context: AudioContext,
+): Promise<void> {
+  const sinkContext = context as unknown as SilentSinkAudioContext;
+  if (typeof sinkContext.setSinkId !== "function") {
+    throw new Error("Streaming audio requires a clocked silent output sink");
+  }
+  await sinkContext.setSinkId({ type: "none" });
+}
+
 /**
  * Client Audio System
  *
@@ -109,6 +128,12 @@ export class ClientAudio extends System {
   private captureDestination: ReturnType<
     AudioContext["createMediaStreamDestination"]
   > | null = null;
+  private streamingCapturePilot: ReturnType<
+    AudioContext["createOscillator"]
+  > | null = null;
+  private streamingCapturePilotGain: GainNode | null = null;
+  private streamingCaptureLocalOutputDisconnected = false;
+  private streamingCaptureSilentSinkActive = false;
 
   constructor(world: World) {
     super(world);
@@ -175,20 +200,71 @@ export class ClientAudio extends System {
     return this.captureDestination.stream;
   }
 
+  /** Return the final post-group master bus for the trusted stream renderer. */
+  getOutputCaptureNode(): GainNode {
+    return this.masterGain;
+  }
+
   ready(fn: () => void) {
     if (this.unlocked) return fn();
     this.queue.push(fn);
   }
 
+  private completeUnlock(): void {
+    if (this.unlocked) return;
+    this.unlocked = true;
+    this.removeUnlockListeners();
+    while (this.queue.length) {
+      const fn = this.queue.pop();
+      if (fn) fn();
+    }
+  }
+
+  /**
+   * Activate audio for the dedicated broadcast renderer. Ordinary players
+   * still require a user gesture; this method succeeds only in the isolated
+   * capture browser launched with an explicit autoplay policy. Draining the
+   * same readiness queue ensures the encoded master mix contains the real
+   * game music and effects instead of an encoder-generated silent fallback.
+   */
+  async activateForStreamingCapture(): Promise<void> {
+    if (this.ctx.state === "closed") {
+      throw new Error("AudioContext is closed, cannot activate stream audio");
+    }
+    if (!this.streamingCaptureLocalOutputDisconnected) {
+      // The isolated renderer needs Chromium's audio render clock, but it must
+      // not play the game mix through the host Mac's speakers. The capture
+      // destination and trusted AudioWorklet remain connected to masterGain.
+      this.masterGain.disconnect(this.ctx.destination);
+      this.streamingCaptureLocalOutputDisconnected = true;
+    }
+    if (!this.streamingCaptureSilentSinkActive) {
+      await activateSilentStreamingAudioSink(this.ctx);
+      this.streamingCaptureSilentSinkActive = true;
+    }
+    if (this.ctx.state !== "running") {
+      await this.ctx.resume();
+    }
+    if (this.ctx.state !== "running") {
+      throw new Error(`Stream audio remained ${this.ctx.state}`);
+    }
+    this.completeUnlock();
+    if (!this.streamingCapturePilot) {
+      // Keep Chromium's pull-based graph rendering the master tap during
+      // momentary gaps between music/SFX. At 1e-8 gain this 20 Hz continuity
+      // pilot is far below audibility and is not accepted as content by the
+      // broadcast audio health gate.
+      this.streamingCapturePilot = this.ctx.createOscillator();
+      this.streamingCapturePilotGain = this.ctx.createGain();
+      this.streamingCapturePilot.frequency.value = 20;
+      this.streamingCapturePilotGain.gain.value = 1e-8;
+      this.streamingCapturePilot.connect(this.streamingCapturePilotGain);
+      this.streamingCapturePilotGain.connect(this.masterGain);
+      this.streamingCapturePilot.start();
+    }
+  }
+
   setupUnlockListener() {
-    const complete = () => {
-      this.unlocked = true;
-      this.removeUnlockListeners();
-      while (this.queue.length) {
-        const fn = this.queue.pop();
-        if (fn) fn();
-      }
-    };
     const unlock = async () => {
       // Guard against closed or closing context
       if (this.ctx.state === "closed") {
@@ -208,7 +284,7 @@ export class ClientAudio extends System {
         await video.play();
         video.pause();
         video.remove();
-        complete();
+        this.completeUnlock();
       } catch (error) {
         console.error("Failed to unlock audio context:", error);
         this.removeUnlockListeners();
@@ -293,6 +369,15 @@ export class ClientAudio extends System {
     this.groupGains.sfx.disconnect();
     this.groupGains.voice.disconnect();
     this.masterGain.disconnect();
+    try {
+      this.streamingCapturePilot?.stop();
+    } catch {
+      // The pilot may already have stopped with its owning context.
+    }
+    this.streamingCapturePilot?.disconnect();
+    this.streamingCapturePilotGain?.disconnect();
+    this.streamingCapturePilot = null;
+    this.streamingCapturePilotGain = null;
     this.captureDestination?.disconnect();
     this.captureDestination = null;
 

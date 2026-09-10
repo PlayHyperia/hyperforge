@@ -203,6 +203,16 @@ export type {
   StreamingGuardrailArenaPositions,
   StreamingGuardrailPhase,
 } from "./utils/rendering/streamingGuardrails";
+export {
+  AVATAR_AUTHORED_MOTION_ACTION_LIMIT,
+  AVATAR_AUTHORED_MOTION_SCHEMA_VERSION,
+  AVATAR_AUTHORED_MOTION_URL_MAX_LENGTH,
+  sanitizeAvatarAuthoredMotionUrl,
+} from "./extras/three/AvatarAuthoredMotionDiagnostics";
+export type {
+  AvatarAuthoredMotionActionDiagnostics,
+  AvatarAuthoredMotionDiagnostics,
+} from "./extras/three/AvatarAuthoredMotionDiagnostics";
 
 // Export SeededRandom and game RNG utilities (rules-accurate deterministic RNG)
 export {
@@ -308,6 +318,109 @@ export type {
   PlayerWithPrayerStats,
 } from "./types/game/prayer-types";
 
+// Export the exact privacy-safe public duel action observation contract.
+export {
+  STREAMING_DUEL_ACTION_OBSERVATION_LIMIT,
+  STREAMING_DUEL_ACTION_OBSERVATION_SCHEMA_VERSION,
+  STREAMING_DUEL_PUBLIC_COMBAT_ROLES,
+  STREAMING_DUEL_PUBLIC_PRAYERS,
+  STREAMING_DUEL_PUBLIC_STYLES,
+  STREAMING_DUEL_PUBLIC_TACTICAL_MACROS,
+  parseStreamingDuelActionObservation,
+  parseStreamingDuelDamageObservationContext,
+  parseStreamingDuelExecutorObservationContext,
+  parseStreamingDuelFoodObservationContext,
+  parseStreamingDuelPrayerObservationContext,
+  parseStreamingDuelRoleSwitchObservationContext,
+  parseStreamingDuelStyleObservationContext,
+} from "./types/game/streaming-duel-action-observation";
+export {
+  DUEL_PREPARATION_COMBAT_ROLES,
+  DUEL_PREPARATION_ROLE_POLICY_VERSION,
+  EXTERNAL_DUEL_PREPARATION_MODEL,
+  EXTERNAL_DUEL_PREPARATION_MODEL_PROVIDER,
+  EXTERNAL_DUEL_PREPARATION_STRATEGY_PROTOCOL_VERSION,
+  MAX_EXTERNAL_DUEL_PREPARATION_ARMOR_OPTIONS,
+  MAX_EXTERNAL_DUEL_PREPARATION_OPPONENT_HISTORY,
+  MAX_EXTERNAL_DUEL_PREPARATION_FOOD_OPTIONS,
+  MAX_EXTERNAL_DUEL_PREPARATION_PLAN_OPTIONS,
+  normalizeExternalDuelPreparationPlanStrategyDecision,
+  normalizeExternalDuelPreparationPublicName,
+  normalizeExternalDuelPreparationOpponentHistorySummary,
+  normalizeExternalDuelPreparationPublicProfile,
+  normalizeExternalDuelPreparationStrategyDecision,
+  normalizeExternalDuelPreparationStrategyRequest,
+  normalizeExternalDuelPreparationStrategyResponse,
+  normalizeExternalDuelPreparationTacticalStrategy,
+} from "./types/game/external-duel-preparation-strategy";
+export type {
+  DuelPreparationBoundedStrategyDecision,
+  DuelPreparationCombatRole,
+  ExternalDuelPreparationArmorOption,
+  ExternalDuelPreparationOpponentHistoryEntry,
+  ExternalDuelPreparationOpponentHistorySummary,
+  ExternalDuelPreparationFoodOption,
+  ExternalDuelPreparationPlanOption,
+  ExternalDuelPreparationPublicProfile,
+  ExternalDuelPreparationStrategyDecision,
+  ExternalDuelPreparationStrategyRequest,
+  ExternalDuelPreparationStrategyResponse,
+  ExternalDuelPreparationTacticalStrategy,
+} from "./types/game/external-duel-preparation-strategy";
+export {
+  getStreamingDuelDamageAuthority,
+  registerStreamingDuelDamageAuthority,
+} from "./systems/shared/combat/StreamingDuelDamageAuthority";
+export type {
+  StreamingDuelDamageAuthority,
+  StreamingDuelDamageCommitAuthority,
+} from "./systems/shared/combat/StreamingDuelDamageAuthority";
+export type {
+  StreamingDuelActionObservation,
+  StreamingDuelDamageObservationContext,
+  StreamingDuelExecutorObservationContext,
+  StreamingDuelFoodObservationContext,
+  StreamingDuelPrayerObservationContext,
+  StreamingDuelRoleSwitchObservationContext,
+  StreamingDuelStyleObservationContext,
+  StreamingDuelPublicCombatRole,
+  StreamingDuelPublicPrayer,
+  StreamingDuelPublicStyle,
+  StreamingDuelPublicTacticalMacro,
+} from "./types/game/streaming-duel-action-observation";
+
+// Export the strict frozen strategy summary disclosed to duel spectators.
+export {
+  STREAMING_DUEL_PUBLIC_STRATEGY_APPROACHES,
+  STREAMING_DUEL_PUBLIC_STRATEGY_ATTACK_STYLES,
+  STREAMING_DUEL_PUBLIC_STRATEGY_SOURCES,
+  STREAMING_DUEL_STRATEGY_SUMMARY_SCHEMA_VERSION,
+  parseStreamingDuelStrategySummary,
+} from "./types/game/streaming-duel-strategy-summary";
+export type {
+  StreamingDuelPublicStrategyApproach,
+  StreamingDuelPublicStrategyAttackStyle,
+  StreamingDuelPublicStrategySource,
+  StreamingDuelStrategySummary,
+} from "./types/game/streaming-duel-strategy-summary";
+
+// Export the strict public status for the selected pre-market contestants.
+export {
+  STREAMING_DUEL_PREPARATION_SUMMARY_SCHEMA_VERSION,
+  STREAMING_DUEL_PUBLIC_PREPARATION_ACTIVITY_TRAIL_LIMIT,
+  STREAMING_DUEL_PUBLIC_PREPARATION_ACTIVITIES,
+  STREAMING_DUEL_PUBLIC_PREPARATION_MODES,
+  STREAMING_DUEL_PUBLIC_PREPARATION_STATUSES,
+  parseStreamingDuelPreparationSummary,
+} from "./types/game/streaming-duel-preparation-summary";
+export type {
+  StreamingDuelPreparationContestantSummary,
+  StreamingDuelPreparationSummary,
+  StreamingDuelPublicPreparationActivity,
+  StreamingDuelPublicPreparationMode,
+  StreamingDuelPublicPreparationStatus,
+} from "./types/game/streaming-duel-preparation-summary";
+
 // Export trade types
 export { TRADE_CONSTANTS } from "./types/game/trade-types";
 export type {
@@ -412,9 +525,11 @@ export {
   CANONICAL_DUEL_AVATAR_ID,
   CANONICAL_DUEL_AVATAR_URL,
   DEFAULT_AVATAR_URL,
+  getAvatarByUrl,
   getDuelAvatarUrlForStyle,
 } from "./data/avatars";
-export type { DuelAvatarStyle } from "./data/avatars";
+export { DIAGNOSTIC_AVATAR_OPTIONS } from "./data/avatars";
+export type { AvatarOption, DuelAvatarStyle } from "./data/avatars";
 
 // Export skill data for UI displays
 export {
@@ -487,11 +602,31 @@ export type {
   StreamingDuelEquipmentVisualReadiness,
   StreamingDuelEquipmentVisualRequirement,
   StreamingDuelVisibleEquipmentSlot,
+  StreamingPreparationVisualDiagnostics,
+  StreamingPreparationVisualPlayerDiagnostics,
 } from "./systems/client/EquipmentVisualSystem";
 export type {
+  StreamingArrowVisualCancellationEvent,
+  StreamingArrowVisualImpactEvent,
   StreamingArrowVisualSpawnEvent,
   StreamingProjectileVisualDiagnostics,
 } from "./systems/client/ProjectileRenderer";
+export type {
+  StreamingDamagePresentationDiagnostics,
+  StreamingDamagePresentationEvent,
+} from "./systems/client/DamageSplatSystem";
+export {
+  getStreamingPreparationEntityPosition,
+  hasActiveStreamingPreparationPresentation,
+  resolveStreamingPreparationFocus,
+} from "./runtime/streamingPreparationFocus";
+export type {
+  StreamingPreparationEntity,
+  StreamingPreparationFocus,
+  StreamingPreparationParticipant,
+  StreamingPreparationPhase,
+  StreamingPreparationPosition,
+} from "./runtime/streamingPreparationFocus";
 
 // Export spell service for magic combat
 export { spellService } from "./systems/shared/combat/SpellService";
@@ -558,6 +693,7 @@ export {
 // paths and accidentally creating duplicate shared-data singletons.
 export { InventorySystem as CharacterInventorySystem } from "./systems/shared/character/InventorySystem";
 export { EquipmentSystem as CharacterEquipmentSystem } from "./systems/shared/character/EquipmentSystem";
+export { PlayerSystem } from "./systems/shared/character/PlayerSystem";
 export type {
   PrayerActionFailureReason,
   PrayerActionReceipt,
@@ -585,6 +721,17 @@ export type {
   Resource,
   Fire,
 } from "./types/game/resource-processing-types";
+export {
+  PROCESSING_SKILLS,
+  isProcessingSkill,
+  normalizeProcessingInteractionPresentationState,
+  resolveProcessingInteractionBodyEmote,
+} from "./types/game/processing-interaction-presentation";
+export type {
+  ProcessingInteractionPresentationPhase,
+  ProcessingInteractionPresentationState,
+  ProcessingInteractionTargetPosition,
+} from "./types/game/processing-interaction-presentation";
 
 // Export client network utilities
 export { PendingActionTracker } from "./systems/client/network/PendingActionTracker";
@@ -655,6 +802,40 @@ export {
   type AttackStyleValidation,
 } from "./utils/game/CombatValidation";
 
+export { getGatheringRewardOperationIdForAttempt } from "./utils/game/GatheringReceiptIdentity";
+export { getGroundItemPickupOperationIdForAttempt } from "./utils/game/GroundItemPickupReceiptIdentity";
+export {
+  generateGroundItemDropOperationId,
+  generateGroundItemDeathOperationId,
+  generateGroundItemMobLootOperationId,
+  generateGroundItemSourceContributionId,
+  generateGroundItemSourceEntityId,
+} from "./utils/game/GroundItemSourceIdentity";
+export { serializeGroundItemDropCommitFingerprint } from "./utils/game/GroundItemDropRegistration";
+export { serializeGroundItemDeathCommitFingerprint } from "./utils/game/GroundItemDeathRegistration";
+export {
+  serializeGroundItemMobLootCommitFingerprint,
+  type GroundItemMobLootIdentity,
+} from "./utils/game/GroundItemMobLootRegistration";
+export {
+  getProcessingFireExtinguishOperationId,
+  serializeProcessingFireExtinguishFingerprint,
+  type ProcessingFireExtinguishIdentity,
+} from "./utils/game/ProcessingFireExtinguishRegistration";
+export {
+  ammunitionShotIdentityFromRequest,
+  serializeAmmunitionShotFingerprint,
+  type AmmunitionShotIdentity,
+} from "./utils/game/AmmunitionShotRegistration";
+export {
+  generateKillToken,
+  isKillTokenValidationAvailable,
+  MAX_MOB_COMBAT_DAMAGE,
+  validateKillToken,
+  validateKillTokenSignature,
+} from "./utils/game/KillTokenUtils";
+export { serializeGroundItemSourceRegistrationFingerprint } from "./utils/game/GroundItemSourceRegistration";
+
 export { isTouch, cls, hashFile } from "./platform/client/utils-client";
 export { ReactiveVector3 } from "./extras/animation/ReactiveVector3";
 export { createEmoteFactory } from "./extras/three/createEmoteFactory";
@@ -673,12 +854,14 @@ export {
   isValidEquipmentSlot,
   getIncompatibleRules,
   areRulesCompatible,
+  getCombatArenaBoundsContainingPositions,
   getDuelArenaConfig,
   isPositionInsideDuelArenaZone,
   isPositionInsideCombatArena,
   type DuelRuleDefinition,
   type EquipmentSlotDefinition,
   type DuelEquipmentSlot,
+  type DuelCombatArenaBounds,
   type DuelArenaConfig,
 } from "./data/duel-manifest";
 export { ControlPriorities } from "./systems/client/ControlPriorities";
@@ -728,6 +911,8 @@ export function getPhysXAssetPath(assetName: string): string {
 
 // Export THREE namespace as a default-only module export
 export { default as THREE } from "./extras/three/three";
+export { BorrowedMaterialEnvironment } from "./extras/three/BorrowedMaterialEnvironment";
+export { fitBoundedDirectionalShadow } from "./extras/three/BoundedDirectionalShadow";
 
 // Export Vector3 compatibility utilities for plugin use
 export {
@@ -1096,8 +1281,38 @@ export type {
   InventoryDebitRequirement,
   InventoryDebitCommitRequest,
   InventoryDebitCommitReceipt,
+  GroundItemSourceStatus,
+  GroundItemSourceState,
+  GroundItemSourceRegistrationRequest,
+  GroundItemSourceRegistrationReceipt,
+  GroundItemDropCommitRequest,
+  GroundItemDropCommitReceipt,
+  GroundItemDeathCommitRequest,
+  GroundItemDeathCommitReceipt,
+  GroundItemMobLootCommitRequest,
+  GroundItemMobLootCommitReceipt,
+  GroundItemPickupCommitRequest,
+  GroundItemPickupCommitReceipt,
+  FoodConsumptionOperationStatus,
+  FoodConsumptionCompletionReason,
+  FoodConsumptionCommitRequest,
+  FoodConsumptionCompleteRequest,
+  FoodConsumptionCommitReceipt,
+  DuelDamageCompetitiveAuthority,
+  DuelDamageCompetitiveTerminal,
+  DuelDamageCommitRequest,
+  DuelDamageCommitReceipt,
   BoneBurialCommitRequest,
   BoneBurialCommitReceipt,
+  QuestRewardSkill,
+  QuestCompletionRewardItem,
+  QuestStartRewardItem,
+  QuestStartCommitRequest,
+  QuestStartCommitReceipt,
+  QuestCompletionRewardXp,
+  QuestCompletionProgressReceipt,
+  QuestCompletionCommitRequest,
+  QuestCompletionCommitReceipt,
   GatheringRewardSkill,
   GatheringRewardItem,
   GatheringRewardCommitRequest,
@@ -1105,6 +1320,14 @@ export type {
   GatheringResourceState,
   EquipmentStackDebitCommitRequest,
   EquipmentStackDebitCommitReceipt,
+  AmmunitionRecoveryDisposition,
+  AmmunitionShotCommitRequest,
+  AmmunitionShotCommitReceipt,
+  StreamingDuelExecutorCommand,
+  StreamingDuelExecutorCommandOutcome,
+  StreamingDuelExecutorCommandRequest,
+  StreamingDuelExecutorCommandCompletionRequest,
+  StreamingDuelExecutorCommandReceipt,
   PrayerPersistenceSnapshot,
   PrayerStateTransitionKind,
   PrayerStateCommitRequest,
@@ -1300,7 +1523,27 @@ export { INPUT } from "./systems/client/interaction/constants";
 // Combat constants (tick-based timing, ranges, etc.)
 export { COMBAT_CONSTANTS } from "./constants/CombatConstants";
 export { PROCESSING_CONSTANTS } from "./constants/ProcessingConstants";
-export { canPlayerPerformPreparationAction } from "./systems/shared/interaction/ProcessingStationAuthority";
+export {
+  acquirePreparationActionFence,
+  canPlayerPerformPreparationAction,
+  canPlayerUseProcessingStation,
+} from "./systems/shared/interaction/ProcessingStationAuthority";
+export type { PreparationActionFence } from "./systems/shared/interaction/ProcessingStationAuthority";
+export { stationDataProvider } from "./data/StationDataProvider";
+export type {
+  ModelBoundsManifest,
+  StationsManifest,
+} from "./data/StationDataProvider";
+export {
+  PROCESSING_QUIESCENCE_SYSTEM_NAMES,
+  isPlayerProcessingQuiescent,
+  requestPlayerProcessingQuiescence,
+} from "./systems/shared/interaction/ProcessingQuiescence";
+export type {
+  PlayerProcessingQuiescenceSystem,
+  ProcessingQuiescenceRequestResult,
+  ProcessingQuiescenceSystemName,
+} from "./systems/shared/interaction/ProcessingQuiescence";
 
 // Home teleport constants (cooldown, cast time)
 export { HOME_TELEPORT_CONSTANTS } from "./constants/GameConstants";
@@ -1320,6 +1563,7 @@ export { PLAYER_CONSTANTS } from "./constants/GameConstants";
 
 // Gathering constants (tick-based timing, ranges, etc.)
 export { GATHERING_CONSTANTS } from "./constants/GatheringConstants";
+export { resolveGatheringPresentationEmote } from "./systems/shared/entities/gathering/ToolUtils";
 
 // Smithing prerequisites shared by authoritative execution and agent planners
 export { SMITHING_CONSTANTS } from "./constants/SmithingConstants";

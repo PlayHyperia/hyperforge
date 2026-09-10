@@ -14,6 +14,8 @@ import { describe, it, expect, beforeEach, vi } from "vitest";
 import { PendingGatherManager } from "../PendingGatherManager";
 import { EventType } from "@hyperforge/shared";
 
+const AUTONOMY_ATTEMPT_ID = "11111111-1111-4111-8111-111111111111";
+
 // ===== MOCK FACTORIES =====
 
 interface MockPlayer {
@@ -37,11 +39,15 @@ const createMockWorld = () => {
   const players = new Map<string, MockPlayer>();
   const resources = new Map<string, MockResource>();
   const emittedEvents: Array<{ type: string; data: unknown }> = [];
+  const playerHasRequiredToolForResource = vi.fn(() => true);
+  const requestGathering = vi.fn(() => true);
 
   return {
     players,
     resources,
     emittedEvents,
+    playerHasRequiredToolForResource,
+    requestGathering,
 
     getPlayer: vi.fn((id: string) => players.get(id)),
 
@@ -49,6 +55,8 @@ const createMockWorld = () => {
       if (name === "resource") {
         return {
           getResource: (id: string) => resources.get(id),
+          playerHasRequiredToolForResource,
+          requestGathering,
         };
       }
       return null;
@@ -199,6 +207,10 @@ describe("PendingGatherManager", () => {
         "player1",
         "fishing",
       );
+      expect(mockWorld.playerHasRequiredToolForResource).toHaveBeenCalledWith(
+        "player1",
+        "fishing_spot_1",
+      );
       expect(accepted).toBe(true);
     });
 
@@ -237,6 +249,37 @@ describe("PendingGatherManager", () => {
         }),
       );
       expect(accepted).toBe(true);
+    });
+
+    it("threads an autonomous attempt into the authoritative gather start", () => {
+      mockWorld.addPlayer({
+        id: "player1",
+        position: { x: 10, y: 0, z: 9 },
+      });
+      mockWorld.addResource({
+        id: "tree_1",
+        position: { x: 10, y: 0, z: 10 },
+        isAvailable: true,
+        skillRequired: "woodcutting",
+        levelRequired: 1,
+        type: "tree",
+      });
+
+      expect(
+        manager.queuePendingGather(
+          "player1",
+          "tree_1",
+          0,
+          false,
+          AUTONOMY_ATTEMPT_ID,
+        ),
+      ).toBe(true);
+      expect(mockWorld.requestGathering).toHaveBeenCalledWith({
+        playerId: "player1",
+        resourceId: "tree_1",
+        playerPosition: { x: 10, y: 0, z: 9 },
+        completionAttemptId: AUTONOMY_ATTEMPT_ID,
+      });
     });
 
     it("should cancel previous pending gather on new request", () => {
@@ -617,6 +660,8 @@ describe("PendingGatherManager", () => {
               createdTick: number;
               isFishing: boolean;
               resourcePosition: { x: number; y: number; z: number };
+              completionAttemptId?: string;
+              skill: string;
             }
           >;
         }
@@ -632,6 +677,8 @@ describe("PendingGatherManager", () => {
         createdTick: 0,
         isFishing: false,
         resourcePosition: { x: 100, y: 0, z: 100 },
+        completionAttemptId: AUTONOMY_ATTEMPT_ID,
+        skill: "unknown",
       });
 
       // Act - process at tick 21 (timeout is 20)
@@ -643,6 +690,16 @@ describe("PendingGatherManager", () => {
       expect(mockWorld.emittedEvents).not.toContainEqual(
         expect.objectContaining({ type: EventType.RESOURCE_GATHER }),
       );
+      expect(mockWorld.emittedEvents).toContainEqual({
+        type: EventType.RESOURCE_GATHERING_COMPLETED,
+        data: {
+          playerId: "player1",
+          resourceId: "tree_1",
+          successful: false,
+          skill: "unknown",
+          operationId: `gathering-reward:${AUTONOMY_ATTEMPT_ID}`,
+        },
+      });
     });
 
     it("should cancel if resource becomes unavailable", () => {
@@ -785,6 +842,9 @@ describe("PendingGatherManager", () => {
               }
               return mockWorld.resources.get(id);
             },
+            playerHasRequiredToolForResource:
+              mockWorld.playerHasRequiredToolForResource,
+            requestGathering: mockWorld.requestGathering,
           };
         }
         return originalGetSystem(name);

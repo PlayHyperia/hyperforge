@@ -10,6 +10,7 @@ import {
 import type { BettingFeedFrame } from "../../../src/routes/streaming-betting-feed.js";
 import type { StreamingDuelCycle } from "../../../src/systems/StreamingDuelScheduler/types.js";
 import { serializeBettingFeedSchemaV3ContractFixture } from "../../../scripts/generate-betting-feed-schema-v3-fixtures.js";
+import { deriveBettingRendererHealth } from "../../../src/routes/streaming-betting-health.js";
 
 function createCycle(
   overrides: Partial<StreamingDuelCycle> = {},
@@ -108,6 +109,52 @@ function createFrame(seq: number): BettingFeedFrame {
 }
 
 describe("streaming-betting-feed", () => {
+  it("retains frame-local health derivation without changing material deduplication", () => {
+    const cycle = createCycle();
+    const health = deriveBettingRendererHealth(cycle, {
+      nowMs: 10_000,
+      captureStats: { clientConnected: true, ffmpegRunning: true },
+    });
+    const payload = buildBettingFeedPayload({
+      sourceEpoch: 9_999,
+      seq: 1,
+      emittedAt: 10_000,
+      cycle,
+      rendererHealth: health,
+    });
+    expect(
+      JSON.parse(JSON.stringify(payload)).rendererHealth.derivation,
+    ).toEqual(health.derivation);
+    const refreshed = {
+      ...payload,
+      seq: 2,
+      emittedAt: 11_000,
+      rendererHealth: deriveBettingRendererHealth(cycle, {
+        nowMs: 11_000,
+        captureStats: { clientConnected: true, ffmpegRunning: true },
+      }),
+    };
+    expect(buildBettingFeedDedupKey(refreshed)).toBe(
+      buildBettingFeedDedupKey(payload),
+    );
+    expect(
+      buildBettingFeedDedupKey({
+        ...refreshed,
+        rendererHealth: {
+          ...refreshed.rendererHealth,
+          ready: false,
+          degradedReason: "capture_process_exited",
+        },
+      }),
+    ).not.toBe(buildBettingFeedDedupKey(payload));
+    expect(payload.rendererHealth?.derivation?.evaluatedAtMs).toBe(
+      payload.emittedAt,
+    );
+    expect(refreshed.rendererHealth.derivation?.evaluatedAtMs).toBe(
+      refreshed.emittedAt,
+    );
+  });
+
   it("keeps the checked-in Hyperbet schema-v3 contract fixture aligned with the production producer", () => {
     const fixturePath = fileURLToPath(
       new URL(
@@ -119,6 +166,51 @@ describe("streaming-betting-feed", () => {
     expect(readFileSync(fixturePath, "utf8")).toBe(
       serializeBettingFeedSchemaV3ContractFixture(),
     );
+  });
+
+  it("publishes the exact frozen strategy without private planning fields", () => {
+    const fixture = JSON.parse(
+      serializeBettingFeedSchemaV3ContractFixture(),
+    ) as {
+      cases: Array<{
+        name: string;
+        payload: {
+          agent1: { strategySummary: Record<string, unknown> | null } | null;
+        };
+      }>;
+    };
+    const announcement = fixture.cases.find(
+      (entry) => entry.name === "announcement",
+    );
+    const strategySummary = announcement?.payload.agent1?.strategySummary;
+
+    expect(strategySummary).toEqual({
+      schemaVersion: 1,
+      approach: "balanced",
+      tacticalMacro: "pressure",
+      attackStyle: "aggressive",
+      prayer: "superhuman_strength",
+      preferredCombatRole: null,
+      foodThreshold: 40,
+      switchDefensiveAt: 30,
+      source: "deterministic",
+      policyVersion: "fixture-policy-v1",
+    });
+    expect(Object.keys(strategySummary ?? {}).sort()).toEqual([
+      "approach",
+      "attackStyle",
+      "foodThreshold",
+      "policyVersion",
+      "prayer",
+      "preferredCombatRole",
+      "schemaVersion",
+      "source",
+      "switchDefensiveAt",
+      "tacticalMacro",
+    ]);
+    expect(strategySummary).not.toHaveProperty("reasoning");
+    expect(strategySummary).not.toHaveProperty("agentPolicyFingerprint");
+    expect(strategySummary).not.toHaveProperty("modelProvider");
   });
 
   it("builds betting payloads with stable schema and phase version data", () => {

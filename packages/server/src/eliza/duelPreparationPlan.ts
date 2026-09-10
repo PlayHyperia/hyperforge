@@ -1,5 +1,6 @@
 import {
   BANKING_CONSTANTS,
+  COMBAT_CONSTANTS,
   INPUT_LIMITS,
   getItem,
   type BankSaveItem,
@@ -7,6 +8,50 @@ import {
   type EquipmentSaveItem,
   type InventorySaveItem,
 } from "@hyperforge/shared";
+import { v5 as uuidv5 } from "uuid";
+
+export const DUEL_PREPARATION_OPERATION_NAMESPACE =
+  "85f33ed8-a0d0-465e-8782-b9bd4c917188";
+
+/**
+ * Resolve the one immutable whole-plan receipt identity shared by the planner,
+ * scheduler recovery, and replacement processes.
+ */
+export function getDuelPreparationPlanOperationId(
+  preparationId: string,
+  playerId: string,
+): string {
+  return uuidv5(
+    `${preparationId}:${playerId}:whole-plan:v1`,
+    DUEL_PREPARATION_OPERATION_NAMESPACE,
+  );
+}
+
+/**
+ * Reserve enough owned projectile supplies for an immediate opening attack and
+ * every later cooldown boundary through the configured maximum fight. The
+ * extra boundary unit also covers scheduler/combat-tick ordering at the exact
+ * wall-clock deadline; unused supplies remain conserved in the private bank.
+ */
+export function getDuelPreparationAttackSupplyTarget(
+  maxFightDurationMs: number,
+  attackSpeedTicks: number,
+): number {
+  if (
+    !Number.isSafeInteger(maxFightDurationMs) ||
+    maxFightDurationMs <= 0 ||
+    !Number.isSafeInteger(attackSpeedTicks) ||
+    attackSpeedTicks <= 0
+  ) {
+    return 0;
+  }
+  const attackIntervalMs = attackSpeedTicks * COMBAT_CONSTANTS.TICK_DURATION_MS;
+  if (!Number.isSafeInteger(attackIntervalMs) || attackIntervalMs <= 0) {
+    return 0;
+  }
+  const target = Math.ceil(maxFightDurationMs / attackIntervalMs) + 1;
+  return Number.isSafeInteger(target) && target > 0 ? target : 0;
+}
 
 type CurrentInventoryItem = {
   slot: number;

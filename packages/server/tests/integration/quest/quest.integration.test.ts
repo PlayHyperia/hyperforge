@@ -22,9 +22,13 @@
  * Tracking: https://github.com/PlayHyperia/hyperia/issues/702
  */
 
+import { createHash } from "node:crypto";
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { QuestSystem } from "@hyperforge/shared";
-import { EventType } from "@hyperforge/shared";
+import {
+  EventType,
+  QuestSystem,
+  generateGroundItemMobLootOperationId,
+} from "@hyperforge/shared";
 import type {
   QuestDefinition,
   QuestStatus,
@@ -120,9 +124,31 @@ const mockQuestDefinitions: Record<string, QuestDefinition> = {
     rewards: {
       questPoints: 2,
       items: [],
-      xp: { defence: 1000 },
+      xp: { defense: 1000 },
     },
   },
+};
+
+type MockKillProgressReceipt = {
+  operationId: string;
+  playerId: string;
+  questId: string;
+  questStartedAt: number;
+  capturedStage: string;
+  mobId: string;
+  mobType: string;
+  quantity: number;
+  createdAt: number;
+  resolution?: "applied" | "retired" | "ignored";
+  resultingStage?: string;
+  resultingProgress?: Record<string, number>;
+};
+
+type MockKillProgressApplication = MockKillProgressReceipt & {
+  expectedCurrentStage: string;
+  expectedProgress: Record<string, number>;
+  resultingStage: string;
+  resultingProgress: Record<string, number>;
 };
 
 // Mock database repository for testing
@@ -140,6 +166,7 @@ class MockQuestRepository {
     }
   > = new Map();
   private questPoints: Map<string, number> = new Map();
+  private killProgressReceipts: MockKillProgressReceipt[] = [];
 
   async getAllPlayerQuests(playerId: string) {
     const results: Array<{
@@ -216,6 +243,116 @@ class MockQuestRepository {
     this.questPoints.set(playerId, currentPoints + questPoints);
   }
 
+  captureMobLootKill(
+    playerId: string,
+    operationId: string,
+    mobId: string,
+    mobType: string,
+    createdAt: number,
+  ): MockKillProgressReceipt[] {
+    const captured: MockKillProgressReceipt[] = [];
+    for (const progress of this.questProgress.values()) {
+      if (
+        progress.playerId !== playerId ||
+        progress.status !== "in_progress" ||
+        !progress.currentStage ||
+        progress.startedAt === null
+      ) {
+        continue;
+      }
+      const receipt = {
+        operationId,
+        playerId,
+        questId: progress.questId,
+        questStartedAt: progress.startedAt,
+        capturedStage: progress.currentStage,
+        mobId,
+        mobType,
+        quantity: 1,
+        createdAt,
+      };
+      this.killProgressReceipts.push(receipt);
+      captured.push(receipt);
+    }
+    return captured;
+  }
+
+  async getPendingKillProgressReceipts(
+    playerId: string,
+  ): Promise<MockKillProgressReceipt[]> {
+    return this.killProgressReceipts.filter(
+      (receipt) =>
+        receipt.playerId === playerId && receipt.resolution === undefined,
+    );
+  }
+
+  async applyKillProgressReceipt(request: MockKillProgressApplication) {
+    const receipt = this.killProgressReceipts.find(
+      (candidate) =>
+        candidate.operationId === request.operationId &&
+        candidate.questId === request.questId,
+    );
+    if (!receipt) throw new Error("quest_kill_progress_receipt_missing");
+    if (receipt.resolution === "applied") {
+      return {
+        status: "replayed" as const,
+        currentStage: receipt.resultingStage!,
+        stageProgress: { ...receipt.resultingProgress! },
+      };
+    }
+    const progress = this.questProgress.get(
+      `${request.playerId}:${request.questId}`,
+    );
+    if (
+      !progress ||
+      progress.status !== "in_progress" ||
+      progress.startedAt !== request.questStartedAt
+    ) {
+      receipt.resolution = "retired";
+      return { status: "retired" as const };
+    }
+    if (
+      progress.currentStage !== request.expectedCurrentStage ||
+      JSON.stringify(progress.stageProgress) !==
+        JSON.stringify(request.expectedProgress)
+    ) {
+      return {
+        status: "stale" as const,
+        currentStage: progress.currentStage!,
+        stageProgress: { ...progress.stageProgress },
+      };
+    }
+    progress.currentStage = request.resultingStage;
+    progress.stageProgress = { ...request.resultingProgress };
+    receipt.resolution = "applied";
+    receipt.resultingStage = request.resultingStage;
+    receipt.resultingProgress = { ...request.resultingProgress };
+    return {
+      status: "applied" as const,
+      currentStage: progress.currentStage,
+      stageProgress: { ...progress.stageProgress },
+    };
+  }
+
+  async retireKillProgressReceipt(receipt: MockKillProgressReceipt) {
+    const progress = this.questProgress.get(
+      `${receipt.playerId}:${receipt.questId}`,
+    );
+    if (
+      progress?.status === "in_progress" &&
+      progress.startedAt === receipt.questStartedAt
+    ) {
+      return "still_active" as const;
+    }
+    receipt.resolution = "retired";
+    return "retired" as const;
+  }
+
+  async ignoreKillProgressReceipt(receipt: MockKillProgressReceipt) {
+    receipt.resolution = "ignored";
+    return "ignored" as const;
+  }
+
   // Test helpers
   getProgress(playerId: string, questId: string) {
     return this.questProgress.get(`${playerId}:${questId}`);
@@ -224,6 +361,7 @@ class MockQuestRepository {
   clear() {
     this.questProgress.clear();
     this.questPoints.clear();
+    this.killProgressReceipts = [];
   }
 }
 
@@ -234,7 +372,43 @@ describe("QuestSystem Integration Tests", () => {
   let emittedEvents: Array<{ event: string; data: unknown }>;
   let mockQuestRepo: MockQuestRepository;
 
+  async function recordNpcDeath(
+    killedBy: string,
+    mobType: string,
+    mobId: string,
+  ): Promise<void> {
+    const timestamp = Date.now();
+    const lootOperationId = generateGroundItemMobLootOperationId();
+    const receipts = mockQuestRepo.captureMobLootKill(
+      killedBy,
+      lootOperationId,
+      mobId,
+      mobType,
+      timestamp,
+    );
+    await (
+      questSystem as unknown as {
+        drainKillProgressReceipts: (playerId: string) => Promise<void>;
+      }
+    ).drainKillProgressReceipts(killedBy);
+    for (const receipt of receipts) {
+      const definition = mockQuestDefinitions[receipt.questId];
+      const stage = definition?.stages.find(
+        (candidate) => candidate.id === receipt.capturedStage,
+      );
+      expect(receipt.resolution).toBe(
+        stage?.type === "kill" && stage.target === mobType
+          ? "applied"
+          : "ignored",
+      );
+    }
+  }
+
   beforeEach(async () => {
+    vi.stubEnv(
+      "KILL_TOKEN_SECRET",
+      "quest-integration-kill-token-regression-secret",
+    );
     eventHandlers = new Map();
     emittedEvents = [];
     mockQuestRepo = new MockQuestRepository();
@@ -303,6 +477,111 @@ describe("QuestSystem Integration Tests", () => {
         if (name === "inventory") {
           return {
             addItem: vi.fn().mockResolvedValue(true),
+            commitQuestStartAtomic: async (
+              playerId: string,
+              questId: string,
+              input: {
+                questStartedAt: number;
+                initialStage: string;
+                items: Array<{ itemId: string; quantity: number }>;
+              },
+            ) => {
+              if (mockQuestRepo.getProgress(playerId, questId)) {
+                return {
+                  ok: false as const,
+                  committed: false as const,
+                  reason: "quest_state_conflict",
+                  retryable: false,
+                };
+              }
+              await mockQuestRepo.startQuest(
+                playerId,
+                questId,
+                input.initialStage,
+                input.questStartedAt,
+              );
+              return {
+                ok: true as const,
+                committed: true as const,
+                liveInventoryApplied: true,
+                receipt: {
+                  operationId: `quest-start:${"a".repeat(64)}`,
+                  replayed: false,
+                  playerId,
+                  questId,
+                  questStartedAt: input.questStartedAt,
+                  initialStage: input.initialStage,
+                },
+              };
+            },
+            commitQuestCompletionAtomic: async (
+              playerId: string,
+              questId: string,
+              input: {
+                questStartedAt: number;
+                expectedStage: string;
+                expectedProgress: Record<string, number>;
+                questPoints: number;
+                items: Array<{ itemId: string; quantity: number }>;
+                xp: Record<string, number>;
+              },
+            ) => {
+              const persisted = mockQuestRepo.getProgress(playerId, questId);
+              if (
+                !persisted ||
+                persisted.status !== "in_progress" ||
+                persisted.startedAt !== input.questStartedAt ||
+                persisted.currentStage !== input.expectedStage ||
+                JSON.stringify(persisted.stageProgress) !==
+                  JSON.stringify(input.expectedProgress)
+              ) {
+                return {
+                  ok: false as const,
+                  committed: false as const,
+                  reason: "quest_state_conflict",
+                  retryable: false,
+                };
+              }
+              await mockQuestRepo.completeQuestWithPoints(
+                playerId,
+                questId,
+                input.questPoints,
+              );
+              const operationId = `quest-completion:${createHash("sha256")
+                .update(
+                  JSON.stringify({
+                    version: 1,
+                    playerId,
+                    questId,
+                    questStartedAt: input.questStartedAt,
+                  }),
+                  "utf8",
+                )
+                .digest("hex")}`;
+              const progress = Object.entries(input.xp)
+                .sort(([left], [right]) => left.localeCompare(right))
+                .map(([skill, xpAmount]) => ({
+                  skill,
+                  xpAmount,
+                  awardedXp: xpAmount,
+                  operationCommittedXp: xpAmount,
+                  currentXp: xpAmount,
+                  currentLevel: xpAmount >= 1_000 ? 9 : xpAmount >= 500 ? 5 : 1,
+                }));
+              return {
+                ok: true as const,
+                committed: true as const,
+                liveInventoryApplied: true,
+                receipt: {
+                  operationId,
+                  replayed: false,
+                  currentQuestPoints:
+                    await mockQuestRepo.getQuestPoints(playerId),
+                  progress,
+                  prayer: null,
+                },
+              };
+            },
           };
         }
         return undefined;
@@ -354,6 +633,7 @@ describe("QuestSystem Integration Tests", () => {
   afterEach(() => {
     questSystem.destroy();
     mockQuestRepo.clear();
+    vi.unstubAllEnvs();
   });
 
   // =========================================================================
@@ -379,11 +659,7 @@ describe("QuestSystem Integration Tests", () => {
 
       // Simulate killing 15 goblins
       for (let i = 0; i < 15; i++) {
-        mockWorld.$eventBus!.emitEvent(EventType.NPC_DIED, {
-          killedBy: "player-1",
-          mobType: "goblin",
-          npcId: `goblin-${i}`,
-        });
+        await recordNpcDeath("player-1", "goblin", `goblin-${i}`);
       }
 
       await questSystem.completeQuest("player-1", "goblin_slayer");
@@ -397,11 +673,7 @@ describe("QuestSystem Integration Tests", () => {
 
       // Kill 15 goblins
       for (let i = 0; i < 15; i++) {
-        mockWorld.$eventBus!.emitEvent(EventType.NPC_DIED, {
-          killedBy: "player-1",
-          mobType: "goblin",
-          npcId: `goblin-${i}`,
-        });
+        await recordNpcDeath("player-1", "goblin", `goblin-${i}`);
       }
 
       const status = questSystem.getQuestStatus("player-1", "goblin_slayer");
@@ -449,20 +721,16 @@ describe("QuestSystem Integration Tests", () => {
       );
     });
 
-    it("grants starting items", async () => {
+    it("commits starting items without legacy item-add events", async () => {
       await questSystem.startQuest("player-1", "goblin_slayer");
 
       const itemEvent = emittedEvents.find(
         (e) => e.event === EventType.INVENTORY_ITEM_ADDED,
       );
-      expect(itemEvent).toBeDefined();
-      expect(itemEvent?.data).toMatchObject({
-        playerId: "player-1",
-        item: {
-          itemId: "bronze_shortsword",
-          quantity: 1,
-        },
-      });
+      expect(itemEvent).toBeUndefined();
+      expect(questSystem.getQuestStatus("player-1", "goblin_slayer")).toBe(
+        "in_progress",
+      );
     });
 
     it("rejects starting already active quest", async () => {
@@ -480,11 +748,7 @@ describe("QuestSystem Integration Tests", () => {
 
       // Complete the quest
       for (let i = 0; i < 15; i++) {
-        mockWorld.$eventBus!.emitEvent(EventType.NPC_DIED, {
-          killedBy: "player-1",
-          mobType: "goblin",
-          npcId: `goblin-${i}`,
-        });
+        await recordNpcDeath("player-1", "goblin", `goblin-${i}`);
       }
       await questSystem.completeQuest("player-1", "goblin_slayer");
 
@@ -505,11 +769,7 @@ describe("QuestSystem Integration Tests", () => {
       // Complete goblin_slayer first
       await questSystem.startQuest("player-1", "goblin_slayer");
       for (let i = 0; i < 15; i++) {
-        mockWorld.$eventBus!.emitEvent(EventType.NPC_DIED, {
-          killedBy: "player-1",
-          mobType: "goblin",
-          npcId: `goblin-${i}`,
-        });
+        await recordNpcDeath("player-1", "goblin", `goblin-${i}`);
       }
       await questSystem.completeQuest("player-1", "goblin_slayer");
 
@@ -554,12 +814,8 @@ describe("QuestSystem Integration Tests", () => {
       emittedEvents = [];
     });
 
-    it("tracks kill progress", () => {
-      mockWorld.$eventBus!.emitEvent(EventType.NPC_DIED, {
-        killedBy: "player-1",
-        mobType: "goblin",
-        npcId: "goblin-1",
-      });
+    it("tracks kill progress", async () => {
+      await recordNpcDeath("player-1", "goblin", "goblin-1");
 
       const activeQuests = questSystem.getActiveQuests("player-1");
       const quest = activeQuests.find((q) => q.questId === "goblin_slayer");
@@ -567,11 +823,7 @@ describe("QuestSystem Integration Tests", () => {
     });
 
     it("emits QUEST_PROGRESSED event on kill", async () => {
-      mockWorld.$eventBus!.emitEvent(EventType.NPC_DIED, {
-        killedBy: "player-1",
-        mobType: "goblin",
-        npcId: "goblin-1",
-      });
+      await recordNpcDeath("player-1", "goblin", "goblin-1");
 
       await vi.waitFor(() =>
         expect(
@@ -591,13 +843,9 @@ describe("QuestSystem Integration Tests", () => {
       });
     });
 
-    it("tracks multiple kills correctly", () => {
+    it("tracks multiple kills correctly", async () => {
       for (let i = 0; i < 10; i++) {
-        mockWorld.$eventBus!.emitEvent(EventType.NPC_DIED, {
-          killedBy: "player-1",
-          mobType: "goblin",
-          npcId: `goblin-${i}`,
-        });
+        await recordNpcDeath("player-1", "goblin", `goblin-${i}`);
       }
 
       const activeQuests = questSystem.getActiveQuests("player-1");
@@ -605,13 +853,9 @@ describe("QuestSystem Integration Tests", () => {
       expect(quest?.stageProgress.kills).toBe(10);
     });
 
-    it("marks quest ready_to_complete when objective met", () => {
+    it("marks quest ready_to_complete when objective met", async () => {
       for (let i = 0; i < 15; i++) {
-        mockWorld.$eventBus!.emitEvent(EventType.NPC_DIED, {
-          killedBy: "player-1",
-          mobType: "goblin",
-          npcId: `goblin-${i}`,
-        });
+        await recordNpcDeath("player-1", "goblin", `goblin-${i}`);
       }
 
       const activeQuests = questSystem.getActiveQuests("player-1");
@@ -619,13 +863,9 @@ describe("QuestSystem Integration Tests", () => {
       expect(quest?.status).toBe("ready_to_complete");
     });
 
-    it("sends chat message when objective complete", () => {
+    it("sends chat message when objective complete", async () => {
       for (let i = 0; i < 15; i++) {
-        mockWorld.$eventBus!.emitEvent(EventType.NPC_DIED, {
-          killedBy: "player-1",
-          mobType: "goblin",
-          npcId: `goblin-${i}`,
-        });
+        await recordNpcDeath("player-1", "goblin", `goblin-${i}`);
       }
 
       const chatEvents = emittedEvents.filter(
@@ -637,24 +877,16 @@ describe("QuestSystem Integration Tests", () => {
       expect(completionMessage).toBeDefined();
     });
 
-    it("ignores kills of wrong mob type", () => {
-      mockWorld.$eventBus!.emitEvent(EventType.NPC_DIED, {
-        killedBy: "player-1",
-        mobType: "orc", // Wrong mob type
-        npcId: "orc-1",
-      });
+    it("ignores kills of wrong mob type", async () => {
+      await recordNpcDeath("player-1", "orc", "orc-1");
 
       const activeQuests = questSystem.getActiveQuests("player-1");
       const quest = activeQuests.find((q) => q.questId === "goblin_slayer");
       expect(quest?.stageProgress.kills).toBeUndefined();
     });
 
-    it("ignores kills from other players", () => {
-      mockWorld.$eventBus!.emitEvent(EventType.NPC_DIED, {
-        killedBy: "player-2", // Different player
-        mobType: "goblin",
-        npcId: "goblin-1",
-      });
+    it("ignores kills from other players", async () => {
+      await recordNpcDeath("player-2", "goblin", "goblin-1");
 
       const activeQuests = questSystem.getActiveQuests("player-1");
       const quest = activeQuests.find((q) => q.questId === "goblin_slayer");
@@ -662,11 +894,7 @@ describe("QuestSystem Integration Tests", () => {
     });
 
     it("updates database on kill progress", async () => {
-      mockWorld.$eventBus!.emitEvent(EventType.NPC_DIED, {
-        killedBy: "player-1",
-        mobType: "goblin",
-        npcId: "goblin-1",
-      });
+      await recordNpcDeath("player-1", "goblin", "goblin-1");
 
       await vi.waitFor(() =>
         expect(
@@ -689,11 +917,7 @@ describe("QuestSystem Integration Tests", () => {
 
       // Complete the objective
       for (let i = 0; i < 15; i++) {
-        mockWorld.$eventBus!.emitEvent(EventType.NPC_DIED, {
-          killedBy: "player-1",
-          mobType: "goblin",
-          npcId: `goblin-${i}`,
-        });
+        await recordNpcDeath("player-1", "goblin", `goblin-${i}`);
       }
 
       emittedEvents = [];
@@ -731,19 +955,19 @@ describe("QuestSystem Integration Tests", () => {
       expect(points).toBe(1);
     });
 
-    it("grants reward items", async () => {
+    it("commits reward items without a second legacy add event", async () => {
       await questSystem.completeQuest("player-1", "goblin_slayer");
 
       const itemEvent = emittedEvents.find(
         (e) => e.event === EventType.INVENTORY_ITEM_ADDED,
       );
-      expect(itemEvent).toBeDefined();
-      expect(itemEvent?.data).toMatchObject({
+      expect(itemEvent).toBeUndefined();
+      const committedEvent = emittedEvents.find(
+        (e) => e.event === EventType.QUEST_COMPLETION_COMMITTED,
+      );
+      expect(committedEvent?.data).toMatchObject({
         playerId: "player-1",
-        item: {
-          itemId: "xp_lamp_100",
-          quantity: 1,
-        },
+        questId: "goblin_slayer",
       });
     });
 
@@ -817,9 +1041,9 @@ describe("QuestSystem Integration Tests", () => {
       });
     });
 
-    it("rejects request for already active quest", () => {
+    it("rejects request for already active quest", async () => {
       questSystem.requestQuestStart("player-1", "goblin_slayer");
-      questSystem.startQuest("player-1", "goblin_slayer");
+      await questSystem.startQuest("player-1", "goblin_slayer");
 
       emittedEvents = [];
       const result = questSystem.requestQuestStart("player-1", "goblin_slayer");
@@ -899,11 +1123,7 @@ describe("QuestSystem Integration Tests", () => {
 
       // Complete goblin_slayer to unlock advanced_quest
       for (let i = 0; i < 15; i++) {
-        mockWorld.$eventBus!.emitEvent(EventType.NPC_DIED, {
-          killedBy: "player-1",
-          mobType: "goblin",
-          npcId: `goblin-${i}`,
-        });
+        await recordNpcDeath("player-1", "goblin", `goblin-${i}`);
       }
       await questSystem.completeQuest("player-1", "goblin_slayer");
 
@@ -931,11 +1151,7 @@ describe("QuestSystem Integration Tests", () => {
       expect(gs1).toBe(true);
 
       for (let i = 0; i < 15; i++) {
-        mockWorld.$eventBus!.emitEvent(EventType.NPC_DIED, {
-          killedBy: "player-1",
-          mobType: "goblin",
-          npcId: `goblin-${i}`,
-        });
+        await recordNpcDeath("player-1", "goblin", `goblin-${i}`);
       }
       const gc1 = await questSystem.completeQuest("player-1", "goblin_slayer");
       expect(gc1).toBe(true);
@@ -947,11 +1163,7 @@ describe("QuestSystem Integration Tests", () => {
       expect(as2).toBe(true);
 
       for (let i = 0; i < 10; i++) {
-        mockWorld.$eventBus!.emitEvent(EventType.NPC_DIED, {
-          killedBy: "player-1",
-          mobType: "orc",
-          npcId: `orc-${i}`,
-        });
+        await recordNpcDeath("player-1", "orc", `orc-${i}`);
       }
       // Verify quest status is ready to complete before completing
       const status2 = questSystem.getQuestStatus("player-1", "advanced_quest");
@@ -986,11 +1198,7 @@ describe("QuestSystem Integration Tests", () => {
     it("returns true for completed quest", async () => {
       await questSystem.startQuest("player-1", "goblin_slayer");
       for (let i = 0; i < 15; i++) {
-        mockWorld.$eventBus!.emitEvent(EventType.NPC_DIED, {
-          killedBy: "player-1",
-          mobType: "goblin",
-          npcId: `goblin-${i}`,
-        });
+        await recordNpcDeath("player-1", "goblin", `goblin-${i}`);
       }
       await questSystem.completeQuest("player-1", "goblin_slayer");
 
@@ -1027,22 +1235,14 @@ describe("QuestSystem Integration Tests", () => {
 
       // Step 3: Track kills
       for (let i = 0; i < 14; i++) {
-        mockWorld.$eventBus!.emitEvent(EventType.NPC_DIED, {
-          killedBy: "player-1",
-          mobType: "goblin",
-          npcId: `goblin-${i}`,
-        });
+        await recordNpcDeath("player-1", "goblin", `goblin-${i}`);
       }
       expect(questSystem.getQuestStatus("player-1", "goblin_slayer")).toBe(
         "in_progress",
       );
 
       // Final kill
-      mockWorld.$eventBus!.emitEvent(EventType.NPC_DIED, {
-        killedBy: "player-1",
-        mobType: "goblin",
-        npcId: "goblin-14",
-      });
+      await recordNpcDeath("player-1", "goblin", "goblin-14");
       expect(questSystem.getQuestStatus("player-1", "goblin_slayer")).toBe(
         "ready_to_complete",
       );

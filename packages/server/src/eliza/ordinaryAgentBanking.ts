@@ -1,10 +1,12 @@
-import { randomUUID } from "node:crypto";
 import { eq } from "drizzle-orm";
 import { v5 as uuidv5 } from "uuid";
 import {
   INVENTORY_CONSTANTS,
   ProcessingDataProvider,
   SMITHING_CONSTANTS,
+  getAllStores,
+  getCombatNPCs,
+  getExternalResources,
   getItem,
 } from "@hyperforge/shared";
 
@@ -19,10 +21,18 @@ import type {
 import type { AgentAutonomyActionResult } from "./agentAutonomyCheckpoint.js";
 import type { AgentAutonomyProgressionAttempt } from "./agentAutonomyProgression.js";
 import type { AgentInstance } from "./managers/AgentBehaviorTicker.js";
+import { resolveOrdinaryCombatSpecialization } from "./ordinaryCombatSpecialization.js";
+import { buildOrdinaryCombatReadinessCatalog } from "./ordinaryCombatReadinessCatalog.js";
+import {
+  getOrdinaryCombatSupplyNeed,
+  selectOrdinaryCombatReadiness,
+  type OrdinaryCombatReadinessCatalog,
+} from "./ordinaryCombatReadinessSelection.js";
 import {
   findOrdinaryQuestEntrySkillTarget,
   getProcessingActivitySkill,
 } from "./ordinaryAgentQuestProgression.js";
+import { orderOrdinarySupplyAlternatives } from "./ordinarySupplyAlternativeSelection.js";
 
 const ORDINARY_BANK_OPERATION_NAMESPACE =
   "c78561cb-80fd-40bf-af7b-9832fbad71c9";
@@ -46,6 +56,23 @@ export type OrdinaryBankStagePlan =
       activity: "survival_food";
       itemId: string;
       quantity: number;
+    }
+  | {
+      activity: "survival_supply_tool";
+      itemId: string;
+      quantity: 1;
+    }
+  | {
+      activity: "combat_supply";
+      itemId: string;
+      quantity: number;
+    }
+  | {
+      activity: "combat_supply_precursors";
+      targetItemId: string;
+      /** Whole target-output actions represented by the current deficit. */
+      actionCount: number;
+      items: AgentBankTransferItem[];
     }
   | {
       activity: "cooking";
@@ -104,26 +131,51 @@ export function recordOrdinaryBankStageOutcome(
   const survivalFoodRequest =
     instance.goal?.type === "banking" &&
     instance.goal.bankPurpose === "survival_food";
+  const combatSupplyRequest =
+    instance.goal?.type === "banking" &&
+    instance.goal.bankPurpose === "combat_supply";
   const exactTrainingMiss =
     !result.applied && result.reason === "nothing_to_stage" && Boolean(questId);
+  const exactGeneralProcessingMiss =
+    !result.applied &&
+    result.reason === "nothing_to_stage" &&
+    !questId &&
+    !survivalFoodRequest &&
+    !combatSupplyRequest;
+  const exactCombatSupplyMiss =
+    !result.applied &&
+    result.reason === "nothing_to_stage" &&
+    combatSupplyRequest;
+  const processingAcquisitionAuthorized =
+    exactGeneralProcessingMiss || exactCombatSupplyMiss;
   const exactSurvivalFoodMiss =
     !result.applied &&
     result.reason === "nothing_to_stage" &&
     survivalFoodRequest;
+  const stagedSurvivalSupplyTool =
+    result.applied && result.plan?.activity === "survival_supply_tool";
+  const survivalRecoveryAuthorized =
+    exactSurvivalFoodMiss || stagedSurvivalSupplyTool;
 
-  instance.bankStageRetryAfter = result.applied
-    ? 0
-    : now +
-      (exactTrainingMiss || exactSurvivalFoodMiss
-        ? BANK_STAGE_MISS_REASSESSMENT_MS
-        : BANK_STAGE_TECHNICAL_RETRY_MS);
+  instance.bankStageRetryAfter =
+    result.applied && !stagedSurvivalSupplyTool
+      ? 0
+      : now +
+        (exactTrainingMiss ||
+        processingAcquisitionAuthorized ||
+        survivalRecoveryAuthorized
+          ? BANK_STAGE_MISS_REASSESSMENT_MS
+          : BANK_STAGE_TECHNICAL_RETRY_MS);
   instance.questEntryAcquisition = exactTrainingMiss
     ? {
         questId: questId!,
         expiresAt: now + BANK_STAGE_MISS_REASSESSMENT_MS,
       }
     : null;
-  instance.survivalFoodAcquisition = exactSurvivalFoodMiss
+  instance.ordinaryProcessingAcquisition = processingAcquisitionAuthorized
+    ? { expiresAt: now + BANK_STAGE_MISS_REASSESSMENT_MS }
+    : null;
+  instance.survivalFoodAcquisition = survivalRecoveryAuthorized
     ? { expiresAt: now + BANK_STAGE_MISS_REASSESSMENT_MS }
     : null;
 }
@@ -145,6 +197,475 @@ export function getOrdinaryBankStageOperationId(attemptId: string): string {
 function getSafeQuantity(value: unknown): number {
   const quantity = Number(value);
   return Number.isSafeInteger(quantity) && quantity > 0 ? quantity : 0;
+}
+
+export interface OrdinaryCombatSupplyRecipe {
+  activity: "smelting" | "smithing" | "fletching" | "runecrafting";
+  stableId: string;
+  outputItemId: string;
+  outputQuantity: number;
+  levelRequired: number;
+  inputAlternatives: Array<Array<{ itemId: string; quantity: number }>>;
+  tools: string[];
+}
+
+export interface OrdinaryBankRetentionPolicyOptions {
+  /** Main-process time authority used to bound private-miss acquisition. */
+  now?: number;
+  /** Injectable only so policy tests can prove an exact authored snapshot. */
+  combatReadinessCatalog?: OrdinaryCombatReadinessCatalog;
+  /** Injectable only so policy tests can prove an exact authored snapshot. */
+  combatSupplyRecipes?: OrdinaryCombatSupplyRecipe[];
+  /** Injectable only so policy tests can prove an exact authored snapshot. */
+  combatSupplyGatheringSources?: OrdinaryCombatSupplyGatheringSource[];
+  /** Injectable only so policy tests can prove an exact authored snapshot. */
+  combatSupplyPublicSourceItemIds?: string[];
+}
+
+export interface OrdinaryCombatSupplyGatheringSource {
+  resourceId: string;
+  harvestSkill: string;
+  toolRequired: string | null;
+  levelRequired: number;
+  outputItemIds: string[];
+}
+
+/**
+ * Rebuild the exact authored combat-supply recipe graph on the private main
+ * thread. Its ordering matches the public worker graph, so private precursor
+ * staging cannot redirect the agent into another recipe or product strategy.
+ */
+export function buildOrdinaryCombatSupplyRecipeCatalog(): OrdinaryCombatSupplyRecipe[] {
+  const provider = ProcessingDataProvider.getInstance();
+  return [
+    ...[...provider.getSmeltableBarIds()].map((barItemId) => {
+      const recipe = provider.getSmeltingData(barItemId)!;
+      return {
+        activity: "smelting" as const,
+        stableId: barItemId,
+        outputItemId: barItemId,
+        outputQuantity: 1,
+        levelRequired: recipe.levelRequired,
+        inputAlternatives: [
+          recipe.inputs ?? [
+            { itemId: recipe.primaryOre, quantity: 1 },
+            ...(recipe.secondaryOre
+              ? [{ itemId: recipe.secondaryOre, quantity: 1 }]
+              : []),
+            ...(recipe.coalRequired > 0
+              ? [{ itemId: "coal", quantity: recipe.coalRequired }]
+              : []),
+          ],
+        ],
+        tools: [],
+      };
+    }),
+    ...provider.getAllSmithingRecipes().map((recipe) => ({
+      activity: "smithing" as const,
+      stableId: recipe.itemId,
+      outputItemId: recipe.itemId,
+      outputQuantity: recipe.outputQuantity,
+      levelRequired: recipe.levelRequired,
+      inputAlternatives: [
+        [{ itemId: recipe.barType, quantity: recipe.barsRequired }],
+      ],
+      tools: [SMITHING_CONSTANTS.HAMMER_ITEM_ID],
+    })),
+    ...provider.getAllFletchingRecipes().map((recipe) => ({
+      activity: "fletching" as const,
+      stableId: recipe.recipeId,
+      outputItemId: recipe.output,
+      outputQuantity: recipe.outputQuantity,
+      levelRequired: recipe.level,
+      inputAlternatives: [
+        recipe.inputs.map((input) => ({
+          itemId: input.item,
+          quantity: input.amount,
+        })),
+      ],
+      tools: [...recipe.tools],
+    })),
+    ...provider.getAllRunecraftingRecipes().map((recipe) => ({
+      activity: "runecrafting" as const,
+      stableId: recipe.runeType,
+      outputItemId: recipe.runeItemId,
+      outputQuantity: 1,
+      levelRequired: recipe.levelRequired,
+      inputAlternatives: recipe.essenceTypes.map((itemId) => [
+        { itemId, quantity: 1 },
+      ]),
+      tools: [],
+    })),
+  ].sort(
+    (left, right) =>
+      left.levelRequired - right.levelRequired ||
+      left.activity.localeCompare(right.activity) ||
+      left.stableId.localeCompare(right.stableId),
+  );
+}
+
+/**
+ * Rebuild the worker's public gathering-source view on the private main
+ * thread. Only public manifest identities cross this derivation; bank custody
+ * remains private and can select only a compatible tool for an exact leaf.
+ */
+export function buildOrdinaryCombatSupplyGatheringCatalog(): OrdinaryCombatSupplyGatheringSource[] {
+  return [...getExternalResources().values()]
+    .map((resource) => ({
+      resourceId: resource.id,
+      harvestSkill: resource.harvestSkill,
+      toolRequired: resource.toolRequired,
+      levelRequired: resource.levelRequired,
+      outputItemIds: [
+        ...new Set(resource.harvestYield.map((drop) => drop.itemId)),
+      ].sort((left, right) => left.localeCompare(right)),
+    }))
+    .sort((left, right) => left.resourceId.localeCompare(right.resourceId));
+}
+
+/**
+ * Rebuild the worker's non-gathering public acquisition boundary on the
+ * private main thread. The set contains public manifest identities only: no
+ * store choice, mob choice, balance preference, or private custody crosses it.
+ */
+export function buildOrdinaryCombatSupplyPublicSourceCatalog(
+  authoredStores = getAllStores(),
+  combatNpcs = getCombatNPCs(),
+): string[] {
+  return [
+    ...new Set([
+      ...authoredStores.flatMap((store) =>
+        store.items.map((item) => item.itemId),
+      ),
+      ...combatNpcs.flatMap((npc) => [
+        ...(npc.drops.defaultDrop.enabled
+          ? [npc.drops.defaultDrop.itemId]
+          : []),
+        ...[
+          ...npc.drops.always,
+          ...npc.drops.common,
+          ...npc.drops.uncommon,
+          ...npc.drops.rare,
+          ...npc.drops.veryRare,
+        ]
+          .filter((drop) => drop.chance === 1)
+          .map((drop) => drop.itemId),
+      ]),
+    ]),
+  ].sort((left, right) => left.localeCompare(right));
+}
+
+function buildCombatSupplyPrecursorItems(
+  targetItemId: string,
+  targetQuantity: number,
+  recipes: OrdinaryCombatSupplyRecipe[],
+  inventoryCounts: ReadonlyMap<string, number>,
+  bankCounts: ReadonlyMap<string, number>,
+  freeSlots: number,
+  gatheringSources: OrdinaryCombatSupplyGatheringSource[],
+  publicSourceItemIds: string[],
+  getSkillLevel: (skill: string) => number,
+): {
+  actionCount: number;
+  items: AgentBankTransferItem[];
+  retainedItems: AgentBankRetainedItem[];
+} {
+  const remainingInventory = new Map(inventoryCounts);
+  const remainingBank = new Map(bankCounts);
+  const requested = new Map<string, number>();
+  const retainedInventory = new Map<string, number>();
+  const selectedGatheringTools = new Set<string>();
+  const publicSourceItems = new Set(publicSourceItemIds);
+  const recipesByOutput = new Map<string, OrdinaryCombatSupplyRecipe[]>();
+  for (const recipe of recipes) {
+    const candidates = recipesByOutput.get(recipe.outputItemId) ?? [];
+    candidates.push(recipe);
+    recipesByOutput.set(recipe.outputItemId, candidates);
+  }
+  const gatheringByOutput = new Map<
+    string,
+    OrdinaryCombatSupplyGatheringSource[]
+  >();
+  for (const source of gatheringSources) {
+    for (const itemId of source.outputItemIds) {
+      const candidates = gatheringByOutput.get(itemId) ?? [];
+      candidates.push(source);
+      gatheringByOutput.set(itemId, candidates);
+    }
+  }
+
+  const getEligibleGatheringSources = (
+    itemId: string,
+  ): OrdinaryCombatSupplyGatheringSource[] =>
+    (gatheringByOutput.get(itemId) ?? [])
+      .filter(
+        (source) => getSkillLevel(source.harvestSkill) >= source.levelRequired,
+      )
+      .sort(
+        (left, right) =>
+          left.levelRequired - right.levelRequired ||
+          left.resourceId.localeCompare(right.resourceId),
+      );
+
+  const consume = (
+    counts: Map<string, number>,
+    itemId: string,
+    quantity: number,
+  ) => {
+    const available = counts.get(itemId) ?? 0;
+    const consumed = Math.min(available, quantity);
+    if (consumed > 0) counts.set(itemId, available - consumed);
+    return consumed;
+  };
+  const consumeInventory = (itemId: string, quantity: number): number => {
+    const consumed = consume(remainingInventory, itemId, quantity);
+    if (consumed > 0) {
+      retainedInventory.set(
+        itemId,
+        (retainedInventory.get(itemId) ?? 0) + consumed,
+      );
+    }
+    return consumed;
+  };
+  const isCompatibleGatheringTool = (
+    source: OrdinaryCombatSupplyGatheringSource,
+    itemId: string,
+  ): boolean =>
+    source.harvestSkill === "fishing"
+      ? itemId === source.toolRequired
+      : getItem(itemId)?.tool?.skill === source.harvestSkill;
+  const collectGatheringTool = (
+    itemId: string,
+    path: ReadonlySet<string>,
+  ): void => {
+    const sources = getEligibleGatheringSources(itemId);
+    if (
+      sources.length === 0 ||
+      sources.some((source) => !source.toolRequired) ||
+      sources.some((source) =>
+        [...selectedGatheringTools].some((toolId) =>
+          isCompatibleGatheringTool(source, toolId),
+        ),
+      )
+    ) {
+      return;
+    }
+
+    const ownedToolIds = new Set([
+      ...[...remainingInventory]
+        .filter(([, quantity]) => quantity > 0)
+        .map(([ownedItemId]) => ownedItemId),
+      ...[...remainingBank]
+        .filter(([, quantity]) => quantity > 0)
+        .map(([ownedItemId]) => ownedItemId),
+    ]);
+    const candidate = sources
+      .flatMap((source) =>
+        [...ownedToolIds]
+          .filter((toolId) => isCompatibleGatheringTool(source, toolId))
+          .map((toolId) => ({
+            toolId,
+            carried: (remainingInventory.get(toolId) ?? 0) > 0,
+            priority: Number(getItem(toolId)?.tool?.priority),
+            resourceId: source.resourceId,
+          })),
+      )
+      .sort(
+        (left, right) =>
+          Number(right.carried) - Number(left.carried) ||
+          (Number.isFinite(left.priority)
+            ? left.priority
+            : Number.MAX_SAFE_INTEGER) -
+            (Number.isFinite(right.priority)
+              ? right.priority
+              : Number.MAX_SAFE_INTEGER) ||
+          left.toolId.localeCompare(right.toolId) ||
+          left.resourceId.localeCompare(right.resourceId),
+      )[0];
+    if (!candidate) return;
+    selectedGatheringTools.add(candidate.toolId);
+    collect(candidate.toolId, 1, path);
+  };
+
+  const getAvailableQuantity = (itemId: string): number =>
+    (remainingInventory.get(itemId) ?? 0) + (remainingBank.get(itemId) ?? 0);
+
+  function getResolvableRecipeInputs(
+    recipe: OrdinaryCombatSupplyRecipe,
+    path: ReadonlySet<string>,
+  ): Array<{ itemId: string; quantity: number }> | null {
+    const alternatives = orderOrdinarySupplyAlternatives(
+      recipe.inputAlternatives,
+      getAvailableQuantity,
+    );
+    for (const alternative of alternatives) {
+      if (
+        alternative.every((input) =>
+          isResolvable(input.itemId, input.quantity, path),
+        ) &&
+        recipe.tools.every((toolId) => isResolvable(toolId, 1, path))
+      ) {
+        return alternative;
+      }
+    }
+    return null;
+  }
+
+  function isResolvable(
+    itemId: string,
+    quantity: number,
+    path: ReadonlySet<string>,
+  ): boolean {
+    if (getAvailableQuantity(itemId) >= quantity) return true;
+    if (path.has(itemId)) return false;
+    const nextPath = new Set(path).add(itemId);
+    const outputRecipes = recipesByOutput.get(itemId) ?? [];
+    const legalRecipes = outputRecipes.filter((recipe) => {
+      const skill = getProcessingActivitySkill(recipe.activity);
+      return skill !== null && recipe.levelRequired <= getSkillLevel(skill);
+    });
+    if (
+      legalRecipes.some(
+        (recipe) => getResolvableRecipeInputs(recipe, nextPath) !== null,
+      )
+    ) {
+      return true;
+    }
+
+    const lockedRecipe = outputRecipes[0];
+    if (lockedRecipe) {
+      const lockedSkill = getProcessingActivitySkill(lockedRecipe.activity);
+      if (
+        lockedSkill !== null &&
+        recipes.some(
+          (recipe) =>
+            getProcessingActivitySkill(recipe.activity) === lockedSkill &&
+            recipe.outputItemId !== itemId &&
+            recipe.levelRequired <= getSkillLevel(lockedSkill) &&
+            getResolvableRecipeInputs(recipe, nextPath) !== null,
+        )
+      ) {
+        return true;
+      }
+    }
+
+    return (
+      getEligibleGatheringSources(itemId).length > 0 ||
+      publicSourceItems.has(itemId)
+    );
+  }
+
+  const collect = (
+    itemId: string,
+    quantity: number,
+    path: ReadonlySet<string>,
+  ): void => {
+    let missing = Math.max(0, quantity);
+    missing -= consumeInventory(itemId, missing);
+    if (missing <= 0) return;
+
+    const banked = consume(remainingBank, itemId, missing);
+    if (banked > 0) {
+      requested.set(itemId, (requested.get(itemId) ?? 0) + banked);
+      missing -= banked;
+    }
+    if (missing <= 0 || path.has(itemId)) return;
+
+    const outputRecipes = recipesByOutput.get(itemId) ?? [];
+    const legalRecipe = outputRecipes.find((candidate) => {
+      const skill = getProcessingActivitySkill(candidate.activity);
+      return skill !== null && candidate.levelRequired <= getSkillLevel(skill);
+    });
+    // The worker attempts level-legal output recipes before using the first
+    // authored output recipe as the exact skill-lock identity.
+    const recipe = legalRecipe ?? outputRecipes[0];
+    if (!recipe || recipe.outputQuantity <= 0) {
+      collectGatheringTool(itemId, path);
+      return;
+    }
+    const recipeSkill = getProcessingActivitySkill(recipe.activity);
+    if (
+      !legalRecipe &&
+      recipeSkill !== null &&
+      recipe.levelRequired > getSkillLevel(recipeSkill)
+    ) {
+      const nextPath = new Set(path).add(itemId);
+      const trainingRecipe = recipes.find(
+        (candidate) =>
+          getProcessingActivitySkill(candidate.activity) === recipeSkill &&
+          candidate.outputItemId !== itemId &&
+          candidate.levelRequired <= getSkillLevel(recipeSkill) &&
+          getResolvableRecipeInputs(candidate, nextPath) !== null,
+      );
+      if (trainingRecipe) {
+        // A banked training output cannot award the XP needed to unlock the
+        // target. Stage exactly one action of its source-complete inputs/tools.
+        const inputs = getResolvableRecipeInputs(trainingRecipe, nextPath);
+        for (const input of inputs ?? []) {
+          collect(input.itemId, input.quantity, nextPath);
+        }
+        for (const toolId of trainingRecipe.tools) {
+          collect(toolId, 1, nextPath);
+        }
+      } else {
+        collectGatheringTool(itemId, path);
+      }
+      return;
+    }
+    const actionCount = Math.ceil(missing / recipe.outputQuantity);
+    const nextPath = new Set(path).add(itemId);
+    const alternatives = recipe.inputAlternatives.map((alternative) =>
+      alternative.map((input) => ({
+        itemId: input.itemId,
+        quantity: input.quantity * actionCount,
+      })),
+    );
+    const inputs =
+      orderOrdinarySupplyAlternatives(
+        alternatives,
+        (candidateItemId) =>
+          (remainingInventory.get(candidateItemId) ?? 0) +
+          (remainingBank.get(candidateItemId) ?? 0),
+      )[0] ?? [];
+    for (const input of inputs) {
+      collect(input.itemId, input.quantity, nextPath);
+    }
+    for (const toolId of recipe.tools) collect(toolId, 1, nextPath);
+  };
+
+  const rootRecipe = recipesByOutput.get(targetItemId)?.[0];
+  const targetDeficit = Math.max(
+    0,
+    targetQuantity - (inventoryCounts.get(targetItemId) ?? 0),
+  );
+  const actionCount = rootRecipe
+    ? Math.ceil(targetDeficit / rootRecipe.outputQuantity)
+    : 0;
+  collect(targetItemId, targetQuantity, new Set());
+
+  let remainingSlots = freeSlots;
+  const items: AgentBankTransferItem[] = [];
+  for (const [itemId, desiredQuantity] of [...requested].sort(
+    ([left], [right]) => left.localeCompare(right),
+  )) {
+    const definition = getItem(itemId);
+    if (!definition || desiredQuantity <= 0) continue;
+    if (definition.stackable) {
+      const needsSlot = (inventoryCounts.get(itemId) ?? 0) === 0;
+      if (needsSlot && remainingSlots <= 0) continue;
+      if (needsSlot) remainingSlots -= 1;
+      items.push({ itemId, quantity: desiredQuantity });
+      continue;
+    }
+    const quantity = Math.min(desiredQuantity, remainingSlots);
+    if (quantity <= 0) continue;
+    items.push({ itemId, quantity });
+    remainingSlots -= quantity;
+  }
+  const retainedItems = [...retainedInventory]
+    .map(([itemId, quantity]) => ({ itemId, quantity }))
+    .sort((left, right) => left.itemId.localeCompare(right.itemId));
+  return { actionCount, items, retainedItems };
 }
 
 function getCookingRecipe(itemId: string): {
@@ -177,8 +698,12 @@ function getCookingRecipe(itemId: string): {
  * multi-item plans use one atomic composite withdrawal.
  */
 export function buildOrdinaryBankStagePlan(
-  instance: Pick<AgentInstance, "service" | "goal">,
+  instance: Pick<AgentInstance, "service" | "goal" | "config">,
   bankItems: AgentBankItemView[],
+  combatReadinessCatalog = buildOrdinaryCombatReadinessCatalog(),
+  combatSupplyRecipes = buildOrdinaryCombatSupplyRecipeCatalog(),
+  combatSupplyGatheringSources = buildOrdinaryCombatSupplyGatheringCatalog(),
+  combatSupplyPublicSourceItemIds = buildOrdinaryCombatSupplyPublicSourceCatalog(),
 ): OrdinaryBankStagePlan | null {
   const gameState = instance.service.getGameState();
   if (!gameState || gameState.inCombat) return null;
@@ -285,6 +810,76 @@ export function buildOrdinaryBankStagePlan(
   const freeSlots =
     INVENTORY_CONSTANTS.MAX_INVENTORY_SLOTS - occupiedSlots.size;
 
+  // A combat-supply request carries only a purpose bit. Rebuild the exact
+  // public readiness catalog and specialization on the private main thread,
+  // then move only the currently missing selected item or an exact authored
+  // precursor in its deterministic supply graph. A compromised worker cannot
+  // name or enumerate arbitrary bank custody through this boundary.
+  if (
+    instance.goal?.type === "banking" &&
+    instance.goal.bankPurpose === "combat_supply"
+  ) {
+    const readiness = selectOrdinaryCombatReadiness(
+      combatReadinessCatalog,
+      resolveOrdinaryCombatSpecialization(instance.config),
+      (skill) => readSkillLevel(skill),
+    );
+    if (!readiness) return null;
+    const equippedQuantity = (itemId: string): number =>
+      Object.values(gameState.equipment)
+        .filter((entry) => entry.itemId === itemId)
+        .reduce((total, entry) => {
+          const quantity = getSafeQuantity(entry.quantity ?? 1);
+          return total + (quantity > 0 ? quantity : 1);
+        }, 0);
+    const need = getOrdinaryCombatSupplyNeed(
+      combatReadinessCatalog,
+      readiness,
+      (itemId) => (inventoryCounts.get(itemId) ?? 0) + equippedQuantity(itemId),
+    );
+    if (!need) return null;
+    const definition = getItem(need.itemId);
+    const privateQuantity = bankCounts.get(need.itemId) ?? 0;
+    const carriedQuantity = inventoryCounts.get(need.itemId) ?? 0;
+    const deficit = Math.max(
+      0,
+      need.targetQuantity - carriedQuantity - equippedQuantity(need.itemId),
+    );
+    if (definition && privateQuantity > 0 && deficit > 0) {
+      const capacity = definition.stackable
+        ? carriedQuantity > 0
+          ? privateQuantity
+          : freeSlots > 0
+            ? privateQuantity
+            : 0
+        : freeSlots;
+      const quantity = Math.min(deficit, privateQuantity, capacity);
+      if (quantity > 0) {
+        return { activity: "combat_supply", itemId: need.itemId, quantity };
+      }
+    }
+
+    const precursorPlan = buildCombatSupplyPrecursorItems(
+      need.itemId,
+      Math.max(0, need.targetQuantity - equippedQuantity(need.itemId)),
+      combatSupplyRecipes,
+      inventoryCounts,
+      bankCounts,
+      freeSlots,
+      combatSupplyGatheringSources,
+      combatSupplyPublicSourceItemIds,
+      readSkillLevel,
+    );
+    return precursorPlan.items.length > 0 && precursorPlan.actionCount > 0
+      ? {
+          activity: "combat_supply_precursors",
+          targetItemId: need.itemId,
+          actionCount: precursorPlan.actionCount,
+          items: precursorPlan.items,
+        }
+      : null;
+  }
+
   // A survival-food request is intentionally narrower than general material
   // staging. The worker supplies only this purpose bit; exact private bank
   // contents and quantities remain on the main thread. Prefer the strongest
@@ -322,7 +917,83 @@ export function buildOrdinaryBankStagePlan(
           right.healAmount - left.healAmount ||
           left.itemId.localeCompare(right.itemId),
       )[0];
-    if (!candidate) return null;
+    if (!candidate) {
+      if (freeSlots <= 0) return null;
+
+      // An empty cooked-food reserve must not strand an agent whose authored
+      // non-combat supply tool is already in private custody. Select only a
+      // banked tool that can gather a level-eligible, cookable resource. The
+      // worker still learns nothing about unselected bank contents; after the
+      // withdrawal it observes the tool through normal carried state and
+      // performs the gathering/cooking loop itself.
+      const supplyTool = [...getExternalResources().values()]
+        .flatMap((resource) => {
+          const harvestSkill = String(resource.harvestSkill ?? "");
+          const toolRequired = resource.toolRequired;
+          if (
+            !harvestSkill ||
+            !toolRequired ||
+            resource.levelRequired > readSkillLevel(harvestSkill)
+          ) {
+            return [];
+          }
+          const cookableYields = resource.harvestYield
+            .map((drop) => {
+              const cooking = getCookingRecipe(drop.itemId);
+              const cookedHealAmount = Number(
+                cooking ? (getItem(cooking.cookedItemId)?.healAmount ?? 0) : 0,
+              );
+              return cooking &&
+                cooking.levelRequired <= cookingLevel &&
+                Number.isFinite(cookedHealAmount) &&
+                cookedHealAmount > 0
+                ? {
+                    rawItemId: drop.itemId,
+                    cookingLevelRequired: cooking.levelRequired,
+                    cookedHealAmount,
+                  }
+                : null;
+            })
+            .filter(
+              (entry): entry is NonNullable<typeof entry> => entry !== null,
+            );
+          if (cookableYields.length === 0) return [];
+
+          return [...bankCounts]
+            .filter(([itemId, quantity]) => {
+              if (quantity <= 0 || (inventoryCounts.get(itemId) ?? 0) > 0) {
+                return false;
+              }
+              return harvestSkill === "fishing"
+                ? itemId === toolRequired
+                : getItem(itemId)?.tool?.skill === harvestSkill;
+            })
+            .flatMap(([itemId]) =>
+              cookableYields.map((yieldData) => ({
+                itemId,
+                resourceId: resource.id,
+                resourceLevelRequired: resource.levelRequired,
+                ...yieldData,
+              })),
+            );
+        })
+        .sort(
+          (left, right) =>
+            left.resourceLevelRequired - right.resourceLevelRequired ||
+            left.cookingLevelRequired - right.cookingLevelRequired ||
+            right.cookedHealAmount - left.cookedHealAmount ||
+            left.rawItemId.localeCompare(right.rawItemId) ||
+            left.resourceId.localeCompare(right.resourceId) ||
+            left.itemId.localeCompare(right.itemId),
+        )[0];
+      return supplyTool
+        ? {
+            activity: "survival_supply_tool",
+            itemId: supplyTool.itemId,
+            quantity: 1,
+          }
+        : null;
+    }
 
     const carriedHealing = [...inventoryCounts].reduce(
       (total, [itemId, quantity]) => {
@@ -957,11 +1628,16 @@ function addRetention(
  * Build the private ordinary-carry policy entirely from authoritative item,
  * quest, health, equipment, and inventory state. It deliberately contains no
  * market/economic tuning: keep operational tools, exact active quest inputs,
- * one full-health-bar of the best carried food, and combat consumables only
- * when the currently equipped weapon can use them.
+ * one full-health-bar of the best carried food, combat consumables usable by
+ * the current style, and only the carried quantities consumed by an active
+ * exact combat-supply recipe lineage.
  */
 export function buildOrdinaryBankRetentionManifest(
-  instance: Pick<AgentInstance, "service">,
+  instance: Pick<AgentInstance, "service"> &
+    Partial<
+      Pick<AgentInstance, "config" | "goal" | "ordinaryProcessingAcquisition">
+    >,
+  options: OrdinaryBankRetentionPolicyOptions = {},
 ): AgentBankRetainedItem[] {
   const gameState = instance.service.getGameState();
   if (!gameState) return [];
@@ -1005,18 +1681,63 @@ export function buildOrdinaryBankRetentionManifest(
   }
 
   // Active quest counts are authored requirements, not inferred balance knobs.
+  // Preserve every item-bearing artifact in the active definition, not only
+  // the current stage target. Multi-stage production quests legitimately carry
+  // an earlier gather output into a later processing stage (for example ore
+  // gathered before the next ore type, then consumed together at a furnace).
+  // Treating that earlier output as generic surplus can make capacity recovery
+  // destroy the only immediately executable quest path. Definitions remain
+  // private/main-process authority; the worker still supplies no item IDs.
   const questRequirements = new Map<string, number>();
-  for (const quest of instance.service.getQuestState()) {
+  const activeQuests = instance.service
+    .getQuestState()
+    .filter((quest) => quest.status === "in_progress");
+  const activeQuestIds = new Set(activeQuests.map((quest) => quest.questId));
+  const availableQuests = (
+    instance.service as typeof instance.service & {
+      getAvailableQuests?: () => Array<{
+        questId: string;
+        requirements?: { items?: string[] };
+        onStartItems?: Array<{ itemId: string; quantity: number }>;
+        stages?: Array<{ target?: string; count?: number }>;
+      }>;
+    }
+  ).getAvailableQuests?.();
+  const addQuestRequirement = (itemId: unknown, rawQuantity: unknown): void => {
+    if (typeof itemId !== "string" || !getItem(itemId)) return;
+    const quantity = getSafeQuantity(rawQuantity);
+    if (quantity <= 0) return;
+    questRequirements.set(
+      itemId,
+      (questRequirements.get(itemId) ?? 0) + quantity,
+    );
+  };
+
+  for (const definition of availableQuests ?? []) {
+    if (!activeQuestIds.has(definition.questId)) continue;
+    for (const itemId of definition.requirements?.items ?? []) {
+      addQuestRequirement(itemId, 1);
+    }
+    for (const item of definition.onStartItems ?? []) {
+      addQuestRequirement(item.itemId, item.quantity);
+    }
+    for (const stage of definition.stages ?? []) {
+      addQuestRequirement(stage.target, stage.count ?? 1);
+    }
+  }
+
+  // Retain the exact live stage as a fail-closed fallback if its definition is
+  // temporarily unavailable during hydration. A missing definition can reduce
+  // useful capacity but must never discard currently named quest custody.
+  for (const quest of activeQuests) {
     if (quest.status !== "in_progress" || !quest.stageTarget) continue;
-    if (!getItem(quest.stageTarget)) continue;
     const quantity =
       Number.isSafeInteger(quest.stageCount) && (quest.stageCount ?? 0) > 0
         ? quest.stageCount!
         : 1;
-    questRequirements.set(
-      quest.stageTarget,
-      (questRequirements.get(quest.stageTarget) ?? 0) + quantity,
-    );
+    if (!questRequirements.has(quest.stageTarget)) {
+      addQuestRequirement(quest.stageTarget, quantity);
+    }
   }
   for (const [itemId, quantity] of questRequirements) {
     addRetention(retained, owned, itemId, quantity);
@@ -1061,10 +1782,64 @@ export function buildOrdinaryBankRetentionManifest(
     retainedHealing += additional * entry.healAmount;
   }
 
+  const specialization = instance.config
+    ? resolveOrdinaryCombatSpecialization(instance.config)
+    : null;
+  if (specialization && specialization !== "melee") {
+    const styleScore = (itemId: string, style: "melee" | "ranged" | "mage") => {
+      const bonuses = getItem(itemId)?.bonuses;
+      if (style === "ranged") return Number(bonuses?.attackRanged ?? 0);
+      if (style === "mage") return Number(bonuses?.attackMagic ?? 0);
+      return Number(bonuses?.attack ?? 0) + Number(bonuses?.strength ?? 0);
+    };
+    const meetsRequirements = (itemId: string): boolean => {
+      const requirements = getItem(itemId)?.requirements?.skills;
+      if (!requirements) return true;
+      return Object.entries(requirements).every(([skill, required]) => {
+        const normalizedSkill = skill === "defence" ? "defense" : skill;
+        const requiredLevel = Number(required);
+        return (
+          Number.isSafeInteger(requiredLevel) &&
+          requiredLevel > 0 &&
+          Number(gameState.skills?.[normalizedSkill]?.level ?? 1) >=
+            requiredLevel
+        );
+      });
+    };
+    for (const style of [specialization, "melee"] as const) {
+      const weapon = [...owned]
+        .filter(([itemId]) => {
+          const item = getItem(itemId);
+          const attackStyle = String(item?.attackType ?? "")
+            .trim()
+            .toLowerCase();
+          return (
+            item?.type === "weapon" &&
+            (item.equipSlot === "weapon" || item.equipSlot === "2h") &&
+            (attackStyle === style ||
+              (style === "mage" && attackStyle === "magic")) &&
+            meetsRequirements(itemId)
+          );
+        })
+        .map(([itemId]) => ({ itemId, score: styleScore(itemId, style) }))
+        .sort(
+          (left, right) =>
+            right.score - left.score || left.itemId.localeCompare(right.itemId),
+        )[0];
+      if (weapon) addRetention(retained, owned, weapon.itemId, 1);
+    }
+  }
+
   const weaponId = gameState.equipment.weapon?.itemId ?? null;
-  const attackType = String(getItem(weaponId ?? "")?.attackType ?? "")
+  const equippedAttackType = String(getItem(weaponId ?? "")?.attackType ?? "")
     .trim()
     .toLowerCase();
+  const attackType =
+    specialization === "mage" || specialization === "ranged"
+      ? specialization === "mage"
+        ? "magic"
+        : "ranged"
+      : equippedAttackType;
   if (attackType === "magic") {
     for (const [itemId, quantity] of owned) {
       if (itemId.endsWith("_rune")) {
@@ -1075,6 +1850,66 @@ export function buildOrdinaryBankRetentionManifest(
     for (const [itemId, quantity] of owned) {
       if (getItem(itemId)?.type === "ammunition") {
         addRetention(retained, owned, itemId, quantity);
+      }
+    }
+  }
+
+  const now = options.now ?? Date.now();
+  const hasActiveCombatSupplyCustody =
+    (instance.goal?.type === "banking" &&
+      instance.goal.bankPurpose === "combat_supply") ||
+    (Boolean(instance.ordinaryProcessingAcquisition) &&
+      instance.ordinaryProcessingAcquisition!.expiresAt > now);
+  if (hasActiveCombatSupplyCustody && instance.config) {
+    const catalog =
+      options.combatReadinessCatalog ?? buildOrdinaryCombatReadinessCatalog();
+    const recipes =
+      options.combatSupplyRecipes ?? buildOrdinaryCombatSupplyRecipeCatalog();
+    const gatheringSources =
+      options.combatSupplyGatheringSources ??
+      buildOrdinaryCombatSupplyGatheringCatalog();
+    const publicSourceItemIds =
+      options.combatSupplyPublicSourceItemIds ??
+      buildOrdinaryCombatSupplyPublicSourceCatalog();
+    const readSkillLevel = (skill: string) => {
+      const level = Number(gameState.skills?.[skill]?.level ?? 1);
+      return Number.isSafeInteger(level) && level >= 1 && level <= 99
+        ? level
+        : 0;
+    };
+    const readiness = selectOrdinaryCombatReadiness(
+      catalog,
+      resolveOrdinaryCombatSpecialization(instance.config),
+      readSkillLevel,
+    );
+    const equippedQuantity = (itemId: string): number =>
+      Object.values(gameState.equipment)
+        .filter((entry) => entry.itemId === itemId)
+        .reduce((total, entry) => {
+          const quantity = getSafeQuantity(entry.quantity ?? 1);
+          return total + (quantity > 0 ? quantity : 1);
+        }, 0);
+    const need = readiness
+      ? getOrdinaryCombatSupplyNeed(
+          catalog,
+          readiness,
+          (itemId) => (owned.get(itemId) ?? 0) + equippedQuantity(itemId),
+        )
+      : null;
+    if (need) {
+      const precursorPlan = buildCombatSupplyPrecursorItems(
+        need.itemId,
+        Math.max(0, need.targetQuantity - equippedQuantity(need.itemId)),
+        recipes,
+        owned,
+        new Map(),
+        0,
+        gatheringSources,
+        publicSourceItemIds,
+        readSkillLevel,
+      );
+      for (const item of precursorPlan.retainedItems) {
+        addRetention(retained, owned, item.itemId, item.quantity);
       }
     }
   }
@@ -1096,11 +1931,9 @@ const wait = (durationMs: number): Promise<void> =>
 export async function executeOrdinaryBankDepositSurplus(
   instance: AgentInstance,
   bankId: string,
-  attempt?: AgentAutonomyProgressionAttempt | null,
+  attempt: AgentAutonomyProgressionAttempt,
 ): Promise<OrdinaryBankExecutionResult> {
-  const operationId = attempt
-    ? getOrdinaryBankOperationId(attempt.attemptId)
-    : randomUUID();
+  const operationId = getOrdinaryBankOperationId(attempt.attemptId);
   const retainedItems = buildOrdinaryBankRetentionManifest(instance);
   let reconciliationAttempts = 0;
   let delayMs = INITIAL_RECONCILIATION_DELAY_MS;
@@ -1164,11 +1997,9 @@ export async function executeOrdinaryBankDepositSurplus(
 export async function executeOrdinaryBankStageMaterials(
   instance: AgentInstance,
   bankId: string,
-  attempt?: AgentAutonomyProgressionAttempt | null,
+  attempt: AgentAutonomyProgressionAttempt,
 ): Promise<OrdinaryBankStageExecutionResult> {
-  const operationId = attempt
-    ? getOrdinaryBankStageOperationId(attempt.attemptId)
-    : randomUUID();
+  const operationId = getOrdinaryBankStageOperationId(attempt.attemptId);
   let reconciliationAttempts = 0;
   let lastReceipt: AgentBankActionReceipt | null = null;
 

@@ -15,6 +15,7 @@ import type { World } from "@hyperforge/shared";
 import { EventType } from "@hyperforge/shared";
 import { logger } from "../lib/logger";
 import { getStreamingAccessToken } from "../lib/streamingAccessToken";
+import { getApiAuthorizationHeaders } from "../lib/api-client";
 
 /** API base URL derived from WebSocket URL */
 function getApiBaseUrl(wsUrl: string): string {
@@ -37,6 +38,7 @@ async function fetchCharacterIdForAgent(
     // Primary route: agent mapping endpoint (current API)
     const mappingResponse = await fetch(
       `${apiBaseUrl}/api/agents/mapping/${encodeURIComponent(agentId)}`,
+      { headers: getApiAuthorizationHeaders() },
     );
 
     if (mappingResponse.ok) {
@@ -85,8 +87,7 @@ type PrefsSystem = {
 
 function isTargetAvatarReady(world: World, targetEntityId: string): boolean {
   const playerDirect = world.entities?.players?.get(targetEntityId) as
-    | { avatar?: unknown }
-    | undefined;
+    { avatar?: unknown } | undefined;
   if (playerDirect?.avatar) {
     return true;
   }
@@ -372,8 +373,7 @@ function setupSpectatorCamera(
 
     // Also check characterId in entity data
     const entityCharacterId = data.entityData?.characterId as
-      | string
-      | undefined;
+      string | undefined;
     const isTargetByCharacterId = entityCharacterId === targetEntityId;
 
     if (isTargetById || isTargetByCharacterId) {

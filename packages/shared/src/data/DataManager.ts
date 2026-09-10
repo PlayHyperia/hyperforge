@@ -55,6 +55,11 @@ import {
 } from "./StationDataProvider";
 import { prayerDataProvider, type PrayersManifest } from "./PrayerDataProvider";
 import { DEFAULT_AVATAR_URL, getDuelAvatarUrlForStyle } from "./avatars";
+import {
+  isExternalValueEnabled,
+  validateExternalValueWorldAreaSafety,
+  validatePreparationDeathCustodyAreas,
+} from "../systems/shared/death/PreparationDeathCustodyPolicy";
 
 // Define constants from JSON data
 const STARTING_ITEMS: Array<{ id: string }> = []; // Stub - data removed
@@ -1019,6 +1024,101 @@ export class DataManager {
       );
     }
 
+    const equippedModelPathsByAvatar = item.equippedModelPathsByAvatar
+      ? Object.fromEntries(
+          Object.entries(item.equippedModelPathsByAvatar).map(
+            ([avatarId, modelPath]) => {
+              if (
+                !/^[a-z0-9][a-z0-9-]*$/u.test(avatarId) ||
+                typeof modelPath !== "string" ||
+                !modelPath.startsWith("asset://") ||
+                modelPath.includes("\\") ||
+                modelPath.split("/").includes("..")
+              ) {
+                throw new Error(
+                  `[DataManager] Item "${item.id}" has an invalid avatar-specific equipped model entry for "${avatarId}"`,
+                );
+              }
+              return [avatarId, modelPath];
+            },
+          ),
+        )
+      : undefined;
+
+    const gatheringModelPathsByAvatar = item.gatheringModelPathsByAvatar
+      ? Object.fromEntries(
+          Object.entries(item.gatheringModelPathsByAvatar).map(
+            ([avatarId, modelPath]) => {
+              if (
+                !/^[a-z0-9][a-z0-9-]*$/u.test(avatarId) ||
+                typeof modelPath !== "string" ||
+                !modelPath.startsWith("asset://") ||
+                modelPath.includes("\\") ||
+                modelPath.split("/").includes("..")
+              ) {
+                throw new Error(
+                  `[DataManager] Item "${item.id}" has an invalid avatar-specific gathering model entry for "${avatarId}"`,
+                );
+              }
+              return [avatarId, modelPath];
+            },
+          ),
+        )
+      : undefined;
+
+    const normalizeContentHash = (
+      value: string | undefined,
+      label: string,
+    ): string | undefined => {
+      if (value === undefined) return undefined;
+      if (!/^[a-f0-9]{64}$/u.test(value)) {
+        throw new Error(
+          `[DataManager] Item "${item.id}" has an invalid ${label} SHA-256`,
+        );
+      }
+      return value;
+    };
+    const normalizeAvatarContentHashes = (
+      hashes: Record<string, string> | undefined,
+      paths: Record<string, string> | undefined,
+      label: string,
+    ): Record<string, string> | undefined =>
+      hashes
+        ? Object.fromEntries(
+            Object.entries(hashes).map(([avatarId, hash]) => {
+              if (!paths?.[avatarId]) {
+                throw new Error(
+                  `[DataManager] Item "${item.id}" has a ${label} SHA-256 without a matching model for "${avatarId}"`,
+                );
+              }
+              const normalizedHash = normalizeContentHash(
+                hash,
+                `${label} "${avatarId}"`,
+              );
+              if (!normalizedHash) {
+                throw new Error(
+                  `[DataManager] Item "${item.id}" is missing a ${label} SHA-256 for "${avatarId}"`,
+                );
+              }
+              return [avatarId, normalizedHash];
+            }),
+          )
+        : undefined;
+    const equippedModelSha256 = normalizeContentHash(
+      item.equippedModelSha256,
+      "equipped model",
+    );
+    const equippedModelSha256ByAvatar = normalizeAvatarContentHashes(
+      item.equippedModelSha256ByAvatar,
+      equippedModelPathsByAvatar,
+      "avatar-specific equipped model",
+    );
+    const gatheringModelSha256ByAvatar = normalizeAvatarContentHashes(
+      item.gatheringModelSha256ByAvatar,
+      gatheringModelPathsByAvatar,
+      "avatar-specific gathering model",
+    );
+
     // Derive requirements from tier if not explicitly set
     // This implements the tier-based requirements system
     let requirements = item.requirements;
@@ -1099,6 +1199,11 @@ export class DataManager {
           ? COMBAT_CONSTANTS.DEFAULTS.ITEM.ATTACK_RANGE
           : undefined),
       equippedModelPath: item.equippedModelPath,
+      equippedModelSha256,
+      equippedModelPathsByAvatar,
+      equippedModelSha256ByAvatar,
+      gatheringModelPathsByAvatar,
+      gatheringModelSha256ByAvatar,
       bonuses: item.bonuses,
       requirements: requirements,
     };
@@ -1900,6 +2005,24 @@ export class DataManager {
         errors.push("No world areas found in ALL_WORLD_AREAS");
       }
     }
+
+    const externalValueEnabled = isExternalValueEnabled();
+    const requireApprovedDeathCustody =
+      typeof process !== "undefined" &&
+      typeof process.env !== "undefined" &&
+      (externalValueEnabled ||
+        process.env.HYPERIA_REQUIRE_APPROVED_PREPARATION_DEATH_CUSTODY ===
+          "true");
+    errors.push(
+      ...validatePreparationDeathCustodyAreas(ALL_WORLD_AREAS, {
+        requireApproval: requireApprovedDeathCustody,
+      }),
+    );
+    errors.push(
+      ...validateExternalValueWorldAreaSafety(ALL_WORLD_AREAS, {
+        externalValueEnabled,
+      }),
+    );
 
     // Validate treasure locations
     const treasureCount = Object.keys(TREASURE_LOCATIONS).length;

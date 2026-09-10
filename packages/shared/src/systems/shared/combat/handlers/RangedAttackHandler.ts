@@ -35,6 +35,7 @@ import { getGameRng } from "../../../../utils/SeededRandom";
 import type { Entity } from "../../../../entities/Entity";
 import type { MobEntity } from "../../../../entities/npc/MobEntity";
 import { getNPCById } from "../../../../data/npcs";
+import { isPositionInsideDuelArenaZone } from "../../../../data/duel-manifest";
 import { uuid } from "../../../../utils/IdGenerator";
 
 export class RangedAttackHandler {
@@ -150,7 +151,9 @@ export class RangedAttackHandler {
       xpReward: 0, // Mobs don't earn XP
     };
 
-    this.ctx.projectileService.createProjectile(projectileParams);
+    const projectile =
+      this.ctx.projectileService.createProjectile(projectileParams);
+    if (!projectile) return;
 
     this.emitRangedProjectile(
       attackerId,
@@ -159,6 +162,7 @@ export class RangedAttackHandler {
       attackerPos,
       targetPos,
       distance,
+      projectile.id,
     );
 
     // Enter combat
@@ -183,6 +187,7 @@ export class RangedAttackHandler {
     attackerPos: { x: number; y: number; z: number },
     targetPos: { x: number; y: number; z: number },
     distance: number,
+    projectileId: string,
   ): void {
     const { HIT_DELAY, TICK_DURATION_MS } = COMBAT_CONSTANTS;
     const rangedHitDelayTicks = Math.min(
@@ -200,6 +205,7 @@ export class RangedAttackHandler {
     );
 
     this.ctx.emitTypedEvent(EventType.COMBAT_PROJECTILE_LAUNCHED, {
+      projectileId,
       attackerId,
       targetId,
       projectileType: "arrow",
@@ -364,24 +370,35 @@ export class RangedAttackHandler {
     const attackerPos = getEntityPosition(attacker)!;
     const targetPos = getEntityPosition(target)!;
 
-    if (
-      !this.ctx.projectileService.canCreateProjectile(
-        attackerId,
-        { x: attackerPos.x, z: attackerPos.z },
-        { x: targetPos.x, z: targetPos.z },
-      )
-    ) {
+    // Check cooldown
+    const typedAttackerId = createEntityID(attackerId);
+    if (!this.ctx.checkAttackCooldown(typedAttackerId, currentTick)) {
+      return;
+    }
+    const projectileSourcePosition = {
+      x: attackerPos.x,
+      z: attackerPos.z,
+    };
+    const projectileTargetPosition = {
+      x: targetPos.x,
+      z: targetPos.z,
+    };
+    const projectileRecoveryPosition = {
+      x: targetPos.x,
+      y: targetPos.y,
+      z: targetPos.z,
+    };
+    const projectileReservation = this.ctx.projectileService.reserveProjectile(
+      attackerId,
+      projectileSourcePosition,
+      projectileTargetPosition,
+    );
+    if (!projectileReservation) {
       this.ctx.emitTypedEvent(EventType.COMBAT_ATTACK_FAILED, {
         attackerId,
         targetId,
         reason: "projectile_capacity",
       });
-      return;
-    }
-
-    // Check cooldown
-    const typedAttackerId = createEntityID(attackerId);
-    if (!this.ctx.checkAttackCooldown(typedAttackerId, currentTick)) {
       return;
     }
 
@@ -408,15 +425,25 @@ export class RangedAttackHandler {
     );
 
     const arrowId = arrowSlot?.itemId?.toString();
+    const recoverySelected =
+      !isPositionInsideDuelArenaZone(
+        projectileTargetPosition.x,
+        projectileTargetPosition.z,
+      ) && getGameRng().random() >= 0.2;
     const arrowDebit =
       arrowId && this.ctx.equipmentSystem
-        ? await this.ctx.equipmentSystem.consumeArrowAtomic(
+        ? await this.ctx.equipmentSystem.consumeArrowForProjectileAtomic(
             attackerId,
-            `arrow-debit:${uuid()}${uuid()}`,
+            `ammunition-shot:${uuid()}${uuid()}`,
             arrowId,
+            recoverySelected ? "recovered" : "destroyed",
+            recoverySelected ? projectileRecoveryPosition : null,
           )
         : null;
     if (!arrowDebit?.ok) {
+      this.ctx.projectileService.releaseProjectileReservation(
+        projectileReservation,
+      );
       if (
         this.ctx.nextAttackTicks.get(typedAttackerId) === claimedNextAttackTick
       ) {
@@ -444,20 +471,48 @@ export class RangedAttackHandler {
       attackType: AttackType.RANGED,
       damage,
       currentTick,
-      sourcePosition: { x: attackerPos.x, z: attackerPos.z },
-      targetPosition: { x: targetPos.x, z: targetPos.z },
+      sourcePosition: projectileSourcePosition,
+      targetPosition: projectileTargetPosition,
       arrowId,
+      ammunitionCustody: {
+        operationId: arrowDebit.operationId,
+        playerId: arrowDebit.playerId,
+        requestFingerprint: arrowDebit.requestFingerprint,
+        itemId: arrowDebit.arrowId,
+        recoveryDisposition: arrowDebit.recoveryDisposition,
+      },
     };
 
-    const projectile =
-      this.ctx.projectileService.createProjectile(projectileParams);
+    const projectile = this.ctx.projectileService.createReservedProjectile(
+      projectileReservation,
+      projectileParams,
+    );
     if (!projectile) {
+      this.ctx.projectileService.releaseProjectileReservation(
+        projectileReservation,
+      );
+      await this.ctx.equipmentSystem?.cancelArrowProjectileAtomic(
+        projectileParams.ammunitionCustody!,
+      );
       this.ctx.logger.error(
-        `Projectile capacity changed after committed arrow debit for ${attackerId}`,
+        `Reserved projectile admission failed after staged arrow debit for ${attackerId}`,
         new Error("ranged_projectile_commit_invariant_failed"),
       );
       return;
     }
+    const scheduledHitTick = projectile.hitsAtTick;
+    projectile.hitsAtTick = Number.POSITIVE_INFINITY;
+    const launchSettlement =
+      await this.ctx.equipmentSystem!.completeArrowProjectileAtomic(
+        projectileParams.ammunitionCustody!,
+      );
+    if (!launchSettlement.ok || launchSettlement.status !== "fired") {
+      this.ctx.projectileService.cancelProjectile(projectile.id);
+      return;
+    }
+    projectile.ammunitionRecovery =
+      launchSettlement.recoverySource ?? undefined;
+    projectile.hitsAtTick = Math.max(scheduledHitTick, currentTick + 1);
 
     this.ctx.rotationManager.rotateTowardsTarget(
       attackerId,
@@ -479,6 +534,7 @@ export class RangedAttackHandler {
       attackerPos,
       targetPos,
       distance,
+      projectile.id,
     );
 
     // Enter combat (cooldown already claimed above before projectile creation)

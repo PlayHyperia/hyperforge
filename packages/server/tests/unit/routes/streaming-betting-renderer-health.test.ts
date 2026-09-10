@@ -257,6 +257,30 @@ describe("deriveBettingRendererHealth", () => {
     });
   });
 
+  it("does not let ready renderer telemetry mask an inactive external capture pipeline", () => {
+    const health = deriveBettingRendererHealth(createCycle(), {
+      externalStatusSnapshot: {
+        destinations: [],
+        stats: {
+          clientConnected: true,
+          ffmpegRunning: false,
+        },
+        updatedAt: Date.now() - 100,
+        rendererHealth: {
+          ready: true,
+          degradedReason: null,
+          updatedAt: Date.now() - 100,
+        },
+      },
+      externalStatusMaxAgeMs: 15_000,
+    });
+
+    expect(health).toMatchObject({
+      ready: false,
+      degradedReason: "capture_pipeline_inactive",
+    });
+  });
+
   it("degrades stale external RTMP renderer snapshots", () => {
     const health = deriveBettingRendererHealth(createCycle(), {
       externalStatusSnapshot: {

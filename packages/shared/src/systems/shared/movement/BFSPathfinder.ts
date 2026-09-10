@@ -49,6 +49,13 @@ export type WalkabilityChecker = (
   fromTile?: TileCoord,
 ) => boolean;
 
+type GuidedPathNode = {
+  tile: TileCoord;
+  cost: number;
+  heuristic: number;
+  order: number;
+};
+
 /**
  * BFS Pathfinder for tile-based movement
  */
@@ -182,6 +189,61 @@ export class BFSPathfinder {
   }
 
   /**
+   * Find the same shortest eight-direction path while ordering unexplored
+   * tiles by an admissible Chebyshev heuristic. Long server-owned routes use
+   * this bounded search so open terrain does not require breadth-first
+   * expansion of every tile around the actor before making useful progress.
+   */
+  findPathGuided(
+    start: TileCoord,
+    end: TileCoord,
+    isWalkable: WalkabilityChecker,
+    maxIterations?: number,
+  ): TileCoord[] {
+    this._lastPathWasPartial = false;
+    this._lastIterationsUsed = 0;
+    this._lastRequestedDestination = { x: end.x, z: end.z };
+
+    if (!start || typeof start.x !== "number" || typeof start.z !== "number") {
+      throw new Error(
+        `[BFSPathfinder] Invalid start tile: ${JSON.stringify(start)}`,
+      );
+    }
+    if (!end || typeof end.x !== "number" || typeof end.z !== "number") {
+      throw new Error(
+        `[BFSPathfinder] Invalid end tile: ${JSON.stringify(end)}`,
+      );
+    }
+    if (!Number.isFinite(start.x) || !Number.isFinite(start.z)) {
+      throw new Error(
+        `[BFSPathfinder] Start tile has non-finite coords: (${start.x}, ${start.z})`,
+      );
+    }
+    if (!Number.isFinite(end.x) || !Number.isFinite(end.z)) {
+      throw new Error(
+        `[BFSPathfinder] End tile has non-finite coords: (${end.x}, ${end.z})`,
+      );
+    }
+    if (typeof isWalkable !== "function") {
+      throw new Error(`[BFSPathfinder] isWalkable must be a function`);
+    }
+    if (tilesEqual(start, end)) return [];
+
+    const originalEnd = { x: end.x, z: end.z };
+    if (!isWalkable(end)) {
+      const nearestWalkable = this.findNearestWalkable(end, isWalkable);
+      if (!nearestWalkable) {
+        this._lastPathWasPartial = true;
+        return [];
+      }
+      end = nearestWalkable;
+      if (!tilesEqual(originalEnd, end)) this._lastPathWasPartial = true;
+    }
+
+    return this.findGuidedPath(start, [end], isWalkable, maxIterations);
+  }
+
+  /**
    * Multi-destination BFS: find shortest path from start to ANY destination tile.
    *
    * classic MMORPG combat pathfinding feeds all valid interaction tiles into the pathfinder
@@ -199,8 +261,10 @@ export class BFSPathfinder {
     isWalkable: WalkabilityChecker,
     maxIterations?: number,
   ): TileCoord[] {
+    this._lastPathWasPartial = false;
+    this._lastIterationsUsed = 0;
+    this._lastRequestedDestination = null;
     if (destinations.length === 0) {
-      this._lastIterationsUsed = 0;
       return [];
     }
 
@@ -288,6 +352,224 @@ export class BFSPathfinder {
       // No destination reachable — partial path to closest destination
       this._lastIterationsUsed = iterations;
       return this.findPartialPathToAny(start, destinations, visited, parent);
+    } finally {
+      bfsPool.release(pooledData);
+    }
+  }
+
+  /** Guided shortest-path variant for an authored set of valid destinations. */
+  findPathToAnyGuided(
+    start: TileCoord,
+    destinations: TileCoord[],
+    isWalkable: WalkabilityChecker,
+    maxIterations?: number,
+  ): TileCoord[] {
+    this._lastPathWasPartial = false;
+    this._lastIterationsUsed = 0;
+    this._lastRequestedDestination = null;
+    if (destinations.length === 0) return [];
+    if (destinations.some((destination) => tilesEqual(start, destination))) {
+      return [];
+    }
+    return this.findGuidedPath(start, destinations, isWalkable, maxIterations);
+  }
+
+  private guidedNodeComesBefore(
+    left: GuidedPathNode,
+    right: GuidedPathNode,
+  ): boolean {
+    const leftScore = left.cost + left.heuristic;
+    const rightScore = right.cost + right.heuristic;
+    return (
+      leftScore < rightScore ||
+      (leftScore === rightScore &&
+        (left.heuristic < right.heuristic ||
+          (left.heuristic === right.heuristic && left.order < right.order)))
+    );
+  }
+
+  private pushGuidedNode(heap: GuidedPathNode[], node: GuidedPathNode): void {
+    let index = heap.length;
+    heap.push(node);
+    while (index > 0) {
+      const parentIndex = (index - 1) >> 1;
+      if (!this.guidedNodeComesBefore(node, heap[parentIndex])) break;
+      heap[index] = heap[parentIndex];
+      index = parentIndex;
+    }
+    heap[index] = node;
+  }
+
+  private popGuidedNode(heap: GuidedPathNode[]): GuidedPathNode | null {
+    const root = heap[0];
+    const tail = heap.pop();
+    if (!root || !tail || heap.length === 0) return root ?? null;
+
+    let index = 0;
+    while (true) {
+      const leftIndex = index * 2 + 1;
+      if (leftIndex >= heap.length) break;
+      const rightIndex = leftIndex + 1;
+      const childIndex =
+        rightIndex < heap.length &&
+        this.guidedNodeComesBefore(heap[rightIndex], heap[leftIndex])
+          ? rightIndex
+          : leftIndex;
+      if (!this.guidedNodeComesBefore(heap[childIndex], tail)) break;
+      heap[index] = heap[childIndex];
+      index = childIndex;
+    }
+    heap[index] = tail;
+    return root;
+  }
+
+  private findGuidedPath(
+    start: TileCoord,
+    destinations: TileCoord[],
+    isWalkable: WalkabilityChecker,
+    maxIterations?: number,
+  ): TileCoord[] {
+    const iterLimit =
+      maxIterations !== undefined
+        ? Math.min(maxIterations, this.MAX_BFS_ITERATIONS)
+        : this.MAX_BFS_ITERATIONS;
+    if (iterLimit <= 0) {
+      this._lastPathWasPartial = true;
+      return [];
+    }
+
+    const destinationKeys = new Set<number>();
+    let destinationMinX = Number.POSITIVE_INFINITY;
+    let destinationMaxX = Number.NEGATIVE_INFINITY;
+    let destinationMinZ = Number.POSITIVE_INFINITY;
+    let destinationMaxZ = Number.NEGATIVE_INFINITY;
+    for (const destination of destinations) {
+      destinationKeys.add(tileKeyNumeric(destination));
+      destinationMinX = Math.min(destinationMinX, destination.x);
+      destinationMaxX = Math.max(destinationMaxX, destination.x);
+      destinationMinZ = Math.min(destinationMinZ, destination.z);
+      destinationMaxZ = Math.max(destinationMaxZ, destination.z);
+    }
+    const distanceToDestinationBounds = (tile: TileCoord): number => {
+      if (destinations.length <= 32) {
+        let nearest = Number.POSITIVE_INFINITY;
+        for (const destination of destinations) {
+          nearest = Math.min(
+            nearest,
+            Math.max(
+              Math.abs(tile.x - destination.x),
+              Math.abs(tile.z - destination.z),
+            ),
+          );
+        }
+        return nearest;
+      }
+      const dx =
+        tile.x < destinationMinX
+          ? destinationMinX - tile.x
+          : Math.max(0, tile.x - destinationMaxX);
+      const dz =
+        tile.z < destinationMinZ
+          ? destinationMinZ - tile.z
+          : Math.max(0, tile.z - destinationMaxZ);
+      return Math.max(dx, dz);
+    };
+
+    const pooledData = bfsPool.acquire();
+    const { visited, parent } = pooledData;
+    const open: GuidedPathNode[] = [];
+    const bestCostByTile = new Map<number, number>();
+    const startTile = { x: start.x, z: start.z };
+    const startKey = tileKeyNumeric(startTile);
+    const startHeuristic = distanceToDestinationBounds(startTile);
+    let insertionOrder = 0;
+    let iterations = 0;
+    let closestTile = startTile;
+    let closestHeuristic = startHeuristic;
+    let closestCost = 0;
+
+    bestCostByTile.set(startKey, 0);
+    this.pushGuidedNode(open, {
+      tile: startTile,
+      cost: 0,
+      heuristic: startHeuristic,
+      order: insertionOrder++,
+    });
+
+    const minX = start.x - PATHFIND_RADIUS;
+    const maxX = start.x + PATHFIND_RADIUS;
+    const minZ = start.z - PATHFIND_RADIUS;
+    const maxZ = start.z + PATHFIND_RADIUS;
+
+    try {
+      while (open.length > 0) {
+        if (iterations >= iterLimit) {
+          this._lastPathWasPartial = true;
+          this._lastIterationsUsed = iterations;
+          return tilesEqual(closestTile, start)
+            ? []
+            : this.reconstructPath(start, closestTile, parent);
+        }
+
+        const current = this.popGuidedNode(open)!;
+        const currentKey = tileKeyNumeric(current.tile);
+        if (visited.has(currentKey)) continue;
+        if (bestCostByTile.get(currentKey) !== current.cost) continue;
+        visited.add(currentKey);
+        iterations++;
+
+        if (destinationKeys.has(currentKey)) {
+          this._lastIterationsUsed = iterations;
+          return this.reconstructPath(start, current.tile, parent);
+        }
+
+        if (
+          current.heuristic < closestHeuristic ||
+          (current.heuristic === closestHeuristic && current.cost < closestCost)
+        ) {
+          closestTile = current.tile;
+          closestHeuristic = current.heuristic;
+          closestCost = current.cost;
+        }
+
+        for (const dir of TILE_DIRECTIONS) {
+          const nx = current.tile.x + dir.x;
+          const nz = current.tile.z + dir.z;
+          if (nx < minX || nx > maxX || nz < minZ || nz > maxZ) continue;
+
+          const neighborKey =
+            ((nx + 1048576) | 0) * 2097152 + ((nz + 1048576) | 0);
+          if (visited.has(neighborKey)) continue;
+
+          this._scratchNeighbor.x = nx;
+          this._scratchNeighbor.z = nz;
+          if (
+            !this.canMoveTo(current.tile, this._scratchNeighbor, isWalkable)
+          ) {
+            continue;
+          }
+
+          const nextCost = current.cost + 1;
+          const previousCost = bestCostByTile.get(neighborKey);
+          if (previousCost !== undefined && previousCost <= nextCost) continue;
+
+          const neighbor = { x: nx, z: nz };
+          bestCostByTile.set(neighborKey, nextCost);
+          parent.set(neighborKey, current.tile);
+          this.pushGuidedNode(open, {
+            tile: neighbor,
+            cost: nextCost,
+            heuristic: distanceToDestinationBounds(neighbor),
+            order: insertionOrder++,
+          });
+        }
+      }
+
+      this._lastPathWasPartial = true;
+      this._lastIterationsUsed = iterations;
+      return tilesEqual(closestTile, start)
+        ? []
+        : this.reconstructPath(start, closestTile, parent);
     } finally {
       bfsPool.release(pooledData);
     }

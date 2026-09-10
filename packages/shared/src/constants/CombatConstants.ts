@@ -73,6 +73,10 @@ export const COMBAT_CONSTANTS = {
   SPELL_LAUNCH_DELAY_MS: 600,
   /** Delay before arrow projectile spawns (allows draw animation wind-up) */
   ARROW_LAUNCH_DELAY_MS: 400,
+  /** Hard server-side lifetime for an unresolved projectile. */
+  PROJECTILE_MAX_LIFETIME_TICKS: 20,
+  /** Client delivery allowance after that server lifetime elapses. */
+  PROJECTILE_TERMINAL_DELIVERY_GRACE_MS: 1_500,
 
   // === Visual Rotation (client-side, exponential decay) ===
   ROTATION: {

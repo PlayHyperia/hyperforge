@@ -1,0 +1,668 @@
+{
+  "schemaVersion": 1,
+  "purpose": "Immutable source and technical preflight lock for non-AI duel-launch avatar candidates; none of these records activates an avatar or item manifest.",
+  "verifiedAt": "2026-08-12",
+  "packs": [
+    {
+      "id": "kaykit-adventurers-2.0-free",
+      "provider": "Kay Lousberg",
+      "kind": "avatar-role-kit",
+      "disposition": "primary-bake-off-candidate",
+      "sourcePage": "https://kaylousberg.itch.io/kaykit-adventurers",
+      "purchasePage": "https://kaylousberg.itch.io/kaykit-adventurers/purchase",
+      "license": {
+        "spdx": "CC0-1.0",
+        "url": "https://creativecommons.org/publicdomain/zero/1.0/",
+        "commercialUse": true,
+        "modification": true,
+        "redistribution": true,
+        "attributionRequired": false,
+        "embeddedEntry": "KayKit_Adventurers_2.0_FREE/License.txt",
+        "embeddedSha256": "d4adc31660d1db22eb60eba648e01db41577548f6fa1a3576cb4a6283dae0a58",
+        "requiredText": [
+          "Creative Commons Zero, CC0",
+          "free to use in personal, educational and commercial projects"
+        ]
+      },
+      "nonAiEvidence": {
+        "url": "https://kaylousberg.itch.io/kaykit-adventurers",
+        "statement": "No generative AI was used",
+        "verifiedAt": "2026-08-12"
+      },
+      "archive": {
+        "file": "KayKit_Adventurers_2.0_FREE.zip",
+        "version": "2.0",
+        "bytes": 13024345,
+        "entries": 266,
+        "sha256": "abe48f4763fba0896bab486ee9e6d08ca6b5b3884b9601f235c8847ae94dc479"
+      },
+      "requiredEntries": [
+        "KayKit_Adventurers_2.0_FREE/Characters/gltf/Knight.glb",
+        "KayKit_Adventurers_2.0_FREE/Assets/gltf/sword_1handed.gltf",
+        "KayKit_Adventurers_2.0_FREE/Assets/gltf/sword_1handed.bin",
+        "KayKit_Adventurers_2.0_FREE/Assets/gltf/sword_2handed.gltf",
+        "KayKit_Adventurers_2.0_FREE/Assets/gltf/sword_2handed.bin",
+        "KayKit_Adventurers_2.0_FREE/Assets/gltf/axe_2handed.gltf",
+        "KayKit_Adventurers_2.0_FREE/Assets/gltf/axe_2handed.bin",
+        "KayKit_Adventurers_2.0_FREE/Assets/gltf/bow_withString.gltf",
+        "KayKit_Adventurers_2.0_FREE/Assets/gltf/bow_withString.bin",
+        "KayKit_Adventurers_2.0_FREE/Assets/gltf/arrow_bow.gltf",
+        "KayKit_Adventurers_2.0_FREE/Assets/gltf/arrow_bow.bin",
+        "KayKit_Adventurers_2.0_FREE/Assets/gltf/staff.gltf",
+        "KayKit_Adventurers_2.0_FREE/Assets/gltf/staff.bin",
+        "KayKit_Adventurers_2.0_FREE/Assets/gltf/shield_round.gltf",
+        "KayKit_Adventurers_2.0_FREE/Assets/gltf/shield_round.bin"
+      ],
+      "inspections": [
+        {
+          "entry": "KayKit_Adventurers_2.0_FREE/Characters/gltf/Knight.glb",
+          "format": "glb",
+          "sha256": "e484370733824a0740683e7f6040aae0d20e5efd4107dde1175d6a2ad7e2f199",
+          "expected": {
+            "triangles": 5800,
+            "vertices": 5328,
+            "primitiveCount": 9,
+            "skinCount": 1,
+            "jointCount": 23,
+            "animationCount": 0,
+            "textureCount": 1,
+            "validatorErrors": 0,
+            "validatorWarningCodes": ["NODE_SKINNED_MESH_NON_ROOT"]
+          }
+        },
+        {
+          "entry": "KayKit_Adventurers_2.0_FREE/Assets/gltf/sword_1handed.gltf",
+          "format": "gltf",
+          "sha256": "2a6074d46c3e337f84f0295d0ea862b116fec7d816db8d027d75a464311228b6",
+          "expected": {
+            "triangles": 300,
+            "vertices": 358,
+            "primitiveCount": 1,
+            "textureCount": 1,
+            "missingResources": [],
+            "validatorErrors": 0,
+            "validatorWarnings": 0
+          }
+        },
+        {
+          "entry": "KayKit_Adventurers_2.0_FREE/Assets/gltf/sword_2handed.gltf",
+          "format": "gltf",
+          "sha256": "42ffb9b49e928763fe21fd928675402ebccd3750ccd89bcec8d186e12c6fdccd",
+          "expected": {
+            "triangles": 412,
+            "vertices": 545,
+            "primitiveCount": 1,
+            "textureCount": 1,
+            "missingResources": [],
+            "validatorErrors": 0,
+            "validatorWarnings": 0
+          }
+        },
+        {
+          "entry": "KayKit_Adventurers_2.0_FREE/Assets/gltf/bow_withString.gltf",
+          "format": "gltf",
+          "sha256": "c55e025638cfbdac33e117a83abac8d01b8d7056a0f7514c72daf937512de932",
+          "expected": {
+            "triangles": 684,
+            "vertices": 802,
+            "primitiveCount": 1,
+            "textureCount": 1,
+            "missingResources": [],
+            "validatorErrors": 0,
+            "validatorWarnings": 0
+          }
+        },
+        {
+          "entry": "KayKit_Adventurers_2.0_FREE/Assets/gltf/arrow_bow.gltf",
+          "format": "gltf",
+          "sha256": "db8d6c4bcf7f6119703565220770241a4d98047f22dcd011e66557cb7df795c1",
+          "expected": {
+            "triangles": 52,
+            "vertices": 73,
+            "primitiveCount": 1,
+            "textureCount": 1,
+            "missingResources": [],
+            "validatorErrors": 0,
+            "validatorWarnings": 0
+          }
+        },
+        {
+          "entry": "KayKit_Adventurers_2.0_FREE/Assets/gltf/staff.gltf",
+          "format": "gltf",
+          "sha256": "25646537632555f2a4e5ae90320bce251bbc5af541e8897960ad4514122110b9",
+          "expected": {
+            "triangles": 440,
+            "vertices": 498,
+            "primitiveCount": 1,
+            "textureCount": 1,
+            "missingResources": [],
+            "validatorErrors": 0,
+            "validatorWarnings": 0
+          }
+        },
+        {
+          "entry": "KayKit_Adventurers_2.0_FREE/Assets/gltf/axe_2handed.gltf",
+          "format": "gltf",
+          "sha256": "8fb5b782848f66a3a7170f4c5da723e1441671938d7434ecc3dd417cebaf4fff",
+          "expected": {
+            "triangles": 508,
+            "vertices": 591,
+            "primitiveCount": 1,
+            "textureCount": 1,
+            "missingResources": [],
+            "validatorErrors": 0,
+            "validatorWarnings": 0
+          }
+        },
+        {
+          "entry": "KayKit_Adventurers_2.0_FREE/Assets/gltf/shield_round.gltf",
+          "format": "gltf",
+          "sha256": "dd052a109d5a003fa7ebe4641c31e89a5189ad8d606ee8fc969d05e2d99dab38",
+          "expected": {
+            "triangles": 284,
+            "vertices": 322,
+            "primitiveCount": 1,
+            "textureCount": 1,
+            "missingResources": [],
+            "validatorErrors": 0,
+            "validatorWarnings": 0
+          }
+        }
+      ]
+    },
+    {
+      "id": "kaykit-character-animations-1.1-free",
+      "provider": "Kay Lousberg",
+      "kind": "animation-library",
+      "disposition": "primary-bake-off-candidate",
+      "sourcePage": "https://kaylousberg.itch.io/kaykit-character-animations",
+      "purchasePage": "https://kaylousberg.itch.io/kaykit-character-animations/purchase",
+      "license": {
+        "spdx": "CC0-1.0",
+        "url": "https://creativecommons.org/publicdomain/zero/1.0/",
+        "commercialUse": true,
+        "modification": true,
+        "redistribution": true,
+        "attributionRequired": false,
+        "embeddedEntry": "KayKit_Character_Animations_1.1/License.txt",
+        "embeddedSha256": "373b159044d1a886ed15f57ca5a7673ba14e2623c460283452705f2056912ed9",
+        "requiredText": [
+          "Creative Commons Zero, CC0",
+          "free to use in personal, educational and commercial projects"
+        ]
+      },
+      "nonAiEvidence": {
+        "url": "https://kaylousberg.itch.io/kaykit-character-animations",
+        "statement": "No generative AI was used",
+        "verifiedAt": "2026-08-12"
+      },
+      "archive": {
+        "file": "KayKit_Character_Animations_1.1.zip",
+        "version": "1.1",
+        "bytes": 14858957,
+        "entries": 48,
+        "sha256": "65882f31f905ad2e953819648a59287cdeab8f623908d5ef701971d3758be20f"
+      },
+      "requiredClips": [
+        "Idle_A",
+        "Walking_A",
+        "Running_A",
+        "Hit_A",
+        "Death_A",
+        "Melee_1H_Attack_Chop",
+        "Melee_Blocking",
+        "Melee_2H_Attack_Chop",
+        "Ranged_Bow_Aiming_Idle",
+        "Ranged_Bow_Draw",
+        "Ranged_Bow_Release",
+        "Ranged_Magic_Shoot",
+        "Ranged_Magic_Spellcasting",
+        "Chop",
+        "Pickaxe",
+        "Hammering",
+        "Fishing_Bite",
+        "Fishing_Cast",
+        "Fishing_Catch",
+        "Fishing_Idle",
+        "Fishing_Reeling",
+        "Fishing_Struggling",
+        "Fishing_Tug",
+        "Throw",
+        "PickUp",
+        "Interact",
+        "Melee_2H_Attack_Stab",
+        "Use_Item"
+      ],
+      "expectedAggregate": {
+        "animationCount": 139,
+        "uniqueAnimationCount": 132,
+        "rigFingerprint": null,
+        "rigFingerprintCount": 6,
+        "rigFingerprints": [
+          "014f784dacc3e0dffdc3f4b06c6b1fa77650934181457cac893d1033a5fb51b3",
+          "2d7833997df7c0ae509bdb939b2ed3408bbd7eb99d9b2e5a07878cbd57aeea6a",
+          "717e1ce8db7a713b02f68b3eeef7d997207e2cd80ad6701d721abc06be693a68",
+          "71966992a6b1748563836b7d19fc18f478d66da0298b23fd7b7d90b462f88e79",
+          "c63861f7f46da89558e956447edbb43a21f3779d6348b9719a33ac078e7764c1",
+          "d3b1becaea8b35bc77af57893bc86a2efb677e1e2381e66da6f5ba692e0cfaa0"
+        ]
+      },
+      "inspections": [
+        {
+          "entry": "KayKit_Character_Animations_1.1/Animations/gltf/Rig_Medium/Rig_Medium_CombatMelee.glb",
+          "format": "glb",
+          "sha256": "c55e6ec1c79e83ae21d46fe1cd921c1b64be8b9a524a24517e51c6ba99231459",
+          "expected": {
+            "animationCount": 22,
+            "jointCount": 23,
+            "validatorErrors": 0
+          }
+        },
+        {
+          "entry": "KayKit_Character_Animations_1.1/Animations/gltf/Rig_Medium/Rig_Medium_CombatRanged.glb",
+          "format": "glb",
+          "sha256": "7fef1fc0e7b0feafd34b8e12d23f514c8c1f9d068047a691b854b56f1774dff5",
+          "expected": {
+            "animationCount": 20,
+            "jointCount": 23,
+            "validatorErrors": 0
+          }
+        },
+        {
+          "entry": "KayKit_Character_Animations_1.1/Animations/gltf/Rig_Medium/Rig_Medium_General.glb",
+          "format": "glb",
+          "sha256": "5f725c0f745f36078c7238968cd5c04843cbc6260689eb6e7f5e2bbd7ffdd7ad",
+          "expected": {
+            "animationCount": 15,
+            "jointCount": 23,
+            "validatorErrors": 0
+          }
+        },
+        {
+          "entry": "KayKit_Character_Animations_1.1/Animations/gltf/Rig_Medium/Rig_Medium_MovementAdvanced.glb",
+          "format": "glb",
+          "sha256": "8b2317cf81e3f24149e4b791c27e1932bebd46cd378ed962e7d27d642fad8c56",
+          "expected": {
+            "animationCount": 13,
+            "jointCount": 23,
+            "validatorErrors": 0
+          }
+        },
+        {
+          "entry": "KayKit_Character_Animations_1.1/Animations/gltf/Rig_Medium/Rig_Medium_MovementBasic.glb",
+          "format": "glb",
+          "sha256": "11422afd50abf7e8c92ea107e2e0bc94abd38023d6d15f55ad580347efbfa29e",
+          "expected": {
+            "animationCount": 11,
+            "jointCount": 23,
+            "validatorErrors": 0
+          }
+        },
+        {
+          "entry": "KayKit_Character_Animations_1.1/Animations/gltf/Rig_Medium/Rig_Medium_Simulation.glb",
+          "format": "glb",
+          "sha256": "ab6ffeed40c8281dd0ce0506534eadf7385151f1c266643a10fa2a0f0a7ba3b1",
+          "expected": {
+            "animationCount": 14,
+            "jointCount": 23,
+            "validatorErrors": 0
+          }
+        },
+        {
+          "entry": "KayKit_Character_Animations_1.1/Animations/gltf/Rig_Medium/Rig_Medium_Special.glb",
+          "format": "glb",
+          "sha256": "74047dd2178fbed388656051664158e921b7bfc613abb119860aeb7b646bd640",
+          "expected": {
+            "animationCount": 15,
+            "jointCount": 23,
+            "validatorErrors": 0
+          }
+        },
+        {
+          "entry": "KayKit_Character_Animations_1.1/Animations/gltf/Rig_Medium/Rig_Medium_Tools.glb",
+          "format": "glb",
+          "sha256": "e3b62dc122c5073373376a846e354137add2088ddcce8731c389fc5c20734aad",
+          "expected": {
+            "animationCount": 29,
+            "jointCount": 23,
+            "validatorErrors": 0
+          }
+        }
+      ]
+    },
+    {
+      "id": "kaykit-rpg-tools-bits-1.0-free",
+      "provider": "Kay Lousberg",
+      "kind": "preparation-tool-kit",
+      "disposition": "primary-preparation-tool-candidate",
+      "sourcePage": "https://kaylousberg.itch.io/rpg-tools-bits",
+      "purchasePage": "https://kaylousberg.itch.io/rpg-tools-bits/purchase",
+      "license": {
+        "spdx": "CC0-1.0",
+        "url": "https://creativecommons.org/publicdomain/zero/1.0/",
+        "commercialUse": true,
+        "modification": true,
+        "redistribution": true,
+        "attributionRequired": false,
+        "embeddedEntry": "KayKit_RPGToolsBits_1.0_FREE/License.txt",
+        "embeddedSha256": "a0d34adb9fddc83036bd28cef791b05edf2108ebcce7f75539d16ad1f01d76ee",
+        "requiredText": [
+          "Creative Commons Zero, CC0",
+          "free to use in personal, educational and commercial projects"
+        ]
+      },
+      "nonAiEvidence": {
+        "url": "https://kaylousberg.itch.io/rpg-tools-bits",
+        "statement": "No generative AI was used",
+        "verifiedAt": "2026-08-12"
+      },
+      "archive": {
+        "file": "KayKit_RPG_Tools_Bits_FREE.zip",
+        "version": "1.0",
+        "bytes": 3885168,
+        "entries": 346,
+        "sha256": "a17c2a54df93d525e90d960baf3c68638defb4f424e204ceead6ea1f89e9c7dd"
+      },
+      "requiredEntries": [
+        "KayKit_RPGToolsBits_1.0_FREE/Assets/gltf/axe.gltf",
+        "KayKit_RPGToolsBits_1.0_FREE/Assets/gltf/axe.bin",
+        "KayKit_RPGToolsBits_1.0_FREE/Assets/gltf/pickaxe.gltf",
+        "KayKit_RPGToolsBits_1.0_FREE/Assets/gltf/pickaxe.bin",
+        "KayKit_RPGToolsBits_1.0_FREE/Assets/gltf/tools_bits_texture.png"
+      ],
+      "inspections": [
+        {
+          "entry": "KayKit_RPGToolsBits_1.0_FREE/Assets/gltf/axe.gltf",
+          "format": "gltf",
+          "sha256": "5761ddb06283a0075e5fdfe8665784488e6bc00aabcca2134851c8ebac1831e7",
+          "expected": {
+            "triangles": 508,
+            "vertices": 594,
+            "primitiveCount": 1,
+            "skinCount": 0,
+            "animationCount": 0,
+            "textureCount": 1,
+            "missingResources": [],
+            "validatorErrors": 0,
+            "validatorWarnings": 0
+          }
+        },
+        {
+          "entry": "KayKit_RPGToolsBits_1.0_FREE/Assets/gltf/pickaxe.gltf",
+          "format": "gltf",
+          "sha256": "4f3777249fdb9551a546ba66b997f948992787e4b5394ebe13cc1d7bf344a98b",
+          "expected": {
+            "triangles": 508,
+            "vertices": 560,
+            "primitiveCount": 1,
+            "skinCount": 0,
+            "animationCount": 0,
+            "textureCount": 1,
+            "missingResources": [],
+            "validatorErrors": 0,
+            "validatorWarnings": 0
+          }
+        }
+      ]
+    },
+    {
+      "id": "kaykit-fantasy-weapons-bits-1.0-free",
+      "provider": "Kay Lousberg",
+      "kind": "weapon-kit",
+      "disposition": "primary-weapon-expansion-candidate",
+      "sourcePage": "https://kaylousberg.itch.io/fantasy-weapons-bits",
+      "purchasePage": "https://kaylousberg.itch.io/fantasy-weapons-bits/purchase",
+      "license": {
+        "spdx": "CC0-1.0",
+        "url": "https://creativecommons.org/publicdomain/zero/1.0/",
+        "commercialUse": true,
+        "modification": true,
+        "redistribution": true,
+        "attributionRequired": false,
+        "embeddedEntry": "KayKit_FantasyWeaponsBits_1.0_FREE/License.txt",
+        "embeddedSha256": "cef02a74a4f2f24cec8fe9c63ee98f8b095d1f7b72b3a1af417db6458dd0b278",
+        "requiredText": [
+          "Creative Commons Zero, CC0",
+          "free to use in personal, educational and commercial projects"
+        ]
+      },
+      "nonAiEvidence": {
+        "url": "https://kaylousberg.itch.io/fantasy-weapons-bits",
+        "statement": "No generative AI was used",
+        "verifiedAt": "2026-08-12"
+      },
+      "archive": {
+        "file": "KayKit_Fantasy_Weapons_Bits_FREE.zip",
+        "version": "1.0",
+        "bytes": 3375694,
+        "entries": 203,
+        "sha256": "1017144f85a994f405b731befa71ced360f5b60ed0b9c00c72e711c1633ce2d2"
+      },
+      "requiredEntries": [
+        "KayKit_FantasyWeaponsBits_1.0_FREE/Assets/gltf/spear_A.gltf",
+        "KayKit_FantasyWeaponsBits_1.0_FREE/Assets/gltf/spear_A.bin",
+        "KayKit_FantasyWeaponsBits_1.0_FREE/Assets/gltf/sword_A.gltf",
+        "KayKit_FantasyWeaponsBits_1.0_FREE/Assets/gltf/sword_A.bin",
+        "KayKit_FantasyWeaponsBits_1.0_FREE/Assets/gltf/bow_A_withString.gltf",
+        "KayKit_FantasyWeaponsBits_1.0_FREE/Assets/gltf/bow_A_withString.bin",
+        "KayKit_FantasyWeaponsBits_1.0_FREE/Assets/gltf/axe_A.gltf",
+        "KayKit_FantasyWeaponsBits_1.0_FREE/Assets/gltf/axe_A.bin",
+        "KayKit_FantasyWeaponsBits_1.0_FREE/Assets/gltf/staff_A.gltf",
+        "KayKit_FantasyWeaponsBits_1.0_FREE/Assets/gltf/staff_A.bin",
+        "KayKit_FantasyWeaponsBits_1.0_FREE/Assets/gltf/shield_A.gltf",
+        "KayKit_FantasyWeaponsBits_1.0_FREE/Assets/gltf/shield_A.bin",
+        "KayKit_FantasyWeaponsBits_1.0_FREE/Assets/gltf/weapons_bits_texture.png"
+      ],
+      "inspections": [
+        {
+          "entry": "KayKit_FantasyWeaponsBits_1.0_FREE/Assets/gltf/spear_A.gltf",
+          "format": "gltf",
+          "sha256": "7299baf7d4f948b7839d616746c791fa57af74a9ccb8903692715f1fd8c947e4",
+          "expected": {
+            "triangles": 1216,
+            "vertices": 1420,
+            "primitiveCount": 1,
+            "textureCount": 1,
+            "missingResources": [],
+            "validatorErrors": 0,
+            "validatorWarnings": 0
+          }
+        },
+        {
+          "entry": "KayKit_FantasyWeaponsBits_1.0_FREE/Assets/gltf/sword_A.gltf",
+          "format": "gltf",
+          "sha256": "137cc318e9f36339a088524243071187da8adff3b5735f1d5330ed1577f54851",
+          "expected": {
+            "triangles": 292,
+            "vertices": 367,
+            "primitiveCount": 1,
+            "textureCount": 1,
+            "missingResources": [],
+            "validatorErrors": 0,
+            "validatorWarnings": 0
+          }
+        },
+        {
+          "entry": "KayKit_FantasyWeaponsBits_1.0_FREE/Assets/gltf/bow_A_withString.gltf",
+          "format": "gltf",
+          "sha256": "a01fc3f9412b414efa62aed49e3556bb270d6dce11011fafded55f6af75bb152",
+          "expected": {
+            "triangles": 700,
+            "vertices": 787,
+            "primitiveCount": 1,
+            "textureCount": 1,
+            "missingResources": [],
+            "validatorErrors": 0,
+            "validatorWarnings": 0
+          }
+        },
+        {
+          "entry": "KayKit_FantasyWeaponsBits_1.0_FREE/Assets/gltf/axe_A.gltf",
+          "format": "gltf",
+          "sha256": "94441195e9a690a58119bf78d6dabe90a313afc5d8a97d84604661d16840535c",
+          "expected": {
+            "triangles": 1206,
+            "vertices": 1243,
+            "primitiveCount": 1,
+            "textureCount": 1,
+            "missingResources": [],
+            "validatorErrors": 0,
+            "validatorWarnings": 0
+          }
+        },
+        {
+          "entry": "KayKit_FantasyWeaponsBits_1.0_FREE/Assets/gltf/staff_A.gltf",
+          "format": "gltf",
+          "sha256": "f369dd0b26fb9cb922141e8ac2772b4bf99a18df04e2d8848e9679f8b35fbc80",
+          "expected": {
+            "triangles": 500,
+            "vertices": 563,
+            "primitiveCount": 1,
+            "textureCount": 1,
+            "missingResources": [],
+            "validatorErrors": 0,
+            "validatorWarnings": 0
+          }
+        },
+        {
+          "entry": "KayKit_FantasyWeaponsBits_1.0_FREE/Assets/gltf/shield_A.gltf",
+          "format": "gltf",
+          "sha256": "3634e520841d408a021c247c613084299e3a57458a4d3fa1ee84a9ba37fd5d9b",
+          "expected": {
+            "triangles": 354,
+            "vertices": 390,
+            "primitiveCount": 1,
+            "textureCount": 1,
+            "missingResources": [],
+            "validatorErrors": 0,
+            "validatorWarnings": 0
+          }
+        }
+      ]
+    },
+    {
+      "id": "quaternius-universal-base-characters-standard",
+      "provider": "Quaternius",
+      "kind": "avatar-base-kit",
+      "disposition": "secondary-repair-required",
+      "sourcePage": "https://quaternius.itch.io/universal-base-characters",
+      "purchasePage": "https://quaternius.itch.io/universal-base-characters/purchase",
+      "license": {
+        "spdx": "CC0-1.0",
+        "url": "https://creativecommons.org/publicdomain/zero/1.0/",
+        "commercialUse": true,
+        "modification": true,
+        "redistribution": true,
+        "attributionRequired": false,
+        "embeddedEntry": "Universal Base Characters[Standard]/License_Standard.txt",
+        "embeddedSha256": "0f4beaf0fe360a7732e58bbe3dbf60a2422367fbea60cb9ea4add968f383268e",
+        "requiredText": ["CC0 1.0 Universal", "Public Domain Dedication"]
+      },
+      "nonAiEvidence": {
+        "url": "https://quaternius.itch.io/universal-base-characters",
+        "statement": "No generative AI was used",
+        "verifiedAt": "2026-08-12"
+      },
+      "archive": {
+        "file": "Universal Base Characters[Standard].zip",
+        "version": "standard-2025-12-16",
+        "bytes": 128968391,
+        "entries": 128,
+        "sha256": "fdbf1804c90dfc1ea03e992bff7da2dfd1a79318e13270a660180f9308455f40"
+      },
+      "inspections": [
+        {
+          "entry": "Universal Base Characters[Standard]/Base Characters/Godot - UE/Superhero_Male_FullBody.gltf",
+          "format": "gltf",
+          "sha256": "e7fcea214ecf8855afbf910b50de6f9c7d1decfb71ca28bad8a4481452dafeb4",
+          "repairs": [
+            {
+              "imageName": "T_Eye_Normal.png",
+              "missingUri": "T_Eye_Normal_png.png",
+              "replacementUri": "T_Eye_Normal.png",
+              "replacementEntry": "Universal Base Characters[Standard]/Base Characters/Godot - UE/T_Eye_Normal.png",
+              "replacementBytes": 15099,
+              "replacementSha256": "9ed61f7726a54fe346a78b9e5a18905d8e2b88f86235d97f53cd207a26f3f8c7"
+            },
+            {
+              "imageName": "T_Hair_1_Normal.png",
+              "missingUri": "T_Hair_1_Normal_png.png",
+              "replacementUri": "T_Hair_1_Normal.png",
+              "replacementEntry": "Universal Base Characters[Standard]/Base Characters/Godot - UE/T_Hair_1_Normal.png",
+              "replacementBytes": 4326126,
+              "replacementSha256": "57fd0ad8c96a4d01b38769637e066cecaa285b456f6e48ce00863754a457affb"
+            }
+          ],
+          "expected": {
+            "triangles": 14318,
+            "vertices": 8483,
+            "primitiveCount": 3,
+            "skinCount": 1,
+            "jointCount": 65,
+            "animationCount": 0,
+            "textureCount": 7,
+            "missingResources": [
+              "T_Eye_Normal_png.png",
+              "T_Hair_1_Normal_png.png"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "quaternius-universal-animation-library-2-standard",
+      "provider": "Quaternius",
+      "kind": "animation-library",
+      "disposition": "secondary-bake-off-candidate",
+      "sourcePage": "https://quaternius.itch.io/universal-animation-library-2",
+      "purchasePage": "https://quaternius.itch.io/universal-animation-library-2/purchase",
+      "license": {
+        "spdx": "CC0-1.0",
+        "url": "https://creativecommons.org/publicdomain/zero/1.0/",
+        "commercialUse": true,
+        "modification": true,
+        "redistribution": true,
+        "attributionRequired": false,
+        "embeddedEntry": "Universal Animation Library 2[Standard]/License.txt",
+        "embeddedSha256": "6d01f55c6e4c49a2c9963e147e561945ae2c83958c8ca667d90a6bffdbfac061",
+        "requiredText": ["CC0 1.0 Universal", "Public Domain Dedication"]
+      },
+      "nonAiEvidence": {
+        "url": "https://quaternius.itch.io/universal-animation-library-2",
+        "statement": "No generative AI was used",
+        "verifiedAt": "2026-08-12"
+      },
+      "archive": {
+        "file": "Universal Animation Library 2[Standard].zip",
+        "version": "standard-2.1",
+        "bytes": 18735003,
+        "entries": 19,
+        "sha256": "4008ea208a604773a2b2177d965f0f5d3195498b5bf838c3f5785d68e95f2a68"
+      },
+      "requiredClips": [
+        "A_TPose",
+        "Hit_Knockback",
+        "Sword_Block",
+        "Sword_Regular_A",
+        "TreeChopping_Loop"
+      ],
+      "expectedAggregate": {
+        "animationCount": 43,
+        "uniqueAnimationCount": 43
+      },
+      "inspections": [
+        {
+          "entry": "Universal Animation Library 2[Standard]/Unreal-Godot/UAL2_Standard.glb",
+          "format": "glb",
+          "sha256": "8cee20ab1bc55130092447e810e26df22dd2803eccc54f52137a7d54d7ab88a8",
+          "expected": {
+            "animationCount": 43,
+            "jointCount": 65,
+            "validatorErrors": 0,
+            "validatorWarningCodes": ["NODE_SKINNED_MESH_NON_ROOT"]
+          }
+        }
+      ]
+    }
+  ]
+}

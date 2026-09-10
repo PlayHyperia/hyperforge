@@ -3,7 +3,7 @@
   "harness": {
     "subject": "DuelCombatAI",
     "seedCount": 256,
-    "retainedExecutions": 12416,
+    "retainedExecutions": 13440,
     "tickMs": 600,
     "maxTicks": 180,
     "arenaBounds": [
@@ -63,239 +63,249 @@
     {
       "variant": "deterministic_fallback",
       "frozenMacro": null,
-      "wins": 147,
-      "losses": 109,
-      "draws": 0,
-      "winRate": 0.574219,
+      "wins": 114,
+      "losses": 136,
+      "draws": 6,
+      "winRate": 0.445313,
       "winRateWilson95": [
-        0.512991,
-        0.633252
+        0.385686,
+        0.506556
       ],
-      "meanScore": 0.574219,
-      "meanTicks": 117.508,
-      "meanDamage": 88.766,
-      "meanDamageReceived": 88.703,
-      "meanMovementActions": 39.457,
+      "meanScore": 0.457031,
+      "meanTicks": 113.996,
+      "meanDamage": 86.266,
+      "meanDamageReceived": 93.156,
+      "meanMovementActions": 37.586,
       "illegalActionAttempts": 0,
-      "cohortHash": "56ee2bc7ca0817ac702c7f024785d7e1c11c808c96313a44e2409a88bb3ad80f"
+      "cohortHash": "6882cc59bdc24709098bbe7fbc3b00a857deef1ce29a5ff28ec72a43c30cbb70",
+      "behaviorHash": "3bacfda51714f4dc7e44804eb7d65d116fd843d7e050262ec6224931b76ba9d4"
     },
     {
       "variant": "frozen_pressure",
       "frozenMacro": "pressure",
-      "wins": 101,
-      "losses": 154,
-      "draws": 1,
-      "winRate": 0.394531,
+      "wins": 125,
+      "losses": 126,
+      "draws": 5,
+      "winRate": 0.488281,
       "winRateWilson95": [
-        0.336643,
-        0.455537
+        0.427677,
+        0.549232
       ],
-      "meanScore": 0.396484,
-      "meanTicks": 113.145,
-      "meanDamage": 82.539,
-      "meanDamageReceived": 94.113,
-      "meanMovementActions": 38.094,
+      "meanScore": 0.498047,
+      "meanTicks": 120,
+      "meanDamage": 87.082,
+      "meanDamageReceived": 87.652,
+      "meanMovementActions": 38.785,
       "illegalActionAttempts": 0,
-      "cohortHash": "23115d5f6726d8c9ead9696d9126c1aacb2e1ec9b03b8bc1d5c6f6df1ac1affe"
+      "cohortHash": "eb86f85fe3f444dd9bc85606970a6f102435ca54568cd1168dd84528346419bd",
+      "behaviorHash": "dcc88242ea64f22f4102b60b1f735743d4fdd7206a20894fc75c5ddcc39fe439"
     },
     {
       "variant": "frozen_hold_range",
       "frozenMacro": "hold_range",
-      "wins": 105,
-      "losses": 150,
+      "wins": 119,
+      "losses": 136,
       "draws": 1,
-      "winRate": 0.410156,
+      "winRate": 0.464844,
       "winRateWilson95": [
-        0.351665,
-        0.471304
+        0.404717,
+        0.52601
       ],
-      "meanScore": 0.412109,
-      "meanTicks": 117.797,
-      "meanDamage": 85.039,
-      "meanDamageReceived": 92.629,
-      "meanMovementActions": 39.332,
+      "meanScore": 0.466797,
+      "meanTicks": 118.844,
+      "meanDamage": 87.07,
+      "meanDamageReceived": 90.004,
+      "meanMovementActions": 38.586,
       "illegalActionAttempts": 0,
-      "cohortHash": "e53d4a9f81639a1275d7136d91871596e08fb413564a9d0032b46e32c60f8b50"
+      "cohortHash": "2c1c7f125459f320b3fcb022644fbf1112fc52a5b08c597d53c4fc9f3440ba6d",
+      "behaviorHash": "330c71a3ac5053e324a9e367bc4b77a0796596ed84e44f02428d30d9835d339b"
     },
     {
       "variant": "frozen_kite",
       "frozenMacro": "kite",
-      "wins": 126,
-      "losses": 128,
-      "draws": 2,
-      "winRate": 0.492188,
+      "wins": 116,
+      "losses": 139,
+      "draws": 1,
+      "winRate": 0.453125,
       "winRateWilson95": [
-        0.431516,
-        0.55309
+        0.393287,
+        0.514349
       ],
-      "meanScore": 0.496094,
-      "meanTicks": 118.617,
-      "meanDamage": 86.629,
-      "meanDamageReceived": 89.395,
-      "meanMovementActions": 39.84,
+      "meanScore": 0.455078,
+      "meanTicks": 118.133,
+      "meanDamage": 86.5,
+      "meanDamageReceived": 90.777,
+      "meanMovementActions": 38.676,
       "illegalActionAttempts": 0,
-      "cohortHash": "7612339e24bfe26a3fd27e26d6b13e6c6053501877b323a82df33ccf45c2e9bc"
+      "cohortHash": "cdcf019a3724e0449a12379fd370d1cdca3157daa4a0b1bf9218dfc38ab67fc1",
+      "behaviorHash": "bca58c1ddd573265a927a332b9509570dc96d9cec9eb3f9c14902610b5714ed6"
     },
     {
       "variant": "frozen_orbit",
       "frozenMacro": "orbit",
-      "wins": 134,
-      "losses": 122,
-      "draws": 0,
-      "winRate": 0.523438,
+      "wins": 96,
+      "losses": 157,
+      "draws": 3,
+      "winRate": 0.375,
       "winRateWilson95": [
-        0.462362,
-        0.58382
+        0.317955,
+        0.435741
       ],
-      "meanScore": 0.523438,
-      "meanTicks": 118.027,
-      "meanDamage": 87.035,
-      "meanDamageReceived": 89.512,
-      "meanMovementActions": 39.645,
+      "meanScore": 0.380859,
+      "meanTicks": 115.316,
+      "meanDamage": 83.332,
+      "meanDamageReceived": 94.266,
+      "meanMovementActions": 38.023,
       "illegalActionAttempts": 0,
-      "cohortHash": "40b00e1ef35ae542a7e82980fee7a529c6bee0dfe42857cc5ea2556d5d22db53"
+      "cohortHash": "4476af627bf1cd4e799b87d182045db5f1cbf3b59e7c95d37cf80c6c9ec8cf48",
+      "behaviorHash": "0a322294ec6d54925ca74c3311c780a34023c5b73937c0d9e21c7211e76f44d1"
     },
     {
       "variant": "frozen_defensive_reset",
       "frozenMacro": "defensive_reset",
-      "wins": 109,
-      "losses": 147,
-      "draws": 0,
-      "winRate": 0.425781,
+      "wins": 108,
+      "losses": 144,
+      "draws": 4,
+      "winRate": 0.421875,
       "winRateWilson95": [
-        0.366748,
-        0.487009
+        0.362971,
+        0.483089
       ],
-      "meanScore": 0.425781,
-      "meanTicks": 116.977,
-      "meanDamage": 84.723,
-      "meanDamageReceived": 93.406,
-      "meanMovementActions": 39.332,
+      "meanScore": 0.429688,
+      "meanTicks": 117.414,
+      "meanDamage": 85.973,
+      "meanDamageReceived": 92.16,
+      "meanMovementActions": 38.504,
       "illegalActionAttempts": 0,
-      "cohortHash": "c3bb395bfb9f78951e66f81ccd456647e080dd087a128efc78da65b2a0e166de"
+      "cohortHash": "d0fb2ce224351a4d97d017cbc0cb8f5f4bae99ea75beb54943712d7ad390c41f",
+      "behaviorHash": "c6e6ed92d635f82937f37efe9da74418c2e37c4d030184c338285e38ef8a2435"
     },
     {
       "variant": "frozen_finish",
       "frozenMacro": "finish",
-      "wins": 101,
-      "losses": 154,
-      "draws": 1,
-      "winRate": 0.394531,
+      "wins": 255,
+      "losses": 1,
+      "draws": 0,
+      "winRate": 0.996094,
       "winRateWilson95": [
-        0.336643,
-        0.455537
+        0.978209,
+        0.99931
       ],
-      "meanScore": 0.396484,
-      "meanTicks": 113.145,
-      "meanDamage": 82.539,
-      "meanDamageReceived": 94.113,
-      "meanMovementActions": 38.094,
+      "meanScore": 0.996094,
+      "meanTicks": 134.523,
+      "meanDamage": 101.93,
+      "meanDamageReceived": 35.137,
+      "meanMovementActions": 10.867,
       "illegalActionAttempts": 0,
-      "cohortHash": "356942040650769c8db99e88c0f667c0835f6ace71a6e9ddef8f611ec0e4d210"
+      "cohortHash": "4ee39e89b684507c202e911e8798a6e1a0708eefafa56848b7053928068f0b93",
+      "behaviorHash": "f3c1afaac2bb5232f1cc8a3bb8d7e490624cd69296e6814ae0c20a2291968f16"
     }
   ],
   "pairedAgainstFallback": [
     {
       "variant": "frozen_pressure",
       "baseline": "deterministic_fallback",
-      "meanScoreDelta": -0.177734,
-      "improvedSeeds": 32,
-      "regressedSeeds": 77,
-      "tiedSeeds": 147,
-      "twoSidedSignTestP": 0.0000193804840937
+      "meanScoreDelta": 0.041016,
+      "improvedSeeds": 47,
+      "regressedSeeds": 33,
+      "tiedSeeds": 176,
+      "twoSidedSignTestP": 0.145635454403
     },
     {
       "variant": "frozen_hold_range",
       "baseline": "deterministic_fallback",
-      "meanScoreDelta": -0.162109,
-      "improvedSeeds": 20,
-      "regressedSeeds": 62,
-      "tiedSeeds": 174,
-      "twoSidedSignTestP": 0.00000371464159383
+      "meanScoreDelta": 0.009766,
+      "improvedSeeds": 42,
+      "regressedSeeds": 39,
+      "tiedSeeds": 175,
+      "twoSidedSignTestP": 0.824313215105
     },
     {
       "variant": "frozen_kite",
       "baseline": "deterministic_fallback",
-      "meanScoreDelta": -0.078125,
-      "improvedSeeds": 31,
-      "regressedSeeds": 51,
-      "tiedSeeds": 174,
-      "twoSidedSignTestP": 0.0352414401787
+      "meanScoreDelta": -0.001953,
+      "improvedSeeds": 52,
+      "regressedSeeds": 52,
+      "tiedSeeds": 152,
+      "twoSidedSignTestP": 1
     },
     {
       "variant": "frozen_orbit",
       "baseline": "deterministic_fallback",
-      "meanScoreDelta": -0.050781,
-      "improvedSeeds": 13,
-      "regressedSeeds": 26,
-      "tiedSeeds": 217,
-      "twoSidedSignTestP": 0.0532519140979
+      "meanScoreDelta": -0.076172,
+      "improvedSeeds": 19,
+      "regressedSeeds": 41,
+      "tiedSeeds": 196,
+      "twoSidedSignTestP": 0.00621760265933
     },
     {
       "variant": "frozen_defensive_reset",
       "baseline": "deterministic_fallback",
-      "meanScoreDelta": -0.148437,
-      "improvedSeeds": 26,
-      "regressedSeeds": 64,
-      "tiedSeeds": 166,
-      "twoSidedSignTestP": 0.0000765707293105
+      "meanScoreDelta": -0.027344,
+      "improvedSeeds": 46,
+      "regressedSeeds": 54,
+      "tiedSeeds": 156,
+      "twoSidedSignTestP": 0.484118413607
     },
     {
       "variant": "frozen_finish",
       "baseline": "deterministic_fallback",
-      "meanScoreDelta": -0.177734,
-      "improvedSeeds": 32,
-      "regressedSeeds": 77,
-      "tiedSeeds": 147,
-      "twoSidedSignTestP": 0.0000193804840937
+      "meanScoreDelta": 0.539063,
+      "improvedSeeds": 141,
+      "regressedSeeds": 0,
+      "tiedSeeds": 115,
+      "twoSidedSignTestP": 7.17464813734e-43
     }
   ],
   "movementAblation": {
     "macro": "deterministic_fallback",
     "facingAblationIncluded": false,
+    "opponentMovementRetained": true,
     "enabled": {
       "variant": "deterministic_fallback",
       "frozenMacro": null,
-      "wins": 147,
-      "losses": 109,
-      "draws": 0,
-      "winRate": 0.574219,
+      "wins": 114,
+      "losses": 136,
+      "draws": 6,
+      "winRate": 0.445313,
       "winRateWilson95": [
-        0.512991,
-        0.633252
+        0.385686,
+        0.506556
       ],
-      "meanScore": 0.574219,
-      "meanTicks": 117.508,
-      "meanDamage": 88.766,
-      "meanDamageReceived": 88.703,
-      "meanMovementActions": 39.457,
+      "meanScore": 0.457031,
+      "meanTicks": 113.996,
+      "meanDamage": 86.266,
+      "meanDamageReceived": 93.156,
+      "meanMovementActions": 37.586,
       "illegalActionAttempts": 0,
-      "cohortHash": "56ee2bc7ca0817ac702c7f024785d7e1c11c808c96313a44e2409a88bb3ad80f"
+      "cohortHash": "6882cc59bdc24709098bbe7fbc3b00a857deef1ce29a5ff28ec72a43c30cbb70",
+      "behaviorHash": "3bacfda51714f4dc7e44804eb7d65d116fd843d7e050262ec6224931b76ba9d4"
     },
     "disabled": {
       "variant": "deterministic_fallback",
       "frozenMacro": null,
-      "wins": 256,
-      "losses": 0,
-      "draws": 0,
-      "winRate": 1,
+      "wins": 90,
+      "losses": 165,
+      "draws": 1,
+      "winRate": 0.351563,
       "winRateWilson95": [
-        0.985216,
-        1
+        0.295662,
+        0.411852
       ],
-      "meanScore": 1,
-      "meanTicks": 134.445,
-      "meanDamage": 102.027,
-      "meanDamageReceived": 0,
-      "meanMovementActions": 45.125,
+      "meanScore": 0.353516,
+      "meanTicks": 111.391,
+      "meanDamage": 83.668,
+      "meanDamageReceived": 95.516,
+      "meanMovementActions": 37.121,
       "illegalActionAttempts": 0,
-      "cohortHash": "48198324fcaf6c4487432193c7785b044c429e2cd5ff85ae82fc98797e6fa4bd"
+      "cohortHash": "f8eae27ffd8b66a23a09e525c3446b9ef45af4380cafd7f52dcb672684ff1ec3",
+      "behaviorHash": "b75f5641d5a7f448b489087f561c49cd3b05e521a098c8d7fdc677d5c0c95153"
     },
-    "disabledMinusEnabledMeanScore": 0.425781,
-    "disabledImprovedSeeds": 109,
-    "disabledRegressedSeeds": 0,
-    "tiedSeeds": 147,
-    "twoSidedSignTestP": 3.08148791102e-33
+    "disabledMinusEnabledMeanScore": -0.103516,
+    "disabledImprovedSeeds": 36,
+    "disabledRegressedSeeds": 63,
+    "tiedSeeds": 157,
+    "twoSidedSignTestP": 0.00863358694342
   },
   "roleMatrix": {
     "seedCountPerPairing": 64,
@@ -304,68 +314,68 @@
       {
         "fighterA": "melee",
         "fighterB": "melee",
-        "wins": 26,
-        "losses": 35,
-        "draws": 3,
-        "meanScore": 0.429688,
-        "meanTicks": 111.219,
+        "wins": 31,
+        "losses": 31,
+        "draws": 2,
+        "meanScore": 0.5,
+        "meanTicks": 152.641,
         "illegalActionAttempts": 0,
-        "cohortHash": "aa9f88c12308dc937358b1843a145f18d43f7441c2f843a702be2feff25b628e"
+        "cohortHash": "3a155dbc23b8f4fcfda8199476e0ca37764851c473af59450a3a688bf1180f73"
       },
       {
         "fighterA": "melee",
+        "fighterB": "ranged",
+        "wins": 36,
+        "losses": 27,
+        "draws": 1,
+        "meanScore": 0.570313,
+        "meanTicks": 113.016,
+        "illegalActionAttempts": 0,
+        "cohortHash": "886b489d9000480531d81d5ef61c108cc00f54fb78d302f46a74e8373dedeef4"
+      },
+      {
+        "fighterA": "melee",
+        "fighterB": "mage",
+        "wins": 63,
+        "losses": 1,
+        "draws": 0,
+        "meanScore": 0.984375,
+        "meanTicks": 117.797,
+        "illegalActionAttempts": 0,
+        "cohortHash": "2c695bfd74862ef9e3159b21268b44c8083ff098b7fe43f07ff433b993177f61"
+      },
+      {
+        "fighterA": "ranged",
+        "fighterB": "melee",
+        "wins": 30,
+        "losses": 34,
+        "draws": 0,
+        "meanScore": 0.46875,
+        "meanTicks": 115.359,
+        "illegalActionAttempts": 0,
+        "cohortHash": "608151243ebe1920006693a9a036d031d82b0e8bb7bb72674c4a7ccbc75951a4"
+      },
+      {
+        "fighterA": "ranged",
         "fighterB": "ranged",
         "wins": 30,
         "losses": 33,
         "draws": 1,
         "meanScore": 0.476563,
-        "meanTicks": 120.781,
+        "meanTicks": 120.344,
         "illegalActionAttempts": 0,
-        "cohortHash": "63d0938ee6a042baa6753ec4abc8e63a276e9475d28589c47ce3650d8f6260f9"
+        "cohortHash": "cb8b2f44205be3981a6b28b7d092f3b7c131ac38894e54fc5b9f75418a42323c"
       },
       {
-        "fighterA": "melee",
+        "fighterA": "ranged",
         "fighterB": "mage",
-        "wins": 63,
-        "losses": 0,
-        "draws": 1,
-        "meanScore": 0.992188,
-        "meanTicks": 123.953,
-        "illegalActionAttempts": 0,
-        "cohortHash": "dcff89daab720efbeb5891a09d666229abf0436baae2d2d22e6ffc42a62f0bb6"
-      },
-      {
-        "fighterA": "ranged",
-        "fighterB": "melee",
-        "wins": 39,
-        "losses": 25,
-        "draws": 0,
-        "meanScore": 0.609375,
-        "meanTicks": 120.578,
-        "illegalActionAttempts": 0,
-        "cohortHash": "5bf0b8dbcb9b9cec859baacb4bf62b5faa638771aa2a7f43f9ded0c17f005b42"
-      },
-      {
-        "fighterA": "ranged",
-        "fighterB": "ranged",
-        "wins": 29,
-        "losses": 33,
+        "wins": 61,
+        "losses": 1,
         "draws": 2,
-        "meanScore": 0.46875,
-        "meanTicks": 120.281,
+        "meanScore": 0.96875,
+        "meanTicks": 135.531,
         "illegalActionAttempts": 0,
-        "cohortHash": "a0c182f6be4bc2d8f719f091decf4a4103e41047a642ff226ba874f684e6a47d"
-      },
-      {
-        "fighterA": "ranged",
-        "fighterB": "mage",
-        "wins": 63,
-        "losses": 0,
-        "draws": 1,
-        "meanScore": 0.992188,
-        "meanTicks": 136.203,
-        "illegalActionAttempts": 0,
-        "cohortHash": "a591110de2114320dd7f331e0042fc2c8c8d48ae875184d7e3c20e239a163266"
+        "cohortHash": "45d0262598967746ee44fca3577b73cf4c4a106412f7320906ae68decbe92d49"
       },
       {
         "fighterA": "mage",
@@ -374,9 +384,9 @@
         "losses": 64,
         "draws": 0,
         "meanScore": 0,
-        "meanTicks": 123.125,
+        "meanTicks": 120.453,
         "illegalActionAttempts": 0,
-        "cohortHash": "bb2793e8d23e2c124bec94376b8c8db98a4ad7f503f47209d2b0fa6baae2997a"
+        "cohortHash": "1c31b7dddf2cdb5dab9e09771846bb189a20c0eb165966f173c5a159e5757607"
       },
       {
         "fighterA": "mage",
@@ -387,7 +397,7 @@
         "meanScore": 0,
         "meanTicks": 136.047,
         "illegalActionAttempts": 0,
-        "cohortHash": "6748f94eaa92d12ddbe5552c257cb83da657abfeacf36faf1e0ca96ae6597245"
+        "cohortHash": "592c46ab1099f9d9ffbf63cf63384c3edaa38bd8acaf6fc8b181b82c329c41fb"
       },
       {
         "fighterA": "mage",
@@ -398,7 +408,7 @@
         "meanScore": 0.546875,
         "meanTicks": 180.375,
         "illegalActionAttempts": 0,
-        "cohortHash": "0eaf7973afa3aaa4e523e37b1e3b446c1b45522a93a8b3fb15957d2e22c62cbc"
+        "cohortHash": "c2b72672a2cd99eaea3e10d2868c5391493123d3b2b00973793247d05f979737"
       }
     ]
   },
@@ -413,47 +423,49 @@
     "fixed": {
       "variant": "deterministic_fallback",
       "frozenMacro": null,
-      "wins": 113,
-      "losses": 133,
-      "draws": 10,
-      "winRate": 0.441406,
+      "wins": 137,
+      "losses": 111,
+      "draws": 8,
+      "winRate": 0.535156,
       "winRateWilson95": [
-        0.381891,
-        0.502654
+        0.47399,
+        0.595283
       ],
-      "meanScore": 0.460938,
-      "meanTicks": 113.121,
-      "meanDamage": 89.387,
-      "meanDamageReceived": 91.887,
-      "meanMovementActions": 22.227,
+      "meanScore": 0.550781,
+      "meanTicks": 155.566,
+      "meanDamage": 90.254,
+      "meanDamageReceived": 86.75,
+      "meanMovementActions": 52.02,
       "illegalActionAttempts": 0,
-      "cohortHash": "1efd817ea78f86c4aa72896418dbf1906435bf418e43354dda9d67f7c2dc7d15"
+      "cohortHash": "895ce33dc278952cf0cab003834c5070ef4d846427b289311e267c9b496ace99",
+      "behaviorHash": "5530bfbd20a462d874aa21ed72b2872bcfb9b84394423e2b6a08a6dc1e7204ee"
     },
     "multiStyle": {
       "variant": "deterministic_fallback",
       "frozenMacro": null,
-      "wins": 99,
-      "losses": 153,
-      "draws": 4,
-      "winRate": 0.386719,
+      "wins": 125,
+      "losses": 129,
+      "draws": 2,
+      "winRate": 0.488281,
       "winRateWilson95": [
-        0.329156,
-        0.447631
+        0.427677,
+        0.549232
       ],
-      "meanScore": 0.394531,
-      "meanTicks": 111.582,
-      "meanDamage": 85.668,
-      "meanDamageReceived": 93.137,
-      "meanMovementActions": 29.238,
+      "meanScore": 0.492188,
+      "meanTicks": 118.52,
+      "meanDamage": 87.613,
+      "meanDamageReceived": 88.898,
+      "meanMovementActions": 38.492,
       "illegalActionAttempts": 0,
-      "cohortHash": "fa993c4e0b555d239a73c0a65a7553f02de5e83e2923b388177ace2a58af8dd0"
+      "cohortHash": "c312296c83f89d675ba10305571ac5cdaad7f5eccd6fada3e9229db7c9f9af5e",
+      "behaviorHash": "a64181f64b2e97c1fcef216b17893db5153669997237fa4ca6ba273bf38809f0"
     },
-    "meanSuccessfulSwitches": 4,
-    "multiStyleMinusFixedMeanScore": -0.066406,
-    "multiStyleImprovedSeeds": 42,
-    "multiStyleRegressedSeeds": 60,
-    "tiedSeeds": 154,
-    "twoSidedSignTestP": 0.0918376782691,
+    "meanSuccessfulSwitches": 1,
+    "multiStyleMinusFixedMeanScore": -0.058594,
+    "multiStyleImprovedSeeds": 62,
+    "multiStyleRegressedSeeds": 77,
+    "tiedSeeds": 117,
+    "twoSidedSignTestP": 0.234931503291,
     "durableCustodyIncluded": false
   },
   "preparationAblation": {
@@ -465,7 +477,7 @@
       "world/assets/manifests/items/ammunition.json",
       "world/assets/manifests/items/food.json"
     ],
-    "authoredInputHash": "2b5733049b067fc61c85409d168807c2f492bb6817a8a4b10169ebfde7a4440c",
+    "authoredInputHash": "48872d679cd11ec37560b2dc6c887cd9c8b9c5e859b0270e7d8ddd36968dfc34",
     "requirementsValidated": true,
     "allCohortsReplayed": true,
     "commonRandomNumbers": true,
@@ -492,12 +504,12 @@
         "losses": 256,
         "draws": 0,
         "meanScore": 0,
-        "meanHealthMargin": -95.805,
+        "meanHealthMargin": -96.91,
         "meanDamage": 2.914,
         "meanFoodConsumed": 0,
         "meanAmmunitionRemaining": 0,
         "illegalActionAttempts": 0,
-        "cohortHash": "397a33c0c73751e9bb89f337c58fa86d132c561d5925463b50a875c2bc05b3a9"
+        "cohortHash": "5ab36f25168d5b236fad52005440159ab3b5c8630e58a4635336d1364f81b01d"
       },
       {
         "cohort": "trained",
@@ -517,12 +529,12 @@
         "losses": 256,
         "draws": 0,
         "meanScore": 0,
-        "meanHealthMargin": -88.609,
+        "meanHealthMargin": -89.715,
         "meanDamage": 10.109,
         "meanFoodConsumed": 0,
         "meanAmmunitionRemaining": 0,
         "illegalActionAttempts": 0,
-        "cohortHash": "250580847f8aa291490fba1a54715e1346f55f5f9d0614e1ebf884182a6b877c"
+        "cohortHash": "99851d38747334d1d1447979003f9802d4d7d8bf7dbddb30e45c4ee84288d162"
       },
       {
         "cohort": "equipped",
@@ -542,12 +554,12 @@
         "losses": 256,
         "draws": 0,
         "meanScore": 0,
-        "meanHealthMargin": -93.207,
+        "meanHealthMargin": -94.312,
         "meanDamage": 5.512,
         "meanFoodConsumed": 0,
         "meanAmmunitionRemaining": 0,
         "illegalActionAttempts": 0,
-        "cohortHash": "a9fac2c3ce3dd448f7002b0fc7df1b74b56efb8cd7054b6ae9c9cad313e7126f"
+        "cohortHash": "560e20c7dde13b4072bee38545bf2dbf0a8851901b52bcd54681cc70033e81ab"
       },
       {
         "cohort": "ammunition_provisioned",
@@ -567,12 +579,12 @@
         "losses": 256,
         "draws": 0,
         "meanScore": 0,
-        "meanHealthMargin": -78.371,
-        "meanDamage": 20.348,
+        "meanHealthMargin": -80.383,
+        "meanDamage": 19.441,
         "meanFoodConsumed": 0,
-        "meanAmmunitionRemaining": 58.16,
+        "meanAmmunitionRemaining": 60.375,
         "illegalActionAttempts": 0,
-        "cohortHash": "a394f9c6d192372f22e8aa663b9d387d7a0e9482a6f7bd02ee95465fbe3b1938"
+        "cohortHash": "a6a252ba0a06709839c0b758b6b2b846c1ac6b8e8d319ac0b0f15519a33453ea"
       },
       {
         "cohort": "food_provisioned",
@@ -592,12 +604,12 @@
         "losses": 256,
         "draws": 0,
         "meanScore": 0,
-        "meanHealthMargin": -73.863,
+        "meanHealthMargin": -90.27,
         "meanDamage": 2.914,
-        "meanFoodConsumed": 3.922,
+        "meanFoodConsumed": 4,
         "meanAmmunitionRemaining": 0,
         "illegalActionAttempts": 0,
-        "cohortHash": "c360d0b252f72a0bafa59d31f662ff9a6b3abc53d65f8b01185a7e52126bd575"
+        "cohortHash": "a658a5513636c047bac5c3c76a76b423a8087c1ded3856e8718d9dcd2ebaf2c6"
       },
       {
         "cohort": "fully_prepared",
@@ -617,12 +629,12 @@
         "losses": 0,
         "draws": 0,
         "meanScore": 1,
-        "meanHealthMargin": 57.109,
+        "meanHealthMargin": 55.516,
         "meanDamage": 103.953,
-        "meanFoodConsumed": 0.977,
+        "meanFoodConsumed": 0.996,
         "meanAmmunitionRemaining": 74.836,
         "illegalActionAttempts": 0,
-        "cohortHash": "2712fa71540e54d9f627d060d44a4ae71e4617f0c3336b41e776ed6c6598b4ae"
+        "cohortHash": "1c9e391952c66556d330edb4553ccd55cbd39c776968a264b694799b6278e270"
       }
     ],
     "pairedAgainstBaseline": [
@@ -653,7 +665,7 @@
         "dimension": "ammunition",
         "baseline": "baseline",
         "meanScoreDelta": 0,
-        "meanHealthMarginDelta": 17.434,
+        "meanHealthMarginDelta": 16.527,
         "improvedSeeds": 255,
         "regressedSeeds": 0,
         "tiedSeeds": 1,
@@ -664,24 +676,173 @@
         "dimension": "food",
         "baseline": "baseline",
         "meanScoreDelta": 0,
-        "meanHealthMarginDelta": 21.941,
-        "improvedSeeds": 184,
+        "meanHealthMarginDelta": 6.641,
+        "improvedSeeds": 101,
         "regressedSeeds": 0,
-        "tiedSeeds": 72,
-        "twoSidedSignTestP": 8.156630585e-56
+        "tiedSeeds": 155,
+        "twoSidedSignTestP": 7.88860905221e-31
       },
       {
         "cohort": "fully_prepared",
         "dimension": "combined",
         "baseline": "baseline",
         "meanScoreDelta": 1,
-        "meanHealthMarginDelta": 152.914,
+        "meanHealthMarginDelta": 152.426,
         "improvedSeeds": 256,
         "regressedSeeds": 0,
         "tiedSeeds": 0,
         "twoSidedSignTestP": 1.72723371102e-77
       }
     ]
+  },
+  "supplyChainAblation": {
+    "fighterA": "ranged",
+    "fighterB": "melee",
+    "authoredManifestInputs": true,
+    "authoredManifestSourceFiles": [
+      "world/assets/manifests/recipes/fletching.json",
+      "world/assets/manifests/recipes/smelting.json",
+      "world/assets/manifests/recipes/smithing.json",
+      "world/assets/manifests/gathering/mining.json",
+      "world/assets/manifests/gathering/woodcutting.json",
+      "world/assets/manifests/stores.json"
+    ],
+    "authoredInputHash": "25d141f28f19f7a1c03527b26736ef6958dc10641753701af2f5e349b041cba9",
+    "recipeGraphValidated": true,
+    "commonRandomNumbers": true,
+    "allCohortsReplayed": true,
+    "technicalResultOnly": true,
+    "productAcceptanceThreshold": null,
+    "acquisitionProvenanceChangesCombatStats": false,
+    "productionProcessingAuthorityIncluded": false,
+    "productionInventoryAuthorityIncluded": false,
+    "durableCustodyIncluded": false,
+    "lineage": {
+      "targetItemId": "bronze_arrow",
+      "readinessTargetQuantity": 50,
+      "outputQuantityPerBatch": 15,
+      "incompleteBatchCount": 1,
+      "incompleteOutputQuantity": 15,
+      "completeBatchCount": 4,
+      "completeOutputQuantity": 60,
+      "exactGatheringInputs": [
+        {
+          "itemId": "copper_ore",
+          "resourceId": "ore_copper",
+          "quantity": 4
+        },
+        {
+          "itemId": "tin_ore",
+          "resourceId": "ore_tin",
+          "quantity": 4
+        },
+        {
+          "itemId": "logs",
+          "resourceId": "tree_bamboo",
+          "quantity": 4
+        }
+      ],
+      "exactStoreLeafInputs": [
+        {
+          "itemId": "feathers",
+          "quantity": 60,
+          "storeId": "range_store"
+        }
+      ],
+      "exactProcessingActions": [
+        {
+          "activity": "smelting",
+          "stableId": "bronze_bar",
+          "actions": 4,
+          "outputItemId": "bronze_bar",
+          "outputQuantity": 4
+        },
+        {
+          "activity": "smithing",
+          "stableId": "bronze_arrowtips",
+          "actions": 4,
+          "outputItemId": "bronze_arrowtips",
+          "outputQuantity": 60
+        },
+        {
+          "activity": "fletching",
+          "stableId": "arrow_shaft:logs",
+          "actions": 4,
+          "outputItemId": "arrow_shaft",
+          "outputQuantity": 60
+        },
+        {
+          "activity": "fletching",
+          "stableId": "headless_arrow",
+          "actions": 4,
+          "outputItemId": "headless_arrow",
+          "outputQuantity": 60
+        },
+        {
+          "activity": "fletching",
+          "stableId": "bronze_arrow:bronze_arrowtips",
+          "actions": 4,
+          "outputItemId": "bronze_arrow",
+          "outputQuantity": 60
+        }
+      ]
+    },
+    "incomplete": {
+      "cohort": "one_batch_incomplete",
+      "dimension": "gathering_processing",
+      "rangedLevel": 30,
+      "weaponId": "shortbow",
+      "weaponRangedRequirement": 1,
+      "rangedAttackBonus": 8,
+      "ammunitionId": "bronze_arrow",
+      "ammunitionRangedRequirement": 1,
+      "rangedStrengthBonus": 7,
+      "ammunitionQuantity": 15,
+      "foodItemId": null,
+      "foodQuantity": 0,
+      "foodHealAmount": 0,
+      "wins": 0,
+      "losses": 256,
+      "draws": 0,
+      "meanScore": 0,
+      "meanHealthMargin": -92.512,
+      "meanDamage": 7.313,
+      "meanFoodConsumed": 0,
+      "meanAmmunitionRemaining": 0,
+      "illegalActionAttempts": 0,
+      "cohortHash": "ee363c6c8bf89452d2d36fb26b275b973c4531f983677f7887a7e5da5afb2f66"
+    },
+    "completed": {
+      "cohort": "minimum_complete_batches",
+      "dimension": "gathering_processing",
+      "rangedLevel": 30,
+      "weaponId": "shortbow",
+      "weaponRangedRequirement": 1,
+      "rangedAttackBonus": 8,
+      "ammunitionId": "bronze_arrow",
+      "ammunitionRangedRequirement": 1,
+      "rangedStrengthBonus": 7,
+      "ammunitionQuantity": 60,
+      "foodItemId": null,
+      "foodQuantity": 0,
+      "foodHealAmount": 0,
+      "wins": 0,
+      "losses": 256,
+      "draws": 0,
+      "meanScore": 0,
+      "meanHealthMargin": -80.383,
+      "meanDamage": 19.441,
+      "meanFoodConsumed": 0,
+      "meanAmmunitionRemaining": 20.375,
+      "illegalActionAttempts": 0,
+      "cohortHash": "e70ba1a637dd306d5b055cb00332498e0ea19b32a21d8c30126bc6b39c1749ab"
+    },
+    "completedMinusIncompleteMeanScore": 0,
+    "completedMinusIncompleteMeanHealthMargin": 12.129,
+    "completedImprovedSeeds": 252,
+    "completedRegressedSeeds": 0,
+    "tiedSeeds": 4,
+    "twoSidedSignTestP": 2.76357393763e-76
   },
   "prayerAblation": {
     "authoredManifestInput": true,
@@ -700,47 +861,49 @@
         "enabled": {
           "variant": "deterministic_fallback",
           "frozenMacro": null,
-          "wins": 114,
-          "losses": 134,
-          "draws": 8,
-          "winRate": 0.445313,
+          "wins": 128,
+          "losses": 119,
+          "draws": 9,
+          "winRate": 0.5,
           "winRateWilson95": [
-            0.385686,
-            0.506556
+            0.439206,
+            0.560794
           ],
-          "meanScore": 0.460938,
-          "meanTicks": 104.84,
-          "meanDamage": 88.793,
-          "meanDamageReceived": 92.383,
-          "meanMovementActions": 20.875,
+          "meanScore": 0.517578,
+          "meanTicks": 144.227,
+          "meanDamage": 90.074,
+          "meanDamageReceived": 88.156,
+          "meanMovementActions": 48.336,
           "illegalActionAttempts": 0,
-          "cohortHash": "9acb3e9d2c024a03b92c2b525b61905d70935380437cee7f578d7a170aa0b010"
+          "cohortHash": "23acceff94387b7d542c834286a71f72ef48aa992d12d63d11c71da1fcfb7db1",
+          "behaviorHash": "6e086fb3562df6f745d1d4bca921b2ab5e1a0fef8e246faa05c32597421e1f31"
         },
         "disabled": {
           "variant": "deterministic_fallback",
           "frozenMacro": null,
-          "wins": 79,
-          "losses": 170,
-          "draws": 7,
-          "winRate": 0.308594,
+          "wins": 103,
+          "losses": 144,
+          "draws": 9,
+          "winRate": 0.402344,
           "winRateWilson95": [
-            0.255189,
-            0.367658
+            0.344146,
+            0.463429
           ],
-          "meanScore": 0.322266,
-          "meanTicks": 107.543,
-          "meanDamage": 84.762,
-          "meanDamageReceived": 95.754,
-          "meanMovementActions": 21.738,
+          "meanScore": 0.419922,
+          "meanTicks": 149.387,
+          "meanDamage": 86.805,
+          "meanDamageReceived": 91.684,
+          "meanMovementActions": 50.027,
           "illegalActionAttempts": 0,
-          "cohortHash": "d4a5d9d7a98631c44ddf6d9782cdafe880cfb03f0529ff6cbf83073cac33906c"
+          "cohortHash": "d57add120ee884488ea4eb940b219e41e4964ee779657e53ccd156e7f6ac490c",
+          "behaviorHash": "206976bc3910e77542e0d5c6d340cc4b39f51b49aa2884ccf71732871bf6a16b"
         },
-        "meanHealthMarginDelta": 6.648,
-        "enabledImprovedSeeds": 193,
-        "enabledRegressedSeeds": 53,
-        "tiedSeeds": 10,
-        "twoSidedSignTestP": 7.02104254075e-20,
-        "meanEnabledPrayerCommits": 1.867,
+        "meanHealthMarginDelta": 6.035,
+        "enabledImprovedSeeds": 229,
+        "enabledRegressedSeeds": 1,
+        "tiedSeeds": 26,
+        "twoSidedSignTestP": 2.67758319003e-67,
+        "meanEnabledPrayerCommits": 1.746,
         "disabledPrayerCommits": 0
       },
       {
@@ -749,47 +912,49 @@
         "enabled": {
           "variant": "deterministic_fallback",
           "frozenMacro": null,
-          "wins": 161,
-          "losses": 94,
+          "wins": 142,
+          "losses": 113,
           "draws": 1,
-          "winRate": 0.628906,
+          "winRate": 0.554688,
           "winRateWilson95": [
-            0.56823,
-            0.685771
+            0.493444,
+            0.614314
           ],
-          "meanScore": 0.630859,
-          "meanTicks": 105.027,
-          "meanDamage": 91.695,
-          "meanDamageReceived": 84.285,
-          "meanMovementActions": 35.301,
+          "meanScore": 0.556641,
+          "meanTicks": 102.125,
+          "meanDamage": 89.027,
+          "meanDamageReceived": 87.398,
+          "meanMovementActions": 33.227,
           "illegalActionAttempts": 0,
-          "cohortHash": "e6197c974b600f6cff3db85b17b60779d92552ca2727213ef0246f9fbbb3e2ba"
+          "cohortHash": "9841e8b1c68d06953b88b499169a748f998476b614a720a168c677134cd994fe",
+          "behaviorHash": "8858f8438333a9e9c49176706986c386f50fdc42bf349fe5c7b8aa3b95da4d49"
         },
         "disabled": {
           "variant": "deterministic_fallback",
           "frozenMacro": null,
-          "wins": 115,
-          "losses": 141,
-          "draws": 0,
-          "winRate": 0.449219,
+          "wins": 86,
+          "losses": 166,
+          "draws": 4,
+          "winRate": 0.335938,
           "winRateWilson95": [
-            0.389485,
-            0.510454
+            0.280883,
+            0.395843
           ],
-          "meanScore": 0.449219,
-          "meanTicks": 111.324,
-          "meanDamage": 84.336,
-          "meanDamageReceived": 92.164,
-          "meanMovementActions": 37.434,
+          "meanScore": 0.34375,
+          "meanTicks": 107.664,
+          "meanDamage": 81.043,
+          "meanDamageReceived": 96.305,
+          "meanMovementActions": 35.727,
           "illegalActionAttempts": 0,
-          "cohortHash": "f2e29de4e376f786aa8e9bb533b4185bdbb7b220b9bcd7c53367d2ca88dfe4eb"
+          "cohortHash": "378d47b6de6a2a86477dea0652fedcc8eb315493adf79098387d90922626b357",
+          "behaviorHash": "ca64e29665123fd7c7b005cc591e9563cbe6629ad43030966ec5637694002050"
         },
-        "meanHealthMarginDelta": 14.039,
-        "enabledImprovedSeeds": 228,
-        "enabledRegressedSeeds": 23,
-        "tiedSeeds": 5,
-        "twoSidedSignTestP": 1.30846194203e-43,
-        "meanEnabledPrayerCommits": 1.754,
+        "meanHealthMarginDelta": 15.57,
+        "enabledImprovedSeeds": 236,
+        "enabledRegressedSeeds": 18,
+        "tiedSeeds": 2,
+        "twoSidedSignTestP": 1.22006303558e-49,
+        "meanEnabledPrayerCommits": 1.781,
         "disabledPrayerCommits": 0
       },
       {
@@ -807,41 +972,43 @@
             0.028033
           ],
           "meanScore": 0.007813,
-          "meanTicks": 111.898,
-          "meanDamage": 48.57,
-          "meanDamageReceived": 103.434,
-          "meanMovementActions": 37.656,
+          "meanTicks": 110.113,
+          "meanDamage": 47.613,
+          "meanDamageReceived": 104.027,
+          "meanMovementActions": 37.137,
           "illegalActionAttempts": 0,
-          "cohortHash": "0f7c82e9d35f5016039aad34937db1814b1a9679358810937d1821e580d9560c"
+          "cohortHash": "5b58c453c12245ee9cbf6e306909555f9e8ed58c3659f9427d93f68db15213a7",
+          "behaviorHash": "aa8bd2f7a007fe35fb33b3a748d93f1f54ed8fd31624d84024940a388c538942"
         },
         "disabled": {
           "variant": "deterministic_fallback",
           "frozenMacro": null,
-          "wins": 2,
-          "losses": 254,
+          "wins": 1,
+          "losses": 255,
           "draws": 0,
-          "winRate": 0.007813,
+          "winRate": 0.003906,
           "winRateWilson95": [
-            0.002145,
-            0.028033
+            0.00069,
+            0.021791
           ],
-          "meanScore": 0.007813,
-          "meanTicks": 111.891,
-          "meanDamage": 45.637,
-          "meanDamageReceived": 103.531,
-          "meanMovementActions": 37.648,
+          "meanScore": 0.003906,
+          "meanTicks": 110.137,
+          "meanDamage": 45.016,
+          "meanDamageReceived": 104.191,
+          "meanMovementActions": 37.172,
           "illegalActionAttempts": 0,
-          "cohortHash": "d668f9b5920623554eb719fc27af4eb8bf50f6e934d577e6e33626e993ba6127"
+          "cohortHash": "0ea1d8fedd34ecd7d22c6272f49b74d90e267ddb414d98d04e4c638698831b24",
+          "behaviorHash": "718acd179c1ee9684bd7f68a50a4f3a39927dad7b2c58c1aed18c7fe17e99481"
         },
-        "meanHealthMarginDelta": 2.934,
+        "meanHealthMarginDelta": 2.719,
         "enabledImprovedSeeds": 107,
-        "enabledRegressedSeeds": 0,
-        "tiedSeeds": 149,
-        "twoSidedSignTestP": 1.23259516441e-32,
+        "enabledRegressedSeeds": 1,
+        "tiedSeeds": 148,
+        "twoSidedSignTestP": 6.71764364602e-31,
         "meanEnabledPrayerCommits": 1.996,
         "disabledPrayerCommits": 0
       }
     ]
   },
-  "reportHash": "0f4bff38ebfd6ebc87c1eb3ce181133adbfe120b8a89864fda5622259e5866a0"
+  "reportHash": "b85d4f3db9cc150d13e12e237c3b75eafcbef3f66c5c344ca6085b302e01d31d"
 }

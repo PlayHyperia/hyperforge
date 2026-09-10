@@ -31,6 +31,11 @@ import type {
   InventorySystem,
 } from "../character/InventorySystem";
 import { canPlayerUseProcessingStation } from "./ProcessingStationAuthority";
+import {
+  clearProcessingInteractionPresentation,
+  publishProcessingInteractionPresentation,
+} from "./ProcessingInteractionPresentation";
+import type { PlayerProcessingQuiescenceSystem } from "./ProcessingQuiescence";
 
 /** Active smithing session for a player */
 interface SmithingSession {
@@ -59,7 +64,10 @@ interface PendingSmithingAction {
 /** Hammer item ID required for smithing (from centralized constants) */
 const HAMMER_ITEM_ID = SMITHING_CONSTANTS.HAMMER_ITEM_ID;
 
-export class SmithingSystem extends SystemBase {
+export class SmithingSystem
+  extends SystemBase
+  implements PlayerProcessingQuiescenceSystem
+{
   private readonly activeSessions = new Map<string, SmithingSession>();
   private readonly authorizedAnvils = new Map<string, string>();
   private readonly pendingActions = new Map<string, PendingSmithingAction>();
@@ -372,6 +380,11 @@ export class SmithingSystem extends SystemBase {
     };
 
     this.activeSessions.set(playerId, session);
+    publishProcessingInteractionPresentation(this.world, {
+      playerId,
+      skill: "smithing",
+      targetEntityId: anvilId,
+    });
     this.reportProcessingRequestProgress(
       playerId,
       requestId,
@@ -595,19 +608,27 @@ export class SmithingSystem extends SystemBase {
         continue;
       }
 
+      if (receipt.xpAmount > 0) {
+        this.emitTypedEvent(EventType.SKILLS_PROGRESS_COMMITTED, {
+          playerId: receipt.playerId,
+          operationId: receipt.operationId,
+          replayed: receipt.replayed,
+          skill: receipt.skill,
+          xpAmount: receipt.xpAmount,
+          awardedXp: receipt.awardedXp,
+          operationCommittedXp: receipt.operationCommittedXp,
+          currentXp: receipt.currentXp,
+          currentLevel: receipt.currentLevel,
+        });
+      }
       this.pendingActions.delete(pending.playerId);
       const session = this.activeSessions.get(pending.playerId);
       if (!session || session.recipeId !== pending.recipeId) continue;
-      this.emitTypedEvent(EventType.ANIMATION_PLAY, {
-        entityId: pending.playerId,
-        animation: "smithing",
-        loop: false,
-      });
-      if (receipt.awardedXp > 0) {
-        this.emitTypedEvent(EventType.SKILLS_XP_GAINED, {
-          playerId: pending.playerId,
-          skill: "smithing",
-          amount: receipt.awardedXp,
+      if (!pending.stopAfterCommit) {
+        this.emitTypedEvent(EventType.ANIMATION_PLAY, {
+          entityId: pending.playerId,
+          animation: "smithing",
+          loop: false,
         });
       }
       session.smithed++;
@@ -615,11 +636,13 @@ export class SmithingSystem extends SystemBase {
         commitRecipe.outputQuantity > 1
           ? `${commitRecipe.outputQuantity} ${recipe.name}`
           : `a ${recipe.name}`;
-      this.emitTypedEvent(EventType.UI_MESSAGE, {
-        playerId: pending.playerId,
-        message: `You hammer the ${recipe.barType.replace("_bar", "")} and make ${qtyText}.`,
-        type: "success",
-      });
+      if (!pending.stopAfterCommit) {
+        this.emitTypedEvent(EventType.UI_MESSAGE, {
+          playerId: pending.playerId,
+          message: `You hammer the ${recipe.barType.replace("_bar", "")} and make ${qtyText}.`,
+          type: "success",
+        });
+      }
       if (!receipt.liveInventoryApplied) {
         this.emitTypedEvent(EventType.UI_MESSAGE, {
           playerId: pending.playerId,
@@ -641,6 +664,7 @@ export class SmithingSystem extends SystemBase {
     if (!session) return;
 
     this.activeSessions.delete(playerId);
+    clearProcessingInteractionPresentation(this.world, playerId, "smithing");
 
     const recipe = processingDataProvider.getSmithingRecipe(session.recipeId);
 
@@ -660,6 +684,7 @@ export class SmithingSystem extends SystemBase {
    * Cancel smithing for a player
    */
   private cancelSmithing(playerId: string): void {
+    clearProcessingInteractionPresentation(this.world, playerId, "smithing");
     const pending = this.pendingActions.get(playerId);
     if (pending) {
       pending.stopAfterCommit = true;
@@ -725,6 +750,17 @@ export class SmithingSystem extends SystemBase {
    */
   isPlayerSmithing(playerId: string): boolean {
     return this.activeSessions.has(playerId);
+  }
+
+  requestPlayerProcessingQuiescence(playerId: string): void {
+    this.authorizedAnvils.delete(playerId);
+    this.cancelSmithing(playerId);
+  }
+
+  isPlayerProcessingQuiescent(playerId: string): boolean {
+    return (
+      !this.activeSessions.has(playerId) && !this.pendingActions.has(playerId)
+    );
   }
 
   canPlayerUseAnvil(playerId: string, anvilId: string): boolean {

@@ -47,9 +47,25 @@ import type { VRMHumanBoneName } from "@pixiv/three-vrm";
 import { getTextureBytesFromMaterial } from "./getTextureBytesFromMaterial";
 import { getTrianglesFromGeometry } from "./getTrianglesFromGeometry";
 import { PlayerHitReactionController } from "./PlayerHitReactionController";
+import {
+  ARM38_ACCEPTED_ASSET_SHA256,
+  Authored38ArmRetarget,
+  type Arm38Humanoid,
+} from "./Authored38ArmRetarget";
+import {
+  collectAvatarAuthoredMotionDiagnostics,
+  EMPTY_AVATAR_AUTHORED_MOTION_DIAGNOSTICS,
+} from "./AvatarAuthoredMotionDiagnostics";
+import { applyAnimationActionStartTime } from "./AnimationActionStartTime";
+import {
+  avatarEmoteBlendSecondsFor,
+  fadeInAvatarEmote,
+  fadeOutAvatarEmote,
+} from "./AvatarEmoteTransition";
 import type { HitReactionSide } from "../../utils/rendering/HitReaction";
 import THREE, {
   MeshBasicNodeMaterial,
+  MeshPhysicalNodeMaterial,
   MeshStandardNodeMaterial,
 } from "./three";
 
@@ -112,32 +128,24 @@ function isBoneLike(value: unknown): value is BoneLike {
 }
 
 /**
- * Create VRM Avatar Factory
- *
- * Prepares a VRM model for instancing with animations and optimizations.
- *
- * @param glb - Loaded VRM GLB data
- * @param setupMaterial - Optional material setup function (for CSM shadows)
- * @returns Factory object with create() method and stats tracking
+ * A Three.js bone matrixWorld already includes every ancestor transform,
+ * including the moved avatar scene. Copy it directly: multiplying the avatar
+ * scene matrix a second time rotates/translates world coordinates twice.
  */
-export function createVRMFactory(
-  glb: GLBData,
-  setupMaterial?: (material: THREE.Material) => void,
-) {
-  // we'll update matrix ourselves
-  glb.scene.matrixAutoUpdate = false;
-  glb.scene.matrixWorldAutoUpdate = false;
-  // remove expressions from scene
-  const expressions = glb.scene.children.filter(n => n.type === 'VRMExpression'); // prettier-ignore
-  for (const node of expressions) node.removeFromParent();
-  // KEEP VRMHumanoidRig - we need normalized bones for A-pose support (Asset Forge approach)
-  // const vrmHumanoidRigs = glb.scene.children.filter(n => n.name === 'VRMHumanoidRig') // prettier-ignore
-  // for (const node of vrmHumanoidRigs) node.removeFromParent()
-  // remove secondary
-  const secondaries = glb.scene.children.filter(n => n.name === 'secondary'); // prettier-ignore
-  for (const node of secondaries) node.removeFromParent();
-  // enable shadows and convert MToon materials to MeshStandardMaterial for proper lighting
-  glb.scene.traverse((obj) => {
+export function copyAvatarBoneWorldTransform(
+  target: THREE.Matrix4,
+  boneWorld: THREE.Matrix4,
+): THREE.Matrix4 {
+  return target.copy(boneWorld);
+}
+
+/** Use the same node-material conversion in the game and avatar review. */
+export function prepareVRMMaterialsForWebGPU(root: THREE.Object3D): void {
+  const convertedMaterials = new Map<
+    THREE.Material,
+    MeshStandardNodeMaterial
+  >();
+  root.traverse((obj) => {
     if (isMeshLike(obj)) {
       obj.castShadow = true;
       obj.receiveShadow = false;
@@ -146,6 +154,35 @@ export function createVRMFactory(
       const convertMaterial = (
         mat: THREE.Material,
       ): MeshStandardNodeMaterial => {
+        const cached = convertedMaterials.get(mat);
+        if (cached) return cached;
+
+        const materialFlags = mat as THREE.Material & {
+          isMeshStandardMaterial?: boolean;
+          isMeshPhysicalMaterial?: boolean;
+          isMeshStandardNodeMaterial?: boolean;
+        };
+        if (materialFlags.isMeshStandardNodeMaterial) {
+          return mat as MeshStandardNodeMaterial;
+        }
+
+        // glTF PBR assets already have authored surface parameters. Use Three's
+        // complete material copy routines so maps, normal scale, transmission,
+        // clearcoat and render state survive the conversion to node materials.
+        // NodeMaterial.copy copies node inputs, not the classic PBR fields.
+        if (materialFlags.isMeshStandardMaterial) {
+          const converted = materialFlags.isMeshPhysicalMaterial
+            ? new MeshPhysicalNodeMaterial()
+            : new MeshStandardNodeMaterial();
+          const copy = materialFlags.isMeshPhysicalMaterial
+            ? THREE.MeshPhysicalMaterial.prototype.copy
+            : THREE.MeshStandardMaterial.prototype.copy;
+          Reflect.apply(copy, converted, [mat]);
+          convertedMaterials.set(mat, converted);
+          mat.dispose();
+          return converted;
+        }
+
         // Extract textures and colors from original material
         const originalMat = mat as THREE.Material & {
           map?: THREE.Texture | null;
@@ -199,6 +236,7 @@ export function createVRMFactory(
         newMat.name = originalMat.name || "VRM_Standard";
 
         // Dispose old material
+        convertedMaterials.set(mat, newMat);
         originalMat.dispose();
 
         return newMat;
@@ -211,6 +249,53 @@ export function createVRMFactory(
       }
     }
   });
+}
+
+/**
+ * Create VRM Avatar Factory
+ *
+ * Prepares a VRM model for instancing with animations and optimizations.
+ *
+ * @param glb - Loaded VRM GLB data
+ * @param setupMaterial - Optional material setup function (for CSM shadows)
+ * @returns Factory object with create() method and stats tracking
+ */
+export function createVRMFactory(
+  glb: GLBData,
+  setupMaterial?: (material: THREE.Material) => void,
+  options: { sourceSHA256?: string } = {},
+) {
+  const restPoseProfile = glb.scene.userData.hyperiaRestPoseProfile;
+  if (
+    restPoseProfile !== undefined &&
+    restPoseProfile !== "body38-arm-apose-v1"
+  ) {
+    throw new Error("Unsupported authored avatar rest-pose profile");
+  }
+  if (restPoseProfile && !options.sourceSHA256) {
+    throw new Error(
+      "Authored rest-pose calibration requires verified avatar bytes",
+    );
+  }
+  if (
+    restPoseProfile &&
+    !ARM38_ACCEPTED_ASSET_SHA256.includes(options.sourceSHA256!)
+  ) {
+    throw new Error("Arm38 calibration requires exact verified package hash");
+  }
+  // we'll update matrix ourselves
+  glb.scene.matrixAutoUpdate = false;
+  glb.scene.matrixWorldAutoUpdate = false;
+  // remove expressions from scene
+  const expressions = glb.scene.children.filter(n => n.type === 'VRMExpression'); // prettier-ignore
+  for (const node of expressions) node.removeFromParent();
+  // Keep the normalized rig for animation-to-raw-bone propagation.
+  // const vrmHumanoidRigs = glb.scene.children.filter(n => n.name === 'VRMHumanoidRig') // prettier-ignore
+  // for (const node of vrmHumanoidRigs) node.removeFromParent()
+  // remove secondary
+  const secondaries = glb.scene.children.filter(n => n.name === 'secondary'); // prettier-ignore
+  for (const node of secondaries) node.removeFromParent();
+  prepareVRMMaterialsForWebGPU(glb.scene);
   // MMO APPROACH: Use cloning with raw bones for memory efficiency
   const humanoid = glb.userData?.vrm?.humanoid;
   const bones = humanoid?._rawHumanBones?.humanBones || {};
@@ -273,9 +358,8 @@ export function createVRMFactory(
     }
   });
 
-  // HYBRID APPROACH: Using Asset Forge's normalized bone system for automatic A-pose handling
-  // By keeping VRMHumanoidRig and using getNormalizedBoneNode() for bone names,
-  // the VRM library's normalized bone abstraction layer handles bind pose compensation automatically
+  // Normalized bones compensate bone axes, not arbitrary anatomical A-rest.
+  // Marked authored A-rest assets require the explicit calibrated clip adapter.
 
   // Get height from bounding box BEFORE normalization
   let originalHeight = 0.5; // minimum
@@ -450,7 +534,7 @@ export function createVRMFactory(
         raw: vrm,
         height,
         headToHeight,
-        setEmote() {
+        setEmote(_url?: string | null, _startTimeSeconds?: number) {
           // Static fallback: no animation system when skeleton binding is unavailable.
         },
         triggerHitReaction() {
@@ -470,6 +554,9 @@ export function createVRMFactory(
             lastIntensity: 0,
             lastSide: 1,
           } as const;
+        },
+        getAuthoredMotionDiagnostics() {
+          return EMPTY_AVATAR_AUTHORED_MOTION_DIAGNOSTICS;
         },
         setFirstPerson() {
           // Static fallback: no reliable neck bone access.
@@ -530,7 +617,7 @@ export function createVRMFactory(
       // Guard against undefined/null bone names
       if (!vrmBoneName || !clonedHumanoid) return undefined;
 
-      // Get normalized bone node from CLONED humanoid - this handles A-pose automatically
+      // Get the normalized animation target from this instance's cloned humanoid.
       const normalizedNode = clonedHumanoid.getNormalizedBoneNode?.(
         vrmBoneName as VRMHumanBoneName,
       );
@@ -584,8 +671,8 @@ export function createVRMFactory(
     vrm.scene.matrixAutoUpdate = false;
     vrm.scene.matrixWorldAutoUpdate = false;
 
-    // A-pose compensation is handled automatically by VRM normalized bones
-    // Cloned instances have their own normalized bones for independent animation
+    // Cloned instances have their own normalized bones for independent animation.
+    // Anatomical A-rest compensation is opt-in below, not supplied by three-vrm.
 
     // PERFORMANCE: Set VRM scene to layer 1 (main camera only, not minimap)
     // Minimap only renders terrain (layer 0) and uses 2D dots for entities
@@ -646,10 +733,22 @@ export function createVRMFactory(
 
     // HYBRID APPROACH: AnimationMixer on vrm.scene (Asset Forge method)
     // Animations target normalized bone names (Normalized_Hips, Normalized_Spine, etc.)
-    // VRM library's normalized bone system handles A-pose automatically via vrm.humanoid.update()
+    // humanoid.update propagates normalized rotations; it does not infer a T-pose.
     // Each clone has its own vrm.scene with cloned normalized bones
     // CRITICAL: Mixer must be on vrm.scene where normalized bones live
+    // Only the explicitly marked, byte-verified A-rest derivative is calibrated.
+    // Ordinary VRMs keep their existing animation path. Original raw rests,
+    // inverse binds and mesh weights remain unchanged on every instance.
+    const armRetarget = restPoseProfile
+      ? new Authored38ArmRetarget(
+          clonedHumanoid as unknown as Arm38Humanoid,
+          options.sourceSHA256!,
+        )
+      : null;
+    armRetarget?.initializeNormalizedPose();
+    if (armRetarget) clonedHumanoid?.update?.(0);
     const mixer = new THREE.AnimationMixer(vrm.scene);
+    let destroyed = false;
     // Track death animation state for future debugging/logging
     let _deathAnimationActive = false;
     let _deathUpdateLogCount = 0;
@@ -705,7 +804,7 @@ export function createVRMFactory(
         }
 
         // Step 2: CRITICAL - Propagate normalized bone transforms to raw bones
-        // This is where the VRM library's automatic A-pose handling happens
+        // Bone-axis propagation uses the preserved source rest transforms.
         // Without this, normalized bone changes never reach the visible skeleton
         if (_tvrm?.humanoid?.update) {
           _tvrm.humanoid.update(elapsed);
@@ -732,6 +831,8 @@ export function createVRMFactory(
       url: string;
       loading: boolean;
       action: THREE.AnimationAction | null;
+      startTimeSeconds: number | undefined;
+      blendDurationSeconds: number;
     }
 
     const emotes: { [url: string]: EmoteData } = {
@@ -742,15 +843,32 @@ export function createVRMFactory(
       // }
     };
     let currentEmote: EmoteData | null;
-    const setEmote = (url) => {
+    const setEmote = (url: string | null, startTimeSeconds?: number) => {
+      if (destroyed) return;
       if (currentEmote?.url === url) {
+        currentEmote.startTimeSeconds = startTimeSeconds;
+        if (currentEmote.action) {
+          const opts = getQueryParams(url || "");
+          currentEmote.action.enabled = true;
+          currentEmote.action.paused = false;
+          applyAnimationActionStartTime(
+            currentEmote.action,
+            mixer,
+            startTimeSeconds,
+            opts.l !== "0",
+          );
+        }
         return;
       }
       if (url?.includes("death") || !url) {
         hitReaction.clear();
       }
+      const blendDurationSeconds = avatarEmoteBlendSecondsFor(
+        currentEmote?.url,
+        url,
+      );
       if (currentEmote) {
-        currentEmote.action?.fadeOut(0.15);
+        fadeOutAvatarEmote(currentEmote.action, blendDurationSeconds);
         // Reset death animation tracking when switching to a different emote
         if (currentEmote.url?.includes("death") && !url?.includes("death")) {
           _deathAnimationActive = false;
@@ -768,6 +886,8 @@ export function createVRMFactory(
 
       if (emotes[url]) {
         currentEmote = emotes[url];
+        currentEmote.startTimeSeconds = startTimeSeconds;
+        currentEmote.blendDurationSeconds = blendDurationSeconds;
         if (currentEmote.action) {
           const action = currentEmote.action;
           // CRITICAL FIX: Fully reset action state before replaying
@@ -779,7 +899,8 @@ export function createVRMFactory(
           action.setEffectiveTimeScale(speed); // Use speed from URL param (e.g. ?s=2.0)
           action.clampWhenFinished = !loop;
           action.setLoop(loop ? THREE.LoopRepeat : THREE.LoopOnce, Infinity);
-          action.reset().fadeIn(0.15).play();
+          fadeInAvatarEmote(action, blendDurationSeconds);
+          applyAnimationActionStartTime(action, mixer, startTimeSeconds, loop);
           // Track death animation state for update timing
           if (url?.includes("death")) {
             _deathAnimationActive = true;
@@ -791,6 +912,8 @@ export function createVRMFactory(
           url,
           loading: true,
           action: null,
+          startTimeSeconds,
+          blendDurationSeconds,
         };
         emotes[url] = newEmote;
         currentEmote = newEmote;
@@ -803,11 +926,15 @@ export function createVRMFactory(
         (hooks.loader as LoaderType)
           .load("emote", url)
           .then((emo) => {
-            const clip = emo.toClip({
+            if (destroyed) return;
+            const retargetedClip = emo.toClip({
               rootToHips,
               version,
               getBoneName,
             });
+            const clip = armRetarget
+              ? armRetarget.prepareClip(retargetedClip)
+              : retargetedClip;
             const action = mixer.clipAction(clip);
             action.timeScale = speed;
             newEmote.action = action;
@@ -821,7 +948,13 @@ export function createVRMFactory(
               );
               // CRITICAL: Use same reset().fadeIn().play() sequence as cached animations
               // Without this, the animation won't blend properly with the previous one
-              action.reset().fadeIn(0.15).play();
+              fadeInAvatarEmote(action, newEmote.blendDurationSeconds);
+              applyAnimationActionStartTime(
+                action,
+                mixer,
+                newEmote.startTimeSeconds,
+                loop,
+              );
               // Track death animation state for update timing
               if (url?.includes("death")) {
                 _deathAnimationActive = true;
@@ -864,8 +997,7 @@ export function createVRMFactory(
     const getBoneTransform = (boneName: string): THREE.Matrix4 | null => {
       const bone = findBone(boneName);
       if (!bone) return null;
-      // combine the scene's world matrix with the bone's world matrix
-      return m1.multiplyMatrices(vrm.scene.matrixWorld, bone.matrixWorld);
+      return copyAvatarBoneWorldTransform(m1, bone.matrixWorld);
     };
 
     // Create a wrapped update function with logging
@@ -881,6 +1013,8 @@ export function createVRMFactory(
       triggerHitReaction,
       clearHitReaction,
       getHitReactionDiagnostics: () => hitReaction.getDiagnostics(),
+      getAuthoredMotionDiagnostics: () =>
+        collectAvatarAuthoredMotionDiagnostics(Object.values(emotes)),
       setFirstPerson,
       update: wrappedUpdate,
       getBoneTransform,
@@ -914,6 +1048,11 @@ export function createVRMFactory(
         rateCheck = false;
       },
       destroy() {
+        if (destroyed) return;
+        destroyed = true;
+        mixer.stopAllAction();
+        mixer.uncacheRoot(vrm.scene);
+        armRetarget?.dispose();
         if (hooks?.scene) {
           hooks.scene.remove(vrm.scene);
         }
@@ -949,30 +1088,28 @@ function cloneGLB(glb: GLBData): GLBData {
   // CRITICAL: Create fresh material instances per clone.
   // SkeletonUtils.clone() shares material references across all clones,
   // which causes highlight bleed (hovering one mob highlights all of same type).
-  // We create brand-new MeshStandardNodeMaterial instances here, copying visual
-  // properties but NOT using material.clone() (which may not isolate TSL node
-  // graph internals). Textures are shared by reference — negligible memory cost.
+  // Keep authored PBR/physical properties in fresh node materials, without
+  // copying runtime TSL graphs or their mutable highlight uniforms. Textures
+  // remain shared; colors, vectors and material state belong to each instance.
   clonedScene.traverse((child) => {
     if (!isMeshLike(child)) return;
     const mesh = child as MeshLike;
     const makeFresh = (src: THREE.Material): MeshStandardNodeMaterial => {
-      const s = src as MeshStandardNodeMaterial;
-      const m = new MeshStandardNodeMaterial();
-      m.color = s.color?.clone() ?? new THREE.Color(0xffffff);
-      m.emissive = s.emissive?.clone() ?? new THREE.Color(0x000000);
-      m.emissiveIntensity = s.emissiveIntensity ?? 0;
-      m.roughness = s.roughness ?? 1;
-      m.metalness = s.metalness ?? 0;
-      m.envMapIntensity = s.envMapIntensity ?? 1;
-      m.opacity = s.opacity ?? 1;
-      m.transparent = s.transparent ?? false;
-      m.alphaTest = s.alphaTest ?? 0;
-      m.side = s.side ?? THREE.FrontSide;
-      m.shadowSide = s.shadowSide;
-      if (s.map) m.map = s.map;
-      if (s.normalMap) m.normalMap = s.normalMap;
-      if (s.emissiveMap) m.emissiveMap = s.emissiveMap;
-      m.name = s.name;
+      const s = src as MeshStandardNodeMaterial & {
+        isMeshPhysicalMaterial?: boolean;
+        isMeshPhysicalNodeMaterial?: boolean;
+      };
+      const physical = s.isMeshPhysicalMaterial || s.isMeshPhysicalNodeMaterial;
+      const m = physical
+        ? new MeshPhysicalNodeMaterial()
+        : new MeshStandardNodeMaterial();
+      // NodeMaterial.copy copies node inputs, not the complete authored PBR
+      // fields. Use the same classic copy routines as initial normalization;
+      // calling node .clone() would also share runtime graph references.
+      const copy = physical
+        ? THREE.MeshPhysicalMaterial.prototype.copy
+        : THREE.MeshStandardMaterial.prototype.copy;
+      Reflect.apply(copy, m, [s]);
       return m;
     };
     if (Array.isArray(mesh.material)) {

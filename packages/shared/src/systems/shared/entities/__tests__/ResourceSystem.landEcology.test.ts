@@ -65,7 +65,7 @@ describe("ResourceSystem production land-node ecology", () => {
     const authoredLandNodes = preparationArea.resources.filter(
       (resource) => resource.resourceId !== "ore_essence",
     );
-    expect(authoredLandNodes).toHaveLength(12);
+    expect(authoredLandNodes).toHaveLength(11);
 
     const players = new Map<
       string,
@@ -201,7 +201,7 @@ describe("ResourceSystem production land-node ecology", () => {
               tick: currentTick,
             });
           }
-          if (event === EventType.SKILLS_XP_GAINED) awardedXpEvents++;
+          if (event === EventType.SKILLS_PROGRESS_COMMITTED) awardedXpEvents++;
         },
       },
     };
@@ -344,15 +344,15 @@ describe("ResourceSystem production land-node ecology", () => {
         ecology.custody.maxRetryCount,
       );
 
-      expect(ecology.totalResources).toBe(12);
-      expect(ecology.availableResources + ecology.depletedResources).toBe(12);
-      expect(ecology.resourceVariants).toBe(12);
-      expect(ecology.manifestResources).toBe(12);
+      expect(ecology.totalResources).toBe(11);
+      expect(ecology.availableResources + ecology.depletedResources).toBe(11);
+      expect(ecology.resourceVariants).toBe(11);
+      expect(ecology.manifestResources).toBe(11);
       expect(ecology.custody.activeSessions).toBeLessThanOrEqual(25);
-      expect(ecology.custody.pendingRewards).toBeLessThanOrEqual(12);
-      expect(ecology.custody.resourceReservations).toBeLessThanOrEqual(12);
+      expect(ecology.custody.pendingRewards).toBeLessThanOrEqual(11);
+      expect(ecology.custody.resourceReservations).toBeLessThanOrEqual(11);
       expect(ecology.forestryTimers).toBeLessThanOrEqual(3);
-      expect(ecology.scheduledRespawns).toBeLessThanOrEqual(12);
+      expect(ecology.scheduledRespawns).toBeLessThanOrEqual(11);
       expect(ecology.forestryActiveGatherers).toBeLessThanOrEqual(
         ecology.custody.activeSessions,
       );
@@ -379,10 +379,10 @@ describe("ResourceSystem production land-node ecology", () => {
     expect(finalEcology.forestryActiveGatherers).toBe(0);
     expect(committedRewards).toBe(awardedXpEvents);
     expect(maxObserved).toEqual({
-      resources: 12,
+      resources: 11,
       activeSessions: 25,
-      pendingRewards: 12,
-      reservations: 12,
+      pendingRewards: 11,
+      reservations: 11,
       forestryTimers: 3,
       respawns: expect.any(Number),
       retryCount: 1,
@@ -410,8 +410,8 @@ describe("ResourceSystem production land-node ecology", () => {
     expect(freshOperations).toBe(committedRewards);
     expect(commitAttempts).toBe(committedRewards + ambiguousResponses);
     expect(ambiguousResponses).toBe(recoveredAmbiguousOperations);
-    expect(ambiguousResponses).toBe(517);
-    expect(expectedRetryWarning).toHaveBeenCalledTimes(517);
+    expect(ambiguousResponses).toBe(513);
+    expect(expectedRetryWarning).toHaveBeenCalledTimes(513);
     expect(expectedRetryWarning).toHaveBeenCalledWith(
       expect.stringContaining(
         "Retaining unresolved gathering reward gathering-reward:",
@@ -425,19 +425,19 @@ describe("ResourceSystem production land-node ecology", () => {
       awardedXpEvents,
       transitionSummary,
     }).toEqual({
-      freshOperations: 132_897,
-      commitAttempts: 133_414,
-      recoveredAmbiguousOperations: 517,
-      committedRewards: 132_897,
-      awardedXpEvents: 132_897,
+      freshOperations: 131_868,
+      commitAttempts: 132_381,
+      recoveredAmbiguousOperations: 513,
+      committedRewards: 131_868,
+      awardedXpEvents: 131_868,
       transitionSummary: {
         "preparation:tree_oak": {
-          rewards: 21_949,
+          rewards: 21_867,
           depleted: 467,
           respawned: 466,
         },
         "preparation:tree_maple": {
-          rewards: 33_252,
+          rewards: 33_145,
           depleted: 326,
           respawned: 325,
         },
@@ -447,29 +447,24 @@ describe("ResourceSystem production land-node ecology", () => {
           respawned: 731,
         },
         "preparation:tree_magic": {
-          rewards: 49_311,
+          rewards: 49_059,
           depleted: 125,
           respawned: 125,
         },
         "preparation:ore_copper": {
-          rewards: 9_980,
-          depleted: 9_980,
-          respawned: 9_980,
+          rewards: 9_982,
+          depleted: 9_982,
+          respawned: 9_982,
         },
         "preparation:ore_tin": {
-          rewards: 9_984,
-          depleted: 9_984,
-          respawned: 9_983,
+          rewards: 9_983,
+          depleted: 9_983,
+          respawned: 9_982,
         },
         "preparation:ore_iron": {
           rewards: 5_449,
           depleted: 5_449,
           respawned: 5_448,
-        },
-        "preparation:ore_gold": {
-          rewards: 589,
-          depleted: 589,
-          respawned: 588,
         },
         "preparation:ore_coal": {
           rewards: 1_154,

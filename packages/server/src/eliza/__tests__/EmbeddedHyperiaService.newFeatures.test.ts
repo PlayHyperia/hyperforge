@@ -1,13 +1,23 @@
 import { describe, expect, it, vi } from "vitest";
-import { ITEMS } from "@hyperforge/shared";
+import {
+  ITEMS,
+  type StreamingDuelFoodObservationContext,
+} from "@hyperforge/shared";
 import { EmbeddedHyperiaService } from "../EmbeddedHyperiaService";
 
 type TestEntity = {
   id: string;
   type: string;
   data: Record<string, unknown>;
-  config?: { mobType?: string };
+  config?: {
+    mobType?: string;
+    resourceId?: string;
+    resourceType?: string;
+    requiredLevel?: number;
+  };
   getProperty?: (name: string) => unknown;
+  getInteractionRange?: () => unknown;
+  getInteractionFootprint?: () => unknown;
   position?: {
     x: number;
     y: number;
@@ -20,12 +30,20 @@ function createMockWorld(options?: {
   inventorySystem?: Record<string, unknown> | null;
   equipmentSystem?: Record<string, unknown> | null;
   playerSystem?: Record<string, unknown> | null;
+  networkSystem?: Record<string, unknown> | null;
   extraEntities?: Array<{
     id: string;
     data: Record<string, unknown>;
     position: [number, number, number];
-    config?: { mobType?: string };
+    config?: {
+      mobType?: string;
+      resourceId?: string;
+      resourceType?: string;
+      requiredLevel?: number;
+    };
     getProperty?: (name: string) => unknown;
+    getInteractionRange?: () => unknown;
+    getInteractionFootprint?: () => unknown;
   }>;
 }) {
   const entities = new Map<string, TestEntity>();
@@ -48,6 +66,12 @@ function createMockWorld(options?: {
       position: pos,
       ...(ent.config ? { config: ent.config } : {}),
       ...(ent.getProperty ? { getProperty: ent.getProperty } : {}),
+      ...(ent.getInteractionRange
+        ? { getInteractionRange: ent.getInteractionRange }
+        : {}),
+      ...(ent.getInteractionFootprint
+        ? { getInteractionFootprint: ent.getInteractionFootprint }
+        : {}),
     });
   }
 
@@ -81,6 +105,7 @@ function createMockWorld(options?: {
         return entity;
       },
       remove: (id: string) => entities.delete(id),
+      values: () => entities.values(),
     },
     on: vi.fn(),
     off: vi.fn(),
@@ -89,6 +114,7 @@ function createMockWorld(options?: {
       if (name === "inventory") return options?.inventorySystem ?? null;
       if (name === "equipment") return options?.equipmentSystem ?? null;
       if (name === "player") return options?.playerSystem ?? null;
+      if (name === "network") return options?.networkSystem ?? null;
       if (name === "database") {
         return {
           getCharactersAsync: async () => [
@@ -190,6 +216,44 @@ describe("getInventoryItems", () => {
     });
     await service.stop();
     expect(service.getInventoryItems()).toEqual([]);
+  });
+});
+
+describe("resource movement", () => {
+  it("routes authored resources to a legal interaction boundary", async () => {
+    const requestServerMove = vi.fn(() => true);
+    const target: [number, number, number] = [-9.5, 10, -12.5];
+    const { service } = await createInitializedService({
+      networkSystem: { requestServerMove },
+      extraEntities: [
+        {
+          id: "fishing-spot-runtime",
+          data: {
+            type: "resource",
+            resourceId: "fishing_spot_net",
+            resourceType: "fishing_spot",
+          },
+          config: {
+            resourceId: "fishing_spot_net",
+            resourceType: "fishing_spot",
+            requiredLevel: 1,
+          },
+          position: target,
+          getInteractionRange: () => 2,
+          getInteractionFootprint: () => ({ width: 1, depth: 1 }),
+        },
+      ],
+    });
+
+    await expect(service.executeMove(target, true)).resolves.toBe(true);
+    expect(requestServerMove).toHaveBeenCalledWith("agent-1", target, {
+      runMode: true,
+      interactionArrival: {
+        interactionRange: 2,
+        footprintWidth: 1,
+        footprintDepth: 1,
+      },
+    });
   });
 });
 
@@ -311,6 +375,53 @@ describe("getNearbyEntities combat equipment", () => {
       nearby.find((entity) => entity.id === "name-only-goblin")?.mobType,
     ).toBeUndefined();
   });
+
+  it("exposes the authored resource identity from runtime entity config", async () => {
+    const { service, entities } = await createInitializedService({
+      extraEntities: [
+        {
+          id: "ore-copper-runtime",
+          data: { type: "resource", name: "Copper Rock", health: 100 },
+          config: {
+            resourceId: "ore_copper",
+            resourceType: "mining_rock",
+            requiredLevel: 1,
+          },
+          position: [2, 10, 0],
+        },
+      ],
+    });
+    const self = entities.get("agent-1");
+    if (!self?.position) throw new Error("initialized agent missing");
+    self.position.x = 0;
+    self.position.y = 10;
+    self.position.z = 0;
+    self.data.position = [0, 10, 0];
+    service.invalidateNearbyEntityCache();
+
+    expect(
+      service
+        .getNearbyEntities()
+        .find((entity) => entity.id === "ore-copper-runtime"),
+    ).toMatchObject({
+      type: "resource",
+      resourceId: "ore_copper",
+      resourceType: "mining_rock",
+      requiredLevel: 1,
+    });
+
+    const resource = entities.get("ore-copper-runtime");
+    if (!resource?.position) throw new Error("runtime resource missing");
+    resource.position.x = 12;
+    resource.data.position = [12, 10, 0];
+    service.invalidateNearbyEntityCache();
+
+    expect(
+      service
+        .getNearbyEntities()
+        .find((entity) => entity.id === "ore-copper-runtime")?.distance,
+    ).toBe(12);
+  });
 });
 
 // categorizeEntity is tested indirectly via getNearbyEntities in the
@@ -329,6 +440,7 @@ describe("executeUse", () => {
         itemId: string,
         slot: number,
         operationId: string,
+        _publicActionObservation?: StreamingDuelFoodObservationContext,
       ) => ({
         ok: true,
         committed: true,
@@ -357,7 +469,19 @@ describe("executeUse", () => {
       playerSystem: { consumeFoodAtomic },
     });
 
-    const receipt = await service.executeUse("shrimp");
+    const publicActionObservation = {
+      operationId: "00000000-0000-4000-8000-000000000301",
+      tick: 3,
+      observedAt: 1_800_000_000_003,
+      cycleId: "cycle-embedded-food",
+      duelId: "duel-embedded-food",
+      actorId: "agent-1",
+      opponentId: "agent-2",
+      phase: "FIGHTING",
+      combatRole: "ranged",
+      tacticalMacro: "kite",
+    } satisfies StreamingDuelFoodObservationContext;
+    const receipt = await service.executeUse("shrimp", publicActionObservation);
 
     expect(receipt).toMatchObject({
       ok: true,
@@ -371,6 +495,7 @@ describe("executeUse", () => {
       "shrimp",
       3,
       expect.stringMatching(/^food-debit:[0-9a-f-]{36}$/),
+      publicActionObservation,
     );
     expect(emit).not.toHaveBeenCalledWith("inventory:use", expect.anything());
   });

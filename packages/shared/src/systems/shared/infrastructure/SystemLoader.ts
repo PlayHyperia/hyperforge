@@ -120,6 +120,7 @@ import { LootSystem } from "..";
 import { GravestoneLootSystem } from "..";
 import { GroundItemSystem } from "../economy/GroundItemSystem";
 import { generateKillToken } from "../../../utils/game/KillTokenUtils";
+import { generateGroundItemMobLootOperationId } from "../../../utils/game/GroundItemSourceIdentity";
 // Movement now handled by physics in PlayerLocal
 // CameraSystem is ClientCameraSystem
 // UI components are React-based in the client package
@@ -194,6 +195,13 @@ export interface Systems {
   healthRegen?: HealthRegenSystem;
 }
 
+export interface SystemRegistrationOptions {
+  /** Render gathering nodes that belong to the interactive exploration map. */
+  enableExplorationResourceNodes?: boolean;
+  /** Render NPCs, stations, and item spawners from the exploration map. */
+  enableExplorationWorldEntities?: boolean;
+}
+
 /**
  * Register all systems with a Hyperia world
  * This is the main entry point called by the bootstrap
@@ -201,6 +209,7 @@ export interface Systems {
 export async function registerSystems(
   world: World,
   runtimeKind: SystemRuntimeKind,
+  options: SystemRegistrationOptions = {},
 ): Promise<void> {
   const runtime = getSystemRuntimePolicy(runtimeKind);
   // Use a centralized logger
@@ -312,7 +321,9 @@ export async function registerSystems(
   }
 
   // 6. Mob NPC system - Core mob NPC management (mobs, bosses, quest enemies)
-  world.register("mob-npc", MobNPCSystem);
+  if (runtime.server || options.enableExplorationWorldEntities !== false) {
+    world.register("mob-npc", MobNPCSystem);
+  }
 
   // === INTERACTION SYSTEMS ===
   // These systems handle player-world interactions
@@ -353,8 +364,12 @@ export async function registerSystems(
   // 14. Store system - Item trading (depends on inventory system)
   world.register("store", StoreSystem);
 
-  // 15. Resource system - Gathering mechanics (depends on inventory system)
-  world.register("resource", ResourceSystem);
+  // 15. Resource system - Gathering mechanics (depends on inventory system).
+  // The server always owns gathering state. The arena-only broadcast client
+  // omits exploration nodes that cannot affect or explain an active duel.
+  if (runtime.server || options.enableExplorationResourceNodes !== false) {
+    world.register("resource", ResourceSystem);
+  }
 
   // 18. Processing system - Crafting and item processing (depends on inventory system)
   world.register("processing", ProcessingSystem);
@@ -443,10 +458,14 @@ export async function registerSystems(
     console.log("[SystemLoader] ✅ QuestSystem registered (server-only)");
   }
 
-  // DYNAMIC WORLD CONTENT SYSTEMS - FULL THREE.JS ACCESS, NO SANDBOX
-  world.register("mob-npc-spawner", MobNPCSpawnerSystem);
-  world.register("station-spawner", StationSpawnerSystem);
-  world.register("item-spawner", ItemSpawnerSystem);
+  // DYNAMIC WORLD CONTENT SYSTEMS - FULL THREE.JS ACCESS, NO SANDBOX.
+  // The fixed arena broadcast receives contestants through PlayerSystem and
+  // does not admit exploration NPCs, stations, or loose item populations.
+  if (runtime.server || options.enableExplorationWorldEntities !== false) {
+    world.register("mob-npc-spawner", MobNPCSpawnerSystem);
+    world.register("station-spawner", StationSpawnerSystem);
+    world.register("item-spawner", ItemSpawnerSystem);
+  }
 
   // Zone Detection System - registered on server only (client registers in createClientWorld.ts)
   if (runtime.server) {
@@ -464,10 +483,16 @@ export async function registerSystems(
   systems.combat = getSystem(world, "combat") as CombatSystem;
   systems.inventory = getSystem(world, "inventory") as InventorySystem;
   systems.skills = getSystem(world, "skills") as SkillsSystem;
-  systems.mobNpc = getSystem(world, "mob-npc") as MobNPCSystem;
+  systems.mobNpc =
+    runtime.server || options.enableExplorationWorldEntities !== false
+      ? (getSystem(world, "mob-npc") as MobNPCSystem)
+      : undefined;
   systems.banking = getSystem(world, "banking") as BankingSystem;
   systems.store = getSystem(world, "store") as StoreSystem;
-  systems.resource = getSystem(world, "resource") as ResourceSystem;
+  systems.resource =
+    runtime.server || options.enableExplorationResourceNodes !== false
+      ? (getSystem(world, "resource") as ResourceSystem)
+      : undefined;
 
   systems.aggro = getSystem(world, "aggro") as AggroSystem;
   systems.equipment = getSystem(world, "equipment") as EquipmentSystem;
@@ -496,15 +521,17 @@ export async function registerSystems(
   }
 
   // DYNAMIC WORLD CONTENT SYSTEMS
-  systems.mobNpcSpawner = getSystem(
-    world,
-    "mob-npc-spawner",
-  ) as MobNPCSpawnerSystem;
-  systems.stationSpawner = getSystem(
-    world,
-    "station-spawner",
-  ) as StationSpawnerSystem;
-  systems.itemSpawner = getSystem(world, "item-spawner") as ItemSpawnerSystem;
+  if (runtime.server || options.enableExplorationWorldEntities !== false) {
+    systems.mobNpcSpawner = getSystem(
+      world,
+      "mob-npc-spawner",
+    ) as MobNPCSpawnerSystem;
+    systems.stationSpawner = getSystem(
+      world,
+      "station-spawner",
+    ) as StationSpawnerSystem;
+    systems.itemSpawner = getSystem(world, "item-spawner") as ItemSpawnerSystem;
+  }
 
   // Set up API for apps to access functionality
   setupAPI(world, systems);
@@ -1352,16 +1379,36 @@ function setupAPI(world: World, systems: Systems): void {
 
       killMob: (mobId: string, killerId: string) => {
         const timestamp = Date.now();
-        const killToken = generateKillToken(mobId, killerId, timestamp);
-        world.emit(EventType.NPC_DIED, {
+        const lootOperationId = generateGroundItemMobLootOperationId();
+        const attackStyle = "aggressive";
+        const damageDealt = 1;
+        void generateKillToken(
           mobId,
-          mobType: "unknown",
-          level: 1,
-          killedBy: killerId,
-          position: { x: 0, y: 0, z: 0 },
+          killerId,
           timestamp,
-          killToken,
-        });
+          lootOperationId,
+          attackStyle,
+          damageDealt,
+        )
+          .then((killToken) => {
+            world.emit(EventType.NPC_DIED, {
+              mobId,
+              mobType: "unknown",
+              level: 1,
+              killedBy: killerId,
+              position: { x: 0, y: 0, z: 0 },
+              timestamp,
+              lootOperationId,
+              killToken,
+              attackStyle,
+              damageDealt,
+            });
+          })
+          .catch((error) => {
+            console.error(
+              `[SystemLoader] Refused unsigned death event for ${mobId}: ${String(error)}`,
+            );
+          });
       },
 
       // App management actions

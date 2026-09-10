@@ -36,37 +36,21 @@ import fs from "fs-extra";
 import path from "path";
 import type { ServerConfig } from "./config.js";
 import {
-  getDefaultElizaOsApiUrl,
-  getDefaultPublicAppUrl,
-} from "../shared/public-ws-url.js";
-import {
   getGlobalRateLimit,
   isRateLimitEnabled,
 } from "../infrastructure/rate-limit/rate-limit-config.js";
+import { resolveTrustedProxy } from "../infrastructure/rate-limit/trusted-proxy.js";
+import { registerCloudflareOriginLock } from "../infrastructure/cloudflare/origin-lock.js";
 import {
   registerCsrfProtection,
   enforceSameSiteCookies,
 } from "../middleware/csrf.js";
-
-/**
- * SECURITY: Validate Origin header for state-changing requests.
- * This provides additional protection against cross-origin attacks
- * even though we don't use cookies (which would make CSRF a non-issue).
- */
-function createOriginValidator(allowedOrigins: (string | RegExp)[]) {
-  return function validateOrigin(origin: string | undefined): boolean {
-    if (!origin) return true; // Server-to-server or same-origin requests may not have Origin
-
-    for (const allowed of allowedOrigins) {
-      if (typeof allowed === "string") {
-        if (origin === allowed) return true;
-      } else if (allowed instanceof RegExp) {
-        if (allowed.test(origin)) return true;
-      }
-    }
-    return false;
-  };
-}
+import {
+  isProductionLikeEnvironment,
+  registerWriteOriginProtection,
+  resolveAllowedOrigins,
+} from "../infrastructure/http/origin-policy.js";
+import { shouldServeSpaForRequestUrl } from "../infrastructure/http/request-path-policy.js";
 
 type PublicRootInfo = {
   root: string;
@@ -127,70 +111,16 @@ export async function createHttpServer(
 ): Promise<FastifyInstance> {
   console.log("[HTTP] Creating Fastify server...");
 
-  const trustProxy =
-    process.env.TRUST_PROXY !== undefined
-      ? process.env.TRUST_PROXY === "true"
-      : config.nodeEnv === "production";
+  const trustProxy = resolveTrustedProxy(process.env);
 
   // Create Fastify instance with minimal logging
   const fastify = Fastify({
     logger: { level: "error" },
     trustProxy,
   });
-  console.log(`[HTTP] ✅ trustProxy=${trustProxy}`);
+  console.log(`[HTTP] ✅ trustProxy=${JSON.stringify(trustProxy)}`);
 
-  const elizaOSUrl =
-    process.env.ELIZAOS_URL ||
-    process.env.ELIZAOS_API_URL ||
-    getDefaultElizaOsApiUrl();
-  const clientUrl =
-    process.env.CLIENT_URL ||
-    process.env.PUBLIC_APP_URL ||
-    getDefaultPublicAppUrl();
-  const serverUrl = process.env.SERVER_URL || `http://localhost:${config.port}`;
-
-  const allowedOrigins = [
-    // Production domains (HTTPS)
-    "https://hyperbet.win",
-    "https://www.hyperbet.win",
-    "https://hyperia.gg",
-    "https://www.hyperia.gg",
-    "https://hyperia.club",
-    "https://www.hyperia.club",
-    "https://hyperia.pages.dev",
-    "https://hyperia-betting.pages.dev",
-    "https://hyperbet.pages.dev",
-    "https://hyperbet-solana.pages.dev",
-    "https://hyperia-production.up.railway.app",
-    "https://api.hyperbet.win",
-    // Production domains (HTTP for legacy/testing)
-    "http://hyperia.pages.dev",
-    "http://hyperia-betting.pages.dev",
-    "http://hyperbet.pages.dev",
-    "http://hyperbet-solana.pages.dev",
-    // Development (from env vars or defaults)
-    elizaOSUrl, // ElizaOS API
-    clientUrl, // Game Client
-    serverUrl, // Game Server
-    // Dynamic patterns (for localhost dev and preview deployments)
-    /^https?:\/\/(localhost|127\.0\.0\.1|192\.168\.\d+\.\d+|10\.\d+\.\d+\.\d+)(:\d+)?$/, // Matches http://localhost:3333, http://127.0.0.1:4179, etc.
-    /^https?:\/\/(www\.)?hyperbet\.win$/, // hyperbet.win apex and www
-    /^https?:\/\/.+\.hyperia-betting\.pages\.dev$/, // Existing Hyperbet Pages preview deployments
-    /^https?:\/\/.+\.hyperbet\.pages\.dev$/, // Hyperbet Pages preview deployments
-    /^https?:\/\/.+\.hyperbet-solana\.pages\.dev$/, // Hyperbet Solana preview deployments
-    /^https?:\/\/(www\.)?hyperia\.gg$/, // hyperia.gg apex and www
-    /^https?:\/\/.+\.hyperia\.gg$/, // hyperia.gg subdomains
-    /^https?:\/\/.+\.hyperia\.pages\.dev$/, // Cloudflare Pages preview deployments
-    /^https:\/\/.+\.farcaster\.xyz$/,
-    /^https:\/\/.+\.warpcast\.com$/,
-    /^https:\/\/.+\.privy\.io$/,
-    /^https:\/\/.+\.up\.railway\.app$/,
-  ];
-
-  // Add custom domain from env if set
-  if (process.env.PUBLIC_APP_URL) {
-    allowedOrigins.push(process.env.PUBLIC_APP_URL);
-  }
+  const allowedOrigins = resolveAllowedOrigins(config.nodeEnv);
 
   await fastify.register(cors, {
     origin: allowedOrigins,
@@ -202,7 +132,6 @@ export async function createHttpServer(
       "X-Requested-With",
       "X-CSRF-Token", // Allow CSRF token header
       "solana-client", // Required by @solana/web3.js browser RPC requests
-      "x-hyperia-origin-secret",
       "x-admin-code", // Admin panel authentication
     ],
   });
@@ -212,33 +141,9 @@ export async function createHttpServer(
     "...",
   );
 
-  // SECURITY: Add Origin validation for state-changing requests
-  // This provides defense-in-depth against cross-origin attacks
-  const isValidOrigin = createOriginValidator(allowedOrigins);
-  fastify.addHook("preHandler", async (request, reply) => {
-    // Only check state-changing methods
-    if (["POST", "PUT", "DELETE", "PATCH"].includes(request.method)) {
-      const origin = request.headers.origin;
-      // Skip validation for:
-      // - Same-origin requests (no Origin header)
-      // - Localhost development
-      // - Health check endpoints
-      if (
-        origin &&
-        !origin.includes("localhost") &&
-        !request.url.startsWith("/health") &&
-        !isValidOrigin(origin)
-      ) {
-        console.warn(
-          `[HTTP] Blocked request from unauthorized origin: ${origin} → ${request.url}`,
-        );
-        return reply.status(403).send({
-          error: "Forbidden",
-          message: "Cross-origin request not allowed",
-        });
-      }
-    }
-  });
+  // Defense in depth for browser-originated writes. Server-to-server requests
+  // legitimately omit Origin and continue to authenticate at their route boundary.
+  registerWriteOriginProtection(fastify, allowedOrigins);
   console.log(
     "[HTTP] ✅ Origin validation enabled for state-changing requests",
   );
@@ -246,34 +151,13 @@ export async function createHttpServer(
   // Optional origin lock for Cloudflare-proxied deployments.
   // When set, only requests carrying the shared origin secret header are accepted
   // (except health/status endpoints used by platform checks).
-  const cloudflareOriginSecret =
-    process.env.CLOUDFLARE_ORIGIN_SECRET?.trim() ?? "";
-  if (cloudflareOriginSecret) {
-    fastify.addHook("onRequest", async (request, reply) => {
-      if (
-        request.url.startsWith("/health") ||
-        request.url.startsWith("/status")
-      ) {
-        return;
-      }
-
-      const header = request.headers["x-hyperia-origin-secret"];
-      const presented =
-        typeof header === "string"
-          ? header
-          : Array.isArray(header)
-            ? header[0]
-            : undefined;
-
-      // Disable origin lock check to allow direct client requests (fixes 403 Forbidden)
-      // if (!presented || presented !== cloudflareOriginSecret) {
-      //   return reply.status(403).send({
-      //     error: "Forbidden",
-      //     message: "Origin not authorized",
-      //   });
-      // }
-    });
-    console.log("[HTTP] ✅ Cloudflare origin secret enforcement enabled");
+  const originLock = registerCloudflareOriginLock(fastify);
+  if (originLock.enabled) {
+    console.log(
+      `[HTTP] ✅ Cloudflare origin secret enforcement enabled (fingerprint=${originLock.fingerprint})`,
+    );
+  } else {
+    console.log("[HTTP] ℹ️  Cloudflare origin secret enforcement disabled");
   }
 
   // Configure rate limiting for production security
@@ -352,30 +236,22 @@ export async function createHttpServer(
     reply.status(500).send({ error: "Internal server error" });
   });
 
-  // Debug endpoint to see public directory contents
-  fastify.get("/debug/public", async (_req, reply) => {
-    const publicDir = path.join(config.__dirname, "public");
-    const assetsDir = path.join(publicDir, "assets");
-    let publicContents: string[] = [];
-    let assetsContents: string[] = [];
-    try {
-      publicContents = await fs.readdir(publicDir);
-    } catch (e) {
-      publicContents = [`ERROR: ${e}`];
-    }
-    try {
-      assetsContents = await fs.readdir(assetsDir);
-    } catch (e) {
-      assetsContents = [`ERROR: ${e}`];
-    }
-    return reply.send({
-      publicDir,
-      assetsDir,
-      publicContents,
-      assetsContents: assetsContents.slice(0, 20), // Limit to 20 items
-      configDirname: config.__dirname,
+  if (!isProductionLikeEnvironment(config.nodeEnv)) {
+    // Local diagnostics only: this intentionally exposes filesystem layout.
+    fastify.get("/debug/public", async (_req, reply) => {
+      const publicDir = path.join(config.__dirname, "public");
+      const assetsDir = path.join(publicDir, "assets");
+      const publicContents = await fs.readdir(publicDir).catch(() => []);
+      const assetsContents = await fs.readdir(assetsDir).catch(() => []);
+      return reply.send({
+        publicDir,
+        assetsDir,
+        publicContents,
+        assetsContents: assetsContents.slice(0, 20),
+        configDirname: config.__dirname,
+      });
     });
-  });
+  }
 
   // SPA catch-all route - serve index.html for any unmatched routes
   // This must be registered AFTER all other routes
@@ -423,7 +299,8 @@ async function registerIndexHtmlRoute(
     console.log(`[HTTP] ⚠️  config.__dirname: ${config.__dirname}`);
     console.log(`[HTTP] ⚠️  process.cwd(): ${process.cwd()}`);
 
-    // Register fallback routes that return a helpful message
+    // Keep operator detail in server logs; never disclose absolute paths or
+    // directory contents to an unauthenticated caller.
     const fallbackHandler = async (
       _req: FastifyRequest,
       reply: FastifyReply,
@@ -432,10 +309,6 @@ async function registerIndexHtmlRoute(
         error: "Frontend not available",
         message:
           "The client application has not been built or deployed. Please ensure the client is built and copied to the server's public directory.",
-        expectedPath: indexHtmlPath,
-        configDirname: config.__dirname,
-        cwd: process.cwd(),
-        publicDirContents,
       });
     };
 
@@ -511,7 +384,7 @@ async function registerStaticFiles(
     prefix: "/live/",
     decorateReply: false,
     setHeaders: (res, filePath) => {
-      setStaticHeaders(res, filePath);
+      setHlsStaticHeaders(res, filePath);
     },
   });
   console.log(`[HTTP] ✅ Registered /live/ → ${hlsDir}`);
@@ -657,20 +530,31 @@ async function registerStaticFiles(
  * @param filePath - Path to the file being served
  * @private
  */
-function setStaticHeaders(
+export function setHlsStaticHeaders(
+  res: { setHeader: (k: string, v: string) => void },
+  filePath: string,
+): void {
+  if (filePath.endsWith(".m3u8")) {
+    res.setHeader("Content-Type", "application/vnd.apple.mpegurl");
+    res.setHeader("Cache-Control", "no-cache, no-store, must-revalidate");
+  } else if (filePath.endsWith(".ts")) {
+    res.setHeader("Content-Type", "video/MP2T");
+    res.setHeader("Cache-Control", "public, max-age=60");
+  }
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Timing-Allow-Origin", "*");
+}
+
+export function setStaticHeaders(
   res: { setHeader: (k: string, v: string) => void },
   filePath: string,
 ): void {
   // HLS streaming files (must be checked before .ts to avoid TypeScript conflict)
   if (filePath.endsWith(".m3u8")) {
-    res.setHeader("Content-Type", "application/vnd.apple.mpegurl");
-    res.setHeader("Cache-Control", "no-cache, no-store, must-revalidate");
-    res.setHeader("Access-Control-Allow-Origin", "*");
+    setHlsStaticHeaders(res, filePath);
     return;
   } else if (filePath.includes("/live/") && filePath.endsWith(".ts")) {
-    res.setHeader("Content-Type", "video/MP2T");
-    res.setHeader("Cache-Control", "public, max-age=60");
-    res.setHeader("Access-Control-Allow-Origin", "*");
+    setHlsStaticHeaders(res, filePath);
     return;
   } else if (filePath.endsWith(".wasm")) {
     res.setHeader("Content-Type", "application/wasm");
@@ -854,12 +738,6 @@ function registerMusicRoute(
 
       return reply.code(404).send({
         error: "Music file not found",
-        tried: [
-          primaryPath,
-          ...pubCandidates.map((r) =>
-            path.join(r, "music", category, filename),
-          ),
-        ],
       });
     },
   );
@@ -918,20 +796,8 @@ async function registerSpaCatchAll(
 
   fastify.setNotFoundHandler(
     async (request: FastifyRequest, reply: FastifyReply) => {
-      const url = request.url;
-
-      // Don't serve index.html for API routes or asset requests
-      if (
-        url.startsWith("/api/") ||
-        url.startsWith("/ws") ||
-        url.startsWith("/assets/") ||
-        url.startsWith("/manifests/") ||
-        url.startsWith("/dist/") ||
-        url.startsWith("/status") ||
-        // Don't serve index.html for file extensions (static files that weren't found)
-        /\.[a-zA-Z0-9]+$/.test(url)
-      ) {
-        return reply.status(404).send({ error: "Not found", path: url });
+      if (!shouldServeSpaForRequestUrl(request.url)) {
+        return reply.status(404).send({ error: "Not found" });
       }
 
       // Serve index.html for SPA routes

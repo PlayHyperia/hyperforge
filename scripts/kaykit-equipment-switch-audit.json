@@ -1,0 +1,28 @@
+{
+  "schemaVersion": 1,
+  "title": "KayKit atomic equipment switching audit",
+  "avatar": "kaykit-knight.vrm",
+  "equipment": {
+    "weapon": {
+      "asset": "fitted-role-kit/kaykit-sword-1h-fitted.glb",
+      "itemId": "kaykit_sword_1h",
+      "slot": "weapon"
+    },
+    "shield": {
+      "asset": "fitted-role-kit/kaykit-round-shield-fitted.glb",
+      "itemId": "kaykit_round_shield",
+      "slot": "shield"
+    },
+    "hatchet": {
+      "asset": "fitted-preparation-kit/kaykit-rpg-axe-fitted.glb",
+      "itemId": "kaykit_hatchet_candidate",
+      "slot": "gatheringtool"
+    },
+    "pickaxe": {
+      "asset": "fitted-preparation-kit/kaykit-rpg-pickaxe-fitted.glb",
+      "itemId": "kaykit_pickaxe_candidate",
+      "slot": "gatheringtool"
+    }
+  },
+  "rapidSwitchIterations": 60
+}

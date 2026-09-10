@@ -131,12 +131,18 @@ function html(manifest) {
         loader.register((parser) => new VRMLoaderPlugin(parser));
         const gltf = await loader.loadAsync("/asset/" + model.asset.split("/").map(encodeURIComponent).join("/"));
         const vrm = gltf.userData.vrm;
-        if (!vrm) throw new Error(model.asset + " did not load as VRM");
-        scene.add(vrm.scene);
-        vrm.scene.updateMatrixWorld(true);
-        vrm.update(0);
+        if (model.kind !== "model" && !vrm) throw new Error(model.asset + " did not load as VRM");
+        const root = model.kind === "model" ? gltf.scene : vrm.scene;
+        if (model.kind === "model" && Array.isArray(model.rotationDegrees)) {
+          root.rotation.set(
+            ...model.rotationDegrees.map(THREE.MathUtils.degToRad),
+          );
+        }
+        scene.add(root);
+        root.updateMatrixWorld(true);
+        vrm?.update(0);
 
-        const box = new THREE.Box3().setFromObject(vrm.scene);
+        const box = new THREE.Box3().setFromObject(root);
         const center = box.getCenter(new THREE.Vector3());
         const size = box.getSize(new THREE.Vector3());
         const largest = Math.max(size.x, size.y, size.z);
@@ -179,10 +185,15 @@ function parseCliArgs(argv) {
   const options = {};
   for (let index = 0; index < argv.length; index += 1) {
     const argument = argv[index];
-    if (argument === "--manifest" || argument === "--output") {
+    if (
+      argument === "--manifest" ||
+      argument === "--output" ||
+      argument === "--assets-root"
+    ) {
       const value = argv[index + 1];
       if (!value) throw new Error(`${argument} requires a path`);
-      options[argument.slice(2)] = value;
+      options[argument === "--assets-root" ? "assetsRoot" : argument.slice(2)] =
+        value;
       index += 1;
     } else {
       throw new Error(`Unknown argument: ${argument}`);
@@ -208,7 +219,12 @@ async function main() {
     path.dirname(fileURLToPath(import.meta.url)),
     "..",
   );
-  const assetsRoot = path.join(workspaceRoot, "packages/server/world/assets");
+  const assetsRoot = resolveWorkspacePath(
+    workspaceRoot,
+    options.assetsRoot,
+    "packages/server/world/assets",
+    "Assets root",
+  );
   const threeRoot = path.join(
     workspaceRoot,
     "packages/client/node_modules/three",

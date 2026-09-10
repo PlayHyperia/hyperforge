@@ -1,9 +1,12 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync } from "node:fs";
+import path from "node:path";
 import { fileURLToPath } from "node:url";
 import pg from "pg";
 import { ITEMS, type World } from "@hyperforge/shared";
+import { migrate } from "drizzle-orm/node-postgres/migrator";
+import { createPostgresClientDatabase } from "../src/database/postgres-transaction.js";
 import {
   executeAuthoritativeAgentBankTransfer,
   getDuelPreparationBankId,
@@ -17,11 +20,23 @@ import {
   DUEL_PREPARATION_BANK_ACTIONS,
   PostgresDuelPreparationStore,
 } from "../src/systems/StreamingDuelScheduler/preparation.js";
+import { buildDeterministicCompetitiveTacticalStrategy } from "../src/systems/StreamingDuelScheduler/competitive-tactical-strategy.js";
 
 const { Pool } = pg;
 const scriptPath = fileURLToPath(import.meta.url);
 const CHAOS_BANK_ITEM_ID = "chaos_bank_item";
 const CHAOS_BANK_PLAYER_ID = "chaos-agent-a";
+
+const planEvidence = (agentId: string) => ({
+  primaryStyle: "melee" as const,
+  availableStyles: ["melee" as const],
+  planningSource: "deterministic" as const,
+  planningPolicyVersion: "streaming-authority-chaos-v1",
+  agentPolicyFingerprint: "ab".repeat(32),
+  modelProvider: "deterministic",
+  model: agentId,
+  tacticalStrategy: buildDeterministicCompetitiveTacticalStrategy("melee"),
+});
 
 type WorkerEvent = {
   event:
@@ -384,57 +399,28 @@ async function runParent(): Promise<void> {
       30_000,
       "temporary PostgreSQL did not become ready",
     );
-    await pool.query(
-      readFileSync(
-        new URL(
-          "../src/database/migrations/0056_add_streaming_scheduler_leases.sql",
-          import.meta.url,
+    const migrationClient = await pool.connect();
+    try {
+      await migrate(createPostgresClientDatabase(migrationClient), {
+        migrationsFolder: path.resolve(
+          import.meta.dirname,
+          "../src/database/migrations",
         ),
-        "utf8",
-      ),
-    );
-    await pool.query(`CREATE TABLE characters (id text PRIMARY KEY NOT NULL)`);
+      });
+    } finally {
+      migrationClient.release();
+    }
     await pool.query(
-      `INSERT INTO characters (id) VALUES ('chaos-agent-a'), ('chaos-agent-b')`,
-    );
-    await pool.query(`
-      CREATE TABLE inventory (
-        id serial PRIMARY KEY,
-        "playerId" text NOT NULL REFERENCES characters(id) ON DELETE CASCADE,
-        "itemId" text NOT NULL,
-        quantity integer DEFAULT 1,
-        "slotIndex" integer DEFAULT -1,
-        metadata jsonb
-      )
-    `);
-    await pool.query(`
-      CREATE TABLE bank_storage (
-        id serial PRIMARY KEY,
-        "playerId" text NOT NULL REFERENCES characters(id) ON DELETE CASCADE,
-        "itemId" text NOT NULL,
-        quantity integer DEFAULT 1 NOT NULL,
-        slot integer DEFAULT 0 NOT NULL,
-        "tabIndex" integer DEFAULT 0 NOT NULL,
-        UNIQUE ("playerId", "tabIndex", slot)
-      )
-    `);
-    await pool.query(
-      readFileSync(
-        new URL(
-          "../src/database/migrations/0059_add_agent_bank_operation_receipts.sql",
-          import.meta.url,
-        ),
-        "utf8",
-      ),
+      `INSERT INTO users (id, name, roles, "createdAt")
+       VALUES
+         ('chaos-account-a', 'Chaos Account A', 'user', '2026-08-21T00:00:00.000Z'),
+         ('chaos-account-b', 'Chaos Account B', 'user', '2026-08-21T00:00:00.000Z')`,
     );
     await pool.query(
-      readFileSync(
-        new URL(
-          "../src/database/migrations/0060_add_streaming_duel_preparations.sql",
-          import.meta.url,
-        ),
-        "utf8",
-      ),
+      `INSERT INTO characters (id, "accountId", name, "isAgent")
+       VALUES
+         ('chaos-agent-a', 'chaos-account-a', 'Chaos Agent A', 1),
+         ('chaos-agent-b', 'chaos-account-b', 'Chaos Agent B', 1)`,
     );
     const preparationStore = new PostgresDuelPreparationStore(pool);
     const abandonedPreparation = await preparationStore.create({
@@ -445,6 +431,16 @@ async function runParent(): Promise<void> {
       durationMs: 60_000,
       allowedBankActions: DUEL_PREPARATION_BANK_ACTIONS,
     });
+    const preparationHostOwnerId = randomUUID();
+    for (const agentId of ["chaos-agent-a", "chaos-agent-b"]) {
+      const lease = await preparationStore.claimContestantHostLease({
+        preparationId: abandonedPreparation.preparationId,
+        agentId,
+        ownerId: preparationHostOwnerId,
+        leaseDurationMs: 60_000,
+      });
+      if (!lease) throw new Error(`host lease rejected for ${agentId}`);
+    }
     await pool.query(
       `INSERT INTO inventory ("playerId", "itemId", quantity, "slotIndex")
        VALUES ($1, $2, 1, 0)`,
@@ -483,6 +479,7 @@ async function runParent(): Promise<void> {
       preparationId: abandonedPreparation.preparationId,
       fencingToken: "1",
       agentId: CHAOS_BANK_PLAYER_ID,
+      planEvidence: planEvidence(CHAOS_BANK_PLAYER_ID),
     });
 
     const second = spawnWorker({
@@ -609,6 +606,55 @@ async function runParent(): Promise<void> {
         "takeover did not fence and supersede the killed authority's preparation",
       );
     }
+    const staleOperationId = randomUUID();
+    await pool.query(
+      `INSERT INTO inventory ("playerId", "itemId", quantity, "slotIndex")
+       VALUES ($1, $2, 1, 0)`,
+      [CHAOS_BANK_PLAYER_ID, CHAOS_BANK_ITEM_ID],
+    );
+    const stalePreparationReceipt = await executeAuthoritativeAgentBankTransfer(
+      {
+        world: createBankWorld(pool),
+        playerId: CHAOS_BANK_PLAYER_ID,
+        bankId: getDuelPreparationBankId(preparationId),
+        preparationId,
+        action: "deposit",
+        itemId: CHAOS_BANK_ITEM_ID,
+        quantity: 1,
+        operationId: staleOperationId,
+      },
+    );
+    const staleInventoryCustody = await pool.query<{ quantity: number }>(
+      `SELECT COALESCE(SUM(quantity), 0)::int AS quantity
+       FROM inventory WHERE "playerId" = $1 AND "itemId" = $2`,
+      [CHAOS_BANK_PLAYER_ID, CHAOS_BANK_ITEM_ID],
+    );
+    const staleBankCustody = await pool.query<{ quantity: number }>(
+      `SELECT COALESCE(SUM(quantity), 0)::int AS quantity
+       FROM bank_storage WHERE "playerId" = $1 AND "itemId" = $2`,
+      [CHAOS_BANK_PLAYER_ID, CHAOS_BANK_ITEM_ID],
+    );
+    const staleOperationCustody = await pool.query<{ count: number }>(
+      `SELECT COUNT(*)::int AS count
+       FROM agent_bank_operations WHERE "operationId" = $1`,
+      [staleOperationId],
+    );
+    if (
+      stalePreparationReceipt.success ||
+      stalePreparationReceipt.failureReason !== "preparation_not_active" ||
+      staleInventoryCustody.rows[0]?.quantity !== 1 ||
+      staleBankCustody.rows[0]?.quantity !== 1 ||
+      staleOperationCustody.rows[0]?.count !== 0
+    ) {
+      throw new Error(
+        `superseded preparation retained bank authority: ${JSON.stringify({
+          receipt: stalePreparationReceipt,
+          inventory: staleInventoryCustody.rows[0]?.quantity,
+          bank: staleBankCustody.rows[0]?.quantity,
+          operations: staleOperationCustody.rows[0]?.count,
+        })}`,
+      );
+    }
     const failedPreparation = await preparationStore.cancel({
       preparationId: replacementPreparation.preparationId,
       fencingToken: lease.fencing_token,
@@ -657,6 +703,7 @@ async function runParent(): Promise<void> {
         bankReplayAfterProcessKill: true,
         bankReplayAfterReadinessFreeze: true,
         bankCustodyDuplicated: false,
+        stalePreparationBankMutationRejected: true,
         agentPreparationFailureCancellationDurable: true,
       })}\n`,
     );

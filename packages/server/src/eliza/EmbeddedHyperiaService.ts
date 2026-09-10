@@ -13,15 +13,27 @@ import {
   EventType,
   INTERACTION_DISTANCE,
   SessionType,
+  type AttackType,
   getDuelArenaConfig,
   getItem,
   getProcessingRequestOperationId,
+  getGatheringRewardOperationIdForAttempt,
+  getGroundItemPickupOperationIdForAttempt,
+  generateGroundItemDropOperationId,
   processingDataProvider,
   DEFAULT_AVATAR_URL,
   isPositionInsideCombatArena,
   ALL_WORLD_AREAS,
   type BoneBurialReceipt,
   type FoodConsumptionReceipt,
+  type StreamingDuelFoodObservationContext,
+  parseStreamingDuelExecutorObservationContext,
+  type StreamingDuelExecutorCommand,
+  type StreamingDuelExecutorCommandOutcome,
+  type StreamingDuelExecutorCommandReceipt,
+  type StreamingDuelExecutorObservationContext,
+  type StreamingDuelPrayerObservationContext,
+  type StreamingDuelStyleObservationContext,
   type OwnedDuelPreparationPlanReceipt,
   type OwnedDuelPreparationPlanRequest,
   type OwnedDuelPreparationPlanRecoveryRequest,
@@ -31,6 +43,7 @@ import {
   type PrayerActionReceipt,
   type World,
 } from "@hyperforge/shared";
+import { createHash } from "node:crypto";
 import type { ServerSocket } from "../shared/types/index.js";
 import { validatePhysicalBankAccess } from "../shared/PhysicalBankAccess.js";
 import {
@@ -236,9 +249,39 @@ export class EmbeddedHyperiaService implements IEmbeddedHyperiaService {
   private activeBankId: string | null = null;
   /** Present only for a durable private, pre-market bank capability. */
   private activeBankPreparationId: string | null = null;
+  /**
+   * Exact private preparation that owns this player's combat-admission fence.
+   * The fence outlives bank readiness and is released only when that exact
+   * preparation freezes or terminates.
+   */
+  private activeDuelPreparationCombatFenceId: string | null = null;
+  /**
+   * Monotonic process-local fence for asynchronous bank-open receipts. A
+   * terminal preparation event or a newer open can arrive while PostgreSQL is
+   * returning the older receipt; only the newest still-live request may
+   * install a bank capability or publish BANK_OPEN.
+   */
+  private bankOpenRevision = 0;
+  private pendingDuelPreparationBankOpen: {
+    preparationId: string;
+    revision: number;
+  } | null = null;
   private isActive: boolean = false;
   /** Cancels the single authoritative processing completion wait on shutdown. */
   private cancelPendingProcessingAction: (() => void) | null = null;
+  /** Cancels the single exact first-reward gathering wait on shutdown. */
+  private cancelPendingGatherAction: (() => void) | null = null;
+  /**
+   * One serialized authority lane prevents concurrent controller actions from
+   * overtaking an executor command whose durable outcome is still ambiguous.
+   */
+  private streamingDuelExecutorCommandTail: Promise<void> = Promise.resolve();
+  /** Last staged command without a confirmed durable outcome in this process. */
+  private pendingStreamingDuelExecutorCommand: StreamingDuelExecutorCommandReceipt | null =
+    null;
+  /** Exact reason returned by the most recent authoritative style request. */
+  private lastStyleChangeFailureReason: string | null = null;
+  private lastGatherFailureReason: string | null = null;
   private static readonly PROCESSING_COMPLETION_TIMEOUT_MS = 30_000;
   private static readonly PROCESSING_STATUS_RETRY_MS = 5_000;
   /** When set, all executeMove targets are clamped to this XZ rectangle. */
@@ -254,6 +297,11 @@ export class EmbeddedHyperiaService implements IEmbeddedHyperiaService {
    * off to do quests or explore between DuelCombatAI ticks.
    */
   private _autonomousEnabled: boolean = true;
+  /**
+   * Durable competitive snapshots fence ordinary behavior by preparation ID
+   * until the active scheduler has recovered and retired each exact row.
+   */
+  private readonly competitiveRecoveryCustodyHolds = new Set<string>();
   /** Set after we re-emit PLAYER_REGISTERED to bootstrap quest state. */
   private _questStateBootstrapEmitted: boolean = false;
   /** Reusable buffer for getNearbyEntities to reduce per-tick allocations. */
@@ -314,6 +362,45 @@ export class EmbeddedHyperiaService implements IEmbeddedHyperiaService {
     this.accountId = accountId;
     this.name = name;
     this.avatarUrl = avatarUrl;
+  }
+
+  /**
+   * Attach the direct authoritative action facade to a player entity that is
+   * owned by a separate authenticated socket. Competitive preparation and the
+   * deterministic duel controller can then use the same server-side receipts
+   * as embedded agents without spawning, replacing, or later removing that
+   * socket-owned entity.
+   */
+  attachExistingPlayer(): boolean {
+    if (this.isActive) return this.playerEntityId === this.characterId;
+    if (!this.world.entities.get(this.characterId)) return false;
+    this.playerEntityId = this.characterId;
+    this.isActive = true;
+    this.subscribeToWorldEvents();
+    return true;
+  }
+
+  /** Release an attached facade without changing socket-owned world state. */
+  detachExistingPlayer(): void {
+    this.releaseActiveDuelPreparationCombatFence();
+    this.isActive = false;
+    this.bankOpenRevision += 1;
+    this.pendingDuelPreparationBankOpen = null;
+    this.activeBankId = null;
+    this.activeBankPreparationId = null;
+    this.cancelPendingProcessingAction?.();
+    this.cancelPendingProcessingAction = null;
+    this.cancelPendingGatherAction?.();
+    this.cancelPendingGatherAction = null;
+    for (const { event, fn } of this.worldListeners) {
+      this.world.off(event, fn);
+    }
+    this.worldListeners = [];
+    this.playerEntityId = null;
+    this._nearbyCache = [];
+    this._nearbyCacheTick = -1;
+    this.localChatBuffer = [];
+    this.eventHandlers.clear();
   }
 
   /**
@@ -385,11 +472,27 @@ export class EmbeddedHyperiaService implements IEmbeddedHyperiaService {
             selectedSpell?: string | null;
             coins?: number;
           } | null>;
+          recoverPendingAmmunitionShotOperationsAsync?: (
+            characterId: string,
+          ) => Promise<unknown[]>;
+          recoverPendingProjectileRuneCostOperationsAsync?: (
+            characterId: string,
+          ) => Promise<unknown[]>;
         }
       | undefined;
 
     if (!databaseSystem) {
       throw new Error("DatabaseSystem not available");
+    }
+    if (databaseSystem.recoverPendingProjectileRuneCostOperationsAsync) {
+      await databaseSystem.recoverPendingProjectileRuneCostOperationsAsync(
+        this.characterId,
+      );
+    }
+    if (databaseSystem.recoverPendingAmmunitionShotOperationsAsync) {
+      await databaseSystem.recoverPendingAmmunitionShotOperationsAsync(
+        this.characterId,
+      );
     }
 
     // Stream-mode agents default to a DB-free startup path to avoid blocking
@@ -733,11 +836,16 @@ export class EmbeddedHyperiaService implements IEmbeddedHyperiaService {
    * Stop the service and remove the player entity
    */
   async stop(): Promise<void> {
+    this.releaseActiveDuelPreparationCombatFence();
     this.isActive = false;
+    this.bankOpenRevision += 1;
+    this.pendingDuelPreparationBankOpen = null;
     this.activeBankId = null;
     this.activeBankPreparationId = null;
     this.cancelPendingProcessingAction?.();
     this.cancelPendingProcessingAction = null;
+    this.cancelPendingGatherAction?.();
+    this.cancelPendingGatherAction = null;
 
     // Remove world event listeners to prevent leaks on agent restart
     for (const { event, fn } of this.worldListeners) {
@@ -819,6 +927,8 @@ export class EmbeddedHyperiaService implements IEmbeddedHyperiaService {
 
   invalidateNearbyEntityCache(): void {
     this._nearbyCacheTick = -1;
+    this._nearbyCacheTime = 0;
+    _snapshotCache.delete(this.world as unknown as object);
   }
 
   getGameState(): EmbeddedGameState | null {
@@ -889,6 +999,8 @@ export class EmbeddedHyperiaService implements IEmbeddedHyperiaService {
         nearbyEntities: this.getNearbyEntities(),
         inCombat: !!(data.inCombat || data.combatTarget),
         currentTarget: (data.combatTarget as string) || null,
+        selectedSpell:
+          typeof data.selectedSpell === "string" ? data.selectedSpell : null,
         activePrayers: (data.activePrayers as string[]) || [],
         prayerPointUnits: Number(data.prayerPointUnits ?? 0),
         prayerPoints: Number(data.prayerPoints ?? 0),
@@ -908,6 +1020,8 @@ export class EmbeddedHyperiaService implements IEmbeddedHyperiaService {
       this._gameStateCache.inCombat = !!(data.inCombat || data.combatTarget);
       this._gameStateCache.currentTarget =
         (data.combatTarget as string) || null;
+      this._gameStateCache.selectedSpell =
+        typeof data.selectedSpell === "string" ? data.selectedSpell : null;
       this._gameStateCache.activePrayers =
         (data.activePrayers as string[]) || [];
       this._gameStateCache.prayerPointUnits = Number(
@@ -1121,6 +1235,19 @@ export class EmbeddedHyperiaService implements IEmbeddedHyperiaService {
 
       // Determine entity type
       const entityType = this.categorizeEntity(entityData);
+      const resourceConfig =
+        entityType === "resource"
+          ? (
+              entry.entity as {
+                config?: {
+                  resourceId?: string;
+                  resourceType?: string;
+                  requiredLevel?: number;
+                  levelRequired?: number;
+                };
+              }
+            ).config
+          : undefined;
 
       // Skip dead mobs — prevents agents from attacking corpses
       if (entityType === "mob") {
@@ -1173,14 +1300,24 @@ export class EmbeddedHyperiaService implements IEmbeddedHyperiaService {
           ? getAuthoritativeRuntimeMobType(entry.entity, entityData)
           : undefined;
       entityObj.itemId = entityData.itemId as string | undefined;
-      entityObj.resourceId = entityData.resourceId as string | undefined;
-      entityObj.resourceType = entityData.resourceType as string | undefined;
+      entityObj.resourceId =
+        typeof entityData.resourceId === "string"
+          ? entityData.resourceId
+          : resourceConfig?.resourceId;
+      entityObj.resourceType =
+        typeof entityData.resourceType === "string"
+          ? entityData.resourceType
+          : resourceConfig?.resourceType;
       entityObj.requiredLevel =
         typeof entityData.requiredLevel === "number"
           ? entityData.requiredLevel
           : typeof entityData.levelRequired === "number"
             ? entityData.levelRequired
-            : undefined;
+            : typeof resourceConfig?.requiredLevel === "number"
+              ? resourceConfig.requiredLevel
+              : typeof resourceConfig?.levelRequired === "number"
+                ? resourceConfig.levelRequired
+                : undefined;
       entityObj.equippedWeapon = equippedWeapon;
 
       nearby.push(entityObj);
@@ -1215,10 +1352,36 @@ export class EmbeddedHyperiaService implements IEmbeddedHyperiaService {
    * completion event. Exact authority-progress events reset the inactivity
    * watchdog so a safely reconciling action cannot be mistaken for failure.
    */
+  private waitForProcessingTerminalAcknowledgementRetry(
+    signal?: AbortSignal,
+  ): Promise<boolean> {
+    if (signal?.aborted === true) return Promise.resolve(false);
+    return new Promise<boolean>((resolve) => {
+      let timeout: ReturnType<typeof setTimeout> | null = null;
+      let finished = false;
+      const finish = (elapsed: boolean): void => {
+        if (finished) return;
+        finished = true;
+        if (timeout) clearTimeout(timeout);
+        signal?.removeEventListener("abort", onAbort);
+        resolve(elapsed);
+      };
+      const onAbort = (): void => finish(false);
+      signal?.addEventListener("abort", onAbort, { once: true });
+      timeout = setTimeout(
+        () => finish(true),
+        EmbeddedHyperiaService.PROCESSING_STATUS_RETRY_MS,
+      );
+      (timeout as unknown as { unref?: () => void }).unref?.();
+    });
+  }
+
   private async acknowledgeProcessingTerminal(
     requestId: string,
+    signal?: AbortSignal,
   ): Promise<boolean> {
-    if (!this.playerEntityId) return false;
+    const playerId = this.playerEntityId;
+    if (!playerId) return false;
     const database = this.world.getSystem("database") as
       | {
           acknowledgeProcessingRequestAsync?: (
@@ -1228,16 +1391,25 @@ export class EmbeddedHyperiaService implements IEmbeddedHyperiaService {
         }
       | undefined;
     if (!database?.acknowledgeProcessingRequestAsync) return false;
-    try {
-      return (
-        (await database.acknowledgeProcessingRequestAsync(
-          this.playerEntityId,
-          requestId,
-        )) === true
-      );
-    } catch {
-      return false;
+    const canRetry = (): boolean => this.isActive && signal?.aborted !== true;
+    while (canRetry()) {
+      try {
+        return (
+          (await database.acknowledgeProcessingRequestAsync(
+            playerId,
+            requestId,
+          )) === true
+        );
+      } catch {
+        if (!canRetry()) return false;
+        if (
+          !(await this.waitForProcessingTerminalAcknowledgementRetry(signal))
+        ) {
+          return false;
+        }
+      }
     }
+    return false;
   }
 
   private resumeRecoverableProcessingRequest(
@@ -1465,12 +1637,20 @@ export class EmbeddedHyperiaService implements IEmbeddedHyperiaService {
 
     return new Promise<boolean>((resolve) => {
       const requestId = recoveredRequestId ?? crypto.randomUUID();
+      const terminalAcknowledgementAbort = new AbortController();
       let settled = false;
       let unsubscribeCompletion = () => {};
       let unsubscribeProgress = () => {};
       let unsubscribeRejection = () => {};
       let timeout: ReturnType<typeof setTimeout> | null = null;
       let durableStatusGeneration = 0;
+      let committedReconciliationStarted = false;
+
+      const releaseSingleFlight = (): void => {
+        if (this.cancelPendingProcessingAction === cancel) {
+          this.cancelPendingProcessingAction = null;
+        }
+      };
 
       const finish = (result: boolean, terminal = false): void => {
         if (settled) return;
@@ -1479,18 +1659,57 @@ export class EmbeddedHyperiaService implements IEmbeddedHyperiaService {
         unsubscribeCompletion();
         unsubscribeProgress();
         unsubscribeRejection();
-        if (this.cancelPendingProcessingAction === cancel) {
-          this.cancelPendingProcessingAction = null;
-        }
         if (!terminal) {
+          releaseSingleFlight();
           resolve(result);
           return;
         }
-        void this.acknowledgeProcessingTerminal(requestId)
-          .then((acknowledged) => resolve(acknowledged ? result : false))
-          .catch(() => resolve(false));
+        void this.acknowledgeProcessingTerminal(
+          requestId,
+          terminalAcknowledgementAbort.signal,
+        )
+          .then((acknowledged) => {
+            if (!acknowledged && this.isActive) {
+              console.warn(
+                `[EmbeddedHyperiaService] Processing terminal waiter acknowledgement remains unresolved for ${requestId}`,
+              );
+            }
+            releaseSingleFlight();
+            // The exact completion/rejection event is emitted only after the
+            // durable terminal receipt. Waiter acknowledgement is cleanup;
+            // losing its response must never rewrite committed action truth.
+            resolve(result);
+          })
+          .catch(() => {
+            releaseSingleFlight();
+            resolve(result);
+          });
       };
-      const cancel = (): void => finish(false);
+      const cancel = (): void => {
+        if (settled) {
+          terminalAcknowledgementAbort.abort();
+          return;
+        }
+        finish(false);
+      };
+      const finishCommitted = (): void => {
+        if (settled || committedReconciliationStarted) return;
+        committedReconciliationStarted = true;
+        if (timeout) clearTimeout(timeout);
+        const questSystem = this.world.getSystem("quest") as
+          | {
+              reconcileDurableProgress?: (playerId: string) => Promise<void>;
+            }
+          | undefined;
+        if (!this.playerEntityId || !questSystem?.reconcileDurableProgress) {
+          finish(true, true);
+          return;
+        }
+        void questSystem
+          .reconcileDurableProgress(this.playerEntityId)
+          .then(() => finish(true, true))
+          .catch(() => finish(false, true));
+      };
       const dispatch = async (): Promise<void> => {
         const operationId = getProcessingRequestOperationId(skill, requestId);
         const database = this.world.getSystem("database") as
@@ -1523,7 +1742,7 @@ export class EmbeddedHyperiaService implements IEmbeddedHyperiaService {
             envelope,
           );
           if (result === "committed") {
-            finish(true, true);
+            finishCommitted();
             return;
           }
           if (result === "pending") {
@@ -1539,7 +1758,7 @@ export class EmbeddedHyperiaService implements IEmbeddedHyperiaService {
           finish(false);
         }
       };
-      const requestDurableStatus = (): void => {
+      const requestDurableStatus = (terminalHint = false): void => {
         if (timeout) clearTimeout(timeout);
         const statusGeneration = ++durableStatusGeneration;
         const operationId = getProcessingRequestOperationId(skill, requestId);
@@ -1569,7 +1788,7 @@ export class EmbeddedHyperiaService implements IEmbeddedHyperiaService {
             )
             .then((status) => {
               if (statusGeneration !== durableStatusGeneration) return;
-              if (status === "committed") finish(true, true);
+              if (status === "committed") finishCommitted();
               else if (status === "interrupted") {
                 durableStatusGeneration += 1;
                 armInactivityTimeout();
@@ -1583,6 +1802,9 @@ export class EmbeddedHyperiaService implements IEmbeddedHyperiaService {
             .catch(() => {
               // The fail-closed retry below remains authoritative.
             });
+        } else if (terminalHint) {
+          finish(false, true);
+          return;
         }
         timeout = setTimeout(
           requestDurableStatus,
@@ -1611,7 +1833,16 @@ export class EmbeddedHyperiaService implements IEmbeddedHyperiaService {
         if (!candidate || typeof candidate !== "object") return;
         const data = candidate as Record<string, unknown>;
         if (data.requestId === requestId && matches(data)) {
-          finish(succeeded(data), true);
+          if (succeeded(data)) {
+            // Family completion is a presentation terminal. Confirm the
+            // durable operation before awaiting its quest projection.
+            requestDurableStatus(true);
+          } else {
+            // A family completion packet is presentation evidence, not
+            // custody authority. If it is malformed or reports no completed
+            // work, reconcile the exact immutable request before deciding.
+            requestDurableStatus(true);
+          }
         }
       };
       const handleRejection = (raw: unknown): void => {
@@ -1631,7 +1862,10 @@ export class EmbeddedHyperiaService implements IEmbeddedHyperiaService {
           data.playerId === this.playerEntityId &&
           data.skill === skill
         ) {
-          finish(false, true);
+          // A late rejection notification must not overwrite an operation
+          // that the database has already committed. The durable request
+          // status distinguishes committed, rejected, and still-pending work.
+          requestDurableStatus(true);
         }
       };
       const handleProgress = (raw: unknown): void => {
@@ -1652,7 +1886,7 @@ export class EmbeddedHyperiaService implements IEmbeddedHyperiaService {
           data.skill === skill
         ) {
           if (data.phase === "committed") {
-            finish(true, true);
+            finishCommitted();
             return;
           }
           durableStatusGeneration += 1;
@@ -1772,7 +2006,340 @@ export class EmbeddedHyperiaService implements IEmbeddedHyperiaService {
   }
 
   isAutonomousEnabled(): boolean {
+    return (
+      this._autonomousEnabled && this.competitiveRecoveryCustodyHolds.size === 0
+    );
+  }
+
+  /** The configured baseline, excluding temporary competitive recovery holds. */
+  isAutonomousBehaviorConfigured(): boolean {
     return this._autonomousEnabled;
+  }
+
+  setCompetitiveRecoveryCustodyHold(
+    preparationId: string,
+    active: boolean,
+  ): void {
+    if (active) {
+      this.competitiveRecoveryCustodyHolds.add(preparationId);
+    } else {
+      this.competitiveRecoveryCustodyHolds.delete(preparationId);
+    }
+  }
+
+  private streamingDuelExecutorFingerprint(
+    playerId: string,
+    publicActionObservation: StreamingDuelExecutorObservationContext,
+    command: StreamingDuelExecutorCommand,
+  ): string {
+    return createHash("sha256")
+      .update(
+        JSON.stringify({
+          version: 1,
+          playerId,
+          publicActionObservation,
+          command,
+        }),
+        "utf8",
+      )
+      .digest("hex");
+  }
+
+  private enqueueStreamingDuelExecutorCommand<T>(
+    execute: () => Promise<T>,
+  ): Promise<T> {
+    const operation = this.streamingDuelExecutorCommandTail.then(
+      execute,
+      execute,
+    );
+    this.streamingDuelExecutorCommandTail = operation.then(
+      () => undefined,
+      () => undefined,
+    );
+    return operation;
+  }
+
+  private executeStreamingDuelExecutorCommand(
+    command: StreamingDuelExecutorCommand,
+  ): Promise<boolean> | boolean {
+    if (command.kind === "engagement") {
+      return this.executeAttack(command.targetId);
+    }
+    if (command.mode === "combat_approach") {
+      return this.executeCombatApproach(command.targetId);
+    }
+    return this.executeMove([...command.target], command.runMode);
+  }
+
+  private executeDurableStreamingDuelCommand(
+    rawContext: StreamingDuelExecutorObservationContext,
+    command: StreamingDuelExecutorCommand,
+    execute: () => Promise<boolean> | boolean,
+  ): Promise<StreamingDuelExecutorCommandReceipt> {
+    return this.enqueueStreamingDuelExecutorCommand(() =>
+      this.executeDurableStreamingDuelCommandInLane(
+        rawContext,
+        command,
+        execute,
+        true,
+      ),
+    );
+  }
+
+  private async executeDurableStreamingDuelCommandInLane(
+    rawContext: StreamingDuelExecutorObservationContext,
+    command: StreamingDuelExecutorCommand,
+    execute: () => Promise<boolean> | boolean,
+    reconcilePriorCommand: boolean,
+  ): Promise<StreamingDuelExecutorCommandReceipt> {
+    if (!this.playerEntityId || !this.isActive) {
+      throw new Error("streaming_duel_executor_agent_inactive");
+    }
+    const publicActionObservation =
+      parseStreamingDuelExecutorObservationContext(rawContext);
+    if (
+      !publicActionObservation ||
+      publicActionObservation.actorId !== this.playerEntityId ||
+      (publicActionObservation.action === "movement" &&
+        command.kind !== "movement") ||
+      (publicActionObservation.action === "engagement" &&
+        command.kind !== "engagement") ||
+      ((command.kind === "engagement" ||
+        (command.kind === "movement" && command.mode === "combat_approach")) &&
+        command.targetId !== publicActionObservation.opponentId)
+    ) {
+      throw new Error("streaming_duel_executor_context_invalid");
+    }
+
+    const database = this.world.getSystem("database") as
+      | {
+          stageStreamingDuelExecutorCommandAsync?: (request: {
+            operationId: string;
+            playerId: string;
+            requestFingerprint: string;
+            publicActionObservation: StreamingDuelExecutorObservationContext;
+            command: StreamingDuelExecutorCommand;
+          }) => Promise<StreamingDuelExecutorCommandReceipt>;
+          completeStreamingDuelExecutorCommandAsync?: (request: {
+            operationId: string;
+            playerId: string;
+            requestFingerprint: string;
+            publicActionObservation: StreamingDuelExecutorObservationContext;
+            command: StreamingDuelExecutorCommand;
+            outcome: StreamingDuelExecutorCommandOutcome;
+          }) => Promise<StreamingDuelExecutorCommandReceipt>;
+        }
+      | undefined;
+    if (
+      !database?.stageStreamingDuelExecutorCommandAsync ||
+      !database.completeStreamingDuelExecutorCommandAsync
+    ) {
+      throw new Error("streaming_duel_executor_database_unavailable");
+    }
+
+    const requestFingerprint = this.streamingDuelExecutorFingerprint(
+      this.playerEntityId,
+      publicActionObservation,
+      command,
+    );
+    const request = {
+      operationId: publicActionObservation.operationId,
+      playerId: this.playerEntityId,
+      requestFingerprint,
+      publicActionObservation,
+      command,
+    };
+    const callWithAmbiguousRetry = async <T>(
+      call: () => Promise<T>,
+    ): Promise<T> => {
+      try {
+        return await call();
+      } catch (firstError) {
+        try {
+          return await call();
+        } catch (retryError) {
+          throw new Error(
+            `streaming_duel_executor_persistence_failed: ${errMsg(retryError)} (first: ${errMsg(firstError)})`,
+          );
+        }
+      }
+    };
+    const validateReceipt = (
+      receipt: StreamingDuelExecutorCommandReceipt,
+    ): void => {
+      if (
+        typeof receipt.replayed !== "boolean" ||
+        typeof receipt.completed !== "boolean" ||
+        (receipt.outcome !== null &&
+          receipt.outcome !== "accepted" &&
+          receipt.outcome !== "rejected" &&
+          receipt.outcome !== "error") ||
+        receipt.operationId !== request.operationId ||
+        receipt.playerId !== request.playerId ||
+        receipt.requestFingerprint !== request.requestFingerprint ||
+        JSON.stringify(receipt.publicActionObservation) !==
+          JSON.stringify(request.publicActionObservation) ||
+        JSON.stringify(receipt.command) !== JSON.stringify(request.command)
+      ) {
+        throw new Error("streaming_duel_executor_receipt_invalid");
+      }
+    };
+
+    const priorCommand = this.pendingStreamingDuelExecutorCommand;
+    if (
+      reconcilePriorCommand &&
+      priorCommand &&
+      priorCommand.operationId !== request.operationId
+    ) {
+      await this.executeDurableStreamingDuelCommandInLane(
+        priorCommand.publicActionObservation,
+        priorCommand.command,
+        () => this.executeStreamingDuelExecutorCommand(priorCommand.command),
+        false,
+      );
+    }
+
+    const staged = await callWithAmbiguousRetry(() =>
+      database.stageStreamingDuelExecutorCommandAsync!(request),
+    );
+    validateReceipt(staged);
+    if (staged.completed) {
+      if (!staged.outcome) {
+        throw new Error("streaming_duel_executor_receipt_invalid");
+      }
+      if (
+        this.pendingStreamingDuelExecutorCommand?.operationId ===
+        staged.operationId
+      ) {
+        this.pendingStreamingDuelExecutorCommand = null;
+      }
+      return staged;
+    }
+    if (staged.outcome !== null) {
+      throw new Error("streaming_duel_executor_receipt_invalid");
+    }
+    this.pendingStreamingDuelExecutorCommand = staged;
+
+    let outcome: StreamingDuelExecutorCommandOutcome;
+    try {
+      outcome = (await execute()) === true ? "accepted" : "rejected";
+    } catch {
+      outcome = "error";
+    }
+    const completed = await callWithAmbiguousRetry(() =>
+      database.completeStreamingDuelExecutorCommandAsync!({
+        ...request,
+        outcome,
+      }),
+    );
+    validateReceipt(completed);
+    if (!completed.completed || completed.outcome !== outcome) {
+      throw new Error("streaming_duel_executor_receipt_invalid");
+    }
+    if (
+      this.pendingStreamingDuelExecutorCommand?.operationId ===
+      completed.operationId
+    ) {
+      this.pendingStreamingDuelExecutorCommand = null;
+    }
+    return completed;
+  }
+
+  async executeDuelMove(
+    target: [number, number, number],
+    runMode: boolean,
+    publicActionObservation: StreamingDuelExecutorObservationContext,
+  ): Promise<StreamingDuelExecutorCommandReceipt> {
+    const command: StreamingDuelExecutorCommand = Object.freeze({
+      kind: "movement",
+      mode: "ground",
+      target: Object.freeze([...target]) as readonly [number, number, number],
+      runMode,
+    });
+    return this.executeDurableStreamingDuelCommand(
+      publicActionObservation,
+      command,
+      () => this.executeMove([...target], runMode),
+    );
+  }
+
+  async executeDuelCombatApproach(
+    targetId: string,
+    publicActionObservation: StreamingDuelExecutorObservationContext,
+  ): Promise<StreamingDuelExecutorCommandReceipt> {
+    const command: StreamingDuelExecutorCommand = Object.freeze({
+      kind: "movement",
+      mode: "combat_approach",
+      targetId,
+      targetType: "player",
+    });
+    return this.executeDurableStreamingDuelCommand(
+      publicActionObservation,
+      command,
+      () => this.executeCombatApproach(targetId),
+    );
+  }
+
+  async executeDuelAttack(
+    targetId: string,
+    publicActionObservation: StreamingDuelExecutorObservationContext,
+  ): Promise<StreamingDuelExecutorCommandReceipt> {
+    const command: StreamingDuelExecutorCommand = Object.freeze({
+      kind: "engagement",
+      targetId,
+      targetType: "player",
+    });
+    return this.executeDurableStreamingDuelCommand(
+      publicActionObservation,
+      command,
+      () => this.executeAttack(targetId),
+    );
+  }
+
+  async recoverPendingStreamingDuelExecutorCommands(
+    cycleId: string,
+  ): Promise<StreamingDuelExecutorCommandReceipt[]> {
+    if (!this.playerEntityId || !this.isActive) return [];
+    const database = this.world.getSystem("database") as
+      | {
+          listPendingStreamingDuelExecutorCommandsAsync?: (
+            cycleId: string,
+          ) => Promise<StreamingDuelExecutorCommandReceipt[]>;
+        }
+      | undefined;
+    if (!database?.listPendingStreamingDuelExecutorCommandsAsync) return [];
+    const pending =
+      await database.listPendingStreamingDuelExecutorCommandsAsync(cycleId);
+    const recovered: StreamingDuelExecutorCommandReceipt[] = [];
+    for (const receipt of pending) {
+      if (
+        receipt.playerId !== this.playerEntityId ||
+        receipt.publicActionObservation.cycleId !== cycleId
+      ) {
+        continue;
+      }
+      recovered.push(await this.recoverStreamingDuelExecutorCommand(receipt));
+    }
+    return recovered;
+  }
+
+  async recoverStreamingDuelExecutorCommand(
+    receipt: StreamingDuelExecutorCommandReceipt,
+  ): Promise<StreamingDuelExecutorCommandReceipt> {
+    if (
+      !this.playerEntityId ||
+      receipt.playerId !== this.playerEntityId ||
+      receipt.publicActionObservation.actorId !== this.playerEntityId ||
+      receipt.completed ||
+      receipt.outcome !== null
+    ) {
+      throw new Error("streaming_duel_executor_recovery_invalid");
+    }
+    return this.executeDurableStreamingDuelCommand(
+      receipt.publicActionObservation,
+      receipt.command,
+      () => this.executeStreamingDuelExecutorCommand(receipt.command),
+    );
   }
 
   async executeMove(
@@ -1829,8 +2396,97 @@ export class EmbeddedHyperiaService implements IEmbeddedHyperiaService {
       return true;
     }
 
-    // Last-resort fallback: keep node transform and serialized data in sync.
-    return this.applyDirectPositionFallback(target);
+    // Movement authority is unavailable. Never turn an infrastructure fault
+    // into a direct transform mutation that bypasses routing and collision.
+    console.warn(
+      "[EmbeddedHyperiaService] Authoritative movement system not available",
+    );
+    return false;
+  }
+
+  /**
+   * Confirm that the combat system—not the mirrored entity flags—currently
+   * owns an active engagement with the exact duel opponent. DuelCombatAI uses
+   * this to avoid submitting a second pursuit/attack driver after the combat
+   * tick loop has taken authority.
+   */
+  isAuthoritativelyInCombatWith(targetId: string): boolean {
+    if (!this.playerEntityId || !this.isActive) {
+      return false;
+    }
+    const combatSystem = this.world.getSystem("combat") as
+      | {
+          isInCombat?: (entityId: string) => boolean;
+          getCombatData?: (entityId: string) => {
+            inCombat?: boolean;
+            targetId?: unknown;
+          } | null;
+        }
+      | undefined;
+    if (!combatSystem?.isInCombat || !combatSystem.getCombatData) {
+      return false;
+    }
+    if (!combatSystem.isInCombat(this.playerEntityId)) {
+      return false;
+    }
+    const combatData = combatSystem.getCombatData(this.playerEntityId);
+    return (
+      combatData?.inCombat === true && String(combatData.targetId) === targetId
+    );
+  }
+
+  /**
+   * Ask the same server network authority that admits attacks whether the
+   * current live tiles satisfy this player's equipped weapon range. Euclidean
+   * presentation distance is insufficient for range-one melee because a
+   * diagonal neighbour is visually close but not a legal attack tile.
+   */
+  isTargetInAuthoritativeAttackRange(targetId: string): boolean {
+    if (!this.playerEntityId || !this.isActive) {
+      return false;
+    }
+    const player = this.world.entities.get(this.playerEntityId) as
+      { position?: { x: number; z: number } } | undefined;
+    const target = this.world.entities.get(targetId) as
+      { position?: { x: number; z: number } } | undefined;
+    if (!player?.position || !target?.position) {
+      return false;
+    }
+    const networkSystem = this.world.getSystem("network") as
+      | {
+          getPlayerWeaponRange?: (playerId: string) => number;
+          getPlayerAttackType?: (playerId: string) => AttackType;
+          isInAttackRange?: (
+            attackerTile: { x: number; z: number },
+            targetTile: { x: number; z: number },
+            attackType: AttackType,
+            range: number,
+          ) => boolean;
+        }
+      | undefined;
+    if (
+      !networkSystem?.getPlayerWeaponRange ||
+      !networkSystem.getPlayerAttackType ||
+      !networkSystem.isInAttackRange
+    ) {
+      return false;
+    }
+    const range = networkSystem.getPlayerWeaponRange(this.playerEntityId);
+    if (!Number.isSafeInteger(range) || range < 1) {
+      return false;
+    }
+    return networkSystem.isInAttackRange(
+      {
+        x: Math.floor(player.position.x),
+        z: Math.floor(player.position.z),
+      },
+      {
+        x: Math.floor(target.position.x),
+        z: Math.floor(target.position.z),
+      },
+      networkSystem.getPlayerAttackType(this.playerEntityId),
+      range,
+    );
   }
 
   /**
@@ -1919,8 +2575,13 @@ export class EmbeddedHyperiaService implements IEmbeddedHyperiaService {
     return false;
   }
 
-  async executeGather(resourceId: string): Promise<boolean> {
+  async executeGather(
+    resourceId: string,
+    autonomyAttemptId?: string,
+  ): Promise<boolean> {
+    this.lastGatherFailureReason = null;
     if (!this.playerEntityId || !this.isActive) {
+      this.lastGatherFailureReason = "service_inactive";
       throw new Error("Agent not spawned");
     }
 
@@ -1930,6 +2591,7 @@ export class EmbeddedHyperiaService implements IEmbeddedHyperiaService {
       if (resEntity) {
         const resPos = this.getEntityPosition(resEntity);
         if (resPos && isPositionInsideCombatArena(resPos[0], resPos[2])) {
+          this.lastGatherFailureReason = "arena_resource_outside_duel";
           return false;
         }
       }
@@ -1944,44 +2606,134 @@ export class EmbeddedHyperiaService implements IEmbeddedHyperiaService {
           resourceId: string,
           currentTick: number,
           runMode?: boolean,
+          completionAttemptId?: string,
         ) => boolean;
       };
       tickSystem?: { getCurrentTick: () => number };
     } | null;
 
-    if (networkSystem?.pendingGatherManager && networkSystem?.tickSystem) {
-      return networkSystem.pendingGatherManager.queuePendingGather(
+    if (!networkSystem?.pendingGatherManager || !networkSystem.tickSystem) {
+      // There is no synchronous acceptance receipt on the legacy event path.
+      // Reporting success there can advance autonomous state even when the
+      // resource authority rejects the request, so embedded agents require the
+      // same pathfinding/contention authority used by connected players.
+      this.lastGatherFailureReason = "authority_unavailable";
+      return false;
+    }
+
+    if (autonomyAttemptId === undefined) {
+      const accepted = networkSystem.pendingGatherManager.queuePendingGather(
         this.playerEntityId,
         resourceId,
         networkSystem.tickSystem.getCurrentTick(),
         true,
       );
-    } else {
-      const player = this.world.entities.get(this.playerEntityId) as
-        | {
-            position?: { x?: number; y?: number; z?: number };
-            data?: { position?: unknown };
-          }
-        | undefined;
-      const normalizedPosition = player ? this.getEntityPosition(player) : null;
-      if (!normalizedPosition) {
-        console.warn(
-          `[EmbeddedHyperiaService] Cannot gather ${resourceId}: player position unavailable`,
-        );
-        return false;
-      }
-      const [x, y, z] = normalizedPosition;
-      const playerPosition = { x, y, z };
-      this.world.emit(EventType.RESOURCE_GATHER, {
-        playerId: this.playerEntityId,
-        resourceId,
-        playerPosition,
-      });
-      return true;
+      this.lastGatherFailureReason = accepted ? null : "admission_rejected";
+      return accepted;
     }
+
+    const operationId =
+      getGatheringRewardOperationIdForAttempt(autonomyAttemptId);
+    if (!operationId) {
+      this.lastGatherFailureReason = "invalid_operation_identity";
+      return false;
+    }
+    if (this.cancelPendingGatherAction) {
+      this.lastGatherFailureReason = "concurrent_request";
+      return false;
+    }
+    const playerId = this.playerEntityId;
+    const pendingGatherManager = networkSystem.pendingGatherManager;
+    const currentTick = networkSystem.tickSystem.getCurrentTick();
+
+    return new Promise<boolean>((resolve) => {
+      let settled = false;
+      let unsubscribe = () => {};
+      const finish = (result: boolean, failureReason?: string): void => {
+        if (settled) return;
+        settled = true;
+        this.lastGatherFailureReason = result
+          ? null
+          : (failureReason ?? "completion_rejected");
+        unsubscribe();
+        if (this.cancelPendingGatherAction === cancel) {
+          this.cancelPendingGatherAction = null;
+        }
+        resolve(result);
+      };
+      const cancel = (): void => finish(false, "cancelled");
+      const handleCompletion = (raw: unknown): void => {
+        const wrapper = raw as { type?: unknown; data?: unknown } | null;
+        const candidate =
+          wrapper &&
+          typeof wrapper === "object" &&
+          typeof wrapper.type === "string" &&
+          wrapper.data &&
+          typeof wrapper.data === "object"
+            ? wrapper.data
+            : raw;
+        if (!candidate || typeof candidate !== "object") return;
+        const data = candidate as Record<string, unknown>;
+        if (
+          data.playerId !== playerId ||
+          data.resourceId !== resourceId ||
+          data.operationId !== operationId
+        ) {
+          return;
+        }
+        if (data.successful !== true) {
+          finish(
+            false,
+            typeof data.failureReason === "string" && data.failureReason
+              ? data.failureReason
+              : "completion_rejected",
+          );
+          return;
+        }
+        const validReward =
+          typeof data.rewardItemId === "string" &&
+          data.rewardItemId.length > 0 &&
+          Number.isSafeInteger(data.rewardQuantity) &&
+          Number(data.rewardQuantity) > 0;
+        finish(validReward, validReward ? undefined : "invalid_reward_receipt");
+      };
+
+      this.cancelPendingGatherAction = cancel;
+      if (this.world.$eventBus) {
+        const subscription = this.world.$eventBus.subscribe(
+          EventType.RESOURCE_GATHERING_COMPLETED,
+          handleCompletion,
+        );
+        unsubscribe = () => subscription.unsubscribe();
+      } else {
+        this.world.on(EventType.RESOURCE_GATHERING_COMPLETED, handleCompletion);
+        unsubscribe = () =>
+          this.world.off(
+            EventType.RESOURCE_GATHERING_COMPLETED,
+            handleCompletion,
+          );
+      }
+
+      const accepted =
+        pendingGatherManager.queuePendingGather(
+          playerId,
+          resourceId,
+          currentTick,
+          true,
+          autonomyAttemptId,
+        ) === true;
+      if (!accepted) finish(false, "admission_rejected");
+    });
   }
 
-  async executePickup(itemId: string): Promise<boolean> {
+  getLastGatherFailureReason(): string | null {
+    return this.lastGatherFailureReason;
+  }
+
+  async executePickup(
+    itemId: string,
+    autonomyAttemptId?: string,
+  ): Promise<boolean> {
     if (!this.playerEntityId || !this.isActive) {
       throw new Error("Agent not spawned");
     }
@@ -1990,38 +2742,54 @@ export class EmbeddedHyperiaService implements IEmbeddedHyperiaService {
       return false;
     }
 
-    // Emit pickup event directly to the world
-    // Note: itemId here is actually the entityId of the ground item to pick up.
-    this.world.emit(EventType.ITEM_PICKUP, {
-      playerId: this.playerEntityId,
-      entityId: itemId,
-    });
-    return true;
+    const operationId =
+      autonomyAttemptId === undefined
+        ? undefined
+        : (getGroundItemPickupOperationIdForAttempt(autonomyAttemptId) ??
+          undefined);
+    if (autonomyAttemptId !== undefined && !operationId) return false;
+
+    const networkSystem = this.world.getSystem("network") as
+      | {
+          requestServerPickup?: (
+            playerId: string,
+            entityId: string,
+            operationId?: string,
+          ) => Promise<boolean>;
+        }
+      | undefined;
+    if (!networkSystem?.requestServerPickup) return false;
+
+    return networkSystem.requestServerPickup(
+      this.playerEntityId,
+      itemId,
+      operationId,
+    );
   }
 
   async executeLootGravestone(
     gravestoneId: string,
-    autonomyAttemptId?: string,
+    autonomyAttemptId: string,
   ): Promise<boolean> {
     if (!this.playerEntityId || !this.isActive) {
       return false;
     }
     const normalizedGravestoneId = gravestoneId.trim();
-    const normalizedAttemptId = autonomyAttemptId?.trim();
+    const normalizedAttemptId =
+      typeof autonomyAttemptId === "string" ? autonomyAttemptId.trim() : "";
     if (
       !normalizedGravestoneId ||
       normalizedGravestoneId.length > 256 ||
-      (normalizedAttemptId !== undefined &&
-        !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(
-          normalizedAttemptId,
-        )) ||
+      !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(
+        normalizedAttemptId,
+      ) ||
       !this.world.entities.get(normalizedGravestoneId)
     ) {
       return false;
     }
 
     const playerId = this.playerEntityId;
-    const transactionId = `agent-grave-loot:${normalizedAttemptId ?? crypto.randomUUID()}`;
+    const transactionId = `agent-grave-loot:${normalizedAttemptId}`;
     return new Promise<boolean>((resolve) => {
       let settled = false;
       const finish = (success: boolean): void => {
@@ -2068,16 +2836,40 @@ export class EmbeddedHyperiaService implements IEmbeddedHyperiaService {
     });
   }
 
-  async executeDrop(itemId: string, quantity: number = 1): Promise<void> {
+  async executeDrop(itemId: string, quantity: number = 1): Promise<boolean> {
     if (!this.playerEntityId || !this.isActive) {
       throw new Error("Agent not spawned");
     }
+    const inventorySystem = this.world.getSystem("inventory") as
+      | {
+          dropOwnedItemAtomic?: (
+            playerId: string,
+            operationId: string,
+            requestedItemId: string,
+            requestedQuantity: number,
+          ) => Promise<{ ok: boolean }>;
+        }
+      | undefined;
+    if (!inventorySystem?.dropOwnedItemAtomic) return false;
 
-    this.world.emit(EventType.ITEM_DROP, {
-      playerId: this.playerEntityId,
-      itemId: itemId,
+    let operationId: string;
+    try {
+      operationId = generateGroundItemDropOperationId();
+    } catch {
+      return false;
+    }
+    const result = await inventorySystem.dropOwnedItemAtomic(
+      this.playerEntityId,
+      operationId,
+      itemId,
       quantity,
-    });
+    );
+    if (result.ok) {
+      this._inventoryCacheTick = -1;
+      this._gameStateCacheTick = -1;
+      this.invalidateNearbyEntityCache();
+    }
+    return result.ok;
   }
 
   async executeEquip(itemId: string): Promise<EquipmentActionReceipt> {
@@ -2194,6 +2986,39 @@ export class EmbeddedHyperiaService implements IEmbeddedHyperiaService {
     return receipt;
   }
 
+  async executeDuelPreparationCustodyRefresh(
+    preparationId: string,
+  ): Promise<boolean> {
+    if (
+      !this.playerEntityId ||
+      !this.isActive ||
+      this.activeBankPreparationId !== preparationId ||
+      this.activeBankId !== getDuelPreparationBankId(preparationId)
+    ) {
+      return false;
+    }
+    const equipmentSystem = this.world.getSystem("equipment") as
+      | {
+          refreshOwnedDuelPreparationCustodyFromPersistence?: (
+            requestedPlayerId: string,
+          ) => Promise<boolean>;
+        }
+      | undefined;
+    if (!equipmentSystem?.refreshOwnedDuelPreparationCustodyFromPersistence) {
+      return false;
+    }
+    const refreshed =
+      await equipmentSystem.refreshOwnedDuelPreparationCustodyFromPersistence(
+        this.playerEntityId,
+      );
+    if (refreshed) {
+      this._inventoryCacheTick = -1;
+      this._equipmentCacheTick = -1;
+      this._gameStateCacheTick = -1;
+    }
+    return refreshed;
+  }
+
   async executeDuelPreparationPlanRecovery(
     operationId: string,
     preparationId: string,
@@ -2226,7 +3051,10 @@ export class EmbeddedHyperiaService implements IEmbeddedHyperiaService {
     return receipt;
   }
 
-  async executeUse(itemId: string): Promise<FoodConsumptionReceipt> {
+  async executeUse(
+    itemId: string,
+    publicActionObservation?: StreamingDuelFoodObservationContext,
+  ): Promise<FoodConsumptionReceipt> {
     if (!this.playerEntityId || !this.isActive) {
       throw new Error("Agent not spawned");
     }
@@ -2256,6 +3084,7 @@ export class EmbeddedHyperiaService implements IEmbeddedHyperiaService {
             requestedItemId: string,
             slot: number,
             operationId: string,
+            observation?: StreamingDuelFoodObservationContext,
           ) => Promise<FoodConsumptionReceipt>;
         }
       | undefined;
@@ -2263,12 +3092,21 @@ export class EmbeddedHyperiaService implements IEmbeddedHyperiaService {
       return failure("atomic_persistence_unavailable");
     }
 
-    const receipt = await playerSystem.consumeFoodAtomic(
-      this.playerEntityId,
-      itemId,
-      item.slot,
-      `food-debit:${crypto.randomUUID()}`,
-    );
+    const operationId = `food-debit:${crypto.randomUUID()}`;
+    const receipt = publicActionObservation
+      ? await playerSystem.consumeFoodAtomic(
+          this.playerEntityId,
+          itemId,
+          item.slot,
+          operationId,
+          publicActionObservation,
+        )
+      : await playerSystem.consumeFoodAtomic(
+          this.playerEntityId,
+          itemId,
+          item.slot,
+          operationId,
+        );
     this._gameStateCacheTick = -1;
     return receipt;
   }
@@ -2393,6 +3231,7 @@ export class EmbeddedHyperiaService implements IEmbeddedHyperiaService {
     // Cancel combat via CombatSystem (keeps internal tracking in sync)
     const combatSystem = this.world.getSystem("combat") as {
       forceEndCombat?: (entityId: string) => void;
+      waitForProjectileCustodySettlements?: () => Promise<void>;
     } | null;
     if (combatSystem?.forceEndCombat) {
       try {
@@ -2402,6 +3241,22 @@ export class EmbeddedHyperiaService implements IEmbeddedHyperiaService {
         // Fall through to manual cleanup
       }
     }
+
+    // A ranged or magic admission can already be awaiting its durable debit
+    // when preparation stops combat. forceEndCombat() fences the launch and
+    // starts the matching refund/cancellation, but the private bank must not
+    // snapshot custody until that terminal operation has settled.
+    if (combatSystem?.waitForProjectileCustodySettlements) {
+      await combatSystem.waitForProjectileCustodySettlements();
+    }
+
+    // Projectile settlement can change equipped ammunition or inventory runes
+    // without advancing the world tick. Preparation reads custody immediately
+    // after this barrier, so same-tick observation caches must be discarded or
+    // the whole-plan delta can be computed from quantities that no longer exist.
+    this._inventoryCacheTick = -1;
+    this._equipmentCacheTick = -1;
+    this._gameStateCacheTick = -1;
 
     // Clear any remaining combat state (including serialized fields)
     const player = this.world.entities.get(this.playerEntityId);
@@ -2416,7 +3271,76 @@ export class EmbeddedHyperiaService implements IEmbeddedHyperiaService {
     return applied;
   }
 
-  async executePrayerToggle(prayerId: string): Promise<PrayerActionReceipt> {
+  /**
+   * Reject every new combat admission involving this selected contestant until
+   * the exact private preparation freezes or terminates. Re-delivery of the
+   * same preparation is idempotent; another preparation cannot steal it.
+   */
+  beginDuelPreparationCombatFence(preparationId: string): boolean {
+    if (!this.playerEntityId || !this.isActive || !preparationId) return false;
+    if (
+      this.activeDuelPreparationCombatFenceId &&
+      this.activeDuelPreparationCombatFenceId !== preparationId
+    ) {
+      return false;
+    }
+    const combatSystem = this.world.getSystem("combat") as
+      | {
+          beginDuelPreparationCombatFence?: (
+            entityId: string,
+            exactPreparationId: string,
+          ) => boolean;
+        }
+      | undefined;
+    if (
+      combatSystem?.beginDuelPreparationCombatFence?.(
+        this.playerEntityId,
+        preparationId,
+      ) !== true
+    ) {
+      return false;
+    }
+    this.activeDuelPreparationCombatFenceId = preparationId;
+    return true;
+  }
+
+  /** Release only the exact preparation that owns this player's combat fence. */
+  endDuelPreparationCombatFence(preparationId: string): boolean {
+    if (
+      !preparationId ||
+      this.activeDuelPreparationCombatFenceId !== preparationId
+    ) {
+      return false;
+    }
+    return this.releaseActiveDuelPreparationCombatFence();
+  }
+
+  private releaseActiveDuelPreparationCombatFence(): boolean {
+    const preparationId = this.activeDuelPreparationCombatFenceId;
+    if (!preparationId) return false;
+    const playerEntityId = this.playerEntityId;
+    this.activeDuelPreparationCombatFenceId = null;
+    if (!playerEntityId) return false;
+    const combatSystem = this.world.getSystem("combat") as
+      | {
+          endDuelPreparationCombatFence?: (
+            entityId: string,
+            exactPreparationId: string,
+          ) => boolean;
+        }
+      | undefined;
+    return (
+      combatSystem?.endDuelPreparationCombatFence?.(
+        playerEntityId,
+        preparationId,
+      ) === true
+    );
+  }
+
+  async executePrayerToggle(
+    prayerId: string,
+    publicActionObservation?: StreamingDuelPrayerObservationContext,
+  ): Promise<PrayerActionReceipt> {
     const operationId = `agent-prayer-toggle:${crypto.randomUUID()}`;
     const failure = (
       reason: PrayerActionReceipt["reason"],
@@ -2446,6 +3370,7 @@ export class EmbeddedHyperiaService implements IEmbeddedHyperiaService {
         playerId: string,
         prayerId: string,
         operationId?: string,
+        observation?: StreamingDuelPrayerObservationContext,
       ) => Promise<PrayerActionReceipt>;
     } | null;
 
@@ -2457,11 +3382,18 @@ export class EmbeddedHyperiaService implements IEmbeddedHyperiaService {
     }
 
     try {
-      const receipt = await prayerSystem.togglePrayer(
-        this.playerEntityId,
-        prayerId,
-        operationId,
-      );
+      const receipt = publicActionObservation
+        ? await prayerSystem.togglePrayer(
+            this.playerEntityId,
+            prayerId,
+            operationId,
+            publicActionObservation,
+          )
+        : await prayerSystem.togglePrayer(
+            this.playerEntityId,
+            prayerId,
+            operationId,
+          );
       this._gameStateCacheTick = -1;
       return receipt;
     } catch (err) {
@@ -2482,10 +3414,27 @@ export class EmbeddedHyperiaService implements IEmbeddedHyperiaService {
     "longrange",
   ]);
 
-  async executeChangeStyle(newStyle: string): Promise<boolean> {
-    if (!this.playerEntityId || !this.isActive) return false;
+  /**
+   * Preserve the authoritative rejection category for the duel controller's
+   * launch diagnostics. The boolean compatibility API remains intentionally
+   * small for ordinary agents, but a paid duel must not collapse a database,
+   * equipment, or projection failure into an undifferentiated rejection.
+   */
+  getLastStyleChangeFailureReason(): string | null {
+    return this.lastStyleChangeFailureReason;
+  }
+
+  async executeChangeStyle(
+    newStyle: string,
+    publicActionObservation?: StreamingDuelStyleObservationContext,
+  ): Promise<boolean> {
+    if (!this.playerEntityId || !this.isActive) {
+      this.lastStyleChangeFailureReason = "service_inactive";
+      return false;
+    }
 
     if (!EmbeddedHyperiaService.VALID_STYLES.has(newStyle)) {
+      this.lastStyleChangeFailureReason = "invalid_style";
       console.warn(
         `[EmbeddedHyperiaService] Invalid attack style: ${newStyle}`,
       );
@@ -2493,12 +3442,49 @@ export class EmbeddedHyperiaService implements IEmbeddedHyperiaService {
     }
 
     const player = this.world.entities.get(this.playerEntityId);
-    if (!player) return false;
+    if (!player) {
+      this.lastStyleChangeFailureReason = "player_missing";
+      return false;
+    }
 
+    const playerSystem = this.world.getSystem("player") as
+      | {
+          changeAttackStyleAtomic?: (
+            playerId: string,
+            requestedStyle: string,
+            observation?: StreamingDuelStyleObservationContext,
+          ) => Promise<{
+            ok: boolean;
+            currentStyle: string | null;
+            reason?: string;
+          }>;
+        }
+      | undefined;
+    if (playerSystem?.changeAttackStyleAtomic) {
+      const receipt = await playerSystem.changeAttackStyleAtomic(
+        this.playerEntityId,
+        newStyle,
+        publicActionObservation,
+      );
+      const accepted = receipt.ok && receipt.currentStyle === newStyle;
+      this.lastStyleChangeFailureReason = accepted
+        ? null
+        : (receipt.reason ??
+          (receipt.ok ? "committed_style_mismatch" : "request_rejected"));
+      return accepted;
+    }
+
+    // Unit/legacy worlds may lack PlayerSystem. Never downgrade a duel receipt
+    // to an unverified event, but preserve the historical diagnostic fallback.
+    if (publicActionObservation) {
+      this.lastStyleChangeFailureReason = "atomic_persistence_unavailable";
+      return false;
+    }
     this.world.emit(EventType.ATTACK_STYLE_CHANGED, {
       playerId: this.playerEntityId,
       newStyle,
     });
+    this.lastStyleChangeFailureReason = null;
     return true;
   }
 
@@ -2525,6 +3511,25 @@ export class EmbeddedHyperiaService implements IEmbeddedHyperiaService {
       }
     }
 
+    const database = this.world.getSystem("database") as {
+      savePlayerAsync?: (
+        playerId: string,
+        data: { selectedSpell: string | null },
+      ) => Promise<void>;
+    } | null;
+    if (!database?.savePlayerAsync) return false;
+    try {
+      await database.savePlayerAsync(this.playerEntityId, {
+        selectedSpell: spellId,
+      });
+    } catch (error) {
+      console.warn(
+        `[EmbeddedHyperiaService] Autocast persistence failed for ${spellId ?? "none"}:`,
+        errMsg(error),
+      );
+      return false;
+    }
+
     (player.data as { selectedSpell?: string | null }).selectedSpell = spellId;
     const worldPlayer = (
       this.world as {
@@ -2536,6 +3541,7 @@ export class EmbeddedHyperiaService implements IEmbeddedHyperiaService {
       playerId: this.playerEntityId,
       spellId,
     });
+    this._gameStateCacheTick = -1;
 
     const entityPostState = (player.data as { selectedSpell?: string | null })
       .selectedSpell;
@@ -2586,11 +3592,16 @@ export class EmbeddedHyperiaService implements IEmbeddedHyperiaService {
       );
     }
 
+    const openRevision = ++this.bankOpenRevision;
+    this.pendingDuelPreparationBankOpen = null;
+    this.activeBankId = null;
+    this.activeBankPreparationId = null;
     const receipt = await openAuthoritativeAgentBank({
       world: this.world,
       playerId: this.playerEntityId,
       bankId,
     });
+    if (openRevision !== this.bankOpenRevision) return receipt;
     if (receipt.success) {
       this.activeBankId = bankId;
       this.activeBankPreparationId = null;
@@ -2625,12 +3636,38 @@ export class EmbeddedHyperiaService implements IEmbeddedHyperiaService {
         "player_unavailable",
       );
     }
-    const receipt = await openAuthoritativeAgentBank({
-      world: this.world,
-      playerId: this.playerEntityId,
-      bankId,
+    const openRevision = ++this.bankOpenRevision;
+    this.pendingDuelPreparationBankOpen = {
       preparationId,
-    });
+      revision: openRevision,
+    };
+    this.activeBankId = null;
+    this.activeBankPreparationId = null;
+    let receipt: AgentBankActionReceipt;
+    try {
+      receipt = await openAuthoritativeAgentBank({
+        world: this.world,
+        playerId: this.playerEntityId,
+        bankId,
+        preparationId,
+      });
+    } catch (error) {
+      if (
+        this.pendingDuelPreparationBankOpen?.preparationId === preparationId &&
+        this.pendingDuelPreparationBankOpen.revision === openRevision
+      ) {
+        this.pendingDuelPreparationBankOpen = null;
+      }
+      throw error;
+    }
+    if (
+      openRevision !== this.bankOpenRevision ||
+      this.pendingDuelPreparationBankOpen?.preparationId !== preparationId ||
+      this.pendingDuelPreparationBankOpen.revision !== openRevision
+    ) {
+      return receipt;
+    }
+    this.pendingDuelPreparationBankOpen = null;
     if (receipt.success) {
       this.activeBankId = bankId;
       this.activeBankPreparationId = preparationId;
@@ -2654,9 +3691,14 @@ export class EmbeddedHyperiaService implements IEmbeddedHyperiaService {
    * from carrying a capability farther than its intended lifecycle.
    */
   revokeDuelPreparationBankAccess(preparationId: string): void {
-    if (this.activeBankPreparationId !== preparationId) return;
-    this.activeBankId = null;
-    this.activeBankPreparationId = null;
+    if (this.pendingDuelPreparationBankOpen?.preparationId === preparationId) {
+      this.bankOpenRevision += 1;
+      this.pendingDuelPreparationBankOpen = null;
+    }
+    if (this.activeBankPreparationId === preparationId) {
+      this.activeBankId = null;
+      this.activeBankPreparationId = null;
+    }
   }
 
   async executeBankDeposit(
@@ -3104,7 +4146,10 @@ export class EmbeddedHyperiaService implements IEmbeddedHyperiaService {
   // Crafting / Processing
   // =========================================================================
 
-  async executeCook(itemId: string): Promise<boolean> {
+  async executeCook(
+    itemId: string,
+    autonomyAttemptId?: string,
+  ): Promise<boolean> {
     if (!this.playerEntityId || !this.isActive) return false;
     const playerId = this.playerEntityId;
     if (!itemId) return false;
@@ -3163,6 +4208,7 @@ export class EmbeddedHyperiaService implements IEmbeddedHyperiaService {
             sourceType: "range" as const,
             requestId,
           }),
+        autonomyAttemptId,
       );
     }
 
@@ -3193,13 +4239,17 @@ export class EmbeddedHyperiaService implements IEmbeddedHyperiaService {
             sourceType: "fire" as const,
             requestId,
           }),
+        autonomyAttemptId,
       );
     }
 
     return false;
   }
 
-  async executeSmelt(recipe: string): Promise<boolean> {
+  async executeSmelt(
+    recipe: string,
+    autonomyAttemptId?: string,
+  ): Promise<boolean> {
     if (!this.playerEntityId || !this.isActive) return false;
     const playerId = this.playerEntityId;
     if (!/^[a-z][a-z0-9_]{0,63}$/.test(recipe)) return false;
@@ -3257,10 +4307,14 @@ export class EmbeddedHyperiaService implements IEmbeddedHyperiaService {
           quantity: 1,
           requestId,
         }),
+      autonomyAttemptId,
     );
   }
 
-  async executeSmith(recipe: string): Promise<boolean> {
+  async executeSmith(
+    recipe: string,
+    autonomyAttemptId?: string,
+  ): Promise<boolean> {
     if (!this.playerEntityId || !this.isActive) return false;
     const playerId = this.playerEntityId;
     if (!/^[a-z][a-z0-9_]{0,63}$/.test(recipe)) return false;
@@ -3312,10 +4366,14 @@ export class EmbeddedHyperiaService implements IEmbeddedHyperiaService {
           quantity: 1,
           requestId,
         }),
+      autonomyAttemptId,
     );
   }
 
-  async executeFiremake(logsItemId?: string): Promise<boolean> {
+  async executeFiremake(
+    logsItemId?: string,
+    autonomyAttemptId?: string,
+  ): Promise<boolean> {
     if (!this.playerEntityId || !this.isActive) return false;
     const playerId = this.playerEntityId;
 
@@ -3357,10 +4415,14 @@ export class EmbeddedHyperiaService implements IEmbeddedHyperiaService {
           tinderboxSlot: tinderboxSlot.slot,
           requestId,
         }),
+      autonomyAttemptId,
     );
   }
 
-  async executeRunecraft(runeType: string): Promise<boolean> {
+  async executeRunecraft(
+    runeType: string,
+    autonomyAttemptId?: string,
+  ): Promise<boolean> {
     if (!this.playerEntityId || !this.isActive) return false;
     const playerId = this.playerEntityId;
 
@@ -3438,10 +4500,15 @@ export class EmbeddedHyperiaService implements IEmbeddedHyperiaService {
           runeType: normalizedRuneType,
           requestId,
         }),
+      autonomyAttemptId,
     );
   }
 
-  async executeCraft(recipeId: string, quantity: number = 1): Promise<boolean> {
+  async executeCraft(
+    recipeId: string,
+    quantity: number = 1,
+    autonomyAttemptId?: string,
+  ): Promise<boolean> {
     if (!this.playerEntityId || !this.isActive) return false;
     const playerId = this.playerEntityId;
     if (
@@ -3511,12 +4578,14 @@ export class EmbeddedHyperiaService implements IEmbeddedHyperiaService {
           quantity,
           requestId,
         }),
+      autonomyAttemptId,
     );
   }
 
   async executeFletch(
     recipeId: string,
     quantity: number = 1,
+    autonomyAttemptId?: string,
   ): Promise<boolean> {
     if (!this.playerEntityId || !this.isActive) return false;
     const playerId = this.playerEntityId;
@@ -3544,12 +4613,14 @@ export class EmbeddedHyperiaService implements IEmbeddedHyperiaService {
           quantity,
           requestId,
         }),
+      autonomyAttemptId,
     );
   }
 
   async executeTan(
     inputItemId: string,
     quantity: number = 1,
+    autonomyAttemptId?: string,
   ): Promise<boolean> {
     if (!this.playerEntityId || !this.isActive) return false;
     const playerId = this.playerEntityId;
@@ -3557,7 +4628,8 @@ export class EmbeddedHyperiaService implements IEmbeddedHyperiaService {
       !inputItemId ||
       !Number.isSafeInteger(quantity) ||
       quantity <= 0 ||
-      quantity > 10_000
+      quantity > 10_000 ||
+      (autonomyAttemptId !== undefined && quantity !== 1)
     ) {
       return false;
     }
@@ -3624,6 +4696,7 @@ export class EmbeddedHyperiaService implements IEmbeddedHyperiaService {
           quantity,
           requestId,
         }),
+      autonomyAttemptId,
     );
   }
 
@@ -4492,11 +5565,7 @@ export class EmbeddedHyperiaService implements IEmbeddedHyperiaService {
     if (!this.playerEntityId || !this.isActive) return false;
     if (!slot) return false;
 
-    this.world.emit(EventType.EQUIPMENT_UNEQUIP, {
-      playerId: this.playerEntityId,
-      slot,
-    });
-    return true;
+    return (await this.executeUnequipOwned(slot)).ok;
   }
 
   async executeSetAutoRetaliate(enabled: boolean): Promise<boolean> {
@@ -4593,17 +5662,28 @@ export class EmbeddedHyperiaService implements IEmbeddedHyperiaService {
     const targetPos = this.getEntityPosition(target);
     if (!targetPos) return false;
 
-    await this.executeMove(targetPos, true);
-    return true;
+    return this.executeMove(targetPos, true);
   }
 
   async executeRespawn(): Promise<boolean> {
     if (!this.playerEntityId || !this.isActive) return false;
 
-    this.world.emit("player:respawn:request", {
-      playerId: this.playerEntityId,
-    });
-    return true;
+    const deathSystem = this.world.getSystem("player-death") as
+      | {
+          requestPlayerRespawn?: (playerId: string) => Promise<boolean>;
+        }
+      | undefined;
+    if (!deathSystem?.requestPlayerRespawn) return false;
+
+    try {
+      return await deathSystem.requestPlayerRespawn(this.playerEntityId);
+    } catch (error) {
+      console.warn(
+        "[EmbeddedHyperiaService] Respawn request failed:",
+        errMsg(error),
+      );
+      return false;
+    }
   }
 
   isSpawned(): boolean {
@@ -4685,7 +5765,8 @@ export class EmbeddedHyperiaService implements IEmbeddedHyperiaService {
   }
 
   /**
-   * Use server tile movement pipeline so embedded agents move like real players.
+   * Resolve exact server-owned interaction geometry for stations, stores, and
+   * authored resources so embedded agents stop on a legal adjacent tile.
    */
   private resolveInteractionMovementArrival(
     target: [number, number, number],
@@ -4715,7 +5796,11 @@ export class EmbeddedHyperiaService implements IEmbeddedHyperiaService {
         runtimeType === "bank" ||
         npcType === "tanner" ||
         typeof (runtime.config?.storeId ?? runtime.data?.storeId) === "string";
-      if (!isPreparationStation) continue;
+      const isAuthoredResource =
+        runtimeType === "resource" ||
+        typeof (runtime.config?.resourceId ?? runtime.data?.resourceId) ===
+          "string";
+      if (!isPreparationStation && !isAuthoredResource) continue;
 
       const position = this.getEntityPosition(entity);
       if (
@@ -4828,37 +5913,6 @@ export class EmbeddedHyperiaService implements IEmbeddedHyperiaService {
         }
       | undefined;
     return networkSystem?.getServerMovementDebug?.(this.playerEntityId) ?? null;
-  }
-
-  /**
-   * Fallback movement path when neither network nor movement systems are available.
-   */
-  private applyDirectPositionFallback(
-    target: [number, number, number],
-  ): boolean {
-    if (!this.playerEntityId) {
-      return false;
-    }
-
-    const player = this.world.entities.get(this.playerEntityId);
-    if (!player) {
-      return false;
-    }
-
-    const groundedTarget = this.groundSpawnPosition(target);
-    const [x, y, z] = groundedTarget;
-
-    // Keep authoritative transform and serializable state aligned.
-    if (player.position && typeof player.position.set === "function") {
-      player.position.set(x, y, z);
-    }
-    (player.data as Record<string, unknown>).position = [x, y, z];
-
-    this.world.emit(EventType.ENTITY_MODIFIED, {
-      id: this.playerEntityId,
-      changes: { position: [x, y, z] },
-    });
-    return true;
   }
 
   /**

@@ -1,4 +1,7 @@
-import type { StreamingPerformanceSnapshot } from "@hyperforge/shared";
+import type {
+  StreamingPerformanceSnapshot,
+  StreamingRenderProfile,
+} from "@hyperforge/shared";
 import type {
   StreamingSceneDiagnostics,
   StreamingSceneReadinessEvidence,
@@ -23,6 +26,10 @@ export type StreamingWindowRendererHealth = {
   phase: string | null;
 };
 
+export type StreamingWindowRenderProfile = StreamingRenderProfile & {
+  explicit: true;
+};
+
 export type CaptureControlStatus = {
   recording?: boolean;
   wsConnected?: boolean;
@@ -36,10 +43,14 @@ export type CaptureControlStatus = {
 };
 
 export type StreamingAudioCaptureBridge = {
-  getStream: () => MediaStream;
-  getContextState: () => AudioContextState;
-  getSampleRate: () => number;
-  resume: () => Promise<void>;
+  /** The final game-master mix. The game owns this track for the page lifetime. */
+  stream: MediaStream;
+  /** Source context retained in-page so the capture worker can unlock it. */
+  context: AudioContext;
+  /** Direct read-only tap of the final post-group game master bus. */
+  node: GainNode;
+  /** Idempotent activation for the isolated autoplay-enabled capture page. */
+  activate: () => Promise<void>;
 };
 
 export type StreamingWindow = Window & {
@@ -47,6 +58,7 @@ export type StreamingWindow = Window & {
   __CDN_URL?: string;
   __HYPERIA_STREAM_READY__?: boolean;
   __HYPERIA_STREAM_RENDERER_HEALTH__?: StreamingWindowRendererHealth | null;
+  __HYPERIA_STREAM_RENDER_PROFILE__?: StreamingWindowRenderProfile | null;
   __HYPERIA_STREAM_PERFORMANCE__?: StreamingPerformanceSnapshot | null;
   /** Public duel projection currently rendered by the canonical stream page. */
   __HYPERIA_STREAM_STATE__?: unknown | null;

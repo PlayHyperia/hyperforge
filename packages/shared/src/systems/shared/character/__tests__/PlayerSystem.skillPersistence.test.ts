@@ -72,4 +72,49 @@ describe("PlayerSystem complete skill persistence", () => {
       }),
     );
   });
+
+  it("does not re-save a skill snapshot that an atomic receipt already committed", () => {
+    const system = new PlayerSystem({
+      isServer: true,
+      $eventBus: new EventBus(),
+      entities: new Map(),
+      getSystem: vi.fn(() => undefined),
+    } as never);
+    const internal = system as unknown as {
+      players: Map<string, { skills: Skills; combat: { combatLevel: number } }>;
+      handleSkillsUpdate(data: {
+        playerId: string;
+        skills: Skills;
+        persistence?: "already_committed";
+      }): void;
+      scheduleSaveSkills(playerId: string): void;
+      emitPlayerUpdate(playerId: string): void;
+      syncCombatLevelToEntity(playerId: string, combatLevel: number): void;
+    };
+    internal.players.set("skill-save-agent", {
+      skills: skills(),
+      combat: { combatLevel: 3 },
+    });
+    const schedule = vi
+      .spyOn(internal, "scheduleSaveSkills")
+      .mockImplementation(() => undefined);
+    vi.spyOn(internal, "emitPlayerUpdate").mockImplementation(() => undefined);
+    vi.spyOn(internal, "syncCombatLevelToEntity").mockImplementation(
+      () => undefined,
+    );
+
+    internal.handleSkillsUpdate({
+      playerId: "skill-save-agent",
+      skills: skills(),
+      persistence: "already_committed",
+    });
+    expect(schedule).not.toHaveBeenCalled();
+
+    internal.handleSkillsUpdate({
+      playerId: "skill-save-agent",
+      skills: skills(),
+    });
+    expect(schedule).toHaveBeenCalledOnce();
+    system.destroy();
+  });
 });

@@ -279,8 +279,7 @@ export class Environment extends System {
     let glb = this.world.loader?.get("model", url);
     if (!glb)
       glb = (await this.world.loader?.load("model", url)) as
-        | LoaderResult
-        | undefined;
+        LoaderResult | undefined;
     if (!glb) return;
 
     if (this.model) this.model.deactivate();
@@ -809,8 +808,7 @@ export class Environment extends System {
 
     // Apply immediately to renderer
     const graphics = this.world.graphics as
-      | { renderer?: { toneMappingExposure?: number } }
-      | undefined;
+      { renderer?: { toneMappingExposure?: number } } | undefined;
     if (graphics?.renderer) {
       graphics.renderer.toneMappingExposure = this.currentExposure;
     }
@@ -823,8 +821,7 @@ export class Environment extends System {
    */
   private updateAutoExposure(dayIntensity: number): void {
     const graphics = this.world.graphics as
-      | { renderer?: { toneMappingExposure?: number } }
-      | undefined;
+      { renderer?: { toneMappingExposure?: number } } | undefined;
     if (!graphics?.renderer) return;
     // Using smoothstep for natural-feeling transitions
     const t = dayIntensity * dayIntensity * (3 - 2 * dayIntensity); // smoothstep
@@ -954,6 +951,7 @@ export class Environment extends System {
 
   /**
    * Build directional light (sun/moon) with optional CSMShadowNode.
+   * Shadow quality "none" retains directional illumination without shadow maps.
    * When ENABLE_CSM=true: uses cascaded shadow maps (multiple passes, heavy).
    * When ENABLE_CSM=false (default): uses a single shadow map centered on the player.
    */
@@ -992,15 +990,16 @@ export class Environment extends System {
       this.sunLight = null;
     }
 
-    if (!csmConfig.enabled) {
-      return;
-    }
-
     // Create directional light
     this.sunLight = new THREE.DirectionalLight(0xffffff, 1.8);
-    this.sunLight.castShadow = true;
+    this.sunLight.castShadow = csmConfig.enabled;
 
-    if (useCSM) {
+    if (!csmConfig.enabled) {
+      // Shadow quality controls occlusion, not sun/moon illumination.
+      this.sunLight.name = "SunLight_NoShadows";
+      this.sunLight.position.set(100, 200, 100);
+      this.sunLight.target.position.set(0, 0, 0);
+    } else if (useCSM) {
       // ---- CSM PATH ----
       this.sunLight.name = useWebGPU ? "SunLight_CSM" : "SunLight_WebGL";
       this.sunLight.shadow.mapSize.width = csmConfig.shadowMapSize;

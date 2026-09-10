@@ -420,10 +420,21 @@ export const offerHelpAction: Action = {
 
         if (foodItem) {
           try {
-            await service.executeDropItem(foodItem.itemId || foodItem.name, 1);
+            const receipt = await service.executeDropItem(
+              foodItem.itemId || foodItem.name,
+              1,
+            );
+            if (!receipt.success) {
+              helpAction = "advice";
+              helpMessage = `${targetName} eat some food!`;
+            }
           } catch {
             helpAction = "advice";
+            helpMessage = `${targetName} eat some food!`;
           }
+        } else {
+          helpAction = "advice";
+          helpMessage = `${targetName} eat some food!`;
         }
       } else if (isLowHealth) {
         helpMessage = `${targetName} eat some food!`;

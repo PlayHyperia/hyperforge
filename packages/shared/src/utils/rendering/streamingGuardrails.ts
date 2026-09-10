@@ -1,9 +1,5 @@
 export type StreamingGuardrailPhase =
-  | "IDLE"
-  | "ANNOUNCEMENT"
-  | "COUNTDOWN"
-  | "FIGHTING"
-  | "RESOLUTION";
+  "IDLE" | "ANNOUNCEMENT" | "COUNTDOWN" | "FIGHTING" | "RESOLUTION";
 
 export type StreamingGuardrailAgentSnapshot = {
   id: string | null | undefined;
@@ -15,6 +11,11 @@ export type StreamingGuardrailAgentSnapshot = {
 export type StreamingGuardrailArenaPositions = {
   agent1: readonly number[] | null | undefined;
   agent2: readonly number[] | null | undefined;
+};
+
+export type ValidStreamingGuardrailArenaPositions = {
+  agent1: readonly [number, number, number];
+  agent2: readonly [number, number, number];
 };
 
 function isFiniteNumber(value: unknown): value is number {
@@ -31,7 +32,10 @@ export function requiresStreamingArenaPositions(
   phase: StreamingGuardrailPhase | null | undefined,
 ): boolean {
   return (
-    phase === "COUNTDOWN" || phase === "FIGHTING" || phase === "RESOLUTION"
+    phase === "ANNOUNCEMENT" ||
+    phase === "COUNTDOWN" ||
+    phase === "FIGHTING" ||
+    phase === "RESOLUTION"
   );
 }
 
@@ -49,7 +53,7 @@ export function hasValidStreamingGuardrailAgentSnapshot(
 
 export function hasValidStreamingGuardrailArenaPositions(
   arenaPositions: StreamingGuardrailArenaPositions | null | undefined,
-): boolean {
+): arenaPositions is ValidStreamingGuardrailArenaPositions {
   if (!arenaPositions) return false;
   const { agent1, agent2 } = arenaPositions;
   if (!Array.isArray(agent1) || !Array.isArray(agent2)) return false;
@@ -57,7 +61,9 @@ export function hasValidStreamingGuardrailArenaPositions(
   if (![...agent1, ...agent2].every((value) => isFiniteNumber(value))) {
     return false;
   }
-  return agent1.some((value, index) => value !== agent2[index]);
+  const dx = agent1[0] - agent2[0];
+  const dz = agent1[2] - agent2[2];
+  return dx * dx + dz * dz >= 0.25 * 0.25;
 }
 
 export function deriveStreamingGuardrailReason(params: {

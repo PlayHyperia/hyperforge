@@ -36,6 +36,11 @@ import {
   canPlayerPerformPreparationAction,
   canPlayerUseProcessingStation,
 } from "./ProcessingStationAuthority";
+import {
+  clearProcessingInteractionPresentation,
+  publishProcessingInteractionPresentation,
+} from "./ProcessingInteractionPresentation";
+import type { PlayerProcessingQuiescenceSystem } from "./ProcessingQuiescence";
 
 /** Active crafting session for a player */
 interface CraftingSession {
@@ -73,7 +78,10 @@ interface InventoryState {
   itemIds: Set<string>;
 }
 
-export class CraftingSystem extends SystemBase {
+export class CraftingSystem
+  extends SystemBase
+  implements PlayerProcessingQuiescenceSystem
+{
   private readonly activeSessions = new Map<string, CraftingSession>();
   private readonly interactionSessions = new Map<
     string,
@@ -504,6 +512,11 @@ export class CraftingSystem extends SystemBase {
     };
 
     this.activeSessions.set(playerId, session);
+    publishProcessingInteractionPresentation(this.world, {
+      playerId,
+      skill: "crafting",
+      targetEntityId: session.stationId,
+    });
     this.reportProcessingRequestProgress(
       playerId,
       requestId,
@@ -752,20 +765,28 @@ export class CraftingSystem extends SystemBase {
         continue;
       }
 
+      if (receipt.xpAmount > 0) {
+        this.emitTypedEvent(EventType.SKILLS_PROGRESS_COMMITTED, {
+          playerId: receipt.playerId,
+          operationId: receipt.operationId,
+          replayed: receipt.replayed,
+          skill: receipt.skill,
+          xpAmount: receipt.xpAmount,
+          awardedXp: receipt.awardedXp,
+          operationCommittedXp: receipt.operationCommittedXp,
+          currentXp: receipt.currentXp,
+          currentLevel: receipt.currentLevel,
+        });
+      }
       this.pendingActions.delete(pending.playerId);
       const session = this.activeSessions.get(pending.playerId);
       if (!session || session.recipeId !== pending.recipeId) continue;
 
-      this.emitTypedEvent(EventType.ANIMATION_PLAY, {
-        entityId: pending.playerId,
-        animation: "crafting",
-        loop: false,
-      });
-      if (receipt.awardedXp > 0) {
-        this.emitTypedEvent(EventType.SKILLS_XP_GAINED, {
-          playerId: pending.playerId,
-          skill: "crafting",
-          amount: receipt.awardedXp,
+      if (!pending.stopAfterCommit) {
+        this.emitTypedEvent(EventType.ANIMATION_PLAY, {
+          entityId: pending.playerId,
+          animation: "crafting",
+          loop: false,
         });
       }
       session.crafted++;
@@ -783,11 +804,13 @@ export class CraftingSystem extends SystemBase {
         batchTotal: session.quantity,
       });
       const itemName = recipe.name || recipe.output.replace(/_/g, " ");
-      this.emitTypedEvent(EventType.UI_MESSAGE, {
-        playerId: pending.playerId,
-        message: `You craft a ${itemName}.`,
-        type: "success",
-      });
+      if (!pending.stopAfterCommit) {
+        this.emitTypedEvent(EventType.UI_MESSAGE, {
+          playerId: pending.playerId,
+          message: `You craft a ${itemName}.`,
+          type: "success",
+        });
+      }
       if (!receipt.liveInventoryApplied) {
         this.emitTypedEvent(EventType.UI_MESSAGE, {
           playerId: pending.playerId,
@@ -809,6 +832,7 @@ export class CraftingSystem extends SystemBase {
     if (!session) return;
 
     this.activeSessions.delete(playerId);
+    clearProcessingInteractionPresentation(this.world, playerId, "crafting");
 
     const recipe = processingDataProvider.getCraftingRecipe(session.recipeId);
 
@@ -828,6 +852,7 @@ export class CraftingSystem extends SystemBase {
    * Cancel crafting for a player
    */
   private cancelCrafting(playerId: string): void {
+    clearProcessingInteractionPresentation(this.world, playerId, "crafting");
     const pending = this.pendingActions.get(playerId);
     if (pending) {
       pending.stopAfterCommit = true;
@@ -915,6 +940,19 @@ export class CraftingSystem extends SystemBase {
    */
   isPlayerCrafting(playerId: string): boolean {
     return this.activeSessions.has(playerId);
+  }
+
+  requestPlayerProcessingQuiescence(playerId: string): void {
+    this.interactionSessions.delete(playerId);
+    this.cancelCrafting(playerId);
+  }
+
+  isPlayerProcessingQuiescent(playerId: string): boolean {
+    return (
+      !this.activeSessions.has(playerId) &&
+      !this.interactionSessions.has(playerId) &&
+      !this.pendingActions.has(playerId)
+    );
   }
 
   canPlayerUseCraftingFurnace(playerId: string, furnaceId: string): boolean {

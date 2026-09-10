@@ -1,0 +1,130 @@
+{
+  "schemaVersion": 1,
+  "exportedAt": "2026-08-12T09:30:00.000Z",
+  "avatar": {
+    "id": "kaykit-knight",
+    "legacyAttachmentId": "kaykit-knight",
+    "path": "artifacts/duel-launch-avatar-bakeoff/kaykit-knight.vrm",
+    "sha256": "b288656410986780a0df81d684e4888633be07751b0e57136d9e3c89512e713f",
+    "normalizedHeight": 1.6
+  },
+  "fits": [
+    {
+      "itemId": "kaykit_sword_1h",
+      "slot": "weapon",
+      "grip": "one-hand",
+      "weaponType": "sword",
+      "attachmentBone": "rightHand",
+      "sourcePath": "artifacts/duel-launch-avatar-bakeoff/role-kit/kaykit-sword-1h.glb",
+      "sourceSha256": "98974a657986a634b858e7214b8361cfbcae7fd56728c805076594df6c6dbb2e",
+      "outputPath": "artifacts/duel-launch-avatar-bakeoff/fitted-role-kit/kaykit-sword-1h-fitted.glb",
+      "targetLengthMetres": 0.75,
+      "desiredWorldEulerDegrees": [0, 0, 0],
+      "desiredWorldOffsetMetres": [0, 0, 0],
+      "referenceMotion": {
+        "path": "artifacts/duel-launch-avatar-bakeoff/motions/kaykit-sword.glb",
+        "sha256": "650f654c236a8f76c59b7ae0aecc0645e71ac1585638605e4e54990ab15bc6b3",
+        "sampleRatio": 0.45
+      }
+    },
+    {
+      "itemId": "kaykit_sword_2h",
+      "slot": "weapon",
+      "grip": "two-hand",
+      "weaponType": "sword",
+      "attachmentBone": "rightHand",
+      "sourcePath": "artifacts/duel-launch-avatar-bakeoff/role-kit/kaykit-sword-2h.glb",
+      "sourceSha256": "6174ae7c8254a510255132eef0adde3812801439a44f68e48c697c11f429d38e",
+      "outputPath": "artifacts/duel-launch-avatar-bakeoff/fitted-role-kit/kaykit-sword-2h-fitted.glb",
+      "targetLengthMetres": 1.15,
+      "desiredWorldEulerDegrees": [0, 0, 0],
+      "desiredWorldOffsetMetres": [0, 0, 0],
+      "alignHandleToSecondaryHand": {
+        "sourceHandleAxis": [0, -1, 0]
+      },
+      "referenceMotion": {
+        "path": "artifacts/duel-launch-avatar-bakeoff/motions/kaykit-two-hand-slash.glb",
+        "sha256": "a74b9872559df5f67a40b3dc5f6a2e53d0fa7a1cba18c5f9b9f2a143ea274a1f",
+        "sampleRatio": 0.45
+      }
+    },
+    {
+      "itemId": "kaykit_bow",
+      "slot": "weapon",
+      "grip": "two-hand",
+      "weaponType": "bow",
+      "dynamicBowString": true,
+      "attachmentBone": "leftHand",
+      "sourcePath": "artifacts/duel-launch-avatar-bakeoff/role-kit/kaykit-bow.glb",
+      "sourceSha256": "7a4843515fb2d9513b14b257536f3f84cb10fd1fb480bb5548c3e37e86bcab45",
+      "outputPath": "artifacts/duel-launch-avatar-bakeoff/fitted-role-kit/kaykit-bow-fitted.glb",
+      "targetLengthMetres": 0.9,
+      "desiredWorldEulerDegrees": [90, 0, 0],
+      "desiredWorldOffsetMetres": [0, 0, 0],
+      "referenceMotion": {
+        "path": "artifacts/duel-launch-avatar-bakeoff/motions/kaykit-ranged.glb",
+        "sha256": "410bac37236976be361deaecd16397809668bf126a3dedd8215e9b94266ab022",
+        "sampleRatio": 0.55
+      }
+    },
+    {
+      "itemId": "kaykit_axe_2h",
+      "slot": "weapon",
+      "grip": "two-hand",
+      "weaponType": "axe",
+      "attachmentBone": "rightHand",
+      "sourcePath": "artifacts/duel-launch-avatar-bakeoff/role-kit/kaykit-axe-2h.glb",
+      "sourceSha256": "c6fb0745f39ffefea47d22e6f74680dfb426eb9e5dd320d8f78ca5bfd7322dbf",
+      "outputPath": "artifacts/duel-launch-avatar-bakeoff/fitted-role-kit/kaykit-axe-2h-fitted.glb",
+      "targetLengthMetres": 1.4,
+      "desiredWorldEulerDegrees": [0, 0, 0],
+      "desiredWorldOffsetMetres": [0, 0, 0],
+      "alignHandleToSecondaryHand": {
+        "sourceHandleAxis": [0, -1, 0]
+      },
+      "referenceMotion": {
+        "path": "artifacts/duel-launch-avatar-bakeoff/motions/kaykit-two-hand-slash.glb",
+        "sha256": "a74b9872559df5f67a40b3dc5f6a2e53d0fa7a1cba18c5f9b9f2a143ea274a1f",
+        "sampleRatio": 0.45
+      }
+    },
+    {
+      "itemId": "kaykit_staff",
+      "slot": "weapon",
+      "grip": "one-hand",
+      "weaponType": "staff",
+      "attachmentBone": "rightHand",
+      "sourcePath": "artifacts/duel-launch-avatar-bakeoff/role-kit/kaykit-staff.glb",
+      "sourceSha256": "bdc7228da87783ed96ef5f26d523291276e98821d16f5337dae092aed983f8fa",
+      "outputPath": "artifacts/duel-launch-avatar-bakeoff/fitted-role-kit/kaykit-staff-fitted.glb",
+      "targetLengthMetres": 1.3,
+      "desiredWorldEulerDegrees": [0, 0, 0],
+      "desiredWorldOffsetMetres": [0, 0, 0],
+      "stableHeldPose": {
+        "avatarLocalEulerDegrees": [0, 0, 32]
+      },
+      "referenceMotion": {
+        "path": "artifacts/duel-launch-avatar-bakeoff/motions/kaykit-magic.glb",
+        "sha256": "47e0ee47203cfd9b57bf64d87eda92eef5d0c278f4da1e09cb9a8528f8cbd9d4",
+        "sampleRatio": 0.55
+      }
+    },
+    {
+      "itemId": "kaykit_round_shield",
+      "slot": "shield",
+      "grip": "one-hand",
+      "attachmentBone": "leftHand",
+      "sourcePath": "artifacts/duel-launch-avatar-bakeoff/role-kit/kaykit-shield.glb",
+      "sourceSha256": "da368ebdc1c3f16f98d79af70389e4f1b29987fabb9f812bf873fd668b2c8535",
+      "outputPath": "artifacts/duel-launch-avatar-bakeoff/fitted-role-kit/kaykit-round-shield-fitted.glb",
+      "targetLengthMetres": 0.6,
+      "desiredWorldEulerDegrees": [0, 0, 0],
+      "desiredWorldOffsetMetres": [0, 0, 0],
+      "referenceMotion": {
+        "path": "artifacts/duel-launch-avatar-bakeoff/motions/kaykit-block.glb",
+        "sha256": "287872dbeccc2f5cb6aee558b54c3bae1ed8086dd0eb5e4cc405ff53bbaa0fa6",
+        "sampleRatio": 0.5
+      }
+    }
+  ]
+}

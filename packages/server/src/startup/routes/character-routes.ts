@@ -9,6 +9,9 @@
 import type { FastifyInstance } from "fastify";
 import type { World } from "@hyperforge/shared";
 import type { DatabaseSystem } from "../../systems/DatabaseSystem/index.js";
+import type { ServerConfig } from "../config.js";
+import { requirePrivyRequestUser } from "../../infrastructure/auth/http-auth.js";
+import { isProductionLikeEnvironment } from "../../infrastructure/http/origin-policy.js";
 import { promises as fs } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -44,6 +47,7 @@ function getCharactersDir(): string {
 export function registerCharacterRoutes(
   fastify: FastifyInstance,
   world?: World,
+  config?: Pick<ServerConfig, "nodeEnv">,
 ): void {
   console.log("[CharacterRoutes] Registering character management routes...");
 
@@ -66,6 +70,14 @@ export function registerCharacterRoutes(
    * }
    */
   fastify.post("/api/characters", async (request, reply) => {
+    if (
+      isProductionLikeEnvironment(
+        config?.nodeEnv ?? process.env.NODE_ENV ?? "development",
+      )
+    ) {
+      return reply.status(404).send({ error: "Not found" });
+    }
+
     try {
       const body = request.body as {
         character: Record<string, unknown>;
@@ -155,6 +167,10 @@ export function registerCharacterRoutes(
         });
       }
 
+      if (!(await requirePrivyRequestUser(request, reply, body.accountId))) {
+        return;
+      }
+
       if (!world) {
         return reply.status(500).send({
           success: false,
@@ -224,8 +240,7 @@ export function registerCharacterRoutes(
 
       return reply.status(500).send({
         success: false,
-        error:
-          error instanceof Error ? error.message : "Failed to create character",
+        error: "Failed to create character",
       });
     }
   });
@@ -241,6 +256,26 @@ export function registerCharacterRoutes(
         "[CharacterRoutes] DatabaseSystem not found - database routes disabled",
       );
     } else {
+      const requireOwnedCharacter = async (
+        request: Parameters<typeof requirePrivyRequestUser>[0],
+        reply: Parameters<typeof requirePrivyRequestUser>[1],
+        characterId: string,
+      ): Promise<string | null> => {
+        const authenticatedUserId = await requirePrivyRequestUser(
+          request,
+          reply,
+        );
+        if (!authenticatedUserId) return null;
+
+        const characters =
+          await databaseSystem.getCharactersAsync(authenticatedUserId);
+        if (!characters.some((character) => character.id === characterId)) {
+          await reply.status(403).send({ error: "Forbidden" });
+          return null;
+        }
+        return authenticatedUserId;
+      };
+
       /**
        * DELETE /api/characters/:id
        *
@@ -267,6 +302,7 @@ export function registerCharacterRoutes(
             error: "Missing character ID parameter",
           });
         }
+        if (!(await requireOwnedCharacter(request, reply, id))) return;
 
         console.log(`[CharacterRoutes] 🗑️  Deleting character: ${id}`);
 
@@ -330,6 +366,7 @@ export function registerCharacterRoutes(
             error: "Missing character ID parameter",
           });
         }
+        if (!(await requireOwnedCharacter(request, reply, id))) return;
 
         console.log(
           `[CharacterRoutes] 📊 Fetching skills for character: ${id}`,
@@ -411,6 +448,7 @@ export function registerCharacterRoutes(
             error: "Missing character ID parameter",
           });
         }
+        if (!(await requireOwnedCharacter(request, reply, id))) return;
 
         try {
           // Get the network system to find the player's socket
@@ -567,6 +605,7 @@ export function registerCharacterRoutes(
             error: "Missing isAgent field in request body",
           });
         }
+        if (!(await requireOwnedCharacter(request, reply, id))) return;
 
         console.log(
           `[CharacterRoutes] 🔄 Updating character ${id} to ${isAgent ? "agent" : "human"}`,

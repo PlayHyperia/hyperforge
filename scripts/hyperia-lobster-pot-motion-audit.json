@@ -1,0 +1,55 @@
+{
+  "schemaVersion": 1,
+  "title": "Lobster pot technical motion review",
+  "framing": "avatar-and-equipment",
+  "motions": [
+    {
+      "id": "pot-pickup-approach",
+      "name": "Pot pickup · approach",
+      "asset": "motions/kaykit-object-pickup-candidate.glb",
+      "sampleRatio": 0.1
+    },
+    {
+      "id": "pot-pickup-reach",
+      "name": "Pot pickup · reach",
+      "asset": "motions/kaykit-object-pickup-candidate.glb",
+      "sampleRatio": 0.35
+    },
+    {
+      "id": "pot-pickup-lift",
+      "name": "Pot pickup · lift",
+      "asset": "motions/kaykit-object-pickup-candidate.glb",
+      "sampleRatio": 0.65
+    },
+    {
+      "id": "pot-pickup-recovery",
+      "name": "Pot pickup · recovery",
+      "asset": "motions/kaykit-object-pickup-candidate.glb",
+      "sampleRatio": 0.9
+    },
+    {
+      "id": "pot-deploy-approach",
+      "name": "Pot deploy · approach",
+      "asset": "motions/kaykit-object-interact-candidate.glb",
+      "sampleRatio": 0.1
+    },
+    {
+      "id": "pot-deploy-reach",
+      "name": "Pot deploy · reach",
+      "asset": "motions/kaykit-object-interact-candidate.glb",
+      "sampleRatio": 0.35
+    },
+    {
+      "id": "pot-deploy-contact",
+      "name": "Pot deploy · contact",
+      "asset": "motions/kaykit-object-interact-candidate.glb",
+      "sampleRatio": 0.65
+    },
+    {
+      "id": "pot-deploy-recovery",
+      "name": "Pot deploy · recovery",
+      "asset": "motions/kaykit-object-interact-candidate.glb",
+      "sampleRatio": 0.9
+    }
+  ]
+}

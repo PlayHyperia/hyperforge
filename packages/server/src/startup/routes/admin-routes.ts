@@ -10,13 +10,21 @@ import type { ServerConfig } from "../config.js";
 import type { DatabaseSystem } from "../../systems/DatabaseSystem/index.js";
 import { eq, like, sql, desc, and, type SQL } from "drizzle-orm";
 import * as schema from "../../database/schema.js";
-import { timingSafeEqual } from "crypto";
+import { createHash, timingSafeEqual } from "crypto";
 import {
   enterMaintenanceMode,
   exitMaintenanceMode,
   getMaintenanceStatus,
 } from "../maintenance-mode.js";
 import { getMemoryMonitor } from "../../infrastructure/memory-monitor.js";
+import { isLocalDiagnosticDuelRuntime } from "../../systems/StreamingDuelScheduler/managers/DuelOrchestrator.js";
+import { evaluateDistributedAdminCredential } from "../../infrastructure/rate-limit/distributed-admin-auth.js";
+import { readDistributedRateLimitConfig } from "../../infrastructure/rate-limit/distributed-rate-limit.js";
+import {
+  isDiagnosticAssetRequestAllowed,
+  parseDiagnosticAssetAction,
+} from "./diagnostic-asset-inventory-policy.js";
+import { runDiagnosticAssetInventoryAction } from "./diagnostic-asset-inventory.js";
 
 /**
  * Rate limiter for admin authentication attempts.
@@ -75,13 +83,9 @@ adminAuthCleanupTimer.unref?.();
  * Returns true if strings are equal.
  */
 function safeCompare(a: string, b: string): boolean {
-  if (a.length !== b.length) {
-    // Still do a comparison to maintain constant time, but will fail
-    const buf = Buffer.alloc(b.length);
-    timingSafeEqual(buf, Buffer.from(b, "utf8"));
-    return false;
-  }
-  return timingSafeEqual(Buffer.from(a, "utf8"), Buffer.from(b, "utf8"));
+  const first = createHash("sha256").update(a, "utf8").digest();
+  const second = createHash("sha256").update(b, "utf8").digest();
+  return timingSafeEqual(first, second);
 }
 
 /**
@@ -186,6 +190,10 @@ export function registerAdminRoutes(
   world: World,
   config: ServerConfig,
 ): void {
+  const distributedRateLimitConfig = readDistributedRateLimitConfig(
+    process.env,
+  );
+
   // SECURITY: Validate ADMIN_CODE is set in production
   if (process.env.NODE_ENV === "production" && !config.adminCode) {
     console.warn(
@@ -198,11 +206,52 @@ export function registerAdminRoutes(
     reply: FastifyReply,
   ): Promise<void> => {
     // Get client IP for rate limiting
-    const clientIp =
-      request.ip || request.headers["x-forwarded-for"] || "unknown";
-    const ip = Array.isArray(clientIp) ? clientIp[0] : clientIp;
+    const ip = request.ip;
 
-    // SECURITY: Check rate limit before any other validation
+    // Always require admin code - if not configured, admin panel is disabled
+    if (!config.adminCode) {
+      return reply.code(403).send({ error: "Admin panel not configured" });
+    }
+
+    const providedCode = request.headers["x-admin-code"];
+    const credentialValid =
+      typeof providedCode === "string" &&
+      safeCompare(providedCode, config.adminCode);
+
+    if (distributedRateLimitConfig.enabled) {
+      const databaseSystem = world.getSystem<DatabaseSystem>("database");
+      const pool = databaseSystem?.getPool();
+      if (!pool) {
+        return reply.code(503).send({
+          error: "Admin authentication authority unavailable",
+        });
+      }
+      try {
+        const result = await evaluateDistributedAdminCredential({
+          config: distributedRateLimitConfig,
+          credentialValid,
+          networkIdentity: ip,
+          pool,
+        });
+        if (result.status === "blocked") {
+          return reply.code(429).send({
+            error: "Too many failed attempts",
+            retryAfter: result.retryAfterSeconds,
+          });
+        }
+        if (result.status === "invalid") {
+          return reply.code(403).send({ error: "Unauthorized" });
+        }
+        return;
+      } catch {
+        return reply.code(503).send({
+          error: "Admin authentication authority unavailable",
+        });
+      }
+    }
+
+    // Non-deployment diagnostics retain the in-process limiter so local work
+    // does not require a shared authority unless explicitly enabled.
     const lockoutRemaining = checkAdminRateLimit(ip);
     if (lockoutRemaining > 0) {
       const secondsRemaining = Math.ceil(lockoutRemaining / 1000);
@@ -212,19 +261,13 @@ export function registerAdminRoutes(
       });
     }
 
-    // Always require admin code - if not configured, admin panel is disabled
-    if (!config.adminCode) {
-      return reply.code(403).send({ error: "Admin panel not configured" });
-    }
-
-    const providedCode = request.headers["x-admin-code"];
     if (typeof providedCode !== "string") {
       recordFailedAttempt(ip);
       return reply.code(403).send({ error: "Unauthorized" });
     }
 
     // SECURITY: Use timing-safe comparison to prevent timing attacks
-    if (!safeCompare(providedCode, config.adminCode)) {
+    if (!credentialValid) {
       const blocked = recordFailedAttempt(ip);
       if (blocked) {
         return reply.code(429).send({
@@ -238,6 +281,75 @@ export function registerAdminRoutes(
     // Successful auth - clear any rate limit state
     clearRateLimit(ip);
   };
+
+  const requireDiagnosticContestantAuthority = async (
+    _request: FastifyRequest,
+    reply: FastifyReply,
+  ): Promise<void> => {
+    if (!isLocalDiagnosticDuelRuntime(process.env)) {
+      return reply.code(404).send({ error: "Not found" });
+    }
+  };
+
+  const activeAssetActions = new Set<string>();
+  fastify.post(
+    "/admin/sparbots/diagnostic-asset-inventory",
+    {
+      preHandler: [requireAdmin, requireDiagnosticContestantAuthority],
+    },
+    async (request: FastifyRequest, reply: FastifyReply) => {
+      const allowed = () =>
+        isDiagnosticAssetRequestAllowed({
+          localNoMoney: isLocalDiagnosticDuelRuntime(process.env),
+          enabled: process.env.STREAMING_DUEL_DIAGNOSTIC_ASSET_TESTS,
+          remoteAddress: request.raw.socket.remoteAddress,
+        });
+      if (!allowed()) return reply.code(404).send({ error: "Not found" });
+      let action;
+      try {
+        action = parseDiagnosticAssetAction(request.body);
+      } catch (error) {
+        return reply.code(400).send({
+          error: error instanceof Error ? error.message : "Invalid action",
+        });
+      }
+      if (activeAssetActions.has(action.characterId))
+        return reply.code(409).send({ error: "Asset action already active" });
+      activeAssetActions.add(action.characterId);
+      try {
+        const { getStreamingDuelScheduler } =
+          await import("../../systems/StreamingDuelScheduler/index.js");
+        const scheduler = getStreamingDuelScheduler();
+        const assertStillIsolated = () => {
+          if (
+            !allowed() ||
+            !scheduler ||
+            !getMaintenanceStatus().active ||
+            scheduler.getCurrentCycle() !== null ||
+            !scheduler
+              .listStandaloneSparbots()
+              .some((row) => row.characterId === action.characterId)
+          ) {
+            throw new Error(
+              "Asset actions require an owned standalone bot under idle local maintenance",
+            );
+          }
+        };
+        const result = await runDiagnosticAssetInventoryAction(
+          world,
+          action,
+          assertStillIsolated,
+        );
+        return reply.send(result);
+      } catch (error) {
+        return reply.code(409).send({
+          error: error instanceof Error ? error.message : "Asset action failed",
+        });
+      } finally {
+        activeAssetActions.delete(action.characterId);
+      }
+    },
+  );
 
   /** Get database system or return error response */
   const getDb = (reply: FastifyReply) => {
@@ -281,6 +393,7 @@ export function registerAdminRoutes(
       return reply.send({
         eventStore: stats,
         antiCheat: antiCheatStats,
+        projectiles: combatSystem.getProjectileLifecycleDiagnostics?.() ?? null,
         currentTick: world.currentTick,
       });
     },
@@ -1869,6 +1982,13 @@ export function registerAdminRoutes(
     "/admin/maintenance/exit",
     { preHandler: requireAdmin },
     async (_request: FastifyRequest, reply: FastifyReply) => {
+      // Keep the no-cycle fixture boundary held across awaited custody writes.
+      // Check and exit synchronously so an asset action cannot enter between them.
+      if (activeAssetActions.size > 0) {
+        return reply.code(409).send({
+          error: "Diagnostic asset inventory actions are still active",
+        });
+      }
       try {
         const status = exitMaintenanceMode();
         return reply.send({
@@ -2121,7 +2241,7 @@ export function registerAdminRoutes(
    */
   fastify.post(
     "/admin/duels/debug-matchup",
-    { preHandler: requireAdmin },
+    { preHandler: [requireAdmin, requireDiagnosticContestantAuthority] },
     async (request: FastifyRequest, reply: FastifyReply) => {
       try {
         const body = request.body as {
@@ -2236,7 +2356,7 @@ export function registerAdminRoutes(
   // Standalone Sparbot Pool Endpoints
   // ==========================================================================
 
-  /** Live bounded diagnostics for the authoritative arena combat controllers. */
+  /** Bounded live or most-recent terminal diagnostics for the arena controllers. */
   fastify.get(
     "/admin/duels/combat-ai",
     { preHandler: requireAdmin },
@@ -2285,7 +2405,7 @@ export function registerAdminRoutes(
    */
   fastify.post(
     "/admin/sparbots",
-    { preHandler: requireAdmin },
+    { preHandler: [requireAdmin, requireDiagnosticContestantAuthority] },
     async (request: FastifyRequest, reply: FastifyReply) => {
       try {
         const body = request.body as {
@@ -2355,6 +2475,54 @@ export function registerAdminRoutes(
         return reply.code(500).send({
           error:
             err instanceof Error ? err.message : "Failed to spawn sparbots",
+        });
+      }
+    },
+  );
+
+  /**
+   * POST /admin/sparbots/diagnostic-harpoon-preparation
+   * Start a real two-agent preparation scene while the local no-money stack
+   * remains in operator-held maintenance.
+   * Body: { characterIds?: [string, string] }
+   */
+  fastify.post(
+    "/admin/sparbots/diagnostic-harpoon-preparation",
+    { preHandler: [requireAdmin, requireDiagnosticContestantAuthority] },
+    async (request: FastifyRequest, reply: FastifyReply) => {
+      try {
+        const body = request.body as { characterIds?: unknown } | undefined;
+        if (
+          body?.characterIds !== undefined &&
+          (!Array.isArray(body.characterIds) ||
+            body.characterIds.some((id) => typeof id !== "string"))
+        ) {
+          return reply.code(400).send({
+            error: "characterIds must be an array of two strings",
+          });
+        }
+        const { getStreamingDuelScheduler } =
+          await import("../../systems/StreamingDuelScheduler/index.js");
+        const scheduler = getStreamingDuelScheduler();
+        if (!scheduler) {
+          return reply
+            .code(503)
+            .send({ error: "Streaming duel scheduler not available" });
+        }
+        const preparation = await scheduler.startDiagnosticHarpoonPreparation(
+          body?.characterIds as string[] | undefined,
+        );
+        return reply.send({ success: true, preparation });
+      } catch (err) {
+        console.error(
+          "[AdminRoutes] diagnostic harpoon preparation error:",
+          err,
+        );
+        return reply.code(409).send({
+          error:
+            err instanceof Error
+              ? err.message
+              : "Failed to start diagnostic harpoon preparation",
         });
       }
     },
@@ -2702,6 +2870,9 @@ export function registerAdminRoutes(
         const resourceSystem = world.getSystem("resource") as
           | {
               getResourceEcologyStats?: () => Record<string, unknown>;
+              getPendingFishingAreaDiagnostics?: () => Array<
+                Record<string, unknown>
+              >;
             }
           | undefined;
         const terrainSystem = world.getSystem("terrain") as
@@ -2860,6 +3031,8 @@ export function registerAdminRoutes(
             },
             resourceEcology:
               resourceSystem?.getResourceEcologyStats?.() ?? null,
+            pendingFishingAreaDiagnostics:
+              resourceSystem?.getPendingFishingAreaDiagnostics?.() ?? [],
             terrain: {
               terrainTiles: terrainSystem?.terrainTiles?.size ?? 0,
               activeChunks: terrainSystem?.activeChunks?.size ?? 0,

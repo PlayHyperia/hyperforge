@@ -56,6 +56,64 @@ export function resolveHyperbetWorkspace({
   });
 }
 
+function normalizeSolanaCluster(rawCluster) {
+  const cluster = String(rawCluster || "")
+    .trim()
+    .toLowerCase();
+  if (cluster === "local") return "localnet";
+  if (cluster === "mainnet") return "mainnet-beta";
+  return cluster;
+}
+
+function assertSolanaProgramId(value, label) {
+  const programId = String(value || "").trim();
+  if (!/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(programId)) {
+    throw new Error(`${label} must be a base58 Solana program id`);
+  }
+  return programId;
+}
+
+export function resolveHyperbetSolanaDeployment({
+  solanaDir,
+  cluster,
+  readFileSync = (filePath) => fs.readFileSync(filePath, "utf8"),
+}) {
+  const normalizedCluster = normalizeSolanaCluster(cluster);
+  if (!normalizedCluster) {
+    throw new Error("Hyperbet Solana cluster is required");
+  }
+
+  const registryPath = path.join(solanaDir, "deployments", "solana-v1.json");
+  let registry;
+  try {
+    registry = JSON.parse(readFileSync(registryPath));
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    throw new Error(
+      `Unable to read the Hyperbet Solana deployment registry at ${registryPath}: ${reason}`,
+    );
+  }
+
+  const deployment = registry?.solana?.[normalizedCluster];
+  if (!deployment || typeof deployment !== "object") {
+    throw new Error(
+      `Hyperbet Solana deployment registry has no ${normalizedCluster} entry`,
+    );
+  }
+
+  return Object.freeze({
+    cluster: normalizedCluster,
+    fightOracleProgramId: assertSolanaProgramId(
+      deployment.fightOracleProgramId,
+      `${normalizedCluster} fight oracle program id`,
+    ),
+    duelMarketProgramId: assertSolanaProgramId(
+      deployment.duelMarketProgramId,
+      `${normalizedCluster} duel market program id`,
+    ),
+  });
+}
+
 export function normalizeHttpServiceUrl(rawValue, label) {
   const value = String(rawValue || "").trim();
   let parsed;
@@ -165,10 +223,14 @@ export function assertStandaloneSparbotRuntimeBoundary({
   environment = {},
 }) {
   if (enabled !== true) return false;
+  const localSolanaIsNoMoney =
+    environment.DUEL_LOCAL_SOLANA_MODE === "true" &&
+    isLoopbackRuntimeUrl(environment.SOLANA_RPC_URL, ["http:", "https:"]);
   const hyperbetIsNoMoney =
     environment.DUEL_WITH_HYPERBET === "false" ||
     (environment.DUEL_WITH_HYPERBET === "true" &&
-      environment.DUEL_HYPERBET_READ_ONLY_MODE === "true");
+      (environment.DUEL_HYPERBET_READ_ONLY_MODE === "true" ||
+        localSolanaIsNoMoney));
   const eligible =
     environment.NODE_ENV === "production" &&
     environment.DUEL_LOCAL_SMOKE_MODE === "true" &&
@@ -181,10 +243,80 @@ export function assertStandaloneSparbotRuntimeBoundary({
 
   if (!eligible) {
     throw new Error(
-      "Standalone scripted sparbots require an explicit production-shaped, authority-owned, loopback, no-money diagnostic boundary. Pass --local-smoke (or set DUEL_LOCAL_SMOKE_MODE=true and LOAD_TEST_MODE=true), keep DUEL_WITH_HYPERBET=false unless Hyperbet is explicitly read-only, or configure a supported duel model provider.",
+      "Standalone scripted sparbots require an explicit production-shaped, authority-owned, loopback, no-money diagnostic boundary. Pass --local-smoke (or set DUEL_LOCAL_SMOKE_MODE=true and LOAD_TEST_MODE=true), and keep Hyperbet absent, explicitly read-only, or attached to the launcher-owned local Solana validator; otherwise configure a supported duel model provider.",
     );
   }
   return true;
+}
+
+export function assertManagedLocalSolanaBoundary({
+  enabled,
+  hyperbetRuntimeEnabled,
+  remoteBettingMode,
+  hyperbetReadOnlyMode,
+  rpcUrl,
+}) {
+  if (enabled !== true) return false;
+  if (
+    hyperbetRuntimeEnabled !== true ||
+    remoteBettingMode === true ||
+    hyperbetReadOnlyMode === true ||
+    !isLoopbackRuntimeUrl(rpcUrl, ["http:", "https:"])
+  ) {
+    throw new Error(
+      "Managed local Solana requires the local transaction-enabled Hyperbet runtime and a loopback RPC URL",
+    );
+  }
+  return true;
+}
+
+/**
+ * A deliberate world-owner hard kill is never a normal launch capability.
+ * Keep it inside the fully owned localnet smoke where every process, port,
+ * database, signer, and on-chain account is disposable.
+ */
+export function assertAuthorityRestartDiagnosticBoundary({
+  enabled,
+  fresh,
+  isolated,
+  verify,
+  localSmoke,
+  localSolana,
+  serverUrl,
+  rpcUrl,
+  pidFile,
+}) {
+  if (enabled !== true) return false;
+  if (
+    fresh !== true ||
+    isolated !== true ||
+    verify !== true ||
+    localSmoke !== true ||
+    localSolana !== true ||
+    !isLoopbackRuntimeUrl(serverUrl, ["http:", "https:"]) ||
+    !isLoopbackRuntimeUrl(rpcUrl, ["http:", "https:"]) ||
+    !String(pidFile || "").trim()
+  ) {
+    throw new Error(
+      "Authority restart injection requires a fresh, isolated, verified, loopback local-smoke with launcher-owned local Solana and an owned game-server PID file",
+    );
+  }
+  return true;
+}
+
+export function shouldReleaseRestartedAuthorityStartupGate({
+  authorityRecoveryEnabled,
+  launcherOwnsStartupGate,
+  generation,
+}) {
+  if (!Number.isSafeInteger(generation) || generation < 1) {
+    throw new Error("Game-server generation must be a positive integer");
+  }
+  return (
+    authorityRecoveryEnabled === true &&
+    launcherOwnsStartupGate === true &&
+    generation > 1
+  );
 }
 
 export function isLocalDatabaseUrl(rawValue) {
@@ -303,6 +435,35 @@ export function resolveHyperbetRuntimeTopology({
   });
 }
 
+export function resolveHyperbetKeeperDatabaseTopology({
+  managedLocalSolana,
+  terminalDbPath,
+  configuredServiceDbPath = "",
+}) {
+  const terminal = String(terminalDbPath || "").trim();
+  const configuredService = String(configuredServiceDbPath || "").trim();
+  if (!terminal || !path.isAbsolute(terminal)) {
+    throw new Error("Hyperbet terminal ledger path must be absolute");
+  }
+  if (configuredService && !path.isAbsolute(configuredService)) {
+    throw new Error("Hyperbet service database path must be absolute");
+  }
+  const service =
+    configuredService ||
+    (managedLocalSolana
+      ? path.join(path.dirname(terminal), "service.sqlite")
+      : terminal);
+  if (managedLocalSolana && service === terminal) {
+    throw new Error(
+      "Managed local SOL service database and terminal ledger must not share a file",
+    );
+  }
+  return Object.freeze({
+    terminalDbPath: terminal,
+    serviceDbPath: service,
+  });
+}
+
 export function resolvePrivateBettingFeedToken(candidates, generateToken) {
   return resolvePrivateRuntimeSecret(
     candidates,
@@ -316,14 +477,62 @@ export function resolvePrivateRuntimeSecret(
   generateSecret,
   label = "The private runtime secret",
 ) {
-  const configured = candidates
-    .map((value) => String(value || "").trim())
-    .find(Boolean);
-  const token = configured || String(generateSecret()).trim();
+  const normalizedCandidates = candidates.map((value) =>
+    value == null ? "" : String(value),
+  );
+  const malformed = normalizedCandidates.find(
+    (value) => value.length > 0 && value !== value.trim(),
+  );
+  if (malformed !== undefined) {
+    throw new Error(`${label} must not contain outer whitespace`);
+  }
+  const configured = normalizedCandidates.find(Boolean);
+  const generated = configured ? "" : String(generateSecret());
+  if (generated !== generated.trim()) {
+    throw new Error(`${label} must not contain outer whitespace`);
+  }
+  const token = configured || generated;
   if (Buffer.byteLength(token, "utf8") < 32) {
     throw new Error(`${label} must contain at least 32 bytes`);
   }
   return Object.freeze({ token, generated: !configured });
+}
+
+export function resolveJwtRuntimeSecret(
+  keyRingCandidates,
+  legacySecretCandidates,
+  generateSecret,
+) {
+  const keyRingConfigured = keyRingCandidates.some(
+    (value) => String(value || "").trim().length > 0,
+  );
+  if (!keyRingConfigured) {
+    return Object.freeze({
+      ...resolvePrivateRuntimeSecret(
+        legacySecretCandidates,
+        generateSecret,
+        "The local duel JWT secret",
+      ),
+      keyRingConfigured: false,
+    });
+  }
+
+  const configuredLegacySecret = legacySecretCandidates
+    .map((value) => String(value || "").trim())
+    .find(Boolean);
+  if (
+    configuredLegacySecret &&
+    Buffer.byteLength(configuredLegacySecret, "utf8") < 32
+  ) {
+    throw new Error(
+      "The legacy duel JWT secret must contain at least 32 bytes",
+    );
+  }
+  return Object.freeze({
+    token: configuredLegacySecret || "",
+    generated: false,
+    keyRingConfigured: true,
+  });
 }
 
 export function assertSupportedUwsNodeVersion(value) {

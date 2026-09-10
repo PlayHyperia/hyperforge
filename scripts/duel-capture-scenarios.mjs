@@ -5,6 +5,7 @@ const PHASES = new Set([
   "FIGHTING",
   "RESOLUTION",
 ]);
+const AVATAR_AUTHORED_MOTION_ACTION_LIMIT = 8;
 
 export const REQUIRED_DUEL_CAPTURE_SCENARIOS = Object.freeze([
   "idle",
@@ -734,7 +735,17 @@ function normalizeSceneAgent(value) {
     candidate?.facingTargetErrorDegrees,
   );
   const ndcPosition = finiteTuple(candidate?.ndcPosition);
+  const ndcHeadPosition = finiteTuple(candidate?.ndcHeadPosition);
+  const insideAssignedCombatArena = normalizeNullableBoolean(
+    candidate?.insideAssignedCombatArena,
+  );
+  const cameraLineOfSight = normalizeCameraLineOfSight(
+    candidate?.cameraLineOfSight,
+  );
   const hitReaction = normalizeSceneHitReaction(candidate?.hitReaction);
+  const authoredMotion = normalizeSceneAuthoredMotion(
+    candidate?.authoredMotion,
+  );
   const avatarEmote = boundedString(candidate?.avatarEmote, 200);
   if (
     !candidate ||
@@ -746,7 +757,11 @@ function normalizeSceneAgent(value) {
     (candidate.renderQuaternion != null && !renderQuaternion) ||
     facingError === undefined ||
     (candidate.ndcPosition != null && !ndcPosition) ||
+    (candidate.ndcHeadPosition != null && !ndcHeadPosition) ||
+    insideAssignedCombatArena === undefined ||
+    cameraLineOfSight === undefined ||
     (candidate.hitReaction != null && !hitReaction) ||
+    (candidate.authoredMotion != null && !authoredMotion) ||
     (candidate.avatarEmote != null && !avatarEmote) ||
     typeof candidate.avatarReady !== "boolean" ||
     typeof candidate.insideCombatArena !== "boolean" ||
@@ -765,11 +780,64 @@ function normalizeSceneAgent(value) {
     facingTargetErrorDegrees: facingError,
     avatarReady: candidate.avatarReady,
     ndcPosition,
+    ndcHeadPosition,
     insideCombatArena: candidate.insideCombatArena,
+    insideAssignedCombatArena,
+    cameraLineOfSight,
     visible: candidate.visible,
     active: candidate.active,
     ...(hitReaction ? { hitReaction } : {}),
+    ...(authoredMotion ? { authoredMotion } : {}),
     ...(avatarEmote ? { avatarEmote } : {}),
+  };
+}
+
+function normalizeSceneAuthoredMotionAction(value) {
+  const candidate = record(value);
+  const url = boundedString(candidate?.url, 200);
+  if (
+    !candidate ||
+    !url ||
+    url !== candidate.url ||
+    /[?#\u0000-\u001f\u007f]/.test(url) ||
+    typeof candidate.running !== "boolean" ||
+    typeof candidate.paused !== "boolean" ||
+    !Number.isFinite(candidate.effectiveWeight) ||
+    candidate.effectiveWeight <= 0 ||
+    candidate.effectiveWeight > 1
+  ) {
+    return null;
+  }
+  return {
+    url,
+    running: candidate.running,
+    paused: candidate.paused,
+    effectiveWeight: candidate.effectiveWeight,
+  };
+}
+
+function normalizeSceneAuthoredMotion(value) {
+  if (value == null) return null;
+  const candidate = record(value);
+  if (
+    !candidate ||
+    candidate.schemaVersion !== 1 ||
+    typeof candidate.overflow !== "boolean" ||
+    !Number.isSafeInteger(candidate.invalidActionCount) ||
+    candidate.invalidActionCount < 0 ||
+    candidate.invalidActionCount > AVATAR_AUTHORED_MOTION_ACTION_LIMIT + 1 ||
+    !Array.isArray(candidate.actions) ||
+    candidate.actions.length > AVATAR_AUTHORED_MOTION_ACTION_LIMIT
+  ) {
+    return null;
+  }
+  const actions = candidate.actions.map(normalizeSceneAuthoredMotionAction);
+  if (actions.some((action) => action === null)) return null;
+  return {
+    schemaVersion: 1,
+    overflow: candidate.overflow,
+    invalidActionCount: candidate.invalidActionCount,
+    actions,
   };
 }
 
@@ -777,9 +845,16 @@ function normalizeSceneHitReaction(value) {
   if (value == null) return null;
   const candidate = record(value);
   const elapsedSeconds = candidate?.elapsedSeconds;
+  const requiredBoneCount = candidate?.requiredBoneCount;
   if (
     !candidate ||
     candidate.schemaVersion !== 1 ||
+    !(
+      requiredBoneCount === undefined ||
+      (Number.isSafeInteger(requiredBoneCount) &&
+        requiredBoneCount >= 1 &&
+        requiredBoneCount <= 5)
+    ) ||
     !Number.isSafeInteger(candidate.availableBoneCount) ||
     candidate.availableBoneCount < 0 ||
     candidate.availableBoneCount > 5 ||
@@ -803,6 +878,7 @@ function normalizeSceneHitReaction(value) {
   }
   return {
     schemaVersion: 1,
+    ...(requiredBoneCount === undefined ? {} : { requiredBoneCount }),
     availableBoneCount: candidate.availableBoneCount,
     triggerCount: candidate.triggerCount,
     active: candidate.active,
@@ -816,6 +892,24 @@ function normalizeSceneHitReaction(value) {
 function normalizeNullableMetric(value) {
   if (value == null) return null;
   return finiteNonNegative(value) ?? undefined;
+}
+
+function normalizeNullableBoolean(value) {
+  if (value === null) return null;
+  return typeof value === "boolean" ? value : undefined;
+}
+
+function normalizeCameraLineOfSight(value) {
+  if (value === null) return null;
+  const candidate = record(value);
+  if (!candidate) return undefined;
+  const head = normalizeNullableBoolean(candidate.head);
+  const torso = normalizeNullableBoolean(candidate.torso);
+  const lowerBody = normalizeNullableBoolean(candidate.lowerBody);
+  if (head === undefined || torso === undefined || lowerBody === undefined) {
+    return undefined;
+  }
+  return { head, torso, lowerBody };
 }
 
 export function normalizeDuelSceneDiagnostics(value) {

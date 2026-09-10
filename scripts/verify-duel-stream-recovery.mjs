@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import { execFile } from "node:child_process";
+import { createHash } from "node:crypto";
 import fs from "node:fs";
 import fsp from "node:fs/promises";
 import path from "node:path";
@@ -8,9 +9,15 @@ import { parseArgs } from "node:util";
 import { promisify } from "node:util";
 
 import {
+  hasHlsManifestAdvanced,
+  hasVerifiedBrowserMatchPresentation,
   parseListenerPids,
   parseProcessSnapshot,
+  redactWarmRendererUrl,
+  validateCaptureFailClosedLatency,
   validateCaptureRestartTarget,
+  validateMarketAuthorityRetention,
+  validateWarmRendererRetention,
 } from "./duel-capture-restart-policy.mjs";
 
 const execFileAsync = promisify(execFile);
@@ -22,6 +29,7 @@ const values = parseArgs({
     "hyperbet-api-url": { type: "string" },
     "hyperia-url": { type: "string" },
     "capture-port": { type: "string" },
+    "capture-browser-port": { type: "string" },
     "status-file": { type: "string" },
     "evidence-dir": { type: "string" },
     "timeout-ms": { type: "string", default: "90000" },
@@ -42,6 +50,7 @@ Required options:
   --hyperbet-api-url <url>  Local Hyperbet backend URL
   --hyperia-url <url>       Local Hyperia server URL
   --capture-port <port>     Smoke-owned capture listener to restart
+  --capture-browser-port <port> Smoke-owned warm renderer that must survive
   --status-file <path>      Smoke-owned RTMP status JSON to fault
   --evidence-dir <path>     New or empty directory for retained evidence
 
@@ -55,6 +64,10 @@ Optional:
 const timeoutMs = Number.parseInt(String(values["timeout-ms"]), 10);
 const pollMs = Number.parseInt(String(values["poll-ms"]), 10);
 const capturePort = Number.parseInt(requiredText("capture-port"), 10);
+const captureBrowserPort = Number.parseInt(
+  requiredText("capture-browser-port"),
+  10,
+);
 if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 30_000) {
   throw new Error("--timeout-ms must be an integer of at least 30000");
 }
@@ -67,6 +80,16 @@ if (
   capturePort > 65_535
 ) {
   throw new Error("--capture-port must be an integer from 1 to 65535");
+}
+if (
+  !Number.isSafeInteger(captureBrowserPort) ||
+  captureBrowserPort < 1 ||
+  captureBrowserPort > 65_535 ||
+  captureBrowserPort === capturePort
+) {
+  throw new Error(
+    "--capture-browser-port must be a distinct integer from 1 to 65535",
+  );
 }
 
 function requiredText(name) {
@@ -223,6 +246,139 @@ async function readCaptureRestartTarget() {
   });
 }
 
+async function readUniqueListenerPid(port, label) {
+  const output = await execFileAsync("lsof", [
+    "-nP",
+    `-iTCP:${port}`,
+    "-sTCP:LISTEN",
+    "-t",
+  ])
+    .then(({ stdout }) => stdout)
+    .catch((error) => {
+      if (error?.code === 1) return String(error?.stdout ?? "");
+      throw error;
+    });
+  const pids = parseListenerPids(output);
+  if (pids.length !== 1) {
+    throw new Error(
+      `${label} must have exactly one listener on ${port}; observed ${pids.join(", ") || "none"}`,
+    );
+  }
+  return pids[0];
+}
+
+async function evaluateCdpTarget(webSocketUrl, expression) {
+  return await new Promise((resolve, reject) => {
+    const socket = new WebSocket(webSocketUrl);
+    const requestId = 1;
+    const timeout = setTimeout(() => {
+      socket.close();
+      reject(new Error("warm renderer CDP evaluation timed out"));
+    }, 5_000);
+    const finish = (operation) => {
+      clearTimeout(timeout);
+      socket.close();
+      operation();
+    };
+    socket.addEventListener("open", () => {
+      socket.send(
+        JSON.stringify({
+          id: requestId,
+          method: "Runtime.evaluate",
+          params: {
+            expression,
+            returnByValue: true,
+            awaitPromise: true,
+          },
+        }),
+      );
+    });
+    socket.addEventListener("message", (event) => {
+      let message;
+      try {
+        message = JSON.parse(String(event.data));
+      } catch {
+        return;
+      }
+      if (message?.id !== requestId) return;
+      if (message.error || message.result?.exceptionDetails) {
+        finish(() =>
+          reject(
+            new Error(
+              `warm renderer CDP evaluation failed: ${JSON.stringify(message.error ?? message.result.exceptionDetails)}`,
+            ),
+          ),
+        );
+        return;
+      }
+      finish(() => resolve(message.result?.result?.value));
+    });
+    socket.addEventListener("error", () => {
+      finish(() => reject(new Error("warm renderer CDP connection failed")));
+    });
+  });
+}
+
+async function readWarmRendererIdentity(marker, initializeMarker) {
+  const targets = await fetchJson(
+    `http://127.0.0.1:${captureBrowserPort}/json/list`,
+  );
+  const pages = Array.isArray(targets)
+    ? targets.filter(
+        (target) =>
+          target?.type === "page" &&
+          typeof target?.id === "string" &&
+          typeof target?.url === "string" &&
+          /^https?:\/\//.test(target.url) &&
+          typeof target?.webSocketDebuggerUrl === "string",
+      )
+    : [];
+  if (pages.length !== 1) {
+    throw new Error(
+      `warm renderer must expose exactly one HTTP page target; observed ${pages.length}`,
+    );
+  }
+  const target = pages[0];
+  const markerLiteral = JSON.stringify(marker);
+  const expression = `(() => {
+    const expectedMarker = ${markerLiteral};
+    if (${initializeMarker ? "true" : "false"}) {
+      globalThis.__HYPERIA_CAPTURE_RECOVERY_MARKER__ = expectedMarker;
+    }
+    const health = globalThis.__HYPERIA_STREAM_RENDERER_HEALTH__;
+    return {
+      marker: globalThis.__HYPERIA_CAPTURE_RECOVERY_MARKER__ ?? null,
+      pageUrl: location.href,
+      timeOrigin: performance.timeOrigin,
+      navigationEntries: performance.getEntriesByType("navigation").length,
+      hasCanvas: document.querySelector("canvas") !== null,
+      rendererReady: health?.ready === true && health?.degradedReason == null,
+    };
+  })()`;
+  const evaluated = await evaluateCdpTarget(
+    target.webSocketDebuggerUrl,
+    expression,
+  );
+  if (
+    !evaluated ||
+    typeof evaluated !== "object" ||
+    typeof evaluated.pageUrl !== "string" ||
+    evaluated.pageUrl !== target.url
+  ) {
+    throw new Error("warm renderer target URL disagrees with the page runtime");
+  }
+  return {
+    targetId: target.id,
+    marker: evaluated.marker,
+    pageUrlSha256: createHash("sha256").update(evaluated.pageUrl).digest("hex"),
+    pageUrlRedacted: redactWarmRendererUrl(evaluated.pageUrl),
+    timeOrigin: evaluated.timeOrigin,
+    navigationEntries: evaluated.navigationEntries,
+    hasCanvas: evaluated.hasCanvas,
+    rendererReady: evaluated.rendererReady,
+  };
+}
+
 async function readExternalCaptureStatus() {
   return JSON.parse(await fsp.readFile(statusFile, "utf8"));
 }
@@ -366,6 +522,39 @@ function summarizeApiState(payload) {
   };
 }
 
+function summarizeRendererPerformance(snapshot) {
+  if (!snapshot || typeof snapshot !== "object") return null;
+  return {
+    updatedAt: Number.isFinite(snapshot.updatedAt) ? snapshot.updatedAt : null,
+    uptimeMs: Number.isFinite(snapshot.uptimeMs) ? snapshot.uptimeMs : null,
+    frames: Number.isFinite(snapshot?.overall?.frames)
+      ? snapshot.overall.frames
+      : null,
+    latestFrameIntervalMs: Number.isFinite(
+      snapshot?.overall?.frameIntervalMs?.latest,
+    )
+      ? snapshot.overall.frameIntervalMs.latest
+      : null,
+    p95FrameIntervalMs: Number.isFinite(snapshot?.overall?.frameIntervalMs?.p95)
+      ? snapshot.overall.frameIntervalMs.p95
+      : null,
+    p99FrameIntervalMs: Number.isFinite(snapshot?.overall?.frameIntervalMs?.p99)
+      ? snapshot.overall.frameIntervalMs.p99
+      : null,
+    textureCount: Number.isFinite(snapshot?.overall?.renderer?.textures?.latest)
+      ? snapshot.overall.renderer.textures.latest
+      : null,
+    geometryCount: Number.isFinite(
+      snapshot?.overall?.renderer?.geometries?.latest,
+    )
+      ? snapshot.overall.renderer.geometries.latest
+      : null,
+    longFrameCount: Array.isArray(snapshot.longFrames)
+      ? snapshot.longFrames.length
+      : null,
+  };
+}
+
 async function prepareEvidenceDirectory() {
   await fsp.mkdir(evidenceDir, { recursive: true });
   const collisions = [...Object.values(screenshotPaths), evidencePath].filter(
@@ -451,6 +640,39 @@ async function readBrowserState(page) {
     const video = document.querySelector("video");
     const appRoot = document.querySelector(".hm-root");
     const recovery = document.querySelector(".hm-stream-recovery");
+    const spectatorUnavailable = document.querySelector(
+      ".hm-spectator-unavailable",
+    );
+    const marketPanel = document.querySelector(
+      '[data-testid="solana-clob-panel"]',
+    );
+    const wagerControls = Array.from(
+      document.querySelectorAll(
+        [
+          '[data-testid="prediction-select-yes"]',
+          '[data-testid="prediction-select-no"]',
+          '[data-testid="prediction-tab-buy"]',
+          '[data-testid="prediction-tab-sell"]',
+          '[data-testid="prediction-amount-input"]',
+          '[data-testid="prediction-submit"]',
+          '[data-testid="solana-clob-price-input"]',
+          '[data-testid="solana-order-quote"]',
+          '[data-testid="solana-order-confirmation"]',
+        ].join(","),
+      ),
+    );
+    const wagerControlCount = wagerControls.filter((control) => {
+      if (control.getAttribute("aria-disabled") === "true") return false;
+      if (
+        control instanceof HTMLButtonElement ||
+        control instanceof HTMLInputElement ||
+        control instanceof HTMLSelectElement ||
+        control instanceof HTMLTextAreaElement
+      ) {
+        return !control.disabled;
+      }
+      return true;
+    }).length;
     const matchup = document.querySelector(".hm-matchup-label");
     const liveState = document.querySelector(".hm-live-state");
     const phaseBadges = Array.from(
@@ -467,6 +689,15 @@ async function readBrowserState(page) {
         recovery.offsetParent !== null,
       ),
       recoveryText: recovery?.textContent?.replace(/\s+/g, " ").trim() ?? "",
+      spectatorUnavailableText:
+        spectatorUnavailable?.textContent?.replace(/\s+/g, " ").trim() ?? "",
+      marketPanelPresent: marketPanel !== null,
+      marketPanelText:
+        marketPanel instanceof HTMLElement
+          ? marketPanel.innerText.replace(/\s+/g, " ").trim()
+          : "",
+      wagerControlElementCount: wagerControls.length,
+      wagerControlCount,
       matchupLabel: matchup?.textContent?.trim() ?? "",
       liveState: liveState?.textContent?.trim() ?? "",
       phaseBadges,
@@ -497,6 +728,19 @@ async function readBrowserState(page) {
             skewMs: Number(appRoot.getAttribute("data-stream-sync-skew-ms")),
           }
         : null,
+      authority: appRoot
+        ? {
+            streamCycleId: appRoot.getAttribute("data-stream-cycle-id") || null,
+            streamDuelId: appRoot.getAttribute("data-stream-duel-id") || null,
+            streamDuelKey: appRoot.getAttribute("data-stream-duel-key") || null,
+            marketDuelId: appRoot.getAttribute("data-market-duel-id") || null,
+            marketDuelKey: appRoot.getAttribute("data-market-duel-key") || null,
+            marketMode: appRoot.getAttribute("data-market-mode") || null,
+            marketReason: appRoot.getAttribute("data-market-reason") || null,
+            marketCanPlaceBet:
+              appRoot.getAttribute("data-market-can-place-bet") === "true",
+          }
+        : null,
       marker: globalThis.__HYPERIA_STREAM_RECOVERY_MARKER__ ?? null,
       navigationEntries: performance.getEntriesByType("navigation").length,
     };
@@ -521,42 +765,49 @@ function assertBrowserTelemetrySynchronized(state, label) {
   }
 }
 
-async function waitForHealthyBrowser(page, expectedMarker, minimumVideoTime) {
-  await page.waitForFunction(
-    ({ marker, minTime }) => {
-      const video = document.querySelector("video");
-      const recovery = document.querySelector(".hm-stream-recovery");
-      const appRoot = document.querySelector(".hm-root");
-      const playbackDateMs = Number(
-        appRoot?.getAttribute("data-stream-playback-date-ms"),
-      );
-      const stateEmittedAt = Number(
-        appRoot?.getAttribute("data-stream-state-emitted-at"),
-      );
-      const skewMs = playbackDateMs - stateEmittedAt;
-      return Boolean(
-        globalThis.__HYPERIA_STREAM_RECOVERY_MARKER__ === marker &&
-        !recovery &&
-        document.querySelector(".hm-matchup-label")?.textContent?.trim() ===
-          "Current Match" &&
-        video &&
-        video.readyState >= 2 &&
-        !video.paused &&
-        Number(video.currentTime) >= minTime &&
-        appRoot?.getAttribute("data-stream-sync-mode") ===
-          "program-date-time" &&
-        Number.isFinite(playbackDateMs) &&
-        playbackDateMs > 0 &&
-        Number.isFinite(stateEmittedAt) &&
-        stateEmittedAt > 0 &&
-        skewMs >= -250 &&
-        skewMs <= 3_000,
-      );
-    },
-    { marker: expectedMarker, minTime: minimumVideoTime },
-    { timeout: timeoutMs },
-  );
-  return readBrowserState(page);
+async function waitForHealthyBrowser(
+  page,
+  expectedMarker,
+  minimumVideoTime,
+  {
+    requireCurrentMatch = true,
+    label = "healthy browser",
+    expectedAgentNames = [],
+  } = {},
+) {
+  try {
+    return await waitFor(label, async () => {
+      const state = await readBrowserState(page);
+      const acceptedMatchupHeadings = requireCurrentMatch
+        ? ["Current Match"]
+        : ["Current Match", "Upcoming Match", "Fight Starting", "Match Result"];
+      const synchronization = state.synchronization;
+      return state.marker === expectedMarker &&
+        !state.recoveryVisible &&
+        acceptedMatchupHeadings.includes(state.matchupLabel) &&
+        ["LIVE", "CONNECTED"].includes(state.liveState) &&
+        hasVerifiedBrowserMatchPresentation(state, expectedAgentNames) &&
+        state.video &&
+        state.video.readyState >= 2 &&
+        !state.video.paused &&
+        state.video.currentTime >= minimumVideoTime &&
+        synchronization?.mode === "program-date-time" &&
+        Number.isFinite(synchronization.playbackDateMs) &&
+        synchronization.playbackDateMs > 0 &&
+        Number.isFinite(synchronization.stateEmittedAt) &&
+        synchronization.stateEmittedAt > 0 &&
+        Number.isFinite(synchronization.skewMs) &&
+        synchronization.skewMs >= -250 &&
+        synchronization.skewMs <= 3_000
+        ? state
+        : null;
+    });
+  } catch (error) {
+    const finalState = await readBrowserState(page).catch(() => null);
+    throw new Error(
+      `${label} was not observed; final state=${JSON.stringify(finalState)}; ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
 }
 
 function startBrowserObservation(page, startedAt) {
@@ -573,7 +824,9 @@ function startBrowserObservation(page, startedAt) {
           (state.matchupLabel === "Current Match" ||
             state.liveState === "LIVE" ||
             state.fighterCardCount > 0 ||
-            state.logPhase === "LIVE")
+            state.logPhase === "LIVE" ||
+            state.authority?.marketCanPlaceBet === true ||
+            state.wagerControlCount > 0)
         ) {
           throw new Error(
             `unsafe recovery presentation: ${JSON.stringify(state)}`,
@@ -599,6 +852,10 @@ function startBrowserObservation(page, startedAt) {
           videoReadyState: state.video?.readyState ?? null,
           videoPaused: state.video?.paused ?? null,
           synchronization: state.synchronization,
+          marketPanelPresent: state.marketPanelPresent,
+          marketCanPlaceBet: state.authority?.marketCanPlaceBet ?? false,
+          wagerControlElementCount: state.wagerControlElementCount,
+          wagerControlCount: state.wagerControlCount,
         };
         const key = JSON.stringify({
           recoveryVisible: observation.recoveryVisible,
@@ -609,6 +866,10 @@ function startBrowserObservation(page, startedAt) {
           logPhase: observation.logPhase,
           videoReadyState: observation.videoReadyState,
           videoPaused: observation.videoPaused,
+          marketPanelPresent: observation.marketPanelPresent,
+          marketCanPlaceBet: observation.marketCanPlaceBet,
+          wagerControlElementCount: observation.wagerControlElementCount,
+          wagerControlCount: observation.wagerControlCount,
         });
         if (key !== lastKey) {
           observations.push(observation);
@@ -650,44 +911,96 @@ function isExpectedCaptureNetworkIssue(message) {
 }
 
 async function waitForUnavailableBrowser(page, expectedMarker) {
-  await page.waitForFunction(
-    (marker) => {
-      const recovery = document.querySelector(".hm-stream-recovery");
-      const recoveryText = recovery?.textContent?.replace(/\s+/g, " ") ?? "";
-      const badges = Array.from(
-        document.querySelectorAll(".hm-phase-badge"),
-      ).map((node) => node.textContent?.trim());
-      const unavailableDetails = document.querySelector(
-        ".hm-spectator-unavailable",
-      );
-      return Boolean(
-        globalThis.__HYPERIA_STREAM_RECOVERY_MARKER__ === marker &&
-        recovery &&
-        recovery instanceof HTMLElement &&
-        recovery.offsetParent !== null &&
-        recoveryText.includes("Live arena view temporarily unavailable") &&
-        document.querySelector(".hm-matchup-label")?.textContent?.trim() ===
-          "Waiting for stream" &&
-        document.querySelector(".hm-live-state")?.textContent?.trim() ===
-          "RECONNECTING" &&
-        badges.length > 0 &&
-        badges.every((badge) => badge === "RECONNECTING") &&
-        unavailableDetails?.textContent?.includes(
-          "Match details unavailable",
-        ) &&
-        unavailableDetails.textContent.includes(
-          "Reconnecting to verified live arena telemetry.",
-        ) &&
-        document.querySelectorAll(".hm-spectator-fighter").length === 0 &&
-        document.querySelector(".hm-log-phase")?.textContent?.trim() ===
-          "RECONNECTING" &&
-        document.querySelector(".hm-log-text")?.textContent?.trim() ===
-          "Reconnecting to verified live arena telemetry.",
-      );
-    },
-    expectedMarker,
-    { timeout: timeoutMs },
-  );
+  try {
+    await page.waitForFunction(
+      (marker) => {
+        const recovery = document.querySelector(".hm-stream-recovery");
+        const recoveryText = recovery?.textContent?.replace(/\s+/g, " ") ?? "";
+        const badges = Array.from(
+          document.querySelectorAll(".hm-phase-badge"),
+        ).map((node) => node.textContent?.trim());
+        const unavailableDetails = document.querySelector(
+          ".hm-spectator-unavailable",
+        );
+        const appRoot = document.querySelector(".hm-root");
+        const marketPanel = document.querySelector(
+          '[data-testid="solana-clob-panel"]',
+        );
+        const wagerControls = Array.from(
+          document.querySelectorAll(
+            [
+              '[data-testid="prediction-select-yes"]',
+              '[data-testid="prediction-select-no"]',
+              '[data-testid="prediction-tab-buy"]',
+              '[data-testid="prediction-tab-sell"]',
+              '[data-testid="prediction-amount-input"]',
+              '[data-testid="prediction-submit"]',
+              '[data-testid="solana-clob-price-input"]',
+              '[data-testid="solana-order-quote"]',
+              '[data-testid="solana-order-confirmation"]',
+            ].join(","),
+          ),
+        );
+        const wagerControlCount = wagerControls.filter((control) => {
+          if (control.getAttribute("aria-disabled") === "true") return false;
+          if (
+            control instanceof HTMLButtonElement ||
+            control instanceof HTMLInputElement ||
+            control instanceof HTMLSelectElement ||
+            control instanceof HTMLTextAreaElement
+          ) {
+            return !control.disabled;
+          }
+          return true;
+        }).length;
+        const unavailableText =
+          unavailableDetails?.textContent?.replace(/\s+/g, " ") ?? "";
+        const marketPanelText =
+          marketPanel instanceof HTMLElement
+            ? marketPanel.innerText.replace(/\s+/g, " ")
+            : "";
+        const normalizedUnavailableText = unavailableText.toLowerCase();
+        const normalizedMarketPanelText = marketPanelText.toLowerCase();
+        const safeRail =
+          (normalizedUnavailableText.includes("match details unavailable") &&
+            normalizedUnavailableText.includes(
+              "reconnecting to verified live arena telemetry.",
+            )) ||
+          (marketPanel !== null &&
+            wagerControlCount === 0 &&
+            appRoot?.getAttribute("data-market-can-place-bet") !== "true" &&
+            normalizedMarketPanelText.includes(
+              "live market connection interrupted. betting is paused.",
+            ));
+        return Boolean(
+          globalThis.__HYPERIA_STREAM_RECOVERY_MARKER__ === marker &&
+          recovery &&
+          recovery instanceof HTMLElement &&
+          recovery.offsetParent !== null &&
+          recoveryText.includes("Live arena view temporarily unavailable") &&
+          document.querySelector(".hm-matchup-label")?.textContent?.trim() ===
+            "Waiting for stream" &&
+          document.querySelector(".hm-live-state")?.textContent?.trim() ===
+            "RECONNECTING" &&
+          badges.length > 0 &&
+          badges.every((badge) => badge === "RECONNECTING") &&
+          safeRail &&
+          document.querySelectorAll(".hm-spectator-fighter").length === 0 &&
+          document.querySelector(".hm-log-phase")?.textContent?.trim() ===
+            "RECONNECTING" &&
+          document.querySelector(".hm-log-text")?.textContent?.trim() ===
+            "Reconnecting to verified live arena telemetry.",
+        );
+      },
+      expectedMarker,
+      { timeout: timeoutMs },
+    );
+  } catch (error) {
+    const finalState = await readBrowserState(page).catch(() => null);
+    throw new Error(
+      `unavailable browser state was not observed; final state=${JSON.stringify(finalState)}; ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
   return readBrowserState(page);
 }
 
@@ -778,7 +1091,9 @@ async function main() {
     await page.evaluate((value) => {
       globalThis.__HYPERIA_STREAM_RECOVERY_MARKER__ = value;
     }, marker);
-    const baseline = await waitForHealthyBrowser(page, marker, 1);
+    const baseline = await waitForHealthyBrowser(page, marker, 1, {
+      expectedAgentNames: baselineApis.names,
+    });
     assertBrowserTelemetrySynchronized(baseline, "baseline browser");
     const firstVideoTime = baseline.video?.currentTime ?? 0;
     await page.waitForFunction(
@@ -836,6 +1151,11 @@ async function main() {
       page,
       marker,
       (healthyBrowser.video?.currentTime ?? 0) + 1,
+      {
+        requireCurrentMatch: false,
+        label: "renderer-recovered browser",
+        expectedAgentNames: baselineApis.names,
+      },
     );
     assertBrowserTelemetrySynchronized(
       recoveredBrowser,
@@ -863,6 +1183,15 @@ async function main() {
       await fetchText(hlsPlaybackUrl),
     );
     const captureTargetBefore = await readCaptureRestartTarget();
+    const warmRendererPidBefore = await readUniqueListenerPid(
+      captureBrowserPort,
+      "warm capture renderer",
+    );
+    const warmRendererMarker = `capture-renderer-${Date.now()}-${process.pid}`;
+    const warmRendererIdentityBefore = await readWarmRendererIdentity(
+      warmRendererMarker,
+      true,
+    );
     const captureKilledAt = Date.now();
     const captureObserver = startBrowserObservation(page, captureKilledAt);
     let captureObservations = [];
@@ -920,6 +1249,11 @@ async function main() {
         marker,
       );
       const captureStartupBrowserObservedAt = Date.now();
+      const failClosedLatency = validateCaptureFailClosedLatency({
+        killedAt: captureKilledAt,
+        apiObservedAt: captureStartupApis.observedAt,
+        browserObservedAt: captureStartupBrowserObservedAt,
+      });
 
       const [readyStatus, readyApis, advancedManifest] = await Promise.all([
         waitFor("replacement capture status ready", async () => {
@@ -946,11 +1280,28 @@ async function main() {
           const manifest = summarizeHlsManifest(
             await fetchText(hlsPlaybackUrl),
           );
-          return manifest.mediaSequence > manifestBeforeRestart.mediaSequence
+          return hasHlsManifestAdvanced(manifestBeforeRestart, manifest)
             ? { manifest, observedAt: Date.now() }
             : null;
         }),
       ]);
+      const warmRendererPidAfter = await readUniqueListenerPid(
+        captureBrowserPort,
+        "warm capture renderer after worker restart",
+      );
+      if (warmRendererPidAfter !== warmRendererPidBefore) {
+        throw new Error(
+          `warm capture renderer changed during encoder recovery (${warmRendererPidBefore} -> ${warmRendererPidAfter})`,
+        );
+      }
+      const warmRendererIdentityAfter = await readWarmRendererIdentity(
+        warmRendererMarker,
+        false,
+      );
+      const warmRendererIdentity = validateWarmRendererRetention(
+        warmRendererIdentityBefore,
+        warmRendererIdentityAfter,
+      );
       captureRestartResult = {
         captureTargetAfter: processReplacement.captureTargetAfter,
         externalStatus: readyStatus.externalStatus,
@@ -968,11 +1319,19 @@ async function main() {
         },
         captureStartupApis,
         captureStartupBrowser,
+        warmRendererPidBefore,
+        warmRendererPidAfter,
+        warmRendererIdentity,
       };
       const captureRestartBrowser = await waitForHealthyBrowser(
         page,
         marker,
         (recoveredBrowser.video?.currentTime ?? 0) + 1,
+        {
+          requireCurrentMatch: false,
+          label: "capture-restarted browser",
+          expectedAgentNames: baselineApis.names,
+        },
       );
       assertBrowserTelemetrySynchronized(
         captureRestartBrowser,
@@ -999,6 +1358,11 @@ async function main() {
       ) {
         throw new Error("browser identity changed during capture restart");
       }
+      const marketAuthority = validateMarketAuthorityRetention(
+        recoveredBrowser,
+        captureStartupBrowser,
+        captureRestartScreenshotBrowser,
+      );
       log(
         `capture process group ${captureTargetBefore.groupId} was replaced by ${captureRestartResult.captureTargetAfter.groupId} without reloading the viewer`,
       );
@@ -1010,11 +1374,26 @@ async function main() {
         targetAfter: summarizeCaptureTarget(
           captureRestartResult.captureTargetAfter,
         ),
+        warmRenderer: {
+          captureBrowserPort,
+          listenerPidBefore: captureRestartResult.warmRendererPidBefore,
+          listenerPidAfter: captureRestartResult.warmRendererPidAfter,
+          page: captureRestartResult.warmRendererIdentity,
+          retained: true,
+        },
         manifestBefore: manifestBeforeRestart,
         manifestAfter: captureRestartResult.manifest,
         lifecycle: summarizeCaptureLifecycle(
           captureRestartResult.externalStatus,
           captureKilledAt,
+        ),
+        rendererReadinessTimeline: Array.isArray(
+          captureRestartResult.externalStatus?.rendererReadinessTimeline,
+        )
+          ? captureRestartResult.externalStatus.rendererReadinessTimeline
+          : [],
+        rendererPerformance: summarizeRendererPerformance(
+          captureRestartResult.externalStatus?.rendererPerformance,
         ),
         phaseObservations: Object.fromEntries(
           Object.entries(captureRestartResult.phaseObservations).map(
@@ -1028,6 +1407,7 @@ async function main() {
           ),
         ),
         failClosed: {
+          latency: failClosedLatency,
           hyperia: summarizeApiState(
             captureRestartResult.captureStartupApis.hyperia,
           ),
@@ -1036,6 +1416,7 @@ async function main() {
           ),
           browser: captureRestartResult.captureStartupBrowser,
         },
+        marketAuthority,
         hyperia: summarizeApiState(captureRestartResult.hyperia),
         hyperbet: summarizeApiState(captureRestartResult.hyperbet),
         browser: captureRestartScreenshotBrowser,
@@ -1117,7 +1498,7 @@ async function main() {
         ]),
       ),
       limitations: [
-        "Local read-only Hyperbet topology; no transaction or settlement authority was enabled.",
+        "Local diagnostic Hyperbet topology; any enabled transaction path uses only a smoke-owned local validator and ephemeral no-value wallet.",
         "Renderer fault was injected into the smoke-owned status file; capture restart used a real SIGKILL against only the separately validated smoke-owned process group.",
         "No external broadcast destination or public network was involved.",
       ],

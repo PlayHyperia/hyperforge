@@ -37,6 +37,30 @@ const TEST_ITEMS: Item[] = [
     iconPath: "",
   },
   {
+    id: "logs",
+    name: "Logs",
+    type: "resource",
+    stackable: false,
+    description: "Firemaking fixture logs",
+    examine: "Firemaking fixture logs",
+    tradeable: false,
+    rarity: "common",
+    modelPath: null,
+    iconPath: "",
+  },
+  {
+    id: "tinderbox",
+    name: "Tinderbox",
+    type: "tool",
+    stackable: false,
+    description: "Firemaking fixture tinderbox",
+    examine: "Firemaking fixture tinderbox",
+    tradeable: false,
+    rarity: "common",
+    modelPath: null,
+    iconPath: "",
+  },
+  {
     id: "bronze_sword",
     name: "Bronze Sword",
     type: "weapon",
@@ -518,7 +542,7 @@ describe("InventorySystem atomic processing action", () => {
       awardedXp: 0,
       operationCommittedXp: 80.5,
       currentXp: 80.5,
-      currentLevel: 2,
+      currentLevel: 1,
       committed: committedFailedSmeltRows(),
     }));
     await expect(
@@ -547,6 +571,43 @@ describe("InventorySystem atomic processing action", () => {
     expect(request.requestFingerprint).toMatch(/^[a-f0-9]{64}$/);
     expect(quantities(fixture.inventory)).toEqual({
       bronze_bar: 1,
+      hammer: 1,
+    });
+  });
+
+  it("rejects a receipt whose level does not match its exact durable XP", async () => {
+    const fixture = createFixture(async (request) => ({
+      ...request,
+      replayed: false,
+      consumableStates: [],
+      awardedXp: 12.5,
+      operationCommittedXp: 12.5,
+      currentXp: 12.5,
+      currentLevel: 99,
+      committed: committedRows(),
+    }));
+
+    await expect(
+      fixture.inventory.commitProcessingActionAtomic(
+        PLAYER_ID,
+        "processing-level-mismatch-1",
+        {
+          skill: "smithing",
+          xpAmount: 12.5,
+          inputs: [{ itemId: "bronze_bar", quantity: 1 }],
+          requiredItems: [{ itemId: "hammer", quantity: 1 }],
+          outputs: [{ itemId: "bronze_shortsword", quantity: 1 }],
+        },
+      ),
+    ).resolves.toEqual(
+      expect.objectContaining({
+        ok: false,
+        retryable: true,
+        reason: "persistence_ambiguous",
+      }),
+    );
+    expect(quantities(fixture.inventory)).toEqual({
+      bronze_bar: 2,
       hammer: 1,
     });
   });

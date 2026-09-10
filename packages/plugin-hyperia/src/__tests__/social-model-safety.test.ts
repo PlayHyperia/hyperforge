@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { shareOpinionAction } from "../actions/social.js";
+import { offerHelpAction, shareOpinionAction } from "../actions/social.js";
 
 const SAFE_FALLBACKS = [
   "Good progress",
@@ -68,5 +68,55 @@ describe("public social model safety", () => {
     expect(prompt.match(/END_SOCIAL_CHAT_CONTEXT_JSON/gu)).toHaveLength(2);
     const message = executeChatMessage.mock.calls[0][0].message as string;
     expect(SAFE_FALLBACKS).toContain(message);
+  });
+
+  it("does not tell a player to take food when the authoritative drop rejects", async () => {
+    const executeChatMessage = vi.fn().mockResolvedValue(undefined);
+    const executeDropItem = vi.fn().mockResolvedValue({
+      success: false,
+      committed: false,
+      playerId: "helper",
+      operationId: "ground-item-drop:11111111-1111-4111-8111-111111111111",
+      itemId: "shrimp",
+      quantity: 1,
+      reason: "insufficient_items",
+    });
+    const service = {
+      getPlayerEntity: vi.fn().mockReturnValue({
+        id: "helper",
+        inCombat: false,
+        items: [{ itemId: "shrimp", name: "Shrimp", quantity: 1 }],
+      }),
+      getNearbyEntities: vi.fn().mockReturnValue([
+        {
+          id: "injured-player",
+          playerId: "injured-player",
+          name: "Newbie",
+          type: "player",
+          entityType: "player",
+          health: { current: 3, max: 10 },
+        },
+      ]),
+      executeDropItem,
+      executeChatMessage,
+    };
+    const runtime = {
+      agentId: "helper",
+      getService: vi.fn().mockReturnValue(service),
+    };
+
+    const result = await offerHelpAction.handler?.(
+      runtime as never,
+      { content: { text: "help" } } as never,
+    );
+
+    expect(executeDropItem).toHaveBeenCalledWith("shrimp", 1);
+    expect(executeChatMessage).toHaveBeenCalledWith({
+      message: "Newbie eat some food!",
+    });
+    expect(result).toMatchObject({
+      success: true,
+      data: { helpType: "advice" },
+    });
   });
 });

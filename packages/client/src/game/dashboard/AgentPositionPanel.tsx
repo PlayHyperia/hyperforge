@@ -1,4 +1,5 @@
 import { GAME_API_URL } from "@/lib/api-config";
+import { getApiAuthorizationHeaders } from "@/lib/api-client";
 import React, { useState, useEffect, useRef, useCallback } from "react";
 import type { Agent } from "./types";
 import {
@@ -135,6 +136,7 @@ export const AgentPositionPanel: React.FC<AgentPositionPanelProps> = ({
 
       const mappingResponse = await fetch(
         `${GAME_API_URL}/api/agents/mapping/${agent.id}`,
+        { headers: getApiAuthorizationHeaders() },
       );
 
       if (!mappingResponse.ok) {
@@ -170,6 +172,7 @@ export const AgentPositionPanel: React.FC<AgentPositionPanelProps> = ({
     try {
       const positionResponse = await fetch(
         `${GAME_API_URL}/api/characters/${characterId}/position`,
+        { headers: getApiAuthorizationHeaders() },
       );
 
       if (!positionResponse.ok) {

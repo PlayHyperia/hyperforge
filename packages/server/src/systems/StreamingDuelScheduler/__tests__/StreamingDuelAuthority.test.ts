@@ -513,6 +513,13 @@ describe("streaming duel scheduler authority", () => {
         STREAMING_DUEL_PREPARATION_MS: "60000",
       }).role,
     ).toBe("authority");
+    expect(() =>
+      resolveStreamingDuelAuthorityConfig({
+        NODE_ENV: "production",
+        STREAMING_DUEL_SCHEDULER_ROLE: "authority",
+        STREAMING_DUEL_PREPARATION_MS: "60000ms",
+      }),
+    ).toThrow(/base-10 integer/);
     expect(
       resolveStreamingDuelAuthorityConfig({
         NODE_ENV: "production",

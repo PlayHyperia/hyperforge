@@ -1,0 +1,70 @@
+{
+  "schemaVersion": 1,
+  "exportedAt": "2026-08-19T21:00:00.000Z",
+  "avatar": {
+    "id": "steve",
+    "legacyAttachmentId": "/api/assets/steve/model",
+    "path": "packages/server/world/assets/avatars/duel-candidates/duel-steve.vrm",
+    "sha256": "879d9d47f4616333fefaaa7c5d71247f31a4f309d6b99931f4cca540d9963207",
+    "normalizedHeight": 1.6
+  },
+  "fits": [
+    {
+      "itemId": "fly_fishing_rod",
+      "slot": "gatheringtool",
+      "grip": "two-hand",
+      "weaponType": "fishing-rod",
+      "attachmentBone": "rightHand",
+      "sourcePath": "artifacts/duel-launch-avatar-bakeoff/fishing-kit/quaternius-fishing-rod-level-2.glb",
+      "sourceSha256": "9fd3105b17a182bd804e7d3b2d921b26c33457efd7cb36ac0071b6744dbdd8c3",
+      "outputPath": "artifacts/duel-launch-avatar-bakeoff/fitted-steve-fishing-interactions/fly-fishing-rod-fitted.glb",
+      "targetLengthMetres": 2.4,
+      "desiredWorldEulerDegrees": [0, 0, 0],
+      "desiredWorldOffsetMetres": [0, 0, 0],
+      "alignHandleToSecondaryHand": {
+        "sourceHandleAxis": [0, -1, 0]
+      },
+      "referenceMotion": {
+        "path": "artifacts/duel-launch-avatar-bakeoff/motions/steve-preparation/steve-fishing-cast.glb",
+        "sha256": "061c247a2e6618daa370bfc759ebabb57ff0ff79c23c9f93dba5dc9c7177ac99",
+        "sampleRatio": 0.55
+      }
+    },
+    {
+      "itemId": "small_fishing_net",
+      "slot": "gatheringtool",
+      "grip": "one-hand",
+      "weaponType": "fishing-net",
+      "attachmentBone": "rightHand",
+      "sourcePath": "artifacts/duel-launch-avatar-bakeoff/fishing-tool-candidates/sources/small_fishing_net.glb",
+      "sourceSha256": "6855ba8bf48b30a3fc65e26fead6cef51f8fc85a054db540e0633d7c34fa1d8b",
+      "outputPath": "artifacts/duel-launch-avatar-bakeoff/fitted-steve-fishing-interactions/small-fishing-net-fitted.glb",
+      "targetLengthMetres": 0.75,
+      "desiredWorldEulerDegrees": [0, 90, 0],
+      "desiredWorldOffsetMetres": [0, 0, 0],
+      "referenceMotion": {
+        "path": "artifacts/duel-launch-avatar-bakeoff/motions/steve-fishing-interactions/steve-small-fishing-net-release.glb",
+        "sha256": "5d56e2c78665da11f37968928790c5a4866c75f841ec31923a118142a1250da7",
+        "sampleRatio": 0.1
+      }
+    },
+    {
+      "itemId": "lobster_pot",
+      "slot": "gatheringtool",
+      "grip": "one-hand",
+      "weaponType": "lobster-pot",
+      "attachmentBone": "rightHand",
+      "sourcePath": "artifacts/duel-launch-avatar-bakeoff/fishing-tool-candidates/sources/lobster_pot.glb",
+      "sourceSha256": "2c56e8b5ac393a1550ba77f11eacfb37b9bffdc5bf15be091fa1456ed5fef30a",
+      "outputPath": "artifacts/duel-launch-avatar-bakeoff/fitted-steve-fishing-interactions/lobster-pot-fitted.glb",
+      "targetLengthMetres": 0.55,
+      "desiredWorldEulerDegrees": [0, 90, 0],
+      "desiredWorldOffsetMetres": [0, 0, 0],
+      "referenceMotion": {
+        "path": "artifacts/duel-launch-avatar-bakeoff/motions/steve-fishing-interactions/steve-lobster-pot-deploy.glb",
+        "sha256": "bdc01e9545c57992433e6e7da7ff41803099452262bf1b9de6b76aff22565748",
+        "sampleRatio": 0.1
+      }
+    }
+  ]
+}

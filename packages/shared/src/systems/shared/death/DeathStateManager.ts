@@ -21,6 +21,7 @@ import type {
 import type { InventoryItem } from "../../../types/core/core";
 import type { EntityManager } from "..";
 import { EventType } from "../../../types/events";
+import { isExternalValueEnabled } from "./PreparationDeathCustodyPolicy";
 
 const DEBUG_DEATH_STATE = false;
 const isTruthyEnv = (value: string | undefined): boolean =>
@@ -66,13 +67,29 @@ type DatabaseSystem = {
     playerId: string,
     groundItemIds: string[],
   ) => Promise<void>;
-  getUnrecoveredDeathsAsync: () => Promise<DeathLockData[]>;
+  getAllActiveDeathsAsync: () => Promise<DeathLockData[]>;
   markDeathRecoveredAsync: (playerId: string) => Promise<void>;
   acquireDeathLockAsync: (
     data: DeathLockData,
     tx?: TransactionContext,
   ) => Promise<boolean>;
 };
+
+export type DeathRecoveryRequest = {
+  playerId: string;
+  /** Immutable custody operation that owns the recovered inventory. */
+  deathOperationId: string | null;
+  /** Reuse the durable world identity when one was already committed. */
+  gravestoneId: string | null;
+  position: { x: number; y: number; z: number };
+  items: InventoryItem[];
+  killedBy: string;
+  zoneType: ZoneType;
+};
+
+export type DeathRecoveryHandler = (
+  request: DeathRecoveryRequest,
+) => Promise<void>;
 
 /**
  * DeathStateManager - Manages player death state with dual persistence
@@ -106,6 +123,7 @@ type DatabaseSystem = {
 export class DeathStateManager {
   private entityManager: EntityManager | null = null;
   private databaseSystem: DatabaseSystem | null = null;
+  private recoveryHandler: DeathRecoveryHandler | null = null;
 
   /** In-memory cache for fast death lock lookups (both client and server) */
   private activeDeaths = new Map<string, DeathLock>();
@@ -124,6 +142,15 @@ export class DeathStateManager {
   };
 
   constructor(private world: World) {}
+
+  /**
+   * Installs the server-owned artifact restorer used during startup recovery.
+   * Recovery is awaited before durable rows are marked recovered, so a player
+   * can never reconnect between an uncommitted spawn and its database identity.
+   */
+  setRecoveryHandler(handler: DeathRecoveryHandler): void {
+    this.recoveryHandler = handler;
+  }
 
   /**
    * Initialize - get entity manager and database system references
@@ -191,6 +218,11 @@ export class DeathStateManager {
       ]);
 
       if (!completedWithinTimeout) {
+        if (isExternalValueEnabled()) {
+          throw new Error(
+            `death_recovery_startup_timeout:${recoveryTimeoutMs}`,
+          );
+        }
         console.warn(
           `[DeathStateManager] Startup death recovery exceeded ${recoveryTimeoutMs}ms; continuing startup while recovery finishes in background`,
         );
@@ -231,12 +263,13 @@ export class DeathStateManager {
   }
 
   /**
-   * Recover unfinished deaths from database after server restart
+   * Recover active death custody from database after server restart.
    *
    * CRITICAL: Prevents item loss when server crashes during death handling.
    *
    * Recovery logic:
-   * 1. Query all player_deaths where recovered = false
+   * 1. Query every active player_deaths row. Runtime entities do not survive a
+   *    process restart, including rows already recovered by an earlier process.
    * 2. For each death, check if gravestone/ground items still exist
    * 3. If not, emit DEATH_RECOVERED event to recreate them
    * 4. Mark death as recovered in database
@@ -252,31 +285,50 @@ export class DeathStateManager {
     );
 
     try {
-      const unrecoveredDeaths =
-        await this.databaseSystem.getUnrecoveredDeathsAsync();
+      const activeDeaths = await this.databaseSystem.getAllActiveDeathsAsync();
       console.log(
-        `[DeathStateManager] Database returned ${unrecoveredDeaths.length} unrecovered deaths`,
+        `[DeathStateManager] Database returned ${activeDeaths.length} active deaths`,
       );
 
-      if (unrecoveredDeaths.length === 0) {
-        console.log("[DeathStateManager] No unfinished deaths to recover");
+      if (activeDeaths.length === 0) {
+        console.log("[DeathStateManager] No active deaths to recover");
         return;
       }
 
       console.log(
-        `[DeathStateManager] Found ${unrecoveredDeaths.length} unfinished deaths to recover`,
+        `[DeathStateManager] Found ${activeDeaths.length} active deaths to recover`,
       );
 
-      for (const death of unrecoveredDeaths) {
-        await this.recoverSingleDeath(death);
+      let recoveredCount = 0;
+      const recoveryFailures: Array<{ playerId: string; error: unknown }> = [];
+      for (const death of activeDeaths) {
+        try {
+          await this.recoverSingleDeath(death);
+          recoveredCount++;
+        } catch (error) {
+          recoveryFailures.push({ playerId: death.playerId, error });
+          console.error(
+            `[DeathStateManager] Failed to recover death custody for ${death.playerId}:`,
+            error,
+          );
+        }
       }
 
       console.log(
-        `[DeathStateManager] Recovery complete: ${unrecoveredDeaths.length} deaths processed`,
+        `[DeathStateManager] Recovery complete: ${recoveredCount}/${activeDeaths.length} deaths restored`,
       );
+      if (recoveryFailures.length > 0 && isExternalValueEnabled()) {
+        throw new AggregateError(
+          recoveryFailures.map(({ error }) => error),
+          `death_recovery_startup_incomplete:${recoveredCount}/${activeDeaths.length}:${recoveryFailures.map(({ playerId }) => playerId).join(",")}`,
+        );
+      }
     } catch (error) {
       console.error("[DeathStateManager] Death recovery failed:", error);
-      // Don't throw - server should start even if recovery fails
+      if (isExternalValueEnabled()) {
+        throw error;
+      }
+      // Diagnostic/non-value worlds may remain available for operator repair.
       // Items may be lost but server remains functional
     }
   }
@@ -313,6 +365,15 @@ export class DeathStateManager {
       console.log(
         `[DeathStateManager]   Item details: ${items.map((i) => `${i.itemId}x${i.quantity}`).join(", ")}`,
       );
+    }
+
+    if (isExternalValueEnabled()) {
+      if (!death.deathOperationId) {
+        throw new Error("external_value_death_custody_legacy_row");
+      }
+      if (groundItemIds.length > 0) {
+        throw new Error("external_value_death_custody_public_items");
+      }
     }
 
     // Check if gravestone still exists
@@ -367,7 +428,9 @@ export class DeathStateManager {
       // This ensures onPlayerReconnect() can find the death lock with items
       this.activeDeaths.set(playerId, {
         playerId,
-        gravestoneId: undefined,
+        // Preserve the committed identity even though this process has not
+        // restored the entity yet. The recovery handler binds its spawn to it.
+        gravestoneId: gravestoneId ?? undefined,
         groundItemIds: [],
         position,
         timestamp: Date.now(),
@@ -380,9 +443,16 @@ export class DeathStateManager {
         recovered: false, // Will be marked true after reconnect
       });
 
-      // Emit DEATH_RECOVERED event - handlers will recreate gravestone/ground items
-      this.world.emit(EventType.DEATH_RECOVERED, {
+      if (!this.recoveryHandler) {
+        throw new Error("death_recovery_handler_unavailable");
+      }
+
+      // The artifact spawn and its durable identity update are one awaited
+      // recovery step. Do not mark the row recovered before this completes.
+      await this.recoveryHandler({
         playerId,
+        deathOperationId: death.deathOperationId ?? null,
+        gravestoneId: gravestoneId ?? null,
         position,
         items: inventoryItems,
         killedBy,
@@ -392,6 +462,10 @@ export class DeathStateManager {
 
     // Mark death as recovered in database
     await this.databaseSystem!.markDeathRecoveredAsync(playerId);
+    const recovered = this.activeDeaths.get(playerId);
+    if (recovered) {
+      this.activeDeaths.set(playerId, { ...recovered, recovered: true });
+    }
 
     console.log(`[DeathStateManager] ✓ Death recovered for ${playerId}`);
   }

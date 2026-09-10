@@ -1,4 +1,5 @@
 import { GAME_API_URL } from "@/lib/api-config";
+import { getApiAuthorizationHeaders } from "@/lib/api-client";
 import React, { useState, useEffect, useRef } from "react";
 import type { Agent } from "./types";
 import { ChevronDown, ChevronUp, Swords, TrendingUp } from "lucide-react";
@@ -239,6 +240,7 @@ export const AgentSkillsPanel: React.FC<AgentSkillsPanelProps> = ({
 
       const mappingResponse = await fetchWithRetry(
         `${GAME_API_URL}/api/agents/mapping/${agent.id}`,
+        { headers: getApiAuthorizationHeaders() },
       );
 
       if (!mappingResponse.ok) {
@@ -273,6 +275,7 @@ export const AgentSkillsPanel: React.FC<AgentSkillsPanelProps> = ({
     try {
       const skillsResponse = await fetchWithRetry(
         `${GAME_API_URL}/api/characters/${characterId}/skills`,
+        { headers: getApiAuthorizationHeaders() },
       );
 
       if (!skillsResponse.ok) {

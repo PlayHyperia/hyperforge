@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   resolveDefaultHyperiaServerUrl,
   resolveHyperiaApiBaseUrl,
+  stripHyperiaWebSocketCredentials,
 } from "../services/HyperiaService.js";
 
 afterEach(() => {
@@ -56,6 +57,17 @@ describe("HyperiaService URL resolution", () => {
 
     expect(resolveHyperiaApiBaseUrl("wss://hyperia.gg/ws")).toBe(
       "https://hyperia.gg",
+    );
+  });
+
+  it("removes credentials from socket URLs while preserving non-secret routing parameters", () => {
+    expect(
+      stripHyperiaWebSocketCredentials(
+        "wss://hyperia.gg/ws?mode=agent&authToken=secret&privyUserId=private",
+      ),
+    ).toBe("wss://hyperia.gg/ws?mode=agent");
+    expect(stripHyperiaWebSocketCredentials("ws://127.0.0.1:5556/ws")).toBe(
+      "ws://127.0.0.1:5556/ws",
     );
   });
 });

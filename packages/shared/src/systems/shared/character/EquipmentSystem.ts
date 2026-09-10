@@ -14,6 +14,7 @@ import { COMBAT_SPELLS } from "../../../data/combat-spells";
 import { ammunitionService } from "../combat/AmmunitionService";
 import { runeService } from "../combat/RuneService";
 import type { InventorySystem } from "./InventorySystem";
+import type { GroundItemSystem } from "../economy/GroundItemSystem";
 import { EQUIPMENT_SLOT_NAMES } from "../../../constants/EquipmentConstants";
 import { BANKING_CONSTANTS } from "../../../constants/BankingConstants";
 
@@ -63,8 +64,22 @@ import type {
   DuelPreparationPlanPersistenceSnapshot,
   DuelPreparationPlanRecoveryEvidence,
   EquipmentSaveItem,
+  AmmunitionRecoveryDisposition,
+  AmmunitionShotOperationStatus,
+  AmmunitionShotCommitRequest,
+  AmmunitionShotSettlementHandle,
+  GroundItemSourceRegistrationReceipt,
   InventorySaveItem,
 } from "../../../types/network/database";
+import {
+  ammunitionShotIdentityFromRequest,
+  serializeAmmunitionShotFingerprint,
+} from "../../../utils/game/AmmunitionShotRegistration";
+import { serializeGroundItemSourceRegistrationFingerprint } from "../../../utils/game/GroundItemSourceRegistration";
+import {
+  parseStreamingDuelRoleSwitchObservationContext,
+  type StreamingDuelRoleSwitchObservationContext,
+} from "../../../types/game/streaming-duel-action-observation";
 import { uuid } from "../../../utils/IdGenerator";
 
 import { World } from "../../../core/World";
@@ -187,6 +202,7 @@ export interface FrozenCombatLoadoutSwitchRequest {
   allowedLoadouts: Partial<
     Record<SwitchableCombatRole, FrozenCombatLoadoutDefinition>
   >;
+  publicActionObservation?: StreamingDuelRoleSwitchObservationContext;
 }
 
 export type FrozenCombatLoadoutSwitchFailureReason =
@@ -241,6 +257,29 @@ export type AtomicArrowDebitReceipt =
       reason: AtomicArrowDebitFailureReason;
     };
 
+export type AtomicAmmunitionShotReceipt =
+  | {
+      ok: true;
+      playerId: string;
+      operationId: string;
+      arrowId: string;
+      changed: true;
+      replayed: boolean;
+      requestFingerprint: string;
+      status: AmmunitionShotOperationStatus;
+      recoveryDisposition: AmmunitionRecoveryDisposition;
+      recoverySource: GroundItemSourceRegistrationReceipt | null;
+    }
+  | {
+      ok: false;
+      playerId: string;
+      operationId: string;
+      arrowId: string;
+      changed: false;
+      replayed: false;
+      reason: AtomicArrowDebitFailureReason;
+    };
+
 async function equipmentDebitSha256Hex(value: string): Promise<string> {
   const subtle = globalThis.crypto?.subtle;
   if (!subtle) throw new Error("web_crypto_unavailable");
@@ -257,13 +296,19 @@ function equipmentStackDebitFailureReason(
   error: unknown,
 ): AtomicArrowDebitFailureReason {
   const message = error instanceof Error ? error.message : String(error);
-  if (message.includes("equipment_stack_debit_insufficient_items")) {
+  if (
+    message.includes("equipment_stack_debit_insufficient_items") ||
+    message.includes("ammunition_shot_insufficient_items")
+  ) {
     return "insufficient_items";
   }
   if (
     message.includes("equipment_stack_debit_request_invalid") ||
     message.includes("equipment_stack_debit_operation_id_conflict") ||
-    message.includes("equipment_stack_debit_player_missing")
+    message.includes("equipment_stack_debit_player_missing") ||
+    message.includes("ammunition_shot_request_invalid") ||
+    message.includes("ammunition_shot_operation_id_conflict") ||
+    message.includes("ammunition_shot_player_missing")
   ) {
     return "invalid_request";
   }
@@ -278,6 +323,19 @@ function shouldRetryEquipmentStackDebit(error: unknown): boolean {
     "equipment_stack_debit_player_missing",
     "equipment_stack_debit_insufficient_items",
     "equipment_stack_debit_equipment_invalid",
+  ].some((code) => message.includes(code));
+}
+
+function shouldRetryAmmunitionShotCommit(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return ![
+    "ammunition_shot_request_invalid",
+    "ammunition_shot_operation_id_conflict",
+    "ammunition_shot_player_missing",
+    "ammunition_shot_insufficient_items",
+    "ammunition_shot_equipment_invalid",
+    "ammunition_shot_source_preexisting",
+    "ammunition_shot_source_receipt_invalid",
   ].some((code) => message.includes(code));
 }
 
@@ -301,6 +359,21 @@ function shouldRetryDuelPreparationPlanCommit(error: unknown): boolean {
     "duel_preparation_plan_metadata_invalid",
     "duel_preparation_plan_state_conflict",
     "combat_loadout_",
+  ].some((code) => message.includes(code));
+}
+
+/**
+ * A contestant's sibling preparation can fail while this agent is committing
+ * its own plan. Cancellation then wins the database lock and the in-flight
+ * commit observes an inactive/expired preparation. That is an expected
+ * capability-revocation race, not a persistence outage and not retryable.
+ */
+function isDuelPreparationCapabilityRevoked(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return [
+    "duel_preparation_plan_preparation_expired",
+    "duel_preparation_plan_preparation_not_active",
+    "duel_preparation_plan_agent_ready",
   ].some((code) => message.includes(code));
 }
 
@@ -405,6 +478,27 @@ export class EquipmentSystem extends SystemBase {
   >();
   /** Prevent duplicate save/cleanup when unregister and leave fire back-to-back. */
   private equipmentCleanupInFlight = new Set<string>();
+  /**
+   * An allocated slot map is not proof that persisted equipment has finished
+   * hydrating. PLAYER_REGISTERED deliberately allocates an empty map while the
+   * earlier PLAYER_JOINED database read may still be in flight, so competitive
+   * custody must use this explicit readiness boundary instead of map presence.
+   */
+  private readyPlayerEquipment = new Set<string>();
+  private equipmentHydrationGeneration = new Map<string, number>();
+  /**
+   * Order every equipment-table writer for one player, including whole-plan
+   * commits and recovery. A normal equip save captured before a competitive
+   * plan must finish before that plan becomes the final durable projection.
+   */
+  private equipmentPersistenceTails = new Map<string, Promise<void>>();
+  /**
+   * A durable combat receipt may finish after the player has begun unloading.
+   * Keep a tombstone until the next join so that receipt convergence never
+   * recreates a ghost equipment/inventory projection during that boundary.
+   */
+  private unloadedPlayerEquipment = new Set<string>();
+  private isDestroying = false;
   private databaseSystem?: DatabaseSystem;
 
   // GDD-compliant level requirements
@@ -442,6 +536,7 @@ export class EquipmentSystem extends SystemBase {
     // Set up type-safe event subscriptions with proper type casting
     this.subscribe(EventType.PLAYER_REGISTERED, (data) => {
       const typedData = data as { playerId: string };
+      this.unloadedPlayerEquipment.delete(typedData.playerId);
       this.initializePlayerEquipment({ id: typedData.playerId });
     });
     // CRITICAL: Equipment is now passed via event payload from character-selection
@@ -452,42 +547,62 @@ export class EquipmentSystem extends SystemBase {
         equipment?: EquipmentSyncData[];
         isReconnect?: boolean;
       };
+      this.unloadedPlayerEquipment.delete(typedData.playerId);
+      // PLAYER_JOINED can precede PLAYER_REGISTERED for embedded agents. Own
+      // the slot allocation here so a synchronous payload load cannot race the
+      // later registration event or silently discard authoritative equipment.
+      this.initializePlayerEquipment({ id: typedData.playerId });
+      const hydrationGeneration = this.beginEquipmentHydration(
+        typedData.playerId,
+      );
+      let hydrationSucceeded = false;
 
-      // On reconnection, equipment is already in memory — just re-send to client
-      // This prevents stale DB data from overwriting current in-memory equipment
-      if (
-        typedData.isReconnect &&
-        this.playerEquipment.has(typedData.playerId)
-      ) {
-        this.sendEquipmentUpdated(typedData.playerId);
-        this.emitEquipmentChangedForAllSlots(typedData.playerId);
-        return;
-      }
+      try {
+        // On reconnection, equipment is already in memory — just re-send to client
+        // This prevents stale DB data from overwriting current in-memory equipment
+        if (
+          typedData.isReconnect &&
+          this.playerEquipment.has(typedData.playerId)
+        ) {
+          this.sendEquipmentUpdated(typedData.playerId);
+          this.emitEquipmentChangedForAllSlots(typedData.playerId);
+          hydrationSucceeded = true;
+          return;
+        }
 
-      // Use equipment from payload (single source of truth from character-selection)
-      if (typedData.equipment && typedData.equipment.length > 0) {
-        await this.loadEquipmentFromPayload(
+        // Use equipment from payload (single source of truth from character-selection)
+        if (typedData.equipment) {
+          hydrationSucceeded = await this.loadEquipmentFromPayload(
+            typedData.playerId,
+            typedData.equipment,
+            hydrationGeneration,
+          );
+        } else {
+          // Backwards compatibility: no equipment in payload, fall back to DB query
+          hydrationSucceeded = await this.loadEquipmentFromDatabase(
+            typedData.playerId,
+            false,
+            hydrationGeneration,
+          );
+        }
+      } finally {
+        this.completeEquipmentHydration(
           typedData.playerId,
-          typedData.equipment,
+          hydrationGeneration,
+          hydrationSucceeded,
         );
-      } else if (typedData.equipment) {
-        // Empty array = new player or cleared equipment, no need to query DB
-        // Just ensure slot visuals are cleared
-        this.emitEmptyEquipmentEvents(typedData.playerId);
-      } else {
-        // Backwards compatibility: no equipment in payload, fall back to DB query
-        await this.loadEquipmentFromDatabase(typedData.playerId);
       }
     });
     this.subscribe(EventType.PLAYER_RESPAWNED, async (data) => {
       const typedData = data as { playerId: string };
       // Reload equipment from database after respawn (equipment cleared on death)
-      await this.loadEquipmentFromDatabase(typedData.playerId);
+      await this.reloadFromDatabase(typedData.playerId);
     });
     this.subscribe(EventType.PLAYER_UNREGISTERED, async (data) => {
       const typedData = data as { playerId: string };
       const { playerId } = typedData;
       if (this.equipmentCleanupInFlight.has(playerId)) return;
+      this.unloadedPlayerEquipment.add(playerId);
       this.equipmentCleanupInFlight.add(playerId);
       try {
         if (this.playerEquipment.has(playerId)) {
@@ -678,12 +793,38 @@ export class EquipmentSystem extends SystemBase {
     // only if no equipment is found in the database
   }
 
+  private beginEquipmentHydration(playerId: string): number {
+    const generation =
+      (this.equipmentHydrationGeneration.get(playerId) ?? 0) + 1;
+    this.equipmentHydrationGeneration.set(playerId, generation);
+    this.readyPlayerEquipment.delete(playerId);
+    return generation;
+  }
+
+  private completeEquipmentHydration(
+    playerId: string,
+    generation: number,
+    succeeded: boolean,
+  ): void {
+    if (this.equipmentHydrationGeneration.get(playerId) !== generation) return;
+    if (
+      succeeded &&
+      !this.unloadedPlayerEquipment.has(playerId) &&
+      this.playerEquipment.has(playerId)
+    ) {
+      this.readyPlayerEquipment.add(playerId);
+      return;
+    }
+    this.readyPlayerEquipment.delete(playerId);
+  }
+
   private async loadEquipmentFromDatabase(
     playerId: string,
     strict = false,
-  ): Promise<void> {
+    hydrationGeneration?: number,
+  ): Promise<boolean> {
     if (!this.databaseSystem) {
-      return;
+      return false;
     }
 
     const allowNonFatalDbErrors =
@@ -707,12 +848,19 @@ export class EquipmentSystem extends SystemBase {
       );
       this.sendEquipmentUpdated(playerId);
       this.emitEquipmentChangedForAllSlots(playerId);
-      return;
+      return false;
+    }
+
+    if (
+      hydrationGeneration !== undefined &&
+      this.equipmentHydrationGeneration.get(playerId) !== hydrationGeneration
+    ) {
+      return false;
     }
 
     const equipment = this.playerEquipment.get(playerId);
     if (!equipment) {
-      return;
+      return false;
     }
 
     // A database load is a complete authoritative replacement, not a sparse
@@ -757,6 +905,7 @@ export class EquipmentSystem extends SystemBase {
     this.recalculateStats(playerId);
     this.sendEquipmentUpdated(playerId);
     this.emitEquipmentChangedForAllSlots(playerId);
+    return true;
   }
 
   /**
@@ -765,7 +914,21 @@ export class EquipmentSystem extends SystemBase {
    * in runtime modes where ordinary hydration reads may be non-fatal.
    */
   async reloadFromDatabase(playerId: string): Promise<void> {
-    await this.loadEquipmentFromDatabase(playerId, true);
+    const hydrationGeneration = this.beginEquipmentHydration(playerId);
+    let hydrationSucceeded = false;
+    try {
+      hydrationSucceeded = await this.loadEquipmentFromDatabase(
+        playerId,
+        true,
+        hydrationGeneration,
+      );
+    } finally {
+      this.completeEquipmentHydration(
+        playerId,
+        hydrationGeneration,
+        hydrationSucceeded,
+      );
+    }
   }
 
   /**
@@ -781,11 +944,30 @@ export class EquipmentSystem extends SystemBase {
   private async loadEquipmentFromPayload(
     playerId: string,
     equipmentData: EquipmentSyncData[],
-  ): Promise<void> {
+    hydrationGeneration?: number,
+  ): Promise<boolean> {
+    if (
+      hydrationGeneration !== undefined &&
+      this.equipmentHydrationGeneration.get(playerId) !== hydrationGeneration
+    ) {
+      return false;
+    }
     const equipment = this.playerEquipment.get(playerId);
     if (!equipment) {
-      return;
+      return false;
     }
+
+    // Payload hydration is a complete authoritative replacement. This matters
+    // for an explicit empty payload and prevents a prior in-memory projection
+    // from surviving a fresh join.
+    for (const slotName of EQUIPMENT_SLOT_NAMES) {
+      const slot = equipment[slotName] as EquipmentSlot | undefined;
+      if (!slot) continue;
+      slot.itemId = null;
+      slot.item = null;
+      slot.quantity = undefined;
+    }
+    equipment.totalStats = createEmptyTotalStats();
 
     // Load equipped items from payload data
     for (const dbItem of equipmentData) {
@@ -822,6 +1004,7 @@ export class EquipmentSystem extends SystemBase {
     // Emit PLAYER_EQUIPMENT_CHANGED for each slot to update server-side systems
     // (visual attachment, combat calculations, etc.)
     this.emitEquipmentChangedForAllSlots(playerId);
+    return true;
   }
 
   /** Send full equipment state to client via network */
@@ -921,7 +1104,37 @@ export class EquipmentSystem extends SystemBase {
     // Use playerId directly - database layer handles character ID mapping
     // CRITICAL: Use async method to ensure save completes before returning
     // Note: Transaction context not passed here; equipment save is independent
-    await this.databaseSystem.savePlayerEquipmentAsync(playerId, dbEquipment);
+    await this.queueEquipmentPersistence(playerId, () =>
+      this.databaseSystem!.savePlayerEquipmentAsync(playerId, dbEquipment),
+    );
+  }
+
+  private queueEquipmentPersistence<T>(
+    playerId: string,
+    operation: () => Promise<T>,
+  ): Promise<T> {
+    const previous = this.equipmentPersistenceTails.get(playerId);
+    let current: Promise<T>;
+    if (previous) {
+      current = previous.catch(() => undefined).then(operation);
+    } else {
+      try {
+        current = operation();
+      } catch (error) {
+        current = Promise.reject(error);
+      }
+    }
+    const tail = current.then(
+      () => undefined,
+      () => undefined,
+    );
+    this.equipmentPersistenceTails.set(playerId, tail);
+    void tail.then(() => {
+      if (this.equipmentPersistenceTails.get(playerId) === tail) {
+        this.equipmentPersistenceTails.delete(playerId);
+      }
+    });
+    return current;
   }
 
   /**
@@ -1011,6 +1224,11 @@ export class EquipmentSystem extends SystemBase {
   }
 
   private cleanupPlayerEquipment(playerId: string): void {
+    this.equipmentHydrationGeneration.set(
+      playerId,
+      (this.equipmentHydrationGeneration.get(playerId) ?? 0) + 1,
+    );
+    this.readyPlayerEquipment.delete(playerId);
     this.playerEquipment.delete(playerId);
     this.playerSkills.delete(playerId);
   }
@@ -1712,6 +1930,18 @@ export class EquipmentSystem extends SystemBase {
   }
 
   /**
+   * Whether the live slot projection is the completed authoritative join or
+   * reload result. Map allocation alone is intentionally insufficient.
+   */
+  isEquipmentReady(playerId: string): boolean {
+    return (
+      this.readyPlayerEquipment.has(playerId) &&
+      !this.unloadedPlayerEquipment.has(playerId) &&
+      this.playerEquipment.has(playerId)
+    );
+  }
+
+  /**
    * Equip an item already owned in inventory and return the authoritative
    * postcondition. This is the server-agent action boundary; it deliberately
    * awaits inventory removal, equipment persistence, and the final slot state.
@@ -1993,8 +2223,8 @@ export class EquipmentSystem extends SystemBase {
 
         let receipt;
         try {
-          receipt =
-            await this.databaseSystem!.commitDuelPreparationPlanOperationAsync({
+          receipt = await this.queueEquipmentPersistence(playerId, () =>
+            this.databaseSystem!.commitDuelPreparationPlanOperationAsync({
               operationId,
               preparationId,
               playerId,
@@ -2002,29 +2232,33 @@ export class EquipmentSystem extends SystemBase {
               expected,
               committed,
               recoveryEvidence,
-            });
+            }),
+          );
         } catch (firstError) {
           if (!shouldRetryDuelPreparationPlanCommit(firstError)) {
-            Logger.systemError(
-              "EquipmentSystem",
-              `Duel preparation plan rejected for ${playerId}: ${String(firstError)}`,
-            );
-            result = failure("persistence_failed");
+            if (isDuelPreparationCapabilityRevoked(firstError)) {
+              result = failure("preparation_capability_unavailable");
+            } else {
+              Logger.systemError(
+                "EquipmentSystem",
+                `Duel preparation plan rejected for ${playerId}: ${String(firstError)}`,
+              );
+              result = failure("persistence_failed");
+            }
             return false;
           }
           try {
-            receipt =
-              await this.databaseSystem!.commitDuelPreparationPlanOperationAsync(
-                {
-                  operationId,
-                  preparationId,
-                  playerId,
-                  requestFingerprint,
-                  expected,
-                  committed,
-                  recoveryEvidence,
-                },
-              );
+            receipt = await this.queueEquipmentPersistence(playerId, () =>
+              this.databaseSystem!.commitDuelPreparationPlanOperationAsync({
+                operationId,
+                preparationId,
+                playerId,
+                requestFingerprint,
+                expected,
+                committed,
+                recoveryEvidence,
+              }),
+            );
           } catch (retryError) {
             Logger.systemError(
               "EquipmentSystem",
@@ -2090,6 +2324,49 @@ export class EquipmentSystem extends SystemBase {
   }
 
   /**
+   * Replace both live custody projections from persistence while holding the
+   * same per-player queue and transaction lock used by whole-plan commits.
+   * Private preparation may call this once after a custody mismatch caused by
+   * asynchronous player hydration or another already-admitted projection
+   * update. It never changes persisted custody.
+   */
+  async refreshOwnedDuelPreparationCustodyFromPersistence(
+    playerId: string,
+  ): Promise<boolean> {
+    if (
+      !this.world.getPlayer(playerId) ||
+      !this.playerEquipment.has(playerId) ||
+      !this.databaseSystem
+    ) {
+      return false;
+    }
+    const inventorySystem = this.world.getSystem(
+      "inventory",
+    ) as InventorySystem | null;
+    if (!inventorySystem?.getInventory(playerId)) return false;
+
+    let refreshed = false;
+    await inventorySystem.queueOperation(playerId, async () => {
+      if (!inventorySystem.lockForTransaction(playerId)) return false;
+      try {
+        await inventorySystem.reloadFromDatabase(playerId);
+        await this.reloadFromDatabase(playerId);
+        refreshed = true;
+        return true;
+      } catch (error) {
+        Logger.systemError(
+          "EquipmentSystem",
+          `Duel preparation custody refresh failed for ${playerId}: ${String(error)}`,
+        );
+        return false;
+      } finally {
+        inventorySystem.unlockTransaction(playerId);
+      }
+    });
+    return refreshed;
+  }
+
+  /**
    * Recover a committed whole-plan receipt after process loss. No planner input
    * is accepted here: the deterministic operation ID resolves the immutable
    * custody snapshot and its public readiness evidence, then live state is
@@ -2131,12 +2408,13 @@ export class EquipmentSystem extends SystemBase {
     await inventorySystem.queueOperation(playerId, async () => {
       if (!inventorySystem.lockForTransaction(playerId)) return false;
       try {
-        const receipt = await this.databaseSystem!
-          .getDuelPreparationPlanOperationAsync!({
-          operationId,
-          preparationId,
-          playerId,
-        });
+        const receipt = await this.queueEquipmentPersistence(playerId, () =>
+          this.databaseSystem!.getDuelPreparationPlanOperationAsync!({
+            operationId,
+            preparationId,
+            playerId,
+          }),
+        );
         if (!receipt) return false;
         const committed = this.canonicalDuelPreparationPlanSnapshot(
           receipt.committed,
@@ -2433,6 +2711,20 @@ export class EquipmentSystem extends SystemBase {
     if (!operationId || !String(request.requestFingerprint ?? "").trim()) {
       return failure("target_loadout_invalid");
     }
+    const publicActionObservation =
+      request.publicActionObservation === undefined
+        ? undefined
+        : parseStreamingDuelRoleSwitchObservationContext(
+            request.publicActionObservation,
+          );
+    if (
+      request.publicActionObservation !== undefined &&
+      (!publicActionObservation ||
+        publicActionObservation.actorId !== playerId ||
+        publicActionObservation.targetRole !== request.targetRole)
+    ) {
+      return failure("target_loadout_invalid");
+    }
     let result: FrozenCombatLoadoutSwitchReceipt = failure("inventory_busy");
     await inventorySystem.queueOperation(playerId, async () => {
       if (!inventorySystem.lockForTransaction(playerId)) {
@@ -2451,17 +2743,20 @@ export class EquipmentSystem extends SystemBase {
           result = failure(built.reason!);
           return false;
         }
+        const committed = built.snapshot;
 
         let receipt;
         try {
-          receipt =
-            await this.databaseSystem!.commitCombatLoadoutOperationAsync({
+          receipt = await this.queueEquipmentPersistence(playerId, () =>
+            this.databaseSystem!.commitCombatLoadoutOperationAsync({
               operationId,
               playerId,
               requestFingerprint: request.requestFingerprint,
               expected,
-              committed: built.snapshot,
-            });
+              committed,
+              ...(publicActionObservation ? { publicActionObservation } : {}),
+            }),
+          );
         } catch (error) {
           Logger.systemError(
             "EquipmentSystem",
@@ -2882,6 +3177,30 @@ export class EquipmentSystem extends SystemBase {
       seen.add(row.slotType);
     }
     return true;
+  }
+
+  /**
+   * Serialize cross-system inventory/equipment custody instead of rejecting a
+   * projectile merely because food, banking, or another receipt currently
+   * owns the player's transaction lock.
+   */
+  private async queueInventoryTransaction<T>(
+    inventorySystem: InventorySystem,
+    playerId: string,
+    busyResult: T,
+    operation: () => Promise<T>,
+  ): Promise<T> {
+    let result = busyResult;
+    await inventorySystem.queueOperation(playerId, async () => {
+      if (!inventorySystem.lockForTransaction(playerId)) return false;
+      try {
+        result = await operation();
+        return true;
+      } finally {
+        inventorySystem.unlockTransaction(playerId);
+      }
+    });
+    return result;
   }
 
   private applyCommittedCombatEquipment(
@@ -3353,6 +3672,372 @@ export class EquipmentSystem extends SystemBase {
   }
 
   /**
+   * Freeze one projectile's ammunition debit and recovery result before the
+   * projectile becomes visible. A recovered source remains unpresented until
+   * the authoritative hit path exposes its committed receipt.
+   */
+  public async consumeArrowForProjectileAtomic(
+    playerId: string,
+    operationId: string,
+    expectedArrowId: string,
+    recoveryDisposition: AmmunitionRecoveryDisposition,
+    recoveryPosition: { x: number; y: number; z: number } | null,
+  ): Promise<AtomicAmmunitionShotReceipt> {
+    const normalizedPlayerId = String(playerId ?? "").trim();
+    const normalizedOperationId = String(operationId ?? "").trim();
+    const arrowId = String(expectedArrowId ?? "").trim();
+    const failure = (
+      reason: AtomicArrowDebitFailureReason,
+    ): AtomicAmmunitionShotReceipt => ({
+      ok: false,
+      playerId: normalizedPlayerId,
+      operationId: normalizedOperationId,
+      arrowId,
+      changed: false,
+      replayed: false,
+      reason,
+    });
+    if (
+      !normalizedPlayerId ||
+      !/^ammunition-shot:[A-Za-z0-9]{20}$/.test(normalizedOperationId) ||
+      !arrowId ||
+      arrowId.length > 256 ||
+      !this.getItemData(arrowId) ||
+      (recoveryDisposition !== "recovered" &&
+        recoveryDisposition !== "destroyed") ||
+      (recoveryDisposition === "recovered"
+        ? !recoveryPosition ||
+          !Object.values(recoveryPosition).every(Number.isFinite)
+        : recoveryPosition !== null)
+    ) {
+      return failure("invalid_request");
+    }
+    const equipment = this.playerEquipment.get(normalizedPlayerId);
+    if (!equipment) return failure("equipment_not_initialized");
+    const inventorySystem = this.world.getSystem(
+      "inventory",
+    ) as InventorySystem | null;
+    if (!inventorySystem) return failure("inventory_not_initialized");
+    const groundItems = this.world.getSystem<GroundItemSystem>("ground-items");
+    const db = this.databaseSystem;
+    if (!db?.commitAmmunitionShotOperationAsync) {
+      return failure("atomic_persistence_unavailable");
+    }
+    return this.queueInventoryTransaction(
+      inventorySystem,
+      normalizedPlayerId,
+      failure("inventory_busy"),
+      async () => {
+        const currentArrow = equipment.arrows;
+        if (
+          !currentArrow?.item ||
+          currentArrow.itemId?.toString() !== arrowId ||
+          !Number.isSafeInteger(currentArrow.quantity ?? 0) ||
+          (currentArrow.quantity ?? 0) <= 0
+        ) {
+          return failure("insufficient_items");
+        }
+        const preparedSource =
+          recoveryDisposition === "recovered" && recoveryPosition && groundItems
+            ? await groundItems.prepareDurableSourceRegistration(
+                arrowId,
+                1,
+                recoveryPosition,
+                {
+                  despawnTime: 120_000,
+                  droppedBy: normalizedPlayerId,
+                  lootProtection: 0,
+                },
+              )
+            : null;
+        if (recoveryDisposition === "recovered" && !preparedSource) {
+          return failure("atomic_persistence_unavailable");
+        }
+        let source = preparedSource;
+        if (source?.allowMerge) {
+          const sourceInput = {
+            contributionId: source.contributionId,
+            preferredSourceId: source.preferredSourceId,
+            itemId: source.itemId,
+            quantity: source.quantity,
+            stackable: source.stackable,
+            position: { ...source.position },
+            tile: { ...source.tile },
+            droppedBy: source.droppedBy,
+            lifetimeMs: source.lifetimeMs,
+            lootProtectionMs: source.lootProtectionMs,
+            allowMerge: false,
+          };
+          source = {
+            ...sourceInput,
+            requestFingerprint: await equipmentDebitSha256Hex(
+              serializeGroundItemSourceRegistrationFingerprint(sourceInput),
+            ),
+          };
+        }
+        const requestWithoutFingerprint: Omit<
+          AmmunitionShotCommitRequest,
+          "requestFingerprint"
+        > = {
+          operationId: normalizedOperationId,
+          playerId: normalizedPlayerId,
+          itemId: arrowId,
+          quantity: 1,
+          recoveryDisposition,
+          source,
+        };
+        let requestFingerprint: string;
+        try {
+          requestFingerprint = await equipmentDebitSha256Hex(
+            serializeAmmunitionShotFingerprint(
+              ammunitionShotIdentityFromRequest(requestWithoutFingerprint),
+            ),
+          );
+        } catch {
+          return failure("atomic_persistence_unavailable");
+        }
+        const request: AmmunitionShotCommitRequest = {
+          ...requestWithoutFingerprint,
+          requestFingerprint,
+        };
+        let receipt;
+        try {
+          receipt = await db.commitAmmunitionShotOperationAsync(request);
+        } catch (firstError) {
+          if (!shouldRetryAmmunitionShotCommit(firstError)) {
+            return failure(equipmentStackDebitFailureReason(firstError));
+          }
+          try {
+            receipt = await db.commitAmmunitionShotOperationAsync(request);
+          } catch (retryError) {
+            Logger.systemError(
+              "EquipmentSystem",
+              `Atomic ammunition shot failed for ${normalizedPlayerId}: ${String(retryError)}`,
+            );
+            return failure(equipmentStackDebitFailureReason(retryError));
+          }
+        }
+        const receiptIdentity = ammunitionShotIdentityFromRequest({
+          operationId: receipt.operationId,
+          playerId: receipt.playerId,
+          itemId: receipt.itemId,
+          quantity: receipt.quantity,
+          recoveryDisposition: receipt.recoveryDisposition,
+          source: receipt.sourceRequest,
+        });
+        const receiptFingerprint = await equipmentDebitSha256Hex(
+          serializeAmmunitionShotFingerprint(receiptIdentity),
+        );
+        const recoveryReceiptValid =
+          recoveryDisposition === "recovered"
+            ? receipt.sourceRequest !== null && receipt.source === null
+            : receipt.sourceRequest === null && receipt.source === null;
+        if (
+          receipt.operationId !== normalizedOperationId ||
+          receipt.playerId !== normalizedPlayerId ||
+          receipt.requestFingerprint !== requestFingerprint ||
+          receiptFingerprint !== requestFingerprint ||
+          typeof receipt.replayed !== "boolean" ||
+          receipt.itemId !== arrowId ||
+          receipt.quantity !== 1 ||
+          receipt.recoveryDisposition !== recoveryDisposition ||
+          receipt.status !== "pending" ||
+          receipt.refundDestination !== null ||
+          !recoveryReceiptValid
+        ) {
+          return failure("persistence_failed");
+        }
+        if (!this.canApplyCommittedCombatEquipment(receipt.committed)) {
+          await this.convergeEquipmentFromDatabase(normalizedPlayerId);
+          return failure("committed_state_apply_failed");
+        }
+        this.applyCommittedCombatEquipment(
+          normalizedPlayerId,
+          receipt.committed,
+        );
+        return {
+          ok: true,
+          playerId: normalizedPlayerId,
+          operationId: normalizedOperationId,
+          arrowId,
+          changed: true,
+          replayed: receipt.replayed,
+          requestFingerprint,
+          status: receipt.status,
+          recoveryDisposition,
+          recoverySource: receipt.source,
+        };
+      },
+    );
+  }
+
+  /** Finalize a staged debit after its reserved projectile is locally active. */
+  public async completeArrowProjectileAtomic(
+    staged: AmmunitionShotSettlementHandle,
+  ): Promise<AtomicAmmunitionShotReceipt> {
+    return this.settleArrowProjectileAtomic(staged, "fired");
+  }
+
+  /** Refund a pending debit, or terminally resolve an already-fired shot. */
+  public async cancelArrowProjectileAtomic(
+    staged: AmmunitionShotSettlementHandle,
+  ): Promise<AtomicAmmunitionShotReceipt> {
+    return this.settleArrowProjectileAtomic(staged, "cancelled");
+  }
+
+  private async settleArrowProjectileAtomic(
+    staged: AmmunitionShotSettlementHandle,
+    requestedStatus: "fired" | "cancelled",
+  ): Promise<AtomicAmmunitionShotReceipt> {
+    const failure = (
+      reason: AtomicArrowDebitFailureReason,
+    ): AtomicAmmunitionShotReceipt => ({
+      ok: false,
+      playerId: staged.playerId,
+      operationId: staged.operationId,
+      arrowId: staged.itemId,
+      changed: false,
+      replayed: false,
+      reason,
+    });
+    const inventorySystem = this.world.getSystem(
+      "inventory",
+    ) as InventorySystem | null;
+    const db = this.databaseSystem;
+    const settle =
+      requestedStatus === "fired"
+        ? db?.completeAmmunitionShotOperationAsync
+        : db?.cancelAmmunitionShotOperationAsync;
+    if (!inventorySystem || !settle) {
+      return failure("atomic_persistence_unavailable");
+    }
+    return this.queueInventoryTransaction(
+      inventorySystem,
+      staged.playerId,
+      failure("inventory_busy"),
+      async () => {
+        let receipt;
+        const settlementRequest = {
+          operationId: staged.operationId,
+          playerId: staged.playerId,
+          requestFingerprint: staged.requestFingerprint,
+        };
+        try {
+          receipt = await settle.call(db, settlementRequest);
+        } catch (firstError) {
+          if (!shouldRetryAmmunitionShotCommit(firstError)) {
+            return failure(equipmentStackDebitFailureReason(firstError));
+          }
+          try {
+            receipt = await settle.call(db, settlementRequest);
+          } catch (retryError) {
+            Logger.systemError(
+              "EquipmentSystem",
+              `Atomic ammunition settlement failed for ${staged.playerId}: ${String(retryError)}`,
+            );
+            return failure(equipmentStackDebitFailureReason(retryError));
+          }
+        }
+        const receiptIdentity = ammunitionShotIdentityFromRequest({
+          operationId: receipt.operationId,
+          playerId: receipt.playerId,
+          itemId: receipt.itemId,
+          quantity: receipt.quantity,
+          recoveryDisposition: receipt.recoveryDisposition,
+          source: receipt.sourceRequest,
+        });
+        const receiptFingerprint = await equipmentDebitSha256Hex(
+          serializeAmmunitionShotFingerprint(receiptIdentity),
+        );
+        const launchedStatus =
+          receipt.status === "fired" || receipt.status === "resolved";
+        const recoveryReceiptValid =
+          receipt.recoveryDisposition === "recovered"
+            ? receipt.sourceRequest !== null &&
+              (!launchedStatus ||
+                (receipt.source !== null &&
+                  receipt.source.contributionId ===
+                    receipt.sourceRequest.contributionId &&
+                  receipt.source.requestFingerprint ===
+                    receipt.sourceRequest.requestFingerprint)) &&
+              (launchedStatus || receipt.source === null)
+            : receipt.sourceRequest === null && receipt.source === null;
+        if (
+          receipt.operationId !== staged.operationId ||
+          receipt.playerId !== staged.playerId ||
+          receipt.requestFingerprint !== staged.requestFingerprint ||
+          receiptFingerprint !== staged.requestFingerprint ||
+          typeof receipt.replayed !== "boolean" ||
+          receipt.itemId !== staged.itemId ||
+          receipt.quantity !== 1 ||
+          receipt.recoveryDisposition !== staged.recoveryDisposition ||
+          (receipt.status !== "fired" &&
+            receipt.status !== "resolved" &&
+            receipt.status !== "cancelled") ||
+          (receipt.status === "cancelled") !==
+            (receipt.refundDestination !== null) ||
+          !recoveryReceiptValid
+        ) {
+          return failure("persistence_failed");
+        }
+        const projectionLoaded =
+          !this.isDestroying &&
+          !this.unloadedPlayerEquipment.has(staged.playerId) &&
+          this.playerEquipment.has(staged.playerId);
+        if (!this.canApplyCommittedCombatEquipment(receipt.committed)) {
+          if (projectionLoaded) {
+            await this.convergeEquipmentFromDatabase(staged.playerId);
+          }
+          return failure("committed_state_apply_failed");
+        }
+        // The database receipt remains authoritative after an unload. Do not
+        // recreate either half of the live projection; the next join hydrates
+        // both from the committed rows.
+        if (!projectionLoaded) {
+          return {
+            ok: true,
+            playerId: staged.playerId,
+            operationId: staged.operationId,
+            arrowId: staged.itemId,
+            changed: true,
+            replayed: receipt.replayed,
+            requestFingerprint: staged.requestFingerprint,
+            status: receipt.status,
+            recoveryDisposition: staged.recoveryDisposition,
+            recoverySource: receipt.source,
+          };
+        }
+        if (
+          !inventorySystem.isInventoryReady(staged.playerId) ||
+          !inventorySystem.applyCommittedInventorySnapshot(
+            staged.playerId,
+            receipt.committedInventory,
+          )
+        ) {
+          await Promise.all([
+            this.convergeEquipmentFromDatabase(staged.playerId),
+            inventorySystem.reloadFromDatabase(staged.playerId),
+          ]);
+          return failure("committed_state_apply_failed");
+        }
+        this.applyCommittedCombatEquipment(staged.playerId, receipt.committed);
+        return {
+          ok: true,
+          playerId: staged.playerId,
+          operationId: staged.operationId,
+          arrowId: staged.itemId,
+          changed: true,
+          replayed: receipt.replayed,
+          requestFingerprint: staged.requestFingerprint,
+          status: receipt.status,
+          recoveryDisposition: staged.recoveryDisposition,
+          recoverySource: receipt.source,
+        };
+      },
+    );
+  }
+
+  /**
    * Debit one exact equipped arrow without exposing a projectile to combat
    * before the database transaction and idempotency receipt have committed.
    * The caller supplies a stable operation identity so a lost response can be
@@ -3543,6 +4228,10 @@ export class EquipmentSystem extends SystemBase {
    * Call this for graceful shutdown to prevent data loss.
    */
   async destroyAsync(): Promise<void> {
+    this.isDestroying = true;
+    for (const playerId of this.playerEquipment.keys()) {
+      this.unloadedPlayerEquipment.add(playerId);
+    }
     // Final save pass for all connected players before shutdown
     if (this.world.isServer && this.databaseSystem) {
       const savePromises: Promise<void>[] = [];
@@ -3564,6 +4253,9 @@ export class EquipmentSystem extends SystemBase {
     // Clear all player equipment data
     this.playerEquipment.clear();
     this.equipmentCleanupInFlight.clear();
+    this.readyPlayerEquipment.clear();
+    this.equipmentHydrationGeneration.clear();
+    this.equipmentPersistenceTails.clear();
 
     // Call parent cleanup
     super.destroy();

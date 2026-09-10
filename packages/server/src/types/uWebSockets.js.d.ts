@@ -31,8 +31,9 @@ declare module "uWebSockets.js" {
       message: ArrayBuffer | Uint8Array | string,
       isBinary?: boolean,
       compress?: boolean,
-    ): boolean | number;
-    ping(message?: ArrayBuffer | string): void;
+    ): number;
+    getBufferedAmount(): number;
+    ping(message?: ArrayBuffer | string): number;
     close(): void;
     end(code?: number, shortMessage?: string): void;
   }
@@ -40,6 +41,8 @@ declare module "uWebSockets.js" {
   export interface WebSocketBehavior<UserData = unknown> {
     compression?: number;
     maxPayloadLength?: number;
+    maxBackpressure?: number;
+    closeOnBackpressureLimit?: boolean;
     idleTimeout?: number;
     sendPingsAutomatically?: boolean;
     upgrade?: (

@@ -89,6 +89,9 @@ function createMockWorld(options?: {
         return {
           acknowledgeProcessingRequestAsync: vi.fn().mockResolvedValue(true),
           beginProcessingRequestAsync: vi.fn().mockResolvedValue("accepted"),
+          getProcessingActionCommitStatusAsync: vi
+            .fn()
+            .mockResolvedValue("committed"),
           getCharactersAsync: async () => [
             { id: "agent-1", name: "TestAgent", avatar: null, wallet: null },
           ],
@@ -466,6 +469,8 @@ describe("executeAttack dead target guard", () => {
 // executeGather — PendingGatherManager integration
 // ==========================================================================
 describe("executeGather", () => {
+  const attemptId = "11111111-1111-4111-8111-111111111111";
+
   it("uses PendingGatherManager when available", async () => {
     const queueFn = vi.fn(() => true);
     const { service } = await createInitializedService({
@@ -484,53 +489,33 @@ describe("executeGather", () => {
     expect(queueFn).toHaveBeenCalledWith("agent-1", "tree_23_-10", 42, true);
   });
 
-  it("falls back to RESOURCE_GATHER event when no PendingGatherManager", async () => {
+  it("fails closed when PendingGatherManager is unavailable", async () => {
     const { service, emit } = await createInitializedService();
 
-    await expect(service.executeGather("tree_23_-10")).resolves.toBe(true);
+    await expect(service.executeGather("tree_23_-10")).resolves.toBe(false);
 
     const gatherCall = emit.mock.calls.find(
       (call: unknown[]) =>
         String(call[0]).includes("resource") &&
         String(call[0]).includes("gather"),
     );
-    expect(gatherCall).toBeDefined();
-    expect(gatherCall![1]).toMatchObject({
-      playerId: "agent-1",
-      resourceId: "tree_23_-10",
-    });
+    expect(gatherCall).toBeUndefined();
   });
 
-  it("falls back safely when entity lacks node.position", async () => {
-    const { service, emit, world } = await createInitializedService();
-    const player = world.entities.get("agent-1") as
-      | {
-          position?: { x?: number; y?: number; z?: number };
-          node?: { position?: { x?: number; y?: number; z?: number } };
-          data?: { position?: unknown };
-        }
-      | undefined;
-
-    expect(player).toBeDefined();
-    if (!player) return;
-
-    delete player.node;
-    delete player.position;
-    player.data = { ...(player.data ?? {}), position: [11, 12, 13] };
-
-    await expect(service.executeGather("tree_23_-10")).resolves.toBe(true);
-
-    const gatherCall = emit.mock.calls.find(
-      (call: unknown[]) =>
-        String(call[0]).includes("resource") &&
-        String(call[0]).includes("gather"),
-    );
-    expect(gatherCall).toBeDefined();
-    expect(gatherCall![1]).toMatchObject({
-      playerId: "agent-1",
-      resourceId: "tree_23_-10",
-      playerPosition: { x: 11, y: 12, z: 13 },
+  it("fails closed when PendingGatherManager lacks tick authority", async () => {
+    const queueFn = vi.fn(() => true);
+    const { service, emit } = await createInitializedService({
+      networkSystem: {
+        pendingGatherManager: { queuePendingGather: queueFn },
+      },
     });
+
+    await expect(service.executeGather("tree_23_-10")).resolves.toBe(false);
+    expect(queueFn).not.toHaveBeenCalled();
+    expect(emit).not.toHaveBeenCalledWith(
+      expect.stringContaining("resource"),
+      expect.anything(),
+    );
   });
 
   it("returns false when PendingGatherManager rejects the request", async () => {
@@ -543,6 +528,123 @@ describe("executeGather", () => {
     });
 
     await expect(service.executeGather("depleted-tree")).resolves.toBe(false);
+  });
+
+  it("completes an autonomous gather only from its exact first committed reward", async () => {
+    const queueFn = vi.fn(() => true);
+    const { service, emit } = await createInitializedService({
+      networkSystem: {
+        pendingGatherManager: { queuePendingGather: queueFn },
+        tickSystem: { getCurrentTick: () => 42 },
+      },
+    });
+
+    let settled = false;
+    const completion = service
+      .executeGather("tree_23_-10", attemptId)
+      .finally(() => {
+        settled = true;
+      });
+    await Promise.resolve();
+
+    expect(settled).toBe(false);
+    expect(queueFn).toHaveBeenCalledWith(
+      "agent-1",
+      "tree_23_-10",
+      42,
+      true,
+      attemptId,
+    );
+
+    emit(EventType.RESOURCE_GATHERING_COMPLETED, {
+      playerId: "agent-1",
+      resourceId: "tree_23_-10",
+      successful: true,
+      skill: "woodcutting",
+      operationId: "gathering-reward:22222222-2222-4222-8222-222222222222",
+      rewardItemId: "logs",
+      rewardQuantity: 1,
+    });
+    await Promise.resolve();
+    expect(settled).toBe(false);
+
+    emit(EventType.RESOURCE_GATHERING_COMPLETED, {
+      playerId: "agent-1",
+      resourceId: "tree_23_-10",
+      successful: true,
+      skill: "woodcutting",
+      operationId: `gathering-reward:${attemptId}`,
+      rewardItemId: "logs",
+      rewardQuantity: 1,
+    });
+
+    await expect(completion).resolves.toBe(true);
+    expect(service.getLastGatherFailureReason()).toBeNull();
+  });
+
+  it("propagates the exact first-reward rejection for an autonomous gather", async () => {
+    const { service, emit } = await createInitializedService({
+      networkSystem: {
+        pendingGatherManager: { queuePendingGather: vi.fn(() => true) },
+        tickSystem: { getCurrentTick: () => 42 },
+      },
+    });
+
+    const completion = service.executeGather("tree_23_-10", attemptId);
+    emit(EventType.RESOURCE_GATHERING_COMPLETED, {
+      playerId: "agent-1",
+      resourceId: "tree_23_-10",
+      successful: false,
+      skill: "woodcutting",
+      operationId: `gathering-reward:${attemptId}`,
+      failureReason: "rate_limited",
+    });
+
+    await expect(completion).resolves.toBe(false);
+    expect(service.getLastGatherFailureReason()).toBe("rate_limited");
+  });
+
+  it("cancels an unresolved first-reward wait when the embedded service stops", async () => {
+    const { service } = await createInitializedService({
+      networkSystem: {
+        pendingGatherManager: { queuePendingGather: vi.fn(() => true) },
+        tickSystem: { getCurrentTick: () => 42 },
+      },
+    });
+
+    const completion = service.executeGather("tree_23_-10", attemptId);
+    await Promise.resolve();
+    await service.stop();
+
+    await expect(completion).resolves.toBe(false);
+  });
+
+  it("rejects a concurrent autonomous gather without replacing the live waiter", async () => {
+    const queueFn = vi.fn(() => true);
+    const { service, emit } = await createInitializedService({
+      networkSystem: {
+        pendingGatherManager: { queuePendingGather: queueFn },
+        tickSystem: { getCurrentTick: () => 42 },
+      },
+    });
+    const first = service.executeGather("tree_23_-10", attemptId);
+
+    await expect(
+      service.executeGather(
+        "tree_23_-10",
+        "22222222-2222-4222-8222-222222222222",
+      ),
+    ).resolves.toBe(false);
+    expect(queueFn).toHaveBeenCalledTimes(1);
+
+    emit(EventType.RESOURCE_GATHERING_COMPLETED, {
+      playerId: "agent-1",
+      resourceId: "tree_23_-10",
+      successful: false,
+      skill: "woodcutting",
+      operationId: `gathering-reward:${attemptId}`,
+    });
+    await expect(first).resolves.toBe(false);
   });
 });
 
@@ -565,14 +667,19 @@ describe("executeMove", () => {
     expect(player.data.position).toEqual(before);
   });
 
-  it("reports a legacy direct fallback only when no network move API exists", async () => {
-    const { service, world } = await createInitializedService();
+  it("refuses to mutate position when movement authority is unavailable", async () => {
+    const { service, world, emit } = await createInitializedService();
     const player = world.entities.get("agent-1") as {
       data: { position: [number, number, number] };
     };
+    const before = [...player.data.position];
 
-    await expect(service.executeMove([12, 10, 12], false)).resolves.toBe(true);
-    expect(player.data.position).toEqual([12, 10.1, 12]);
+    await expect(service.executeMove([12, 10, 12], false)).resolves.toBe(false);
+    expect(player.data.position).toEqual(before);
+    expect(emit).not.toHaveBeenCalledWith(
+      EventType.ENTITY_MODIFIED,
+      expect.anything(),
+    );
   });
 
   it("passes the exact live workstation footprint to authoritative pathing", async () => {
@@ -604,29 +711,89 @@ describe("executeMove", () => {
 });
 
 describe("executePickup", () => {
-  it("rejects a stale ground-item target without dispatching an event", async () => {
-    const { service, emit } = await createInitializedService();
+  const attemptId = "11111111-1111-4111-8111-111111111111";
 
-    await expect(service.executePickup("missing-item")).resolves.toBe(false);
+  it("rejects a stale ground-item target without requesting authoritative pickup", async () => {
+    const requestServerPickup = vi.fn(async () => true);
+    const { service, emit } = await createInitializedService({
+      networkSystem: { requestServerPickup },
+    });
+
+    await expect(
+      service.executePickup("missing-item", attemptId),
+    ).resolves.toBe(false);
+    expect(requestServerPickup).not.toHaveBeenCalled();
     expect(emit).not.toHaveBeenCalledWith(
       EventType.ITEM_PICKUP,
       expect.anything(),
     );
   });
 
-  it("dispatches pickup only for a loaded ground-item entity", async () => {
-    const { service, entities, emit } = await createInitializedService();
+  it("reports only an authoritative pickup completion", async () => {
+    const requestServerPickup = vi.fn(async () => true);
+    const { service, entities, emit } = await createInitializedService({
+      networkSystem: { requestServerPickup },
+    });
     entities.set("ground-item-1", {
       id: "ground-item-1",
       type: "item",
       data: { type: "item" },
     });
 
-    await expect(service.executePickup("ground-item-1")).resolves.toBe(true);
-    expect(emit).toHaveBeenCalledWith(EventType.ITEM_PICKUP, {
-      playerId: "agent-1",
-      entityId: "ground-item-1",
+    await expect(
+      service.executePickup("ground-item-1", attemptId),
+    ).resolves.toBe(true);
+    expect(requestServerPickup).toHaveBeenCalledWith(
+      "agent-1",
+      "ground-item-1",
+      `ground-item-pickup:${attemptId}`,
+    );
+    expect(emit).not.toHaveBeenCalledWith(
+      EventType.ITEM_PICKUP,
+      expect.anything(),
+    );
+  });
+
+  it("propagates authoritative pickup rejection and fails closed without it", async () => {
+    const requestServerPickup = vi.fn(async () => false);
+    const rejected = await createInitializedService({
+      networkSystem: { requestServerPickup },
     });
+    rejected.entities.set("ground-item-1", {
+      id: "ground-item-1",
+      type: "item",
+      data: { type: "item" },
+    });
+    await expect(
+      rejected.service.executePickup("ground-item-1", attemptId),
+    ).resolves.toBe(false);
+
+    const unavailable = await createInitializedService();
+    unavailable.entities.set("ground-item-1", {
+      id: "ground-item-1",
+      type: "item",
+      data: { type: "item" },
+    });
+    await expect(
+      unavailable.service.executePickup("ground-item-1", attemptId),
+    ).resolves.toBe(false);
+  });
+
+  it("rejects a malformed autonomy identity before authoritative pickup", async () => {
+    const requestServerPickup = vi.fn(async () => true);
+    const { service, entities } = await createInitializedService({
+      networkSystem: { requestServerPickup },
+    });
+    entities.set("ground-item-1", {
+      id: "ground-item-1",
+      type: "item",
+      data: { type: "item" },
+    });
+
+    await expect(
+      service.executePickup("ground-item-1", "not-an-attempt"),
+    ).resolves.toBe(false);
+    expect(requestServerPickup).not.toHaveBeenCalled();
   });
 });
 

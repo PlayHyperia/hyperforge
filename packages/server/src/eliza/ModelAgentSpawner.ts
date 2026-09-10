@@ -24,6 +24,8 @@ import {
 } from "@elizaos/core";
 import { EventType, getDuelArenaConfig, type World } from "@hyperforge/shared";
 import { createJWT } from "../shared/utils.js";
+import { buildAgentCredentialJwtPayload } from "../infrastructure/auth/agent-credential-session.js";
+import { rotateAgentCredentialSession } from "../database/agent-credential-sessions.js";
 import { errMsg } from "../shared/errMsg.js";
 import { hyperiaPlugin } from "@hyperforge/plugin-hyperia";
 import type { EmbeddedHyperiaService } from "./EmbeddedHyperiaService.js";
@@ -33,6 +35,10 @@ import {
 } from "./agentRecovery.js";
 import { getAgentManager } from "./AgentManager.js";
 import { loadModelPlugin, createAgentCharacter } from "./agentHelpers.js";
+import {
+  buildLegacyModelAgentMapping,
+  isLegacyModelAgentMappingClaimSafe,
+} from "./agentPopulationPolicy.js";
 import {
   formatUntrustedPromptData,
   normalizeUntrustedPromptText,
@@ -272,14 +278,18 @@ export async function spawnModelAgents(
   // @ts-ignore - Dynamic import to avoid circular dependency
   const databaseSystem = world.getSystem("database");
   const db = databaseSystem?.getDb?.();
+  const credentialPool = databaseSystem?.getPool?.();
 
-  if (!db) {
-    console.error("[ModelAgentSpawner] Database not available");
+  if (!db || !credentialPool) {
+    console.error(
+      "[ModelAgentSpawner] Database credential authority not available",
+    );
     return 0;
   }
 
-  const { characters, users } = await import("../database/schema.js");
-  const { eq } = await import("drizzle-orm");
+  const { agentMappings, characters, users } =
+    await import("../database/schema.js");
+  const { eq, or } = await import("drizzle-orm");
 
   // Create shared account for model agents
   const accountId = "model-agents-account";
@@ -344,11 +354,10 @@ export async function spawnModelAgents(
     let runtime: AgentRuntime | null = null;
 
     try {
-      const authToken = await createJWT({ userId: accountId });
       const perAgentSecrets: Record<string, string> = {
         HYPERIA_SERVER_URL: hyperiaServerUrl,
         HYPERIA_API_URL: hyperiaApiUrl,
-        HYPERIA_AUTH_TOKEN: authToken,
+        HYPERIA_AUTH_TOKEN: "",
         HYPERIA_PRIVY_USER_ID: accountId,
         HYPERIA_CHARACTER_ID: "",
       };
@@ -360,6 +369,12 @@ export async function spawnModelAgents(
         (
           character.settings.secrets as Record<string, string>
         ).HYPERIA_CHARACTER_ID = characterId;
+      }
+
+      // Never let the legacy runtime change the mapping or lifecycle of an
+      // already-running embedded agent with the same deterministic identity.
+      if (embeddedAgentManager?.hasAgent(characterId)) {
+        return false;
       }
 
       // Ensure character exists in database
@@ -378,8 +393,66 @@ export async function spawnModelAgents(
         });
       }
 
-      if (embeddedAgentManager?.hasAgent(characterId)) {
+      // This legacy runtime owns a separate, non-checkpointed mutation loop.
+      // It may exercise the open world, but must never enter a money-bearing
+      // scheduler merely because an agent-mapping row was absent. Reassert the
+      // opt-out before the Hyperia service can create the player entity.
+      const existingMappings = await db
+        .select({
+          agentId: agentMappings.agentId,
+          accountId: agentMappings.accountId,
+          characterId: agentMappings.characterId,
+        })
+        .from(agentMappings)
+        .where(
+          or(
+            eq(agentMappings.agentId, characterId),
+            eq(agentMappings.characterId, characterId),
+          ),
+        )
+        .limit(2);
+      if (
+        !isLegacyModelAgentMappingClaimSafe(existingMappings, {
+          agentId: characterId,
+          accountId,
+          characterId,
+        })
+      ) {
+        console.error(
+          `[ModelAgentSpawner] Refusing conflicting mapping ownership for ${characterId}`,
+        );
         return false;
+      }
+
+      const mappingTimestamp = new Date();
+      const mapping = buildLegacyModelAgentMapping(
+        {
+          agentId: characterId,
+          accountId,
+          characterId,
+          agentName: agentConfig.displayName,
+        },
+        mappingTimestamp,
+      );
+      await db.insert(agentMappings).values(mapping.insert).onConflictDoUpdate({
+        target: agentMappings.agentId,
+        set: mapping.update,
+      });
+
+      const credentialSession = await rotateAgentCredentialSession({
+        accountId,
+        authMethod: "server-managed-agent-v1",
+        characterId,
+        pool: credentialPool,
+      });
+      const authToken = await createJWT(
+        buildAgentCredentialJwtPayload(credentialSession),
+      );
+      perAgentSecrets.HYPERIA_AUTH_TOKEN = authToken;
+      if (character.settings?.secrets) {
+        (
+          character.settings.secrets as Record<string, string>
+        ).HYPERIA_AUTH_TOKEN = authToken;
       }
 
       const runtimePlugins: Plugin[] = [modelPlugin, hyperiaPlugin];

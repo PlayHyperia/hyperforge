@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 import {
   buildDuelSmokeLauncherArgs,
   isDuelSmokeOnlineLine,
+  resolveDuelSmokeCaptureBrowserEnvironment,
   validateDuelSmokePorts,
 } from "../../../../../scripts/duel-launch-smoke-policy.mjs";
 
@@ -12,10 +13,12 @@ const PORTS = {
   websocket: 35552,
   client: 35553,
   capture: 35554,
+  captureBrowser: 35559,
   spectator: 35556,
   postgres: 35555,
   hyperbetApi: 35557,
   hyperbetApp: 35558,
+  solanaRpc: 35800,
 };
 const smokeSource = readFileSync(
   new URL("../../../../../scripts/smoke-duel-launch.mjs", import.meta.url),
@@ -120,7 +123,7 @@ describe("clean duel launch smoke policy", () => {
       "validateCaptureRestartTarget",
     );
     expect(streamRecoveryVerifierSource).toContain(
-      "Local read-only Hyperbet topology",
+      "Local diagnostic Hyperbet topology",
     );
   });
 
@@ -133,7 +136,20 @@ describe("clean duel launch smoke policy", () => {
 
   it("keeps synthetic contestants in explicit load-test mode with production-built artifacts", () => {
     expect(smokeSource).toContain('STREAMING_DUEL_PREPARATION_MS: "5000"');
-    expect(smokeSource).toContain('STREAM_CAPTURE_CHANNEL: "bundled"');
+    expect(smokeSource).not.toContain('STREAM_CAPTURE_CHANNEL: "bundled"');
+    expect(smokeSource).toContain("...smokeCaptureBrowserEnvironment");
+    expect(
+      resolveDuelSmokeCaptureBrowserEnvironment({
+        platform: "darwin",
+        environment: {},
+      }),
+    ).toEqual({
+      STREAM_CAPTURE_CHANNEL: "chrome",
+      STREAM_CAPTURE_ANGLE: "metal",
+      STREAM_CAPTURE_HEADLESS: "false",
+      STREAMING_CAPTURE_BROWSER_CHANNEL: "chrome",
+      STREAMING_CAPTURE_ANGLE: "metal",
+    });
     expect(smokeSource).toContain('DUEL_USE_PRODUCTION_CLIENT: "true"');
     expect(smokeSource).toContain('DUEL_NODE_ENV: "production"');
     expect(smokeSource).toContain('DUEL_LOG_LEVEL: "info"');
@@ -149,6 +165,14 @@ describe("clean duel launch smoke policy", () => {
     expect(smokeSource).toContain(
       'HYPERIA_REQUIRE_BROWSER_SYSTEM_DEPS: "true"',
     );
+  });
+
+  it("restricts every retained live-evidence file to its owner", () => {
+    expect(smokeSource).toContain("await fsp.chmod(videoPath, 0o600)");
+    expect(smokeSource).toContain(
+      "await fsp.chmod(retainedRtmpStatusPath, 0o600)",
+    );
+    expect(smokeSource).toContain('mode: 0o600, flag: "wx"');
   });
 
   it("supplies an explicit preparation window in the local oracle verifier", () => {

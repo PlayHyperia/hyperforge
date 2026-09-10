@@ -131,6 +131,15 @@ export function shouldRenderInteractiveArenaProps(win?: Window): boolean {
   return !isStreamingLikeViewport(win);
 }
 
+/**
+ * The playable center marker is useful for spatial judgment, but a cinematic
+ * camera can place it between the viewer and the contestants. Stream and
+ * embedded spectator views omit it so the floor never becomes foreground UI.
+ */
+export function shouldRenderArenaCenterMarker(win?: Window): boolean {
+  return !isStreamingLikeViewport(win);
+}
+
 // Instanced mesh counts (fence posts, rails, pillars) are derived from DuelArenaConfig at runtime.
 
 // ============================================================================
@@ -494,7 +503,9 @@ export class DuelArenaVisualsSystem extends System {
     this.createLobbyFloor();
     this.createHospitalFloor();
     if (this.world.isClient) {
-      this.createArenaCenterRings();
+      if (shouldRenderArenaCenterMarker()) {
+        this.createArenaCenterRings();
+      }
       if (shouldRenderInteractiveArenaProps()) {
         this.createForfeitPillars();
         this.createBannerCloths();
@@ -1196,6 +1207,9 @@ export class DuelArenaVisualsSystem extends System {
         }
 
         const floor = new THREE.Mesh(floorGeom, this.arenaFloorMat!);
+        // The opaque arena surface must receive contestant/prop shadows;
+        // receiving on the terrain hidden beneath it cannot provide contact.
+        floor.receiveShadow = true;
         floor.position.set(cx, floorY, cz);
         floor.name = `ArenaFloor_${i + 1}`;
         floor.layers.set(2);
@@ -1231,13 +1245,10 @@ export class DuelArenaVisualsSystem extends System {
     if (!this.world.isClient || !this.arenaGroup) return;
 
     const cfg = this.arenaCfg;
-    const isBroadcastViewport = isStreamingLikeViewport();
-    // Playable clients keep the small center reference. The broadcast uses a
-    // larger boundary that matches the scheduler's compact combat footprint,
-    // so viewers read kiting and diagonal footwork as movement within the duel
-    // instead of mistaking the center marker for an abandoned arena.
-    const innerR = isBroadcastViewport ? 7.0 : 2.0;
-    const outerR = isBroadcastViewport ? 7.35 : 2.45;
+    // This is a subtle center reference, not the combat boundary. Keep it
+    // compact in every viewport so it never becomes foreground obstruction.
+    const innerR = 2.0;
+    const outerR = 2.45;
     const ringGeom = new THREE.RingGeometry(innerR, outerR, 64);
     ringGeom.rotateX(-Math.PI / 2);
     this.geometries.push(ringGeom);

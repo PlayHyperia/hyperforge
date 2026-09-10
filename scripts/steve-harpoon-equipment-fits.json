@@ -1,0 +1,34 @@
+{
+  "schemaVersion": 1,
+  "exportedAt": "2026-08-18T22:00:00.000Z",
+  "avatar": {
+    "id": "steve",
+    "legacyAttachmentId": "/api/assets/steve/model",
+    "path": "packages/server/world/assets/avatars/duel-candidates/duel-steve.vrm",
+    "sha256": "879d9d47f4616333fefaaa7c5d71247f31a4f309d6b99931f4cca540d9963207",
+    "normalizedHeight": 1.6
+  },
+  "fits": [
+    {
+      "itemId": "harpoon",
+      "slot": "gatheringtool",
+      "grip": "two-hand",
+      "weaponType": "harpoon",
+      "attachmentBone": "rightHand",
+      "sourcePath": "artifacts/duel-launch-avatar-bakeoff/fishing-tool-candidates/sources/harpoon.glb",
+      "sourceSha256": "3574760a4bdfac6d81077672a7f983530ad1c4fd1a77174ccc1fbc0f4a3893de",
+      "outputPath": "artifacts/duel-launch-avatar-bakeoff/fishing-tool-candidates/fitted-steve/harpoon-fitted.glb",
+      "targetLengthMetres": 2.398,
+      "desiredWorldEulerDegrees": [0, 0, 0],
+      "desiredWorldOffsetMetres": [0, 0, 0],
+      "alignHandleToSecondaryHand": {
+        "sourceHandleAxis": [0, 1, 0]
+      },
+      "referenceMotion": {
+        "path": "artifacts/duel-launch-avatar-bakeoff/motions/harpoon-water-strike-candidates/steve-harpoon-water-strike.glb",
+        "sha256": "f414eecf3289dd510bc325ceaf3d809776195585de3ca20753c61918a7673812",
+        "sampleRatio": 0.02
+      }
+    }
+  ]
+}

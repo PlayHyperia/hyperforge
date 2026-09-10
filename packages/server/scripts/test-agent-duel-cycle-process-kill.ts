@@ -1,5 +1,6 @@
 import { execFile, spawn, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
+import EventEmitter from "node:events";
 import path from "node:path";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
@@ -8,21 +9,24 @@ import {
   AttackType,
   CharacterEquipmentSystem,
   CharacterInventorySystem,
+  COMBAT_CONSTANTS,
+  CombatSystem,
   EventBus,
   EventType,
   ITEMS,
   PRAYER_POINT_UNITS_PER_POINT,
   PrayerSystem,
+  PlayerSystem,
   prayerDataProvider,
   type World,
 } from "@hyperforge/shared";
 import { drizzle } from "drizzle-orm/node-postgres";
 import { migrate } from "drizzle-orm/node-postgres/migrator";
-import EventEmitter from "eventemitter3";
 import pg from "pg";
 
 import ammunitionManifest from "../world/assets/manifests/items/ammunition.json";
 import foodManifest from "../world/assets/manifests/items/food.json";
+import runesManifest from "../world/assets/manifests/items/runes.json";
 import weaponsManifest from "../world/assets/manifests/items/weapons.json";
 import prayersManifest from "../world/assets/manifests/prayers.json";
 import { createPostgresClientDatabase } from "../src/database/postgres-transaction.js";
@@ -30,6 +34,11 @@ import * as schema from "../src/database/schema.js";
 import { AgentManager, setAgentManager } from "../src/eliza/AgentManager.js";
 import { DatabaseSystem } from "../src/systems/DatabaseSystem/index.js";
 import { StreamingDuelScheduler } from "../src/systems/StreamingDuelScheduler/index.js";
+import {
+  AGENT_DUEL_COMBAT_ROLE as CHAOS_COMBAT_ROLE,
+  AGENT_DUEL_ROLE_FIXTURE as ROLE_FIXTURE,
+  AGENT_DUEL_ROLE_FIXTURES,
+} from "./agent-duel-role-fixtures.js";
 
 const execFileAsync = promisify(execFile);
 const scriptPath = fileURLToPath(import.meta.url);
@@ -42,7 +51,45 @@ export const AGENT_IDS = [
   "persisted-cycle-chaos-alpha",
   "persisted-cycle-chaos-beta",
 ] as const;
-const FIXTURE_ITEM_IDS = new Set(["shortbow", "bronze_arrow", "lobster"]);
+
+const EXPECTED_PRAYER_ID = ROLE_FIXTURE.prayerId;
+const rawCombinedMultiStyle =
+  process.env.AGENT_DUEL_COMBINED_MULTI_STYLE?.trim();
+if (
+  rawCombinedMultiStyle !== undefined &&
+  rawCombinedMultiStyle !== "true" &&
+  rawCombinedMultiStyle !== "false"
+) {
+  throw new Error("AGENT_DUEL_COMBINED_MULTI_STYLE must be true or false");
+}
+export const AGENT_DUEL_COMBINED_MULTI_STYLE = rawCombinedMultiStyle === "true";
+const FIXTURE_ITEM_IDS = new Set([
+  ROLE_FIXTURE.weaponId,
+  "lobster",
+  ...(ROLE_FIXTURE.equippedAmmunition
+    ? [ROLE_FIXTURE.equippedAmmunition.itemId]
+    : []),
+  ...ROLE_FIXTURE.inventorySupplies.map(({ itemId }) => itemId),
+  ...(AGENT_DUEL_COMBINED_MULTI_STYLE
+    ? Object.values(AGENT_DUEL_ROLE_FIXTURES).flatMap((fixture) => [
+        fixture.weaponId,
+        ...(fixture.equippedAmmunition
+          ? [fixture.equippedAmmunition.itemId]
+          : []),
+        ...fixture.inventorySupplies.map(({ itemId }) => itemId),
+      ])
+    : []),
+]);
+
+function minimumXpForLevel(level: number): number {
+  let cumulative = 0;
+  for (let nextLevel = 2; nextLevel <= level; nextLevel += 1) {
+    const increment =
+      Math.floor(nextLevel - 1 + 300 * Math.pow(2, (nextLevel - 1) / 7)) / 4;
+    cumulative = Math.floor(cumulative + increment);
+  }
+  return cumulative;
+}
 
 type WorkerEvent = {
   event:
@@ -59,6 +106,7 @@ type WorkerEvent = {
   betCloseTime?: number;
   lifecycleStatus?: string;
   prayerPointUnits?: number;
+  combatRole?: ChaosCombatRole;
   message?: string;
 };
 
@@ -79,8 +127,13 @@ type TestEntity = {
     combatBonuses: { prayerBonus: number };
   };
   serialize(): Record<string, unknown>;
+  getHealth(): number;
   isAlive(): boolean;
   isDead(): boolean;
+  setHealth(health: number): void;
+  setHealthAndMaxHealth(health: number, maxHealth: number): void;
+  resetDeathState(): void;
+  getComponent(name: string): { data: Record<string, unknown> } | null;
   modify(changes: Record<string, unknown>): void;
   markNetworkDirty(): void;
 };
@@ -99,7 +152,54 @@ export type WorkerRuntime = RuntimeWorld & {
   inventorySystem: CharacterInventorySystem;
   equipmentSystem: CharacterEquipmentSystem;
   prayerSystem: PrayerSystem;
+  playerSystem: PlayerSystem;
   manager: AgentManager;
+};
+
+export type AuthoritativeCombatRuntime = {
+  combatSystem: CombatSystem;
+  destroy(): void;
+};
+
+export type NaturalCombatTerminalEvidence = {
+  authoritativeCombatTicks: number;
+  diagnostics: ReturnType<StreamingDuelScheduler["getCombatAIDiagnostics"]>;
+  antiCheatDiagnostics: Array<{
+    agentId: string;
+    score: number;
+    attacksThisTick: number;
+    violationCount: number;
+    lastViolations: ReturnType<
+      CombatSystem["antiCheat"]["getPlayerReport"]
+    >["recentViolations"];
+  }>;
+  projectileDiagnostics: ReturnType<
+    CombatSystem["getProjectileLifecycleDiagnostics"]
+  >;
+  resolvedCycle: NonNullable<
+    ReturnType<StreamingDuelScheduler["getCurrentCycle"]>
+  >;
+};
+
+type NaturalCombatTraceStage = "before_ai" | "after_ai" | "after_combat";
+
+type NaturalCombatTraceSample = {
+  stage: NaturalCombatTraceStage;
+  driverTick: number;
+  worldTick: number;
+  contestants: Array<{
+    agentId: string;
+    position: [number, number, number] | null;
+    tile: { x: number; z: number } | null;
+    health: number | null;
+    combat: {
+      inCombat: boolean;
+      targetId: string | null;
+      lastAttackTick: number | null;
+      nextAttackTick: number | null;
+      combatEndTick: number | null;
+    } | null;
+  }>;
 };
 
 function emit(event: WorkerEvent): void {
@@ -139,12 +239,16 @@ function installFixtureManifests(): void {
   for (const item of [
     ...weaponsManifest,
     ...ammunitionManifest,
+    ...runesManifest,
     ...foodManifest,
   ]) {
     if (!FIXTURE_ITEM_IDS.has(item.id)) continue;
+    const combatFixture = Object.values(AGENT_DUEL_ROLE_FIXTURES).find(
+      (fixture) => fixture.weaponId === item.id,
+    );
     ITEMS.set(item.id, {
       ...item,
-      ...(item.id === "shortbow" ? { attackType: AttackType.RANGED } : {}),
+      ...(combatFixture ? { attackType: combatFixture.attackType } : {}),
     } as never);
   }
 }
@@ -153,7 +257,7 @@ function createRuntimeWorld(
   pool: pg.Pool,
   db: ReturnType<typeof drizzle<typeof schema>>,
 ) {
-  const emitter = new EventEmitter<string | symbol, unknown>();
+  const emitter = new EventEmitter();
   const eventBus = new EventBus();
   const entities = new Map<string, TestEntity>();
   const systems = new Map<string, unknown>();
@@ -212,13 +316,55 @@ function createRuntimeWorld(
       return combatSystem.startCombat(attackerId, targetId);
     },
     requestServerCombatApproach: (playerId: string, targetId: string) => {
+      const player = entities.get(playerId);
       const target = entities.get(targetId);
-      if (!target) return false;
-      return setPosition(playerId, [
-        target.position.x + 1,
-        target.position.y,
-        target.position.z,
-      ]);
+      if (!player || !target) return false;
+      const playerTile = {
+        x: Math.floor(player.position.x),
+        z: Math.floor(player.position.z),
+      };
+      const targetTile = {
+        x: Math.floor(target.position.x),
+        z: Math.floor(target.position.z),
+      };
+      if (
+        Math.abs(playerTile.x - targetTile.x) +
+          Math.abs(playerTile.z - targetTile.z) ===
+        1
+      ) {
+        return true;
+      }
+      const occupied = (x: number, z: number): boolean =>
+        [...entities.values()].some(
+          (entity) =>
+            entity.id !== playerId &&
+            entity.isAlive() &&
+            Math.floor(entity.position.x) === x &&
+            Math.floor(entity.position.z) === z,
+        );
+      const destination = [
+        { x: targetTile.x + 1, z: targetTile.z },
+        { x: targetTile.x - 1, z: targetTile.z },
+        { x: targetTile.x, z: targetTile.z + 1 },
+        { x: targetTile.x, z: targetTile.z - 1 },
+      ]
+        .filter((tile) => !occupied(tile.x, tile.z))
+        .sort((left, right) => {
+          const leftDistance =
+            Math.abs(left.x - playerTile.x) + Math.abs(left.z - playerTile.z);
+          const rightDistance =
+            Math.abs(right.x - playerTile.x) + Math.abs(right.z - playerTile.z);
+          return (
+            leftDistance - rightDistance || left.x - right.x || left.z - right.z
+          );
+        })[0];
+      return destination
+        ? setPosition(playerId, [
+            destination.x + 0.5,
+            target.position.y,
+            destination.z + 0.5,
+          ])
+        : false;
     },
     requestServerMove: (playerId: string, target: [number, number, number]) =>
       setPosition(playerId, target),
@@ -231,7 +377,27 @@ function createRuntimeWorld(
       remainingPathTiles: 0,
       moveSeq: 0,
     }),
-    getPlayerWeaponRange: () => 7,
+    getPlayerWeaponRange: () =>
+      ROLE_FIXTURE.attackType === AttackType.MELEE
+        ? 1
+        : ROLE_FIXTURE.attackType === AttackType.MAGIC
+          ? 10
+          : Number(ITEMS.get(ROLE_FIXTURE.weaponId)?.attackRange ?? 7),
+    getPlayerAttackType: () => ROLE_FIXTURE.attackType,
+    isInAttackRange: (
+      attackerTile: { x: number; z: number },
+      targetTile: { x: number; z: number },
+      attackType: AttackType,
+      range: number,
+    ) => {
+      const dx = Math.abs(attackerTile.x - targetTile.x);
+      const dz = Math.abs(attackerTile.z - targetTile.z);
+      if (attackType === AttackType.MELEE && range === 1) {
+        return dx + dz === 1;
+      }
+      const distance = Math.max(dx, dz);
+      return distance > 0 && distance <= range;
+    },
   };
 
   const world = Object.assign(emitter, {
@@ -276,6 +442,59 @@ function createRuntimeWorld(
             data.position = [x, y, z];
           },
         };
+        const statsData: Record<string, unknown> = {
+          prayer: {
+            level: STARTING_PRAYER_POINTS,
+            xp: minimumXpForLevel(STARTING_PRAYER_POINTS),
+          },
+          combatBonuses: { prayerBonus: 0 },
+          health: {
+            current: Number(data.health ?? 0),
+            max: Number(data.maxHealth ?? data.health ?? 0),
+          },
+          hitpoints: {
+            current: Number(data.health ?? 0),
+            max: Number(data.maxHealth ?? data.health ?? 0),
+          },
+        };
+        const healthData: Record<string, unknown> = {
+          current: Number(data.health ?? 0),
+          max: Number(data.maxHealth ?? data.health ?? 0),
+          isDead: Number(data.health ?? 0) <= 0,
+        };
+        const components = new Map<string, { data: Record<string, unknown> }>([
+          ["stats", { data: statsData }],
+          ["health", { data: healthData }],
+        ]);
+        const applyHealth = (health: number, maxHealth?: number): void => {
+          const safeMax = Math.max(
+            1,
+            Math.floor(
+              Number.isFinite(maxHealth)
+                ? Number(maxHealth)
+                : Number(data.maxHealth ?? health),
+            ),
+          );
+          const safeHealth = Math.max(
+            0,
+            Math.min(safeMax, Math.floor(Number(health))),
+          );
+          data.health = safeHealth;
+          data.maxHealth = safeMax;
+          data.alive = safeHealth > 0;
+          data.deathState = safeHealth > 0 ? "alive" : "dead";
+          healthData.current = safeHealth;
+          healthData.max = safeMax;
+          healthData.isDead = safeHealth <= 0;
+          for (const key of ["health", "hitpoints"] as const) {
+            const pool = statsData[key] as
+              { current?: number; max?: number } | undefined;
+            if (pool) {
+              pool.current = safeHealth;
+              pool.max = safeMax;
+            }
+          }
+        };
         const entity: TestEntity = {
           id,
           type: String(entityData.type ?? "player"),
@@ -283,13 +502,19 @@ function createRuntimeWorld(
           isEmbeddedAgent: entityData.isAgent === true,
           position,
           data,
-          stats: {
-            prayer: { level: STARTING_PRAYER_POINTS, xp: 0 },
-            combatBonuses: { prayerBonus: 0 },
-          },
+          stats: statsData as TestEntity["stats"],
           serialize: () => ({ ...data }),
+          getHealth: () => Number(data.health ?? 0),
           isAlive: () => Number(data.health ?? 0) > 0,
           isDead: () => Number(data.health ?? 0) <= 0,
+          setHealth: (health) => applyHealth(health),
+          setHealthAndMaxHealth: (health, maxHealth) =>
+            applyHealth(health, maxHealth),
+          resetDeathState: () => {
+            data.alive = Number(data.health ?? 0) > 0;
+            data.deathState = "alive";
+          },
+          getComponent: (name) => components.get(name) ?? null,
           modify: (changes) => Object.assign(data, changes),
           markNetworkDirty: () => undefined,
         };
@@ -370,6 +595,9 @@ export async function startWorkerRuntime(
   const prayerSystem = new PrayerSystem(runtime.world);
   runtime.systems.set("prayer", prayerSystem);
   await prayerSystem.init();
+  const playerSystem = new PlayerSystem(runtime.world);
+  runtime.systems.set("player", playerSystem);
+  await playerSystem.init();
 
   const manager = new AgentManager(runtime.world, {
     startBehaviorBridge: false,
@@ -391,30 +619,61 @@ export async function startWorkerRuntime(
     );
   }
   await runtime.eventBus.waitForPendingHandlers(15_000);
+  await waitFor(
+    () => AGENT_IDS.every((agentId) => playerSystem.getPlayer(agentId)),
+    "persisted PlayerSystem hydration",
+  );
+  for (const agentId of AGENT_IDS) {
+    runtime.eventBus.emitEvent(
+      EventType.PLAYER_REGISTERED,
+      { playerId: agentId },
+      "agent-duel-cycle-process-kill",
+    );
+  }
+  await waitFor(
+    () =>
+      AGENT_IDS.every((agentId) => playerSystem.getPlayerAttackStyle(agentId)),
+    "persisted attack-style hydration",
+  );
   await Promise.all(
     AGENT_IDS.map((agentId) => prayerSystem.waitForPrayerIdle(agentId)),
   );
   for (const agentId of AGENT_IDS) {
     const entity = runtime.entities.get(agentId);
     if (!entity) throw new Error(`persisted agent ${agentId} was not spawned`);
+    const persistedPlayer = playerSystem.getPlayer(agentId);
+    if (!persistedPlayer) {
+      throw new Error(`persisted PlayerSystem state missing for ${agentId}`);
+    }
+    const statsComponent = entity.getComponent("stats");
+    if (statsComponent?.data) {
+      Object.assign(statsComponent.data, persistedPlayer.skills);
+    }
     runtime.eventBus.emitEvent(
       EventType.SKILLS_UPDATED,
-      { playerId: agentId, skills: entity.data.skills },
+      {
+        playerId: agentId,
+        skills: persistedPlayer.skills,
+        persistence: "already_committed",
+      },
       "agent-duel-cycle-process-kill",
     );
   }
+  await runtime.eventBus.waitForPendingHandlers(15_000);
   await waitFor(
     () =>
-      AGENT_IDS.every(
-        (agentId) =>
+      AGENT_IDS.every((agentId) => {
+        const equipment = equipmentSystem.getPlayerEquipment(agentId);
+        return (
           inventorySystem.isInventoryReady(agentId) &&
-          equipmentSystem.getPlayerEquipment(agentId)?.weapon?.itemId ===
-            "shortbow" &&
-          equipmentSystem.getPlayerEquipment(agentId)?.arrows?.itemId ===
-            "bronze_arrow" &&
+          equipment?.weapon?.itemId === ROLE_FIXTURE.weaponId &&
+          (ROLE_FIXTURE.equippedAmmunition === null ||
+            equipment?.arrows?.itemId ===
+              ROLE_FIXTURE.equippedAmmunition.itemId) &&
           prayerSystem.getPrayerCustody(agentId).ready &&
-          prayerSystem.getPrayerCustody(agentId).persistenceHealthy,
-      ),
+          prayerSystem.getPrayerCustody(agentId).persistenceHealthy
+        );
+      }),
     "persisted worker runtime readiness",
   );
   runtime.world.currentTick += 1;
@@ -425,13 +684,184 @@ export async function startWorkerRuntime(
     inventorySystem,
     equipmentSystem,
     prayerSystem,
+    playerSystem,
     manager,
+  };
+}
+
+/**
+ * Replace the engagement-only combat fixture with the production combat
+ * authority after the persisted contestants have hydrated. This is opt-in so
+ * process-kill lifecycle tests can retain their deliberately inert fight edge,
+ * while the joined launch proof can exercise real projectile, damage, food,
+ * and terminal custody against the same runtime and database.
+ */
+export async function installAuthoritativeCombatRuntime(
+  runtime: WorkerRuntime,
+): Promise<AuthoritativeCombatRuntime> {
+  const entityRegistry = runtime.world.entities as unknown as {
+    players?: Map<string, TestEntity>;
+  };
+  entityRegistry.players = runtime.entities;
+  runtime.systems.set("entity-manager", {
+    getEntity: (id: string) => runtime.entities.get(id),
+  });
+
+  const previousCombat = runtime.systems.get("combat");
+  const combatSystem = new CombatSystem(runtime.world);
+  runtime.systems.set("combat", combatSystem);
+  await combatSystem.init();
+
+  const network = runtime.systems.get("network") as {
+    requestServerAttack?: (
+      attackerId: string,
+      targetId: string,
+      targetType: "mob" | "player",
+    ) => boolean;
+    requestServerCombatApproach?: (
+      playerId: string,
+      targetId: string,
+    ) => boolean;
+    getPlayerWeaponRange: (playerId: string) => number;
+    getPlayerAttackType: (playerId: string) => AttackType;
+    isInAttackRange: (
+      attackerTile: { x: number; z: number },
+      targetTile: { x: number; z: number },
+      attackType: AttackType,
+      range: number,
+    ) => boolean;
+  };
+  const previousRequestServerAttack = network.requestServerAttack;
+  const previousGetPlayerWeaponRange = network.getPlayerWeaponRange;
+  const previousGetPlayerAttackType = network.getPlayerAttackType;
+  const getEquippedWeapon = (playerId: string) => {
+    const equipment = runtime.equipmentSystem.getPlayerEquipment(playerId);
+    const weaponSlot = equipment?.weapon;
+    const weaponId = String(
+      weaponSlot?.itemId ?? weaponSlot?.item?.id ?? "",
+    ).trim();
+    return weaponId ? ITEMS.get(weaponId) : undefined;
+  };
+  network.getPlayerAttackType = (playerId) => {
+    const attackType = getEquippedWeapon(playerId)?.attackType;
+    return attackType === AttackType.RANGED || attackType === AttackType.MAGIC
+      ? attackType
+      : AttackType.MELEE;
+  };
+  network.getPlayerWeaponRange = (playerId) => {
+    const weapon = getEquippedWeapon(playerId);
+    if (network.getPlayerAttackType(playerId) === AttackType.MELEE) return 1;
+    const range = Number(weapon?.attackRange);
+    return Number.isFinite(range) && range > 0 ? range : 1;
+  };
+  network.requestServerAttack = (attackerId, targetId, targetType) => {
+    const attacker = runtime.entities.get(attackerId);
+    const target = runtime.entities.get(targetId);
+    if (!attacker?.isAlive() || !target?.isAlive()) return false;
+    const attackType = network.getPlayerAttackType(attackerId);
+    const attackRange = network.getPlayerWeaponRange(attackerId);
+    if (
+      !network.isInAttackRange(
+        {
+          x: Math.floor(attacker.position.x),
+          z: Math.floor(attacker.position.z),
+        },
+        {
+          x: Math.floor(target.position.x),
+          z: Math.floor(target.position.z),
+        },
+        attackType,
+        attackRange,
+      )
+    ) {
+      return false;
+    }
+    runtime.eventBus.emitEvent(
+      EventType.COMBAT_ATTACK_REQUEST,
+      {
+        attackerId,
+        targetId,
+        attackerType: "player",
+        targetType,
+        attackType,
+      },
+      "agent-duel-authoritative-combat-runtime",
+    );
+    return true;
+  };
+
+  // The production world bridges typed system events into its public emitter.
+  // This compact runtime has no EventBridge system, so install the exact three
+  // scheduler-facing signals needed for damage, healing, and terminal death.
+  const publicEventTypes = [
+    EventType.COMBAT_DAMAGE_DEALT,
+    EventType.ENTITY_HEALED,
+    EventType.ENTITY_DEATH,
+  ] as const;
+  const bridgeSubscriptions = publicEventTypes.map((eventType) =>
+    runtime.eventBus.subscribe(eventType, (event) => {
+      runtime.world.emit(eventType, event.data);
+    }),
+  );
+  bridgeSubscriptions.push(
+    runtime.eventBus.subscribe(
+      EventType.COMBAT_FOLLOW_TARGET,
+      (event: {
+        data: {
+          playerId: string;
+          targetId: string;
+        };
+      }) => {
+        network.requestServerCombatApproach?.(
+          event.data.playerId,
+          event.data.targetId,
+        );
+      },
+    ),
+  );
+
+  for (const agentId of AGENT_IDS) {
+    runtime.eventBus.emitEvent(
+      EventType.PLAYER_JOINED,
+      { playerId: agentId },
+      "agent-duel-authoritative-combat-runtime",
+    );
+  }
+  // This compact harness swaps CombatSystem into an already hydrated world.
+  // Its replacement PLAYER_JOINED handlers must finish before the scheduler
+  // can create combat state; otherwise a late join reset can erase a valid
+  // engagement after fight start. The production world initializes systems
+  // before admitting players, so make that ordering explicit here as well.
+  await runtime.eventBus.waitForPendingHandlers(15_000);
+  const pendingJoinHandlers = runtime.eventBus.getPendingHandlerBreakdown();
+  if (pendingJoinHandlers.length > 0) {
+    throw new Error(
+      `authoritative combat hydration timed out: ${JSON.stringify(pendingJoinHandlers)}`,
+    );
+  }
+
+  let destroyed = false;
+  return {
+    combatSystem,
+    destroy: () => {
+      if (destroyed) return;
+      destroyed = true;
+      for (const subscription of bridgeSubscriptions) {
+        subscription.unsubscribe();
+      }
+      network.requestServerAttack = previousRequestServerAttack;
+      network.getPlayerWeaponRange = previousGetPlayerWeaponRange;
+      network.getPlayerAttackType = previousGetPlayerAttackType;
+      combatSystem.destroy();
+      runtime.systems.set("combat", previousCombat);
+    },
   };
 }
 
 export async function stopWorkerRuntime(runtime: WorkerRuntime): Promise<void> {
   await runtime.manager.shutdown().catch(() => undefined);
   runtime.prayerSystem.destroy();
+  runtime.playerSystem.destroy();
   await runtime.equipmentSystem.destroyAsync().catch(() => undefined);
   await runtime.inventorySystem.destroyAsync().catch(() => undefined);
   runtime.databaseSystem.destroy();
@@ -447,7 +877,297 @@ export function schedulerInternals(scheduler: StreamingDuelScheduler) {
     abortCycleToIdle(reason: string): Promise<void>;
     orchestrator: {
       combatAIs: Map<string, { externalTick(): Promise<void> }>;
+      stopCombatLoop(): void;
+      runCombatAITickOnce(): Promise<void>;
+      waitForCombatAITick(): Promise<void>;
     };
+  };
+}
+
+/**
+ * Drive the compact persisted-worker fixture through the same authoritative
+ * combat authority used by the server world. The scheduler retains ownership
+ * of agent-controller cadence and terminal persistence; this helper advances
+ * only the world and CombatSystem ticks that a full server loop would own.
+ */
+export async function driveAuthoritativeCombatToNaturalTerminal(
+  runtime: WorkerRuntime,
+  scheduler: StreamingDuelScheduler,
+  authoritativeCombat: AuthoritativeCombatRuntime,
+  options: { combatTimeoutMs?: number } = {},
+): Promise<NaturalCombatTerminalEvidence> {
+  const initialCycle = scheduler.getCurrentCycle();
+  if (
+    initialCycle?.phase !== "ANNOUNCEMENT" ||
+    !Number.isSafeInteger(initialCycle.betCloseTime)
+  ) {
+    throw new Error(
+      `natural combat driver requires an announced cycle with an immutable close: ${JSON.stringify(initialCycle)}`,
+    );
+  }
+
+  const internal = schedulerInternals(scheduler);
+  await new Promise((resolve) =>
+    setTimeout(
+      resolve,
+      Math.max(0, (initialCycle.betCloseTime as number) - Date.now() + 10),
+    ),
+  );
+  await internal.startCountdown();
+  await waitFor(
+    () => scheduler.getCurrentCycle()?.phase === "COUNTDOWN",
+    "authoritative natural countdown",
+  );
+  await waitFor(
+    () => scheduler.getCurrentCycle()?.phase === "FIGHTING",
+    "authoritative natural fight",
+    15_000,
+  );
+  await waitFor(
+    () => scheduler.getCombatAIDiagnostics().length === 2,
+    "authoritative natural combat controllers",
+  );
+  // The production server has one scheduler interval and one world tick. This
+  // compact gate advances the world manually, so stop the scheduler interval
+  // and drive each controller exactly once per synthetic tick. Waiting for
+  // global EventBus quiescence while that interval remained live allowed new
+  // attack requests to replace the promise being observed and could starve the
+  // world clock even though every individual database commit was fast.
+  internal.orchestrator.stopCombatLoop();
+  await internal.orchestrator.waitForCombatAITick();
+
+  const combatTimeoutMs = options.combatTimeoutMs ?? 300_000;
+  if (
+    !Number.isSafeInteger(combatTimeoutMs) ||
+    combatTimeoutMs < 10_000 ||
+    combatTimeoutMs > 900_000
+  ) {
+    throw new Error(
+      "combatTimeoutMs must be an integer between 10000 and 900000",
+    );
+  }
+  const fightDeadline = Date.now() + combatTimeoutMs;
+  let authoritativeCombatTicks = 0;
+  let diagnostics = scheduler.getCombatAIDiagnostics();
+  const captureControllerDiagnostics = (): void => {
+    const observed = scheduler.getCombatAIDiagnostics();
+    // Terminal presentation intentionally clears the live controller map. Keep
+    // the final complete pre-teardown snapshot instead of replacing it with an
+    // empty post-resolution lifecycle observation.
+    if (observed.length > 0) diagnostics = observed;
+  };
+  const initialCombatTrace: NaturalCombatTraceSample[] = [];
+  const recentCombatTrace: NaturalCombatTraceSample[] = [];
+  const captureCombatTrace = (stage: NaturalCombatTraceStage): void => {
+    const sample: NaturalCombatTraceSample = {
+      stage,
+      driverTick: authoritativeCombatTicks,
+      worldTick: runtime.world.currentTick,
+      contestants: AGENT_IDS.map((agentId) => {
+        const entity = runtime.world.entities.get(agentId);
+        const combatData =
+          authoritativeCombat.combatSystem.getCombatData(agentId);
+        const position = entity?.position
+          ? ([entity.position.x, entity.position.y, entity.position.z] as [
+              number,
+              number,
+              number,
+            ])
+          : null;
+        return {
+          agentId,
+          position,
+          tile: position
+            ? { x: Math.floor(position[0]), z: Math.floor(position[2]) }
+            : null,
+          health: entity ? entity.getHealth() : null,
+          combat: combatData
+            ? {
+                inCombat: combatData.inCombat === true,
+                targetId:
+                  combatData.targetId === undefined ||
+                  combatData.targetId === null
+                    ? null
+                    : String(combatData.targetId),
+                lastAttackTick: Number.isFinite(combatData.lastAttackTick)
+                  ? combatData.lastAttackTick
+                  : null,
+                nextAttackTick: Number.isFinite(combatData.nextAttackTick)
+                  ? combatData.nextAttackTick
+                  : null,
+                combatEndTick: Number.isFinite(combatData.combatEndTick)
+                  ? combatData.combatEndTick
+                  : null,
+              }
+            : null,
+        };
+      }),
+    };
+    if (initialCombatTrace.length < 12) initialCombatTrace.push(sample);
+    recentCombatTrace.push(sample);
+    if (recentCombatTrace.length > 18) recentCombatTrace.shift();
+  };
+  const summarizeAntiCheat = (agentId: string) => {
+    const report =
+      authoritativeCombat.combatSystem.antiCheat.getPlayerReport(agentId);
+    return {
+      score: report.score,
+      attacksThisTick: report.attacksThisTick,
+      violationCount: report.recentViolations.length,
+      lastViolations: report.recentViolations.slice(-8),
+    };
+  };
+  const getAntiCheatDiagnostics = () =>
+    AGENT_IDS.map((agentId) => ({
+      agentId,
+      ...summarizeAntiCheat(agentId),
+    }));
+  const getProjectileDiagnostics = (): ReturnType<
+    CombatSystem["getProjectileLifecycleDiagnostics"]
+  > => {
+    const snapshot =
+      authoritativeCombat.combatSystem.getProjectileLifecycleDiagnostics();
+    return {
+      ...snapshot,
+      recent: snapshot.recent.slice(-18),
+    };
+  };
+  const combatFailureEvidence = () => {
+    const combatSystem = authoritativeCombat.combatSystem;
+    return {
+      authoritativeCombatTicks,
+      worldTick: runtime.world.currentTick,
+      diagnostics,
+      projectileDiagnostics: getProjectileDiagnostics(),
+      damageReconciliation: combatSystem.getDuelDamageReconciliationStats(),
+      pendingEventHandlers: runtime.eventBus.getPendingHandlerBreakdown(),
+      eventHandlerDiagnostics: runtime.eventBus.getAsyncHandlerDiagnostics(),
+      initialCombatTrace,
+      recentCombatTrace,
+      contestants: getAntiCheatDiagnostics().map((antiCheat) => {
+        const agentId = antiCheat.agentId;
+        const entity = runtime.world.entities.get(agentId);
+        return {
+          agentId,
+          position: entity?.data.position ?? null,
+          health: entity?.data.health ?? null,
+          combatData: combatSystem.getCombatData(agentId),
+          antiCheat,
+        };
+      }),
+    };
+  };
+  const assertNoAntiCheatViolations = (stage: string): void => {
+    if (
+      getAntiCheatDiagnostics().every(
+        ({ score, violationCount }) => score === 0 && violationCount === 0,
+      )
+    ) {
+      return;
+    }
+    throw new Error(
+      `authoritative natural combat anti-cheat violation: ${JSON.stringify({
+        stage,
+        ...combatFailureEvidence(),
+      })}`,
+    );
+  };
+  const assertNoOverdueEventHandlers = (stage: string): void => {
+    const pendingEventHandlers = runtime.eventBus.getPendingHandlerBreakdown();
+    if (pendingEventHandlers.length === 0) return;
+    const combatSystem = authoritativeCombat.combatSystem;
+    throw new Error(
+      `authoritative natural combat event handler deadline exceeded: ${JSON.stringify(
+        {
+          stage,
+          authoritativeCombatTicks,
+          worldTick: runtime.world.currentTick,
+          pendingEventHandlers,
+          eventHandlerDiagnostics:
+            runtime.eventBus.getAsyncHandlerDiagnostics(),
+          diagnostics: scheduler.getCombatAIDiagnostics(),
+          damageReconciliation: combatSystem.getDuelDamageReconciliationStats(),
+          contestants: AGENT_IDS.map((agentId) => {
+            const entity = runtime.world.entities.get(agentId);
+            return {
+              agentId,
+              position: entity?.data.position ?? null,
+              health: entity?.data.health ?? null,
+              combatData: combatSystem.getCombatData(agentId),
+            };
+          }),
+        },
+      )}`,
+    );
+  };
+  while (
+    scheduler.getCurrentCycle()?.phase === "FIGHTING" &&
+    Date.now() < fightDeadline
+  ) {
+    runtime.world.currentTick += 1;
+    authoritativeCombatTicks += 1;
+    captureCombatTrace("before_ai");
+    await internal.orchestrator.runCombatAITickOnce();
+    await runtime.eventBus.waitForPendingHandlers(15_000);
+    assertNoOverdueEventHandlers("after_ai_tick");
+    captureControllerDiagnostics();
+    captureCombatTrace("after_ai");
+    assertNoAntiCheatViolations("after_ai_tick");
+    authoritativeCombat.combatSystem.processCombatTick(
+      runtime.world.currentTick,
+    );
+    await runtime.eventBus.waitForPendingHandlers(15_000);
+    assertNoOverdueEventHandlers("after_combat_tick");
+    await waitFor(
+      () =>
+        authoritativeCombat.combatSystem.getDuelDamageReconciliationStats()
+          .pendingOperations === 0,
+      "authoritative natural damage settlement",
+      15_000,
+    );
+    captureCombatTrace("after_combat");
+    assertNoAntiCheatViolations("after_combat_tick");
+    if (scheduler.getCurrentCycle()?.phase === "FIGHTING") {
+      captureControllerDiagnostics();
+    }
+    if (scheduler.getCurrentCycle()?.phase !== "FIGHTING") break;
+    await new Promise((resolve) =>
+      setTimeout(resolve, COMBAT_CONSTANTS.TICK_DURATION_MS),
+    );
+  }
+
+  if (scheduler.getCurrentCycle()?.phase === "FIGHTING") {
+    throw new Error(
+      `authoritative natural combat deadline exceeded: ${JSON.stringify(combatFailureEvidence())}`,
+    );
+  }
+
+  const terminalPhase = scheduler.getCurrentCycle()?.phase ?? null;
+  if (terminalPhase !== "RESOLUTION") {
+    throw new Error(
+      `authoritative natural combat left fighting without a resolution: ${JSON.stringify(
+        { terminalPhase, ...combatFailureEvidence() },
+      )}`,
+    );
+  }
+
+  await waitFor(
+    () => scheduler.getCurrentCycle()?.phase === "RESOLUTION",
+    "authoritative natural persisted resolution",
+    15_000,
+  );
+  await scheduler.waitForCombatCustodySettlements();
+  await runtime.eventBus.waitForPendingHandlers(15_000);
+  const resolvedCycle = scheduler.getCurrentCycle();
+  if (!resolvedCycle) {
+    throw new Error("authoritative natural terminal disappeared");
+  }
+  return {
+    authoritativeCombatTicks,
+    diagnostics,
+    antiCheatDiagnostics: getAntiCheatDiagnostics(),
+    projectileDiagnostics: getProjectileDiagnostics(),
+    resolvedCycle,
   };
 }
 
@@ -508,6 +1228,7 @@ async function runFreezeWorker(): Promise<void> {
     !cycle?.competitiveSnapshot?.persisted ||
     !cycle.competitiveSnapshotDigest ||
     !cycle.competitiveSnapshot.preparationId ||
+    !cycle.duelId ||
     !cycle.betCloseTime
   ) {
     throw new Error("freeze worker did not expose persisted snapshot identity");
@@ -538,6 +1259,7 @@ async function runFreezeWorker(): Promise<void> {
     digest: cycle.competitiveSnapshotDigest,
     betCloseTime: cycle.betCloseTime,
     lifecycleStatus: "frozen",
+    combatRole: CHAOS_COMBAT_ROLE,
   });
   await new Promise<never>(() => undefined);
 }
@@ -622,7 +1344,7 @@ async function runRecoveryWorker(): Promise<void> {
       const custody = runtime.prayerSystem.getPrayerCustody(agentId);
       if (
         custody.pointUnits !== STARTING_PRAYER_UNITS ||
-        custody.activePrayers.join(",") !== "hawk_eye"
+        custody.activePrayers.join(",") !== EXPECTED_PRAYER_ID
       ) {
         throw new Error(
           `replacement combat prayer activation drifted for ${agentId}: ${JSON.stringify(custody)}`,
@@ -640,7 +1362,7 @@ async function runRecoveryWorker(): Promise<void> {
       const custody = runtime.prayerSystem.getPrayerCustody(agentId);
       if (
         custody.pointUnits !== EXPECTED_DRAINED_PRAYER_UNITS ||
-        custody.activePrayers.join(",") !== "hawk_eye"
+        custody.activePrayers.join(",") !== EXPECTED_PRAYER_ID
       ) {
         throw new Error(
           `replacement combat prayer drain drifted for ${agentId}: ${JSON.stringify(custody)}`,
@@ -693,6 +1415,7 @@ async function runRecoveryWorker(): Promise<void> {
       betCloseTime: expectedBetCloseTime,
       lifecycleStatus: "retired",
       prayerPointUnits: EXPECTED_DRAINED_PRAYER_UNITS,
+      combatRole: CHAOS_COMBAT_ROLE,
     };
   } finally {
     scheduler.destroy("scheduler_shutdown");
@@ -732,7 +1455,7 @@ async function runDatabaseOutageWorker(): Promise<void> {
     // Do not serialize connection strings or transport diagnostics. The
     // parent verifies the database was deliberately paused and that no
     // lifecycle row or fencing token changed before accepting this edge.
-    emit({ event: "database_unavailable" });
+    emit({ event: "database_unavailable", combatRole: CHAOS_COMBAT_ROLE });
   }
 }
 
@@ -752,6 +1475,7 @@ async function runActiveFightWorker(): Promise<void> {
     !cycle.competitiveSnapshot?.persisted ||
     !cycle.competitiveSnapshotDigest ||
     !cycle.competitiveSnapshot.preparationId ||
+    !cycle.duelId ||
     !cycle.betCloseTime
   ) {
     throw new Error("active-fight worker did not freeze persisted evidence");
@@ -789,7 +1513,7 @@ async function runActiveFightWorker(): Promise<void> {
     const custody = runtime.prayerSystem.getPrayerCustody(agentId);
     if (
       custody.pointUnits !== EXPECTED_DRAINED_PRAYER_UNITS ||
-      custody.activePrayers.join(",") !== "hawk_eye"
+      custody.activePrayers.join(",") !== EXPECTED_PRAYER_ID
     ) {
       throw new Error(
         `active-fight Prayer activation drifted for ${agentId}: ${JSON.stringify(custody)}`,
@@ -804,7 +1528,7 @@ async function runActiveFightWorker(): Promise<void> {
     const custody = runtime.prayerSystem.getPrayerCustody(agentId);
     if (
       custody.pointUnits !== EXPECTED_TWICE_DRAINED_PRAYER_UNITS ||
-      custody.activePrayers.join(",") !== "hawk_eye"
+      custody.activePrayers.join(",") !== EXPECTED_PRAYER_ID
     ) {
       throw new Error(
         `active-fight Prayer drain drifted for ${agentId}: ${JSON.stringify(custody)}`,
@@ -847,6 +1571,7 @@ async function runActiveFightWorker(): Promise<void> {
     betCloseTime: cycle.betCloseTime,
     lifecycleStatus: "frozen",
     prayerPointUnits: EXPECTED_TWICE_DRAINED_PRAYER_UNITS,
+    combatRole: CHAOS_COMBAT_ROLE,
   });
   await new Promise<never>(() => undefined);
 }
@@ -934,6 +1659,7 @@ async function runExpiredFightRecoveryWorker(): Promise<void> {
       betCloseTime: expectedBetCloseTime,
       lifecycleStatus: "retired",
       prayerPointUnits: EXPECTED_TWICE_DRAINED_PRAYER_UNITS,
+      combatRole: CHAOS_COMBAT_ROLE,
     };
   } finally {
     scheduler.destroy("scheduler_shutdown");
@@ -946,7 +1672,7 @@ async function runExpiredFightRecoveryWorker(): Promise<void> {
   emit(recoveryEvidence);
 }
 
-async function docker(args: string[]): Promise<string> {
+export async function docker(args: string[]): Promise<string> {
   const binary = process.env.DOCKER_BIN?.trim() || "docker";
   const result = await execFileAsync(binary, args, {
     maxBuffer: 4 * 1024 * 1024,
@@ -994,6 +1720,7 @@ function spawnWorker(input: {
       STREAMING_COUNTDOWN_TICKS: "1",
       STREAMING_FIGHTING_MS: "5000",
       AGENT_DUEL_CYCLE_CHAOS_DATABASE_URL: input.connectionString,
+      AGENT_DUEL_CYCLE_CHAOS_ROLE: CHAOS_COMBAT_ROLE,
       AGENT_DUEL_CYCLE_CHAOS_CYCLE_ID: input.expected?.cycleId,
       AGENT_DUEL_CYCLE_CHAOS_DIGEST: input.expected?.digest,
       AGENT_DUEL_CYCLE_CHAOS_BET_CLOSE_TIME:
@@ -1086,8 +1813,13 @@ async function waitForExit(
 
 export async function seedAgents(
   db: ReturnType<typeof drizzle<typeof schema>>,
+  options: { multiStyle?: boolean } = {},
 ): Promise<void> {
   const createdAt = "2026-08-11T00:00:00.000Z";
+  const level40Xp = minimumXpForLevel(40);
+  const startingPrayerXp = minimumXpForLevel(STARTING_PRAYER_POINTS);
+  const magicLevel = options.multiStyle ? 40 : ROLE_FIXTURE.magicLevel;
+  const roleMagicXp = minimumXpForLevel(magicLevel);
   await db.insert(schema.users).values(
     AGENT_IDS.map((agentId, index) => ({
       id: `account-${index + 1}-${agentId}`,
@@ -1104,12 +1836,19 @@ export async function seedAgents(
       isAgent: 1,
       combatLevel: 45,
       attackLevel: 40,
+      attackXp: level40Xp,
       strengthLevel: 40,
+      strengthXp: level40Xp,
       defenseLevel: 40,
+      defenseXp: level40Xp,
       constitutionLevel: 40,
+      constitutionXp: level40Xp,
       rangedLevel: 40,
-      magicLevel: 1,
+      rangedXp: level40Xp,
+      magicLevel,
+      magicXp: roleMagicXp,
       prayerLevel: STARTING_PRAYER_POINTS,
+      prayerXp: startingPrayerXp,
       prayerPoints: STARTING_PRAYER_POINTS,
       prayerPointUnits: STARTING_PRAYER_UNITS,
       prayerMaxPoints: STARTING_PRAYER_POINTS,
@@ -1131,31 +1870,137 @@ export async function seedAgents(
     })),
   );
   await db.insert(schema.inventory).values(
-    AGENT_IDS.flatMap((agentId) =>
-      Array.from({ length: 4 }, (_, slotIndex) => ({
+    AGENT_IDS.flatMap((agentId) => [
+      ...Array.from({ length: 4 }, (_, slotIndex) => ({
         playerId: agentId,
         itemId: "lobster",
         quantity: 1,
         slotIndex,
       })),
-    ),
-  );
-  await db.insert(schema.equipment).values(
-    AGENT_IDS.flatMap((agentId) => [
-      {
+      ...ROLE_FIXTURE.inventorySupplies.map((supply, supplyIndex) => ({
         playerId: agentId,
-        slotType: "weapon",
-        itemId: "shortbow",
-        quantity: 1,
-      },
-      {
-        playerId: agentId,
-        slotType: "arrows",
-        itemId: "bronze_arrow",
-        quantity: 100,
-      },
+        itemId: supply.itemId,
+        quantity: supply.quantity,
+        slotIndex: 4 + supplyIndex,
+      })),
     ]),
   );
+  await db.insert(schema.equipment).values(
+    AGENT_IDS.flatMap((agentId) => {
+      const equipment: Array<{
+        playerId: string;
+        slotType: string;
+        itemId: string;
+        quantity: number;
+      }> = [
+        {
+          playerId: agentId,
+          slotType: "weapon",
+          itemId: ROLE_FIXTURE.weaponId,
+          quantity: 1,
+        },
+      ];
+      if (ROLE_FIXTURE.equippedAmmunition) {
+        equipment.push({
+          playerId: agentId,
+          slotType: "arrows",
+          itemId: ROLE_FIXTURE.equippedAmmunition.itemId,
+          quantity: ROLE_FIXTURE.equippedAmmunition.quantity,
+        });
+      }
+      return equipment;
+    }),
+  );
+  if (options.multiStyle) {
+    await db.insert(schema.bankStorage).values(
+      AGENT_IDS.flatMap((agentId) =>
+        [
+          { itemId: "bronze_longsword", quantity: 1 },
+          { itemId: "staff_of_air", quantity: 1 },
+          { itemId: "fire_rune", quantity: 500 },
+          { itemId: "mind_rune", quantity: 500 },
+        ].map((item, slot) => ({
+          playerId: agentId,
+          itemId: item.itemId,
+          quantity: item.quantity,
+          slot: 10 + slot,
+          tabIndex: 0,
+        })),
+      ),
+    );
+  }
+}
+
+function expectedItemCustody(agentId: string): Array<{
+  playerId: string;
+  itemId: string;
+  quantity: number;
+  custody: string;
+}> {
+  if (CHAOS_COMBAT_ROLE === "ranged") {
+    return [
+      {
+        playerId: agentId,
+        itemId: "bronze_arrow",
+        quantity: 100,
+        custody: "equipment",
+      },
+      {
+        playerId: agentId,
+        itemId: "shortbow",
+        quantity: 1,
+        custody: "equipment",
+      },
+      {
+        playerId: agentId,
+        itemId: "lobster",
+        quantity: 4,
+        custody: "inventory",
+      },
+    ];
+  }
+  if (CHAOS_COMBAT_ROLE === "mage") {
+    return [
+      {
+        playerId: agentId,
+        itemId: "staff_of_air",
+        quantity: 1,
+        custody: "equipment",
+      },
+      {
+        playerId: agentId,
+        itemId: "fire_rune",
+        quantity: 60,
+        custody: "inventory",
+      },
+      {
+        playerId: agentId,
+        itemId: "lobster",
+        quantity: 4,
+        custody: "inventory",
+      },
+      {
+        playerId: agentId,
+        itemId: "mind_rune",
+        quantity: 20,
+        custody: "inventory",
+      },
+    ];
+  }
+  return [
+    {
+      playerId: agentId,
+      itemId: "bronze_longsword",
+      quantity: 1,
+      custody: "equipment",
+    },
+    {
+      playerId: agentId,
+      itemId: "lobster",
+      quantity: 4,
+      custody: "inventory",
+    },
+  ];
 }
 
 async function runParent(): Promise<void> {
@@ -1166,40 +2011,68 @@ async function runParent(): Promise<void> {
   const image =
     process.env.AGENT_DUEL_CYCLE_CHAOS_POSTGRES_IMAGE?.trim() ||
     "postgres:16-alpine";
+  const externalConnectionString =
+    process.env.AGENT_DUEL_CYCLE_CHAOS_EXTERNAL_DATABASE_URL?.trim() || null;
+  const rawSkipDatabaseOutage =
+    process.env.AGENT_DUEL_CYCLE_CHAOS_SKIP_DATABASE_OUTAGE?.trim();
+  if (
+    rawSkipDatabaseOutage !== undefined &&
+    rawSkipDatabaseOutage !== "true" &&
+    rawSkipDatabaseOutage !== "false"
+  ) {
+    throw new Error(
+      "AGENT_DUEL_CYCLE_CHAOS_SKIP_DATABASE_OUTAGE must be true or false",
+    );
+  }
+  const skipDatabaseOutage = rawSkipDatabaseOutage === "true";
+  if (externalConnectionString && !skipDatabaseOutage) {
+    throw new Error(
+      "external database mode requires AGENT_DUEL_CYCLE_CHAOS_SKIP_DATABASE_OUTAGE=true because the harness does not own that database process",
+    );
+  }
   const workers: ChildProcess[] = [];
   let containerStarted = false;
   let containerPaused = false;
   let pool: pg.Pool | null = null;
+  let databaseOutageWorkerPid: number | null = null;
   try {
-    await docker(["info", "--format", "{{.ServerVersion}}"]).catch((error) => {
-      throw new Error(
-        `Docker is required for the retained chaos gate: ${error}`,
+    let connectionString: string;
+    if (externalConnectionString) {
+      connectionString = externalConnectionString;
+      pool = await waitForPostgres(connectionString);
+    } else {
+      await docker(["info", "--format", "{{.ServerVersion}}"]).catch(
+        (error) => {
+          throw new Error(
+            `Docker is required for the retained chaos gate: ${error}`,
+          );
+        },
       );
-    });
-    await docker([
-      "run",
-      "--rm",
-      "-d",
-      "--name",
-      containerName,
-      "-e",
-      `POSTGRES_USER=${databaseUser}`,
-      "-e",
-      `POSTGRES_PASSWORD=${databasePassword}`,
-      "-e",
-      `POSTGRES_DB=${databaseName}`,
-      "-p",
-      "127.0.0.1::5432",
-      image,
-    ]);
-    containerStarted = true;
-    const portOutput = await docker(["port", containerName, "5432/tcp"]);
-    const port = Number(portOutput.split(":").pop());
-    if (!Number.isSafeInteger(port) || port <= 0) {
-      throw new Error("could not resolve temporary PostgreSQL port");
+      await docker([
+        "run",
+        "--rm",
+        "-d",
+        "--name",
+        containerName,
+        "-e",
+        `POSTGRES_USER=${databaseUser}`,
+        "-e",
+        `POSTGRES_PASSWORD=${databasePassword}`,
+        "-e",
+        `POSTGRES_DB=${databaseName}`,
+        "-p",
+        "127.0.0.1::5432",
+        image,
+      ]);
+      containerStarted = true;
+      const portOutput = await docker(["port", containerName, "5432/tcp"]);
+      const port = Number(portOutput.split(":").pop());
+      if (!Number.isSafeInteger(port) || port <= 0) {
+        throw new Error("could not resolve temporary PostgreSQL port");
+      }
+      connectionString = `postgresql://${databaseUser}:${encodeURIComponent(databasePassword)}@127.0.0.1:${port}/${databaseName}`;
+      pool = await waitForPostgres(connectionString);
     }
-    const connectionString = `postgresql://${databaseUser}:${encodeURIComponent(databasePassword)}@127.0.0.1:${port}/${databaseName}`;
-    pool = await waitForPostgres(connectionString);
     const migrationClient = await pool.connect();
     try {
       await migrate(createPostgresClientDatabase(migrationClient), {
@@ -1223,7 +2096,8 @@ async function runParent(): Promise<void> {
       !frozen.preparationId ||
       !frozen.digest ||
       !Number.isSafeInteger(frozen.betCloseTime) ||
-      frozen.lifecycleStatus !== "frozen"
+      frozen.lifecycleStatus !== "frozen" ||
+      frozen.combatRole !== CHAOS_COMBAT_ROLE
     ) {
       throw new Error(`freeze evidence is invalid: ${JSON.stringify(frozen)}`);
     }
@@ -1259,55 +2133,61 @@ async function runParent(): Promise<void> {
       );
     }
 
-    await docker(["pause", containerName]);
-    containerPaused = true;
-    const outageProbe = spawnWorker({
-      mode: "database-outage",
-      connectionString,
-      expected: frozen,
-    });
-    workers.push(outageProbe.child);
-    const outageEvidence = await outageProbe.event;
-    await waitForExit(outageProbe.child, outageProbe.stderr);
-    if (outageEvidence.event !== "database_unavailable") {
-      throw new Error(
-        `database outage evidence is invalid: ${JSON.stringify(outageEvidence)}`,
-      );
-    }
-    await docker(["unpause", containerName]);
-    containerPaused = false;
-    await pool.query("SELECT 1");
+    if (!skipDatabaseOutage) {
+      await docker(["pause", containerName]);
+      containerPaused = true;
+      const outageProbe = spawnWorker({
+        mode: "database-outage",
+        connectionString,
+        expected: frozen,
+      });
+      databaseOutageWorkerPid = outageProbe.child.pid ?? null;
+      workers.push(outageProbe.child);
+      const outageEvidence = await outageProbe.event;
+      await waitForExit(outageProbe.child, outageProbe.stderr);
+      if (
+        outageEvidence.event !== "database_unavailable" ||
+        outageEvidence.combatRole !== CHAOS_COMBAT_ROLE
+      ) {
+        throw new Error(
+          `database outage evidence is invalid: ${JSON.stringify(outageEvidence)}`,
+        );
+      }
+      await docker(["unpause", containerName]);
+      containerPaused = false;
+      await pool.query("SELECT 1");
 
-    const frozenAfterOutage = await pool.query<{
-      lifecycleStatus: string;
-      snapshotDigest: string;
-      fencingToken: string;
-      snapshotCount: string;
-      transitionCount: string;
-    }>(
-      `SELECT max(snapshot."lifecycleStatus") AS "lifecycleStatus",
-              max(snapshot."snapshotDigest") AS "snapshotDigest",
-              max(preparation."fencingToken")::text AS "fencingToken",
-              count(DISTINCT snapshot."preparationId")::text AS "snapshotCount",
-              count(DISTINCT transition."eventSequence")::text AS "transitionCount"
-         FROM streaming_duel_competitive_snapshots snapshot
-         JOIN streaming_duel_preparations preparation
-           USING ("preparationId")
-         JOIN streaming_duel_transition_events transition
-           USING ("preparationId")
-        WHERE snapshot."cycleId" = $1`,
-      [frozen.cycleId],
-    );
-    if (
-      frozenAfterOutage.rows[0]?.lifecycleStatus !== "frozen" ||
-      frozenAfterOutage.rows[0]?.snapshotDigest !== frozen.digest ||
-      frozenAfterOutage.rows[0]?.fencingToken !== "1" ||
-      frozenAfterOutage.rows[0]?.snapshotCount !== "1" ||
-      frozenAfterOutage.rows[0]?.transitionCount !== "4"
-    ) {
-      throw new Error(
-        `database outage mutated frozen truth: ${JSON.stringify(frozenAfterOutage.rows)}`,
+      const frozenAfterOutage = await pool.query<{
+        lifecycleStatus: string;
+        snapshotDigest: string;
+        fencingToken: string;
+        snapshotCount: string;
+        transitionCount: string;
+      }>(
+        `SELECT max(snapshot."lifecycleStatus") AS "lifecycleStatus",
+                max(snapshot."snapshotDigest") AS "snapshotDigest",
+                max(preparation."fencingToken")::text AS "fencingToken",
+                count(DISTINCT snapshot."preparationId")::text AS "snapshotCount",
+                count(DISTINCT transition."eventSequence")::text AS "transitionCount"
+           FROM streaming_duel_competitive_snapshots snapshot
+           JOIN streaming_duel_preparations preparation
+             USING ("preparationId")
+           JOIN streaming_duel_transition_events transition
+             USING ("preparationId")
+          WHERE snapshot."cycleId" = $1`,
+        [frozen.cycleId],
       );
+      if (
+        frozenAfterOutage.rows[0]?.lifecycleStatus !== "frozen" ||
+        frozenAfterOutage.rows[0]?.snapshotDigest !== frozen.digest ||
+        frozenAfterOutage.rows[0]?.fencingToken !== "1" ||
+        frozenAfterOutage.rows[0]?.snapshotCount !== "1" ||
+        frozenAfterOutage.rows[0]?.transitionCount !== "4"
+      ) {
+        throw new Error(
+          `database outage mutated frozen truth: ${JSON.stringify(frozenAfterOutage.rows)}`,
+        );
+      }
     }
 
     const replacement = spawnWorker({
@@ -1324,7 +2204,8 @@ async function runParent(): Promise<void> {
       recovered.digest !== frozen.digest ||
       recovered.betCloseTime !== frozen.betCloseTime ||
       recovered.lifecycleStatus !== "retired" ||
-      recovered.prayerPointUnits !== EXPECTED_DRAINED_PRAYER_UNITS
+      recovered.prayerPointUnits !== EXPECTED_DRAINED_PRAYER_UNITS ||
+      recovered.combatRole !== CHAOS_COMBAT_ROLE
     ) {
       throw new Error(
         `replacement evidence is invalid: ${JSON.stringify(recovered)}`,
@@ -1512,32 +2393,7 @@ async function runParent(): Promise<void> {
     );
     for (const agentId of AGENT_IDS) {
       const rows = custody.rows.filter((row) => row.playerId === agentId);
-      const expected = [
-        {
-          playerId: agentId,
-          itemId: "bronze_arrow",
-          quantity: 50,
-          custody: "bank",
-        },
-        {
-          playerId: agentId,
-          itemId: "bronze_arrow",
-          quantity: 50,
-          custody: "equipment",
-        },
-        {
-          playerId: agentId,
-          itemId: "shortbow",
-          quantity: 1,
-          custody: "equipment",
-        },
-        {
-          playerId: agentId,
-          itemId: "lobster",
-          quantity: 4,
-          custody: "inventory",
-        },
-      ];
+      const expected = expectedItemCustody(agentId);
       if (JSON.stringify(rows) !== JSON.stringify(expected)) {
         throw new Error(
           `item custody drifted for ${agentId}: ${JSON.stringify(rows)}`,
@@ -1556,7 +2412,8 @@ async function runParent(): Promise<void> {
       !fighting.digest ||
       !Number.isSafeInteger(fighting.betCloseTime) ||
       fighting.lifecycleStatus !== "frozen" ||
-      fighting.prayerPointUnits !== EXPECTED_TWICE_DRAINED_PRAYER_UNITS
+      fighting.prayerPointUnits !== EXPECTED_TWICE_DRAINED_PRAYER_UNITS ||
+      fighting.combatRole !== CHAOS_COMBAT_ROLE
     ) {
       throw new Error(
         `active-fight evidence is invalid: ${JSON.stringify(fighting)}`,
@@ -1620,7 +2477,7 @@ async function runParent(): Promise<void> {
       activePrayerAfterKill.rows.some(
         (row) =>
           row.prayerPointUnits !== EXPECTED_TWICE_DRAINED_PRAYER_UNITS ||
-          row.activePrayers.join(",") !== "hawk_eye",
+          row.activePrayers.join(",") !== EXPECTED_PRAYER_ID,
       )
     ) {
       throw new Error(
@@ -1643,7 +2500,8 @@ async function runParent(): Promise<void> {
       cancelledAfterRestart.betCloseTime !== fighting.betCloseTime ||
       cancelledAfterRestart.lifecycleStatus !== "retired" ||
       cancelledAfterRestart.prayerPointUnits !==
-        EXPECTED_TWICE_DRAINED_PRAYER_UNITS
+        EXPECTED_TWICE_DRAINED_PRAYER_UNITS ||
+      cancelledAfterRestart.combatRole !== CHAOS_COMBAT_ROLE
     ) {
       throw new Error(
         `expired-fight recovery evidence is invalid: ${JSON.stringify(cancelledAfterRestart)}`,
@@ -1850,13 +2708,18 @@ async function runParent(): Promise<void> {
 
     process.stdout.write(
       `${JSON.stringify({
+        combatRole: CHAOS_COMBAT_ROLE,
+        weaponId: ROLE_FIXTURE.weaponId,
+        prayerId: EXPECTED_PRAYER_ID,
         freezeWorkerPid: freezer.child.pid,
-        databaseOutageWorkerPid: outageProbe.child.pid,
+        databaseOutageWorkerPid,
         replacementWorkerPid: replacement.child.pid,
         freezeWorkerKilled: true,
-        databaseOutageFailedClosed: true,
-        frozenTruthUnchangedDuringOutage: true,
-        recoveryAfterDatabaseRestore: true,
+        databaseOutageFailedClosed: !skipDatabaseOutage,
+        databaseOutageSkipped: skipDatabaseOutage,
+        frozenTruthUnchangedDuringOutage: !skipDatabaseOutage,
+        recoveryAfterDatabaseRestore: !skipDatabaseOutage,
+        externalDatabase: externalConnectionString !== null,
         exactCycleRecovered: true,
         exactSnapshotDigestRecovered: true,
         immutableBetClosePreserved: true,

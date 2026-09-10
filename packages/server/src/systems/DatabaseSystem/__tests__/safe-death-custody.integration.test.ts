@@ -51,7 +51,17 @@ describeDatabase("atomic safe-area death custody", () => {
 
     const testUrl = new URL(baseDatabaseUrl);
     testUrl.pathname = `/${databaseName}`;
-    pool = new pg.Pool({ connectionString: testUrl.toString(), max: 8 });
+    pool = new pg.Pool({
+      connectionString: testUrl.toString(),
+      max: 8,
+      connectionTimeoutMillis: 1_000,
+      statement_timeout: 1_500,
+      query_timeout: 2_000,
+    });
+    // PostgreSQL reports terminated idle clients through the pool error event.
+    // The outage test below expects that signal and verifies recovery through a
+    // subsequent checkout; it must not become an unhandled test-process error.
+    pool.on("error", () => undefined);
     const migrationClient = await pool.connect();
     try {
       await migrate(createPostgresClientDatabase(migrationClient), {
@@ -121,6 +131,53 @@ describeDatabase("atomic safe-area death custody", () => {
       position: { x: -8.5, y: 28.2, z: -16 },
       killedBy: "wolf",
     };
+
+    // Refuse new connections and terminate every live checkout to model a hard
+    // database outage without restarting this process or replacing its pool.
+    // The failed attempt must not mutate custody; the exact same DatabaseSystem
+    // and operation identity must recover once PostgreSQL is available again.
+    await adminPool.query(
+      `UPDATE pg_database SET datallowconn = false WHERE datname = $1`,
+      [databaseName],
+    );
+    await adminPool.query(
+      `SELECT pg_terminate_backend(pid)
+       FROM pg_stat_activity
+       WHERE datname = $1 AND pid <> pg_backend_pid()`,
+      [databaseName],
+    );
+    const outageStartedAt = Date.now();
+    try {
+      await expect(
+        databaseSystem.commitSafeAreaDeathOperationAsync(deathRequest),
+      ).rejects.toThrow();
+      expect(Date.now() - outageStartedAt).toBeLessThan(5_000);
+    } finally {
+      await adminPool.query(
+        `UPDATE pg_database SET datallowconn = true WHERE datname = $1`,
+        [databaseName],
+      );
+    }
+    await expect(
+      pool.query(
+        `SELECT
+           (SELECT count(*)::int FROM inventory WHERE "playerId" = $1) AS inventory_rows,
+           (SELECT count(*)::int FROM equipment WHERE "playerId" = $1) AS equipment_rows,
+           (SELECT count(*)::int FROM player_deaths WHERE "playerId" = $1) AS death_rows,
+           (SELECT count(*)::int FROM operations_log WHERE id = $2) AS receipt_rows`,
+        [playerId, deathOperationId],
+      ),
+    ).resolves.toMatchObject({
+      rows: [
+        {
+          inventory_rows: 4,
+          equipment_rows: 1,
+          death_rows: 0,
+          receipt_rows: 0,
+        },
+      ],
+    });
+
     const captured =
       await databaseSystem.commitSafeAreaDeathOperationAsync(deathRequest);
     expect(captured).toMatchObject({
@@ -203,6 +260,47 @@ describeDatabase("atomic safe-area death custody", () => {
       `UPDATE player_deaths SET "gravestoneId" = $2 WHERE "playerId" = $1`,
       [playerId, gravestoneId],
     );
+
+    // Capacity rejection must leave the grave and receipt ledger untouched.
+    await pool.query(
+      `INSERT INTO inventory ("playerId", "itemId", quantity, "slotIndex")
+       SELECT $1, 'bronze_shortsword', 1, slot
+       FROM generate_series(3, 27) AS slot`,
+      [playerId],
+    );
+    const fullInventoryOperationId = randomUUID();
+    await expect(
+      restarted.commitSafeAreaDeathGravestoneLootAsync({
+        operationId: fullInventoryOperationId,
+        playerId,
+        deathOperationId,
+        gravestoneId,
+        items: [{ itemId: "shrimp", quantity: 1 }],
+      }),
+    ).rejects.toThrow("safe_death_inventory_full");
+    await expect(
+      pool.query<{
+        items: Array<{ itemId: string; quantity: number }>;
+        operation_count: string;
+      }>(
+        `SELECT items,
+           (SELECT count(*)::text FROM operations_log WHERE id = $2) AS operation_count
+         FROM player_deaths WHERE "playerId" = $1`,
+        [playerId, fullInventoryOperationId],
+      ),
+    ).resolves.toMatchObject({
+      rows: [
+        {
+          items: [{ itemId: "shrimp", quantity: 2 }],
+          operation_count: "0",
+        },
+      ],
+    });
+    await pool.query(
+      `DELETE FROM inventory WHERE "playerId" = $1 AND "slotIndex" >= 3`,
+      [playerId],
+    );
+
     const firstLootOperationId = randomUUID();
     const firstLoot = await restarted.commitSafeAreaDeathGravestoneLootAsync({
       operationId: firstLootOperationId,
@@ -229,17 +327,53 @@ describeDatabase("atomic safe-area death custody", () => {
       transferred: firstLoot.transferred,
     });
 
-    const finalLoot = await restarted.commitSafeAreaDeathGravestoneLootAsync({
-      operationId: randomUUID(),
-      playerId,
-      deathOperationId,
-      gravestoneId,
-    });
-    expect(finalLoot).toMatchObject({
+    // Two hosts racing for the final unit serialize on the character lock. One
+    // exact receipt wins; the other sees terminal custody and cannot duplicate.
+    const concurrentOperations = [randomUUID(), randomUUID()];
+    const contender = new DatabaseSystem({} as never);
+    (contender as unknown as { db: typeof db }).db = db;
+    (contender as unknown as { pool: pg.Pool }).pool = pool;
+    const concurrentResults = await Promise.allSettled(
+      concurrentOperations.map((operationId, index) =>
+        (index === 0
+          ? restarted
+          : contender
+        ).commitSafeAreaDeathGravestoneLootAsync({
+          operationId,
+          playerId,
+          deathOperationId,
+          gravestoneId,
+          items: [{ itemId: "shrimp", quantity: 1 }],
+        }),
+      ),
+    );
+    const concurrentSuccesses = concurrentResults.filter(
+      (
+        result,
+      ): result is PromiseFulfilledResult<
+        Awaited<
+          ReturnType<typeof restarted.commitSafeAreaDeathGravestoneLootAsync>
+        >
+      > => result.status === "fulfilled",
+    );
+    const concurrentFailures = concurrentResults.filter(
+      (result): result is PromiseRejectedResult => result.status === "rejected",
+    );
+    expect(concurrentSuccesses).toHaveLength(1);
+    expect(concurrentSuccesses[0]!.value).toMatchObject({
       replayed: false,
       transferred: [{ itemId: "shrimp", quantity: 1 }],
       remaining: [],
     });
+    expect(concurrentFailures).toHaveLength(1);
+    expect(String(concurrentFailures[0]!.reason)).toContain(
+      "safe_death_lock_mismatch",
+    );
+    const concurrentReceipts = await pool.query<{ id: string }>(
+      `SELECT id FROM operations_log WHERE id = ANY($1::text[])`,
+      [concurrentOperations],
+    );
+    expect(concurrentReceipts.rows).toHaveLength(1);
 
     const finalCustody = await pool.query<{
       itemId: string;

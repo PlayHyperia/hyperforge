@@ -22,6 +22,7 @@ import {
   finalizeAgentAutonomyProgressionAttempt,
   recoverOpenAgentAutonomyProgressionAttempt,
 } from "../agentAutonomyProgression.js";
+import { loadAgentAutonomyLifecycleHead } from "../agentAutonomyLifecycle.js";
 import {
   getOrdinaryBankOperationId,
   getOrdinaryBankStageOperationId,
@@ -115,6 +116,7 @@ describeDatabase("agent autonomy progression PostgreSQL contract", () => {
       "progression-rollback",
       "progression-lifecycle-start-rollback",
       "progression-lifecycle",
+      "progression-autocast-lifecycle",
     ]) {
       await db.insert(schema.users).values({
         id: `account-${characterId}`,
@@ -304,6 +306,44 @@ describeDatabase("agent autonomy progression PostgreSQL contract", () => {
     ]);
   });
 
+  it("persists the typed autocast action through a fresh lifecycle migration", async () => {
+    const instance = makeInstance("progression-autocast-lifecycle");
+    instance.goal = {
+      type: "provisioning",
+      description: "Prepare an authored magic loadout",
+    };
+    const attempt = await beginAgentAutonomyProgressionAttempt(pool, {
+      attemptId: "17777777-7777-4777-8777-777777777777",
+      characterId: instance.config.characterId,
+      goalType: "provisioning",
+      actionType: "setAutocast",
+      decisionSource: "scripted",
+      startedAt: 1_200,
+    });
+    await finalizeAgentAutonomyProgressionAttempt(
+      pool,
+      attempt,
+      draftFor(
+        instance,
+        {
+          attemptedActionType: "setAutocast",
+          appliedActionType: "setAutocast",
+          outcome: "completed",
+        },
+        1_300,
+      ),
+    );
+
+    await expect(
+      loadAgentAutonomyLifecycleHead(db, instance.config.characterId),
+    ).resolves.toMatchObject({
+      state: "provisioning",
+      latestActionType: "setAutocast",
+      latestActionStartedAt: 1_200,
+      headRevision: 2,
+    });
+  });
+
   it("allows exactly one concurrent open attempt per agent", async () => {
     const attempts = await Promise.allSettled(
       Array.from({ length: 5 }, (_, index) =>
@@ -427,6 +467,34 @@ describeDatabase("agent autonomy progression PostgreSQL contract", () => {
       ),
     );
 
+    // Moving toward the next provisioning context stays in the same broad
+    // lifecycle category, but its bounded latest action must still persist for
+    // privacy-safe travel storytelling and restart recovery.
+    const provisioningTravel = await beginAgentAutonomyProgressionAttempt(
+      pool,
+      {
+        attemptId: "a4444444-4444-4444-8444-444444444444",
+        characterId,
+        goalType: "provisioning",
+        actionType: "move",
+        decisionSource: "scripted",
+        startedAt: 10_600,
+      },
+    );
+    await finalizeAgentAutonomyProgressionAttempt(
+      pool,
+      provisioningTravel,
+      draftFor(
+        instance,
+        {
+          attemptedActionType: "move",
+          appliedActionType: "move",
+          outcome: "dispatched",
+        },
+        10_700,
+      ),
+    );
+
     const events = await pool.query<{
       event_type: string;
       lifecycle_state: string;
@@ -520,9 +588,12 @@ describeDatabase("agent autonomy progression PostgreSQL contract", () => {
     const head = await pool.query<{
       current_state: string;
       current_goal_type: string;
+      latest_action_type: string;
+      latest_action_started_at: string;
       head_revision: string;
     }>(
-      `SELECT current_state, current_goal_type, head_revision::text
+      `SELECT current_state, current_goal_type, latest_action_type,
+              latest_action_started_at::text, head_revision::text
        FROM agent_autonomy_lifecycle_heads WHERE character_id = $1`,
       [characterId],
     );
@@ -530,9 +601,36 @@ describeDatabase("agent autonomy progression PostgreSQL contract", () => {
       {
         current_state: "provisioning",
         current_goal_type: "provisioning",
+        latest_action_type: "move",
+        latest_action_started_at: "10600",
         head_revision: "7",
       },
     ]);
+    const publicHead = await loadAgentAutonomyLifecycleHead(db, characterId);
+    expect(publicHead).toMatchObject({
+      state: "provisioning",
+      latestActionType: "move",
+      latestActionStartedAt: 10_600,
+      headRevision: 7,
+    });
+    expect(publicHead?.updatedAt).toBe(10_600);
+    expect(Object.isFrozen(publicHead)).toBe(true);
+    await expect(
+      pool.query(
+        `UPDATE agent_autonomy_lifecycle_heads
+         SET latest_action_started_at = NULL
+         WHERE character_id = $1`,
+        [characterId],
+      ),
+    ).rejects.toMatchObject({ code: "23514" });
+    await expect(
+      pool.query(
+        `UPDATE agent_autonomy_lifecycle_heads
+         SET latest_action_type = 'move_to_private_target'
+         WHERE character_id = $1`,
+        [characterId],
+      ),
+    ).rejects.toMatchObject({ code: "23514" });
 
     const columns = await pool.query<{ column_name: string }>(
       `SELECT column_name FROM information_schema.columns
@@ -1564,6 +1662,56 @@ describeDatabase("agent autonomy progression PostgreSQL contract", () => {
       ),
     ).rejects.toThrow(/matching progression edge/);
 
+    // Reconstruct the exact pre-0083 shape, write one valid historical
+    // preparation receipt, and require the checked-in migration to bind it.
+    await pool.query(`DROP VIEW streaming_duel_bank_action_audit`);
+    await pool.query(`DROP VIEW streaming_duel_committed_bank_action_audit`);
+    await pool.query(
+      `DROP TRIGGER agent_bank_operations_validate_preparation_insert
+       ON agent_bank_operations`,
+    );
+    await pool.query(
+      `ALTER TABLE agent_bank_operations
+         DROP CONSTRAINT "agent_bank_operations_preparationId_preparations_fk",
+         DROP CONSTRAINT agent_bank_operations_preparation_identity_check`,
+    );
+    await pool.query(
+      `DROP INDEX idx_agent_bank_operations_preparation_created`,
+    );
+    await pool.query(
+      `ALTER TABLE agent_bank_operations DROP COLUMN "preparationId"`,
+    );
+    const legacyPreparationId = "e3333333-3333-4333-8333-333333333333";
+    const legacyOperationId = "e4444444-4444-4444-8444-444444444444";
+    await pool.query(
+      `INSERT INTO streaming_duel_preparations (
+         "preparationId", "fencingToken", "agent1Id", "agent2Id",
+         "allowedBankActions", status, "selectedAt", "expiresAt",
+         "cancelledAt", "cancellationReason"
+       ) VALUES (
+         $1, 1, 'progression-bank-recovery', 'progression-linear',
+         ARRAY['open', 'deposit', 'withdraw', 'deposit_all'],
+         'cancelled', 1, 2, 2, 'migration_fixture'
+       )`,
+      [legacyPreparationId],
+    );
+    await pool.query(
+      `INSERT INTO agent_bank_operations (
+         "operationId", "playerId", action, "bankId", "itemId",
+         "requestedQuantity", "committedQuantity",
+         "inventoryQuantityAfter", "bankQuantityAfter",
+         "requestFingerprint", "itemCount", "createdAt"
+       ) VALUES (
+         $1, 'progression-bank-recovery', 'deposit', $2,
+         'progression_migration_item', 1, 1, 0, 1, $3, 1, 10000
+       )`,
+      [
+        legacyOperationId,
+        `duel-preparation:${legacyPreparationId}`,
+        "ef".repeat(32),
+      ],
+    );
+
     const before = await pool.query<{
       events: string;
       bank_receipts: string;
@@ -1586,6 +1734,8 @@ describeDatabase("agent autonomy progression PostgreSQL contract", () => {
     for (const migrationName of [
       "0077_add_atomic_composite_bank_withdrawal.sql",
       "0078_add_agent_store_operation_receipts.sql",
+      "0083_bind_duel_bank_receipts_to_preparations.sql",
+      "0084_add_durable_preparation_bank_open_audit.sql",
     ]) {
       const migration = await readFile(
         path.resolve(
@@ -1615,5 +1765,88 @@ describeDatabase("agent autonomy progression PostgreSQL contract", () => {
          (SELECT count(*)::text FROM agent_autonomy_lifecycle_events) AS lifecycle_events`,
     );
     expect(after.rows[0]).toEqual(before.rows[0]);
+
+    const openOperationId = "e5555555-5555-4555-8555-555555555555";
+    await pool.query(
+      `INSERT INTO streaming_duel_bank_open_events
+         ("operationId", "preparationId", "playerId", "bankId")
+       VALUES ($1, $2, 'progression-bank-recovery', $3)`,
+      [
+        openOperationId,
+        legacyPreparationId,
+        `duel-preparation:${legacyPreparationId}`,
+      ],
+    );
+    await expect(
+      pool.query(
+        `UPDATE streaming_duel_bank_open_events SET "createdAt" = 0
+         WHERE "operationId" = $1`,
+        [openOperationId],
+      ),
+    ).rejects.toThrow(/append-only/);
+    await expect(
+      pool.query(
+        `DELETE FROM streaming_duel_bank_open_events
+         WHERE "operationId" = $1`,
+        [openOperationId],
+      ),
+    ).rejects.toThrow(/append-only/);
+    await expect(
+      pool.query(`TRUNCATE streaming_duel_bank_open_events`),
+    ).rejects.toThrow(/append-only/);
+    const openMigration = await readFile(
+      path.resolve(
+        import.meta.dirname,
+        "../../database/migrations/0084_add_durable_preparation_bank_open_audit.sql",
+      ),
+      "utf8",
+    );
+    for (const statement of openMigration.split("--> statement-breakpoint")) {
+      if (statement.trim()) await pool.query(statement);
+    }
+
+    const migrated = await pool.query<{
+      preparation_id: string | null;
+      private_columns: string;
+      protection_triggers: string;
+      open_events: string;
+      open_protection_triggers: string;
+    }>(
+      `SELECT
+         (SELECT "preparationId" FROM agent_bank_operations
+          WHERE "operationId" = $1) AS preparation_id,
+         (SELECT count(*)::text FROM information_schema.columns
+          WHERE table_schema = 'public'
+            AND table_name = 'streaming_duel_bank_action_audit'
+            AND column_name IN (
+              'itemId', 'requestedQuantity', 'committedQuantity',
+              'inventoryQuantityAfter', 'bankQuantityAfter', 'itemCount'
+            )) AS private_columns,
+         (SELECT count(*)::text FROM pg_trigger
+          WHERE tgrelid = 'agent_bank_operations'::regclass
+            AND tgname IN (
+              'agent_bank_operations_reject_mutation',
+              'agent_bank_operations_validate_preparation_insert'
+            )
+            AND NOT tgisinternal) AS protection_triggers,
+         (SELECT count(*)::text FROM streaming_duel_bank_open_events
+          WHERE "operationId" = $2) AS open_events,
+         (SELECT count(*)::text FROM pg_trigger
+          WHERE tgrelid = 'streaming_duel_bank_open_events'::regclass
+            AND tgname IN (
+              'streaming_duel_bank_open_events_validate_insert',
+              'streaming_duel_bank_open_events_reject_mutation',
+              'streaming_duel_bank_open_events_reject_truncate'
+            )
+            AND NOT tgisinternal) AS open_protection_triggers`,
+      [legacyOperationId, openOperationId],
+    );
+    expect(migrated.rows[0]).toEqual({
+      preparation_id: legacyPreparationId,
+      private_columns: "0",
+      protection_triggers: "2",
+      open_events: "1",
+      open_protection_triggers: "3",
+    });
   });
 });

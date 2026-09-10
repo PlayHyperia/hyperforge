@@ -407,7 +407,7 @@ export class World extends EventEmitter {
   network!: NetworkSystem & {
     id?: string;
     send?: (event: string, data?: unknown) => void;
-    dropItem?: (itemId: string, slot?: number, quantity?: number) => void;
+    dropItem?: (itemId: string, slot?: number, quantity?: number) => string;
     lastInventoryByPlayerId?: Record<
       string,
       {

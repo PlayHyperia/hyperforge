@@ -4,7 +4,9 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 
 import {
+  assertGenericPlayerUpdateExcludesAttackStyleAuthority,
   assertGenericPlayerUpdateExcludesPrayerAuthority,
+  GENERIC_PLAYER_UPDATE_PROTECTED_ATTACK_STYLE_FIELDS,
   GENERIC_PLAYER_UPDATE_PROTECTED_PRAYER_FIELDS,
 } from "../prayer-custody-policy";
 import { PlayerRepository } from "../repositories/PlayerRepository";
@@ -12,7 +14,7 @@ import { DatabaseSystem } from "../../systems/DatabaseSystem";
 
 const sourceRoot = fileURLToPath(new URL("../../", import.meta.url));
 
-describe("generic player-save Prayer authority policy", () => {
+describe("generic player-save atomic authority policy", () => {
   it("allows ordinary non-Prayer fields", () => {
     expect(() =>
       assertGenericPlayerUpdateExcludesPrayerAuthority(
@@ -32,6 +34,20 @@ describe("generic player-save Prayer authority policy", () => {
         ),
       ).toThrow(
         `generic_player_update_prayer_custody_forbidden:test-boundary:${field}`,
+      );
+    },
+  );
+
+  it.each(GENERIC_PLAYER_UPDATE_PROTECTED_ATTACK_STYLE_FIELDS)(
+    "rejects stale generic %s authority",
+    (field) => {
+      expect(() =>
+        assertGenericPlayerUpdateExcludesAttackStyleAuthority(
+          { [field]: "aggressive" },
+          "test-boundary",
+        ),
+      ).toThrow(
+        `generic_player_update_attack_style_custody_forbidden:test-boundary:${field}`,
       );
     },
   );
@@ -57,6 +73,10 @@ describe("generic player-save Prayer authority policy", () => {
         `updateData.${field} = data.${field}`,
       );
     }
+    expect(repositorySource).not.toContain("u.attackStyle = data.attackStyle");
+    expect(databaseSystemSource).not.toContain(
+      "updateData.attackStyle = data.attackStyle",
+    );
     expect(repositorySource).not.toContain("u.prayerLevel = data.prayerLevel");
     expect(repositorySource).not.toContain("u.prayerXp = data.prayerXp");
     expect(databaseSystemSource).not.toContain(
@@ -116,6 +136,11 @@ describe("generic player-save Prayer authority policy", () => {
     ).rejects.toThrow(
       "generic_player_update_prayer_custody_forbidden:DatabaseSystem.savePlayerCompleteAsync:activePrayers",
     );
+    expect(() =>
+      database.savePlayer("player-1", { attackStyle: "rapid" } as never),
+    ).toThrow(
+      "generic_player_update_attack_style_custody_forbidden:DatabaseSystem.savePlayer:attackStyle",
+    );
   });
 
   it("rejects protected state in direct and batched repository saves", async () => {
@@ -132,6 +157,13 @@ describe("generic player-save Prayer authority policy", () => {
       ),
     ).rejects.toThrow(
       "generic_player_update_prayer_custody_forbidden:PlayerRepository.buildUpdateData:prayerPoints",
+    );
+    await expect(
+      repository.savePlayerAsync("player-1", {
+        attackStyle: "aggressive",
+      } as never),
+    ).rejects.toThrow(
+      "generic_player_update_attack_style_custody_forbidden:PlayerRepository.buildUpdateData:attackStyle",
     );
   });
 });

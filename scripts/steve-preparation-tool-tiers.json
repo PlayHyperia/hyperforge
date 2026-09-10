@@ -1,0 +1,96 @@
+{
+  "schemaVersion": 1,
+  "exportedAt": "2026-08-19T15:30:00.000Z",
+  "avatarId": "steve",
+  "runtimeItemManifest": {
+    "path": "packages/server/world/assets/manifests/items/tools.json",
+    "sha256": "6b0992d6aeabfeb45485abd094d4d5224939f5d37c5ed833d332890bb3a2db73"
+  },
+  "assetSourceLock": {
+    "path": "scripts/duel-launch-asset-sources.json",
+    "sha256": "11ccf382396949c4a7d211df7e178f1ee2d9d52057eeaed981c792e065c590ac",
+    "packId": "kaykit-rpg-tools-bits-1.0-free"
+  },
+  "families": [
+    {
+      "id": "hatchet",
+      "skill": "woodcutting",
+      "sourcePath": "artifacts/duel-launch-avatar-bakeoff/fitted-steve-active-preparation/bronze-hatchet-fitted.glb",
+      "sourceSha256": "d859f71d4564ed20d51bfaf784dc9531bef5e400e2a331190454f5ab5ade5635",
+      "sourceCandidateItemId": "bronze_hatchet",
+      "grip": "one-hand",
+      "headSelector": {
+        "centroidUvVGreaterThan": 0.25
+      }
+    },
+    {
+      "id": "pickaxe",
+      "skill": "mining",
+      "sourcePath": "artifacts/duel-launch-avatar-bakeoff/fitted-steve-active-preparation/bronze-pickaxe-fitted.glb",
+      "sourceSha256": "0851ca2e2ac8ea0263f73c2d69ecfff0b60e1b073303c7b4629777b0076aa90a",
+      "sourceCandidateItemId": "bronze_pickaxe",
+      "grip": "two-hand",
+      "headSelector": {
+        "centroidUvVGreaterThan": 0.25
+      }
+    }
+  ],
+  "tiers": [
+    {
+      "id": "bronze",
+      "priority": 6,
+      "headMaterial": {
+        "baseColorFactor": [0.78, 0.42, 0.2, 1],
+        "metallicFactor": 0.28,
+        "roughnessFactor": 0.46
+      }
+    },
+    {
+      "id": "iron",
+      "priority": 5,
+      "headMaterial": {
+        "baseColorFactor": [0.5, 0.53, 0.57, 1],
+        "metallicFactor": 0.3,
+        "roughnessFactor": 0.44
+      }
+    },
+    {
+      "id": "steel",
+      "priority": 4,
+      "headMaterial": {
+        "baseColorFactor": [0.72, 0.79, 0.88, 1],
+        "metallicFactor": 0.35,
+        "roughnessFactor": 0.4
+      }
+    },
+    {
+      "id": "mithril",
+      "priority": 3,
+      "headMaterial": {
+        "baseColorFactor": [0.24, 0.68, 0.86, 1],
+        "metallicFactor": 0.26,
+        "roughnessFactor": 0.42
+      }
+    },
+    {
+      "id": "adamant",
+      "priority": 2,
+      "headMaterial": {
+        "baseColorFactor": [0.14, 0.64, 0.31, 1],
+        "metallicFactor": 0.25,
+        "roughnessFactor": 0.43
+      }
+    },
+    {
+      "id": "rune",
+      "priority": 1,
+      "headMaterial": {
+        "baseColorFactor": [0.18, 0.43, 0.9, 1],
+        "metallicFactor": 0.3,
+        "roughnessFactor": 0.4
+      }
+    }
+  ],
+  "outputDirectory": "artifacts/duel-launch-avatar-bakeoff/fitted-steve-preparation-tiers",
+  "reportPath": "artifacts/duel-launch-avatar-bakeoff/steve-preparation-tool-tier-report.json"
+}

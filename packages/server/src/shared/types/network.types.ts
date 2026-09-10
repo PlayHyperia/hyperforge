@@ -57,6 +57,11 @@ export interface ServerSocket extends Socket {
 
   // Server-specific extensions
   accountId?: string;
+  /** Database-backed agent credential session bound during JWT verification. */
+  agentCredentialSessionId?: string;
+  /** Exact character authorized by the database-backed agent credential. */
+  agentCredentialCharacterId?: string;
+  agentCredentialExpiryTimeoutId?: NodeJS.Timeout;
   selectedCharacterId?: string;
   characterId?: string; // Track active character immediately for duplicate detection
   pendingClientReady?: boolean; // Buffer clientReady packets that arrive before player attach

@@ -1,94 +1,68 @@
 name: Sync Railway Status
 
 on:
-  workflow_run:
-    workflows:
-      - CI
-    types:
-      - completed
+  workflow_call:
+    inputs:
+      sha:
+        description: Full commit SHA whose CI-approved deployment is being tracked
+        required: true
+        type: string
+      state:
+        description: GitHub commit status state
+        required: true
+        type: string
+      description:
+        description: One-line GitHub commit status description
+        required: true
+        type: string
+      target_url:
+        description: Calling Railway deployment workflow URL
+        required: true
+        type: string
 
 permissions:
-  checks: read
   contents: read
   statuses: write
 
 jobs:
-  sync:
-    if: >
-      github.event.workflow_run.conclusion == 'success' &&
-      (
-        github.event.workflow_run.head_branch == 'main' ||
-        github.event.workflow_run.head_branch == 'develop' ||
-        github.event.workflow_run.head_branch == 'dev' ||
-        github.event.workflow_run.head_branch == 'hackathon'
-      )
+  publish:
+    name: Publish Railway commit status
     runs-on: ubuntu-latest
     steps:
-      - name: Resolve Railway commit status
+      - name: Checkout trusted deployment policy
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: workflow-source
+          persist-credentials: false
+
+      - name: Setup pinned Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version-file: workflow-source/.node-version
+
+      - name: Validate commit status input
+        env:
+          COMMIT_SHA: ${{ inputs.sha }}
+          COMMIT_STATE: ${{ inputs.state }}
+          COMMIT_DESCRIPTION: ${{ inputs.description }}
+          COMMIT_TARGET_URL: ${{ inputs.target_url }}
+        run: node workflow-source/scripts/railway-deployment-policy.mjs validate-commit-status
+
+      - name: Publish commit status
         env:
           GH_TOKEN: ${{ github.token }}
-          REPO: ${{ github.repository }}
-          SHA: ${{ github.event.workflow_run.head_sha }}
-          WORKFLOW_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.event.workflow_run.id }}
+          REPOSITORY: ${{ github.repository }}
+          COMMIT_SHA: ${{ inputs.sha }}
+          COMMIT_STATE: ${{ inputs.state }}
+          COMMIT_DESCRIPTION: ${{ inputs.description }}
+          COMMIT_TARGET_URL: ${{ inputs.target_url }}
         run: |
           set -euo pipefail
-
-          changed_files="$(gh api --paginate "repos/$REPO/commits/$SHA" --jq '.files[]?.filename')"
-
-          requires_deploy=false
-          while IFS= read -r file; do
-            case "$file" in
-              packages/shared/*|packages/client/*|packages/server/*|packages/plugin-hyperia/*|package.json|bun.lock|nixpacks.toml|railway.server.json|Dockerfile.server)
-                requires_deploy=true
-                break
-                ;;
-            esac
-          done <<< "$changed_files"
-
-          if [ "$requires_deploy" != "true" ]; then
-            gh api "repos/$REPO/statuses/$SHA" \
-              -X POST \
-              -f state=success \
-              -f context="hyperia - hyperia" \
-              -f description="No Railway deployment required" \
-              -f target_url="$WORKFLOW_URL"
-            exit 0
-          fi
-
-          deploy_run="$(gh api "repos/$REPO/commits/$SHA/check-runs" --jq '[.check_runs[] | select(.name | startswith("Deploy to Railway ("))] | sort_by(.completed_at) | last')"
-
-          if [ -z "$deploy_run" ] || [ "$deploy_run" = "null" ]; then
-            gh api "repos/$REPO/statuses/$SHA" \
-              -X POST \
-              -f state=failure \
-              -f context="hyperia - hyperia" \
-              -f description="Expected Railway deploy workflow did not run" \
-              -f target_url="$WORKFLOW_URL"
-            exit 1
-          fi
-
-          conclusion="$(echo "$deploy_run" | jq -r '.conclusion')"
-          details_url="$(echo "$deploy_run" | jq -r '.html_url')"
-          run_name="$(echo "$deploy_run" | jq -r '.name')"
-
-          case "$conclusion" in
-            success)
-              state=success
-              description="Deployment verified via $run_name"
-              ;;
-            failure|cancelled|timed_out|action_required)
-              state=failure
-              description="Deployment failed in $run_name"
-              ;;
-            *)
-              echo "Skipping unresolved deployment conclusion: $conclusion"
-              exit 0
-              ;;
-          esac
-
-          gh api "repos/$REPO/statuses/$SHA" \
-            -X POST \
-            -f state="$state" \
-            -f context="hyperia - hyperia" \
-            -f description="$description" \
-            -f target_url="$details_url"
+          gh api "repos/$REPOSITORY/statuses/$COMMIT_SHA" \
+            --method POST \
+            --field state="$COMMIT_STATE" \
+            --field context='hyperia - hyperia' \
+            --field description="$COMMIT_DESCRIPTION" \
+            --field target_url="$COMMIT_TARGET_URL" \
+            >/dev/null

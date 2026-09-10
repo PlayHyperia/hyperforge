@@ -48,7 +48,7 @@ describe("agent autonomy checkpoints", () => {
     expect(checkpoint).not.toHaveProperty("targetId");
   });
 
-  it("persists only the bounded server-derived survival bank purpose", () => {
+  it("persists only the bounded server-derived bank purposes", () => {
     const checkpoint = normalizeAgentAutonomyCheckpoint({
       ...validCheckpoint(),
       goal: {
@@ -62,6 +62,20 @@ describe("agent autonomy checkpoints", () => {
       type: "banking",
       description: "Stage survival food",
       bankPurpose: "survival_food",
+    });
+    expect(
+      normalizeAgentAutonomyCheckpoint({
+        ...validCheckpoint(),
+        goal: {
+          type: "banking",
+          description: "Check exact combat supplies",
+          bankPurpose: "combat_supply",
+        },
+      }).goal,
+    ).toEqual({
+      type: "banking",
+      description: "Check exact combat supplies",
+      bankPurpose: "combat_supply",
     });
     for (const goal of [
       {

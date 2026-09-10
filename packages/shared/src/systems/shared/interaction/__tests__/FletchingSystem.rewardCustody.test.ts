@@ -215,6 +215,15 @@ describe("FletchingSystem durable reward custody", () => {
       }),
     );
     startAndReachCompletion(SHAFT_RECIPE, 1, requestId);
+
+    expect(
+      events(EventType.PROCESSING_INTERACTION_PRESENTATION).at(-1)?.data,
+    ).toMatchObject({
+      playerId: PLAYER_ID,
+      skill: "fletching",
+      phase: "working",
+      targetPosition: null,
+    });
     expect(events(EventType.PROCESSING_REQUEST_PROGRESS)).toContainEqual(
       expect.objectContaining({
         data: {
@@ -266,7 +275,7 @@ describe("FletchingSystem durable reward custody", () => {
     });
     expect(events(EventType.INVENTORY_ITEM_REMOVED)).toHaveLength(0);
     expect(events(EventType.INVENTORY_ITEM_ADDED)).toHaveLength(0);
-    expect(events(EventType.SKILLS_XP_GAINED)).toHaveLength(0);
+    expect(events(EventType.SKILLS_PROGRESS_COMMITTED)).toHaveLength(0);
     expect(events(EventType.ANIMATION_PLAY)).toHaveLength(0);
     expect(
       events(EventType.UI_MESSAGE).some(
@@ -282,15 +291,28 @@ describe("FletchingSystem durable reward custody", () => {
 
     expect(events(EventType.INVENTORY_ITEM_REMOVED)).toHaveLength(0);
     expect(events(EventType.INVENTORY_ITEM_ADDED)).toHaveLength(0);
-    expect(events(EventType.SKILLS_XP_GAINED)).toEqual([
+    expect(events(EventType.SKILLS_PROGRESS_COMMITTED)).toEqual([
       expect.objectContaining({
-        data: { playerId: PLAYER_ID, skill: "fletching", amount: 5 },
+        data: {
+          playerId: PLAYER_ID,
+          operationId,
+          replayed: false,
+          skill: "fletching",
+          xpAmount: 5,
+          awardedXp: 5,
+          operationCommittedXp: 5,
+          currentXp: 5,
+          currentLevel: 1,
+        },
       }),
     ]);
     expect(events(EventType.ANIMATION_PLAY)).toHaveLength(1);
     expect(events(EventType.FLETCHING_COMPLETE)).toEqual([
       expect.objectContaining({ data: expect.objectContaining({ requestId }) }),
     ]);
+    expect(
+      events(EventType.PROCESSING_INTERACTION_PRESENTATION).at(-1)?.data,
+    ).toMatchObject({ playerId: PLAYER_ID, skill: null, phase: "idle" });
   });
 
   it("commits both arrow inputs, fifteen outputs, and fractional XP together", async () => {
@@ -311,13 +333,19 @@ describe("FletchingSystem durable reward custody", () => {
       consumables: [],
       outputs: [{ itemId: "bronze_arrow", quantity: 15 }],
     });
-    expect(events(EventType.SKILLS_XP_GAINED)).toHaveLength(0);
+    expect(events(EventType.SKILLS_PROGRESS_COMMITTED)).toHaveLength(0);
     await flushPromises();
     world.currentTick++;
     system.update(0.6);
-    expect(events(EventType.SKILLS_XP_GAINED)).toEqual([
+    expect(events(EventType.SKILLS_PROGRESS_COMMITTED)).toEqual([
       expect.objectContaining({
-        data: expect.objectContaining({ amount: 19.5 }),
+        data: expect.objectContaining({
+          xpAmount: 19.5,
+          awardedXp: 19.5,
+          operationCommittedXp: 19.5,
+          currentXp: 19.5,
+          currentLevel: 1,
+        }),
       }),
     ]);
   });
@@ -343,7 +371,7 @@ describe("FletchingSystem durable reward custody", () => {
     expect(commitProcessingActionAtomic.mock.calls[0]).toEqual(
       commitProcessingActionAtomic.mock.calls[1],
     );
-    expect(events(EventType.SKILLS_XP_GAINED)).toHaveLength(1);
+    expect(events(EventType.SKILLS_PROGRESS_COMMITTED)).toHaveLength(1);
   });
 
   it("reconciles one committed fletch after disconnect and stops future work", async () => {
@@ -362,7 +390,7 @@ describe("FletchingSystem durable reward custody", () => {
     world.currentTick++;
     system.update(0.6);
 
-    expect(events(EventType.SKILLS_XP_GAINED)).toHaveLength(1);
+    expect(events(EventType.SKILLS_PROGRESS_COMMITTED)).toHaveLength(1);
     expect(events(EventType.FLETCHING_COMPLETE)).toHaveLength(1);
     world.currentTick = 200;
     system.update(0.6);
@@ -374,6 +402,42 @@ describe("FletchingSystem durable reward custody", () => {
       retryWaiting: 0,
       maxRetryCount: 0,
     });
+  });
+
+  it("keeps a late committed fletch but does not resurrect work presentation after movement", async () => {
+    let release: ((receipt: AtomicProcessingActionReceipt) => void) | undefined;
+    commitProcessingActionAtomic.mockImplementation(
+      (_playerId: string, operationId: string) =>
+        new Promise<AtomicProcessingActionReceipt>((resolve) => {
+          release = (receipt) => resolve({ ...receipt, operationId });
+        }),
+    );
+    startAndReachCompletion(SHAFT_RECIPE, 2);
+    const operationId = commitProcessingActionAtomic.mock.calls[0][1];
+
+    emit(EventType.MOVEMENT_CLICK_TO_MOVE, {
+      playerId: PLAYER_ID,
+      targetPosition: { x: 10, y: 0, z: 10 },
+    });
+    expect(
+      events(EventType.PROCESSING_INTERACTION_PRESENTATION).at(-1)?.data,
+    ).toMatchObject({ skill: null, phase: "idle" });
+    release?.(committedReceipt(operationId));
+    await flushPromises();
+    world.currentTick++;
+    system.update(0.6);
+
+    expect(events(EventType.SKILLS_PROGRESS_COMMITTED)).toHaveLength(1);
+    expect(events(EventType.FLETCHING_COMPLETE)).toHaveLength(1);
+    expect(events(EventType.ANIMATION_PLAY)).toHaveLength(0);
+    expect(
+      events(EventType.UI_MESSAGE).some(
+        (event) => (event.data as { type?: string }).type === "success",
+      ),
+    ).toBe(false);
+    world.currentTick = 200;
+    system.update(0.6);
+    expect(commitProcessingActionAtomic).toHaveBeenCalledOnce();
   });
 
   it("bounds a non-finite internal quantity to one action", async () => {
@@ -391,5 +455,45 @@ describe("FletchingSystem durable reward custody", () => {
     expect(commitProcessingActionAtomic).toHaveBeenCalledOnce();
     expect(events(EventType.FLETCHING_COMPLETE)).toHaveLength(1);
     expect(system.isPlayerFletching(PLAYER_ID)).toBe(false);
+  });
+
+  it("drains exactly one in-flight fletch after quiescence with no later batch or presentation", async () => {
+    let release: ((receipt: AtomicProcessingActionReceipt) => void) | undefined;
+    commitProcessingActionAtomic.mockImplementation(
+      (_playerId: string, operationId: string) =>
+        new Promise<AtomicProcessingActionReceipt>((resolve) => {
+          release = (receipt) => resolve({ ...receipt, operationId });
+        }),
+    );
+    startAndReachCompletion(SHAFT_RECIPE, 2);
+    const operationId = commitProcessingActionAtomic.mock.calls[0][1];
+    expect(system.isPlayerProcessingQuiescent(PLAYER_ID)).toBe(false);
+
+    const presentationBoundary = events(
+      EventType.PROCESSING_INTERACTION_PRESENTATION,
+    ).length;
+    system.requestPlayerProcessingQuiescence(PLAYER_ID);
+    expect(system.isPlayerProcessingQuiescent(PLAYER_ID)).toBe(false);
+    expect(
+      events(EventType.PROCESSING_INTERACTION_PRESENTATION).at(-1)?.data,
+    ).toMatchObject({ playerId: PLAYER_ID, skill: null, phase: "idle" });
+
+    release?.(committedReceipt(operationId));
+    await flushPromises();
+    world.currentTick++;
+    system.update(0.6);
+    world.currentTick = 200;
+    system.update(0.6);
+
+    expect(system.isPlayerProcessingQuiescent(PLAYER_ID)).toBe(true);
+    expect(commitProcessingActionAtomic).toHaveBeenCalledOnce();
+    expect(events(EventType.FLETCHING_COMPLETE)).toHaveLength(1);
+    expect(
+      events(EventType.PROCESSING_INTERACTION_PRESENTATION)
+        .slice(presentationBoundary)
+        .some(
+          (event) => (event.data as { phase?: string }).phase === "working",
+        ),
+    ).toBe(false);
   });
 });

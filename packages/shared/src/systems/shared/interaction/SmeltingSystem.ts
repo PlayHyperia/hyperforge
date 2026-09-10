@@ -29,6 +29,11 @@ import type {
   InventorySystem,
 } from "../character/InventorySystem";
 import { canPlayerUseProcessingStation } from "./ProcessingStationAuthority";
+import {
+  clearProcessingInteractionPresentation,
+  publishProcessingInteractionPresentation,
+} from "./ProcessingInteractionPresentation";
+import type { PlayerProcessingQuiescenceSystem } from "./ProcessingQuiescence";
 
 /** Active smelting session for a player */
 interface SmeltingSession {
@@ -56,7 +61,10 @@ interface PendingSmeltingAction {
   stopAfterCommit: boolean;
 }
 
-export class SmeltingSystem extends SystemBase {
+export class SmeltingSystem
+  extends SystemBase
+  implements PlayerProcessingQuiescenceSystem
+{
   private readonly activeSessions = new Map<string, SmeltingSession>();
   private readonly authorizedFurnaces = new Map<string, string>();
   private readonly pendingActions = new Map<string, PendingSmeltingAction>();
@@ -364,6 +372,11 @@ export class SmeltingSystem extends SystemBase {
     };
 
     this.activeSessions.set(playerId, session);
+    publishProcessingInteractionPresentation(this.world, {
+      playerId,
+      skill: "smelting",
+      targetEntityId: furnaceId,
+    });
     this.reportProcessingRequestProgress(
       playerId,
       requestId,
@@ -599,30 +612,40 @@ export class SmeltingSystem extends SystemBase {
         continue;
       }
 
+      if (receipt.xpAmount > 0) {
+        this.emitTypedEvent(EventType.SKILLS_PROGRESS_COMMITTED, {
+          playerId: receipt.playerId,
+          operationId: receipt.operationId,
+          replayed: receipt.replayed,
+          skill: receipt.skill,
+          xpAmount: receipt.xpAmount,
+          awardedXp: receipt.awardedXp,
+          operationCommittedXp: receipt.operationCommittedXp,
+          currentXp: receipt.currentXp,
+          currentLevel: receipt.currentLevel,
+        });
+      }
       this.pendingActions.delete(pending.playerId);
       const session = this.activeSessions.get(pending.playerId);
       if (!session || session.barItemId !== pending.barItemId) continue;
 
-      this.emitTypedEvent(EventType.ANIMATION_PLAY, {
-        entityId: pending.playerId,
-        animation: "smelting",
-        loop: false,
-      });
-      if (receipt.awardedXp > 0) {
-        this.emitTypedEvent(EventType.SKILLS_XP_GAINED, {
-          playerId: pending.playerId,
-          skill: "smithing",
-          amount: receipt.awardedXp,
+      if (!pending.stopAfterCommit) {
+        this.emitTypedEvent(EventType.ANIMATION_PLAY, {
+          entityId: pending.playerId,
+          animation: "smelting",
+          loop: false,
         });
       }
       if (pending.success) {
         session.smelted++;
         const barName = session.barItemId.replace("_bar", " bar");
-        this.emitTypedEvent(EventType.UI_MESSAGE, {
-          playerId: pending.playerId,
-          message: `You smelt a ${barName}.`,
-          type: "success",
-        });
+        if (!pending.stopAfterCommit) {
+          this.emitTypedEvent(EventType.UI_MESSAGE, {
+            playerId: pending.playerId,
+            message: `You smelt a ${barName}.`,
+            type: "success",
+          });
+        }
         this.emitTypedEvent(EventType.SMELTING_SUCCESS, {
           playerId: pending.playerId,
           barItemId: session.barItemId,
@@ -630,11 +653,13 @@ export class SmeltingSystem extends SystemBase {
         });
       } else {
         session.failed++;
-        this.emitTypedEvent(EventType.UI_MESSAGE, {
-          playerId: pending.playerId,
-          message: "The ore is too impure and you fail to smelt it.",
-          type: "warning",
-        });
+        if (!pending.stopAfterCommit) {
+          this.emitTypedEvent(EventType.UI_MESSAGE, {
+            playerId: pending.playerId,
+            message: "The ore is too impure and you fail to smelt it.",
+            type: "warning",
+          });
+        }
         this.emitTypedEvent(EventType.SMELTING_FAILURE, {
           playerId: pending.playerId,
           barItemId: session.barItemId,
@@ -661,6 +686,7 @@ export class SmeltingSystem extends SystemBase {
     if (!session) return;
 
     this.activeSessions.delete(playerId);
+    clearProcessingInteractionPresentation(this.world, playerId, "smelting");
 
     // Emit completion event
     this.finishProcessingRequest(session.requestId);
@@ -680,6 +706,7 @@ export class SmeltingSystem extends SystemBase {
    * Cancel smelting for a player
    */
   private cancelSmelting(playerId: string): void {
+    clearProcessingInteractionPresentation(this.world, playerId, "smelting");
     const pending = this.pendingActions.get(playerId);
     if (pending) {
       pending.stopAfterCommit = true;
@@ -767,6 +794,17 @@ export class SmeltingSystem extends SystemBase {
    */
   isPlayerSmelting(playerId: string): boolean {
     return this.activeSessions.has(playerId);
+  }
+
+  requestPlayerProcessingQuiescence(playerId: string): void {
+    this.authorizedFurnaces.delete(playerId);
+    this.cancelSmelting(playerId);
+  }
+
+  isPlayerProcessingQuiescent(playerId: string): boolean {
+    return (
+      !this.activeSessions.has(playerId) && !this.pendingActions.has(playerId)
+    );
   }
 
   getSmeltingCustodyStats(): {

@@ -3,6 +3,7 @@ import { act, render, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { EventType } from "@hyperforge/shared";
 import {
+  resolveStreamingRenderDpr,
   STREAMING_BOOT_TIMEOUT_MS,
   StreamingMode,
 } from "../../../src/screens/StreamingMode";
@@ -47,7 +48,31 @@ function createMockWorld() {
       attachmentMismatches: [],
     }),
   };
+  const prefs = {
+    setDPR: vi.fn(),
+    setShadows: vi.fn(),
+    setPostprocessing: vi.fn(),
+    setBloom: vi.fn(),
+    setColorGrading: vi.fn(),
+    setDepthBlur: vi.fn(),
+    setWaterReflections: vi.fn(),
+    setEntityHighlighting: vi.fn(),
+  };
+  const captureStream = {} as MediaStream;
+  const captureNode = {} as GainNode;
+  const audio = {
+    ctx: {} as AudioContext,
+    getOutputCaptureNode: vi.fn(() => captureNode),
+    getOutputCaptureStream: vi.fn(() => captureStream),
+    activateForStreamingCapture: vi.fn(async () => {}),
+  };
+  const musicSystem = {
+    setCategoryLock: vi.fn(),
+  };
   const world = {
+    audio,
+    musicSystem,
+    prefs,
     entities: {
       get: (id: string) => players.get(id) ?? null,
       players,
@@ -55,16 +80,7 @@ function createMockWorld() {
     },
     getSystem: (name: string) => {
       if (name === "prefs") {
-        return {
-          setDPR: vi.fn(),
-          setShadows: vi.fn(),
-          setPostprocessing: vi.fn(),
-          setBloom: vi.fn(),
-          setColorGrading: vi.fn(),
-          setDepthBlur: vi.fn(),
-          setWaterReflections: vi.fn(),
-          setEntityHighlighting: vi.fn(),
-        };
+        return prefs;
       }
       if (name === "terrain") {
         return {
@@ -82,11 +98,8 @@ function createMockWorld() {
           setEnabled: vi.fn(),
         };
       }
-      if (name === "music-system") {
-        return {
-          setCategoryLock: vi.fn(),
-        };
-      }
+      if (name === "music") return musicSystem;
+      if (name === "audio") return audio;
       return null;
     },
     on: (event: string, listener: Listener) => {
@@ -162,11 +175,23 @@ vi.mock("../../../src/components/streaming/StreamingOverlay", () => ({
     state,
   }: {
     state: {
-      cycle?: { phase?: string };
+      cycle?: {
+        phase?: string;
+        actionObservations?: readonly { sequence?: number }[];
+        agent1?: { strategySummary?: { tacticalMacro?: string } | null } | null;
+      };
       terminalNotice?: { outcome?: string } | null;
     } | null;
   }) => (
-    <div data-testid="streaming-overlay">
+    <div
+      data-testid="streaming-overlay"
+      data-action-sequence={
+        state?.cycle?.actionObservations?.at(-1)?.sequence ?? "none"
+      }
+      data-strategy-macro={
+        state?.cycle?.agent1?.strategySummary?.tacticalMacro ?? "none"
+      }
+    >
       {state?.terminalNotice?.outcome === "cancelled"
         ? "CANCELLED"
         : (state?.cycle?.phase ?? "NONE")}
@@ -229,6 +254,7 @@ function createStreamingState(
       winnerId: null,
       winnerName: null,
       winReason: null,
+      actionObservations: [],
     },
     leaderboard: [],
     cameraTarget: null,
@@ -261,6 +287,7 @@ function publishStreamingPerformanceSnapshot(
 
 describe("StreamingMode component", () => {
   beforeEach(() => {
+    window.history.replaceState(null, "", "/stream.html");
     gameClientState.mode = "setup";
     gameClientState.wsUrl = null;
     gameClientState.world = null;
@@ -299,6 +326,16 @@ describe("StreamingMode component", () => {
         __HYPERIA_STREAM_PERFORMANCE__?: unknown;
       }
     ).__HYPERIA_STREAM_PERFORMANCE__ = null;
+    (
+      window as Window & {
+        __HYPERIA_STREAM_RENDER_PROFILE__?: unknown;
+      }
+    ).__HYPERIA_STREAM_RENDER_PROFILE__ = null;
+    delete (
+      window as Window & {
+        __HYPERIA_STREAM_AUDIO_CAPTURE__?: unknown;
+      }
+    ).__HYPERIA_STREAM_AUDIO_CAPTURE__;
   });
 
   afterEach(() => {
@@ -311,6 +348,107 @@ describe("StreamingMode component", () => {
 
     await waitFor(() => {
       expect(gameClientState.wsUrl).toContain("streamToken=stream-token");
+    });
+  });
+
+  it("activates and exposes only the game-owned master mix for capture", async () => {
+    const { unmount } = render(<StreamingMode />);
+
+    await waitFor(() => {
+      expect(
+        gameClientState.world?.audio.activateForStreamingCapture,
+      ).toHaveBeenCalledTimes(1);
+      expect(
+        gameClientState.world?.audio.getOutputCaptureStream,
+      ).toHaveBeenCalledTimes(1);
+      expect(
+        gameClientState.world?.musicSystem.setCategoryLock,
+      ).toHaveBeenCalledWith("combat");
+    });
+    const bridge = (
+      window as Window & {
+        __HYPERIA_STREAM_AUDIO_CAPTURE__?: {
+          stream: MediaStream;
+          node: GainNode;
+          activate: () => Promise<void>;
+        };
+      }
+    ).__HYPERIA_STREAM_AUDIO_CAPTURE__;
+    expect(bridge?.stream).toBe(
+      gameClientState.world?.audio.getOutputCaptureStream.mock.results[0]
+        ?.value,
+    );
+    expect(bridge?.node).toBe(
+      gameClientState.world?.audio.getOutputCaptureNode.mock.results[0]?.value,
+    );
+    await bridge?.activate();
+    expect(
+      gameClientState.world?.audio.activateForStreamingCapture,
+    ).toHaveBeenCalledTimes(2);
+
+    unmount();
+    expect(
+      gameClientState.world?.musicSystem.setCategoryLock,
+    ).toHaveBeenCalledWith(null);
+    expect(
+      (window as Window & { __HYPERIA_STREAM_AUDIO_CAPTURE__?: unknown })
+        .__HYPERIA_STREAM_AUDIO_CAPTURE__,
+    ).toBeUndefined();
+  });
+
+  it("keeps a native 720p capture at full render resolution", () => {
+    expect(resolveStreamingRenderDpr(1280, 720)).toBe(1);
+  });
+
+  it("holds landscape and portrait 1080p captures to the same 720p pixel budget", () => {
+    expect(resolveStreamingRenderDpr(1920, 1080)).toBeCloseTo(2 / 3, 10);
+    expect(resolveStreamingRenderDpr(1080, 1920)).toBeCloseTo(2 / 3, 10);
+  });
+
+  it("applies and exposes the exact explicit fallback render profile", async () => {
+    window.history.replaceState(
+      null,
+      "",
+      "/stream.html?streamRenderProfile=fallback-720p30-v1&streamFps=30",
+    );
+    render(<StreamingMode />);
+
+    await waitFor(() => {
+      expect(
+        (
+          window as Window & {
+            __HYPERIA_STREAM_RENDER_PROFILE__?: {
+              id?: string;
+              targetFps?: number;
+              explicit?: boolean;
+            } | null;
+          }
+        ).__HYPERIA_STREAM_RENDER_PROFILE__,
+      ).toEqual(
+        expect.objectContaining({
+          id: "fallback-720p30-v1",
+          targetFps: 30,
+          explicit: true,
+        }),
+      );
+      expect(gameClientState.world?.prefs.setShadows).toHaveBeenCalledWith(
+        "none",
+      );
+      expect(
+        gameClientState.world?.prefs.setPostprocessing,
+      ).toHaveBeenCalledWith(false);
+    });
+  });
+
+  it("applies the adaptive broadcast render scale to the live world", async () => {
+    vi.stubGlobal("innerWidth", 1920);
+    vi.stubGlobal("innerHeight", 1080);
+    render(<StreamingMode />);
+
+    await waitFor(() => {
+      expect(gameClientState.world?.prefs.setDPR).toHaveBeenCalledWith(
+        expect.closeTo(2 / 3, 10),
+      );
     });
   });
 
@@ -441,6 +579,96 @@ describe("StreamingMode component", () => {
 
     await waitFor(() => {
       expect(getByTestId("streaming-overlay").textContent).toBe("FIGHTING");
+    });
+  });
+
+  it("renders an action-only authority update when the latest observation sequence changes", async () => {
+    const { getByTestId } = render(<StreamingMode />);
+
+    await waitFor(() => {
+      expect(getByTestId("streaming-overlay")).toHaveAttribute(
+        "data-action-sequence",
+        "none",
+      );
+    });
+
+    const unchangedFight = createStreamingState();
+    act(() => {
+      gameClientState.world?.emitLocal("streaming:state:update", {
+        ...unchangedFight,
+        cycle: {
+          ...unchangedFight.cycle,
+          actionObservations: [
+            {
+              schemaVersion: 1,
+              sequence: 1,
+              tick: 20,
+              observedAt: 2_000,
+              cycleId: unchangedFight.cycle.cycleId,
+              duelId: "duel-1",
+              actorId: unchangedFight.cycle.agent1.id,
+              opponentId: unchangedFight.cycle.agent2.id,
+              phase: "FIGHTING",
+              combatRole: "ranged",
+              tacticalMacro: "kite",
+              action: "movement",
+              outcome: "accepted",
+              value: "reposition",
+              amount: null,
+            },
+          ],
+        },
+      });
+    });
+
+    await waitFor(() => {
+      expect(getByTestId("streaming-overlay")).toHaveAttribute(
+        "data-action-sequence",
+        "1",
+      );
+    });
+  });
+
+  it("renders a strategy-only authority update when the frozen summary arrives", async () => {
+    const { getByTestId } = render(<StreamingMode />);
+
+    await waitFor(() => {
+      expect(getByTestId("streaming-overlay")).toHaveAttribute(
+        "data-strategy-macro",
+        "none",
+      );
+    });
+
+    const unchangedFight = createStreamingState();
+    act(() => {
+      gameClientState.world?.emitLocal("streaming:state:update", {
+        ...unchangedFight,
+        cycle: {
+          ...unchangedFight.cycle,
+          agent1: {
+            ...unchangedFight.cycle.agent1,
+            strategySummary: {
+              schemaVersion: 1,
+              approach: "balanced",
+              tacticalMacro: "orbit",
+              attackStyle: "accurate",
+              prayer: "hawk_eye",
+              preferredCombatRole: null,
+              foodThreshold: 40,
+              switchDefensiveAt: 30,
+              source: "model",
+              policyVersion: "duel-preparation-role-v3",
+            },
+          },
+        },
+      });
+    });
+
+    await waitFor(() => {
+      expect(getByTestId("streaming-overlay")).toHaveAttribute(
+        "data-strategy-macro",
+        "orbit",
+      );
     });
   });
 

@@ -22,7 +22,7 @@
     }
   },
   "scripts": {
-    "build": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })\" && tsc",
+    "build": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })\" && tsc && node scripts/build-executable-manifest.mjs",
     "dev": "tsc --watch",
     "test": "vitest run --passWithNoTests",
     "test:watch": "vitest",

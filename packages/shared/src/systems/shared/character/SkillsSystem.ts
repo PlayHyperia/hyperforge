@@ -35,6 +35,11 @@ import { Entity } from "../../../entities/Entity";
 import { SkillData, Skills } from "../../../types/core/core";
 import { StatsComponent } from "../../../components/StatsComponent";
 import { EventType } from "../../../types/events";
+import type {
+  DuelCombatProgressCommittedPayload,
+  QuestCompletionCommittedPayload,
+  SkillsProgressCommittedPayload,
+} from "../../../types/events";
 import type { World } from "../../../types/index";
 import { SystemBase } from "../infrastructure/SystemBase";
 import {
@@ -43,6 +48,10 @@ import {
 } from "../../../utils/game/ComponentUtils";
 import { COMBAT_CONSTANTS } from "../../../constants/CombatConstants";
 import { Logger } from "../../../utils/Logger";
+import type {
+  MobCombatProgressReceipt,
+  MobCombatProgressSkill,
+} from "../../../types/network/database";
 
 /** Skill name constants for type-safe skill references */
 export const Skill = {
@@ -64,6 +73,24 @@ export const Skill = {
   FLETCHING: "fletching" as keyof Skills,
   RUNECRAFTING: "runecrafting" as keyof Skills,
 };
+const COMMITTED_CUSTODY_SKILLS = new Set<keyof Skills>([
+  Skill.ATTACK,
+  Skill.STRENGTH,
+  Skill.DEFENSE,
+  Skill.CONSTITUTION,
+  Skill.RANGE,
+  Skill.MAGIC,
+  Skill.WOODCUTTING,
+  Skill.MINING,
+  Skill.FISHING,
+  Skill.FIREMAKING,
+  Skill.COOKING,
+  Skill.SMITHING,
+  Skill.AGILITY,
+  Skill.CRAFTING,
+  Skill.FLETCHING,
+  Skill.RUNECRAFTING,
+]);
 
 import type {
   SkillMilestone,
@@ -88,6 +115,8 @@ export class SkillsSystem extends SystemBase {
   private xpTable: number[] = [];
   private xpDrops: XPDrop[] = [];
   private skillMilestones: Map<keyof Skills, SkillMilestone[]> = new Map();
+  private readonly presentedMobCombatOperations = new Set<string>();
+  private readonly presentedCommittedProgressOperations = new Set<string>();
 
   constructor(world: World) {
     super(world, {
@@ -109,6 +138,18 @@ export class SkillsSystem extends SystemBase {
       damageDealt: number;
       attackStyle: string;
     }>(EventType.COMBAT_KILL, (data) => this.handleCombatKill(data));
+    this.subscribe<{
+      playerId: string;
+      lootOperationId: string;
+      replayed: boolean;
+      combatProgress: MobCombatProgressReceipt[];
+    }>(EventType.MOB_LOOT_COMMITTED, (data) => {
+      this.reconcileCommittedMobCombatProgress(data);
+    });
+    this.subscribe<DuelCombatProgressCommittedPayload>(
+      EventType.DUEL_COMBAT_PROGRESS_COMMITTED,
+      (data) => this.reconcileCommittedDuelCombatProgress(data),
+    );
     this.subscribe<{ entityId: string; skill: keyof Skills; xp: number }>(
       EventType.SKILLS_ACTION,
       (data) => this.handleSkillAction(data),
@@ -119,12 +160,21 @@ export class SkillsSystem extends SystemBase {
         this.handleExternalXPGain(data);
       },
     );
+    this.subscribe<SkillsProgressCommittedPayload>(
+      EventType.SKILLS_PROGRESS_COMMITTED,
+      (data) => this.reconcileCommittedSkillProgression(data),
+    );
+    this.subscribe<QuestCompletionCommittedPayload>(
+      EventType.QUEST_COMPLETION_COMMITTED,
+      (data) => this.reconcileCommittedQuestProgression(data),
+    );
     this.subscribe(
       EventType.QUEST_COMPLETED,
       (data: {
         playerId: string;
         questId: string;
         rewards: { xp?: Record<keyof Skills, number> };
+        progressionCommitted?: boolean;
       }) => {
         this.handleQuestComplete(data);
       },
@@ -155,6 +205,7 @@ export class SkillsSystem extends SystemBase {
       this.emitTypedEvent(EventType.SKILLS_UPDATED, {
         playerId,
         skills: entityData.skills as unknown as Skills,
+        persistence: "already_committed",
       });
     }
   }
@@ -363,6 +414,7 @@ export class SkillsSystem extends SystemBase {
     this.emitTypedEvent(EventType.SKILLS_UPDATED, {
       playerId: entityId,
       skills: this.getSkills(entityId) || {},
+      persistence: "already_committed",
     });
     return true;
   }
@@ -926,6 +978,298 @@ export class SkillsSystem extends SystemBase {
     });
   }
 
+  /**
+   * Converge live combat skills on an already committed mob-death receipt.
+   * Loot, quest progress, and every returned skill value are durable before
+   * this runs, so this path must not emit another XP mutation or database save.
+   */
+  private reconcileCommittedMobCombatProgress(data: {
+    playerId: string;
+    lootOperationId: string;
+    replayed: boolean;
+    combatProgress: MobCombatProgressReceipt[];
+  }): void {
+    this.reconcileCommittedCombatProgress({
+      playerId: data.playerId,
+      operationId: data.lootOperationId,
+      replayed: data.replayed,
+      combatProgress: data.combatProgress,
+      receiptKind: "mob",
+    });
+  }
+
+  private reconcileCommittedDuelCombatProgress(
+    data: DuelCombatProgressCommittedPayload,
+  ): void {
+    this.reconcileCommittedCombatProgress({
+      playerId: data.playerId,
+      operationId: data.damageOperationId,
+      replayed: data.replayed,
+      combatProgress: data.combatProgress,
+      receiptKind: "duel",
+    });
+  }
+
+  private reconcileCommittedCombatProgress(data: {
+    playerId: string;
+    operationId: string;
+    replayed: boolean;
+    combatProgress: MobCombatProgressReceipt[];
+    receiptKind: "mob" | "duel";
+  }): void {
+    const operationId = String(data.operationId ?? "").trim();
+    const playerId = String(data.playerId ?? "").trim();
+    const progress = Array.isArray(data.combatProgress)
+      ? data.combatProgress
+      : [];
+    const allowed = new Set<MobCombatProgressSkill>([
+      "attack",
+      "strength",
+      "defense",
+      "constitution",
+      "ranged",
+      "magic",
+    ]);
+    if (
+      !playerId ||
+      (data.receiptKind === "mob"
+        ? !/^ground-item-mob-loot:[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(
+            operationId,
+          )
+        : !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+            operationId,
+          )) ||
+      typeof data.replayed !== "boolean" ||
+      progress.length === 0 ||
+      progress.length > 4 ||
+      new Set(progress.map((entry) => entry.skill)).size !== progress.length ||
+      progress.some(
+        (entry) =>
+          !allowed.has(entry.skill) ||
+          !Number.isSafeInteger(entry.xpAmount) ||
+          entry.xpAmount <= 0 ||
+          entry.xpAmount > 1_000_000 ||
+          !Number.isSafeInteger(entry.awardedXp) ||
+          entry.awardedXp < 0 ||
+          entry.awardedXp > entry.xpAmount ||
+          !Number.isSafeInteger(entry.operationCommittedXp) ||
+          entry.operationCommittedXp < entry.awardedXp ||
+          entry.operationCommittedXp > SkillsSystem.MAX_XP ||
+          !Number.isSafeInteger(entry.currentXp) ||
+          entry.currentXp < entry.operationCommittedXp ||
+          entry.currentXp > SkillsSystem.MAX_XP ||
+          !Number.isSafeInteger(entry.currentLevel) ||
+          entry.currentLevel < 1 ||
+          entry.currentLevel > SkillsSystem.MAX_LEVEL ||
+          this.getLevelForXP(entry.currentXp) !== entry.currentLevel,
+      )
+    ) {
+      console.error(
+        `[SkillsSystem] Refused invalid committed ${data.receiptKind}-combat receipt ${operationId || "unknown"}`,
+      );
+      return;
+    }
+
+    const entity = this.world.entities.get(playerId) as Entity | undefined;
+    const stats = entity ? getStatsComponent(entity) : undefined;
+    if (!entity || !stats) return;
+    const presentVisual =
+      !data.replayed && !this.presentedMobCombatOperations.has(operationId);
+    if (!data.replayed) {
+      this.presentedMobCombatOperations.add(operationId);
+      if (this.presentedMobCombatOperations.size > 4_096) {
+        const oldest = this.presentedMobCombatOperations.values().next().value;
+        if (oldest) this.presentedMobCombatOperations.delete(oldest);
+      }
+    }
+
+    const accepted: MobCombatProgressReceipt[] = [];
+    for (const entry of progress) {
+      const skill = entry.skill as keyof Skills;
+      const current = stats[skill] as SkillData | undefined;
+      // A delayed older response must never regress a newer live receipt.
+      if (!current || entry.currentXp < current.xp) continue;
+      const oldLevel = current.level;
+      current.xp = entry.currentXp;
+      if (presentVisual && entry.currentLevel > oldLevel) {
+        this.handleLevelUp(entity, skill, oldLevel, entry.currentLevel);
+      } else {
+        current.level = entry.currentLevel;
+      }
+      accepted.push(entry);
+    }
+    if (accepted.length === 0) return;
+
+    this.updateCombatLevel(entity, stats);
+    this.updateTotalLevel(entity, stats);
+    for (const entry of accepted) {
+      if (!presentVisual || entry.awardedXp <= 0) continue;
+      this.xpDrops.push({
+        entityId: playerId,
+        playerId,
+        skill: entry.skill,
+        amount: entry.awardedXp,
+        timestamp: Date.now(),
+        position: { x: 0, y: 0, z: 0 },
+      });
+      const position = entity.position || { x: 0, y: 0, z: 0 };
+      this.emitTypedEvent(EventType.XP_DROP_BROADCAST, {
+        playerId,
+        skill: entry.skill,
+        amount: entry.awardedXp,
+        newXp: entry.currentXp,
+        newLevel: entry.currentLevel,
+        position: { x: position.x, y: position.y, z: position.z },
+      });
+    }
+    this.emitTypedEvent(EventType.SKILLS_UPDATED, {
+      playerId,
+      skills: this.getSkills(playerId) || {},
+      persistence: "already_committed",
+    });
+  }
+
+  /**
+   * Converge one live skill on an exact custody-transaction receipt. Processing
+   * and gathering XP may be fractional, so this authority intentionally keeps
+   * finite decimal values instead of applying the integer-only combat rules.
+   */
+  private reconcileCommittedSkillProgression(
+    data: Omit<SkillsProgressCommittedPayload, "skill"> & {
+      skill: keyof Skills;
+    },
+  ): void {
+    const operationId = String(data.operationId ?? "").trim();
+    const playerId = String(data.playerId ?? "").trim();
+    const skill = String(data.skill ?? "") as keyof Skills;
+    if (
+      !playerId ||
+      !operationId ||
+      operationId.length > 256 ||
+      /[\u0000-\u001f\u007f]/u.test(operationId) ||
+      typeof data.replayed !== "boolean" ||
+      !COMMITTED_CUSTODY_SKILLS.has(skill) ||
+      !Number.isFinite(data.xpAmount) ||
+      data.xpAmount <= 0 ||
+      data.xpAmount > 1_000_000 ||
+      !Number.isFinite(data.awardedXp) ||
+      data.awardedXp < 0 ||
+      data.awardedXp > data.xpAmount ||
+      !Number.isFinite(data.operationCommittedXp) ||
+      data.operationCommittedXp < data.awardedXp ||
+      data.operationCommittedXp > SkillsSystem.MAX_XP ||
+      !Number.isFinite(data.currentXp) ||
+      data.currentXp < data.operationCommittedXp ||
+      data.currentXp > SkillsSystem.MAX_XP ||
+      !Number.isSafeInteger(data.currentLevel) ||
+      data.currentLevel < 1 ||
+      data.currentLevel > SkillsSystem.MAX_LEVEL ||
+      this.getLevelForXP(data.currentXp) !== data.currentLevel
+    ) {
+      console.error(
+        `[SkillsSystem] Refused invalid committed skill receipt ${operationId || "unknown"}`,
+      );
+      return;
+    }
+
+    const entity = this.world.entities.get(playerId) as Entity | undefined;
+    const stats = entity ? getStatsComponent(entity) : undefined;
+    const current = stats?.[skill] as SkillData | undefined;
+    if (!entity || !stats || !current) return;
+    if (Number.isFinite(current.xp) && data.currentXp < current.xp) return;
+
+    const presentationKey = `${skill}:${operationId}`;
+    const presentVisual =
+      !data.replayed &&
+      !this.presentedCommittedProgressOperations.has(presentationKey);
+    if (!data.replayed) {
+      this.presentedCommittedProgressOperations.add(presentationKey);
+      if (this.presentedCommittedProgressOperations.size > 4_096) {
+        const oldest = this.presentedCommittedProgressOperations
+          .values()
+          .next().value;
+        if (oldest) this.presentedCommittedProgressOperations.delete(oldest);
+      }
+    }
+
+    const oldLevel = Number.isSafeInteger(current.level) ? current.level : 1;
+    current.xp = data.currentXp;
+    if (presentVisual && data.currentLevel > oldLevel) {
+      this.handleLevelUp(entity, skill, oldLevel, data.currentLevel);
+    } else {
+      current.level = data.currentLevel;
+    }
+    if (SkillsSystem.COMBAT_SKILLS.includes(skill)) {
+      this.updateCombatLevel(entity, stats);
+    }
+    this.updateTotalLevel(entity, stats);
+
+    if (presentVisual && data.awardedXp > 0) {
+      this.xpDrops.push({
+        entityId: playerId,
+        playerId,
+        skill,
+        amount: data.awardedXp,
+        timestamp: Date.now(),
+        position: { x: 0, y: 0, z: 0 },
+      });
+      const position = entity.position || { x: 0, y: 0, z: 0 };
+      this.emitTypedEvent(EventType.XP_DROP_BROADCAST, {
+        playerId,
+        skill,
+        amount: data.awardedXp,
+        newXp: data.currentXp,
+        newLevel: data.currentLevel,
+        position: { x: position.x, y: position.y, z: position.z },
+      });
+    }
+    this.emitTypedEvent(EventType.SKILLS_UPDATED, {
+      playerId,
+      skills: this.getSkills(playerId) || {},
+      persistence: "already_committed",
+    });
+  }
+
+  /** Converge every direct skill reward from one committed quest receipt. */
+  private reconcileCommittedQuestProgression(
+    data: QuestCompletionCommittedPayload,
+  ): void {
+    const operationId = String(data.operationId ?? "").trim();
+    const playerId = String(data.playerId ?? "").trim();
+    if (
+      !/^quest-completion:[a-f0-9]{64}$/.test(operationId) ||
+      !playerId ||
+      typeof data.replayed !== "boolean" ||
+      !Array.isArray(data.progress) ||
+      data.progress.length > 17 ||
+      new Set(data.progress.map((entry) => entry.skill)).size !==
+        data.progress.length
+    ) {
+      console.error(
+        `[SkillsSystem] Refused invalid committed quest receipt ${operationId || "unknown"}`,
+      );
+      return;
+    }
+    for (const entry of data.progress) {
+      if (entry.skill === Skill.PRAYER) {
+        this.reconcileCommittedPrayerProgression(
+          playerId,
+          entry.currentXp,
+          entry.currentLevel,
+          entry.awardedXp,
+          data.replayed,
+        );
+        continue;
+      }
+      this.reconcileCommittedSkillProgression({
+        playerId,
+        operationId,
+        replayed: data.replayed,
+        ...entry,
+      });
+    }
+  }
+
   private handleSkillAction(data: {
     entityId: string;
     skill: keyof Skills;
@@ -947,10 +1291,12 @@ export class SkillsSystem extends SystemBase {
   private handleQuestComplete(data: {
     playerId: string;
     questId: string;
+    progressionCommitted?: boolean;
     rewards: {
       xp?: Record<keyof Skills, number>;
     };
   }): void {
+    if (data.progressionCommitted) return;
     if (!data.rewards.xp) return;
 
     for (const [skill, xp] of Object.entries(data.rewards.xp)) {
@@ -1013,6 +1359,8 @@ export class SkillsSystem extends SystemBase {
 
     // Clear skill milestones
     this.skillMilestones.clear();
+    this.presentedMobCombatOperations.clear();
+    this.presentedCommittedProgressOperations.clear();
 
     // Clear XP table
     this.xpTable.length = 0;

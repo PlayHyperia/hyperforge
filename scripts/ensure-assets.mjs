@@ -14,7 +14,7 @@
  */
 
 import { existsSync, readdirSync, rmSync, mkdirSync } from "fs";
-import { execSync } from "child_process";
+import { execFileSync, execSync } from "child_process";
 import { fileURLToPath } from "url";
 import path from "path";
 
@@ -22,6 +22,14 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const rootDir = path.join(__dirname, "..");
 const assetsDir = path.join(rootDir, "packages/server/world/assets");
 const assetsRepo = "https://github.com/PlayHyperia/assets.git";
+const requestedRevision = process.env.HYPERIA_ASSETS_REV?.trim();
+
+if (requestedRevision && !/^[0-9a-f]{40}$/i.test(requestedRevision)) {
+  console.error(
+    "❌ HYPERIA_ASSETS_REV must be a full 40-character Git commit SHA",
+  );
+  process.exit(1);
+}
 
 // Local CDN URL for development
 const LOCAL_CDN_URL = "http://localhost:8080";
@@ -100,7 +108,7 @@ async function main() {
   const ci = isCI() && !requireFullAssets;
 
   // In CI: only need manifests (no binary assets), but still must clone
-  if (ci && hasManifests(assetsDir)) {
+  if (ci && hasManifests(assetsDir) && !requestedRevision) {
     console.log("✅ Assets manifests already present (CI)");
     return;
   }
@@ -151,13 +159,63 @@ async function main() {
     }
 
     if (!existsSync(assetsDir) || !isGitRepo(assetsDir)) {
-      // Clone with depth 1 for faster download
-      // CI: GIT_LFS_SKIP_SMUDGE=1 skips binary LFS objects (only need manifests)
-      execSync(`git clone --depth 1 ${assetsRepo} "${assetsDir}"`, {
-        stdio: "inherit",
-        cwd: rootDir,
-        env: ci ? { ...process.env, GIT_LFS_SKIP_SMUDGE: "1" } : process.env,
-      });
+      const gitEnvironment = ci
+        ? { ...process.env, GIT_LFS_SKIP_SMUDGE: "1" }
+        : process.env;
+
+      if (requestedRevision) {
+        // A production image must resolve an immutable commit, never a moving
+        // branch head. Argument-array execution also prevents shell injection.
+        mkdirSync(assetsDir, { recursive: true });
+        execFileSync("git", ["init", assetsDir], {
+          stdio: "inherit",
+          cwd: rootDir,
+          env: gitEnvironment,
+        });
+        execFileSync(
+          "git",
+          ["-C", assetsDir, "remote", "add", "origin", assetsRepo],
+          {
+            stdio: "inherit",
+            cwd: rootDir,
+            env: gitEnvironment,
+          },
+        );
+        execFileSync(
+          "git",
+          [
+            "-C",
+            assetsDir,
+            "fetch",
+            "--depth",
+            "1",
+            "origin",
+            requestedRevision,
+          ],
+          {
+            stdio: "inherit",
+            cwd: rootDir,
+            env: gitEnvironment,
+          },
+        );
+        execFileSync(
+          "git",
+          ["-C", assetsDir, "checkout", "--detach", "FETCH_HEAD"],
+          {
+            stdio: "inherit",
+            cwd: rootDir,
+            env: gitEnvironment,
+          },
+        );
+      } else {
+        // Clone with depth 1 for faster download.
+        // CI skips binary LFS objects because only manifests are required.
+        execFileSync("git", ["clone", "--depth", "1", assetsRepo, assetsDir], {
+          stdio: "inherit",
+          cwd: rootDir,
+          env: gitEnvironment,
+        });
+      }
     }
 
     // Dev: pull LFS binary assets (models, audio, textures)

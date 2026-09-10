@@ -1,0 +1,135 @@
+{
+  "schemaVersion": 1,
+  "title": "Certified bow semantic-grip and direction review",
+  "framing": "avatar-and-equipment",
+  "motions": [
+    {
+      "id": "idle-front",
+      "name": "Bow idle · front",
+      "asset": "emotes/emote-bow-duel-idle-steve.glb",
+      "sampleRatio": 0.35,
+      "heldEquipmentEmote": "idle",
+      "cameraYawDegrees": 0,
+      "cameraPitchDegrees": 6
+    },
+    {
+      "id": "idle-left",
+      "name": "Bow idle · left",
+      "asset": "emotes/emote-bow-duel-idle-steve.glb",
+      "sampleRatio": 0.35,
+      "heldEquipmentEmote": "idle",
+      "cameraYawDegrees": -90,
+      "cameraPitchDegrees": 6
+    },
+    {
+      "id": "idle-rear",
+      "name": "Bow idle · rear",
+      "asset": "emotes/emote-bow-duel-idle-steve.glb",
+      "sampleRatio": 0.35,
+      "heldEquipmentEmote": "idle",
+      "cameraYawDegrees": 180,
+      "cameraPitchDegrees": 6
+    },
+    {
+      "id": "idle-right",
+      "name": "Bow idle · right",
+      "asset": "emotes/emote-bow-duel-idle-steve.glb",
+      "sampleRatio": 0.35,
+      "heldEquipmentEmote": "idle",
+      "cameraYawDegrees": 90,
+      "cameraPitchDegrees": 6
+    },
+    {
+      "id": "walk-front",
+      "name": "Bow walk · front",
+      "asset": "emotes/emote-bow-duel-walk-steve.glb",
+      "sampleRatio": 0.25,
+      "heldEquipmentEmote": "walk",
+      "cameraYawDegrees": 0,
+      "cameraPitchDegrees": 6
+    },
+    {
+      "id": "walk-profile",
+      "name": "Bow walk · profile",
+      "asset": "emotes/emote-bow-duel-walk-steve.glb",
+      "sampleRatio": 0.75,
+      "heldEquipmentEmote": "walk",
+      "cameraYawDegrees": 90,
+      "cameraPitchDegrees": 6
+    },
+    {
+      "id": "run-front",
+      "name": "Bow run · front",
+      "asset": "emotes/emote-bow-duel-run-steve.glb",
+      "sampleRatio": 0.25,
+      "heldEquipmentEmote": "run",
+      "cameraYawDegrees": 0,
+      "cameraPitchDegrees": 6
+    },
+    {
+      "id": "run-rear",
+      "name": "Bow run · rear",
+      "asset": "emotes/emote-bow-duel-run-steve.glb",
+      "sampleRatio": 0.75,
+      "heldEquipmentEmote": "run",
+      "cameraYawDegrees": 180,
+      "cameraPitchDegrees": 6
+    },
+    {
+      "id": "draw-front",
+      "name": "Bow draw · front",
+      "asset": "emotes/emote-range.glb",
+      "sampleRatio": 0.4,
+      "heldEquipmentEmote": "range",
+      "cameraYawDegrees": 0,
+      "cameraPitchDegrees": 6
+    },
+    {
+      "id": "draw-left",
+      "name": "Bow draw · left",
+      "asset": "emotes/emote-range.glb",
+      "sampleRatio": 0.55,
+      "heldEquipmentEmote": "range",
+      "cameraYawDegrees": -90,
+      "cameraPitchDegrees": 6
+    },
+    {
+      "id": "release-rear",
+      "name": "Bow release · rear",
+      "asset": "emotes/emote-range.glb",
+      "sampleRatio": 0.7,
+      "heldEquipmentEmote": "range",
+      "cameraYawDegrees": 180,
+      "cameraPitchDegrees": 6
+    },
+    {
+      "id": "release-right",
+      "name": "Bow release · right",
+      "asset": "emotes/emote-range.glb",
+      "sampleRatio": 0.7,
+      "heldEquipmentEmote": "range",
+      "cameraYawDegrees": 90,
+      "cameraPitchDegrees": 6
+    },
+    {
+      "id": "reaction-front",
+      "name": "Bow hit reaction · front",
+      "asset": "emotes/emote-bow-duel-idle-steve.glb",
+      "sampleRatio": 0.35,
+      "heldEquipmentEmote": "idle",
+      "cameraYawDegrees": 0,
+      "cameraPitchDegrees": 6,
+      "hitReaction": { "intensity": 1, "side": 1, "elapsedSeconds": 0.0504 }
+    },
+    {
+      "id": "reaction-profile",
+      "name": "Bow hit reaction · profile",
+      "asset": "emotes/emote-bow-duel-idle-steve.glb",
+      "sampleRatio": 0.35,
+      "heldEquipmentEmote": "idle",
+      "cameraYawDegrees": 90,
+      "cameraPitchDegrees": 6,
+      "hitReaction": { "intensity": 1, "side": -1, "elapsedSeconds": 0.0504 }
+    }
+  ]
+}

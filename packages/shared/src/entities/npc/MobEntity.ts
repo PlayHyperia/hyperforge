@@ -101,7 +101,11 @@ import {
   AIStateMachine,
   type AIStateContext,
 } from "../managers/AIStateMachine";
-import { generateKillToken } from "../../utils/game/KillTokenUtils";
+import {
+  generateKillToken,
+  MAX_MOB_COMBAT_DAMAGE,
+} from "../../utils/game/KillTokenUtils";
+import { generateGroundItemMobLootOperationId } from "../../utils/game/GroundItemSourceIdentity";
 import { RespawnManager } from "../managers/RespawnManager";
 import type {
   HealthBars as HealthBarsSystem,
@@ -2415,6 +2419,11 @@ export class MobEntity extends CombatantEntity {
   }
 
   die(): void {
+    // One mob life may emit at most one authenticated loot operation. The
+    // death manager flips synchronously below, so duplicate damage/direct calls
+    // cannot mint a second operation while HMAC generation is still pending.
+    if (this.deathManager.isCurrentlyDead()) return;
+
     // Unregister tile occupancy (dead NPCs don't block tiles)
     this.unregisterOccupancy();
 
@@ -2462,22 +2471,10 @@ export class MobEntity extends CombatantEntity {
     // Emit death event with last attacker
     const lastAttackerId = this.combatManager.getLastAttackerId();
     if (lastAttackerId) {
-      // Generate kill token for anti-spoof validation
-      const timestamp = Date.now();
-      const killToken = generateKillToken(this.id, lastAttackerId, timestamp);
-
-      this.world.emit(EventType.NPC_DIED, {
-        mobId: this.id,
-        mobType: this.config.mobType,
-        level: this.config.level,
-        killedBy: lastAttackerId,
-        position: this.getPosition(),
-        timestamp,
-        killToken,
-      });
-
-      // Emit COMBAT_KILL event for SkillsSystem to grant combat XP
-      // Get the player's actual attack style from PlayerSystem
+      // Freeze the existing kill-XP inputs into the same authenticated death
+      // identity as loot and quest progress. Skills are reconciled only after
+      // that complete database transaction commits; this entity must never
+      // grant progression from the transient pre-commit event.
       const playerSystem = this.world.getSystem("player") as {
         getPlayerAttackStyle?: (playerId: string) => { id: string } | null;
       } | null;
@@ -2551,12 +2548,46 @@ export class MobEntity extends CombatantEntity {
         }
       }
 
-      this.world.emit(EventType.COMBAT_KILL, {
-        attackerId: lastAttackerId,
-        targetId: this.id,
-        damageDealt: this.config.maxHealth,
-        attackStyle: attackStyle,
-      });
+      const damageDealt = this.config.maxHealth;
+      if (
+        !Number.isSafeInteger(damageDealt) ||
+        damageDealt <= 0 ||
+        damageDealt > MAX_MOB_COMBAT_DAMAGE
+      ) {
+        console.error(
+          `[MobEntity] Refused death event with invalid XP authority for ${this.id}`,
+        );
+        return;
+      }
+      const timestamp = Date.now();
+      const lootOperationId = generateGroundItemMobLootOperationId();
+      const deathEvent = {
+        mobId: this.id,
+        mobType: this.config.mobType,
+        level: this.config.level,
+        killedBy: lastAttackerId,
+        position: deathPosition,
+        timestamp,
+        lootOperationId,
+        attackStyle,
+        damageDealt,
+      };
+      void generateKillToken(
+        deathEvent.mobId,
+        deathEvent.killedBy,
+        deathEvent.timestamp,
+        deathEvent.lootOperationId,
+        deathEvent.attackStyle,
+        deathEvent.damageDealt,
+      )
+        .then((killToken) => {
+          this.world.emit(EventType.NPC_DIED, { ...deathEvent, killToken });
+        })
+        .catch((error) => {
+          console.error(
+            `[MobEntity] Refused unsigned death event for ${this.id}: ${String(error)}`,
+          );
+        });
 
       // NOTE: Loot is handled by LootSystem via NPC_DIED event (emitted above)
       // Do NOT call dropLoot() here - it would cause duplicate drops
@@ -2698,8 +2729,7 @@ export class MobEntity extends CombatantEntity {
     // AggroSystem maintains a playersByRegion index using 21x21 tile regions
     // This queries a 3x3 grid of regions (63x63 tiles) which covers any aggro range
     const aggroSystem = this.world.getSystem("aggro") as
-      | AggroSystem
-      | undefined;
+      AggroSystem | undefined;
     const players = aggroSystem
       ? aggroSystem.getPlayersInNearbyRegions(currentPos)
       : this.world.getPlayers(); // Fallback if AggroSystem not available
@@ -2774,12 +2804,7 @@ export class MobEntity extends CombatantEntity {
     // Direct mapping - internal states match interface states
     return (
       (internalState as
-        | "idle"
-        | "wander"
-        | "chase"
-        | "attack"
-        | "return"
-        | "dead") || "idle"
+        "idle" | "wander" | "chase" | "attack" | "return" | "dead") || "idle"
     );
   }
 

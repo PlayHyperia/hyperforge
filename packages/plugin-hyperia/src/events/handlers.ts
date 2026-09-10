@@ -202,12 +202,9 @@ export function registerEventHandlers(
 
     // Get current health from changes
     const currentHealth = (changes as Record<string, unknown>).currentHealth as
-      | number
-      | undefined;
+      number | undefined;
     const deathTime = (changes as Record<string, unknown>).deathTime as
-      | number
-      | null
-      | undefined;
+      number | null | undefined;
     const previousHealth = previousMobHealth.get(entityId);
 
     // Update tracked health
@@ -402,9 +399,13 @@ export function registerEventHandlers(
   });
 
   service.onGameEvent("ITEM_DROPPED", async (data: unknown) => {
-    const eventData = data as { itemName: string; quantity: number };
+    const eventData = data as {
+      itemName?: string;
+      itemId?: string;
+      quantity: number;
+    };
     logger.debug(
-      `[HyperiaPlugin] Dropped: ${eventData.itemName} x${eventData.quantity}`,
+      `[HyperiaPlugin] Dropped: ${eventData.itemName ?? eventData.itemId ?? "unknown"} x${eventData.quantity}`,
     );
   });
 

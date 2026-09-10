@@ -1,32 +1,20 @@
 {
   "$schema": "https://turbo.build/schema.json",
-  "globalDependencies": [
-    "**/.env"
-  ],
+  "globalDependencies": ["**/.env"],
   "ui": "tui",
   "concurrency": "10",
   "tasks": {
     "build": {
-      "dependsOn": [
-        "^build"
-      ],
-      "outputs": [
-        "dist/**",
-        "build/**",
-        ".next/**",
-        "tsconfig.tsbuildinfo"
-      ],
+      "dependsOn": ["^build"],
+      "outputs": ["dist/**", "build/**", ".next/**", "tsconfig.tsbuildinfo"],
       "cache": true
     },
     "extract-bounds": {
       "cache": true
     },
-    "physx-js-webidl#build": {
+    "@hyperforge/physx-js-webidl#build": {
       "dependsOn": [],
-      "outputs": [
-        "dist/**",
-        "PhysX/physx/compiler/emscripten-release/**"
-      ],
+      "outputs": ["dist/**", "PhysX/physx/compiler/emscripten-release/**"],
       "inputs": [
         "PhysX/physx/source/**",
         "PhysX/physx/include/**",
@@ -35,127 +23,77 @@
       ],
       "cache": true
     },
-    "shared#build": {
-      "dependsOn": [
-        "^build",
-        "physx-js-webidl#build"
-      ],
-      "outputs": [
-        "dist/**",
-        "build/**",
-        "tsconfig.tsbuildinfo"
-      ],
+    "@hyperforge/shared#build": {
+      "dependsOn": ["^build", "@hyperforge/physx-js-webidl#build"],
+      "outputs": ["dist/**", "build/**", "tsconfig.tsbuildinfo"],
       "cache": true
     },
-    "procgen#build": {
-      "dependsOn": [
-        "^build"
-      ],
-      "outputs": [
-        "dist/**",
-        "tsconfig.tsbuildinfo"
-      ],
+    "@hyperforge/procgen#build": {
+      "dependsOn": ["^build"],
+      "outputs": ["dist/**", "tsconfig.tsbuildinfo"],
       "cache": true
     },
-    "client#build": {
+    "@hyperforge/client#build": {
       "dependsOn": [
         "^build",
-        "physx-js-webidl#build",
-        "shared#build"
+        "@hyperforge/physx-js-webidl#build",
+        "@hyperforge/shared#build"
       ],
-      "outputs": [
-        "dist/**",
-        "build/**",
-        "tsconfig.tsbuildinfo"
-      ],
+      "outputs": ["dist/**", "build/**", "tsconfig.tsbuildinfo"],
       "cache": true
     },
-    "asset-forge#build": {
-      "dependsOn": [
-        "^build",
-        "procgen#build"
-      ],
-      "outputs": [
-        "dist/**",
-        "tsconfig.tsbuildinfo"
-      ],
+    "@hyperforge/asset-forge#build": {
+      "dependsOn": ["^build", "@hyperforge/procgen#build"],
+      "outputs": ["dist/**", "tsconfig.tsbuildinfo"],
       "cache": true
     },
-    "plugin-hyperia#build": {
-      "dependsOn": [
-        "^build",
-        "shared#build"
-      ],
-      "outputs": [
-        "dist/**",
-        "tsconfig.tsbuildinfo"
-      ],
+    "@hyperforge/plugin-hyperia#build": {
+      "dependsOn": ["^build", "@hyperforge/shared#build"],
+      "outputs": ["dist/**", "tsconfig.tsbuildinfo"],
       "cache": true
     },
-    "server#build": {
-      "dependsOn": [
-        "^build",
-        "shared#build"
-      ],
-      "outputs": [
-        "dist/**",
-        "tsconfig.tsbuildinfo"
-      ],
+    "@hyperforge/server#build": {
+      "dependsOn": ["^build", "@hyperforge/shared#build"],
+      "outputs": ["dist/**", "tsconfig.tsbuildinfo"],
       "cache": true
     },
     "@hyperforge/app#build": {
-      "dependsOn": [
-        "@hyperforge/client#build"
-      ],
+      "dependsOn": ["@hyperforge/client#build"],
       "outputs": [],
       "cache": false
     },
     "@hyperforge/contracts#build": {
-      "dependsOn": [
-        "^build"
-      ],
+      "dependsOn": ["^build"],
       "outputs": [],
       "cache": true
     },
     "@hyperforge/solana-prediction-market#build": {
-      "dependsOn": [
-        "^build"
-      ],
+      "dependsOn": ["^build"],
       "outputs": [],
       "cache": true
     },
     "dev": {
-      "dependsOn": [
-        "^build"
-      ],
+      "dependsOn": ["^build"],
       "cache": false,
       "persistent": true
     },
-    "app#dev": {
-      "dependsOn": [
-        "client#build"
-      ],
+    "@hyperforge/app#dev": {
+      "dependsOn": ["@hyperforge/client#build"],
       "cache": false,
       "persistent": true
     },
     "test": {
-      "dependsOn": [
-        "build"
-      ],
+      "dependsOn": ["build"],
       "outputs": [],
       "cache": true,
-      "env": [
-        "NODE_ENV"
-      ]
+      "env": ["NODE_ENV"]
     },
     "lint": {
       "outputs": [],
       "cache": true
     },
     "typecheck": {
-      "dependsOn": [
-        "^build"
-      ],
+      "dependsOn": ["^build"],
       "outputs": [],
       "cache": true
     },

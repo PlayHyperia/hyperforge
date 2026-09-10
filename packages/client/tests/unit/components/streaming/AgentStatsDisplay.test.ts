@@ -66,6 +66,18 @@ const agent: AgentInfo = {
     },
   },
   loadoutFrozen: true,
+  strategySummary: {
+    schemaVersion: 1,
+    approach: "balanced",
+    tacticalMacro: "orbit",
+    attackStyle: "accurate",
+    prayer: "hawk_eye",
+    preferredCombatRole: null,
+    foodThreshold: 40,
+    switchDefensiveAt: 30,
+    source: "model",
+    policyVersion: "duel-preparation-role-v3",
+  },
   prayerPointUnits: 12_345_678,
   prayerPoints: 13,
   prayerMaxPoints: 40,
@@ -90,13 +102,19 @@ describe("streaming item icon fallback", () => {
   });
 
   it("resolves server-provided asset paths against the runtime CDN", () => {
-    const resolvedPath = resolveStreamingItemIconPath(
-      "asset://icons/longsword-bronze.svg",
-    );
-    expect(resolvedPath).not.toContain("asset://");
-    expect(resolvedPath).toMatch(
-      /\/game-assets\/icons\/longsword-bronze\.svg$/,
-    );
+    for (const iconName of [
+      "shortsword-bronze.svg",
+      "longsword-bronze.svg",
+      "scimitar-bronze.svg",
+    ]) {
+      const resolvedPath = resolveStreamingItemIconPath(
+        `asset://icons/${iconName}`,
+      );
+      expect(resolvedPath).not.toContain("asset://");
+      expect(resolvedPath).toMatch(
+        new RegExp(`/game-assets/icons/${iconName.replace(".", "\\.")}$`),
+      );
+    }
   });
 
   it("treats an empty authoritative icon map as intentional", () => {
@@ -159,6 +177,49 @@ describe("streaming item icon fallback", () => {
 
     expect(markup).not.toContain("Frozen loadouts");
     expect(markup).not.toContain("data-loadout-fingerprint");
+    expect(markup).not.toContain("Committed strategy");
+  });
+
+  it("discloses only the strict frozen strategy summary while the market is open", () => {
+    const markup = renderToStaticMarkup(
+      React.createElement(AgentStatsDisplay, {
+        agent,
+        side: "left",
+        showFrozenLoadouts: true,
+      }),
+    );
+
+    expect(markup).toContain("Committed strategy");
+    expect(markup).toContain("Agent-planned");
+    expect(markup).toContain("Balanced");
+    expect(markup).toContain("Orbit");
+    expect(markup).toContain("Accurate attacks");
+    expect(markup).toContain("Adaptive roles");
+    expect(markup).toContain("Hawk Eye");
+    expect(markup).toContain("Recover 40%");
+    expect(markup).toContain("Defend 30%");
+    expect(markup).toContain('data-strategy-policy="duel-preparation-role-v3"');
+    expect(markup).not.toContain("reasoning");
+    expect(markup).not.toContain("agentPolicyFingerprint");
+  });
+
+  it("fails closed when an uncontrolled field is added to the strategy summary", () => {
+    const markup = renderToStaticMarkup(
+      React.createElement(AgentStatsDisplay, {
+        agent: {
+          ...agent,
+          strategySummary: {
+            ...agent.strategySummary!,
+            reasoning: "private",
+          } as never,
+        },
+        side: "right",
+        showFrozenLoadouts: true,
+      }),
+    );
+
+    expect(markup).not.toContain("Committed strategy");
+    expect(markup).not.toContain("private");
   });
 
   it("shows the active role only when current equipment uniquely matches a frozen loadout", () => {

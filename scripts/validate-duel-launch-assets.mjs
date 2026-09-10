@@ -1,8 +1,13 @@
 #!/usr/bin/env node
 
-import { existsSync, readFileSync, statSync } from "fs";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import path from "path";
 import { fileURLToPath } from "url";
+import { validateLaunchWorldAreaSafety } from "./lib/launch-world-area-safety.mjs";
+import {
+  readLaunchAssetByteEvidence,
+  resolveLaunchAssetReadTimeoutMs,
+} from "./lib/launch-asset-byte-evidence.mjs";
 
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 const workspaceRoot = path.resolve(scriptDir, "..");
@@ -12,6 +17,58 @@ const assetsRoot = path.resolve(
 );
 const manifestsRoot = path.join(assetsRoot, "manifests");
 const failures = [];
+const assetByteEvidence = new Map();
+const assetReadTimeoutMs = resolveLaunchAssetReadTimeoutMs(
+  process.env.DUEL_ASSET_READ_TIMEOUT_MS,
+);
+let assetReadTimedOut = false;
+
+const essentialDuelAssetUrls = [
+  "asset://avatars/duel-candidates/duel-steve.vrm",
+  "asset://avatars/duel-candidates/duel-steve_lod1.vrm",
+  "asset://avatars/duel-candidates/duel-steve_lod2.vrm",
+  "asset://emotes/emote-idle.glb",
+  "asset://emotes/emote-walk.glb",
+  "asset://emotes/emote-run.glb",
+  "asset://emotes/emote-bow-duel-idle-steve.glb",
+  "asset://emotes/emote-bow-duel-walk-steve.glb",
+  "asset://emotes/emote-bow-duel-run-steve.glb",
+  "asset://emotes/emote-one-hand-idle-steve.glb",
+  "asset://emotes/emote-one-hand-walk-steve.glb",
+  "asset://emotes/emote-one-hand-run-steve.glb",
+  "asset://emotes/emote-2h-duel-idle-steve.glb",
+  "asset://emotes/emote-2h-duel-walk-steve.glb",
+  "asset://emotes/emote-2h-duel-run-steve.glb",
+  "asset://emotes/emote-2h-duel-slash-steve.glb",
+  "asset://emotes/emote-float.glb",
+  "asset://emotes/emote-fall.glb",
+  "asset://emotes/emote-flip.glb",
+  "asset://emotes/emote-talk.glb",
+  "asset://emotes/emote-punching.glb",
+  "asset://emotes/emote_sword_swing.glb",
+  "asset://emotes/emote-2h-idle.glb",
+  "asset://emotes/emote-2h-slash.glb",
+  "asset://emotes/emote-range.glb",
+  "asset://emotes/emote-spell-cast.glb",
+  "asset://emotes/emote-steve-woodcutting.glb",
+  "asset://emotes/emote-steve-mining.glb",
+  "asset://emotes/emote-steve-fishing-cast.glb",
+  "asset://emotes/emote-harpoon-water-strike.glb",
+  "asset://emotes/emote-steve-small-fishing-net-release.glb",
+  "asset://emotes/emote-steve-fishing-retrieve.glb",
+  "asset://emotes/emote-steve-lobster-pot-deploy.glb",
+  "asset://emotes/emote-death.glb",
+  "asset://emotes/emote-squat.glb",
+  "asset://emotes/emote-waving-both-hands.glb",
+  "asset://emotes/emote-dance-happy.glb",
+  "asset://textures/terrain-biomes/grass.png",
+  "asset://textures/terrain-biomes/dirt.png",
+  "asset://textures/terrain-biomes/cliff.png",
+  "asset://textures/terrain-biomes/desertGrass.png",
+  "asset://textures/terrain-biomes/desertDirt.png",
+  "asset://textures/terrain-biomes/snowgrass.png",
+  "asset://textures/terrain-biomes/snowdirt.png",
+];
 
 function fail(message) {
   failures.push(message);
@@ -19,6 +76,32 @@ function fail(message) {
 
 function readJson(relativePath) {
   const absolutePath = path.join(manifestsRoot, relativePath);
+  if (!existsSync(absolutePath) || !statSync(absolutePath).isFile()) {
+    fail(`${relativePath} is missing or is not a regular file`);
+    return null;
+  }
+  if (!readAssetEvidence(relativePath, relativePath, absolutePath)) {
+    return null;
+  }
+  try {
+    return JSON.parse(readFileSync(absolutePath, "utf8"));
+  } catch (error) {
+    fail(
+      `${relativePath} is missing or invalid JSON: ${error instanceof Error ? error.message : String(error)}`,
+    );
+    return null;
+  }
+}
+
+function readWorkspaceJson(relativePath) {
+  const absolutePath = path.join(workspaceRoot, relativePath);
+  if (!existsSync(absolutePath) || !statSync(absolutePath).isFile()) {
+    fail(`${relativePath} is missing or is not a regular file`);
+    return null;
+  }
+  if (!readAssetEvidence(relativePath, relativePath, absolutePath)) {
+    return null;
+  }
   try {
     return JSON.parse(readFileSync(absolutePath, "utf8"));
   } catch (error) {
@@ -33,10 +116,28 @@ function isRecord(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+function readAssetEvidence(location, value, absolutePath) {
+  if (assetReadTimedOut) return null;
+
+  let result = assetByteEvidence.get(absolutePath);
+  if (!result) {
+    result = readLaunchAssetByteEvidence(absolutePath, {
+      timeoutMs: assetReadTimeoutMs,
+    });
+    assetByteEvidence.set(absolutePath, result);
+  }
+  if (!result.ok) {
+    fail(`${location} ${result.error}: ${value}`);
+    if (result.timeout) assetReadTimedOut = true;
+    return null;
+  }
+  return result.evidence;
+}
+
 function assertAssetUrl(location, value) {
   if (typeof value !== "string" || !value.startsWith("asset://")) {
     fail(`${location} must contain an asset:// URL`);
-    return;
+    return null;
   }
 
   const relativePath = value.slice("asset://".length);
@@ -46,11 +147,27 @@ function assertAssetUrl(location, value) {
     !absolutePath.startsWith(`${assetsRoot}${path.sep}`)
   ) {
     fail(`${location} escapes the asset root: ${value}`);
-    return;
+    return null;
   }
 
   if (!existsSync(absolutePath) || !statSync(absolutePath).isFile()) {
     fail(`${location} references a missing asset: ${value}`);
+    return null;
+  }
+
+  return readAssetEvidence(location, value, absolutePath);
+}
+
+function assertLockedAssetUrl(location, value, expectedSha256) {
+  const evidence = assertAssetUrl(location, value);
+  if (!/^[a-f0-9]{64}$/u.test(expectedSha256)) {
+    fail(`${location} must declare a lowercase SHA-256 lock`);
+    return;
+  }
+  if (evidence && evidence.sha256 !== expectedSha256) {
+    fail(
+      `${location} drifted from SHA-256 ${expectedSha256}; received ${evidence.sha256}`,
+    );
   }
 }
 
@@ -94,8 +211,37 @@ const stationsDocument = readJson("stations.json");
 const woodcutting = readJson("gathering/woodcutting.json");
 const mining = readJson("gathering/mining.json");
 const fishing = readJson("gathering/fishing.json");
+const resourceItems = readJson("items/resources.json");
 const stores = readJson("stores.json");
 const worldAreas = readJson("world-areas.json");
+const music = readJson("music.json");
+
+if (!Array.isArray(music) || music.length === 0) {
+  fail("music.json must contain at least one playable track");
+} else {
+  const musicIds = new Set();
+  for (const [index, track] of music.entries()) {
+    const location = `music.json[${index}]`;
+    if (!isRecord(track) || typeof track.id !== "string" || !track.id) {
+      fail(`${location} must declare a non-empty id`);
+      continue;
+    }
+    if (musicIds.has(track.id)) {
+      fail(`${location} duplicates track id ${track.id}`);
+    }
+    musicIds.add(track.id);
+    assertAssetUrl(`${location}.path`, track.path);
+  }
+  for (const requiredCategory of ["intro", "normal", "combat"]) {
+    if (!music.some((track) => track?.category === requiredCategory)) {
+      fail(`music.json must contain a ${requiredCategory} track`);
+    }
+  }
+}
+
+for (const failure of validateLaunchWorldAreaSafety(worldAreas)) {
+  fail(failure);
+}
 
 const npcIds = new Set(
   Array.isArray(npcs) ? npcs.map((npc) => npc?.id).filter(Boolean) : [],
@@ -105,13 +251,22 @@ const stationTypes = new Set(
     ? stationsDocument.stations.map((station) => station?.type).filter(Boolean)
     : [],
 );
+const gatheringResources = [
+  ...(Array.isArray(woodcutting?.trees) ? woodcutting.trees : []),
+  ...(Array.isArray(mining?.rocks) ? mining.rocks : []),
+  ...(Array.isArray(fishing?.spots) ? fishing.spots : []),
+];
 const resourceIds = new Set(
-  [
-    ...(Array.isArray(woodcutting?.trees) ? woodcutting.trees : []),
-    ...(Array.isArray(mining?.rocks) ? mining.rocks : []),
-    ...(Array.isArray(fishing?.spots) ? fishing.spots : []),
-  ]
-    .map((resource) => resource?.id)
+  gatheringResources.map((resource) => resource?.id).filter(Boolean),
+);
+const gatheringResourcesById = new Map(
+  gatheringResources
+    .filter((resource) => typeof resource?.id === "string")
+    .map((resource) => [resource.id, resource]),
+);
+const resourceItemIds = new Set(
+  (Array.isArray(resourceItems) ? resourceItems : [])
+    .map((item) => item?.id)
     .filter(Boolean),
 );
 const storeIds = new Set(
@@ -304,6 +459,32 @@ const preparationHub = worldAreas?.starterTowns?.central_haven;
 const preparationPond = worldAreas?.level1Areas?.haven_pond;
 const preparationTraining =
   worldAreas?.level1Areas?.preparation_training_grounds;
+const preparationAreas = [
+  preparationHub,
+  preparationPond,
+  preparationTraining,
+].filter(isRecord);
+const requiredPreparationFishingSpots = [
+  "fishing_spot_net",
+  "fishing_spot_bait",
+  "fishing_spot_fly",
+  "fishing_spot_cage",
+  "fishing_spot_harpoon",
+];
+for (const area of preparationAreas) {
+  for (const placement of Array.isArray(area.resources) ? area.resources : []) {
+    const resource = gatheringResourcesById.get(placement?.resourceId);
+    for (const reward of Array.isArray(resource?.harvestYield)
+      ? resource.harvestYield
+      : []) {
+      if (!resourceItemIds.has(reward?.itemId)) {
+        fail(
+          `${String(area.id)} resource ${String(placement?.resourceId)} yields undefined item ${String(reward?.itemId)}`,
+        );
+      }
+    }
+  }
+}
 if (!isRecord(preparationHub)) {
   fail("world-areas.json is missing starterTowns.central_haven");
 } else {
@@ -394,11 +575,6 @@ if (!isRecord(preparationHub)) {
     fail("central_haven cannot declare training mobs inside its safe zone");
   }
 
-  const preparationAreas = [
-    preparationHub,
-    preparationPond,
-    preparationTraining,
-  ].filter(isRecord);
   const hubStationTypes = new Set(
     preparationAreas
       .flatMap((area) => (Array.isArray(area.stations) ? area.stations : []))
@@ -516,6 +692,33 @@ if (!isRecord(preparationPond)) {
   const pondWater = (preparationPond.waterBodies ?? []).find(
     (body) => body?.id === "haven_pond_water",
   );
+  const authoredFishingSpotIds = (preparationPond.resources ?? [])
+    .filter((resource) => resource?.type === "fishing_spot")
+    .map((resource) => resource?.resourceId);
+  const dynamicFishingSpotIds = Array.isArray(
+    preparationPond.fishing?.spotTypes,
+  )
+    ? preparationPond.fishing.spotTypes
+    : [];
+  const configuredFishingSpotIds = new Set([
+    ...authoredFishingSpotIds,
+    ...dynamicFishingSpotIds,
+  ]);
+  for (const requiredSpotId of requiredPreparationFishingSpots) {
+    if (!configuredFishingSpotIds.has(requiredSpotId)) {
+      fail(
+        `haven_pond is missing preparation fishing method ${requiredSpotId}`,
+      );
+    }
+  }
+  if (
+    preparationPond.fishing?.spotCount !== dynamicFishingSpotIds.length ||
+    new Set(dynamicFishingSpotIds).size !== dynamicFishingSpotIds.length
+  ) {
+    fail(
+      "haven_pond must assign one distinct dynamic spot type to every dynamic fishing spawn",
+    );
+  }
   if (
     !pondFloor ||
     !pondWater ||
@@ -523,6 +726,36 @@ if (!isRecord(preparationPond)) {
     pondFloor.height >= pondWater.surfaceY
   ) {
     fail("haven_pond floor must remain below its explicit water surface");
+  }
+  const radialPond = pondFloor?.radialPond;
+  if (
+    !isRecord(radialPond) ||
+    ![
+      radialPond.bedRadius,
+      radialPond.bankInnerRadius,
+      radialPond.bankOuterRadius,
+      radialPond.bankHeight,
+    ].every(Number.isFinite) ||
+    radialPond.bedRadius <= 0 ||
+    radialPond.bedRadius >= radialPond.bankInnerRadius ||
+    radialPond.bankInnerRadius >= radialPond.bankOuterRadius ||
+    radialPond.bankHeight <= pondWater?.surfaceY ||
+    pondWater?.radius <= radialPond.bankInnerRadius ||
+    pondWater?.radius >= radialPond.bankOuterRadius ||
+    pondFloor?.blendRadius <= 0 ||
+    pondFloor?.width <
+      2 * (radialPond.bankOuterRadius + pondFloor.blendRadius) ||
+    pondFloor?.depth < 2 * (radialPond.bankOuterRadius + pondFloor.blendRadius)
+  ) {
+    fail(
+      "haven_pond must define a finite radial bed, visible shoreline, dry bank, and complete outer terrain blend",
+    );
+  }
+  if (
+    pondFloor?.centerX !== pondWater?.centerX ||
+    pondFloor?.centerZ !== pondWater?.centerZ
+  ) {
+    fail("haven_pond floor and water must share the same authored center");
   }
 }
 
@@ -572,18 +805,25 @@ if (!isRecord(preparationTraining)) {
 
 const ammunition = readJson("items/ammunition.json");
 const weapons = readJson("items/weapons.json");
-const ironArrow = Array.isArray(ammunition)
-  ? ammunition.find((item) => item?.id === "iron_arrow")
-  : null;
+const tools = readJson("items/tools.json");
+const duelPresentation = readJson("duel-presentation-assets.json");
+const bowDuelPresentation = readWorkspaceJson(
+  "scripts/certified-bow-duel-presentation-asset-install.json",
+);
 const runeArrow = Array.isArray(ammunition)
   ? ammunition.find((item) => item?.id === "rune_arrow")
   : null;
-if (!ironArrow) {
-  fail("items/ammunition.json is missing iron_arrow");
-} else {
-  assertAssetUrl("iron_arrow.modelPath", ironArrow.modelPath);
-  assertAssetUrl("iron_arrow.equippedModelPath", ironArrow.equippedModelPath);
-  assertAssetUrl("iron_arrow.iconPath", ironArrow.iconPath);
+for (const arrowId of ["bronze_arrow", "iron_arrow"]) {
+  const arrow = Array.isArray(ammunition)
+    ? ammunition.find((item) => item?.id === arrowId)
+    : null;
+  if (!arrow) {
+    fail(`items/ammunition.json is missing ${arrowId}`);
+    continue;
+  }
+  assertAssetUrl(`${arrowId}.modelPath`, arrow.modelPath);
+  assertAssetUrl(`${arrowId}.equippedModelPath`, arrow.equippedModelPath);
+  assertAssetUrl(`${arrowId}.iconPath`, arrow.iconPath);
 }
 if (!runeArrow) {
   fail("items/ammunition.json is missing rune_arrow");
@@ -597,7 +837,9 @@ if (!runeArrow) {
 }
 
 for (const weaponId of [
+  "bronze_shortsword",
   "bronze_longsword",
+  "bronze_scimitar",
   "shortbow",
   "magic_shortbow",
   "staff_of_air",
@@ -614,6 +856,361 @@ for (const weaponId of [
   assertAssetUrl(`${weaponId}.iconPath`, weapon.iconPath);
 }
 
+const expectedBowDuelMotionIds = ["idle", "walk", "run"];
+const expectedBowDuelWeaponIds = ["shortbow", "magic_shortbow"];
+if (
+  bowDuelPresentation?.schemaVersion !== 1 ||
+  bowDuelPresentation.activationId !== "steve-bow-duel-natural-v1" ||
+  bowDuelPresentation.avatarId !== "steve" ||
+  bowDuelPresentation.candidateId !== "natural" ||
+  JSON.stringify(bowDuelPresentation.weaponItemIds) !==
+    JSON.stringify(expectedBowDuelWeaponIds) ||
+  !Array.isArray(bowDuelPresentation.motions) ||
+  bowDuelPresentation.motions.length !== expectedBowDuelMotionIds.length ||
+  !Array.isArray(bowDuelPresentation.equipment) ||
+  bowDuelPresentation.equipment.length !== expectedBowDuelWeaponIds.length
+) {
+  fail("certified bow-duel presentation authority is invalid");
+} else {
+  for (const [index, motion] of bowDuelPresentation.motions.entries()) {
+    const motionId = expectedBowDuelMotionIds[index];
+    const expectedAssetUrl = `asset://${motion.destinationPath}${
+      motion.playbackSpeed === 1 ? "" : `?s=${motion.playbackSpeed}`
+    }`;
+    if (
+      motion.id !== motionId ||
+      motion.assetUrl !== expectedAssetUrl ||
+      motion.destinationPath.includes("candidates")
+    ) {
+      fail(`${motionId} bow-duel motion is not canonical`);
+      continue;
+    }
+    assertLockedAssetUrl(
+      `steve-bow-duel-natural-v1.${motionId}`,
+      `asset://${motion.destinationPath}`,
+      motion.sha256,
+    );
+  }
+  for (const [index, equipment] of bowDuelPresentation.equipment.entries()) {
+    const itemId = expectedBowDuelWeaponIds[index];
+    const weapon = Array.isArray(weapons)
+      ? weapons.find((candidate) => candidate?.id === itemId)
+      : null;
+    const expectedAssetUrl = `asset://${equipment.activePath}`;
+    if (
+      equipment.itemId !== itemId ||
+      weapon?.equippedModelPath !== expectedAssetUrl
+    ) {
+      fail(`${itemId} does not select its certified active bow fit`);
+      continue;
+    }
+    assertLockedAssetUrl(
+      `steve-bow-duel-natural-v1.${itemId}`,
+      expectedAssetUrl,
+      equipment.activeSha256,
+    );
+  }
+}
+
+const harpoon = Array.isArray(tools)
+  ? tools.find((item) => item?.id === "harpoon")
+  : null;
+const presentationActivations = Array.isArray(duelPresentation?.activations)
+  ? duelPresentation.activations
+  : [];
+const corePreparationFamilies = [
+  {
+    itemIds: [
+      "bronze_hatchet",
+      "iron_hatchet",
+      "steel_hatchet",
+      "mithril_hatchet",
+      "adamant_hatchet",
+      "rune_hatchet",
+    ],
+    bodyEmoteKey: "chopping",
+    motionAssetUrl: "asset://emotes/emote-steve-woodcutting.glb",
+    rollbackBodyEmotePath: "asset://emotes/emote_chopping.glb",
+  },
+  {
+    itemIds: [
+      "bronze_pickaxe",
+      "iron_pickaxe",
+      "steel_pickaxe",
+      "mithril_pickaxe",
+      "adamant_pickaxe",
+      "rune_pickaxe",
+    ],
+    bodyEmoteKey: "mining",
+    motionAssetUrl: "asset://emotes/emote-steve-mining.glb",
+    rollbackBodyEmotePath: "asset://emotes/emote_chopping.glb",
+  },
+  {
+    itemIds: ["fishing_rod"],
+    bodyEmoteKey: "fishing_rod",
+    motionAssetUrl: "asset://emotes/emote-steve-fishing-cast.glb",
+    rollbackBodyEmotePath: "asset://emotes/emote-fishing.glb",
+  },
+];
+const fishingInteractionAuthorities = [
+  {
+    itemId: "fly_fishing_rod",
+    bodyEmoteKey: "fly_fishing_rod",
+    equipmentAssetUrl:
+      "asset://models/tools/fishing-interactions/fly-fishing-rod-steve-fitted.glb",
+    motionAssetUrl: "asset://emotes/emote-steve-fishing-cast.glb",
+    durationSeconds: 1.933333,
+    loopSeamExact: true,
+  },
+  {
+    itemId: "small_fishing_net",
+    bodyEmoteKey: "small_fishing_net",
+    equipmentAssetUrl:
+      "asset://models/tools/fishing-interactions/small-fishing-net-steve-fitted.glb",
+    motionAssetUrl: "asset://emotes/emote-steve-small-fishing-net-release.glb",
+    durationSeconds: 1.2,
+    releaseSeconds: 0.78,
+    retrievalAssetUrl: "asset://emotes/emote-steve-fishing-retrieve.glb",
+    retrievalDurationSeconds: 1.2,
+    pickupSeconds: 0.42,
+    worldAssetUrl:
+      "asset://models/tools/fishing-interactions/small-fishing-net-world.glb",
+  },
+  {
+    itemId: "lobster_pot",
+    bodyEmoteKey: "lobster_pot",
+    equipmentAssetUrl:
+      "asset://models/tools/fishing-interactions/lobster-pot-steve-fitted.glb",
+    motionAssetUrl: "asset://emotes/emote-steve-lobster-pot-deploy.glb",
+    durationSeconds: 1.2,
+    releaseSeconds: 1.08,
+    retrievalAssetUrl: "asset://emotes/emote-steve-fishing-retrieve.glb",
+    retrievalDurationSeconds: 1.2,
+    pickupSeconds: 0.42,
+    worldAssetUrl:
+      "asset://models/tools/fishing-interactions/lobster-pot-world.glb",
+  },
+];
+const requiredPreparationActivationIds = new Set([
+  "steve-harpoon-v1",
+  ...corePreparationFamilies.flatMap((family) =>
+    family.itemIds.map((itemId) => `steve-${itemId.replaceAll("_", "-")}-v1`),
+  ),
+  ...fishingInteractionAuthorities.map(
+    ({ itemId }) => `steve-${itemId.replaceAll("_", "-")}-v1`,
+  ),
+]);
+const harpoonActivation = presentationActivations.find(
+  (activation) => activation?.activationId === "steve-harpoon-v1",
+);
+if (
+  duelPresentation?.schemaVersion !== 1 ||
+  presentationActivations.length !== requiredPreparationActivationIds.size ||
+  new Set(presentationActivations.map((activation) => activation?.activationId))
+    .size !== presentationActivations.length ||
+  presentationActivations.some(
+    (activation) =>
+      !requiredPreparationActivationIds.has(activation?.activationId),
+  ) ||
+  !isRecord(harpoonActivation) ||
+  harpoonActivation.state !== "active" ||
+  harpoonActivation.avatarId !== "steve" ||
+  harpoonActivation.itemId !== "harpoon" ||
+  harpoonActivation.slot !== "gatheringtool" ||
+  harpoonActivation.bodyEmoteKey !== "harpoon"
+) {
+  fail(
+    `duel-presentation-assets.json must contain exactly the ${requiredPreparationActivationIds.size} certified Steve preparation authorities`,
+  );
+} else {
+  if (
+    harpoonActivation.motion?.durationSeconds !== 1.2 ||
+    harpoonActivation.motion?.strikeSeconds !== 0.6 ||
+    harpoonActivation.motion?.recoverySeconds !== 0.6
+  ) {
+    fail("steve-harpoon-v1 must match the two authoritative 600 ms phases");
+  }
+  if (
+    harpoonActivation.rollback?.equippedModelPath !== null ||
+    !isRecord(harpoonActivation.rollback?.equippedModelPathsByAvatar) ||
+    Object.keys(harpoonActivation.rollback.equippedModelPathsByAvatar)
+      .length !== 0 ||
+    harpoonActivation.rollback?.bodyEmotePath !== null ||
+    harpoonActivation.rollback?.removeInstalledAssets !== true
+  ) {
+    fail(
+      "steve-harpoon-v1 must retain an exact fail-closed rollback projection",
+    );
+  }
+  assertLockedAssetUrl(
+    "steve-harpoon-v1.equipment",
+    harpoonActivation.equipment?.assetUrl,
+    harpoonActivation.equipment?.sha256,
+  );
+  assertLockedAssetUrl(
+    "steve-harpoon-v1.motion",
+    harpoonActivation.motion?.assetUrl,
+    harpoonActivation.motion?.sha256,
+  );
+}
+
+for (const family of corePreparationFamilies) {
+  for (const itemId of family.itemIds) {
+    const activationId = `steve-${itemId.replaceAll("_", "-")}-v1`;
+    const activation = presentationActivations.find(
+      (candidate) => candidate?.activationId === activationId,
+    );
+    const item = Array.isArray(tools)
+      ? tools.find((candidate) => candidate?.id === itemId)
+      : null;
+    if (!item) {
+      fail(`items/tools.json is missing ${itemId}`);
+      continue;
+    }
+    if (
+      !isRecord(activation) ||
+      activation.activationGroupId !== "steve-core-preparation-v1" ||
+      activation.state !== "active" ||
+      activation.avatarId !== "steve" ||
+      activation.itemId !== itemId ||
+      activation.slot !== "gatheringtool" ||
+      activation.bodyEmoteKey !== family.bodyEmoteKey ||
+      activation.motion?.assetUrl !== family.motionAssetUrl ||
+      !Number.isFinite(activation.motion?.durationSeconds) ||
+      activation.motion.durationSeconds <= 0 ||
+      activation.motion?.loopSeamExact !== true ||
+      activation.rollback?.bodyEmotePath !== family.rollbackBodyEmotePath ||
+      !isRecord(activation.rollback?.gatheringModelPathsByAvatar) ||
+      Object.keys(activation.rollback.gatheringModelPathsByAvatar).length !==
+        0 ||
+      activation.rollback?.removeInstalledAssets !== true
+    ) {
+      fail(`${activationId} does not match its certified runtime authority`);
+      continue;
+    }
+    const gatheringPaths = item.gatheringModelPathsByAvatar;
+    if (
+      !isRecord(gatheringPaths) ||
+      Object.keys(gatheringPaths).length !== 1 ||
+      gatheringPaths.steve !== activation.equipment?.assetUrl
+    ) {
+      fail(`${itemId} must select only its active exact Steve gathering fit`);
+    }
+    assertLockedAssetUrl(
+      `${activationId}.equipment`,
+      activation.equipment?.assetUrl,
+      activation.equipment?.sha256,
+    );
+    assertLockedAssetUrl(
+      `${activationId}.motion`,
+      activation.motion?.assetUrl,
+      activation.motion?.sha256,
+    );
+  }
+}
+for (const authority of fishingInteractionAuthorities) {
+  const activationId = `steve-${authority.itemId.replaceAll("_", "-")}-v1`;
+  const activation = presentationActivations.find(
+    (candidate) => candidate?.activationId === activationId,
+  );
+  const item = Array.isArray(tools)
+    ? tools.find((candidate) => candidate?.id === authority.itemId)
+    : null;
+  if (!item) {
+    fail(`items/tools.json is missing ${authority.itemId}`);
+    continue;
+  }
+  const hasDeploymentLifecycle = authority.retrievalAssetUrl !== undefined;
+  const motionTiming = activation?.motion?.presentationTiming;
+  const retrievalTiming = activation?.retrievalMotion?.presentationTiming;
+  if (
+    !isRecord(activation) ||
+    activation.activationGroupId !== "steve-fishing-interactions-v1" ||
+    activation.state !== "active" ||
+    activation.avatarId !== "steve" ||
+    activation.itemId !== authority.itemId ||
+    activation.slot !== "gatheringtool" ||
+    activation.bodyEmoteKey !== authority.bodyEmoteKey ||
+    activation.equipment?.assetUrl !== authority.equipmentAssetUrl ||
+    activation.motion?.assetUrl !== authority.motionAssetUrl ||
+    Math.abs(
+      Number(activation.motion?.durationSeconds) - authority.durationSeconds,
+    ) > 0.000001 ||
+    (authority.loopSeamExact === true &&
+      activation.motion?.loopSeamExact !== true) ||
+    (hasDeploymentLifecycle &&
+      (!isRecord(motionTiming) ||
+        motionTiming.durationSeconds !== authority.durationSeconds ||
+        motionTiming.releaseSeconds !== authority.releaseSeconds ||
+        activation.retrievalMotion?.assetUrl !== authority.retrievalAssetUrl ||
+        activation.retrievalMotion?.durationSeconds !==
+          authority.retrievalDurationSeconds ||
+        !isRecord(retrievalTiming) ||
+        retrievalTiming.durationSeconds !==
+          authority.retrievalDurationSeconds ||
+        retrievalTiming.pickupSeconds !== authority.pickupSeconds ||
+        activation.worldModel?.assetUrl !== authority.worldAssetUrl)) ||
+    (!hasDeploymentLifecycle &&
+      (activation.retrievalMotion !== undefined ||
+        activation.worldModel !== undefined)) ||
+    !isRecord(activation.rollback?.gatheringModelPathsByAvatar) ||
+    Object.keys(activation.rollback.gatheringModelPathsByAvatar).length !== 0 ||
+    activation.rollback?.removeInstalledAssets !== true ||
+    (hasDeploymentLifecycle && activation.rollback?.modelPath !== null)
+  ) {
+    fail(`${activationId} does not match its certified runtime authority`);
+    continue;
+  }
+  const gatheringPaths = item.gatheringModelPathsByAvatar;
+  if (
+    item.equippedModelPath != null ||
+    !isRecord(gatheringPaths) ||
+    Object.keys(gatheringPaths).length !== 1 ||
+    gatheringPaths.steve !== authority.equipmentAssetUrl
+  ) {
+    fail(
+      `${authority.itemId} must select its active exact Steve gathering fit without a generic equipped override`,
+    );
+  }
+  assertLockedAssetUrl(
+    `${activationId}.equipment`,
+    activation.equipment?.assetUrl,
+    activation.equipment?.sha256,
+  );
+  assertLockedAssetUrl(
+    `${activationId}.motion`,
+    activation.motion?.assetUrl,
+    activation.motion?.sha256,
+  );
+  if (hasDeploymentLifecycle) {
+    assertLockedAssetUrl(
+      `${activationId}.retrievalMotion`,
+      activation.retrievalMotion?.assetUrl,
+      activation.retrievalMotion?.sha256,
+    );
+    assertLockedAssetUrl(
+      `${activationId}.worldModel`,
+      activation.worldModel?.assetUrl,
+      activation.worldModel?.sha256,
+    );
+  }
+}
+if (!harpoon) {
+  fail("items/tools.json is missing harpoon");
+} else if (harpoonActivation) {
+  const fittedPaths = harpoon.equippedModelPathsByAvatar;
+  if (
+    harpoon.equippedModelPath !== null ||
+    !isRecord(fittedPaths) ||
+    Object.keys(fittedPaths).length !== 1 ||
+    fittedPaths.steve !== harpoonActivation.equipment?.assetUrl
+  ) {
+    fail(
+      "harpoon must fail closed by default and select only the active exact Steve fit",
+    );
+  }
+}
+
 for (const impactFile of [
   "sword-clash-001.mp3",
   "sword-clash-002.mp3",
@@ -626,6 +1223,10 @@ for (const impactFile of [
     `melee impact ${impactFile}`,
     `asset://audio/soundeffects/${impactFile}`,
   );
+}
+
+for (const assetUrl of essentialDuelAssetUrls) {
+  assertAssetUrl(`essential duel asset ${assetUrl}`, assetUrl);
 }
 
 if (failures.length > 0) {

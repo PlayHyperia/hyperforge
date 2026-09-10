@@ -161,6 +161,25 @@ export class TileMovementManager {
    * with the movement end packet, preventing race conditions on the client.
    */
   private arrivalEmotes: Map<string, string> = new Map();
+  private arrivalEmoteResolvers: Map<string, () => string | null> = new Map();
+
+  private consumeArrivalEmote(
+    playerId: string,
+    reachedRequestedDestination: boolean,
+  ): string {
+    const fallback = this.arrivalEmotes.get(playerId) || "idle";
+    const resolver = this.arrivalEmoteResolvers.get(playerId);
+    this.arrivalEmotes.delete(playerId);
+    this.arrivalEmoteResolvers.delete(playerId);
+    if (!reachedRequestedDestination) return "idle";
+    if (!resolver) return fallback;
+    try {
+      const resolved = resolver();
+      return typeof resolved === "string" && resolved ? resolved : "idle";
+    } catch {
+      return "idle";
+    }
+  }
 
   /**
    * RULES-ACCURATE: Tick-start positions for all players
@@ -242,6 +261,43 @@ export class TileMovementManager {
     return this.world.getSystem("terrain") as InstanceType<
       typeof TerrainSystem
     > | null;
+  }
+
+  /**
+   * Persist only settled open-world positions. Duel movement is intentionally
+   * temporary: the duel authority owns crash recovery and returns contestants
+   * to their saved open-world positions after the result phase.
+   */
+  private persistSettledPlayerPosition(
+    playerId: string,
+    position: { x: number; y: number; z: number },
+  ): void {
+    if (
+      !Number.isFinite(position.x) ||
+      !Number.isFinite(position.y) ||
+      !Number.isFinite(position.z)
+    ) {
+      return;
+    }
+    const entity = this.world.entities.get(playerId) as
+      { data?: { inStreamingDuel?: boolean } } | undefined;
+    if (entity?.data?.inStreamingDuel === true) return;
+
+    const database = this.world.getSystem("database") as {
+      savePlayer?: (
+        id: string,
+        update: {
+          positionX: number;
+          positionY: number;
+          positionZ: number;
+        },
+      ) => void;
+    } | null;
+    database?.savePlayer?.(playerId, {
+      positionX: position.x,
+      positionY: position.y,
+      positionZ: position.z,
+    });
   }
 
   /**
@@ -900,7 +956,8 @@ export class TileMovementManager {
 
   /**
    * Max BFS path continuations per tick to prevent 25+ agents all pathfinding
-   * simultaneously (each BFS = 4000 iterations × walkability checks).
+   * simultaneously. The separate shared iteration budget remains the hard
+   * ceiling when several continuations are individually inexpensive.
    * Remaining continuations will happen on the next tick.
    */
   private static readonly MAX_PATH_CONTINUATIONS_PER_TICK = 5;
@@ -908,10 +965,13 @@ export class TileMovementManager {
   /**
    * Global BFS iteration budget per tick. ALL BFS callers share this budget.
    * Each BFS iteration costs 1 unit. Short paths (50 iterations) barely dent
-   * the budget while max-distance paths (4000 iterations) cost proportionally.
-   * At 12000 total: 3 full-length paths or 60+ short paths can coexist per tick.
+   * the budget while long or obstructed paths cost proportionally. The 1,000-unit
+   * ceiling keeps simultaneous path installation below the measured movement
+   * tick latency threshold on the production terrain manifest.
    */
-  private static readonly MAX_BFS_ITERATIONS_PER_TICK = 12000;
+  private static readonly MAX_BFS_ITERATIONS_PER_TICK = 1000;
+  /** Bound one guided non-combat segment so no single route owns the tick. */
+  private static readonly MAX_GUIDED_NON_COMBAT_ITERATIONS_PER_SEARCH = 250;
   private _bfsIterationsThisTick = 0;
 
   /**
@@ -963,6 +1023,7 @@ export class TileMovementManager {
       destination: TileCoord;
       isRunning: boolean;
       interactionArrival: TileInteractionArrival | null;
+      failedAttempts: number;
     }
   >();
 
@@ -1227,6 +1288,7 @@ export class TileMovementManager {
       if (entity?.data) entity.data.tileMovementActive = false;
       const worldPosition = tileToWorld(state.currentTile);
       if (entity?.position) worldPosition.y = entity.position.y;
+      this.persistSettledPlayerPosition(playerId, worldPosition);
       this.sendFn("tileMovementEnd", {
         id: playerId,
         tile: state.currentTile,
@@ -1277,6 +1339,7 @@ export class TileMovementManager {
       destination: { x: destination.x, z: destination.z },
       isRunning,
       interactionArrival,
+      failedAttempts: 0,
     });
   }
 
@@ -1284,14 +1347,45 @@ export class TileMovementManager {
     const pending = this._pendingNonCombatMoves.get(playerId);
     if (!pending) return;
 
+    const currentTile = this.playerStates.get(playerId)?.currentTile;
+    if (
+      currentTile &&
+      pending.interactionArrival &&
+      this.isTileWithinInteractionArrival(
+        currentTile,
+        pending.destination,
+        pending.interactionArrival,
+      )
+    ) {
+      this._pendingNonCombatMoves.delete(playerId);
+      return;
+    }
+
     const outcome = this._continuePathToDestination(
       playerId,
       pending.destination,
       pending.isRunning,
       pending.interactionArrival,
     );
-    if (outcome !== "deferred") {
+    if (outcome === "started") {
       this._pendingNonCombatMoves.delete(playerId);
+      return;
+    }
+    if (outcome === "deferred") return;
+
+    // An empty interaction path can mean every legal workstation approach is
+    // temporarily occupied or reserved. Retain that intent for a bounded
+    // interval so queued agents get a fair turn as the current users depart.
+    // Exact movement and interaction validation still run on every retry, and
+    // permanently unreachable stations are abandoned at the existing bound.
+    pending.failedAttempts += 1;
+    if (
+      !pending.interactionArrival ||
+      pending.failedAttempts >=
+        TileMovementManager.MAX_INTERACTION_REPLAN_ATTEMPTS
+    ) {
+      this._pendingNonCombatMoves.delete(playerId);
+      this._interactionApproachReservations.delete(playerId);
     }
   }
 
@@ -1673,10 +1767,12 @@ export class TileMovementManager {
 
         // Get any pending arrival emote (e.g., "fishing" for gathering actions)
         // This is bundled with tileMovementEnd to prevent race conditions
-        const arrivalEmote = reachedRequestedDestination
-          ? this.arrivalEmotes.get(playerId) || "idle"
-          : "idle";
-        this.arrivalEmotes.delete(playerId);
+        const arrivalEmote = this.consumeArrivalEmote(
+          playerId,
+          reachedRequestedDestination,
+        );
+
+        this.persistSettledPlayerPosition(playerId, this._worldPos);
 
         // Broadcast movement end with emote (atomic delivery)
         // Include moveSeq so client can ignore stale end packets
@@ -1978,10 +2074,12 @@ export class TileMovementManager {
 
       // Get any pending arrival emote (e.g., "fishing" for gathering actions)
       // This is bundled with tileMovementEnd to prevent race conditions
-      const arrivalEmote = reachedRequestedDestination
-        ? this.arrivalEmotes.get(playerId) || "idle"
-        : "idle";
-      this.arrivalEmotes.delete(playerId);
+      const arrivalEmote = this.consumeArrivalEmote(
+        playerId,
+        reachedRequestedDestination,
+      );
+
+      this.persistSettledPlayerPosition(playerId, this._worldPos);
 
       // Broadcast movement end with emote (atomic delivery)
       // Note: Rotation is handled by FaceDirectionManager at end of tick
@@ -2264,6 +2362,7 @@ export class TileMovementManager {
     this._precomputedPathSegments.delete(playerId);
     this._interactionApproachReservations.delete(playerId);
     this.arrivalEmotes.delete(playerId);
+    this.arrivalEmoteResolvers.delete(playerId);
     this.tilesTraveledForXP.delete(playerId);
     this.antiCheat.cleanup(playerId);
     this.movementRateLimiter.reset(playerId);
@@ -2287,8 +2386,17 @@ export class TileMovementManager {
    * @param playerId - The player ID
    * @param emote - The emote to use on arrival (e.g., "fishing", "chopping")
    */
-  setArrivalEmote(playerId: string, emote: string): void {
+  setArrivalEmote(
+    playerId: string,
+    emote: string,
+    resolveAtArrival?: () => string | null,
+  ): void {
     this.arrivalEmotes.set(playerId, emote);
+    if (resolveAtArrival) {
+      this.arrivalEmoteResolvers.set(playerId, resolveAtArrival);
+    } else {
+      this.arrivalEmoteResolvers.delete(playerId);
+    }
   }
 
   /**
@@ -2297,6 +2405,7 @@ export class TileMovementManager {
    */
   clearArrivalEmote(playerId: string): void {
     this.arrivalEmotes.delete(playerId);
+    this.arrivalEmoteResolvers.delete(playerId);
   }
 
   /**
@@ -2332,6 +2441,7 @@ export class TileMovementManager {
     this._precomputedPathSegments.delete(playerId);
     this._interactionApproachReservations.delete(playerId);
     this.arrivalEmotes.delete(playerId);
+    this.arrivalEmoteResolvers.delete(playerId);
 
     // Get existing state or create new one
     let state = this.playerStates.get(playerId);
@@ -2390,6 +2500,7 @@ export class TileMovementManager {
         entity.data.position = [corrected.x, corrected.y, corrected.z];
       }
       resolvedPosition = corrected;
+      this.persistSettledPlayerPosition(playerId, corrected);
       this.sendFn("tileMovementEnd", {
         id: playerId,
         tile: newTile,
@@ -2580,6 +2691,8 @@ export class TileMovementManager {
       worldPos.y = entity.position.y;
     }
 
+    this.persistSettledPlayerPosition(playerId, worldPos);
+
     this.sendFn("tileMovementEnd", {
       id: playerId,
       tile: state.currentTile,
@@ -2713,6 +2826,10 @@ export class TileMovementManager {
     currentBuildingId: string | null,
     remainingBudget: number,
   ): TileCoord[] {
+    const guidedBudget = Math.min(
+      remainingBudget,
+      TileMovementManager.MAX_GUIDED_NON_COMBAT_ITERATIONS_PER_SEARCH,
+    );
     const canTraverse = (tile: TileCoord, fromTile?: TileCoord) =>
       this.isTileTraversableForPlayer(
         playerId,
@@ -2722,11 +2839,11 @@ export class TileMovementManager {
         currentBuildingId,
       );
     if (!arrival) {
-      return this.pathfinder.findPath(
+      return this.pathfinder.findPathGuided(
         start,
         destination,
         canTraverse,
-        remainingBudget,
+        guidedBudget,
       );
     }
 
@@ -2777,11 +2894,11 @@ export class TileMovementManager {
         break;
       }
     }
-    const path = this.pathfinder.findPathToAny(
+    const path = this.pathfinder.findPathToAnyGuided(
       start,
       validDestinations,
       canTraverse,
-      remainingBudget,
+      guidedBudget,
     );
     if (path.length > 0 && !this.pathfinder.wasLastPathPartial()) {
       const reservedTile = path[path.length - 1];
@@ -2800,16 +2917,16 @@ export class TileMovementManager {
     attackRange: number = 0, // 0 = non-combat, 1+ = combat range
     attackType: AttackType = AttackType.MELEE,
     interactionArrival?: TileInteractionArrival | null,
-  ): void {
+  ): boolean {
     const entity = this.world.entities.get(playerId);
     if (!entity) {
-      return;
+      return false;
     }
 
     // Death lock: Dead players cannot move
     const deathState = entity.data?.deathState;
     if (deathState === DeathState.DYING || deathState === DeathState.DEAD) {
-      return;
+      return false;
     }
 
     // Arena bounds clamp: when an agent is locked into the duel arena, clamp
@@ -2886,7 +3003,7 @@ export class TileMovementManager {
       state.isRunning === running &&
       this.isMoving(playerId)
     ) {
-      return;
+      return true;
     }
 
     this._pendingObstructionReplans.delete(playerId);
@@ -2966,7 +3083,14 @@ export class TileMovementManager {
           attackType === AttackType.MELEE ||
           this.tileHasLineOfSight(state.currentTile, this._targetTile)
         ) {
-          return; // Already in valid combat position
+          // A target can move while an older combat-follow path is active. If
+          // that movement puts the actor in a valid attack tile, retire the
+          // stale path immediately so the next interpolation step cannot carry
+          // the actor past the cardinal/ranged engagement boundary.
+          if (this.isMoving(playerId)) {
+            this.stopPlayer(playerId);
+          }
+          return true; // Already in valid combat position
         }
       }
 
@@ -2975,7 +3099,7 @@ export class TileMovementManager {
         this._bfsIterationsThisTick >=
         TileMovementManager.MAX_BFS_ITERATIONS_PER_TICK
       ) {
-        return;
+        return false;
       }
 
       // Generate ALL valid destination tiles
@@ -3008,7 +3132,7 @@ export class TileMovementManager {
       }
 
       if (validTiles.length === 0) {
-        return; // No valid combat position found
+        return false; // No valid combat position found
       }
 
       // Multi-destination BFS: finds shortest path to ANY valid tile
@@ -3044,7 +3168,7 @@ export class TileMovementManager {
         state.requestedDestination = null;
         state.requestedInteractionArrival = null;
         this._interactionApproachReservations.delete(playerId);
-        return;
+        return true;
       }
 
       // Retain the latest non-combat intent when the shared budget is exhausted;
@@ -3059,7 +3183,7 @@ export class TileMovementManager {
           running,
           normalizedInteractionArrival,
         );
-        return;
+        return true;
       }
 
       // Calculate BFS path to the target tile
@@ -3079,7 +3203,16 @@ export class TileMovementManager {
     }
 
     if (path.length === 0) {
-      return; // No path found
+      if (normalizedInteractionArrival) {
+        this.queueNonCombatMove(
+          playerId,
+          this._targetTile,
+          running,
+          normalizedInteractionArrival,
+        );
+        return true;
+      }
+      return false; // No path found
     }
 
     // Resolve contestant path conflicts before tileMovementStart reaches the
@@ -3088,7 +3221,7 @@ export class TileMovementManager {
     if (
       !this.resolveStreamingDuelPathInstallation(playerId, state, path, running)
     ) {
-      return;
+      return false;
     }
 
     // If we're already following the same remaining path at the same speed,
@@ -3116,7 +3249,7 @@ export class TileMovementManager {
             : null;
         state.requestedInteractionArrival =
           attackRange === 0 ? normalizedInteractionArrival : null;
-        return;
+        return true;
       }
     }
 
@@ -3187,6 +3320,7 @@ export class TileMovementManager {
       moveSeq: state.moveSeq,
       emote: state.isRunning ? "run" : "walk",
     });
+    return true;
   }
 
   /**

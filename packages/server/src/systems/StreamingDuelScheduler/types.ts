@@ -6,6 +6,15 @@
 
 import type { DuelPreparationStatus } from "./preparation";
 import type { CompetitiveSnapshot } from "./competitive-snapshot.js";
+import {
+  STREAMING_DUEL_TIMEOUT_POLICY,
+  STREAMING_DUEL_TIMING_CONTRACT_VERSION,
+} from "./competitive-timing-policy.js";
+import type {
+  StreamingDuelActionObservation,
+  StreamingDuelPreparationSummary,
+  StreamingDuelStrategySummary,
+} from "@hyperforge/shared";
 
 export type StreamingPhase =
   "IDLE" | "ANNOUNCEMENT" | "COUNTDOWN" | "FIGHTING" | "RESOLUTION";
@@ -221,6 +230,15 @@ export interface StreamingDuelOperationalMetrics {
     cancellationReasons: Record<string, number>;
   };
   engagement: StreamingCombatEngagementMetrics;
+  actionObservations: {
+    configured: boolean;
+    healthy: boolean;
+    pending: number;
+    persisted: number;
+    replayed: number;
+    rejected: number;
+    persistenceErrors: number;
+  };
   current: {
     cycleId: string | null;
     phase: StreamingPhase;
@@ -260,6 +278,8 @@ export interface StreamingCycleAgent {
   availableCombatStyles: Array<"melee" | "ranged" | "mage" | "prayer">;
   combatLoadouts: FrozenStreamingCombatLoadouts;
   loadoutFrozen: boolean;
+  /** Strict frozen strategy disclosure; null for idle or unsupported legacy state. */
+  strategySummary: StreamingDuelStrategySummary | null;
   prayerPointUnits: number;
   prayerPoints: number;
   prayerMaxPoints: number;
@@ -316,72 +336,244 @@ export interface StreamingStateUpdate {
     winReason: string | null;
     seed: string | null;
     replayHash: string | null;
+    /** Immutable bounded tail of exact server-authored public fight actions. */
+    actionObservations: readonly StreamingDuelActionObservation[];
   };
   leaderboard: LeaderboardEntry[];
   cameraTarget: string | null;
   terminalNotice: StreamingTerminalNotice | null;
+  /** Bounded public truth for the exact selected pre-market contestants. */
+  preparation?: StreamingDuelPreparationSummary | null;
 }
 
 const parseDurationEnv = (
+  env: NodeJS.ProcessEnv,
   key: string,
   fallbackMs: number,
   minMs: number,
 ): number => {
-  const raw = process.env[key];
-  if (!raw) return fallbackMs;
+  const configured = env[key];
+  if (configured === undefined) return fallbackMs;
+  const raw = configured.trim();
 
-  const parsed = Number.parseInt(raw, 10);
-  if (!Number.isFinite(parsed) || parsed < minMs) {
-    return fallbackMs;
+  if (!/^\d+$/u.test(raw)) {
+    throw new Error(`${key} must be a base-10 integer`);
   }
-
+  const parsed = Number(raw);
+  if (!Number.isSafeInteger(parsed) || parsed < minMs) {
+    throw new Error(`${key} must be a safe integer of at least ${minMs}`);
+  }
   return parsed;
 };
 
-const isDevelopment = process.env.NODE_ENV !== "production";
 const DEV_ANNOUNCEMENT_MS = 60 * 1000;
 const DEV_FIGHTING_MS = 270 * 1000;
 const DEV_END_WARNING_MS = 15 * 1000;
 const DEV_RESOLUTION_MS = 10 * 1000;
 
-const ANNOUNCEMENT_DURATION = parseDurationEnv(
-  "STREAMING_ANNOUNCEMENT_MS",
-  DEV_ANNOUNCEMENT_MS,
-  1000,
-);
-const FIGHTING_DURATION = parseDurationEnv(
-  "STREAMING_FIGHTING_MS",
-  DEV_FIGHTING_MS,
-  5000,
-);
-const END_WARNING_DURATION = parseDurationEnv(
-  "STREAMING_END_WARNING_MS",
-  DEV_END_WARNING_MS,
-  1000,
-);
-const RESOLUTION_DURATION = parseDurationEnv(
-  "STREAMING_RESOLUTION_MS",
-  DEV_RESOLUTION_MS,
-  1000,
-);
-const COUNTDOWN_TICKS = parseDurationEnv("STREAMING_COUNTDOWN_TICKS", 3, 1);
+export {
+  STREAMING_DUEL_TIMEOUT_POLICY,
+  STREAMING_DUEL_TIMING_CONTRACT_VERSION,
+} from "./competitive-timing-policy.js";
 
-// Timing constants (in milliseconds)
-export const STREAMING_TIMING = {
-  CYCLE_DURATION:
+export type StreamingDuelTimingContract = Readonly<{
+  CONTRACT_VERSION: typeof STREAMING_DUEL_TIMING_CONTRACT_VERSION;
+  TIMEOUT_POLICY: typeof STREAMING_DUEL_TIMEOUT_POLICY;
+  /** Pre-market deadline; null only when private preparation is disabled. */
+  PREPARATION_DURATION: number | null;
+  CYCLE_DURATION: number;
+  ANNOUNCEMENT_DURATION: number;
+  FIGHTING_DURATION: number;
+  END_WARNING_DURATION: number;
+  MAX_FIGHT_DURATION: number;
+  RESOLUTION_DURATION: number;
+  COUNTDOWN_TICKS: number;
+  COUNTDOWN_DURATION: number;
+  STATE_BROADCAST_INTERVAL: number;
+  FIGHT_BROADCAST_INTERVAL: number;
+  INTER_CYCLE_DELAY_MS: number;
+}>;
+
+export function resolveStreamingPreparationDuration(
+  env: NodeJS.ProcessEnv = process.env,
+): number | null {
+  if (env.STREAMING_DUEL_PREPARATION_MS === undefined) return null;
+  const raw = env.STREAMING_DUEL_PREPARATION_MS.trim();
+  if (!/^\d+$/u.test(raw)) {
+    throw new Error("STREAMING_DUEL_PREPARATION_MS must be a base-10 integer");
+  }
+  const parsed = Number(raw);
+  if (!Number.isSafeInteger(parsed) || parsed < 1_000) {
+    throw new Error(
+      "STREAMING_DUEL_PREPARATION_MS must be a safe integer of at least 1000",
+    );
+  }
+  return parsed;
+}
+
+/**
+ * Optional minimum time that an authoritative ready preparation remains
+ * publicly observable before market publication. This is a presentation
+ * floor, not an extension of the private preparation deadline; when too little
+ * time remains, the existing deadline expires the preparation fail-closed.
+ */
+export function resolveStreamingPublicPreparationMinimumDuration(
+  env: NodeJS.ProcessEnv = process.env,
+  preparationDurationMs = resolveStreamingPreparationDuration(env),
+): number {
+  if (env.STREAMING_DUEL_PUBLIC_PREPARATION_MIN_MS === undefined) return 0;
+  const raw = env.STREAMING_DUEL_PUBLIC_PREPARATION_MIN_MS.trim();
+  if (!/^\d+$/u.test(raw)) {
+    throw new Error(
+      "STREAMING_DUEL_PUBLIC_PREPARATION_MIN_MS must be a base-10 integer",
+    );
+  }
+  const parsed = Number(raw);
+  if (!Number.isSafeInteger(parsed)) {
+    throw new Error(
+      "STREAMING_DUEL_PUBLIC_PREPARATION_MIN_MS must be a safe integer",
+    );
+  }
+  if (parsed === 0) return 0;
+  if (parsed < 1_000) {
+    throw new Error(
+      "STREAMING_DUEL_PUBLIC_PREPARATION_MIN_MS must be zero or at least 1000",
+    );
+  }
+  if (preparationDurationMs === null) {
+    throw new Error(
+      "STREAMING_DUEL_PUBLIC_PREPARATION_MIN_MS requires STREAMING_DUEL_PREPARATION_MS",
+    );
+  }
+  if (parsed >= preparationDurationMs) {
+    throw new Error(
+      "STREAMING_DUEL_PUBLIC_PREPARATION_MIN_MS must be below STREAMING_DUEL_PREPARATION_MS",
+    );
+  }
+  return parsed;
+}
+
+/**
+ * Resolve the earliest market-publication time from the later authoritative
+ * contestant readiness receipt. Selection time cannot prove that spectators
+ * saw the completed loadouts, especially when planning consumes most of the
+ * configured preparation floor.
+ */
+export function resolveStreamingPublicPreparationReleaseAt(
+  preparation: Readonly<{
+    selectedAt: number;
+    expiresAt: number;
+    agent1ReadyAt: number | null;
+    agent2ReadyAt: number | null;
+  }>,
+  minimumDurationMs: number,
+): number {
+  const timestamps = [
+    preparation.selectedAt,
+    preparation.expiresAt,
+    preparation.agent1ReadyAt,
+    preparation.agent2ReadyAt,
+  ];
+  if (
+    !Number.isSafeInteger(minimumDurationMs) ||
+    minimumDurationMs < 0 ||
+    timestamps.some(
+      (timestamp) =>
+        timestamp === null || !Number.isSafeInteger(timestamp) || timestamp < 0,
+    ) ||
+    preparation.expiresAt <= preparation.selectedAt ||
+    preparation.agent1ReadyAt! < preparation.selectedAt ||
+    preparation.agent2ReadyAt! < preparation.selectedAt ||
+    preparation.agent1ReadyAt! > preparation.expiresAt ||
+    preparation.agent2ReadyAt! > preparation.expiresAt
+  ) {
+    throw new Error("invalid ready preparation presentation window");
+  }
+  const readyAt = Math.max(
+    preparation.agent1ReadyAt!,
+    preparation.agent2ReadyAt!,
+  );
+  const releaseAt = readyAt + minimumDurationMs;
+  if (!Number.isSafeInteger(releaseAt)) {
+    throw new Error(
+      "ready preparation presentation window exceeds safe integers",
+    );
+  }
+  return Math.min(preparation.expiresAt, releaseAt);
+}
+
+export function resolveStreamingDuelTiming(
+  env: NodeJS.ProcessEnv = process.env,
+): StreamingDuelTimingContract {
+  const PREPARATION_DURATION = resolveStreamingPreparationDuration(env);
+  const ANNOUNCEMENT_DURATION = parseDurationEnv(
+    env,
+    "STREAMING_ANNOUNCEMENT_MS",
+    DEV_ANNOUNCEMENT_MS,
+    1000,
+  );
+  const FIGHTING_DURATION = parseDurationEnv(
+    env,
+    "STREAMING_FIGHTING_MS",
+    DEV_FIGHTING_MS,
+    5000,
+  );
+  const END_WARNING_DURATION = parseDurationEnv(
+    env,
+    "STREAMING_END_WARNING_MS",
+    DEV_END_WARNING_MS,
+    1000,
+  );
+  const RESOLUTION_DURATION = parseDurationEnv(
+    env,
+    "STREAMING_RESOLUTION_MS",
+    DEV_RESOLUTION_MS,
+    1000,
+  );
+  const COUNTDOWN_TICKS = parseDurationEnv(
+    env,
+    "STREAMING_COUNTDOWN_TICKS",
+    3,
+    1,
+  );
+  const INTER_CYCLE_DELAY_MS = parseDurationEnv(
+    env,
+    "STREAMING_INTER_CYCLE_DELAY_MS",
+    5000,
+    1000,
+  );
+  const COUNTDOWN_DURATION = (COUNTDOWN_TICKS + 1) * 1000;
+  const MAX_FIGHT_DURATION = FIGHTING_DURATION + END_WARNING_DURATION;
+  const CYCLE_DURATION =
     ANNOUNCEMENT_DURATION +
-    FIGHTING_DURATION +
-    END_WARNING_DURATION +
+    COUNTDOWN_DURATION +
+    MAX_FIGHT_DURATION +
+    RESOLUTION_DURATION;
+  const safeValues = [COUNTDOWN_DURATION, MAX_FIGHT_DURATION, CYCLE_DURATION];
+  if (!safeValues.every(Number.isSafeInteger)) {
+    throw new Error("Streaming duel timing arithmetic exceeds safe integers");
+  }
+
+  return {
+    CONTRACT_VERSION: STREAMING_DUEL_TIMING_CONTRACT_VERSION,
+    TIMEOUT_POLICY: STREAMING_DUEL_TIMEOUT_POLICY,
+    PREPARATION_DURATION,
+    CYCLE_DURATION,
+    ANNOUNCEMENT_DURATION,
+    FIGHTING_DURATION,
+    END_WARNING_DURATION,
+    MAX_FIGHT_DURATION,
     RESOLUTION_DURATION,
-  ANNOUNCEMENT_DURATION,
-  FIGHTING_DURATION,
-  END_WARNING_DURATION,
-  RESOLUTION_DURATION,
-  COUNTDOWN_TICKS,
-  COUNTDOWN_DURATION: (COUNTDOWN_TICKS + 1) * 1000,
-  STATE_BROADCAST_INTERVAL: 1000, // Broadcast every 1 second
-  FIGHT_BROADCAST_INTERVAL: 200, // Faster updates during fight
-  /** Delay between end of one cycle's cleanup and start of the next cycle.
-   * Gives spectators a visual reset and prevents stale avatar artifacts. */
-  INTER_CYCLE_DELAY_MS: 2000,
-} as const;
+    COUNTDOWN_TICKS,
+    COUNTDOWN_DURATION,
+    STATE_BROADCAST_INTERVAL: 1000,
+    FIGHT_BROADCAST_INTERVAL: 200,
+    /** Delay between end of one cycle's cleanup and start of the next cycle.
+     * Gives spectators a visual reset and prevents stale avatar artifacts. */
+    INTER_CYCLE_DELAY_MS,
+  };
+}
+
+// Timing constants (in milliseconds). Explicit malformed configuration throws
+// during module initialization instead of silently changing a live schedule.
+export const STREAMING_TIMING = resolveStreamingDuelTiming();

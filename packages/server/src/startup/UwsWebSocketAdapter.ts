@@ -25,6 +25,23 @@ export interface UwsUserData {
 
 type ListenerFn = (...args: unknown[]) => void;
 
+type OutboundPayload = ArrayBuffer | Uint8Array | string;
+
+type ReliablePacket = {
+  data: OutboundPayload;
+  bytes: number;
+  isBinary: boolean;
+};
+
+/**
+ * Critical game packets are tiny, so reaching either bound means the client is
+ * no longer consuming a useful real-time stream. Close it and let the normal
+ * reconnect/snapshot path restore one coherent state instead of retaining an
+ * unbounded, increasingly stale queue.
+ */
+const MAX_RELIABLE_QUEUE_PACKETS = 512;
+const MAX_RELIABLE_QUEUE_BYTES = 512 * 1024;
+
 /**
  * Adapter that makes a uWS.WebSocket behave like a Node.js `ws` WebSocket.
  *
@@ -39,14 +56,25 @@ export class UwsWebSocketAdapter {
   /** Whether the underlying uWS socket has been closed */
   private _closed = false;
 
+  /** Critical packets rejected by uWS's native backpressure ceiling. */
+  private readonly reliableQueue: ReliablePacket[] = [];
+  private reliableQueueBytes = 0;
+
   /** Unique identifier for this WebSocket */
   __wsId: string;
 
   /** Remote IP address */
   __remoteAddress: string;
 
-  /** Buffered amount (always 0 for compatibility — uWS manages its own backpressure) */
-  readonly bufferedAmount = 0;
+  /** Native plus application-retained backpressure, matching browser/ws semantics. */
+  get bufferedAmount(): number {
+    if (this._closed) return 0;
+    try {
+      return this.uwsWs.getBufferedAmount() + this.reliableQueueBytes;
+    } catch {
+      return this.reliableQueueBytes;
+    }
+  }
 
   constructor(private uwsWs: uWS.WebSocket<UwsUserData>) {
     const userData = uwsWs.getUserData();
@@ -91,7 +119,7 @@ export class UwsWebSocketAdapter {
   // WebSocket-like interface
   // ---------------------------------------------------------------------------
 
-  send(data: ArrayBuffer | Uint8Array | string): void {
+  send(data: OutboundPayload): void {
     if (this._closed) return;
     try {
       // isBinary = true for ArrayBuffer/Uint8Array, false for string
@@ -100,6 +128,89 @@ export class UwsWebSocketAdapter {
     } catch {
       // Socket may have closed between check and send
     }
+  }
+
+  /**
+   * Send an ordering-sensitive packet without treating uWS status 2 (dropped)
+   * as success. Status 0 is already accepted into uWS's native buffer and must
+   * not be retried; only a genuinely dropped packet enters this FIFO. Once a
+   * FIFO exists, later critical packets join it so impact/death/terminal order
+   * cannot invert while the socket drains.
+   */
+  sendReliable(data: OutboundPayload): boolean {
+    if (this._closed) return false;
+    const packet = this.toReliablePacket(data);
+    if (this.reliableQueue.length > 0) {
+      return this.enqueueReliable(packet);
+    }
+
+    try {
+      const status = this.uwsWs.send(packet.data, packet.isBinary);
+      if (status !== 2) return true;
+      return this.enqueueReliable(packet);
+    } catch {
+      return false;
+    }
+  }
+
+  /** Resume the exact critical FIFO after uWS reports native buffer relief. */
+  dispatchDrain(): void {
+    if (this._closed) return;
+    while (this.reliableQueue.length > 0) {
+      const packet = this.reliableQueue[0];
+      let status: number;
+      try {
+        status = this.uwsWs.send(packet.data, packet.isBinary);
+      } catch {
+        return;
+      }
+      if (status === 2) return;
+
+      this.reliableQueue.shift();
+      this.reliableQueueBytes -= packet.bytes;
+      // Status 0 means uWS accepted this packet but is backpressured again.
+      if (status === 0) return;
+    }
+  }
+
+  getReliableQueueStats(): { packets: number; bytes: number } {
+    return {
+      packets: this.reliableQueue.length,
+      bytes: this.reliableQueueBytes,
+    };
+  }
+
+  private toReliablePacket(data: OutboundPayload): ReliablePacket {
+    if (typeof data === "string") {
+      return {
+        data,
+        bytes: new TextEncoder().encode(data).byteLength,
+        isBinary: false,
+      };
+    }
+    const copy = data instanceof Uint8Array ? data.slice() : data.slice(0);
+    return { data: copy, bytes: copy.byteLength, isBinary: true };
+  }
+
+  private enqueueReliable(packet: ReliablePacket): boolean {
+    if (
+      this.reliableQueue.length >= MAX_RELIABLE_QUEUE_PACKETS ||
+      this.reliableQueueBytes + packet.bytes > MAX_RELIABLE_QUEUE_BYTES
+    ) {
+      console.error(
+        `[UwsAdapter] Critical outbound queue exceeded its recovery bound for ${this.__wsId}; closing the stale connection`,
+      );
+      this.terminate();
+      return false;
+    }
+    this.reliableQueue.push(packet);
+    this.reliableQueueBytes += packet.bytes;
+    return true;
+  }
+
+  private clearReliableQueue(): void {
+    this.reliableQueue.length = 0;
+    this.reliableQueueBytes = 0;
   }
 
   ping(): void {
@@ -114,6 +225,7 @@ export class UwsWebSocketAdapter {
   close(): void {
     if (this._closed) return;
     this._closed = true;
+    this.clearReliableQueue();
     try {
       this.uwsWs.close();
     } catch {
@@ -124,6 +236,7 @@ export class UwsWebSocketAdapter {
   terminate(): void {
     if (this._closed) return;
     this._closed = true;
+    this.clearReliableQueue();
     try {
       this.uwsWs.end(1006, "");
     } catch {
@@ -212,6 +325,7 @@ export class UwsWebSocketAdapter {
   /** Dispatch a "close" event to registered listeners. */
   dispatchClose(code: number): void {
     this._closed = true;
+    this.clearReliableQueue();
     const arr = this.listeners.get("close");
     if (!arr || arr.length === 0) return;
     const snapshot = arr.slice();

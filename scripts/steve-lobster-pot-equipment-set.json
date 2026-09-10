@@ -1,0 +1,13 @@
+{
+  "schemaVersion": 1,
+  "title": "Hyperia Steve lobster pot launch candidate",
+  "equipments": [
+    {
+      "asset": "artifacts/duel-launch-avatar-bakeoff/fitted-steve-fishing-interactions/lobster-pot-fitted.glb",
+      "itemId": "lobster_pot",
+      "avatarId": "steve",
+      "slot": "gatheringtool",
+      "grip": "one-hand"
+    }
+  ]
+}

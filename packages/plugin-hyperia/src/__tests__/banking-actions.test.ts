@@ -76,6 +76,8 @@ describe("banking actions", () => {
     const items = [
       { id: "bronze_hatchet", name: "Bronze Hatchet", quantity: 1 },
       { id: "iron_hatchet", name: "Iron Hatchet", quantity: 1 },
+      { id: "small_fishing_net", name: "Small Fishing Net", quantity: 1 },
+      { id: "harpoon", name: "Harpoon", quantity: 1 },
       { id: "bronze_shortsword", name: "Bronze Shortsword", quantity: 1 },
       { id: "bronze_arrow", name: "Bronze Arrow", quantity: 25 },
       { id: "air_rune", name: "Air rune", quantity: 30 },
@@ -92,11 +94,13 @@ describe("banking actions", () => {
     ).toEqual([
       { itemId: "air_rune", quantity: 30 },
       { itemId: "bronze_arrow", quantity: 25 },
-      { itemId: "bronze_hatchet", quantity: 1 },
       { itemId: "bronze_shortsword", quantity: 1 },
       { itemId: "future_manifest_item", quantity: 3 },
+      { itemId: "harpoon", quantity: 1 },
+      { itemId: "iron_hatchet", quantity: 1 },
       { itemId: "logs", quantity: 2 },
       { itemId: "shrimp", quantity: 4 },
+      { itemId: "small_fishing_net", quantity: 1 },
     ]);
   });
 

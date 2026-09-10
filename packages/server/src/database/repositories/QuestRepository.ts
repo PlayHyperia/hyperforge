@@ -109,6 +109,30 @@ export type ApplyQuestProcessingProgressReceiptResult =
 export type RetireQuestProcessingProgressReceiptResult =
   RetireQuestGatheringProgressReceiptResult;
 
+export interface QuestKillProgressReceiptRow {
+  operationId: string;
+  playerId: string;
+  questId: string;
+  questStartedAt: number;
+  capturedStage: string;
+  mobId: string;
+  mobType: string;
+  quantity: number;
+  createdAt: number;
+}
+
+export interface ApplyQuestKillProgressReceiptRequest extends QuestKillProgressReceiptRow {
+  expectedCurrentStage: string;
+  expectedProgress: StageProgress;
+  resultingStage: string;
+  resultingProgress: StageProgress;
+}
+
+export type ApplyQuestKillProgressReceiptResult =
+  ApplyQuestGatheringProgressReceiptResult;
+export type RetireQuestKillProgressReceiptResult =
+  RetireQuestGatheringProgressReceiptResult;
+
 function normalizeStageProgress(value: unknown): StageProgress | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const normalized: StageProgress = {};
@@ -927,6 +951,361 @@ export class QuestRepository extends BaseRepository {
     }, "ignore processing quest progress receipt");
   }
 
+  /** Load unresolved authenticated mob-kill edges in commit order. */
+  async getPendingKillProgressReceipts(
+    playerId: string,
+  ): Promise<QuestKillProgressReceiptRow[]> {
+    this.ensureDatabase();
+    const rows = await this.db
+      .select({
+        operationId: schema.questKillProgressReceipts.operationId,
+        playerId: schema.questKillProgressReceipts.playerId,
+        questId: schema.questKillProgressReceipts.questId,
+        questStartedAt: schema.questKillProgressReceipts.questStartedAt,
+        capturedStage: schema.questKillProgressReceipts.capturedStage,
+        mobId: schema.questKillProgressReceipts.mobId,
+        mobType: schema.questKillProgressReceipts.mobType,
+        quantity: schema.questKillProgressReceipts.quantity,
+        createdAt: schema.questKillProgressReceipts.createdAt,
+      })
+      .from(schema.questKillProgressReceipts)
+      .where(
+        and(
+          eq(schema.questKillProgressReceipts.playerId, playerId),
+          isNull(schema.questKillProgressReceipts.resolvedAt),
+        ),
+      )
+      .orderBy(
+        asc(schema.questKillProgressReceipts.createdAt),
+        asc(schema.questKillProgressReceipts.id),
+      );
+    return rows.map((row) => ({
+      operationId: row.operationId,
+      playerId: row.playerId,
+      questId: row.questId,
+      questStartedAt: Number(row.questStartedAt),
+      capturedStage: row.capturedStage,
+      mobId: row.mobId,
+      mobType: row.mobType,
+      quantity: Number(row.quantity),
+      createdAt: Number(row.createdAt),
+    }));
+  }
+
+  /** Atomically apply one authenticated mob kill to its captured quest. */
+  async applyKillProgressReceipt(
+    request: ApplyQuestKillProgressReceiptRequest,
+  ): Promise<ApplyQuestKillProgressReceiptResult> {
+    if (this.isDestroying) {
+      throw new Error("quest_kill_progress_database_unavailable");
+    }
+    const operationId = String(request.operationId ?? "").trim();
+    const playerId = String(request.playerId ?? "").trim();
+    const questId = String(request.questId ?? "").trim();
+    const capturedStage = String(request.capturedStage ?? "").trim();
+    const mobId = String(request.mobId ?? "").trim();
+    const mobType = String(request.mobType ?? "").trim();
+    const expectedCurrentStage = String(
+      request.expectedCurrentStage ?? "",
+    ).trim();
+    const resultingStage = String(request.resultingStage ?? "").trim();
+    const questStartedAt = Number(request.questStartedAt);
+    const quantity = Number(request.quantity);
+    const createdAt = Number(request.createdAt);
+    const expectedBaseProgress = normalizeStageProgress(
+      request.expectedProgress,
+    );
+    const proposedProgress = normalizeStageProgress(request.resultingProgress);
+    if (
+      !/^ground-item-mob-loot:[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(
+        operationId,
+      ) ||
+      !playerId ||
+      playerId.length > 256 ||
+      !questId ||
+      questId.length > 256 ||
+      !capturedStage ||
+      capturedStage.length > 256 ||
+      !mobId ||
+      mobId.length > 256 ||
+      !mobType ||
+      mobType.length > 128 ||
+      !expectedCurrentStage ||
+      expectedCurrentStage.length > 256 ||
+      expectedCurrentStage !== capturedStage ||
+      !resultingStage ||
+      resultingStage.length > 256 ||
+      !Number.isSafeInteger(questStartedAt) ||
+      questStartedAt < 0 ||
+      quantity !== 1 ||
+      !Number.isSafeInteger(createdAt) ||
+      createdAt < 0 ||
+      !expectedBaseProgress ||
+      !proposedProgress
+    ) {
+      throw new Error("quest_kill_progress_request_invalid");
+    }
+
+    return this.withTransaction(async (tx) => {
+      await tx.execute(
+        sql`SELECT "id" FROM "characters" WHERE "id" = ${playerId} FOR UPDATE`,
+      );
+      const receiptRows = await tx
+        .select()
+        .from(schema.questKillProgressReceipts)
+        .where(
+          and(
+            eq(schema.questKillProgressReceipts.operationId, operationId),
+            eq(schema.questKillProgressReceipts.questId, questId),
+          ),
+        )
+        .limit(1);
+      const receipt = receiptRows[0];
+      if (!receipt) {
+        throw new Error("quest_kill_progress_receipt_missing");
+      }
+      if (
+        receipt.playerId !== playerId ||
+        Number(receipt.questStartedAt) !== questStartedAt ||
+        receipt.capturedStage !== capturedStage ||
+        receipt.mobId !== mobId ||
+        receipt.mobType !== mobType ||
+        Number(receipt.quantity) !== quantity ||
+        Number(receipt.createdAt) !== createdAt
+      ) {
+        throw new Error("quest_kill_progress_receipt_conflict");
+      }
+      if (
+        receipt.resolution === "retired" ||
+        receipt.resolution === "ignored"
+      ) {
+        return { status: "retired" };
+      }
+      if (receipt.resolution === "applied") {
+        const persisted = normalizeStageProgress(receipt.resultingProgress);
+        if (!receipt.resultingStage || !persisted) {
+          throw new Error("quest_kill_progress_receipt_corrupt");
+        }
+        return {
+          status: "replayed",
+          currentStage: receipt.resultingStage,
+          stageProgress: persisted,
+        };
+      }
+      if (receipt.resolution !== null || receipt.resolvedAt !== null) {
+        throw new Error("quest_kill_progress_receipt_corrupt");
+      }
+
+      const progressRows = await tx
+        .select()
+        .from(schema.questProgress)
+        .where(
+          and(
+            eq(schema.questProgress.playerId, playerId),
+            eq(schema.questProgress.questId, questId),
+          ),
+        )
+        .limit(1);
+      const persistedQuest = progressRows[0];
+      if (
+        !persistedQuest ||
+        persistedQuest.status !== "in_progress" ||
+        Number(persistedQuest.startedAt) !== questStartedAt
+      ) {
+        await tx
+          .update(schema.questKillProgressReceipts)
+          .set({ resolution: "retired", resolvedAt: Date.now() })
+          .where(eq(schema.questKillProgressReceipts.id, receipt.id));
+        return { status: "retired" };
+      }
+
+      const currentStage = String(persistedQuest.currentStage ?? "").trim();
+      const currentProgress = normalizeStageProgress(
+        persistedQuest.stageProgress,
+      );
+      if (!currentStage || !currentProgress) {
+        throw new Error("quest_kill_progress_state_invalid");
+      }
+      if (
+        currentStage !== expectedCurrentStage ||
+        !stageProgressMatches(currentProgress, expectedBaseProgress)
+      ) {
+        return {
+          status: "stale",
+          currentStage,
+          stageProgress: currentProgress,
+        };
+      }
+
+      const nextCount = (currentProgress.kills ?? 0) + quantity;
+      if (!Number.isSafeInteger(nextCount) || nextCount <= 0) {
+        throw new Error("quest_kill_progress_state_invalid");
+      }
+      const expectedProgress = { ...currentProgress, kills: nextCount };
+      if (!stageProgressMatches(expectedProgress, proposedProgress)) {
+        throw new Error("quest_kill_progress_result_invalid");
+      }
+
+      const updated = await tx
+        .update(schema.questProgress)
+        .set({ currentStage: resultingStage, stageProgress: expectedProgress })
+        .where(eq(schema.questProgress.id, persistedQuest.id))
+        .returning({ id: schema.questProgress.id });
+      if (updated.length !== 1) {
+        throw new Error("quest_kill_progress_update_failed");
+      }
+      const now = Date.now();
+      await tx
+        .update(schema.questKillProgressReceipts)
+        .set({
+          resolution: "applied",
+          resolvedAt: now,
+          resultingStage,
+          resultingProgress: expectedProgress,
+        })
+        .where(eq(schema.questKillProgressReceipts.id, receipt.id));
+      await tx.insert(schema.questAuditLog).values({
+        playerId,
+        questId,
+        action: "progressed",
+        stageId: resultingStage,
+        stageProgress: expectedProgress,
+        timestamp: now,
+        metadata: {
+          source: "mob_loot",
+          operationId,
+          mobId,
+          mobType,
+          capturedStage,
+        },
+      });
+      return {
+        status: "applied",
+        currentStage: resultingStage,
+        stageProgress: expectedProgress,
+      };
+    }, "apply kill quest progress receipt");
+  }
+
+  /** Retire a kill edge only after its captured quest incarnation is gone. */
+  async retireKillProgressReceipt(
+    receipt: QuestKillProgressReceiptRow,
+  ): Promise<RetireQuestKillProgressReceiptResult> {
+    if (this.isDestroying) {
+      throw new Error("quest_kill_progress_database_unavailable");
+    }
+    const operationId = String(receipt.operationId ?? "").trim();
+    const playerId = String(receipt.playerId ?? "").trim();
+    const questId = String(receipt.questId ?? "").trim();
+    if (!operationId || !playerId || !questId) {
+      throw new Error("quest_kill_progress_request_invalid");
+    }
+    return this.withTransaction(async (tx) => {
+      await tx.execute(
+        sql`SELECT "id" FROM "characters" WHERE "id" = ${playerId} FOR UPDATE`,
+      );
+      const rows = await tx
+        .select()
+        .from(schema.questKillProgressReceipts)
+        .where(
+          and(
+            eq(schema.questKillProgressReceipts.operationId, operationId),
+            eq(schema.questKillProgressReceipts.questId, questId),
+          ),
+        )
+        .limit(1);
+      const persisted = rows[0];
+      if (!persisted) {
+        throw new Error("quest_kill_progress_receipt_missing");
+      }
+      if (
+        persisted.playerId !== playerId ||
+        Number(persisted.questStartedAt) !== receipt.questStartedAt ||
+        persisted.capturedStage !== receipt.capturedStage ||
+        persisted.mobId !== receipt.mobId ||
+        persisted.mobType !== receipt.mobType ||
+        Number(persisted.quantity) !== receipt.quantity ||
+        Number(persisted.createdAt) !== receipt.createdAt
+      ) {
+        throw new Error("quest_kill_progress_receipt_conflict");
+      }
+      if (persisted.resolution !== null || persisted.resolvedAt !== null) {
+        return "already_resolved";
+      }
+      const active = await tx
+        .select({ id: schema.questProgress.id })
+        .from(schema.questProgress)
+        .where(
+          and(
+            eq(schema.questProgress.playerId, playerId),
+            eq(schema.questProgress.questId, questId),
+            eq(schema.questProgress.status, "in_progress"),
+            eq(schema.questProgress.startedAt, receipt.questStartedAt),
+          ),
+        )
+        .limit(1);
+      if (active.length > 0) return "still_active";
+      await tx
+        .update(schema.questKillProgressReceipts)
+        .set({ resolution: "retired", resolvedAt: Date.now() })
+        .where(eq(schema.questKillProgressReceipts.id, persisted.id));
+      return "retired";
+    }, "retire kill quest progress receipt");
+  }
+
+  /** Resolve a manifest-proven irrelevant mob kill without progress. */
+  async ignoreKillProgressReceipt(
+    receipt: QuestKillProgressReceiptRow,
+  ): Promise<IgnoreQuestProgressReceiptResult> {
+    if (this.isDestroying) {
+      throw new Error("quest_kill_progress_database_unavailable");
+    }
+    const operationId = String(receipt.operationId ?? "").trim();
+    const playerId = String(receipt.playerId ?? "").trim();
+    const questId = String(receipt.questId ?? "").trim();
+    if (!operationId || !playerId || !questId) {
+      throw new Error("quest_kill_progress_request_invalid");
+    }
+    return this.withTransaction(async (tx) => {
+      await tx.execute(
+        sql`SELECT "id" FROM "characters" WHERE "id" = ${playerId} FOR UPDATE`,
+      );
+      const rows = await tx
+        .select()
+        .from(schema.questKillProgressReceipts)
+        .where(
+          and(
+            eq(schema.questKillProgressReceipts.operationId, operationId),
+            eq(schema.questKillProgressReceipts.questId, questId),
+          ),
+        )
+        .limit(1);
+      const persisted = rows[0];
+      if (!persisted) {
+        throw new Error("quest_kill_progress_receipt_missing");
+      }
+      if (
+        persisted.playerId !== playerId ||
+        Number(persisted.questStartedAt) !== receipt.questStartedAt ||
+        persisted.capturedStage !== receipt.capturedStage ||
+        persisted.mobId !== receipt.mobId ||
+        persisted.mobType !== receipt.mobType ||
+        Number(persisted.quantity) !== receipt.quantity ||
+        Number(persisted.createdAt) !== receipt.createdAt
+      ) {
+        throw new Error("quest_kill_progress_receipt_conflict");
+      }
+      if (persisted.resolution !== null || persisted.resolvedAt !== null) {
+        return "already_resolved";
+      }
+      await tx
+        .update(schema.questKillProgressReceipts)
+        .set({ resolution: "ignored", resolvedAt: Date.now() })
+        .where(eq(schema.questKillProgressReceipts.id, persisted.id));
+      return "ignored";
+    }, "ignore kill quest progress receipt");
+  }
+
   /**
    * Get list of completed quest IDs for a player
    *
@@ -1084,26 +1463,45 @@ export class QuestRepository extends BaseRepository {
    * @param playerId - The player ID
    * @param questId - The quest identifier
    */
-  async abandonQuest(playerId: string, questId: string): Promise<void> {
+  async abandonQuest(
+    playerId: string,
+    questId: string,
+    questStartedAt?: number,
+  ): Promise<void> {
     if (this.isDestroying) {
       return;
     }
 
     this.ensureDatabase();
 
+    if (
+      questStartedAt !== undefined &&
+      (!Number.isSafeInteger(questStartedAt) || questStartedAt <= 0)
+    ) {
+      throw new Error("quest_abandon_started_at_invalid");
+    }
+
     await this.withTransaction(async (tx) => {
       await tx.execute(
         sql`SELECT "id" FROM "characters" WHERE "id" = ${playerId} FOR UPDATE`,
       );
       // Delete quest progress entry
-      await tx
+      const deleted = await tx
         .delete(schema.questProgress)
         .where(
           and(
             eq(schema.questProgress.playerId, playerId),
             eq(schema.questProgress.questId, questId),
+            eq(schema.questProgress.status, "in_progress"),
+            ...(questStartedAt === undefined
+              ? []
+              : [eq(schema.questProgress.startedAt, questStartedAt)]),
           ),
-        );
+        )
+        .returning({ id: schema.questProgress.id });
+      if (deleted.length !== 1) {
+        throw new Error("quest_abandon_progress_state_conflict");
+      }
 
       // Audit log entry for quest abandonment
       await tx.insert(schema.questAuditLog).values({
@@ -1111,6 +1509,10 @@ export class QuestRepository extends BaseRepository {
         questId,
         action: "abandoned",
         timestamp: Date.now(),
+        metadata:
+          questStartedAt === undefined
+            ? {}
+            : { questStartedAt: questStartedAt },
       });
     });
   }

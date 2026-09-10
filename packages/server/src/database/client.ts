@@ -48,6 +48,8 @@ import { createPostgresClientDatabase } from "./postgres-transaction";
 import path from "path";
 import { fileURLToPath } from "url";
 import fs from "fs";
+import { readSolanaAgentAuthConfig } from "../infrastructure/auth/solana-agent-auth.js";
+import { readDistributedRateLimitConfig } from "../infrastructure/rate-limit/distributed-rate-limit.js";
 
 const { Pool } = pg;
 
@@ -106,7 +108,7 @@ function getMigrationErrorMessage(error: unknown): string {
 /**
  * Ensure additive columns exist when the live DB lags behind drizzle-kit migrate
  * (e.g. SKIP_MIGRATIONS, wrong DATABASE_URL for CLI migrate, or partial apply).
- * Matches migration 0053_add_agent_streaming_duel_enabled.sql.
+ * Matches the fail-closed default established by migration 0090.
  */
 async function ensureAgentMappingsStreamingDuelColumn(
   pool: pg.Pool,
@@ -114,13 +116,225 @@ async function ensureAgentMappingsStreamingDuelColumn(
   try {
     await pool.query(`
       ALTER TABLE "agent_mappings"
-      ADD COLUMN IF NOT EXISTS "streaming_duel_enabled" boolean DEFAULT true NOT NULL;
+      ADD COLUMN IF NOT EXISTS "streaming_duel_enabled" boolean DEFAULT false NOT NULL;
+      ALTER TABLE "agent_mappings"
+      ALTER COLUMN "streaming_duel_enabled" SET DEFAULT false;
     `);
     console.log("[DB] ✓ Ensured agent_mappings.streaming_duel_enabled");
   } catch (error) {
     console.warn(
       "[DB] Could not ensure agent_mappings.streaming_duel_enabled:",
       getMigrationErrorMessage(error),
+    );
+  }
+}
+
+export async function assertSolanaAgentAuthDatabaseAuthority(
+  pool: Pick<pg.Pool, "query">,
+  environment: NodeJS.ProcessEnv = process.env,
+): Promise<void> {
+  const config = readSolanaAgentAuthConfig(environment);
+  if (!config) return;
+
+  const result = await pool.query<{
+    challenge_table: string | null;
+    constraint_count: string;
+    immutable_trigger: boolean;
+  }>(
+    `SELECT
+       to_regclass('public.solana_agent_auth_challenges')::text AS challenge_table,
+       EXISTS (
+         SELECT 1
+           FROM pg_trigger
+          WHERE tgrelid = to_regclass('public.solana_agent_auth_challenges')
+            AND tgname = 'trg_solana_agent_auth_challenge_immutability'
+            AND tgenabled <> 'D'
+       ) AS immutable_trigger,
+       (
+         SELECT COUNT(*)::text
+           FROM pg_constraint
+          WHERE conrelid = to_regclass('public.solana_agent_auth_challenges')
+            AND conname IN (
+              'solana_agent_auth_hash_lengths_check',
+              'solana_agent_auth_lifetime_check',
+              'solana_agent_auth_attempts_check',
+              'solana_agent_auth_terminal_check'
+            )
+       ) AS constraint_count`,
+  );
+  const authority = result.rows[0];
+  if (
+    authority?.challenge_table !== "solana_agent_auth_challenges" ||
+    authority.immutable_trigger !== true ||
+    Number(authority.constraint_count) !== 4
+  ) {
+    throw new Error(
+      "[DB] SOL agent authentication is enabled but migration 0091 authority is incomplete",
+    );
+  }
+}
+
+export async function assertAgentCredentialSessionDatabaseAuthority(
+  pool: Pick<pg.Pool, "query">,
+  environment: NodeJS.ProcessEnv = process.env,
+): Promise<void> {
+  const solanaAuthEnabled = readSolanaAgentAuthConfig(environment) !== null;
+  const deploymentRequiresAuthority =
+    environment.NODE_ENV === "production" ||
+    environment.NODE_ENV === "staging" ||
+    solanaAuthEnabled;
+  if (!deploymentRequiresAuthority) return;
+
+  const result = await pool.query<{
+    constraint_count: string;
+    immutable_trigger: boolean;
+    session_table: string | null;
+    single_active_index: boolean;
+  }>(
+    `SELECT
+       to_regclass('public.agent_credential_sessions')::text AS session_table,
+       EXISTS (
+         SELECT 1
+           FROM pg_trigger
+          WHERE tgrelid = to_regclass('public.agent_credential_sessions')
+            AND tgname = 'trg_agent_credential_session_immutability'
+            AND tgenabled <> 'D'
+       ) AS immutable_trigger,
+       EXISTS (
+         SELECT 1
+           FROM pg_index i
+           JOIN pg_class c ON c.oid = i.indexrelid
+          WHERE i.indrelid = to_regclass('public.agent_credential_sessions')
+            AND c.relname = 'idx_agent_credential_sessions_one_active'
+            AND i.indisunique
+            AND i.indpred IS NOT NULL
+       ) AS single_active_index,
+       (
+         SELECT COUNT(*)::text
+           FROM pg_constraint
+          WHERE conrelid = to_regclass('public.agent_credential_sessions')
+            AND conname IN (
+              'agent_credential_session_id_check',
+              'agent_credential_session_auth_method_check',
+              'agent_credential_session_lifetime_check',
+              'agent_credential_session_revocation_check'
+            )
+       ) AS constraint_count`,
+  );
+  const authority = result.rows[0];
+  if (
+    authority?.session_table !== "agent_credential_sessions" ||
+    authority.immutable_trigger !== true ||
+    authority.single_active_index !== true ||
+    Number(authority.constraint_count) !== 4
+  ) {
+    throw new Error(
+      "[DB] Agent credential sessions are required but migration 0092 authority is incomplete",
+    );
+  }
+}
+
+export async function assertDistributedRateLimitDatabaseAuthority(
+  pool: Pick<pg.Pool, "query">,
+  environment: NodeJS.ProcessEnv = process.env,
+): Promise<void> {
+  const config = readDistributedRateLimitConfig(environment);
+  if (!config.enabled) return;
+
+  const result = await pool.query<{
+    bucket_table: string | null;
+    constraint_count: string;
+    expiry_index: boolean;
+  }>(
+    `SELECT
+       to_regclass('public.distributed_rate_limit_buckets')::text AS bucket_table,
+       EXISTS (
+         SELECT 1
+           FROM pg_index i
+           JOIN pg_class c ON c.oid = i.indexrelid
+          WHERE i.indrelid = to_regclass('public.distributed_rate_limit_buckets')
+            AND c.relname = 'idx_distributed_rate_limit_buckets_expiry'
+            AND i.indisvalid
+       ) AS expiry_index,
+       (
+         SELECT COUNT(*)::text
+           FROM pg_constraint
+          WHERE conrelid = to_regclass('public.distributed_rate_limit_buckets')
+            AND conname IN (
+              'distributed_rate_limit_bucket_key_check',
+              'distributed_rate_limit_scope_check',
+              'distributed_rate_limit_window_check',
+              'distributed_rate_limit_count_check',
+              'distributed_rate_limit_updated_check'
+            )
+       ) AS constraint_count`,
+  );
+  const authority = result.rows[0];
+  if (
+    authority?.bucket_table !== "distributed_rate_limit_buckets" ||
+    authority.expiry_index !== true ||
+    Number(authority.constraint_count) !== 5
+  ) {
+    throw new Error(
+      "[DB] Distributed rate limiting is enabled but migration 0093 authority is incomplete",
+    );
+  }
+}
+
+export async function assertDuelPreparationHostLeaseDatabaseAuthority(
+  pool: Pick<pg.Pool, "query">,
+  environment: NodeJS.ProcessEnv = process.env,
+): Promise<void> {
+  if (environment.STREAMING_DUEL_PREPARATION_MS === undefined) return;
+
+  const result = await pool.query<{
+    constraint_count: string;
+    expiry_index: boolean;
+    lease_table: string | null;
+    required_trigger_count: string;
+  }>(
+    `SELECT
+       to_regclass('public.streaming_duel_preparation_agent_host_leases')::text AS lease_table,
+       EXISTS (
+         SELECT 1
+           FROM pg_index i
+           JOIN pg_class c ON c.oid = i.indexrelid
+          WHERE i.indrelid = to_regclass('public.streaming_duel_preparation_agent_host_leases')
+            AND c.relname = 'idx_streaming_duel_preparation_agent_host_leases_expiry'
+            AND i.indisvalid
+       ) AS expiry_index,
+       (
+         SELECT COUNT(*)::text
+           FROM pg_constraint
+          WHERE conrelid = to_regclass('public.streaming_duel_preparation_agent_host_leases')
+            AND conname IN (
+              'streaming_duel_preparation_agent_host_leases_pk',
+              'streaming_duel_preparation_agent_host_leases_preparation_fk',
+              'streaming_duel_preparation_agent_host_leases_identity_check',
+              'streaming_duel_preparation_agent_host_leases_time_check'
+            )
+       ) AS constraint_count,
+       (
+         SELECT COUNT(*)::text
+           FROM pg_trigger
+          WHERE tgrelid = to_regclass('public.streaming_duel_preparation_agent_host_leases')
+            AND tgname IN (
+              'streaming_duel_preparation_agent_host_leases_validate',
+              'streaming_duel_preparation_agent_host_leases_reject_removal',
+              'streaming_duel_preparation_agent_host_leases_reject_truncate'
+            )
+            AND tgenabled <> 'D'
+       ) AS required_trigger_count`,
+  );
+  const authority = result.rows[0];
+  if (
+    authority?.lease_table !== "streaming_duel_preparation_agent_host_leases" ||
+    authority.expiry_index !== true ||
+    Number(authority.constraint_count) !== 4 ||
+    Number(authority.required_trigger_count) !== 3
+  ) {
+    throw new Error(
+      "[DB] Private duel preparation is enabled but migration 0098 host-lease authority is incomplete",
     );
   }
 }
@@ -543,6 +757,10 @@ export async function initializeDatabase(connectionString: string) {
   }
 
   await ensureAgentMappingsStreamingDuelColumn(pool);
+  await assertSolanaAgentAuthDatabaseAuthority(pool);
+  await assertAgentCredentialSessionDatabaseAuthority(pool);
+  await assertDistributedRateLimitDatabaseAuthority(pool);
+  await assertDuelPreparationHostLeaseDatabaseAuthority(pool);
 
   dbInstance = db;
   poolInstance = pool;

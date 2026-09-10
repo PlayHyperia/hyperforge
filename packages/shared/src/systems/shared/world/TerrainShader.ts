@@ -79,6 +79,12 @@ export const TERRAIN_SHADE = {
   FRESNEL_INTENSITY: 0.2,
 };
 
+/** One terrain/grass palette per runtime material owner, never shared across worlds. */
+export class TerrainShadeUniforms {
+  readonly tint = uniform(new THREE.Color(...TERRAIN_SHADE.TINT_COLOR));
+  readonly strength = uniform(TERRAIN_SHADE.STRENGTH);
+}
+
 /**
  * Shared TSL anime shading: half-lambert cool tint + fresnel rim highlight.
  * Used by both terrain and grass so the shading stays in sync.
@@ -87,17 +93,20 @@ export function applyAnimeShade(
   baseColor: Node<"vec3">,
   normal: Node<"vec3">,
   sunDirNode: Node<"vec3">,
+  palette?: TerrainShadeUniforms,
 ): Node<"vec3"> {
   const sDir = normalize(vec3(sunDirNode));
   const NdotL = dot(normal, sDir);
   const halfLambert = add(mul(NdotL, float(0.5)), float(0.5));
   const shadeFactor = sub(float(1.0), halfLambert);
-  const coolTint = vec3(...TERRAIN_SHADE.TINT_COLOR);
+  const coolTint = palette
+    ? vec3(palette.tint)
+    : vec3(...TERRAIN_SHADE.TINT_COLOR);
   const tintedBase = mul(baseColor, coolTint);
   const shaded = mix(
     baseColor,
     tintedBase,
-    mul(shadeFactor, float(TERRAIN_SHADE.STRENGTH)),
+    mul(shadeFactor, palette?.strength ?? float(TERRAIN_SHADE.STRENGTH)),
   );
 
   const viewDir = normalize(sub(positionWorld, cameraPosition));
@@ -1032,6 +1041,7 @@ export function computeTerrainColorCPU(
 export const MAX_VERTEX_LIGHTS = 8;
 
 export type TerrainUniforms = {
+  shade: TerrainShadeUniforms;
   sunPosition: UniformNode<"vec3", THREE.Vector3>;
   sunDirection: UniformNode<"vec3", THREE.Vector3>;
   time: UniformNode<"float", number>;
@@ -1084,7 +1094,9 @@ export function updateTerrainVertexLights(
  * Stylized terrain material with biome texture sampling
  * Grass/dirt textures use top-down projection; cliff textures use triplanar mapping
  */
-export function createTerrainMaterial(): THREE.Material & {
+export function createTerrainMaterial(
+  shade = new TerrainShadeUniforms(),
+): THREE.Material & {
   terrainUniforms: TerrainUniforms;
 } {
   // Ensure noise texture is generated (still used for dirt patch variation)
@@ -1446,6 +1458,7 @@ export function createTerrainMaterial(): THREE.Material & {
     baseWithRoads,
     worldNormal,
     sunDirectionUniform,
+    shade,
   );
 
   // ============================================================================
@@ -1611,6 +1624,7 @@ export function createTerrainMaterial(): THREE.Material & {
   })();
 
   const terrainUniforms: TerrainUniforms = {
+    shade,
     sunPosition: sunPositionUniform,
     sunDirection: sunDirectionUniform,
     time: timeUniform,

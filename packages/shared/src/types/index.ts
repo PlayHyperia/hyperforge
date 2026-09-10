@@ -103,6 +103,7 @@ export * from "./world/building-collision-types";
 export * from "./entities/npc-mob-types";
 export * from "./game/inventory-types";
 export * from "./game/resource-processing-types";
+export * from "./game/processing-interaction-presentation";
 export * from "./game/interaction-types";
 export * from "./game/animation-dialogue-types";
 export * from "./game/spawning-types";
@@ -1097,11 +1098,7 @@ export interface PointerEntry {
 }
 
 export type ControlEntry =
-  | ButtonEntry
-  | VectorEntry
-  | ValueEntry
-  | ScreenEntry
-  | PointerEntry;
+  ButtonEntry | VectorEntry | ValueEntry | ScreenEntry | PointerEntry;
 
 export interface ControlAction {
   id?: number;

@@ -1,8 +1,23 @@
 import type pg from "pg";
+import {
+  DUEL_PREPARATION_ROLE_POLICY_VERSION,
+  EXTERNAL_DUEL_PREPARATION_STRATEGY_PROTOCOL_VERSION,
+  STREAMING_DUEL_PUBLIC_PREPARATION_ACTIVITY_TRAIL_LIMIT,
+  STREAMING_DUEL_PUBLIC_PREPARATION_ACTIVITIES,
+  STREAMING_DUEL_PUBLIC_PREPARATION_MODES,
+  normalizeExternalDuelPreparationOpponentHistorySummary,
+  normalizeExternalDuelPreparationPublicName,
+  normalizeExternalDuelPreparationPublicProfile,
+  type ExternalDuelPreparationOpponentHistorySummary,
+  type ExternalDuelPreparationPublicProfile,
+  type StreamingDuelPublicPreparationActivity,
+  type StreamingDuelPublicPreparationMode,
+} from "@hyperforge/shared";
 import type {
   CompetitivePreparationEvidence,
   CompetitiveSnapshot,
   CompetitiveSnapshotDraft,
+  CompetitiveSnapshotTimingInput,
 } from "./competitive-snapshot.js";
 import {
   assertValidCompetitiveSnapshot,
@@ -11,7 +26,13 @@ import {
   finalizeCompetitiveSnapshot,
 } from "./competitive-snapshot.js";
 import { normalizeCompetitiveTacticalStrategy } from "./competitive-tactical-strategy.js";
+import { buildCompetitiveTerminalStatUpdates } from "./competitive-terminal-stats.js";
 import type { SwitchableStreamingCombatRole } from "./types.js";
+import { lockAndAssertPersistedStreamingDuelParticipation } from "../../database/streaming-duel-participation.js";
+import {
+  MAX_DUEL_PREPARATION_HOST_LEASE_MS,
+  MIN_DUEL_PREPARATION_HOST_LEASE_MS,
+} from "./preparation-host-lease.js";
 
 export type DuelPreparationStatus =
   "preparing" | "ready" | "frozen" | "cancelled" | "expired";
@@ -25,6 +46,10 @@ export const DUEL_PREPARATION_BANK_ACTIONS = [
   "withdraw",
   "deposit_all",
 ] as const satisfies readonly DuelPreparationBankAction[];
+
+/** Internal fail-closed signal that revokes process-local preparation authority. */
+export const DUEL_PREPARATION_LOCAL_REVOCATION_EVENT =
+  "duel:preparation:local_revoked" as const;
 
 export type DuelPreparationSnapshot = {
   preparationId: string;
@@ -57,6 +82,49 @@ export type DuelPreparationBankAccessDecision =
   | { ok: true; preparation: DuelPreparationSnapshot }
   | { ok: false; reason: DuelPreparationBankAccessFailure };
 
+export const DUEL_PREPARATION_CONTESTANT_UNAVAILABILITY_REASON =
+  "agent_unavailable" as const;
+
+export type DuelPreparationContestantUnavailabilityReport = {
+  preparationId: string;
+  agentId: string;
+  reason: typeof DUEL_PREPARATION_CONTESTANT_UNAVAILABILITY_REASON;
+  reportedAt: number;
+};
+
+export type DuelPreparationAgentHostLease = {
+  preparationId: string;
+  agentId: string;
+  ownerId: string;
+  executableBuildId: string | null;
+  claimedAt: number;
+  heartbeatAt: number;
+  expiresAt: number;
+};
+
+export type DuelPreparationPublicActivityRecord = {
+  preparationId: string;
+  agentId: string;
+  activity: StreamingDuelPublicPreparationActivity;
+  mode: StreamingDuelPublicPreparationMode;
+  occurredAt: number;
+  revision: number;
+};
+
+export type DuelPreparationStrategyContext = {
+  preparationId: string;
+  agentId: string;
+  hostOwnerId: string;
+  policyVersion: typeof DUEL_PREPARATION_ROLE_POLICY_VERSION;
+  protocolVersion: typeof EXTERNAL_DUEL_PREPARATION_STRATEGY_PROTOCOL_VERSION;
+  agentName: string;
+  opponentName: string;
+  ownPublicProfile: ExternalDuelPreparationPublicProfile | null;
+  opponentPublicProfile: ExternalDuelPreparationPublicProfile | null;
+  opponentHistorySummary: ExternalDuelPreparationOpponentHistorySummary;
+  boundAt: number;
+};
+
 type PreparationRow = {
   preparationId: string;
   fencingToken: string | number | bigint;
@@ -78,6 +146,48 @@ type PreparationRow = {
 
 type PreparationAccessRow = PreparationRow & {
   databaseNow: string | number;
+  contestantUnavailable?: boolean;
+  contestantHostLeaseActive?: boolean;
+};
+
+type ContestantUnavailabilityRow = {
+  preparationId: string;
+  agentId: string;
+  reason: string;
+  reportedAt: string | number;
+};
+
+type AgentHostLeaseRow = {
+  preparationId: string;
+  agentId: string;
+  ownerId: string;
+  executableBuildId?: unknown;
+  claimedAt: string | number;
+  heartbeatAt: string | number;
+  expiresAt: string | number;
+};
+
+type PublicPreparationActivityRow = {
+  preparationId: string;
+  agentId: string;
+  activity: string;
+  mode: string;
+  occurredAt: string | number;
+  activitySequence: string | number | bigint;
+};
+
+type DuelPreparationStrategyContextRow = {
+  preparationId: string;
+  agentId: string;
+  hostOwnerId: string;
+  policyVersion: string;
+  protocolVersion: string;
+  agentName: string;
+  opponentName: string;
+  ownPublicProfile: unknown;
+  opponentPublicProfile: unknown;
+  opponentHistorySummary: unknown;
+  boundAt: string | number;
 };
 
 type CompetitiveSnapshotRow = {
@@ -122,6 +232,19 @@ export type PersistedCompetitiveSnapshot = {
   lifecycleStatus: "retired" | "frozen" | "terminal";
   terminal: CompetitiveSnapshotTerminal | null;
 };
+
+/**
+ * A process-start custody fence for contestants whose immutable competitive
+ * snapshot still needs to be recovered or retired by the active authority.
+ */
+export type CompetitiveRecoveryCustodyHold = {
+  preparationId: string;
+  agent1Id: string;
+  agent2Id: string;
+};
+
+export const DUEL_COMPETITIVE_RECOVERY_CUSTODY_HOLD_EVENT =
+  "duel:competitive:recovery_custody_hold";
 
 export const DUEL_TRANSITION_EVENT_TYPES = [
   "preparation_selected",
@@ -176,8 +299,147 @@ type DuelTransitionEventRow = Omit<
 type QueryablePool = Pick<pg.Pool, "query" | "connect">;
 type Queryable = Pick<pg.Pool | pg.PoolClient, "query">;
 
+type CompetitiveDamageAggregateRow = {
+  actorId: string;
+  totalDamage: string | number;
+};
+
+/**
+ * Commit leaderboard and model-history aggregates inside the same transaction
+ * as immutable terminal truth. The terminal row is the idempotency boundary:
+ * this helper is reached only for the first successful frozen -> terminal
+ * transition, so a lost COMMIT response or process restart cannot double count.
+ *
+ * Frozen wins/losses are a lower-bound repair anchor for deployments that may
+ * have lost an older best-effort aggregate write. GREATEST never rolls back a
+ * newer aggregate maintained by another duel surface.
+ */
+const persistCompetitiveTerminalStats = async (
+  queryable: Queryable,
+  snapshot: CompetitiveSnapshot,
+  terminal: CompetitiveSnapshotTerminal,
+): Promise<void> => {
+  if (terminal.outcome === "cancelled") return;
+
+  const damageResult = await queryable.query<CompetitiveDamageAggregateRow>(
+    `
+      SELECT "actorId", SUM((observation->>'amount')::numeric)::text AS "totalDamage"
+      FROM streaming_duel_action_observations
+      WHERE "cycleId" = $1
+        AND "duelId" = $2
+        AND action = 'damage'
+      GROUP BY "actorId"
+    `,
+    [snapshot.cycleId, snapshot.duelId],
+  );
+  const damageByAgent = new Map<string, number>();
+  for (const row of damageResult.rows) {
+    const totalDamage = Number(row.totalDamage);
+    if (!Number.isSafeInteger(totalDamage) || totalDamage < 0) {
+      throw new Error("competitive_terminal_stats_damage_invalid");
+    }
+    damageByAgent.set(row.actorId, totalDamage);
+  }
+
+  const updates = buildCompetitiveTerminalStatUpdates(
+    snapshot,
+    terminal,
+    damageByAgent,
+  );
+  for (const update of updates) {
+    await queryable.query(
+      `
+        INSERT INTO player_combat_stats (
+          "playerId", "totalDuelWins", "totalDuelLosses", "updatedAt"
+        ) VALUES ($1, $2, $3, $4::bigint)
+        ON CONFLICT ("playerId") DO UPDATE SET
+          "totalDuelWins" = GREATEST(
+            player_combat_stats."totalDuelWins" + $5,
+            $2
+          ),
+          "totalDuelLosses" = GREATEST(
+            player_combat_stats."totalDuelLosses" + $6,
+            $3
+          ),
+          "updatedAt" = GREATEST(
+            player_combat_stats."updatedAt",
+            $4::bigint
+          )
+      `,
+      [
+        update.agentId,
+        update.anchoredWins,
+        update.anchoredLosses,
+        terminal.terminalAt,
+        update.winDelta,
+        update.lossDelta,
+      ],
+    );
+
+    await queryable.query(
+      `
+        INSERT INTO agent_duel_stats (
+          "characterId", "agentName", provider, model, wins, losses, draws,
+          "totalDamageDealt", "totalDamageTaken", "killStreak",
+          "currentStreak", "lastDuelAt", "updatedAt"
+        ) VALUES (
+          $1, $2, $3, $4, $5, $6, $7, $8, $9,
+          CASE WHEN $10 = 'win' THEN 1 ELSE 0 END,
+          CASE WHEN $10 = 'win' THEN 1 ELSE 0 END,
+          $11::bigint, $11::bigint
+        )
+        ON CONFLICT ("characterId") DO UPDATE SET
+          "agentName" = EXCLUDED."agentName",
+          provider = EXCLUDED.provider,
+          model = EXCLUDED.model,
+          wins = GREATEST(agent_duel_stats.wins + $12, $5),
+          losses = GREATEST(agent_duel_stats.losses + $13, $6),
+          draws = agent_duel_stats.draws + $7,
+          "totalDamageDealt" = agent_duel_stats."totalDamageDealt" + $8,
+          "totalDamageTaken" = agent_duel_stats."totalDamageTaken" + $9,
+          "killStreak" = CASE
+            WHEN $10 = 'win' THEN GREATEST(
+              agent_duel_stats."killStreak",
+              agent_duel_stats."currentStreak" + 1
+            )
+            ELSE agent_duel_stats."killStreak"
+          END,
+          "currentStreak" = CASE
+            WHEN $10 = 'win' THEN agent_duel_stats."currentStreak" + 1
+            WHEN $10 = 'loss' THEN 0
+            ELSE agent_duel_stats."currentStreak"
+          END,
+          "lastDuelAt" = GREATEST(
+            COALESCE(agent_duel_stats."lastDuelAt", 0),
+            $11::bigint
+          ),
+          "updatedAt" = GREATEST(
+            agent_duel_stats."updatedAt",
+            $11::bigint
+          )
+      `,
+      [
+        update.agentId,
+        update.name,
+        update.provider,
+        update.model,
+        update.anchoredWins,
+        update.anchoredLosses,
+        update.drawDelta,
+        update.damageDealt,
+        update.damageTaken,
+        update.result,
+        terminal.terminalAt,
+        update.winDelta,
+        update.lossDelta,
+      ],
+    );
+  }
+};
+
 const UUID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const EXECUTABLE_BUILD_ID_PATTERN = /^[0-9a-f]{64}$/;
 const CANCELLATION_REASON_PATTERN = /^[a-z0-9][a-z0-9_.:-]{0,127}$/;
 const COMPETITIVE_WIN_REASONS = new Set([
   "kill",
@@ -571,6 +833,345 @@ const mapPreparation = (
   };
 };
 
+const mapContestantUnavailability = (
+  row: ContestantUnavailabilityRow | undefined,
+): DuelPreparationContestantUnavailabilityReport | null => {
+  if (!row) return null;
+  const reportedAt = finiteTimestamp(row.reportedAt);
+  if (
+    reportedAt === null ||
+    row.reason !== DUEL_PREPARATION_CONTESTANT_UNAVAILABILITY_REASON ||
+    !row.preparationId ||
+    !row.agentId
+  ) {
+    throw new Error("invalid duel preparation unavailability report");
+  }
+  return {
+    preparationId: row.preparationId,
+    agentId: row.agentId,
+    reason: DUEL_PREPARATION_CONTESTANT_UNAVAILABILITY_REASON,
+    reportedAt,
+  };
+};
+
+const mapAgentHostLease = (
+  row: AgentHostLeaseRow | undefined,
+): DuelPreparationAgentHostLease | null => {
+  if (!row) return null;
+  const claimedAt = finiteTimestamp(row.claimedAt);
+  const heartbeatAt = finiteTimestamp(row.heartbeatAt);
+  const expiresAt = finiteTimestamp(row.expiresAt);
+  const executableBuildId = row.executableBuildId ?? null;
+  if (
+    !row.preparationId ||
+    !row.agentId ||
+    !UUID_PATTERN.test(row.ownerId) ||
+    !(
+      executableBuildId === null ||
+      (typeof executableBuildId === "string" &&
+        EXECUTABLE_BUILD_ID_PATTERN.test(executableBuildId))
+    ) ||
+    claimedAt === null ||
+    heartbeatAt === null ||
+    expiresAt === null ||
+    heartbeatAt < claimedAt ||
+    expiresAt <= heartbeatAt
+  ) {
+    throw new Error("invalid duel preparation agent host lease");
+  }
+  return {
+    preparationId: row.preparationId,
+    agentId: row.agentId,
+    ownerId: row.ownerId,
+    executableBuildId,
+    claimedAt,
+    heartbeatAt,
+    expiresAt,
+  };
+};
+
+const PUBLIC_PREPARATION_ACTIVITIES = new Set<string>(
+  STREAMING_DUEL_PUBLIC_PREPARATION_ACTIVITIES,
+);
+const PUBLIC_PREPARATION_MODES = new Set<string>(
+  STREAMING_DUEL_PUBLIC_PREPARATION_MODES,
+);
+
+const mapPublicPreparationActivity = (
+  row: PublicPreparationActivityRow | undefined,
+): DuelPreparationPublicActivityRecord | null => {
+  if (!row) return null;
+  const occurredAt = finiteTimestamp(row.occurredAt);
+  const revision = Number(row.activitySequence);
+  if (
+    !row.preparationId ||
+    !row.agentId ||
+    occurredAt === null ||
+    !Number.isSafeInteger(revision) ||
+    revision < 1 ||
+    !PUBLIC_PREPARATION_ACTIVITIES.has(row.activity) ||
+    !PUBLIC_PREPARATION_MODES.has(row.mode) ||
+    ((row.activity === "planning" || row.activity === "reassessing") &&
+      row.mode !== "working")
+  ) {
+    throw new Error("invalid durable public preparation activity");
+  }
+  return Object.freeze({
+    preparationId: row.preparationId,
+    agentId: row.agentId,
+    activity: row.activity as StreamingDuelPublicPreparationActivity,
+    mode: row.mode as StreamingDuelPublicPreparationMode,
+    occurredAt,
+    revision,
+  });
+};
+
+const normalizeExactStrategyPublicProfile = (
+  value: unknown,
+): ExternalDuelPreparationPublicProfile | null | undefined => {
+  if (value === null) return null;
+  const normalized = normalizeExternalDuelPreparationPublicProfile(value);
+  if (
+    !normalized ||
+    !value ||
+    typeof value !== "object" ||
+    Array.isArray(value)
+  ) {
+    return undefined;
+  }
+  const record = value as Record<string, unknown>;
+  const keys = Object.keys(record).sort();
+  if (
+    keys.length !== 2 ||
+    keys[0] !== "narrative" ||
+    keys[1] !== "pillars" ||
+    record.narrative !== normalized.narrative ||
+    !Array.isArray(record.pillars) ||
+    record.pillars.length !== normalized.pillars.length ||
+    record.pillars.some((pillar, index) => pillar !== normalized.pillars[index])
+  ) {
+    return undefined;
+  }
+  return {
+    narrative: normalized.narrative,
+    pillars: [...normalized.pillars],
+  };
+};
+
+const normalizeExactOpponentHistorySummary = (
+  value: unknown,
+): ExternalDuelPreparationOpponentHistorySummary | undefined => {
+  const normalized =
+    normalizeExternalDuelPreparationOpponentHistorySummary(value);
+  if (
+    !normalized ||
+    !value ||
+    typeof value !== "object" ||
+    Array.isArray(value)
+  ) {
+    return undefined;
+  }
+  const record = value as Record<string, unknown>;
+  if (
+    Object.keys(record).sort().join("|") !==
+      "observedOpponentOpeningStyleFocus|recent|sampleSize" ||
+    !Array.isArray(record.recent) ||
+    record.recent.length !== normalized.recent.length ||
+    record.recent.some((candidate, index) => {
+      if (
+        !candidate ||
+        typeof candidate !== "object" ||
+        Array.isArray(candidate)
+      ) {
+        return true;
+      }
+      const row = candidate as Record<string, unknown>;
+      const expected = normalized.recent[index]!;
+      return (
+        Object.keys(row).sort().join("|") !==
+          "opponentOpeningStyle|ownOpeningStyle|result|winReason" ||
+        row.result !== expected.result ||
+        row.ownOpeningStyle !== expected.ownOpeningStyle ||
+        row.opponentOpeningStyle !== expected.opponentOpeningStyle ||
+        row.winReason !== expected.winReason
+      );
+    })
+  ) {
+    return undefined;
+  }
+  return {
+    sampleSize: normalized.sampleSize,
+    observedOpponentOpeningStyleFocus:
+      normalized.observedOpponentOpeningStyleFocus,
+    recent: normalized.recent.map((entry) => ({ ...entry })),
+  };
+};
+
+const mapDuelPreparationStrategyContext = (
+  row: DuelPreparationStrategyContextRow | undefined,
+): DuelPreparationStrategyContext | null => {
+  if (!row) return null;
+  const boundAt = finiteTimestamp(row.boundAt);
+  const agentName = normalizeExternalDuelPreparationPublicName(row.agentName);
+  const opponentName = normalizeExternalDuelPreparationPublicName(
+    row.opponentName,
+  );
+  const ownPublicProfile = normalizeExactStrategyPublicProfile(
+    row.ownPublicProfile,
+  );
+  const opponentPublicProfile = normalizeExactStrategyPublicProfile(
+    row.opponentPublicProfile,
+  );
+  const opponentHistorySummary = normalizeExactOpponentHistorySummary(
+    row.opponentHistorySummary,
+  );
+  if (
+    !UUID_PATTERN.test(row.preparationId) ||
+    !row.agentId ||
+    row.agentId.length > 128 ||
+    /[\u0000-\u001f\u007f]/u.test(row.agentId) ||
+    !UUID_PATTERN.test(row.hostOwnerId) ||
+    row.policyVersion !== DUEL_PREPARATION_ROLE_POLICY_VERSION ||
+    row.protocolVersion !==
+      EXTERNAL_DUEL_PREPARATION_STRATEGY_PROTOCOL_VERSION ||
+    !agentName ||
+    agentName !== row.agentName ||
+    !opponentName ||
+    opponentName !== row.opponentName ||
+    ownPublicProfile === undefined ||
+    opponentPublicProfile === undefined ||
+    opponentHistorySummary === undefined ||
+    boundAt === null
+  ) {
+    throw new Error("invalid durable duel preparation strategy context");
+  }
+  return Object.freeze({
+    preparationId: row.preparationId,
+    agentId: row.agentId,
+    hostOwnerId: row.hostOwnerId,
+    policyVersion: DUEL_PREPARATION_ROLE_POLICY_VERSION,
+    protocolVersion: EXTERNAL_DUEL_PREPARATION_STRATEGY_PROTOCOL_VERSION,
+    agentName,
+    opponentName,
+    ownPublicProfile,
+    opponentPublicProfile,
+    opponentHistorySummary,
+    boundAt,
+  });
+};
+
+const equalStrategyPublicProfiles = (
+  left: ExternalDuelPreparationPublicProfile | null,
+  right: ExternalDuelPreparationPublicProfile | null,
+): boolean =>
+  left === null || right === null
+    ? left === right
+    : left.narrative === right.narrative &&
+      left.pillars.length === right.pillars.length &&
+      left.pillars.every((pillar, index) => pillar === right.pillars[index]);
+
+const sameDuelPreparationStrategyContext = (
+  persisted: DuelPreparationStrategyContext,
+  input: Omit<DuelPreparationStrategyContext, "boundAt">,
+): boolean =>
+  persisted.preparationId === input.preparationId &&
+  persisted.agentId === input.agentId &&
+  persisted.hostOwnerId === input.hostOwnerId &&
+  persisted.policyVersion === input.policyVersion &&
+  persisted.protocolVersion === input.protocolVersion &&
+  persisted.agentName === input.agentName &&
+  persisted.opponentName === input.opponentName &&
+  equalStrategyPublicProfiles(
+    persisted.ownPublicProfile,
+    input.ownPublicProfile,
+  ) &&
+  equalStrategyPublicProfiles(
+    persisted.opponentPublicProfile,
+    input.opponentPublicProfile,
+  ) &&
+  persisted.opponentHistorySummary.sampleSize ===
+    input.opponentHistorySummary.sampleSize &&
+  persisted.opponentHistorySummary.observedOpponentOpeningStyleFocus ===
+    input.opponentHistorySummary.observedOpponentOpeningStyleFocus &&
+  persisted.opponentHistorySummary.recent.length ===
+    input.opponentHistorySummary.recent.length &&
+  persisted.opponentHistorySummary.recent.every((entry, index) => {
+    const other = input.opponentHistorySummary.recent[index];
+    return (
+      other !== undefined &&
+      entry.result === other.result &&
+      entry.ownOpeningStyle === other.ownOpeningStyle &&
+      entry.opponentOpeningStyle === other.opponentOpeningStyle &&
+      entry.winReason === other.winReason
+    );
+  });
+
+const validateHostLeaseDuration = (leaseDurationMs: number): void => {
+  if (
+    !Number.isSafeInteger(leaseDurationMs) ||
+    leaseDurationMs < MIN_DUEL_PREPARATION_HOST_LEASE_MS ||
+    leaseDurationMs > MAX_DUEL_PREPARATION_HOST_LEASE_MS
+  ) {
+    throw new Error(
+      `leaseDurationMs must be between ${MIN_DUEL_PREPARATION_HOST_LEASE_MS} and ${MAX_DUEL_PREPARATION_HOST_LEASE_MS}`,
+    );
+  }
+};
+
+const hasContestantUnavailability = async (
+  queryable: Queryable,
+  preparationId: string,
+): Promise<boolean> => {
+  const result = await queryable.query<{ unavailable: boolean }>(
+    `SELECT EXISTS (
+       SELECT 1
+       FROM streaming_duel_preparation_unavailability_reports
+       WHERE "preparationId" = $1
+     ) AS unavailable`,
+    [preparationId],
+  );
+  return result.rows[0]?.unavailable === true;
+};
+
+const hasActiveContestantHostLease = async (
+  queryable: Queryable,
+  preparationId: string,
+  agentId: string,
+  databaseNow: number,
+): Promise<boolean> => {
+  const result = await queryable.query<{ active: boolean }>(
+    `SELECT EXISTS (
+       SELECT 1
+       FROM streaming_duel_preparation_agent_host_leases
+       WHERE "preparationId" = $1
+         AND "agentId" = $2
+         AND "expiresAt" > $3::bigint
+     ) AS active`,
+    [preparationId, agentId, databaseNow],
+  );
+  return result.rows[0]?.active === true;
+};
+
+const haveActiveContestantHostLeases = async (
+  queryable: Queryable,
+  preparation: DuelPreparationSnapshot,
+  databaseNow: number,
+): Promise<boolean> => {
+  const result = await queryable.query<{ activeCount: string | number }>(
+    `SELECT COUNT(*)::integer AS "activeCount"
+       FROM streaming_duel_preparation_agent_host_leases
+      WHERE "preparationId" = $1
+        AND "agentId" = ANY($2::text[])
+        AND "expiresAt" > $3::bigint`,
+    [
+      preparation.preparationId,
+      [preparation.agent1Id, preparation.agent2Id],
+      databaseNow,
+    ],
+  );
+  return Number(result.rows[0]?.activeCount ?? 0) === 2;
+};
+
 const validateFencingToken = (value: string): void => {
   if (!/^[1-9][0-9]*$/.test(value)) {
     throw new Error("fencingToken must be a positive integer string");
@@ -660,11 +1261,65 @@ export function normalizeCompetitivePreparationEvidence(
 export class PostgresDuelPreparationStore {
   constructor(private readonly pool: QueryablePool) {}
 
+  /**
+   * List every contestant whose frozen or terminal competitive snapshot is
+   * still eligible for authority recovery. Startup uses this read-only view to
+   * fence ordinary autonomy before persisted players are spawned; the normal
+   * fenced claim remains the sole authority for lifecycle mutation.
+   */
+  async listCompetitiveRecoveryCustodyHolds(): Promise<
+    CompetitiveRecoveryCustodyHold[]
+  > {
+    const result = await this.pool.query<{
+      preparationId: string;
+      agent1Id: string;
+      agent2Id: string;
+      snapshot: CompetitiveSnapshot;
+    }>(
+      `
+        SELECT snapshot."preparationId",
+               preparation."agent1Id",
+               preparation."agent2Id",
+               snapshot.snapshot
+        FROM streaming_duel_competitive_snapshots AS snapshot
+        JOIN streaming_duel_preparations AS preparation
+          ON preparation."preparationId" = snapshot."preparationId"
+        WHERE snapshot."lifecycleStatus" IN ('frozen', 'terminal')
+          AND snapshot."recoveredAt" IS NULL
+          AND preparation.status = 'frozen'
+        ORDER BY snapshot."frozenAt" ASC, snapshot."preparationId" ASC
+      `,
+    );
+
+    return result.rows.map((row) => {
+      assertValidCompetitiveSnapshot(row.snapshot);
+      if (
+        !UUID_PATTERN.test(row.preparationId) ||
+        row.snapshot.preparationId !== row.preparationId ||
+        typeof row.agent1Id !== "string" ||
+        !row.agent1Id ||
+        typeof row.agent2Id !== "string" ||
+        !row.agent2Id ||
+        row.agent1Id === row.agent2Id ||
+        row.snapshot.contestants[0].agentId !== row.agent1Id ||
+        row.snapshot.contestants[1].agentId !== row.agent2Id
+      ) {
+        throw new Error("competitive recovery custody hold is invalid");
+      }
+      return {
+        preparationId: row.preparationId,
+        agent1Id: row.agent1Id,
+        agent2Id: row.agent2Id,
+      };
+    });
+  }
+
   async create(input: {
     preparationId: string;
     fencingToken: string;
     agent1Id: string;
     agent2Id: string;
+    diagnostic: boolean;
     durationMs: number;
     allowedBankActions: readonly DuelPreparationBankAction[];
   }): Promise<DuelPreparationSnapshot> {
@@ -695,6 +1350,12 @@ export class PostgresDuelPreparationStore {
       await client.query(
         "SELECT pg_advisory_xact_lock(hashtextextended('streaming-duel-preparation', 0))",
       );
+      if (!input.diagnostic) {
+        await lockAndAssertPersistedStreamingDuelParticipation(client, [
+          input.agent1Id,
+          input.agent2Id,
+        ]);
+      }
       const existingResult = await client.query<PreparationRow>(
         `SELECT * FROM streaming_duel_preparations
          WHERE "preparationId" = $1 FOR UPDATE`,
@@ -813,6 +1474,724 @@ export class PostgresDuelPreparationStore {
     return mapPreparation(result.rows[0]);
   }
 
+  /**
+   * Insert or replay the one immutable public context an authenticated
+   * external contestant may receive during this preparation. PostgreSQL's
+   * trigger binds the write to the exact live host owner and database clock.
+   */
+  async bindStrategyContext(
+    input: Omit<DuelPreparationStrategyContext, "boundAt">,
+  ): Promise<DuelPreparationStrategyContext> {
+    const agentName = normalizeExternalDuelPreparationPublicName(
+      input.agentName,
+    );
+    const opponentName = normalizeExternalDuelPreparationPublicName(
+      input.opponentName,
+    );
+    const ownPublicProfile = normalizeExactStrategyPublicProfile(
+      input.ownPublicProfile,
+    );
+    const opponentPublicProfile = normalizeExactStrategyPublicProfile(
+      input.opponentPublicProfile,
+    );
+    const opponentHistorySummary = normalizeExactOpponentHistorySummary(
+      input.opponentHistorySummary,
+    );
+    if (
+      !UUID_PATTERN.test(input.preparationId) ||
+      !input.agentId ||
+      input.agentId.length > 128 ||
+      /[\u0000-\u001f\u007f]/u.test(input.agentId) ||
+      !UUID_PATTERN.test(input.hostOwnerId) ||
+      input.policyVersion !== DUEL_PREPARATION_ROLE_POLICY_VERSION ||
+      input.protocolVersion !==
+        EXTERNAL_DUEL_PREPARATION_STRATEGY_PROTOCOL_VERSION ||
+      !agentName ||
+      agentName !== input.agentName ||
+      !opponentName ||
+      opponentName !== input.opponentName ||
+      ownPublicProfile === undefined ||
+      opponentPublicProfile === undefined ||
+      opponentHistorySummary === undefined
+    ) {
+      throw new Error("invalid duel preparation strategy context input");
+    }
+
+    const expected: Omit<DuelPreparationStrategyContext, "boundAt"> = {
+      preparationId: input.preparationId,
+      agentId: input.agentId,
+      hostOwnerId: input.hostOwnerId,
+      policyVersion: DUEL_PREPARATION_ROLE_POLICY_VERSION,
+      protocolVersion: EXTERNAL_DUEL_PREPARATION_STRATEGY_PROTOCOL_VERSION,
+      agentName,
+      opponentName,
+      ownPublicProfile,
+      opponentPublicProfile,
+      opponentHistorySummary,
+    };
+    const fields = `
+      "preparationId", "agentId", "hostOwnerId", "policyVersion",
+      "protocolVersion", "agentName", "opponentName",
+      "ownPublicProfile", "opponentPublicProfile", "opponentHistorySummary",
+      "boundAt"`;
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      const inserted = await client.query<DuelPreparationStrategyContextRow>(
+        `INSERT INTO streaming_duel_preparation_strategy_contexts (${fields})
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9::jsonb, $10::jsonb, 0)
+         ON CONFLICT ("preparationId", "agentId") DO NOTHING
+         RETURNING ${fields}`,
+        [
+          expected.preparationId,
+          expected.agentId,
+          expected.hostOwnerId,
+          expected.policyVersion,
+          expected.protocolVersion,
+          expected.agentName,
+          expected.opponentName,
+          JSON.stringify(expected.ownPublicProfile),
+          JSON.stringify(expected.opponentPublicProfile),
+          JSON.stringify(expected.opponentHistorySummary),
+        ],
+      );
+      const selected = inserted.rows[0]
+        ? inserted
+        : await client.query<DuelPreparationStrategyContextRow>(
+            `SELECT ${fields}
+               FROM streaming_duel_preparation_strategy_contexts
+              WHERE "preparationId" = $1 AND "agentId" = $2`,
+            [expected.preparationId, expected.agentId],
+          );
+      const persisted = mapDuelPreparationStrategyContext(selected.rows[0]);
+      if (!persisted) {
+        throw new Error("duel_preparation_strategy_context_insert_lost");
+      }
+      if (!sameDuelPreparationStrategyContext(persisted, expected)) {
+        throw new Error("duel_preparation_strategy_context_conflict");
+      }
+      await client.query("COMMIT");
+      return persisted;
+    } catch (error) {
+      try {
+        await client.query("ROLLBACK");
+      } catch {
+        // Preserve the original binding failure.
+      }
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  /**
+   * Append one privacy-safe public activity only while the exact contestant's
+   * database-clock host lease is active. Adjacent identical presentation is
+   * an idempotent replay and returns the existing immutable record.
+   */
+  async appendPublicActivity(input: {
+    preparationId: string;
+    agentId: string;
+    ownerId: string;
+    activity: StreamingDuelPublicPreparationActivity;
+    mode: StreamingDuelPublicPreparationMode;
+  }): Promise<DuelPreparationPublicActivityRecord> {
+    if (!UUID_PATTERN.test(input.preparationId)) {
+      throw new Error("preparationId must be a UUID");
+    }
+    if (
+      !input.agentId ||
+      input.agentId.length > 128 ||
+      /[\u0000-\u001f\u007f]/u.test(input.agentId) ||
+      !UUID_PATTERN.test(input.ownerId) ||
+      !PUBLIC_PREPARATION_ACTIVITIES.has(input.activity) ||
+      !PUBLIC_PREPARATION_MODES.has(input.mode) ||
+      ((input.activity === "planning" || input.activity === "reassessing") &&
+        input.mode !== "working")
+    ) {
+      throw new Error("invalid public preparation activity input");
+    }
+
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      const authority = await client.query<{
+        agent1Id: string;
+        agent2Id: string;
+        status: DuelPreparationStatus;
+        expiresAt: string | number;
+        databaseNow: string | number;
+        hostLeaseActive: boolean;
+      }>(
+        `SELECT
+           preparation."agent1Id",
+           preparation."agent2Id",
+           preparation.status,
+           preparation."expiresAt",
+           (EXTRACT(EPOCH FROM clock_timestamp()) * 1000)::bigint AS "databaseNow",
+           EXISTS (
+             SELECT 1
+             FROM streaming_duel_preparation_agent_host_leases AS lease
+             WHERE lease."preparationId" = preparation."preparationId"
+               AND lease."agentId" = $2
+               AND lease."ownerId" = $3
+               AND lease."expiresAt" >
+                 (EXTRACT(EPOCH FROM clock_timestamp()) * 1000)::bigint
+           ) AS "hostLeaseActive"
+         FROM streaming_duel_preparations AS preparation
+         WHERE preparation."preparationId" = $1
+         FOR UPDATE OF preparation`,
+        [input.preparationId, input.agentId, input.ownerId],
+      );
+      const row = authority.rows[0];
+      const databaseNow = finiteTimestamp(row?.databaseNow ?? null);
+      const expiresAt = finiteTimestamp(row?.expiresAt ?? null);
+      if (
+        !row ||
+        databaseNow === null ||
+        expiresAt === null ||
+        (input.agentId !== row.agent1Id && input.agentId !== row.agent2Id) ||
+        (row.status !== "preparing" && row.status !== "ready") ||
+        expiresAt <= databaseNow ||
+        row.hostLeaseActive !== true
+      ) {
+        throw new Error("duel_preparation_public_activity_not_authorized");
+      }
+
+      const previousResult = await client.query<PublicPreparationActivityRow>(
+        `SELECT
+             "activitySequence", "preparationId", "agentId",
+             activity, mode, "occurredAt"
+           FROM streaming_duel_preparation_public_activities
+           WHERE "preparationId" = $1 AND "agentId" = $2
+           ORDER BY "activitySequence" DESC
+           LIMIT 1`,
+        [input.preparationId, input.agentId],
+      );
+      const previous = mapPublicPreparationActivity(previousResult.rows[0]);
+      if (
+        previous?.activity === input.activity &&
+        previous.mode === input.mode
+      ) {
+        await client.query("COMMIT");
+        return previous;
+      }
+
+      const inserted = await client.query<PublicPreparationActivityRow>(
+        `INSERT INTO streaming_duel_preparation_public_activities (
+           "preparationId", "agentId", activity, mode, "occurredAt"
+         ) VALUES ($1, $2, $3, $4, $5::bigint)
+         RETURNING
+           "activitySequence", "preparationId", "agentId",
+           activity, mode, "occurredAt"`,
+        [
+          input.preparationId,
+          input.agentId,
+          input.activity,
+          input.mode,
+          databaseNow,
+        ],
+      );
+      const activity = mapPublicPreparationActivity(inserted.rows[0]);
+      if (!activity) {
+        throw new Error("duel_preparation_public_activity_insert_lost");
+      }
+      await client.query("COMMIT");
+      return activity;
+    } catch (error) {
+      try {
+        await client.query("ROLLBACK");
+      } catch {
+        // Preserve the original append failure.
+      }
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  /** Load only the bounded tail needed to rebuild each contestant's recap. */
+  async listRecentPublicActivities(
+    preparationId: string,
+    perContestantLimit: number = STREAMING_DUEL_PUBLIC_PREPARATION_ACTIVITY_TRAIL_LIMIT,
+  ): Promise<readonly DuelPreparationPublicActivityRecord[]> {
+    if (!UUID_PATTERN.test(preparationId)) {
+      throw new Error("preparationId must be a UUID");
+    }
+    if (
+      !Number.isSafeInteger(perContestantLimit) ||
+      perContestantLimit < 1 ||
+      perContestantLimit >
+        STREAMING_DUEL_PUBLIC_PREPARATION_ACTIVITY_TRAIL_LIMIT
+    ) {
+      throw new Error("invalid public preparation activity limit");
+    }
+    const result = await this.pool.query<PublicPreparationActivityRow>(
+      `WITH recent AS (
+         SELECT
+           "activitySequence", "preparationId", "agentId",
+           activity, mode, "occurredAt",
+           row_number() OVER (
+             PARTITION BY "agentId"
+             ORDER BY "activitySequence" DESC
+           ) AS recent_rank
+         FROM streaming_duel_preparation_public_activities
+         WHERE "preparationId" = $1
+       )
+       SELECT
+         "activitySequence", "preparationId", "agentId",
+         activity, mode, "occurredAt"
+       FROM recent
+       WHERE recent_rank <= $2::integer
+       ORDER BY "activitySequence" ASC`,
+      [preparationId, perContestantLimit],
+    );
+    return Object.freeze(
+      result.rows.map((row) => {
+        const activity = mapPublicPreparationActivity(row);
+        if (!activity || activity.preparationId !== preparationId) {
+          throw new Error("invalid durable public preparation activity set");
+        }
+        return activity;
+      }),
+    );
+  }
+
+  /**
+   * Claim one immutable contestant-host identity while preparation is private.
+   * Exact retry by the same owner returns the existing lease without extending
+   * it. A different owner or an expired lease cannot take the session over.
+   */
+  async claimContestantHostLease(input: {
+    preparationId: string;
+    agentId: string;
+    ownerId: string;
+    executableBuildId?: string | null;
+    leaseDurationMs: number;
+  }): Promise<DuelPreparationAgentHostLease | null> {
+    validateHostLeaseDuration(input.leaseDurationMs);
+    const executableBuildId = input.executableBuildId ?? null;
+    if (
+      !UUID_PATTERN.test(input.preparationId) ||
+      !UUID_PATTERN.test(input.ownerId) ||
+      !(
+        executableBuildId === null ||
+        EXECUTABLE_BUILD_ID_PATTERN.test(executableBuildId)
+      ) ||
+      !input.agentId.trim()
+    ) {
+      return null;
+    }
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN ISOLATION LEVEL SERIALIZABLE");
+      const selected = await client.query<PreparationAccessRow>(
+        `
+          WITH clock AS (
+            SELECT (EXTRACT(EPOCH FROM clock_timestamp()) * 1000)::bigint AS now_ms
+          )
+          SELECT preparation.*, clock.now_ms AS "databaseNow"
+          FROM streaming_duel_preparations AS preparation
+          CROSS JOIN clock
+          WHERE preparation."preparationId" = $1
+          FOR UPDATE OF preparation
+        `,
+        [input.preparationId],
+      );
+      const row = selected.rows[0];
+      const preparation = mapPreparation(row);
+      const databaseNow = finiteTimestamp(row?.databaseNow ?? null);
+      if (
+        !preparation ||
+        databaseNow === null ||
+        (preparation.agent1Id !== input.agentId &&
+          preparation.agent2Id !== input.agentId) ||
+        !["preparing", "ready"].includes(preparation.status) ||
+        preparation.expiresAt <= databaseNow ||
+        (await hasContestantUnavailability(client, input.preparationId))
+      ) {
+        await client.query("ROLLBACK");
+        return null;
+      }
+
+      const existingResult = await client.query<AgentHostLeaseRow>(
+        `SELECT *
+           FROM streaming_duel_preparation_agent_host_leases
+          WHERE "preparationId" = $1 AND "agentId" = $2
+          FOR UPDATE`,
+        [input.preparationId, input.agentId],
+      );
+      const existing = mapAgentHostLease(existingResult.rows[0]);
+      if (existing) {
+        await client.query("COMMIT");
+        return existing.ownerId === input.ownerId &&
+          existing.executableBuildId === executableBuildId &&
+          existing.expiresAt > databaseNow
+          ? existing
+          : null;
+      }
+
+      const insertedResult = await client.query<AgentHostLeaseRow>(
+        `INSERT INTO streaming_duel_preparation_agent_host_leases (
+           "preparationId", "agentId", "ownerId", "executableBuildId",
+           "claimedAt", "heartbeatAt", "expiresAt"
+         ) VALUES ($1, $2, $3, $4, 0, 0, $5)
+         RETURNING *`,
+        [
+          input.preparationId,
+          input.agentId,
+          input.ownerId,
+          executableBuildId,
+          input.leaseDurationMs,
+        ],
+      );
+      const inserted = mapAgentHostLease(insertedResult.rows[0]);
+      if (!inserted) {
+        throw new Error("duel_preparation_agent_host_lease_insert_lost");
+      }
+      await client.query("COMMIT");
+      return inserted;
+    } catch (error) {
+      try {
+        await client.query("ROLLBACK");
+      } catch {
+        // Preserve the original claim failure.
+      }
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  /** Extend one live lease. Neither an expired lease nor another owner wins. */
+  async heartbeatContestantHostLease(input: {
+    preparationId: string;
+    agentId: string;
+    ownerId: string;
+    executableBuildId?: string | null;
+    leaseDurationMs: number;
+  }): Promise<DuelPreparationAgentHostLease | null> {
+    validateHostLeaseDuration(input.leaseDurationMs);
+    const executableBuildId = input.executableBuildId ?? null;
+    if (
+      !UUID_PATTERN.test(input.preparationId) ||
+      !UUID_PATTERN.test(input.ownerId) ||
+      !(
+        executableBuildId === null ||
+        EXECUTABLE_BUILD_ID_PATTERN.test(executableBuildId)
+      ) ||
+      !input.agentId.trim()
+    ) {
+      return null;
+    }
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN ISOLATION LEVEL SERIALIZABLE");
+      const selected = await client.query<PreparationAccessRow>(
+        `
+          WITH clock AS (
+            SELECT (EXTRACT(EPOCH FROM clock_timestamp()) * 1000)::bigint AS now_ms
+          )
+          SELECT preparation.*, clock.now_ms AS "databaseNow"
+          FROM streaming_duel_preparations AS preparation
+          CROSS JOIN clock
+          WHERE preparation."preparationId" = $1
+          FOR UPDATE OF preparation
+        `,
+        [input.preparationId],
+      );
+      const row = selected.rows[0];
+      const preparation = mapPreparation(row);
+      const databaseNow = finiteTimestamp(row?.databaseNow ?? null);
+      if (
+        !preparation ||
+        databaseNow === null ||
+        (preparation.agent1Id !== input.agentId &&
+          preparation.agent2Id !== input.agentId) ||
+        !["preparing", "ready"].includes(preparation.status) ||
+        preparation.expiresAt <= databaseNow ||
+        (await hasContestantUnavailability(client, input.preparationId))
+      ) {
+        await client.query("ROLLBACK");
+        return null;
+      }
+
+      const existingResult = await client.query<AgentHostLeaseRow>(
+        `SELECT *
+           FROM streaming_duel_preparation_agent_host_leases
+          WHERE "preparationId" = $1 AND "agentId" = $2
+          FOR UPDATE`,
+        [input.preparationId, input.agentId],
+      );
+      const existing = mapAgentHostLease(existingResult.rows[0]);
+      if (
+        !existing ||
+        existing.ownerId !== input.ownerId ||
+        existing.executableBuildId !== executableBuildId ||
+        existing.expiresAt <= databaseNow
+      ) {
+        await client.query("ROLLBACK");
+        return null;
+      }
+
+      const updatedResult = await client.query<AgentHostLeaseRow>(
+        `UPDATE streaming_duel_preparation_agent_host_leases
+            SET "heartbeatAt" = 0, "expiresAt" = $5
+          WHERE "preparationId" = $1
+            AND "agentId" = $2
+            AND "ownerId" = $3
+            AND "executableBuildId" IS NOT DISTINCT FROM $4
+          RETURNING *`,
+        [
+          input.preparationId,
+          input.agentId,
+          input.ownerId,
+          executableBuildId,
+          input.leaseDurationMs,
+        ],
+      );
+      const updated = mapAgentHostLease(updatedResult.rows[0]);
+      if (!updated) {
+        throw new Error("duel_preparation_agent_host_lease_heartbeat_lost");
+      }
+      await client.query("COMMIT");
+      return updated;
+    } catch (error) {
+      try {
+        await client.query("ROLLBACK");
+      } catch {
+        // Preserve the original heartbeat failure.
+      }
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  /**
+   * Promote a missing/expired private host lease into the existing immutable
+   * unavailability report while holding the preparation row lock. This wins or
+   * loses atomically against a claim/heartbeat and never manufactures a duel
+   * result or market terminal.
+   */
+  async reportExpiredContestantHostLease(input: {
+    preparationId: string;
+    claimGraceMs: number;
+  }): Promise<DuelPreparationContestantUnavailabilityReport | null> {
+    if (
+      !UUID_PATTERN.test(input.preparationId) ||
+      !Number.isSafeInteger(input.claimGraceMs) ||
+      input.claimGraceMs < 1_000 ||
+      input.claimGraceMs > MAX_DUEL_PREPARATION_HOST_LEASE_MS
+    ) {
+      return null;
+    }
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN ISOLATION LEVEL SERIALIZABLE");
+      const selected = await client.query<PreparationAccessRow>(
+        `
+          WITH clock AS (
+            SELECT (EXTRACT(EPOCH FROM clock_timestamp()) * 1000)::bigint AS now_ms
+          )
+          SELECT preparation.*, clock.now_ms AS "databaseNow"
+          FROM streaming_duel_preparations AS preparation
+          CROSS JOIN clock
+          WHERE preparation."preparationId" = $1
+          FOR UPDATE OF preparation
+        `,
+        [input.preparationId],
+      );
+      const row = selected.rows[0];
+      const preparation = mapPreparation(row);
+      const databaseNow = finiteTimestamp(row?.databaseNow ?? null);
+      if (
+        !preparation ||
+        databaseNow === null ||
+        !["preparing", "ready"].includes(preparation.status) ||
+        preparation.expiresAt <= databaseNow
+      ) {
+        await client.query("ROLLBACK");
+        return null;
+      }
+
+      const existingReportResult =
+        await client.query<ContestantUnavailabilityRow>(
+          `SELECT *
+             FROM streaming_duel_preparation_unavailability_reports
+            WHERE "preparationId" = $1
+            ORDER BY "reportedAt" ASC, "agentId" ASC
+            LIMIT 1`,
+          [input.preparationId],
+        );
+      const existingReport = mapContestantUnavailability(
+        existingReportResult.rows[0],
+      );
+      if (existingReport) {
+        await client.query("COMMIT");
+        return existingReport;
+      }
+
+      const leaseResult = await client.query<AgentHostLeaseRow>(
+        `SELECT *
+           FROM streaming_duel_preparation_agent_host_leases
+          WHERE "preparationId" = $1
+          ORDER BY "agentId" ASC
+          FOR UPDATE`,
+        [input.preparationId],
+      );
+      const leases = new Map(
+        leaseResult.rows.map((leaseRow) => {
+          const lease = mapAgentHostLease(leaseRow)!;
+          return [lease.agentId, lease] as const;
+        }),
+      );
+      const missingClaimExpired =
+        databaseNow >= preparation.selectedAt + input.claimGraceMs;
+      const unavailableAgentId = [
+        preparation.agent1Id,
+        preparation.agent2Id,
+      ].find((agentId) => {
+        const lease = leases.get(agentId);
+        return lease ? lease.expiresAt <= databaseNow : missingClaimExpired;
+      });
+      if (!unavailableAgentId) {
+        await client.query("COMMIT");
+        return null;
+      }
+
+      const insertedResult = await client.query<ContestantUnavailabilityRow>(
+        `INSERT INTO streaming_duel_preparation_unavailability_reports (
+           "preparationId", "agentId", reason
+         ) VALUES ($1, $2, $3)
+         RETURNING *`,
+        [
+          input.preparationId,
+          unavailableAgentId,
+          DUEL_PREPARATION_CONTESTANT_UNAVAILABILITY_REASON,
+        ],
+      );
+      const inserted = mapContestantUnavailability(insertedResult.rows[0]);
+      if (!inserted) {
+        throw new Error(
+          "duel_preparation_expired_host_lease_report_insert_lost",
+        );
+      }
+      await client.query("COMMIT");
+      return inserted;
+    } catch (error) {
+      try {
+        await client.query("ROLLBACK");
+      } catch {
+        // Preserve the original expiry/report failure.
+      }
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  /**
+   * Append one database-timestamped contestant-host report while the session is
+   * still private. The preparation row lock serializes this boundary against
+   * readiness, freeze, expiry, and scheduler cancellation.
+   */
+  async reportContestantUnavailable(input: {
+    preparationId: string;
+    agentId: string;
+  }): Promise<DuelPreparationContestantUnavailabilityReport | null> {
+    if (!UUID_PATTERN.test(input.preparationId) || !input.agentId.trim()) {
+      return null;
+    }
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN ISOLATION LEVEL SERIALIZABLE");
+      const selected = await client.query<PreparationAccessRow>(
+        `
+          WITH clock AS (
+            SELECT (EXTRACT(EPOCH FROM clock_timestamp()) * 1000)::bigint AS now_ms
+          )
+          SELECT preparation.*, clock.now_ms AS "databaseNow"
+          FROM streaming_duel_preparations AS preparation
+          CROSS JOIN clock
+          WHERE preparation."preparationId" = $1
+          FOR UPDATE OF preparation
+        `,
+        [input.preparationId],
+      );
+      const row = selected.rows[0];
+      const preparation = mapPreparation(row);
+      const databaseNow = finiteTimestamp(row?.databaseNow ?? null);
+      if (!preparation || databaseNow === null) {
+        await client.query("ROLLBACK");
+        return null;
+      }
+
+      const existingResult = await client.query<ContestantUnavailabilityRow>(
+        `SELECT *
+           FROM streaming_duel_preparation_unavailability_reports
+          WHERE "preparationId" = $1 AND "agentId" = $2`,
+        [input.preparationId, input.agentId],
+      );
+      const existing = mapContestantUnavailability(existingResult.rows[0]);
+      if (existing) {
+        await client.query("COMMIT");
+        return existing;
+      }
+      if (
+        (preparation.agent1Id !== input.agentId &&
+          preparation.agent2Id !== input.agentId) ||
+        !["preparing", "ready"].includes(preparation.status) ||
+        preparation.expiresAt <= databaseNow
+      ) {
+        await client.query("ROLLBACK");
+        return null;
+      }
+
+      const insertedResult = await client.query<ContestantUnavailabilityRow>(
+        `INSERT INTO streaming_duel_preparation_unavailability_reports (
+           "preparationId", "agentId", reason
+         ) VALUES ($1, $2, $3)
+         RETURNING *`,
+        [
+          input.preparationId,
+          input.agentId,
+          DUEL_PREPARATION_CONTESTANT_UNAVAILABILITY_REASON,
+        ],
+      );
+      const inserted = mapContestantUnavailability(insertedResult.rows[0]);
+      if (!inserted) {
+        throw new Error("duel_preparation_unavailability_insert_lost");
+      }
+      await client.query("COMMIT");
+      return inserted;
+    } catch (error) {
+      try {
+        await client.query("ROLLBACK");
+      } catch {
+        // Preserve the original report failure.
+      }
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  async getContestantUnavailability(
+    preparationId: string,
+  ): Promise<DuelPreparationContestantUnavailabilityReport | null> {
+    if (!UUID_PATTERN.test(preparationId)) return null;
+    const result = await this.pool.query<ContestantUnavailabilityRow>(
+      `SELECT *
+         FROM streaming_duel_preparation_unavailability_reports
+        WHERE "preparationId" = $1
+        ORDER BY "reportedAt" ASC, "agentId" ASC
+        LIMIT 1`,
+      [preparationId],
+    );
+    return mapContestantUnavailability(result.rows[0]);
+  }
+
   async markReady(input: {
     preparationId: string;
     fencingToken: string;
@@ -848,6 +2227,23 @@ export class PostgresDuelPreparationStore {
         preparation.fencingToken !== input.fencingToken ||
         (preparation.agent1Id !== input.agentId &&
           preparation.agent2Id !== input.agentId)
+      ) {
+        await client.query("ROLLBACK");
+        return null;
+      }
+      if (
+        await hasContestantUnavailability(client, preparation.preparationId)
+      ) {
+        await client.query("ROLLBACK");
+        return null;
+      }
+      if (
+        !(await hasActiveContestantHostLease(
+          client,
+          preparation.preparationId,
+          input.agentId,
+          databaseNow,
+        ))
       ) {
         await client.query("ROLLBACK");
         return null;
@@ -961,9 +2357,25 @@ export class PostgresDuelPreparationStore {
         await client.query("ROLLBACK");
         return null;
       }
+      if (
+        await hasContestantUnavailability(client, preparation.preparationId)
+      ) {
+        await client.query("ROLLBACK");
+        return null;
+      }
       if (preparation.status === "frozen") {
         await client.query("COMMIT");
         return preparation;
+      }
+      if (
+        !(await haveActiveContestantHostLeases(
+          client,
+          preparation,
+          databaseNow,
+        ))
+      ) {
+        await client.query("ROLLBACK");
+        return null;
       }
       if (
         preparation.status !== "ready" ||
@@ -1017,6 +2429,7 @@ export class PostgresDuelPreparationStore {
     fencingToken: string;
     draft: CompetitiveSnapshotDraft;
     betWindowDurationMs: number;
+    timing: CompetitiveSnapshotTimingInput;
   }): Promise<PersistedCompetitiveSnapshot | null> {
     validateFencingToken(input.fencingToken);
     if (
@@ -1028,6 +2441,12 @@ export class PostgresDuelPreparationStore {
     const client = await this.pool.connect();
     try {
       await client.query("BEGIN ISOLATION LEVEL SERIALIZABLE");
+      if (!input.draft.diagnostic) {
+        await lockAndAssertPersistedStreamingDuelParticipation(
+          client,
+          input.draft.contestants.map((contestant) => contestant.agentId),
+        );
+      }
       const preparationResult = await client.query<PreparationAccessRow>(
         `
           WITH clock AS (
@@ -1047,6 +2466,12 @@ export class PostgresDuelPreparationStore {
         preparationResult.rows[0]?.databaseNow ?? null,
       );
       if (!preparation || databaseNow === null) {
+        await client.query("ROLLBACK");
+        return null;
+      }
+      if (
+        await hasContestantUnavailability(client, preparation.preparationId)
+      ) {
         await client.query("ROLLBACK");
         return null;
       }
@@ -1089,12 +2514,23 @@ export class PostgresDuelPreparationStore {
           persisted: true,
           frozenAt: preparation.frozenAt,
           betWindowDurationMs: input.betWindowDurationMs,
+          timing: input.timing,
         });
         if (expected.digest !== existing.digest) {
           throw new Error("competitive_snapshot_conflict");
         }
         await client.query("COMMIT");
         return { preparation, ...existing };
+      }
+      if (
+        !(await haveActiveContestantHostLeases(
+          client,
+          preparation,
+          databaseNow,
+        ))
+      ) {
+        await client.query("ROLLBACK");
+        return null;
       }
       if (
         preparation.status !== "ready" ||
@@ -1111,6 +2547,7 @@ export class PostgresDuelPreparationStore {
         persisted: true,
         frozenAt: databaseNow,
         betWindowDurationMs: input.betWindowDurationMs,
+        timing: input.timing,
       });
       const updatedResult = await client.query<PreparationRow>(
         `
@@ -1535,6 +2972,11 @@ export class PostgresDuelPreparationStore {
       );
       const terminal = mapCompetitiveSnapshot(updated.rows[0]);
       if (!terminal) throw new Error("competitive_snapshot_terminal_lost");
+      await persistCompetitiveTerminalStats(
+        client,
+        terminal.snapshot,
+        input.terminal,
+      );
       await insertRuntimeTransitionEvent(client, {
         eventType: "terminal_committed",
         preparation,
@@ -1819,12 +3261,24 @@ export async function authorizeDuelPreparationBankAccess(
         SELECT (EXTRACT(EPOCH FROM clock_timestamp()) * 1000)::bigint AS now_ms
       )
       SELECT preparation.*, clock.now_ms AS "databaseNow"
+           , EXISTS (
+               SELECT 1
+               FROM streaming_duel_preparation_unavailability_reports AS unavailable
+               WHERE unavailable."preparationId" = preparation."preparationId"
+             ) AS "contestantUnavailable"
+           , EXISTS (
+               SELECT 1
+               FROM streaming_duel_preparation_agent_host_leases AS lease
+               WHERE lease."preparationId" = preparation."preparationId"
+                 AND lease."agentId" = $2
+                 AND lease."expiresAt" > clock.now_ms
+             ) AS "contestantHostLeaseActive"
       FROM streaming_duel_preparations AS preparation
       CROSS JOIN clock
       WHERE preparation."preparationId" = $1
       ${input.lockForTransaction ? "FOR SHARE OF preparation" : ""}
     `,
-    [input.preparationId],
+    [input.preparationId, input.playerId],
   );
   const row = result.rows[0];
   if (!row) return { ok: false, reason: "preparation_not_found" };
@@ -1839,11 +3293,17 @@ export async function authorizeDuelPreparationBankAccess(
   if (preparation.status !== "preparing") {
     return { ok: false, reason: "preparation_not_active" };
   }
+  if (row.contestantUnavailable === true) {
+    return { ok: false, reason: "preparation_not_active" };
+  }
   if (
     preparation.agent1Id !== input.playerId &&
     preparation.agent2Id !== input.playerId
   ) {
     return { ok: false, reason: "preparation_agent_mismatch" };
+  }
+  if (row.contestantHostLeaseActive !== true) {
+    return { ok: false, reason: "preparation_not_active" };
   }
   const readyAt =
     preparation.agent1Id === input.playerId

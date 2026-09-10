@@ -12,15 +12,24 @@ import {
   getOrdinaryBankStageOperationId,
   recordOrdinaryBankStageOutcome,
 } from "../ordinaryAgentBanking";
-import type { OrdinaryBankStageExecutionResult } from "../ordinaryAgentBanking";
+import type {
+  OrdinaryBankStageExecutionResult,
+  OrdinaryCombatSupplyRecipe,
+} from "../ordinaryAgentBanking";
 import type { AgentInstance } from "../managers/AgentBehaviorTicker";
 import type { AgentQuestInfo } from "../types";
+import type { OrdinaryCombatReadinessCatalog } from "../ordinaryCombatReadinessSelection";
 
 const testItems = [
   {
     id: "ordinary_hatchet",
     type: "tool",
     tool: { skill: "woodcutting", priority: 1 },
+  },
+  {
+    id: "ordinary_pickaxe",
+    type: "tool",
+    tool: { skill: "mining", priority: 1 },
   },
   {
     id: "ordinary_weak_hatchet",
@@ -30,19 +39,44 @@ const testItems = [
   { id: "ordinary_logs", type: "resource" },
   { id: "ordinary_lobster", type: "consumable", healAmount: 12 },
   { id: "ordinary_shrimp", type: "consumable", healAmount: 3 },
+  { id: "ordinary_cooked_low", type: "consumable", healAmount: 3 },
+  {
+    id: "ordinary_net",
+    type: "tool",
+    tool: { skill: "fishing", priority: 1 },
+  },
   { id: "ordinary_air_rune", type: "misc" },
   { id: "ordinary_arrow", type: "ammunition" },
   { id: "ordinary_ore_a", type: "resource", stackable: true },
   { id: "ordinary_ore_b", type: "resource", stackable: true },
   { id: "ordinary_bar", type: "resource", stackable: false },
-  { id: "ordinary_sword", type: "weapon", stackable: false },
+  {
+    id: "ordinary_sword",
+    type: "weapon",
+    stackable: false,
+    equipSlot: "weapon",
+    attackType: "MELEE",
+    bonuses: { attack: 5, strength: 4 },
+  },
   { id: "ordinary_craft_material", type: "resource", stackable: false },
   { id: "ordinary_craft_output", type: "resource", stackable: false },
   { id: "ordinary_needle", type: "tool", stackable: false },
   { id: "ordinary_thread", type: "tool", stackable: true },
   { id: "hammer", type: "tool", stackable: false },
-  { id: "ordinary_staff", type: "weapon", attackType: "MAGIC" },
-  { id: "ordinary_bow", type: "weapon", attackType: "RANGED" },
+  {
+    id: "ordinary_staff",
+    type: "weapon",
+    equipSlot: "weapon",
+    attackType: "MAGIC",
+    bonuses: { attackMagic: 10 },
+  },
+  {
+    id: "ordinary_bow",
+    type: "weapon",
+    equipSlot: "2h",
+    attackType: "RANGED",
+    bonuses: { attackRanged: 8 },
+  },
   {
     id: "ordinary_raw_low",
     type: "resource",
@@ -72,9 +106,18 @@ const testItems = [
 function makeInstance(input?: {
   weaponId?: string | null;
   maxHealth?: number;
+  combatSpecialization?: "melee" | "ranged" | "mage";
   executeBankDepositAll?: ReturnType<typeof vi.fn>;
+  inventory?: Array<{ slot: number; itemId: string; quantity: number }>;
+  questState?: Array<{
+    questId: string;
+    status: string;
+    stageTarget?: string;
+    stageCount?: number;
+  }>;
+  availableQuests?: AgentQuestInfo[];
 }): AgentInstance {
-  const inventory = [
+  const inventory = input?.inventory ?? [
     { slot: 0, itemId: "ordinary_hatchet", quantity: 3 },
     { slot: 1, itemId: "ordinary_weak_hatchet", quantity: 1 },
     { slot: 2, itemId: "ordinary_logs", quantity: 12 },
@@ -82,11 +125,34 @@ function makeInstance(input?: {
     { slot: 4, itemId: "ordinary_shrimp", quantity: 8 },
     { slot: 5, itemId: "ordinary_air_rune", quantity: 50 },
     { slot: 6, itemId: "ordinary_arrow", quantity: 40 },
+    ...(input?.combatSpecialization
+      ? [
+          { slot: 7, itemId: "ordinary_sword", quantity: 1 },
+          {
+            slot: 8,
+            itemId:
+              input.combatSpecialization === "mage"
+                ? "ordinary_staff"
+                : "ordinary_bow",
+            quantity: 1,
+          },
+        ]
+      : []),
   ];
   const executeBankDepositAll =
     input?.executeBankDepositAll ?? vi.fn(async () => ({ success: true }));
   return {
     state: "running",
+    ...(input?.combatSpecialization
+      ? {
+          config: {
+            characterId: "ordinary-agent",
+            accountId: "ordinary-account",
+            name: "Ordinary agent",
+            combatSpecialization: input.combatSpecialization,
+          },
+        }
+      : {}),
     service: {
       getGameState: () => ({
         maxHealth: input?.maxHealth ?? 20,
@@ -95,13 +161,16 @@ function makeInstance(input?: {
           ? { weapon: { itemId: input.weaponId } }
           : {},
       }),
-      getQuestState: () => [
-        {
-          status: "in_progress",
-          stageTarget: "ordinary_logs",
-          stageCount: 5,
-        },
-      ],
+      getQuestState: () =>
+        input?.questState ?? [
+          {
+            questId: "ordinary-logging-quest",
+            status: "in_progress",
+            stageTarget: "ordinary_logs",
+            stageCount: 5,
+          },
+        ],
+      getAvailableQuests: () => input?.availableQuests ?? [],
       executeBankDepositAll,
     },
   } as unknown as AgentInstance;
@@ -115,6 +184,11 @@ function makeStageInstance(input?: {
   fletchingLevel?: number;
   firemakingLevel?: number;
   runecraftingLevel?: number;
+  attackLevel?: number;
+  rangedLevel?: number;
+  magicLevel?: number;
+  combatSpecialization?: "melee" | "ranged" | "mage";
+  equipment?: Record<string, { itemId: string; quantity?: number }>;
   coinBalance?: number | null;
   inventory?: Array<{ slot: number; itemId: string; quantity: number }>;
   questTarget?: string | null;
@@ -129,6 +203,12 @@ function makeStageInstance(input?: {
   return {
     state: "running",
     goal: input?.goal ?? null,
+    config: {
+      characterId: "ordinary-stage-agent",
+      accountId: "ordinary-stage-account",
+      name: "Ordinary stage agent",
+      combatSpecialization: input?.combatSpecialization ?? "melee",
+    },
     service: {
       getGameState: () => ({
         inCombat: false,
@@ -141,8 +221,12 @@ function makeStageInstance(input?: {
           fletching: { level: input?.fletchingLevel ?? 99, xp: 0 },
           firemaking: { level: input?.firemakingLevel ?? 99, xp: 0 },
           runecrafting: { level: input?.runecraftingLevel ?? 99, xp: 0 },
+          attack: { level: input?.attackLevel ?? 1, xp: 0 },
+          ranged: { level: input?.rangedLevel ?? 1, xp: 0 },
+          magic: { level: input?.magicLevel ?? 1, xp: 0 },
         },
         inventory,
+        equipment: input?.equipment ?? {},
       }),
       getQuestState: () =>
         input?.questTarget
@@ -175,8 +259,11 @@ function makeStageInstance(input?: {
 
 describe("ordinary agent banking policy", () => {
   const previous = new Map<string, unknown>();
+  let previousExternalResources: unknown;
 
   beforeEach(() => {
+    previousExternalResources = (globalThis as { EXTERNAL_RESOURCES?: unknown })
+      .EXTERNAL_RESOURCES;
     for (const item of testItems) {
       previous.set(item.id, ITEMS.get(item.id));
       ITEMS.set(item.id, {
@@ -199,6 +286,8 @@ describe("ordinary agent banking policy", () => {
       else ITEMS.delete(itemId);
     }
     previous.clear();
+    (globalThis as { EXTERNAL_RESOURCES?: unknown }).EXTERNAL_RESOURCES =
+      previousExternalResources;
   });
 
   it("privately stages the strongest authored food without exposing bank custody", () => {
@@ -264,6 +353,520 @@ describe("ordinary agent banking policy", () => {
         [bankItem("ordinary_raw_low", 5, 0)],
       ),
     ).toBeNull();
+
+    (
+      globalThis as { EXTERNAL_RESOURCES?: Map<string, unknown> }
+    ).EXTERNAL_RESOURCES = new Map([
+      [
+        "ordinary_fishing_spot",
+        {
+          id: "ordinary_fishing_spot",
+          harvestSkill: "fishing",
+          toolRequired: "ordinary_net",
+          levelRequired: 1,
+          harvestYield: [{ itemId: "ordinary_raw_low" }],
+        },
+      ],
+    ]);
+    expect(
+      buildOrdinaryBankStagePlan(
+        makeStageInstance({
+          maxHealth: 10,
+          cookingLevel: 1,
+          goal: survivalGoal,
+        }),
+        [bankItem("ordinary_net", 1, 0)],
+      ),
+    ).toEqual({
+      activity: "survival_supply_tool",
+      itemId: "ordinary_net",
+      quantity: 1,
+    });
+  });
+
+  it("re-derives and stages only the exact selected combat supply from private custody", () => {
+    const catalog: OrdinaryCombatReadinessCatalog = {
+      ammunitionTarget: 50,
+      magicCastTarget: 20,
+      melee: [],
+      ranged: [
+        {
+          weaponId: "ordinary_bow",
+          ammunitionId: "ordinary_arrow",
+          weaponScore: 8,
+          ammunitionScore: 7,
+          requiredRangedLevel: 1,
+        },
+      ],
+      magic: [],
+    };
+    const weaponId = catalog.ranged[0]!.weaponId;
+    const ammunitionId = catalog.ranged[0]!.ammunitionId;
+    const combatGoal: AgentInstance["goal"] = {
+      type: "banking",
+      description: "Check exact combat supplies",
+      bankPurpose: "combat_supply",
+    };
+    const bankItem = (itemId: string, quantity: number, slot: number) => ({
+      itemId,
+      quantity,
+      slot,
+      tabIndex: 0,
+    });
+
+    expect(
+      buildOrdinaryBankStagePlan(
+        makeStageInstance({
+          combatSpecialization: "ranged",
+          rangedLevel: 1,
+          goal: combatGoal,
+        }),
+        [bankItem("ordinary_ore_a", 100, 0), bankItem(weaponId, 1, 1)],
+        catalog,
+      ),
+    ).toEqual({
+      activity: "combat_supply",
+      itemId: weaponId,
+      quantity: 1,
+    });
+
+    expect(
+      buildOrdinaryBankStagePlan(
+        makeStageInstance({
+          combatSpecialization: "ranged",
+          rangedLevel: 1,
+          goal: combatGoal,
+          equipment: {
+            weapon: { itemId: weaponId, quantity: 1 },
+          },
+        }),
+        [bankItem(ammunitionId, 17, 0)],
+        catalog,
+      ),
+    ).toEqual({
+      activity: "combat_supply",
+      itemId: ammunitionId,
+      quantity: 17,
+    });
+
+    expect(
+      buildOrdinaryBankStagePlan(
+        makeStageInstance({
+          combatSpecialization: "ranged",
+          rangedLevel: 1,
+          goal: combatGoal,
+        }),
+        [bankItem("ordinary_ore_a", 100, 0)],
+        catalog,
+      ),
+    ).toBeNull();
+  });
+
+  it("recursively stages only banked precursors in the exact selected combat supply graph", () => {
+    const catalog: OrdinaryCombatReadinessCatalog = {
+      ammunitionTarget: 50,
+      magicCastTarget: 20,
+      melee: [],
+      ranged: [
+        {
+          weaponId: "ordinary_bow",
+          ammunitionId: "ordinary_arrow",
+          weaponScore: 8,
+          ammunitionScore: 7,
+          requiredRangedLevel: 1,
+        },
+      ],
+      magic: [],
+    };
+    const recipes: OrdinaryCombatSupplyRecipe[] = [
+      {
+        activity: "smelting",
+        stableId: "ordinary_bar",
+        outputItemId: "ordinary_bar",
+        outputQuantity: 1,
+        levelRequired: 1,
+        inputAlternatives: [
+          [
+            { itemId: "ordinary_ore_a", quantity: 1 },
+            { itemId: "ordinary_ore_b", quantity: 1 },
+          ],
+        ],
+        tools: [],
+      },
+      {
+        activity: "fletching",
+        stableId: "ordinary_arrow",
+        outputItemId: "ordinary_arrow",
+        outputQuantity: 10,
+        levelRequired: 1,
+        inputAlternatives: [
+          [
+            { itemId: "ordinary_bar", quantity: 1 },
+            { itemId: "ordinary_logs", quantity: 1 },
+          ],
+        ],
+        tools: ["hammer"],
+      },
+    ];
+    const goal: AgentInstance["goal"] = {
+      type: "banking",
+      description: "Check exact combat supplies",
+      bankPurpose: "combat_supply",
+    };
+    const bankItem = (itemId: string, quantity: number, slot: number) => ({
+      itemId,
+      quantity,
+      slot,
+      tabIndex: 0,
+    });
+
+    expect(
+      buildOrdinaryBankStagePlan(
+        makeStageInstance({
+          combatSpecialization: "ranged",
+          rangedLevel: 1,
+          goal,
+          equipment: { weapon: { itemId: "ordinary_bow" } },
+        }),
+        [
+          bankItem("ordinary_sword", 1, 0),
+          bankItem("ordinary_bar", 2, 1),
+          bankItem("ordinary_logs", 5, 2),
+          bankItem("ordinary_ore_a", 9, 3),
+          bankItem("ordinary_ore_b", 3, 4),
+          bankItem("hammer", 1, 5),
+        ],
+        catalog,
+        recipes,
+      ),
+    ).toEqual({
+      activity: "combat_supply_precursors",
+      targetItemId: "ordinary_arrow",
+      actionCount: 5,
+      items: [
+        { itemId: "hammer", quantity: 1 },
+        { itemId: "ordinary_bar", quantity: 2 },
+        { itemId: "ordinary_logs", quantity: 5 },
+        { itemId: "ordinary_ore_a", quantity: 3 },
+        { itemId: "ordinary_ore_b", quantity: 3 },
+      ],
+    });
+
+    expect(
+      buildOrdinaryBankStagePlan(
+        makeStageInstance({
+          combatSpecialization: "ranged",
+          rangedLevel: 1,
+          goal,
+          equipment: {
+            weapon: { itemId: "ordinary_bow" },
+            ammunition: { itemId: "ordinary_arrow", quantity: 20 },
+          },
+        }),
+        [
+          bankItem("ordinary_bar", 2, 0),
+          bankItem("ordinary_logs", 3, 1),
+          bankItem("ordinary_ore_a", 1, 2),
+          bankItem("ordinary_ore_b", 1, 3),
+          bankItem("hammer", 1, 4),
+        ],
+        catalog,
+        recipes,
+      ),
+    ).toEqual({
+      activity: "combat_supply_precursors",
+      targetItemId: "ordinary_arrow",
+      actionCount: 3,
+      items: [
+        { itemId: "hammer", quantity: 1 },
+        { itemId: "ordinary_bar", quantity: 2 },
+        { itemId: "ordinary_logs", quantity: 3 },
+        { itemId: "ordinary_ore_a", quantity: 1 },
+        { itemId: "ordinary_ore_b", quantity: 1 },
+      ],
+    });
+
+    expect(
+      buildOrdinaryBankStagePlan(
+        makeStageInstance({
+          combatSpecialization: "ranged",
+          rangedLevel: 1,
+          goal,
+          equipment: { weapon: { itemId: "ordinary_bow" } },
+        }),
+        [bankItem("ordinary_ore_b", 5, 0), bankItem("ordinary_sword", 1, 1)],
+        catalog,
+        [
+          {
+            activity: "fletching",
+            stableId: "ordinary_alternative_arrow",
+            outputItemId: "ordinary_arrow",
+            outputQuantity: 10,
+            levelRequired: 1,
+            inputAlternatives: [
+              [{ itemId: "ordinary_ore_a", quantity: 1 }],
+              [{ itemId: "ordinary_ore_b", quantity: 1 }],
+            ],
+            tools: [],
+          },
+        ],
+      ),
+    ).toEqual({
+      activity: "combat_supply_precursors",
+      targetItemId: "ordinary_arrow",
+      actionCount: 5,
+      items: [{ itemId: "ordinary_ore_b", quantity: 5 }],
+    });
+
+    expect(
+      buildOrdinaryBankStagePlan(
+        makeStageInstance({
+          combatSpecialization: "ranged",
+          rangedLevel: 1,
+          goal,
+          equipment: { weapon: { itemId: "ordinary_bow" } },
+          inventory: [
+            { slot: 0, itemId: "ordinary_bar", quantity: 2 },
+            { slot: 1, itemId: "ordinary_logs", quantity: 5 },
+            { slot: 2, itemId: "ordinary_ore_a", quantity: 3 },
+            { slot: 3, itemId: "ordinary_ore_b", quantity: 3 },
+            { slot: 4, itemId: "hammer", quantity: 1 },
+          ],
+        }),
+        [bankItem("ordinary_sword", 1, 0)],
+        catalog,
+        recipes,
+      ),
+    ).toBeNull();
+  });
+
+  it("stages banked gathering tools for unresolved leaves in the exact combat-supply graph", () => {
+    (
+      globalThis as { EXTERNAL_RESOURCES?: Map<string, unknown> }
+    ).EXTERNAL_RESOURCES = new Map([
+      [
+        "ordinary_copper_rock",
+        {
+          id: "ordinary_copper_rock",
+          harvestSkill: "mining",
+          toolRequired: "pickaxe",
+          levelRequired: 1,
+          harvestYield: [{ itemId: "ordinary_ore_a" }],
+        },
+      ],
+      [
+        "ordinary_tin_rock",
+        {
+          id: "ordinary_tin_rock",
+          harvestSkill: "mining",
+          toolRequired: "pickaxe",
+          levelRequired: 1,
+          harvestYield: [{ itemId: "ordinary_ore_b" }],
+        },
+      ],
+      [
+        "ordinary_tree",
+        {
+          id: "ordinary_tree",
+          harvestSkill: "woodcutting",
+          toolRequired: "ordinary_hatchet",
+          levelRequired: 1,
+          harvestYield: [{ itemId: "ordinary_logs" }],
+        },
+      ],
+    ]);
+    const catalog: OrdinaryCombatReadinessCatalog = {
+      ammunitionTarget: 50,
+      magicCastTarget: 20,
+      melee: [],
+      ranged: [
+        {
+          weaponId: "ordinary_bow",
+          ammunitionId: "ordinary_arrow",
+          weaponScore: 8,
+          ammunitionScore: 7,
+          requiredRangedLevel: 1,
+        },
+      ],
+      magic: [],
+    };
+    const recipes: OrdinaryCombatSupplyRecipe[] = [
+      {
+        activity: "smelting",
+        stableId: "ordinary_bar",
+        outputItemId: "ordinary_bar",
+        outputQuantity: 1,
+        levelRequired: 1,
+        inputAlternatives: [
+          [
+            { itemId: "ordinary_ore_a", quantity: 1 },
+            { itemId: "ordinary_ore_b", quantity: 1 },
+          ],
+        ],
+        tools: [],
+      },
+      {
+        activity: "fletching",
+        stableId: "ordinary_arrow",
+        outputItemId: "ordinary_arrow",
+        outputQuantity: 10,
+        levelRequired: 1,
+        inputAlternatives: [
+          [
+            { itemId: "ordinary_bar", quantity: 1 },
+            { itemId: "ordinary_logs", quantity: 1 },
+          ],
+        ],
+        tools: [],
+      },
+    ];
+
+    expect(
+      buildOrdinaryBankStagePlan(
+        makeStageInstance({
+          combatSpecialization: "ranged",
+          rangedLevel: 1,
+          smithingLevel: 1,
+          fletchingLevel: 1,
+          goal: {
+            type: "banking",
+            description: "Check exact combat supplies",
+            bankPurpose: "combat_supply",
+          },
+          equipment: { weapon: { itemId: "ordinary_bow" } },
+        }),
+        [
+          {
+            itemId: "ordinary_hatchet",
+            quantity: 1,
+            slot: 0,
+            tabIndex: 0,
+          },
+          {
+            itemId: "ordinary_pickaxe",
+            quantity: 1,
+            slot: 1,
+            tabIndex: 0,
+          },
+          {
+            itemId: "ordinary_craft_material",
+            quantity: 5,
+            slot: 2,
+            tabIndex: 0,
+          },
+        ],
+        catalog,
+        recipes,
+      ),
+    ).toEqual({
+      activity: "combat_supply_precursors",
+      targetItemId: "ordinary_arrow",
+      actionCount: 5,
+      items: [
+        { itemId: "ordinary_hatchet", quantity: 1 },
+        { itemId: "ordinary_pickaxe", quantity: 1 },
+      ],
+    });
+  });
+
+  it("skips blocked training recipes and stages the exact first source-complete skill detour", () => {
+    (
+      globalThis as { EXTERNAL_RESOURCES?: Map<string, unknown> }
+    ).EXTERNAL_RESOURCES = new Map([
+      [
+        "ordinary_copper_rock",
+        {
+          id: "ordinary_copper_rock",
+          harvestSkill: "mining",
+          toolRequired: "pickaxe",
+          levelRequired: 1,
+          harvestYield: [{ itemId: "ordinary_ore_a" }],
+        },
+      ],
+    ]);
+    const catalog: OrdinaryCombatReadinessCatalog = {
+      ammunitionTarget: 50,
+      magicCastTarget: 20,
+      melee: [],
+      ranged: [
+        {
+          weaponId: "ordinary_bow",
+          ammunitionId: "ordinary_arrow",
+          weaponScore: 8,
+          ammunitionScore: 7,
+          requiredRangedLevel: 1,
+        },
+      ],
+      magic: [],
+    };
+    const recipes: OrdinaryCombatSupplyRecipe[] = [
+      {
+        activity: "fletching",
+        stableId: "blocked_training",
+        outputItemId: "ordinary_craft_output",
+        outputQuantity: 1,
+        levelRequired: 1,
+        inputAlternatives: [[{ itemId: "unobtainable_input", quantity: 1 }]],
+        tools: [],
+      },
+      {
+        activity: "fletching",
+        stableId: "source_complete_training",
+        outputItemId: "ordinary_bar",
+        outputQuantity: 1,
+        levelRequired: 1,
+        inputAlternatives: [[{ itemId: "ordinary_ore_a", quantity: 1 }]],
+        tools: ["ordinary_pickaxe"],
+      },
+      {
+        activity: "fletching",
+        stableId: "locked_arrow",
+        outputItemId: "ordinary_arrow",
+        outputQuantity: 10,
+        levelRequired: 20,
+        inputAlternatives: [
+          [{ itemId: "ordinary_craft_material", quantity: 1 }],
+        ],
+        tools: [],
+      },
+    ];
+
+    expect(
+      buildOrdinaryBankStagePlan(
+        makeStageInstance({
+          combatSpecialization: "ranged",
+          rangedLevel: 1,
+          fletchingLevel: 1,
+          goal: {
+            type: "banking",
+            description: "Stage exact locked-skill training",
+            bankPurpose: "combat_supply",
+          },
+          equipment: { weapon: { itemId: "ordinary_bow" } },
+        }),
+        [
+          {
+            itemId: "ordinary_bar",
+            quantity: 1,
+            slot: 0,
+            tabIndex: 0,
+          },
+          {
+            itemId: "ordinary_pickaxe",
+            quantity: 1,
+            slot: 1,
+            tabIndex: 0,
+          },
+        ],
+        catalog,
+        recipes,
+      ),
+    ).toEqual({
+      activity: "combat_supply_precursors",
+      targetItemId: "ordinary_arrow",
+      actionCount: 5,
+      items: [{ itemId: "ordinary_pickaxe", quantity: 1 }],
+    });
   });
 
   it("can stage every authored single-input cooking and Smithing batch from the production manifests", async () => {
@@ -498,7 +1101,6 @@ describe("ordinary agent banking policy", () => {
       expect(plan).toMatchObject({
         activity: "smelting",
         recipeId: barItemId,
-        actionCount: expect.any(Number),
       });
       if (!plan || !("items" in plan)) continue;
       expect(plan.actionCount).toBeGreaterThanOrEqual(1);
@@ -537,7 +1139,6 @@ describe("ordinary agent banking policy", () => {
       expect(plan).toMatchObject({
         activity: "crafting",
         recipeId: recipe.output,
-        actionCount: expect.any(Number),
       });
       if (!plan || !("items" in plan)) continue;
       expect(plan.actionCount).toBeGreaterThanOrEqual(1);
@@ -577,7 +1178,6 @@ describe("ordinary agent banking policy", () => {
       expect(plan).toMatchObject({
         activity: "fletching",
         recipeId: recipe.recipeId,
-        actionCount: expect.any(Number),
       });
       if (!plan || !("items" in plan)) continue;
       expect(plan.actionCount).toBeGreaterThanOrEqual(1);
@@ -791,6 +1391,7 @@ describe("ordinary agent banking policy", () => {
     });
     instance.bankStageRetryAfter = 0;
     instance.questEntryAcquisition = null;
+    instance.ordinaryProcessingAcquisition = null;
     instance.survivalFoodAcquisition = null;
     const result = (
       reason: OrdinaryBankStageExecutionResult["reason"],
@@ -812,6 +1413,7 @@ describe("ordinary agent banking policy", () => {
       questId: "crafting_basics",
       expiresAt: 301_000,
     });
+    expect(instance.ordinaryProcessingAcquisition).toBeNull();
 
     recordOrdinaryBankStageOutcome(
       instance,
@@ -820,12 +1422,129 @@ describe("ordinary agent banking policy", () => {
     );
     expect(instance.bankStageRetryAfter).toBe(32_000);
     expect(instance.questEntryAcquisition).toBeNull();
+    expect(instance.ordinaryProcessingAcquisition).toBeNull();
     expect(instance.survivalFoodAcquisition).toBeNull();
 
     recordOrdinaryBankStageOutcome(instance, result("completed", true), 3_000);
     expect(instance.bankStageRetryAfter).toBe(0);
     expect(instance.questEntryAcquisition).toBeNull();
+    expect(instance.ordinaryProcessingAcquisition).toBeNull();
     expect(instance.survivalFoodAcquisition).toBeNull();
+  });
+
+  it("authorizes one public ordinary-processing baseline only after an exact general bank miss", () => {
+    const instance = makeStageInstance({
+      goal: {
+        type: "banking",
+        description: "Stage an authored processing batch from bank",
+      },
+    });
+    instance.bankStageRetryAfter = 0;
+    instance.questEntryAcquisition = null;
+    instance.ordinaryProcessingAcquisition = null;
+    instance.survivalFoodAcquisition = null;
+    const outcome = (
+      reason: OrdinaryBankStageExecutionResult["reason"],
+      applied = false,
+    ): OrdinaryBankStageExecutionResult => ({
+      settled: true,
+      applied,
+      receipt: null,
+      operationId: "general-processing-operation",
+      retainedItems: [],
+      reconciliationAttempts: 1,
+      plan: null,
+      reason,
+    });
+
+    recordOrdinaryBankStageOutcome(
+      instance,
+      outcome("nothing_to_stage"),
+      10_000,
+    );
+    expect(instance.bankStageRetryAfter).toBe(310_000);
+    expect(instance.ordinaryProcessingAcquisition).toEqual({
+      expiresAt: 310_000,
+    });
+    expect(instance.questEntryAcquisition).toBeNull();
+    expect(instance.survivalFoodAcquisition).toBeNull();
+
+    recordOrdinaryBankStageOutcome(
+      instance,
+      outcome("bank_open_rejected"),
+      11_000,
+    );
+    expect(instance.bankStageRetryAfter).toBe(41_000);
+    expect(instance.ordinaryProcessingAcquisition).toBeNull();
+
+    recordOrdinaryBankStageOutcome(
+      instance,
+      outcome("completed", true),
+      12_000,
+    );
+    expect(instance.bankStageRetryAfter).toBe(0);
+    expect(instance.ordinaryProcessingAcquisition).toBeNull();
+  });
+
+  it("authorizes exact combat self-supply only after a confirmed private-bank miss", () => {
+    const instance = makeStageInstance({
+      goal: {
+        type: "banking",
+        description: "Check exact combat supplies",
+        bankPurpose: "combat_supply",
+      },
+    });
+    instance.bankStageRetryAfter = 0;
+    instance.questEntryAcquisition = null;
+    instance.ordinaryProcessingAcquisition = null;
+    instance.survivalFoodAcquisition = null;
+    const outcome = (
+      reason: OrdinaryBankStageExecutionResult["reason"],
+      applied = false,
+    ): OrdinaryBankStageExecutionResult => ({
+      settled: true,
+      applied,
+      receipt: null,
+      operationId: "combat-supply-operation",
+      retainedItems: [],
+      reconciliationAttempts: 1,
+      plan: applied
+        ? {
+            activity: "combat_supply",
+            itemId: "ordinary_bow",
+            quantity: 1,
+          }
+        : null,
+      reason,
+    });
+
+    recordOrdinaryBankStageOutcome(
+      instance,
+      outcome("nothing_to_stage"),
+      20_000,
+    );
+    expect(instance.bankStageRetryAfter).toBe(320_000);
+    expect(instance.ordinaryProcessingAcquisition).toEqual({
+      expiresAt: 320_000,
+    });
+    expect(instance.questEntryAcquisition).toBeNull();
+    expect(instance.survivalFoodAcquisition).toBeNull();
+
+    recordOrdinaryBankStageOutcome(
+      instance,
+      outcome("bank_open_rejected"),
+      21_000,
+    );
+    expect(instance.bankStageRetryAfter).toBe(51_000);
+    expect(instance.ordinaryProcessingAcquisition).toBeNull();
+
+    recordOrdinaryBankStageOutcome(
+      instance,
+      outcome("completed", true),
+      22_000,
+    );
+    expect(instance.bankStageRetryAfter).toBe(0);
+    expect(instance.ordinaryProcessingAcquisition).toBeNull();
   });
 
   it("authorizes public food recovery only after an exact survival-bank miss", () => {
@@ -867,6 +1586,22 @@ describe("ordinary agent banking policy", () => {
     );
     expect(instance.bankStageRetryAfter).toBe(36_000);
     expect(instance.survivalFoodAcquisition).toBeNull();
+
+    recordOrdinaryBankStageOutcome(
+      instance,
+      {
+        ...outcome("completed"),
+        applied: true,
+        plan: {
+          activity: "survival_supply_tool",
+          itemId: "ordinary_net",
+          quantity: 1,
+        },
+      },
+      7_000,
+    );
+    expect(instance.bankStageRetryAfter).toBe(307_000);
+    expect(instance.survivalFoodAcquisition).toEqual({ expiresAt: 307_000 });
   });
 
   it("stages a conservative fresh consumable unit when the carried head may have only one use", () => {
@@ -1108,6 +1843,83 @@ describe("ordinary agent banking policy", () => {
     ]);
   });
 
+  it("keeps authored artifacts from earlier stages until the active quest completes", () => {
+    const quest: AgentQuestInfo = {
+      questId: "ordinary-forging-path",
+      name: "Ordinary forging path",
+      description: "Gather two ores and forge a weapon",
+      difficulty: "novice",
+      status: "in_progress",
+      canStart: false,
+      requirements: { quests: [], skills: {}, items: ["ordinary_needle"] },
+      startNpc: "ordinary-smith",
+      onStartItems: [{ itemId: "hammer", quantity: 1 }],
+      rewardItems: [],
+      stages: [
+        {
+          id: "mine-a",
+          type: "gather",
+          description: "Mine ore A",
+          target: "ordinary_ore_a",
+          count: 4,
+        },
+        {
+          id: "mine-b",
+          type: "gather",
+          description: "Mine ore B",
+          target: "ordinary_ore_b",
+          count: 4,
+        },
+        {
+          id: "smelt",
+          type: "interact",
+          description: "Smelt bars",
+          target: "ordinary_bar",
+          count: 4,
+        },
+        {
+          id: "smith",
+          type: "interact",
+          description: "Forge a sword",
+          target: "ordinary_sword",
+          count: 1,
+        },
+      ],
+    };
+    const retained = buildOrdinaryBankRetentionManifest(
+      makeInstance({
+        maxHealth: 0,
+        inventory: [
+          { slot: 0, itemId: "ordinary_ore_a", quantity: 4 },
+          { slot: 1, itemId: "ordinary_ore_b", quantity: 1 },
+          { slot: 2, itemId: "ordinary_bar", quantity: 2 },
+          { slot: 3, itemId: "ordinary_sword", quantity: 2 },
+          { slot: 4, itemId: "ordinary_needle", quantity: 1 },
+          { slot: 5, itemId: "hammer", quantity: 1 },
+          { slot: 6, itemId: "ordinary_craft_material", quantity: 5 },
+        ],
+        questState: [
+          {
+            questId: quest.questId,
+            status: "in_progress",
+            stageTarget: "ordinary_ore_b",
+            stageCount: 4,
+          },
+        ],
+        availableQuests: [quest],
+      }),
+    );
+
+    expect(retained).toEqual([
+      { itemId: "hammer", quantity: 1 },
+      { itemId: "ordinary_bar", quantity: 2 },
+      { itemId: "ordinary_needle", quantity: 1 },
+      { itemId: "ordinary_ore_a", quantity: 4 },
+      { itemId: "ordinary_ore_b", quantity: 1 },
+      { itemId: "ordinary_sword", quantity: 1 },
+    ]);
+  });
+
   it("treats invalid health input as no food reserve instead of emitting an invalid manifest", () => {
     expect(
       buildOrdinaryBankRetentionManifest(makeInstance({ maxHealth: NaN })),
@@ -1134,6 +1946,253 @@ describe("ordinary agent banking policy", () => {
         makeInstance({ weaponId: "ordinary_bow" }),
       ),
     ).toContainEqual({ itemId: "ordinary_arrow", quantity: 40 });
+  });
+
+  it("retains an incomplete specialist kit and one melee recovery weapon", () => {
+    const mage = buildOrdinaryBankRetentionManifest(
+      makeInstance({
+        weaponId: "ordinary_sword",
+        combatSpecialization: "mage",
+      }),
+    );
+    expect(mage).toContainEqual({ itemId: "ordinary_staff", quantity: 1 });
+    expect(mage).toContainEqual({ itemId: "ordinary_air_rune", quantity: 50 });
+    expect(mage).toContainEqual({ itemId: "ordinary_sword", quantity: 1 });
+    expect(mage).not.toContainEqual({ itemId: "ordinary_arrow", quantity: 40 });
+
+    const ranged = buildOrdinaryBankRetentionManifest(
+      makeInstance({
+        weaponId: "ordinary_sword",
+        combatSpecialization: "ranged",
+      }),
+    );
+    expect(ranged).toContainEqual({ itemId: "ordinary_bow", quantity: 1 });
+    expect(ranged).toContainEqual({ itemId: "ordinary_arrow", quantity: 40 });
+    expect(ranged).toContainEqual({ itemId: "ordinary_sword", quantity: 1 });
+    expect(ranged).not.toContainEqual({
+      itemId: "ordinary_air_rune",
+      quantity: 50,
+    });
+  });
+
+  it("retains only the carried quantities consumed by an active exact combat-supply lineage", () => {
+    const catalog: OrdinaryCombatReadinessCatalog = {
+      ammunitionTarget: 50,
+      magicCastTarget: 20,
+      melee: [],
+      ranged: [
+        {
+          weaponId: "ordinary_bow",
+          ammunitionId: "ordinary_arrow",
+          weaponScore: 8,
+          ammunitionScore: 7,
+          requiredRangedLevel: 1,
+        },
+      ],
+      magic: [],
+    };
+    const recipes: OrdinaryCombatSupplyRecipe[] = [
+      {
+        activity: "smelting",
+        stableId: "ordinary_bar",
+        outputItemId: "ordinary_bar",
+        outputQuantity: 1,
+        levelRequired: 1,
+        inputAlternatives: [
+          [
+            { itemId: "ordinary_ore_a", quantity: 1 },
+            { itemId: "ordinary_ore_b", quantity: 1 },
+          ],
+        ],
+        tools: [],
+      },
+      {
+        activity: "fletching",
+        stableId: "ordinary_arrow",
+        outputItemId: "ordinary_arrow",
+        outputQuantity: 10,
+        levelRequired: 1,
+        inputAlternatives: [
+          [
+            { itemId: "ordinary_bar", quantity: 1 },
+            { itemId: "ordinary_logs", quantity: 1 },
+          ],
+        ],
+        tools: ["hammer"],
+      },
+    ];
+    const instance = makeStageInstance({
+      combatSpecialization: "ranged",
+      rangedLevel: 1,
+      goal: {
+        type: "banking",
+        description: "Make room for exact combat supply",
+        bankPurpose: "combat_supply",
+      },
+      equipment: { weapon: { itemId: "ordinary_bow" } },
+      inventory: [
+        { slot: 0, itemId: "ordinary_arrow", quantity: 10 },
+        { slot: 1, itemId: "ordinary_bar", quantity: 2 },
+        { slot: 2, itemId: "ordinary_logs", quantity: 9 },
+        { slot: 3, itemId: "ordinary_ore_a", quantity: 9 },
+        { slot: 4, itemId: "ordinary_ore_b", quantity: 9 },
+        { slot: 5, itemId: "hammer", quantity: 2 },
+        { slot: 6, itemId: "ordinary_craft_material", quantity: 7 },
+      ],
+    });
+
+    expect(
+      buildOrdinaryBankRetentionManifest(instance, {
+        now: 1_000,
+        combatReadinessCatalog: catalog,
+        combatSupplyRecipes: recipes,
+      }),
+    ).toEqual([
+      { itemId: "hammer", quantity: 1 },
+      { itemId: "ordinary_arrow", quantity: 10 },
+      { itemId: "ordinary_bar", quantity: 2 },
+      { itemId: "ordinary_logs", quantity: 4 },
+      { itemId: "ordinary_ore_a", quantity: 2 },
+      { itemId: "ordinary_ore_b", quantity: 2 },
+    ]);
+  });
+
+  it("retains exact carried inputs for a level-locked combat-supply training detour", () => {
+    const catalog: OrdinaryCombatReadinessCatalog = {
+      ammunitionTarget: 50,
+      magicCastTarget: 20,
+      melee: [],
+      ranged: [
+        {
+          weaponId: "ordinary_bow",
+          ammunitionId: "ordinary_arrow",
+          weaponScore: 8,
+          ammunitionScore: 7,
+          requiredRangedLevel: 1,
+        },
+      ],
+      magic: [],
+    };
+    const recipes: OrdinaryCombatSupplyRecipe[] = [
+      {
+        activity: "fletching",
+        stableId: "training_bar",
+        outputItemId: "ordinary_bar",
+        outputQuantity: 1,
+        levelRequired: 1,
+        inputAlternatives: [[{ itemId: "ordinary_ore_a", quantity: 1 }]],
+        tools: ["ordinary_pickaxe"],
+      },
+      {
+        activity: "fletching",
+        stableId: "locked_arrow",
+        outputItemId: "ordinary_arrow",
+        outputQuantity: 10,
+        levelRequired: 20,
+        inputAlternatives: [
+          [{ itemId: "ordinary_craft_material", quantity: 1 }],
+        ],
+        tools: [],
+      },
+    ];
+    const instance = makeStageInstance({
+      combatSpecialization: "ranged",
+      rangedLevel: 1,
+      fletchingLevel: 1,
+      goal: {
+        type: "banking",
+        description: "Retain exact locked-skill training inputs",
+        bankPurpose: "combat_supply",
+      },
+      equipment: { weapon: { itemId: "ordinary_bow" } },
+      inventory: [
+        { slot: 0, itemId: "ordinary_ore_a", quantity: 4 },
+        { slot: 1, itemId: "ordinary_pickaxe", quantity: 1 },
+        { slot: 2, itemId: "ordinary_craft_material", quantity: 6 },
+      ],
+    });
+
+    expect(
+      buildOrdinaryBankRetentionManifest(instance, {
+        combatReadinessCatalog: catalog,
+        combatSupplyRecipes: recipes,
+        combatSupplyPublicSourceItemIds: [],
+      }),
+    ).toEqual([
+      { itemId: "ordinary_ore_a", quantity: 1 },
+      { itemId: "ordinary_pickaxe", quantity: 1 },
+    ]);
+  });
+
+  it("retains an exact combat lineage during bounded public acquisition but releases it after expiry", () => {
+    const catalog: OrdinaryCombatReadinessCatalog = {
+      ammunitionTarget: 50,
+      magicCastTarget: 20,
+      melee: [],
+      ranged: [
+        {
+          weaponId: "ordinary_bow",
+          ammunitionId: "ordinary_arrow",
+          weaponScore: 8,
+          ammunitionScore: 7,
+          requiredRangedLevel: 1,
+        },
+      ],
+      magic: [],
+    };
+    const recipes: OrdinaryCombatSupplyRecipe[] = [
+      {
+        activity: "fletching",
+        stableId: "ordinary_arrow",
+        outputItemId: "ordinary_arrow",
+        outputQuantity: 10,
+        levelRequired: 1,
+        inputAlternatives: [
+          [
+            { itemId: "ordinary_bar", quantity: 1 },
+            { itemId: "ordinary_logs", quantity: 1 },
+          ],
+        ],
+        tools: ["hammer"],
+      },
+    ];
+    const instance = makeStageInstance({
+      combatSpecialization: "ranged",
+      rangedLevel: 1,
+      goal: {
+        type: "provisioning",
+        description: "Building exact combat supply",
+      },
+      equipment: { weapon: { itemId: "ordinary_bow" } },
+      inventory: [
+        { slot: 0, itemId: "ordinary_bar", quantity: 8 },
+        { slot: 1, itemId: "ordinary_logs", quantity: 8 },
+        { slot: 2, itemId: "hammer", quantity: 1 },
+      ],
+    });
+    instance.ordinaryProcessingAcquisition = { expiresAt: 2_000 };
+    const options = {
+      combatReadinessCatalog: catalog,
+      combatSupplyRecipes: recipes,
+    };
+
+    const active = buildOrdinaryBankRetentionManifest(instance, {
+      ...options,
+      now: 1_999,
+    });
+    expect(active).toContainEqual({ itemId: "ordinary_bar", quantity: 5 });
+    expect(active).toContainEqual({ itemId: "ordinary_logs", quantity: 5 });
+
+    const expired = buildOrdinaryBankRetentionManifest(instance, {
+      ...options,
+      now: 2_000,
+    });
+    expect(expired).not.toContainEqual({ itemId: "ordinary_bar", quantity: 5 });
+    expect(expired).not.toContainEqual({
+      itemId: "ordinary_logs",
+      quantity: 5,
+    });
+    expect(expired).toEqual([{ itemId: "hammer", quantity: 1 }]);
   });
 
   it("derives one stable, namespace-separated custody key from the immutable attempt", () => {
@@ -1491,7 +2550,9 @@ describe("ordinary agent banking policy", () => {
     const result = await executeOrdinaryBankDepositSurplus(
       makeInstance({ executeBankDepositAll }),
       "bank-1",
-      null,
+      {
+        attemptId: "35257e8d-eec5-4561-8658-b9a9fef401ee",
+      } as never,
     );
 
     expect(result).toMatchObject({

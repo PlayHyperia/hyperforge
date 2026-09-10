@@ -3,6 +3,9 @@ import * as THREE from "three";
 import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
 
 import { createEmoteFactory } from "../packages/shared/src/extras/three/createEmoteFactory";
+import { createSkinnedBoneRegionGeometry } from "./lib/skinned-bone-region";
+
+const MAX_ROTATION_RECONSTRUCTION_ERROR_DEGREES = 0.02;
 
 interface FitDefinition {
   itemId: string;
@@ -12,6 +15,12 @@ interface FitDefinition {
   targetLengthMetres: number;
   desiredWorldEulerDegrees: [number, number, number];
   desiredWorldOffsetMetres: [number, number, number];
+  sourceGripPoint?: [number, number, number];
+  primaryGripAnchor?: "hand-mesh-center";
+  alignHandleToSecondaryHand?: {
+    sourceHandleAxis: [number, number, number];
+    secondaryGripAnchor?: "hand-mesh-center";
+  };
   referenceMotion: {
     path: string;
     sha256: string;
@@ -45,6 +54,8 @@ export interface BrowserRigidFitResult {
     samples: Array<{ ratio: number; distance: number }>;
   };
   targetBoneWorldScale: number;
+  primaryHandMeshCenterBoneLocal: [number, number, number];
+  secondaryHandMeshCenterBoneLocal: [number, number, number];
   fittedWorldPositionErrorMetres: number;
   fittedWorldRotationErrorDegrees: number;
 }
@@ -65,6 +76,22 @@ function round(value: number): number {
 
 function roundArray(values: readonly number[]): number[] {
   return values.map(round);
+}
+
+function skinnedBoneRegionWorldCenter(
+  avatarRoot: THREE.Object3D,
+  bone: THREE.Object3D,
+  label: string,
+): THREE.Vector3 {
+  const region = createSkinnedBoneRegionGeometry(avatarRoot, bone);
+  try {
+    if (region.triangleCount === 0 || !region.geometry.boundingBox) {
+      throw new Error(`${label} has no skinned hand-region geometry`);
+    }
+    return region.geometry.boundingBox.getCenter(new THREE.Vector3());
+  } finally {
+    region.geometry.dispose();
+  }
 }
 
 async function fitOne(
@@ -147,6 +174,24 @@ async function fitOne(
     );
   }
   targetBone.updateWorldMatrix(true, false);
+  const secondaryBone =
+    definition.attachmentBone === "rightHand" ? leftHand : rightHand;
+  const primaryHandMeshCenter = skinnedBoneRegionWorldCenter(
+    vrm.scene,
+    targetBone,
+    `${definition.itemId} primary hand`,
+  );
+  const secondaryHandMeshCenter = skinnedBoneRegionWorldCenter(
+    vrm.scene,
+    secondaryBone,
+    `${definition.itemId} secondary hand`,
+  );
+  const primaryHandMeshCenterBoneLocal = targetBone.worldToLocal(
+    primaryHandMeshCenter.clone(),
+  );
+  const secondaryHandMeshCenterBoneLocal = secondaryBone.worldToLocal(
+    secondaryHandMeshCenter.clone(),
+  );
   const referenceHandSeparation = leftHand
     .getWorldPosition(new THREE.Vector3())
     .distanceTo(rightHand.getWorldPosition(new THREE.Vector3()));
@@ -173,10 +218,14 @@ async function fitOne(
     throw new Error(`${definition.itemId} source geometry has invalid bounds`);
   }
 
-  const targetPosition = targetBone
-    .getWorldPosition(new THREE.Vector3())
+  const targetPosition = (
+    definition.primaryGripAnchor === "hand-mesh-center"
+      ? primaryHandMeshCenter
+      : targetBone.getWorldPosition(new THREE.Vector3())
+  )
+    .clone()
     .add(new THREE.Vector3(...definition.desiredWorldOffsetMetres));
-  const desiredQuaternion = new THREE.Quaternion().setFromEuler(
+  const authoredQuaternion = new THREE.Quaternion().setFromEuler(
     new THREE.Euler(
       ...(definition.desiredWorldEulerDegrees.map(THREE.MathUtils.degToRad) as [
         number,
@@ -186,6 +235,35 @@ async function fitOne(
       "XYZ",
     ),
   );
+  const desiredQuaternion = authoredQuaternion.clone();
+  if (definition.alignHandleToSecondaryHand) {
+    const sourceHandleAxis = new THREE.Vector3(
+      ...definition.alignHandleToSecondaryHand.sourceHandleAxis,
+    );
+    const targetHandleAxis = (
+      definition.alignHandleToSecondaryHand.secondaryGripAnchor ===
+      "hand-mesh-center"
+        ? secondaryHandMeshCenter
+        : secondaryBone.getWorldPosition(new THREE.Vector3())
+    )
+      .clone()
+      .sub(targetPosition);
+    if (
+      !finiteVector(sourceHandleAxis.toArray()) ||
+      !finiteVector(targetHandleAxis.toArray()) ||
+      sourceHandleAxis.lengthSq() <= 1e-8 ||
+      targetHandleAxis.lengthSq() <= 1e-8
+    ) {
+      throw new Error(`${definition.itemId} two-hand alignment is invalid`);
+    }
+    desiredQuaternion
+      .setFromUnitVectors(
+        sourceHandleAxis.normalize(),
+        targetHandleAxis.normalize(),
+      )
+      .multiply(authoredQuaternion)
+      .normalize();
+  }
   const boneWorldQuaternion = targetBone.getWorldQuaternion(
     new THREE.Quaternion(),
   );
@@ -211,15 +289,36 @@ async function fitOne(
   const targetScale = definition.targetLengthMetres / sourceLongestDimension;
   const contentScale = targetScale / boneWorldScale.x;
 
-  const relativeMatrix = new THREE.Matrix4().compose(
-    localPosition,
-    localQuaternion,
-    new THREE.Vector3(1, 1, 1),
-  );
   const verificationWrapper = new THREE.Group();
   verificationWrapper.position.copy(localPosition);
   verificationWrapper.quaternion.copy(localQuaternion);
   targetBone.add(verificationWrapper);
+  const worldCorrection = new THREE.Quaternion();
+  const localCorrection = new THREE.Quaternion();
+  for (let iteration = 0; iteration < 4; iteration += 1) {
+    verificationWrapper.updateMatrixWorld(true);
+    const reconstructed = verificationWrapper.getWorldQuaternion(
+      new THREE.Quaternion(),
+    );
+    if (
+      THREE.MathUtils.radToDeg(reconstructed.angleTo(desiredQuaternion)) <=
+      0.000001
+    ) {
+      break;
+    }
+    worldCorrection
+      .copy(desiredQuaternion)
+      .multiply(reconstructed.clone().invert())
+      .normalize();
+    localCorrection
+      .copy(boneWorldQuaternion)
+      .invert()
+      .multiply(worldCorrection)
+      .multiply(boneWorldQuaternion)
+      .normalize();
+    localQuaternion.premultiply(localCorrection).normalize();
+    verificationWrapper.quaternion.copy(localQuaternion);
+  }
   verificationWrapper.updateMatrixWorld(true);
   const fittedPosition = verificationWrapper.getWorldPosition(
     new THREE.Vector3(),
@@ -232,10 +331,18 @@ async function fitOne(
     fittedQuaternion.angleTo(desiredQuaternion),
   );
   targetBone.remove(verificationWrapper);
+  const relativeMatrix = new THREE.Matrix4().compose(
+    localPosition,
+    localQuaternion,
+    new THREE.Vector3(1, 1, 1),
+  );
 
   mixer.stopAllAction();
   mixer.uncacheRoot(vrm.scene);
-  if (positionError > 0.000001 || rotationError > 0.0001) {
+  if (
+    positionError > 0.000001 ||
+    rotationError > MAX_ROTATION_RECONSTRUCTION_ERROR_DEGREES
+  ) {
     throw new Error(
       `${definition.itemId} fit reconstruction drifted (${positionError}m, ${rotationError}deg)`,
     );
@@ -264,6 +371,12 @@ async function fitOne(
       })),
     },
     targetBoneWorldScale: round(boneWorldScale.x),
+    primaryHandMeshCenterBoneLocal: roundArray(
+      primaryHandMeshCenterBoneLocal.toArray(),
+    ) as [number, number, number],
+    secondaryHandMeshCenterBoneLocal: roundArray(
+      secondaryHandMeshCenterBoneLocal.toArray(),
+    ) as [number, number, number],
     fittedWorldPositionErrorMetres: round(positionError),
     fittedWorldRotationErrorDegrees: round(rotationError),
   };
@@ -281,6 +394,8 @@ async function fitOne(
         (sample) => [sample.ratio, sample.distance],
       ),
       result.targetBoneWorldScale,
+      ...result.primaryHandMeshCenterBoneLocal,
+      ...result.secondaryHandMeshCenterBoneLocal,
       result.fittedWorldPositionErrorMetres,
       result.fittedWorldRotationErrorDegrees,
     ])

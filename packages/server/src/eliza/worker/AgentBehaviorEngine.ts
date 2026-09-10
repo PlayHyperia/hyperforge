@@ -35,6 +35,12 @@ import {
   getProcessingActivitySkill,
   type OrdinaryQuestEntrySkillTarget,
 } from "../ordinaryAgentQuestProgression.js";
+import {
+  getOrdinaryCombatSupplyNeed,
+  selectOrdinaryCombatReadiness,
+  type OrdinaryCombatReadinessSelection,
+} from "../ordinaryCombatReadinessSelection.js";
+import { orderOrdinarySupplyAlternatives } from "../ordinarySupplyAlternativeSelection.js";
 
 /** Local item database — populated from main thread at init */
 const ITEMS = new Map<string, WorkerItemData>();
@@ -52,7 +58,12 @@ const SMELTING_RECIPES = new Map<
 >();
 const SMITHING_RECIPES = new Map<
   string,
-  { barItemId: string; barsRequired: number; levelRequired: number }
+  {
+    barItemId: string;
+    barsRequired: number;
+    levelRequired: number;
+    outputQuantity: number;
+  }
 >();
 const FIREMAKING_RECIPES = new Map<string, { levelRequired: number }>();
 const CRAFTING_RECIPES = new Map<
@@ -92,6 +103,7 @@ const STORE_SUPPLIERS = new Map<
     category: string;
   }>
 >();
+let COMBAT_READINESS: WorkerProcessingRecipeSnapshot["combatReadiness"];
 
 function getItem(itemId: string): WorkerItemData | null {
   return ITEMS.get(itemId) || null;
@@ -122,6 +134,7 @@ export function initializeItems(
   GATHERING_BY_OUTPUT.clear();
   GUARANTEED_MOB_TYPES_BY_DROP.clear();
   STORE_SUPPLIERS.clear();
+  COMBAT_READINESS = processingRecipes?.combatReadiness;
   for (const [id, item] of itemsData) {
     ITEMS.set(id, item);
     if (item.cooking) {
@@ -239,6 +252,24 @@ function processOneAgent(input: AgentTickInput): AgentTickOutput {
     };
   }
 
+  const combatReadinessAction = pickCombatReadinessAction(input);
+  if (combatReadinessAction) {
+    return {
+      characterId: input.characterId,
+      behaviorEpoch: input.behaviorEpoch,
+      action: combatReadinessAction,
+      updatedState: {
+        goal: state.goal,
+        questsAccepted: state.questsAccepted,
+        currentTargetId: state.currentTargetId,
+        lastGatherTargetId: state.lastGatherTargetId,
+        lastGatherQueuedAt: state.lastGatherQueuedAt,
+        lastCombatChatAt: state.lastCombatChatAt,
+      },
+      chatMessage,
+    };
+  }
+
   const equipmentAction = pickEquipmentAction(input);
   if (equipmentAction) {
     return {
@@ -302,6 +333,24 @@ function processOneAgent(input: AgentTickInput): AgentTickOutput {
       characterId: input.characterId,
       behaviorEpoch: input.behaviorEpoch,
       action: survivalSelfSupplyAction,
+      updatedState: {
+        goal: state.goal,
+        questsAccepted: state.questsAccepted,
+        currentTargetId: state.currentTargetId,
+        lastGatherTargetId: state.lastGatherTargetId,
+        lastGatherQueuedAt: state.lastGatherQueuedAt,
+        lastCombatChatAt: state.lastCombatChatAt,
+      },
+      chatMessage,
+    };
+  }
+
+  const combatSupplyBankAction = pickCombatSupplyBankAction(input, state);
+  if (combatSupplyBankAction) {
+    return {
+      characterId: input.characterId,
+      behaviorEpoch: input.behaviorEpoch,
+      action: combatSupplyBankAction,
       updatedState: {
         goal: state.goal,
         questsAccepted: state.questsAccepted,
@@ -600,6 +649,27 @@ function pickSurvivalFoodSelfSupplyAction(
     return { type: "idle" };
   }
 
+  // A failed cook can consume the final free slot with burnt output. Make
+  // room through the normal private-bank deposit policy before requesting
+  // another resource; otherwise a full inventory can strand food recovery
+  // indefinitely even though the agent is healthy and already owns its tool.
+  if (input.inventoryItems.length >= INVENTORY_CONSTANTS.MAX_INVENTORY_SLOTS) {
+    const bank = findNearestStation(input, position, "bank");
+    if (!bank) return { type: "idle" };
+    state.goal = {
+      type: "banking",
+      description: "Making room for authored survival-food recovery",
+      bankPurpose: "survival_food",
+    };
+    return isStationInInteractionRange(position, bank)
+      ? { type: "bankDepositAll", bankId: bank.entityId }
+      : {
+          type: "move",
+          target: getStationApproachTarget(position, bank),
+          runMode: true,
+        };
+  }
+
   const candidates = [...COOKING_RECIPES.entries()]
     .flatMap(([rawItemId, cooking]) => {
       const cookedHealAmount = Number(
@@ -784,6 +854,63 @@ function pickSurvivalFoodSelfSupplyAction(
   return { type: "gather", targetId: distant.entityId };
 }
 
+function getCurrentCombatSupplyNeed(input: AgentTickInput) {
+  const catalog = COMBAT_READINESS;
+  const readiness = selectCombatReadiness(input);
+  return catalog && readiness
+    ? getOrdinaryCombatSupplyNeed(catalog, readiness, (itemId) =>
+        getOwnedItemQuantity(input, itemId),
+      )
+    : null;
+}
+
+/**
+ * A loaded private bank is the first authority for a missing competitive
+ * supply. The worker sees only public readiness and emits one purpose bit;
+ * the main process independently re-derives the allowed target before it may
+ * inspect or move private custody.
+ */
+function requiresCombatSupplyBankCheck(input: AgentTickInput): boolean {
+  return (
+    !input.gameState.inCombat &&
+    !input.ordinaryProcessingAcquisitionAuthorized &&
+    getCurrentCombatSupplyNeed(input) !== null &&
+    input.stationPositions.some((station) => station.stationType === "bank")
+  );
+}
+
+function pickCombatSupplyBankAction(
+  input: AgentTickInput,
+  state: AgentState,
+): EmbeddedBehaviorAction | null {
+  // A startable or active authored quest is itself productive preparation.
+  // Survival and immediately usable equipment are handled above this point;
+  // an optional competitive-supply bank check must not replace the quest goal
+  // every tick and permanently starve gathering, processing, or forging work.
+  if (state.goal?.type === "questing") return null;
+  if (!requiresCombatSupplyBankCheck(input)) return null;
+  state.goal = {
+    type: "banking",
+    description: "Checking private bank for exact combat readiness",
+    bankPurpose: "combat_supply",
+  };
+  if (Date.now() < input.bankStageRetryAfter) return { type: "idle" };
+  const position = input.gameState.position;
+  if (!position) return { type: "idle" };
+  const bank = findNearestStation(input, position, "bank");
+  if (!bank) return { type: "idle" };
+  if (!isStationInInteractionRange(position, bank)) {
+    return {
+      type: "move",
+      target: getStationApproachTarget(position, bank),
+      runMode: true,
+    };
+  }
+  return input.inventoryItems.length >= 15
+    ? { type: "bankDepositAll", bankId: bank.entityId }
+    : { type: "bankWithdraw", bankId: bank.entityId };
+}
+
 function manageShopping(
   input: AgentTickInput,
   state: AgentState,
@@ -881,17 +1008,65 @@ function manageShopping(
       }
     | undefined;
 
-  // Priority 1: Acquire a weapon if unarmed.
-  if (
-    !equipped.weapon &&
-    !inventory.some((i) => {
-      const item = getItem(i.itemId);
+  // Priority 1: establish a self-contained broadcast-certified fallback
+  // before saving for a more expensive ranged or magic specialization. This
+  // bounds first-duel readiness without replacing the agent's authored combat
+  // identity: once the fallback exists, Priority 5 resumes specialization.
+  // The generated readiness catalog is the certification boundary, so a
+  // cheaper unsupported store weapon can never satisfy this stage.
+  const selectedCombatReadiness = selectCombatReadiness(input);
+  const ordinaryAcquisitionStep = getOrdinaryProcessingAcquisitionStep(input);
+  const ordinarySelfSupplyTargetId = ordinaryAcquisitionStep?.targetItemId;
+  const readinessCatalog = COMBAT_READINESS;
+  const eligibleCertifiedWeaponIds = new Set([
+    ...(readinessCatalog?.melee ?? [])
+      .filter(
+        (candidate) =>
+          candidate.requiredAttackLevel <= getSkillLevel(input, "attack"),
+      )
+      .map((candidate) => candidate.weaponId),
+    ...(readinessCatalog?.ranged ?? [])
+      .filter(
+        (candidate) =>
+          candidate.requiredRangedLevel <= getSkillLevel(input, "ranged"),
+      )
+      .map((candidate) => candidate.weaponId),
+    ...(readinessCatalog?.magic ?? [])
+      .filter(
+        (candidate) =>
+          candidate.requiredMagicLevel <= getSkillLevel(input, "magic"),
+      )
+      .map((candidate) => candidate.weaponId),
+  ]);
+  const ownsEligibleCertifiedWeapon = [...eligibleCertifiedWeaponIds].some(
+    (itemId) => getOwnedItemQuantity(input, itemId) > 0,
+  );
+  const ownsAnyWeapon =
+    Boolean(equipped.weapon) ||
+    inventory.some((entry) => {
+      const item = getItem(entry.itemId);
       return item?.equipSlot === "weapon" || item?.equipSlot === "2h";
-    })
+    });
+  const selfSupplyingSelectedWeapon =
+    selectedCombatReadiness !== null &&
+    ordinarySelfSupplyTargetId === selectedCombatReadiness.loadout.weaponId;
+  if (
+    !selfSupplyingSelectedWeapon &&
+    (readinessCatalog ? !ownsEligibleCertifiedWeapon : !ownsAnyWeapon)
   ) {
+    const eligibleFallbackIds = new Set(
+      (readinessCatalog?.melee ?? [])
+        .filter(
+          (candidate) =>
+            candidate.requiredAttackLevel <= getSkillLevel(input, "attack"),
+        )
+        .map((candidate) => candidate.weaponId),
+    );
     const basicWeapon = findCheapestLoadedCatalogItem(
       (item, catalog) =>
-        catalog.category === "weapons" &&
+        (readinessCatalog
+          ? eligibleFallbackIds.has(item.id)
+          : catalog.category === "weapons") &&
         item.type === "weapon" &&
         (item.equipSlot === "weapon" || item.equipSlot === "2h") &&
         String(item.attackType ?? "").toLowerCase() === "melee" &&
@@ -1153,6 +1328,163 @@ function manageShopping(
     }
   }
 
+  // Priority 5: after an exact general processing-bank miss, source the next
+  // specialization-relevant baseline dependency. Gatherable or guaranteed
+  // mob-drop materials stay gameplay work; stores supply only a missing exact
+  // tool or a store-only leaf.
+  if (!need && input.ordinaryProcessingAcquisitionAuthorized) {
+    const dependency =
+      ordinaryAcquisitionStep?.kind === "dependency"
+        ? ordinaryAcquisitionStep.dependency
+        : null;
+    if (dependency) {
+      const gatheringRequirements = getEligibleGatheringRequirements(
+        input,
+        dependency.itemId,
+      );
+      if (dependency.role === "material" && gatheringRequirements.length > 0) {
+        if (
+          !gatheringRequirements.some((requirement) =>
+            hasCompatibleGatheringTool(input, requirement),
+          )
+        ) {
+          const tool = gatheringRequirements
+            .map((requirement) => {
+              if (!requirement.toolRequired) return null;
+              if (requirement.harvestSkill === "fishing") {
+                const storeId = findLoadedSupplier(requirement.toolRequired);
+                const supplier = (
+                  STORE_SUPPLIERS.get(requirement.toolRequired) ?? []
+                ).find((entry) => entry.storeId === storeId);
+                return storeId && supplier
+                  ? {
+                      storeId,
+                      itemId: requirement.toolRequired,
+                      price: supplier.price,
+                    }
+                  : null;
+              }
+              return findCheapestLoadedCatalogItem(
+                (item, catalog) =>
+                  catalog.category === "tools" &&
+                  item.tool?.skill === requirement.harvestSkill,
+              );
+            })
+            .filter(
+              (
+                candidate,
+              ): candidate is {
+                storeId: string;
+                itemId: string;
+                price: number;
+              } => candidate !== null,
+            )
+            .sort(
+              (left, right) =>
+                left.price - right.price ||
+                left.itemId.localeCompare(right.itemId) ||
+                left.storeId.localeCompare(right.storeId),
+            )[0];
+          if (tool) {
+            need = {
+              storeId: tool.storeId,
+              itemId: tool.itemId,
+              quantity: 1,
+              reason: `Acquire an authored ${dependency.activity} gathering tool`,
+            };
+          }
+        }
+      } else if (
+        dependency.role !== "material" ||
+        (GUARANTEED_MOB_TYPES_BY_DROP.get(dependency.itemId)?.length ?? 0) === 0
+      ) {
+        const storeId = findLoadedSupplier(dependency.itemId);
+        if (storeId) {
+          need = {
+            storeId,
+            itemId: dependency.itemId,
+            quantity: dependency.quantity,
+            reason: dependency.reason,
+          };
+        }
+      }
+    }
+  }
+
+  // Priority 6: build the agent's stable combat identity only from exact
+  // public catalog combinations. The chosen weapon must also have a frozen
+  // broadcast fit; ranged or magic gear is never equipped until its complete
+  // authored ammunition/rune reserve exists.
+  if (!need && goal?.type !== "questing") {
+    const readiness = selectedCombatReadiness;
+    if (readiness) {
+      const missingWeapon =
+        getOwnedItemQuantity(input, readiness.loadout.weaponId) < 1;
+      if (missingWeapon) {
+        if (ordinarySelfSupplyTargetId !== readiness.loadout.weaponId) {
+          const storeId = findLoadedSupplier(readiness.loadout.weaponId);
+          if (storeId) {
+            need = {
+              storeId,
+              itemId: readiness.loadout.weaponId,
+              quantity: 1,
+              reason: `Acquire authored ${readiness.role} weapon`,
+            };
+          }
+        }
+      } else if (readiness.role === "ranged") {
+        const missing = Math.max(
+          0,
+          (COMBAT_READINESS?.ammunitionTarget ?? 0) -
+            getOwnedItemQuantity(input, readiness.loadout.ammunitionId),
+        );
+        const storeId = findLoadedSupplier(readiness.loadout.ammunitionId);
+        if (
+          missing > 0 &&
+          storeId &&
+          ordinarySelfSupplyTargetId !== readiness.loadout.ammunitionId
+        ) {
+          need = {
+            storeId,
+            itemId: readiness.loadout.ammunitionId,
+            quantity: missing,
+            reason: "Acquire an authored ranged-combat reserve",
+          };
+        }
+      } else if (readiness.role === "mage") {
+        const missingRune = readiness.loadout.runes
+          .filter(
+            (rune) => !readiness.loadout.providedRuneIds.includes(rune.itemId),
+          )
+          .map((rune) => ({
+            itemId: rune.itemId,
+            quantity: Math.max(
+              0,
+              rune.quantityPerCast * (COMBAT_READINESS?.magicCastTarget ?? 0) -
+                getOwnedItemQuantity(input, rune.itemId),
+            ),
+          }))
+          .filter((rune) => rune.quantity > 0)
+          .sort((left, right) => left.itemId.localeCompare(right.itemId))[0];
+        const storeId = missingRune
+          ? findLoadedSupplier(missingRune.itemId)
+          : null;
+        if (
+          missingRune &&
+          storeId &&
+          ordinarySelfSupplyTargetId !== missingRune.itemId
+        ) {
+          need = {
+            storeId,
+            itemId: missingRune.itemId,
+            quantity: missingRune.quantity,
+            reason: "Acquire an authored magic-combat reserve",
+          };
+        }
+      }
+    }
+  }
+
   // A carried, executable Smithing recipe is not actually executable without
   // the authoritative loose-inventory hammer required by SmithingSystem.
   if (
@@ -1260,6 +1592,397 @@ type QuestEntryTrainingDependency = {
   role: "material" | "tool" | "consumable";
   reason: string;
 };
+
+type OrdinaryProcessingAcquisitionDependency = {
+  activity: "smelting" | "smithing" | "fletching" | "runecrafting";
+  stableId: string;
+  itemId: string;
+  quantity: number;
+  role: "material" | "tool";
+  reason: string;
+};
+
+type OrdinaryProcessingSupplyRecipe = {
+  activity: OrdinaryProcessingAcquisitionDependency["activity"];
+  stableId: string;
+  outputItemId: string;
+  outputQuantity: number;
+  skill: "smithing" | "fletching" | "runecrafting";
+  levelRequired: number;
+  inputAlternatives: Array<Array<{ itemId: string; quantity: number }>>;
+  tools: string[];
+  action: EmbeddedBehaviorAction;
+  stationType: ReadyProcessingCandidate["stationType"];
+  stationNameToken?: string;
+};
+
+type OrdinaryProcessingSupplyTarget = {
+  itemId: string;
+  quantity: number;
+  purpose: string;
+};
+
+type OrdinaryProcessingAcquisitionStep =
+  | {
+      kind: "dependency";
+      targetItemId: string;
+      dependency: OrdinaryProcessingAcquisitionDependency;
+    }
+  | {
+      kind: "processing";
+      targetItemId: string;
+      candidate: ReadyProcessingCandidate;
+    };
+
+type OrdinaryProcessingSupplyResolution =
+  | { status: "complete" }
+  | { status: "blocked" }
+  | { status: "step"; step: OrdinaryProcessingAcquisitionStep };
+
+const ORDINARY_PROCESSING_ACQUISITION_BATCH_SIZE = 5;
+
+function getOrdinaryProcessingSupplyRecipes(): OrdinaryProcessingSupplyRecipe[] {
+  return [
+    ...[...SMELTING_RECIPES.entries()].map(([barItemId, recipe]) => ({
+      activity: "smelting" as const,
+      stableId: barItemId,
+      outputItemId: barItemId,
+      outputQuantity: 1,
+      skill: "smithing" as const,
+      levelRequired: recipe.levelRequired,
+      inputAlternatives: [recipe.inputs],
+      tools: [],
+      action: { type: "smelt", recipe: barItemId } as const,
+      stationType: "furnace" as const,
+    })),
+    ...[...SMITHING_RECIPES.entries()].map(([outputItemId, recipe]) => ({
+      activity: "smithing" as const,
+      stableId: outputItemId,
+      outputItemId,
+      outputQuantity: recipe.outputQuantity,
+      skill: "smithing" as const,
+      levelRequired: recipe.levelRequired,
+      inputAlternatives: [
+        [{ itemId: recipe.barItemId, quantity: recipe.barsRequired }],
+      ],
+      tools: [SMITHING_CONSTANTS.HAMMER_ITEM_ID],
+      action: { type: "smith", recipe: outputItemId } as const,
+      stationType: "anvil" as const,
+    })),
+    ...[...FLETCHING_RECIPES.values()].map((recipe) => ({
+      activity: "fletching" as const,
+      stableId: recipe.recipeId,
+      outputItemId: recipe.outputItemId,
+      outputQuantity: recipe.outputQuantity,
+      skill: "fletching" as const,
+      levelRequired: recipe.levelRequired,
+      inputAlternatives: [recipe.inputs],
+      tools: recipe.tools,
+      action: {
+        type: "fletch",
+        recipeId: recipe.recipeId,
+        quantity: 1,
+      } as const,
+      stationType: null,
+    })),
+    ...[...RUNECRAFTING_RECIPES.values()].map((recipe) => ({
+      activity: "runecrafting" as const,
+      stableId: recipe.runeType,
+      outputItemId: recipe.runeItemId,
+      // The authoritative system may award a level-derived multiplier. One is
+      // the conservative guaranteed output used for planning.
+      outputQuantity: 1,
+      skill: "runecrafting" as const,
+      levelRequired: recipe.levelRequired,
+      inputAlternatives: recipe.essenceItemIds.map((itemId) => [
+        { itemId, quantity: 1 },
+      ]),
+      tools: [],
+      action: { type: "runecraft", runeType: recipe.runeType } as const,
+      stationType: "runecrafting" as const,
+      stationNameToken: recipe.runeType,
+    })),
+  ].sort(
+    (left, right) =>
+      left.levelRequired - right.levelRequired ||
+      left.activity.localeCompare(right.activity) ||
+      left.stableId.localeCompare(right.stableId),
+  );
+}
+
+function hasOrdinaryPublicSource(
+  input: AgentTickInput,
+  itemId: string,
+): boolean {
+  return (
+    getEligibleGatheringRequirements(input, itemId).length > 0 ||
+    (GUARANTEED_MOB_TYPES_BY_DROP.get(itemId)?.length ?? 0) > 0 ||
+    (STORE_SUPPLIERS.get(itemId)?.length ?? 0) > 0
+  );
+}
+
+/**
+ * Bind ordinary self-supply to the exact combat setup already selected from
+ * the public launch catalog. A store-only weapon remains a store purchase;
+ * only an authored processing output can fence that purchase.
+ */
+function getOrdinaryCombatSupplyTarget(
+  input: AgentTickInput,
+  recipes: OrdinaryProcessingSupplyRecipe[],
+): OrdinaryProcessingSupplyTarget | null {
+  const readiness = selectCombatReadiness(input);
+  if (!readiness) return null;
+  const need = COMBAT_READINESS
+    ? getOrdinaryCombatSupplyNeed(COMBAT_READINESS, readiness, (itemId) =>
+        getOwnedItemQuantity(input, itemId),
+      )
+    : null;
+  if (!need) return null;
+  const hasRecipe = (itemId: string): boolean =>
+    recipes.some((recipe) => recipe.outputItemId === itemId);
+  return hasRecipe(need.itemId)
+    ? {
+        itemId: need.itemId,
+        quantity: need.targetQuantity,
+        purpose: need.purpose,
+      }
+    : null;
+}
+
+function requiresOrdinaryCombatReadinessStoreFallback(
+  input: AgentTickInput,
+  recipes: OrdinaryProcessingSupplyRecipe[],
+): boolean {
+  const readiness = selectCombatReadiness(input);
+  if (!readiness) return false;
+  const hasRecipe = (itemId: string): boolean =>
+    recipes.some((recipe) => recipe.outputItemId === itemId);
+  if (getOwnedItemQuantity(input, readiness.loadout.weaponId) < 1) {
+    return !hasRecipe(readiness.loadout.weaponId);
+  }
+  if (readiness.role === "melee") return false;
+  if (readiness.role === "ranged") {
+    return (
+      getOwnedItemQuantity(input, readiness.loadout.ammunitionId) <
+        (COMBAT_READINESS?.ammunitionTarget ?? Number.POSITIVE_INFINITY) &&
+      !hasRecipe(readiness.loadout.ammunitionId)
+    );
+  }
+  return readiness.loadout.runes.some(
+    (rune) =>
+      !readiness.loadout.providedRuneIds.includes(rune.itemId) &&
+      getOwnedItemQuantity(input, rune.itemId) <
+        rune.quantityPerCast *
+          (COMBAT_READINESS?.magicCastTarget ?? Number.POSITIVE_INFINITY) &&
+      !hasRecipe(rune.itemId),
+  );
+}
+
+function getOrdinaryProcessingBaselineRecipe(
+  input: AgentTickInput,
+  recipes: OrdinaryProcessingSupplyRecipe[],
+): OrdinaryProcessingSupplyRecipe | null {
+  const expectedActivity =
+    input.combatSpecialization === "melee"
+      ? "smelting"
+      : input.combatSpecialization === "ranged"
+        ? "fletching"
+        : "runecrafting";
+  return (
+    recipes
+      .filter(
+        (recipe) =>
+          recipe.activity === expectedActivity &&
+          recipe.levelRequired <= getSkillLevel(input, recipe.skill) &&
+          recipe.tools.every(
+            (itemId) =>
+              hasOwnedItem(input, itemId) ||
+              hasOrdinaryPublicSource(input, itemId),
+          ) &&
+          recipe.inputAlternatives.some((alternative) =>
+            alternative.every(
+              ({ itemId, quantity }) =>
+                getInventoryQuantity(input.inventoryItems, itemId) >=
+                  quantity * ORDINARY_PROCESSING_ACQUISITION_BATCH_SIZE ||
+                hasOrdinaryPublicSource(input, itemId),
+            ),
+          ),
+      )
+      .sort(
+        (left, right) =>
+          left.levelRequired - right.levelRequired ||
+          left.stableId.localeCompare(right.stableId),
+      )[0] ?? null
+  );
+}
+
+function resolveOrdinaryProcessingSupplyItem(
+  input: AgentTickInput,
+  recipes: OrdinaryProcessingSupplyRecipe[],
+  target: OrdinaryProcessingSupplyTarget,
+  itemId: string,
+  quantity: number,
+  path: ReadonlySet<string>,
+  role: OrdinaryProcessingAcquisitionDependency["role"] = "material",
+): OrdinaryProcessingSupplyResolution {
+  const carriedQuantity = getInventoryQuantity(input.inventoryItems, itemId);
+  if (carriedQuantity >= quantity) return { status: "complete" };
+  if (path.has(itemId)) return { status: "blocked" };
+  const nextPath = new Set(path).add(itemId);
+  const outputRecipes = recipes.filter(
+    (recipe) => recipe.outputItemId === itemId,
+  );
+  const legalRecipes = outputRecipes.filter(
+    (recipe) => recipe.levelRequired <= getSkillLevel(input, recipe.skill),
+  );
+
+  for (const recipe of legalRecipes) {
+    for (const alternative of orderOrdinarySupplyAlternatives(
+      recipe.inputAlternatives,
+      (candidateItemId) =>
+        getInventoryQuantity(input.inventoryItems, candidateItemId),
+    )) {
+      let blockedAlternative = false;
+      for (const requirement of alternative) {
+        const resolution = resolveOrdinaryProcessingSupplyItem(
+          input,
+          recipes,
+          target,
+          requirement.itemId,
+          requirement.quantity,
+          nextPath,
+        );
+        if (resolution.status === "step") return resolution;
+        if (resolution.status === "blocked") {
+          blockedAlternative = true;
+          break;
+        }
+      }
+      if (blockedAlternative) continue;
+
+      let blockedTool = false;
+      for (const toolId of recipe.tools) {
+        if (hasOwnedItem(input, toolId)) continue;
+        const toolResolution = resolveOrdinaryProcessingSupplyItem(
+          input,
+          recipes,
+          target,
+          toolId,
+          1,
+          nextPath,
+          "tool",
+        );
+        if (toolResolution.status === "step") return toolResolution;
+        if (toolResolution.status === "blocked") {
+          blockedTool = true;
+          break;
+        }
+      }
+      if (blockedTool) continue;
+      return {
+        status: "step",
+        step: {
+          kind: "processing",
+          targetItemId: target.itemId,
+          candidate: {
+            activity: recipe.activity,
+            stableId: recipe.stableId,
+            levelRequired: recipe.levelRequired,
+            action: recipe.action,
+            stationType: recipe.stationType,
+            stationNameToken: recipe.stationNameToken,
+          },
+        },
+      };
+    }
+  }
+
+  // If the desired recipe is still skill-locked, train that exact skill with
+  // the first level-legal, source-complete authored recipe. The target grows by
+  // one action each tick, so already-produced training outputs cannot stall the
+  // unlock path or require private bank knowledge.
+  const lockedRecipe = outputRecipes[0];
+  if (lockedRecipe) {
+    const trainingRecipes = recipes.filter(
+      (recipe) =>
+        recipe.skill === lockedRecipe.skill &&
+        recipe.outputItemId !== itemId &&
+        recipe.levelRequired <= getSkillLevel(input, recipe.skill),
+    );
+    for (const trainingRecipe of trainingRecipes) {
+      const resolution = resolveOrdinaryProcessingSupplyItem(
+        input,
+        recipes,
+        target,
+        trainingRecipe.outputItemId,
+        getInventoryQuantity(
+          input.inventoryItems,
+          trainingRecipe.outputItemId,
+        ) + trainingRecipe.outputQuantity,
+        nextPath,
+      );
+      if (resolution.status !== "blocked") return resolution;
+    }
+  }
+
+  if (!hasOrdinaryPublicSource(input, itemId)) return { status: "blocked" };
+  return {
+    status: "step",
+    step: {
+      kind: "dependency",
+      targetItemId: target.itemId,
+      dependency: {
+        activity:
+          legalRecipes[0]?.activity ?? lockedRecipe?.activity ?? "smelting",
+        stableId: legalRecipes[0]?.stableId ?? lockedRecipe?.stableId ?? itemId,
+        itemId,
+        quantity: Math.max(1, quantity - carriedQuantity),
+        role,
+        reason: `Acquire authored ${itemId} for ${target.purpose}`,
+      },
+    },
+  };
+}
+
+/**
+ * Resolve one deterministic public-manifest step after the main process proves
+ * an exact private-bank miss. Combat-useful readiness wins; the prior direct
+ * role baseline remains the fallback once that exact setup is already ready.
+ */
+function getOrdinaryProcessingAcquisitionStep(
+  input: AgentTickInput,
+): OrdinaryProcessingAcquisitionStep | null {
+  if (!input.ordinaryProcessingAcquisitionAuthorized) return null;
+  const recipes = getOrdinaryProcessingSupplyRecipes();
+  if (requiresOrdinaryCombatReadinessStoreFallback(input, recipes)) {
+    return null;
+  }
+  const combatTarget = getOrdinaryCombatSupplyTarget(input, recipes);
+  const baseline = combatTarget
+    ? null
+    : getOrdinaryProcessingBaselineRecipe(input, recipes);
+  const target =
+    combatTarget ??
+    (baseline
+      ? {
+          itemId: baseline.outputItemId,
+          quantity:
+            getInventoryQuantity(input.inventoryItems, baseline.outputItemId) +
+            baseline.outputQuantity,
+          purpose: `${input.combatSpecialization} ${baseline.activity} training`,
+        }
+      : null);
+  if (!target) return null;
+  const resolution = resolveOrdinaryProcessingSupplyItem(
+    input,
+    recipes,
+    target,
+    target.itemId,
+    target.quantity,
+    new Set(),
+  );
+  return resolution.status === "step" ? resolution.step : null;
+}
 
 /**
  * Select a minimum-entry authored recipe for the exact locked skill. This is
@@ -1651,19 +2374,22 @@ function getReadyProcessingCandidates(
   );
 }
 
-function pickReadyProcessingAction(
+function pickReadyProcessingCandidateAction(
   input: AgentTickInput,
   state: AgentState,
+  selected: ReadyProcessingCandidate,
+  description?: string,
 ): EmbeddedBehaviorAction | null {
   const position = input.gameState.position;
-  const selected = getReadyProcessingCandidates(input).find(
-    (candidate) =>
-      !isOrdinaryProcessingActionSuppressed(
-        input.ordinaryProcessingRetrySuppressions,
-        candidate.action,
-      ),
-  );
-  if (!position || !selected) return null;
+  if (
+    !position ||
+    isOrdinaryProcessingActionSuppressed(
+      input.ordinaryProcessingRetrySuppressions,
+      selected.action,
+    )
+  ) {
+    return null;
+  }
 
   const goalType: AgentGoal["type"] =
     selected.activity === "cooking" ||
@@ -1681,9 +2407,11 @@ function pickReadyProcessingAction(
     getProcessingActivitySkill(selected.activity) === trainingTarget.skill;
   state.goal = {
     type: goalType,
-    description: advancesEntrySkill
-      ? `Training ${trainingTarget.skill} for ${trainingTarget.questName} with ${selected.stableId}`
-      : `Processing authored ${selected.activity} recipe ${selected.stableId}`,
+    description:
+      description ??
+      (advancesEntrySkill
+        ? `Training ${trainingTarget.skill} for ${trainingTarget.questName} with ${selected.stableId}`
+        : `Processing authored ${selected.activity} recipe ${selected.stableId}`),
     ...(advancesEntrySkill
       ? {
           questId: trainingTarget.questId,
@@ -1711,6 +2439,22 @@ function pickReadyProcessingAction(
     target: getStationApproachTarget(position, station),
     runMode: true,
   };
+}
+
+function pickReadyProcessingAction(
+  input: AgentTickInput,
+  state: AgentState,
+): EmbeddedBehaviorAction | null {
+  const selected = getReadyProcessingCandidates(input).find(
+    (candidate) =>
+      !isOrdinaryProcessingActionSuppressed(
+        input.ordinaryProcessingRetrySuppressions,
+        candidate.action,
+      ),
+  );
+  return selected
+    ? pickReadyProcessingCandidateAction(input, state, selected)
+    : null;
 }
 
 /**
@@ -1792,11 +2536,30 @@ function pickCraftOrBankAction(
     return { type: "runecraft", runeType: runecrafting.runeType };
   }
 
-  // --- Bank deposit if near a bank and inventory is nearly full ---
-  if (inventory.length >= 24) {
+  // --- Bank deposit when inventory is nearly full ---
+  // This runs before active-quest selection. Preserve quest custody when the
+  // exact current stage can either finish gathering into the remaining slots
+  // or consume/transform carried inputs immediately. Otherwise an agent can
+  // mine every required ore, advance to the furnace stage, and then deposit
+  // those same ores merely because the stage is no longer named `gather`.
+  // A genuinely blocked or undersized inventory still routes to banking.
+  const activeQuest = input.questState.find(
+    (quest) => quest.status === "in_progress",
+  );
+  const openSlots = INVENTORY_CONSTANTS.MAX_INVENTORY_SLOTS - inventory.length;
+  const canAdvanceActiveQuest = activeQuest
+    ? canAdvanceQuestBeforeBanking(input, activeQuest, openSlots)
+    : false;
+  if (inventory.length >= 24 && !canAdvanceActiveQuest) {
     const bank = findNearestStation(input, position, "bank");
-    if (bank && isStationInInteractionRange(position, bank)) {
-      return { type: "bankDepositAll", bankId: bank.entityId };
+    if (bank) {
+      return isStationInInteractionRange(position, bank)
+        ? { type: "bankDepositAll", bankId: bank.entityId }
+        : {
+            type: "move",
+            target: getStationApproachTarget(position, bank),
+            runMode: true,
+          };
     }
   }
 
@@ -1816,6 +2579,31 @@ function pickBankStageAction(
   const position = input.gameState.position;
   if (!position || input.inventoryItems.length >= 15) return null;
   if (getReadyProcessingCandidates(input).length > 0) return null;
+
+  if (state.goal?.type === "questing" && state.goal.questId) {
+    const activeQuest = input.questState.find(
+      (quest) => quest.questId === state.goal?.questId,
+    );
+    // A generic bank probe must not replace accepting or turning in an
+    // authored quest. During an active objective, request private staging only
+    // when a real dependency is missing and cannot already be gathered with
+    // the carried tool.
+    if (!activeQuest || activeQuest.status === "ready_to_complete") return null;
+    const dependency = getQuestDependencyNeed(
+      input,
+      activeQuest.stageType ?? "",
+      activeQuest.stageTarget ?? "",
+    );
+    if (!dependency) return null;
+    if (
+      dependency.role === "material" &&
+      getEligibleGatheringRequirements(input, dependency.itemId).some(
+        (requirement) => hasCompatibleGatheringTool(input, requirement),
+      )
+    ) {
+      return null;
+    }
+  }
   const carriedRawFood = countInventoryItems(input.inventoryItems, (itemId) =>
     COOKING_RECIPES.has(itemId),
   );
@@ -1966,6 +2754,167 @@ function pickQuestEntryAcquisitionAction(
 }
 
 /**
+ * Execute one public-source step for the specialization-relevant ordinary
+ * processing baseline. The private bank contributes only the authorization
+ * bit; recipe, source, tool, entity, and carried quantities are all public or
+ * already owned by the agent.
+ */
+function pickOrdinaryProcessingAcquisitionAction(
+  input: AgentTickInput,
+  state: AgentState,
+): EmbeddedBehaviorAction | null {
+  if (!input.ordinaryProcessingAcquisitionAuthorized) return null;
+  const position = input.gameState.position;
+  if (!position) return { type: "idle" };
+  // Let the ordinary deposit-surplus path run instead of turning a full
+  // inventory into a five-minute acquisition stall.
+  if (input.inventoryItems.length >= 25) return null;
+  const step = getOrdinaryProcessingAcquisitionStep(input);
+  if (!step) return { type: "idle" };
+  if (step.kind === "processing") {
+    return (
+      pickReadyProcessingCandidateAction(
+        input,
+        state,
+        step.candidate,
+        `Building authored ${input.combatSpecialization} supply chain toward ${step.targetItemId}`,
+      ) ?? { type: "idle" }
+    );
+  }
+  const dependency = step.dependency;
+
+  state.goal = {
+    type: "provisioning",
+    description: dependency.reason,
+  };
+  const gatheringRequirements = getEligibleGatheringRequirements(
+    input,
+    dependency.itemId,
+  ).filter((requirement) => hasCompatibleGatheringTool(input, requirement));
+  if (gatheringRequirements.length > 0) {
+    const eligibleResourceIds = new Set(
+      gatheringRequirements.map((requirement) => requirement.resourceId),
+    );
+    const nearby = input.gameState.nearbyEntities
+      .filter(
+        (entity) =>
+          entity.type === "resource" &&
+          typeof entity.resourceId === "string" &&
+          eligibleResourceIds.has(entity.resourceId),
+      )
+      .sort(
+        (left, right) =>
+          left.distance - right.distance || left.id.localeCompare(right.id),
+      )[0];
+    if (nearby) {
+      if (nearby.distance >= 4) {
+        return {
+          type: "move",
+          target: [nearby.position[0], position[1], nearby.position[2]],
+          runMode: false,
+        };
+      }
+      if (
+        state.lastGatherTargetId === nearby.id &&
+        Date.now() - state.lastGatherQueuedAt < 30_000
+      ) {
+        return { type: "idle" };
+      }
+      state.lastGatherTargetId = nearby.id;
+      state.lastGatherQueuedAt = Date.now();
+      return { type: "gather", targetId: nearby.id };
+    }
+
+    const distant = input.worldResources
+      .filter(
+        (resource) =>
+          !resource.depleted && eligibleResourceIds.has(resource.resourceId),
+      )
+      .map((resource) => ({
+        resource,
+        distance: Math.hypot(
+          position[0] - resource.position[0],
+          position[2] - resource.position[2],
+        ),
+      }))
+      .sort(
+        (left, right) =>
+          left.distance - right.distance ||
+          left.resource.resourceId.localeCompare(right.resource.resourceId) ||
+          left.resource.position[0] - right.resource.position[0] ||
+          left.resource.position[2] - right.resource.position[2],
+      )[0]?.resource;
+    if (distant) {
+      if (
+        state.lastGatherTargetId === distant.entityId &&
+        Date.now() - state.lastGatherQueuedAt < 30_000
+      ) {
+        return { type: "idle" };
+      }
+      state.lastGatherTargetId = distant.entityId;
+      state.lastGatherQueuedAt = Date.now();
+      return { type: "gather", targetId: distant.entityId };
+    }
+    return moveTowardResourceArea(input, position, dependency.itemId);
+  }
+
+  const guaranteedMobTypes = new Set(
+    GUARANTEED_MOB_TYPES_BY_DROP.get(dependency.itemId) ?? [],
+  );
+  if (guaranteedMobTypes.size > 0) {
+    if (
+      input.gameState.health / Math.max(1, input.gameState.maxHealth) <=
+      0.4
+    ) {
+      return { type: "idle" };
+    }
+    const nearbyMob = input.gameState.nearbyEntities
+      .filter(
+        (entity) =>
+          entity.type === "mob" &&
+          typeof entity.mobType === "string" &&
+          guaranteedMobTypes.has(entity.mobType) &&
+          (entity.health === undefined || entity.health > 0),
+      )
+      .sort(
+        (left, right) =>
+          left.distance - right.distance || left.id.localeCompare(right.id),
+      )[0];
+    if (nearbyMob) {
+      state.currentTargetId = nearbyMob.id;
+      return { type: "attack", targetId: nearbyMob.id };
+    }
+    const distantMob = input.worldMobs
+      .filter((mob) => guaranteedMobTypes.has(mob.mobType))
+      .map((mob) => ({
+        mob,
+        distance: Math.hypot(
+          position[0] - mob.position[0],
+          position[2] - mob.position[2],
+        ),
+      }))
+      .sort(
+        (left, right) =>
+          left.distance - right.distance ||
+          left.mob.mobType.localeCompare(right.mob.mobType) ||
+          left.mob.position[0] - right.mob.position[0] ||
+          left.mob.position[2] - right.mob.position[2],
+      )[0]?.mob;
+    return distantMob
+      ? {
+          type: "move",
+          target: [distantMob.position[0], position[1], distantMob.position[2]],
+          runMode: true,
+        }
+      : { type: "idle" };
+  }
+
+  // Store-only leaves and missing gathering tools are handled by the earlier
+  // shopping pass. Missing live store identity fails closed here.
+  return { type: "idle" };
+}
+
+/**
  * Earn currency only after the main process reports a definite insufficient-
  * coin rejection. The worker receives one boolean fence and can use only an
  * exact live mob identity with a probability-one authored coin drop.
@@ -2085,6 +3034,81 @@ function pickFoodAction(
 
 // ─── EQUIPMENT MANAGEMENT ────────────────────────────────────────────────
 
+function getOwnedItemQuantity(input: AgentTickInput, itemId: string): number {
+  const carried = input.inventoryItems
+    .filter((entry) => entry.itemId === itemId && entry.quantity > 0)
+    .reduce((total, entry) => total + entry.quantity, 0);
+  const equipped = Object.values(input.gameState.equipment)
+    .filter((entry) => entry.itemId === itemId)
+    .reduce((total, entry) => total + (entry.quantity ?? 1), 0);
+  if (equipped > 0) return carried + equipped;
+  return (
+    carried +
+    Object.values(input.equippedItems).filter(
+      (equippedItemId) => equippedItemId === itemId,
+    ).length
+  );
+}
+
+function selectCombatReadiness(
+  input: AgentTickInput,
+): OrdinaryCombatReadinessSelection | null {
+  const catalog = COMBAT_READINESS;
+  if (!catalog) return null;
+  return selectOrdinaryCombatReadiness(
+    catalog,
+    input.combatSpecialization,
+    (skill) => getSkillLevel(input, skill),
+  );
+}
+
+function hasCompleteCombatReadiness(
+  input: AgentTickInput,
+  readiness: OrdinaryCombatReadinessSelection,
+): boolean {
+  if (getOwnedItemQuantity(input, readiness.loadout.weaponId) < 1) {
+    return false;
+  }
+  if (readiness.role === "melee") return true;
+  if (readiness.role === "ranged") {
+    return (
+      getOwnedItemQuantity(input, readiness.loadout.ammunitionId) >=
+      (COMBAT_READINESS?.ammunitionTarget ?? Number.POSITIVE_INFINITY)
+    );
+  }
+  return readiness.loadout.runes.every(
+    (rune) =>
+      readiness.loadout.providedRuneIds.includes(rune.itemId) ||
+      getOwnedItemQuantity(input, rune.itemId) >=
+        rune.quantityPerCast *
+          (COMBAT_READINESS?.magicCastTarget ?? Number.POSITIVE_INFINITY),
+  );
+}
+
+function pickCombatReadinessAction(
+  input: AgentTickInput,
+): EmbeddedBehaviorAction | null {
+  if (input.gameState.inCombat) return null;
+  const readiness = selectCombatReadiness(input);
+  if (!readiness || !hasCompleteCombatReadiness(input, readiness)) return null;
+  if (input.equippedItems.weapon !== readiness.loadout.weaponId) {
+    return { type: "equip", itemId: readiness.loadout.weaponId };
+  }
+  if (
+    readiness.role === "ranged" &&
+    input.equippedItems.arrows !== readiness.loadout.ammunitionId
+  ) {
+    return { type: "equip", itemId: readiness.loadout.ammunitionId };
+  }
+  if (
+    readiness.role === "mage" &&
+    input.gameState.selectedSpell !== readiness.loadout.spellId
+  ) {
+    return { type: "setAutocast", spellId: readiness.loadout.spellId };
+  }
+  return null;
+}
+
 function pickEquipmentAction(
   input: AgentTickInput,
 ): Extract<EmbeddedBehaviorAction, { type: "equip" }> | null {
@@ -2095,19 +3119,33 @@ function pickEquipmentAction(
 
   // --- WEAPON ---
   const equippedWeaponId = equipped.weapon || null;
+  const specializedReadiness = selectCombatReadiness(input);
+  const preserveSpecializedWeapon =
+    specializedReadiness !== null &&
+    equippedWeaponId === specializedReadiness.loadout.weaponId &&
+    (input.gameState.inCombat ||
+      hasCompleteCombatReadiness(input, specializedReadiness));
   let bestWeapon: { itemId: string; score: number } | null = null;
 
-  for (const slot of inventory) {
-    const itemData = getItem(slot.itemId);
-    if (!itemData) continue;
-    if (itemData.equipSlot !== "weapon" && itemData.equipSlot !== "2h")
-      continue;
+  if (!preserveSpecializedWeapon) {
+    for (const slot of inventory) {
+      const itemData = getItem(slot.itemId);
+      if (!itemData) continue;
+      // Gathering tools can share the weapon equipment slot so players may
+      // wield them explicitly, but they are not ordinary combat candidates.
+      // Auto-equipping one here can displace the selected combat identity
+      // immediately after private-bank preparation, even though gathering
+      // authority already recognizes compatible tools from inventory.
+      if (itemData.type !== "weapon") continue;
+      if (itemData.equipSlot !== "weapon" && itemData.equipSlot !== "2h")
+        continue;
 
-    const bonuses = itemData.bonuses;
-    const score = (bonuses?.attack || 0) + (bonuses?.strength || 0);
+      const bonuses = itemData.bonuses;
+      const score = (bonuses?.attack || 0) + (bonuses?.strength || 0);
 
-    if (!bestWeapon || score > bestWeapon.score) {
-      bestWeapon = { itemId: slot.itemId, score };
+      if (!bestWeapon || score > bestWeapon.score) {
+        bestWeapon = { itemId: slot.itemId, score };
+      }
     }
   }
 
@@ -2292,6 +3330,15 @@ function pickBehaviorAction(
   const prayerTraining = pickPrayerTrainingAction(input);
   if (prayerTraining) return prayerTraining;
 
+  // An exact bank-miss capability binds processing to its selected combat
+  // supply chain. Execute that recipe before the generic ready-work ordering
+  // can consume a conserved prerequisite for an unrelated output.
+  const processingAcquisitionAction = pickOrdinaryProcessingAcquisitionAction(
+    input,
+    state,
+  );
+  if (processingAcquisitionAction) return processingAcquisitionAction;
+
   // Drain a complete conserved processing batch before asking the private bank
   // for more material. Quest work keeps its dedicated target-aware planner.
   if (state.goal?.type !== "questing") {
@@ -2321,6 +3368,36 @@ function pickBehaviorAction(
 
   // === QUEST-DRIVEN BEHAVIOR (with stall detection) ===
   if (goal?.type === "questing" && goal.questId) {
+    const activeQuest = input.questState.find(
+      (quest) =>
+        quest.questId === goal.questId && quest.status === "in_progress",
+    );
+    const retryingQuestAction = activeQuest
+      ? getReadyQuestCustodyAction(input, activeQuest)
+      : null;
+    if (
+      retryingQuestAction &&
+      isOrdinaryProcessingActionSuppressed(
+        input.ordinaryProcessingRetrySuppressions,
+        retryingQuestAction,
+      )
+    ) {
+      if (shouldHoldSuppressedQuestCustody(input, activeQuest!)) {
+        // A time-bounded processing retry is expected progress control, not a
+        // stalled quest tick. Keep substantial or already-progressed custody
+        // unchanged until the exact action can be retried or reconciled.
+        return { type: "idle" };
+      }
+      state.goal = null;
+      return pickCombatOrExplore(
+        input,
+        state,
+        position,
+        nearbyMobs,
+        nearbyResources,
+        healthPercent,
+      );
+    }
     const stalled = isQuestStalled(input, goal);
     if (!stalled) {
       const questAction = pickQuestAction(
@@ -2331,13 +3408,26 @@ function pickBehaviorAction(
         nearbyResources,
         healthPercent,
       );
-      if (
-        questAction &&
-        !isOrdinaryProcessingActionSuppressed(
-          input.ordinaryProcessingRetrySuppressions,
-          questAction,
-        )
-      ) {
+      if (questAction) {
+        if (
+          isOrdinaryProcessingActionSuppressed(
+            input.ordinaryProcessingRetrySuppressions,
+            questAction,
+          )
+        ) {
+          if (shouldHoldSuppressedQuestCustody(input, activeQuest!)) {
+            return { type: "idle" };
+          }
+          state.goal = null;
+          return pickCombatOrExplore(
+            input,
+            state,
+            position,
+            nearbyMobs,
+            nearbyResources,
+            healthPercent,
+          );
+        }
         return questAction;
       }
     }
@@ -2354,6 +3444,20 @@ function pickBehaviorAction(
     nearbyMobs,
     nearbyResources,
     healthPercent,
+  );
+}
+
+function shouldHoldSuppressedQuestCustody(
+  input: AgentTickInput,
+  quest: AgentQuestProgress,
+): boolean {
+  return (
+    input.inventoryItems.length >= 15 ||
+    Object.values(quest.stageProgress).some(
+      (progress) => Number.isFinite(progress) && progress > 0,
+    ) ||
+    input.gameState.inCombat ||
+    input.gameState.health < input.gameState.maxHealth
   );
 }
 
@@ -3184,14 +4288,31 @@ function getStationDistance(
   position: [number, number, number],
   station: WorkerStationData,
 ): number {
-  // Interaction authority is tile-based. Runtime station manifests commonly
-  // use integer anchors while moving actors stand at tile centers, so raw
-  // world-coordinate distance would incorrectly turn a cardinally adjacent
-  // actor into a 1.5-tile miss.
-  return Math.max(
-    Math.abs(Math.floor(position[0]) - Math.floor(station.position[0])),
-    Math.abs(Math.floor(position[2]) - Math.floor(station.position[2])),
-  );
+  // Mirror InteractableEntity's centered footprint-aware Chebyshev distance.
+  // Measuring only from the anchor makes an actor beside the far edge of an
+  // even-width station look one tile farther away than interaction authority,
+  // producing accepted no-op movement loops instead of the intended action.
+  const playerX = Math.floor(position[0]);
+  const playerZ = Math.floor(position[2]);
+  const anchorX = Math.floor(station.position[0]);
+  const anchorZ = Math.floor(station.position[2]);
+  const footprintWidth =
+    Number.isSafeInteger(station.footprintWidth) &&
+    Number(station.footprintWidth) >= 1
+      ? Number(station.footprintWidth)
+      : 1;
+  const footprintDepth =
+    Number.isSafeInteger(station.footprintDepth) &&
+    Number(station.footprintDepth) >= 1
+      ? Number(station.footprintDepth)
+      : 1;
+  const minX = anchorX - Math.floor(footprintWidth / 2);
+  const maxX = minX + footprintWidth - 1;
+  const minZ = anchorZ - Math.floor(footprintDepth / 2);
+  const maxZ = minZ + footprintDepth - 1;
+  const dx = playerX < minX ? minX - playerX : Math.max(0, playerX - maxX);
+  const dz = playerZ < minZ ? minZ - playerZ : Math.max(0, playerZ - maxZ);
+  return Math.max(dx, dz);
 }
 
 function isStationInInteractionRange(
@@ -3202,29 +4323,16 @@ function isStationInInteractionRange(
 }
 
 /**
- * Stations occupy their authored tile. Moving at that blocked center can
- * leave pathfinding on a diagonal tile that strict processing authority will
- * reject, so travel targets the nearest cardinal tile center instead.
+ * Target the exact authored station anchor. The main-thread service recognizes
+ * that identity and supplies its interaction range and footprint to the
+ * authoritative movement system, which can then choose any reachable legal
+ * arrival tile instead of binding the agent to one guessed adjacent tile.
  */
 function getStationApproachTarget(
   position: [number, number, number],
   station: WorkerStationData,
 ): [number, number, number] {
-  const tileX = Math.floor(station.position[0]);
-  const tileZ = Math.floor(station.position[2]);
-  const candidates: Array<[number, number, number]> = [
-    [tileX - 0.5, position[1], tileZ + 0.5],
-    [tileX + 1.5, position[1], tileZ + 0.5],
-    [tileX + 0.5, position[1], tileZ - 0.5],
-    [tileX + 0.5, position[1], tileZ + 1.5],
-  ];
-  return candidates.sort(
-    (left, right) =>
-      Math.hypot(position[0] - left[0], position[2] - left[2]) -
-        Math.hypot(position[0] - right[0], position[2] - right[2]) ||
-      left[0] - right[0] ||
-      left[2] - right[2],
-  )[0];
+  return [station.position[0], position[1], station.position[2]];
 }
 
 function countInventoryItems(
@@ -3275,6 +4383,172 @@ function hasAuthoredRecipeInputs(
       ({ itemId }) => getInventoryQuantity(input.inventoryItems, itemId) > 0,
     )
   );
+}
+
+/**
+ * Decide whether the current quest can make authoritative progress before a
+ * generic near-full-inventory deposit. This deliberately recognizes only
+ * loaded authored recipes and exact carried custody. It does not infer bank
+ * contents or let an unknown interact stage suppress necessary banking.
+ */
+function canAdvanceQuestBeforeBanking(
+  input: AgentTickInput,
+  quest: AgentQuestProgress,
+  openSlots: number,
+): boolean {
+  const stageTarget = quest.stageTarget;
+  if (!stageTarget) return false;
+
+  if (quest.stageType === "gather") {
+    const stageCount = quest.stageCount;
+    if (!Number.isSafeInteger(stageCount) || stageCount! <= 0) return false;
+    const stageProgress = quest.stageProgress[stageTarget] ?? 0;
+    const remainingRewards = Math.max(0, stageCount! - stageProgress);
+    return remainingRewards <= openSlots;
+  }
+  return getReadyQuestCustodyAction(input, quest) !== null;
+}
+
+/** Return the exact ready processing action whose inputs must not be banked. */
+function getReadyQuestCustodyAction(
+  input: AgentTickInput,
+  quest: AgentQuestProgress,
+): EmbeddedBehaviorAction | null {
+  const stageTarget = quest.stageTarget;
+  if (!stageTarget || quest.stageType !== "interact") return null;
+
+  let action: EmbeddedBehaviorAction | null = null;
+
+  if (stageTarget === "fire") {
+    if (!hasOwnedItem(input, "tinderbox")) return null;
+    const firemakingLevel = getSkillLevel(input, "firemaking");
+    const logsItem = input.inventoryItems
+      .filter(
+        (item) =>
+          item.quantity > 0 &&
+          (FIREMAKING_RECIPES.get(item.itemId)?.levelRequired ?? Infinity) <=
+            firemakingLevel,
+      )
+      .sort((left, right) => left.itemId.localeCompare(right.itemId))[0];
+    action = logsItem
+      ? { type: "firemake", logsItemId: logsItem.itemId }
+      : null;
+  } else {
+    const runecraftingRecipe = RUNECRAFTING_BY_OUTPUT.get(stageTarget);
+    if (
+      runecraftingRecipe &&
+      runecraftingRecipe.levelRequired <=
+        getSkillLevel(input, "runecrafting") &&
+      runecraftingRecipe.essenceItemIds.some(
+        (itemId) => getInventoryQuantity(input.inventoryItems, itemId) > 0,
+      )
+    ) {
+      action = {
+        type: "runecraft",
+        runeType: runecraftingRecipe.runeType,
+      };
+    }
+
+    const rawItemId = COOKING_INPUT_BY_OUTPUT.get(stageTarget);
+    const cookingRecipe = rawItemId ? COOKING_RECIPES.get(rawItemId) : null;
+    if (
+      !action &&
+      rawItemId &&
+      cookingRecipe &&
+      cookingRecipe.levelRequired <= getSkillLevel(input, "cooking") &&
+      getInventoryQuantity(input.inventoryItems, rawItemId) > 0
+    ) {
+      action = { type: "cook", itemId: rawItemId };
+    }
+
+    const smeltingRecipe = SMELTING_RECIPES.get(stageTarget);
+    if (
+      !action &&
+      smeltingRecipe &&
+      smeltingRecipe.levelRequired <= getSkillLevel(input, "smithing") &&
+      hasSmeltingInputs(input, smeltingRecipe)
+    ) {
+      action = { type: "smelt", recipe: stageTarget };
+    }
+
+    const smithingRecipe = SMITHING_RECIPES.get(stageTarget);
+    if (
+      !action &&
+      smithingRecipe &&
+      smithingRecipe.levelRequired <= getSkillLevel(input, "smithing")
+    ) {
+      const carriedBars = getInventoryQuantity(
+        input.inventoryItems,
+        smithingRecipe.barItemId,
+      );
+      if (
+        carriedBars >= smithingRecipe.barsRequired &&
+        hasOwnedItem(input, SMITHING_CONSTANTS.HAMMER_ITEM_ID)
+      ) {
+        action = { type: "smith", recipe: stageTarget };
+      } else {
+        const upstreamSmelting = SMELTING_RECIPES.get(smithingRecipe.barItemId);
+        if (
+          upstreamSmelting &&
+          upstreamSmelting.levelRequired <= getSkillLevel(input, "smithing") &&
+          hasSmeltingInputs(input, upstreamSmelting)
+        ) {
+          action = {
+            type: "smelt",
+            recipe: smithingRecipe.barItemId,
+          };
+        }
+      }
+    }
+
+    const craftingRecipe = CRAFTING_RECIPES.get(stageTarget);
+    if (
+      !action &&
+      craftingRecipe &&
+      craftingRecipe.levelRequired <= getSkillLevel(input, "crafting")
+    ) {
+      if (hasAuthoredRecipeInputs(input, craftingRecipe)) {
+        action = { type: "craft", recipeId: stageTarget, quantity: 1 };
+      } else {
+        const tannableInput = craftingRecipe.inputs.find((inputItem) => {
+          if (
+            getInventoryQuantity(input.inventoryItems, inputItem.itemId) >=
+            inputItem.quantity
+          ) {
+            return false;
+          }
+          const tanning = TANNING_BY_OUTPUT.get(inputItem.itemId);
+          return (
+            tanning !== undefined &&
+            getInventoryQuantity(input.inventoryItems, tanning.inputItemId) > 0
+          );
+        });
+        const tanning = tannableInput
+          ? TANNING_BY_OUTPUT.get(tannableInput.itemId)
+          : null;
+        if (tanning) {
+          action = {
+            type: "tan",
+            inputItemId: tanning.inputItemId,
+            quantity: 1,
+          };
+        }
+      }
+    }
+
+    if (!action) {
+      const fletchingStep = getFletchingQuestStep(input, stageTarget);
+      if (fletchingStep?.kind === "action") {
+        action = {
+          type: "fletch",
+          recipeId: fletchingStep.recipe.recipeId,
+          quantity: 1,
+        };
+      }
+    }
+  }
+
+  return action;
 }
 
 function getFletchingRecipesForOutput(

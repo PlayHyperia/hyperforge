@@ -416,3 +416,47 @@ export function isPositionInsideCombatArena(x: number, z: number): boolean {
 
   return false;
 }
+
+export type DuelCombatArenaBounds = {
+  minX: number;
+  maxX: number;
+  minZ: number;
+  maxZ: number;
+};
+
+/** Resolve one exact combat ring containing every supplied world position. */
+export function getCombatArenaBoundsContainingPositions(
+  positions: readonly (readonly [number, number, number])[],
+): DuelCombatArenaBounds | null {
+  if (positions.length === 0) return null;
+  const config = getDuelArenaConfig();
+
+  for (let row = 0; row < config.rows; row += 1) {
+    for (let column = 0; column < config.columns; column += 1) {
+      const minX =
+        config.baseX + column * (config.arenaWidth + config.arenaGap);
+      const minZ = config.baseZ + row * (config.arenaLength + config.arenaGap);
+      const bounds = {
+        minX,
+        maxX: minX + config.arenaWidth,
+        minZ,
+        maxZ: minZ + config.arenaLength,
+      };
+      if (
+        positions.every(
+          ([x, , z]) =>
+            Number.isFinite(x) &&
+            Number.isFinite(z) &&
+            x >= bounds.minX &&
+            x <= bounds.maxX &&
+            z >= bounds.minZ &&
+            z <= bounds.maxZ,
+        )
+      ) {
+        return bounds;
+      }
+    }
+  }
+
+  return null;
+}

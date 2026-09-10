@@ -14,13 +14,13 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { build } from "esbuild";
 import validator from "gltf-validator";
-import puppeteer from "puppeteer";
 
 const GLB_MAGIC = 0x46546c67;
 const GLB_VERSION = 2;
 const JSON_CHUNK_TYPE = 0x4e4f534a;
 const SAFE_ID_PATTERN = /^[a-zA-Z0-9_-]+$/u;
 const SHA256_PATTERN = /^[a-f0-9]{64}$/u;
+const RIGID_EQUIPMENT_SLOTS = new Set(["weapon", "shield", "gatheringtool"]);
 
 function isRecord(value) {
   return Boolean(value && typeof value === "object" && !Array.isArray(value));
@@ -128,6 +128,55 @@ function averagePoints(points) {
     for (let axis = 0; axis < 3; axis += 1) result[axis] += point[axis];
   }
   return result.map((value) => value / points.length);
+}
+
+export function detectStaticBowStringComponents(components, globalBounds) {
+  if (
+    !Array.isArray(components) ||
+    components.length < 1 ||
+    !isRecord(globalBounds) ||
+    !Array.isArray(globalBounds.minimum) ||
+    !Array.isArray(globalBounds.maximum)
+  ) {
+    throw new Error("Bow component bounds are invalid");
+  }
+  const globalSize = globalBounds.maximum.map(
+    (value, axis) => value - globalBounds.minimum[axis],
+  );
+  if (
+    globalSize.length !== 3 ||
+    globalSize.some((value) => !Number.isFinite(value) || value <= 0)
+  ) {
+    throw new Error("Bow global bounds must have three positive dimensions");
+  }
+  const longitudinalAxis = globalSize.indexOf(Math.max(...globalSize));
+  const crossAxes = [0, 1, 2].filter((axis) => axis !== longitudinalAxis);
+  const minimumStringLength = globalSize[longitudinalAxis] * 0.75;
+  const maximumStringThickness = globalSize[longitudinalAxis] * 0.02;
+  const stringComponents = components.filter((component) => {
+    if (
+      !isRecord(component) ||
+      !Array.isArray(component.minimum) ||
+      !Array.isArray(component.maximum)
+    ) {
+      return false;
+    }
+    const size = component.maximum.map(
+      (value, axis) => value - component.minimum[axis],
+    );
+    return (
+      size.length === 3 &&
+      size.every((value) => Number.isFinite(value) && value >= 0) &&
+      size[longitudinalAxis] >= minimumStringLength &&
+      crossAxes.every((axis) => size[axis] <= maximumStringThickness)
+    );
+  });
+  return {
+    longitudinalAxis,
+    minimumStringLength,
+    maximumStringThickness,
+    stringComponents,
+  };
 }
 
 /**
@@ -239,6 +288,10 @@ export function stripStaticBowStringGlb(input) {
     union(sourceIndices[index + 1], sourceIndices[index + 2]);
   }
   const components = new Map();
+  const globalBounds = {
+    minimum: [Infinity, Infinity, Infinity],
+    maximum: [-Infinity, -Infinity, -Infinity],
+  };
   for (let index = 0; index < vertexCount; index += 1) {
     const root = find(index);
     const component = components.get(root) ?? {
@@ -256,15 +309,22 @@ export function stripStaticBowStringGlb(input) {
         component.maximum[axis],
         points[index][axis],
       );
+      globalBounds.minimum[axis] = Math.min(
+        globalBounds.minimum[axis],
+        points[index][axis],
+      );
+      globalBounds.maximum[axis] = Math.max(
+        globalBounds.maximum[axis],
+        points[index][axis],
+      );
     }
     components.set(root, component);
   }
-  const stringComponents = [...components.values()].filter((component) => {
-    const size = component.maximum.map(
-      (value, axis) => value - component.minimum[axis],
-    );
-    return size[1] >= 1.7 && size[0] <= 0.03 && size[2] <= 0.03;
-  });
+  const stringDetection = detectStaticBowStringComponents(
+    [...components.values()],
+    globalBounds,
+  );
+  const { longitudinalAxis, stringComponents } = stringDetection;
   if (stringComponents.length < 1) {
     throw new Error("No deterministic static bowstring components were found");
   }
@@ -285,19 +345,42 @@ export function stripStaticBowStringGlb(input) {
     throw new Error("Static bowstring filtering produced an invalid primitive");
   }
   const stringPoints = [...removedVertices].map((index) => points[index]);
-  const minimumY = Math.min(...stringPoints.map((point) => point[1]));
-  const maximumY = Math.max(...stringPoints.map((point) => point[1]));
+  const minimumLongitudinal = Math.min(
+    ...stringPoints.map((point) => point[longitudinalAxis]),
+  );
+  const maximumLongitudinal = Math.max(
+    ...stringPoints.map((point) => point[longitudinalAxis]),
+  );
   const near = (target, tolerance) =>
-    stringPoints.filter((point) => Math.abs(point[1] - target) <= tolerance);
+    stringPoints.filter(
+      (point) => Math.abs(point[longitudinalAxis] - target) <= tolerance,
+    );
+  const longitudinalMiddle = (minimumLongitudinal + maximumLongitudinal) / 2;
   const middle = [...stringPoints]
-    .sort((left, right) => Math.abs(left[1]) - Math.abs(right[1]))
+    .sort(
+      (left, right) =>
+        Math.abs(left[longitudinalAxis] - longitudinalMiddle) -
+        Math.abs(right[longitudinalAxis] - longitudinalMiddle),
+    )
     .slice(0, Math.min(32, stringPoints.length));
+  const endpointTolerance =
+    longitudinalAxis === 1
+      ? 0.02
+      : (maximumLongitudinal - minimumLongitudinal) * 0.0125;
+  const upperTip = averagePoints(near(maximumLongitudinal, endpointTolerance));
+  const lowerTip = averagePoints(near(minimumLongitudinal, endpointTolerance));
   const bowString = {
     schemaVersion: 1,
     contentNodeName: "EquipmentContent",
-    upperTip: averagePoints(near(maximumY, 0.02)),
-    lowerTip: averagePoints(near(minimumY, 0.02)),
-    restNock: averagePoints(middle),
+    upperTip,
+    lowerTip,
+    // Preserve the locked Steve output while using the exact straight-string
+    // midpoint for sources whose authoring axis is not Y. This avoids bias
+    // from asymmetric endpoint tessellation in low-poly source meshes.
+    restNock:
+      longitudinalAxis === 1
+        ? averagePoints(middle)
+        : upperTip.map((value, axis) => (value + lowerTip[axis]) / 2),
   };
 
   const outputIndexBytes = Buffer.alloc(keptIndices.length * indexBytes);
@@ -332,11 +415,168 @@ export function stripStaticBowStringGlb(input) {
     report: {
       sourceVertexCount: vertexCount,
       sourceTriangleCount: sourceIndices.length / 3,
+      longitudinalAxis,
+      minimumStringLength: stringDetection.minimumStringLength,
+      maximumStringThickness: stringDetection.maximumStringThickness,
       stringComponentCount: stringComponents.length,
       stringVertexCount: removedVertices.size,
       removedTriangleCount,
       outputTriangleCount: keptIndices.length / 3,
       bowString,
+    },
+  };
+}
+
+/**
+ * Upgrade an already-authored fitted bow without recalculating its attachment
+ * transform. This is intentionally separate from the semantic fitter: a
+ * visually proven legacy alignment must not drift merely to gain the current
+ * stream validation and dynamic-bowstring contracts.
+ */
+export function certifyExistingFittedBowGlb({
+  source,
+  itemId,
+  compatibleAvatarId,
+  legacyAvatarId,
+  drawHandLocalOffset,
+  stableHeldPose,
+  gripContact,
+  exportedAt,
+}) {
+  if (
+    !Buffer.isBuffer(source) ||
+    !SAFE_ID_PATTERN.test(itemId) ||
+    !SAFE_ID_PATTERN.test(compatibleAvatarId) ||
+    typeof legacyAvatarId !== "string" ||
+    legacyAvatarId.trim().length === 0 ||
+    !Array.isArray(drawHandLocalOffset) ||
+    drawHandLocalOffset.length !== 3 ||
+    drawHandLocalOffset.some((value) => !Number.isFinite(value)) ||
+    typeof exportedAt !== "string" ||
+    exportedAt.trim().length === 0 ||
+    (stableHeldPose !== undefined &&
+      (!isRecord(stableHeldPose) ||
+        !Array.isArray(stableHeldPose.avatarLocalEulerDegrees) ||
+        stableHeldPose.avatarLocalEulerDegrees.length !== 3 ||
+        stableHeldPose.avatarLocalEulerDegrees.some(
+          (value) => !Number.isFinite(value) || Math.abs(value) > 180,
+        ))) ||
+    (gripContact !== undefined &&
+      (!isRecord(gripContact) ||
+        gripContact.schemaVersion !== 1 ||
+        gripContact.contentNodeName !== "EquipmentContent" ||
+        !Array.isArray(gripContact.sourceAxis) ||
+        gripContact.sourceAxis.length !== 3 ||
+        gripContact.sourceAxis.some((value) => !Number.isFinite(value)) ||
+        Math.hypot(...gripContact.sourceAxis) <= 0.000001 ||
+        gripContact.actionEnd !== "dynamic-aim" ||
+        !Array.isArray(gripContact.zones) ||
+        gripContact.zones.length !== 1 ||
+        gripContact.zones[0]?.id !== "primary" ||
+        !["leftHand", "rightHand"].includes(gripContact.zones[0]?.boneName) ||
+        !Number.isFinite(gripContact.zones[0]?.minimumSourceProjection) ||
+        !Number.isFinite(gripContact.zones[0]?.maximumSourceProjection) ||
+        gripContact.zones[0].minimumSourceProjection >=
+          gripContact.zones[0].maximumSourceProjection))
+  ) {
+    throw new Error("Existing fitted bow certification input is invalid");
+  }
+
+  const stripped = stripStaticBowStringGlb(source);
+  const parsed = parseGlb(stripped.output);
+  const document = cloneJson(parsed.document);
+  const sceneIndex = Number.isInteger(document.scene) ? document.scene : 0;
+  const scene = document.scenes?.[sceneIndex];
+  if (!isRecord(scene) || !Array.isArray(scene.nodes)) {
+    throw new Error("Existing fitted bow has no active scene");
+  }
+
+  const wrapperIndex = scene.nodes.find((nodeIndex) => {
+    const node = document.nodes?.[nodeIndex];
+    return node?.name === "EquipmentWrapper" && isRecord(node.extras?.hyperia);
+  });
+  const wrapper = document.nodes?.[wrapperIndex];
+  const existingMetadata = wrapper?.extras?.hyperia;
+  const contentIndex = wrapper?.children?.[0];
+  const content = document.nodes?.[contentIndex];
+  if (
+    !Number.isInteger(wrapperIndex) ||
+    !isRecord(wrapper) ||
+    !isRecord(existingMetadata) ||
+    existingMetadata.version !== 2 ||
+    existingMetadata.weaponType !== "bow" ||
+    (existingMetadata.vrmBoneName !== "leftHand" &&
+      existingMetadata.vrmBoneName !== "rightHand") ||
+    !Array.isArray(existingMetadata.relativeMatrix) ||
+    existingMetadata.relativeMatrix.length !== 16 ||
+    existingMetadata.relativeMatrix.some((value) => !Number.isFinite(value)) ||
+    !Number.isInteger(contentIndex) ||
+    !isRecord(content)
+  ) {
+    throw new Error("Existing fitted bow attachment contract is invalid");
+  }
+  if (
+    gripContact &&
+    gripContact.zones[0].boneName !== existingMetadata.vrmBoneName
+  ) {
+    throw new Error("Existing fitted bow grip-contact bone is invalid");
+  }
+
+  content.name = "EquipmentContent";
+  const metadata = {
+    ...existingMetadata,
+    originalSlot: "weapon",
+    avatarId: legacyAvatarId,
+    exportedFrom: "existing-fitted-bow-certification-v1",
+    exportedAt,
+    usage:
+      "Visually proven fitted transform preserved exactly; dynamic string and competitive metadata added without refitting.",
+    fitReference: {
+      schemaVersion: 1,
+      sourceSha256: sha256(source),
+      preservedExistingAttachment: true,
+    },
+    bowString: {
+      ...cloneJson(stripped.bowString),
+      contentNodeName: "EquipmentContent",
+      drawHandLocalOffset: [...drawHandLocalOffset],
+    },
+    ...(stableHeldPose
+      ? {
+          stableHeldPose: {
+            schemaVersion: 1,
+            wrapperNodeName: "EquipmentWrapper",
+            avatarLocalEulerDegrees: [
+              ...stableHeldPose.avatarLocalEulerDegrees,
+            ],
+          },
+        }
+      : {}),
+    ...(gripContact ? { gripContact: cloneJson(gripContact) } : {}),
+    duelFit: {
+      schemaVersion: 1,
+      itemId,
+      slot: "weapon",
+      compatibleAvatarIds: [compatibleAvatarId],
+    },
+  };
+  wrapper.extras = {
+    ...(isRecord(wrapper.extras) ? wrapper.extras : {}),
+    hyperia: cloneJson(metadata),
+  };
+  scene.extras = {
+    ...(isRecord(scene.extras) ? scene.extras : {}),
+    hyperia: cloneJson(metadata),
+  };
+
+  return {
+    output: encodeGlb(document, parsed.chunks),
+    metadata,
+    report: {
+      sourceSha256: sha256(source),
+      preservedRelativeMatrix: [...existingMetadata.relativeMatrix],
+      bowString: cloneJson(stripped.bowString),
+      staticString: stripped.report,
     },
   };
 }
@@ -393,13 +633,20 @@ export function buildFittedRigidEquipmentGlb({
   }
   if (
     !SAFE_ID_PATTERN.test(definition.itemId) ||
-    definition.slot !== "weapon" ||
+    !RIGID_EQUIPMENT_SLOTS.has(definition.slot) ||
     (definition.attachmentBone !== "leftHand" &&
+      definition.attachmentBone !== "rightHand") ||
+    (definition.slot === "shield" &&
+      definition.attachmentBone !== "leftHand") ||
+    (definition.slot === "gatheringtool" &&
       definition.attachmentBone !== "rightHand")
   ) {
     throw new Error(`${definition.itemId} has an invalid rigid fit identity`);
   }
   assertFiniteTuple(browserFit.relativeMatrix, 16, "relativeMatrix");
+  const outputRelativeMatrix = definition.certifiedRelativeMatrix
+    ? [...definition.certifiedRelativeMatrix]
+    : [...browserFit.relativeMatrix];
   if (
     !Number.isFinite(browserFit.contentScale) ||
     browserFit.contentScale <= 0
@@ -415,7 +662,7 @@ export function buildFittedRigidEquipmentGlb({
   const metadata = {
     version: 2,
     vrmBoneName: definition.attachmentBone,
-    relativeMatrix: [...browserFit.relativeMatrix],
+    relativeMatrix: outputRelativeMatrix,
     originalSlot: definition.slot,
     avatarId: avatar.legacyAttachmentId,
     avatarHeight: avatar.normalizedHeight,
@@ -436,8 +683,44 @@ export function buildFittedRigidEquipmentGlb({
       targetLengthMetres: definition.targetLengthMetres,
       desiredWorldEulerDegrees: [...definition.desiredWorldEulerDegrees],
       desiredWorldOffsetMetres: [...definition.desiredWorldOffsetMetres],
+      ...(definition.sourceGripPoint
+        ? { sourceGripPoint: [...definition.sourceGripPoint] }
+        : {}),
+      ...(definition.primaryGripAnchor
+        ? { primaryGripAnchor: definition.primaryGripAnchor }
+        : {}),
+      ...(definition.alignHandleToSecondaryHand
+        ? {
+            alignHandleToSecondaryHand: {
+              sourceHandleAxis: [
+                ...definition.alignHandleToSecondaryHand.sourceHandleAxis,
+              ],
+              ...(definition.alignHandleToSecondaryHand.secondaryGripAnchor
+                ? {
+                    secondaryGripAnchor:
+                      definition.alignHandleToSecondaryHand.secondaryGripAnchor,
+                  }
+                : {}),
+            },
+          }
+        : {}),
     },
-    ...(bowString ? { bowString: cloneJson(bowString) } : {}),
+    ...(bowString
+      ? {
+          bowString:
+            definition.preserveLegacyBowMetadata === true
+              ? cloneJson(bowString)
+              : {
+                  ...cloneJson(bowString),
+                  drawHandLocalOffset: [
+                    ...browserFit.secondaryHandMeshCenterBoneLocal,
+                  ],
+                },
+        }
+      : {}),
+    ...(definition.gripContact
+      ? { gripContact: cloneJson(definition.gripContact) }
+      : {}),
     ...(definition.stableHeldPose
       ? {
           stableHeldPose: {
@@ -446,6 +729,43 @@ export function buildFittedRigidEquipmentGlb({
             avatarLocalEulerDegrees: [
               ...definition.stableHeldPose.avatarLocalEulerDegrees,
             ],
+            ...(definition.stableHeldPose.anchorToPrimaryHandMeshCenter === true
+              ? {
+                  primaryBoneLocalOffset: [
+                    ...browserFit.primaryHandMeshCenterBoneLocal,
+                  ],
+                }
+              : {}),
+            ...(definition.stableHeldPose.avatarLocalPositionOffset
+              ? {
+                  avatarLocalPositionOffset: [
+                    ...definition.stableHeldPose.avatarLocalPositionOffset,
+                  ],
+                }
+              : {}),
+          },
+        }
+      : {}),
+    ...(definition.grip === "two-hand" && definition.alignHandleToSecondaryHand
+      ? {
+          twoHandGrip: {
+            schemaVersion: 1,
+            wrapperNodeName: "EquipmentWrapper",
+            sourceHandleAxis: [
+              ...definition.alignHandleToSecondaryHand.sourceHandleAxis,
+            ],
+            secondaryBoneName:
+              definition.attachmentBone === "rightHand"
+                ? "leftHand"
+                : "rightHand",
+            ...(definition.alignHandleToSecondaryHand.secondaryGripAnchor ===
+            "hand-mesh-center"
+              ? {
+                  secondaryBoneLocalOffset: [
+                    ...browserFit.secondaryHandMeshCenterBoneLocal,
+                  ],
+                }
+              : {}),
           },
         }
       : {}),
@@ -456,6 +776,13 @@ export function buildFittedRigidEquipmentGlb({
   document.nodes.push({
     name: "EquipmentContent",
     children: sourceRoots,
+    ...(definition.sourceGripPoint
+      ? {
+          translation: definition.sourceGripPoint.map(
+            (component) => -component * browserFit.contentScale,
+          ),
+        }
+      : {}),
     scale: [
       browserFit.contentScale,
       browserFit.contentScale,
@@ -472,7 +799,7 @@ export function buildFittedRigidEquipmentGlb({
   document.nodes.push({
     name: "EquipmentWrapper",
     children: [contentIndex],
-    matrix: [...browserFit.relativeMatrix],
+    matrix: outputRelativeMatrix,
     extras: { hyperia: cloneJson(metadata) },
   });
   scene.name = "AuxScene";
@@ -558,7 +885,7 @@ function validateManifest(manifest, assetsRoot) {
     if (
       !isRecord(definition) ||
       !SAFE_ID_PATTERN.test(definition.itemId) ||
-      definition.slot !== "weapon" ||
+      !RIGID_EQUIPMENT_SLOTS.has(definition.slot) ||
       (definition.grip !== "one-hand" && definition.grip !== "two-hand") ||
       (definition.attachmentBone !== "leftHand" &&
         definition.attachmentBone !== "rightHand") ||
@@ -570,15 +897,47 @@ function validateManifest(manifest, assetsRoot) {
       definition.referenceMotion.sampleRatio > 1 ||
       !Number.isFinite(definition.targetLengthMetres) ||
       definition.targetLengthMetres <= 0 ||
+      (definition.alignHandleToSecondaryHand !== undefined &&
+        !isRecord(definition.alignHandleToSecondaryHand)) ||
+      (definition.sourceGripPoint !== undefined &&
+        !Array.isArray(definition.sourceGripPoint)) ||
+      (definition.primaryGripAnchor !== undefined &&
+        definition.primaryGripAnchor !== "hand-mesh-center") ||
       (definition.dynamicBowString !== undefined &&
         typeof definition.dynamicBowString !== "boolean") ||
+      (definition.preserveLegacyBowMetadata !== undefined &&
+        typeof definition.preserveLegacyBowMetadata !== "boolean") ||
+      (definition.preserveLegacyBowMetadata === true &&
+        definition.dynamicBowString !== true) ||
+      (definition.certifiedRelativeMatrix !== undefined &&
+        (!Array.isArray(definition.certifiedRelativeMatrix) ||
+          definition.preserveLegacyBowMetadata !== true)) ||
       (definition.dynamicBowString === true &&
-        (definition.weaponType !== "bow" ||
+        (definition.slot !== "weapon" ||
+          definition.weaponType !== "bow" ||
           definition.attachmentBone !== "leftHand")) ||
       (definition.weaponType === "staff" &&
-        !isRecord(definition.stableHeldPose)) ||
+        (definition.slot !== "weapon" ||
+          !isRecord(definition.stableHeldPose))) ||
+      (definition.weaponType === "harpoon" &&
+        (definition.slot !== "gatheringtool" ||
+          !isRecord(definition.alignHandleToSecondaryHand))) ||
+      (definition.slot === "shield" &&
+        (definition.attachmentBone !== "leftHand" ||
+          definition.grip !== "one-hand" ||
+          definition.dynamicBowString !== undefined ||
+          definition.stableHeldPose !== undefined ||
+          definition.alignHandleToSecondaryHand !== undefined)) ||
+      (definition.slot === "gatheringtool" &&
+        (definition.attachmentBone !== "rightHand" ||
+          typeof definition.weaponType !== "string" ||
+          !definition.weaponType ||
+          definition.dynamicBowString !== undefined ||
+          definition.stableHeldPose !== undefined)) ||
       (definition.stableHeldPose !== undefined &&
-        !isRecord(definition.stableHeldPose))
+        !isRecord(definition.stableHeldPose)) ||
+      (definition.gripContact !== undefined &&
+        !isRecord(definition.gripContact))
     ) {
       throw new Error("Rigid equipment fit definition is invalid");
     }
@@ -592,6 +951,90 @@ function validateManifest(manifest, assetsRoot) {
       3,
       `${definition.itemId}.desiredWorldOffsetMetres`,
     );
+    if (definition.certifiedRelativeMatrix !== undefined) {
+      assertFiniteTuple(
+        definition.certifiedRelativeMatrix,
+        16,
+        `${definition.itemId}.certifiedRelativeMatrix`,
+      );
+    }
+    if (definition.sourceGripPoint !== undefined) {
+      assertFiniteTuple(
+        definition.sourceGripPoint,
+        3,
+        `${definition.itemId}.sourceGripPoint`,
+      );
+    }
+    if (definition.alignHandleToSecondaryHand) {
+      assertFiniteTuple(
+        definition.alignHandleToSecondaryHand.sourceHandleAxis,
+        3,
+        `${definition.itemId}.alignHandleToSecondaryHand.sourceHandleAxis`,
+      );
+      if (
+        Math.hypot(...definition.alignHandleToSecondaryHand.sourceHandleAxis) <=
+        0.000001
+      ) {
+        throw new Error(
+          `${definition.itemId}.alignHandleToSecondaryHand.sourceHandleAxis must be non-zero`,
+        );
+      }
+      if (
+        definition.alignHandleToSecondaryHand.secondaryGripAnchor !==
+          undefined &&
+        definition.alignHandleToSecondaryHand.secondaryGripAnchor !==
+          "hand-mesh-center"
+      ) {
+        throw new Error(
+          `${definition.itemId}.alignHandleToSecondaryHand.secondaryGripAnchor is invalid`,
+        );
+      }
+    }
+    if (definition.gripContact) {
+      const gripContact = definition.gripContact;
+      if (
+        gripContact.schemaVersion !== 1 ||
+        gripContact.contentNodeName !== "EquipmentContent" ||
+        !Array.isArray(gripContact.sourceAxis) ||
+        !["minimum", "maximum", "dynamic-aim"].includes(
+          gripContact.actionEnd,
+        ) ||
+        !Array.isArray(gripContact.zones) ||
+        gripContact.zones.length < 1 ||
+        gripContact.zones.length > 2
+      ) {
+        throw new Error(`${definition.itemId}.gripContact is invalid`);
+      }
+      assertFiniteTuple(
+        gripContact.sourceAxis,
+        3,
+        `${definition.itemId}.gripContact.sourceAxis`,
+      );
+      if (Math.hypot(...gripContact.sourceAxis) <= 0.000001) {
+        throw new Error(`${definition.itemId}.gripContact.sourceAxis is zero`);
+      }
+      const zoneIds = new Set();
+      const boneNames = new Set();
+      for (const zone of gripContact.zones) {
+        if (
+          !isRecord(zone) ||
+          !["primary", "secondary"].includes(zone.id) ||
+          zoneIds.has(zone.id) ||
+          !["leftHand", "rightHand"].includes(zone.boneName) ||
+          boneNames.has(zone.boneName) ||
+          !Number.isFinite(zone.minimumSourceProjection) ||
+          !Number.isFinite(zone.maximumSourceProjection) ||
+          zone.minimumSourceProjection >= zone.maximumSourceProjection
+        ) {
+          throw new Error(`${definition.itemId}.gripContact zone is invalid`);
+        }
+        zoneIds.add(zone.id);
+        boneNames.add(zone.boneName);
+      }
+      if (!zoneIds.has("primary")) {
+        throw new Error(`${definition.itemId}.gripContact needs primary`);
+      }
+    }
     if (definition.stableHeldPose) {
       assertFiniteTuple(
         definition.stableHeldPose.avatarLocalEulerDegrees,
@@ -606,6 +1049,29 @@ function validateManifest(manifest, assetsRoot) {
         throw new Error(
           `${definition.itemId}.stableHeldPose angles must be within [-180, 180]`,
         );
+      }
+      if (
+        definition.stableHeldPose.anchorToPrimaryHandMeshCenter !== undefined &&
+        definition.stableHeldPose.anchorToPrimaryHandMeshCenter !== true
+      ) {
+        throw new Error(
+          `${definition.itemId}.stableHeldPose anchor must be true when provided`,
+        );
+      }
+      if (definition.stableHeldPose.avatarLocalPositionOffset !== undefined) {
+        assertFiniteTuple(
+          definition.stableHeldPose.avatarLocalPositionOffset,
+          3,
+          `${definition.itemId}.stableHeldPose.avatarLocalPositionOffset`,
+        );
+        if (
+          Math.hypot(...definition.stableHeldPose.avatarLocalPositionOffset) >
+          0.5
+        ) {
+          throw new Error(
+            `${definition.itemId}.stableHeldPose position offset is too large`,
+          );
+        }
       }
     }
     if (itemIds.has(definition.itemId)) {
@@ -669,6 +1135,7 @@ function html(config) {
 }
 
 async function deriveBrowserFits(workspaceRoot, assetsRoot, manifest) {
+  const { default: puppeteer } = await import("puppeteer");
   const bundleResult = await build({
     entryPoints: [
       path.join(
@@ -799,12 +1266,12 @@ async function deriveBrowserFits(workspaceRoot, assetsRoot, manifest) {
   }
 }
 
-export async function buildSteveRigidDuelEquipment({
+export async function buildRigidDuelEquipment({
   workspaceRoot,
+  assetsRoot,
   manifest,
   check,
 }) {
-  const assetsRoot = path.join(workspaceRoot, "packages/server/world/assets");
   validateManifest(manifest, assetsRoot);
   const browser = await deriveBrowserFits(workspaceRoot, assetsRoot, manifest);
   if (browser.fits.length !== manifest.fits.length) {
@@ -883,7 +1350,7 @@ export async function buildSteveRigidDuelEquipment({
       outputSha256: sha256(built.output),
       outputBytes: built.output.length,
       attachmentBone: browserFit.attachmentBone,
-      relativeMatrix: browserFit.relativeMatrix,
+      relativeMatrix: built.metadata.relativeMatrix,
       contentScale: browserFit.contentScale,
       targetLengthMetres: browserFit.targetLengthMetres,
       sourceLongestDimension: browserFit.sourceLongestDimension,
@@ -892,6 +1359,9 @@ export async function buildSteveRigidDuelEquipment({
       referenceHandSeparationMetres: browserFit.referenceHandSeparationMetres,
       referenceMotionHandSeparationRangeMetres:
         browserFit.referenceMotionHandSeparationRangeMetres,
+      primaryHandMeshCenterBoneLocal: browserFit.primaryHandMeshCenterBoneLocal,
+      secondaryHandMeshCenterBoneLocal:
+        browserFit.secondaryHandMeshCenterBoneLocal,
       fittedWorldPositionErrorMetres: browserFit.fittedWorldPositionErrorMetres,
       fittedWorldRotationErrorDegrees:
         browserFit.fittedWorldRotationErrorDegrees,
@@ -915,40 +1385,101 @@ export async function buildSteveRigidDuelEquipment({
   };
 }
 
-function parseArguments(argv) {
-  const options = { check: false, write: false };
+export async function buildSteveRigidDuelEquipment({
+  workspaceRoot,
+  manifest,
+  check,
+}) {
+  return buildRigidDuelEquipment({
+    workspaceRoot,
+    assetsRoot: path.join(workspaceRoot, "packages/server/world/assets"),
+    manifest,
+    check,
+  });
+}
+
+const DEFAULT_MANIFEST_PATH = "scripts/steve-rigid-duel-equipment-fits.json";
+const DEFAULT_ASSETS_ROOT = "packages/server/world/assets";
+const DEFAULT_REPORT_PATH =
+  "artifacts/duel-avatar-candidates/steve-rigid-equipment-fit-report.json";
+
+export function parseRigidEquipmentArguments(argv) {
+  const options = {
+    check: false,
+    write: false,
+    manifestPath: DEFAULT_MANIFEST_PATH,
+    assetsRoot: DEFAULT_ASSETS_ROOT,
+    reportPath: DEFAULT_REPORT_PATH,
+  };
   for (const argument of argv) {
     if (argument === "--check") options.check = true;
     else if (argument === "--write") options.write = true;
-    else throw new Error(`Unknown argument: ${argument}`);
+    else if (argument.startsWith("--manifest=")) {
+      options.manifestPath = argument.slice("--manifest=".length);
+    } else if (argument.startsWith("--assets-root=")) {
+      options.assetsRoot = argument.slice("--assets-root=".length);
+    } else if (argument.startsWith("--report=")) {
+      options.reportPath = argument.slice("--report=".length);
+    } else throw new Error(`Unknown argument: ${argument}`);
   }
   if (options.check === options.write) {
     throw new Error("Specify exactly one of --write or --check");
   }
+  for (const [label, value] of [
+    ["manifest", options.manifestPath],
+    ["assets root", options.assetsRoot],
+    ["report", options.reportPath],
+  ]) {
+    if (typeof value !== "string" || value.trim().length === 0) {
+      throw new Error(`${label} path must be non-empty`);
+    }
+  }
   return options;
 }
 
+function safeWorkspacePath(workspaceRoot, relativePath, label) {
+  if (path.isAbsolute(relativePath)) {
+    throw new Error(`${label} path must be workspace-relative`);
+  }
+  const root = path.resolve(workspaceRoot);
+  const resolved = path.resolve(root, relativePath);
+  if (resolved !== root && !resolved.startsWith(`${root}${path.sep}`)) {
+    throw new Error(`${label} path escapes the workspace`);
+  }
+  return resolved;
+}
+
 async function main() {
-  const options = parseArguments(process.argv.slice(2));
+  const options = parseRigidEquipmentArguments(process.argv.slice(2));
   const workspaceRoot = path.resolve(
     path.dirname(fileURLToPath(import.meta.url)),
     "..",
   );
-  const manifest = JSON.parse(
-    readFileSync(
-      path.join(workspaceRoot, "scripts/steve-rigid-duel-equipment-fits.json"),
-      "utf8",
-    ),
-  );
-  const report = await buildSteveRigidDuelEquipment({
+  const manifestPath = safeWorkspacePath(
     workspaceRoot,
+    options.manifestPath,
+    "Manifest",
+  );
+  const assetsRoot = safeWorkspacePath(
+    workspaceRoot,
+    options.assetsRoot,
+    "Assets root",
+  );
+  const reportPath = safeWorkspacePath(
+    workspaceRoot,
+    options.reportPath,
+    "Report",
+  );
+  if (reportPath === workspaceRoot) {
+    throw new Error("Report path must resolve to a file inside the workspace");
+  }
+  const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
+  const report = await buildRigidDuelEquipment({
+    workspaceRoot,
+    assetsRoot,
     manifest,
     check: options.check,
   });
-  const reportPath = path.join(
-    workspaceRoot,
-    "artifacts/duel-avatar-candidates/steve-rigid-equipment-fit-report.json",
-  );
   const serialized = `${JSON.stringify(report, null, 2)}\n`;
   if (options.check) {
     if (

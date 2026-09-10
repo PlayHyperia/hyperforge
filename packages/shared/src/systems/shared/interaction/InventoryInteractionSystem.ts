@@ -1314,10 +1314,23 @@ export class InventoryInteractionSystem extends SystemBase {
       condition: (item: Item, playerId: string) =>
         !this.isEquippedItem(item, playerId),
       callback: (playerId: string, itemId: string, slot: number | null) => {
+        const normalizedSlot = slot ?? undefined;
+        if (!this.world.isServer) {
+          const network = this.world.network as unknown as {
+            dropItem?: (
+              requestedItemId: string,
+              requestedSlot?: number,
+              requestedQuantity?: number,
+            ) => string;
+          };
+          network.dropItem?.(itemId, normalizedSlot, 1);
+          return;
+        }
         this.emitTypedEvent(EventType.ITEM_DROP, {
           playerId: playerId,
           itemId: itemId,
-          slot: slot,
+          quantity: 1,
+          slot: normalizedSlot,
         });
       },
     });

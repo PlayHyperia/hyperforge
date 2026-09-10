@@ -52,7 +52,10 @@ import { registerAdminRoutes } from "./routes/admin-routes.js";
 import { registerLayoutRoutes } from "./routes/layout-routes.js";
 import { registerDataRoutes } from "./routes/data-routes.js";
 import { registerProxyRoutes } from "../routes/proxy-routes.js";
-import { registerStreamingRoutes } from "../routes/streaming.js";
+import {
+  registerStreamingRoutes,
+  type StreamingRoutesRuntime,
+} from "../routes/streaming.js";
 import { registerDuelOracleRoutes } from "./routes/duel-oracle-routes.js";
 
 /**
@@ -70,11 +73,11 @@ export function registerApiRoutes(
   fastify: FastifyInstance,
   world: World,
   config: ServerConfig,
-): void {
+): StreamingRoutesRuntime {
   console.log("[API] Registering API routes...");
 
   // Proxy API keys
-  registerProxyRoutes(fastify);
+  registerProxyRoutes(fastify, config);
 
   // Health and status endpoints
   registerHealthRoutes(fastify, world, config);
@@ -95,7 +98,7 @@ export function registerApiRoutes(
   registerErrorRoutes(fastify);
 
   // Character file management and database operations
-  registerCharacterRoutes(fastify, world);
+  registerCharacterRoutes(fastify, world, config);
 
   // Agent credential management
   registerAgentRoutes(fastify, world);
@@ -116,10 +119,11 @@ export function registerApiRoutes(
   registerDataRoutes(fastify);
 
   // Streaming mode state and leaderboard
-  registerStreamingRoutes(fastify, world);
+  const streamingRoutes = registerStreamingRoutes(fastify, world);
 
   // Duel arena oracle metadata and inspection
   registerDuelOracleRoutes(fastify, world);
 
   console.log("[API] ✅ API routes registered");
+  return streamingRoutes;
 }

@@ -1,70 +1,56 @@
 /**
  * Kill Token Utilities
  *
- * Provides HMAC-based kill token generation and validation to prevent
- * spoofed NPC_DIED events from compromised components.
- *
- * **Security Model:**
- * - CombatSystem/MobEntity generates token on kill
- * - QuestSystem validates token before crediting progress
- * - Prevents quest progress manipulation via event spoofing
- *
- * **Implementation:**
- * - Uses HMAC-SHA256 for token generation
- * - Tokens include: mobId, killedBy, timestamp
- * - Validates timestamp within acceptable window (default: 5 seconds)
- *
- * **Runs on:** Server only (uses Node.js crypto)
+ * Binds one authoritative mob death to its killer, timestamp, durable
+ * mob-loot operation identity, lethal combat style, and XP damage authority.
+ * The helper uses the standard Web Crypto API so it works in the production
+ * ESM server without a CommonJS `require` shim.
  */
 
-// Lazy-loaded crypto module (Node.js only)
-let cryptoModule: typeof import("crypto") | null = null;
-let cryptoLoadAttempted = false;
+const MAX_KILL_EVENT_AGE_MS = 5_000;
+/** Maximum full-health value accepted as one mob kill-XP authority. */
+export const MAX_MOB_COMBAT_DAMAGE = 250_000;
+const MOB_LOOT_OPERATION_ID_PATTERN =
+  /^ground-item-mob-loot:[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+const KILL_TOKEN_PATTERN = /^[a-f0-9]{64}$/;
+const encoder = new TextEncoder();
 
-/** Type for dynamic require function */
-type RequireFn = (id: string) => unknown;
+let secretWarningLogged = false;
+let developmentSecret: string | null = null;
+let cachedSecret: string | null = null;
+let cachedKey: ReturnType<
+  NonNullable<typeof globalThis.crypto>["subtle"]["importKey"]
+> | null = null;
 
-/**
- * Get the crypto module (lazy load to avoid client-side errors)
- */
-function getCrypto(): typeof import("crypto") | null {
-  if (!cryptoLoadAttempted) {
-    cryptoLoadAttempted = true;
-    try {
-      // Use globalThis to access require in Node.js environment
-      // This avoids ESLint issues while maintaining compatibility
-      const g = globalThis as { require?: RequireFn };
-      const nodeRequire =
-        typeof g !== "undefined" && typeof g.require === "function"
-          ? g.require
-          : null;
-
-      if (nodeRequire) {
-        cryptoModule = nodeRequire("crypto") as typeof import("crypto");
-      }
-    } catch {
-      // Not available (running on client or bundled environment)
-      cryptoModule = null;
-    }
-  }
-  return cryptoModule;
+function getSubtleCrypto():
+  NonNullable<typeof globalThis.crypto>["subtle"] | null {
+  return globalThis.crypto?.subtle ?? null;
 }
 
-/** Maximum age of a valid kill event (milliseconds) */
-const MAX_KILL_EVENT_AGE_MS = 5000;
+function bytesToHex(bytes: Uint8Array): string {
+  return [...bytes].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+}
 
-/** Tracks if we've warned about missing secret */
-let secretWarningLogged = false;
+function hexToBytes(value: string): Uint8Array<ArrayBuffer> {
+  const bytes = new Uint8Array(value.length / 2);
+  for (let index = 0; index < bytes.length; index++) {
+    bytes[index] = Number.parseInt(value.slice(index * 2, index * 2 + 2), 16);
+  }
+  return bytes;
+}
 
-/**
- * Get the secret used for kill token generation/validation
- */
 function getSecret(): string {
-  if (typeof process !== "undefined" && process.env?.KILL_TOKEN_SECRET) {
-    return process.env.KILL_TOKEN_SECRET;
+  const configured =
+    typeof process !== "undefined"
+      ? process.env?.KILL_TOKEN_SECRET?.trim()
+      : undefined;
+  if (configured) {
+    if (encoder.encode(configured).byteLength < 32) {
+      throw new Error("KILL_TOKEN_SECRET must contain at least 32 bytes");
+    }
+    return configured;
   }
 
-  // In production, require the secret
   const isProduction =
     typeof process !== "undefined" && process.env?.NODE_ENV === "production";
   if (isProduction) {
@@ -73,93 +59,169 @@ function getSecret(): string {
     );
   }
 
-  // Development fallback - log warning once
   if (!secretWarningLogged) {
     console.warn(
-      "[KillTokenUtils] Using insecure development secret. Set KILL_TOKEN_SECRET in production.",
+      "[KillTokenUtils] Using a process-local development secret. Set KILL_TOKEN_SECRET in production.",
     );
     secretWarningLogged = true;
   }
 
-  // Generate a session-specific secret for development (changes each restart)
-  return `dev-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  if (!developmentSecret) {
+    const random = new Uint8Array(32);
+    globalThis.crypto?.getRandomValues(random);
+    developmentSecret = `dev-${bytesToHex(random)}`;
+  }
+  return developmentSecret;
 }
 
-/**
- * Generate a kill token for an NPC death event
- *
- * @param mobId - The mob entity ID
- * @param killedBy - The player ID who killed the mob
- * @param timestamp - When the kill occurred (Unix ms)
- * @returns HMAC token string (16 hex chars), or empty string if crypto unavailable
- */
-export function generateKillToken(
+function serializeKillAuthority(
   mobId: string,
   killedBy: string,
   timestamp: number,
+  lootOperationId: string,
+  attackStyle: string,
+  damageDealt: number,
 ): string {
-  const crypto = getCrypto();
-  if (!crypto) {
-    // Client-side or crypto unavailable - return empty (validation will be skipped)
-    return "";
-  }
-
-  const secret = getSecret();
-  const data = `${mobId}:${killedBy}:${timestamp}`;
-
-  return crypto
-    .createHmac("sha256", secret)
-    .update(data)
-    .digest("hex")
-    .substring(0, 16);
+  return JSON.stringify({
+    version: 3,
+    mobId,
+    killedBy,
+    timestamp,
+    lootOperationId,
+    attackStyle,
+    damageDealt,
+  });
 }
 
-/**
- * Validate a kill token from an NPC death event
- *
- * @param mobId - The mob entity ID
- * @param killedBy - The player ID who killed the mob
- * @param timestamp - When the kill occurred (Unix ms)
- * @param token - The token to validate
- * @returns true if token is valid and not stale, false otherwise
- */
-export function validateKillToken(
+async function importHmacKey(secret: string) {
+  const subtle = getSubtleCrypto();
+  if (!subtle) throw new Error("kill_token_crypto_unavailable");
+  if (cachedSecret === secret && cachedKey) return cachedKey;
+  cachedSecret = secret;
+  cachedKey = subtle.importKey(
+    "raw",
+    encoder.encode(secret),
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign", "verify"],
+  );
+  try {
+    return await cachedKey;
+  } catch (error) {
+    cachedSecret = null;
+    cachedKey = null;
+    throw error;
+  }
+}
+
+/** Generate a full HMAC-SHA256 token for one exact mob death occurrence. */
+export async function generateKillToken(
+  mobId: string,
+  killedBy: string,
+  timestamp: number,
+  lootOperationId: string,
+  attackStyle: string,
+  damageDealt: number,
+): Promise<string> {
+  if (
+    !Number.isSafeInteger(damageDealt) ||
+    damageDealt <= 0 ||
+    damageDealt > MAX_MOB_COMBAT_DAMAGE
+  ) {
+    throw new Error("kill_token_damage_authority_invalid");
+  }
+  const subtle = getSubtleCrypto();
+  if (!subtle) throw new Error("kill_token_crypto_unavailable");
+  const key = await importHmacKey(getSecret());
+  const signature = await subtle.sign(
+    "HMAC",
+    key,
+    encoder.encode(
+      serializeKillAuthority(
+        mobId,
+        killedBy,
+        timestamp,
+        lootOperationId,
+        attackStyle,
+        damageDealt,
+      ),
+    ),
+  );
+  return bytesToHex(new Uint8Array(signature));
+}
+
+/** Validate exact operation identity and the complete HMAC without an age gate. */
+export async function validateKillTokenSignature(
   mobId: string,
   killedBy: string,
   timestamp: number,
   token: string,
-): boolean {
-  const crypto = getCrypto();
-  if (!crypto) {
-    // Crypto unavailable - skip validation (development/client mode)
-    return true;
-  }
-
-  // Check for missing token (backwards compatibility during rollout)
-  if (!token) {
-    // During rollout phase, allow events without tokens
-    // FUTURE: Make this stricter after full rollout
-    return true;
-  }
-
-  // Validate timestamp freshness
-  const now = Date.now();
-  const age = Math.abs(now - timestamp);
-  if (age > MAX_KILL_EVENT_AGE_MS) {
-    // Event is too old - likely replay attack or stale event
+  lootOperationId: string,
+  attackStyle: string,
+  damageDealt: number,
+): Promise<boolean> {
+  const subtle = getSubtleCrypto();
+  if (
+    !subtle ||
+    !mobId ||
+    !killedBy ||
+    !Number.isSafeInteger(timestamp) ||
+    timestamp <= 0 ||
+    !attackStyle ||
+    attackStyle.length > 32 ||
+    !Number.isSafeInteger(damageDealt) ||
+    damageDealt <= 0 ||
+    damageDealt > MAX_MOB_COMBAT_DAMAGE ||
+    !KILL_TOKEN_PATTERN.test(token) ||
+    !MOB_LOOT_OPERATION_ID_PATTERN.test(lootOperationId)
+  ) {
     return false;
   }
 
-  // Validate token signature
-  const expectedToken = generateKillToken(mobId, killedBy, timestamp);
-  return token === expectedToken;
+  try {
+    const key = await importHmacKey(getSecret());
+    return await subtle.verify(
+      "HMAC",
+      key,
+      hexToBytes(token),
+      encoder.encode(
+        serializeKillAuthority(
+          mobId,
+          killedBy,
+          timestamp,
+          lootOperationId,
+          attackStyle,
+          damageDealt,
+        ),
+      ),
+    );
+  } catch {
+    return false;
+  }
 }
 
-/**
- * Check if kill token validation is available
- *
- * @returns true if crypto module is available (server-side)
- */
+/** Validate freshness, exact operation identity, and the complete HMAC. */
+export async function validateKillToken(
+  mobId: string,
+  killedBy: string,
+  timestamp: number,
+  token: string,
+  lootOperationId: string,
+  attackStyle: string,
+  damageDealt: number,
+): Promise<boolean> {
+  if (Math.abs(Date.now() - timestamp) > MAX_KILL_EVENT_AGE_MS) return false;
+  return validateKillTokenSignature(
+    mobId,
+    killedBy,
+    timestamp,
+    token,
+    lootOperationId,
+    attackStyle,
+    damageDealt,
+  );
+}
+
 export function isKillTokenValidationAvailable(): boolean {
-  return getCrypto() !== null;
+  return getSubtleCrypto() !== null;
 }

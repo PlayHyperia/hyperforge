@@ -225,7 +225,20 @@ export class GravestoneLootSystem extends SystemBase {
     transactionId: string,
   ): LootContext | null {
     const entity = this.getLootableEntity(corpseId);
-    if (!entity) return null;
+    if (!entity) {
+      // A service may validate an entity immediately before it is removed by
+      // another authoritative action. Always close the exact request instead
+      // of making the caller wait for its custody timeout.
+      this.emitLootResult(
+        playerId,
+        transactionId,
+        false,
+        corpseId,
+        "",
+        "INVALID_REQUEST",
+      );
+      return null;
+    }
 
     const ownerId = entity.getOwnerId();
     const zoneType = entity.getZoneType();

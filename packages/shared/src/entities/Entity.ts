@@ -2045,6 +2045,11 @@ export class Entity implements IEntity {
   ): Promise<void> {
     if (!this.hlodState || this.hlodState.impostorPending) return;
 
+    // Retain the exact state that owns this asynchronous bake. Avatars can
+    // replace their geometry while a prior LOD is still baking; an old result
+    // must never be installed into the replacement state's mesh/material slots.
+    const requestedState = this.hlodState;
+
     const manager = ImpostorManager.getInstance(this.world);
 
     // Initialize baker if needed
@@ -2061,36 +2066,42 @@ export class Entity implements IEntity {
       atlasSize: options.atlasSize ?? 1024,
       hemisphere: options.hemisphere ?? true,
       priority: options.priority ?? BakePriority.NORMAL,
-      category: this.hlodState.category,
+      category: requestedState.category,
       // AAA LOD: Pass prepareForBake to ImpostorManager - it calls it RIGHT BEFORE baking
       prepareForBake: options.prepareForBake,
     };
 
     try {
       const bakeResult = await manager.getOrCreate(
-        this.hlodState.modelId,
+        requestedState.modelId,
         source,
         impostorOptions,
       );
 
+      if (this.hlodState !== requestedState) {
+        return;
+      }
+
       const meshCreated = this.createHLODImpostorMesh(bakeResult);
-      this.hlodState.bakeResult = bakeResult;
+      requestedState.bakeResult = bakeResult;
       // Only mark as ready if mesh was actually created
       if (meshCreated) {
-        this.hlodState.impostorReady = true;
+        requestedState.impostorReady = true;
         console.log(`[Entity HLOD] ✅ Impostor ready for ${this.name}`);
       } else {
         console.warn(
           `[Entity HLOD] ⚠️ Bake succeeded but mesh creation failed for ${this.name}`,
         );
       }
-      this.hlodState.impostorPending = false;
+      requestedState.impostorPending = false;
     } catch (err) {
       console.warn(
         `[Entity] Failed to create HLOD impostor for ${this.name}:`,
         err,
       );
-      this.hlodState.impostorPending = false;
+      if (this.hlodState === requestedState) {
+        requestedState.impostorPending = false;
+      }
     }
   }
 

@@ -138,6 +138,75 @@ function assertExactExistingFit(metadata, fit) {
   }
 }
 
+function validateSemanticGripContact(document, gripContact, attachmentBone) {
+  if (!isRecord(gripContact) || gripContact.schemaVersion !== 1) {
+    throw new Error("Semantic grip authority must use schemaVersion 1");
+  }
+  if (
+    typeof gripContact.contentNodeName !== "string" ||
+    gripContact.contentNodeName.trim() !== gripContact.contentNodeName ||
+    gripContact.contentNodeName.length < 1 ||
+    !Array.isArray(document.nodes) ||
+    !document.nodes.some((node) => node?.name === gripContact.contentNodeName)
+  ) {
+    throw new Error(
+      "Semantic grip authority must name an existing content node",
+    );
+  }
+  if (
+    !Array.isArray(gripContact.sourceAxis) ||
+    gripContact.sourceAxis.length !== 3 ||
+    gripContact.sourceAxis.some(
+      (value) => typeof value !== "number" || !Number.isFinite(value),
+    ) ||
+    Math.hypot(...gripContact.sourceAxis) <= 0.000001
+  ) {
+    throw new Error("Semantic grip authority must define a finite source axis");
+  }
+  if (!["minimum", "maximum", "dynamic-aim"].includes(gripContact.actionEnd)) {
+    throw new Error("Semantic grip authority has an invalid action end");
+  }
+  if (
+    !Array.isArray(gripContact.zones) ||
+    gripContact.zones.length < 1 ||
+    gripContact.zones.length > 2
+  ) {
+    throw new Error(
+      "Semantic grip authority must define one or two handle zones",
+    );
+  }
+  const zoneIds = new Set();
+  for (const zone of gripContact.zones) {
+    if (
+      !isRecord(zone) ||
+      (zone.id !== "primary" && zone.id !== "secondary") ||
+      zoneIds.has(zone.id) ||
+      (zone.boneName !== "leftHand" && zone.boneName !== "rightHand") ||
+      typeof zone.minimumSourceProjection !== "number" ||
+      !Number.isFinite(zone.minimumSourceProjection) ||
+      typeof zone.maximumSourceProjection !== "number" ||
+      !Number.isFinite(zone.maximumSourceProjection) ||
+      zone.minimumSourceProjection >= zone.maximumSourceProjection
+    ) {
+      throw new Error(
+        "Semantic grip authority contains an invalid handle zone",
+      );
+    }
+    zoneIds.add(zone.id);
+  }
+  const primary = gripContact.zones.find((zone) => zone.id === "primary");
+  if (!primary || primary.boneName !== attachmentBone) {
+    throw new Error(
+      "Semantic grip primary zone must use the fitted attachment hand",
+    );
+  }
+  const secondary = gripContact.zones.find((zone) => zone.id === "secondary");
+  if (secondary?.boneName === attachmentBone) {
+    throw new Error("Semantic grip secondary zone must use the other hand");
+  }
+  return cloneJson(gripContact);
+}
+
 function structuralDocumentFingerprint(document) {
   const copy = cloneJson(document);
   if (Array.isArray(copy.scenes)) {
@@ -155,7 +224,7 @@ function structuralDocumentFingerprint(document) {
 
 export function certifyRigidDuelEquipmentGlb(
   input,
-  { itemId, avatarId, legacyAvatarId, slot },
+  { itemId, avatarId, legacyAvatarId, slot, gripContact },
 ) {
   if (!SAFE_ID_PATTERN.test(itemId) || !SAFE_ID_PATTERN.test(avatarId)) {
     throw new Error("Item and avatar IDs must be safe competitive IDs");
@@ -188,6 +257,12 @@ export function certifyRigidDuelEquipmentGlb(
     throw new Error("Legacy attachment avatar identity does not match");
   }
 
+  const certifiedGripContact = validateSemanticGripContact(
+    parsed.document,
+    gripContact,
+    metadata.vrmBoneName,
+  );
+
   const duelFit = {
     schemaVersion: 1,
     itemId,
@@ -201,7 +276,23 @@ export function certifyRigidDuelEquipmentGlb(
   if (isRecord(existingSceneMetadata)) {
     assertExactExistingFit(existingSceneMetadata, duelFit);
   }
-  const certifiedMetadata = { ...metadata, duelFit };
+  for (const existingMetadata of [metadata, existingSceneMetadata]) {
+    if (
+      isRecord(existingMetadata) &&
+      existingMetadata.gripContact !== undefined &&
+      JSON.stringify(existingMetadata.gripContact) !==
+        JSON.stringify(certifiedGripContact)
+    ) {
+      throw new Error(
+        "Existing semantic grip authority contradicts the request",
+      );
+    }
+  }
+  const certifiedMetadata = {
+    ...metadata,
+    duelFit,
+    gripContact: certifiedGripContact,
+  };
   scene.extras = {
     ...(isRecord(scene.extras) ? scene.extras : {}),
     hyperia: cloneJson(certifiedMetadata),
@@ -252,6 +343,7 @@ export function certifyRigidDuelEquipmentGlb(
       outputBytes: output.length,
       changed: !input.equals(output),
       duelFit,
+      gripContact: certifiedGripContact,
     },
   };
 }

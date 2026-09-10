@@ -15,9 +15,22 @@
 import {
   COMBAT_SPELLS,
   ELEMENTAL_STAVES,
+  STREAMING_DUEL_PUBLIC_PRAYERS,
   TICK_DURATION_MS,
   getItem,
+  type PrayerActionReceipt,
+  type StreamingDuelActionObservation,
+  type StreamingDuelExecutorCommandOutcome,
+  type StreamingDuelExecutorObservationContext,
+  type StreamingDuelFoodObservationContext,
+  type StreamingDuelPrayerObservationContext,
+  type StreamingDuelRoleSwitchObservationContext,
+  type StreamingDuelStyleObservationContext,
+  type StreamingDuelPublicCombatRole,
+  type StreamingDuelPublicPrayer,
+  type StreamingDuelPublicStyle,
 } from "@hyperforge/shared";
+import { randomUUID } from "node:crypto";
 import type { EmbeddedHyperiaService } from "../eliza/EmbeddedHyperiaService";
 import type { EmbeddedGameState } from "../eliza/types";
 import type {
@@ -56,6 +69,7 @@ export interface DuelCombatConfig {
   switchCombatRole?: (
     role: SwitchableStreamingCombatRole,
     operationId: string,
+    publicActionObservation?: StreamingDuelRoleSwitchObservationContext,
   ) => Promise<{
     ok: boolean;
     retryable: boolean;
@@ -81,7 +95,47 @@ export interface DuelCombatConfig {
    * same standoff point.
    */
   initialStrafeSign?: 1 | -1;
+  /** Immutable server identity required for atomic custody/stream receipts. */
+  publicActionIdentity?: DuelCombatPublicActionIdentity;
+  /** Privacy-safe observer; failures must never affect combat authority. */
+  onPublicActionObservation?: (
+    observation: DuelCombatPublicActionObservation,
+    persistence?: DuelCombatPublicActionPersistence,
+  ) => void;
 }
+
+export type DuelCombatPublicActionIdentity = Pick<
+  StreamingDuelFoodObservationContext,
+  "cycleId" | "duelId" | "actorId" | "opponentId" | "phase"
+>;
+
+export type DuelCombatPublicActionPersistence = Pick<
+  StreamingDuelFoodObservationContext,
+  "operationId" | "observedAt"
+>;
+
+export type DuelCombatPublicActionObservation =
+  StreamingDuelActionObservation extends infer Observation
+    ? Observation extends StreamingDuelActionObservation
+      ? Pick<
+          Observation,
+          | "tick"
+          | "combatRole"
+          | "tacticalMacro"
+          | "action"
+          | "outcome"
+          | "value"
+          | "amount"
+        >
+      : never
+    : never;
+
+type DuelCombatPublicActionDetail =
+  DuelCombatPublicActionObservation extends infer Observation
+    ? Observation extends DuelCombatPublicActionObservation
+      ? Pick<Observation, "action" | "outcome" | "value" | "amount">
+      : never
+    : never;
 
 const DEFAULT_CONFIG: DuelCombatConfig = {
   healThresholdPct: 40,
@@ -152,9 +206,94 @@ const FALLBACK_TAUNTS_OPENING = [
 ];
 
 type CombatPhase = "opening" | "trading" | "finishing" | "desperate";
+type HealDecision = "none" | "disengaged" | "consumed";
+type CombatObservationGuard = {
+  playerHealth: number;
+  opponentHealth: number | null;
+  inventoryCustody: string;
+  equipmentCustody: string;
+  prayerCustody: string;
+  activePrayerCustody: string;
+};
 
 export const TACTICAL_MACROS = COMPETITIVE_TACTICAL_MACROS;
 export type TacticalMacro = (typeof TACTICAL_MACROS)[number];
+
+type TacticalMovementBounds = {
+  minX: number;
+  maxX: number;
+  minZ: number;
+  maxZ: number;
+};
+
+function adjacentTileCenter(
+  origin: number,
+  proposed: number,
+  preferredSign: 1 | -1,
+  minimum: number,
+  maximum: number,
+): number | null {
+  const originTile = Math.floor(origin);
+  const candidates = ([preferredSign, -preferredSign] as const)
+    .map((sign, order) => ({
+      value: originTile + sign + 0.5,
+      order,
+    }))
+    .filter(
+      ({ value }) =>
+        value >= minimum &&
+        value <= maximum &&
+        Math.floor(value) !== originTile,
+    )
+    .sort(
+      (left, right) =>
+        Math.abs(left.value - proposed) - Math.abs(right.value - proposed) ||
+        left.order - right.order,
+    );
+  return candidates[0]?.value ?? null;
+}
+
+/**
+ * Preserve a real two-axis tile step after continuous spacing math and arena
+ * clamping. This keeps projectile orbit/kite paths diagonal when the ring has
+ * room, while retaining any already-authored component and never crossing the
+ * movement envelope.
+ */
+export function ensureDuelProjectileDiagonalDestination(
+  origin: readonly [number, number],
+  proposed: readonly [number, number],
+  strafeSign: 1 | -1,
+  bounds?: TacticalMovementBounds,
+): [number, number] {
+  const limits = bounds ?? {
+    minX: Number.NEGATIVE_INFINITY,
+    maxX: Number.POSITIVE_INFINITY,
+    minZ: Number.NEGATIVE_INFINITY,
+    maxZ: Number.POSITIVE_INFINITY,
+  };
+  let [targetX, targetZ] = proposed;
+  if (Math.floor(targetX) === Math.floor(origin[0])) {
+    targetX =
+      adjacentTileCenter(
+        origin[0],
+        targetX,
+        strafeSign,
+        limits.minX,
+        limits.maxX,
+      ) ?? targetX;
+  }
+  if (Math.floor(targetZ) === Math.floor(origin[1])) {
+    targetZ =
+      adjacentTileCenter(
+        origin[1],
+        targetZ,
+        -strafeSign as 1 | -1,
+        limits.minZ,
+        limits.maxZ,
+      ) ?? targetZ;
+  }
+  return [targetX, targetZ];
+}
 
 /** Role-based offensive prayers that actually exist in the prayer manifest. */
 const OFFENSIVE_PRAYER: Record<
@@ -243,13 +382,28 @@ export class DuelCombatAI {
   private totalDamageReceived = 0;
   /** Request-path diagnostics only; authoritative hits/heals come from world events. */
   private foodUseAttempts = 0;
+  /** Number of deliberate decision yields before eating under pressure. */
+  private foodDisengageYields = 0;
+  /** Yields exactly one combat decision after requesting space to eat. */
+  private foodDisengagePending = false;
   private engagementAttempts = 0;
+  private engagementAccepts = 0;
+  private engagementRejects = 0;
+  private engagementErrors = 0;
+  private lastEngagementFailureReason: string | null = null;
   private activePrayers: Set<string> = new Set();
-  private currentStyle: string = "accurate";
+  private currentStyle: StreamingDuelPublicStyle = "accurate";
+  private styleChangeAttempts = 0;
+  private styleChangeAccepts = 0;
+  private styleChangeRejects = 0;
+  private styleChangeErrors = 0;
+  private lastStyleChangeFailureReason: string | null = null;
+  private styleRetryPending = false;
   private strategy: CombatStrategy = { ...DEFAULT_STRATEGY };
   private roleSwitchSequence = 0;
   private successfulRoleSwitches = 0;
   private roleSwitchAttempts = 0;
+  private roleSwitchDeferrals = 0;
   private roleSwitchFailures = 0;
   private lastRoleSwitchFailureReason: string | null = null;
   private lastRoleSwitchTick = Number.NEGATIVE_INFINITY;
@@ -257,6 +411,7 @@ export class DuelCombatAI {
   private pendingRoleSwitch: {
     role: SwitchableStreamingCombatRole;
     operationId: string;
+    publicActionObservation?: StreamingDuelRoleSwitchObservationContext;
   } | null = null;
   private lastExecutedTacticalMacro: TacticalMacro = "hold_range";
   private strategyPlanned = false;
@@ -286,7 +441,7 @@ export class DuelCombatAI {
   private _trashTalkInFlight = false;
   /** Next tick count when an ambient taunt is eligible. */
   private nextAmbientTauntTick = 0;
-  /** Tick count of last executeAttack call (for periodic keep-alive re-engagement). */
+  /** Tick count of last accepted executeAttack request. */
   private _lastEngageTick = 0;
   /** How often (in ticks) to force re-engagement as a keep-alive. */
   private static readonly RE_ENGAGE_INTERVAL = 5;
@@ -308,6 +463,10 @@ export class DuelCombatAI {
   private warnedNoFood = false;
   /** Launch telemetry: requested repositions and their immediate tile-path state. */
   private movementRequests = 0;
+  private movementAccepts = 0;
+  private movementRejects = 0;
+  private movementErrors = 0;
+  private lastMovementFailureReason: string | null = null;
   private movementPathsActive = 0;
   private movementPathsInactive = 0;
   private minObservedDistance = Number.POSITIVE_INFINITY;
@@ -318,13 +477,24 @@ export class DuelCombatAI {
   private prayerToggleAttempts = 0;
   private prayerToggleCommits = 0;
   private prayerToggleRejects = 0;
+  /** Retained for the full controller lifetime so a later success cannot erase failure evidence. */
   private lastPrayerToggleFailureReason: string | null = null;
   private prayerToggleCommittedThisTick = false;
   private unavailablePrayersForFight = new Set<string>();
   /** Movement AI cooldown (ms) — longer = more deliberate, less jittery */
   private static readonly MOVE_COOLDOWN_MS = 1800;
+  /**
+   * Let an accepted ordinary path finish before issuing another destination.
+   * Replacing it at the movement cooldown can repeatedly discard the final
+   * diagonal tile and turn intended arcs into rigid cardinal-only motion.
+   */
+  private static readonly ACTIVE_PATH_REPLAN_TIMEOUT_MS = 4800;
   /** Pace coordinated same-style footwork so it punctuates attacks instead of replacing them. */
   private static readonly PAIRED_FOOTWORK_INTERVAL_TICKS = 8;
+  /** Pace coordinated pressure without replacing ordinary attack contact. */
+  private static readonly PRESSURE_FOOTWORK_INTERVAL_TICKS = 6;
+  /** Mixed-style pressure needs a faster safe tangent to avoid static exchanges. */
+  private static readonly MIXED_PRESSURE_FOOTWORK_INTERVAL_TICKS = 4;
   /** Minimum paired offset that survives half-tile production spawn alignment. */
   private static readonly PAIRED_FOOTWORK_STEP = 1.1;
   /** Perpendicular offset magnitude (world units) when strafing during reposition */
@@ -342,8 +512,12 @@ export class DuelCombatAI {
     { min: number; max: number }
   > = {
     melee: { min: 1.5, max: 3.0 },
-    ranged: { min: 5, max: 8 },
-    mage: { min: 5, max: 8 },
+    // Projectile roles keep a meaningful multi-tile advantage over melee while
+    // staying inside the broadcast's full-body 4:3 combat envelope. Each AI
+    // contributes half of a spacing correction, so this remains active kiting,
+    // not a fixed five-metre leash or a stationary turret policy.
+    ranged: { min: 4, max: 5 },
+    mage: { min: 4, max: 5 },
   };
 
   /** Track last phase for change detection (#7) */
@@ -389,12 +563,27 @@ export class DuelCombatAI {
     this.totalDamageDealt = 0;
     this.totalDamageReceived = 0;
     this.foodUseAttempts = 0;
+    this.foodDisengageYields = 0;
+    this.foodDisengagePending = false;
     this.engagementAttempts = 0;
+    this.engagementAccepts = 0;
+    this.engagementRejects = 0;
+    this.engagementErrors = 0;
+    this.lastEngagementFailureReason = null;
+    this._lastEngageTick = 0;
+    this.currentStyle = "accurate";
+    this.styleChangeAttempts = 0;
+    this.styleChangeAccepts = 0;
+    this.styleChangeRejects = 0;
+    this.styleChangeErrors = 0;
+    this.lastStyleChangeFailureReason = null;
+    this.styleRetryPending = false;
     this.lastFoodUseTime = 0;
     this.lastMoveTime = 0;
     this.roleSwitchSequence = 0;
     this.successfulRoleSwitches = 0;
     this.roleSwitchAttempts = 0;
+    this.roleSwitchDeferrals = 0;
     this.roleSwitchFailures = 0;
     this.lastRoleSwitchFailureReason = null;
     this.lastRoleSwitchTick = Number.NEGATIVE_INFINITY;
@@ -406,6 +595,10 @@ export class DuelCombatAI {
     this.strafeMoveCount = 0;
     this.warnedNoFood = false;
     this.movementRequests = 0;
+    this.movementAccepts = 0;
+    this.movementRejects = 0;
+    this.movementErrors = 0;
+    this.lastMovementFailureReason = null;
     this.movementPathsActive = 0;
     this.movementPathsInactive = 0;
     this.minObservedDistance = Number.POSITIVE_INFINITY;
@@ -424,9 +617,11 @@ export class DuelCombatAI {
     const committedStrategy = normalizeCompetitiveTacticalStrategy(
       this.config.tacticalStrategy,
       availableCombatRoles,
+      this.config.availablePrayerIds,
     );
     const deterministicStrategy = buildDeterministicCompetitiveTacticalStrategy(
       this.config.combatRole,
+      this.config.availablePrayerIds,
     );
     this.strategy = {
       ...(committedStrategy ?? deterministicStrategy),
@@ -464,8 +659,15 @@ export class DuelCombatAI {
     duelLogInfo(
       "DuelCombatAI",
       `Stopped after ${this.tickCount} ticks. ` +
-        `Engagement attempts: ${this.engagementAttempts}, Food-use attempts: ${this.foodUseAttempts}, ` +
-        `Movement: ${this.movementRequests} requested (${this.movementPathsActive} active paths, ${this.movementPathsInactive} inactive), ` +
+        `Engagement accepts: ${this.engagementAccepts}/${this.engagementAttempts} ` +
+        `(${this.engagementRejects} rejected, ${this.engagementErrors} errored), ` +
+        `Style accepts: ${this.styleChangeAccepts}/${this.styleChangeAttempts} ` +
+        `(${this.styleChangeRejects} rejected, ${this.styleChangeErrors} errored), ` +
+        `Food-use attempts: ${this.foodUseAttempts}, ` +
+        `Food disengages: ${this.foodDisengageYields}, ` +
+        `Movement accepts: ${this.movementAccepts}/${this.movementRequests} ` +
+        `(${this.movementRejects} rejected, ${this.movementErrors} errored; ` +
+        `${this.movementPathsActive} active paths, ${this.movementPathsInactive} inactive), ` +
         `distance=${Number.isFinite(this.minObservedDistance) ? this.minObservedDistance.toFixed(2) : "n/a"}..${this.maxObservedDistance.toFixed(2)}, ` +
         `Dmg dealt: ${this.totalDamageDealt}, Dmg received: ${this.totalDamageReceived}`,
     );
@@ -507,10 +709,24 @@ export class DuelCombatAI {
   getStats(): {
     tickCount: number;
     engagementAttempts: number;
+    engagementAccepts: number;
+    engagementRejects: number;
+    engagementErrors: number;
+    lastEngagementFailureReason: string | null;
+    styleChangeAttempts: number;
+    styleChangeAccepts: number;
+    styleChangeRejects: number;
+    styleChangeErrors: number;
+    lastStyleChangeFailureReason: string | null;
     foodUseAttempts: number;
+    foodDisengageYields: number;
     totalDamageDealt: number;
     totalDamageReceived: number;
     movementRequests: number;
+    movementAccepts: number;
+    movementRejects: number;
+    movementErrors: number;
+    lastMovementFailureReason: string | null;
     movementPathsActive: number;
     movementPathsInactive: number;
     minObservedDistance: number | null;
@@ -519,6 +735,7 @@ export class DuelCombatAI {
     lastExecutedTacticalMacro: TacticalMacro;
     combatRole: DuelCombatConfig["combatRole"];
     roleSwitchAttempts: number;
+    roleSwitchDeferrals: number;
     successfulRoleSwitches: number;
     roleSwitchFailures: number;
     lastRoleSwitchFailureReason: string | null;
@@ -532,10 +749,24 @@ export class DuelCombatAI {
     return {
       tickCount: this.tickCount,
       engagementAttempts: this.engagementAttempts,
+      engagementAccepts: this.engagementAccepts,
+      engagementRejects: this.engagementRejects,
+      engagementErrors: this.engagementErrors,
+      lastEngagementFailureReason: this.lastEngagementFailureReason,
+      styleChangeAttempts: this.styleChangeAttempts,
+      styleChangeAccepts: this.styleChangeAccepts,
+      styleChangeRejects: this.styleChangeRejects,
+      styleChangeErrors: this.styleChangeErrors,
+      lastStyleChangeFailureReason: this.lastStyleChangeFailureReason,
       foodUseAttempts: this.foodUseAttempts,
+      foodDisengageYields: this.foodDisengageYields,
       totalDamageDealt: this.totalDamageDealt,
       totalDamageReceived: this.totalDamageReceived,
       movementRequests: this.movementRequests,
+      movementAccepts: this.movementAccepts,
+      movementRejects: this.movementRejects,
+      movementErrors: this.movementErrors,
+      lastMovementFailureReason: this.lastMovementFailureReason,
       movementPathsActive: this.movementPathsActive,
       movementPathsInactive: this.movementPathsInactive,
       minObservedDistance: Number.isFinite(this.minObservedDistance)
@@ -546,6 +777,7 @@ export class DuelCombatAI {
       lastExecutedTacticalMacro: this.lastExecutedTacticalMacro,
       combatRole: this.config.combatRole,
       roleSwitchAttempts: this.roleSwitchAttempts,
+      roleSwitchDeferrals: this.roleSwitchDeferrals,
       successfulRoleSwitches: this.successfulRoleSwitches,
       roleSwitchFailures: this.roleSwitchFailures,
       lastRoleSwitchFailureReason: this.lastRoleSwitchFailureReason,
@@ -558,8 +790,414 @@ export class DuelCombatAI {
     };
   }
 
+  private observePublicAction(
+    detail: DuelCombatPublicActionDetail,
+    persistence?: DuelCombatPublicActionPersistence,
+  ): void {
+    const callback = this.config.onPublicActionObservation;
+    if (!callback) return;
+    const combatRole = this.config.combatRole;
+    if (
+      combatRole !== "melee" &&
+      combatRole !== "ranged" &&
+      combatRole !== "mage"
+    ) {
+      return;
+    }
+
+    try {
+      callback(
+        {
+          tick: this.tickCount,
+          combatRole: combatRole as StreamingDuelPublicCombatRole,
+          tacticalMacro: this.lastExecutedTacticalMacro,
+          ...detail,
+        } as DuelCombatPublicActionObservation,
+        persistence,
+      );
+    } catch (error) {
+      // Public presentation is downstream of combat authority. A broken
+      // observer is diagnosable but can never change a duel decision/receipt.
+      duelLogDebug(
+        "DuelCombatAI",
+        "Public action observer rejected an observation:",
+        errMsg(error),
+      );
+    }
+  }
+
+  private createExecutorObservationContext(
+    action: "movement" | "engagement",
+    value: "reposition" | "initial" | "keep_alive",
+  ): StreamingDuelExecutorObservationContext | null {
+    const identity = this.config.publicActionIdentity;
+    const combatRole = this.config.combatRole;
+    if (
+      !identity ||
+      !this.config.onPublicActionObservation ||
+      (combatRole !== "melee" &&
+        combatRole !== "ranged" &&
+        combatRole !== "mage") ||
+      (action === "movement" && value !== "reposition") ||
+      (action === "engagement" && value !== "initial" && value !== "keep_alive")
+    ) {
+      return null;
+    }
+    return Object.freeze({
+      operationId: randomUUID(),
+      tick: this.tickCount,
+      observedAt: Date.now(),
+      ...identity,
+      combatRole,
+      tacticalMacro: this.lastExecutedTacticalMacro,
+      action,
+      value,
+    }) as StreamingDuelExecutorObservationContext;
+  }
+
+  private observeCommittedExecutor(
+    context: StreamingDuelExecutorObservationContext,
+    outcome: StreamingDuelExecutorCommandOutcome,
+  ): void {
+    this.observePublicAction(
+      {
+        action: context.action,
+        outcome,
+        value: context.value,
+        amount: null,
+      } as DuelCombatPublicActionDetail,
+      {
+        operationId: context.operationId,
+        observedAt: context.observedAt,
+      },
+    );
+  }
+
+  private createFoodObservationContext(): StreamingDuelFoodObservationContext | null {
+    const identity = this.config.publicActionIdentity;
+    const combatRole = this.config.combatRole;
+    if (
+      !identity ||
+      !this.config.onPublicActionObservation ||
+      (combatRole !== "melee" &&
+        combatRole !== "ranged" &&
+        combatRole !== "mage")
+    ) {
+      return null;
+    }
+    return Object.freeze({
+      operationId: randomUUID(),
+      tick: this.tickCount,
+      observedAt: Date.now(),
+      ...identity,
+      combatRole,
+      tacticalMacro: this.lastExecutedTacticalMacro,
+    });
+  }
+
+  private observeCommittedFood(
+    context: StreamingDuelFoodObservationContext,
+    healedAmount: number,
+  ): void {
+    try {
+      this.config.onPublicActionObservation?.(
+        {
+          tick: context.tick,
+          combatRole: context.combatRole,
+          tacticalMacro: context.tacticalMacro,
+          action: "food",
+          outcome: "committed",
+          value: "consume",
+          amount: healedAmount,
+        },
+        {
+          operationId: context.operationId,
+          observedAt: context.observedAt,
+        },
+      );
+    } catch (error) {
+      duelLogDebug(
+        "DuelCombatAI",
+        "Public committed-food observer rejected an observation:",
+        errMsg(error),
+      );
+    }
+  }
+
+  private observePublicPrayer(
+    prayerId: string,
+    outcome: "committed" | "rejected" | "error",
+  ): void {
+    const publicPrayer = STREAMING_DUEL_PUBLIC_PRAYERS.find(
+      (candidate): candidate is StreamingDuelPublicPrayer =>
+        candidate === prayerId,
+    );
+    if (!publicPrayer) return;
+    this.observePublicAction({
+      action: "prayer",
+      outcome,
+      value: publicPrayer,
+      amount: null,
+    });
+  }
+
+  private createPrayerObservationContext(
+    prayerId: string,
+  ): StreamingDuelPrayerObservationContext | null {
+    const publicPrayer = STREAMING_DUEL_PUBLIC_PRAYERS.find(
+      (candidate): candidate is StreamingDuelPublicPrayer =>
+        candidate === prayerId,
+    );
+    const identity = this.config.publicActionIdentity;
+    const combatRole = this.config.combatRole;
+    if (
+      !publicPrayer ||
+      !identity ||
+      !this.config.onPublicActionObservation ||
+      (combatRole !== "melee" &&
+        combatRole !== "ranged" &&
+        combatRole !== "mage")
+    ) {
+      return null;
+    }
+    return Object.freeze({
+      operationId: randomUUID(),
+      tick: this.tickCount,
+      observedAt: Date.now(),
+      ...identity,
+      combatRole,
+      tacticalMacro: this.lastExecutedTacticalMacro,
+      prayer: publicPrayer,
+    });
+  }
+
+  private observeCommittedPrayer(
+    context: StreamingDuelPrayerObservationContext,
+  ): void {
+    try {
+      this.config.onPublicActionObservation?.(
+        {
+          tick: context.tick,
+          combatRole: context.combatRole,
+          tacticalMacro: context.tacticalMacro,
+          action: "prayer",
+          outcome: "committed",
+          value: context.prayer,
+          amount: null,
+        },
+        {
+          operationId: context.operationId,
+          observedAt: context.observedAt,
+        },
+      );
+    } catch (error) {
+      duelLogDebug(
+        "DuelCombatAI",
+        "Public committed-prayer observer rejected an observation:",
+        errMsg(error),
+      );
+    }
+  }
+
+  private createRoleSwitchObservationContext(
+    targetRole: SwitchableStreamingCombatRole,
+  ): StreamingDuelRoleSwitchObservationContext | null {
+    const identity = this.config.publicActionIdentity;
+    const combatRole = this.config.combatRole;
+    if (
+      !identity ||
+      !this.config.onPublicActionObservation ||
+      (combatRole !== "melee" &&
+        combatRole !== "ranged" &&
+        combatRole !== "mage")
+    ) {
+      return null;
+    }
+    return Object.freeze({
+      operationId: randomUUID(),
+      tick: this.tickCount,
+      observedAt: Date.now(),
+      ...identity,
+      combatRole,
+      tacticalMacro: this.lastExecutedTacticalMacro,
+      targetRole,
+    });
+  }
+
+  private observeCommittedRoleSwitch(
+    context: StreamingDuelRoleSwitchObservationContext,
+  ): void {
+    try {
+      this.config.onPublicActionObservation?.(
+        {
+          tick: context.tick,
+          combatRole: context.combatRole,
+          tacticalMacro: context.tacticalMacro,
+          action: "role_switch",
+          outcome: "committed",
+          value: context.targetRole,
+          amount: null,
+        },
+        {
+          operationId: context.operationId,
+          observedAt: context.observedAt,
+        },
+      );
+    } catch (error) {
+      duelLogDebug(
+        "DuelCombatAI",
+        "Public committed-role observer rejected an observation:",
+        errMsg(error),
+      );
+    }
+  }
+
+  private createStyleObservationContext(
+    style: StreamingDuelPublicStyle,
+  ): StreamingDuelStyleObservationContext | null {
+    const identity = this.config.publicActionIdentity;
+    const combatRole = this.config.combatRole;
+    if (
+      !identity ||
+      !this.config.onPublicActionObservation ||
+      (combatRole !== "melee" &&
+        combatRole !== "ranged" &&
+        combatRole !== "mage")
+    ) {
+      return null;
+    }
+    return Object.freeze({
+      operationId: randomUUID(),
+      tick: this.tickCount,
+      observedAt: Date.now(),
+      ...identity,
+      combatRole,
+      tacticalMacro: this.lastExecutedTacticalMacro,
+      style,
+    });
+  }
+
+  private observeCommittedStyle(
+    context: StreamingDuelStyleObservationContext,
+  ): void {
+    try {
+      this.config.onPublicActionObservation?.(
+        {
+          tick: context.tick,
+          combatRole: context.combatRole,
+          tacticalMacro: context.tacticalMacro,
+          action: "style",
+          outcome: "accepted",
+          value: context.style,
+          amount: null,
+        },
+        {
+          operationId: context.operationId,
+          observedAt: context.observedAt,
+        },
+      );
+    } catch (error) {
+      duelLogDebug(
+        "DuelCombatAI",
+        "Public committed-style observer rejected an observation:",
+        errMsg(error),
+      );
+    }
+  }
+
+  /**
+   * Re-read the minimum live authority needed to continue a decision after an
+   * awaited server action. Receipt latency must not let a dead fighter, a dead
+   * or vanished opponent, or a foreign combat target cascade into another
+   * movement, inventory, Prayer, style, or attack request.
+   */
+  private canContinueCurrentFight(expected?: CombatObservationGuard): boolean {
+    if (!this.isRunning) return false;
+    const latest = this.service.getGameState();
+    if (!latest) return false;
+    if (!latest.alive) {
+      this.stop();
+      return false;
+    }
+    if (
+      latest.currentTarget !== null &&
+      latest.currentTarget !== this.opponentId
+    ) {
+      return false;
+    }
+    const opponent = latest.nearbyEntities.find(
+      (entity) => entity.id === this.opponentId,
+    );
+    if (!opponent) return false;
+    if (typeof opponent.health === "number" && opponent.health <= 0) {
+      return false;
+    }
+    if (expected) {
+      if (latest.health !== expected.playerHealth) return false;
+      if (
+        expected.opponentHealth !== null &&
+        typeof opponent.health === "number" &&
+        opponent.health !== expected.opponentHealth
+      ) {
+        return false;
+      }
+      if (
+        this.inventoryCustodyFingerprint(latest) !==
+          expected.inventoryCustody ||
+        this.equipmentCustodyFingerprint(latest) !==
+          expected.equipmentCustody ||
+        this.prayerCustodyFingerprint(latest) !== expected.prayerCustody ||
+        this.activePrayerFingerprint(latest.activePrayers) !==
+          expected.activePrayerCustody
+      ) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  private inventoryCustodyFingerprint(state: EmbeddedGameState): string {
+    return state.inventory
+      .map((item) => `${item.slot}:${item.itemId}:${item.quantity}`)
+      .sort()
+      .join("|");
+  }
+
+  private equipmentCustodyFingerprint(state: EmbeddedGameState): string {
+    return Object.entries(state.equipment)
+      .map(
+        ([slot, item]) =>
+          `${slot}:${item.itemId}:${item.quantity === undefined ? 1 : item.quantity}`,
+      )
+      .sort()
+      .join("|");
+  }
+
+  private prayerCustodyFingerprint(state: EmbeddedGameState): string {
+    if (state.prayerPointUnits !== undefined) {
+      return `units:${state.prayerPointUnits}`;
+    }
+    if (state.prayerPoints !== undefined) {
+      return `points:${state.prayerPoints}`;
+    }
+    return "unavailable";
+  }
+
+  private activePrayerFingerprint(prayers: readonly string[]): string {
+    return [...prayers].sort().join("|");
+  }
+
+  private refreshExpectedActivePrayers(
+    expected?: CombatObservationGuard,
+  ): void {
+    if (!expected) return;
+    expected.activePrayerCustody = this.activePrayerFingerprint([
+      ...this.activePrayers,
+    ]);
+  }
+
   private async tick(): Promise<void> {
-    if (!this.isRunning) return;
+    if (!this.canContinueCurrentFight()) return;
     this.tickCount++;
     this.prayerToggleCommittedThisTick = false;
 
@@ -607,6 +1245,14 @@ export class DuelCombatAI {
       }
       this.opponentLastHealthPct = oppHealthPct;
     }
+    const observationGuard: CombatObservationGuard = {
+      playerHealth: state.health,
+      opponentHealth: opponentData?.health ?? null,
+      inventoryCustody: this.inventoryCustodyFingerprint(state),
+      equipmentCustody: this.equipmentCustodyFingerprint(state),
+      prayerCustody: this.prayerCustodyFingerprint(state),
+      activePrayerCustody: this.activePrayerFingerprint(state.activePrayers),
+    };
 
     // 5. Determine phase + detect phase change (#7)
     const phase = this.determineCombatPhase(healthPct, opponentData);
@@ -618,6 +1264,7 @@ export class DuelCombatAI {
     if (opponentData) {
       try {
         await this.maybeActivateProtectionPrayer(opponentData);
+        this.refreshExpectedActivePrayers(observationGuard);
       } catch (error) {
         duelLogDebug(
           "DuelCombatAI",
@@ -626,7 +1273,7 @@ export class DuelCombatAI {
         );
       }
     }
-    if (!this.isRunning) return;
+    if (!this.canContinueCurrentFight(observationGuard)) return;
 
     // 6. Trash talk (fire-and-forget, never blocks tick)
     this.checkHealthMilestones(
@@ -638,47 +1285,58 @@ export class DuelCombatAI {
     this.maybeAmbientTrashTalk(healthPct, opponentData);
 
     // 7. tryHeal (context-aware #4, finishing adjustment #10, burst-reactive)
-    const healed = await this.tryHeal(
+    const healDecision = await this.tryHeal(
       state,
       healthPct,
       phase,
       opponentData,
       damageThisTickPct,
+      observationGuard,
     );
     if (!this.isRunning) return;
-    if (healed) {
+    if (healDecision === "consumed") {
       this.foodUseAttempts++;
+    }
+    if (healDecision !== "none") {
       return;
     }
+    if (!this.canContinueCurrentFight(observationGuard)) return;
 
     // A role switch stops the old combat instance, commits the complete frozen
     // loadout, and intentionally yields this tick. Re-engagement happens from
     // the newly observed equipment on the next authoritative tick.
     const switchedRole = await this.maybeSwitchCombatRole(state, opponentData);
-    if (!this.isRunning) return;
+    if (!this.canContinueCurrentFight(observationGuard)) return;
     if (switchedRole) {
       return;
     }
 
     // 8. tryBuff (+ prayer activation at fight start #16)
     const usedBuff = await this.tryBuff(state, phase);
-    if (!this.isRunning) return;
+    this.refreshExpectedActivePrayers(observationGuard);
+    if (!this.canContinueCurrentFight(observationGuard)) return;
     if (usedBuff) {
       return;
     }
 
     // 9. Movement AI - kite/chase by role (#1, #5, #17)
-    this.movementTick(state, opponentData, Date.now(), phase);
+    await this.movementTick(state, opponentData, Date.now(), phase);
+    if (!this.canContinueCurrentFight(observationGuard)) return;
 
     // 10. Strategy/prayer/style (correct IDs, faster switching, faster replan)
     if (this.strategyPlanned) {
-      await this.executeStrategy(healthPct, phase, phaseChanged);
-      if (!this.isRunning) return;
+      await this.executeStrategy(
+        healthPct,
+        phase,
+        phaseChanged,
+        observationGuard,
+      );
+      if (!this.canContinueCurrentFight(observationGuard)) return;
     } else {
-      await this.tryPrayerSwitch(phase, phaseChanged);
-      if (!this.isRunning) return;
+      await this.tryPrayerSwitch(phase, phaseChanged, observationGuard);
+      if (!this.canContinueCurrentFight(observationGuard)) return;
       await this.tryStyleSwitch(healthPct, phase, phaseChanged);
-      if (!this.isRunning) return;
+      if (!this.canContinueCurrentFight(observationGuard)) return;
     }
 
     // 11. tryAttack
@@ -719,9 +1377,12 @@ export class DuelCombatAI {
       const desiredRole = this.selectDesiredCombatRole(state, opponentData);
       if (!desiredRole || desiredRole === this.config.combatRole) return false;
       this.roleSwitchSequence++;
+      const publicActionObservation =
+        this.createRoleSwitchObservationContext(desiredRole);
       pending = {
         role: desiredRole,
         operationId: `${prefix}:${this.roleSwitchSequence}`,
+        ...(publicActionObservation ? { publicActionObservation } : {}),
       };
       this.pendingRoleSwitch = pending;
     }
@@ -730,11 +1391,43 @@ export class DuelCombatAI {
     this.roleSwitchAttempts++;
     this.lastRoleSwitchAttemptTick = this.tickCount;
     try {
-      const result = await switchRole(pending.role, pending.operationId);
+      const result = pending.publicActionObservation
+        ? await switchRole(
+            pending.role,
+            pending.operationId,
+            pending.publicActionObservation,
+          )
+        : await switchRole(pending.role, pending.operationId);
       if (!result.ok) {
+        if (result.retryable && result.reason === "attack_in_flight") {
+          // Waiting for a committed projectile is normal combat sequencing,
+          // not a failed custody transaction. Keep the operation stable and do
+          // not spend the bounded retry/failure budget while it resolves.
+          this.roleSwitchAttempts--;
+          this.roleSwitchDeferrals++;
+          this.observePublicAction({
+            action: "role_switch",
+            outcome: "deferred",
+            value: pending.role,
+            amount: null,
+          });
+          return true;
+        }
         this.roleSwitchFailures++;
         this.lastRoleSwitchFailureReason = result.reason ?? "switch_rejected";
         if (!result.retryable) this.pendingRoleSwitch = null;
+        const commitIsAmbiguous =
+          pending.publicActionObservation &&
+          (result.reason === "persistence_failed" ||
+            result.reason === "committed_state_apply_failed");
+        if (!commitIsAmbiguous) {
+          this.observePublicAction({
+            action: "role_switch",
+            outcome: "rejected",
+            value: pending.role,
+            amount: null,
+          });
+        }
         return true;
       }
 
@@ -745,7 +1438,20 @@ export class DuelCombatAI {
       this.pendingRoleSwitch = null;
       this.lastRoleSwitchFailureReason = null;
       this.currentStyle = "accurate";
-      this.strategy.prayer = OFFENSIVE_PRAYER[pending.role] ?? null;
+      this.styleRetryPending = false;
+      // A role switch may change the frozen loadout, but it cannot rewrite the
+      // pre-market Prayer decision. Bettors saw and priced that exact strategy;
+      // null must remain null, and a selected Prayer must retain its identity.
+      if (pending.publicActionObservation) {
+        this.observeCommittedRoleSwitch(pending.publicActionObservation);
+      } else {
+        this.observePublicAction({
+          action: "role_switch",
+          outcome: "committed",
+          value: pending.role,
+          amount: null,
+        });
+      }
       if (oldPrayer && oldPrayer !== this.strategy.prayer) {
         await this.deactivatePrayer(oldPrayer);
       }
@@ -759,6 +1465,14 @@ export class DuelCombatAI {
       // next attempt reconciles a possible commit instead of moving gear twice.
       this.roleSwitchFailures++;
       this.lastRoleSwitchFailureReason = "ambiguous_response";
+      if (!pending.publicActionObservation) {
+        this.observePublicAction({
+          action: "role_switch",
+          outcome: "error",
+          value: pending.role,
+          amount: null,
+        });
+      }
       duelLogDebug(
         "DuelCombatAI",
         `Combat role switch response ambiguous for ${pending.operationId}:`,
@@ -790,9 +1504,8 @@ export class DuelCombatAI {
     }
 
     const plannedRole = this.strategy.preferredCombatRole;
-    if (plannedRole && roles.includes(plannedRole)) return plannedRole;
     if (this.tickCount < 3 || !opponentData) {
-      return null;
+      return plannedRole && roles.includes(plannedRole) ? plannedRole : null;
     }
 
     const opponentType = this.detectOpponentAttackType(
@@ -807,7 +1520,8 @@ export class DuelCombatAI {
       magic: "melee",
     };
     const desired = opponentType ? counterRole[opponentType] : null;
-    return desired && roles.includes(desired) ? desired : null;
+    if (desired && roles.includes(desired)) return desired;
+    return plannedRole && roles.includes(plannedRole) ? plannedRole : null;
   }
 
   private isFrozenRoleUsable(
@@ -871,7 +1585,8 @@ export class DuelCombatAI {
   }
 
   /**
-   * Attempt to heal. Returns true if a heal action was taken.
+   * Attempt to heal. Reports whether this tick did nothing, yielded to create
+   * space, or committed an authoritative food receipt.
    * Context-aware: skips healing when dominating (#4).
    * Finishing phase: lower threshold for aggression (#10).
    */
@@ -881,8 +1596,12 @@ export class DuelCombatAI {
     phase: CombatPhase,
     opponentData?: OpponentData | null,
     damageThisTickPct = 0,
-  ): Promise<boolean> {
-    if (this.config.noFood === true) return false;
+    observationGuard?: CombatObservationGuard,
+  ): Promise<HealDecision> {
+    if (this.config.noFood === true) {
+      this.foodDisengagePending = false;
+      return "none";
+    }
 
     const baseThreshold = this.strategyPlanned
       ? this.strategy.foodThreshold
@@ -904,7 +1623,10 @@ export class DuelCombatAI {
       threshold = Math.min(95, threshold + 12);
     }
 
-    if (healthPct >= threshold) return false;
+    if (healthPct >= threshold) {
+      this.foodDisengagePending = false;
+      return "none";
+    }
 
     // Context-aware: skip healing when dominating opponent (#4)
     if (phase !== "desperate" && healthPct > 25 && opponentData) {
@@ -912,12 +1634,15 @@ export class DuelCombatAI {
         opponentData.maxHealth > 0
           ? (opponentData.health / Math.max(1, opponentData.maxHealth)) * 100
           : 50;
-      if (healthPct - oppPct >= 30) return false;
+      if (healthPct - oppPct >= 30) {
+        this.foodDisengagePending = false;
+        return "none";
+      }
     }
 
     // 1800ms cooldown (3 ticks) to prevent spamming food
     const now = Date.now();
-    if (now - this.lastFoodUseTime < 1800) return false;
+    if (now - this.lastFoodUseTime < 1800) return "none";
 
     const food = this.findBestFood(state.inventory);
     if (!food) {
@@ -928,27 +1653,105 @@ export class DuelCombatAI {
           `No edible food in inventory at ${healthPct.toFixed(0)}% HP (agent=${this.agentName || this.opponentId})`,
         );
       }
-      return false;
+      this.foodDisengagePending = false;
+      return "none";
     }
 
+    // Eating while body-blocked makes the fighter look oblivious and collapses
+    // defense into a same-tick inventory macro. Use the existing authored
+    // defensive-reset movement policy first, then yield the entire decision
+    // tick. The next authoritative observation may consume even if the opponent
+    // followed, so a retreat cannot starve emergency recovery indefinitely.
+    const underImmediatePressure =
+      opponentData !== null &&
+      opponentData !== undefined &&
+      opponentData.distance < 2.2;
+    if (underImmediatePressure && !this.foodDisengagePending) {
+      const requestedMove = await this.movementTick(
+        state,
+        opponentData,
+        now,
+        "desperate",
+      );
+      if (!this.canContinueCurrentFight(observationGuard)) return "none";
+      const alreadyMoving =
+        this.service.getMovementDebugState?.()?.activePath === true;
+      if (requestedMove || alreadyMoving) {
+        this.foodDisengagePending = true;
+        this.foodDisengageYields++;
+        this.observePublicAction({
+          action: "food",
+          outcome: "deferred",
+          value: "disengage",
+          amount: null,
+        });
+        return "disengaged";
+      }
+    }
+
+    this.foodDisengagePending = false;
+    const publicObservationContext = this.createFoodObservationContext();
     try {
-      const receipt = await this.service.executeUse(food.itemId);
+      const receipt = publicObservationContext
+        ? await this.service.executeUse(food.itemId, publicObservationContext)
+        : await this.service.executeUse(food.itemId);
       if (!receipt.ok) {
+        if (
+          receipt.committed &&
+          receipt.reason !== "effect_completion_pending" &&
+          publicObservationContext
+        ) {
+          this.observeCommittedFood(
+            publicObservationContext,
+            receipt.healedAmount,
+          );
+        } else if (!receipt.committed) {
+          this.observePublicAction({
+            action: "food",
+            outcome: "rejected",
+            value: "consume",
+            amount: null,
+          });
+        }
         duelLogDebug(
           "DuelCombatAI",
           `Heal rejected (${food.itemId}): ${receipt.reason ?? "unknown"}`,
         );
-        return false;
+        return "none";
       }
       this.lastFoodUseTime = Date.now();
-      return true;
+      if (publicObservationContext) {
+        this.observeCommittedFood(
+          publicObservationContext,
+          receipt.healedAmount,
+        );
+      } else {
+        this.observePublicAction({
+          action: "food",
+          outcome: "committed",
+          value: "consume",
+          amount: receipt.healedAmount,
+        });
+      }
+      return "consumed";
     } catch (err) {
+      // With an atomic context, a thrown response is ambiguous: PostgreSQL may
+      // already contain the committed observation. Let that durable row remain
+      // the sole public truth instead of publishing a contradictory error.
+      if (!publicObservationContext) {
+        this.observePublicAction({
+          action: "food",
+          outcome: "error",
+          value: "consume",
+          amount: null,
+        });
+      }
       duelLogDebug(
         "DuelCombatAI",
         `Heal failed (${food.itemId}):`,
         errMsg(err),
       );
-      return false;
+      return "none";
     }
   }
 
@@ -966,10 +1769,11 @@ export class DuelCombatAI {
   ): Promise<boolean> {
     if (phase !== "opening" || this.tickCount > 2) return false;
 
-    // Activate offensive prayer at fight start (#16)
-    const offPrayer = OFFENSIVE_PRAYER[this.config.combatRole];
-    if (offPrayer) {
-      await this.activatePrayer(offPrayer);
+    // The pre-market strategy is bettor-visible competitive authority. A null
+    // Prayer choice must remain null instead of being silently replaced with a
+    // role-derived buff after the market has locked.
+    if (this.strategy.prayer) {
+      await this.activatePrayer(this.strategy.prayer);
     }
 
     void state;
@@ -980,6 +1784,7 @@ export class DuelCombatAI {
     healthPct: number,
     phase: CombatPhase,
     phaseChanged = false,
+    observationGuard?: CombatObservationGuard,
   ): Promise<void> {
     const offPrayer =
       OFFENSIVE_PRAYER[this.config.combatRole] ?? "superhuman_strength";
@@ -989,19 +1794,18 @@ export class DuelCombatAI {
       await this.activatePrayer(
         this.strategy.protectionPrayer || DEFENSIVE_PRAYER,
       );
-      if (!this.isRunning) return;
+      this.refreshExpectedActivePrayers(observationGuard);
+      if (!this.canContinueCurrentFight(observationGuard)) return;
       await this.deactivatePrayer(offPrayer);
-      if (!this.isRunning) return;
+      this.refreshExpectedActivePrayers(observationGuard);
+      if (!this.canContinueCurrentFight(observationGuard)) return;
+      const defensiveStyle: StreamingDuelPublicStyle =
+        this.config.combatRole === "ranged" ? "longrange" : "defensive";
       if (
-        this.currentStyle !== "defensive" &&
+        this.currentStyle !== defensiveStyle &&
         this.config.combatRole !== "mage"
       ) {
-        try {
-          await this.service.executeChangeStyle("defensive");
-          this.currentStyle = "defensive";
-        } catch (err) {
-          duelLogDebug("DuelCombatAI", "Style switch failed:", errMsg(err));
-        }
+        await this.changeStyle(defensiveStyle);
       }
       return;
     }
@@ -1009,7 +1813,8 @@ export class DuelCombatAI {
     // Apply strategy prayer (all roles benefit from prayers)
     if (this.strategy.prayer) {
       await this.activatePrayer(this.strategy.prayer);
-      if (!this.isRunning) return;
+      this.refreshExpectedActivePrayers(observationGuard);
+      if (!this.canContinueCurrentFight(observationGuard)) return;
     }
 
     // Mage agents skip style switching — magic auto-casts via selectedSpell
@@ -1022,14 +1827,66 @@ export class DuelCombatAI {
         : this.strategy.attackStyle || "aggressive";
     if (
       desiredStyle !== this.currentStyle &&
-      (phaseChanged || this.tickCount % 2 === 0)
+      (phaseChanged || this.styleRetryPending || this.tickCount % 2 === 0)
     ) {
-      try {
-        await this.service.executeChangeStyle(desiredStyle);
-        this.currentStyle = desiredStyle;
-      } catch (err) {
-        duelLogDebug("DuelCombatAI", "Style switch failed:", errMsg(err));
+      await this.changeStyle(desiredStyle);
+    }
+  }
+
+  private async changeStyle(
+    desiredStyle: StreamingDuelPublicStyle,
+  ): Promise<boolean> {
+    this.styleChangeAttempts++;
+    const publicActionObservation =
+      this.createStyleObservationContext(desiredStyle);
+    try {
+      const accepted = publicActionObservation
+        ? await this.service.executeChangeStyle(
+            desiredStyle,
+            publicActionObservation,
+          )
+        : await this.service.executeChangeStyle(desiredStyle);
+      if (accepted !== true) {
+        this.styleChangeRejects++;
+        this.lastStyleChangeFailureReason =
+          this.service.getLastStyleChangeFailureReason?.() ??
+          "request_rejected";
+        this.styleRetryPending = true;
+        this.observePublicAction({
+          action: "style",
+          outcome: "rejected",
+          value: desiredStyle,
+          amount: null,
+        });
+        return false;
       }
+      this.currentStyle = desiredStyle;
+      this.styleChangeAccepts++;
+      this.lastStyleChangeFailureReason = null;
+      this.styleRetryPending = false;
+      if (publicActionObservation) {
+        this.observeCommittedStyle(publicActionObservation);
+      } else {
+        this.observePublicAction({
+          action: "style",
+          outcome: "accepted",
+          value: desiredStyle,
+          amount: null,
+        });
+      }
+      return true;
+    } catch (err) {
+      this.styleChangeErrors++;
+      this.lastStyleChangeFailureReason = "request_error";
+      this.styleRetryPending = true;
+      this.observePublicAction({
+        action: "style",
+        outcome: "error",
+        value: desiredStyle,
+        amount: null,
+      });
+      duelLogDebug("DuelCombatAI", "Style switch failed:", errMsg(err));
+      return false;
     }
   }
 
@@ -1048,10 +1905,30 @@ export class DuelCombatAI {
     }
     if (this.service.getGameState()?.prayerPointUnits === 0) return;
     this.prayerToggleAttempts++;
-    const receipt = await this.service.executePrayerToggle(prayerId);
+    const publicObservationContext =
+      this.createPrayerObservationContext(prayerId);
+    let receipt: PrayerActionReceipt;
+    try {
+      receipt = publicObservationContext
+        ? await this.service.executePrayerToggle(
+            prayerId,
+            publicObservationContext,
+          )
+        : await this.service.executePrayerToggle(prayerId);
+    } catch (error) {
+      // A thrown response after an atomic request is ambiguous: PostgreSQL may
+      // already contain the committed row. Never publish a contradiction.
+      if (!publicObservationContext) {
+        this.observePublicPrayer(prayerId, "error");
+      }
+      throw error;
+    }
     if (receipt.committed) {
       this.activePrayers = new Set(receipt.activePrayers);
       this.prayerToggleCommittedThisTick = true;
+      if (publicObservationContext) {
+        this.observeCommittedPrayer(publicObservationContext);
+      }
     }
     if (
       receipt.success &&
@@ -1059,10 +1936,15 @@ export class DuelCombatAI {
       receipt.activePrayers.includes(prayerId)
     ) {
       this.prayerToggleCommits++;
-      this.lastPrayerToggleFailureReason = null;
+      if (!publicObservationContext) {
+        this.observePublicPrayer(prayerId, "committed");
+      }
       return;
     }
     this.prayerToggleRejects++;
+    if (!publicObservationContext || !receipt.committed) {
+      this.observePublicPrayer(prayerId, "rejected");
+    }
     this.lastPrayerToggleFailureReason =
       receipt.reason ?? "committed_state_mismatch";
     if (
@@ -1082,10 +1964,28 @@ export class DuelCombatAI {
       return;
     }
     this.prayerToggleAttempts++;
-    const receipt = await this.service.executePrayerToggle(prayerId);
+    const publicObservationContext =
+      this.createPrayerObservationContext(prayerId);
+    let receipt: PrayerActionReceipt;
+    try {
+      receipt = publicObservationContext
+        ? await this.service.executePrayerToggle(
+            prayerId,
+            publicObservationContext,
+          )
+        : await this.service.executePrayerToggle(prayerId);
+    } catch (error) {
+      if (!publicObservationContext) {
+        this.observePublicPrayer(prayerId, "error");
+      }
+      throw error;
+    }
     if (receipt.committed) {
       this.activePrayers = new Set(receipt.activePrayers);
       this.prayerToggleCommittedThisTick = true;
+      if (publicObservationContext) {
+        this.observeCommittedPrayer(publicObservationContext);
+      }
     }
     if (
       receipt.success &&
@@ -1093,10 +1993,15 @@ export class DuelCombatAI {
       !receipt.activePrayers.includes(prayerId)
     ) {
       this.prayerToggleCommits++;
-      this.lastPrayerToggleFailureReason = null;
+      if (!publicObservationContext) {
+        this.observePublicPrayer(prayerId, "committed");
+      }
       return;
     }
     this.prayerToggleRejects++;
+    if (!publicObservationContext || !receipt.committed) {
+      this.observePublicPrayer(prayerId, "rejected");
+    }
     this.lastPrayerToggleFailureReason =
       receipt.reason ?? "committed_state_mismatch";
   }
@@ -1162,6 +2067,7 @@ export class DuelCombatAI {
   private async tryPrayerSwitch(
     phase: CombatPhase,
     phaseChanged = false,
+    observationGuard?: CombatObservationGuard,
   ): Promise<void> {
     // Faster switching (#7): every 2 ticks, immediate on phase change
     if (!phaseChanged && this.tickCount % 2 !== 0) return;
@@ -1172,14 +2078,19 @@ export class DuelCombatAI {
     try {
       if (phase === "opening" || phase === "finishing") {
         await this.activatePrayer(offPrayer);
-        if (!this.isRunning) return;
+        this.refreshExpectedActivePrayers(observationGuard);
+        if (!this.canContinueCurrentFight(observationGuard)) return;
         await this.deactivatePrayer(DEFENSIVE_PRAYER);
+        this.refreshExpectedActivePrayers(observationGuard);
       } else if (phase === "desperate") {
         await this.activatePrayer(DEFENSIVE_PRAYER);
-        if (!this.isRunning) return;
+        this.refreshExpectedActivePrayers(observationGuard);
+        if (!this.canContinueCurrentFight(observationGuard)) return;
         await this.deactivatePrayer(offPrayer);
+        this.refreshExpectedActivePrayers(observationGuard);
       } else {
         await this.activatePrayer(offPrayer);
+        this.refreshExpectedActivePrayers(observationGuard);
       }
     } catch (err) {
       duelLogDebug("DuelCombatAI", "Prayer switch failed:", errMsg(err));
@@ -1195,9 +2106,11 @@ export class DuelCombatAI {
     if (this.config.combatRole === "mage") return;
 
     // Faster switching (#7): every 2 ticks, immediate on phase change
-    if (!phaseChanged && this.tickCount % 2 !== 0) return;
+    if (!phaseChanged && !this.styleRetryPending && this.tickCount % 2 !== 0) {
+      return;
+    }
 
-    let desiredStyle: string;
+    let desiredStyle: StreamingDuelPublicStyle;
     if (this.config.combatRole === "ranged") {
       // Ranged agents use "rapid" for faster attack speed (-1 tick)
       desiredStyle = "rapid";
@@ -1218,12 +2131,7 @@ export class DuelCombatAI {
 
     if (desiredStyle === this.currentStyle) return;
 
-    try {
-      await this.service.executeChangeStyle(desiredStyle);
-      this.currentStyle = desiredStyle;
-    } catch (err) {
-      duelLogDebug("DuelCombatAI", "Style switch failed:", errMsg(err));
-    }
+    await this.changeStyle(desiredStyle);
   }
 
   // ============================================================================
@@ -1485,14 +2393,115 @@ export class DuelCombatAI {
       : "pressure";
   }
 
-  private movementTick(
+  /**
+   * Install a combat-aware path without submitting an attack before arrival.
+   * The receipt is public competitive evidence, while the network authority
+   * still owns collision, weapon range, line of sight, and path completion.
+   */
+  private async requestAuthoritativeCombatApproach(
+    now: number,
+  ): Promise<boolean> {
+    const publicContext = this.createExecutorObservationContext(
+      "movement",
+      "reposition",
+    );
+    this.movementRequests++;
+    try {
+      if (publicContext) {
+        const receipt = await this.service.executeDuelCombatApproach(
+          this.opponentId,
+          publicContext,
+        );
+        if (!receipt.completed || !receipt.outcome) {
+          throw new Error("movement executor receipt incomplete");
+        }
+        this.observeCommittedExecutor(publicContext, receipt.outcome);
+        if (receipt.outcome !== "accepted") {
+          if (receipt.outcome === "rejected") this.movementRejects++;
+          else this.movementErrors++;
+          this.lastMovementFailureReason =
+            receipt.outcome === "rejected"
+              ? "request_rejected"
+              : "request_error";
+          return false;
+        }
+      } else if (
+        this.service.executeCombatApproach?.(this.opponentId) !== true
+      ) {
+        this.movementRejects++;
+        this.lastMovementFailureReason = "request_rejected";
+        this.observePublicAction({
+          action: "movement",
+          outcome: "rejected",
+          value: "reposition",
+          amount: null,
+        });
+        return false;
+      }
+      this.movementAccepts++;
+      this.lastMovementFailureReason = null;
+      if (!publicContext) {
+        this.observePublicAction({
+          action: "movement",
+          outcome: "accepted",
+          value: "reposition",
+          amount: null,
+        });
+      }
+      const pathState = this.service.getMovementDebugState?.();
+      if (pathState?.activePath) {
+        this.movementPathsActive++;
+      } else {
+        this.movementPathsInactive++;
+      }
+      this.lastMoveTime = now;
+      return true;
+    } catch (err) {
+      this.movementErrors++;
+      this.lastMovementFailureReason = "request_error";
+      if (!publicContext) {
+        this.observePublicAction({
+          action: "movement",
+          outcome: "error",
+          value: "reposition",
+          amount: null,
+        });
+      }
+      duelLogDebug("DuelCombatAI", "Combat approach failed:", errMsg(err));
+      return false;
+    }
+  }
+
+  private async movementTick(
     state: EmbeddedGameState,
     opponentData: OpponentData | null,
     now: number,
     phase: CombatPhase = "trading",
-  ): void {
-    if (now - this.lastMoveTime < DuelCombatAI.MOVE_COOLDOWN_MS) return;
-    if (!opponentData) return;
+  ): Promise<boolean> {
+    if (now - this.lastMoveTime < DuelCombatAI.MOVE_COOLDOWN_MS) return false;
+    if (!opponentData) return false;
+    const existingPath = this.service.getMovementDebugState?.();
+    if (
+      this.lastMoveTime > 0 &&
+      existingPath?.activePath === true &&
+      now - this.lastMoveTime < DuelCombatAI.ACTIVE_PATH_REPLAN_TIMEOUT_MS &&
+      phase !== "desperate" &&
+      phase !== "finishing"
+    ) {
+      return false;
+    }
+
+    // A missing engagement can follow food, a role switch, or a moving target.
+    // Before applying presentation spacing, recover to one exact legal attack
+    // tile. This prevents a visually-close diagonal range-one fighter from
+    // submitting an invalid attack and lets ranged/magic recover line of sight.
+    if (
+      this.service.isAuthoritativelyInCombatWith?.(this.opponentId) === false &&
+      this.service.isTargetInAuthoritativeAttackRange?.(this.opponentId) ===
+        false
+    ) {
+      return this.requestAuthoritativeCombatApproach(now);
+    }
 
     const distance = opponentData.distance;
     this.minObservedDistance = Math.min(this.minObservedDistance, distance);
@@ -1557,8 +2566,18 @@ export class DuelCombatAI {
     } else if (tacticalMacro === "defensive_reset") {
       idealMin = idealMax;
     } else if (tacticalMacro === "finish") {
-      idealMin = Math.max(1.5, idealMin - 1);
-      idealMax = Math.max(idealMin, idealMax - 1);
+      // A committed finish is a materially tighter engagement policy than
+      // ordinary pressure. With the projectile 4-5m band, subtracting one from
+      // both bounds produced the same 3-4m band as pressure, making two public
+      // strategy choices behaviorally identical. Projectile finishers accept a
+      // 2-3m danger band to create earlier attack contact; melee retains the
+      // existing 1.5-2m close without allowing capsule overlap.
+      const closingOffset =
+        this.config.combatRole === "ranged" || this.config.combatRole === "mage"
+          ? 2
+          : 1;
+      idealMin = Math.max(1.5, idealMin - closingOffset);
+      idealMax = Math.max(idealMin, idealMax - closingOffset);
     }
 
     // Check if we need to reposition
@@ -1571,53 +2590,64 @@ export class DuelCombatAI {
           : this.config.combatRole) ||
       (observedOpponentAttackType === null &&
         this.config.opponentCombatRole === this.config.combatRole);
-    const meleePressureFootwork =
-      this.config.combatRole === "melee" &&
-      opponentUsesCurrentRole &&
+    const currentRoleUsesProjectiles =
+      this.config.combatRole === "ranged" || this.config.combatRole === "mage";
+    const opponentUsesProjectiles =
+      observedOpponentAttackType === "ranged" ||
+      observedOpponentAttackType === "magic" ||
+      (observedOpponentAttackType === null &&
+        (this.config.opponentCombatRole === "ranged" ||
+          this.config.opponentCombatRole === "mage"));
+    const pressureFootworkIntervalTicks = opponentUsesCurrentRole
+      ? DuelCombatAI.PRESSURE_FOOTWORK_INTERVAL_TICKS
+      : DuelCombatAI.MIXED_PRESSURE_FOOTWORK_INTERVAL_TICKS;
+    const pressureFootwork =
       tacticalMacro === "pressure" &&
       !tooFar &&
-      (tooClose ||
-        this.tickCount % DuelCombatAI.PAIRED_FOOTWORK_INTERVAL_TICKS === 0);
+      (tooClose || this.tickCount % pressureFootworkIntervalTicks === 0);
     const projectileOrbitFootwork =
-      (this.config.combatRole === "ranged" ||
-        this.config.combatRole === "mage") &&
-      opponentUsesCurrentRole &&
+      currentRoleUsesProjectiles &&
+      opponentUsesProjectiles &&
       (tacticalMacro === "orbit" ||
         tacticalMacro === "kite" ||
         tacticalMacro === "defensive_reset") &&
-      !tooClose &&
-      !tooFar &&
       distance > 1.5;
-    const pairedFootwork = meleePressureFootwork || projectileOrbitFootwork;
+    // Pressure must stay visually active against mixed styles too. Without
+    // this paced step, an in-range pressure strategy can devolve into a static
+    // attack loop while its opponent does all of the visible positioning. The
+    // authoritative follow system still exclusively owns out-of-range melee
+    // pursuit; this branch only punctuates contact with bounded footwork.
+    const coordinatedPressureFootwork =
+      pressureFootwork && opponentUsesCurrentRole;
+    const mixedPressureFootwork = pressureFootwork && !opponentUsesCurrentRole;
+    const fullTileFootwork =
+      coordinatedPressureFootwork || projectileOrbitFootwork;
     const activeRepositionInBand =
-      pairedFootwork ||
+      pressureFootwork ||
       ((tacticalMacro === "orbit" ||
         tacticalMacro === "kite" ||
         tacticalMacro === "defensive_reset") &&
         !tooClose &&
         !tooFar &&
         distance > 1.5);
-    if (!tooClose && !tooFar && !activeRepositionInBand) return;
+    if (!tooClose && !tooFar && !activeRepositionInBand) return false;
 
     // Need own position and opponent position to compute direction
     const ownPos = state.position;
     const oppPos = opponentData.position;
-    if (!ownPos || !oppPos) return;
+    if (!ownPos || !oppPos) return false;
 
-    if (
-      this.config.combatRole === "melee" &&
-      tooFar &&
-      this.service.executeCombatApproach?.(this.opponentId) === true
-    ) {
-      this.movementRequests++;
-      const pathState = this.service.getMovementDebugState?.();
-      if (pathState?.activePath) {
-        this.movementPathsActive++;
-      } else {
-        this.movementPathsInactive++;
+    if (this.config.combatRole === "melee" && tooFar) {
+      // Once the exact CombatSystem engagement exists, its per-server-tick
+      // range/follow loop is the sole pursuit owner. Submitting a second duel
+      // approach here makes the two path drivers oscillate around cardinal
+      // melee range and can turn harmless keepalives into anti-cheat failures.
+      if (
+        this.service.isAuthoritativelyInCombatWith?.(this.opponentId) === true
+      ) {
+        return false;
       }
-      this.lastMoveTime = now;
-      return;
+      return this.requestAuthoritativeCombatApproach(now);
     }
 
     const dx = oppPos[0] - ownPos[0];
@@ -1627,6 +2657,8 @@ export class DuelCombatAI {
     let targetX: number;
     let targetZ: number;
     let run = false;
+    let wallEscapeAcceptedTransition = false;
+    let fullTileFootworkDirection: { x: number; z: number } | null = null;
 
     // Both duel AIs make their movement decision during the same scheduler
     // interval. Moving each actor to a full opponent-anchored standoff point
@@ -1646,21 +2678,33 @@ export class DuelCombatAI {
       nz = (this.strafeSign * 0.5) / fallbackLength;
     }
 
-    if (pairedFootwork) {
-      // Same-style contestants take the same paced diagonal sidestep. Parallel
-      // paths preserve their current engagement distance and cannot converge on
-      // the same destination tile. Four shared phases trace a bounded square
-      // rather than reversing on one line. A full-tile component is intentional:
-      // smaller orbit offsets collapse to the current tile from the production
-      // arena's half-tile spawn alignment, leaving projectile duels motionless.
+    if (fullTileFootwork) {
+      // Pressure strategies and projectile-vs-projectile contestants take a
+      // paced diagonal sidestep. Same-style parallel paths preserve their
+      // current engagement distance and cannot converge on one destination.
+      // Four shared phases trace a bounded square rather than reversing on one
+      // line. A full-tile component is intentional: smaller orbit offsets
+      // collapse to the current tile from the production arena's half-tile
+      // spawn alignment, leaving projectile duels motionless.
+      const footworkIntervalTicks = pressureFootwork
+        ? DuelCombatAI.PRESSURE_FOOTWORK_INTERVAL_TICKS
+        : DuelCombatAI.PAIRED_FOOTWORK_INTERVAL_TICKS;
       const footworkPhase =
-        Math.floor(
-          (this.tickCount - 1) / DuelCombatAI.PAIRED_FOOTWORK_INTERVAL_TICKS,
-        ) % 4;
+        Math.floor((this.tickCount - 1) / footworkIntervalTicks) % 4;
       const footworkX = footworkPhase < 2 ? 1 : -1;
       const footworkZ = footworkPhase === 0 || footworkPhase === 3 ? 1 : -1;
+      fullTileFootworkDirection = { x: footworkX, z: footworkZ };
       targetX = ownPos[0] + footworkX * DuelCombatAI.PAIRED_FOOTWORK_STEP;
       targetZ = ownPos[2] + footworkZ * DuelCombatAI.PAIRED_FOOTWORK_STEP;
+      if (fullTileFootwork && (tooClose || tooFar)) {
+        // Preserve the lateral step while each fighter owns half of the radial
+        // correction. This restores the selected engagement band without
+        // turning a pressure step or shared orbit into a widening standoff.
+        const desiredSeparation = tooClose ? idealMax : idealMin;
+        const spacingCorrection = (dist - desiredSeparation) * 0.5;
+        targetX += nx * spacingCorrection;
+        targetZ += nz * spacingCorrection;
+      }
     } else {
       const configuredDesiredSeparation = tooClose
         ? this.config.combatRole === "melee"
@@ -1708,12 +2752,23 @@ export class DuelCombatAI {
     // two combatants. The line-of-sight perpendicular (-nz, nx) * strafeSign is
     // mathematically identical for both agents (opposite nx/nz cancels opposite
     // strafeSign), so use a fixed diagonal instead.
-    if (!pairedFootwork) {
-      const strafeScale =
-        dist < idealMax ? Math.max(0.35, Math.min(1, dist / idealMax)) : 1;
-      const strafeAmt = DuelCombatAI.STRAFE_STEP * strafeScale * 0.7;
-      targetX += this.strafeSign * strafeAmt;
-      targetZ -= this.strafeSign * strafeAmt;
+    if (!fullTileFootwork) {
+      if (mixedPressureFootwork) {
+        // A pressure fighter facing a different style owns this step alone, so
+        // orbit tangentially around the opponent instead of using the shared
+        // world diagonal. The tangent cannot cross the opponent's current tile
+        // and preserves a real separation while the combat follow loop closes
+        // any temporary range opened by the sidestep.
+        const pressureStep = DuelCombatAI.PAIRED_FOOTWORK_STEP;
+        targetX += -nz * this.strafeSign * pressureStep;
+        targetZ += nx * this.strafeSign * pressureStep;
+      } else {
+        const strafeScale =
+          dist < idealMax ? Math.max(0.35, Math.min(1, dist / idealMax)) : 1;
+        const strafeAmt = DuelCombatAI.STRAFE_STEP * strafeScale * 0.7;
+        targetX += this.strafeSign * strafeAmt;
+        targetZ -= this.strafeSign * strafeAmt;
+      }
     }
 
     const b = this.config.movementClampBounds;
@@ -1743,7 +2798,6 @@ export class DuelCombatAI {
         // contacts choose the axis with more usable room from the current
         // position. This keeps wall pressure meaningful without turning it into
         // a permanent body-overlap state.
-        const escapeSign = this.strafeSign;
         const availableX = Math.max(
           ownPos[0] - (b.minX + pad),
           b.maxX - pad - ownPos[0],
@@ -1754,6 +2808,16 @@ export class DuelCombatAI {
         );
         const escapeAlongZ =
           wallPushX > 0.25 && (wallPushZ <= 0.25 || availableZ >= availableX);
+        // Same-style footwork is intentionally parallel. Using each fighter's
+        // opposite strafe sign at a shared wall splits the pair toward opposite
+        // arena ends, turning a five-metre engagement into a full-ring gap.
+        // Continue along the shared footwork axis instead; mixed-style wall
+        // recovery retains its individual orbit direction.
+        const escapeSign = fullTileFootworkDirection
+          ? escapeAlongZ
+            ? fullTileFootworkDirection.z
+            : fullTileFootworkDirection.x
+          : this.strafeSign;
         if (escapeAlongZ) {
           targetX = Math.min(b.maxX - pad, Math.max(b.minX + pad, ownPos[0]));
           targetZ = Math.min(
@@ -1774,14 +2838,88 @@ export class DuelCombatAI {
           targetZ = Math.min(b.maxZ - pad, Math.max(b.minZ + pad, ownPos[2]));
         }
         run = true;
-        this.strafeSign = (this.strafeSign * -1) as 1 | -1;
-        this.strafeMoveCount = 0; // reset counter so the next natural flip is delayed
+        // Commit the future orbit direction only after the movement service
+        // accepts this path. A rejected/ambiguous receipt must retry the exact
+        // same wall escape instead of steering back into the contact.
+        wallEscapeAcceptedTransition = fullTileFootworkDirection === null;
       }
     }
 
+    const projectileOrbitMove =
+      (this.config.combatRole === "ranged" ||
+        this.config.combatRole === "mage") &&
+      (tacticalMacro === "orbit" ||
+        tacticalMacro === "kite" ||
+        tacticalMacro === "defensive_reset");
+    if (projectileOrbitMove && !opponentUsesCurrentRole) {
+      const pad = 2.5;
+      [targetX, targetZ] = ensureDuelProjectileDiagonalDestination(
+        [ownPos[0], ownPos[2]],
+        [targetX, targetZ],
+        this.strafeSign,
+        b
+          ? {
+              minX: b.minX + pad,
+              maxX: b.maxX - pad,
+              minZ: b.minZ + pad,
+              maxZ: b.maxZ - pad,
+            }
+          : undefined,
+      );
+    }
+
+    this.movementRequests++;
+    const publicContext = this.createExecutorObservationContext(
+      "movement",
+      "reposition",
+    );
     try {
-      void this.service.executeMove([targetX, ownPos[1], targetZ], run);
-      this.movementRequests++;
+      let outcome: StreamingDuelExecutorCommandOutcome;
+      if (publicContext) {
+        const receipt = await this.service.executeDuelMove(
+          [targetX, ownPos[1], targetZ],
+          run,
+          publicContext,
+        );
+        if (!receipt.completed || !receipt.outcome) {
+          throw new Error("movement executor receipt incomplete");
+        }
+        outcome = receipt.outcome;
+        this.observeCommittedExecutor(publicContext, outcome);
+      } else {
+        outcome =
+          (await this.service.executeMove(
+            [targetX, ownPos[1], targetZ],
+            run,
+          )) === true
+            ? "accepted"
+            : "rejected";
+      }
+      if (outcome !== "accepted") {
+        if (outcome === "rejected") this.movementRejects++;
+        else this.movementErrors++;
+        this.lastMovementFailureReason =
+          outcome === "rejected" ? "request_rejected" : "request_error";
+        if (!publicContext) {
+          this.observePublicAction({
+            action: "movement",
+            outcome,
+            value: "reposition",
+            amount: null,
+          });
+        }
+        return false;
+      }
+      if (!publicContext) {
+        this.observePublicAction({
+          action: "movement",
+          outcome: "accepted",
+          value: "reposition",
+          amount: null,
+        });
+      }
+      this.movementAccepts++;
+      this.lastMovementFailureReason = null;
       const pathState = this.service.getMovementDebugState?.();
       duelLogDebug(
         "DuelCombatAI",
@@ -1799,14 +2937,30 @@ export class DuelCombatAI {
         this.movementPathsInactive++;
       }
       this.lastMoveTime = now;
+      if (wallEscapeAcceptedTransition) {
+        this.strafeSign = (this.strafeSign * -1) as 1 | -1;
+        this.strafeMoveCount = 0;
+      }
       this.strafeMoveCount++;
       // Flip orbit direction every 5 moves — creates longer, more readable arcs
       // instead of the rapid zig-zag from flipping every 3.
       if (this.strafeMoveCount % 5 === 0) {
         this.strafeSign = (this.strafeSign * -1) as 1 | -1;
       }
+      return true;
     } catch (err) {
+      this.movementErrors++;
+      this.lastMovementFailureReason = "request_error";
+      if (!publicContext) {
+        this.observePublicAction({
+          action: "movement",
+          outcome: "error",
+          value: "reposition",
+          amount: null,
+        });
+      }
       duelLogDebug("DuelCombatAI", "Move failed:", errMsg(err));
+      return false;
     }
   }
 
@@ -1821,25 +2975,98 @@ export class DuelCombatAI {
     // creates a redundant second driver that competes for the same cooldown slot,
     // silently dropping attacks (especially for slow weapons like 2h swords).
     //
-    // However, entity data flags (inCombat, combatTarget) can be stale — they
-    // are set by DuelOrchestrator.setAgentCombatTarget() even when the
-    // CombatSystem's internal state has timed out or was never created.
-    // To prevent agents from standing idle, we also periodically force
-    // re-engagement as a keep-alive (every RE_ENGAGE_INTERVAL ticks ≈ 3s).
+    // Entity data flags (inCombat, combatTarget) can be stale — they are set by
+    // DuelOrchestrator.setAgentCombatTarget() even when CombatSystem timed out
+    // or was never created. Production therefore consults CombatSystem itself.
+    // The periodic keepalive remains only for older service implementations
+    // that cannot expose that authority, preserving the standalone fallback.
+    const authoritativeEngagement =
+      this.service.isAuthoritativelyInCombatWith?.(this.opponentId);
+    const mirroredEngagementIsCurrent =
+      state.inCombat && state.currentTarget === this.opponentId;
     const needsEngagement =
-      !state.inCombat || state.currentTarget !== this.opponentId;
+      authoritativeEngagement === undefined
+        ? !mirroredEngagementIsCurrent
+        : authoritativeEngagement !== true;
 
     const ticksSinceLastEngage = this.tickCount - this._lastEngageTick;
     const needsKeepAlive =
+      authoritativeEngagement === undefined &&
       !needsEngagement &&
       ticksSinceLastEngage >= DuelCombatAI.RE_ENGAGE_INTERVAL;
 
+    // Never submit an engagement until the same network authority used by the
+    // attack handler confirms exact tile/range legality. movementTick installs
+    // the combat-aware path; a later controller tick attacks after arrival.
+    if (
+      needsEngagement &&
+      this.service.isTargetInAuthoritativeAttackRange?.(this.opponentId) ===
+        false
+    ) {
+      return;
+    }
+
     if (needsEngagement || needsKeepAlive) {
+      const engagementMode = needsEngagement ? "initial" : "keep_alive";
+      const publicContext = this.createExecutorObservationContext(
+        "engagement",
+        engagementMode,
+      );
+      this.engagementAttempts++;
       try {
-        await this.service.executeAttack(this.opponentId);
+        let outcome: StreamingDuelExecutorCommandOutcome;
+        if (publicContext) {
+          const receipt = await this.service.executeDuelAttack(
+            this.opponentId,
+            publicContext,
+          );
+          if (!receipt.completed || !receipt.outcome) {
+            throw new Error("engagement executor receipt incomplete");
+          }
+          outcome = receipt.outcome;
+          this.observeCommittedExecutor(publicContext, outcome);
+        } else {
+          outcome = (await this.service.executeAttack(this.opponentId))
+            ? "accepted"
+            : "rejected";
+        }
+        if (outcome !== "accepted") {
+          if (outcome === "rejected") this.engagementRejects++;
+          else this.engagementErrors++;
+          this.lastEngagementFailureReason =
+            outcome === "rejected" ? "request_rejected" : "request_error";
+          if (!publicContext) {
+            this.observePublicAction({
+              action: "engagement",
+              outcome,
+              value: engagementMode,
+              amount: null,
+            });
+          }
+          return;
+        }
         this._lastEngageTick = this.tickCount;
-        this.engagementAttempts++;
+        this.engagementAccepts++;
+        this.lastEngagementFailureReason = null;
+        if (!publicContext) {
+          this.observePublicAction({
+            action: "engagement",
+            outcome: "accepted",
+            value: engagementMode,
+            amount: null,
+          });
+        }
       } catch (err) {
+        this.engagementErrors++;
+        this.lastEngagementFailureReason = "request_error";
+        if (!publicContext) {
+          this.observePublicAction({
+            action: "engagement",
+            outcome: "error",
+            value: engagementMode,
+            amount: null,
+          });
+        }
         duelLogDebug("DuelCombatAI", "Attack failed:", errMsg(err));
       }
     }

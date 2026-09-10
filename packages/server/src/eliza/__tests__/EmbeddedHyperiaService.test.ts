@@ -58,6 +58,12 @@ function createMockWorld() {
         ]),
       getPlayerAsync: vi.fn().mockResolvedValue({}),
       getHeightAt: vi.fn().mockReturnValue(10),
+      recoverPendingProjectileRuneCostOperationsAsync: vi
+        .fn()
+        .mockResolvedValue([]),
+      recoverPendingAmmunitionShotOperationsAsync: vi
+        .fn()
+        .mockResolvedValue([]),
     }),
     settings: { avatar: { url: "test.vrm" } },
     _listeners: listeners,
@@ -65,6 +71,69 @@ function createMockWorld() {
 }
 
 describe("EmbeddedHyperiaService", () => {
+  it("rejects unresolved rune custody before reading or spawning an embedded agent", async () => {
+    const world = createMockWorld();
+    const databaseSystem = world.getSystem();
+    databaseSystem.recoverPendingProjectileRuneCostOperationsAsync.mockRejectedValueOnce(
+      new Error("projectile_rune_cost_fired_reconciliation_required"),
+    );
+    const service = new EmbeddedHyperiaService(
+      world as any,
+      "char-1",
+      "account-1",
+      "TestAgent",
+    );
+
+    await expect(service.initialize()).rejects.toThrow(
+      "projectile_rune_cost_fired_reconciliation_required",
+    );
+
+    expect(
+      databaseSystem.recoverPendingProjectileRuneCostOperationsAsync,
+    ).toHaveBeenCalledWith("char-1");
+    expect(
+      databaseSystem.recoverPendingAmmunitionShotOperationsAsync,
+    ).not.toHaveBeenCalled();
+    expect(databaseSystem.getPlayerAsync).not.toHaveBeenCalled();
+    expect(world.entities.add).not.toHaveBeenCalled();
+    expect(world.emit).not.toHaveBeenCalled();
+  });
+
+  it("rejects unresolved ammunition custody after rune recovery but before embedded spawn", async () => {
+    const world = createMockWorld();
+    const databaseSystem = world.getSystem();
+    databaseSystem.recoverPendingAmmunitionShotOperationsAsync.mockRejectedValueOnce(
+      new Error("ammunition_shot_fired_reconciliation_required"),
+    );
+    const service = new EmbeddedHyperiaService(
+      world as any,
+      "char-1",
+      "account-1",
+      "TestAgent",
+    );
+
+    await expect(service.initialize()).rejects.toThrow(
+      "ammunition_shot_fired_reconciliation_required",
+    );
+
+    expect(
+      databaseSystem.recoverPendingProjectileRuneCostOperationsAsync,
+    ).toHaveBeenCalledWith("char-1");
+    expect(
+      databaseSystem.recoverPendingAmmunitionShotOperationsAsync,
+    ).toHaveBeenCalledWith("char-1");
+    expect(
+      databaseSystem.recoverPendingProjectileRuneCostOperationsAsync.mock
+        .invocationCallOrder[0],
+    ).toBeLessThan(
+      databaseSystem.recoverPendingAmmunitionShotOperationsAsync.mock
+        .invocationCallOrder[0]!,
+    );
+    expect(databaseSystem.getPlayerAsync).not.toHaveBeenCalled();
+    expect(world.entities.add).not.toHaveBeenCalled();
+    expect(world.emit).not.toHaveBeenCalled();
+  });
+
   it("uses an explicit optimized agent avatar when no persisted avatar exists", async () => {
     const world = createMockWorld();
     const avatar = "asset://avatars/duel-candidates/duel-bandit.vrm";
@@ -220,6 +289,99 @@ describe("EmbeddedHyperiaService", () => {
         (listener) => listener.event === EventType.LOOT_RESULT,
       ),
     ).toHaveLength(0);
+  });
+
+  it("refuses gravestone custody without a valid autonomy attempt receipt", async () => {
+    const world = createMockWorld();
+    const service = new EmbeddedHyperiaService(
+      world as any,
+      "char-1",
+      "account-1",
+      "TestAgent",
+    );
+    await service.initialize();
+
+    await expect(
+      service.executeLootGravestone(
+        "gravestone_char-1_123",
+        undefined as unknown as string,
+      ),
+    ).resolves.toBe(false);
+    await expect(
+      service.executeLootGravestone("gravestone_char-1_123", "invalid"),
+    ).resolves.toBe(false);
+
+    expect(world.emit).not.toHaveBeenCalledWith(
+      EventType.CORPSE_LOOT_ALL_REQUEST,
+      expect.anything(),
+    );
+  });
+
+  it("awaits the atomic drop receipt instead of reporting event dispatch as success", async () => {
+    const world = createMockWorld();
+    const service = new EmbeddedHyperiaService(
+      world as any,
+      "char-1",
+      "account-1",
+      "TestAgent",
+    );
+    await service.initialize();
+    let release: ((result: { ok: boolean }) => void) | undefined;
+    const commit = new Promise<{ ok: boolean }>((resolve) => {
+      release = resolve;
+    });
+    const dropOwnedItemAtomic = vi.fn(
+      async (
+        _playerId: string,
+        _operationId: string,
+        _itemId: string,
+        _quantity: number,
+      ) => commit,
+    );
+    world.getSystem.mockImplementation((name: string) =>
+      name === "inventory" ? { dropOwnedItemAtomic } : undefined,
+    );
+
+    let settled = false;
+    const pending = service.executeDrop("air_rune", 2).then((result) => {
+      settled = true;
+      return result;
+    });
+    await vi.waitFor(() => expect(dropOwnedItemAtomic).toHaveBeenCalledOnce());
+    expect(settled).toBe(false);
+    const [playerId, operationId, itemId, quantity] =
+      dropOwnedItemAtomic.mock.calls[0]!;
+    expect(playerId).toBe("char-1");
+    expect(operationId).toMatch(
+      /^ground-item-drop:[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
+    );
+    expect(itemId).toBe("air_rune");
+    expect(quantity).toBe(2);
+    expect(world.emit).not.toHaveBeenCalledWith(
+      EventType.ITEM_DROP,
+      expect.anything(),
+    );
+
+    release?.({ ok: true });
+    await expect(pending).resolves.toBe(true);
+  });
+
+  it("fails an embedded drop closed when atomic custody is unavailable", async () => {
+    const world = createMockWorld();
+    const service = new EmbeddedHyperiaService(
+      world as any,
+      "char-1",
+      "account-1",
+      "TestAgent",
+    );
+    await service.initialize();
+    world.getSystem.mockReturnValue(undefined);
+
+    await expect(service.executeDrop("air_rune", 1)).resolves.toBe(false);
+    expect(world.emit).not.toHaveBeenCalledWith(
+      EventType.ITEM_DROP,
+      expect.anything(),
+    );
   });
 
   it("keeps live coin readiness in a main-process-only accessor", async () => {

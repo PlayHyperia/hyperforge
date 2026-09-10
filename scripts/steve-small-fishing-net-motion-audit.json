@@ -1,0 +1,31 @@
+{
+  "schemaVersion": 1,
+  "title": "Hyperia Steve small fishing net release review",
+  "framing": "avatar-and-equipment",
+  "motions": [
+    {
+      "id": "net-windup",
+      "name": "Net · windup",
+      "asset": "artifacts/duel-launch-avatar-bakeoff/motions/steve-fishing-interactions/steve-small-fishing-net-release.glb",
+      "sampleRatio": 0.1
+    },
+    {
+      "id": "net-early-release",
+      "name": "Net · early release",
+      "asset": "artifacts/duel-launch-avatar-bakeoff/motions/steve-fishing-interactions/steve-small-fishing-net-release.glb",
+      "sampleRatio": 0.35
+    },
+    {
+      "id": "net-release",
+      "name": "Net · release",
+      "asset": "artifacts/duel-launch-avatar-bakeoff/motions/steve-fishing-interactions/steve-small-fishing-net-release.glb",
+      "sampleRatio": 0.65
+    },
+    {
+      "id": "net-recovery",
+      "name": "Net · recovery",
+      "asset": "artifacts/duel-launch-avatar-bakeoff/motions/steve-fishing-interactions/steve-small-fishing-net-release.glb",
+      "sampleRatio": 0.9
+    }
+  ]
+}

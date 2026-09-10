@@ -30,19 +30,26 @@ import type { PlayerID } from "../../../types/core/identifiers";
 import type { DatabaseSystem } from "../../../types/systems/system-interfaces";
 import type {
   PrayerPersistenceSnapshot,
+  PrayerStateCommitRequest,
   PrayerStateCommitReceipt,
   PrayerStateTransitionKind,
 } from "../../../types/network/database";
+import {
+  parseStreamingDuelPrayerObservationContext,
+  type StreamingDuelPrayerObservationContext,
+} from "../../../types/game/streaming-duel-action-observation";
 import { uuid } from "../../../utils/IdGenerator";
 import { prayerDataProvider } from "../../../data/PrayerDataProvider";
-import type { PlayerJoinedPayload } from "../../../types/events";
+import type {
+  PlayerJoinedPayload,
+  QuestCompletionCommittedPayload,
+} from "../../../types/events";
 import {
   type PrayerState,
   isValidPrayerId,
   MAX_ACTIVE_PRAYERS,
   PRAYER_TOGGLE_COOLDOWN_MS,
   PRAYER_TOGGLE_RATE_LIMIT,
-  getPlayerPrayerLevel,
   getPlayerPrayerBonus,
   type PlayerWithPrayerStats,
   type PrayerBonuses,
@@ -512,8 +519,53 @@ export class PrayerSystem extends SystemBase {
     this.world.on(EventType.ALTAR_PRAY, this.onAltarPray);
     // Listen for deactivate-all requests (prayerId === "*")
     this.world.on(EventType.PRAYER_DEACTIVATED, this.onPrayerDeactivated);
+    this.subscribe<QuestCompletionCommittedPayload>(
+      EventType.QUEST_COMPLETION_COMMITTED,
+      (data) => {
+        void this.reconcileCommittedQuestPrayer(data);
+      },
+    );
 
     Logger.system("PrayerSystem", "Initialized");
+  }
+
+  /**
+   * Re-read the current locked Prayer projection after a quest commits Prayer
+   * XP. Reading current database state inside the ordinary Prayer serializer
+   * prevents a delayed quest event from overwriting a newer drain or toggle.
+   */
+  private async reconcileCommittedQuestPrayer(
+    data: QuestCompletionCommittedPayload,
+  ): Promise<void> {
+    const playerId = String(data.playerId ?? "").trim();
+    const prayerProgress = Array.isArray(data.progress)
+      ? data.progress.find((entry) => entry.skill === "prayer")
+      : undefined;
+    if (!prayerProgress) return;
+    if (
+      !playerId ||
+      !/^quest-completion:[a-f0-9]{64}$/.test(
+        String(data.operationId ?? "").trim(),
+      ) ||
+      !data.prayer ||
+      data.prayer.maxPoints !== prayerProgress.currentLevel
+    ) {
+      Logger.systemError(
+        "PrayerSystem",
+        "Refused malformed committed quest Prayer receipt",
+      );
+      return;
+    }
+    await this.ensurePlayerPrayerInitialized(playerId);
+    const reconciled = await this.runSerializedTransition(playerId, () =>
+      this.reconcilePrayerStateFromDatabase(playerId),
+    );
+    if (reconciled) {
+      this.clearPrayerReconciliation(playerId);
+      return;
+    }
+    this.prayerPersistenceFailures.add(playerId);
+    this.schedulePrayerReconciliation(playerId);
   }
 
   /**
@@ -906,6 +958,7 @@ export class PrayerSystem extends SystemBase {
     playerId: string,
     prayerId: string,
     operationId = `prayer-toggle:${uuid()}${uuid()}`,
+    publicActionObservation?: StreamingDuelPrayerObservationContext,
   ): Promise<PrayerActionReceipt> {
     if (!isValidPrayerId(prayerId)) {
       return this.prayerFailure(
@@ -913,6 +966,23 @@ export class PrayerSystem extends SystemBase {
         operationId,
         "invalid_request",
         "Invalid prayer",
+      );
+    }
+    const parsedPublicActionObservation =
+      publicActionObservation === undefined
+        ? undefined
+        : parseStreamingDuelPrayerObservationContext(publicActionObservation);
+    if (
+      publicActionObservation !== undefined &&
+      (!parsedPublicActionObservation ||
+        parsedPublicActionObservation.actorId !== playerId ||
+        parsedPublicActionObservation.prayer !== prayerId)
+    ) {
+      return this.prayerFailure(
+        playerId,
+        operationId,
+        "invalid_request",
+        "Invalid duel prayer observation",
       );
     }
 
@@ -964,10 +1034,11 @@ export class PrayerSystem extends SystemBase {
       if (wasActive) {
         nextActive.delete(prayerId);
       } else {
-        const player = this.getPlayerEntity(playerId);
-        const prayerLevel = player
-          ? getPlayerPrayerLevel(player as PlayerWithPrayerStats)
-          : Math.max(1, Math.floor(state.maxPoints));
+        // PrayerSystem's persisted max-points custody is the authoritative
+        // prayer level. Database progression commits keep prayerMaxPoints and
+        // prayerLevel equal atomically; entity projections may be absent or
+        // stale during streamed duel role switches.
+        const prayerLevel = state.maxPoints;
         if (prayerLevel < prayer.level) {
           return this.prayerFailure(
             playerId,
@@ -1011,6 +1082,7 @@ export class PrayerSystem extends SystemBase {
         "toggle",
         expected,
         committed,
+        parsedPublicActionObservation ?? undefined,
       );
       if (!transition.ok) {
         return this.prayerFailure(
@@ -1141,6 +1213,7 @@ export class PrayerSystem extends SystemBase {
     transition: PrayerStateTransitionKind,
     expected: PrayerPersistenceSnapshot,
     committed: PrayerPersistenceSnapshot,
+    publicActionObservation?: StreamingDuelPrayerObservationContext,
   ): Promise<
     | { ok: true; receipt: PrayerStateCommitReceipt }
     | { ok: false; reason: PrayerActionFailureReason }
@@ -1165,6 +1238,7 @@ export class PrayerSystem extends SystemBase {
           transition,
           expected,
           committed,
+          ...(publicActionObservation ? { publicActionObservation } : {}),
         }),
       );
     } catch (error) {
@@ -1178,7 +1252,8 @@ export class PrayerSystem extends SystemBase {
       transition,
       expected,
       committed,
-    };
+      ...(publicActionObservation ? { publicActionObservation } : {}),
+    } satisfies PrayerStateCommitRequest;
     let receipt: PrayerStateCommitReceipt;
     try {
       receipt = await db.commitPrayerStateOperationAsync(request);
@@ -2077,8 +2152,55 @@ export class PrayerSystem extends SystemBase {
   private getPlayerEntity(playerId: string): PlayerWithPrayerStats | undefined {
     const entity = this.world.entities.get(playerId);
     if (!entity) return undefined;
-    // Entity has stats/skills properties that match PlayerWithPrayerStats interface
-    return entity as PlayerWithPrayerStats;
+    const candidate = entity as unknown as {
+      id?: unknown;
+      stats?: PlayerWithPrayerStats["stats"];
+      skills?: PlayerWithPrayerStats["skills"];
+      data?: {
+        stats?: PlayerWithPrayerStats["stats"];
+        skills?: PlayerWithPrayerStats["skills"];
+      };
+      getPlayerData?: () => {
+        skills?: PlayerWithPrayerStats["skills"];
+      };
+      getComponent?: (name: string) =>
+        | {
+            data?: {
+              prayer?: NonNullable<PlayerWithPrayerStats["stats"]>["prayer"];
+              combatBonuses?: NonNullable<
+                PlayerWithPrayerStats["stats"]
+              >["combatBonuses"];
+            };
+          }
+        | undefined;
+    };
+
+    let playerDataSkills: PlayerWithPrayerStats["skills"] | undefined;
+    try {
+      playerDataSkills = candidate.getPlayerData?.().skills;
+    } catch {
+      // A partially constructed or teardown-phase entity can reject reads.
+    }
+    const skills =
+      candidate.skills ?? candidate.data?.skills ?? playerDataSkills;
+    const componentStats = candidate.getComponent?.("stats")?.data;
+    const stats =
+      candidate.stats ??
+      candidate.data?.stats ??
+      (componentStats
+        ? {
+            // Live skill custody wins whenever it is available. The stats
+            // component remains a compatibility fallback and bonus source.
+            prayer: skills?.prayer ? undefined : componentStats.prayer,
+            combatBonuses: componentStats.combatBonuses,
+          }
+        : undefined);
+
+    return {
+      id: typeof candidate.id === "string" ? candidate.id : playerId,
+      stats,
+      skills,
+    };
   }
 
   /**

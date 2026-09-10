@@ -33,20 +33,26 @@ export default defineConfig({
   resolve: {
     alias: [
       {
-        find: /^@hyperia\/shared\/client$/,
-        replacement: path.resolve(__dirname, "../shared/src/index.client.ts"),
+        find: /^@hyperforge\/shared\/client$/,
+        replacement: path.resolve(
+          import.meta.dirname,
+          "../shared/src/index.client.ts",
+        ),
       },
       {
-        find: /^@hyperia\/shared$/,
-        replacement: path.resolve(__dirname, "../shared/src/index.ts"),
+        find: /^@hyperforge\/shared$/,
+        replacement: path.resolve(
+          import.meta.dirname,
+          "../shared/src/index.ts",
+        ),
       },
       {
-        find: /^@hyperia\/shared\/(.*)$/,
-        replacement: path.resolve(__dirname, "../shared/src/$1"),
+        find: /^@hyperforge\/shared\/(.*)$/,
+        replacement: path.resolve(import.meta.dirname, "../shared/src/$1"),
       },
       {
         find: "@",
-        replacement: path.resolve(__dirname, "./src"),
+        replacement: path.resolve(import.meta.dirname, "./src"),
       },
     ],
   },

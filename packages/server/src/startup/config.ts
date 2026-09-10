@@ -61,6 +61,7 @@ const MANIFEST_FILES = [
   "buildings.json",
   "combat-spells.json",
   "duel-arenas.json",
+  "duel-presentation-assets.json",
   "lod-settings.json",
   "model-bounds.json",
   "music.json",
@@ -216,9 +217,6 @@ export interface ServerConfig {
 
   /** Admin code for protected endpoints */
   adminCode?: string;
-
-  /** JWT secret for token signing */
-  jwtSecret?: string;
 
   /** Auto-save interval in seconds */
   saveInterval: number;
@@ -439,7 +437,6 @@ export async function loadConfig(): Promise<ServerConfig> {
   const CDN_URL = process.env["PUBLIC_CDN_URL"] || DEFAULT_CDN_URL;
   const SYSTEMS_PATH = process.env["SYSTEMS_PATH"];
   const ADMIN_CODE = process.env["ADMIN_CODE"];
-  const JWT_SECRET = process.env["JWT_SECRET"];
   const SAVE_INTERVAL = parseInt(process.env["SAVE_INTERVAL"] || "60", 10);
   const COMMIT_HASH = process.env["COMMIT_HASH"];
 
@@ -487,7 +484,6 @@ export async function loadConfig(): Promise<ServerConfig> {
     assetsUrl,
     systemsPath: SYSTEMS_PATH,
     adminCode: ADMIN_CODE,
-    jwtSecret: JWT_SECRET,
     saveInterval: SAVE_INTERVAL,
     nodeEnv: NODE_ENV,
     commitHash: COMMIT_HASH,

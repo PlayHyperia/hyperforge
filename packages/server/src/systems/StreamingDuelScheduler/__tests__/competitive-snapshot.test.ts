@@ -1,13 +1,17 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import {
   assertValidCompetitiveSnapshot,
   canonicalCompetitiveSnapshotJson,
+  competitiveSnapshotMismatchPaths,
   digestCompetitiveSnapshot,
   finalizeCompetitiveSnapshot,
   type CompetitiveSnapshotContestant,
 } from "../competitive-snapshot.js";
 import { buildDeterministicCompetitiveTacticalStrategy } from "../competitive-tactical-strategy.js";
+import { buildCompetitiveTerminalStatUpdates } from "../competitive-terminal-stats.js";
+import { PostgresDuelPreparationStore } from "../preparation.js";
+import { COMPETITIVE_SNAPSHOT_TIMING_FIXTURE } from "./competitiveSnapshotTimingFixture.js";
 
 function contestant(side: "agent1" | "agent2"): CompetitiveSnapshotContestant {
   const agentId = side === "agent1" ? "agent-alpha" : "agent-beta";
@@ -82,6 +86,7 @@ function finalize(
     persisted: true,
     frozenAt: 1_800_000_000_000,
     betWindowDurationMs: 60_000,
+    timing: COMPETITIVE_SNAPSHOT_TIMING_FIXTURE,
     draft: {
       diagnostic: false,
       preparationId: "11111111-1111-4111-a111-111111111111",
@@ -127,6 +132,49 @@ describe("competitive snapshot contract", () => {
     ).toEqual(["attack", "strength"]);
     expect(first.digest).toBe(second.digest);
     expect(first.digest).toBe(digestCompetitiveSnapshot(first.snapshot));
+  });
+
+  it("reports bounded value-free mismatch paths for recovery diagnostics", () => {
+    const expected = finalize().snapshot;
+    const actual = structuredClone(expected);
+    actual.contestants[0].inventory[0]!.quantity = 987_654_321;
+    actual.contestants[1].skillLevels[0]!.level = 73;
+
+    const paths = competitiveSnapshotMismatchPaths(expected, actual, 1);
+
+    expect(paths).toEqual(["$.contestants[0].inventory[0].quantity"]);
+    expect(paths.join(" ")).not.toContain("987654321");
+    expect(paths.join(" ")).not.toContain("73");
+  });
+
+  it("binds the exact sporting clock and timeout policy before betting opens", () => {
+    const { snapshot } = finalize();
+    expect(snapshot.timing).toEqual({
+      ...COMPETITIVE_SNAPSHOT_TIMING_FIXTURE,
+      fightStartTime:
+        snapshot.betCloseTime +
+        COMPETITIVE_SNAPSHOT_TIMING_FIXTURE.countdownDurationMs,
+      fightDeadline:
+        snapshot.betCloseTime +
+        COMPETITIVE_SNAPSHOT_TIMING_FIXTURE.countdownDurationMs +
+        COMPETITIVE_SNAPSHOT_TIMING_FIXTURE.maxFightDurationMs,
+    });
+  });
+
+  it("rejects any post-freeze sporting-clock or timeout-policy mutation", () => {
+    const { snapshot } = finalize();
+    const changedDeadline = structuredClone(snapshot);
+    changedDeadline.timing!.fightDeadline += 1;
+    expect(() => assertValidCompetitiveSnapshot(changedDeadline)).toThrow(
+      /timing contract/u,
+    );
+
+    const changedPolicy = structuredClone(snapshot);
+    (changedPolicy.timing as { timeoutPolicy: string }).timeoutPolicy =
+      "unbound_policy";
+    expect(() => assertValidCompetitiveSnapshot(changedPolicy)).toThrow(
+      /timing contract/u,
+    );
   });
 
   it("copies only the public allowlist and strips injected private custody fields", () => {
@@ -176,6 +224,7 @@ describe("competitive snapshot contract", () => {
         persisted: true,
         frozenAt: Number.MAX_SAFE_INTEGER - 10,
         betWindowDurationMs: 60_000,
+        timing: COMPETITIVE_SNAPSHOT_TIMING_FIXTURE,
         draft: {
           diagnostic: false,
           preparationId: "11111111-1111-4111-a111-111111111111",
@@ -212,6 +261,7 @@ describe("competitive snapshot contract", () => {
       persisted: false,
       frozenAt: 1_800_000_000_000,
       betWindowDurationMs: 60_000,
+      timing: COMPETITIVE_SNAPSHOT_TIMING_FIXTURE,
       draft: {
         diagnostic: true,
         preparationId: null,
@@ -269,6 +319,7 @@ describe("competitive snapshot contract", () => {
     const legacy = structuredClone(snapshot);
     legacy.snapshotVersion = 2;
     legacy.combatPolicyVersion = "duel-combat-policy-v1";
+    delete legacy.timing;
     for (const entry of legacy.contestants) {
       for (const loadout of Object.values(entry.combatLoadouts)) {
         if (loadout) delete loadout.armorIds;
@@ -278,11 +329,21 @@ describe("competitive snapshot contract", () => {
     expect(() => assertValidCompetitiveSnapshot(legacy)).not.toThrow();
   });
 
+  it("can validate a schema-v3 snapshot without inventing a historical clock", () => {
+    const { snapshot } = finalize();
+    const legacy = structuredClone(snapshot);
+    legacy.snapshotVersion = 3;
+    delete legacy.timing;
+
+    expect(() => assertValidCompetitiveSnapshot(legacy)).not.toThrow();
+  });
+
   it("can validate a legacy snapshot for terminal inspection without making it current", () => {
     const { snapshot } = finalize();
     const legacy = structuredClone(snapshot);
     legacy.snapshotVersion = 1;
     legacy.combatPolicyVersion = "duel-combat-policy-v1";
+    delete legacy.timing;
     for (const entry of legacy.contestants) {
       delete entry.preparation.tacticalStrategy;
       for (const loadout of Object.values(entry.combatLoadouts)) {
@@ -291,5 +352,149 @@ describe("competitive snapshot contract", () => {
     }
 
     expect(() => assertValidCompetitiveSnapshot(legacy)).not.toThrow();
+  });
+});
+
+describe("competitive recovery custody hold query", () => {
+  it("returns only validated contestant identities from the active recovery set", async () => {
+    const { snapshot } = finalize();
+    const query = vi.fn(async (sql: string) => ({
+      rows: [
+        {
+          preparationId: snapshot.preparationId,
+          agent1Id: snapshot.contestants[0].agentId,
+          agent2Id: snapshot.contestants[1].agentId,
+          snapshot,
+        },
+      ],
+      rowCount: 1,
+      command: "SELECT",
+      oid: 0,
+      fields: [],
+    }));
+    const store = new PostgresDuelPreparationStore({ query } as never);
+
+    await expect(store.listCompetitiveRecoveryCustodyHolds()).resolves.toEqual([
+      {
+        preparationId: snapshot.preparationId,
+        agent1Id: "agent-alpha",
+        agent2Id: "agent-beta",
+      },
+    ]);
+    const sql = String(query.mock.calls[0]?.[0]);
+    expect(sql).toContain(
+      `snapshot."lifecycleStatus" IN ('frozen', 'terminal')`,
+    );
+    expect(sql).toContain(`snapshot."recoveredAt" IS NULL`);
+    expect(sql).toContain("preparation.status = 'frozen'");
+  });
+
+  it("fails closed when relational contestant ownership disagrees with the snapshot", async () => {
+    const { snapshot } = finalize();
+    const query = vi.fn(async () => ({
+      rows: [
+        {
+          preparationId: snapshot.preparationId,
+          agent1Id: "agent-beta",
+          agent2Id: "agent-alpha",
+          snapshot,
+        },
+      ],
+      rowCount: 1,
+      command: "SELECT",
+      oid: 0,
+      fields: [],
+    }));
+    const store = new PostgresDuelPreparationStore({ query } as never);
+
+    await expect(store.listCompetitiveRecoveryCustodyHolds()).rejects.toThrow(
+      /custody hold is invalid/u,
+    );
+  });
+});
+
+describe("competitive terminal aggregate contract", () => {
+  it("derives exact winner, loser, anchor, and two-sided damage updates", () => {
+    const { snapshot } = finalize();
+    const terminalAt = snapshot.frozenAt + 10;
+
+    expect(
+      buildCompetitiveTerminalStatUpdates(
+        snapshot,
+        { outcome: "win", winnerId: "agent-alpha", terminalAt },
+        new Map([
+          ["agent-alpha", 17],
+          ["agent-beta", 9],
+        ]),
+      ),
+    ).toEqual([
+      expect.objectContaining({
+        agentId: "agent-alpha",
+        opponentId: "agent-beta",
+        result: "win",
+        winDelta: 1,
+        lossDelta: 0,
+        drawDelta: 0,
+        anchoredWins: 11,
+        anchoredLosses: 5,
+        damageDealt: 17,
+        damageTaken: 9,
+        terminalAt,
+      }),
+      expect.objectContaining({
+        agentId: "agent-beta",
+        opponentId: "agent-alpha",
+        result: "loss",
+        winDelta: 0,
+        lossDelta: 1,
+        drawDelta: 0,
+        anchoredWins: 10,
+        anchoredLosses: 6,
+        damageDealt: 9,
+        damageTaken: 17,
+        terminalAt,
+      }),
+    ]);
+  });
+
+  it("derives draws, ignores cancellations, and rejects foreign damage", () => {
+    const { snapshot } = finalize();
+    const terminalAt = snapshot.frozenAt + 10;
+    expect(
+      buildCompetitiveTerminalStatUpdates(
+        snapshot,
+        { outcome: "draw", winnerId: null, terminalAt },
+        new Map(),
+      ),
+    ).toEqual([
+      expect.objectContaining({
+        agentId: "agent-alpha",
+        result: "draw",
+        drawDelta: 1,
+        anchoredWins: 10,
+        anchoredLosses: 5,
+      }),
+      expect.objectContaining({
+        agentId: "agent-beta",
+        result: "draw",
+        drawDelta: 1,
+        anchoredWins: 10,
+        anchoredLosses: 5,
+      }),
+    ]);
+    expect(
+      buildCompetitiveTerminalStatUpdates(
+        snapshot,
+        { outcome: "cancelled", winnerId: null, terminalAt },
+        new Map(),
+      ),
+    ).toEqual([]);
+    expect(() =>
+      buildCompetitiveTerminalStatUpdates(
+        snapshot,
+        { outcome: "win", winnerId: "agent-alpha", terminalAt },
+        new Map([["foreign-agent", 1]]),
+      ),
+    ).toThrow("competitive_terminal_stats_damage_invalid");
   });
 });

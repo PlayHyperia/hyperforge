@@ -11,11 +11,12 @@
  * - WebSocket: No rate limiting (handled by connection limits)
  *
  * **Implementation**:
- * Uses @fastify/rate-limit with IP-based tracking and Redis support for
- * distributed deployments (when configured).
+ * Uses @fastify/rate-limit as a fast process-local load-shedding layer.
+ * Security-sensitive authentication and enumeration routes additionally use
+ * the PostgreSQL authority in distributed-rate-limit.ts.
  *
  * **Production Considerations**:
- * - In production, consider using Redis for distributed rate limiting
+ * - Production and staging always retain this local load-shedding layer
  * - Adjust limits based on actual traffic patterns and server capacity
  * - Monitor rate limit hits to detect attack patterns
  * - Consider different limits for authenticated vs unauthenticated users
@@ -28,6 +29,36 @@
  */
 
 import type { RateLimitOptions } from "@fastify/rate-limit";
+import type { FastifyRequest } from "fastify";
+
+const PUBLIC_STATIC_DELIVERY_ROUTES = new Set([
+  "/game-assets/*",
+  "/game-assets/manifests/*",
+  "/live/*",
+]);
+
+/**
+ * Immutable game packages and HLS segments are intentionally outside the
+ * application API bucket. A production browser cold-start can request more
+ * than 100 files, and the supervised renderer plus stream bridge share an
+ * origin address. Counting those cacheable reads against API traffic makes a
+ * healthy launch shed fitted equipment and poison renderer readiness.
+ *
+ * The exception is matched against Fastify's resolved route pattern—not a raw
+ * attacker-controlled URL—and applies only to GET/HEAD. Production bandwidth,
+ * bot, and origin protection remains the responsibility of the CDN/edge and
+ * the private-origin lock; mutable and API routes retain their normal limits.
+ */
+export function isPublicStaticDeliveryRequest(
+  request: Pick<FastifyRequest, "method" | "routeOptions">,
+): boolean {
+  const routeUrl = request.routeOptions.url;
+  return (
+    (request.method === "GET" || request.method === "HEAD") &&
+    typeof routeUrl === "string" &&
+    PUBLIC_STATIC_DELIVERY_ROUTES.has(routeUrl)
+  );
+}
 
 /**
  * Global rate limit configuration
@@ -46,6 +77,7 @@ export function getGlobalRateLimit(): RateLimitOptions {
   return {
     max: 100,
     timeWindow: "1 minute",
+    allowList: (request) => isPublicStaticDeliveryRequest(request),
     errorResponseBuilder: (_request, context) => ({
       statusCode: 429,
       error: "Too Many Requests",
@@ -201,14 +233,21 @@ export function getArenaAdminRateLimit(): RateLimitOptions {
  * for easier local development, unless explicitly enabled.
  *
  * Controls:
- * - `NODE_ENV=production` => always enabled
- * - `DISABLE_RATE_LIMIT=true` => disabled (non-production only)
- * - `DISABLE_RATE_LIMIT=false` => enabled (non-production only)
- * - unset in non-production => disabled by default
+ * - `NODE_ENV=production|staging` => always enabled
+ * - `DISABLE_RATE_LIMIT=true` => disabled (local/test only)
+ * - `DISABLE_RATE_LIMIT=false` => enabled (local/test only)
+ * - unset in local/test => disabled by default
  *
  * @returns true if rate limiting should be enabled
  */
 export function isRateLimitEnabled(): boolean {
+  if (
+    process.env.NODE_ENV === "production" ||
+    process.env.NODE_ENV === "staging"
+  ) {
+    return true;
+  }
+
   const toggle = process.env.DISABLE_RATE_LIMIT;
   if (toggle != null && toggle.trim() !== "") {
     const normalized = toggle.trim().toLowerCase();
@@ -219,12 +258,7 @@ export function isRateLimitEnabled(): boolean {
       return true;
     }
 
-    // Unknown value: fail safe for dev ergonomics.
-    return false;
-  }
-
-  // Production default remains enabled unless explicitly disabled above.
-  if (process.env.NODE_ENV === "production") {
+    // Unknown values fail closed instead of silently disabling protection.
     return true;
   }
 

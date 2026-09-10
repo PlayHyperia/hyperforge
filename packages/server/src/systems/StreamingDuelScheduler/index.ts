@@ -19,14 +19,26 @@ import {
   DEFAULT_DUEL_RULES,
   calculateCombatLevel,
   AVATAR_OPTIONS,
-  DEFAULT_AVATAR_URL,
+  DIAGNOSTIC_AVATAR_OPTIONS,
+  CANONICAL_DUEL_AVATAR_URL,
+  STREAMING_DUEL_PREPARATION_SUMMARY_SCHEMA_VERSION,
+  STREAMING_DUEL_PUBLIC_PREPARATION_ACTIVITY_TRAIL_LIMIT,
+  STREAMING_DUEL_PUBLIC_PREPARATION_ACTIVITIES,
+  STREAMING_DUEL_PUBLIC_PREPARATION_MODES,
+  acquirePreparationActionFence,
+  isPlayerProcessingQuiescent,
+  parseStreamingDuelPreparationSummary,
+  registerStreamingDuelDamageAuthority,
+  requestPlayerProcessingQuiescence,
+  type PreparationActionFence,
+  type StreamingDuelPreparationSummary,
+  type StreamingDuelPublicPreparationActivity,
+  type StreamingDuelPublicPreparationMode,
+  type StreamingDuelStrategySummary,
+  type StreamingDuelDamageObservationContext,
 } from "@hyperforge/shared";
 import crypto from "node:crypto";
 import type pg from "pg";
-
-const CANONICAL_DUEL_AVATAR_URL =
-  AVATAR_OPTIONS.find((avatar) => avatar.id === "steve")?.url ??
-  DEFAULT_AVATAR_URL;
 
 /** Type for network with send method */
 interface NetworkWithSend {
@@ -34,9 +46,37 @@ interface NetworkWithSend {
   sendToSpectators?: <T>(name: string, data: T) => void;
   syncStreamingContestants?: (contestantIds: string[]) => void;
 }
+
+type DamageFencedResolution = {
+  cycleId: string;
+  winnerId: string | null;
+  loserId: string | null;
+  winReason: StreamingDuelWinReason;
+  terminalAtOverride?: number;
+  terminalState?: {
+    terminalAt: number;
+    seed: string;
+    replayHash: string;
+    persisted: boolean;
+  };
+};
+
+type DamageFencedAbort = {
+  cycleId: string;
+  reason: string;
+  occurredAtOverride?: number;
+  terminalPersisted: boolean;
+  cycleOverride?: StreamingDuelCycle;
+  promise: Promise<void>;
+  resolve: () => void;
+  reject: (error: unknown) => void;
+};
 import { Logger } from "../ServerNetwork/services";
 import { v4 as uuidv4 } from "uuid";
 import { errMsg } from "../../shared/errMsg.js";
+import { isRetryablePostgresTransactionConflict } from "../../database/postgres-transaction.js";
+
+const PRIVATE_PREPARATION_CONFLICT_RETRIES = 4;
 
 /** Log once if agent_mappings.streaming_duel_enabled cannot be read (e.g. migration not applied). */
 let streamingDuelPrefReadWarningLogged = false;
@@ -51,7 +91,14 @@ import {
   type StreamingDuelWinReason,
   type FrozenStreamingCombatLoadouts,
   type SwitchableStreamingCombatRole,
+  resolveStreamingPublicPreparationMinimumDuration,
+  resolveStreamingPublicPreparationReleaseAt,
+  resolveStreamingPreparationDuration,
   STREAMING_TIMING,
+} from "./types.js";
+export {
+  resolveStreamingPreparationDuration,
+  resolveStreamingPublicPreparationMinimumDuration,
 } from "./types.js";
 import { MatchmakingManager } from "./managers/MatchmakingManager.js";
 import { CameraDirector } from "./managers/CameraDirector.js";
@@ -61,24 +108,218 @@ import {
 } from "./managers/DuelOrchestrator.js";
 import { CycleStateMachine } from "./managers/CycleStateMachine.js";
 import {
+  DUEL_COMPETITIVE_RECOVERY_CUSTODY_HOLD_EVENT,
   DUEL_PREPARATION_BANK_ACTIONS,
+  DUEL_PREPARATION_LOCAL_REVOCATION_EVENT,
   PostgresDuelPreparationStore,
   type DuelPreparationSnapshot,
   type PersistedCompetitiveSnapshot,
 } from "./preparation.js";
 import {
+  resolveDuelPreparationHostLeaseConfig,
+  type DuelPreparationHostLeaseConfig,
+} from "./preparation-host-lease.js";
+import {
   COMPETITIVE_SNAPSHOT_VERSION,
+  competitiveSnapshotMismatchPaths,
   finalizeCompetitiveSnapshot,
   type CompetitiveSnapshotContestant,
   type CompetitiveSnapshotDraft,
   type CompetitivePreparationEvidence,
   type CompetitiveSnapshot,
+  type CompetitiveSnapshotTimingInput,
 } from "./competitive-snapshot.js";
 import { buildDeterministicCompetitiveTacticalStrategy } from "./competitive-tactical-strategy.js";
-import { sanitizePublicTerminalNotice } from "../../streaming/streaming-public-presentation.js";
+import { resolvePersistedStreamingDuelEligibility } from "../../eliza/agentPopulationPolicy.js";
+import { sanitizePublicStreamingState } from "../../streaming/streaming-public-presentation.js";
+import { buildCompetitiveTerminalProof } from "./competitive-terminal-proof.js";
+import { toPublicStrategySummary } from "./public-strategy-summary.js";
+import { sparbotSkillXpForLevel } from "./sparbot-skill-seed.js";
+import {
+  PostgresStreamingDuelActionObservationStore,
+  type StreamingDuelActionObservationPool,
+} from "./public-action-observation-ledger.js";
+
+const COMPETITIVE_SNAPSHOT_TIMING = Object.freeze({
+  contractVersion: STREAMING_TIMING.CONTRACT_VERSION,
+  timeoutPolicy: STREAMING_TIMING.TIMEOUT_POLICY,
+  countdownDurationMs: STREAMING_TIMING.COUNTDOWN_DURATION,
+  fightingDurationMs: STREAMING_TIMING.FIGHTING_DURATION,
+  endWarningDurationMs: STREAMING_TIMING.END_WARNING_DURATION,
+  maxFightDurationMs: STREAMING_TIMING.MAX_FIGHT_DURATION,
+}) satisfies CompetitiveSnapshotTimingInput;
+
+/**
+ * Keep alternate rigs behind the explicit loopback, no-money diagnostic
+ * boundary until their complete duel presentation has been approved.
+ */
+export function resolveStreamingDuelDiagnosticAvatarUrl(
+  env: NodeJS.ProcessEnv,
+): string {
+  const requestedAvatarId = env.STREAMING_DUEL_DIAGNOSTIC_AVATAR_ID?.trim();
+  if (!requestedAvatarId) return CANONICAL_DUEL_AVATAR_URL;
+  if (!isLocalDiagnosticDuelRuntime(env)) {
+    throw new Error(
+      "A diagnostic duel avatar override requires the explicit loopback no-money diagnostic boundary",
+    );
+  }
+  const avatar = [...AVATAR_OPTIONS, ...DIAGNOSTIC_AVATAR_OPTIONS].find(
+    (candidate) => candidate.id === requestedAvatarId,
+  );
+  if (!avatar) {
+    throw new Error(`Unknown diagnostic duel avatar: ${requestedAvatarId}`);
+  }
+  return avatar.url;
+}
+
+export function assertLocalDiagnosticContestantAuthority(
+  env: NodeJS.ProcessEnv,
+): void {
+  if (!isLocalDiagnosticDuelRuntime(env)) {
+    throw new Error(
+      "Diagnostic contestant authority requires the explicit loopback no-money boundary",
+    );
+  }
+}
 
 const SWITCHABLE_STREAMING_COMBAT_ROLES =
   new Set<SwitchableStreamingCombatRole>(["melee", "ranged", "mage"]);
+const PUBLIC_PREPARATION_ACTIVITIES = new Set<string>(
+  STREAMING_DUEL_PUBLIC_PREPARATION_ACTIVITIES,
+);
+const PUBLIC_PREPARATION_MODES = new Set<string>(
+  STREAMING_DUEL_PUBLIC_PREPARATION_MODES,
+);
+const PUBLIC_PREPARATION_ACTIVITY_EVENT_KEYS = [
+  "activity",
+  "agentId",
+  "mode",
+  "occurredAt",
+  "preparationId",
+  "revision",
+] as const;
+
+const DIAGNOSTIC_HARPOON_INTERACTION_RANGE_METERS = 4;
+const DIAGNOSTIC_HARPOON_MAX_BANK_HEIGHT_METERS = 0.3;
+const DIAGNOSTIC_HARPOON_MIN_AGENT_SEPARATION_METERS = 2;
+
+type DiagnosticPreparationTerrain = {
+  getHeightAt?: (x: number, z: number) => number;
+  isPositionWalkableFast?: (x: number, z: number) => boolean;
+};
+
+export type DiagnosticPreparationPosition = [number, number, number];
+
+/**
+ * Select two distinct, dry shoreline positions inside the authoritative
+ * fishing interaction radius. The active Steve harpoon strike is certified
+ * only when the avatar's footing is no more than 0.3m above the water plane,
+ * so a topology regression fails instead of producing a misleading capture.
+ */
+export function selectDiagnosticHarpoonPreparationPositions(
+  resourcePosition: DiagnosticPreparationPosition,
+  terrain: DiagnosticPreparationTerrain,
+): [DiagnosticPreparationPosition, DiagnosticPreparationPosition] {
+  if (
+    typeof terrain.getHeightAt !== "function" ||
+    typeof terrain.isPositionWalkableFast !== "function"
+  ) {
+    throw new Error("Harpoon preparation requires live terrain authority");
+  }
+
+  const [resourceX, waterSurfaceY, resourceZ] = resourcePosition;
+  const candidates: Array<{
+    position: DiagnosticPreparationPosition;
+    distanceToWater: number;
+    distanceToResource: number;
+  }> = [];
+  const sampleStep = 0.25;
+  const searchRadius = DIAGNOSTIC_HARPOON_INTERACTION_RANGE_METERS - sampleStep;
+
+  for (let dx = -searchRadius; dx <= searchRadius; dx += sampleStep) {
+    for (let dz = -searchRadius; dz <= searchRadius; dz += sampleStep) {
+      const distanceToResource = Math.hypot(dx, dz);
+      if (distanceToResource < 0.75 || distanceToResource > searchRadius) {
+        continue;
+      }
+      const x = resourceX + dx;
+      const z = resourceZ + dz;
+      if (!terrain.isPositionWalkableFast(x, z)) continue;
+      const y = terrain.getHeightAt(x, z);
+      const distanceToWater = y - waterSurfaceY;
+      if (
+        !Number.isFinite(y) ||
+        distanceToWater < 0 ||
+        distanceToWater > DIAGNOSTIC_HARPOON_MAX_BANK_HEIGHT_METERS
+      ) {
+        continue;
+      }
+      candidates.push({
+        position: [x, y, z],
+        distanceToWater,
+        distanceToResource,
+      });
+    }
+  }
+
+  candidates.sort(
+    (left, right) =>
+      left.distanceToWater - right.distanceToWater ||
+      left.distanceToResource - right.distanceToResource ||
+      left.position[0] - right.position[0] ||
+      left.position[2] - right.position[2],
+  );
+
+  let bestPair:
+    | {
+        positions: [
+          DiagnosticPreparationPosition,
+          DiagnosticPreparationPosition,
+        ];
+        separation: number;
+        bankHeightTotal: number;
+      }
+    | undefined;
+  for (let leftIndex = 0; leftIndex < candidates.length; leftIndex += 1) {
+    const left = candidates[leftIndex];
+    if (!left) continue;
+    for (
+      let rightIndex = leftIndex + 1;
+      rightIndex < candidates.length;
+      rightIndex += 1
+    ) {
+      const right = candidates[rightIndex];
+      if (!right) continue;
+      const separation = Math.hypot(
+        right.position[0] - left.position[0],
+        right.position[2] - left.position[2],
+      );
+      if (separation < DIAGNOSTIC_HARPOON_MIN_AGENT_SEPARATION_METERS) {
+        continue;
+      }
+      const bankHeightTotal = left.distanceToWater + right.distanceToWater;
+      if (
+        !bestPair ||
+        separation > bestPair.separation ||
+        (separation === bestPair.separation &&
+          bankHeightTotal < bestPair.bankHeightTotal)
+      ) {
+        bestPair = {
+          positions: [left.position, right.position],
+          separation,
+          bankHeightTotal,
+        };
+      }
+    }
+  }
+
+  if (!bestPair) {
+    throw new Error(
+      "No two certified dry shoreline positions are available for harpoon preparation",
+    );
+  }
+  return bestPair.positions;
+}
 
 const getFrozenOpeningStyle = (
   snapshot: CompetitiveSnapshot | null,
@@ -173,20 +414,6 @@ const cloneCombatLoadouts = (
   return clone;
 };
 
-export function resolveStreamingPreparationDuration(
-  env: NodeJS.ProcessEnv = process.env,
-): number | null {
-  const raw = env.STREAMING_DUEL_PREPARATION_MS?.trim();
-  if (!raw) return null;
-  const parsed = Number.parseInt(raw, 10);
-  if (!Number.isSafeInteger(parsed) || parsed < 1_000) {
-    throw new Error(
-      "STREAMING_DUEL_PREPARATION_MS must be an integer of at least 1000",
-    );
-  }
-  return parsed;
-}
-
 // ============================================================================
 // StreamingDuelScheduler Class (Thin Facade)
 // ============================================================================
@@ -202,13 +429,42 @@ export class StreamingDuelScheduler {
   private readonly preparationStore: PostgresDuelPreparationStore | null;
   private readonly preparationFencingToken: string | null;
   private readonly preparationDurationMs: number | null;
+  private readonly publicPreparationMinimumDurationMs: number;
+  private readonly preparationHostLeaseConfig: DuelPreparationHostLeaseConfig | null;
+  private readonly preparationDiagnosticHostOwnerId = uuidv4();
   private onDeckPreparation: DuelPreparationSnapshot | null = null;
   private onDeckPreparationPairKey: string | null = null;
+  private publicPreparationActivities: {
+    preparationId: string;
+    agents: Map<
+      string,
+      {
+        activity: StreamingDuelPublicPreparationActivity;
+        mode: StreamingDuelPublicPreparationMode;
+        activityTrail: StreamingDuelPublicPreparationActivity[];
+        revision: number;
+      }
+    >;
+  } | null = null;
   private preparationSelectionGeneration = 0;
   private preparationSelectionInFlight: Promise<void> | null = null;
   private preparationSelectionInFlightPairKey: string | null = null;
   private preparationIdleCheckInFlight = false;
   private competitiveRecoveryChecked = false;
+  /**
+   * Process-start fences keyed by the exact durable preparation. They prevent
+   * persisted agents from changing frozen custody before recovery/retirement.
+   */
+  private readonly competitiveRecoveryCustodyHolds = new Map<
+    string,
+    readonly [string, string]
+  >();
+  private preMarketProcessingFences: PreparationActionFence[] = [];
+  private readonly deferredProcessingFenceReleases = new Set<{
+    fences: PreparationActionFence[];
+    playerIds: string[];
+    timeout: ReturnType<typeof setTimeout> | null;
+  }>();
 
   // ---- Facade-owned state ----
 
@@ -229,6 +485,27 @@ export class StreamingDuelScheduler {
 
   /** Prevent asynchronous cleanup continuations from reviving a destroyed scheduler. */
   private isDestroyed = false;
+  /** Removes this scheduler's narrow combat-to-custody bridge on replacement. */
+  private unregisterDamageAuthority: (() => void) | null = null;
+  /** Exact operations that must settle before any competing terminal decision. */
+  private readonly pendingDuelDamageOperations = new Map<
+    string,
+    { cycleId: string; duelId: string }
+  >();
+  /**
+   * A committed damage promise settles just before some projectile callers
+   * publish its COMBAT_DAMAGE_DEALT receipt. Release the terminal fence on the
+   * next task turn so the exact co-committed terminal identity can arrive
+   * first; otherwise ENTITY_DEATH can race a redundant terminal transaction.
+   */
+  private readonly pendingDuelDamageSettlementTimers = new Map<
+    string,
+    ReturnType<typeof setTimeout>
+  >();
+  /** Resolution waits until every already-authored exact hit is acknowledged. */
+  private damageFencedResolution: DamageFencedResolution | null = null;
+  /** Cancellation and contestant restoration use the same exact-damage fence. */
+  private damageFencedAbort: DamageFencedAbort | null = null;
 
   /** Event listeners for cleanup */
   private eventListeners: Array<{
@@ -328,6 +605,7 @@ export class StreamingDuelScheduler {
     winReason: null,
     seed: null,
     replayHash: null,
+    actionObservations: [],
   };
   /** Pre-allocated active cycle object (reused during active cycle) */
   private readonly _activeCycleObject: StreamingStateUpdate["cycle"] = {
@@ -358,6 +636,7 @@ export class StreamingDuelScheduler {
     winReason: null,
     seed: null,
     replayHash: null,
+    actionObservations: [],
   };
   /** Pre-allocated streaming state return object */
   private readonly _streamingStateObject: StreamingStateUpdate = {
@@ -366,11 +645,21 @@ export class StreamingDuelScheduler {
     leaderboard: [],
     cameraTarget: null,
     terminalNotice: null,
+    preparation: null,
   };
 
   constructor(world: World, options: { fencingToken?: string } = {}) {
     this.world = world;
     this.preparationDurationMs = resolveStreamingPreparationDuration();
+    this.publicPreparationMinimumDurationMs =
+      resolveStreamingPublicPreparationMinimumDuration(
+        process.env,
+        this.preparationDurationMs,
+      );
+    this.preparationHostLeaseConfig =
+      this.preparationDurationMs === null
+        ? null
+        : resolveDuelPreparationHostLeaseConfig();
     this.preparationFencingToken = options.fencingToken ?? null;
     const pool = (world as { pgPool?: pg.Pool }).pgPool;
     if (this.preparationDurationMs !== null) {
@@ -433,14 +722,26 @@ export class StreamingDuelScheduler {
         }
       },
       () => this.matchmaking.agentStats,
-      (winnerId, loserId, winReason) =>
-        this.handleResolution(winnerId, loserId, winReason),
-      (reason) => this.abortCycleToIdle(reason),
+      (winnerId, loserId, winReason, terminalAtOverride) =>
+        this.handleResolution(
+          winnerId,
+          loserId,
+          winReason,
+          undefined,
+          terminalAtOverride,
+        ),
+      (reason, occurredAtOverride) =>
+        this.abortCycleToIdle(reason, occurredAtOverride),
       () => this.matchmaking.getLeaderboard(),
       () => this.matchmaking.getRecentDuels(),
       (playerId) =>
         this.debugSparbotSpawnIds.has(playerId) ||
         this.standaloneSparbotIds.has(playerId),
+      pool
+        ? new PostgresStreamingDuelActionObservationStore(
+            pool as unknown as StreamingDuelActionObservationPool,
+          )
+        : null,
     );
 
     // -- Wire matchmaking callbacks --
@@ -548,25 +849,58 @@ export class StreamingDuelScheduler {
 
   /**
    * Register for streaming duels only when `agent_mappings.streaming_duel_enabled` is true.
-   * Missing DB row defaults to enabled.
+   * A DB-backed launch requires an explicit positive mapping. Missing or
+   * unreadable authority fails closed; DB-free diagnostic worlds retain their
+   * existing direct-registration behavior above this boundary.
    */
   private registerAgentIfEligible(agentId: string): void {
     if (this.isDestroyed) return;
+    // Standalone sparbots are created only behind the explicit loopback,
+    // no-money diagnostic authority and carry a server-reserved identity.
+    // Their PLAYER_JOINED event is emitted before spawnStandaloneSparbots can
+    // finish attaching diagnostic metadata. Do not start the production
+    // agent_mappings lookup for that event: its delayed negative result would
+    // otherwise unregister the already-validated diagnostic contestant and
+    // leave the maintenance-held renderer with no preview entities to warm.
+    if (
+      agentId.startsWith("sparbot-standalone-") &&
+      isLocalDiagnosticDuelRuntime(process.env)
+    ) {
+      this.registerDiagnosticAgent(agentId);
+      return;
+    }
     const db = this.getDatabase();
     if (!db) {
-      this.matchmaking.markStreamingDuelOptOut(agentId, false);
-      this.matchmaking.registerAgent(agentId);
+      if (isLocalDiagnosticDuelRuntime(process.env)) {
+        this.matchmaking.markStreamingDuelOptOut(agentId, false);
+        this.matchmaking.registerAgent(agentId);
+      } else {
+        this.matchmaking.markStreamingDuelOptOut(agentId, true);
+        if (!streamingDuelPrefReadWarningLogged) {
+          streamingDuelPrefReadWarningLogged = true;
+          Logger.warn(
+            "StreamingDuelScheduler",
+            "Database-backed duel participation authority is unavailable. Matchmaking remains disabled for unverified agents.",
+          );
+        }
+      }
       return;
     }
 
     void this.registerAgentFromDatabasePreference(agentId, db);
   }
 
+  private registerDiagnosticAgent(agentId: string): void {
+    assertLocalDiagnosticContestantAuthority(process.env);
+    this.matchmaking.markStreamingDuelOptOut(agentId, false);
+    this.matchmaking.registerAgent(agentId);
+  }
+
   private async registerAgentFromDatabasePreference(
     agentId: string,
     db: import("drizzle-orm/node-postgres").NodePgDatabase,
   ): Promise<void> {
-    let enabled = true;
+    let enabled = false;
     try {
       const { agentMappings } = await import("../../database/schema.js");
       const { eq, or } = await import("drizzle-orm");
@@ -579,15 +913,17 @@ export class StreamingDuelScheduler {
             eq(agentMappings.agentId, agentId),
           ),
         )
-        .limit(1);
-      enabled = rows[0]?.streamingDuelEnabled !== false;
+        .limit(2);
+      enabled = resolvePersistedStreamingDuelEligibility(
+        rows.map((row) => row.streamingDuelEnabled),
+      );
     } catch (err) {
       if (!streamingDuelPrefReadWarningLogged) {
         streamingDuelPrefReadWarningLogged = true;
         Logger.warn(
           "StreamingDuelScheduler",
           `Could not read agent streaming duel preference (${errMsg(err)}). ` +
-            "If the column is missing, run `bun run db:migrate` in packages/server against the same DATABASE_URL as this server. Defaulting to duel-eligible.",
+            "If the column is missing, run `bun run db:migrate` in packages/server against the same DATABASE_URL as this server. Matchmaking remains disabled for this agent.",
         );
       }
     }
@@ -598,6 +934,24 @@ export class StreamingDuelScheduler {
     if (enabled) {
       this.matchmaking.registerAgent(agentId);
     }
+  }
+
+  private async reconcilePersistedStreamingDuelParticipation(
+    agentIds: readonly string[],
+  ): Promise<void> {
+    const db = this.getDatabase();
+    const uniqueAgentIds = [...new Set(agentIds)].filter(Boolean);
+    if (!db) {
+      for (const agentId of uniqueAgentIds) {
+        this.matchmaking.markStreamingDuelOptOut(agentId, true);
+      }
+      return;
+    }
+    await Promise.all(
+      uniqueAgentIds.map((agentId) =>
+        this.registerAgentFromDatabasePreference(agentId, db),
+      ),
+    );
   }
 
   /** Agents already in the world when the scheduler starts (same rules as PLAYER_JOINED). */
@@ -614,11 +968,13 @@ export class StreamingDuelScheduler {
         data?: { isAgent?: boolean; isEmbeddedAgent?: boolean; name?: string };
       };
 
-      if (entityAny.type === "player" && id.startsWith("sparbot-standalone-")) {
+      if (
+        entityAny.type === "player" &&
+        id.startsWith("sparbot-standalone-") &&
+        isLocalDiagnosticDuelRuntime(process.env)
+      ) {
         this.restoreStandaloneSparbotIdentity(id, entityAny.data?.name);
-        this.matchmaking.registerAgent(id, {
-          bypassStreamingDuelOptOut: true,
-        });
+        this.registerDiagnosticAgent(id);
         agentCount++;
         continue;
       }
@@ -652,11 +1008,14 @@ export class StreamingDuelScheduler {
   private restoreStandaloneSparbotIdentity(
     agentId: string,
     name?: string,
+    frozenStyle?: "melee" | "ranged" | "mage" | "prayer",
   ): void {
+    assertLocalDiagnosticContestantAuthority(process.env);
     if (!agentId.startsWith("sparbot-standalone-")) return;
     this.standaloneSparbotIds.add(agentId);
     const readiness = this.orchestrator.inspectCompetitiveLoadout(agentId);
-    const style = readiness.ok ? readiness.initialCombatRole : "melee";
+    const style =
+      frozenStyle ?? (readiness.ok ? readiness.initialCombatRole : "melee");
     const multiStyle = agentId.startsWith("sparbot-standalone-multi-");
     this.orchestrator.setDebugCombatRoleOverride(agentId, style);
     this.orchestrator.setDiagnosticMultiStyleAllowed(agentId, multiStyle);
@@ -669,6 +1028,7 @@ export class StreamingDuelScheduler {
   }
 
   private reconcileStandaloneSparbotsFromWorld(): void {
+    if (!isLocalDiagnosticDuelRuntime(process.env)) return;
     const allEntities = this.getAuthoritativeWorldEntities();
     if (!allEntities) return;
     for (const [id, entity] of allEntities) {
@@ -679,9 +1039,7 @@ export class StreamingDuelScheduler {
       };
       if (entityAny.type !== "player") continue;
       this.restoreStandaloneSparbotIdentity(id, entityAny.data?.name);
-      this.matchmaking.registerAgent(id, {
-        bypassStreamingDuelOptOut: true,
-      });
+      this.registerDiagnosticAgent(id);
     }
   }
 
@@ -793,6 +1151,126 @@ export class StreamingDuelScheduler {
     }
 
     this.isDestroyed = false;
+    this.unregisterDamageAuthority?.();
+    this.unregisterDamageAuthority = registerStreamingDuelDamageAuthority(
+      this.world,
+      {
+        createDamageObservationContext: (attackerId, targetId, damage) =>
+          (() => {
+            const publicActionObservation =
+              this.orchestrator.createAuthoritativeDamageObservationContext(
+                attackerId,
+                targetId,
+                damage,
+              );
+            if (!publicActionObservation) return null;
+            const cycle = this.currentCycle;
+            const snapshot = cycle?.competitiveSnapshot;
+            if (!snapshot?.persisted) return { publicActionObservation };
+            if (
+              !snapshot.preparationId ||
+              !cycle?.competitiveSnapshotDigest ||
+              !this.preparationFencingToken
+            ) {
+              return null;
+            }
+            return {
+              publicActionObservation,
+              competitiveAuthority: {
+                preparationId: snapshot.preparationId,
+                fencingToken: this.preparationFencingToken,
+                snapshotDigest: cycle.competitiveSnapshotDigest,
+              },
+            };
+          })(),
+        handleDamageCommitStarted: (context) => {
+          const cycle = this.currentCycle;
+          if (
+            this.isDestroyed ||
+            cycle?.phase !== "FIGHTING" ||
+            cycle.cycleId !== context.cycleId ||
+            (cycle.duelId ?? `streaming-${cycle.cycleId}`) !== context.duelId ||
+            !(
+              (context.actorId === cycle.agent1?.characterId &&
+                context.opponentId === cycle.agent2?.characterId) ||
+              (context.actorId === cycle.agent2?.characterId &&
+                context.opponentId === cycle.agent1?.characterId)
+            )
+          ) {
+            return;
+          }
+          this.pendingDuelDamageOperations.set(context.operationId, {
+            cycleId: context.cycleId,
+            duelId: context.duelId,
+          });
+        },
+        handleDamageCommitSettled: (context) => {
+          const pending = this.pendingDuelDamageOperations.get(
+            context.operationId,
+          );
+          if (
+            pending?.cycleId === context.cycleId &&
+            pending.duelId === context.duelId &&
+            !this.pendingDuelDamageSettlementTimers.has(context.operationId)
+          ) {
+            const timer = setTimeout(() => {
+              this.pendingDuelDamageSettlementTimers.delete(
+                context.operationId,
+              );
+              const current = this.pendingDuelDamageOperations.get(
+                context.operationId,
+              );
+              if (
+                current?.cycleId !== context.cycleId ||
+                current.duelId !== context.duelId
+              ) {
+                return;
+              }
+              this.pendingDuelDamageOperations.delete(context.operationId);
+              this.resumeDamageFencedTerminal(context.cycleId);
+            }, 0);
+            this.pendingDuelDamageSettlementTimers.set(
+              context.operationId,
+              timer,
+            );
+          }
+        },
+        handleDamageCommitFailure: (attackerId, targetId, reason, context) => {
+          const cycle = this.currentCycle;
+          if (
+            !this.isDestroyed &&
+            cycle?.phase === "FIGHTING" &&
+            (!context ||
+              (context.cycleId === cycle.cycleId &&
+                context.duelId ===
+                  (cycle.duelId ?? `streaming-${cycle.cycleId}`))) &&
+            [cycle.agent1?.characterId, cycle.agent2?.characterId].includes(
+              attackerId,
+            ) &&
+            [cycle.agent1?.characterId, cycle.agent2?.characterId].includes(
+              targetId,
+            )
+          ) {
+            if (context) {
+              const timer = this.pendingDuelDamageSettlementTimers.get(
+                context.operationId,
+              );
+              if (timer) clearTimeout(timer);
+              this.pendingDuelDamageSettlementTimers.delete(
+                context.operationId,
+              );
+              this.pendingDuelDamageOperations.delete(context.operationId);
+              this.resumeDamageFencedTerminal(context.cycleId);
+            }
+            Logger.warn(
+              "StreamingDuelScheduler",
+              `Cancelling duel after damage authority failure (${reason})`,
+            );
+            this.abortCycleToIdle("damage_authority_failed");
+          }
+        },
+      },
+    );
 
     Logger.info(
       "StreamingDuelScheduler",
@@ -842,9 +1320,120 @@ export class StreamingDuelScheduler {
     );
   }
 
+  /**
+   * Load recovery fences before persisted agents are initialized. A failed
+   * read rejects scheduler startup rather than allowing mutable contestants to
+   * race an unresolved competitive snapshot.
+   */
+  async primeCompetitiveRecoveryCustodyHolds(): Promise<void> {
+    const store = this.preparationStore;
+    if (!store) return;
+    const list = (
+      store as PostgresDuelPreparationStore & {
+        listCompetitiveRecoveryCustodyHolds?: PostgresDuelPreparationStore["listCompetitiveRecoveryCustodyHolds"];
+      }
+    ).listCompetitiveRecoveryCustodyHolds;
+    if (!list) return;
+    const holds = await list.call(store);
+    for (const hold of holds) {
+      this.competitiveRecoveryCustodyHolds.set(hold.preparationId, [
+        hold.agent1Id,
+        hold.agent2Id,
+      ]);
+    }
+    for (const [, contestantIds] of this.competitiveRecoveryCustodyHolds) {
+      for (const contestantId of contestantIds) {
+        this.applyCompetitiveRecoveryCustodyHolds(contestantId);
+      }
+    }
+  }
+
+  private recoveryHoldPreparationIdsForAgent(agentId: string): string[] {
+    const preparationIds: string[] = [];
+    for (const [preparationId, contestantIds] of this
+      .competitiveRecoveryCustodyHolds) {
+      if (contestantIds.includes(agentId)) preparationIds.push(preparationId);
+    }
+    return preparationIds;
+  }
+
+  private applyCompetitiveRecoveryCustodyHolds(agentId: string): void {
+    const preparationIds = this.recoveryHoldPreparationIdsForAgent(agentId);
+    if (preparationIds.length === 0) return;
+    const entity = this.world.entities.get(agentId);
+    if (entity) {
+      entity.data.inStreamingDuel = true;
+      entity.data.preventRespawn = true;
+      entity.markNetworkDirty?.();
+    }
+    for (const preparationId of preparationIds) {
+      this.world.emit(DUEL_COMPETITIVE_RECOVERY_CUSTODY_HOLD_EVENT, {
+        preparationId,
+        agentId,
+        active: true,
+      });
+    }
+  }
+
+  private holdCompetitiveSnapshotRecovery(
+    competitive: PersistedCompetitiveSnapshot,
+  ): void {
+    const preparationId = competitive.preparation.preparationId;
+    const contestantIds = [
+      competitive.snapshot.contestants[0].agentId,
+      competitive.snapshot.contestants[1].agentId,
+    ] as const;
+    this.competitiveRecoveryCustodyHolds.set(preparationId, contestantIds);
+    for (const contestantId of contestantIds) {
+      this.applyCompetitiveRecoveryCustodyHolds(contestantId);
+    }
+  }
+
+  private releaseCompetitiveRecoveryCustodyHold(preparationId: string): void {
+    const contestantIds =
+      this.competitiveRecoveryCustodyHolds.get(preparationId);
+    if (!contestantIds) return;
+    this.competitiveRecoveryCustodyHolds.delete(preparationId);
+    for (const contestantId of contestantIds) {
+      this.world.emit(DUEL_COMPETITIVE_RECOVERY_CUSTODY_HOLD_EVENT, {
+        preparationId,
+        agentId: contestantId,
+        active: false,
+      });
+      if (
+        this.recoveryHoldPreparationIdsForAgent(contestantId).length === 0 &&
+        this.currentCycle?.agent1?.characterId !== contestantId &&
+        this.currentCycle?.agent2?.characterId !== contestantId
+      ) {
+        const entity = this.world.entities.get(contestantId);
+        if (entity) {
+          entity.data.inStreamingDuel = false;
+          entity.data.preventRespawn = false;
+          entity.markNetworkDirty?.();
+        }
+      }
+    }
+  }
+
   /** Destroy the scheduler and cleanup */
   destroy(cancellationReason = "scheduler_shutdown"): void {
     this.isDestroyed = true;
+    this.unregisterDamageAuthority?.();
+    this.unregisterDamageAuthority = null;
+    for (const timer of this.pendingDuelDamageSettlementTimers.values()) {
+      clearTimeout(timer);
+    }
+    this.pendingDuelDamageSettlementTimers.clear();
+    this.pendingDuelDamageOperations.clear();
+    this.damageFencedResolution = null;
+    this.damageFencedAbort?.resolve();
+    this.damageFencedAbort = null;
+    this.releasePreMarketProcessingFences();
+    for (const pending of this.deferredProcessingFenceReleases) {
+      if (pending.timeout) clearTimeout(pending.timeout);
+      for (const fence of pending.fences) fence.release();
+    }
+    this.deferredProcessingFenceReleases.clear();
     for (const wake of this.cycleRecoveryRetryWaiters) wake();
     this.cycleRecoveryRetryWaiters.clear();
     if (this.terminalTransitionRetryTimeout) {
@@ -895,7 +1484,7 @@ export class StreamingDuelScheduler {
     }
     const preparationCleanup = this.cancelOnDeckPreparation(cancellationReason);
     this.pendingCycleCleanup = Promise.all([cycleCleanup, preparationCleanup])
-      .then(() => undefined)
+      .then(() => this.orchestrator.waitForPublicActionObservations())
       .finally(() => {
         // A persisted live cycle cannot restore custody until its cancellation
         // has committed. Retain the orchestrator snapshots until that finishes.
@@ -955,6 +1544,11 @@ export class StreamingDuelScheduler {
     return this.pendingCycleCleanup;
   }
 
+  /** Wait for authoritative arrow/rune terminals at a combat boundary. */
+  waitForCombatCustodySettlements(): Promise<void> {
+    return this.orchestrator.waitForCombatCustodySettlements();
+  }
+
   // ============================================================================
   // Event Subscriptions
   // ============================================================================
@@ -969,6 +1563,7 @@ export class StreamingDuelScheduler {
       };
 
       if (data.playerId && (data.isEmbeddedAgent || data.isAgent)) {
+        this.applyCompetitiveRecoveryCustodyHolds(data.playerId);
         void this.registerAgentIfEligible(data.playerId);
       }
     };
@@ -980,8 +1575,18 @@ export class StreamingDuelScheduler {
 
     // Track agent leaves
     const onPlayerLeft = (payload: unknown) => {
-      const data = payload as { playerId?: string };
+      const data = payload as {
+        playerId?: string;
+        reconnectGraceActive?: boolean;
+      };
       if (data.playerId) {
+        const isCurrentCycleContestant =
+          this.currentCycle?.agent1?.characterId === data.playerId ||
+          this.currentCycle?.agent2?.characterId === data.playerId;
+        if (data.reconnectGraceActive === true && !isCurrentCycleContestant) {
+          this.matchmaking.suspendAgentForReconnect(data.playerId);
+          return;
+        }
         this.matchmaking.unregisterAgent(data.playerId);
       }
     };
@@ -1055,8 +1660,17 @@ export class StreamingDuelScheduler {
         preparationId?: string;
         agentId?: string;
         status?: string;
+        failureReason?: string;
       };
       if (data.status === "failed" && data.preparationId && data.agentId) {
+        const failureReason =
+          typeof data.failureReason === "string" && data.failureReason.trim()
+            ? data.failureReason.trim().slice(0, 256)
+            : "preparation_failed";
+        Logger.warn(
+          "StreamingDuelScheduler",
+          `Private preparation ${data.preparationId} failed for agent ${data.agentId}: ${failureReason}`,
+        );
         void this.handleOnDeckPreparationAgentFailure(
           data.preparationId,
           data.agentId,
@@ -1070,6 +1684,18 @@ export class StreamingDuelScheduler {
     this.eventListeners.push({
       event: "duel:preparation:agent_plan_status",
       fn: onPreparationPlanStatus,
+    });
+
+    const onPreparationPublicActivity = (payload: unknown) => {
+      this.handlePreparationPublicActivity(payload);
+    };
+    this.world.on(
+      "duel:preparation:public_activity",
+      onPreparationPublicActivity,
+    );
+    this.eventListeners.push({
+      event: "duel:preparation:public_activity",
+      fn: onPreparationPublicActivity,
     });
   }
 
@@ -1092,11 +1718,8 @@ export class StreamingDuelScheduler {
   }
 
   /** Register an agent for duel scheduling */
-  registerAgent(
-    agentId: string,
-    options?: { bypassStreamingDuelOptOut?: boolean },
-  ): void {
-    this.matchmaking.registerAgent(agentId, options);
+  registerAgent(agentId: string): void {
+    this.matchmaking.registerAgent(agentId);
   }
 
   /** Unregister an agent from duel scheduling */
@@ -1141,6 +1764,8 @@ export class StreamingDuelScheduler {
       cycle?.firstHitAt != null && cycle.fightStartTime != null
         ? Math.max(0, cycle.firstHitAt - cycle.fightStartTime)
         : null;
+    const actionObservationHealth =
+      this.orchestrator.getPublicActionObservationHealth();
 
     return {
       emittedAt: Date.now(),
@@ -1156,6 +1781,15 @@ export class StreamingDuelScheduler {
         cancellationReasons,
       },
       engagement: this.orchestrator.getEngagementMetrics(),
+      actionObservations: {
+        configured: actionObservationHealth.configured,
+        healthy: actionObservationHealth.lastError === null,
+        pending: actionObservationHealth.pending,
+        persisted: actionObservationHealth.persisted,
+        replayed: actionObservationHealth.replayed,
+        rejected: actionObservationHealth.rejected,
+        persistenceErrors: actionObservationHealth.persistenceErrors,
+      },
       current: {
         cycleId: cycle?.cycleId ?? null,
         phase: cycle?.phase ?? "IDLE",
@@ -1189,6 +1823,54 @@ export class StreamingDuelScheduler {
     this.tick();
   }
 
+  private hasPendingDamageForCurrentCycle(): boolean {
+    const cycle = this.currentCycle;
+    if (!cycle) return false;
+    const duelId = cycle.duelId ?? `streaming-${cycle.cycleId}`;
+    for (const pending of this.pendingDuelDamageOperations.values()) {
+      if (pending.cycleId === cycle.cycleId && pending.duelId === duelId) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  private resumeDamageFencedTerminal(settledCycleId: string): void {
+    if (this.hasPendingDamageForCurrentCycle()) return;
+    const deferred = this.damageFencedResolution;
+    if (
+      deferred &&
+      deferred.cycleId === settledCycleId &&
+      this.currentCycle?.cycleId === deferred.cycleId
+    ) {
+      this.damageFencedResolution = null;
+      this.handleResolution(
+        deferred.winnerId,
+        deferred.loserId,
+        deferred.winReason,
+        deferred.terminalState,
+        deferred.terminalAtOverride,
+      );
+    }
+
+    const deferredAbort = this.damageFencedAbort;
+    if (
+      !deferredAbort ||
+      deferredAbort.cycleId !== settledCycleId ||
+      (this.currentCycle?.cycleId !== deferredAbort.cycleId &&
+        deferredAbort.cycleOverride?.cycleId !== deferredAbort.cycleId)
+    ) {
+      return;
+    }
+    this.damageFencedAbort = null;
+    void this.abortCycleToIdle(
+      deferredAbort.reason,
+      deferredAbort.occurredAtOverride,
+      deferredAbort.terminalPersisted,
+      deferredAbort.cycleOverride,
+    ).then(deferredAbort.resolve, deferredAbort.reject);
+  }
+
   private tick(): void {
     const now = Date.now();
     this.camera.refreshAgentActivity(now);
@@ -1219,6 +1901,14 @@ export class StreamingDuelScheduler {
     };
     const maxPhaseMs = PHASE_TIMEOUT_MS[this.currentCycle.phase];
     if (maxPhaseMs !== undefined && phaseElapsed > maxPhaseMs) {
+      if (
+        this.currentCycle.phase === "FIGHTING" &&
+        this.hasPendingDamageForCurrentCycle()
+      ) {
+        // Database truth owns the terminal edge. A watchdog cancellation may
+        // proceed on the first tick after every exact damage operation settles.
+        return;
+      }
       Logger.warn(
         "StreamingDuelScheduler",
         `Watchdog: phase ${this.currentCycle.phase} stuck for ${Math.round(phaseElapsed / 1000)}s (max ${Math.round(maxPhaseMs / 1000)}s), aborting`,
@@ -1430,6 +2120,40 @@ export class StreamingDuelScheduler {
     };
   }
 
+  private competitiveSnapshotContestantReconstructionIssue(
+    agent: AgentContestant,
+    planEvidence: CompetitivePreparationEvidence | null,
+  ): string {
+    const frozen = this.orchestrator.getFrozenCompetitiveState(
+      agent.characterId,
+    );
+    if (!frozen) return "frozen_state_missing";
+    const evidence =
+      planEvidence ??
+      (frozen.diagnostic
+        ? {
+            primaryStyle: frozen.initialCombatRole,
+            availableStyles: [...frozen.availableCombatStyles],
+            planningSource: "diagnostic" as const,
+            planningPolicyVersion: "diagnostic-v1",
+            agentPolicyFingerprint: null,
+            modelProvider: "diagnostic",
+            model: "diagnostic",
+            tacticalStrategy: buildDeterministicCompetitiveTacticalStrategy(
+              frozen.initialCombatRole,
+            ),
+          }
+        : null);
+    if (!evidence) return "preparation_evidence_missing";
+    if (evidence.primaryStyle !== frozen.initialCombatRole) {
+      return "primary_style_mismatch";
+    }
+    const plannedStyles = [...evidence.availableStyles].sort().join(",");
+    const frozenStyles = [...frozen.availableCombatStyles].sort().join(",");
+    if (plannedStyles !== frozenStyles) return "available_styles_mismatch";
+    return "unclassified";
+  }
+
   private contestantFromCompetitiveSnapshot(
     contestant: CompetitiveSnapshotContestant,
   ): AgentContestant {
@@ -1523,7 +2247,8 @@ export class StreamingDuelScheduler {
       betOpenTime: snapshot.betOpenTime,
       betCloseTime: snapshot.betCloseTime,
       countdownValue: null,
-      fightStartTime: null,
+      fightStartTime:
+        snapshot.betCloseTime + STREAMING_TIMING.COUNTDOWN_DURATION,
       firstHitAt: null,
       duelEndTime: null,
       arenaPositions: null,
@@ -1535,9 +2260,12 @@ export class StreamingDuelScheduler {
       replayHash: null,
       recoveredFromPersistence: true,
     };
+    this.orchestrator.activatePublicActionObservations(snapshot.cycleId);
     this.durableBettingTerminal = null;
     this.onDeckPreparation = null;
     this.onDeckPreparationPairKey = null;
+    this.publicPreparationActivities = null;
+    this.camera.clearIdlePreparationActivityCut();
     this.matchmaking.nextDuelPair = null;
   }
 
@@ -1639,6 +2367,8 @@ export class StreamingDuelScheduler {
       terminal.snapshot.contestants[1],
     );
     this.installRecoveredCompetitiveCycle(terminal, agent1, agent2);
+    await this.orchestrator.waitForPublicActionObservations();
+    this.competitiveRecoveryChecked = true;
     this.abortCycleToIdle(reason, occurredAt, true);
     return true;
   }
@@ -1857,6 +2587,11 @@ export class StreamingDuelScheduler {
           // the restart backlog is empty. Force the idle gate to claim again
           // before any newer preparation or market can be admitted.
           this.competitiveRecoveryChecked = false;
+          if (input.cycle.competitiveSnapshot.preparationId) {
+            this.releaseCompetitiveRecoveryCustodyHold(
+              input.cycle.competitiveSnapshot.preparationId,
+            );
+          }
         }
         return true;
       } catch (error) {
@@ -1895,6 +2630,7 @@ export class StreamingDuelScheduler {
       competitive.snapshot.contestants[1],
     );
     this.installRecoveredCompetitiveCycle(competitive, agent1, agent2);
+    await this.orchestrator.waitForPublicActionObservations();
     this.phaseStateMachine.transition("COUNTDOWN");
     this.phaseStateMachine.transition("FIGHTING");
     this.phaseStateMachine.transition("RESOLUTION");
@@ -1977,6 +2713,7 @@ export class StreamingDuelScheduler {
       "StreamingDuelScheduler",
       `Replayed durable ${terminal.outcome} for cycle ${cycle.cycleId}`,
     );
+    this.competitiveRecoveryChecked = true;
     if (terminal.terminalAt + STREAMING_TIMING.RESOLUTION_DURATION <= now) {
       // The exact terminal frame and lifecycle event have already been
       // published above. Do not make an expired restart backlog wait for the
@@ -1986,12 +2723,98 @@ export class StreamingDuelScheduler {
     return true;
   }
 
+  /**
+   * The launcher-owned sparbots are ordinary persisted character rows but the
+   * external-agent server mode intentionally does not auto-start every agent
+   * at boot. A cold authority replacement may therefore need to restore only
+   * the two exact frozen contestants before digest verification. This path is
+   * unavailable outside the explicit loopback/no-money diagnostic boundary.
+   */
+  private async rehydrateStandaloneSnapshotContestants(
+    contestants: readonly CompetitiveSnapshotContestant[],
+  ): Promise<void> {
+    if (
+      !isLocalDiagnosticDuelRuntime(process.env) ||
+      contestants.length !== 2 ||
+      contestants.some(
+        (contestant) => !contestant.agentId.startsWith("sparbot-standalone-"),
+      )
+    ) {
+      return;
+    }
+    const { getAgentManager } = await import("../../eliza/index.js");
+    const agentManager = getAgentManager();
+    const db = this.getDatabase();
+    if (!agentManager || !db) return;
+
+    const { characters } = await import("../../database/schema.js");
+    const { inArray } = await import("drizzle-orm");
+    const ids = contestants.map((contestant) => contestant.agentId);
+    const rows = await db
+      .select({
+        id: characters.id,
+        accountId: characters.accountId,
+        name: characters.name,
+        isAgent: characters.isAgent,
+      })
+      .from(characters)
+      .where(inArray(characters.id, ids));
+    const rowsById = new Map(rows.map((row) => [row.id, row]));
+    if (
+      contestants.some((contestant) => {
+        const row = rowsById.get(contestant.agentId);
+        return (
+          !row ||
+          row.isAgent !== 1 ||
+          row.name !== contestant.name ||
+          !String(row.accountId || "").trim()
+        );
+      })
+    ) {
+      Logger.warn(
+        "StreamingDuelScheduler",
+        "Deferred cold standalone recovery because persisted contestant identity is unavailable",
+      );
+      return;
+    }
+
+    const diagnosticAvatarUrl = resolveStreamingDuelDiagnosticAvatarUrl(
+      process.env,
+    );
+    for (const contestant of contestants) {
+      const row = rowsById.get(contestant.agentId)!;
+      if (!agentManager.hasAgent(contestant.agentId)) {
+        await agentManager.createAgent({
+          characterId: contestant.agentId,
+          accountId: row.accountId,
+          name: contestant.name,
+          scriptedRole: "combat",
+          enableLlm: false,
+          characterConfig: {
+            name: contestant.name,
+            settings: { avatar: diagnosticAvatarUrl },
+          },
+          autoStart: true,
+        });
+      }
+      agentManager
+        .getAgentService(contestant.agentId)
+        ?.setAutonomousBehaviorEnabled(false);
+      this.restoreStandaloneSparbotIdentity(
+        contestant.agentId,
+        contestant.name,
+        contestant.initialCombatStyle,
+      );
+      this.registerDiagnosticAgent(contestant.agentId);
+    }
+  }
+
   private async recoverFrozenCompetitiveSnapshot(
     now: number,
-  ): Promise<boolean> {
+  ): Promise<"handled" | "none" | "deferred"> {
     const store = this.preparationStore;
     const fencingToken = this.preparationFencingToken;
-    if (!store || !fencingToken) return false;
+    if (!store || !fencingToken) return "none";
     const claim = (
       store as PostgresDuelPreparationStore & {
         claimLatestCompetitiveSnapshotForRecovery?: (
@@ -1999,52 +2822,89 @@ export class StreamingDuelScheduler {
         ) => Promise<PersistedCompetitiveSnapshot | null>;
       }
     ).claimLatestCompetitiveSnapshotForRecovery;
-    if (!claim) return false;
+    if (!claim) return "none";
     const competitive = await claim.call(store, fencingToken);
-    if (!competitive) return false;
+    if (!competitive) return "none";
+    this.holdCompetitiveSnapshotRecovery(competitive);
     const { snapshot, preparation } = competitive;
+    const recoverableLocalDiagnostic =
+      snapshot.diagnostic &&
+      isLocalDiagnosticDuelRuntime(process.env) &&
+      snapshot.contestants.every(
+        (contestant) =>
+          contestant.agentId.startsWith("sparbot-standalone-") &&
+          contestant.preparation.planningSource === "diagnostic",
+      );
+    const finalizeRecovery = async (
+      operation: Promise<boolean>,
+    ): Promise<"handled" | "deferred"> =>
+      (await operation) ? "handled" : "deferred";
     if (competitive.lifecycleStatus === "terminal") {
-      return this.replayPersistedCompetitiveTerminal(competitive, now);
+      return finalizeRecovery(
+        this.replayPersistedCompetitiveTerminal(competitive, now),
+      );
     }
     if (snapshot.snapshotVersion !== COMPETITIVE_SNAPSHOT_VERSION) {
-      return this.cancelRecoveredCompetitiveSnapshot(
-        competitive,
-        "competitive_snapshot_recovery_loadout_schema_unavailable",
-        now,
+      return finalizeRecovery(
+        this.cancelRecoveredCompetitiveSnapshot(
+          competitive,
+          "competitive_snapshot_recovery_loadout_schema_unavailable",
+          now,
+        ),
       );
     }
     if (
-      snapshot.diagnostic ||
+      (snapshot.diagnostic && !recoverableLocalDiagnostic) ||
       !snapshot.persisted ||
       snapshot.preparationId !== preparation.preparationId ||
       snapshot.contestants[0].agentId !== preparation.agent1Id ||
       snapshot.contestants[1].agentId !== preparation.agent2Id
     ) {
-      return this.cancelRecoveredCompetitiveSnapshot(
-        competitive,
-        "competitive_snapshot_recovery_invalid",
-        now,
+      return finalizeRecovery(
+        this.cancelRecoveredCompetitiveSnapshot(
+          competitive,
+          "competitive_snapshot_recovery_invalid",
+          now,
+        ),
       );
     }
     if (now >= snapshot.betCloseTime) {
-      return this.cancelRecoveredCompetitiveSnapshot(
-        competitive,
-        "competitive_snapshot_recovery_window_elapsed",
-        now,
+      return finalizeRecovery(
+        this.cancelRecoveredCompetitiveSnapshot(
+          competitive,
+          "competitive_snapshot_recovery_window_elapsed",
+          now,
+        ),
       );
     }
 
-    const agent1 = this.orchestrator.createContestant(
+    let agent1 = this.orchestrator.createContestant(
       preparation.agent1Id,
       preparation.agent2Id,
     );
-    const agent2 = this.orchestrator.createContestant(
+    let agent2 = this.orchestrator.createContestant(
       preparation.agent2Id,
       preparation.agent1Id,
     );
     const expected1 = snapshot.contestants[0];
     const expected2 = snapshot.contestants[1];
-    const identityMatches = (
+    if (!agent1 || !agent2) {
+      await this.rehydrateStandaloneSnapshotContestants(snapshot.contestants);
+      agent1 = this.orchestrator.createContestant(
+        preparation.agent1Id,
+        preparation.agent2Id,
+      );
+      agent2 = this.orchestrator.createContestant(
+        preparation.agent2Id,
+        preparation.agent1Id,
+      );
+      // A replacement process initializes AgentManager, entity persistence,
+      // inventory, equipment, and Prayer after the scheduler. Preserve the
+      // frozen market and retry until the immutable close time instead of
+      // cancelling real-money authority because one startup tick ran first.
+      if (!agent1 || !agent2) return "deferred";
+    }
+    const immutableCharacterMatches = (
       agent: AgentContestant | null,
       expected: CompetitiveSnapshotContestant,
     ) =>
@@ -2053,55 +2913,139 @@ export class StreamingDuelScheduler {
         agent.characterId === expected.agentId &&
         agent.name === expected.name &&
         agent.combatLevel === expected.combatLevel &&
-        agent.maxHp === expected.maxHp &&
-        agent.wins === expected.wins &&
-        agent.losses === expected.losses &&
-        agent.rank === expected.rank &&
-        agent.headToHeadWins === expected.headToHeadWins &&
-        agent.headToHeadLosses === expected.headToHeadLosses,
+        agent.maxHp === expected.maxHp,
       );
     if (
-      !identityMatches(agent1, expected1) ||
-      !identityMatches(agent2, expected2)
+      !immutableCharacterMatches(agent1, expected1) ||
+      !immutableCharacterMatches(agent2, expected2)
     ) {
-      return this.cancelRecoveredCompetitiveSnapshot(
-        competitive,
-        "competitive_snapshot_recovery_identity_drift",
-        now,
+      return finalizeRecovery(
+        this.cancelRecoveredCompetitiveSnapshot(
+          competitive,
+          "competitive_snapshot_recovery_identity_drift",
+          now,
+        ),
+      );
+    }
+    // Win/loss/rank/head-to-head data is already committed inside the frozen
+    // snapshot. A cold process intentionally starts with empty in-memory
+    // leaderboard maps, so re-deriving these fields would reject valid truth
+    // or rewrite what bettors saw. Preserve the snapshot values while still
+    // requiring live character, skill, health, equipment, inventory, Prayer,
+    // policy, and digest verification below.
+    for (const [agent, expected] of [
+      [agent1!, expected1],
+      [agent2!, expected2],
+    ] as const) {
+      agent.wins = expected.wins;
+      agent.losses = expected.losses;
+      agent.rank = expected.rank;
+      agent.headToHeadWins = expected.headToHeadWins;
+      agent.headToHeadLosses = expected.headToHeadLosses;
+    }
+    const [planRecovery1, planRecovery2] = await Promise.all([
+      this.orchestrator.recoverCompetitivePreparationLoadout(
+        preparation.agent1Id,
+        preparation.preparationId,
+      ),
+      this.orchestrator.recoverCompetitivePreparationLoadout(
+        preparation.agent2Id,
+        preparation.preparationId,
+      ),
+    ]);
+    if (!planRecovery1.ok || !planRecovery2.ok) {
+      const transientPlanRecoveryReasons = new Set([
+        "player_missing",
+        "equipment_not_initialized",
+        "inventory_not_initialized",
+        "inventory_busy",
+        "persistence_failed",
+      ]);
+      if (
+        (!planRecovery1.ok &&
+          transientPlanRecoveryReasons.has(planRecovery1.reason)) ||
+        (!planRecovery2.ok &&
+          transientPlanRecoveryReasons.has(planRecovery2.reason))
+      ) {
+        return "deferred";
+      }
+      Logger.error(
+        "StreamingDuelScheduler",
+        `Competitive preparation receipt recovery failed for cycle ${snapshot.cycleId}: agent1=${planRecovery1.ok ? "ready" : planRecovery1.reason}, agent2=${planRecovery2.ok ? "ready" : planRecovery2.reason}`,
+      );
+      return finalizeRecovery(
+        this.cancelRecoveredCompetitiveSnapshot(
+          competitive,
+          "competitive_snapshot_recovery_loadout_drift",
+          now,
+        ),
       );
     }
     const policyValidation =
       await this.orchestrator.validateCompetitiveAgentPolicies({
         cycleId: snapshot.cycleId,
-        diagnostic: false,
+        diagnostic: snapshot.diagnostic,
         contestants: snapshot.contestants,
       });
     if (!policyValidation.ok) {
-      return this.cancelRecoveredCompetitiveSnapshot(
-        competitive,
-        policyValidation.reason === "competitive_agent_policy_drift"
-          ? "competitive_snapshot_recovery_policy_drift"
-          : policyValidation.reason ===
-              "competitive_tactical_strategy_unavailable"
-            ? "competitive_snapshot_recovery_tactical_strategy_unavailable"
-            : "competitive_snapshot_recovery_policy_unavailable",
-        now,
+      return finalizeRecovery(
+        this.cancelRecoveredCompetitiveSnapshot(
+          competitive,
+          policyValidation.reason === "competitive_agent_policy_drift"
+            ? "competitive_snapshot_recovery_policy_drift"
+            : policyValidation.reason ===
+                "competitive_tactical_strategy_unavailable"
+              ? "competitive_snapshot_recovery_tactical_strategy_unavailable"
+              : "competitive_snapshot_recovery_policy_unavailable",
+          now,
+        ),
       );
     }
-    const frozen1 = this.orchestrator.freezeCompetitiveLoadout(agent1!);
-    const frozen2 = this.orchestrator.freezeCompetitiveLoadout(agent2!);
+    const frozen1 = snapshot.diagnostic
+      ? this.orchestrator.restoreDiagnosticCompetitiveLoadoutFromSnapshot(
+          agent1!,
+          expected1,
+        )
+      : this.orchestrator.freezeCompetitiveLoadout(agent1!);
+    const frozen2 = snapshot.diagnostic
+      ? this.orchestrator.restoreDiagnosticCompetitiveLoadoutFromSnapshot(
+          agent2!,
+          expected2,
+        )
+      : this.orchestrator.freezeCompetitiveLoadout(agent2!);
     if (
       !frozen1.ok ||
       !frozen2.ok ||
-      frozen1.diagnostic ||
-      frozen2.diagnostic
+      frozen1.diagnostic !== snapshot.diagnostic ||
+      frozen2.diagnostic !== snapshot.diagnostic
     ) {
       this.orchestrator.releaseCompetitiveLoadout(preparation.agent1Id);
       this.orchestrator.releaseCompetitiveLoadout(preparation.agent2Id);
-      return this.cancelRecoveredCompetitiveSnapshot(
-        competitive,
-        "competitive_snapshot_recovery_loadout_drift",
-        now,
+      const transientReasons = new Set([
+        "contestant_missing",
+        "player_state_unavailable",
+        "player_state_not_ready",
+        "equipment_state_unavailable",
+        "inventory_state_unavailable",
+        "inventory_not_ready",
+        "equipment_not_ready",
+        "equipment_not_initialized",
+        "inventory_not_initialized",
+        "prayer_state_unavailable",
+        "prayer_state_not_ready",
+      ]);
+      if (
+        (!frozen1.ok && transientReasons.has(frozen1.reason)) ||
+        (!frozen2.ok && transientReasons.has(frozen2.reason))
+      ) {
+        return "deferred";
+      }
+      return finalizeRecovery(
+        this.cancelRecoveredCompetitiveSnapshot(
+          competitive,
+          "competitive_snapshot_recovery_loadout_drift",
+          now,
+        ),
       );
     }
     const actual1 = this.buildCompetitiveSnapshotContestant(
@@ -2115,10 +3059,12 @@ export class StreamingDuelScheduler {
       preparation.agent2PlanEvidence,
     );
     let digestMatches = false;
+    let reconstructedSnapshot: CompetitiveSnapshot | null = null;
+    let reconstructedDigest: string | null = null;
     if (actual1 && actual2) {
       const reconstructed = finalizeCompetitiveSnapshot({
         draft: {
-          diagnostic: false,
+          diagnostic: snapshot.diagnostic,
           preparationId: preparation.preparationId,
           cycleId: snapshot.cycleId,
           duelId: snapshot.duelId,
@@ -2128,43 +3074,239 @@ export class StreamingDuelScheduler {
         persisted: true,
         frozenAt: snapshot.frozenAt,
         betWindowDurationMs: snapshot.betCloseTime - snapshot.betOpenTime,
+        timing: COMPETITIVE_SNAPSHOT_TIMING,
       });
+      reconstructedSnapshot = reconstructed.snapshot;
+      reconstructedDigest = reconstructed.digest;
       digestMatches = reconstructed.digest === competitive.digest;
     }
     if (!digestMatches) {
+      const reconstructionDetails = [
+        [agent1!, expected1, preparation.agent1PlanEvidence],
+        [agent2!, expected2, preparation.agent2PlanEvidence],
+      ].map(([agent, expected, planEvidence]) => {
+        const frozen = this.orchestrator.getFrozenCompetitiveState(
+          (agent as AgentContestant).characterId,
+        );
+        return {
+          agentId: (agent as AgentContestant).characterId,
+          expectedPrimaryStyle: (
+            planEvidence as CompetitivePreparationEvidence | null
+          )?.primaryStyle,
+          expectedInitialCombatStyle: (
+            expected as CompetitiveSnapshotContestant
+          ).initialCombatStyle,
+          actualInitialCombatStyle: frozen?.initialCombatRole ?? null,
+          expectedAvailableCombatStyles: (
+            expected as CompetitiveSnapshotContestant
+          ).availableCombatStyles,
+          actualAvailableCombatStyles: frozen?.availableCombatStyles ?? null,
+          expectedLoadoutFingerprint: (
+            expected as CompetitiveSnapshotContestant
+          ).loadoutFingerprint,
+          actualLoadoutFingerprint: frozen?.fingerprint ?? null,
+          actualEquipment: frozen?.equipment ?? null,
+          actualSelectedSpell: frozen?.selectedSpell ?? null,
+        };
+      });
+      const mismatchPaths = reconstructedSnapshot
+        ? competitiveSnapshotMismatchPaths(snapshot, reconstructedSnapshot)
+        : [
+            ...(!actual1
+              ? [
+                  `$.contestants[0].reconstruction.${this.competitiveSnapshotContestantReconstructionIssue(
+                    agent1!,
+                    preparation.agent1PlanEvidence,
+                  )}`,
+                ]
+              : []),
+            ...(!actual2
+              ? [
+                  `$.contestants[1].reconstruction.${this.competitiveSnapshotContestantReconstructionIssue(
+                    agent2!,
+                    preparation.agent2PlanEvidence,
+                  )}`,
+                ]
+              : []),
+          ];
+      Logger.error(
+        "StreamingDuelScheduler",
+        `Competitive snapshot recovery integrity failure for cycle ${snapshot.cycleId}; mismatchPaths=${mismatchPaths.join(",")}; reconstruction=${JSON.stringify(reconstructionDetails)}`,
+        null,
+        {
+          preparationId: preparation.preparationId,
+          cycleId: snapshot.cycleId,
+          expectedDigest: competitive.digest,
+          reconstructedDigest,
+          mismatchPaths,
+          reconstructionDetails,
+        },
+      );
       this.orchestrator.releaseCompetitiveLoadout(preparation.agent1Id);
       this.orchestrator.releaseCompetitiveLoadout(preparation.agent2Id);
-      return this.cancelRecoveredCompetitiveSnapshot(
-        competitive,
-        "competitive_snapshot_recovery_state_drift",
-        now,
+      return finalizeRecovery(
+        this.cancelRecoveredCompetitiveSnapshot(
+          competitive,
+          "competitive_snapshot_recovery_state_drift",
+          now,
+        ),
       );
     }
 
     this.installRecoveredCompetitiveCycle(competitive, agent1!, agent2!);
+    await this.orchestrator.waitForPublicActionObservations();
     this.orchestrator.setDuelFlags(true);
     this.orchestrator.forceStopAgentCombat(agent1!.characterId);
     this.orchestrator.forceStopAgentCombat(agent2!.characterId);
     this.orchestrator.restoreHealth(agent1!.characterId);
     this.orchestrator.restoreHealth(agent2!.characterId);
     this.camera.setCameraTarget(agent1!.characterId, now);
+    try {
+      this.orchestrator.teleportToArena(
+        agent1!.characterId,
+        agent2!.characterId,
+        true,
+      );
+    } catch (error) {
+      if (this.currentCycle?.cycleId === snapshot.cycleId) {
+        Logger.warn(
+          "StreamingDuelScheduler",
+          `Failed to restage recovered contestants: ${errMsg(error)}`,
+        );
+        this.abortCycleToIdle("arena_teleport_failed");
+      }
+      this.competitiveRecoveryChecked = true;
+      return "handled";
+    }
     this.emitRecoveredCompetitiveCycle(competitive);
-    void this.orchestrator
-      .teleportToArena(agent1!.characterId, agent2!.characterId, true)
-      .catch((error) => {
-        if (this.currentCycle?.cycleId === snapshot.cycleId) {
-          Logger.warn(
-            "StreamingDuelScheduler",
-            `Failed to restage recovered contestants: ${errMsg(error)}`,
-          );
-          this.abortCycleToIdle("arena_teleport_failed");
-        }
-      });
     Logger.info(
       "StreamingDuelScheduler",
       `Recovered frozen cycle ${snapshot.cycleId} with immutable digest ${competitive.digest}`,
     );
-    return true;
+    this.competitiveRecoveryChecked = true;
+    return "handled";
+  }
+
+  private releasePreMarketProcessingFences(): void {
+    for (const fence of this.preMarketProcessingFences) fence.release();
+    this.preMarketProcessingFences = [];
+  }
+
+  private arePlayersProcessingQuiescent(playerIds: readonly string[]): boolean {
+    return playerIds.every((playerId) =>
+      isPlayerProcessingQuiescent(this.world, playerId),
+    );
+  }
+
+  /**
+   * Keep failed or timed-out admissions fenced until every loaded processing
+   * authority reports idle. The retry timer is deliberately unref'd so a
+   * failed diagnostic cannot keep a shutting-down server process alive.
+   */
+  private releaseProcessingFencesWhenSettled(
+    fences: PreparationActionFence[],
+    playerIds: readonly string[],
+  ): void {
+    const pending = {
+      fences,
+      playerIds: [...playerIds],
+      timeout: null as ReturnType<typeof setTimeout> | null,
+    };
+    this.deferredProcessingFenceReleases.add(pending);
+
+    const check = (): void => {
+      pending.timeout = null;
+      if (
+        this.isDestroyed ||
+        this.arePlayersProcessingQuiescent(pending.playerIds)
+      ) {
+        for (const fence of pending.fences) fence.release();
+        this.deferredProcessingFenceReleases.delete(pending);
+        return;
+      }
+      pending.timeout = setTimeout(
+        check,
+        STREAMING_TIMING.STATE_BROADCAST_INTERVAL,
+      );
+      (
+        pending.timeout as ReturnType<typeof setTimeout> & {
+          unref?: () => void;
+        }
+      ).unref?.();
+    };
+
+    check();
+  }
+
+  private async waitForPlayerProcessingQuiescence(
+    playerIds: readonly string[],
+    deadline: number,
+  ): Promise<boolean> {
+    while (!this.isDestroyed) {
+      if (this.arePlayersProcessingQuiescent(playerIds)) return true;
+      const remainingMs = deadline - Date.now();
+      if (remainingMs <= 0) return false;
+      await new Promise<void>((resolve) => {
+        setTimeout(
+          resolve,
+          Math.min(STREAMING_TIMING.STATE_BROADCAST_INTERVAL, remainingMs),
+        );
+      });
+    }
+    return false;
+  }
+
+  /**
+   * Fence new work first, then cancel uncommitted work and wait for any
+   * admitted durable action to settle. A competitive snapshot is never frozen
+   * unless both contestants are authoritatively idle before the preparation
+   * lease expires. DB-free diagnostics get an immediate, no-wait boundary.
+   */
+  private quiesceContestantsBeforeCompetitiveFreeze(
+    playerIds: readonly string[],
+    preparation?: DuelPreparationSnapshot,
+  ): boolean | Promise<boolean> {
+    this.releasePreMarketProcessingFences();
+    const fences = playerIds.map((playerId) =>
+      acquirePreparationActionFence(this.world, playerId),
+    );
+    let failedRequest: ReturnType<
+      typeof requestPlayerProcessingQuiescence
+    > | null = null;
+    for (const playerId of playerIds) {
+      const result = requestPlayerProcessingQuiescence(this.world, playerId);
+      if (!result.ok && !failedRequest) failedRequest = result;
+    }
+    if (failedRequest && !failedRequest.ok) {
+      Logger.warn(
+        "StreamingDuelScheduler",
+        `Cycle rejected before market processing barrier: ${failedRequest.reason}${failedRequest.systemName ? `:${failedRequest.systemName}` : ""}`,
+      );
+      this.releaseProcessingFencesWhenSettled(fences, playerIds);
+      return false;
+    }
+
+    if (this.arePlayersProcessingQuiescent(playerIds)) {
+      this.preMarketProcessingFences = fences;
+      return true;
+    }
+
+    const deadline = preparation?.expiresAt ?? Date.now();
+    if (deadline <= Date.now()) {
+      this.releaseProcessingFencesWhenSettled(fences, playerIds);
+      return false;
+    }
+
+    return this.waitForPlayerProcessingQuiescence(playerIds, deadline).then(
+      (quiet) => {
+        if (!quiet) {
+          this.releaseProcessingFencesWhenSettled(fences, playerIds);
+          return false;
+        }
+        this.preMarketProcessingFences = fences;
+        return true;
+      },
+    );
   }
 
   private startNewCycle(
@@ -2179,8 +3321,15 @@ export class StreamingDuelScheduler {
     this._startCycleInProgress = true;
     return this.startNewCycleInternal(forcedPair, preparation)
       .then(() => this.currentCycle !== null)
-      .catch((error: unknown) => {
+      .catch(async (error: unknown) => {
         if (this.isDestroyed) return false;
+        await this.reconcilePersistedStreamingDuelParticipation(
+          preparation
+            ? [preparation.agent1Id, preparation.agent2Id]
+            : forcedPair
+              ? [forcedPair.agent1Id, forcedPair.agent2Id]
+              : [],
+        );
         Logger.error(
           "StreamingDuelScheduler",
           `Failed to start duel cycle: ${errMsg(error)}`,
@@ -2193,6 +3342,7 @@ export class StreamingDuelScheduler {
         return false;
       })
       .finally(() => {
+        this.releasePreMarketProcessingFences();
         this._startCycleInProgress = false;
       });
   }
@@ -2240,6 +3390,14 @@ export class StreamingDuelScheduler {
           `Agent ${agentId} no longer exists in world, removing from available list`,
         );
         this.matchmaking.availableAgents.delete(agentId);
+        return false;
+      }
+      const runtimeStatus = this.getContestantRuntimeStatus(agentId);
+      if (runtimeStatus !== "alive") {
+        Logger.warn(
+          "StreamingDuelScheduler",
+          `Agent ${agentId} is not alive at cycle preflight (${runtimeStatus})`,
+        );
         return false;
       }
       return true;
@@ -2329,313 +3487,363 @@ export class StreamingDuelScheduler {
       return;
     }
 
-    const frozen1 = this.orchestrator.freezeCompetitiveLoadout(agent1);
-    const frozen2 = this.orchestrator.freezeCompetitiveLoadout(agent2);
+    // Prayer policy may involve an asynchronous provider check. Revalidate
+    // authoritative life at the final private boundary before loadout freeze
+    // can create a market-visible competitive snapshot.
     if (
-      !frozen1.ok ||
-      !frozen2.ok ||
-      frozen1.diagnostic !== frozen2.diagnostic
+      this.getContestantRuntimeStatus(agent1Id) !== "alive" ||
+      this.getContestantRuntimeStatus(agent2Id) !== "alive"
     ) {
-      this.orchestrator.releaseCompetitiveLoadout(agent1Id);
-      this.orchestrator.releaseCompetitiveLoadout(agent2Id);
       Logger.warn(
         "StreamingDuelScheduler",
-        `Cycle rejected before market open: agent1=${frozen1.ok ? (frozen1.diagnostic ? "diagnostic" : "frozen") : frozen1.reason}, agent2=${frozen2.ok ? (frozen2.diagnostic ? "diagnostic" : "frozen") : frozen2.reason}`,
+        "Cycle rejected before market freeze because a contestant became unavailable",
       );
       this.schedulerState = "WAITING_FOR_AGENTS";
       return;
     }
 
-    const duelId = `streaming-${cycleId}`;
-    const duelKeyHex = this.deriveStreamingDuelKeyHex(cycleId);
-    if (
-      this.preparationStore &&
-      (!preparation ||
-        preparation.status !== "ready" ||
-        preparation.agent1Id !== agent1.characterId ||
-        preparation.agent2Id !== agent2.characterId)
-    ) {
-      this.orchestrator.releaseCompetitiveLoadout(agent1Id);
-      this.orchestrator.releaseCompetitiveLoadout(agent2Id);
-      throw new Error("durable_preparation_snapshot_mismatch");
-    }
-    if (
-      !this.preparationStore &&
-      process.env.NODE_ENV === "production" &&
-      !diagnosticPair
-    ) {
-      this.orchestrator.releaseCompetitiveLoadout(agent1Id);
-      this.orchestrator.releaseCompetitiveLoadout(agent2Id);
-      Logger.error(
-        "StreamingDuelScheduler",
-        "Production market rejected: durable preparation/snapshot store is not configured",
-      );
-      this.schedulerState = "WAITING_FOR_AGENTS";
-      return;
-    }
-
-    const snapshotAgent1 = this.buildCompetitiveSnapshotContestant(
-      "agent1",
-      agent1,
-      preparation?.agent1PlanEvidence ?? null,
+    const processingQuiescence = this.quiesceContestantsBeforeCompetitiveFreeze(
+      [agent1Id, agent2Id],
+      preparation,
     );
-    const snapshotAgent2 = this.buildCompetitiveSnapshotContestant(
-      "agent2",
-      agent2,
-      preparation?.agent2PlanEvidence ?? null,
-    );
-    if (!snapshotAgent1 || !snapshotAgent2) {
-      this.orchestrator.releaseCompetitiveLoadout(agent1Id);
-      this.orchestrator.releaseCompetitiveLoadout(agent2Id);
-      throw new Error("competitive_snapshot_evidence_mismatch");
-    }
-    if (!diagnosticPair) {
-      const policyValidation =
-        await this.orchestrator.validateCompetitiveAgentPolicies({
-          cycleId,
-          diagnostic: false,
-          contestants: [snapshotAgent1, snapshotAgent2],
-        });
-      if (!policyValidation.ok) {
-        this.orchestrator.releaseCompetitiveLoadout(agent1Id);
-        this.orchestrator.releaseCompetitiveLoadout(agent2Id);
-        throw new Error(policyValidation.reason);
-      }
-    }
-    const snapshotDraft: CompetitiveSnapshotDraft = {
-      diagnostic: diagnosticPair,
-      preparationId: preparation?.preparationId ?? null,
-      cycleId,
-      duelId,
-      duelKey: duelKeyHex,
-      contestants: [snapshotAgent1, snapshotAgent2],
-    };
-    let competitive:
-      | Pick<
-          PersistedCompetitiveSnapshot,
-          "preparation" | "snapshot" | "digest"
-        >
-      | {
-          preparation: null;
-          snapshot: CompetitiveSnapshot;
-          digest: string;
-        }
-      | null;
-    if (this.preparationStore) {
-      try {
-        competitive = await this.preparationStore.freezeWithCompetitiveSnapshot(
-          {
-            preparationId: preparation!.preparationId,
-            fencingToken: this.preparationFencingToken!,
-            draft: snapshotDraft,
-            betWindowDurationMs: STREAMING_TIMING.ANNOUNCEMENT_DURATION,
-          },
+    const processingQuiescent =
+      typeof processingQuiescence === "boolean"
+        ? processingQuiescence
+        : await processingQuiescence;
+    if (!processingQuiescent) {
+      if (!this.isDestroyed) {
+        Logger.warn(
+          "StreamingDuelScheduler",
+          "Cycle rejected before market freeze because contestant processing did not become idle before the preparation deadline",
         );
-      } catch (error) {
-        this.orchestrator.releaseCompetitiveLoadout(agent1Id);
-        this.orchestrator.releaseCompetitiveLoadout(agent2Id);
-        throw error;
+        this.schedulerState = "WAITING_FOR_AGENTS";
       }
-    } else {
-      // Keep the isolated DB-free diagnostic lane synchronous. Besides
-      // preserving deterministic local harnesses, this avoids a window where
-      // init() reports IDLE even though a diagnostic cycle has already been
-      // selected. The production branch above remains durably awaited.
-      competitive = {
-        preparation: null,
-        ...finalizeCompetitiveSnapshot({
-          draft: snapshotDraft,
-          persisted: false,
-          frozenAt: Date.now(),
-          betWindowDurationMs: STREAMING_TIMING.ANNOUNCEMENT_DURATION,
-        }),
-      };
-    }
-    if (!competitive) {
-      this.orchestrator.releaseCompetitiveLoadout(agent1Id);
-      this.orchestrator.releaseCompetitiveLoadout(agent2Id);
-      throw new Error("competitive_snapshot_persistence_failed");
-    }
-    if (this.isDestroyed) {
-      this.orchestrator.releaseCompetitiveLoadout(agent1Id);
-      this.orchestrator.releaseCompetitiveLoadout(agent2Id);
       return;
     }
-    const { snapshot, digest: competitiveSnapshotDigest } = competitive;
-    const betOpenTime = snapshot.betOpenTime;
-    const betCloseTime = snapshot.betCloseTime;
 
-    this.phaseStateMachine.transition("ANNOUNCEMENT");
-    this.currentCycle = {
-      cycleId,
-      phase: "ANNOUNCEMENT",
-      cycleStartTime: betOpenTime,
-      phaseStartTime: betOpenTime,
-      phaseVersion: 1,
-      agent1,
-      agent2,
-      duelId,
-      duelKeyHex,
-      competitiveSnapshotVersion: snapshot.snapshotVersion,
-      competitiveSnapshotDigest,
-      competitiveSnapshot: snapshot,
-      arenaId: null,
-      betOpenTime,
-      betCloseTime,
-      countdownValue: null,
-      fightStartTime: null,
-      firstHitAt: null,
-      duelEndTime: null,
-      arenaPositions: null,
-      winnerId: null,
-      loserId: null,
-      outcome: null,
-      winReason: null,
-      seed: null,
-      replayHash: null,
-    };
-    this.durableBettingTerminal = null;
-    if (competitive.preparation) {
-      this.world.emit("duel:preparation:frozen", {
-        preparationId: competitive.preparation.preparationId,
-        agent1Id: competitive.preparation.agent1Id,
-        agent2Id: competitive.preparation.agent2Id,
-        selectedAt: competitive.preparation.selectedAt,
-        frozenAt: competitive.preparation.frozenAt,
+    try {
+      // Quiescence can wait for an already-committed transaction. Revalidate
+      // life after that wait and before creating any market-visible snapshot.
+      if (
+        this.isDestroyed ||
+        this.getContestantRuntimeStatus(agent1Id) !== "alive" ||
+        this.getContestantRuntimeStatus(agent2Id) !== "alive"
+      ) {
+        if (!this.isDestroyed) this.schedulerState = "WAITING_FOR_AGENTS";
+        return;
+      }
+
+      const frozen1 = this.orchestrator.freezeCompetitiveLoadout(agent1);
+      const frozen2 = this.orchestrator.freezeCompetitiveLoadout(agent2);
+      if (
+        !frozen1.ok ||
+        !frozen2.ok ||
+        frozen1.diagnostic !== frozen2.diagnostic
+      ) {
+        this.orchestrator.releaseCompetitiveLoadout(agent1Id);
+        this.orchestrator.releaseCompetitiveLoadout(agent2Id);
+        Logger.warn(
+          "StreamingDuelScheduler",
+          `Cycle rejected before market open: agent1=${frozen1.ok ? (frozen1.diagnostic ? "diagnostic" : "frozen") : frozen1.reason}, agent2=${frozen2.ok ? (frozen2.diagnostic ? "diagnostic" : "frozen") : frozen2.reason}`,
+        );
+        this.schedulerState = "WAITING_FOR_AGENTS";
+        return;
+      }
+
+      const duelId = `streaming-${cycleId}`;
+      const duelKeyHex = this.deriveStreamingDuelKeyHex(cycleId);
+      if (
+        this.preparationStore &&
+        (!preparation ||
+          preparation.status !== "ready" ||
+          preparation.agent1Id !== agent1.characterId ||
+          preparation.agent2Id !== agent2.characterId)
+      ) {
+        this.orchestrator.releaseCompetitiveLoadout(agent1Id);
+        this.orchestrator.releaseCompetitiveLoadout(agent2Id);
+        throw new Error("durable_preparation_snapshot_mismatch");
+      }
+      if (
+        !this.preparationStore &&
+        process.env.NODE_ENV === "production" &&
+        !diagnosticPair
+      ) {
+        this.orchestrator.releaseCompetitiveLoadout(agent1Id);
+        this.orchestrator.releaseCompetitiveLoadout(agent2Id);
+        Logger.error(
+          "StreamingDuelScheduler",
+          "Production market rejected: durable preparation/snapshot store is not configured",
+        );
+        this.schedulerState = "WAITING_FOR_AGENTS";
+        return;
+      }
+
+      const snapshotAgent1 = this.buildCompetitiveSnapshotContestant(
+        "agent1",
+        agent1,
+        preparation?.agent1PlanEvidence ?? null,
+      );
+      const snapshotAgent2 = this.buildCompetitiveSnapshotContestant(
+        "agent2",
+        agent2,
+        preparation?.agent2PlanEvidence ?? null,
+      );
+      if (!snapshotAgent1 || !snapshotAgent2) {
+        this.orchestrator.releaseCompetitiveLoadout(agent1Id);
+        this.orchestrator.releaseCompetitiveLoadout(agent2Id);
+        throw new Error("competitive_snapshot_evidence_mismatch");
+      }
+      if (!diagnosticPair) {
+        const policyValidation =
+          await this.orchestrator.validateCompetitiveAgentPolicies({
+            cycleId,
+            diagnostic: false,
+            contestants: [snapshotAgent1, snapshotAgent2],
+          });
+        if (!policyValidation.ok) {
+          this.orchestrator.releaseCompetitiveLoadout(agent1Id);
+          this.orchestrator.releaseCompetitiveLoadout(agent2Id);
+          throw new Error(policyValidation.reason);
+        }
+      }
+      const snapshotDraft: CompetitiveSnapshotDraft = {
+        diagnostic: diagnosticPair,
+        preparationId: preparation?.preparationId ?? null,
+        cycleId,
+        duelId,
+        duelKey: duelKeyHex,
+        contestants: [snapshotAgent1, snapshotAgent2],
+      };
+      let competitive:
+        | Pick<
+            PersistedCompetitiveSnapshot,
+            "preparation" | "snapshot" | "digest"
+          >
+        | {
+            preparation: null;
+            snapshot: CompetitiveSnapshot;
+            digest: string;
+          }
+        | null;
+      if (this.preparationStore) {
+        try {
+          competitive =
+            await this.preparationStore.freezeWithCompetitiveSnapshot({
+              preparationId: preparation!.preparationId,
+              fencingToken: this.preparationFencingToken!,
+              draft: snapshotDraft,
+              betWindowDurationMs: STREAMING_TIMING.ANNOUNCEMENT_DURATION,
+              timing: COMPETITIVE_SNAPSHOT_TIMING,
+            });
+        } catch (error) {
+          this.orchestrator.releaseCompetitiveLoadout(agent1Id);
+          this.orchestrator.releaseCompetitiveLoadout(agent2Id);
+          throw error;
+        }
+      } else {
+        // Keep the isolated DB-free diagnostic lane synchronous. Besides
+        // preserving deterministic local harnesses, this avoids a window where
+        // init() reports IDLE even though a diagnostic cycle has already been
+        // selected. The production branch above remains durably awaited.
+        competitive = {
+          preparation: null,
+          ...finalizeCompetitiveSnapshot({
+            draft: snapshotDraft,
+            persisted: false,
+            frozenAt: Date.now(),
+            betWindowDurationMs: STREAMING_TIMING.ANNOUNCEMENT_DURATION,
+            timing: COMPETITIVE_SNAPSHOT_TIMING,
+          }),
+        };
+      }
+      if (!competitive) {
+        this.orchestrator.releaseCompetitiveLoadout(agent1Id);
+        this.orchestrator.releaseCompetitiveLoadout(agent2Id);
+        throw new Error("competitive_snapshot_persistence_failed");
+      }
+      if (this.isDestroyed) {
+        this.orchestrator.releaseCompetitiveLoadout(agent1Id);
+        this.orchestrator.releaseCompetitiveLoadout(agent2Id);
+        return;
+      }
+      const { snapshot, digest: competitiveSnapshotDigest } = competitive;
+      const betOpenTime = snapshot.betOpenTime;
+      const betCloseTime = snapshot.betCloseTime;
+
+      this.phaseStateMachine.transition("ANNOUNCEMENT");
+      this.currentCycle = {
+        cycleId,
+        phase: "ANNOUNCEMENT",
+        cycleStartTime: betOpenTime,
+        phaseStartTime: betOpenTime,
+        phaseVersion: 1,
+        agent1,
+        agent2,
+        duelId,
+        duelKeyHex,
         competitiveSnapshotVersion: snapshot.snapshotVersion,
         competitiveSnapshotDigest,
+        competitiveSnapshot: snapshot,
+        arenaId: null,
+        betOpenTime,
+        betCloseTime,
+        countdownValue: null,
+        fightStartTime: betCloseTime + STREAMING_TIMING.COUNTDOWN_DURATION,
+        firstHitAt: null,
+        duelEndTime: null,
+        arenaPositions: null,
+        winnerId: null,
+        loserId: null,
+        outcome: null,
+        winReason: null,
+        seed: null,
+        replayHash: null,
+      };
+      this.durableBettingTerminal = null;
+      if (competitive.preparation) {
+        this.world.emit("duel:preparation:frozen", {
+          preparationId: competitive.preparation.preparationId,
+          agent1Id: competitive.preparation.agent1Id,
+          agent2Id: competitive.preparation.agent2Id,
+          selectedAt: competitive.preparation.selectedAt,
+          frozenAt: competitive.preparation.frozenAt,
+          competitiveSnapshotVersion: snapshot.snapshotVersion,
+          competitiveSnapshotDigest,
+        });
+      }
+      this.matchmaking.refreshNextDuelPair(betOpenTime);
+      this.notifyOnDeckAgents();
+
+      // Mark agents as in a streaming duel immediately so their autonomous AI
+      // won't make them attack each other or wander into combat during announcement.
+      this.orchestrator.setDuelFlags(true);
+
+      // Force-end any combat the selected agents are already in.
+      this.orchestrator.forceStopAgentCombat(agent1.characterId);
+      this.orchestrator.forceStopAgentCombat(agent2.characterId);
+
+      // Restore full health immediately so the first broadcast shows full HP.
+      this.orchestrator.restoreHealth(agent1.characterId);
+      this.orchestrator.restoreHealth(agent2.characterId);
+
+      // Present the announced matchup in the arena immediately. Waiting until
+      // COUNTDOWN left both selected contestants at their previous world
+      // positions for the full market-open window, so the canonical camera had
+      // no in-ring subjects and briefly framed hidden/overlapping avatars. The
+      // countdown prep teleports to these same marks again after loadout work,
+      // making that second placement idempotent rather than a visible snap.
+      try {
+        this.orchestrator.teleportToArena(
+          agent1.characterId,
+          agent2.characterId,
+          true,
+        );
+      } catch (err) {
+        Logger.warn(
+          "StreamingDuelScheduler",
+          `Failed to stage announced contestants in arena: ${errMsg(err)}`,
+        );
+        this.abortCycleToIdle("arena_teleport_failed");
+        return;
+      }
+
+      // Set initial camera target
+      this.camera.setCameraTarget(agent1.characterId, betOpenTime);
+
+      Logger.info(
+        "StreamingDuelScheduler",
+        `New cycle started: ${agent1.name} vs ${agent2.name}`,
+      );
+
+      // Emit announcement event
+      this.world.emit("streaming:cycle:started", {
+        cycleId,
+        duelId,
+        duelKeyHex: this.currentCycle.duelKeyHex,
+        competitiveSnapshotVersion: snapshot.snapshotVersion,
+        competitiveSnapshotDigest,
+        competitiveSnapshot: snapshot,
+        betOpenTime,
+        betCloseTime,
+        agent1: {
+          id: agent1.characterId,
+          name: agent1.name,
+          loadoutFingerprint: agent1.loadoutFingerprint,
+          availableCombatStyles: agent1.availableCombatStyles,
+          combatLoadouts: cloneCombatLoadouts(agent1.combatLoadouts),
+          prayerPointUnits: agent1.prayerPointUnits,
+          prayerPoints: agent1.prayerPoints,
+          prayerMaxPoints: agent1.prayerMaxPoints,
+        },
+        agent2: {
+          id: agent2.characterId,
+          name: agent2.name,
+          loadoutFingerprint: agent2.loadoutFingerprint,
+          availableCombatStyles: agent2.availableCombatStyles,
+          combatLoadouts: cloneCombatLoadouts(agent2.combatLoadouts),
+          prayerPointUnits: agent2.prayerPointUnits,
+          prayerPoints: agent2.prayerPoints,
+          prayerMaxPoints: agent2.prayerMaxPoints,
+        },
       });
+
+      this.world.emit("streaming:announcement:start", {
+        cycleId,
+        duelId,
+        duelKeyHex: this.currentCycle.duelKeyHex,
+        competitiveSnapshotVersion: snapshot.snapshotVersion,
+        competitiveSnapshotDigest,
+        competitiveSnapshot: snapshot,
+        betOpenTime,
+        betCloseTime,
+        agent1: {
+          id: agent1.characterId,
+          name: agent1.name,
+          loadoutFingerprint: agent1.loadoutFingerprint,
+          availableCombatStyles: agent1.availableCombatStyles,
+          combatLoadouts: cloneCombatLoadouts(agent1.combatLoadouts),
+          prayerPointUnits: agent1.prayerPointUnits,
+          prayerPoints: agent1.prayerPoints,
+          prayerMaxPoints: agent1.prayerMaxPoints,
+        },
+        agent2: {
+          id: agent2.characterId,
+          name: agent2.name,
+          loadoutFingerprint: agent2.loadoutFingerprint,
+          availableCombatStyles: agent2.availableCombatStyles,
+          combatLoadouts: cloneCombatLoadouts(agent2.combatLoadouts),
+          prayerPointUnits: agent2.prayerPointUnits,
+          prayerPoints: agent2.prayerPoints,
+          prayerMaxPoints: agent2.prayerMaxPoints,
+        },
+        duration: STREAMING_TIMING.ANNOUNCEMENT_DURATION,
+      });
+
+      // Hyperbet / DuelBettingBridge: same payload shape as legacy DuelScheduler
+      this.world.emit("duel:scheduled", {
+        duelId,
+        agent1Id: agent1.characterId,
+        agent2Id: agent2.characterId,
+        agent1Name: agent1.name,
+        agent2Name: agent2.name,
+        agent1LoadoutFingerprint: agent1.loadoutFingerprint,
+        agent2LoadoutFingerprint: agent2.loadoutFingerprint,
+        agent1CombatStyles: agent1.availableCombatStyles,
+        agent2CombatStyles: agent2.availableCombatStyles,
+        agent1CombatLoadouts: cloneCombatLoadouts(agent1.combatLoadouts),
+        agent2CombatLoadouts: cloneCombatLoadouts(agent2.combatLoadouts),
+        agent1PrayerPointUnits: agent1.prayerPointUnits,
+        agent2PrayerPointUnits: agent2.prayerPointUnits,
+        agent1PrayerMaxPoints: agent1.prayerMaxPoints,
+        agent2PrayerMaxPoints: agent2.prayerMaxPoints,
+        competitiveSnapshotVersion: snapshot.snapshotVersion,
+        competitiveSnapshotDigest,
+        competitiveSnapshot: snapshot,
+        startTime: betCloseTime,
+      });
+    } finally {
+      this.releasePreMarketProcessingFences();
     }
-    this.matchmaking.refreshNextDuelPair(betOpenTime);
-    this.notifyOnDeckAgents();
-
-    // Mark agents as in a streaming duel immediately so their autonomous AI
-    // won't make them attack each other or wander into combat during announcement.
-    this.orchestrator.setDuelFlags(true);
-
-    // Force-end any combat the selected agents are already in.
-    this.orchestrator.forceStopAgentCombat(agent1.characterId);
-    this.orchestrator.forceStopAgentCombat(agent2.characterId);
-
-    // Restore full health immediately so the first broadcast shows full HP.
-    this.orchestrator.restoreHealth(agent1.characterId);
-    this.orchestrator.restoreHealth(agent2.characterId);
-
-    // Present the announced matchup in the arena immediately. Waiting until
-    // COUNTDOWN left both selected contestants at their previous world
-    // positions for the full market-open window, so the canonical camera had
-    // no in-ring subjects and briefly framed hidden/overlapping avatars. The
-    // countdown prep teleports to these same marks again after loadout work,
-    // making that second placement idempotent rather than a visible snap.
-    void this.orchestrator
-      .teleportToArena(agent1.characterId, agent2.characterId, true)
-      .catch((err) => {
-        if (
-          this.currentCycle?.cycleId === cycleId &&
-          this.currentCycle.phase === "ANNOUNCEMENT"
-        ) {
-          Logger.warn(
-            "StreamingDuelScheduler",
-            `Failed to stage announced contestants in arena: ${errMsg(err)}`,
-          );
-          this.abortCycleToIdle("arena_teleport_failed");
-        }
-      });
-
-    // Set initial camera target
-    this.camera.setCameraTarget(agent1.characterId, betOpenTime);
-
-    Logger.info(
-      "StreamingDuelScheduler",
-      `New cycle started: ${agent1.name} vs ${agent2.name}`,
-    );
-
-    // Emit announcement event
-    this.world.emit("streaming:cycle:started", {
-      cycleId,
-      duelId,
-      duelKeyHex: this.currentCycle.duelKeyHex,
-      competitiveSnapshotVersion: snapshot.snapshotVersion,
-      competitiveSnapshotDigest,
-      competitiveSnapshot: snapshot,
-      betOpenTime,
-      betCloseTime,
-      agent1: {
-        id: agent1.characterId,
-        name: agent1.name,
-        loadoutFingerprint: agent1.loadoutFingerprint,
-        availableCombatStyles: agent1.availableCombatStyles,
-        combatLoadouts: cloneCombatLoadouts(agent1.combatLoadouts),
-        prayerPointUnits: agent1.prayerPointUnits,
-        prayerPoints: agent1.prayerPoints,
-        prayerMaxPoints: agent1.prayerMaxPoints,
-      },
-      agent2: {
-        id: agent2.characterId,
-        name: agent2.name,
-        loadoutFingerprint: agent2.loadoutFingerprint,
-        availableCombatStyles: agent2.availableCombatStyles,
-        combatLoadouts: cloneCombatLoadouts(agent2.combatLoadouts),
-        prayerPointUnits: agent2.prayerPointUnits,
-        prayerPoints: agent2.prayerPoints,
-        prayerMaxPoints: agent2.prayerMaxPoints,
-      },
-    });
-
-    this.world.emit("streaming:announcement:start", {
-      cycleId,
-      duelId,
-      duelKeyHex: this.currentCycle.duelKeyHex,
-      competitiveSnapshotVersion: snapshot.snapshotVersion,
-      competitiveSnapshotDigest,
-      competitiveSnapshot: snapshot,
-      betOpenTime,
-      betCloseTime,
-      agent1: {
-        id: agent1.characterId,
-        name: agent1.name,
-        loadoutFingerprint: agent1.loadoutFingerprint,
-        availableCombatStyles: agent1.availableCombatStyles,
-        combatLoadouts: cloneCombatLoadouts(agent1.combatLoadouts),
-        prayerPointUnits: agent1.prayerPointUnits,
-        prayerPoints: agent1.prayerPoints,
-        prayerMaxPoints: agent1.prayerMaxPoints,
-      },
-      agent2: {
-        id: agent2.characterId,
-        name: agent2.name,
-        loadoutFingerprint: agent2.loadoutFingerprint,
-        availableCombatStyles: agent2.availableCombatStyles,
-        combatLoadouts: cloneCombatLoadouts(agent2.combatLoadouts),
-        prayerPointUnits: agent2.prayerPointUnits,
-        prayerPoints: agent2.prayerPoints,
-        prayerMaxPoints: agent2.prayerMaxPoints,
-      },
-      duration: STREAMING_TIMING.ANNOUNCEMENT_DURATION,
-    });
-
-    // Hyperbet / DuelBettingBridge: same payload shape as legacy DuelScheduler
-    this.world.emit("duel:scheduled", {
-      duelId,
-      agent1Id: agent1.characterId,
-      agent2Id: agent2.characterId,
-      agent1Name: agent1.name,
-      agent2Name: agent2.name,
-      agent1LoadoutFingerprint: agent1.loadoutFingerprint,
-      agent2LoadoutFingerprint: agent2.loadoutFingerprint,
-      agent1CombatStyles: agent1.availableCombatStyles,
-      agent2CombatStyles: agent2.availableCombatStyles,
-      agent1CombatLoadouts: cloneCombatLoadouts(agent1.combatLoadouts),
-      agent2CombatLoadouts: cloneCombatLoadouts(agent2.combatLoadouts),
-      agent1PrayerPointUnits: agent1.prayerPointUnits,
-      agent2PrayerPointUnits: agent2.prayerPointUnits,
-      agent1PrayerMaxPoints: agent1.prayerMaxPoints,
-      agent2PrayerMaxPoints: agent2.prayerMaxPoints,
-      competitiveSnapshotVersion: snapshot.snapshotVersion,
-      competitiveSnapshotDigest,
-      competitiveSnapshot: snapshot,
-      startTime: betCloseTime,
-    });
   }
 
   /**
@@ -2752,11 +3960,22 @@ export class StreamingDuelScheduler {
     const fencingToken = this.preparationFencingToken;
     if (!store || durationMs === null || !fencingToken) return;
     try {
+      await this.matchmaking.waitForAgentStatsHydration([
+        pair.agent1Id,
+        pair.agent2Id,
+      ]);
       const preparation = await store.create({
         preparationId: uuidv4(),
         fencingToken,
         agent1Id: pair.agent1Id,
         agent2Id: pair.agent2Id,
+        diagnostic:
+          isLocalDiagnosticDuelRuntime(process.env) &&
+          [pair.agent1Id, pair.agent2Id].every((agentId) => {
+            const readiness =
+              this.orchestrator.inspectCompetitiveLoadout(agentId);
+            return readiness.ok && readiness.diagnostic;
+          }),
         durationMs,
         allowedBankActions: DUEL_PREPARATION_BANK_ACTIONS,
       });
@@ -2780,16 +3999,26 @@ export class StreamingDuelScheduler {
         "StreamingDuelScheduler",
         `Private preparation selected: ${pair.agent1Id} vs ${pair.agent2Id}`,
       );
-      if (announced.status === "ready" && !this.currentCycle) {
+      if (
+        announced.status === "ready" &&
+        !this.currentCycle &&
+        !config.isMaintenanceMode()
+      ) {
         // Diagnostic contestants can become ready inside selection delivery.
         // Reconcile immediately instead of waiting for the next one-second
         // scheduler tick, which can land just beyond the supported one-second
-        // minimum preparation window.
+        // minimum preparation window. Maintenance remains an absolute launch
+        // fence even if it is enabled while asynchronous selection is in
+        // flight; the ready record stays durable for the post-maintenance tick.
         await this.advancePrivatePreparationGate(Date.now());
       }
     } catch (error) {
       this.onDeckPreparation = null;
       this.onDeckPreparationPairKey = null;
+      await this.reconcilePersistedStreamingDuelParticipation([
+        pair.agent1Id,
+        pair.agent2Id,
+      ]);
       Logger.error(
         "StreamingDuelScheduler",
         `Failed to persist private preparation: ${errMsg(error)}`,
@@ -2813,6 +4042,25 @@ export class StreamingDuelScheduler {
     let announced = preparation;
     for (const agentId of [preparation.agent1Id, preparation.agent2Id]) {
       if (!this.standaloneSparbotIds.has(agentId)) continue;
+      if (!this.preparationStore || !this.preparationHostLeaseConfig) {
+        throw new Error("diagnostic_contestant_host_lease_unavailable");
+      }
+      const hostLeaseInput = {
+        preparationId: preparation.preparationId,
+        agentId,
+        ownerId: this.preparationDiagnosticHostOwnerId,
+        leaseDurationMs: this.preparationHostLeaseConfig.leaseMs,
+      };
+      const claimedHostLease =
+        await this.preparationStore.claimContestantHostLease(hostLeaseInput);
+      const activeHostLease = claimedHostLease
+        ? await this.preparationStore.heartbeatContestantHostLease(
+            hostLeaseInput,
+          )
+        : null;
+      if (!activeHostLease) {
+        throw new Error("diagnostic_contestant_host_lease_rejected");
+      }
       const readiness = this.orchestrator.inspectCompetitiveLoadout(agentId);
       if (!readiness.ok) continue;
       await this.confirmOnDeckPreparation(
@@ -2841,6 +4089,8 @@ export class StreamingDuelScheduler {
 
     const agent1Entity = this.world.entities.get(announced.agent1Id);
     const agent2Entity = this.world.entities.get(announced.agent2Id);
+    this.camera.clearIdlePreparationActivityCut();
+    await this.hydratePublicPreparationActivities(announced);
     const payload = {
       preparationId: announced.preparationId,
       selectedAt: announced.selectedAt,
@@ -2875,6 +4125,16 @@ export class StreamingDuelScheduler {
       // unwinds and must never be mistaken for the stale session.
       this.onDeckPreparation = null;
       this.onDeckPreparationPairKey = null;
+      this.clearPublicPreparationActivities(preparation.preparationId);
+      // Durable cancellation can lose a fencing-token race to a successor or
+      // be temporarily unavailable during authority loss. Revoke the old
+      // process's private-bank capability synchronously without publishing a
+      // durable/public terminal transition that PostgreSQL has not confirmed.
+      this.world.emit(DUEL_PREPARATION_LOCAL_REVOCATION_EVENT, {
+        preparationId: preparation.preparationId,
+        reason,
+        occurredAt: Date.now(),
+      });
     }
     ++this.preparationSelectionGeneration;
     const selectionInFlight = this.preparationSelectionInFlight;
@@ -2901,6 +4161,30 @@ export class StreamingDuelScheduler {
         `Failed to cancel private preparation: ${errMsg(error)}`,
       );
     }
+  }
+
+  /**
+   * Cancel a still-private selection when one contestant is authoritatively
+   * unavailable. Keeping the registration lets ordinary respawn restore
+   * future eligibility; clearing this exact pair prevents a dead contestant
+   * from reaching loadout freeze or retaining its preparation bank capability.
+   */
+  private cancelUnavailableOnDeckContestant(agentId: string): boolean {
+    const preparation = this.onDeckPreparation;
+    if (
+      !preparation ||
+      (preparation.agent1Id !== agentId && preparation.agent2Id !== agentId) ||
+      this.getContestantRuntimeStatus(agentId) === "alive"
+    ) {
+      return false;
+    }
+
+    const pair = this.matchmaking.nextDuelPair;
+    if (pair && (pair.agent1Id === agentId || pair.agent2Id === agentId)) {
+      this.matchmaking.nextDuelPair = null;
+    }
+    void this.cancelOnDeckPreparation("contestant_unavailable");
+    return true;
   }
 
   private async handleOnDeckPreparationAgentFailure(
@@ -2938,6 +4222,49 @@ export class StreamingDuelScheduler {
       reason: "agent_preparation_failed",
     });
     await this.cancelOnDeckPreparation("agent_preparation_failed");
+  }
+
+  /**
+   * Consume a report written by a contestant host that cannot emit into this
+   * process. The scheduler retains sole cancellation authority and therefore
+   * applies its own current fencing token after validating the durable pair.
+   */
+  private async consumeReportedContestantUnavailability(
+    preparation: DuelPreparationSnapshot,
+  ): Promise<boolean> {
+    const store = this.preparationStore;
+    if (!store) return false;
+    const reportExpiredContestantHostLease = (
+      store as PostgresDuelPreparationStore & {
+        reportExpiredContestantHostLease?: PostgresDuelPreparationStore["reportExpiredContestantHostLease"];
+      }
+    ).reportExpiredContestantHostLease;
+    const expiredLeaseReport =
+      this.preparationHostLeaseConfig &&
+      typeof reportExpiredContestantHostLease === "function"
+        ? await reportExpiredContestantHostLease.call(store, {
+            preparationId: preparation.preparationId,
+            claimGraceMs: this.preparationHostLeaseConfig.claimGraceMs,
+          })
+        : null;
+    const report =
+      expiredLeaseReport ??
+      (await store.getContestantUnavailability(preparation.preparationId));
+    if (!report) return false;
+    if (
+      report.agentId !== preparation.agent1Id &&
+      report.agentId !== preparation.agent2Id
+    ) {
+      throw new Error("duel_preparation_unavailability_agent_mismatch");
+    }
+
+    this.onDeckPreparation = preparation;
+    this.onDeckPreparationPairKey = `${preparation.agent1Id}\u0000${preparation.agent2Id}`;
+    await this.handleOnDeckPreparationAgentFailure(
+      preparation.preparationId,
+      report.agentId,
+    );
+    return true;
   }
 
   private async confirmOnDeckPreparation(
@@ -2991,58 +4318,94 @@ export class StreamingDuelScheduler {
       });
       return;
     }
-    try {
-      const updated = await store.markReady({
-        preparationId,
-        fencingToken,
-        agentId,
-        planEvidence,
-      });
-      if (!updated) {
+    for (let conflictAttempt = 0; ; conflictAttempt += 1) {
+      try {
+        const updated = await store.markReady({
+          preparationId,
+          fencingToken,
+          agentId,
+          planEvidence,
+        });
+        if (!updated) {
+          this.world.emit("duel:preparation:readiness_rejected", {
+            preparationId,
+            agentId,
+            reason: "preparation_not_mutable",
+          });
+          return;
+        }
+        const latest = this.onDeckPreparation;
+        if (!latest || latest.preparationId !== preparationId) return;
+        const authoritative =
+          latest.version > updated.version ? latest : updated;
+        this.onDeckPreparation = authoritative;
+        if (!emitReadinessEvent) return;
+        this.world.emit("duel:preparation:readiness", {
+          preparationId,
+          agentId,
+          agent1Ready: authoritative.agent1ReadyAt !== null,
+          agent2Ready: authoritative.agent2ReadyAt !== null,
+          bothReady: authoritative.status === "ready",
+          expiresAt: authoritative.expiresAt,
+        });
+        return;
+      } catch (error) {
+        if (
+          isRetryablePostgresTransactionConflict(error) &&
+          conflictAttempt < PRIVATE_PREPARATION_CONFLICT_RETRIES
+        ) {
+          await new Promise((resolve) =>
+            setTimeout(resolve, 10 * (conflictAttempt + 1)),
+          );
+          const retryCurrent = this.onDeckPreparation;
+          if (
+            this.isDestroyed ||
+            this.preparationStore !== store ||
+            this.preparationFencingToken !== fencingToken ||
+            !retryCurrent ||
+            retryCurrent.preparationId !== preparationId ||
+            (retryCurrent.agent1Id !== agentId &&
+              retryCurrent.agent2Id !== agentId)
+          ) {
+            this.world.emit("duel:preparation:readiness_rejected", {
+              preparationId,
+              agentId,
+              reason: "stale_or_unauthorized_preparation",
+            });
+            return;
+          }
+          continue;
+        }
+        Logger.error(
+          "StreamingDuelScheduler",
+          `Failed to persist preparation readiness: ${errMsg(error)}`,
+        );
         this.world.emit("duel:preparation:readiness_rejected", {
           preparationId,
           agentId,
-          reason: "preparation_not_mutable",
+          reason: "preparation_persistence_failed",
         });
         return;
       }
-      const latest = this.onDeckPreparation;
-      if (!latest || latest.preparationId !== preparationId) return;
-      const authoritative = latest.version > updated.version ? latest : updated;
-      this.onDeckPreparation = authoritative;
-      if (!emitReadinessEvent) return;
-      this.world.emit("duel:preparation:readiness", {
-        preparationId,
-        agentId,
-        agent1Ready: authoritative.agent1ReadyAt !== null,
-        agent2Ready: authoritative.agent2ReadyAt !== null,
-        bothReady: authoritative.status === "ready",
-        expiresAt: authoritative.expiresAt,
-      });
-    } catch (error) {
-      Logger.error(
-        "StreamingDuelScheduler",
-        `Failed to persist preparation readiness: ${errMsg(error)}`,
-      );
-      this.world.emit("duel:preparation:readiness_rejected", {
-        preparationId,
-        agentId,
-        reason: "preparation_persistence_failed",
-      });
     }
   }
 
-  private async advancePrivatePreparationGate(now: number): Promise<void> {
+  private async advancePrivatePreparationGate(
+    now: number,
+    conflictAttempt = 0,
+  ): Promise<void> {
     if (this.preparationIdleCheckInFlight) return;
     const store = this.preparationStore;
     const fencingToken = this.preparationFencingToken;
     if (!store || !fencingToken) return;
     this.preparationIdleCheckInFlight = true;
+    let retryConflict = false;
     try {
       if (!this.competitiveRecoveryChecked) {
         const recovered = await this.recoverFrozenCompetitiveSnapshot(now);
+        if (recovered === "deferred") return;
+        if (recovered === "handled") return;
         this.competitiveRecoveryChecked = true;
-        if (recovered) return;
       }
       const expired = await store.expire();
       if (
@@ -3055,11 +4418,23 @@ export class StreamingDuelScheduler {
         const expiredId = this.onDeckPreparation.preparationId;
         this.onDeckPreparation = null;
         this.onDeckPreparationPairKey = null;
+        this.clearPublicPreparationActivities(expiredId);
         this.matchmaking.nextDuelPair = null;
         this.world.emit("duel:preparation:expired", {
           preparationId: expiredId,
           occurredAt: now,
         });
+      }
+
+      const locallyKnownPreparationId =
+        this.onDeckPreparation?.preparationId ?? null;
+      let active = this.onDeckPreparation ?? (await store.getActive());
+      if (
+        active &&
+        (active.status === "preparing" || active.status === "ready") &&
+        (await this.consumeReportedContestantUnavailability(active))
+      ) {
+        return;
       }
 
       let pair = this.matchmaking.nextDuelPair;
@@ -3068,10 +4443,11 @@ export class StreamingDuelScheduler {
         pair = this.matchmaking.nextDuelPair;
       }
       if (!pair) return;
+      await this.matchmaking.waitForAgentStatsHydration([
+        pair.agent1Id,
+        pair.agent2Id,
+      ]);
 
-      const locallyKnownPreparationId =
-        this.onDeckPreparation?.preparationId ?? null;
-      let active = this.onDeckPreparation ?? (await store.getActive());
       const activeMatchesPair =
         active &&
         ((active.agent1Id === pair.agent1Id &&
@@ -3118,8 +4494,32 @@ export class StreamingDuelScheduler {
       }
       if (active.status !== "ready") return;
 
+      // A direct reconciliation can overlap an operator maintenance change
+      // even though the ordinary idle path checks maintenance before entering
+      // this method. Keep the durable ready record and private/public state
+      // intact so release resumes the exact same preparation instead of
+      // launching through the deployment fence or manufacturing a new one.
+      if (config.isMaintenanceMode()) return;
+
+      // Retain the exact completed preparation (and its pair-bound camera and
+      // activity trail) for the full optional presentation floor measured from
+      // the later readiness receipt. Measuring from selection lets slow
+      // planning consume the entire public ready hold. The release remains
+      // capped by the private deadline, which expires fail-closed on the next
+      // reconciliation instead of extending or inventing product timing.
+      if (
+        now <
+        resolveStreamingPublicPreparationReleaseAt(
+          active,
+          this.publicPreparationMinimumDurationMs,
+        )
+      ) {
+        return;
+      }
+
       this.onDeckPreparation = null;
       this.onDeckPreparationPairKey = null;
+      this.clearPublicPreparationActivities(active.preparationId);
       this.matchmaking.nextDuelPair = null;
       const launched = await this.startNewCycle(pair, active);
       if (!launched) {
@@ -3139,12 +4539,25 @@ export class StreamingDuelScheduler {
         return;
       }
     } catch (error) {
-      Logger.error(
-        "StreamingDuelScheduler",
-        `Private preparation gate failed closed: ${errMsg(error)}`,
-      );
+      if (
+        isRetryablePostgresTransactionConflict(error) &&
+        conflictAttempt < PRIVATE_PREPARATION_CONFLICT_RETRIES
+      ) {
+        retryConflict = true;
+      } else {
+        Logger.error(
+          "StreamingDuelScheduler",
+          `Private preparation gate failed closed: ${errMsg(error)}`,
+        );
+      }
     } finally {
       this.preparationIdleCheckInFlight = false;
+    }
+    if (retryConflict) {
+      await new Promise((resolve) =>
+        setTimeout(resolve, 10 * (conflictAttempt + 1)),
+      );
+      await this.advancePrivatePreparationGate(Date.now(), conflictAttempt + 1);
     }
   }
 
@@ -3336,7 +4749,7 @@ export class StreamingDuelScheduler {
 
       // Teleport agents to arena NOW — right as countdown begins.
       try {
-        await this.orchestrator.teleportToArena(
+        this.orchestrator.teleportToArena(
           this.currentCycle.agent1.characterId,
           this.currentCycle.agent2.characterId,
         );
@@ -3397,15 +4810,26 @@ export class StreamingDuelScheduler {
         targetName: this.currentCycle.agent2.name,
       });
 
-      // Transition to COUNTDOWN.
+      // Transition to COUNTDOWN without moving the fight boundary that was
+      // published with the announcement and committed by the keeper. Any
+      // preparation delay consumes countdown time instead of silently
+      // extending a market contract after positions can exist.
       const now = Date.now();
-      const fightStartTime = now + STREAMING_TIMING.COUNTDOWN_DURATION;
+      const fightStartTime = this.currentCycle.fightStartTime;
+      if (
+        !Number.isSafeInteger(fightStartTime) ||
+        fightStartTime === null ||
+        fightStartTime < lockedAt
+      ) {
+        this.abortCycleToIdle("competitive_timing_contract_invalid");
+        return;
+      }
+      const countdownDelay = Math.max(0, fightStartTime - now);
 
       this.phaseStateMachine.transition("COUNTDOWN");
       this.currentCycle.phase = "COUNTDOWN";
       this.currentCycle.phaseStartTime = now;
       this.currentCycle.phaseVersion += 1;
-      this.currentCycle.fightStartTime = fightStartTime;
       this.currentCycle.countdownValue = null;
       this.camera.setCameraTarget(
         this.currentCycle.agent1?.characterId ?? null,
@@ -3423,8 +4847,8 @@ export class StreamingDuelScheduler {
       }
       this.countdownTimeout = setTimeout(() => {
         this.countdownTimeout = null;
-        void this.doStartFight(Date.now());
-      }, STREAMING_TIMING.COUNTDOWN_DURATION);
+        void this.doStartFight(fightStartTime);
+      }, countdownDelay);
     } finally {
       this._startCountdownInProgress = false;
     }
@@ -3463,7 +4887,11 @@ export class StreamingDuelScheduler {
     if (this.resolveUnavailableActiveContestants()) return;
 
     const cycleAtFightStart = this.currentCycle;
-    const duelStartedAt = Date.now();
+    const duelStartedAt = cycleAtFightStart.fightStartTime;
+    if (!Number.isSafeInteger(duelStartedAt) || duelStartedAt === null) {
+      this.abortCycleToIdle("competitive_timing_contract_invalid");
+      return;
+    }
     const duelStarted = await this.persistCompetitiveLifecycleMilestone(
       cycleAtFightStart,
       "duel",
@@ -3486,7 +4914,11 @@ export class StreamingDuelScheduler {
 
     // Delegate fight start to orchestrator (handles phase transition, duel flags,
     // health restore, emit, combat initiation, combat AIs).
-    this.orchestrator.startFight();
+    // Keep the pre-published start boundary immutable across persistence,
+    // combat authority, the public phase clock, and the keeper/on-chain feed.
+    // A slow persistence edge may consume part of the round, but it must never
+    // silently move the deadline after bettors have seen the timing contract.
+    this.orchestrator.startFight(duelStartedAt);
 
     // If the orchestrator transitioned to FIGHTING, set camera target and start fast broadcast.
     // Re-read cycle since startFight() mutates phase via setCurrentCycleFields.
@@ -3497,7 +4929,7 @@ export class StreamingDuelScheduler {
     ) {
       this.camera.setCameraTarget(
         cycleAfterFight.agent1?.characterId ?? null,
-        now,
+        duelStartedAt,
       );
       // Start fast 200ms broadcast for fight phase (#11)
       this.startFightBroadcast();
@@ -3510,6 +4942,7 @@ export class StreamingDuelScheduler {
     // Refresh HP before the lifecycle fence so a missed terminal damage event
     // resolves from authoritative state rather than producing a false timeout.
     this.orchestrator.updateContestantHp();
+    if (this.hasPendingDamageForCurrentCycle()) return;
     if (this.resolveUnavailableActiveContestants()) return;
 
     const elapsed = now - this.currentCycle.phaseStartTime;
@@ -3534,7 +4967,10 @@ export class StreamingDuelScheduler {
 
     // Check if fight time is up
     if (elapsed >= totalFightDuration) {
-      this.orchestrator.endFightByTimeout();
+      const committedFightDeadline =
+        this.currentCycle.competitiveSnapshot?.timing?.fightDeadline ??
+        this.currentCycle.phaseStartTime + totalFightDuration;
+      this.orchestrator.endFightByTimeout(committedFightDeadline);
     }
   }
 
@@ -3562,31 +4998,19 @@ export class StreamingDuelScheduler {
   ): { seed: string; replayHash: string } {
     const duelId = cycle.duelId ?? `streaming-${cycle.cycleId}`;
     const fightStartedAt = cycle.fightStartTime ?? cycle.cycleStartTime;
-    const duelSeedHex = crypto
-      .createHash("sha256")
-      .update(`${duelId}-${fightStartedAt}`)
-      .digest("hex")
-      .slice(0, 16);
-    const seed = BigInt(`0x${duelSeedHex}`).toString();
-    const replayHash = crypto
-      .createHash("sha256")
-      .update(
-        JSON.stringify({
-          duelId,
-          cycleId: cycle.cycleId,
-          winnerId,
-          loserId,
-          winReason,
-          fightStartedAt,
-          finishedAt,
-          agent1Id: cycle.agent1?.characterId ?? null,
-          agent2Id: cycle.agent2?.characterId ?? null,
-          damageAgent1: cycle.agent1?.damageDealtThisFight ?? 0,
-          damageAgent2: cycle.agent2?.damageDealtThisFight ?? 0,
-        }),
-      )
-      .digest("hex");
-    return { seed, replayHash };
+    return buildCompetitiveTerminalProof({
+      duelId,
+      cycleId: cycle.cycleId,
+      winnerId,
+      loserId,
+      winReason,
+      fightStartedAt,
+      finishedAt,
+      agent1Id: cycle.agent1?.characterId ?? null,
+      agent2Id: cycle.agent2?.characterId ?? null,
+      damageAgent1: cycle.agent1?.damageDealtThisFight ?? 0,
+      damageAgent2: cycle.agent2?.damageDealtThisFight ?? 0,
+    });
   }
 
   /**
@@ -3603,6 +5027,7 @@ export class StreamingDuelScheduler {
       replayHash: string;
       persisted: boolean;
     },
+    terminalAtOverride?: number,
   ): void {
     if (!this.currentCycle) return;
 
@@ -3612,6 +5037,59 @@ export class StreamingDuelScheduler {
       this.currentCycle.phase !== "COUNTDOWN"
     ) {
       return;
+    }
+
+    if (this.hasPendingDamageForCurrentCycle()) {
+      const deferred: DamageFencedResolution = {
+        cycleId: this.currentCycle.cycleId,
+        winnerId,
+        loserId,
+        winReason,
+        ...(terminalAtOverride !== undefined ? { terminalAtOverride } : {}),
+        // A non-persisted proof was derived before every already-started hit
+        // settled and is therefore stale by construction. Only the terminal
+        // identity co-committed by the damage authority may cross this fence.
+        ...(terminalState?.persisted ? { terminalState } : {}),
+      };
+      const existing = this.damageFencedResolution;
+      if (
+        existing &&
+        (existing.cycleId !== deferred.cycleId ||
+          existing.winnerId !== deferred.winnerId ||
+          existing.loserId !== deferred.loserId ||
+          existing.winReason !== deferred.winReason ||
+          existing.terminalAtOverride !== deferred.terminalAtOverride)
+      ) {
+        Logger.error(
+          "StreamingDuelScheduler",
+          "Conflicting resolution arrived while exact damage commits were pending",
+        );
+        return;
+      }
+      if (
+        existing?.terminalState?.persisted &&
+        deferred.terminalState?.persisted &&
+        JSON.stringify(existing.terminalState) !==
+          JSON.stringify(deferred.terminalState)
+      ) {
+        Logger.error(
+          "StreamingDuelScheduler",
+          "Conflicting persisted terminal receipts arrived while exact damage commits were pending",
+        );
+        return;
+      }
+      // ENTITY_DEATH is emitted before COMBAT_DAMAGE_DEALT. When the death
+      // microtask reaches us first it contributes the sporting result only;
+      // the later atomic damage receipt upgrades that deferred result with the
+      // exact already-persisted seed/replay identity. The reverse event order
+      // retains the same receipt instead of downgrading it to a fresh proof.
+      this.damageFencedResolution = deferred.terminalState
+        ? deferred
+        : (existing ?? deferred);
+      return;
+    }
+    if (this.damageFencedResolution?.cycleId === this.currentCycle.cycleId) {
+      this.damageFencedResolution = null;
     }
 
     // Stop fast fight broadcast (#11)
@@ -3635,7 +5113,7 @@ export class StreamingDuelScheduler {
     const proposedTerminal =
       terminalState ??
       (() => {
-        const terminalAt = Date.now();
+        const terminalAt = terminalAtOverride ?? Date.now();
         const proof = this.buildOracleProof(
           this.currentCycle!,
           winnerId,
@@ -3741,10 +5219,18 @@ export class StreamingDuelScheduler {
         this.matchmaking.updateDrawStats(
           agent1.characterId,
           agent2.characterId,
+          {
+            // The durable terminal transaction already applied this outcome.
+            // Keep the post-commit scheduler edge memory-only.
+            persistToDatabase:
+              !this.currentCycle.competitiveSnapshot?.persisted,
+          },
         );
       }
     } else {
-      this.matchmaking.updateStats(winnerId!, loserId!);
+      this.matchmaking.updateStats(winnerId!, loserId!, {
+        persistToDatabase: !this.currentCycle.competitiveSnapshot?.persisted,
+      });
     }
 
     // Get winner/loser names
@@ -4049,8 +5535,48 @@ export class StreamingDuelScheduler {
     terminalPersisted = false,
     cycleOverride?: StreamingDuelCycle,
   ): Promise<void> {
-    Logger.warn("StreamingDuelScheduler", `Aborting cycle to IDLE: ${reason}`);
     const cycleSnapshot = cycleOverride ?? this.currentCycle;
+    if (
+      !this.isDestroyed &&
+      cycleSnapshot?.phase === "FIGHTING" &&
+      this.currentCycle?.cycleId === cycleSnapshot.cycleId &&
+      this.hasPendingDamageForCurrentCycle()
+    ) {
+      const existing = this.damageFencedAbort;
+      if (existing) {
+        if (
+          existing.cycleId !== cycleSnapshot.cycleId ||
+          existing.reason !== reason ||
+          existing.occurredAtOverride !== occurredAtOverride ||
+          existing.terminalPersisted !== terminalPersisted
+        ) {
+          Logger.error(
+            "StreamingDuelScheduler",
+            "Conflicting cancellation arrived while exact damage commits were pending",
+          );
+        }
+        return existing.promise;
+      }
+      let resolve!: () => void;
+      let reject!: (error: unknown) => void;
+      const promise = new Promise<void>((resolvePromise, rejectPromise) => {
+        resolve = resolvePromise;
+        reject = rejectPromise;
+      });
+      this.damageFencedAbort = {
+        cycleId: cycleSnapshot.cycleId,
+        reason,
+        ...(occurredAtOverride !== undefined ? { occurredAtOverride } : {}),
+        terminalPersisted,
+        ...(cycleOverride ? { cycleOverride } : {}),
+        promise,
+        resolve,
+        reject,
+      };
+      return promise;
+    }
+
+    Logger.warn("StreamingDuelScheduler", `Aborting cycle to IDLE: ${reason}`);
     let cleanup: (() => Promise<void>) | null = null;
     let initialCleanup: Promise<void> | null = null;
 
@@ -4328,6 +5854,16 @@ export class StreamingDuelScheduler {
       sourceId?: string;
       attackerId?: string;
       damage?: number;
+      publicActionObservation?: StreamingDuelDamageObservationContext;
+      competitiveTerminal?: {
+        outcome: "win";
+        winnerId: string;
+        loserId: string;
+        winReason: "kill";
+        terminalAt: number;
+        seed: string;
+        replayHash: string;
+      };
     };
 
     const attackerId = data.attackerId || data.sourceId;
@@ -4376,6 +5912,14 @@ export class StreamingDuelScheduler {
     if (recordedDuelHit && this.currentCycle.firstHitAt == null) {
       this.currentCycle.firstHitAt = now;
     }
+    if (recordedDuelHit) {
+      this.orchestrator.recordAuthoritativeDamageObservation(
+        attackerId,
+        targetId,
+        damage,
+        data.publicActionObservation,
+      );
+    }
 
     // Sync target HP immediately so the next broadcast reflects current health
     // (don't wait for the next tickFighting → updateContestantHp cycle).
@@ -4408,6 +5952,35 @@ export class StreamingDuelScheduler {
           }
         }
       }
+    }
+
+    const terminal = data.competitiveTerminal;
+    if (terminal) {
+      const observation = data.publicActionObservation;
+      if (
+        !recordedDuelHit ||
+        terminal.outcome !== "win" ||
+        terminal.winnerId !== attackerId ||
+        terminal.loserId !== targetId ||
+        terminal.winReason !== "kill" ||
+        !observation ||
+        terminal.terminalAt !== observation.observedAt ||
+        !/^(0|[1-9][0-9]{0,19})$/.test(terminal.seed) ||
+        !/^[0-9a-f]{64}$/.test(terminal.replayHash)
+      ) {
+        Logger.error(
+          "StreamingDuelScheduler",
+          "Rejected mismatched atomic competitive terminal receipt",
+        );
+        this.abortCycleToIdle("damage_terminal_receipt_invalid");
+        return;
+      }
+      this.handleResolution(attackerId, targetId, "kill", {
+        terminalAt: terminal.terminalAt,
+        seed: terminal.seed,
+        replayHash: terminal.replayHash,
+        persisted: true,
+      });
     }
   }
 
@@ -4455,6 +6028,11 @@ export class StreamingDuelScheduler {
     }
     if (data.entityId) {
       this.camera.markAgentInteresting(data.entityId, 1.2, now);
+      // An on-deck preparation is private and pre-market. Death therefore
+      // cancels it as unavailable rather than manufacturing a sporting result.
+      // The current-cycle path below still runs when this agent is also an
+      // active contestant.
+      this.cancelUnavailableOnDeckContestant(data.entityId);
     }
 
     // Handle deaths during both FIGHTING and COUNTDOWN phases (Fix F).
@@ -4602,12 +6180,7 @@ export class StreamingDuelScheduler {
     // The scheduler retains raw cancellation reasons for persistence and
     // operator telemetry. Spectator sockets receive the same viewer-safe
     // vocabulary as public REST/SSE so every rendered channel agrees.
-    const publicState = state.terminalNotice
-      ? {
-          ...state,
-          terminalNotice: sanitizePublicTerminalNotice(state.terminalNotice),
-        }
-      : state;
+    const publicState = sanitizePublicStreamingState(state);
     // Broadcast streaming state only to spectator sockets (interest management).
     // Regular gameplay clients don't need streaming duel updates every second.
     const network = this.world.network as NetworkWithSend | undefined;
@@ -4690,17 +6263,16 @@ export class StreamingDuelScheduler {
       // Update idle cycle object in place (zero allocation)
       this._idleCycleObject.cycleStartTime = now;
       this._idleCycleObject.phaseStartTime = now;
-      this._idleCycleObject.phaseEndTime = now;
       this._idleCycleObject.phaseVersion = 0;
       this._idleCycleObject.agent1 = this._cachedAgent1;
       this._idleCycleObject.agent2 = this._cachedAgent2;
 
       // Build camera IDs without allocation if possible
       const cameraId1 = this._cachedAgent1
-        ? (this._cachedAgent1 as { id?: string }).id
+        ? ((this._cachedAgent1 as { id?: string }).id ?? null)
         : null;
       const cameraId2 = this._cachedAgent2
-        ? (this._cachedAgent2 as { id?: string }).id
+        ? ((this._cachedAgent2 as { id?: string }).id ?? null)
         : null;
 
       // Use inline array to avoid allocation when possible
@@ -4711,11 +6283,24 @@ export class StreamingDuelScheduler {
       const idleCameraTarget =
         this.camera.getIdleCameraTargetSnapshot(preferredCameraIds);
 
+      const publicPreparation = this.getPublicPreparationSummary(
+        now,
+        cameraId1,
+        cameraId2,
+      );
+      const preparationDeadline = publicPreparation?.expiresAt ?? now;
+      this._idleCycleObject.phaseEndTime = preparationDeadline;
+      this._idleCycleObject.timeRemaining = Math.max(
+        0,
+        preparationDeadline - now,
+      );
+
       // Update return object in place
       this._streamingStateObject.cycle = this._idleCycleObject;
       this._streamingStateObject.leaderboard = leaderboard;
       this._streamingStateObject.cameraTarget = idleCameraTarget;
       this._streamingStateObject.terminalNotice = this._terminalNotice;
+      this._streamingStateObject.preparation = publicPreparation;
 
       return this._streamingStateObject;
     }
@@ -4789,14 +6374,206 @@ export class StreamingDuelScheduler {
     this._activeCycleObject.winReason = this.currentCycle.winReason;
     this._activeCycleObject.seed = this.currentCycle.seed;
     this._activeCycleObject.replayHash = this.currentCycle.replayHash;
+    this._activeCycleObject.actionObservations =
+      this.orchestrator.getPublicActionObservations(currentCycleId);
 
     // Update return object in place
     this._streamingStateObject.cycle = this._activeCycleObject;
     this._streamingStateObject.leaderboard = leaderboard;
     this._streamingStateObject.cameraTarget = cameraTarget;
     this._streamingStateObject.terminalNotice = null;
+    this._streamingStateObject.preparation = null;
 
     return this._streamingStateObject;
+  }
+
+  private getPublicPreparationSummary(
+    now: number,
+    agent1Id: string | null,
+    agent2Id: string | null,
+  ): StreamingDuelPreparationSummary | null {
+    const preparation = this.onDeckPreparation;
+    if (
+      !preparation ||
+      preparation.expiresAt <= now ||
+      (preparation.status !== "preparing" && preparation.status !== "ready") ||
+      preparation.agent1Id !== agent1Id ||
+      preparation.agent2Id !== agent2Id
+    ) {
+      return null;
+    }
+
+    return parseStreamingDuelPreparationSummary({
+      schemaVersion: STREAMING_DUEL_PREPARATION_SUMMARY_SCHEMA_VERSION,
+      status: preparation.status,
+      selectedAt: preparation.selectedAt,
+      expiresAt: preparation.expiresAt,
+      agent1: {
+        id: preparation.agent1Id,
+        ready: preparation.agent1ReadyAt !== null,
+        activity: this.getPublicPreparationActivity(
+          preparation.preparationId,
+          preparation.agent1Id,
+        ),
+        mode: this.getPublicPreparationMode(
+          preparation.preparationId,
+          preparation.agent1Id,
+        ),
+        activityTrail: this.getPublicPreparationActivityTrail(
+          preparation.preparationId,
+          preparation.agent1Id,
+        ),
+      },
+      agent2: {
+        id: preparation.agent2Id,
+        ready: preparation.agent2ReadyAt !== null,
+        activity: this.getPublicPreparationActivity(
+          preparation.preparationId,
+          preparation.agent2Id,
+        ),
+        mode: this.getPublicPreparationMode(
+          preparation.preparationId,
+          preparation.agent2Id,
+        ),
+        activityTrail: this.getPublicPreparationActivityTrail(
+          preparation.preparationId,
+          preparation.agent2Id,
+        ),
+      },
+    });
+  }
+
+  private getPublicPreparationActivity(
+    preparationId: string,
+    agentId: string,
+  ): StreamingDuelPublicPreparationActivity | null {
+    if (this.publicPreparationActivities?.preparationId !== preparationId) {
+      return null;
+    }
+    return (
+      this.publicPreparationActivities.agents.get(agentId)?.activity ?? null
+    );
+  }
+
+  private clearPublicPreparationActivities(preparationId: string): void {
+    if (this.publicPreparationActivities?.preparationId === preparationId) {
+      this.publicPreparationActivities = null;
+      this.camera.clearIdlePreparationActivityCut();
+    }
+  }
+
+  private getPublicPreparationMode(
+    preparationId: string,
+    agentId: string,
+  ): StreamingDuelPublicPreparationMode | null {
+    if (this.publicPreparationActivities?.preparationId !== preparationId) {
+      return null;
+    }
+    return this.publicPreparationActivities.agents.get(agentId)?.mode ?? null;
+  }
+
+  private getPublicPreparationActivityTrail(
+    preparationId: string,
+    agentId: string,
+  ): readonly StreamingDuelPublicPreparationActivity[] {
+    if (this.publicPreparationActivities?.preparationId !== preparationId) {
+      return [];
+    }
+    return (
+      this.publicPreparationActivities.agents.get(agentId)?.activityTrail ?? []
+    );
+  }
+
+  /**
+   * Rebuild the bounded public recap before re-announcing a durable private
+   * preparation. Historical replay must not manufacture a fresh camera cut.
+   */
+  private async hydratePublicPreparationActivities(
+    preparation: DuelPreparationSnapshot,
+  ): Promise<void> {
+    const store = this.preparationStore;
+    const records =
+      store && typeof store.listRecentPublicActivities === "function"
+        ? await store.listRecentPublicActivities(preparation.preparationId)
+        : [];
+    this.publicPreparationActivities = {
+      preparationId: preparation.preparationId,
+      agents: new Map(),
+    };
+    for (const record of records) {
+      if (
+        record.preparationId !== preparation.preparationId ||
+        (record.agentId !== preparation.agent1Id &&
+          record.agentId !== preparation.agent2Id)
+      ) {
+        throw new Error("public_preparation_activity_history_mismatch");
+      }
+      this.handlePreparationPublicActivity(record, false);
+    }
+  }
+
+  private handlePreparationPublicActivity(
+    payload: unknown,
+    considerCameraCut = true,
+  ): void {
+    if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+      return;
+    }
+    const data = payload as Record<string, unknown>;
+    const keys = Object.keys(data).sort();
+    if (
+      keys.length !== PUBLIC_PREPARATION_ACTIVITY_EVENT_KEYS.length ||
+      !PUBLIC_PREPARATION_ACTIVITY_EVENT_KEYS.every(
+        (key, index) => keys[index] === key,
+      ) ||
+      typeof data.preparationId !== "string" ||
+      typeof data.agentId !== "string" ||
+      typeof data.activity !== "string" ||
+      !PUBLIC_PREPARATION_ACTIVITIES.has(data.activity) ||
+      typeof data.mode !== "string" ||
+      !PUBLIC_PREPARATION_MODES.has(data.mode) ||
+      ((data.activity === "planning" || data.activity === "reassessing") &&
+        data.mode !== "working") ||
+      !Number.isSafeInteger(data.occurredAt) ||
+      Number(data.occurredAt) < 0 ||
+      !Number.isSafeInteger(data.revision) ||
+      Number(data.revision) < 1
+    ) {
+      return;
+    }
+    const preparation = this.onDeckPreparation;
+    const activities = this.publicPreparationActivities;
+    if (
+      !preparation ||
+      !activities ||
+      activities.preparationId !== preparation.preparationId ||
+      data.preparationId !== preparation.preparationId ||
+      (data.agentId !== preparation.agent1Id &&
+        data.agentId !== preparation.agent2Id)
+    ) {
+      return;
+    }
+    const previous = activities.agents.get(data.agentId);
+    if (previous && previous.revision >= Number(data.revision)) return;
+    const activity = data.activity as StreamingDuelPublicPreparationActivity;
+    const mode = data.mode as StreamingDuelPublicPreparationMode;
+    const priorTrail = previous?.activityTrail ?? [];
+    const isNewActivity = priorTrail.at(-1) !== activity;
+    const isNewPresentation = isNewActivity || previous?.mode !== mode;
+    const activityTrail = !isNewActivity
+      ? priorTrail
+      : [...priorTrail, activity].slice(
+          -STREAMING_DUEL_PUBLIC_PREPARATION_ACTIVITY_TRAIL_LIMIT,
+        );
+    activities.agents.set(data.agentId, {
+      activity,
+      mode,
+      activityTrail,
+      revision: Number(data.revision),
+    });
+    if (considerCameraCut && isNewPresentation && !this.currentCycle) {
+      this.camera.considerIdlePreparationActivityCut(data.agentId, Date.now());
+    }
   }
 
   /**
@@ -4830,7 +6607,18 @@ export class StreamingDuelScheduler {
     preview.availableCombatStyles = [];
     preview.combatLoadouts = {};
     preview.loadoutFrozen = false;
+    preview.strategySummary = null;
     return preview;
+  }
+
+  private getPublicStrategySummary(
+    agentId: string,
+  ): StreamingDuelStrategySummary | null {
+    return toPublicStrategySummary(
+      this.currentCycle?.competitiveSnapshot?.contestants.find(
+        (contestant) => contestant.agentId === agentId,
+      ),
+    );
   }
 
   /**
@@ -4864,6 +6652,9 @@ export class StreamingDuelScheduler {
       existing.availableCombatStyles = [...agent.availableCombatStyles];
       existing.combatLoadouts = cloneCombatLoadouts(agent.combatLoadouts);
       existing.loadoutFrozen = agent.loadoutFrozen;
+      existing.strategySummary = this.getPublicStrategySummary(
+        agent.characterId,
+      );
       existing.prayerPointUnits = agent.prayerPointUnits;
       existing.prayerPoints = agent.prayerPoints;
       existing.prayerMaxPoints = agent.prayerMaxPoints;
@@ -5013,6 +6804,7 @@ export class StreamingDuelScheduler {
       availableCombatStyles: [...agent.availableCombatStyles],
       combatLoadouts: cloneCombatLoadouts(agent.combatLoadouts),
       loadoutFrozen: agent.loadoutFrozen,
+      strategySummary: this.getPublicStrategySummary(agent.characterId),
       prayerPointUnits: agent.prayerPointUnits,
       prayerPoints: agent.prayerPoints,
       prayerMaxPoints: agent.prayerMaxPoints,
@@ -5191,6 +6983,7 @@ export class StreamingDuelScheduler {
     mode: "spawned" | "existing";
     opponent: { characterId: string; name: string };
   }> {
+    assertLocalDiagnosticContestantAuthority(process.env);
     const targetEntity = this.world.entities.get(params.targetCharacterId);
     if (!targetEntity) {
       throw new Error(`Target ${params.targetCharacterId} is not in the world`);
@@ -5206,6 +6999,9 @@ export class StreamingDuelScheduler {
     let opponentName: string;
 
     if (params.spawnOpponent) {
+      const diagnosticAvatarUrl = resolveStreamingDuelDiagnosticAvatarUrl(
+        process.env,
+      );
       opponentId = `sparbot-${uuidv4()}`;
       const accountId = `sparbot-account-${opponentId.slice(-24)}`;
       opponentName =
@@ -5226,7 +7022,7 @@ export class StreamingDuelScheduler {
         characterConfig: {
           name: opponentName,
           settings: {
-            avatar: CANONICAL_DUEL_AVATAR_URL,
+            avatar: diagnosticAvatarUrl,
           },
         },
         autoStart: true,
@@ -5260,12 +7056,8 @@ export class StreamingDuelScheduler {
       opponentName = data.name ?? opponentId;
     }
 
-    this.matchmaking.registerAgent(params.targetCharacterId, {
-      bypassStreamingDuelOptOut: true,
-    });
-    this.matchmaking.registerAgent(opponentId, {
-      bypassStreamingDuelOptOut: true,
-    });
+    this.registerDiagnosticAgent(params.targetCharacterId);
+    this.registerDiagnosticAgent(opponentId);
 
     this.matchmaking.nextDuelPair = {
       agent1Id: params.targetCharacterId,
@@ -5506,6 +7298,13 @@ export class StreamingDuelScheduler {
         rangedLevel: skills.rangedLevel,
         magicLevel: skills.magicLevel,
         prayerLevel: skills.prayerLevel,
+        attackXp: sparbotSkillXpForLevel(skills.attackLevel),
+        strengthXp: sparbotSkillXpForLevel(skills.strengthLevel),
+        defenseXp: sparbotSkillXpForLevel(skills.defenseLevel),
+        constitutionXp: sparbotSkillXpForLevel(skills.constitutionLevel),
+        rangedXp: sparbotSkillXpForLevel(skills.rangedLevel),
+        magicXp: sparbotSkillXpForLevel(skills.magicLevel),
+        prayerXp: sparbotSkillXpForLevel(skills.prayerLevel),
         health: skills.constitutionLevel,
         maxHealth: skills.constitutionLevel,
         prayerPoints: pp,
@@ -5588,7 +7387,7 @@ export class StreamingDuelScheduler {
     for (const [skillName, level] of Object.entries(levels)) {
       nextSkills[skillName] = {
         level,
-        xp: previousSkills[skillName]?.xp ?? 0,
+        xp: sparbotSkillXpForLevel(level),
       };
     }
 
@@ -5672,6 +7471,7 @@ export class StreamingDuelScheduler {
     multiStyle = false,
     profileSeed?: number,
   ): Promise<Array<{ characterId: string; name: string; tier: string }>> {
+    assertLocalDiagnosticContestantAuthority(process.env);
     const { getAgentManager } = await import("../../eliza/index.js");
     const agentManager = getAgentManager();
     if (!agentManager) {
@@ -5696,6 +7496,9 @@ export class StreamingDuelScheduler {
         "A sparbot profile seed requires an unsigned 32-bit value inside the explicit loopback no-money diagnostic boundary",
       );
     }
+    const diagnosticAvatarUrl = resolveStreamingDuelDiagnosticAvatarUrl(
+      process.env,
+    );
 
     const spawned: Array<{ characterId: string; name: string; tier: string }> =
       [];
@@ -5731,7 +7534,7 @@ export class StreamingDuelScheduler {
         enableLlm: false,
         characterConfig: {
           name,
-          settings: { avatar: CANONICAL_DUEL_AVATAR_URL },
+          settings: { avatar: diagnosticAvatarUrl },
         },
         autoStart: true,
       });
@@ -5756,14 +7559,406 @@ export class StreamingDuelScheduler {
         multiStyle,
       });
 
-      this.matchmaking.registerAgent(characterId, {
-        bypassStreamingDuelOptOut: true,
-      });
+      this.registerDiagnosticAgent(characterId);
 
       spawned.push({ characterId, name, tier });
     }
 
     return spawned;
+  }
+
+  /**
+   * Start a production-shaped, two-agent harpoon preparation scene for the
+   * supervised stream. This deliberately uses the real inventory, resource,
+   * skill, terrain, replication, and camera paths. It is unavailable unless
+   * the server is inside the explicit loopback/no-money diagnostic boundary
+   * and operator maintenance is holding the duel scheduler.
+   */
+  private async ensureDiagnosticPreparationSession(
+    characterIds: readonly [string, string],
+  ): Promise<DuelPreparationSnapshot> {
+    const store = this.preparationStore;
+    const fencingToken = this.preparationFencingToken;
+    if (!store || !fencingToken || this.preparationDurationMs === null) {
+      throw new Error(
+        "Harpoon preparation diagnostics require durable preparation authority; configure STREAMING_DUEL_PREPARATION_MS and the fenced PostgreSQL scheduler",
+      );
+    }
+
+    if (!this.competitiveRecoveryChecked) {
+      const recovery = await this.recoverFrozenCompetitiveSnapshot(Date.now());
+      if (recovery !== "none") {
+        throw new Error(
+          `Harpoon preparation diagnostics cannot supersede competitive recovery (${recovery})`,
+        );
+      }
+      this.competitiveRecoveryChecked = true;
+    }
+
+    const expired = await store.expire();
+    if (
+      this.onDeckPreparation &&
+      expired.some(
+        (entry) =>
+          entry.preparationId === this.onDeckPreparation?.preparationId,
+      )
+    ) {
+      const expiredId = this.onDeckPreparation.preparationId;
+      this.onDeckPreparation = null;
+      this.onDeckPreparationPairKey = null;
+      this.clearPublicPreparationActivities(expiredId);
+      this.world.emit("duel:preparation:expired", {
+        preparationId: expiredId,
+        occurredAt: Date.now(),
+      });
+    }
+
+    let active = this.onDeckPreparation ?? (await store.getActive());
+    if (active) {
+      const requested = new Set(characterIds);
+      const samePair =
+        requested.size === 2 &&
+        requested.has(active.agent1Id) &&
+        requested.has(active.agent2Id);
+      if (!samePair) {
+        throw new Error(
+          "Harpoon preparation diagnostics cannot supersede another active preparation",
+        );
+      }
+      this.matchmaking.nextDuelPair = {
+        agent1Id: active.agent1Id,
+        agent2Id: active.agent2Id,
+        selectedAt: active.selectedAt,
+      };
+      this.onDeckPreparation = active;
+      this.onDeckPreparationPairKey = `${active.agent1Id}\u0000${active.agent2Id}`;
+      if (
+        this.publicPreparationActivities?.preparationId !== active.preparationId
+      ) {
+        active = await this.emitOnDeckPreparationSelected(active);
+        this.onDeckPreparation = active;
+      }
+      return active;
+    }
+
+    const pair = {
+      agent1Id: characterIds[0],
+      agent2Id: characterIds[1],
+      selectedAt: Date.now(),
+    };
+    this.matchmaking.nextDuelPair = pair;
+    await this.beginOnDeckPreparation(pair);
+    active = this.onDeckPreparation;
+    if (
+      !active ||
+      active.agent1Id !== pair.agent1Id ||
+      active.agent2Id !== pair.agent2Id ||
+      (active.status !== "preparing" && active.status !== "ready")
+    ) {
+      throw new Error(
+        "Harpoon preparation diagnostics could not establish the authoritative preparation session",
+      );
+    }
+    return active;
+  }
+
+  private publishDiagnosticPreparationActivity(
+    preparationId: string,
+    agentId: string,
+    activity: StreamingDuelPublicPreparationActivity,
+    mode: StreamingDuelPublicPreparationMode = "working",
+  ): void {
+    const preparation = this.onDeckPreparation;
+    const activities = this.publicPreparationActivities;
+    if (
+      !preparation ||
+      preparation.preparationId !== preparationId ||
+      (preparation.agent1Id !== agentId && preparation.agent2Id !== agentId) ||
+      !activities ||
+      activities.preparationId !== preparationId
+    ) {
+      throw new Error(
+        "Harpoon preparation activity lost its authoritative preparation session",
+      );
+    }
+    const revision = (activities.agents.get(agentId)?.revision ?? 0) + 1;
+    const payload = {
+      preparationId,
+      agentId,
+      activity,
+      mode,
+      occurredAt: Date.now(),
+      revision,
+    };
+    // Accept through the same strict validator synchronously before notifying
+    // other server consumers. The scheduler's ordinary world listener sees the
+    // duplicate revision and ignores it, so publication is deterministic even
+    // when a test harness or shutdown boundary has no listener installed.
+    this.handlePreparationPublicActivity(payload);
+    this.world.emit("duel:preparation:public_activity", payload);
+    const published = activities.agents.get(agentId);
+    if (
+      published?.revision !== revision ||
+      published.activity !== activity ||
+      published.mode !== mode
+    ) {
+      throw new Error(
+        "Harpoon preparation activity was not accepted by the revision-fenced public contract",
+      );
+    }
+  }
+
+  async startDiagnosticHarpoonPreparation(
+    requestedCharacterIds?: string[],
+  ): Promise<{
+    publicPreparation: StreamingDuelPreparationSummary;
+    resource: {
+      id: string;
+      variant: "fishing_spot_harpoon";
+      position: DiagnosticPreparationPosition;
+    };
+    agents: Array<{
+      characterId: string;
+      position: DiagnosticPreparationPosition;
+      fishingLevel: number;
+      harpoonQuantity: number;
+      gatheringToolPresentation: unknown;
+      fishingInteractionPresentation: unknown;
+    }>;
+  }> {
+    if (!isLocalDiagnosticDuelRuntime(process.env)) {
+      throw new Error(
+        "Harpoon preparation diagnostics require the explicit loopback no-money boundary",
+      );
+    }
+    if (process.env.STREAMING_DUEL_MAINTENANCE_MODE !== "true") {
+      throw new Error(
+        "Harpoon preparation diagnostics require operator-held duel maintenance",
+      );
+    }
+    if (this.currentCycle) {
+      throw new Error(
+        "Harpoon preparation diagnostics cannot start during an active duel cycle",
+      );
+    }
+
+    const characterIds =
+      requestedCharacterIds == null
+        ? [...this.standaloneSparbotIds].slice(0, 2)
+        : requestedCharacterIds.map((id) => id.trim()).filter(Boolean);
+    if (characterIds.length !== 2 || new Set(characterIds).size !== 2) {
+      throw new Error(
+        "Harpoon preparation diagnostics require exactly two distinct sparbots",
+      );
+    }
+    for (const characterId of characterIds) {
+      if (!this.standaloneSparbotIds.has(characterId)) {
+        throw new Error(
+          `Harpoon preparation contestant is not a standalone sparbot: ${characterId}`,
+        );
+      }
+    }
+
+    const resourceSystem = this.world.getSystem("resource") as {
+      getAvailableResourceByVariant?: (variant: string) =>
+        | {
+            id: string;
+            position: { x: number; y: number; z: number };
+          }
+        | undefined;
+    } | null;
+    const resource = resourceSystem?.getAvailableResourceByVariant?.(
+      "fishing_spot_harpoon",
+    );
+    const resourcePosition = this.orchestrator.normalizePosition(
+      resource?.position,
+    );
+    if (!resource || !resourcePosition) {
+      throw new Error(
+        "No available live fishing_spot_harpoon resource is registered",
+      );
+    }
+
+    const terrain = this.world.getSystem(
+      "terrain",
+    ) as DiagnosticPreparationTerrain | null;
+    if (!terrain) {
+      throw new Error("Harpoon preparation requires the terrain system");
+    }
+    const positions = selectDiagnosticHarpoonPreparationPositions(
+      resourcePosition,
+      terrain,
+    );
+    const inventorySystem = this.world.getSystem("inventory") as {
+      getInventory?: (playerId: string) => {
+        items?: Array<{ itemId?: string; quantity?: number }>;
+      };
+      addItemDirect?: (
+        playerId: string,
+        item: { itemId: string; quantity: number },
+      ) => Promise<boolean>;
+    } | null;
+    if (
+      typeof inventorySystem?.getInventory !== "function" ||
+      typeof inventorySystem.addItemDirect !== "function"
+    ) {
+      throw new Error("Harpoon preparation requires inventory authority");
+    }
+
+    const diagnosticPreparation = await this.ensureDiagnosticPreparationSession(
+      characterIds as [string, string],
+    );
+    const resultAgents: Array<{
+      characterId: string;
+      position: DiagnosticPreparationPosition;
+      fishingLevel: number;
+      harpoonQuantity: number;
+      gatheringToolPresentation: unknown;
+      fishingInteractionPresentation: unknown;
+    }> = [];
+    try {
+      for (let index = 0; index < characterIds.length; index += 1) {
+        const characterId = characterIds[index];
+        const position = positions[index];
+        if (!characterId || !position) continue;
+        const entity = this.world.entities.get(characterId) as {
+          data?: {
+            skills?: Record<string, { level: number; xp: number }>;
+            gatheringToolPresentation?: unknown;
+            fishingInteractionPresentation?: unknown;
+          };
+          getComponent?: (name: string) => {
+            data?: Record<string, unknown>;
+          } | null;
+          updateFromPlayerData?: (player: {
+            skills: Record<string, { level: number; xp: number }>;
+          }) => void;
+          markNetworkDirty?: () => void;
+        } | null;
+        if (!entity?.data) {
+          throw new Error(
+            `Harpoon preparation contestant has no live entity: ${characterId}`,
+          );
+        }
+
+        const nextSkills = {
+          ...(entity.data.skills ?? {}),
+          fishing: {
+            level: 50,
+            xp: Math.max(entity.data.skills?.fishing?.xp ?? 0, 101_333),
+          },
+        };
+        entity.data.skills = nextSkills;
+        entity.updateFromPlayerData?.({ skills: nextSkills });
+        const statsComponent = entity.getComponent?.("stats");
+        if (statsComponent?.data) {
+          const existingFishing = statsComponent.data.fishing;
+          statsComponent.data.fishing = {
+            ...(typeof existingFishing === "object" && existingFishing !== null
+              ? existingFishing
+              : {}),
+            ...nextSkills.fishing,
+          };
+        }
+        entity.markNetworkDirty?.();
+        this.world.emit(EventType.SKILLS_UPDATED, {
+          playerId: characterId,
+          skills: nextSkills,
+        });
+        this.world.emit(EventType.ENTITY_MODIFIED, {
+          id: characterId,
+          changes: { skills: nextSkills },
+        });
+
+        const inventoryBefore = inventorySystem.getInventory(characterId);
+        const existingHarpoonQuantity = (inventoryBefore?.items ?? []).reduce(
+          (total, item) =>
+            item.itemId === "harpoon" ? total + (item.quantity ?? 0) : total,
+          0,
+        );
+        if (existingHarpoonQuantity < 1) {
+          const added = await inventorySystem.addItemDirect(characterId, {
+            itemId: "harpoon",
+            quantity: 1,
+          });
+          if (!added) {
+            throw new Error(
+              `Could not provision the diagnostic harpoon for ${characterId}`,
+            );
+          }
+        }
+
+        this.orchestrator.teleportPlayer(
+          characterId,
+          position,
+          resourcePosition,
+          true,
+        );
+        this.world.emit(EventType.RESOURCE_GATHER, {
+          playerId: characterId,
+          resourceId: resource.id,
+          playerPosition: {
+            x: position[0],
+            y: position[1],
+            z: position[2],
+          },
+        });
+
+        const inventoryAfter = inventorySystem.getInventory(characterId);
+        const harpoonQuantity = (inventoryAfter?.items ?? []).reduce(
+          (total, item) =>
+            item.itemId === "harpoon" ? total + (item.quantity ?? 0) : total,
+          0,
+        );
+        if (
+          entity.data.gatheringToolPresentation == null ||
+          entity.data.fishingInteractionPresentation == null
+        ) {
+          throw new Error(
+            `Live resource authority did not publish harpoon preparation for ${characterId}`,
+          );
+        }
+        this.publishDiagnosticPreparationActivity(
+          diagnosticPreparation.preparationId,
+          characterId,
+          "gathering",
+        );
+        resultAgents.push({
+          characterId,
+          position,
+          fishingLevel: nextSkills.fishing.level,
+          harpoonQuantity,
+          gatheringToolPresentation: entity.data.gatheringToolPresentation,
+          fishingInteractionPresentation:
+            entity.data.fishingInteractionPresentation,
+        });
+      }
+    } catch (error) {
+      await this.cancelOnDeckPreparation("diagnostic_preparation_failed");
+      throw error;
+    }
+
+    const publicPreparation = this.getPublicPreparationSummary(
+      Date.now(),
+      diagnosticPreparation.agent1Id,
+      diagnosticPreparation.agent2Id,
+    );
+    if (!publicPreparation) {
+      await this.cancelOnDeckPreparation("diagnostic_preparation_failed");
+      throw new Error(
+        "Harpoon preparation diagnostics did not publish the authoritative public preparation summary",
+      );
+    }
+    this.broadcastState();
+    return {
+      publicPreparation,
+      resource: {
+        id: resource.id,
+        variant: "fishing_spot_harpoon",
+        position: resourcePosition,
+      },
+      agents: resultAgents,
+    };
   }
 
   /** Live bounded diagnostics for the authoritative arena combat controllers. */
@@ -5875,6 +8070,7 @@ export async function initStreamingDuelScheduler(
   const scheduler = new StreamingDuelScheduler(world, options);
   streamingSchedulerInstance = scheduler;
   try {
+    await scheduler.primeCompetitiveRecoveryCustodyHolds();
     scheduler.init();
   } catch (error) {
     if (streamingSchedulerInstance === scheduler) {
@@ -5898,7 +8094,12 @@ export async function destroyStreamingDuelScheduler(
   cancellationReason = "scheduler_shutdown",
 ): Promise<void> {
   const scheduler = streamingSchedulerInstance;
-  streamingSchedulerInstance = null;
   scheduler?.destroy(cancellationReason);
   await scheduler?.waitForShutdownCleanup();
+  // Keep the stopped instance reachable until its durable terminal barrier has
+  // emitted. Internal betting listeners need that exact cycle snapshot to
+  // publish the cancellation before shutdown tears down their SSE clients.
+  if (streamingSchedulerInstance === scheduler) {
+    streamingSchedulerInstance = null;
+  }
 }

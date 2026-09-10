@@ -115,6 +115,16 @@ async function runFreezeWorker(): Promise<void> {
       durationMs: 120_000,
       allowedBankActions: DUEL_PREPARATION_BANK_ACTIONS,
     });
+    const hostOwnerId = randomUUID();
+    for (const agentId of [AGENT_1_ID, AGENT_2_ID]) {
+      const lease = await store.claimContestantHostLease({
+        preparationId,
+        agentId,
+        ownerId: hostOwnerId,
+        leaseDurationMs: 60_000,
+      });
+      if (!lease) throw new Error(`host lease rejected for ${agentId}`);
+    }
     await store.markReady({
       preparationId,
       fencingToken: "1",

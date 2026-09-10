@@ -488,6 +488,77 @@ describe("BFSPathfinder", () => {
     });
   });
 
+  describe("Guided long-route search", () => {
+    it("reaches a distant diagonal destination without radial expansion", () => {
+      const start = { x: 0, z: 0 };
+      const end = { x: 100, z: 100 };
+
+      const path = pathfinder.findPathGuided(start, end, () => true, 4000);
+
+      expect(pathfinder.wasLastPathPartial()).toBe(false);
+      expect(pathfinder.getLastIterationsUsed()).toBeLessThanOrEqual(101);
+      expect(path).toHaveLength(100);
+      expect(path[path.length - 1]).toEqual(end);
+      expect(isValidPath(path, start)).toBe(true);
+    });
+
+    it("preserves shortest diagonal-safe routing around an obstruction", () => {
+      const blocked = Array.from({ length: 9 }, (_, index) => ({
+        x: 5,
+        z: index - 4,
+      }));
+      const start = { x: 0, z: 0 };
+      const end = { x: 10, z: 0 };
+      const path = pathfinder.findPathGuided(
+        start,
+        end,
+        createWalkabilityChecker(blocked),
+      );
+
+      expect(pathfinder.wasLastPathPartial()).toBe(false);
+      expect(path[path.length - 1]).toEqual(end);
+      expect(isValidPath(path, start)).toBe(true);
+      expect(
+        path.every((tile) => !(tile.x === 5 && Math.abs(tile.z) <= 4)),
+      ).toBe(true);
+      const breadthFirstPath = new BFSPathfinder().findPath(
+        start,
+        end,
+        createWalkabilityChecker(blocked),
+      );
+      expect(path).toHaveLength(breadthFirstPath.length);
+    });
+
+    it("returns bounded forward progress when its budget is exhausted", () => {
+      const start = { x: 0, z: 0 };
+      const end = { x: 100, z: 0 };
+      const path = pathfinder.findPathGuided(start, end, () => true, 12);
+
+      expect(pathfinder.wasLastPathPartial()).toBe(true);
+      expect(pathfinder.getLastIterationsUsed()).toBeLessThanOrEqual(12);
+      expect(path.length).toBeGreaterThan(0);
+      expect(Math.abs(end.x - path[path.length - 1].x)).toBeLessThan(100);
+    });
+
+    it("reaches the nearest member of a destination set efficiently", () => {
+      const destinations = [
+        { x: 80, z: 80 },
+        { x: 75, z: 80 },
+        { x: 80, z: 75 },
+      ];
+      const path = pathfinder.findPathToAnyGuided(
+        { x: 0, z: 0 },
+        destinations,
+        () => true,
+        4000,
+      );
+
+      expect(pathfinder.wasLastPathPartial()).toBe(false);
+      expect(pathfinder.getLastIterationsUsed()).toBeLessThan(200);
+      expect(destinations).toContainEqual(path[path.length - 1]);
+    });
+  });
+
   describe("Multi-Destination BFS (findPathToAny)", () => {
     it("finds path to nearest destination", () => {
       const start = { x: 0, z: 0 };

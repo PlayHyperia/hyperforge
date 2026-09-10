@@ -52,11 +52,39 @@ type RenderInfo = {
   geometries: number;
 };
 
+type StreamSceneComplexityContributor = {
+  name: string;
+  category: string;
+  type: string;
+  triangles: number;
+  instances: number;
+  visible: boolean;
+};
+
+type StreamSceneComplexitySnapshot = {
+  schemaVersion: 1;
+  capturedAt: number;
+  objectCount: number;
+  visibleObjectCount: number;
+  triangles: number;
+  visibleTriangles: number;
+  categories: Array<{
+    category: string;
+    objectCount: number;
+    visibleObjectCount: number;
+    triangles: number;
+    visibleTriangles: number;
+  }>;
+  topObjects: StreamSceneComplexityContributor[];
+};
+
 type StreamingTelemetryWindow = Window & {
   __HYPERIA_STREAM_RENDERER_HEALTH__?: {
     phase?: string | null;
   } | null;
   __HYPERIA_STREAM_PERFORMANCE__?: StreamingPerformanceSnapshot | null;
+  __HYPERIA_RESET_STREAM_PERFORMANCE__?: () => boolean;
+  __HYPERIA_GET_STREAM_SCENE_COMPLEXITY__?: () => StreamSceneComplexitySnapshot | null;
 };
 
 /**
@@ -147,8 +175,12 @@ export class DevStats extends System {
     this.streamTelemetryEnabled = isStreamingLikeViewport();
     if (this.streamTelemetryEnabled) {
       this.streamTelemetry = new StreamPerformanceTelemetry(Date.now());
-      (window as StreamingTelemetryWindow).__HYPERIA_STREAM_PERFORMANCE__ =
-        null;
+      const telemetryWindow = window as StreamingTelemetryWindow;
+      telemetryWindow.__HYPERIA_STREAM_PERFORMANCE__ = null;
+      telemetryWindow.__HYPERIA_RESET_STREAM_PERFORMANCE__ = () =>
+        this.resetStreamingPerformanceTelemetry();
+      telemetryWindow.__HYPERIA_GET_STREAM_SCENE_COMPLEXITY__ = () =>
+        this.collectStreamSceneComplexity();
       this.setupStreamResourceTimingObserver();
       this.streamSystemProfilingEnabled =
         new URLSearchParams(window.location.search).get("streamProfile") ===
@@ -663,6 +695,115 @@ export class DevStats extends System {
     console.log(`TOTAL TRIANGLES: ${(totalTriangles / 1_000_000).toFixed(2)}M`);
     console.log(`VISIBLE TRIANGLES: ${(totalVisible / 1_000_000).toFixed(2)}M`);
     console.log("==========================================\n");
+  }
+
+  /**
+   * Produce an on-demand, serializable render-cost inventory for production
+   * stream verification. It is never traversed per frame; the verifier calls
+   * the hook once at teardown so profiling cannot perturb cadence evidence.
+   */
+  private collectStreamSceneComplexity(): StreamSceneComplexitySnapshot | null {
+    const stage = this.world.stage as { scene?: THREE.Scene } | null;
+    const scene = stage?.scene;
+    if (!scene) return null;
+
+    const contributors: StreamSceneComplexityContributor[] = [];
+    const categoryTotals = new Map<
+      string,
+      {
+        category: string;
+        objectCount: number;
+        visibleObjectCount: number;
+        triangles: number;
+        visibleTriangles: number;
+      }
+    >();
+    let objectCount = 0;
+    let visibleObjectCount = 0;
+    let triangles = 0;
+    let visibleTriangles = 0;
+
+    scene.traverse((object: THREE.Object3D) => {
+      const mesh = object as THREE.Mesh | THREE.InstancedMesh;
+      const geometry = mesh.geometry;
+      if (!geometry) return;
+      const elementCount =
+        geometry.index?.count ?? geometry.attributes.position?.count ?? 0;
+      const instances =
+        "isInstancedMesh" in mesh && mesh.isInstancedMesh
+          ? Math.max(0, Math.floor((mesh as THREE.InstancedMesh).count))
+          : 1;
+      const objectTriangles = Math.max(
+        0,
+        Math.floor((elementCount / 3) * instances),
+      );
+      let visible = true;
+      let ancestor: THREE.Object3D | null = object;
+      while (ancestor) {
+        if (ancestor.visible === false) {
+          visible = false;
+          break;
+        }
+        ancestor = ancestor.parent;
+      }
+      const rawCategory =
+        typeof mesh.userData?.type === "string"
+          ? mesh.userData.type
+          : object.name.split("_", 1)[0] || object.type;
+      const category = rawCategory.slice(0, 80);
+      const name = (object.name || "(unnamed)").slice(0, 160);
+      const contributor = {
+        name,
+        category,
+        type: object.type.slice(0, 80),
+        triangles: objectTriangles,
+        instances,
+        visible,
+      };
+      contributors.push(contributor);
+      objectCount += 1;
+      triangles += objectTriangles;
+      if (visible) {
+        visibleObjectCount += 1;
+        visibleTriangles += objectTriangles;
+      }
+      const totals = categoryTotals.get(category) ?? {
+        category,
+        objectCount: 0,
+        visibleObjectCount: 0,
+        triangles: 0,
+        visibleTriangles: 0,
+      };
+      totals.objectCount += 1;
+      totals.triangles += objectTriangles;
+      if (visible) {
+        totals.visibleObjectCount += 1;
+        totals.visibleTriangles += objectTriangles;
+      }
+      categoryTotals.set(category, totals);
+    });
+
+    return {
+      schemaVersion: 1,
+      capturedAt: Date.now(),
+      objectCount,
+      visibleObjectCount,
+      triangles,
+      visibleTriangles,
+      categories: [...categoryTotals.values()].sort(
+        (left, right) =>
+          right.visibleTriangles - left.visibleTriangles ||
+          left.category.localeCompare(right.category),
+      ),
+      topObjects: contributors
+        .sort(
+          (left, right) =>
+            Number(right.visible) - Number(left.visible) ||
+            right.triangles - left.triangles ||
+            left.name.localeCompare(right.name),
+        )
+        .slice(0, 40),
+    };
   }
 
   /**
@@ -2033,6 +2174,24 @@ export class DevStats extends System {
   }
 
   /**
+   * Begin a fresh, explicitly bounded stream-performance observation window.
+   * Capture verification calls this only after the production scene is fully
+   * admitted so cold asset work cannot be mislabeled as steady-state combat.
+   */
+  private resetStreamingPerformanceTelemetry(): boolean {
+    if (!this.streamTelemetryEnabled || typeof window === "undefined") {
+      return false;
+    }
+    this.streamTelemetry = new StreamPerformanceTelemetry(Date.now());
+    if (this.streamResourceTimingObserver) {
+      this.streamTelemetry.enableResourceTimingCollection();
+    }
+    this.lastStreamTelemetryPublish = 0;
+    (window as StreamingTelemetryWindow).__HYPERIA_STREAM_PERFORMANCE__ = null;
+    return true;
+  }
+
+  /**
    * Check if stats are currently visible
    */
   isVisible(): boolean {
@@ -2043,8 +2202,10 @@ export class DevStats extends System {
     this.streamResourceTimingObserver?.disconnect();
     this.streamResourceTimingObserver = null;
     if (this.streamTelemetryEnabled && typeof window !== "undefined") {
-      (window as StreamingTelemetryWindow).__HYPERIA_STREAM_PERFORMANCE__ =
-        null;
+      const telemetryWindow = window as StreamingTelemetryWindow;
+      telemetryWindow.__HYPERIA_STREAM_PERFORMANCE__ = null;
+      delete telemetryWindow.__HYPERIA_RESET_STREAM_PERFORMANCE__;
+      delete telemetryWindow.__HYPERIA_GET_STREAM_SCENE_COMPLEXITY__;
     }
     if (this.streamSystemProfilingEnabled) {
       this.world.disableSystemTiming();

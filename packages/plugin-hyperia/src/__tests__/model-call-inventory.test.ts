@@ -39,7 +39,8 @@ describe("shipped model-call inventory", () => {
       "actions/goals.ts": 1,
       "actions/social.ts": 1,
       "managers/autonomous-behavior-manager.ts": 4,
-      "services/HyperiaService.ts": 1,
+      // Operator classification plus the bounded, pre-market duel strategy.
+      "services/HyperiaService.ts": 2,
       "utils/ai-helpers.ts": 1,
     });
   });

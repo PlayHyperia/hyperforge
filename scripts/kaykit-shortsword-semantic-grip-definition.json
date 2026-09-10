@@ -1,0 +1,43 @@
+{
+  "schemaVersion": 1,
+  "itemId": "bronze_shortsword",
+  "avatar": {
+    "id": "kaykit-knight",
+    "path": "packages/server/world/assets/avatars/duel-candidates/duel-kaykit-knight.vrm",
+    "sha256": "b288656410986780a0df81d684e4888633be07751b0e57136d9e3c89512e713f",
+    "normalizedHeightMetres": 1.6,
+    "vrmHandBone": "rightHand",
+    "rawHandNode": "wrist.r"
+  },
+  "equipment": {
+    "path": "packages/server/world/assets/models/duel-kaykit/bronze-shortsword-fitted.glb",
+    "sha256": "683076c44ac972b6c0e57a75733e611b9bb6eca355906a8c37de31ca1779924c",
+    "sourcePath": "artifacts/duel-launch-avatar-bakeoff/role-kit/kaykit-sword-1h.glb",
+    "sourceSha256": "98974a657986a634b858e7214b8361cfbcae7fd56728c805076594df6c6dbb2e",
+    "contentNodeName": "EquipmentContent",
+    "meshNodeName": "sword_1handed",
+    "sourceAxis": [0, 1, 0],
+    "actionEnd": "maximum"
+  },
+  "sourceTriangleRegions": {
+    "handle": [
+      [0, 13],
+      [117, 182]
+    ],
+    "pommel": [
+      [14, 116],
+      [183, 191]
+    ],
+    "guard": [[207, 274]],
+    "blade": [
+      [192, 206],
+      [275, 299]
+    ]
+  },
+  "derivation": {
+    "selection": "The handle is the narrow wrapped shaft around source Y=0, identified by the source mesh topology and its separate UV island (U 0.6659320592880249 through 0.7127493023872375). The pommel has a wider rounded lobe below it; the guard is the transverse component above it; the blade extends to the positive-Y tip. Inclusive source triangle ranges freeze this semantic selection to the exact source bytes.",
+    "interval": "Compute the two midpoint planes in the empty centroid gaps between the handle triangles and the nearest excluded pommel/guard triangles. Validate that the existing axis-region utility selects exactly the 80 handle triangles, with zero blade/guard/pommel triangles. Do not expand the interval to obtain contact.",
+    "hand": "Use the actual VRM-mapped wrist.r and its actual descendant skin bones, all triangle vertices at summed influence >=0.5. This selects rendered hand-region triangles, not articulated fingers or anatomical closure.",
+    "transform": "Preserve the installed attachment matrix and every scene/node transform. Normalize the actual avatar bounds to 1.6 metres as the browser audit does. Bind-pose measurement is diagnostic, not production animation or visual approval."
+  }
+}

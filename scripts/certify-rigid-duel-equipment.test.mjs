@@ -35,6 +35,7 @@ function document(overrides = {}) {
     nodes: [
       {
         name: "EquipmentWrapper",
+        children: [1],
         extras: {
           hyperia: {
             version: 2,
@@ -45,6 +46,7 @@ function document(overrides = {}) {
           },
         },
       },
+      { name: "EquipmentContent" },
     ],
     buffers: [{ byteLength: 8 }],
   };
@@ -55,6 +57,20 @@ const request = {
   avatarId: "steve",
   legacyAvatarId: "/api/assets/steve/model",
   slot: "weapon",
+  gripContact: {
+    schemaVersion: 1,
+    contentNodeName: "EquipmentContent",
+    sourceAxis: [0, 1, 0],
+    actionEnd: "minimum",
+    zones: [
+      {
+        id: "primary",
+        boneName: "rightHand",
+        minimumSourceProjection: 0.55,
+        maximumSourceProjection: 0.95,
+      },
+    ],
+  },
 };
 
 test("certifies identical scene/root authority without changing binary data", () => {
@@ -67,6 +83,7 @@ test("certifies identical scene/root authority without changing binary data", ()
     slot: "weapon",
     compatibleAvatarIds: ["steve"],
   });
+  assert.deepEqual(first.report.gripContact, request.gripContact);
   assert.equal(first.report.nonJsonChunksSha256.length, 1);
 
   const second = certifyRigidDuelEquipmentGlb(first.output, request);
@@ -126,5 +143,83 @@ test("enforces finite v2 matrices and left-hand shield attachment", () => {
         slot: "shield",
       }),
     /only be certified on leftHand/u,
+  );
+});
+
+test("requires exact semantic grip and action-end authority", () => {
+  assert.throws(
+    () =>
+      certifyRigidDuelEquipmentGlb(createGlb(document()), {
+        ...request,
+        gripContact: undefined,
+      }),
+    /Semantic grip authority/u,
+  );
+  assert.throws(
+    () =>
+      certifyRigidDuelEquipmentGlb(createGlb(document()), {
+        ...request,
+        gripContact: {
+          ...request.gripContact,
+          contentNodeName: "MissingContent",
+        },
+      }),
+    /existing content node/u,
+  );
+  assert.throws(
+    () =>
+      certifyRigidDuelEquipmentGlb(createGlb(document()), {
+        ...request,
+        gripContact: {
+          ...request.gripContact,
+          sourceAxis: [0, 0, 0],
+        },
+      }),
+    /finite source axis/u,
+  );
+  assert.throws(
+    () =>
+      certifyRigidDuelEquipmentGlb(createGlb(document()), {
+        ...request,
+        gripContact: {
+          ...request.gripContact,
+          actionEnd: "either",
+        },
+      }),
+    /invalid action end/u,
+  );
+  assert.throws(
+    () =>
+      certifyRigidDuelEquipmentGlb(createGlb(document()), {
+        ...request,
+        gripContact: {
+          ...request.gripContact,
+          zones: [
+            {
+              ...request.gripContact.zones[0],
+              boneName: "leftHand",
+            },
+          ],
+        },
+      }),
+    /primary zone must use the fitted attachment hand/u,
+  );
+});
+
+test("rejects contradictory embedded semantic grip authority", () => {
+  assert.throws(
+    () =>
+      certifyRigidDuelEquipmentGlb(
+        createGlb(
+          document({
+            gripContact: {
+              ...request.gripContact,
+              actionEnd: "maximum",
+            },
+          }),
+        ),
+        request,
+      ),
+    /contradicts/u,
   );
 });

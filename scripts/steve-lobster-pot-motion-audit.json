@@ -1,0 +1,55 @@
+{
+  "schemaVersion": 1,
+  "title": "Hyperia Steve lobster pot deploy and retrieval review",
+  "framing": "avatar-and-equipment",
+  "motions": [
+    {
+      "id": "pot-deploy-standing",
+      "name": "Pot deploy · standing carry",
+      "asset": "artifacts/duel-launch-avatar-bakeoff/motions/steve-fishing-interactions/steve-lobster-pot-deploy.glb",
+      "sampleRatio": 0.1
+    },
+    {
+      "id": "pot-deploy-lowering",
+      "name": "Pot deploy · lowering",
+      "asset": "artifacts/duel-launch-avatar-bakeoff/motions/steve-fishing-interactions/steve-lobster-pot-deploy.glb",
+      "sampleRatio": 0.35
+    },
+    {
+      "id": "pot-deploy-contact",
+      "name": "Pot deploy · water contact",
+      "asset": "artifacts/duel-launch-avatar-bakeoff/motions/steve-fishing-interactions/steve-lobster-pot-deploy.glb",
+      "sampleRatio": 0.65
+    },
+    {
+      "id": "pot-deploy-release",
+      "name": "Pot deploy · release",
+      "asset": "artifacts/duel-launch-avatar-bakeoff/motions/steve-fishing-interactions/steve-lobster-pot-deploy.glb",
+      "sampleRatio": 0.9
+    },
+    {
+      "id": "pot-retrieve-approach",
+      "name": "Pot retrieve · approach",
+      "asset": "artifacts/duel-launch-avatar-bakeoff/motions/steve-fishing-interactions/steve-fishing-retrieve.glb",
+      "sampleRatio": 0.1
+    },
+    {
+      "id": "pot-retrieve-contact",
+      "name": "Pot retrieve · water contact",
+      "asset": "artifacts/duel-launch-avatar-bakeoff/motions/steve-fishing-interactions/steve-fishing-retrieve.glb",
+      "sampleRatio": 0.35
+    },
+    {
+      "id": "pot-retrieve-lift",
+      "name": "Pot retrieve · lift",
+      "asset": "artifacts/duel-launch-avatar-bakeoff/motions/steve-fishing-interactions/steve-fishing-retrieve.glb",
+      "sampleRatio": 0.65
+    },
+    {
+      "id": "pot-retrieve-standing",
+      "name": "Pot retrieve · standing carry",
+      "asset": "artifacts/duel-launch-avatar-bakeoff/motions/steve-fishing-interactions/steve-fishing-retrieve.glb",
+      "sampleRatio": 0.9
+    }
+  ]
+}

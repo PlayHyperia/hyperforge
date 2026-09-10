@@ -117,12 +117,19 @@ export async function enterMaintenanceMode(
  * - Re-enables betting markets
  */
 export function exitMaintenanceMode(): MaintenanceStatus {
-  if (!maintenanceState.active) {
+  const environmentGateActive =
+    process.env.STREAMING_DUEL_MAINTENANCE_MODE === "true";
+  if (!maintenanceState.active && !environmentGateActive) {
     Logger.info("MaintenanceMode", "Not in maintenance mode");
     return getMaintenanceStatus();
   }
 
-  Logger.info("MaintenanceMode", "Exiting maintenance mode");
+  Logger.info(
+    "MaintenanceMode",
+    maintenanceState.active
+      ? "Exiting maintenance mode"
+      : "Exiting inherited maintenance mode after process restart",
+  );
 
   // Re-enable scheduler
   delete process.env.STREAMING_DUEL_MAINTENANCE_MODE;
@@ -143,6 +150,9 @@ export function exitMaintenanceMode(): MaintenanceStatus {
  */
 export function getMaintenanceStatus(): MaintenanceStatus {
   const scheduler = getStreamingDuelScheduler();
+  const active =
+    maintenanceState.active ||
+    process.env.STREAMING_DUEL_MAINTENANCE_MODE === "true";
 
   // Get current phase from scheduler
   let currentPhase: string | null = null;
@@ -166,11 +176,10 @@ export function getMaintenanceStatus(): MaintenanceStatus {
     currentPhase === "ANNOUNCEMENT";
   const hasPendingMarkets = pendingMarkets > 0;
 
-  const safeToDeploy =
-    maintenanceState.active && !inActiveDuel && !hasPendingMarkets;
+  const safeToDeploy = active && !inActiveDuel && !hasPendingMarkets;
 
   return {
-    active: maintenanceState.active,
+    active,
     enteredAt: maintenanceState.enteredAt,
     reason: maintenanceState.reason,
     safeToDeploy,

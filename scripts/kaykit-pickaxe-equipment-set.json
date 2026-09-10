@@ -1,0 +1,13 @@
+{
+  "schemaVersion": 1,
+  "title": "KayKit isolated preparation pickaxe candidate",
+  "equipments": [
+    {
+      "asset": "fitted-preparation-kit/kaykit-rpg-pickaxe-fitted.glb",
+      "itemId": "kaykit_pickaxe_candidate",
+      "avatarId": "kaykit-knight",
+      "slot": "gatheringtool",
+      "grip": "two-hand"
+    }
+  ]
+}

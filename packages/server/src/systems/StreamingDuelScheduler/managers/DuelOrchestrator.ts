@@ -7,8 +7,13 @@
  */
 
 import type {
+  OwnedDuelPreparationPlanReceipt,
   PrayerActionReceipt,
   PrayerCustodyView,
+  StreamingDuelActionObservation,
+  StreamingDuelDamageObservationContext,
+  StreamingDuelExecutorCommandReceipt,
+  StreamingDuelRoleSwitchObservationContext,
   World,
 } from "@hyperforge/shared";
 import crypto from "node:crypto";
@@ -30,11 +35,16 @@ import {
   getDuelArenaConfig,
   getItem,
   isPositionInsideCombatArena,
+  parseStreamingDuelRoleSwitchObservationContext,
+  parseStreamingDuelDamageObservationContext,
   runeService,
   worldToTile,
   createEntityID,
 } from "@hyperforge/shared";
-import { DuelCombatAI } from "../../../duel/DuelCombatAI.js";
+import {
+  DuelCombatAI,
+  type DuelCombatPublicActionObservation,
+} from "../../../duel/DuelCombatAI.js";
 import type { EmbeddedHyperiaService } from "../../../eliza/EmbeddedHyperiaService.js";
 import type { CompetitiveAgentPolicyBinding } from "../../../eliza/competitiveAgentPolicy.js";
 import {
@@ -57,6 +67,15 @@ import type { CompetitiveSnapshotContestant } from "../competitive-snapshot.js";
 import { normalizeCompetitiveTacticalStrategy } from "../competitive-tactical-strategy.js";
 import { getAvailablePrayerIdsForLevel } from "../competitive-prayer-policy.js";
 import { STREAMING_DUEL_ARENA_ID } from "../../DuelSystem/streaming-arena.js";
+import type { StreamingDuelActionObservationDraft } from "../public-action-observation-buffer.js";
+import {
+  StreamingDuelActionObservationLedger,
+  type StreamingDuelActionObservationLedgerHealth,
+  type StreamingDuelActionObservationPersistence,
+  type StreamingDuelActionObservationStore,
+} from "../public-action-observation-ledger.js";
+import { isStreamingDuelEquipmentPresentationEligible } from "../../../streaming/duel-equipment-presentation.js";
+import { getDuelPreparationPlanOperationId } from "../../../eliza/duelPreparationPlan.js";
 
 /**
  * The physical arena remains large enough for ordinary player duels, while the
@@ -149,10 +168,13 @@ function isServedStreamingItemIcon(iconPath: string): boolean {
 }
 
 export function isLocalDiagnosticDuelRuntime(env: NodeJS.ProcessEnv): boolean {
+  const localSolanaIsNoMoney =
+    env.DUEL_LOCAL_SOLANA_MODE === "true" &&
+    isLoopbackRuntimeUrl(env.SOLANA_RPC_URL, ["http:", "https:"]);
   const hyperbetIsNoMoney =
     env.DUEL_WITH_HYPERBET === "false" ||
     (env.DUEL_WITH_HYPERBET === "true" &&
-      env.DUEL_HYPERBET_READ_ONLY_MODE === "true");
+      (env.DUEL_HYPERBET_READ_ONLY_MODE === "true" || localSolanaIsNoMoney));
   return (
     env.NODE_ENV === "production" &&
     env.DUEL_LOCAL_SMOKE_MODE === "true" &&
@@ -282,6 +304,10 @@ type PrayerSystemView = {
   ) => Promise<PrayerActionReceipt>;
 };
 
+type PlayerSystemView = {
+  isPlayerReady?: (playerId: string) => boolean;
+};
+
 export type CompetitiveLoadoutFreezeResult =
   | {
       ok: true;
@@ -314,6 +340,11 @@ export type FrozenCompetitiveState = {
 /** Equipment system shape used by the orchestrator. */
 type EquipmentSystem = {
   getPlayerEquipment?: (playerId: string) => DuelEquipmentView | undefined;
+  isEquipmentReady?: (playerId: string) => boolean;
+  recoverOwnedDuelPreparationPlan?: (
+    playerId: string,
+    request: { operationId: string; preparationId: string },
+  ) => Promise<OwnedDuelPreparationPlanReceipt | null>;
   canPlayerEquipItem?: (playerId: string, itemId: string | number) => boolean;
   equipItemDirect?: (
     playerId: string,
@@ -343,6 +374,7 @@ type EquipmentSystem = {
       requestFingerprint: string;
       targetRole: SwitchableStreamingCombatRole;
       allowedLoadouts: FrozenStreamingCombatLoadouts;
+      publicActionObservation?: StreamingDuelRoleSwitchObservationContext;
     },
   ) => Promise<{
     ok: boolean;
@@ -369,15 +401,31 @@ type AgentCombatData = {
 // Constants
 // ============================================================================
 
-/** Duel-eligible bronze weapons — only types with new models in swords/ directory. */
+/** Duel-eligible bronze weapons with certified canonical-avatar presentation. */
 const DUEL_BRONZE_WEAPON_IDS = [
+  "bronze_shortsword",
   "bronze_longsword",
   "bronze_scimitar",
-  "bronze_2h_sword",
 ] as const;
 
-/** Weapon types eligible for duel arenas (must have models in swords/ directory). */
-const DUEL_WEAPON_TYPES = new Set(["LONGSWORD", "SCIMITAR", "TWO_HAND_SWORD"]);
+/** Weapon types whose canonical-avatar motion sheets pass the launch gate. */
+export const STREAMING_DUEL_PRESENTATION_ELIGIBLE_MELEE_WEAPON_TYPES = new Set([
+  // The canonical item manifest names the shortsword family `SWORD`.
+  "SWORD",
+  "LONGSWORD",
+  "SCIMITAR",
+]);
+
+export function isStreamingDuelMeleeWeaponTypePresentationEligible(
+  weaponType: unknown,
+): boolean {
+  return (
+    typeof weaponType === "string" &&
+    STREAMING_DUEL_PRESENTATION_ELIGIBLE_MELEE_WEAPON_TYPES.has(
+      weaponType.toUpperCase(),
+    )
+  );
+}
 /**
  * Half of the presentation-space center separation for melee contestants.
  * 0.65 keeps each center inside its cardinally adjacent tile while leaving a
@@ -407,6 +455,7 @@ const RANGED_FALLBACK_BOW = "shortbow";
 const RANGED_FALLBACK_ARROW = "bronze_arrow";
 const MAGE_FALLBACK_STAFF = "staff_of_air";
 const MAGE_FALLBACK_SPELL = "wind_strike";
+const STANDALONE_SINGLE_STYLE_MELEE_WEAPON = "bronze_shortsword";
 const RUNE_PROVISION_QTY = 500;
 const COMPETITIVE_EQUIPMENT_SLOTS: readonly CompetitiveEquipmentSlotName[] = [
   "weapon",
@@ -422,6 +471,42 @@ const COMPETITIVE_EQUIPMENT_SLOTS: readonly CompetitiveEquipmentSlotName[] = [
   "arrows",
 ];
 
+type DuelCombatAIDiagnosticSnapshot = {
+  characterId: string;
+  cycleId: string | null;
+  duelId: string | null;
+  active: boolean;
+  capturedAtMs: number;
+} & ReturnType<DuelCombatAI["getStats"]>;
+
+export function resolveStandaloneSingleStyleCombatLoadout(
+  role: DuelCombatRole,
+): Readonly<{
+  weaponId: string;
+  arrowsId: string | null;
+  spellId: string | null;
+}> {
+  if (role === "ranged") {
+    return Object.freeze({
+      weaponId: RANGED_FALLBACK_BOW,
+      arrowsId: RANGED_FALLBACK_ARROW,
+      spellId: null,
+    });
+  }
+  if (role === "mage") {
+    return Object.freeze({
+      weaponId: MAGE_FALLBACK_STAFF,
+      arrowsId: null,
+      spellId: MAGE_FALLBACK_SPELL,
+    });
+  }
+  return Object.freeze({
+    weaponId: STANDALONE_SINGLE_STYLE_MELEE_WEAPON,
+    arrowsId: null,
+    spellId: null,
+  });
+}
+
 // ============================================================================
 // DuelOrchestrator Class
 // ============================================================================
@@ -429,6 +514,8 @@ const COMPETITIVE_EQUIPMENT_SLOTS: readonly CompetitiveEquipmentSlotName[] = [
 export class DuelOrchestrator {
   // -- Owned state --
   private combatAIs: Map<string, DuelCombatAI> = new Map();
+  /** Bounded post-terminal evidence for the most recently stopped pair only. */
+  private lastStoppedCombatAIDiagnostics: DuelCombatAIDiagnosticSnapshot[] = [];
   private validatedCompetitiveAgentPolicies: {
     cycleId: string;
     manager: CompetitiveAgentPolicyManager;
@@ -439,6 +526,7 @@ export class DuelOrchestrator {
     service: {
       clearArenaBounds(): void;
       setAutonomousBehaviorEnabled(enabled: boolean): void;
+      isAutonomousBehaviorConfigured?(): boolean;
     };
     wasAutonomous: boolean;
   }> = [];
@@ -475,6 +563,15 @@ export class DuelOrchestrator {
   private prayerTeardownInFlightByCycle = new Map<string, Promise<void>>();
   /** Fence for async controller ticks whose authority was just revoked. */
   private combatAiShutdownInFlight: Promise<void> = Promise.resolve();
+  /** One pair-level controller transaction; scheduled ticks coalesce while busy. */
+  private combatAiTickInFlight: Promise<void> | null = null;
+  /**
+   * Fence for database-backed arrow/rune terminals created while combat stops.
+   * Loadout cleanup and player unload must not overtake these exact receipts.
+   */
+  private combatCustodyShutdownInFlight: Promise<void> = Promise.resolve();
+  /** Durable publication boundary plus immutable public tail for one cycle. */
+  private readonly publicActionObservations: StreamingDuelActionObservationLedger;
   /** Debug director: force a contestant's combat style for the next prep only. */
   private debugCombatRoleOverrideByCharacterId = new Map<
     string,
@@ -517,14 +614,35 @@ export class DuelOrchestrator {
       winnerId: string | null,
       loserId: string | null,
       winReason: StreamingDuelWinReason,
+      terminalAtOverride?: number,
     ) => void,
-    private readonly onAbort: (reason: string) => void,
+    private readonly onAbort: (
+      reason: string,
+      occurredAtOverride?: number,
+    ) => void,
     private readonly getLeaderboard: () => LeaderboardEntry[],
     private readonly getRecentDuels: () => RecentDuelEntry[],
     private readonly isSyntheticDiagnosticAgent: (
       playerId: string,
     ) => boolean = () => false,
-  ) {}
+    publicActionObservationStore: StreamingDuelActionObservationStore | null = null,
+    private readonly isEquipmentPresentationEligible: (
+      itemId: string,
+      slot: CompetitiveEquipmentSlotName,
+    ) => boolean = isStreamingDuelEquipmentPresentationEligible,
+  ) {
+    this.publicActionObservations = new StreamingDuelActionObservationLedger(
+      publicActionObservationStore,
+      {
+        onError: (message) => {
+          Logger.warn(
+            "StreamingDuelScheduler",
+            `Public duel action persistence degraded: ${message}`,
+          );
+        },
+      },
+    );
+  }
 
   // ============================================================================
   // Public accessors for state owned by this orchestrator
@@ -540,6 +658,192 @@ export class DuelOrchestrator {
       ...this.engagementMetrics,
       currentRetryCount: this.combatRetryCount,
     };
+  }
+
+  getPublicActionObservations(
+    cycleId: string,
+  ): readonly StreamingDuelActionObservation[] {
+    return this.publicActionObservations.getSnapshot(cycleId);
+  }
+
+  getPublicActionObservationHealth(): StreamingDuelActionObservationLedgerHealth {
+    return this.publicActionObservations.getHealth();
+  }
+
+  activatePublicActionObservations(cycleId: string): void {
+    this.publicActionObservations.activateCycle(cycleId);
+  }
+
+  waitForPublicActionObservations(): Promise<void> {
+    return this.publicActionObservations.waitForIdle();
+  }
+
+  private recordControllerPublicAction(
+    cycleId: string,
+    duelId: string,
+    actorId: string,
+    opponentId: string,
+    observation: DuelCombatPublicActionObservation,
+    persistence?: StreamingDuelActionObservationPersistence,
+  ): void {
+    const cycle = this.getCurrentCycle();
+    if (
+      !cycle ||
+      cycle.cycleId !== cycleId ||
+      cycle.phase !== "FIGHTING" ||
+      ![cycle.agent1?.characterId, cycle.agent2?.characterId].includes(
+        actorId,
+      ) ||
+      ![cycle.agent1?.characterId, cycle.agent2?.characterId].includes(
+        opponentId,
+      ) ||
+      actorId === opponentId
+    ) {
+      return;
+    }
+
+    const accepted = this.publicActionObservations.record(
+      {
+        ...observation,
+        cycleId,
+        duelId,
+        actorId,
+        opponentId,
+        phase: "FIGHTING",
+      } as StreamingDuelActionObservationDraft,
+      persistence,
+    );
+    if (!accepted) {
+      Logger.warn(
+        "StreamingDuelScheduler",
+        `Rejected public duel action observation for ${actorId}`,
+      );
+    }
+  }
+
+  createAuthoritativeDamageObservationContext(
+    attackerId: string,
+    targetId: string,
+    requestedDamage: number,
+  ): StreamingDuelDamageObservationContext | null {
+    const cycle = this.getCurrentCycle();
+    if (
+      !cycle ||
+      cycle.phase !== "FIGHTING" ||
+      !Number.isSafeInteger(requestedDamage) ||
+      requestedDamage <= 0 ||
+      !(
+        (attackerId === cycle.agent1?.characterId &&
+          targetId === cycle.agent2?.characterId) ||
+        (attackerId === cycle.agent2?.characterId &&
+          targetId === cycle.agent1?.characterId)
+      )
+    ) {
+      return null;
+    }
+    const ai = this.combatAIs.get(attackerId);
+    if (!ai) return null;
+    const stats = ai.getStats();
+    const parsed = parseStreamingDuelDamageObservationContext({
+      operationId: crypto.randomUUID(),
+      tick: stats.tickCount,
+      observedAt: Date.now(),
+      cycleId: cycle.cycleId,
+      duelId: cycle.duelId ?? `streaming-${cycle.cycleId}`,
+      actorId: attackerId,
+      opponentId: targetId,
+      phase: "FIGHTING",
+      combatRole: stats.combatRole,
+      tacticalMacro: stats.lastExecutedTacticalMacro,
+      requestedDamage,
+    });
+    return parsed;
+  }
+
+  recordAuthoritativeDamageObservation(
+    attackerId: string,
+    targetId: string,
+    damage: number,
+    context?: StreamingDuelDamageObservationContext,
+  ): void {
+    const cycle = this.getCurrentCycle();
+    if (!cycle || cycle.phase !== "FIGHTING") return;
+    const parsedContext =
+      context === undefined
+        ? null
+        : parseStreamingDuelDamageObservationContext(context);
+    if (context !== undefined) {
+      if (
+        !parsedContext ||
+        parsedContext.cycleId !== cycle.cycleId ||
+        parsedContext.duelId !==
+          (cycle.duelId ?? `streaming-${cycle.cycleId}`) ||
+        parsedContext.actorId !== attackerId ||
+        parsedContext.opponentId !== targetId ||
+        damage > parsedContext.requestedDamage
+      ) {
+        Logger.warn(
+          "StreamingDuelScheduler",
+          "Rejected mismatched authoritative duel damage receipt",
+        );
+        return;
+      }
+      this.recordControllerPublicAction(
+        parsedContext.cycleId,
+        parsedContext.duelId,
+        attackerId,
+        targetId,
+        {
+          tick: parsedContext.tick,
+          combatRole: parsedContext.combatRole,
+          tacticalMacro: parsedContext.tacticalMacro,
+          action: "damage",
+          outcome: "committed",
+          value: "hit",
+          amount: damage,
+        },
+        {
+          operationId: parsedContext.operationId,
+          observedAt: parsedContext.observedAt,
+        },
+      );
+      return;
+    }
+
+    // Unit/local worlds without PostgreSQL retain immediate presentation. A
+    // configured production ledger never accepts an unreceipted duel hit.
+    if (this.publicActionObservations.getHealth().configured) {
+      Logger.warn(
+        "StreamingDuelScheduler",
+        "Rejected duel damage without its atomic health receipt",
+      );
+      return;
+    }
+    const ai = this.combatAIs.get(attackerId);
+    if (!ai) return;
+    const stats = ai.getStats();
+    if (
+      stats.combatRole !== "melee" &&
+      stats.combatRole !== "ranged" &&
+      stats.combatRole !== "mage"
+    ) {
+      return;
+    }
+    this.recordControllerPublicAction(
+      cycle.cycleId,
+      cycle.duelId ?? `streaming-${cycle.cycleId}`,
+      attackerId,
+      targetId,
+      {
+        tick: stats.tickCount,
+        combatRole: stats.combatRole,
+        tacticalMacro: stats.lastExecutedTacticalMacro,
+        action: "damage",
+        outcome: "committed",
+        value: "hit",
+        amount: damage,
+      },
+    );
   }
 
   // ============================================================================
@@ -923,6 +1227,7 @@ export class DuelOrchestrator {
     // events would be broadcast at pre-arena positions.
     this.forceStopAgentCombat(agent1.characterId);
     this.forceStopAgentCombat(agent2.characterId);
+    await this.waitForCombatCustodySettlements();
     this.world.emit("player:movement:cancel", { playerId: agent1.characterId });
     this.world.emit("player:movement:cancel", { playerId: agent2.characterId });
 
@@ -1038,9 +1343,11 @@ export class DuelOrchestrator {
         if (item.equipable === false) return false;
         if (item.equipSlot !== "weapon" && item.equipSlot !== "2h")
           return false;
-        // Only include weapon types with new models in swords/ directory
-        const wt = (item.weaponType ?? "").toUpperCase();
-        return DUEL_WEAPON_TYPES.has(wt);
+        if (!isStreamingDuelEquipmentPresentationEligible(item.id, "weapon"))
+          return false;
+        return isStreamingDuelMeleeWeaponTypePresentationEligible(
+          item.weaponType,
+        );
       })
       .map((item) => item.id);
 
@@ -1119,6 +1426,50 @@ export class DuelOrchestrator {
   }
 
   /**
+   * Replay the immutable whole-plan receipt before a replacement process
+   * reconstructs a public competitive snapshot. The equipment system repairs
+   * only custody-conserving durable projection drift and then applies the same
+   * receipt to live inventory/equipment state.
+   */
+  async recoverCompetitivePreparationLoadout(
+    playerId: string,
+    preparationId: string,
+  ): Promise<{ ok: true } | { ok: false; reason: string }> {
+    const equipmentSystem = this.getEquipmentSystem();
+    if (!equipmentSystem?.recoverOwnedDuelPreparationPlan) {
+      return { ok: false, reason: "atomic_persistence_unavailable" };
+    }
+    const operationId = getDuelPreparationPlanOperationId(
+      preparationId,
+      playerId,
+    );
+    try {
+      const receipt = await equipmentSystem.recoverOwnedDuelPreparationPlan(
+        playerId,
+        { operationId, preparationId },
+      );
+      if (!receipt) {
+        return { ok: false, reason: "preparation_plan_missing" };
+      }
+      if (!receipt.ok) return { ok: false, reason: receipt.reason };
+      if (
+        receipt.playerId !== playerId ||
+        receipt.preparationId !== preparationId ||
+        receipt.operationId !== operationId
+      ) {
+        return { ok: false, reason: "committed_state_apply_failed" };
+      }
+      return { ok: true };
+    } catch (error) {
+      Logger.warn(
+        "StreamingDuelScheduler",
+        `Competitive preparation recovery failed for ${playerId}: ${errMsg(error)}`,
+      );
+      return { ok: false, reason: "persistence_failed" };
+    }
+  }
+
+  /**
    * Freeze the exact equipment, inventory, spell, and combat skill levels that
    * bettors will evaluate. This must happen before any market-open event.
    */
@@ -1154,6 +1505,113 @@ export class DuelOrchestrator {
     return built.result;
   }
 
+  /**
+   * Restore an already-normalized diagnostic freeze after a cold replacement.
+   * This is deliberately unavailable to public/non-diagnostic contestants:
+   * those must reconstruct and verify live custody through
+   * freezeCompetitiveLoadout(). Local multi-style fixtures provision their
+   * gear by design, so their persisted snapshot is the exact replay authority.
+   */
+  restoreDiagnosticCompetitiveLoadoutFromSnapshot(
+    contestant: AgentContestant,
+    persisted: CompetitiveSnapshotContestant,
+  ): CompetitiveLoadoutFreezeResult {
+    if (
+      !isLocalDiagnosticDuelRuntime(process.env) ||
+      !contestant.characterId.startsWith("sparbot-standalone-") ||
+      contestant.characterId !== persisted.agentId ||
+      persisted.preparation.planningSource !== "diagnostic" ||
+      typeof persisted.loadoutFingerprint !== "string" ||
+      this.combatSetupSnapshotsByAgent.has(contestant.characterId)
+    ) {
+      return {
+        ok: false,
+        reason: "diagnostic_snapshot_restore_not_authorized",
+      };
+    }
+
+    const frozenEquipment = Object.fromEntries(
+      COMPETITIVE_EQUIPMENT_SLOTS.map((slotName) => [slotName, null]),
+    ) as Record<CompetitiveEquipmentSlotName, DuelEquipmentSlotSnapshot>;
+    for (const item of persisted.equipment) {
+      if (
+        !COMPETITIVE_EQUIPMENT_SLOTS.includes(
+          item.slot as CompetitiveEquipmentSlotName,
+        )
+      ) {
+        return { ok: false, reason: "diagnostic_snapshot_slot_invalid" };
+      }
+      frozenEquipment[item.slot as CompetitiveEquipmentSlotName] = {
+        itemId: item.itemId,
+        quantity: item.quantity,
+      };
+    }
+    const frozenInventory = persisted.inventory.map((item) => ({ ...item }));
+    const frozenSkillLevels = Object.fromEntries(
+      persisted.skillLevels.map((skill) => [skill.skill, skill.level]),
+    );
+    const prayer = {
+      ...persisted.prayer,
+      activePrayers: [...persisted.prayer.activePrayers],
+    };
+    const inventoryQuantityByItemId = new Map<string, number>();
+    for (const item of frozenInventory) {
+      inventoryQuantityByItemId.set(
+        item.itemId,
+        (inventoryQuantityByItemId.get(item.itemId) ?? 0) + item.quantity,
+      );
+    }
+    const fingerprint = this.fingerprintCompetitiveLoadout({
+      equipment: frozenEquipment,
+      inventory: frozenInventory,
+      selectedSpell: persisted.selectedSpell,
+      skillLevels: frozenSkillLevels,
+      prayer,
+    });
+    if (persisted.loadoutFingerprint !== fingerprint) {
+      return {
+        ok: false,
+        reason: "diagnostic_snapshot_fingerprint_mismatch",
+      };
+    }
+    const availableCombatStyles = [...persisted.availableCombatStyles];
+    const diagnosticMultiStyleAllowed = availableCombatStyles.length > 1;
+    const snapshot: DuelCombatSetupSnapshot = {
+      equipment: frozenEquipment,
+      selectedSpell: persisted.selectedSpell,
+      inventoryQuantityByItemId,
+      provisionedItemIds: new Set<string>(),
+      frozenEquipment,
+      frozenInventory,
+      frozenSkillLevels,
+      prayer,
+      fingerprint,
+      availableCombatStyles,
+      combatLoadouts: this.cloneFrozenCombatLoadouts(persisted.combatLoadouts),
+      initialCombatRole: persisted.initialCombatStyle,
+      diagnosticProvisioningAllowed: true,
+      diagnosticMultiStyleAllowed,
+    };
+    this.combatSetupSnapshotsByAgent.set(contestant.characterId, snapshot);
+    contestant.loadoutFingerprint = fingerprint;
+    contestant.availableCombatStyles = [...availableCombatStyles];
+    contestant.combatLoadouts = this.cloneFrozenCombatLoadouts(
+      persisted.combatLoadouts,
+    );
+    contestant.loadoutFrozen = diagnosticMultiStyleAllowed;
+    contestant.prayerPointUnits = prayer.pointUnits;
+    contestant.prayerPoints = prayer.points;
+    contestant.prayerMaxPoints = prayer.maxPoints;
+    return {
+      ok: true,
+      fingerprint,
+      availableCombatStyles,
+      combatLoadouts: this.cloneFrozenCombatLoadouts(persisted.combatLoadouts),
+      initialCombatRole: persisted.initialCombatStyle,
+      diagnostic: true,
+    };
+  }
+
   /** Public-only exact state captured by freezeCompetitiveLoadout(). */
   getFrozenCompetitiveState(playerId: string): FrozenCompetitiveState | null {
     const frozen = this.combatSetupSnapshotsByAgent.get(playerId);
@@ -1175,9 +1633,7 @@ export class DuelOrchestrator {
         ...frozen.prayer,
         activePrayers: [...frozen.prayer.activePrayers],
       },
-      fingerprint: frozen.diagnosticProvisioningAllowed
-        ? null
-        : frozen.fingerprint,
+      fingerprint: frozen.fingerprint,
       initialCombatRole: frozen.initialCombatRole,
       availableCombatStyles: [...frozen.availableCombatStyles],
       combatLoadouts: this.cloneFrozenCombatLoadouts(frozen.combatLoadouts),
@@ -1222,6 +1678,15 @@ export class DuelOrchestrator {
     // gear provisioning. No non-synthetic development contestant receives it.
     const diagnosticProvisioningAllowed =
       this.isDiagnosticProvisioningAllowed(playerId);
+    const playerSystem = this.getPlayerSystem();
+    if (playerSystem?.isPlayerReady && !playerSystem.isPlayerReady(playerId)) {
+      return { result: { ok: false, reason: "player_state_not_ready" } };
+    }
+    if (!diagnosticProvisioningAllowed && !playerSystem?.isPlayerReady) {
+      return {
+        result: { ok: false, reason: "player_state_unavailable" },
+      };
+    }
     const entity = this.world.entities.get(playerId);
     if (!entity) {
       return { result: { ok: false, reason: "contestant_missing" } };
@@ -1233,6 +1698,12 @@ export class DuelOrchestrator {
       return {
         result: { ok: false, reason: "equipment_state_unavailable" },
       };
+    }
+    if (
+      equipmentSystem.isEquipmentReady &&
+      !equipmentSystem.isEquipmentReady(playerId)
+    ) {
+      return { result: { ok: false, reason: "equipment_not_ready" } };
     }
     if (!inventorySystem?.getInventory) {
       return {
@@ -1289,6 +1760,19 @@ export class DuelOrchestrator {
         this.snapshotEquipmentSlot(equipment[slotName]),
       ]),
     ) as Record<CompetitiveEquipmentSlotName, DuelEquipmentSlotSnapshot>;
+    if (!diagnosticProvisioningAllowed) {
+      for (const slotName of COMPETITIVE_EQUIPMENT_SLOTS) {
+        const itemId = frozenEquipment[slotName]?.itemId;
+        if (itemId && !this.isEquipmentPresentationEligible(itemId, slotName)) {
+          return {
+            result: {
+              ok: false,
+              reason: `equipment_presentation_not_certified:${slotName}:${itemId}`,
+            },
+          };
+        }
+      }
+    }
     const frozenInventory: Array<{
       slot: number;
       itemId: string;
@@ -1414,7 +1898,7 @@ export class DuelOrchestrator {
     return {
       result: {
         ok: true,
-        fingerprint: diagnosticProvisioningAllowed ? null : fingerprint,
+        fingerprint,
         availableCombatStyles: readiness.availableCombatStyles,
         combatLoadouts: this.cloneFrozenCombatLoadouts(
           readiness.combatLoadouts,
@@ -1604,7 +2088,11 @@ export class DuelOrchestrator {
     const weapons = ownedItemIds
       .map((itemId) => getItem(itemId))
       .filter((item): item is NonNullable<typeof item> =>
-        Boolean(item?.type === "weapon" && canEquip(item.id)),
+        Boolean(
+          item?.type === "weapon" &&
+          canEquip(item.id) &&
+          this.isEquipmentPresentationEligible(item.id, "weapon"),
+        ),
       );
     const loadouts: FrozenStreamingCombatLoadouts = {};
     const bonus = (
@@ -1646,7 +2134,8 @@ export class DuelOrchestrator {
         Boolean(
           item?.type === "armor" &&
           item.equipSlot === "shield" &&
-          canEquip(item.id),
+          canEquip(item.id) &&
+          this.isEquipmentPresentationEligible(item.id, "shield"),
         ),
       );
     const selectShield = (
@@ -1677,7 +2166,8 @@ export class DuelOrchestrator {
             Boolean(
               item?.type === "armor" &&
               item.equipSlot === slot &&
-              canEquip(item.id),
+              canEquip(item.id) &&
+              this.isEquipmentPresentationEligible(item.id, slot),
             ),
           ),
       ]),
@@ -2136,7 +2626,10 @@ export class DuelOrchestrator {
     if (!item || item.type !== "weapon") return false;
     if (item.attackType !== AttackType.MELEE) return false;
     if (item.equipSlot !== "weapon" && item.equipSlot !== "2h") return false;
-    return item.equipable !== false;
+    return (
+      item.equipable !== false &&
+      isStreamingDuelMeleeWeaponTypePresentationEligible(item.weaponType)
+    );
   }
 
   /** Check if an item is a ranged bow. */
@@ -2181,6 +2674,11 @@ export class DuelOrchestrator {
       if (item.attackType !== AttackType.MELEE) continue;
       if (item.equipSlot !== "weapon" && item.equipSlot !== "2h") continue;
       if (item.equipable === false) continue;
+      if (
+        !isStreamingDuelMeleeWeaponTypePresentationEligible(item.weaponType)
+      ) {
+        continue;
+      }
       // Limit to bronze tier so mage/ranged matchups stay fair
       if ((item.tier ?? "").toLowerCase() !== "bronze") continue;
 
@@ -2552,6 +3050,12 @@ export class DuelOrchestrator {
     playerId: string,
     role: DuelCombatRole,
   ): Promise<string> {
+    if (
+      playerId.startsWith("sparbot-standalone-") &&
+      isLocalDiagnosticDuelRuntime(process.env)
+    ) {
+      return this.ensureStandaloneSingleStyleCombatSetup(playerId, role);
+    }
     if (role === "ranged" || role === "mage") {
       await this.waitForInventoryReadyPlayer(playerId);
     }
@@ -2605,6 +3109,49 @@ export class DuelOrchestrator {
         return staffId;
       }
     }
+  }
+
+  private async ensureStandaloneSingleStyleCombatSetup(
+    playerId: string,
+    role: DuelCombatRole,
+  ): Promise<string> {
+    const loadout = resolveStandaloneSingleStyleCombatLoadout(role);
+    if (role === "ranged") {
+      if (!loadout.arrowsId) {
+        throw new Error("diagnostic_single_style_arrows_missing");
+      }
+      await this.waitForInventoryReadyPlayer(playerId);
+      await this.equipRangedGear(playerId, loadout.weaponId, loadout.arrowsId);
+    } else if (role === "mage") {
+      const spell = loadout.spellId ? COMBAT_SPELLS[loadout.spellId] : null;
+      if (!loadout.spellId || !spell) {
+        throw new Error("diagnostic_single_style_spell_missing");
+      }
+      await this.waitForInventoryReadyPlayer(playerId);
+      const infiniteRunes = new Set(ELEMENTAL_STAVES[loadout.weaponId] ?? []);
+      await this.equipMageGear(
+        playerId,
+        loadout.weaponId,
+        loadout.spellId,
+        spell.runes
+          .filter((rune) => !infiniteRunes.has(rune.runeId))
+          .map((rune) => ({
+            runeId: rune.runeId,
+            quantity: RUNE_PROVISION_QTY,
+          })),
+      );
+    } else {
+      await this.equipMeleeWeapon(playerId, loadout.weaponId);
+    }
+
+    const equippedWeaponId = this.getEquippedWeaponId(playerId);
+    if (equippedWeaponId !== loadout.weaponId) {
+      throw new Error(
+        `diagnostic_single_style_equip_failed:${role}:${loadout.weaponId}`,
+      );
+    }
+    this.markProvisionedInventoryItem(playerId, equippedWeaponId);
+    return equippedWeaponId;
   }
 
   private async ensureDiagnosticMultiStyleCombatSetup(
@@ -3540,11 +4087,11 @@ export class DuelOrchestrator {
   // Arena Teleportation
   // ============================================================================
 
-  async teleportToArena(
+  teleportToArena(
     agent1Id: string,
     agent2Id: string,
     suppressEffect = false,
-  ): Promise<void> {
+  ): void {
     // Enter directly on the grounded, cardinally adjacent combat marks. The
     // previous presentation marks were 16 tiles apart and forced a second
     // teleport at the bell, producing a visible snap on every duel.
@@ -4000,7 +4547,7 @@ export class DuelOrchestrator {
   // Fight Execution
   // ============================================================================
 
-  startFight(): void {
+  startFight(fightStartedAt = Date.now()): void {
     const cycle = this.getCurrentCycle();
     if (!cycle) return;
 
@@ -4030,10 +4577,16 @@ export class DuelOrchestrator {
       return;
     }
 
-    const now = Date.now();
+    if (!Number.isSafeInteger(fightStartedAt) || fightStartedAt <= 0) {
+      this.onAbort("competitive_timing_contract_invalid");
+      return;
+    }
+    const now = fightStartedAt;
+    this.publicActionObservations.activateCycle(cycle.cycleId);
     this.setCurrentCycleFields({
       phase: "FIGHTING",
       phaseStartTime: now,
+      fightStartTime: now,
       countdownValue: null,
     });
     // The public phase can render on the next browser frame. Establish both
@@ -4109,6 +4662,7 @@ export class DuelOrchestrator {
     playerId: string,
     targetRole: SwitchableStreamingCombatRole,
     operationId: string,
+    publicActionObservation?: StreamingDuelRoleSwitchObservationContext,
   ): Promise<{
     ok: boolean;
     retryable: boolean;
@@ -4123,6 +4677,12 @@ export class DuelOrchestrator {
           ? cycle.agent2
           : null;
     const frozen = this.combatSetupSnapshotsByAgent.get(playerId);
+    const parsedPublicActionObservation =
+      publicActionObservation === undefined
+        ? undefined
+        : parseStreamingDuelRoleSwitchObservationContext(
+            publicActionObservation,
+          );
     const expectedOperationPrefix = `combat-loadout:${cycleId}:${playerId}:`;
     const diagnosticSwitchAllowed = Boolean(
       frozen?.diagnosticProvisioningAllowed &&
@@ -4135,6 +4695,17 @@ export class DuelOrchestrator {
       cycle.phase !== "FIGHTING" ||
       !contestant ||
       !frozen ||
+      (publicActionObservation !== undefined &&
+        (!parsedPublicActionObservation ||
+          parsedPublicActionObservation.cycleId !== cycleId ||
+          parsedPublicActionObservation.duelId !==
+            (cycle.duelId ?? `streaming-${cycleId}`) ||
+          parsedPublicActionObservation.actorId !== playerId ||
+          parsedPublicActionObservation.opponentId !==
+            (cycle.agent1?.characterId === playerId
+              ? cycle.agent2?.characterId
+              : cycle.agent1?.characterId) ||
+          parsedPublicActionObservation.targetRole !== targetRole)) ||
       (frozen.diagnosticProvisioningAllowed && !diagnosticSwitchAllowed) ||
       !frozen.combatLoadouts[targetRole] ||
       !operationId.startsWith(expectedOperationPrefix)
@@ -4162,6 +4733,41 @@ export class DuelOrchestrator {
         reason: "equipment_system_unavailable",
       };
     }
+
+    const opponentId =
+      cycle.agent1?.characterId === playerId
+        ? cycle.agent2?.characterId
+        : cycle.agent1?.characterId;
+    const combatSystem = this.world.getSystem("combat") as {
+      hasActiveProjectilesBetween?: (
+        entityAId: string,
+        entityBId: string,
+      ) => boolean;
+      quiesceAutoAttacksBetween?: (
+        entityAId: string,
+        entityBId: string,
+      ) => boolean;
+    } | null;
+    if (
+      opponentId &&
+      combatSystem?.hasActiveProjectilesBetween?.(playerId, opponentId)
+    ) {
+      // forceStopAgentCombat tears down the shared combat pair and therefore
+      // cancels its delayed damage. Finish the committed attack first; the AI
+      // retries this exact operation ID from a later authoritative tick.
+      return combatSystem.quiesceAutoAttacksBetween?.(playerId, opponentId) ===
+        true
+        ? {
+            ok: false,
+            retryable: true,
+            reason: "attack_in_flight",
+          }
+        : {
+            ok: false,
+            retryable: false,
+            reason: "attack_quiesce_unavailable",
+          };
+    }
     const requestFingerprint = crypto
       .createHash("sha256")
       .update(
@@ -4171,6 +4777,9 @@ export class DuelOrchestrator {
           frozenFingerprint: frozen.fingerprint,
           targetRole,
           loadout: frozen.combatLoadouts[targetRole],
+          ...(parsedPublicActionObservation
+            ? { publicActionObservation: parsedPublicActionObservation }
+            : {}),
         }),
       )
       .digest("hex");
@@ -4184,6 +4793,9 @@ export class DuelOrchestrator {
       requestFingerprint,
       targetRole,
       allowedLoadouts: frozen.combatLoadouts,
+      ...(parsedPublicActionObservation
+        ? { publicActionObservation: parsedPublicActionObservation }
+        : {}),
     });
     if (!receipt.ok) {
       return {
@@ -4197,6 +4809,13 @@ export class DuelOrchestrator {
     }
 
     this.combatRolesByAgent.set(playerId, targetRole);
+    const entity = this.world.entities.get(playerId);
+    if (entity?.data.inStreamingDuel === true) {
+      (entity.data as Record<string, unknown>).streamingDuelCombatRole =
+        targetRole;
+      (entity.data as Record<string, unknown>).streamingDuelWeaponId =
+        this.getEquippedWeaponId(playerId);
+    }
     this.refreshContestantLoadout(contestant);
     Logger.info(
       "StreamingDuelScheduler",
@@ -4278,6 +4897,14 @@ export class DuelOrchestrator {
             ok: false,
             reason: "competitive_agent_policy_unavailable",
           };
+        }
+        if (
+          current.fingerprint !== expected.binding.fingerprint ||
+          current.provider !== expected.binding.provider ||
+          current.model !== expected.binding.model
+        ) {
+          this.validatedCompetitiveAgentPolicies = null;
+          return { ok: false, reason: "competitive_agent_policy_drift" };
         }
       }
       return { ok: true };
@@ -4366,7 +4993,10 @@ export class DuelOrchestrator {
         !expected ||
         !current ||
         currentService !== expected.service ||
-        !current.combatControllerEnabled
+        !current.combatControllerEnabled ||
+        current.fingerprint !== expected.binding.fingerprint ||
+        current.provider !== expected.binding.provider ||
+        current.model !== expected.binding.model
       ) {
         return false;
       }
@@ -4467,10 +5097,79 @@ export class DuelOrchestrator {
     this._arenaModeServices = [];
     for (const svc of [service1, service2]) {
       if (!svc) continue;
-      const wasAutonomous = svc.isAutonomousEnabled();
+      const wasAutonomous =
+        svc.isAutonomousBehaviorConfigured?.() ?? svc.isAutonomousEnabled();
       svc.setArenaBounds(movementClampBounds);
       svc.setAutonomousBehaviorEnabled(false);
       this._arenaModeServices.push({ service: svc, wasAutonomous });
+    }
+
+    const hasSystemLookup =
+      typeof (this.world as { getSystem?: unknown }).getSystem === "function";
+    const executorDatabase = (
+      hasSystemLookup ? this.world.getSystem("database") : undefined
+    ) as
+      | {
+          listPendingStreamingDuelExecutorCommandsAsync?: (
+            cycleId: string,
+          ) => Promise<StreamingDuelExecutorCommandReceipt[]>;
+        }
+      | undefined;
+    if (executorDatabase?.listPendingStreamingDuelExecutorCommandsAsync) {
+      const pending =
+        await executorDatabase.listPendingStreamingDuelExecutorCommandsAsync(
+          cycle.cycleId,
+        );
+      const serviceByActor = new Map<string, EmbeddedHyperiaService>();
+      if (service1) serviceByActor.set(agent1.characterId, service1);
+      if (service2) serviceByActor.set(agent2.characterId, service2);
+      const duelId = cycle.duelId ?? `streaming-${cycle.cycleId}`;
+      for (const command of pending) {
+        const context = command.publicActionObservation;
+        const service = serviceByActor.get(context.actorId);
+        const expectedOpponent =
+          context.actorId === agent1.characterId
+            ? agent2.characterId
+            : context.actorId === agent2.characterId
+              ? agent1.characterId
+              : null;
+        if (
+          !service ||
+          !expectedOpponent ||
+          command.playerId !== context.actorId ||
+          context.cycleId !== cycle.cycleId ||
+          context.duelId !== duelId ||
+          context.opponentId !== expectedOpponent
+        ) {
+          throw new Error("streaming_duel_executor_recovery_invalid");
+        }
+        const recovered =
+          await service.recoverStreamingDuelExecutorCommand(command);
+        if (!recovered.completed || !recovered.outcome) {
+          throw new Error("streaming_duel_executor_recovery_incomplete");
+        }
+        this.recordControllerPublicAction(
+          cycle.cycleId,
+          duelId,
+          context.actorId,
+          context.opponentId,
+          {
+            tick: context.tick,
+            combatRole: context.combatRole,
+            tacticalMacro: context.tacticalMacro,
+            action: context.action,
+            outcome: recovered.outcome,
+            value: context.value,
+            amount: null,
+          } as DuelCombatPublicActionObservation,
+          {
+            operationId: context.operationId,
+            observedAt: context.observedAt,
+          },
+        );
+      }
+    } else if (competitive && hasSystemLookup) {
+      throw new Error("streaming_duel_executor_database_unavailable");
     }
 
     if (service1) {
@@ -4490,17 +5189,39 @@ export class DuelOrchestrator {
               ? this.cloneFrozenCombatLoadouts(frozen1.combatLoadouts)
               : {},
           loadoutSwitchOperationPrefix: `combat-loadout:${cycle.cycleId}:${agent1.characterId}`,
-          switchCombatRole: async (targetRole, operationId) => {
+          switchCombatRole: async (
+            targetRole,
+            operationId,
+            publicActionObservation,
+          ) => {
             const result = await this.switchFrozenCombatRole(
               cycle.cycleId,
               agent1.characterId,
               targetRole,
               operationId,
+              publicActionObservation,
             );
             if (result.ok) service1.invalidateCombatLoadoutObservation();
             return result;
           },
           initialStrafeSign: 1,
+          publicActionIdentity: {
+            cycleId: cycle.cycleId,
+            duelId: cycle.duelId ?? `streaming-${cycle.cycleId}`,
+            actorId: agent1.characterId,
+            opponentId: agent2.characterId,
+            phase: "FIGHTING",
+          },
+          onPublicActionObservation: (observation, persistence) => {
+            this.recordControllerPublicAction(
+              cycle.cycleId,
+              cycle.duelId ?? `streaming-${cycle.cycleId}`,
+              agent1.characterId,
+              agent2.characterId,
+              observation,
+              persistence,
+            );
+          },
         },
         runtime1 ?? undefined,
         // Trash talk callback — sends chat as overhead bubble via the agent's service
@@ -4538,17 +5259,39 @@ export class DuelOrchestrator {
               ? this.cloneFrozenCombatLoadouts(frozen2.combatLoadouts)
               : {},
           loadoutSwitchOperationPrefix: `combat-loadout:${cycle.cycleId}:${agent2.characterId}`,
-          switchCombatRole: async (targetRole, operationId) => {
+          switchCombatRole: async (
+            targetRole,
+            operationId,
+            publicActionObservation,
+          ) => {
             const result = await this.switchFrozenCombatRole(
               cycle.cycleId,
               agent2.characterId,
               targetRole,
               operationId,
+              publicActionObservation,
             );
             if (result.ok) service2.invalidateCombatLoadoutObservation();
             return result;
           },
           initialStrafeSign: -1,
+          publicActionIdentity: {
+            cycleId: cycle.cycleId,
+            duelId: cycle.duelId ?? `streaming-${cycle.cycleId}`,
+            actorId: agent2.characterId,
+            opponentId: agent1.characterId,
+            phase: "FIGHTING",
+          },
+          onPublicActionObservation: (observation, persistence) => {
+            this.recordControllerPublicAction(
+              cycle.cycleId,
+              cycle.duelId ?? `streaming-${cycle.cycleId}`,
+              agent2.characterId,
+              agent1.characterId,
+              observation,
+              persistence,
+            );
+          },
         },
         runtime2 ?? undefined,
         // Trash talk callback — sends chat as overhead bubble via the agent's service
@@ -4570,12 +5313,21 @@ export class DuelOrchestrator {
     }
   }
 
-  /** Bounded live diagnostics for the authoritative combat controllers. */
-  getCombatAIDiagnostics(): Array<
-    { characterId: string } & ReturnType<DuelCombatAI["getStats"]>
-  > {
+  /** Bounded live or most-recent terminal diagnostics for the authoritative pair. */
+  getCombatAIDiagnostics(): DuelCombatAIDiagnosticSnapshot[] {
+    if (this.combatAIs.size === 0) {
+      return this.lastStoppedCombatAIDiagnostics.map((diagnostic) => ({
+        ...diagnostic,
+      }));
+    }
+    const cycle = this.getCurrentCycle();
+    const capturedAtMs = Date.now();
     return [...this.combatAIs].map(([characterId, ai]) => ({
       characterId,
+      cycleId: cycle?.cycleId ?? null,
+      duelId: cycle?.duelId ?? null,
+      active: true,
+      capturedAtMs,
       ...ai.getStats(),
     }));
   }
@@ -4583,18 +5335,33 @@ export class DuelOrchestrator {
   /** Stop all DuelCombatAI instances and log their final stats. */
   stopCombatAIs(): Promise<void> {
     const previousShutdown = this.combatAiShutdownInFlight;
+    const activePairTick = this.combatAiTickInFlight ?? Promise.resolve();
     const tickShutdowns: Promise<void>[] = [];
+    const cycle = this.getCurrentCycle();
+    const capturedAtMs = Date.now();
+    const stoppedDiagnostics: DuelCombatAIDiagnosticSnapshot[] = [];
     for (const [characterId, ai] of this.combatAIs) {
       const stats = ai.getStats();
+      stoppedDiagnostics.push({
+        characterId,
+        cycleId: cycle?.cycleId ?? null,
+        duelId: cycle?.duelId ?? null,
+        active: false,
+        capturedAtMs,
+        ...stats,
+      });
       Logger.info(
         "StreamingDuelScheduler",
-        `Combat AI request stats for ${characterId}: role=${stats.combatRole}, switches=${stats.successfulRoleSwitches}/${stats.roleSwitchAttempts} (${stats.roleSwitchFailures} failed), ${stats.engagementAttempts} engagement attempts, ${stats.foodUseAttempts} food-use attempts, ${stats.movementRequests} movement requests (${stats.movementPathsActive} active/${stats.movementPathsInactive} inactive paths), distance=${stats.minObservedDistance?.toFixed(2) ?? "n/a"}..${stats.maxObservedDistance.toFixed(2)}, ${stats.totalDamageDealt} observed dmg dealt`,
+        `Combat AI request stats for ${characterId}: role=${stats.combatRole}, switches=${stats.successfulRoleSwitches}/${stats.roleSwitchAttempts} (${stats.roleSwitchDeferrals} attack-completion deferrals, ${stats.roleSwitchFailures} failed), engagements=${stats.engagementAccepts}/${stats.engagementAttempts} accepted (${stats.engagementRejects} rejected, ${stats.engagementErrors} errored), styles=${stats.styleChangeAccepts}/${stats.styleChangeAttempts} accepted (${stats.styleChangeRejects} rejected, ${stats.styleChangeErrors} errored), prayers=${stats.prayerToggleCommits}/${stats.prayerToggleAttempts} committed (${stats.prayerToggleRejects} rejected; last failure=${stats.lastPrayerToggleFailureReason ?? "none"}), ${stats.foodUseAttempts} food-use attempts, movement=${stats.movementAccepts}/${stats.movementRequests} accepted (${stats.movementRejects} rejected, ${stats.movementErrors} errored; ${stats.movementPathsActive} active/${stats.movementPathsInactive} inactive paths), distance=${stats.minObservedDistance?.toFixed(2) ?? "n/a"}..${stats.maxObservedDistance?.toFixed(2) ?? "n/a"}, ${stats.totalDamageDealt} observed dmg dealt`,
       );
       tickShutdowns.push(ai.stopAndWaitForIdle());
       const entity = this.world.entities.get(characterId);
       if (entity) {
         (entity.data as Record<string, unknown>).duelAiControlsMovement = false;
       }
+    }
+    if (stoppedDiagnostics.length > 0) {
+      this.lastStoppedCombatAIDiagnostics = stoppedDiagnostics;
     }
     this.combatAIs.clear();
     // Release arena mode: restore movement freedom and autonomous behavior.
@@ -4603,9 +5370,11 @@ export class DuelOrchestrator {
       service.setAutonomousBehaviorEnabled(wasAutonomous);
     }
     this._arenaModeServices = [];
-    const shutdown = Promise.all([previousShutdown, ...tickShutdowns]).then(
-      () => undefined,
-    );
+    const shutdown = Promise.all([
+      previousShutdown,
+      activePairTick,
+      ...tickShutdowns,
+    ]).then(() => undefined);
     this.combatAiShutdownInFlight = shutdown;
     void shutdown.then(() => {
       if (this.combatAiShutdownInFlight === shutdown) {
@@ -4613,6 +5382,11 @@ export class DuelOrchestrator {
       }
     });
     return shutdown;
+  }
+
+  /** Await all projectile custody already authorized by the combat runtime. */
+  waitForCombatCustodySettlements(): Promise<void> {
+    return this.combatCustodyShutdownInFlight;
   }
 
   // ============================================================================
@@ -4632,6 +5406,12 @@ export class DuelOrchestrator {
     if (entity1) {
       entity1.data.inStreamingDuel = inDuel;
       entity1.data.preventRespawn = inDuel;
+      (entity1.data as Record<string, unknown>).streamingDuelCombatRole = inDuel
+        ? (this.combatRolesByAgent.get(agent1.characterId) ?? "melee")
+        : null;
+      (entity1.data as Record<string, unknown>).streamingDuelWeaponId = inDuel
+        ? this.getEquippedWeaponId(agent1.characterId)
+        : null;
       (entity1.data as Record<string, unknown>).streamingDuelOpponentId = inDuel
         ? agent2.characterId
         : null;
@@ -4643,6 +5423,12 @@ export class DuelOrchestrator {
     if (entity2) {
       entity2.data.inStreamingDuel = inDuel;
       entity2.data.preventRespawn = inDuel;
+      (entity2.data as Record<string, unknown>).streamingDuelCombatRole = inDuel
+        ? (this.combatRolesByAgent.get(agent2.characterId) ?? "melee")
+        : null;
+      (entity2.data as Record<string, unknown>).streamingDuelWeaponId = inDuel
+        ? this.getEquippedWeaponId(agent2.characterId)
+        : null;
       (entity2.data as Record<string, unknown>).streamingDuelOpponentId = inDuel
         ? agent1.characterId
         : null;
@@ -4674,6 +5460,8 @@ export class DuelOrchestrator {
       entity.data.preventRespawn = false;
       (entity.data as Record<string, unknown>).arenaBounds = null;
       (entity.data as Record<string, unknown>).streamingDuelOpponentId = null;
+      (entity.data as Record<string, unknown>).streamingDuelCombatRole = null;
+      (entity.data as Record<string, unknown>).streamingDuelWeaponId = null;
       (entity.data as Record<string, unknown>).duelAiControlsMovement = false;
     }
   }
@@ -4708,6 +5496,8 @@ export class DuelOrchestrator {
       entity.data.preventRespawn = false;
       (entity.data as Record<string, unknown>).arenaBounds = null;
       (entity.data as Record<string, unknown>).streamingDuelOpponentId = null;
+      (entity.data as Record<string, unknown>).streamingDuelCombatRole = null;
+      (entity.data as Record<string, unknown>).streamingDuelWeaponId = null;
       (entity.data as Record<string, unknown>).duelAiControlsMovement = false;
     }
   }
@@ -4735,6 +5525,8 @@ export class DuelOrchestrator {
         entity.data.preventRespawn = false;
         (entity.data as Record<string, unknown>).arenaBounds = null;
         (entity.data as Record<string, unknown>).streamingDuelOpponentId = null;
+        (entity.data as Record<string, unknown>).streamingDuelCombatRole = null;
+        (entity.data as Record<string, unknown>).streamingDuelWeaponId = null;
         (entity.data as Record<string, unknown>).duelAiControlsMovement = false;
       }
     }
@@ -4809,6 +5601,7 @@ export class DuelOrchestrator {
     const combatSystem = this.world.getSystem("combat") as {
       forceEndCombat?: (entityId: string) => void;
       isInCombat?: (entityId: string) => boolean;
+      waitForProjectileCustodySettlements?: () => Promise<void>;
     } | null;
 
     // Use the CombatSystem's forceEndCombat to properly tear down internal
@@ -4819,6 +5612,22 @@ export class DuelOrchestrator {
       } catch {
         // Agent may not have active combat state; safe to ignore.
       }
+    }
+    if (combatSystem?.waitForProjectileCustodySettlements) {
+      const previousShutdown = this.combatCustodyShutdownInFlight;
+      const shutdown = Promise.all([
+        previousShutdown,
+        combatSystem.waitForProjectileCustodySettlements(),
+      ]).then(() => undefined);
+      this.combatCustodyShutdownInFlight = shutdown;
+      void shutdown.then(
+        () => {
+          if (this.combatCustodyShutdownInFlight === shutdown) {
+            this.combatCustodyShutdownInFlight = Promise.resolve();
+          }
+        },
+        () => undefined,
+      );
     }
 
     // Clear entity-level combat flags as a belt-and-suspenders measure.
@@ -4883,18 +5692,6 @@ export class DuelOrchestrator {
       if (!cycle || cycle.phase !== "FIGHTING") return;
 
       this.engagementMetrics.checks++;
-      this.combatRetryCount++;
-      if (this.combatRetryCount > DuelOrchestrator.MAX_COMBAT_RETRIES) {
-        this.engagementMetrics.failures++;
-        Logger.warn(
-          "StreamingDuelScheduler",
-          `Combat retry limit reached (${this.combatRetryCount}/${DuelOrchestrator.MAX_COMBAT_RETRIES}) — cancelling duel as no contest`,
-        );
-        this.combatRetryCount = 0;
-        this.onAbort("combat_engagement_failed");
-        return;
-      }
-
       const combatSystem = this.world.getSystem("combat") as {
         startCombat?: (
           attackerId: string,
@@ -4902,6 +5699,9 @@ export class DuelOrchestrator {
           options?: { attackerType?: string; targetType?: string },
         ) => boolean;
         isInCombat?: (entityId: string) => boolean;
+        getDuelDamageReconciliationStats?: () => {
+          pendingOperations?: unknown;
+        };
       } | null;
 
       const entity1 = this.world.entities.get(agent1Id);
@@ -4917,6 +5717,37 @@ export class DuelOrchestrator {
           this.engagementMetrics.recoveries++;
         }
         this.combatRetryCount = 0; // Reset on success
+        return;
+      }
+
+      // Persisted duel damage is committed before it mutates live health. A
+      // hit can therefore be settling at the exact instant this wall-clock
+      // watchdog samples combat state. Repositioning or counting a failure in
+      // that custody window can tear down a healthy fight, and this 3-second
+      // check naturally phase-locks with several weapon cadences. Defer without
+      // consuming the retry budget; the normal fight deadline still bounds an
+      // indefinitely unresolved persistence operation.
+      const pendingDamageOperations = Number(
+        combatSystem?.getDuelDamageReconciliationStats?.().pendingOperations ??
+          0,
+      );
+      if (
+        Number.isSafeInteger(pendingDamageOperations) &&
+        pendingDamageOperations > 0
+      ) {
+        this.scheduleCombatRetryIfNeeded(agent1Id, agent2Id);
+        return;
+      }
+
+      this.combatRetryCount++;
+      if (this.combatRetryCount > DuelOrchestrator.MAX_COMBAT_RETRIES) {
+        this.engagementMetrics.failures++;
+        Logger.warn(
+          "StreamingDuelScheduler",
+          `Combat retry limit reached (${this.combatRetryCount}/${DuelOrchestrator.MAX_COMBAT_RETRIES}) — cancelling duel as no contest`,
+        );
+        this.combatRetryCount = 0;
+        this.onAbort("combat_engagement_failed");
         return;
       }
 
@@ -5003,8 +5834,6 @@ export class DuelOrchestrator {
       clearInterval(this.combatLoopInterval);
     }
     this.combatLoopTickCount = 0;
-    const movementBounds = this.getStreamingArenaMovementBounds();
-
     const TICK_MS = 600; // Match game tick duration
 
     this.combatLoopInterval = setInterval(() => {
@@ -5016,85 +5845,127 @@ export class DuelOrchestrator {
         }
         return;
       }
-
-      this.combatLoopTickCount++;
-
-      const { agent1, agent2 } = cycle;
-      if (!agent1 || !agent2) return;
-      if (!this.hasCurrentCompetitiveAgentPolicies(cycle)) {
+      void this.runCombatAITickOnce().catch((err) => {
         Logger.warn(
           "StreamingDuelScheduler",
-          "Competitive agent policy changed after market freeze; cancelling the duel",
+          `Combat AI pair tick failed: ${err instanceof Error ? err.message : String(err)}`,
         );
-        this.onAbort("competitive_agent_policy_drift");
+      });
+    }, TICK_MS);
+  }
+
+  /**
+   * Execute one causally ordered controller tick for the current pair. A slow
+   * durable movement or engagement commit cannot overlap the opponent's next
+   * decision or accumulate interval backlog. First-mover order alternates on
+   * each admitted tick so serialization introduces no persistent side bias.
+   */
+  runCombatAITickOnce(): Promise<void> {
+    if (this.combatAiTickInFlight) return this.combatAiTickInFlight;
+    const cycle = this.getCurrentCycle();
+    if (
+      !cycle ||
+      cycle.phase !== "FIGHTING" ||
+      !cycle.agent1 ||
+      !cycle.agent2
+    ) {
+      return Promise.resolve();
+    }
+    this.combatLoopTickCount++;
+    const tickNumber = this.combatLoopTickCount;
+    const operation = this.executeCombatAITick(
+      cycle.cycleId,
+      cycle.agent1.characterId,
+      cycle.agent2.characterId,
+      tickNumber,
+    );
+    this.combatAiTickInFlight = operation;
+    const clearOperation = (): void => {
+      if (this.combatAiTickInFlight === operation) {
+        this.combatAiTickInFlight = null;
+      }
+    };
+    void operation.then(clearOperation, clearOperation);
+    return operation;
+  }
+
+  waitForCombatAITick(): Promise<void> {
+    return this.combatAiTickInFlight ?? Promise.resolve();
+  }
+
+  private async executeCombatAITick(
+    cycleId: string,
+    agent1Id: string,
+    agent2Id: string,
+    tickNumber: number,
+  ): Promise<void> {
+    const cycle = this.getCurrentCycle();
+    if (!cycle || cycle.cycleId !== cycleId || cycle.phase !== "FIGHTING") {
+      return;
+    }
+    if (!this.hasCurrentCompetitiveAgentPolicies(cycle)) {
+      Logger.warn(
+        "StreamingDuelScheduler",
+        "Competitive agent policy changed after market freeze; cancelling the duel",
+      );
+      this.onAbort("competitive_agent_policy_drift");
+      return;
+    }
+
+    this.enforceStreamingArenaBounds(
+      [agent1Id, agent2Id],
+      this.getStreamingArenaMovementBounds(),
+    );
+    this.reassertDuelFaceTargets(cycleId);
+
+    const controllerEntries = [...this.combatAIs];
+    if (tickNumber % 2 === 0) controllerEntries.reverse();
+    for (const [characterId, ai] of controllerEntries) {
+      const currentCycle = this.getCurrentCycle();
+      if (
+        !currentCycle ||
+        currentCycle.cycleId !== cycleId ||
+        currentCycle.phase !== "FIGHTING" ||
+        this.combatAIs.get(characterId) !== ai
+      ) {
         return;
       }
-
-      // Target clamping prevents normal paths from leaving the ring. This
-      // independent tick-aligned guard also recovers physics overshoot,
-      // external position mutation, or stale paths before another AI action.
-      this.enforceStreamingArenaBounds(
-        [agent1.characterId, agent2.characterId],
-        movementBounds,
-      );
-
-      // Keep a bounded authoritative target even if a prior combat subsystem
-      // cleared presentation ownership between scheduler ticks.
-      this.reassertDuelFaceTargets(cycle.cycleId);
-
-      // Drive DuelCombatAI ticks synchronously with this loop. Ordinary
-      // ground-path movement deliberately clears normal-world combat facing.
-      // A duel is different: its authoritative pair remains mutually engaged
-      // while either contestant kites or repositions, so reassert the frozen
-      // opponent targets after every deterministic combat tick completes.
-      const combatAiTicks: Promise<void>[] = [];
-      for (const [characterId, ai] of this.combatAIs) {
-        combatAiTicks.push(
-          ai
-            .externalTick()
-            .catch((err) => {
-              Logger.warn(
-                "StreamingDuelScheduler",
-                `Combat AI tick error for ${characterId}: ${err instanceof Error ? err.message : String(err)}`,
-              );
-            })
-            .finally(() => {
-              // executeMove starts its authoritative path before an AI tick
-              // resolves. Reassert after each contestant independently so one
-              // slow policy action cannot leave the other facing its path.
-              this.reassertDuelFaceTargets(cycle.cycleId);
-            }),
+      try {
+        await ai.externalTick();
+      } catch (err) {
+        Logger.warn(
+          "StreamingDuelScheduler",
+          `Combat AI tick error for ${characterId}: ${err instanceof Error ? err.message : String(err)}`,
         );
+      } finally {
+        this.reassertDuelFaceTargets(cycleId);
       }
-      void Promise.allSettled(combatAiTicks);
+    }
 
-      // Hard-enforce minimum separation — the tile movement system has no
-      // player-player collision, so we must prevent stacking directly.
-      this.enforceAgentSeparation(agent1.characterId, agent2.characterId);
+    const currentCycle = this.getCurrentCycle();
+    if (
+      !currentCycle ||
+      currentCycle.cycleId !== cycleId ||
+      currentCycle.phase !== "FIGHTING"
+    ) {
+      return;
+    }
+    this.enforceAgentSeparation(agent1Id, agent2Id);
 
-      // Re-engage agents that DON'T have an active AI every ~3 seconds (5 ticks)
-      if (this.combatLoopTickCount % 5 !== 0) return;
+    if (tickNumber % 5 !== 0) return;
+    const agent1HasAI = this.combatAIs.has(agent1Id);
+    const agent2HasAI = this.combatAIs.has(agent2Id);
+    if (agent1HasAI && agent2HasAI) return;
 
-      const agent1HasAI = this.combatAIs.has(agent1.characterId);
-      const agent2HasAI = this.combatAIs.has(agent2.characterId);
-
-      // If both agents have AI, skip re-engagement entirely
-      if (agent1HasAI && agent2HasAI) return;
-
-      const entity1 = this.world.entities.get(agent1.characterId);
-      const entity2 = this.world.entities.get(agent2.characterId);
-
-      // Only re-engage agents without an active AI
-      if (!agent1HasAI && entity1 && !entity1.data.combatTarget) {
-        this.setAgentCombatTarget(agent1.characterId, agent2.characterId);
-      }
-      if (!agent2HasAI && entity2 && !entity2.data.combatTarget) {
-        this.setAgentCombatTarget(agent2.characterId, agent1.characterId);
-      }
-
-      // Re-initiate combat via system
-      this.tryMutualCombat(agent1.characterId, agent2.characterId);
-    }, TICK_MS);
+    const entity1 = this.world.entities.get(agent1Id);
+    const entity2 = this.world.entities.get(agent2Id);
+    if (!agent1HasAI && entity1 && !entity1.data.combatTarget) {
+      this.setAgentCombatTarget(agent1Id, agent2Id);
+    }
+    if (!agent2HasAI && entity2 && !entity2.data.combatTarget) {
+      this.setAgentCombatTarget(agent2Id, agent1Id);
+    }
+    this.tryMutualCombat(agent1Id, agent2Id);
   }
 
   private reassertDuelFaceTargets(cycleId: string): void {
@@ -5281,7 +6152,7 @@ export class DuelOrchestrator {
   // Fight Resolution
   // ============================================================================
 
-  endFightByTimeout(): void {
+  endFightByTimeout(terminalAtOverride?: number): void {
     const cycle = this.getCurrentCycle();
     if (!cycle?.agent1 || !cycle?.agent2) return;
 
@@ -5299,7 +6170,7 @@ export class DuelOrchestrator {
       agent1.currentHp === agent1.maxHp &&
       agent2.currentHp === agent2.maxHp
     ) {
-      this.onAbort("no_combat_activity");
+      this.onAbort("no_combat_activity", terminalAtOverride);
       return;
     }
 
@@ -5331,18 +6202,19 @@ export class DuelOrchestrator {
         winReason = "damage_advantage";
       } else {
         // True draw — both HP and damage equal, with no winner or loser.
-        this.startResolution(null, null, "draw");
+        this.startResolution(null, null, "draw", terminalAtOverride);
         return;
       }
     }
 
-    this.startResolution(winnerId, loserId, winReason);
+    this.startResolution(winnerId, loserId, winReason, terminalAtOverride);
   }
 
   startResolution(
     winnerId: string | null,
     loserId: string | null,
     winReason: StreamingDuelWinReason,
+    terminalAtOverride?: number,
   ): void {
     const cycle = this.getCurrentCycle();
     if (!cycle) return;
@@ -5388,7 +6260,7 @@ export class DuelOrchestrator {
     }
 
     // Notify the facade to handle resolution (phase transition, stats, recording, camera)
-    this.onResolution(winnerId, loserId, winReason);
+    this.onResolution(winnerId, loserId, winReason, terminalAtOverride);
 
     // Delay the victory emote so all death/combat cleanup (emote resets,
     // combat state teardown, scheduled animation resets) finishes first.
@@ -5503,7 +6375,10 @@ export class DuelOrchestrator {
       // consuming provisioned food after stop() revokes future decisions.
       // Do not inspect or mutate those custody domains until that exact tick
       // has fully unwound.
-      await this.combatAiShutdownInFlight;
+      await Promise.all([
+        this.combatAiShutdownInFlight,
+        this.combatCustodyShutdownInFlight,
+      ]);
       // Remove scheduler-owned combat gear and food.
       await Promise.all([
         this.finishDuelPrayerTeardown(cycleSnapshot),
@@ -5550,7 +6425,10 @@ export class DuelOrchestrator {
 
     // Match normal resolution: scheduler-owned equipment and food must not
     // race an already-authorized controller receipt during an abort.
-    await this.combatAiShutdownInFlight;
+    await Promise.all([
+      this.combatAiShutdownInFlight,
+      this.combatCustodyShutdownInFlight,
+    ]);
     await Promise.all([
       this.finishDuelPrayerTeardown(cycleSnapshot),
       ...agents.map((agent) => this.cleanupAgentCombatSetup(agent.characterId)),
@@ -5801,16 +6679,7 @@ export class DuelOrchestrator {
     // Tear down CombatSystem internal state (StateService entries, attack
     // cooldowns, animation resets) so the combat tick doesn't re-set entity
     // flags after we clear them below.
-    const combatSystem = this.world.getSystem("combat") as {
-      forceEndCombat?: (entityId: string) => void;
-    } | null;
-    if (combatSystem?.forceEndCombat) {
-      try {
-        combatSystem.forceEndCombat(playerId);
-      } catch {
-        // Agent may not have active combat state; safe to ignore.
-      }
-    }
+    this.forceStopAgentCombat(playerId);
 
     const entity = this.world.entities.get(playerId);
     if (!entity) return;
@@ -5854,6 +6723,10 @@ export class DuelOrchestrator {
 
   private getPrayerSystem(): PrayerSystemView | null {
     return this.world.getSystem("prayer") as PrayerSystemView | null;
+  }
+
+  private getPlayerSystem(): PlayerSystemView | null {
+    return this.world.getSystem("player") as PlayerSystemView | null;
   }
 
   private isDiagnosticProvisioningAllowed(playerId: string): boolean {

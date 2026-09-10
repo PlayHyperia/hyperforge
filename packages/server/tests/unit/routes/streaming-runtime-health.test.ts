@@ -33,8 +33,13 @@ function healthyInput() {
       observedAt: 9_500,
       error: null,
       reasons: [],
+      correlationIds: [],
     },
     keeperMaxAgeMs: 2_000,
+    projectileCostCustody: {
+      healthy: true,
+      status: "healthy" as const,
+    },
   };
 }
 
@@ -75,6 +80,7 @@ describe("streaming runtime health", () => {
           observedAt: null,
           error: null,
           reasons: [],
+          correlationIds: [],
         },
       },
       {
@@ -84,6 +90,7 @@ describe("streaming runtime health", () => {
           observedAt: 9_500,
           error: null,
           reasons: ["market-recovery-active"],
+          correlationIds: [],
         },
       },
       {
@@ -93,6 +100,13 @@ describe("streaming runtime health", () => {
           observedAt: 1_000,
           error: null,
           reasons: [],
+          correlationIds: [],
+        },
+      },
+      {
+        projectileCostCustody: {
+          healthy: false,
+          status: "stalled" as const,
         },
       },
     ];
@@ -105,6 +119,22 @@ describe("streaming runtime health", () => {
         }).ready,
       ).toBe(false);
     }
+  });
+
+  it("reports the exact aggregate projectile-custody failure reason", () => {
+    expect(
+      evaluateStreamingRuntimeHealth({
+        ...healthyInput(),
+        projectileCostCustody: {
+          healthy: false,
+          status: "invalid",
+        },
+      }).checks.projectileCostCustody,
+    ).toEqual({
+      ready: false,
+      reason: "projectile_cost_custody_invalid",
+      observedAt: 10_000,
+    });
   });
 
   it("accepts a fresh browser master-mix source and rejects a stale one", () => {
@@ -153,6 +183,7 @@ describe("streaming runtime health", () => {
             JSON.stringify({
               ok: true,
               now: 9_500,
+              correlationIds: ["b".repeat(64), "a".repeat(64), "b".repeat(64)],
               readiness: { ready: true, reasons: [] },
             }),
             { status: 200 },
@@ -165,6 +196,7 @@ describe("streaming runtime health", () => {
       observedAt: 9_500,
       error: null,
       reasons: [],
+      correlationIds: ["a".repeat(64), "b".repeat(64)],
     });
 
     const degraded = await loadKeeperRuntimeObservation({
@@ -176,6 +208,7 @@ describe("streaming runtime health", () => {
             JSON.stringify({
               ok: true,
               now: 9_600,
+              correlationIds: ["NOT-CANONICAL", "c".repeat(64)],
               readiness: {
                 ready: false,
                 reasons: ["market-recovery-active", "market-recovery-active"],
@@ -187,6 +220,7 @@ describe("streaming runtime health", () => {
     });
     expect(degraded.ready).toBe(false);
     expect(degraded.reasons).toEqual(["market-recovery-active"]);
+    expect(degraded.correlationIds).toEqual(["c".repeat(64)]);
   });
 
   it("reports missing, HTTP-failed, and timed-out keeper sources", async () => {

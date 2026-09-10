@@ -1,0 +1,102 @@
+{
+  "schemaVersion": 1,
+  "activationGroupId": "steve-core-preparation-v1",
+  "avatarId": "steve",
+  "avatarAsset": "packages/server/world/assets/avatars/duel-candidates/duel-steve.vrm",
+  "itemsManifest": {
+    "path": "manifests/items/tools.json",
+    "baselineSha256": "df50c75e1aed972293fff561dd73afe6a91b6bbe07b3e5d539f565b8d8303190"
+  },
+  "runtimeManifest": {
+    "path": "manifests/duel-presentation-assets.json",
+    "baselineSha256": "18f786f7734a38259325635e196d2902c3f71fddb3bfa9709a2f3eca65c67a4e",
+    "preserveActivationIds": ["steve-harpoon-v1"],
+    "optionalPreserveActivationIds": [
+      "steve-fly-fishing-rod-v1",
+      "steve-small-fishing-net-v1",
+      "steve-lobster-pot-v1"
+    ]
+  },
+  "reports": {
+    "toolTiers": {
+      "path": "artifacts/duel-launch-avatar-bakeoff/steve-preparation-tool-tier-report.json",
+      "sha256": "89d975d79615e594fc2c3310ead6d2418afa4641d7a2bc9caaaa9cc2832e0da9"
+    },
+    "activeFits": {
+      "path": "artifacts/duel-launch-avatar-bakeoff/steve-active-preparation-fit-report.json",
+      "sha256": "90573eb21aa4cdad3bd8913e72297860eabaf5c60335bb94c3374c79d1ce57c8"
+    },
+    "motions": {
+      "path": "artifacts/duel-launch-avatar-bakeoff/steve-preparation-motion-candidate-report.json",
+      "sha256": "0e793eaca2c7168cc3f3c9f27fd13e7ed2e167d00eeb7ef8f3918018109b16d4"
+    }
+  },
+  "families": [
+    {
+      "id": "woodcutting",
+      "bodyEmoteKey": "chopping",
+      "itemIds": [
+        "bronze_hatchet",
+        "iron_hatchet",
+        "steel_hatchet",
+        "mithril_hatchet",
+        "adamant_hatchet",
+        "rune_hatchet"
+      ],
+      "motionId": "woodcutting",
+      "motionDestinationPath": "emotes/emote-steve-woodcutting.glb",
+      "reviewItemId": "bronze_hatchet",
+      "reviewReport": {
+        "path": "artifacts/duel-launch-avatar-bakeoff/fitted-steve-active-preparation/bronze-hatchet-motion-report.json",
+        "sha256": "6e66b5620c2d5c10651d8974ee6d14e189388cc0f7d3812f321a6567cdd720f1"
+      },
+      "contactSheet": {
+        "path": "artifacts/duel-launch-avatar-bakeoff/fitted-steve-active-preparation/bronze-hatchet-contact-sheet.png",
+        "sha256": "2a9186e7cf352fc329eb46f2ac0c6f616f113d31e867ffcc01e11a1806b34539"
+      },
+      "rollbackBodyEmotePath": "asset://emotes/emote_chopping.glb"
+    },
+    {
+      "id": "mining",
+      "bodyEmoteKey": "mining",
+      "itemIds": [
+        "bronze_pickaxe",
+        "iron_pickaxe",
+        "steel_pickaxe",
+        "mithril_pickaxe",
+        "adamant_pickaxe",
+        "rune_pickaxe"
+      ],
+      "motionId": "mining",
+      "motionDestinationPath": "emotes/emote-steve-mining.glb",
+      "reviewItemId": "bronze_pickaxe",
+      "reviewReport": {
+        "path": "artifacts/duel-launch-avatar-bakeoff/fitted-steve-active-preparation/bronze-pickaxe-motion-report.json",
+        "sha256": "7df59d76edf4495dc1cad2f886938bc01e982a434a1bb97b4c8f5fb981b3d3c9"
+      },
+      "contactSheet": {
+        "path": "artifacts/duel-launch-avatar-bakeoff/fitted-steve-active-preparation/bronze-pickaxe-contact-sheet.png",
+        "sha256": "e23d3d69253f0743bc7eb955b57a0a8978e611b43546396e1dbbbd980524cc0f"
+      },
+      "rollbackBodyEmotePath": "asset://emotes/emote_chopping.glb"
+    },
+    {
+      "id": "fishing",
+      "bodyEmoteKey": "fishing_rod",
+      "itemIds": ["fishing_rod"],
+      "motionId": "fishing",
+      "motionDestinationPath": "emotes/emote-steve-fishing-cast.glb",
+      "reviewItemId": "fishing_rod",
+      "reviewReport": {
+        "path": "artifacts/duel-launch-avatar-bakeoff/fitted-steve-active-preparation/fishing-rod-motion-report.json",
+        "sha256": "2d39bfec549d1498ea8b04d204f95b2f2cac373e469ba9990b87aef49487be95"
+      },
+      "contactSheet": {
+        "path": "artifacts/duel-launch-avatar-bakeoff/fitted-steve-active-preparation/fishing-rod-contact-sheet.png",
+        "sha256": "a6d61c2fc8dde96f570774433e37ae42fdedf0c731c4fa99969eeca79ae06c7c"
+      },
+      "rollbackBodyEmotePath": "asset://emotes/emote-fishing.glb"
+    }
+  ],
+  "equipmentDestinationDirectory": "models/tools/preparation"
+}

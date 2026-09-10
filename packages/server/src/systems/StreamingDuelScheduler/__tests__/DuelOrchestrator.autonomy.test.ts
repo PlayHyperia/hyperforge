@@ -3,6 +3,7 @@ import {
   EntityOccupancyMap,
   ITEMS,
   type PrayerActionReceipt,
+  type StreamingDuelExecutorCommandReceipt,
   ammunitionService,
   createEntityID,
   getDuelArenaConfig,
@@ -11,10 +12,13 @@ import {
   worldToTile,
 } from "@hyperforge/shared";
 import prayersManifest from "../../../../world/assets/manifests/prayers.json";
+import weaponsManifest from "../../../../world/assets/manifests/items/weapons.json";
 
 import {
   DuelOrchestrator,
   isLocalDiagnosticDuelRuntime,
+  isStreamingDuelMeleeWeaponTypePresentationEligible,
+  resolveStandaloneSingleStyleCombatLoadout,
 } from "../managers/DuelOrchestrator";
 import {
   getAgentManager,
@@ -22,6 +26,7 @@ import {
 } from "../../../eliza/AgentManager.js";
 import { buildDeterministicCompetitiveTacticalStrategy } from "../competitive-tactical-strategy.js";
 import { TileMovementManager } from "../../ServerNetwork/tile-movement";
+import { isStreamingDuelEquipmentPresentationEligible } from "../../../streaming/duel-equipment-presentation.js";
 
 describe("local diagnostic duel runtime boundary", () => {
   const validEnvironment = {
@@ -44,6 +49,22 @@ describe("local diagnostic duel runtime boundary", () => {
         DUEL_HYPERBET_READ_ONLY_MODE: "true",
       }),
     ).toBe(true);
+    expect(
+      isLocalDiagnosticDuelRuntime({
+        ...validEnvironment,
+        DUEL_WITH_HYPERBET: "true",
+        DUEL_LOCAL_SOLANA_MODE: "true",
+        SOLANA_RPC_URL: "http://127.0.0.1:18899",
+      }),
+    ).toBe(true);
+    expect(
+      isLocalDiagnosticDuelRuntime({
+        ...validEnvironment,
+        DUEL_WITH_HYPERBET: "true",
+        DUEL_LOCAL_SOLANA_MODE: "true",
+        SOLANA_RPC_URL: "https://api.mainnet-beta.solana.com",
+      }),
+    ).toBe(false);
     for (const [name, value] of [
       ["NODE_ENV", "development"],
       ["DUEL_LOCAL_SMOKE_MODE", "false"],
@@ -62,6 +83,114 @@ describe("local diagnostic duel runtime boundary", () => {
         name,
       ).toBe(false);
     }
+  });
+});
+
+describe("streaming duel melee presentation gate", () => {
+  it("admits every canonical weapon family with certified presentation", () => {
+    for (const itemId of [
+      "bronze_shortsword",
+      "bronze_longsword",
+      "bronze_scimitar",
+    ]) {
+      const weapon = weaponsManifest.find((item) => item.id === itemId);
+      expect(weapon, itemId).toBeDefined();
+      expect(
+        isStreamingDuelMeleeWeaponTypePresentationEligible(weapon?.weaponType),
+        itemId,
+      ).toBe(true);
+    }
+    expect(
+      isStreamingDuelMeleeWeaponTypePresentationEligible("battleaxe"),
+    ).toBe(false);
+    expect(
+      isStreamingDuelMeleeWeaponTypePresentationEligible("TWO_HAND_SWORD"),
+    ).toBe(false);
+    expect(isStreamingDuelMeleeWeaponTypePresentationEligible(null)).toBe(
+      false,
+    );
+  });
+});
+
+describe("standalone single-style combat loadouts", () => {
+  it("uses one deterministic technically fitted loadout for every diagnostic role", () => {
+    expect(resolveStandaloneSingleStyleCombatLoadout("melee")).toEqual({
+      weaponId: "bronze_shortsword",
+      arrowsId: null,
+      spellId: null,
+    });
+    expect(resolveStandaloneSingleStyleCombatLoadout("prayer")).toEqual({
+      weaponId: "bronze_shortsword",
+      arrowsId: null,
+      spellId: null,
+    });
+    expect(resolveStandaloneSingleStyleCombatLoadout("ranged")).toEqual({
+      weaponId: "shortbow",
+      arrowsId: "bronze_arrow",
+      spellId: null,
+    });
+    expect(resolveStandaloneSingleStyleCombatLoadout("mage")).toEqual({
+      weaponId: "staff_of_air",
+      arrowsId: null,
+      spellId: "wind_strike",
+    });
+  });
+
+  it("equips the exact air-staff fixture and records every synthetic asset for cleanup", async () => {
+    const equipMageGear = vi.fn(async () => undefined);
+    const markProvisionedInventoryItem = vi.fn();
+    const fixture = {
+      waitForInventoryReadyPlayer: vi.fn(async () => undefined),
+      equipMageGear,
+      getEquippedWeaponId: vi.fn(() => "staff_of_air"),
+      markProvisionedInventoryItem,
+    };
+    const ensure = (
+      DuelOrchestrator.prototype as unknown as {
+        ensureStandaloneSingleStyleCombatSetup: (
+          this: typeof fixture,
+          playerId: string,
+          role: "mage",
+        ) => Promise<string>;
+      }
+    ).ensureStandaloneSingleStyleCombatSetup;
+
+    await expect(
+      ensure.call(fixture, "sparbot-standalone-mage", "mage"),
+    ).resolves.toBe("staff_of_air");
+    expect(equipMageGear).toHaveBeenCalledWith(
+      "sparbot-standalone-mage",
+      "staff_of_air",
+      "wind_strike",
+      [{ runeId: "mind_rune", quantity: 500 }],
+    );
+    expect(markProvisionedInventoryItem).toHaveBeenCalledWith(
+      "sparbot-standalone-mage",
+      "staff_of_air",
+    );
+  });
+
+  it("fails closed when the requested fixed-role weapon was not attached", async () => {
+    const fixture = {
+      waitForInventoryReadyPlayer: vi.fn(async () => undefined),
+      equipRangedGear: vi.fn(async () => undefined),
+      getEquippedWeaponId: vi.fn(() => null),
+      markProvisionedInventoryItem: vi.fn(),
+    };
+    const ensure = (
+      DuelOrchestrator.prototype as unknown as {
+        ensureStandaloneSingleStyleCombatSetup: (
+          this: typeof fixture,
+          playerId: string,
+          role: "ranged",
+        ) => Promise<string>;
+      }
+    ).ensureStandaloneSingleStyleCombatSetup;
+
+    await expect(
+      ensure.call(fixture, "sparbot-standalone-ranged", "ranged"),
+    ).rejects.toThrow("diagnostic_single_style_equip_failed:ranged:shortbow");
+    expect(fixture.markProvisionedInventoryItem).not.toHaveBeenCalled();
   });
 });
 
@@ -351,6 +480,172 @@ describe("DuelOrchestrator autonomy ownership", () => {
     });
   });
 
+  it("recovers pending executor commands globally in order before starting combat controllers", async () => {
+    const previousManager = getAgentManager();
+    const recoveryOrder: string[] = [];
+    const createService = () => ({
+      isAutonomousEnabled: vi.fn(() => true),
+      setArenaBounds: vi.fn(),
+      clearArenaBounds: vi.fn(),
+      setAutonomousBehaviorEnabled: vi.fn(),
+      invalidateCombatLoadoutObservation: vi.fn(),
+      sendChatMessage: vi.fn(async () => "message-id"),
+      recoverStreamingDuelExecutorCommand: vi.fn(
+        async (
+          command: StreamingDuelExecutorCommandReceipt,
+        ): Promise<StreamingDuelExecutorCommandReceipt> => {
+          recoveryOrder.push(command.operationId);
+          return {
+            ...command,
+            replayed: false,
+            completed: true,
+            outcome: "accepted",
+          };
+        },
+      ),
+    });
+    const serviceA = createService();
+    const serviceB = createService();
+    const services = new Map([
+      ["agent-a", serviceA],
+      ["agent-b", serviceB],
+    ]);
+    setAgentManager({
+      getAgentService: (id: string) => services.get(id) ?? null,
+      shutdown: vi.fn(async () => undefined),
+      dispose: vi.fn(),
+    } as never);
+
+    const movementOperationId = "11111111-1111-4111-8111-111111111111";
+    const engagementOperationId = "22222222-2222-4222-8222-222222222222";
+    const pending: StreamingDuelExecutorCommandReceipt[] = [
+      {
+        operationId: movementOperationId,
+        playerId: "agent-a",
+        requestFingerprint: "aa".repeat(32),
+        publicActionObservation: {
+          operationId: movementOperationId,
+          tick: 7,
+          observedAt: 1_800_000_000_001,
+          cycleId: "executor-recovery-cycle",
+          duelId: "executor-recovery-duel",
+          actorId: "agent-a",
+          opponentId: "agent-b",
+          phase: "FIGHTING",
+          combatRole: "ranged",
+          tacticalMacro: "kite",
+          action: "movement",
+          value: "reposition",
+        },
+        command: {
+          kind: "movement",
+          mode: "ground",
+          target: [349.5, 4, 406.5],
+          runMode: true,
+        },
+        replayed: false,
+        completed: false,
+        outcome: null,
+      },
+      {
+        operationId: engagementOperationId,
+        playerId: "agent-b",
+        requestFingerprint: "bb".repeat(32),
+        publicActionObservation: {
+          operationId: engagementOperationId,
+          tick: 8,
+          observedAt: 1_800_000_000_002,
+          cycleId: "executor-recovery-cycle",
+          duelId: "executor-recovery-duel",
+          actorId: "agent-b",
+          opponentId: "agent-a",
+          phase: "FIGHTING",
+          combatRole: "melee",
+          tacticalMacro: "pressure",
+          action: "engagement",
+          value: "initial",
+        },
+        command: {
+          kind: "engagement",
+          targetId: "agent-a",
+          targetType: "player",
+        },
+        replayed: false,
+        completed: false,
+        outcome: null,
+      },
+    ];
+    const listPendingStreamingDuelExecutorCommandsAsync = vi.fn(
+      async () => pending,
+    );
+    const cycle = {
+      cycleId: "executor-recovery-cycle",
+      duelId: "executor-recovery-duel",
+      phase: "FIGHTING",
+      agent1: {
+        characterId: "agent-a",
+        name: "Agent A",
+        combatLevel: 12,
+      },
+      agent2: {
+        characterId: "agent-b",
+        name: "Agent B",
+        combatLevel: 11,
+      },
+    } as never;
+    const entities = new Map([
+      ["agent-a", { data: {} }],
+      ["agent-b", { data: {} }],
+    ]);
+    const orchestrator = new DuelOrchestrator(
+      {
+        entities: { get: (id: string) => entities.get(id) },
+        getSystem: (name: string) =>
+          name === "database"
+            ? { listPendingStreamingDuelExecutorCommandsAsync }
+            : null,
+      } as never,
+      () => cycle,
+      () => {},
+      () => new Map(),
+      () => {},
+      () => {},
+      () => [],
+      () => [],
+    );
+    orchestrator.activatePublicActionObservations("executor-recovery-cycle");
+
+    try {
+      await orchestrator.startCombatAIs();
+
+      expect(
+        listPendingStreamingDuelExecutorCommandsAsync,
+      ).toHaveBeenCalledWith("executor-recovery-cycle");
+      expect(recoveryOrder).toEqual([
+        movementOperationId,
+        engagementOperationId,
+      ]);
+      expect(serviceA.recoverStreamingDuelExecutorCommand).toHaveBeenCalledWith(
+        pending[0],
+      );
+      expect(serviceB.recoverStreamingDuelExecutorCommand).toHaveBeenCalledWith(
+        pending[1],
+      );
+      expect(
+        orchestrator
+          .getPublicActionObservations("executor-recovery-cycle")
+          .map(({ action, outcome }) => [action, outcome]),
+      ).toEqual([
+        ["movement", "accepted"],
+        ["engagement", "accepted"],
+      ]);
+      expect((orchestrator as any).combatAIs.size).toBe(2);
+    } finally {
+      orchestrator.stopCombatAIs();
+      setAgentManager(previousManager as never);
+    }
+  });
+
   it("binds the pre-market policy but withholds the planner runtime from combat", async () => {
     const previousManager = getAgentManager();
     const runtimeA = { useModel: vi.fn(), stop: vi.fn() };
@@ -507,7 +802,23 @@ describe("DuelOrchestrator autonomy ownership", () => {
         ]),
       );
       expect(runtimeA.useModel).not.toHaveBeenCalled();
-      orchestrator.stopCombatAIs();
+      await orchestrator.stopCombatAIs();
+      expect(orchestrator.getCombatAIDiagnostics()).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            characterId: "agent-a",
+            cycleId: "policy-cycle",
+            active: false,
+            capturedAtMs: expect.any(Number),
+          }),
+          expect.objectContaining({
+            characterId: "agent-b",
+            cycleId: "policy-cycle",
+            active: false,
+            capturedAtMs: expect.any(Number),
+          }),
+        ]),
+      );
 
       const preparationA = (
         contestants as unknown as Array<{
@@ -583,7 +894,9 @@ describe("DuelOrchestrator autonomy ownership", () => {
         ...bindings.get("agent-a")!,
         fingerprint: "cc".repeat(32),
       });
-      (orchestrator as any).validatedCompetitiveAgentPolicies = null;
+      expect(
+        (orchestrator as any).hasCurrentCompetitiveAgentPolicies(cycle),
+      ).toBe(false);
       await expect(
         orchestrator.validateCompetitiveAgentPolicies({
           cycleId: "policy-cycle",
@@ -778,6 +1091,76 @@ describe("DuelOrchestrator autonomy ownership", () => {
     ).toHaveBeenCalledWith(false);
   });
 
+  it("serializes pair controller ticks, coalesces overlap, and alternates first mover", async () => {
+    const cycle = {
+      cycleId: "serialized-controller-cycle",
+      phase: "FIGHTING",
+      agent1: { characterId: "agent-alpha", name: "Agent Alpha" },
+      agent2: { characterId: "agent-beta", name: "Agent Beta" },
+      competitiveSnapshot: { diagnostic: true },
+    } as never;
+    const world = {
+      entities: new Map([
+        ["agent-alpha", { data: {} }],
+        ["agent-beta", { data: {} }],
+      ]),
+      emit: vi.fn(),
+      getSystem: vi.fn(() => null),
+    };
+    const orchestrator = new DuelOrchestrator(
+      world as never,
+      () => cycle,
+      () => {},
+      () => new Map(),
+      () => {},
+      () => {},
+      () => [],
+      () => [],
+    );
+
+    let releaseFirstAlpha!: () => void;
+    const firstAlphaGate = new Promise<void>((resolve) => {
+      releaseFirstAlpha = resolve;
+    });
+    let alphaTicks = 0;
+    const executionOrder: string[] = [];
+    const alpha = {
+      externalTick: vi.fn(async () => {
+        alphaTicks++;
+        executionOrder.push("alpha");
+        if (alphaTicks === 1) await firstAlphaGate;
+      }),
+    };
+    const beta = {
+      externalTick: vi.fn(async () => {
+        executionOrder.push("beta");
+      }),
+    };
+    const combatAIs = (
+      orchestrator as unknown as {
+        combatAIs: Map<string, { externalTick(): Promise<void> }>;
+      }
+    ).combatAIs;
+    combatAIs.set("agent-alpha", alpha);
+    combatAIs.set("agent-beta", beta);
+
+    const firstTick = orchestrator.runCombatAITickOnce();
+    const coalescedTick = orchestrator.runCombatAITickOnce();
+    expect(coalescedTick).toBe(firstTick);
+    await vi.waitFor(() => expect(executionOrder).toEqual(["alpha"]));
+    expect(beta.externalTick).not.toHaveBeenCalled();
+
+    releaseFirstAlpha();
+    await firstTick;
+    expect(executionOrder).toEqual(["alpha", "beta"]);
+
+    executionOrder.length = 0;
+    await orchestrator.runCombatAITickOnce();
+    expect(executionOrder).toEqual(["beta", "alpha"]);
+    expect(alpha.externalTick).toHaveBeenCalledTimes(2);
+    expect(beta.externalTick).toHaveBeenCalledTimes(2);
+  });
+
   it("pairs manifest-normalized bows with ammunition the combat service accepts", () => {
     const fixtureItems = [
       {
@@ -885,6 +1268,8 @@ type CompetitiveFixtureOptions = {
   betaArrows?: { itemId: string; quantity: number } | null;
   alphaBody?: string | null;
   betaBody?: string | null;
+  alphaHelmet?: string | null;
+  betaHelmet?: string | null;
   alphaInventory?: Array<{ slot: number; itemId: string; quantity: number }>;
   betaInventory?: Array<{ slot: number; itemId: string; quantity: number }>;
   alphaSpell?: string | null;
@@ -896,6 +1281,9 @@ type CompetitiveFixtureOptions = {
   synthetic?: boolean;
   skillsSystemOnly?: boolean;
   staleEntityHealth?: boolean;
+  activePairProjectile?: boolean;
+  useProductionPresentationGate?: boolean;
+  playerReady?: (playerId: string) => boolean;
 };
 
 function createCompetitiveFixture(options: CompetitiveFixtureOptions = {}) {
@@ -965,7 +1353,11 @@ function createCompetitiveFixture(options: CompetitiveFixtureOptions = {}) {
           options.alphaArrows?.quantity,
         ),
         shield: slot(null),
-        helmet: slot("launch_test_helmet"),
+        helmet: slot(
+          options.alphaHelmet === undefined
+            ? "launch_test_helmet"
+            : options.alphaHelmet,
+        ),
         body: slot(options.alphaBody ?? null),
       },
     ],
@@ -982,7 +1374,11 @@ function createCompetitiveFixture(options: CompetitiveFixtureOptions = {}) {
           options.betaArrows?.quantity,
         ),
         shield: slot(null),
-        helmet: slot("launch_test_helmet"),
+        helmet: slot(
+          options.betaHelmet === undefined
+            ? "launch_test_helmet"
+            : options.betaHelmet,
+        ),
         body: slot(options.betaBody ?? null),
       },
     ],
@@ -993,11 +1389,29 @@ function createCompetitiveFixture(options: CompetitiveFixtureOptions = {}) {
       displacedItems: [],
     }),
   );
-  const switchOwnedCombatLoadout = vi.fn(async () => ({
-    ok: true,
-    changed: true,
-    replayed: false,
-  }));
+  const switchOwnedCombatLoadout = vi.fn(
+    async (
+      playerId: string,
+      input: {
+        targetRole: string;
+        allowedLoadouts: Record<
+          string,
+          { weaponId: string } | null | undefined
+        >;
+      },
+    ) => {
+      const nextWeaponId = input.allowedLoadouts[input.targetRole]?.weaponId;
+      const playerEquipment = equipment.get(playerId as (typeof ids)[number]);
+      if (nextWeaponId && playerEquipment) {
+        playerEquipment.weapon = slot(nextWeaponId);
+      }
+      return {
+        ok: true,
+        changed: true,
+        replayed: false,
+      };
+    },
+  );
   const addItemDirect = vi.fn(
     async (_playerId: string, _item: { itemId: string; quantity: number }) =>
       true,
@@ -1101,11 +1515,22 @@ function createCompetitiveFixture(options: CompetitiveFixtureOptions = {}) {
     },
   );
   const emit = vi.fn();
+  const hasActiveProjectilesBetween = vi.fn(
+    () => options.activePairProjectile === true,
+  );
+  const quiesceAutoAttacksBetween = vi.fn(() => true);
+  const forceEndCombat = vi.fn();
+  const waitForProjectileCustodySettlements = vi.fn(async () => {});
   const world = {
     entities: { get: (id: string) => entities.get(id as (typeof ids)[number]) },
     getPlayer: (id: string) => entities.get(id as (typeof ids)[number]),
     emit,
     getSystem: (name: string) => {
+      if (name === "player") {
+        return {
+          isPlayerReady: (id: string) => options.playerReady?.(id) ?? true,
+        };
+      }
       if (name === "equipment") {
         return {
           getPlayerEquipment: (id: string) =>
@@ -1147,6 +1572,14 @@ function createCompetitiveFixture(options: CompetitiveFixtureOptions = {}) {
           getSkills: () => makeSkills(),
         };
       }
+      if (name === "combat") {
+        return {
+          hasActiveProjectilesBetween,
+          quiesceAutoAttacksBetween,
+          forceEndCombat,
+          waitForProjectileCustodySettlements,
+        };
+      }
       return null;
     },
   };
@@ -1161,6 +1594,12 @@ function createCompetitiveFixture(options: CompetitiveFixtureOptions = {}) {
     () => [],
     () => [],
     () => options.synthetic === true,
+    null,
+    options.useProductionPresentationGate
+      ? isStreamingDuelEquipmentPresentationEligible
+      : (itemId, slotName) =>
+          itemId.startsWith("launch_test_") ||
+          isStreamingDuelEquipmentPresentationEligible(itemId, slotName),
   );
   const agent1 = orchestrator.createContestant(ids[0], ids[1])!;
   const agent2 = orchestrator.createContestant(ids[1], ids[0])!;
@@ -1184,6 +1623,10 @@ function createCompetitiveFixture(options: CompetitiveFixtureOptions = {}) {
     deactivateAllPrayers,
     restorePrayerPoints,
     emit,
+    hasActiveProjectilesBetween,
+    quiesceAutoAttacksBetween,
+    forceEndCombat,
+    waitForProjectileCustodySettlements,
     orchestrator,
     agent1,
     agent2,
@@ -1201,6 +1644,31 @@ describe.sequential("DuelOrchestrator competitive loadout boundary", () => {
       equipSlot: "weapon",
       attackType: "melee",
       weaponType: "sword",
+      equipable: true,
+    },
+    {
+      id: "bronze_shortsword",
+      name: "Bronze Shortsword",
+      type: "weapon",
+      equipSlot: "weapon",
+      attackType: "melee",
+      weaponType: "sword",
+      equipable: true,
+    },
+    {
+      id: "bronze_dagger",
+      name: "Bronze Dagger",
+      type: "weapon",
+      equipSlot: "weapon",
+      attackType: "melee",
+      weaponType: "dagger",
+      equipable: true,
+    },
+    {
+      id: "bronze_full_helm",
+      name: "Bronze Full Helm",
+      type: "armor",
+      equipSlot: "helmet",
       equipable: true,
     },
     {
@@ -1325,6 +1793,20 @@ describe.sequential("DuelOrchestrator competitive loadout boundary", () => {
         }),
       },
     });
+  });
+
+  it("fails closed until the authoritative player projection is hydrated", () => {
+    let ready = false;
+    const fixture = createCompetitiveFixture({ playerReady: () => ready });
+
+    expect(
+      fixture.orchestrator.inspectCompetitiveLoadout(fixture.ids[0]),
+    ).toEqual({ ok: false, reason: "player_state_not_ready" });
+
+    ready = true;
+    expect(
+      fixture.orchestrator.inspectCompetitiveLoadout(fixture.ids[0]),
+    ).toMatchObject({ ok: true, diagnostic: false });
   });
 
   it("freezes the authoritative SkillsSystem state when entity data has no skills", () => {
@@ -1721,6 +2203,46 @@ describe.sequential("DuelOrchestrator competitive loadout boundary", () => {
     },
   );
 
+  it("waits for projectile custody terminals before aborted-duel loadout cleanup", async () => {
+    const fixture = createCompetitiveFixture({});
+    let releaseCustody!: () => void;
+    const custodyGate = new Promise<void>((resolve) => {
+      releaseCustody = resolve;
+    });
+    fixture.waitForProjectileCustodySettlements.mockImplementation(
+      async () => custodyGate,
+    );
+    const cleanupAgentCombatSetup = vi.fn(async () => {});
+    const removeDuelFood = vi.fn(async () => {});
+    const internals = fixture.orchestrator as unknown as {
+      cleanupAgentCombatSetup(playerId: string): Promise<void>;
+      removeDuelFood(
+        playerId: string,
+        trackedSlots: readonly unknown[],
+      ): Promise<void>;
+    };
+    internals.cleanupAgentCombatSetup = cleanupAgentCombatSetup;
+    internals.removeDuelFood = removeDuelFood;
+
+    const cleanup = fixture.orchestrator.cleanupAfterAbort(
+      fixture.cycle as never,
+    );
+    await vi.waitFor(() => {
+      expect(fixture.forceEndCombat).toHaveBeenCalledTimes(2);
+      expect(fixture.waitForProjectileCustodySettlements).toHaveBeenCalledTimes(
+        2,
+      );
+    });
+    expect(cleanupAgentCombatSetup).not.toHaveBeenCalled();
+    expect(removeDuelFood).not.toHaveBeenCalled();
+
+    releaseCustody();
+    await cleanup;
+
+    expect(cleanupAgentCombatSetup).toHaveBeenCalledTimes(2);
+    expect(removeDuelFood).toHaveBeenCalledTimes(2);
+  });
+
   it("freezes exact owned melee, ranged, and magic alternatives for bettors", () => {
     const fixture = createCompetitiveFixture({
       alphaInventory: [
@@ -1825,6 +2347,9 @@ describe.sequential("DuelOrchestrator competitive loadout boundary", () => {
     );
     if (!frozen.ok) throw new Error(frozen.reason);
     fixture.cycle.phase = "FIGHTING";
+    (
+      fixture.entities.get(fixture.ids[0])!.data as Record<string, unknown>
+    ).inStreamingDuel = true;
     const switchRole = (
       fixture.orchestrator as unknown as {
         switchFrozenCombatRole: (
@@ -1854,6 +2379,97 @@ describe.sequential("DuelOrchestrator competitive loadout boundary", () => {
         allowedLoadouts: frozen.combatLoadouts,
       }),
     );
+    expect(fixture.entities.get(fixture.ids[0])!.data).toMatchObject({
+      streamingDuelCombatRole: "ranged",
+      streamingDuelWeaponId: "shortbow",
+    });
+  });
+
+  it("defers a frozen switch until the committed pair projectile resolves", async () => {
+    const fixture = createCompetitiveFixture({
+      alphaInventory: [
+        { slot: 0, itemId: "shortbow", quantity: 1 },
+        { slot: 1, itemId: "bronze_arrow", quantity: 50 },
+      ],
+      activePairProjectile: true,
+    });
+    const frozen = fixture.orchestrator.freezeCompetitiveLoadout(
+      fixture.agent1,
+    );
+    if (!frozen.ok) throw new Error(frozen.reason);
+    fixture.cycle.phase = "FIGHTING";
+    const switchRole = (
+      fixture.orchestrator as unknown as {
+        switchFrozenCombatRole: (
+          cycleId: string,
+          playerId: string,
+          role: "ranged",
+          operationId: string,
+        ) => Promise<{ ok: boolean; retryable: boolean; reason?: string }>;
+      }
+    ).switchFrozenCombatRole.bind(fixture.orchestrator);
+
+    await expect(
+      switchRole(
+        "competitive-cycle",
+        fixture.ids[0],
+        "ranged",
+        `combat-loadout:competitive-cycle:${fixture.ids[0]}:1`,
+      ),
+    ).resolves.toEqual({
+      ok: false,
+      retryable: true,
+      reason: "attack_in_flight",
+    });
+    expect(fixture.hasActiveProjectilesBetween).toHaveBeenCalledWith(
+      fixture.ids[0],
+      fixture.ids[1],
+    );
+    expect(fixture.quiesceAutoAttacksBetween).toHaveBeenCalledWith(
+      fixture.ids[0],
+      fixture.ids[1],
+    );
+    expect(fixture.switchOwnedCombatLoadout).not.toHaveBeenCalled();
+  });
+
+  it("fails a frozen switch closed when projectile quiescence is unavailable", async () => {
+    const fixture = createCompetitiveFixture({
+      alphaInventory: [
+        { slot: 0, itemId: "shortbow", quantity: 1 },
+        { slot: 1, itemId: "bronze_arrow", quantity: 50 },
+      ],
+      activePairProjectile: true,
+    });
+    fixture.quiesceAutoAttacksBetween.mockReturnValue(false);
+    const frozen = fixture.orchestrator.freezeCompetitiveLoadout(
+      fixture.agent1,
+    );
+    if (!frozen.ok) throw new Error(frozen.reason);
+    fixture.cycle.phase = "FIGHTING";
+    const switchRole = (
+      fixture.orchestrator as unknown as {
+        switchFrozenCombatRole: (
+          cycleId: string,
+          playerId: string,
+          role: "ranged",
+          operationId: string,
+        ) => Promise<{ ok: boolean; retryable: boolean; reason?: string }>;
+      }
+    ).switchFrozenCombatRole.bind(fixture.orchestrator);
+
+    await expect(
+      switchRole(
+        "competitive-cycle",
+        fixture.ids[0],
+        "ranged",
+        `combat-loadout:competitive-cycle:${fixture.ids[0]}:1`,
+      ),
+    ).resolves.toEqual({
+      ok: false,
+      retryable: false,
+      reason: "attack_quiesce_unavailable",
+    });
+    expect(fixture.switchOwnedCombatLoadout).not.toHaveBeenCalled();
   });
 
   it("permits exact frozen multi-style switching only inside the no-money diagnostic boundary", async () => {
@@ -2149,6 +2765,36 @@ describe.sequential("DuelOrchestrator competitive loadout boundary", () => {
     expect(
       runeStarved.orchestrator.inspectCompetitiveLoadout(runeStarved.ids[0]),
     ).toEqual({ ok: false, reason: "selected_spell_runes_missing" });
+  });
+
+  it("rejects unsupported visible equipment before a public market can open", () => {
+    const unsupportedWeapon = createCompetitiveFixture({
+      alphaWeapon: "bronze_dagger",
+      alphaHelmet: null,
+      useProductionPresentationGate: true,
+    });
+    expect(
+      unsupportedWeapon.orchestrator.inspectCompetitiveLoadout(
+        unsupportedWeapon.ids[0],
+      ),
+    ).toEqual({
+      ok: false,
+      reason: "equipment_presentation_not_certified:weapon:bronze_dagger",
+    });
+
+    const unsupportedArmor = createCompetitiveFixture({
+      alphaWeapon: "bronze_shortsword",
+      alphaHelmet: "bronze_full_helm",
+      useProductionPresentationGate: true,
+    });
+    expect(
+      unsupportedArmor.orchestrator.inspectCompetitiveLoadout(
+        unsupportedArmor.ids[0],
+      ),
+    ).toEqual({
+      ok: false,
+      reason: "equipment_presentation_not_certified:helmet:bronze_full_helm",
+    });
   });
 
   it("accepts an owned magic setup only when the frozen runes are sufficient", () => {

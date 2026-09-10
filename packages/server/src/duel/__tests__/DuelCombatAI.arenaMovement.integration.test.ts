@@ -247,21 +247,23 @@ async function runArenaScenario(
       newHealth: 100,
       reason: "item_not_owned",
     }),
-    executeAttack: async (targetId: string): Promise<void> => {
+    executeAttack: async (targetId: string): Promise<boolean> => {
       if (targetId !== opponent.id) {
         throw new Error("arena integration AI attacked a foreign target");
       }
       combatState.set(own.id, true);
+      return true;
     },
     executeMove: async (
       target: [number, number, number],
       runMode: boolean,
-    ): Promise<void> => {
+    ): Promise<boolean> => {
       movement.movePlayerToward(
         own.id,
         { x: target[0], y: target[1], z: target[2] },
         runMode,
       );
+      return true;
     },
     executeCombatApproach: (targetId: string): boolean => {
       if (targetId !== opponent.id) return false;
@@ -455,17 +457,28 @@ describe("DuelCombatAI production arena movement integration", () => {
     const replay = await runArenaScenario();
     expect(replay).toEqual(first);
     expect(first.traceHash).toBe(
-      "d9c07cf0f01282a8e07906f769a93aed80aed6f174b7399f5554d9806918f50e",
+      "a254943787554987b93355cea57a1963019483f9e1faddf62b512086f6774691",
     );
     expect(first.packetHash).toBe(
-      "76b72f7c7b2fdd5ba8eab70c7d5dd4f9f2ea2a267ccecdaa668a2d49cdf4531d",
+      "5e1701e5fd6f929a77541c84d4a153bac1184e9c1c89bc72199794bf58ee7185",
     );
-    expect(first.movementDirections).toEqual(["-1,-1", "-1,0", "1,-1", "1,0"]);
+    expect(first.movementDirections).toEqual([
+      "-1,-1",
+      "-1,1",
+      "0,-1",
+      "0,1",
+      "1,-1",
+      "1,0",
+      "1,1",
+    ]);
     expect(first.startPackets).toBeGreaterThan(0);
     expect(first.tileUpdates).toBeGreaterThan(0);
     expect(first.wallBandVisits).toBeGreaterThan(0);
     expect(first.maximumChebyshevStep).toBeLessThanOrEqual(TILES_PER_TICK_RUN);
-    expect(first.minimumSeparation).toBeGreaterThan(0);
+    // Adjacent combat tiles are one metre apart. The duel avatars' collision
+    // capsules are at most 0.4 m in radius, so this rejects same-tile/body
+    // collapse while preserving the authoritative adjacent-tile melee range.
+    expect(first.minimumSeparation).toBeGreaterThanOrEqual(1);
     expect(first.maximumSeparation).toBeGreaterThan(first.minimumSeparation);
     expect(
       first.movementDirections.some((direction) =>
@@ -487,16 +500,18 @@ describe("DuelCombatAI production arena movement integration", () => {
 
     expect(replay).toEqual(first);
     expect(first.traceHash).toBe(
-      "b3c225cc95324eab35286e18dc981713d72eaccd510e82b7a40fcd8e73b675f8",
+      "61df02fd3de15f29de2657981fe995a057d5cb3f6857b0e2935d29677f1be1fa",
     );
     expect(first.packetHash).toBe(
-      "623e124d39c370167b24eaa992bfab24281fdc3d576e65cf4c1653e84730d3bd",
+      "3c3b4a262229f4397e8e225a9c08e645f67f4402f69cd313c694945b51d92687",
     );
     expect(first.movementDirections).toEqual(["-1,-1", "-1,1", "1,-1", "1,1"]);
     expect(first.startPackets).toBeGreaterThan(0);
     expect(first.tileUpdates).toBeGreaterThan(0);
     expect(first.maximumChebyshevStep).toBeLessThanOrEqual(TILES_PER_TICK_RUN);
-    expect(first.minimumSeparation).toBeGreaterThan(0);
+    // Same-style footwork may close to adjacent combat tiles, but the fighters
+    // must never collapse into the same tile/body space.
+    expect(first.minimumSeparation).toBeGreaterThanOrEqual(1);
     expect(first.maximumSeparation).toBeGreaterThan(first.minimumSeparation);
     expect(
       first.movementDirections.some((direction) =>
@@ -527,26 +542,24 @@ describe("DuelCombatAI production arena movement integration", () => {
 
     expect(replay).toEqual(first);
     expect(first.traceHash).toBe(
-      "a08869bd5d25435eb307d917f1734b0d82cc44e8623c84ebbc1e1a4e01a35238",
+      "f691f300085030c740dcd591c39518d22737b8c5a989bdcca051097b9b1c0c35",
     );
     expect(first.packetHash).toBe(
-      "1bf58a7f7d9ff3c00f083f01e844d7db0427b9c9fb12bd19ece5180e78495243",
+      "ea0be0b15f1ead4debe43126a4bab2f0cbb7f78bf2ab6b2352ff3a3b5d946080",
     );
     expect(first.movementDirections).toEqual([
       "-1,-1",
-      "-1,0",
       "-1,1",
       "0,-1",
       "0,1",
       "1,-1",
-      "1,0",
       "1,1",
     ]);
     expect(first.startPackets).toBeGreaterThan(0);
     expect(first.tileUpdates).toBeGreaterThan(0);
     expect(first.maximumChebyshevStep).toBeLessThanOrEqual(TILES_PER_TICK_RUN);
     expect(first.minimumSeparation).toBeGreaterThan(1);
-    expect(first.maximumSeparation).toBeLessThanOrEqual(8);
+    expect(first.maximumSeparation).toBeLessThanOrEqual(6);
     expect(first.fighterAStats.movementPathsActive).toBeGreaterThan(10);
     expect(first.fighterBStats.movementPathsActive).toBeGreaterThan(10);
     expect(first.fighterAStats.movementPathsInactive).toBe(0);
@@ -559,26 +572,24 @@ describe("DuelCombatAI production arena movement integration", () => {
 
     expect(replay).toEqual(first);
     expect(first.traceHash).toBe(
-      "a08869bd5d25435eb307d917f1734b0d82cc44e8623c84ebbc1e1a4e01a35238",
+      "f691f300085030c740dcd591c39518d22737b8c5a989bdcca051097b9b1c0c35",
     );
     expect(first.packetHash).toBe(
-      "1bf58a7f7d9ff3c00f083f01e844d7db0427b9c9fb12bd19ece5180e78495243",
+      "ea0be0b15f1ead4debe43126a4bab2f0cbb7f78bf2ab6b2352ff3a3b5d946080",
     );
     expect(first.movementDirections).toEqual([
       "-1,-1",
-      "-1,0",
       "-1,1",
       "0,-1",
       "0,1",
       "1,-1",
-      "1,0",
       "1,1",
     ]);
     expect(first.startPackets).toBeGreaterThan(0);
     expect(first.tileUpdates).toBeGreaterThan(0);
     expect(first.maximumChebyshevStep).toBeLessThanOrEqual(TILES_PER_TICK_RUN);
     expect(first.minimumSeparation).toBeGreaterThan(1);
-    expect(first.maximumSeparation).toBeLessThanOrEqual(8);
+    expect(first.maximumSeparation).toBeLessThanOrEqual(6);
     expect(first.fighterAStats.movementPathsActive).toBeGreaterThan(10);
     expect(first.fighterBStats.movementPathsActive).toBeGreaterThan(10);
     expect(first.fighterAStats.movementPathsInactive).toBe(0);

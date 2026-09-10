@@ -14,6 +14,24 @@ export function parseCaptureFrameRate(
 }
 
 /**
+ * Resolves the render-source cadence independently from the encoder cadence.
+ * A source may render faster for smoother CDP sampling, but it must never run
+ * slower than the output clock or the constant-frame-rate pump will repeat
+ * avoidable frames.
+ */
+export function resolveCaptureSourceFrameRate(
+  outputFramesPerSecond: number,
+  rawSourceFramesPerSecond: string | undefined,
+): number {
+  const outputFps = parseCaptureFrameRate(String(outputFramesPerSecond));
+  if (!rawSourceFramesPerSecond?.trim()) return outputFps;
+  return Math.max(
+    outputFps,
+    parseCaptureFrameRate(rawSourceFramesPerSecond, outputFps),
+  );
+}
+
+/**
  * Limits CDP screencast acknowledgements to the configured delivery rate.
  * CDP produces another JPEG as soon as the previous frame is acknowledged, so
  * immediate acknowledgements can make a high-refresh compositor encode and
@@ -22,6 +40,7 @@ export function parseCaptureFrameRate(
 export class CaptureFramePacer {
   private readonly intervalMs: number;
   private nextFrameAt: number | null = null;
+  private pacingTail: Promise<void> = Promise.resolve();
 
   constructor(framesPerSecond: number) {
     const safeFps = parseCaptureFrameRate(String(framesPerSecond));
@@ -42,6 +61,35 @@ export class CaptureFramePacer {
       return;
     }
     this.nextFrameAt += this.intervalMs;
+  }
+
+  /**
+   * Serializes CDP frame callbacks before applying the acknowledgement clock.
+   * Chromium can deliver more than one screencast callback before an earlier
+   * async listener finishes. Without this queue those callbacks observe the
+   * same deadline, wake together, and publish a burst followed by a gap.
+   */
+  runPaced<T>(operation: () => T | Promise<T>): Promise<T> {
+    const pending = this.pacingTail.then(async () => {
+      const delayMs = this.getDelayMs(performance.now());
+      if (delayMs > 0) {
+        await new Promise<void>((resolve) => setTimeout(resolve, delayMs));
+      }
+      try {
+        return await operation();
+      } finally {
+        this.markFrameAcknowledged(performance.now());
+      }
+    });
+    this.pacingTail = pending.then(
+      () => undefined,
+      () => undefined,
+    );
+    return pending;
+  }
+
+  async drain(): Promise<void> {
+    await this.pacingTail;
   }
 
   reset(): void {

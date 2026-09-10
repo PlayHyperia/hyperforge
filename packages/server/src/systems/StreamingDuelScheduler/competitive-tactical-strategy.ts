@@ -1,23 +1,16 @@
+import {
+  STREAMING_DUEL_PUBLIC_PRAYERS,
+  STREAMING_DUEL_PUBLIC_TACTICAL_MACROS,
+} from "@hyperforge/shared";
 import type { SwitchableStreamingCombatRole } from "./types.js";
 
-export const COMPETITIVE_TACTICAL_PRAYERS = [
-  "superhuman_strength",
-  "rock_skin",
-  "hawk_eye",
-  "mystic_lore",
-] as const;
+export const COMPETITIVE_TACTICAL_PRAYERS = STREAMING_DUEL_PUBLIC_PRAYERS;
 
 export type CompetitiveTacticalPrayer =
   (typeof COMPETITIVE_TACTICAL_PRAYERS)[number];
 
-export const COMPETITIVE_TACTICAL_MACROS = [
-  "pressure",
-  "hold_range",
-  "kite",
-  "orbit",
-  "defensive_reset",
-  "finish",
-] as const;
+export const COMPETITIVE_TACTICAL_MACROS =
+  STREAMING_DUEL_PUBLIC_TACTICAL_MACROS;
 
 export type CompetitiveTacticalMacro =
   (typeof COMPETITIVE_TACTICAL_MACROS)[number];

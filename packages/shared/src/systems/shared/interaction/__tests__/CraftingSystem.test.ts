@@ -474,9 +474,11 @@ describe("CraftingSystem", () => {
       const itemsAdded = findEmitted(EventType.INVENTORY_ITEM_ADDED);
       expect(itemsAdded.length).toBe(0);
       expect(findEmitted(EventType.INVENTORY_ITEM_REMOVED)).toHaveLength(0);
-      const xpGained = findEmitted(EventType.SKILLS_XP_GAINED);
+      const xpGained = findEmitted(EventType.SKILLS_PROGRESS_COMMITTED);
       expect(xpGained.length).toBe(1);
-      expect((xpGained[0].data as { amount: number }).amount).toBe(recipe.xp);
+      expect((xpGained[0].data as { awardedXp: number }).awardedXp).toBe(
+        recipe.xp,
+      );
 
       // For quantity 1, session should complete
       const completes = findEmitted(EventType.CRAFTING_COMPLETE);

@@ -26,6 +26,18 @@ node_modules
 **/coverage
 **/test-results
 **/playwright-report
+**/__tests__/
+**/tests/
+**/*.test.*
+**/*.spec.*
+**/*.e2e.*
+
+# Retained local qualification evidence is never a production build input.
+artifacts/
+progress-videos/
+heap-snapshots/
+**/*.cpuprofile
+**/*.heapsnapshot
 
 # Development files
 *.log

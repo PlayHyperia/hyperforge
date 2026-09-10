@@ -347,10 +347,10 @@ describe("TileInterpolator combat rotation", () => {
     expect(runMovementAndCombatTurnTimeline(30)).toEqual(thirty);
     expect(runMovementAndCombatTurnTimeline(60)).toEqual(sixty);
     expect(thirty.hash).toBe(
-      "71fb98ad617ac58377da746481342cdfd35e9ad5b8e580304a52f404d82d8800",
+      "d01d1e78e97e5351397745a4ea4086073ec2520cf8e80d7e257cda26dda84352",
     );
     expect(sixty.hash).toBe(
-      "a81e81cecbff1597b6c0367c90ec54f79f5b6ea955e8738e7d6b346095832cb9",
+      "bde78c4d680be71b92e9bf469b41b0225529e00ccb284e10559b2fce1dde0b57",
     );
     expect(thirty.movementCompleted).toBe(true);
     expect(sixty.movementCompleted).toBe(true);
@@ -362,10 +362,10 @@ describe("TileInterpolator combat rotation", () => {
     expect(sixty.firstTargetTurnStep).toBeLessThan(sixty.fullTargetTurn);
     expect(thirty.finalFacingError).toBeLessThanOrEqual(0.000001);
     expect(sixty.finalFacingError).toBeLessThanOrEqual(0.000001);
-    // Large turns are capped at 6 rad/s while small tracking corrections retain
+    // Large turns are capped at 5.85 rad/s while small tracking corrections retain
     // the responsive exponential damping path.
-    expect(thirty.maximumAngularVelocity).toBeLessThanOrEqual(6.000001);
-    expect(sixty.maximumAngularVelocity).toBeLessThanOrEqual(6.000001);
+    expect(thirty.maximumAngularVelocity).toBeLessThanOrEqual(5.850001);
+    expect(sixty.maximumAngularVelocity).toBeLessThanOrEqual(5.850001);
     expect(thirty.maximumVisualStep).toBeLessThanOrEqual(2 / 18 + 0.000001);
     expect(sixty.maximumVisualStep).toBeLessThanOrEqual(2 / 36 + 0.000001);
   });

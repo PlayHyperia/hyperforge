@@ -41,29 +41,12 @@ export type {
  * World Areas Database - Populated at runtime from JSON manifests
  * DataManager loads from assets/manifests/world-areas.json
  *
- * DEFAULT: If JSON is empty, use this hardcoded starter area
+ * The duel arena remains as a structural bootstrap fallback until the
+ * authoritative manifest replaces it. Ordinary risk areas must never be
+ * embedded here: production startup validates the complete manifest before
+ * external-value play can be enabled.
  */
 export const ALL_WORLD_AREAS: Record<string, WorldArea> = {
-  // Wilderness test zone - PvP enabled area for testing player vs player combat
-  wilderness_test: {
-    id: "wilderness_test",
-    name: "The Wastes",
-    description:
-      "A dangerous zone where players can attack each other. Enter at your own risk.",
-    difficultyLevel: 1,
-    bounds: {
-      minX: 55,
-      maxX: 75,
-      minZ: -10,
-      maxZ: 10,
-    },
-    biomeType: "wastes",
-    safeZone: false,
-    pvpEnabled: true,
-    npcs: [],
-    resources: [],
-    mobSpawns: [],
-  },
   // Duel Arena - PvP dueling area with 6 arena platforms, lobby, and hospital
   // NOTE: Flat zones are registered programmatically by DuelArenaVisualsSystem.registerArenaFlatZones()
   // at startup. This ensures terrain height queries return floor-level values so players stand

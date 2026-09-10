@@ -1,5 +1,12 @@
 import type { FastifyInstance, FastifyRequest, FastifyReply } from "fastify";
 import type { WebSocket as WsWebSocket } from "ws";
+import { PublicKey } from "@solana/web3.js";
+import type { ServerConfig } from "../startup/config.js";
+import {
+  createRequiredBrowserOriginPreHandler,
+  isProductionLikeEnvironment,
+  resolveAllowedOrigins,
+} from "../infrastructure/http/origin-policy.js";
 
 type SolanaCluster = "mainnet-beta" | "devnet" | "testnet" | "localnet";
 
@@ -20,6 +27,32 @@ type CachedRpcResponse = ProxiedRpcResponse & {
   expiresAt: number;
   byteSize: number;
 };
+
+const MAX_RPC_REQUEST_BYTES = 256 * 1024;
+const MAX_RPC_BATCH_ENTRIES = 50;
+const MAX_RPC_METHOD_LENGTH = 128;
+const MAX_WS_PROXY_MESSAGE_BYTES = 64 * 1024;
+const MAX_WS_PROXY_MESSAGES_PER_MINUTE = 120;
+const WS_PROXY_ALLOWED_METHODS = new Set([
+  "accountSubscribe",
+  "accountUnsubscribe",
+  "blockSubscribe",
+  "blockUnsubscribe",
+  "logsSubscribe",
+  "logsUnsubscribe",
+  "programSubscribe",
+  "programUnsubscribe",
+  "rootSubscribe",
+  "rootUnsubscribe",
+  "signatureSubscribe",
+  "signatureUnsubscribe",
+  "slotSubscribe",
+  "slotUnsubscribe",
+  "slotsUpdatesSubscribe",
+  "slotsUpdatesUnsubscribe",
+  "voteSubscribe",
+  "voteUnsubscribe",
+]);
 
 function parseEnvInt(
   rawValue: string | undefined,
@@ -132,11 +165,13 @@ const inflightCleanupTimer = setInterval(
 );
 inflightCleanupTimer.unref?.();
 
-function normalizeCluster(
+export function resolveSolanaProxyCluster(
   value: unknown,
   fallback: SolanaCluster,
-): SolanaCluster {
-  if (typeof value !== "string") return fallback;
+  productionLike: boolean,
+): SolanaCluster | null {
+  if (value === undefined || value === "") return fallback;
+  if (typeof value !== "string") return null;
   const normalized = value.trim().toLowerCase();
   if (normalized === "mainnet" || normalized === "mainnet-beta") {
     return "mainnet-beta";
@@ -146,9 +181,23 @@ function normalizeCluster(
     normalized === "testnet" ||
     normalized === "localnet"
   ) {
-    return normalized;
+    return productionLike ? null : normalized;
   }
-  return fallback;
+  return null;
+}
+
+export function isCanonicalSolanaAddress(value: unknown): value is string {
+  if (
+    typeof value !== "string" ||
+    !/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(value)
+  ) {
+    return false;
+  }
+  try {
+    return new PublicKey(value).toBase58() === value;
+  } catch {
+    return false;
+  }
 }
 
 function resolveRpcUpstream(cluster: SolanaCluster): string {
@@ -200,13 +249,54 @@ function resolveWsUpstream(cluster: SolanaCluster): string {
 function parseRpcPayload(body: unknown): JsonRpcRequestPayload[] | null {
   if (!body) return null;
   if (Array.isArray(body)) {
-    const entries = body.filter((value) => value && typeof value === "object");
-    return entries.length > 0 ? (entries as JsonRpcRequestPayload[]) : null;
+    if (body.length === 0 || body.length > MAX_RPC_BATCH_ENTRIES) return null;
+    if (body.some((value) => !value || typeof value !== "object")) return null;
+    return body as JsonRpcRequestPayload[];
   }
   if (typeof body === "object") {
     return [body as JsonRpcRequestPayload];
   }
   return null;
+}
+
+function isValidRpcPayload(payload: JsonRpcRequestPayload): boolean {
+  if (
+    payload.jsonrpc !== "2.0" ||
+    typeof payload.method !== "string" ||
+    payload.method.length < 1 ||
+    payload.method.length > MAX_RPC_METHOD_LENGTH ||
+    !/^[A-Za-z][A-Za-z0-9]*$/.test(payload.method)
+  ) {
+    return false;
+  }
+
+  if (
+    payload.params !== undefined &&
+    !Array.isArray(payload.params) &&
+    (payload.params === null || typeof payload.params !== "object")
+  ) {
+    return false;
+  }
+
+  return true;
+}
+
+function isAllowedWsRpcMessage(message: string): boolean {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(message);
+  } catch {
+    return false;
+  }
+  const payloads = parseRpcPayload(parsed);
+  return Boolean(
+    payloads &&
+    payloads.every(
+      (payload) =>
+        isValidRpcPayload(payload) &&
+        WS_PROXY_ALLOWED_METHODS.has(payload.method || ""),
+    ),
+  );
 }
 
 function normalizeRpcIdsForCache(body: unknown): unknown {
@@ -365,8 +455,7 @@ function pruneRpcCache(nowMs: number = Date.now()): void {
     rpcResponseCacheTotalBytes > MAX_RPC_CACHE_TOTAL_BYTES
   ) {
     const oldest = rpcResponseCache.entries().next().value as
-      | [string, CachedRpcResponse]
-      | undefined;
+      [string, CachedRpcResponse] | undefined;
     if (!oldest) break;
     deleteCachedRpcResponse(oldest[0], oldest[1]);
   }
@@ -377,8 +466,17 @@ async function proxySolanaRpcRequest(
   request: FastifyRequest<{ Querystring: { cluster?: string } }>,
   reply: FastifyReply,
   defaultCluster: SolanaCluster,
+  productionLike: boolean,
 ): Promise<void> {
-  const cluster = normalizeCluster(request.query?.cluster, defaultCluster);
+  const cluster = resolveSolanaProxyCluster(
+    request.query?.cluster,
+    defaultCluster,
+    productionLike,
+  );
+  if (!cluster) {
+    reply.status(400).send({ error: "Unsupported Solana cluster" });
+    return;
+  }
   const upstreamUrl = resolveRpcUpstream(cluster);
 
   let requestBody = request.body;
@@ -404,6 +502,14 @@ async function proxySolanaRpcRequest(
   }
 
   const payloads = parseRpcPayload(requestBody);
+  if (
+    Buffer.byteLength(requestBodyText, "utf8") > MAX_RPC_REQUEST_BYTES ||
+    !payloads ||
+    !payloads.every(isValidRpcPayload)
+  ) {
+    reply.status(400).send({ error: "Invalid JSON-RPC payload" });
+    return;
+  }
   const shouldCache = canCacheRpcPayload(payloads);
   const cacheTtlMs = shouldCache ? getRpcCacheTtlMs(payloads || []) : 0;
   const cacheKey = shouldCache ? buildRpcCacheKey(cluster, requestBody) : null;
@@ -489,7 +595,10 @@ async function proxySolanaRpcRequest(
     }
     reply.status(proxied.status).send(proxied.body);
   } catch (error: unknown) {
-    fastify.log.error(error);
+    fastify.log.error(
+      { errorName: error instanceof Error ? error.name : "UnknownError" },
+      "Solana RPC proxy request failed",
+    );
     if (error instanceof Error && error.name === "AbortError") {
       reply.status(504).send({ error: "Solana RPC upstream timeout" });
       return;
@@ -506,23 +615,61 @@ function registerSolanaWsProxyRoute(
   fastify: FastifyInstance,
   routePath: string,
   defaultCluster: SolanaCluster,
+  productionLike: boolean,
+  requireBrowserOrigin: ReturnType<
+    typeof createRequiredBrowserOriginPreHandler
+  >,
 ): void {
+  const validateCluster = async (
+    request: FastifyRequest<{ Querystring: { cluster?: string } }>,
+    reply: FastifyReply,
+  ) => {
+    if (
+      !resolveSolanaProxyCluster(
+        request.query?.cluster,
+        defaultCluster,
+        productionLike,
+      )
+    ) {
+      return reply.status(400).send({ error: "Unsupported Solana cluster" });
+    }
+  };
   fastify.get<{ Querystring: { cluster?: string } }>(
     routePath,
-    { websocket: true, config: { rateLimit: false } },
+    {
+      websocket: true,
+      config: {
+        rateLimit: { max: 20, timeWindow: "1 minute" },
+      },
+      preValidation: productionLike
+        ? [requireBrowserOrigin, validateCluster]
+        : [validateCluster],
+    },
     (connection, req) => {
-      const cluster = normalizeCluster(req.query?.cluster, defaultCluster);
+      const cluster = resolveSolanaProxyCluster(
+        req.query?.cluster,
+        defaultCluster,
+        productionLike,
+      );
+      if (!cluster) {
+        connection.close();
+        return;
+      }
       const upstreamWsUrl = resolveWsUpstream(cluster);
 
       import("ws")
         .then(({ default: WebSocket }) => {
-          const upstreamSocket = new WebSocket(upstreamWsUrl);
+          const upstreamSocket = new WebSocket(upstreamWsUrl, {
+            maxPayload: 2 * 1024 * 1024,
+          });
           // Fastify WebSocket connection wraps the socket - access it safely
           // The connection from @fastify/websocket is a ws WebSocket
           const wsClient = ((connection as unknown as { socket?: WsWebSocket })
             .socket || connection) as WsWebSocket;
           const pendingOpenMessages: string[] = [];
           let bridgeClosed = false;
+          let messageWindowStartedAt = Date.now();
+          let messageCount = 0;
 
           const closeBridge = (): void => {
             if (bridgeClosed) return;
@@ -557,7 +704,36 @@ function registerSolanaWsProxyRoute(
 
           wsClient.on("message", (message: Buffer | string) => {
             if (bridgeClosed) return;
+            const messageByteLength = Buffer.isBuffer(message)
+              ? message.byteLength
+              : Buffer.byteLength(message, "utf8");
+            if (messageByteLength > MAX_WS_PROXY_MESSAGE_BYTES) {
+              closeBridge();
+              upstreamSocket.close();
+              wsClient.close(1009, "Message too large");
+              return;
+            }
+
+            const now = Date.now();
+            if (now - messageWindowStartedAt >= 60_000) {
+              messageWindowStartedAt = now;
+              messageCount = 0;
+            }
+            messageCount += 1;
+            if (messageCount > MAX_WS_PROXY_MESSAGES_PER_MINUTE) {
+              closeBridge();
+              upstreamSocket.close();
+              wsClient.close(1008, "Message rate exceeded");
+              return;
+            }
+
             const normalized = message.toString();
+            if (!isAllowedWsRpcMessage(normalized)) {
+              closeBridge();
+              upstreamSocket.close();
+              wsClient.close(1008, "Unsupported JSON-RPC message");
+              return;
+            }
             if (upstreamSocket.readyState === WebSocket.OPEN) {
               upstreamSocket.send(normalized);
               return;
@@ -596,13 +772,16 @@ function registerSolanaWsProxyRoute(
           });
 
           upstreamSocket.on("error", (err: Error) => {
-            fastify.log.error(`Solana WS proxy error: ${err}`);
+            fastify.log.error(
+              { errorName: err.name },
+              "Solana WS proxy upstream failed",
+            );
             closeBridge();
             wsClient.close();
           });
         })
-        .catch((err) => {
-          fastify.log.error(`Failed to load ws dependency: ${err}`);
+        .catch(() => {
+          fastify.log.error("Failed to load Solana WS proxy dependency");
           // Fastify WebSocket connection wraps the socket - access it safely
           // The connection from @fastify/websocket is a ws WebSocket
           const wsClient = ((connection as unknown as { socket?: WsWebSocket })
@@ -613,24 +792,41 @@ function registerSolanaWsProxyRoute(
   );
 }
 
-export function registerProxyRoutes(fastify: FastifyInstance): void {
+export function registerProxyRoutes(
+  fastify: FastifyInstance,
+  config: Pick<ServerConfig, "nodeEnv">,
+): void {
+  const productionLike = isProductionLikeEnvironment(config.nodeEnv);
+  const requireBrowserOrigin = createRequiredBrowserOriginPreHandler(
+    resolveAllowedOrigins(config.nodeEnv),
+  );
+  const browserOnlyRouteOptions = {
+    bodyLimit: MAX_RPC_REQUEST_BYTES,
+    config: { rateLimit: { max: 60, timeWindow: "1 minute" } },
+    ...(productionLike ? { preHandler: requireBrowserOrigin } : {}),
+  };
+  const rpcRouteOptions = {
+    bodyLimit: MAX_RPC_REQUEST_BYTES,
+    config: { rateLimit: { max: 300, timeWindow: "1 minute" } },
+    ...(productionLike ? { preHandler: requireBrowserOrigin } : {}),
+  };
+
   // Proxy for Birdeye API
-  fastify.get(
+  fastify.get<{ Querystring: { address: string } }>(
     "/api/proxy/birdeye/price",
+    browserOnlyRouteOptions,
     async (
       request: FastifyRequest<{ Querystring: { address: string } }>,
       reply: FastifyReply,
     ) => {
       const apiKey = process.env.BIRDEYE_API_KEY;
       if (!apiKey) {
-        return reply
-          .status(500)
-          .send({ error: "Missing BIRDEYE_API_KEY in server environment" });
+        return reply.status(503).send({ error: "Price service unavailable" });
       }
 
       const { address } = request.query;
-      if (!address) {
-        return reply.status(400).send({ error: "Missing address parameter" });
+      if (!isCanonicalSolanaAddress(address)) {
+        return reply.status(400).send({ error: "Invalid address parameter" });
       }
 
       try {
@@ -651,7 +847,10 @@ export function registerProxyRoutes(fastify: FastifyInstance): void {
         const data = await response.json();
         return reply.send(data);
       } catch (error: unknown) {
-        fastify.log.error(error);
+        fastify.log.error(
+          { errorName: error instanceof Error ? error.name : "UnknownError" },
+          "Birdeye price proxy request failed",
+        );
         return reply
           .status(500)
           .send({ error: "Failed to fetch from Birdeye" });
@@ -662,20 +861,44 @@ export function registerProxyRoutes(fastify: FastifyInstance): void {
   // Cluster-aware Solana RPC proxy.
   fastify.post<{ Querystring: { cluster?: string } }>(
     "/api/proxy/solana/rpc",
-    { config: { rateLimit: false } },
+    rpcRouteOptions,
     async (request, reply) =>
-      proxySolanaRpcRequest(fastify, request, reply, "mainnet-beta"),
+      proxySolanaRpcRequest(
+        fastify,
+        request,
+        reply,
+        "mainnet-beta",
+        productionLike,
+      ),
   );
 
   // Backwards-compatible alias used by existing frontends.
   fastify.post<{ Querystring: { cluster?: string } }>(
     "/api/proxy/helius/rpc",
-    { config: { rateLimit: false } },
+    rpcRouteOptions,
     async (request, reply) =>
-      proxySolanaRpcRequest(fastify, request, reply, "mainnet-beta"),
+      proxySolanaRpcRequest(
+        fastify,
+        request,
+        reply,
+        "mainnet-beta",
+        productionLike,
+      ),
   );
 
   // Cluster-aware Solana WS proxy and Helius-compatible alias.
-  registerSolanaWsProxyRoute(fastify, "/api/proxy/solana/ws", "mainnet-beta");
-  registerSolanaWsProxyRoute(fastify, "/api/proxy/helius/ws", "mainnet-beta");
+  registerSolanaWsProxyRoute(
+    fastify,
+    "/api/proxy/solana/ws",
+    "mainnet-beta",
+    productionLike,
+    requireBrowserOrigin,
+  );
+  registerSolanaWsProxyRoute(
+    fastify,
+    "/api/proxy/helius/ws",
+    "mainnet-beta",
+    productionLike,
+    requireBrowserOrigin,
+  );
 }

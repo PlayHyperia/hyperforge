@@ -1,0 +1,91 @@
+{
+  "schemaVersion": 1,
+  "title": "Production one-hand duel locomotion · multiview",
+  "framing": "avatar-and-equipment",
+  "motions": [
+    {
+      "id": "idle-front",
+      "name": "Idle · front",
+      "asset": "emotes/emote-one-hand-idle-steve.glb",
+      "sampleRatio": 0.35,
+      "cameraYawDegrees": 0
+    },
+    {
+      "id": "idle-right",
+      "name": "Idle · right",
+      "asset": "emotes/emote-one-hand-idle-steve.glb",
+      "sampleRatio": 0.35,
+      "cameraYawDegrees": 90
+    },
+    {
+      "id": "idle-rear",
+      "name": "Idle · rear",
+      "asset": "emotes/emote-one-hand-idle-steve.glb",
+      "sampleRatio": 0.35,
+      "cameraYawDegrees": 180
+    },
+    {
+      "id": "idle-left",
+      "name": "Idle · left",
+      "asset": "emotes/emote-one-hand-idle-steve.glb",
+      "sampleRatio": 0.35,
+      "cameraYawDegrees": -90
+    },
+    {
+      "id": "walk-front-a",
+      "name": "Walk 15% · front",
+      "asset": "emotes/emote-one-hand-walk-steve.glb",
+      "sampleRatio": 0.15,
+      "cameraYawDegrees": 0
+    },
+    {
+      "id": "walk-right-b",
+      "name": "Walk 45% · right",
+      "asset": "emotes/emote-one-hand-walk-steve.glb",
+      "sampleRatio": 0.45,
+      "cameraYawDegrees": 90
+    },
+    {
+      "id": "walk-rear-c",
+      "name": "Walk 75% · rear",
+      "asset": "emotes/emote-one-hand-walk-steve.glb",
+      "sampleRatio": 0.75,
+      "cameraYawDegrees": 180
+    },
+    {
+      "id": "walk-left-b",
+      "name": "Walk 45% · left",
+      "asset": "emotes/emote-one-hand-walk-steve.glb",
+      "sampleRatio": 0.45,
+      "cameraYawDegrees": -90
+    },
+    {
+      "id": "run-front-a",
+      "name": "Run 15% · front",
+      "asset": "emotes/emote-one-hand-run-steve.glb",
+      "sampleRatio": 0.15,
+      "cameraYawDegrees": 0
+    },
+    {
+      "id": "run-right-b",
+      "name": "Run 45% · right",
+      "asset": "emotes/emote-one-hand-run-steve.glb",
+      "sampleRatio": 0.45,
+      "cameraYawDegrees": 90
+    },
+    {
+      "id": "run-rear-c",
+      "name": "Run 75% · rear",
+      "asset": "emotes/emote-one-hand-run-steve.glb",
+      "sampleRatio": 0.75,
+      "cameraYawDegrees": 180
+    },
+    {
+      "id": "run-left-b",
+      "name": "Run 45% · left",
+      "asset": "emotes/emote-one-hand-run-steve.glb",
+      "sampleRatio": 0.45,
+      "cameraYawDegrees": -90
+    }
+  ]
+}

@@ -1,0 +1,69 @@
+diff --git a/build/three.webgpu.js b/build/three.webgpu.js
+index ff56ac4034083c2c625ca0cec4e77c2f9fa34d7b..2706201f8c287f9f7fd0a1e70c309ce93f760d2c 100644
+--- a/build/three.webgpu.js
++++ b/build/three.webgpu.js
+@@ -79345,6 +79345,10 @@ class WebGPUBackend extends Backend {
+ 
+ 		}
+ 
++		// A completed context can be reused by compileAsync framebuffer copies.
++		// Only an active render pass may resume on this encoder.
++		renderContextData.currentPass = null;
++
+ 		if ( occlusionQueryCount > 0 ) {
+ 
+ 			const bufferSize = occlusionQueryCount * 8; // 8 byte entries for query results
+@@ -79388,6 +79392,7 @@ class WebGPUBackend extends Backend {
+ 		}
+ 
+ 		this.device.queue.submit( [ renderContextData.encoder.finish() ] );
++		renderContextData.encoder = null;
+ 
+ 
+ 		//
+diff --git a/build/three.webgpu.nodes.js b/build/three.webgpu.nodes.js
+index 58195f291fa1fc18f4df85a5e072dde97c4ca675..7fe5cefab6deefa8cd2da5159400e42bd3f48fcb 100644
+--- a/build/three.webgpu.nodes.js
++++ b/build/three.webgpu.nodes.js
+@@ -79345,6 +79345,10 @@ class WebGPUBackend extends Backend {
+ 
+ 		}
+ 
++		// A completed context can be reused by compileAsync framebuffer copies.
++		// Only an active render pass may resume on this encoder.
++		renderContextData.currentPass = null;
++
+ 		if ( occlusionQueryCount > 0 ) {
+ 
+ 			const bufferSize = occlusionQueryCount * 8; // 8 byte entries for query results
+@@ -79388,6 +79392,7 @@ class WebGPUBackend extends Backend {
+ 		}
+ 
+ 		this.device.queue.submit( [ renderContextData.encoder.finish() ] );
++		renderContextData.encoder = null;
+ 
+ 
+ 		//
+diff --git a/src/renderers/webgpu/WebGPUBackend.js b/src/renderers/webgpu/WebGPUBackend.js
+index 3d6f8042127dd9ac131e359516b07d8521c4d21c..4d2ca844fe84389a20dd9f0db82c777cc3021950 100644
+--- a/src/renderers/webgpu/WebGPUBackend.js
++++ b/src/renderers/webgpu/WebGPUBackend.js
+@@ -1019,6 +1019,10 @@ class WebGPUBackend extends Backend {
+ 
+ 		}
+ 
++		// A completed context can be reused by compileAsync framebuffer copies.
++		// Only an active render pass may resume on this encoder.
++		renderContextData.currentPass = null;
++
+ 		if ( occlusionQueryCount > 0 ) {
+ 
+ 			const bufferSize = occlusionQueryCount * 8; // 8 byte entries for query results
+@@ -1062,6 +1066,7 @@ class WebGPUBackend extends Backend {
+ 		}
+ 
+ 		this.device.queue.submit( [ renderContextData.encoder.finish() ] );
++		renderContextData.encoder = null;
+ 
+ 
+ 		//

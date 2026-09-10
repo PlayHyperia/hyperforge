@@ -311,4 +311,36 @@ describe("InventorySystem atomic gathering reward", () => {
     ).toHaveBeenCalledOnce();
     expect(quantities(fixture.inventory)).toEqual({ fishing_bait: 5 });
   });
+
+  it("rejects a receipt whose level does not match its exact durable XP", async () => {
+    const fixture = createFixture(async (request) => ({
+      ...request,
+      replayed: false,
+      depletedUntil: null,
+      awardedXp: 25,
+      operationCommittedXp: 25,
+      currentXp: 25,
+      currentLevel: 99,
+      committed: inventoryRows(5, 1),
+    }));
+
+    await expect(
+      fixture.inventory.commitGatheringRewardAtomic(PLAYER_ID, "gathering-5", {
+        resourceId: "tree_atomic_5",
+        depleteAfterCommit: false,
+        respawnTicks: 80,
+        skill: "woodcutting",
+        xpAmount: 25,
+        rewardItemId: "logs",
+        rewardQuantity: 1,
+      }),
+    ).resolves.toEqual(
+      expect.objectContaining({
+        ok: false,
+        retryable: true,
+        reason: "persistence_ambiguous",
+      }),
+    );
+    expect(quantities(fixture.inventory)).toEqual({ fishing_bait: 5 });
+  });
 });

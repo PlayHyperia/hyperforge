@@ -37,6 +37,7 @@ export const DUEL_MOTION_TELEMETRY_LIMITS = Object.freeze({
   minimumTravelXZPerAgent: 0.35,
   minimumMovingSegmentsPerAgent: 4,
   minimumDiagonalSegments: 2,
+  minimumDiagonalSegmentsPerAgent: 2,
   minimumDirectionCoverage: 3,
   maximumStationaryRatio: 0.85,
   maximumSharpReversalRatio: 0.75,
@@ -51,6 +52,21 @@ export const DUEL_MOTION_TELEMETRY_LIMITS = Object.freeze({
   maximumFrameWorkP95Ms: 8,
   maximumFrameWorkP99Ms: 16,
   maximumOver33MsFrameRatio: 0.02,
+});
+
+export const DUEL_FIGHT_COMPOSITION_LIMITS = Object.freeze({
+  minimumBodyHeightNdcP05: 0.32,
+  minimumBodyHeightNdcP50: 0.38,
+  maximumBodyHeightNdcP95: 0.78,
+  maximumBodyProjectionAbsX: 0.72,
+  minimumFootNdcY: -0.78,
+  maximumHeadNdcY: 0.58,
+  minimumFrameCenterNdcY: -0.24,
+  maximumFrameCenterNdcY: 0.2,
+  maximumFrameCenterDeltaP95: 0.12,
+  maximumFrameCenterDelta: 0.3,
+  maximumBodyScaleDeltaP95: 0.08,
+  maximumBodyScaleDelta: 0.2,
 });
 
 const MOVEMENT_EPSILON = 0.015;
@@ -122,11 +138,21 @@ function metricSummary(values) {
   const finite = values.filter(Number.isFinite);
   return {
     samples: finite.length,
+    min: finite.length > 0 ? round(Math.min(...finite)) : null,
+    p05: percentile(finite, 0.05),
     p50: percentile(finite, 0.5),
     p95: percentile(finite, 0.95),
     p99: percentile(finite, 0.99),
     max: finite.length > 0 ? round(Math.max(...finite)) : null,
   };
+}
+
+function finiteNdcPosition(value) {
+  return Array.isArray(value) &&
+    value.length === 3 &&
+    value.every(Number.isFinite)
+    ? value
+    : null;
 }
 
 function check(label, pass, actual) {
@@ -227,10 +253,98 @@ function summarizeAgent(agentId, observations) {
     ),
     outsideArenaSamples: ordered.filter((entry) => !entry.insideCombatArena)
       .length,
+    outsideAssignedArenaSamples: ordered.filter(
+      (entry) => entry.insideAssignedCombatArena === false,
+    ).length,
+    missingAssignedArenaSamples: ordered.filter(
+      (entry) => typeof entry.insideAssignedCombatArena !== "boolean",
+    ).length,
+    occludedHeadSamples: ordered.filter(
+      (entry) => entry.cameraLineOfSight?.head === false,
+    ).length,
+    occludedTorsoSamples: ordered.filter(
+      (entry) => entry.cameraLineOfSight?.torso === false,
+    ).length,
+    occludedLowerBodySamples: ordered.filter(
+      (entry) => entry.cameraLineOfSight?.lowerBody === false,
+    ).length,
+    missingLineOfSightSamples: ordered.filter(
+      (entry) =>
+        typeof entry.cameraLineOfSight?.head !== "boolean" ||
+        typeof entry.cameraLineOfSight?.torso !== "boolean" ||
+        typeof entry.cameraLineOfSight?.lowerBody !== "boolean",
+    ).length,
     hiddenSamples: ordered.filter((entry) => !entry.visible).length,
     inactiveSamples: ordered.filter((entry) => !entry.active).length,
     avatarNotReadySamples: ordered.filter((entry) => !entry.avatarReady).length,
   };
+}
+
+const MAX_SCREENSHOT_PERFORMANCE_CHARACTERS = 262_144;
+
+function hasScreenshotPerformanceEnvelope(value) {
+  return (
+    value != null &&
+    typeof value === "object" &&
+    !Array.isArray(value) &&
+    value.schemaVersion === 1 &&
+    Number.isSafeInteger(value.sessionStartedAt) &&
+    value.sessionStartedAt >= 0 &&
+    Number.isSafeInteger(value.updatedAt) &&
+    value.updatedAt >= value.sessionStartedAt &&
+    value.uptimeMs === value.updatedAt - value.sessionStartedAt &&
+    Number.isSafeInteger(value.overall?.frames) &&
+    value.overall.frames >= 0
+  );
+}
+
+export function cloneDuelScreenshotPerformanceSnapshot(value) {
+  if (!hasScreenshotPerformanceEnvelope(value)) {
+    throw new TypeError("Screenshot performance snapshot envelope is invalid");
+  }
+  const serialized = JSON.stringify(value);
+  if (serialized.length > MAX_SCREENSHOT_PERFORMANCE_CHARACTERS) {
+    throw new RangeError(
+      "Screenshot performance snapshot exceeds retention limit",
+    );
+  }
+  return JSON.parse(serialized);
+}
+
+export function evaluateDuelScreenshotPerformanceSnapshot({
+  before,
+  after,
+  captureEndedAt,
+  afterObservedAt,
+}) {
+  if (
+    !hasScreenshotPerformanceEnvelope(before) ||
+    !hasScreenshotPerformanceEnvelope(after) ||
+    !Number.isSafeInteger(captureEndedAt) ||
+    !Number.isSafeInteger(afterObservedAt) ||
+    captureEndedAt < before.updatedAt ||
+    afterObservedAt < captureEndedAt ||
+    after.updatedAt > afterObservedAt
+  ) {
+    return { status: "invalid", reason: "invalid_snapshot_or_clock" };
+  }
+  if (after.sessionStartedAt !== before.sessionStartedAt) {
+    return { status: "invalid", reason: "telemetry_session_changed" };
+  }
+  if (
+    after.updatedAt < before.updatedAt ||
+    after.overall.frames < before.overall.frames
+  ) {
+    return { status: "invalid", reason: "telemetry_progress_regressed" };
+  }
+  if (
+    after.updatedAt <= before.updatedAt ||
+    after.overall.frames <= before.overall.frames ||
+    after.updatedAt < captureEndedAt
+  ) {
+    return { status: "pending", reason: "cached_or_pre_capture_snapshot" };
+  }
+  return { status: "ready", reason: null };
 }
 
 function summarizePerformance(performance) {
@@ -243,12 +357,71 @@ function summarizePerformance(performance) {
     Number.isFinite(frames) && frames > 0 && Number.isFinite(over33)
       ? over33 / frames
       : null;
+  const longFrames = Array.isArray(performance?.longFrames)
+    ? performance.longFrames
+        .filter((entry) => entry?.phase === "FIGHTING")
+        .slice(-32)
+        .map((entry) => {
+          const observedAt =
+            Number.isSafeInteger(performance.sessionStartedAt) &&
+            performance.sessionStartedAt >= 0 &&
+            Number.isSafeInteger(entry.uptimeMs) &&
+            entry.uptimeMs >= 0 &&
+            Number.isSafeInteger(
+              performance.sessionStartedAt + entry.uptimeMs,
+            ) &&
+            performance.sessionStartedAt + entry.uptimeMs <=
+              performance.updatedAt
+              ? performance.sessionStartedAt + entry.uptimeMs
+              : null;
+          return {
+            frameSequence: entry.frameSequence ?? null,
+            phaseFrame: entry.phaseFrame ?? null,
+            uptimeMs: entry.uptimeMs ?? null,
+            observedAt,
+            // Date.now is sampled after the monotonic frame interval, so this
+            // start is an estimate for correlation, never a cause attribution.
+            estimatedIntervalStartedAt:
+              observedAt !== null &&
+              Number.isFinite(entry.frameIntervalMs) &&
+              entry.frameIntervalMs >= 0
+                ? observedAt - entry.frameIntervalMs
+                : null,
+            frameIntervalMs: entry.frameIntervalMs ?? null,
+            frameWorkMs: entry.frameWorkMs ?? null,
+            cpuMs: entry.cpuMs ?? null,
+            renderSubmitMs: entry.renderSubmitMs ?? null,
+            drawCalls: entry.drawCalls ?? null,
+            triangles: entry.triangles ?? null,
+            textures: entry.textures ?? null,
+            geometries: entry.geometries ?? null,
+            jsHeapUsedBytes: entry.jsHeapUsedBytes ?? null,
+            resourceEntries: entry.resourceEntries ?? null,
+            topSystems: Array.isArray(entry.topSystems)
+              ? entry.topSystems.slice(0, 8)
+              : [],
+          };
+        })
+    : [];
   return {
+    sessionStartedAt: Number.isSafeInteger(performance?.sessionStartedAt)
+      ? performance.sessionStartedAt
+      : null,
+    overallFrames: Number.isSafeInteger(performance?.overall?.frames)
+      ? performance.overall.frames
+      : null,
     frames: Number.isFinite(frames) ? frames : null,
     frameIntervalMs: interval ?? null,
     frameWorkMs: work ?? null,
+    cpuMs: fighting?.cpuMs ?? null,
+    renderSubmitMs: fighting?.renderSubmitMs ?? null,
     framesAbove33_33Ms: Number.isFinite(over33) ? over33 : null,
     over33_33MsRatio: round(over33Ratio),
+    renderer: fighting?.renderer ?? null,
+    viewport: performance?.viewport ?? null,
+    jsHeap: performance?.jsHeap ?? null,
+    resources: performance?.resources ?? null,
+    longFrames,
     snapshotUpdatedAt: Number.isSafeInteger(performance?.updatedAt)
       ? performance.updatedAt
       : null,
@@ -330,7 +503,68 @@ export const DUEL_HIT_REACTION_TELEMETRY_LIMITS = Object.freeze({
   maximumAlignmentMs: 500,
   resolutionGraceMs: 350,
   minimumCleanResolutionSamples: 2,
+  maximumAuthoredMotionActions: 8,
 });
+
+function normalizeAuthoredMotionEvidence(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  if (
+    value.schemaVersion !== 1 ||
+    typeof value.overflow !== "boolean" ||
+    !Number.isSafeInteger(value.invalidActionCount) ||
+    value.invalidActionCount < 0 ||
+    value.invalidActionCount >
+      DUEL_HIT_REACTION_TELEMETRY_LIMITS.maximumAuthoredMotionActions + 1 ||
+    !Array.isArray(value.actions) ||
+    value.actions.length >
+      DUEL_HIT_REACTION_TELEMETRY_LIMITS.maximumAuthoredMotionActions
+  ) {
+    return null;
+  }
+  const actions = [];
+  for (const action of value.actions) {
+    if (
+      !action ||
+      typeof action !== "object" ||
+      Array.isArray(action) ||
+      typeof action.url !== "string" ||
+      action.url.length === 0 ||
+      action.url.length > 200 ||
+      action.url !== action.url.trim() ||
+      /[?#\u0000-\u001f\u007f]/.test(action.url) ||
+      typeof action.running !== "boolean" ||
+      typeof action.paused !== "boolean" ||
+      !Number.isFinite(action.effectiveWeight) ||
+      action.effectiveWeight <= 0 ||
+      action.effectiveWeight > 1
+    ) {
+      return null;
+    }
+    actions.push(action);
+  }
+  return {
+    clean: !value.overflow && value.invalidActionCount === 0,
+    actions,
+  };
+}
+
+function isActiveNonIdleAuthoredMotion(action) {
+  return (
+    action.running &&
+    !action.paused &&
+    action.effectiveWeight > 0 &&
+    !/(?:^|[-_/])(idle|death)(?:[-_.?/]|$)/i.test(action.url)
+  );
+}
+
+function exactRequiredHitReactionBoneCount(reaction) {
+  return Number.isSafeInteger(reaction?.requiredBoneCount) &&
+    reaction.requiredBoneCount >= 1 &&
+    reaction.requiredBoneCount <=
+      DUEL_HIT_REACTION_TELEMETRY_LIMITS.requiredBoneCount
+    ? reaction.requiredBoneCount
+    : DUEL_HIT_REACTION_TELEMETRY_LIMITS.requiredBoneCount;
+}
 
 export function summarizeDuelHitReactionTelemetry(samples) {
   const ordered = [...samples].sort(
@@ -374,6 +608,9 @@ export function summarizeDuelHitReactionTelemetry(samples) {
   const agents = new Map();
   let expectedDiagnostics = 0;
   let retainedDiagnostics = 0;
+  let expectedAuthoredMotionDiagnostics = 0;
+  let retainedAuthoredMotionDiagnostics = 0;
+  let invalidAuthoredMotionDiagnostics = 0;
   let positiveWeightSamples = 0;
   let activeAuthoredMotionSamples = 0;
   let sequenceResets = 0;
@@ -384,6 +621,14 @@ export function summarizeDuelHitReactionTelemetry(samples) {
       const key = `${sample.cycleId}\0${agent.id}`;
       const previous = previousByCycleAgent.get(key);
       const reaction = agent.hitReaction;
+      const authoredMotion = normalizeAuthoredMotionEvidence(
+        agent.authoredMotion,
+      );
+      expectedAuthoredMotionDiagnostics += 1;
+      if (authoredMotion) {
+        retainedAuthoredMotionDiagnostics += 1;
+        if (!authoredMotion.clean) invalidAuthoredMotionDiagnostics += 1;
+      }
       const metrics = agents.get(agent.id) ?? {
         id: agent.id,
         healthDropEvents: 0,
@@ -391,18 +636,22 @@ export function summarizeDuelHitReactionTelemetry(samples) {
         positiveWeightSamples: 0,
         activeSamples: 0,
         availableBoneCounts: new Set(),
+        requiredBoneCounts: new Set(),
       };
 
       if (reaction) {
         retainedDiagnostics += 1;
         metrics.availableBoneCounts.add(reaction.availableBoneCount);
+        metrics.requiredBoneCounts.add(
+          exactRequiredHitReactionBoneCount(reaction),
+        );
         if (reaction.active) metrics.activeSamples += 1;
         if (reaction.currentWeight > 0) {
           positiveWeightSamples += 1;
           metrics.positiveWeightSamples += 1;
           if (
-            typeof agent.avatarEmote === "string" &&
-            !/(?:^|[-_/])(idle|death)(?:[-_.?/]|$)/i.test(agent.avatarEmote)
+            authoredMotion?.clean &&
+            authoredMotion.actions.some(isActiveNonIdleAuthoredMotion)
           ) {
             activeAuthoredMotionSamples += 1;
           }
@@ -415,6 +664,8 @@ export function summarizeDuelHitReactionTelemetry(samples) {
             agentId: agent.id,
             cycleId: sample.cycleId,
             observedAt: sample.observedAt,
+            observationWindowStartMs: previous.observedAt,
+            observationWindowEndMs: sample.observedAt,
             damage: previous.hp - agent.hp,
           };
           healthDrops.push(event);
@@ -430,6 +681,8 @@ export function summarizeDuelHitReactionTelemetry(samples) {
               agentId: agent.id,
               cycleId: sample.cycleId,
               observedAt: sample.observedAt,
+              observationWindowStartMs: previous.observedAt,
+              observationWindowEndMs: sample.observedAt,
               count: delta,
             });
             metrics.triggerIncrements += delta;
@@ -439,26 +692,77 @@ export function summarizeDuelHitReactionTelemetry(samples) {
       previousByCycleAgent.set(key, {
         hp: agent.hp,
         hitReaction: reaction ?? null,
+        observedAt: sample.observedAt,
       });
       agents.set(agent.id, metrics);
     }
   }
 
-  const aligned = (left, right) =>
-    left.agentId === right.agentId &&
-    left.cycleId === right.cycleId &&
-    Math.abs(left.observedAt - right.observedAt) <=
-      DUEL_HIT_REACTION_TELEMETRY_LIMITS.maximumAlignmentMs;
-  const unmatchedHealthDrops = healthDrops.filter(
-    (drop) => !triggerIncrements.some((trigger) => aligned(drop, trigger)),
-  );
-  const unmatchedTriggerIncrements = triggerIncrements.filter(
-    (trigger) => !healthDrops.some((drop) => aligned(drop, trigger)),
-  );
+  // State HP and mixer diagnostics are independent projections sampled at a
+  // finite cadence. A delta therefore happened somewhere between its previous
+  // and current observation, not necessarily at the current poll timestamp.
+  // Compare those uncertainty windows in strict sequence order: adjacent
+  // windows may touch, while a full clean sample between them exposes real
+  // presentation lag and still fails the 500 ms budget.
+  const observationWindowGapMs = (left, right) => {
+    if (left.observationWindowEndMs < right.observationWindowStartMs) {
+      return right.observationWindowStartMs - left.observationWindowEndMs;
+    }
+    if (right.observationWindowEndMs < left.observationWindowStartMs) {
+      return left.observationWindowStartMs - right.observationWindowEndMs;
+    }
+    return 0;
+  };
+  const healthByCycleAgent = new Map();
+  const triggersByCycleAgent = new Map();
+  for (const drop of healthDrops) {
+    const key = `${drop.cycleId}\0${drop.agentId}`;
+    const entries = healthByCycleAgent.get(key) ?? [];
+    entries.push(drop);
+    healthByCycleAgent.set(key, entries);
+  }
+  for (const trigger of triggerIncrements) {
+    const key = `${trigger.cycleId}\0${trigger.agentId}`;
+    const entries = triggersByCycleAgent.get(key) ?? [];
+    for (let index = 0; index < trigger.count; index += 1) {
+      entries.push(trigger);
+    }
+    triggersByCycleAgent.set(key, entries);
+  }
+  const alignmentKeys = new Set([
+    ...healthByCycleAgent.keys(),
+    ...triggersByCycleAgent.keys(),
+  ]);
+  let unmatchedHealthDrops = 0;
+  let unmatchedTriggerIncrements = 0;
+  let maximumAlignmentGapMs = 0;
+  let maximumObservedPointSkewMs = 0;
+  for (const key of alignmentKeys) {
+    const drops = healthByCycleAgent.get(key) ?? [];
+    const triggers = triggersByCycleAgent.get(key) ?? [];
+    const pairedCount = Math.min(drops.length, triggers.length);
+    for (let index = 0; index < pairedCount; index += 1) {
+      const gapMs = observationWindowGapMs(drops[index], triggers[index]);
+      maximumAlignmentGapMs = Math.max(maximumAlignmentGapMs, gapMs);
+      maximumObservedPointSkewMs = Math.max(
+        maximumObservedPointSkewMs,
+        Math.abs(drops[index].observedAt - triggers[index].observedAt),
+      );
+      if (gapMs > DUEL_HIT_REACTION_TELEMETRY_LIMITS.maximumAlignmentMs) {
+        unmatchedHealthDrops += 1;
+        unmatchedTriggerIncrements += 1;
+      }
+    }
+    unmatchedHealthDrops += Math.max(0, drops.length - triggers.length);
+    unmatchedTriggerIncrements += Math.max(0, triggers.length - drops.length);
+  }
   const agentMetrics = [...agents.values()]
     .map((entry) => ({
       ...entry,
       availableBoneCounts: [...entry.availableBoneCounts].sort(
+        (left, right) => left - right,
+      ),
+      requiredBoneCounts: [...entry.requiredBoneCounts].sort(
         (left, right) => left - right,
       ),
     }))
@@ -477,11 +781,14 @@ export function summarizeDuelHitReactionTelemetry(samples) {
         agentMetrics.every(
           (agent) =>
             agent.availableBoneCounts.length === 1 &&
-            agent.availableBoneCounts[0] ===
-              DUEL_HIT_REACTION_TELEMETRY_LIMITS.requiredBoneCount,
+            agent.requiredBoneCounts.length === 1 &&
+            agent.availableBoneCounts[0] === agent.requiredBoneCounts[0],
         ),
       `${retainedDiagnostics}/${expectedDiagnostics} samples; ${agentMetrics
-        .map((agent) => `${agent.id}:${agent.availableBoneCounts.join("/")}`)
+        .map(
+          (agent) =>
+            `${agent.id}:${agent.availableBoneCounts.join("/")} of ${agent.requiredBoneCounts.join("/")}`,
+        )
         .join(",")}`,
     ),
     check(
@@ -498,11 +805,19 @@ export function summarizeDuelHitReactionTelemetry(samples) {
       )} triggers`,
     ),
     check(
+      "every retained contestant exposes bounded authored-motion diagnostics",
+      expectedAuthoredMotionDiagnostics > 0 &&
+        retainedAuthoredMotionDiagnostics ===
+          expectedAuthoredMotionDiagnostics &&
+        invalidAuthoredMotionDiagnostics === 0,
+      `${retainedAuthoredMotionDiagnostics}/${expectedAuthoredMotionDiagnostics} samples; ${invalidAuthoredMotionDiagnostics} invalid or overflowed`,
+    ),
+    check(
       "health loss and avatar reaction sequences remain aligned",
-      unmatchedHealthDrops.length === 0 &&
-        unmatchedTriggerIncrements.length === 0 &&
+      unmatchedHealthDrops === 0 &&
+        unmatchedTriggerIncrements === 0 &&
         sequenceResets === 0,
-      `unmatched health=${unmatchedHealthDrops.length}, triggers=${unmatchedTriggerIncrements.length}, resets=${sequenceResets}`,
+      `unmatched health=${unmatchedHealthDrops}, triggers=${unmatchedTriggerIncrements}, resets=${sequenceResets}, window gap max=${maximumAlignmentGapMs}ms`,
     ),
     check(
       "non-zero reaction weight is sampled in the real mixer",
@@ -526,6 +841,9 @@ export function summarizeDuelHitReactionTelemetry(samples) {
       incompleteCycleCount: incompleteCycleIds.size,
       retainedDiagnostics,
       expectedDiagnostics,
+      retainedAuthoredMotionDiagnostics,
+      expectedAuthoredMotionDiagnostics,
+      invalidAuthoredMotionDiagnostics,
       healthDropEvents: healthDrops.length,
       triggerIncrements: triggerIncrements.reduce(
         (total, event) => total + event.count,
@@ -533,8 +851,10 @@ export function summarizeDuelHitReactionTelemetry(samples) {
       ),
       positiveWeightSamples,
       activeAuthoredMotionSamples,
-      unmatchedHealthDrops: unmatchedHealthDrops.length,
-      unmatchedTriggerIncrements: unmatchedTriggerIncrements.length,
+      unmatchedHealthDrops,
+      unmatchedTriggerIncrements,
+      maximumAlignmentGapMs,
+      maximumObservedPointSkewMs,
       sequenceResets,
       agents: agentMetrics,
     },
@@ -588,16 +908,26 @@ export function summarizeDuelHitReactionResolutionTelemetry(
     const fightingAgents = new Map();
     for (const sample of fighting) {
       for (const agent of sample.agents) {
-        const previous = fightingAgents.get(agent.id) ?? 0;
-        fightingAgents.set(
-          agent.id,
-          Math.max(previous, agent.hitReaction?.triggerCount ?? 0),
-        );
+        const previous = fightingAgents.get(agent.id) ?? {
+          triggerCount: 0,
+          requiredBoneCount: exactRequiredHitReactionBoneCount(
+            agent.hitReaction,
+          ),
+        };
+        fightingAgents.set(agent.id, {
+          triggerCount: Math.max(
+            previous.triggerCount,
+            agent.hitReaction?.triggerCount ?? 0,
+          ),
+          requiredBoneCount: exactRequiredHitReactionBoneCount(
+            agent.hitReaction,
+          ),
+        });
       }
     }
     if (
       fightingAgents.size !== 2 ||
-      ![...fightingAgents.values()].some((triggerCount) => triggerCount > 0)
+      ![...fightingAgents.values()].some(({ triggerCount }) => triggerCount > 0)
     ) {
       continue;
     }
@@ -618,7 +948,7 @@ export function summarizeDuelHitReactionResolutionTelemetry(
         if (
           reaction &&
           reaction.availableBoneCount ===
-            DUEL_HIT_REACTION_TELEMETRY_LIMITS.requiredBoneCount
+            fightingAgents.get(agent.id)?.requiredBoneCount
         ) {
           completeDiagnostics += 1;
         } else {
@@ -635,7 +965,8 @@ export function summarizeDuelHitReactionResolutionTelemetry(
         }
         if (
           reaction &&
-          reaction.triggerCount < (fightingAgents.get(agent.id) ?? 0)
+          reaction.triggerCount <
+            (fightingAgents.get(agent.id)?.triggerCount ?? 0)
         ) {
           sequenceRegressions += 1;
           sampleClean = false;
@@ -718,6 +1049,8 @@ export function summarizeDuelMotionTelemetry({
   const observedRoles = new Set();
   const separations = [];
   const projectedPositions = [];
+  const projectedBodies = [];
+  const compositionFrames = [];
 
   for (const sample of orderedSamples) {
     const times = cycles.get(sample.cycleId) ?? [];
@@ -726,14 +1059,25 @@ export function summarizeDuelMotionTelemetry({
     if (Number.isFinite(sample.renderedSeparationXZ)) {
       separations.push(sample.renderedSeparationXZ);
     }
+    const sampleBodies = [];
     for (const agent of sample.agents) {
       observedRoles.add(agent.role);
-      if (
-        Array.isArray(agent.ndcPosition) &&
-        agent.ndcPosition.length === 3 &&
-        agent.ndcPosition.every(Number.isFinite)
-      ) {
-        projectedPositions.push(agent.ndcPosition);
+      const foot = finiteNdcPosition(agent.ndcPosition);
+      const head = finiteNdcPosition(agent.ndcHeadPosition);
+      if (foot) {
+        projectedPositions.push(foot);
+      }
+      if (foot && head) {
+        const body = {
+          foot,
+          head,
+          height: head[1] - foot[1],
+          centerX: (head[0] + foot[0]) * 0.5,
+          centerY: (head[1] + foot[1]) * 0.5,
+          maximumAbsX: Math.max(Math.abs(head[0]), Math.abs(foot[0])),
+        };
+        projectedBodies.push(body);
+        sampleBodies.push(body);
       }
       const observations = agentObservations.get(agent.id) ?? [];
       observations.push({
@@ -742,6 +1086,14 @@ export function summarizeDuelMotionTelemetry({
         cycleId: sample.cycleId,
       });
       agentObservations.set(agent.id, observations);
+    }
+    if (sampleBodies.length === 2) {
+      compositionFrames.push({
+        cycleId: sample.cycleId,
+        centerX: (sampleBodies[0].centerX + sampleBodies[1].centerX) * 0.5,
+        centerY: (sampleBodies[0].centerY + sampleBodies[1].centerY) * 0.5,
+        bodyScale: (sampleBodies[0].height + sampleBodies[1].height) * 0.5,
+      });
     }
   }
 
@@ -771,7 +1123,64 @@ export function summarizeDuelMotionTelemetry({
       agent.avatarNotReadySamples,
     0,
   );
+  const assignedArenaFailures = agents.reduce(
+    (total, agent) =>
+      total +
+      agent.outsideAssignedArenaSamples +
+      agent.missingAssignedArenaSamples,
+    0,
+  );
+  const lineOfSightCoverageFailures = agents.reduce(
+    (total, agent) => total + agent.missingLineOfSightSamples,
+    0,
+  );
+  const lineOfSightOcclusions = agents.reduce(
+    (total, agent) =>
+      total +
+      agent.occludedHeadSamples +
+      agent.occludedTorsoSamples +
+      agent.occludedLowerBodySamples,
+    0,
+  );
   const expectedProjectionCount = orderedSamples.length * 2;
+  const frameCenterDeltas = [];
+  const bodyScaleDeltas = [];
+  for (let index = 1; index < compositionFrames.length; index += 1) {
+    const previous = compositionFrames[index - 1];
+    const current = compositionFrames[index];
+    if (previous.cycleId !== current.cycleId) continue;
+    frameCenterDeltas.push(
+      Math.hypot(
+        current.centerX - previous.centerX,
+        current.centerY - previous.centerY,
+      ),
+    );
+    bodyScaleDeltas.push(Math.abs(current.bodyScale - previous.bodyScale));
+  }
+  const compositionMetrics = {
+    expectedBodyCount: expectedProjectionCount,
+    retainedBodyCount: projectedBodies.length,
+    expectedFrameCount: orderedSamples.length,
+    retainedFrameCount: compositionFrames.length,
+    bodyHeightNdc: metricSummary(projectedBodies.map((body) => body.height)),
+    maximumObservedAbsX:
+      projectedBodies.length > 0
+        ? round(Math.max(...projectedBodies.map((body) => body.maximumAbsX)))
+        : null,
+    minimumObservedFootY:
+      projectedBodies.length > 0
+        ? round(Math.min(...projectedBodies.map((body) => body.foot[1])))
+        : null,
+    maximumObservedHeadY:
+      projectedBodies.length > 0
+        ? round(Math.max(...projectedBodies.map((body) => body.head[1])))
+        : null,
+    frameCenterNdcY: metricSummary(
+      compositionFrames.map((frame) => frame.centerY),
+    ),
+    frameCenterDeltaNdc: metricSummary(frameCenterDeltas),
+    bodyScaleDeltaNdc: metricSummary(bodyScaleDeltas),
+  };
   const safeCropViolations = safeCrop
     ? projectedPositions.filter(
         (position) =>
@@ -845,6 +1254,18 @@ export function summarizeDuelMotionTelemetry({
       `${combinedDiagonalSegments} diagonal segments`,
     ),
     check(
+      "every contestant demonstrates diagonal movement",
+      agents.length === 2 &&
+        agents.every(
+          (agent) =>
+            agent.diagonalSegments >=
+            DUEL_MOTION_TELEMETRY_LIMITS.minimumDiagonalSegmentsPerAgent,
+        ),
+      agents
+        .map((agent) => `${agent.role}:${agent.diagonalSegments}`)
+        .join(", "),
+    ),
+    check(
       "multi-direction movement observed",
       combinedDirectionCoverage.length >=
         DUEL_MOTION_TELEMETRY_LIMITS.minimumDirectionCoverage,
@@ -916,6 +1337,68 @@ export function summarizeDuelMotionTelemetry({
       "avatars stay visible, active, loaded, and inside the arena",
       agents.length === 2 && containmentFailures === 0,
       `${containmentFailures} violations`,
+    ),
+    check(
+      "contestants remain inside their exact assigned combat ring",
+      agents.length === 2 && assignedArenaFailures === 0,
+      `${assignedArenaFailures} assigned-ring violations or missing samples`,
+    ),
+    check(
+      "complete camera line-of-sight telemetry retained",
+      agents.length === 2 && lineOfSightCoverageFailures === 0,
+      `${lineOfSightCoverageFailures} missing head/torso/lower-body probes`,
+    ),
+    check(
+      "contestants remain visually unobstructed from head through lower body",
+      agents.length === 2 && lineOfSightOcclusions === 0,
+      `${lineOfSightOcclusions} obstructed head/torso/lower-body probes`,
+    ),
+    check(
+      "complete head-to-foot composition telemetry retained",
+      projectedBodies.length === expectedProjectionCount &&
+        compositionFrames.length === orderedSamples.length,
+      `${projectedBodies.length}/${expectedProjectionCount} bodies, ${compositionFrames.length}/${orderedSamples.length} frames`,
+    ),
+    check(
+      "contestants remain readable at broadcast scale",
+      compositionMetrics.bodyHeightNdc.p05 >=
+        DUEL_FIGHT_COMPOSITION_LIMITS.minimumBodyHeightNdcP05 &&
+        compositionMetrics.bodyHeightNdc.p50 >=
+          DUEL_FIGHT_COMPOSITION_LIMITS.minimumBodyHeightNdcP50 &&
+        compositionMetrics.bodyHeightNdc.p95 <=
+          DUEL_FIGHT_COMPOSITION_LIMITS.maximumBodyHeightNdcP95,
+      `heightNdc p05=${compositionMetrics.bodyHeightNdc.p05},p50=${compositionMetrics.bodyHeightNdc.p50},p95=${compositionMetrics.bodyHeightNdc.p95}`,
+    ),
+    check(
+      "contestants remain inside HUD-safe body framing",
+      compositionMetrics.maximumObservedAbsX <=
+        DUEL_FIGHT_COMPOSITION_LIMITS.maximumBodyProjectionAbsX &&
+        compositionMetrics.minimumObservedFootY >=
+          DUEL_FIGHT_COMPOSITION_LIMITS.minimumFootNdcY &&
+        compositionMetrics.maximumObservedHeadY <=
+          DUEL_FIGHT_COMPOSITION_LIMITS.maximumHeadNdcY,
+      `maxAbsX=${compositionMetrics.maximumObservedAbsX},footMinY=${compositionMetrics.minimumObservedFootY},headMaxY=${compositionMetrics.maximumObservedHeadY}`,
+    ),
+    check(
+      "fighting composition remains vertically balanced",
+      compositionMetrics.frameCenterNdcY.min >=
+        DUEL_FIGHT_COMPOSITION_LIMITS.minimumFrameCenterNdcY &&
+        compositionMetrics.frameCenterNdcY.max <=
+          DUEL_FIGHT_COMPOSITION_LIMITS.maximumFrameCenterNdcY,
+      `centerY min=${compositionMetrics.frameCenterNdcY.min},max=${compositionMetrics.frameCenterNdcY.max}`,
+    ),
+    check(
+      "camera composition transitions remain continuous",
+      compositionMetrics.frameCenterDeltaNdc.samples > 0 &&
+        compositionMetrics.frameCenterDeltaNdc.p95 <=
+          DUEL_FIGHT_COMPOSITION_LIMITS.maximumFrameCenterDeltaP95 &&
+        compositionMetrics.frameCenterDeltaNdc.max <=
+          DUEL_FIGHT_COMPOSITION_LIMITS.maximumFrameCenterDelta &&
+        compositionMetrics.bodyScaleDeltaNdc.p95 <=
+          DUEL_FIGHT_COMPOSITION_LIMITS.maximumBodyScaleDeltaP95 &&
+        compositionMetrics.bodyScaleDeltaNdc.max <=
+          DUEL_FIGHT_COMPOSITION_LIMITS.maximumBodyScaleDelta,
+      `centerDelta p95=${compositionMetrics.frameCenterDeltaNdc.p95},max=${compositionMetrics.frameCenterDeltaNdc.max}; scaleDelta p95=${compositionMetrics.bodyScaleDeltaNdc.p95},max=${compositionMetrics.bodyScaleDeltaNdc.max}`,
     ),
     ...(safeCropMetrics
       ? [
@@ -1016,6 +1499,7 @@ export function summarizeDuelMotionTelemetry({
       combinedDiagonalSegments,
       combinedDirectionCoverage,
       renderedSeparationXZ: metricSummary(separations),
+      fightCompositionNdc: compositionMetrics,
       safeCropNdc: safeCropMetrics,
       performance: performanceSummary,
     },

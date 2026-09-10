@@ -3,11 +3,40 @@ import { describe, expect, it } from "vitest";
 import THREE from "../../../../extras/three/three";
 import {
   MAX_VERTEX_LIGHTS,
+  TERRAIN_SHADE,
+  TerrainShadeUniforms,
   createTerrainMaterial,
   updateTerrainVertexLights,
 } from "../TerrainShader";
 
 describe("TerrainShader material graph", () => {
+  it("preserves the original palette and shares only an explicitly supplied owner", () => {
+    const first = createTerrainMaterial();
+    const second = createTerrainMaterial();
+    const explicit = new TerrainShadeUniforms();
+    const shared = createTerrainMaterial(explicit);
+    expect(first.terrainUniforms.shade.tint.value.toArray()).toEqual([
+      ...TERRAIN_SHADE.TINT_COLOR,
+    ]);
+    expect(first.terrainUniforms.shade.strength.value).toBe(
+      TERRAIN_SHADE.STRENGTH,
+    );
+    expect(first.terrainUniforms.shade).not.toBe(second.terrainUniforms.shade);
+    expect(first.terrainUniforms.shade.tint.value).not.toBe(
+      second.terrainUniforms.shade.tint.value,
+    );
+    expect(shared.terrainUniforms.shade).toBe(explicit);
+    const originalVersion = shared.version;
+    explicit.tint.value.setRGB(1, 1, 1);
+    explicit.strength.value = 0;
+    expect(shared.version).toBe(originalVersion);
+    expect(first.terrainUniforms.shade.tint.value.toArray()).toEqual([
+      ...TERRAIN_SHADE.TINT_COLOR,
+    ]);
+    first.dispose();
+    second.dispose();
+    shared.dispose();
+  });
   it("constructs typed runtime uniforms and updates vertex lights", () => {
     const material = createTerrainMaterial();
     const { terrainUniforms } = material;

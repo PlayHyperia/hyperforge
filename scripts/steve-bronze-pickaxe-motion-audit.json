@@ -1,0 +1,35 @@
+{
+  "schemaVersion": 1,
+  "motions": [
+    {
+      "id": "mining-start",
+      "name": "Mining start",
+      "asset": "artifacts/duel-launch-avatar-bakeoff/motions/steve-preparation/steve-mining.glb",
+      "sampleRatio": 0.1
+    },
+    {
+      "id": "mining-lift",
+      "name": "Mining lift",
+      "asset": "artifacts/duel-launch-avatar-bakeoff/motions/steve-preparation/steve-mining.glb",
+      "sampleRatio": 0.3
+    },
+    {
+      "id": "mining",
+      "name": "Mining contact",
+      "asset": "artifacts/duel-launch-avatar-bakeoff/motions/steve-preparation/steve-mining.glb",
+      "sampleRatio": 0.55
+    },
+    {
+      "id": "mining-follow-through",
+      "name": "Mining follow-through",
+      "asset": "artifacts/duel-launch-avatar-bakeoff/motions/steve-preparation/steve-mining.glb",
+      "sampleRatio": 0.7
+    },
+    {
+      "id": "mining-recovery",
+      "name": "Mining recovery",
+      "asset": "artifacts/duel-launch-avatar-bakeoff/motions/steve-preparation/steve-mining.glb",
+      "sampleRatio": 0.9
+    }
+  ]
+}

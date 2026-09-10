@@ -1,5 +1,5 @@
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "avatarId": "steve",
   "legacyAvatarId": "/api/assets/steve/model",
   "certifications": [
@@ -7,8 +7,31 @@
       "itemId": "bronze_shortsword",
       "slot": "weapon",
       "grip": "one-hand",
+      "presentationAuthority": {
+        "schemaVersion": 1,
+        "actionSemantic": "blade-tip",
+        "actionAxisSymmetry": "directed",
+        "gripContact": {
+          "schemaVersion": 1,
+          "contentNodeName": "Mesh10",
+          "sourceAxis": [
+            0,
+            1,
+            0
+          ],
+          "actionEnd": "minimum",
+          "zones": [
+            {
+              "id": "primary",
+              "boneName": "rightHand",
+              "minimumSourceProjection": 0.55,
+              "maximumSourceProjection": 0.95
+            }
+          ]
+        }
+      },
       "path": "packages/server/world/assets/models/swords/shortswords/shortsword-bronze-aligned.glb",
-      "sha256": "aafce4e8e71d2c152e72a2530c935dd276f6eef81b7565d8a25535c86fcdcc2b",
+      "sha256": "062af58e4822b147709cc687656b28188603da75ee0c95f179aa96289e62d8cc",
       "structuralDocumentSha256": "3784f475dfae45080f73c91623f8c0d40f91e6dfe49911cc621fe7fe64e8d691",
       "nonJsonChunksSha256": [
         {
@@ -21,8 +44,31 @@
       "itemId": "bronze_longsword",
       "slot": "weapon",
       "grip": "one-hand",
+      "presentationAuthority": {
+        "schemaVersion": 1,
+        "actionSemantic": "blade-tip",
+        "actionAxisSymmetry": "directed",
+        "gripContact": {
+          "schemaVersion": 1,
+          "contentNodeName": "Mesh10",
+          "sourceAxis": [
+            0,
+            1,
+            0
+          ],
+          "actionEnd": "minimum",
+          "zones": [
+            {
+              "id": "primary",
+              "boneName": "rightHand",
+              "minimumSourceProjection": 0.57,
+              "maximumSourceProjection": 0.95
+            }
+          ]
+        }
+      },
       "path": "packages/server/world/assets/models/swords/long-swords/longsword-bronze-aligned.glb",
-      "sha256": "d8f9f1be4f0aa7c0a78f331328135273656bda0b1848b635d0c36b3f801c6c04",
+      "sha256": "48a6d5562e78d224c06727778d211b22795fc5fe88992939ba716a694b39e193",
       "structuralDocumentSha256": "ee2ee21159d684cda605a86cdbce511fee2e9b126e1c77d872b1ca3420e458d3",
       "nonJsonChunksSha256": [
         {
@@ -35,8 +81,31 @@
       "itemId": "bronze_scimitar",
       "slot": "weapon",
       "grip": "one-hand",
+      "presentationAuthority": {
+        "schemaVersion": 1,
+        "actionSemantic": "blade-tip",
+        "actionAxisSymmetry": "directed",
+        "gripContact": {
+          "schemaVersion": 1,
+          "contentNodeName": "mesh_0",
+          "sourceAxis": [
+            0,
+            1,
+            0
+          ],
+          "actionEnd": "minimum",
+          "zones": [
+            {
+              "id": "primary",
+              "boneName": "rightHand",
+              "minimumSourceProjection": 0.7,
+              "maximumSourceProjection": 0.95
+            }
+          ]
+        }
+      },
       "path": "packages/server/world/assets/models/swords/scimitars/scimitar-bronze-aligned.glb",
-      "sha256": "216502c4af16f36a88c77eafaaaf3d7218d323c6e0bbe2593acdfae941df6163",
+      "sha256": "d353b4981037f59663564c35b16d511a880efb68fce903f34a21e5cc61916925",
       "structuralDocumentSha256": "4151ecc586dd26957d92246022c20c154327111beebcc8df52c1987a7236d9b9",
       "nonJsonChunksSha256": [
         {
@@ -46,26 +115,35 @@
       ]
     },
     {
-      "itemId": "bronze_2h_sword",
-      "slot": "weapon",
-      "grip": "two-hand",
-      "path": "packages/server/world/assets/models/swords/2h-swords/2h-sword-bronze-aligned.glb",
-      "sha256": "1299047901a2a154af443fe687c0cd4f10f2bcbfb7104aed991aa5b1078810ef",
-      "structuralDocumentSha256": "dbfc52d2d369cc01f3b3ee097621782ad83aec79a489a8f7b79ea89ee97797eb",
-      "nonJsonChunksSha256": [
-        {
-          "type": 5130562,
-          "sha256": "3a3f999a5cf6b0d4c4defde6e67a9e391a55935cf0799ac343f2071b6c0cfe87"
-        }
-      ]
-    },
-    {
       "itemId": "shortbow",
       "slot": "weapon",
       "grip": "two-hand",
+      "presentationAuthority": {
+        "schemaVersion": 1,
+        "actionSemantic": "projectile-aim",
+        "actionAxisSymmetry": "directed",
+        "gripContact": {
+          "schemaVersion": 1,
+          "contentNodeName": "EquipmentContent",
+          "sourceAxis": [
+            0,
+            1,
+            0
+          ],
+          "actionEnd": "dynamic-aim",
+          "zones": [
+            {
+              "id": "primary",
+              "boneName": "leftHand",
+              "minimumSourceProjection": -0.16,
+              "maximumSourceProjection": 0.16
+            }
+          ]
+        }
+      },
       "path": "packages/server/world/assets/models/bows/bow-wood/shortbow-steve-fitted.glb",
-      "sha256": "eb026953db1593dc1533312594bbf7b647b8f9c50f1c56e6c6bf215d826d4964",
-      "structuralDocumentSha256": "31c3600dccfaf448511ccd751256a975ff78a5e3fcd67d191c1bb326342c7bc5",
+      "sha256": "899ad277c4e45bc1339d529bf97efa729aea5f7aaee13771159a6ce1b7647ca7",
+      "structuralDocumentSha256": "9644673ef5ab32e19e87b4ef2b83e39ca5cfc06cf6255c7bd8554f51e4bd713d",
       "nonJsonChunksSha256": [
         {
           "type": 5130562,
@@ -77,9 +155,32 @@
       "itemId": "magic_shortbow",
       "slot": "weapon",
       "grip": "two-hand",
+      "presentationAuthority": {
+        "schemaVersion": 1,
+        "actionSemantic": "projectile-aim",
+        "actionAxisSymmetry": "directed",
+        "gripContact": {
+          "schemaVersion": 1,
+          "contentNodeName": "EquipmentContent",
+          "sourceAxis": [
+            0,
+            1,
+            0
+          ],
+          "actionEnd": "dynamic-aim",
+          "zones": [
+            {
+              "id": "primary",
+              "boneName": "leftHand",
+              "minimumSourceProjection": -0.16,
+              "maximumSourceProjection": 0.16
+            }
+          ]
+        }
+      },
       "path": "packages/server/world/assets/models/bows/bow-wood/magic-shortbow-steve-fitted.glb",
-      "sha256": "99fece2e333b3e5457fa333ca7e67b3d4df11b0f77f22d72c7cb9fc266e55bef",
-      "structuralDocumentSha256": "31c3600dccfaf448511ccd751256a975ff78a5e3fcd67d191c1bb326342c7bc5",
+      "sha256": "c3501d2302f922e04539c88f9c9898ba153c6493865bc5a9c4e1baed5162e837",
+      "structuralDocumentSha256": "9644673ef5ab32e19e87b4ef2b83e39ca5cfc06cf6255c7bd8554f51e4bd713d",
       "nonJsonChunksSha256": [
         {
           "type": 5130562,
@@ -91,8 +192,31 @@
       "itemId": "staff_of_air",
       "slot": "weapon",
       "grip": "one-hand",
+      "presentationAuthority": {
+        "schemaVersion": 1,
+        "actionSemantic": "staff-focus",
+        "actionAxisSymmetry": "directed",
+        "gripContact": {
+          "schemaVersion": 1,
+          "contentNodeName": "EquipmentContent",
+          "sourceAxis": [
+            0,
+            1,
+            0
+          ],
+          "actionEnd": "maximum",
+          "zones": [
+            {
+              "id": "primary",
+              "boneName": "rightHand",
+              "minimumSourceProjection": -0.18,
+              "maximumSourceProjection": 0.18
+            }
+          ]
+        }
+      },
       "path": "packages/server/world/assets/models/magic-staffs/air-staff/staff-of-air-steve-fitted.glb",
-      "sha256": "73ebc7cdd8b483df23a79845a7ee3d8999ca81e711a09b65257fb9167c79d972",
+      "sha256": "5d90371b420ec45c5aa64fa8857217d035315cd6dffe21b07ac38a757a25b5c2",
       "structuralDocumentSha256": "edcf518255cf4efb6a902ec114e1dd379313dd48ec13b753c085024e073644d5",
       "nonJsonChunksSha256": [
         {

@@ -9,6 +9,8 @@ export type PostgresTransactionDatabase = NodePgDatabase<typeof schema>;
 export type PostgresTransactionClient = {
   query(statement: string): Promise<unknown>;
   release(discard?: Error | boolean): void;
+  on?(event: "error", listener: (error: Error) => void): void;
+  removeListener?(event: "error", listener: (error: Error) => void): void;
 };
 
 export type PostgresTransactionPool = {
@@ -89,6 +91,13 @@ async function runPostgresTransactionOnce<T>(
   const tx = createPostgresClientDatabase(client);
   let transactionOpen = false;
   let discardClient = false;
+  const handleCheckedOutClientError = () => {
+    // `pg` removes its idle-client handler while a PoolClient is checked out.
+    // Keep connection loss inside the awaited transaction failure path instead
+    // of allowing EventEmitter's unhandled `error` semantics to kill the host.
+    discardClient = true;
+  };
+  client.on?.("error", handleCheckedOutClientError);
 
   try {
     await client.query(BEGIN_STATEMENTS[isolationLevel]);
@@ -116,7 +125,11 @@ async function runPostgresTransactionOnce<T>(
     }
     throw error;
   } finally {
-    client.release(discardClient);
+    try {
+      client.release(discardClient);
+    } finally {
+      client.removeListener?.("error", handleCheckedOutClientError);
+    }
   }
 }
 

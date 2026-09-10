@@ -42,6 +42,12 @@ import { destroyAllRateLimiters } from "../systems/ServerNetwork/services/Slidin
 import { destroyIdempotencyService } from "../systems/ServerNetwork/services/IdempotencyService.js";
 import { stopMemoryMonitor } from "../infrastructure/memory-monitor.js";
 import { getDuelArenaOraclePublisher } from "../oracle/DuelArenaOraclePublisher.js";
+import { getStreamingDuelScheduler } from "../systems/StreamingDuelScheduler/index.js";
+import type { StreamingRoutesRuntime } from "../routes/streaming.js";
+import {
+  resolveStreamingDuelShutdownAckConfig,
+  waitForStreamingDuelShutdownAcknowledgement,
+} from "./streaming-shutdown-contract.js";
 
 /**
  * Web3 context for chain writer shutdown
@@ -110,6 +116,7 @@ export function registerShutdownHandlers(
   world: World,
   dbContext: DatabaseContext,
   web3Context: Web3Context | null = null,
+  streamingRoutes: StreamingRoutesRuntime | null = null,
 ): void {
   const dbWriteErrorsNonFatal = /^(1|true|yes|on)$/i.test(
     process.env.DB_WRITE_ERRORS_NON_FATAL || "",
@@ -139,6 +146,11 @@ export function registerShutdownHandlers(
   }
 
   const context: ShutdownContext = { fastify, world, dbContext, web3Context };
+  // Resolve at startup so an unsafe or malformed acknowledgement target can
+  // never remain latent until the process is already trying to terminate.
+  const streamingShutdownAckConfig = resolveStreamingDuelShutdownAckConfig(
+    process.env,
+  );
 
   // Track if we're shutting down (prevent duplicate shutdowns)
   let isShuttingDown = false;
@@ -169,7 +181,74 @@ export function registerShutdownHandlers(
       await sendAlert("Hyperia server shutting down", details);
     }
 
-    // Step 1: Stop stream capture (headless browser + FFmpeg)
+    // Step 1: Close game WebSocket ingress. Keep Fastify and its authenticated
+    // betting feed alive until the exact terminal cancellation is delivered.
+    try {
+      const { closeUwsServer } = await import("./uws-server.js");
+      closeUwsServer();
+    } catch {
+      // uWS may not have been started (UWS_ENABLED=false)
+    }
+
+    // Step 2: Stop the scheduler while the world, database, HTTP server, and
+    // authenticated betting SSE clients are still alive. A nonterminal cycle
+    // must persist and publish its exact cancellation before any feed teardown.
+    const cycleAtShutdown =
+      getStreamingDuelScheduler()?.getCurrentCycle() ?? null;
+    const expectsCancellation = Boolean(
+      cycleAtShutdown && cycleAtShutdown.phase !== "RESOLUTION",
+    );
+    let streamingShutdownExitCode = 0;
+    try {
+      await destroyStreamingDuelAuthority();
+      let terminalFrame: Awaited<
+        ReturnType<StreamingRoutesRuntime["waitForBettingTerminalFrame"]>
+      > | null = null;
+      let downstreamAcknowledged = false;
+      if (expectsCancellation && cycleAtShutdown?.duelId) {
+        if (!streamingRoutes) {
+          throw new Error(
+            "streaming route runtime is unavailable during active-duel shutdown",
+          );
+        }
+        terminalFrame = await streamingRoutes.waitForBettingTerminalFrame({
+          duelId: cycleAtShutdown.duelId,
+          cancellationReason: "scheduler_shutdown",
+          timeoutMs: 5_000,
+        });
+        downstreamAcknowledged =
+          await waitForStreamingDuelShutdownAcknowledgement({
+            config: streamingShutdownAckConfig,
+            duelId: terminalFrame.duelId,
+          });
+      }
+      process.stdout.write(
+        `${JSON.stringify({
+          event: "shutdown-complete",
+          sourceEpoch: terminalFrame?.sourceEpoch ?? null,
+          terminalFrameSeq: terminalFrame?.terminalFrameSeq ?? null,
+          duelId: terminalFrame?.duelId ?? null,
+          duelKeyHex: terminalFrame?.duelKeyHex ?? null,
+          competitiveSnapshotDigest:
+            terminalFrame?.competitiveSnapshotDigest ?? null,
+          outcome: terminalFrame?.outcome ?? null,
+          cancellationReason: terminalFrame?.cancellationReason ?? null,
+          downstreamAcknowledged,
+        })}\n`,
+      );
+    } catch (err) {
+      streamingShutdownExitCode = 1;
+      console.error(
+        `${JSON.stringify({
+          event: "shutdown-failed",
+          signal,
+          reason: errMsg(err),
+        })}`,
+      );
+    }
+
+    // Step 3: Stop stream capture only after the terminal market frame has been
+    // acknowledged. This preserves visual/feed continuity through cancellation.
     try {
       const capture = getStreamCapture();
       if (capture.isRunning()) {
@@ -179,35 +258,13 @@ export function registerShutdownHandlers(
       // Stream capture may not have been initialized
     }
 
-    // Step 2: Close HTTP server
+    // Step 4: Close HTTP only after the terminal betting barrier is complete.
     await closeHttpServer(context);
 
-    // Step 2a: Close uWS game WebSocket server (stop accepting new WS connections)
-    try {
-      const { closeUwsServer } = await import("./uws-server.js");
-      closeUwsServer();
-    } catch {
-      // uWS may not have been started (UWS_ENABLED=false)
-    }
-
-    // Step 3: Stop the scheduler and await contestant/loadout restoration
-    // while embedded-agent entities and their inventory/equipment systems still
-    // exist. Releasing agents first makes active-cycle cleanup race missing data.
-    try {
-      // Teardown the scheduler before releasing the database lease so a
-      // standby cannot overlap this process during handoff.
-      await destroyStreamingDuelAuthority();
-    } catch (err) {
-      console.error(
-        "[Shutdown] Failed to destroy StreamingDuelScheduler:",
-        err,
-      );
-    }
-
-    // Step 4: Shutdown embedded agents after duel cleanup has settled.
+    // Step 5: Shutdown embedded agents after duel cleanup has settled.
     await shutdownAgents();
 
-    // Step 4a: Flush agent thoughts to database
+    // Step 5a: Flush agent thoughts to database
     try {
       const { flushAgentThoughtsToDb } =
         await import("../eliza/dashboardInterop.js");
@@ -216,10 +273,10 @@ export function registerShutdownHandlers(
       // Thoughts module may not have been loaded
     }
 
-    // Step 4b: Shutdown Web3 chain writer (flush pending writes)
+    // Step 5b: Shutdown Web3 chain writer (flush pending writes)
     await shutdownWeb3(context);
 
-    // Step 4c: Shutdown DuelArenaOraclePublisher
+    // Step 5c: Shutdown DuelArenaOraclePublisher
     try {
       const oraclePublisher = getDuelArenaOraclePublisher(context.world);
       if (oraclePublisher) {
@@ -271,7 +328,7 @@ export function registerShutdownHandlers(
 
     // For termination signals, exit after short delay
     setTimeout(() => {
-      process.exit(0);
+      process.exit(streamingShutdownExitCode);
     }, 100);
   };
 

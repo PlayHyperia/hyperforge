@@ -1,7 +1,9 @@
 #!/usr/bin/env node
 
 import { createHash } from "node:crypto";
+import { spawnSync } from "node:child_process";
 import {
+  access,
   chmod,
   mkdir,
   readFile,
@@ -11,8 +13,12 @@ import {
 } from "node:fs/promises";
 import path from "node:path";
 import { parseArgs } from "node:util";
+import { fileURLToPath } from "node:url";
 import { chromium } from "playwright";
-import { buildDefaultCaptureLaunchArgs } from "../packages/server/src/streaming/captureBrowserPolicy.ts";
+import {
+  applyCaptureFrameRateToUrl,
+  buildDefaultCaptureLaunchArgs,
+} from "../packages/server/src/streaming/captureBrowserPolicy.ts";
 import {
   advanceDuelTerminalHandoff,
   attachStreamingViewerToken,
@@ -46,6 +52,8 @@ const parsed = parseArgs({
     "duration-s": { type: "string", default: "900" },
     "poll-ms": { type: "string", default: "250" },
     "settle-ms": { type: "string", default: "750" },
+    "network-latency-ms": { type: "string", default: "0" },
+    "cpu-throttle-rate": { type: "string", default: "1" },
     viewport: { type: "string", default: "1920x1080" },
     "safe-ndc-x": { type: "string" },
     "safe-ndc-y": { type: "string" },
@@ -73,6 +81,8 @@ Options:
   --duration-s <n>     Maximum capture window (default: 900)
   --poll-ms <n>        State sampling interval (default: 250)
   --settle-ms <n>      Required unchanged state before capture (default: 750)
+  --network-latency-ms <n> Browser transport latency in milliseconds (0-2000)
+  --cpu-throttle-rate <n> Browser CPU slowdown multiplier (1-20)
   --viewport <WxH>     Capture viewport (default: 1920x1080)
   --safe-ndc-x <n>     Optional maximum absolute fighter projection X (0,1]
   --safe-ndc-y <n>     Optional maximum absolute fighter projection Y (0,1]
@@ -89,7 +99,9 @@ render transforms, settled opponent-facing combat rotation, in-frame projection
 and any explicitly declared stream-safe crop,
 the expected camera target and aspect,
 stable state before and after each screenshot, zero console errors, zero failed
-browser requests or HTTP error responses, phase-correct DOM presentation, and
+browser requests or HTTP error responses, a fresh service-worker-free 60 FPS
+production artifact under the exact requested browser conditions,
+phase-correct DOM presentation, and
 for every captured terminal scenario a clean handoff through the next announced
 cycle's live fight. It writes a hashed mode-0600
 JSON evidence manifest. STREAMING_CAPTURE_VIEWER_TOKEN may provide the gated
@@ -119,6 +131,15 @@ function parseViewport(value) {
   };
 }
 
+function parseBoundedNumber(value, fallback, minimum, maximum, label) {
+  const parsedValue = Number(value);
+  const normalized = Number.isFinite(parsedValue) ? parsedValue : fallback;
+  if (normalized < minimum || normalized > maximum) {
+    throw new RangeError(`${label} must be between ${minimum} and ${maximum}`);
+  }
+  return normalized;
+}
+
 function parseHttpUrl(value, label) {
   const url = new URL(String(value ?? ""));
   if (!new Set(["http:", "https:"]).has(url.protocol)) {
@@ -135,6 +156,43 @@ function publicUrl(url) {
   copy.search = "";
   copy.hash = "";
   return copy.toString();
+}
+
+function assertByteCompleteLaunchAssets() {
+  const workspaceRoot = path.resolve(
+    path.dirname(fileURLToPath(import.meta.url)),
+    "..",
+  );
+  const validatorPath = path.join(
+    workspaceRoot,
+    "scripts/validate-duel-launch-assets.mjs",
+  );
+  const result = spawnSync(process.execPath, [validatorPath], {
+    cwd: workspaceRoot,
+    env: process.env,
+    encoding: "utf8",
+    timeout: 120_000,
+    killSignal: "SIGKILL",
+    maxBuffer: 1024 * 1024,
+  });
+  if (result.error?.code === "ETIMEDOUT") {
+    throw new Error(
+      "duel launch asset preflight exceeded its 120000ms process deadline",
+    );
+  }
+  if (result.error) {
+    throw new Error(
+      `duel launch asset preflight failed: ${result.error.message}`,
+    );
+  }
+  if (result.status !== 0) {
+    const detail = String(result.stderr || result.stdout || "").trim();
+    throw new Error(
+      `duel launch asset preflight rejected capture${detail ? `: ${detail}` : ""}`,
+    );
+  }
+  const summary = String(result.stdout || "").trim();
+  if (summary) console.log(`[duel-capture] ${summary}`);
 }
 
 function requestedScenarios(value) {
@@ -287,11 +345,14 @@ function summarizeCaptureState(state) {
   };
 }
 
-const streamUrl = parseHttpUrl(parsed["stream-url"], "stream-url");
-const streamNavigationUrl = attachStreamingViewerToken(
-  streamUrl,
-  process.env.STREAMING_CAPTURE_VIEWER_TOKEN,
+const streamUrl = parseHttpUrl(
+  applyCaptureFrameRateToUrl(parsed["stream-url"], 60),
+  "stream-url",
 );
+const viewerToken = String(
+  process.env.STREAMING_CAPTURE_VIEWER_TOKEN ?? "",
+).trim();
+const streamNavigationUrl = attachStreamingViewerToken(streamUrl, viewerToken);
 const stateUrl = parseHttpUrl(parsed["state-url"], "state-url");
 const viewport = parseViewport(parsed.viewport);
 const safeCrop = parseDuelSafeCrop(parsed["safe-ndc-x"], parsed["safe-ndc-y"]);
@@ -312,11 +373,31 @@ const settleMs = parseBoundedInteger(
   10_000,
   "settle-ms",
 );
+const networkLatencyMs = parseBoundedInteger(
+  parsed["network-latency-ms"],
+  0,
+  0,
+  2_000,
+  "network-latency-ms",
+);
+const cpuThrottleRate = parseBoundedNumber(
+  parsed["cpu-throttle-rate"],
+  1,
+  1,
+  20,
+  "cpu-throttle-rate",
+);
 const scenarios = requestedScenarios(parsed.scenarios);
 const outputDirectory = path.resolve(String(parsed["output-dir"]));
-const stateBearerToken = String(
+const distinctStateBearerToken = String(
   process.env.STREAMING_CAPTURE_STATE_TOKEN ?? "",
 ).trim();
+const stateBearerToken = distinctStateBearerToken || viewerToken;
+const stateAuthorizationMode = distinctStateBearerToken
+  ? "distinct"
+  : viewerToken
+    ? "shared-viewer"
+    : "none";
 const captureHeadless = parsed.headed !== true;
 const captureAngleBackend =
   String(process.env.STREAMING_CAPTURE_ANGLE ?? "").trim() ||
@@ -329,6 +410,17 @@ const captureLaunchArgs = buildDefaultCaptureLaunchArgs({
   featureFlags: "--enable-features=Vulkan,UseSkiaRenderer,WebGPU",
 });
 
+const manifestPath = path.join(outputDirectory, "manifest.json");
+await access(manifestPath)
+  .then(() => {
+    throw new Error(`refusing to overwrite existing evidence: ${manifestPath}`);
+  })
+  .catch((error) => {
+    if (error?.code !== "ENOENT") throw error;
+  });
+
+assertByteCompleteLaunchAssets();
+
 await mkdir(outputDirectory, { recursive: true, mode: 0o700 });
 await chmod(outputDirectory, 0o700);
 
@@ -337,8 +429,35 @@ const browser = await chromium.launch({
   args: captureLaunchArgs,
   ...(captureBrowserChannel ? { channel: captureBrowserChannel } : {}),
 });
-const context = await browser.newContext({ viewport });
+const context = await browser.newContext({
+  viewport,
+  serviceWorkers: "block",
+});
 const page = await context.newPage();
+const cdpSession = await context.newCDPSession(page);
+let browserConditionError = null;
+try {
+  await cdpSession.send("Network.enable");
+  await cdpSession.send("Network.setCacheDisabled", { cacheDisabled: true });
+  if (networkLatencyMs > 0) {
+    await cdpSession.send("Network.emulateNetworkConditions", {
+      offline: false,
+      latency: networkLatencyMs,
+      downloadThroughput: -1,
+      uploadThroughput: -1,
+      connectionType: "wifi",
+    });
+  }
+  if (cpuThrottleRate > 1) {
+    await cdpSession.send("Emulation.setCPUThrottlingRate", {
+      rate: cpuThrottleRate,
+    });
+  }
+} catch (error) {
+  browserConditionError = boundedMessage(
+    error instanceof Error ? error.message : String(error),
+  );
+}
 const consoleErrors = [];
 const requestFailures = [];
 const responseFailures = [];
@@ -686,6 +805,7 @@ const missingTerminalHandoffs = terminalScenarios.filter(
 const finishedAt = Date.now();
 const ok =
   navigationError === null &&
+  browserConditionError === null &&
   missingScenarios.length === 0 &&
   missingTerminalHandoffs.length === 0 &&
   consoleErrors.length === 0 &&
@@ -700,10 +820,15 @@ const manifest = {
   elapsedMs: finishedAt - startedAt,
   streamUrl: publicUrl(streamUrl),
   stateUrl: publicUrl(stateUrl),
+  stateAuthorizationMode,
+  requestedFrameRate: 60,
   captureBrowser: {
     headless: captureHeadless,
     channel: captureBrowserChannel ?? "bundled",
     angleBackend: captureAngleBackend,
+    networkLatencyMs,
+    cpuThrottleRate,
+    conditionError: browserConditionError,
   },
   viewport,
   safeCropNdc: safeCrop,
@@ -713,6 +838,7 @@ const manifest = {
   captures,
   terminalHandoffs: Object.fromEntries(terminalHandoffs),
   navigationError,
+  browserConditionError,
   consoleErrors,
   requestFailures,
   responseFailures,
@@ -734,7 +860,6 @@ const manifest = {
     ),
   },
 };
-const manifestPath = path.join(outputDirectory, "manifest.json");
 const temporaryManifestPath = `${manifestPath}.tmp-${process.pid}`;
 try {
   await writeFile(
@@ -761,6 +886,7 @@ console.log(
     requestFailures: requestFailures.length,
     responseFailures: responseFailures.length,
     stateErrors: stateErrors.length,
+    browserConditionError,
     latestSceneIssues,
     latestPresentationIssues,
     manifestPath,

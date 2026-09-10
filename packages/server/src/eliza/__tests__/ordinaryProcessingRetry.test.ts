@@ -149,6 +149,34 @@ describe("ordinary processing retry policy", () => {
     expect(holder.ordinaryProcessingRetries).toEqual([]);
   });
 
+  it("ends a bank-miss acquisition cycle only after an authored processing action completes", () => {
+    const holder: OrdinaryProcessingRetryHolder = {
+      ordinaryProcessingAcquisition: { expiresAt: 3_500_000 },
+      bankStageRetryAfter: 3_500_000,
+    };
+    const action = { type: "smelt", recipe: "bronze_bar" } as const;
+
+    recordOrdinaryProcessingActionOutcome(
+      holder,
+      action,
+      { outcome: "rejected", appliedActionType: null },
+      3_100_000,
+    );
+    expect(holder.ordinaryProcessingAcquisition).toEqual({
+      expiresAt: 3_500_000,
+    });
+    expect(holder.bankStageRetryAfter).toBe(3_500_000);
+
+    recordOrdinaryProcessingActionOutcome(
+      holder,
+      action,
+      { outcome: "completed", appliedActionType: "smelt" },
+      3_130_000,
+    );
+    expect(holder.ordinaryProcessingAcquisition).toBeNull();
+    expect(holder.bankStageRetryAfter).toBe(0);
+  });
+
   it("does not classify a useful cook fallback as a recipe rejection", () => {
     const holder: OrdinaryProcessingRetryHolder = {};
     const action = { type: "cook", itemId: "raw_shrimp" } as const;

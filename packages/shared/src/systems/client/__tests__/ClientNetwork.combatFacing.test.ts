@@ -45,6 +45,63 @@ function createWorld(entities: Map<string, ReturnType<typeof createEntity>>) {
 }
 
 describe("ClientNetwork authoritative combat facing", () => {
+  it("retries processing-source facing after out-of-order entity creation", () => {
+    const entities = new Map<string, ReturnType<typeof createEntity>>();
+    const world = createWorld(entities);
+    const network = new ClientNetwork(world);
+    network.onProcessingInteractionPresentation({
+      playerId: "cook",
+      revision: 1,
+      skill: "cooking",
+      phase: "working",
+      phaseStartedAtServerTimeMs: 1000,
+      targetPosition: { x: 4.5, y: 0, z: 3.5 },
+    });
+
+    const cook = createEntity("cook", 0.5, 0.5);
+    entities.set(cook.id, cook);
+    network.lateUpdate(1 / 60);
+    const target = { position: new THREE.Vector3(4.5, 0, 3.5) };
+    expect(
+      cook.base.quaternion.angleTo(facingQuaternion(cook, target)),
+    ).toBeLessThan(1e-6);
+  });
+
+  it("does not let processing cleanup release an active combat-facing owner", () => {
+    const fighter = createEntity("fighter", 0.5, 0.5);
+    const target = createEntity("target", 0.5, 5.5);
+    const entities = new Map([
+      [fighter.id, fighter],
+      [target.id, target],
+    ]);
+    const world = createWorld(entities);
+    const network = new ClientNetwork(world);
+    const clear = vi.spyOn(network.tileInterpolator, "clearCombatRotation");
+    network.onCombatFaceTarget({ playerId: fighter.id, targetId: target.id });
+    network.onProcessingInteractionPresentation({
+      playerId: fighter.id,
+      revision: 2,
+      skill: "smithing",
+      phase: "working",
+      phaseStartedAtServerTimeMs: 2000,
+      targetPosition: { x: 4, y: 0, z: 0 },
+    });
+    network.onProcessingInteractionPresentation({
+      playerId: fighter.id,
+      revision: 3,
+      skill: null,
+      phase: "idle",
+      phaseStartedAtServerTimeMs: null,
+      targetPosition: null,
+    });
+
+    expect(clear).not.toHaveBeenCalledWith(fighter.id);
+    network.lateUpdate(1 / 60);
+    expect(
+      fighter.base.quaternion.angleTo(facingQuaternion(fighter, target)),
+    ).toBeLessThan(1e-6);
+  });
+
   it("renders an anonymous spectator's remote fighter toward its authoritative target", () => {
     const fighter = createEntity("ranger", 0.5, 0.5);
     const target = createEntity("melee", 0.5, 5.5);
@@ -141,7 +198,7 @@ describe("ClientNetwork authoritative combat facing", () => {
     });
   });
 
-  it("retains the frozen stream pair through transient clears and releases it at resolution", () => {
+  it("locks the staged stream pair through combat and releases it at resolution", () => {
     const fighter = createEntity("ranger", 0.5, 0.5);
     const target = createEntity("melee", 0.5, 5.5);
     const decoy = createEntity("decoy", -10.5, -10.5);
@@ -153,7 +210,9 @@ describe("ClientNetwork authoritative combat facing", () => {
     const world = createWorld(entities);
     const network = new ClientNetwork(world);
     const clear = vi.spyOn(network.tileInterpolator, "clearCombatRotation");
-    const streamState = (phase: "COUNTDOWN" | "FIGHTING" | "RESOLUTION") => ({
+    const streamState = (
+      phase: "ANNOUNCEMENT" | "COUNTDOWN" | "FIGHTING" | "RESOLUTION",
+    ) => ({
       type: "STREAMING_STATE_UPDATE",
       cycle: {
         cycleId: "cycle-a",
@@ -176,7 +235,7 @@ describe("ClientNetwork authoritative combat facing", () => {
       cameraTarget: null,
     });
 
-    network.onStreamingState(streamState("COUNTDOWN"));
+    network.onStreamingState(streamState("ANNOUNCEMENT"));
     for (let frame = 0; frame < 120; frame += 1) {
       network.lateUpdate(1 / 60);
     }
@@ -185,6 +244,11 @@ describe("ClientNetwork authoritative combat facing", () => {
     ).toBeLessThan(1e-6);
     expect(fighter.avatar.clearHitReaction).not.toHaveBeenCalled();
     expect(target.avatar.clearHitReaction).not.toHaveBeenCalled();
+
+    network.onStreamingState(streamState("COUNTDOWN"));
+    expect(
+      fighter.base.quaternion.angleTo(facingQuaternion(fighter, target)),
+    ).toBeLessThan(1e-6);
 
     network.onStreamingState(streamState("FIGHTING"));
     network.onCombatFaceTarget({ playerId: fighter.id, targetId: decoy.id });

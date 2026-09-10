@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { createServer } from "node:http";
+import type { Socket } from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -83,6 +84,9 @@ const rendererMetric = {
   latest: 11,
   max: 15,
 };
+
+const HTTP_LIFECYCLE_PROCESS_DEADLINE_MS = 30_000;
+const HTTP_LIFECYCLE_TEST_TIMEOUT_MS = 35_000;
 
 function rendererTelemetryPayload() {
   const frame = {
@@ -546,154 +550,175 @@ describe("streaming soak integrity tracker", () => {
     });
   });
 
-  it("gates the real load-test process on a complete HTTP lifecycle", async () => {
-    let firstStateRequestAt: number | null = null;
-    const server = createServer((request, response) => {
-      response.setHeader("Content-Type", "application/json");
-      if (request.url === "/health") {
-        response.end(JSON.stringify({ ok: true }));
-        return;
-      }
-      if (request.url === "/api/streaming/state") {
-        const now = Date.now();
-        firstStateRequestAt ??= now;
-        const elapsed = now - firstStateRequestAt;
-        const payload =
-          elapsed < 1_500
-            ? state("ANNOUNCEMENT")
-            : elapsed < 3_000
-              ? state("COUNTDOWN")
-              : elapsed < 4_500
-                ? state("FIGHTING", {
-                    agent1: agent("a", 45, 5),
-                    agent2: agent("b", 46, 4),
-                    firstHitAt: 3_250,
-                  })
-                : state("RESOLUTION", {
-                    agent1: agent("a", 45, 5),
-                    agent2: agent("b", 0, 50),
-                    winnerId: "a",
-                    outcome: "win",
-                    winReason: "death",
-                    duelEndTime: 4_000,
-                    seed: "seed-proof",
-                    replayHash: "replay-proof",
-                    firstHitAt: 3_250,
-                  });
-        response.end(JSON.stringify(payload));
-        return;
-      }
-      if (request.url === "/api/streaming/metrics") {
-        response.end(JSON.stringify({ type: "STREAMING_METRICS" }));
-        return;
-      }
-      if (request.url === "/api/streaming/health") {
-        response.end(JSON.stringify(rendererTelemetryPayload()));
-        return;
-      }
-      if (request.url === "/admin/memory/report") {
-        if (request.headers["x-admin-code"] !== "soak-admin") {
-          response.statusCode = 403;
-          response.end(JSON.stringify({ error: "unauthorized" }));
+  it(
+    "gates the real load-test process on a complete HTTP lifecycle",
+    async () => {
+      let firstStateRequestAt: number | null = null;
+      const server = createServer((request, response) => {
+        response.setHeader("Content-Type", "application/json");
+        if (request.url === "/health") {
+          response.end(JSON.stringify({ ok: true }));
           return;
         }
-        response.end(JSON.stringify(serverTelemetryPayload()));
-        return;
-      }
-      response.statusCode = 404;
-      response.end(JSON.stringify({ error: "not found" }));
-    });
-
-    await new Promise<void>((resolve) =>
-      server.listen(0, "127.0.0.1", resolve),
-    );
-    const address = server.address();
-    if (!address || typeof address === "string") {
-      server.close();
-      throw new Error("test server did not bind a TCP port");
-    }
-
-    const workspaceRoot = fileURLToPath(
-      new URL("../../../../../", import.meta.url),
-    );
-    const evidenceDirectory = await mkdtemp(
-      path.join(tmpdir(), "hyperia-soak-evidence-"),
-    );
-    const evidencePath = path.join(evidenceDirectory, "result.json");
-    const child = spawn(
-      "bun",
-      [
-        "scripts/load-test-streaming.mjs",
-        `--server-url=http://127.0.0.1:${address.port}`,
-        "--duration-s=10",
-        "--sse-clients=0",
-        "--hls-clients=0",
-        "--state-pollers=0",
-        "--duel-context-pollers=0",
-        "--integrity-poll-ms=250",
-        "--metrics-poll-ms=1000",
-        "--telemetry-snapshot-ms=1000",
-        "--min-resolved-duels=1",
-        "--max-cancelled-duels=0",
-        "--require-full-phase-coverage",
-        "--require-server-telemetry",
-        "--require-renderer-telemetry",
-        "--require-resource-telemetry",
-        "--require-resource-ecology-telemetry",
-        `--json-output=${evidencePath}`,
-      ],
-      {
-        cwd: workspaceRoot,
-        env: { ...process.env, STREAMING_LOAD_ADMIN_CODE: "soak-admin" },
-        stdio: ["ignore", "pipe", "pipe"],
-      },
-    );
-    let stdout = "";
-    let stderr = "";
-    child.stdout.on("data", (chunk: Buffer) => {
-      stdout += chunk.toString();
-    });
-    child.stderr.on("data", (chunk: Buffer) => {
-      stderr += chunk.toString();
-    });
-
-    try {
-      const exitCode = await new Promise<number | null>((resolve, reject) => {
-        child.once("error", reject);
-        child.once("close", resolve);
-      }).finally(
-        () => new Promise<void>((resolve) => server.close(() => resolve())),
-      );
-
-      expect(stderr).toBe("");
-      expect(exitCode).toBe(0);
-      expect(stdout).toContain('"ok": true');
-      expect(stdout).toContain('"resolvedDuels": 1');
-      expect(stdout).toContain('"fullyObservedResolvedDuels": 1');
-      expect(stdout).toContain('"integrityViolationCount": 0');
-      expect(stdout).toContain('"runtimeTelemetry"');
-      expect(stdout).toMatch(/"retainedSamples": [1-9][0-9]*/);
-      expect(stdout).toContain(
-        "server tick/memory telemetry retained without poll failures",
-      );
-      expect(stdout).toContain(
-        "renderer frame telemetry retained without poll failures",
-      );
-      expect(stdout).toContain(
-        "server resource ecology telemetry retained and internally consistent",
-      );
-
-      const evidence = JSON.parse(await readFile(evidencePath, "utf8"));
-      expect(evidence).toMatchObject({
-        ok: true,
-        duelIntegrity: { resolvedDuels: 1, integrityViolationCount: 0 },
-        runtimeTelemetry: {
-          server: { configured: true, failures: 0 },
-          renderer: { failures: 0 },
-        },
+        if (request.url === "/api/streaming/state") {
+          const now = Date.now();
+          firstStateRequestAt ??= now;
+          const elapsed = now - firstStateRequestAt;
+          const payload =
+            elapsed < 1_500
+              ? state("ANNOUNCEMENT")
+              : elapsed < 3_000
+                ? state("COUNTDOWN")
+                : elapsed < 4_500
+                  ? state("FIGHTING", {
+                      agent1: agent("a", 45, 5),
+                      agent2: agent("b", 46, 4),
+                      firstHitAt: 3_250,
+                    })
+                  : state("RESOLUTION", {
+                      agent1: agent("a", 45, 5),
+                      agent2: agent("b", 0, 50),
+                      winnerId: "a",
+                      outcome: "win",
+                      winReason: "death",
+                      duelEndTime: 4_000,
+                      seed: "seed-proof",
+                      replayHash: "replay-proof",
+                      firstHitAt: 3_250,
+                    });
+          response.end(JSON.stringify(payload));
+          return;
+        }
+        if (request.url === "/api/streaming/metrics") {
+          response.end(JSON.stringify({ type: "STREAMING_METRICS" }));
+          return;
+        }
+        if (request.url === "/api/streaming/health") {
+          response.end(JSON.stringify(rendererTelemetryPayload()));
+          return;
+        }
+        if (request.url === "/admin/memory/report") {
+          if (request.headers["x-admin-code"] !== "soak-admin") {
+            response.statusCode = 403;
+            response.end(JSON.stringify({ error: "unauthorized" }));
+            return;
+          }
+          response.end(JSON.stringify(serverTelemetryPayload()));
+          return;
+        }
+        response.statusCode = 404;
+        response.end(JSON.stringify({ error: "not found" }));
       });
-    } finally {
-      await rm(evidenceDirectory, { recursive: true, force: true });
-    }
-  }, 20_000);
+      const serverSockets = new Set<Socket>();
+      server.on("connection", (socket) => {
+        serverSockets.add(socket);
+        socket.once("close", () => serverSockets.delete(socket));
+      });
+
+      await new Promise<void>((resolve) =>
+        server.listen(0, "127.0.0.1", resolve),
+      );
+      const address = server.address();
+      if (!address || typeof address === "string") {
+        server.close();
+        throw new Error("test server did not bind a TCP port");
+      }
+
+      const workspaceRoot = fileURLToPath(
+        new URL("../../../../../", import.meta.url),
+      );
+      const evidenceDirectory = await mkdtemp(
+        path.join(tmpdir(), "hyperia-soak-evidence-"),
+      );
+      const evidencePath = path.join(evidenceDirectory, "result.json");
+      const child = spawn(
+        "bun",
+        [
+          "scripts/load-test-streaming.mjs",
+          `--server-url=http://127.0.0.1:${address.port}`,
+          "--duration-s=10",
+          "--sse-clients=0",
+          "--hls-clients=0",
+          "--state-pollers=0",
+          "--duel-context-pollers=0",
+          "--integrity-poll-ms=250",
+          "--metrics-poll-ms=1000",
+          "--telemetry-snapshot-ms=1000",
+          "--min-resolved-duels=1",
+          "--max-cancelled-duels=0",
+          "--require-full-phase-coverage",
+          "--require-server-telemetry",
+          "--require-renderer-telemetry",
+          "--require-resource-telemetry",
+          "--require-resource-ecology-telemetry",
+          `--json-output=${evidencePath}`,
+        ],
+        {
+          cwd: workspaceRoot,
+          env: { ...process.env, STREAMING_LOAD_ADMIN_CODE: "soak-admin" },
+          stdio: ["ignore", "pipe", "pipe"],
+        },
+      );
+      let stdout = "";
+      let stderr = "";
+      child.stdout.on("data", (chunk: Buffer) => {
+        stdout += chunk.toString();
+      });
+      child.stderr.on("data", (chunk: Buffer) => {
+        stderr += chunk.toString();
+      });
+
+      try {
+        let processDeadline: ReturnType<typeof setTimeout> | null = null;
+        const exitCode = await new Promise<number | null>((resolve, reject) => {
+          processDeadline = setTimeout(() => {
+            child.kill("SIGKILL");
+            reject(
+              new Error(
+                `streaming soak child exceeded its ${HTTP_LIFECYCLE_PROCESS_DEADLINE_MS}ms process deadline`,
+              ),
+            );
+          }, HTTP_LIFECYCLE_PROCESS_DEADLINE_MS);
+          processDeadline.unref();
+          child.once("error", reject);
+          child.once("close", resolve);
+        }).finally(async () => {
+          if (processDeadline) clearTimeout(processDeadline);
+          for (const socket of serverSockets) socket.destroy();
+          await new Promise<void>((resolve) => server.close(() => resolve()));
+        });
+
+        expect(stderr).toBe("");
+        expect(exitCode).toBe(0);
+        expect(stdout).toContain('"ok": true');
+        expect(stdout).toContain('"resolvedDuels": 1');
+        expect(stdout).toContain('"fullyObservedResolvedDuels": 1');
+        expect(stdout).toContain('"integrityViolationCount": 0');
+        expect(stdout).toContain('"runtimeTelemetry"');
+        expect(stdout).toMatch(/"retainedSamples": [1-9][0-9]*/);
+        expect(stdout).toContain(
+          "server tick/memory telemetry retained without poll failures",
+        );
+        expect(stdout).toContain(
+          "renderer frame telemetry retained without poll failures",
+        );
+        expect(stdout).toContain(
+          "server resource ecology telemetry retained and internally consistent",
+        );
+
+        const evidence = JSON.parse(await readFile(evidencePath, "utf8"));
+        expect(evidence).toMatchObject({
+          ok: true,
+          duelIntegrity: { resolvedDuels: 1, integrityViolationCount: 0 },
+          runtimeTelemetry: {
+            server: { configured: true, failures: 0 },
+            renderer: { failures: 0 },
+          },
+        });
+      } finally {
+        await rm(evidenceDirectory, { recursive: true, force: true });
+      }
+    },
+    HTTP_LIFECYCLE_TEST_TIMEOUT_MS,
+  );
 });

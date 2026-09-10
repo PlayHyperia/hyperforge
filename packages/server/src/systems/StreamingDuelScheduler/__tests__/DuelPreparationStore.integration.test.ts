@@ -1,16 +1,28 @@
 import pg from "pg";
 import { randomUUID } from "node:crypto";
-import { ITEMS } from "@hyperforge/shared";
+import {
+  DUEL_PREPARATION_ROLE_POLICY_VERSION,
+  EXTERNAL_DUEL_PREPARATION_STRATEGY_PROTOCOL_VERSION,
+  ITEMS,
+} from "@hyperforge/shared";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
+  authorizeDuelPreparationBankAccess,
   DUEL_PREPARATION_BANK_ACTIONS,
   PostgresDuelPreparationStore,
 } from "../preparation.js";
 import {
   executeAuthoritativeAgentBankTransfer,
   getDuelPreparationBankId,
+  openAuthoritativeAgentBank,
 } from "../../../eliza/AuthoritativeAgentBanking.js";
 import { buildDeterministicCompetitiveTacticalStrategy } from "../competitive-tactical-strategy.js";
+import { buildCompetitiveStrategyOutcomeReport } from "../competitive-strategy-outcome-metrics.js";
+import {
+  executeOwnedAgentMutation,
+  updatePersistedStreamingDuelParticipation,
+} from "../../../database/streaming-duel-participation.js";
+import { COMPETITIVE_SNAPSHOT_TIMING_FIXTURE } from "./competitiveSnapshotTimingFixture.js";
 
 const connectionString = process.env.DUEL_PREPARATION_TEST_DATABASE_URL;
 const describeWithDatabase = connectionString ? describe : describe.skip;
@@ -89,7 +101,29 @@ describeWithDatabase("PostgresDuelPreparationStore integration", () => {
   const account2Id = `preparation-account-2-${runId}`;
   const account3Id = `preparation-account-3-${runId}`;
   const bankItemId = "preparation_integration_item";
+  const hostOwnerId = randomUUID();
   let previousBankItem: unknown;
+
+  const claimHostLeases = async (preparation: {
+    preparationId: string;
+    agent1Id: string;
+    agent2Id: string;
+  }): Promise<void> => {
+    for (const agentId of [preparation.agent1Id, preparation.agent2Id]) {
+      await expect(
+        store.claimContestantHostLease({
+          preparationId: preparation.preparationId,
+          agentId,
+          ownerId: hostOwnerId,
+          leaseDurationMs: 60_000,
+        }),
+      ).resolves.toMatchObject({
+        preparationId: preparation.preparationId,
+        agentId,
+        ownerId: hostOwnerId,
+      });
+    }
+  };
 
   beforeAll(async () => {
     previousBankItem = ITEMS.get(bankItemId);
@@ -117,6 +151,19 @@ describeWithDatabase("PostgresDuelPreparationStore integration", () => {
        ON CONFLICT (id) DO NOTHING`,
       [agent1Id, agent2Id, agent3Id, account1Id, account2Id, account3Id],
     );
+    await pool.query(
+      `INSERT INTO agent_mappings (
+         agent_id, account_id, character_id, agent_name,
+         streaming_duel_enabled, created_at, updated_at
+       ) VALUES
+         ($1, $4, $1, 'Preparation Agent 1', true, NOW(), NOW()),
+         ($2, $5, $2, 'Preparation Agent 2', true, NOW(), NOW()),
+         ($3, $6, $3, 'Preparation Agent 3', true, NOW(), NOW())
+       ON CONFLICT (agent_id) DO UPDATE SET
+         streaming_duel_enabled = EXCLUDED.streaming_duel_enabled,
+         updated_at = NOW()`,
+      [agent1Id, agent2Id, agent3Id, account1Id, account2Id, account3Id],
+    );
   });
 
   afterAll(async () => {
@@ -128,12 +175,43 @@ describeWithDatabase("PostgresDuelPreparationStore integration", () => {
     await pool.end();
   });
 
+  it("rejects private preparation unless both mappings are explicitly enabled", async () => {
+    expect(
+      await updatePersistedStreamingDuelParticipation({
+        pool,
+        accountId: account2Id,
+        agentId: agent2Id,
+        enabled: false,
+      }),
+    ).toMatchObject({ status: "updated" });
+    await expect(
+      store.create({
+        preparationId: randomUUID(),
+        fencingToken: "3",
+        agent1Id,
+        agent2Id,
+        diagnostic: false,
+        durationMs: 60_000,
+        allowedBankActions: DUEL_PREPARATION_BANK_ACTIONS,
+      }),
+    ).rejects.toThrow(/competitive_contestant_participation_not_enabled/u);
+    expect(
+      await updatePersistedStreamingDuelParticipation({
+        pool,
+        accountId: account2Id,
+        agentId: agent2Id,
+        enabled: true,
+      }),
+    ).toMatchObject({ status: "updated" });
+  });
+
   it("persists selection and supersedes the prior private session", async () => {
     const first = await store.create({
       preparationId: randomUUID(),
       fencingToken: "4",
       agent1Id,
       agent2Id,
+      diagnostic: false,
       durationMs: 60_000,
       allowedBankActions: DUEL_PREPARATION_BANK_ACTIONS,
     });
@@ -142,6 +220,7 @@ describeWithDatabase("PostgresDuelPreparationStore integration", () => {
       fencingToken: "4",
       agent1Id,
       agent2Id,
+      diagnostic: false,
       durationMs: 60_000,
       allowedBankActions: DUEL_PREPARATION_BANK_ACTIONS,
     });
@@ -152,6 +231,7 @@ describeWithDatabase("PostgresDuelPreparationStore integration", () => {
       fencingToken: "4",
       agent1Id,
       agent2Id: agent3Id,
+      diagnostic: false,
       durationMs: 60_000,
       allowedBankActions: DUEL_PREPARATION_BANK_ACTIONS,
     });
@@ -193,15 +273,467 @@ describeWithDatabase("PostgresDuelPreparationStore integration", () => {
     ]);
   });
 
+  it("retains a bounded privacy-safe public activity trail across restart", async () => {
+    const preparation = await store.create({
+      preparationId: randomUUID(),
+      fencingToken: "401",
+      agent1Id,
+      agent2Id,
+      diagnostic: false,
+      durationMs: 60_000,
+      allowedBankActions: DUEL_PREPARATION_BANK_ACTIONS,
+    });
+    await claimHostLeases(preparation);
+
+    const planning = await store.appendPublicActivity({
+      preparationId: preparation.preparationId,
+      agentId: agent1Id,
+      ownerId: hostOwnerId,
+      activity: "planning",
+      mode: "working",
+    });
+    await expect(
+      store.appendPublicActivity({
+        preparationId: preparation.preparationId,
+        agentId: agent1Id,
+        ownerId: hostOwnerId,
+        activity: "planning",
+        mode: "working",
+      }),
+    ).resolves.toEqual(planning);
+    const traveling = await store.appendPublicActivity({
+      preparationId: preparation.preparationId,
+      agentId: agent1Id,
+      ownerId: hostOwnerId,
+      activity: "gathering",
+      mode: "traveling",
+    });
+    const provisioning = await store.appendPublicActivity({
+      preparationId: preparation.preparationId,
+      agentId: agent2Id,
+      ownerId: hostOwnerId,
+      activity: "provisioning",
+      mode: "working",
+    });
+
+    expect(
+      await store.listRecentPublicActivities(preparation.preparationId),
+    ).toEqual([planning, traveling, provisioning]);
+    await expect(
+      store.appendPublicActivity({
+        preparationId: preparation.preparationId,
+        agentId: agent3Id,
+        ownerId: hostOwnerId,
+        activity: "training",
+        mode: "working",
+      }),
+    ).rejects.toThrow("duel_preparation_public_activity_not_authorized");
+    await expect(
+      pool.query(
+        `UPDATE streaming_duel_preparation_public_activities
+         SET activity = 'training'
+         WHERE "activitySequence" = $1`,
+        [planning.revision],
+      ),
+    ).rejects.toThrow(/append-only/u);
+  });
+
+  it("immutably binds external public strategy context to the exact live host", async () => {
+    const preparation = await store.create({
+      preparationId: randomUUID(),
+      fencingToken: "402",
+      agent1Id,
+      agent2Id,
+      diagnostic: false,
+      durationMs: 60_000,
+      allowedBankActions: DUEL_PREPARATION_BANK_ACTIONS,
+    });
+    await claimHostLeases(preparation);
+    const context = {
+      preparationId: preparation.preparationId,
+      agentId: agent1Id,
+      hostOwnerId,
+      policyVersion: DUEL_PREPARATION_ROLE_POLICY_VERSION,
+      protocolVersion: EXTERNAL_DUEL_PREPARATION_STRATEGY_PROTOCOL_VERSION,
+      agentName: "Preparation Agent 1",
+      opponentName: "Preparation Agent 2",
+      ownPublicProfile: {
+        narrative: "Patient adaptive fighter.",
+        pillars: ["spacing", "resource control"],
+      },
+      opponentPublicProfile: {
+        narrative: "Aggressive ranged fighter.",
+        pillars: ["pressure"],
+      },
+      opponentHistorySummary: {
+        sampleSize: 1,
+        observedOpponentOpeningStyleFocus: "ranged" as const,
+        recent: [
+          {
+            result: "loss" as const,
+            ownOpeningStyle: "melee" as const,
+            opponentOpeningStyle: "ranged" as const,
+            winReason: "kill" as const,
+          },
+        ],
+      },
+    };
+
+    const bound = await store.bindStrategyContext(context);
+    expect(bound).toMatchObject({
+      ...context,
+      boundAt: expect.any(Number),
+    });
+    await expect(store.bindStrategyContext(context)).resolves.toEqual(bound);
+    await expect(
+      store.bindStrategyContext({
+        ...context,
+        opponentName: "Mutable Opponent Name",
+      }),
+    ).rejects.toThrow("duel_preparation_strategy_context_conflict");
+    await expect(
+      store.bindStrategyContext({
+        ...context,
+        opponentHistorySummary: {
+          sampleSize: 0,
+          observedOpponentOpeningStyleFocus: null,
+          recent: [],
+        },
+      }),
+    ).rejects.toThrow("duel_preparation_strategy_context_conflict");
+    await expect(
+      pool.query(
+        `INSERT INTO streaming_duel_preparation_strategy_contexts (
+          "preparationId", "agentId", "hostOwnerId", "policyVersion",
+          "protocolVersion", "agentName", "opponentName",
+          "ownPublicProfile", "opponentPublicProfile",
+          "opponentHistorySummary", "boundAt"
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, NULL, NULL, $8::jsonb, 0)`,
+        [
+          preparation.preparationId,
+          agent2Id,
+          hostOwnerId,
+          DUEL_PREPARATION_ROLE_POLICY_VERSION,
+          EXTERNAL_DUEL_PREPARATION_STRATEGY_PROTOCOL_VERSION,
+          "Preparation Agent 2",
+          "Preparation Agent 1",
+          JSON.stringify({
+            sampleSize: 1,
+            observedOpponentOpeningStyleFocus: "mage",
+            recent: [
+              {
+                result: "loss",
+                ownOpeningStyle: "melee",
+                opponentOpeningStyle: "ranged",
+                winReason: "kill",
+              },
+            ],
+          }),
+        ],
+      ),
+    ).rejects.toThrow(/history focus is not canonical/u);
+    await expect(
+      store.bindStrategyContext({
+        ...context,
+        hostOwnerId: randomUUID(),
+      }),
+    ).rejects.toThrow(/exact active contestant host lease/u);
+    await expect(
+      pool.query(
+        `UPDATE streaming_duel_preparation_strategy_contexts
+            SET "opponentName" = 'Mutated'
+          WHERE "preparationId" = $1 AND "agentId" = $2`,
+        [preparation.preparationId, agent1Id],
+      ),
+    ).rejects.toThrow(/append-only/u);
+  });
+
+  it("fences readiness and bank custody to one non-revivable database-clock host lease", async () => {
+    const preparation = await store.create({
+      preparationId: randomUUID(),
+      fencingToken: "400",
+      agent1Id,
+      agent2Id,
+      diagnostic: false,
+      durationMs: 60_000,
+      allowedBankActions: DUEL_PREPARATION_BANK_ACTIONS,
+    });
+    expect(
+      await store.authorizeBankAccess({
+        preparationId: preparation.preparationId,
+        playerId: agent1Id,
+        action: "open",
+      }),
+    ).toEqual({ ok: false, reason: "preparation_not_active" });
+    expect(
+      await store.markReady({
+        preparationId: preparation.preparationId,
+        fencingToken: "400",
+        agentId: agent1Id,
+        planEvidence: planEvidence(agent1Id),
+      }),
+    ).toBeNull();
+
+    const shortOwnerId = randomUUID();
+    const executableBuildId = "55".repeat(32);
+    const shortLease = await store.claimContestantHostLease({
+      preparationId: preparation.preparationId,
+      agentId: agent1Id,
+      ownerId: shortOwnerId,
+      executableBuildId,
+      leaseDurationMs: 5_000,
+    });
+    expect(shortLease).toMatchObject({
+      preparationId: preparation.preparationId,
+      agentId: agent1Id,
+      ownerId: shortOwnerId,
+      executableBuildId,
+    });
+    expect(
+      await store.claimContestantHostLease({
+        preparationId: preparation.preparationId,
+        agentId: agent1Id,
+        ownerId: shortOwnerId,
+        executableBuildId,
+        leaseDurationMs: 5_000,
+      }),
+    ).toEqual(shortLease);
+    expect(
+      await store.claimContestantHostLease({
+        preparationId: preparation.preparationId,
+        agentId: agent1Id,
+        ownerId: randomUUID(),
+        executableBuildId,
+        leaseDurationMs: 5_000,
+      }),
+    ).toBeNull();
+    expect(
+      await store.claimContestantHostLease({
+        preparationId: preparation.preparationId,
+        agentId: agent1Id,
+        ownerId: shortOwnerId,
+        executableBuildId: "66".repeat(32),
+        leaseDurationMs: 5_000,
+      }),
+    ).toBeNull();
+    await expect(
+      pool.query(
+        `UPDATE streaming_duel_preparation_agent_host_leases
+            SET "executableBuildId" = $3
+          WHERE "preparationId" = $1 AND "agentId" = $2`,
+        [preparation.preparationId, agent1Id, "66".repeat(32)],
+      ),
+    ).rejects.toThrow(/executable build identity is immutable/u);
+    await expect(
+      store.claimContestantHostLease({
+        preparationId: preparation.preparationId,
+        agentId: agent2Id,
+        ownerId: hostOwnerId,
+        leaseDurationMs: 60_000,
+      }),
+    ).resolves.toMatchObject({ agentId: agent2Id, ownerId: hostOwnerId });
+    expect(
+      await store.authorizeBankAccess({
+        preparationId: preparation.preparationId,
+        playerId: agent1Id,
+        action: "open",
+      }),
+    ).toMatchObject({ ok: true });
+
+    await pool.query("SELECT pg_sleep(5.1)");
+    const expired = await store.reportExpiredContestantHostLease({
+      preparationId: preparation.preparationId,
+      claimGraceMs: 1_000,
+    });
+    expect(expired).toMatchObject({
+      preparationId: preparation.preparationId,
+      agentId: agent1Id,
+      reason: "agent_unavailable",
+    });
+    expect(
+      await store.heartbeatContestantHostLease({
+        preparationId: preparation.preparationId,
+        agentId: agent1Id,
+        ownerId: shortOwnerId,
+        executableBuildId,
+        leaseDurationMs: 5_000,
+      }),
+    ).toBeNull();
+    expect(
+      await store.claimContestantHostLease({
+        preparationId: preparation.preparationId,
+        agentId: agent1Id,
+        ownerId: randomUUID(),
+        executableBuildId,
+        leaseDurationMs: 5_000,
+      }),
+    ).toBeNull();
+    expect(
+      await store.authorizeBankAccess({
+        preparationId: preparation.preparationId,
+        playerId: agent2Id,
+        action: "open",
+      }),
+    ).toEqual({ ok: false, reason: "preparation_not_active" });
+    expect(
+      await store.freeze({
+        preparationId: preparation.preparationId,
+        fencingToken: "400",
+      }),
+    ).toBeNull();
+    await expect(
+      pool.query(
+        `DELETE FROM streaming_duel_preparation_agent_host_leases
+          WHERE "preparationId" = $1`,
+        [preparation.preparationId],
+      ),
+    ).rejects.toThrow(/retained for audit/u);
+
+    await expect(
+      store.cancel({
+        preparationId: preparation.preparationId,
+        fencingToken: "400",
+        reason: "agent_preparation_failed",
+      }),
+    ).resolves.toMatchObject({ status: "cancelled" });
+  });
+
+  it("durably fences a reported unavailable contestant before private state can freeze", async () => {
+    const preparation = await store.create({
+      preparationId: randomUUID(),
+      fencingToken: "401",
+      agent1Id,
+      agent2Id,
+      diagnostic: false,
+      durationMs: 60_000,
+      allowedBankActions: DUEL_PREPARATION_BANK_ACTIONS,
+    });
+    await claimHostLeases(preparation);
+    await store.markReady({
+      preparationId: preparation.preparationId,
+      fencingToken: "401",
+      agentId: agent1Id,
+      planEvidence: planEvidence(agent1Id),
+    });
+    const ready = await store.markReady({
+      preparationId: preparation.preparationId,
+      fencingToken: "401",
+      agentId: agent2Id,
+      planEvidence: planEvidence(agent2Id),
+    });
+    expect(ready?.status).toBe("ready");
+
+    const reported = await store.reportContestantUnavailable({
+      preparationId: preparation.preparationId,
+      agentId: agent1Id,
+    });
+    expect(reported).toEqual({
+      preparationId: preparation.preparationId,
+      agentId: agent1Id,
+      reason: "agent_unavailable",
+      reportedAt: expect.any(Number),
+    });
+    expect(
+      await store.reportContestantUnavailable({
+        preparationId: preparation.preparationId,
+        agentId: agent1Id,
+      }),
+    ).toEqual(reported);
+    expect(
+      await store.getContestantUnavailability(preparation.preparationId),
+    ).toEqual(reported);
+    expect(
+      await store.authorizeBankAccess({
+        preparationId: preparation.preparationId,
+        playerId: agent2Id,
+        action: "open",
+      }),
+    ).toEqual({ ok: false, reason: "preparation_not_active" });
+    expect(
+      await store.markReady({
+        preparationId: preparation.preparationId,
+        fencingToken: "401",
+        agentId: agent2Id,
+        planEvidence: planEvidence(agent2Id),
+      }),
+    ).toBeNull();
+    expect(
+      await store.freeze({
+        preparationId: preparation.preparationId,
+        fencingToken: "401",
+      }),
+    ).toBeNull();
+    expect(
+      await store.freezeWithCompetitiveSnapshot({
+        preparationId: preparation.preparationId,
+        fencingToken: "401",
+        draft: {
+          diagnostic: false,
+          preparationId: preparation.preparationId,
+          cycleId: randomUUID(),
+          duelId: `streaming-${randomUUID()}`,
+          duelKey: "91".repeat(32),
+          contestants: [
+            snapshotContestant("agent1", agent1Id),
+            snapshotContestant("agent2", agent2Id),
+          ],
+        },
+        betWindowDurationMs: 60_000,
+        timing: COMPETITIVE_SNAPSHOT_TIMING_FIXTURE,
+      }),
+    ).toBeNull();
+
+    const cancelled = await store.cancel({
+      preparationId: preparation.preparationId,
+      fencingToken: "401",
+      reason: "agent_preparation_failed",
+    });
+    expect(cancelled).toMatchObject({
+      status: "cancelled",
+      cancellationReason: "agent_preparation_failed",
+      version: 5,
+    });
+    expect(
+      await store.reportContestantUnavailable({
+        preparationId: preparation.preparationId,
+        agentId: agent2Id,
+      }),
+    ).toBeNull();
+    expect(
+      await store.getContestantUnavailability(preparation.preparationId),
+    ).toEqual(reported);
+
+    await expect(
+      pool.query(
+        `UPDATE streaming_duel_preparation_unavailability_reports
+            SET "reportedAt" = 0
+          WHERE "preparationId" = $1`,
+        [preparation.preparationId],
+      ),
+    ).rejects.toThrow(/append-only/u);
+    await expect(
+      pool.query(
+        `DELETE FROM streaming_duel_preparation_unavailability_reports
+          WHERE "preparationId" = $1`,
+        [preparation.preparationId],
+      ),
+    ).rejects.toThrow(/append-only/u);
+    await expect(
+      pool.query(`TRUNCATE streaming_duel_preparation_unavailability_reports`),
+    ).rejects.toThrow(/append-only/u);
+  });
+
   it("revokes each contestant's bank access at readiness and freezes only both-ready state", async () => {
     const preparation = await store.create({
       preparationId: randomUUID(),
       fencingToken: "5",
       agent1Id,
       agent2Id,
+      diagnostic: false,
       durationMs: 60_000,
       allowedBankActions: DUEL_PREPARATION_BANK_ACTIONS,
     });
+    await claimHostLeases(preparation);
 
     expect(
       await store.authorizeBankAccess({
@@ -303,9 +835,11 @@ describeWithDatabase("PostgresDuelPreparationStore integration", () => {
       fencingToken: "6",
       agent1Id,
       agent2Id,
+      diagnostic: false,
       durationMs: 60_000,
       allowedBankActions: DUEL_PREPARATION_BANK_ACTIONS,
     });
+    await claimHostLeases(preparation);
     const [agent1Ready, agent2Ready] = await Promise.all([
       store.markReady({
         preparationId: preparation.preparationId,
@@ -348,6 +882,7 @@ describeWithDatabase("PostgresDuelPreparationStore integration", () => {
       fencingToken: "8",
       agent1Id,
       agent2Id,
+      diagnostic: false,
       durationMs: 60_000,
       allowedBankActions: DUEL_PREPARATION_BANK_ACTIONS,
     });
@@ -389,15 +924,83 @@ describeWithDatabase("PostgresDuelPreparationStore integration", () => {
     ]);
   });
 
+  it("revalidates persisted participation atomically at public snapshot freeze", async () => {
+    const preparation = await store.create({
+      preparationId: randomUUID(),
+      fencingToken: "29",
+      agent1Id,
+      agent2Id,
+      diagnostic: false,
+      durationMs: 60_000,
+      allowedBankActions: DUEL_PREPARATION_BANK_ACTIONS,
+    });
+    await claimHostLeases(preparation);
+    await store.markReady({
+      preparationId: preparation.preparationId,
+      fencingToken: "29",
+      agentId: agent1Id,
+      planEvidence: planEvidence(agent1Id),
+    });
+    await store.markReady({
+      preparationId: preparation.preparationId,
+      fencingToken: "29",
+      agentId: agent2Id,
+      planEvidence: planEvidence(agent2Id),
+    });
+    expect(
+      await updatePersistedStreamingDuelParticipation({
+        pool,
+        accountId: account2Id,
+        agentId: agent2Id,
+        enabled: false,
+      }),
+    ).toMatchObject({ status: "updated" });
+    const cycleId = `participation-revalidation-${runId}`;
+    await expect(
+      store.freezeWithCompetitiveSnapshot({
+        preparationId: preparation.preparationId,
+        fencingToken: "29",
+        betWindowDurationMs: 60_000,
+        timing: COMPETITIVE_SNAPSHOT_TIMING_FIXTURE,
+        draft: {
+          diagnostic: false,
+          preparationId: preparation.preparationId,
+          cycleId,
+          duelId: `streaming-${cycleId}`,
+          duelKey: "29".repeat(32),
+          contestants: [
+            snapshotContestant("agent1", agent1Id),
+            snapshotContestant("agent2", agent2Id),
+          ],
+        },
+      }),
+    ).rejects.toThrow(/competitive_contestant_participation_not_enabled/u);
+    expect(
+      await updatePersistedStreamingDuelParticipation({
+        pool,
+        accountId: account2Id,
+        agentId: agent2Id,
+        enabled: true,
+      }),
+    ).toMatchObject({ status: "updated" });
+    await store.cancel({
+      preparationId: preparation.preparationId,
+      fencingToken: "29",
+      reason: "participation_revalidation_test_complete",
+    });
+  });
+
   it("claims one frozen snapshot with a newer fence and commits terminal truth idempotently", async () => {
     const preparation = await store.create({
       preparationId: randomUUID(),
       fencingToken: "30",
       agent1Id,
       agent2Id,
+      diagnostic: false,
       durationMs: 60_000,
       allowedBankActions: DUEL_PREPARATION_BANK_ACTIONS,
     });
+    await claimHostLeases(preparation);
     await store.markReady({
       preparationId: preparation.preparationId,
       fencingToken: "30",
@@ -415,6 +1018,7 @@ describeWithDatabase("PostgresDuelPreparationStore integration", () => {
       preparationId: preparation.preparationId,
       fencingToken: "30",
       betWindowDurationMs: 60_000,
+      timing: COMPETITIVE_SNAPSHOT_TIMING_FIXTURE,
       draft: {
         diagnostic: false,
         preparationId: preparation.preparationId,
@@ -433,6 +1037,26 @@ describeWithDatabase("PostgresDuelPreparationStore integration", () => {
       preparation: { status: "frozen", fencingToken: "30" },
     });
     expect(frozen?.digest).toMatch(/^[0-9a-f]{64}$/);
+    let ownerMutationCalls = 0;
+    expect(
+      await executeOwnedAgentMutation({
+        pool,
+        routeAgentId: agent1Id,
+        accountId: account1Id,
+        mutate: async () => {
+          ownerMutationCalls += 1;
+        },
+      }),
+    ).toEqual({ status: "market_locked", characterId: agent1Id });
+    expect(ownerMutationCalls).toBe(0);
+    expect(
+      await updatePersistedStreamingDuelParticipation({
+        pool,
+        accountId: account1Id,
+        agentId: agent1Id,
+        enabled: false,
+      }),
+    ).toEqual({ status: "market_locked", characterId: agent1Id });
 
     const claimed = await store.claimLatestCompetitiveSnapshotForRecovery("31");
     expect(claimed).toMatchObject({
@@ -536,6 +1160,14 @@ describeWithDatabase("PostgresDuelPreparationStore integration", () => {
       terminal: cancellation,
     });
     expect(
+      await updatePersistedStreamingDuelParticipation({
+        pool,
+        accountId: account1Id,
+        agentId: agent1Id,
+        enabled: false,
+      }),
+    ).toEqual({ status: "market_locked", characterId: agent1Id });
+    expect(
       await store.markCompetitiveSnapshotTerminal({
         preparationId: preparation.preparationId,
         fencingToken: "31",
@@ -579,6 +1211,43 @@ describeWithDatabase("PostgresDuelPreparationStore integration", () => {
       recoveredAt,
       terminal: cancellation,
     });
+    expect(
+      await executeOwnedAgentMutation({
+        pool,
+        routeAgentId: agent1Id,
+        accountId: account1Id,
+        mutate: async () => {
+          ownerMutationCalls += 1;
+          return "mutated";
+        },
+      }),
+    ).toMatchObject({
+      status: "completed",
+      value: "mutated",
+    });
+    expect(ownerMutationCalls).toBe(1);
+    expect(
+      await updatePersistedStreamingDuelParticipation({
+        pool,
+        accountId: account1Id,
+        agentId: agent1Id,
+        enabled: false,
+      }),
+    ).toMatchObject({
+      status: "updated",
+      mapping: {
+        characterId: agent1Id,
+        streamingDuelEnabled: false,
+      },
+    });
+    expect(
+      await updatePersistedStreamingDuelParticipation({
+        pool,
+        accountId: account1Id,
+        agentId: agent1Id,
+        enabled: true,
+      }),
+    ).toMatchObject({ status: "updated" });
     expect(
       await store.markCompetitiveSnapshotRecovered({
         preparationId: preparation.preparationId,
@@ -739,12 +1408,380 @@ describeWithDatabase("PostgresDuelPreparationStore integration", () => {
     );
   });
 
+  it("commits competitive aggregates atomically and idempotently with terminal truth", async () => {
+    const freezeCycle = async (input: {
+      fencingToken: string;
+      cycleId: string;
+      agent1Wins: number;
+      agent1Losses: number;
+      agent2Wins: number;
+      agent2Losses: number;
+    }) => {
+      const preparation = await store.create({
+        preparationId: randomUUID(),
+        fencingToken: input.fencingToken,
+        agent1Id,
+        agent2Id,
+        diagnostic: false,
+        durationMs: 60_000,
+        allowedBankActions: DUEL_PREPARATION_BANK_ACTIONS,
+      });
+      await claimHostLeases(preparation);
+      await store.markReady({
+        preparationId: preparation.preparationId,
+        fencingToken: input.fencingToken,
+        agentId: agent1Id,
+        planEvidence: planEvidence(agent1Id),
+      });
+      await store.markReady({
+        preparationId: preparation.preparationId,
+        fencingToken: input.fencingToken,
+        agentId: agent2Id,
+        planEvidence: planEvidence(agent2Id),
+      });
+      const frozen = await store.freezeWithCompetitiveSnapshot({
+        preparationId: preparation.preparationId,
+        fencingToken: input.fencingToken,
+        betWindowDurationMs: 60_000,
+        timing: COMPETITIVE_SNAPSHOT_TIMING_FIXTURE,
+        draft: {
+          diagnostic: false,
+          preparationId: preparation.preparationId,
+          cycleId: input.cycleId,
+          duelId: `streaming-${input.cycleId}`,
+          duelKey: randomUUID().replaceAll("-", "").repeat(2),
+          contestants: [
+            {
+              ...snapshotContestant("agent1", agent1Id),
+              wins: input.agent1Wins,
+              losses: input.agent1Losses,
+            },
+            {
+              ...snapshotContestant("agent2", agent2Id),
+              wins: input.agent2Wins,
+              losses: input.agent2Losses,
+            },
+          ],
+        },
+      });
+      expect(frozen).not.toBeNull();
+      const locked = await store.markCompetitiveSnapshotLocked({
+        preparationId: preparation.preparationId,
+        fencingToken: input.fencingToken,
+        snapshotDigest: frozen!.digest,
+        lockedAt: frozen!.snapshot.betCloseTime,
+      });
+      expect(locked).toMatchObject({
+        lockedAt: frozen!.snapshot.betCloseTime,
+        duelStartedAt: null,
+      });
+      const duelStartedAt = frozen!.snapshot.betCloseTime + 1;
+      const started = await store.markCompetitiveSnapshotDuelStarted({
+        preparationId: preparation.preparationId,
+        fencingToken: input.fencingToken,
+        snapshotDigest: frozen!.digest,
+        duelStartedAt,
+      });
+      expect(started).toMatchObject({ duelStartedAt });
+      return { preparation, frozen: frozen!, duelStartedAt };
+    };
+
+    const first = await freezeCycle({
+      fencingToken: "40",
+      cycleId: `stats-win-${runId}`,
+      agent1Wins: 4,
+      agent1Losses: 1,
+      agent2Wins: 2,
+      agent2Losses: 5,
+    });
+    const observedAt = first.duelStartedAt + 1;
+    await pool.query(
+      `
+        INSERT INTO streaming_duel_action_observations (
+          "operationId", "cycleId", "duelId", sequence, "observedAt",
+          "actorId", "opponentId", action, observation
+        ) VALUES ($1, $2, $3, 1, $4::bigint, $5, $6, 'damage', $7::jsonb)
+      `,
+      [
+        randomUUID(),
+        first.frozen.snapshot.cycleId,
+        first.frozen.snapshot.duelId,
+        observedAt,
+        agent1Id,
+        agent2Id,
+        JSON.stringify({
+          schemaVersion: 1,
+          sequence: 1,
+          cycleId: first.frozen.snapshot.cycleId,
+          duelId: first.frozen.snapshot.duelId,
+          actorId: agent1Id,
+          opponentId: agent2Id,
+          tick: 1,
+          observedAt,
+          phase: "FIGHTING",
+          combatRole: "melee",
+          tacticalMacro: "pressure",
+          action: "damage",
+          value: "hit",
+          amount: 7,
+          outcome: "committed",
+        }),
+      ],
+    );
+    await pool.query(
+      `
+        INSERT INTO streaming_duel_action_observations (
+          "operationId", "cycleId", "duelId", sequence, "observedAt",
+          "actorId", "opponentId", action, observation
+        ) VALUES
+          ($1, $3, $4, 2, $5::bigint, $6, $7, 'movement', $8::jsonb),
+          ($2, $3, $4, 3, $9::bigint, $7, $6, 'style', $10::jsonb)
+      `,
+      [
+        randomUUID(),
+        randomUUID(),
+        first.frozen.snapshot.cycleId,
+        first.frozen.snapshot.duelId,
+        observedAt + 1,
+        agent1Id,
+        agent2Id,
+        JSON.stringify({
+          schemaVersion: 1,
+          sequence: 2,
+          cycleId: first.frozen.snapshot.cycleId,
+          duelId: first.frozen.snapshot.duelId,
+          actorId: agent1Id,
+          opponentId: agent2Id,
+          tick: 2,
+          observedAt: observedAt + 1,
+          phase: "FIGHTING",
+          combatRole: "melee",
+          tacticalMacro: "pressure",
+          action: "movement",
+          value: "reposition",
+          amount: null,
+          outcome: "accepted",
+        }),
+        observedAt + 2,
+        JSON.stringify({
+          schemaVersion: 1,
+          sequence: 3,
+          cycleId: first.frozen.snapshot.cycleId,
+          duelId: first.frozen.snapshot.duelId,
+          actorId: agent2Id,
+          opponentId: agent1Id,
+          tick: 3,
+          observedAt: observedAt + 2,
+          phase: "FIGHTING",
+          combatRole: "melee",
+          tacticalMacro: "pressure",
+          action: "style",
+          value: "aggressive",
+          amount: null,
+          outcome: "accepted",
+        }),
+      ],
+    );
+    const winTerminal = {
+      outcome: "win" as const,
+      winnerId: agent1Id,
+      winReason: "kill",
+      cancellationReason: null,
+      seed: "50",
+      replayHash: "55".repeat(32),
+      terminalAt: observedAt + 3,
+    };
+    const committedWin = await store.markCompetitiveSnapshotTerminal({
+      preparationId: first.preparation.preparationId,
+      fencingToken: "40",
+      snapshotDigest: first.frozen.digest,
+      terminal: winTerminal,
+    });
+    expect(committedWin).toMatchObject({ terminal: winTerminal });
+    expect(
+      await store.markCompetitiveSnapshotTerminal({
+        preparationId: first.preparation.preparationId,
+        fencingToken: "40",
+        snapshotDigest: first.frozen.digest,
+        terminal: winTerminal,
+      }),
+    ).toEqual(committedWin);
+
+    const afterWin = await pool.query(
+      `
+        SELECT combat."playerId", combat."totalDuelWins", combat."totalDuelLosses",
+               agent.draws, agent."currentStreak", agent."killStreak",
+               agent."totalDamageDealt", agent."totalDamageTaken"
+        FROM player_combat_stats AS combat
+        JOIN agent_duel_stats AS agent ON agent."characterId" = combat."playerId"
+        WHERE combat."playerId" IN ($1, $2)
+        ORDER BY combat."playerId"
+      `,
+      [agent1Id, agent2Id],
+    );
+    expect(afterWin.rows).toEqual([
+      {
+        playerId: agent1Id,
+        totalDuelWins: 5,
+        totalDuelLosses: 1,
+        draws: 0,
+        currentStreak: 1,
+        killStreak: 1,
+        totalDamageDealt: 7,
+        totalDamageTaken: 0,
+      },
+      {
+        playerId: agent2Id,
+        totalDuelWins: 2,
+        totalDuelLosses: 6,
+        draws: 0,
+        currentStreak: 0,
+        killStreak: 0,
+        totalDamageDealt: 0,
+        totalDamageTaken: 7,
+      },
+    ]);
+
+    const second = await freezeCycle({
+      fencingToken: "41",
+      cycleId: `stats-draw-${runId}`,
+      agent1Wins: 5,
+      agent1Losses: 1,
+      agent2Wins: 2,
+      agent2Losses: 6,
+    });
+    const drawTerminal = {
+      outcome: "draw" as const,
+      winnerId: null,
+      winReason: "draw",
+      cancellationReason: "draw",
+      seed: "51",
+      replayHash: "56".repeat(32),
+      terminalAt: second.duelStartedAt + 1,
+    };
+    await store.markCompetitiveSnapshotTerminal({
+      preparationId: second.preparation.preparationId,
+      fencingToken: "41",
+      snapshotDigest: second.frozen.digest,
+      terminal: drawTerminal,
+    });
+
+    const afterDraw = await pool.query(
+      `
+        SELECT "characterId", wins, losses, draws, "currentStreak"
+        FROM agent_duel_stats
+        WHERE "characterId" IN ($1, $2)
+        ORDER BY "characterId"
+      `,
+      [agent1Id, agent2Id],
+    );
+    expect(afterDraw.rows).toEqual([
+      {
+        characterId: agent1Id,
+        wins: 5,
+        losses: 1,
+        draws: 1,
+        currentStreak: 1,
+      },
+      {
+        characterId: agent2Id,
+        wins: 2,
+        losses: 6,
+        draws: 1,
+        currentStreak: 0,
+      },
+    ]);
+
+    const terminalRows = await pool.query(
+      `SELECT
+         "preparationId", "snapshotVersion", "cycleId", "duelId", "duelKey",
+         "snapshotDigest", "snapshot", "frozenAt", "lockedAt", "duelStartedAt",
+         "recoveredAt", "lifecycleStatus", "terminalOutcome",
+         "terminalWinnerId", "terminalWinReason", "terminalCancellationReason",
+         "terminalSeed", "terminalReplayHash", "terminalAt"
+       FROM streaming_duel_competitive_snapshots
+       WHERE "cycleId" = ANY($1::text[])
+       ORDER BY "terminalAt", "cycleId"`,
+      [[first.frozen.snapshot.cycleId, second.frozen.snapshot.cycleId]],
+    );
+    const actionRows = await pool.query(
+      `SELECT
+         "cycleId", "duelId", "sequence", "observedAt",
+         "actorId", "opponentId", "action", "observation"
+       FROM streaming_duel_action_observations
+       WHERE "cycleId" = ANY($1::text[])
+       ORDER BY "cycleId", sequence`,
+      [[first.frozen.snapshot.cycleId, second.frozen.snapshot.cycleId]],
+    );
+    const strategyReport = buildCompetitiveStrategyOutcomeReport(
+      terminalRows.rows,
+      actionRows.rows,
+    );
+    expect(strategyReport).toMatchObject({
+      completedDuels: 2,
+      participantSamples: 4,
+    });
+    expect(strategyReport.samples[0].execution).toMatchObject({
+      observations: 2,
+      movement: { attempts: 1, accepted: 1 },
+      damage: { hits: 1, total: 7 },
+    });
+    expect(strategyReport.samples[1].execution).toMatchObject({
+      observations: 1,
+      style: {
+        attempts: 1,
+        accepted: 1,
+        acceptedByStyle: { aggressive: 1 },
+      },
+      damage: { hits: 0, total: 0 },
+    });
+    expect(
+      strategyReport.samples.map((sample) => ({
+        cycleId: sample.cycleId,
+        agentId: sample.agentId,
+        result: sample.result,
+        damageDealt: sample.damageDealt,
+        damageTaken: sample.damageTaken,
+      })),
+    ).toEqual([
+      {
+        cycleId: first.frozen.snapshot.cycleId,
+        agentId: agent1Id,
+        result: "win",
+        damageDealt: 7,
+        damageTaken: 0,
+      },
+      {
+        cycleId: first.frozen.snapshot.cycleId,
+        agentId: agent2Id,
+        result: "loss",
+        damageDealt: 0,
+        damageTaken: 7,
+      },
+      {
+        cycleId: second.frozen.snapshot.cycleId,
+        agentId: agent1Id,
+        result: "draw",
+        damageDealt: 0,
+        damageTaken: 0,
+      },
+      {
+        cycleId: second.frozen.snapshot.cycleId,
+        agentId: agent2Id,
+        result: "draw",
+        damageDealt: 0,
+        damageTaken: 0,
+      },
+    ]);
+  });
+
   it("cancels idempotently with a bounded machine-readable reason", async () => {
     const preparation = await store.create({
       preparationId: randomUUID(),
       fencingToken: "9",
       agent1Id,
       agent2Id,
+      diagnostic: false,
       durationMs: 60_000,
       allowedBankActions: DUEL_PREPARATION_BANK_ACTIONS,
     });
@@ -791,6 +1828,7 @@ describeWithDatabase("PostgresDuelPreparationStore integration", () => {
         fencingToken: "10",
         agent1Id,
         agent2Id,
+        diagnostic: false,
         durationMs: 60_000,
         allowedBankActions: DUEL_PREPARATION_BANK_ACTIONS,
       }),
@@ -799,6 +1837,7 @@ describeWithDatabase("PostgresDuelPreparationStore integration", () => {
         fencingToken: "10",
         agent1Id,
         agent2Id: agent3Id,
+        diagnostic: false,
         durationMs: 60_000,
         allowedBankActions: DUEL_PREPARATION_BANK_ACTIONS,
       }),
@@ -820,15 +1859,75 @@ describeWithDatabase("PostgresDuelPreparationStore integration", () => {
     expect(activeCount.rows[0]?.count).toBe("1");
   });
 
+  it("serializes cancellation behind an in-flight preparation bank authority and then revokes it", async () => {
+    const preparation = await store.create({
+      preparationId: randomUUID(),
+      fencingToken: "71",
+      agent1Id,
+      agent2Id,
+      diagnostic: false,
+      durationMs: 60_000,
+      allowedBankActions: DUEL_PREPARATION_BANK_ACTIONS,
+    });
+    await claimHostLeases(preparation);
+    const accessClient = await pool.connect();
+    let cancellationSettled = false;
+    try {
+      await accessClient.query("BEGIN");
+      expect(
+        await authorizeDuelPreparationBankAccess(accessClient, {
+          preparationId: preparation.preparationId,
+          playerId: agent1Id,
+          action: "withdraw",
+          lockForTransaction: true,
+        }),
+      ).toMatchObject({ ok: true });
+
+      const cancellationPromise = store
+        .cancel({
+          preparationId: preparation.preparationId,
+          fencingToken: "71",
+          reason: "contestant_unavailable",
+        })
+        .then((result) => {
+          cancellationSettled = true;
+          return result;
+        });
+
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(cancellationSettled).toBe(false);
+      await accessClient.query("COMMIT");
+
+      await expect(cancellationPromise).resolves.toMatchObject({
+        status: "cancelled",
+        cancellationReason: "contestant_unavailable",
+      });
+      expect(
+        await store.authorizeBankAccess({
+          preparationId: preparation.preparationId,
+          playerId: agent1Id,
+          action: "withdraw",
+        }),
+      ).toEqual({ ok: false, reason: "preparation_not_active" });
+    } finally {
+      if (!cancellationSettled) {
+        await accessClient.query("ROLLBACK").catch(() => undefined);
+      }
+      accessClient.release();
+    }
+  });
+
   it("atomically couples the durable capability to retry-safe bank custody", async () => {
     const preparation = await store.create({
       preparationId: randomUUID(),
       fencingToken: "11",
       agent1Id,
       agent2Id,
+      diagnostic: false,
       durationMs: 60_000,
       allowedBankActions: DUEL_PREPARATION_BANK_ACTIONS,
     });
+    await claimHostLeases(preparation);
     await pool.query(
       `INSERT INTO inventory ("playerId", "itemId", quantity, "slotIndex")
        VALUES ($1, $2, 2, 0)`,
@@ -857,6 +1956,17 @@ describeWithDatabase("PostgresDuelPreparationStore integration", () => {
         name === "inventory" ? inventorySystem : null,
     };
     const operationId = randomUUID();
+    const opened = await openAuthoritativeAgentBank({
+      world: world as never,
+      playerId: agent1Id,
+      bankId: getDuelPreparationBankId(preparation.preparationId),
+      preparationId: preparation.preparationId,
+    });
+    expect(opened).toMatchObject({
+      success: true,
+      action: "open",
+      bankItems: expect.any(Array),
+    });
     const request = {
       world: world as never,
       playerId: agent1Id,
@@ -886,6 +1996,7 @@ describeWithDatabase("PostgresDuelPreparationStore integration", () => {
       inventoryQuantity: string;
       bankQuantity: string;
       operationCount: string;
+      operationPreparationId: string | null;
     }>(
       `SELECT
          (SELECT COALESCE(SUM(quantity), 0)::text FROM inventory
@@ -893,13 +2004,16 @@ describeWithDatabase("PostgresDuelPreparationStore integration", () => {
          (SELECT COALESCE(SUM(quantity), 0)::text FROM bank_storage
           WHERE "playerId" = $1 AND "itemId" = $2) AS "bankQuantity",
          (SELECT count(*)::text FROM agent_bank_operations
-          WHERE "operationId" = $3) AS "operationCount"`,
+          WHERE "operationId" = $3) AS "operationCount",
+         (SELECT "preparationId" FROM agent_bank_operations
+          WHERE "operationId" = $3) AS "operationPreparationId"`,
       [agent1Id, bankItemId, operationId],
     );
     expect(custody.rows[0]).toEqual({
       inventoryQuantity: "1",
       bankQuantity: "1",
       operationCount: "1",
+      operationPreparationId: preparation.preparationId,
     });
 
     await store.markReady({
@@ -918,6 +2032,120 @@ describeWithDatabase("PostgresDuelPreparationStore integration", () => {
       commitState: "not_committed",
       failureReason: "preparation_agent_ready",
     });
+
+    await store.markReady({
+      preparationId: preparation.preparationId,
+      fencingToken: "11",
+      agentId: agent2Id,
+      planEvidence: planEvidence(agent2Id),
+    });
+    const cycleId = `preparation-bank-audit-cycle-${runId}`;
+    const frozen = await store.freezeWithCompetitiveSnapshot({
+      preparationId: preparation.preparationId,
+      fencingToken: "11",
+      betWindowDurationMs: 60_000,
+      timing: COMPETITIVE_SNAPSHOT_TIMING_FIXTURE,
+      draft: {
+        diagnostic: false,
+        preparationId: preparation.preparationId,
+        cycleId,
+        duelId: `streaming-${cycleId}`,
+        duelKey: `ba${runId.replaceAll("-", "")}`.padEnd(64, "0").slice(0, 64),
+        contestants: [
+          snapshotContestant("agent1", agent1Id),
+          snapshotContestant("agent2", agent2Id),
+        ],
+      },
+    });
+    const audit = await pool.query<{
+      operationId: string;
+      preparationId: string;
+      cycleId: string;
+      duelId: string;
+      snapshotDigest: string;
+      playerId: string;
+      action: string;
+      createdAt: string;
+    }>(
+      `SELECT *
+       FROM streaming_duel_bank_action_audit
+       WHERE "preparationId" = $1
+       ORDER BY action`,
+      [preparation.preparationId],
+    );
+    expect(audit.rows).toEqual([
+      {
+        operationId,
+        preparationId: preparation.preparationId,
+        cycleId,
+        duelId: `streaming-${cycleId}`,
+        snapshotDigest: frozen!.digest,
+        playerId: agent1Id,
+        action: "deposit",
+        createdAt: expect.any(String),
+      },
+      {
+        operationId: opened.operationId,
+        preparationId: preparation.preparationId,
+        cycleId,
+        duelId: `streaming-${cycleId}`,
+        snapshotDigest: frozen!.digest,
+        playerId: agent1Id,
+        action: "open",
+        createdAt: expect.any(String),
+      },
+    ]);
+    expect(Object.keys(audit.rows[0] ?? {}).sort()).toEqual(
+      [
+        "action",
+        "createdAt",
+        "cycleId",
+        "duelId",
+        "operationId",
+        "playerId",
+        "preparationId",
+        "snapshotDigest",
+      ].sort(),
+    );
+
+    await expect(
+      pool.query(
+        `INSERT INTO agent_bank_operations (
+           "operationId", "playerId", action, "bankId", "preparationId",
+           "itemId", "requestedQuantity", "committedQuantity",
+           "inventoryQuantityAfter", "bankQuantityAfter",
+           "requestFingerprint", "itemCount"
+         ) VALUES ($1, $2, 'deposit', $3, $4, $5, 1, 1, 0, 1, $6, 1)`,
+        [
+          randomUUID(),
+          agent3Id,
+          getDuelPreparationBankId(preparation.preparationId),
+          preparation.preparationId,
+          bankItemId,
+          "cd".repeat(32),
+        ],
+      ),
+    ).rejects.toThrow(/not a preparation contestant/);
+    await expect(
+      pool.query(
+        `INSERT INTO streaming_duel_bank_open_events
+           ("operationId", "preparationId", "playerId", "bankId")
+         VALUES ($1, $2, $3, $4)`,
+        [
+          randomUUID(),
+          preparation.preparationId,
+          agent3Id,
+          getDuelPreparationBankId(preparation.preparationId),
+        ],
+      ),
+    ).rejects.toThrow(/not a preparation contestant/);
+    await expect(
+      pool.query(
+        `UPDATE streaming_duel_bank_open_events SET "createdAt" = 0
+         WHERE "operationId" = $1`,
+        [opened.operationId],
+      ),
+    ).rejects.toThrow(/append-only/);
   });
 
   it("serializes concurrent cross-process custody transfers without duplicating items", async () => {
@@ -926,9 +2154,11 @@ describeWithDatabase("PostgresDuelPreparationStore integration", () => {
       fencingToken: "12",
       agent1Id,
       agent2Id: agent3Id,
+      diagnostic: false,
       durationMs: 60_000,
       allowedBankActions: DUEL_PREPARATION_BANK_ACTIONS,
     });
+    await claimHostLeases(preparation);
     await pool.query(
       `INSERT INTO inventory ("playerId", "itemId", quantity, "slotIndex")
        VALUES ($1, $2, 1, 0)`,

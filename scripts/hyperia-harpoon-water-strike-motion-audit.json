@@ -1,0 +1,79 @@
+{
+  "schemaVersion": 1,
+  "title": "Harpoon water-strike body-motion comparison",
+  "framing": "avatar",
+  "motions": [
+    {
+      "id": "water-dig-windup",
+      "name": "Full dig · windup",
+      "asset": "motions/harpoon-water-strike-candidates/kaykit-harpoon-water-dig.glb",
+      "sampleRatio": 0.1
+    },
+    {
+      "id": "water-dig-drive",
+      "name": "Full dig · drive",
+      "asset": "motions/harpoon-water-strike-candidates/kaykit-harpoon-water-dig.glb",
+      "sampleRatio": 0.35
+    },
+    {
+      "id": "water-dig-extension",
+      "name": "Full dig · extension",
+      "asset": "motions/harpoon-water-strike-candidates/kaykit-harpoon-water-dig.glb",
+      "sampleRatio": 0.65
+    },
+    {
+      "id": "water-dig-recovery",
+      "name": "Full dig · recovery",
+      "asset": "motions/harpoon-water-strike-candidates/kaykit-harpoon-water-dig.glb",
+      "sampleRatio": 0.9
+    },
+    {
+      "id": "water-digging-windup",
+      "name": "Digging loop · windup",
+      "asset": "motions/harpoon-water-strike-candidates/kaykit-harpoon-water-digging.glb",
+      "sampleRatio": 0.1
+    },
+    {
+      "id": "water-digging-drive",
+      "name": "Digging loop · drive",
+      "asset": "motions/harpoon-water-strike-candidates/kaykit-harpoon-water-digging.glb",
+      "sampleRatio": 0.35
+    },
+    {
+      "id": "water-digging-extension",
+      "name": "Digging loop · extension",
+      "asset": "motions/harpoon-water-strike-candidates/kaykit-harpoon-water-digging.glb",
+      "sampleRatio": 0.65
+    },
+    {
+      "id": "water-digging-recovery",
+      "name": "Digging loop · recovery",
+      "asset": "motions/harpoon-water-strike-candidates/kaykit-harpoon-water-digging.glb",
+      "sampleRatio": 0.9
+    },
+    {
+      "id": "water-pickaxe-windup",
+      "name": "Full pickaxe · windup",
+      "asset": "motions/harpoon-water-strike-candidates/kaykit-harpoon-water-pickaxe.glb",
+      "sampleRatio": 0.1
+    },
+    {
+      "id": "water-pickaxe-drive",
+      "name": "Full pickaxe · drive",
+      "asset": "motions/harpoon-water-strike-candidates/kaykit-harpoon-water-pickaxe.glb",
+      "sampleRatio": 0.35
+    },
+    {
+      "id": "water-pickaxe-extension",
+      "name": "Full pickaxe · extension",
+      "asset": "motions/harpoon-water-strike-candidates/kaykit-harpoon-water-pickaxe.glb",
+      "sampleRatio": 0.65
+    },
+    {
+      "id": "water-pickaxe-recovery",
+      "name": "Full pickaxe · recovery",
+      "asset": "motions/harpoon-water-strike-candidates/kaykit-harpoon-water-pickaxe.glb",
+      "sampleRatio": 0.9
+    }
+  ]
+}

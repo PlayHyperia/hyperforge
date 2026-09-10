@@ -42,7 +42,7 @@ import {
   vec3,
   vec4,
 } from "../../../extras/three/three";
-import type { Node } from "three/webgpu";
+import type { Node, UniformNode } from "three/webgpu";
 import type { World, WorldOptions } from "../../../types";
 import { isStreamingLikeViewport } from "../../../runtime/clientViewportMode";
 import { applyCloudFog, fogRenderTarget } from "./FogConfig";
@@ -402,6 +402,28 @@ export type SkyUniforms = {
 type TSLUniformFloat = { value: number };
 type TSLUniformVec3 = { value: THREE.Vector3 };
 
+type PaletteColorUniform = UniformNode<"color", THREE.Color>;
+
+/** Linear colors shared by this world's visible sky and starless fog graphs. */
+export type SkyPaletteUniforms = {
+  readonly dayZenith: PaletteColorUniform;
+  readonly dayHorizon: PaletteColorUniform;
+  readonly nightZenith: PaletteColorUniform;
+  readonly nightHorizon: PaletteColorUniform;
+  readonly sunrise: PaletteColorUniform;
+  readonly sunsetPink: PaletteColorUniform;
+  readonly moonGlow: PaletteColorUniform;
+  readonly haze: PaletteColorUniform;
+};
+
+/** Linear colors shared by all decorative clouds in this world. */
+export type CloudPaletteUniforms = {
+  readonly nightBright: PaletteColorUniform;
+  readonly dayBright: PaletteColorUniform;
+  readonly nightDark: PaletteColorUniform;
+  readonly dayDark: PaletteColorUniform;
+};
+
 // Material uniform storage types
 type SkyMaterialUniforms = {
   uTime: TSLUniformFloat;
@@ -430,6 +452,26 @@ type MoonMaterialUniforms = {
 export class SkySystem extends System {
   // PERFORMANCE: Static shared TextureLoader (avoids creating new loader per texture)
   private static _textureLoader = new THREE.TextureLoader();
+
+  // Records/nodes stay stable; callers may reversibly edit each uniform's Color value.
+  // Per-instance allocation keeps palette ownership separate between worlds.
+  public readonly skyPaletteUniforms: SkyPaletteUniforms = Object.freeze({
+    dayZenith: uniform(new THREE.Color(0.25, 0.55, 0.95)),
+    dayHorizon: uniform(new THREE.Color(0.7, 0.85, 1.0)),
+    nightZenith: uniform(new THREE.Color(0.005, 0.008, 0.025)),
+    nightHorizon: uniform(new THREE.Color(0.02, 0.03, 0.06)),
+    sunrise: uniform(new THREE.Color(1.0, 0.5, 0.2)),
+    sunsetPink: uniform(new THREE.Color(1.0, 0.4, 0.5)),
+    moonGlow: uniform(new THREE.Color(0.5, 0.6, 0.8)),
+    haze: uniform(new THREE.Color(0.83, 0.78, 0.72)),
+  });
+
+  public readonly cloudPaletteUniforms: CloudPaletteUniforms = Object.freeze({
+    nightBright: uniform(new THREE.Color(0.141, 0.607, 0.94)),
+    dayBright: uniform(new THREE.Color(1.0, 1.0, 1.0)),
+    nightDark: uniform(new THREE.Color(0.024, 0.32, 0.59)),
+    dayDark: uniform(new THREE.Color(0.22, 0.5, 0.85)),
+  });
 
   private scene: THREE.Scene | null = null;
   private group: THREE.Group | null = null;
@@ -885,14 +927,14 @@ export class SkySystem extends System {
       // SKY COLORS - Darker night sky
       // =====================
       // Day sky gradient: deep blue at zenith, lighter at horizon
-      const dayZenith = vec3(0.25, 0.55, 0.95); // Rich blue
-      const dayHorizon = vec3(0.7, 0.85, 1.0); // Light blue/white
+      const dayZenith = vec3(this.skyPaletteUniforms.dayZenith); // Rich blue
+      const dayHorizon = vec3(this.skyPaletteUniforms.dayHorizon); // Light blue/white
       const dayGradient = pow(sub(float(1.0), elevation), float(1.5));
       const daySkyColor = mix(dayZenith, dayHorizon, dayGradient);
 
       // Night sky gradient: MUCH darker for proper night feel
-      const nightZenith = vec3(0.005, 0.008, 0.025); // Almost black with blue tint
-      const nightHorizon = vec3(0.02, 0.03, 0.06); // Very dark blue-gray
+      const nightZenith = vec3(this.skyPaletteUniforms.nightZenith); // Almost black with blue tint
+      const nightHorizon = vec3(this.skyPaletteUniforms.nightHorizon); // Very dark blue-gray
       const nightGradient = pow(sub(float(1.0), elevation), float(2.0));
       const nightSkyColor = mix(nightZenith, nightHorizon, nightGradient);
 
@@ -918,8 +960,8 @@ export class SkySystem extends System {
       const angleToSun = dot(localPos, sunDir);
 
       // Sunrise/sunset colors near sun
-      const sunriseColor = vec3(1.0, 0.5, 0.2); // Orange
-      const sunsetPinkColor = vec3(1.0, 0.4, 0.5); // Pink/red
+      const sunriseColor = vec3(this.skyPaletteUniforms.sunrise); // Orange
+      const sunsetPinkColor = vec3(this.skyPaletteUniforms.sunsetPink); // Pink/red
 
       // Glow strongest near sun, with gradual falloff across radius
       // Use power function for smooth natural falloff instead of smoothstep
@@ -1045,7 +1087,7 @@ export class SkySystem extends System {
       // Use power function for gradual falloff instead of smoothstep
       const moonGlowRaw = clamp(angleToMoon, float(0.0), float(1.0));
       const moonGlowAngle = pow(moonGlowRaw, float(6.0)); // Softer glow
-      const moonGlowColor = vec3(0.5, 0.6, 0.8); // Cool blue glow
+      const moonGlowColor = vec3(this.skyPaletteUniforms.moonGlow); // Cool blue glow
       const moonGlowIntensity = mul(
         mul(moonGlowAngle, nightIntensity),
         float(0.4), // Stronger moon glow
@@ -1055,7 +1097,7 @@ export class SkySystem extends System {
       // =====================
       // HORIZON HAZE (subtle atmosphere)
       // =====================
-      const hazeColor = vec3(0.83, 0.78, 0.72); // Warm beige
+      const hazeColor = vec3(this.skyPaletteUniforms.haze); // Warm beige
       // Haze strongest near horizon (low elevation), fades as you go higher
       // Use elevation (which is now abs(localPos.y)) for symmetric reflections
       const hazeStrength = smoothstep(float(0.15), float(0.0), elevation);
@@ -1128,13 +1170,13 @@ export class SkySystem extends System {
       const dayIntensity = uDayIntensity;
       const nightIntensity = sub(float(1.0), dayIntensity);
 
-      const dayZenith = vec3(0.25, 0.55, 0.95);
-      const dayHorizon = vec3(0.7, 0.85, 1.0);
+      const dayZenith = vec3(this.skyPaletteUniforms.dayZenith);
+      const dayHorizon = vec3(this.skyPaletteUniforms.dayHorizon);
       const dayGradient = pow(sub(float(1.0), elevation), float(1.5));
       const daySkyColor = mix(dayZenith, dayHorizon, dayGradient);
 
-      const nightZenith = vec3(0.005, 0.008, 0.025);
-      const nightHorizon = vec3(0.02, 0.03, 0.06);
+      const nightZenith = vec3(this.skyPaletteUniforms.nightZenith);
+      const nightHorizon = vec3(this.skyPaletteUniforms.nightHorizon);
       const nightGradient = pow(sub(float(1.0), elevation), float(2.0));
       const nightSkyColor = mix(nightZenith, nightHorizon, nightGradient);
 
@@ -1153,8 +1195,8 @@ export class SkySystem extends System {
       const sunDir = normalize(uSunPosition);
       const angleToSun = dot(localPos, sunDir);
 
-      const sunriseColor = vec3(1.0, 0.5, 0.2);
-      const sunsetPinkColor = vec3(1.0, 0.4, 0.5);
+      const sunriseColor = vec3(this.skyPaletteUniforms.sunrise);
+      const sunsetPinkColor = vec3(this.skyPaletteUniforms.sunsetPink);
       const sunGlowRaw = clamp(angleToSun, float(0.0), float(1.0));
       const sunGlowAngle = pow(sunGlowRaw, float(4.0));
       const horizonGlow = pow(
@@ -1178,7 +1220,7 @@ export class SkySystem extends System {
       const angleToMoon = dot(localPos, moonPos);
       const moonGlowRaw = clamp(angleToMoon, float(0.0), float(1.0));
       const moonGlowAngle = pow(moonGlowRaw, float(6.0));
-      const moonGlowColor = vec3(0.5, 0.6, 0.8);
+      const moonGlowColor = vec3(this.skyPaletteUniforms.moonGlow);
       const moonGlowIntensity = mul(
         mul(moonGlowAngle, nightIntensity),
         float(0.4),
@@ -1186,7 +1228,7 @@ export class SkySystem extends System {
       skyColor = add(skyColor, mul(moonGlowColor, moonGlowIntensity));
 
       // Horizon haze
-      const hazeColor = vec3(0.83, 0.78, 0.72);
+      const hazeColor = vec3(this.skyPaletteUniforms.haze);
       const hazeStrength = smoothstep(float(0.15), float(0.0), elevation);
       const hazeAmount = mul(
         hazeStrength,
@@ -1329,13 +1371,13 @@ export class SkySystem extends System {
           div(uSunPos.y, uCloudRadius),
         );
         const brightColor = mix(
-          vec3(0.141, 0.607, 0.94),
-          vec3(1.0, 1.0, 1.0),
+          vec3(this.cloudPaletteUniforms.nightBright),
+          vec3(this.cloudPaletteUniforms.dayBright),
           sunNightStep,
         );
         const darkColor = mix(
-          vec3(0.024, 0.32, 0.59),
-          vec3(0.22, 0.5, 0.85),
+          vec3(this.cloudPaletteUniforms.nightDark),
+          vec3(this.cloudPaletteUniforms.dayDark),
           sunNightStep,
         );
 

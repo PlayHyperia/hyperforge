@@ -4,6 +4,7 @@
     "module": "ESNext",
     "moduleResolution": "bundler",
     "lib": ["ES2022", "DOM"],
+    "types": [],
     "jsx": "react-jsx",
     "declaration": true,
     "declarationMap": true,

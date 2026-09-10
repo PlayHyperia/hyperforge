@@ -7,7 +7,12 @@
  * Extracted from ServerNetwork.initializeManagers() to keep the orchestrator lean.
  */
 
-import { EventType, type EventMap, World } from "@hyperforge/shared";
+import {
+  EventType,
+  type EventMap,
+  type ExternalDuelPreparationStrategyRequest,
+  World,
+} from "@hyperforge/shared";
 import type { BroadcastManager } from "./broadcast";
 import type { ServerSocket } from "../../shared/types";
 
@@ -81,7 +86,18 @@ export function registerDuelEventListeners(deps: DuelEventDeps): () => void {
 
   // -- on-deck notification (next duel pair selected, agents should prepare) --
   on("duel:on-deck", (event) => {
-    const { agent1Id, agent1Name, agent2Id, agent2Name } = event as {
+    const {
+      preparationId,
+      selectedAt,
+      expiresAt,
+      agent1Id,
+      agent1Name,
+      agent2Id,
+      agent2Name,
+    } = event as {
+      preparationId?: string;
+      selectedAt?: number;
+      expiresAt?: number;
       agent1Id: string;
       agent1Name: string;
       agent2Id: string;
@@ -91,6 +107,7 @@ export function registerDuelEventListeners(deps: DuelEventDeps): () => void {
     const agent1Socket = getSocketByPlayerId(agent1Id);
     if (agent1Socket) {
       agent1Socket.send("duelOnDeck", {
+        ...(preparationId ? { preparationId, selectedAt, expiresAt } : {}),
         opponentId: agent2Id,
         opponentName: agent2Name,
       });
@@ -99,10 +116,77 @@ export function registerDuelEventListeners(deps: DuelEventDeps): () => void {
     const agent2Socket = getSocketByPlayerId(agent2Id);
     if (agent2Socket) {
       agent2Socket.send("duelOnDeck", {
+        ...(preparationId ? { preparationId, selectedAt, expiresAt } : {}),
         opponentId: agent1Id,
         opponentName: agent1Name,
       });
     }
+  });
+
+  const sendPreparationStatus = (
+    playerId: string,
+    preparationId: string,
+    status: "validating" | "ready" | "failed",
+  ): void => {
+    getSocketByPlayerId(playerId)?.send("duelPreparationStatus", {
+      preparationId,
+      status,
+    });
+  };
+
+  on("duel:preparation:agent_plan_status", (event) => {
+    const data = event as {
+      preparationId?: string;
+      agentId?: string;
+      status?: string;
+    };
+    if (!data.preparationId || !data.agentId) return;
+    if (data.status === "ready_for_validation") {
+      sendPreparationStatus(data.agentId, data.preparationId, "validating");
+    } else if (data.status === "failed") {
+      sendPreparationStatus(data.agentId, data.preparationId, "failed");
+    }
+  });
+
+  on("duel:preparation:readiness", (event) => {
+    const data = event as { preparationId?: string; agentId?: string };
+    if (!data.preparationId || !data.agentId) return;
+    sendPreparationStatus(data.agentId, data.preparationId, "ready");
+  });
+
+  on("duel:preparation:readiness_rejected", (event) => {
+    const data = event as { preparationId?: string; agentId?: string };
+    if (!data.preparationId || !data.agentId) return;
+    sendPreparationStatus(data.agentId, data.preparationId, "failed");
+  });
+
+  on("duel:preparation:external_strategy_request", (event) => {
+    const data = event as ExternalDuelPreparationStrategyRequest & {
+      agentId?: string;
+    };
+    if (!data.agentId) return;
+    getSocketByPlayerId(data.agentId)?.send("duelPreparationStrategy", {
+      requestId: data.requestId,
+      preparationId: data.preparationId,
+      policyVersion: data.policyVersion,
+      protocolVersion: data.protocolVersion,
+      expiresAt: data.expiresAt,
+      decisionDeadlineAt: data.decisionDeadlineAt,
+      agentName: data.agentName,
+      opponentName: data.opponentName,
+      ownPublicProfile: data.ownPublicProfile,
+      opponentPublicProfile: data.opponentPublicProfile,
+      opponentHistorySummary: data.opponentHistorySummary,
+      availableRoles: data.availableRoles,
+      availablePrayerIds: data.availablePrayerIds,
+      preparationOptions: data.preparationOptions,
+      foodOptions: data.foodOptions,
+      armorOptions: data.armorOptions,
+      deterministicPlanOptionId: data.deterministicPlanOptionId,
+      deterministicFoodOptionId: data.deterministicFoodOptionId,
+      deterministicArmorOptionId: data.deterministicArmorOptionId,
+      deterministicRole: data.deterministicRole,
+    });
   });
 
   // -- session created (also used by StreamingDuelScheduler to notify agents) --

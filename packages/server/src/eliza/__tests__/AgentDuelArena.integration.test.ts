@@ -15,7 +15,6 @@ import {
 } from "@hyperforge/shared";
 import { drizzle } from "drizzle-orm/node-postgres";
 import { migrate } from "drizzle-orm/node-postgres/migrator";
-import EventEmitter from "eventemitter3";
 import pg from "pg";
 import {
   afterAll,
@@ -29,6 +28,7 @@ import {
 
 import ammunitionManifest from "../../../world/assets/manifests/items/ammunition.json";
 import foodManifest from "../../../world/assets/manifests/items/food.json";
+import runesManifest from "../../../world/assets/manifests/items/runes.json";
 import weaponsManifest from "../../../world/assets/manifests/items/weapons.json";
 import prayersManifest from "../../../world/assets/manifests/prayers.json";
 import { createPostgresClientDatabase } from "../../database/postgres-transaction.js";
@@ -40,6 +40,10 @@ import {
 } from "../AgentManager.js";
 import { DatabaseSystem } from "../../systems/DatabaseSystem/index.js";
 import { StreamingDuelScheduler } from "../../systems/StreamingDuelScheduler/index.js";
+import {
+  digestCompetitiveSnapshot,
+  type CompetitiveSnapshot,
+} from "../../systems/StreamingDuelScheduler/competitive-snapshot.js";
 
 const baseDatabaseUrl =
   process.env.AGENT_DUEL_CYCLE_TEST_DATABASE_URL?.trim() ?? "";
@@ -47,7 +51,15 @@ const describeDatabase = baseDatabaseUrl ? describe.sequential : describe.skip;
 const STARTING_PRAYER_POINTS = 39;
 const STARTING_PRAYER_UNITS =
   STARTING_PRAYER_POINTS * PRAYER_POINT_UNITS_PER_POINT;
-const FIXTURE_ITEM_IDS = new Set(["shortbow", "bronze_arrow", "lobster"]);
+const FIXTURE_ITEM_IDS = new Set([
+  "bronze_longsword",
+  "shortbow",
+  "bronze_arrow",
+  "staff_of_air",
+  "fire_rune",
+  "mind_rune",
+  "lobster",
+]);
 const AGENT_IDS = [
   "persisted-duelist-alpha",
   "persisted-duelist-beta",
@@ -100,7 +112,7 @@ function createPersistedRuntimeWorld(
   pool: pg.Pool,
   db: ReturnType<typeof drizzle<typeof schema>>,
 ) {
-  const emitter = new EventEmitter<string | symbol, unknown>();
+  const emitter = new EventBus();
   const eventBus = new EventBus();
   const entities = new Map<string, TestEntity>();
   const systems = new Map<string, unknown>();
@@ -339,13 +351,20 @@ describeDatabase("persisted AgentManager streaming duel cycle", () => {
     for (const item of [
       ...weaponsManifest,
       ...ammunitionManifest,
+      ...runesManifest,
       ...foodManifest,
     ]) {
       if (!FIXTURE_ITEM_IDS.has(item.id)) continue;
       priorItems.set(item.id, ITEMS.get(item.id));
       ITEMS.set(item.id, {
         ...item,
-        ...(item.id === "shortbow" ? { attackType: AttackType.RANGED } : {}),
+        ...(item.id === "shortbow"
+          ? { attackType: AttackType.RANGED }
+          : item.id === "bronze_longsword"
+            ? { attackType: AttackType.MELEE }
+            : item.id === "staff_of_air"
+              ? { attackType: AttackType.MAGIC }
+              : {}),
       } as never);
     }
 
@@ -392,12 +411,12 @@ describeDatabase("persisted AgentManager streaming duel cycle", () => {
         defenseLevel: 40,
         constitutionLevel: 40,
         rangedLevel: 40,
-        magicLevel: 1,
+        magicLevel: 40,
         prayerLevel: STARTING_PRAYER_POINTS,
         prayerPoints: STARTING_PRAYER_POINTS,
         prayerPointUnits: STARTING_PRAYER_UNITS,
         prayerMaxPoints: STARTING_PRAYER_POINTS,
-        activePrayers: [],
+        activePrayers: ["thick_skin"],
         health: 40,
         maxHealth: 40,
         positionX: index * 4,
@@ -425,18 +444,49 @@ describeDatabase("persisted AgentManager streaming duel cycle", () => {
       ),
     );
     await db.insert(schema.equipment).values(
+      AGENT_IDS.map((agentId) => ({
+        playerId: agentId,
+        slotType: "weapon",
+        itemId: "bronze_longsword",
+        quantity: 1,
+      })),
+    );
+    await db.insert(schema.bankStorage).values(
       AGENT_IDS.flatMap((agentId) => [
         {
           playerId: agentId,
-          slotType: "weapon",
           itemId: "shortbow",
           quantity: 1,
+          slot: 0,
+          tabIndex: 0,
         },
         {
           playerId: agentId,
-          slotType: "arrows",
           itemId: "bronze_arrow",
           quantity: 100,
+          slot: 1,
+          tabIndex: 0,
+        },
+        {
+          playerId: agentId,
+          itemId: "staff_of_air",
+          quantity: 1,
+          slot: 2,
+          tabIndex: 0,
+        },
+        {
+          playerId: agentId,
+          itemId: "fire_rune",
+          quantity: 60,
+          slot: 3,
+          tabIndex: 0,
+        },
+        {
+          playerId: agentId,
+          itemId: "mind_rune",
+          quantity: 20,
+          slot: 4,
+          tabIndex: 0,
         },
       ]),
     );
@@ -491,15 +541,12 @@ describeDatabase("persisted AgentManager streaming duel cycle", () => {
         expect(inventorySystem.isInventoryReady(agentId)).toBe(true);
         expect(
           equipmentSystem.getPlayerEquipment(agentId)?.weapon?.itemId,
-        ).toBe("shortbow");
-        expect(
-          equipmentSystem.getPlayerEquipment(agentId)?.arrows?.itemId,
-        ).toBe("bronze_arrow");
+        ).toBe("bronze_longsword");
         expect(prayerSystem.getPrayerCustody(agentId)).toMatchObject({
           ready: true,
           persistenceHealthy: true,
           pointUnits: STARTING_PRAYER_UNITS,
-          activePrayers: [],
+          activePrayers: ["thick_skin"],
         });
       }
     });
@@ -562,7 +609,7 @@ describeDatabase("persisted AgentManager streaming duel cycle", () => {
     }
   }, 60_000);
 
-  it("prepares, freezes, fights, drains Prayer, and tears down two persisted agents without custody loss", async () => {
+  it("prepares, freezes, exercises every combat-role Prayer, drains, and tears down two persisted agents without custody loss", async () => {
     const preparationEvents: Array<{ event: string; payload: unknown }> = [];
     for (const event of [
       "duel:preparation:selected",
@@ -599,6 +646,7 @@ describeDatabase("persisted AgentManager streaming duel cycle", () => {
               availableCombatStyles: string[];
             }
           | { ok: false; reason: string };
+        waitForPublicActionObservations(): Promise<void>;
       };
     };
     if (schedulerInternal.tickInterval) {
@@ -706,25 +754,107 @@ describeDatabase("persisted AgentManager streaming duel cycle", () => {
       persisted: true,
       contestants: [
         expect.objectContaining({
-          initialCombatStyle: "ranged",
+          initialCombatStyle: "melee",
+          availableCombatStyles: ["melee", "ranged", "mage"],
+          prayer: expect.objectContaining({
+            pointUnits: STARTING_PRAYER_UNITS,
+            activePrayers: [],
+          }),
           preparation: expect.objectContaining({
-            primaryStyle: "ranged",
+            primaryStyle: "melee",
+            availableStyles: ["melee", "ranged", "mage"],
             planningSource: "deterministic",
             planningPolicyVersion: "duel-preparation-role-v3",
-            tacticalStrategy: expect.objectContaining({ prayer: "hawk_eye" }),
+            tacticalStrategy: expect.objectContaining({
+              prayer: "superhuman_strength",
+            }),
           }),
         }),
         expect.objectContaining({
-          initialCombatStyle: "ranged",
+          initialCombatStyle: "melee",
+          availableCombatStyles: ["melee", "ranged", "mage"],
+          prayer: expect.objectContaining({
+            pointUnits: STARTING_PRAYER_UNITS,
+            activePrayers: [],
+          }),
           preparation: expect.objectContaining({
-            primaryStyle: "ranged",
+            primaryStyle: "melee",
+            availableStyles: ["melee", "ranged", "mage"],
             planningSource: "deterministic",
             planningPolicyVersion: "duel-preparation-role-v3",
-            tacticalStrategy: expect.objectContaining({ prayer: "hawk_eye" }),
+            tacticalStrategy: expect.objectContaining({
+              prayer: "superhuman_strength",
+            }),
           }),
         }),
       ],
     });
+    const frozenSnapshot = announcement!.competitiveSnapshot!;
+    const frozenSnapshotDigest = announcement!.competitiveSnapshotDigest!;
+    expect(digestCompetitiveSnapshot(frozenSnapshot)).toBe(
+      frozenSnapshotDigest,
+    );
+    for (const publicAgent of [
+      scheduler.getStreamingState().cycle.agent1,
+      scheduler.getStreamingState().cycle.agent2,
+    ]) {
+      expect(publicAgent?.strategySummary).toEqual({
+        schemaVersion: 1,
+        approach: "balanced",
+        tacticalMacro: "pressure",
+        attackStyle: "aggressive",
+        prayer: "superhuman_strength",
+        preferredCombatRole: null,
+        foodThreshold: 40,
+        switchDefensiveAt: 30,
+        source: "deterministic",
+        policyVersion: "duel-preparation-role-v3",
+      });
+      expect(publicAgent?.strategySummary).not.toHaveProperty(
+        "decisionOutcome",
+      );
+      expect(publicAgent?.strategySummary).not.toHaveProperty(
+        "decisionLatencyMs",
+      );
+      expect(publicAgent?.strategySummary).not.toHaveProperty("reasoning");
+    }
+
+    const preFightPrayerOperations = await pool.query<{
+      playerId: string;
+      transition: string | null;
+      pointUnits: number | null;
+      activePrayers: string[] | null;
+    }>(
+      `SELECT "playerId",
+              "operationState"->>'transition' AS transition,
+              ("operationState"->'committed'->>'pointUnits')::int AS "pointUnits",
+              ARRAY(
+                SELECT jsonb_array_elements_text(
+                  "operationState"->'committed'->'activePrayers'
+                )
+              ) AS "activePrayers"
+         FROM operations_log
+        WHERE "playerId" = ANY($1::text[])
+          AND "operationType" = 'prayer_state_transition'
+        ORDER BY "playerId", timestamp, id`,
+      [AGENT_IDS],
+    );
+    for (const agentId of AGENT_IDS) {
+      expect(
+        preFightPrayerOperations.rows.filter((row) => row.playerId === agentId),
+      ).toEqual([
+        {
+          playerId: agentId,
+          transition: "deactivate_all",
+          pointUnits: STARTING_PRAYER_UNITS,
+          activePrayers: [],
+        },
+      ]);
+      expect(prayerSystem.getPrayerCustody(agentId)).toMatchObject({
+        pointUnits: STARTING_PRAYER_UNITS,
+        activePrayers: [],
+      });
+    }
 
     const persistedFreeze = await pool.query<{
       preparationStatus: string;
@@ -747,6 +877,12 @@ describeDatabase("persisted AgentManager streaming duel cycle", () => {
         snapshot: expect.objectContaining({ diagnostic: false }),
       }),
     ]);
+    expect(persistedFreeze.rows[0]!.snapshot).toEqual(frozenSnapshot);
+    expect(
+      digestCompetitiveSnapshot(
+        persistedFreeze.rows[0]!.snapshot as CompetitiveSnapshot,
+      ),
+    ).toBe(frozenSnapshotDigest);
 
     const nowSpy = vi.spyOn(Date, "now");
     nowSpy.mockReturnValue(announcement!.betCloseTime!);
@@ -769,6 +905,14 @@ describeDatabase("persisted AgentManager streaming duel cycle", () => {
     await waitForCondition(() => {
       expect(scheduler.getCombatAIDiagnostics()).toHaveLength(2);
     });
+    const countdownPrayerOperationCount = await pool.query<{ count: string }>(
+      `SELECT count(*)::text AS count
+         FROM operations_log
+        WHERE "playerId" = ANY($1::text[])
+          AND "operationType" = 'prayer_state_transition'`,
+      [AGENT_IDS],
+    );
+    expect(countdownPrayerOperationCount.rows).toEqual([{ count: "2" }]);
     const combatAIs = (
       scheduler as unknown as {
         orchestrator: {
@@ -776,27 +920,142 @@ describeDatabase("persisted AgentManager streaming duel cycle", () => {
         };
       }
     ).orchestrator.combatAIs;
-    for (let tick = 0; tick < 5; tick += 1) {
+    const completeExecutorCommand =
+      databaseSystem.completeStreamingDuelExecutorCommandAsync.bind(
+        databaseSystem,
+      );
+    const executorCompletionRequests: Array<
+      Parameters<DatabaseSystem["completeStreamingDuelExecutorCommandAsync"]>[0]
+    > = [];
+    const injectedCompletionResponseLosses = new Set<
+      "movement" | "engagement"
+    >();
+    vi.spyOn(
+      databaseSystem,
+      "completeStreamingDuelExecutorCommandAsync",
+    ).mockImplementation(async (request) => {
+      executorCompletionRequests.push(request);
+      const receipt = await completeExecutorCommand(request);
+      const action = request.publicActionObservation.action;
+      if (!injectedCompletionResponseLosses.has(action)) {
+        injectedCompletionResponseLosses.add(action);
+        throw new Error(`injected_${action}_completion_response_loss`);
+      }
+      return receipt;
+    });
+    let publicExecutorObservations = scheduler
+      .getStreamingState()
+      .cycle.actionObservations.filter(
+        ({ action }) => action === "movement" || action === "engagement",
+      );
+    const observedRolesByAgent = new Map(
+      AGENT_IDS.map((agentId) => [agentId, new Set<string>()]),
+    );
+    const observedPrayersByAgent = new Map(
+      AGENT_IDS.map((agentId) => [agentId, new Set<string>()]),
+    );
+    const captureCombatState = (): void => {
+      for (const diagnostic of scheduler.getCombatAIDiagnostics()) {
+        observedRolesByAgent
+          .get(diagnostic.characterId as (typeof AGENT_IDS)[number])
+          ?.add(diagnostic.combatRole);
+      }
+      for (const agentId of AGENT_IDS) {
+        for (const prayerId of prayerSystem.getPrayerCustody(agentId)
+          .activePrayers) {
+          observedPrayersByAgent.get(agentId)!.add(prayerId);
+        }
+      }
+    };
+    captureCombatState();
+    for (let tick = 0; tick < 36; tick += 1) {
       runtime.world.currentTick += 1;
-      await Promise.all([...combatAIs.values()].map((ai) => ai.externalTick()));
+      // The stable actor order is intentional: each controller observes the
+      // opponent's newly committed weapon before choosing its counter-role.
+      // This drives both persisted agents through all three legal roles using
+      // the ordinary production counter-selection path rather than mutating a
+      // test-only strategy or calling the loadout boundary directly.
+      for (const agentId of AGENT_IDS) {
+        await combatAIs.get(agentId)!.externalTick();
+      }
+      await Promise.all(
+        AGENT_IDS.map((agentId) => prayerSystem.waitForPrayerIdle(agentId)),
+      );
+      await schedulerInternal.orchestrator.waitForPublicActionObservations();
+      captureCombatState();
+      publicExecutorObservations = scheduler
+        .getStreamingState()
+        .cycle.actionObservations.filter(
+          ({ action }) => action === "movement" || action === "engagement",
+        );
+      const bothControllersReachedExecutorBoundary = AGENT_IDS.every(
+        (agentId) => {
+          const actions = new Set(
+            publicExecutorObservations
+              .filter(({ actorId }) => actorId === agentId)
+              .map(({ action }) => action),
+          );
+          return actions.has("movement") && actions.has("engagement");
+        },
+      );
+      const allRolePrayerPairsObserved = AGENT_IDS.every((agentId) => {
+        const roles = observedRolesByAgent.get(agentId)!;
+        const prayers = observedPrayersByAgent.get(agentId)!;
+        return (
+          ["melee", "ranged", "mage"].every((role) => roles.has(role)) &&
+          ["superhuman_strength", "hawk_eye", "mystic_lore"].every((prayerId) =>
+            prayers.has(prayerId),
+          )
+        );
+      });
+      if (bothControllersReachedExecutorBoundary && allRolePrayerPairsObserved)
+        break;
     }
     await Promise.all(
       AGENT_IDS.map((agentId) => prayerSystem.waitForPrayerIdle(agentId)),
     );
 
-    for (const diagnostic of scheduler.getCombatAIDiagnostics()) {
+    const finalCombatDiagnostics = scheduler.getCombatAIDiagnostics();
+    for (const diagnostic of finalCombatDiagnostics) {
       expect(diagnostic).toMatchObject({
-        combatRole: "ranged",
-        prayerToggleAttempts: 1,
-        prayerToggleCommits: 1,
+        prayerToggleAttempts: 7,
+        prayerToggleCommits: 7,
         prayerToggleRejects: 0,
+        successfulRoleSwitches: 3,
+        roleSwitchFailures: 0,
       });
-      expect(diagnostic.tickCount).toBeGreaterThanOrEqual(5);
+      expect(diagnostic.tickCount).toBeGreaterThanOrEqual(32);
     }
+    const finalRoleByAgent = new Map(
+      finalCombatDiagnostics.map((diagnostic) => [
+        diagnostic.characterId,
+        diagnostic.combatRole,
+      ]),
+    );
+    expect([...finalRoleByAgent.entries()]).toEqual([
+      [AGENT_IDS[0], "mage"],
+      [AGENT_IDS[1], "melee"],
+    ]);
+    const prayerForRole = (role: string | undefined): string =>
+      role === "mage"
+        ? "mystic_lore"
+        : role === "ranged"
+          ? "hawk_eye"
+          : "superhuman_strength";
     for (const agentId of AGENT_IDS) {
+      expect([...observedRolesByAgent.get(agentId)!].sort()).toEqual([
+        "mage",
+        "melee",
+        "ranged",
+      ]);
+      expect([...observedPrayersByAgent.get(agentId)!].sort()).toEqual([
+        "hawk_eye",
+        "mystic_lore",
+        "superhuman_strength",
+      ]);
       expect(prayerSystem.getPrayerCustody(agentId)).toMatchObject({
         pointUnits: STARTING_PRAYER_UNITS,
-        activePrayers: ["hawk_eye"],
+        activePrayers: [prayerForRole(finalRoleByAgent.get(agentId))],
       });
     }
     expect(
@@ -806,6 +1065,50 @@ describeDatabase("persisted AgentManager streaming duel cycle", () => {
         AGENT_IDS.map((attackerId) => expect.objectContaining({ attackerId })),
       ),
     );
+    await schedulerInternal.orchestrator.waitForPublicActionObservations();
+    expect([...injectedCompletionResponseLosses].sort()).toEqual([
+      "engagement",
+      "movement",
+    ]);
+    for (const action of ["movement", "engagement"] as const) {
+      const requestsByOperation = new Map<
+        string,
+        typeof executorCompletionRequests
+      >();
+      for (const request of executorCompletionRequests) {
+        if (request.publicActionObservation.action !== action) continue;
+        const requests = requestsByOperation.get(request.operationId) ?? [];
+        requests.push(request);
+        requestsByOperation.set(request.operationId, requests);
+      }
+      const reconciled = [...requestsByOperation.values()].filter(
+        (requests) => requests.length >= 2,
+      );
+      expect(reconciled.length).toBeGreaterThanOrEqual(1);
+      for (const exactRetries of reconciled) {
+        expect(exactRetries.length).toBeLessThanOrEqual(4);
+        for (const retry of exactRetries.slice(1)) {
+          expect(retry).toEqual(exactRetries[0]);
+        }
+      }
+    }
+    for (const agentId of AGENT_IDS) {
+      const observations = publicExecutorObservations.filter(
+        ({ actorId }) => actorId === agentId,
+      );
+      expect(observations).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            action: "movement",
+            outcome: "accepted",
+          }),
+          expect.objectContaining({
+            action: "engagement",
+            outcome: "accepted",
+          }),
+        ]),
+      );
+    }
 
     processDrainTicks(prayerSystem, 4);
     await Promise.all(
@@ -815,7 +1118,7 @@ describeDatabase("persisted AgentManager streaming duel cycle", () => {
     for (const agentId of AGENT_IDS) {
       expect(prayerSystem.getPrayerCustody(agentId)).toMatchObject({
         pointUnits: expectedAfterDrain,
-        activePrayers: ["hawk_eye"],
+        activePrayers: [prayerForRole(finalRoleByAgent.get(agentId))],
       });
     }
 
@@ -841,8 +1144,11 @@ describeDatabase("persisted AgentManager streaming duel cycle", () => {
     const persistedTerminal = await pool.query<{
       lifecycleStatus: string;
       terminalCancellationReason: string | null;
+      snapshotDigest: string;
+      snapshot: Record<string, unknown>;
     }>(
-      `SELECT "lifecycleStatus", "terminalCancellationReason"
+      `SELECT "lifecycleStatus", "terminalCancellationReason",
+              "snapshotDigest", snapshot
          FROM streaming_duel_competitive_snapshots
         WHERE "cycleId" = $1`,
       [announcement!.cycleId],
@@ -851,6 +1157,26 @@ describeDatabase("persisted AgentManager streaming duel cycle", () => {
       {
         lifecycleStatus: "retired",
         terminalCancellationReason: "operator_cancelled",
+        snapshotDigest: frozenSnapshotDigest,
+        snapshot: frozenSnapshot,
+      },
+    ]);
+    const terminalTransition = await pool.query<{
+      snapshotDigest: string | null;
+      terminalOutcome: string | null;
+      reason: string | null;
+    }>(
+      `SELECT "snapshotDigest", "terminalOutcome", reason
+         FROM streaming_duel_transition_events
+        WHERE "cycleId" = $1
+          AND "eventType" = 'terminal_committed'`,
+      [announcement!.cycleId],
+    );
+    expect(terminalTransition.rows).toEqual([
+      {
+        snapshotDigest: frozenSnapshotDigest,
+        terminalOutcome: "cancelled",
+        reason: "operator_cancelled",
       },
     ]);
 
@@ -879,12 +1205,26 @@ describeDatabase("persisted AgentManager streaming duel cycle", () => {
       playerId: string;
       operationType: string;
       id: string;
+      completed: boolean;
       transition: string | null;
+      executorAction: string | null;
+      executorOutcome: string | null;
+      publicActionValue: string | null;
+      operationVersion: number | null;
+      decisionOutcome: string | null;
+      decisionLatencyMs: number | null;
     }>(
       `SELECT "playerId",
               "operationType",
               id,
-              "operationState"->>'transition' AS transition
+              completed,
+              "operationState"->>'transition' AS transition,
+              "operationState"->'publicActionObservation'->>'action' AS "executorAction",
+              "operationState"->>'outcome' AS "executorOutcome",
+              "operationState"->'publicActionObservation'->>'value' AS "publicActionValue",
+              ("operationState"->>'version')::int AS "operationVersion",
+              "operationState"->'recoveryEvidence'->>'decisionOutcome' AS "decisionOutcome",
+              ("operationState"->'recoveryEvidence'->>'decisionLatencyMs')::int AS "decisionLatencyMs"
          FROM operations_log
         WHERE "playerId" = ANY($1::text[])
         ORDER BY "playerId", timestamp, id`,
@@ -894,11 +1234,36 @@ describeDatabase("persisted AgentManager streaming duel cycle", () => {
       const operations = operationEvidence.rows.filter(
         (row) => row.playerId === agentId,
       );
-      expect(
-        operations.filter(
-          (row) => row.operationType === "duel_preparation_plan",
-        ),
-      ).toHaveLength(1);
+      const planOperations = operations.filter(
+        (row) => row.operationType === "duel_preparation_plan",
+      );
+      expect(planOperations).toEqual([
+        expect.objectContaining({
+          completed: true,
+          operationVersion: 3,
+          decisionOutcome: "deterministic_runtime_unavailable",
+          decisionLatencyMs: expect.any(Number),
+        }),
+      ]);
+      expect(planOperations[0]!.decisionLatencyMs).toBeGreaterThanOrEqual(0);
+      expect(planOperations[0]!.decisionLatencyMs).toBeLessThanOrEqual(10_000);
+      const executorOperations = operations.filter(
+        (row) => row.operationType === "streaming_duel_executor_command",
+      );
+      expect(executorOperations).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            completed: true,
+            executorAction: "movement",
+            executorOutcome: "accepted",
+          }),
+          expect.objectContaining({
+            completed: true,
+            executorAction: "engagement",
+            executorOutcome: "accepted",
+          }),
+        ]),
+      );
       const drainOperations = operations.filter(
         (row) =>
           row.operationType === "prayer_state_transition" &&
@@ -911,19 +1276,147 @@ describeDatabase("persisted AgentManager streaming duel cycle", () => {
       expect(new Set(drainOperations.map((row) => row.id)).size).toBe(
         drainOperations.length,
       );
-      expect(operations).toEqual(
+      const toggleOperations = operations.filter(
+        (row) =>
+          row.operationType === "prayer_state_transition" &&
+          row.transition === "toggle",
+      );
+      expect(toggleOperations).toHaveLength(7);
+      expect(
+        [
+          ...new Set(toggleOperations.map((row) => row.publicActionValue)),
+        ].sort(),
+      ).toEqual(["hawk_eye", "mystic_lore", "superhuman_strength"]);
+      const deactivateAllOperations = operations.filter(
+        (row) =>
+          row.operationType === "prayer_state_transition" &&
+          row.transition === "deactivate_all",
+      );
+      expect(deactivateAllOperations).toHaveLength(2);
+      expect(
+        deactivateAllOperations.some((row) =>
+          row.id.startsWith("market-freeze-prayer:"),
+        ),
+      ).toBe(true);
+      expect(deactivateAllOperations).toEqual(
         expect.arrayContaining([
           expect.objectContaining({
-            operationType: "prayer_state_transition",
-            transition: "toggle",
-          }),
-          expect.objectContaining({
             id: `duel-prayer-teardown:${announcement!.cycleId}:${agentId}`,
-            operationType: "prayer_state_transition",
-            transition: "deactivate_all",
           }),
         ]),
       );
+      const roleSwitchOperations = operations.filter(
+        (row) => row.operationType === "combat_loadout_switch",
+      );
+      expect(roleSwitchOperations).toHaveLength(3);
+      expect(
+        [
+          ...new Set(roleSwitchOperations.map((row) => row.publicActionValue)),
+        ].sort(),
+      ).toEqual(["mage", "melee", "ranged"]);
+    }
+
+    const durableExecutorObservations = await pool.query<{
+      operationId: string;
+      actorId: string;
+      action: string;
+      outcome: string;
+    }>(
+      `SELECT "operationId",
+              "actorId",
+              action,
+              observation->>'outcome' AS outcome
+         FROM streaming_duel_action_observations
+        WHERE "cycleId" = $1
+          AND action IN ('movement', 'engagement')
+        ORDER BY sequence`,
+      [announcement!.cycleId],
+    );
+    const executorOperations = operationEvidence.rows.filter(
+      (row) => row.operationType === "streaming_duel_executor_command",
+    );
+    expect(
+      durableExecutorObservations.rows
+        .map((row) => ({
+          operationId: row.operationId,
+          actorId: row.actorId,
+          action: row.action,
+          outcome: row.outcome,
+        }))
+        .sort((left, right) =>
+          left.operationId.localeCompare(right.operationId),
+        ),
+    ).toEqual(
+      executorOperations
+        .map((row) => ({
+          operationId: row.id,
+          actorId: row.playerId,
+          action: row.executorAction,
+          outcome: row.executorOutcome,
+        }))
+        .sort((left, right) =>
+          left.operationId.localeCompare(right.operationId),
+        ),
+    );
+
+    const durableRolePrayerObservations = await pool.query<{
+      operationId: string;
+      actorId: string;
+      action: string;
+      outcome: string;
+      value: string;
+    }>(
+      `SELECT "operationId",
+              "actorId",
+              action,
+              observation->>'outcome' AS outcome,
+              observation->>'value' AS value
+         FROM streaming_duel_action_observations
+        WHERE "cycleId" = $1
+          AND action IN ('prayer', 'role_switch')
+        ORDER BY sequence`,
+      [announcement!.cycleId],
+    );
+    for (const agentId of AGENT_IDS) {
+      const observations = durableRolePrayerObservations.rows.filter(
+        (row) => row.actorId === agentId,
+      );
+      expect(
+        observations.filter((row) => row.action === "prayer"),
+      ).toHaveLength(7);
+      expect(
+        [
+          ...new Set(
+            observations
+              .filter((row) => row.action === "prayer")
+              .map((row) => row.value),
+          ),
+        ].sort(),
+      ).toEqual(["hawk_eye", "mystic_lore", "superhuman_strength"]);
+      expect(
+        observations
+          .filter((row) => row.action === "role_switch")
+          .map((row) => row.value)
+          .sort(),
+      ).toEqual(["mage", "melee", "ranged"]);
+      expect(observations.every((row) => row.outcome === "committed")).toBe(
+        true,
+      );
+    }
+    for (const observation of durableRolePrayerObservations.rows) {
+      const operation = operationEvidence.rows.find(
+        (row) => row.id === observation.operationId,
+      );
+      expect(operation).toMatchObject({
+        playerId: observation.actorId,
+        operationType:
+          observation.action === "prayer"
+            ? "prayer_state_transition"
+            : "combat_loadout_switch",
+        completed: true,
+        executorAction: observation.action,
+        publicActionValue: observation.value,
+      });
     }
 
     const conservedItems = await pool.query<{
@@ -954,33 +1447,52 @@ describeDatabase("persisted AgentManager streaming duel cycle", () => {
       [AGENT_IDS],
     );
     for (const agentId of AGENT_IDS) {
-      expect(
-        conservedItems.rows.filter((row) => row.playerId === agentId),
-      ).toEqual([
+      const rows = conservedItems.rows.filter(
+        (row) => row.playerId === agentId,
+      );
+      const totals = Object.fromEntries(
+        [...new Set(rows.map((row) => row.itemId))]
+          .sort()
+          .map((itemId) => [
+            itemId,
+            rows
+              .filter((row) => row.itemId === itemId)
+              .reduce((total, row) => total + row.quantity, 0),
+          ]),
+      );
+      expect(totals).toEqual({
+        bronze_arrow: 100,
+        bronze_longsword: 1,
+        fire_rune: 60,
+        lobster: 4,
+        mind_rune: 20,
+        shortbow: 1,
+        staff_of_air: 1,
+      });
+      const finalRole = finalRoleByAgent.get(agentId);
+      const expectedWeapon =
+        finalRole === "mage"
+          ? "staff_of_air"
+          : finalRole === "ranged"
+            ? "shortbow"
+            : "bronze_longsword";
+      expect(rows.filter((row) => row.custody === "equipment")).toEqual([
         {
           playerId: agentId,
-          itemId: "bronze_arrow",
-          quantity: 50,
-          custody: "bank",
-        },
-        {
-          playerId: agentId,
-          itemId: "bronze_arrow",
-          quantity: 50,
-          custody: "equipment",
-        },
-        {
-          playerId: agentId,
-          itemId: "shortbow",
+          itemId: expectedWeapon,
           quantity: 1,
           custody: "equipment",
         },
-        {
-          playerId: agentId,
-          itemId: "lobster",
-          quantity: 4,
-          custody: "inventory",
-        },
+        ...(finalRole === "ranged"
+          ? [
+              {
+                playerId: agentId,
+                itemId: "bronze_arrow",
+                quantity: 50,
+                custody: "equipment",
+              },
+            ]
+          : []),
       ]);
     }
   }, 60_000);

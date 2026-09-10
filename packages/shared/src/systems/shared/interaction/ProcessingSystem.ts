@@ -23,6 +23,11 @@ import {
   getRandomFireDuration,
 } from "../entities/processing/FiremakingCalculator";
 import { canPlayerPerformPreparationAction } from "./ProcessingStationAuthority";
+import {
+  clearProcessingInteractionPresentation,
+  publishProcessingInteractionPresentation,
+} from "./ProcessingInteractionPresentation";
+import type { PlayerProcessingQuiescenceSystem } from "./ProcessingQuiescence";
 
 /**
  * Processing System
@@ -52,9 +57,15 @@ import type {
 } from "../character/InventorySystem";
 import type {
   ActiveProcessingFire,
+  ProcessingFireExtinguishCommitReceipt,
+  ProcessingFireExtinguishCommitRequest,
   ProcessingActionFireEffectRequest,
 } from "../../../types/network/database";
 import type { DatabaseSystem } from "../../../types/systems/system-interfaces";
+import {
+  getProcessingFireExtinguishOperationId,
+  serializeProcessingFireExtinguishFingerprint,
+} from "../../../utils/game/ProcessingFireExtinguishRegistration";
 
 interface RuntimeProcessingAction extends ProcessingAction {
   sourceType?: "fire" | "range";
@@ -87,7 +98,16 @@ interface PendingProcessingCommit {
   state: "in_flight" | "retry_wait" | "settled";
   receipt: AtomicProcessingActionReceipt | null;
   disconnected: boolean;
+  presentationCancelled: boolean;
   requestId?: string;
+}
+
+interface PendingFireExpirySettlement {
+  effect: ActiveProcessingFire;
+  retryCount: number;
+  retryAt: number;
+  state: "in_flight" | "retry_wait" | "blocked";
+  lastError: string;
 }
 
 interface CookingRangeLike {
@@ -103,8 +123,47 @@ interface CookingRangeLike {
  * Should be false in production for performance.
  */
 const DEBUG_PROCESSING = false;
+const ASH_SOURCE_LIFETIME_MS = 120_000;
+const FIRE_EXPIRY_RETRY_BASE_MS = 1_000;
+const FIRE_EXPIRY_RETRY_MAX_MS = 60_000;
 
-export class ProcessingSystem extends SystemBase {
+async function sha256Hex(value: string): Promise<string> {
+  const subtle = globalThis.crypto?.subtle;
+  if (!subtle) throw new Error("web_crypto_unavailable");
+  const digest = await subtle.digest(
+    "SHA-256",
+    new TextEncoder().encode(value),
+  );
+  return [...new Uint8Array(digest)]
+    .map((byte) => byte.toString(16).padStart(2, "0"))
+    .join("");
+}
+
+function isDefinitiveFireExtinguishError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return [
+    "processing_fire_extinguish_request_invalid",
+    "processing_fire_extinguish_fire_mismatch",
+    "processing_fire_extinguish_operation_id_conflict",
+    "processing_fire_extinguish_state_conflict",
+    "processing_fire_extinguish_source_preexisting",
+    "processing_fire_extinguish_source_receipt_invalid",
+    "processing_fire_extinguish_receipt_invalid",
+    "processing_fire_extinguish_source_authority_unavailable",
+    "processing_fire_extinguish_database_authority_incomplete",
+    "processing_fire_extinguish_source_plan_unavailable",
+    "processing_fire_extinguish_diagnostic_source_rejected",
+    "ground_item_source_request_invalid",
+    "ground_item_source_contribution_id_conflict",
+    "ground_item_source_quantity_overflow",
+    "ground_item_source_lifetime_overflow",
+  ].some((code) => message.includes(code));
+}
+
+export class ProcessingSystem
+  extends SystemBase
+  implements PlayerProcessingQuiescenceSystem
+{
   // Fire visual constants
   private static readonly FIRE_MODEL_SCALE = 0.35;
 
@@ -112,8 +171,15 @@ export class ProcessingSystem extends SystemBase {
   private static readonly FIRE_PLACEHOLDER_Y_OFFSET = 0.4;
 
   private activeFires = new Map<string, Fire>();
+  /** Host-clock deadline derived from the database-observed remaining duration. */
+  private readonly fireLocalExpiryDeadlines = new Map<string, number>();
   private activeProcessing = new Map<string, RuntimeProcessingAction>();
   private readonly pendingCommits = new Map<string, PendingProcessingCommit>();
+  /** Runtime expiry ambiguity remains owned until it commits or is operator-blocked. */
+  private readonly pendingFireExpirySettlements = new Map<
+    string,
+    PendingFireExpirySettlement
+  >();
   /** Fire tiles stay reserved from the first lighting frame through commit settlement. */
   private readonly reservedFireTiles = new Map<string, string>();
   private fireCleanupTimers = new Map<string, NodeJS.Timeout>();
@@ -262,6 +328,19 @@ export class ProcessingSystem extends SystemBase {
       EventType.PLAYER_UNREGISTERED,
       (data: { playerId: string }) => this.cleanupPlayer({ id: data.playerId }),
     );
+    this.subscribe<{
+      playerId: string;
+      targetPosition: { x: number; y: number; z: number };
+    }>(EventType.MOVEMENT_CLICK_TO_MOVE, (data) => {
+      this.cancelPendingProcessingPresentation(data.playerId);
+    });
+    this.subscribe(
+      EventType.COMBAT_STARTED,
+      (data: { attackerId: string; targetId: string }) => {
+        this.cancelPendingProcessingPresentation(data.attackerId);
+        this.cancelPendingProcessingPresentation(data.targetId);
+      },
+    );
     // Listen for test event to extinguish fires early for testing
     this.subscribe(
       EventType.TEST_FIRE_EXTINGUISH,
@@ -328,6 +407,11 @@ export class ProcessingSystem extends SystemBase {
             return;
           }
           const existing = this.activeFires.get(data.fireId);
+          const remainingMs = expiresAt - serverObservedAt;
+          this.fireLocalExpiryDeadlines.set(
+            data.fireId,
+            Date.now() + remainingMs,
+          );
           if (existing?.isActive) {
             existing.createdAt = createdAt;
             existing.duration = expiresAt - createdAt;
@@ -408,7 +492,16 @@ export class ProcessingSystem extends SystemBase {
     const effects = await database.getActiveProcessingFiresAsync();
     let restored = 0;
     for (const effect of effects) {
-      if (this.registerActiveFire(effect)) restored++;
+      const observedAt =
+        Number.isSafeInteger(effect.databaseObservedAt) &&
+        effect.databaseObservedAt! >= 0
+          ? effect.databaseObservedAt!
+          : Date.now();
+      if (effect.expiresAt <= observedAt) {
+        await this.settleFireExpiry(effect, true);
+      } else if (this.registerActiveFire(effect, observedAt)) {
+        restored++;
+      }
     }
     if (restored > 0) {
       Logger.system("ProcessingSystem", "active_fires_restored", { restored });
@@ -419,9 +512,11 @@ export class ProcessingSystem extends SystemBase {
    * Register one authoritative fire idempotently and schedule only its remaining
    * lifetime. Server recovery does not replay XP, movement, inventory, or UI.
    */
-  private registerActiveFire(effect: ActiveProcessingFire): Fire | null {
-    const now = Date.now();
-    if (effect.expiresAt <= now) return null;
+  private registerActiveFire(
+    effect: ActiveProcessingFire,
+    observedAt = Date.now(),
+  ): Fire | null {
+    if (effect.expiresAt <= observedAt) return null;
     const existing = this.activeFires.get(effect.fireId);
     if (existing?.isActive) return existing;
     const fire: Fire = {
@@ -433,13 +528,12 @@ export class ProcessingSystem extends SystemBase {
       isActive: true,
     };
     this.activeFires.set(fire.id, fire);
+    const remainingMs = Math.max(1, effect.expiresAt - observedAt);
+    this.fireLocalExpiryDeadlines.set(fire.id, Date.now() + remainingMs);
     this.createFireVisual(fire);
-    const cleanupTimer = setTimeout(
-      () => {
-        void this.extinguishFire(fire.id);
-      },
-      Math.max(1, effect.expiresAt - now),
-    );
+    const cleanupTimer = setTimeout(() => {
+      void this.extinguishFire(fire.id);
+    }, remainingMs);
     this.fireCleanupTimers.set(fire.id, cleanupTimer);
     return fire;
   }
@@ -820,6 +914,11 @@ export class ProcessingSystem extends SystemBase {
     processingAction.requestId = requestId;
 
     this.activeProcessing.set(playerId, processingAction);
+    publishProcessingInteractionPresentation(this.world, {
+      playerId,
+      skill: "firemaking",
+      targetPosition: startPosition,
+    });
     this.reportProcessingRequestProgress(
       playerId,
       requestId,
@@ -933,6 +1032,7 @@ export class ProcessingSystem extends SystemBase {
     },
   ): void {
     this.activeProcessing.delete(playerId);
+    clearProcessingInteractionPresentation(this.world, playerId, "firemaking");
     this.releaseFireReservation(playerId, action.startPosition);
     this.releaseAction(action);
     this.resetPlayerEmote(playerId);
@@ -966,6 +1066,11 @@ export class ProcessingSystem extends SystemBase {
       !this.isFireTileAvailable(playerId, position)
     ) {
       this.releaseFireReservation(playerId, position);
+      clearProcessingInteractionPresentation(
+        this.world,
+        playerId,
+        "firemaking",
+      );
       this.releaseAction(action);
       this.resetPlayerEmote(playerId);
       this.emitTypedEvent(EventType.FIRE_LIGHTING_CANCELLED, { playerId });
@@ -1008,6 +1113,7 @@ export class ProcessingSystem extends SystemBase {
       state: "in_flight",
       receipt: null,
       disconnected: false,
+      presentationCancelled: false,
       requestId: action.requestId,
     };
     this.pendingCommits.set(playerId, pending);
@@ -1018,6 +1124,11 @@ export class ProcessingSystem extends SystemBase {
     pending: PendingProcessingCommit,
     receipt: Extract<AtomicProcessingActionReceipt, { ok: true }>,
   ): void {
+    clearProcessingInteractionPresentation(
+      this.world,
+      pending.playerId,
+      "firemaking",
+    );
     const effect = receipt.worldEffect;
     if (
       !effect ||
@@ -1059,14 +1170,6 @@ export class ProcessingSystem extends SystemBase {
       ...(pending.requestId ? { requestId: pending.requestId } : {}),
     });
 
-    if (receipt.awardedXp > 0) {
-      this.emitTypedEvent(EventType.SKILLS_XP_GAINED, {
-        playerId: pending.playerId,
-        skill: "firemaking",
-        amount: receipt.awardedXp,
-      });
-    }
-
     Logger.system("ProcessingSystem", "firemaking_complete", {
       playerId: pending.playerId,
       operationId: pending.operationId,
@@ -1076,7 +1179,7 @@ export class ProcessingSystem extends SystemBase {
       xpAwarded: receipt.awardedXp,
     });
 
-    if (!pending.disconnected) {
+    if (!pending.disconnected && !pending.presentationCancelled) {
       this.resetPlayerEmote(pending.playerId);
       const moveTarget = this.findFiremakingMoveTarget(pending.firePosition);
       if (moveTarget) {
@@ -1164,6 +1267,15 @@ export class ProcessingSystem extends SystemBase {
     } catch {
       return false;
     }
+  }
+
+  private getCookingSourcePosition(
+    sourceId: string,
+    sourceType: "fire" | "range",
+  ): FinitePosition | null {
+    return sourceType === "fire"
+      ? this.getFiniteEntityPosition(this.activeFires.get(sourceId))
+      : this.getFiniteEntityPosition(this.world.entities.get(sourceId));
   }
 
   private startCooking(data: {
@@ -1410,6 +1522,11 @@ export class ProcessingSystem extends SystemBase {
     processingAction.requestId = requestId;
 
     this.activeProcessing.set(playerId, processingAction);
+    publishProcessingInteractionPresentation(this.world, {
+      playerId,
+      skill: "cooking",
+      targetPosition: this.getCookingSourcePosition(sourceId, sourceType),
+    });
     this.reportProcessingRequestProgress(
       playerId,
       requestId,
@@ -1463,6 +1580,7 @@ export class ProcessingSystem extends SystemBase {
       !this.isAuthorizedCookingSource(playerId, sourceId, sourceType)
     ) {
       this.releaseAction(action);
+      clearProcessingInteractionPresentation(this.world, playerId, "cooking");
       this.resetPlayerEmote(playerId);
       this.emitTypedEvent(EventType.UI_MESSAGE, {
         playerId,
@@ -1512,6 +1630,7 @@ export class ProcessingSystem extends SystemBase {
       state: "in_flight",
       receipt: null,
       disconnected: false,
+      presentationCancelled: false,
       requestId: action.requestId,
     };
     this.pendingCommits.set(playerId, pending);
@@ -1531,6 +1650,7 @@ export class ProcessingSystem extends SystemBase {
   ): void {
     if (!this.isAuthorizedCookingSource(playerId, sourceId, sourceType)) {
       this.resetPlayerEmote(playerId);
+      clearProcessingInteractionPresentation(this.world, playerId, "cooking");
       return;
     }
 
@@ -1539,6 +1659,7 @@ export class ProcessingSystem extends SystemBase {
     if (nextSlot === -1) {
       // No more cookable items - cooking complete, reset emote
       this.resetPlayerEmote(playerId);
+      clearProcessingInteractionPresentation(this.world, playerId, "cooking");
       return;
     }
 
@@ -1699,6 +1820,19 @@ export class ProcessingSystem extends SystemBase {
         continue;
       }
 
+      if (receipt.xpAmount > 0) {
+        this.emitTypedEvent(EventType.SKILLS_PROGRESS_COMMITTED, {
+          playerId: receipt.playerId,
+          operationId: receipt.operationId,
+          replayed: receipt.replayed,
+          skill: receipt.skill,
+          xpAmount: receipt.xpAmount,
+          awardedXp: receipt.awardedXp,
+          operationCommittedXp: receipt.operationCommittedXp,
+          currentXp: receipt.currentXp,
+          currentLevel: receipt.currentLevel,
+        });
+      }
       this.pendingCommits.delete(pending.playerId);
       if (pending.kind === "firemaking") {
         this.createCommittedFire(pending, receipt);
@@ -1714,6 +1848,11 @@ export class ProcessingSystem extends SystemBase {
     reason: string,
   ): void {
     this.pendingCommits.delete(pending.playerId);
+    clearProcessingInteractionPresentation(
+      this.world,
+      pending.playerId,
+      pending.kind,
+    );
     if (pending.kind === "firemaking") {
       this.releaseFireReservation(
         pending.playerId,
@@ -1732,7 +1871,7 @@ export class ProcessingSystem extends SystemBase {
       reason,
     });
     this.finishProcessingRequest(pending.requestId);
-    if (pending.disconnected) return;
+    if (pending.disconnected || pending.presentationCancelled) return;
     this.resetPlayerEmote(pending.playerId);
     const message =
       reason === "inventory_full"
@@ -1772,13 +1911,6 @@ export class ProcessingSystem extends SystemBase {
     receipt: Extract<AtomicProcessingActionReceipt, { ok: true }>,
   ): void {
     if (!pending.outputItemId) return;
-    if (receipt.awardedXp > 0) {
-      this.emitTypedEvent(EventType.SKILLS_XP_GAINED, {
-        playerId: pending.playerId,
-        skill: "cooking",
-        amount: receipt.awardedXp,
-      });
-    }
     this.finishProcessingRequest(pending.requestId);
     this.emitTypedEvent(EventType.COOKING_COMPLETED, {
       playerId: pending.playerId,
@@ -1804,23 +1936,33 @@ export class ProcessingSystem extends SystemBase {
 
     if (pending.disconnected) return;
     const foodName = pending.inputItemId.replace(/^raw_/, "");
-    this.emitTypedEvent(EventType.UI_MESSAGE, {
-      playerId: pending.playerId,
-      message: pending.didBurn
-        ? `You accidentally burn the ${foodName}.`
-        : `You roast a ${foodName}.`,
-      type: pending.didBurn ? "warning" : "success",
-    });
+    if (!pending.presentationCancelled) {
+      this.emitTypedEvent(EventType.UI_MESSAGE, {
+        playerId: pending.playerId,
+        message: pending.didBurn
+          ? `You accidentally burn the ${foodName}.`
+          : `You roast a ${foodName}.`,
+        type: pending.didBurn ? "warning" : "success",
+      });
+    }
     if (!receipt.liveInventoryApplied) {
-      this.resetPlayerEmote(pending.playerId);
+      if (!pending.presentationCancelled) {
+        this.resetPlayerEmote(pending.playerId);
+      }
       this.emitTypedEvent(EventType.UI_MESSAGE, {
         playerId: pending.playerId,
         message:
           "The cooking result is safely recorded, but your live inventory needs to resynchronize.",
         type: "warning",
       });
+      clearProcessingInteractionPresentation(
+        this.world,
+        pending.playerId,
+        "cooking",
+      );
       return;
     }
+    if (pending.presentationCancelled) return;
     if (!pending.requestId && pending.sourceId && pending.sourceType) {
       this.tryAutoCookNext(
         pending.playerId,
@@ -1830,6 +1972,11 @@ export class ProcessingSystem extends SystemBase {
       );
     } else {
       this.resetPlayerEmote(pending.playerId);
+      clearProcessingInteractionPresentation(
+        this.world,
+        pending.playerId,
+        "cooking",
+      );
     }
   }
 
@@ -1840,6 +1987,11 @@ export class ProcessingSystem extends SystemBase {
     retryWaiting: number;
     reservedFireTiles: number;
     maxRetryCount: number;
+    pendingFireExpiries: number;
+    fireExpiryInFlight: number;
+    fireExpiryRetryWaiting: number;
+    fireExpiryBlocked: number;
+    maxFireExpiryRetryCount: number;
   } {
     let inFlight = 0;
     let retryWaiting = 0;
@@ -1849,6 +2001,19 @@ export class ProcessingSystem extends SystemBase {
       if (pending.state === "retry_wait") retryWaiting++;
       maxRetryCount = Math.max(maxRetryCount, pending.retryCount);
     }
+    let fireExpiryInFlight = 0;
+    let fireExpiryRetryWaiting = 0;
+    let fireExpiryBlocked = 0;
+    let maxFireExpiryRetryCount = 0;
+    for (const pending of this.pendingFireExpirySettlements.values()) {
+      if (pending.state === "in_flight") fireExpiryInFlight++;
+      if (pending.state === "retry_wait") fireExpiryRetryWaiting++;
+      if (pending.state === "blocked") fireExpiryBlocked++;
+      maxFireExpiryRetryCount = Math.max(
+        maxFireExpiryRetryCount,
+        pending.retryCount,
+      );
+    }
     return {
       activeActions: this.activeProcessing.size,
       pendingCommits: this.pendingCommits.size,
@@ -1856,6 +2021,11 @@ export class ProcessingSystem extends SystemBase {
       retryWaiting,
       reservedFireTiles: this.reservedFireTiles.size,
       maxRetryCount,
+      pendingFireExpiries: this.pendingFireExpirySettlements.size,
+      fireExpiryInFlight,
+      fireExpiryRetryWaiting,
+      fireExpiryBlocked,
+      maxFireExpiryRetryCount,
     };
   }
 
@@ -2135,6 +2305,7 @@ export class ProcessingSystem extends SystemBase {
     }
 
     this.activeFires.delete(fireId);
+    this.fireLocalExpiryDeadlines.delete(fireId);
 
     // cleanup timer
     clearTimeout(this.fireCleanupTimers.get(fireId));
@@ -2147,38 +2318,251 @@ export class ProcessingSystem extends SystemBase {
     const fire = this.removeFireLocally(fireId);
     if (!fire || this.world.isClient || this.destroyed) return;
 
-    let ownsOneTimeEffects = true;
-    const database = this.getDatabaseSystem();
-    if (database?.markProcessingFireExtinguishedAsync) {
-      try {
-        ownsOneTimeEffects =
-          await database.markProcessingFireExtinguishedAsync(fireId);
-      } catch (error) {
-        ownsOneTimeEffects = false;
-        Logger.systemError(
-          "ProcessingSystem",
-          `Failed to durably extinguish fire ${fireId}: ${String(error)}`,
-        );
-      }
-    }
-
-    // Only the process that wins the durable transition may create one-time loot.
-    if (ownsOneTimeEffects) {
-      const groundItems =
-        this.world.getSystem<GroundItemSystem>("ground-items");
-      groundItems?.spawnGroundItem("ashes", 1, fire.position, {
-        despawnTime: 120000,
-      });
-    }
-
     // Every hosting process tells its own clients to remove the visual.
     this.emitTypedEvent(EventType.FIRE_EXTINGUISHED, {
       fireId,
     });
+
+    this.launchFireExpirySettlement({
+      kind: "fire",
+      fireId: fire.id,
+      playerId: fire.playerId,
+      position: { ...fire.position },
+      tile: worldToTile(fire.position.x, fire.position.z),
+      createdAt: fire.createdAt,
+      expiresAt: fire.createdAt + fire.duration,
+    });
+  }
+
+  /**
+   * Own one runtime expiry until its exact database operation settles. The
+   * visual fire is already gone; this queue protects the durable fire/ash
+   * transition from disappearing after a bounded response-loss retry window.
+   */
+  private launchFireExpirySettlement(effect: ActiveProcessingFire): void {
+    if (this.destroyed || this.world.isClient) return;
+    const existing = this.pendingFireExpirySettlements.get(effect.fireId);
+    if (existing?.state === "in_flight" || existing?.state === "blocked") {
+      return;
+    }
+    this.pendingFireExpirySettlements.set(effect.fireId, {
+      effect: {
+        ...effect,
+        position: { ...effect.position },
+        tile: { ...effect.tile },
+      },
+      retryCount: existing?.retryCount ?? 0,
+      retryAt: Date.now(),
+      state: "in_flight",
+      lastError: existing?.lastError ?? "",
+    });
+    void this.settleFireExpiry(effect, false);
+  }
+
+  private scheduleFireExpiryRetry(
+    effect: ActiveProcessingFire,
+    error: unknown,
+  ): void {
+    if (this.destroyed) return;
+    const previous = this.pendingFireExpirySettlements.get(effect.fireId);
+    const retryCount = (previous?.retryCount ?? 0) + 1;
+    const delay = Math.min(
+      FIRE_EXPIRY_RETRY_BASE_MS * 2 ** Math.min(retryCount - 1, 30),
+      FIRE_EXPIRY_RETRY_MAX_MS,
+    );
+    this.pendingFireExpirySettlements.set(effect.fireId, {
+      effect: previous?.effect ?? {
+        ...effect,
+        position: { ...effect.position },
+        tile: { ...effect.tile },
+      },
+      retryCount,
+      retryAt: Date.now() + delay,
+      state: "retry_wait",
+      lastError: error instanceof Error ? error.message : String(error),
+    });
+    Logger.system("ProcessingSystem", "fire_expiry_reconciliation_scheduled", {
+      fireId: effect.fireId,
+      operationId: getProcessingFireExtinguishOperationId(effect.fireId),
+      retryCount,
+      retryInMs: delay,
+    });
+  }
+
+  private processPendingFireExpirySettlements(now: number): void {
+    for (const pending of this.pendingFireExpirySettlements.values()) {
+      if (pending.state !== "retry_wait" || pending.retryAt > now) continue;
+      this.launchFireExpirySettlement(pending.effect);
+    }
+  }
+
+  private async settleFireExpiry(
+    effect: ActiveProcessingFire,
+    failStartup: boolean,
+  ): Promise<void> {
+    const groundItems = this.world.getSystem<GroundItemSystem>("ground-items");
+    const database = this.getDatabaseSystem();
+    try {
+      if (!groundItems) {
+        throw new Error(
+          "processing_fire_extinguish_source_authority_unavailable",
+        );
+      }
+      if (!database) {
+        const sourceId = await groundItems.spawnGroundItem(
+          "ashes",
+          1,
+          effect.position,
+          { despawnTime: ASH_SOURCE_LIFETIME_MS },
+        );
+        if (!sourceId) {
+          throw new Error(
+            "processing_fire_extinguish_diagnostic_source_rejected",
+          );
+        }
+        return;
+      }
+      if (!database.commitProcessingFireExtinguishOperationAsync) {
+        throw new Error(
+          "processing_fire_extinguish_database_authority_incomplete",
+        );
+      }
+      const source = await groundItems.prepareDurableSourceRegistration(
+        "ashes",
+        1,
+        effect.position,
+        { despawnTime: ASH_SOURCE_LIFETIME_MS },
+      );
+      if (!source) {
+        throw new Error("processing_fire_extinguish_source_plan_unavailable");
+      }
+      const identity = {
+        operationId: getProcessingFireExtinguishOperationId(effect.fireId),
+        fireId: effect.fireId,
+        playerId: effect.playerId,
+        position: { ...effect.position },
+        expiresAt: effect.expiresAt,
+      };
+      const request: ProcessingFireExtinguishCommitRequest = {
+        ...identity,
+        requestFingerprint: await sha256Hex(
+          serializeProcessingFireExtinguishFingerprint(identity),
+        ),
+        source,
+      };
+      const receipt = await this.commitFireExpiryWithExactRetry(
+        request.operationId,
+        () => database.commitProcessingFireExtinguishOperationAsync!(request),
+      );
+      this.assertFireExtinguishReceipt(request, receipt);
+      try {
+        const exposed = await groundItems.exposeCommittedDurableSource(
+          receipt.source,
+        );
+        if (!exposed) {
+          Logger.systemError(
+            "ProcessingSystem",
+            `Ash source ${receipt.source.sourceId} committed with deferred presentation`,
+          );
+        }
+      } catch (error) {
+        Logger.systemError(
+          "ProcessingSystem",
+          `Ash source ${receipt.source.sourceId} committed but presentation failed: ${String(error)}`,
+        );
+      }
+      if (!failStartup) {
+        this.pendingFireExpirySettlements.delete(effect.fireId);
+      }
+    } catch (error) {
+      Logger.systemError(
+        "ProcessingSystem",
+        `Failed to atomically extinguish fire ${effect.fireId}: ${String(error)}`,
+      );
+      if (failStartup) throw error;
+      if (isDefinitiveFireExtinguishError(error)) {
+        const previous = this.pendingFireExpirySettlements.get(effect.fireId);
+        this.pendingFireExpirySettlements.set(effect.fireId, {
+          effect: previous?.effect ?? {
+            ...effect,
+            position: { ...effect.position },
+            tile: { ...effect.tile },
+          },
+          retryCount: previous?.retryCount ?? 0,
+          retryAt: Number.POSITIVE_INFINITY,
+          state: "blocked",
+          lastError: error instanceof Error ? error.message : String(error),
+        });
+      } else {
+        this.scheduleFireExpiryRetry(effect, error);
+      }
+    } finally {
+      if (failStartup) {
+        this.emitTypedEvent(EventType.FIRE_EXTINGUISHED, {
+          fireId: effect.fireId,
+        });
+      }
+    }
+  }
+
+  private assertFireExtinguishReceipt(
+    request: ProcessingFireExtinguishCommitRequest,
+    receipt: ProcessingFireExtinguishCommitReceipt,
+  ): void {
+    const source = receipt.sourceRequest;
+    if (
+      receipt.operationId !== request.operationId ||
+      receipt.fireId !== request.fireId ||
+      receipt.playerId !== request.playerId ||
+      receipt.requestFingerprint !== request.requestFingerprint ||
+      typeof receipt.replayed !== "boolean" ||
+      JSON.stringify(receipt.position) !== JSON.stringify(request.position) ||
+      receipt.expiresAt !== request.expiresAt ||
+      !Number.isSafeInteger(receipt.extinguishedAt) ||
+      receipt.extinguishedAt < receipt.expiresAt ||
+      !source ||
+      source.itemId !== "ashes" ||
+      source.quantity !== 1 ||
+      source.droppedBy !== null ||
+      source.lootProtectionMs !== 0 ||
+      source.lifetimeMs !== ASH_SOURCE_LIFETIME_MS ||
+      !receipt.source ||
+      receipt.source.contributionId !== source.contributionId ||
+      receipt.source.requestFingerprint !== source.requestFingerprint
+    ) {
+      throw new Error("processing_fire_extinguish_receipt_invalid");
+    }
+  }
+
+  private async commitFireExpiryWithExactRetry<T>(
+    operationId: string,
+    commit: () => Promise<T>,
+  ): Promise<T> {
+    let lastError: unknown;
+    for (let attempt = 1; attempt <= 8; attempt++) {
+      try {
+        return await commit();
+      } catch (error) {
+        if (isDefinitiveFireExtinguishError(error)) throw error;
+        lastError = error;
+        if (attempt < 8) {
+          await new Promise<void>((resolve) => {
+            setTimeout(resolve, Math.min(250 * 2 ** (attempt - 1), 5_000));
+          });
+        }
+      }
+    }
+    throw new Error(
+      `processing_fire_extinguish_commit_unknown:${operationId}`,
+      {
+        cause: lastError,
+      },
+    );
   }
 
   private cleanupPlayer(data: { id: string }): void {
     const playerId = data.id;
+    clearProcessingInteractionPresentation(this.world, playerId);
 
     const action = this.activeProcessing.get(playerId);
     this.activeProcessing.delete(playerId);
@@ -2205,6 +2589,37 @@ export class ProcessingSystem extends SystemBase {
     // disconnects. A committed in-flight fire is also reconciled exactly once.
   }
 
+  private cancelPendingProcessingPresentation(playerId: string): void {
+    const action = this.activeProcessing.get(playerId);
+    if (action) {
+      if (action.actionType === "firemaking") {
+        this.cancelFiremaking(playerId, action);
+      } else {
+        this.activeProcessing.delete(playerId);
+        clearProcessingInteractionPresentation(this.world, playerId, "cooking");
+        this.resetPlayerEmote(playerId);
+        this.rejectProcessingRequest(
+          playerId,
+          action.requestId,
+          "cooking",
+          "interrupted",
+          true,
+        );
+        this.releaseAction(action);
+      }
+      return;
+    }
+    const pending = this.pendingCommits.get(playerId);
+    if (!pending || pending.presentationCancelled) return;
+
+    pending.presentationCancelled = true;
+    clearProcessingInteractionPresentation(this.world, playerId, pending.kind);
+    this.resetPlayerEmote(playerId);
+    if (pending.kind === "firemaking") {
+      this.emitTypedEvent(EventType.FIRE_LIGHTING_CANCELLED, { playerId });
+    }
+  }
+
   // Public API
 
   /**
@@ -2228,9 +2643,12 @@ export class ProcessingSystem extends SystemBase {
     createdAt: number;
     expiresAt: number;
   }> {
-    const now = Date.now();
     return [...this.activeFires.values()]
-      .filter((fire) => fire.isActive && fire.createdAt + fire.duration > now)
+      .filter(
+        (fire) =>
+          fire.isActive &&
+          (this.fireLocalExpiryDeadlines.get(fire.id) ?? 0) > Date.now(),
+      )
       .map((fire) => ({
         fireId: fire.id,
         playerId: fire.playerId,
@@ -2282,6 +2700,15 @@ export class ProcessingSystem extends SystemBase {
     return (
       this.activeProcessing.has(playerId) || this.pendingCommits.has(playerId)
     );
+  }
+
+  /** Stop pre-commit work and suppress presentation/batching after settlement. */
+  requestPlayerProcessingQuiescence(playerId: string): void {
+    this.cancelPendingProcessingPresentation(playerId);
+  }
+
+  isPlayerProcessingQuiescent(playerId: string): boolean {
+    return !this.isPlayerProcessing(playerId);
   }
 
   getFiresInRange(
@@ -2379,6 +2806,12 @@ export class ProcessingSystem extends SystemBase {
 
   destroy(): void {
     this.destroyed = true;
+    for (const playerId of new Set([
+      ...this.activeProcessing.keys(),
+      ...this.pendingCommits.keys(),
+    ])) {
+      clearProcessingInteractionPresentation(this.world, playerId);
+    }
     // Process shutdown is not a world expiry: preserve durable fires for recovery.
     for (const fireId of [...this.activeFires.keys()]) {
       this.removeFireLocally(fireId);
@@ -2397,7 +2830,9 @@ export class ProcessingSystem extends SystemBase {
 
     this.activeProcessing.clear();
     this.pendingCommits.clear();
+    this.pendingFireExpirySettlements.clear();
     this.reservedFireTiles.clear();
+    this.fireLocalExpiryDeadlines.clear();
     this.playerSkills.clear();
     this.fireCleanupTimers.clear();
   }
@@ -2418,6 +2853,7 @@ export class ProcessingSystem extends SystemBase {
   update(_dt: number): void {
     if (!this.world.isServer || this.destroyed) return;
     this.processPendingCommits(this.world.currentTick ?? 0);
+    this.processPendingFireExpirySettlements(Date.now());
 
     for (const [playerId, action] of this.activeProcessing.entries()) {
       this.reportProcessingRequestProgress(

@@ -467,9 +467,11 @@ describe("FletchingSystem", () => {
       const itemsAdded = findEmitted(EventType.INVENTORY_ITEM_ADDED);
       expect(itemsAdded).toHaveLength(0);
 
-      const xpGained = findEmitted(EventType.SKILLS_XP_GAINED);
+      const xpGained = findEmitted(EventType.SKILLS_PROGRESS_COMMITTED);
       expect(xpGained.length).toBe(1);
-      expect((xpGained[0].data as { amount: number }).amount).toBe(recipe.xp);
+      expect((xpGained[0].data as { awardedXp: number }).awardedXp).toBe(
+        recipe.xp,
+      );
 
       // For quantity 1, session should complete
       const completes = findEmitted(EventType.FLETCHING_COMPLETE);
@@ -785,7 +787,7 @@ describe("FletchingSystem", () => {
       system.update(0);
 
       expect(commitProcessingActionAtomic).toHaveBeenCalledOnce();
-      expect(findEmitted(EventType.SKILLS_XP_GAINED)).toHaveLength(1);
+      expect(findEmitted(EventType.SKILLS_PROGRESS_COMMITTED)).toHaveLength(1);
       expect(system.isPlayerFletching("player1")).toBe(true);
     });
   });

@@ -1,0 +1,13 @@
+{
+  "schemaVersion": 1,
+  "title": "Hyperia isolated small-fishing-net technical candidate",
+  "equipments": [
+    {
+      "asset": "fishing-tool-candidates/fitted/small_fishing_net-fitted.glb",
+      "itemId": "small_fishing_net",
+      "avatarId": "kaykit-knight",
+      "slot": "gatheringtool",
+      "grip": "one-hand"
+    }
+  ]
+}

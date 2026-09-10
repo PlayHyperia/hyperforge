@@ -175,6 +175,7 @@ describe("RunecraftingSystem durable reward custody", () => {
             id: "air_altar",
             entityType: "runecrafting_altar",
             runeType: "air",
+            position: { x: 1, y: 0, z: 0 },
             isPlayerInRange: () => true,
           },
         ],
@@ -274,6 +275,14 @@ describe("RunecraftingSystem durable reward custody", () => {
     );
 
     expect(calls).toHaveLength(1);
+    expect(
+      findEvents(EventType.PROCESSING_INTERACTION_PRESENTATION).at(-1)?.data,
+    ).toMatchObject({
+      playerId: "player1",
+      skill: "runecrafting",
+      phase: "working",
+      targetPosition: { x: 1, y: 0, z: 0 },
+    });
     expect(calls[0].operationId).toBe(
       `processing-request:runecrafting:${requestId}`,
     );
@@ -285,7 +294,7 @@ describe("RunecraftingSystem durable reward custody", () => {
       ],
       outputs: [{ itemId: "air_rune", quantity: 5 }],
     });
-    expect(findEvents(EventType.SKILLS_XP_GAINED)).toHaveLength(0);
+    expect(findEvents(EventType.SKILLS_PROGRESS_COMMITTED)).toHaveLength(0);
     expect(findEvents(EventType.RUNECRAFTING_COMPLETE)).toHaveLength(0);
     expect(
       findEvents(EventType.UI_MESSAGE).filter(
@@ -298,11 +307,14 @@ describe("RunecraftingSystem durable reward custody", () => {
     expect(findEvents(EventType.RUNECRAFTING_COMPLETE)).toHaveLength(0);
     system?.update(0);
 
-    expect(findEvents(EventType.SKILLS_XP_GAINED)).toHaveLength(1);
+    expect(findEvents(EventType.SKILLS_PROGRESS_COMMITTED)).toHaveLength(1);
     expect(findEvents(EventType.RUNECRAFTING_COMPLETE)).toEqual([
       expect.objectContaining({ data: expect.objectContaining({ requestId }) }),
     ]);
     expect(system?.getRunecraftingCustodyStats().pendingActions).toBe(0);
+    expect(
+      findEvents(EventType.PROCESSING_INTERACTION_PRESENTATION).at(-1)?.data,
+    ).toMatchObject({ playerId: "player1", skill: null, phase: "idle" });
   });
 
   it("retries an ambiguous rejection with the same operation and payload", async () => {
@@ -383,7 +395,7 @@ describe("RunecraftingSystem durable reward custody", () => {
     await flushPromises();
     system?.update(0);
 
-    expect(findEvents(EventType.SKILLS_XP_GAINED)).toHaveLength(0);
+    expect(findEvents(EventType.SKILLS_PROGRESS_COMMITTED)).toHaveLength(0);
     expect(findEvents(EventType.RUNECRAFTING_COMPLETE)).toHaveLength(0);
     expect(findEvents(EventType.PROCESSING_REQUEST_REJECTED)).toEqual([
       expect.objectContaining({
@@ -421,13 +433,40 @@ describe("RunecraftingSystem durable reward custody", () => {
     await flushPromises();
     system?.update(0);
 
-    expect(findEvents(EventType.SKILLS_XP_GAINED)).toHaveLength(1);
+    expect(findEvents(EventType.SKILLS_PROGRESS_COMMITTED)).toHaveLength(1);
     expect(findEvents(EventType.RUNECRAFTING_COMPLETE)).toHaveLength(1);
     expect(
       findEvents(EventType.UI_MESSAGE).filter((event) => {
         const type = (event.data as { type?: string }).type;
         return type === "success" || type === "warning";
       }),
+    ).toHaveLength(0);
+    expect(system?.getRunecraftingCustodyStats().pendingActions).toBe(0);
+  });
+
+  it("keeps a late committed result but does not revive altar presentation after movement", async () => {
+    const held = deferred<AtomicProcessingActionReceipt>();
+    commitImplementation = () => held.promise;
+    emitInteraction();
+    eventBus.emitEvent(
+      EventType.MOVEMENT_CLICK_TO_MOVE,
+      { playerId: "player1", targetPosition: { x: 10, y: 0, z: 10 } },
+      "test",
+    );
+    expect(
+      findEvents(EventType.PROCESSING_INTERACTION_PRESENTATION).at(-1)?.data,
+    ).toMatchObject({ skill: null, phase: "idle" });
+
+    held.resolve(successReceipt(calls[0]));
+    await flushPromises();
+    system?.update(0);
+
+    expect(findEvents(EventType.SKILLS_PROGRESS_COMMITTED)).toHaveLength(1);
+    expect(findEvents(EventType.RUNECRAFTING_COMPLETE)).toHaveLength(1);
+    expect(
+      findEvents(EventType.UI_MESSAGE).filter(
+        (event) => (event.data as { type?: string }).type === "success",
+      ),
     ).toHaveLength(0);
     expect(system?.getRunecraftingCustodyStats().pendingActions).toBe(0);
   });
@@ -452,5 +491,38 @@ describe("RunecraftingSystem durable reward custody", () => {
         }),
       }),
     );
+  });
+
+  it("drains exactly one in-flight rune craft after quiescence with no presentation revival", async () => {
+    const held = deferred<AtomicProcessingActionReceipt>();
+    commitImplementation = () => held.promise;
+    emitInteraction();
+    expect(system?.isPlayerProcessingQuiescent("player1")).toBe(false);
+
+    const presentationBoundary = findEvents(
+      EventType.PROCESSING_INTERACTION_PRESENTATION,
+    ).length;
+    system?.requestPlayerProcessingQuiescence("player1");
+    expect(system?.isPlayerProcessingQuiescent("player1")).toBe(false);
+    expect(
+      findEvents(EventType.PROCESSING_INTERACTION_PRESENTATION).at(-1)?.data,
+    ).toMatchObject({ playerId: "player1", skill: null, phase: "idle" });
+
+    held.resolve(successReceipt(calls[0]));
+    await flushPromises();
+    system?.update(0);
+    world.currentTick = 200;
+    system?.update(0);
+
+    expect(system?.isPlayerProcessingQuiescent("player1")).toBe(true);
+    expect(calls).toHaveLength(1);
+    expect(findEvents(EventType.RUNECRAFTING_COMPLETE)).toHaveLength(1);
+    expect(
+      findEvents(EventType.PROCESSING_INTERACTION_PRESENTATION)
+        .slice(presentationBoundary)
+        .some(
+          (event) => (event.data as { phase?: string }).phase === "working",
+        ),
+    ).toBe(false);
   });
 });

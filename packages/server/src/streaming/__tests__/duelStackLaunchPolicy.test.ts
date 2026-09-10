@@ -1,12 +1,17 @@
 import { execFile } from "node:child_process";
 import { readFileSync } from "node:fs";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { createServer } from "node:http";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 
 import {
+  assertAuthorityRestartDiagnosticBoundary,
   assertMultiStyleSparbotOptions,
+  assertManagedLocalSolanaBoundary,
   assertStandaloneSparbotRuntimeBoundary,
   assertSupportedUwsNodeVersion,
   assertProcessTerminationAllowed,
@@ -19,25 +24,58 @@ import {
   omitEnvironmentKeys,
   resolveDuelDatabaseConfiguration,
   resolveDuelGameServiceTopology,
+  resolveHyperbetKeeperDatabaseTopology,
   resolveHyperbetRuntimeTopology,
+  resolveHyperbetSolanaDeployment,
   resolveHyperbetWorkspace,
   resolvePrivateBettingFeedToken,
+  resolveJwtRuntimeSecret,
   resolvePrivateRuntimeSecret,
   resolveStandaloneSparbotProfileSeed,
   resolveStandaloneSparbotStyles,
+  shouldReleaseRestartedAuthorityStartupGate,
 } from "../../../../../scripts/duel-stack-topology.mjs";
 
 const launcherSource = readFileSync(
   new URL("../../../../../scripts/duel-stack.mjs", import.meta.url),
   "utf8",
 );
+const shutdownPolicySource = readFileSync(
+  new URL("../../../../../scripts/duel-stack-shutdown.mjs", import.meta.url),
+  "utf8",
+);
+const captureBrowserHostSource = readFileSync(
+  new URL("../../../scripts/capture-browser-host.ts", import.meta.url),
+  "utf8",
+);
+const streamToRtmpSource = readFileSync(
+  new URL("../../../scripts/stream-to-rtmp.ts", import.meta.url),
+  "utf8",
+);
+const persistedBetSyncServiceSource = readFileSync(
+  new URL(
+    "../../../scripts/run-agent-duel-bet-sync-service.ts",
+    import.meta.url,
+  ),
+  "utf8",
+);
 const verifierUrl = new URL(
   "../../../../../scripts/verify-duel-stack.mjs",
   import.meta.url,
 );
+const verifierSource = readFileSync(verifierUrl, "utf8");
 const execFileAsync = promisify(execFile);
+// A cold macOS file-provider checkout can spend tens of seconds materializing
+// verifier dependencies before Node reaches its first log line. Keep the child
+// watchdog finite without turning a healthy cold checkout into a false failure.
+const verifierProcessTimeoutMs = 60_000;
 
 describe("duel stack launch policy", () => {
+  it("retains verifier evidence with owner-only permissions", () => {
+    expect(verifierSource).toContain("await fsp.chmod(screenshotPath, 0o600);");
+    expect(verifierSource).toContain("mode: 0o600");
+  });
+
   it("uses one validated custom-port topology for server binding and discovery", () => {
     expect(
       resolveDuelGameServiceTopology({
@@ -162,7 +200,7 @@ describe("duel stack launch policy", () => {
     expect(launcherSource).not.toContain("cleanupStaleLocalPostgresSessions");
     expect(launcherSource).toContain("String(clientPort)");
     expect(launcherSource).toContain('verifyArgs.push("--skip-betting")');
-    expect(launcherSource).toContain('requestedCaptureChannel === "bundled"');
+    expect(launcherSource).toContain('requestedChannel === "bundled"');
   });
 
   it("makes isolated launches fail closed instead of terminating existing processes", () => {
@@ -213,6 +251,135 @@ describe("duel stack launch policy", () => {
     expect(launcherSource).toContain("payload?.rendererHealth?.ready === true");
   });
 
+  it("keeps the persisted restart source on the production streaming contract", () => {
+    expect(persistedBetSyncServiceSource).toContain(
+      'requestUrl.pathname === "/api/streaming/state"',
+    );
+    expect(persistedBetSyncServiceSource).toContain(
+      'requestUrl.pathname === "/api/streaming/state/events"',
+    );
+    expect(persistedBetSyncServiceSource).toContain(
+      '"content-type": "text/event-stream; charset=utf-8"',
+    );
+    expect(persistedBetSyncServiceSource).toContain(
+      "rendererHealth: {\n        ready: true as const,",
+    );
+    expect(persistedBetSyncServiceSource).toContain(
+      "streamingBroadcastTimer = setInterval(broadcastStreamingState, 1_000)",
+    );
+    expect(persistedBetSyncServiceSource).toContain("streamingClients.clear()");
+  });
+
+  it("allows browser-audio preflight to finish before CDP startup can time out", () => {
+    expect(streamToRtmpSource).toContain(
+      'process.env.STREAM_CAPTURE_START_TIMEOUT_MS || "15000"',
+    );
+    expect(streamToRtmpSource).not.toContain(
+      'process.env.STREAM_CAPTURE_START_TIMEOUT_MS || "15_000"',
+    );
+  });
+
+  it("keeps the FFmpeg video timeline on an independent constant-rate pump", () => {
+    expect(streamToRtmpSource).toContain(
+      "new CaptureFramePump<Buffer>(TARGET_FPS",
+    );
+    expect(streamToRtmpSource).toContain(
+      "const framePacer = new CaptureFramePacer(CAPTURE_SOURCE_FPS)",
+    );
+    expect(streamToRtmpSource).toContain(
+      "framePump.start(1000 / (TARGET_FPS * 2))",
+    );
+    expect(streamToRtmpSource).toContain(".runPaced(async () =>");
+    expect(streamToRtmpSource).toContain("await framePacer?.drain()");
+    expect(streamToRtmpSource).toContain("framePump.pushFrame(jpegBuffer)");
+    expect(streamToRtmpSource).not.toContain(
+      "const written = await bridge.feedFrame(jpegBuffer)",
+    );
+  });
+
+  it("supervises the warm WebGPU renderer separately from the restartable encoder worker", () => {
+    expect(launcherSource).toContain("const PROCESS_QUERY_TIMEOUT_MS = 2_000;");
+    expect(launcherSource).toContain(
+      'const out = execFileSync(\n      "pgrep",',
+    );
+    expect(launcherSource).toContain(
+      '["-f", escapeProcessQueryPattern(pattern)]',
+    );
+    expect(launcherSource).toContain("timeout: PROCESS_QUERY_TIMEOUT_MS");
+    expect(launcherSource).toContain('killSignal: "SIGKILL"');
+    expect(launcherSource).not.toContain(
+      'execFileSync("ps", ["-axo", "pid=,command="]',
+    );
+    expect(launcherSource).toContain('spawnManaged("capture-browser-host"');
+    expect(launcherSource).toContain("STREAM_CAPTURE_BROWSER_ENDPOINT");
+    expect(launcherSource).toContain("STREAM_BROWSER_AUDIO_REQUIRED");
+    expect(launcherSource).toContain("await startCaptureBrowserHost()");
+    expect(launcherSource).toContain("restartDelayMs: 500");
+    expect(launcherSource).toContain("cleanupProcessGroupOnExit: true");
+    expect(launcherSource).toContain('process.kill(-proc.pid, "SIGKILL")');
+    expect(shutdownPolicySource).toContain(
+      'env.DUEL_STACK_SHUTDOWN_GRACE_MS?.trim() || "24000"',
+    );
+    expect(shutdownPolicySource).toContain(
+      "DUEL_STACK_SHUTDOWN_GRACE_MS must be 2000..30000",
+    );
+    expect(shutdownPolicySource).toContain(
+      "DUEL_STACK_SHUTDOWN_GRACE_MS must cover the 5000ms terminal wait, configured ACK timeout, and 2000ms cleanup margin",
+    );
+    expect(launcherSource).toContain(
+      "const result = await shutdownDuelStackChildren({",
+    );
+    expect(launcherSource).toContain(
+      "entry.shutdownMonitor = observeGameServerShutdown(",
+    );
+    expect(launcherSource).toContain("process.exit(shutdownExitCode)");
+    expect(launcherSource).toContain(
+      "STRUCTURED_SHUTDOWN_EVENT_PATTERN.test(trimmedLine)",
+    );
+    expect(captureBrowserHostSource).not.toContain(
+      '"--remote-allow-origins=*"',
+    );
+    expect(captureBrowserHostSource).toContain('browser.on("disconnected"');
+    expect(captureBrowserHostSource).toContain('page.on("crash"');
+    expect(captureBrowserHostSource).toContain('page.on("close"');
+    expect(captureBrowserHostSource).toContain('"renderer_degraded"');
+    expect(captureBrowserHostSource).toContain(
+      "resolveCaptureBrowserFrameIpcConfig(process.env)",
+    );
+    expect(captureBrowserHostSource).toContain(
+      "parseCaptureBrowserFrameRequest(rawRequest",
+    );
+    expect(captureBrowserHostSource).toContain(
+      "await waitForStableFrameCaptureReadiness(page, request)",
+    );
+    expect(captureBrowserHostSource).toContain(
+      "normalizeCaptureSceneReadinessDiagnostics(rawReadiness)",
+    );
+    expect(captureBrowserHostSource).toContain("postCaptureReadiness");
+    expect(captureBrowserHostSource).toContain(
+      'fs.writeFileSync(outputPath, screenshot, { flag: "wx", mode: 0o600 })',
+    );
+    expect(captureBrowserHostSource).toContain(
+      'source: "capture-browser-host"',
+    );
+    expect(captureBrowserHostSource).toContain(
+      'createHash("sha256").update(screenshot).digest("hex")',
+    );
+    expect(captureBrowserHostSource).not.toContain("connectOverCDP");
+    expect(streamToRtmpSource).toContain(
+      "chromium.connectOverCDP(STREAM_CAPTURE_BROWSER_ENDPOINT)",
+    );
+    expect(streamToRtmpSource).toContain(
+      "Supervised capture browser must expose exactly one configured game page",
+    );
+    expect(streamToRtmpSource).toContain(
+      "if (!browserExternallyOwned) {\n      await browser.close();",
+    );
+    expect(streamToRtmpSource).toContain(
+      "Required browser game-master audio did not pass PCM preflight",
+    );
+  });
+
   it("verifies a streamless duel stack without weakening streamed delivery checks", async () => {
     let hlsRequests = 0;
     let rtmpRequests = 0;
@@ -232,7 +399,60 @@ describe("duel stack launch policy", () => {
       }
       if (requestUrl.pathname === "/api/streaming/rtmp/status") {
         rtmpRequests += 1;
-        sendJson({ active: false, stats: { bytesReceived: 0 } });
+        const updatedAt = Date.now();
+        sendJson({
+          active: false,
+          updatedAt,
+          stats: {
+            bytesReceived: 0,
+            audioSource: "browser",
+            audioHealthy: true,
+            audioLastChunkAt: Date.now(),
+            audioChunks: 1,
+            audioDroppedChunks: 0,
+            audioTrimmedChunks: 0,
+          },
+          browserAudioCaptureHealth: {
+            contextState: "running",
+            sourceContextState: "running",
+            trackState: "live",
+            sampleRate: 48_000,
+            channels: 2,
+            chunks: 1,
+            bytes: 4_096,
+            contentChunks: 1,
+            contentThreshold: 0.0001,
+            maxSamplePeak: 0.25,
+            lastContentChunkAt: updatedAt,
+            lastChunkAt: updatedAt,
+          },
+          rendererHealth: {
+            ready: true,
+            degradedReason: null,
+            phase: "FIGHTING",
+            diagnostics: {
+              sceneReadiness: {
+                ready: true,
+                cycleId: "streamless-cycle",
+                phase: "FIGHTING",
+                equipmentVisualsReady: true,
+                equipmentConfigured: true,
+                equipmentCycleId: "streamless-cycle",
+                equipmentRequiredCount: 6,
+                equipmentRequiredPlayerCount: 2,
+                equipmentReadyCount: 6,
+                equipmentExpectedPlayerCount: 2,
+                equipmentActiveVisualCount: 2,
+                equipmentActiveVisibleCount: 2,
+                equipmentActivePlayerCount: 2,
+                equipmentActiveVisiblePlayerCount: 2,
+                equipmentUnresolvedCount: 0,
+                equipmentAttachmentMismatchCount: 0,
+                expectedAgentCount: 2,
+              },
+            },
+          },
+        });
         return;
       }
       if (requestUrl.pathname === "/health") {
@@ -253,6 +473,7 @@ describe("duel stack launch policy", () => {
       if (requestUrl.pathname === "/api/streaming/duel-context") {
         sendJson({
           cycle: {
+            cycleId: "streamless-cycle",
             phase: "FIGHTING",
             agent1: {
               id: "streamless-agent-a",
@@ -297,6 +518,9 @@ describe("duel stack launch policy", () => {
       throw new Error("mock duel stack did not expose a TCP address");
     }
     origin = `http://127.0.0.1:${address.port}`;
+    const evidenceDirectory = await mkdtemp(
+      path.join(tmpdir(), "hyperia-duel-verifier-evidence-"),
+    );
 
     try {
       const verifierArgs = [
@@ -316,20 +540,35 @@ describe("duel stack launch policy", () => {
         "250",
         "--poll-ms",
         "10",
+        "--browser-evidence-dir",
+        evidenceDirectory,
       ];
       const { stdout } = await execFileAsync(
         process.execPath,
         [...verifierArgs, "--skip-stream"],
-        { timeout: 5_000 },
+        { timeout: verifierProcessTimeoutMs },
       );
 
       expect(stdout).toContain("verification passed");
       expect(stdout).toContain('"skipStream": true');
+      const retainedReport = JSON.parse(
+        await readFile(
+          path.join(evidenceDirectory, "duel-stack-verification-report.json"),
+          "utf8",
+        ),
+      );
+      expect(retainedReport).toMatchObject({
+        ok: true,
+        skipStream: true,
+        combatEvidence: { damageRecorded: true },
+      });
       expect(hlsRequests).toBe(0);
       expect(rtmpRequests).toBe(0);
 
       await expect(
-        execFileAsync(process.execPath, verifierArgs, { timeout: 5_000 }),
+        execFileAsync(process.execPath, verifierArgs, {
+          timeout: verifierProcessTimeoutMs,
+        }),
       ).rejects.toMatchObject({
         stderr: expect.stringContaining("Timed out waiting for HLS playlist"),
       });
@@ -345,7 +584,7 @@ describe("duel stack launch policy", () => {
             "--require-destinations",
             "twitch",
           ],
-          { timeout: 5_000 },
+          { timeout: verifierProcessTimeoutMs },
         ),
       ).rejects.toMatchObject({
         stderr: expect.stringContaining(
@@ -354,8 +593,9 @@ describe("duel stack launch policy", () => {
       });
     } finally {
       await new Promise<void>((resolve) => mockStack.close(() => resolve()));
+      await rm(evidenceDirectory, { recursive: true, force: true });
     }
-  }, 10_000);
+  }, 90_000);
 
   it("holds the first duel until the complete launch surface is ready", () => {
     expect(launcherSource).toContain(
@@ -374,11 +614,16 @@ describe("duel stack launch policy", () => {
     const verificationIndex = launcherSource.indexOf(
       'if (verifyEnabled) {\n    log("running startup verification checks...")',
     );
+    const combinedReadinessIndex = launcherSource.indexOf(
+      '"combined Hyperbet launch readiness"',
+    );
 
     expect(contestantsIndex).toBeGreaterThan(0);
     expect(streamIndex).toBeGreaterThan(contestantsIndex);
     expect(servicesIndex).toBeGreaterThan(streamIndex);
     expect(releaseIndex).toBeGreaterThan(servicesIndex);
+    expect(combinedReadinessIndex).toBeGreaterThan(releaseIndex);
+    expect(verificationIndex).toBeGreaterThan(combinedReadinessIndex);
     expect(verificationIndex).toBeGreaterThan(releaseIndex);
   });
 
@@ -430,6 +675,78 @@ describe("duel stack launch policy", () => {
     ).toBeNull();
   });
 
+  it("takes keeper program identity from the versioned SOL deployment registry", () => {
+    const registry = JSON.stringify({
+      solana: {
+        localnet: {
+          cluster: "localnet",
+          fightOracleProgramId: "GFdnu7kUnZGiXh4ejWiJSBCUxvq4UfdEeUv9jjFzr5EM",
+          duelMarketProgramId: "3QUVoaKJqo1rg9eXe7vyFewJrY75NWdtH8JZfvTb79Uy",
+        },
+      },
+    });
+    const readFile = () => registry;
+
+    expect(
+      resolveHyperbetSolanaDeployment({
+        solanaDir: "/workspace/hyperbet/packages/hyperbet-solana",
+        cluster: "local",
+        readFileSync: readFile,
+      }),
+    ).toEqual({
+      cluster: "localnet",
+      fightOracleProgramId: "GFdnu7kUnZGiXh4ejWiJSBCUxvq4UfdEeUv9jjFzr5EM",
+      duelMarketProgramId: "3QUVoaKJqo1rg9eXe7vyFewJrY75NWdtH8JZfvTb79Uy",
+    });
+    expect(() =>
+      resolveHyperbetSolanaDeployment({
+        solanaDir: "/workspace/hyperbet/packages/hyperbet-solana",
+        cluster: "devnet",
+        readFileSync: readFile,
+      }),
+    ).toThrow("has no devnet entry");
+    expect(() =>
+      resolveHyperbetSolanaDeployment({
+        solanaDir: "/workspace/hyperbet/packages/hyperbet-solana",
+        cluster: "localnet",
+        readFileSync: () =>
+          JSON.stringify({
+            solana: {
+              localnet: {
+                fightOracleProgramId: "not-a-program",
+                duelMarketProgramId:
+                  "3QUVoaKJqo1rg9eXe7vyFewJrY75NWdtH8JZfvTb79Uy",
+              },
+            },
+          }),
+      }),
+    ).toThrow("must be a base58 Solana program id");
+
+    expect(launcherSource).toContain("resolveHyperbetSolanaDeployment({");
+    expect(launcherSource).toContain(
+      "FIGHT_ORACLE_PROGRAM_ID: keeperDeployment.fightOracleProgramId",
+    );
+    expect(launcherSource).toContain(
+      "DUEL_MARKET_PROGRAM_ID: keeperDeployment.duelMarketProgramId",
+    );
+    expect(launcherSource).toContain(
+      'path.join(hyperbetKeeperDir, "src/duelBot.ts")',
+    );
+    expect(launcherSource).not.toContain('"keeper:duel"');
+    expect(launcherSource).not.toContain('"keeper:bot"');
+    expect(launcherSource).toContain(
+      'BOT_LOOP: process.env.DUEL_KEEPER_BOT_LOOP || "true"',
+    );
+    expect(launcherSource).toContain(
+      'HYPERBET_LOCAL_DIAGNOSTIC_FEED: manageLocalSolana ? "true" : "false"',
+    );
+    expect(launcherSource).toContain(
+      "SOLANA_ORACLE_DISPUTE_WINDOW_SECS: localOracleDisputeWindowSeconds",
+    );
+    expect(launcherSource).toContain("ORACLE_CONFIG_AUTHORITY_KEYPAIR:");
+    expect(launcherSource).toContain("CLOB_CONFIG_AUTHORITY_KEYPAIR:");
+  });
+
   it("keeps the game origin, backend origin, and browser app origin distinct", () => {
     expect(
       resolveHyperbetRuntimeTopology({
@@ -452,6 +769,36 @@ describe("duel stack launch policy", () => {
         "service",
       ),
     ).toThrow();
+  });
+
+  it("isolates the managed local SOL service index from the terminal ledger", () => {
+    expect(
+      resolveHyperbetKeeperDatabaseTopology({
+        managedLocalSolana: false,
+        terminalDbPath: "/runtime/keeper.sqlite",
+      }),
+    ).toEqual({
+      terminalDbPath: "/runtime/keeper.sqlite",
+      serviceDbPath: "/runtime/keeper.sqlite",
+    });
+    expect(
+      resolveHyperbetKeeperDatabaseTopology({
+        managedLocalSolana: true,
+        terminalDbPath: "/runtime/keeper.sqlite",
+      }),
+    ).toEqual({
+      terminalDbPath: "/runtime/keeper.sqlite",
+      serviceDbPath: "/runtime/service.sqlite",
+    });
+    expect(() =>
+      resolveHyperbetKeeperDatabaseTopology({
+        managedLocalSolana: true,
+        terminalDbPath: "/runtime/keeper.sqlite",
+        configuredServiceDbPath: "/runtime/keeper.sqlite",
+      }),
+    ).toThrow("must not share");
+    expect(launcherSource).toContain("KEEPER_DB_PATH: keeperServiceDbPath");
+    expect(launcherSource).toContain("KEEPER_DB_PATH: keeperDbPath");
   });
 
   it("requires a high-entropy private feed token and never substitutes the viewer token", () => {
@@ -483,6 +830,45 @@ describe("duel stack launch policy", () => {
         "The local duel JWT secret",
       ),
     ).toThrow("at least 32 bytes");
+    expect(() =>
+      resolvePrivateRuntimeSecret(
+        [` ${"d".repeat(32)}`],
+        () => generated,
+        "The distributed authentication rate-limit key",
+      ),
+    ).toThrow("must not contain outer whitespace");
+
+    expect(
+      resolveJwtRuntimeSecret(
+        [JSON.stringify({ current: generated })],
+        ["", undefined],
+        () => {
+          throw new Error("must not generate a legacy bridge");
+        },
+      ),
+    ).toEqual({
+      token: "",
+      generated: false,
+      keyRingConfigured: true,
+    });
+    expect(
+      resolveJwtRuntimeSecret(
+        [JSON.stringify({ current: generated })],
+        ["d".repeat(32)],
+        () => generated,
+      ),
+    ).toEqual({
+      token: "d".repeat(32),
+      generated: false,
+      keyRingConfigured: true,
+    });
+    expect(() =>
+      resolveJwtRuntimeSecret(
+        [JSON.stringify({ current: generated })],
+        ["too-short"],
+        () => generated,
+      ),
+    ).toThrow("legacy duel JWT secret must contain at least 32 bytes");
 
     expect(assertSupportedUwsNodeVersion("v22.23.2")).toBe("22.23.2");
     expect(() => assertSupportedUwsNodeVersion("v22.23.1")).toThrow(
@@ -585,6 +971,28 @@ describe("duel stack launch policy", () => {
         environment: {
           ...validEnvironment,
           DUEL_WITH_HYPERBET: "true",
+          DUEL_LOCAL_SOLANA_MODE: "true",
+          SOLANA_RPC_URL: "http://127.0.0.1:18899",
+        },
+      }),
+    ).toBe(true);
+    expect(() =>
+      assertStandaloneSparbotRuntimeBoundary({
+        enabled: true,
+        environment: {
+          ...validEnvironment,
+          DUEL_WITH_HYPERBET: "true",
+          DUEL_LOCAL_SOLANA_MODE: "true",
+          SOLANA_RPC_URL: "https://api.mainnet-beta.solana.com",
+        },
+      }),
+    ).toThrow("Standalone scripted sparbots require");
+    expect(
+      assertStandaloneSparbotRuntimeBoundary({
+        enabled: true,
+        environment: {
+          ...validEnvironment,
+          DUEL_WITH_HYPERBET: "true",
           DUEL_HYPERBET_READ_ONLY_MODE: "true",
         },
       }),
@@ -634,10 +1042,158 @@ describe("duel stack launch policy", () => {
       "DUEL_LOCAL_SMOKE_MODE: effectiveDuelLocalSmokeMode",
     );
     expect(launcherSource).toContain("LOAD_TEST_MODE: effectiveLoadTestMode");
+    expect(launcherSource).toContain(
+      "DUEL_LOCAL_BROWSER_ORIGIN: localSmokeBrowserOrigin",
+    );
+    expect(launcherSource).toContain(
+      '"The local-smoke game client URL must use an exact loopback hostname"',
+    );
     expect(launcherSource).toContain('(localSmokeRequested ? "5000" : "")');
     expect(launcherSource).toContain(
       "STREAMING_DUEL_PREPARATION_MS: effectiveDuelPreparationMs",
     );
+  });
+
+  it("owns transaction-enabled local SOL only behind an explicit loopback boundary", () => {
+    const validBoundary = {
+      enabled: true,
+      hyperbetRuntimeEnabled: true,
+      remoteBettingMode: false,
+      hyperbetReadOnlyMode: false,
+      rpcUrl: "http://127.0.0.1:18899",
+    };
+    expect(assertManagedLocalSolanaBoundary(validBoundary)).toBe(true);
+    expect(
+      assertManagedLocalSolanaBoundary({
+        ...validBoundary,
+        enabled: false,
+        hyperbetRuntimeEnabled: false,
+      }),
+    ).toBe(false);
+    for (const override of [
+      { hyperbetRuntimeEnabled: false },
+      { remoteBettingMode: true },
+      { hyperbetReadOnlyMode: true },
+      { rpcUrl: "https://api.mainnet-beta.solana.com" },
+    ]) {
+      expect(() =>
+        assertManagedLocalSolanaBoundary({ ...validBoundary, ...override }),
+      ).toThrow("Managed local Solana requires");
+    }
+
+    const boundaryIndex = launcherSource.indexOf(
+      "assertManagedLocalSolanaBoundary({",
+    );
+    const localnetStartIndex = launcherSource.indexOf(
+      "await startManagedLocalSolana();",
+    );
+    const hlsMutationIndex = launcherSource.indexOf(
+      "prepareHlsOutput(hlsOutputPath);",
+    );
+    expect(boundaryIndex).toBeGreaterThan(0);
+    expect(localnetStartIndex).toBeGreaterThan(boundaryIndex);
+    expect(localnetStartIndex).toBeLessThan(hlsMutationIndex);
+    expect(launcherSource).toContain('"local-solana": { type: "boolean" }');
+    expect(launcherSource).toContain('"--upgradeable-program"');
+    expect(launcherSource).toContain('spawnManaged(\n    "solana-localnet"');
+    expect(launcherSource).toContain("ownedRuntimePaths.push(ledgerDir)");
+    expect(launcherSource).toContain(
+      "ownedRuntimePaths.push(managedLocalHyperbetRuntimeDir)",
+    );
+    expect(launcherSource).toContain(
+      "VITE_SOLANA_RPC_URL: keeperRpcUrl || defaultSolanaRpcUrl(keeperCluster)",
+    );
+    expect(launcherSource).toContain(
+      '(keeperCluster === "localnet" ? localSolanaWsUrl : "")',
+    );
+    expect(launcherSource).toContain(
+      'input.scriptPath,\n    "--cluster",\n    "localnet"',
+    );
+    expect(launcherSource).toContain(
+      "const browserWallet = Keypair.generate()",
+    );
+    expect(launcherSource).toContain("connection.requestAirdrop(");
+    expect(launcherSource).toContain("VITE_HEADLESS_WALLET_SECRET_KEY:");
+    expect(launcherSource).toContain(
+      'VITE_HEADLESS_WALLET_NAME: "Full Topology Test Wallet"',
+    );
+    expect(launcherSource).toContain('"--hyperbet-local-transactions",');
+    expect(launcherSource).toContain('"--expected-local-wallet",');
+    expect(launcherSource).toContain('"--duel-market-program-id",');
+  });
+
+  it("keeps world-owner hard-kill injection inside the owned localnet smoke", () => {
+    const validBoundary = {
+      enabled: true,
+      fresh: true,
+      isolated: true,
+      verify: true,
+      localSmoke: true,
+      localSolana: true,
+      serverUrl: "http://127.0.0.1:35551",
+      rpcUrl: "http://127.0.0.1:35800",
+      pidFile: "/tmp/owned-game-server.json",
+    };
+    expect(assertAuthorityRestartDiagnosticBoundary(validBoundary)).toBe(true);
+    for (const override of [
+      { fresh: false },
+      { isolated: false },
+      { verify: false },
+      { localSmoke: false },
+      { localSolana: false },
+      { serverUrl: "https://game.example" },
+      { rpcUrl: "https://api.mainnet-beta.solana.com" },
+      { pidFile: "" },
+    ]) {
+      expect(() =>
+        assertAuthorityRestartDiagnosticBoundary({
+          ...validBoundary,
+          ...override,
+        }),
+      ).toThrow("Authority restart injection requires");
+    }
+    expect(
+      assertAuthorityRestartDiagnosticBoundary({
+        ...validBoundary,
+        enabled: false,
+      }),
+    ).toBe(false);
+    expect(
+      shouldReleaseRestartedAuthorityStartupGate({
+        authorityRecoveryEnabled: true,
+        launcherOwnsStartupGate: true,
+        generation: 1,
+      }),
+    ).toBe(false);
+    expect(
+      shouldReleaseRestartedAuthorityStartupGate({
+        authorityRecoveryEnabled: true,
+        launcherOwnsStartupGate: true,
+        generation: 2,
+      }),
+    ).toBe(true);
+    expect(
+      shouldReleaseRestartedAuthorityStartupGate({
+        authorityRecoveryEnabled: false,
+        launcherOwnsStartupGate: true,
+        generation: 2,
+      }),
+    ).toBe(false);
+    expect(
+      shouldReleaseRestartedAuthorityStartupGate({
+        authorityRecoveryEnabled: true,
+        launcherOwnsStartupGate: false,
+        generation: 2,
+      }),
+    ).toBe(false);
+    expect(() =>
+      shouldReleaseRestartedAuthorityStartupGate({
+        authorityRecoveryEnabled: true,
+        launcherOwnsStartupGate: true,
+        generation: 0,
+      }),
+    ).toThrow("positive integer");
+    expect(launcherSource).toContain("releaseRestartedAuthorityStartupGate");
   });
 
   it("resolves an explicit, deterministic combat style for every standalone sparbot", () => {
@@ -902,6 +1458,12 @@ describe("duel stack launch policy", () => {
       'verifyArgs.push("--hyperbet-api-url", hyperbetTopology.hyperbetApiUrl)',
     );
     expect(launcherSource).toContain('verifyArgs.push("--hyperbet-read-only")');
+    expect(launcherSource).toContain(
+      '"read-only Hyperbet authoritative stream readiness"',
+    );
+    expect(launcherSource).toMatch(
+      /if \(hyperbetReadOnlyMode\) \{[\s\S]*?isHyperbetStreamSynchronized\([\s\S]*?\} else \{[\s\S]*?"combined Hyperbet launch readiness"/,
+    );
   });
 
   it("contains no retired token or perps launcher configuration", () => {

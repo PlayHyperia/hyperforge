@@ -1,4 +1,3 @@
-import { randomUUID } from "node:crypto";
 import { eq } from "drizzle-orm";
 import { v5 as uuidv5 } from "uuid";
 
@@ -41,11 +40,9 @@ const wait = (durationMs: number): Promise<void> =>
 export async function executeOrdinaryBoneBurial(
   instance: AgentInstance,
   itemId: string,
-  attempt?: AgentAutonomyProgressionAttempt | null,
+  attempt: AgentAutonomyProgressionAttempt,
 ): Promise<OrdinaryBoneBurialExecutionResult> {
-  const operationId = getOrdinaryBoneBurialOperationId(
-    attempt?.attemptId ?? randomUUID(),
-  );
+  const operationId = getOrdinaryBoneBurialOperationId(attempt.attemptId);
   let reconciliationAttempts = 0;
   let delayMs = INITIAL_RECONCILIATION_DELAY_MS;
   let lastReceipt: BoneBurialReceipt | null = null;

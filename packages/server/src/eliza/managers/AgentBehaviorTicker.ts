@@ -105,7 +105,7 @@ export interface AgentGoal {
     | "idle";
   description: string;
   /** Server-private staging intent; never contains bank item identities/counts. */
-  bankPurpose?: "survival_food";
+  bankPurpose?: "survival_food" | "combat_supply";
   questId?: string;
   questName?: string;
   questStageType?: string;
@@ -179,6 +179,11 @@ export interface AgentInstance {
     questId: string;
     expiresAt: number;
   } | null;
+  /**
+   * Main-process authorization for one manifest-derived ordinary processing
+   * baseline after an exact private-bank miss. No bank item or count crosses.
+   */
+  ordinaryProcessingAcquisition?: { expiresAt: number } | null;
   /** Public-source food recovery after an exact empty private-bank result. */
   survivalFoodAcquisition: { expiresAt: number } | null;
   /** Process-local, exact-recipe anti-storm state; never replayed after restart. */
@@ -331,6 +336,7 @@ export type EmbeddedBehaviorAction =
   | { type: "use"; itemId: string }
   | { type: "bury"; itemId: string }
   | { type: "equip"; itemId: string }
+  | { type: "setAutocast"; spellId: string }
   | { type: "bankDepositAll"; bankId: string }
   | { type: "bankWithdraw"; bankId: string }
   | { type: "homeTeleport" }
@@ -555,6 +561,15 @@ export class AgentBehaviorTicker {
       return;
     }
 
+    const gatherThrottleBeforeDecision = {
+      targetId: instance.lastGatherTargetId,
+      queuedAt: instance.lastGatherQueuedAt,
+    };
+    const restoreUncommittedGatherThrottle = () => {
+      instance.lastGatherTargetId = gatherThrottleBeforeDecision.targetId;
+      instance.lastGatherQueuedAt = gatherThrottleBeforeDecision.queuedAt;
+    };
+
     ensureEmbeddedAgentCharacterVision(characterId, gameState.skills);
 
     // === COMBAT CHAT REACTIONS (non-blocking) ===
@@ -697,6 +712,7 @@ export class AgentBehaviorTicker {
         }
       } catch (error) {
         actionExecution = actionResult(action.type, "failed");
+        restoreUncommittedGatherThrottle();
         if (!resultIsStale()) {
           recordAuthoritativeBehaviorOutcome(instance, {
             action,
@@ -711,6 +727,7 @@ export class AgentBehaviorTicker {
         return;
       }
       if (resultIsStale()) {
+        restoreUncommittedGatherThrottle();
         if (
           progressionAttempt &&
           preActionCheckpointContext &&
@@ -755,24 +772,37 @@ export class AgentBehaviorTicker {
         }
 
         case "gather":
-          if (await instance.service.executeGather(action.targetId)) {
-            actionExecution = actionResult("gather", "dispatched", "gather");
+          if (!progressionAttempt) break;
+          if (
+            await instance.service.executeGather(
+              action.targetId,
+              progressionAttempt.attemptId,
+            )
+          ) {
+            actionExecution = actionResult("gather", "completed", "gather");
             instance.lastActivity = Date.now();
           }
           break;
 
         case "pickup":
-          if (await instance.service.executePickup(action.targetId)) {
-            actionExecution = actionResult("pickup", "dispatched", "pickup");
+          if (!progressionAttempt) break;
+          if (
+            await instance.service.executePickup(
+              action.targetId,
+              progressionAttempt.attemptId,
+            )
+          ) {
+            actionExecution = actionResult("pickup", "completed", "pickup");
             instance.lastActivity = Date.now();
           }
           break;
 
         case "lootGravestone": {
+          if (!progressionAttempt) break;
           if (
             await instance.service.executeLootGravestone(
               action.gravestoneId,
-              progressionAttempt?.attemptId,
+              progressionAttempt.attemptId,
             )
           ) {
             actionExecution = actionResult(
@@ -795,8 +825,10 @@ export class AgentBehaviorTicker {
           break;
 
         case "firemake": {
+          if (!progressionAttempt) break;
           const completed = await instance.service.executeFiremake(
             action.logsItemId,
+            progressionAttempt.attemptId,
           );
           if (completed) {
             actionExecution = actionResult("firemake", "completed", "firemake");
@@ -920,6 +952,7 @@ export class AgentBehaviorTicker {
           break;
 
         case "bury": {
+          if (!progressionAttempt) break;
           const burial = await executeOrdinaryBoneBurial(
             instance,
             action.itemId,
@@ -940,8 +973,23 @@ export class AgentBehaviorTicker {
           }
           break;
 
+        case "setAutocast":
+          if (await instance.service.executeSetAutocast(action.spellId)) {
+            actionExecution = actionResult(
+              "setAutocast",
+              "completed",
+              "setAutocast",
+            );
+            instance.lastActivity = Date.now();
+          }
+          break;
+
         case "cook": {
-          const cooked = await instance.service.executeCook(action.itemId);
+          if (!progressionAttempt) break;
+          const cooked = await instance.service.executeCook(
+            action.itemId,
+            progressionAttempt.attemptId,
+          );
           if (cooked) {
             actionExecution = actionResult("cook", "completed", "cook");
             instance.lastActivity = Date.now();
@@ -950,7 +998,11 @@ export class AgentBehaviorTicker {
         }
 
         case "smelt": {
-          const completed = await instance.service.executeSmelt(action.recipe);
+          if (!progressionAttempt) break;
+          const completed = await instance.service.executeSmelt(
+            action.recipe,
+            progressionAttempt.attemptId,
+          );
           if (completed) {
             actionExecution = actionResult("smelt", "completed", "smelt");
             instance.lastActivity = Date.now();
@@ -959,7 +1011,11 @@ export class AgentBehaviorTicker {
         }
 
         case "smith": {
-          const completed = await instance.service.executeSmith(action.recipe);
+          if (!progressionAttempt) break;
+          const completed = await instance.service.executeSmith(
+            action.recipe,
+            progressionAttempt.attemptId,
+          );
           if (completed) {
             actionExecution = actionResult("smith", "completed", "smith");
             instance.lastActivity = Date.now();
@@ -968,8 +1024,10 @@ export class AgentBehaviorTicker {
         }
 
         case "runecraft": {
+          if (!progressionAttempt) break;
           const completed = await instance.service.executeRunecraft(
             action.runeType,
+            progressionAttempt.attemptId,
           );
           if (completed) {
             actionExecution = actionResult(
@@ -983,9 +1041,11 @@ export class AgentBehaviorTicker {
         }
 
         case "craft": {
+          if (!progressionAttempt) break;
           const completed = await instance.service.executeCraft(
             action.recipeId,
             action.quantity ?? 1,
+            progressionAttempt.attemptId,
           );
           if (completed) {
             actionExecution = actionResult("craft", "completed", "craft");
@@ -995,9 +1055,11 @@ export class AgentBehaviorTicker {
         }
 
         case "fletch": {
+          if (!progressionAttempt) break;
           const completed = await instance.service.executeFletch(
             action.recipeId,
             action.quantity ?? 1,
+            progressionAttempt.attemptId,
           );
           if (completed) {
             actionExecution = actionResult("fletch", "completed", "fletch");
@@ -1007,9 +1069,11 @@ export class AgentBehaviorTicker {
         }
 
         case "tan": {
+          if (!progressionAttempt) break;
           const completed = await instance.service.executeTan(
             action.inputItemId,
             action.quantity ?? 1,
+            progressionAttempt.attemptId,
           );
           if (completed) {
             actionExecution = actionResult("tan", "completed", "tan");
@@ -1019,6 +1083,7 @@ export class AgentBehaviorTicker {
         }
 
         case "storeBuy": {
+          if (!progressionAttempt) break;
           const purchase = await executeOrdinaryStoreBuy(
             instance,
             action.storeId,
@@ -1039,6 +1104,7 @@ export class AgentBehaviorTicker {
         }
 
         case "bankDepositAll": {
+          if (!progressionAttempt) break;
           const banking = await executeOrdinaryBankDepositSurplus(
             instance,
             action.bankId,
@@ -1060,6 +1126,7 @@ export class AgentBehaviorTicker {
         }
 
         case "bankWithdraw": {
+          if (!progressionAttempt) break;
           const banking = await executeOrdinaryBankStageMaterials(
             instance,
             action.bankId,
@@ -1108,6 +1175,23 @@ export class AgentBehaviorTicker {
       console.warn(
         `[AgentManager] Action ${action.type} failed for ${characterId}: ${errMsg(error)}`,
       );
+    }
+
+    if (
+      !resultIsStale() &&
+      actionExecution.appliedActionType !== null &&
+      actionExecution.appliedActionType !== "gather"
+    ) {
+      // A successfully applied non-gather action closes the old gathering
+      // phase. Keep the throttle across idle/rejected decisions, but do not
+      // strand immediate burn or material recovery after moving/processing.
+      instance.lastGatherTargetId = null;
+      instance.lastGatherQueuedAt = 0;
+    } else if (
+      actionExecution.appliedActionType !== "gather" ||
+      resultIsStale()
+    ) {
+      restoreUncommittedGatherThrottle();
     }
 
     if (resultIsStale()) {
@@ -1225,6 +1309,8 @@ export class AgentBehaviorTicker {
         return `Training Prayer with ${action.itemId}.`;
       case "equip":
         return `Equipping ${action.itemId}.`;
+      case "setAutocast":
+        return `Preparing combat spell ${action.spellId}.`;
       case "navigateTo":
         return `Navigating to ${action.destination}.`;
       case "bankDepositAll":
@@ -1232,7 +1318,9 @@ export class AgentBehaviorTicker {
       case "bankWithdraw":
         return instance.goal?.bankPurpose === "survival_food"
           ? "Staging survival food from private bank."
-          : "Staging an authored processing batch from bank.";
+          : instance.goal?.bankPurpose === "combat_supply"
+            ? "Checking exact combat supplies in private bank."
+            : "Staging an authored processing batch from bank.";
       case "homeTeleport":
         return "Teleporting home.";
       case "stop":

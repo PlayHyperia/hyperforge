@@ -51,6 +51,7 @@ import type { TerrainTile } from "../../../types/world/terrain";
 import type { Wind } from "./Wind";
 import { FOG_NEAR_SQ, FOG_FAR_SQ, fogRenderTarget } from "./FogConfig";
 import { SUN_SHADE, NIGHT, applySunShade } from "./LightingConfig";
+import { WorldIlluminationUniforms } from "./WorldIlluminationUniforms";
 import { TERRAIN_CONSTANTS } from "../../../constants/GameConstants";
 
 // ============================================================================
@@ -163,14 +164,17 @@ const WAVES: WaveParams[] = [
 
 type UniformFloat = UniformNode<"float", number>;
 type UniformVec3 = UniformNode<"vec3", THREE.Vector3>;
+type UniformColor = UniformNode<"color", THREE.Color>;
 
 export type WaterUniforms = {
+  illumination: WorldIlluminationUniforms;
   time: UniformFloat;
   sunDirection: UniformVec3;
   windStrength: UniformFloat;
   reflectionIntensity: UniformFloat;
   dayIntensity: UniformFloat;
   sunIntensity: UniformFloat;
+  shadeColor: UniformColor;
 };
 
 /**
@@ -244,6 +248,20 @@ export class WaterSystem {
 
   get waterUniforms(): WaterUniforms | null {
     return this.uniforms;
+  }
+
+  /**
+   * Snapshot of both live uniform records, including materials with no meshes.
+   * Record references are read-only; the existing uniform values remain live.
+   * Read again after initialization or destruction to discover current records.
+   */
+  get waterUniformsByType(): Readonly<
+    Record<WaterBodyType, Readonly<WaterUniforms> | null>
+  > {
+    return Object.freeze({
+      lake: this.uniforms,
+      ocean: this.oceanUniforms,
+    });
   }
 
   /**
@@ -604,6 +622,7 @@ export class WaterSystem {
    * MeshStandardNodeMaterial + outputNode override + applySunShade + nightDim.
    */
   private createLakeMaterial(): MeshStandardNodeMaterial {
+    const illumination = new WorldIlluminationUniforms();
     const uTime = uniform(0);
     const uSunDir = uniform(new THREE.Vector3(0.4, 0.8, 0.4));
     const uWind = uniform(1.0);
@@ -616,12 +635,14 @@ export class WaterSystem {
     );
 
     this.uniforms = {
+      illumination,
       time: uTime,
       sunDirection: uSunDir,
       windStrength: uWind,
       reflectionIntensity: uReflectionIntensity,
       dayIntensity: uDayIntensity,
       sunIntensity: uSunIntensity,
+      shadeColor: uShadeColor,
     };
 
     const material = new MeshStandardNodeMaterial();
@@ -953,6 +974,64 @@ export class WaterSystem {
       const nightDim = mix(float(NIGHT.BRIGHTNESS), float(1.0), dayFactor);
       color = mul(color, nightDim);
 
+      // Opt-in custom radiometry: light the dominant depth/scatter contribution,
+      // not merely the old small white Phong term. Reuse existing normal samples.
+      // Planar reflection is already radiance and is NOT multiplied by diffuse
+      // fill. Keep its existing Fresnel/strength/mix; no new reflection capture.
+      const worldDiffuse = illumination.diffuse(waterColor, surfaceNormal);
+      const worldScatter = mul(
+        worldDiffuse,
+        max(dot(surfaceNormal, V), float(0)),
+      );
+      const worldKey = normalize(illumination.keyDirection);
+      const worldNdotL = dot(surfaceNormal, worldKey);
+      const worldReflectDir = normalize(
+        add(
+          mul(worldKey, float(-1)),
+          mul(surfaceNormal, mul(float(2), worldNdotL)),
+        ),
+      );
+      // Retained Phong-shaped approximation, not an energy-conserving BRDF:
+      // actual key direction/color and no below-surface direct highlight.
+      const worldSpecular = mul(
+        vec3(illumination.keyColor),
+        mul(
+          pow(
+            max(dot(V, worldReflectDir), float(0)),
+            float(WATER.SPECULAR_SHININESS),
+          ),
+          mul(float(WATER.SPECULAR_STRENGTH), max(worldNdotL, float(0))),
+        ),
+      );
+      const worldReflect = add(
+        add(
+          mul(illumination.fillRadiance(), float(0.1)),
+          mul(reflectionSample, float(0.9)),
+        ),
+        mul(reflectionSample, worldSpecular),
+      );
+      let worldColor = mix(
+        mix(
+          add(
+            mul(worldDiffuse, float(0.3 * WATER.DIFFUSE_STRENGTH)),
+            worldScatter,
+          ),
+          mul(worldReflect, uReflectionIntensity),
+          reflectance,
+        ),
+        worldDiffuse,
+        float(0.8),
+      );
+      worldColor = mix(
+        worldColor,
+        illumination.diffuse(
+          vec3(WATER.FOAM_COLOR.r, WATER.FOAM_COLOR.g, WATER.FOAM_COLOR.b),
+          surfaceNormal,
+        ),
+        clamp(foamIntensity, float(0), float(WATER.FOAM_MAX_OPACITY)),
+      );
+      color = illumination.select(color, worldColor);
+
       // --- Fog ---
       const toCam = sub(cameraPosition, wp);
       const fogDistSq = dot(toCam, toCam);
@@ -976,6 +1055,7 @@ export class WaterSystem {
    * Uses MeshBasicNodeMaterial with ALL computation in outputNode (no PBR).
    */
   private createOceanMaterial(): MeshStandardNodeMaterial {
+    const illumination = new WorldIlluminationUniforms();
     const uTime = uniform(0);
     const uSunDir = uniform(new THREE.Vector3(0.4, 0.8, 0.4));
     const uWind = uniform(1.2);
@@ -986,12 +1066,14 @@ export class WaterSystem {
     const fogTexNode = texture(fogRenderTarget.texture, screenUV);
 
     this.oceanUniforms = {
+      illumination,
       time: uTime,
       sunDirection: uSunDir,
       windStrength: uWind,
       reflectionIntensity: uReflectionIntensity,
       dayIntensity: uDayIntensity,
       sunIntensity: uSunIntensity,
+      shadeColor: uShadeColor,
     };
 
     const material = new MeshStandardNodeMaterial();
@@ -1274,6 +1356,33 @@ export class WaterSystem {
       const dayFactor = div(clamp(uSunIntensity, float(0), float(2)), float(2));
       const nightDim = mix(float(NIGHT.BRIGHTNESS), float(1.0), dayFactor);
       color = mul(color, nightDim);
+
+      // Same diffuse convention as lake/trees, including depth color and foam.
+      // Ocean has no environment/reflection sampler: replace its fixed blue
+      // Fresnel surrogate with isotropic fill radiance, not a PBR/IBL claim.
+      const worldDiffuse = illumination.diffuse(waterColor, surfaceNormal);
+      const worldScatter = mul(
+        worldDiffuse,
+        max(dot(surfaceNormal, V), float(0)),
+      );
+      let worldColor = mix(
+        add(
+          mul(worldDiffuse, float(0.3 * WATER.DIFFUSE_STRENGTH)),
+          worldScatter,
+        ),
+        worldDiffuse,
+        float(0.8),
+      );
+      worldColor = add(
+        worldColor,
+        mul(illumination.fillRadiance(), mul(fresnelSky, float(0.2))),
+      );
+      worldColor = mix(
+        worldColor,
+        illumination.diffuse(vec3(0.9, 0.91, 0.96), surfaceNormal),
+        clamp(foamIntensity, float(0), float(0.75)),
+      );
+      color = illumination.select(color, worldColor);
 
       // --- Fog ---
       const toCam = sub(cameraPosition, wp);

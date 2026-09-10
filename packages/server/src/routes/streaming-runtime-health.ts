@@ -10,7 +10,10 @@ export type KeeperRuntimeObservation = {
   observedAt: number | null;
   error: string | null;
   reasons: string[];
+  correlationIds: string[];
 };
+
+const DUEL_CORRELATION_ID = /^[0-9a-f]{64}$/u;
 
 function keeperReadinessReasons(value: unknown): string[] {
   if (!Array.isArray(value)) return [];
@@ -25,6 +28,21 @@ function keeperReadinessReasons(value: unknown): string[] {
   ];
 }
 
+function keeperCorrelationIds(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return [
+    ...new Set(
+      value.filter(
+        (correlationId): correlationId is string =>
+          typeof correlationId === "string" &&
+          DUEL_CORRELATION_ID.test(correlationId),
+      ),
+    ),
+  ]
+    .sort()
+    .slice(0, 64);
+}
+
 export type StreamingRuntimeHealth = {
   ready: boolean;
   emittedAt: number;
@@ -37,6 +55,7 @@ export type StreamingRuntimeHealth = {
     audio: StreamingRuntimeCheck;
     rtmpDelivery: StreamingRuntimeCheck;
     keeper: StreamingRuntimeCheck;
+    projectileCostCustody: StreamingRuntimeCheck;
   };
 };
 
@@ -75,6 +94,16 @@ export function evaluateStreamingRuntimeHealth(input: {
   deliveryObservedAt: number | null;
   keeper: KeeperRuntimeObservation;
   keeperMaxAgeMs: number;
+  projectileCostCustody: {
+    healthy: boolean;
+    status:
+      | "healthy"
+      | "processing"
+      | "stalled"
+      | "invalid"
+      | "unavailable"
+      | "timeout";
+  };
 }): StreamingRuntimeHealth {
   const feedAgeMs =
     input.feedObservedAt == null
@@ -147,6 +176,11 @@ export function evaluateStreamingRuntimeHealth(input: {
             : "keeper_not_ready",
       input.keeper.observedAt,
     ),
+    projectileCostCustody: check(
+      input.projectileCostCustody.healthy,
+      `projectile_cost_custody_${input.projectileCostCustody.status}`,
+      input.nowMs,
+    ),
   };
 
   return {
@@ -182,6 +216,7 @@ export async function loadKeeperRuntimeObservation(input: {
       observedAt: null,
       error: null,
       reasons: [],
+      correlationIds: [],
     };
   }
 
@@ -206,6 +241,7 @@ export async function loadKeeperRuntimeObservation(input: {
         ? payload.now
         : Date.now();
     const reasons = keeperReadinessReasons(readiness?.reasons);
+    const correlationIds = keeperCorrelationIds(payload.correlationIds);
     if (!response.ok) {
       return {
         configured: true,
@@ -213,6 +249,7 @@ export async function loadKeeperRuntimeObservation(input: {
         observedAt,
         error: `HTTP ${response.status}`,
         reasons,
+        correlationIds,
       };
     }
     return {
@@ -221,6 +258,7 @@ export async function loadKeeperRuntimeObservation(input: {
       observedAt,
       error: null,
       reasons,
+      correlationIds,
     };
   } catch (error) {
     return {
@@ -234,6 +272,7 @@ export async function loadKeeperRuntimeObservation(input: {
             ? error.message
             : "request failed",
       reasons: [],
+      correlationIds: [],
     };
   } finally {
     clearTimeout(timeoutId);

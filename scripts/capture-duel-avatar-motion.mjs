@@ -15,6 +15,9 @@ import { fileURLToPath } from "node:url";
 import { build } from "esbuild";
 import puppeteer from "puppeteer";
 
+import { validateDuelAvatarMotionDefinition } from "./lib/duel-avatar-motion-manifest.mjs";
+import { validateDuelMotionEquipmentSetManifest } from "./lib/duel-motion-equipment-set.mjs";
+
 const MOTIONS = Object.freeze([
   {
     id: "idle",
@@ -95,6 +98,20 @@ const MOTIONS = Object.freeze([
   },
 ]);
 
+const PRODUCTION_VRM_OVERLAP_ASSETS = Object.freeze({
+  authoredMotion: "emotes/emote_sword_swing.glb",
+  idleMotion: "emotes/emote-idle.glb",
+});
+
+const PRODUCTION_VRM_OVERLAP_SOURCES = Object.freeze([
+  "scripts/capture-duel-avatar-motion.mjs",
+  "scripts/duel-avatar-motion-browser.ts",
+  "packages/shared/src/extras/three/createVRMFactory.ts",
+  "packages/shared/src/extras/three/createEmoteFactory.ts",
+  "packages/shared/src/extras/three/AvatarAuthoredMotionDiagnostics.ts",
+  "packages/shared/src/extras/three/PlayerHitReactionController.ts",
+]);
+
 function sha256(buffer) {
   return createHash("sha256").update(buffer).digest("hex");
 }
@@ -121,19 +138,26 @@ function parseCliArgs(argv) {
   const options = {};
   for (let index = 0; index < argv.length; index += 1) {
     const argument = argv[index];
-    if (
+    if (argument === "--production-vrm-overlap") {
+      options.productionVrmOverlap = true;
+    } else if (
       argument === "--avatar" ||
       argument === "--equipment" ||
+      argument === "--equipment-set" ||
       argument === "--item-id" ||
       argument === "--equipment-slot" ||
       argument === "--avatar-id" ||
       argument === "--grip" ||
+      argument === "--assets-root" ||
+      argument === "--motions" ||
+      argument === "--title" ||
       argument === "--output" ||
       argument === "--report"
     ) {
       const value = argv[index + 1];
       if (!value) throw new Error(`${argument} requires a path`);
-      options[argument.slice(2)] = value;
+      options[argument === "--assets-root" ? "assetsRoot" : argument.slice(2)] =
+        value;
       index += 1;
     } else {
       throw new Error(`Unknown argument: ${argument}`);
@@ -180,13 +204,15 @@ function html(config) {
   </head>
   <body>
     <header>
-      <h1>Steve canonical-rig motion audit</h1>
-      <p>Actual Hyperia retargeting and additive hit feedback · fixed representative poses · source registry unchanged</p>
+      <h1></h1>
+      <p></p>
     </header>
     <main></main>
     <script type="module">
       import { runDuelAvatarMotionAudit } from "/motion-audit.js";
       try {
+        document.querySelector("h1").textContent = ${JSON.stringify(config.title ?? "Hyperia canonical-rig motion audit")};
+        document.querySelector("header p").textContent = ${JSON.stringify(config.subtitle ?? "Actual Hyperia retargeting and additive hit feedback · fixed representative poses · source registry unchanged")};
         window.__motionReport = await runDuelAvatarMotionAudit(${serialized});
         document.body.dataset.ready = "true";
       } catch (error) {
@@ -206,7 +232,60 @@ async function main() {
     path.dirname(fileURLToPath(import.meta.url)),
     "..",
   );
-  const assetsRoot = path.join(workspaceRoot, "packages/server/world/assets");
+  const assetsRoot = resolveWorkspacePath(
+    workspaceRoot,
+    options.assetsRoot,
+    "packages/server/world/assets",
+    "Assets root",
+  );
+  let motions = MOTIONS;
+  let motionTitle;
+  let framing = "avatar";
+  let motionManifestPath;
+  if (options.motions) {
+    motionManifestPath = resolveWorkspacePath(
+      workspaceRoot,
+      options.motions,
+      "",
+      "Motion manifest",
+    );
+    const motionManifest = JSON.parse(readFileSync(motionManifestPath, "utf8"));
+    const environment = motionManifest.environment;
+    if (
+      motionManifest.schemaVersion !== 1 ||
+      !Array.isArray(motionManifest.motions) ||
+      motionManifest.motions.length === 0 ||
+      (motionManifest.framing !== undefined &&
+        !["avatar", "avatar-and-equipment"].includes(motionManifest.framing)) ||
+      (environment !== undefined &&
+        (typeof environment !== "object" ||
+          environment === null ||
+          !Number.isFinite(environment.waterSurfaceBelowFeet) ||
+          environment.waterSurfaceBelowFeet <= 0 ||
+          environment.waterSurfaceBelowFeet > 2))
+    ) {
+      throw new Error(
+        "Motion manifest must use schemaVersion 1 with motions and a supported framing mode",
+      );
+    }
+    motions = motionManifest.motions.map((motion, index) => {
+      if (!validateDuelAvatarMotionDefinition(motion)) {
+        throw new Error(`Motion manifest entry ${index} is invalid`);
+      }
+      return motion;
+    });
+    motionTitle = motionManifest.title;
+    framing = motionManifest.framing ?? "avatar";
+    if (
+      motions.some((motion) => motion.waterContact !== undefined) &&
+      environment === undefined
+    ) {
+      throw new Error(
+        "Water-contact motion expectations require an environment",
+      );
+    }
+    options.environment = environment;
+  }
   const avatarPath = resolveWorkspacePath(
     assetsRoot,
     options.avatar,
@@ -219,48 +298,99 @@ async function main() {
     .relative(assetsRoot, avatarPath)
     .split(path.sep)
     .join("/");
-  let equipment = null;
-  if (options.equipment) {
+  const resolveEquipment = (definition) => {
     const equipmentPath = resolveWorkspacePath(
       assetsRoot,
-      options.equipment,
+      definition.asset,
       "",
       "Equipment path",
     );
     if (!existsSync(equipmentPath)) {
       throw new Error(`Equipment is missing: ${equipmentPath}`);
     }
-    const itemId = options["item-id"];
-    const avatarId = options["avatar-id"] ?? "steve";
-    const slot = options["equipment-slot"] ?? "weapon";
-    const grip = options.grip ?? "one-hand";
-    const safeId = /^[a-zA-Z0-9_-]+$/u;
-    if (!itemId || !safeId.test(itemId)) {
-      throw new Error("--item-id must be a safe competitive item ID");
-    }
-    if (!safeId.test(avatarId)) {
-      throw new Error("--avatar-id must be a safe competitive avatar ID");
-    }
-    if (slot !== "weapon" && slot !== "shield") {
-      throw new Error("--equipment-slot must be weapon or shield");
-    }
-    if (grip !== "one-hand" && grip !== "two-hand") {
-      throw new Error("--grip must be one-hand or two-hand");
-    }
-    equipment = {
+    return {
       asset: path.relative(assetsRoot, equipmentPath).split(path.sep).join("/"),
       sha256: sha256(readFileSync(equipmentPath)),
-      itemId,
-      avatarId,
-      slot,
-      grip,
+      itemId: definition.itemId,
+      avatarId: definition.avatarId,
+      slot: definition.slot,
+      grip: definition.grip,
     };
+  };
+  let equipment = null;
+  let equipments = null;
+  let equipmentSetTitle;
+  let equipmentSetManifestPath;
+  if (options["equipment-set"]) {
+    if (
+      options.equipment ||
+      options["item-id"] ||
+      options["equipment-slot"] ||
+      options["avatar-id"] ||
+      options.grip
+    ) {
+      throw new Error(
+        "--equipment-set cannot be combined with single-equipment arguments",
+      );
+    }
+    equipmentSetManifestPath = resolveWorkspacePath(
+      workspaceRoot,
+      options["equipment-set"],
+      "",
+      "Equipment-set manifest",
+    );
+    const equipmentSet = validateDuelMotionEquipmentSetManifest(
+      JSON.parse(readFileSync(equipmentSetManifestPath, "utf8")),
+    );
+    equipmentSetTitle = equipmentSet.title;
+    equipments = equipmentSet.equipments.map(resolveEquipment);
+  } else if (options.equipment) {
+    const equipmentSet = validateDuelMotionEquipmentSetManifest({
+      schemaVersion: 1,
+      equipments: [
+        {
+          asset: options.equipment,
+          itemId: options["item-id"],
+          avatarId: options["avatar-id"] ?? "steve",
+          slot: options["equipment-slot"] ?? "weapon",
+          grip: options.grip ?? "one-hand",
+        },
+      ],
+    });
+    equipment = resolveEquipment(equipmentSet.equipments[0]);
+  } else if (
+    options["item-id"] ||
+    options["equipment-slot"] ||
+    options["avatar-id"] ||
+    options.grip
+  ) {
+    throw new Error("Single-equipment metadata requires --equipment");
   }
-  for (const motion of MOTIONS) {
-    if (!existsSync(path.join(assetsRoot, motion.asset))) {
+  for (const motion of motions) {
+    const motionPath = safePath(assetsRoot, motion.asset);
+    if (!motionPath || !existsSync(motionPath)) {
       throw new Error(`Motion asset is missing: ${motion.asset}`);
     }
   }
+  const productionVrmOverlap = options.productionVrmOverlap
+    ? Object.fromEntries(
+        Object.entries(PRODUCTION_VRM_OVERLAP_ASSETS).map(([key, asset]) => {
+          const assetPath = safePath(assetsRoot, asset);
+          if (!assetPath || !existsSync(assetPath)) {
+            throw new Error(
+              `Production VRM overlap asset is missing: ${asset}`,
+            );
+          }
+          return [
+            key,
+            {
+              asset,
+              sha256: sha256(readFileSync(assetPath)),
+            },
+          ];
+        }),
+      )
+    : null;
   const outputPath = resolveWorkspacePath(
     workspaceRoot,
     options.output,
@@ -292,8 +422,18 @@ async function main() {
   const config = {
     avatarAsset,
     avatarSha256: sha256(readFileSync(avatarPath)),
-    motions: MOTIONS,
-    equipment,
+    motions,
+    framing,
+    ...(options.environment ? { environment: options.environment } : {}),
+    ...(equipment ? { equipment } : {}),
+    ...(equipments ? { equipments } : {}),
+    ...(productionVrmOverlap ? { productionVrmOverlap } : {}),
+    title: options.title ?? equipmentSetTitle ?? motionTitle,
+    subtitle: equipmentSetTitle
+      ? `${motionTitle ?? "Canonical-rig motion matrix"} · combined production attachment path · active registry unchanged`
+      : options.motions
+        ? "Isolated non-AI candidate · combat, preparation, and reaction poses · active registry unchanged"
+        : undefined,
   };
   const server = createServer((request, response) => {
     try {
@@ -349,7 +489,27 @@ async function main() {
     const executablePath =
       process.env.PUPPETEER_EXECUTABLE_PATH ??
       (existsSync(systemChrome) ? systemChrome : undefined);
-    browser = await puppeteer.launch({ headless: true, executablePath });
+    if (!executablePath || !existsSync(executablePath)) {
+      throw new Error(
+        "Motion acceptance requires an explicit installed Chrome executable",
+      );
+    }
+    browser = await puppeteer.launch({
+      headless: false,
+      executablePath,
+      args: ["--enable-unsafe-webgpu", "--use-angle=metal"],
+    });
+    const browserProcess = browser.process();
+    if (
+      !browserProcess?.pid ||
+      browserProcess.spawnargs.some((argument) =>
+        argument.startsWith("--headless"),
+      )
+    ) {
+      throw new Error(
+        "Motion acceptance requires a witnessed headful Chrome process",
+      );
+    }
     const page = await browser.newPage();
     await page.setViewport({ width: 1600, height: 1200, deviceScaleFactor: 1 });
     const browserErrors = [];
@@ -361,24 +521,89 @@ async function main() {
       waitUntil: "networkidle0",
       timeout: 120_000,
     });
-    await page.waitForFunction(
-      () =>
-        document.body.dataset.ready === "true" || document.body.dataset.error,
-      { timeout: 120_000 },
-    );
+    try {
+      await page.waitForFunction(
+        () =>
+          document.body.dataset.ready === "true" || document.body.dataset.error,
+        { timeout: 120_000 },
+      );
+    } catch (error) {
+      const diagnostics = await page.evaluate(() => ({
+        ready: document.body.dataset.ready ?? null,
+        error: document.body.dataset.error ?? null,
+        text: document.body.innerText.slice(0, 2_000),
+      }));
+      throw new Error(
+        `Motion audit readiness timed out: ${JSON.stringify({
+          diagnostics,
+          browserErrors: [...new Set(browserErrors)],
+          cause: error instanceof Error ? error.message : String(error),
+        })}`,
+      );
+    }
     const pageError = await page.evaluate(() => document.body.dataset.error);
     if (pageError) throw new Error(pageError);
     const report = await page.evaluate(() => window.__motionReport);
+    if (
+      typeof report?.userAgent !== "string" ||
+      /HeadlessChrome/u.test(report.userAgent)
+    ) {
+      throw new Error(
+        "Motion acceptance rejects missing or headless browser identity",
+      );
+    }
+    if (report?.rendererBackend !== "webgpu") {
+      throw new Error(
+        `Motion audit did not report WebGPU: ${JSON.stringify(report?.rendererBackend ?? null)}`,
+      );
+    }
+    report.browserLaunch = {
+      headless: false,
+      executablePath,
+      version: await browser.version(),
+      pid: browserProcess.pid,
+      angle: "metal",
+    };
     report.browserErrors = [...new Set(browserErrors)];
+    report.browserBundle = {
+      sha256: sha256(bundle),
+      byteLength: bundle.length,
+    };
     report.inputs = Object.fromEntries(
       [
         avatarAsset,
-        ...MOTIONS.map((motion) => motion.asset),
+        ...motions.map((motion) => motion.asset),
         ...(equipment ? [equipment.asset] : []),
+        ...(equipments ?? []).map((entry) => entry.asset),
+        ...(productionVrmOverlap
+          ? Object.values(productionVrmOverlap).map((entry) => entry.asset)
+          : []),
       ].map((asset) => [
         asset,
         sha256(readFileSync(path.join(assetsRoot, asset))),
       ]),
+    );
+    report.manifests = Object.fromEntries(
+      [
+        motionManifestPath
+          ? [
+              "motions",
+              {
+                path: path.relative(workspaceRoot, motionManifestPath),
+                sha256: sha256(readFileSync(motionManifestPath)),
+              },
+            ]
+          : null,
+        equipmentSetManifestPath
+          ? [
+              "equipmentSet",
+              {
+                path: path.relative(workspaceRoot, equipmentSetManifestPath),
+                sha256: sha256(readFileSync(equipmentSetManifestPath)),
+              },
+            ]
+          : null,
+      ].filter(Boolean),
     );
     if (report.browserErrors.length > 0) {
       report.failures.push(
@@ -386,6 +611,32 @@ async function main() {
       );
     }
     const screenshot = await page.screenshot({ fullPage: true, type: "png" });
+    report.contactSheet = {
+      path: path.relative(workspaceRoot, outputPath),
+      sha256: sha256(screenshot),
+      byteLength: screenshot.length,
+      mimeType: "image/png",
+    };
+    if (report.productionVrmOverlap) {
+      report.productionVrmOverlap.executionSource = {
+        browserBundle: {
+          sha256: sha256(bundle),
+          byteLength: bundle.length,
+        },
+        files: Object.fromEntries(
+          PRODUCTION_VRM_OVERLAP_SOURCES.map((sourcePath) => [
+            sourcePath,
+            sha256(readFileSync(path.join(workspaceRoot, sourcePath))),
+          ]),
+        ),
+      };
+      report.productionVrmOverlap.screenshotEvidence = {
+        ...report.contactSheet,
+        evidenceCardIds: report.productionVrmOverlap.snapshots.map(
+          (snapshot) => snapshot.id,
+        ),
+      };
+    }
     writeAtomic(outputPath, screenshot);
     writeAtomic(reportPath, `${JSON.stringify(report, null, 2)}\n`);
     if (report.failures.length > 0) {
@@ -394,7 +645,7 @@ async function main() {
       );
     }
     console.log(
-      `Passed ${report.motions.length} Steve motions; report ${reportPath}; contact sheet ${outputPath}`,
+      `Passed ${report.motions.length} avatar motions${report.productionVrmOverlap ? " plus production VRM authored-motion overlap proof" : ""}; report ${reportPath}; contact sheet ${outputPath}`,
     );
   } finally {
     await browser?.close();

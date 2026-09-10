@@ -41,6 +41,7 @@ import type {
   ExternalAgentBankActionReceipt,
   ExternalAgentBankEnvelope,
   ExternalAgentBankRetainedItem,
+  GroundItemDropResult,
   HyperiaServiceInterface,
   WorldMapData,
 } from "../types.js";
@@ -66,15 +67,23 @@ import {
   formatUntrustedPromptData,
   normalizeUntrustedPromptText,
   parseExactAllowedToken,
+  parseOneJsonObject,
 } from "../utils/prompt-safety.js";
 import { AgentLiveKit } from "../systems/liveKit.js";
+import { getExternalAgentExecutableBuildIdentity } from "../externalAgentBuildIdentity.js";
 import {
   getPacketId as sharedGetPacketId,
   getPacketName as sharedGetPacketName,
+  MAX_EXTERNAL_DUEL_PREPARATION_OPPONENT_HISTORY,
+  normalizeExternalDuelPreparationPlanStrategyDecision,
+  normalizeExternalDuelPreparationStrategyRequest,
   normalizeProcessingRequestEnvelope,
   normalizeProcessingRequestId,
 } from "@hyperforge/shared";
 import type {
+  ExternalDuelPreparationStrategyDecision,
+  ExternalDuelPreparationStrategyRequest,
+  ExternalDuelPreparationStrategyResponse,
   ProcessingRequestEnvelope,
   ProcessingSkill,
   RecoverableProcessingRequest,
@@ -83,6 +92,90 @@ import type {
 // msgpackr instances for binary packet encoding/decoding
 const packr = new Packr({ structuredClone: true });
 const unpackr = new Unpackr();
+const UUID_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
+const PROCESS_DUEL_PREPARATION_HOST_OWNER_ID = randomUUID();
+
+export function buildExternalDuelPreparationStrategyPrompt(
+  request: ExternalDuelPreparationStrategyRequest,
+): string {
+  const deterministicOption = request.preparationOptions.find(
+    (option) => option.planOptionId === request.deterministicPlanOptionId,
+  );
+  if (!deterministicOption) {
+    throw new Error("external duel preparation fallback option missing");
+  }
+  const deterministicFoodOption =
+    request.deterministicFoodOptionId === null
+      ? null
+      : request.foodOptions.find(
+          (option) => option.foodOptionId === request.deterministicFoodOptionId,
+        );
+  if (
+    (request.foodOptions.length === 0) !==
+      (request.deterministicFoodOptionId === null) ||
+    (request.foodOptions.length > 0 && !deterministicFoodOption)
+  ) {
+    throw new Error("external duel preparation fallback food option missing");
+  }
+  const deterministicArmorOption = request.armorOptions.find(
+    (option) =>
+      option.armorOptionId === request.deterministicArmorOptionId &&
+      option.planOptionId === deterministicOption.planOptionId,
+  );
+  if (!deterministicArmorOption) {
+    throw new Error("external duel preparation fallback armor option missing");
+  }
+  return [
+    "Choose one server-certified preparation candidate and one bounded tactical strategy for this autonomous agent.",
+    "This decision is frozen before any public market. Each opaque option maps to an owned, legal weapon and required attack supplies; the server alone revalidates and atomically commits the selected whole plan.",
+    `Choose planOptionId exactly from ${JSON.stringify(request.preparationOptions.map((option) => option.planOptionId))}.`,
+    request.foodOptions.length > 0
+      ? `Choose foodOptionId exactly from ${JSON.stringify(request.foodOptions.map((option) => option.foodOptionId))}.`
+      : "Choose foodOptionId as JSON null because no owned healing-item option exists.",
+    `Choose armorOptionId exactly from ${JSON.stringify(request.armorOptions.map((option) => option.armorOptionId))}; it must belong to the selected planOptionId.`,
+    `Choose primaryStyle exactly from ${JSON.stringify(request.availableRoles)}.`,
+    "primaryStyle must match the selected weapon option. styleRank 1 is the strongest server-ranked weapon for that style; attackSupplyUnits is prepared ammunition or casts and is null for melee; canUseShield describes the opening weapon.",
+    "For food options, recoveryRank 1 is the strongest server-ranked owned healing item and quantity is the server-fixed carried count. You may choose identity, not alter quantity.",
+    "For armor options, offenseRank, focusedDefenseRank, and totalDefenseRank are relative full-loadout ranks scoped to that weapon plan; rank 1 is highest. focusedDefenseRank is null when no verified opponent-style history exists.",
+    `The matchup summary contains at most ${MAX_EXTERNAL_DUEL_PREPARATION_OPPONENT_HISTORY} verified newest-first outcomes with only opening styles and terminal reason; identifiers, timestamps, damage, equipment, and custody are intentionally absent.`,
+    `Choose preferredCombatRole as JSON null or exactly one of ${JSON.stringify(request.availableRoles)}.`,
+    `Choose prayer as JSON null or exactly one of ${JSON.stringify(request.availablePrayerIds)}.`,
+    "Do not invent or request item identifiers, quantities, bank actions, direct game actions, or rule changes. Do not reveal private chain-of-thought; both text fields must be concise public-safe summaries.",
+    JSON.stringify({
+      armorOptionId: deterministicArmorOption.armorOptionId,
+      planOptionId: deterministicOption.planOptionId,
+      foodOptionId: deterministicFoodOption?.foodOptionId ?? null,
+      primaryStyle: deterministicOption.primaryStyle,
+      reason: "brief public-safe preparation choice",
+      tacticalStrategy: {
+        approach: "balanced",
+        attackStyle: "aggressive",
+        foodThreshold: 40,
+        prayer: null,
+        preferredCombatRole: null,
+        reasoning: "brief public-safe tactical summary",
+        switchDefensiveAt: 30,
+        tacticalMacro: "pressure",
+      },
+    }),
+    "Return exactly one JSON object with exactly those keys. foodThreshold must be an integer from 20 through 60 and switchDefensiveAt from 20 through 40.",
+    formatUntrustedPromptData("EXTERNAL_DUEL_STRATEGY_CONTEXT", {
+      agentName: request.agentName,
+      opponentName: request.opponentName,
+      ownPublicProfile: request.ownPublicProfile,
+      opponentPublicProfile: request.opponentPublicProfile,
+      opponentHistorySummary: request.opponentHistorySummary,
+      preparationOptions: request.preparationOptions,
+      foodOptions: request.foodOptions,
+      armorOptions: request.armorOptions,
+      deterministicFallbackPlanOptionId: request.deterministicPlanOptionId,
+      deterministicFallbackFoodOptionId: request.deterministicFoodOptionId,
+      deterministicFallbackArmorOptionId: request.deterministicArmorOptionId,
+      deterministicFallbackRole: request.deterministicRole,
+    }),
+  ].join("\n");
+}
 
 /** WebSocket with an optional tracking identifier tag */
 type TaggedWebSocket = WebSocket & { __wsId?: string };
@@ -221,6 +314,10 @@ export const FALLBACK_PACKET_IDS: Readonly<Record<string, number>> = {
   prayerActionReceipt: 285,
   externalAgentBankTransfer: 286,
   externalAgentBankRecovery: 287,
+  groundItemDropResult: 293,
+  duelPreparationHostLease: 294,
+  duelPreparationStatus: 295,
+  duelPreparationStrategy: 296,
 };
 
 const FALLBACK_PACKET_NAMES: Record<number, string> = Object.fromEntries(
@@ -363,6 +460,13 @@ export function resolveHyperiaApiBaseUrl(wsUrl: string): string {
   }
 }
 
+export function stripHyperiaWebSocketCredentials(baseUrl: string): string {
+  const url = new URL(baseUrl);
+  url.searchParams.delete("authToken");
+  url.searchParams.delete("privyUserId");
+  return url.toString();
+}
+
 let loggedPacketIdFallbackWarning = false;
 let loggedPacketNameFallbackWarning = false;
 
@@ -440,6 +544,16 @@ export class HyperiaService extends Service implements HyperiaServiceInterface {
   >;
   /** Cancels the one in-flight authoritative processing acknowledgement. */
   private cancelPendingProcessingAcknowledgement: (() => void) | null = null;
+  private readonly pendingGroundItemDrops = new Map<
+    string,
+    {
+      itemId: string;
+      quantity: number;
+      slot?: number;
+      promise: Promise<GroundItemDropResult>;
+      cancel: (reason: string) => void;
+    }
+  >();
   private processingRecoveryReady = false;
   private processingRecoveryInFlight: Promise<boolean> | null = null;
   private readonly processingRecoveryResponses = new Map<
@@ -449,6 +563,8 @@ export class HyperiaService extends Service implements HyperiaServiceInterface {
   private static readonly PROCESSING_ACKNOWLEDGEMENT_TIMEOUT_MS = 30_000;
   private static readonly PROCESSING_STATUS_RETRY_MS = 5_000;
   private static readonly PROCESSING_RECOVERY_RESPONSE_TIMEOUT_MS = 5_000;
+  private static readonly GROUND_ITEM_DROP_RETRY_MS = 5_000;
+  private static readonly GROUND_ITEM_DROP_MAX_SENDS = 3;
   private reconnectInterval: NodeJS.Timeout | null = null;
   private autoReconnect: boolean = true;
   private serverUrl: string = resolveDefaultHyperiaServerUrl();
@@ -460,6 +576,8 @@ export class HyperiaService extends Service implements HyperiaServiceInterface {
   private privyUserId: string | undefined;
   private characterId: string | undefined;
   private hasReceivedSnapshot: boolean = false;
+  /** One character-selection/enter-world sequence per WebSocket connection. */
+  private worldJoinPromise: Promise<void> | null = null;
   private pluginEventHandlersRegistered: boolean = false;
   private chatHandlerRegistered: boolean = false;
   private chatProcessingChain: Promise<void> = Promise.resolve();
@@ -502,6 +620,8 @@ export class HyperiaService extends Service implements HyperiaServiceInterface {
   private static readonly BANK_OPERATION_ACK_TIMEOUT_MS = 5_000;
   private static readonly BANK_INVENTORY_SYNC_TIMEOUT_MS = 2_500;
   private static readonly PRAYER_ACKNOWLEDGEMENT_TIMEOUT_MS = 5_000;
+  private static readonly DUEL_PREPARATION_HOST_ACK_TIMEOUT_MS = 5_000;
+  private static readonly DUEL_PREPARATION_HOST_RETRY_MS = 1_000;
   private static readonly REQUEST_IN_FLIGHT_TIMEOUT_MS = 15_000;
   private static readonly GOAL_SYNC_MIN_INTERVAL_MS = 2_000;
   private static readonly THOUGHT_SYNC_MIN_INTERVAL_MS = 1_500;
@@ -535,6 +655,39 @@ export class HyperiaService extends Service implements HyperiaServiceInterface {
     string,
     (receipt: PrayerActionReceipt) => void
   >();
+  private readonly duelPreparationHostOwnerId =
+    PROCESS_DUEL_PREPARATION_HOST_OWNER_ID;
+  private readonly externalAgentExecutableBuild =
+    getExternalAgentExecutableBuildIdentity();
+  private duelPreparationHostLease: {
+    preparationId: string;
+    selectedAt: number;
+    expiresAt: number;
+    onDeckPayload: Record<string, unknown>;
+    announced: boolean;
+    heartbeatMs: number;
+    heartbeatTimer: ReturnType<typeof setInterval> | null;
+    retryTimer: ReturnType<typeof setTimeout> | null;
+    inFlight: Promise<void> | null;
+  } | null = null;
+  private pendingDuelPreparationHostResponses = new Map<
+    string,
+    (
+      response: {
+        action: "claim" | "heartbeat";
+        preparationId: string;
+        status: "active" | "rejected" | "unavailable";
+        heartbeatAfterMs: number;
+      } | null,
+    ) => void
+  >();
+  private duelPreparationStrategyDecision: {
+    preparationId: string;
+    requestFingerprint: string;
+    inFlight: Promise<ExternalDuelPreparationStrategyDecision | null> | null;
+    settled: boolean;
+    decision: ExternalDuelPreparationStrategyDecision | null;
+  } | null = null;
   private lastGoalSyncAt = 0;
   private lastGoalSyncSignature: string | null = null;
   private lastThoughtSyncAt = 0;
@@ -735,7 +888,7 @@ export class HyperiaService extends Service implements HyperiaServiceInterface {
 
     // Debug: Log what we got from environment
     logger.info(
-      `[HyperiaService] 🔑 Credentials from env: authToken=${service.authToken ? "***" + service.authToken.slice(-8) : "null"}, privyUserId=${service.privyUserId || "null"}`,
+      `[HyperiaService] 🔑 Credentials from env: authToken=${service.authToken ? "SET" : "null"}, privyUserId=${service.privyUserId || "null"}`,
     );
 
     // Try to get from agent settings if not in env
@@ -798,110 +951,41 @@ export class HyperiaService extends Service implements HyperiaServiceInterface {
     // Summary of final credential state
     logger.info(
       `[HyperiaService] 📋 Final credentials:\n` +
-        `  - authToken: ${service.authToken ? "SET (***" + service.authToken.slice(-8) + ")" : "NOT SET ⚠️"}\n` +
+        `  - authToken: ${service.authToken ? "SET" : "NOT SET ⚠️"}\n` +
         `  - privyUserId: ${service.privyUserId || "NOT SET"}\n` +
         `  - characterId: ${service.characterId || "NOT SET ⚠️"}`,
     );
 
-    // Auto-authenticate using wallet if no credentials exist
-    if (!service.authToken || !service.characterId) {
+    // Auto-authenticate through the shared replay-safe SOL challenge/signature flow.
+    // Production also validates a stored session before opening the game socket.
+    if (
+      !service.authToken ||
+      !service.characterId ||
+      process.env.NODE_ENV === "production"
+    ) {
       logger.info(
-        "[HyperiaService] No credentials found - attempting wallet-based auth...",
+        "[HyperiaService] No credentials found - attempting SOL wallet proof...",
       );
-
       try {
-        // Get wallet address from runtime character settings
-        const characterSettings = runtime.character as {
-          settings?: {
-            secrets?: Record<string, string>;
-            evmAddress?: string;
-            solanaAddress?: string;
-          };
-        };
-
-        // Try to get wallet from various sources
-        let walletAddress =
-          characterSettings?.settings?.evmAddress ||
-          characterSettings?.settings?.secrets?.EVM_PUBLIC_KEY ||
-          process.env.EVM_PUBLIC_KEY ||
-          characterSettings?.settings?.solanaAddress ||
-          characterSettings?.settings?.secrets?.SOLANA_PUBLIC_KEY ||
-          process.env.SOLANA_PUBLIC_KEY;
-
-        const walletType = walletAddress?.startsWith("0x") ? "evm" : "solana";
-
-        if (walletAddress) {
-          logger.info(
-            `[HyperiaService] Authenticating with wallet: ${walletAddress.slice(0, 10)}...`,
-          );
-
-          const response = await fetch(
-            `${service.apiBaseUrl}/api/agents/wallet-auth`,
-            {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({
-                walletAddress,
-                walletType,
-                agentName: runtime.character?.name || "Agent",
-                agentId: runtime.agentId, // Pass agentId for dashboard spectating support
-              }),
-            },
-          );
-
-          if (response.ok) {
-            const result = (await response.json()) as {
-              success: boolean;
-              authToken?: string;
-              characterId?: string;
-              accountId?: string;
-            };
-
-            if (result.success && result.authToken && result.characterId) {
-              service.authToken = result.authToken;
-              service.characterId = result.characterId;
-              // Set env vars so viewer can use them
-              process.env.HYPERIA_AUTH_TOKEN = result.authToken;
-              process.env.HYPERIA_CHARACTER_ID = result.characterId;
-              // Set agent ID for embedded viewer polling
-              if (runtime.agentId) {
-                process.env.HYPERIA_EMBED_AGENT_ID = runtime.agentId;
-              }
-
-              // Persist to character secrets for future sessions
-              const char = runtime.character as {
-                settings?: { secrets?: Record<string, string> };
-              };
-              if (char?.settings) {
-                if (!char.settings.secrets) {
-                  char.settings.secrets = {};
-                }
-                char.settings.secrets.HYPERIA_AUTH_TOKEN = result.authToken;
-                char.settings.secrets.HYPERIA_CHARACTER_ID = result.characterId;
-                if (result.accountId) {
-                  char.settings.secrets.HYPERIA_ACCOUNT_ID = result.accountId;
-                }
-                logger.info(
-                  "[HyperiaService] ✅ Credentials persisted to character secrets",
-                );
-              }
-
-              logger.info(
-                `[HyperiaService] ✅ Wallet auth successful! Character: ${result.characterId}`,
-              );
-            }
-          } else {
-            const errorText = await response.text().catch(() => "Unknown");
-            logger.warn(
-              `[HyperiaService] Wallet auth failed: ${response.status} ${errorText}`,
-            );
+        const { prepareHyperiaAppLaunch } = await import("../app-runtime.js");
+        const diagnostics = await prepareHyperiaAppLaunch(runtime as never);
+        for (const diagnostic of diagnostics) {
+          logger.warn(`[HyperiaService] ${diagnostic.message}`);
+        }
+        service.authToken = process.env.HYPERIA_AUTH_TOKEN ?? service.authToken;
+        service.characterId =
+          process.env.HYPERIA_CHARACTER_ID ?? service.characterId;
+        if (service.authToken && service.characterId) {
+          if (runtime.agentId) {
+            process.env.HYPERIA_EMBED_AGENT_ID = runtime.agentId;
           }
-        } else {
-          logger.warn("[HyperiaService] No wallet address found for auto-auth");
+          logger.info(
+            `[HyperiaService] ✅ SOL wallet proof succeeded for character ${service.characterId}`,
+          );
         }
       } catch (error) {
         logger.warn(
-          `[HyperiaService] Wallet auth error: ${error instanceof Error ? error.message : String(error)}`,
+          `[HyperiaService] SOL wallet proof failed: ${error instanceof Error ? error.message : String(error)}`,
         );
       }
     }
@@ -1553,6 +1637,433 @@ export class HyperiaService extends Service implements HyperiaServiceInterface {
     this.pendingPrayerResponses.clear();
   }
 
+  private cancelPendingGroundItemDrops(reason: string): void {
+    for (const pending of [...this.pendingGroundItemDrops.values()]) {
+      pending.cancel(reason);
+    }
+    this.pendingGroundItemDrops.clear();
+  }
+
+  private clearPendingDuelPreparationHostResponses(): void {
+    for (const resolve of this.pendingDuelPreparationHostResponses.values()) {
+      resolve(null);
+    }
+    this.pendingDuelPreparationHostResponses.clear();
+  }
+
+  private stopDuelPreparationHostLease(clearIdentity: boolean): void {
+    const state = this.duelPreparationHostLease;
+    if (!state) return;
+    if (state.heartbeatTimer) clearInterval(state.heartbeatTimer);
+    if (state.retryTimer) clearTimeout(state.retryTimer);
+    state.heartbeatTimer = null;
+    state.retryTimer = null;
+    if (clearIdentity) {
+      this.duelPreparationHostLease = null;
+      this.duelPreparationStrategyDecision = null;
+    }
+  }
+
+  private handleDuelPreparationTransportClosure(willReconnect: boolean): void {
+    this.clearPendingDuelPreparationHostResponses();
+    this.stopDuelPreparationHostLease(!willReconnect);
+  }
+
+  private requestDuelPreparationHostLease(
+    action: "claim" | "heartbeat",
+    preparationId: string,
+  ): Promise<{
+    action: "claim" | "heartbeat";
+    preparationId: string;
+    status: "active" | "rejected" | "unavailable";
+    heartbeatAfterMs: number;
+  } | null> {
+    if (!this.isConnected()) return Promise.resolve(null);
+    const requestId = randomUUID();
+    return new Promise((resolve) => {
+      let settled = false;
+      const finish = (
+        response: {
+          action: "claim" | "heartbeat";
+          preparationId: string;
+          status: "active" | "rejected" | "unavailable";
+          heartbeatAfterMs: number;
+        } | null,
+      ): void => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timeout);
+        this.pendingDuelPreparationHostResponses.delete(requestId);
+        resolve(
+          response &&
+            response.action === action &&
+            response.preparationId === preparationId
+            ? response
+            : null,
+        );
+      };
+      const timeout = setTimeout(
+        () => finish(null),
+        HyperiaService.DUEL_PREPARATION_HOST_ACK_TIMEOUT_MS,
+      );
+      this.pendingDuelPreparationHostResponses.set(requestId, finish);
+      try {
+        this.sendCommand("duelPreparationHostLease", {
+          requestId,
+          preparationId,
+          ownerId: this.duelPreparationHostOwnerId,
+          executableBuildId: this.externalAgentExecutableBuild.buildId,
+          action,
+        });
+      } catch {
+        finish(null);
+      }
+    });
+  }
+
+  private normalizeDuelPreparationHeartbeatMs(value: unknown): number | null {
+    return Number.isSafeInteger(value) &&
+      Number(value) >= 1_000 &&
+      Number(value) <= 60_000
+      ? Number(value)
+      : null;
+  }
+
+  private revokeDuelPreparationHostLease(
+    state: NonNullable<HyperiaService["duelPreparationHostLease"]>,
+  ): void {
+    if (this.duelPreparationHostLease !== state) return;
+    this.stopDuelPreparationHostLease(true);
+    if (state.announced) {
+      this.broadcastEvent("DUEL_PREPARATION_REVOKED", {
+        preparationId: state.preparationId,
+        reason: "host_lease_inactive",
+      });
+    }
+  }
+
+  private scheduleDuelPreparationHostClaim(
+    state: NonNullable<HyperiaService["duelPreparationHostLease"]>,
+    delayMs: number,
+  ): void {
+    if (
+      this.duelPreparationHostLease !== state ||
+      state.retryTimer ||
+      Date.now() >= state.expiresAt
+    ) {
+      if (Date.now() >= state.expiresAt) {
+        this.revokeDuelPreparationHostLease(state);
+      }
+      return;
+    }
+    state.retryTimer = setTimeout(() => {
+      state.retryTimer = null;
+      this.claimDuelPreparationHostLease(state);
+    }, delayMs);
+    (state.retryTimer as unknown as { unref?: () => void }).unref?.();
+  }
+
+  private startDuelPreparationHostHeartbeat(
+    state: NonNullable<HyperiaService["duelPreparationHostLease"]>,
+  ): void {
+    if (this.duelPreparationHostLease !== state) return;
+    if (state.heartbeatTimer) clearInterval(state.heartbeatTimer);
+    state.heartbeatTimer = setInterval(() => {
+      if (
+        this.duelPreparationHostLease !== state ||
+        state.inFlight ||
+        !this.isConnected()
+      ) {
+        return;
+      }
+      const attempt = this.requestDuelPreparationHostLease(
+        "heartbeat",
+        state.preparationId,
+      )
+        .then((response) => {
+          if (this.duelPreparationHostLease !== state || !response) return;
+          if (response.status === "rejected") {
+            this.revokeDuelPreparationHostLease(state);
+          }
+          // `unavailable` is intentionally non-terminal. The immutable
+          // database lease and scheduler sweep decide whether it expired.
+        })
+        .finally(() => {
+          if (state.inFlight === attempt) state.inFlight = null;
+        });
+      state.inFlight = attempt;
+    }, state.heartbeatMs);
+    (state.heartbeatTimer as unknown as { unref?: () => void }).unref?.();
+  }
+
+  private claimDuelPreparationHostLease(
+    state: NonNullable<HyperiaService["duelPreparationHostLease"]>,
+  ): void {
+    if (
+      this.duelPreparationHostLease !== state ||
+      state.inFlight ||
+      !this.isConnected()
+    ) {
+      return;
+    }
+    const attempt = this.requestDuelPreparationHostLease(
+      "claim",
+      state.preparationId,
+    )
+      .then((response) => {
+        if (this.duelPreparationHostLease !== state) return;
+        if (!response || response.status === "unavailable") {
+          if (this.isConnected()) {
+            this.scheduleDuelPreparationHostClaim(
+              state,
+              response?.heartbeatAfterMs ??
+                HyperiaService.DUEL_PREPARATION_HOST_RETRY_MS,
+            );
+          }
+          return;
+        }
+        if (response.status !== "active") {
+          this.revokeDuelPreparationHostLease(state);
+          return;
+        }
+        const heartbeatMs = this.normalizeDuelPreparationHeartbeatMs(
+          response.heartbeatAfterMs,
+        );
+        if (heartbeatMs === null) {
+          this.revokeDuelPreparationHostLease(state);
+          return;
+        }
+        state.heartbeatMs = heartbeatMs;
+        this.startDuelPreparationHostHeartbeat(state);
+        if (!state.announced) {
+          state.announced = true;
+          this.broadcastEvent("DUEL_ON_DECK", state.onDeckPayload);
+        }
+      })
+      .finally(() => {
+        if (state.inFlight === attempt) state.inFlight = null;
+      });
+    state.inFlight = attempt;
+  }
+
+  private beginDuelPreparationHostLease(
+    payload: Record<string, unknown>,
+  ): void {
+    const preparationId = payload.preparationId;
+    const selectedAt = payload.selectedAt;
+    const expiresAt = payload.expiresAt;
+    if (
+      typeof preparationId !== "string" ||
+      !UUID_PATTERN.test(preparationId) ||
+      !Number.isSafeInteger(selectedAt) ||
+      !Number.isSafeInteger(expiresAt) ||
+      Number(expiresAt) <= Number(selectedAt) ||
+      Number(expiresAt) <= Date.now()
+    ) {
+      logger.warn(
+        "[HyperiaService] Rejected malformed private-preparation on-deck authority",
+      );
+      return;
+    }
+
+    const current = this.duelPreparationHostLease;
+    if (current?.preparationId === preparationId) {
+      if (!current.heartbeatTimer && !current.inFlight) {
+        this.claimDuelPreparationHostLease(current);
+      }
+      return;
+    }
+    if (current?.announced) {
+      this.revokeDuelPreparationHostLease(current);
+    } else {
+      this.stopDuelPreparationHostLease(true);
+    }
+    const state: NonNullable<HyperiaService["duelPreparationHostLease"]> = {
+      preparationId,
+      selectedAt: Number(selectedAt),
+      expiresAt: Number(expiresAt),
+      onDeckPayload: { ...payload },
+      announced: false,
+      heartbeatMs: HyperiaService.DUEL_PREPARATION_HOST_RETRY_MS,
+      heartbeatTimer: null,
+      retryTimer: null,
+      inFlight: null,
+    };
+    this.duelPreparationHostLease = state;
+    this.claimDuelPreparationHostLease(state);
+  }
+
+  private duelPreparationStrategyRequestFingerprint(
+    request: ExternalDuelPreparationStrategyRequest,
+  ): string {
+    return JSON.stringify({
+      preparationId: request.preparationId,
+      policyVersion: request.policyVersion,
+      protocolVersion: request.protocolVersion,
+      expiresAt: request.expiresAt,
+      agentName: request.agentName,
+      opponentName: request.opponentName,
+      ownPublicProfile: request.ownPublicProfile,
+      opponentPublicProfile: request.opponentPublicProfile,
+      opponentHistorySummary: request.opponentHistorySummary,
+      availableRoles: request.availableRoles,
+      availablePrayerIds: request.availablePrayerIds,
+      preparationOptions: request.preparationOptions,
+      foodOptions: request.foodOptions,
+      armorOptions: request.armorOptions,
+      deterministicPlanOptionId: request.deterministicPlanOptionId,
+      deterministicFoodOptionId: request.deterministicFoodOptionId,
+      deterministicArmorOptionId: request.deterministicArmorOptionId,
+      deterministicRole: request.deterministicRole,
+    });
+  }
+
+  private async resolveDuelPreparationStrategyDecision(
+    request: ExternalDuelPreparationStrategyRequest,
+  ): Promise<ExternalDuelPreparationStrategyDecision | null> {
+    const timeoutMs = request.decisionDeadlineAt - Date.now() - 100;
+    if (timeoutMs < 250) return null;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    try {
+      const response = await Promise.race([
+        this.runtime.useModel(ModelType.TEXT_SMALL, {
+          prompt: buildExternalDuelPreparationStrategyPrompt(request),
+          maxTokens: 220,
+          temperature: 0.2,
+        }),
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(
+            () =>
+              reject(new Error("external duel preparation strategy timeout")),
+            timeoutMs,
+          );
+        }),
+      ]);
+      const parsed = parseOneJsonObject(response, 2_048);
+      return normalizeExternalDuelPreparationPlanStrategyDecision(
+        parsed,
+        request.preparationOptions,
+        request.foodOptions,
+        request.armorOptions,
+        request.availablePrayerIds,
+      );
+    } catch {
+      return null;
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  }
+
+  private async handleDuelPreparationStrategyRequest(
+    value: unknown,
+  ): Promise<void> {
+    const request = normalizeExternalDuelPreparationStrategyRequest(value);
+    const lease = this.duelPreparationHostLease;
+    if (
+      !request ||
+      !lease ||
+      !lease.announced ||
+      lease.preparationId !== request.preparationId ||
+      lease.expiresAt !== request.expiresAt ||
+      request.decisionDeadlineAt <= Date.now() ||
+      request.expiresAt <= Date.now()
+    ) {
+      return;
+    }
+
+    const fingerprint = this.duelPreparationStrategyRequestFingerprint(request);
+    let state = this.duelPreparationStrategyDecision;
+    if (!state || state.preparationId !== request.preparationId) {
+      state = {
+        preparationId: request.preparationId,
+        requestFingerprint: fingerprint,
+        inFlight: null,
+        settled: false,
+        decision: null,
+      };
+      this.duelPreparationStrategyDecision = state;
+    }
+
+    if (state.requestFingerprint !== fingerprint) {
+      this.sendCommand("duelPreparationStrategy", {
+        requestId: request.requestId,
+        preparationId: request.preparationId,
+        status: "fallback",
+        decision: null,
+      } satisfies ExternalDuelPreparationStrategyResponse);
+      return;
+    }
+
+    if (!state.settled && !state.inFlight) {
+      const attempt = this.resolveDuelPreparationStrategyDecision(request).then(
+        (decision) => {
+          if (this.duelPreparationStrategyDecision !== state) return decision;
+          state.settled = true;
+          state.decision = decision;
+          return decision;
+        },
+      );
+      state.inFlight = attempt;
+      void attempt.finally(() => {
+        if (state.inFlight === attempt) state.inFlight = null;
+      });
+    }
+    const decision = state.settled ? state.decision : await state.inFlight;
+    if (
+      this.duelPreparationStrategyDecision !== state ||
+      this.duelPreparationHostLease !== lease ||
+      Date.now() >= request.decisionDeadlineAt
+    ) {
+      return;
+    }
+    this.sendCommand("duelPreparationStrategy", {
+      requestId: request.requestId,
+      preparationId: request.preparationId,
+      status: decision ? "selected" : "fallback",
+      decision,
+    } satisfies ExternalDuelPreparationStrategyResponse);
+  }
+
+  private resumeDuelPreparationHostLeaseAfterReconnect(): void {
+    const state = this.duelPreparationHostLease;
+    if (state && Date.now() >= state.expiresAt) {
+      this.revokeDuelPreparationHostLease(state);
+      return;
+    }
+    if (!state || state.heartbeatTimer || state.inFlight) {
+      return;
+    }
+    this.claimDuelPreparationHostLease(state);
+  }
+
+  private handleDuelPreparationHostLeaseResponse(
+    data: Record<string, unknown>,
+  ): void {
+    const requestId = data.requestId;
+    if (typeof requestId !== "string" || !UUID_PATTERN.test(requestId)) return;
+    const resolve = this.pendingDuelPreparationHostResponses.get(requestId);
+    if (!resolve) return;
+    const action = data.action;
+    const preparationId = data.preparationId;
+    const status = data.status;
+    const heartbeatAfterMs = this.normalizeDuelPreparationHeartbeatMs(
+      data.heartbeatAfterMs,
+    );
+    if (
+      (action !== "claim" && action !== "heartbeat") ||
+      typeof preparationId !== "string" ||
+      !UUID_PATTERN.test(preparationId) ||
+      (status !== "active" &&
+        status !== "rejected" &&
+        status !== "unavailable") ||
+      heartbeatAfterMs === null
+    ) {
+      resolve(null);
+      return;
+    }
+    resolve({ action, preparationId, status, heartbeatAfterMs });
+  }
+
   /** Preserve an in-flight waiter only when transport recovery will continue. */
   private handleProcessingTransportClosure(willReconnect: boolean): void {
     this.resetProcessingRecoveryState();
@@ -1560,6 +2071,7 @@ export class HyperiaService extends Service implements HyperiaServiceInterface {
     if (willReconnect) return;
     this.cancelPendingProcessingAcknowledgement?.();
     this.cancelPendingProcessingAcknowledgement = null;
+    this.cancelPendingGroundItemDrops("transport_closed");
   }
 
   async stop(): Promise<void> {
@@ -1570,7 +2082,9 @@ export class HyperiaService extends Service implements HyperiaServiceInterface {
     clearMapProviderCache(this.runtime.agentId);
     this.cancelPendingProcessingAcknowledgement?.();
     this.cancelPendingProcessingAcknowledgement = null;
+    this.cancelPendingGroundItemDrops("service_stopped");
     this.resetProcessingRecoveryState();
+    this.handleDuelPreparationTransportClosure(false);
     this.cancelPendingBankResponses();
     this.cancelPendingPrayerResponses(
       "Prayer transport stopped before an authoritative receipt arrived",
@@ -1615,6 +2129,10 @@ export class HyperiaService extends Service implements HyperiaServiceInterface {
       return;
     }
 
+    if (!this.authToken) {
+      throw new Error("Agent authentication is required before connecting.");
+    }
+
     // If WebSocket exists but we're not connected, it's in a bad state - clean it up
     if (this.ws) {
       logger.warn(
@@ -1635,6 +2153,7 @@ export class HyperiaService extends Service implements HyperiaServiceInterface {
     // Reset snapshot flag for new connection
     this.hasReceivedSnapshot = false;
     this.clientReadySent = false;
+    this.worldJoinPromise = null;
 
     return new Promise((resolve, reject) => {
       // Connection timeout - fail fast to avoid hitting ElizaOS's 30s service registration timeout
@@ -1706,7 +2225,7 @@ export class HyperiaService extends Service implements HyperiaServiceInterface {
 
           // SECURITY: Check if we need first-message authentication
           // If no authToken in URL, server expects us to send 'authenticate' packet
-          const needsFirstMessageAuth = !this.authToken;
+          const needsFirstMessageAuth = Boolean(this.authToken);
 
           if (needsFirstMessageAuth) {
             logger.info(
@@ -1761,58 +2280,11 @@ export class HyperiaService extends Service implements HyperiaServiceInterface {
                     logger.warn(
                       `[HyperiaService] 🔄 ===== RECONNECTION DETECTED (first-message auth) ===== Re-spawning player...`,
                     );
-
-                    // Clear old player entity reference since we're respawning on new socket
-                    this.gameState.playerEntity = null;
-
-                    // Use setTimeout to avoid blocking the auth result handler
-                    setTimeout(async () => {
-                      try {
-                        // Wait for connection to stabilize
-                        await new Promise((r) => setTimeout(r, 500));
-
-                        // Re-send character selection
-                        this.sendBinaryPacket("characterSelected", {
-                          characterId: this.characterId,
-                        });
-                        logger.info(
-                          `[HyperiaService] 📤 Re-sent characterSelected: ${this.characterId} (reconnection)`,
-                        );
-
-                        // Wait before entering world
-                        await new Promise((r) => setTimeout(r, 500));
-
-                        // Re-send enter world — include duelBot flag for duel bots
-                        const isDuelBot2 = this.isDuelBotRuntime();
-                        this.sendBinaryPacket("enterWorld", {
-                          characterId: this.characterId,
-                          ...(isDuelBot2
-                            ? {
-                                duelBot: true,
-                                botName:
-                                  this.runtime.character?.name ||
-                                  this.characterId,
-                              }
-                            : {}),
-                        });
-                        logger.info(
-                          `[HyperiaService] 🚪 Re-sent enterWorld: ${this.characterId} (reconnection)`,
-                        );
-
-                        // Sync pause state
-                        setTimeout(() => {
-                          this.syncPauseStateFromServer().catch((err) => {
-                            logger.warn(
-                              `[HyperiaService] Failed to sync pause state on reconnection: ${err instanceof Error ? err.message : String(err)}`,
-                            );
-                          });
-                        }, 1000);
-                      } catch (err) {
-                        logger.error(
-                          `[HyperiaService] Reconnection handling failed: ${err instanceof Error ? err.message : String(err)}`,
-                        );
-                      }
-                    }, 0);
+                    void this.rejoinWorldAfterReconnect().catch((error) => {
+                      logger.error(
+                        `[HyperiaService] Reconnection handling failed: ${error instanceof Error ? error.message : String(error)}`,
+                      );
+                    });
                   }
 
                   settleResolve();
@@ -1834,9 +2306,7 @@ export class HyperiaService extends Service implements HyperiaServiceInterface {
             // Listen for authResult packet
             this.ws?.on("message", authResultHandler);
 
-            // Send authenticate packet with whatever credentials we have
-            // For embedded agents, they may connect without traditional auth tokens
-            // The server can choose to allow or reject based on configuration
+            // Send credentials in the first binary message so they never enter the URL.
             const authPacket = packr.pack([
               this.getPacketId("authenticate"),
               {
@@ -1871,50 +2341,7 @@ export class HyperiaService extends Service implements HyperiaServiceInterface {
               `[HyperiaService] WebSocket ${wsId} reconnected, sending characterSelected + enterWorld for character ${this.characterId}`,
             );
 
-            // Clear old player entity reference since we're respawning on new socket
-            this.gameState.playerEntity = null;
-            logger.info(
-              `[HyperiaService] Cleared old player entity reference for re-spawn`,
-            );
-
-            // Wait for connection to stabilize
-            await new Promise((resolve) => setTimeout(resolve, 500));
-
-            // Re-send character selection
-            this.sendBinaryPacket("characterSelected", {
-              characterId: this.characterId,
-            });
-            logger.info(
-              `[HyperiaService] 📤 Re-sent characterSelected: ${this.characterId} (reconnection)`,
-            );
-
-            // Wait before entering world
-            await new Promise((resolve) => setTimeout(resolve, 500));
-
-            // Re-send enter world — include duelBot flag for duel bots
-            const isDuelBotRecon = this.isDuelBotRuntime();
-            this.sendBinaryPacket("enterWorld", {
-              characterId: this.characterId,
-              ...(isDuelBotRecon
-                ? {
-                    duelBot: true,
-                    botName: this.runtime.character?.name || this.characterId,
-                  }
-                : {}),
-            });
-            logger.info(
-              `[HyperiaService] 🚪 Re-sent enterWorld: ${this.characterId} (reconnection)`,
-            );
-
-            // Sync pause state from server to maintain consistent state across reconnects
-            // Wait for connection to stabilize before syncing
-            setTimeout(() => {
-              this.syncPauseStateFromServer().catch((err) => {
-                logger.warn(
-                  `[HyperiaService] Failed to sync pause state on reconnection: ${err instanceof Error ? err.message : String(err)}`,
-                );
-              });
-            }, 1000);
+            await this.rejoinWorldAfterReconnect();
           } else {
             logger.info(
               `[HyperiaService] Connected to Hyperia server (WebSocket ${wsId})`,
@@ -1944,9 +2371,9 @@ export class HyperiaService extends Service implements HyperiaServiceInterface {
           // Code 1006 = Abnormal closure (connection lost, DO reconnect)
           const isNormalClosure =
             code === 1000 || code === 1001 || code === 1005;
-          this.handleProcessingTransportClosure(
-            !isNormalClosure && this.autoReconnect,
-          );
+          const willReconnect = !isNormalClosure && this.autoReconnect;
+          this.handleProcessingTransportClosure(willReconnect);
+          this.handleDuelPreparationTransportClosure(willReconnect);
           this.resetExternalBankRecoveryState();
           this.cancelPendingBankResponses();
           this.cancelPendingPrayerResponses(
@@ -1987,32 +2414,38 @@ export class HyperiaService extends Service implements HyperiaServiceInterface {
     });
   }
 
-  /**
-   * Build WebSocket URL with auth tokens as query parameters
-   *
-   * CRITICAL: Strip any existing query parameters to prevent duplicates.
-   * When auto-reconnect is triggered, the URL may already have authToken from previous connection.
-   * Duplicate authToken parameters cause server to authenticate as wrong user.
-   */
+  /** Build a WebSocket URL with all credential-bearing query parameters removed. */
   private buildWebSocketUrl(baseUrl: string): string {
-    if (!this.authToken) {
-      return baseUrl;
-    }
+    return stripHyperiaWebSocketCredentials(baseUrl);
+  }
 
-    // Strip any existing query parameters - we'll rebuild them from scratch
-    const cleanBaseUrl = baseUrl.split("?")[0];
-
-    // Build fresh URL with current authentication parameters
-    let url = `${cleanBaseUrl}?authToken=${encodeURIComponent(this.authToken)}`;
-    if (this.privyUserId) {
-      url += `&privyUserId=${encodeURIComponent(this.privyUserId)}`;
-    }
-
-    logger.info(
-      `[HyperiaService] 🔧 Built WebSocket URL: ${cleanBaseUrl}?authToken=*** (stripped any existing params)`,
+  private async refreshCredentialSessionForReconnect(): Promise<void> {
+    const { prepareHyperiaAppLaunch } = await import("../app-runtime.js");
+    const diagnostics = await prepareHyperiaAppLaunch(this.runtime as never);
+    const failure = diagnostics.find(
+      (diagnostic) => diagnostic.code === "hyperia-auth-provisioning-failed",
     );
-
-    return url;
+    if (failure) {
+      throw new Error(failure.message);
+    }
+    const updatedToken = await Promise.resolve(
+      this.runtime.getSetting("HYPERIA_AUTH_TOKEN"),
+    );
+    const updatedCharacterId = await Promise.resolve(
+      this.runtime.getSetting("HYPERIA_CHARACTER_ID"),
+    );
+    if (
+      typeof updatedToken !== "string" ||
+      updatedToken.trim().length === 0 ||
+      typeof updatedCharacterId !== "string" ||
+      updatedCharacterId.trim().length === 0
+    ) {
+      throw new Error(
+        "Agent credential refresh did not return a usable session.",
+      );
+    }
+    this.authToken = updatedToken.trim();
+    this.characterId = updatedCharacterId.trim();
   }
 
   /**
@@ -2035,7 +2468,9 @@ export class HyperiaService extends Service implements HyperiaServiceInterface {
     this.autoReconnect = false;
     this.cancelPendingProcessingAcknowledgement?.();
     this.cancelPendingProcessingAcknowledgement = null;
+    this.cancelPendingGroundItemDrops("transport_disconnected");
     this.resetProcessingRecoveryState();
+    this.handleDuelPreparationTransportClosure(false);
     this.resetExternalBankRecoveryState();
     this.cancelPendingPrayerResponses(
       "Prayer transport disconnected before an authoritative receipt arrived",
@@ -2113,6 +2548,7 @@ export class HyperiaService extends Service implements HyperiaServiceInterface {
       this.connectionState.reconnectAttempts++;
 
       try {
+        await this.refreshCredentialSessionForReconnect();
         await this.connect(this.serverUrl);
       } catch (error) {
         logger.error(
@@ -2385,6 +2821,7 @@ export class HyperiaService extends Service implements HyperiaServiceInterface {
       entityModified: "ENTITY_UPDATED",
       entityRemoved: "ENTITY_LEFT",
       inventoryUpdated: "INVENTORY_UPDATED",
+      groundItemDropResult: "ITEM_DROP_RESULT",
       skillsUpdated: "SKILLS_UPDATED",
       chatAdded: "CHAT_MESSAGE",
       combatDamageDealt: "COMBAT_DAMAGE_DEALT",
@@ -2424,103 +2861,136 @@ export class HyperiaService extends Service implements HyperiaServiceInterface {
         });
       }
 
-      // CRITICAL FIX: If we already have a characterId from settings, use it directly
-      // Don't wait for snapshot to include the character - the server JWT auth already
-      // verified our identity, we just need to tell it which character to spawn
-      if (this.characterId) {
-        logger.info(
-          `[HyperiaService] ✅ Using characterId from settings: ${this.characterId}`,
-        );
-
-        // Detect if this is a duel bot (auto-accept duels = duel bot behaviour)
-        const isDuelBot = this.isDuelBotRuntime();
-        const botName = this.runtime.character?.name;
-
-        // Wait a moment for server to be ready
-        await new Promise((resolve) => setTimeout(resolve, 500));
-
-        // Send character selected packet
-        this.sendBinaryPacket("characterSelected", {
-          characterId: this.characterId,
-        });
-        logger.info(
-          `[HyperiaService] 📤 Sent characterSelected: ${this.characterId}`,
-        );
-
-        // Wait a moment before entering world
-        await new Promise((resolve) => setTimeout(resolve, 500));
-
-        // Send enter world packet — include duelBot flag so server skips DB lookup
-        this.sendBinaryPacket("enterWorld", {
-          characterId: this.characterId,
-          ...(isDuelBot
-            ? { duelBot: true, botName: botName || this.characterId }
-            : {}),
-        });
-        logger.info(
-          `[HyperiaService] 🚪 Sent enterWorld: ${this.characterId}${isDuelBot ? " (duelBot)" : ""}`,
-        );
-
-        logger.info(
-          `[HyperiaService] ✅ Auto-join complete! Agent should spawn with characterId: ${this.characterId}`,
-        );
-        return;
-      }
-
-      // Fallback: No characterId in settings, try to use snapshot characters
-      // (This path is for human players or agents without pre-configured characterId)
-      const characters = (snapshotData?.characters ?? []) as Array<{
-        id: string;
-        name: string;
-      }>;
-      logger.info(
-        `[HyperiaService] No characterId in settings, checking snapshot: ${characters.length} character(s)`,
-      );
-
-      if (characters.length === 0) {
-        logger.warn(
-          "[HyperiaService] ⚠️ No characterId in settings AND no characters in snapshot - agent cannot enter world!",
-        );
-        return;
-      }
-
-      // Use first character from snapshot as fallback
-      const selectedCharacter = characters[0];
-      logger.info(
-        `[HyperiaService] Using first character from snapshot: ${selectedCharacter.name} (${selectedCharacter.id})`,
-      );
-
-      // Wait a moment for server to be ready
-      await new Promise((resolve) => setTimeout(resolve, 500));
-
-      // Send character selected packet
-      this.sendBinaryPacket("characterSelected", {
-        characterId: selectedCharacter.id,
-      });
-      logger.info(
-        `[HyperiaService] 📤 Sent characterSelected: ${selectedCharacter.id}`,
-      );
-
-      // Wait a moment before entering world
-      await new Promise((resolve) => setTimeout(resolve, 500));
-
-      // Send enter world packet
-      this.sendBinaryPacket("enterWorld", {
-        characterId: selectedCharacter.id,
-      });
-      logger.info(
-        `[HyperiaService] 🚪 Sent enterWorld: ${selectedCharacter.id}`,
-      );
-
-      logger.info(
-        `[HyperiaService] ✅ Auto-join complete! Agent should spawn as ${selectedCharacter.name}`,
-      );
+      await this.ensureWorldJoin(snapshotData);
     } catch (error) {
       logger.error(
         "[HyperiaService] Failed to auto-join world:",
         error instanceof Error ? error.message : String(error),
       );
     }
+  }
+
+  /**
+   * Coalesces snapshot and reconnect-triggered joins for the active socket.
+   * The promise deliberately remains settled until connect() installs a new socket,
+   * preventing late duplicate snapshots from replaying world entry.
+   */
+  private ensureWorldJoin(
+    snapshotData: Record<string, unknown>,
+  ): Promise<void> {
+    if (!this.worldJoinPromise) {
+      this.worldJoinPromise = this.performWorldJoin(snapshotData);
+    }
+    return this.worldJoinPromise;
+  }
+
+  private async performWorldJoin(
+    snapshotData: Record<string, unknown>,
+  ): Promise<void> {
+    // CRITICAL FIX: If we already have a characterId from settings, use it directly
+    // Don't wait for snapshot to include the character - the server JWT auth already
+    // verified our identity, we just need to tell it which character to spawn
+    if (this.characterId) {
+      logger.info(
+        `[HyperiaService] ✅ Using characterId from settings: ${this.characterId}`,
+      );
+
+      // Detect if this is a duel bot (auto-accept duels = duel bot behaviour)
+      const isDuelBot = this.isDuelBotRuntime();
+      const botName = this.runtime.character?.name;
+
+      // Wait a moment for server to be ready
+      await new Promise((resolve) => setTimeout(resolve, 500));
+
+      // Send character selected packet
+      this.sendBinaryPacket("characterSelected", {
+        characterId: this.characterId,
+      });
+      logger.info(
+        `[HyperiaService] 📤 Sent characterSelected: ${this.characterId}`,
+      );
+
+      // Wait a moment before entering world
+      await new Promise((resolve) => setTimeout(resolve, 500));
+
+      // Send enter world packet — include duelBot flag so server skips DB lookup
+      this.sendBinaryPacket("enterWorld", {
+        characterId: this.characterId,
+        ...(isDuelBot
+          ? { duelBot: true, botName: botName || this.characterId }
+          : {}),
+      });
+      logger.info(
+        `[HyperiaService] 🚪 Sent enterWorld: ${this.characterId}${isDuelBot ? " (duelBot)" : ""}`,
+      );
+
+      logger.info(
+        `[HyperiaService] ✅ Auto-join complete! Agent should spawn with characterId: ${this.characterId}`,
+      );
+      return;
+    }
+
+    // Fallback: No characterId in settings, try to use snapshot characters
+    // (This path is for human players or agents without pre-configured characterId)
+    const characters = (snapshotData?.characters ?? []) as Array<{
+      id: string;
+      name: string;
+    }>;
+    logger.info(
+      `[HyperiaService] No characterId in settings, checking snapshot: ${characters.length} character(s)`,
+    );
+
+    if (characters.length === 0) {
+      logger.warn(
+        "[HyperiaService] ⚠️ No characterId in settings AND no characters in snapshot - agent cannot enter world!",
+      );
+      return;
+    }
+
+    // Use first character from snapshot as fallback
+    const selectedCharacter = characters[0];
+    logger.info(
+      `[HyperiaService] Using first character from snapshot: ${selectedCharacter.name} (${selectedCharacter.id})`,
+    );
+
+    // Wait a moment for server to be ready
+    await new Promise((resolve) => setTimeout(resolve, 500));
+
+    // Send character selected packet
+    this.sendBinaryPacket("characterSelected", {
+      characterId: selectedCharacter.id,
+    });
+    logger.info(
+      `[HyperiaService] 📤 Sent characterSelected: ${selectedCharacter.id}`,
+    );
+
+    // Wait a moment before entering world
+    await new Promise((resolve) => setTimeout(resolve, 500));
+
+    // Send enter world packet
+    this.sendBinaryPacket("enterWorld", {
+      characterId: selectedCharacter.id,
+    });
+    logger.info(`[HyperiaService] 🚪 Sent enterWorld: ${selectedCharacter.id}`);
+
+    logger.info(
+      `[HyperiaService] ✅ Auto-join complete! Agent should spawn as ${selectedCharacter.name}`,
+    );
+  }
+
+  private async rejoinWorldAfterReconnect(): Promise<void> {
+    // The server retains the prior entity during reconnect grace. Clear only the
+    // local reference so the new socket's authoritative entityAdded replaces it.
+    this.gameState.playerEntity = null;
+    await this.ensureWorldJoin({});
+
+    setTimeout(() => {
+      this.syncPauseStateFromServer().catch((error) => {
+        logger.warn(
+          `[HyperiaService] Failed to sync pause state on reconnection: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      });
+    }, 1000);
   }
 
   /**
@@ -2538,6 +3008,7 @@ export class HyperiaService extends Service implements HyperiaServiceInterface {
         );
         if (data && data.id === this.characterId) {
           this.gameState.playerEntity = data as unknown as PlayerEntity;
+          this.resumeDuelPreparationHostLeaseAfterReconnect();
           const wsId = (this.ws as TaggedWebSocket).__wsId || "unknown";
           logger.info(
             `[HyperiaService] 🎮 Player entity spawned: ${data.id} on WebSocket ${wsId}, runtime: ${this.runtime.agentId}`,
@@ -3533,6 +4004,36 @@ export class HyperiaService extends Service implements HyperiaServiceInterface {
         break;
       }
 
+      case "duelPreparationHostLease": {
+        this.handleDuelPreparationHostLeaseResponse(data);
+        break;
+      }
+
+      case "duelPreparationStatus": {
+        const preparationId = data.preparationId;
+        const status = data.status;
+        if (
+          typeof preparationId === "string" &&
+          UUID_PATTERN.test(preparationId) &&
+          (status === "validating" || status === "ready" || status === "failed")
+        ) {
+          this.broadcastEvent("DUEL_PREPARATION_STATUS", {
+            preparationId,
+            status,
+          });
+        }
+        break;
+      }
+
+      case "duelPreparationStrategy": {
+        void this.handleDuelPreparationStrategyRequest(data).catch((error) => {
+          logger.warn(
+            `[HyperiaService] External duel strategy request failed: ${error instanceof Error ? error.message : String(error)}`,
+          );
+        });
+        break;
+      }
+
       case "bankState": {
         this.bankStateRequestInFlight = false;
         const bankData = data as {
@@ -3650,6 +4151,7 @@ export class HyperiaService extends Service implements HyperiaServiceInterface {
           opponentName?: string;
         };
         this.activeDuelId = (sessionData.duelId as string) ?? null;
+        this.stopDuelPreparationHostLease(true);
         logger.info(
           `[HyperiaService] ⚔️ Duel session started - duelId=${this.activeDuelId}`,
         );
@@ -3750,6 +4252,7 @@ export class HyperiaService extends Service implements HyperiaServiceInterface {
           this.gameState.playerEntity.combatTarget = null;
         }
         this.resumeAutonomyAfterStreamingDuel();
+        this.stopDuelPreparationHostLease(true);
         this.activeDuelId = null;
         this.broadcastEvent("DUEL_COMPLETED", duelData);
         // Clear pending challenge state just in case
@@ -3758,8 +4261,16 @@ export class HyperiaService extends Service implements HyperiaServiceInterface {
       }
 
       case "duelOnDeck": {
-        // Agent is on-deck for the next duel — should prepare
-        this.broadcastEvent("DUEL_ON_DECK", data as Record<string, unknown>);
+        // Private preparation cannot begin until the exact authenticated
+        // external host has claimed and immediately refreshed its immutable
+        // DB-clock lease. Legacy non-private on-deck events retain their
+        // existing behavior.
+        const onDeck = data as Record<string, unknown>;
+        if (typeof onDeck.preparationId === "string") {
+          this.beginDuelPreparationHostLease(onDeck);
+        } else {
+          this.broadcastEvent("DUEL_ON_DECK", onDeck);
+        }
         break;
       }
 
@@ -3792,6 +4303,7 @@ export class HyperiaService extends Service implements HyperiaServiceInterface {
           this.gameState.playerEntity.combatTarget = null;
         }
         this.activeDuelId = null;
+        this.stopDuelPreparationHostLease(true);
         this.resumeAutonomyAfterStreamingDuel();
         this.broadcastEvent("DUEL_CANCELLED", cancelData);
         this.clearPendingDuelChallenge();
@@ -4890,15 +5402,145 @@ export class HyperiaService extends Service implements HyperiaServiceInterface {
     itemId: string,
     quantity: number = 1,
     slot?: number,
-  ): Promise<void> {
-    const payload: { itemId: string; quantity: number; slot?: number } = {
-      itemId,
+    suppliedOperationId?: string,
+  ): Promise<GroundItemDropResult> {
+    const normalizedItemId = typeof itemId === "string" ? itemId.trim() : "";
+    const operationId =
+      suppliedOperationId === undefined
+        ? `ground-item-drop:${randomUUID()}`
+        : typeof suppliedOperationId === "string"
+          ? suppliedOperationId.trim()
+          : "";
+    const playerId = this.characterId || this.gameState.playerEntity?.id || "";
+    const failure = (
+      committed: false | "unknown",
+      reason: string,
+    ): GroundItemDropResult => ({
+      success: false,
+      committed,
+      playerId,
+      operationId,
+      itemId: normalizedItemId,
       quantity,
-    };
-    if (slot !== undefined) {
-      payload.slot = slot;
+      reason,
+    });
+    if (
+      !playerId ||
+      !normalizedItemId ||
+      normalizedItemId.length > 256 ||
+      !Number.isSafeInteger(quantity) ||
+      quantity <= 0 ||
+      quantity > 2_147_483_647 ||
+      (slot !== undefined &&
+        (!Number.isSafeInteger(slot) || slot < 0 || slot >= 28)) ||
+      !/^ground-item-drop:[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(
+        operationId,
+      )
+    ) {
+      return failure(false, "invalid_request");
     }
-    this.sendCommand("dropItem", payload);
+    if (!this.isConnected()) return failure(false, "transport_unavailable");
+    const pending = this.pendingGroundItemDrops.get(operationId);
+    if (pending) {
+      if (
+        pending.itemId === normalizedItemId &&
+        pending.quantity === quantity &&
+        pending.slot === slot
+      ) {
+        return pending.promise;
+      }
+      return failure("unknown", "operation_collision");
+    }
+
+    const payload: {
+      itemId: string;
+      quantity: number;
+      operationId: string;
+      slot?: number;
+    } = { itemId: normalizedItemId, quantity, operationId };
+    if (slot !== undefined) payload.slot = slot;
+
+    let resolvePromise!: (result: GroundItemDropResult) => void;
+    const promise = new Promise<GroundItemDropResult>((resolve) => {
+      resolvePromise = resolve;
+    });
+    let settled = false;
+    let attempts = 0;
+    let retryTimer: ReturnType<typeof setTimeout> | null = null;
+    const finish = (result: GroundItemDropResult): void => {
+      if (settled) return;
+      settled = true;
+      if (retryTimer) clearTimeout(retryTimer);
+      this.offGameEvent("ITEM_DROP_RESULT", handleResult);
+      this.pendingGroundItemDrops.delete(operationId);
+      resolvePromise(result);
+    };
+    const cancel = (reason: string): void => finish(failure("unknown", reason));
+    const handleResult = (raw: unknown): void => {
+      if (!raw || typeof raw !== "object" || Array.isArray(raw)) return;
+      const result = raw as Partial<GroundItemDropResult>;
+      if (result.operationId !== operationId) return;
+      const validBase =
+        result.playerId === playerId &&
+        result.itemId === normalizedItemId &&
+        result.quantity === quantity &&
+        typeof result.success === "boolean";
+      const validSuccess =
+        result.success === true &&
+        result.committed === true &&
+        typeof result.sourceId === "string" &&
+        result.sourceId.length > 0 &&
+        result.sourceId.length <= 256 &&
+        !!result.position &&
+        typeof result.position === "object" &&
+        Number.isFinite(result.position.x) &&
+        Number.isFinite(result.position.y) &&
+        Number.isFinite(result.position.z) &&
+        typeof result.replayed === "boolean" &&
+        typeof result.liveInventoryApplied === "boolean" &&
+        typeof result.liveCoinsApplied === "boolean" &&
+        typeof result.presentationReady === "boolean";
+      const validFailure =
+        result.success === false &&
+        (result.committed === false || result.committed === "unknown") &&
+        typeof result.reason === "string" &&
+        result.reason.length > 0 &&
+        result.reason.length <= 256;
+      if (!validBase || (!validSuccess && !validFailure)) {
+        finish(failure("unknown", "invalid_receipt"));
+        return;
+      }
+      finish(result as GroundItemDropResult);
+    };
+    const sendAttempt = (): void => {
+      if (settled) return;
+      attempts++;
+      if (this.isConnected()) {
+        try {
+          this.sendCommand("dropItem", payload);
+        } catch {
+          // Delivery is ambiguous; only an exact receipt can resolve custody.
+        }
+      }
+      retryTimer = setTimeout(
+        attempts >= HyperiaService.GROUND_ITEM_DROP_MAX_SENDS
+          ? () => finish(failure("unknown", "receipt_timeout"))
+          : sendAttempt,
+        HyperiaService.GROUND_ITEM_DROP_RETRY_MS,
+      );
+      retryTimer.unref?.();
+    };
+
+    this.pendingGroundItemDrops.set(operationId, {
+      itemId: normalizedItemId,
+      quantity,
+      slot,
+      promise,
+      cancel,
+    });
+    this.onGameEvent("ITEM_DROP_RESULT", handleResult);
+    sendAttempt();
+    return promise;
   }
 
   /**

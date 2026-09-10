@@ -8,6 +8,10 @@
 import type { DeathState } from "../../../types/entities";
 import type { DeathLocationData } from "../../../types/core/core";
 import type { TransactionContext } from "../../../types/death";
+import type {
+  GroundItemDeathCommitReceipt,
+  GroundItemDeathCommitRequest,
+} from "../../../types/network/database";
 
 export interface PlayerSystemLike {
   players?: Map<string, { position?: { x: number; y: number; z: number } }>;
@@ -37,6 +41,9 @@ export interface DatabaseSystemLike {
     replayed: boolean;
     returned: Array<{ itemId: string; quantity: number }>;
   }>;
+  commitGroundItemDeathOperationAsync?: (
+    request: GroundItemDeathCommitRequest,
+  ) => Promise<GroundItemDeathCommitReceipt>;
 }
 
 export interface EquipmentSystemLike {

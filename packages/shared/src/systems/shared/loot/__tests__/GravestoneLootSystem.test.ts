@@ -474,7 +474,7 @@ describe("GravestoneLootSystem", () => {
       );
     });
 
-    it("nonexistent gravestone silently fails", async () => {
+    it("returns a terminal rejection when the gravestone no longer exists", async () => {
       world.emit(EventType.CORPSE_LOOT_REQUEST, {
         corpseId: "nonexistent",
         playerId: "player_1",
@@ -483,8 +483,14 @@ describe("GravestoneLootSystem", () => {
       });
       await tick();
 
-      // No crash, no network result (entity not found = null context)
-      expect(world.network.sendTo).not.toHaveBeenCalled();
+      expect(world.network.sendTo).toHaveBeenCalledWith(
+        "player_1",
+        "lootResult",
+        expect.objectContaining({
+          success: false,
+          reason: "INVALID_REQUEST",
+        }),
+      );
     });
   });
 

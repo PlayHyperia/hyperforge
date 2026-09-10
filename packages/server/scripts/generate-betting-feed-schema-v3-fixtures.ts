@@ -9,10 +9,11 @@ import {
   type BettingFeedPayload,
   type BettingFeedTerminalOverride,
 } from "../src/routes/streaming-betting-feed.js";
-import type {
-  StreamingDuelCycle,
-  StreamingDuelWinReason,
-  StreamingPhase,
+import {
+  STREAMING_TIMING,
+  type StreamingDuelCycle,
+  type StreamingDuelWinReason,
+  type StreamingPhase,
 } from "../src/systems/StreamingDuelScheduler/types.js";
 import {
   finalizeCompetitiveSnapshot,
@@ -43,6 +44,8 @@ export type BettingFeedSchemaV3ContractFixture = {
 
 const SOURCE_EPOCH = 1_785_829_600_000;
 const BASE_TIME = 1_785_829_601_000;
+const BET_CLOSE_TIME = BASE_TIME + 60_000;
+const FIGHT_START_TIME = BET_CLOSE_TIME + STREAMING_TIMING.COUNTDOWN_DURATION;
 
 function deriveDuelKey(cycleId: string): string {
   return createHash("sha256")
@@ -150,6 +153,14 @@ function createCycle(
     persisted: true,
     frozenAt: BASE_TIME,
     betWindowDurationMs: 60_000,
+    timing: {
+      contractVersion: STREAMING_TIMING.CONTRACT_VERSION,
+      timeoutPolicy: STREAMING_TIMING.TIMEOUT_POLICY,
+      countdownDurationMs: STREAMING_TIMING.COUNTDOWN_DURATION,
+      fightingDurationMs: STREAMING_TIMING.FIGHTING_DURATION,
+      endWarningDurationMs: STREAMING_TIMING.END_WARNING_DURATION,
+      maxFightDurationMs: STREAMING_TIMING.MAX_FIGHT_DURATION,
+    },
     draft: {
       diagnostic: false,
       preparationId: deterministicUuid(`fixture-preparation:${cycleId}`),
@@ -243,7 +254,7 @@ function createCycle(
     competitiveSnapshot: competitive.snapshot,
     arenaId: 1,
     betOpenTime: BASE_TIME,
-    betCloseTime: BASE_TIME + 60_000,
+    betCloseTime: BET_CLOSE_TIME,
     countdownValue: null,
     fightStartTime: null,
     duelEndTime: null,
@@ -344,10 +355,10 @@ function terminalWinCase(input: {
   reason: Exclude<StreamingDuelWinReason, "draw">;
 }): BettingFeedSchemaV3ContractCase {
   const loserId = input.winnerId === "agent-a" ? "agent-b" : "agent-a";
-  const finishedAt = BASE_TIME + 61_000 + input.seq * 1_000;
+  const finishedAt = FIGHT_START_TIME + input.seq * 1_000;
   const baseCycle = createCycle(input.name, "RESOLUTION", {
     phaseVersion: 4,
-    fightStartTime: BASE_TIME + 61_000,
+    fightStartTime: FIGHT_START_TIME,
     duelEndTime: finishedAt,
     winnerId: input.winnerId,
     loserId,
@@ -384,10 +395,10 @@ function refundCase(input: {
   const duelEndTime =
     input.phase === "ANNOUNCEMENT"
       ? BASE_TIME + input.seq * 1_000
-      : BASE_TIME + 61_000 + input.seq * 1_000;
+      : FIGHT_START_TIME + input.seq * 1_000;
   const cycle = createCycle(input.name, input.phase, {
     phaseVersion: input.phase === "ANNOUNCEMENT" ? 1 : 3,
-    fightStartTime: input.phase === "ANNOUNCEMENT" ? null : BASE_TIME + 61_000,
+    fightStartTime: input.phase === "ANNOUNCEMENT" ? null : FIGHT_START_TIME,
     duelEndTime,
     outcome: input.outcome === "draw" ? "draw" : null,
     winReason: input.outcome === "draw" ? "draw" : null,
@@ -420,10 +431,11 @@ export function buildBettingFeedSchemaV3ContractFixture(): BettingFeedSchemaV3Co
   const countdown = createCycle("countdown", "COUNTDOWN", {
     phaseVersion: 2,
     countdownValue: 3,
+    fightStartTime: FIGHT_START_TIME,
   });
   const fighting = createCycle("fighting", "FIGHTING", {
     phaseVersion: 3,
-    fightStartTime: BASE_TIME + 61_000,
+    fightStartTime: FIGHT_START_TIME,
   });
 
   const refundDefinitions: Array<{

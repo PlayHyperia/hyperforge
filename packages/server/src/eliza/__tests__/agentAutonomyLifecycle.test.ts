@@ -3,6 +3,8 @@ import { describe, expect, it } from "vitest";
 import {
   AGENT_AUTONOMY_LIFECYCLE_STATES,
   deriveAgentAutonomyLifecycleState,
+  toPublicPreparationActivity,
+  toPublicPreparationMode,
 } from "../agentAutonomyLifecycle.js";
 import { AGENT_AUTONOMY_ACTION_TYPES } from "../agentAutonomyCheckpoint.js";
 import type { EmbeddedBehaviorAction } from "../managers/AgentBehaviorTicker.js";
@@ -67,5 +69,35 @@ describe("ordinary agent lifecycle categories", () => {
         ),
       ).toBe(true);
     }
+  });
+
+  it("maps every durable lifecycle state to a bounded public category", () => {
+    expect(
+      AGENT_AUTONOMY_LIFECYCLE_STATES.map(toPublicPreparationActivity),
+    ).toEqual([
+      "planning",
+      "gathering",
+      "training",
+      "crafting",
+      "provisioning",
+      "questing",
+      "exploring",
+      "reassessing",
+    ]);
+  });
+
+  it("reduces exact action intent to a privacy-safe work or travel mode", () => {
+    expect(toPublicPreparationMode("gathering", "move")).toBe("traveling");
+    expect(toPublicPreparationMode("crafting", "navigateTo")).toBe("traveling");
+    expect(toPublicPreparationMode("exploring", "homeTeleport")).toBe(
+      "traveling",
+    );
+    expect(toPublicPreparationMode("gathering", "gather")).toBe("working");
+    expect(toPublicPreparationMode("crafting", "smith")).toBe("working");
+    expect(toPublicPreparationMode("goal_selection", "move")).toBe("working");
+    expect(toPublicPreparationMode("reassessment", "navigateTo")).toBe(
+      "working",
+    );
+    expect(toPublicPreparationMode("provisioning", null)).toBe("working");
   });
 });

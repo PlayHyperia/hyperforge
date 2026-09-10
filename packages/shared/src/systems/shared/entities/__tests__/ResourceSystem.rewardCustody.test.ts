@@ -6,6 +6,8 @@ import type { AtomicGatheringRewardReceipt } from "../../character/InventorySyst
 import { ResourceSystem } from "../ResourceSystem";
 
 const RESOURCE_ID = "ore_launch_contention";
+const AUTONOMY_ATTEMPT_ID = "11111111-1111-4111-8111-111111111111";
+const AUTONOMY_OPERATION_ID = `gathering-reward:${AUTONOMY_ATTEMPT_ID}`;
 
 beforeAll(async () => {
   await DataManager.getInstance().initialize();
@@ -79,6 +81,7 @@ function createFixture(
       attempts: 0,
       successes: 0,
       pendingRewardOperationId: null,
+      completionOperationId: null,
       skill: "mining",
       toolItemId: null,
       cachedTuning: {
@@ -156,6 +159,160 @@ afterEach(() => {
 });
 
 describe("ResourceSystem durable reward contention", () => {
+  it("uses and clears the bound autonomy attempt for the first reward only", async () => {
+    const fixture = createFixture(async (playerId, operationId) =>
+      committedReceipt(playerId, operationId),
+    );
+    const session = fixture.activeGathering.get("contention-agent-00");
+    expect(
+      fixture.system.bindGatheringCompletionAttempt(
+        "contention-agent-00",
+        RESOURCE_ID,
+        AUTONOMY_ATTEMPT_ID,
+      ),
+    ).toBe(true);
+    expect(session.completionOperationId).toBe(AUTONOMY_OPERATION_ID);
+    vi.spyOn(Math, "random").mockReturnValue(0);
+
+    fixture.system.processGatheringTick(1);
+
+    expect(fixture.commitGatheringRewardAtomic).toHaveBeenCalledWith(
+      "contention-agent-00",
+      AUTONOMY_OPERATION_ID,
+      expect.objectContaining({ resourceId: RESOURCE_ID, skill: "mining" }),
+    );
+    expect(session.completionOperationId).toBeNull();
+
+    await flushPromises();
+    fixture.system.processGatheringTick(2);
+    expect(fixture.world.$eventBus.emitEvent).toHaveBeenCalledWith(
+      EventType.RESOURCE_GATHERING_COMPLETED,
+      expect.objectContaining({
+        playerId: "contention-agent-00",
+        resourceId: RESOURCE_ID,
+        successful: true,
+        operationId: AUTONOMY_OPERATION_ID,
+      }),
+      "resource",
+    );
+  });
+
+  it("publishes an exact rejection when completion-bound admission fails", () => {
+    const fixture = createFixture(async (playerId, operationId) =>
+      committedReceipt(playerId, operationId),
+    );
+
+    expect(
+      fixture.system.requestGathering({
+        playerId: "contention-agent-00",
+        resourceId: "missing_resource",
+        playerPosition: { x: 100, y: 0, z: 100 },
+        completionAttemptId: AUTONOMY_ATTEMPT_ID,
+      }),
+    ).toBe(false);
+    expect(fixture.world.$eventBus.emitEvent).toHaveBeenCalledWith(
+      EventType.RESOURCE_GATHERING_COMPLETED,
+      {
+        playerId: "contention-agent-00",
+        resourceId: "missing_resource",
+        successful: false,
+        skill: "unknown",
+        operationId: AUTONOMY_OPERATION_ID,
+        failureReason: "resource_missing",
+      },
+      "resource",
+    );
+  });
+
+  it("publishes the exact anti-spam reason for a completion-bound rapid retry", () => {
+    const fixture = createFixture(async (playerId, operationId) =>
+      committedReceipt(playerId, operationId),
+    );
+    (
+      fixture.system as unknown as {
+        gatherRateLimits: Map<string, number>;
+      }
+    ).gatherRateLimits.set("contention-agent-00", Date.now());
+
+    expect(
+      fixture.system.requestGathering({
+        playerId: "contention-agent-00",
+        resourceId: RESOURCE_ID,
+        playerPosition: { x: 0, y: 0, z: 0 },
+        completionAttemptId: AUTONOMY_ATTEMPT_ID,
+      }),
+    ).toBe(false);
+    expect(fixture.world.$eventBus.emitEvent).toHaveBeenCalledWith(
+      EventType.RESOURCE_GATHERING_COMPLETED,
+      {
+        playerId: "contention-agent-00",
+        resourceId: RESOURCE_ID,
+        successful: false,
+        skill: "unknown",
+        operationId: AUTONOMY_OPERATION_ID,
+        failureReason: "rate_limited",
+      },
+      "resource",
+    );
+  });
+
+  it("publishes an exact failure when a bound gathering attempt is cancelled before reward", () => {
+    const fixture = createFixture(async (playerId, operationId) =>
+      committedReceipt(playerId, operationId),
+    );
+    const session = fixture.activeGathering.get("contention-agent-00");
+    session.completionOperationId = AUTONOMY_OPERATION_ID;
+
+    (
+      fixture.system as unknown as {
+        cancelGatheringForPlayer: (playerId: string, reason: string) => void;
+      }
+    ).cancelGatheringForPlayer("contention-agent-00", "movement");
+
+    expect(fixture.world.$eventBus.emitEvent).toHaveBeenCalledWith(
+      EventType.RESOURCE_GATHERING_COMPLETED,
+      {
+        playerId: "contention-agent-00",
+        resourceId: RESOURCE_ID,
+        successful: false,
+        skill: "mining",
+        operationId: AUTONOMY_OPERATION_ID,
+        failureReason: "movement",
+      },
+      "resource",
+    );
+  });
+
+  it("publishes an exact moving-resource reason for a bound gathering attempt", () => {
+    const fixture = createFixture(async (playerId, operationId) =>
+      committedReceipt(playerId, operationId),
+    );
+    const session = fixture.activeGathering.get("contention-agent-00");
+    session.completionOperationId = AUTONOMY_OPERATION_ID;
+
+    (
+      fixture.system as unknown as {
+        stopGathering: (
+          data: { playerId: string },
+          failureReason: string,
+        ) => void;
+      }
+    ).stopGathering({ playerId: "contention-agent-00" }, "resource_moved");
+
+    expect(fixture.world.$eventBus.emitEvent).toHaveBeenCalledWith(
+      EventType.RESOURCE_GATHERING_COMPLETED,
+      {
+        playerId: "contention-agent-00",
+        resourceId: RESOURCE_ID,
+        successful: false,
+        skill: "mining",
+        operationId: AUTONOMY_OPERATION_ID,
+        failureReason: "resource_moved",
+      },
+      "resource",
+    );
+  });
+
   it("hydrates a persisted depletion before spawning a server resource", async () => {
     const respawnAt = Date.now() + 6_000;
     const getGatheringResourceStatesAsync = vi.fn(async () => [
@@ -296,7 +453,7 @@ describe("ResourceSystem durable reward contention", () => {
     expect(fixture.resource.isAvailable).toBe(true);
     expect(
       fixture.world.$eventBus.emitEvent.mock.calls.filter(
-        ([event]) => event === EventType.SKILLS_XP_GAINED,
+        ([event]) => event === EventType.SKILLS_PROGRESS_COMMITTED,
       ),
     ).toHaveLength(0);
 
@@ -310,7 +467,7 @@ describe("ResourceSystem durable reward contention", () => {
     expect(fixture.commitGatheringRewardAtomic).toHaveBeenCalledOnce();
     expect(
       fixture.world.$eventBus.emitEvent.mock.calls.filter(
-        ([event]) => event === EventType.SKILLS_XP_GAINED,
+        ([event]) => event === EventType.SKILLS_PROGRESS_COMMITTED,
       ),
     ).toHaveLength(1);
     expect(
@@ -424,7 +581,7 @@ describe("ResourceSystem durable reward contention", () => {
     expect(fixture.resource.isAvailable).toBe(false);
     expect(
       fixture.world.$eventBus.emitEvent.mock.calls.filter(
-        ([event]) => event === EventType.SKILLS_XP_GAINED,
+        ([event]) => event === EventType.SKILLS_PROGRESS_COMMITTED,
       ),
     ).toHaveLength(1);
   });
@@ -445,6 +602,8 @@ describe("ResourceSystem durable reward contention", () => {
       reason: "inventory_full",
     }));
     vi.spyOn(Math, "random").mockReturnValue(0);
+    fixture.activeGathering.get("contention-agent-00").completionOperationId =
+      AUTONOMY_OPERATION_ID;
 
     fixture.system.processGatheringTick(1);
     await flushPromises();
@@ -453,7 +612,7 @@ describe("ResourceSystem durable reward contention", () => {
     expect(fixture.resource.isAvailable).toBe(true);
     expect(
       fixture.world.$eventBus.emitEvent.mock.calls.filter(
-        ([event]) => event === EventType.SKILLS_XP_GAINED,
+        ([event]) => event === EventType.SKILLS_PROGRESS_COMMITTED,
       ),
     ).toHaveLength(0);
     expect(
@@ -462,6 +621,115 @@ describe("ResourceSystem durable reward contention", () => {
       ),
     ).toHaveLength(0);
     expect(fixture.activeGathering.size).toBe(24);
+    expect(fixture.world.$eventBus.emitEvent).toHaveBeenCalledWith(
+      EventType.RESOURCE_GATHERING_COMPLETED,
+      {
+        playerId: "contention-agent-00",
+        resourceId: RESOURCE_ID,
+        successful: false,
+        skill: "mining",
+        operationId: AUTONOMY_OPERATION_ID,
+        failureReason: "inventory_full",
+      },
+      "resource",
+    );
+  });
+
+  it("preserves unresolved reward custody and clears the arrival emote after the session was canceled", () => {
+    const fixture = createFixture(
+      async (playerId, operationId) =>
+        new Promise<AtomicGatheringRewardReceipt>(() => {
+          void playerId;
+          void operationId;
+        }),
+      1,
+    );
+    vi.spyOn(Math, "random").mockReturnValue(0);
+
+    fixture.system.processGatheringTick(1);
+    const [playerId] = fixture.commitGatheringRewardAtomic.mock.calls[0];
+    const internals = fixture.system as unknown as {
+      activeGathering: Map<string, unknown>;
+      pendingGatherRewards: Map<string, unknown>;
+      cancelGatheringForPlayer: (id: string, reason: string) => void;
+      resetGatheringEmote: ReturnType<typeof vi.fn>;
+      startGathering: (data: {
+        playerId: string;
+        resourceId: string;
+        playerPosition: { x: number; y: number; z: number };
+      }) => void;
+    };
+    const pending = internals.pendingGatherRewards.get(playerId);
+
+    internals.cancelGatheringForPlayer(playerId, "movement");
+    internals.resetGatheringEmote.mockClear();
+    fixture.world.$eventBus.emitEvent.mockClear();
+
+    const replacementRequest = {
+      playerId,
+      resourceId: RESOURCE_ID,
+      playerPosition: { x: 0, y: 0, z: 0 },
+    };
+    internals.startGathering(replacementRequest);
+    internals.startGathering(replacementRequest);
+
+    expect(internals.activeGathering.size).toBe(0);
+    expect(internals.pendingGatherRewards.get(playerId)).toBe(pending);
+    expect(fixture.commitGatheringRewardAtomic).toHaveBeenCalledOnce();
+    expect(internals.resetGatheringEmote).toHaveBeenCalledTimes(1);
+    expect(internals.resetGatheringEmote).toHaveBeenCalledWith(playerId);
+    expect(fixture.world.$eventBus.emitEvent).toHaveBeenCalledOnce();
+    expect(fixture.world.$eventBus.emitEvent).toHaveBeenCalledWith(
+      EventType.UI_MESSAGE,
+      {
+        playerId,
+        message:
+          "Your previous gathering result is still being reconciled. Please try again in a moment.",
+        type: "info",
+      },
+      "resource",
+    );
+  });
+
+  it("leaves the live gathering presentation intact while its own reward is unresolved", () => {
+    const fixture = createFixture(
+      async (playerId, operationId) =>
+        new Promise<AtomicGatheringRewardReceipt>(() => {
+          void playerId;
+          void operationId;
+        }),
+      1,
+    );
+    vi.spyOn(Math, "random").mockReturnValue(0);
+
+    fixture.system.processGatheringTick(1);
+    const [playerId] = fixture.commitGatheringRewardAtomic.mock.calls[0];
+    const internals = fixture.system as unknown as {
+      activeGathering: Map<string, unknown>;
+      pendingGatherRewards: Map<string, unknown>;
+      resetGatheringEmote: ReturnType<typeof vi.fn>;
+      startGathering: (data: {
+        playerId: string;
+        resourceId: string;
+        playerPosition: { x: number; y: number; z: number };
+      }) => void;
+    };
+    const session = internals.activeGathering.get(playerId);
+    const pending = internals.pendingGatherRewards.get(playerId);
+    internals.resetGatheringEmote.mockClear();
+    fixture.world.$eventBus.emitEvent.mockClear();
+
+    internals.startGathering({
+      playerId,
+      resourceId: RESOURCE_ID,
+      playerPosition: { x: 0, y: 0, z: 0 },
+    });
+
+    expect(internals.activeGathering.get(playerId)).toBe(session);
+    expect(internals.pendingGatherRewards.get(playerId)).toBe(pending);
+    expect(fixture.commitGatheringRewardAtomic).toHaveBeenCalledOnce();
+    expect(internals.resetGatheringEmote).not.toHaveBeenCalled();
+    expect(fixture.world.$eventBus.emitEvent).not.toHaveBeenCalled();
   });
 
   it("honors an already-started durable reward after movement cancels future attempts", async () => {
@@ -490,7 +758,7 @@ describe("ResourceSystem durable reward contention", () => {
     expect(fixture.resource.isAvailable).toBe(false);
     expect(
       fixture.world.$eventBus.emitEvent.mock.calls.filter(
-        ([event]) => event === EventType.SKILLS_XP_GAINED,
+        ([event]) => event === EventType.SKILLS_PROGRESS_COMMITTED,
       ),
     ).toHaveLength(1);
     expect(fixture.commitGatheringRewardAtomic).toHaveBeenCalledOnce();

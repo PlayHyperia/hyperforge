@@ -13,14 +13,26 @@ import type { EntityManager } from "..";
 import { ZoneDetectionSystem } from "../death/ZoneDetectionSystem";
 import type { GroundItemSystem } from "../economy/GroundItemSystem";
 import { DeathStateManager } from "../death/DeathStateManager";
+import type { DeathRecoveryRequest } from "../death/DeathStateManager";
 import { SafeAreaDeathHandler } from "../death/SafeAreaDeathHandler";
 import { WildernessDeathHandler } from "../death/WildernessDeathHandler";
 import { ZoneType, type TransactionContext } from "../../../types/death";
 import type { InventorySystem } from "../character/InventorySystem";
 import { getEntityPosition } from "../../../utils/game/EntityPositionUtils";
 import { STARTER_TOWNS } from "../../../data/world-areas";
+import { ALL_WORLD_AREAS } from "../../../data/world-areas";
 import { isPositionInsideDuelArenaZone } from "../../../data/duel-manifest";
+import {
+  isExternalValueEnabled,
+  requirePreparationDeathCustodyPolicy,
+} from "../death/PreparationDeathCustodyPolicy";
 import { generateTransactionId } from "../../../utils/IdGenerator";
+import type {
+  GroundItemDeathCommitReceipt,
+  GroundItemDeathCommitRequest,
+} from "../../../types/network/database";
+import { serializeGroundItemDeathCommitFingerprint } from "../../../utils/game/GroundItemDeathRegistration";
+import { generateGroundItemDeathOperationId } from "../../../utils/game/GroundItemSourceIdentity";
 import type {
   PlayerSystemLike,
   DatabaseSystemLike,
@@ -39,6 +51,32 @@ import {
   validatePosition,
   isPositionInBounds,
 } from "./DeathUtils";
+
+async function sha256Hex(value: string): Promise<string> {
+  const subtle = globalThis.crypto?.subtle;
+  if (!subtle) throw new Error("web_crypto_unavailable");
+  const digest = await subtle.digest(
+    "SHA-256",
+    new TextEncoder().encode(value),
+  );
+  return [...new Uint8Array(digest)]
+    .map((byte) => byte.toString(16).padStart(2, "0"))
+    .join("");
+}
+
+function isDefinitiveDeathCustodyError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return (
+    message.startsWith("safe_death_") ||
+    message.startsWith("ground_item_death_") ||
+    message.startsWith("ground_item_source_")
+  );
+}
+
+function isAmbiguousDeathCustodyError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return message.startsWith("death_custody_commit_unknown:");
+}
 
 /**
  * Orchestrates player death via modular handlers (zone detection, safe area, wilderness).
@@ -73,6 +111,11 @@ export class PlayerDeathSystem extends SystemBase {
 
   // Guard: prevents respawn race while death transaction is in progress
   private deathProcessingInProgress = new Set<string>();
+
+  // A respawn can await gravestone custody, database reloads, and kept-item
+  // restoration. Keep one exact completion boundary per player so event, tick,
+  // reconnect, and embedded-agent requests cannot run that work concurrently.
+  private respawnInProgress = new Set<string>();
 
   // Single-retry queue for post-transaction DB persist failures.
   // Bounded to MAX_PERSIST_RETRIES to prevent unbounded growth if DB is persistently unavailable.
@@ -145,6 +188,9 @@ export class PlayerDeathSystem extends SystemBase {
       this.groundItemSystem,
       this.deathStateManager,
     );
+    this.deathStateManager.setRecoveryHandler((request) =>
+      this.restoreDeathCustody(request),
+    );
 
     this.wildernessHandler = new WildernessDeathHandler(
       this.world,
@@ -158,6 +204,7 @@ export class PlayerDeathSystem extends SystemBase {
         entityId: string;
         killedBy: string;
         entityType: "player" | "mob";
+        combatProgressCommitted?: boolean;
       }) => this.handlePlayerDeath(data),
     );
     this.subscribe(
@@ -184,18 +231,6 @@ export class PlayerDeathSystem extends SystemBase {
     );
     this.subscribe(EventType.PLAYER_JOINED, (data: { playerId: string }) =>
       this.handlePlayerReconnect(data),
-    );
-
-    // Crash recovery: when server restarts and finds unrecovered deaths for offline players
-    this.subscribe(
-      EventType.DEATH_RECOVERED,
-      (data: {
-        playerId: string;
-        position: { x: number; y: number; z: number };
-        items: InventoryItem[];
-        killedBy: string;
-        zoneType: ZoneType;
-      }) => this.handleDeathRecovered(data),
     );
 
     this.subscribe(
@@ -277,6 +312,7 @@ export class PlayerDeathSystem extends SystemBase {
     killedBy: string;
     entityType: "player" | "mob";
     deathPosition?: { x: number; y: number; z: number };
+    combatProgressCommitted?: boolean;
   }): Promise<void> {
     // Skip gravestone entity destruction events — not player deaths.
     // This is a performance optimization (avoids entering processPlayerDeath for
@@ -393,10 +429,11 @@ export class PlayerDeathSystem extends SystemBase {
         });
       }
 
-      // Award combat XP to the killer - duels should grant XP (rules-accurate)
-      // Pass killedBy directly since CombatSystem clears attacker states on ENTITY_DEATH
-      // before PlayerDeathSystem runs, making stateService queries unreliable
-      this.emitCombatKillForPvP(playerId, data.killedBy);
+      // Competitive persistent duels co-commit kill XP with their lethal hit.
+      // Database-free/noncompetitive duels retain the existing transient path.
+      if (data.combatProgressCommitted !== true) {
+        this.emitCombatKillForPvP(playerId, data.killedBy);
+      }
 
       return;
     }
@@ -432,6 +469,25 @@ export class PlayerDeathSystem extends SystemBase {
     try {
       await this.processPlayerDeath(playerId, position, data.killedBy);
     } catch (error) {
+      if (isAmbiguousDeathCustodyError(error)) {
+        this.logger.error(
+          "Death custody remains ambiguous after exact retries; retaining dead-state fence",
+          error instanceof Error ? error : undefined,
+          { playerId },
+        );
+        this.emitTypedEvent(EventType.AUDIT_LOG, {
+          action: "DEATH_CUSTODY_COMMIT_UNKNOWN",
+          playerId,
+          actorId: playerId,
+          success: false,
+          transactionId:
+            error instanceof Error
+              ? error.message.slice("death_custody_commit_unknown:".length)
+              : undefined,
+          timestamp: Date.now(),
+        });
+        return;
+      }
       this.logger.error(
         "Death processing failed, resetting to alive",
         error instanceof Error ? error : undefined,
@@ -484,6 +540,30 @@ export class PlayerDeathSystem extends SystemBase {
     } finally {
       this.deathProcessingInProgress.delete(playerId);
     }
+  }
+
+  private async commitDeathCustodyWithExactRetry<T>(
+    operationId: string,
+    commit: () => Promise<T>,
+  ): Promise<T> {
+    let lastError: unknown;
+    for (let attempt = 1; attempt <= 8; attempt++) {
+      try {
+        return await commit();
+      } catch (error) {
+        if (isDefinitiveDeathCustodyError(error)) throw error;
+        lastError = error;
+        if (attempt < 8) {
+          await new Promise<void>((resolve) => {
+            setTimeout(resolve, Math.min(250 * 2 ** (attempt - 1), 5_000));
+          });
+        }
+      }
+    }
+    const unknown = new Error(`death_custody_commit_unknown:${operationId}`, {
+      cause: lastError,
+    });
+    throw unknown;
   }
 
   private async _processPlayerDeathInner(
@@ -580,6 +660,38 @@ export class PlayerDeathSystem extends SystemBase {
       return;
     }
 
+    // Resolve preparation custody before any optional-system fallback. Ordinary
+    // offline play may preserve in-memory items when persistence is absent, but
+    // a preparation area explicitly promises atomic private-grave custody. It
+    // must never silently degrade into no-loss respawn or the wilderness path.
+    const zoneType = this.zoneDetection.getZoneType(deathPosition);
+    let usesProtectedCustody = zoneType === ZoneType.SAFE_AREA;
+    let isPreparationCustody = false;
+    if (!usesProtectedCustody) {
+      const zoneProperties = this.zoneDetection.getZoneProperties?.({
+        x: deathPosition.x,
+        z: deathPosition.z,
+      });
+      const area = zoneProperties?.id
+        ? ALL_WORLD_AREAS[zoneProperties.id]
+        : undefined;
+      if (area?.agentPreparationArea === true) {
+        requirePreparationDeathCustodyPolicy(area);
+        usesProtectedCustody = true;
+        isPreparationCustody = true;
+      }
+    }
+
+    // Real-value operation must never convert an unknown, wilderness, or PvP
+    // classification into an implicit public item drop. Reject before looking
+    // up the database/inventory/equipment systems and before any custody,
+    // ground-item, death-lock, or live inventory mutation can occur.
+    if (isExternalValueEnabled() && !usesProtectedCustody) {
+      throw new Error(
+        `external_value_death_custody_unapproved:${String(zoneType)}`,
+      );
+    }
+
     // PLAYER_SET_DEAD is emitted once in postDeathCleanup after the transaction
     // succeeds. The deathState = DYING set above blocks loot during the transaction.
 
@@ -588,6 +700,9 @@ export class PlayerDeathSystem extends SystemBase {
       "database",
     ) as unknown as DatabaseSystemLike | null;
     if (!databaseSystem || !databaseSystem.executeInTransaction) {
+      if (isPreparationCustody) {
+        throw new Error("preparation_death_custody_database_unavailable");
+      }
       // No DB: death animation + respawn only, no item drops. Items stay in memory
       // (player keeps them). This is safe because without DB, nothing to desync.
       this.postDeathCleanup(playerId, deathPosition, [], killedBy);
@@ -597,6 +712,9 @@ export class PlayerDeathSystem extends SystemBase {
     // Get inventory system
     const inventorySystem = this.world.getSystem("inventory");
     if (!inventorySystem) {
+      if (isPreparationCustody) {
+        throw new Error("preparation_death_custody_inventory_unavailable");
+      }
       // No inventory system: same as no-DB — respawn without item drops.
       this.postDeathCleanup(playerId, deathPosition, [], killedBy);
       return;
@@ -607,12 +725,17 @@ export class PlayerDeathSystem extends SystemBase {
       "equipment",
     ) as unknown as EquipmentSystemLike | null;
 
-    const zoneType = this.zoneDetection.getZoneType(deathPosition);
+    if (
+      isPreparationCustody &&
+      !databaseSystem.commitSafeAreaDeathOperationAsync
+    ) {
+      throw new Error("preparation_death_custody_commit_unavailable");
+    }
     const existingDeathLock =
       await this.deathStateManager.getDeathLock(playerId);
 
     if (
-      zoneType === ZoneType.SAFE_AREA &&
+      usesProtectedCustody &&
       databaseSystem.commitSafeAreaDeathOperationAsync
     ) {
       // A second death must never destroy unresolved custody from the first.
@@ -628,13 +751,17 @@ export class PlayerDeathSystem extends SystemBase {
       }
 
       const operationId = `safe-death:${generateTransactionId()}`;
-      const receipt = await databaseSystem.commitSafeAreaDeathOperationAsync({
+      const deathRequest = {
         operationId,
         playerId,
         deathTimestamp: now,
         position: deathPosition,
         killedBy,
-      });
+      };
+      const receipt = await this.commitDeathCustodyWithExactRetry(
+        operationId,
+        () => databaseSystem.commitSafeAreaDeathOperationAsync!(deathRequest),
+      );
       const toInventoryItems = (
         prefix: string,
         items: Array<{ itemId: string; quantity: number }>,
@@ -701,7 +828,7 @@ export class PlayerDeathSystem extends SystemBase {
           position: deathPosition,
           items: itemsToDrop,
           killedBy,
-          zoneType,
+          zoneType: ZoneType.SAFE_AREA,
         });
       }
       this.postDeathCleanup(
@@ -711,6 +838,170 @@ export class PlayerDeathSystem extends SystemBase {
         killedBy,
         itemsKept,
       );
+      return;
+    }
+
+    if (
+      (zoneType === ZoneType.WILDERNESS || zoneType === ZoneType.PVP_ZONE) &&
+      databaseSystem.commitGroundItemDeathOperationAsync
+    ) {
+      if (existingDeathLock) {
+        throw new Error("ground_item_death_active_lock_exists");
+      }
+      if (!inventorySystem.reloadFromDatabase) {
+        throw new Error("ground_item_death_inventory_reload_unavailable");
+      }
+      if (equipmentSystem && !equipmentSystem.reloadFromDatabase) {
+        throw new Error("ground_item_death_equipment_reload_unavailable");
+      }
+
+      const inventory = inventorySystem.getInventory(playerId);
+      const inventoryItems =
+        inventory?.items.map((item, index) => ({
+          id: `death_inventory_${playerId}_${index}`,
+          itemId: item.itemId,
+          quantity: item.quantity,
+          slot: item.slot,
+          metadata: null,
+        })) ?? [];
+      const equipment = equipmentSystem?.getPlayerEquipment(playerId);
+      const equipmentItems = equipment
+        ? Object.values(equipment).flatMap((entry, index) => {
+            const itemId = entry?.item?.id;
+            if (!itemId) return [];
+            return [
+              {
+                id: `death_equipment_${playerId}_${index}`,
+                itemId,
+                quantity: entry.item?.quantity ?? 1,
+                slot: -1,
+                metadata: null,
+              } satisfies InventoryItem,
+            ];
+          })
+        : [];
+      const plannedItems = [...inventoryItems, ...equipmentItems];
+      const sourceRequests =
+        await this.groundItemSystem.prepareDurableSourceBatchRegistration(
+          plannedItems,
+          deathPosition,
+          {
+            despawnTime: ticksToMs(COMBAT_CONSTANTS.GROUND_ITEM_DESPAWN_TICKS),
+            droppedBy: playerId,
+            lootProtection: ticksToMs(COMBAT_CONSTANTS.LOOT_PROTECTION_TICKS),
+            scatter: true,
+            scatterRadius: 3,
+          },
+        );
+      if (!sourceRequests) {
+        throw new Error("ground_item_death_source_plan_unavailable");
+      }
+
+      const operationId = generateGroundItemDeathOperationId();
+      const fingerprintInput: Omit<
+        GroundItemDeathCommitRequest,
+        "requestFingerprint"
+      > = {
+        operationId,
+        playerId,
+        deathTimestamp: now,
+        position: deathPosition,
+        killedBy,
+        zoneType,
+        sources: sourceRequests,
+      };
+      const request: GroundItemDeathCommitRequest = {
+        ...fingerprintInput,
+        requestFingerprint: await sha256Hex(
+          serializeGroundItemDeathCommitFingerprint(fingerprintInput),
+        ),
+      };
+      const receipt: GroundItemDeathCommitReceipt =
+        await this.commitDeathCustodyWithExactRetry(operationId, () =>
+          databaseSystem.commitGroundItemDeathOperationAsync!(request),
+        );
+      const itemsToDrop = receipt.dropped.map((item, index) => ({
+        id: `death_${receipt.operationId}_${index}`,
+        itemId: item.itemId,
+        quantity: item.quantity,
+        slot: -1,
+        metadata: null,
+      }));
+
+      let liveMirrorFailed = false;
+      try {
+        await equipmentSystem?.reloadFromDatabase?.(playerId);
+      } catch (error) {
+        liveMirrorFailed = true;
+        this.logger.error(
+          "Public death equipment reload failed; retaining dead-state fence",
+          error instanceof Error ? error : undefined,
+          { playerId, operationId },
+        );
+      }
+      try {
+        await inventorySystem.reloadFromDatabase(playerId);
+      } catch (error) {
+        liveMirrorFailed = true;
+        this.logger.error(
+          "Public death inventory reload failed; retaining dead-state fence",
+          error instanceof Error ? error : undefined,
+          { playerId, operationId },
+        );
+      }
+      try {
+        await this.deathStateManager.refreshDeathLock(playerId);
+      } catch (error) {
+        liveMirrorFailed = true;
+        this.logger.error(
+          "Public death lock refresh failed; durable custody remains authoritative",
+          error instanceof Error ? error : undefined,
+          { playerId, operationId },
+        );
+      }
+
+      const finalSources = new Map<
+        string,
+        GroundItemDeathCommitReceipt["sources"][number]
+      >();
+      for (const source of receipt.sources) {
+        const current = finalSources.get(source.sourceId);
+        if (!current || source.version > current.version) {
+          finalSources.set(source.sourceId, source);
+        }
+      }
+      for (const source of finalSources.values()) {
+        try {
+          const exposed =
+            await this.groundItemSystem.exposeCommittedDurableSource(source);
+          if (!exposed) {
+            liveMirrorFailed = true;
+            this.logger.warn(
+              "Public death source presentation deferred; durable custody remains authoritative",
+              { playerId, operationId, sourceId: source.sourceId },
+            );
+          }
+        } catch (error) {
+          liveMirrorFailed = true;
+          this.logger.error(
+            "Public death source presentation deferred; durable custody remains authoritative",
+            error instanceof Error ? error : undefined,
+            { playerId, operationId, sourceId: source.sourceId },
+          );
+        }
+      }
+      if (liveMirrorFailed) {
+        this.emitTypedEvent(EventType.AUDIT_LOG, {
+          action: "GROUND_DEATH_LIVE_RELOAD_DEFERRED",
+          playerId,
+          actorId: playerId,
+          success: false,
+          transactionId: operationId,
+          timestamp: Date.now(),
+        });
+      }
+
+      this.postDeathCleanup(playerId, deathPosition, itemsToDrop, killedBy);
       return;
     }
 
@@ -952,13 +1243,7 @@ export class PlayerDeathSystem extends SystemBase {
           }
         }
 
-        this.initiateRespawn(playerId).catch((err) => {
-          this.logger.error(
-            "Respawn failed",
-            err instanceof Error ? err : undefined,
-            { playerId },
-          );
-        });
+        void this.requestPlayerRespawn(playerId);
       }, DEATH_ANIMATION_DURATION);
 
       this.respawnTimers.set(playerId, respawnTimer);
@@ -1097,7 +1382,7 @@ export class PlayerDeathSystem extends SystemBase {
     }
   }
 
-  private async initiateRespawn(playerId: string): Promise<void> {
+  private async initiateRespawn(playerId: string): Promise<boolean> {
     this.respawnTimers.delete(playerId);
 
     // Defense-in-depth: block respawn during active duel
@@ -1108,7 +1393,7 @@ export class PlayerDeathSystem extends SystemBase {
       this.logger.warn("Blocked initiateRespawn during active duel", {
         playerId,
       });
-      return;
+      return false;
     }
 
     this.logger.info("initiateRespawn called", { playerId });
@@ -1173,6 +1458,7 @@ export class PlayerDeathSystem extends SystemBase {
     // Kept-item return and player revival happen only after any dropped-item
     // gravestone has a durable, exact identity.
     await this.respawnPlayer(playerId, spawnPosition, spawnTownName);
+    return true;
   }
 
   private async respawnPlayer(
@@ -1398,53 +1684,74 @@ export class PlayerDeathSystem extends SystemBase {
     this.lastDeathTime.delete(playerId);
   }
 
-  private handleRespawnRequest(data: { playerId: string }): void {
+  /**
+   * Request and await the authoritative respawn postcondition.
+   *
+   * Exact `true` means the complete respawn boundary resolved. Rejected,
+   * duplicate, unavailable, or failed work returns `false`; callers must not
+   * infer success from event dispatch alone.
+   */
+  async requestPlayerRespawn(playerId: string): Promise<boolean> {
+    if (!playerId || this.respawnInProgress.has(playerId)) {
+      return false;
+    }
+
     // SECURITY: Block respawn during active duel — players cannot escape duels via respawn button
     const duelSystem = this.world.getSystem?.("duel") as {
       isPlayerInActiveDuel?: (playerId: string) => boolean;
     } | null;
-    if (duelSystem?.isPlayerInActiveDuel?.(data.playerId)) {
+    if (duelSystem?.isPlayerInActiveDuel?.(playerId)) {
       this.logger.warn("Blocked respawn request during active duel", {
-        playerId: data.playerId,
+        playerId,
       });
-      return;
+      return false;
     }
 
     // Block respawn while death transaction is still processing
-    if (this.deathProcessingInProgress.has(data.playerId)) {
+    if (this.deathProcessingInProgress.has(playerId)) {
       this.logger.info("Blocked respawn request during death processing", {
-        playerId: data.playerId,
+        playerId,
       });
-      return;
+      return false;
     }
 
     // PRECONDITION: Player must be in DYING state. This is the single source of truth
     // for whether a player is dead. PlayerSystem.handleDeath always sets deathState = DYING
     // before emitting ENTITY_DEATH, so any legitimately dead player will have this state.
-    const playerEntity = this.world.entities?.get?.(data.playerId);
+    const playerEntity = this.world.entities?.get?.(playerId);
     const isDying =
       playerEntity &&
       "data" in playerEntity &&
       (playerEntity as PlayerEntityLike).data?.deathState === DeathState.DYING;
 
     if (!isDying) {
-      return;
+      return false;
     }
 
     // Clear any legacy setTimeout timer if still active
-    const timer = this.respawnTimers.get(data.playerId);
+    const timer = this.respawnTimers.get(playerId);
     if (timer) {
       clearTimeout(timer);
-      this.respawnTimers.delete(data.playerId);
+      this.respawnTimers.delete(playerId);
     }
 
-    this.initiateRespawn(data.playerId).catch((err) => {
+    this.respawnInProgress.add(playerId);
+    try {
+      return await this.initiateRespawn(playerId);
+    } catch (err) {
       this.logger.error(
         "Respawn request failed",
         err instanceof Error ? err : undefined,
-        { playerId: data.playerId },
+        { playerId },
       );
-    });
+      return false;
+    } finally {
+      this.respawnInProgress.delete(playerId);
+    }
+  }
+
+  private handleRespawnRequest(data: { playerId: string }): void {
+    void this.requestPlayerRespawn(data.playerId);
   }
 
   private async handlePlayerReconnect(data: {
@@ -1502,7 +1809,19 @@ export class PlayerDeathSystem extends SystemBase {
       });
 
       // Restore pendingGravestones so initiateRespawn will spawn the gravestone
-      if (itemsFromDeathLock.length > 0) {
+      const hasExactRestoredGravestone = this.hasExactOwnedGravestone(
+        playerId,
+        deathLock.gravestoneId,
+      );
+      if (hasExactRestoredGravestone) {
+        // Startup recovery already restored the exact durable identity. Remove
+        // any stale pending request so reconnect cannot create a sibling grave.
+        this.pendingGravestones.delete(playerId);
+        this.logger.info("Using restored gravestone on reconnect", {
+          playerId,
+          gravestoneId: deathLock.gravestoneId,
+        });
+      } else if (itemsFromDeathLock.length > 0) {
         this.pendingGravestones.set(playerId, {
           position: deathLock.position,
           items: itemsFromDeathLock,
@@ -1526,13 +1845,7 @@ export class PlayerDeathSystem extends SystemBase {
       // Very short delay, then auto-respawn (just enough for world to load)
       const reconnectTimer = setTimeout(() => {
         this.respawnTimers.delete(playerId);
-        this.initiateRespawn(playerId).catch((err) => {
-          this.logger.error(
-            "Reconnect respawn failed",
-            err instanceof Error ? err : undefined,
-            { playerId },
-          );
-        });
+        void this.requestPlayerRespawn(playerId);
       }, ticksToMs(COMBAT_CONSTANTS.DEATH.RECONNECT_RESPAWN_DELAY_TICKS));
       this.respawnTimers.set(playerId, reconnectTimer);
 
@@ -1563,14 +1876,28 @@ export class PlayerDeathSystem extends SystemBase {
    * where items exist but no gravestone/ground items are in the world.
    * Spawns a new gravestone with the recovered items.
    */
-  private handleDeathRecovered(data: {
-    playerId: string;
-    position: { x: number; y: number; z: number };
-    items: InventoryItem[];
-    killedBy: string;
-    zoneType: ZoneType;
-  }): void {
-    if (!this.world.isServer) return;
+  private hasExactOwnedGravestone(
+    playerId: string,
+    gravestoneId: string | null | undefined,
+  ): boolean {
+    if (!gravestoneId) return false;
+    const entity = this.world.entities?.get?.(gravestoneId) as
+      | {
+          getOwnerId?: () => string;
+          getLootItems?: () => InventoryItem[];
+        }
+      | undefined;
+    return (
+      typeof entity?.getOwnerId === "function" &&
+      typeof entity.getLootItems === "function" &&
+      entity.getOwnerId() === playerId
+    );
+  }
+
+  private async restoreDeathCustody(data: DeathRecoveryRequest): Promise<void> {
+    if (!this.world.isServer) {
+      throw new Error("death_recovery_requires_server_authority");
+    }
 
     // Guard against double-recovery
     if (this.pendingGravestones.has(data.playerId)) {
@@ -1580,7 +1907,7 @@ export class PlayerDeathSystem extends SystemBase {
           playerId: data.playerId,
         },
       );
-      return;
+      throw new Error("death_recovery_pending_gravestone_conflict");
     }
 
     if (data.items.length === 0) {
@@ -1596,28 +1923,35 @@ export class PlayerDeathSystem extends SystemBase {
     });
 
     // Spawn gravestone via SafeAreaDeathHandler (tick-based expiration)
-    this.safeAreaHandler
-      .spawnAndTrackGravestone(
-        data.playerId,
-        data.position,
-        data.items,
-        data.killedBy,
-      )
-      .then(async (gravestoneId) => {
-        if (gravestoneId) {
-          await this.deathStateManager.updateGravestoneId(
-            data.playerId,
-            gravestoneId,
-          );
-        }
-      })
-      .catch((err) => {
-        this.logger.error(
-          "Failed to spawn recovery gravestone",
-          err instanceof Error ? err : undefined,
-          { playerId: data.playerId },
+    const gravestoneId = await this.safeAreaHandler.spawnAndTrackGravestone(
+      data.playerId,
+      data.position,
+      data.items,
+      data.killedBy,
+      {
+        deathOperationId: data.deathOperationId,
+        exactGravestoneId: data.gravestoneId,
+      },
+    );
+    if (!gravestoneId) {
+      throw new Error("death_recovery_gravestone_spawn_failed");
+    }
+
+    try {
+      if (data.gravestoneId !== gravestoneId) {
+        await this.deathStateManager.updateGravestoneId(
+          data.playerId,
+          gravestoneId,
         );
-      });
+      }
+    } catch (error) {
+      this.safeAreaHandler.cancelGravestoneTimer(gravestoneId);
+      const entityManager = this.world.getSystem(
+        "entity-manager",
+      ) as EntityManager | null;
+      entityManager?.destroyEntity(gravestoneId);
+      throw error;
+    }
   }
 
   private handleLootCollection(data: { playerId: string }): void {
@@ -1817,7 +2151,7 @@ export class PlayerDeathSystem extends SystemBase {
   }
 
   forceRespawn(playerId: string): void {
-    this.handleRespawnRequest({ playerId });
+    void this.requestPlayerRespawn(playerId);
   }
 
   // Headstone API (now uses EntityManager instead of HeadstoneApp objects)
@@ -1867,13 +2201,7 @@ export class PlayerDeathSystem extends SystemBase {
         }
 
         // Initiate respawn for this player
-        this.initiateRespawn(playerId).catch((err) => {
-          this.logger.error(
-            "Tick-based respawn failed",
-            err instanceof Error ? err : undefined,
-            { playerId },
-          );
-        });
+        void this.requestPlayerRespawn(playerId);
       }
     }
   }

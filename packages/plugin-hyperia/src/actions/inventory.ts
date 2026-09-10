@@ -490,9 +490,17 @@ export const dropItemAction: Action = {
               logger.info(
                 `[DROP_ITEM] Dropping ${itemName} (id=${itemId}, qty=${quantity}, slot=${slot})`,
               );
-              await service.executeDropItem(itemId, quantity, slot);
-              droppedNames.push(itemName || itemId);
-              consecutiveFailures = 0; // Reset on success
+              const receipt = await service.executeDropItem(
+                itemId,
+                quantity,
+                slot,
+              );
+              if (receipt.success) {
+                droppedNames.push(itemName || itemId);
+                consecutiveFailures = 0; // Reset on success
+              } else {
+                throw new Error(receipt.reason);
+              }
             } catch (dropError) {
               logger.warn(
                 `[DROP_ITEM] Failed to drop ${itemName}: ${dropError instanceof Error ? dropError.message : String(dropError)}`,
@@ -505,25 +513,37 @@ export const dropItemAction: Action = {
           }
         }
 
-        let summary =
-          droppedNames.length <= 3
-            ? droppedNames.join(", ")
-            : `${droppedNames.length} items`;
+        const stoppedEarly =
+          droppedNames.length + failedCount < limitedItems.length;
+        const allRequestedDropsCommitted =
+          failedCount === 0 &&
+          !wasLimited &&
+          !stoppedEarly &&
+          droppedNames.length === itemsToDrop.length;
+        const committedSummary =
+          droppedNames.length === 0
+            ? "No items were dropped"
+            : droppedNames.length <= 3
+              ? `Dropped ${droppedNames.join(", ")}`
+              : `Dropped ${droppedNames.length} items`;
+        const details = [
+          failedCount > 0 ? `${failedCount} failed` : null,
+          stoppedEarly ? "stopped after repeated failures" : null,
+          wasLimited ? `limited to ${MAX_DROP_ALL_ITEMS}` : null,
+        ].filter((detail): detail is string => detail !== null);
+        const summary = `${committedSummary}${details.length > 0 ? ` (${details.join("; ")})` : ""}`;
 
-        // Add info about failures or limiting
-        if (failedCount > 0) {
-          summary += ` (${failedCount} failed)`;
-        }
-        if (wasLimited) {
-          summary += ` (limited to ${MAX_DROP_ALL_ITEMS})`;
-        }
-
-        await callback?.({ text: `Dropped ${summary}`, action: "DROP_ITEM" });
+        await callback?.({
+          text: summary,
+          ...(allRequestedDropsCommitted
+            ? { action: "DROP_ITEM" }
+            : { error: true }),
+        });
         logger.info(
           `[DROP_ITEM] Dropped ${droppedNames.length} items, ${failedCount} failed: ${droppedNames.join(", ")}`,
         );
 
-        return { success: true, text: `Dropped ${summary}` };
+        return { success: allRequestedDropsCommitted, text: summary };
       }
 
       // Single item drop - try to find item matching the user's description
@@ -569,7 +589,10 @@ export const dropItemAction: Action = {
         `[DROP_ITEM] Dropping item: ${itemName} (id=${itemId}, slot=${slot})`,
       );
 
-      await service.executeDropItem(itemId, 1, slot);
+      const receipt = await service.executeDropItem(itemId, 1, slot);
+      if (!receipt.success) {
+        throw new Error(receipt.reason);
+      }
 
       await callback?.({ text: `Dropped ${itemName}`, action: "DROP_ITEM" });
 
@@ -796,8 +819,7 @@ export const pickupItemAction: Action = {
       // If too far, walk to it first
       if (itemDistance > MAX_PICKUP_DISTANCE) {
         const itemPos = targetItem.position as
-          | [number, number, number]
-          | { x: number; y: number; z: number };
+          [number, number, number] | { x: number; y: number; z: number };
 
         let itemX: number, itemY: number, itemZ: number;
         if (Array.isArray(itemPos)) {
@@ -1031,8 +1053,7 @@ export const lootGravestoneAction: Action = {
       // If too far, walk to it first
       if (dist !== null && dist > MAX_GRAVESTONE_DISTANCE) {
         const gravePos = gravestone.position as
-          | [number, number, number]
-          | { x: number; y: number; z: number };
+          [number, number, number] | { x: number; y: number; z: number };
 
         let targetPos: [number, number, number];
         if (Array.isArray(gravePos)) {

@@ -23,15 +23,12 @@ import {
   getActionRateLimit,
   isRateLimitEnabled,
 } from "../../infrastructure/rate-limit/rate-limit-config.js";
+import { requirePrivyRequestUser } from "../../infrastructure/auth/http-auth.js";
+import type { DatabaseSystem } from "../../systems/DatabaseSystem/index.js";
 
 // JSON value type for proper typing
 type JSONValue =
-  | string
-  | number
-  | boolean
-  | null
-  | JSONValue[]
-  | { [key: string]: JSONValue };
+  string | number | boolean | null | JSONValue[] | { [key: string]: JSONValue };
 
 // Route schema interfaces
 interface ActionRouteParams {
@@ -62,6 +59,39 @@ export function registerActionRoutes(
     ? { config: { rateLimit: getActionRateLimit() } }
     : {};
 
+  const requireOwnedPlayer = async (
+    request: FastifyRequest,
+    reply: FastifyReply,
+    playerId: unknown,
+  ): Promise<string | null> => {
+    if (
+      typeof playerId !== "string" ||
+      playerId.length < 1 ||
+      playerId.length > 256 ||
+      /[\u0000-\u001f\u007f]/u.test(playerId)
+    ) {
+      await reply.status(400).send({ error: "Invalid playerId" });
+      return null;
+    }
+
+    const authenticatedUserId = await requirePrivyRequestUser(request, reply);
+    if (!authenticatedUserId) return null;
+
+    const databaseSystem = world.getSystem("database") as
+      DatabaseSystem | undefined;
+    if (!databaseSystem) {
+      await reply.status(503).send({ error: "Action authority unavailable" });
+      return null;
+    }
+    const characters =
+      await databaseSystem.getCharactersAsync(authenticatedUserId);
+    if (!characters.some((character) => character.id === playerId)) {
+      await reply.status(403).send({ error: "Forbidden" });
+      return null;
+    }
+    return playerId;
+  };
+
   // Get all available actions
   fastify.get(
     "/api/actions",
@@ -83,10 +113,13 @@ export function registerActionRoutes(
     "/api/actions/available",
     async (request: FastifyRequest, reply: FastifyReply) => {
       const query = request.query as Record<string, unknown>;
+      const playerId = query?.playerId
+        ? await requireOwnedPlayer(request, reply, query.playerId)
+        : undefined;
+      if (query?.playerId && !playerId) return;
       const context = {
         world,
-        playerId: query?.playerId,
-        ...query,
+        playerId,
       };
 
       const actions = world.actionRegistry!.getAvailable(context);
@@ -103,13 +136,26 @@ export function registerActionRoutes(
     actionRouteConfig,
     async (request, reply) => {
       const actionName = request.params.name;
-      const body = request.body as { params: Record<string, unknown> };
-      const params = body.params;
+      if (!/^[a-zA-Z0-9:_-]{1,128}$/.test(actionName)) {
+        return reply.status(400).send({ error: "Invalid action name" });
+      }
+      const body = request.body;
+      const params =
+        body?.params &&
+        typeof body.params === "object" &&
+        !Array.isArray(body.params)
+          ? (body.params as Record<string, unknown>)
+          : {};
       const query = request.query as Record<string, JSONValue>;
+      const playerId = await requireOwnedPlayer(
+        request,
+        reply,
+        query?.playerId,
+      );
+      if (!playerId) return;
       const context = {
         world,
-        playerId: query?.playerId,
-        ...query,
+        playerId,
       };
 
       try {

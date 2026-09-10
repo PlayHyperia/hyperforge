@@ -80,6 +80,17 @@ function createRouteOptions(
     getStreamingDuelScheduler: () => ({
       getCurrentCycle: () => null,
     }),
+    getStreamingDuelAuthoritySnapshot: () => ({
+      configured: true,
+      role: "authority" as const,
+      verified: true,
+      schedulerRunning: true,
+      fencingToken: "7",
+      acquiredAt: 1_000,
+      renewedAt: 2_000,
+      expiresAt: 17_000,
+      lastError: null,
+    }),
     getStreamCaptureStats: () => ({
       clientConnected: true,
       ffmpegRunning: true,
@@ -196,6 +207,104 @@ describe("streaming-betting-routes", () => {
       replay: expect.objectContaining({
         sourceEpoch: expect.any(Number),
       }),
+    });
+
+    routes.close();
+    await options.fastify.close();
+  });
+
+  it("exposes exact authenticated authority health instead of generic server health", async () => {
+    vi.stubEnv("BETTING_FEED_ACCESS_TOKEN", "bet-secret");
+    const cycle = createRouteCycle({
+      phase: "ANNOUNCEMENT",
+      competitiveSnapshotVersion: 4,
+      competitiveSnapshotDigest: "a".repeat(64),
+      competitiveSnapshot: {
+        persisted: true,
+        diagnostic: false,
+      } as never,
+    });
+    const options = createRouteOptions({
+      getStreamingDuelScheduler: () => ({
+        getCurrentCycle: () => cycle,
+        getDurableBettingTerminal: () => null,
+      }),
+    });
+    const routes = registerStreamingBettingRoutes(options);
+
+    const unauthorized = await options.fastify.inject({
+      method: "GET",
+      url: "/api/internal/bet-sync/authority-health",
+    });
+    expect(unauthorized.statusCode).toBe(401);
+
+    const response = await options.fastify.inject({
+      method: "GET",
+      url: "/api/internal/bet-sync/authority-health",
+      headers: { authorization: "Bearer bet-secret" },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.headers["cache-control"]).toBe("no-store");
+    expect(response.json()).toEqual({
+      ready: true,
+      sourceEpoch: expect.any(Number),
+      duelId: "duel-1",
+      duelKeyHex: "0xabcdef",
+      snapshotDigest: "a".repeat(64),
+      phase: "ANNOUNCEMENT",
+      outcome: null,
+      cancellationReason: null,
+      competitiveSnapshotPersisted: true,
+      competitiveSnapshotDiagnostic: false,
+    });
+
+    routes.close();
+    await options.fastify.close();
+  });
+
+  it("fails authority health closed when the production lease is not verified", async () => {
+    vi.stubEnv("BETTING_FEED_ACCESS_TOKEN", "bet-secret");
+    const cycle = createRouteCycle({
+      phase: "ANNOUNCEMENT",
+      competitiveSnapshotVersion: 4,
+      competitiveSnapshotDigest: "b".repeat(64),
+      competitiveSnapshot: {
+        persisted: true,
+        diagnostic: false,
+      } as never,
+    });
+    const options = createRouteOptions({
+      getStreamingDuelScheduler: () => ({
+        getCurrentCycle: () => cycle,
+        getDurableBettingTerminal: () => null,
+      }),
+      getStreamingDuelAuthoritySnapshot: () => ({
+        configured: true,
+        role: "authority",
+        verified: false,
+        schedulerRunning: true,
+        fencingToken: null,
+        acquiredAt: 1_000,
+        renewedAt: 2_000,
+        expiresAt: 2_000,
+        lastError: "lease_local_deadline_elapsed",
+      }),
+    });
+    const routes = registerStreamingBettingRoutes(options);
+
+    const response = await options.fastify.inject({
+      method: "GET",
+      url: "/api/internal/bet-sync/authority-health",
+      headers: { authorization: "Bearer bet-secret" },
+    });
+
+    expect(response.statusCode).toBe(503);
+    expect(response.json()).toMatchObject({
+      ready: false,
+      duelId: "duel-1",
+      competitiveSnapshotPersisted: true,
+      competitiveSnapshotDiagnostic: false,
     });
 
     routes.close();
@@ -357,6 +466,125 @@ describe("streaming-betting-routes", () => {
     await options.fastify.close();
   });
 
+  it("serves the retained terminal state and replay after the scheduler singleton clears", async () => {
+    vi.stubEnv("BETTING_FEED_ACCESS_TOKEN", "bet-secret");
+    const cycle = createRouteCycle({
+      competitiveSnapshotVersion: 4,
+      competitiveSnapshotDigest: "a".repeat(64),
+      competitiveSnapshot: {
+        persisted: true,
+        diagnostic: false,
+      } as never,
+    });
+    let schedulerAvailable = true;
+    const scheduler = {
+      getCurrentCycle: () => cycle,
+      getDurableBettingTerminal: () => null,
+    };
+    const options = createRouteOptions({
+      maxClients: 2,
+      pushIntervalMs: 60_000,
+      heartbeatMs: 60_000,
+      getStreamingDuelScheduler: () => (schedulerAvailable ? scheduler : null),
+    });
+    const routes = registerStreamingBettingRoutes(options);
+    const world = options.world as unknown as EventEmitter;
+
+    routes.captureCurrentState();
+    world.emit("streaming:cycle:aborted", {
+      cycleId: cycle.cycleId,
+      duelId: cycle.duelId,
+      reason: "scheduler_shutdown",
+    });
+    await waitForCondition(() => routes.getMetrics().replay.size === 2);
+    schedulerAvailable = false;
+
+    const stateResponse = await options.fastify.inject({
+      method: "GET",
+      url: "/api/internal/bet-sync/state",
+      headers: { authorization: "Bearer bet-secret" },
+    });
+    expect(stateResponse.statusCode).toBe(200);
+    expect(stateResponse.json()).toMatchObject({
+      seq: 2,
+      duelId: "duel-1",
+      duelKey: "0xabcdef",
+      outcome: "cancelled",
+      cancellationReason: "scheduler_shutdown",
+    });
+
+    const baseUrl = await options.fastify.listen({
+      host: "127.0.0.1",
+      port: 0,
+    });
+    const replayResponse = await fetch(
+      `${baseUrl}/api/internal/bet-sync/events?since=1`,
+      { headers: { authorization: "Bearer bet-secret" } },
+    );
+    expect(replayResponse.status).toBe(200);
+    const replay = await readSseEvents(replayResponse, 1);
+    expect(replay.events).toMatchObject([
+      {
+        id: 2,
+        event: "betting",
+        data: {
+          duelId: "duel-1",
+          outcome: "cancelled",
+          cancellationReason: "scheduler_shutdown",
+        },
+      },
+    ]);
+    await replay.reader.cancel("retained terminal replay verified");
+
+    routes.close();
+    await options.fastify.close();
+  });
+
+  it("does not serve a retained nonterminal frame after the scheduler singleton clears", async () => {
+    vi.stubEnv("BETTING_FEED_ACCESS_TOKEN", "bet-secret");
+    const cycle = createRouteCycle({
+      competitiveSnapshotVersion: 4,
+      competitiveSnapshotDigest: "b".repeat(64),
+      competitiveSnapshot: {
+        persisted: true,
+        diagnostic: false,
+      } as never,
+    });
+    let schedulerAvailable = true;
+    const options = createRouteOptions({
+      getStreamingDuelScheduler: () =>
+        schedulerAvailable
+          ? {
+              getCurrentCycle: () => cycle,
+              getDurableBettingTerminal: () => null,
+            }
+          : null,
+    });
+    const routes = registerStreamingBettingRoutes(options);
+
+    routes.captureCurrentState();
+    expect(routes.getMetrics().replay.size).toBe(1);
+    schedulerAvailable = false;
+
+    for (const url of [
+      "/api/internal/bet-sync/state",
+      "/api/internal/bet-sync/events?since=0",
+    ]) {
+      const response = await options.fastify.inject({
+        method: "GET",
+        url,
+        headers: { authorization: "Bearer bet-secret" },
+      });
+      expect(response.statusCode).toBe(503);
+      expect(response.json()).toMatchObject({
+        error: "Streaming mode not active",
+      });
+    }
+
+    routes.close();
+    await options.fastify.close();
+  });
+
   it("bootstraps a durable cancellation even when routes attach after the cycle cleared", async () => {
     vi.stubEnv("BETTING_FEED_ACCESS_TOKEN", "bet-secret");
     const terminalCycle = createRouteCycle({
@@ -393,6 +621,54 @@ describe("streaming-betting-routes", () => {
       duelEndTime: 9_000,
       outcome: "cancelled",
       cancellationReason: "scheduler_shutdown",
+    });
+
+    routes.close();
+    await options.fastify.close();
+  });
+
+  it("captures an emitted durable cancellation after the live cycle has cleared", async () => {
+    vi.stubEnv("BETTING_FEED_ACCESS_TOKEN", "bet-secret");
+    const terminalCycle = createRouteCycle({
+      phase: "FIGHTING",
+      duelEndTime: 9_000,
+    });
+    const options = createRouteOptions({
+      getStreamingDuelScheduler: () =>
+        ({
+          getCurrentCycle: () => null,
+          getDurableBettingTerminal: () => ({
+            cycle: terminalCycle,
+            terminal: {
+              outcome: "cancelled",
+              cancellationReason: "scheduler_shutdown",
+              duelEndTime: 9_000,
+            },
+          }),
+        }) as never,
+    });
+    const routes = registerStreamingBettingRoutes(options);
+    const world = options.world as unknown as EventEmitter;
+
+    world.emit("streaming:cycle:aborted", {
+      cycleId: "cycle-1",
+      duelId: "duel-1",
+      reason: "scheduler_shutdown",
+    });
+
+    await waitForCondition(() => routes.getMetrics().replay.size === 1);
+    const response = await options.fastify.inject({
+      method: "GET",
+      url: "/api/internal/bet-sync/state",
+      headers: { authorization: "Bearer bet-secret" },
+    });
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({
+      duelId: "duel-1",
+      duelKey: "0xabcdef",
+      outcome: "cancelled",
+      cancellationReason: "scheduler_shutdown",
+      duelEndTime: 9_000,
     });
 
     routes.close();
@@ -984,9 +1260,13 @@ describe("streaming-betting-routes", () => {
   });
 
   it("rotates betting feed tokens without restarting or extending retired access", async () => {
+    let authNowMs = 1_000;
     vi.stubEnv("BETTING_FEED_ACCESS_TOKEN", "old-secret");
     vi.stubEnv("BETTING_FEED_ACCESS_TOKEN_PREVIOUS", "");
-    const options = createRouteOptions();
+    vi.stubEnv("BETTING_FEED_ACCESS_TOKEN_PREVIOUS_EXPIRES_AT_MS", "");
+    const options = createRouteOptions({
+      getAuthNowMs: () => authNowMs,
+    });
     const routes = registerStreamingBettingRoutes(options);
     const requestWith = (token: string) =>
       options.fastify.inject({
@@ -998,11 +1278,110 @@ describe("streaming-betting-routes", () => {
     expect((await requestWith("old-secret")).statusCode).toBe(200);
     vi.stubEnv("BETTING_FEED_ACCESS_TOKEN", "new-secret");
     vi.stubEnv("BETTING_FEED_ACCESS_TOKEN_PREVIOUS", "old-secret");
+    vi.stubEnv("BETTING_FEED_ACCESS_TOKEN_PREVIOUS_EXPIRES_AT_MS", "2000");
     expect((await requestWith("new-secret")).statusCode).toBe(200);
     expect((await requestWith("old-secret")).statusCode).toBe(200);
+    vi.stubEnv("BETTING_FEED_ACCESS_TOKEN_PREVIOUS_EXPIRES_AT_MS", "");
+    expect((await requestWith("new-secret")).statusCode).toBe(503);
+    vi.stubEnv("BETTING_FEED_ACCESS_TOKEN_PREVIOUS_EXPIRES_AT_MS", "2000");
+    authNowMs = 2_000;
+    expect((await requestWith("old-secret")).statusCode).toBe(401);
+    expect((await requestWith("new-secret")).statusCode).toBe(200);
     vi.stubEnv("BETTING_FEED_ACCESS_TOKEN_PREVIOUS", "");
+    vi.stubEnv("BETTING_FEED_ACCESS_TOKEN_PREVIOUS_EXPIRES_AT_MS", "");
     expect((await requestWith("old-secret")).statusCode).toBe(401);
     routes.close();
+    await options.fastify.close();
+  });
+
+  it("revokes an expired previous-token SSE connection while preserving current-token access", async () => {
+    const authClockStartedAt = Date.now();
+    vi.stubEnv("BETTING_FEED_ACCESS_TOKEN", "new-secret");
+    vi.stubEnv("BETTING_FEED_ACCESS_TOKEN_PREVIOUS", "old-secret");
+    vi.stubEnv("BETTING_FEED_ACCESS_TOKEN_PREVIOUS_EXPIRES_AT_MS", "2000");
+    const options = createRouteOptions({
+      maxClients: 2,
+      pushIntervalMs: 60_000,
+      heartbeatMs: 60_000,
+      getAuthNowMs: () => 1_000 + (Date.now() - authClockStartedAt),
+    });
+    const routes = registerStreamingBettingRoutes(options);
+    const baseUrl = await options.fastify.listen({
+      host: "127.0.0.1",
+      port: 0,
+    });
+    const eventsUrl = `${baseUrl}/api/internal/bet-sync/events`;
+
+    const previousResponse = await fetch(eventsUrl, {
+      headers: { authorization: "Bearer old-secret" },
+    });
+    expect(previousResponse.status).toBe(200);
+    const previousDelivery = await readSseEvents(previousResponse, 1);
+    expect(routes.getMetrics().clients.connected).toBe(1);
+
+    await waitForCondition(() => routes.getMetrics().clients.connected === 0);
+    await previousDelivery.reader.cancel("previous token expired");
+
+    const currentResponse = await fetch(eventsUrl, {
+      headers: { authorization: "Bearer new-secret" },
+    });
+    expect(currentResponse.status).toBe(200);
+    const currentDelivery = await readSseEvents(currentResponse, 1);
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(routes.getMetrics().clients.connected).toBe(1);
+    await currentDelivery.reader.cancel("current token verified");
+    await waitForCondition(() => routes.getMetrics().clients.connected === 0);
+
+    routes.close();
+    await options.fastify.close();
+  });
+
+  it("revokes a previous-token SSE connection immediately when rotation settings are retired", async () => {
+    vi.stubEnv("BETTING_FEED_ACCESS_TOKEN", "new-secret");
+    vi.stubEnv("BETTING_FEED_ACCESS_TOKEN_PREVIOUS", "old-secret");
+    vi.stubEnv("BETTING_FEED_ACCESS_TOKEN_PREVIOUS_EXPIRES_AT_MS", "5000");
+    const options = createRouteOptions({
+      maxClients: 2,
+      pushIntervalMs: 60_000,
+      heartbeatMs: 60_000,
+      getAuthNowMs: () => 1_000,
+    });
+    const routes = registerStreamingBettingRoutes(options);
+    const baseUrl = await options.fastify.listen({
+      host: "127.0.0.1",
+      port: 0,
+    });
+    const previousResponse = await fetch(
+      `${baseUrl}/api/internal/bet-sync/events`,
+      { headers: { authorization: "Bearer old-secret" } },
+    );
+    const previousDelivery = await readSseEvents(previousResponse, 1);
+    expect(routes.getMetrics().clients.connected).toBe(1);
+
+    vi.stubEnv("BETTING_FEED_ACCESS_TOKEN_PREVIOUS", "");
+    vi.stubEnv("BETTING_FEED_ACCESS_TOKEN_PREVIOUS_EXPIRES_AT_MS", "");
+    const currentBootstrap = await options.fastify.inject({
+      method: "GET",
+      url: "/api/internal/bet-sync/state",
+      headers: { authorization: "Bearer new-secret" },
+    });
+    expect(currentBootstrap.statusCode).toBe(200);
+    await waitForCondition(() => routes.getMetrics().clients.connected === 0);
+    await previousDelivery.reader.cancel("previous token retired");
+
+    routes.close();
+    await options.fastify.close();
+  });
+
+  it("refuses to register with an invalid previous-token rotation", async () => {
+    vi.stubEnv("BETTING_FEED_ACCESS_TOKEN", "new-secret");
+    vi.stubEnv("BETTING_FEED_ACCESS_TOKEN_PREVIOUS", "old-secret");
+    vi.stubEnv("BETTING_FEED_ACCESS_TOKEN_PREVIOUS_EXPIRES_AT_MS", "");
+    const options = createRouteOptions();
+
+    expect(() => registerStreamingBettingRoutes(options)).toThrow(
+      "previous_token_requires_expiry",
+    );
     await options.fastify.close();
   });
 

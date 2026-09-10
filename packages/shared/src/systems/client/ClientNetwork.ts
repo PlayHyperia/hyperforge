@@ -96,6 +96,7 @@
 
 // moment removed; use native Date
 import { emoteUrls, Emotes } from "../../data/playerEmotes";
+import { EQUIPMENT_SLOT_NAMES } from "../../constants/EquipmentConstants";
 import THREE from "../../extras/three/three";
 import { readPacket, writePacket } from "../../platform/shared/packets";
 import { storage } from "../../platform/shared/storage";
@@ -107,8 +108,13 @@ import type {
   WorldOptions,
 } from "../../types";
 import type { Entity } from "../../entities/Entity";
-import { EventType } from "../../types/events";
-import type { FletchingInterfaceOpenPayload } from "../../types/events";
+import { EventType, type EventMap } from "../../types/events";
+import type {
+  FishingInteractionPresentationPayload,
+  FletchingInterfaceOpenPayload,
+  ProcessingInteractionPresentationPayload,
+} from "../../types/events";
+import { normalizeProcessingInteractionPresentationState } from "../../types/game/processing-interaction-presentation";
 import { DeathState } from "../../types/entities";
 // Social system types - use shared types for consistency
 import type {
@@ -121,10 +127,14 @@ import { uuid } from "../../utils";
 import { SystemBase } from "../shared/infrastructure/SystemBase";
 import { resolveClientConnectionAuthMode } from "./clientNetworkAuthPolicy";
 import { PendingActionTracker } from "./network/PendingActionTracker";
-import { isStreamingLikeViewport } from "../../runtime/clientViewportMode";
+import {
+  isStreamingLikeViewport,
+  shouldAdmitNetworkEntityInViewport,
+} from "../../runtime/clientViewportMode";
 import { PlayerLocal } from "../../entities/player/PlayerLocal";
 import { TileInterpolator } from "./TileInterpolator";
 import { type TileCoord } from "../shared/movement/TileSystem"; // Internal import within shared package
+import { generateGroundItemDropOperationId } from "../../utils/game/GroundItemSourceIdentity";
 
 type ClientNetworkEnv = {
   PUBLIC_DISABLE_NETWORK?: string;
@@ -290,6 +300,14 @@ export class ClientNetwork extends SystemBase {
   private readonly _recentDamageKeys = new Map<string, number>();
   private readonly _recentProjectileLaunchKeys = new Map<string, number>();
   private readonly _recentProjectileHitKeys = new Map<string, number>();
+  private readonly _recentProjectileCancellationKeys = new Map<
+    string,
+    number
+  >();
+  private _projectileNetworkSourceId: string | null = null;
+  private _highestProjectileNetworkSequence = 0;
+  private readonly _missingProjectileNetworkSequences = new Set<number>();
+  private readonly _terminalProjectileIds = new Map<string, number>();
   // Single tracker for all optimistic inventory mutations (shared by all callers).
   // Snapshots the cache before mutation; rolls back after 5s if no server confirmation.
   private inventoryTracker = new PendingActionTracker<InventorySnapshot>(5000);
@@ -337,7 +355,15 @@ export class ClientNetwork extends SystemBase {
   // engagement while an agent repositions; those packets must not release the
   // broadcast client's opponent-facing lock between scheduler ticks.
   private streamingDuelCombatFaceTargets: Map<string, string> = new Map();
+  private processingFaceTargets: Map<
+    string,
+    { x: number; y: number; z: number }
+  > = new Map();
   private streamingDuelContestantIds: Set<string> = new Set();
+  // Entity ids intentionally omitted from arena-only snapshots. Tracking them
+  // prevents later modification packets from accumulating in the out-of-order
+  // queue while preserving the full snapshot behavior for playable clients.
+  private streamingFilteredEntityIds: Set<string> = new Set();
   private streamingDuelFacingLocked = false;
   private streamingDuelFighting = false;
 
@@ -1057,10 +1083,16 @@ export class ClientNetwork extends SystemBase {
       }
     }
 
-    // OPTIMIZATION: Only clear queue when it gets large (avoids array reallocation)
-    // Reset read index and clear queue periodically to prevent unbounded growth
+    // Compact processed entries periodically without discarding unread packets.
+    // A frame can intentionally leave work behind at MAX_PACKETS_PER_FRAME; clearing
+    // the whole array here used to drop that tail whenever the read index crossed
+    // 1,000 during a packet burst (including adjacent combat terminal packets).
     if (this._queueReadIndex > 1000) {
-      this.queue.length = 0;
+      if (this._queueReadIndex >= this.queue.length) {
+        this.queue.length = 0;
+      } else {
+        this.queue = this.queue.slice(this._queueReadIndex);
+      }
       this._queueReadIndex = 0;
     }
   }
@@ -1276,8 +1308,9 @@ export class ClientNetwork extends SystemBase {
     }
     // Deserialize entities if method exists
     if (data.entities) {
+      const snapshotEntities = this.filterNetworkEntities(data.entities);
       try {
-        await this.world.entities.deserialize(data.entities);
+        await this.world.entities.deserialize(snapshotEntities);
       } catch (err) {
         this.logger.error(
           "Failed to deserialize entity snapshot:",
@@ -1304,7 +1337,7 @@ export class ClientNetwork extends SystemBase {
         }
         if (!playerAvatarPreloaded) {
           // Try from the raw data if entity iteration didn't work
-          for (const item of data.entities) {
+          for (const item of snapshotEntities) {
             const entity = item as {
               type?: string;
               owner?: string;
@@ -1326,7 +1359,7 @@ export class ClientNetwork extends SystemBase {
       }
 
       // Set initial serverPosition for local player immediately to avoid Y=0 flash
-      for (const entityData of data.entities) {
+      for (const entityData of snapshotEntities) {
         if (
           entityData &&
           entityData.type === "player" &&
@@ -1348,7 +1381,7 @@ export class ClientNetwork extends SystemBase {
         }
       }
       // Apply pending modifications to all newly added entities
-      for (const entityData of data.entities) {
+      for (const entityData of snapshotEntities) {
         if (entityData && entityData.id) {
           this.applyPendingModifications(entityData.id);
         }
@@ -1514,6 +1547,8 @@ export class ClientNetwork extends SystemBase {
   };
 
   onEntityAdded = (data: EntityData) => {
+    if (this.filterNetworkEntities([data]).length === 0) return;
+
     // Add entity if method exists
     const newEntity = this.world.entities.add(data);
     if (newEntity) {
@@ -1595,7 +1630,7 @@ export class ClientNetwork extends SystemBase {
 
   onEntitiesBatchAdded = (batch: EntityData[]) => {
     if (!Array.isArray(batch)) return;
-    for (const data of batch) {
+    for (const data of this.filterNetworkEntities(batch)) {
       const newEntity = this.world.entities.add(data);
       if (newEntity) {
         this.applyPendingModifications(newEntity.id);
@@ -1610,6 +1645,8 @@ export class ClientNetwork extends SystemBase {
     >,
   ) => {
     const { id } = data;
+    if (this.streamingFilteredEntityIds.has(id)) return;
+
     const entity = this.world.entities.get(id);
     if (!entity) {
       // Limit queued modifications per entity to avoid unbounded growth
@@ -2459,6 +2496,12 @@ export class ClientNetwork extends SystemBase {
     this.world.emit(EventType.INVENTORY_UPDATED, snapshot);
   };
 
+  onGroundItemDropResult = (
+    data: EventMap[EventType.ITEM_DROP_RESULT],
+  ): void => {
+    this.world.emit(EventType.ITEM_DROP_RESULT, data);
+  };
+
   onCoinsUpdated = (data: { playerId: string; coins: number }) => {
     // Update cached inventory coins
     if (this.lastInventoryByPlayerId[data.playerId]) {
@@ -2547,9 +2590,9 @@ export class ClientNetwork extends SystemBase {
     // so EquipmentVisualSystem can attach/remove 3D models to the avatar
     if (data.equipment) {
       const equipment = data.equipment;
-      const slots = ["weapon", "shield", "helmet", "body", "legs", "arrows"];
-
-      for (const slot of slots) {
+      // Use the server's canonical slots, including boots/gloves and accessories.
+      // Omitting a slot prevents its real replicated equip AND clear events.
+      for (const slot of EQUIPMENT_SLOT_NAMES) {
         const slotData = equipment[slot];
         // Emit for ALL slots, including null (to remove items on death)
         interface SlotDataWithItem {
@@ -3995,8 +4038,10 @@ export class ClientNetwork extends SystemBase {
   }
 
   // Inventory actions
-  dropItem(itemId: string, slot?: number, quantity?: number) {
-    this.send("dropItem", { itemId, slot, quantity });
+  dropItem(itemId: string, slot?: number, quantity?: number): string {
+    const operationId = generateGroundItemDropOperationId();
+    this.send("dropItem", { itemId, slot, quantity, operationId });
+    return operationId;
   }
 
   // Prayer actions
@@ -4018,6 +4063,8 @@ export class ClientNetwork extends SystemBase {
   }
 
   onEntityRemoved = (id: string) => {
+    this.streamingFilteredEntityIds.delete(id);
+    this.processingFaceTargets.delete(id);
     // An entity can disappear before the explicit combat-clear packet during a
     // death/disconnect. Drop both its own target and any references to it so a
     // stale facing mode cannot survive entity removal.
@@ -4042,13 +4089,7 @@ export class ClientNetwork extends SystemBase {
     // Remove from tile interpolation tracking (classic fantasy MMORPG-style movement)
     this.tileInterpolator.removeEntity(id);
     // Clean up pending modifications tracking - decrement count first
-    const list = this.pendingModifications.get(id);
-    if (list) {
-      this.totalPendingModificationCount -= list.length;
-    }
-    this.pendingModifications.delete(id);
-    this.pendingModificationTimestamps.delete(id);
-    this.pendingModificationLimitReached.delete(id);
+    this.clearPendingModifications(id);
     // Clean up dead players tracking
     this.deadPlayers.delete(id);
     // Remove from entities system
@@ -4065,6 +4106,7 @@ export class ClientNetwork extends SystemBase {
     // strafing/kiting fighter visually locked to a moving opponent instead of
     // preserving the direction from the first attack packet.
     this.refreshCombatFaceRotations();
+    this.refreshProcessingFaceRotations();
 
     // Get terrain system for height lookups
     const terrain = this.world.getSystem("terrain") as {
@@ -4147,25 +4189,63 @@ export class ClientNetwork extends SystemBase {
     });
   };
 
-  // classic MMORPG-STYLE: Show gathering tool in hand during gathering (e.g., fishing rod)
+  // Show the authoritative gathering tool visual.
   onGatheringToolShow = (data: {
     playerId: string;
     itemId: string;
     slot: string;
+    revision?: number;
   }) => {
     // Forward to local event system for EquipmentVisualSystem
     this.world.emit(EventType.GATHERING_TOOL_SHOW, {
       playerId: data.playerId,
       itemId: data.itemId,
       slot: data.slot,
+      revision: data.revision,
     });
   };
 
-  onGatheringToolHide = (data: { playerId: string; slot: string }) => {
+  onGatheringToolHide = (data: {
+    playerId: string;
+    slot: string;
+    revision?: number;
+  }) => {
     // Forward to local event system for EquipmentVisualSystem
     this.world.emit(EventType.GATHERING_TOOL_HIDE, {
       playerId: data.playerId,
       slot: data.slot,
+      revision: data.revision,
+    });
+  };
+
+  onFishingInteractionPresentation = (
+    data: FishingInteractionPresentationPayload,
+  ) => {
+    this.world.emit(EventType.FISHING_INTERACTION_PRESENTATION, data);
+  };
+
+  onProcessingInteractionPresentation = (
+    data: ProcessingInteractionPresentationPayload,
+  ) => {
+    if (typeof data?.playerId !== "string") return;
+    const playerId = data.playerId.trim();
+    if (!playerId || playerId.length > 256) return;
+    const { playerId: _playerId, ...rawState } = data;
+    const state = normalizeProcessingInteractionPresentationState(rawState);
+    if (!state) return;
+
+    if (state.phase === "working" && state.targetPosition) {
+      this.processingFaceTargets.set(playerId, state.targetPosition);
+      this.applyProcessingFaceRotation(playerId, state.targetPosition);
+    } else {
+      this.processingFaceTargets.delete(playerId);
+      if (!this.combatFaceTargets.has(playerId)) {
+        this.tileInterpolator.clearCombatRotation(playerId);
+      }
+    }
+    this.world.emit(EventType.PROCESSING_INTERACTION_PRESENTATION, {
+      playerId,
+      ...state,
     });
   };
 
@@ -4586,6 +4666,7 @@ export class ClientNetwork extends SystemBase {
   };
 
   onCombatDamageDealt = (data: {
+    projectileId?: string;
     attackerId: string;
     targetId: string;
     damage: number;
@@ -4602,7 +4683,9 @@ export class ClientNetwork extends SystemBase {
     // If tick is missing (rolling deploy), fall back to ms timestamp rounded to
     // 125ms (one server tick at 8Hz) so distinct hits aren't collapsed to tick 0.
     const tick = data.tick ?? Math.floor(performance.now() / 125);
-    const dedupKey = `${data.attackerId}|${data.targetId}|${data.damage}|${tick}`;
+    const dedupKey = data.projectileId
+      ? `projectile|${data.projectileId}`
+      : `${data.attackerId}|${data.targetId}|${data.damage}|${tick}`;
     if (this._recentDamageKeys.has(dedupKey)) {
       return; // Already processed this damage event
     }
@@ -4636,6 +4719,7 @@ export class ClientNetwork extends SystemBase {
   };
 
   onProjectileLaunched = (data: {
+    projectileId?: string;
     attackerId: string;
     targetId: string;
     projectileType: string;
@@ -4648,6 +4732,13 @@ export class ClientNetwork extends SystemBase {
     tick?: number;
     networkEventId?: string;
   }) => {
+    this.observeProjectileNetworkEvent(data.networkEventId);
+    if (
+      data.projectileId &&
+      this._terminalProjectileIds.has(data.projectileId)
+    ) {
+      return;
+    }
     const eventIdentity = this.getProjectileNetworkEventIdentity(
       data.networkEventId,
       data.tick,
@@ -4687,6 +4778,7 @@ export class ClientNetwork extends SystemBase {
   };
 
   onProjectileHit = (data: {
+    projectileId?: string;
     attackerId: string;
     targetId: string;
     damage: number;
@@ -4695,6 +4787,10 @@ export class ClientNetwork extends SystemBase {
     tick?: number;
     networkEventId?: string;
   }) => {
+    this.observeProjectileNetworkEvent(data.networkEventId);
+    if (data.projectileId) {
+      this.rememberTerminalProjectile(data.projectileId);
+    }
     const eventIdentity = this.getProjectileNetworkEventIdentity(
       data.networkEventId,
       data.tick,
@@ -4724,6 +4820,180 @@ export class ClientNetwork extends SystemBase {
 
     this.world.emit(EventType.COMBAT_PROJECTILE_HIT, data);
   };
+
+  onProjectileCancelled = (data: {
+    projectileId: string;
+    attackerId: string;
+    targetId: string;
+    projectileType: "arrow" | "spell";
+    reason:
+      | "combat_ended"
+      | "entity_died"
+      | "player_respawned"
+      | "player_disconnected"
+      | "combat_state_missing"
+      | "projectile_expired";
+    tick?: number;
+    networkEventId?: string;
+  }) => {
+    this.observeProjectileNetworkEvent(data.networkEventId);
+    this.rememberTerminalProjectile(data.projectileId);
+    const eventIdentity = this.getProjectileNetworkEventIdentity(
+      data.networkEventId,
+      data.tick,
+    );
+    const dedupKey = eventIdentity.startsWith("event:")
+      ? `cancel|${eventIdentity}`
+      : [
+          "cancel",
+          eventIdentity,
+          data.projectileId,
+          data.attackerId,
+          data.targetId,
+          data.reason,
+        ].join("|");
+    if (
+      !this.shouldProcessSpatialCombatPacket(
+        this._recentProjectileCancellationKeys,
+        dedupKey,
+      )
+    ) {
+      return;
+    }
+
+    this.world.emit(EventType.COMBAT_PROJECTILE_CANCELLED, data);
+  };
+
+  onProjectileEventReplay = (data: {
+    sourceId?: unknown;
+    requestedFromSequence?: unknown;
+    requestedToSequence?: unknown;
+    complete?: unknown;
+    events?: unknown;
+  }) => {
+    if (
+      typeof data?.sourceId !== "string" ||
+      !Number.isSafeInteger(data.requestedFromSequence) ||
+      !Number.isSafeInteger(data.requestedToSequence) ||
+      !Array.isArray(data.events)
+    ) {
+      return;
+    }
+
+    if (
+      this._projectileNetworkSourceId &&
+      data.sourceId !== this._projectileNetworkSourceId
+    ) {
+      this._projectileNetworkSourceId = data.sourceId;
+      this._highestProjectileNetworkSequence = 0;
+      this._missingProjectileNetworkSequences.clear();
+      return;
+    }
+
+    const events = data.events
+      .filter(
+        (
+          event,
+        ): event is {
+          sequence: number;
+          name:
+            | "projectileLaunched"
+            | "projectileHit"
+            | "projectileCancelled"
+            | "combatDamageDealt";
+          data: unknown;
+        } =>
+          !!event &&
+          typeof event === "object" &&
+          Number.isSafeInteger((event as { sequence?: unknown }).sequence) &&
+          [
+            "projectileLaunched",
+            "projectileHit",
+            "projectileCancelled",
+            "combatDamageDealt",
+          ].includes(String((event as { name?: unknown }).name)),
+      )
+      .sort((left, right) => left.sequence - right.sequence);
+
+    for (const event of events) {
+      switch (event.name) {
+        case "projectileLaunched":
+          this.onProjectileLaunched(event.data as never);
+          break;
+        case "projectileHit":
+          this.onProjectileHit(event.data as never);
+          break;
+        case "projectileCancelled":
+          this.onProjectileCancelled(event.data as never);
+          break;
+        case "combatDamageDealt":
+          this.onCombatDamageDealt(event.data as never);
+          break;
+      }
+    }
+
+    const fromSequence = data.requestedFromSequence as number;
+    const toSequence = data.requestedToSequence as number;
+    for (let sequence = fromSequence; sequence <= toSequence; sequence += 1) {
+      this._missingProjectileNetworkSequences.delete(sequence);
+    }
+  };
+
+  private observeProjectileNetworkEvent(networkEventId?: string): void {
+    if (typeof networkEventId !== "string") return;
+    const separator = networkEventId.lastIndexOf(":");
+    if (separator <= 0 || separator === networkEventId.length - 1) return;
+
+    const sourceId = networkEventId.slice(0, separator);
+    const sequence = Number(networkEventId.slice(separator + 1));
+    if (
+      sourceId.length === 0 ||
+      sourceId.length > 64 ||
+      !Number.isSafeInteger(sequence) ||
+      sequence <= 0
+    ) {
+      return;
+    }
+
+    if (sourceId !== this._projectileNetworkSourceId) {
+      this._projectileNetworkSourceId = sourceId;
+      this._highestProjectileNetworkSequence = sequence;
+      this._missingProjectileNetworkSequences.clear();
+      return;
+    }
+
+    if (sequence > this._highestProjectileNetworkSequence + 1) {
+      const fromSequence = Math.max(
+        this._highestProjectileNetworkSequence + 1,
+        sequence - 64,
+      );
+      const toSequence = sequence - 1;
+      for (let missing = fromSequence; missing <= toSequence; missing += 1) {
+        this._missingProjectileNetworkSequences.add(missing);
+      }
+      this.send("requestProjectileEventReplay", {
+        sourceId,
+        fromSequence,
+        toSequence,
+      });
+    }
+
+    this._highestProjectileNetworkSequence = Math.max(
+      this._highestProjectileNetworkSequence,
+      sequence,
+    );
+    this._missingProjectileNetworkSequences.delete(sequence);
+  }
+
+  private rememberTerminalProjectile(projectileId: string): void {
+    this._terminalProjectileIds.set(projectileId, performance.now());
+    while (this._terminalProjectileIds.size > 512) {
+      const oldest = this._terminalProjectileIds.keys().next().value as
+        string | undefined;
+      if (!oldest) break;
+      this._terminalProjectileIds.delete(oldest);
+    }
+  }
 
   private getProjectileNetworkEventIdentity(
     networkEventId: string | undefined,
@@ -4801,6 +5071,33 @@ export class ClientNetwork extends SystemBase {
     }
   }
 
+  private applyProcessingFaceRotation(
+    playerId: string,
+    targetPosition: { x: number; y: number; z: number },
+  ): boolean {
+    if (this.combatFaceTargets.has(playerId)) return false;
+    const player = this.world.entities.get(playerId);
+    if (!player?.position) return false;
+    const dx = targetPosition.x - player.position.x;
+    const dz = targetPosition.z - player.position.z;
+    if (!Number.isFinite(dx) || !Number.isFinite(dz)) return false;
+    if (dx * dx + dz * dz < 1e-8) return false;
+    const angle = Math.atan2(dx, dz) + Math.PI;
+    _quat_1.setFromAxisAngle(_combatFaceAxis, angle);
+    return this.tileInterpolator.setCombatRotation(
+      playerId,
+      _quat_1,
+      player.position,
+      false,
+    );
+  }
+
+  private refreshProcessingFaceRotations(): void {
+    for (const [playerId, targetPosition] of this.processingFaceTargets) {
+      this.applyProcessingFaceRotation(playerId, targetPosition);
+    }
+  }
+
   private clearPlayerHitReaction(playerId: string): void {
     const player = this.world.entities.get(playerId) as
       { avatar?: { clearHitReaction?: () => void } } | null | undefined;
@@ -4842,7 +5139,9 @@ export class ClientNetwork extends SystemBase {
       agent2Id !== null &&
       agent1Id !== agent2Id;
     const facingLocked =
-      (cycle.phase === "COUNTDOWN" || fighting) &&
+      (cycle.phase === "ANNOUNCEMENT" ||
+        cycle.phase === "COUNTDOWN" ||
+        fighting) &&
       agent1Id !== null &&
       agent2Id !== null &&
       agent1Id !== agent2Id;
@@ -4981,6 +5280,33 @@ export class ClientNetwork extends SystemBase {
     // Forward to local event system so UI can open loot window
     this.world.emit(EventType.CORPSE_CLICK, data);
   };
+
+  private clearPendingModifications(entityId: string): void {
+    const pending = this.pendingModifications.get(entityId);
+    if (pending) {
+      this.totalPendingModificationCount = Math.max(
+        0,
+        this.totalPendingModificationCount - pending.length,
+      );
+    }
+    this.pendingModifications.delete(entityId);
+    this.pendingModificationTimestamps.delete(entityId);
+    this.pendingModificationLimitReached.delete(entityId);
+  }
+
+  private filterNetworkEntities(entities: EntityData[]): EntityData[] {
+    const admitted: EntityData[] = [];
+    for (const entity of entities) {
+      if (!shouldAdmitNetworkEntityInViewport(entity.type)) {
+        this.streamingFilteredEntityIds.add(entity.id);
+        this.clearPendingModifications(entity.id);
+        continue;
+      }
+      this.streamingFilteredEntityIds.delete(entity.id);
+      admitted.push(entity);
+    }
+    return admitted;
+  }
 
   applyPendingModifications = (entityId: string) => {
     const pending = this.pendingModifications.get(entityId);
@@ -5397,6 +5723,11 @@ export class ClientNetwork extends SystemBase {
     tilesPerTick?: number; // Mob-specific speed (optional, defaults to walk/run speed)
     isContinuation?: boolean; // Append to existing path instead of resetting interpolator
   }) => {
+    if (this.processingFaceTargets.delete(data.id)) {
+      if (!this.combatFaceTargets.has(data.id)) {
+        this.tileInterpolator.clearCombatRotation(data.id);
+      }
+    }
     // Get entity's current position for smooth start (fallback if startTile not provided)
     const entity = this.world.entities.get(data.id);
     const currentPosition = entity?.position as THREE.Vector3 | undefined;
@@ -5804,7 +6135,9 @@ export class ClientNetwork extends SystemBase {
     this.tileInterpolator.clear();
     this.combatFaceTargets.clear();
     this.streamingDuelCombatFaceTargets.clear();
+    this.processingFaceTargets.clear();
     this.streamingDuelContestantIds.clear();
+    this.streamingFilteredEntityIds.clear();
     this.streamingDuelFacingLocked = false;
     this.streamingDuelFighting = false;
     // Clear pending modifications tracking
@@ -5815,6 +6148,11 @@ export class ClientNetwork extends SystemBase {
     this._recentDamageKeys.clear();
     this._recentProjectileLaunchKeys.clear();
     this._recentProjectileHitKeys.clear();
+    this._recentProjectileCancellationKeys.clear();
+    this._projectileNetworkSourceId = null;
+    this._highestProjectileNetworkSequence = 0;
+    this._missingProjectileNetworkSequences.clear();
+    this._terminalProjectileIds.clear();
     // Clear dead players tracking
     this.deadPlayers.clear();
   };

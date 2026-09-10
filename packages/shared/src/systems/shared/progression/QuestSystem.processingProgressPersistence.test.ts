@@ -188,7 +188,7 @@ describe("QuestSystem durable processing progress", () => {
       })
       .mockResolvedValueOnce({
         status: "applied",
-        currentStage: "cook_shrimp",
+        currentStage: "return",
         stageProgress: { shrimp: 6 },
       });
     const repository: QuestRepositoryDouble = {
@@ -220,12 +220,12 @@ describe("QuestSystem durable processing progress", () => {
       ...receipts[1],
       expectedCurrentStage: "cook_shrimp",
       expectedProgress: { shrimp: 2 },
-      resultingStage: "cook_shrimp",
+      resultingStage: "return",
       resultingProgress: { shrimp: 6 },
     });
     expect(fixture.state.activeQuests.get(QUEST_ID)).toMatchObject({
       status: "ready_to_complete",
-      currentStage: "cook_shrimp",
+      currentStage: "return",
       stageProgress: { shrimp: 6 },
     });
     fixture.system.destroy();
@@ -358,7 +358,7 @@ describe("QuestSystem durable processing progress", () => {
     };
     const applyProcessingProgressReceipt = vi.fn().mockResolvedValue({
       status: "applied",
-      currentStage: "craft_boots",
+      currentStage: "return",
       stageProgress: { leather_boots: 5, leather_gloves: 5 },
     });
     const fixture = await createFixture({
@@ -391,12 +391,12 @@ describe("QuestSystem durable processing progress", () => {
     expect(applyProcessingProgressReceipt.mock.calls[0][0]).toMatchObject({
       expectedCurrentStage: "craft_gloves",
       expectedProgress: { leather_boots: 5 },
-      resultingStage: "craft_boots",
+      resultingStage: "return",
       resultingProgress: { leather_boots: 5, leather_gloves: 5 },
     });
     expect(fixture.state.activeQuests.get(questId)).toMatchObject({
       status: "ready_to_complete",
-      currentStage: "craft_boots",
+      currentStage: "return",
       stageProgress: { leather_boots: 5, leather_gloves: 5 },
     });
     fixture.system.destroy();

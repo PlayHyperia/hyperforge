@@ -31,6 +31,10 @@ import {
 import type { ShorelineConfig, BiomeNoiseSet } from "./TerrainHeightParams";
 import { BiomeType, DEFAULT_BIOME, BIOME_LIST } from "./TerrainBiomeTypes";
 import { WaterBodyRegistry } from "./WaterBodyRegistry";
+import {
+  resolveRadialPondTerrainHeight,
+  validateRadialPondTerrainProfile,
+} from "./RadialPondTerrainProfile";
 import type { BridgeSystem } from "./BridgeSystem";
 // Import terrain generator from procgen package
 import {
@@ -57,6 +61,7 @@ import type {
   ResourceNode,
   TerrainTile,
   FlatZone,
+  RadialPondTerrainProfile,
 } from "../../../types/world/terrain";
 import type { RoadTileSegment } from "../../../types/world/world-types";
 import { PhysicsHandle } from "../../../types/systems/physics";
@@ -131,7 +136,19 @@ import { terminateQuadChunkWorkerPool } from "../../../utils/workers/QuadChunkWo
 import {
   isStreamPageRoute,
   isStreamingLikeViewport,
+  resolveExplicitStreamingWorldProfile,
 } from "../../../runtime/clientViewportMode";
+import {
+  hasActiveStreamingPreparationPresentation,
+  resolveStreamingPreparationFocus,
+  type StreamingPreparationEntity,
+} from "../../../runtime/streamingPreparationFocus";
+
+const SERVER_LAUNCH_PREPARATION_AREA_IDS = [
+  "central_haven",
+  "haven_pond",
+  "preparation_training_grounds",
+] as const;
 
 // Road influence blending - used for shader's roadInfluence attribute
 const ROAD_BLEND_WIDTH = 0.5; // Extra blend distance beyond road width (meters)
@@ -140,6 +157,18 @@ const TERRAIN_ROAD_INFLUENCE_DEBUG =
 const TERRAIN_TIMING_DEBUG = process.env.TERRAIN_TIMING_DEBUG === "true";
 /** Maximum entries retained in pendingSerializationData to prevent unbounded growth */
 const MAX_PENDING_SERIALIZATION_ENTRIES = 100;
+// The fixed broadcast camera never approaches terrain closely enough to reveal
+// the exploration mesh's 64x64 vertices per quad-tree leaf. Halving each axis
+// retains the authored height field while cutting terrain triangles and vertex
+// work by roughly 75% on the public stream.
+/**
+ * The arena floor and architecture provide the close-range broadcast detail;
+ * quad terrain is only the distant landscape behind that set. A 16-segment
+ * grid keeps the silhouette while avoiding hundreds of thousands of off-set
+ * terrain triangles in every 1080p stream frame. Exploration retains the
+ * authored 64-segment terrain profile.
+ */
+export const STREAMING_TERRAIN_QUADTREE_RESOLUTION = 16;
 
 // Lamppost vertex lighting (terrain-only, GPU shader accumulation)
 const LAMP_VERTEX_LIGHT_RANGE = 12;
@@ -255,6 +284,7 @@ export class TerrainSystem extends System {
   private _tempVec2_3 = new THREE.Vector2(); // For road distance calculations
   private _tempBox3 = new THREE.Box3();
   private _spectatorFocusPos = new THREE.Vector3();
+  private _streamingPreparationFocusPos = new THREE.Vector3();
   private _hasStreamingArenaFocus = false;
   private lamppostLightUpdateTimer = 0;
   private lamppostActiveLights: VertexLight[] = [];
@@ -2040,6 +2070,9 @@ export class TerrainSystem extends System {
     const maxAssembliesPerFrame = isStreamingViewport
       ? Math.min(2, this.CONFIG.QUADTREE_MAX_ASSEMBLIES_PER_FRAME)
       : this.CONFIG.QUADTREE_MAX_ASSEMBLIES_PER_FRAME;
+    const quadTreeResolution = isStreamingViewport
+      ? STREAMING_TERRAIN_QUADTREE_RESOLUTION
+      : this.CONFIG.QUADTREE_RESOLUTION;
 
     this.quadTreeVisualManager = new TerrainVisualManager(
       {
@@ -2047,7 +2080,7 @@ export class TerrainSystem extends System {
         maxDepth: this.CONFIG.QUADTREE_MAX_DEPTH,
         splitRatio: this.CONFIG.QUADTREE_SPLIT_RATIO,
         unsplitMultiplier: this.CONFIG.QUADTREE_UNSPLIT_MULTIPLIER,
-        resolution: this.CONFIG.QUADTREE_RESOLUTION,
+        resolution: quadTreeResolution,
         skirtDrop: this.CONFIG.QUADTREE_SKIRT_DROP,
         // The broadcast camera is pinned to the compact arena complex. One
         // 1,600 m root covers the complete 250 m critical scene radius, so
@@ -2085,6 +2118,7 @@ export class TerrainSystem extends System {
         (x: number, z: number) => this.getHeightAt(x, z),
         (x: number, z: number) => this.getIslandMask(x, z),
         this.CONFIG.WATER_THRESHOLD,
+        this.waterBodyRegistry.getAllBodies(),
       );
 
       const grassContainer = new THREE.Group();
@@ -2093,6 +2127,13 @@ export class TerrainSystem extends System {
         this.terrainContainer.parent?.add(grassContainer);
       }
       const grassWorkerSetup = this.buildGrassWorkerSetup();
+      const terrainShade =
+        this.getTerrainMaterialWithUniforms()?.terrainUniforms.shade;
+      if (!terrainShade) {
+        throw new Error(
+          "Terrain shading must be initialized before grass materials",
+        );
+      }
       this.grassVisualManager = new GrassVisualManager(
         grassContainer,
         (x: number, z: number) => this.getHeightAt(x, z),
@@ -2103,6 +2144,7 @@ export class TerrainSystem extends System {
         (wx: number, wz: number) => this.getTerrainColorAt(wx, wz),
         grassWorkerSetup,
         isStreamingViewport ? STREAMING_GRASS_VISUAL_PROFILE : undefined,
+        terrainShade,
       );
 
       // Wire terrain, water, grass managers to the same quad-tree via composite
@@ -2116,7 +2158,7 @@ export class TerrainSystem extends System {
     console.log(
       "[TerrainSystem] Quad-tree LOD visual manager initialized " +
         `(minSize=${this.CONFIG.QUADTREE_MIN_SIZE}, maxDepth=${this.CONFIG.QUADTREE_MAX_DEPTH}, ` +
-        `resolution=${this.CONFIG.QUADTREE_RESOLUTION}, splitRatio=${this.CONFIG.QUADTREE_SPLIT_RATIO})`,
+        `resolution=${quadTreeResolution}, splitRatio=${this.CONFIG.QUADTREE_SPLIT_RATIO})`,
     );
   }
 
@@ -2416,6 +2458,34 @@ export class TerrainSystem extends System {
     // Initial tiles will be loaded in start() method
   }
 
+  private getServerLaunchPreparationAreas() {
+    return SERVER_LAUNCH_PREPARATION_AREA_IDS.map(
+      (areaId) => ALL_WORLD_AREAS[areaId],
+    ).filter((area) => area !== undefined);
+  }
+
+  private addServerLaunchPreparationTiles(tileKeys: Set<string>): void {
+    if (
+      !this.runtimeIsServer ||
+      typeof process === "undefined" ||
+      process.env.STREAMING_DUEL_ENABLED !== "true"
+    ) {
+      return;
+    }
+
+    for (const area of this.getServerLaunchPreparationAreas()) {
+      const minTileX = this.worldToTerrainTileIndex(area.bounds.minX);
+      const maxTileX = this.worldToTerrainTileIndex(area.bounds.maxX);
+      const minTileZ = this.worldToTerrainTileIndex(area.bounds.minZ);
+      const maxTileZ = this.worldToTerrainTileIndex(area.bounds.maxZ);
+      for (let tileX = minTileX; tileX <= maxTileX; tileX++) {
+        for (let tileZ = minTileZ; tileZ <= maxTileZ; tileZ++) {
+          tileKeys.add(`${tileX}_${tileZ}`);
+        }
+      }
+    }
+  }
+
   /**
    * Resolve terrain focus centers for streaming.
    *
@@ -2433,14 +2503,20 @@ export class TerrainSystem extends System {
         // the delayed public renderer is still completing RESOLUTION; following
         // either remote avatar here would rebuild far-away terrain even though
         // the cinematic camera intentionally remains at the arena.
-        if (isStreamPageRoute()) {
-          const arenaPositions =
+        if (
+          isStreamPageRoute() &&
+          resolveExplicitStreamingWorldProfile() !== "preparation-v1"
+        ) {
+          const streamState =
             typeof window === "undefined"
               ? null
               : (
                   window as Window & {
                     __HYPERIA_STREAM_STATE__?: {
                       cycle?: {
+                        phase?: string;
+                        agent1?: { id?: string | null } | null;
+                        agent2?: { id?: string | null } | null;
                         arenaPositions?: {
                           agent1?: unknown;
                           agent2?: unknown;
@@ -2448,7 +2524,9 @@ export class TerrainSystem extends System {
                       } | null;
                     } | null;
                   }
-                ).__HYPERIA_STREAM_STATE__?.cycle?.arenaPositions;
+                ).__HYPERIA_STREAM_STATE__;
+          const cycle = streamState?.cycle;
+          const arenaPositions = cycle?.arenaPositions;
           const first = arenaPositions?.agent1;
           const second = arenaPositions?.agent2;
           if (
@@ -2478,6 +2556,51 @@ export class TerrainSystem extends System {
             );
             this._hasStreamingArenaFocus = true;
           }
+
+          const participantIds = [cycle?.agent1?.id, cycle?.agent2?.id].filter(
+            (participantId): participantId is string =>
+              typeof participantId === "string" && participantId.length > 0,
+          );
+          const equipmentVisuals = this.world.getSystem?.(
+            "equipment-visual",
+          ) as
+            | {
+                isStreamingPreparationPresentationActive?: (
+                  playerId: string,
+                ) => boolean;
+              }
+            | undefined;
+          const preparationFocus = resolveStreamingPreparationFocus({
+            phase: cycle?.phase,
+            participantIds,
+            resolveEntity: (participantId) =>
+              this.world.entities?.get(participantId) as
+                StreamingPreparationEntity | undefined,
+            isParticipantActive: (participantId, entity) =>
+              equipmentVisuals?.isStreamingPreparationPresentationActive?.(
+                participantId,
+              ) === true || hasActiveStreamingPreparationPresentation(entity),
+          });
+          if (preparationFocus) {
+            this._streamingPreparationFocusPos.set(
+              preparationFocus.position.x,
+              preparationFocus.position.y,
+              preparationFocus.position.z,
+            );
+            // Keep the arena resident as a secondary center so the transition
+            // from preparation into announcement cannot expose terrain pop-in.
+            return [
+              {
+                id: "streaming-preparation-focus",
+                position: this._streamingPreparationFocusPos,
+              },
+              {
+                id: "streaming-arena-focus",
+                position: this._spectatorFocusPos,
+              },
+            ];
+          }
+
           return [
             {
               id: "streaming-arena-focus",
@@ -2708,10 +2831,29 @@ export class TerrainSystem extends System {
       }
     }
 
+    // External-value duel agents must be able to bank, train, and gather as
+    // soon as the authoritative server becomes ready. The arena is hundreds
+    // of metres from the compact preparation complex, so its initial 5x5 grid
+    // does not bake the preparation pond. Generate every manifest tile that
+    // intersects the launch preparation areas before ResourceSystem starts;
+    // the explicit resident-tile set in updatePlayerBasedTerrain keeps them.
+    let launchPreparationTiles = 0;
+    const preparationTileKeys = new Set<string>();
+    this.addServerLaunchPreparationTiles(preparationTileKeys);
+    for (const key of preparationTileKeys) {
+      if (this.terrainTiles.has(key)) continue;
+      const [tileX, tileZ] = key.split("_").map(Number);
+      this.generateTile(tileX, tileZ, true);
+      _tilesGenerated++;
+      fullTiles++;
+      launchPreparationTiles++;
+    }
+
     // Debug: Log flat zone statistics
     console.log(
       `[TerrainSystem] Initial tiles generated around (${centerTileX}, ${centerTileZ}). ` +
         `Tiles: ${_tilesGenerated} (full=${fullTiles}, terrain-only=${terrainOnlyTiles}). ` +
+        `Launch preparation tiles: ${launchPreparationTiles}. ` +
         `Flat zones: ${this.flatZones.size} zones, ` +
         `${this.flatZonesByTile.size} tile keys, ` +
         `${this._flatZoneHitCount} height lookups used flat zones`,
@@ -4175,6 +4317,9 @@ export class TerrainSystem extends System {
     this._flatZoneChecked.clear();
     const checked = this._flatZoneChecked;
     const result = {
+      radialZone: null as FlatZone | null,
+      radialHeight: null as number | null,
+      radialDistance: Infinity,
       coreZone: null as FlatZone | null,
       coreDist: Infinity,
       blendZone: null as FlatZone | null,
@@ -4191,6 +4336,27 @@ export class TerrainSystem extends System {
           // Deduplicate zones that span multiple terrain tiles
           if (checked.has(zone.id)) continue;
           checked.add(zone.id);
+
+          if (zone.radialPond) {
+            const radialHeight = resolveRadialPondTerrainHeight(
+              zone,
+              worldX,
+              worldZ,
+              () => this.getProceduralHeightAt(worldX, worldZ),
+            );
+            if (radialHeight !== null) {
+              const distance = Math.hypot(
+                worldX - zone.centerX,
+                worldZ - zone.centerZ,
+              );
+              if (distance < result.radialDistance) {
+                result.radialZone = zone;
+                result.radialHeight = radialHeight;
+                result.radialDistance = distance;
+              }
+            }
+            continue;
+          }
 
           this.classifyZone(
             zone,
@@ -4209,6 +4375,14 @@ export class TerrainSystem extends System {
           );
         }
       }
+    }
+
+    if (result.radialZone && result.radialHeight !== null) {
+      if (!this._flatZoneLoggedZones.has(result.radialZone.id)) {
+        this._flatZoneLoggedZones.add(result.radialZone.id);
+      }
+      this._flatZoneHitCount++;
+      return result.radialHeight;
     }
 
     const bestCoreZone = result.coreZone;
@@ -4293,6 +4467,12 @@ export class TerrainSystem extends System {
     if (!Number.isFinite(zone.blendRadius) || zone.blendRadius < 0) {
       throw new Error(
         `[TerrainSystem] registerFlatZone "${zone.id}": invalid blendRadius ${zone.blendRadius}`,
+      );
+    }
+    const radialProfileError = validateRadialPondTerrainProfile(zone);
+    if (radialProfileError) {
+      throw new Error(
+        `[TerrainSystem] registerFlatZone "${zone.id}": ${radialProfileError}`,
       );
     }
 
@@ -4649,6 +4829,7 @@ export class TerrainSystem extends System {
           height?: number;
           heightOffset?: number;
           blendRadius: number;
+          radialPond?: RadialPondTerrainProfile;
         }>;
       };
 
@@ -4725,6 +4906,9 @@ export class TerrainSystem extends System {
             depth: zoneConfig.depth,
             height: flatHeight,
             blendRadius: zoneConfig.blendRadius,
+            radialPond: zoneConfig.radialPond
+              ? { ...zoneConfig.radialPond }
+              : undefined,
           };
 
           this.registerFlatZone(zone);
@@ -7753,6 +7937,11 @@ export class TerrainSystem extends System {
         this.chunkPlayerCounts.set(chunkKey, currentCount + 1);
       }
     }
+
+    // Launch preparation is a compact authoritative service region, not a
+    // second terrain viewer. Retain only the exact manifest-intersecting tiles
+    // so banking/gathering stays live without generating another 5x5 horizon.
+    this.addServerLaunchPreparationTiles(neededTiles);
 
     // Update simulated chunks - only chunks with players get simulation
     this.simulatedChunks.clear();

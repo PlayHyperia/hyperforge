@@ -74,8 +74,6 @@ export interface Web3ClientConfig {
   worldAddress: string;
   /** Block explorer URL */
   blockExplorerUrl: string;
-  /** ERC-20 gold token address */
-  goldTokenAddress: string;
 }
 
 /**
@@ -134,8 +132,6 @@ export interface OnChainPlayerInfo {
   registeredAt: number;
   /** Whether the account is active */
   isActive: boolean;
-  /** ERC-20 gold balance (raw, 18 decimals) */
-  goldBalance: string;
   /** Number of ERC-1155 item types owned */
   uniqueItemsOwned: number;
 }

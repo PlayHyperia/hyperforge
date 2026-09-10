@@ -35,11 +35,23 @@ interface DamageSplat {
   texture: THREE.CanvasTexture;
   canvas: HTMLCanvasElement;
   context: CanvasRenderingContext2D;
+  targetId: string | null;
   startTime: number;
   duration: number;
   startY: number;
   riseDistance: number;
   active: boolean;
+}
+
+type StreamingDamagePhase =
+  "IDLE" | "ANNOUNCEMENT" | "COUNTDOWN" | "FIGHTING" | "RESOLUTION";
+
+interface StreamingDamageStateUpdate {
+  cycle?: {
+    phase?: StreamingDamagePhase;
+    agent1?: { id?: string | null } | null;
+    agent2?: { id?: string | null } | null;
+  } | null;
 }
 
 /**
@@ -52,7 +64,33 @@ interface HitReactionTarget {
   isPlayer?: boolean;
   avatar?: {
     triggerHitReaction?: (intensity?: number, side?: -1 | 1) => void;
+    instance?: {
+      getHitReactionDiagnostics?: () => { triggerCount?: unknown } | null;
+    };
   };
+}
+
+export interface StreamingDamagePresentationEvent {
+  sequence: number;
+  projectileId: string | null;
+  attackerId: string;
+  targetId: string;
+  attackType: string | null;
+  targetType: "player" | "mob" | null;
+  damage: number;
+  isCritical: boolean;
+  performanceTimeMs: number;
+  hitReactionTriggered: boolean;
+  hitReactionTriggerCount: number | null;
+  damageSplatCreated: boolean;
+}
+
+export interface StreamingDamagePresentationDiagnostics {
+  schemaVersion: 1;
+  updatedAt: number;
+  latestSequence: number;
+  activeSplatCount: number;
+  recentEvents: StreamingDamagePresentationEvent[];
 }
 
 export function triggerPlayerDamageReaction(
@@ -89,6 +127,14 @@ export class DamageSplatSystem extends System {
   private splatPool: DamageSplat[] = [];
   private activeSplats: DamageSplat[] = [];
   private poolInitialized = false;
+  private damagePresentationSequence = 0;
+  private streamingPhase: StreamingDamagePhase | null = null;
+  private streamingAgent1Id: string | null = null;
+  private streamingAgent2Id: string | null = null;
+  private hasObservedStreamingState = false;
+  private readonly recentDamagePresentationEvents: StreamingDamagePresentationEvent[] =
+    [];
+  private static readonly MAX_RECENT_DAMAGE_PRESENTATION_EVENTS = 128;
 
   private readonly SPLAT_DURATION = 1500; // 1.5 seconds
   private readonly RISE_DISTANCE = 1.5; // Units to float upward
@@ -100,9 +146,22 @@ export class DamageSplatSystem extends System {
 
   // Bound handler reference for proper cleanup
   private boundDamageHandler: ((data: unknown) => void) | null = null;
+  private boundStreamingStateHandler: ((data: unknown) => void) | null = null;
 
   constructor(world: World) {
     super(world);
+  }
+
+  getStreamingDamagePresentationDiagnostics(): StreamingDamagePresentationDiagnostics {
+    return {
+      schemaVersion: 1,
+      updatedAt: Date.now(),
+      latestSequence: this.damagePresentationSequence,
+      activeSplatCount: this.activeSplats.length,
+      recentEvents: this.recentDamagePresentationEvents.map((event) => ({
+        ...event,
+      })),
+    };
   }
 
   /**
@@ -134,6 +193,7 @@ export class DamageSplatSystem extends System {
         texture,
         canvas,
         context,
+        targetId: null,
         startTime: 0,
         duration: this.SPLAT_DURATION,
         startY: 0,
@@ -168,6 +228,7 @@ export class DamageSplatSystem extends System {
    */
   private releaseSplat(splat: DamageSplat): void {
     splat.active = false;
+    splat.targetId = null;
     splat.sprite.visible = false;
     if (splat.sprite.parent) {
       splat.sprite.parent.remove(splat.sprite);
@@ -190,9 +251,87 @@ export class DamageSplatSystem extends System {
 
     // Create bound handler for proper cleanup in destroy()
     this.boundDamageHandler = this.onDamageDealt.bind(this);
+    this.boundStreamingStateHandler = this.onStreamingStateUpdate.bind(this);
 
     // Listen for combat damage events
     this.world.on(EventType.COMBAT_DAMAGE_DEALT, this.boundDamageHandler, this);
+    this.world.on(
+      "streaming:state:update",
+      this.boundStreamingStateHandler,
+      this,
+    );
+  }
+
+  private isStreamingContestantId(id: string | null | undefined): boolean {
+    return Boolean(
+      id && (id === this.streamingAgent1Id || id === this.streamingAgent2Id),
+    );
+  }
+
+  private clearStreamingContestantSplats(
+    nextAgent1Id: string | null,
+    nextAgent2Id: string | null,
+  ): void {
+    for (let i = this.activeSplats.length - 1; i >= 0; i--) {
+      const splat = this.activeSplats[i];
+      const targetId = splat.targetId;
+      if (
+        !targetId ||
+        (targetId !== this.streamingAgent1Id &&
+          targetId !== this.streamingAgent2Id &&
+          targetId !== nextAgent1Id &&
+          targetId !== nextAgent2Id)
+      ) {
+        continue;
+      }
+      this.releaseSplat(splat);
+      this.activeSplats.splice(i, 1);
+    }
+  }
+
+  private onStreamingStateUpdate(data: unknown): void {
+    const state = data as StreamingDamageStateUpdate;
+    const nextPhase = state?.cycle?.phase;
+    if (
+      nextPhase !== "IDLE" &&
+      nextPhase !== "ANNOUNCEMENT" &&
+      nextPhase !== "COUNTDOWN" &&
+      nextPhase !== "FIGHTING" &&
+      nextPhase !== "RESOLUTION"
+    ) {
+      return;
+    }
+
+    const nextAgent1Id =
+      typeof state.cycle?.agent1?.id === "string" && state.cycle.agent1.id
+        ? state.cycle.agent1.id
+        : null;
+    const nextAgent2Id =
+      typeof state.cycle?.agent2?.id === "string" && state.cycle.agent2.id
+        ? state.cycle.agent2.id
+        : null;
+
+    if (
+      (this.streamingPhase === "FIGHTING" && nextPhase !== "FIGHTING") ||
+      nextPhase === "RESOLUTION"
+    ) {
+      this.clearStreamingContestantSplats(nextAgent1Id, nextAgent2Id);
+    }
+
+    this.streamingPhase = nextPhase;
+    this.streamingAgent1Id = nextAgent1Id;
+    this.streamingAgent2Id = nextAgent2Id;
+    this.hasObservedStreamingState = true;
+  }
+
+  private shouldPresentDamage(payload: CombatDamageDealtPayload): boolean {
+    if (!this.hasObservedStreamingState || this.streamingPhase === "FIGHTING") {
+      return true;
+    }
+    return !(
+      this.isStreamingContestantId(payload.attackerId) ||
+      this.isStreamingContestantId(payload.targetId)
+    );
   }
 
   private onDamageDealt = (data: unknown): void => {
@@ -201,44 +340,85 @@ export class DamageSplatSystem extends System {
     const { damage, targetId, position } = payload;
 
     // Get target entity for position
-    const target = this.world.entities.get(targetId);
-    triggerPlayerDamageReaction(
-      target as HitReactionTarget | undefined,
-      payload,
-    );
-    if (!target) {
-      if (!position) {
-        return;
+    const target = this.world.entities.get(targetId) as
+      | (HitReactionTarget & {
+          position?: { x: number; y: number; z: number };
+        })
+      | undefined;
+    const shouldPresentDamage = this.shouldPresentDamage(payload);
+    const hitReactionTriggered = shouldPresentDamage
+      ? triggerPlayerDamageReaction(
+          target as HitReactionTarget | undefined,
+          payload,
+        )
+      : false;
+    const reactionDiagnostics =
+      target?.avatar?.instance?.getHitReactionDiagnostics?.() ?? null;
+    const reactionTriggerCount = reactionDiagnostics?.triggerCount;
+
+    // Prefer the entity's visual position (updated by TileInterpolator) over
+    // the server tile center so the splat stays attached to moving fighters.
+    const targetPos = target?.position || position;
+    const damageSplatCreated =
+      shouldPresentDamage && targetPos
+        ? this.createDamageSplat(damage, targetPos, targetId)
+        : false;
+
+    if (
+      typeof payload.attackerId === "string" &&
+      payload.attackerId.length > 0 &&
+      typeof targetId === "string" &&
+      targetId.length > 0 &&
+      Number.isFinite(damage)
+    ) {
+      this.recentDamagePresentationEvents.push({
+        sequence: ++this.damagePresentationSequence,
+        projectileId:
+          typeof payload.projectileId === "string" && payload.projectileId
+            ? payload.projectileId
+            : null,
+        attackerId: payload.attackerId,
+        targetId,
+        attackType:
+          typeof payload.attackType === "string" ? payload.attackType : null,
+        targetType:
+          payload.targetType === "player" || payload.targetType === "mob"
+            ? payload.targetType
+            : null,
+        damage,
+        isCritical: payload.isCritical === true,
+        performanceTimeMs: performance.now(),
+        hitReactionTriggered,
+        hitReactionTriggerCount:
+          Number.isSafeInteger(reactionTriggerCount) &&
+          Number(reactionTriggerCount) >= 0
+            ? Number(reactionTriggerCount)
+            : null,
+        damageSplatCreated,
+      });
+      if (
+        this.recentDamagePresentationEvents.length >
+        DamageSplatSystem.MAX_RECENT_DAMAGE_PRESENTATION_EVENTS
+      ) {
+        this.recentDamagePresentationEvents.shift();
       }
-      this.createDamageSplat(damage, position);
-      return;
     }
-
-    // Prefer entity's visual position (updated by TileInterpolator) over
-    // server-provided position (tile center, potentially stale). This ensures
-    // damage splats appear where the entity visually is on the client.
-    const targetPos = target.position || position;
-    if (!targetPos) {
-      return;
-    }
-
-    // Create damage splat
-    this.createDamageSplat(damage, targetPos);
   };
 
   private createDamageSplat(
     damage: number,
     position: { x: number; y: number; z: number },
-  ): void {
+    targetId: string,
+  ): boolean {
     // Check if scene is available
     if (!this.world.stage?.scene) {
-      return;
+      return false;
     }
 
     // Acquire splat from pool (returns null if pool exhausted)
     const splat = this.acquireSplat();
     if (!splat) {
-      return; // Pool exhausted, skip this splat
+      return false; // Pool exhausted, skip this splat
     }
 
     const { context, texture, sprite, material } = splat;
@@ -290,11 +470,13 @@ export class DamageSplatSystem extends System {
     this.world.stage.scene.add(sprite);
 
     // Configure splat animation state
+    splat.targetId = targetId;
     splat.startTime = performance.now();
     splat.startY = sprite.position.y;
 
     // Track splat for animation
     this.activeSplats.push(splat);
+    return true;
   }
 
   private roundRect(
@@ -358,6 +540,10 @@ export class DamageSplatSystem extends System {
       this.world.off(EventType.COMBAT_DAMAGE_DEALT, this.boundDamageHandler);
       this.boundDamageHandler = null;
     }
+    if (this.boundStreamingStateHandler) {
+      this.world.off("streaming:state:update", this.boundStreamingStateHandler);
+      this.boundStreamingStateHandler = null;
+    }
 
     // Release all active splats back to pool
     for (const splat of this.activeSplats) {
@@ -375,6 +561,10 @@ export class DamageSplatSystem extends System {
     }
     this.splatPool = [];
     this.poolInitialized = false;
+    this.streamingPhase = null;
+    this.streamingAgent1Id = null;
+    this.streamingAgent2Id = null;
+    this.hasObservedStreamingState = false;
 
     // Call parent destroy to reset initialized flag
     super.destroy();

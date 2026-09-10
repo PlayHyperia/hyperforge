@@ -39,6 +39,27 @@ export interface ExternalRendererHealthBlob {
   degradedReason?: string | null;
   updatedAt?: number | null;
   phase?: string | null;
+  diagnostics?: {
+    sceneReadiness?: {
+      ready: boolean;
+      cycleId: string | null;
+      phase: string | null;
+      equipmentVisualsReady: boolean;
+      equipmentConfigured: boolean;
+      equipmentCycleId: string | null;
+      equipmentRequiredCount: number;
+      equipmentRequiredPlayerCount: number;
+      equipmentReadyCount: number;
+      equipmentExpectedPlayerCount: number;
+      equipmentActiveVisualCount: number;
+      equipmentActiveVisibleCount: number;
+      equipmentActivePlayerCount: number;
+      equipmentActiveVisiblePlayerCount: number;
+      equipmentUnresolvedCount: number;
+      equipmentAttachmentMismatchCount: number;
+      expectedAgentCount: number;
+    };
+  };
 }
 
 export interface ExternalCaptureHealthBlob {
@@ -48,6 +69,28 @@ export interface ExternalCaptureHealthBlob {
   receivedFrames: number | null;
   droppedFrames: number | null;
   acknowledgementPacing: boolean;
+}
+
+type ExternalBrowserAudioTrackState = "live" | "ended";
+
+/** Scalar-only health evidence for the browser-owned game master mix. */
+export interface ExternalBrowserAudioCaptureHealthBlob {
+  contextState: AudioContextState | null;
+  sourceContextState: AudioContextState | null;
+  trackState: ExternalBrowserAudioTrackState | null;
+  sampleRate: number | null;
+  channels: number | null;
+  chunks: number;
+  bytes: number;
+  contentChunks: number;
+  contentThreshold: number | null;
+  lastSamplePeak: number | null;
+  maxSamplePeak: number | null;
+  lastContentChunkAt: number | null;
+  droppedChunks: number;
+  pendingWrites: number;
+  lastChunkAt: number | null;
+  observedAt: number | null;
 }
 
 /**
@@ -60,6 +103,7 @@ export interface ExternalRtmpStatusSnapshot {
   stats: ExternalRtmpStreamStats;
   updatedAt: number;
   captureHealth?: ExternalCaptureHealthBlob;
+  browserAudioCaptureHealth?: ExternalBrowserAudioCaptureHealthBlob;
   rendererHealth?: ExternalRendererHealthBlob;
   rendererPerformance?: StreamingPerformanceSnapshot;
 }
@@ -77,12 +121,92 @@ function asFiniteNumber(value: unknown): number | null {
   return typeof value === "number" && Number.isFinite(value) ? value : null;
 }
 
+function boundedDiagnosticCounter(value: unknown, maximum: number): number {
+  const normalized = asFiniteNumber(value);
+  if (normalized === null || normalized <= 0) return 0;
+  return Math.min(maximum, Math.floor(normalized));
+}
+
+function boundedDiagnosticText(value: unknown, maximum: number): string | null {
+  return typeof value === "string" ? value.slice(0, maximum) : null;
+}
+
+function normalizeExternalRendererDiagnostics(
+  value: unknown,
+): NonNullable<ExternalRendererHealthBlob["diagnostics"]> | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const diagnostics = value as Record<string, unknown>;
+  const rawSceneReadiness = diagnostics.sceneReadiness;
+  if (
+    !rawSceneReadiness ||
+    typeof rawSceneReadiness !== "object" ||
+    Array.isArray(rawSceneReadiness)
+  ) {
+    return null;
+  }
+  const scene = rawSceneReadiness as Record<string, unknown>;
+  return {
+    sceneReadiness: {
+      ready: scene.ready === true,
+      cycleId: boundedDiagnosticText(scene.cycleId, 128),
+      phase: boundedDiagnosticText(scene.phase, 32),
+      equipmentVisualsReady: scene.equipmentVisualsReady === true,
+      equipmentConfigured: scene.equipmentConfigured === true,
+      equipmentCycleId: boundedDiagnosticText(scene.equipmentCycleId, 128),
+      equipmentRequiredCount: boundedDiagnosticCounter(
+        scene.equipmentRequiredCount,
+        10_000,
+      ),
+      equipmentRequiredPlayerCount: boundedDiagnosticCounter(
+        scene.equipmentRequiredPlayerCount,
+        64,
+      ),
+      equipmentReadyCount: boundedDiagnosticCounter(
+        scene.equipmentReadyCount,
+        10_000,
+      ),
+      equipmentExpectedPlayerCount: boundedDiagnosticCounter(
+        scene.equipmentExpectedPlayerCount,
+        64,
+      ),
+      equipmentActiveVisualCount: boundedDiagnosticCounter(
+        scene.equipmentActiveVisualCount,
+        10_000,
+      ),
+      equipmentActiveVisibleCount: boundedDiagnosticCounter(
+        scene.equipmentActiveVisibleCount,
+        10_000,
+      ),
+      equipmentActivePlayerCount: boundedDiagnosticCounter(
+        scene.equipmentActivePlayerCount,
+        64,
+      ),
+      equipmentActiveVisiblePlayerCount: boundedDiagnosticCounter(
+        scene.equipmentActiveVisiblePlayerCount,
+        64,
+      ),
+      equipmentUnresolvedCount: boundedDiagnosticCounter(
+        scene.equipmentUnresolvedCount,
+        10_000,
+      ),
+      equipmentAttachmentMismatchCount: boundedDiagnosticCounter(
+        scene.equipmentAttachmentMismatchCount,
+        10_000,
+      ),
+      expectedAgentCount: boundedDiagnosticCounter(
+        scene.expectedAgentCount,
+        64,
+      ),
+    },
+  };
+}
+
 function normalizeExternalRendererHealth(
   value: unknown,
 ): ExternalRendererHealthBlob | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const candidate = value as Record<string, unknown>;
-  return {
+  const normalized: ExternalRendererHealthBlob = {
     ready: candidate.ready === true,
     degradedReason:
       typeof candidate.degradedReason === "string"
@@ -92,6 +216,11 @@ function normalizeExternalRendererHealth(
     phase:
       typeof candidate.phase === "string" ? candidate.phase.slice(0, 32) : null,
   };
+  const diagnostics = normalizeExternalRendererDiagnostics(
+    candidate.diagnostics,
+  );
+  if (diagnostics) normalized.diagnostics = diagnostics;
+  return normalized;
 }
 
 function normalizeCounter(value: unknown): number | null {
@@ -123,6 +252,53 @@ function normalizeExternalCaptureHealth(
     receivedFrames: normalizeCounter(candidate.receivedFrames),
     droppedFrames: normalizeCounter(candidate.droppedFrames),
     acknowledgementPacing: candidate.acknowledgementPacing === true,
+  };
+}
+
+function normalizeExternalBrowserAudioCaptureHealth(
+  value: unknown,
+): ExternalBrowserAudioCaptureHealthBlob | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const candidate = value as Record<string, unknown>;
+  const audioContextState = (input: unknown): AudioContextState | null =>
+    input === "suspended" ||
+    input === "running" ||
+    input === "closed" ||
+    input === "interrupted"
+      ? input
+      : null;
+  const trackState = (input: unknown): ExternalBrowserAudioTrackState | null =>
+    input === "live" || input === "ended" ? input : null;
+  const sampleRate = asFiniteNumber(candidate.sampleRate);
+  const channels = normalizeCounter(candidate.channels);
+  const boundedAmplitude = (input: unknown): number | null => {
+    const amplitude = asFiniteNumber(input);
+    return amplitude !== null && amplitude >= 0 && amplitude <= 64
+      ? amplitude
+      : null;
+  };
+
+  return {
+    contextState: audioContextState(candidate.contextState),
+    sourceContextState: audioContextState(candidate.sourceContextState),
+    trackState: trackState(candidate.trackState),
+    sampleRate:
+      sampleRate !== null && sampleRate > 0 && sampleRate <= 384_000
+        ? sampleRate
+        : null,
+    channels:
+      channels !== null && channels >= 1 && channels <= 32 ? channels : null,
+    chunks: normalizeCounter(candidate.chunks) ?? 0,
+    bytes: normalizeCounter(candidate.bytes) ?? 0,
+    contentChunks: normalizeCounter(candidate.contentChunks) ?? 0,
+    contentThreshold: boundedAmplitude(candidate.contentThreshold),
+    lastSamplePeak: boundedAmplitude(candidate.lastSamplePeak),
+    maxSamplePeak: boundedAmplitude(candidate.maxSamplePeak),
+    lastContentChunkAt: asFiniteNumber(candidate.lastContentChunkAt),
+    droppedChunks: normalizeCounter(candidate.droppedChunks) ?? 0,
+    pendingWrites: normalizeCounter(candidate.pendingWrites) ?? 0,
+    lastChunkAt: asFiniteNumber(candidate.lastChunkAt),
+    observedAt: asFiniteNumber(candidate.observedAt),
   };
 }
 
@@ -171,6 +347,14 @@ export function parseExternalRtmpStatusSnapshot(
 
     const captureHealth = normalizeExternalCaptureHealth(parsed.captureHealth);
     if (captureHealth) snapshot.captureHealth = captureHealth;
+
+    const browserAudioCaptureHealth =
+      normalizeExternalBrowserAudioCaptureHealth(
+        parsed.browserAudioCaptureHealth,
+      );
+    if (browserAudioCaptureHealth) {
+      snapshot.browserAudioCaptureHealth = browserAudioCaptureHealth;
+    }
 
     const rendererPerformance = normalizeStreamingPerformanceSnapshot(
       parsed.rendererPerformance,
@@ -226,6 +410,14 @@ function getExternalStatusPollerKey(
   return `${externalStatusFile}::${externalStatusMaxAgeMs}`;
 }
 
+/** Keep health observations comfortably inside the stale-status boundary. */
+export function resolveExternalStatusRefreshIntervalMs(
+  externalStatusMaxAgeMs: number,
+): number {
+  if (!Number.isFinite(externalStatusMaxAgeMs)) return 500;
+  return Math.max(250, Math.min(500, Math.floor(externalStatusMaxAgeMs / 4)));
+}
+
 async function refreshExternalStatusPoller(
   poller: ExternalStatusPoller,
   externalStatusFile: string,
@@ -267,9 +459,8 @@ export function acquireExternalStatusPoller(
   );
   let poller = externalStatusPollers.get(key);
   if (!poller) {
-    const refreshIntervalMs = Math.max(
-      1_000,
-      Math.min(externalStatusMaxAgeMs, 5_000),
+    const refreshIntervalMs = resolveExternalStatusRefreshIntervalMs(
+      externalStatusMaxAgeMs,
     );
     poller = {
       snapshot: null,

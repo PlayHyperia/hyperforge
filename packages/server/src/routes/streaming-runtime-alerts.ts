@@ -1,14 +1,27 @@
 import type { StreamingRuntimeHealth } from "./streaming-runtime-health.js";
+import type { ProjectileCostCustodyHealthResult } from "../startup/routes/health-routes.js";
 
 export type StreamingRuntimeAlertObservation = {
   health: StreamingRuntimeHealth;
+  projectileCostCustody: ProjectileCostCustodyHealthResult;
   keeperReasons: string[];
+  keeperCorrelationIds: string[];
   droppedFrames: number;
   stalePhase: {
     phase: string;
     phaseStartedAt: number;
   } | null;
 };
+
+const DUEL_CORRELATION_ID = /^[0-9a-f]{64}$/u;
+const PROJECTILE_COST_CUSTODY_STATUSES = new Set([
+  "healthy",
+  "processing",
+  "stalled",
+  "invalid",
+  "unavailable",
+  "timeout",
+]);
 
 export type StreamingRuntimeAlertIssue = {
   key: string;
@@ -19,6 +32,7 @@ export type StreamingRuntimeAlertIssue = {
 
 type StreamingRuntimeAlertDispatcherOptions = {
   webhookUrl: string | null;
+  routeId: string;
   reminderMs: number;
   retryMs: number;
   timeoutMs: number;
@@ -26,24 +40,66 @@ type StreamingRuntimeAlertDispatcherOptions = {
   now?: () => number;
 };
 
+function normalizeAlertCode(reason: string, fallback: string): string {
+  const normalized = reason.trim();
+  return /^[a-z0-9][a-z0-9._:-]{0,127}$/u.test(normalized)
+    ? normalized
+    : fallback;
+}
+
 function normalizeKeeperReasons(reasons: string[]): string[] {
   return [
     ...new Set(
       reasons
         .map((reason) => reason.trim())
-        .filter((reason) => reason.length > 0)
+        .filter(Boolean)
+        .map((reason) =>
+          normalizeAlertCode(reason, "unclassified_keeper_reason"),
+        )
         .slice(0, 64),
     ),
   ].sort();
+}
+
+function normalizeKeeperCorrelationIds(values: string[]): string[] {
+  return [...new Set(values.filter((value) => DUEL_CORRELATION_ID.test(value)))]
+    .sort()
+    .slice(0, 64);
+}
+
+function safeAggregateCount(value: unknown): number {
+  return Number.isSafeInteger(value) && Number(value) >= 0 ? Number(value) : 0;
+}
+
+function sanitizeProjectileCostCustody(
+  custody: ProjectileCostCustodyHealthResult,
+): ProjectileCostCustodyHealthResult {
+  const status = PROJECTILE_COST_CUSTODY_STATUSES.has(custody.status)
+    ? custody.status
+    : "invalid";
+  return {
+    healthy: custody.healthy === true,
+    status,
+    maxAgeMs: safeAggregateCount(custody.maxAgeMs),
+    pendingAmmunitionShots: safeAggregateCount(custody.pendingAmmunitionShots),
+    firedAmmunitionShots: safeAggregateCount(custody.firedAmmunitionShots),
+    pendingRuneCosts: safeAggregateCount(custody.pendingRuneCosts),
+    firedRuneCosts: safeAggregateCount(custody.firedRuneCosts),
+    invalidOperations: safeAggregateCount(custody.invalidOperations),
+    futureTimestampOperations: safeAggregateCount(
+      custody.futureTimestampOperations,
+    ),
+    oldestUnresolvedAgeMs: safeAggregateCount(custody.oldestUnresolvedAgeMs),
+  };
 }
 
 export class StreamingRuntimeAlertDispatcher {
   private readonly fetchImpl: typeof fetch;
   private readonly now: () => number;
   private deliveredSignature = "";
-  private lastDeliveredAt = 0;
-  private lastAttemptAt = 0;
-  private lastDroppedFrames = 0;
+  private lastDeliveredAt = Number.NEGATIVE_INFINITY;
+  private lastAttemptAt = Number.NEGATIVE_INFINITY;
+  private acknowledgedDroppedFrames = 0;
   private inFlight = false;
 
   constructor(
@@ -62,10 +118,16 @@ export class StreamingRuntimeAlertDispatcher {
   ): Promise<{ attempted: boolean; sent: boolean; issues: string[] }> {
     const nowMs = this.now();
     const issues = this.buildIssues(observation);
-    const signature = issues
-      .map((issue) => issue.key)
-      .sort()
-      .join("|");
+    const correlationIds = issues.some((issue) => issue.component === "keeper")
+      ? normalizeKeeperCorrelationIds(observation.keeperCorrelationIds)
+      : [];
+    const signature =
+      issues.length === 0
+        ? ""
+        : JSON.stringify({
+            issues: issues.map((issue) => issue.key).sort(),
+            correlationIds,
+          });
     const isRecovery = signature === "" && this.deliveredSignature !== "";
     const changed = signature !== this.deliveredSignature;
     const reminderDue =
@@ -102,12 +164,17 @@ export class StreamingRuntimeAlertDispatcher {
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
           type: "STREAMING_RUNTIME_ALERT",
+          routeId: this.options.routeId,
           status: isRecovery ? "recovered" : "firing",
           emittedAt: observation.health.emittedAt,
           ready: observation.health.ready,
           issues,
           keeperReasons: normalizeKeeperReasons(observation.keeperReasons),
+          correlationIds: isRecovery ? [] : correlationIds,
           droppedFrames: observation.droppedFrames,
+          projectileCostCustody: sanitizeProjectileCostCustody(
+            observation.projectileCostCustody,
+          ),
         }),
         signal: controller.signal,
       });
@@ -121,6 +188,12 @@ export class StreamingRuntimeAlertDispatcher {
       }
       this.deliveredSignature = signature;
       this.lastDeliveredAt = nowMs;
+      if (Number.isFinite(observation.droppedFrames)) {
+        this.acknowledgedDroppedFrames = Math.max(
+          this.acknowledgedDroppedFrames,
+          observation.droppedFrames,
+        );
+      }
       return {
         attempted: true,
         sent: true,
@@ -146,10 +219,14 @@ export class StreamingRuntimeAlertDispatcher {
       observation.health.checks,
     )) {
       if (!runtimeCheck.ready) {
+        const reason = normalizeAlertCode(
+          runtimeCheck.reason ?? "not_ready",
+          "unclassified_not_ready",
+        );
         issues.push({
-          key: `health:${component}:${runtimeCheck.reason ?? "not_ready"}`,
+          key: `health:${component}:${reason}`,
           component,
-          reason: runtimeCheck.reason ?? "not_ready",
+          reason,
           observedAt: runtimeCheck.observedAt,
         });
       }
@@ -163,16 +240,20 @@ export class StreamingRuntimeAlertDispatcher {
       });
     }
     if (observation.stalePhase) {
+      const phase = normalizeAlertCode(
+        observation.stalePhase.phase.toLowerCase(),
+        "unclassified",
+      );
       issues.push({
-        key: `scheduler:stale_phase:${observation.stalePhase.phase}`,
+        key: `scheduler:stale_phase:${phase}`,
         component: "schedulerPhase",
-        reason: `stale_${observation.stalePhase.phase.toLowerCase()}_phase`,
+        reason: `stale_${phase}_phase`,
         observedAt: observation.stalePhase.phaseStartedAt,
       });
     }
     if (
       Number.isFinite(observation.droppedFrames) &&
-      observation.droppedFrames > this.lastDroppedFrames
+      observation.droppedFrames > this.acknowledgedDroppedFrames
     ) {
       issues.push({
         key: "encoder:dropped_frames_increased",
@@ -181,12 +262,6 @@ export class StreamingRuntimeAlertDispatcher {
         observedAt: observation.health.emittedAt,
       });
     }
-    this.lastDroppedFrames = Math.max(
-      this.lastDroppedFrames,
-      Number.isFinite(observation.droppedFrames)
-        ? observation.droppedFrames
-        : 0,
-    );
     return issues;
   }
 }

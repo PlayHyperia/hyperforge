@@ -51,9 +51,11 @@ import type {
 import { STREAMING_PUBLIC_DELAY_MS } from "../../streaming/streaming-policy.js";
 import { resolveStreamingViewerAccessToken } from "../../streaming/stream-viewer-access-token.js";
 import {
+  AgentCredentialAuthenticationError,
   authenticateUser,
   checkUserBan,
   isLoadTestMode,
+  PresentedCredentialAuthenticationError,
   verifyStreamingViewerCredentials,
 } from "./authentication";
 import { loadCharacterList } from "./character-selection";
@@ -232,10 +234,14 @@ export class ConnectionHandler {
       }
 
       // Authenticate user (legacy: authToken in URL)
-      const { user, authToken, userWithPrivy } = await authenticateUser(
-        params,
-        this.db,
-      );
+      const {
+        user,
+        authToken,
+        agentCredentialCharacterId,
+        agentCredentialSessionExpiresAt,
+        agentCredentialSessionId,
+        userWithPrivy,
+      } = await authenticateUser(params, this.db);
 
       // SECURITY: Always check bans, even for load test bots in production
       // Only skip ban check if LOAD_TEST_MODE is explicitly enabled
@@ -264,6 +270,9 @@ export class ConnectionHandler {
       // Create socket
       const socket = this.createSocket(ws, user.id);
       socket.isLoadTestBot = isLoadTestBot;
+      socket.agentCredentialCharacterId = agentCredentialCharacterId;
+      socket.agentCredentialSessionId = agentCredentialSessionId;
+      this.armAgentCredentialExpiry(socket, agentCredentialSessionExpiresAt);
 
       // Load character list
       const characters = await loadCharacterList(user.id, this.world);
@@ -308,7 +317,21 @@ export class ConnectionHandler {
         this.emitPlayerJoined(socket);
       }
     } catch (err) {
-      console.error("[ConnectionHandler] Error in handleConnection:", err);
+      if (
+        err instanceof AgentCredentialAuthenticationError ||
+        err instanceof PresentedCredentialAuthenticationError
+      ) {
+        console.warn("[ConnectionHandler] Rejected presented credential");
+      } else {
+        console.error("[ConnectionHandler] Error in handleConnection:", err);
+      }
+      try {
+        const packet = writePacket("kick", "authentication_failed");
+        ws.send(packet);
+        ws.close(4001, "Authentication failed");
+      } catch {
+        // The transport may already be closed.
+      }
     }
   }
 
@@ -359,6 +382,27 @@ export class ConnectionHandler {
     socket.createdAt = Date.now(); // Track creation time for reconnection grace period
 
     return socket;
+  }
+
+  private armAgentCredentialExpiry(
+    socket: ServerSocket,
+    expiresAt: string | undefined,
+  ): void {
+    if (!socket.agentCredentialSessionId || !expiresAt) return;
+    const delayMs = Date.parse(expiresAt) - Date.now();
+    if (!Number.isFinite(delayMs) || delayMs <= 0) {
+      socket.disconnect("agent_credentials_expired");
+      return;
+    }
+    socket.agentCredentialExpiryTimeoutId = setTimeout(() => {
+      socket.agentCredentialExpiryTimeoutId = undefined;
+      try {
+        socket.send("kick", "agent_credentials_expired");
+      } finally {
+        socket.disconnect("agent_credentials_expired");
+      }
+    }, delayMs);
+    socket.agentCredentialExpiryTimeoutId.unref?.();
   }
 
   /**
@@ -511,10 +555,14 @@ export class ConnectionHandler {
           };
 
           // Authenticate user
-          const { user, authToken, userWithPrivy } = await authenticateUser(
-            authParams,
-            this.db,
-          );
+          const {
+            user,
+            authToken,
+            agentCredentialCharacterId,
+            agentCredentialSessionExpiresAt,
+            agentCredentialSessionId,
+            userWithPrivy,
+          } = await authenticateUser(authParams, this.db);
 
           // Check if user is banned
           const banInfo = await checkUserBan(user.id, this.db);
@@ -547,6 +595,12 @@ export class ConnectionHandler {
 
           // Create socket
           const socket = this.createSocket(ws, user.id);
+          socket.agentCredentialCharacterId = agentCredentialCharacterId;
+          socket.agentCredentialSessionId = agentCredentialSessionId;
+          this.armAgentCredentialExpiry(
+            socket,
+            agentCredentialSessionExpiresAt,
+          );
 
           // Load character list
           const characters = await loadCharacterList(user.id, this.world);
@@ -590,10 +644,17 @@ export class ConnectionHandler {
         } catch (err) {
           // Ensure cleanup on error
           cleanup();
-          console.error(
-            "[ConnectionHandler] Error in deferred authentication:",
-            err,
-          );
+          if (
+            err instanceof AgentCredentialAuthenticationError ||
+            err instanceof PresentedCredentialAuthenticationError
+          ) {
+            console.warn("[ConnectionHandler] Rejected presented credential");
+          } else {
+            console.error(
+              "[ConnectionHandler] Error in deferred authentication:",
+              err,
+            );
+          }
           try {
             const packet = writePacket("authResult", {
               success: false,

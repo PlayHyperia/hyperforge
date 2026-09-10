@@ -57,10 +57,10 @@
         "emittedAt": 1785829603000,
         "duelId": "streaming-contract-announcement",
         "duelKey": "de9ab1a0829b516dedbf935c8771133a51ed7c16c6cf875c0bdb24a48222fac0",
-        "competitiveSnapshotVersion": 3,
-        "competitiveSnapshotDigest": "add574616917bc159d5c0db0d6822dace6489bdfe28f70fc77449facc34598b2",
+        "competitiveSnapshotVersion": 4,
+        "competitiveSnapshotDigest": "73bf480d3d584d36afada8c2c6ec269f91e4277036c0f741863c335eefb09663",
         "competitiveSnapshot": {
-          "snapshotVersion": 3,
+          "snapshotVersion": 4,
           "persisted": true,
           "diagnostic": false,
           "preparationId": "6ee1af48-42f0-4081-afe9-d7e256d96e2b",
@@ -71,6 +71,16 @@
           "betOpenTime": 1785829601000,
           "betCloseTime": 1785829661000,
           "combatPolicyVersion": "duel-combat-policy-v2",
+          "timing": {
+            "contractVersion": 2,
+            "timeoutPolicy": "hp_percentage_then_damage_then_draw_v1",
+            "countdownDurationMs": 4000,
+            "fightingDurationMs": 270000,
+            "endWarningDurationMs": 15000,
+            "maxFightDurationMs": 285000,
+            "fightStartTime": 1785829665000,
+            "fightDeadline": 1785829950000
+          },
           "contestants": [
             {
               "side": "agent1",
@@ -298,7 +308,19 @@
           "damageDealtThisFight": 0,
           "rank": 1,
           "headToHeadWins": 3,
-          "headToHeadLosses": 2
+          "headToHeadLosses": 2,
+          "strategySummary": {
+            "schemaVersion": 1,
+            "approach": "balanced",
+            "tacticalMacro": "pressure",
+            "attackStyle": "aggressive",
+            "prayer": "superhuman_strength",
+            "preferredCombatRole": null,
+            "foodThreshold": 40,
+            "switchDefensiveAt": 30,
+            "source": "deterministic",
+            "policyVersion": "fixture-policy-v1"
+          }
         },
         "agent2": {
           "id": "agent-b",
@@ -313,7 +335,19 @@
           "damageDealtThisFight": 0,
           "rank": 2,
           "headToHeadWins": 2,
-          "headToHeadLosses": 3
+          "headToHeadLosses": 3,
+          "strategySummary": {
+            "schemaVersion": 1,
+            "approach": "balanced",
+            "tacticalMacro": "pressure",
+            "attackStyle": "aggressive",
+            "prayer": "superhuman_strength",
+            "preferredCombatRole": null,
+            "foodThreshold": 40,
+            "switchDefensiveAt": 30,
+            "source": "deterministic",
+            "policyVersion": "fixture-policy-v1"
+          }
         },
         "arenaPositions": {
           "agent1": [
@@ -350,10 +384,10 @@
         "emittedAt": 1785829661000,
         "duelId": "streaming-contract-countdown",
         "duelKey": "72ecad31d4f2b552403e0fc018a75d764dd347fbee5812684b31fdc7767c413d",
-        "competitiveSnapshotVersion": 3,
-        "competitiveSnapshotDigest": "84d462a4f25de25f68705a561fe7980cc8e4707b2e4ebf9dbab780e879adc323",
+        "competitiveSnapshotVersion": 4,
+        "competitiveSnapshotDigest": "d168ff6d9d004666ba1f3260b5008c4338dd709fd983e771e12334be9d428305",
         "competitiveSnapshot": {
-          "snapshotVersion": 3,
+          "snapshotVersion": 4,
           "persisted": true,
           "diagnostic": false,
           "preparationId": "4873c4dc-a403-4ef1-ac35-0669fd63815f",
@@ -364,6 +398,16 @@
           "betOpenTime": 1785829601000,
           "betCloseTime": 1785829661000,
           "combatPolicyVersion": "duel-combat-policy-v2",
+          "timing": {
+            "contractVersion": 2,
+            "timeoutPolicy": "hp_percentage_then_damage_then_draw_v1",
+            "countdownDurationMs": 4000,
+            "fightingDurationMs": 270000,
+            "endWarningDurationMs": 15000,
+            "maxFightDurationMs": 285000,
+            "fightStartTime": 1785829665000,
+            "fightDeadline": 1785829950000
+          },
           "contestants": [
             {
               "side": "agent1",
@@ -569,7 +613,7 @@
         "phaseVersion": 2,
         "betOpenTime": 1785829601000,
         "betCloseTime": 1785829661000,
-        "fightStartTime": null,
+        "fightStartTime": 1785829665000,
         "duelEndTime": null,
         "winnerId": null,
         "winnerName": null,
@@ -591,7 +635,19 @@
           "damageDealtThisFight": 0,
           "rank": 1,
           "headToHeadWins": 3,
-          "headToHeadLosses": 2
+          "headToHeadLosses": 2,
+          "strategySummary": {
+            "schemaVersion": 1,
+            "approach": "balanced",
+            "tacticalMacro": "pressure",
+            "attackStyle": "aggressive",
+            "prayer": "superhuman_strength",
+            "preferredCombatRole": null,
+            "foodThreshold": 40,
+            "switchDefensiveAt": 30,
+            "source": "deterministic",
+            "policyVersion": "fixture-policy-v1"
+          }
         },
         "agent2": {
           "id": "agent-b",
@@ -606,7 +662,19 @@
           "damageDealtThisFight": 0,
           "rank": 2,
           "headToHeadWins": 2,
-          "headToHeadLosses": 3
+          "headToHeadLosses": 3,
+          "strategySummary": {
+            "schemaVersion": 1,
+            "approach": "balanced",
+            "tacticalMacro": "pressure",
+            "attackStyle": "aggressive",
+            "prayer": "superhuman_strength",
+            "preferredCombatRole": null,
+            "foodThreshold": 40,
+            "switchDefensiveAt": 30,
+            "source": "deterministic",
+            "policyVersion": "fixture-policy-v1"
+          }
         },
         "arenaPositions": {
           "agent1": [
@@ -640,13 +708,13 @@
         "schemaVersion": 3,
         "sourceEpoch": 1785829600000,
         "seq": 4,
-        "emittedAt": 1785829662000,
+        "emittedAt": 1785829665000,
         "duelId": "streaming-contract-fighting",
         "duelKey": "308a4460d7d3cd6f9d9d452a3335f3cbbdd5fdd6f2a5032dbc4af4d67eeed83a",
-        "competitiveSnapshotVersion": 3,
-        "competitiveSnapshotDigest": "7c4c0813bdf9749ddf4e8ff7ca6e338104f6f8ec5e3c63feaa31a1ac81b06087",
+        "competitiveSnapshotVersion": 4,
+        "competitiveSnapshotDigest": "04b062c43c4528b270fd0f4999305f85fc141404f1b2294f0f0b813952244076",
         "competitiveSnapshot": {
-          "snapshotVersion": 3,
+          "snapshotVersion": 4,
           "persisted": true,
           "diagnostic": false,
           "preparationId": "0b1e028e-64e1-45fb-a874-6b0c913caa1b",
@@ -657,6 +725,16 @@
           "betOpenTime": 1785829601000,
           "betCloseTime": 1785829661000,
           "combatPolicyVersion": "duel-combat-policy-v2",
+          "timing": {
+            "contractVersion": 2,
+            "timeoutPolicy": "hp_percentage_then_damage_then_draw_v1",
+            "countdownDurationMs": 4000,
+            "fightingDurationMs": 270000,
+            "endWarningDurationMs": 15000,
+            "maxFightDurationMs": 285000,
+            "fightStartTime": 1785829665000,
+            "fightDeadline": 1785829950000
+          },
           "contestants": [
             {
               "side": "agent1",
@@ -862,7 +940,7 @@
         "phaseVersion": 3,
         "betOpenTime": 1785829601000,
         "betCloseTime": 1785829661000,
-        "fightStartTime": 1785829662000,
+        "fightStartTime": 1785829665000,
         "duelEndTime": null,
         "winnerId": null,
         "winnerName": null,
@@ -884,7 +962,19 @@
           "damageDealtThisFight": 0,
           "rank": 1,
           "headToHeadWins": 3,
-          "headToHeadLosses": 2
+          "headToHeadLosses": 2,
+          "strategySummary": {
+            "schemaVersion": 1,
+            "approach": "balanced",
+            "tacticalMacro": "pressure",
+            "attackStyle": "aggressive",
+            "prayer": "superhuman_strength",
+            "preferredCombatRole": null,
+            "foodThreshold": 40,
+            "switchDefensiveAt": 30,
+            "source": "deterministic",
+            "policyVersion": "fixture-policy-v1"
+          }
         },
         "agent2": {
           "id": "agent-b",
@@ -899,7 +989,19 @@
           "damageDealtThisFight": 0,
           "rank": 2,
           "headToHeadWins": 2,
-          "headToHeadLosses": 3
+          "headToHeadLosses": 3,
+          "strategySummary": {
+            "schemaVersion": 1,
+            "approach": "balanced",
+            "tacticalMacro": "pressure",
+            "attackStyle": "aggressive",
+            "prayer": "superhuman_strength",
+            "preferredCombatRole": null,
+            "foodThreshold": 40,
+            "switchDefensiveAt": 30,
+            "source": "deterministic",
+            "policyVersion": "fixture-policy-v1"
+          }
         },
         "arenaPositions": {
           "agent1": [
@@ -916,7 +1018,7 @@
         "rendererHealth": {
           "ready": true,
           "degradedReason": null,
-          "updatedAt": 1785829662000
+          "updatedAt": 1785829665000
         }
       }
     },
@@ -937,13 +1039,13 @@
         "schemaVersion": 3,
         "sourceEpoch": 1785829600000,
         "seq": 5,
-        "emittedAt": 1785829667000,
+        "emittedAt": 1785829670000,
         "duelId": "streaming-contract-win-agent-a-kill",
         "duelKey": "1efd0132383c42a633569456e17e2d582dd67ac52505739262955732a631ee82",
-        "competitiveSnapshotVersion": 3,
-        "competitiveSnapshotDigest": "baea41142d66b533d0dc01d8ed64f5dd0ed74fcf9f58660fe82b9ae0b2663a24",
+        "competitiveSnapshotVersion": 4,
+        "competitiveSnapshotDigest": "bebdc017579c17cf4ffc8c7268350ca39870219d4d46dfba0a99e0a4ad7cef06",
         "competitiveSnapshot": {
-          "snapshotVersion": 3,
+          "snapshotVersion": 4,
           "persisted": true,
           "diagnostic": false,
           "preparationId": "3c2880e6-417d-47df-aa68-5c47a10c6cf1",
@@ -954,6 +1056,16 @@
           "betOpenTime": 1785829601000,
           "betCloseTime": 1785829661000,
           "combatPolicyVersion": "duel-combat-policy-v2",
+          "timing": {
+            "contractVersion": 2,
+            "timeoutPolicy": "hp_percentage_then_damage_then_draw_v1",
+            "countdownDurationMs": 4000,
+            "fightingDurationMs": 270000,
+            "endWarningDurationMs": 15000,
+            "maxFightDurationMs": 285000,
+            "fightStartTime": 1785829665000,
+            "fightDeadline": 1785829950000
+          },
           "contestants": [
             {
               "side": "agent1",
@@ -1159,15 +1271,15 @@
         "phaseVersion": 4,
         "betOpenTime": 1785829601000,
         "betCloseTime": 1785829661000,
-        "fightStartTime": 1785829662000,
-        "duelEndTime": 1785829667000,
+        "fightStartTime": 1785829665000,
+        "duelEndTime": 1785829670000,
         "winnerId": "agent-a",
         "winnerName": "Agent Alpha",
         "outcome": "win",
         "cancellationReason": null,
         "winReason": "kill",
-        "seed": "842586902121855182",
-        "replayHash": "014d1e61ff5ab96e21cc96eae8b93ff329a679f7cb227038f15063f2ee990aaa",
+        "seed": "18242515627239552030",
+        "replayHash": "e0612d55b70de4b8306ee49f6d873e46cdd88421d33e72dbc93b24d85cedb06a",
         "agent1": {
           "id": "agent-a",
           "name": "Agent Alpha",
@@ -1181,7 +1293,19 @@
           "damageDealtThisFight": 0,
           "rank": 1,
           "headToHeadWins": 3,
-          "headToHeadLosses": 2
+          "headToHeadLosses": 2,
+          "strategySummary": {
+            "schemaVersion": 1,
+            "approach": "balanced",
+            "tacticalMacro": "pressure",
+            "attackStyle": "aggressive",
+            "prayer": "superhuman_strength",
+            "preferredCombatRole": null,
+            "foodThreshold": 40,
+            "switchDefensiveAt": 30,
+            "source": "deterministic",
+            "policyVersion": "fixture-policy-v1"
+          }
         },
         "agent2": {
           "id": "agent-b",
@@ -1196,7 +1320,19 @@
           "damageDealtThisFight": 0,
           "rank": 2,
           "headToHeadWins": 2,
-          "headToHeadLosses": 3
+          "headToHeadLosses": 3,
+          "strategySummary": {
+            "schemaVersion": 1,
+            "approach": "balanced",
+            "tacticalMacro": "pressure",
+            "attackStyle": "aggressive",
+            "prayer": "superhuman_strength",
+            "preferredCombatRole": null,
+            "foodThreshold": 40,
+            "switchDefensiveAt": 30,
+            "source": "deterministic",
+            "policyVersion": "fixture-policy-v1"
+          }
         },
         "arenaPositions": {
           "agent1": [
@@ -1213,7 +1349,7 @@
         "rendererHealth": {
           "ready": true,
           "degradedReason": null,
-          "updatedAt": 1785829667000
+          "updatedAt": 1785829670000
         }
       }
     },
@@ -1234,13 +1370,13 @@
         "schemaVersion": 3,
         "sourceEpoch": 1785829600000,
         "seq": 6,
-        "emittedAt": 1785829668000,
+        "emittedAt": 1785829671000,
         "duelId": "streaming-contract-win-agent-b-forfeit",
         "duelKey": "17de043a4a964b7b692e6b98dd50a9468f83d89ab2c08ac4961beaf3542784e8",
-        "competitiveSnapshotVersion": 3,
-        "competitiveSnapshotDigest": "8d674ed41ff8dd9a66e3703b97f02d79c2d27db1f943c72358d2c069ee85095e",
+        "competitiveSnapshotVersion": 4,
+        "competitiveSnapshotDigest": "4d137c34d38c5363c9fd64ae7607c5c7b43647a3929a592e972cbc8106eca0d2",
         "competitiveSnapshot": {
-          "snapshotVersion": 3,
+          "snapshotVersion": 4,
           "persisted": true,
           "diagnostic": false,
           "preparationId": "039fc269-9df3-40c3-a3ae-f07a0cb39380",
@@ -1251,6 +1387,16 @@
           "betOpenTime": 1785829601000,
           "betCloseTime": 1785829661000,
           "combatPolicyVersion": "duel-combat-policy-v2",
+          "timing": {
+            "contractVersion": 2,
+            "timeoutPolicy": "hp_percentage_then_damage_then_draw_v1",
+            "countdownDurationMs": 4000,
+            "fightingDurationMs": 270000,
+            "endWarningDurationMs": 15000,
+            "maxFightDurationMs": 285000,
+            "fightStartTime": 1785829665000,
+            "fightDeadline": 1785829950000
+          },
           "contestants": [
             {
               "side": "agent1",
@@ -1456,15 +1602,15 @@
         "phaseVersion": 4,
         "betOpenTime": 1785829601000,
         "betCloseTime": 1785829661000,
-        "fightStartTime": 1785829662000,
-        "duelEndTime": 1785829668000,
+        "fightStartTime": 1785829665000,
+        "duelEndTime": 1785829671000,
         "winnerId": "agent-b",
         "winnerName": "Agent Beta",
         "outcome": "win",
         "cancellationReason": null,
         "winReason": "forfeit",
-        "seed": "5819608503786215738",
-        "replayHash": "549ed58203e4b0b4455d763c20e5fde4b68143743689d78dec370b38ecbce72b",
+        "seed": "4566727931717607671",
+        "replayHash": "72fc41faeb10b2e95c3f0b99be5622894480652819c7ea2351e94a39e0ae903e",
         "agent1": {
           "id": "agent-a",
           "name": "Agent Alpha",
@@ -1478,7 +1624,19 @@
           "damageDealtThisFight": 0,
           "rank": 1,
           "headToHeadWins": 3,
-          "headToHeadLosses": 2
+          "headToHeadLosses": 2,
+          "strategySummary": {
+            "schemaVersion": 1,
+            "approach": "balanced",
+            "tacticalMacro": "pressure",
+            "attackStyle": "aggressive",
+            "prayer": "superhuman_strength",
+            "preferredCombatRole": null,
+            "foodThreshold": 40,
+            "switchDefensiveAt": 30,
+            "source": "deterministic",
+            "policyVersion": "fixture-policy-v1"
+          }
         },
         "agent2": {
           "id": "agent-b",
@@ -1493,7 +1651,19 @@
           "damageDealtThisFight": 0,
           "rank": 2,
           "headToHeadWins": 2,
-          "headToHeadLosses": 3
+          "headToHeadLosses": 3,
+          "strategySummary": {
+            "schemaVersion": 1,
+            "approach": "balanced",
+            "tacticalMacro": "pressure",
+            "attackStyle": "aggressive",
+            "prayer": "superhuman_strength",
+            "preferredCombatRole": null,
+            "foodThreshold": 40,
+            "switchDefensiveAt": 30,
+            "source": "deterministic",
+            "policyVersion": "fixture-policy-v1"
+          }
         },
         "arenaPositions": {
           "agent1": [
@@ -1510,7 +1680,7 @@
         "rendererHealth": {
           "ready": true,
           "degradedReason": null,
-          "updatedAt": 1785829668000
+          "updatedAt": 1785829671000
         }
       }
     },
@@ -1530,13 +1700,13 @@
         "schemaVersion": 3,
         "sourceEpoch": 1785829600000,
         "seq": 7,
-        "emittedAt": 1785829669000,
+        "emittedAt": 1785829672000,
         "duelId": "streaming-contract-draw",
         "duelKey": "e7c277d273f36d64b3c8502e5bade57fb6745351a407078923a45ceb7fa94db5",
-        "competitiveSnapshotVersion": 3,
-        "competitiveSnapshotDigest": "9ede6777306d8be8381b25e13883fd0f50c9fe2fe70e54810fbf280aa0889b78",
+        "competitiveSnapshotVersion": 4,
+        "competitiveSnapshotDigest": "696935649b96434fc4ab9e9040708d66fa12647fcbf108fa18de17196e15782d",
         "competitiveSnapshot": {
-          "snapshotVersion": 3,
+          "snapshotVersion": 4,
           "persisted": true,
           "diagnostic": false,
           "preparationId": "04483182-2dd2-4b6e-a9dd-a8878fef4d24",
@@ -1547,6 +1717,16 @@
           "betOpenTime": 1785829601000,
           "betCloseTime": 1785829661000,
           "combatPolicyVersion": "duel-combat-policy-v2",
+          "timing": {
+            "contractVersion": 2,
+            "timeoutPolicy": "hp_percentage_then_damage_then_draw_v1",
+            "countdownDurationMs": 4000,
+            "fightingDurationMs": 270000,
+            "endWarningDurationMs": 15000,
+            "maxFightDurationMs": 285000,
+            "fightStartTime": 1785829665000,
+            "fightDeadline": 1785829950000
+          },
           "contestants": [
             {
               "side": "agent1",
@@ -1752,15 +1932,15 @@
         "phaseVersion": 3,
         "betOpenTime": 1785829601000,
         "betCloseTime": 1785829661000,
-        "fightStartTime": 1785829662000,
-        "duelEndTime": 1785829669000,
+        "fightStartTime": 1785829665000,
+        "duelEndTime": 1785829672000,
         "winnerId": null,
         "winnerName": null,
         "outcome": "draw",
         "cancellationReason": "draw",
         "winReason": "draw",
-        "seed": "4464630956409452144",
-        "replayHash": "f9c490c8bd5421cf7ab911f383da51e793a89009941fc888be6aaaed0aaca808",
+        "seed": "696993658315208374",
+        "replayHash": "605d39d17ce03f124554704624ca6c321e7b432fcfd5262c1ef19a1877f1c4f2",
         "agent1": {
           "id": "agent-a",
           "name": "Agent Alpha",
@@ -1774,7 +1954,19 @@
           "damageDealtThisFight": 0,
           "rank": 1,
           "headToHeadWins": 3,
-          "headToHeadLosses": 2
+          "headToHeadLosses": 2,
+          "strategySummary": {
+            "schemaVersion": 1,
+            "approach": "balanced",
+            "tacticalMacro": "pressure",
+            "attackStyle": "aggressive",
+            "prayer": "superhuman_strength",
+            "preferredCombatRole": null,
+            "foodThreshold": 40,
+            "switchDefensiveAt": 30,
+            "source": "deterministic",
+            "policyVersion": "fixture-policy-v1"
+          }
         },
         "agent2": {
           "id": "agent-b",
@@ -1789,7 +1981,19 @@
           "damageDealtThisFight": 0,
           "rank": 2,
           "headToHeadWins": 2,
-          "headToHeadLosses": 3
+          "headToHeadLosses": 3,
+          "strategySummary": {
+            "schemaVersion": 1,
+            "approach": "balanced",
+            "tacticalMacro": "pressure",
+            "attackStyle": "aggressive",
+            "prayer": "superhuman_strength",
+            "preferredCombatRole": null,
+            "foodThreshold": 40,
+            "switchDefensiveAt": 30,
+            "source": "deterministic",
+            "policyVersion": "fixture-policy-v1"
+          }
         },
         "arenaPositions": {
           "agent1": [
@@ -1806,7 +2010,7 @@
         "rendererHealth": {
           "ready": true,
           "degradedReason": null,
-          "updatedAt": 1785829669000
+          "updatedAt": 1785829672000
         }
       }
     },
@@ -1829,10 +2033,10 @@
         "emittedAt": 1785829609000,
         "duelId": "streaming-contract-cancel-contestant-prep-failed",
         "duelKey": "25f7b969cad3e8d818dbf1aa73965fddaea903c634eac613cbf3a4d08f7c06ee",
-        "competitiveSnapshotVersion": 3,
-        "competitiveSnapshotDigest": "f64df822ae99a8ffcb08948e49d8fe24cd56430a7df45131f17267b6dd59ae66",
+        "competitiveSnapshotVersion": 4,
+        "competitiveSnapshotDigest": "b5d5a42daeca0d83587b7a2da35f67d1e95ea6b3f416326ae51143e8583f4314",
         "competitiveSnapshot": {
-          "snapshotVersion": 3,
+          "snapshotVersion": 4,
           "persisted": true,
           "diagnostic": false,
           "preparationId": "1f9ee580-27fd-44dc-ab03-47e3be7bb748",
@@ -1843,6 +2047,16 @@
           "betOpenTime": 1785829601000,
           "betCloseTime": 1785829661000,
           "combatPolicyVersion": "duel-combat-policy-v2",
+          "timing": {
+            "contractVersion": 2,
+            "timeoutPolicy": "hp_percentage_then_damage_then_draw_v1",
+            "countdownDurationMs": 4000,
+            "fightingDurationMs": 270000,
+            "endWarningDurationMs": 15000,
+            "maxFightDurationMs": 285000,
+            "fightStartTime": 1785829665000,
+            "fightDeadline": 1785829950000
+          },
           "contestants": [
             {
               "side": "agent1",
@@ -2070,7 +2284,19 @@
           "damageDealtThisFight": 0,
           "rank": 1,
           "headToHeadWins": 3,
-          "headToHeadLosses": 2
+          "headToHeadLosses": 2,
+          "strategySummary": {
+            "schemaVersion": 1,
+            "approach": "balanced",
+            "tacticalMacro": "pressure",
+            "attackStyle": "aggressive",
+            "prayer": "superhuman_strength",
+            "preferredCombatRole": null,
+            "foodThreshold": 40,
+            "switchDefensiveAt": 30,
+            "source": "deterministic",
+            "policyVersion": "fixture-policy-v1"
+          }
         },
         "agent2": {
           "id": "agent-b",
@@ -2085,7 +2311,19 @@
           "damageDealtThisFight": 0,
           "rank": 2,
           "headToHeadWins": 2,
-          "headToHeadLosses": 3
+          "headToHeadLosses": 3,
+          "strategySummary": {
+            "schemaVersion": 1,
+            "approach": "balanced",
+            "tacticalMacro": "pressure",
+            "attackStyle": "aggressive",
+            "prayer": "superhuman_strength",
+            "preferredCombatRole": null,
+            "foodThreshold": 40,
+            "switchDefensiveAt": 30,
+            "source": "deterministic",
+            "policyVersion": "fixture-policy-v1"
+          }
         },
         "arenaPositions": {
           "agent1": [
@@ -2125,10 +2363,10 @@
         "emittedAt": 1785829610000,
         "duelId": "streaming-contract-cancel-both-agents-lost-during-prep",
         "duelKey": "1f7caf79260e1e2462106915431560d6f4dd112fd14df2a0ac192670689fb6ad",
-        "competitiveSnapshotVersion": 3,
-        "competitiveSnapshotDigest": "6d3d41e4e7a0632324df8da5c3c78f61cf6265ff2122a81f5100143c4b36558c",
+        "competitiveSnapshotVersion": 4,
+        "competitiveSnapshotDigest": "a7e54daab2a387e290c9b10da387190e6f800aa79d478dc8a17fb7f922905f84",
         "competitiveSnapshot": {
-          "snapshotVersion": 3,
+          "snapshotVersion": 4,
           "persisted": true,
           "diagnostic": false,
           "preparationId": "550a08ae-d3f4-4916-a20c-343711028166",
@@ -2139,6 +2377,16 @@
           "betOpenTime": 1785829601000,
           "betCloseTime": 1785829661000,
           "combatPolicyVersion": "duel-combat-policy-v2",
+          "timing": {
+            "contractVersion": 2,
+            "timeoutPolicy": "hp_percentage_then_damage_then_draw_v1",
+            "countdownDurationMs": 4000,
+            "fightingDurationMs": 270000,
+            "endWarningDurationMs": 15000,
+            "maxFightDurationMs": 285000,
+            "fightStartTime": 1785829665000,
+            "fightDeadline": 1785829950000
+          },
           "contestants": [
             {
               "side": "agent1",
@@ -2366,7 +2614,19 @@
           "damageDealtThisFight": 0,
           "rank": 1,
           "headToHeadWins": 3,
-          "headToHeadLosses": 2
+          "headToHeadLosses": 2,
+          "strategySummary": {
+            "schemaVersion": 1,
+            "approach": "balanced",
+            "tacticalMacro": "pressure",
+            "attackStyle": "aggressive",
+            "prayer": "superhuman_strength",
+            "preferredCombatRole": null,
+            "foodThreshold": 40,
+            "switchDefensiveAt": 30,
+            "source": "deterministic",
+            "policyVersion": "fixture-policy-v1"
+          }
         },
         "agent2": {
           "id": "agent-b",
@@ -2381,7 +2641,19 @@
           "damageDealtThisFight": 0,
           "rank": 2,
           "headToHeadWins": 2,
-          "headToHeadLosses": 3
+          "headToHeadLosses": 3,
+          "strategySummary": {
+            "schemaVersion": 1,
+            "approach": "balanced",
+            "tacticalMacro": "pressure",
+            "attackStyle": "aggressive",
+            "prayer": "superhuman_strength",
+            "preferredCombatRole": null,
+            "foodThreshold": 40,
+            "switchDefensiveAt": 30,
+            "source": "deterministic",
+            "policyVersion": "fixture-policy-v1"
+          }
         },
         "arenaPositions": {
           "agent1": [
@@ -2421,10 +2693,10 @@
         "emittedAt": 1785829611000,
         "duelId": "streaming-contract-cancel-arena-teleport-failed",
         "duelKey": "521ce369bc3932487b0ce87acb275aaf590d434475b74f3ad642684c0da56dea",
-        "competitiveSnapshotVersion": 3,
-        "competitiveSnapshotDigest": "4faea973c7cbe3f107425ea1efb1bf92e5a93e17ec225ef25b0b8bcf4f00b3cf",
+        "competitiveSnapshotVersion": 4,
+        "competitiveSnapshotDigest": "332d6c0a286fb7cb562a69b12f7d52f46c678fa2623ff68b86988b0a0419186c",
         "competitiveSnapshot": {
-          "snapshotVersion": 3,
+          "snapshotVersion": 4,
           "persisted": true,
           "diagnostic": false,
           "preparationId": "7be54b0d-85ac-460c-aee2-8a2f7654e27b",
@@ -2435,6 +2707,16 @@
           "betOpenTime": 1785829601000,
           "betCloseTime": 1785829661000,
           "combatPolicyVersion": "duel-combat-policy-v2",
+          "timing": {
+            "contractVersion": 2,
+            "timeoutPolicy": "hp_percentage_then_damage_then_draw_v1",
+            "countdownDurationMs": 4000,
+            "fightingDurationMs": 270000,
+            "endWarningDurationMs": 15000,
+            "maxFightDurationMs": 285000,
+            "fightStartTime": 1785829665000,
+            "fightDeadline": 1785829950000
+          },
           "contestants": [
             {
               "side": "agent1",
@@ -2662,7 +2944,19 @@
           "damageDealtThisFight": 0,
           "rank": 1,
           "headToHeadWins": 3,
-          "headToHeadLosses": 2
+          "headToHeadLosses": 2,
+          "strategySummary": {
+            "schemaVersion": 1,
+            "approach": "balanced",
+            "tacticalMacro": "pressure",
+            "attackStyle": "aggressive",
+            "prayer": "superhuman_strength",
+            "preferredCombatRole": null,
+            "foodThreshold": 40,
+            "switchDefensiveAt": 30,
+            "source": "deterministic",
+            "policyVersion": "fixture-policy-v1"
+          }
         },
         "agent2": {
           "id": "agent-b",
@@ -2677,7 +2971,19 @@
           "damageDealtThisFight": 0,
           "rank": 2,
           "headToHeadWins": 2,
-          "headToHeadLosses": 3
+          "headToHeadLosses": 3,
+          "strategySummary": {
+            "schemaVersion": 1,
+            "approach": "balanced",
+            "tacticalMacro": "pressure",
+            "attackStyle": "aggressive",
+            "prayer": "superhuman_strength",
+            "preferredCombatRole": null,
+            "foodThreshold": 40,
+            "switchDefensiveAt": 30,
+            "source": "deterministic",
+            "policyVersion": "fixture-policy-v1"
+          }
         },
         "arenaPositions": {
           "agent1": [
@@ -2714,13 +3020,13 @@
         "schemaVersion": 3,
         "sourceEpoch": 1785829600000,
         "seq": 11,
-        "emittedAt": 1785829673000,
+        "emittedAt": 1785829676000,
         "duelId": "streaming-contract-cancel-both-agents-missing",
         "duelKey": "0cf9295978c7e6fdc9700494e091df8b3de7000d8bda8e3abdebb9b1911ab2e5",
-        "competitiveSnapshotVersion": 3,
-        "competitiveSnapshotDigest": "2218e4a77005996c18ddcb80b32e4df10c6d7da0e90499d011058a46760b58dd",
+        "competitiveSnapshotVersion": 4,
+        "competitiveSnapshotDigest": "49b0e8d57c8c81c53fa7e385efa00486fdd493c8fcd88c8d16b011dd61a916bf",
         "competitiveSnapshot": {
-          "snapshotVersion": 3,
+          "snapshotVersion": 4,
           "persisted": true,
           "diagnostic": false,
           "preparationId": "0b495b37-6894-4544-a2a5-2ea1fd9a0c95",
@@ -2731,6 +3037,16 @@
           "betOpenTime": 1785829601000,
           "betCloseTime": 1785829661000,
           "combatPolicyVersion": "duel-combat-policy-v2",
+          "timing": {
+            "contractVersion": 2,
+            "timeoutPolicy": "hp_percentage_then_damage_then_draw_v1",
+            "countdownDurationMs": 4000,
+            "fightingDurationMs": 270000,
+            "endWarningDurationMs": 15000,
+            "maxFightDurationMs": 285000,
+            "fightStartTime": 1785829665000,
+            "fightDeadline": 1785829950000
+          },
           "contestants": [
             {
               "side": "agent1",
@@ -2936,8 +3252,8 @@
         "phaseVersion": 3,
         "betOpenTime": 1785829601000,
         "betCloseTime": 1785829661000,
-        "fightStartTime": 1785829662000,
-        "duelEndTime": 1785829673000,
+        "fightStartTime": 1785829665000,
+        "duelEndTime": 1785829676000,
         "winnerId": null,
         "winnerName": null,
         "outcome": "cancelled",
@@ -2958,7 +3274,19 @@
           "damageDealtThisFight": 0,
           "rank": 1,
           "headToHeadWins": 3,
-          "headToHeadLosses": 2
+          "headToHeadLosses": 2,
+          "strategySummary": {
+            "schemaVersion": 1,
+            "approach": "balanced",
+            "tacticalMacro": "pressure",
+            "attackStyle": "aggressive",
+            "prayer": "superhuman_strength",
+            "preferredCombatRole": null,
+            "foodThreshold": 40,
+            "switchDefensiveAt": 30,
+            "source": "deterministic",
+            "policyVersion": "fixture-policy-v1"
+          }
         },
         "agent2": {
           "id": "agent-b",
@@ -2973,7 +3301,19 @@
           "damageDealtThisFight": 0,
           "rank": 2,
           "headToHeadWins": 2,
-          "headToHeadLosses": 3
+          "headToHeadLosses": 3,
+          "strategySummary": {
+            "schemaVersion": 1,
+            "approach": "balanced",
+            "tacticalMacro": "pressure",
+            "attackStyle": "aggressive",
+            "prayer": "superhuman_strength",
+            "preferredCombatRole": null,
+            "foodThreshold": 40,
+            "switchDefensiveAt": 30,
+            "source": "deterministic",
+            "policyVersion": "fixture-policy-v1"
+          }
         },
         "arenaPositions": {
           "agent1": [
@@ -2990,7 +3330,7 @@
         "rendererHealth": {
           "ready": true,
           "degradedReason": null,
-          "updatedAt": 1785829673000
+          "updatedAt": 1785829676000
         }
       }
     },
@@ -3010,13 +3350,13 @@
         "schemaVersion": 3,
         "sourceEpoch": 1785829600000,
         "seq": 12,
-        "emittedAt": 1785829674000,
+        "emittedAt": 1785829677000,
         "duelId": "streaming-contract-cancel-combat-engagement-failed",
         "duelKey": "303f43ee89e06a36232ef26161dd1fe8c0c442d8a54b44d00cb40a4f767e77ba",
-        "competitiveSnapshotVersion": 3,
-        "competitiveSnapshotDigest": "fe3f17b39002b2fd6c72dd2ad5abb317890d7ea144c7a5459ed90e30f05a338a",
+        "competitiveSnapshotVersion": 4,
+        "competitiveSnapshotDigest": "88ee01d29e3911287abf72330fd7605d342ff41ba5b606db4a972af470522af9",
         "competitiveSnapshot": {
-          "snapshotVersion": 3,
+          "snapshotVersion": 4,
           "persisted": true,
           "diagnostic": false,
           "preparationId": "cd6ab4de-b6ec-4750-aca2-dc020a364c26",
@@ -3027,6 +3367,16 @@
           "betOpenTime": 1785829601000,
           "betCloseTime": 1785829661000,
           "combatPolicyVersion": "duel-combat-policy-v2",
+          "timing": {
+            "contractVersion": 2,
+            "timeoutPolicy": "hp_percentage_then_damage_then_draw_v1",
+            "countdownDurationMs": 4000,
+            "fightingDurationMs": 270000,
+            "endWarningDurationMs": 15000,
+            "maxFightDurationMs": 285000,
+            "fightStartTime": 1785829665000,
+            "fightDeadline": 1785829950000
+          },
           "contestants": [
             {
               "side": "agent1",
@@ -3232,8 +3582,8 @@
         "phaseVersion": 3,
         "betOpenTime": 1785829601000,
         "betCloseTime": 1785829661000,
-        "fightStartTime": 1785829662000,
-        "duelEndTime": 1785829674000,
+        "fightStartTime": 1785829665000,
+        "duelEndTime": 1785829677000,
         "winnerId": null,
         "winnerName": null,
         "outcome": "cancelled",
@@ -3254,7 +3604,19 @@
           "damageDealtThisFight": 0,
           "rank": 1,
           "headToHeadWins": 3,
-          "headToHeadLosses": 2
+          "headToHeadLosses": 2,
+          "strategySummary": {
+            "schemaVersion": 1,
+            "approach": "balanced",
+            "tacticalMacro": "pressure",
+            "attackStyle": "aggressive",
+            "prayer": "superhuman_strength",
+            "preferredCombatRole": null,
+            "foodThreshold": 40,
+            "switchDefensiveAt": 30,
+            "source": "deterministic",
+            "policyVersion": "fixture-policy-v1"
+          }
         },
         "agent2": {
           "id": "agent-b",
@@ -3269,7 +3631,19 @@
           "damageDealtThisFight": 0,
           "rank": 2,
           "headToHeadWins": 2,
-          "headToHeadLosses": 3
+          "headToHeadLosses": 3,
+          "strategySummary": {
+            "schemaVersion": 1,
+            "approach": "balanced",
+            "tacticalMacro": "pressure",
+            "attackStyle": "aggressive",
+            "prayer": "superhuman_strength",
+            "preferredCombatRole": null,
+            "foodThreshold": 40,
+            "switchDefensiveAt": 30,
+            "source": "deterministic",
+            "policyVersion": "fixture-policy-v1"
+          }
         },
         "arenaPositions": {
           "agent1": [
@@ -3286,7 +3660,7 @@
         "rendererHealth": {
           "ready": true,
           "degradedReason": null,
-          "updatedAt": 1785829674000
+          "updatedAt": 1785829677000
         }
       }
     },
@@ -3306,13 +3680,13 @@
         "schemaVersion": 3,
         "sourceEpoch": 1785829600000,
         "seq": 13,
-        "emittedAt": 1785829675000,
+        "emittedAt": 1785829678000,
         "duelId": "streaming-contract-cancel-no-combat-activity",
         "duelKey": "9aca1fb5d879bfc1284ea3f42920c9af7c0408357112f8cfad43553ad1a370ec",
-        "competitiveSnapshotVersion": 3,
-        "competitiveSnapshotDigest": "3cdafcbbcd78683f391537bdf88372afd76a96266056a484d81b4548ce0b2c69",
+        "competitiveSnapshotVersion": 4,
+        "competitiveSnapshotDigest": "8c8ad30b20a2ea1f784bbda7661752e5ee681fae8b28c4fbd212ca7a1b8a75f9",
         "competitiveSnapshot": {
-          "snapshotVersion": 3,
+          "snapshotVersion": 4,
           "persisted": true,
           "diagnostic": false,
           "preparationId": "63ae7dd3-f742-4746-a484-38929993f6e1",
@@ -3323,6 +3697,16 @@
           "betOpenTime": 1785829601000,
           "betCloseTime": 1785829661000,
           "combatPolicyVersion": "duel-combat-policy-v2",
+          "timing": {
+            "contractVersion": 2,
+            "timeoutPolicy": "hp_percentage_then_damage_then_draw_v1",
+            "countdownDurationMs": 4000,
+            "fightingDurationMs": 270000,
+            "endWarningDurationMs": 15000,
+            "maxFightDurationMs": 285000,
+            "fightStartTime": 1785829665000,
+            "fightDeadline": 1785829950000
+          },
           "contestants": [
             {
               "side": "agent1",
@@ -3528,8 +3912,8 @@
         "phaseVersion": 3,
         "betOpenTime": 1785829601000,
         "betCloseTime": 1785829661000,
-        "fightStartTime": 1785829662000,
-        "duelEndTime": 1785829675000,
+        "fightStartTime": 1785829665000,
+        "duelEndTime": 1785829678000,
         "winnerId": null,
         "winnerName": null,
         "outcome": "cancelled",
@@ -3550,7 +3934,19 @@
           "damageDealtThisFight": 0,
           "rank": 1,
           "headToHeadWins": 3,
-          "headToHeadLosses": 2
+          "headToHeadLosses": 2,
+          "strategySummary": {
+            "schemaVersion": 1,
+            "approach": "balanced",
+            "tacticalMacro": "pressure",
+            "attackStyle": "aggressive",
+            "prayer": "superhuman_strength",
+            "preferredCombatRole": null,
+            "foodThreshold": 40,
+            "switchDefensiveAt": 30,
+            "source": "deterministic",
+            "policyVersion": "fixture-policy-v1"
+          }
         },
         "agent2": {
           "id": "agent-b",
@@ -3565,7 +3961,19 @@
           "damageDealtThisFight": 0,
           "rank": 2,
           "headToHeadWins": 2,
-          "headToHeadLosses": 3
+          "headToHeadLosses": 3,
+          "strategySummary": {
+            "schemaVersion": 1,
+            "approach": "balanced",
+            "tacticalMacro": "pressure",
+            "attackStyle": "aggressive",
+            "prayer": "superhuman_strength",
+            "preferredCombatRole": null,
+            "foodThreshold": 40,
+            "switchDefensiveAt": 30,
+            "source": "deterministic",
+            "policyVersion": "fixture-policy-v1"
+          }
         },
         "arenaPositions": {
           "agent1": [
@@ -3582,7 +3990,7 @@
         "rendererHealth": {
           "ready": true,
           "degradedReason": null,
-          "updatedAt": 1785829675000
+          "updatedAt": 1785829678000
         }
       }
     },
@@ -3605,10 +4013,10 @@
         "emittedAt": 1785829615000,
         "duelId": "streaming-contract-cancel-watchdog-announcement-timeout",
         "duelKey": "376e439fd12ca28ddd86a48108eeb4b13654fc19a6695d5703dc35ae033a0b72",
-        "competitiveSnapshotVersion": 3,
-        "competitiveSnapshotDigest": "2d0d9290dd9efe0dc06912d6ba1957c9fcd00b785688ae4b0931baa109662524",
+        "competitiveSnapshotVersion": 4,
+        "competitiveSnapshotDigest": "5a9a7dae0073fcc9f55d0f5b5559e93d7779a1a1324a6272fcd5dd3f4434c22a",
         "competitiveSnapshot": {
-          "snapshotVersion": 3,
+          "snapshotVersion": 4,
           "persisted": true,
           "diagnostic": false,
           "preparationId": "0bf93716-bd1b-478d-a9c2-c96c9fa59109",
@@ -3619,6 +4027,16 @@
           "betOpenTime": 1785829601000,
           "betCloseTime": 1785829661000,
           "combatPolicyVersion": "duel-combat-policy-v2",
+          "timing": {
+            "contractVersion": 2,
+            "timeoutPolicy": "hp_percentage_then_damage_then_draw_v1",
+            "countdownDurationMs": 4000,
+            "fightingDurationMs": 270000,
+            "endWarningDurationMs": 15000,
+            "maxFightDurationMs": 285000,
+            "fightStartTime": 1785829665000,
+            "fightDeadline": 1785829950000
+          },
           "contestants": [
             {
               "side": "agent1",
@@ -3846,7 +4264,19 @@
           "damageDealtThisFight": 0,
           "rank": 1,
           "headToHeadWins": 3,
-          "headToHeadLosses": 2
+          "headToHeadLosses": 2,
+          "strategySummary": {
+            "schemaVersion": 1,
+            "approach": "balanced",
+            "tacticalMacro": "pressure",
+            "attackStyle": "aggressive",
+            "prayer": "superhuman_strength",
+            "preferredCombatRole": null,
+            "foodThreshold": 40,
+            "switchDefensiveAt": 30,
+            "source": "deterministic",
+            "policyVersion": "fixture-policy-v1"
+          }
         },
         "agent2": {
           "id": "agent-b",
@@ -3861,7 +4291,19 @@
           "damageDealtThisFight": 0,
           "rank": 2,
           "headToHeadWins": 2,
-          "headToHeadLosses": 3
+          "headToHeadLosses": 3,
+          "strategySummary": {
+            "schemaVersion": 1,
+            "approach": "balanced",
+            "tacticalMacro": "pressure",
+            "attackStyle": "aggressive",
+            "prayer": "superhuman_strength",
+            "preferredCombatRole": null,
+            "foodThreshold": 40,
+            "switchDefensiveAt": 30,
+            "source": "deterministic",
+            "policyVersion": "fixture-policy-v1"
+          }
         },
         "arenaPositions": {
           "agent1": [
@@ -3898,13 +4340,13 @@
         "schemaVersion": 3,
         "sourceEpoch": 1785829600000,
         "seq": 15,
-        "emittedAt": 1785829677000,
+        "emittedAt": 1785829680000,
         "duelId": "streaming-contract-cancel-watchdog-fighting-timeout",
         "duelKey": "5edd960026813540718e39680f1b8997354f2885391e611a86b17f7dce23413d",
-        "competitiveSnapshotVersion": 3,
-        "competitiveSnapshotDigest": "2057bc3f792c7d0bd578da28714594761509db9be1d3c2c9e4e0b60426034870",
+        "competitiveSnapshotVersion": 4,
+        "competitiveSnapshotDigest": "9f011fb1333bf805876717384166544771ab166185e5c811b5fe84465c990616",
         "competitiveSnapshot": {
-          "snapshotVersion": 3,
+          "snapshotVersion": 4,
           "persisted": true,
           "diagnostic": false,
           "preparationId": "3a31946e-0fb1-4d33-ab13-57b6408e2c7e",
@@ -3915,6 +4357,16 @@
           "betOpenTime": 1785829601000,
           "betCloseTime": 1785829661000,
           "combatPolicyVersion": "duel-combat-policy-v2",
+          "timing": {
+            "contractVersion": 2,
+            "timeoutPolicy": "hp_percentage_then_damage_then_draw_v1",
+            "countdownDurationMs": 4000,
+            "fightingDurationMs": 270000,
+            "endWarningDurationMs": 15000,
+            "maxFightDurationMs": 285000,
+            "fightStartTime": 1785829665000,
+            "fightDeadline": 1785829950000
+          },
           "contestants": [
             {
               "side": "agent1",
@@ -4120,8 +4572,8 @@
         "phaseVersion": 3,
         "betOpenTime": 1785829601000,
         "betCloseTime": 1785829661000,
-        "fightStartTime": 1785829662000,
-        "duelEndTime": 1785829677000,
+        "fightStartTime": 1785829665000,
+        "duelEndTime": 1785829680000,
         "winnerId": null,
         "winnerName": null,
         "outcome": "cancelled",
@@ -4142,7 +4594,19 @@
           "damageDealtThisFight": 0,
           "rank": 1,
           "headToHeadWins": 3,
-          "headToHeadLosses": 2
+          "headToHeadLosses": 2,
+          "strategySummary": {
+            "schemaVersion": 1,
+            "approach": "balanced",
+            "tacticalMacro": "pressure",
+            "attackStyle": "aggressive",
+            "prayer": "superhuman_strength",
+            "preferredCombatRole": null,
+            "foodThreshold": 40,
+            "switchDefensiveAt": 30,
+            "source": "deterministic",
+            "policyVersion": "fixture-policy-v1"
+          }
         },
         "agent2": {
           "id": "agent-b",
@@ -4157,7 +4621,19 @@
           "damageDealtThisFight": 0,
           "rank": 2,
           "headToHeadWins": 2,
-          "headToHeadLosses": 3
+          "headToHeadLosses": 3,
+          "strategySummary": {
+            "schemaVersion": 1,
+            "approach": "balanced",
+            "tacticalMacro": "pressure",
+            "attackStyle": "aggressive",
+            "prayer": "superhuman_strength",
+            "preferredCombatRole": null,
+            "foodThreshold": 40,
+            "switchDefensiveAt": 30,
+            "source": "deterministic",
+            "policyVersion": "fixture-policy-v1"
+          }
         },
         "arenaPositions": {
           "agent1": [
@@ -4174,7 +4650,7 @@
         "rendererHealth": {
           "ready": true,
           "degradedReason": null,
-          "updatedAt": 1785829677000
+          "updatedAt": 1785829680000
         }
       }
     },
@@ -4197,10 +4673,10 @@
         "emittedAt": 1785829617000,
         "duelId": "streaming-contract-cancel-competitive-snapshot-recovery-window-elapsed",
         "duelKey": "cad5dc6aec777f68a2b28c3742517972099a24a872c31d81b7c3ec78448ddc81",
-        "competitiveSnapshotVersion": 3,
-        "competitiveSnapshotDigest": "4030864c1c89dc4063386c519f143a1e9177ac1c7ce468b776d3c8e4a0688a40",
+        "competitiveSnapshotVersion": 4,
+        "competitiveSnapshotDigest": "9ed98c1ef8646ff642b0d7e38982d27fe8ec8a1f92382cb774a1dc5a58bc74b6",
         "competitiveSnapshot": {
-          "snapshotVersion": 3,
+          "snapshotVersion": 4,
           "persisted": true,
           "diagnostic": false,
           "preparationId": "9666c15f-db80-4761-a391-3a485a89803c",
@@ -4211,6 +4687,16 @@
           "betOpenTime": 1785829601000,
           "betCloseTime": 1785829661000,
           "combatPolicyVersion": "duel-combat-policy-v2",
+          "timing": {
+            "contractVersion": 2,
+            "timeoutPolicy": "hp_percentage_then_damage_then_draw_v1",
+            "countdownDurationMs": 4000,
+            "fightingDurationMs": 270000,
+            "endWarningDurationMs": 15000,
+            "maxFightDurationMs": 285000,
+            "fightStartTime": 1785829665000,
+            "fightDeadline": 1785829950000
+          },
           "contestants": [
             {
               "side": "agent1",
@@ -4438,7 +4924,19 @@
           "damageDealtThisFight": 0,
           "rank": 1,
           "headToHeadWins": 3,
-          "headToHeadLosses": 2
+          "headToHeadLosses": 2,
+          "strategySummary": {
+            "schemaVersion": 1,
+            "approach": "balanced",
+            "tacticalMacro": "pressure",
+            "attackStyle": "aggressive",
+            "prayer": "superhuman_strength",
+            "preferredCombatRole": null,
+            "foodThreshold": 40,
+            "switchDefensiveAt": 30,
+            "source": "deterministic",
+            "policyVersion": "fixture-policy-v1"
+          }
         },
         "agent2": {
           "id": "agent-b",
@@ -4453,7 +4951,19 @@
           "damageDealtThisFight": 0,
           "rank": 2,
           "headToHeadWins": 2,
-          "headToHeadLosses": 3
+          "headToHeadLosses": 3,
+          "strategySummary": {
+            "schemaVersion": 1,
+            "approach": "balanced",
+            "tacticalMacro": "pressure",
+            "attackStyle": "aggressive",
+            "prayer": "superhuman_strength",
+            "preferredCombatRole": null,
+            "foodThreshold": 40,
+            "switchDefensiveAt": 30,
+            "source": "deterministic",
+            "policyVersion": "fixture-policy-v1"
+          }
         },
         "arenaPositions": null,
         "rendererHealth": {
@@ -4479,13 +4989,13 @@
         "schemaVersion": 3,
         "sourceEpoch": 1785829600000,
         "seq": 17,
-        "emittedAt": 1785829679000,
+        "emittedAt": 1785829682000,
         "duelId": "streaming-contract-cancel-scheduler-shutdown",
         "duelKey": "7dac2cbb5b643f4d66f3338433fe7b545bd288f754a65e9e7e3dfef6a5a23ffd",
-        "competitiveSnapshotVersion": 3,
-        "competitiveSnapshotDigest": "d50ee8863023c1768eb7221305fd5430d601d49fad2f0199775f46c308d71aed",
+        "competitiveSnapshotVersion": 4,
+        "competitiveSnapshotDigest": "266bcc110abeada523d060722e8392e50e1188ff88fe295c9ce38b74f554b818",
         "competitiveSnapshot": {
-          "snapshotVersion": 3,
+          "snapshotVersion": 4,
           "persisted": true,
           "diagnostic": false,
           "preparationId": "4c7508f1-3031-428d-a856-c0c78089fb76",
@@ -4496,6 +5006,16 @@
           "betOpenTime": 1785829601000,
           "betCloseTime": 1785829661000,
           "combatPolicyVersion": "duel-combat-policy-v2",
+          "timing": {
+            "contractVersion": 2,
+            "timeoutPolicy": "hp_percentage_then_damage_then_draw_v1",
+            "countdownDurationMs": 4000,
+            "fightingDurationMs": 270000,
+            "endWarningDurationMs": 15000,
+            "maxFightDurationMs": 285000,
+            "fightStartTime": 1785829665000,
+            "fightDeadline": 1785829950000
+          },
           "contestants": [
             {
               "side": "agent1",
@@ -4701,8 +5221,8 @@
         "phaseVersion": 3,
         "betOpenTime": 1785829601000,
         "betCloseTime": 1785829661000,
-        "fightStartTime": 1785829662000,
-        "duelEndTime": 1785829679000,
+        "fightStartTime": 1785829665000,
+        "duelEndTime": 1785829682000,
         "winnerId": null,
         "winnerName": null,
         "outcome": "cancelled",
@@ -4723,7 +5243,19 @@
           "damageDealtThisFight": 0,
           "rank": 1,
           "headToHeadWins": 3,
-          "headToHeadLosses": 2
+          "headToHeadLosses": 2,
+          "strategySummary": {
+            "schemaVersion": 1,
+            "approach": "balanced",
+            "tacticalMacro": "pressure",
+            "attackStyle": "aggressive",
+            "prayer": "superhuman_strength",
+            "preferredCombatRole": null,
+            "foodThreshold": 40,
+            "switchDefensiveAt": 30,
+            "source": "deterministic",
+            "policyVersion": "fixture-policy-v1"
+          }
         },
         "agent2": {
           "id": "agent-b",
@@ -4738,7 +5270,19 @@
           "damageDealtThisFight": 0,
           "rank": 2,
           "headToHeadWins": 2,
-          "headToHeadLosses": 3
+          "headToHeadLosses": 3,
+          "strategySummary": {
+            "schemaVersion": 1,
+            "approach": "balanced",
+            "tacticalMacro": "pressure",
+            "attackStyle": "aggressive",
+            "prayer": "superhuman_strength",
+            "preferredCombatRole": null,
+            "foodThreshold": 40,
+            "switchDefensiveAt": 30,
+            "source": "deterministic",
+            "policyVersion": "fixture-policy-v1"
+          }
         },
         "arenaPositions": {
           "agent1": [
@@ -4755,7 +5299,7 @@
         "rendererHealth": {
           "ready": true,
           "degradedReason": null,
-          "updatedAt": 1785829679000
+          "updatedAt": 1785829682000
         }
       }
     }

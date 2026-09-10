@@ -11,6 +11,7 @@
 
 import THREE from "../../../extras/three/three";
 import type { TerrainQuadNode, QuadTreeListener } from "./TerrainQuadTree";
+import type { ElevatedWaterBody } from "./WaterBodyRegistry";
 import type { WaterSystem, WaterBodyType } from "./WaterSystem";
 
 const WATER_RESOLUTION_BY_DEPTH: Record<number, number> = {
@@ -35,6 +36,7 @@ export class WaterVisualManager implements QuadTreeListener {
   private getIslandMask: (x: number, z: number) => number;
   private waterThreshold: number;
   private chunks = new Map<string, WaterChunk>();
+  private elevatedWaterMeshes: THREE.Mesh[] = [];
 
   constructor(
     container: THREE.Group,
@@ -42,12 +44,14 @@ export class WaterVisualManager implements QuadTreeListener {
     getHeightAt: (x: number, z: number) => number,
     getIslandMask: (x: number, z: number) => number,
     waterThreshold: number,
+    elevatedWaterBodies: readonly ElevatedWaterBody[] = [],
   ) {
     this.container = container;
     this.waterSystem = waterSystem;
     this.getHeightAt = getHeightAt;
     this.getIslandMask = getIslandMask;
     this.waterThreshold = waterThreshold;
+    this.createElevatedWaterMeshes(elevatedWaterBodies);
   }
 
   // -- QuadTreeListener -------------------------------------------------
@@ -141,6 +145,57 @@ export class WaterVisualManager implements QuadTreeListener {
     return mask < 0.3 ? "ocean" : "lake";
   }
 
+  /**
+   * Elevated manifest ponds are independent of the ocean-level quad-tree
+   * threshold. Keep their small, authored surfaces resident so a quad-tree
+   * viewport cannot omit the water while retaining the matching terrain,
+   * collision, resource, and camera context.
+   */
+  private createElevatedWaterMeshes(
+    bodies: readonly ElevatedWaterBody[],
+  ): void {
+    const material = this.waterSystem.getMaterial("lake");
+    if (!material) return;
+
+    for (const body of bodies) {
+      const segments = Math.max(32, Math.min(96, Math.ceil(body.radius * 6)));
+      const geometry = new THREE.CircleGeometry(body.radius, segments);
+      geometry.rotateX(-Math.PI / 2);
+
+      const positions = geometry.getAttribute("position");
+      const shoreDistances = new Float32Array(positions.count);
+      for (let index = 0; index < positions.count; index += 1) {
+        const distanceFromCenter = Math.hypot(
+          positions.getX(index),
+          positions.getZ(index),
+        );
+        shoreDistances[index] = Math.max(0, body.radius - distanceFromCenter);
+      }
+      geometry.setAttribute(
+        "shoreDistance",
+        new THREE.BufferAttribute(shoreDistances, 1),
+      );
+
+      const mesh = new THREE.Mesh(geometry, material);
+      mesh.position.set(body.centerX, body.surfaceY, body.centerZ);
+      mesh.name = `WaterQT_elevated_${body.id}`;
+      mesh.renderOrder = 101;
+      mesh.userData = {
+        type: "water",
+        waterType: "lake",
+        waterBodyId: body.id,
+        elevated: true,
+        walkable: false,
+        clickable: false,
+      };
+      mesh.layers.set(1);
+
+      this.container.add(mesh);
+      this.waterSystem.registerWaterMesh(mesh);
+      this.elevatedWaterMeshes.push(mesh);
+    }
+  }
+
   destroy(): void {
     for (const [, chunk] of this.chunks) {
       this.waterSystem.unregisterWaterMesh(chunk.mesh);
@@ -148,6 +203,12 @@ export class WaterVisualManager implements QuadTreeListener {
       chunk.mesh.geometry.dispose();
     }
     this.chunks.clear();
+    for (const mesh of this.elevatedWaterMeshes) {
+      this.waterSystem.unregisterWaterMesh(mesh);
+      if (mesh.parent) mesh.parent.remove(mesh);
+      mesh.geometry.dispose();
+    }
+    this.elevatedWaterMeshes = [];
     if (this.container.parent) this.container.parent.remove(this.container);
   }
 }

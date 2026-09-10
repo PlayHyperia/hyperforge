@@ -15,12 +15,15 @@ import {
 import { StreamingDuelScheduler } from "../src/systems/StreamingDuelScheduler/index.js";
 import {
   AGENT_IDS,
+  driveAuthoritativeCombatToNaturalTerminal,
+  installAuthoritativeCombatRuntime,
   openPersistedCycle,
   seedAgents,
   startWorkerRuntime,
   stopWorkerRuntime,
   waitFor,
   waitForPostgres,
+  type AuthoritativeCombatRuntime,
   type WorkerRuntime,
 } from "./test-agent-duel-cycle-process-kill.js";
 
@@ -30,6 +33,29 @@ const port = Number.parseInt(
   process.env.AGENT_DUEL_BET_SYNC_PORT?.trim() || "",
   10,
 );
+const naturalTerminalModeValue =
+  process.env.AGENT_DUEL_BET_SYNC_NATURAL_TERMINAL?.trim().toLowerCase() ||
+  "false";
+if (
+  naturalTerminalModeValue !== "true" &&
+  naturalTerminalModeValue !== "false"
+) {
+  throw new Error("AGENT_DUEL_BET_SYNC_NATURAL_TERMINAL must be true or false");
+}
+const naturalTerminalMode = naturalTerminalModeValue === "true";
+const naturalCombatTimeoutMs = Number.parseInt(
+  process.env.AGENT_DUEL_BET_SYNC_COMBAT_TIMEOUT_MS?.trim() || "300000",
+  10,
+);
+if (
+  !Number.isSafeInteger(naturalCombatTimeoutMs) ||
+  naturalCombatTimeoutMs < 10_000 ||
+  naturalCombatTimeoutMs > 900_000
+) {
+  throw new Error(
+    "AGENT_DUEL_BET_SYNC_COMBAT_TIMEOUT_MS must be an integer between 10000 and 900000",
+  );
+}
 
 if (!databaseUrl) {
   throw new Error("AGENT_DUEL_BET_SYNC_DATABASE_URL is required");
@@ -40,6 +66,33 @@ if (!bettingToken) {
 if (!Number.isSafeInteger(port) || port < 1 || port > 65_535) {
   throw new Error("AGENT_DUEL_BET_SYNC_PORT must be a valid TCP port");
 }
+const shutdownAckUrl =
+  process.env.AGENT_DUEL_BET_SYNC_SHUTDOWN_ACK_URL?.trim() || "";
+const shutdownAckTimeoutMs = Number.parseInt(
+  process.env.AGENT_DUEL_BET_SYNC_SHUTDOWN_ACK_TIMEOUT_MS?.trim() || "15000",
+  10,
+);
+if (shutdownAckUrl) {
+  const parsed = new URL(shutdownAckUrl);
+  if (
+    (parsed.protocol !== "http:" && parsed.protocol !== "https:") ||
+    parsed.username ||
+    parsed.password
+  ) {
+    throw new Error(
+      "AGENT_DUEL_BET_SYNC_SHUTDOWN_ACK_URL must be credential-free HTTP(S)",
+    );
+  }
+  if (
+    !Number.isSafeInteger(shutdownAckTimeoutMs) ||
+    shutdownAckTimeoutMs < 1_000 ||
+    shutdownAckTimeoutMs > 20_000
+  ) {
+    throw new Error(
+      "AGENT_DUEL_BET_SYNC_SHUTDOWN_ACK_TIMEOUT_MS must be 1000..20000",
+    );
+  }
+}
 
 type RetainedFrame = {
   seq: number;
@@ -47,12 +100,36 @@ type RetainedFrame = {
   json: string;
 };
 
+type StreamingState = ReturnType<StreamingDuelScheduler["getStreamingState"]>;
+
+type StreamingStateFrame = {
+  seq: number;
+  emittedAt: number;
+  payload: StreamingState & {
+    type: "STREAMING_STATE_UPDATE";
+    seq: number;
+    emittedAt: number;
+    cycle: StreamingState["cycle"] & {
+      rendererHealth: {
+        ready: true;
+        degradedReason: null;
+        updatedAt: number;
+      };
+    };
+  };
+  json: string;
+};
+
 let runtime: WorkerRuntime | null = null;
 let scheduler: StreamingDuelScheduler | null = null;
+let authoritativeCombat: AuthoritativeCombatRuntime | null = null;
 let shuttingDown = false;
 const sourceEpoch = Date.now();
 let sequence = 0;
+let streamingSequence = 0;
 const retainedFrames: RetainedFrame[] = [];
+const streamingClients = new Set<ServerResponse>();
+let streamingBroadcastTimer: ReturnType<typeof setInterval> | null = null;
 
 type AuthoritativeBettingSource = {
   cycle: NonNullable<ReturnType<StreamingDuelScheduler["getCurrentCycle"]>>;
@@ -106,6 +183,100 @@ function captureFrame(): RetainedFrame {
   retainedFrames.push(frame);
   if (retainedFrames.length > 128) retainedFrames.shift();
   return frame;
+}
+
+async function waitForShutdownAcknowledgement(
+  frame: RetainedFrame,
+): Promise<boolean> {
+  if (!shutdownAckUrl) return false;
+  const duelId = frame.payload.duelId;
+  if (!duelId) {
+    throw new Error("shutdown terminal frame is missing its duel identity");
+  }
+  const deadline = Date.now() + shutdownAckTimeoutMs;
+  let lastFailure = "keeper acknowledgement was not observed";
+  while (Date.now() < deadline) {
+    try {
+      const response = await fetch(shutdownAckUrl, {
+        cache: "no-store",
+        signal: AbortSignal.timeout(1_000),
+      });
+      if (!response.ok) {
+        lastFailure = `HTTP ${response.status}`;
+      } else {
+        const body = (await response.json()) as {
+          running?: unknown;
+          health?: {
+            markets?: Array<{
+              duelId?: unknown;
+              lifecycleStatus?: unknown;
+            }>;
+          } | null;
+        };
+        const acknowledged =
+          body.running === true &&
+          body.health?.markets?.some(
+            (market) =>
+              market.duelId === duelId &&
+              market.lifecycleStatus === "CANCELLED",
+          ) === true;
+        if (acknowledged) return true;
+        lastFailure = `duel ${duelId} is not CANCELLED`;
+      }
+    } catch (error) {
+      lastFailure = error instanceof Error ? error.message : String(error);
+    }
+    await new Promise<void>((resolve) => setTimeout(resolve, 250));
+  }
+  throw new Error(
+    `Timed out waiting for shutdown cancellation acknowledgement: ${lastFailure}`,
+  );
+}
+
+function captureStreamingStateFrame(): StreamingStateFrame {
+  if (!scheduler) throw new Error("streaming scheduler is not ready");
+  const state = scheduler.getStreamingState();
+  const emittedAt = Date.now();
+  const seq = streamingSequence + 1;
+  const payload = {
+    ...state,
+    type: "STREAMING_STATE_UPDATE" as const,
+    seq,
+    emittedAt,
+    cycle: {
+      ...state.cycle,
+      rendererHealth: {
+        ready: true as const,
+        degradedReason: null,
+        updatedAt: emittedAt,
+      },
+    },
+  };
+  streamingSequence = seq;
+  return { seq, emittedAt, payload, json: JSON.stringify(payload) };
+}
+
+function writeStreamingStateEvent(
+  response: ServerResponse,
+  frame: StreamingStateFrame,
+): boolean {
+  if (response.destroyed || response.writableEnded) return false;
+  try {
+    response.write(`id: ${frame.seq}\nevent: state\ndata: ${frame.json}\n\n`);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function broadcastStreamingState(): void {
+  if (streamingClients.size === 0) return;
+  const frame = captureStreamingStateFrame();
+  for (const response of streamingClients) {
+    if (!writeStreamingStateEvent(response, frame)) {
+      streamingClients.delete(response);
+    }
+  }
 }
 
 async function initializeDatabase(): Promise<void> {
@@ -212,6 +383,10 @@ async function initializeRuntime(): Promise<void> {
       cycle.duelKeyHex,
     );
   }, "production-owned Hyperia betting feed readiness");
+
+  if (naturalTerminalMode) {
+    authoritativeCombat = await installAuthoritativeCombatRuntime(runtime);
+  }
 }
 
 await initializeRuntime();
@@ -244,9 +419,36 @@ const server = createServer((request, response) => {
     request.method === "GET" &&
     requestUrl.pathname === "/api/streaming/state"
   ) {
-    sendJson(response, 200, {
-      cycle: scheduler?.getStreamingState().cycle ?? null,
+    try {
+      sendJson(response, 200, captureStreamingStateFrame().payload);
+    } catch {
+      sendJson(response, 503, { error: "Streaming state unavailable" });
+    }
+    return;
+  }
+
+  if (
+    request.method === "GET" &&
+    requestUrl.pathname === "/api/streaming/state/events"
+  ) {
+    response.writeHead(200, {
+      "access-control-allow-origin": "*",
+      "cache-control": "no-cache, no-transform",
+      connection: "keep-alive",
+      "content-type": "text/event-stream; charset=utf-8",
+      "x-accel-buffering": "no",
     });
+    response.socket?.setNoDelay(true);
+    response.socket?.setKeepAlive(true, 2_000);
+    response.flushHeaders();
+    response.write("retry: 1000\n\n");
+    const frame = captureStreamingStateFrame();
+    if (!writeStreamingStateEvent(response, frame)) {
+      response.end();
+      return;
+    }
+    streamingClients.add(response);
+    request.once("close", () => streamingClients.delete(response));
     return;
   }
 
@@ -304,6 +506,8 @@ const server = createServer((request, response) => {
   sendJson(response, 404, { error: "Not found" });
 });
 
+streamingBroadcastTimer = setInterval(broadcastStreamingState, 1_000);
+
 server.listen(port, "127.0.0.1", () => {
   const cycle = getAuthoritativeBettingSource()?.cycle;
   process.stdout.write(
@@ -314,20 +518,142 @@ server.listen(port, "127.0.0.1", () => {
       duelId: cycle?.duelId,
       duelKeyHex: cycle?.duelKeyHex,
       snapshotDigest: cycle?.competitiveSnapshotDigest,
+      naturalTerminalMode,
     })}\n`,
   );
+});
+
+async function runNaturalTerminalMode(): Promise<void> {
+  if (!naturalTerminalMode) return;
+  if (!runtime || !scheduler || !authoritativeCombat) {
+    throw new Error("natural terminal authority was not initialized");
+  }
+  const evidence = await driveAuthoritativeCombatToNaturalTerminal(
+    runtime,
+    scheduler,
+    authoritativeCombat,
+    { combatTimeoutMs: naturalCombatTimeoutMs },
+  );
+  const { resolvedCycle, projectileDiagnostics, diagnostics } = evidence;
+  if (
+    resolvedCycle.phase !== "RESOLUTION" ||
+    resolvedCycle.outcome !== "win" ||
+    resolvedCycle.winReason !== "kill" ||
+    !resolvedCycle.winnerId ||
+    !resolvedCycle.loserId ||
+    evidence.authoritativeCombatTicks < 5 ||
+    projectileDiagnostics.launched < 2 ||
+    projectileDiagnostics.hit < 1 ||
+    projectileDiagnostics.active !== 0 ||
+    diagnostics.length !== 2 ||
+    diagnostics.some(
+      (entry) =>
+        entry.tickCount < 5 ||
+        entry.engagementAccepts < 1 ||
+        entry.engagementErrors !== 0 ||
+        entry.movementErrors !== 0 ||
+        entry.styleChangeRejects !== 0 ||
+        entry.styleChangeErrors !== 0 ||
+        entry.prayerToggleRejects !== 0,
+    )
+  ) {
+    throw new Error(
+      `natural terminal acceptance diagnostics drifted: ${JSON.stringify(evidence)}`,
+    );
+  }
+  const terminalFrame = captureFrame();
+  process.stdout.write(
+    `${JSON.stringify({
+      event: "natural-terminal",
+      sourceEpoch,
+      duelId: terminalFrame.payload.duelId,
+      duelKeyHex: terminalFrame.payload.duelKey,
+      competitiveSnapshotDigest:
+        terminalFrame.payload.competitiveSnapshotDigest,
+      winnerId: resolvedCycle.winnerId,
+      loserId: resolvedCycle.loserId,
+      outcome: resolvedCycle.outcome,
+      winReason: resolvedCycle.winReason,
+      authoritativeCombatTicks: evidence.authoritativeCombatTicks,
+      projectileDiagnostics,
+    })}\n`,
+  );
+}
+
+void runNaturalTerminalMode().catch((error) => {
+  process.stderr.write(
+    `${JSON.stringify({
+      event: "natural-terminal-failed",
+      sourceEpoch,
+      reason: error instanceof Error ? error.message : String(error),
+    })}\n`,
+  );
+  void shutdown().finally(() => process.exit(1));
 });
 
 async function shutdown(): Promise<void> {
   if (shuttingDown) return;
   shuttingDown = true;
-  await new Promise<void>((resolve) => server.close(() => resolve()));
+  if (streamingBroadcastTimer) {
+    clearInterval(streamingBroadcastTimer);
+    streamingBroadcastTimer = null;
+  }
+  let terminalFrame: RetainedFrame | null = null;
+  let downstreamAcknowledged = false;
   if (scheduler) {
     scheduler.destroy("scheduler_shutdown");
     await scheduler.waitForShutdownCleanup().catch(() => undefined);
+    const terminal = getAuthoritativeBettingSource()?.terminal ?? null;
+    if (terminal?.outcome === "cancelled") {
+      terminalFrame = captureFrame();
+      downstreamAcknowledged =
+        await waitForShutdownAcknowledgement(terminalFrame);
+    }
   }
+  for (const response of streamingClients) {
+    try {
+      response.end();
+    } catch {
+      // The source may already have lost this client during shutdown.
+    }
+  }
+  streamingClients.clear();
+  await new Promise<void>((resolve) => server.close(() => resolve()));
+  authoritativeCombat?.destroy();
+  authoritativeCombat = null;
   if (runtime) await stopWorkerRuntime(runtime).catch(() => undefined);
+  const terminalPayload = terminalFrame?.payload ?? null;
+  process.stdout.write(
+    `${JSON.stringify({
+      event: "shutdown-complete",
+      sourceEpoch,
+      terminalFrameSeq: terminalFrame?.seq ?? null,
+      duelId: terminalPayload?.duelId ?? null,
+      duelKeyHex: terminalPayload?.duelKey ?? null,
+      competitiveSnapshotDigest:
+        terminalPayload?.competitiveSnapshotDigest ?? null,
+      outcome: terminalPayload?.outcome ?? null,
+      cancellationReason: terminalPayload?.cancellationReason ?? null,
+      downstreamAcknowledged,
+    })}\n`,
+  );
 }
 
-process.once("SIGINT", () => void shutdown().then(() => process.exit(0)));
-process.once("SIGTERM", () => void shutdown().then(() => process.exit(0)));
+function requestShutdown(signal: "SIGINT" | "SIGTERM"): void {
+  void shutdown().then(
+    () => process.exit(0),
+    (error) => {
+      process.stderr.write(
+        `${JSON.stringify({
+          event: "shutdown-failed",
+          signal,
+          reason: error instanceof Error ? error.message : String(error),
+        })}\n`,
+      );
+      process.exit(1);
+    },
+  );
+}
+
+process.once("SIGINT", () => requestShutdown("SIGINT"));
+process.once("SIGTERM", () => requestShutdown("SIGTERM"));

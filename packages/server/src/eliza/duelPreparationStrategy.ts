@@ -1,5 +1,9 @@
 import { ModelType, type AgentRuntime } from "@elizaos/core";
 import {
+  DUEL_PREPARATION_ROLE_POLICY_VERSION,
+  normalizeExternalDuelPreparationStrategyDecision,
+} from "@hyperforge/shared";
+import {
   formatUntrustedPromptData,
   normalizeUntrustedPromptText,
   parseOneJsonObject,
@@ -11,9 +15,9 @@ import {
 } from "../systems/StreamingDuelScheduler/types.js";
 import {
   buildDeterministicCompetitiveTacticalStrategy,
-  normalizeCompetitiveTacticalStrategy,
   type CompetitiveTacticalStrategy,
 } from "../systems/StreamingDuelScheduler/competitive-tactical-strategy.js";
+import type { DuelPreparationDecisionOutcome } from "../systems/StreamingDuelScheduler/preparation-decision-receipt.js";
 
 export type DuelPreparationRole = "melee" | "ranged" | "mage";
 
@@ -25,14 +29,14 @@ export type PublicAgentVision = {
 export type DuelPreparationRoleDecision = {
   primaryStyle: DuelPreparationRole;
   source: "model" | "deterministic";
+  decisionOutcome: DuelPreparationDecisionOutcome;
   reason: string;
   tacticalStrategy: CompetitiveTacticalStrategy;
   policyVersion: typeof DUEL_PREPARATION_ROLE_POLICY_VERSION;
   latencyMs: number;
 };
 
-export const DUEL_PREPARATION_ROLE_POLICY_VERSION =
-  "duel-preparation-role-v3" as const;
+export { DUEL_PREPARATION_ROLE_POLICY_VERSION };
 
 const DEFAULT_MODEL_TIMEOUT_MS = 3_000;
 const MIN_MODEL_BUDGET_MS = 250;
@@ -187,35 +191,16 @@ export function parseDuelPreparationRoleResponse(
 } | null {
   const parsed = parseOneJsonObject(raw, 2_048);
   if (!parsed) return null;
-  const keys = Object.keys(parsed).sort();
-  if (
-    keys.length !== 3 ||
-    keys[0] !== "primaryStyle" ||
-    keys[1] !== "reason" ||
-    keys[2] !== "tacticalStrategy"
-  ) {
-    return null;
-  }
-
-  const role = boundedText(parsed.primaryStyle, 16).toLowerCase();
-  if (
-    !ROLE_SET.has(role as DuelPreparationRole) ||
-    !availableRoles.includes(role as DuelPreparationRole)
-  ) {
-    return null;
-  }
-  const tacticalStrategy = normalizeCompetitiveTacticalStrategy(
-    parsed.tacticalStrategy,
+  const decision = normalizeExternalDuelPreparationStrategyDecision(
+    parsed,
     availableRoles,
     availablePrayerIds,
   );
-  const reason = boundedText(parsed.reason, 240);
-  if (!tacticalStrategy || !reason) return null;
-  return {
-    primaryStyle: role as DuelPreparationRole,
-    reason,
-    tacticalStrategy,
-  };
+  return decision as {
+    primaryStyle: DuelPreparationRole;
+    reason: string;
+    tacticalStrategy: CompetitiveTacticalStrategy;
+  } | null;
 }
 
 export async function chooseDuelPreparationRole(input: {
@@ -235,9 +220,13 @@ export async function chooseDuelPreparationRole(input: {
 }): Promise<DuelPreparationRoleDecision> {
   const now = input.now ?? Date.now;
   const startedAt = now();
-  const fallback = (reason: string): DuelPreparationRoleDecision => ({
+  const fallback = (
+    reason: string,
+    decisionOutcome: Exclude<DuelPreparationDecisionOutcome, "model_selected">,
+  ): DuelPreparationRoleDecision => ({
     primaryStyle: input.deterministicRole,
     source: "deterministic",
+    decisionOutcome,
     reason,
     tacticalStrategy: buildDeterministicCompetitiveTacticalStrategy(
       input.deterministicRole,
@@ -247,14 +236,23 @@ export async function chooseDuelPreparationRole(input: {
     latencyMs: Math.max(0, now() - startedAt),
   });
 
-  if (
-    input.availableRoles.length <= 1 ||
-    !input.availableRoles.includes(input.deterministicRole)
-  ) {
-    return fallback("Only one complete legal opening style is available.");
+  if (input.availableRoles.length <= 1) {
+    return fallback(
+      "Only one complete legal opening style is available.",
+      "deterministic_single_legal_role",
+    );
+  }
+  if (!input.availableRoles.includes(input.deterministicRole)) {
+    return fallback(
+      "The deterministic role was not present in the legal role set.",
+      "deterministic_invalid_role_set",
+    );
   }
   if (!input.runtime) {
-    return fallback("No healthy ElizaOS model runtime was available.");
+    return fallback(
+      "No healthy ElizaOS model runtime was available.",
+      "deterministic_runtime_unavailable",
+    );
   }
 
   const requestedTimeout = Math.max(
@@ -265,7 +263,10 @@ export async function chooseDuelPreparationRole(input: {
     input.preparationExpiresAt - now() - DEADLINE_RESERVE_MS;
   const timeoutMs = Math.min(requestedTimeout, remainingBudget);
   if (timeoutMs < MIN_MODEL_BUDGET_MS) {
-    return fallback("The preparation deadline had insufficient model budget.");
+    return fallback(
+      "The preparation deadline had insufficient model budget.",
+      "deterministic_deadline_exhausted",
+    );
   }
 
   const opponentHistory = normalizeDuelPreparationOpponentHistory(
@@ -310,7 +311,10 @@ export async function chooseDuelPreparationRole(input: {
       }),
     ]);
     if (typeof response !== "string") {
-      return fallback("The model returned no usable role decision.");
+      return fallback(
+        "The model returned no usable role decision.",
+        "deterministic_model_empty",
+      );
     }
     const parsed = parseDuelPreparationRoleResponse(
       response,
@@ -318,16 +322,23 @@ export async function chooseDuelPreparationRole(input: {
       input.availablePrayerIds,
     );
     if (!parsed) {
-      return fallback("The model role decision failed strict validation.");
+      return fallback(
+        "The model role decision failed strict validation.",
+        "deterministic_model_rejected",
+      );
     }
     return {
       ...parsed,
       source: "model",
+      decisionOutcome: "model_selected",
       policyVersion: DUEL_PREPARATION_ROLE_POLICY_VERSION,
       latencyMs: Math.max(0, now() - startedAt),
     };
   } catch {
-    return fallback("The model role decision timed out or failed.");
+    return fallback(
+      "The model role decision timed out or failed.",
+      "deterministic_model_failed",
+    );
   } finally {
     if (timer) clearTimeout(timer);
   }

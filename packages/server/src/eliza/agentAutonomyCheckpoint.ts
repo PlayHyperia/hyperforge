@@ -53,6 +53,7 @@ export const AGENT_AUTONOMY_ACTION_TYPES = [
   "use",
   "bury",
   "equip",
+  "setAutocast",
   "bankDepositAll",
   "bankWithdraw",
   "homeTeleport",
@@ -189,10 +190,14 @@ function normalizeGoal(value: unknown): AgentGoal | null {
     ),
   };
   if (value.bankPurpose !== undefined) {
-    if (value.type !== "banking" || value.bankPurpose !== "survival_food") {
+    if (
+      value.type !== "banking" ||
+      (value.bankPurpose !== "survival_food" &&
+        value.bankPurpose !== "combat_supply")
+    ) {
       throw new Error("agent_autonomy_checkpoint_goal_invalid");
     }
-    normalized.bankPurpose = "survival_food";
+    normalized.bankPurpose = value.bankPurpose;
   }
   for (const field of GOAL_OPTIONAL_STRING_FIELDS) {
     if (value[field] !== undefined) {

@@ -5,6 +5,7 @@ function createPool(options?: {
   beginFails?: boolean;
   rollbackFails?: boolean;
 }) {
+  const errorListeners = new Set<(error: Error) => void>();
   const query = vi.fn(async (statement: string) => {
     if (statement.startsWith("BEGIN") && options?.beginFails) {
       throw new Error("connection_lost_during_begin");
@@ -15,8 +16,27 @@ function createPool(options?: {
     return {};
   });
   const release = vi.fn();
-  const connect = vi.fn(async () => ({ query, release }));
-  return { pool: { connect }, connect, query, release };
+  const on = vi.fn((event: string, listener: (error: Error) => void) => {
+    if (event === "error") errorListeners.add(listener);
+  });
+  const removeListener = vi.fn(
+    (event: string, listener: (error: Error) => void) => {
+      if (event === "error") errorListeners.delete(listener);
+    },
+  );
+  const connect = vi.fn(async () => ({ query, release, on, removeListener }));
+  const emitClientError = (error: Error) => {
+    for (const listener of errorListeners) listener(error);
+  };
+  return {
+    pool: { connect },
+    connect,
+    query,
+    release,
+    on,
+    removeListener,
+    emitClientError,
+  };
 }
 
 describe("runInPostgresTransaction", () => {
@@ -82,6 +102,27 @@ describe("runInPostgresTransaction", () => {
 
     expect(fixture.query).toHaveBeenCalledOnce();
     expect(fixture.release).toHaveBeenCalledWith(true);
+  });
+
+  it("contains checked-out client errors and discards the connection", async () => {
+    const fixture = createPool();
+    const operationError = new Error("connection_lost_mid_transaction");
+
+    await expect(
+      runInPostgresTransaction(fixture.pool, async () => {
+        fixture.emitClientError(
+          new Error("Connection terminated unexpectedly"),
+        );
+        throw operationError;
+      }),
+    ).rejects.toBe(operationError);
+
+    expect(fixture.on).toHaveBeenCalledWith("error", expect.any(Function));
+    expect(fixture.release).toHaveBeenCalledWith(true);
+    expect(fixture.removeListener).toHaveBeenCalledWith(
+      "error",
+      expect.any(Function),
+    );
   });
 
   it("retries a completely rolled-back serializable conflict on a fresh checkout", async () => {

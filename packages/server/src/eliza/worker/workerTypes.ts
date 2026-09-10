@@ -50,6 +50,7 @@ export interface WorkerItemData {
     barItemId: string;
     barsRequired: number;
     levelRequired: number;
+    outputQuantity: number;
   };
 }
 
@@ -108,6 +109,32 @@ export interface WorkerProcessingRecipeSnapshot {
     essenceItemIds: string[];
     levelRequired: number;
   }>;
+  /** Public authored combat combinations used for ordinary-world readiness. */
+  combatReadiness?: {
+    ammunitionTarget: number;
+    magicCastTarget: number;
+    melee: Array<{
+      weaponId: string;
+      weaponScore: number;
+      requiredAttackLevel: number;
+    }>;
+    ranged: Array<{
+      weaponId: string;
+      ammunitionId: string;
+      weaponScore: number;
+      ammunitionScore: number;
+      requiredRangedLevel: number;
+    }>;
+    magic: Array<{
+      weaponId: string;
+      spellId: string;
+      weaponScore: number;
+      spellOrder: number;
+      requiredMagicLevel: number;
+      providedRuneIds: string[];
+      runes: Array<{ itemId: string; quantityPerCast: number }>;
+    }>;
+  };
 }
 
 /** Exact server-loaded workstation data used by the pure behavior worker. */
@@ -118,6 +145,13 @@ export interface WorkerStationData {
   stationType: string;
   /** Authoritative interaction range read from the live entity configuration. */
   interactionRange: number;
+  /**
+   * Exact centered runtime footprint used by server interaction authority.
+   * Optional only for rolling compatibility with an older paired worker;
+   * the production bridge always publishes both dimensions.
+   */
+  footprintWidth?: number;
+  footprintDepth?: number;
 }
 
 // ─── Shared world data (sent once per tick batch, not per agent) ─────────────
@@ -163,6 +197,7 @@ export interface SharedTickData {
 /** Snapshot of agent state sent to worker for decision-making */
 export interface AgentTickInput {
   characterId: string;
+  combatSpecialization: "melee" | "ranged" | "mage";
   /** Monotonic fence captured with this decision snapshot. */
   behaviorEpoch: number;
   playerId: string | null;
@@ -188,6 +223,11 @@ export interface AgentTickInput {
    * quest and found no stageable training path. No bank item or count crosses.
    */
   questEntryAcquisitionQuestId: string | null;
+  /**
+   * Main-thread authorization after an exact general processing-bank miss.
+   * The worker derives the public recipe and source path independently.
+   */
+  ordinaryProcessingAcquisitionAuthorized?: boolean;
   /** Exact main-thread authorization after a private survival-food bank miss. */
   survivalFoodAcquisitionAuthorized: boolean;
   /** Active exact-recipe suppressions; contains no bank, coin, or custody state. */

@@ -269,7 +269,7 @@ describe("RunecraftingSystem", () => {
     });
     expect(findEmitted(EventType.INVENTORY_ITEM_ADDED)).toHaveLength(0);
     expect(findEmitted(EventType.INVENTORY_ITEM_REMOVED)).toHaveLength(0);
-    expect(findEmitted(EventType.SKILLS_XP_GAINED)).toHaveLength(1);
+    expect(findEmitted(EventType.SKILLS_PROGRESS_COMMITTED)).toHaveLength(1);
     expect(findEmitted(EventType.RUNECRAFTING_COMPLETE)[0].data).toMatchObject({
       playerId: "player1",
       runeType: "air",

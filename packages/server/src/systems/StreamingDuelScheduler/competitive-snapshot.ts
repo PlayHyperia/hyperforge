@@ -9,10 +9,16 @@ import {
   normalizeCompetitiveTacticalStrategy,
   type CompetitiveTacticalStrategy,
 } from "./competitive-tactical-strategy.js";
+import {
+  STREAMING_DUEL_TIMEOUT_POLICY,
+  STREAMING_DUEL_TIMING_CONTRACT_VERSION,
+  type StreamingDuelTimeoutPolicy,
+  type StreamingDuelTimingContractVersion,
+} from "./competitive-timing-policy.js";
 
-export const COMPETITIVE_SNAPSHOT_VERSION = 3 as const;
+export const COMPETITIVE_SNAPSHOT_VERSION = 4 as const;
 export type CompetitiveSnapshotVersion =
-  1 | 2 | typeof COMPETITIVE_SNAPSHOT_VERSION;
+  1 | 2 | 3 | typeof COMPETITIVE_SNAPSHOT_VERSION;
 export const DUEL_COMBAT_POLICY_VERSION = "duel-combat-policy-v2" as const;
 export type CompetitiveCombatPolicyVersion =
   "duel-combat-policy-v1" | typeof DUEL_COMBAT_POLICY_VERSION;
@@ -78,6 +84,20 @@ export type CompetitiveSnapshotContestant = {
   preparation: CompetitivePreparationEvidence;
 };
 
+export type CompetitiveSnapshotTimingInput = {
+  contractVersion: StreamingDuelTimingContractVersion;
+  timeoutPolicy: StreamingDuelTimeoutPolicy;
+  countdownDurationMs: number;
+  fightingDurationMs: number;
+  endWarningDurationMs: number;
+  maxFightDurationMs: number;
+};
+
+export type CompetitiveSnapshotTiming = CompetitiveSnapshotTimingInput & {
+  fightStartTime: number;
+  fightDeadline: number;
+};
+
 export type CompetitiveSnapshot = {
   snapshotVersion: CompetitiveSnapshotVersion;
   persisted: boolean;
@@ -90,6 +110,8 @@ export type CompetitiveSnapshot = {
   betOpenTime: number;
   betCloseTime: number;
   combatPolicyVersion: CompetitiveCombatPolicyVersion;
+  /** Present on schema-v4 snapshots; legacy snapshots predate clock binding. */
+  timing?: CompetitiveSnapshotTiming;
   contestants: [CompetitiveSnapshotContestant, CompetitiveSnapshotContestant];
 };
 
@@ -101,6 +123,7 @@ export type CompetitiveSnapshotDraft = Omit<
   | "betOpenTime"
   | "betCloseTime"
   | "combatPolicyVersion"
+  | "timing"
 >;
 
 function compareText(left: string, right: string): number {
@@ -194,7 +217,57 @@ function isNullableText(value: unknown, maxLength = 256): boolean {
 function isCompetitiveSnapshotVersion(
   value: unknown,
 ): value is CompetitiveSnapshotVersion {
-  return value === 1 || value === 2 || value === COMPETITIVE_SNAPSHOT_VERSION;
+  return (
+    value === 1 ||
+    value === 2 ||
+    value === 3 ||
+    value === COMPETITIVE_SNAPSHOT_VERSION
+  );
+}
+
+function assertCompetitiveSnapshotTiming(
+  value: unknown,
+  betCloseTime: number,
+): asserts value is CompetitiveSnapshotTiming {
+  if (
+    !isRecord(value) ||
+    !hasExactKeys(value, [
+      "contractVersion",
+      "timeoutPolicy",
+      "countdownDurationMs",
+      "fightingDurationMs",
+      "endWarningDurationMs",
+      "maxFightDurationMs",
+      "fightStartTime",
+      "fightDeadline",
+    ])
+  ) {
+    throw new Error("invalid competitive snapshot timing shape");
+  }
+
+  const positiveDurations = [
+    value.countdownDurationMs,
+    value.fightingDurationMs,
+    value.endWarningDurationMs,
+    value.maxFightDurationMs,
+  ];
+  if (
+    value.contractVersion !== STREAMING_DUEL_TIMING_CONTRACT_VERSION ||
+    value.timeoutPolicy !== STREAMING_DUEL_TIMEOUT_POLICY ||
+    !positiveDurations.every(
+      (duration) => Number.isSafeInteger(duration) && Number(duration) > 0,
+    ) ||
+    Number(value.maxFightDurationMs) !==
+      Number(value.fightingDurationMs) + Number(value.endWarningDurationMs) ||
+    !Number.isSafeInteger(value.fightStartTime) ||
+    Number(value.fightStartTime) !==
+      betCloseTime + Number(value.countdownDurationMs) ||
+    !Number.isSafeInteger(value.fightDeadline) ||
+    Number(value.fightDeadline) !==
+      Number(value.fightStartTime) + Number(value.maxFightDurationMs)
+  ) {
+    throw new Error("invalid competitive snapshot timing contract");
+  }
 }
 
 function isFrozenArmorIds(value: unknown): boolean {
@@ -405,9 +478,7 @@ function assertCompetitiveContestant(
       "arrowsId",
       "shieldId",
       "spellId",
-      ...(snapshotVersion === COMPETITIVE_SNAPSHOT_VERSION
-        ? (["armorIds"] as const)
-        : []),
+      ...(snapshotVersion >= 3 ? (["armorIds"] as const) : []),
     ];
     if (
       !isRecord(loadout) ||
@@ -417,8 +488,7 @@ function assertCompetitiveContestant(
       !isNullableText(loadout.arrowsId, 128) ||
       !isNullableText(loadout.shieldId, 128) ||
       !isNullableText(loadout.spellId, 128) ||
-      (snapshotVersion === COMPETITIVE_SNAPSHOT_VERSION &&
-        !isFrozenArmorIds(loadout.armorIds))
+      (snapshotVersion >= 3 && !isFrozenArmorIds(loadout.armorIds))
     ) {
       throw new Error(`invalid competitive snapshot ${side} combat loadouts`);
     }
@@ -478,11 +548,20 @@ function assertCompetitiveContestant(
 export function assertValidCompetitiveSnapshot(
   value: unknown,
 ): asserts value is CompetitiveSnapshot {
-  if (!isRecord(value) || !hasExactKeys(value, SNAPSHOT_KEYS)) {
+  if (
+    !isRecord(value) ||
+    !isCompetitiveSnapshotVersion(value.snapshotVersion)
+  ) {
+    throw new Error("invalid competitive snapshot shape");
+  }
+  const snapshotKeys = [
+    ...SNAPSHOT_KEYS,
+    ...(value.snapshotVersion >= 4 ? (["timing"] as const) : []),
+  ];
+  if (!hasExactKeys(value, snapshotKeys)) {
     throw new Error("invalid competitive snapshot shape");
   }
   if (
-    !isCompetitiveSnapshotVersion(value.snapshotVersion) ||
     typeof value.persisted !== "boolean" ||
     typeof value.diagnostic !== "boolean" ||
     (value.persisted
@@ -499,13 +578,16 @@ export function assertValidCompetitiveSnapshot(
     !Number.isSafeInteger(value.betCloseTime) ||
     Number(value.betCloseTime) <= Number(value.betOpenTime) ||
     value.combatPolicyVersion !==
-      (value.snapshotVersion === COMPETITIVE_SNAPSHOT_VERSION
+      (value.snapshotVersion >= 3
         ? DUEL_COMBAT_POLICY_VERSION
         : "duel-combat-policy-v1") ||
     !Array.isArray(value.contestants) ||
     value.contestants.length !== 2
   ) {
     throw new Error("invalid competitive snapshot identity or timing");
+  }
+  if (value.snapshotVersion >= 4) {
+    assertCompetitiveSnapshotTiming(value.timing, Number(value.betCloseTime));
   }
   assertCompetitiveContestant(
     value.contestants[0],
@@ -641,6 +723,65 @@ export function canonicalCompetitiveSnapshotJson(value: unknown): string {
   return JSON.stringify(normalize(value));
 }
 
+/**
+ * Return bounded, value-free JSON paths that differ between two competitive
+ * snapshots. Recovery logs need enough structure to diagnose a startup race,
+ * but must never duplicate contestant custody or strategy values into logs.
+ */
+export function competitiveSnapshotMismatchPaths(
+  expected: CompetitiveSnapshot,
+  actual: CompetitiveSnapshot,
+  maximumPaths = 64,
+): string[] {
+  const limit =
+    Number.isSafeInteger(maximumPaths) && maximumPaths > 0
+      ? Math.min(maximumPaths, 128)
+      : 64;
+  const paths: string[] = [];
+  const append = (path: string): void => {
+    if (paths.length < limit) paths.push(path);
+  };
+  const walk = (left: unknown, right: unknown, path: string): void => {
+    if (paths.length >= limit || Object.is(left, right)) return;
+    if (Array.isArray(left) || Array.isArray(right)) {
+      if (!Array.isArray(left) || !Array.isArray(right)) {
+        append(path);
+        return;
+      }
+      if (left.length !== right.length) append(`${path}.length`);
+      const sharedLength = Math.min(left.length, right.length);
+      for (let index = 0; index < sharedLength; index++) {
+        walk(left[index], right[index], `${path}[${index}]`);
+      }
+      return;
+    }
+    if (isRecord(left) || isRecord(right)) {
+      if (!isRecord(left) || !isRecord(right)) {
+        append(path);
+        return;
+      }
+      const keys = [
+        ...new Set([...Object.keys(left), ...Object.keys(right)]),
+      ].sort(compareText);
+      for (const key of keys) {
+        if (
+          !Object.prototype.hasOwnProperty.call(left, key) ||
+          !Object.prototype.hasOwnProperty.call(right, key)
+        ) {
+          append(`${path}.${key}`);
+          continue;
+        }
+        walk(left[key], right[key], `${path}.${key}`);
+      }
+      return;
+    }
+    append(path);
+  };
+
+  walk(expected, actual, "$");
+  return paths;
+}
+
 export function digestCompetitiveSnapshot(
   snapshot: CompetitiveSnapshot,
 ): string {
@@ -654,6 +795,7 @@ export function finalizeCompetitiveSnapshot(input: {
   persisted: boolean;
   frozenAt: number;
   betWindowDurationMs: number;
+  timing: CompetitiveSnapshotTimingInput;
 }): { snapshot: CompetitiveSnapshot; digest: string } {
   if (
     !Number.isSafeInteger(input.frozenAt) ||
@@ -665,6 +807,14 @@ export function finalizeCompetitiveSnapshot(input: {
   }
   const betCloseTime = input.frozenAt + input.betWindowDurationMs;
   if (!Number.isSafeInteger(betCloseTime)) {
+    throw new Error("invalid competitive snapshot timing");
+  }
+  const fightStartTime = betCloseTime + input.timing.countdownDurationMs;
+  const fightDeadline = fightStartTime + input.timing.maxFightDurationMs;
+  if (
+    !Number.isSafeInteger(fightStartTime) ||
+    !Number.isSafeInteger(fightDeadline)
+  ) {
     throw new Error("invalid competitive snapshot timing");
   }
   if (
@@ -689,6 +839,11 @@ export function finalizeCompetitiveSnapshot(input: {
     betOpenTime: input.frozenAt,
     betCloseTime,
     combatPolicyVersion: DUEL_COMBAT_POLICY_VERSION,
+    timing: {
+      ...input.timing,
+      fightStartTime,
+      fightDeadline,
+    },
     contestants: [
       normalizeContestant(input.draft.contestants[0]),
       normalizeContestant(input.draft.contestants[1]),

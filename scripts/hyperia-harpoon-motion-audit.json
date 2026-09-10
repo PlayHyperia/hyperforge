@@ -1,0 +1,87 @@
+{
+  "schemaVersion": 1,
+  "title": "Harpoon water-strike motion review",
+  "framing": "avatar-and-equipment",
+  "environment": {
+    "waterSurfaceBelowFeet": 0.28
+  },
+  "motions": [
+    {
+      "id": "harpoon-cycle-02",
+      "name": "Harpoon water strike · held",
+      "asset": "motions/harpoon-water-strike-candidates/kaykit-harpoon-water-strike.glb",
+      "sampleRatio": 0.02,
+      "waterContact": "clear"
+    },
+    {
+      "id": "harpoon-cycle-10",
+      "name": "Harpoon water strike · brace",
+      "asset": "motions/harpoon-water-strike-candidates/kaykit-harpoon-water-strike.glb",
+      "sampleRatio": 0.1,
+      "waterContact": "clear"
+    },
+    {
+      "id": "harpoon-cycle-20",
+      "name": "Harpoon water strike · aim",
+      "asset": "motions/harpoon-water-strike-candidates/kaykit-harpoon-water-strike.glb",
+      "sampleRatio": 0.2,
+      "waterContact": "clear"
+    },
+    {
+      "id": "harpoon-cycle-30",
+      "name": "Harpoon water strike · drive",
+      "asset": "motions/harpoon-water-strike-candidates/kaykit-harpoon-water-strike.glb",
+      "sampleRatio": 0.3,
+      "waterContact": "clear"
+    },
+    {
+      "id": "harpoon-cycle-40",
+      "name": "Harpoon water strike · extension",
+      "asset": "motions/harpoon-water-strike-candidates/kaykit-harpoon-water-strike.glb",
+      "sampleRatio": 0.4,
+      "waterContact": "clear"
+    },
+    {
+      "id": "harpoon-cycle-50",
+      "name": "Harpoon water strike · impact",
+      "asset": "motions/harpoon-water-strike-candidates/kaykit-harpoon-water-strike.glb",
+      "sampleRatio": 0.5,
+      "waterContact": "contact"
+    },
+    {
+      "id": "harpoon-cycle-60",
+      "name": "Harpoon water strike · follow-through",
+      "asset": "motions/harpoon-water-strike-candidates/kaykit-harpoon-water-strike.glb",
+      "sampleRatio": 0.6,
+      "waterContact": "contact"
+    },
+    {
+      "id": "harpoon-cycle-70",
+      "name": "Harpoon water strike · retrieve",
+      "asset": "motions/harpoon-water-strike-candidates/kaykit-harpoon-water-strike.glb",
+      "sampleRatio": 0.7,
+      "waterContact": "contact"
+    },
+    {
+      "id": "harpoon-cycle-80",
+      "name": "Harpoon water strike · recovery",
+      "asset": "motions/harpoon-water-strike-candidates/kaykit-harpoon-water-strike.glb",
+      "sampleRatio": 0.8,
+      "waterContact": "contact"
+    },
+    {
+      "id": "harpoon-cycle-90",
+      "name": "Harpoon water strike · withdrawal",
+      "asset": "motions/harpoon-water-strike-candidates/kaykit-harpoon-water-strike.glb",
+      "sampleRatio": 0.9,
+      "waterContact": "contact"
+    },
+    {
+      "id": "harpoon-cycle-98",
+      "name": "Harpoon water strike · ready",
+      "asset": "motions/harpoon-water-strike-candidates/kaykit-harpoon-water-strike.glb",
+      "sampleRatio": 0.98,
+      "waterContact": "clear"
+    }
+  ]
+}

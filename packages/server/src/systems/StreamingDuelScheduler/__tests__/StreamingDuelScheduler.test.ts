@@ -4,25 +4,155 @@ import {
   EventType,
   ITEMS,
   calculateCombatLevel,
+  canPlayerPerformPreparationAction,
+  getStreamingDuelDamageAuthority,
   isPositionInsideCombatArena,
 } from "@hyperforge/shared";
 import {
-  StreamingDuelScheduler,
+  StreamingDuelScheduler as ProductionStreamingDuelScheduler,
+  assertLocalDiagnosticContestantAuthority,
+  resolveStreamingDuelDiagnosticAvatarUrl,
+  resolveStreamingPublicPreparationMinimumDuration,
   resolveStreamingPreparationDuration,
+  selectDiagnosticHarpoonPreparationPositions,
 } from "../index";
 import {
   digestCompetitiveSnapshot,
   finalizeCompetitiveSnapshot,
   type CompetitivePreparationEvidence,
 } from "../competitive-snapshot";
-import type { PersistedCompetitiveSnapshot } from "../preparation";
-import { STREAMING_TIMING } from "../types";
+import {
+  DUEL_COMPETITIVE_RECOVERY_CUSTODY_HOLD_EVENT,
+  type PersistedCompetitiveSnapshot,
+} from "../preparation";
+import { STREAMING_TIMING, type StreamingStateUpdate } from "../types";
 import { buildDeterministicCompetitiveTacticalStrategy } from "../competitive-tactical-strategy";
+import { buildCompetitiveTerminalProof } from "../competitive-terminal-proof";
+import { Logger } from "../../ServerNetwork/services";
 /** Legacy constant kept for test assertions. */
 const DUEL_FOOD_ITEM = "shark";
-const RECOVERY_ALPHA_WEAPON = "recovery_alpha_sword";
-const RECOVERY_BETA_WEAPON = "recovery_beta_sword";
+const RECOVERY_ALPHA_WEAPON = "bronze_longsword";
+const RECOVERY_BETA_WEAPON = "bronze_shortsword";
+const recoveryItemPriors = new Map<string, unknown>();
 import { isDuelFoodItemId } from "../../duelFood";
+
+const localNoMoneyDiagnosticEnv = (): NodeJS.ProcessEnv => ({
+  NODE_ENV: "production",
+  DUEL_LOCAL_SMOKE_MODE: "true",
+  LOAD_TEST_MODE: "true",
+  DUEL_BETTING_ENABLED: "false",
+  DUEL_WITH_HYPERBET: "false",
+  STREAMING_DUEL_SCHEDULER_ROLE: "authority",
+  PUBLIC_API_URL: "http://127.0.0.1:5555",
+  PUBLIC_WS_URL: "ws://127.0.0.1:5555/ws",
+});
+
+describe("diagnostic duel avatar boundary", () => {
+  it.each([
+    "authored-body15-test",
+    "authored-body38-test",
+    "authored-body38-light01-test",
+  ])("permits %s only under the explicit diagnostic boundary", (id) => {
+    const candidate = {
+      STREAMING_DUEL_DIAGNOSTIC_AVATAR_ID: id,
+    };
+    expect(
+      resolveStreamingDuelDiagnosticAvatarUrl({
+        ...localNoMoneyDiagnosticEnv(),
+        ...candidate,
+      }),
+    ).toBe(`asset://avatars/asset-studio-test/${id}.vrm`);
+    expect(() => resolveStreamingDuelDiagnosticAvatarUrl(candidate)).toThrow(
+      /loopback no-money/u,
+    );
+    expect(() =>
+      resolveStreamingDuelDiagnosticAvatarUrl({
+        ...localNoMoneyDiagnosticEnv(),
+        ...candidate,
+        DUEL_BETTING_ENABLED: "true",
+      }),
+    ).toThrow(/loopback no-money/u);
+    expect(() =>
+      resolveStreamingDuelDiagnosticAvatarUrl({
+        ...localNoMoneyDiagnosticEnv(),
+        ...candidate,
+        PUBLIC_API_URL: "https://example.invalid",
+      }),
+    ).toThrow(/loopback no-money/u);
+  });
+
+  it("keeps the canonical rig unless an override is explicitly requested", () => {
+    expect(resolveStreamingDuelDiagnosticAvatarUrl({})).toContain(
+      "duel-steve.vrm",
+    );
+  });
+
+  it("allows the vetted KayKit candidate only inside the no-money local boundary", () => {
+    expect(
+      resolveStreamingDuelDiagnosticAvatarUrl({
+        ...localNoMoneyDiagnosticEnv(),
+        STREAMING_DUEL_DIAGNOSTIC_AVATAR_ID: "kaykit-knight",
+      }),
+    ).toContain("duel-kaykit-knight.vrm");
+  });
+
+  it("rejects unknown avatars and any override outside the diagnostic boundary", () => {
+    expect(() =>
+      resolveStreamingDuelDiagnosticAvatarUrl({
+        STREAMING_DUEL_DIAGNOSTIC_AVATAR_ID: "kaykit-knight",
+      }),
+    ).toThrow(/loopback no-money diagnostic boundary/u);
+    expect(() =>
+      resolveStreamingDuelDiagnosticAvatarUrl({
+        ...localNoMoneyDiagnosticEnv(),
+        STREAMING_DUEL_DIAGNOSTIC_AVATAR_ID: "not-registered",
+      }),
+    ).toThrow(/Unknown diagnostic duel avatar/u);
+  });
+});
+
+describe("diagnostic contestant authority boundary", () => {
+  it("accepts only the exact loopback no-money runtime", () => {
+    expect(() =>
+      assertLocalDiagnosticContestantAuthority(localNoMoneyDiagnosticEnv()),
+    ).not.toThrow();
+    expect(() =>
+      assertLocalDiagnosticContestantAuthority({
+        ...localNoMoneyDiagnosticEnv(),
+        DUEL_BETTING_ENABLED: "true",
+      }),
+    ).toThrow(/explicit loopback no-money boundary/u);
+  });
+});
+
+describe("diagnostic harpoon shoreline selection", () => {
+  it("selects two separated walkable banks inside the certified contact envelope", () => {
+    const positions = selectDiagnosticHarpoonPreparationPositions([0, 10, 0], {
+      getHeightAt: () => 10.2,
+      isPositionWalkableFast: (x, z) => Math.hypot(x, z) >= 2,
+    });
+
+    for (const [x, y, z] of positions) {
+      expect(Math.hypot(x, z)).toBeLessThan(4);
+      expect(y - 10).toBeLessThanOrEqual(0.3);
+    }
+    expect(
+      Math.hypot(
+        positions[1][0] - positions[0][0],
+        positions[1][2] - positions[0][2],
+      ),
+    ).toBeGreaterThanOrEqual(2);
+  });
+
+  it("fails closed when the shoreline exceeds the certified strike reach", () => {
+    expect(() =>
+      selectDiagnosticHarpoonPreparationPositions([0, 10, 0], {
+        getHeightAt: () => 10.31,
+        isPositionWalkableFast: () => true,
+      }),
+    ).toThrow(/No two certified dry shoreline positions/u);
+  });
+});
 
 type SkillMap = Record<string, { level: number; xp: number }>;
 
@@ -36,6 +166,7 @@ type MockEntity = {
   id: string;
   type: "player";
   isAgent: boolean;
+  isEmbeddedAgent?: boolean;
   data: {
     name: string;
     position: [number, number, number];
@@ -51,11 +182,15 @@ type MockEntity = {
     attackTarget?: string | null;
     inStreamingDuel?: boolean;
     streamingDuelOpponentId?: string | null;
+    streamingDuelCombatRole?: string | null;
+    streamingDuelWeaponId?: string | null;
     preventRespawn?: boolean;
     arenaBounds?: unknown;
     alive?: boolean;
     emote?: string;
     selectedSpell?: string | null;
+    isAgent?: boolean;
+    isEmbeddedAgent?: boolean;
   };
 };
 
@@ -79,6 +214,10 @@ type MockWorldContext = {
   combatCalls: Array<{ attackerId: string; targetId: string }>;
   forceEndCombatCalls: string[];
   equipCalls: Array<{ playerId: string; itemId: string; quantity: number }>;
+  recoverPreparationCalls: Array<{
+    playerId: string;
+    preparationId: string;
+  }>;
   getInventory: (playerId: string) => { items: InventoryItem[]; coins: number };
   countFood: (playerId: string) => number;
   hasItemAtSlot: (playerId: string, slot: number, itemId: string) => boolean;
@@ -95,11 +234,12 @@ type SchedulerTestHarness = {
   startCountdown(): Promise<void>;
   tick(): void;
   orchestrator: {
-    endFightByTimeout(): void;
+    endFightByTimeout(terminalAtOverride?: number): void;
     startResolution(
       winnerId: string,
       loserId: string,
       winReason: "kill" | "forfeit" | "hp_advantage" | "damage_advantage",
+      terminalAtOverride?: number,
     ): void;
     setDebugCombatRoleOverride(
       characterId: string,
@@ -112,6 +252,19 @@ function asSchedulerHarness(
   scheduler: StreamingDuelScheduler,
 ): SchedulerTestHarness {
   return scheduler as unknown as SchedulerTestHarness;
+}
+
+async function startCountdownAtMarketClose(
+  scheduler: StreamingDuelScheduler,
+): Promise<void> {
+  const betCloseTime = scheduler.getCurrentCycle()?.betCloseTime;
+  if (typeof betCloseTime !== "number" || !Number.isSafeInteger(betCloseTime)) {
+    throw new Error("test cycle is missing its immutable betting close");
+  }
+  if (Date.now() < betCloseTime) {
+    vi.setSystemTime(betCloseTime);
+  }
+  await (scheduler as unknown as SchedulerTestHarness)["startCountdown"]();
 }
 
 function testPlanEvidence(
@@ -138,11 +291,15 @@ function buildPersistedCompetitiveTestSnapshot(
 ): PersistedCompetitiveSnapshot {
   const schedulerInternal = scheduler as any;
   for (const itemId of [RECOVERY_ALPHA_WEAPON, RECOVERY_BETA_WEAPON]) {
+    if (!recoveryItemPriors.has(itemId)) {
+      recoveryItemPriors.set(itemId, ITEMS.get(itemId));
+    }
     ITEMS.set(itemId, {
       id: itemId,
       name: itemId,
       type: "weapon",
       attackType: AttackType.MELEE,
+      weaponType: "LONGSWORD",
       equipSlot: "weapon",
       equipable: true,
     } as never);
@@ -231,6 +388,14 @@ function buildPersistedCompetitiveTestSnapshot(
     persisted: true,
     frozenAt,
     betWindowDurationMs: STREAMING_TIMING.ANNOUNCEMENT_DURATION,
+    timing: {
+      contractVersion: STREAMING_TIMING.CONTRACT_VERSION,
+      timeoutPolicy: STREAMING_TIMING.TIMEOUT_POLICY,
+      countdownDurationMs: STREAMING_TIMING.COUNTDOWN_DURATION,
+      fightingDurationMs: STREAMING_TIMING.FIGHTING_DURATION,
+      endWarningDurationMs: STREAMING_TIMING.END_WARNING_DURATION,
+      maxFightDurationMs: STREAMING_TIMING.MAX_FIGHT_DURATION,
+    },
   });
   schedulerInternal.orchestrator.releaseCompetitiveLoadout("agent-alpha");
   schedulerInternal.orchestrator.releaseCompetitiveLoadout("agent-beta");
@@ -313,8 +478,23 @@ function createMockWorld(options?: {
   failOnEmitEvent?: string;
   failOnEmitEventCount?: number;
   equipmentDelayMs?: number;
+  equipmentReady?: (playerId: string) => boolean;
+  playerReady?: (playerId: string) => boolean;
+  recoverPreparationEquipment?: Record<
+    string,
+    {
+      weaponId: string;
+      arrowId?: string | null;
+      arrowQuantity?: number;
+    }
+  >;
   damageByAttacker?: Record<string, number>;
   combatStarts?: boolean;
+  duelDamagePending?: () => boolean;
+  processingQuiescenceSystem?: {
+    requestPlayerProcessingQuiescence(playerId: string): void;
+    isPlayerProcessingQuiescent(playerId: string): boolean;
+  };
 }): MockWorldContext {
   const listeners = new Map<string, Set<(payload: unknown) => void>>();
   const entities = new Map<string, MockEntity>();
@@ -329,6 +509,10 @@ function createMockWorld(options?: {
     playerId: string;
     itemId: string;
     quantity: number;
+  }> = [];
+  const recoverPreparationCalls: Array<{
+    playerId: string;
+    preparationId: string;
   }> = [];
   type MockEquipmentSlot = {
     itemId: string | null;
@@ -516,6 +700,49 @@ function createMockWorld(options?: {
 
   const equipmentSystem = {
     getPlayerEquipment: (playerId: string) => equipment.get(playerId),
+    isEquipmentReady: (playerId: string) =>
+      options?.equipmentReady?.(playerId) ?? true,
+    recoverOwnedDuelPreparationPlan: async (
+      playerId: string,
+      request: { operationId: string; preparationId: string },
+    ) => {
+      recoverPreparationCalls.push({
+        playerId,
+        preparationId: request.preparationId,
+      });
+      const recovered = options?.recoverPreparationEquipment?.[playerId];
+      const state = equipment.get(playerId);
+      if (recovered && state) {
+        state.weapon = {
+          itemId: recovered.weaponId,
+          item: { id: recovered.weaponId },
+          quantity: 1,
+        };
+        state.arrows = recovered.arrowId
+          ? {
+              itemId: recovered.arrowId,
+              item: { id: recovered.arrowId },
+              quantity: recovered.arrowQuantity ?? 1,
+            }
+          : { itemId: null, item: null };
+      }
+      return {
+        ok: true as const,
+        playerId,
+        operationId: request.operationId,
+        preparationId: request.preparationId,
+        requestFingerprint: "recovered-plan",
+        changed: false,
+        replayed: true,
+        committed: {
+          bank: [],
+          inventory: [],
+          equipment: [],
+          selectedSpell: null,
+        },
+        recoveryEvidence: {},
+      };
+    },
     canPlayerEquipItem: () => true,
     equipItemDirect: async (
       playerId: string,
@@ -599,6 +826,16 @@ function createMockWorld(options?: {
     off,
     emit,
     getSystem: (name: string) => {
+      if (name === "player") {
+        return {
+          isPlayerReady: (playerId: string) =>
+            options?.playerReady?.(playerId) ?? true,
+        };
+      }
+      if (name === "processing" && options?.processingQuiescenceSystem) {
+        return options.processingQuiescenceSystem;
+      }
+
       if (name === "terrain") {
         return {
           getHeightAt: () => terrainHeight,
@@ -672,6 +909,9 @@ function createMockWorld(options?: {
             return true;
           },
           isInCombat: (entityId: string) => combatState.has(entityId),
+          getDuelDamageReconciliationStats: () => ({
+            pendingOperations: options?.duelDamagePending?.() === true ? 1 : 0,
+          }),
           forceEndCombat: (entityId: string) => {
             forceEndCombatCalls.push(entityId);
             combatState.delete(entityId);
@@ -693,6 +933,7 @@ function createMockWorld(options?: {
     combatCalls,
     forceEndCombatCalls,
     equipCalls,
+    recoverPreparationCalls,
     getInventory: (playerId: string) => getInventoryState(playerId),
     countFood: (playerId: string) =>
       getInventoryState(playerId).items.filter((item) =>
@@ -716,6 +957,44 @@ function createMockWorld(options?: {
       damageByAttacker[playerId] = damage;
     },
   };
+}
+
+/**
+ * The scheduler now requires persisted participation authority before it will
+ * admit ordinary agents discovered in the world. These database-free unit
+ * worlds model agents whose positive preference was already applied by the
+ * trusted DB/API boundary, so make that authority explicit before the first
+ * competitive tick. Tests of the raw fail-closed boundary instantiate the
+ * production class directly.
+ */
+class StreamingDuelScheduler extends ProductionStreamingDuelScheduler {
+  private readonly eligibilityTestWorld: MockWorldContext["world"];
+
+  constructor(
+    world: ConstructorParameters<typeof ProductionStreamingDuelScheduler>[0],
+  ) {
+    super(world);
+    this.eligibilityTestWorld = world as unknown as MockWorldContext["world"];
+  }
+
+  override init(): void {
+    super.init();
+    this.eligibilityTestWorld.network.send.mockClear();
+    this.eligibilityTestWorld.network.syncStreamingContestants.mockClear();
+    for (const [id, entity] of this.eligibilityTestWorld.entities.items) {
+      if (
+        entity.type === "player" &&
+        (entity.isAgent === true ||
+          entity.isEmbeddedAgent === true ||
+          entity.data.isAgent === true ||
+          entity.data.isEmbeddedAgent === true)
+      ) {
+        this.applyStreamingDuelParticipation(id, true);
+      }
+    }
+    (this as unknown as { tick: () => void }).tick();
+    (this as unknown as { broadcastState: () => void }).broadcastState();
+  }
 }
 
 function collectCycleAbortEvents(ctx: MockWorldContext): unknown[] {
@@ -778,9 +1057,13 @@ describe("StreamingDuelScheduler", () => {
 
   afterEach(() => {
     vi.useRealTimers();
+    vi.unstubAllEnvs();
     vi.restoreAllMocks();
-    ITEMS.delete(RECOVERY_ALPHA_WEAPON);
-    ITEMS.delete(RECOVERY_BETA_WEAPON);
+    for (const [itemId, prior] of recoveryItemPriors) {
+      if (prior) ITEMS.set(itemId, prior as never);
+      else ITEMS.delete(itemId);
+    }
+    recoveryItemPriors.clear();
   });
 
   it("cancels immediately when a selected contestant leaves during announcement", async () => {
@@ -836,7 +1119,7 @@ describe("StreamingDuelScheduler", () => {
       .spyOn((scheduler as any).orchestrator, "prepareContestantsForDuel")
       .mockReturnValue(preparationGate);
 
-    const countdown = asSchedulerHarness(scheduler).startCountdown();
+    const countdown = startCountdownAtMarketClose(scheduler);
     await vi.waitFor(() => expect(prepare).toHaveBeenCalledOnce());
     ctx.entities.delete(cycle.agent2!.characterId);
     releasePreparation();
@@ -873,7 +1156,7 @@ describe("StreamingDuelScheduler", () => {
     ctx.world.on("streaming:fight:start", fightStarted);
 
     scheduler.init();
-    await asSchedulerHarness(scheduler).startCountdown();
+    await startCountdownAtMarketClose(scheduler);
     const cycle = scheduler.getCurrentCycle()!;
     expect(cycle.phase).toBe("COUNTDOWN");
     ctx.entities.delete(cycle.agent2!.characterId);
@@ -910,7 +1193,7 @@ describe("StreamingDuelScheduler", () => {
     ctx.world.on("streaming:fight:start", fightStarted);
 
     scheduler.init();
-    await asSchedulerHarness(scheduler).startCountdown();
+    await startCountdownAtMarketClose(scheduler);
     const cycle = scheduler.getCurrentCycle()!;
     cycle.competitiveSnapshot = {
       ...cycle.competitiveSnapshot!,
@@ -980,7 +1263,7 @@ describe("StreamingDuelScheduler", () => {
     ctx.world.on(EventType.DUEL_COMPLETED, completed);
 
     scheduler.init();
-    await asSchedulerHarness(scheduler).startCountdown();
+    await startCountdownAtMarketClose(scheduler);
     await vi.advanceTimersByTimeAsync(STREAMING_TIMING.COUNTDOWN_DURATION);
     const cycle = scheduler.getCurrentCycle()!;
     expect(cycle.phase).toBe("FIGHTING");
@@ -1008,7 +1291,7 @@ describe("StreamingDuelScheduler", () => {
     ctx.world.on(EventType.DUEL_COMPLETED, completed);
 
     scheduler.init();
-    await asSchedulerHarness(scheduler).startCountdown();
+    await startCountdownAtMarketClose(scheduler);
     const cycle = scheduler.getCurrentCycle()!;
     ctx.entities.get(cycle.agent2!.characterId)!.data.health = Number.NaN;
 
@@ -1061,7 +1344,7 @@ describe("StreamingDuelScheduler", () => {
         ),
     ).toBe(1);
 
-    await (scheduler as any).startCountdown();
+    await startCountdownAtMarketClose(scheduler);
 
     const alpha = ctx.entities.get("agent-alpha");
     const beta = ctx.entities.get("agent-beta");
@@ -1092,6 +1375,54 @@ describe("StreamingDuelScheduler", () => {
     expect(ctx.combatCalls.length).toBeGreaterThanOrEqual(2);
     expect(alpha!.data.health).toBeLessThan(alpha!.data.maxHealth);
     expect(beta!.data.health).toBeLessThan(beta!.data.maxHealth);
+    const schedulerInternal = scheduler as any;
+    const publicActionAi = {
+      getStats: () => ({
+        tickCount: 7,
+        combatRole: "melee",
+        lastExecutedTacticalMacro: "pressure",
+      }),
+    };
+    schedulerInternal.orchestrator.combatAIs.set("agent-alpha", publicActionAi);
+    const damageContext =
+      schedulerInternal.orchestrator.createAuthoritativeDamageObservationContext(
+        "agent-alpha",
+        "agent-beta",
+        3,
+      );
+    expect(damageContext).toMatchObject({
+      actorId: "agent-alpha",
+      opponentId: "agent-beta",
+      requestedDamage: 3,
+      combatRole: "melee",
+      tacticalMacro: "pressure",
+    });
+    ctx.world.emit(EventType.COMBAT_DAMAGE_DEALT, {
+      attackerId: "agent-alpha",
+      targetId: "agent-beta",
+      damage: 3,
+      publicActionObservation: damageContext,
+    });
+    schedulerInternal.orchestrator.combatAIs.delete("agent-alpha");
+    const publicActions =
+      scheduler.getStreamingState().cycle.actionObservations;
+    expect(publicActions.length).toBeGreaterThan(0);
+    expect(publicActions.map(({ sequence }) => sequence)).toEqual(
+      publicActions.map((_, index) => index + 1),
+    );
+    expect(
+      publicActions.every(
+        (observation) =>
+          observation.cycleId === scheduler.getCurrentCycle()?.cycleId &&
+          observation.duelId === scheduler.getCurrentCycle()?.duelId &&
+          observation.phase === "FIGHTING" &&
+          !Object.prototype.hasOwnProperty.call(observation, "reasoning") &&
+          !Object.prototype.hasOwnProperty.call(observation, "coordinates") &&
+          !Object.prototype.hasOwnProperty.call(observation, "bank") &&
+          !Object.prototype.hasOwnProperty.call(observation, "wallet") &&
+          !Object.prototype.hasOwnProperty.call(observation, "rawError"),
+      ),
+    ).toBe(true);
     const dx = Math.abs(
       Math.floor(alpha!.data.position[0]) - Math.floor(beta!.data.position[0]),
     );
@@ -1101,6 +1432,528 @@ describe("StreamingDuelScheduler", () => {
     expect(dx + dz).toBe(1);
     expect(alpha!.data.position).toEqual(countdownAlphaPosition);
     expect(beta!.data.position).toEqual(countdownBetaPosition);
+
+    scheduler.destroy();
+  });
+
+  it("publishes a co-committed lethal terminal without a second persistence edge", async () => {
+    const ctx = createMockWorld();
+    const scheduler = new StreamingDuelScheduler(ctx.world as never);
+    const resolutionStarted = vi.fn();
+    const duelCompleted = vi.fn();
+    ctx.world.on("streaming:resolution:start", resolutionStarted);
+    ctx.world.on(EventType.DUEL_COMPLETED, duelCompleted);
+
+    scheduler.init();
+    await startCountdownAtMarketClose(scheduler);
+    await vi.advanceTimersByTimeAsync(4_000);
+    expect(scheduler.getCurrentCycle()?.phase).toBe("FIGHTING");
+
+    const schedulerInternal = scheduler as any;
+    schedulerInternal.orchestrator.combatAIs.set("agent-alpha", {
+      getStats: () => ({
+        tickCount: 23,
+        combatRole: "melee",
+        lastExecutedTacticalMacro: "finish",
+      }),
+    });
+    const cycle = scheduler.getCurrentCycle()!;
+    cycle.competitiveSnapshot = {
+      ...cycle.competitiveSnapshot!,
+      persisted: true,
+      preparationId: "00000000-0000-4000-8000-000000000511",
+    };
+    cycle.competitiveSnapshotDigest = "ab".repeat(32);
+    schedulerInternal.preparationFencingToken = "109";
+    const authority = getStreamingDuelDamageAuthority(ctx.world as never);
+    const commitAuthority = authority?.createDamageObservationContext(
+      "agent-alpha",
+      "agent-beta",
+      4,
+    );
+    expect(commitAuthority).toMatchObject({
+      publicActionObservation: {
+        actorId: "agent-alpha",
+        opponentId: "agent-beta",
+        requestedDamage: 4,
+      },
+      competitiveAuthority: {
+        preparationId: "00000000-0000-4000-8000-000000000511",
+        fencingToken: "109",
+        snapshotDigest: "ab".repeat(32),
+      },
+    });
+    const observation = commitAuthority!.publicActionObservation;
+    const proof = buildCompetitiveTerminalProof({
+      duelId: cycle.duelId!,
+      cycleId: cycle.cycleId,
+      winnerId: "agent-alpha",
+      loserId: "agent-beta",
+      winReason: "kill",
+      fightStartedAt: cycle.fightStartTime!,
+      finishedAt: observation.observedAt,
+      agent1Id: "agent-alpha",
+      agent2Id: "agent-beta",
+      damageAgent1: cycle.agent1!.damageDealtThisFight + 4,
+      damageAgent2: cycle.agent2!.damageDealtThisFight,
+    });
+    ctx.entities.get("agent-beta")!.data.health = 0;
+    ctx.world.emit(EventType.COMBAT_DAMAGE_DEALT, {
+      attackerId: "agent-alpha",
+      targetId: "agent-beta",
+      damage: 4,
+      publicActionObservation: observation,
+      competitiveTerminal: {
+        outcome: "win",
+        winnerId: "agent-alpha",
+        loserId: "agent-beta",
+        winReason: "kill",
+        terminalAt: observation.observedAt,
+        ...proof,
+      },
+    });
+
+    expect(scheduler.getCurrentCycle()).toMatchObject({
+      phase: "RESOLUTION",
+      winnerId: "agent-alpha",
+      loserId: "agent-beta",
+      outcome: "win",
+      seed: proof.seed,
+      replayHash: proof.replayHash,
+    });
+    expect(resolutionStarted).toHaveBeenCalledOnce();
+    expect(duelCompleted).toHaveBeenCalledOnce();
+    ctx.world.emit(EventType.ENTITY_DEATH, {
+      entityId: "agent-beta",
+      killedBy: "agent-alpha",
+    });
+    await Promise.resolve();
+    expect(resolutionStarted).toHaveBeenCalledOnce();
+    expect(duelCompleted).toHaveBeenCalledOnce();
+
+    cycle.competitiveSnapshot.persisted = false;
+    schedulerInternal.orchestrator.combatAIs.delete("agent-alpha");
+    scheduler.destroy();
+  });
+
+  it("does not race the fighting watchdog against an unresolved exact damage commit", async () => {
+    const ctx = createMockWorld();
+    const scheduler = new StreamingDuelScheduler(ctx.world as never);
+    const harness = asSchedulerHarness(scheduler);
+    const abortEvents = collectCycleAbortEvents(ctx);
+
+    scheduler.init();
+    await startCountdownAtMarketClose(scheduler);
+    await vi.advanceTimersByTimeAsync(STREAMING_TIMING.COUNTDOWN_DURATION);
+    const cycle = scheduler.getCurrentCycle()!;
+    expect(cycle.phase).toBe("FIGHTING");
+    cycle.competitiveSnapshot!.persisted = false;
+    (scheduler as any).orchestrator.combatAIs.set("agent-alpha", {
+      getStats: () => ({
+        tickCount: 9,
+        combatRole: "melee",
+        lastExecutedTacticalMacro: "pressure",
+      }),
+    });
+    const authority = getStreamingDuelDamageAuthority(ctx.world as never)!;
+    const commitAuthority = authority.createDamageObservationContext(
+      "agent-alpha",
+      "agent-beta",
+      4,
+    );
+    expect(commitAuthority).not.toBeNull();
+    authority.handleDamageCommitStarted(
+      commitAuthority!.publicActionObservation,
+    );
+    cycle.phaseStartTime = Date.now() - 10_000_000;
+
+    harness.tick();
+    expect(scheduler.getCurrentCycle()?.phase).toBe("FIGHTING");
+    expect(abortEvents).toHaveLength(0);
+
+    (scheduler as any).orchestrator.combatAIs.delete("agent-alpha");
+    authority.handleDamageCommitSettled(
+      commitAuthority!.publicActionObservation,
+    );
+    await vi.advanceTimersByTimeAsync(0);
+    harness.tick();
+    await Promise.resolve();
+    await Promise.resolve();
+    expectAuthoritativeCycleAbort(abortEvents, {
+      cycleId: cycle.cycleId,
+      duelId: cycle.duelId,
+      duelKeyHex: cycle.duelKeyHex,
+      reason: "watchdog_fighting_timeout",
+      agent1Id: cycle.agent1?.characterId ?? null,
+      agent2Id: cycle.agent2?.characterId ?? null,
+    });
+
+    scheduler.destroy();
+  });
+
+  it("defers a committed lethal presentation until every authored hit settles", async () => {
+    const ctx = createMockWorld();
+    const scheduler = new StreamingDuelScheduler(ctx.world as never);
+    const resolutionStarted = vi.fn();
+    ctx.world.on("streaming:resolution:start", resolutionStarted);
+
+    scheduler.init();
+    await startCountdownAtMarketClose(scheduler);
+    await vi.advanceTimersByTimeAsync(STREAMING_TIMING.COUNTDOWN_DURATION);
+    const cycle = scheduler.getCurrentCycle()!;
+    cycle.competitiveSnapshot!.persisted = false;
+    (scheduler as any).orchestrator.combatAIs.set("agent-alpha", {
+      getStats: () => ({
+        tickCount: 10,
+        combatRole: "melee",
+        lastExecutedTacticalMacro: "finish",
+      }),
+    });
+    const authority = getStreamingDuelDamageAuthority(ctx.world as never)!;
+    const commitAuthority = authority.createDamageObservationContext(
+      "agent-alpha",
+      "agent-beta",
+      4,
+    )!;
+    authority.handleDamageCommitStarted(
+      commitAuthority.publicActionObservation,
+    );
+    const proof = buildCompetitiveTerminalProof({
+      duelId: cycle.duelId!,
+      cycleId: cycle.cycleId,
+      winnerId: "agent-alpha",
+      loserId: "agent-beta",
+      winReason: "kill",
+      fightStartedAt: cycle.fightStartTime!,
+      finishedAt: commitAuthority.publicActionObservation.observedAt,
+      agent1Id: "agent-alpha",
+      agent2Id: "agent-beta",
+      damageAgent1: cycle.agent1!.damageDealtThisFight + 4,
+      damageAgent2: cycle.agent2!.damageDealtThisFight,
+    });
+    ctx.entities.get("agent-beta")!.data.health = 0;
+    ctx.world.emit(EventType.COMBAT_DAMAGE_DEALT, {
+      attackerId: "agent-alpha",
+      targetId: "agent-beta",
+      damage: 4,
+      publicActionObservation: commitAuthority.publicActionObservation,
+      competitiveTerminal: {
+        outcome: "win",
+        winnerId: "agent-alpha",
+        loserId: "agent-beta",
+        winReason: "kill",
+        terminalAt: commitAuthority.publicActionObservation.observedAt,
+        ...proof,
+      },
+    });
+
+    expect(scheduler.getCurrentCycle()?.phase).toBe("FIGHTING");
+    expect(resolutionStarted).not.toHaveBeenCalled();
+
+    authority.handleDamageCommitSettled(
+      commitAuthority.publicActionObservation,
+    );
+    await vi.advanceTimersByTimeAsync(0);
+    expect(scheduler.getCurrentCycle()).toMatchObject({
+      phase: "RESOLUTION",
+      winnerId: "agent-alpha",
+      loserId: "agent-beta",
+      outcome: "win",
+    });
+    expect(resolutionStarted).toHaveBeenCalledOnce();
+
+    (scheduler as any).orchestrator.combatAIs.delete("agent-alpha");
+    scheduler.destroy();
+  });
+
+  it("upgrades a death-first damage fence with the exact atomic terminal receipt", async () => {
+    const ctx = createMockWorld();
+    const scheduler = new StreamingDuelScheduler(ctx.world as never);
+    const resolutionStarted = vi.fn();
+    ctx.world.on("streaming:resolution:start", resolutionStarted);
+
+    scheduler.init();
+    await startCountdownAtMarketClose(scheduler);
+    await vi.advanceTimersByTimeAsync(STREAMING_TIMING.COUNTDOWN_DURATION);
+    const cycle = scheduler.getCurrentCycle()!;
+    cycle.competitiveSnapshot!.persisted = false;
+    (scheduler as any).orchestrator.combatAIs.set("agent-alpha", {
+      getStats: () => ({
+        tickCount: 12,
+        engagementAttempts: 1,
+        engagementAccepts: 1,
+        engagementRejects: 0,
+        engagementErrors: 0,
+        lastEngagementFailureReason: null,
+        styleChangeAttempts: 1,
+        styleChangeAccepts: 1,
+        styleChangeRejects: 0,
+        styleChangeErrors: 0,
+        lastStyleChangeFailureReason: null,
+        foodUseAttempts: 0,
+        foodDisengageYields: 0,
+        totalDamageDealt: 4,
+        totalDamageReceived: 0,
+        movementRequests: 1,
+        movementAccepts: 1,
+        movementRejects: 0,
+        movementErrors: 0,
+        lastMovementFailureReason: null,
+        movementPathsActive: 1,
+        movementPathsInactive: 0,
+        minObservedDistance: 2,
+        maxObservedDistance: 4,
+        plannedTacticalMacro: "finish",
+        combatRole: "ranged",
+        lastExecutedTacticalMacro: "finish",
+        roleSwitchAttempts: 0,
+        roleSwitchDeferrals: 0,
+        successfulRoleSwitches: 0,
+        roleSwitchFailures: 0,
+        lastRoleSwitchFailureReason: null,
+        lastObservedOpponentWeapon: null,
+        lastObservedOpponentAttackType: null,
+        prayerToggleAttempts: 0,
+        prayerToggleCommits: 0,
+        prayerToggleRejects: 0,
+        lastPrayerToggleFailureReason: null,
+      }),
+      stopAndWaitForIdle: vi.fn(async () => undefined),
+    });
+    const authority = getStreamingDuelDamageAuthority(ctx.world as never)!;
+    const commitAuthority = authority.createDamageObservationContext(
+      "agent-alpha",
+      "agent-beta",
+      4,
+    )!;
+    authority.handleDamageCommitStarted(
+      commitAuthority.publicActionObservation,
+    );
+    const proof = buildCompetitiveTerminalProof({
+      duelId: cycle.duelId!,
+      cycleId: cycle.cycleId,
+      winnerId: "agent-alpha",
+      loserId: "agent-beta",
+      winReason: "kill",
+      fightStartedAt: cycle.fightStartTime!,
+      finishedAt: commitAuthority.publicActionObservation.observedAt,
+      agent1Id: "agent-alpha",
+      agent2Id: "agent-beta",
+      damageAgent1: cycle.agent1!.damageDealtThisFight + 4,
+      damageAgent2: cycle.agent2!.damageDealtThisFight,
+    });
+    ctx.entities.get("agent-beta")!.data.health = 0;
+
+    // PlayerSystem publishes death before CombatSystem publishes the matching
+    // damage receipt. Let that microtask establish the plain sporting result.
+    ctx.world.emit(EventType.ENTITY_DEATH, {
+      entityId: "agent-beta",
+      killedBy: "agent-alpha",
+    });
+    await Promise.resolve();
+    expect(scheduler.getCurrentCycle()?.phase).toBe("FIGHTING");
+
+    // The atomic damage event carries the terminal identity that was already
+    // committed in the same PostgreSQL transaction as lethal HP mutation.
+    ctx.world.emit(EventType.COMBAT_DAMAGE_DEALT, {
+      attackerId: "agent-alpha",
+      targetId: "agent-beta",
+      damage: 4,
+      publicActionObservation: commitAuthority.publicActionObservation,
+      competitiveTerminal: {
+        outcome: "win",
+        winnerId: "agent-alpha",
+        loserId: "agent-beta",
+        winReason: "kill",
+        terminalAt: commitAuthority.publicActionObservation.observedAt,
+        ...proof,
+      },
+    });
+    expect(scheduler.getCurrentCycle()?.phase).toBe("FIGHTING");
+
+    authority.handleDamageCommitSettled(
+      commitAuthority.publicActionObservation,
+    );
+    await vi.advanceTimersByTimeAsync(0);
+    expect(scheduler.getCurrentCycle()).toMatchObject({
+      phase: "RESOLUTION",
+      phaseStartTime: commitAuthority.publicActionObservation.observedAt,
+      winnerId: "agent-alpha",
+      loserId: "agent-beta",
+      outcome: "win",
+      seed: proof.seed,
+      replayHash: proof.replayHash,
+    });
+    expect(resolutionStarted).toHaveBeenCalledOnce();
+
+    scheduler.destroy();
+  });
+
+  it("keeps a settled projectile fenced through its next-turn terminal receipt", async () => {
+    const ctx = createMockWorld();
+    const scheduler = new StreamingDuelScheduler(ctx.world as never);
+    const resolutionStarted = vi.fn();
+    ctx.world.on("streaming:resolution:start", resolutionStarted);
+
+    scheduler.init();
+    await startCountdownAtMarketClose(scheduler);
+    await vi.advanceTimersByTimeAsync(STREAMING_TIMING.COUNTDOWN_DURATION);
+    const cycle = scheduler.getCurrentCycle()!;
+    cycle.competitiveSnapshot = {
+      ...cycle.competitiveSnapshot!,
+      persisted: true,
+      preparationId: "31450f15-4fbd-41ce-a914-5f68b42df288",
+    };
+    cycle.competitiveSnapshotDigest = "fa".repeat(32);
+    const markCompetitiveSnapshotTerminal = vi.fn(async () => {
+      throw new Error("redundant terminal persistence must not run");
+    });
+    Object.assign(scheduler as unknown as Record<string, unknown>, {
+      preparationStore: { markCompetitiveSnapshotTerminal },
+      preparationFencingToken: "119",
+    });
+    const orchestrator = (
+      scheduler as unknown as {
+        orchestrator: {
+          combatAIs: Map<
+            string,
+            {
+              getStats(): {
+                tickCount: number;
+                combatRole: "ranged";
+                lastExecutedTacticalMacro: "finish";
+              };
+              stopAndWaitForIdle(): Promise<void>;
+            }
+          >;
+        };
+      }
+    ).orchestrator;
+    orchestrator.combatAIs.set("agent-alpha", {
+      getStats: () => ({
+        tickCount: 19,
+        combatRole: "ranged",
+        lastExecutedTacticalMacro: "finish",
+      }),
+      stopAndWaitForIdle: vi.fn(async () => undefined),
+    });
+    const authority = getStreamingDuelDamageAuthority(ctx.world as never)!;
+    const commitAuthority = authority.createDamageObservationContext(
+      "agent-alpha",
+      "agent-beta",
+      4,
+    )!;
+    authority.handleDamageCommitStarted(
+      commitAuthority.publicActionObservation,
+    );
+    const observation = commitAuthority.publicActionObservation;
+    const proof = buildCompetitiveTerminalProof({
+      duelId: cycle.duelId!,
+      cycleId: cycle.cycleId,
+      winnerId: "agent-alpha",
+      loserId: "agent-beta",
+      winReason: "kill",
+      fightStartedAt: cycle.fightStartTime!,
+      finishedAt: observation.observedAt,
+      agent1Id: "agent-alpha",
+      agent2Id: "agent-beta",
+      damageAgent1: cycle.agent1!.damageDealtThisFight + 4,
+      damageAgent2: cycle.agent2!.damageDealtThisFight,
+    });
+    ctx.entities.get("agent-beta")!.data.health = 0;
+
+    // The combat promise can settle one microtask before its projectile caller
+    // emits the co-committed receipt. The scheduler must retain the fence until
+    // the next task turn instead of manufacturing a second terminal write.
+    authority.handleDamageCommitSettled(observation);
+    ctx.world.emit(EventType.ENTITY_DEATH, {
+      entityId: "agent-beta",
+      killedBy: "agent-alpha",
+    });
+    await Promise.resolve();
+    expect(scheduler.getCurrentCycle()?.phase).toBe("FIGHTING");
+
+    ctx.world.emit(EventType.COMBAT_DAMAGE_DEALT, {
+      attackerId: "agent-alpha",
+      targetId: "agent-beta",
+      damage: 4,
+      publicActionObservation: observation,
+      competitiveTerminal: {
+        outcome: "win",
+        winnerId: "agent-alpha",
+        loserId: "agent-beta",
+        winReason: "kill",
+        terminalAt: observation.observedAt,
+        ...proof,
+      },
+    });
+    expect(scheduler.getCurrentCycle()?.phase).toBe("FIGHTING");
+
+    await vi.advanceTimersByTimeAsync(0);
+    expect(scheduler.getCurrentCycle()).toMatchObject({
+      phase: "RESOLUTION",
+      winnerId: "agent-alpha",
+      loserId: "agent-beta",
+      seed: proof.seed,
+      replayHash: proof.replayHash,
+    });
+    expect(markCompetitiveSnapshotTerminal).not.toHaveBeenCalled();
+    expect(resolutionStarted).toHaveBeenCalledOnce();
+
+    cycle.competitiveSnapshot.persisted = false;
+    orchestrator.combatAIs.delete("agent-alpha");
+    scheduler.destroy();
+  });
+
+  it("defers cancellation and contestant restoration behind the same damage fence", async () => {
+    const ctx = createMockWorld();
+    const scheduler = new StreamingDuelScheduler(ctx.world as never);
+    const abortEvents = collectCycleAbortEvents(ctx);
+
+    scheduler.init();
+    await startCountdownAtMarketClose(scheduler);
+    await vi.advanceTimersByTimeAsync(STREAMING_TIMING.COUNTDOWN_DURATION);
+    const cycle = scheduler.getCurrentCycle()!;
+    cycle.competitiveSnapshot!.persisted = false;
+    (scheduler as any).orchestrator.combatAIs.set("agent-alpha", {
+      getStats: () => ({
+        tickCount: 11,
+        combatRole: "melee",
+        lastExecutedTacticalMacro: "pressure",
+      }),
+    });
+    const authority = getStreamingDuelDamageAuthority(ctx.world as never)!;
+    const commitAuthority = authority.createDamageObservationContext(
+      "agent-alpha",
+      "agent-beta",
+      4,
+    )!;
+    authority.handleDamageCommitStarted(
+      commitAuthority.publicActionObservation,
+    );
+    (scheduler as any).orchestrator.combatAIs.delete("agent-alpha");
+
+    const abortPromise = (
+      scheduler as unknown as {
+        abortCycleToIdle: (reason: string) => Promise<void>;
+      }
+    ).abortCycleToIdle("damage_reconciliation_test");
+    expect(scheduler.getCurrentCycle()?.phase).toBe("FIGHTING");
+    expect(abortEvents).toHaveLength(0);
+
+    authority.handleDamageCommitSettled(
+      commitAuthority.publicActionObservation,
+    );
+    await vi.advanceTimersByTimeAsync(0);
+    await abortPromise;
+    expectAuthoritativeCycleAbort(abortEvents, {
+      cycleId: cycle.cycleId,
+      duelId: cycle.duelId,
+      duelKeyHex: cycle.duelKeyHex,
+      reason: "damage_reconciliation_test",
+      agent1Id: cycle.agent1?.characterId ?? null,
+      agent2Id: cycle.agent2?.characterId ?? null,
+    });
 
     scheduler.destroy();
   });
@@ -1116,15 +1969,60 @@ describe("StreamingDuelScheduler", () => {
       expect.any(Object),
     );
     const cycle = scheduler.getCurrentCycle();
+    const publicState = scheduler.getStreamingState();
+    const committedContestants = cycle?.competitiveSnapshot?.contestants ?? [];
+    for (const publicAgent of [
+      publicState.cycle.agent1,
+      publicState.cycle.agent2,
+    ]) {
+      expect(publicAgent?.loadoutFingerprint).toMatch(/^[a-f0-9]{64}$/u);
+      expect(publicAgent?.loadoutFingerprint).toBe(
+        committedContestants.find(
+          (contestant) => contestant.agentId === publicAgent?.id,
+        )?.loadoutFingerprint,
+      );
+      expect(publicAgent?.strategySummary).toMatchObject({
+        schemaVersion: 1,
+        approach: "balanced",
+        attackStyle: "aggressive",
+        source: "diagnostic",
+        policyVersion: "diagnostic-v1",
+      });
+      expect(Object.keys(publicAgent?.strategySummary ?? {}).sort()).toEqual([
+        "approach",
+        "attackStyle",
+        "foodThreshold",
+        "policyVersion",
+        "prayer",
+        "preferredCombatRole",
+        "schemaVersion",
+        "source",
+        "switchDefensiveAt",
+        "tacticalMacro",
+      ]);
+      expect(publicAgent?.strategySummary).not.toHaveProperty("reasoning");
+      expect(publicAgent?.strategySummary).not.toHaveProperty(
+        "agentPolicyFingerprint",
+      );
+    }
     expect(ctx.world.network.syncStreamingContestants).toHaveBeenCalledWith([
       cycle?.agent1?.characterId,
       cycle?.agent2?.characterId,
     ]);
+    (scheduler as unknown as { broadcastState: () => void }).broadcastState();
+    const socketState = ctx.world.network.send.mock.calls
+      .filter(([event]) => event === "streamingState")
+      .at(-1)?.[1] as StreamingStateUpdate | undefined;
+    expect(socketState?.cycle.competitiveSnapshot).toBeNull();
+    expect(socketState?.cycle.agent1?.strategySummary).toEqual(
+      publicState.cycle.agent1?.loadoutFrozen
+        ? publicState.cycle.agent1.strategySummary
+        : null,
+    );
     expect(
       ctx.world.network.syncStreamingContestants.mock.invocationCallOrder[0],
     ).toBeLessThan(ctx.world.network.send.mock.invocationCallOrder[0]);
 
-    (scheduler as unknown as { broadcastState: () => void }).broadcastState();
     expect(ctx.world.network.syncStreamingContestants).toHaveBeenCalledTimes(1);
 
     scheduler.destroy();
@@ -1136,7 +2034,7 @@ describe("StreamingDuelScheduler", () => {
     const ctx = createMockWorld();
     const scheduled: unknown[] = [];
     ctx.world.on("duel:scheduled", (payload) => scheduled.push(payload));
-    const scheduler = new StreamingDuelScheduler(ctx.world as never);
+    const scheduler = new ProductionStreamingDuelScheduler(ctx.world as never);
 
     try {
       scheduler.init();
@@ -1156,8 +2054,12 @@ describe("StreamingDuelScheduler", () => {
     scheduler.init();
     const announcementCycle = scheduler.getCurrentCycle()!;
     const immutableCloseTime = announcementCycle.betCloseTime;
+    const immutableFightStartTime = announcementCycle.fightStartTime;
     expect(immutableCloseTime).toBe(
       announcementCycle.phaseStartTime + STREAMING_TIMING.ANNOUNCEMENT_DURATION,
+    );
+    expect(immutableFightStartTime).toBe(
+      immutableCloseTime! + STREAMING_TIMING.COUNTDOWN_DURATION,
     );
     expect(scheduler.getStreamingState().cycle.phaseEndTime).toBe(
       immutableCloseTime,
@@ -1166,10 +2068,12 @@ describe("StreamingDuelScheduler", () => {
       STREAMING_TIMING.ANNOUNCEMENT_DURATION,
     );
 
-    await (scheduler as any).startCountdown();
+    vi.setSystemTime(immutableCloseTime!);
+    await startCountdownAtMarketClose(scheduler);
     expect(scheduler.getCurrentCycle()).toMatchObject({
       phase: "COUNTDOWN",
       betCloseTime: immutableCloseTime,
+      fightStartTime: immutableFightStartTime,
     });
     expect(scheduler.getStreamingState().cycle.betCloseTime).toBe(
       immutableCloseTime,
@@ -1214,7 +2118,12 @@ describe("StreamingDuelScheduler", () => {
       "startFight",
     );
 
-    await (scheduler as any).startCountdown();
+    const immutableFightStartTime = cycle.fightStartTime;
+    expect(immutableFightStartTime).toBe(
+      cycle.betCloseTime! + STREAMING_TIMING.COUNTDOWN_DURATION,
+    );
+    vi.setSystemTime(cycle.betCloseTime!);
+    await startCountdownAtMarketClose(scheduler);
     expect(store.markCompetitiveSnapshotLocked).toHaveBeenCalledWith({
       preparationId: cycle.competitiveSnapshot.preparationId,
       fencingToken: "55",
@@ -1223,12 +2132,93 @@ describe("StreamingDuelScheduler", () => {
     });
     expect(scheduler.getCurrentCycle()?.phase).toBe("COUNTDOWN");
 
-    await (scheduler as any).doStartFight(Date.now());
+    expect(scheduler.getCurrentCycle()?.fightStartTime).toBe(
+      immutableFightStartTime,
+    );
+
+    await (scheduler as any).doStartFight(immutableFightStartTime);
     expect(store.markCompetitiveSnapshotDuelStarted).toHaveBeenCalledOnce();
+    expect(store.markCompetitiveSnapshotDuelStarted).toHaveBeenCalledWith({
+      preparationId: cycle.competitiveSnapshot.preparationId,
+      fencingToken: "55",
+      snapshotDigest: cycle.competitiveSnapshotDigest,
+      duelStartedAt: immutableFightStartTime,
+    });
     expect(
       store.markCompetitiveSnapshotDuelStarted.mock.invocationCallOrder[0],
     ).toBeLessThan(orchestratorStart.mock.invocationCallOrder[0]!);
+    expect(orchestratorStart).toHaveBeenCalledWith(immutableFightStartTime);
     expect(scheduler.getCurrentCycle()?.phase).toBe("FIGHTING");
+    expect(scheduler.getCurrentCycle()?.phaseStartTime).toBe(
+      immutableFightStartTime,
+    );
+    expect(scheduler.getCurrentCycle()?.fightStartTime).toBe(
+      immutableFightStartTime,
+    );
+    expect(scheduler.getStreamingState().cycle.phaseEndTime).toBe(
+      immutableFightStartTime! +
+        STREAMING_TIMING.FIGHTING_DURATION +
+        STREAMING_TIMING.END_WARNING_DURATION,
+    );
+
+    scheduler.destroy();
+    await scheduler.waitForShutdownCleanup();
+  });
+
+  it("does not extend the immutable fight deadline after delayed start persistence", async () => {
+    const ctx = createMockWorld();
+    const scheduler = new StreamingDuelScheduler(ctx.world as never);
+    scheduler.init();
+    const cycle = scheduler.getCurrentCycle()!;
+    cycle.competitiveSnapshot = {
+      ...cycle.competitiveSnapshot!,
+      persisted: true,
+      preparationId: "18ac9328-1642-4999-a8a8-2aa847d14ff0",
+    };
+    cycle.competitiveSnapshotDigest = "cd".repeat(32);
+    const store = {
+      markCompetitiveSnapshotLocked: vi.fn(async ({ lockedAt }: any) => ({
+        lifecycleStatus: "frozen",
+        lockedAt,
+        duelStartedAt: null,
+        recoveredAt: null,
+      })),
+      markCompetitiveSnapshotDuelStarted: vi.fn(
+        async ({ duelStartedAt }: any) => {
+          vi.setSystemTime(duelStartedAt + 2_000);
+          return {
+            lifecycleStatus: "frozen",
+            lockedAt: cycle.betCloseTime,
+            duelStartedAt,
+            recoveredAt: null,
+          };
+        },
+      ),
+    };
+    Object.assign(scheduler as any, {
+      preparationStore: store,
+      preparationFencingToken: "89",
+    });
+
+    await startCountdownAtMarketClose(scheduler);
+    const immutableFightStartTime =
+      scheduler.getCurrentCycle()!.fightStartTime!;
+    await (scheduler as any).doStartFight(immutableFightStartTime);
+
+    const fighting = scheduler.getCurrentCycle()!;
+    expect(fighting.phase).toBe("FIGHTING");
+    expect(fighting.fightStartTime).toBe(immutableFightStartTime);
+    expect(fighting.phaseStartTime).toBe(immutableFightStartTime);
+    expect(scheduler.getStreamingState().cycle.timeRemaining).toBe(
+      STREAMING_TIMING.FIGHTING_DURATION +
+        STREAMING_TIMING.END_WARNING_DURATION -
+        2_000,
+    );
+    expect(scheduler.getStreamingState().cycle.phaseEndTime).toBe(
+      immutableFightStartTime +
+        STREAMING_TIMING.FIGHTING_DURATION +
+        STREAMING_TIMING.END_WARNING_DURATION,
+    );
 
     scheduler.destroy();
     await scheduler.waitForShutdownCleanup();
@@ -1254,7 +2244,7 @@ describe("StreamingDuelScheduler", () => {
     });
     const aborts = collectCycleAbortEvents(ctx);
 
-    await (scheduler as any).startCountdown();
+    await startCountdownAtMarketClose(scheduler);
     await vi.waitFor(() => expect(aborts).toHaveLength(1));
 
     expect(aborts[0]).toMatchObject({
@@ -1462,7 +2452,6 @@ describe("StreamingDuelScheduler", () => {
       preparationFencingToken: "58",
       competitiveRecoveryChecked: true,
     });
-
     (scheduler as any).abortCycleToIdle("operator_cancelled");
     await vi.advanceTimersByTimeAsync(0);
     await Promise.resolve();
@@ -1506,7 +2495,7 @@ describe("StreamingDuelScheduler", () => {
     const scheduler = new StreamingDuelScheduler(ctx.world as never);
 
     scheduler.init();
-    await (scheduler as any).startCountdown();
+    await startCountdownAtMarketClose(scheduler);
     await vi.advanceTimersByTimeAsync(4000);
 
     expect(scheduler.getCurrentCycle()?.phase).toBe("FIGHTING");
@@ -1533,7 +2522,7 @@ describe("StreamingDuelScheduler", () => {
     });
 
     scheduler.init();
-    await asSchedulerHarness(scheduler).startCountdown();
+    await startCountdownAtMarketClose(scheduler);
     await vi.advanceTimersByTimeAsync(STREAMING_TIMING.COUNTDOWN_DURATION);
     const fightingCycle = scheduler.getCurrentCycle();
     expect(fightingCycle?.phase).toBe("FIGHTING");
@@ -1565,7 +2554,7 @@ describe("StreamingDuelScheduler", () => {
     });
 
     scheduler.init();
-    await asSchedulerHarness(scheduler).startCountdown();
+    await startCountdownAtMarketClose(scheduler);
     const countdownCycle = scheduler.getCurrentCycle()!;
     const firstId = countdownCycle.agent1!.characterId;
     const secondId = countdownCycle.agent2!.characterId;
@@ -1629,7 +2618,7 @@ describe("StreamingDuelScheduler", () => {
     const scheduler = new StreamingDuelScheduler(ctx.world as never);
 
     scheduler.init();
-    await (scheduler as any).startCountdown();
+    await startCountdownAtMarketClose(scheduler);
     await vi.advanceTimersByTimeAsync(4000);
     const cycle = scheduler.getCurrentCycle()!;
     const alpha = ctx.entities.get("agent-alpha")!;
@@ -1689,7 +2678,7 @@ describe("StreamingDuelScheduler", () => {
     const scheduler = new StreamingDuelScheduler(ctx.world as never);
 
     scheduler.init();
-    await (scheduler as any).startCountdown();
+    await startCountdownAtMarketClose(scheduler);
     await vi.advanceTimersByTimeAsync(4000);
     const cycle = scheduler.getCurrentCycle()!;
     const alphaContestant =
@@ -1744,7 +2733,7 @@ describe("StreamingDuelScheduler", () => {
     const abortEvents = collectCycleAbortEvents(ctx);
 
     scheduler.init();
-    await (scheduler as any).startCountdown();
+    await startCountdownAtMarketClose(scheduler);
     await vi.advanceTimersByTimeAsync(4000);
     expect(scheduler.getCurrentCycle()?.phase).toBe("FIGHTING");
     const cycle = scheduler.getCurrentCycle()!;
@@ -1821,6 +2810,146 @@ describe("StreamingDuelScheduler", () => {
     scheduler.destroy();
   });
 
+  it("keeps the fight open until the immutable schema-v4 deadline and resolves on that exact boundary", async () => {
+    const ctx = createMockWorld({
+      damageByAttacker: {
+        "agent-alpha": 0,
+        "agent-beta": 0,
+      },
+    });
+    const scheduler = new StreamingDuelScheduler(ctx.world as never);
+    const harness = asSchedulerHarness(scheduler);
+    const abortEvents = collectCycleAbortEvents(ctx);
+
+    scheduler.init();
+    await startCountdownAtMarketClose(scheduler);
+    await vi.advanceTimersByTimeAsync(STREAMING_TIMING.COUNTDOWN_DURATION);
+
+    const cycle = scheduler.getCurrentCycle()!;
+    const timing = cycle.competitiveSnapshot?.timing;
+    expect(cycle.phase).toBe("FIGHTING");
+    expect(cycle.competitiveSnapshot?.snapshotVersion).toBe(4);
+    expect(timing).toMatchObject({
+      contractVersion: STREAMING_TIMING.CONTRACT_VERSION,
+      timeoutPolicy: STREAMING_TIMING.TIMEOUT_POLICY,
+      fightStartTime: cycle.phaseStartTime,
+      fightDeadline: cycle.phaseStartTime + STREAMING_TIMING.MAX_FIGHT_DURATION,
+    });
+
+    vi.setSystemTime(timing!.fightDeadline - 1);
+    harness.tick();
+    expect(scheduler.getCurrentCycle()?.phase).toBe("FIGHTING");
+    expect(abortEvents).toHaveLength(0);
+
+    // The one-second production scheduler cadence can observe expiry after the
+    // boundary. Terminal truth must still use the deadline bettors saw.
+    vi.setSystemTime(timing!.fightDeadline + 777);
+    harness.tick();
+    await Promise.resolve();
+
+    expectAuthoritativeCycleAbort(abortEvents, {
+      cycleId: cycle.cycleId,
+      duelId: cycle.duelId,
+      duelKeyHex: cycle.duelKeyHex,
+      reason: "no_combat_activity",
+      agent1Id: cycle.agent1?.characterId ?? null,
+      agent2Id: cycle.agent2?.characterId ?? null,
+    });
+    expect(scheduler.getStreamingState().terminalNotice).toMatchObject({
+      outcome: "cancelled",
+      reason: "no_combat_activity",
+      occurredAt: timing!.fightDeadline,
+    });
+    expect(scheduler.getRecentDuels()).toEqual([
+      expect.objectContaining({
+        outcome: "cancelled",
+        cancellationReason: "no_combat_activity",
+        finishedAt: timing!.fightDeadline,
+      }),
+    ]);
+    expect(scheduler.getCurrentCycle()).toBeNull();
+    scheduler.destroy();
+  });
+
+  it.each([
+    {
+      name: "HP percentage before damage",
+      alphaHp: 12,
+      alphaMaxHp: 20,
+      betaHp: 15,
+      betaMaxHp: 30,
+      alphaDamage: 4,
+      betaDamage: 12,
+      expectedReason: "hp_advantage" as const,
+    },
+    {
+      name: "damage after equal HP percentage",
+      alphaHp: 15,
+      alphaMaxHp: 30,
+      betaHp: 10,
+      betaMaxHp: 20,
+      alphaDamage: 9,
+      betaDamage: 6,
+      expectedReason: "damage_advantage" as const,
+    },
+  ])(
+    "applies $name at timeout without changing the committed policy order",
+    async ({
+      alphaHp,
+      alphaMaxHp,
+      betaHp,
+      betaMaxHp,
+      alphaDamage,
+      betaDamage,
+      expectedReason,
+    }) => {
+      const ctx = createMockWorld({
+        damageByAttacker: {
+          "agent-alpha": 0,
+          "agent-beta": 0,
+        },
+      });
+      const scheduler = new StreamingDuelScheduler(ctx.world as never);
+
+      scheduler.init();
+      await startCountdownAtMarketClose(scheduler);
+      await vi.advanceTimersByTimeAsync(STREAMING_TIMING.COUNTDOWN_DURATION);
+
+      const cycle = scheduler.getCurrentCycle()!;
+      const alpha =
+        cycle.agent1?.characterId === "agent-alpha"
+          ? cycle.agent1
+          : cycle.agent2!;
+      const beta = alpha === cycle.agent1 ? cycle.agent2! : cycle.agent1!;
+      alpha.currentHp = alphaHp;
+      alpha.maxHp = alphaMaxHp;
+      beta.currentHp = betaHp;
+      beta.maxHp = betaMaxHp;
+      alpha.damageDealtThisFight = alphaDamage;
+      beta.damageDealtThisFight = betaDamage;
+      cycle.firstHitAt = cycle.phaseStartTime + 1;
+
+      const fightDeadline = cycle.competitiveSnapshot!.timing!.fightDeadline;
+      vi.setSystemTime(fightDeadline + 777);
+      asSchedulerHarness(scheduler).orchestrator.endFightByTimeout(
+        fightDeadline,
+      );
+
+      expect(cycle).toMatchObject({
+        phase: "RESOLUTION",
+        outcome: "win",
+        winnerId: "agent-alpha",
+        loserId: "agent-beta",
+        winReason: expectedReason,
+        duelEndTime: fightDeadline,
+      });
+      expect(cycle.competitiveSnapshot?.timing?.timeoutPolicy).toBe(
+        STREAMING_TIMING.TIMEOUT_POLICY,
+      );
+      scheduler.destroy();
+    },
+  );
+
   it("records a true draw with no winner and emits market cancellation", async () => {
     const ctx = createMockWorld();
     const scheduler = new StreamingDuelScheduler(ctx.world as never);
@@ -1838,7 +2967,7 @@ describe("StreamingDuelScheduler", () => {
     ctx.world.on(EventType.DUEL_CANCELLED, cancelled);
 
     scheduler.init();
-    await (scheduler as any).startCountdown();
+    await startCountdownAtMarketClose(scheduler);
     await vi.advanceTimersByTimeAsync(4000);
 
     const cycle = scheduler.getCurrentCycle()!;
@@ -1847,10 +2976,13 @@ describe("StreamingDuelScheduler", () => {
     cycle.agent1!.damageDealtThisFight = 5;
     cycle.agent2!.damageDealtThisFight = 5;
 
-    (scheduler as any).orchestrator.endFightByTimeout();
+    const fightDeadline = cycle.competitiveSnapshot!.timing!.fightDeadline;
+    vi.setSystemTime(fightDeadline + 777);
+    (scheduler as any).orchestrator.endFightByTimeout(fightDeadline);
 
     expect(cycle.phase).toBe("RESOLUTION");
     expect(cycle.outcome).toBe("draw");
+    expect(cycle.duelEndTime).toBe(fightDeadline);
     expect(cycle.winnerId).toBeNull();
     expect(cycle.loserId).toBeNull();
     expect(aborted).toHaveBeenCalledWith(
@@ -1913,7 +3045,7 @@ describe("StreamingDuelScheduler", () => {
     ] as [number, number, number];
 
     scheduler.init();
-    await harness.startCountdown();
+    await startCountdownAtMarketClose(scheduler);
     await vi.advanceTimersByTimeAsync(STREAMING_TIMING.COUNTDOWN_DURATION);
     const cycle = scheduler.getCurrentCycle()!;
     expect(cycle.phase).toBe("FIGHTING");
@@ -2005,7 +3137,7 @@ describe("StreamingDuelScheduler", () => {
 
       const combatCallsBefore = ctx.combatCalls.length;
       const damageEventsBefore = damageEvents.length;
-      await harness.startCountdown();
+      await startCountdownAtMarketClose(scheduler);
       expect(scheduler.getCurrentCycle()?.phase).toBe("COUNTDOWN");
       await vi.advanceTimersByTimeAsync(STREAMING_TIMING.COUNTDOWN_DURATION);
 
@@ -2154,7 +3286,7 @@ describe("StreamingDuelScheduler", () => {
     const abortEvents = collectCycleAbortEvents(ctx);
 
     scheduler.init();
-    await (scheduler as any).startCountdown();
+    await startCountdownAtMarketClose(scheduler);
     await vi.advanceTimersByTimeAsync(4000);
     expect(scheduler.getCurrentCycle()?.phase).toBe("FIGHTING");
     const cycle = scheduler.getCurrentCycle()!;
@@ -2208,6 +3340,47 @@ describe("StreamingDuelScheduler", () => {
     scheduler.destroy();
   });
 
+  it("does not consume engagement retries while persisted duel damage is settling", async () => {
+    let damagePending = true;
+    const ctx = createMockWorld({
+      combatStarts: false,
+      duelDamagePending: () => damagePending,
+    });
+    const scheduler = new StreamingDuelScheduler(ctx.world as never);
+    const abortEvents = collectCycleAbortEvents(ctx);
+
+    scheduler.init();
+    await startCountdownAtMarketClose(scheduler);
+    await vi.advanceTimersByTimeAsync(4000);
+    expect(scheduler.getCurrentCycle()?.phase).toBe("FIGHTING");
+
+    await vi.advanceTimersByTimeAsync(18_500);
+
+    expect(scheduler.getCurrentCycle()?.phase).toBe("FIGHTING");
+    expect(abortEvents).toHaveLength(0);
+    expect(scheduler.getOperationalMetrics().engagement).toMatchObject({
+      retries: 0,
+      failures: 0,
+      currentRetryCount: 0,
+    });
+
+    damagePending = false;
+    await vi.advanceTimersByTimeAsync(18_500);
+
+    expect(scheduler.getCurrentCycle()).toBeNull();
+    expect(abortEvents).toHaveLength(1);
+    expect(abortEvents[0]).toMatchObject({
+      reason: "combat_engagement_failed",
+    });
+    expect(scheduler.getOperationalMetrics().engagement).toMatchObject({
+      retries: 5,
+      failures: 1,
+      currentRetryCount: 0,
+    });
+
+    scheduler.destroy();
+  });
+
   it("auto-equips a bronze weapon for unarmed duel contestants", async () => {
     const ctx = createMockWorld({
       alphaWeaponId: null,
@@ -2216,7 +3389,7 @@ describe("StreamingDuelScheduler", () => {
     const scheduler = new StreamingDuelScheduler(ctx.world as never);
 
     scheduler.init();
-    await (scheduler as any).startCountdown();
+    await startCountdownAtMarketClose(scheduler);
 
     expect(ctx.getEquippedWeapon("agent-alpha")).toMatch(/^bronze_/);
     expect(ctx.getEquippedWeapon("agent-beta")).toMatch(/^bronze_/);
@@ -2254,7 +3427,7 @@ describe("StreamingDuelScheduler", () => {
 
     try {
       scheduler.init();
-      await (scheduler as any).startCountdown();
+      await startCountdownAtMarketClose(scheduler);
 
       expect(ctx.getEquippedWeapon("agent-alpha")).toBe(equippedWeaponId);
       expect(ctx.getEquippedWeapon("agent-beta")).toMatch(/^bronze_/);
@@ -2288,7 +3461,7 @@ describe("StreamingDuelScheduler", () => {
     ] as [number, number, number];
 
     scheduler.init();
-    await (scheduler as any).startCountdown();
+    await startCountdownAtMarketClose(scheduler);
 
     expect(ctx.countFood("agent-alpha")).toBe(1);
     expect(ctx.countFood("agent-beta")).toBe(1);
@@ -2367,7 +3540,7 @@ describe("StreamingDuelScheduler", () => {
     harness.orchestrator.setDebugCombatRoleOverride("agent-beta", "mage");
 
     scheduler.init();
-    await harness.startCountdown();
+    await startCountdownAtMarketClose(scheduler);
 
     expect(ctx.getEquippedWeapon("agent-alpha")).not.toBe("iron_sword");
     expect(ctx.getEquipmentSlot("agent-alpha", "arrows")?.itemId).toBe(
@@ -2445,7 +3618,7 @@ describe("StreamingDuelScheduler", () => {
     harness.orchestrator.setDebugCombatRoleOverride("agent-beta", "melee");
 
     scheduler.init();
-    await harness.startCountdown();
+    await startCountdownAtMarketClose(scheduler);
 
     expect(
       (
@@ -2482,7 +3655,7 @@ describe("StreamingDuelScheduler", () => {
     ] as [number, number, number];
 
     scheduler.init();
-    await asSchedulerHarness(scheduler).startCountdown();
+    await startCountdownAtMarketClose(scheduler);
     await vi.advanceTimersByTimeAsync(STREAMING_TIMING.COUNTDOWN_DURATION);
     await vi.advanceTimersByTimeAsync(
       STREAMING_TIMING.STATE_BROADCAST_INTERVAL,
@@ -2490,7 +3663,11 @@ describe("StreamingDuelScheduler", () => {
     const cycle = scheduler.getCurrentCycle()!;
     expect(cycle.phase).toBe("FIGHTING");
 
-    ctx.world.emit(EventType.PLAYER_LEFT, { playerId: "agent-beta" });
+    ctx.world.emit(EventType.PLAYER_LEFT, {
+      playerId: "agent-beta",
+      reconnectGraceActive: true,
+      reconnectGraceExpiresAt: Date.now() + 30_000,
+    });
 
     expect(cycle.phase).toBe("RESOLUTION");
     expect(cycle.outcome).toBe("win");
@@ -2533,7 +3710,7 @@ describe("StreamingDuelScheduler", () => {
     ] as [number, number, number];
 
     scheduler.init();
-    await asSchedulerHarness(scheduler).startCountdown();
+    await startCountdownAtMarketClose(scheduler);
     await vi.advanceTimersByTimeAsync(STREAMING_TIMING.COUNTDOWN_DURATION);
     const cycle = scheduler.getCurrentCycle()!;
     const alpha = ctx.entities.get("agent-alpha")!;
@@ -2579,7 +3756,7 @@ describe("StreamingDuelScheduler", () => {
     const scheduler = new StreamingDuelScheduler(ctx.world as never);
 
     scheduler.init();
-    await (scheduler as any).startCountdown();
+    await startCountdownAtMarketClose(scheduler);
 
     await vi.advanceTimersByTimeAsync(4000);
     (scheduler as any).orchestrator.startResolution(
@@ -2611,7 +3788,7 @@ describe("StreamingDuelScheduler", () => {
 
     const scheduler = new StreamingDuelScheduler(ctx.world as never);
     scheduler.init();
-    await (scheduler as any).startCountdown();
+    await startCountdownAtMarketClose(scheduler);
 
     await vi.advanceTimersByTimeAsync(4000);
     (scheduler as any).orchestrator.startResolution(
@@ -2667,7 +3844,7 @@ describe("StreamingDuelScheduler", () => {
     ] as [number, number, number];
 
     scheduler.init();
-    await harness.startCountdown();
+    await startCountdownAtMarketClose(scheduler);
     await vi.advanceTimersByTimeAsync(STREAMING_TIMING.COUNTDOWN_DURATION);
 
     const alpha = ctx.entities.get("agent-alpha")!;
@@ -2715,7 +3892,7 @@ describe("StreamingDuelScheduler", () => {
     const ctx = createMockWorld();
     const scheduler = new StreamingDuelScheduler(ctx.world as never);
     scheduler.init();
-    await asSchedulerHarness(scheduler).startCountdown();
+    await startCountdownAtMarketClose(scheduler);
     await vi.advanceTimersByTimeAsync(STREAMING_TIMING.COUNTDOWN_DURATION);
 
     let releaseCleanup: (() => void) | undefined;
@@ -2755,7 +3932,7 @@ describe("StreamingDuelScheduler", () => {
     ] as [number, number, number];
 
     scheduler.init();
-    await asSchedulerHarness(scheduler).startCountdown();
+    await startCountdownAtMarketClose(scheduler);
     await vi.advanceTimersByTimeAsync(STREAMING_TIMING.COUNTDOWN_DURATION);
     await vi.advanceTimersByTimeAsync(
       STREAMING_TIMING.STATE_BROADCAST_INTERVAL,
@@ -2798,7 +3975,7 @@ describe("StreamingDuelScheduler", () => {
 
     scheduler.init();
     const cycle = scheduler.getCurrentCycle()!;
-    const countdownPromise = harness.startCountdown();
+    const countdownPromise = startCountdownAtMarketClose(scheduler);
     scheduler.destroy();
 
     await vi.advanceTimersByTimeAsync(500);
@@ -2882,6 +4059,251 @@ describe("StreamingDuelScheduler", () => {
     );
 
     chooseSpy.mockRestore();
+    scheduler.destroy();
+  });
+
+  it("locks idle preparation coverage to the exact on-deck pair and alternates both sides deterministically", () => {
+    const ctx = createMockWorld({
+      extraAgents: [
+        { id: "agent-gamma", name: "Gamma", position: [30, 0.2, 30] },
+        { id: "agent-delta", name: "Delta", position: [40, 0.2, 40] },
+      ],
+    });
+    const scheduler = new StreamingDuelScheduler(ctx.world as never);
+    scheduler.init();
+
+    const now = Date.now();
+    const camera = (scheduler as any).camera;
+    (scheduler as any).currentCycle = null;
+    (scheduler as any).matchmaking.nextDuelPair = {
+      agent1Id: "agent-alpha",
+      agent2Id: "agent-beta",
+      selectedAt: now,
+    };
+    camera._cameraTarget = "agent-gamma";
+    camera.lastCameraSwitchTime = now;
+    const random = vi.spyOn(Math, "random").mockReturnValue(0);
+
+    camera.syncIdlePreviewAndCamera(now);
+    expect(camera.cameraTarget).toBe("agent-alpha");
+
+    camera.lastCameraSwitchTime = now - 20_000;
+    camera.syncIdlePreviewAndCamera(now);
+    expect(camera.cameraTarget).toBe("agent-beta");
+
+    camera.lastCameraSwitchTime = now - 20_000;
+    camera.syncIdlePreviewAndCamera(now);
+    expect(camera.cameraTarget).toBe("agent-alpha");
+    expect(random).not.toHaveBeenCalled();
+
+    random.mockRestore();
+    scheduler.destroy();
+  });
+
+  it("cuts idle preparation coverage to a contestant with a new authoritative activity after the established hold", () => {
+    const ctx = createMockWorld();
+    const scheduler = new StreamingDuelScheduler(ctx.world as never);
+    scheduler.init();
+
+    const now = Date.now();
+    const preparationId = "camera-activity-preparation";
+    const camera = (scheduler as any).camera;
+    (scheduler as any).currentCycle = null;
+    (scheduler as any).matchmaking.nextDuelPair = {
+      agent1Id: "agent-alpha",
+      agent2Id: "agent-beta",
+      selectedAt: now,
+    };
+    (scheduler as any).onDeckPreparation = {
+      preparationId,
+      agent1Id: "agent-alpha",
+      agent2Id: "agent-beta",
+      status: "preparing",
+    };
+    (scheduler as any).publicPreparationActivities = {
+      preparationId,
+      agents: new Map(),
+    };
+    camera._cameraTarget = "agent-alpha";
+    camera.lastCameraSwitchTime = now - 20_000;
+
+    ctx.world.emit("duel:preparation:public_activity", {
+      preparationId,
+      agentId: "agent-beta",
+      activity: "gathering",
+      mode: "working",
+      occurredAt: now,
+      revision: 1,
+    });
+
+    expect(camera.cameraTarget).toBe("agent-beta");
+
+    ctx.world.emit("duel:preparation:public_activity", {
+      preparationId,
+      agentId: "agent-alpha",
+      activity: "gathering",
+      mode: "working",
+      occurredAt: now + 1,
+      revision: 1,
+    });
+
+    expect(camera.cameraTarget).toBe("agent-beta");
+
+    camera.lastCameraSwitchTime = now - 20_000;
+    ctx.world.emit("duel:preparation:public_activity", {
+      preparationId,
+      agentId: "agent-alpha",
+      activity: "gathering",
+      mode: "working",
+      occurredAt: now + 2,
+      revision: 2,
+    });
+
+    expect(camera.cameraTarget).toBe("agent-beta");
+
+    ctx.world.emit("duel:preparation:public_activity", {
+      preparationId,
+      agentId: "agent-alpha",
+      activity: "gathering",
+      mode: "traveling",
+      occurredAt: now + 3,
+      revision: 3,
+    });
+
+    expect(camera.cameraTarget).toBe("agent-alpha");
+
+    (scheduler as any).currentCycle = { phase: "FIGHTING" };
+    ctx.world.emit("duel:preparation:public_activity", {
+      preparationId,
+      agentId: "agent-alpha",
+      activity: "crafting",
+      mode: "working",
+      occurredAt: now + 4,
+      revision: 4,
+    });
+
+    expect(camera.cameraTarget).toBe("agent-alpha");
+
+    (scheduler as any).currentCycle = null;
+    ctx.world.emit("duel:preparation:public_activity", {
+      preparationId,
+      agentId: "agent-alpha",
+      activity: "exploring",
+      mode: "working",
+      occurredAt: now + 5,
+      revision: 5,
+      targetItemId: "private_item_id",
+    });
+
+    expect(camera.cameraTarget).toBe("agent-alpha");
+
+    scheduler.destroy();
+  });
+
+  it("hydrates the bounded durable preparation trail without manufacturing a restart camera cut", async () => {
+    const ctx = createMockWorld();
+    const scheduler = new StreamingDuelScheduler(ctx.world as never);
+    scheduler.init();
+
+    const now = Date.now();
+    const preparation = {
+      preparationId: "5f50e456-192e-49e8-b485-0e52000fd426",
+      agent1Id: "agent-alpha",
+      agent2Id: "agent-beta",
+      status: "preparing",
+      selectedAt: now - 1_000,
+      expiresAt: now + 60_000,
+    };
+    Object.assign(scheduler as any, {
+      onDeckPreparation: preparation,
+      preparationStore: {
+        listRecentPublicActivities: vi.fn().mockResolvedValue([
+          {
+            preparationId: preparation.preparationId,
+            agentId: "agent-alpha",
+            activity: "planning",
+            mode: "working",
+            occurredAt: now - 900,
+            revision: 101,
+          },
+          {
+            preparationId: preparation.preparationId,
+            agentId: "agent-beta",
+            activity: "gathering",
+            mode: "traveling",
+            occurredAt: now - 800,
+            revision: 102,
+          },
+          {
+            preparationId: preparation.preparationId,
+            agentId: "agent-alpha",
+            activity: "provisioning",
+            mode: "working",
+            occurredAt: now - 700,
+            revision: 103,
+          },
+        ]),
+      },
+    });
+    const camera = (scheduler as any).camera;
+    camera._cameraTarget = "agent-beta";
+    camera.lastCameraSwitchTime = now - 20_000;
+
+    await (scheduler as any).hydratePublicPreparationActivities(preparation);
+
+    expect(camera.cameraTarget).toBe("agent-beta");
+    expect(
+      (scheduler as any).publicPreparationActivities.agents.get("agent-alpha"),
+    ).toEqual({
+      activity: "provisioning",
+      mode: "working",
+      activityTrail: ["planning", "provisioning"],
+      revision: 103,
+    });
+    expect(
+      (scheduler as any).publicPreparationActivities.agents.get("agent-beta"),
+    ).toEqual({
+      activity: "gathering",
+      mode: "traveling",
+      activityTrail: ["gathering"],
+      revision: 102,
+    });
+    scheduler.destroy();
+  });
+
+  it("retains one pair-bound preparation activity cut until the established hold elapses", () => {
+    const ctx = createMockWorld();
+    const scheduler = new StreamingDuelScheduler(ctx.world as never);
+    scheduler.init();
+
+    const now = Date.now();
+    const camera = (scheduler as any).camera;
+    (scheduler as any).currentCycle = null;
+    (scheduler as any).matchmaking.nextDuelPair = {
+      agent1Id: "agent-alpha",
+      agent2Id: "agent-beta",
+      selectedAt: now,
+    };
+    camera._cameraTarget = "agent-alpha";
+    camera.lastCameraSwitchTime = now;
+
+    expect(
+      camera.considerIdlePreparationActivityCut("agent-beta", now + 1_000),
+    ).toBe(false);
+    camera.syncIdlePreviewAndCamera(now + 5_999);
+    expect(camera.cameraTarget).toBe("agent-alpha");
+
+    camera.syncIdlePreviewAndCamera(now + 6_000);
+    expect(camera.cameraTarget).toBe("agent-beta");
+
+    camera.setCameraTarget("agent-alpha", now + 10_000);
+    expect(
+      camera.considerIdlePreparationActivityCut("agent-beta", now + 11_000),
+    ).toBe(false);
+    camera.clearIdlePreparationActivityCut();
+    camera.syncIdlePreviewAndCamera(now + 16_000);
+    expect(camera.cameraTarget).toBe("agent-alpha");
+
     scheduler.destroy();
   });
 
@@ -3118,8 +4540,8 @@ describe("StreamingDuelScheduler", () => {
     expect(scheduler.getCurrentCycle()?.phase).toBe("ANNOUNCEMENT");
 
     // Call startCountdown twice concurrently (simulates two ticks racing).
-    const p1 = (scheduler as any).startCountdown();
-    const p2 = (scheduler as any).startCountdown();
+    const p1 = startCountdownAtMarketClose(scheduler);
+    const p2 = startCountdownAtMarketClose(scheduler);
     await Promise.all([p1, p2]);
 
     // Should still have moved to COUNTDOWN exactly once.
@@ -3149,7 +4571,7 @@ describe("StreamingDuelScheduler", () => {
       reason: "competitive_agent_policy_drift",
     });
 
-    await (scheduler as any).startCountdown();
+    await startCountdownAtMarketClose(scheduler);
 
     expectAuthoritativeCycleAbort(aborts, {
       cycleId: cycle.cycleId,
@@ -3168,7 +4590,7 @@ describe("StreamingDuelScheduler", () => {
     const scheduler = new StreamingDuelScheduler(ctx.world as never);
     const aborts = collectCycleAbortEvents(ctx);
     scheduler.init();
-    await (scheduler as any).startCountdown();
+    await startCountdownAtMarketClose(scheduler);
     const cycle = scheduler.getCurrentCycle()!;
     vi.spyOn(
       (scheduler as any).orchestrator,
@@ -3197,7 +4619,7 @@ describe("StreamingDuelScheduler", () => {
     const scheduler = new StreamingDuelScheduler(ctx.world as never);
     const aborts = collectCycleAbortEvents(ctx);
     scheduler.init();
-    await (scheduler as any).startCountdown();
+    await startCountdownAtMarketClose(scheduler);
     const cycle = scheduler.getCurrentCycle()!;
     vi.spyOn(
       (scheduler as any).orchestrator,
@@ -3224,7 +4646,7 @@ describe("StreamingDuelScheduler", () => {
     const scheduler = new StreamingDuelScheduler(ctx.world as never);
     const aborts = collectCycleAbortEvents(ctx);
     scheduler.init();
-    await (scheduler as any).startCountdown();
+    await startCountdownAtMarketClose(scheduler);
     await vi.advanceTimersByTimeAsync(STREAMING_TIMING.COUNTDOWN_DURATION);
     const cycle = scheduler.getCurrentCycle()!;
     expect(cycle.phase).toBe("FIGHTING");
@@ -3247,16 +4669,59 @@ describe("StreamingDuelScheduler", () => {
     scheduler.destroy();
   });
 
-  it("resets countdown guard and aborts when arena teleport fails", async () => {
+  it("aborts failed arena staging before publishing a market", () => {
     const ctx = createMockWorld({
       failOnEmitEvent: "player:teleport",
     });
     const scheduler = new StreamingDuelScheduler(ctx.world as never);
     const abortEvents = collectCycleAbortEvents(ctx);
+    const scheduled = vi.fn();
+    const cycleStarted = vi.fn();
+    ctx.world.on("duel:scheduled", scheduled);
+    ctx.world.on("streaming:cycle:started", cycleStarted);
+
+    scheduler.init();
+
+    expect(abortEvents).toEqual([
+      expect.objectContaining({
+        cycleId: expect.any(String),
+        duelId: expect.any(String),
+        duelKeyHex: expect.any(String),
+        reason: "arena_teleport_failed",
+      }),
+    ]);
+    const abortedContestants = abortEvents[0] as {
+      agent1Id: string;
+      agent2Id: string;
+    };
+    expect(
+      [abortedContestants.agent1Id, abortedContestants.agent2Id].sort(),
+    ).toEqual(["agent-alpha", "agent-beta"]);
+    expect(scheduled).not.toHaveBeenCalled();
+    expect(cycleStarted).not.toHaveBeenCalled();
+    expect((scheduler as any)._startCountdownInProgress).toBe(false);
+    expect(scheduler.getCurrentCycle()).toBeNull();
+    expect((scheduler as any).schedulerState).toBe("IDLE");
+    expect(ctx.entities.get("agent-alpha")?.data.inStreamingDuel).toBe(false);
+    expect(ctx.entities.get("agent-beta")?.data.inStreamingDuel).toBe(false);
+
+    scheduler.destroy();
+  });
+
+  it("resets countdown guard and aborts if restaging fails at lock", async () => {
+    const ctx = createMockWorld();
+    const scheduler = new StreamingDuelScheduler(ctx.world as never);
+    const abortEvents = collectCycleAbortEvents(ctx);
     scheduler.init();
     const cycle = scheduler.getCurrentCycle()!;
+    vi.spyOn(
+      (scheduler as any).orchestrator,
+      "teleportToArena",
+    ).mockImplementation(() => {
+      throw new Error("Injected countdown restaging failure");
+    });
 
-    await (scheduler as any).startCountdown();
+    await startCountdownAtMarketClose(scheduler);
 
     expectAuthoritativeCycleAbort(abortEvents, {
       cycleId: cycle.cycleId,
@@ -3284,7 +4749,7 @@ describe("StreamingDuelScheduler", () => {
     scheduler.init();
     const cycle = scheduler.getCurrentCycle()!;
 
-    await (scheduler as any).startCountdown();
+    await startCountdownAtMarketClose(scheduler);
 
     expectAuthoritativeCycleAbort(abortEvents, {
       cycleId: cycle.cycleId,
@@ -3348,7 +4813,7 @@ describe("StreamingDuelScheduler", () => {
     const ctx = createMockWorld();
     const scheduler = new StreamingDuelScheduler(ctx.world as never);
     scheduler.init();
-    await (scheduler as any).startCountdown();
+    await startCountdownAtMarketClose(scheduler);
 
     expect(scheduler.getCurrentCycle()?.phase).toBe("COUNTDOWN");
 
@@ -3372,7 +4837,7 @@ describe("StreamingDuelScheduler", () => {
     const scheduler = new StreamingDuelScheduler(ctx.world as never);
     const abortEvents = collectCycleAbortEvents(ctx);
     scheduler.init();
-    await (scheduler as any).startCountdown();
+    await startCountdownAtMarketClose(scheduler);
 
     expect(scheduler.getCurrentCycle()?.phase).toBe("COUNTDOWN");
     const cycle = scheduler.getCurrentCycle()!;
@@ -3400,7 +4865,7 @@ describe("StreamingDuelScheduler", () => {
     const ctx = createMockWorld();
     const scheduler = new StreamingDuelScheduler(ctx.world as never);
     scheduler.init();
-    await (scheduler as any).startCountdown();
+    await startCountdownAtMarketClose(scheduler);
     await vi.advanceTimersByTimeAsync(4000);
 
     expect(scheduler.getCurrentCycle()?.phase).toBe("FIGHTING");
@@ -3443,7 +4908,7 @@ describe("StreamingDuelScheduler", () => {
     });
     const scheduler = new StreamingDuelScheduler(ctx.world as never);
     scheduler.init();
-    await (scheduler as any).startCountdown();
+    await startCountdownAtMarketClose(scheduler);
     await vi.advanceTimersByTimeAsync(4000);
 
     // Identify which agents were selected for this cycle.
@@ -3458,6 +4923,15 @@ describe("StreamingDuelScheduler", () => {
     expect(entity2.data.inStreamingDuel).toBe(true);
     expect(entity1.data.streamingDuelOpponentId).toBe(id2);
     expect(entity2.data.streamingDuelOpponentId).toBe(id1);
+    const combatRoles = (
+      (scheduler as any).orchestrator as {
+        combatRolesByAgent: Map<string, string>;
+      }
+    ).combatRolesByAgent;
+    expect(entity1.data.streamingDuelCombatRole).toBe(combatRoles.get(id1));
+    expect(entity2.data.streamingDuelCombatRole).toBe(combatRoles.get(id2));
+    expect(entity1.data.streamingDuelWeaponId).toBe(ctx.getEquippedWeapon(id1));
+    expect(entity2.data.streamingDuelWeaponId).toBe(ctx.getEquippedWeapon(id2));
 
     const allAgentIds = [
       "agent-alpha",
@@ -3494,6 +4968,10 @@ describe("StreamingDuelScheduler", () => {
     expect(entity2.data.preventRespawn).toBe(false);
     expect(entity1.data.streamingDuelOpponentId).toBeNull();
     expect(entity2.data.streamingDuelOpponentId).toBeNull();
+    expect(entity1.data.streamingDuelCombatRole).toBeNull();
+    expect(entity2.data.streamingDuelCombatRole).toBeNull();
+    expect(entity1.data.streamingDuelWeaponId).toBeNull();
+    expect(entity2.data.streamingDuelWeaponId).toBeNull();
 
     scheduler.destroy();
   });
@@ -3502,7 +4980,7 @@ describe("StreamingDuelScheduler", () => {
     const ctx = createMockWorld();
     const scheduler = new StreamingDuelScheduler(ctx.world as never);
     scheduler.init();
-    await (scheduler as any).startCountdown();
+    await startCountdownAtMarketClose(scheduler);
     await vi.advanceTimersByTimeAsync(4000);
 
     expect(scheduler.getCurrentCycle()?.phase).toBe("FIGHTING");
@@ -3565,7 +5043,7 @@ describe("StreamingDuelScheduler", () => {
     const ctx = createMockWorld();
     const scheduler = new StreamingDuelScheduler(ctx.world as never);
     scheduler.init();
-    await (scheduler as any).startCountdown();
+    await startCountdownAtMarketClose(scheduler);
     await vi.advanceTimersByTimeAsync(4000);
 
     expect(scheduler.getCurrentCycle()?.phase).toBe("FIGHTING");
@@ -3587,7 +5065,7 @@ describe("StreamingDuelScheduler", () => {
     (scheduler as any).endCycle();
     await Promise.resolve();
     await Promise.resolve();
-    await vi.advanceTimersByTimeAsync(2000);
+    await vi.advanceTimersByTimeAsync(STREAMING_TIMING.INTER_CYCLE_DELAY_MS);
     const nextCycle = scheduler.getCurrentCycle();
     expect(nextCycle?.phase).toBe("ANNOUNCEMENT");
     expect(
@@ -3627,7 +5105,7 @@ describe("StreamingDuelScheduler", () => {
     const ctx = createMockWorld();
     const scheduler = new StreamingDuelScheduler(ctx.world as never);
     scheduler.init();
-    await (scheduler as any).startCountdown();
+    await startCountdownAtMarketClose(scheduler);
     await vi.advanceTimersByTimeAsync(4000);
 
     const cycle = scheduler.getCurrentCycle()!;
@@ -3708,7 +5186,7 @@ describe("StreamingDuelScheduler", () => {
     const ctx = createMockWorld();
     const scheduler = new StreamingDuelScheduler(ctx.world as never);
     scheduler.init();
-    await (scheduler as any).startCountdown();
+    await startCountdownAtMarketClose(scheduler);
     await vi.advanceTimersByTimeAsync(4000);
 
     (scheduler as any).orchestrator.startResolution(
@@ -3749,7 +5227,7 @@ describe("StreamingDuelScheduler", () => {
     await Promise.resolve();
     await Promise.resolve();
     await Promise.resolve();
-    await vi.advanceTimersByTimeAsync(2000);
+    await vi.advanceTimersByTimeAsync(STREAMING_TIMING.INTER_CYCLE_DELAY_MS);
 
     expect(scheduler.getCurrentCycle()?.phase).toBe("ANNOUNCEMENT");
 
@@ -3764,7 +5242,7 @@ describe("StreamingDuelScheduler", () => {
     const ctx = createMockWorld();
     const scheduler = new StreamingDuelScheduler(ctx.world as never);
     scheduler.init();
-    await (scheduler as any).startCountdown();
+    await startCountdownAtMarketClose(scheduler);
 
     expect(scheduler.getCurrentCycle()?.phase).toBe("COUNTDOWN");
 
@@ -3797,7 +5275,7 @@ describe("StreamingDuelScheduler", () => {
     const ctx = createMockWorld();
     const scheduler = new StreamingDuelScheduler(ctx.world as never);
     scheduler.init();
-    await asSchedulerHarness(scheduler).startCountdown();
+    await startCountdownAtMarketClose(scheduler);
     await vi.advanceTimersByTimeAsync(STREAMING_TIMING.COUNTDOWN_DURATION);
 
     const cycle = scheduler.getCurrentCycle()!;
@@ -3851,7 +5329,7 @@ describe("StreamingDuelScheduler", () => {
 
     const scheduler = new StreamingDuelScheduler(ctx.world as never);
     scheduler.init();
-    await asSchedulerHarness(scheduler).startCountdown();
+    await startCountdownAtMarketClose(scheduler);
 
     expect(restorePlayerHealth).toHaveBeenCalledWith("agent-alpha", 20);
     expect(restorePlayerHealth).toHaveBeenCalledWith("agent-beta", 20);
@@ -3869,7 +5347,7 @@ describe("StreamingDuelScheduler", () => {
     const ctx = createMockWorld();
     const scheduler = new StreamingDuelScheduler(ctx.world as never);
     scheduler.init();
-    await asSchedulerHarness(scheduler).startCountdown();
+    await startCountdownAtMarketClose(scheduler);
     await vi.advanceTimersByTimeAsync(STREAMING_TIMING.COUNTDOWN_DURATION);
 
     const cycle = scheduler.getCurrentCycle()!;
@@ -3896,7 +5374,7 @@ describe("StreamingDuelScheduler", () => {
     const ctx = createMockWorld();
     const scheduler = new StreamingDuelScheduler(ctx.world as never);
     scheduler.init();
-    await (scheduler as any).startCountdown();
+    await startCountdownAtMarketClose(scheduler);
 
     // Phase is COUNTDOWN, not FIGHTING.
     expect(scheduler.getCurrentCycle()?.phase).toBe("COUNTDOWN");
@@ -3912,7 +5390,7 @@ describe("StreamingDuelScheduler", () => {
     const ctx = createMockWorld();
     const scheduler = new StreamingDuelScheduler(ctx.world as never);
     scheduler.init();
-    await (scheduler as any).startCountdown();
+    await startCountdownAtMarketClose(scheduler);
 
     expect(scheduler.getCurrentCycle()?.phase).toBe("COUNTDOWN");
     expect((scheduler as any).countdownTimeout).not.toBeNull();
@@ -4060,13 +5538,13 @@ describe("StreamingDuelScheduler", () => {
     expect(alpha.data.health).toBe(59);
     expect(alpha.data.maxHealth).toBe(59);
     expect(alpha.data.skills).toMatchObject({
-      attack: { level: 61, xp: 0 },
-      strength: { level: 66, xp: 0 },
-      defense: { level: 42, xp: 0 },
-      constitution: { level: 59, xp: 0 },
+      attack: { level: 61, xp: 302264 },
+      strength: { level: 66, xp: 496229 },
+      defense: { level: 42, xp: 45513 },
+      constitution: { level: 59, xp: 247862 },
       ranged: { level: 1, xp: 0 },
       magic: { level: 1, xp: 0 },
-      prayer: { level: 12, xp: 0 },
+      prayer: { level: 12, xp: 1580 },
       woodcutting: { level: 1, xp: 0 },
       mining: { level: 1, xp: 0 },
       fishing: { level: 1, xp: 0 },
@@ -4202,7 +5680,55 @@ describe("StreamingDuelScheduler", () => {
       resolveStreamingPreparationDuration({
         STREAMING_DUEL_PREPARATION_MS: "not-a-duration",
       }),
-    ).toThrow(/at least 1000/);
+    ).toThrow(/base-10 integer/);
+    expect(() =>
+      resolveStreamingPreparationDuration({
+        STREAMING_DUEL_PREPARATION_MS: "90000ms",
+      }),
+    ).toThrow(/base-10 integer/);
+    expect(() =>
+      resolveStreamingPreparationDuration({
+        STREAMING_DUEL_PREPARATION_MS: "   ",
+      }),
+    ).toThrow(/base-10 integer/);
+  });
+
+  it("keeps the public preparation floor explicit and inside the private deadline", () => {
+    expect(resolveStreamingPublicPreparationMinimumDuration({})).toBe(0);
+    expect(
+      resolveStreamingPublicPreparationMinimumDuration({
+        STREAMING_DUEL_PREPARATION_MS: "60000",
+        STREAMING_DUEL_PUBLIC_PREPARATION_MIN_MS: "10000",
+      }),
+    ).toBe(10_000);
+    expect(
+      resolveStreamingPublicPreparationMinimumDuration({
+        STREAMING_DUEL_PUBLIC_PREPARATION_MIN_MS: "0",
+      }),
+    ).toBe(0);
+    expect(() =>
+      resolveStreamingPublicPreparationMinimumDuration({
+        STREAMING_DUEL_PREPARATION_MS: "60000",
+        STREAMING_DUEL_PUBLIC_PREPARATION_MIN_MS: "999",
+      }),
+    ).toThrow(/zero or at least 1000/);
+    expect(() =>
+      resolveStreamingPublicPreparationMinimumDuration({
+        STREAMING_DUEL_PUBLIC_PREPARATION_MIN_MS: "10000",
+      }),
+    ).toThrow(/requires STREAMING_DUEL_PREPARATION_MS/);
+    expect(() =>
+      resolveStreamingPublicPreparationMinimumDuration({
+        STREAMING_DUEL_PREPARATION_MS: "60000",
+        STREAMING_DUEL_PUBLIC_PREPARATION_MIN_MS: "60000",
+      }),
+    ).toThrow(/must be below/);
+    expect(() =>
+      resolveStreamingPublicPreparationMinimumDuration({
+        STREAMING_DUEL_PREPARATION_MS: "60000",
+        STREAMING_DUEL_PUBLIC_PREPARATION_MIN_MS: "10s",
+      }),
+    ).toThrow(/base-10 integer/);
   });
 
   it("resumes the exact persisted competitive snapshot after scheduler authority handoff", async () => {
@@ -4227,7 +5753,18 @@ describe("StreamingDuelScheduler", () => {
       preparationDurationMs: 60_000,
     });
     const scheduled: any[] = [];
-    ctx.world.on("duel:scheduled", (event) => scheduled.push(event));
+    const recoveryPresentationOrder: string[] = [];
+    let scheduledArenaPositions: unknown = null;
+    ctx.world.on("player:teleport", (event: any) => {
+      if (event.playerId === "agent-alpha" || event.playerId === "agent-beta") {
+        recoveryPresentationOrder.push(`teleport:${event.playerId}`);
+      }
+    });
+    ctx.world.on("duel:scheduled", (event) => {
+      recoveryPresentationOrder.push("scheduled");
+      scheduledArenaPositions = scheduler.getCurrentCycle()?.arenaPositions;
+      scheduled.push(event);
+    });
 
     scheduler.init();
     await vi.advanceTimersByTimeAsync(0);
@@ -4251,6 +5788,296 @@ describe("StreamingDuelScheduler", () => {
         recovered: true,
       }),
     ]);
+    expect(recoveryPresentationOrder).toEqual([
+      "teleport:agent-alpha",
+      "teleport:agent-beta",
+      "scheduled",
+    ]);
+    expect(scheduledArenaPositions).toEqual({
+      agent1: ctx.entities.get("agent-alpha")?.data.position,
+      agent2: ctx.entities.get("agent-beta")?.data.position,
+    });
+    scheduler.destroy();
+    await scheduler.waitForShutdownCleanup();
+  });
+
+  it("replays each immutable whole-plan receipt before reconstructing recovered loadouts", async () => {
+    const ctx = createMockWorld({
+      alphaWeaponId: RECOVERY_ALPHA_WEAPON,
+      betaWeaponId: RECOVERY_BETA_WEAPON,
+      recoverPreparationEquipment: {
+        "agent-alpha": { weaponId: RECOVERY_ALPHA_WEAPON },
+        "agent-beta": { weaponId: RECOVERY_BETA_WEAPON },
+      },
+    });
+    const scheduler = new StreamingDuelScheduler(ctx.world as never);
+    const competitive = buildPersistedCompetitiveTestSnapshot(
+      scheduler,
+      Date.now() - 1_000,
+    );
+    const equipmentSystem = ctx.world.getSystem("equipment") as {
+      equipItemDirect(playerId: string, itemId: string): Promise<unknown>;
+    };
+    await equipmentSystem.equipItemDirect("agent-alpha", RECOVERY_BETA_WEAPON);
+    await equipmentSystem.equipItemDirect("agent-beta", RECOVERY_ALPHA_WEAPON);
+    const store = {
+      claimLatestCompetitiveSnapshotForRecovery: vi.fn(async () => competitive),
+      markCompetitiveSnapshotTerminal: vi.fn(),
+      expire: vi.fn(async () => []),
+      getActive: vi.fn(async () => null),
+    };
+    Object.assign(scheduler as any, {
+      preparationStore: store,
+      preparationFencingToken: "41",
+      preparationDurationMs: 60_000,
+    });
+
+    scheduler.init();
+    await vi.advanceTimersByTimeAsync(0);
+    await vi.waitFor(() => expect(scheduler.getCurrentCycle()).not.toBeNull());
+
+    expect(ctx.recoverPreparationCalls).toEqual([
+      {
+        playerId: "agent-alpha",
+        preparationId: competitive.preparation.preparationId,
+      },
+      {
+        playerId: "agent-beta",
+        preparationId: competitive.preparation.preparationId,
+      },
+    ]);
+    expect(ctx.getEquippedWeapon("agent-alpha")).toBe(RECOVERY_ALPHA_WEAPON);
+    expect(ctx.getEquippedWeapon("agent-beta")).toBe(RECOVERY_BETA_WEAPON);
+    expect(store.markCompetitiveSnapshotTerminal).not.toHaveBeenCalled();
+
+    scheduler.destroy();
+    await scheduler.waitForShutdownCleanup();
+  });
+
+  it("primes overlapping recovery custody holds before agents can mutate frozen state", async () => {
+    const ctx = createMockWorld({
+      alphaWeaponId: RECOVERY_ALPHA_WEAPON,
+      betaWeaponId: RECOVERY_BETA_WEAPON,
+    });
+    const scheduler = new StreamingDuelScheduler(ctx.world as never);
+    const competitive = buildPersistedCompetitiveTestSnapshot(
+      scheduler,
+      Date.now() - 1_000,
+    );
+    const secondPreparationId = "00000000-0000-4000-8000-000000000099";
+    const events: unknown[] = [];
+    ctx.world.on(DUEL_COMPETITIVE_RECOVERY_CUSTODY_HOLD_EVENT, (event) => {
+      events.push(event);
+    });
+    const store = {
+      listCompetitiveRecoveryCustodyHolds: vi.fn(async () => [
+        {
+          preparationId: competitive.preparation.preparationId,
+          agent1Id: "agent-alpha",
+          agent2Id: "agent-beta",
+        },
+        {
+          preparationId: secondPreparationId,
+          agent1Id: "agent-alpha",
+          agent2Id: "agent-gamma",
+        },
+      ]),
+    };
+    Object.assign(scheduler as any, { preparationStore: store });
+
+    await scheduler.primeCompetitiveRecoveryCustodyHolds();
+
+    expect(store.listCompetitiveRecoveryCustodyHolds).toHaveBeenCalledOnce();
+    expect(ctx.entities.get("agent-alpha")?.data).toMatchObject({
+      inStreamingDuel: true,
+      preventRespawn: true,
+    });
+    expect(ctx.entities.get("agent-beta")?.data).toMatchObject({
+      inStreamingDuel: true,
+      preventRespawn: true,
+    });
+    expect(events).toContainEqual({
+      preparationId: competitive.preparation.preparationId,
+      agentId: "agent-alpha",
+      active: true,
+    });
+
+    (scheduler as any).releaseCompetitiveRecoveryCustodyHold(
+      competitive.preparation.preparationId,
+    );
+    expect(ctx.entities.get("agent-alpha")?.data.inStreamingDuel).toBe(true);
+    expect(ctx.entities.get("agent-beta")?.data.inStreamingDuel).toBe(false);
+
+    (scheduler as any).releaseCompetitiveRecoveryCustodyHold(
+      secondPreparationId,
+    );
+    expect(ctx.entities.get("agent-alpha")?.data.inStreamingDuel).toBe(false);
+    expect(events).toContainEqual({
+      preparationId: secondPreparationId,
+      agentId: "agent-alpha",
+      active: false,
+    });
+
+    scheduler.destroy();
+    await scheduler.waitForShutdownCleanup();
+  });
+
+  it("keeps a frozen market recoverable while cold-start contestants reconnect", async () => {
+    const ctx = createMockWorld({
+      alphaWeaponId: RECOVERY_ALPHA_WEAPON,
+      betaWeaponId: RECOVERY_BETA_WEAPON,
+    });
+    const scheduler = new StreamingDuelScheduler(ctx.world as never);
+    const competitive = buildPersistedCompetitiveTestSnapshot(
+      scheduler,
+      Date.now() - 1_000,
+    );
+    const alpha = ctx.entities.get("agent-alpha")!;
+    const beta = ctx.entities.get("agent-beta")!;
+    ctx.entities.delete("agent-alpha");
+    ctx.entities.delete("agent-beta");
+    const store = {
+      claimLatestCompetitiveSnapshotForRecovery: vi.fn(async () => competitive),
+      markCompetitiveSnapshotTerminal: vi.fn(),
+      expire: vi.fn(async () => []),
+      getActive: vi.fn(async () => null),
+    };
+    Object.assign(scheduler as any, {
+      preparationStore: store,
+      preparationFencingToken: "42",
+      preparationDurationMs: 60_000,
+    });
+
+    scheduler.init();
+    await vi.advanceTimersByTimeAsync(1_000);
+
+    expect(store.markCompetitiveSnapshotTerminal).not.toHaveBeenCalled();
+    expect((scheduler as any).competitiveRecoveryChecked).toBe(false);
+    expect(scheduler.getCurrentCycle()).toBeNull();
+
+    ctx.entities.set("agent-alpha", alpha);
+    ctx.entities.set("agent-beta", beta);
+    await vi.advanceTimersByTimeAsync(1_000);
+    await vi.waitFor(() => expect(scheduler.getCurrentCycle()).not.toBeNull());
+
+    expect(scheduler.getCurrentCycle()).toMatchObject({
+      cycleId: competitive.snapshot.cycleId,
+      duelId: competitive.snapshot.duelId,
+      duelKeyHex: competitive.snapshot.duelKey,
+      phase: "ANNOUNCEMENT",
+    });
+    expect(store.markCompetitiveSnapshotTerminal).not.toHaveBeenCalled();
+    scheduler.destroy();
+    await scheduler.waitForShutdownCleanup();
+  });
+
+  it("defers frozen-snapshot recovery while authoritative equipment is hydrating", async () => {
+    let equipmentReady = true;
+    const ctx = createMockWorld({
+      alphaWeaponId: RECOVERY_ALPHA_WEAPON,
+      betaWeaponId: RECOVERY_BETA_WEAPON,
+      equipmentReady: () => equipmentReady,
+    });
+    const scheduler = new StreamingDuelScheduler(ctx.world as never);
+    const competitive = buildPersistedCompetitiveTestSnapshot(
+      scheduler,
+      Date.now() - 1_000,
+    );
+    const equipmentSystem = ctx.world.getSystem("equipment") as {
+      equipItemDirect(
+        playerId: string,
+        itemId: string,
+      ): Promise<{ success: boolean }>;
+      unequipItemDirect(
+        playerId: string,
+        slotName: string,
+      ): Promise<{ success: boolean }>;
+    };
+    equipmentReady = false;
+    await equipmentSystem.unequipItemDirect("agent-alpha", "weapon");
+    await equipmentSystem.unequipItemDirect("agent-beta", "weapon");
+    const store = {
+      claimLatestCompetitiveSnapshotForRecovery: vi.fn(async () => competitive),
+      markCompetitiveSnapshotTerminal: vi.fn(),
+      expire: vi.fn(async () => []),
+      getActive: vi.fn(async () => null),
+    };
+    Object.assign(scheduler as any, {
+      preparationStore: store,
+      preparationFencingToken: "42",
+      preparationDurationMs: 60_000,
+    });
+
+    scheduler.init();
+    await vi.advanceTimersByTimeAsync(1_000);
+
+    expect(store.markCompetitiveSnapshotTerminal).not.toHaveBeenCalled();
+    expect((scheduler as any).competitiveRecoveryChecked).toBe(false);
+    expect(scheduler.getCurrentCycle()).toBeNull();
+
+    await equipmentSystem.equipItemDirect("agent-alpha", RECOVERY_ALPHA_WEAPON);
+    await equipmentSystem.equipItemDirect("agent-beta", RECOVERY_BETA_WEAPON);
+    equipmentReady = true;
+    await vi.advanceTimersByTimeAsync(1_000);
+    await vi.waitFor(() => expect(scheduler.getCurrentCycle()).not.toBeNull());
+
+    expect(store.markCompetitiveSnapshotTerminal).not.toHaveBeenCalled();
+    expect(
+      store.claimLatestCompetitiveSnapshotForRecovery.mock.calls.length,
+    ).toBeGreaterThanOrEqual(2);
+    expect(scheduler.getCurrentCycle()).toMatchObject({
+      cycleId: competitive.snapshot.cycleId,
+      duelId: competitive.snapshot.duelId,
+      competitiveSnapshotDigest: competitive.digest,
+      phase: "ANNOUNCEMENT",
+    });
+    scheduler.destroy();
+    await scheduler.waitForShutdownCleanup();
+  });
+
+  it("defers frozen-snapshot recovery until the full player projection is hydrated", async () => {
+    let playerReady = true;
+    const ctx = createMockWorld({
+      alphaWeaponId: RECOVERY_ALPHA_WEAPON,
+      betaWeaponId: RECOVERY_BETA_WEAPON,
+      playerReady: () => playerReady,
+    });
+    const scheduler = new StreamingDuelScheduler(ctx.world as never);
+    const competitive = buildPersistedCompetitiveTestSnapshot(
+      scheduler,
+      Date.now() - 1_000,
+    );
+    playerReady = false;
+    const store = {
+      claimLatestCompetitiveSnapshotForRecovery: vi.fn(async () => competitive),
+      markCompetitiveSnapshotTerminal: vi.fn(),
+      expire: vi.fn(async () => []),
+      getActive: vi.fn(async () => null),
+    };
+    Object.assign(scheduler as any, {
+      preparationStore: store,
+      preparationFencingToken: "42",
+      preparationDurationMs: 60_000,
+    });
+
+    scheduler.init();
+    await vi.advanceTimersByTimeAsync(1_000);
+
+    expect(store.markCompetitiveSnapshotTerminal).not.toHaveBeenCalled();
+    expect((scheduler as any).competitiveRecoveryChecked).toBe(false);
+    expect(scheduler.getCurrentCycle()).toBeNull();
+
+    playerReady = true;
+    await vi.advanceTimersByTimeAsync(1_000);
+    await vi.waitFor(() => expect(scheduler.getCurrentCycle()).not.toBeNull());
+
+    expect(store.markCompetitiveSnapshotTerminal).not.toHaveBeenCalled();
+    expect(scheduler.getCurrentCycle()).toMatchObject({
+      cycleId: competitive.snapshot.cycleId,
+      duelId: competitive.snapshot.duelId,
+      competitiveSnapshotDigest: competitive.digest,
+      phase: "ANNOUNCEMENT",
+    });
     scheduler.destroy();
     await scheduler.waitForShutdownCleanup();
   });
@@ -4481,6 +6308,7 @@ describe("StreamingDuelScheduler", () => {
       preparationDurationMs: 60_000,
     });
     const aborts = collectCycleAbortEvents(ctx);
+    const priorLogCount = Logger.getRecentLogs().length;
 
     scheduler.init();
     await vi.advanceTimersByTimeAsync(0);
@@ -4502,6 +6330,31 @@ describe("StreamingDuelScheduler", () => {
       reason: "competitive_snapshot_recovery_state_drift",
       agent1Id: "agent-alpha",
       agent2Id: "agent-beta",
+    });
+    expect(
+      Logger.getRecentLogs()
+        .slice(priorLogCount)
+        .find(
+          (entry) =>
+            entry.level === "ERROR" &&
+            entry.message.includes(
+              "Competitive snapshot recovery integrity failure",
+            ),
+        ),
+    ).toMatchObject({
+      message: expect.stringContaining(
+        "mismatchPaths=$.contestants[0].inventory.length,$.contestants[0].loadoutFingerprint",
+      ),
+      data: {
+        preparationId: competitive.preparation.preparationId,
+        cycleId: competitive.snapshot.cycleId,
+        expectedDigest: competitive.digest,
+        reconstructedDigest: expect.stringMatching(/^[0-9a-f]{64}$/u),
+        mismatchPaths: expect.arrayContaining([
+          "$.contestants[0].inventory.length",
+          "$.contestants[0].loadoutFingerprint",
+        ]),
+      },
     });
     scheduler.destroy();
     await scheduler.waitForShutdownCleanup();
@@ -4973,6 +6826,7 @@ describe("StreamingDuelScheduler", () => {
         return preparation;
       }),
       getActive: vi.fn(async () => preparation),
+      getContestantUnavailability: vi.fn(async () => null),
       expire: vi.fn(async () => []),
       markReady: vi.fn(
         async ({
@@ -5007,6 +6861,7 @@ describe("StreamingDuelScheduler", () => {
           persisted: true,
           frozenAt: Date.now(),
           betWindowDurationMs: input.betWindowDurationMs,
+          timing: input.timing,
         });
         preparation = {
           ...preparation,
@@ -5032,6 +6887,7 @@ describe("StreamingDuelScheduler", () => {
       preparationStore: store,
       preparationFencingToken: "1",
       preparationDurationMs: 60_000,
+      publicPreparationMinimumDurationMs: 2_000,
     });
     const selections: any[] = [];
     const scheduled: any[] = [];
@@ -5071,6 +6927,203 @@ describe("StreamingDuelScheduler", () => {
     expect(scheduler.getCurrentCycle()).toBeNull();
 
     const selected = selections[0];
+    const initialPublicState = scheduler.getStreamingState();
+    const initialPublicPreparation = initialPublicState.preparation;
+    expect(initialPublicPreparation).toEqual({
+      schemaVersion: 2,
+      status: "preparing",
+      selectedAt: preparation.selectedAt,
+      expiresAt: preparation.expiresAt,
+      agent1: {
+        id: selected.agent1Id,
+        ready: false,
+        activity: null,
+        mode: null,
+        activityTrail: [],
+      },
+      agent2: {
+        id: selected.agent2Id,
+        ready: false,
+        activity: null,
+        mode: null,
+        activityTrail: [],
+      },
+    });
+    expect(JSON.stringify(initialPublicPreparation)).not.toContain(
+      selected.preparationId,
+    );
+    expect(JSON.stringify(initialPublicPreparation)).not.toContain(
+      "allowedBankActions",
+    );
+    expect(initialPublicState.cycle.phaseEndTime).toBe(preparation.expiresAt);
+    expect(initialPublicState.cycle.timeRemaining).toBe(60_000);
+    ctx.world.emit("duel:preparation:public_activity", {
+      preparationId: selected.preparationId,
+      agentId: selected.agent1Id,
+      activity: "forge a private counter",
+      mode: "working",
+      occurredAt: preparation.selectedAt,
+      revision: 1,
+    });
+    ctx.world.emit("duel:preparation:public_activity", {
+      preparationId: selected.preparationId,
+      agentId: selected.agent1Id,
+      activity: "planning",
+      mode: "working",
+      occurredAt: preparation.selectedAt,
+      revision: 1,
+      targetItemId: "private_item_id",
+    });
+    expect(scheduler.getStreamingState().preparation).toEqual(
+      initialPublicPreparation,
+    );
+    ctx.world.emit("duel:preparation:public_activity", {
+      preparationId: selected.preparationId,
+      agentId: selected.agent1Id,
+      activity: "training",
+      mode: "traveling",
+      occurredAt: preparation.selectedAt,
+      revision: 2,
+    });
+    expect(scheduler.getStreamingState().preparation).toMatchObject({
+      agent1:
+        selected.agent1Id === preparation.agent1Id
+          ? {
+              activity: "training",
+              mode: "traveling",
+              activityTrail: ["training"],
+            }
+          : { activity: null, mode: null, activityTrail: [] },
+      agent2:
+        selected.agent1Id === preparation.agent2Id
+          ? {
+              activity: "training",
+              mode: "traveling",
+              activityTrail: ["training"],
+            }
+          : { activity: null, mode: null, activityTrail: [] },
+    });
+    ctx.world.emit("duel:preparation:public_activity", {
+      preparationId: selected.preparationId,
+      agentId: selected.agent1Id,
+      activity: "training",
+      mode: "working",
+      occurredAt: preparation.selectedAt + 1,
+      revision: 3,
+    });
+    expect(scheduler.getStreamingState().preparation).toMatchObject({
+      agent1:
+        selected.agent1Id === preparation.agent1Id
+          ? {
+              activity: "training",
+              mode: "working",
+              activityTrail: ["training"],
+            }
+          : { activity: null, mode: null, activityTrail: [] },
+      agent2:
+        selected.agent1Id === preparation.agent2Id
+          ? {
+              activity: "training",
+              mode: "working",
+              activityTrail: ["training"],
+            }
+          : { activity: null, mode: null, activityTrail: [] },
+    });
+    ctx.world.emit("duel:preparation:public_activity", {
+      preparationId: selected.preparationId,
+      agentId: selected.agent1Id,
+      activity: "crafting",
+      mode: "working",
+      occurredAt: preparation.selectedAt + 2,
+      revision: 4,
+    });
+    ctx.world.emit("duel:preparation:public_activity", {
+      preparationId: selected.preparationId,
+      agentId: selected.agent1Id,
+      activity: "gathering",
+      mode: "working",
+      occurredAt: preparation.selectedAt + 3,
+      revision: 3,
+    });
+    ctx.world.emit("duel:preparation:public_activity", {
+      preparationId: "stale-private-preparation",
+      agentId: selected.agent1Id,
+      activity: "questing",
+      mode: "working",
+      occurredAt: preparation.selectedAt + 4,
+      revision: 5,
+    });
+    expect(scheduler.getStreamingState().preparation).toMatchObject({
+      agent1:
+        selected.agent1Id === preparation.agent1Id
+          ? {
+              activity: "crafting",
+              mode: "working",
+              activityTrail: ["training", "crafting"],
+            }
+          : { activity: null, mode: null, activityTrail: [] },
+      agent2:
+        selected.agent1Id === preparation.agent2Id
+          ? {
+              activity: "crafting",
+              mode: "working",
+              activityTrail: ["training", "crafting"],
+            }
+          : { activity: null, mode: null, activityTrail: [] },
+    });
+    const laterActivities = [
+      "provisioning",
+      "questing",
+      "exploring",
+      "reassessing",
+      "planning",
+      "gathering",
+      "training",
+    ] as const;
+    laterActivities.forEach((activity, index) => {
+      ctx.world.emit("duel:preparation:public_activity", {
+        preparationId: selected.preparationId,
+        agentId: selected.agent1Id,
+        activity,
+        mode: "working",
+        occurredAt: preparation.selectedAt + 5 + index,
+        revision: 5 + index,
+      });
+    });
+    expect(scheduler.getStreamingState().preparation).toMatchObject({
+      agent1:
+        selected.agent1Id === preparation.agent1Id
+          ? {
+              activity: "training",
+              activityTrail: [
+                "crafting",
+                "provisioning",
+                "questing",
+                "exploring",
+                "reassessing",
+                "planning",
+                "gathering",
+                "training",
+              ],
+            }
+          : { activity: null, activityTrail: [] },
+      agent2:
+        selected.agent1Id === preparation.agent2Id
+          ? {
+              activity: "training",
+              activityTrail: [
+                "crafting",
+                "provisioning",
+                "questing",
+                "exploring",
+                "reassessing",
+                "planning",
+                "gathering",
+                "training",
+              ],
+            }
+          : { activity: null, activityTrail: [] },
+    });
     const expectedHistoryByAgent = {
       "agent-alpha": {
         result: "win",
@@ -5101,6 +7154,9 @@ describe("StreamingDuelScheduler", () => {
         ],
       ),
     ]);
+    // A slow plan must not consume the configured completed-preparation hold.
+    // The old selection-relative calculation would launch immediately here.
+    await vi.advanceTimersByTimeAsync(10_000);
     ctx.world.emit("duel:preparation:ready", {
       preparationId: selected.preparationId,
       agentId: selected.agent1Id,
@@ -5109,6 +7165,17 @@ describe("StreamingDuelScheduler", () => {
     await Promise.resolve();
     await Promise.resolve();
     expect(scheduled).toHaveLength(0);
+    expect(scheduler.getStreamingState().preparation).toMatchObject({
+      status: "preparing",
+      agent1:
+        selected.agent1Id === preparation.agent1Id
+          ? { id: selected.agent1Id, ready: true }
+          : { id: selected.agent1Id, ready: false },
+      agent2:
+        selected.agent1Id === preparation.agent2Id
+          ? { id: selected.agent2Id, ready: true }
+          : { id: selected.agent2Id, ready: false },
+    });
     ctx.world.emit("duel:preparation:ready", {
       preparationId: selected.preparationId,
       agentId: selected.agent2Id,
@@ -5121,9 +7188,27 @@ describe("StreamingDuelScheduler", () => {
     await Promise.resolve();
     await Promise.resolve();
 
-    expect(store.freezeWithCompetitiveSnapshot).toHaveBeenCalledOnce();
+    expect(store.freezeWithCompetitiveSnapshot).not.toHaveBeenCalled();
+    expect(scheduled).toHaveLength(0);
+    expect(scheduler.getCurrentCycle()).toBeNull();
+    expect(scheduler.getStreamingState().preparation).toMatchObject({
+      status: "ready",
+      agent1: { ready: true },
+      agent2: { ready: true },
+    });
+
+    await vi.advanceTimersByTimeAsync(2_000);
+    (scheduler as any).tick();
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    await vi.waitFor(() =>
+      expect(store.freezeWithCompetitiveSnapshot).toHaveBeenCalledOnce(),
+    );
     expect(scheduled).toHaveLength(1);
     expect(scheduler.getCurrentCycle()?.phase).toBe("ANNOUNCEMENT");
+    expect(scheduler.getStreamingState().preparation).toBeNull();
     expect(scheduled[0]).toMatchObject({
       agent1Id: selected.agent1Id,
       agent2Id: selected.agent2Id,
@@ -5219,6 +7304,7 @@ describe("StreamingDuelScheduler", () => {
         return preparation;
       }),
       getActive: vi.fn(async () => preparation),
+      getContestantUnavailability: vi.fn(async () => null),
       expire: vi.fn(async () => []),
       markReady: vi.fn(),
       freeze: vi.fn(),
@@ -5259,12 +7345,18 @@ describe("StreamingDuelScheduler", () => {
     await vi.waitFor(() => expect(selections).toHaveLength(1));
     const selected = selections[0];
     const failureStartedAt = Date.now();
+    const failureLog = vi.spyOn(Logger, "warn").mockImplementation(() => {});
     ctx.world.emit("duel:preparation:agent_plan_status", {
       preparationId: selected.preparationId,
       agentId: selected.agent1Id,
       status: "failed",
       failureReason: "private_internal_detail",
     });
+
+    expect(failureLog).toHaveBeenCalledWith(
+      "StreamingDuelScheduler",
+      `Private preparation ${selected.preparationId} failed for agent ${selected.agent1Id}: private_internal_detail`,
+    );
 
     await vi.waitFor(() => expect(store.cancel).toHaveBeenCalledOnce());
     expect(store.cancel).toHaveBeenCalledWith({
@@ -5298,6 +7390,235 @@ describe("StreamingDuelScheduler", () => {
     expect(scheduler.getCurrentCycle()).toBeNull();
     expect((scheduler as any).onDeckPreparation).toBeNull();
     expect((scheduler as any).matchmaking.nextDuelPair).toBeNull();
+
+    scheduler.destroy();
+    await scheduler.waitForShutdownCleanup();
+  });
+
+  it("consumes a cross-process contestant-unavailability report before market publication", async () => {
+    const ctx = createMockWorld();
+    const scheduler = new StreamingDuelScheduler(ctx.world as never);
+    const now = Date.now();
+    const preparation = {
+      preparationId: "3b86878a-d3e8-407a-a9de-2cab78640361",
+      fencingToken: "311",
+      agent1Id: "agent-alpha",
+      agent2Id: "agent-beta",
+      allowedBankActions: ["open", "deposit", "withdraw", "deposit_all"],
+      status: "ready",
+      selectedAt: now - 1_000,
+      expiresAt: now + 60_000,
+      agent1ReadyAt: now - 500,
+      agent2ReadyAt: now - 400,
+      agent1PlanEvidence: testPlanEvidence(),
+      agent2PlanEvidence: testPlanEvidence(),
+      frozenAt: null,
+      cancelledAt: null,
+      cancellationReason: null,
+      version: 4,
+    };
+    const cancelled = {
+      ...preparation,
+      status: "cancelled",
+      cancelledAt: now,
+      cancellationReason: "agent_preparation_failed",
+      version: 5,
+    };
+    const store = {
+      expire: vi.fn(async () => []),
+      getActive: vi.fn(async () => preparation),
+      getContestantUnavailability: vi.fn(async () => ({
+        preparationId: preparation.preparationId,
+        agentId: preparation.agent2Id,
+        reason: "agent_unavailable",
+        reportedAt: now - 100,
+      })),
+      cancel: vi.fn(async () => cancelled),
+    };
+    Object.assign(scheduler as any, {
+      preparationStore: store,
+      preparationFencingToken: "311",
+      preparationDurationMs: 60_000,
+      competitiveRecoveryChecked: true,
+    });
+    const startNewCycle = vi
+      .spyOn(scheduler as any, "startNewCycle")
+      .mockResolvedValue(true);
+    const failures: unknown[] = [];
+    const cancellations: unknown[] = [];
+    ctx.world.on("duel:preparation:failed", (event) => failures.push(event));
+    ctx.world.on("duel:preparation:cancelled", (event) =>
+      cancellations.push(event),
+    );
+
+    await (scheduler as any).advancePrivatePreparationGate(now);
+
+    expect(store.getContestantUnavailability).toHaveBeenCalledWith(
+      preparation.preparationId,
+    );
+    expect(store.cancel).toHaveBeenCalledWith({
+      preparationId: preparation.preparationId,
+      fencingToken: "311",
+      reason: "agent_preparation_failed",
+    });
+    expect(startNewCycle).not.toHaveBeenCalled();
+    expect(failures).toEqual([
+      {
+        preparationId: preparation.preparationId,
+        agent1Id: preparation.agent1Id,
+        agent2Id: preparation.agent2Id,
+        failedAgentId: preparation.agent2Id,
+        reason: "agent_preparation_failed",
+      },
+    ]);
+    expect(cancellations).toEqual([
+      expect.objectContaining({
+        preparationId: preparation.preparationId,
+        reason: "agent_preparation_failed",
+      }),
+    ]);
+    expect((scheduler as any).onDeckPreparation).toBeNull();
+
+    scheduler.destroy();
+    await scheduler.waitForShutdownCleanup();
+  });
+
+  it("promotes an expired contestant-host lease to the same pre-market cancellation", async () => {
+    const ctx = createMockWorld();
+    const scheduler = new StreamingDuelScheduler(ctx.world as never);
+    const now = Date.now();
+    const preparation = {
+      preparationId: "6b65826f-3fe8-4676-823e-8ae0eef46e47",
+      fencingToken: "312",
+      agent1Id: "agent-alpha",
+      agent2Id: "agent-beta",
+      allowedBankActions: ["open", "deposit", "withdraw", "deposit_all"],
+      status: "preparing",
+      selectedAt: now - 20_000,
+      expiresAt: now + 40_000,
+      agent1ReadyAt: null,
+      agent2ReadyAt: null,
+      agent1PlanEvidence: null,
+      agent2PlanEvidence: null,
+      frozenAt: null,
+      cancelledAt: null,
+      cancellationReason: null,
+      version: 1,
+    };
+    const report = {
+      preparationId: preparation.preparationId,
+      agentId: preparation.agent1Id,
+      reason: "agent_unavailable",
+      reportedAt: now,
+    };
+    const store = {
+      reportExpiredContestantHostLease: vi.fn(async () => report),
+      getContestantUnavailability: vi.fn(async () => null),
+      cancel: vi.fn(async () => ({
+        ...preparation,
+        status: "cancelled",
+        cancelledAt: now,
+        cancellationReason: "agent_preparation_failed",
+        version: 2,
+      })),
+    };
+    Object.assign(scheduler as any, {
+      preparationStore: store,
+      preparationFencingToken: "312",
+      preparationDurationMs: 60_000,
+      preparationHostLeaseConfig: {
+        leaseMs: 15_000,
+        heartbeatMs: 3_000,
+        claimGraceMs: 10_000,
+      },
+      onDeckPreparation: preparation,
+      onDeckPreparationPairKey: "agent-alpha\u0000agent-beta",
+    });
+
+    await expect(
+      (scheduler as any).consumeReportedContestantUnavailability(preparation),
+    ).resolves.toBe(true);
+
+    expect(store.reportExpiredContestantHostLease).toHaveBeenCalledWith({
+      preparationId: preparation.preparationId,
+      claimGraceMs: 10_000,
+    });
+    expect(store.getContestantUnavailability).not.toHaveBeenCalled();
+    expect(store.cancel).toHaveBeenCalledWith({
+      preparationId: preparation.preparationId,
+      fencingToken: "312",
+      reason: "agent_preparation_failed",
+    });
+    expect((scheduler as any).onDeckPreparation).toBeNull();
+
+    scheduler.destroy();
+    await scheduler.waitForShutdownCleanup();
+  });
+
+  it("revokes local preparation authority before a fenced durable cancellation settles", async () => {
+    const ctx = createMockWorld();
+    const scheduler = new StreamingDuelScheduler(ctx.world as never);
+    const preparation = {
+      preparationId: "f18b3e9a-bfce-4385-a47f-daf946275be3",
+      fencingToken: "32",
+      agent1Id: "agent-alpha",
+      agent2Id: "agent-beta",
+      allowedBankActions: ["open", "deposit", "withdraw", "deposit_all"],
+      status: "preparing",
+      selectedAt: Date.now(),
+      expiresAt: Date.now() + 60_000,
+      agent1ReadyAt: null,
+      agent2ReadyAt: null,
+      frozenAt: null,
+      cancelledAt: null,
+      cancellationReason: null,
+      version: 1,
+    };
+    let settleCancellation!: (value: null) => void;
+    const durableCancellation = new Promise<null>((resolve) => {
+      settleCancellation = resolve;
+    });
+    const store = {
+      cancel: vi.fn(() => durableCancellation),
+    };
+    Object.assign(scheduler as any, {
+      preparationStore: store,
+      preparationFencingToken: "32",
+      preparationDurationMs: 60_000,
+      onDeckPreparation: preparation,
+      onDeckPreparationPairKey: "agent-alpha\u0000agent-beta",
+    });
+    const localRevocations: any[] = [];
+    const durableCancellations: any[] = [];
+    ctx.world.on("duel:preparation:local_revoked", (event) =>
+      localRevocations.push(event),
+    );
+    ctx.world.on("duel:preparation:cancelled", (event) =>
+      durableCancellations.push(event),
+    );
+
+    const cancellation = (scheduler as any).cancelOnDeckPreparation(
+      "lease_renewal_rejected",
+    );
+    await Promise.resolve();
+    const revocationsBeforeDurableSettlement = [...localRevocations];
+    settleCancellation(null);
+    await cancellation;
+
+    expect(revocationsBeforeDurableSettlement).toEqual([
+      expect.objectContaining({
+        preparationId: preparation.preparationId,
+        reason: "lease_renewal_rejected",
+        occurredAt: expect.any(Number),
+      }),
+    ]);
+    expect(store.cancel).toHaveBeenCalledWith({
+      preparationId: preparation.preparationId,
+      fencingToken: "32",
+      reason: "lease_renewal_rejected",
+    });
+    expect(durableCancellations).toEqual([]);
+    expect((scheduler as any).onDeckPreparation).toBeNull();
 
     scheduler.destroy();
     await scheduler.waitForShutdownCleanup();
@@ -5367,6 +7688,147 @@ describe("StreamingDuelScheduler", () => {
       expect.objectContaining({
         preparationId: preparation.preparationId,
         reason: "pair_cleared",
+      }),
+    ]);
+
+    scheduler.destroy();
+    await scheduler.waitForShutdownCleanup();
+  });
+
+  it("suspends an on-deck contestant during reconnect grace without revoking the durable preparation", async () => {
+    const ctx = createMockWorld();
+    const scheduler = new StreamingDuelScheduler(ctx.world as never);
+    const preparation = {
+      preparationId: "3ad7103c-a852-4782-a96e-7c693ea87e78",
+      fencingToken: "37",
+      agent1Id: "agent-alpha",
+      agent2Id: "agent-beta",
+      allowedBankActions: ["open", "deposit", "withdraw", "deposit_all"],
+      status: "preparing",
+      selectedAt: Date.now(),
+      expiresAt: Date.now() + 60_000,
+      agent1ReadyAt: null,
+      agent2ReadyAt: null,
+      agent1PlanEvidence: null,
+      agent2PlanEvidence: null,
+      frozenAt: null,
+      cancelledAt: null,
+      cancellationReason: null,
+      version: 1,
+    };
+    const store = {
+      cancel: vi.fn(async ({ reason }: { reason: string }) => ({
+        ...preparation,
+        status: "cancelled",
+        cancelledAt: Date.now(),
+        cancellationReason: reason,
+        version: 2,
+      })),
+    };
+    Object.assign(scheduler as any, {
+      preparationStore: store,
+      preparationFencingToken: "37",
+      preparationDurationMs: 60_000,
+      onDeckPreparation: preparation,
+      onDeckPreparationPairKey: "agent-alpha\u0000agent-beta",
+    });
+    const matchmaking = (scheduler as any).matchmaking;
+    matchmaking.availableAgents = new Set(["agent-alpha", "agent-beta"]);
+    const selectedPair = {
+      agent1Id: "agent-alpha",
+      agent2Id: "agent-beta",
+      selectedAt: Date.now(),
+    };
+    matchmaking.nextDuelPair = selectedPair;
+    (scheduler as any).subscribeToEvents();
+
+    ctx.world.emit(EventType.PLAYER_LEFT, {
+      playerId: "agent-alpha",
+      reconnectGraceActive: true,
+      reconnectGraceExpiresAt: Date.now() + 30_000,
+    });
+
+    expect(matchmaking.availableAgents.has("agent-alpha")).toBe(false);
+    expect(matchmaking.nextDuelPair).toBe(selectedPair);
+    expect((scheduler as any).onDeckPreparation).toBe(preparation);
+    expect(store.cancel).not.toHaveBeenCalled();
+
+    scheduler.destroy();
+    await scheduler.waitForShutdownCleanup();
+  });
+
+  it("cancels an on-deck preparation when a contestant dies and ignores stale death events", async () => {
+    const ctx = createMockWorld();
+    const scheduler = new StreamingDuelScheduler(ctx.world as never);
+    const preparation = {
+      preparationId: "c8ab83d9-a65e-49a2-b094-64fd608a4a4c",
+      fencingToken: "35",
+      agent1Id: "agent-alpha",
+      agent2Id: "agent-beta",
+      allowedBankActions: ["open", "deposit", "withdraw", "deposit_all"],
+      status: "preparing",
+      selectedAt: Date.now(),
+      expiresAt: Date.now() + 60_000,
+      agent1ReadyAt: null,
+      agent2ReadyAt: null,
+      agent1PlanEvidence: null,
+      agent2PlanEvidence: null,
+      frozenAt: null,
+      cancelledAt: null,
+      cancellationReason: null,
+      version: 1,
+    };
+    const store = {
+      cancel: vi.fn(async ({ reason }: { reason: string }) => ({
+        ...preparation,
+        status: "cancelled",
+        cancelledAt: Date.now(),
+        cancellationReason: reason,
+        version: 2,
+      })),
+    };
+    Object.assign(scheduler as any, {
+      preparationStore: store,
+      preparationFencingToken: "35",
+      onDeckPreparation: preparation,
+      onDeckPreparationPairKey: "agent-alpha\u0000agent-beta",
+    });
+    const matchmaking = (scheduler as any).matchmaking;
+    matchmaking.availableAgents = new Set(["agent-alpha", "agent-beta"]);
+    matchmaking.nextDuelPair = {
+      agent1Id: "agent-alpha",
+      agent2Id: "agent-beta",
+      selectedAt: Date.now(),
+    };
+    const cancellations: any[] = [];
+    ctx.world.on("duel:preparation:cancelled", (event) =>
+      cancellations.push(event),
+    );
+
+    // ENTITY_DEATH carries no cycle/preparation identity. A stale event against
+    // a living entity must not revoke the current private capability.
+    (scheduler as any).handleEntityDeath({ entityId: "agent-alpha" });
+    await Promise.resolve();
+    expect(store.cancel).not.toHaveBeenCalled();
+    expect((scheduler as any).onDeckPreparation).toBe(preparation);
+
+    const alpha = ctx.entities.get("agent-alpha")!;
+    alpha.data.health = 0;
+    alpha.data.alive = false;
+    (scheduler as any).handleEntityDeath({ entityId: "agent-alpha" });
+
+    await vi.waitFor(() => expect(store.cancel).toHaveBeenCalledOnce());
+    expect(store.cancel).toHaveBeenCalledWith({
+      preparationId: preparation.preparationId,
+      fencingToken: "35",
+      reason: "contestant_unavailable",
+    });
+    expect(matchmaking.nextDuelPair).toBeNull();
+    expect((scheduler as any).onDeckPreparation).toBeNull();
+    expect(cancellations).toEqual([
+      expect.objectContaining({
+        preparationId: preparation.preparationId,
+        reason: "contestant_unavailable",
       }),
     ]);
 
@@ -5482,6 +7944,18 @@ describe("StreamingDuelScheduler", () => {
       version: 1,
     };
     const store = {
+      claimContestantHostLease: vi.fn(async (input: any) => ({
+        ...input,
+        claimedAt: Date.now(),
+        heartbeatAt: Date.now(),
+        expiresAt: Date.now() + input.leaseDurationMs,
+      })),
+      heartbeatContestantHostLease: vi.fn(async (input: any) => ({
+        ...input,
+        claimedAt: Date.now(),
+        heartbeatAt: Date.now(),
+        expiresAt: Date.now() + input.leaseDurationMs,
+      })),
       markReady: vi.fn(async ({ agentId }: { agentId: string }) => {
         preparation = {
           ...preparation,
@@ -5507,6 +7981,11 @@ describe("StreamingDuelScheduler", () => {
       preparationStore: store,
       preparationFencingToken: "22",
       preparationDurationMs: 60_000,
+      preparationHostLeaseConfig: {
+        leaseMs: 15_000,
+        heartbeatMs: 3_000,
+        claimGraceMs: 10_000,
+      },
       onDeckPreparation: preparation,
       onDeckPreparationPairKey: "agent-alpha\u0000agent-beta",
       standaloneSparbotIds: new Set(["agent-alpha", "agent-beta"]),
@@ -5541,6 +8020,8 @@ describe("StreamingDuelScheduler", () => {
       "agent-alpha",
       "agent-beta",
     ]);
+    expect(store.claimContestantHostLease).toHaveBeenCalledTimes(2);
+    expect(store.heartbeatContestantHostLease).toHaveBeenCalledTimes(2);
     expect(prayerReadiness).toHaveBeenCalledTimes(2);
     // Each standalone contestant is inspected once to derive its diagnostic
     // evidence and again inside the authoritative readiness transition.
@@ -5611,6 +8092,210 @@ describe("StreamingDuelScheduler", () => {
     await scheduler.waitForShutdownCleanup();
   });
 
+  it("keeps an asynchronously ready selection behind the operator maintenance fence", async () => {
+    const previousMaintenance = process.env.STREAMING_DUEL_MAINTENANCE_MODE;
+    process.env.STREAMING_DUEL_MAINTENANCE_MODE = "true";
+    try {
+      const ctx = createMockWorld();
+      const scheduler = new StreamingDuelScheduler(ctx.world as never);
+      const preparation = {
+        preparationId: "e9704f89-c93a-41f9-b69b-d6d7050272c5",
+        fencingToken: "35",
+        agent1Id: "agent-alpha",
+        agent2Id: "agent-beta",
+        allowedBankActions: ["open", "deposit", "withdraw", "deposit_all"],
+        status: "ready",
+        selectedAt: Date.now(),
+        expiresAt: Date.now() + 60_000,
+        agent1ReadyAt: Date.now(),
+        agent2ReadyAt: Date.now(),
+        frozenAt: null,
+        cancelledAt: null,
+        cancellationReason: null,
+        version: 3,
+      };
+      const store = { create: vi.fn(async () => preparation) };
+      const announce = vi
+        .spyOn(scheduler as any, "emitOnDeckPreparationSelected")
+        .mockResolvedValue(preparation);
+      const reconcile = vi
+        .spyOn(scheduler as any, "advancePrivatePreparationGate")
+        .mockResolvedValue(undefined);
+      Object.assign(scheduler as any, {
+        preparationStore: store,
+        preparationFencingToken: "35",
+        preparationDurationMs: 60_000,
+        preparationSelectionGeneration: 1,
+      });
+      (scheduler as any).matchmaking.nextDuelPair = {
+        agent1Id: preparation.agent1Id,
+        agent2Id: preparation.agent2Id,
+        selectedAt: preparation.selectedAt,
+      };
+
+      await (scheduler as any).persistOnDeckPreparation(
+        {
+          agent1Id: preparation.agent1Id,
+          agent2Id: preparation.agent2Id,
+        },
+        "agent-alpha\u0000agent-beta",
+        1,
+      );
+
+      expect(announce).toHaveBeenCalledOnce();
+      expect(reconcile).not.toHaveBeenCalled();
+      expect((scheduler as any).onDeckPreparation).toBe(preparation);
+      scheduler.destroy();
+      await scheduler.waitForShutdownCleanup();
+    } finally {
+      if (previousMaintenance === undefined) {
+        delete process.env.STREAMING_DUEL_MAINTENANCE_MODE;
+      } else {
+        process.env.STREAMING_DUEL_MAINTENANCE_MODE = previousMaintenance;
+      }
+    }
+  });
+
+  it("preserves a durable ready preparation when direct reconciliation overlaps maintenance", async () => {
+    const previousMaintenance = process.env.STREAMING_DUEL_MAINTENANCE_MODE;
+    process.env.STREAMING_DUEL_MAINTENANCE_MODE = "true";
+    try {
+      const ctx = createMockWorld();
+      const scheduler = new StreamingDuelScheduler(ctx.world as never);
+      const preparation = {
+        preparationId: "21d42b20-a9ab-4eb3-a225-0f15a715b8f5",
+        fencingToken: "36",
+        agent1Id: "agent-alpha",
+        agent2Id: "agent-beta",
+        allowedBankActions: ["open", "deposit", "withdraw", "deposit_all"],
+        status: "ready",
+        selectedAt: Date.now(),
+        expiresAt: Date.now() + 60_000,
+        agent1ReadyAt: Date.now(),
+        agent2ReadyAt: Date.now(),
+        frozenAt: null,
+        cancelledAt: null,
+        cancellationReason: null,
+        version: 3,
+      };
+      const store = {
+        expire: vi.fn(async () => []),
+        getActive: vi.fn(async () => preparation),
+        getContestantUnavailability: vi.fn(async () => null),
+      };
+      Object.assign(scheduler as any, {
+        preparationStore: store,
+        preparationFencingToken: "36",
+        preparationDurationMs: 60_000,
+        competitiveRecoveryChecked: true,
+      });
+      (scheduler as any).matchmaking.nextDuelPair = {
+        agent1Id: preparation.agent1Id,
+        agent2Id: preparation.agent2Id,
+        selectedAt: preparation.selectedAt,
+      };
+      const startNewCycle = vi
+        .spyOn(scheduler as any, "startNewCycle")
+        .mockResolvedValue(true);
+
+      await (scheduler as any).advancePrivatePreparationGate(Date.now());
+
+      expect(startNewCycle).not.toHaveBeenCalled();
+      expect((scheduler as any).onDeckPreparation).toBe(preparation);
+      expect((scheduler as any).onDeckPreparationPairKey).toBe(
+        "agent-alpha\u0000agent-beta",
+      );
+      expect((scheduler as any).matchmaking.nextDuelPair).toMatchObject({
+        agent1Id: "agent-alpha",
+        agent2Id: "agent-beta",
+      });
+      scheduler.destroy();
+      await scheduler.waitForShutdownCleanup();
+    } finally {
+      if (previousMaintenance === undefined) {
+        delete process.env.STREAMING_DUEL_MAINTENANCE_MODE;
+      } else {
+        process.env.STREAMING_DUEL_MAINTENANCE_MODE = previousMaintenance;
+      }
+    }
+  });
+
+  it("publishes diagnostic gathering through the exact durable public preparation contract", async () => {
+    const ctx = createMockWorld();
+    const scheduler = new StreamingDuelScheduler(ctx.world as never);
+    const preparation = {
+      preparationId: "9d101da7-154a-47ba-8e5d-c22323677306",
+      fencingToken: "37",
+      agent1Id: "agent-alpha",
+      agent2Id: "agent-beta",
+      allowedBankActions: ["open", "deposit", "withdraw", "deposit_all"],
+      status: "ready",
+      selectedAt: Date.now(),
+      expiresAt: Date.now() + 60_000,
+      agent1ReadyAt: Date.now(),
+      agent2ReadyAt: Date.now(),
+      frozenAt: null,
+      cancelledAt: null,
+      cancellationReason: null,
+      version: 3,
+    };
+    const store = {
+      expire: vi.fn(async () => []),
+      getActive: vi.fn(async () => preparation),
+    };
+    Object.assign(scheduler as any, {
+      preparationStore: store,
+      preparationFencingToken: "37",
+      preparationDurationMs: 60_000,
+      competitiveRecoveryChecked: true,
+    });
+
+    const established = await (
+      scheduler as any
+    ).ensureDiagnosticPreparationSession(["agent-alpha", "agent-beta"]);
+    (scheduler as any).publishDiagnosticPreparationActivity(
+      established.preparationId,
+      established.agent1Id,
+      "gathering",
+    );
+    (scheduler as any).publishDiagnosticPreparationActivity(
+      established.preparationId,
+      established.agent2Id,
+      "gathering",
+    );
+
+    expect(store.expire).toHaveBeenCalledOnce();
+    expect(store.getActive).toHaveBeenCalledOnce();
+    expect(
+      (scheduler as any).getPublicPreparationSummary(
+        Date.now(),
+        preparation.agent1Id,
+        preparation.agent2Id,
+      ),
+    ).toEqual({
+      schemaVersion: 2,
+      status: "ready",
+      selectedAt: preparation.selectedAt,
+      expiresAt: preparation.expiresAt,
+      agent1: {
+        id: "agent-alpha",
+        ready: true,
+        activity: "gathering",
+        mode: "working",
+        activityTrail: ["gathering"],
+      },
+      agent2: {
+        id: "agent-beta",
+        ready: true,
+        activity: "gathering",
+        mode: "working",
+        activityTrail: ["gathering"],
+      },
+    });
+    scheduler.destroy();
+    await scheduler.waitForShutdownCleanup();
+  });
+
   it("does not overwrite newer in-memory preparation readiness with a stale concurrent response", async () => {
     const ctx = createMockWorld({
       alphaWeaponId: "iron_sword",
@@ -5672,6 +8357,97 @@ describe("StreamingDuelScheduler", () => {
     await scheduler.waitForShutdownCleanup();
   });
 
+  it("retries a transient preparation-readiness serialization conflict without rejecting the contestant", async () => {
+    const ctx = createMockWorld({
+      alphaWeaponId: "iron_sword",
+      betaWeaponId: "bronze_longsword",
+    });
+    const scheduler = new StreamingDuelScheduler(ctx.world as never);
+    const preparation = {
+      preparationId: "b1ee941b-c542-451d-b806-9372f8415f09",
+      fencingToken: "24",
+      agent1Id: "agent-alpha",
+      agent2Id: "agent-beta",
+      allowedBankActions: ["open", "deposit", "withdraw", "deposit_all"],
+      status: "preparing",
+      selectedAt: Date.now(),
+      expiresAt: Date.now() + 60_000,
+      agent1ReadyAt: null,
+      agent2ReadyAt: null,
+      frozenAt: null,
+      cancelledAt: null,
+      cancellationReason: null,
+      version: 1,
+    };
+    const updated = {
+      ...preparation,
+      agent1ReadyAt: Date.now(),
+      version: 2,
+    };
+    const serializationConflict = Object.assign(
+      new Error("could not serialize access due to read/write dependencies"),
+      { code: "40001" },
+    );
+    const store = {
+      markReady: vi
+        .fn()
+        .mockRejectedValueOnce(serializationConflict)
+        .mockResolvedValueOnce(updated),
+    };
+    Object.assign(scheduler as any, {
+      preparationStore: store,
+      preparationFencingToken: "24",
+      onDeckPreparation: preparation,
+    });
+    const prayerReadiness = vi
+      .spyOn(
+        (scheduler as any).orchestrator,
+        "preparePrayerForCompetitiveFreeze",
+      )
+      .mockResolvedValue({ ok: true });
+    const loadoutReadiness = vi
+      .spyOn((scheduler as any).orchestrator, "inspectCompetitiveLoadout")
+      .mockReturnValue({ ok: true });
+    const readinessEvents: any[] = [];
+    const rejectionEvents: any[] = [];
+    ctx.world.on("duel:preparation:readiness", (event) =>
+      readinessEvents.push(event),
+    );
+    ctx.world.on("duel:preparation:readiness_rejected", (event) =>
+      rejectionEvents.push(event),
+    );
+    const errorLog = vi.spyOn(Logger, "error").mockImplementation(() => {});
+
+    const confirmation = (scheduler as any).confirmOnDeckPreparation(
+      preparation.preparationId,
+      preparation.agent1Id,
+      true,
+      testPlanEvidence(),
+    );
+    await vi.advanceTimersByTimeAsync(10);
+    await confirmation;
+
+    expect(store.markReady).toHaveBeenCalledTimes(2);
+    expect(prayerReadiness).toHaveBeenCalledOnce();
+    expect(loadoutReadiness).toHaveBeenCalledOnce();
+    expect((scheduler as any).onDeckPreparation).toBe(updated);
+    expect(readinessEvents).toEqual([
+      expect.objectContaining({
+        agentId: preparation.agent1Id,
+        agent1Ready: true,
+        agent2Ready: false,
+        bothReady: false,
+      }),
+    ]);
+    expect(rejectionEvents).toEqual([]);
+    expect(errorLog).not.toHaveBeenCalledWith(
+      "StreamingDuelScheduler",
+      expect.stringContaining("Failed to persist preparation readiness"),
+    );
+    scheduler.destroy();
+    await scheduler.waitForShutdownCleanup();
+  });
+
   it("re-announces a partially ready durable preparation once after scheduler recovery", async () => {
     const ctx = createMockWorld({
       alphaWeaponId: "iron_sword",
@@ -5697,6 +8473,7 @@ describe("StreamingDuelScheduler", () => {
     const store = {
       create: vi.fn(),
       getActive: vi.fn(async () => preparation),
+      getContestantUnavailability: vi.fn(async () => null),
       expire: vi.fn(async () => []),
       freeze: vi.fn(),
       cancel: vi.fn(),
@@ -5730,6 +8507,48 @@ describe("StreamingDuelScheduler", () => {
     await scheduler.waitForShutdownCleanup();
   });
 
+  it("retries a transient preparation-gate serialization conflict without an error log", async () => {
+    const ctx = createMockWorld();
+    const scheduler = new StreamingDuelScheduler(ctx.world as never);
+    const serializationConflict = Object.assign(
+      new Error("could not serialize access due to concurrent update"),
+      { code: "40001" },
+    );
+    const store = {
+      expire: vi
+        .fn()
+        .mockRejectedValueOnce(serializationConflict)
+        .mockResolvedValueOnce([]),
+      getActive: vi.fn(async () => null),
+    };
+    Object.assign(scheduler as any, {
+      preparationStore: store,
+      preparationFencingToken: "20",
+      preparationDurationMs: 60_000,
+      competitiveRecoveryChecked: true,
+    });
+    (scheduler as any).matchmaking.nextDuelPair = null;
+    vi.spyOn(
+      (scheduler as any).matchmaking,
+      "refreshNextDuelPair",
+    ).mockImplementation(() => undefined);
+    const errorLog = vi.spyOn(Logger, "error").mockImplementation(() => {});
+
+    const reconciliation = (scheduler as any).advancePrivatePreparationGate(
+      Date.now(),
+    );
+    await vi.advanceTimersByTimeAsync(10);
+    await reconciliation;
+
+    expect(store.expire).toHaveBeenCalledTimes(2);
+    expect(errorLog).not.toHaveBeenCalledWith(
+      "StreamingDuelScheduler",
+      expect.stringContaining("Private preparation gate failed closed"),
+    );
+    scheduler.destroy();
+    await scheduler.waitForShutdownCleanup();
+  });
+
   it("re-announces recovered readiness before starting competitive freeze", async () => {
     const ctx = createMockWorld({
       alphaWeaponId: "iron_sword",
@@ -5757,6 +8576,7 @@ describe("StreamingDuelScheduler", () => {
     const store = {
       create: vi.fn(),
       getActive: vi.fn(async () => preparation),
+      getContestantUnavailability: vi.fn(async () => null),
       expire: vi.fn(async () => []),
       freeze: vi.fn(),
       cancel: vi.fn(),
@@ -5851,6 +8671,47 @@ describe("StreamingDuelScheduler", () => {
     await scheduler.waitForShutdownCleanup();
   });
 
+  it("evicts stale in-memory eligibility when durable preparation rejects an opt-out", async () => {
+    const ctx = createMockWorld();
+    const scheduler = new StreamingDuelScheduler(ctx.world as never);
+    const pair = {
+      agent1Id: "agent-alpha",
+      agent2Id: "agent-beta",
+      selectedAt: Date.now(),
+    };
+    const store = {
+      create: vi.fn(async () => {
+        throw new Error("competitive_contestant_participation_not_enabled");
+      }),
+    };
+    scheduler.applyStreamingDuelParticipation(pair.agent1Id, true);
+    scheduler.applyStreamingDuelParticipation(pair.agent2Id, true);
+    Object.assign(scheduler as any, {
+      preparationStore: store,
+      preparationFencingToken: "25",
+      preparationDurationMs: 60_000,
+      competitiveRecoveryChecked: true,
+    });
+    const reconcile = vi.spyOn(
+      scheduler as any,
+      "reconcilePersistedStreamingDuelParticipation",
+    );
+    (scheduler as any).matchmaking.nextDuelPair = pair;
+    expect((scheduler as any).getDatabase()).toBeNull();
+
+    await (scheduler as any).beginOnDeckPreparation(pair);
+
+    expect(store.create).toHaveBeenCalledOnce();
+    expect(reconcile).toHaveBeenCalledOnce();
+    expect(new Set(reconcile.mock.calls[0]![0] as string[])).toEqual(
+      new Set([pair.agent1Id, pair.agent2Id]),
+    );
+    expect(scheduler.getSchedulerState().availableAgents).toBe(0);
+    expect((scheduler as any).matchmaking.nextDuelPair).toBeNull();
+    scheduler.destroy();
+    await scheduler.waitForShutdownCleanup();
+  });
+
   it("keeps durable reconciliation responsive while same-pair delivery is still in flight", async () => {
     const ctx = createMockWorld();
     const scheduler = new StreamingDuelScheduler(ctx.world as never);
@@ -5909,6 +8770,9 @@ describe("StreamingDuelScheduler", () => {
   });
 
   it("rehydrates live standalone contestants after scheduler authority handoff", async () => {
+    for (const [key, value] of Object.entries(localNoMoneyDiagnosticEnv())) {
+      if (value !== undefined) vi.stubEnv(key, value);
+    }
     const standaloneIds = [
       "sparbot-standalone-multi-00000000-0000-4000-8000-000000000001",
       "sparbot-standalone-00000000-0000-4000-8000-000000000002",
@@ -5945,20 +8809,108 @@ describe("StreamingDuelScheduler", () => {
     (scheduler as any).reconcileStandaloneSparbotsFromWorld();
 
     expect(scheduler.getSchedulerState().availableAgents).toBe(2);
+    const idlePreviewState = scheduler.getStreamingState();
+    expect(
+      new Set([
+        idlePreviewState.cycle.agent1?.id,
+        idlePreviewState.cycle.agent2?.id,
+      ]),
+    ).toEqual(new Set(standaloneIds));
     scheduler.destroy();
     await scheduler.waitForShutdownCleanup();
   });
 
-  it("recognizes embedded-agent flags stored in authoritative entity data", () => {
+  it("does not let a production preference lookup evict a joined local standalone contestant", async () => {
+    for (const [key, value] of Object.entries(localNoMoneyDiagnosticEnv())) {
+      if (value !== undefined) vi.stubEnv(key, value);
+    }
+    const standaloneId =
+      "sparbot-standalone-00000000-0000-4000-8000-000000000004";
+    const ctx = createMockWorld({
+      extraAgents: [
+        {
+          id: standaloneId,
+          name: "Riven Ash",
+          position: [0, 0.2, 0],
+        },
+      ],
+    });
+    ctx.entities.delete("agent-alpha");
+    ctx.entities.delete("agent-beta");
+    const scheduler = new StreamingDuelScheduler(ctx.world as never);
+    const persistedPreferenceLookup = vi.spyOn(
+      scheduler as any,
+      "registerAgentFromDatabasePreference",
+    );
+
+    (scheduler as any).registerAgentIfEligible(standaloneId);
+    await Promise.resolve();
+
+    expect(persistedPreferenceLookup).not.toHaveBeenCalled();
+    expect(scheduler.getSchedulerState().availableAgents).toBe(1);
+    scheduler.destroy();
+    await scheduler.waitForShutdownCleanup();
+  });
+
+  it("does not treat a reserved sparbot prefix as production participation authority", () => {
+    vi.stubEnv("DUEL_LOCAL_SMOKE_MODE", "false");
+    const reservedId =
+      "sparbot-standalone-00000000-0000-4000-8000-000000000003";
+    const ctx = createMockWorld({
+      extraAgents: [
+        {
+          id: reservedId,
+          name: "Unverified",
+          position: [0, 0.2, 0],
+        },
+      ],
+    });
+    ctx.entities.delete("agent-alpha");
+    ctx.entities.delete("agent-beta");
+    ctx.entities.get(reservedId)!.isAgent = false;
+    const scheduler = new ProductionStreamingDuelScheduler(ctx.world as never);
+
+    (scheduler as any).scanForExistingAgentsWithEligibility();
+
+    expect(scheduler.getSchedulerState().availableAgents).toBe(0);
+    expect((scheduler as any).standaloneSparbotIds).toEqual(new Set());
+    scheduler.destroy();
+  });
+
+  it("rejects debug contestant mutation before changing a production world", async () => {
+    vi.stubEnv("DUEL_LOCAL_SMOKE_MODE", "false");
+    const ctx = createMockWorld();
+    const scheduler = new ProductionStreamingDuelScheduler(ctx.world as never);
+    const entityCount = ctx.entities.size;
+
+    await expect(
+      scheduler.queueDebugMatchup({
+        targetCharacterId: "agent-alpha",
+        spawnOpponent: true,
+      }),
+    ).rejects.toThrow(/explicit loopback no-money boundary/u);
+    await expect(scheduler.spawnStandaloneSparbots(2, "melee")).rejects.toThrow(
+      /explicit loopback no-money boundary/u,
+    );
+
+    expect(ctx.entities.size).toBe(entityCount);
+    expect(scheduler.getSchedulerState().availableAgents).toBe(0);
+    scheduler.destroy();
+  });
+
+  it("does not treat embedded-agent flags as participation authority", () => {
     const ctx = createMockWorld();
     for (const entity of ctx.entities.values()) {
       entity.isAgent = false;
       Object.assign(entity.data, { isEmbeddedAgent: true });
     }
-    const scheduler = new StreamingDuelScheduler(ctx.world as never);
+    const scheduler = new ProductionStreamingDuelScheduler(ctx.world as never);
 
     (scheduler as any).scanForExistingAgentsWithEligibility();
 
+    expect(scheduler.getSchedulerState().availableAgents).toBe(0);
+    scheduler.applyStreamingDuelParticipation("agent-alpha", true);
+    scheduler.applyStreamingDuelParticipation("agent-beta", true);
     expect(scheduler.getSchedulerState().availableAgents).toBe(2);
     scheduler.destroy();
   });
@@ -5991,6 +8943,7 @@ describe("StreamingDuelScheduler", () => {
     const store = {
       create: vi.fn(),
       getActive: vi.fn(async () => preparation),
+      getContestantUnavailability: vi.fn(async () => null),
       expire: vi.fn(async () => []),
       cancel: vi.fn(),
     };
@@ -6019,6 +8972,214 @@ describe("StreamingDuelScheduler", () => {
       },
       preparation,
     );
+    scheduler.destroy();
+    await scheduler.waitForShutdownCleanup();
+  });
+
+  it("waits inside the durable preparation lease for admitted processing to settle", async () => {
+    let quiet = false;
+    const processingQuiescenceSystem = {
+      requestPlayerProcessingQuiescence: vi.fn(),
+      isPlayerProcessingQuiescent: vi.fn(() => quiet),
+    };
+    const ctx = createMockWorld({ processingQuiescenceSystem });
+    const scheduler = new StreamingDuelScheduler(ctx.world as never);
+    const internal = scheduler as any;
+    const deadline = Date.now() + STREAMING_TIMING.STATE_BROADCAST_INTERVAL * 2;
+
+    const barrier = internal.quiesceContestantsBeforeCompetitiveFreeze(
+      ["agent-alpha", "agent-beta"],
+      { expiresAt: deadline },
+    ) as Promise<boolean>;
+    await Promise.resolve();
+
+    expect(
+      processingQuiescenceSystem.requestPlayerProcessingQuiescence,
+    ).toHaveBeenNthCalledWith(1, "agent-alpha");
+    expect(
+      processingQuiescenceSystem.requestPlayerProcessingQuiescence,
+    ).toHaveBeenNthCalledWith(2, "agent-beta");
+    expect(internal.preMarketProcessingFences).toEqual([]);
+
+    quiet = true;
+    await vi.advanceTimersByTimeAsync(
+      STREAMING_TIMING.STATE_BROADCAST_INTERVAL,
+    );
+    await expect(barrier).resolves.toBe(true);
+    expect(internal.preMarketProcessingFences).toHaveLength(2);
+
+    internal.releasePreMarketProcessingFences();
+    scheduler.destroy();
+    await scheduler.waitForShutdownCleanup();
+  });
+
+  it("fails closed at the processing deadline and releases admission only after later settlement", async () => {
+    let quiet = false;
+    const processingQuiescenceSystem = {
+      requestPlayerProcessingQuiescence: vi.fn(),
+      isPlayerProcessingQuiescent: vi.fn(() => quiet),
+    };
+    const ctx = createMockWorld({ processingQuiescenceSystem });
+    const scheduler = new StreamingDuelScheduler(ctx.world as never);
+    const internal = scheduler as any;
+
+    await expect(
+      Promise.resolve(
+        internal.quiesceContestantsBeforeCompetitiveFreeze(
+          ["agent-alpha", "agent-beta"],
+          { expiresAt: Date.now() },
+        ),
+      ),
+    ).resolves.toBe(false);
+    expect(internal.deferredProcessingFenceReleases.size).toBe(1);
+
+    quiet = true;
+    await vi.advanceTimersByTimeAsync(
+      STREAMING_TIMING.STATE_BROADCAST_INTERVAL,
+    );
+    expect(internal.deferredProcessingFenceReleases.size).toBe(0);
+
+    scheduler.destroy();
+    await scheduler.waitForShutdownCleanup();
+  });
+
+  it("revalidates contestant life after admitted processing settles", async () => {
+    let quiet = false;
+    const processingQuiescenceSystem = {
+      requestPlayerProcessingQuiescence: vi.fn(),
+      isPlayerProcessingQuiescent: vi.fn(() => quiet),
+    };
+    const ctx = createMockWorld({ processingQuiescenceSystem });
+    const scheduler = new StreamingDuelScheduler(ctx.world as never);
+    const internal = scheduler as any;
+    internal.matchmaking.availableAgents.add("agent-alpha");
+    internal.matchmaking.availableAgents.add("agent-beta");
+    const freeze = vi.spyOn(internal.orchestrator, "freezeCompetitiveLoadout");
+    const scheduled = vi.fn();
+    ctx.world.on("duel:scheduled", scheduled);
+
+    const admission = internal.startNewCycleInternal(undefined, {
+      expiresAt: Date.now() + STREAMING_TIMING.STATE_BROADCAST_INTERVAL * 2,
+    }) as Promise<void>;
+    await Promise.resolve();
+    ctx.entities.delete("agent-beta");
+    quiet = true;
+    await vi.advanceTimersByTimeAsync(
+      STREAMING_TIMING.STATE_BROADCAST_INTERVAL,
+    );
+    await admission;
+
+    expect(scheduler.getCurrentCycle()).toBeNull();
+    expect(freeze).not.toHaveBeenCalled();
+    expect(scheduled).not.toHaveBeenCalled();
+    expect(internal.preMarketProcessingFences).toEqual([]);
+    scheduler.destroy();
+    await scheduler.waitForShutdownCleanup();
+  });
+
+  it("keeps processing fenced while replacement authority rechecks an unsettled receipt", async () => {
+    let quiet = false;
+    const processingQuiescenceSystem = {
+      requestPlayerProcessingQuiescence: vi.fn(),
+      isPlayerProcessingQuiescent: vi.fn(() => quiet),
+    };
+    const ctx = createMockWorld({ processingQuiescenceSystem });
+    const first = new StreamingDuelScheduler(ctx.world as never);
+    const firstInternal = first as any;
+    firstInternal.matchmaking.availableAgents.add("agent-alpha");
+    firstInternal.matchmaking.availableAgents.add("agent-beta");
+    const firstFreeze = vi.spyOn(
+      firstInternal.orchestrator,
+      "freezeCompetitiveLoadout",
+    );
+    const deadline = Date.now() + STREAMING_TIMING.STATE_BROADCAST_INTERVAL * 3;
+    const firstAdmission = firstInternal.startNewCycleInternal(undefined, {
+      expiresAt: deadline,
+    }) as Promise<void>;
+    await Promise.resolve();
+
+    expect(
+      canPlayerPerformPreparationAction(ctx.world as never, "agent-alpha"),
+    ).toBe(false);
+    first.destroy();
+
+    const replacement = new StreamingDuelScheduler(ctx.world as never);
+    const replacementInternal = replacement as any;
+    replacementInternal.matchmaking.availableAgents.add("agent-alpha");
+    replacementInternal.matchmaking.availableAgents.add("agent-beta");
+    const replacementFreeze = vi.spyOn(
+      replacementInternal.orchestrator,
+      "freezeCompetitiveLoadout",
+    );
+    const scheduled = vi.fn();
+    ctx.world.on("duel:scheduled", scheduled);
+    const replacementAdmission = replacementInternal.startNewCycleInternal(
+      undefined,
+      { expiresAt: deadline },
+    ) as Promise<void>;
+    await Promise.resolve();
+
+    expect(firstFreeze).not.toHaveBeenCalled();
+    expect(replacementFreeze).not.toHaveBeenCalled();
+    expect(scheduled).not.toHaveBeenCalled();
+    expect(
+      canPlayerPerformPreparationAction(ctx.world as never, "agent-alpha"),
+    ).toBe(false);
+    expect(
+      processingQuiescenceSystem.requestPlayerProcessingQuiescence,
+    ).toHaveBeenCalledTimes(4);
+
+    quiet = true;
+    await vi.advanceTimersByTimeAsync(
+      STREAMING_TIMING.STATE_BROADCAST_INTERVAL,
+    );
+    await Promise.all([firstAdmission, replacementAdmission]);
+
+    expect(first.getCurrentCycle()).toBeNull();
+    expect(firstFreeze).not.toHaveBeenCalled();
+    expect(replacement.getCurrentCycle()?.phase).toBe("ANNOUNCEMENT");
+    expect(replacementFreeze).toHaveBeenCalledTimes(2);
+    expect(scheduled).toHaveBeenCalledOnce();
+
+    replacement.destroy();
+    await Promise.all([
+      first.waitForShutdownCleanup(),
+      replacement.waitForShutdownCleanup(),
+    ]);
+  });
+
+  it("never freezes or publishes a diagnostic matchup while contestant processing is active", async () => {
+    let quiet = false;
+    const processingQuiescenceSystem = {
+      requestPlayerProcessingQuiescence: vi.fn(),
+      isPlayerProcessingQuiescent: vi.fn(() => quiet),
+    };
+    const ctx = createMockWorld({ processingQuiescenceSystem });
+    const scheduler = new StreamingDuelScheduler(ctx.world as never);
+    const internal = scheduler as any;
+    internal.matchmaking.availableAgents.add("agent-alpha");
+    internal.matchmaking.availableAgents.add("agent-beta");
+    const freeze = vi.spyOn(internal.orchestrator, "freezeCompetitiveLoadout");
+    const scheduled = vi.fn();
+    ctx.world.on("duel:scheduled", scheduled);
+
+    await internal.startNewCycleInternal();
+
+    expect(scheduler.getCurrentCycle()).toBeNull();
+    expect(freeze).not.toHaveBeenCalled();
+    expect(scheduled).not.toHaveBeenCalled();
+    expect(
+      processingQuiescenceSystem.requestPlayerProcessingQuiescence,
+    ).toHaveBeenCalledTimes(2);
+
+    quiet = true;
+    await vi.advanceTimersByTimeAsync(
+      STREAMING_TIMING.STATE_BROADCAST_INTERVAL,
+    );
+    await internal.startNewCycleInternal();
+
+    expect(scheduler.getCurrentCycle()?.phase).toBe("ANNOUNCEMENT");
+    expect(scheduled).toHaveBeenCalledOnce();
     scheduler.destroy();
     await scheduler.waitForShutdownCleanup();
   });
@@ -6052,6 +9213,32 @@ describe("StreamingDuelScheduler", () => {
     );
 
     await (scheduler as any).startNewCycleInternal();
+
+    expect(scheduler.getCurrentCycle()?.phase).toBe("ANNOUNCEMENT");
+    scheduler.destroy();
+    await scheduler.waitForShutdownCleanup();
+  });
+
+  it("keeps a dead registered agent out of cycle preflight until authoritative respawn", async () => {
+    const ctx = createMockWorld();
+    const scheduler = new StreamingDuelScheduler(ctx.world as never);
+    const internal = scheduler as any;
+    internal.matchmaking.availableAgents.add("agent-alpha");
+    internal.matchmaking.availableAgents.add("agent-beta");
+    const beta = ctx.entities.get("agent-beta")!;
+    beta.data.health = 0;
+    beta.data.alive = false;
+    const freeze = vi.spyOn(internal.orchestrator, "freezeCompetitiveLoadout");
+
+    await internal.startNewCycleInternal();
+
+    expect(scheduler.getCurrentCycle()).toBeNull();
+    expect(freeze).not.toHaveBeenCalled();
+    expect(internal.matchmaking.availableAgents.has("agent-beta")).toBe(true);
+
+    beta.data.health = beta.data.maxHealth;
+    beta.data.alive = true;
+    await internal.startNewCycleInternal();
 
     expect(scheduler.getCurrentCycle()?.phase).toBe("ANNOUNCEMENT");
     scheduler.destroy();

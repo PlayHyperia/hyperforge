@@ -73,7 +73,8 @@ export class BroadcastManager {
     if (
       ws &&
       typeof ws.subscribe === "function" &&
-      typeof ws.publish === "function"
+      typeof ws.publish === "function" &&
+      typeof ws.sendReliable === "function"
     ) {
       return ws;
     }
@@ -100,7 +101,11 @@ export class BroadcastManager {
     const packet = writePacket(name, data);
 
     // Pub/sub fast path: single publish to "global" topic
-    if (this.uwsApp) {
+    // Critical combat/state terminals need per-socket delivery semantics.
+    // Topic fan-out can discard a publication for a backpressured subscriber
+    // without identifying which client missed it, so reserve pub/sub for
+    // replayable/lower-priority traffic and send critical packets directly.
+    if (this.uwsApp && priority < PacketPriority.CRITICAL) {
       if (ignoreSocketId) {
         // ws.publish() excludes self — publish from the ignored socket's adapter
         const adapter = this.getAdapter(ignoreSocketId);
@@ -159,7 +164,7 @@ export class BroadcastManager {
     }
 
     // Pub/sub fast path: publish to 9 region topics + spectator topic
-    if (this.uwsApp) {
+    if (this.uwsApp && priority < PacketPriority.CRITICAL) {
       const packet = writePacket(name, data);
       const regionKeys = this.spatialIndex.getAdjacentRegionKeys(
         worldX,
@@ -242,9 +247,21 @@ export class BroadcastManager {
    * @param data - Message payload
    * @returns True if socket was found and message sent
    */
-  sendToSocket<T = unknown>(socketId: string, name: string, data: T): boolean {
+  sendToSocket<T = unknown>(
+    socketId: string,
+    name: string,
+    data: T,
+    priority: PacketPriority = PacketPriority.NORMAL,
+  ): boolean {
     const socket = this.sockets.get(socketId);
     if (socket) {
+      if (priority >= PacketPriority.CRITICAL) {
+        return this.sendBufferedPacket(
+          socket,
+          writePacket(name, data),
+          priority,
+        );
+      }
       socket.send(name, data);
       return true;
     }
@@ -265,9 +282,21 @@ export class BroadcastManager {
    * @param data - Message payload
    * @returns True if player was found and message sent
    */
-  sendToPlayer<T = unknown>(playerId: string, name: string, data: T): boolean {
+  sendToPlayer<T = unknown>(
+    playerId: string,
+    name: string,
+    data: T,
+    priority: PacketPriority = PacketPriority.NORMAL,
+  ): boolean {
     const socket = this.getPlayerSocket(playerId);
     if (socket) {
+      if (priority >= PacketPriority.CRITICAL) {
+        return this.sendBufferedPacket(
+          socket,
+          writePacket(name, data),
+          priority,
+        );
+      }
       socket.send(name, data);
       return true;
     }
@@ -373,7 +402,7 @@ export class BroadcastManager {
     priority: PacketPriority = PacketPriority.NORMAL,
   ): number {
     // Pub/sub fast path
-    if (this.uwsApp) {
+    if (this.uwsApp && priority < PacketPriority.CRITICAL) {
       const packet = writePacket(name, data);
       this.uwsApp.publish("spectator", packet, true);
       this._pubsubPublishCount++;
@@ -454,7 +483,18 @@ export class BroadcastManager {
 
     const t0 = performance.now();
     try {
-      socket.sendPacket(packet);
+      const adapter = this.getAdapter(socket.id);
+      if (
+        priority >= PacketPriority.CRITICAL &&
+        adapter &&
+        !adapter.sendReliable(packet)
+      ) {
+        this._sendTimeAccumMs += performance.now() - t0;
+        return false;
+      }
+      if (priority < PacketPriority.CRITICAL || !adapter) {
+        socket.sendPacket(packet);
+      }
       this.bandwidthBudget.recordSend(socket.id, packetBytes);
       const trackedPlayerId = socket.player?.id || socket.characterId;
       if (trackedPlayerId) {

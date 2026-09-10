@@ -61,7 +61,7 @@ const ROTATION_SLERP_SPEED = 12.0;
 // Keep large target-side reversals readable. Exponential damping remains
 // responsive for ordinary tracking errors, while this angular-velocity ceiling
 // prevents a close-range bearing flip from becoming a one-sample visual snap.
-const MAX_ROTATION_RADIANS_PER_SECOND = 6.0;
+const MAX_ROTATION_RADIANS_PER_SECOND = 5.85;
 
 // Emotes that are controlled by TileInterpolator (movement-related)
 // Other emotes like "chopping", "combat", "death" etc. should NOT be overridden

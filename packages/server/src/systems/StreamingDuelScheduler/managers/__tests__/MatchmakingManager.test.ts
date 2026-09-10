@@ -3,9 +3,127 @@ import type { World } from "@hyperforge/shared";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import {
   MatchmakingManager,
+  normalizePersistedCompetitiveOutcome,
   normalizePersistedRecentDuel,
 } from "../MatchmakingManager.js";
 import type { RecentDuelEntry } from "../../types.js";
+import { finalizeCompetitiveSnapshot } from "../../competitive-snapshot.js";
+import { COMPETITIVE_SNAPSHOT_TIMING_FIXTURE } from "../../__tests__/competitiveSnapshotTimingFixture.js";
+
+const makeCompetitiveContestant = (
+  side: "agent1" | "agent2",
+  agentId: string,
+  name: string,
+) => ({
+  side,
+  agentId,
+  name,
+  provider: "test",
+  model: "test-model",
+  combatLevel: 10,
+  startingHp: 20,
+  maxHp: 20,
+  wins: 0,
+  losses: 0,
+  rank: side === "agent1" ? 1 : 2,
+  headToHeadWins: 0,
+  headToHeadLosses: 0,
+  loadoutFingerprint: (side === "agent1" ? "11" : "22").repeat(32),
+  equipment: [{ slot: "weapon", itemId: "bronze_sword", quantity: 1 }],
+  inventory: [],
+  selectedSpell: null,
+  skillLevels: [
+    { skill: "attack", level: 10 },
+    { skill: "constitution", level: 20 },
+  ],
+  prayer: {
+    pointUnits: 0,
+    points: 0,
+    maxPoints: 10,
+    activePrayers: [],
+  },
+  initialCombatStyle: "melee" as const,
+  availableCombatStyles: ["melee" as const],
+  combatLoadouts: {
+    melee: {
+      role: "melee" as const,
+      weaponId: "bronze_sword",
+      arrowsId: null,
+      shieldId: null,
+      spellId: null,
+      armorIds: {
+        helmet: null,
+        body: null,
+        legs: null,
+        boots: null,
+        gloves: null,
+        cape: null,
+        amulet: null,
+        ring: null,
+      },
+    },
+  },
+  preparation: {
+    primaryStyle: "melee" as const,
+    availableStyles: ["melee" as const],
+    planningSource: "deterministic" as const,
+    planningPolicyVersion: "test-policy-v1",
+    agentPolicyFingerprint: "ab".repeat(32),
+    modelProvider: "test",
+    model: "test-model",
+    tacticalStrategy: {
+      approach: "balanced" as const,
+      tacticalMacro: "pressure" as const,
+      attackStyle: "aggressive" as const,
+      prayer: null,
+      preferredCombatRole: null,
+      foodThreshold: 40,
+      switchDefensiveAt: 30,
+      reasoning: "Use the deterministic role-aware competitive fallback.",
+    },
+  },
+});
+
+const makeCompetitiveOutcomeRow = () => {
+  const finalized = finalizeCompetitiveSnapshot({
+    draft: {
+      diagnostic: false,
+      preparationId: "f27f5d4b-84df-4bdf-9d0c-2ee4c0a5776d",
+      cycleId: "authoritative-cycle",
+      duelId: "authoritative-duel",
+      duelKey: "ab".repeat(32),
+      contestants: [
+        makeCompetitiveContestant("agent1", "agent-a", "Astra"),
+        makeCompetitiveContestant("agent2", "agent-b", "Riven"),
+      ],
+    },
+    persisted: true,
+    frozenAt: 100,
+    betWindowDurationMs: 1_000,
+    timing: COMPETITIVE_SNAPSHOT_TIMING_FIXTURE,
+  });
+  return {
+    preparationId: finalized.snapshot.preparationId,
+    snapshotVersion: finalized.snapshot.snapshotVersion,
+    cycleId: finalized.snapshot.cycleId,
+    duelId: finalized.snapshot.duelId,
+    duelKey: finalized.snapshot.duelKey,
+    snapshotDigest: finalized.digest,
+    snapshot: finalized.snapshot,
+    frozenAt: finalized.snapshot.frozenAt,
+    lockedAt: 1_100,
+    duelStartedAt: 1_200,
+    recoveredAt: null,
+    lifecycleStatus: "terminal",
+    terminalOutcome: "win",
+    terminalWinnerId: "agent-a",
+    terminalWinReason: "kill",
+    terminalCancellationReason: null,
+    terminalSeed: "1",
+    terminalReplayHash: "cd".repeat(32),
+    terminalAt: 1_300,
+  };
+};
 
 const makePersistedWin = (overrides: Record<string, unknown> = {}) => ({
   id: 1,
@@ -31,16 +149,40 @@ const makePersistedWin = (overrides: Record<string, unknown> = {}) => ({
 });
 
 const makeManager = (
-  rows: unknown[] | Promise<unknown[]>,
+  rows:
+    | unknown[]
+    | Promise<unknown[]>
+    | {
+        competitive: unknown[];
+        damage: unknown[];
+        legacy: unknown[] | Promise<unknown[]>;
+      },
   maxRecentDuels = 3,
 ) => {
-  const query = {
-    from: vi.fn(() => query),
-    orderBy: vi.fn(() => query),
-    limit: vi.fn(() => rows),
-  };
+  const results =
+    Array.isArray(rows) || rows instanceof Promise
+      ? [[], rows]
+      : [
+          rows.competitive,
+          ...(rows.competitive.length > 0 ? [rows.damage] : []),
+          rows.legacy,
+        ];
+  let selection = 0;
   const db = {
-    select: vi.fn(() => query),
+    select: vi.fn(() => {
+      const result = results[selection++] ?? [];
+      const query = {
+        from: vi.fn(() => query),
+        where: vi.fn(() => query),
+        orderBy: vi.fn(() => query),
+        limit: vi.fn(() => result),
+        then: (
+          resolve: (value: unknown) => unknown,
+          reject: (reason: unknown) => unknown,
+        ) => Promise.resolve(result).then(resolve, reject),
+      };
+      return query;
+    }),
   } as unknown as NodePgDatabase;
 
   return new MatchmakingManager({} as World, () => db, {
@@ -55,7 +197,10 @@ const makeManager = (
 
 const makeSelectionManager = (agentIds: string[]) => {
   const entities = new Map(
-    agentIds.map((agentId) => [agentId, { data: { name: agentId } }]),
+    agentIds.map((agentId) => [
+      agentId,
+      { data: { name: agentId, health: 10, alive: true } },
+    ]),
   );
   const manager = new MatchmakingManager(
     { entities } as unknown as World,
@@ -85,6 +230,83 @@ const makeSelectionManager = (agentIds: string[]) => {
   return { entities, manager, pairChanges };
 };
 
+describe("streaming duel participation authority", () => {
+  it("cannot bypass an opt-out through ordinary registration", () => {
+    const { manager } = makeSelectionManager(["agent-a"]);
+    manager.availableAgents.clear();
+
+    manager.markStreamingDuelOptOut("agent-a", true);
+    manager.registerAgent("agent-a");
+    expect(manager.availableAgents.has("agent-a")).toBe(false);
+
+    manager.markStreamingDuelOptOut("agent-a", false);
+    manager.registerAgent("agent-a");
+    expect(manager.availableAgents.has("agent-a")).toBe(true);
+  });
+
+  it("suspends a reconnecting agent without discarding its selected pair", () => {
+    const { manager, pairChanges } = makeSelectionManager([
+      "agent-a",
+      "agent-b",
+    ]);
+    manager.refreshNextDuelPair(1_000);
+    const selectedPair = manager.nextDuelPair;
+    expect(selectedPair).not.toBeNull();
+
+    manager.suspendAgentForReconnect("agent-a");
+
+    expect(manager.availableAgents.has("agent-a")).toBe(false);
+    expect(manager.nextDuelPair).toBe(selectedPair);
+    expect(pairChanges).toEqual([selectedPair]);
+
+    manager.registerAgent("agent-a");
+    expect(manager.availableAgents.has("agent-a")).toBe(true);
+    expect(manager.nextDuelPair).toBe(selectedPair);
+  });
+});
+
+const makeStatsHydrationManager = (results: unknown[]) => {
+  let selection = 0;
+  const db = {
+    select: vi.fn(() => {
+      const result = results[selection++] ?? [];
+      const query = {
+        from: vi.fn(() => query),
+        where: vi.fn(() => query),
+        limit: vi.fn(() => result),
+      };
+      return query;
+    }),
+  } as unknown as NodePgDatabase;
+  const entities = new Map([
+    [
+      "agent-stats",
+      {
+        data: {
+          name: "Stats Agent",
+          health: 10,
+          alive: true,
+          agentProvider: "test",
+          agentModel: "test-model",
+        },
+      },
+    ],
+  ]);
+  const manager = new MatchmakingManager(
+    { entities } as unknown as World,
+    () => db,
+    {
+      minAgents: 2,
+      maxRecentDuels: 3,
+      persistStatsToDatabase: true,
+      maxAgentStats: 64,
+      insufficientAgentsRetryInterval: 30_000,
+      maxInsufficientAgentWarnings: 5,
+    },
+  );
+  return { db, manager };
+};
+
 const makeLiveDuel = (overrides: Partial<RecentDuelEntry> = {}) => ({
   cycleId: "live-cycle",
   duelId: "live-duel",
@@ -110,6 +332,32 @@ const makeLiveDuel = (overrides: Partial<RecentDuelEntry> = {}) => ({
 });
 
 describe("MatchmakingManager preparation retry deferral", () => {
+  it("keeps dead contestants registered but out of pair selection until respawn", () => {
+    const { entities, manager } = makeSelectionManager([
+      "agent-dead",
+      "agent-healthy-a",
+      "agent-healthy-b",
+    ]);
+    const dead = entities.get("agent-dead")!;
+    dead.data.health = 0;
+    dead.data.alive = false;
+
+    manager.refreshNextDuelPair(1_000);
+
+    expect(manager.availableAgents.has("agent-dead")).toBe(true);
+    expect(
+      new Set([manager.nextDuelPair?.agent1Id, manager.nextDuelPair?.agent2Id]),
+    ).toEqual(new Set(["agent-healthy-a", "agent-healthy-b"]));
+
+    dead.data.health = 10;
+    dead.data.alive = true;
+    manager.availableAgents.delete("agent-healthy-b");
+    manager.refreshNextDuelPair(2_000);
+    expect(
+      new Set([manager.nextDuelPair?.agent1Id, manager.nextDuelPair?.agent2Id]),
+    ).toEqual(new Set(["agent-dead", "agent-healthy-a"]));
+  });
+
   it("keeps a failed agent out while healthy agents continue pairing", () => {
     const { manager } = makeSelectionManager([
       "agent-failed",
@@ -190,6 +438,71 @@ describe("MatchmakingManager preparation retry deferral", () => {
     expect(() =>
       manager.deferAgentAfterPreparationFailure("agent-failed", -1),
     ).toThrow("invalid preparation retry deferral");
+  });
+});
+
+describe("MatchmakingManager competitive stat hydration", () => {
+  it("singleflights persisted records and exposes no registration placeholder", async () => {
+    let resolveCombat!: (rows: unknown[]) => void;
+    const combatRows = new Promise<unknown[]>((resolve) => {
+      resolveCombat = resolve;
+    });
+    const { db, manager } = makeStatsHydrationManager([
+      combatRows,
+      [{ wins: 10, losses: 4, draws: 2, currentStreak: 5 }],
+    ]);
+
+    manager.registerAgent("agent-stats");
+    const first = manager.waitForAgentStatsHydration(["agent-stats"]);
+    const second = manager.waitForAgentStatsHydration(["agent-stats"]);
+    let released = false;
+    void first.then(() => {
+      released = true;
+    });
+    await vi.waitFor(() => expect(db.select).toHaveBeenCalledTimes(2));
+
+    expect(released).toBe(false);
+    resolveCombat([{ totalDuelWins: 12, totalDuelLosses: 3 }]);
+    await Promise.all([first, second]);
+    expect(manager.agentStats.get("agent-stats")).toMatchObject({
+      wins: 12,
+      losses: 3,
+      draws: 2,
+      currentStreak: 5,
+    });
+
+    await manager.waitForAgentStatsHydration(["agent-stats"]);
+    expect(db.select).toHaveBeenCalledTimes(2);
+  });
+
+  it("fails closed on a configured database error and retries successfully", async () => {
+    let rejectCombat!: (error: Error) => void;
+    const failedCombat = new Promise<unknown[]>((_, reject) => {
+      rejectCombat = reject;
+    });
+    const { db, manager } = makeStatsHydrationManager([
+      failedCombat,
+      [],
+      [{ totalDuelWins: 7, totalDuelLosses: 2 }],
+      [{ wins: 7, losses: 2, draws: 1, currentStreak: 3 }],
+    ]);
+
+    manager.registerAgent("agent-stats");
+    const first = manager.waitForAgentStatsHydration(["agent-stats"]);
+    await vi.waitFor(() => expect(db.select).toHaveBeenCalledTimes(2));
+    rejectCombat(new Error("temporary stats outage"));
+    await expect(first).rejects.toThrow("temporary stats outage");
+    await expect(
+      manager.waitForAgentStatsHydration(["agent-stats"]),
+    ).resolves.toBeUndefined();
+
+    expect(db.select).toHaveBeenCalledTimes(4);
+    expect(manager.agentStats.get("agent-stats")).toMatchObject({
+      wins: 7,
+      losses: 2,
+      draws: 1,
+      currentStreak: 3,
+    });
   });
 });
 
@@ -390,6 +703,162 @@ describe("MatchmakingManager opponent history", () => {
 });
 
 describe("MatchmakingManager recent-duel hydration", () => {
+  it("normalizes terminal truth from the exact frozen snapshot and computed damage", () => {
+    const row = makeCompetitiveOutcomeRow();
+
+    expect(normalizePersistedCompetitiveOutcome(row, 7, 3)).toEqual({
+      cycleId: "authoritative-cycle",
+      duelId: "authoritative-duel",
+      finishedAt: 1_300,
+      outcome: "win",
+      agent1Id: "agent-a",
+      agent1Name: "Astra",
+      agent1OpeningStyle: "melee",
+      agent2Id: "agent-b",
+      agent2Name: "Riven",
+      agent2OpeningStyle: "melee",
+      winnerId: "agent-a",
+      winnerName: "Astra",
+      loserId: "agent-b",
+      loserName: "Riven",
+      winReason: "kill",
+      cancellationReason: null,
+      damageAgent1: 7,
+      damageAgent2: 3,
+      damageWinner: 7,
+      damageLoser: 3,
+    });
+    expect(
+      normalizePersistedCompetitiveOutcome(
+        { ...row, snapshotDigest: "00".repeat(32) },
+        7,
+        3,
+      ),
+    ).toBeNull();
+    expect(
+      normalizePersistedCompetitiveOutcome(
+        {
+          ...row,
+          snapshot: { ...row.snapshot, diagnostic: true },
+        },
+        7,
+        3,
+      ),
+    ).toBeNull();
+  });
+
+  it("reconstructs draw and cancellation terminals without inventing a winner", () => {
+    const win = makeCompetitiveOutcomeRow();
+    expect(
+      normalizePersistedCompetitiveOutcome(
+        {
+          ...win,
+          terminalOutcome: "draw",
+          terminalWinnerId: null,
+          terminalWinReason: "draw",
+          terminalCancellationReason: "draw",
+        },
+        4,
+        4,
+      ),
+    ).toMatchObject({
+      outcome: "draw",
+      winnerId: null,
+      loserId: null,
+      winReason: "draw",
+      damageAgent1: 4,
+      damageAgent2: 4,
+      damageWinner: null,
+      damageLoser: null,
+    });
+    expect(
+      normalizePersistedCompetitiveOutcome(
+        {
+          ...win,
+          terminalOutcome: "cancelled",
+          terminalWinnerId: null,
+          terminalWinReason: null,
+          terminalCancellationReason: "operator_cancelled",
+          terminalSeed: null,
+          terminalReplayHash: null,
+        },
+        2,
+        1,
+      ),
+    ).toMatchObject({
+      outcome: "cancelled",
+      winnerId: null,
+      loserId: null,
+      winReason: null,
+      cancellationReason: "operator_cancelled",
+      damageAgent1: 2,
+      damageAgent2: 1,
+    });
+  });
+
+  it("hydrates authoritative terminal rows ahead of conflicting legacy history", async () => {
+    const row = makeCompetitiveOutcomeRow();
+    const manager = makeManager({
+      competitive: [row],
+      damage: [
+        {
+          cycleId: row.cycleId,
+          observation: {
+            schemaVersion: 1,
+            sequence: 1,
+            cycleId: row.cycleId,
+            duelId: row.duelId,
+            actorId: "agent-a",
+            opponentId: "agent-b",
+            tick: 5,
+            observedAt: 1_250,
+            phase: "FIGHTING",
+            combatRole: "melee",
+            tacticalMacro: "pressure",
+            action: "damage",
+            value: "hit",
+            amount: 7,
+            outcome: "committed",
+          },
+        },
+      ],
+      legacy: [
+        makePersistedWin({
+          cycleId: row.cycleId,
+          winnerId: "agent-b",
+          winnerName: "Riven",
+          loserId: "agent-a",
+          loserName: "Astra",
+          damageAgent1: 0,
+          damageAgent2: 99,
+        }),
+      ],
+    });
+
+    await expect(manager.hydrateRecentDuelsFromDatabase()).resolves.toBe(1);
+    expect(manager.getRecentDuels()).toEqual([
+      expect.objectContaining({
+        cycleId: row.cycleId,
+        winnerId: "agent-a",
+        loserId: "agent-b",
+        damageAgent1: 7,
+        damageAgent2: 0,
+      }),
+    ]);
+  });
+
+  it("never masks a corrupt competitive terminal with the legacy cache", async () => {
+    const row = makeCompetitiveOutcomeRow();
+    const manager = makeManager({
+      competitive: [{ ...row, snapshotDigest: "00".repeat(32) }],
+      damage: [],
+      legacy: [makePersistedWin({ cycleId: row.cycleId })],
+    });
+
+    await expect(manager.hydrateRecentDuelsFromDatabase()).resolves.toBe(0);
+    expect(manager.getRecentDuels()).toEqual([]);
+  });
+
   it("merges persisted rows newest-first without replacing live cycles", async () => {
     const manager = makeManager([
       makePersistedWin({

@@ -5,7 +5,10 @@ export default defineConfig({
   test: {
     // Only include .test.ts files (unit/integration tests)
     // Exclude .spec.ts files (Playwright E2E tests - run with `npm run test:e2e`)
-    include: ["**/*.test.ts"],
+    // Scope collection to this package's real test roots. A workspace dependency
+    // can be symlinked beneath node_modules, and a package-wide `**` glob follows
+    // those links into sibling packages (including archived source trees).
+    include: ["src/**/*.test.ts", "tests/**/*.test.ts", "scripts/**/*.test.ts"],
     exclude: [
       "**/node_modules/**",
       "**/dist/**",
@@ -21,16 +24,22 @@ export default defineConfig({
   resolve: {
     alias: [
       {
-        find: /^@hyperia\/shared\/client$/,
-        replacement: path.resolve(__dirname, "../shared/src/index.client.ts"),
+        find: /^@hyperforge\/shared\/client$/,
+        replacement: path.resolve(
+          import.meta.dirname,
+          "../shared/src/index.client.ts",
+        ),
       },
       {
-        find: /^@hyperia\/shared$/,
-        replacement: path.resolve(__dirname, "../shared/src/index.ts"),
+        find: /^@hyperforge\/shared$/,
+        replacement: path.resolve(
+          import.meta.dirname,
+          "../shared/src/index.ts",
+        ),
       },
       {
-        find: /^@hyperia\/shared\/(.*)$/,
-        replacement: path.resolve(__dirname, "../shared/src/$1"),
+        find: /^@hyperforge\/shared\/(.*)$/,
+        replacement: path.resolve(import.meta.dirname, "../shared/src/$1"),
       },
     ],
   },

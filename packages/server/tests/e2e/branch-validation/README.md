@@ -274,7 +274,8 @@ const testAgent = createTestAgent();
 // Returns: { userId, characterId, token, isAgent: true }
 ```
 
-This bypasses Privy authentication for testing while using the same JWT secret as production.
+This bypasses Privy authentication for testing while using the same configured
+JWT signing authority as the server.
 
 ## CI/CD Integration
 

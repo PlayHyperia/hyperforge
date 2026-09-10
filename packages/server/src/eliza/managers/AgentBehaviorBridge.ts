@@ -15,7 +15,7 @@
 import { Worker } from "node:worker_threads";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
-import { existsSync } from "node:fs";
+import { existsSync, statSync } from "node:fs";
 import {
   EventType,
   getCombatNPCs,
@@ -92,9 +92,15 @@ import {
   snapshotOrdinaryProcessingRetrySuppressions,
 } from "../ordinaryProcessingRetry.js";
 import { getAuthoritativeRuntimeMobType } from "../runtimeEntityIdentity.js";
+import { resolveOrdinaryCombatSpecialization } from "../ordinaryCombatSpecialization.js";
+import { buildOrdinaryCombatReadinessCatalog } from "../ordinaryCombatReadinessCatalog.js";
 
 /** How often the bridge checks which agents are due for a tick (ms) */
 const BRIDGE_POLL_INTERVAL_MS = 1000;
+
+/** Bound the asynchronous quest persistence acknowledgement per action. */
+const QUEST_ACCEPT_CONFIRMATION_TIMEOUT_MS = 5_000;
+const QUEST_ACCEPT_CONFIRMATION_POLL_MS = 25;
 
 /** Max agents to process per poll cycle to avoid blocking the event loop */
 const MAX_AGENTS_PER_POLL = 5;
@@ -103,12 +109,56 @@ const MAX_AGENTS_PER_POLL = 5;
 const yieldToEventLoop = (): Promise<void> =>
   new Promise((resolve) => setTimeout(resolve, 0));
 
+async function waitForQuestStartConfirmation(
+  instance: AgentInstance,
+  questId: string,
+): Promise<boolean> {
+  const deadline = Date.now() + QUEST_ACCEPT_CONFIRMATION_TIMEOUT_MS;
+  while (Date.now() < deadline) {
+    if (
+      instance.service
+        .getQuestState()
+        .some((quest) => quest.questId === questId)
+    ) {
+      return true;
+    }
+    await new Promise((resolve) =>
+      setTimeout(resolve, QUEST_ACCEPT_CONFIRMATION_POLL_MS),
+    );
+  }
+  return instance.service
+    .getQuestState()
+    .some((quest) => quest.questId === questId);
+}
+
 function actionResult(
   attemptedActionType: EmbeddedBehaviorAction["type"],
   outcome: AgentAutonomyActionResult["outcome"],
   appliedActionType: EmbeddedBehaviorAction["type"] | null = null,
 ): AgentAutonomyActionResult {
   return { attemptedActionType, appliedActionType, outcome };
+}
+
+const RECEIPT_BOUND_CUSTODY_ACTIONS = new Set<EmbeddedBehaviorAction["type"]>([
+  "gather",
+  "pickup",
+  "lootGravestone",
+  "bury",
+  "firemake",
+  "cook",
+  "smelt",
+  "smith",
+  "runecraft",
+  "craft",
+  "fletch",
+  "tan",
+  "storeBuy",
+  "bankDepositAll",
+  "bankWithdraw",
+]);
+
+function isReceiptBoundCustodyAction(action: EmbeddedBehaviorAction): boolean {
+  return RECEIPT_BOUND_CUSTODY_ACTIONS.has(action.type);
 }
 
 /**
@@ -181,6 +231,7 @@ export function buildWorkerItemDataSnapshot(): Array<[string, WorkerItemData]> {
               barItemId: smithing.barType,
               barsRequired: smithing.barsRequired,
               levelRequired: smithing.levelRequired,
+              outputQuantity: smithing.outputQuantity,
             }
           : undefined,
       },
@@ -192,10 +243,11 @@ export function buildWorkerItemDataSnapshot(): Array<[string, WorkerItemData]> {
 /** Build the non-custodial public recipe catalogs that are not item-keyed. */
 export function buildWorkerProcessingRecipeSnapshot(
   combatNpcs = getCombatNPCs(),
+  authoredStores = getAllStores(),
 ): WorkerProcessingRecipeSnapshot {
   const provider = ProcessingDataProvider.getInstance();
   return {
-    stores: getAllStores()
+    stores: authoredStores
       .map((store) => ({
         storeId: store.id,
         items: store.items
@@ -302,7 +354,52 @@ export function buildWorkerProcessingRecipeSnapshot(
         levelRequired: recipe.levelRequired,
       }))
       .sort((a, b) => a.runeType.localeCompare(b.runeType)),
+    combatReadiness: buildOrdinaryCombatReadinessCatalog(authoredStores),
   };
+}
+
+/**
+ * Resolve the worker paired with this bridge. Bundled dev/production bridges
+ * always use their sibling. Direct source consumers may have both build/ and
+ * dist/ artifacts, so they use the freshest generated worker instead of
+ * silently loading an obsolete bundle.
+ */
+export function resolveAgentBehaviorWorkerPath(
+  thisFile: string,
+  fileExists: (candidate: string) => boolean = existsSync,
+  fileModifiedAt: (candidate: string) => number = (candidate) =>
+    statSync(candidate).mtimeMs,
+): string {
+  const siblingWorkerPath = path.join(
+    path.dirname(thisFile),
+    "agentBehaviorWorker.js",
+  );
+  if (fileExists(siblingWorkerPath)) return siblingWorkerPath;
+
+  const generatedCandidates = [
+    path.resolve(
+      path.dirname(thisFile),
+      "../../../dist/agentBehaviorWorker.js",
+    ),
+    path.resolve(
+      path.dirname(thisFile),
+      "../../../build/agentBehaviorWorker.js",
+    ),
+  ];
+  let freshest: { path: string; modifiedAt: number } | null = null;
+  for (const candidate of generatedCandidates) {
+    if (!fileExists(candidate)) continue;
+    let modifiedAt: number;
+    try {
+      modifiedAt = fileModifiedAt(candidate);
+    } catch {
+      continue;
+    }
+    if (!freshest || modifiedAt > freshest.modifiedAt) {
+      freshest = { path: candidate, modifiedAt };
+    }
+  }
+  return freshest?.path ?? siblingWorkerPath;
 }
 
 export class AgentBehaviorBridge {
@@ -386,22 +483,7 @@ export class AgentBehaviorBridge {
     // esbuild bundles to build/ (dev) or dist/ (prod), with the worker as a
     // sibling file (agentBehaviorWorker.js) in the same directory.
     const thisFile = fileURLToPath(import.meta.url);
-    const siblingWorkerPath = path.join(
-      path.dirname(thisFile),
-      "agentBehaviorWorker.js",
-    );
-    const workerPath =
-      [
-        siblingWorkerPath,
-        path.resolve(
-          path.dirname(thisFile),
-          "../../../build/agentBehaviorWorker.js",
-        ),
-        path.resolve(
-          path.dirname(thisFile),
-          "../../../dist/agentBehaviorWorker.js",
-        ),
-      ].find((candidate) => existsSync(candidate)) ?? siblingWorkerPath;
+    const workerPath = resolveAgentBehaviorWorkerPath(thisFile);
     this.worker = new Worker(workerPath);
 
     // Handle messages from worker
@@ -847,11 +929,19 @@ export class AgentBehaviorBridge {
 
       const inventoryItems = instance.service.getInventoryItems();
       const equippedItems = instance.service.getEquippedItems();
+      const coinRecoveryAuthorized = hasOrdinaryCoinRecoveryAuthorization(
+        instance,
+        now,
+        { inventoryItems, equippedItems },
+      );
 
       // Per-agent data only — shared data is sent separately to avoid
       // structured clone duplicating large arrays N times
       const tickInput: AgentTickInput = {
         characterId,
+        combatSpecialization: resolveOrdinaryCombatSpecialization(
+          instance.config,
+        ),
         behaviorEpoch: instance.behaviorEpoch,
         playerId: instance.service.getPlayerId(),
         name: instance.config.name,
@@ -861,11 +951,7 @@ export class AgentBehaviorBridge {
         questState: instance.service.getQuestState(),
         availableQuests: instance.service.getAvailableQuests(),
         storeRetryAfter: instance.storeRetryAfter,
-        coinRecoveryAuthorized: hasOrdinaryCoinRecoveryAuthorization(
-          instance,
-          now,
-          { inventoryItems, equippedItems },
-        ),
+        coinRecoveryAuthorized,
         attackObservationRetryAfter: instance.attackObservationRetryAfter,
         bankStageRetryAfter: instance.bankStageRetryAfter,
         questEntryAcquisitionQuestId:
@@ -873,6 +959,9 @@ export class AgentBehaviorBridge {
           instance.questEntryAcquisition.expiresAt > now
             ? instance.questEntryAcquisition.questId
             : null,
+        ordinaryProcessingAcquisitionAuthorized:
+          Boolean(instance.ordinaryProcessingAcquisition) &&
+          instance.ordinaryProcessingAcquisition!.expiresAt > now,
         survivalFoodAcquisitionAuthorized:
           Boolean(instance.survivalFoodAcquisition) &&
           instance.survivalFoodAcquisition!.expiresAt > now,
@@ -948,21 +1037,13 @@ export class AgentBehaviorBridge {
       );
     }
 
-    // If worker timed out (empty results), clear tickInProgress for all
-    // agents that were in this batch so they aren't permanently stuck.
-    if (results.length === 0 && dueAgents.length > 0) {
-      for (const agent of dueAgents) {
-        const schedule = this.schedules.get(agent.characterId);
-        if (schedule) schedule.tickInProgress = false;
-      }
-    }
+    const acceptedResults = this.reconcileTickResults(dueAgents, results);
 
-    // Apply results on main thread — yield between each to avoid blocking
+    // Results belong to distinct agents, so their asynchronous action
+    // completions can safely overlap. Per-agent tick fences remain held until
+    // that agent's action and durable checkpoint have both completed.
     const applyStart = Date.now();
-    for (const result of results) {
-      await this.applyTickResultWithDrain(result);
-      await yieldToEventLoop();
-    }
+    await this.applyTickResultsConcurrently(acceptedResults);
     const applyMs = Date.now() - applyStart;
 
     const totalMs = Date.now() - pollStart;
@@ -971,6 +1052,66 @@ export class AgentBehaviorBridge {
         `[AgentBridge] Total poll: ${totalMs}ms (snapshot=${snapshotMs}ms, worker=${workerMs}ms, apply=${applyMs}ms, agents=${dueAgents.length})`,
       );
     }
+  }
+
+  /**
+   * Accept at most one current result for each agent dispatched in this
+   * batch. A malformed/partial worker response must neither replay an action
+   * nor leave an agent permanently fenced as tick-in-progress.
+   */
+  private reconcileTickResults(
+    dueAgents: AgentTickInput[],
+    results: AgentTickOutput[],
+  ): AgentTickOutput[] {
+    const expectedEpochByCharacter = new Map(
+      dueAgents.map((agent) => [agent.characterId, agent.behaviorEpoch]),
+    );
+    const acceptedCharacters = new Set<string>();
+    const acceptedResults: AgentTickOutput[] = [];
+
+    for (const result of results) {
+      const expectedEpoch = expectedEpochByCharacter.get(result.characterId);
+      if (expectedEpoch === undefined) {
+        console.warn(
+          `[AgentBehaviorBridge] Ignoring unexpected worker result for ${result.characterId}`,
+        );
+        continue;
+      }
+      if (acceptedCharacters.has(result.characterId)) {
+        console.warn(
+          `[AgentBehaviorBridge] Ignoring duplicate worker result for ${result.characterId}`,
+        );
+        continue;
+      }
+      if (result.behaviorEpoch !== expectedEpoch) {
+        console.warn(
+          `[AgentBehaviorBridge] Ignoring stale worker result for ${result.characterId}: expected epoch ${expectedEpoch}, received ${result.behaviorEpoch}`,
+        );
+        continue;
+      }
+
+      acceptedCharacters.add(result.characterId);
+      acceptedResults.push(result);
+    }
+
+    for (const agent of dueAgents) {
+      if (acceptedCharacters.has(agent.characterId)) continue;
+      const schedule = this.schedules.get(agent.characterId);
+      if (schedule) schedule.tickInProgress = false;
+    }
+
+    return acceptedResults;
+  }
+
+  private async applyTickResultsConcurrently(
+    results: AgentTickOutput[],
+  ): Promise<void> {
+    await Promise.all(
+      results.map(async (result) => {
+        await this.applyTickResultWithDrain(result);
+        await yieldToEventLoop();
+      }),
+    );
   }
 
   private sendTickAndWait(
@@ -1012,6 +1153,11 @@ export class AgentBehaviorBridge {
 
   /** Apply one fenced, typed agent action. */
   private async applyTickResult(result: AgentTickOutput): Promise<void> {
+    const applyStartedAt = Date.now();
+    let appliedActionType = result.action.type;
+    let beginAttemptMs = 0;
+    let actionExecutionMs = 0;
+    let checkpointMs = 0;
     const instance = this.getAgent(result.characterId);
     if (!instance || instance.state !== "running") {
       const schedule = this.schedules.get(result.characterId);
@@ -1038,8 +1184,6 @@ export class AgentBehaviorBridge {
       instance.goal = s.goal;
       instance.questsAccepted = new Set(s.questsAccepted);
       instance.currentTargetId = s.currentTargetId;
-      instance.lastGatherTargetId = s.lastGatherTargetId;
-      instance.lastGatherQueuedAt = s.lastGatherQueuedAt;
       instance.lastCombatChatAt = s.lastCombatChatAt;
       instance.pendingChatReaction = null; // Worker consumed it
 
@@ -1108,6 +1252,7 @@ export class AgentBehaviorBridge {
         now - instance.operatorCommandAt < 30_000;
 
       let action = result.action;
+      appliedActionType = action.type;
       let consumedLlmResult: LlmBehaviorResult | null = null;
       const provisioningAction =
         action.type === "storeBuy" ||
@@ -1360,6 +1505,7 @@ export class AgentBehaviorBridge {
         instance.questCompleteFailures.clear();
       }
 
+      appliedActionType = action.type;
       let actionExecution = actionResult(
         action.type,
         action.type === "idle" ? "idle" : "rejected",
@@ -1373,6 +1519,7 @@ export class AgentBehaviorBridge {
       if (action.type !== "idle" && this.beginAutonomyProgressionAttempt) {
         const safePreActionContext =
           captureAgentAutonomyCheckpointContext(instance);
+        const beginAttemptStartedAt = Date.now();
         try {
           progressionAttempt = await this.beginAutonomyProgressionAttempt(
             instance,
@@ -1397,6 +1544,8 @@ export class AgentBehaviorBridge {
             `[AgentBehaviorBridge] Refusing untracked action ${action.type} for ${result.characterId}: ${errMsg(error)}`,
           );
           return;
+        } finally {
+          beginAttemptMs = Date.now() - beginAttemptStartedAt;
         }
 
         if (resultIsStale()) {
@@ -1421,6 +1570,7 @@ export class AgentBehaviorBridge {
           return;
         }
       }
+      const actionExecutionStartedAt = Date.now();
       try {
         switch (action.type) {
           case "attack":
@@ -1432,22 +1582,35 @@ export class AgentBehaviorBridge {
             break;
 
           case "gather":
-            if (await instance.service.executeGather(action.targetId)) {
-              actionExecution = actionResult("gather", "dispatched", "gather");
+            if (!progressionAttempt) break;
+            if (
+              await instance.service.executeGather(
+                action.targetId,
+                progressionAttempt.attemptId,
+              )
+            ) {
+              actionExecution = actionResult("gather", "completed", "gather");
             }
             break;
 
           case "pickup":
-            if (await instance.service.executePickup(action.targetId)) {
-              actionExecution = actionResult("pickup", "dispatched", "pickup");
+            if (!progressionAttempt) break;
+            if (
+              await instance.service.executePickup(
+                action.targetId,
+                progressionAttempt.attemptId,
+              )
+            ) {
+              actionExecution = actionResult("pickup", "completed", "pickup");
             }
             break;
 
           case "lootGravestone": {
+            if (!progressionAttempt) break;
             if (
               await instance.service.executeLootGravestone(
                 action.gravestoneId,
-                progressionAttempt?.attemptId,
+                progressionAttempt.attemptId,
               )
             ) {
               actionExecution = actionResult(
@@ -1468,7 +1631,13 @@ export class AgentBehaviorBridge {
             break;
 
           case "firemake":
-            if (await instance.service.executeFiremake(action.logsItemId)) {
+            if (!progressionAttempt) break;
+            if (
+              await instance.service.executeFiremake(
+                action.logsItemId,
+                progressionAttempt.attemptId,
+              )
+            ) {
               actionExecution = actionResult(
                 "firemake",
                 "completed",
@@ -1483,9 +1652,7 @@ export class AgentBehaviorBridge {
             );
             const questStarted =
               accepted &&
-              instance.service
-                .getQuestState()
-                .some((quest) => quest.questId === action.questId);
+              (await waitForQuestStartConfirmation(instance, action.questId));
             if (questStarted) {
               instance.questsAccepted.add(action.questId);
               actionExecution = actionResult(
@@ -1578,9 +1745,7 @@ export class AgentBehaviorBridge {
               if (
                 fallback.type !== "idle" &&
                 fallback.type !== "navigateTo" &&
-                fallback.type !== "bankDepositAll" &&
-                fallback.type !== "bankWithdraw" &&
-                fallback.type !== "bury"
+                !isReceiptBoundCustodyAction(fallback)
               ) {
                 let fallbackExecution: AgentAutonomyActionResult;
                 try {
@@ -1622,6 +1787,7 @@ export class AgentBehaviorBridge {
             break;
 
           case "bury": {
+            if (!progressionAttempt) break;
             const burial = await executeOrdinaryBoneBurial(
               instance,
               action.itemId,
@@ -1643,27 +1809,61 @@ export class AgentBehaviorBridge {
             }
             break;
 
+          case "setAutocast":
+            if (await instance.service.executeSetAutocast(action.spellId)) {
+              actionExecution = actionResult(
+                "setAutocast",
+                "completed",
+                "setAutocast",
+              );
+            }
+            break;
+
           case "cook": {
-            if (await instance.service.executeCook(action.itemId)) {
+            if (!progressionAttempt) break;
+            if (
+              await instance.service.executeCook(
+                action.itemId,
+                progressionAttempt.attemptId,
+              )
+            ) {
               actionExecution = actionResult("cook", "completed", "cook");
             }
             break;
           }
 
           case "smelt":
-            if (await instance.service.executeSmelt(action.recipe)) {
+            if (!progressionAttempt) break;
+            if (
+              await instance.service.executeSmelt(
+                action.recipe,
+                progressionAttempt.attemptId,
+              )
+            ) {
               actionExecution = actionResult("smelt", "completed", "smelt");
             }
             break;
 
           case "smith":
-            if (await instance.service.executeSmith(action.recipe)) {
+            if (!progressionAttempt) break;
+            if (
+              await instance.service.executeSmith(
+                action.recipe,
+                progressionAttempt.attemptId,
+              )
+            ) {
               actionExecution = actionResult("smith", "completed", "smith");
             }
             break;
 
           case "runecraft":
-            if (await instance.service.executeRunecraft(action.runeType)) {
+            if (!progressionAttempt) break;
+            if (
+              await instance.service.executeRunecraft(
+                action.runeType,
+                progressionAttempt.attemptId,
+              )
+            ) {
               actionExecution = actionResult(
                 "runecraft",
                 "completed",
@@ -1673,10 +1873,12 @@ export class AgentBehaviorBridge {
             break;
 
           case "craft":
+            if (!progressionAttempt) break;
             if (
               await instance.service.executeCraft(
                 action.recipeId,
                 action.quantity ?? 1,
+                progressionAttempt.attemptId,
               )
             ) {
               actionExecution = actionResult("craft", "completed", "craft");
@@ -1684,10 +1886,12 @@ export class AgentBehaviorBridge {
             break;
 
           case "fletch":
+            if (!progressionAttempt) break;
             if (
               await instance.service.executeFletch(
                 action.recipeId,
                 action.quantity ?? 1,
+                progressionAttempt.attemptId,
               )
             ) {
               actionExecution = actionResult("fletch", "completed", "fletch");
@@ -1695,10 +1899,12 @@ export class AgentBehaviorBridge {
             break;
 
           case "tan":
+            if (!progressionAttempt) break;
             if (
               await instance.service.executeTan(
                 action.inputItemId,
                 action.quantity ?? 1,
+                progressionAttempt.attemptId,
               )
             ) {
               actionExecution = actionResult("tan", "completed", "tan");
@@ -1706,6 +1912,7 @@ export class AgentBehaviorBridge {
             break;
 
           case "storeBuy": {
+            if (!progressionAttempt) break;
             const purchase = await executeOrdinaryStoreBuy(
               instance,
               action.storeId,
@@ -1730,6 +1937,7 @@ export class AgentBehaviorBridge {
           }
 
           case "bankDepositAll": {
+            if (!progressionAttempt) break;
             const banking = await executeOrdinaryBankDepositSurplus(
               instance,
               action.bankId,
@@ -1752,6 +1960,7 @@ export class AgentBehaviorBridge {
           }
 
           case "bankWithdraw": {
+            if (!progressionAttempt) break;
             const banking = await executeOrdinaryBankStageMaterials(
               instance,
               action.bankId,
@@ -1800,6 +2009,8 @@ export class AgentBehaviorBridge {
         console.warn(
           `[AgentBehaviorBridge] Action ${action.type} failed for ${result.characterId}: ${errMsg(error)}`,
         );
+      } finally {
+        actionExecutionMs = Date.now() - actionExecutionStartedAt;
       }
 
       if (actionExecution.appliedActionType !== null) {
@@ -1826,6 +2037,22 @@ export class AgentBehaviorBridge {
           }
         }
         return;
+      }
+
+      // The worker proposes this throttle before the main thread can ask the
+      // authoritative path/reservation manager. Commit it only after exact
+      // queue admission; a rejected or superseded request must remain
+      // immediately retryable and must not hide another eligible resource.
+      if (actionExecution.appliedActionType === "gather") {
+        instance.lastGatherTargetId = s.lastGatherTargetId;
+        instance.lastGatherQueuedAt = s.lastGatherQueuedAt;
+      } else if (actionExecution.appliedActionType !== null) {
+        // The throttle protects one still-active gather from duplicate queue
+        // submissions. Once any different action is authoritatively applied,
+        // that gathering phase is over and burn/material recovery may return
+        // to the same resource immediately.
+        instance.lastGatherTargetId = null;
+        instance.lastGatherQueuedAt = 0;
       }
 
       recordOrdinaryProcessingActionOutcome(instance, action, actionExecution);
@@ -1855,6 +2082,7 @@ export class AgentBehaviorBridge {
       // never replay this tick and must decide again from live world state.
       let checkpointPersisted = true;
       if (this.persistAutonomyCheckpoint) {
+        const checkpointStartedAt = Date.now();
         try {
           if (progressionAttempt) {
             await this.persistAutonomyCheckpoint(
@@ -1871,6 +2099,8 @@ export class AgentBehaviorBridge {
           console.warn(
             `[AgentBehaviorBridge] Failed to persist autonomy checkpoint for ${result.characterId}: ${errMsg(error)}`,
           );
+        } finally {
+          checkpointMs = Date.now() - checkpointStartedAt;
         }
       }
 
@@ -1929,6 +2159,12 @@ export class AgentBehaviorBridge {
         `[AgentBehaviorBridge] Failed to apply tick result for ${result.characterId}: ${errMsg(err)}`,
       );
     } finally {
+      const totalMs = Date.now() - applyStartedAt;
+      if (totalMs > 100) {
+        console.warn(
+          `[AgentBridge] Slow apply for ${result.characterId} action=${appliedActionType}: total=${totalMs}ms begin=${beginAttemptMs}ms execute=${actionExecutionMs}ms checkpoint=${checkpointMs}ms residual=${Math.max(0, totalMs - beginAttemptMs - actionExecutionMs - checkpointMs)}ms`,
+        );
+      }
       const schedule = this.schedules.get(result.characterId);
       if (schedule) schedule.tickInProgress = false;
     }
@@ -1942,6 +2178,12 @@ export class AgentBehaviorBridge {
     instance: AgentInstance,
     action: EmbeddedBehaviorAction,
   ): Promise<AgentAutonomyActionResult> {
+    // Receipt-bound custody actions are valid only in the primary switch,
+    // where the immutable progression-attempt identity is available. A
+    // navigation fallback must never synthesize a second operation identity.
+    if (isReceiptBoundCustodyAction(action)) {
+      return actionResult(action.type, "rejected");
+    }
     switch (action.type) {
       case "attack": {
         const dispatched = await instance.service.executeAttack(
@@ -1951,21 +2193,6 @@ export class AgentBehaviorBridge {
         instance.attackObservationRetryAfter =
           Date.now() + ATTACK_OBSERVATION_SETTLE_MS;
         return actionResult("attack", "dispatched", "attack");
-      }
-      case "gather":
-        return (await instance.service.executeGather(action.targetId))
-          ? actionResult("gather", "dispatched", "gather")
-          : actionResult("gather", "rejected");
-      case "pickup":
-        return (await instance.service.executePickup(action.targetId))
-          ? actionResult("pickup", "dispatched", "pickup")
-          : actionResult("pickup", "rejected");
-      case "lootGravestone": {
-        return (await instance.service.executeLootGravestone(
-          action.gravestoneId,
-        ))
-          ? actionResult("lootGravestone", "completed", "lootGravestone")
-          : actionResult("lootGravestone", "rejected");
       }
       case "move":
         return (await instance.service.executeMove(
@@ -1990,14 +2217,14 @@ export class AgentBehaviorBridge {
         return (await instance.service.executeUse(action.itemId)).ok
           ? actionResult("use", "completed", "use")
           : actionResult("use", "rejected");
-      case "bury":
-        // The primary switch binds this custody action to an open progression
-        // attempt. Fallback execution must never create an untracked receipt.
-        return actionResult("bury", "rejected");
       case "equip":
         return (await instance.service.executeEquip(action.itemId)).ok
           ? actionResult("equip", "completed", "equip")
           : actionResult("equip", "rejected");
+      case "setAutocast":
+        return (await instance.service.executeSetAutocast(action.spellId))
+          ? actionResult("setAutocast", "completed", "setAutocast")
+          : actionResult("setAutocast", "rejected");
       case "cook":
         return (await instance.service.executeCook(action.itemId))
           ? actionResult("cook", "completed", "cook")
@@ -2035,34 +2262,6 @@ export class AgentBehaviorBridge {
         ))
           ? actionResult("tan", "completed", "tan")
           : actionResult("tan", "rejected");
-      case "storeBuy": {
-        const completed = await instance.service.executeStoreBuy(
-          action.storeId,
-          action.itemId,
-          action.quantity,
-        );
-        instance.storeRetryAfter = completed ? 0 : Date.now() + 30_000;
-        return completed
-          ? actionResult("storeBuy", "completed", "storeBuy")
-          : actionResult("storeBuy", "rejected");
-      }
-      case "bankDepositAll":
-        return (
-          await executeOrdinaryBankDepositSurplus(instance, action.bankId, null)
-        ).applied
-          ? actionResult("bankDepositAll", "completed", "bankDepositAll")
-          : actionResult("bankDepositAll", "rejected");
-      case "bankWithdraw": {
-        const banking = await executeOrdinaryBankStageMaterials(
-          instance,
-          action.bankId,
-          null,
-        );
-        recordOrdinaryBankStageOutcome(instance, banking);
-        return banking.applied
-          ? actionResult("bankWithdraw", "completed", "bankWithdraw")
-          : actionResult("bankWithdraw", "rejected");
-      }
       case "homeTeleport":
         return (await instance.service.executeHomeTeleport())
           ? actionResult("homeTeleport", "dispatched", "homeTeleport")
@@ -2105,6 +2304,7 @@ export class AgentBehaviorBridge {
           depleted?: unknown;
         };
         node?: { userData?: { interactionDistance?: unknown } };
+        getInteractionFootprint?: () => unknown;
       };
       const runtimeEntityType = String(
         runtimeEntity.entityType ?? "",
@@ -2211,11 +2411,21 @@ export class AgentBehaviorBridge {
                   data.interactionDistance ??
                   (stationType === "tanner" ? 3 : Number.NaN),
               );
+        const runtimeFootprint = runtimeEntity.getInteractionFootprint?.() as
+          { width?: unknown; depth?: unknown } | undefined;
+        const footprintWidth = Number(runtimeFootprint?.width ?? 1);
+        const footprintDepth = Number(runtimeFootprint?.depth ?? 1);
         if (
           pos &&
           Number.isFinite(configuredRange) &&
           configuredRange > 0 &&
-          configuredRange <= 10
+          configuredRange <= 10 &&
+          Number.isSafeInteger(footprintWidth) &&
+          footprintWidth >= 1 &&
+          footprintWidth <= 10 &&
+          Number.isSafeInteger(footprintDepth) &&
+          footprintDepth >= 1 &&
+          footprintDepth <= 10
         ) {
           // Include entity ID in name for specific station matching (e.g. "air_altar_spawn")
           const entityId = String(data.id || entity.id);
@@ -2229,6 +2439,8 @@ export class AgentBehaviorBridge {
             name: stationName,
             stationType,
             interactionRange: configuredRange,
+            footprintWidth,
+            footprintDepth,
           });
         }
       }

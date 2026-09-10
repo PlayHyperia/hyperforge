@@ -1,7 +1,10 @@
 import React from "react";
 import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it } from "vitest";
-import { CombatLog } from "../../../../src/components/streaming/CombatLog";
+import {
+  CombatLog,
+  getStreamingCombatLogName,
+} from "../../../../src/components/streaming/CombatLog";
 import type {
   AgentInfo,
   StreamingState,
@@ -86,6 +89,7 @@ function createState(
       winnerName: null,
       outcome: null,
       winReason: null,
+      actionObservations: [],
     },
     leaderboard: [],
     cameraTarget: "agent-a",
@@ -95,6 +99,24 @@ function createState(
 afterEach(cleanup);
 
 describe("CombatLog", () => {
+  it("removes a repeated matchup prefix from compact broadcast events", () => {
+    expect(
+      getStreamingCombatLogName(
+        "Persisted Chaos Alpha",
+        "Persisted Chaos Beta",
+      ),
+    ).toBe("Alpha");
+    expect(
+      getStreamingCombatLogName(
+        "Persisted Chaos Beta",
+        "Persisted Chaos Alpha",
+      ),
+    ).toBe("Beta");
+    expect(getStreamingCombatLogName("Riven Ash", "Astra Vale")).toBe(
+      "Riven Ash",
+    );
+  });
+
   it("announces a legal frozen-loadout style switch", async () => {
     const { rerender } = render(
       <CombatLog state={createState("cycle-1", "FIGHTING")} />,
@@ -136,5 +158,30 @@ describe("CombatLog", () => {
         screen.queryByText("Riven Ash vs Astra Vale — FIGHT!"),
       ).not.toBeInTheDocument();
     });
+  });
+
+  it("keeps only the seven latest events mounted in the arena view", async () => {
+    const { container, rerender } = render(
+      <CombatLog state={createState("cycle-density", "FIGHTING")} />,
+    );
+    await screen.findByText("Riven Ash vs Astra Vale — FIGHT!");
+
+    for (let hp = 54; hp >= 46; hp -= 1) {
+      const next = createState("cycle-density", "FIGHTING");
+      next.cycle.agent1!.hp = hp;
+      rerender(<CombatLog state={next} />);
+      await waitFor(() => {
+        expect(
+          container
+            .querySelector("[data-total-events]")
+            ?.getAttribute("data-total-events"),
+        ).toBe(String(56 - hp));
+      });
+    }
+
+    const log = container.querySelector("[data-total-events]");
+    expect(log).toHaveAttribute("data-total-events", "10");
+    expect(log).toHaveAttribute("data-visible-events", "7");
+    expect(container.querySelectorAll("[data-event-kind]")).toHaveLength(7);
   });
 });

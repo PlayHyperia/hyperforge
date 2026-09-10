@@ -193,8 +193,13 @@ export function mergePlantGroupForInstancing(
 ): MergedPlantGeometry | null {
   const meshes: THREE.Mesh[] = [];
   group.traverse((child) => {
-    if (child instanceof THREE.Mesh) {
-      meshes.push(child);
+    // Procgen builds its geometry with Three's core entry point while the
+    // renderer imports the WebGPU entry point. Those entry points can expose
+    // distinct runtime constructors even though they share the same Object3D
+    // contract, so `instanceof THREE.Mesh` incorrectly rejects valid meshes.
+    // `isMesh` is Three's cross-module runtime discriminator.
+    if ((child as THREE.Mesh).isMesh === true) {
+      meshes.push(child as THREE.Mesh);
     }
   });
 

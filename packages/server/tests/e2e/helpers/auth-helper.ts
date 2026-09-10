@@ -7,27 +7,17 @@
 
 import { randomBytes } from "crypto";
 import jsonwebtoken from "jsonwebtoken";
+import {
+  HYPERIA_JWT_ALGORITHM,
+  HYPERIA_JWT_AUDIENCE,
+  HYPERIA_JWT_ISSUER,
+  resolveJwtSigningKeyAuthority,
+} from "../../../src/infrastructure/auth/jwt-signing-key-authority.js";
 
 const DEFAULT_SERVER_URL =
   process.env.PUBLIC_API_URL ||
   process.env.SERVER_URL ||
   "http://localhost:5555";
-
-// Use the same JWT secret as the server (from utils.ts)
-// IMPORTANT: This MUST match the dev fallback in src/shared/utils.ts
-// The server uses this secret when JWT_SECRET env var is not set in non-production.
-// Playwright tests run in NODE_ENV=test, so server uses this fallback.
-const SERVER_DEV_JWT_SECRET = "hyperia-dev-secret-key-12345";
-
-const getJwtSecret = (): string => {
-  // If JWT_SECRET is explicitly set (e.g., from .env), use it
-  if (process.env.JWT_SECRET) {
-    return process.env.JWT_SECRET;
-  }
-  // Use the same dev secret that the server uses in non-production
-  // This ensures test-generated JWTs are valid on the server
-  return SERVER_DEV_JWT_SECRET;
-};
 
 /**
  * Create a test JWT token for authenticated testing
@@ -42,13 +32,24 @@ export function createTestJWT(
   characterId: string,
   isAgent: boolean = false,
 ): string {
+  const authority = resolveJwtSigningKeyAuthority();
+  const options: jsonwebtoken.SignOptions = {
+    algorithm: HYPERIA_JWT_ALGORITHM,
+    expiresIn: "7d",
+  };
+  if (authority.mode === "key-ring") {
+    options.audience = HYPERIA_JWT_AUDIENCE;
+    options.issuer = HYPERIA_JWT_ISSUER;
+    options.keyid = authority.activeKeyId;
+  }
   return jsonwebtoken.sign(
     {
       userId,
       characterId,
       isAgent,
     },
-    getJwtSecret(),
+    authority.activeSecret,
+    options,
   );
 }
 

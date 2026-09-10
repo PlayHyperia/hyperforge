@@ -13,6 +13,7 @@ import type {
   AtomicProcessingActionReceipt,
   InventorySystem,
 } from "../../character/InventorySystem";
+import { acquirePreparationActionFence } from "../ProcessingStationAuthority";
 
 type ProcessingInput = Parameters<
   InventorySystem["commitProcessingActionAtomic"]
@@ -272,6 +273,14 @@ describe("TanningSystem atomic item and money-pouch custody", () => {
     );
 
     expect(calls).toHaveLength(1);
+    expect(
+      findEvents(EventType.PROCESSING_INTERACTION_PRESENTATION).at(-1)?.data,
+    ).toMatchObject({
+      playerId: "player1",
+      skill: "tanning",
+      phase: "working",
+      targetPosition: { x: 1, y: 0, z: 1 },
+    });
     expect(calls[0].operationId).toBe(
       `processing-request:tanning:${requestId}`,
     );
@@ -299,6 +308,9 @@ describe("TanningSystem atomic item and money-pouch custody", () => {
     expect(findEvents(EventType.TANNING_COMPLETE)).toEqual([
       expect.objectContaining({ data: expect.objectContaining({ requestId }) }),
     ]);
+    expect(
+      findEvents(EventType.PROCESSING_INTERACTION_PRESENTATION).at(-1)?.data,
+    ).toMatchObject({ playerId: "player1", skill: null, phase: "idle" });
   });
 
   it("requires the exact live Tanner identity and physical range", () => {
@@ -313,6 +325,22 @@ describe("TanningSystem atomic item and money-pouch custody", () => {
     expect(findEvents(EventType.TANNING_INTERFACE_OPEN)).toHaveLength(0);
     request();
     expect(calls).toHaveLength(0);
+  });
+
+  it("cannot reopen Tanner authority while pre-market admission is fenced", () => {
+    const fence = acquirePreparationActionFence(
+      world as unknown as World,
+      "player1",
+    );
+
+    openSession();
+    request();
+    expect(findEvents(EventType.TANNING_INTERFACE_OPEN)).toHaveLength(0);
+    expect(calls).toHaveLength(0);
+
+    fence.release();
+    openSession();
+    expect(findEvents(EventType.TANNING_INTERFACE_OPEN)).toHaveLength(1);
   });
 
   it("rejects direct requests without an established Tanner session", () => {
@@ -462,6 +490,68 @@ describe("TanningSystem atomic item and money-pouch custody", () => {
       ),
     ).toHaveLength(0);
     expect(system?.getTanningCustodyStats().pendingActions).toBe(0);
+  });
+
+  it("keeps a late committed action but does not revive Tanner presentation after movement", async () => {
+    const held = deferred<AtomicProcessingActionReceipt>();
+    commitImplementation = () => held.promise;
+    openSession();
+    request();
+    eventBus.emitEvent(
+      EventType.MOVEMENT_CLICK_TO_MOVE,
+      { playerId: "player1", targetPosition: { x: 10, y: 0, z: 10 } },
+      "test",
+    );
+    expect(
+      findEvents(EventType.PROCESSING_INTERACTION_PRESENTATION).at(-1)?.data,
+    ).toMatchObject({ skill: null, phase: "idle" });
+
+    held.resolve(successReceipt(calls[0]));
+    await flushPromises();
+    system?.update(0);
+
+    expect(findEvents(EventType.TANNING_COMPLETE)).toHaveLength(1);
+    expect(
+      findEvents(EventType.UI_MESSAGE).filter(
+        (event) => (event.data as { type?: string }).type === "success",
+      ),
+    ).toHaveLength(0);
+    expect(system?.getTanningCustodyStats().pendingActions).toBe(0);
+  });
+
+  it("drains exactly one in-flight tan after quiescence and keeps Tanner closed", async () => {
+    const held = deferred<AtomicProcessingActionReceipt>();
+    commitImplementation = () => held.promise;
+    openSession();
+    request();
+    expect(system?.isPlayerProcessingQuiescent("player1")).toBe(false);
+
+    const presentationBoundary = findEvents(
+      EventType.PROCESSING_INTERACTION_PRESENTATION,
+    ).length;
+    system?.requestPlayerProcessingQuiescence("player1");
+    expect(system?.isPlayerProcessingQuiescent("player1")).toBe(false);
+    expect(
+      findEvents(EventType.PROCESSING_INTERACTION_PRESENTATION).at(-1)?.data,
+    ).toMatchObject({ playerId: "player1", skill: null, phase: "idle" });
+
+    held.resolve(successReceipt(calls[0]));
+    await flushPromises();
+    system?.update(0);
+    world.currentTick = 200;
+    system?.update(0);
+    request();
+
+    expect(system?.isPlayerProcessingQuiescent("player1")).toBe(true);
+    expect(calls).toHaveLength(1);
+    expect(findEvents(EventType.TANNING_COMPLETE)).toHaveLength(1);
+    expect(
+      findEvents(EventType.PROCESSING_INTERACTION_PRESENTATION)
+        .slice(presentationBoundary)
+        .some(
+          (event) => (event.data as { phase?: string }).phase === "working",
+        ),
+    ).toBe(false);
   });
 });
 

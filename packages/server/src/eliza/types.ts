@@ -8,6 +8,8 @@ import type {
   DuelPreparationPlanRecoveryEvidence,
   BoneBurialReceipt,
   FoodConsumptionReceipt,
+  StreamingDuelFoodObservationContext,
+  StreamingDuelPrayerObservationContext,
   OwnedDuelPreparationPlanReceipt,
   PrayerActionReceipt,
   World,
@@ -30,6 +32,8 @@ export interface EmbeddedAgentConfig {
   name: string;
   /** Scripted role for non-LLM bots */
   scriptedRole?: "combat" | "woodcutting" | "fishing" | "mining" | "balanced";
+  /** Stable ordinary-world combat preparation identity. */
+  combatSpecialization?: "melee" | "ranged" | "mage";
   /**
    * Explicitly enable or disable model-backed planning, chat, and vision.
    * Scripted agents default to disabled; non-scripted agents default to enabled.
@@ -123,6 +127,8 @@ export interface EmbeddedGameState {
   nearbyEntities: NearbyEntityData[];
   inCombat: boolean;
   currentTarget: string | null;
+  /** Authoritative persisted combat spell selection. */
+  selectedSpell?: string | null;
   activePrayers: string[];
   prayerPointUnits?: number;
   prayerPoints?: number;
@@ -321,19 +327,22 @@ export interface IEmbeddedHyperiaService {
   executeAttack(targetId: string): Promise<boolean>;
 
   /** Execute a gather resource command */
-  executeGather(resourceId: string): Promise<boolean>;
+  executeGather(
+    resourceId: string,
+    autonomyAttemptId?: string,
+  ): Promise<boolean>;
 
   /** Execute a pickup item command */
-  executePickup(itemId: string): Promise<boolean>;
+  executePickup(itemId: string, autonomyAttemptId?: string): Promise<boolean>;
 
   /** Loot owned gravestone custody and wait for the exact authoritative result. */
   executeLootGravestone(
     gravestoneId: string,
-    autonomyAttemptId?: string,
+    autonomyAttemptId: string,
   ): Promise<boolean>;
 
   /** Execute a drop item command */
-  executeDrop(itemId: string, quantity?: number): Promise<void>;
+  executeDrop(itemId: string, quantity?: number): Promise<boolean>;
 
   /** Execute an owned-item equip command and return its authoritative postcondition. */
   executeEquip(itemId: string): Promise<EquipmentActionReceipt>;
@@ -351,6 +360,9 @@ export interface IEmbeddedHyperiaService {
     operationId: string,
     preparationId: string,
   ): Promise<OwnedDuelPreparationPlanReceipt | null>;
+
+  /** Replace stale live custody mirrors from persistence during private preparation. */
+  executeDuelPreparationCustodyRefresh(preparationId: string): Promise<boolean>;
 
   /** Open a nearby authoritative bank and return its committed snapshot. */
   executeBankOpen(bankId: string): Promise<AgentBankActionReceipt>;
@@ -391,7 +403,10 @@ export interface IEmbeddedHyperiaService {
   ): Promise<AgentBankActionReceipt>;
 
   /** Execute a food action and return its authoritative custody/effect receipt. */
-  executeUse(itemId: string): Promise<FoodConsumptionReceipt>;
+  executeUse(
+    itemId: string,
+    publicActionObservation?: StreamingDuelFoodObservationContext,
+  ): Promise<FoodConsumptionReceipt>;
 
   /** Atomically consume one prayer resource and converge its committed XP. */
   executeBury(itemId: string, operationId?: string): Promise<BoneBurialReceipt>;
@@ -400,7 +415,10 @@ export interface IEmbeddedHyperiaService {
   executePrayer(prayerId: string): Promise<PrayerActionReceipt>;
 
   /** Explicit prayer toggle alias used by the duel tactical controller. */
-  executePrayerToggle(prayerId: string): Promise<PrayerActionReceipt>;
+  executePrayerToggle(
+    prayerId: string,
+    publicActionObservation?: StreamingDuelPrayerObservationContext,
+  ): Promise<PrayerActionReceipt>;
 
   /** Deactivate every prayer and return the authoritative persisted state. */
   executePrayerDeactivateAll(): Promise<PrayerActionReceipt>;
@@ -413,6 +431,12 @@ export interface IEmbeddedHyperiaService {
 
   /** Stop current action */
   executeStop(): Promise<boolean>;
+
+  /** Fence new combat admission for one exact private duel preparation. */
+  beginDuelPreparationCombatFence(preparationId: string): boolean;
+
+  /** Release only the exact private duel preparation's combat fence. */
+  endDuelPreparationCombatFence(preparationId: string): boolean;
 
   /** Check if the agent's player entity is spawned */
   isSpawned(): boolean;

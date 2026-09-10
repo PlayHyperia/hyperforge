@@ -1,0 +1,13 @@
+{
+  "schemaVersion": 1,
+  "title": "Quaternius isolated level-1 fishing-rod candidate",
+  "equipments": [
+    {
+      "asset": "fitted-fishing-kit/quaternius-fishing-rod-level-1-fitted.glb",
+      "itemId": "fishing_rod",
+      "avatarId": "kaykit-knight",
+      "slot": "gatheringtool",
+      "grip": "two-hand"
+    }
+  ]
+}

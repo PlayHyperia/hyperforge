@@ -30,8 +30,11 @@ type PlayerEntity = Entity & {
   health?: number;
   name?: string;
   alive?: boolean;
+  getHealth?: () => number;
+  isAlive?: () => boolean;
   data?: Entity["data"] & {
     isLoading?: boolean;
+    health?: number;
   };
 };
 
@@ -102,7 +105,7 @@ export class PlayerDamageHandler implements DamageHandler {
       return { actualDamage: 0, targetDied: false, success: true };
     }
 
-    const healthBefore = player.health ?? 0;
+    const healthBefore = this.getHealth(targetId);
 
     // Apply damage through PlayerSystem
     const success = this.playerSystem.damagePlayer(
@@ -127,16 +130,26 @@ export class PlayerDamageHandler implements DamageHandler {
 
   getHealth(entityId: EntityID): number {
     const player = this.getEntity(entityId);
-    return player?.health ?? 0;
+    if (!player) return 0;
+    const methodHealth = player.getHealth?.();
+    if (Number.isFinite(methodHealth)) return Number(methodHealth);
+    if (Number.isFinite(player.health)) return Number(player.health);
+    const dataHealth = player.data?.health;
+    return Number.isFinite(dataHealth) ? Number(dataHealth) : 0;
   }
 
   isAlive(entityId: EntityID): boolean {
     const player = this.getEntity(entityId);
     if (!player) return false;
 
-    // Check both health and alive flag
-    const health = player.health ?? 0;
-    const alive = player.alive !== false; // Default to true if not set
+    // Prefer the entity's canonical lifecycle method. Lightweight server
+    // runtimes and tests may expose health through getHealth()/data rather than
+    // duplicating PlayerEntity's top-level field, so field-only checks can turn
+    // a valid zero-hit into a false death and tear down both combat states.
+    const methodAlive = player.isAlive?.();
+    const health = this.getHealth(entityId);
+    const alive =
+      typeof methodAlive === "boolean" ? methodAlive : player.alive !== false;
 
     return health > 0 && alive;
   }

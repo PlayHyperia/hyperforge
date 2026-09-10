@@ -191,8 +191,7 @@ async function getFromIndexedDB(url: string): Promise<File | null> {
       request.onerror = () => resolve(null);
       request.onsuccess = () => {
         const result = request.result as
-          | { blob: Blob; name: string; type: string }
-          | undefined;
+          { blob: Blob; name: string; type: string } | undefined;
         if (result) {
           resolve(new File([result.blob], result.name, { type: result.type }));
         } else {
@@ -374,6 +373,7 @@ export class ClientLoader extends SystemBase {
   private readonly RUNTIME_CONCURRENCY = 6;
   private activeFetches = 0;
   private fetchQueue: Array<() => void> = [];
+  private assetFetchTimeoutMs = 30_000;
   private isPreloading = false;
 
   /**
@@ -530,8 +530,7 @@ export class ClientLoader extends SystemBase {
       // Notify server that client is ready - player can now be targeted
       // This completes the client-ready handshake for spawn protection
       const network = this.world.network as
-        | { send?: (name: string, data: unknown) => void }
-        | undefined;
+        { send?: (name: string, data: unknown) => void } | undefined;
       if (network?.send) {
         console.log(
           `[PlayerLoading] Assets loaded, sending clientReady to server`,
@@ -598,19 +597,7 @@ export class ClientLoader extends SystemBase {
           console.log(`[ClientLoader] Fetching: ${url}`);
           // Use 'default' cache mode to leverage browser HTTP cache
           // This will use cached response if available and not stale
-          const resp = await fetch(url, {
-            cache: "default",
-            mode: "cors",
-          });
-
-          if (!resp.ok) {
-            console.error(
-              `[ClientLoader] Fetch failed for ${url} with status: ${resp.status}`,
-            );
-            throw new Error(`HTTP error! status: ${resp.status}`);
-          }
-
-          const blob = await resp.blob();
+          const blob = await this.fetchAssetBlob(url);
           const file = new File([blob], url.split("/").pop() as string, {
             type: blob.type,
           });
@@ -996,6 +983,42 @@ export class ClientLoader extends SystemBase {
     }
   }
 
+  private async fetchAssetBlob(url: string): Promise<Blob> {
+    const controller = new AbortController();
+    let timedOut = false;
+    const timeout = setTimeout(() => {
+      timedOut = true;
+      controller.abort();
+    }, this.assetFetchTimeoutMs);
+    try {
+      const resp = await fetch(url, {
+        cache: "default",
+        mode: "cors",
+        signal: controller.signal,
+      });
+      if (!resp.ok) {
+        console.error(
+          `[ClientLoader] Fetch failed for ${url} with status: ${resp.status}`,
+        );
+        throw new Error(`HTTP error! status: ${resp.status}`);
+      }
+      // Keep the timeout active through body consumption. fetch() resolves as
+      // soon as headers arrive, while a truncated/stalled CDN body can hang in
+      // blob() indefinitely.
+      return await resp.blob();
+    } catch (error) {
+      if (timedOut) {
+        throw new Error(
+          `Asset fetch timed out after ${this.assetFetchTimeoutMs}ms: ${url}`,
+          { cause: error },
+        );
+      }
+      throw error;
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+
   async load(type: string, url: string): Promise<LoaderResult> {
     // NOTE: Removed blocking `await this.preloader` that used to wait for ALL preloads
     // to complete before any new load could start. This was a significant bottleneck.
@@ -1137,6 +1160,16 @@ export class ClientLoader extends SystemBase {
           const factoryBase = createVRMFactory(
             glb as GLBData,
             this.world.setupMaterial,
+            glb.scene.userData.hyperiaRestPoseProfile
+              ? {
+                  sourceSHA256: Array.from(
+                    new Uint8Array(
+                      await crypto.subtle.digest("SHA-256", buffer),
+                    ),
+                    (value) => value.toString(16).padStart(2, "0"),
+                  ).join(""),
+                }
+              : undefined,
           );
           const factory = {
             ...factoryBase,
@@ -1202,7 +1235,23 @@ export class ClientLoader extends SystemBase {
       },
     );
     this.promises.set(key, promise);
-    return promise;
+    try {
+      return await promise;
+    } catch (error) {
+      // Keep successful parsed assets deduplicated for the life of the loader,
+      // but never pin a rejected promise. File-level fetch tracking already
+      // clears on completion; matching that behavior here lets a caller's
+      // explicit retry perform a fresh fetch and parse. Purge the source file
+      // as well because a successful HTTP response can still contain a
+      // truncated/corrupt body that would otherwise poison both memory and
+      // persistent caches. The identity guard prevents an older rejection
+      // from deleting a newer replacement load.
+      if (this.promises.get(key) === promise) {
+        this.promises.delete(key);
+        await this.clearCachedFile(url);
+      }
+      throw error;
+    }
   }
 
   insert(type: string, url: string, file: File) {
@@ -1314,7 +1363,7 @@ export class ClientLoader extends SystemBase {
       console.log("[ClientLoader] Loading VRM from:", localUrl);
       promise = this.gltfLoader
         .loadAsync(localUrl)
-        .then((glb) => {
+        .then(async (glb) => {
           this.logger.info("Avatar GLB loaded");
           console.log("[ClientLoader] VRM GLB loaded, checking userData...", {
             hasVRM: !!glb.userData?.vrm,
@@ -1326,6 +1375,19 @@ export class ClientLoader extends SystemBase {
           const factoryBase = createVRMFactory(
             glb as GLBData,
             this.world.setupMaterial,
+            glb.scene.userData.hyperiaRestPoseProfile
+              ? {
+                  sourceSHA256: Array.from(
+                    new Uint8Array(
+                      await crypto.subtle.digest(
+                        "SHA-256",
+                        await file.arrayBuffer(),
+                      ),
+                    ),
+                    (value) => value.toString(16).padStart(2, "0"),
+                  ).join(""),
+                }
+              : undefined,
           );
           console.log("[ClientLoader] VRM factory created");
           const factory = {

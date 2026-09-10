@@ -52,13 +52,17 @@ test("keeps local, manifest, container, and server-start pins synchronized", () 
     rootManifest.scripts.preinstall,
     "node scripts/node-runtime-policy.mjs",
   );
-  assert.match(
+  assert.equal(
     serverManifest.scripts.prestart,
-    /^node \.\.\/\.\.\/scripts\/node-runtime-policy\.mjs && /,
+    "node ../../scripts/node-runtime-policy.mjs",
   );
   assert.equal(
     serverManifest.scripts.start,
     "node --import ./scripts/register-hooks.mjs ../../scripts/start-hyperia-server.mjs",
+  );
+  assert.equal(
+    rootManifest.scripts["server:container:smoke"],
+    "node scripts/smoke-server-container.mjs",
   );
 
   const dockerfile = read("Dockerfile.server");
@@ -75,6 +79,65 @@ test("keeps local, manifest, container, and server-start pins synchronized", () 
   assert.match(
     dockerfile,
     /CMD \["node", "--import", "\/app\/packages\/server\/scripts\/register-hooks\.mjs", "\/app\/scripts\/start-hyperia-server\.mjs"\]/,
+  );
+  assert.match(dockerfile, /cd \/app\/packages\/impostors && bun run build/);
+  assert.match(dockerfile, /cd \/app\/packages\/client && bun run build:cf/);
+  assert.doesNotMatch(
+    dockerfile,
+    /node \.\.\/\.\.\/node_modules\/(?:typescript|vite)\//,
+    "container builds must resolve tools through each isolated workspace",
+  );
+  assert.match(
+    dockerfile,
+    /ARG HYPERIA_ASSETS_REV=[0-9a-f]{40}/,
+    "container assets must be pinned to a full immutable commit",
+  );
+  assert.match(
+    dockerfile,
+    /test "\$\(git -C packages\/server\/world\/assets rev-parse HEAD\)" = "\$\{HYPERIA_ASSETS_REV\}"/,
+    "container build must verify the resolved asset revision",
+  );
+  assert.match(
+    dockerfile,
+    /rm -rf packages\/server\/world\/assets\/\.git/,
+    "runtime image must not retain the asset repository metadata",
+  );
+  assert.match(
+    dockerfile,
+    /chmod -R a=rX \/app\/packages\/server\/src\/database\/migrations/,
+    "migration inputs must be readable regardless of host file modes",
+  );
+  assert.match(
+    dockerfile,
+    /USER node[\s\S]*?RUN test -r \/app\/packages\/server\/src\/database\/migrations\/0000_numerous_korvac\.sql[\s\S]*?test ! -w \/app\/packages\/server\/src\/database\/migrations\/0000_numerous_korvac\.sql/,
+    "the non-root runtime user must prove migrations are readable and immutable",
+  );
+  assert.doesNotMatch(
+    dockerfile,
+    /COPY --from=builder \/app\/packages\/server\/(?:src|scripts)\s+\.\/packages\/server\/(?:src|scripts)/,
+    "runtime images must not copy the complete server source or test-harness tree",
+  );
+  assert.match(
+    dockerfile,
+    /COPY --from=builder \/app\/packages\/server\/scripts\/register-hooks\.mjs[\s\S]*?\/app\/packages\/server\/scripts\/node-esm-hooks\.mjs\s+\.\/packages\/server\/scripts\//,
+    "runtime images must copy only the two required Node hook scripts",
+  );
+  assert.match(
+    dockerfile,
+    /COPY --from=builder \/app\/packages\/server\/src\/database\/migrations\s*\\?\s+\.\/packages\/server\/src\/database\/migrations/,
+    "runtime images must retain the complete migration journal",
+  );
+
+  const assetInstaller = read("scripts/ensure-assets.mjs");
+  assert.match(
+    assetInstaller,
+    /\^\[0-9a-f\]\{40\}\$\/i/,
+    "asset installer must reject non-commit revision selectors",
+  );
+  assert.match(
+    assetInstaller,
+    /\[\s*"-C",\s*assetsDir,\s*"fetch",\s*"--depth",\s*"1",\s*"origin",\s*requestedRevision,?\s*\]/,
+    "asset installer must fetch the requested immutable commit directly",
   );
 
   for (const relativePath of [
@@ -97,6 +160,25 @@ test("keeps local, manifest, container, and server-start pins synchronized", () 
       `${relativePath} must use the Node 22 type line`,
     );
   }
+});
+
+test("routes production starts through the pre-import attestation wrapper", () => {
+  const expectedStartCommand =
+    "node --import /app/packages/server/scripts/register-hooks.mjs /app/scripts/start-hyperia-server.mjs";
+  for (const relativePath of ["railway.json", "railway.server.json"]) {
+    const railwayManifest = JSON.parse(read(relativePath));
+    assert.equal(
+      railwayManifest.deploy.startCommand,
+      expectedStartCommand,
+      `${relativePath} must not bypass the attestation wrapper`,
+    );
+  }
+
+  const serverStart = read("scripts/start-hyperia-server.mjs");
+  assert.match(serverStart, /competitiveServerBootstrap\.js/);
+  assert.match(serverStart, /verifyCompetitiveServerRuntime/);
+  assert.match(serverStart, /startVerifiedCompetitiveServer/);
+  assert.match(serverStart, /--preflight-only/);
 });
 
 test("makes every Bun workflow select the repository Node pin", () => {
@@ -136,6 +218,15 @@ test("makes every Bun workflow select the repository Node pin", () => {
       );
     }
   }
+});
+
+test("keeps the canonical container smoke in CI", () => {
+  const integrationWorkflow = read(".github/workflows/integration.yml");
+  assert.match(integrationWorkflow, /^ {2}server-container-smoke:$/m);
+  assert.match(
+    integrationWorkflow,
+    /run: node scripts\/smoke-server-container\.mjs/,
+  );
 });
 
 test("checks the runtime before the duel launcher mutates or builds anything", () => {

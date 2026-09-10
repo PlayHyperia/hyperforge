@@ -488,6 +488,25 @@ export interface WorldArea {
   safeZone: boolean;
   /** PvP enabled - players can attack each other in this zone */
   pvpEnabled?: boolean;
+  /** Marks a bounded area as part of the autonomous duel-preparation loop. */
+  agentPreparationArea?: boolean;
+  /**
+   * Explicit death-custody contract for a preparation area. Unsupported or
+   * contradictory policies fail closed instead of falling through to public
+   * wilderness drops.
+   */
+  deathCustodyPolicy?: {
+    version: 1;
+    mode: "private_grave" | "no_loss" | "public_risk";
+    approvalStatus: "diagnostic_only" | "approved";
+    keptItemCount: number;
+    ownerProtectionTicks: number | null;
+    publicTransitionTicks: number | null;
+    terminalExpirationTicks: number | null;
+    spectatorCopyKey: string;
+    approvalId?: string;
+    approvedAt?: string;
+  };
   npcs: NPCLocation[];
   resources: BiomeResource[];
   mobSpawns: MobSpawnPoint[];
@@ -516,6 +535,12 @@ export interface WorldArea {
     height?: number;
     heightOffset?: number;
     blendRadius: number;
+    radialPond?: {
+      bedRadius: number;
+      bankInnerRadius: number;
+      bankOuterRadius: number;
+      bankHeight: number;
+    };
   }>;
   /** Explicit elevated water bodies used for compact ponds and lakes. */
   waterBodies?: Array<{

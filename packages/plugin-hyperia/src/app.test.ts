@@ -1,4 +1,5 @@
 import http from "node:http";
+import crypto from "node:crypto";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   collectLaunchDiagnostics,
@@ -11,6 +12,48 @@ import {
   resolveViewerAuthMessage,
   type HyperiaAppRouteContext,
 } from "./app.js";
+
+const base58Alphabet =
+  "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+
+function base58Encode(data: Buffer | Uint8Array): string {
+  let value = BigInt(`0x${Buffer.from(data).toString("hex")}`);
+  const characters: string[] = [];
+  while (value > 0n) {
+    characters.unshift(base58Alphabet[Number(value % 58n)]!);
+    value /= 58n;
+  }
+  for (const byte of data) {
+    if (byte !== 0) break;
+    characters.unshift("1");
+  }
+  return characters.join("") || "1";
+}
+
+function createTestSolanaWallet() {
+  const seed = Buffer.alloc(32, 11);
+  const privateKey = crypto.createPrivateKey({
+    key: Buffer.concat([
+      Buffer.from("302e020100300506032b657004220420", "hex"),
+      seed,
+    ]),
+    format: "der",
+    type: "pkcs8",
+  });
+  const publicKey = (
+    crypto
+      .createPublicKey(privateKey)
+      .export({ format: "der", type: "spki" }) as Buffer
+  ).subarray(12, 44);
+  return {
+    address: base58Encode(publicKey),
+    privateKey: base58Encode(Buffer.concat([seed, publicKey])),
+  };
+}
+
+const TEST_SOLANA_WALLET = createTestSolanaWallet();
+const FIXTURE_CHALLENGE_ID = "00000000-0000-4000-8000-000000000001";
+const FIXTURE_MESSAGE = "Hyperia bridge SOL wallet challenge";
 
 type HyperiaFixtureServer = {
   close: () => Promise<void>;
@@ -363,8 +406,29 @@ async function startFixtureServer(options?: {
       return;
     }
 
-    if (req.method === "POST" && url.pathname === "/api/agents/wallet-auth") {
-      requests.walletAuth.push(body ?? {});
+    if (
+      req.method === "POST" &&
+      url.pathname === "/api/agents/sol-wallet-auth/challenge"
+    ) {
+      requests.walletAuth.push({ ...(body ?? {}), path: url.pathname });
+      res.statusCode = 200;
+      res.end(
+        JSON.stringify({
+          success: true,
+          challengeId: FIXTURE_CHALLENGE_ID,
+          expiresAt: new Date(Date.now() + 60_000).toISOString(),
+          message: FIXTURE_MESSAGE,
+          signatureEncoding: "base58",
+        }),
+      );
+      return;
+    }
+
+    if (
+      req.method === "POST" &&
+      url.pathname === "/api/agents/sol-wallet-auth/verify"
+    ) {
+      requests.walletAuth.push({ ...(body ?? {}), path: url.pathname });
       res.statusCode = 200;
       res.end(
         JSON.stringify({
@@ -374,6 +438,17 @@ async function startFixtureServer(options?: {
           accountId: "account-1",
         }),
       );
+      return;
+    }
+
+    if (req.method === "POST" && url.pathname === "/api/agents/mappings") {
+      requests.walletAuth.push({
+        ...(body ?? {}),
+        authorization: req.headers.authorization,
+        path: url.pathname,
+      });
+      res.statusCode = 200;
+      res.end(JSON.stringify({ success: true }));
       return;
     }
 
@@ -409,13 +484,16 @@ async function startFixtureServer(options?: {
   });
 
   await new Promise<void>((resolve, reject) => {
-    server.listen(0, "127.0.0.1", (error?: Error | null) => {
-      if (error) {
-        reject(error);
-        return;
-      }
+    const onError = (error: Error) => {
+      server.off("listening", onListening);
+      reject(error);
+    };
+    const onListening = () => {
+      server.off("error", onError);
       resolve();
-    });
+    };
+    server.once("error", onError);
+    server.listen(0, "127.0.0.1", onListening);
   });
 
   const address = server.address();
@@ -465,7 +543,12 @@ function createRuntime(
     character: {
       name: "Chen",
       walletAddresses: {
-        evm: "0x1234567890123456789012345678901234567890",
+        solana: TEST_SOLANA_WALLET.address,
+      },
+      settings: {
+        secrets: {
+          SOLANA_PRIVATE_KEY: TEST_SOLANA_WALLET.privateKey,
+        },
       },
     },
     getSetting: (key: string) => settings.get(key) ?? null,
@@ -844,9 +927,22 @@ describe("plugin-hyperia app bridge", () => {
       );
       expect(fixtureServer.requests.walletAuth).toEqual([
         expect.objectContaining({
-          walletAddress: "0x1234567890123456789012345678901234567890",
-          walletType: "evm",
+          walletAddress: TEST_SOLANA_WALLET.address,
+          path: "/api/agents/sol-wallet-auth/challenge",
+        }),
+        expect.objectContaining({
+          challengeId: FIXTURE_CHALLENGE_ID,
+          message: FIXTURE_MESSAGE,
+          signature: expect.stringMatching(/^[1-9A-HJ-NP-Za-km-z]+$/u),
+          walletAddress: TEST_SOLANA_WALLET.address,
+          path: "/api/agents/sol-wallet-auth/verify",
+        }),
+        expect.objectContaining({
+          accountId: "account-1",
           agentId: "agent-1",
+          authorization: "Bearer fixture-auth-token",
+          characterId: "character-1",
+          path: "/api/agents/mappings",
         }),
       ]);
       await expect(resolveViewerAuthMessage({ runtime })).resolves.toEqual(

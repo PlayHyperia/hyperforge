@@ -1,0 +1,110 @@
+{
+  "schemaVersion": 1,
+  "provider": "Quaternius",
+  "pack": "Animated Cute Fish Pack",
+  "packPage": "https://quaternius.com/packs/cutefish.html",
+  "publicFolder": "https://drive.google.com/drive/folders/1QK5NCgIxUZ1cYGzVwaNfcfEiQhvczqUB?usp=sharing",
+  "verifiedAt": "2026-08-13",
+  "disposition": "isolated-preparation-fishing-candidate",
+  "activationStatus": "not-activated",
+  "sourcePreview": {
+    "url": "https://quaternius.com/assets/images/fullres/cutefish.jpg",
+    "sha256": "87e8a10b43dc1348164bc912968497443e0e88a272e9410ca8ea1501324d6a52",
+    "width": 1920,
+    "height": 1080
+  },
+  "license": {
+    "spdx": "CC0-1.0",
+    "url": "https://creativecommons.org/publicdomain/zero/1.0/",
+    "commercialUse": true,
+    "modification": true,
+    "redistribution": true,
+    "attributionRequired": false,
+    "sourcePath": "artifacts/duel-launch-assets/downloads/Quaternius_Animated_Cute_Fish_Pack_Rods/License.txt",
+    "sourceFileId": "1waDUmVd9Cs2leBNGKpyHMamqGkIoob5Q",
+    "sourceBytes": 364,
+    "sourceSha256": "83d8959f9fc56353ed571fbe2dc52e4bcd64508e2399501cd45ac2ce3df0bf8c"
+  },
+  "candidates": [
+    {
+      "id": "fishing-rod-level-1",
+      "intendedRuntimeItemId": "fishing_rod",
+      "obj": {
+        "path": "artifacts/duel-launch-assets/downloads/Quaternius_Animated_Cute_Fish_Pack_Rods/FishingRod_Lvl1.obj",
+        "fileId": "1Q8-TLAql0gp2UNyom0Pf9jM_lW2Re_wm",
+        "bytes": 11866,
+        "sha256": "e2171c5cc53d9def4b8829fd2bd25ad502ba670d6bd8352b3c5f7b12c03fe785"
+      },
+      "mtl": {
+        "path": "artifacts/duel-launch-assets/downloads/Quaternius_Animated_Cute_Fish_Pack_Rods/FishingRod_Lvl1.mtl",
+        "fileId": "1B2vWicWZFE6HlZe4Fh9cE3a9jaA1m9VR",
+        "bytes": 241,
+        "sha256": "474a56001cce0d02a505718dce8b94bbe05917a325b0cffa47569ba9ac196fc0"
+      }
+    },
+    {
+      "id": "fishing-rod-level-2",
+      "intendedRuntimeItemId": "fly_fishing_rod",
+      "obj": {
+        "path": "artifacts/duel-launch-assets/downloads/Quaternius_Animated_Cute_Fish_Pack_Rods/FishingRod_Lvl2.obj",
+        "fileId": "1qBdv6h_FnvIs-MokhrncQffB5WafFaog",
+        "bytes": 19370,
+        "sha256": "b19f7371492ebf21986e122e0f4a941248145e7b26aef214f44e4959206fc685"
+      },
+      "mtl": {
+        "path": "artifacts/duel-launch-assets/downloads/Quaternius_Animated_Cute_Fish_Pack_Rods/FishingRod_Lvl2.mtl",
+        "fileId": "19Riw4nXvB2iKpj40W4bj67_t6I87Epdl",
+        "bytes": 419,
+        "sha256": "5380fa117728578e20511f2af81b1f23d5643c40e66b87b7ce687ed6544c82bc"
+      }
+    },
+    {
+      "id": "fishing-rod-level-3",
+      "intendedRuntimeItemId": null,
+      "obj": {
+        "path": "artifacts/duel-launch-assets/downloads/Quaternius_Animated_Cute_Fish_Pack_Rods/FishingRod_Lvl3.obj",
+        "fileId": "1x5S1__7j25WVfDU4_jvYN-ewavq8w6bT",
+        "bytes": 31842,
+        "sha256": "c85d7cc48fca294aa52a51c6fb5bb54943e8b03821b5af04868fb53f62d2bfa4"
+      },
+      "mtl": {
+        "path": "artifacts/duel-launch-assets/downloads/Quaternius_Animated_Cute_Fish_Pack_Rods/FishingRod_Lvl3.mtl",
+        "fileId": "19HzelC-SYA6Ksa6jNVY9G8on9JIeuRgQ",
+        "bytes": 420,
+        "sha256": "dcc653af9c26a6d224c2abe4835124a1320e335e3cc9c62e75814f22ce9cfca2"
+      }
+    },
+    {
+      "id": "fishing-rod-level-4",
+      "intendedRuntimeItemId": null,
+      "obj": {
+        "path": "artifacts/duel-launch-assets/downloads/Quaternius_Animated_Cute_Fish_Pack_Rods/FishingRod_Lvl4.obj",
+        "fileId": "12D3nd0tI6o4saeLMGZOzSD9AT0azd-CF",
+        "bytes": 34020,
+        "sha256": "40839898999c027d3e094d8aa1dda9e79bd96c5a471980030c2d17ec8d1b5117"
+      },
+      "mtl": {
+        "path": "artifacts/duel-launch-assets/downloads/Quaternius_Animated_Cute_Fish_Pack_Rods/FishingRod_Lvl4.mtl",
+        "fileId": "1Wi-PvdK3CSrcuEwp4VJ6sfkmAU0-vyMK",
+        "bytes": 419,
+        "sha256": "5a37cb57bdb687102cf4f33cd8930e15b73feeffd0ab861e6b74796a1c250deb"
+      }
+    },
+    {
+      "id": "fishing-rod-level-5",
+      "intendedRuntimeItemId": null,
+      "obj": {
+        "path": "artifacts/duel-launch-assets/downloads/Quaternius_Animated_Cute_Fish_Pack_Rods/FishingRod_Lvl5.obj",
+        "fileId": "1E_6nAJqmcjZoZizwTJq0MCL8_fhjw7wd",
+        "bytes": 45130,
+        "sha256": "64b220243d28e29a088dca713e16de594ad1622038e97e1803f3d71bf35d1bea"
+      },
+      "mtl": {
+        "path": "artifacts/duel-launch-assets/downloads/Quaternius_Animated_Cute_Fish_Pack_Rods/FishingRod_Lvl5.mtl",
+        "fileId": "1AtroIF6ytBBBMupvJMb2ETrQVoUJDP7L",
+        "bytes": 418,
+        "sha256": "9f245e4f01d9b263e875578c8d1c1744e525c29d53c48235bdfcbc370f2b7ed1"
+      }
+    }
+  ]
+}

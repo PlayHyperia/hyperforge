@@ -3,6 +3,7 @@
  */
 
 import { EventType } from "../../../types/events";
+import type { CombatProjectileCancelledPayload } from "../../../types/events/event-payloads";
 import type { World } from "../../../core/World";
 import {
   COMBAT_CONSTANTS,
@@ -63,6 +64,17 @@ import {
   PlayerDamageHandler,
   MobDamageHandler,
 } from "./handlers";
+import type { DamageApplicationResult } from "./handlers";
+import type { StreamingDuelDamageObservationContext } from "../../../types/game/streaming-duel-action-observation";
+import type {
+  DuelDamageCompetitiveTerminal,
+  DuelDamageProjectileCostAuthority,
+} from "../../../types/network/database";
+import {
+  getStreamingDuelDamageAuthority,
+  type StreamingDuelDamageAuthority,
+  type StreamingDuelDamageCommitAuthority,
+} from "./StreamingDuelDamageAuthority";
 import { PidManager } from "./PidManager";
 import { getGameRng } from "../../../utils/SeededRandom";
 import {
@@ -95,11 +107,20 @@ import { runeService } from "./RuneService";
 import { spellService, type Spell } from "./SpellService";
 import {
   ProjectileService,
+  type CombatProjectile,
   type CreateProjectileParams,
+  type ProjectileLifecycleDiagnostics,
 } from "./ProjectileService";
 import { getNPCById } from "../../../data/npcs";
-import type { EquipmentSystem } from "../character/EquipmentSystem";
+import { isPositionInsideDuelArenaZone } from "../../../data/duel-manifest";
+import type {
+  AtomicAmmunitionShotReceipt,
+  EquipmentSystem,
+} from "../character/EquipmentSystem";
 import type { InventorySystem } from "../character/InventorySystem";
+import type { ProjectileRuneCostSettlementHandle } from "../../../types/network/database";
+import type { GroundItemSystem } from "../economy/GroundItemSystem";
+import type { GroundItemSourceRegistrationReceipt } from "../../../types/network/database";
 import type { Item, EquipmentSlot } from "../../../types/game/item-types";
 import { uuid } from "../../../utils/IdGenerator";
 
@@ -128,8 +149,79 @@ interface AttackValidationResult {
   typedTargetId: EntityID | null;
 }
 
+type DamageResolution = DamageApplicationResult & {
+  publicActionObservation?: StreamingDuelDamageObservationContext;
+  competitiveTerminal?: DuelDamageCompetitiveTerminal;
+};
+
+type PendingDuelDamageOperation = {
+  status: "queued" | "committing" | "reconciling";
+  startedAt: number;
+  reconciliationAttempts: number;
+  reconciliationStartedAt: number | null;
+};
+
+type DuelDamageRetryWait = {
+  timer: ReturnType<typeof setTimeout>;
+  resolve: (continueRetrying: boolean) => void;
+};
+
+export type DuelDamageReconciliationStats = {
+  pendingOperations: number;
+  queuedOperations: number;
+  committingOperations: number;
+  reconcilingOperations: number;
+  maxReconciliationAttempts: number;
+  oldestPendingAgeMs: number;
+  oldestReconciliationAgeMs: number;
+};
+
+const DUEL_DAMAGE_RECONCILIATION_RETRY_MS = 1_000;
+
 export class CombatSystem extends SystemBase {
   private nextAttackTicks = new Map<EntityID, number>(); // Tick when entity can next attack
+  /** Durable ammunition/rune custody can cross ticks; one source commits at a time. */
+  private readonly pendingProjectileAttacks = new Set<EntityID>();
+  /**
+   * A frozen loadout switch must let already-paid projectiles resolve without
+   * allowing either combatant to immediately launch another one. The
+   * orchestrator releases this pair by ending and recreating combat only after
+   * the projectile boundary is empty.
+   */
+  private readonly autoAttackQuiescedEntities = new Set<EntityID>();
+  /**
+   * Private duel preparation owns a longer-lived admission fence than a role
+   * switch. It starts before ordinary combat teardown and remains until the
+   * exact preparation freezes or terminates, preventing a delayed hit or
+   * retaliation from spending custody after the bank plan was computed.
+   */
+  private readonly duelPreparationCombatFences = new Map<EntityID, string>();
+  /**
+   * Full projectile admission and terminal-custody operations still in flight.
+   * A combat stop synchronously cancels local projectiles, but the matching
+   * database receipt and optional recovered-ammunition presentation are async.
+   * Teardown must await this set before inventory/equipment projections unload.
+   */
+  private readonly pendingProjectileCustodyOperations = new Set<
+    Promise<unknown>
+  >();
+  /** Exact per-attacker tails preserve impact order without dropping later hits. */
+  private readonly duelDamageTailByAttacker = new Map<string, Promise<void>>();
+  /** Aggregate-only state keeps unknown database outcomes operator-visible. */
+  private readonly pendingDuelDamageOperations = new Map<
+    string,
+    PendingDuelDamageOperation
+  >();
+  private readonly duelDamageRetryWaits = new Set<DuelDamageRetryWait>();
+  private duelDamageReconciliationStopped = false;
+  /** Reference counts keep commit epochs bounded to custody operations in flight. */
+  private readonly attackCommitReferences = new Map<string, number>();
+  /**
+   * Fences an async projectile commit from a combat authority that has ended.
+   * Custody can resolve after forceEndCombat(), so a successful debit alone is
+   * never sufficient authority to recreate combat or launch delayed damage.
+   */
+  private readonly attackCommitEpochs = new Map<string, number>();
   private mobSystem?: MobNPCSystem;
   private entityManager?: EntityManager;
   private playerSystem?: PlayerSystem; // Cached for auto-retaliate checks (hot path optimization)
@@ -181,6 +273,7 @@ export class CombatSystem extends SystemBase {
   private readonly projectileService: ProjectileService;
   private equipmentSystem?: EquipmentSystem;
   private inventorySystem?: InventorySystem;
+  private groundItemSystem?: GroundItemSystem;
 
   // Pre-allocated pooled tiles for hot path calculations (zero GC)
   private readonly _attackerTile: PooledTile = tilePool.acquire();
@@ -206,6 +299,7 @@ export class CombatSystem extends SystemBase {
   // Safe because EventEmitter3 is synchronous - listeners process before emit returns.
 
   private readonly _damageDealtPayload = {
+    projectileId: undefined as string | undefined,
     attackerId: "",
     targetId: "",
     damage: 0,
@@ -214,12 +308,16 @@ export class CombatSystem extends SystemBase {
     position: { x: 0, y: 0, z: 0 } as
       { x: number; y: number; z: number } | undefined,
     isCritical: false as boolean | undefined,
+    publicActionObservation: undefined as
+      StreamingDuelDamageObservationContext | undefined,
+    competitiveTerminal: undefined as DuelDamageCompetitiveTerminal | undefined,
   };
 
   // Separate position object for when there's no position (to avoid repeated undefined assignment)
   private readonly _damageDealtPositionBuffer = { x: 0, y: 0, z: 0 };
 
   private readonly _projectileLaunchedPayload = {
+    projectileId: undefined as string | undefined,
     attackerId: "",
     targetId: "",
     projectileType: "",
@@ -265,10 +363,19 @@ export class CombatSystem extends SystemBase {
   };
 
   private readonly _projectileHitPayload = {
+    projectileId: undefined as string | undefined,
     attackerId: "",
     targetId: "",
     damage: 0,
     projectileType: "",
+  };
+
+  private readonly _projectileCancelledPayload = {
+    projectileId: "",
+    attackerId: "",
+    targetId: "",
+    projectileType: "arrow" as "arrow" | "spell",
+    reason: "combat_ended" as CombatProjectileCancelledPayload["reason"],
   };
 
   constructor(world: World) {
@@ -320,13 +427,19 @@ export class CombatSystem extends SystemBase {
     targetType?: "player" | "mob",
     position?: { x: number; y: number; z: number } | null,
     isCritical?: boolean,
+    projectileId?: string,
+    publicActionObservation?: StreamingDuelDamageObservationContext,
+    competitiveTerminal?: DuelDamageCompetitiveTerminal,
   ): void {
+    this._damageDealtPayload.projectileId = projectileId;
     this._damageDealtPayload.attackerId = attackerId;
     this._damageDealtPayload.targetId = targetId;
     this._damageDealtPayload.damage = damage;
     this._damageDealtPayload.attackType = attackType;
     this._damageDealtPayload.targetType = targetType;
     this._damageDealtPayload.isCritical = isCritical;
+    this._damageDealtPayload.publicActionObservation = publicActionObservation;
+    this._damageDealtPayload.competitiveTerminal = competitiveTerminal;
     // Copy position values into pre-allocated buffer to avoid object creation
     if (position) {
       this._damageDealtPositionBuffer.x = position.x;
@@ -352,7 +465,9 @@ export class CombatSystem extends SystemBase {
     arrowId?: string,
     delayMs?: number,
     flightTimeMs?: number,
+    projectileId?: string,
   ): void {
+    this._projectileLaunchedPayload.projectileId = projectileId;
     this._projectileLaunchedPayload.attackerId = attackerId;
     this._projectileLaunchedPayload.targetId = targetId;
     this._projectileLaunchedPayload.projectileType = projectileType;
@@ -437,7 +552,9 @@ export class CombatSystem extends SystemBase {
     targetId: string,
     damage: number,
     projectileType: string,
+    projectileId?: string,
   ): void {
+    this._projectileHitPayload.projectileId = projectileId;
     this._projectileHitPayload.attackerId = attackerId;
     this._projectileHitPayload.targetId = targetId;
     this._projectileHitPayload.damage = damage;
@@ -445,6 +562,23 @@ export class CombatSystem extends SystemBase {
     this.emitTypedEvent(
       EventType.COMBAT_PROJECTILE_HIT,
       this._projectileHitPayload,
+    );
+  }
+
+  private emitProjectileCancelled(
+    projectile: Readonly<CombatProjectile>,
+    reason: CombatProjectileCancelledPayload["reason"],
+  ): void {
+    this._projectileCancelledPayload.projectileId = projectile.id;
+    this._projectileCancelledPayload.attackerId = projectile.attackerId;
+    this._projectileCancelledPayload.targetId = projectile.targetId;
+    this._projectileCancelledPayload.projectileType = projectile.spellId
+      ? "spell"
+      : "arrow";
+    this._projectileCancelledPayload.reason = reason;
+    this.emitTypedEvent(
+      EventType.COMBAT_PROJECTILE_CANCELLED,
+      this._projectileCancelledPayload,
     );
   }
 
@@ -483,6 +617,8 @@ export class CombatSystem extends SystemBase {
     // Cache EquipmentSystem and InventorySystem for ranged/magic combat (F2P)
     this.equipmentSystem = this.world.getSystem<EquipmentSystem>("equipment");
     this.inventorySystem = this.world.getSystem<InventorySystem>("inventory");
+    this.groundItemSystem =
+      this.world.getSystem<GroundItemSystem>("ground-items");
 
     // Listen for auto-retaliate toggle to start combat if toggled ON while being attacked
     // SERVER-ONLY: Combat state changes must happen on server, client receives via network sync
@@ -535,7 +671,13 @@ export class CombatSystem extends SystemBase {
       targetType: "player" | "mob";
     }>(EventType.COMBAT_MELEE_ATTACK, (data) => {
       if (!this.world.isServer) return; // Combat is server-authoritative
-      this.handleMeleeAttack(data);
+      void this.handleMeleeAttack(data).catch((error) => {
+        this.logger.error(
+          "Melee damage authority failed",
+          error instanceof Error ? error : undefined,
+          { attackerId: data.attackerId, targetId: data.targetId },
+        );
+      });
     });
     // MVP: Ranged combat subscription removed - melee only
     this.subscribe(
@@ -721,6 +863,31 @@ export class CombatSystem extends SystemBase {
     targetType: "player" | "mob";
     attackType?: AttackType;
   }): Promise<void> {
+    if (
+      this.isDuelPreparationCombatFenced(data.attackerId) ||
+      this.isDuelPreparationCombatFenced(data.targetId)
+    ) {
+      return;
+    }
+    const attacker = this.world.entities.get(data.attackerId);
+    const target = this.world.entities.get(data.targetId);
+    if (
+      this.hasUnknownDuelDamageCommit() &&
+      data.attackerType === "player" &&
+      data.targetType === "player" &&
+      attacker?.data.inStreamingDuel === true &&
+      target?.data.inStreamingDuel === true
+    ) {
+      // Once persistence truth is ambiguous, stop authoring new attacks and
+      // costs. Already-fired projectiles still enter the exact ordered queue.
+      this.emitAttackFailed(
+        data.attackerId,
+        data.targetId,
+        "damage_persistence_reconciling",
+      );
+      return;
+    }
+
     // Route by attack type from equipped weapon (F2P ranged/magic support)
     const attackType =
       data.attackerType === "player"
@@ -736,7 +903,7 @@ export class CombatSystem extends SystemBase {
         break;
       case AttackType.MELEE:
       default:
-        this.handleMeleeAttack(data);
+        await this.handleMeleeAttack(data);
         break;
     }
   }
@@ -746,8 +913,14 @@ export class CombatSystem extends SystemBase {
    * Refactored for clarity: validation logic extracted to validateMeleeAttack(),
    * execution logic extracted to executeMeleeAttack()
    */
-  private handleMeleeAttack(data: MeleeAttackData): void {
+  private async handleMeleeAttack(data: MeleeAttackData): Promise<void> {
     const { attackerId, targetId, attackerType } = data;
+    if (
+      this.isDuelPreparationCombatFenced(attackerId) ||
+      this.isDuelPreparationCombatFenced(targetId)
+    ) {
+      return;
+    }
     const currentTick = this.world.currentTick ?? 0;
 
     if (!this.entityIdValidator.isValid(attackerId)) {
@@ -799,7 +972,7 @@ export class CombatSystem extends SystemBase {
     }
 
     // Execute the attack
-    this.executeMeleeAttack(data, validation, currentTick);
+    await this.executeMeleeAttack(data, validation, currentTick);
   }
 
   /**
@@ -984,7 +1157,7 @@ export class CombatSystem extends SystemBase {
     data: MeleeAttackData,
     validation: AttackValidationResult,
     currentTick: number,
-  ): void {
+  ): Promise<void> | void {
     const { attackerId, targetId, attackerType, targetType } = data;
     const { attacker, target, typedAttackerId, typedTargetId } = validation;
 
@@ -1030,32 +1203,58 @@ export class CombatSystem extends SystemBase {
     const currentHealth = this.entityResolver.getHealth(target);
     const damage = Math.min(rawDamage, currentHealth);
 
-    this.applyDamage(targetId, targetType, damage, attackerId);
-
-    // Emit damage event using pre-allocated payload (zero allocation)
-    const targetPosition = getEntityPosition(target);
-    this.emitDamageDealt(
-      attackerId,
+    const damageResolution = this.applyDamage(
       targetId,
-      damage,
-      undefined,
       targetType,
-      targetPosition,
+      damage,
+      attackerId,
     );
+    const finish = (damageResult: DamageResolution): void => {
+      if (!damageResult.success) return;
 
-    if (!this.entityResolver.isAlive(target, targetType)) {
-      return;
+      // Emit damage event using pre-allocated payload (zero allocation)
+      const targetPosition = getEntityPosition(target);
+      this.emitDamageDealt(
+        attackerId,
+        targetId,
+        damageResult.actualDamage,
+        undefined,
+        targetType,
+        targetPosition,
+        undefined,
+        undefined,
+        damageResult.publicActionObservation,
+        damageResult.competitiveTerminal,
+      );
+
+      if (!this.entityResolver.isAlive(target, targetType)) return;
+
+      // Set cooldown and enter combat state
+      this.nextAttackTicks.set(typedAttackerId, currentTick + attackSpeedTicks);
+      this.enterCombat(typedAttackerId, typedTargetId, attackSpeedTicks);
+    };
+    if (damageResolution instanceof Promise) {
+      return damageResolution.then(finish);
     }
-
-    // Set cooldown and enter combat state
-    this.nextAttackTicks.set(typedAttackerId, currentTick + attackSpeedTicks);
-    this.enterCombat(typedAttackerId, typedTargetId, attackSpeedTicks);
+    finish(damageResolution);
   }
 
   /**
    * Handle ranged attack - validate arrows, create projectile, queue damage
    */
-  private async handleRangedAttack(data: {
+  private handleRangedAttack(data: {
+    attackerId: string;
+    targetId: string;
+    attackerType: "player" | "mob";
+    targetType: "player" | "mob";
+    arrowId?: string;
+  }): Promise<void> {
+    return this.trackProjectileCustodyOperation(
+      this.handleRangedAttackImpl(data),
+    );
+  }
+
+  private async handleRangedAttackImpl(data: {
     attackerId: string;
     targetId: string;
     attackerType: "player" | "mob";
@@ -1063,6 +1262,12 @@ export class CombatSystem extends SystemBase {
     arrowId?: string;
   }): Promise<void> {
     const { attackerId, targetId, attackerType, targetType } = data;
+    if (
+      this.isDuelPreparationCombatFenced(attackerId) ||
+      this.isDuelPreparationCombatFenced(targetId)
+    ) {
+      return;
+    }
     const currentTick = this.world.currentTick ?? 0;
 
     // Mobs can launch ranged projectiles when configured with arrowId.
@@ -1153,7 +1358,9 @@ export class CombatSystem extends SystemBase {
         xpReward: 0,
       };
 
-      this.projectileService.createProjectile(projectileParams);
+      const projectile =
+        this.projectileService.createProjectile(projectileParams);
+      if (!projectile) return;
 
       const { HIT_DELAY, TICK_DURATION_MS } = COMBAT_CONSTANTS;
       const rangedHitDelayTicks = Math.min(
@@ -1180,6 +1387,7 @@ export class CombatSystem extends SystemBase {
         arrowId,
         arrowLaunchDelayMs,
         travelDurationMs,
+        projectile.id,
       );
 
       const typedTargetId = createEntityID(targetId);
@@ -1258,20 +1466,37 @@ export class CombatSystem extends SystemBase {
       return;
     }
 
-    if (
-      !this.projectileService.canCreateProjectile(
-        attackerId,
-        { x: attackerPos.x, z: attackerPos.z },
-        { x: targetPos.x, z: targetPos.z },
-      )
-    ) {
-      this.emitAttackFailed(attackerId, targetId, "projectile_capacity");
-      return;
-    }
-
     // Check cooldown
     const typedAttackerId = createEntityID(attackerId);
     if (!this.checkAttackCooldown(typedAttackerId, currentTick)) {
+      return;
+    }
+    if (this.pendingProjectileAttacks.has(typedAttackerId)) {
+      return;
+    }
+    // Entity positions are mutable live objects. Bind the capacity lease and
+    // eventual projectile to one immutable attack-decision snapshot so normal
+    // kiting during the database await cannot invalidate a paid launch.
+    const projectileSourcePosition = {
+      x: attackerPos.x,
+      z: attackerPos.z,
+    };
+    const projectileTargetPosition = {
+      x: targetPos.x,
+      z: targetPos.z,
+    };
+    const projectileRecoveryPosition = {
+      x: targetPos.x,
+      y: targetPos.y,
+      z: targetPos.z,
+    };
+    const projectileReservation = this.projectileService.reserveProjectile(
+      attackerId,
+      projectileSourcePosition,
+      projectileTargetPosition,
+    );
+    if (!projectileReservation) {
+      this.emitAttackFailed(attackerId, targetId, "projectile_capacity");
       return;
     }
 
@@ -1299,6 +1524,7 @@ export class CombatSystem extends SystemBase {
     const previousNextAttackTick = this.nextAttackTicks.get(typedAttackerId);
     const claimedNextAttackTick = currentTick + attackSpeedTicks;
     this.nextAttackTicks.set(typedAttackerId, claimedNextAttackTick);
+    this.pendingProjectileAttacks.add(typedAttackerId);
 
     // Calculate damage
     const damage = this.calculateRangedDamageForAttack(
@@ -1307,24 +1533,81 @@ export class CombatSystem extends SystemBase {
       attackerId,
       targetType,
     );
+    const attackCommitEpoch = this.captureAttackCommitEpoch(
+      attackerId,
+      targetId,
+    );
 
     const arrowId = arrowSlot?.itemId?.toString();
-    const arrowDebit =
-      arrowId && this.equipmentSystem
-        ? await this.equipmentSystem.consumeArrowAtomic(
-            attackerId,
-            `arrow-debit:${uuid()}${uuid()}`,
-            arrowId,
-          )
-        : null;
-    if (!arrowDebit?.ok) {
-      if (this.nextAttackTicks.get(typedAttackerId) === claimedNextAttackTick) {
-        if (previousNextAttackTick === undefined) {
-          this.nextAttackTicks.delete(typedAttackerId);
-        } else {
-          this.nextAttackTicks.set(typedAttackerId, previousNextAttackTick);
+    const recoverySelected =
+      !isPositionInsideDuelArenaZone(
+        projectileTargetPosition.x,
+        projectileTargetPosition.z,
+      ) && getGameRng().random() >= 0.2;
+    let arrowDebit: AtomicAmmunitionShotReceipt | null = null;
+    try {
+      arrowDebit =
+        arrowId && this.equipmentSystem
+          ? await this.equipmentSystem.consumeArrowForProjectileAtomic(
+              attackerId,
+              `ammunition-shot:${uuid()}${uuid()}`,
+              arrowId,
+              recoverySelected ? "recovered" : "destroyed",
+              recoverySelected ? projectileRecoveryPosition : null,
+            )
+          : null;
+    } catch (error) {
+      this.logger.error(
+        "Ranged projectile custody failed before launch",
+        error instanceof Error ? error : undefined,
+        { attackerId, targetId, arrowId },
+      );
+    } finally {
+      this.pendingProjectileAttacks.delete(typedAttackerId);
+    }
+    const attackCommitCurrent = this.isAttackCommitEpochCurrent(
+      attackerId,
+      targetId,
+      attackCommitEpoch,
+    );
+    this.releaseAttackCommitEpoch(attackerId, targetId);
+    if (!attackCommitCurrent) {
+      this.projectileService.releaseProjectileReservation(
+        projectileReservation,
+      );
+      if (arrowDebit?.ok && this.equipmentSystem) {
+        const cancelled =
+          await this.equipmentSystem.cancelArrowProjectileAtomic({
+            operationId: arrowDebit.operationId,
+            playerId: arrowDebit.playerId,
+            requestFingerprint: arrowDebit.requestFingerprint,
+            itemId: arrowDebit.arrowId,
+            recoveryDisposition: arrowDebit.recoveryDisposition,
+          });
+        if (!cancelled.ok || cancelled.status !== "cancelled") {
+          this.logger.error(
+            "Stale ranged admission refund deferred to recovery",
+            undefined,
+            { attackerId, targetId, operationId: arrowDebit.operationId },
+          );
         }
       }
+      this.restoreClaimedProjectileCooldown(
+        typedAttackerId,
+        claimedNextAttackTick,
+        previousNextAttackTick,
+      );
+      return;
+    }
+    if (!arrowDebit?.ok) {
+      this.projectileService.releaseProjectileReservation(
+        projectileReservation,
+      );
+      this.restoreClaimedProjectileCooldown(
+        typedAttackerId,
+        claimedNextAttackTick,
+        previousNextAttackTick,
+      );
       this.emitTypedEvent(EventType.UI_MESSAGE, {
         playerId: attackerId,
         message:
@@ -1336,27 +1619,93 @@ export class CombatSystem extends SystemBase {
       return;
     }
 
+    const projectileCommitTick = this.world.currentTick ?? currentTick;
+    if (this.nextAttackTicks.get(typedAttackerId) === claimedNextAttackTick) {
+      this.nextAttackTicks.set(
+        typedAttackerId,
+        projectileCommitTick + attackSpeedTicks,
+      );
+    }
+
     // Create projectile with delayed hit
     const projectileParams: CreateProjectileParams = {
       sourceId: attackerId,
       targetId,
       attackType: AttackType.RANGED,
       damage,
-      currentTick,
-      sourcePosition: { x: attackerPos.x, z: attackerPos.z },
-      targetPosition: { x: targetPos.x, z: targetPos.z },
+      currentTick: projectileCommitTick,
+      sourcePosition: projectileSourcePosition,
+      targetPosition: projectileTargetPosition,
       arrowId,
+      ammunitionCustody: {
+        operationId: arrowDebit.operationId,
+        playerId: arrowDebit.playerId,
+        requestFingerprint: arrowDebit.requestFingerprint,
+        itemId: arrowDebit.arrowId,
+        recoveryDisposition: arrowDebit.recoveryDisposition,
+      },
     };
 
-    const projectile =
-      this.projectileService.createProjectile(projectileParams);
+    const projectile = this.projectileService.createReservedProjectile(
+      projectileReservation,
+      projectileParams,
+    );
     if (!projectile) {
+      this.projectileService.releaseProjectileReservation(
+        projectileReservation,
+      );
       this.logger.error(
-        `Projectile capacity changed after committed arrow debit for ${attackerId}`,
+        `Reserved projectile admission failed after committed arrow debit for ${attackerId}`,
         new Error("ranged_projectile_commit_invariant_failed"),
+      );
+      const cancelled = await this.equipmentSystem?.cancelArrowProjectileAtomic(
+        projectileParams.ammunitionCustody!,
+      );
+      if (!cancelled?.ok || cancelled.status !== "cancelled") {
+        this.logger.error(
+          "Failed reserved ranged admission refund deferred to recovery",
+          undefined,
+          { attackerId, targetId, operationId: arrowDebit.operationId },
+        );
+      }
+      return;
+    }
+
+    // Keep the locally admitted projectile non-hittable and invisible until
+    // its staged debit reaches a durable fired terminal. Cancellation can race
+    // this await; the database serializes the exact fired/cancelled winner.
+    const scheduledHitTick = projectile.hitsAtTick;
+    projectile.hitsAtTick = Number.POSITIVE_INFINITY;
+    const launchSettlement =
+      await this.equipmentSystem!.completeArrowProjectileAtomic(
+        projectileParams.ammunitionCustody!,
+      );
+    if (!launchSettlement.ok || launchSettlement.status !== "fired") {
+      this.projectileService.cancelProjectile(projectile.id, (cancelled) =>
+        this.handleProjectileCancellation(cancelled, "combat_state_missing"),
+      );
+      this.restoreClaimedProjectileCooldown(
+        typedAttackerId,
+        claimedNextAttackTick,
+        previousNextAttackTick,
       );
       return;
     }
+    projectile.ammunitionRecovery =
+      launchSettlement.recoverySource ?? undefined;
+    if (this.projectileService.getProjectile(projectile.id) !== projectile) {
+      if (launchSettlement.recoverySource) {
+        await this.exposeAmmunitionRecovery(
+          projectile.id,
+          launchSettlement.recoverySource,
+        );
+      }
+      return;
+    }
+    projectile.hitsAtTick = Math.max(
+      scheduledHitTick,
+      (this.world.currentTick ?? projectileCommitTick) + 1,
+    );
 
     this.rotationManager.rotateTowardsTarget(
       attackerId,
@@ -1367,8 +1716,19 @@ export class CombatSystem extends SystemBase {
     this.animationManager.setCombatEmote(
       attackerId,
       attackerType,
-      currentTick,
+      projectileCommitTick,
       attackSpeedTicks,
+    );
+
+    // Keep the visual flight on the same tick-derived authority as the
+    // projectile service. Player attacks previously omitted this duration,
+    // which made clients guess from render speed and occasionally remove an
+    // arrow before its real hit under load.
+    const arrowLaunchDelayMs = COMBAT_CONSTANTS.ARROW_LAUNCH_DELAY_MS;
+    const travelDurationMs = Math.max(
+      200,
+      projectile.delayTicks * COMBAT_CONSTANTS.TICK_DURATION_MS -
+        arrowLaunchDelayMs,
     );
 
     // Emit projectile created event for client visuals
@@ -1380,7 +1740,9 @@ export class CombatSystem extends SystemBase {
       targetPos,
       undefined,
       arrowId,
-      400, // Delay to match bow draw animation
+      arrowLaunchDelayMs,
+      travelDurationMs,
+      projectile.id,
     );
 
     // Set cooldown and enter combat
@@ -1393,7 +1755,19 @@ export class CombatSystem extends SystemBase {
     );
   }
 
-  private async handleMagicAttack(data: {
+  private handleMagicAttack(data: {
+    attackerId: string;
+    targetId: string;
+    attackerType: "player" | "mob";
+    targetType: "player" | "mob";
+    spellId?: string;
+  }): Promise<void> {
+    return this.trackProjectileCustodyOperation(
+      this.handleMagicAttackImpl(data),
+    );
+  }
+
+  private async handleMagicAttackImpl(data: {
     attackerId: string;
     targetId: string;
     attackerType: "player" | "mob";
@@ -1401,6 +1775,12 @@ export class CombatSystem extends SystemBase {
     spellId?: string;
   }): Promise<void> {
     const { attackerId, targetId, attackerType, targetType } = data;
+    if (
+      this.isDuelPreparationCombatFenced(attackerId) ||
+      this.isDuelPreparationCombatFenced(targetId)
+    ) {
+      return;
+    }
     const currentTick = this.world.currentTick ?? 0;
 
     // Mobs can launch magic projectiles when configured with spellId.
@@ -1493,7 +1873,9 @@ export class CombatSystem extends SystemBase {
         xpReward: 0,
       };
 
-      this.projectileService.createProjectile(projectileParams);
+      const projectile =
+        this.projectileService.createProjectile(projectileParams);
+      if (!projectile) return;
 
       const { HIT_DELAY, TICK_DURATION_MS } = COMBAT_CONSTANTS;
       const magicHitDelayTicks = Math.min(
@@ -1520,6 +1902,7 @@ export class CombatSystem extends SystemBase {
         undefined,
         spellLaunchDelayMs,
         travelDurationMs,
+        projectile.id,
       );
 
       const typedTargetId = createEntityID(targetId);
@@ -1688,20 +2071,31 @@ export class CombatSystem extends SystemBase {
       return;
     }
 
-    if (
-      !this.projectileService.canCreateProjectile(
-        attackerId,
-        { x: attackerPos.x, z: attackerPos.z },
-        { x: targetPos.x, z: targetPos.z },
-      )
-    ) {
-      this.emitAttackFailed(attackerId, targetId, "projectile_capacity");
-      return;
-    }
-
     // Check cooldown
     const typedAttackerId = createEntityID(attackerId);
     if (!this.checkAttackCooldown(typedAttackerId, currentTick)) {
+      return;
+    }
+    if (this.pendingProjectileAttacks.has(typedAttackerId)) {
+      return;
+    }
+    // Keep the reservation and launch geometry byte-equivalent even when the
+    // attacker or target moves while durable rune custody is committing.
+    const projectileSourcePosition = {
+      x: attackerPos.x,
+      z: attackerPos.z,
+    };
+    const projectileTargetPosition = {
+      x: targetPos.x,
+      z: targetPos.z,
+    };
+    const projectileReservation = this.projectileService.reserveProjectile(
+      attackerId,
+      projectileSourcePosition,
+      projectileTargetPosition,
+    );
+    if (!projectileReservation) {
+      this.emitAttackFailed(attackerId, targetId, "projectile_capacity");
       return;
     }
 
@@ -1715,6 +2109,7 @@ export class CombatSystem extends SystemBase {
     const previousNextAttackTick = this.nextAttackTicks.get(typedAttackerId);
     const claimedNextAttackTick = currentTick + attackSpeedTicks;
     this.nextAttackTicks.set(typedAttackerId, claimedNextAttackTick);
+    this.pendingProjectileAttacks.add(typedAttackerId);
 
     // Calculate damage
     const damage = this.calculateMagicDamageForAttack(
@@ -1724,24 +2119,79 @@ export class CombatSystem extends SystemBase {
       targetType,
       spell,
     );
+    const attackCommitEpoch = this.captureAttackCommitEpoch(
+      attackerId,
+      targetId,
+    );
 
     // The complete spell cost is one durable custody operation for every
     // player, including selected duel contestants. No animation, combat state,
     // projectile, damage, or XP is created unless that receipt succeeds.
-    const runeDebit = await this.consumeRunesForSpell(
+    let runeDebit:
+      | { ok: true; custody: ProjectileRuneCostSettlementHandle | null }
+      | { ok: false; reason: string } = {
+      ok: false,
+      reason: "persistence_failed",
+    };
+    try {
+      runeDebit = await this.consumeRunesForSpell(
+        attackerId,
+        spell,
+        weapon,
+        `spell-runes:${uuid()}${uuid()}`,
+      );
+    } catch (error) {
+      this.logger.error(
+        "Magic projectile custody failed before launch",
+        error instanceof Error ? error : undefined,
+        { attackerId, targetId, spellId: spell.id },
+      );
+    } finally {
+      this.pendingProjectileAttacks.delete(typedAttackerId);
+    }
+    const attackCommitCurrent = this.isAttackCommitEpochCurrent(
       attackerId,
-      spell,
-      weapon,
-      `spell-runes:${uuid()}${uuid()}`,
+      targetId,
+      attackCommitEpoch,
     );
-    if (!runeDebit.ok) {
-      if (this.nextAttackTicks.get(typedAttackerId) === claimedNextAttackTick) {
-        if (previousNextAttackTick === undefined) {
-          this.nextAttackTicks.delete(typedAttackerId);
-        } else {
-          this.nextAttackTicks.set(typedAttackerId, previousNextAttackTick);
+    this.releaseAttackCommitEpoch(attackerId, targetId);
+    if (!attackCommitCurrent) {
+      this.projectileService.releaseProjectileReservation(
+        projectileReservation,
+      );
+      if (runeDebit.ok && runeDebit.custody && this.inventorySystem) {
+        const cancelled =
+          await this.inventorySystem.cancelProjectileRuneCostAtomic(
+            runeDebit.custody,
+          );
+        if (!cancelled.ok || cancelled.status !== "cancelled") {
+          this.logger.error(
+            "Stale magic admission refund deferred to recovery",
+            undefined,
+            {
+              attackerId,
+              targetId,
+              operationId: runeDebit.custody.operationId,
+            },
+          );
         }
       }
+      this.restoreClaimedProjectileCooldown(
+        typedAttackerId,
+        claimedNextAttackTick,
+        previousNextAttackTick,
+      );
+      return;
+    }
+    if (!runeDebit.ok) {
+      this.projectileService.releaseProjectileReservation(
+        projectileReservation,
+      );
+      this.restoreClaimedProjectileCooldown(
+        typedAttackerId,
+        claimedNextAttackTick,
+        previousNextAttackTick,
+      );
       this.emitTypedEvent(EventType.UI_MESSAGE, {
         playerId: attackerId,
         message:
@@ -1753,27 +2203,85 @@ export class CombatSystem extends SystemBase {
       return;
     }
 
+    const projectileCommitTick = this.world.currentTick ?? currentTick;
+    if (this.nextAttackTicks.get(typedAttackerId) === claimedNextAttackTick) {
+      this.nextAttackTicks.set(
+        typedAttackerId,
+        projectileCommitTick + attackSpeedTicks,
+      );
+    }
+
     // Create projectile with delayed hit
     const projectileParams: CreateProjectileParams = {
       sourceId: attackerId,
       targetId,
       attackType: AttackType.MAGIC,
       damage,
-      currentTick,
-      sourcePosition: { x: attackerPos.x, z: attackerPos.z },
-      targetPosition: { x: targetPos.x, z: targetPos.z },
+      currentTick: projectileCommitTick,
+      sourcePosition: projectileSourcePosition,
+      targetPosition: projectileTargetPosition,
       spellId: spell.id,
       xpReward: spell.baseXp,
+      runeCustody: runeDebit.custody ?? undefined,
     };
 
-    const projectile =
-      this.projectileService.createProjectile(projectileParams);
+    const projectile = this.projectileService.createReservedProjectile(
+      projectileReservation,
+      projectileParams,
+    );
     if (!projectile) {
+      this.projectileService.releaseProjectileReservation(
+        projectileReservation,
+      );
       this.logger.error(
-        `Projectile capacity changed after committed spell debit for ${attackerId}`,
+        `Reserved projectile admission failed after committed spell debit for ${attackerId}`,
         new Error("magic_projectile_commit_invariant_failed"),
       );
+      if (runeDebit.custody && this.inventorySystem) {
+        const cancelled =
+          await this.inventorySystem.cancelProjectileRuneCostAtomic(
+            runeDebit.custody,
+          );
+        if (!cancelled.ok || cancelled.status !== "cancelled") {
+          this.logger.error(
+            "Failed reserved magic admission refund deferred to recovery",
+            undefined,
+            {
+              attackerId,
+              targetId,
+              operationId: runeDebit.custody.operationId,
+            },
+          );
+        }
+      }
       return;
+    }
+
+    if (runeDebit.custody && this.inventorySystem) {
+      const scheduledHitTick = projectile.hitsAtTick;
+      projectile.hitsAtTick = Number.POSITIVE_INFINITY;
+      const launchSettlement =
+        await this.inventorySystem.completeProjectileRuneCostAtomic(
+          runeDebit.custody,
+        );
+      if (!launchSettlement.ok || launchSettlement.status !== "fired") {
+        this.projectileService.cancelProjectile(projectile.id, (cancelled) =>
+          this.handleProjectileCancellation(cancelled, "combat_state_missing"),
+        );
+        this.restoreClaimedProjectileCooldown(
+          typedAttackerId,
+          claimedNextAttackTick,
+          previousNextAttackTick,
+        );
+        return;
+      }
+      if (this.projectileService.getProjectile(projectile.id) !== projectile) {
+        return;
+      }
+      projectile.hitsAtTick = Math.max(
+        scheduledHitTick,
+        (this.world.currentTick ?? projectileCommitTick) + 1,
+      );
     }
 
     const typedTargetId = createEntityID(targetId);
@@ -1792,12 +2300,20 @@ export class CombatSystem extends SystemBase {
     this.animationManager.setCombatEmote(
       attackerId,
       attackerType,
-      currentTick,
+      projectileCommitTick,
       attackSpeedTicks,
     );
 
-    // Emit projectile created event for client visuals
-    // Delay projectile spawn to sync with casting animation (roughly halfway through)
+    // Use the projectile service's hit tick for the visual duration so player
+    // and mob spells share one authoritative timing model.
+    const spellLaunchDelayMs = COMBAT_CONSTANTS.SPELL_LAUNCH_DELAY_MS;
+    const travelDurationMs = Math.max(
+      200,
+      projectile.delayTicks * COMBAT_CONSTANTS.TICK_DURATION_MS -
+        spellLaunchDelayMs,
+    );
+
+    // Emit projectile created event for client visuals.
     this.emitProjectileLaunched(
       attackerId,
       targetId,
@@ -1806,7 +2322,9 @@ export class CombatSystem extends SystemBase {
       targetPos,
       spell.id,
       undefined,
-      800, // Delay to match casting animation
+      spellLaunchDelayMs,
+      travelDurationMs,
+      projectile.id,
     );
   }
 
@@ -1880,14 +2398,17 @@ export class CombatSystem extends SystemBase {
     spell: Spell,
     weapon: Item | null,
     operationId: string,
-  ): Promise<{ ok: true } | { ok: false; reason: string }> {
+  ): Promise<
+    | { ok: true; custody: ProjectileRuneCostSettlementHandle | null }
+    | { ok: false; reason: string }
+  > {
     if (!this.inventorySystem) {
       return { ok: false, reason: "atomic_persistence_unavailable" };
     }
 
     const runesToConsume = runeService.getRunesToConsume(spell.runes, weapon);
-    if (runesToConsume.length === 0) return { ok: true };
-    const receipt = await this.inventorySystem.debitItemsAtomic(
+    if (runesToConsume.length === 0) return { ok: true, custody: null };
+    const receipt = await this.inventorySystem.stageProjectileRuneCostAtomic(
       playerId,
       operationId,
       runesToConsume.map((requirement) => ({
@@ -1895,7 +2416,17 @@ export class CombatSystem extends SystemBase {
         quantity: requirement.quantity,
       })),
     );
-    return receipt.ok ? { ok: true } : { ok: false, reason: receipt.reason };
+    return receipt.ok
+      ? {
+          ok: true,
+          custody: {
+            operationId: receipt.operationId,
+            playerId: receipt.playerId,
+            requestFingerprint: receipt.requestFingerprint,
+            requirements: receipt.requirements,
+          },
+        }
+      : { ok: false, reason: receipt.reason };
   }
 
   /**
@@ -2149,7 +2680,7 @@ export class CombatSystem extends SystemBase {
     }
 
     // Default mob attack path is melee.
-    this.handleMeleeAttack({
+    void this.handleMeleeAttack({
       attackerId: data.mobId,
       targetId: data.targetId,
       attackerType: "mob",
@@ -2333,10 +2864,16 @@ export class CombatSystem extends SystemBase {
     targetType: string,
     damage: number,
     attackerId: string,
-  ): void {
+    projectileCost?: DuelDamageProjectileCostAuthority,
+  ): DamageResolution | Promise<DamageResolution> {
+    const failed = (targetDied = false): DamageResolution => ({
+      actualDamage: 0,
+      targetDied,
+      success: false,
+    });
     // Validate target type
     if (targetType !== "player" && targetType !== "mob") {
-      return;
+      return failed();
     }
 
     // Get the appropriate handler for the target type
@@ -2345,7 +2882,7 @@ export class CombatSystem extends SystemBase {
       this.logger.error("No damage handler for target type", undefined, {
         targetType,
       });
-      return;
+      return failed();
     }
 
     // Create typed EntityID for handler
@@ -2354,6 +2891,42 @@ export class CombatSystem extends SystemBase {
 
     // Determine attacker type for handler
     const attackerType = this.entityResolver.resolveType(attackerId);
+
+    const attacker = this.world.entities.get(attackerId);
+    const target = this.world.entities.get(targetId);
+    const isStreamingDuelDamage =
+      damage > 0 &&
+      targetType === "player" &&
+      attackerType === "player" &&
+      (attacker as { data?: { inStreamingDuel?: boolean } } | undefined)?.data
+        ?.inStreamingDuel === true &&
+      (target as { data?: { inStreamingDuel?: boolean } } | undefined)?.data
+        ?.inStreamingDuel === true;
+    if (isStreamingDuelDamage) {
+      const authority = getStreamingDuelDamageAuthority(this.world);
+      const commitAuthority = authority?.createDamageObservationContext(
+        attackerId,
+        targetId,
+        damage,
+      );
+      if (!authority || !commitAuthority || !this.playerSystem) {
+        authority?.handleDamageCommitFailure(
+          attackerId,
+          targetId,
+          "damage_authority_unavailable",
+          commitAuthority?.publicActionObservation,
+        );
+        return failed();
+      }
+      return this.enqueueStreamingDuelDamage({
+        attackerId,
+        targetId,
+        damage,
+        authority,
+        commitAuthority,
+        projectileCost,
+      });
+    }
 
     // Apply damage through polymorphic handler
     const result = handler.applyDamage(
@@ -2374,13 +2947,13 @@ export class CombatSystem extends SystemBase {
           targetType,
         });
       }
-      return;
+      return result;
     }
 
     // Prevent additional attacks if target died this tick
     if (result.targetDied) {
       this.handleEntityDied(targetId, targetType);
-      return;
+      return result;
     }
 
     // Emit UI message based on target type
@@ -2401,6 +2974,173 @@ export class CombatSystem extends SystemBase {
 
     // Note: Damage splatter events are now emitted at the call sites
     // (handleMeleeAttack, processAutoAttack) to ensure they're emitted even for 0 damage hits
+    return result;
+  }
+
+  /**
+   * Serialize hits from one attacker while allowing the opposing contestant's
+   * transaction to proceed. An ambiguous response retains the exact operation
+   * and retries it until persistence returns committed truth or a deterministic
+   * rejection; a new operation is never fabricated during reconciliation.
+   */
+  private enqueueStreamingDuelDamage(input: {
+    attackerId: string;
+    targetId: string;
+    damage: number;
+    authority: StreamingDuelDamageAuthority;
+    commitAuthority: StreamingDuelDamageCommitAuthority;
+    projectileCost?: DuelDamageProjectileCostAuthority;
+  }): Promise<DamageResolution> {
+    const {
+      attackerId,
+      targetId,
+      damage,
+      authority,
+      commitAuthority,
+      projectileCost,
+    } = input;
+    const observation = commitAuthority.publicActionObservation;
+    const operationId = observation.operationId;
+    const failed = (targetDied = false): DamageResolution => ({
+      actualDamage: 0,
+      targetDied,
+      success: false,
+    });
+    if (
+      this.duelDamageReconciliationStopped ||
+      this.pendingDuelDamageOperations.has(operationId)
+    ) {
+      authority.handleDamageCommitFailure(
+        attackerId,
+        targetId,
+        "damage_operation_duplicate",
+        observation,
+      );
+      return Promise.resolve(failed());
+    }
+
+    const pending: PendingDuelDamageOperation = {
+      status: "queued",
+      startedAt: Date.now(),
+      reconciliationAttempts: 0,
+      reconciliationStartedAt: null,
+    };
+    this.pendingDuelDamageOperations.set(operationId, pending);
+    authority.handleDamageCommitStarted(observation);
+
+    const previousTail =
+      this.duelDamageTailByAttacker.get(attackerId) ?? Promise.resolve();
+    const result = previousTail.then(async (): Promise<DamageResolution> => {
+      if (this.duelDamageReconciliationStopped) return failed();
+      pending.status = "committing";
+
+      for (;;) {
+        let receipt;
+        try {
+          receipt = await this.playerSystem!.damagePlayerAtomic(
+            targetId,
+            damage,
+            attackerId,
+            observation,
+            commitAuthority.competitiveAuthority,
+            projectileCost,
+          );
+        } catch (error) {
+          this.logger.error(
+            "Streaming duel damage reconciliation threw",
+            error instanceof Error ? error : undefined,
+            { attackerId, targetId, operationId },
+          );
+          receipt = {
+            ok: false as const,
+            committed: false,
+            operationId,
+            replayed: false,
+            appliedDamage: 0 as const,
+            targetDied: false,
+            competitiveTerminal: null,
+            reason: "persistence_unknown" as const,
+          };
+        }
+
+        if (receipt.ok) {
+          return {
+            actualDamage: receipt.appliedDamage,
+            targetDied: receipt.targetDied,
+            success: true,
+            publicActionObservation: receipt.publicActionObservation,
+            ...(receipt.competitiveTerminal
+              ? { competitiveTerminal: receipt.competitiveTerminal }
+              : {}),
+          };
+        }
+        if (receipt.reason !== "persistence_unknown") {
+          const currentAuthority =
+            getStreamingDuelDamageAuthority(this.world) ?? authority;
+          currentAuthority.handleDamageCommitFailure(
+            attackerId,
+            targetId,
+            receipt.reason,
+            observation,
+          );
+          return failed(receipt.targetDied);
+        }
+
+        pending.status = "reconciling";
+        pending.reconciliationAttempts += 1;
+        pending.reconciliationStartedAt ??= Date.now();
+        if (
+          pending.reconciliationAttempts === 1 ||
+          pending.reconciliationAttempts % 30 === 0
+        ) {
+          this.logger.warn(
+            "Streaming duel damage response remains unknown; retrying exact operation",
+            {
+              attackerId,
+              targetId,
+              operationId,
+              attempts: pending.reconciliationAttempts,
+            },
+          );
+        }
+        if (!(await this.waitForDuelDamageReconciliationRetry())) {
+          return failed();
+        }
+      }
+    });
+    const tail = result.then(
+      () => undefined,
+      () => undefined,
+    );
+    this.duelDamageTailByAttacker.set(attackerId, tail);
+    void tail.finally(() => {
+      this.pendingDuelDamageOperations.delete(operationId);
+      authority.handleDamageCommitSettled(observation);
+      if (this.duelDamageTailByAttacker.get(attackerId) === tail) {
+        this.duelDamageTailByAttacker.delete(attackerId);
+      }
+    });
+    return result;
+  }
+
+  private hasUnknownDuelDamageCommit(): boolean {
+    for (const pending of this.pendingDuelDamageOperations.values()) {
+      if (pending.status === "reconciling") return true;
+    }
+    return false;
+  }
+
+  private waitForDuelDamageReconciliationRetry(): Promise<boolean> {
+    if (this.duelDamageReconciliationStopped) return Promise.resolve(false);
+    return new Promise((resolve) => {
+      const wait = {} as DuelDamageRetryWait;
+      wait.resolve = resolve;
+      wait.timer = setTimeout(() => {
+        this.duelDamageRetryWaits.delete(wait);
+        resolve(!this.duelDamageReconciliationStopped);
+      }, DUEL_DAMAGE_RECONCILIATION_RETRY_MS);
+      this.duelDamageRetryWaits.add(wait);
+    });
   }
 
   // Note: syncCombatStateToEntity, clearCombatStateFromEntity moved to CombatStateService
@@ -2413,6 +3153,12 @@ export class CombatSystem extends SystemBase {
     attackerSpeedTicks?: number,
     attackerWeaponType: AttackType = AttackType.MELEE,
   ): void {
+    if (
+      this.isDuelPreparationCombatFenced(String(attackerId)) ||
+      this.isDuelPreparationCombatFenced(String(targetId))
+    ) {
+      return;
+    }
     const currentTick = this.world.currentTick ?? 0;
 
     // Detect entity types (don't assume attacker is always player!)
@@ -2705,20 +3451,32 @@ export class CombatSystem extends SystemBase {
 
     const typedEntityId = createEntityID(data.entityId);
     const combatState = this.stateService.getCombatData(data.entityId);
+    this.autoAttackQuiescedEntities.delete(typedEntityId);
+    this.invalidateAttackCommitEpoch(data.entityId);
     if (!combatState) {
       // An explicit stop can race with state teardown while its projectile is
       // still active. With no counterpart available, clear every projectile
       // involving this entity so it cannot damage a revived/teleported player.
-      this.cancelProjectilesInvolvingEntity(data.entityId);
+      this.cancelProjectilesInvolvingEntity(
+        data.entityId,
+        "combat_state_missing",
+      );
       return;
     }
 
     const targetId = String(combatState.targetId);
+    this.autoAttackQuiescedEntities.delete(combatState.targetId);
+    this.invalidateAttackCommitEpoch(targetId);
 
     // Projectile damage is delayed by one or more ticks. Combat state teardown
     // must invalidate that queued work before health restoration or a new fight
     // can reuse the same entities.
-    this.projectileService.cancelProjectilesBetween(data.entityId, targetId);
+    this.projectileService.cancelProjectilesBetween(
+      data.entityId,
+      targetId,
+      (projectile) =>
+        this.handleProjectileCancellation(projectile, "combat_ended"),
+    );
 
     // Reset emotes for both entities via AnimationManager
     // Skip attacker emote reset if requested (e.g., when target died during attack animation)
@@ -2796,7 +3554,7 @@ export class CombatSystem extends SystemBase {
     // A dead entity can have both inbound and outbound delayed hits queued.
     // Remove them before any duel-owned restoration can make the same entity
     // alive again.
-    this.cancelProjectilesInvolvingEntity(entityId);
+    this.cancelProjectilesInvolvingEntity(entityId, "entity_died");
 
     // Record death event for analytics
     const deathEventType =
@@ -2888,7 +3646,7 @@ export class CombatSystem extends SystemBase {
     const typedPlayerId = createEntityID(playerId);
 
     // Safety net for any projectile that survived an abnormal death path.
-    this.cancelProjectilesInvolvingEntity(playerId);
+    this.cancelProjectilesInvolvingEntity(playerId, "player_respawned");
 
     // 1. Clear any lingering combat state the respawned player might have
     const playerCombatState = this.stateService.getCombatData(typedPlayerId);
@@ -2930,6 +3688,12 @@ export class CombatSystem extends SystemBase {
       weaponType: AttackType.MELEE,
       ...options,
     };
+    if (
+      this.isDuelPreparationCombatFenced(attackerId) ||
+      this.isDuelPreparationCombatFenced(targetId)
+    ) {
+      return false;
+    }
 
     const attacker = this.entityResolver.resolve(attackerId, opts.attackerType);
     const target = this.entityResolver.resolve(targetId, opts.targetType);
@@ -3053,12 +3817,291 @@ export class CombatSystem extends SystemBase {
     });
   }
 
-  /** Cancel all delayed damage either targeting or originating from an entity. */
-  private cancelProjectilesInvolvingEntity(entityId: string): number {
-    return (
-      this.projectileService.cancelProjectilesForTarget(entityId) +
-      this.projectileService.cancelProjectilesFromAttacker(entityId)
+  /** Keep a frozen loadout switch from cancelling an attack already in flight. */
+  public hasActiveProjectilesBetween(
+    entityAId: string,
+    entityBId: string,
+  ): boolean {
+    return this.projectileService.hasActiveProjectilesBetween(
+      entityAId,
+      entityBId,
     );
+  }
+
+  /**
+   * Stop both exact opponents from launching another auto-attack while a
+   * frozen loadout switch waits for already-paid projectiles to resolve.
+   * Existing projectiles and their damage/cost custody are deliberately left
+   * untouched. Combat teardown releases the quiescence for both entities.
+   */
+  public quiesceAutoAttacksBetween(
+    entityAId: string,
+    entityBId: string,
+  ): boolean {
+    if (!entityAId || !entityBId || entityAId === entityBId) return false;
+    const entityA = createEntityID(entityAId);
+    const entityB = createEntityID(entityBId);
+    const stateA = this.stateService.getCombatData(entityA);
+    const stateB = this.stateService.getCombatData(entityB);
+    const exactPair =
+      (stateA?.inCombat === true && String(stateA.targetId) === entityBId) ||
+      (stateB?.inCombat === true && String(stateB.targetId) === entityAId);
+    if (!exactPair) return false;
+    this.autoAttackQuiescedEntities.add(entityA);
+    this.autoAttackQuiescedEntities.add(entityB);
+    return true;
+  }
+
+  /**
+   * Fence all new combat admission involving one selected contestant before
+   * ordinary combat is torn down for private duel preparation. Re-delivery of
+   * the same preparation is idempotent; a different live preparation cannot
+   * replace the owner silently.
+   */
+  public beginDuelPreparationCombatFence(
+    entityId: string,
+    preparationId: string,
+  ): boolean {
+    if (!entityId || !preparationId) return false;
+    if (!this.entityIdValidator.isValid(entityId)) return false;
+    const typedEntityId = createEntityID(entityId);
+    const current = this.duelPreparationCombatFences.get(typedEntityId);
+    if (current && current !== preparationId) return false;
+    this.duelPreparationCombatFences.set(typedEntityId, preparationId);
+    return true;
+  }
+
+  /** Release only the exact preparation that acquired this combat boundary. */
+  public endDuelPreparationCombatFence(
+    entityId: string,
+    preparationId: string,
+  ): boolean {
+    if (!entityId || !preparationId) return false;
+    if (!this.entityIdValidator.isValid(entityId)) return false;
+    const typedEntityId = createEntityID(entityId);
+    if (this.duelPreparationCombatFences.get(typedEntityId) !== preparationId) {
+      return false;
+    }
+    this.duelPreparationCombatFences.delete(typedEntityId);
+    return true;
+  }
+
+  private isDuelPreparationCombatFenced(entityId: string): boolean {
+    if (!this.entityIdValidator.isValid(entityId)) return false;
+    return this.duelPreparationCombatFences.has(createEntityID(entityId));
+  }
+
+  /** Protected operations telemetry reconciles every accepted launch terminal. */
+  public getProjectileLifecycleDiagnostics(): ProjectileLifecycleDiagnostics {
+    return this.projectileService.getLifecycleDiagnostics();
+  }
+
+  /**
+   * Wait for every projectile admission/refund/spend receipt that was already
+   * authorized. The loop is intentional: an admission fenced by forceEndCombat
+   * can enqueue its compensating cancellation while the first snapshot waits.
+   */
+  public async waitForProjectileCustodySettlements(): Promise<void> {
+    while (this.pendingProjectileCustodyOperations.size > 0) {
+      await Promise.allSettled([...this.pendingProjectileCustodyOperations]);
+    }
+  }
+
+  private trackProjectileCustodyOperation<T>(
+    operation: Promise<T>,
+  ): Promise<T> {
+    let tracked!: Promise<T>;
+    tracked = operation.finally(() => {
+      this.pendingProjectileCustodyOperations.delete(tracked);
+    });
+    this.pendingProjectileCustodyOperations.add(tracked);
+    return tracked;
+  }
+
+  /** Cancel all delayed damage either targeting or originating from an entity. */
+  private cancelProjectilesInvolvingEntity(
+    entityId: string,
+    reason: CombatProjectileCancelledPayload["reason"],
+  ): number {
+    const onCancelled = (projectile: Readonly<CombatProjectile>) =>
+      this.handleProjectileCancellation(projectile, reason);
+    return (
+      this.projectileService.cancelProjectilesForTarget(entityId, onCancelled) +
+      this.projectileService.cancelProjectilesFromAttacker(
+        entityId,
+        onCancelled,
+      )
+    );
+  }
+
+  private handleProjectileCancellation(
+    projectile: Readonly<CombatProjectile>,
+    reason: CombatProjectileCancelledPayload["reason"],
+  ): void {
+    this.emitProjectileCancelled(projectile, reason);
+    this.settleProjectileCostWithoutDamage(projectile, true);
+  }
+
+  /**
+   * A pending cost is refunded; a cost whose launch already committed becomes
+   * terminally resolved as spent. This preserves existing combat economics
+   * while giving every same-process no-damage terminal durable closure.
+   */
+  private settleProjectileCostWithoutDamage(
+    projectile: Readonly<CombatProjectile>,
+    exposeRecovery: boolean,
+  ): void {
+    const custody = projectile.ammunitionCustody;
+    if (custody && this.equipmentSystem) {
+      const settlement = this.equipmentSystem
+        .cancelArrowProjectileAtomic(custody)
+        .then(async (receipt) => {
+          if (!receipt.ok) {
+            this.logger.error(
+              "Projectile ammunition terminal deferred to recovery",
+              undefined,
+              { projectileId: projectile.id, reason: receipt.reason },
+            );
+            return;
+          }
+          if (
+            exposeRecovery &&
+            (receipt.status === "fired" || receipt.status === "resolved") &&
+            receipt.recoverySource
+          ) {
+            await this.exposeAmmunitionRecovery(
+              projectile.id,
+              receipt.recoverySource,
+            );
+          }
+        })
+        .catch((error) => {
+          this.logger.error(
+            "Projectile ammunition terminal failed",
+            error instanceof Error ? error : undefined,
+            { projectileId: projectile.id },
+          );
+        });
+      void this.trackProjectileCustodyOperation(settlement);
+    }
+    const runeCustody = projectile.runeCustody;
+    if (runeCustody && this.inventorySystem) {
+      const settlement = this.inventorySystem
+        .cancelProjectileRuneCostAtomic(runeCustody)
+        .then((receipt) => {
+          if (!receipt.ok) {
+            this.logger.error(
+              "Projectile rune terminal deferred to recovery",
+              undefined,
+              { projectileId: projectile.id, reason: receipt.reason },
+            );
+          }
+        })
+        .catch((error) => {
+          this.logger.error(
+            "Projectile rune terminal failed",
+            error instanceof Error ? error : undefined,
+            { projectileId: projectile.id },
+          );
+        });
+      void this.trackProjectileCustodyOperation(settlement);
+    }
+  }
+
+  private async exposeAmmunitionRecovery(
+    projectileId: string,
+    recovery: GroundItemSourceRegistrationReceipt,
+  ): Promise<void> {
+    const groundItems = this.groundItemSystem;
+    if (!groundItems) {
+      this.logger.error(
+        "Committed ammunition recovery lacks presentation authority",
+        new Error("ammunition_recovery_presentation_unavailable"),
+        { projectileId, sourceId: recovery.sourceId },
+      );
+      return;
+    }
+    try {
+      const exposed = await groundItems.exposeCommittedDurableSource(recovery);
+      if (!exposed) {
+        this.logger.error(
+          "Committed ammunition recovery presentation deferred",
+          undefined,
+          { projectileId, sourceId: recovery.sourceId },
+        );
+      }
+    } catch (error) {
+      this.logger.error(
+        "Committed ammunition recovery presentation failed",
+        error instanceof Error ? error : undefined,
+        { projectileId, sourceId: recovery.sourceId },
+      );
+    }
+  }
+
+  private captureAttackCommitEpoch(
+    attackerId: string,
+    targetId: string,
+  ): readonly [number, number] {
+    for (const entityId of new Set([attackerId, targetId])) {
+      this.attackCommitReferences.set(
+        entityId,
+        (this.attackCommitReferences.get(entityId) ?? 0) + 1,
+      );
+      if (!this.attackCommitEpochs.has(entityId)) {
+        this.attackCommitEpochs.set(entityId, 0);
+      }
+    }
+    return [
+      this.attackCommitEpochs.get(attackerId) ?? 0,
+      this.attackCommitEpochs.get(targetId) ?? 0,
+    ];
+  }
+
+  private isAttackCommitEpochCurrent(
+    attackerId: string,
+    targetId: string,
+    captured: readonly [number, number],
+  ): boolean {
+    const currentCombat = this.stateService.getCombatData(attackerId);
+    return (
+      (this.attackCommitEpochs.get(attackerId) ?? 0) === captured[0] &&
+      (this.attackCommitEpochs.get(targetId) ?? 0) === captured[1] &&
+      (!currentCombat || String(currentCombat.targetId) === targetId)
+    );
+  }
+
+  private invalidateAttackCommitEpoch(entityId: string): void {
+    if (!this.attackCommitReferences.has(entityId)) return;
+    this.attackCommitEpochs.set(
+      entityId,
+      (this.attackCommitEpochs.get(entityId) ?? 0) + 1,
+    );
+  }
+
+  private releaseAttackCommitEpoch(attackerId: string, targetId: string): void {
+    for (const entityId of new Set([attackerId, targetId])) {
+      const remaining = (this.attackCommitReferences.get(entityId) ?? 0) - 1;
+      if (remaining > 0) {
+        this.attackCommitReferences.set(entityId, remaining);
+      } else {
+        this.attackCommitReferences.delete(entityId);
+        this.attackCommitEpochs.delete(entityId);
+      }
+    }
+  }
+
+  private restoreClaimedProjectileCooldown(
+    attackerId: EntityID,
+    claimedNextAttackTick: number,
+    previousNextAttackTick: number | undefined,
+  ): void {
+    if (this.nextAttackTicks.get(attackerId) !== claimedNextAttackTick) return;
+    if (previousNextAttackTick === undefined) {
+      this.nextAttackTicks.delete(attackerId);
+    } else {
+      this.nextAttackTicks.set(attackerId, previousNextAttackTick);
+    }
   }
 
   /**
@@ -3124,6 +4167,9 @@ export class CombatSystem extends SystemBase {
   public cleanupPlayerDisconnect(playerId: string): void {
     const typedPlayerId = createEntityID(playerId);
 
+    this.autoAttackQuiescedEntities.delete(typedPlayerId);
+    this.duelPreparationCombatFences.delete(typedPlayerId);
+
     // Remove player's own combat state
     this.stateService.removeCombatState(typedPlayerId);
 
@@ -3144,12 +4190,13 @@ export class CombatSystem extends SystemBase {
     this.lastCombatTargetTile.delete(playerId);
 
     // Cancel any in-flight projectiles targeting or from this player
-    this.cancelProjectilesInvolvingEntity(playerId);
+    this.cancelProjectilesInvolvingEntity(playerId, "player_disconnected");
 
     // Find all entities that were targeting this disconnected player
     const combatStatesMap = this.stateService.getCombatStatesMap();
     for (const [attackerId, state] of combatStatesMap) {
       if (String(state.targetId) === playerId) {
+        this.autoAttackQuiescedEntities.delete(attackerId);
         // Clear the attacker's cooldown so they can immediately retarget
         this.nextAttackTicks.delete(attackerId);
 
@@ -3265,7 +4312,10 @@ export class CombatSystem extends SystemBase {
         this.checkRangeAndFollow(combatState, tickNumber);
       }
 
-      if (tickNumber >= combatState.nextAttackTick) {
+      if (
+        tickNumber >= combatState.nextAttackTick &&
+        !this.autoAttackQuiescedEntities.has(entityId)
+      ) {
         void this.processAutoAttackOnTick(combatState, tickNumber).catch(
           (error) => {
             this.logger.error(
@@ -3311,7 +4361,10 @@ export class CombatSystem extends SystemBase {
     // Process emote resets for this mob
     this.animationManager.processEntityEmoteReset(mobId, tickNumber);
 
-    if (tickNumber >= combatState.nextAttackTick) {
+    if (
+      tickNumber >= combatState.nextAttackTick &&
+      !this.autoAttackQuiescedEntities.has(createEntityID(mobId))
+    ) {
       void this.processAutoAttackOnTick(combatState, tickNumber).catch(
         (error) => {
           this.logger.error(
@@ -3365,7 +4418,10 @@ export class CombatSystem extends SystemBase {
     // classic MMORPG-style: Check range EVERY tick and follow if needed
     this.checkRangeAndFollow(combatState, tickNumber);
 
-    if (tickNumber >= combatState.nextAttackTick) {
+    if (
+      tickNumber >= combatState.nextAttackTick &&
+      !this.autoAttackQuiescedEntities.has(createEntityID(playerId))
+    ) {
       void this.processAutoAttackOnTick(combatState, tickNumber).catch(
         (error) => {
           this.logger.error(
@@ -3615,7 +4671,7 @@ export class CombatSystem extends SystemBase {
     target: Entity | MobEntity,
     combatState: CombatData,
     tickNumber: number,
-  ): number {
+  ): number | null | Promise<number | null> {
     // classic MMORPG-STYLE: Update entity facing to face target
     this.rotationManager.rotateTowardsTarget(
       attackerId,
@@ -3652,44 +4708,61 @@ export class CombatSystem extends SystemBase {
     const damage = Math.min(rawDamage, currentHealth);
 
     // Apply capped damage
-    this.applyDamage(targetId, combatState.targetType, damage, attackerId);
-
-    // Emit damage splatter event using pre-allocated payload (zero allocation)
-    const targetPosition = getEntityPosition(target);
-    this.emitDamageDealt(
-      attackerId,
+    const damageResolution = this.applyDamage(
       targetId,
-      damage,
-      undefined,
       combatState.targetType,
-      targetPosition,
+      damage,
+      attackerId,
     );
+    const finish = (damageResult: DamageResolution): number | null => {
+      if (!damageResult.success) return null;
+      const appliedDamage = damageResult.actualDamage;
 
-    this.recordCombatEvent(GameEventType.COMBAT_ATTACK, attackerId, {
-      targetId,
-      attackerType: combatState.attackerType,
-      targetType: combatState.targetType,
-      attackSpeedTicks: combatState.attackSpeedTicks,
-    });
+      // Emit damage splatter event using pre-allocated payload (zero allocation)
+      const targetPosition = getEntityPosition(target);
+      this.emitDamageDealt(
+        attackerId,
+        targetId,
+        appliedDamage,
+        undefined,
+        combatState.targetType,
+        targetPosition,
+        undefined,
+        undefined,
+        damageResult.publicActionObservation,
+        damageResult.competitiveTerminal,
+      );
 
-    if (damage > 0) {
-      this.recordCombatEvent(GameEventType.COMBAT_DAMAGE, attackerId, {
+      this.recordCombatEvent(GameEventType.COMBAT_ATTACK, attackerId, {
         targetId,
-        damage,
-        rawDamage,
-        targetHealth: currentHealth,
-        targetPosition: targetPosition
-          ? { x: targetPosition.x, y: targetPosition.y, z: targetPosition.z }
-          : undefined,
+        attackerType: combatState.attackerType,
+        targetType: combatState.targetType,
+        attackSpeedTicks: combatState.attackSpeedTicks,
       });
-    } else {
-      this.recordCombatEvent(GameEventType.COMBAT_MISS, attackerId, {
-        targetId,
-        rawDamage,
-      });
+
+      if (appliedDamage > 0) {
+        this.recordCombatEvent(GameEventType.COMBAT_DAMAGE, attackerId, {
+          targetId,
+          damage: appliedDamage,
+          rawDamage,
+          targetHealth: currentHealth,
+          targetPosition: targetPosition
+            ? { x: targetPosition.x, y: targetPosition.y, z: targetPosition.z }
+            : undefined,
+        });
+      } else {
+        this.recordCombatEvent(GameEventType.COMBAT_MISS, attackerId, {
+          targetId,
+          rawDamage,
+        });
+      }
+
+      return appliedDamage;
+    };
+    if (damageResolution instanceof Promise) {
+      return damageResolution.then(finish);
     }
-
-    return damage;
+    return finish(damageResolution);
   }
 
   /**
@@ -3806,6 +4879,13 @@ export class CombatSystem extends SystemBase {
   private processProjectileHits(tickNumber: number): void {
     const result = this.projectileService.processTick(tickNumber);
 
+    for (const projectile of result.expired) {
+      // A launch must always resolve to a terminal network event. The service
+      // hard-stop protects the simulation from an immortal projectile, while
+      // this explicit cancellation lets every renderer retire the same ID.
+      this.handleProjectileCancellation(projectile, "projectile_expired");
+    }
+
     for (const projectile of result.hits) {
       // Get target entity
       const target =
@@ -3814,13 +4894,21 @@ export class CombatSystem extends SystemBase {
           "mob", // Could be player or mob, resolver handles this
         ) ?? this.entityResolver.resolve(projectile.targetId, "player");
 
-      if (!target) continue;
+      if (!target) {
+        this.handleProjectileCancellation(projectile, "combat_state_missing");
+        continue;
+      }
 
       // Determine target type
       const targetType = isMobEntity(target) ? "mob" : "player";
 
       // Check if target is still alive
       if (!this.entityResolver.isAlive(target, targetType)) {
+        // processTick removes every projectile scheduled for this tick before
+        // damage is applied. If an earlier same-tick hit kills the target, any
+        // later hit in the batch still needs an exact terminal event so the
+        // client can remove its matching visual instead of waiting for expiry.
+        this.handleProjectileCancellation(projectile, "entity_died");
         continue;
       }
 
@@ -3829,50 +4917,126 @@ export class CombatSystem extends SystemBase {
       const damage = Math.min(projectile.damage, currentHealth);
 
       // Apply damage
-      this.applyDamage(
+      const damageResolution = this.applyDamage(
         projectile.targetId,
         targetType,
         damage,
         projectile.attackerId,
+        projectile.ammunitionCustody
+          ? {
+              operationType: "ammunition_shot",
+              operationId: projectile.ammunitionCustody.operationId,
+              playerId: projectile.ammunitionCustody.playerId,
+              requestFingerprint:
+                projectile.ammunitionCustody.requestFingerprint,
+            }
+          : projectile.runeCustody
+            ? {
+                operationType: "projectile_rune_cost",
+                operationId: projectile.runeCustody.operationId,
+                playerId: projectile.runeCustody.playerId,
+                requestFingerprint: projectile.runeCustody.requestFingerprint,
+              }
+            : undefined,
       );
+      const finish = (damageResult: DamageResolution): void => {
+        if (!damageResult.success) return;
+        const appliedDamage = damageResult.actualDamage;
+        if (appliedDamage === 0) {
+          this.settleProjectileCostWithoutDamage(projectile, false);
+        }
 
-      // Emit damage and projectile hit events using pre-allocated payloads (zero allocation)
-      const targetPosition = getEntityPosition(target);
-      this.emitDamageDealt(
-        projectile.attackerId,
-        projectile.targetId,
-        damage,
-        undefined,
-        targetType,
-        targetPosition,
-      );
-      this.emitProjectileHit(
-        projectile.attackerId,
-        projectile.targetId,
-        damage,
-        projectile.spellId ? "spell" : "arrow",
-      );
+        // Emit damage and projectile hit events using pre-allocated payloads (zero allocation)
+        const targetPosition = getEntityPosition(target);
+        this.emitDamageDealt(
+          projectile.attackerId,
+          projectile.targetId,
+          appliedDamage,
+          projectile.spellId ? "magic" : "ranged",
+          targetType,
+          targetPosition,
+          undefined,
+          projectile.id,
+          damageResult.publicActionObservation,
+          damageResult.competitiveTerminal,
+        );
+        this.emitProjectileHit(
+          projectile.attackerId,
+          projectile.targetId,
+          appliedDamage,
+          projectile.spellId ? "spell" : "arrow",
+          projectile.id,
+        );
 
-      // Record combat event
-      this.recordCombatEvent(
-        GameEventType.COMBAT_DAMAGE,
-        projectile.attackerId,
-        {
-          targetId: projectile.targetId,
-          damage,
-          rawDamage: projectile.damage,
-          projectileHit: true,
-          attackType: projectile.spellId ? "magic" : "ranged",
-        },
-      );
+        if (projectile.ammunitionRecovery) {
+          const recovery = projectile.ammunitionRecovery;
+          const groundItems = this.groundItemSystem;
+          if (!groundItems) {
+            this.logger.error(
+              "Committed ammunition recovery lacks presentation authority",
+              new Error("ammunition_recovery_presentation_unavailable"),
+              { projectileId: projectile.id, sourceId: recovery.sourceId },
+            );
+          } else {
+            void groundItems
+              .exposeCommittedDurableSource(recovery)
+              .then((exposed) => {
+                if (!exposed) {
+                  this.logger.error(
+                    "Committed ammunition recovery presentation deferred",
+                    undefined,
+                    {
+                      projectileId: projectile.id,
+                      sourceId: recovery.sourceId,
+                    },
+                  );
+                }
+              })
+              .catch((error) => {
+                this.logger.error(
+                  "Committed ammunition recovery presentation failed",
+                  error instanceof Error ? error : undefined,
+                  { projectileId: projectile.id, sourceId: recovery.sourceId },
+                );
+              });
+          }
+        }
 
-      // Handle XP rewards for magic (ranged XP handled elsewhere)
-      if (projectile.xpReward && projectile.xpReward > 0) {
-        this.emitTypedEvent(EventType.PLAYER_XP_GAINED, {
-          playerId: projectile.attackerId,
-          skill: "magic",
-          xp: projectile.xpReward,
+        // Record combat event
+        this.recordCombatEvent(
+          GameEventType.COMBAT_DAMAGE,
+          projectile.attackerId,
+          {
+            targetId: projectile.targetId,
+            damage: appliedDamage,
+            rawDamage: projectile.damage,
+            projectileHit: true,
+            attackType: projectile.spellId ? "magic" : "ranged",
+          },
+        );
+
+        // Handle XP rewards for magic (ranged XP handled elsewhere)
+        if (projectile.xpReward && projectile.xpReward > 0) {
+          this.emitTypedEvent(EventType.PLAYER_XP_GAINED, {
+            playerId: projectile.attackerId,
+            skill: "magic",
+            xp: projectile.xpReward,
+          });
+        }
+      };
+      if (damageResolution instanceof Promise) {
+        void damageResolution.then(finish).catch((error) => {
+          this.logger.error(
+            "Projectile damage resolution failed",
+            error instanceof Error ? error : undefined,
+            {
+              attackerId: projectile.attackerId,
+              targetId: projectile.targetId,
+            },
+          );
         });
+      } else {
+        finish(damageResolution);
       }
     }
   }
@@ -3909,19 +5073,11 @@ export class CombatSystem extends SystemBase {
         targetType: combatState.targetType,
         attackType,
       });
-
-      // Refresh combat timeout after ranged/magic attack to prevent combat
-      // from timing out after COMBAT_TIMEOUT_TICKS. The handler may have
-      // replaced the state via enterCombat → createAttackerState, so fetch
-      // the fresh state from the Map (old reference may be stale).
-      const freshState = this.stateService
-        .getCombatStatesMap()
-        .get(typedAttackerId);
-      if (freshState) {
-        freshState.combatEndTick =
-          tickNumber + COMBAT_CONSTANTS.COMBAT_TIMEOUT_TICKS;
-        freshState.lastAttackTick = tickNumber;
-      }
+      // A successful projectile admission calls enterCombat() and installs a
+      // fresh state with the committed launch tick. A rejected attempt (for
+      // example, exhausted runes or arrows) must not refresh liveness: doing so
+      // makes nextAttackTick remain overdue and retries the failed action every
+      // tick forever while preventing normal combat timeout.
       return;
     }
 
@@ -3931,7 +5087,7 @@ export class CombatSystem extends SystemBase {
     }
 
     // Step 3: Execute melee attack (rotation, animation, damage)
-    const damage = this.executeAttackDamage(
+    const damageResolution = this.executeAttackDamage(
       attackerId,
       targetId,
       attacker,
@@ -3939,6 +5095,11 @@ export class CombatSystem extends SystemBase {
       combatState,
       tickNumber,
     );
+    const damage =
+      damageResolution instanceof Promise
+        ? await damageResolution
+        : damageResolution;
+    if (damage === null) return;
 
     // Step 4: Check if combat state still exists (target may have died)
     if (!this.stateService.getCombatStatesMap().has(typedAttackerId)) {
@@ -4070,6 +5231,12 @@ export class CombatSystem extends SystemBase {
   }
 
   destroy(): void {
+    this.duelDamageReconciliationStopped = true;
+    for (const wait of this.duelDamageRetryWaits) {
+      clearTimeout(wait.timer);
+      wait.resolve(false);
+    }
+    this.duelDamageRetryWaits.clear();
     this.stateService.destroy();
     this.animationManager.destroy();
     this.antiCheat.destroy();
@@ -4079,6 +5246,13 @@ export class CombatSystem extends SystemBase {
     tilePool.release(this._attackerTile);
     tilePool.release(this._targetTile);
     this.nextAttackTicks.clear();
+    this.pendingProjectileAttacks.clear();
+    this.autoAttackQuiescedEntities.clear();
+    this.duelPreparationCombatFences.clear();
+    this.duelDamageTailByAttacker.clear();
+    this.pendingDuelDamageOperations.clear();
+    this.attackCommitReferences.clear();
+    this.attackCommitEpochs.clear();
     this.lastCombatTargetTile.clear();
     this.playerEquipmentStats.clear();
     this.lastInputTick.clear();
@@ -4107,6 +5281,45 @@ export class CombatSystem extends SystemBase {
   } {
     return {
       quaternions: quaternionPool.getStats(),
+    };
+  }
+
+  /** Privacy-safe aggregate for readiness and operator diagnostics. */
+  public getDuelDamageReconciliationStats(): DuelDamageReconciliationStats {
+    let queuedOperations = 0;
+    let committingOperations = 0;
+    let reconcilingOperations = 0;
+    let maxReconciliationAttempts = 0;
+    let oldestPendingAgeMs = 0;
+    let oldestReconciliationAgeMs = 0;
+    const now = Date.now();
+    for (const pending of this.pendingDuelDamageOperations.values()) {
+      if (pending.status === "queued") queuedOperations += 1;
+      if (pending.status === "committing") committingOperations += 1;
+      if (pending.status === "reconciling") reconcilingOperations += 1;
+      maxReconciliationAttempts = Math.max(
+        maxReconciliationAttempts,
+        pending.reconciliationAttempts,
+      );
+      oldestPendingAgeMs = Math.max(
+        oldestPendingAgeMs,
+        Math.max(0, now - pending.startedAt),
+      );
+      if (pending.reconciliationStartedAt !== null) {
+        oldestReconciliationAgeMs = Math.max(
+          oldestReconciliationAgeMs,
+          Math.max(0, now - pending.reconciliationStartedAt),
+        );
+      }
+    }
+    return {
+      pendingOperations: this.pendingDuelDamageOperations.size,
+      queuedOperations,
+      committingOperations,
+      reconcilingOperations,
+      maxReconciliationAttempts,
+      oldestPendingAgeMs,
+      oldestReconciliationAgeMs,
     };
   }
 }

@@ -3,6 +3,7 @@ import { PlayerMigration } from "../../../../types/core/core";
 import { EventType } from "../../../../types/events";
 import { EventBus } from "../../infrastructure/EventBus";
 import { PlayerSystem } from "../PlayerSystem";
+import * as THREE from "three";
 
 describe("PlayerSystem authoritative healing", () => {
   it("persists an explicit null when autocast is cleared", () => {
@@ -212,8 +213,15 @@ describe("PlayerSystem authoritative healing", () => {
       setHealthAndMaxHealth: vi.fn(),
       setHealth: vi.fn(),
     };
+    let resolvePersistedRow!: (row: typeof persistedRow) => void;
+    const persistedRowPromise = new Promise<typeof persistedRow>((resolve) => {
+      resolvePersistedRow = resolve;
+    });
     const databaseSystem = {
-      getPlayerAsync: vi.fn(async () => persistedRow),
+      recoverPendingProjectileRuneCostOperationsAsync: vi.fn(async () => []),
+      recoverPendingAmmunitionShotOperationsAsync: vi.fn(async () => []),
+      recoverPendingFoodConsumptionOperationsAsync: vi.fn(async () => []),
+      getPlayerAsync: vi.fn(() => persistedRowPromise),
       savePlayer: vi.fn(),
     };
     const world = {
@@ -228,14 +236,39 @@ describe("PlayerSystem authoritative healing", () => {
       system as unknown as { databaseSystem: typeof databaseSystem }
     ).databaseSystem = databaseSystem;
 
-    await system.onPlayerEnter({
+    const hydration = system.onPlayerEnter({
       playerId: "runtime-health",
       userId: "account-health",
     } as never);
 
+    expect(system.isPlayerReady("runtime-health")).toBe(false);
+    resolvePersistedRow(persistedRow);
+    await hydration;
+
     expect(databaseSystem.getPlayerAsync).toHaveBeenCalledWith(
       "account-health",
     );
+    expect(
+      databaseSystem.recoverPendingProjectileRuneCostOperationsAsync,
+    ).toHaveBeenCalledWith("account-health");
+    expect(
+      databaseSystem.recoverPendingProjectileRuneCostOperationsAsync.mock
+        .invocationCallOrder[0],
+    ).toBeLessThan(databaseSystem.getPlayerAsync.mock.invocationCallOrder[0]!);
+    expect(
+      databaseSystem.recoverPendingAmmunitionShotOperationsAsync,
+    ).toHaveBeenCalledWith("account-health");
+    expect(
+      databaseSystem.recoverPendingAmmunitionShotOperationsAsync.mock
+        .invocationCallOrder[0],
+    ).toBeLessThan(databaseSystem.getPlayerAsync.mock.invocationCallOrder[0]!);
+    expect(
+      databaseSystem.recoverPendingFoodConsumptionOperationsAsync,
+    ).toHaveBeenCalledWith("account-health");
+    expect(
+      databaseSystem.recoverPendingFoodConsumptionOperationsAsync.mock
+        .invocationCallOrder[0],
+    ).toBeLessThan(databaseSystem.getPlayerAsync.mock.invocationCallOrder[0]!);
     expect(entity.setHealthAndMaxHealth).toHaveBeenCalledWith(3, 10);
     expect(entity.setHealth).not.toHaveBeenCalled();
     expect(entity.data).toMatchObject({ selectedSpell: "wind_strike" });
@@ -243,6 +276,7 @@ describe("PlayerSystem authoritative healing", () => {
       current: 3,
       max: 10,
     });
+    expect(system.isPlayerReady("runtime-health")).toBe(true);
   });
 
   it("awaits direct full-player snapshots for graceful shutdown", async () => {
@@ -277,6 +311,165 @@ describe("PlayerSystem authoritative healing", () => {
         health: 3,
         maxHealth: 10,
       }),
+    );
+  });
+
+  it("never publishes a join that was superseded by player leave", async () => {
+    let resolvePlayerRow!: (row: null) => void;
+    const playerRow = new Promise<null>((resolve) => {
+      resolvePlayerRow = resolve;
+    });
+    const world = {
+      isServer: true,
+      entities: { get: vi.fn(() => null) },
+      $eventBus: new EventBus(),
+      getSystem: vi.fn(() => null),
+    };
+    const system = new PlayerSystem(world as never);
+    const getPlayerAsync = vi.fn(() => playerRow);
+    (
+      system as unknown as {
+        databaseSystem: {
+          getPlayerAsync: () => Promise<null>;
+          savePlayer: ReturnType<typeof vi.fn>;
+        };
+      }
+    ).databaseSystem = {
+      getPlayerAsync,
+      savePlayer: vi.fn(),
+    };
+
+    const hydration = system.onPlayerEnter({
+      playerId: "departing-player",
+    } as never);
+    await vi.waitFor(() => expect(getPlayerAsync).toHaveBeenCalledOnce());
+
+    await system.onPlayerLeave({ playerId: "departing-player" } as never);
+    resolvePlayerRow(null);
+    await hydration;
+
+    expect(system.getPlayer("departing-player")).toBeUndefined();
+    expect(system.isPlayerReady("departing-player")).toBe(false);
+  });
+
+  it("never applies delayed starter equipment to an authoritative agent loadout", async () => {
+    const entity = { data: { isAgent: true, inStreamingDuel: true } };
+    const eventBus = new EventBus();
+    const emitEvent = vi.spyOn(eventBus, "emitEvent");
+    const world = {
+      isServer: true,
+      entities: { get: vi.fn(() => entity) },
+      $eventBus: eventBus,
+      getSystem: vi.fn(() => null),
+    };
+    const system = new PlayerSystem(world as never);
+    const playerId = "competitive-agent";
+    (
+      system as unknown as {
+        spawnedPlayers: Map<
+          string,
+          {
+            playerId: string;
+            position: THREE.Vector3;
+            spawnTime: number;
+            hasStarterEquipment: boolean;
+            aggroTriggered: boolean;
+          }
+        >;
+        handleSpawnComplete(event: { playerId: string }): Promise<void>;
+      }
+    ).spawnedPlayers.set(playerId, {
+      playerId,
+      position: new THREE.Vector3(1, 2, 3),
+      spawnTime: Date.now(),
+      hasStarterEquipment: false,
+      aggroTriggered: false,
+    });
+
+    await (
+      system as unknown as {
+        handleSpawnComplete(event: { playerId: string }): Promise<void>;
+      }
+    ).handleSpawnComplete({ playerId });
+
+    expect(system.hasPlayerCompletedSpawn(playerId)).toBe(true);
+    expect(emitEvent).not.toHaveBeenCalledWith(
+      EventType.EQUIPMENT_EQUIP,
+      expect.anything(),
+      expect.anything(),
+    );
+    expect(emitEvent).toHaveBeenCalledWith(
+      EventType.PLAYER_SPAWNED,
+      expect.objectContaining({ playerId, equipment: [] }),
+      "player",
+    );
+  });
+
+  it("never replaces an existing authoritative weapon during delayed onboarding", async () => {
+    const entity = { data: {} };
+    const eventBus = new EventBus();
+    const emitEvent = vi.spyOn(eventBus, "emitEvent");
+    const world = {
+      isServer: true,
+      entities: { get: vi.fn(() => entity) },
+      $eventBus: eventBus,
+      on: vi.fn(
+        (
+          event: string,
+          listener: (payload: { playerId: string; success: boolean }) => void,
+        ) => {
+          if (event === EventType.AVATAR_LOAD_COMPLETE) {
+            listener({ playerId: "returning-player", success: true });
+          }
+        },
+      ),
+      off: vi.fn(),
+      getSystem: vi.fn((name: string) =>
+        name === "equipment"
+          ? {
+              isEquipmentReady: () => true,
+              getPlayerEquipment: () => ({
+                weapon: { itemId: "shortbow" },
+              }),
+            }
+          : null,
+      ),
+    };
+    const system = new PlayerSystem(world as never);
+    const playerId = "returning-player";
+    (
+      system as unknown as {
+        spawnedPlayers: Map<
+          string,
+          {
+            playerId: string;
+            position: THREE.Vector3;
+            spawnTime: number;
+            hasStarterEquipment: boolean;
+            aggroTriggered: boolean;
+          }
+        >;
+        handleSpawnComplete(event: { playerId: string }): Promise<void>;
+      }
+    ).spawnedPlayers.set(playerId, {
+      playerId,
+      position: new THREE.Vector3(1, 2, 3),
+      spawnTime: Date.now(),
+      hasStarterEquipment: false,
+      aggroTriggered: false,
+    });
+
+    await (
+      system as unknown as {
+        handleSpawnComplete(event: { playerId: string }): Promise<void>;
+      }
+    ).handleSpawnComplete({ playerId });
+
+    expect(system.hasPlayerCompletedSpawn(playerId)).toBe(true);
+    expect(emitEvent).not.toHaveBeenCalledWith(
+      EventType.EQUIPMENT_EQUIP,
+      expect.anything(),
+      expect.anything(),
     );
   });
 

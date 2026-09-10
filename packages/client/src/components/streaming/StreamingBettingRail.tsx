@@ -43,6 +43,8 @@ interface StreamingBettingRailProps {
   agent1Name: string | null | undefined;
   agent2Name: string | null | undefined;
   timeRemainingMs: number;
+  /** Exact public arena-staging authority for an announced matchup. */
+  arenaReady?: boolean;
   cancelled?: boolean;
 }
 
@@ -53,6 +55,7 @@ export function StreamingBettingRail({
   agent1Name,
   agent2Name,
   timeRemainingMs,
+  arenaReady = false,
   cancelled = false,
 }: StreamingBettingRailProps) {
   const betUrl = config?.betUrl?.trim() || null;
@@ -96,6 +99,12 @@ export function StreamingBettingRail({
       ? "No winner was declared. Open the betting app to review this market's refund status."
       : "No winner was declared for this round.";
     urgency = "done";
+  } else if (phase === "ANNOUNCEMENT" && !arenaReady) {
+    headline = "Arena handoff";
+    sub =
+      "Betting remains unavailable until both fighters are confirmed in the arena.";
+    urgency = "locked";
+    actionEnabled = false;
   } else if (phase === "ANNOUNCEMENT") {
     if (timeRemainingMs > 0) {
       headline = "Betting open";
@@ -103,7 +112,7 @@ export function StreamingBettingRail({
       urgency = "open";
     } else {
       headline = "Betting locked";
-      sub = "Lines are closed while the fighters enter the arena.";
+      sub = "Lines are closed while officials complete the final arena checks.";
       urgency = "locked";
     }
   } else if (phase === "COUNTDOWN" || phase === "FIGHTING") {
@@ -117,6 +126,13 @@ export function StreamingBettingRail({
       : "Thanks for watching — see you on the next card.";
     urgency = "done";
   }
+
+  const actionLabel = actionEnabled
+    ? urgency === "open"
+      ? "Place a bet"
+      : "Open betting app"
+    : "Betting unavailable";
+  const compactStateLabel = headline === actionLabel ? null : headline;
 
   return (
     <aside
@@ -133,14 +149,24 @@ export function StreamingBettingRail({
           target="_blank"
           rel="noopener noreferrer"
         >
-          {urgency === "open" ? "Place a bet" : "Open betting app"}
+          {compactStateLabel ? (
+            <span className="streaming-betting-rail-cta-state">
+              {compactStateLabel}
+            </span>
+          ) : null}
+          <span>{actionLabel}</span>
         </a>
       ) : (
         <span
           className="streaming-betting-rail-cta streaming-betting-rail-cta--disabled"
           aria-disabled="true"
         >
-          Betting unavailable
+          {compactStateLabel ? (
+            <span className="streaming-betting-rail-cta-state">
+              {compactStateLabel}
+            </span>
+          ) : null}
+          <span>{actionLabel}</span>
         </span>
       )}
       {config?.hint && urgency === "open" ? (

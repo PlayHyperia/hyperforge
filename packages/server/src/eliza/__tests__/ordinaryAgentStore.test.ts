@@ -156,13 +156,62 @@ describe("ordinary autonomous store reconciliation", () => {
       quantity: 1,
       expiresAt: now + 300_000,
     });
-    expect(hasOrdinaryCoinRecoveryAuthorization(instance, now + 1)).toBe(true);
+    expect(
+      hasOrdinaryCoinRecoveryAuthorization(instance, now + 1, undefined, {
+        coinBalance: 0,
+        unitPrice: 50,
+      }),
+    ).toBe(true);
 
     vi.spyOn(instance.service, "getInventoryItems").mockReturnValue([
       { slot: 0, itemId: "bronze_hatchet", quantity: 1 },
     ]);
-    expect(hasOrdinaryCoinRecoveryAuthorization(instance, now + 2)).toBe(false);
+    expect(
+      hasOrdinaryCoinRecoveryAuthorization(instance, now + 2, undefined, {
+        coinBalance: 0,
+        unitPrice: 50,
+      }),
+    ).toBe(false);
     expect(instance.coinRecovery).toBeNull();
+  });
+
+  it("stops guaranteed-drop recovery and releases the retry once the exact purchase is affordable", () => {
+    const now = 20_000;
+    const instance = makeInstance(vi.fn());
+    recordOrdinaryStoreBuyOutcome(
+      instance,
+      {
+        settled: true,
+        applied: false,
+        receipt: {
+          status: "rejected",
+          operationId: "c1a3e807-0a4a-4e07-9eba-cc49e23770c5",
+          replayed: false,
+          reason: "insufficient_coins",
+        },
+        operationId: "c1a3e807-0a4a-4e07-9eba-cc49e23770c5",
+        reconciliationAttempts: 1,
+      },
+      { storeId: "tool_store", itemId: "bronze_hatchet", quantity: 2 },
+      now,
+    );
+
+    expect(
+      hasOrdinaryCoinRecoveryAuthorization(instance, now + 1, undefined, {
+        coinBalance: 99,
+        unitPrice: 50,
+      }),
+    ).toBe(true);
+    expect(instance.storeRetryAfter).toBe(50_000);
+
+    expect(
+      hasOrdinaryCoinRecoveryAuthorization(instance, now + 2, undefined, {
+        coinBalance: 100,
+        unitPrice: 50,
+      }),
+    ).toBe(false);
+    expect(instance.coinRecovery).toBeNull();
+    expect(instance.storeRetryAfter).toBe(0);
   });
 
   it("never authorizes technical, ambiguous, or unrelated store rejection", () => {
@@ -193,5 +242,45 @@ describe("ordinary autonomous store reconciliation", () => {
 
     expect(instance.coinRecovery).toBeNull();
     expect(hasOrdinaryCoinRecoveryAuthorization(instance, 10_001)).toBe(false);
+  });
+
+  it("fails closed when the exact failed purchase no longer has price authority", () => {
+    const instance = makeInstance(vi.fn());
+    instance.storeRetryAfter = 40_000;
+    instance.coinRecovery = {
+      storeId: "missing_store",
+      itemId: "missing_item",
+      quantity: 1,
+      expiresAt: 300_000,
+    };
+
+    expect(
+      hasOrdinaryCoinRecoveryAuthorization(instance, 10_000, undefined, {
+        coinBalance: 0,
+        unitPrice: null,
+      }),
+    ).toBe(false);
+    expect(instance.coinRecovery).toBeNull();
+    expect(instance.storeRetryAfter).toBe(40_000);
+  });
+
+  it("pauses recovery without discarding identity when private coin authority is unavailable", () => {
+    const instance = makeInstance(vi.fn());
+    instance.storeRetryAfter = 40_000;
+    instance.coinRecovery = {
+      storeId: "tool_store",
+      itemId: "bronze_hatchet",
+      quantity: 1,
+      expiresAt: 300_000,
+    };
+
+    expect(
+      hasOrdinaryCoinRecoveryAuthorization(instance, 10_000, undefined, {
+        coinBalance: null,
+        unitPrice: 50,
+      }),
+    ).toBe(false);
+    expect(instance.coinRecovery).not.toBeNull();
+    expect(instance.storeRetryAfter).toBe(40_000);
   });
 });

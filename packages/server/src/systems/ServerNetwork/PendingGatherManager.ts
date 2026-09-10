@@ -34,6 +34,7 @@ import {
   FOOTPRINT_SIZES,
   GATHERING_CONSTANTS,
   canPlayerPerformPreparationAction,
+  getGatheringRewardOperationIdForAttempt,
 } from "@hyperforge/shared";
 import type { TileMovementManager } from "./tile-movement";
 
@@ -62,6 +63,10 @@ interface PendingGather {
   targetApproachTile?: TileCoord;
   /** Preserve the caller's movement mode when a moving fishing spot replans. */
   runMode: boolean;
+  /** Immutable autonomous action awaiting the first durable reward. */
+  completionAttemptId?: string;
+  /** Skill label for exact failure completion before ResourceSystem admission. */
+  skill: string;
 }
 
 /**
@@ -97,7 +102,12 @@ export class PendingGatherManager {
    * the same pending-gather pass. */
   private fishingReplans = new Map<
     string,
-    { resourceId: string; runMode: boolean }
+    {
+      resourceId: string;
+      runMode: boolean;
+      completionAttemptId?: string;
+      skill: string;
+    }
   >();
 
   /** Pre-allocated tile buffers (zero-allocation hot path) */
@@ -269,7 +279,14 @@ export class PendingGatherManager {
     resourceId: string,
     currentTick: number,
     runMode?: boolean,
+    completionAttemptId?: string,
   ): boolean {
+    if (
+      completionAttemptId !== undefined &&
+      !getGatheringRewardOperationIdForAttempt(completionAttemptId)
+    ) {
+      return false;
+    }
     if (!canPlayerPerformPreparationAction(this.world, playerId)) {
       this.cancelPendingGather(playerId);
       return false;
@@ -286,15 +303,35 @@ export class PendingGatherManager {
         playerId: string,
         resourceId: string,
       ) => boolean;
+      bindGatheringCompletionAttempt?: (
+        playerId: string,
+        resourceId: string,
+        attemptId: string,
+      ) => boolean;
+      requestGathering?: (data: {
+        playerId: string;
+        resourceId: string;
+        playerPosition: { x: number; y: number; z: number };
+        completionAttemptId?: string;
+      }) => boolean;
     } | null;
 
     // Early out if already gathering same resource (prevents repeated event emissions)
     if (resourceSystem?.isPlayerGatheringResource?.(playerId, resourceId)) {
-      return true;
+      return completionAttemptId === undefined
+        ? true
+        : resourceSystem.bindGatheringCompletionAttempt?.(
+            playerId,
+            resourceId,
+            completionAttemptId,
+          ) === true;
     }
 
     if (!resourceSystem?.getResource) {
       console.warn("[PendingGather] No resource system available");
+      return false;
+    }
+    if (completionAttemptId !== undefined && !resourceSystem.requestGathering) {
       return false;
     }
 
@@ -368,7 +405,11 @@ export class PendingGatherManager {
           size.x,
           size.z,
         );
-        const started = this.startGathering(playerId, resourceId);
+        const started = this.startGathering(
+          playerId,
+          resourceId,
+          completionAttemptId,
+        );
         this.releaseApproachReservation(playerId);
         return started;
       }
@@ -422,6 +463,8 @@ export class PendingGatherManager {
         resourcePosition: { ...resource.position },
         targetShoreTile: { x: shoreTile.x, z: shoreTile.z },
         runMode: isRunning,
+        completionAttemptId,
+        skill: resource.skillRequired ?? "unknown",
       });
 
       console.log(
@@ -456,7 +499,11 @@ export class PendingGatherManager {
           size.x,
           size.z,
         );
-        const started = this.startGathering(playerId, resourceId);
+        const started = this.startGathering(
+          playerId,
+          resourceId,
+          completionAttemptId,
+        );
         this.releaseApproachReservation(playerId);
         return started;
       }
@@ -529,6 +576,8 @@ export class PendingGatherManager {
         z: this._tempFootprintTile.z,
       },
       runMode: isRunning,
+      completionAttemptId,
+      skill: resource.skillRequired ?? "unknown",
     });
 
     console.log(
@@ -540,13 +589,34 @@ export class PendingGatherManager {
   /**
    * Cancel pending gather for a player
    */
-  cancelPendingGather(playerId: string): void {
+  cancelPendingGather(playerId: string, publishFailure = true): void {
     this.fishingReplans.delete(playerId);
     this.releaseApproachReservation(playerId);
-    if (this.pendingGathers.has(playerId)) {
+    const pending = this.pendingGathers.get(playerId);
+    if (pending) {
       this.pendingGathers.delete(playerId);
+      if (publishFailure) this.publishPendingGatherFailure(pending);
       console.log(`[PendingGather] Cancelled pending gather for ${playerId}`);
     }
+  }
+
+  private publishPendingGatherFailure(
+    pending: Pick<
+      PendingGather,
+      "playerId" | "resourceId" | "completionAttemptId" | "skill"
+    >,
+  ): void {
+    const operationId = getGatheringRewardOperationIdForAttempt(
+      pending.completionAttemptId,
+    );
+    if (!operationId) return;
+    this.world.emit(EventType.RESOURCE_GATHERING_COMPLETED, {
+      playerId: pending.playerId,
+      resourceId: pending.resourceId,
+      successful: false,
+      skill: pending.skill,
+      operationId,
+    });
   }
 
   /**
@@ -556,8 +626,10 @@ export class PendingGatherManager {
   onPlayerDisconnect(playerId: string): void {
     this.fishingReplans.delete(playerId);
     this.releaseApproachReservation(playerId);
-    if (this.pendingGathers.has(playerId)) {
+    const pending = this.pendingGathers.get(playerId);
+    if (pending) {
       this.pendingGathers.delete(playerId);
+      this.publishPendingGatherFailure(pending);
       console.log(
         `[PendingGather] Cleaned up pending gather for disconnected player ${playerId}`,
       );
@@ -584,6 +656,7 @@ export class PendingGatherManager {
         // Fail-safe cleanup: remove from pending to prevent infinite error loops
         this.pendingGathers.delete(playerId);
         this.releaseApproachReservation(playerId);
+        this.publishPendingGatherFailure(pending);
       }
     }
 
@@ -591,12 +664,21 @@ export class PendingGatherManager {
       const replans = [...this.fishingReplans];
       this.fishingReplans.clear();
       for (const [playerId, replan] of replans) {
-        this.queuePendingGather(
+        const accepted = this.queuePendingGather(
           playerId,
           replan.resourceId,
           currentTick,
           replan.runMode,
+          replan.completionAttemptId,
         );
+        if (!accepted) {
+          this.publishPendingGatherFailure({
+            playerId,
+            resourceId: replan.resourceId,
+            completionAttemptId: replan.completionAttemptId,
+            skill: replan.skill,
+          });
+        }
       }
     }
   }
@@ -615,6 +697,7 @@ export class PendingGatherManager {
       console.log(`[PendingGather] Timeout for ${playerId}`);
       this.pendingGathers.delete(playerId);
       this.releaseApproachReservation(playerId);
+      this.publishPendingGatherFailure(pending);
       return;
     }
 
@@ -623,6 +706,7 @@ export class PendingGatherManager {
     if (!player?.position) {
       this.pendingGathers.delete(playerId);
       this.releaseApproachReservation(playerId);
+      this.publishPendingGatherFailure(pending);
       return;
     }
 
@@ -638,6 +722,7 @@ export class PendingGatherManager {
       );
       this.pendingGathers.delete(playerId);
       this.releaseApproachReservation(playerId);
+      this.publishPendingGatherFailure(pending);
       return;
     }
 
@@ -659,6 +744,8 @@ export class PendingGatherManager {
         this.fishingReplans.set(playerId, {
           resourceId: pending.resourceId,
           runMode: pending.runMode,
+          completionAttemptId: pending.completionAttemptId,
+          skill: pending.skill,
         });
         return;
       }
@@ -715,7 +802,14 @@ export class PendingGatherManager {
       );
 
       // Start gathering
-      this.startGathering(playerId, pending.resourceId);
+      this.startGathering(
+        playerId,
+        pending.resourceId,
+        pending.completionAttemptId,
+      );
+      // A valid completion-bound ResourceSystem request publishes its own exact
+      // terminal rejection. PendingGatherManager owns only pre-admission
+      // failures such as timeout, disappearance, and failed replanning.
 
       // Remove from pending
       this.pendingGathers.delete(playerId);
@@ -792,12 +886,15 @@ export class PendingGatherManager {
   /**
    * Start the gathering process
    */
-  private startGathering(playerId: string, resourceId: string): boolean {
+  private startGathering(
+    playerId: string,
+    resourceId: string,
+    completionAttemptId?: string,
+  ): boolean {
     const player = this.world.getPlayer?.(playerId);
     if (!player?.position) return false;
 
-    // Emit RESOURCE_GATHER event - ResourceSystem will handle the actual gathering
-    this.world.emit(EventType.RESOURCE_GATHER, {
+    const request = {
       playerId,
       resourceId,
       playerPosition: {
@@ -805,7 +902,17 @@ export class PendingGatherManager {
         y: player.position.y,
         z: player.position.z,
       },
-    });
+      completionAttemptId,
+    };
+    if (completionAttemptId !== undefined) {
+      const resourceSystem = this.world.getSystem("resource") as {
+        requestGathering?: (data: typeof request) => boolean;
+      } | null;
+      return resourceSystem?.requestGathering?.(request) === true;
+    }
+
+    // Emit RESOURCE_GATHER event - ResourceSystem will handle the actual gathering
+    this.world.emit(EventType.RESOURCE_GATHER, request);
     return true;
   }
 }

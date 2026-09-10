@@ -33,6 +33,11 @@ import type {
   InventorySystem,
 } from "../character/InventorySystem";
 import { canPlayerPerformPreparationAction } from "./ProcessingStationAuthority";
+import {
+  clearProcessingInteractionPresentation,
+  publishProcessingInteractionPresentation,
+} from "./ProcessingInteractionPresentation";
+import type { PlayerProcessingQuiescenceSystem } from "./ProcessingQuiescence";
 
 /** Active fletching session for a player */
 interface FletchingSession {
@@ -65,7 +70,10 @@ interface InventoryState {
   itemIds: Set<string>;
 }
 
-export class FletchingSystem extends SystemBase {
+export class FletchingSystem
+  extends SystemBase
+  implements PlayerProcessingQuiescenceSystem
+{
   private readonly activeSessions = new Map<string, FletchingSession>();
   private readonly pendingActions = new Map<string, PendingFletchingAction>();
   private readonly playerSkills = new Map<
@@ -417,6 +425,10 @@ export class FletchingSystem extends SystemBase {
     };
 
     this.activeSessions.set(playerId, session);
+    publishProcessingInteractionPresentation(this.world, {
+      playerId,
+      skill: "fletching",
+    });
     this.reportProcessingRequestProgress(
       playerId,
       requestId,
@@ -646,20 +658,28 @@ export class FletchingSystem extends SystemBase {
         continue;
       }
 
+      if (receipt.xpAmount > 0) {
+        this.emitTypedEvent(EventType.SKILLS_PROGRESS_COMMITTED, {
+          playerId: receipt.playerId,
+          operationId: receipt.operationId,
+          replayed: receipt.replayed,
+          skill: receipt.skill,
+          xpAmount: receipt.xpAmount,
+          awardedXp: receipt.awardedXp,
+          operationCommittedXp: receipt.operationCommittedXp,
+          currentXp: receipt.currentXp,
+          currentLevel: receipt.currentLevel,
+        });
+      }
       this.pendingActions.delete(pending.playerId);
       const session = this.activeSessions.get(pending.playerId);
       if (!session || session.recipeId !== pending.recipeId) continue;
 
-      this.emitTypedEvent(EventType.ANIMATION_PLAY, {
-        entityId: pending.playerId,
-        animation: "crafting",
-        loop: false,
-      });
-      if (receipt.awardedXp > 0) {
-        this.emitTypedEvent(EventType.SKILLS_XP_GAINED, {
-          playerId: pending.playerId,
-          skill: "fletching",
-          amount: receipt.awardedXp,
+      if (!pending.stopAfterCommit) {
+        this.emitTypedEvent(EventType.ANIMATION_PLAY, {
+          entityId: pending.playerId,
+          animation: "crafting",
+          loop: false,
         });
       }
       session.crafted++;
@@ -677,14 +697,16 @@ export class FletchingSystem extends SystemBase {
         batchTotal: session.quantity,
       });
       const itemName = recipe.name || recipe.output.replace(/_/g, " ");
-      this.emitTypedEvent(EventType.UI_MESSAGE, {
-        playerId: pending.playerId,
-        message:
-          recipe.outputQuantity > 1
-            ? `You fletch ${recipe.outputQuantity} ${itemName}s.`
-            : `You fletch a ${itemName}.`,
-        type: "success",
-      });
+      if (!pending.stopAfterCommit) {
+        this.emitTypedEvent(EventType.UI_MESSAGE, {
+          playerId: pending.playerId,
+          message:
+            recipe.outputQuantity > 1
+              ? `You fletch ${recipe.outputQuantity} ${itemName}s.`
+              : `You fletch a ${itemName}.`,
+          type: "success",
+        });
+      }
       if (!receipt.liveInventoryApplied) {
         this.emitTypedEvent(EventType.UI_MESSAGE, {
           playerId: pending.playerId,
@@ -706,6 +728,7 @@ export class FletchingSystem extends SystemBase {
     if (!session) return;
 
     this.activeSessions.delete(playerId);
+    clearProcessingInteractionPresentation(this.world, playerId, "fletching");
 
     const recipe = processingDataProvider.getFletchingRecipe(session.recipeId);
 
@@ -725,6 +748,7 @@ export class FletchingSystem extends SystemBase {
    * Cancel fletching for a player
    */
   private cancelFletching(playerId: string): void {
+    clearProcessingInteractionPresentation(this.world, playerId, "fletching");
     const pending = this.pendingActions.get(playerId);
     if (pending) {
       pending.stopAfterCommit = true;
@@ -801,6 +825,16 @@ export class FletchingSystem extends SystemBase {
    */
   isPlayerFletching(playerId: string): boolean {
     return this.activeSessions.has(playerId);
+  }
+
+  requestPlayerProcessingQuiescence(playerId: string): void {
+    this.cancelFletching(playerId);
+  }
+
+  isPlayerProcessingQuiescent(playerId: string): boolean {
+    return (
+      !this.activeSessions.has(playerId) && !this.pendingActions.has(playerId)
+    );
   }
 
   getFletchingCustodyStats(): {

@@ -34,4 +34,13 @@ describe("stream render frame pacing", () => {
     expect(pacer.shouldRun(33)).toBe(true);
     expect(pacer.shouldRun(50)).toBe(true);
   });
+
+  it("selects every second 120 Hz callback for a true 60 FPS stream", () => {
+    const pacer = new StreamRenderFramePacer(60);
+    expect(pacer.shouldRun(0)).toBe(true);
+    expect(pacer.shouldRun(8)).toBe(false);
+    expect(pacer.shouldRun(16)).toBe(true);
+    expect(pacer.shouldRun(24)).toBe(false);
+    expect(pacer.shouldRun(32)).toBe(true);
+  });
 });

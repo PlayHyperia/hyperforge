@@ -1,5 +1,16 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
-import { EntityOccupancyMap } from "@hyperforge/shared";
+import {
+  AttackType,
+  canPlayerPerformPreparationAction,
+  DeathState,
+  EntityOccupancyMap,
+  resolveFootprint,
+  stationDataProvider,
+} from "@hyperforge/shared";
+
+import modelBoundsManifest from "../../../../world/assets/manifests/model-bounds.json";
+import stationsManifest from "../../../../world/assets/manifests/stations.json";
+import worldAreasManifest from "../../../../world/assets/manifests/world-areas.json";
 import { TileMovementManager } from "../tile-movement";
 
 // Mocks
@@ -61,6 +72,175 @@ describe("TileMovementManager - Building Integration", () => {
     });
 
     manager = new TileMovementManager(mockWorld, mockSendFn);
+  });
+
+  it("returns a truthful movement admission receipt", () => {
+    expect(
+      manager.movePlayerToward(
+        "missing-player",
+        { x: 1.5, y: 0, z: 0.5 },
+        false,
+      ),
+    ).toBe(false);
+
+    const playerId = "movement-receipt-player";
+    const position = {
+      x: 0.5,
+      y: 0,
+      z: 0.5,
+      set(x: number, y: number, z: number) {
+        this.x = x;
+        this.y = y;
+        this.z = z;
+      },
+    };
+    const entity = {
+      position,
+      data: {
+        position: [position.x, position.y, position.z],
+        quaternion: [0, 0, 0, 1],
+        deathState: DeathState.ALIVE,
+      },
+      node: { quaternion: { copy: vi.fn() } },
+    };
+    mockWorld.entities.get.mockImplementation((id: string) =>
+      id === playerId ? entity : null,
+    );
+    manager.syncPlayerPosition(playerId, position);
+
+    expect(
+      manager.movePlayerToward(playerId, { x: 1.5, y: 0, z: 0.5 }, false),
+    ).toBe(true);
+    expect(mockSendFn).toHaveBeenCalledWith(
+      "tileMovementStart",
+      expect.objectContaining({ id: playerId, moveSeq: 1 }),
+    );
+
+    entity.data.deathState = DeathState.DEAD;
+    expect(
+      manager.movePlayerToward(playerId, { x: 2.5, y: 0, z: 0.5 }, false),
+    ).toBe(false);
+  });
+
+  it("stops an active combat path when the actor is already in exact attack range", () => {
+    const playerId = "combat-arrival-player";
+    const position = {
+      x: 0.5,
+      y: 0,
+      z: 0.5,
+      set(x: number, y: number, z: number) {
+        this.x = x;
+        this.y = y;
+        this.z = z;
+      },
+    };
+    const entity = {
+      position,
+      data: {
+        position: [position.x, position.y, position.z],
+        quaternion: [0, 0, 0, 1],
+        deathState: DeathState.ALIVE,
+        tileMovementActive: false,
+      },
+      node: { quaternion: { copy: vi.fn() } },
+    };
+    mockWorld.entities.get.mockImplementation((id: string) =>
+      id === playerId ? entity : null,
+    );
+    manager.syncPlayerPosition(playerId, position);
+
+    expect(
+      manager.movePlayerToward(
+        playerId,
+        { x: 4.5, y: 0, z: 0.5 },
+        true,
+        1,
+        AttackType.MELEE,
+      ),
+    ).toBe(true);
+    expect(manager.getPlayerMovementDebug(playerId).activePath).toBe(true);
+
+    position.x = 3.5;
+    entity.data.position = [position.x, position.y, position.z];
+    mockSendFn.mockClear();
+
+    expect(
+      manager.movePlayerToward(
+        playerId,
+        { x: 4.5, y: 0, z: 0.5 },
+        true,
+        1,
+        AttackType.MELEE,
+      ),
+    ).toBe(true);
+    expect(manager.getPlayerMovementDebug(playerId)).toEqual(
+      expect.objectContaining({
+        activePath: false,
+        currentTile: { x: 3, z: 0 },
+        remainingPathTiles: 0,
+      }),
+    );
+    expect(entity.data.tileMovementActive).toBe(false);
+    expect(mockSendFn).toHaveBeenCalledWith(
+      "tileMovementEnd",
+      expect.objectContaining({
+        id: playerId,
+        tile: { x: 3, z: 0 },
+        emote: "idle",
+      }),
+    );
+  });
+
+  it("persists settled open-world endpoints without overwriting duel recovery positions", () => {
+    const playerId = "settled-position-player";
+    const savePlayer = vi.fn();
+    mockWorld.getSystem.mockImplementation((name: string) => {
+      if (name === "buildingCollision") return mockBuildingService;
+      if (name === "database") return { savePlayer };
+      return null;
+    });
+    const position = {
+      x: 0.5,
+      y: 0,
+      z: 0.5,
+      set(x: number, y: number, z: number) {
+        this.x = x;
+        this.y = y;
+        this.z = z;
+      },
+    };
+    const entity = {
+      position,
+      data: {
+        position: [position.x, position.y, position.z],
+        quaternion: [0, 0, 0, 1],
+        deathState: DeathState.ALIVE,
+        inStreamingDuel: false,
+      },
+      node: { quaternion: { copy: vi.fn() } },
+    };
+    mockWorld.entities.get.mockImplementation((id: string) =>
+      id === playerId ? entity : null,
+    );
+    manager.syncPlayerPosition(playerId, position);
+
+    expect(
+      manager.movePlayerToward(playerId, { x: 1.5, y: 0, z: 0.5 }, false),
+    ).toBe(true);
+    manager.processPlayerTick(playerId, 1);
+    expect(savePlayer).toHaveBeenCalledTimes(1);
+    expect(savePlayer).toHaveBeenLastCalledWith(playerId, {
+      positionX: 1.5,
+      positionY: 0.01,
+      positionZ: 0.5,
+    });
+
+    entity.data.inStreamingDuel = true;
+    expect(
+      manager.movePlayerToward(playerId, { x: 2.5, y: 0, z: 0.5 }, false),
+    ).toBe(true);
+    manager.processPlayerTick(playerId, 2);
+    expect(savePlayer).toHaveBeenCalledTimes(1);
   });
 
   it("should call handleStairTransition during movement", () => {
@@ -186,6 +366,94 @@ describe("TileMovementManager - Building Integration", () => {
     expect(state.currentTile).toEqual({ x: 11, z: 10 });
     expect(state.path).toHaveLength(0);
     expect(state.pathIndex).toBe(0);
+  });
+
+  it("resolves the current authoritative emote at movement end", () => {
+    const playerId = "arrival-authority";
+    const resolveAtArrival = vi.fn(() => "small_fishing_net");
+    manager.syncPlayerPosition(playerId, { x: 10.5, y: 0, z: 10.5 });
+    const state = (
+      manager as unknown as { playerStates: Map<string, unknown> }
+    ).playerStates.get(playerId) as {
+      path: Array<{ x: number; z: number }>;
+      pathIndex: number;
+      previousTile: { x: number; z: number };
+    };
+    state.path = [{ x: 11, z: 10 }];
+    state.pathIndex = 0;
+    state.previousTile = { x: 10, z: 10 };
+    mockWorld.entities.get.mockReturnValue({
+      position: { set: vi.fn(), x: 10.5, y: 0, z: 10.5 },
+      data: {
+        position: [10.5, 0, 10.5],
+        quaternion: [0, 0, 0, 1],
+        tileMovementActive: true,
+      },
+      node: { quaternion: { copy: vi.fn() } },
+    });
+    manager.setArrivalEmote(playerId, "fishing_rod", resolveAtArrival);
+
+    manager.processPlayerTick(playerId, 1);
+
+    expect(resolveAtArrival).toHaveBeenCalledOnce();
+    expect(mockSendFn).toHaveBeenCalledWith(
+      "tileMovementEnd",
+      expect.objectContaining({ id: playerId, emote: "small_fishing_net" }),
+    );
+    expect(mockSendFn).toHaveBeenCalledWith(
+      "entityModified",
+      expect.objectContaining({
+        id: playerId,
+        changes: expect.objectContaining({ e: "small_fishing_net" }),
+      }),
+    );
+  });
+
+  it.each([
+    ["revoked", () => null],
+    [
+      "resolver failure",
+      () => {
+        throw new Error("custody unavailable");
+      },
+    ],
+  ])("fails %s arrival authority closed to idle", (_label, resolver) => {
+    const playerId = `arrival-${_label}`;
+    manager.syncPlayerPosition(playerId, { x: 10.5, y: 0, z: 10.5 });
+    const state = (
+      manager as unknown as { playerStates: Map<string, unknown> }
+    ).playerStates.get(playerId) as {
+      path: Array<{ x: number; z: number }>;
+      pathIndex: number;
+      previousTile: { x: number; z: number };
+    };
+    state.path = [{ x: 11, z: 10 }];
+    state.pathIndex = 0;
+    state.previousTile = { x: 10, z: 10 };
+    mockWorld.entities.get.mockReturnValue({
+      position: { set: vi.fn(), x: 10.5, y: 0, z: 10.5 },
+      data: {
+        position: [10.5, 0, 10.5],
+        quaternion: [0, 0, 0, 1],
+        tileMovementActive: true,
+      },
+      node: { quaternion: { copy: vi.fn() } },
+    });
+    manager.setArrivalEmote(playerId, "fishing_rod", resolver);
+
+    expect(() => manager.processPlayerTick(playerId, 1)).not.toThrow();
+
+    expect(mockSendFn).toHaveBeenCalledWith(
+      "tileMovementEnd",
+      expect.objectContaining({ id: playerId, emote: "idle" }),
+    );
+    expect(mockSendFn).toHaveBeenCalledWith(
+      "entityModified",
+      expect.objectContaining({
+        id: playerId,
+        changes: expect.objectContaining({ e: "idle" }),
+      }),
+    );
   });
 
   it("arbitrates a shared destination without overlapping player tiles", () => {
@@ -424,7 +692,7 @@ describe("TileMovementManager - Building Integration", () => {
     });
   });
 
-  it("fairly drains 25 simultaneous preparation routes without false arrivals", () => {
+  it("starts 25 simultaneous preparation routes without exhausting the shared budget", () => {
     const agentCount = 25;
     const destinationTile = { x: 30, z: 0 };
     const entities = new Map<string, any>();
@@ -499,9 +767,13 @@ describe("TileMovementManager - Building Integration", () => {
       );
     }
 
-    expect(
-      scenarioManager.getPerformanceContext().pendingNonCombatMoves,
-    ).toBeGreaterThan(0);
+    expect(scenarioManager.getPerformanceContext()).toMatchObject({
+      pendingNonCombatMoves: 0,
+      precomputedPathSegments: 0,
+    });
+    expect(scenarioManager.getPerformanceContext().bfsIterations).toBeLessThan(
+      2_000,
+    );
 
     let completionTick = 0;
     for (currentTick = 1; currentTick <= 80; currentTick++) {
@@ -528,7 +800,7 @@ describe("TileMovementManager - Building Integration", () => {
     expect(Math.max(...firstStartTick.values())).toBeLessThanOrEqual(6);
     expect(completionTick).toBeGreaterThan(0);
     expect(completionTick).toBeLessThanOrEqual(20);
-    expect(continuationStarts).toBeGreaterThan(0);
+    expect(continuationStarts).toBe(0);
     expect(scenarioManager.getPerformanceContext()).toMatchObject({
       activePaths: 0,
       pendingNonCombatMoves: 0,
@@ -577,7 +849,8 @@ describe("TileMovementManager - Building Integration", () => {
       if (event === "tileMovementEnd") movementEnds.push(payload);
     });
     manager.syncPlayerPosition(playerId, position);
-    manager.setArrivalEmote(playerId, "banking");
+    const resolveAtArrival = vi.fn(() => "banking");
+    manager.setArrivalEmote(playerId, "stale-banking", resolveAtArrival);
 
     const state = (
       manager as unknown as {
@@ -634,6 +907,7 @@ describe("TileMovementManager - Building Integration", () => {
       precomputedPathSegments: 0,
     });
     expect(movementEnds).toHaveLength(1);
+    expect(resolveAtArrival).toHaveBeenCalledOnce();
     expect(movementEnds[0]).toMatchObject({
       id: playerId,
       tile: destinationTile,
@@ -1230,12 +1504,59 @@ describe("TileMovementManager - Building Integration", () => {
     ).toHaveLength(1);
   });
 
-  it("cycles 25 agents through legal tiles around one blocked 2x2 workstation", () => {
+  it("queues and cycles 25 agents through the saturated production range boundary", () => {
+    stationDataProvider.loadStations(stationsManifest);
+    stationDataProvider.loadModelBounds(modelBoundsManifest);
+    const footprint = resolveFootprint(
+      stationDataProvider.getFootprint("range"),
+    );
+    expect(footprint).toEqual({ x: 2, z: 1 });
+
+    const rangePlacement =
+      worldAreasManifest.starterTowns.central_haven.stations.find(
+        (station) => station.type === "range",
+      );
+    expect(rangePlacement).toBeDefined();
+    const stationId = rangePlacement!.id;
+    const stationPosition = rangePlacement!.position;
+    const centerTile = {
+      x: Math.floor(stationPosition.x),
+      z: Math.floor(stationPosition.z),
+    };
+    const footprintMinX = centerTile.x - Math.floor(footprint.x / 2);
+    const footprintMaxX = footprintMinX + footprint.x - 1;
+    const footprintMinZ = centerTile.z - Math.floor(footprint.z / 2);
+    const footprintMaxZ = footprintMinZ + footprint.z - 1;
+
     const entities = new Map<string, any>();
     const occupancy = new EntityOccupancyMap();
-    const blockedFootprint = new Set(["19,19", "19,20", "20,19", "20,20"]);
+    const blockedFootprint = new Set<string>();
+    for (let x = footprintMinX; x <= footprintMaxX; x++) {
+      for (let z = footprintMinZ; z <= footprintMaxZ; z++) {
+        blockedFootprint.add(`${x},${z}`);
+      }
+    }
+    entities.set(stationId, {
+      entityType: "range",
+      position: stationPosition,
+      canInteract: (_playerId: string, position: { x: number; z: number }) => {
+        const tileX = Math.floor(position.x);
+        const tileZ = Math.floor(position.z);
+        if (blockedFootprint.has(`${tileX},${tileZ}`)) return false;
+        const dx =
+          tileX < footprintMinX
+            ? footprintMinX - tileX
+            : Math.max(0, tileX - footprintMaxX);
+        const dz =
+          tileZ < footprintMinZ
+            ? footprintMinZ - tileZ
+            : Math.max(0, tileZ - footprintMaxZ);
+        return Math.max(dx, dz) <= 1;
+      },
+    });
     const world = {
       entities,
+      getPlayer: (id: string) => entities.get(id),
       entityOccupancy: occupancy,
       getSystem: vi.fn(() => null),
       collision: {
@@ -1249,8 +1570,12 @@ describe("TileMovementManager - Building Integration", () => {
     };
     const movement = new TileMovementManager(world as never, vi.fn());
     const startTiles: Array<{ x: number; z: number }> = [];
-    for (let x = 13; x <= 27; x++) startTiles.push({ x, z: 13 });
-    for (let x = 13; x <= 22; x++) startTiles.push({ x, z: 27 });
+    for (let x = centerTile.x - 7; x <= centerTile.x + 7; x++) {
+      startTiles.push({ x, z: centerTile.z - 7 });
+    }
+    for (let x = centerTile.x - 7; x <= centerTile.x + 2; x++) {
+      startTiles.push({ x, z: centerTile.z + 7 });
+    }
 
     for (let index = 0; index < 25; index++) {
       const id = `preparation-agent-${index}`;
@@ -1275,17 +1600,15 @@ describe("TileMovementManager - Building Integration", () => {
         node: { quaternion: { copy: vi.fn() } },
       });
       movement.syncPlayerPosition(id, position);
-      movement.movePlayerToward(
-        id,
-        { x: 20.5, y: 0, z: 20.5 },
-        true,
-        0,
-        undefined,
-        { interactionRange: 2, footprintWidth: 2, footprintDepth: 2 },
-      );
+      movement.movePlayerToward(id, stationPosition, true, 0, undefined, {
+        interactionRange: 1,
+        footprintWidth: footprint.x,
+        footprintDepth: footprint.z,
+      });
     }
 
     const arrived = new Set<string>();
+    const arrivalTickByAgent = new Map<string, number>();
     for (let tick = 1; tick <= 40 && arrived.size < 25; tick++) {
       movement.onTick(tick);
       const currentTiles: string[] = [];
@@ -1294,10 +1617,23 @@ describe("TileMovementManager - Building Integration", () => {
         const tile = movement.getCurrentTile(id)!;
         currentTiles.push(`${tile.x},${tile.z}`);
         expect(blockedFootprint.has(`${tile.x},${tile.z}`)).toBe(false);
-        const dx = tile.x < 19 ? 19 - tile.x : Math.max(0, tile.x - 20);
-        const dz = tile.z < 19 ? 19 - tile.z : Math.max(0, tile.z - 20);
-        if (!arrived.has(id) && Math.max(dx, dz) <= 2) {
+        const dx =
+          tile.x < footprintMinX
+            ? footprintMinX - tile.x
+            : Math.max(0, tile.x - footprintMaxX);
+        const dz =
+          tile.z < footprintMinZ
+            ? footprintMinZ - tile.z
+            : Math.max(0, tile.z - footprintMaxZ);
+        if (!arrived.has(id) && Math.max(dx, dz) <= 1) {
+          expect(canPlayerPerformPreparationAction(world as never, id)).toBe(
+            true,
+          );
+          expect(
+            entities.get(stationId).canInteract(id, entities.get(id).position),
+          ).toBe(true);
           arrived.add(id);
+          arrivalTickByAgent.set(id, tick);
           const start = startTiles[index];
           movement.movePlayerToward(
             id,
@@ -1310,6 +1646,8 @@ describe("TileMovementManager - Building Integration", () => {
     }
 
     expect(arrived.size).toBe(25);
+    expect(arrivalTickByAgent.size).toBe(25);
+    expect(Math.max(...arrivalTickByAgent.values())).toBeLessThanOrEqual(40);
     expect(movement.getPerformanceContext().occupiedPlayerTiles).toBe(25);
   });
 });

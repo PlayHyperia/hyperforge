@@ -28,6 +28,8 @@ export interface AvatarOption {
   lod2Url?: string;
   /** Path portion for character preview (prepend CDN URL) */
   previewPath: string;
+  /** Exact humanoid bones available to the additive hit-reaction controller. */
+  hitReactionBoneCount?: number;
   description?: string;
 }
 
@@ -48,6 +50,13 @@ export const AVATAR_LOD_DISTANCES = {
   /** Distance at which to switch from LOD1 to LOD2 */
   LOD1_TO_LOD2: 60,
 } as const;
+
+/**
+ * Fraction of an outward LOD threshold that must be crossed when returning to
+ * a higher-detail avatar. This prevents camera jitter around 30 m or 60 m from
+ * repeatedly replacing the active VRM.
+ */
+export const AVATAR_LOD_RETURN_THRESHOLD_RATIO = 0.9;
 
 /**
  * Available avatar models
@@ -108,9 +117,46 @@ export const AVATAR_OPTIONS: AvatarOption[] = [
     previewPath: "/avatars/duel-candidates/duel-steve.vrm",
     description: "Canonical launch duel rig",
   },
+  {
+    id: "kaykit-knight",
+    name: "KayKit Knight",
+    url: "asset://avatars/duel-candidates/duel-kaykit-knight.vrm",
+    lod1Url: "asset://avatars/duel-candidates/duel-kaykit-knight_lod1.vrm",
+    lod2Url: "asset://avatars/duel-candidates/duel-kaykit-knight_lod2.vrm",
+    previewPath: "/avatars/duel-candidates/duel-kaykit-knight.vrm",
+    hitReactionBoneCount: 3,
+    description: "Vetted CC0 diagnostic duel candidate",
+  },
 ];
 
 export const DEFAULT_AVATAR_URL = AVATAR_OPTIONS[0].url;
+/** Local no-money asset tests only; never offer these in character selection. */
+export const DIAGNOSTIC_AVATAR_OPTIONS: readonly AvatarOption[] = [
+  {
+    id: "authored-body38-light01-test",
+    name: "Light-skin authored avatar — calibrated arm rest test",
+    url: "asset://avatars/asset-studio-test/authored-body38-light01-test.vrm",
+    previewPath: "/avatars/asset-studio-test/authored-body38-light01-test.vrm",
+    description:
+      "Original body38 rig/shape with light-skin reference and opt-in arm retargeting; full fit/LOD approval pending",
+  },
+  {
+    id: "authored-body15-test",
+    name: "Authored avatar — provisional asset test",
+    url: "asset://avatars/asset-studio-test/authored-body15-test.vrm",
+    previewPath: "/avatars/asset-studio-test/authored-body15-test.vrm",
+    description: "Body15 integration checkpoint; grip and LODs unapproved",
+  },
+  {
+    id: "authored-body38-test",
+    name: "Authored avatar with eyes and clothing — provisional asset test",
+    url: "asset://avatars/asset-studio-test/authored-body38-test.vrm",
+    previewPath: "/avatars/asset-studio-test/authored-body38-test.vrm",
+    description:
+      "Preserved body38 with eye04 and shorts02; grip and LODs unapproved",
+  },
+];
+
 export const CANONICAL_DUEL_AVATAR_ID = "steve";
 export const CANONICAL_DUEL_AVATAR_URL =
   AVATAR_OPTIONS.find((avatar) => avatar.id === CANONICAL_DUEL_AVATAR_ID)
@@ -148,7 +194,7 @@ export function getAvatarById(id: string): AvatarOption | undefined {
  * Get avatar by URL (checks url, lod1Url, lod2Url, and previewPath)
  */
 export function getAvatarByUrl(url: string): AvatarOption | undefined {
-  return AVATAR_OPTIONS.find(
+  return [...AVATAR_OPTIONS, ...DIAGNOSTIC_AVATAR_OPTIONS].find(
     (avatar) =>
       avatar.url === url ||
       avatar.lod1Url === url ||
@@ -173,6 +219,41 @@ export function getAvatarLODForDistance(distance: number): AvatarLOD {
 }
 
 /**
+ * Resolve avatar LOD with asymmetric return thresholds.
+ *
+ * Moving away uses the declared 30 m / 60 m thresholds. Moving closer keeps
+ * the current lower-detail LOD until the camera crosses 90% of the boundary,
+ * eliminating rapid swaps when a spectator camera rests on the threshold.
+ */
+export function getAvatarLODForDistanceWithHysteresis(
+  distance: number,
+  currentLOD: AvatarLOD,
+): AvatarLOD {
+  if (Number.isNaN(distance)) return currentLOD;
+  const safeDistance = Math.max(0, distance);
+  const lod1ReturnDistance =
+    AVATAR_LOD_DISTANCES.LOD0_TO_LOD1 * AVATAR_LOD_RETURN_THRESHOLD_RATIO;
+  const lod2ReturnDistance =
+    AVATAR_LOD_DISTANCES.LOD1_TO_LOD2 * AVATAR_LOD_RETURN_THRESHOLD_RATIO;
+
+  if (currentLOD === AvatarLOD.LOD2) {
+    if (safeDistance >= lod2ReturnDistance) return AvatarLOD.LOD2;
+    return safeDistance >= AVATAR_LOD_DISTANCES.LOD0_TO_LOD1
+      ? AvatarLOD.LOD1
+      : AvatarLOD.LOD0;
+  }
+
+  if (currentLOD === AvatarLOD.LOD1) {
+    if (safeDistance >= AVATAR_LOD_DISTANCES.LOD1_TO_LOD2) {
+      return AvatarLOD.LOD2;
+    }
+    return safeDistance >= lod1ReturnDistance ? AvatarLOD.LOD1 : AvatarLOD.LOD0;
+  }
+
+  return getAvatarLODForDistance(safeDistance);
+}
+
+/**
  * Get the URL for a specific LOD level of an avatar
  * Falls back to higher detail LOD if requested LOD is not available
  *
@@ -193,6 +274,16 @@ export function getAvatarUrlForLOD(
     default:
       return avatar.url;
   }
+}
+
+/** Return the declared LOD represented by an exact avatar URL. */
+export function getAvatarLODForUrl(
+  avatar: AvatarOption,
+  url: string,
+): AvatarLOD {
+  if (avatar.lod2Url === url) return AvatarLOD.LOD2;
+  if (avatar.lod1Url === url) return AvatarLOD.LOD1;
+  return AvatarLOD.LOD0;
 }
 
 /**

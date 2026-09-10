@@ -189,6 +189,7 @@ export class CameraDirector {
   private fightCutawayTotalMs: number = 0;
   private fightLastCutawayEndedAt: number = 0;
   private cachedContestantIds: Set<string> = new Set();
+  private pendingIdlePreparationActivityTarget: string | null = null;
 
   constructor(
     private readonly world: World,
@@ -216,6 +217,7 @@ export class CameraDirector {
     this.fightCutawayTotalMs = 0;
     this.fightLastCutawayEndedAt = 0;
     this.cachedContestantIds = new Set();
+    this.pendingIdlePreparationActivityTarget = null;
   }
 
   // ---- Agent activity ----
@@ -773,6 +775,18 @@ export class CameraDirector {
     return candidates[candidates.length - 1];
   }
 
+  selectHighestWeightCameraCandidate(
+    candidates: CameraCandidateWeight[],
+  ): CameraCandidateWeight | null {
+    let selected: CameraCandidateWeight | null = null;
+    for (const candidate of candidates) {
+      if (!selected || candidate.weight > selected.weight) {
+        selected = candidate;
+      }
+    }
+    return selected;
+  }
+
   markAgentFocused(agentId: string | null, now: number): void {
     if (!agentId) return;
     const sample = this.ensureAgentActivity(agentId, now);
@@ -1142,6 +1156,48 @@ export class CameraDirector {
     return null;
   }
 
+  considerIdlePreparationActivityCut(agentId: string, now: number): boolean {
+    const previewPair = this.getIdlePreviewPairSnapshot();
+    if (
+      !previewPair ||
+      (agentId !== previewPair.agent1Id && agentId !== previewPair.agent2Id) ||
+      !this.isAgentValidCameraCandidate(agentId)
+    ) {
+      return false;
+    }
+
+    const currentTarget =
+      this._cameraTarget &&
+      this.isAgentValidCameraCandidate(this._cameraTarget) &&
+      (this._cameraTarget === previewPair.agent1Id ||
+        this._cameraTarget === previewPair.agent2Id)
+        ? this._cameraTarget
+        : null;
+    if (currentTarget === agentId) {
+      if (this.pendingIdlePreparationActivityTarget === agentId) {
+        this.pendingIdlePreparationActivityTarget = null;
+      }
+      return false;
+    }
+
+    if (
+      currentTarget &&
+      now - this.lastCameraSwitchTime <
+        CAMERA_DIRECTOR.idle.holdByActivity.idle.minHoldMs
+    ) {
+      this.pendingIdlePreparationActivityTarget = agentId;
+      return false;
+    }
+
+    this.pendingIdlePreparationActivityTarget = null;
+    this.setCameraTarget(agentId, now);
+    return true;
+  }
+
+  clearIdlePreparationActivityCut(): void {
+    this.pendingIdlePreparationActivityTarget = null;
+  }
+
   syncIdlePreviewAndCamera(now: number): void {
     const previewPair = this.resolveIdlePreviewPair(now);
     const onDeckIds = new Set<string>();
@@ -1150,9 +1206,43 @@ export class CameraDirector {
       onDeckIds.add(previewPair.agent2Id);
     }
 
-    const currentTarget = this.isAgentValidCameraCandidate(this._cameraTarget)
+    let currentTarget = this.isAgentValidCameraCandidate(this._cameraTarget)
       ? this._cameraTarget
       : null;
+    const hasExactOnDeckPair = previewPair !== null && onDeckIds.size === 2;
+
+    if (!hasExactOnDeckPair) {
+      this.pendingIdlePreparationActivityTarget = null;
+    } else if (this.pendingIdlePreparationActivityTarget) {
+      const pendingTarget = this.pendingIdlePreparationActivityTarget;
+      if (
+        !onDeckIds.has(pendingTarget) ||
+        !this.isAgentValidCameraCandidate(pendingTarget)
+      ) {
+        this.pendingIdlePreparationActivityTarget = null;
+      } else if (currentTarget === pendingTarget) {
+        this.pendingIdlePreparationActivityTarget = null;
+      } else if (
+        currentTarget &&
+        now - this.lastCameraSwitchTime >=
+          CAMERA_DIRECTOR.idle.holdByActivity.idle.minHoldMs
+      ) {
+        this.pendingIdlePreparationActivityTarget = null;
+        this.setCameraTarget(pendingTarget, now);
+        return;
+      }
+    }
+
+    // Preparation coverage is pair-bound. Never retain a bystander merely
+    // because its generic IDLE hold has not elapsed; that produces an overlay
+    // about one matchup over footage of somebody else.
+    if (
+      hasExactOnDeckPair &&
+      (!currentTarget || !onDeckIds.has(currentTarget))
+    ) {
+      this.setCameraTarget(previewPair.agent1Id, now);
+      currentTarget = previewPair.agent1Id;
+    }
 
     // No current target — pick the best candidate immediately
     if (!currentTarget) {
@@ -1171,7 +1261,9 @@ export class CameraDirector {
     // Determine hold timing based on what the current target is doing.
     // Idle agents get switched off fast; agents in combat get long holds.
     const currentActivity = this.classifyAgentActivity(currentTarget);
-    const holdTiming = CAMERA_DIRECTOR.idle.holdByActivity[currentActivity];
+    const holdTiming = hasExactOnDeckPair
+      ? CAMERA_DIRECTOR.idle.holdByActivity.idle
+      : CAMERA_DIRECTOR.idle.holdByActivity[currentActivity];
     const msSinceSwitch = now - this.lastCameraSwitchTime;
     const canSwitch = msSinceSwitch >= holdTiming.minHoldMs;
     const forceSwitch = msSinceSwitch >= holdTiming.maxHoldMs;
@@ -1185,12 +1277,16 @@ export class CameraDirector {
       now,
       currentTarget,
       onDeckIds,
+    ).filter(
+      (candidate) => !hasExactOnDeckPair || onDeckIds.has(candidate.agentId),
     );
     if (candidates.length <= 1) {
       return;
     }
 
-    let selected = this.chooseWeightedCameraCandidate(candidates);
+    let selected = hasExactOnDeckPair
+      ? this.selectHighestWeightCameraCandidate(candidates)
+      : this.chooseWeightedCameraCandidate(candidates);
     if (!selected) {
       return;
     }
@@ -1202,9 +1298,11 @@ export class CameraDirector {
       candidates.length > 1
     ) {
       const alternatives = candidates.filter(
-        (c) => c.agentId !== currentTarget,
+        (candidate) => candidate.agentId !== currentTarget,
       );
-      const alt = this.chooseWeightedCameraCandidate(alternatives);
+      const alt = hasExactOnDeckPair
+        ? this.selectHighestWeightCameraCandidate(alternatives)
+        : this.chooseWeightedCameraCandidate(alternatives);
       if (alt) selected = alt;
     }
 
@@ -1230,7 +1328,8 @@ export class CameraDirector {
       selectedIsStronger ||
       (currentIsIdle &&
         selected.activityScore >= currentCandidate.activityScore) ||
-      Math.random() < CAMERA_DIRECTOR.idle.switchRandomChance;
+      (!hasExactOnDeckPair &&
+        Math.random() < CAMERA_DIRECTOR.idle.switchRandomChance);
 
     if (shouldSwitch) {
       this.setCameraTarget(selected.agentId, now);

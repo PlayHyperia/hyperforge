@@ -391,10 +391,24 @@ export function handleCharacterSelected(
   sendToFn: (socketId: string, name: string, data: unknown) => void,
 ): void {
   const payload = (data as { characterId?: string }) || {};
+  const credentialCharacterId = socket.agentCredentialCharacterId;
+  if (
+    credentialCharacterId &&
+    payload.characterId &&
+    payload.characterId !== credentialCharacterId
+  ) {
+    socket.selectedCharacterId = undefined;
+    sendToFn(socket.id, "enterWorldRejected", {
+      reason: "credential_character_mismatch",
+      message: "This agent credential cannot select that character.",
+    });
+    return;
+  }
   // Store selection in socket for subsequent enterWorld
-  socket.selectedCharacterId = payload.characterId || undefined;
+  socket.selectedCharacterId =
+    payload.characterId || credentialCharacterId || undefined;
   sendToFn(socket.id, "characterSelected", {
-    characterId: payload.characterId || null,
+    characterId: socket.selectedCharacterId || null,
   });
 }
 
@@ -487,7 +501,16 @@ export async function handleEnterWorld(
     payload.characterId ||
     socket.selectedCharacterId ||
     socket.characterId ||
+    socket.agentCredentialCharacterId ||
     null;
+  const credentialCharacterId = socket.agentCredentialCharacterId;
+  if (credentialCharacterId && characterId !== credentialCharacterId) {
+    sendToFn(socket.id, "enterWorldRejected", {
+      reason: "credential_character_mismatch",
+      message: "This agent credential cannot enter as that character.",
+    });
+    return;
+  }
   // Only the connection handler may grant the local test bypass. Never trust
   // the packet flag by itself because this path can skip persistent identity.
   const isLoadTestBot = socket.isLoadTestBot === true;
@@ -505,6 +528,9 @@ export async function handleEnterWorld(
     characterId && getAgentRuntimeByCharacterId(characterId)
   );
   const agentIsDuelBot = isEmbeddedAgent || isModelAgent;
+  const isAuthenticatedAgent =
+    credentialCharacterId !== undefined &&
+    characterId === credentialCharacterId;
   const loadTestDuelBot =
     isLoadTestBot && (payload.duelBot === true || payload.duelBot === "true");
   const trustedAccountDuelBot =
@@ -734,35 +760,6 @@ export async function handleEnterWorld(
           characterData = characters.find((c) => c.id === characterId) || null;
         }
 
-        // Second try: If not found by accountId, look up character directly
-        // This handles agents where JWT verification may fail and create anonymous accountId
-        if (!characterData) {
-          console.log(
-            `[CharacterSelection] Character ${characterId} not found for account ${accountId}, trying direct lookup...`,
-          );
-
-          // Try to find the character directly by ID (any account)
-          // This is safe because the agent already has the characterId in its settings
-          const db = databaseSystem.getDb ? databaseSystem.getDb() : null;
-          if (db) {
-            // Use Drizzle query to find character by ID
-            const directLookup = await db.query.characters.findFirst({
-              where: (characters, { eq }) => eq(characters.id, characterId),
-            });
-            if (directLookup) {
-              characterData = directLookup as {
-                id: string;
-                name: string;
-                avatar?: string | null;
-                wallet?: string | null;
-              };
-              console.log(
-                `[CharacterSelection] ✅ Found character via direct lookup: ${characterData.name} (${characterId})`,
-              );
-            }
-          }
-        }
-
         if (characterData) {
           name = characterData.name;
           avatar = characterData.avatar || undefined;
@@ -799,6 +796,24 @@ export async function handleEnterWorld(
   if (!characterId) {
     console.warn(
       `[CharacterSelection] No characterId provided to enterWorld; using ephemeral socketId for bot spawn`,
+    );
+  }
+
+  // Projectile costs must be reconciled before any player state is read or
+  // published. A fired receipt needs an explicit resolution policy, so fail
+  // closed before terrain work, entity creation, timers, spatial registration,
+  // or PLAYER_JOINED can expose a partially hydrated player.
+  const dbSys = world.getSystem?.("database") as
+    DatabaseSystemOperations | undefined;
+  const custodyPersistenceId = characterId || entityId;
+  if (dbSys?.recoverPendingProjectileRuneCostOperationsAsync) {
+    await dbSys.recoverPendingProjectileRuneCostOperationsAsync(
+      custodyPersistenceId,
+    );
+  }
+  if (dbSys?.recoverPendingAmmunitionShotOperationsAsync) {
+    await dbSys.recoverPendingAmmunitionShotOperationsAsync(
+      custodyPersistenceId,
     );
   }
 
@@ -1014,9 +1029,11 @@ export async function handleEnterWorld(
   const spawnedPlayer = socket.player;
   if (spawnedPlayer) {
     socket.player.data.isLoading = true;
+    if (isAuthenticatedAgent || isDuelBot) {
+      socket.player.data.isAgent = true;
+    }
     if (isDuelBot) {
       socket.player.data.isDuelBot = true;
-      socket.player.data.isAgent = true;
     }
   }
 
@@ -1094,14 +1111,10 @@ export async function handleEnterWorld(
     // CRITICAL: Load equipment and inventory from DB BEFORE emitting PLAYER_JOINED
     // This ensures systems receive the data via event payload (single source of truth)
     // and eliminates the race condition where two systems query the DB independently
-    const dbSys = world.getSystem?.("database") as
-      DatabaseSystemOperations | undefined;
-    const persistenceId = characterId || spawnedPlayer.id;
-
     let equipmentRows: EquipmentSyncData[] | undefined;
     try {
       equipmentRows = dbSys?.getPlayerEquipmentAsync
-        ? await dbSys.getPlayerEquipmentAsync(persistenceId)
+        ? await dbSys.getPlayerEquipmentAsync(custodyPersistenceId)
         : undefined;
     } catch (err) {
       console.error("[CharacterSelection] ❌ Failed to load equipment:", err);
@@ -1112,7 +1125,7 @@ export async function handleEnterWorld(
     let inventoryRows: InventorySyncData[] | undefined;
     try {
       const rawRows = dbSys?.getPlayerInventoryAsync
-        ? await dbSys.getPlayerInventoryAsync(persistenceId)
+        ? await dbSys.getPlayerInventoryAsync(custodyPersistenceId)
         : undefined;
       // Transform to InventorySyncData format (slotIndex, itemId, quantity)
       inventoryRows = rawRows?.map((row) => ({
@@ -1151,7 +1164,7 @@ export async function handleEnterWorld(
       equipment: equipmentRows,
       inventory: inventoryRows,
       isLoadTestBot,
-      isAgent: isDuelBot,
+      isAgent: isAuthenticatedAgent || isDuelBot,
     });
 
     try {

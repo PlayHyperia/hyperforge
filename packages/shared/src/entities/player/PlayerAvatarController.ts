@@ -15,7 +15,10 @@
  */
 
 import * as THREE from "../../extras/three/three";
-import { Emotes } from "../../data/playerEmotes";
+import {
+  Emotes,
+  GATHERING_PRESENTATION_EMOTE_URLS,
+} from "../../data/playerEmotes";
 import { DEFAULT_AVATAR_URL } from "../../data/avatars";
 import { EventType } from "../../types/events";
 import type { ClientLoader, LoadedAvatar } from "../../types/index";
@@ -70,9 +73,7 @@ const EMOTE_MAP: Record<string, string> = {
   "2h_slash": Emotes.TWO_HAND_SLASH,
   range: Emotes.RANGE,
   spell_cast: Emotes.SPELL_CAST,
-  chopping: Emotes.CHOPPING,
-  mining: Emotes.CHOPPING, // Use chopping animation for mining (temporary)
-  fishing: Emotes.FISHING,
+  ...GATHERING_PRESENTATION_EMOTE_URLS,
   death: Emotes.DEATH,
   squat: Emotes.SQUAT, // Used for firemaking and cooking
   victory: Emotes.VICTORY, // Victory celebration (waving)

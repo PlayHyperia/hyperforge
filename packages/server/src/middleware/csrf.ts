@@ -198,6 +198,8 @@ export function registerCsrfProtection(fastify: FastifyInstance): void {
     // Generate new token
     const token = generateCsrfToken();
 
+    reply.header("Cache-Control", "no-store");
+
     // Set cookie with SameSite=Strict
     reply.header(
       "Set-Cookie",

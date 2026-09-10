@@ -78,7 +78,8 @@ jobs:
             libappindicator3-dev \
             librsvg2-dev \
             patchelf \
-            libglib2.0-dev
+            libglib2.0-dev \
+            ffmpeg
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
@@ -125,6 +126,23 @@ jobs:
           bun run assets:verify:preparation-topology
           bun run assets:verify:town-collision
 
+      - name: Verify stream media runtime and startup failures
+        run: |
+          bun run stream:runtime:test
+          bun run physics:runtime:test
+
+      - name: Verify browser stream resource accounting
+        run: |
+          bunx --no-install playwright install --with-deps chromium
+          bun run stream:browser-performance:test
+
+      - name: Verify duel equipment authority policy
+        run: |
+          bun run equipment:active-combat-orientation:test
+          bun run equipment:active-combat-orientation:check
+          bun run equipment:fit:test
+          bun run duel:smoke:policy:test
+
       - name: Setup database schema
         working-directory: packages/server
         run: bunx drizzle-kit push
@@ -149,6 +167,18 @@ jobs:
       - name: Verify processing action process-kill custody
         working-directory: packages/server
         run: bun run test:processing-action-chaos
+
+      - name: Verify external ElizaOS preparation process-kill fencing
+        working-directory: packages/server
+        run: bun run test:external-duel-preparation-host-lease-built-chaos
+
+      - name: Verify production agent WebSocket authentication, reconnect, and on-deck host loss
+        working-directory: packages/server
+        run: bun run test:agent-websocket-auth-built
+
+      - name: Verify fired projectile process and database crash custody
+        working-directory: packages/server
+        run: bun run test:projectile-cost-host-loss-chaos
 
   build:
     name: Build

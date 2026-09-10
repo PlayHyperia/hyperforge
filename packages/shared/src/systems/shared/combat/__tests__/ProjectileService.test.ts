@@ -60,7 +60,7 @@ describe("ProjectileService", () => {
       expect(projectile.arrowId).toBeUndefined();
     });
 
-    it("assigns unique ID to each projectile", () => {
+    it("assigns unique IDs even for the same pair committed on one tick", () => {
       const p1 = service.createProjectile({
         sourceId: "player-1",
         targetId: "mob-1",
@@ -73,15 +73,16 @@ describe("ProjectileService", () => {
 
       const p2 = service.createProjectile({
         sourceId: "player-1",
-        targetId: "mob-2", // Different target
+        targetId: "mob-1",
         attackType: AttackType.RANGED,
         damage: 10,
-        currentTick: 101, // Different tick
+        currentTick: 100,
         sourcePosition: { x: 0, z: 0 },
         targetPosition: { x: 5, z: 0 },
       });
 
       expect(p1.id).not.toBe(p2.id);
+      expect(service.getActiveCount()).toBe(2);
     });
 
     it("calculates hit tick based on distance and type", () => {
@@ -139,6 +140,77 @@ describe("ProjectileService", () => {
       });
 
       expect(service.getActiveCount()).toBe(2);
+    });
+  });
+
+  describe("projectile reservations", () => {
+    const params = (targetId: string) => ({
+      sourceId: "player-1",
+      targetId,
+      attackType: AttackType.RANGED,
+      damage: 10,
+      currentTick: 100,
+      sourcePosition: { x: 0, z: 0 },
+      targetPosition: { x: 5, z: 0 },
+    });
+
+    it("holds capacity across asynchronous admission and consumes it once", () => {
+      const reservations = Array.from({ length: 10 }, () =>
+        service.reserveProjectile("player-1", { x: 0, z: 0 }, { x: 5, z: 0 }),
+      );
+
+      expect(reservations.every(Boolean)).toBe(true);
+      expect(
+        service.reserveProjectile("player-1", { x: 0, z: 0 }, { x: 5, z: 0 }),
+      ).toBeNull();
+      expect(service.createProjectile(params("unreserved"))).toBeNull();
+
+      const reservation = reservations[0]!;
+      expect(
+        service.createReservedProjectile(reservation, params("mob-1")),
+      ).not.toBeNull();
+      expect(
+        service.createReservedProjectile(reservation, params("mob-2")),
+      ).toBeNull();
+      expect(service.getActiveCount()).toBe(1);
+    });
+
+    it("rejects mismatched geometry without consuming the lease", () => {
+      const reservation = service.reserveProjectile(
+        "player-1",
+        { x: 0, z: 0 },
+        { x: 5, z: 0 },
+      )!;
+
+      expect(
+        service.createReservedProjectile(reservation, {
+          ...params("mob-1"),
+          targetPosition: { x: 6, z: 0 },
+        }),
+      ).toBeNull();
+      expect(
+        service.createReservedProjectile(reservation, params("mob-1")),
+      ).not.toBeNull();
+    });
+
+    it("releases unused leases idempotently and clear drops every lease", () => {
+      const first = service.reserveProjectile(
+        "player-1",
+        { x: 0, z: 0 },
+        { x: 5, z: 0 },
+      )!;
+      expect(service.releaseProjectileReservation(first)).toBe(true);
+      expect(service.releaseProjectileReservation(first)).toBe(false);
+
+      const second = service.reserveProjectile(
+        "player-1",
+        { x: 0, z: 0 },
+        { x: 5, z: 0 },
+      )!;
+      service.clear();
+      expect(
+        service.createReservedProjectile(second, params("mob-1")),
+      ).toBeNull();
     });
   });
 
@@ -246,6 +318,33 @@ describe("ProjectileService", () => {
       expect(result.hits).toHaveLength(0);
       expect(result.remaining).toBe(0);
     });
+
+    it("returns an explicit terminal record when a projectile exceeds its lifetime", () => {
+      const projectile = service.createProjectile({
+        sourceId: "player-1",
+        targetId: "mob-1",
+        attackType: AttackType.RANGED,
+        damage: 10,
+        currentTick: 100,
+        sourcePosition: { x: 0, z: 0 },
+        targetPosition: { x: 5, z: 0 },
+      });
+
+      expect(projectile).not.toBeNull();
+      projectile!.hitsAtTick = Number.POSITIVE_INFINITY;
+      const result = service.processTick(121);
+
+      expect(result.hits).toHaveLength(0);
+      expect(result.expired).toEqual([
+        expect.objectContaining({
+          id: projectile!.id,
+          attackerId: "player-1",
+          targetId: "mob-1",
+          cancelled: true,
+        }),
+      ]);
+      expect(result.remaining).toBe(0);
+    });
   });
 
   describe("cancelProjectilesForTarget", () => {
@@ -273,6 +372,28 @@ describe("ProjectileService", () => {
       const cancelled = service.cancelProjectilesForTarget("mob-1");
 
       expect(cancelled).toBe(2);
+    });
+
+    it("reports each exact projectile before removing it", () => {
+      const projectile = service.createProjectile({
+        sourceId: "player-1",
+        targetId: "mob-1",
+        attackType: AttackType.RANGED,
+        damage: 10,
+        currentTick: 100,
+        sourcePosition: { x: 0, z: 0 },
+        targetPosition: { x: 5, z: 0 },
+        arrowId: "bronze_arrow",
+      });
+      const observed: string[] = [];
+
+      service.cancelProjectilesForTarget("mob-1", (cancelled) => {
+        observed.push(cancelled.id);
+        expect(service.getProjectile(cancelled.id)).toBe(cancelled);
+      });
+
+      expect(observed).toEqual([projectile?.id]);
+      expect(service.getProjectile(projectile!.id)).toBeUndefined();
     });
 
     it("returns 0 when no projectiles for target", () => {
@@ -306,6 +427,39 @@ describe("ProjectileService", () => {
 
       expect(service.getActiveCount()).toBe(1); // Cancelled projectile removed immediately
       expect(service.getProjectilesForTarget("mob-2")).toHaveLength(1);
+    });
+  });
+
+  describe("cancelProjectile", () => {
+    it("cancels only the exact identity and notifies before removal", () => {
+      const first = service.createProjectile({
+        sourceId: "player-1",
+        targetId: "mob-1",
+        attackType: AttackType.RANGED,
+        damage: 10,
+        currentTick: 100,
+        sourcePosition: { x: 0, z: 0 },
+        targetPosition: { x: 5, z: 0 },
+      })!;
+      const second = service.createProjectile({
+        sourceId: "player-1",
+        targetId: "mob-1",
+        attackType: AttackType.RANGED,
+        damage: 10,
+        currentTick: 100,
+        sourcePosition: { x: 0, z: 0 },
+        targetPosition: { x: 5, z: 0 },
+      })!;
+
+      expect(
+        service.cancelProjectile(first.id, (projectile) => {
+          expect(projectile).toBe(first);
+          expect(service.getProjectile(first.id)).toBe(first);
+        }),
+      ).toBe(true);
+      expect(service.cancelProjectile(first.id)).toBe(false);
+      expect(service.getProjectile(first.id)).toBeUndefined();
+      expect(service.getProjectile(second.id)).toBe(second);
     });
   });
 
@@ -386,6 +540,47 @@ describe("ProjectileService", () => {
       expect(service.getActiveCount()).toBe(2);
       expect(service.getProjectilesForTarget("player-3")).toHaveLength(1);
       expect(service.getProjectilesForTarget("player-2")).toHaveLength(1);
+    });
+  });
+
+  describe("hasActiveProjectilesBetween", () => {
+    it("tracks either direction for only the exact unresolved pair", () => {
+      service.createProjectile({
+        sourceId: "player-2",
+        targetId: "player-1",
+        attackType: AttackType.RANGED,
+        damage: 10,
+        currentTick: 100,
+        sourcePosition: { x: 0, z: 0 },
+        targetPosition: { x: 2, z: 0 },
+      });
+      service.createProjectile({
+        sourceId: "player-1",
+        targetId: "player-3",
+        attackType: AttackType.MAGIC,
+        damage: 8,
+        currentTick: 100,
+        sourcePosition: { x: 0, z: 0 },
+        targetPosition: { x: 2, z: 0 },
+      });
+
+      expect(service.hasActiveProjectilesBetween("player-1", "player-2")).toBe(
+        true,
+      );
+      expect(service.hasActiveProjectilesBetween("player-1", "player-4")).toBe(
+        false,
+      );
+
+      service.cancelProjectilesBetween("player-1", "player-2");
+      expect(service.hasActiveProjectilesBetween("player-1", "player-2")).toBe(
+        false,
+      );
+      expect(service.hasActiveProjectilesBetween("player-1", "player-3")).toBe(
+        true,
+      );
+      expect(service.hasActiveProjectilesBetween("player-1", "player-1")).toBe(
+        false,
+      );
     });
   });
 
@@ -674,6 +869,65 @@ describe("ProjectileService", () => {
       // Cancel one target's projectiles
       service.cancelProjectilesForTarget("mob-1");
       expect(service.getActiveCountForAttacker("player-1")).toBe(1);
+    });
+  });
+
+  describe("lifecycle diagnostics", () => {
+    it("reconciles every accepted launch to a hit, cancellation, or expiry", () => {
+      const hit = service.createProjectile({
+        sourceId: "player-1",
+        targetId: "mob-hit",
+        attackType: AttackType.RANGED,
+        damage: 5,
+        currentTick: 100,
+        sourcePosition: { x: 0, z: 0 },
+        targetPosition: { x: 1, z: 0 },
+      })!;
+      const cancelled = service.createProjectile({
+        sourceId: "player-1",
+        targetId: "mob-cancelled",
+        attackType: AttackType.RANGED,
+        damage: 5,
+        currentTick: 100,
+        sourcePosition: { x: 0, z: 0 },
+        targetPosition: { x: 1, z: 0 },
+      })!;
+      const expired = service.createProjectile({
+        sourceId: "player-2",
+        targetId: "mob-expired",
+        attackType: AttackType.RANGED,
+        damage: 5,
+        currentTick: 100,
+        sourcePosition: { x: 0, z: 0 },
+        targetPosition: { x: 1, z: 0 },
+      })!;
+      expired.hitsAtTick = 999;
+
+      service.cancelProjectilesForTarget("mob-cancelled");
+      service.processTick(hit.hitsAtTick);
+      service.processTick(121);
+
+      const diagnostics = service.getLifecycleDiagnostics();
+      expect(diagnostics).toMatchObject({
+        active: 0,
+        launched: 3,
+        hit: 1,
+        cancelled: 1,
+        expired: 1,
+        latestSequence: 6,
+      });
+      expect(
+        diagnostics.recent.map(({ kind, projectileId }) => ({
+          kind,
+          projectileId,
+        })),
+      ).toEqual(
+        expect.arrayContaining([
+          { kind: "hit", projectileId: hit.id },
+          { kind: "cancelled", projectileId: cancelled.id },
+          { kind: "expired", projectileId: expired.id },
+        ]),
+      );
     });
   });
 

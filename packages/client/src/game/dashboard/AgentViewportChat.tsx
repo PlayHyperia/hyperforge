@@ -1,4 +1,5 @@
 import { GAME_API_URL } from "@/lib/api-config";
+import { getApiAuthorizationHeaders } from "@/lib/api-client";
 import {
   formatDashboardAgentReply,
   formatDashboardAgentReplyMetaLine,
@@ -240,6 +241,7 @@ export const AgentViewportChat: React.FC<AgentViewportChatProps> = ({
           // Fallback: mapping endpoint
           const mappingResponse = await fetch(
             `${GAME_API_URL}/api/agents/mapping/${requestedAgentId}`,
+            { headers: getApiAuthorizationHeaders() },
           );
           if (!stillThisAgent()) return;
           if (mappingResponse.ok) {

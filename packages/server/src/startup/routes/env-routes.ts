@@ -71,11 +71,6 @@ export function registerEnvRoutes(
 ): void {
   const publicEnvs = resolvePublicRuntimeEnvs(config);
 
-  // Expose plugin paths to client for systems loading
-  if (config.systemsPath) {
-    publicEnvs["PLUGIN_PATH"] = config.systemsPath;
-  }
-
   const envsCode = `
   if (!globalThis.env) globalThis.env = {}
   globalThis.env = ${JSON.stringify(publicEnvs)}

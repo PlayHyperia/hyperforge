@@ -74,6 +74,10 @@ export {
 import type { World } from "@hyperforge/shared";
 import { AgentManager, setAgentManager } from "./AgentManager.js";
 import { spawnModelAgents, getAvailableModels } from "./ModelAgentSpawner.js";
+import {
+  isExplicitlyEnabled,
+  resolveAgentPopulationPolicy,
+} from "./agentPopulationPolicy.js";
 
 /**
  * Server configuration type (partial, for what we need)
@@ -84,6 +88,8 @@ interface ServerConfig {
   spawnModelAgents?: boolean;
   /** Maximum number of model agents to spawn */
   maxModelAgents?: number;
+  /** Deliberately allow both lifecycle authorities in one process. */
+  spawnModelAgentsWithEmbedded?: boolean;
   /** Specific providers backed by pinned launch plugins. */
   modelProviders?: Array<"openai" | "anthropic" | "groq">;
 }
@@ -126,12 +132,25 @@ export async function initializeAgents(
     process.env.NODE_ENV === "production" || streamingDuelEnabled;
   const spawnRequested =
     config?.spawnModelAgents ?? spawnRequestedByEnv ?? defaultSpawnModelAgents;
-  // Model agents (spawned via spawnModelAgents) are a separate system from
-  // embedded agents (loaded from database via AgentManager). Previously,
-  // stale isAgent=1 records from prior runs would set embeddedAgentCount > 0,
-  // silently blocking model agent spawning. Model agents manage their own
-  // deduplication via runningAgents Map, so this gate is unnecessary.
-  const shouldSpawnAgents = spawnRequested;
+  const embeddedAgentCount = manager.getAllAgents().length;
+  const allowModelAgentsWithEmbedded =
+    config?.spawnModelAgentsWithEmbedded ??
+    isExplicitlyEnabled(process.env.SPAWN_MODEL_AGENTS_WITH_EMBEDDED);
+  const populationDecision = resolveAgentPopulationPolicy({
+    embeddedAgentCount,
+    spawnModelAgentsRequested: spawnRequested,
+    allowModelAgentsWithEmbedded,
+  });
+  const shouldSpawnAgents = populationDecision.spawnModelAgents;
+
+  if (
+    spawnRequested &&
+    populationDecision.reason === "embedded_population_active"
+  ) {
+    console.info(
+      `[AgentManager] Suppressed the legacy model-agent population because ${embeddedAgentCount} persisted embedded agent(s) are active. Set SPAWN_MODEL_AGENTS_WITH_EMBEDDED=true only for an explicitly reviewed mixed-population diagnostic.`,
+    );
+  }
 
   if (shouldSpawnAgents) {
     const availableModels = getAvailableModels();

@@ -1,0 +1,55 @@
+{
+  "schemaVersion": 1,
+  "title": "Hyperia Steve small fishing net deploy and retrieval review",
+  "framing": "avatar-and-equipment",
+  "motions": [
+    {
+      "id": "net-windup",
+      "name": "Net deploy · windup",
+      "asset": "artifacts/duel-launch-avatar-bakeoff/motions/steve-fishing-interactions/steve-small-fishing-net-release.glb",
+      "sampleRatio": 0.1
+    },
+    {
+      "id": "net-early-release",
+      "name": "Net deploy · early release",
+      "asset": "artifacts/duel-launch-avatar-bakeoff/motions/steve-fishing-interactions/steve-small-fishing-net-release.glb",
+      "sampleRatio": 0.35
+    },
+    {
+      "id": "net-release",
+      "name": "Net deploy · release",
+      "asset": "artifacts/duel-launch-avatar-bakeoff/motions/steve-fishing-interactions/steve-small-fishing-net-release.glb",
+      "sampleRatio": 0.65
+    },
+    {
+      "id": "net-recovery",
+      "name": "Net deploy · recovery",
+      "asset": "artifacts/duel-launch-avatar-bakeoff/motions/steve-fishing-interactions/steve-small-fishing-net-release.glb",
+      "sampleRatio": 0.9
+    },
+    {
+      "id": "net-retrieve-approach",
+      "name": "Net retrieve · approach",
+      "asset": "artifacts/duel-launch-avatar-bakeoff/motions/steve-fishing-interactions/steve-fishing-retrieve.glb",
+      "sampleRatio": 0.1
+    },
+    {
+      "id": "net-retrieve-contact",
+      "name": "Net retrieve · water contact",
+      "asset": "artifacts/duel-launch-avatar-bakeoff/motions/steve-fishing-interactions/steve-fishing-retrieve.glb",
+      "sampleRatio": 0.35
+    },
+    {
+      "id": "net-retrieve-lift",
+      "name": "Net retrieve · lift",
+      "asset": "artifacts/duel-launch-avatar-bakeoff/motions/steve-fishing-interactions/steve-fishing-retrieve.glb",
+      "sampleRatio": 0.65
+    },
+    {
+      "id": "net-retrieve-standing",
+      "name": "Net retrieve · standing carry",
+      "asset": "artifacts/duel-launch-avatar-bakeoff/motions/steve-fishing-interactions/steve-fishing-retrieve.glb",
+      "sampleRatio": 0.9
+    }
+  ]
+}

@@ -8,6 +8,7 @@ import type {
   PrayerStateCommitRequest,
   PrayerStateCommitReceipt,
 } from "../../../../types/network/database";
+import type { StreamingDuelPrayerObservationContext } from "../../../../types/game/streaming-duel-action-observation";
 import { EventBus } from "../../infrastructure/EventBus";
 import { PRAYER_POINT_UNITS_PER_POINT, PrayerSystem } from "../PrayerSystem";
 
@@ -39,6 +40,7 @@ function createFixture(initial: PrayerPersistenceSnapshot): {
     commitPrayerStateOperationAsync: ReturnType<typeof vi.fn>;
   };
   persisted: () => PrayerPersistenceSnapshot;
+  setPersisted: (snapshot: PrayerPersistenceSnapshot) => void;
   commitNormally: (
     request: PrayerStateCommitRequest,
   ) => Promise<PrayerStateCommitReceipt>;
@@ -125,6 +127,9 @@ function createFixture(initial: PrayerPersistenceSnapshot): {
     world,
     database,
     persisted: () => structuredClone(persisted),
+    setPersisted: (snapshot) => {
+      persisted = structuredClone(snapshot);
+    },
     commitNormally,
   };
 }
@@ -208,6 +213,111 @@ afterEach(() => {
 });
 
 describe("PrayerSystem atomic custody", () => {
+  it("reloads current Prayer state after a committed quest reward instead of applying a stale snapshot", async () => {
+    const fixture = createFixture({
+      pointUnits: 1_000_000,
+      maxPoints: 1,
+      activePrayers: [],
+    });
+    const system = await initialize(fixture.world);
+    fixture.database.getPlayerAsync.mockClear();
+    fixture.setPersisted({
+      pointUnits: 3_000_000,
+      maxPoints: 3,
+      activePrayers: [],
+    });
+
+    fixture.world.$eventBus.emitEvent(EventType.QUEST_COMPLETION_COMMITTED, {
+      playerId: PLAYER_ID,
+      questId: "prayer_reward_quest",
+      operationId: `quest-completion:${"a".repeat(64)}`,
+      replayed: false,
+      progress: [
+        {
+          skill: "prayer",
+          xpAmount: 100,
+          awardedXp: 100,
+          operationCommittedXp: 100,
+          currentXp: 100,
+          currentLevel: 2,
+        },
+      ],
+      prayer: {
+        pointUnits: 2_000_000,
+        maxPoints: 2,
+        activePrayers: [],
+      },
+    });
+    await vi.waitFor(() =>
+      expect(fixture.database.getPlayerAsync).toHaveBeenCalledOnce(),
+    );
+    await system.waitForPrayerIdle(PLAYER_ID);
+    expect(system.getPrayerPoints(PLAYER_ID)).toBe(3);
+    expect(system.getMaxPrayerPoints(PLAYER_ID)).toBe(3);
+    system.destroy();
+  });
+
+  it("binds an exact duel prayer observation to the atomic toggle request", async () => {
+    const fixture = createFixture({
+      pointUnits: 99_000_000,
+      maxPoints: 99,
+      activePrayers: [],
+    });
+    const system = await initialize(fixture.world);
+    const context = {
+      operationId: "00000000-0000-4000-8000-000000000011",
+      tick: 7,
+      observedAt: 1_725_000_000_100,
+      cycleId: "cycle-prayer",
+      duelId: "duel-prayer",
+      actorId: PLAYER_ID,
+      opponentId: "prayer-opponent",
+      phase: "FIGHTING",
+      combatRole: "ranged",
+      tacticalMacro: "kite",
+      prayer: "hawk_eye",
+    } as const satisfies StreamingDuelPrayerObservationContext;
+
+    const receipt = await system.togglePrayer(
+      PLAYER_ID,
+      "hawk_eye",
+      "atomic-duel-prayer",
+      context,
+    );
+
+    expect(receipt).toMatchObject({
+      success: true,
+      committed: true,
+      activePrayers: ["hawk_eye"],
+    });
+    expect(
+      fixture.database.commitPrayerStateOperationAsync,
+    ).toHaveBeenCalledWith(
+      expect.objectContaining({
+        operationId: "atomic-duel-prayer",
+        playerId: PLAYER_ID,
+        transition: "toggle",
+        publicActionObservation: context,
+      }),
+    );
+
+    const invalid = await system.togglePrayer(
+      PLAYER_ID,
+      "mystic_lore",
+      "invalid-duel-prayer",
+      { ...context, actorId: "another-player", prayer: "mystic_lore" },
+    );
+    expect(invalid).toMatchObject({
+      success: false,
+      committed: false,
+      reason: "invalid_request",
+    });
+    expect(
+      fixture.database.commitPrayerStateOperationAsync,
+    ).toHaveBeenCalledTimes(1);
+    system.destroy();
+  });
+
   it("retains authored ranged and magic bonuses after authoritative hydration", async () => {
     const fixture = createFixture({
       pointUnits: 99_000_000,
@@ -295,6 +405,39 @@ describe("PrayerSystem atomic custody", () => {
 
     expect(rejected.reason).toBe("level_requirement");
     expect(accepted.success).toBe(true);
+    expect(
+      fixture.database.commitPrayerStateOperationAsync,
+    ).toHaveBeenCalledTimes(1);
+    system.destroy();
+  });
+
+  it("uses persisted prayer custody when the production entity projection has no top-level stats", async () => {
+    const fixture = createFixture({
+      pointUnits: 39_000_000,
+      maxPoints: 39,
+      activePrayers: [],
+    });
+    fixture.world.entities.get.mockReturnValue({
+      id: PLAYER_ID,
+      data: {
+        skills: {
+          prayer: { level: 39, xp: 0 },
+        },
+      },
+    });
+    const system = await initialize(fixture.world);
+
+    const receipt = await system.togglePrayer(
+      PLAYER_ID,
+      "mystic_lore",
+      "production-entity-level",
+    );
+
+    expect(receipt).toMatchObject({
+      success: true,
+      committed: true,
+      activePrayers: ["mystic_lore"],
+    });
     expect(
       fixture.database.commitPrayerStateOperationAsync,
     ).toHaveBeenCalledTimes(1);

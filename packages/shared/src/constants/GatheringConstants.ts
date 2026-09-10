@@ -62,6 +62,8 @@ export const GATHERING_CONSTANTS = {
   PROXIMITY_SEARCH_RADIUS: 15,
   /** Default interaction range for gathering (world units, legacy) */
   DEFAULT_INTERACTION_RANGE: 4.0,
+  /** Horizontal shore-to-water reach permitted for fishing interactions. */
+  FISHING_INTERACTION_RANGE: 4.0,
   /** Floating point tolerance for position comparison (classic MMORPG: any movement cancels) */
   POSITION_EPSILON: 0.01,
 
@@ -255,7 +257,9 @@ export const GATHERING_CONSTANTS = {
     /** Maximum distance to search for a new spot across a compact water body. */
     relocateRadius: 15,
     /** Keep a relocation visually distinct from the current position. */
-    relocateMinDistance: 5,
+    relocateMinDistance: 3.5,
+    /** Keep simultaneous pond interactions comfortably separated. */
+    shoreMinSpacing: 3.5,
   } as const,
 } as const;
 

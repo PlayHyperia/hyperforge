@@ -10,6 +10,69 @@ describe("EquipmentSystem player lifecycle", () => {
     vi.restoreAllMocks();
   });
 
+  it("does not expose the PLAYER_REGISTERED placeholder as hydrated equipment", async () => {
+    let releaseEquipmentLoad:
+      | ((
+          rows: Array<{ slotType: string; itemId: string; quantity: number }>,
+        ) => void)
+      | undefined;
+    const equipmentLoad = new Promise<
+      Array<{ slotType: string; itemId: string; quantity: number }>
+    >((resolve) => {
+      releaseEquipmentLoad = resolve;
+    });
+    const eventBus = new EventBus();
+    const database = {
+      savePlayerEquipmentAsync: vi.fn(async () => undefined),
+      getPlayerEquipmentAsync: vi.fn(async () => equipmentLoad),
+    };
+    const world = {
+      $eventBus: eventBus,
+      isServer: true,
+      network: { send: vi.fn() },
+      getSystem: (name: string) => (name === "database" ? database : undefined),
+    };
+    vi.spyOn(dataManager, "getItem").mockImplementation((itemId: string) =>
+      itemId === "bronze_sword"
+        ? ({
+            id: itemId,
+            name: "Bronze Sword",
+            type: "weapon",
+            equipSlot: "weapon",
+          } as never)
+        : null,
+    );
+
+    const equipment = new EquipmentSystem(world as never);
+    await equipment.init();
+
+    // Embedded agents emit JOINED first, then REGISTERED while JOINED's
+    // database fallback is still pending.
+    eventBus.emitEvent(
+      EventType.PLAYER_JOINED,
+      { playerId: "agent-a" },
+      "test",
+    );
+    eventBus.emitEvent(
+      EventType.PLAYER_REGISTERED,
+      { playerId: "agent-a" },
+      "test",
+    );
+
+    expect(equipment.getPlayerEquipment("agent-a")?.weapon.itemId).toBeNull();
+    expect(equipment.isEquipmentReady("agent-a")).toBe(false);
+
+    releaseEquipmentLoad?.([
+      { slotType: "weapon", itemId: "bronze_sword", quantity: 1 },
+    ]);
+    await vi.waitFor(() => {
+      expect(equipment.isEquipmentReady("agent-a")).toBe(true);
+    });
+    expect(equipment.getPlayerEquipment("agent-a")?.weapon.itemId).toBe(
+      "bronze_sword",
+    );
+  });
+
   it("persists the exact direct-equipped ammunition quantity before returning", async () => {
     const eventBus = new EventBus();
     const database = {
@@ -701,6 +764,52 @@ describe("EquipmentSystem whole duel preparation plan", () => {
     },
   };
 
+  it("refreshes inventory and equipment from persistence under the per-player transaction queue", async () => {
+    const fixture = createPlanFixture();
+    const equipment = await initializePlanEquipment(fixture);
+    fixture.rawInventory.items = [
+      {
+        slot: 0,
+        itemId: "bronze_longsword",
+        quantity: 1,
+        item: fixture.items.get("bronze_longsword"),
+      },
+    ];
+    fixture.inventory.reloadFromDatabase.mockImplementation(async () => {
+      fixture.rawInventory.items = [
+        {
+          slot: 0,
+          itemId: "lobster",
+          quantity: 1,
+          item: fixture.items.get("lobster"),
+        },
+      ];
+    });
+    fixture.database.getPlayerEquipmentAsync.mockResolvedValue([
+      { slotType: "weapon", itemId: "shortbow", quantity: 1 },
+    ]);
+
+    await expect(
+      equipment.refreshOwnedDuelPreparationCustodyFromPersistence("agent-a"),
+    ).resolves.toBe(true);
+
+    expect(fixture.inventory.queueOperation).toHaveBeenCalledOnce();
+    expect(fixture.inventory.lockForTransaction).toHaveBeenCalledOnce();
+    expect(fixture.inventory.reloadFromDatabase).toHaveBeenCalledWith(
+      "agent-a",
+    );
+    expect(fixture.database.getPlayerEquipmentAsync).toHaveBeenCalledWith(
+      "agent-a",
+    );
+    expect(fixture.inventory.unlockTransaction).toHaveBeenCalledOnce();
+    expect(fixture.rawInventory.items).toEqual([
+      expect.objectContaining({ itemId: "lobster", quantity: 1 }),
+    ]);
+    expect(equipment.getPlayerEquipment("agent-a")?.weapon.itemId).toBe(
+      "shortbow",
+    );
+  });
+
   it("applies no live custody until one complete durable commit succeeds", async () => {
     let releaseCommit: ((receipt: any) => void) | undefined;
     const gate = new Promise<any>((resolve) => {
@@ -744,6 +853,44 @@ describe("EquipmentSystem whole duel preparation plan", () => {
     );
     expect(equipment.getPlayerEquipment("agent-a")?.arrows.quantity).toBe(50);
     expect(fixture.rawInventory.items).toHaveLength(2);
+  });
+
+  it("orders an older equipment save before the authoritative whole-plan commit", async () => {
+    let releaseSave!: () => void;
+    const saveGate = new Promise<void>((resolve) => {
+      releaseSave = resolve;
+    });
+    const fixture = createPlanFixture();
+    fixture.database.savePlayerEquipmentAsync.mockImplementationOnce(
+      async () => saveGate,
+    );
+    const equipment = await initializePlanEquipment(fixture);
+
+    const staleSave = (
+      equipment as unknown as {
+        saveEquipmentToDatabase(playerId: string): Promise<void>;
+      }
+    ).saveEquipmentToDatabase("agent-a");
+    await vi.waitFor(() =>
+      expect(fixture.database.savePlayerEquipmentAsync).toHaveBeenCalledOnce(),
+    );
+
+    const planCommit = equipment.commitOwnedDuelPreparationPlan(
+      "agent-a",
+      exactPlan,
+    );
+    await Promise.resolve();
+    expect(fixture.commit).not.toHaveBeenCalled();
+
+    releaseSave();
+    await staleSave;
+    await expect(planCommit).resolves.toMatchObject({ ok: true });
+    expect(
+      fixture.database.savePlayerEquipmentAsync.mock.invocationCallOrder[0],
+    ).toBeLessThan(fixture.commit.mock.invocationCallOrder[0]!);
+    expect(equipment.getPlayerEquipment("agent-a")?.weapon.itemId).toBe(
+      "shortbow",
+    );
   });
 
   it("replays the identical operation once after an ambiguous commit response", async () => {
@@ -851,6 +998,27 @@ describe("EquipmentSystem whole duel preparation plan", () => {
     ).resolves.toMatchObject({
       ok: false,
       reason: "persistence_failed",
+      changed: false,
+      replayed: false,
+    });
+    expect(fixture.commit).toHaveBeenCalledOnce();
+    expect(equipment.getPlayerEquipment("agent-a")?.weapon.itemId).toBe(
+      "bronze_longsword",
+    );
+    expect(fixture.rawInventory.items).toEqual([]);
+  });
+
+  it("treats cancellation winning an in-flight plan commit as capability revocation", async () => {
+    const fixture = createPlanFixture(async () => {
+      throw new Error("duel_preparation_plan_preparation_not_active");
+    });
+    const equipment = await initializePlanEquipment(fixture);
+
+    await expect(
+      equipment.commitOwnedDuelPreparationPlan("agent-a", exactPlan),
+    ).resolves.toMatchObject({
+      ok: false,
+      reason: "preparation_capability_unavailable",
       changed: false,
       replayed: false,
     });
@@ -1233,6 +1401,50 @@ describe("EquipmentSystem frozen combat loadout switching", () => {
         },
       ]),
     );
+  });
+
+  it("binds an exact duel role observation to the atomic loadout request", async () => {
+    const fixture = createSwitchFixture();
+    const equipment = await initializeSwitchEquipment(fixture);
+    const context = {
+      operationId: "00000000-0000-4000-8000-000000000021",
+      tick: 9,
+      observedAt: 1_725_000_000_300,
+      cycleId: "cycle-role",
+      duelId: "duel-role",
+      actorId: "agent-a",
+      opponentId: "agent-b",
+      phase: "FIGHTING" as const,
+      combatRole: "melee" as const,
+      tacticalMacro: "pressure" as const,
+      targetRole: "ranged" as const,
+    };
+    const request = {
+      ...rangedRequest,
+      requestFingerprint: "a".repeat(64),
+      publicActionObservation: context,
+    };
+
+    await expect(
+      equipment.switchOwnedCombatLoadout("agent-a", request),
+    ).resolves.toMatchObject({ ok: true, targetRole: "ranged" });
+    expect(fixture.commit).toHaveBeenCalledWith(
+      expect.objectContaining({ publicActionObservation: context }),
+    );
+
+    const invalidFixture = createSwitchFixture();
+    const invalidEquipment = await initializeSwitchEquipment(invalidFixture);
+    await expect(
+      invalidEquipment.switchOwnedCombatLoadout("agent-a", {
+        ...request,
+        operationId: "cycle-role:invalid",
+        publicActionObservation: { ...context, actorId: "wrong-agent" },
+      }),
+    ).resolves.toMatchObject({
+      ok: false,
+      reason: "target_loadout_invalid",
+    });
+    expect(invalidFixture.commit).not.toHaveBeenCalled();
   });
 
   it("atomically replaces every frozen non-shield armor slot with conserved owned custody", async () => {

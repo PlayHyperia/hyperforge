@@ -141,8 +141,9 @@ function getInventoryQuantity(items: InventoryItem[], itemId: string): number {
 /**
  * Derive a conservative private carry manifest from authored item metadata and
  * live state. Unknown items fail closed into retention. Combat gear, exact
- * quest inputs, switching consumables, one best gathering tool per skill, and
- * one complete health bar of food are never silently bulk-banked.
+ * quest inputs, switching consumables, every non-substitutable gathering tool
+ * tied at the best authored priority for its skill, and one complete health
+ * bar of food are never silently bulk-banked.
  */
 export function buildExternalBankRetentionManifest(
   service: HyperiaService,
@@ -165,7 +166,10 @@ export function buildExternalBankRetentionManifest(
     );
   };
 
-  const bestTools = new Map<string, { itemId: string; priority: number }>();
+  const bestTools = new Map<
+    string,
+    { itemIds: Set<string>; priority: number }
+  >();
   for (const [itemId, quantity] of owned) {
     const definition = getItemEntry(itemId);
     if (!definition) {
@@ -178,16 +182,13 @@ export function buildExternalBankRetentionManifest(
         continue;
       }
       const current = bestTools.get(definition.tool.skill);
-      if (
-        !current ||
-        definition.tool.priority < current.priority ||
-        (definition.tool.priority === current.priority &&
-          itemId.localeCompare(current.itemId) < 0)
-      ) {
+      if (!current || definition.tool.priority < current.priority) {
         bestTools.set(definition.tool.skill, {
-          itemId,
+          itemIds: new Set([itemId]),
           priority: definition.tool.priority,
         });
+      } else if (definition.tool.priority === current.priority) {
+        current.itemIds.add(itemId);
       }
       continue;
     }
@@ -201,7 +202,13 @@ export function buildExternalBankRetentionManifest(
       retain(itemId, quantity);
     }
   }
-  for (const tool of bestTools.values()) retain(tool.itemId, 1);
+  for (const tool of bestTools.values()) {
+    for (const itemId of [...tool.itemIds].sort((left, right) =>
+      left.localeCompare(right),
+    )) {
+      retain(itemId, 1);
+    }
+  }
 
   const state = service.getGameState();
   for (const quest of state.quests) {

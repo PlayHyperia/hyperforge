@@ -10,10 +10,14 @@ import type {
 } from "../../../src/oracle/types.js";
 import type { World } from "@hyperforge/shared";
 
-vi.mock("@hyperforge/shared", () => ({
-  AVATAR_OPTIONS: [{ id: "steve", url: "/avatars/steve.vrm" }],
-  DEFAULT_AVATAR_URL: "/avatars/steve.vrm",
-}));
+vi.mock("@hyperforge/shared", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@hyperforge/shared")>();
+  return {
+    ...actual,
+    AVATAR_OPTIONS: [{ id: "steve", url: "/avatars/steve.vrm" }],
+    DEFAULT_AVATAR_URL: "/avatars/steve.vrm",
+  };
+});
 
 vi.mock("@solana/web3.js", async () => ({
   Connection: vi.fn(),

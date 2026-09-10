@@ -11,15 +11,29 @@ const rootDir = path.resolve(
 
 const explicitFiles = [
   ".env.example",
+  "ecosystem.config.cjs",
   "scripts/duel-stack.mjs",
   "scripts/duel-stack-topology.mjs",
+  "scripts/smoke-duel-launch.mjs",
   "scripts/test-duel-stack-hyperbet-backend.mjs",
   "scripts/verify-duel-oracle-local.mjs",
+  "scripts/verify-duel-stack.mjs",
   "scripts/configure-r2-cors.sh",
   "docs/duel-stack.md",
   "docs/duel-arena-oracle-deploy.md",
+  "packages/app/.env.e2e",
   "packages/server/.env.example",
+  "packages/server/scripts/capture-browser-host.ts",
+  "packages/server/scripts/generate-betting-feed-schema-v3-fixtures.ts",
+  "packages/server/scripts/generate-duel-oracle-wallets.ts",
+  "packages/server/scripts/run-agent-duel-bet-sync-service.ts",
+  "packages/server/scripts/stream-to-rtmp.ts",
   "packages/server/src/database/schema.ts",
+  "packages/server/src/routes/streaming-runtime-alert-config.ts",
+  "packages/server/src/routes/streaming-runtime-alerts.ts",
+  "packages/server/src/streaming/streaming-alert-route-probe.ts",
+  "packages/server/scripts/probe-streaming-alert-route.ts",
+  "packages/server/package.json",
   "packages/server/src/startup/http-server.ts",
   "packages/server/src/middleware/csrf.ts",
   "packages/website/.env.example",
@@ -33,10 +47,17 @@ const explicitFiles = [
 
 const recursiveDirectories = [
   "packages/server/src/oracle",
+  "packages/server/src/routes",
+  "packages/server/src/streaming",
+  "packages/server/src/systems/DuelScheduler",
+  "packages/server/src/systems/DuelSystem",
+  "packages/server/src/systems/StreamingDuelScheduler",
   "packages/client/src/components/streaming",
 ];
 
 const allowedExtensions = new Set([".ts", ".tsx", ".js", ".mjs", ".md"]);
+const excludedDirectoryNames = new Set(["__tests__"]);
+const excludedTestFilenamePattern = /\.(?:test|spec)\.[^.]+$/;
 
 function collectFiles(directory) {
   const absoluteDirectory = path.resolve(rootDir, directory);
@@ -48,8 +69,12 @@ function collectFiles(directory) {
   })) {
     const relativePath = path.join(directory, entry.name);
     if (entry.isDirectory()) {
+      if (excludedDirectoryNames.has(entry.name)) continue;
       files.push(...collectFiles(relativePath));
-    } else if (allowedExtensions.has(path.extname(entry.name))) {
+    } else if (
+      allowedExtensions.has(path.extname(entry.name)) &&
+      !excludedTestFilenamePattern.test(entry.name)
+    ) {
       files.push(relativePath);
     }
   }
@@ -72,7 +97,7 @@ const forbiddenRules = [
   {
     name: "retired betting-token vocabulary",
     pattern:
-      /\b(?:GOLD|USDC)\b|\$GOLD|goldAmount|goldBalance|goldHoldDays|FeeGold|GOLD_(?:MINT|TOKEN)|SOLANA_GOLD|DUEL_SOLANA_GOLD/,
+      /\b(?:GOLD|USDC)\b|\$GOLD|gold(?:Amount|Balance|HoldDays|Mint|TokenAddress)|FeeGold|GOLD_(?:MINT|TOKEN|DECIMALS)|MARKET_MAKER_SEED_GOLD|SOLANA_GOLD|DUEL_SOLANA_GOLD/,
   },
   {
     name: "non-Solana duel-chain vocabulary",
@@ -145,6 +170,22 @@ for (const removedPath of removedWebsiteBettingPaths) {
   }
 }
 
+const retiredSharedTokenApiPath = "packages/shared/src/types/web3/index.ts";
+const retiredSharedTokenApiSource = fs.readFileSync(
+  path.resolve(rootDir, retiredSharedTokenApiPath),
+  "utf8",
+);
+for (const retiredField of ["goldTokenAddress", "goldBalance"]) {
+  if (retiredSharedTokenApiSource.includes(retiredField)) {
+    violations.push({
+      file: retiredSharedTokenApiPath,
+      rule: "retired shared betting-token API must remain absent",
+      line: 0,
+      text: retiredField,
+    });
+  }
+}
+
 const websitePackageJson = JSON.parse(
   fs.readFileSync(
     path.resolve(rootDir, "packages/website/package.json"),
@@ -182,6 +223,58 @@ for (const scriptName of ["duel-oracle:build", "duel-oracle:pack"]) {
   }
 }
 
+const serverPackageJson = JSON.parse(
+  fs.readFileSync(
+    path.resolve(rootDir, "packages/server/package.json"),
+    "utf8",
+  ),
+);
+if (
+  serverPackageJson.scripts?.["stream:alert:probe"] !==
+  "bun scripts/probe-streaming-alert-route.ts"
+) {
+  violations.push({
+    file: "packages/server/package.json",
+    rule: "server must expose the guarded streaming alert probe",
+    line: 0,
+    text: String(serverPackageJson.scripts?.["stream:alert:probe"] ?? ""),
+  });
+}
+
+for (const [relativePath, requiredControls] of [
+  [
+    "packages/server/src/routes/streaming-runtime-alert-config.ts",
+    [
+      "HYPERIA_EXTERNAL_VALUE_ENABLED",
+      "STREAMING_DUEL_SCHEDULER_ROLE",
+      "STREAMING_ALERT_WEBHOOK_URL",
+      "strictProductionRoute",
+    ],
+  ],
+  [
+    "packages/server/src/streaming/streaming-alert-route-probe.ts",
+    [
+      "STREAMING_ALERT_TEST_APPROVED=true",
+      'redirect: "error"',
+      'open(temporaryPath, "wx", 0o600)',
+      "webhook_http_acceptance_only",
+      "onCallAcknowledgementRequired",
+    ],
+  ],
+]) {
+  const source = fs.readFileSync(path.resolve(rootDir, relativePath), "utf8");
+  for (const control of requiredControls) {
+    if (!source.includes(control)) {
+      violations.push({
+        file: relativePath,
+        rule: `streaming alert control is missing ${control}`,
+        line: 0,
+        text: "",
+      });
+    }
+  }
+}
+
 if (violations.length > 0) {
   console.error(
     JSON.stringify(
@@ -201,5 +294,6 @@ console.log(
     authoritativeUnit: "lamports",
     retiredBettingPanel: true,
     retiredWebsiteBettingClient: true,
+    retiredSharedBettingTokenApi: true,
   }),
 );

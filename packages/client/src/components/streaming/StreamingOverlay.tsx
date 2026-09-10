@@ -11,6 +11,15 @@
  */
 
 import React, { useEffect, useState, useRef } from "react";
+import {
+  hasValidStreamingGuardrailArenaPositions,
+  parseStreamingDuelPreparationSummary,
+  type StreamingDuelPublicPreparationActivity,
+  type StreamingDuelPublicPreparationMode,
+  type StreamingDuelPreparationContestantSummary,
+  type StreamingPreparationVisualDiagnostics,
+  type StreamingPreparationVisualPlayerDiagnostics,
+} from "@hyperforge/shared";
 import type { StreamingState } from "../../screens/StreamingMode";
 import { AgentStatsDisplay } from "./AgentStatsDisplay";
 import { LeaderboardPanel } from "./LeaderboardPanel";
@@ -39,11 +48,86 @@ interface StreamingOverlayProps {
   state: StreamingState | null;
   /** From GET /api/streaming/betting — public bet link for viewers */
   bettingConfig?: StreamingBettingConfig | null;
+  /** Live, replicated world presentation used to label preparation honestly. */
+  preparationVisuals?: StreamingPreparationVisualDiagnostics | null;
+}
+
+export function getStreamingPreparationActivityLabel(
+  player: StreamingPreparationVisualPlayerDiagnostics,
+): string {
+  if (player.fishingPhase) return "Fishing";
+  const tool = player.gatheringToolItemId?.toLowerCase() ?? "";
+  if (/harpoon|fishing|lobster|net/.test(tool)) return "Fishing";
+  if (player.gatheringToolItemId) return "Gathering";
+  return "Preparing";
+}
+
+export function getStreamingPreparationPublicActivityLabel(
+  activity: StreamingDuelPublicPreparationActivity,
+  mode: StreamingDuelPublicPreparationMode = "working",
+): string {
+  if (mode === "traveling") {
+    switch (activity) {
+      case "gathering":
+        return "Traveling to resources";
+      case "training":
+        return "Traveling to train";
+      case "crafting":
+        return "Traveling to a station";
+      case "provisioning":
+        return "Traveling for supplies";
+      case "questing":
+        return "Traveling on a quest";
+      case "exploring":
+        return "Exploring";
+      case "planning":
+      case "reassessing":
+        break;
+    }
+  }
+  switch (activity) {
+    case "planning":
+      return "Planning";
+    case "gathering":
+      return "Gathering";
+    case "training":
+      return "Training";
+    case "crafting":
+      return "Crafting";
+    case "provisioning":
+      return "Provisioning";
+    case "questing":
+      return "Questing";
+    case "exploring":
+      return "Exploring";
+    case "reassessing":
+      return "Reassessing";
+  }
+}
+
+/**
+ * Treat arena ingress as public only after the exact announced matchup has a
+ * duel identity and two finite, non-overlapping authoritative arena marks.
+ */
+export function isStreamingArenaHandoffComplete(
+  cycle: StreamingState["cycle"],
+): boolean {
+  if (
+    cycle.phase !== "ANNOUNCEMENT" ||
+    !cycle.duelId ||
+    !cycle.agent1 ||
+    !cycle.agent2 ||
+    !cycle.arenaPositions
+  ) {
+    return false;
+  }
+  return hasValidStreamingGuardrailArenaPositions(cycle.arenaPositions);
 }
 
 export function StreamingOverlay({
   state,
   bettingConfig = null,
+  preparationVisuals = null,
 }: StreamingOverlayProps) {
   const [showVictory, setShowVictory] = useState(false);
   const victoryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -138,14 +222,70 @@ export function StreamingOverlay({
     : null;
 
   const hasMatchup = Boolean(agent1 && agent2);
+  const arenaHandoffComplete = isStreamingArenaHandoffComplete(cycle);
+  const preparation = parseStreamingDuelPreparationSummary(state.preparation);
+  const preparationActive = Boolean(
+    phase === "IDLE" &&
+    agent1 &&
+    agent2 &&
+    preparation &&
+    preparation.agent1.id === agent1.id &&
+    preparation.agent2.id === agent2.id,
+  );
+  const preparationReady = Boolean(
+    preparationActive &&
+    preparation?.status === "ready" &&
+    preparation.agent1.ready &&
+    preparation.agent2.ready,
+  );
   const showActiveFightHud =
     (phase === "FIGHTING" || phase === "COUNTDOWN") && hasMatchup;
 
   const showBetweenMatchupStrip =
     hasMatchup &&
     (phase === "IDLE" || phase === "ANNOUNCEMENT" || phase === "RESOLUTION") &&
+    !preparationActive &&
     !showActiveFightHud &&
     !terminalNotice;
+
+  const preparationRows = [agent1, agent2].flatMap((agent) => {
+    if (!agent) return [];
+    const preparationContestant: StreamingDuelPreparationContestantSummary | null =
+      preparation?.agent1.id === agent.id
+        ? preparation.agent1
+        : preparation?.agent2.id === agent.id
+          ? preparation.agent2
+          : null;
+    const visual = preparationVisuals?.players.find(
+      (player) => player.playerId === agent.id && player.presentationActive,
+    );
+    return [
+      {
+        id: agent.id,
+        name: agent.name,
+        activityTrail:
+          preparationContestant?.activityTrail.map((activity) =>
+            getStreamingPreparationPublicActivityLabel(activity),
+          ) ?? [],
+        activity: preparationContestant?.ready
+          ? "Ready"
+          : preparationContestant?.activity && preparationContestant.mode
+            ? preparationContestant.mode === "working" &&
+              preparationContestant.activity === "gathering" &&
+              visual
+              ? getStreamingPreparationActivityLabel(visual)
+              : getStreamingPreparationPublicActivityLabel(
+                  preparationContestant.activity,
+                  preparationContestant.mode,
+                )
+            : visual
+              ? getStreamingPreparationActivityLabel(visual)
+              : state.cameraTarget === agent.id
+                ? "Preparing"
+                : "Preparing off-camera",
+      },
+    ];
+  });
 
   const interstitialCopy = (() => {
     switch (phase) {
@@ -194,7 +334,7 @@ export function StreamingOverlay({
       {/* Left panel: combat log during a fight, leaderboard during intermission */}
       {showCombatLog ? (
         <CombatLog state={state} />
-      ) : phase !== "RESOLUTION" ? (
+      ) : phase === "IDLE" && !preparationActive && leaderboard.length > 0 ? (
         <aside className="streaming-leaderboard-mount">
           <LeaderboardPanel leaderboard={leaderboard} />
         </aside>
@@ -207,6 +347,7 @@ export function StreamingOverlay({
         agent1Name={agent1?.name ?? terminalNotice?.agent1Name}
         agent2Name={agent2?.name ?? terminalNotice?.agent2Name}
         timeRemainingMs={timeRemaining}
+        arenaReady={arenaHandoffComplete}
         cancelled={Boolean(terminalNotice)}
       />
 
@@ -270,16 +411,27 @@ export function StreamingOverlay({
                   ? "Result"
                   : "Round complete"
                 : phase === "ANNOUNCEMENT"
-                  ? "Matchup set"
-                  : "Up next"}
+                  ? arenaHandoffComplete
+                    ? "Arena handoff complete"
+                    : "Finalizing arena handoff"
+                  : "Potential matchup"}
             </span>
             <span className="streaming-between-title">
               {phase === "RESOLUTION"
                 ? isDraw
                   ? "Draw"
                   : "Next duel"
-                : `${agent1.name} vs ${agent2.name}`}
+                : phase === "ANNOUNCEMENT"
+                  ? arenaHandoffComplete
+                    ? "Matchup locked"
+                    : "Matchup set"
+                  : `${agent1.name} vs ${agent2.name}`}
             </span>
+            {phase === "ANNOUNCEMENT" && matchupLine ? (
+              <span className="streaming-between-matchup-compact">
+                {matchupLine}
+              </span>
+            ) : null}
             <div className="streaming-between-timer-wrap">
               <div className="streaming-between-timer-inner">
                 {timeRemaining > 0 ? formatTime(timeRemaining) : "—"}
@@ -299,7 +451,11 @@ export function StreamingOverlay({
                 ? isDraw
                   ? "Next duel"
                   : "Stand by"
-                : "Starts in"}
+                : phase === "ANNOUNCEMENT" && !arenaHandoffComplete
+                  ? "Waiting for arena"
+                  : phase === "IDLE"
+                    ? "Readiness pending"
+                    : "Starts in"}
             </span>
           </div>
           <div
@@ -321,10 +477,54 @@ export function StreamingOverlay({
         </div>
       )}
 
+      {preparationActive && agent1 && agent2 && (
+        <section
+          className="streaming-preparation-strip"
+          aria-label="Live agent preparation"
+          aria-live="polite"
+        >
+          <div className="streaming-preparation-eyebrow">
+            <span className="streaming-preparation-live-dot" aria-hidden />
+            Live preparation
+          </div>
+          <div className="streaming-preparation-title">
+            {preparationReady ? "Ready for the arena" : "Building the loadout"}
+          </div>
+          <div className="streaming-preparation-matchup">
+            {agent1.name} <span>vs</span> {agent2.name}
+          </div>
+          <div className="streaming-preparation-agents">
+            {preparationRows.map((row) => (
+              <div className="streaming-preparation-agent" key={row.id}>
+                <span>{row.name}</span>
+                <strong className="streaming-preparation-status">
+                  {row.activity}
+                </strong>
+                {row.activityTrail.length > 1 ||
+                (row.activity === "Ready" && row.activityTrail.length > 0) ? (
+                  <small
+                    className="streaming-preparation-recap"
+                    aria-label={`${row.name} preparation path`}
+                  >
+                    {row.activityTrail.join(" → ")}
+                  </small>
+                ) : null}
+              </div>
+            ))}
+          </div>
+          <p className="streaming-preparation-sub">
+            {preparationReady
+              ? "Equipment and strategy locked · arena handoff is next"
+              : `Preparation is live · ${formatTime(timeRemaining)} remaining · equipment and strategy lock before the bell`}
+          </p>
+        </section>
+      )}
+
       {/* No lineup yet, or resolution without both cards — full interstitial */}
       {(phase === "IDLE" ||
         phase === "ANNOUNCEMENT" ||
         phase === "RESOLUTION") &&
+        !preparationActive &&
         !showBetweenMatchupStrip && (
           <div
             className="streaming-interstitial"
@@ -412,7 +612,14 @@ export function StreamingOverlay({
         <p className="streaming-lower-third-status">
           {terminalNotice
             ? "Round cancelled — no winner was declared"
-            : publicStreamStatusLine(phase, hasMatchup, bettingConfig)}
+            : publicStreamStatusLine(
+                phase,
+                hasMatchup,
+                bettingConfig,
+                preparationActive,
+                preparationReady,
+                arenaHandoffComplete,
+              )}
         </p>
       </footer>
     </div>
@@ -431,13 +638,24 @@ function publicStreamStatusLine(
   phase: StreamingState["cycle"]["phase"] | undefined,
   hasMatchup: boolean,
   betting: StreamingBettingConfig | null,
+  preparationActive = false,
+  preparationReady = false,
+  arenaHandoffComplete = false,
 ): string {
   switch (phase) {
     case "IDLE":
+      if (preparationActive) {
+        return preparationReady
+          ? "Preparation complete — both agents are ready for the arena"
+          : "Live preparation — agents are building and locking their matchup plans";
+      }
       return hasMatchup
-        ? "Matchup locked — ring opens soon"
+        ? "Agents preparing — betting opens only after both loadouts lock"
         : "Pairing the next warriors";
     case "ANNOUNCEMENT":
+      if (!arenaHandoffComplete) {
+        return "Arena handoff in progress — waiting for both fighters to be staged";
+      }
       if (
         betting?.ready &&
         betting.bettingBridgeEnabled &&

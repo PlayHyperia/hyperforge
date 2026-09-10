@@ -1,0 +1,35 @@
+{
+  "schemaVersion": 1,
+  "motions": [
+    {
+      "id": "fishing-start",
+      "name": "Fishing cast start",
+      "asset": "artifacts/duel-launch-avatar-bakeoff/motions/steve-preparation/steve-fishing-cast.glb",
+      "sampleRatio": 0.1
+    },
+    {
+      "id": "fishing-lift",
+      "name": "Fishing rod lift",
+      "asset": "artifacts/duel-launch-avatar-bakeoff/motions/steve-preparation/steve-fishing-cast.glb",
+      "sampleRatio": 0.3
+    },
+    {
+      "id": "fishing",
+      "name": "Fishing cast release",
+      "asset": "artifacts/duel-launch-avatar-bakeoff/motions/steve-preparation/steve-fishing-cast.glb",
+      "sampleRatio": 0.55
+    },
+    {
+      "id": "fishing-follow-through",
+      "name": "Fishing follow-through",
+      "asset": "artifacts/duel-launch-avatar-bakeoff/motions/steve-preparation/steve-fishing-cast.glb",
+      "sampleRatio": 0.7
+    },
+    {
+      "id": "fishing-recovery",
+      "name": "Fishing recovery",
+      "asset": "artifacts/duel-launch-avatar-bakeoff/motions/steve-preparation/steve-fishing-cast.glb",
+      "sampleRatio": 0.85
+    }
+  ]
+}

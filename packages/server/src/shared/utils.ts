@@ -13,14 +13,16 @@
  *
  * **JSON Web Tokens** (`createJWT`, `verifyJWT`):
  * Provides JWT-based authentication for session management and API access.
- * Tokens are signed with a secret key (from JWT_SECRET env var) and can contain
+ * Tokens are signed by the configured JWT key authority and can contain
  * arbitrary user data. Used for:
  * - Session persistence across WebSocket reconnections
- * - API authentication without database lookups
+ * - Stateless human/spectator verification; agent credentials additionally
+ *   require their database-backed active session
  * - Stateless authentication with expiration
  *
  * **Security Notes**:
- * - JWT_SECRET must be set in production (warns if using default dev secret)
+ * - Production supports a keyed signing ring with exact key selection
+ * - JWT_SECRET remains a legacy no-kid migration bridge
  * - Tokens should have reasonable expiration times (set by caller)
  * - Hash algorithm (SHA-256) matches client for consistency
  *
@@ -31,7 +33,14 @@
 
 import { createHash } from "crypto";
 import jsonwebtoken from "jsonwebtoken";
+import {
+  HYPERIA_JWT_ALGORITHM,
+  HYPERIA_JWT_AUDIENCE,
+  HYPERIA_JWT_ISSUER,
+  resolveJwtSigningKeyAuthority,
+} from "../infrastructure/auth/jwt-signing-key-authority.js";
 const jwt = jsonwebtoken;
+const MAXIMUM_JWT_LIFETIME_SECONDS = 7 * 24 * 60 * 60;
 
 /**
  * Generates a SHA-256 hash of a file buffer
@@ -61,40 +70,11 @@ export async function hashFile(buffer: Buffer): Promise<string> {
  * JSON Web Token authentication utilities
  *
  * Provides JWT creation and verification for session tokens.
- * Tokens are signed with JWT_SECRET from environment variables.
+ * New keyed tokens carry an exact `kid`, issuer, audience, algorithm, and
+ * seven-day expiry. A no-kid token is accepted only through an explicitly
+ * configured JWT_SECRET compatibility bridge (or the local development
+ * fallback), never by trying every key in the ring.
  */
-
-// JWT secret — required in production, uses dev fallback only in local development
-const getJwtSecret = (): string => {
-  const secret = process.env["JWT_SECRET"];
-  if (secret) {
-    return secret;
-  }
-
-  // In production or staging, JWT_SECRET is required
-  const env = process.env.NODE_ENV;
-  if (env === "production" || env === "staging") {
-    throw new Error(
-      "[Security] JWT_SECRET environment variable is required in production/staging",
-    );
-  }
-
-  // Only allow dev secret in explicit development mode
-  if (env !== "development") {
-    console.warn(
-      "[Security] JWT_SECRET not set and NODE_ENV is not 'development'. " +
-        "Using insecure dev secret. Set JWT_SECRET or NODE_ENV=development to suppress.",
-    );
-  }
-
-  console.warn(
-    "[Security] Using insecure development JWT secret. " +
-      "This is only acceptable for local development.",
-  );
-  return "hyperia-dev-secret-key-12345";
-};
-
-const jwtSecret = getJwtSecret();
 
 /**
  * Creates a signed JSON Web Token containing arbitrary data
@@ -109,18 +89,20 @@ const jwtSecret = getJwtSecret();
  * const token = await createJWT({ userId: '123', roles: ['player'] })
  * // Send token to client for future requests
  */
-export function createJWT(data: Record<string, unknown>): Promise<string> {
-  return new Promise((resolve, reject) => {
-    jwt.sign(
-      data,
-      jwtSecret,
-      { expiresIn: "7d" },
-      (err: Error | null, token?: string) => {
-        if (err) reject(err);
-        else resolve(token!);
-      },
-    );
-  });
+export async function createJWT(
+  data: Record<string, unknown>,
+): Promise<string> {
+  const authority = resolveJwtSigningKeyAuthority();
+  const options: jsonwebtoken.SignOptions = {
+    algorithm: HYPERIA_JWT_ALGORITHM,
+    expiresIn: "7d",
+  };
+  if (authority.mode === "key-ring") {
+    options.audience = HYPERIA_JWT_AUDIENCE;
+    options.issuer = HYPERIA_JWT_ISSUER;
+    options.keyid = authority.activeKeyId;
+  }
+  return jwt.sign(data, authority.activeSecret, options);
 }
 
 /**
@@ -141,17 +123,58 @@ export function createJWT(data: Record<string, unknown>): Promise<string> {
  *   // Token invalid, reject request
  * }
  */
-export function verifyJWT(
+export async function verifyJWT(
   token: string,
 ): Promise<Record<string, unknown> | null> {
-  return new Promise((resolve, _reject) => {
-    jwt.verify(
-      token,
-      jwtSecret,
-      (err: jsonwebtoken.VerifyErrors | null, decoded: unknown) => {
-        if (err) resolve(null);
-        else resolve((decoded as Record<string, unknown>) || null);
-      },
-    );
-  });
+  try {
+    const authority = resolveJwtSigningKeyAuthority();
+    const decoded = jwt.decode(token, { complete: true });
+    if (
+      !decoded ||
+      typeof decoded !== "object" ||
+      decoded.header.alg !== HYPERIA_JWT_ALGORITHM
+    ) {
+      return null;
+    }
+
+    let secret: string | null = null;
+    const options: jsonwebtoken.VerifyOptions = {
+      algorithms: [HYPERIA_JWT_ALGORITHM],
+    };
+    if (decoded.header.kid !== undefined) {
+      if (
+        authority.mode !== "key-ring" ||
+        typeof decoded.header.kid !== "string" ||
+        decoded.header.typ !== "JWT"
+      ) {
+        return null;
+      }
+      secret =
+        authority.keyedVerificationSecrets.get(decoded.header.kid) ?? null;
+      if (!secret) return null;
+      options.audience = HYPERIA_JWT_AUDIENCE;
+      options.issuer = HYPERIA_JWT_ISSUER;
+    } else {
+      secret = authority.legacyVerificationSecret;
+      if (!secret) return null;
+    }
+
+    const verified = jwt.verify(token, secret, options);
+    if (!verified || typeof verified !== "object" || Array.isArray(verified)) {
+      return null;
+    }
+    const payload = verified as Record<string, unknown>;
+    if (
+      !Number.isSafeInteger(payload.iat) ||
+      !Number.isSafeInteger(payload.exp) ||
+      (payload.exp as number) <= (payload.iat as number) ||
+      (payload.exp as number) - (payload.iat as number) >
+        MAXIMUM_JWT_LIFETIME_SECONDS
+    ) {
+      return null;
+    }
+    return payload;
+  } catch {
+    return null;
+  }
 }

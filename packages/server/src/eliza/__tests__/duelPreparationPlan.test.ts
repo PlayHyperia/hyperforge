@@ -1,6 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { ITEMS } from "@hyperforge/shared";
-import { buildDuelPreparationCommittedSnapshot } from "../duelPreparationPlan.js";
+import {
+  buildDuelPreparationCommittedSnapshot,
+  getDuelPreparationAttackSupplyTarget,
+} from "../duelPreparationPlan.js";
 
 const testItems = [
   { id: "plan_sword", type: "weapon", equipSlot: "weapon", stackable: false },
@@ -14,6 +17,21 @@ const testItems = [
   { id: "plan_food", type: "consumable", stackable: false, healAmount: 10 },
   { id: "plan_junk", type: "material", stackable: false },
 ] as const;
+
+describe("getDuelPreparationAttackSupplyTarget", () => {
+  it("covers the opening launch and every configured fight-time boundary", () => {
+    expect(getDuelPreparationAttackSupplyTarget(315_000, 5)).toBe(106);
+    expect(getDuelPreparationAttackSupplyTarget(315_000, 3)).toBe(176);
+    expect(getDuelPreparationAttackSupplyTarget(315_001, 5)).toBe(107);
+  });
+
+  it("fails closed for invalid duration or attack-speed inputs", () => {
+    expect(getDuelPreparationAttackSupplyTarget(0, 5)).toBe(0);
+    expect(getDuelPreparationAttackSupplyTarget(315_000, 0)).toBe(0);
+    expect(getDuelPreparationAttackSupplyTarget(315_000.5, 5)).toBe(0);
+    expect(getDuelPreparationAttackSupplyTarget(315_000, Number.NaN)).toBe(0);
+  });
+});
 
 describe("buildDuelPreparationCommittedSnapshot", () => {
   beforeEach(() => {

@@ -11,9 +11,9 @@
  * - Keeps Node.js dependencies isolated from browser code
  *
  * Loading Strategy:
- * 1. Try loading from local assets/web/ directory (workspace root)
- * 2. Fall back to fetching from CDN and caching to temp directory
- * 3. Provides buffer to PhysX via wasmBinary option (bypasses locateFile)
+ * 1. Production reads WASM beside the resolved PhysX JavaScript package entry.
+ * 2. Development supports local assets and CDN/temp-cache fallback.
+ * 3. Provides buffer to PhysX via wasmBinary option (bypasses locateFile).
  *
  * Referenced by: PhysXManager.loadPhysXInternal() in Node.js environments only
  */
@@ -21,13 +21,9 @@
 /**
  * Load PhysX WASM Binary for Node.js
  *
- * Attempts to load WASM from local assets first, then falls back to CDN fetch with caching.
- * The WASM binary is then provided directly to PhysX initialization.
- *
- * Loading Strategy:
- * 1. Check assets/web/ directory relative to workspace root
- * 2. If not found, fetch from CDN (PUBLIC_CDN_URL environment variable)
- * 3. Cache CDN downloads to temp directory for future use
+ * Production must use the same package bound by the competitive build identity.
+ * A working-directory asset or persistent temporary cache cannot replace it.
+ * Development may use local assets followed by CDN fetching with caching.
  *
  * @returns Buffer containing physx-js-webidl.wasm binary
  * @throws Error if WASM file cannot be loaded from any source
@@ -35,6 +31,18 @@
 export async function loadPhysXWasmForNode(): Promise<Buffer> {
   const { readFileSync, writeFileSync, existsSync, mkdirSync } =
     await import("node:fs");
+  if (process.env["NODE_ENV"] === "production") {
+    const entry = new URL(import.meta.resolve("@hyperforge/physx-js-webidl"));
+    if (
+      entry.protocol !== "file:" ||
+      !entry.pathname.endsWith("/physx-js-webidl.js")
+    ) {
+      throw new Error(
+        "[PhysXManager] Unsupported production PhysX package entry",
+      );
+    }
+    return readFileSync(new URL("./physx-js-webidl.wasm", entry));
+  }
   const { join } = await import("node:path");
   const { tmpdir } = await import("node:os");
 

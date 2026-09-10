@@ -14,6 +14,7 @@
 
 import { describe, it, expect, beforeEach, vi, type Mock } from "vitest";
 import { DeathStateManager } from "../DeathStateManager";
+import { SafeAreaDeathHandler } from "../SafeAreaDeathHandler";
 import { ZoneType } from "../../../../types/death";
 
 // Mock types
@@ -30,7 +31,7 @@ interface MockDatabaseSystem {
   deleteDeathLockAsync: Mock;
   updateGroundItemsAsync: Mock;
   acquireDeathLockAsync: Mock;
-  getUnrecoveredDeathsAsync: Mock;
+  getAllActiveDeathsAsync: Mock;
   markDeathRecoveredAsync: Mock;
 }
 
@@ -51,7 +52,7 @@ function createMockDatabaseSystem(): MockDatabaseSystem {
     deleteDeathLockAsync: vi.fn().mockResolvedValue(undefined),
     updateGroundItemsAsync: vi.fn().mockResolvedValue(undefined),
     acquireDeathLockAsync: vi.fn().mockResolvedValue(true),
-    getUnrecoveredDeathsAsync: vi.fn().mockResolvedValue([]),
+    getAllActiveDeathsAsync: vi.fn().mockResolvedValue([]),
     markDeathRecoveredAsync: vi.fn().mockResolvedValue(undefined),
   };
 }
@@ -114,6 +115,301 @@ describe("DeathStateManager", () => {
       );
 
       warnSpy.mockRestore();
+    });
+  });
+
+  describe("startup recovery", () => {
+    it("awaits the restored artifact identity before marking custody recovered", async () => {
+      await manager.init();
+      databaseSystem.getAllActiveDeathsAsync.mockResolvedValue([
+        {
+          playerId: "player1",
+          gravestoneId: "gravestone_from_previous_process",
+          groundItemIds: [],
+          position: TEST_POSITION,
+          timestamp: Date.now(),
+          zoneType: ZoneType.SAFE_AREA,
+          itemCount: 1,
+          items: [{ itemId: "bronze_sword", quantity: 1 }],
+          keptItems: [],
+          deathOperationId: "safe-death-operation-1",
+          killedBy: "wolf",
+          recovered: true,
+        },
+      ]);
+
+      let finishRecovery: (() => void) | undefined;
+      const recoveryBarrier = new Promise<void>((resolve) => {
+        finishRecovery = resolve;
+      });
+      const recover = vi.fn(async () => recoveryBarrier);
+      manager.setRecoveryHandler(recover);
+
+      const startPromise = manager.start();
+      await vi.waitFor(() => expect(recover).toHaveBeenCalledOnce());
+      expect(databaseSystem.markDeathRecoveredAsync).not.toHaveBeenCalled();
+
+      finishRecovery?.();
+      await startPromise;
+
+      expect(recover).toHaveBeenCalledWith({
+        playerId: "player1",
+        deathOperationId: "safe-death-operation-1",
+        gravestoneId: "gravestone_from_previous_process",
+        position: TEST_POSITION,
+        items: [
+          expect.objectContaining({
+            itemId: "bronze_sword",
+            quantity: 1,
+          }),
+        ],
+        killedBy: "wolf",
+        zoneType: ZoneType.SAFE_AREA,
+      });
+      expect(databaseSystem.markDeathRecoveredAsync).toHaveBeenCalledWith(
+        "player1",
+      );
+    });
+
+    it("reuses the exact committed grave ID through the real recovery handler boundary", async () => {
+      const exactGravestoneId = "gravestone_player1_committed";
+      const database = createMockDatabaseSystem();
+      database.getAllActiveDeathsAsync.mockResolvedValue([
+        {
+          playerId: "player1",
+          gravestoneId: exactGravestoneId,
+          groundItemIds: [],
+          position: TEST_POSITION,
+          timestamp: Date.now(),
+          zoneType: ZoneType.SAFE_AREA,
+          itemCount: 1,
+          items: [{ itemId: "bronze_sword", quantity: 1 }],
+          keptItems: [],
+          deathOperationId: "safe-death-operation-1",
+          killedBy: "wolf",
+          recovered: true,
+        },
+      ]);
+      const entityManager = {
+        spawnEntity: vi.fn().mockResolvedValue({ id: exactGravestoneId }),
+        destroyEntity: vi.fn(),
+      };
+      const recoveryWorld = {
+        isServer: true,
+        currentTick: 1_000,
+        entities: { get: vi.fn(), players: new Map() },
+        getPlayer: vi.fn(),
+        getSystem: vi.fn((name: string) =>
+          name === "database"
+            ? database
+            : name === "entity-manager"
+              ? entityManager
+              : null,
+        ),
+        on: vi.fn(),
+        off: vi.fn(),
+      };
+      const exactManager = new DeathStateManager(recoveryWorld as never);
+      const safeHandler = new SafeAreaDeathHandler(
+        recoveryWorld as never,
+        { spawnGroundItems: vi.fn() } as never,
+        exactManager,
+      );
+      exactManager.setRecoveryHandler(async (request) => {
+        const restored = await safeHandler.spawnAndTrackGravestone(
+          request.playerId,
+          request.position,
+          request.items,
+          request.killedBy,
+          {
+            deathOperationId: request.deathOperationId,
+            exactGravestoneId: request.gravestoneId,
+          },
+        );
+        expect(restored).toBe(exactGravestoneId);
+      });
+
+      await exactManager.init();
+      await exactManager.start();
+
+      expect(entityManager.spawnEntity).toHaveBeenCalledWith(
+        expect.objectContaining({ id: exactGravestoneId }),
+      );
+      expect(database.markDeathRecoveredAsync).toHaveBeenCalledWith("player1");
+    });
+
+    it("leaves durable custody unrecovered when artifact restoration fails", async () => {
+      await manager.init();
+      databaseSystem.getAllActiveDeathsAsync.mockResolvedValue([
+        {
+          playerId: "player1",
+          gravestoneId: undefined,
+          groundItemIds: [],
+          position: TEST_POSITION,
+          timestamp: Date.now(),
+          zoneType: ZoneType.SAFE_AREA,
+          itemCount: 1,
+          items: [{ itemId: "bronze_sword", quantity: 1 }],
+          keptItems: [],
+          deathOperationId: "safe-death-operation-1",
+          killedBy: "wolf",
+          recovered: false,
+        },
+      ]);
+      manager.setRecoveryHandler(async () => {
+        throw new Error("spawn failed");
+      });
+      const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+      await manager.start();
+
+      expect(databaseSystem.markDeathRecoveredAsync).not.toHaveBeenCalled();
+      expect(errorSpy).toHaveBeenCalledWith(
+        expect.stringContaining("Failed to recover death custody for player1"),
+        expect.any(Error),
+      );
+      errorSpy.mockRestore();
+    });
+
+    it("fails external-value startup when any durable custody cannot be restored", async () => {
+      const priorExternalValue = process.env.HYPERIA_EXTERNAL_VALUE_ENABLED;
+      process.env.HYPERIA_EXTERNAL_VALUE_ENABLED = "true";
+      try {
+        await manager.init();
+        databaseSystem.getAllActiveDeathsAsync.mockResolvedValue([
+          {
+            playerId: "player1",
+            gravestoneId: "gravestone_player1_committed",
+            groundItemIds: [],
+            position: TEST_POSITION,
+            timestamp: Date.now(),
+            zoneType: ZoneType.SAFE_AREA,
+            itemCount: 1,
+            items: [{ itemId: "bronze_sword", quantity: 1 }],
+            keptItems: [],
+            deathOperationId: "safe-death-operation-1",
+            killedBy: "wolf",
+            recovered: true,
+          },
+        ]);
+        manager.setRecoveryHandler(async () => {
+          throw new Error("spawn failed");
+        });
+        const errorSpy = vi
+          .spyOn(console, "error")
+          .mockImplementation(() => {});
+
+        await expect(manager.start()).rejects.toThrow(
+          "death_recovery_startup_incomplete:0/1:player1",
+        );
+        expect(databaseSystem.markDeathRecoveredAsync).not.toHaveBeenCalled();
+        errorSpy.mockRestore();
+      } finally {
+        if (priorExternalValue === undefined) {
+          delete process.env.HYPERIA_EXTERNAL_VALUE_ENABLED;
+        } else {
+          process.env.HYPERIA_EXTERNAL_VALUE_ENABLED = priorExternalValue;
+        }
+      }
+    });
+
+    it("fails external-value startup when durable recovery exceeds its startup deadline", async () => {
+      const priorExternalValue = process.env.HYPERIA_EXTERNAL_VALUE_ENABLED;
+      const priorTimeout = process.env.DEATH_RECOVERY_STARTUP_TIMEOUT_MS;
+      process.env.HYPERIA_EXTERNAL_VALUE_ENABLED = "true";
+      process.env.DEATH_RECOVERY_STARTUP_TIMEOUT_MS = "1";
+      try {
+        await manager.init();
+        databaseSystem.getAllActiveDeathsAsync.mockResolvedValue([
+          {
+            playerId: "player1",
+            gravestoneId: "gravestone_player1_committed",
+            groundItemIds: [],
+            position: TEST_POSITION,
+            timestamp: Date.now(),
+            zoneType: ZoneType.SAFE_AREA,
+            itemCount: 1,
+            items: [{ itemId: "bronze_sword", quantity: 1 }],
+            keptItems: [],
+            deathOperationId: "safe-death-operation-1",
+            killedBy: "wolf",
+            recovered: true,
+          },
+        ]);
+        manager.setRecoveryHandler(() => new Promise<void>(() => undefined));
+
+        await expect(manager.start()).rejects.toThrow(
+          "death_recovery_startup_timeout:1",
+        );
+        expect(databaseSystem.markDeathRecoveredAsync).not.toHaveBeenCalled();
+      } finally {
+        if (priorExternalValue === undefined) {
+          delete process.env.HYPERIA_EXTERNAL_VALUE_ENABLED;
+        } else {
+          process.env.HYPERIA_EXTERNAL_VALUE_ENABLED = priorExternalValue;
+        }
+        if (priorTimeout === undefined) {
+          delete process.env.DEATH_RECOVERY_STARTUP_TIMEOUT_MS;
+        } else {
+          process.env.DEATH_RECOVERY_STARTUP_TIMEOUT_MS = priorTimeout;
+        }
+      }
+    });
+
+    it.each([
+      {
+        label: "legacy custody row",
+        deathOperationId: undefined,
+        groundItemIds: [],
+        reason: "external_value_death_custody_legacy_row",
+      },
+      {
+        label: "public ground-item custody",
+        deathOperationId: "safe-death-operation-1",
+        groundItemIds: ["ground-item-1"],
+        reason: "external_value_death_custody_public_items",
+      },
+    ])("rejects a $label before external-value startup", async (fixture) => {
+      const priorExternalValue = process.env.HYPERIA_EXTERNAL_VALUE_ENABLED;
+      process.env.HYPERIA_EXTERNAL_VALUE_ENABLED = "true";
+      try {
+        await manager.init();
+        databaseSystem.getAllActiveDeathsAsync.mockResolvedValue([
+          {
+            playerId: "player1",
+            gravestoneId: "gravestone_player1_committed",
+            groundItemIds: fixture.groundItemIds,
+            position: TEST_POSITION,
+            timestamp: Date.now(),
+            zoneType: ZoneType.SAFE_AREA,
+            itemCount: 1,
+            items: [{ itemId: "bronze_sword", quantity: 1 }],
+            keptItems: [],
+            deathOperationId: fixture.deathOperationId,
+            killedBy: "wolf",
+            recovered: true,
+          },
+        ]);
+        const recover = vi.fn().mockResolvedValue(undefined);
+        manager.setRecoveryHandler(recover);
+        const errorSpy = vi
+          .spyOn(console, "error")
+          .mockImplementation(() => {});
+
+        await expect(manager.start()).rejects.toMatchObject({
+          name: "AggregateError",
+          errors: [expect.objectContaining({ message: fixture.reason })],
+        });
+        expect(recover).not.toHaveBeenCalled();
+        expect(databaseSystem.markDeathRecoveredAsync).not.toHaveBeenCalled();
+        errorSpy.mockRestore();
+      } finally {
+        if (priorExternalValue === undefined) {
+          delete process.env.HYPERIA_EXTERNAL_VALUE_ENABLED;
+        } else {
+          process.env.HYPERIA_EXTERNAL_VALUE_ENABLED = priorExternalValue;
+        }
+      }
     });
   });
 

@@ -10,6 +10,7 @@
 
 import { World } from "../../../core/World";
 import { COMBAT_CONSTANTS } from "../../../constants/CombatConstants";
+import { ticksToMs } from "../../../utils/game/CombatCalculations";
 import { Entity, EntityConfig } from "../../../entities/Entity";
 import { ItemEntity } from "../../../entities/world/ItemEntity";
 import { HeadstoneEntity } from "../../../entities/world/HeadstoneEntity";
@@ -71,6 +72,7 @@ import { EventType } from "../../../types/events";
 import { TerrainSystem } from "../world/TerrainSystem";
 import { isPositionInsideDuelArenaZone } from "../../../data/duel-manifest";
 import { SystemBase } from "../infrastructure/SystemBase";
+import type { GroundItemSystem } from "../economy/GroundItemSystem";
 import { getItem } from "../../../data/items";
 import { getNPCById } from "../../../data/npcs";
 import { getExternalNPC } from "../../../utils/ExternalAssetUtils";
@@ -223,15 +225,21 @@ export class EntityManager extends SystemBase {
         itemType?: string;
         position: { x: number; y: number; z: number };
         quantity?: number;
+        droppedBy?: string;
       };
       const itemIdToUse =
         typedData.itemId || typedData.itemType || "unknown_item";
-      this.handleItemSpawn({
+      void this.handleItemSpawn({
         customId: `item_${itemIdToUse}_${Date.now()}`,
         name: itemIdToUse,
         position: typedData.position,
         itemId: itemIdToUse,
         quantity: typedData.quantity || 1,
+        droppedBy: typedData.droppedBy,
+      }).catch((error) => {
+        console.error(
+          `[EntityManager] Refused ITEM_SPAWN without durable ground custody: ${String(error)}`,
+        );
       });
     });
     // EntityManager should handle spawn REQUESTS, not completed spawns
@@ -1115,65 +1123,30 @@ export class EntityManager extends SystemBase {
 
   private async handleItemSpawn(data: ItemSpawnData): Promise<void> {
     const itemIdToUse = data.itemId || data.id || "unknown_item";
-
-    // Get item data from items database to get model path and other properties
     const itemData = getItem(itemIdToUse);
-
-    // Create proper ItemEntityConfig (not generic EntityConfig)
-    const config: ItemEntityConfig = {
-      id: data.customId || `item_${this.nextEntityId++}`,
-      name: data.name || itemData?.name || itemIdToUse,
-      type: EntityType.ITEM,
-      position: data.position || { x: 0, y: 0, z: 0 },
-      rotation: { x: 0, y: 0, z: 0, w: 1 },
-      scale: { x: 1, y: 1, z: 1 },
-      visible: true,
-      interactable: true,
-      interactionType: InteractionType.PICKUP,
-      interactionDistance: 2,
-      description: itemData?.description || data.name || itemIdToUse,
-      model: itemData?.modelPath || data.model || null,
-      modelPath: itemData?.modelPath || data.model || undefined,
-      // ItemEntityConfig required fields at top level
-      itemType: String(itemData?.type || "misc"),
-      itemId: itemIdToUse,
-      quantity: data.quantity || 1,
-      stackable: itemData?.stackable !== false,
-      value: itemData?.value || data.value || 0,
-      weight: itemData?.weight || this.getItemWeight(itemIdToUse),
-      rarity: itemData?.rarity || ItemRarity.COMMON,
-      requirements: {
-        level: itemData?.requirements?.level || 1,
-        attack:
-          (itemData?.requirements?.skills as Record<string, number>)?.attack ||
-          0,
+    const quantity = Number(data.quantity ?? 1);
+    if (
+      !this.world.isServer ||
+      !itemData ||
+      !Number.isSafeInteger(quantity) ||
+      quantity <= 0
+    ) {
+      throw new Error("item_spawn_request_invalid");
+    }
+    const groundItems = this.world.getSystem<GroundItemSystem>("ground-items");
+    if (!groundItems) {
+      throw new Error("item_spawn_ground_custody_unavailable");
+    }
+    const sourceId = await groundItems.spawnGroundItem(
+      itemData.id,
+      quantity,
+      data.position,
+      {
+        despawnTime: ticksToMs(COMBAT_CONSTANTS.GROUND_ITEM_DESPAWN_TICKS),
+        droppedBy: data.droppedBy,
       },
-      effects: [],
-      armorSlot: null,
-      examine: itemData?.examine || "",
-      iconPath: itemData?.iconPath || "",
-      healAmount: itemData?.healAmount || 0,
-      // Properties field for Entity base class (must include ItemEntityProperties)
-      properties: {
-        movementComponent: null,
-        combatComponent: null,
-        healthComponent: null,
-        visualComponent: null,
-        health: { current: 1, max: 1 },
-        level: 1,
-        harvestable: false,
-        dialogue: [],
-        // ItemEntityProperties required fields
-        itemId: itemIdToUse,
-        quantity: data.quantity || 1,
-        stackable: itemData?.stackable !== false,
-        value: itemData?.value || data.value || 0,
-        weight: itemData?.weight || this.getItemWeight(itemIdToUse),
-        rarity: itemData?.rarity || ItemRarity.COMMON,
-      },
-    };
-
-    await this.spawnEntity(config);
+    );
+    if (!sourceId) throw new Error("item_spawn_ground_custody_rejected");
   }
 
   private handleItemPickup(data: { entityId: string; playerId: string }): void {
@@ -1610,8 +1583,8 @@ export class EntityManager extends SystemBase {
       rotation: { x: 0, y: 0, z: 0, w: 1 },
       scale: { x: 1, y: 1, z: 1 },
       visible: true,
-      interactable: true,
-      interactionType: InteractionType.PICKUP,
+      interactable: false,
+      interactionType: null,
       interactionDistance: 2,
       description: `Test item: ${config.name}`,
       model: null,
@@ -1638,6 +1611,7 @@ export class EntityManager extends SystemBase {
         },
         level: 1,
         itemId: config.itemId || "test-item",
+        custodyPolicy: "diagnostic_only",
         harvestable: false,
         dialogue: [],
         quantity: config.quantity || 1,

@@ -11,7 +11,8 @@
  * NOTE: Uses mocked system logic to avoid circular dependency issues.
  */
 
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect, beforeEach, vi } from "vitest";
+import { CoinPouchSystem } from "../CoinPouchSystem";
 
 // ============================================================================
 // Constants (mirror actual constants)
@@ -650,5 +651,102 @@ describe("CoinPouchSystem", () => {
     it("hasCoins returns false for unknown player", () => {
       expect(manager.hasCoins("nonexistent", 1)).toBe(false);
     });
+  });
+});
+
+describe("CoinPouchSystem disconnect persistence", () => {
+  it("persists the captured balance after the in-memory entry is cleared", async () => {
+    let releaseLookup!: (row: { coins: number }) => void;
+    const lookup = new Promise<{ coins: number }>((resolve) => {
+      releaseLookup = resolve;
+    });
+    const savePlayerAsync = vi.fn(async () => {});
+    const database = {
+      getPlayerAsync: vi.fn(() => lookup),
+      savePlayerAsync,
+    };
+    const system = Object.create(
+      CoinPouchSystem.prototype,
+    ) as CoinPouchSystem & {
+      world: {
+        isServer: boolean;
+        getSystem: () => typeof database;
+      };
+      coinBalances: Map<string, number>;
+      loadingPlayers: Set<string>;
+      initializedPlayers: Set<string>;
+      persistenceQueues: Map<string, Promise<void>>;
+      cleanupPlayerCoins: (playerId: string) => void;
+    };
+    system.world = {
+      isServer: true,
+      getSystem: () => database,
+    };
+    system.coinBalances = new Map([["player-1", 600]]);
+    system.loadingPlayers = new Set();
+    system.initializedPlayers = new Set(["player-1"]);
+    system.persistenceQueues = new Map();
+
+    system.cleanupPlayerCoins("player-1");
+    expect(system.coinBalances.has("player-1")).toBe(false);
+    releaseLookup({ coins: 100 });
+
+    await vi.waitFor(() => {
+      expect(savePlayerAsync).toHaveBeenCalledWith("player-1", { coins: 600 });
+    });
+  });
+
+  it("commits overlapping balance writes in mutation order", async () => {
+    let releaseFirstSave!: () => void;
+    const firstSave = new Promise<void>((resolve) => {
+      releaseFirstSave = resolve;
+    });
+    const committedBalances: number[] = [];
+    const savePlayerAsync = vi
+      .fn()
+      .mockImplementationOnce(async (_playerId, update: { coins: number }) => {
+        committedBalances.push(update.coins);
+        await firstSave;
+      })
+      .mockImplementationOnce(async (_playerId, update: { coins: number }) => {
+        committedBalances.push(update.coins);
+      });
+    const database = {
+      getPlayerAsync: vi.fn(async () => ({ coins: 0 })),
+      savePlayerAsync,
+    };
+    const system = Object.create(
+      CoinPouchSystem.prototype,
+    ) as CoinPouchSystem & {
+      world: {
+        isServer: boolean;
+        getSystem: () => typeof database;
+      };
+      coinBalances: Map<string, number>;
+      loadingPlayers: Set<string>;
+      initializedPlayers: Set<string>;
+      persistenceQueues: Map<string, Promise<void>>;
+    };
+    system.world = {
+      isServer: true,
+      getSystem: () => database,
+    };
+    system.coinBalances = new Map([["player-1", 1]]);
+    system.loadingPlayers = new Set();
+    system.initializedPlayers = new Set(["player-1"]);
+    system.persistenceQueues = new Map();
+
+    const first = system.persistCoinsImmediate("player-1");
+    await vi.waitFor(() => expect(savePlayerAsync).toHaveBeenCalledTimes(1));
+    system.coinBalances.set("player-1", 2);
+    const second = system.persistCoinsImmediate("player-1");
+
+    await Promise.resolve();
+    expect(savePlayerAsync).toHaveBeenCalledTimes(1);
+    releaseFirstSave();
+    await Promise.all([first, second]);
+
+    expect(committedBalances).toEqual([1, 2]);
+    expect(system.persistenceQueues.size).toBe(0);
   });
 });

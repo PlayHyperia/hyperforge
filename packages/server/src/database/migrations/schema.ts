@@ -14,6 +14,7 @@ import {
   serial,
   boolean,
   uniqueIndex,
+  check,
 } from "drizzle-orm/pg-core";
 import { sql } from "drizzle-orm";
 
@@ -514,7 +515,7 @@ export const agentMappings = pgTable(
     characterId: text("character_id").notNull(),
     agentName: text("agent_name").notNull(),
     streamingDuelEnabled: boolean("streaming_duel_enabled")
-      .default(true)
+      .default(false)
       .notNull(),
     createdAt: timestamp("created_at", { mode: "string" })
       .defaultNow()
@@ -528,7 +529,7 @@ export const agentMappings = pgTable(
       "btree",
       table.accountId.asc().nullsLast().op("text_ops"),
     ),
-    index("idx_agent_mappings_character").using(
+    uniqueIndex("idx_agent_mappings_character").using(
       "btree",
       table.characterId.asc().nullsLast().op("text_ops"),
     ),
@@ -542,6 +543,178 @@ export const agentMappings = pgTable(
       foreignColumns: [characters.id],
       name: "agent_mappings_character_id_characters_id_fk",
     }).onDelete("cascade"),
+  ],
+);
+
+export const solanaAgentAuthChallenges = pgTable(
+  "solana_agent_auth_challenges",
+  {
+    challengeId: text("challenge_id").primaryKey().notNull(),
+    walletHash: text("wallet_hash").notNull(),
+    messageHash: text("message_hash").notNull(),
+    nonceHash: text("nonce_hash").notNull(),
+    configFingerprint: text("config_fingerprint").notNull(),
+    agentName: text("agent_name").notNull(),
+    characterId: text("character_id"),
+    issuedAt: timestamp("issued_at", {
+      mode: "string",
+      withTimezone: true,
+    }).notNull(),
+    expiresAt: timestamp("expires_at", {
+      mode: "string",
+      withTimezone: true,
+    }).notNull(),
+    consumedAt: timestamp("consumed_at", {
+      mode: "string",
+      withTimezone: true,
+    }),
+    revokedAt: timestamp("revoked_at", {
+      mode: "string",
+      withTimezone: true,
+    }),
+    failedAttempts: integer("failed_attempts").default(0).notNull(),
+    lastFailureAt: timestamp("last_failure_at", {
+      mode: "string",
+      withTimezone: true,
+    }),
+    failureCode: text("failure_code"),
+  },
+  (table) => [
+    index("idx_solana_agent_auth_wallet_active").using(
+      "btree",
+      table.walletHash.asc().nullsLast().op("text_ops"),
+      table.expiresAt.asc().nullsLast().op("timestamptz_ops"),
+    ),
+    index("idx_solana_agent_auth_expiry").using(
+      "btree",
+      table.expiresAt.asc().nullsLast().op("timestamptz_ops"),
+    ),
+    check(
+      "solana_agent_auth_hash_lengths_check",
+      sql`${table.walletHash} ~ '^[0-9a-f]{64}$' AND ${table.messageHash} ~ '^[0-9a-f]{64}$' AND ${table.nonceHash} ~ '^[0-9a-f]{64}$' AND ${table.configFingerprint} ~ '^[0-9a-f]{64}$'`,
+    ),
+    check(
+      "solana_agent_auth_lifetime_check",
+      sql`${table.expiresAt} > ${table.issuedAt}`,
+    ),
+    check(
+      "solana_agent_auth_attempts_check",
+      sql`${table.failedAttempts} >= 0 AND ${table.failedAttempts} <= 5`,
+    ),
+    check(
+      "solana_agent_auth_terminal_check",
+      sql`NOT (${table.consumedAt} IS NOT NULL AND ${table.revokedAt} IS NOT NULL)`,
+    ),
+  ],
+);
+
+export const agentCredentialSessions = pgTable(
+  "agent_credential_sessions",
+  {
+    sessionId: text("session_id").primaryKey().notNull(),
+    accountId: text("account_id").notNull(),
+    characterId: text("character_id").notNull(),
+    authMethod: text("auth_method").notNull(),
+    issuedAt: timestamp("issued_at", {
+      mode: "string",
+      withTimezone: true,
+    }).notNull(),
+    expiresAt: timestamp("expires_at", {
+      mode: "string",
+      withTimezone: true,
+    }).notNull(),
+    revokedAt: timestamp("revoked_at", {
+      mode: "string",
+      withTimezone: true,
+    }),
+    revokedReason: text("revoked_reason"),
+  },
+  (table) => [
+    uniqueIndex("idx_agent_credential_sessions_one_active")
+      .using(
+        "btree",
+        table.accountId.asc().nullsLast().op("text_ops"),
+        table.characterId.asc().nullsLast().op("text_ops"),
+      )
+      .where(sql`${table.revokedAt} IS NULL`),
+    index("idx_agent_credential_sessions_expiry").using(
+      "btree",
+      table.expiresAt.asc().nullsLast().op("timestamptz_ops"),
+    ),
+    check(
+      "agent_credential_session_id_check",
+      sql`${table.sessionId} ~ '^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$'`,
+    ),
+    check(
+      "agent_credential_session_auth_method_check",
+      sql`${table.authMethod} IN ('sol-wallet-signature-v1', 'owner-credential-v1', 'local-diagnostic-wallet-v1', 'server-managed-agent-v1')`,
+    ),
+    check(
+      "agent_credential_session_lifetime_check",
+      sql`${table.expiresAt} > ${table.issuedAt} AND ${table.expiresAt} <= ${table.issuedAt} + INTERVAL '7 days'`,
+    ),
+    check(
+      "agent_credential_session_revocation_check",
+      sql`(${table.revokedAt} IS NULL AND ${table.revokedReason} IS NULL) OR (${table.revokedAt} IS NOT NULL AND ${table.revokedAt} >= ${table.issuedAt} AND ${table.revokedReason} IN ('rotated', 'owner_revoked', 'security_revoked'))`,
+    ),
+    foreignKey({
+      columns: [table.accountId],
+      foreignColumns: [users.id],
+      name: "agent_credential_sessions_account_id_users_id_fk",
+    }).onDelete("cascade"),
+    foreignKey({
+      columns: [table.characterId],
+      foreignColumns: [characters.id],
+      name: "agent_credential_sessions_character_id_characters_id_fk",
+    }).onDelete("cascade"),
+  ],
+);
+
+export const distributedRateLimitBuckets = pgTable(
+  "distributed_rate_limit_buckets",
+  {
+    bucketKey: text("bucket_key").primaryKey().notNull(),
+    scope: text("scope").notNull(),
+    windowMs: integer("window_ms").notNull(),
+    windowStartedAt: timestamp("window_started_at", {
+      mode: "string",
+      withTimezone: true,
+    }).notNull(),
+    expiresAt: timestamp("expires_at", {
+      mode: "string",
+      withTimezone: true,
+    }).notNull(),
+    requestCount: bigint("request_count", { mode: "number" }).notNull(),
+    updatedAt: timestamp("updated_at", {
+      mode: "string",
+      withTimezone: true,
+    }).notNull(),
+  },
+  (table) => [
+    index("idx_distributed_rate_limit_buckets_expiry").using(
+      "btree",
+      table.expiresAt.asc().nullsLast().op("timestamptz_ops"),
+    ),
+    check(
+      "distributed_rate_limit_bucket_key_check",
+      sql`${table.bucketKey} ~ '^[0-9a-f]{64}$'`,
+    ),
+    check(
+      "distributed_rate_limit_scope_check",
+      sql`${table.scope} ~ '^[a-z0-9][a-z0-9-]{0,63}$'`,
+    ),
+    check(
+      "distributed_rate_limit_window_check",
+      sql`${table.windowMs} BETWEEN 1000 AND 3600000 AND ${table.expiresAt} = ${table.windowStartedAt} + (${table.windowMs} * INTERVAL '1 millisecond')`,
+    ),
+    check(
+      "distributed_rate_limit_count_check",
+      sql`${table.requestCount} BETWEEN 1 AND 2147483647`,
+    ),
+    check(
+      "distributed_rate_limit_updated_check",
+      sql`${table.updatedAt} >= ${table.windowStartedAt} AND ${table.updatedAt} <= ${table.expiresAt}`,
+    ),
   ],
 );
 
@@ -732,6 +905,48 @@ export const questProcessingProgressReceipts = pgTable(
   ],
 );
 
+export const questKillProgressReceipts = pgTable(
+  "quest_kill_progress_receipts",
+  {
+    id: bigserial("id", { mode: "number" }).primaryKey().notNull(),
+    operationId: text("operation_id").notNull(),
+    playerId: text("player_id").notNull(),
+    questId: text("quest_id").notNull(),
+    questStartedAt: bigint("quest_started_at", { mode: "number" }).notNull(),
+    capturedStage: text("captured_stage").notNull(),
+    mobId: text("mob_id").notNull(),
+    mobType: text("mob_type").notNull(),
+    quantity: integer("quantity").default(1).notNull(),
+    createdAt: bigint("created_at", { mode: "number" }).notNull(),
+    resolvedAt: bigint("resolved_at", { mode: "number" }),
+    resolution: text("resolution"),
+    resultingStage: text("resulting_stage"),
+    resultingProgress: jsonb("resulting_progress"),
+  },
+  (table) => [
+    uniqueIndex("quest_kill_progress_receipts_operation_quest_unique").on(
+      table.operationId,
+      table.questId,
+    ),
+    index("idx_quest_kill_progress_receipts_pending_player").on(
+      table.playerId,
+      table.resolvedAt,
+      table.createdAt,
+      table.id,
+    ),
+    index("idx_quest_kill_progress_receipts_incarnation").on(
+      table.playerId,
+      table.questId,
+      table.questStartedAt,
+    ),
+    foreignKey({
+      columns: [table.playerId],
+      foreignColumns: [characters.id],
+      name: "quest_kill_progress_receipts_player_id_characters_id_fk",
+    }).onDelete("cascade"),
+  ],
+);
+
 export const processingActiveFires = pgTable(
   "processing_active_fires",
   {
@@ -774,5 +989,107 @@ export const processingActiveFires = pgTable(
       foreignColumns: [characters.id],
       name: "processing_active_fires_player_id_characters_id_fk",
     }).onDelete("cascade"),
+  ],
+);
+
+export const groundItemSources = pgTable(
+  "ground_item_sources",
+  {
+    sourceId: text("source_id").primaryKey().notNull(),
+    status: text("status").default("active").notNull(),
+    itemId: text("item_id").notNull(),
+    quantity: integer("quantity").notNull(),
+    stackable: boolean("stackable").notNull(),
+    positionX: doublePrecision("position_x").notNull(),
+    positionY: doublePrecision("position_y").notNull(),
+    positionZ: doublePrecision("position_z").notNull(),
+    tileX: integer("tile_x").notNull(),
+    tileZ: integer("tile_z").notNull(),
+    droppedBy: text("dropped_by"),
+    createdAt: bigint("created_at", { mode: "number" }).notNull(),
+    updatedAt: bigint("updated_at", { mode: "number" }).notNull(),
+    expiresAt: bigint("expires_at", { mode: "number" }).notNull(),
+    lootProtectionExpiresAt: bigint("loot_protection_expires_at", {
+      mode: "number",
+    }),
+    claimedByOperationId: text("claimed_by_operation_id"),
+    claimedByPlayerId: text("claimed_by_player_id"),
+    claimedAt: bigint("claimed_at", { mode: "number" }),
+    version: integer("version").default(1).notNull(),
+  },
+  (table) => [
+    uniqueIndex("uidx_ground_item_sources_claimed_operation")
+      .on(table.claimedByOperationId)
+      .where(sql`${table.claimedByOperationId} IS NOT NULL`),
+    index("idx_ground_item_sources_active_expiry").on(
+      table.status,
+      table.expiresAt,
+      table.sourceId,
+    ),
+    index("idx_ground_item_sources_active_merge").on(
+      table.status,
+      table.tileX,
+      table.tileZ,
+      table.itemId,
+      table.droppedBy,
+      table.expiresAt,
+    ),
+    check(
+      "ground_item_sources_status_check",
+      sql`${table.status} IN ('active', 'claimed', 'expired')`,
+    ),
+    check(
+      "ground_item_sources_identity_check",
+      sql`${table.sourceId} ~ '^ground_item_[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$' AND length(${table.itemId}) BETWEEN 1 AND 256 AND (${table.droppedBy} IS NULL OR length(${table.droppedBy}) BETWEEN 1 AND 128)`,
+    ),
+    check(
+      "ground_item_sources_quantity_check",
+      sql`${table.quantity} BETWEEN 1 AND 2147483647`,
+    ),
+    check(
+      "ground_item_sources_lifetime_check",
+      sql`${table.createdAt} >= 0 AND ${table.updatedAt} >= ${table.createdAt} AND ${table.expiresAt} > ${table.createdAt} AND (${table.lootProtectionExpiresAt} IS NULL OR ${table.lootProtectionExpiresAt} BETWEEN ${table.createdAt} AND ${table.expiresAt})`,
+    ),
+    check(
+      "ground_item_sources_position_check",
+      sql`${table.positionX} > '-Infinity'::double precision AND ${table.positionX} < 'Infinity'::double precision AND ${table.positionY} > '-Infinity'::double precision AND ${table.positionY} < 'Infinity'::double precision AND ${table.positionZ} > '-Infinity'::double precision AND ${table.positionZ} < 'Infinity'::double precision`,
+    ),
+    check(
+      "ground_item_sources_claim_check",
+      sql`(${table.status} = 'claimed' AND ${table.claimedByOperationId} IS NOT NULL AND ${table.claimedByPlayerId} IS NOT NULL AND ${table.claimedAt} IS NOT NULL) OR (${table.status} <> 'claimed' AND ${table.claimedByOperationId} IS NULL AND ${table.claimedByPlayerId} IS NULL AND ${table.claimedAt} IS NULL)`,
+    ),
+    check("ground_item_sources_version_check", sql`${table.version} >= 1`),
+  ],
+);
+
+export const groundItemSourceContributions = pgTable(
+  "ground_item_source_contributions",
+  {
+    contributionId: text("contribution_id").primaryKey().notNull(),
+    sourceId: text("source_id").notNull(),
+    requestFingerprint: text("request_fingerprint").notNull(),
+    itemId: text("item_id").notNull(),
+    quantity: integer("quantity").notNull(),
+    contributedAt: bigint("contributed_at", { mode: "number" }).notNull(),
+  },
+  (table) => [
+    index("idx_ground_item_source_contributions_source").on(
+      table.sourceId,
+      table.contributedAt,
+      table.contributionId,
+    ),
+    foreignKey({
+      columns: [table.sourceId],
+      foreignColumns: [groundItemSources.sourceId],
+      name: "ground_item_source_contributions_source_fk",
+    }).onDelete("restrict"),
+    check(
+      "ground_item_source_contributions_identity_check",
+      sql`${table.contributionId} ~ '^ground-item-source:[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$' AND ${table.requestFingerprint} ~ '^[0-9a-f]{64}$' AND length(${table.itemId}) BETWEEN 1 AND 256`,
+    ),
+    check(
+      "ground_item_source_contributions_quantity_check",
+      sql`${table.quantity} BETWEEN 1 AND 2147483647`,
+    ),
   ],
 );

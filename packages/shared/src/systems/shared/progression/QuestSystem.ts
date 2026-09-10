@@ -37,7 +37,6 @@ import type {
 } from "../../../types/game/quest-types";
 import { validateQuestDefinition } from "../../../types/game/quest-types";
 import type { NPCDiedPayload } from "../../../types/events/event-payloads";
-import { validateKillToken } from "../../../utils/game/KillTokenUtils";
 import type { IQuestSystem } from "../../../types/game/quest-interfaces";
 
 type DurableGatheringProgressReceipt = {
@@ -120,6 +119,45 @@ type DurableProcessingProgressRepository = {
   ) => Promise<"ignored" | "already_resolved">;
 };
 
+type DurableKillProgressReceipt = {
+  operationId: string;
+  playerId: string;
+  questId: string;
+  questStartedAt: number;
+  capturedStage: string;
+  mobId: string;
+  mobType: string;
+  quantity: number;
+  createdAt: number;
+};
+
+type DurableKillProgressRepository = {
+  getPendingKillProgressReceipts: (
+    playerId: string,
+  ) => Promise<DurableKillProgressReceipt[]>;
+  applyKillProgressReceipt: (request: {
+    operationId: string;
+    playerId: string;
+    questId: string;
+    questStartedAt: number;
+    capturedStage: string;
+    mobId: string;
+    mobType: string;
+    quantity: number;
+    createdAt: number;
+    expectedCurrentStage: string;
+    expectedProgress: StageProgress;
+    resultingStage: string;
+    resultingProgress: StageProgress;
+  }) => Promise<DurableGatheringProgressResult>;
+  retireKillProgressReceipt: (
+    receipt: DurableKillProgressReceipt,
+  ) => Promise<"retired" | "already_resolved" | "still_active">;
+  ignoreKillProgressReceipt: (
+    receipt: DurableKillProgressReceipt,
+  ) => Promise<"ignored" | "already_resolved">;
+};
+
 /**
  * QuestSystem - Handles quest progression and rewards
  *
@@ -183,8 +221,11 @@ export class QuestSystem extends SystemBase implements IQuestSystem {
   /** Cache: questId -> target -> QuestStage (for interact stages) */
   private _interactStageCache: Map<string, Map<string, QuestStage>> = new Map();
 
-  /** Per-quest persistence tails preserve event order and immutable snapshots. */
-  private readonly questProgressSaveTails = new Map<string, Promise<void>>();
+  /** One caller-visible acceptance attempt per player/quest at a time. */
+  private readonly questStartInflight = new Map<string, Promise<boolean>>();
+
+  /** Retains an uncertain start identity so a retry cannot mint a new request. */
+  private readonly questStartAttempts = new Map<string, number>();
 
   /** Per-player drains serialize every durable non-combat progression edge. */
   private readonly questReceiptDrainTails = new Map<string, Promise<void>>();
@@ -208,10 +249,17 @@ export class QuestSystem extends SystemBase implements IQuestSystem {
     // Load quest manifest
     await this.loadQuestManifest();
 
-    // Subscribe to NPC deaths for kill quest tracking
+    // Transient death is a wake-up hint only. Durable mob-loot custody captures
+    // every active quest incarnation before progress can change.
     this.subscribe<NPCDiedPayload>(EventType.NPC_DIED, async (data) => {
-      await this.handleNPCDied(data);
+      if (data.killedBy) await this.queueQuestReceiptDrain(data.killedBy);
     });
+    this.subscribe(
+      EventType.MOB_LOOT_COMMITTED,
+      async (data: { playerId: string }) => {
+        await this.queueQuestReceiptDrain(data.playerId);
+      },
+    );
 
     // Subscribe to player registration for loading quest state
     this.subscribe(
@@ -226,9 +274,14 @@ export class QuestSystem extends SystemBase implements IQuestSystem {
       this.playerStates.delete(data.playerId);
       this._activeQuestsCache.delete(data.playerId);
       this._activeQuestsDirty.delete(data.playerId);
-      for (const key of this.questProgressSaveTails.keys()) {
+      for (const key of this.questStartInflight.keys()) {
         if (key.startsWith(`${data.playerId}\0`)) {
-          this.questProgressSaveTails.delete(key);
+          this.questStartInflight.delete(key);
+        }
+      }
+      for (const key of this.questStartAttempts.keys()) {
+        if (key.startsWith(`${data.playerId}\0`)) {
+          this.questStartAttempts.delete(key);
         }
       }
       this.questReceiptDrainTails.delete(data.playerId);
@@ -274,6 +327,19 @@ export class QuestSystem extends SystemBase implements IQuestSystem {
     this.subscribe(EventType.CRAFTING_COMPLETE, queueProcessingDrain);
     this.subscribe(EventType.FLETCHING_COMPLETE, queueProcessingDrain);
     this.subscribe(EventType.TANNING_COMPLETE, queueProcessingDrain);
+    this.subscribe(
+      EventType.PROCESSING_REQUEST_PROGRESS,
+      async (data: { playerId: string; phase: string }) => {
+        // Family-specific completion events are presentation-level wake-up
+        // hints and can be lost or malformed after custody has committed. The
+        // durable committed phase is the cross-family authority that a quest
+        // receipt now exists and must be drained. Queueing both is safe because
+        // receipt application is serialized and idempotent.
+        if (data.phase === "committed") {
+          await this.queueQuestReceiptDrain(data.playerId);
+        }
+      },
+    );
 
     this.logger.info(
       `QuestSystem initialized with ${this.questDefinitions.size} quests`,
@@ -503,6 +569,19 @@ export class QuestSystem extends SystemBase implements IQuestSystem {
       // Progress is tracked by target ID (e.g., fire, bronze_bar)
       const interacted = row.stageProgress[stage.target] || 0;
       if (interacted >= stage.count) {
+        return "ready_to_complete";
+      }
+    }
+
+    if (stage.type === "dialogue") {
+      const stageIndex = this.getStageIndex(questId, stage.id);
+      const hasLaterObjective = definition.stages
+        .slice(stageIndex + 1)
+        .some((candidate) => candidate.type !== "dialogue");
+      if (!hasLaterObjective) {
+        // Database status intentionally stores only in_progress/completed.
+        // A terminal dialogue stage is the durable representation of
+        // "return to the quest NPC" and therefore derives ready-to-complete.
         return "ready_to_complete";
       }
     }
@@ -745,6 +824,25 @@ export class QuestSystem extends SystemBase implements IQuestSystem {
    * Called when player accepts quest via QUEST_START_ACCEPTED event
    */
   public async startQuest(playerId: string, questId: string): Promise<boolean> {
+    const key = `${playerId}\0${questId}`;
+    const existing = this.questStartInflight.get(key);
+    if (existing) return existing;
+    const attempt = this.startQuestAtomic(playerId, questId, key).finally(
+      () => {
+        if (this.questStartInflight.get(key) === attempt) {
+          this.questStartInflight.delete(key);
+        }
+      },
+    );
+    this.questStartInflight.set(key, attempt);
+    return attempt;
+  }
+
+  private async startQuestAtomic(
+    playerId: string,
+    questId: string,
+    attemptKey: string,
+  ): Promise<boolean> {
     const state = this.playerStates.get(playerId);
     if (!state) {
       this.logger.warn(`Cannot start quest: player ${playerId} not found`);
@@ -782,32 +880,91 @@ export class QuestSystem extends SystemBase implements IQuestSystem {
     const initialStage =
       firstKillStage?.id || definition.stages[1]?.id || definition.stages[0].id;
 
-    // Create quest progress
+    const questStartedAt =
+      this.questStartAttempts.get(attemptKey) ?? Date.now();
+    this.questStartAttempts.set(attemptKey, questStartedAt);
+    const inventorySystem = this.world.getSystem("inventory") as {
+      commitQuestStartAtomic?: (
+        playerId: string,
+        questId: string,
+        input: {
+          questStartedAt: number;
+          initialStage: string;
+          items: Array<{ itemId: string; quantity: number }>;
+        },
+      ) => Promise<
+        | {
+            ok: true;
+            committed: true;
+            liveInventoryApplied: boolean;
+            receipt: {
+              operationId: string;
+              replayed: boolean;
+              playerId: string;
+              questId: string;
+              questStartedAt: number;
+              initialStage: string;
+            };
+          }
+        | {
+            ok: false;
+            committed: false | "unknown";
+            reason: string;
+            retryable: boolean;
+          }
+      >;
+    };
+    if (!inventorySystem?.commitQuestStartAtomic) {
+      this.logger.error(
+        `Atomic quest start is unavailable for ${playerId}/${questId}`,
+      );
+      return false;
+    }
+    const start = await inventorySystem.commitQuestStartAtomic(
+      playerId,
+      questId,
+      {
+        questStartedAt,
+        initialStage,
+        items: definition.onStart?.items ?? [],
+      },
+    );
+    if (!start.ok) {
+      if (start.committed !== "unknown") {
+        this.questStartAttempts.delete(attemptKey);
+      }
+      this.logger.error(
+        `Quest start was not confirmed for ${playerId}/${questId}: ${start.reason}`,
+      );
+      return false;
+    }
+    if (
+      start.receipt.playerId !== playerId ||
+      start.receipt.questId !== questId ||
+      start.receipt.questStartedAt !== questStartedAt ||
+      start.receipt.initialStage !== initialStage
+    ) {
+      this.logger.error(
+        `Quest start returned contradictory authority for ${playerId}/${questId}`,
+      );
+      return false;
+    }
+
+    this.questStartAttempts.delete(attemptKey);
     const progress: QuestProgress = {
       playerId,
       questId,
       status: "in_progress",
       currentStage: initialStage,
       stageProgress: {},
-      startedAt: Date.now(),
+      startedAt: questStartedAt,
     };
-
     state.activeQuests.set(questId, progress);
     this.markActiveQuestsDirty(playerId);
-
-    // Save to database (isNew=true since we just started the quest)
-    await this.saveQuestProgress(
-      playerId,
-      questId,
-      initialStage,
-      {},
-      true,
-      progress.startedAt,
-    );
-
-    // Grant starting items
-    if (definition.onStart?.items) {
-      await this.grantItems(playerId, definition.onStart.items);
+    if (!start.liveInventoryApplied) {
+      this.logger.error(
+        `Quest ${questId} started but live inventory requires reconciliation for ${playerId}`,
+      );
     }
 
     // Emit quest started event
@@ -861,32 +1018,119 @@ export class QuestSystem extends SystemBase implements IQuestSystem {
       return false;
     }
 
-    // Move to completed
-    state.activeQuests.delete(questId);
-    state.completedQuests.add(questId);
-    this.markActiveQuestsDirty(playerId);
-
-    // Update in-memory quest points
-    if (definition.rewards.questPoints > 0) {
-      state.questPoints += definition.rewards.questPoints;
+    const questStartedAt = Number(progress.startedAt);
+    if (!Number.isSafeInteger(questStartedAt) || questStartedAt <= 0) {
+      this.logger.error(
+        `Quest ${questId} has no durable incarnation identity for ${playerId}`,
+      );
+      return false;
     }
-
-    // Update database atomically (quest completion + quest points in transaction)
-    await this.completeQuestWithPoints(
+    const inventorySystem = this.world.getSystem("inventory") as {
+      commitQuestCompletionAtomic?: (
+        playerId: string,
+        questId: string,
+        input: {
+          questStartedAt: number;
+          expectedStage: string;
+          expectedProgress: Record<string, number>;
+          questPoints: number;
+          items: Array<{ itemId: string; quantity: number }>;
+          xp: Record<string, number>;
+        },
+      ) => Promise<
+        | {
+            ok: true;
+            committed: true;
+            liveInventoryApplied: boolean;
+            receipt: {
+              operationId: string;
+              replayed: boolean;
+              currentQuestPoints: number;
+              progress: Array<{
+                skill:
+                  | "attack"
+                  | "strength"
+                  | "defense"
+                  | "constitution"
+                  | "ranged"
+                  | "magic"
+                  | "prayer"
+                  | "woodcutting"
+                  | "mining"
+                  | "fishing"
+                  | "firemaking"
+                  | "cooking"
+                  | "smithing"
+                  | "agility"
+                  | "crafting"
+                  | "fletching"
+                  | "runecrafting";
+                xpAmount: number;
+                awardedXp: number;
+                operationCommittedXp: number;
+                currentXp: number;
+                currentLevel: number;
+              }>;
+              prayer: {
+                pointUnits: number;
+                maxPoints: number;
+                activePrayers: string[];
+              } | null;
+            };
+          }
+        | {
+            ok: false;
+            reason: string;
+            committed: false | "unknown";
+            retryable: boolean;
+          }
+      >;
+    };
+    if (!inventorySystem?.commitQuestCompletionAtomic) {
+      this.logger.error(
+        `Atomic quest completion is unavailable for ${playerId}/${questId}`,
+      );
+      return false;
+    }
+    const completion = await inventorySystem.commitQuestCompletionAtomic(
       playerId,
       questId,
-      definition.rewards.questPoints,
+      {
+        questStartedAt,
+        expectedStage: progress.currentStage,
+        expectedProgress: progress.stageProgress,
+        questPoints: definition.rewards.questPoints,
+        items: definition.rewards.items,
+        xp: definition.rewards.xp,
+      },
     );
-
-    // Grant reward items
-    if (definition.rewards.items.length > 0) {
-      this.logger.info(
-        `[QuestSystem] Granting ${definition.rewards.items.length} reward items to ${playerId}`,
+    if (!completion.ok) {
+      this.logger.error(
+        `Quest completion was not confirmed for ${playerId}/${questId}: ${completion.reason}`,
       );
-      await this.grantItems(playerId, definition.rewards.items);
+      return false;
     }
 
-    // Emit quest completed event (SkillsSystem will handle XP rewards)
+    // The durable receipt is now the only authority allowed to move live state.
+    state.activeQuests.delete(questId);
+    state.completedQuests.add(questId);
+    state.questPoints = completion.receipt.currentQuestPoints;
+    this.markActiveQuestsDirty(playerId);
+    if (!completion.liveInventoryApplied) {
+      this.logger.error(
+        `Quest ${questId} committed but live inventory requires reconciliation for ${playerId}`,
+      );
+    }
+    this.emitTypedEvent(EventType.QUEST_COMPLETION_COMMITTED, {
+      playerId,
+      questId,
+      operationId: completion.receipt.operationId,
+      replayed: completion.receipt.replayed,
+      progress: completion.receipt.progress,
+      prayer: completion.receipt.prayer,
+    });
+
+    // Presentation only: every reward mutation above is already committed.
     this.logger.info(
       `[QuestSystem] Emitting QUEST_COMPLETED for ${playerId}, quest ${questId}`,
     );
@@ -895,111 +1139,11 @@ export class QuestSystem extends SystemBase implements IQuestSystem {
       questId,
       questName: definition.name,
       rewards: definition.rewards,
+      progressionCommitted: true,
     });
 
     this.logger.info(`Player ${playerId} completed quest: ${questId}`);
     return true;
-  }
-
-  /**
-   * Handle NPC death for kill quest tracking
-   */
-  private async handleNPCDied(data: NPCDiedPayload): Promise<void> {
-    const { killedBy, mobType, mobId, timestamp, killToken } = data;
-
-    // Validate kill token to prevent spoofed events
-    if (timestamp && killToken && mobId) {
-      if (!validateKillToken(mobId, killedBy, timestamp, killToken)) {
-        this.logger.warn(
-          `Invalid kill token for ${killedBy} killing ${mobId} - possible spoof attempt`,
-        );
-        return;
-      }
-    }
-
-    // Info-level logging for kill tracking visibility
-    this.logger.info(`[Quest] Kill: player=${killedBy}, mobType=${mobType}`);
-
-    const state = this.playerStates.get(killedBy);
-    if (!state) {
-      this.logger.warn(
-        `[Quest] No player state for ${killedBy} - kills not tracked`,
-      );
-      return;
-    }
-
-    this.logger.info(
-      `[Quest] Player ${killedBy}: ${state.activeQuests.size} active quests`,
-    );
-
-    // Check all active quests for kill objectives
-    for (const [questId, progress] of state.activeQuests) {
-      const definition = this.questDefinitions.get(questId);
-      if (!definition) {
-        continue;
-      }
-
-      // Use cached lookup (O(1) instead of O(n))
-      const stage = this.getStageById(questId, progress.currentStage);
-      if (!stage) {
-        continue;
-      }
-
-      if (stage.type !== "kill") {
-        continue;
-      }
-
-      // Check if this mob matches the target
-      const targetType = stage.target;
-      if (!targetType || mobType !== targetType) {
-        continue;
-      }
-
-      // Increment kill count (direct mutation to avoid GC pressure)
-      progress.stageProgress.kills = (progress.stageProgress.kills || 0) + 1;
-      const kills = progress.stageProgress.kills;
-      this.markActiveQuestsDirty(killedBy);
-
-      // Log at info level only for milestones (first, halfway, complete)
-      const requiredCount = stage.count || 1;
-      const halfway = Math.floor(requiredCount / 2);
-      if (kills === 1 || kills === halfway || kills >= requiredCount) {
-        this.logger.info(`Quest ${questId}: ${kills}/${requiredCount} kills`);
-      }
-
-      // Check if objective complete
-      if (stage.count && kills >= stage.count) {
-        progress.status = "ready_to_complete";
-
-        // Send chat message that objective is complete
-        this.emitTypedEvent(EventType.CHAT_MESSAGE, {
-          playerId: killedBy,
-          message: `You've killed enough ${targetType}s. Return to ${definition.startNpc.replace(/_/g, " ")}.`,
-          type: "game",
-        });
-      }
-
-      // Save progress (isNew=false since this is an update)
-      await this.queueQuestProgressSave(
-        killedBy,
-        questId,
-        progress.currentStage,
-        progress.stageProgress,
-        false,
-      );
-
-      // Emit progress event (include stage details so clients don't need a round-trip)
-      this.emitTypedEvent(EventType.QUEST_PROGRESSED, {
-        playerId: killedBy,
-        questId,
-        stage: progress.currentStage,
-        progress: progress.stageProgress,
-        description: stage.description,
-        stageType: stage.type,
-        stageTarget: stage.target,
-        stageCount: stage.count,
-      });
-    }
   }
 
   /**
@@ -1015,6 +1159,7 @@ export class QuestSystem extends SystemBase implements IQuestSystem {
       .then(async () => {
         await this.drainGatheringProgressReceipts(playerId);
         await this.drainProcessingProgressReceipts(playerId);
+        await this.drainKillProgressReceipts(playerId);
       });
     this.questReceiptDrainTails.set(playerId, drain);
     return drain.finally(() => {
@@ -1022,6 +1167,16 @@ export class QuestSystem extends SystemBase implements IQuestSystem {
         this.questReceiptDrainTails.delete(playerId);
       }
     });
+  }
+
+  /**
+   * Await the durable quest-receipt projection for a player. Processing
+   * callers use this as a commit barrier before scheduling the agent's next
+   * decision; event delivery starts the same drain but does not await async
+   * subscribers.
+   */
+  public reconcileDurableProgress(playerId: string): Promise<void> {
+    return this.queueQuestReceiptDrain(playerId);
   }
 
   /**
@@ -1379,33 +1534,179 @@ export class QuestSystem extends SystemBase implements IQuestSystem {
     throw new Error("quest_processing_progress_stale_retry_exhausted");
   }
 
-  /**
-   * Serialize saves for one quest and capture an immutable progress snapshot.
-   * Without this queue, a slower earlier database write can overwrite a newer
-   * stage/count, and passing the live mutable object can change the payload
-   * underneath an in-flight repository call.
-   */
-  private queueQuestProgressSave(
-    playerId: string,
-    questId: string,
-    stage: string,
-    progress: StageProgress,
-    isNew: boolean,
-  ): Promise<void> {
-    const key = `${playerId}\0${questId}`;
-    const snapshot = { ...progress };
-    const previous = this.questProgressSaveTails.get(key) ?? Promise.resolve();
-    const save = previous
-      .catch(() => {})
-      .then(() =>
-        this.saveQuestProgress(playerId, questId, stage, snapshot, isNew),
-      );
-    this.questProgressSaveTails.set(key, save);
-    return save.finally(() => {
-      if (this.questProgressSaveTails.get(key) === save) {
-        this.questProgressSaveTails.delete(key);
+  /** Recover mob kills captured in the same transaction as durable loot. */
+  private async drainKillProgressReceipts(playerId: string): Promise<void> {
+    if (!this.playerStates.has(playerId)) return;
+    const dbSystem = this.world.getSystem("database") as {
+      getQuestRepository?: () => Partial<DurableKillProgressRepository>;
+    };
+    const candidate = dbSystem?.getQuestRepository?.();
+    if (
+      !candidate?.getPendingKillProgressReceipts ||
+      !candidate.applyKillProgressReceipt ||
+      !candidate.retireKillProgressReceipt ||
+      !candidate.ignoreKillProgressReceipt
+    ) {
+      return;
+    }
+    const repository = candidate as DurableKillProgressRepository;
+    const receipts = await repository.getPendingKillProgressReceipts(playerId);
+    for (const receipt of receipts) {
+      if (
+        receipt.playerId !== playerId ||
+        !/^ground-item-mob-loot:[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(
+          receipt.operationId,
+        ) ||
+        !receipt.questId ||
+        !Number.isSafeInteger(receipt.questStartedAt) ||
+        receipt.questStartedAt < 0 ||
+        !receipt.capturedStage ||
+        !receipt.mobId ||
+        !receipt.mobType ||
+        receipt.quantity !== 1 ||
+        !Number.isSafeInteger(receipt.createdAt) ||
+        receipt.createdAt < 0
+      ) {
+        throw new Error("quest_kill_progress_receipt_invalid");
       }
-    });
+      await this.applyKillProgressReceipt(repository, receipt);
+    }
+  }
+
+  private async applyKillProgressReceipt(
+    repository: DurableKillProgressRepository,
+    receipt: DurableKillProgressReceipt,
+  ): Promise<void> {
+    const state = this.playerStates.get(receipt.playerId);
+    const progress = state?.activeQuests.get(receipt.questId);
+    const definition = this.questDefinitions.get(receipt.questId);
+    if (!state) return;
+    if (!progress || progress.startedAt !== receipt.questStartedAt) {
+      const retirement = await repository.retireKillProgressReceipt(receipt);
+      if (retirement === "still_active") {
+        throw new Error("quest_kill_progress_memory_desynchronized");
+      }
+      return;
+    }
+    if (!definition) {
+      throw new Error("quest_kill_progress_definition_missing");
+    }
+    const capturedStage = this.getStageById(
+      receipt.questId,
+      receipt.capturedStage,
+    );
+    if (
+      !capturedStage ||
+      capturedStage.type !== "kill" ||
+      capturedStage.target !== receipt.mobType
+    ) {
+      await repository.ignoreKillProgressReceipt(receipt);
+      return;
+    }
+
+    for (let attempt = 0; attempt < 4; attempt++) {
+      const originalStage = progress.currentStage;
+      const originalStatus = progress.status;
+      if (originalStage !== receipt.capturedStage) {
+        await repository.ignoreKillProgressReceipt(receipt);
+        return;
+      }
+      const originalStageDefinition = this.getStageById(
+        receipt.questId,
+        originalStage,
+      );
+      const nextCount = (progress.stageProgress.kills ?? 0) + receipt.quantity;
+      if (!Number.isSafeInteger(nextCount) || nextCount <= 0) {
+        throw new Error("quest_kill_progress_state_invalid");
+      }
+      const candidate: QuestProgress = {
+        ...progress,
+        stageProgress: { ...progress.stageProgress, kills: nextCount },
+      };
+      this.advanceThroughCompletedStages(
+        receipt.playerId,
+        receipt.questId,
+        candidate,
+        definition,
+      );
+
+      const result = await repository.applyKillProgressReceipt({
+        ...receipt,
+        expectedCurrentStage: originalStage,
+        expectedProgress: { ...progress.stageProgress },
+        resultingStage: candidate.currentStage,
+        resultingProgress: candidate.stageProgress,
+      });
+      if (result.status === "retired") return;
+      if (result.status === "stale") {
+        progress.currentStage = result.currentStage;
+        progress.stageProgress = { ...result.stageProgress };
+        progress.status = this.computeQuestStatus(receipt.questId, {
+          status: "in_progress",
+          currentStage: result.currentStage,
+          stageProgress: result.stageProgress,
+        });
+        continue;
+      }
+
+      progress.currentStage = result.currentStage;
+      progress.stageProgress = { ...result.stageProgress };
+      progress.status = this.computeQuestStatus(receipt.questId, {
+        status: "in_progress",
+        currentStage: result.currentStage,
+        stageProgress: result.stageProgress,
+      });
+      this.markActiveQuestsDirty(receipt.playerId);
+
+      const currentCount = progress.stageProgress.kills ?? 0;
+      const requiredCount = capturedStage.count || 1;
+      const halfway = Math.floor(requiredCount / 2);
+      if (
+        currentCount === receipt.quantity ||
+        currentCount === halfway ||
+        currentCount >= requiredCount
+      ) {
+        this.logger.info(
+          `Quest ${receipt.questId}: ${currentCount}/${requiredCount} kills`,
+        );
+      }
+      if (
+        progress.status === "ready_to_complete" &&
+        originalStatus !== "ready_to_complete"
+      ) {
+        this.emitTypedEvent(EventType.CHAT_MESSAGE, {
+          playerId: receipt.playerId,
+          message: `You've killed enough ${receipt.mobType}s. Return to ${definition.startNpc.replace(/_/g, " ")}.`,
+          type: "game",
+        });
+      } else if (progress.currentStage !== originalStage) {
+        const nextStage = this.getStageById(
+          receipt.questId,
+          progress.currentStage,
+        );
+        if (nextStage) {
+          this.emitTypedEvent(EventType.CHAT_MESSAGE, {
+            playerId: receipt.playerId,
+            message: `New objective: ${nextStage.description}`,
+            type: "game",
+          });
+        }
+      }
+
+      const emitStage = originalStageDefinition || capturedStage;
+      this.emitTypedEvent(EventType.QUEST_PROGRESSED, {
+        playerId: receipt.playerId,
+        questId: receipt.questId,
+        stage: progress.currentStage,
+        progress: progress.stageProgress,
+        description: emitStage.description,
+        stageType: emitStage.type,
+        stageTarget: emitStage.target,
+        stageCount: emitStage.count,
+      });
+      return;
+    }
+    throw new Error("quest_kill_progress_stale_retry_exhausted");
   }
 
   /**
@@ -1461,7 +1762,11 @@ export class QuestSystem extends SystemBase implements IQuestSystem {
       const nextStageIndex = this.getStageIndex(questId, nextStage.id);
       const afterDialogue = definition.stages[nextStageIndex + 1];
       if (!afterDialogue || afterDialogue.type === "dialogue") {
-        // This is the final "return to NPC" dialogue - quest is ready to complete
+        // Preserve the authored return stage instead of leaving the journal on
+        // the objective that just completed. The database retains
+        // `in_progress`; computeQuestStatus derives ready-to-complete from this
+        // terminal dialogue stage after recovery.
+        progress.currentStage = nextStage.id;
         progress.status = "ready_to_complete";
         if (emitMessages) {
           this.emitTypedEvent(EventType.CHAT_MESSAGE, {
@@ -1564,105 +1869,6 @@ export class QuestSystem extends SystemBase implements IQuestSystem {
   }
 
   /**
-   * Grant items to player (via InventorySystem)
-   */
-  private async grantItems(
-    playerId: string,
-    items: Array<{ itemId: string; quantity: number }>,
-  ): Promise<void> {
-    for (const { itemId, quantity } of items) {
-      this.emitTypedEvent(EventType.INVENTORY_ITEM_ADDED, {
-        playerId,
-        item: {
-          itemId,
-          quantity,
-          slot: -1, // Let inventory system find a slot
-        },
-      });
-    }
-  }
-
-  /**
-   * Save quest progress to database
-   * @param isNew - true if this is a new quest being started, false if updating existing progress
-   */
-  private async saveQuestProgress(
-    playerId: string,
-    questId: string,
-    stage: string,
-    progress: StageProgress,
-    isNew: boolean,
-    startedAt?: number,
-  ): Promise<void> {
-    try {
-      const dbSystem = this.world.getSystem("database") as {
-        getQuestRepository?: () => {
-          startQuest: (
-            playerId: string,
-            questId: string,
-            initialStage: string,
-            startedAt?: number,
-          ) => Promise<void>;
-          updateProgress: (
-            playerId: string,
-            questId: string,
-            stage: string,
-            progress: StageProgress,
-          ) => Promise<void>;
-        };
-      };
-
-      if (dbSystem?.getQuestRepository) {
-        const repo = dbSystem.getQuestRepository();
-
-        if (isNew) {
-          await repo.startQuest(playerId, questId, stage, startedAt);
-        } else {
-          await repo.updateProgress(playerId, questId, stage, progress);
-        }
-      }
-    } catch (error) {
-      this.logger.error(
-        `Failed to save quest progress for ${playerId}`,
-        error instanceof Error ? error : undefined,
-      );
-    }
-  }
-
-  /**
-   * Complete quest and award points atomically in database
-   * Uses a transaction to ensure consistency
-   */
-  private async completeQuestWithPoints(
-    playerId: string,
-    questId: string,
-    questPoints: number,
-  ): Promise<void> {
-    try {
-      const dbSystem = this.world.getSystem("database") as {
-        getQuestRepository?: () => {
-          completeQuestWithPoints: (
-            playerId: string,
-            questId: string,
-            questPoints: number,
-          ) => Promise<void>;
-        };
-      };
-
-      if (dbSystem?.getQuestRepository) {
-        await dbSystem
-          .getQuestRepository()
-          .completeQuestWithPoints(playerId, questId, questPoints);
-      }
-    } catch (error) {
-      this.logger.error(
-        `Failed to complete quest ${questId} for ${playerId}`,
-        error instanceof Error ? error : undefined,
-      );
-    }
-  }
-
-  /**
    * Abandon an active quest for a player
    *
    * Removes the quest from active quests and deletes progress from database
@@ -1685,28 +1891,50 @@ export class QuestSystem extends SystemBase implements IQuestSystem {
 
     const definition = this.questDefinitions.get(questId);
     const questName = definition?.name || questId;
+    if ((definition?.onStart?.items?.length ?? 0) > 0) {
+      this.logger.warn(
+        `Quest ${questId} cannot be abandoned after starter custody was issued for ${playerId}`,
+      );
+      return false;
+    }
+    const questStartedAt = Number(progress.startedAt);
+    if (!Number.isSafeInteger(questStartedAt) || questStartedAt <= 0) {
+      this.logger.error(
+        `Quest ${questId} has no durable incarnation identity for ${playerId}`,
+      );
+      return false;
+    }
 
-    // Remove from active quests
-    state.activeQuests.delete(questId);
-    this.markActiveQuestsDirty(playerId);
-
-    // Delete from database
+    // Persist the exact active-incarnation deletion before changing live state.
     try {
       const dbSystem = this.world.getSystem("database") as {
         getQuestRepository?: () => {
-          abandonQuest: (playerId: string, questId: string) => Promise<void>;
+          abandonQuest: (
+            playerId: string,
+            questId: string,
+            questStartedAt: number,
+          ) => Promise<void>;
         };
       };
-
-      if (dbSystem?.getQuestRepository) {
-        await dbSystem.getQuestRepository().abandonQuest(playerId, questId);
+      if (!dbSystem?.getQuestRepository) {
+        this.logger.error(
+          `Durable quest abandonment is unavailable for ${playerId}/${questId}`,
+        );
+        return false;
       }
+      await dbSystem
+        .getQuestRepository()
+        .abandonQuest(playerId, questId, questStartedAt);
     } catch (error) {
       this.logger.error(
         `Failed to delete quest ${questId} from database for ${playerId}`,
         error instanceof Error ? error : undefined,
       );
+      return false;
     }
+
+    state.activeQuests.delete(questId);
+    this.markActiveQuestsDirty(playerId);
 
     // Send chat message
     this.emitTypedEvent(EventType.CHAT_MESSAGE, {

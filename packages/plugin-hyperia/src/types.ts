@@ -38,6 +38,7 @@ export type EventType =
   | "INVENTORY_UPDATED"
   | "ITEM_PICKED_UP"
   | "ITEM_DROPPED"
+  | "ITEM_DROP_RESULT"
   | "PLAYER_EQUIPMENT_CHANGED"
   | "CHAT_MESSAGE"
   | "CRAFTING_COMPLETE"
@@ -49,6 +50,8 @@ export type EventType =
   | "DUEL_COMPLETED"
   | "DUEL_CANCELLED"
   | "DUEL_ON_DECK"
+  | "DUEL_PREPARATION_REVOKED"
+  | "DUEL_PREPARATION_STATUS"
   | "DUEL_COUNTDOWN_START"
   | "DUEL_COUNTDOWN_TICK"
   | "DUEL_OPPONENT_DISCONNECTED"
@@ -77,6 +80,31 @@ export interface NetworkEvent {
   data: unknown;
   timestamp?: number;
 }
+
+export type GroundItemDropResult =
+  | {
+      success: true;
+      committed: true;
+      playerId: string;
+      operationId: string;
+      itemId: string;
+      quantity: number;
+      sourceId: string;
+      position: { x: number; y: number; z: number };
+      replayed: boolean;
+      liveInventoryApplied: boolean;
+      liveCoinsApplied: boolean;
+      presentationReady: boolean;
+    }
+  | {
+      success: false;
+      committed: false | "unknown";
+      playerId: string;
+      operationId: string;
+      itemId: string;
+      quantity: number;
+      reason: string;
+    };
 
 // Combat styles
 export type CombatStyle = "attack" | "strength" | "defense" | "ranged";
@@ -553,6 +581,12 @@ export interface HyperiaServiceInterface {
   executeAttack(command: AttackEntityCommand): Promise<void>;
   executeUseItem(command: UseItemCommand): Promise<void>;
   executeEquipItem(command: EquipItemCommand): Promise<void>;
+  executeDropItem(
+    itemId: string,
+    quantity?: number,
+    slot?: number,
+    operationId?: string,
+  ): Promise<GroundItemDropResult>;
   executeChatMessage(command: ChatMessageCommand): Promise<void>;
   executeGatherResource(command: GatherResourceCommand): Promise<void>;
   executeTanning(

@@ -974,6 +974,44 @@ function summarize() {
       actual: stats.sse.parseErrors,
     },
     {
+      label: `SSE connect failures == 0`,
+      pass: stats.sse.connectFailures === 0,
+      actual: stats.sse.connectFailures,
+    },
+    {
+      label: `SSE reconnects == 0`,
+      pass: stats.sse.reconnects === 0,
+      actual: stats.sse.reconnects,
+    },
+    {
+      label: `SSE reset and unavailable events == 0`,
+      pass: stats.sse.resetEvents === 0 && stats.sse.unavailableEvents === 0,
+      actual: {
+        resets: stats.sse.resetEvents,
+        unavailable: stats.sse.unavailableEvents,
+      },
+    },
+    {
+      label: `SSE sequence gaps == 0`,
+      pass: stats.sse.gapEvents === 0,
+      actual: stats.sse.gapEvents,
+    },
+    {
+      label: `SSE duplicate sequences == 0`,
+      pass: stats.sse.duplicateEvents === 0,
+      actual: stats.sse.duplicateEvents,
+    },
+    {
+      label: `SSE out-of-order sequences == 0`,
+      pass: stats.sse.outOfOrderEvents === 0,
+      actual: stats.sse.outOfOrderEvents,
+    },
+    {
+      label: `SSE fatal client errors == 0`,
+      pass: stats.sse.fatalClientErrors === 0,
+      actual: stats.sse.fatalClientErrors,
+    },
+    {
       label: `SSE p95 delivery overhead beyond configured public delay <= ${maxSseP95LagMs}ms`,
       pass:
         sseDeliveryOverheadP95Ms == null
@@ -992,6 +1030,11 @@ function summarize() {
       actual: Number(hlsSegmentFailureRate.toFixed(4)),
     },
     {
+      label: `HLS fatal poller errors == 0`,
+      pass: stats.hls.fatalPollerErrors === 0,
+      actual: stats.hls.fatalPollerErrors,
+    },
+    {
       label: `API state failure rate <= ${maxApiFailureRate}`,
       pass: stateFailureRate <= maxApiFailureRate,
       actual: Number(stateFailureRate.toFixed(4)),
@@ -1000,6 +1043,16 @@ function summarize() {
       label: `API duel-context failure rate <= ${maxApiFailureRate}`,
       pass: duelFailureRate <= maxApiFailureRate,
       actual: Number(duelFailureRate.toFixed(4)),
+    },
+    {
+      label: `API fatal poller errors == 0`,
+      pass:
+        stats.api.state.fatalErrors === 0 &&
+        stats.api.duelContext.fatalErrors === 0,
+      actual: {
+        state: stats.api.state.fatalErrors,
+        duelContext: stats.api.duelContext.fatalErrors,
+      },
     },
     ...buildStreamingSoakChecks(duelIntegritySummary, {
       minResolvedDuels,

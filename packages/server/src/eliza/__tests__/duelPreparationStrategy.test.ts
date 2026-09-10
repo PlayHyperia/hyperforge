@@ -143,6 +143,7 @@ describe("duel preparation model strategy", () => {
     ).resolves.toMatchObject({
       primaryStyle: "ranged",
       source: "model",
+      decisionOutcome: "model_selected",
       reason: "Use mobility against the public pressure profile.",
       policyVersion: DUEL_PREPARATION_ROLE_POLICY_VERSION,
       tacticalStrategy: {
@@ -180,6 +181,7 @@ describe("duel preparation model strategy", () => {
     expect(decision).toMatchObject({
       primaryStyle: "melee",
       source: "deterministic",
+      decisionOutcome: "deterministic_model_rejected",
       tacticalStrategy: { prayer: null },
     });
     const prompt = String(
@@ -316,6 +318,7 @@ describe("duel preparation model strategy", () => {
     expect(rejected).toMatchObject({
       primaryStyle: "melee",
       source: "deterministic",
+      decisionOutcome: "deterministic_model_rejected",
       reason: "The model role decision failed strict validation.",
     });
 
@@ -327,6 +330,7 @@ describe("duel preparation model strategy", () => {
     expect(unavailable).toMatchObject({
       primaryStyle: "melee",
       source: "deterministic",
+      decisionOutcome: "deterministic_model_failed",
       reason: "The model role decision timed out or failed.",
     });
     expect(rejected.tacticalStrategy).toEqual(unavailable.tacticalStrategy);
@@ -373,6 +377,7 @@ describe("duel preparation model strategy", () => {
     expect(timedOut).toMatchObject({
       primaryStyle: "melee",
       source: "deterministic",
+      decisionOutcome: "deterministic_model_failed",
       reason: "The model role decision timed out or failed.",
     });
     expect(timedOut.tacticalStrategy).toMatchObject({
@@ -393,6 +398,7 @@ describe("duel preparation model strategy", () => {
     expect(singleRole).toMatchObject({
       primaryStyle: "melee",
       source: "deterministic",
+      decisionOutcome: "deterministic_single_legal_role",
     });
 
     const deadline = await chooseDuelPreparationRole({
@@ -403,8 +409,44 @@ describe("duel preparation model strategy", () => {
     expect(deadline).toMatchObject({
       primaryStyle: "melee",
       source: "deterministic",
+      decisionOutcome: "deterministic_deadline_exhausted",
       reason: "The preparation deadline had insufficient model budget.",
     });
     expect(useModel).not.toHaveBeenCalled();
+  });
+
+  it("classifies every pre-model and empty-response fallback without free-form inference", async () => {
+    await expect(
+      chooseDuelPreparationRole({
+        ...baseInput(),
+        runtime: null,
+      }),
+    ).resolves.toMatchObject({
+      source: "deterministic",
+      decisionOutcome: "deterministic_runtime_unavailable",
+    });
+
+    await expect(
+      chooseDuelPreparationRole({
+        ...baseInput(),
+        availableRoles: ["ranged", "mage"],
+        runtime: { useModel: vi.fn() } as never,
+      }),
+    ).resolves.toMatchObject({
+      source: "deterministic",
+      decisionOutcome: "deterministic_invalid_role_set",
+    });
+
+    await expect(
+      chooseDuelPreparationRole({
+        ...baseInput(),
+        runtime: {
+          useModel: vi.fn(async () => Promise.resolve(null)),
+        } as never,
+      }),
+    ).resolves.toMatchObject({
+      source: "deterministic",
+      decisionOutcome: "deterministic_model_empty",
+    });
   });
 });

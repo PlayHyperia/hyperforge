@@ -4,6 +4,14 @@
  */
 
 import { EquipmentSlotName } from "../core/core";
+import type {
+  StreamingDuelDamageObservationContext,
+  StreamingDuelExecutorObservationContext,
+  StreamingDuelFoodObservationContext,
+  StreamingDuelPrayerObservationContext,
+  StreamingDuelRoleSwitchObservationContext,
+  StreamingDuelStyleObservationContext,
+} from "../game/streaming-duel-action-observation";
 
 // Boolean representation in database (0 or 1 for compatibility)
 type SQLiteBoolean = 0 | 1;
@@ -40,6 +48,7 @@ export interface CombatLoadoutCommitRequest {
   requestFingerprint: string;
   expected: CombatLoadoutPersistenceSnapshot;
   committed: CombatLoadoutPersistenceSnapshot;
+  publicActionObservation?: StreamingDuelRoleSwitchObservationContext;
 }
 
 export interface CombatLoadoutCommitReceipt {
@@ -128,6 +137,311 @@ export interface InventoryDebitCommitReceipt {
   committed: InventorySaveItem[];
 }
 
+export type ProjectileRuneCostOperationStatus =
+  "pending" | "fired" | "resolved" | "cancelled";
+export type ProjectileRuneCostRefundDestination =
+  "inventory" | "bank" | "mixed";
+
+/** Exact multi-rune debit staged before a spell projectile is admitted. */
+export interface ProjectileRuneCostCommitRequest extends InventoryDebitCommitRequest {}
+
+export interface ProjectileRuneCostSettlementRequest {
+  operationId: string;
+  playerId: string;
+  requestFingerprint: string;
+}
+
+export interface ProjectileRuneCostSettlementHandle extends ProjectileRuneCostSettlementRequest {
+  requirements: InventoryDebitRequirement[];
+}
+
+export interface ProjectileRuneCostCommitReceipt {
+  operationId: string;
+  playerId: string;
+  requestFingerprint: string;
+  replayed: boolean;
+  requirements: InventoryDebitRequirement[];
+  status: ProjectileRuneCostOperationStatus;
+  committed: InventorySaveItem[];
+  refundDestination: ProjectileRuneCostRefundDestination | null;
+}
+
+/** Durable lifecycle state for one exact ground-source occurrence. */
+export type GroundItemSourceStatus = "active" | "claimed" | "expired";
+
+/** Authoritative source state reconstructed by a replacement world authority. */
+export interface GroundItemSourceState {
+  sourceId: string;
+  status: GroundItemSourceStatus;
+  itemId: string;
+  quantity: number;
+  stackable: boolean;
+  position: { x: number; y: number; z: number };
+  tile: { x: number; z: number };
+  droppedBy: string | null;
+  createdAt: number;
+  updatedAt: number;
+  expiresAt: number;
+  lootProtectionExpiresAt: number | null;
+  version: number;
+}
+
+/**
+ * One idempotent contribution to a durable ground source. PostgreSQL may merge
+ * compatible stackable contributions while preserving each contribution ID.
+ */
+export interface GroundItemSourceRegistrationRequest {
+  contributionId: string;
+  preferredSourceId: string;
+  requestFingerprint: string;
+  itemId: string;
+  quantity: number;
+  stackable: boolean;
+  position: { x: number; y: number; z: number };
+  tile: { x: number; z: number };
+  droppedBy: string | null;
+  lifetimeMs: number;
+  lootProtectionMs: number;
+  allowMerge: boolean;
+}
+
+/** Exact registration replay plus the source's current terminal or active state. */
+export interface GroundItemSourceRegistrationReceipt extends GroundItemSourceState {
+  contributionId: string;
+  requestFingerprint: string;
+  replayed: boolean;
+}
+
+/** One manual drop whose debit and durable source are committed together. */
+export interface GroundItemDropCommitRequest {
+  operationId: string;
+  playerId: string;
+  requestFingerprint: string;
+  itemId: string;
+  quantity: number;
+  slotIndex: number | null;
+  source: GroundItemSourceRegistrationRequest;
+}
+
+export interface GroundItemDropCommitReceipt {
+  operationId: string;
+  playerId: string;
+  requestFingerprint: string;
+  replayed: boolean;
+  itemId: string;
+  quantity: number;
+  slotIndex: number | null;
+  operationCommittedCoins: number | null;
+  currentCoins: number;
+  committed: InventorySaveItem[];
+  source: GroundItemSourceRegistrationReceipt;
+}
+
+/** One public-zone death whose owned custody and every resulting source co-commit. */
+export interface GroundItemDeathCommitRequest {
+  operationId: string;
+  playerId: string;
+  requestFingerprint: string;
+  deathTimestamp: number;
+  position: { x: number; y: number; z: number };
+  killedBy: string;
+  zoneType: "wilderness" | "pvp_zone";
+  sources: GroundItemSourceRegistrationRequest[];
+}
+
+export interface GroundItemDeathCommitReceipt {
+  operationId: string;
+  playerId: string;
+  requestFingerprint: string;
+  replayed: boolean;
+  deathTimestamp: number;
+  position: { x: number; y: number; z: number };
+  killedBy: string;
+  zoneType: "wilderness" | "pvp_zone";
+  dropped: Array<{ itemId: string; quantity: number }>;
+  sources: GroundItemSourceRegistrationReceipt[];
+}
+
+/** One authoritative mob-death occurrence and its frozen loot-source roll. */
+export interface GroundItemMobLootCommitRequest {
+  operationId: string;
+  killedBy: string;
+  requestFingerprint: string;
+  mobId: string;
+  mobType: string;
+  deathTimestamp: number;
+  position: { x: number; y: number; z: number };
+  killToken: string;
+  /** Exact combat style used by the lethal authoritative hit. */
+  attackStyle: string;
+  /** Existing kill-XP authority: the defeated mob's full health value. */
+  damageDealt: number;
+  sources: GroundItemSourceRegistrationRequest[];
+}
+
+export type MobCombatProgressSkill =
+  "attack" | "strength" | "defense" | "constitution" | "ranged" | "magic";
+
+/** Durable result for one combat-skill component of a mob death. */
+export interface MobCombatProgressReceipt {
+  skill: MobCombatProgressSkill;
+  xpAmount: number;
+  awardedXp: number;
+  operationCommittedXp: number;
+  currentXp: number;
+  currentLevel: number;
+}
+
+/** Durable combat progression returned by a lethal competitive duel hit. */
+export type DuelCombatProgressReceipt = MobCombatProgressReceipt;
+
+export interface GroundItemMobLootCommitReceipt {
+  operationId: string;
+  killedBy: string;
+  requestFingerprint: string;
+  replayed: boolean;
+  mobId: string;
+  mobType: string;
+  deathTimestamp: number;
+  position: { x: number; y: number; z: number };
+  killToken: string;
+  attackStyle: string;
+  damageDealt: number;
+  combatProgress: MobCombatProgressReceipt[];
+  dropped: Array<{ itemId: string; quantity: number }>;
+  sources: GroundItemSourceRegistrationReceipt[];
+}
+
+/**
+ * One exact ground source credited to a player's durable destination custody.
+ * The source identity is serialized independently from the player so two world
+ * authorities cannot both credit the same drop.
+ */
+export interface GroundItemPickupCommitRequest {
+  operationId: string;
+  playerId: string;
+  requestFingerprint: string;
+  sourceEntityId: string;
+  itemId: string;
+  quantity: number;
+}
+
+export interface GroundItemPickupCommitReceipt {
+  operationId: string;
+  playerId: string;
+  requestFingerprint: string;
+  replayed: boolean;
+  sourceEntityId: string;
+  itemId: string;
+  quantity: number;
+  stackable: boolean;
+  /** Exact balance written by this operation for a coin source, otherwise null. */
+  operationCommittedCoins: number | null;
+  /** Current locked balance at response time; safe to apply after an old replay. */
+  currentCoins: number;
+  /** Current locked inventory at response time; safe to apply after an old replay. */
+  committed: InventorySaveItem[];
+}
+
+/** Durable lifecycle of one food item debit and its matching health effect. */
+export type FoodConsumptionOperationStatus = "pending" | "completed";
+
+/** Why a completed food operation produced no health increase. */
+export type FoodConsumptionCompletionReason =
+  "player_not_alive" | "full_health";
+
+/**
+ * Starts one idempotent food operation. The database validates the registered
+ * item, debits exactly one unit, and records a recoverable pending health
+ * effect while holding the character custody lock.
+ */
+export interface FoodConsumptionCommitRequest {
+  operationId: string;
+  playerId: string;
+  requestFingerprint: string;
+  itemId: string;
+  healAmount: number;
+  /** Present only for an authoritative in-progress streaming duel action. */
+  publicActionObservation?: StreamingDuelFoodObservationContext;
+}
+
+/** Completes (or replays) the health half of a durable food operation. */
+export interface FoodConsumptionCompleteRequest {
+  operationId: string;
+  playerId: string;
+  requestFingerprint: string;
+}
+
+/** Durable result shared by begin, completion, replay, and startup recovery. */
+export interface FoodConsumptionCommitReceipt {
+  operationId: string;
+  playerId: string;
+  requestFingerprint: string;
+  replayed: boolean;
+  itemId: string;
+  healAmount: number;
+  status: FoodConsumptionOperationStatus;
+  healedAmount: number;
+  healthAfter: number | null;
+  completionReason?: FoodConsumptionCompletionReason;
+  committed: InventorySaveItem[];
+}
+
+/** One idempotent streaming-duel hit committed with target health and public evidence. */
+export interface DuelDamageCompetitiveAuthority {
+  preparationId: string;
+  fencingToken: string;
+  snapshotDigest: string;
+}
+
+/** Exact competitive win co-committed by a lethal persisted-duel hit. */
+export interface DuelDamageCompetitiveTerminal {
+  outcome: "win";
+  winnerId: string;
+  loserId: string;
+  winReason: "kill";
+  terminalAt: number;
+  seed: string;
+  replayHash: string;
+}
+
+/** Exact fired projectile cost that must settle with one durable duel hit. */
+export interface DuelDamageProjectileCostAuthority {
+  operationType: "ammunition_shot" | "projectile_rune_cost";
+  operationId: string;
+  playerId: string;
+  requestFingerprint: string;
+}
+
+export interface DuelDamageCommitRequest {
+  operationId: string;
+  attackerId: string;
+  targetPlayerId: string;
+  requestFingerprint: string;
+  requestedDamage: number;
+  /** Exact existing PvP kill-XP style frozen at the lethal hit boundary. */
+  attackStyle: string;
+  publicActionObservation: StreamingDuelDamageObservationContext;
+  competitiveAuthority?: DuelDamageCompetitiveAuthority;
+  projectileCost?: DuelDamageProjectileCostAuthority;
+}
+
+export interface DuelDamageCommitReceipt {
+  operationId: string;
+  attackerId: string;
+  targetPlayerId: string;
+  requestFingerprint: string;
+  requestedDamage: number;
+  replayed: boolean;
+  appliedDamage: number;
+  healthBefore: number;
+  healthAfter: number;
+  targetDied: boolean;
+  xpDamageAuthority: number | null;
+  combatProgress: DuelCombatProgressReceipt[];
+  competitiveTerminal: DuelDamageCompetitiveTerminal | null;
+}
+
 /** One idempotent bone burial that consumes custody and awards Prayer XP. */
 export interface BoneBurialCommitRequest {
   operationId: string;
@@ -151,6 +465,112 @@ export interface BoneBurialCommitReceipt {
   operationCommittedXp: number;
   currentXp: number;
   currentLevel: number;
+  committed: InventorySaveItem[];
+}
+
+/** Skills that a quest definition may reward directly on completion. */
+export type QuestRewardSkill =
+  | "attack"
+  | "strength"
+  | "defense"
+  | "constitution"
+  | "ranged"
+  | "magic"
+  | "prayer"
+  | "woodcutting"
+  | "mining"
+  | "fishing"
+  | "firemaking"
+  | "cooking"
+  | "smithing"
+  | "agility"
+  | "crafting"
+  | "fletching"
+  | "runecrafting";
+
+/** One manifest-authored item credited by a quest completion. */
+export interface QuestCompletionRewardItem {
+  itemId: string;
+  quantity: number;
+  stackable: boolean;
+}
+
+/** One manifest-authored starter item credited with durable quest acceptance. */
+export interface QuestStartRewardItem {
+  itemId: string;
+  quantity: number;
+  stackable: boolean;
+}
+
+/**
+ * Starts one exact quest incarnation. The progress row, starter inventory,
+ * audit record, and replay receipt commit together.
+ */
+export interface QuestStartCommitRequest {
+  operationId: string;
+  playerId: string;
+  requestFingerprint: string;
+  questId: string;
+  questStartedAt: number;
+  initialStage: string;
+  items: QuestStartRewardItem[];
+}
+
+export interface QuestStartCommitReceipt extends QuestStartCommitRequest {
+  replayed: boolean;
+  committed: InventorySaveItem[];
+}
+
+/** One manifest-authored skill reward committed with the quest result. */
+export interface QuestCompletionRewardXp {
+  skill: QuestRewardSkill;
+  xpAmount: number;
+}
+
+/** Durable progression result for one quest reward skill. */
+export interface QuestCompletionProgressReceipt extends QuestCompletionRewardXp {
+  awardedXp: number;
+  operationCommittedXp: number;
+  currentXp: number;
+  currentLevel: number;
+}
+
+/**
+ * Completes one exact quest incarnation. Quest state, points, reward items,
+ * direct XP, Prayer state, and the replay receipt commit together.
+ */
+export interface QuestCompletionCommitRequest {
+  operationId: string;
+  playerId: string;
+  requestFingerprint: string;
+  questId: string;
+  questStartedAt: number;
+  expectedStage: string;
+  expectedProgress: Record<string, number>;
+  questPoints: number;
+  items: QuestCompletionRewardItem[];
+  xp: QuestCompletionRewardXp[];
+}
+
+export interface QuestCompletionCommitReceipt {
+  operationId: string;
+  playerId: string;
+  requestFingerprint: string;
+  replayed: boolean;
+  questId: string;
+  questStartedAt: number;
+  expectedStage: string;
+  expectedProgress: Record<string, number>;
+  completedAt: number;
+  questPoints: number;
+  operationCommittedQuestPoints: number;
+  currentQuestPoints: number;
+  items: QuestCompletionRewardItem[];
+  xp: QuestCompletionRewardXp[];
+  progress: QuestCompletionProgressReceipt[];
+  /** Current locked Prayer state when a Prayer reward exists, otherwise null. */
+  prayer: PrayerPersistenceSnapshot | null;
+  /** Current locked inventory at response time, safe for delayed replay apply. */
   committed: InventorySaveItem[];
 }
 
@@ -262,6 +682,32 @@ export interface ProcessingActionFireEffect {
 /** A committed active fire with the owning player required for world recovery. */
 export interface ActiveProcessingFire extends ProcessingActionFireEffect {
   playerId: string;
+  /** Database clock sampled with the recovery query; absent only for live commits. */
+  databaseObservedAt?: number;
+}
+
+/** One fire-expiry transition whose ash source is committed in the same write. */
+export interface ProcessingFireExtinguishCommitRequest {
+  operationId: string;
+  fireId: string;
+  playerId: string;
+  requestFingerprint: string;
+  position: { x: number; y: number; z: number };
+  expiresAt: number;
+  source: GroundItemSourceRegistrationRequest;
+}
+
+export interface ProcessingFireExtinguishCommitReceipt {
+  operationId: string;
+  fireId: string;
+  playerId: string;
+  requestFingerprint: string;
+  replayed: boolean;
+  position: { x: number; y: number; z: number };
+  expiresAt: number;
+  extinguishedAt: number;
+  sourceRequest: GroundItemSourceRegistrationRequest;
+  source: GroundItemSourceRegistrationReceipt;
 }
 
 /**
@@ -327,6 +773,117 @@ export interface EquipmentStackDebitCommitReceipt {
   committed: EquipmentSaveItem[];
 }
 
+export type AmmunitionRecoveryDisposition = "recovered" | "destroyed";
+export type AmmunitionShotOperationStatus =
+  "pending" | "fired" | "resolved" | "cancelled";
+export type AmmunitionShotRefundDestination =
+  "equipment" | "inventory" | "bank";
+
+/** One fired arrow whose debit and optional recovery source commit together. */
+export interface AmmunitionShotCommitRequest {
+  operationId: string;
+  playerId: string;
+  requestFingerprint: string;
+  itemId: string;
+  quantity: 1;
+  recoveryDisposition: AmmunitionRecoveryDisposition;
+  source: GroundItemSourceRegistrationRequest | null;
+}
+
+export interface AmmunitionShotCommitReceipt {
+  operationId: string;
+  playerId: string;
+  requestFingerprint: string;
+  replayed: boolean;
+  itemId: string;
+  quantity: 1;
+  recoveryDisposition: AmmunitionRecoveryDisposition;
+  status: AmmunitionShotOperationStatus;
+  committed: EquipmentSaveItem[];
+  committedInventory: InventorySaveItem[];
+  refundDestination: AmmunitionShotRefundDestination | null;
+  sourceRequest: GroundItemSourceRegistrationRequest | null;
+  source: GroundItemSourceRegistrationReceipt | null;
+}
+
+/** Immutable identity used to settle one previously staged shot. */
+export interface AmmunitionShotSettlementRequest {
+  operationId: string;
+  playerId: string;
+  requestFingerprint: string;
+}
+
+/** Private in-process handle carried by the reserved projectile. */
+export interface AmmunitionShotSettlementHandle extends AmmunitionShotSettlementRequest {
+  itemId: string;
+  recoveryDisposition: AmmunitionRecoveryDisposition;
+}
+
+/**
+ * Idempotent attack-style authority. A duel context causes the accepted public
+ * acknowledgement to commit in the same transaction as the character style.
+ */
+export interface AttackStyleCommitRequest {
+  operationId: string;
+  playerId: string;
+  requestFingerprint: string;
+  requestedStyle: string;
+  publicActionObservation?: StreamingDuelStyleObservationContext;
+}
+
+export interface AttackStyleCommitReceipt {
+  operationId: string;
+  playerId: string;
+  requestFingerprint: string;
+  requestedStyle: string;
+  replayed: boolean;
+  /** Style written by this immutable operation. */
+  operationCommittedStyle: string;
+  /** Current locked character style at receipt/replay time. */
+  currentStyle: string;
+}
+
+export type StreamingDuelExecutorCommand =
+  | Readonly<{
+      kind: "movement";
+      mode: "ground";
+      target: readonly [number, number, number];
+      runMode: boolean;
+    }>
+  | Readonly<{
+      kind: "movement";
+      mode: "combat_approach";
+      targetId: string;
+      targetType: "player";
+    }>
+  | Readonly<{
+      kind: "engagement";
+      targetId: string;
+      targetType: "player";
+    }>;
+
+export type StreamingDuelExecutorCommandOutcome =
+  "accepted" | "rejected" | "error";
+
+/** Immutable write-ahead command staged before an in-memory executor call. */
+export interface StreamingDuelExecutorCommandRequest {
+  operationId: string;
+  playerId: string;
+  requestFingerprint: string;
+  publicActionObservation: StreamingDuelExecutorObservationContext;
+  command: StreamingDuelExecutorCommand;
+}
+
+export interface StreamingDuelExecutorCommandCompletionRequest extends StreamingDuelExecutorCommandRequest {
+  outcome: StreamingDuelExecutorCommandOutcome;
+}
+
+export interface StreamingDuelExecutorCommandReceipt extends StreamingDuelExecutorCommandRequest {
+  replayed: boolean;
+  completed: boolean;
+  outcome: StreamingDuelExecutorCommandOutcome | null;
+}
+
 /** Fixed-point prayer state persisted at one million units per point. */
 export interface PrayerPersistenceSnapshot {
   pointUnits: number;
@@ -349,6 +906,7 @@ export interface PrayerStateCommitRequest {
   transition: PrayerStateTransitionKind;
   expected: PrayerPersistenceSnapshot;
   committed: PrayerPersistenceSnapshot;
+  publicActionObservation?: StreamingDuelPrayerObservationContext;
 }
 
 export interface PrayerStateCommitReceipt {
@@ -429,6 +987,7 @@ export interface PlayerRow {
 /** Generic saves cannot mutate atomic Prayer progression or resource custody. */
 export type PlayerPersistenceUpdate = Omit<
   Partial<PlayerRow>,
+  | "attackStyle"
   | "prayerLevel"
   | "prayerXp"
   | "prayerPoints"

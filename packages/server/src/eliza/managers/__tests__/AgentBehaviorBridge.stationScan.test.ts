@@ -20,6 +20,7 @@ function worldEntity(params: {
   entityType?: string;
   position: [number, number, number];
   interactionDistance?: number;
+  footprint?: { width: number; depth: number };
   npcType?: string;
   resourceId?: string;
   resourceType?: string;
@@ -37,6 +38,9 @@ function worldEntity(params: {
     id: params.id,
     ...(params.entityType ? { entityType: params.entityType } : {}),
     position: params.position,
+    ...(params.footprint
+      ? { getInteractionFootprint: () => ({ ...params.footprint! }) }
+      : {}),
     config: {
       ...(params.interactionDistance === undefined
         ? {}
@@ -83,6 +87,7 @@ describe("AgentBehaviorBridge workstation scan", () => {
           entityType: "furnace",
           position: [10, 0, 10],
           interactionDistance: 2,
+          footprint: { width: 2, depth: 1 },
         }),
       ],
       [
@@ -167,6 +172,8 @@ describe("AgentBehaviorBridge workstation scan", () => {
         name: "town furnace furnace-live",
         stationType: "furnace",
         interactionRange: 2,
+        footprintWidth: 2,
+        footprintDepth: 1,
       },
       {
         entityId: "anvil-live",
@@ -174,6 +181,8 @@ describe("AgentBehaviorBridge workstation scan", () => {
         name: "town anvil anvil-live",
         stationType: "anvil",
         interactionRange: 2,
+        footprintWidth: 1,
+        footprintDepth: 1,
       },
       {
         entityId: "air-altar-live",
@@ -181,6 +190,8 @@ describe("AgentBehaviorBridge workstation scan", () => {
         name: "air altar air-altar-live",
         stationType: "runecrafting",
         interactionRange: 2,
+        footprintWidth: 1,
+        footprintDepth: 1,
       },
       {
         entityId: "Bank-Live-CaseSensitive",
@@ -188,6 +199,8 @@ describe("AgentBehaviorBridge workstation scan", () => {
         name: "town bank bank-live-casesensitive",
         stationType: "bank",
         interactionRange: 2,
+        footprintWidth: 1,
+        footprintDepth: 1,
       },
       {
         entityId: "tanner-live",
@@ -195,6 +208,8 @@ describe("AgentBehaviorBridge workstation scan", () => {
         name: "tanner tanner-live",
         stationType: "tanner",
         interactionRange: 4,
+        footprintWidth: 1,
+        footprintDepth: 1,
       },
     ]);
   });

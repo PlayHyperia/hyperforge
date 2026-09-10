@@ -24,9 +24,9 @@ function workerOutput(key: string, count = 1): GrassWorkerOutput {
 describe("GrassVisualManager streaming pacing", () => {
   it("uses only the far-detail grass tier within the bounded broadcast horizon", () => {
     expect(STREAMING_GRASS_VISUAL_PROFILE).toEqual({
-      clumpSpacingMultiplier: 1.5,
+      clumpSpacingMultiplier: 4,
       minimumLodLevel: 2,
-      maxRenderDistance: 250,
+      maxRenderDistance: 140,
       maxChunksPerFrame: 1,
     });
   });

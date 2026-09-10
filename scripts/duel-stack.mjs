@@ -18,7 +18,9 @@ import { execFileSync, spawn } from "node:child_process";
 import { parseArgs } from "node:util";
 
 import {
+  assertAuthorityRestartDiagnosticBoundary,
   assertMultiStyleSparbotOptions,
+  assertManagedLocalSolanaBoundary,
   assertStandaloneSparbotRuntimeBoundary,
   assertSupportedUwsNodeVersion,
   assertProcessTerminationAllowed,
@@ -31,14 +33,37 @@ import {
   isStandaloneSparbotBootstrap,
   omitEnvironmentKeys,
   resolveHyperbetRuntimeTopology,
+  resolveHyperbetKeeperDatabaseTopology,
+  resolveHyperbetSolanaDeployment,
   resolveHyperbetWorkspace,
   resolveDuelGameServiceTopology,
   resolveDuelDatabaseConfiguration,
   resolvePrivateBettingFeedToken,
+  resolveJwtRuntimeSecret,
   resolvePrivateRuntimeSecret,
   resolveStandaloneSparbotProfileSeed,
   resolveStandaloneSparbotStyles,
+  shouldReleaseRestartedAuthorityStartupGate,
 } from "./duel-stack-topology.mjs";
+import { buildCaptureSupervisorUnavailableStatus } from "./duel-capture-restart-policy.mjs";
+import {
+  bindPinnedBunToEnvironment,
+  resolvePinnedBunRuntime,
+} from "./duel-bun-runtime-policy.mjs";
+import { writeEphemeralSolanaKeypairFile } from "./duel-solana-keypair-policy.mjs";
+import { getHealthyBrowserAudioEvidence } from "./duel-launch-smoke-policy.mjs";
+import {
+  resolveFullTopologyBrowserPerformanceProfile,
+  resolveHyperbetAppViteMode,
+  resolveHyperbetAppRuntime,
+} from "./duel-full-topology-browser-performance-policy.mjs";
+import { waitForBoundedChildExit } from "./bounded-child-command.mjs";
+import {
+  observeGameServerShutdown,
+  resolveDuelStackShutdownPolicy,
+  shutdownDuelStackChildren,
+} from "./duel-stack-shutdown.mjs";
+import { resolveMediaExecutable } from "../packages/server/src/streaming/media-runtime.mjs";
 
 const options = parseArgs({
   options: {
@@ -62,6 +87,10 @@ const options = parseArgs({
       default: process.env.DUEL_HYPERBET_ROOT || "",
     },
     "rtmp-port": { type: "string", default: "8765" },
+    "capture-browser-port": {
+      type: "string",
+      default: process.env.STREAM_CAPTURE_BROWSER_DEBUG_PORT || "9223",
+    },
     "server-url": {
       type: "string",
       default:
@@ -100,12 +129,25 @@ const options = parseArgs({
     fresh: { type: "boolean" },
     isolated: { type: "boolean" },
     verify: { type: "boolean" },
+    "check-runtimes": { type: "boolean" },
+    "reuse-game-builds": { type: "boolean" },
     "verify-timeout-ms": { type: "string", default: "240000" },
     "startup-timeout-ms": {
       type: "string",
       default: process.env.DUEL_STARTUP_TIMEOUT_MS || "420000",
     },
     "local-smoke": { type: "boolean" },
+    "local-solana": { type: "boolean" },
+    "authority-recovery": { type: "boolean" },
+    "local-solana-rebuild": { type: "boolean" },
+    "local-solana-rpc-port": {
+      type: "string",
+      default: process.env.DUEL_LOCAL_SOLANA_RPC_PORT || "18899",
+    },
+    "local-solana-ledger-shreds": {
+      type: "string",
+      default: process.env.DUEL_LOCAL_SOLANA_LEDGER_SHREDS || "10000",
+    },
     "multi-style-sparbots": { type: "boolean" },
     verbose: { type: "boolean", short: "v" },
   },
@@ -128,6 +170,7 @@ Options:
   --hyperbet-api-url <url> Hyperbet backend URL (default: http://localhost:8080)
   --hyperbet-root <path>  Hyperbet monorepo root (auto-detected by default)
   --rtmp-port <n>         RTMP bridge websocket port (default: 8765)
+  --capture-browser-port <n> Loopback CDP port for the supervised warm renderer (default: 9223)
   --server-url <url>      Game HTTP base URL (default: http://localhost:5555)
   --ws-url <url>          Game WS URL (default: ws://localhost:5556/ws)
   --client-url <url>      Game client URL (default: http://localhost:3333)
@@ -144,9 +187,16 @@ Options:
   --fresh                 Force fresh restart of game server + client
   --isolated              Fail rather than terminate any pre-existing process
   --verify                Run startup verification checks after boot
+  --check-runtimes        Verify exact Hyperia/Hyperbet Bun pins, then exit
+  --reuse-game-builds     Require and reuse existing shared/server/client production artifacts
   --verify-timeout-ms <n> Verification timeout in ms (default: 240000)
   --startup-timeout-ms <n> Readiness timeout for game/client/Hyperbet startup (default: 420000)
   --local-smoke           Explicit loopback/no-money diagnostic mode for model-free sparbots
+  --local-solana          Own a reset local validator for transaction-enabled Hyperbet tests
+  --authority-recovery    Allow one owned game-server hard-kill/restart in the isolated localnet smoke
+  --local-solana-rebuild  Rebuild the two SOL programs before starting the local validator
+  --local-solana-rpc-port <n> Managed validator RPC port (default: 18899)
+  --local-solana-ledger-shreds <n> Retained validator shreds (default: 10000)
   --multi-style-sparbots  Give local no-money sparbots all three frozen combat loadouts
   -v, --verbose           Verbose status logs
 `);
@@ -277,6 +327,18 @@ function resolveRuntimePath(configuredPath, fallbackPath) {
 
 const bettingPort = Number.parseInt(options["betting-port"], 10);
 const rtmpPort = Number.parseInt(options["rtmp-port"], 10);
+const captureBrowserPort = Number.parseInt(options["capture-browser-port"], 10);
+if (
+  !Number.isSafeInteger(captureBrowserPort) ||
+  captureBrowserPort < 1 ||
+  captureBrowserPort > 65_535
+) {
+  throw new Error("Capture browser port must be an integer from 1 to 65535");
+}
+const captureBrowserHostEnabled = !/^(0|false|no|off)$/i.test(
+  process.env.DUEL_CAPTURE_BROWSER_HOST || "true",
+);
+const captureBrowserEndpoint = `http://127.0.0.1:${captureBrowserPort}`;
 const gameServiceTopology = resolveDuelGameServiceTopology({
   serverUrl: options["server-url"],
   websocketUrl: options["ws-url"],
@@ -351,6 +413,121 @@ const hyperbetMarketMakerAvailable = fs.existsSync(hyperbetMarketMakerDir);
 const skipBettingApp =
   options["skip-betting"] === true || remoteBettingMode || !hyperbetEnabled;
 const hyperbetRuntimeEnabled = hyperbetEnabled && !remoteBettingMode;
+const hyperbetAppRuntime = resolveHyperbetAppRuntime(
+  process.env.DUEL_HYPERBET_APP_RUNTIME,
+);
+const hyperbetBrowserPerformanceProfile =
+  resolveFullTopologyBrowserPerformanceProfile(
+    process.env.DUEL_VERIFY_BROWSER_PERFORMANCE_PROFILE,
+  );
+if (hyperbetBrowserPerformanceProfile && !hyperbetRuntimeEnabled) {
+  throw new Error(
+    "Full-topology browser performance requires the owned Hyperbet runtime",
+  );
+}
+if (
+  hyperbetBrowserPerformanceProfile &&
+  hyperbetAppRuntime !== "production_preview"
+) {
+  throw new Error(
+    "Full-topology browser performance requires DUEL_HYPERBET_APP_RUNTIME=production_preview",
+  );
+}
+const manageLocalSolana = options["local-solana"] === true;
+const gameBunRuntime = resolvePinnedBunRuntime({
+  label: "Hyperia",
+  workspaceRoot: ROOT,
+  configuredPath: process.env.DUEL_HYPERIA_BUN_PATH,
+  processPath: process.execPath,
+  pathCommand: "",
+});
+const hyperbetBunRequired =
+  options["check-runtimes"] === true ||
+  hyperbetRuntimeEnabled ||
+  manageLocalSolana ||
+  withMarketMaker;
+const hyperbetBunRuntime =
+  hyperbetAvailable && hyperbetBunRequired
+    ? resolvePinnedBunRuntime({
+        label: "Hyperbet",
+        workspaceRoot: hyperbetRoot,
+        configuredPath: process.env.DUEL_HYPERBET_BUN_PATH,
+      })
+    : null;
+const gameBunPath = gameBunRuntime.path;
+
+if (options["check-runtimes"] === true) {
+  console.log(
+    JSON.stringify({
+      ok: true,
+      hyperia: gameBunRuntime,
+      hyperbet: hyperbetBunRuntime,
+    }),
+  );
+  releaseRunLock();
+  process.exit(0);
+}
+
+function requireHyperbetBunPath() {
+  if (!hyperbetBunRuntime) {
+    throw new Error(
+      "Hyperbet Bun runtime is unavailable because its launch workspace was not resolved",
+    );
+  }
+  return hyperbetBunRuntime.path;
+}
+
+const HYPERBET_BUN_RUNTIME_PREFIX_ARGS = Object.freeze([
+  "--config=/dev/null",
+  "--no-install",
+]);
+
+function withHyperbetBunRuntimeArgs(args) {
+  if (!Array.isArray(args)) {
+    throw new TypeError("Hyperbet Bun runtime arguments must be an array");
+  }
+  return [...HYPERBET_BUN_RUNTIME_PREFIX_ARGS, ...args];
+}
+const localSolanaRpcPort = Number.parseInt(
+  options["local-solana-rpc-port"],
+  10,
+);
+const localSolanaLedgerShreds = Number.parseInt(
+  options["local-solana-ledger-shreds"],
+  10,
+);
+if (
+  !Number.isSafeInteger(localSolanaRpcPort) ||
+  localSolanaRpcPort < 1024 ||
+  localSolanaRpcPort > 65_432
+) {
+  throw new Error(
+    "Local Solana RPC port must be an integer from 1024 to 65532",
+  );
+}
+if (
+  !Number.isSafeInteger(localSolanaLedgerShreds) ||
+  localSolanaLedgerShreds < 10_000 ||
+  localSolanaLedgerShreds > 10_000_000
+) {
+  throw new Error(
+    "Local Solana ledger shreds must be an integer from 10000 to 10000000",
+  );
+}
+const localSolanaWsPort = localSolanaRpcPort + 1;
+const localSolanaFaucetPort = localSolanaRpcPort + 2;
+const localSolanaGossipPort = localSolanaRpcPort + 3;
+const localSolanaDynamicPortStart = localSolanaRpcPort + 100;
+const localSolanaDynamicPortEnd = localSolanaDynamicPortStart + 99;
+if (localSolanaDynamicPortEnd > 65_535) {
+  throw new Error("Local Solana RPC port leaves no valid dynamic port range");
+}
+const localSolanaRpcUrl = `http://127.0.0.1:${localSolanaRpcPort}`;
+const localSolanaWsUrl = `ws://127.0.0.1:${localSolanaWsPort}`;
+const authorityRecoveryEnabled = options["authority-recovery"] === true;
+const ownedGameServerPidFile = authorityRecoveryEnabled
+  ? resolveRuntimePath(process.env.DUEL_GAME_SERVER_PID_FILE, "")
+  : null;
 const hyperbetTopology = resolveHyperbetRuntimeTopology({
   gameServerUrl: serverHttpUrl,
   hyperbetApiUrl: options["hyperbet-api-url"],
@@ -379,16 +556,6 @@ const madviseShimOutput = path.join(
 );
 const DUEL_SOLANA_CANONICAL_PROGRAM_ID =
   "9NdidShnVzy1fc1WHWJTvyuXmH47ynfNGA6QFdyfAuSU";
-const KEEPER_REQUIRED_PROGRAMS = Object.freeze([
-  {
-    name: "fight oracle",
-    programId: "6tpRysBFd1yXRipYEYwAw9jxEoVHk15kVXfkDGFLMqcD",
-  },
-  {
-    name: "duel market",
-    programId: "ARVJNJp49VZnkB8QBYZAAFJmufvtVSPhnuuenwwSLwpi",
-  },
-]);
 const KEEPER_AUTHORITY_ENV_NAMES = Object.freeze([
   "KEEPER_FEE_PAYER_KEYPAIR",
   "ORACLE_REPORTER_KEYPAIR",
@@ -455,6 +622,10 @@ const rtmpStatusFile = configuredRtmpStatusFile
     ? configuredRtmpStatusFile
     : path.resolve(ROOT, configuredRtmpStatusFile)
   : defaultRtmpStatusFile;
+const captureBrowserStatusFile = resolveRuntimePath(
+  process.env.STREAM_CAPTURE_BROWSER_STATUS_FILE,
+  path.join(path.dirname(rtmpStatusFile), "capture-browser-status.json"),
+);
 const toPublicPath = (baseDir) => {
   const relative = path.relative(baseDir, hlsOutputPath).replace(/\\/g, "/");
   if (relative.startsWith("..")) return null;
@@ -474,6 +645,23 @@ const requestedCaptureMode = (
 )
   .trim()
   .toLowerCase();
+function resolveEffectiveCaptureChannel(requestedChannel) {
+  if (requestedChannel === "bundled") return "";
+  if (process.platform === "linux" && requestedChannel === "chromium") {
+    return "chrome-beta";
+  }
+  if (process.platform === "darwin" && requestedChannel === "chromium") {
+    return "chrome";
+  }
+  return (
+    requestedChannel ||
+    (process.platform === "linux"
+      ? "chrome-beta"
+      : process.platform === "darwin"
+        ? "chrome"
+        : "chrome")
+  );
+}
 const disableBridgeCapture =
   process.env.DUEL_DISABLE_BRIDGE_CAPTURE == null
     ? requestedCaptureMode === "cdp"
@@ -509,7 +697,11 @@ const normalizedDuelRuntimeLogLevel =
     : "warn";
 
 const managed = [];
+const ownedRuntimePaths = [];
 let shuttingDown = false;
+let shutdownExitCode = 0;
+let managedLocalBrowserWallet = null;
+let managedLocalSolanaRoles = null;
 const CHILD_OUTPUT_ERROR_PATTERNS = [
   /(^|[^A-Za-z0-9_-])error(?::|\s|$)/i,
   /\b(?:failed|failure|exception|uncaught|unhandled|fatal)\b(?::|\s|$)/i,
@@ -519,6 +711,9 @@ const CHILD_OUTPUT_ERROR_PATTERNS = [
 const CHILD_OUTPUT_WARN_PATTERN = /(^|[^A-Za-z0-9_-])warn(?:ing)?(?::|\s|$)/i;
 const EXPECTED_BUN_SHUTDOWN_PATTERN =
   /^error: script "[^"]+" (?:was terminated by signal SIGTERM|exited with code 143)\b/i;
+const STRUCTURED_SHUTDOWN_EVENT_PATTERN =
+  /^\{"event":"shutdown-(?:complete|failed)"[,}]/u;
+const duelStackShutdownPolicy = resolveDuelStackShutdownPolicy(process.env);
 const childStdoutMode = (
   options.verbose === true
     ? "all"
@@ -563,6 +758,7 @@ function isErrorLikeChildLine(line) {
 }
 
 function shouldForwardChildLine(channel, line) {
+  if (STRUCTURED_SHUTDOWN_EVENT_PATTERN.test(line)) return true;
   if (shuttingDown && EXPECTED_BUN_SHUTDOWN_PATTERN.test(line)) {
     return false;
   }
@@ -588,6 +784,12 @@ function attachPrefixedOutput(stream, prefix, channel) {
     const trimmedLine = line.replace(/\r$/, "");
     if (!trimmedLine) return;
     if (!shouldForwardChildLine(channel, trimmedLine)) return;
+    if (STRUCTURED_SHUTDOWN_EVENT_PATTERN.test(trimmedLine)) {
+      const destination =
+        channel === "stderr" ? process.stderr : process.stdout;
+      destination.write(`${trimmedLine}\n`);
+      return;
+    }
     if (channel === "stderr") {
       console.error(`${prefix} ${trimmedLine}`);
       return;
@@ -879,12 +1081,22 @@ async function resolvePredictionMarketProgramId({
   return null;
 }
 
-async function resolveKeeperProgramReadiness({ rpcUrl }) {
+async function resolveKeeperProgramReadiness({ rpcUrl, deployment }) {
   const { Connection, PublicKey } = await getSolanaToolDeps();
   const connection = new Connection(rpcUrl, "confirmed");
   const missing = [];
 
-  for (const target of KEEPER_REQUIRED_PROGRAMS) {
+  const requiredPrograms = [
+    {
+      name: "fight oracle",
+      programId: deployment.fightOracleProgramId,
+    },
+    {
+      name: "duel market",
+      programId: deployment.duelMarketProgramId,
+    },
+  ];
+  for (const target of requiredPrograms) {
     try {
       const info = await connection.getAccountInfo(
         new PublicKey(target.programId),
@@ -903,51 +1115,68 @@ async function resolveKeeperProgramReadiness({ rpcUrl }) {
   };
 }
 
-function listProcessSnapshot() {
+const PROCESS_QUERY_TIMEOUT_MS = 2_000;
+
+function escapeProcessQueryPattern(pattern) {
+  return pattern.replace(/[\\^$.*+?()[\]{}|]/g, "\\$&");
+}
+
+function listProcessIdsMatchingPattern(pattern) {
   try {
-    const out = execFileSync("ps", ["-axo", "pid=,command="], {
-      encoding: "utf8",
-    });
+    const out = execFileSync(
+      "pgrep",
+      ["-f", escapeProcessQueryPattern(pattern)],
+      {
+        encoding: "utf8",
+        timeout: PROCESS_QUERY_TIMEOUT_MS,
+        killSignal: "SIGKILL",
+        maxBuffer: 1024 * 1024,
+      },
+    );
     return out
       .split(/\r?\n/)
       .map((line) => line.trim())
       .filter(Boolean)
-      .map((line) => {
-        const match = line.match(/^(\d+)\s+(.+)$/);
-        if (!match) return null;
-        return {
-          pid: Number.parseInt(match[1], 10),
-          command: match[2],
-        };
-      })
-      .filter((entry) => entry && Number.isFinite(entry.pid));
-  } catch {
-    return [];
+      .map((line) => Number.parseInt(line, 10))
+      .filter((pid) => Number.isSafeInteger(pid) && pid > 1);
+  } catch (error) {
+    if (
+      error &&
+      typeof error === "object" &&
+      "status" in error &&
+      error.status === 1
+    ) {
+      return [];
+    }
+    const detail = error instanceof Error ? error.message : String(error);
+    throw new Error(
+      `Could not enumerate stale processes within ${PROCESS_QUERY_TIMEOUT_MS}ms: ${detail}`,
+    );
   }
 }
 
 async function terminateProcessesByCommandPatterns(patterns, label) {
-  const snapshot = listProcessSnapshot();
-  const matched = snapshot.filter((entry) => {
-    if (!entry?.pid || entry.pid === process.pid) return false;
-    return patterns.some((pattern) => entry.command.includes(pattern));
-  });
+  const matchedPids = Array.from(
+    new Set(
+      patterns.flatMap((pattern) => listProcessIdsMatchingPattern(pattern)),
+    ),
+  ).filter((pid) => pid !== process.pid);
 
-  if (matched.length === 0) return;
+  if (matchedPids.length === 0) return;
 
   assertProcessTerminationAllowed({
     isolated: options.isolated,
     label,
-    pids: matched.map((entry) => entry.pid),
+    pids: matchedPids,
   });
 
   log(
-    `found ${matched.length} stale ${label} process(es): ${matched.map((entry) => entry.pid).join(", ")} - terminating`,
+    `found ${matchedPids.length} stale ${label} process(es): ${matchedPids.join(", ")} - terminating`,
   );
 
-  for (const entry of matched) {
+  for (const pid of matchedPids) {
     try {
-      process.kill(entry.pid, "SIGTERM");
+      process.kill(pid, "SIGTERM");
     } catch {
       // ignore dead/unowned pid
     }
@@ -955,10 +1184,10 @@ async function terminateProcessesByCommandPatterns(patterns, label) {
 
   await new Promise((resolve) => setTimeout(resolve, 1200));
 
-  for (const entry of matched) {
-    if (!isProcessAlive(entry.pid)) continue;
+  for (const pid of matchedPids) {
+    if (!isProcessAlive(pid)) continue;
     try {
-      process.kill(entry.pid, "SIGKILL");
+      process.kill(pid, "SIGKILL");
     } catch {
       // ignore dead/unowned pid
     }
@@ -1056,6 +1285,9 @@ function spawnManaged(name, command, args, opts = {}) {
     restart = false,
     restartDelayMs = 3000,
     maxRestarts = restart ? Number.POSITIVE_INFINITY : 0,
+    cleanupProcessGroupOnExit = false,
+    onLaunch = null,
+    onUnexpectedExit = null,
     ...spawnOptions
   } = opts;
 
@@ -1074,14 +1306,23 @@ function spawnManaged(name, command, args, opts = {}) {
       Number.isFinite(maxRestarts) && maxRestarts >= 0
         ? Math.floor(maxRestarts)
         : Number.POSITIVE_INFINITY,
+    cleanupProcessGroupOnExit,
+    onLaunch,
+    onUnexpectedExit,
     restarts: 0,
     restartTimer: null,
     proc: null,
+    lastProc: null,
+    shutdownMonitor: null,
   };
 
   const launch = () => {
     if (shuttingDown) return;
 
+    const shutdownPolicy =
+      name === "game-server"
+        ? resolveDuelStackShutdownPolicy(entry.spawnOptions.env || process.env)
+        : null;
     const runtimePath =
       command === process.execPath ? process.execPath : command;
     const proc = spawn(runtimePath, args, {
@@ -1094,15 +1335,65 @@ function spawnManaged(name, command, args, opts = {}) {
       ],
       detached: true,
       ...entry.spawnOptions,
+      // Shutdown is a protocol, not optional logging. Keep these pipes even
+      // when either display mode is off, and observe before prefix/filtering.
+      ...(name === "game-server" ? { stdio: ["ignore", "pipe", "pipe"] } : {}),
     });
     entry.proc = proc;
+    entry.lastProc = proc;
+    if (name === "game-server") {
+      entry.shutdownMonitor = observeGameServerShutdown(proc, shutdownPolicy);
+    }
+
+    if (typeof entry.onLaunch === "function") {
+      try {
+        entry.onLaunch({ pid: proc.pid });
+      } catch (error) {
+        console.error(
+          `[${name}] failed to publish its owned launch state: ${error instanceof Error ? error.message : String(error)}`,
+        );
+        try {
+          process.kill(-proc.pid, "SIGKILL");
+        } catch {
+          proc.kill("SIGKILL");
+        }
+        void shutdown(1);
+        return;
+      }
+    }
 
     const prefix = `[${name}]`;
     attachPrefixedOutput(proc.stdout, prefix, "stdout");
     attachPrefixedOutput(proc.stderr, prefix, "stderr");
+    proc.on("error", (error) => {
+      console.error(`${prefix} process error: ${error.message}`);
+      if (!shuttingDown && entry.critical) void shutdown(1);
+      else if (shuttingDown) shutdownExitCode = 1;
+    });
     proc.on("exit", (code, signal) => {
       entry.proc = null;
       if (shuttingDown) return;
+
+      // A detached service can own browser, encoder, shell, or Xvfb children.
+      // If its leader exits unexpectedly, terminate only that still-owned
+      // process group before a replacement can race stale listeners or files.
+      if (entry.cleanupProcessGroupOnExit && process.platform !== "win32") {
+        try {
+          process.kill(-proc.pid, "SIGKILL");
+        } catch {
+          // No descendants remain in the owned process group.
+        }
+      }
+
+      if (typeof entry.onUnexpectedExit === "function") {
+        try {
+          entry.onUnexpectedExit({ code, signal, pid: proc.pid });
+        } catch (error) {
+          console.error(
+            `${prefix} failed to publish its unavailable state: ${error instanceof Error ? error.message : String(error)}`,
+          );
+        }
+      }
 
       const canRestart =
         entry.restart &&
@@ -1139,38 +1430,569 @@ function spawnManaged(name, command, args, opts = {}) {
   return entry;
 }
 
-function runCommand(name, command, args, opts = {}) {
-  return new Promise((resolve, reject) => {
-    const runtimePath = command === "bun" ? process.execPath : command;
-    const proc = spawn(runtimePath, args, {
-      cwd: ROOT,
-      env: process.env,
-      stdio: [
-        "ignore",
-        childStdoutMode === "off" ? "ignore" : "pipe",
-        childStderrMode === "off" ? "ignore" : "pipe",
-      ],
-      ...opts,
-    });
+let ownedGameServerGeneration = 0;
 
-    const prefix = `[${name}]`;
-    attachPrefixedOutput(proc.stdout, prefix, "stdout");
-    attachPrefixedOutput(proc.stderr, prefix, "stderr");
-    proc.on("error", (error) => {
-      reject(error);
-    });
-    proc.on("exit", (code, signal) => {
-      if (code === 0) {
-        resolve();
-        return;
-      }
-      reject(
-        new Error(
-          `${name} exited with code=${code ?? "null"} signal=${signal ?? "null"}`,
-        ),
-      );
-    });
+function publishOwnedGameServerState(input) {
+  if (!ownedGameServerPidFile) return;
+  const payload = {
+    schemaVersion: 1,
+    launcherPid: process.pid,
+    generation: ownedGameServerGeneration,
+    pid: input.pid,
+    available: input.available,
+    startedAtMs: input.startedAtMs,
+    exitedAtMs: input.exitedAtMs ?? null,
+    exitCode: input.exitCode ?? null,
+    signal: input.signal ?? null,
+  };
+  fs.mkdirSync(path.dirname(ownedGameServerPidFile), { recursive: true });
+  const temporaryPath = `${ownedGameServerPidFile}.${process.pid}.tmp`;
+  fs.writeFileSync(temporaryPath, `${JSON.stringify(payload)}\n`, {
+    encoding: "utf8",
+    mode: 0o600,
   });
+  fs.renameSync(temporaryPath, ownedGameServerPidFile);
+}
+
+function isCurrentOwnedGameServerGeneration(pid, generation) {
+  if (!ownedGameServerPidFile) return false;
+  try {
+    const state = JSON.parse(fs.readFileSync(ownedGameServerPidFile, "utf8"));
+    return (
+      state?.schemaVersion === 1 &&
+      state?.launcherPid === process.pid &&
+      state?.available === true &&
+      state?.pid === pid &&
+      state?.generation === generation
+    );
+  } catch {
+    return false;
+  }
+}
+
+function publishCaptureSupervisorUnavailableStatus() {
+  const payload = buildCaptureSupervisorUnavailableStatus(Date.now());
+  fs.mkdirSync(path.dirname(rtmpStatusFile), { recursive: true });
+  const temporaryPath = `${rtmpStatusFile}.supervisor-${process.pid}.tmp`;
+  fs.writeFileSync(temporaryPath, JSON.stringify(payload), {
+    encoding: "utf8",
+    mode: 0o600,
+  });
+  fs.renameSync(temporaryPath, rtmpStatusFile);
+}
+
+async function runCommand(name, command, args, opts = {}) {
+  const {
+    captureStdout = false,
+    timeoutMs = null,
+    terminationGraceMs = 5_000,
+    ...spawnOptions
+  } = opts;
+  const proc = spawn(command, args, {
+    cwd: ROOT,
+    env: process.env,
+    stdio: [
+      "ignore",
+      childStdoutMode === "off" ? "ignore" : "pipe",
+      childStderrMode === "off" ? "ignore" : "pipe",
+    ],
+    ...spawnOptions,
+  });
+
+  const prefix = `[${name}]`;
+  let capturedStdout = "";
+  if (captureStdout && proc.stdout) {
+    proc.stdout.setEncoding("utf8");
+    proc.stdout.on("data", (chunk) => {
+      capturedStdout += chunk;
+    });
+  }
+  attachPrefixedOutput(proc.stdout, prefix, "stdout");
+  attachPrefixedOutput(proc.stderr, prefix, "stderr");
+  await waitForBoundedChildExit(proc, {
+    label: name,
+    timeoutMs,
+    terminationGraceMs,
+  });
+  return captureStdout ? capturedStdout : undefined;
+}
+
+function resolveLocalSolanaTool(toolName) {
+  const configuredBinDir = String(
+    process.env.SOLANA_ACTIVE_RELEASE_BIN || "",
+  ).trim();
+  const candidates = uniqueNonEmpty([
+    configuredBinDir ? path.join(configuredBinDir, toolName) : "",
+    path.join(
+      os.homedir(),
+      ".local",
+      "share",
+      "solana",
+      "install",
+      "active_release",
+      "bin",
+      toolName,
+    ),
+  ]);
+  for (const candidate of candidates) {
+    if (fs.existsSync(candidate)) return candidate;
+  }
+  try {
+    const resolved = execFileSync("which", [toolName], {
+      encoding: "utf8",
+    }).trim();
+    if (resolved) return resolved;
+  } catch {
+    // Fall through to the actionable error below.
+  }
+  throw new Error(
+    `Managed local Solana requires ${toolName}; install the pinned Agave CLI or set SOLANA_ACTIVE_RELEASE_BIN`,
+  );
+}
+
+function resolveLocalSolanaWalletPath() {
+  const candidates = uniqueNonEmpty([
+    process.env.DUEL_LOCAL_SOLANA_WALLET,
+    process.env.ANCHOR_WALLET,
+    "~/.config/solana/hyperia-keys/deployer.json",
+    "~/.config/solana/id.json",
+  ]);
+  for (const candidate of candidates) {
+    const expanded = expandHome(candidate);
+    const resolved = path.isAbsolute(expanded)
+      ? expanded
+      : path.resolve(ROOT, expanded);
+    if (fs.existsSync(resolved)) return resolved;
+  }
+  throw new Error(
+    `Managed local Solana requires a bootstrap keypair; checked ${candidates.join(", ")}`,
+  );
+}
+
+function validateLocalSolanaArtifacts(deployment) {
+  const anchorDir = path.join(hyperbetSolanaDir, "anchor");
+  const programs = [
+    {
+      name: "fight oracle",
+      id: deployment.fightOracleProgramId,
+      artifact: "fight_oracle",
+    },
+    {
+      name: "duel market",
+      id: deployment.duelMarketProgramId,
+      artifact: "duel_market",
+    },
+  ];
+  return programs.map((program) => {
+    const binaryPath = path.join(
+      anchorDir,
+      "target",
+      "deploy",
+      `${program.artifact}.so`,
+    );
+    const idlPath = path.join(
+      anchorDir,
+      "target",
+      "idl",
+      `${program.artifact}.json`,
+    );
+    if (!fs.existsSync(binaryPath) || !fs.existsSync(idlPath)) {
+      throw new Error(
+        `Managed local Solana is missing the ${program.name} build artifacts; pass --local-solana-rebuild`,
+      );
+    }
+    const idl = JSON.parse(fs.readFileSync(idlPath, "utf8"));
+    const idlAddress = String(
+      idl.address || idl.metadata?.address || "",
+    ).trim();
+    if (idlAddress !== program.id) {
+      throw new Error(
+        `Managed local Solana ${program.name} IDL address ${idlAddress || "<missing>"} does not match registry ${program.id}`,
+      );
+    }
+    return { ...program, binaryPath };
+  });
+}
+
+async function waitForManagedLocalSolana(deployment, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  const requiredProgramIds = [
+    deployment.fightOracleProgramId,
+    deployment.duelMarketProgramId,
+  ];
+  while (Date.now() < deadline) {
+    try {
+      const health = await fetchJsonWithTimeout(localSolanaRpcUrl, {
+        requestTimeoutMs: 2_000,
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: 1,
+          method: "getHealth",
+        }),
+      });
+      if (!health.response.ok || health.payload?.result !== "ok") {
+        throw new Error("validator not healthy");
+      }
+
+      let allExecutable = true;
+      for (const programId of requiredProgramIds) {
+        const account = await fetchJsonWithTimeout(localSolanaRpcUrl, {
+          requestTimeoutMs: 2_000,
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            jsonrpc: "2.0",
+            id: 1,
+            method: "getAccountInfo",
+            params: [programId, { encoding: "base64" }],
+          }),
+        });
+        if (
+          !account.response.ok ||
+          account.payload?.result?.value?.executable !== true
+        ) {
+          allExecutable = false;
+          break;
+        }
+      }
+      if (allExecutable) return;
+    } catch {
+      // Retry while the validator initializes its ledger and programs.
+    }
+    await new Promise((resolve) => setTimeout(resolve, 1_000));
+  }
+  throw new Error(
+    `Managed local Solana did not expose both executable programs at ${localSolanaRpcUrl} within ${timeoutMs}ms`,
+  );
+}
+
+async function waitForManagedLocalSolanaProgramDispatch(input) {
+  const deadline = Date.now() + Math.min(input.timeoutMs, 120_000);
+  let attempt = 0;
+  let lastError = null;
+  const args = withHyperbetBunRuntimeArgs([
+    input.scriptPath,
+    "--cluster",
+    "localnet",
+    "--rpc-url",
+    localSolanaRpcUrl,
+    "--wallet",
+    input.walletPath,
+    "--oracle-dispute-window-secs",
+    input.configuration.oracleDisputeWindowSeconds,
+    "--trade-treasury-fee-bps",
+    input.configuration.tradeTreasuryFeeBps,
+    "--trade-market-maker-fee-bps",
+    input.configuration.tradeMarketMakerFeeBps,
+    "--winnings-market-maker-fee-bps",
+    input.configuration.winningsMarketMakerFeeBps,
+    "--reporter",
+    input.roles.reporter,
+    "--finalizer",
+    input.roles.finalizer,
+    "--challenger",
+    input.roles.challenger,
+    "--market-operator",
+    input.roles.marketOperator,
+    "--treasury",
+    input.roles.treasury,
+    "--market-maker",
+    input.roles.marketMaker,
+  ]);
+
+  while (Date.now() < deadline) {
+    attempt += 1;
+    const remainingMs = deadline - Date.now();
+    try {
+      await runCommand(
+        "solana-program-readiness",
+        requireHyperbetBunPath(),
+        args,
+        { timeoutMs: Math.max(1_000, Math.min(15_000, remainingMs)) },
+      );
+      log(
+        `managed local SOL programs accepted simulated instructions after ${attempt} attempt(s)`,
+      );
+      return;
+    } catch (error) {
+      lastError = error;
+      const waitMs = Math.min(1_000, Math.max(0, deadline - Date.now()));
+      if (waitMs > 0) {
+        await new Promise((resolve) => setTimeout(resolve, waitMs));
+      }
+    }
+  }
+
+  throw new Error(
+    `Managed local SOL programs did not become dispatch-ready at ${localSolanaRpcUrl} after ${attempt} attempt(s)`,
+    { cause: lastError },
+  );
+}
+
+async function startManagedLocalSolana() {
+  const deployment = resolveHyperbetSolanaDeployment({
+    solanaDir: hyperbetSolanaDir,
+    cluster: "localnet",
+  });
+  if (options["local-solana-rebuild"] === true) {
+    log("rebuilding the two Hyperbet SOL programs for managed localnet...");
+    await runCommand(
+      "solana-build",
+      requireHyperbetBunPath(),
+      withHyperbetBunRuntimeArgs([
+        "run",
+        "--cwd",
+        path.relative(ROOT, hyperbetSolanaDir),
+        "anchor:build",
+      ]),
+      { cwd: ROOT },
+    );
+  }
+  const programs = validateLocalSolanaArtifacts(deployment);
+  const launchConfigScriptPath = path.join(
+    hyperbetSolanaDir,
+    "scripts/init-pm-config.ts",
+  );
+  const programReadinessScriptPath = path.join(
+    hyperbetSolanaDir,
+    "scripts/probe-program-readiness.ts",
+  );
+  await runCommand(
+    "solana-launch-config-runtime-preflight",
+    requireHyperbetBunPath(),
+    withHyperbetBunRuntimeArgs([launchConfigScriptPath, "--help"]),
+    { timeoutMs: Math.min(240_000, startupTimeoutMs) },
+  );
+  await runCommand(
+    "solana-program-readiness-runtime-preflight",
+    requireHyperbetBunPath(),
+    withHyperbetBunRuntimeArgs([programReadinessScriptPath, "--help"]),
+    { timeoutMs: Math.min(240_000, startupTimeoutMs) },
+  );
+  const validatorBinary = resolveLocalSolanaTool("solana-test-validator");
+  const keygenBinary = resolveLocalSolanaTool("solana-keygen");
+  const walletPath = resolveLocalSolanaWalletPath();
+  const mintAuthority = execFileSync(keygenBinary, ["pubkey", walletPath], {
+    encoding: "utf8",
+  }).trim();
+  if (!mintAuthority) {
+    throw new Error("Managed local Solana could not resolve the wallet pubkey");
+  }
+
+  for (const port of [
+    localSolanaRpcPort,
+    localSolanaWsPort,
+    localSolanaFaucetPort,
+    localSolanaGossipPort,
+  ]) {
+    const listeners = getListeningPids(port);
+    if (listeners.length > 0) {
+      throw new Error(
+        `Managed local Solana port ${port} is already occupied by pid(s) ${listeners.join(", ")}`,
+      );
+    }
+  }
+
+  const ledgerDir = fs.mkdtempSync(
+    path.join(os.tmpdir(), `hyperia-duel-solana-${localSolanaRpcPort}-`),
+  );
+  ownedRuntimePaths.push(ledgerDir);
+  const programArgs = programs.flatMap((program) => [
+    "--upgradeable-program",
+    program.id,
+    program.binaryPath,
+    walletPath,
+  ]);
+  log(`starting managed SOL localnet at ${localSolanaRpcUrl}...`);
+  spawnManaged(
+    "solana-localnet",
+    validatorBinary,
+    [
+      "--reset",
+      "--quiet",
+      "--rpc-port",
+      String(localSolanaRpcPort),
+      "--faucet-port",
+      String(localSolanaFaucetPort),
+      "--gossip-port",
+      String(localSolanaGossipPort),
+      "--dynamic-port-range",
+      `${localSolanaDynamicPortStart}-${localSolanaDynamicPortEnd}`,
+      "--mint",
+      mintAuthority,
+      "--ledger",
+      ledgerDir,
+      "--limit-ledger-size",
+      String(localSolanaLedgerShreds),
+      ...programArgs,
+    ],
+    { cleanupProcessGroupOnExit: true },
+  );
+  await waitForManagedLocalSolana(deployment, startupTimeoutMs);
+  const { Connection, Keypair, LAMPORTS_PER_SOL } = await getSolanaToolDeps();
+  const browserWallet = Keypair.generate();
+  const managedRoleKeypairs = Object.fromEntries(
+    [
+      "feePayer",
+      "reporter",
+      "finalizer",
+      "challenger",
+      "marketOperator",
+      "treasury",
+      "marketMaker",
+    ].map((role) => [role, Keypair.generate()]),
+  );
+  const localOracleDisputeWindowSeconds =
+    process.env.DUEL_LOCAL_SOLANA_ORACLE_DISPUTE_WINDOW_SECS || "60";
+  const localFeePolicy = {
+    tradeTreasuryFeeBps:
+      process.env.DUEL_LOCAL_SOLANA_TRADE_TREASURY_FEE_BPS || "100",
+    tradeMarketMakerFeeBps:
+      process.env.DUEL_LOCAL_SOLANA_TRADE_MARKET_MAKER_FEE_BPS || "100",
+    winningsMarketMakerFeeBps:
+      process.env.DUEL_LOCAL_SOLANA_WINNINGS_MARKET_MAKER_FEE_BPS || "200",
+  };
+  await waitForManagedLocalSolanaProgramDispatch({
+    scriptPath: programReadinessScriptPath,
+    walletPath,
+    timeoutMs: startupTimeoutMs,
+    configuration: {
+      oracleDisputeWindowSeconds: localOracleDisputeWindowSeconds,
+      ...localFeePolicy,
+    },
+    roles: {
+      reporter: managedRoleKeypairs.reporter.publicKey.toBase58(),
+      finalizer: managedRoleKeypairs.finalizer.publicKey.toBase58(),
+      challenger: managedRoleKeypairs.challenger.publicKey.toBase58(),
+      marketOperator: managedRoleKeypairs.marketOperator.publicKey.toBase58(),
+      treasury: managedRoleKeypairs.treasury.publicKey.toBase58(),
+      marketMaker: managedRoleKeypairs.marketMaker.publicKey.toBase58(),
+    },
+  });
+  const connection = new Connection(localSolanaRpcUrl, "confirmed");
+  const fundWallet = async (wallet, lamports, label) => {
+    const latestBlockhash = await connection.getLatestBlockhash("confirmed");
+    const signature = await connection.requestAirdrop(
+      wallet.publicKey,
+      lamports,
+    );
+    await connection.confirmTransaction(
+      {
+        signature,
+        blockhash: latestBlockhash.blockhash,
+        lastValidBlockHeight: latestBlockhash.lastValidBlockHeight,
+      },
+      "confirmed",
+    );
+    const balance = await connection.getBalance(wallet.publicKey, "confirmed");
+    if (balance < lamports) {
+      throw new Error(
+        `Managed local ${label} funding is incomplete: ${balance}/${lamports}`,
+      );
+    }
+    return balance;
+  };
+  const airdropLamports = 2 * LAMPORTS_PER_SOL;
+  const fundedLamports = await fundWallet(
+    browserWallet,
+    airdropLamports,
+    "browser wallet",
+  );
+  const roleFundingLamports = 10 * LAMPORTS_PER_SOL;
+  await Promise.all(
+    Object.entries(managedRoleKeypairs).map(([role, keypair]) =>
+      fundWallet(keypair, roleFundingLamports, `${role} role`),
+    ),
+  );
+  managedLocalBrowserWallet = {
+    publicKey: browserWallet.publicKey.toBase58(),
+    secretKey: Array.from(browserWallet.secretKey).join(","),
+    fundedLamports,
+  };
+  const managedRoleKeypairDirectory = path.join(
+    ledgerDir,
+    "launch-role-keypairs",
+  );
+  managedLocalSolanaRoles = Object.fromEntries(
+    Object.entries(managedRoleKeypairs).map(([role, keypair]) => [
+      role,
+      {
+        publicKey: keypair.publicKey.toBase58(),
+        secretRef: writeEphemeralSolanaKeypairFile({
+          directory: managedRoleKeypairDirectory,
+          role,
+          secretKey: keypair.secretKey,
+        }),
+      },
+    ]),
+  );
+
+  const launchConfigEvidencePath = path.join(
+    ledgerDir,
+    "frozen-launch-config.json",
+  );
+  const launchConfigEnv = bindPinnedBunToEnvironment(
+    {
+      ...process.env,
+      SOLANA_RPC_URL: localSolanaRpcUrl,
+      SOLANA_STAGE_A_WALLET_PATH: walletPath,
+      SOLANA_EXPECTED_UPGRADE_AUTHORITY: mintAuthority,
+      SOLANA_LAUNCH_FEE_POLICY_APPROVED: "true",
+      SOLANA_LAUNCH_CONFIG_FREEZE_APPROVED: "true",
+      SOLANA_ORACLE_DISPUTE_WINDOW_SECS: localOracleDisputeWindowSeconds,
+      TRADE_TREASURY_FEE_BPS: localFeePolicy.tradeTreasuryFeeBps,
+      TRADE_MARKET_MAKER_FEE_BPS: localFeePolicy.tradeMarketMakerFeeBps,
+      WINNINGS_MARKET_MAKER_FEE_BPS: localFeePolicy.winningsMarketMakerFeeBps,
+      SOLANA_PM_REPORTER_PUBKEY: managedLocalSolanaRoles.reporter.publicKey,
+      SOLANA_PM_FINALIZER_PUBKEY: managedLocalSolanaRoles.finalizer.publicKey,
+      SOLANA_PM_CHALLENGER_PUBKEY: managedLocalSolanaRoles.challenger.publicKey,
+      SOLANA_PM_MARKET_OPERATOR_PUBKEY:
+        managedLocalSolanaRoles.marketOperator.publicKey,
+      SOLANA_PM_TREASURY_PUBKEY: managedLocalSolanaRoles.treasury.publicKey,
+      SOLANA_PM_MARKET_MAKER_PUBKEY:
+        managedLocalSolanaRoles.marketMaker.publicKey,
+    },
+    requireHyperbetBunPath(),
+  );
+  const launchConfigArgs = [
+    launchConfigScriptPath,
+    "--cluster",
+    "localnet",
+    "--freeze",
+    "--out",
+    launchConfigEvidencePath,
+  ];
+  await runCommand(
+    "solana-launch-config",
+    requireHyperbetBunPath(),
+    withHyperbetBunRuntimeArgs(launchConfigArgs),
+    {
+      env: launchConfigEnv,
+      timeoutMs: Math.min(120_000, startupTimeoutMs),
+    },
+  );
+  const frozenLaunchConfig = JSON.parse(
+    fs.readFileSync(launchConfigEvidencePath, "utf8"),
+  );
+  if (
+    frozenLaunchConfig?.programs?.fightOracle?.frozen !== true ||
+    frozenLaunchConfig?.programs?.duelMarket?.frozen !== true
+  ) {
+    throw new Error(
+      "Managed local Solana launch policy did not permanently freeze both program configurations",
+    );
+  }
+  managedLocalSolanaRoles.feePolicy = localFeePolicy;
+  log(
+    `managed SOL localnet ready: oracle=${deployment.fightOracleProgramId} market=${deployment.duelMarketProgramId}`,
+  );
+  log("managed local SOL launch roles configured and permanently frozen");
+  log(
+    `managed local browser wallet ready: ${managedLocalBrowserWallet.publicKey} (${fundedLamports} diagnostic lamports)`,
+  );
+  return deployment;
 }
 
 async function waitForHttp(url, label, timeoutMs = 180_000) {
@@ -1196,6 +2018,42 @@ async function waitForHttp(url, label, timeoutMs = 180_000) {
     await new Promise((resolve) => setTimeout(resolve, 1_000));
   }
   throw new Error(`${label} did not become ready at ${url}`);
+}
+
+async function waitForStableHttp(
+  url,
+  label,
+  timeoutMs = 180_000,
+  requiredConsecutiveSuccesses = 3,
+) {
+  const timeoutWindowMs =
+    Number.isFinite(timeoutMs) && timeoutMs > 0 ? timeoutMs : 180_000;
+  const deadlineMs = Date.now() + timeoutWindowMs;
+  const required = Math.max(1, Math.floor(requiredConsecutiveSuccesses));
+  let consecutiveSuccesses = 0;
+
+  while (Date.now() < deadlineMs) {
+    let timeout;
+    try {
+      const controller = new AbortController();
+      timeout = setTimeout(() => controller.abort(), 2_000);
+      const response = await fetch(url, {
+        cache: "no-store",
+        signal: controller.signal,
+      });
+      consecutiveSuccesses = response.ok ? consecutiveSuccesses + 1 : 0;
+      if (consecutiveSuccesses >= required) {
+        log(`${label} stable at ${url}`);
+        return;
+      }
+    } catch {
+      consecutiveSuccesses = 0;
+    } finally {
+      if (timeout) clearTimeout(timeout);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 500));
+  }
+  throw new Error(`${label} did not remain ready at ${url}`);
 }
 
 async function fetchJsonWithTimeout(url, options = {}) {
@@ -1442,6 +2300,36 @@ async function setDuelMaintenanceMode(
   return payload.status;
 }
 
+async function releaseRestartedAuthorityStartupGate({
+  pid,
+  generation,
+  healthUrl,
+  streamingStateUrl,
+  startupTimeoutMs,
+  streamingStateTimeoutMs,
+  serverUrl,
+  adminCode,
+}) {
+  await waitForHttp(
+    healthUrl,
+    `replacement game server generation ${generation}`,
+    startupTimeoutMs,
+  );
+  await waitForHttp(
+    streamingStateUrl,
+    `replacement streaming authority generation ${generation}`,
+    streamingStateTimeoutMs,
+  );
+  if (!isCurrentOwnedGameServerGeneration(pid, generation)) return;
+  await setDuelMaintenanceMode(serverUrl, adminCode, false, startupTimeoutMs);
+  if (!isCurrentOwnedGameServerGeneration(pid, generation)) {
+    throw new Error(
+      `replacement game server generation ${generation} changed while releasing its startup gate`,
+    );
+  }
+  log(`replacement game server generation ${generation} released`);
+}
+
 async function verifyAuthenticatedBettingFeed(topology, bearerToken) {
   const unauthenticated = await fetchJsonWithTimeout(
     topology.bettingFeedStateUrl,
@@ -1605,37 +2493,59 @@ async function clearUnhealthyListener(label, rawUrl, force = false) {
 }
 
 async function shutdown(exitCode = 0) {
+  if (exitCode !== 0) shutdownExitCode = 1;
   if (shuttingDown) return;
   shuttingDown = true;
   log("shutting down duel stack...");
 
-  for (const entry of [...managed].reverse()) {
-    if (entry.restartTimer) {
-      clearTimeout(entry.restartTimer);
-      entry.restartTimer = null;
-    }
-    const activeProc = entry.proc;
-    if (activeProc && activeProc.exitCode == null && !activeProc.killed) {
-      if (options.verbose) {
-        log(`stopping ${entry.name} (pid ${activeProc.pid})`);
-      }
-      signalProcessTree(activeProc, "SIGTERM");
-    }
-  }
-
-  await new Promise((resolve) => setTimeout(resolve, 1200));
   for (const entry of managed) {
     if (entry.restartTimer) {
       clearTimeout(entry.restartTimer);
       entry.restartTimer = null;
     }
-    const proc = entry.proc;
-    if (proc && proc.exitCode == null && !proc.killed) {
-      signalProcessTree(proc, "SIGKILL");
-    }
   }
-  releaseRunLock();
-  process.exit(exitCode);
+  const gameServer =
+    managed.find((entry) => entry.name === "game-server")?.shutdownMonitor ??
+    null;
+  const result = await shutdownDuelStackChildren({
+    entries: managed.map((entry) => ({
+      name: entry.name,
+      proc: entry.proc || entry.lastProc,
+    })),
+    gameServer,
+    requestedExitCode: shutdownExitCode,
+    graceMs: gameServer?.policy.graceMs ?? duelStackShutdownPolicy.graceMs,
+  });
+  shutdownExitCode = Math.max(shutdownExitCode, result.exitCode);
+  if (result.remainingGroups.length === 0) {
+    for (const runtimePath of ownedRuntimePaths.splice(0)) {
+      try {
+        fs.rmSync(runtimePath, { recursive: true, force: true });
+      } catch (error) {
+        shutdownExitCode = 1;
+        warnLog(
+          `failed to remove owned runtime path ${runtimePath}: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    }
+    releaseRunLock();
+  } else {
+    console.error(
+      "[duel] retaining owned runtime paths and run lock because process groups remain",
+    );
+  }
+  console.log(
+    JSON.stringify({
+      event:
+        shutdownExitCode === 0
+          ? "duel-stack-shutdown-complete"
+          : "duel-stack-shutdown-failed",
+      ...result,
+      ok: shutdownExitCode === 0,
+      exitCode: shutdownExitCode,
+    }),
+  );
+  process.exit(shutdownExitCode);
 }
 
 process.on("SIGINT", () => {
@@ -1665,6 +2575,41 @@ async function main() {
   }).trim();
   assertSupportedUwsNodeVersion(nodeVersion);
   if (options.verbose) log(`using pinned duel server ${nodeVersion}`);
+
+  if (!options["skip-stream"]) {
+    const encoder = resolveMediaExecutable({ tool: "ffmpeg" });
+    process.env.FFMPEG_PATH = encoder.path;
+    log(`verified stream encoder: ${encoder.version} (${encoder.path})`);
+  }
+
+  assertManagedLocalSolanaBoundary({
+    enabled: manageLocalSolana,
+    hyperbetRuntimeEnabled,
+    remoteBettingMode,
+    hyperbetReadOnlyMode,
+    rpcUrl: localSolanaRpcUrl,
+  });
+  assertAuthorityRestartDiagnosticBoundary({
+    enabled: authorityRecoveryEnabled,
+    fresh: options.fresh === true,
+    isolated: options.isolated === true,
+    verify: verifyEnabled,
+    localSmoke: options["local-smoke"] === true,
+    localSolana: manageLocalSolana,
+    serverUrl: serverHttpUrl,
+    rpcUrl: localSolanaRpcUrl,
+    pidFile: ownedGameServerPidFile,
+  });
+  if (manageLocalSolana) {
+    process.env.DUEL_LOCAL_SOLANA_MODE = "true";
+    process.env.DUEL_SOLANA_CLUSTER = "localnet";
+    process.env.DUEL_KEEPER_SOLANA_CLUSTER = "localnet";
+    process.env.DUEL_SOLANA_RPC_URL = localSolanaRpcUrl;
+    process.env.DUEL_KEEPER_SOLANA_RPC_URL = localSolanaRpcUrl;
+    process.env.SOLANA_CLUSTER = "localnet";
+    process.env.SOLANA_RPC_URL = localSolanaRpcUrl;
+    process.env.SOLANA_WS_URL = localSolanaWsUrl;
+  }
 
   if (
     hyperbetReadOnlyMode &&
@@ -1704,6 +2649,17 @@ async function main() {
   const useStandaloneSparbotPool =
     useExternalAgentPool && !modelProviderConfigured;
   const localSmokeRequested = options["local-smoke"] === true;
+  const localSmokeBrowserOrigin = localSmokeRequested
+    ? new URL(clientUrl).origin
+    : "";
+  if (
+    localSmokeBrowserOrigin &&
+    !isLoopbackHostname(new URL(localSmokeBrowserOrigin).hostname)
+  ) {
+    throw new Error(
+      "The local-smoke game client URL must use an exact loopback hostname",
+    );
+  }
   const standaloneSparbotProfileSeed = resolveStandaloneSparbotProfileSeed(
     options["sparbot-profile-seed"],
     {
@@ -1738,11 +2694,16 @@ async function main() {
       DUEL_BETTING_ENABLED: "false",
       DUEL_WITH_HYPERBET: effectiveDuelWithHyperbet,
       DUEL_HYPERBET_READ_ONLY_MODE: hyperbetReadOnlyMode ? "true" : "false",
+      DUEL_LOCAL_SOLANA_MODE: manageLocalSolana ? "true" : "false",
+      SOLANA_RPC_URL: manageLocalSolana ? localSolanaRpcUrl : "",
       STREAMING_DUEL_SCHEDULER_ROLE: effectiveSchedulerRole,
       PUBLIC_API_URL: process.env.DUEL_PUBLIC_API_URL || serverHttpUrl,
       PUBLIC_WS_URL: process.env.DUEL_PUBLIC_WS_URL || serverWsUrl,
     },
   });
+  if (manageLocalSolana) {
+    await startManagedLocalSolana();
+  }
   prepareHlsOutput(hlsOutputPath);
   const bettingFeedCredential = resolvePrivateBettingFeedToken(
     [
@@ -1757,13 +2718,38 @@ async function main() {
       "generated an ephemeral high-entropy credential for the internal betting feed",
     );
   }
-  const jwtCredential = resolvePrivateRuntimeSecret(
+  const jwtCredential = resolveJwtRuntimeSecret(
+    [process.env.JWT_SIGNING_KEYS, serverEnv.JWT_SIGNING_KEYS],
     [process.env.JWT_SECRET, serverEnv.JWT_SECRET],
     () => randomBytes(32).toString("hex"),
-    "The local duel JWT secret",
   );
   if (jwtCredential.generated) {
     log("generated an ephemeral JWT signing secret for the local duel server");
+  } else if (jwtCredential.keyRingConfigured && !jwtCredential.token) {
+    log("using the configured JWT key ring without a legacy no-kid bridge");
+  }
+  const distributedRateLimitCredential = resolvePrivateRuntimeSecret(
+    [
+      process.env.DISTRIBUTED_RATE_LIMIT_KEY_SECRET,
+      serverEnv.DISTRIBUTED_RATE_LIMIT_KEY_SECRET,
+    ],
+    () => randomBytes(32).toString("hex"),
+    "The distributed authentication rate-limit key",
+  );
+  if (distributedRateLimitCredential.generated) {
+    log(
+      "generated an ephemeral distributed authentication rate-limit key for the local duel server",
+    );
+  }
+  const killTokenCredential = resolvePrivateRuntimeSecret(
+    [process.env.KILL_TOKEN_SECRET, serverEnv.KILL_TOKEN_SECRET],
+    () => randomBytes(32).toString("hex"),
+    "The mob-death kill-token authority",
+  );
+  if (killTokenCredential.generated) {
+    log(
+      "generated an ephemeral mob-death kill-token authority for the local duel server",
+    );
   }
   const preserveOperatorMaintenance = /^(1|true|yes|on)$/i.test(
     process.env.STREAMING_DUEL_MAINTENANCE_MODE ||
@@ -1933,6 +2919,8 @@ async function main() {
     PORT: String(gameServiceTopology.serverPort),
     UWS_PORT: String(gameServiceTopology.websocketPort),
     JWT_SECRET: jwtCredential.token,
+    DISTRIBUTED_RATE_LIMIT_KEY_SECRET: distributedRateLimitCredential.token,
+    KILL_TOKEN_SECRET: killTokenCredential.token,
     ADMIN_CODE: adminCredential.token,
     // ElizaOS requires SECRET_SALT in production mode; generate a random one
     // for local duel runs so agents don't crash on startup.
@@ -2019,6 +3007,7 @@ async function main() {
     DUEL_HYPERBET_READ_ONLY_MODE: hyperbetReadOnlyMode ? "true" : "false",
     DUEL_LOCAL_SMOKE_MODE: effectiveDuelLocalSmokeMode,
     LOAD_TEST_MODE: effectiveLoadTestMode,
+    DUEL_LOCAL_BROWSER_ORIGIN: localSmokeBrowserOrigin,
     DISABLE_RATE_LIMIT: process.env.DISABLE_RATE_LIMIT || "true",
     ALLOW_DESTRUCTIVE_CHANGES: process.env.ALLOW_DESTRUCTIVE_CHANGES || "false",
     USE_LOCAL_POSTGRES: databaseConfiguration.useManagedLocalPostgres
@@ -2071,6 +3060,9 @@ async function main() {
     // model runtime for a money-bearing fight.
     STREAMING_DUEL_COMBAT_AI_ENABLED:
       process.env.STREAMING_DUEL_COMBAT_AI_ENABLED || "true",
+    STREAMING_AGENT_SKIP_DB_LOAD: authorityRecoveryEnabled
+      ? "false"
+      : process.env.STREAMING_AGENT_SKIP_DB_LOAD || "true",
     STREAMING_ANNOUNCEMENT_MS: process.env.STREAMING_ANNOUNCEMENT_MS || "30000",
     STREAMING_FIGHTING_MS: process.env.STREAMING_FIGHTING_MS || "150000",
     STREAMING_END_WARNING_MS: process.env.STREAMING_END_WARNING_MS || "10000",
@@ -2176,6 +3168,14 @@ async function main() {
     );
   }
 
+  log("validating byte-complete duel launch assets before startup...");
+  await runCommand(
+    "duel-launch-assets",
+    process.execPath,
+    ["scripts/validate-duel-launch-assets.mjs"],
+    { cwd: ROOT, env: gameEnv },
+  );
+
   if (serverWasReady && clientWasReady) {
     log("reusing existing game server + client");
   } else {
@@ -2199,20 +3199,43 @@ async function main() {
     );
 
     if (!serverWasReady) {
-      log("building shared package for fresh server startup...");
-      await runCommand(
-        "shared-build",
-        "bun",
-        ["run", "--cwd", "packages/shared", "build"],
-        { env: gameEnv },
-      );
-      log("building server package for stable runtime startup...");
-      await runCommand(
-        "server-build",
-        "bun",
-        ["run", "--cwd", "packages/server", "build"],
-        { env: gameEnv },
-      );
+      if (options["reuse-game-builds"] === true) {
+        const requiredBuilds = [
+          "packages/shared/build/framework.js",
+          // framework.js loads these server-only modules dynamically at
+          // runtime, so a reusable build is incomplete without them.
+          "packages/shared/build/PhysXManager.server.js",
+          "packages/shared/build/storage.server.js",
+          "packages/server/dist/index.js",
+          "packages/server/dist/agentBehaviorWorker.js",
+          "packages/server/dist/competitive-build.json",
+          "packages/server/dist/competitiveServerBootstrap.js",
+        ];
+        const missingBuilds = requiredBuilds.filter(
+          (artifact) => !fs.existsSync(path.join(ROOT, artifact)),
+        );
+        if (missingBuilds.length > 0) {
+          throw new Error(
+            `Cannot reuse missing game build artifact(s): ${missingBuilds.join(", ")}`,
+          );
+        }
+        log("reusing required shared and server production artifacts");
+      } else {
+        log("building shared package for fresh server startup...");
+        await runCommand(
+          "shared-build",
+          gameBunPath,
+          ["run", "--cwd", "packages/shared", "build"],
+          { env: gameEnv },
+        );
+        log("building server package for stable runtime startup...");
+        await runCommand(
+          "server-build",
+          gameBunPath,
+          ["run", "--cwd", "packages/server", "build"],
+          { env: gameEnv },
+        );
+      }
       const gameServerEnv = { ...gameEnv };
       const madviseShimPath = ensureMadviseEagainShim();
       if (madviseShimPath) {
@@ -2243,7 +3266,59 @@ async function main() {
         "game-server",
         gameServerCommand.command,
         gameServerCommand.args,
-        gameServerCommand.opts,
+        {
+          ...gameServerCommand.opts,
+          restart: authorityRecoveryEnabled,
+          restartDelayMs: 500,
+          maxRestarts: authorityRecoveryEnabled ? 1 : 0,
+          cleanupProcessGroupOnExit: authorityRecoveryEnabled,
+          onLaunch: authorityRecoveryEnabled
+            ? ({ pid }) => {
+                ownedGameServerGeneration += 1;
+                const generation = ownedGameServerGeneration;
+                publishOwnedGameServerState({
+                  pid,
+                  available: true,
+                  startedAtMs: Date.now(),
+                });
+                if (
+                  shouldReleaseRestartedAuthorityStartupGate({
+                    authorityRecoveryEnabled,
+                    launcherOwnsStartupGate,
+                    generation,
+                  })
+                ) {
+                  void releaseRestartedAuthorityStartupGate({
+                    pid,
+                    generation,
+                    healthUrl: gameServerHealthUrl,
+                    streamingStateUrl: gameStreamingStateUrl,
+                    startupTimeoutMs,
+                    streamingStateTimeoutMs,
+                    serverUrl: serverHttpUrl,
+                    adminCode: adminCredential.token,
+                  }).catch((error) => {
+                    if (shuttingDown) return;
+                    console.error(
+                      `[game-server] replacement startup gate failed closed: ${error instanceof Error ? error.message : String(error)}`,
+                    );
+                    void shutdown(1);
+                  });
+                }
+              }
+            : null,
+          onUnexpectedExit: authorityRecoveryEnabled
+            ? ({ code, signal, pid }) =>
+                publishOwnedGameServerState({
+                  pid,
+                  available: false,
+                  startedAtMs: 0,
+                  exitedAtMs: Date.now(),
+                  exitCode: code,
+                  signal,
+                })
+            : null,
+        },
       );
     }
 
@@ -2268,11 +3343,19 @@ async function main() {
 
       if (useProductionBuild) {
         const clientDistDir = path.join(ROOT, "packages/client/dist");
-        if (options.fresh === true || !distExists) {
+        if (options["reuse-game-builds"] === true && !distExists) {
+          throw new Error(
+            "Cannot reuse missing game build artifact: packages/client/dist/index.html",
+          );
+        }
+        if (
+          options["reuse-game-builds"] !== true &&
+          (options.fresh === true || !distExists)
+        ) {
           log("building production game client for stable duel runtime...");
           await runCommand(
             "client-build",
-            "bun",
+            gameBunPath,
             ["run", "--cwd", "packages/client", "build:cf"],
             { env: gameEnv },
           );
@@ -2288,7 +3371,7 @@ async function main() {
         log("starting game client in production mode (vite preview)...");
         spawnManaged(
           "game-client",
-          "bun",
+          gameBunPath,
           [
             "run",
             "--cwd",
@@ -2304,7 +3387,7 @@ async function main() {
       } else {
         spawnManaged(
           "game-client",
-          "bun",
+          gameBunPath,
           [
             "run",
             "--cwd",
@@ -2377,7 +3460,7 @@ async function main() {
     log("starting duel matchmaker bots...");
     spawnManaged(
       "duel-bots",
-      "bun",
+      gameBunPath,
       [
         "--preload",
         "packages/server/src/shared/polyfills.ts",
@@ -2406,25 +3489,50 @@ async function main() {
   await startContestants();
 
   if (!options["skip-stream"]) {
+    await startCaptureBrowserHost();
     await startStreamBridge();
   }
 
   let keeperCluster = null;
   let keeperRpcUrl = "";
   let keeperDefaults = {};
+  let keeperDeployment = null;
   let hyperbetBackendEnv = null;
+  let hyperbetBackendStartedAtMs = null;
+  const managedLocalHyperbetRuntimeDir = manageLocalSolana
+    ? fs.mkdtempSync(
+        path.join(os.tmpdir(), `hyperia-duel-hyperbet-${localSolanaRpcPort}-`),
+      )
+    : null;
+  if (managedLocalHyperbetRuntimeDir) {
+    ownedRuntimePaths.push(managedLocalHyperbetRuntimeDir);
+  }
   const keeperHealthFile = resolveRuntimePath(
     process.env.DUEL_HYPERBET_KEEPER_HEALTH_FILE,
-    path.join(ROOT, ".runtime-locks", "hyperbet-keeper-health.json"),
+    managedLocalHyperbetRuntimeDir
+      ? path.join(managedLocalHyperbetRuntimeDir, "keeper-health.json")
+      : path.join(ROOT, ".runtime-locks", "hyperbet-keeper-health.json"),
   );
   const keeperStreamStateFile = resolveRuntimePath(
     process.env.DUEL_HYPERBET_STREAM_STATE_FILE,
-    path.join(ROOT, ".runtime-locks", "hyperbet-stream-state.json"),
+    managedLocalHyperbetRuntimeDir
+      ? path.join(managedLocalHyperbetRuntimeDir, "stream-state.json")
+      : path.join(ROOT, ".runtime-locks", "hyperbet-stream-state.json"),
   );
   const keeperDbPath = resolveRuntimePath(
     process.env.DUEL_HYPERBET_KEEPER_DB_PATH || process.env.KEEPER_DB_PATH,
-    path.join(ROOT, ".runtime-locks", "hyperbet-keeper.sqlite"),
+    managedLocalHyperbetRuntimeDir
+      ? path.join(managedLocalHyperbetRuntimeDir, "keeper.sqlite")
+      : path.join(ROOT, ".runtime-locks", "hyperbet-keeper.sqlite"),
   );
+  const keeperDatabaseTopology = resolveHyperbetKeeperDatabaseTopology({
+    managedLocalSolana: manageLocalSolana,
+    terminalDbPath: keeperDbPath,
+    configuredServiceDbPath: process.env.DUEL_HYPERBET_SERVICE_DB_PATH
+      ? resolveRuntimePath(process.env.DUEL_HYPERBET_SERVICE_DB_PATH, "")
+      : "",
+  });
+  const keeperServiceDbPath = keeperDatabaseTopology.serviceDbPath;
 
   if (hyperbetRuntimeEnabled) {
     if (
@@ -2472,6 +3580,11 @@ async function main() {
       keeperDefaults.SOLANA_RPC_URL ||
       ""
     ).trim();
+    keeperDeployment = resolveHyperbetSolanaDeployment({
+      solanaDir: hyperbetSolanaDir,
+      cluster: keeperCluster,
+    });
+    keeperCluster = keeperDeployment.cluster;
 
     const sourceProtocol = new URL(hyperbetTopology.streamStateSourceUrl)
       .protocol;
@@ -2493,41 +3606,46 @@ async function main() {
         "STREAMING_VIEWER_ACCESS_TOKEN",
       ],
     );
-    hyperbetBackendEnv = {
-      ...backendBaseEnv,
-      NODE_ENV: hyperbetNodeEnv,
-      PORT: String(getPortFromUrl(hyperbetTopology.hyperbetApiUrl)),
-      SOLANA_CLUSTER: keeperCluster,
-      SOLANA_RPC_URL: keeperRpcUrl,
-      STREAM_STATE_SOURCE_URL: hyperbetTopology.streamStateSourceUrl,
-      STREAM_STATE_SOURCE_BEARER_TOKEN: effectiveStreamingViewerAccessToken,
-      KEEPER_BOT_HEALTH_FILE: keeperHealthFile,
-      KEEPER_STREAM_STATE_FILE: keeperStreamStateFile,
-      KEEPER_DB_PATH: keeperDbPath,
-      CORS_ORIGINS: uniqueNonEmpty([
-        process.env.CORS_ORIGINS,
-        hyperbetTopology.hyperbetAppUrl,
-      ]).join(","),
-    };
+    hyperbetBackendEnv = bindPinnedBunToEnvironment(
+      {
+        ...backendBaseEnv,
+        NODE_ENV: hyperbetNodeEnv,
+        PORT: String(getPortFromUrl(hyperbetTopology.hyperbetApiUrl)),
+        SOLANA_CLUSTER: keeperCluster,
+        SOLANA_RPC_URL: keeperRpcUrl,
+        FIGHT_ORACLE_PROGRAM_ID: keeperDeployment.fightOracleProgramId,
+        DUEL_MARKET_PROGRAM_ID: keeperDeployment.duelMarketProgramId,
+        STREAM_STATE_SOURCE_URL: hyperbetTopology.streamStateSourceUrl,
+        STREAM_STATE_SOURCE_BEARER_TOKEN: effectiveStreamingViewerAccessToken,
+        KEEPER_BOT_HEALTH_FILE: keeperHealthFile,
+        KEEPER_STREAM_STATE_FILE: keeperStreamStateFile,
+        KEEPER_DB_PATH: keeperServiceDbPath,
+        CORS_ORIGINS: uniqueNonEmpty([
+          process.env.CORS_ORIGINS,
+          hyperbetTopology.hyperbetAppUrl,
+        ]).join(","),
+      },
+      requireHyperbetBunPath(),
+    );
 
     await clearUnhealthyListener(
       "Hyperbet backend",
       hyperbetTopology.hyperbetApiUrl,
       true,
     );
-    const backendStartedAtMs = Date.now();
+    hyperbetBackendStartedAtMs = Date.now();
     log(
       `starting Hyperbet SOL backend at ${hyperbetTopology.hyperbetApiUrl}...`,
     );
     spawnManaged(
       "hyperbet-backend",
-      "bun",
-      [
+      requireHyperbetBunPath(),
+      withHyperbetBunRuntimeArgs([
         "run",
         "--cwd",
         path.relative(ROOT, hyperbetSolanaDir),
         "keeper:service",
-      ],
+      ]),
       {
         env: hyperbetBackendEnv,
         restart: true,
@@ -2545,59 +3663,103 @@ async function main() {
       (payload) =>
         isHyperbetStreamSynchronized(payload, {
           sourceUrl: hyperbetTopology.streamStateSourceUrl,
-          startedAtMs: backendStartedAtMs,
+          startedAtMs: hyperbetBackendStartedAtMs,
         }),
       { timeoutMs: startupTimeoutMs },
     );
   }
 
   if (!skipBettingApp && hyperbetRuntimeEnabled && hyperbetAvailable) {
-    const bettingEnv = {
-      ...readEnvFile(path.join(hyperbetSolanaDir, ".env.devnet")),
-      ...readEnvFile(path.join(hyperbetAppDir, ".env.devnet")),
-      ...toPublicAppEnvironment(process.env),
-      NODE_ENV: process.env.DUEL_HYPERBET_APP_NODE_ENV || "development",
-      LOG_LEVEL: duelRuntimeLogLevel,
-      DEFAULT_LOG_LEVEL:
-        process.env.DUEL_DEFAULT_LOG_LEVEL ||
-        process.env.DEFAULT_LOG_LEVEL ||
-        duelRuntimeLogLevel,
-      // Point the player at the process that actually owns the rendered HLS
-      // files. The Hyperbet Vite server does not serve Hyperia's public tree.
-      VITE_STREAM_URL: hlsUrl,
-      VITE_GAME_API_URL: hyperbetTopology.hyperbetApiUrl,
-      VITE_GAME_WS_URL: hyperbetTopology.hyperbetApiUrl.replace(/^http/, "ws"),
-      // The owned HLS player intentionally buffers four two-second segments
-      // for smooth playback. Hyperbet reads the privileged authoritative feed,
-      // so its public telemetry must wait for that same playback horizon.
-      VITE_UI_SYNC_DELAY_MS:
-        process.env.DUEL_HYPERBET_UI_SYNC_DELAY_MS ||
-        process.env.VITE_UI_SYNC_DELAY_MS ||
-        "8000",
-      VITE_SOLANA_CLUSTER: keeperCluster,
-      VITE_TRANSACTIONS_ENABLED: hyperbetReadOnlyMode ? "false" : "true",
-    };
+    const hyperbetViteMode = resolveHyperbetAppViteMode({
+      cluster: keeperCluster,
+      hasManagedLocalBrowserWallet: managedLocalBrowserWallet !== null,
+    });
+    const bettingEnv = bindPinnedBunToEnvironment(
+      {
+        ...readEnvFile(path.join(hyperbetSolanaDir, ".env.devnet")),
+        ...readEnvFile(path.join(hyperbetAppDir, ".env.devnet")),
+        ...toPublicAppEnvironment(process.env),
+        NODE_ENV:
+          hyperbetAppRuntime === "production_preview"
+            ? "production"
+            : process.env.DUEL_HYPERBET_APP_NODE_ENV || "development",
+        LOG_LEVEL: duelRuntimeLogLevel,
+        DEFAULT_LOG_LEVEL:
+          process.env.DUEL_DEFAULT_LOG_LEVEL ||
+          process.env.DEFAULT_LOG_LEVEL ||
+          duelRuntimeLogLevel,
+        // Point the player at the process that actually owns the rendered HLS
+        // files. The Hyperbet Vite server does not serve Hyperia's public tree.
+        VITE_STREAM_URL: hlsUrl,
+        VITE_GAME_API_URL: hyperbetTopology.hyperbetApiUrl,
+        VITE_GAME_WS_URL: hyperbetTopology.hyperbetApiUrl.replace(
+          /^http/,
+          "ws",
+        ),
+        // The owned HLS player intentionally buffers four two-second segments
+        // for smooth playback. Hyperbet reads the privileged authoritative feed,
+        // so its public telemetry must wait for that same playback horizon.
+        VITE_UI_SYNC_DELAY_MS:
+          process.env.DUEL_HYPERBET_UI_SYNC_DELAY_MS ||
+          process.env.VITE_UI_SYNC_DELAY_MS ||
+          "8000",
+        VITE_SOLANA_CLUSTER: keeperCluster,
+        VITE_SOLANA_RPC_URL: keeperRpcUrl || defaultSolanaRpcUrl(keeperCluster),
+        VITE_SOLANA_WS_URL:
+          process.env.DUEL_SOLANA_WS_URL ||
+          process.env.SOLANA_WS_URL ||
+          (keeperCluster === "localnet" ? localSolanaWsUrl : ""),
+        VITE_FIGHT_ORACLE_PROGRAM_ID: keeperDeployment.fightOracleProgramId,
+        VITE_DUEL_MARKET_PROGRAM_ID: keeperDeployment.duelMarketProgramId,
+        VITE_TRANSACTIONS_ENABLED: hyperbetReadOnlyMode ? "false" : "true",
+        ...(managedLocalBrowserWallet
+          ? {
+              VITE_HEADLESS_WALLET_SECRET_KEY:
+                managedLocalBrowserWallet.secretKey,
+              VITE_HEADLESS_WALLET_NAME: "Full Topology Test Wallet",
+              VITE_HEADLESS_WALLET_AUTO_CONNECT: "true",
+            }
+          : {}),
+      },
+      requireHyperbetBunPath(),
+    );
 
     await clearUnhealthyListener(
       "betting-app",
       hyperbetTopology.hyperbetAppUrl,
       true,
     );
-    log(`starting Hyperbet app on :${bettingPort}...`);
+    if (hyperbetAppRuntime === "production_preview") {
+      log("building Hyperbet production app for compiled preview...");
+      await runCommand(
+        "hyperbet-app-build",
+        requireHyperbetBunPath(),
+        withHyperbetBunRuntimeArgs([
+          "run",
+          "--cwd",
+          path.relative(ROOT, hyperbetAppDir),
+          "build",
+          "--mode",
+          hyperbetViteMode,
+        ]),
+        { env: bettingEnv },
+      );
+    }
+    log(`starting Hyperbet ${hyperbetAppRuntime} app on :${bettingPort}...`);
     spawnManaged(
       "betting-app",
-      "bun",
-      [
+      requireHyperbetBunPath(),
+      withHyperbetBunRuntimeArgs([
         "run",
         "--cwd",
         path.relative(ROOT, hyperbetAppDir),
-        "dev",
+        hyperbetAppRuntime === "production_preview" ? "preview" : "dev",
         "--mode",
-        "devnet",
+        hyperbetViteMode,
         "--host",
         "--port",
         String(bettingPort),
-      ],
+      ]),
       {
         env: bettingEnv,
         restart: true,
@@ -2608,6 +3770,110 @@ async function main() {
       hyperbetTopology.hyperbetAppUrl,
       "Hyperbet app",
       startupTimeoutMs,
+    );
+  }
+
+  async function startCaptureBrowserHost() {
+    if (!captureBrowserHostEnabled) return;
+
+    const defaultCaptureHeadless = "false";
+    const captureHeadless =
+      (
+        process.env.STREAM_CAPTURE_HEADLESS || defaultCaptureHeadless
+      ).toLowerCase() === "true";
+    const effectiveCaptureChannel = resolveEffectiveCaptureChannel(
+      (process.env.STREAM_CAPTURE_CHANNEL || "").trim(),
+    );
+    const explicitStreamGameUrl = (
+      process.env.DUEL_STREAM_GAME_URL ||
+      process.env.STREAM_GAME_URL ||
+      ""
+    ).trim();
+    const explicitStreamFallbackUrls = (
+      process.env.DUEL_STREAM_FALLBACK_URLS ||
+      process.env.STREAM_GAME_FALLBACK_URLS ||
+      ""
+    ).trim();
+    const hostEnv = {
+      ...serverEnv,
+      ...process.env,
+      GAME_URL: explicitStreamGameUrl || streamCaptureUrl,
+      GAME_FALLBACK_URLS: explicitStreamFallbackUrls,
+      STREAM_CAPTURE_BROWSER_DEBUG_PORT: String(captureBrowserPort),
+      STREAM_CAPTURE_BROWSER_STATUS_FILE: captureBrowserStatusFile,
+      STREAM_CAPTURE_CHANNEL: effectiveCaptureChannel,
+      STREAM_CAPTURE_ANGLE:
+        process.env.STREAM_CAPTURE_ANGLE ||
+        (process.platform === "darwin" ? "metal" : "vulkan"),
+      STREAM_CAPTURE_HEADLESS:
+        process.env.STREAM_CAPTURE_HEADLESS || defaultCaptureHeadless,
+    };
+
+    const existingDisplay = process.env.DISPLAY;
+    const hasExistingXvfb =
+      Boolean(existingDisplay) && existingDisplay.startsWith(":");
+    const useXvfbForCapture =
+      process.platform === "linux" &&
+      !captureHeadless &&
+      !hasExistingXvfb &&
+      (process.env.DUEL_CAPTURE_USE_XVFB || "true").toLowerCase() !== "false";
+    if (hasExistingXvfb) {
+      hostEnv.DISPLAY = existingDisplay;
+      log(
+        `starting capture browser host with existing DISPLAY=${existingDisplay}...`,
+      );
+    }
+
+    await clearUnhealthyListener(
+      "capture browser host",
+      captureBrowserEndpoint,
+      true,
+    );
+    try {
+      fs.unlinkSync(captureBrowserStatusFile);
+    } catch (error) {
+      if (error?.code !== "ENOENT") throw error;
+    }
+    const command = useXvfbForCapture ? "xvfb-run" : gameBunPath;
+    const args = useXvfbForCapture
+      ? [
+          "-a",
+          "-s",
+          `-screen 0 ${hostEnv.STREAM_CAPTURE_WIDTH || "1280"}x${hostEnv.STREAM_CAPTURE_HEIGHT || "720"}x24`,
+          gameBunPath,
+          "run",
+          "--cwd",
+          "packages/server",
+          "scripts/capture-browser-host.ts",
+        ]
+      : ["run", "--cwd", "packages/server", "scripts/capture-browser-host.ts"];
+    log(
+      `starting supervised warm capture renderer on ${captureBrowserEndpoint}...`,
+    );
+    const hostStartedAtMs = Date.now();
+    spawnManaged("capture-browser-host", command, args, {
+      env: hostEnv,
+      critical: false,
+      restart: true,
+      restartDelayMs: 500,
+      cleanupProcessGroupOnExit: true,
+    });
+    await waitForHttp(
+      `${captureBrowserEndpoint}/json/version`,
+      "capture browser host",
+      startupTimeoutMs,
+    );
+    await waitForJsonFile(
+      captureBrowserStatusFile,
+      "strict warm capture renderer",
+      (payload) =>
+        payload?.source === "capture-browser-host" &&
+        Number.isFinite(payload?.startedAt) &&
+        payload.startedAt >= hostStartedAtMs &&
+        payload?.stage === "ready" &&
+        payload?.rendererHealth?.ready === true &&
+        payload?.rendererHealth?.degradedReason == null,
+      { timeoutMs: startupTimeoutMs },
     );
   }
 
@@ -2642,20 +3908,9 @@ async function main() {
     const requestedCaptureChannel = (
       process.env.STREAM_CAPTURE_CHANNEL || ""
     ).trim();
-    const effectiveCaptureChannel =
-      requestedCaptureChannel === "bundled"
-        ? ""
-        : process.platform === "linux" && requestedCaptureChannel === "chromium"
-          ? "chrome-beta"
-          : process.platform === "darwin" &&
-              requestedCaptureChannel === "chromium"
-            ? "chrome"
-            : requestedCaptureChannel ||
-              (process.platform === "linux"
-                ? "chrome-beta"
-                : process.platform === "darwin"
-                  ? "chrome"
-                  : "chrome");
+    const effectiveCaptureChannel = resolveEffectiveCaptureChannel(
+      requestedCaptureChannel,
+    );
     const streamEnv = {
       ...serverEnv,
       ...process.env,
@@ -2689,6 +3944,11 @@ async function main() {
         (process.platform === "darwin" ? "metal" : "vulkan"),
       STREAM_CAPTURE_HEADLESS:
         process.env.STREAM_CAPTURE_HEADLESS || defaultCaptureHeadless,
+      STREAM_CAPTURE_BROWSER_ENDPOINT: captureBrowserHostEnabled
+        ? captureBrowserEndpoint
+        : "",
+      STREAM_BROWSER_AUDIO_REQUIRED:
+        process.env.STREAM_BROWSER_AUDIO_REQUIRED || "true",
       RTMP_STATUS_FILE: rtmpStatusFile,
     };
     log(`rtmp bridge game url: ${streamEnv.GAME_URL}`);
@@ -2719,6 +3979,7 @@ async function main() {
 
     const useXvfbForCapture =
       process.platform === "linux" &&
+      !captureBrowserHostEnabled &&
       !captureHeadlessForLaunch &&
       !hasExistingXvfb && // Don't spawn new Xvfb if we already have one
       (process.env.DUEL_CAPTURE_USE_XVFB || "true").toLowerCase() !== "false";
@@ -2740,19 +4001,25 @@ async function main() {
       true,
     );
 
-    const rtmpCommand = useXvfbForCapture ? "xvfb-run" : "bun";
+    const rtmpCommand = useXvfbForCapture
+      ? "xvfb-run"
+      : captureBrowserHostEnabled
+        ? "node"
+        : gameBunPath;
     const rtmpArgs = useXvfbForCapture
       ? [
           "-a",
           "-s",
           `-screen 0 ${streamEnv.STREAM_CAPTURE_WIDTH || "1280"}x${streamEnv.STREAM_CAPTURE_HEIGHT || "720"}x24`,
-          "bun",
+          gameBunPath,
           "run",
           "--cwd",
           "packages/server",
           "stream:rtmp",
         ]
-      : ["run", "--cwd", "packages/server", "stream:rtmp"];
+      : captureBrowserHostEnabled
+        ? ["--import", "tsx", "packages/server/scripts/stream-to-rtmp.ts"]
+        : ["run", "--cwd", "packages/server", "stream:rtmp"];
     if (useXvfbForCapture) {
       log("starting RTMP bridge + capture under Xvfb (virtual display)...");
     } else if (hasExistingXvfb) {
@@ -2766,7 +4033,12 @@ async function main() {
       env: streamEnv,
       critical: false,
       restart: true,
-      restartDelayMs: 3000,
+      // Listener ownership is isolated to this detached worker. After SIGKILL
+      // the kernel releases its sockets immediately, so a long generic service
+      // delay only extends a visible broadcast outage.
+      restartDelayMs: 500,
+      cleanupProcessGroupOnExit: true,
+      onUnexpectedExit: publishCaptureSupervisorUnavailableStatus,
     });
 
     const hlsReadyTimeoutMs =
@@ -2781,7 +4053,8 @@ async function main() {
         Number.isFinite(payload?.updatedAt) &&
         payload.updatedAt >= rtmpBridgeStartedAtMs &&
         payload?.rendererHealth?.ready === true &&
-        payload?.stats?.ffmpegRunning === true,
+        payload?.stats?.ffmpegRunning === true &&
+        getHealthyBrowserAudioEvidence(payload) !== null,
       { timeoutMs: hlsReadyTimeoutMs },
     );
   }
@@ -2839,8 +4112,8 @@ async function main() {
         );
         spawnManaged(
           "market-maker",
-          "bun",
-          [
+          requireHyperbetBunPath(),
+          withHyperbetBunRuntimeArgs([
             "run",
             "--cwd",
             hyperbetMarketMakerRelativeDir,
@@ -2850,7 +4123,7 @@ async function main() {
             mmConfigPath,
             "--stagger-ms",
             String(mmStaggerMs),
-          ],
+          ]),
           {
             env: mmEnv,
             critical: false,
@@ -2866,8 +4139,13 @@ async function main() {
     log("starting Hyperbet market maker bot (single)...");
     spawnManaged(
       "market-maker",
-      "bun",
-      ["run", "--cwd", hyperbetMarketMakerRelativeDir, "start"],
+      requireHyperbetBunPath(),
+      withHyperbetBunRuntimeArgs([
+        "run",
+        "--cwd",
+        hyperbetMarketMakerRelativeDir,
+        "start",
+      ]),
       {
         env: mmEnv,
         critical: false,
@@ -2887,6 +4165,7 @@ async function main() {
       process.env.DUEL_FORCE_KEEPER === "true";
     const readiness = await resolveKeeperProgramReadiness({
       rpcUrl: effectiveKeeperRpcUrl,
+      deployment: keeperDeployment,
     });
     if (!forceKeeper && !readiness.ready) {
       throw new Error(
@@ -2902,59 +4181,116 @@ async function main() {
     const sharedDevelopmentPubkey = isMainnetKeeper
       ? ""
       : resolvedSolanaAuthority?.pubkey || "";
-    const keeperEnv = {
-      ...keeperDefaults,
-      ...process.env,
-      SOLANA_CLUSTER: keeperCluster,
-      SOLANA_RPC_URL: effectiveKeeperRpcUrl,
-      KEEPER_FEE_PAYER_KEYPAIR:
-        process.env.DUEL_KEEPER_FEE_PAYER_KEYPAIR ||
-        process.env.KEEPER_FEE_PAYER_KEYPAIR ||
-        process.env.DUEL_KEEPER_BOT_KEYPAIR ||
-        keeperDefaults.KEEPER_FEE_PAYER_KEYPAIR ||
-        sharedDevelopmentAuthority,
-      ORACLE_REPORTER_KEYPAIR:
-        process.env.DUEL_KEEPER_ORACLE_REPORTER_KEYPAIR ||
-        process.env.ORACLE_REPORTER_KEYPAIR ||
-        process.env.DUEL_KEEPER_ORACLE_AUTHORITY_KEYPAIR ||
-        keeperDefaults.ORACLE_REPORTER_KEYPAIR ||
-        sharedDevelopmentAuthority,
-      ORACLE_FINALIZER_KEYPAIR:
-        process.env.DUEL_KEEPER_ORACLE_FINALIZER_KEYPAIR ||
-        process.env.ORACLE_FINALIZER_KEYPAIR ||
-        keeperDefaults.ORACLE_FINALIZER_KEYPAIR ||
-        sharedDevelopmentAuthority,
-      CLOB_MARKET_OPERATOR_KEYPAIR:
-        process.env.DUEL_KEEPER_CLOB_MARKET_OPERATOR_KEYPAIR ||
-        process.env.CLOB_MARKET_OPERATOR_KEYPAIR ||
-        keeperDefaults.CLOB_MARKET_OPERATOR_KEYPAIR ||
-        sharedDevelopmentAuthority,
-      MARKET_MAKER_KEYPAIR:
-        process.env.DUEL_KEEPER_MARKET_MAKER_KEYPAIR ||
-        process.env.MARKET_MAKER_KEYPAIR ||
-        keeperDefaults.MARKET_MAKER_KEYPAIR ||
-        sharedDevelopmentAuthority,
-      ORACLE_CHALLENGER_WALLET:
-        process.env.DUEL_KEEPER_ORACLE_CHALLENGER_WALLET ||
-        process.env.ORACLE_CHALLENGER_WALLET ||
-        keeperDefaults.ORACLE_CHALLENGER_WALLET ||
-        sharedDevelopmentPubkey,
-      GAME_URL: keeperGameUrl,
-      BET_SYNC_SOURCE_BEARER_TOKEN: bettingFeedCredential.token,
-      KEEPER_BOT_HEALTH_FILE: keeperHealthFile,
-      KEEPER_STREAM_STATE_FILE: keeperStreamStateFile,
-      KEEPER_DB_PATH: keeperDbPath,
-      GAME_STATE_POLL_TIMEOUT_MS:
-        process.env.GAME_STATE_POLL_TIMEOUT_MS || "5000",
-      GAME_STATE_POLL_INTERVAL_MS:
-        process.env.GAME_STATE_POLL_INTERVAL_MS || "3000",
-    };
+    if (manageLocalSolana && !managedLocalSolanaRoles) {
+      throw new Error("Managed local Solana keeper roles were not initialized");
+    }
+    const keeperEnv = bindPinnedBunToEnvironment(
+      {
+        ...keeperDefaults,
+        ...process.env,
+        SOLANA_CLUSTER: keeperCluster,
+        SOLANA_RPC_URL: effectiveKeeperRpcUrl,
+        FIGHT_ORACLE_PROGRAM_ID: keeperDeployment.fightOracleProgramId,
+        DUEL_MARKET_PROGRAM_ID: keeperDeployment.duelMarketProgramId,
+        KEEPER_FEE_PAYER_KEYPAIR:
+          managedLocalSolanaRoles?.feePayer.secretRef ||
+          process.env.DUEL_KEEPER_FEE_PAYER_KEYPAIR ||
+          process.env.KEEPER_FEE_PAYER_KEYPAIR ||
+          process.env.DUEL_KEEPER_BOT_KEYPAIR ||
+          keeperDefaults.KEEPER_FEE_PAYER_KEYPAIR ||
+          sharedDevelopmentAuthority,
+        ORACLE_REPORTER_KEYPAIR:
+          managedLocalSolanaRoles?.reporter.secretRef ||
+          process.env.DUEL_KEEPER_ORACLE_REPORTER_KEYPAIR ||
+          process.env.ORACLE_REPORTER_KEYPAIR ||
+          process.env.DUEL_KEEPER_ORACLE_AUTHORITY_KEYPAIR ||
+          keeperDefaults.ORACLE_REPORTER_KEYPAIR ||
+          sharedDevelopmentAuthority,
+        ORACLE_FINALIZER_KEYPAIR:
+          managedLocalSolanaRoles?.finalizer.secretRef ||
+          process.env.DUEL_KEEPER_ORACLE_FINALIZER_KEYPAIR ||
+          process.env.ORACLE_FINALIZER_KEYPAIR ||
+          keeperDefaults.ORACLE_FINALIZER_KEYPAIR ||
+          sharedDevelopmentAuthority,
+        CLOB_MARKET_OPERATOR_KEYPAIR:
+          managedLocalSolanaRoles?.marketOperator.secretRef ||
+          process.env.DUEL_KEEPER_CLOB_MARKET_OPERATOR_KEYPAIR ||
+          process.env.CLOB_MARKET_OPERATOR_KEYPAIR ||
+          keeperDefaults.CLOB_MARKET_OPERATOR_KEYPAIR ||
+          sharedDevelopmentAuthority,
+        MARKET_MAKER_KEYPAIR:
+          managedLocalSolanaRoles?.marketMaker.secretRef ||
+          process.env.DUEL_KEEPER_MARKET_MAKER_KEYPAIR ||
+          process.env.MARKET_MAKER_KEYPAIR ||
+          keeperDefaults.MARKET_MAKER_KEYPAIR ||
+          sharedDevelopmentAuthority,
+        ORACLE_CONFIG_AUTHORITY_KEYPAIR:
+          process.env.DUEL_KEEPER_ORACLE_CONFIG_AUTHORITY_KEYPAIR ||
+          process.env.ORACLE_CONFIG_AUTHORITY_KEYPAIR ||
+          keeperDefaults.ORACLE_CONFIG_AUTHORITY_KEYPAIR ||
+          sharedDevelopmentAuthority,
+        CLOB_CONFIG_AUTHORITY_KEYPAIR:
+          process.env.DUEL_KEEPER_CLOB_CONFIG_AUTHORITY_KEYPAIR ||
+          process.env.CLOB_CONFIG_AUTHORITY_KEYPAIR ||
+          keeperDefaults.CLOB_CONFIG_AUTHORITY_KEYPAIR ||
+          sharedDevelopmentAuthority,
+        ORACLE_CHALLENGER_WALLET:
+          managedLocalSolanaRoles?.challenger.publicKey ||
+          process.env.DUEL_KEEPER_ORACLE_CHALLENGER_WALLET ||
+          process.env.ORACLE_CHALLENGER_WALLET ||
+          keeperDefaults.ORACLE_CHALLENGER_WALLET ||
+          sharedDevelopmentPubkey,
+        TRADE_TREASURY_WALLET:
+          managedLocalSolanaRoles?.treasury.publicKey ||
+          process.env.TRADE_TREASURY_WALLET ||
+          keeperDefaults.TRADE_TREASURY_WALLET ||
+          sharedDevelopmentPubkey,
+        TRADE_MARKET_MAKER_WALLET:
+          managedLocalSolanaRoles?.marketMaker.publicKey ||
+          process.env.TRADE_MARKET_MAKER_WALLET ||
+          keeperDefaults.TRADE_MARKET_MAKER_WALLET ||
+          sharedDevelopmentPubkey,
+        TRADE_TREASURY_FEE_BPS:
+          managedLocalSolanaRoles?.feePolicy.tradeTreasuryFeeBps ||
+          process.env.TRADE_TREASURY_FEE_BPS ||
+          keeperDefaults.TRADE_TREASURY_FEE_BPS ||
+          "",
+        TRADE_MARKET_MAKER_FEE_BPS:
+          managedLocalSolanaRoles?.feePolicy.tradeMarketMakerFeeBps ||
+          process.env.TRADE_MARKET_MAKER_FEE_BPS ||
+          keeperDefaults.TRADE_MARKET_MAKER_FEE_BPS ||
+          "",
+        WINNINGS_MARKET_MAKER_FEE_BPS:
+          managedLocalSolanaRoles?.feePolicy.winningsMarketMakerFeeBps ||
+          process.env.WINNINGS_MARKET_MAKER_FEE_BPS ||
+          keeperDefaults.WINNINGS_MARKET_MAKER_FEE_BPS ||
+          "",
+        GAME_URL: keeperGameUrl,
+        BET_SYNC_SOURCE_BEARER_TOKEN: bettingFeedCredential.token,
+        BOT_LOOP: process.env.DUEL_KEEPER_BOT_LOOP || "true",
+        BOT_POLL_SECONDS: process.env.DUEL_KEEPER_POLL_SECONDS || "1",
+        HYPERBET_LOCAL_DIAGNOSTIC_FEED: manageLocalSolana ? "true" : "false",
+        SOLANA_ORACLE_DISPUTE_WINDOW_SECS: manageLocalSolana
+          ? process.env.DUEL_LOCAL_SOLANA_ORACLE_DISPUTE_WINDOW_SECS || "60"
+          : process.env.SOLANA_ORACLE_DISPUTE_WINDOW_SECS || "",
+        KEEPER_BOT_HEALTH_FILE: keeperHealthFile,
+        KEEPER_STREAM_STATE_FILE: keeperStreamStateFile,
+        KEEPER_DB_PATH: keeperDbPath,
+        GAME_STATE_POLL_TIMEOUT_MS:
+          process.env.GAME_STATE_POLL_TIMEOUT_MS || "5000",
+        GAME_STATE_POLL_INTERVAL_MS:
+          process.env.GAME_STATE_POLL_INTERVAL_MS || "3000",
+      },
+      requireHyperbetBunPath(),
+    );
     const requiredKeeperRoles = [
       "KEEPER_FEE_PAYER_KEYPAIR",
       "ORACLE_REPORTER_KEYPAIR",
       "ORACLE_FINALIZER_KEYPAIR",
       "CLOB_MARKET_OPERATOR_KEYPAIR",
       "MARKET_MAKER_KEYPAIR",
+      "ORACLE_CONFIG_AUTHORITY_KEYPAIR",
+      "CLOB_CONFIG_AUTHORITY_KEYPAIR",
       "ORACLE_CHALLENGER_WALLET",
     ];
     const missingKeeperRoles = requiredKeeperRoles.filter(
@@ -2965,6 +4301,25 @@ async function main() {
         `Hyperbet keeper is missing required role configuration: ${missingKeeperRoles.join(", ")}`,
       );
     }
+    const requiredKeeperLaunchPolicy = [
+      "TRADE_TREASURY_WALLET",
+      "TRADE_MARKET_MAKER_WALLET",
+      "TRADE_TREASURY_FEE_BPS",
+      "TRADE_MARKET_MAKER_FEE_BPS",
+      "WINNINGS_MARKET_MAKER_FEE_BPS",
+      "SOLANA_ORACLE_DISPUTE_WINDOW_SECS",
+    ];
+    if (isMainnetKeeper) {
+      requiredKeeperLaunchPolicy.push("SOLANA_LAUNCH_FEE_POLICY_APPROVED");
+    }
+    const missingKeeperLaunchPolicy = requiredKeeperLaunchPolicy.filter(
+      (name) => !String(keeperEnv[name] || "").trim(),
+    );
+    if (missingKeeperLaunchPolicy.length > 0) {
+      throw new Error(
+        `Hyperbet keeper is missing required explicit launch policy: ${missingKeeperLaunchPolicy.join(", ")}`,
+      );
+    }
 
     log("starting Hyperbet SOL keeper automation...");
     log(`keeper game api url: ${keeperGameUrl}`);
@@ -2972,8 +4327,10 @@ async function main() {
     const keeperStartedAtMs = Date.now() - 1_000;
     spawnManaged(
       "keeper-bot",
-      "bun",
-      ["run", "--cwd", path.relative(ROOT, hyperbetSolanaDir), "keeper:bot"],
+      requireHyperbetBunPath(),
+      withHyperbetBunRuntimeArgs([
+        path.join(hyperbetKeeperDir, "src/duelBot.ts"),
+      ]),
       {
         env: keeperEnv,
         restart: true,
@@ -3012,6 +4369,30 @@ async function main() {
     log("preserving operator-requested duel maintenance mode");
   }
 
+  if (hyperbetRuntimeEnabled) {
+    if (hyperbetReadOnlyMode) {
+      if (!Number.isSafeInteger(hyperbetBackendStartedAtMs)) {
+        throw new Error("read-only Hyperbet backend start time is unavailable");
+      }
+      await waitForJson(
+        `${hyperbetTopology.hyperbetApiUrl}/status`,
+        "read-only Hyperbet authoritative stream readiness",
+        (payload) =>
+          isHyperbetStreamSynchronized(payload, {
+            sourceUrl: hyperbetTopology.streamStateSourceUrl,
+            startedAtMs: hyperbetBackendStartedAtMs,
+          }),
+        { timeoutMs: startupTimeoutMs },
+      );
+    } else {
+      await waitForStableHttp(
+        `${hyperbetTopology.hyperbetApiUrl}/ready`,
+        "combined Hyperbet launch readiness",
+        startupTimeoutMs,
+      );
+    }
+  }
+
   if (verifyEnabled) {
     log("running startup verification checks...");
     const verifyArgs = [
@@ -3039,7 +4420,36 @@ async function main() {
     }
     if (hyperbetRuntimeEnabled) {
       verifyArgs.push("--hyperbet-api-url", hyperbetTopology.hyperbetApiUrl);
+      verifyArgs.push("--hyperbet-app-runtime", hyperbetAppRuntime);
+      if (hyperbetBrowserPerformanceProfile) {
+        verifyArgs.push(
+          "--browser-performance-profile",
+          hyperbetBrowserPerformanceProfile.name,
+        );
+      }
       if (hyperbetReadOnlyMode) verifyArgs.push("--hyperbet-read-only");
+      if (manageLocalSolana) {
+        if (!managedLocalBrowserWallet || !keeperDeployment) {
+          throw new Error(
+            "Managed local Solana verification is missing its browser wallet or deployment",
+          );
+        }
+        verifyArgs.push(
+          "--hyperbet-local-transactions",
+          "--solana-rpc-url",
+          localSolanaRpcUrl,
+          "--duel-market-program-id",
+          keeperDeployment.duelMarketProgramId,
+          "--expected-local-wallet",
+          managedLocalBrowserWallet.publicKey,
+        );
+      }
+    }
+    const browserEvidenceDir = (
+      process.env.DUEL_VERIFY_BROWSER_EVIDENCE_DIR || ""
+    ).trim();
+    if (browserEvidenceDir) {
+      verifyArgs.push("--browser-evidence-dir", browserEvidenceDir);
     }
     if (verifyRequiredDestinations.length > 0) {
       verifyArgs.push(
@@ -3047,7 +4457,60 @@ async function main() {
         verifyRequiredDestinations.join(","),
       );
     }
-    await runCommand("duel-verify", "bun", verifyArgs);
+    const verifyOutput = await runCommand(
+      "duel-verify",
+      gameBunPath,
+      verifyArgs,
+      {
+        captureStdout: true,
+      },
+    );
+    const reportLine = String(verifyOutput || "")
+      .split(/\r?\n/)
+      .find((line) => line.startsWith("[duel-verify-report] "));
+    if (!reportLine) {
+      throw new Error("duel verifier passed without a structured report");
+    }
+    let verificationReport;
+    try {
+      verificationReport = JSON.parse(
+        reportLine.slice("[duel-verify-report] ".length),
+      );
+    } catch {
+      throw new Error("duel verifier returned an invalid structured report");
+    }
+    console.log(
+      `[duel-stack-verification-report] ${JSON.stringify(verificationReport)}`,
+    );
+    if (!options["skip-stream"]) {
+      const equipment = verificationReport?.equipmentVisualEvidence;
+      const audio = verificationReport?.audioEvidence;
+      if (
+        typeof equipment?.cycleId !== "string" ||
+        !Number.isSafeInteger(equipment?.requiredCount) ||
+        !Number.isSafeInteger(equipment?.readyCount) ||
+        !Number.isSafeInteger(equipment?.requiredPlayerCount)
+      ) {
+        throw new Error(
+          "duel verifier report omitted fitted equipment evidence",
+        );
+      }
+      if (
+        audio?.source !== "browser" ||
+        audio?.healthy !== true ||
+        !Number.isSafeInteger(audio?.bridgeChunks) ||
+        audio.bridgeChunks <= 0 ||
+        !Number.isSafeInteger(audio?.captureChunks) ||
+        audio.captureChunks <= 0
+      ) {
+        throw new Error(
+          "duel verifier report omitted healthy browser master-mix audio evidence",
+        );
+      }
+      log(
+        `verification evidence: cycle=${equipment.cycleId} fitted=${equipment.readyCount}/${equipment.requiredCount} agents=${equipment.requiredPlayerCount}/${equipment.expectedAgentCount} audio=${audio.captureChunks} chunks rtmp=${verificationReport.rtmpEvidence?.bytesReceived ?? 0} bytes`,
+      );
+    }
     log("startup verification passed");
   }
 

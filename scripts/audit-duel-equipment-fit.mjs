@@ -26,13 +26,14 @@ const VISIBLE_ARMOR_SLOTS = new Set([
   "cape",
   "shield",
 ]);
+const VISIBLE_COMBAT_SLOTS = new Set(["weapon", ...VISIBLE_ARMOR_SLOTS]);
 const DEFORMING_SLOTS = new Set(["body", "legs", "boots", "gloves", "cape"]);
 const LAUNCH_MINIMUM_IDS = Object.freeze([
   "bronze_shortsword",
   "bronze_longsword",
   "bronze_scimitar",
-  "bronze_2h_sword",
   "shortbow",
+  "magic_shortbow",
   "staff_of_air",
 ]);
 
@@ -46,6 +47,48 @@ function sha256(value) {
 
 function readJson(filePath) {
   return JSON.parse(readFileSync(filePath, "utf8"));
+}
+
+export function launchMinimumCertificationsFromManifest(
+  manifest,
+  { avatarId = "steve", legacyAvatarId = "/api/assets/steve/model" } = {},
+) {
+  if (
+    !isRecord(manifest) ||
+    manifest.schemaVersion !== 2 ||
+    manifest.avatarId !== avatarId ||
+    manifest.legacyAvatarId !== legacyAvatarId ||
+    !Array.isArray(manifest.certifications) ||
+    manifest.certifications.length === 0
+  ) {
+    throw new Error("invalid_launch_certification_manifest");
+  }
+
+  const itemIds = new Set();
+  return manifest.certifications.map((certification) => {
+    if (
+      !isRecord(certification) ||
+      typeof certification.itemId !== "string" ||
+      !SAFE_ID_PATTERN.test(certification.itemId) ||
+      typeof certification.slot !== "string" ||
+      !VISIBLE_COMBAT_SLOTS.has(certification.slot) ||
+      typeof certification.path !== "string" ||
+      !certification.path.startsWith("packages/server/world/assets/") ||
+      path.posix.normalize(certification.path) !== certification.path ||
+      typeof certification.sha256 !== "string" ||
+      !SHA256_PATTERN.test(certification.sha256) ||
+      itemIds.has(certification.itemId)
+    ) {
+      throw new Error("invalid_launch_certification_entry");
+    }
+    itemIds.add(certification.itemId);
+    return {
+      itemId: certification.itemId,
+      slot: certification.slot,
+      path: certification.path,
+      sha256: certification.sha256,
+    };
+  });
 }
 
 function parseGlbDocument(bytes) {
@@ -206,6 +249,7 @@ export function auditDuelEquipmentFit({
   assetsRoot,
   avatarId = "steve",
   legacyAvatarId = "/api/assets/steve/model",
+  launchMinimumCertifications = null,
 }) {
   const manifestsRoot = path.join(assetsRoot, "manifests");
   const weaponManifestPath = path.join(manifestsRoot, "items", "weapons.json");
@@ -236,9 +280,14 @@ export function auditDuelEquipmentFit({
     const blockers = [];
     let assetRelativePath = null;
     let assetSha256 = null;
+    const declaredContentSha256 =
+      typeof item.equippedModelSha256 === "string"
+        ? item.equippedModelSha256
+        : null;
     let fit = null;
     let attachment = null;
     let certifiableWithoutRefit = false;
+    const avatarSpecificContent = [];
     const sharedByItemIds =
       typeof item.equippedModelPath === "string"
         ? [...(pathUsers.get(item.equippedModelPath) ?? [])]
@@ -303,6 +352,13 @@ export function auditDuelEquipmentFit({
               if (!fit.compatibleAvatarIds.includes(avatarId)) {
                 blockers.push("incompatible_avatar");
               }
+              if (!declaredContentSha256) {
+                blockers.push("missing_content_hash");
+              } else if (!SHA256_PATTERN.test(declaredContentSha256)) {
+                blockers.push("invalid_content_hash");
+              } else if (declaredContentSha256 !== assetSha256) {
+                blockers.push("content_hash_mismatch");
+              }
             }
 
             if (DEFORMING_SLOTS.has(item.competitiveSlot)) {
@@ -337,6 +393,43 @@ export function auditDuelEquipmentFit({
       certifiableWithoutRefit = false;
     }
 
+    if (isRecord(item.equippedModelPathsByAvatar)) {
+      const declaredHashes = isRecord(item.equippedModelSha256ByAvatar)
+        ? item.equippedModelSha256ByAvatar
+        : {};
+      for (const [specificAvatarId, assetUrl] of Object.entries(
+        item.equippedModelPathsByAvatar,
+      ).sort(([left], [right]) => left.localeCompare(right))) {
+        const declaredSha256 =
+          typeof declaredHashes[specificAvatarId] === "string"
+            ? declaredHashes[specificAvatarId]
+            : null;
+        let actualSha256 = null;
+        try {
+          const resolved = resolveAssetUrl(assetsRoot, assetUrl);
+          actualSha256 = sha256(readFileSync(resolved.resolved));
+        } catch {
+          blockers.push("missing_avatar_specific_asset");
+        }
+        if (!declaredSha256) {
+          blockers.push("missing_avatar_content_hash");
+        } else if (!SHA256_PATTERN.test(declaredSha256)) {
+          blockers.push("invalid_avatar_content_hash");
+        } else if (actualSha256 && declaredSha256 !== actualSha256) {
+          blockers.push("avatar_content_hash_mismatch");
+        }
+        avatarSpecificContent.push({
+          avatarId: specificAvatarId,
+          assetUrl,
+          declaredSha256,
+          actualSha256,
+          matches: Boolean(
+            declaredSha256 && actualSha256 && declaredSha256 === actualSha256,
+          ),
+        });
+      }
+    }
+
     return {
       itemId: item.id,
       name: item.name ?? item.id,
@@ -346,24 +439,51 @@ export function auditDuelEquipmentFit({
       equippedModelPath: item.equippedModelPath ?? null,
       assetRelativePath,
       assetSha256,
+      declaredContentSha256,
       sharedByItemIds,
       fit,
       attachment,
+      avatarSpecificContent,
       certifiableWithoutRefit,
       ready: blockers.length === 0,
       blockers: [...new Set(blockers)],
     };
   });
 
-  const launchMinimum = LAUNCH_MINIMUM_IDS.map((itemId) => {
+  const launchMinimumSpecs =
+    launchMinimumCertifications ??
+    LAUNCH_MINIMUM_IDS.map((itemId) => ({ itemId }));
+  const launchMinimum = launchMinimumSpecs.map((certification) => {
+    const { itemId } = certification;
     const item = items.find((candidate) => candidate.itemId === itemId);
     if (!item) {
       return { itemId, ready: false, blockers: ["missing_manifest_item"] };
     }
+    const blockers = [...item.blockers];
+    if (
+      typeof certification.slot === "string" &&
+      certification.slot !== item.slot
+    ) {
+      blockers.push("certification_slot_mismatch");
+    }
+    if (typeof certification.path === "string") {
+      const itemPath = item.assetRelativePath
+        ? `packages/server/world/assets/${item.assetRelativePath}`
+        : null;
+      if (certification.path !== itemPath) {
+        blockers.push("certification_path_mismatch");
+      }
+    }
+    if (
+      typeof certification.sha256 === "string" &&
+      certification.sha256 !== item.assetSha256
+    ) {
+      blockers.push("certification_hash_mismatch");
+    }
     return {
       itemId,
-      ready: item.ready,
-      blockers: item.blockers,
+      ready: blockers.length === 0,
+      blockers: [...new Set(blockers)],
     };
   });
   const jewelry = armor.filter(
@@ -468,9 +588,31 @@ function main() {
     path.dirname(fileURLToPath(import.meta.url)),
     "..",
   );
+  const certificationManifestRelativePath =
+    "scripts/duel-rigid-equipment-certifications.json";
+  const certificationManifestBytes = readFileSync(
+    path.join(workspaceRoot, certificationManifestRelativePath),
+  );
+  const certificationManifest = JSON.parse(
+    certificationManifestBytes.toString("utf8"),
+  );
+  const launchMinimumCertifications = launchMinimumCertificationsFromManifest(
+    certificationManifest,
+  );
   const report = auditDuelEquipmentFit({
     assetsRoot: path.join(workspaceRoot, "packages/server/world/assets"),
+    launchMinimumCertifications,
   });
+  report.inputs[certificationManifestRelativePath] = sha256(
+    certificationManifestBytes,
+  );
+  report.launchMinimumAuthority = {
+    path: certificationManifestRelativePath,
+    sha256: report.inputs[certificationManifestRelativePath],
+    schemaVersion: certificationManifest.schemaVersion,
+    avatarId: certificationManifest.avatarId,
+    legacyAvatarId: certificationManifest.legacyAvatarId,
+  };
   const encoded = `${JSON.stringify(report, null, 2)}\n`;
   if (options.output) {
     writeAtomic(resolveWorkspaceOutput(workspaceRoot, options.output), encoded);

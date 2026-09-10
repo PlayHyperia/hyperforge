@@ -35,6 +35,8 @@ import {
   EventType,
   CombatSystem,
   ResourceSystem,
+  COMBAT_CONSTANTS,
+  canPlayerPerformPreparationAction,
   worldToTile,
   tilesWithinMeleeRange,
   tileChebyshevDistance,
@@ -118,6 +120,7 @@ import { MobTileMovementManager } from "./mob-tile-movement";
 import { ActionQueue } from "./action-queue";
 import { TickSystem, TickPriority } from "../TickSystem";
 import { SocketManager } from "./socket-management";
+import { resolveReconnectAgentFlags } from "./reconnect-agent-flags.js";
 import { BroadcastManager } from "./broadcast";
 import { PacketPriority } from "./BandwidthBudget";
 import { SpatialIndex } from "./SpatialIndex";
@@ -275,6 +278,8 @@ import {
   handleDuelAcceptFinal,
   handleDuelForfeit,
 } from "./handlers/duel";
+import { handleDuelPreparationHostLease } from "./handlers/duel/preparation-host-lease";
+import { handleDuelPreparationStrategy } from "./handlers/duel/preparation-strategy";
 import { getDatabase } from "./handlers/common";
 import { registerDuelEventListeners } from "./duel-events";
 import type { UwsWebSocketAdapter } from "../../startup/UwsWebSocketAdapter";
@@ -2831,6 +2836,14 @@ export class ServerNetwork extends System implements NetworkWithSocket {
       handleExternalAgentBankRecovery(socket, data, this.world);
     this.handlers["externalAgentBankRecovery"] =
       this.handlers["onExternalAgentBankRecovery"];
+    this.handlers["onDuelPreparationHostLease"] = (socket, data) =>
+      handleDuelPreparationHostLease(socket, data, this.world);
+    this.handlers["duelPreparationHostLease"] =
+      this.handlers["onDuelPreparationHostLease"];
+    this.handlers["onDuelPreparationStrategy"] = (socket, data) =>
+      handleDuelPreparationStrategy(socket, data, this.world);
+    this.handlers["duelPreparationStrategy"] =
+      this.handlers["onDuelPreparationStrategy"];
     this.handlers["bankDepositCoins"] = this.handlers["onBankDepositCoins"];
     this.handlers["bankWithdrawCoins"] = this.handlers["onBankWithdrawCoins"];
     this.handlers["bankClose"] = this.handlers["onBankClose"];
@@ -3280,9 +3293,15 @@ export class ServerNetwork extends System implements NetworkWithSocket {
   ): Promise<void> {
     const accountId = socket.accountId;
     if (accountId) {
+      const requestedCharacterId =
+        (data as { characterId?: string } | null)?.characterId ||
+        socket.selectedCharacterId ||
+        socket.agentCredentialCharacterId ||
+        socket.characterId;
       const reconnectedPlayerId = this.socketManager.tryReconnect(
         accountId,
         socket,
+        requestedCharacterId,
       );
       if (reconnectedPlayerId) {
         const sendToFn = this.broadcastManager.sendToSocket.bind(
@@ -3319,12 +3338,14 @@ export class ServerNetwork extends System implements NetworkWithSocket {
         }
 
         // Re-emit PLAYER_JOINED so systems re-initialize for this session
+        const reconnectAgentFlags = resolveReconnectAgentFlags(entity);
         this.world.emit(EventType.PLAYER_JOINED, {
           playerId: reconnectedPlayerId,
           userId: reconnectedPlayerId,
           player:
             socket.player as unknown as import("@hyperforge/shared").PlayerLocal,
           isReconnect: true,
+          ...reconnectAgentFlags,
         });
 
         // Re-send existing players' equipment to the reconnected client
@@ -3745,7 +3766,7 @@ export class ServerNetwork extends System implements NetworkWithSocket {
     }
 
     this.cancelPendingPreparationApproaches(playerId);
-    this.tileMovementManager.movePlayerToward(
+    return this.tileMovementManager.movePlayerToward(
       playerId,
       { x: target[0], y: target[1], z: target[2] },
       options?.runMode ?? false,
@@ -3753,7 +3774,53 @@ export class ServerNetwork extends System implements NetworkWithSocket {
       undefined,
       options?.interactionArrival,
     );
-    return true;
+  }
+
+  /**
+   * Server-authoritative ground-item pickup for non-socket actors. Admission
+   * uses the same duel, preparation, distance, protection, inventory-capacity,
+   * world-removal, and persistence authorities as the live inventory system.
+   */
+  async requestServerPickup(
+    playerId: string,
+    entityId: string,
+    operationId?: string,
+  ): Promise<boolean> {
+    if (!canPlayerPerformPreparationAction(this.world, playerId)) return false;
+
+    const player = this.world.entities.get(playerId) as {
+      position?: { x: number; y: number; z: number };
+    } | null;
+    const item = this.world.entities.get(entityId) as {
+      position?: { x: number; y: number; z: number };
+    } | null;
+    if (!player?.position || !item?.position) return false;
+
+    const duelSystem = this.world.getSystem("duel") as
+      { isPlayerInActiveDuel?: (id: string) => boolean } | undefined;
+    if (duelSystem?.isPlayerInActiveDuel?.(playerId)) return false;
+
+    const dx = player.position.x - item.position.x;
+    const dz = player.position.z - item.position.z;
+    const pickupRange = COMBAT_CONSTANTS.PICKUP_RANGE ?? 2.5;
+    if (Math.sqrt(dx * dx + dz * dz) > pickupRange) return false;
+
+    const inventorySystem = this.world.getSystem("inventory") as
+      | {
+          pickupGroundItem?: (request: {
+            playerId: string;
+            entityId: string;
+            operationId?: string;
+          }) => Promise<boolean>;
+        }
+      | undefined;
+    if (!inventorySystem?.pickupGroundItem) return false;
+
+    return inventorySystem.pickupGroundItem({
+      playerId,
+      entityId,
+      ...(operationId ? { operationId } : {}),
+    });
   }
 
   /**
@@ -3773,14 +3840,13 @@ export class ServerNetwork extends System implements NetworkWithSocket {
       return false;
     }
 
-    this.tileMovementManager.movePlayerToward(
+    return this.tileMovementManager.movePlayerToward(
       playerId,
       targetEntity.position,
       true,
       this.getPlayerWeaponRange(playerId),
       this.getPlayerAttackType(playerId),
     );
-    return true;
   }
 
   /**

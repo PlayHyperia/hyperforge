@@ -16,6 +16,13 @@ export {
 } from "./runtime/createEditorWorld";
 export type { EditorWorldOptions } from "./runtime/createEditorWorld";
 export { World } from "./core/World";
+export {
+  STREAMING_RENDER_PROFILES,
+  resolveExplicitStreamingRenderProfile,
+  resolveStreamingRenderFrameRate,
+  type StreamingRenderProfile,
+  type StreamingRenderProfileId,
+} from "./runtime/clientViewportMode";
 
 // Export editor systems
 export {
@@ -124,6 +131,124 @@ export type {
   StreamingGuardrailArenaPositions,
   StreamingGuardrailPhase,
 } from "./utils/rendering/streamingGuardrails";
+export {
+  AVATAR_AUTHORED_MOTION_ACTION_LIMIT,
+  AVATAR_AUTHORED_MOTION_SCHEMA_VERSION,
+  AVATAR_AUTHORED_MOTION_URL_MAX_LENGTH,
+  sanitizeAvatarAuthoredMotionUrl,
+} from "./extras/three/AvatarAuthoredMotionDiagnostics";
+export type {
+  AvatarAuthoredMotionActionDiagnostics,
+  AvatarAuthoredMotionDiagnostics,
+} from "./extras/three/AvatarAuthoredMotionDiagnostics";
+
+// Export the exact privacy-safe public duel action observation contract.
+export {
+  STREAMING_DUEL_ACTION_OBSERVATION_LIMIT,
+  STREAMING_DUEL_ACTION_OBSERVATION_SCHEMA_VERSION,
+  STREAMING_DUEL_PUBLIC_COMBAT_ROLES,
+  STREAMING_DUEL_PUBLIC_PRAYERS,
+  STREAMING_DUEL_PUBLIC_STYLES,
+  STREAMING_DUEL_PUBLIC_TACTICAL_MACROS,
+  parseStreamingDuelActionObservation,
+  parseStreamingDuelDamageObservationContext,
+  parseStreamingDuelExecutorObservationContext,
+  parseStreamingDuelFoodObservationContext,
+  parseStreamingDuelPrayerObservationContext,
+  parseStreamingDuelRoleSwitchObservationContext,
+  parseStreamingDuelStyleObservationContext,
+} from "./types/game/streaming-duel-action-observation";
+export {
+  DUEL_PREPARATION_COMBAT_ROLES,
+  DUEL_PREPARATION_ROLE_POLICY_VERSION,
+  EXTERNAL_DUEL_PREPARATION_MODEL,
+  EXTERNAL_DUEL_PREPARATION_MODEL_PROVIDER,
+  EXTERNAL_DUEL_PREPARATION_STRATEGY_PROTOCOL_VERSION,
+  MAX_EXTERNAL_DUEL_PREPARATION_ARMOR_OPTIONS,
+  MAX_EXTERNAL_DUEL_PREPARATION_OPPONENT_HISTORY,
+  MAX_EXTERNAL_DUEL_PREPARATION_FOOD_OPTIONS,
+  MAX_EXTERNAL_DUEL_PREPARATION_PLAN_OPTIONS,
+  normalizeExternalDuelPreparationPlanStrategyDecision,
+  normalizeExternalDuelPreparationPublicName,
+  normalizeExternalDuelPreparationOpponentHistorySummary,
+  normalizeExternalDuelPreparationPublicProfile,
+  normalizeExternalDuelPreparationStrategyDecision,
+  normalizeExternalDuelPreparationStrategyRequest,
+  normalizeExternalDuelPreparationStrategyResponse,
+  normalizeExternalDuelPreparationTacticalStrategy,
+} from "./types/game/external-duel-preparation-strategy";
+export type {
+  DuelPreparationBoundedStrategyDecision,
+  DuelPreparationCombatRole,
+  ExternalDuelPreparationArmorOption,
+  ExternalDuelPreparationOpponentHistoryEntry,
+  ExternalDuelPreparationOpponentHistorySummary,
+  ExternalDuelPreparationFoodOption,
+  ExternalDuelPreparationPlanOption,
+  ExternalDuelPreparationPublicProfile,
+  ExternalDuelPreparationStrategyDecision,
+  ExternalDuelPreparationStrategyRequest,
+  ExternalDuelPreparationStrategyResponse,
+  ExternalDuelPreparationTacticalStrategy,
+} from "./types/game/external-duel-preparation-strategy";
+export type {
+  StreamingDuelActionObservation,
+  StreamingDuelDamageObservationContext,
+  StreamingDuelExecutorObservationContext,
+  StreamingDuelFoodObservationContext,
+  StreamingDuelPrayerObservationContext,
+  StreamingDuelRoleSwitchObservationContext,
+  StreamingDuelStyleObservationContext,
+  StreamingDuelPublicCombatRole,
+  StreamingDuelPublicPrayer,
+  StreamingDuelPublicStyle,
+  StreamingDuelPublicTacticalMacro,
+} from "./types/game/streaming-duel-action-observation";
+
+// Export the strict frozen strategy summary disclosed to duel spectators.
+export {
+  STREAMING_DUEL_PUBLIC_STRATEGY_APPROACHES,
+  STREAMING_DUEL_PUBLIC_STRATEGY_ATTACK_STYLES,
+  STREAMING_DUEL_PUBLIC_STRATEGY_SOURCES,
+  STREAMING_DUEL_STRATEGY_SUMMARY_SCHEMA_VERSION,
+  parseStreamingDuelStrategySummary,
+} from "./types/game/streaming-duel-strategy-summary";
+export type {
+  StreamingDuelPublicStrategyApproach,
+  StreamingDuelPublicStrategyAttackStyle,
+  StreamingDuelPublicStrategySource,
+  StreamingDuelStrategySummary,
+} from "./types/game/streaming-duel-strategy-summary";
+
+// Export the strict public status for the selected pre-market contestants.
+export {
+  STREAMING_DUEL_PREPARATION_SUMMARY_SCHEMA_VERSION,
+  STREAMING_DUEL_PUBLIC_PREPARATION_ACTIVITY_TRAIL_LIMIT,
+  STREAMING_DUEL_PUBLIC_PREPARATION_ACTIVITIES,
+  STREAMING_DUEL_PUBLIC_PREPARATION_MODES,
+  STREAMING_DUEL_PUBLIC_PREPARATION_STATUSES,
+  parseStreamingDuelPreparationSummary,
+} from "./types/game/streaming-duel-preparation-summary";
+export type {
+  StreamingDuelPreparationContestantSummary,
+  StreamingDuelPreparationSummary,
+  StreamingDuelPublicPreparationActivity,
+  StreamingDuelPublicPreparationMode,
+  StreamingDuelPublicPreparationStatus,
+} from "./types/game/streaming-duel-preparation-summary";
+
+// Export the strict, privacy-safe preparation processing presentation contract.
+export {
+  PROCESSING_SKILLS,
+  isProcessingSkill,
+  normalizeProcessingInteractionPresentationState,
+  resolveProcessingInteractionBodyEmote,
+} from "./types/game/processing-interaction-presentation";
+export type {
+  ProcessingInteractionPresentationPhase,
+  ProcessingInteractionPresentationState,
+  ProcessingInteractionTargetPosition,
+} from "./types/game/processing-interaction-presentation";
 
 // Export death/loot types for shadow state and transaction tracking
 export type {
@@ -187,9 +312,11 @@ export {
   CANONICAL_DUEL_AVATAR_ID,
   CANONICAL_DUEL_AVATAR_URL,
   DEFAULT_AVATAR_URL,
+  getAvatarByUrl,
   getDuelAvatarUrlForStyle,
 } from "./data/avatars";
-export type { DuelAvatarStyle } from "./data/avatars";
+export { DIAGNOSTIC_AVATAR_OPTIONS } from "./data/avatars";
+export type { AvatarOption, DuelAvatarStyle } from "./data/avatars";
 
 // Export skill data for UI displays
 export {
@@ -287,9 +414,15 @@ export type {
   StreamingDuelVisibleEquipmentSlot,
 } from "./systems/client/EquipmentVisualSystem";
 export type {
+  StreamingArrowVisualCancellationEvent,
+  StreamingArrowVisualImpactEvent,
   StreamingArrowVisualSpawnEvent,
   StreamingProjectileVisualDiagnostics,
 } from "./systems/client/ProjectileRenderer";
+export type {
+  StreamingDamagePresentationDiagnostics,
+  StreamingDamagePresentationEvent,
+} from "./systems/client/DamageSplatSystem";
 export { ClientActions } from "./systems/client/ClientActions";
 export { DevStats } from "./systems/client/DevStats"; // FPS counter and dev performance telemetry
 export {
@@ -388,10 +521,12 @@ export {
   isValidEquipmentSlot,
   getIncompatibleRules,
   areRulesCompatible,
+  getCombatArenaBoundsContainingPositions,
   isPositionInsideCombatArena,
   type DuelRuleDefinition,
   type EquipmentSlotDefinition,
   type DuelEquipmentSlot,
+  type DuelCombatArenaBounds,
 } from "./data/duel-manifest";
 export { ControlPriorities } from "./systems/client/ControlPriorities";
 export { downloadFile } from "./utils/downloadFile";
@@ -421,6 +556,8 @@ export function getPhysXAssetPath(assetName: string): string {
 
 // Export THREE namespace as a default-only module export
 export { default as THREE } from "./extras/three/three";
+export { BorrowedMaterialEnvironment } from "./extras/three/BorrowedMaterialEnvironment";
+export { fitBoundedDirectionalShadow } from "./extras/three/BoundedDirectionalShadow";
 
 // Export Vector3 compatibility utilities for plugin use
 export {
@@ -737,10 +874,46 @@ export type {
   InventoryDebitRequirement,
   InventoryDebitCommitRequest,
   InventoryDebitCommitReceipt,
+  GroundItemSourceStatus,
+  GroundItemSourceState,
+  GroundItemSourceRegistrationRequest,
+  GroundItemSourceRegistrationReceipt,
+  GroundItemDropCommitRequest,
+  GroundItemDropCommitReceipt,
+  GroundItemDeathCommitRequest,
+  GroundItemDeathCommitReceipt,
+  GroundItemPickupCommitRequest,
+  GroundItemPickupCommitReceipt,
+  FoodConsumptionOperationStatus,
+  FoodConsumptionCompletionReason,
+  FoodConsumptionCommitRequest,
+  FoodConsumptionCompleteRequest,
+  FoodConsumptionCommitReceipt,
+  DuelDamageCompetitiveAuthority,
+  DuelDamageCompetitiveTerminal,
+  DuelDamageCommitRequest,
+  DuelDamageCommitReceipt,
   BoneBurialCommitRequest,
   BoneBurialCommitReceipt,
+  QuestRewardSkill,
+  QuestCompletionRewardItem,
+  QuestStartRewardItem,
+  QuestStartCommitRequest,
+  QuestStartCommitReceipt,
+  QuestCompletionRewardXp,
+  QuestCompletionProgressReceipt,
+  QuestCompletionCommitRequest,
+  QuestCompletionCommitReceipt,
   EquipmentStackDebitCommitRequest,
   EquipmentStackDebitCommitReceipt,
+  AmmunitionRecoveryDisposition,
+  AmmunitionShotCommitRequest,
+  AmmunitionShotCommitReceipt,
+  StreamingDuelExecutorCommand,
+  StreamingDuelExecutorCommandOutcome,
+  StreamingDuelExecutorCommandRequest,
+  StreamingDuelExecutorCommandCompletionRequest,
+  StreamingDuelExecutorCommandReceipt,
   PrayerPersistenceSnapshot,
   PrayerStateTransitionKind,
   PrayerStateCommitRequest,

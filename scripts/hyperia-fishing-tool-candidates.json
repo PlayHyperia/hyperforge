@@ -1,0 +1,74 @@
+{
+  "schemaVersion": 1,
+  "exportedAt": "2026-08-18T20:00:00.000Z",
+  "avatar": {
+    "id": "kaykit-knight",
+    "legacyAttachmentId": "kaykit-knight",
+    "path": "artifacts/duel-launch-avatar-bakeoff/kaykit-knight.vrm",
+    "sha256": "b288656410986780a0df81d684e4888633be07751b0e57136d9e3c89512e713f",
+    "normalizedHeight": 1.6
+  },
+  "runtimeItemManifest": {
+    "path": "packages/server/world/assets/manifests/items/tools.json",
+    "sha256": "08ff3018d17f5da7871c8d946d7c23b085614cc89452f2e71c0907e48a797411"
+  },
+  "authorship": {
+    "method": "deterministic-repository-authored-geometry",
+    "externalGeometry": false,
+    "externalTextures": false,
+    "activationStatus": "not-activated"
+  },
+  "candidates": [
+    {
+      "itemId": "small_fishing_net",
+      "displayName": "Small fishing net",
+      "grip": "one-hand",
+      "weaponType": "fishing-net",
+      "attachmentBone": "rightHand",
+      "targetLengthMetres": 0.95,
+      "desiredWorldEulerDegrees": [0, 0, 0],
+      "desiredWorldOffsetMetres": [0, 0, 0],
+      "referenceMotion": {
+        "path": "artifacts/duel-launch-avatar-bakeoff/motions/kaykit-net-throw-candidate.glb",
+        "sha256": "0b40e3c9582def34191d6116794a7243dce8230ac684b2e2efb99843461b1e24",
+        "sampleRatio": 0.35
+      }
+    },
+    {
+      "itemId": "harpoon",
+      "displayName": "Barbed fishing harpoon",
+      "grip": "two-hand",
+      "weaponType": "harpoon",
+      "attachmentBone": "rightHand",
+      "targetLengthMetres": 2,
+      "desiredWorldEulerDegrees": [0, 0, 0],
+      "desiredWorldOffsetMetres": [0, 0, 0],
+      "alignHandleToSecondaryHand": {
+        "sourceHandleAxis": [0, 1, 0]
+      },
+      "referenceMotion": {
+        "path": "artifacts/duel-launch-avatar-bakeoff/motions/harpoon-water-strike-candidates/kaykit-harpoon-water-strike.glb",
+        "sha256": "395a445ad9f77b96be25eaa3def4d2eb5340145668dc076363569ddf338dd48b",
+        "sampleRatio": 0.02
+      }
+    },
+    {
+      "itemId": "lobster_pot",
+      "displayName": "Lobster cage",
+      "grip": "one-hand",
+      "weaponType": "lobster-pot",
+      "attachmentBone": "rightHand",
+      "targetLengthMetres": 0.9,
+      "desiredWorldEulerDegrees": [0, 0, 0],
+      "desiredWorldOffsetMetres": [0, 0, 0],
+      "referenceMotion": {
+        "path": "artifacts/duel-launch-avatar-bakeoff/motions/kaykit-object-pickup-candidate.glb",
+        "sha256": "738e20692ca70ac2122c03fd289413a0160e02d23ebd997671aa4c19757fb99b",
+        "sampleRatio": 0.65
+      }
+    }
+  ],
+  "sourceOutputDirectory": "artifacts/duel-launch-avatar-bakeoff/fishing-tool-candidates/sources",
+  "fitOutputDirectory": "artifacts/duel-launch-avatar-bakeoff/fishing-tool-candidates/fitted",
+  "reportPath": "artifacts/duel-launch-avatar-bakeoff/hyperia-fishing-tool-fit-report.json"
+}

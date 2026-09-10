@@ -33,6 +33,7 @@ function makeInput(overrides: Partial<AgentTickInput> = {}): AgentTickInput {
   const uniqueId = `agent-${++nextAgentId}`;
   return {
     characterId: uniqueId,
+    combatSpecialization: "melee",
     behaviorEpoch: 0,
     playerId: `player-${nextAgentId}`,
     name: "TestBot",
@@ -48,6 +49,7 @@ function makeInput(overrides: Partial<AgentTickInput> = {}): AgentTickInput {
       nearbyEntities: [],
       inCombat: false,
       currentTarget: null,
+      selectedSpell: null,
       activePrayers: [],
     },
     inventoryItems: [],
@@ -59,6 +61,7 @@ function makeInput(overrides: Partial<AgentTickInput> = {}): AgentTickInput {
     attackObservationRetryAfter: 0,
     bankStageRetryAfter: 0,
     questEntryAcquisitionQuestId: null,
+    ordinaryProcessingAcquisitionAuthorized: false,
     survivalFoodAcquisitionAuthorized: false,
     ordinaryProcessingRetrySuppressions: [],
     agentState: {
@@ -215,6 +218,7 @@ function initializeTestItems(): void {
             barItemId: "bronze_bar",
             barsRequired: 1,
             levelRequired: 1,
+            outputQuantity: 1,
           },
         },
       ],
@@ -422,6 +426,432 @@ describe("AgentBehaviorEngine", () => {
     });
   });
 
+  describe("ordinary combat readiness", () => {
+    const combatRecipes: WorkerProcessingRecipeSnapshot = {
+      ...TEST_PROCESSING_RECIPES,
+      stores: [
+        ...TEST_PROCESSING_RECIPES.stores,
+        {
+          storeId: "range_store",
+          items: [
+            { itemId: "shortbow", price: 50, category: "ranged_weapons" },
+            { itemId: "bronze_arrow", price: 7, category: "ammunition" },
+          ],
+        },
+        {
+          storeId: "magic_store",
+          items: [
+            { itemId: "staff_of_air", price: 1500, category: "magic_weapons" },
+            { itemId: "mind_rune", price: 15, category: "runes" },
+          ],
+        },
+        {
+          storeId: "melee_store",
+          items: [
+            {
+              itemId: "bronze_dagger",
+              price: 10,
+              category: "weapons",
+            },
+            {
+              itemId: "bronze_shortsword",
+              price: 100,
+              category: "weapons",
+            },
+          ],
+        },
+      ],
+      combatReadiness: {
+        ammunitionTarget: 50,
+        magicCastTarget: 20,
+        melee: [
+          {
+            weaponId: "bronze_shortsword",
+            weaponScore: 7,
+            requiredAttackLevel: 1,
+          },
+        ],
+        ranged: [
+          {
+            weaponId: "shortbow",
+            ammunitionId: "bronze_arrow",
+            weaponScore: 8,
+            ammunitionScore: 7,
+            requiredRangedLevel: 1,
+          },
+        ],
+        magic: [
+          {
+            weaponId: "staff_of_air",
+            spellId: "wind_strike",
+            weaponScore: 10,
+            spellOrder: 0,
+            requiredMagicLevel: 1,
+            providedRuneIds: ["air_rune"],
+            runes: [
+              { itemId: "air_rune", quantityPerCast: 1 },
+              { itemId: "mind_rune", quantityPerCast: 1 },
+            ],
+          },
+        ],
+      },
+    };
+    const combatItems: Array<[string, WorkerItemData]> = [
+      [
+        "bronze_dagger",
+        {
+          id: "bronze_dagger",
+          name: "Bronze Dagger",
+          type: "weapon",
+          equipSlot: "weapon",
+          attackType: "MELEE",
+          bonuses: { attack: 2, strength: 1 },
+        },
+      ],
+      [
+        "bronze_shortsword",
+        {
+          id: "bronze_shortsword",
+          name: "Bronze Shortsword",
+          type: "weapon",
+          equipSlot: "weapon",
+          attackType: "MELEE",
+          bonuses: { attack: 4, strength: 3 },
+        },
+      ],
+      [
+        "shortbow",
+        {
+          id: "shortbow",
+          name: "Shortbow",
+          type: "weapon",
+          equipSlot: "2h",
+          attackType: "RANGED",
+          bonuses: { attackRanged: 8 },
+          requirements: { skills: { ranged: 1 } },
+        },
+      ],
+      [
+        "bronze_arrow",
+        {
+          id: "bronze_arrow",
+          name: "Bronze arrow",
+          type: "ammunition",
+          stackable: true,
+          equipSlot: "arrows",
+          bonuses: { rangedStrength: 7 },
+          requirements: { skills: { ranged: 1 } },
+        },
+      ],
+      [
+        "staff_of_air",
+        {
+          id: "staff_of_air",
+          name: "Staff of air",
+          type: "weapon",
+          equipSlot: "weapon",
+          attackType: "MAGIC",
+          bonuses: { attackMagic: 10 },
+          requirements: { skills: { magic: 1 } },
+        },
+      ],
+      ["air_rune", { id: "air_rune", name: "Air rune", type: "rune" }],
+      ["mind_rune", { id: "mind_rune", name: "Mind rune", type: "rune" }],
+      [
+        "combat_ration",
+        {
+          id: "combat_ration",
+          name: "Combat ration",
+          type: "food",
+          stackable: true,
+          healAmount: 100,
+        },
+      ],
+    ];
+
+    const makeCombatInput = (
+      specialization: AgentTickInput["combatSpecialization"],
+      overrides: Partial<AgentTickInput> = {},
+    ): AgentTickInput => {
+      const input = makeInput({
+        combatSpecialization: specialization,
+        storePositions: [
+          {
+            entityId: "range-shop",
+            storeId: "range_store",
+            name: "Range store",
+            position: [100, 0, 100],
+          },
+          {
+            entityId: "magic-shop",
+            storeId: "magic_store",
+            name: "Magic store",
+            position: [100, 0, 100],
+          },
+          {
+            entityId: "melee-shop",
+            storeId: "melee_store",
+            name: "Melee store",
+            position: [100, 0, 100],
+          },
+        ],
+        ...overrides,
+      });
+      input.gameState.skills = {
+        attack: { level: 1, xp: 0 },
+        ranged: { level: 1, xp: 0 },
+        magic: { level: 1, xp: 0 },
+      };
+      input.inventoryItems.push({
+        slot: input.inventoryItems.length,
+        itemId: "combat_ration",
+        quantity: 1,
+      });
+      return input;
+    };
+
+    it("acquires and keeps the certified melee identity over unsupported gear", () => {
+      initializeItems(combatItems, combatRecipes);
+      try {
+        const unarmed = makeCombatInput("melee");
+        expect(processAgentTicks([unarmed])[0].action).toEqual({
+          type: "storeBuy",
+          storeId: "melee_store",
+          itemId: "bronze_shortsword",
+          quantity: 1,
+        });
+
+        const missing = makeCombatInput("melee", {
+          equippedItems: { weapon: "bronze_dagger" },
+        });
+        expect(processAgentTicks([missing])[0].action).toEqual({
+          type: "storeBuy",
+          storeId: "melee_store",
+          itemId: "bronze_shortsword",
+          quantity: 1,
+        });
+
+        const owned = makeCombatInput("melee", {
+          equippedItems: { weapon: "iron_shortsword" },
+          inventoryItems: [
+            { slot: 0, itemId: "bronze_shortsword", quantity: 1 },
+          ],
+        });
+        expect(processAgentTicks([owned])[0].action).toEqual({
+          type: "equip",
+          itemId: "bronze_shortsword",
+        });
+
+        owned.equippedItems.weapon = "bronze_shortsword";
+        owned.inventoryItems = [
+          { slot: 0, itemId: "iron_shortsword", quantity: 1 },
+        ];
+        expect(processAgentTicks([owned])[0].action).not.toEqual({
+          type: "equip",
+          itemId: "iron_shortsword",
+        });
+      } finally {
+        initializeTestItems();
+      }
+    });
+
+    it("buys and equips a ranged loadout only after the full arrow reserve exists", () => {
+      initializeItems(combatItems, combatRecipes);
+      try {
+        const noCertifiedFallback = makeCombatInput("ranged", {
+          equippedItems: { weapon: "bronze_dagger" },
+        });
+        expect(processAgentTicks([noCertifiedFallback])[0].action).toEqual({
+          type: "storeBuy",
+          storeId: "melee_store",
+          itemId: "bronze_shortsword",
+          quantity: 1,
+        });
+
+        const missingBow = makeCombatInput("ranged", {
+          equippedItems: { weapon: "bronze_shortsword" },
+        });
+        expect(processAgentTicks([missingBow])[0].action).toEqual({
+          type: "storeBuy",
+          storeId: "range_store",
+          itemId: "shortbow",
+          quantity: 1,
+        });
+
+        const missingArrows = makeCombatInput("ranged", {
+          equippedItems: { weapon: "bronze_shortsword" },
+          inventoryItems: [
+            { slot: 0, itemId: "shortbow", quantity: 1 },
+            { slot: 1, itemId: "bronze_arrow", quantity: 20 },
+          ],
+        });
+        expect(processAgentTicks([missingArrows])[0].action).toEqual({
+          type: "storeBuy",
+          storeId: "range_store",
+          itemId: "bronze_arrow",
+          quantity: 30,
+        });
+
+        const complete = makeCombatInput("ranged", {
+          equippedItems: { weapon: "bronze_shortsword" },
+          inventoryItems: [
+            { slot: 0, itemId: "shortbow", quantity: 1 },
+            { slot: 1, itemId: "bronze_arrow", quantity: 50 },
+          ],
+        });
+        expect(processAgentTicks([complete])[0].action).toEqual({
+          type: "equip",
+          itemId: "shortbow",
+        });
+
+        complete.equippedItems.weapon = "shortbow";
+        expect(processAgentTicks([complete])[0].action).toEqual({
+          type: "equip",
+          itemId: "bronze_arrow",
+        });
+      } finally {
+        initializeTestItems();
+      }
+    });
+
+    it("buys exact non-staff runes before persisting a legal autocast spell", () => {
+      initializeItems(combatItems, combatRecipes);
+      try {
+        const noCertifiedFallback = makeCombatInput("mage", {
+          equippedItems: { weapon: "bronze_dagger" },
+        });
+        expect(processAgentTicks([noCertifiedFallback])[0].action).toEqual({
+          type: "storeBuy",
+          storeId: "melee_store",
+          itemId: "bronze_shortsword",
+          quantity: 1,
+        });
+
+        const missingRunes = makeCombatInput("mage", {
+          equippedItems: { weapon: "staff_of_air" },
+          inventoryItems: [{ slot: 0, itemId: "mind_rune", quantity: 4 }],
+        });
+        expect(processAgentTicks([missingRunes])[0].action).toEqual({
+          type: "storeBuy",
+          storeId: "magic_store",
+          itemId: "mind_rune",
+          quantity: 16,
+        });
+
+        const complete = makeCombatInput("mage", {
+          equippedItems: { weapon: "staff_of_air" },
+          inventoryItems: [{ slot: 0, itemId: "mind_rune", quantity: 20 }],
+        });
+        expect(processAgentTicks([complete])[0].action).toEqual({
+          type: "setAutocast",
+          spellId: "wind_strike",
+        });
+      } finally {
+        initializeTestItems();
+      }
+    });
+
+    it("checks exact private combat custody before buying or self-supplying a missing loadout", () => {
+      initializeItems(combatItems, combatRecipes);
+      try {
+        const bank = {
+          entityId: "combat-bank",
+          stationType: "bank",
+          name: "Combat bank",
+          position: [120, 0, 100] as [number, number, number],
+          interactionRange: 2,
+        };
+        const walking = makeCombatInput("ranged", {
+          stationPositions: [bank],
+          equippedItems: { weapon: "bronze_shortsword" },
+        });
+        expect(processAgentTicks([walking])[0]).toMatchObject({
+          action: {
+            type: "move",
+            target: [120, 0, 100],
+            runMode: true,
+          },
+          updatedState: {
+            goal: {
+              type: "banking",
+              bankPurpose: "combat_supply",
+            },
+          },
+        });
+
+        const waitingAfterTechnicalFailure = makeCombatInput("ranged", {
+          stationPositions: [bank],
+          equippedItems: { weapon: "bronze_shortsword" },
+          bankStageRetryAfter: Date.now() + 30_000,
+        });
+        expect(
+          processAgentTicks([waitingAfterTechnicalFailure])[0].action,
+        ).toEqual({ type: "idle" });
+
+        const opening = makeCombatInput("ranged", {
+          stationPositions: [bank],
+          equippedItems: { weapon: "bronze_shortsword" },
+        });
+        opening.gameState.position = [120, 0, 100];
+        expect(processAgentTicks([opening])[0]).toMatchObject({
+          action: { type: "bankWithdraw", bankId: "combat-bank" },
+          updatedState: {
+            goal: {
+              type: "banking",
+              bankPurpose: "combat_supply",
+            },
+          },
+        });
+      } finally {
+        initializeTestItems();
+      }
+    });
+
+    it("does not let an optional combat-supply bank check starve a startable quest", () => {
+      initializeItems(combatItems, combatRecipes);
+      try {
+        const quest = makeQuestInfo("torvins_tools", true);
+        quest.startNpc = "torvin";
+        const input = makeCombatInput("ranged", {
+          equippedItems: { weapon: "bronze_shortsword" },
+          availableQuests: [quest],
+          npcPositions: [
+            {
+              id: "torvin-npc",
+              name: "Torvin",
+              npcId: "torvin",
+              position: [100, 0, 100],
+            },
+          ],
+          stationPositions: [
+            {
+              entityId: "combat-bank",
+              stationType: "bank",
+              name: "Combat bank",
+              position: [100, 0, 100],
+              interactionRange: 2,
+            },
+          ],
+        });
+        input.agentState.questsAccepted = [
+          "goblin_slayer",
+          "lumberjacks_first_lesson",
+          "fresh_catch",
+          "rune_mysteries",
+        ];
+
+        expect(processAgentTicks([input])[0]).toMatchObject({
+          action: { type: "questAccept", questId: "torvins_tools" },
+          updatedState: {
+            goal: { type: "questing", questId: "torvins_tools" },
+          },
+        });
+      } finally {
+        initializeTestItems();
+      }
+    });
+  });
+
   describe("Inventory Management", () => {
     it("provisions a full authored food reserve through private bank then exact store fallback", () => {
       const recipes: WorkerProcessingRecipeSnapshot = {
@@ -509,7 +939,7 @@ describe("AgentBehaviorEngine", () => {
         const walking = processAgentTicks([makeSurvivalInput()])[0];
         expect(walking.action).toEqual({
           type: "move",
-          target: [109.5, 0, 100.5],
+          target: [110, 0, 100],
           runMode: true,
         });
         expect(walking.updatedState.goal).toMatchObject({
@@ -707,13 +1137,67 @@ describe("AgentBehaviorEngine", () => {
         });
         expect(processAgentTicks([cooking])[0].action).toEqual({
           type: "move",
-          target: [109.5, 0, 100.5],
+          target: [110, 0, 100],
           runMode: true,
         });
         cooking.gameState.position = [110, 0, 100];
         expect(processAgentTicks([cooking])[0].action).toEqual({
           type: "cook",
           itemId: "raw_shrimp",
+        });
+
+        const footprintEdgeCooking = makeSurvivalInput({
+          bankStageRetryAfter: Date.now() + 300_000,
+          survivalFoodAcquisitionAuthorized: true,
+          inventoryItems: [
+            { slot: 0, itemId: "small_fishing_net", quantity: 1 },
+            { slot: 1, itemId: "raw_shrimp", quantity: 4 },
+          ],
+          stationPositions: [
+            {
+              entityId: "wide-safe-range",
+              name: "Wide safe range",
+              stationType: "range",
+              position: [-14, 0, -3],
+              interactionRange: 1,
+              footprintWidth: 2,
+              footprintDepth: 1,
+            },
+          ],
+        });
+        footprintEdgeCooking.gameState.position = [-15.5, 0, -3.5];
+        expect(processAgentTicks([footprintEdgeCooking])[0].action).toEqual({
+          type: "cook",
+          itemId: "raw_shrimp",
+        });
+
+        const burnRecovery = makeSurvivalInput({
+          bankStageRetryAfter: Date.now() + 300_000,
+          survivalFoodAcquisitionAuthorized: true,
+          inventoryItems: [
+            { slot: 0, itemId: "small_fishing_net", quantity: 1 },
+            { slot: 1, itemId: "burnt_shrimp", quantity: 1 },
+            { slot: 2, itemId: "raw_shrimp", quantity: 3 },
+          ],
+        });
+        burnRecovery.gameState.nearbyEntities = [
+          {
+            id: "exact-net-spot",
+            name: "Safe pond",
+            type: "resource",
+            resourceId: "fishing_test",
+            position: [101, 0, 100],
+            distance: 1,
+          },
+        ];
+        expect(processAgentTicks([burnRecovery])[0].action).toEqual({
+          type: "gather",
+          targetId: "exact-net-spot",
+        });
+        burnRecovery.agentState.lastGatherTargetId = "exact-net-spot";
+        burnRecovery.agentState.lastGatherQueuedAt = Date.now();
+        expect(processAgentTicks([burnRecovery])[0].action).toEqual({
+          type: "idle",
         });
 
         const unsafeFallback = makeSurvivalInput({
@@ -726,6 +1210,27 @@ describe("AgentBehaviorEngine", () => {
           authorizedCoinRecovery.gameState.nearbyEntities;
         expect(processAgentTicks([unsafeFallback])[0].action).toEqual({
           type: "idle",
+        });
+
+        const fullInventory = makeSurvivalInput({
+          bankStageRetryAfter: Date.now() + 300_000,
+          survivalFoodAcquisitionAuthorized: true,
+          inventoryItems: Array.from({ length: 28 }, (_, slot) => ({
+            slot,
+            itemId: "burnt_shrimp",
+            quantity: 1,
+          })),
+          stationPositions: [bank],
+        });
+        expect(processAgentTicks([fullInventory])[0].action).toEqual({
+          type: "move",
+          target: [110, 0, 100],
+          runMode: true,
+        });
+        fullInventory.gameState.position = [110, 0, 100];
+        expect(processAgentTicks([fullInventory])[0].action).toEqual({
+          type: "bankDepositAll",
+          bankId: "survival-bank",
         });
 
         const alreadyProvisioned = makeSurvivalInput({
@@ -1768,6 +2273,355 @@ describe("AgentBehaviorEngine", () => {
   });
 
   describe("Authoritative workstation proximity", () => {
+    it("routes a full questing agent diagonally to the loaded bank before another blocked gather", () => {
+      const inventoryItems = Array.from({ length: 28 }, (_, slot) => ({
+        slot,
+        itemId: slot === 0 ? "cooked_shrimp" : `quest-custody-${slot}`,
+        quantity: slot === 0 ? 100 : 1,
+      }));
+      const bank = {
+        entityId: "quest-bank-live",
+        name: "quest bank quest-bank-live",
+        stationType: "bank",
+        position: [112, 0, 108] as [number, number, number],
+        interactionRange: 2,
+      };
+      const input = makeInput({
+        inventoryItems,
+        questState: [
+          {
+            questId: "full-inventory-gather",
+            name: "Full inventory gather",
+            status: "in_progress",
+            currentStage: "gather",
+            stageDescription: "Gather copper ore",
+            stageProgress: {},
+            stageType: "gather",
+            stageTarget: "copper_ore",
+            stageCount: 1,
+            startNpc: "miner",
+          },
+        ],
+        stationPositions: [bank],
+      });
+      input.equippedItems.weapon = "bronze_pickaxe";
+      input.gameState.skills.mining = { level: 1, xp: 0 };
+      input.gameState.nearbyEntities = [
+        {
+          id: "blocked-ore-node",
+          name: "Copper rock",
+          type: "resource",
+          position: [102, 0, 100],
+          distance: 2,
+          resourceId: "ore_test",
+          resourceType: "mining_rock",
+        },
+      ];
+
+      const [travelling] = processAgentTicks([input]);
+      expect(travelling.action).toEqual({
+        type: "move",
+        target: [112, 0, 108],
+        runMode: true,
+      });
+      expect(travelling.action).not.toEqual({
+        type: "gather",
+        targetId: "blocked-ore-node",
+      });
+
+      input.gameState.position = [111.5, 0, 108.5];
+      const [arrived] = processAgentTicks([input]);
+      expect(arrived.action).toEqual({
+        type: "bankDepositAll",
+        bankId: "quest-bank-live",
+      });
+    });
+
+    it("preserves quest materials when the remaining gathering stage exactly fits", () => {
+      const inventoryItems = Array.from({ length: 24 }, (_, slot) => ({
+        slot,
+        itemId: slot === 0 ? "cooked_shrimp" : `quest-custody-${slot}`,
+        quantity: slot === 0 ? 100 : 1,
+      }));
+      const input = makeInput({
+        inventoryItems,
+        questState: [
+          {
+            questId: "torvins_tools",
+            name: "Torvin's Tools",
+            status: "in_progress",
+            currentStage: "mine_copper",
+            stageDescription: "Mine 4 copper ore",
+            stageProgress: {},
+            stageType: "gather",
+            stageTarget: "copper_ore",
+            stageCount: 4,
+            startNpc: "torvin",
+          },
+        ],
+      });
+      input.equippedItems.weapon = "bronze_pickaxe";
+      input.gameState.skills.mining = { level: 1, xp: 0 };
+      input.gameState.nearbyEntities = [
+        {
+          id: "copper-node-with-capacity",
+          name: "Copper rock",
+          type: "resource",
+          position: [102, 0, 100],
+          distance: 2,
+          resourceId: "ore_test",
+          resourceType: "mining_rock",
+        },
+      ];
+      input.agentState.goal = {
+        type: "questing",
+        description: "Mine 4 copper ore",
+        questId: "torvins_tools",
+        questName: "Torvin's Tools",
+        questStageType: "gather",
+        questStageTarget: "copper_ore",
+        questStageCount: 4,
+        questStartNpc: "torvin",
+      };
+      input.agentState.questsAccepted = ["torvins_tools"];
+
+      expect(processAgentTicks([input])[0].action).toEqual({
+        type: "gather",
+        targetId: "copper-node-with-capacity",
+      });
+    });
+
+    it("requests surplus banking when the next quest gather cannot fit while preserving the quest goal", () => {
+      const inventoryItems = [
+        ...Array.from({ length: 14 }, (_, slot) => ({
+          slot,
+          itemId: "cooked_shrimp",
+          quantity: 1,
+        })),
+        ...Array.from({ length: 4 }, (_, offset) => ({
+          slot: 14 + offset,
+          itemId: "burnt_shrimp",
+          quantity: 1,
+        })),
+        ...Array.from({ length: 4 }, (_, offset) => ({
+          slot: 18 + offset,
+          itemId: "copper_ore",
+          quantity: 1,
+        })),
+        { slot: 22, itemId: "bronze_pickaxe", quantity: 1 },
+        { slot: 23, itemId: "hammer", quantity: 1 },
+        { slot: 24, itemId: "small_fishing_net", quantity: 1 },
+      ];
+      const input = makeInput({
+        inventoryItems,
+        questState: [
+          {
+            questId: "torvins_tools",
+            name: "Torvin's Tools",
+            status: "in_progress",
+            currentStage: "mine_tin",
+            stageDescription: "Mine 4 tin ore",
+            stageProgress: {},
+            stageType: "gather",
+            stageTarget: "tin_ore",
+            stageCount: 4,
+            startNpc: "torvin",
+          },
+        ],
+        stationPositions: [
+          {
+            entityId: "quest-bank-live",
+            name: "Quest bank",
+            stationType: "bank",
+            position: [100, 0, 100],
+            interactionRange: 2,
+          },
+        ],
+      });
+      input.gameState.health = 10;
+      input.gameState.maxHealth = 10;
+      input.agentState.goal = {
+        type: "questing",
+        description: "Mine 4 tin ore",
+        questId: "torvins_tools",
+        questName: "Torvin's Tools",
+        questStageType: "gather",
+        questStageTarget: "tin_ore",
+        questStageCount: 4,
+        questStartNpc: "torvin",
+      };
+      input.agentState.questsAccepted = ["torvins_tools"];
+
+      const [result] = processAgentTicks([input]);
+      expect(result.action).toEqual({
+        type: "bankDepositAll",
+        bankId: "quest-bank-live",
+      });
+      expect(result.updatedState.goal).toMatchObject({
+        type: "questing",
+        questId: "torvins_tools",
+      });
+    });
+
+    it("carries a near-full authored ore batch from the bank to the furnace", () => {
+      const inventoryItems = [
+        ...Array.from({ length: 14 }, (_, slot) => ({
+          slot,
+          itemId: "cooked_shrimp",
+          quantity: 1,
+        })),
+        ...Array.from({ length: 2 }, (_, offset) => ({
+          slot: 14 + offset,
+          itemId: "burnt_shrimp",
+          quantity: 1,
+        })),
+        ...Array.from({ length: 4 }, (_, offset) => ({
+          slot: 16 + offset,
+          itemId: "copper_ore",
+          quantity: 1,
+        })),
+        ...Array.from({ length: 4 }, (_, offset) => ({
+          slot: 20 + offset,
+          itemId: "tin_ore",
+          quantity: 1,
+        })),
+        { slot: 24, itemId: "bronze_pickaxe", quantity: 1 },
+        { slot: 25, itemId: "hammer", quantity: 1 },
+      ];
+      const input = makeInput({
+        inventoryItems,
+        questState: [
+          {
+            questId: "torvins_tools",
+            name: "Torvin's Tools",
+            status: "in_progress",
+            currentStage: "smelt_bronze",
+            stageDescription: "Smelt 4 bronze bars",
+            stageProgress: {},
+            stageType: "interact",
+            stageTarget: "bronze_bar",
+            stageCount: 4,
+            startNpc: "torvin",
+          },
+        ],
+        stationPositions: [
+          {
+            entityId: "quest-bank-live",
+            name: "Quest bank",
+            stationType: "bank",
+            position: [100, 0, 100],
+            interactionRange: 2,
+          },
+          {
+            entityId: "quest-furnace-live",
+            name: "Quest furnace",
+            stationType: "furnace",
+            position: [112, 0, 108],
+            interactionRange: 2,
+          },
+        ],
+      });
+      // Keep this regression focused on quest-custody routing. The carried
+      // shrimp cover this fixture's full health so the higher-priority,
+      // independently tested survival-bank policy does not preempt it.
+      input.gameState.health = 40;
+      input.gameState.maxHealth = 40;
+      input.gameState.skills.smithing = { level: 1, xp: 0 };
+      input.agentState.goal = {
+        type: "questing",
+        description: "Smelt 4 bronze bars",
+        questId: "torvins_tools",
+        questName: "Torvin's Tools",
+        questStageType: "interact",
+        questStageTarget: "bronze_bar",
+        questStageCount: 4,
+        questStartNpc: "torvin",
+      };
+      input.agentState.questsAccepted = ["torvins_tools"];
+
+      expect(processAgentTicks([input])[0].action).toEqual({
+        type: "move",
+        target: [112, 0, 108],
+        runMode: true,
+      });
+    });
+
+    it("keeps a near-full quest batch during a bounded smelting retry", () => {
+      const inventoryItems = [
+        { slot: 0, itemId: "cooked_shrimp", quantity: 100 },
+        ...Array.from({ length: 18 }, (_, offset) => ({
+          slot: offset + 1,
+          itemId: `quest-custody-${offset}`,
+          quantity: 1,
+        })),
+        { slot: 19, itemId: "copper_ore", quantity: 1 },
+        { slot: 20, itemId: "copper_ore", quantity: 1 },
+        { slot: 21, itemId: "tin_ore", quantity: 1 },
+        { slot: 22, itemId: "tin_ore", quantity: 1 },
+        { slot: 23, itemId: "hammer", quantity: 1 },
+      ];
+      const input = makeInput({
+        inventoryItems,
+        questState: [
+          {
+            questId: "torvins_tools",
+            name: "Torvin's Tools",
+            status: "in_progress",
+            currentStage: "smelt_bronze",
+            stageDescription: "Smelt 4 bronze bars",
+            stageProgress: { bronze_bar: 2 },
+            stageType: "interact",
+            stageTarget: "bronze_bar",
+            stageCount: 4,
+            startNpc: "torvin",
+          },
+        ],
+        ordinaryProcessingRetrySuppressions: [
+          {
+            actionType: "smelt",
+            intentId: "bronze_bar",
+            retryAfter: Date.now() + 30_000,
+          },
+        ],
+        stationPositions: [
+          {
+            entityId: "quest-furnace-live",
+            name: "Quest furnace",
+            stationType: "furnace",
+            position: [100, 0, 100],
+            interactionRange: 2,
+          },
+          {
+            entityId: "quest-bank-live",
+            name: "Quest bank",
+            stationType: "bank",
+            position: [112, 0, 108],
+            interactionRange: 2,
+          },
+        ],
+      });
+      input.equippedItems.weapon = "bronze_pickaxe";
+      input.gameState.skills.smithing = { level: 1, xp: 0 };
+      input.agentState.goal = {
+        type: "questing",
+        description: "Smelt 4 bronze bars",
+        questId: "torvins_tools",
+        questName: "Torvin's Tools",
+        questStageType: "interact",
+        questStageTarget: "bronze_bar",
+        questStageCount: 4,
+        questStartNpc: "torvin",
+      };
+      input.agentState.questsAccepted = ["torvins_tools"];
+
+      const [result] = processAgentTicks([input]);
+      expect(result.action).toEqual({ type: "idle" });
+      expect(result.updatedState.goal).toMatchObject({
+        type: "questing",
+        questId: "torvins_tools",
+      });
+    });
+
     it("walks into the loaded range boundary before attempting to cook", () => {
       const input = makeInput({
         inventoryItems: [{ slot: 0, itemId: "raw_shrimp", quantity: 5 }],
@@ -1785,7 +2639,7 @@ describe("AgentBehaviorEngine", () => {
       const [outside] = processAgentTicks([input]);
       expect(outside.action).toEqual({
         type: "move",
-        target: [101.5, 0, 100.5],
+        target: [102, 0, 100],
         runMode: true,
       });
 
@@ -1818,7 +2672,7 @@ describe("AgentBehaviorEngine", () => {
       const [outside] = processAgentTicks([input]);
       expect(outside.action).toEqual({
         type: "move",
-        target: [102.5, 0, 100.5],
+        target: [103, 0, 100],
         runMode: true,
       });
 
@@ -2097,6 +2951,7 @@ describe("AgentBehaviorEngine", () => {
             bar: string;
             barsRequired: number;
             level: number;
+            outputQuantity?: number;
           }>;
         },
       ];
@@ -2131,6 +2986,7 @@ describe("AgentBehaviorEngine", () => {
           barItemId: recipe.bar,
           barsRequired: recipe.barsRequired,
           levelRequired: recipe.level,
+          outputQuantity: recipe.outputQuantity ?? 1,
         };
       }
       const hammer = ensureItem("hammer");
@@ -2899,7 +3755,7 @@ describe("AgentBehaviorEngine", () => {
         input.gameState.skills.crafting = { level: 1, xp: 0 };
         expect(processAgentTicks([input])[0].action).toEqual({
           type: "move",
-          target: [105.5, 0, 100.5],
+          target: [106, 0, 100],
           runMode: true,
         });
       } finally {
@@ -3692,7 +4548,7 @@ describe("AgentBehaviorEngine", () => {
       const walking = processAgentTicks([makeTrainingInput([100, 0, 100])])[0];
       expect(walking.action).toEqual({
         type: "move",
-        target: [109.5, 0, 100.5],
+        target: [110, 0, 100],
         runMode: true,
       });
       expect(walking.updatedState.goal).toMatchObject({
@@ -3727,6 +4583,1011 @@ describe("AgentBehaviorEngine", () => {
         type: "questAccept",
         questId: "fletchers_introduction",
       });
+    });
+  });
+
+  describe("specialization-aware processing acquisition", () => {
+    const recipes: WorkerProcessingRecipeSnapshot = {
+      stores: [
+        {
+          storeId: "general_store",
+          items: [
+            { itemId: "bronze_pickaxe", price: 10, category: "tools" },
+            { itemId: "bronze_hatchet", price: 10, category: "tools" },
+            { itemId: "knife", price: 5, category: "tools" },
+          ],
+        },
+      ],
+      gathering: [
+        {
+          resourceId: "ore_copper",
+          harvestSkill: "mining",
+          toolRequired: "bronze_pickaxe",
+          levelRequired: 1,
+          outputItemIds: ["copper_ore"],
+        },
+        {
+          resourceId: "ore_tin",
+          harvestSkill: "mining",
+          toolRequired: "bronze_pickaxe",
+          levelRequired: 1,
+          outputItemIds: ["tin_ore"],
+        },
+        {
+          resourceId: "tree_pine",
+          harvestSkill: "woodcutting",
+          toolRequired: "bronze_hatchet",
+          levelRequired: 1,
+          outputItemIds: ["logs"],
+        },
+        {
+          resourceId: "ore_rune_essence",
+          harvestSkill: "mining",
+          toolRequired: "bronze_pickaxe",
+          levelRequired: 1,
+          outputItemIds: ["rune_essence"],
+        },
+      ],
+      guaranteedMobDrops: [],
+      firemaking: [],
+      crafting: [],
+      tanning: [],
+      fletching: [
+        {
+          recipeId: "arrow_shaft:logs",
+          outputItemId: "arrow_shaft",
+          outputQuantity: 15,
+          category: "arrow_shafts",
+          inputs: [{ itemId: "logs", quantity: 1 }],
+          tools: ["knife"],
+          levelRequired: 1,
+        },
+      ],
+      runecrafting: [
+        {
+          runeType: "air",
+          runeItemId: "air_rune",
+          essenceItemIds: ["rune_essence"],
+          levelRequired: 1,
+        },
+      ],
+    };
+    const items: Array<[string, WorkerItemData]> = [
+      [
+        "baseline_sword",
+        {
+          id: "baseline_sword",
+          name: "Baseline sword",
+          type: "weapon",
+          equipSlot: "weapon",
+          attackType: "melee",
+        },
+      ],
+      [
+        "baseline_bow",
+        {
+          id: "baseline_bow",
+          name: "Baseline bow",
+          type: "weapon",
+          equipSlot: "2h",
+          attackType: "ranged",
+        },
+      ],
+      [
+        "baseline_staff",
+        {
+          id: "baseline_staff",
+          name: "Baseline staff",
+          type: "weapon",
+          equipSlot: "weapon",
+          attackType: "magic",
+        },
+      ],
+      [
+        "bronze_pickaxe",
+        {
+          id: "bronze_pickaxe",
+          name: "Bronze pickaxe",
+          type: "tool",
+          tool: { skill: "mining", priority: 1 },
+        },
+      ],
+      [
+        "bronze_hatchet",
+        {
+          id: "bronze_hatchet",
+          name: "Bronze hatchet",
+          type: "tool",
+          tool: { skill: "woodcutting", priority: 1 },
+        },
+      ],
+      ["knife", { id: "knife", name: "Knife", type: "tool" }],
+      [
+        "copper_ore",
+        { id: "copper_ore", name: "Copper ore", type: "resource" },
+      ],
+      ["tin_ore", { id: "tin_ore", name: "Tin ore", type: "resource" }],
+      [
+        "blocked_ore",
+        { id: "blocked_ore", name: "Blocked ore", type: "resource" },
+      ],
+      ["logs", { id: "logs", name: "Logs", type: "resource" }],
+      [
+        "a_blocked_bar",
+        {
+          id: "a_blocked_bar",
+          name: "Blocked bar",
+          type: "resource",
+          smelting: {
+            inputs: [{ itemId: "blocked_ore", quantity: 1 }],
+            levelRequired: 1,
+          },
+        },
+      ],
+      [
+        "bronze_bar",
+        {
+          id: "bronze_bar",
+          name: "Bronze bar",
+          type: "resource",
+          smelting: {
+            inputs: [
+              { itemId: "copper_ore", quantity: 1 },
+              { itemId: "tin_ore", quantity: 1 },
+            ],
+            levelRequired: 1,
+          },
+        },
+      ],
+      [
+        "arrow_shaft",
+        { id: "arrow_shaft", name: "Arrow shaft", type: "resource" },
+      ],
+      [
+        "rune_essence",
+        { id: "rune_essence", name: "Rune essence", type: "resource" },
+      ],
+      ["air_rune", { id: "air_rune", name: "Air rune", type: "resource" }],
+    ];
+    const storePositions = [
+      {
+        entityId: "general-store",
+        storeId: "general_store",
+        name: "General Store",
+        position: [100, 0, 100] as [number, number, number],
+      },
+    ];
+    const makeAcquisitionInput = (
+      specialization: AgentTickInput["combatSpecialization"],
+      weaponId: string,
+      overrides: Partial<AgentTickInput> = {},
+    ): AgentTickInput => {
+      const input = makeInput({
+        combatSpecialization: specialization,
+        ordinaryProcessingAcquisitionAuthorized: true,
+        bankStageRetryAfter: Date.now() + 300_000,
+        storePositions,
+        ...overrides,
+      });
+      input.equippedItems.weapon = weaponId;
+      input.gameState.skills.mining = { level: 1, xp: 0 };
+      input.gameState.skills.woodcutting = { level: 1, xp: 0 };
+      input.gameState.skills.smithing = { level: 1, xp: 0 };
+      input.gameState.skills.fletching = { level: 1, xp: 0 };
+      input.gameState.skills.runecrafting = { level: 1, xp: 0 };
+      return input;
+    };
+
+    const combatSupplyRecipes: WorkerProcessingRecipeSnapshot = {
+      stores: [
+        {
+          storeId: "general_store",
+          items: [
+            { itemId: "bronze_pickaxe", price: 10, category: "tools" },
+            { itemId: "bronze_hatchet", price: 10, category: "tools" },
+            { itemId: "hammer", price: 5, category: "tools" },
+            { itemId: "knife", price: 5, category: "tools" },
+            { itemId: "bowstring", price: 5, category: "fletching" },
+            { itemId: "feathers", price: 1, category: "fletching" },
+            { itemId: "bronze_shortsword", price: 50, category: "weapons" },
+            { itemId: "shortbow", price: 50, category: "weapons" },
+            { itemId: "bronze_arrow", price: 2, category: "ammunition" },
+            { itemId: "staff_of_air", price: 50, category: "weapons" },
+            { itemId: "mind_rune", price: 2, category: "runes" },
+          ],
+        },
+      ],
+      gathering: recipes.gathering,
+      guaranteedMobDrops: [],
+      firemaking: [],
+      crafting: [],
+      tanning: [],
+      fletching: [
+        {
+          recipeId: "arrow_shaft:logs",
+          outputItemId: "arrow_shaft",
+          outputQuantity: 15,
+          category: "arrow_shafts",
+          inputs: [{ itemId: "logs", quantity: 1 }],
+          tools: ["knife"],
+          levelRequired: 1,
+        },
+        {
+          recipeId: "headless_arrow",
+          outputItemId: "headless_arrow",
+          outputQuantity: 15,
+          category: "headless_arrows",
+          inputs: [
+            { itemId: "arrow_shaft", quantity: 15 },
+            { itemId: "feathers", quantity: 15 },
+          ],
+          tools: [],
+          levelRequired: 1,
+        },
+        {
+          recipeId: "shortbow_u:logs",
+          outputItemId: "shortbow_u",
+          outputQuantity: 1,
+          category: "shortbows",
+          inputs: [{ itemId: "logs", quantity: 1 }],
+          tools: ["knife"],
+          levelRequired: 5,
+        },
+        {
+          recipeId: "shortbow:shortbow_u",
+          outputItemId: "shortbow",
+          outputQuantity: 1,
+          category: "shortbows",
+          inputs: [
+            { itemId: "bowstring", quantity: 1 },
+            { itemId: "shortbow_u", quantity: 1 },
+          ],
+          tools: [],
+          levelRequired: 5,
+        },
+        {
+          recipeId: "bronze_arrow:bronze_arrowtips",
+          outputItemId: "bronze_arrow",
+          outputQuantity: 15,
+          category: "arrows",
+          inputs: [
+            { itemId: "bronze_arrowtips", quantity: 15 },
+            { itemId: "headless_arrow", quantity: 15 },
+          ],
+          tools: [],
+          levelRequired: 1,
+        },
+      ],
+      runecrafting: [
+        {
+          runeType: "air",
+          runeItemId: "air_rune",
+          essenceItemIds: ["rune_essence"],
+          levelRequired: 1,
+        },
+        {
+          runeType: "mind",
+          runeItemId: "mind_rune",
+          essenceItemIds: ["rune_essence"],
+          levelRequired: 2,
+        },
+      ],
+      combatReadiness: {
+        ammunitionTarget: 15,
+        magicCastTarget: 5,
+        melee: [
+          {
+            weaponId: "bronze_shortsword",
+            weaponScore: 5,
+            requiredAttackLevel: 1,
+          },
+        ],
+        ranged: [
+          {
+            weaponId: "shortbow",
+            ammunitionId: "bronze_arrow",
+            weaponScore: 5,
+            ammunitionScore: 1,
+            requiredRangedLevel: 1,
+          },
+        ],
+        magic: [
+          {
+            weaponId: "staff_of_air",
+            spellId: "wind_strike",
+            weaponScore: 5,
+            spellOrder: 1,
+            requiredMagicLevel: 1,
+            providedRuneIds: ["air_rune"],
+            runes: [
+              { itemId: "air_rune", quantityPerCast: 1 },
+              { itemId: "mind_rune", quantityPerCast: 1 },
+            ],
+          },
+        ],
+      },
+    };
+    const combatSupplyItems: Array<[string, WorkerItemData]> = [
+      ...items,
+      ["hammer", { id: "hammer", name: "Hammer", type: "tool" }],
+      ["bowstring", { id: "bowstring", name: "Bowstring", type: "resource" }],
+      ["feathers", { id: "feathers", name: "Feathers", type: "resource" }],
+      [
+        "shortbow_u",
+        { id: "shortbow_u", name: "Shortbow (u)", type: "resource" },
+      ],
+      [
+        "headless_arrow",
+        {
+          id: "headless_arrow",
+          name: "Headless arrow",
+          type: "resource",
+          stackable: true,
+        },
+      ],
+      [
+        "bronze_arrowtips",
+        {
+          id: "bronze_arrowtips",
+          name: "Bronze arrowtips",
+          type: "resource",
+          stackable: true,
+          smithing: {
+            barItemId: "bronze_bar",
+            barsRequired: 1,
+            levelRequired: 5,
+            outputQuantity: 15,
+          },
+        },
+      ],
+      [
+        "bronze_shortsword",
+        {
+          id: "bronze_shortsword",
+          name: "Bronze shortsword",
+          type: "weapon",
+          equipSlot: "weapon",
+          attackType: "melee",
+          smithing: {
+            barItemId: "bronze_bar",
+            barsRequired: 1,
+            levelRequired: 1,
+            outputQuantity: 1,
+          },
+        },
+      ],
+      [
+        "shortbow",
+        {
+          id: "shortbow",
+          name: "Shortbow",
+          type: "weapon",
+          equipSlot: "2h",
+          attackType: "ranged",
+        },
+      ],
+      [
+        "bronze_arrow",
+        {
+          id: "bronze_arrow",
+          name: "Bronze arrow",
+          type: "ammunition",
+          equipSlot: "arrows",
+          stackable: true,
+        },
+      ],
+      [
+        "staff_of_air",
+        {
+          id: "staff_of_air",
+          name: "Staff of air",
+          type: "weapon",
+          equipSlot: "weapon",
+          attackType: "magic",
+        },
+      ],
+      [
+        "mind_rune",
+        {
+          id: "mind_rune",
+          name: "Mind rune",
+          type: "resource",
+          stackable: true,
+        },
+      ],
+    ];
+    const makeCombatSupplyInput = (
+      specialization: AgentTickInput["combatSpecialization"],
+      overrides: Partial<AgentTickInput> = {},
+    ): AgentTickInput => {
+      const input = makeInput({
+        combatSpecialization: specialization,
+        ordinaryProcessingAcquisitionAuthorized: true,
+        bankStageRetryAfter: Date.now() + 300_000,
+        storePositions,
+        ...overrides,
+      });
+      for (const skill of [
+        "attack",
+        "ranged",
+        "magic",
+        "mining",
+        "woodcutting",
+        "smithing",
+        "fletching",
+        "runecrafting",
+      ]) {
+        input.gameState.skills[skill] = { level: 1, xp: 0 };
+      }
+      return input;
+    };
+
+    it("gathers both exact ores and smelts the melee baseline", () => {
+      initializeItems(items, recipes);
+      try {
+        expect(
+          processAgentTicks([
+            makeAcquisitionInput("melee", "baseline_sword"),
+          ])[0].action,
+        ).toEqual({
+          type: "storeBuy",
+          storeId: "general_store",
+          itemId: "bronze_pickaxe",
+          quantity: 1,
+        });
+
+        const copper = makeAcquisitionInput("melee", "baseline_sword", {
+          inventoryItems: [
+            { slot: 0, itemId: "bronze_pickaxe", quantity: 1 },
+            { slot: 1, itemId: "blocked_ore", quantity: 1 },
+          ],
+        });
+        copper.gameState.nearbyEntities = [
+          {
+            id: "wrong-tin",
+            name: "Misleading copper rock",
+            type: "resource",
+            resourceId: "ore_tin",
+            position: [101, 0, 100],
+            distance: 1,
+          },
+          {
+            id: "exact-copper",
+            name: "Copper rock",
+            type: "resource",
+            resourceId: "ore_copper",
+            position: [102, 0, 100],
+            distance: 2,
+          },
+        ];
+        expect(processAgentTicks([copper])[0].action).toEqual({
+          type: "gather",
+          targetId: "exact-copper",
+        });
+
+        const tin = makeAcquisitionInput("melee", "baseline_sword", {
+          inventoryItems: [
+            { slot: 0, itemId: "bronze_pickaxe", quantity: 1 },
+            { slot: 1, itemId: "copper_ore", quantity: 5 },
+          ],
+        });
+        tin.gameState.nearbyEntities = [
+          {
+            id: "exact-tin",
+            name: "Tin rock",
+            type: "resource",
+            resourceId: "ore_tin",
+            position: [102, 0, 100],
+            distance: 2,
+          },
+        ];
+        expect(processAgentTicks([tin])[0].action).toEqual({
+          type: "gather",
+          targetId: "exact-tin",
+        });
+
+        const smelt = makeAcquisitionInput("melee", "baseline_sword", {
+          inventoryItems: [
+            { slot: 0, itemId: "bronze_pickaxe", quantity: 1 },
+            { slot: 1, itemId: "copper_ore", quantity: 5 },
+            { slot: 2, itemId: "tin_ore", quantity: 5 },
+          ],
+          stationPositions: [
+            {
+              entityId: "furnace",
+              name: "Furnace",
+              stationType: "furnace",
+              position: [100, 0, 100],
+              interactionRange: 2,
+            },
+          ],
+        });
+        expect(processAgentTicks([smelt])[0].action).toEqual({
+          type: "smelt",
+          recipe: "bronze_bar",
+        });
+      } finally {
+        initializeTestItems();
+      }
+    });
+
+    it("gathers logs, acquires the exact tool, and fletches the ranged baseline", () => {
+      initializeItems(items, recipes);
+      try {
+        expect(
+          processAgentTicks([makeAcquisitionInput("ranged", "baseline_bow")])[0]
+            .action,
+        ).toEqual({
+          type: "storeBuy",
+          storeId: "general_store",
+          itemId: "bronze_hatchet",
+          quantity: 1,
+        });
+
+        const logs = makeAcquisitionInput("ranged", "baseline_bow", {
+          inventoryItems: [{ slot: 0, itemId: "bronze_hatchet", quantity: 1 }],
+        });
+        logs.gameState.nearbyEntities = [
+          {
+            id: "exact-pine",
+            name: "Pine tree",
+            type: "resource",
+            resourceId: "tree_pine",
+            position: [102, 0, 100],
+            distance: 2,
+          },
+        ];
+        expect(processAgentTicks([logs])[0].action).toEqual({
+          type: "gather",
+          targetId: "exact-pine",
+        });
+
+        expect(
+          processAgentTicks([
+            makeAcquisitionInput("ranged", "baseline_bow", {
+              inventoryItems: [
+                { slot: 0, itemId: "bronze_hatchet", quantity: 1 },
+                { slot: 1, itemId: "logs", quantity: 5 },
+              ],
+            }),
+          ])[0].action,
+        ).toEqual({
+          type: "storeBuy",
+          storeId: "general_store",
+          itemId: "knife",
+          quantity: 1,
+        });
+
+        expect(
+          processAgentTicks([
+            makeAcquisitionInput("ranged", "baseline_bow", {
+              inventoryItems: [
+                { slot: 0, itemId: "bronze_hatchet", quantity: 1 },
+                { slot: 1, itemId: "logs", quantity: 5 },
+                { slot: 2, itemId: "knife", quantity: 1 },
+              ],
+            }),
+          ])[0].action,
+        ).toEqual({
+          type: "fletch",
+          recipeId: "arrow_shaft:logs",
+          quantity: 1,
+        });
+      } finally {
+        initializeTestItems();
+      }
+    });
+
+    it("gathers essence and runecrafts the mage baseline", () => {
+      initializeItems(items, recipes);
+      try {
+        expect(
+          processAgentTicks([makeAcquisitionInput("mage", "baseline_staff")])[0]
+            .action,
+        ).toEqual({
+          type: "storeBuy",
+          storeId: "general_store",
+          itemId: "bronze_pickaxe",
+          quantity: 1,
+        });
+
+        const essence = makeAcquisitionInput("mage", "baseline_staff", {
+          inventoryItems: [{ slot: 0, itemId: "bronze_pickaxe", quantity: 1 }],
+        });
+        essence.gameState.nearbyEntities = [
+          {
+            id: "exact-essence",
+            name: "Essence rock",
+            type: "resource",
+            resourceId: "ore_rune_essence",
+            position: [102, 0, 100],
+            distance: 2,
+          },
+        ];
+        expect(processAgentTicks([essence])[0].action).toEqual({
+          type: "gather",
+          targetId: "exact-essence",
+        });
+
+        expect(
+          processAgentTicks([
+            makeAcquisitionInput("mage", "baseline_staff", {
+              inventoryItems: [
+                { slot: 0, itemId: "bronze_pickaxe", quantity: 1 },
+                { slot: 1, itemId: "rune_essence", quantity: 5 },
+              ],
+              stationPositions: [
+                {
+                  entityId: "air-altar",
+                  name: "Air altar",
+                  stationType: "runecrafting",
+                  position: [100, 0, 100],
+                  interactionRange: 2,
+                },
+              ],
+            }),
+          ])[0].action,
+        ).toEqual({ type: "runecraft", runeType: "air" });
+      } finally {
+        initializeTestItems();
+      }
+    });
+
+    it("uses an already-owned authored essence alternative before gathering the default", () => {
+      initializeItems(
+        [
+          ...items,
+          [
+            "pure_essence",
+            {
+              id: "pure_essence",
+              name: "Pure essence",
+              type: "resource",
+            },
+          ],
+        ],
+        {
+          ...recipes,
+          runecrafting: [
+            {
+              runeType: "air",
+              runeItemId: "air_rune",
+              essenceItemIds: ["rune_essence", "pure_essence"],
+              levelRequired: 1,
+            },
+          ],
+        },
+      );
+      try {
+        expect(
+          processAgentTicks([
+            makeAcquisitionInput("mage", "baseline_staff", {
+              inventoryItems: [
+                { slot: 0, itemId: "pure_essence", quantity: 5 },
+              ],
+              stationPositions: [
+                {
+                  entityId: "air-altar",
+                  name: "Air altar",
+                  stationType: "runecrafting",
+                  position: [100, 0, 100],
+                  interactionRange: 2,
+                },
+              ],
+            }),
+          ])[0].action,
+        ).toEqual({ type: "runecraft", runeType: "air" });
+      } finally {
+        initializeTestItems();
+      }
+    });
+
+    it("does not expose a source path without the exact bank-miss capability", () => {
+      initializeItems(items, recipes);
+      try {
+        const input = makeAcquisitionInput("melee", "baseline_sword", {
+          ordinaryProcessingAcquisitionAuthorized: false,
+          bankStageRetryAfter: Date.now() + 300_000,
+          storePositions: [],
+          inventoryItems: [{ slot: 0, itemId: "bronze_pickaxe", quantity: 1 }],
+        });
+        input.worldResources = [
+          {
+            entityId: "exact-copper",
+            resourceId: "ore_copper",
+            name: "Copper rock",
+            resourceType: "ore",
+            position: [102, 0, 100],
+            depleted: false,
+          },
+        ];
+        expect(processAgentTicks([input])[0].action).not.toEqual({
+          type: "gather",
+          targetId: "exact-copper",
+        });
+      } finally {
+        initializeTestItems();
+      }
+    });
+
+    it("releases a full acquisition inventory to the authoritative bank path", () => {
+      initializeItems(items, recipes);
+      try {
+        const input = makeAcquisitionInput("melee", "baseline_sword", {
+          storePositions: [],
+          inventoryItems: Array.from({ length: 25 }, (_, slot) => ({
+            slot,
+            itemId: `held-output-${slot}`,
+            quantity: 1,
+          })),
+          stationPositions: [
+            {
+              entityId: "acquisition-bank",
+              name: "Acquisition Bank",
+              stationType: "bank",
+              position: [100, 0, 100],
+              interactionRange: 2,
+            },
+          ],
+        });
+        expect(processAgentTicks([input])[0].action).toEqual({
+          type: "bankDepositAll",
+          bankId: "acquisition-bank",
+        });
+      } finally {
+        initializeTestItems();
+      }
+    });
+
+    it("forges the exact selected melee weapon instead of buying it after a bank miss", () => {
+      initializeItems(combatSupplyItems, combatSupplyRecipes);
+      try {
+        expect(
+          processAgentTicks([makeCombatSupplyInput("melee")])[0].action,
+        ).toEqual({
+          type: "storeBuy",
+          storeId: "general_store",
+          itemId: "bronze_pickaxe",
+          quantity: 1,
+        });
+
+        const smelt = makeCombatSupplyInput("melee", {
+          inventoryItems: [
+            { slot: 0, itemId: "bronze_pickaxe", quantity: 1 },
+            { slot: 1, itemId: "copper_ore", quantity: 1 },
+            { slot: 2, itemId: "tin_ore", quantity: 1 },
+          ],
+          stationPositions: [
+            {
+              entityId: "furnace",
+              name: "Furnace",
+              stationType: "furnace",
+              position: [100, 0, 100],
+              interactionRange: 2,
+            },
+          ],
+        });
+        expect(processAgentTicks([smelt])[0].action).toEqual({
+          type: "smelt",
+          recipe: "bronze_bar",
+        });
+
+        expect(
+          processAgentTicks([
+            makeCombatSupplyInput("melee", {
+              inventoryItems: [{ slot: 0, itemId: "bronze_bar", quantity: 1 }],
+            }),
+          ])[0].action,
+        ).toEqual({
+          type: "storeBuy",
+          storeId: "general_store",
+          itemId: "hammer",
+          quantity: 1,
+        });
+
+        const smith = makeCombatSupplyInput("melee", {
+          inventoryItems: [
+            { slot: 0, itemId: "bronze_bar", quantity: 1 },
+            { slot: 1, itemId: "hammer", quantity: 1 },
+          ],
+          stationPositions: [
+            {
+              entityId: "anvil",
+              name: "Anvil",
+              stationType: "anvil",
+              position: [100, 0, 100],
+              interactionRange: 2,
+            },
+          ],
+        });
+        expect(processAgentTicks([smith])[0].action).toEqual({
+          type: "smith",
+          recipe: "bronze_shortsword",
+        });
+      } finally {
+        initializeTestItems();
+      }
+    });
+
+    it("trains through authored prerequisites and completes ranged weapon and ammunition outputs", () => {
+      initializeItems(combatSupplyItems, combatSupplyRecipes);
+      try {
+        expect(
+          processAgentTicks([makeCombatSupplyInput("ranged")])[0].action,
+        ).toEqual({
+          type: "storeBuy",
+          storeId: "general_store",
+          itemId: "bronze_hatchet",
+          quantity: 1,
+        });
+
+        const training = makeCombatSupplyInput("ranged", {
+          inventoryItems: [
+            { slot: 0, itemId: "bronze_hatchet", quantity: 1 },
+            { slot: 1, itemId: "logs", quantity: 1 },
+            { slot: 2, itemId: "knife", quantity: 1 },
+            { slot: 3, itemId: "bronze_bar", quantity: 1 },
+            { slot: 4, itemId: "hammer", quantity: 1 },
+          ],
+          stationPositions: [
+            {
+              entityId: "unrelated-anvil",
+              name: "Anvil",
+              stationType: "anvil",
+              position: [100, 0, 100],
+              interactionRange: 2,
+            },
+          ],
+        });
+        expect(processAgentTicks([training])[0].action).toEqual({
+          type: "fletch",
+          recipeId: "arrow_shaft:logs",
+          quantity: 1,
+        });
+
+        const unstrung = makeCombatSupplyInput("ranged", {
+          inventoryItems: [
+            { slot: 0, itemId: "bronze_hatchet", quantity: 1 },
+            { slot: 1, itemId: "logs", quantity: 1 },
+            { slot: 2, itemId: "knife", quantity: 1 },
+            { slot: 3, itemId: "bowstring", quantity: 1 },
+          ],
+        });
+        unstrung.gameState.skills.fletching = { level: 5, xp: 0 };
+        expect(processAgentTicks([unstrung])[0].action).toEqual({
+          type: "fletch",
+          recipeId: "shortbow_u:logs",
+          quantity: 1,
+        });
+
+        const bow = makeCombatSupplyInput("ranged", {
+          inventoryItems: [
+            { slot: 0, itemId: "shortbow_u", quantity: 1 },
+            { slot: 1, itemId: "bowstring", quantity: 1 },
+          ],
+        });
+        bow.gameState.skills.fletching = { level: 5, xp: 0 };
+        expect(processAgentTicks([bow])[0].action).toEqual({
+          type: "fletch",
+          recipeId: "shortbow:shortbow_u",
+          quantity: 1,
+        });
+
+        const smithingTraining = makeCombatSupplyInput("ranged", {
+          equippedItems: { weapon: "shortbow" },
+          inventoryItems: [
+            { slot: 0, itemId: "bronze_pickaxe", quantity: 1 },
+            { slot: 1, itemId: "copper_ore", quantity: 1 },
+            { slot: 2, itemId: "tin_ore", quantity: 1 },
+          ],
+          stationPositions: [
+            {
+              entityId: "furnace",
+              name: "Furnace",
+              stationType: "furnace",
+              position: [100, 0, 100],
+              interactionRange: 2,
+            },
+          ],
+        });
+        expect(processAgentTicks([smithingTraining])[0].action).toEqual({
+          type: "smelt",
+          recipe: "bronze_bar",
+        });
+
+        const arrowtips = makeCombatSupplyInput("ranged", {
+          equippedItems: { weapon: "shortbow" },
+          inventoryItems: [
+            { slot: 0, itemId: "bronze_bar", quantity: 1 },
+            { slot: 1, itemId: "hammer", quantity: 1 },
+          ],
+          stationPositions: [
+            {
+              entityId: "anvil",
+              name: "Anvil",
+              stationType: "anvil",
+              position: [100, 0, 100],
+              interactionRange: 2,
+            },
+          ],
+        });
+        arrowtips.gameState.skills.smithing = { level: 5, xp: 0 };
+        expect(processAgentTicks([arrowtips])[0].action).toEqual({
+          type: "smith",
+          recipe: "bronze_arrowtips",
+        });
+
+        const arrows = makeCombatSupplyInput("ranged", {
+          equippedItems: { weapon: "shortbow" },
+          inventoryItems: [
+            { slot: 0, itemId: "bronze_arrowtips", quantity: 15 },
+            { slot: 1, itemId: "headless_arrow", quantity: 15 },
+          ],
+        });
+        arrows.gameState.skills.smithing = { level: 5, xp: 0 };
+        expect(processAgentTicks([arrows])[0].action).toEqual({
+          type: "fletch",
+          recipeId: "bronze_arrow:bronze_arrowtips",
+          quantity: 1,
+        });
+      } finally {
+        initializeTestItems();
+      }
+    });
+
+    it("buys a store-only magic weapon but trains and crafts its exact consumed rune", () => {
+      initializeItems(combatSupplyItems, combatSupplyRecipes);
+      try {
+        expect(
+          processAgentTicks([
+            makeCombatSupplyInput("mage", {
+              equippedItems: { weapon: "bronze_shortsword" },
+            }),
+          ])[0].action,
+        ).toEqual({
+          type: "storeBuy",
+          storeId: "general_store",
+          itemId: "staff_of_air",
+          quantity: 1,
+        });
+
+        expect(
+          processAgentTicks([
+            makeCombatSupplyInput("mage", {
+              equippedItems: { weapon: "staff_of_air" },
+            }),
+          ])[0].action,
+        ).toEqual({
+          type: "storeBuy",
+          storeId: "general_store",
+          itemId: "bronze_pickaxe",
+          quantity: 1,
+        });
+
+        const mindRune = makeCombatSupplyInput("mage", {
+          equippedItems: { weapon: "staff_of_air" },
+          inventoryItems: [
+            { slot: 0, itemId: "bronze_pickaxe", quantity: 1 },
+            { slot: 1, itemId: "rune_essence", quantity: 1 },
+          ],
+          stationPositions: [
+            {
+              entityId: "mind-altar",
+              name: "Mind altar",
+              stationType: "runecrafting",
+              position: [100, 0, 100],
+              interactionRange: 2,
+            },
+          ],
+        });
+        mindRune.gameState.skills.runecrafting = { level: 2, xp: 0 };
+        expect(processAgentTicks([mindRune])[0].action).toEqual({
+          type: "runecraft",
+          runeType: "mind",
+        });
+      } finally {
+        initializeTestItems();
+      }
     });
   });
 

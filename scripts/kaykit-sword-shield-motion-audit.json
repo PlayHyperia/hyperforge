@@ -1,0 +1,59 @@
+{
+  "schemaVersion": 1,
+  "title": "KayKit sword plus shield supported motion matrix",
+  "motions": [
+    {
+      "id": "idle",
+      "name": "Idle",
+      "asset": "motions/kaykit-idle.glb",
+      "sampleRatio": 0.35
+    },
+    {
+      "id": "walk",
+      "name": "Walk",
+      "asset": "motions/kaykit-walk.glb",
+      "sampleRatio": 0.45
+    },
+    {
+      "id": "run",
+      "name": "Run",
+      "asset": "motions/kaykit-run.glb",
+      "sampleRatio": 0.45
+    },
+    {
+      "id": "sword",
+      "name": "One-handed melee",
+      "asset": "motions/kaykit-sword.glb",
+      "sampleRatio": 0.45
+    },
+    {
+      "id": "block",
+      "name": "Melee block",
+      "asset": "motions/kaykit-block.glb",
+      "sampleRatio": 0.5
+    },
+    {
+      "id": "death",
+      "name": "Death",
+      "asset": "motions/kaykit-death.glb",
+      "sampleRatio": 0.9
+    },
+    {
+      "id": "victory",
+      "name": "Victory",
+      "asset": "motions/kaykit-victory.glb",
+      "sampleRatio": 0.55
+    },
+    {
+      "id": "hit-reaction",
+      "name": "Hit reaction overlay",
+      "asset": "motions/kaykit-idle.glb",
+      "sampleRatio": 0,
+      "hitReaction": {
+        "intensity": 1,
+        "side": 1,
+        "elapsedSeconds": 0.0504
+      }
+    }
+  ]
+}

@@ -1,0 +1,55 @@
+{
+  "schemaVersion": 1,
+  "exportedAt": "2026-08-13T18:05:00.000Z",
+  "avatar": {
+    "id": "kaykit-knight",
+    "legacyAttachmentId": "kaykit-knight",
+    "path": "artifacts/duel-launch-avatar-bakeoff/kaykit-knight.vrm",
+    "sha256": "b288656410986780a0df81d684e4888633be07751b0e57136d9e3c89512e713f",
+    "normalizedHeight": 1.6
+  },
+  "fits": [
+    {
+      "itemId": "fishing_rod",
+      "slot": "gatheringtool",
+      "grip": "two-hand",
+      "weaponType": "fishing-rod",
+      "attachmentBone": "rightHand",
+      "sourcePath": "artifacts/duel-launch-avatar-bakeoff/fishing-kit/quaternius-fishing-rod-level-1.glb",
+      "sourceSha256": "31f8f360617335c45f2d1c4283dc246f7b91ab0d591fa55ecb0c053fd2f045a2",
+      "outputPath": "artifacts/duel-launch-avatar-bakeoff/fitted-fishing-kit/quaternius-fishing-rod-level-1-fitted.glb",
+      "targetLengthMetres": 2.4,
+      "desiredWorldEulerDegrees": [0, 0, 0],
+      "desiredWorldOffsetMetres": [0, 0, 0],
+      "alignHandleToSecondaryHand": {
+        "sourceHandleAxis": [0, -1, 0]
+      },
+      "referenceMotion": {
+        "path": "artifacts/duel-launch-avatar-bakeoff/motions/kaykit-fishing.glb",
+        "sha256": "0600120f6c37dc7eaba96cf9b167ef0e8d632de161bcac4d3a7ff00de12389cf",
+        "sampleRatio": 0.55
+      }
+    },
+    {
+      "itemId": "fly_fishing_rod",
+      "slot": "gatheringtool",
+      "grip": "two-hand",
+      "weaponType": "fishing-rod",
+      "attachmentBone": "rightHand",
+      "sourcePath": "artifacts/duel-launch-avatar-bakeoff/fishing-kit/quaternius-fishing-rod-level-2.glb",
+      "sourceSha256": "9fd3105b17a182bd804e7d3b2d921b26c33457efd7cb36ac0071b6744dbdd8c3",
+      "outputPath": "artifacts/duel-launch-avatar-bakeoff/fitted-fishing-kit/quaternius-fishing-rod-level-2-fitted.glb",
+      "targetLengthMetres": 2.4,
+      "desiredWorldEulerDegrees": [0, 0, 0],
+      "desiredWorldOffsetMetres": [0, 0, 0],
+      "alignHandleToSecondaryHand": {
+        "sourceHandleAxis": [0, -1, 0]
+      },
+      "referenceMotion": {
+        "path": "artifacts/duel-launch-avatar-bakeoff/motions/kaykit-fishing.glb",
+        "sha256": "0600120f6c37dc7eaba96cf9b167ef0e8d632de161bcac4d3a7ff00de12389cf",
+        "sampleRatio": 0.55
+      }
+    }
+  ]
+}

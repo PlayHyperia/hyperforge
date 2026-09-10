@@ -65,6 +65,7 @@ import { varyingProperty } from "three/tsl";
 import { FOG_NEAR_SQ, FOG_FAR_SQ, fogRenderTarget } from "./FogConfig";
 import { TERRAIN_CONSTANTS } from "../../../constants/GameConstants";
 import { SUN_SHADE, SUN_LIGHT, NIGHT, applySunShade } from "./LightingConfig";
+import { WorldIlluminationUniforms } from "./WorldIlluminationUniforms";
 
 // ============================================================================
 // CONFIGURATION
@@ -990,6 +991,7 @@ export type TreeMaterialOptions = DissolveMaterialOptions;
  */
 export type TreeDissolveMaterial = DissolveMaterial & {
   treeUniforms: {
+    illumination: WorldIlluminationUniforms;
     sunDirection: { value: THREE.Vector3 };
     sunIntensity: { value: number };
     dayIntensity: { value: number };
@@ -1038,6 +1040,7 @@ export function createTreeDissolveMaterial(
   const uDayIntensity = uniform(1.0);
   const uShadeColor = uniform(new THREE.Color(...SUN_SHADE.TINT_COLOR));
   const uHighlightColor = uniform(new THREE.Color(0x00ffff));
+  const illumination = new WorldIlluminationUniforms();
   const uWindTime = uniform(0.0);
   const uWindStrength = uniform(0.3);
   const uWindDir = uniform(new THREE.Vector2(1, 0));
@@ -1152,6 +1155,8 @@ export function createTreeDissolveMaterial(
     const biomeSnowStrength = pow(biomeSnowRaw, float(3.0));
     const snowWeight = mul(snowMask, biomeSnowStrength);
     baseAlbedo = mix(baseAlbedo, snowCol, snowWeight);
+    // Preserve literal textured/snow albedo before the legacy color treatment.
+    const worldAlbedo = baseAlbedo;
 
     // ---- dayFactor (night fading for rim / saturation; SSS when enabled) ----
     const sunI = clamp(uSunIntensity, float(0.0), float(2.0));
@@ -1229,6 +1234,13 @@ export function createTreeDissolveMaterial(
       mul(sub(result, vec3(luma, luma, luma)), satScale),
       vec3(luma, luma, luma),
     );
+    // Opt-in Lambert diffuse uses the geometric normal and the same vertex AO.
+    // Legacy warm/cool ramp, additive SSS, rim and saturation remain at blend=0;
+    // they are not treated as physically sourced illumination at blend=1.
+    const litRgb = illumination.select(
+      boosted,
+      mul(illumination.diffuse(worldAlbedo, N), aoMul),
+    );
 
     // ---- Instance rim highlight (hover) ----
     let hlIntensity;
@@ -1244,10 +1256,10 @@ export function createTreeDissolveMaterial(
       pow(sub(float(1.0), NdotV), float(HL_RIM_POWER)),
       float(HL_RIM_STRENGTH),
     );
-    const brightened = add(boosted, float(HL_BRIGHTEN));
+    const brightened = add(litRgb, float(HL_BRIGHTEN));
     const rimGlow = mul(vec3(uHighlightColor), hlRim);
     const highlighted = add(brightened, rimGlow);
-    const finalRgb = mix(boosted, highlighted, hlIntensity);
+    const finalRgb = mix(litRgb, highlighted, hlIntensity);
 
     // ---- Sky-color fog ----
     const fogged = mix(finalRgb, treeFogTex.rgb, treeFogFactor);
@@ -1260,6 +1272,7 @@ export function createTreeDissolveMaterial(
   const treeMat = baseDm as TreeDissolveMaterial;
   treeMat.highlightColor = uHighlightColor;
   treeMat.treeUniforms = {
+    illumination,
     sunDirection: uSunDir as unknown as { value: THREE.Vector3 },
     sunIntensity: uSunIntensity as unknown as { value: number },
     dayIntensity: uDayIntensity as unknown as { value: number },

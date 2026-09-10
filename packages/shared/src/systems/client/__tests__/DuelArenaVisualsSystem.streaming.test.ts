@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { shouldRenderInteractiveArenaProps } from "../DuelArenaVisualsSystem";
+import {
+  shouldRenderArenaCenterMarker,
+  shouldRenderInteractiveArenaProps,
+} from "../DuelArenaVisualsSystem";
 
 function viewport(pathname: string, search = ""): Window {
   return {
@@ -24,5 +27,15 @@ describe("DuelArenaVisualsSystem streaming viewport policy", () => {
 
   it("preserves interaction markers and banners in normal gameplay", () => {
     expect(shouldRenderInteractiveArenaProps(viewport("/"))).toBe(true);
+  });
+
+  it("keeps the center marker out of cinematic spectator framing", () => {
+    expect(shouldRenderArenaCenterMarker(viewport("/stream.html"))).toBe(false);
+    expect(
+      shouldRenderArenaCenterMarker(
+        viewport("/", "?embedded=true&mode=spectator"),
+      ),
+    ).toBe(false);
+    expect(shouldRenderArenaCenterMarker(viewport("/"))).toBe(true);
   });
 });

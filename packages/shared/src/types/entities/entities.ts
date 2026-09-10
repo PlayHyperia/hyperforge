@@ -444,6 +444,9 @@ export interface MobEntityProperties extends BaseEntityProperties {
 // Item-specific properties
 export interface ItemEntityProperties extends BaseEntityProperties {
   itemId: string;
+  /** Runtime custody classification; pickup authority accepts only durable ground sources. */
+  custodyPolicy?: "durable_ground" | "display_only" | "diagnostic_only";
+  custodySourceId?: string;
   harvestable: boolean;
   dialogue: string[];
   quantity: number;
@@ -522,6 +525,7 @@ export interface ItemSpawnData {
   quantity?: number;
   stackable?: boolean;
   value?: number;
+  droppedBy?: string;
 }
 
 export interface ItemSpawnerStats {

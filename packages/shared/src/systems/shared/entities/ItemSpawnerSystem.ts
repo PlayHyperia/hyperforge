@@ -4,17 +4,16 @@ import { EventType } from "../../../types/events";
 import { GENERAL_STORES } from "../../../data/banks-stores";
 import { getItem } from "../../../data/items";
 import { ItemType } from "../../../types/index";
-import {
-  ItemRarity,
-  EntityType,
-  InteractionType,
-} from "../../../types/entities";
+import { ItemRarity, EntityType } from "../../../types/entities";
 import type { World } from "../../../types/index";
-import type { Item } from "../../../types/core/core";
+import type { InventoryItem, Item } from "../../../types/core/core";
 // NOTE: Import directly to avoid circular dependency through barrel file
 import type { EntityManager } from "./EntityManager";
 import { groundToTerrain } from "../../../utils/game/EntityUtils";
 import type { ItemSpawnerStats } from "../../../types/entities";
+import type { GroundItemSystem } from "../economy/GroundItemSystem";
+import { ticksToMs } from "../../../utils/game/CombatCalculations";
+import { COMBAT_CONSTANTS } from "../../../constants/CombatConstants";
 
 // Define LootItem locally - Item with quantity
 type LootItem = Item & {
@@ -61,10 +60,13 @@ export class ItemSpawnerSystem extends SystemBase {
       itemId: string;
       position: { x: number; y: number; z: number };
       quantity?: number;
-    }>(
-      EventType.ITEM_SPAWN_REQUEST,
-      async (data) => await this.spawnItemAtLocation(data, 0),
-    );
+    }>(EventType.ITEM_SPAWN_REQUEST, (data) => {
+      void this.spawnItemAtLocation(data, 0).catch((error) => {
+        console.error(
+          `[ItemSpawnerSystem] Durable dynamic spawn rejected: ${String(error)}`,
+        );
+      });
+    });
     this.subscribe<{ itemId: string }>(EventType.ITEM_DESPAWN, (data) =>
       this.despawnItem(data.itemId),
     );
@@ -75,10 +77,13 @@ export class ItemSpawnerSystem extends SystemBase {
     this.subscribe<{
       position: { x: number; y: number; z: number };
       lootTable: string[];
-    }>(
-      EventType.ITEM_SPAWN_LOOT,
-      async (data) => await this.spawnLootItems(data),
-    );
+    }>(EventType.ITEM_SPAWN_LOOT, (data) => {
+      void this.spawnLootItems(data).catch((error) => {
+        console.error(
+          `[ItemSpawnerSystem] Durable loot spawn rejected: ${String(error)}`,
+        );
+      });
+    });
   }
 
   start(): void {
@@ -90,8 +95,7 @@ export class ItemSpawnerSystem extends SystemBase {
     // Wait for terrain to be ready before spawning items
     const checkTerrainAndSpawn = async () => {
       const terrainSystem = this.world.getSystem("terrain") as
-        | { getHeightAt: (x: number, z: number) => number | null }
-        | undefined;
+        { getHeightAt: (x: number, z: number) => number | null } | undefined;
       if (!terrainSystem) {
         console.warn(
           "[ItemSpawnerSystem] Terrain system not ready, waiting...",
@@ -149,7 +153,7 @@ export class ItemSpawnerSystem extends SystemBase {
             z: store.location.position.z + offsetZ,
           };
 
-          const itemApp = await this.spawnItemFromData(
+          const itemApp = await this.spawnDisplayItemFromData(
             itemData,
             position,
             "shop",
@@ -166,7 +170,7 @@ export class ItemSpawnerSystem extends SystemBase {
 
   #lastKnownIndex: Record<string, number> = {};
 
-  private async spawnItemFromData(
+  private async spawnDisplayItemFromData(
     itemData: Item,
     position: { x: number; y: number; z: number },
     spawnType: string,
@@ -174,14 +178,13 @@ export class ItemSpawnerSystem extends SystemBase {
     index: number,
   ): Promise<string> {
     if (
-      this.#lastKnownIndex[itemData.type] &&
+      this.#lastKnownIndex[itemData.type] !== undefined &&
       this.#lastKnownIndex[itemData.type] >= index
     ) {
       index = this.#lastKnownIndex[itemData.type] + 1;
     }
     this.#lastKnownIndex[itemData.type] = index;
     const itemId = `gdd_${itemData.id}_${location}_${index}`;
-
     // Ground item to terrain - use Infinity to allow any initial height difference
     // This is safe because we're always grounding to actual terrain height
     const groundedPosition = groundToTerrain(
@@ -217,8 +220,8 @@ export class ItemSpawnerSystem extends SystemBase {
       rotation: { x: 0, y: 0, z: 0, w: 1 },
       scale: { x: 1, y: 1, z: 1 },
       visible: true,
-      interactable: true,
-      interactionType: InteractionType.PICKUP,
+      interactable: false,
+      interactionType: null,
       interactionDistance: 2,
       description: itemData.description || "",
       model: itemData.modelPath || null,
@@ -252,6 +255,7 @@ export class ItemSpawnerSystem extends SystemBase {
         level: 1,
         // Item-specific properties
         itemId: itemData.id,
+        custodyPolicy: "display_only" as const,
         harvestable: false,
         dialogue: [],
         quantity: 1,
@@ -390,19 +394,20 @@ export class ItemSpawnerSystem extends SystemBase {
       quantity?: number;
       model?: string;
     },
-    index: number,
+    _index: number,
   ): Promise<void> {
-    const itemData = getItem(data.itemId);
-    if (!itemData) {
+    if (!getItem(data.itemId)) {
       throw new Error(`[ItemSpawnerSystem] Unknown item ID: ${data.itemId}`);
     }
-    await this.spawnItemFromData(
-      itemData,
+    const sourceId = await this.requireGroundItemSystem().spawnGroundItem(
+      data.itemId,
+      data.quantity ?? 1,
       data.position,
-      "spawned",
-      "Dynamic Spawn",
-      index,
+      {
+        despawnTime: ticksToMs(COMBAT_CONSTANTS.GROUND_ITEM_DESPAWN_TICKS),
+      },
     );
+    if (!sourceId) throw new Error("item_spawner_ground_custody_rejected");
   }
 
   private despawnItem(itemId: string): void {
@@ -417,21 +422,24 @@ export class ItemSpawnerSystem extends SystemBase {
   public async spawnItem(
     itemId: string,
     position: { x: number; y: number; z: number },
-    index: number,
-    _quantity: number = 1,
+    _index: number,
+    quantity: number = 1,
   ): Promise<string> {
     const itemData = getItem(itemId);
     if (!itemData) {
       throw new Error(`[ItemSpawnerSystem] Unknown item ID: ${itemId}`);
     }
 
-    return await this.spawnItemFromData(
-      itemData,
+    const sourceId = await this.requireGroundItemSystem().spawnGroundItem(
+      itemData.id,
+      quantity,
       position,
-      "test",
-      "Test Environment",
-      index,
+      {
+        despawnTime: ticksToMs(COMBAT_CONSTANTS.GROUND_ITEM_DESPAWN_TICKS),
+      },
     );
+    if (!sourceId) throw new Error("item_spawner_ground_custody_rejected");
+    return sourceId;
   }
 
   private async respawnShopItems(): Promise<void> {
@@ -451,25 +459,44 @@ export class ItemSpawnerSystem extends SystemBase {
     position: { x: number; y: number; z: number };
     lootTable: string[];
   }): Promise<void> {
+    const items: InventoryItem[] = [];
     for (let index = 0; index < data.lootTable.length; index++) {
       const itemId = data.lootTable[index];
       const itemData = getItem(itemId);
       if (itemData) {
-        const offsetPosition = {
-          x: data.position.x + (index % 3) * 0.5 - 0.5,
-          y: data.position.y,
-          z: data.position.z + Math.floor(index / 3) * 0.5 - 0.5,
-        };
-
-        await this.spawnItemFromData(
-          itemData,
-          offsetPosition,
-          "loot",
-          "Mob Drop",
-          index,
-        );
+        items.push({
+          id: `item-spawner-loot-${index}`,
+          itemId: itemData.id,
+          quantity: 1,
+          slot: index,
+          metadata: null,
+        });
       }
     }
+    if (items.length === 0) return;
+    const sourceIds = await this.requireGroundItemSystem().spawnGroundItems(
+      items,
+      data.position,
+      {
+        despawnTime: ticksToMs(COMBAT_CONSTANTS.GROUND_ITEM_DESPAWN_TICKS),
+        scatter: false,
+      },
+      true,
+    );
+    if (sourceIds.length !== items.length) {
+      throw new Error("item_spawner_ground_custody_batch_incomplete");
+    }
+  }
+
+  private requireGroundItemSystem(): GroundItemSystem {
+    if (!this.world.isServer) {
+      throw new Error("item_spawner_ground_custody_server_only");
+    }
+    const groundItems = this.world.getSystem<GroundItemSystem>("ground-items");
+    if (!groundItems) {
+      throw new Error("item_spawner_ground_custody_unavailable");
+    }
+    return groundItems;
   }
 
   // Public API

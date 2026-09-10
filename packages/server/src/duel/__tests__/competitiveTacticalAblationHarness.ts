@@ -12,6 +12,7 @@ import {
 } from "@hyperforge/shared";
 
 import type { EmbeddedGameState } from "../../eliza/types.js";
+import { ORDINARY_COMBAT_AMMUNITION_TARGET } from "../../eliza/ordinaryCombatSpecialization.js";
 import type { CompetitiveTacticalStrategy } from "../../systems/StreamingDuelScheduler/competitive-tactical-strategy.js";
 import { DuelCombatAI } from "../DuelCombatAI.js";
 
@@ -61,6 +62,8 @@ type FighterWorldState = {
   damage: number;
   movementActions: number;
   engagementActions: number;
+  movementDestination: [number, number, number] | null;
+  movementStep: number;
   yieldAttackTick: number;
   rangedLevel: number;
   rangedAttackBonus: number;
@@ -145,6 +148,7 @@ type VariantSummary = {
   meanMovementActions: number;
   illegalActionAttempts: number;
   cohortHash: string;
+  behaviorHash: string;
 };
 
 type PairedComparison = {
@@ -193,6 +197,41 @@ type PreparationPairedComparison = {
   regressedSeeds: number;
   tiedSeeds: number;
   twoSidedSignTestP: number;
+};
+
+type SupplyChainCohortSummary = Omit<
+  PreparationCohortSummary,
+  "cohort" | "dimension"
+> & {
+  cohort: "one_batch_incomplete" | "minimum_complete_batches";
+  dimension: "gathering_processing";
+};
+
+type AuthoredSupplyChainLineage = {
+  targetItemId: "bronze_arrow";
+  readinessTargetQuantity: number;
+  outputQuantityPerBatch: number;
+  incompleteBatchCount: 1;
+  incompleteOutputQuantity: number;
+  completeBatchCount: number;
+  completeOutputQuantity: number;
+  exactGatheringInputs: Array<{
+    itemId: "copper_ore" | "tin_ore" | "logs";
+    quantity: number;
+    resourceId: string;
+  }>;
+  exactStoreLeafInputs: Array<{
+    itemId: "feathers";
+    quantity: number;
+    storeId: string;
+  }>;
+  exactProcessingActions: Array<{
+    activity: "smelting" | "smithing" | "fletching";
+    stableId: string;
+    actions: number;
+    outputItemId: string;
+    outputQuantity: number;
+  }>;
 };
 
 type PrayerAblationSummary = {
@@ -272,6 +311,7 @@ export type CompetitiveTacticalAblationReport = {
   movementAblation: {
     macro: "deterministic_fallback";
     facingAblationIncluded: false;
+    opponentMovementRetained: true;
     enabled: VariantSummary;
     disabled: VariantSummary;
     disabledMinusEnabledMeanScore: number;
@@ -329,6 +369,38 @@ export type CompetitiveTacticalAblationReport = {
     profiles: PreparationCohortSummary[];
     pairedAgainstBaseline: PreparationPairedComparison[];
   };
+  supplyChainAblation: {
+    fighterA: "ranged";
+    fighterB: "melee";
+    authoredManifestInputs: true;
+    authoredManifestSourceFiles: readonly [
+      "world/assets/manifests/recipes/fletching.json",
+      "world/assets/manifests/recipes/smelting.json",
+      "world/assets/manifests/recipes/smithing.json",
+      "world/assets/manifests/gathering/mining.json",
+      "world/assets/manifests/gathering/woodcutting.json",
+      "world/assets/manifests/stores.json",
+    ];
+    authoredInputHash: string;
+    recipeGraphValidated: true;
+    commonRandomNumbers: true;
+    allCohortsReplayed: true;
+    technicalResultOnly: true;
+    productAcceptanceThreshold: null;
+    acquisitionProvenanceChangesCombatStats: false;
+    productionProcessingAuthorityIncluded: false;
+    productionInventoryAuthorityIncluded: false;
+    durableCustodyIncluded: false;
+    lineage: AuthoredSupplyChainLineage;
+    incomplete: SupplyChainCohortSummary;
+    completed: SupplyChainCohortSummary;
+    completedMinusIncompleteMeanScore: number;
+    completedMinusIncompleteMeanHealthMargin: number;
+    completedImprovedSeeds: number;
+    completedRegressedSeeds: number;
+    tiedSeeds: number;
+    twoSidedSignTestP: number;
+  };
   prayerAblation: {
     authoredManifestInput: true;
     authoredManifestSourceFile: "world/assets/manifests/prayers.json";
@@ -376,6 +448,51 @@ const AUTHORED_MANIFEST_SOURCES = [
     reportPath: "world/assets/manifests/items/food.json" as const,
     url: new URL(
       "../../../world/assets/manifests/items/food.json",
+      import.meta.url,
+    ),
+  },
+] as const;
+
+const AUTHORED_SUPPLY_CHAIN_SOURCES = [
+  {
+    reportPath: "world/assets/manifests/recipes/fletching.json" as const,
+    url: new URL(
+      "../../../world/assets/manifests/recipes/fletching.json",
+      import.meta.url,
+    ),
+  },
+  {
+    reportPath: "world/assets/manifests/recipes/smelting.json" as const,
+    url: new URL(
+      "../../../world/assets/manifests/recipes/smelting.json",
+      import.meta.url,
+    ),
+  },
+  {
+    reportPath: "world/assets/manifests/recipes/smithing.json" as const,
+    url: new URL(
+      "../../../world/assets/manifests/recipes/smithing.json",
+      import.meta.url,
+    ),
+  },
+  {
+    reportPath: "world/assets/manifests/gathering/mining.json" as const,
+    url: new URL(
+      "../../../world/assets/manifests/gathering/mining.json",
+      import.meta.url,
+    ),
+  },
+  {
+    reportPath: "world/assets/manifests/gathering/woodcutting.json" as const,
+    url: new URL(
+      "../../../world/assets/manifests/gathering/woodcutting.json",
+      import.meta.url,
+    ),
+  },
+  {
+    reportPath: "world/assets/manifests/stores.json" as const,
+    url: new URL(
+      "../../../world/assets/manifests/stores.json",
       import.meta.url,
     ),
   },
@@ -594,6 +711,315 @@ const loadAuthoredPreparationProfiles = async (): Promise<{
   };
 };
 
+const loadAuthoredSupplyChainLineage = async (): Promise<{
+  lineage: AuthoredSupplyChainLineage;
+  authoredInputHash: string;
+}> => {
+  const parsed = await Promise.all(
+    AUTHORED_SUPPLY_CHAIN_SOURCES.map(async (source) => ({
+      source,
+      value: JSON.parse(await readFile(source.url, "utf8")) as unknown,
+    })),
+  );
+  const requireRecord = (
+    value: unknown,
+    description: string,
+  ): Record<string, unknown> => {
+    if (!value || typeof value !== "object" || Array.isArray(value)) {
+      throw new Error(`authored ${description} must be an object`);
+    }
+    return value as Record<string, unknown>;
+  };
+  const requireArray = (value: unknown, description: string): unknown[] => {
+    if (!Array.isArray(value)) {
+      throw new Error(`authored ${description} must be an array`);
+    }
+    return value;
+  };
+  const requirePositiveInteger = (
+    value: unknown,
+    description: string,
+  ): number => {
+    if (!Number.isSafeInteger(value) || Number(value) < 1) {
+      throw new Error(`authored ${description} must be a positive integer`);
+    }
+    return Number(value);
+  };
+  const sourceValue = (index: number): Record<string, unknown> =>
+    requireRecord(
+      parsed[index]?.value,
+      AUTHORED_SUPPLY_CHAIN_SOURCES[index]?.reportPath ?? `source ${index}`,
+    );
+  const fletchingRecipes = requireArray(
+    sourceValue(0).recipes,
+    "Fletching recipes",
+  ).map((entry) => requireRecord(entry, "Fletching recipe"));
+  const smeltingRecipes = requireArray(
+    sourceValue(1).recipes,
+    "Smelting recipes",
+  ).map((entry) => requireRecord(entry, "Smelting recipe"));
+  const smithingRecipes = requireArray(
+    sourceValue(2).recipes,
+    "Smithing recipes",
+  ).map((entry) => requireRecord(entry, "Smithing recipe"));
+  const miningResources = requireArray(
+    sourceValue(3).rocks,
+    "Mining resources",
+  ).map((entry) => requireRecord(entry, "Mining resource"));
+  const woodcuttingResources = requireArray(
+    sourceValue(4).trees,
+    "Woodcutting resources",
+  ).map((entry) => requireRecord(entry, "Woodcutting resource"));
+  const stores = requireArray(parsed[5]?.value, "stores").map((entry) =>
+    requireRecord(entry, "store"),
+  );
+
+  const requireRecipe = (
+    recipes: Record<string, unknown>[],
+    outputItemId: string,
+    inputItemId?: string,
+  ): Record<string, unknown> => {
+    const candidates = recipes.filter((recipe) => {
+      if (recipe.output !== outputItemId) return false;
+      if (!inputItemId) return true;
+      return requireArray(recipe.inputs, `${outputItemId} inputs`).some(
+        (input) =>
+          requireRecord(input, `${outputItemId} input`).item === inputItemId,
+      );
+    });
+    if (candidates.length !== 1) {
+      throw new Error(
+        `expected one authored ${outputItemId}${inputItemId ? `/${inputItemId}` : ""} recipe, found ${candidates.length}`,
+      );
+    }
+    return candidates[0];
+  };
+  const recipeInputs = (
+    recipe: Record<string, unknown>,
+    outputItemId: string,
+  ): Array<{ itemId: string; quantity: number }> =>
+    requireArray(recipe.inputs, `${outputItemId} inputs`).map((entry) => {
+      const input = requireRecord(entry, `${outputItemId} input`);
+      if (typeof input.item !== "string" || input.item.length === 0) {
+        throw new Error(`authored ${outputItemId} input has an invalid item`);
+      }
+      return {
+        itemId: input.item,
+        quantity: requirePositiveInteger(
+          input.amount,
+          `${outputItemId}/${input.item} amount`,
+        ),
+      };
+    });
+  const requireInput = (
+    inputs: Array<{ itemId: string; quantity: number }>,
+    itemId: string,
+    outputItemId: string,
+  ): number => {
+    const matches = inputs.filter((input) => input.itemId === itemId);
+    if (matches.length !== 1) {
+      throw new Error(
+        `expected one authored ${itemId} input for ${outputItemId}`,
+      );
+    }
+    return matches[0].quantity;
+  };
+
+  const arrowRecipe = requireRecipe(fletchingRecipes, "bronze_arrow");
+  const headlessRecipe = requireRecipe(fletchingRecipes, "headless_arrow");
+  const shaftRecipe = requireRecipe(fletchingRecipes, "arrow_shaft", "logs");
+  const arrowtipRecipe = requireRecipe(smithingRecipes, "bronze_arrowtips");
+  const barRecipe = requireRecipe(smeltingRecipes, "bronze_bar");
+  const arrowOutput = requirePositiveInteger(
+    arrowRecipe.outputQuantity,
+    "bronze_arrow output quantity",
+  );
+  const headlessOutput = requirePositiveInteger(
+    headlessRecipe.outputQuantity,
+    "headless_arrow output quantity",
+  );
+  const shaftOutput = requirePositiveInteger(
+    shaftRecipe.outputQuantity,
+    "arrow_shaft output quantity",
+  );
+  const arrowtipOutput = requirePositiveInteger(
+    arrowtipRecipe.outputQuantity,
+    "bronze_arrowtips output quantity",
+  );
+  const arrowInputs = recipeInputs(arrowRecipe, "bronze_arrow");
+  const headlessInputs = recipeInputs(headlessRecipe, "headless_arrow");
+  const shaftInputs = recipeInputs(shaftRecipe, "arrow_shaft");
+  const barInputs = recipeInputs(barRecipe, "bronze_bar");
+  const arrowtipsPerBatch = requireInput(
+    arrowInputs,
+    "bronze_arrowtips",
+    "bronze_arrow",
+  );
+  const headlessPerBatch = requireInput(
+    arrowInputs,
+    "headless_arrow",
+    "bronze_arrow",
+  );
+  const shaftsPerHeadlessAction = requireInput(
+    headlessInputs,
+    "arrow_shaft",
+    "headless_arrow",
+  );
+  const feathersPerHeadlessAction = requireInput(
+    headlessInputs,
+    "feathers",
+    "headless_arrow",
+  );
+  const logsPerShaftAction = requireInput(shaftInputs, "logs", "arrow_shaft");
+  if (arrowtipRecipe.bar !== "bronze_bar") {
+    throw new Error("authored bronze_arrowtips recipe must consume bronze_bar");
+  }
+  const barsPerArrowtipAction = requirePositiveInteger(
+    arrowtipRecipe.barsRequired,
+    "bronze_arrowtips barsRequired",
+  );
+  const completeBatchCount = Math.ceil(
+    ORDINARY_COMBAT_AMMUNITION_TARGET / arrowOutput,
+  );
+  const incompleteBatchCount = 1 as const;
+  const arrowtipActions = Math.ceil(
+    (completeBatchCount * arrowtipsPerBatch) / arrowtipOutput,
+  );
+  const headlessActions = Math.ceil(
+    (completeBatchCount * headlessPerBatch) / headlessOutput,
+  );
+  const shaftActions = Math.ceil(
+    (headlessActions * shaftsPerHeadlessAction) / shaftOutput,
+  );
+  const barActions = arrowtipActions * barsPerArrowtipAction;
+
+  const requireGatheringSource = (
+    itemId: "copper_ore" | "tin_ore" | "logs",
+  ): { itemId: typeof itemId; resourceId: string } => {
+    const candidates = [...miningResources, ...woodcuttingResources]
+      .filter((resource) =>
+        requireArray(
+          resource.harvestYield,
+          `${String(resource.id)} yield`,
+        ).some((entry) => {
+          const drop = requireRecord(entry, `${String(resource.id)} drop`);
+          return (
+            drop.itemId === itemId && drop.chance === 1 && drop.quantity === 1
+          );
+        }),
+      )
+      .sort((left, right) => String(left.id).localeCompare(String(right.id)));
+    const selected = candidates[0];
+    if (!selected || typeof selected.id !== "string") {
+      throw new Error(
+        `no probability-one authored gathering source for ${itemId}`,
+      );
+    }
+    return { itemId, resourceId: selected.id };
+  };
+  const featherStores = stores
+    .filter((store) =>
+      requireArray(store.items, `${String(store.id)} items`).some(
+        (entry) =>
+          requireRecord(entry, `${String(store.id)} item`).itemId ===
+          "feathers",
+      ),
+    )
+    .sort((left, right) => String(left.id).localeCompare(String(right.id)));
+  const featherStore = featherStores[0];
+  if (!featherStore || typeof featherStore.id !== "string") {
+    throw new Error("no authored store source for feathers");
+  }
+  const copperPerBar = requireInput(barInputs, "copper_ore", "bronze_bar");
+  const tinPerBar = requireInput(barInputs, "tin_ore", "bronze_bar");
+  const lineage: AuthoredSupplyChainLineage = {
+    targetItemId: "bronze_arrow",
+    readinessTargetQuantity: ORDINARY_COMBAT_AMMUNITION_TARGET,
+    outputQuantityPerBatch: arrowOutput,
+    incompleteBatchCount,
+    incompleteOutputQuantity: incompleteBatchCount * arrowOutput,
+    completeBatchCount,
+    completeOutputQuantity: completeBatchCount * arrowOutput,
+    exactGatheringInputs: [
+      {
+        ...requireGatheringSource("copper_ore"),
+        quantity: barActions * copperPerBar,
+      },
+      {
+        ...requireGatheringSource("tin_ore"),
+        quantity: barActions * tinPerBar,
+      },
+      {
+        ...requireGatheringSource("logs"),
+        quantity: shaftActions * logsPerShaftAction,
+      },
+    ],
+    exactStoreLeafInputs: [
+      {
+        itemId: "feathers",
+        quantity: headlessActions * feathersPerHeadlessAction,
+        storeId: featherStore.id,
+      },
+    ],
+    exactProcessingActions: [
+      {
+        activity: "smelting",
+        stableId: "bronze_bar",
+        actions: barActions,
+        outputItemId: "bronze_bar",
+        outputQuantity: barActions,
+      },
+      {
+        activity: "smithing",
+        stableId: "bronze_arrowtips",
+        actions: arrowtipActions,
+        outputItemId: "bronze_arrowtips",
+        outputQuantity: arrowtipActions * arrowtipOutput,
+      },
+      {
+        activity: "fletching",
+        stableId: "arrow_shaft:logs",
+        actions: shaftActions,
+        outputItemId: "arrow_shaft",
+        outputQuantity: shaftActions * shaftOutput,
+      },
+      {
+        activity: "fletching",
+        stableId: "headless_arrow",
+        actions: headlessActions,
+        outputItemId: "headless_arrow",
+        outputQuantity: headlessActions * headlessOutput,
+      },
+      {
+        activity: "fletching",
+        stableId: "bronze_arrow:bronze_arrowtips",
+        actions: completeBatchCount,
+        outputItemId: "bronze_arrow",
+        outputQuantity: completeBatchCount * arrowOutput,
+      },
+    ],
+  };
+  if (
+    lineage.incompleteOutputQuantity >= lineage.readinessTargetQuantity ||
+    lineage.completeOutputQuantity < lineage.readinessTargetQuantity
+  ) {
+    throw new Error("authored supply-chain cohorts do not straddle readiness");
+  }
+  return {
+    lineage,
+    authoredInputHash: sha256({
+      readinessTargetQuantity: ORDINARY_COMBAT_AMMUNITION_TARGET,
+      arrowRecipe,
+      headlessRecipe,
+      shaftRecipe,
+      arrowtipRecipe,
+      barRecipe,
+      gathering: lineage.exactGatheringInputs,
+      featherStore,
+    }),
+  };
+};
+
 const PRAYER_MANIFEST_SOURCE = {
   reportPath: "world/assets/manifests/prayers.json" as const,
   url: new URL("../../../world/assets/manifests/prayers.json", import.meta.url),
@@ -719,6 +1145,21 @@ const moveToward = (
   ];
 };
 
+const advanceMovementPath = (fighter: FighterWorldState): void => {
+  const destination = fighter.movementDestination;
+  if (!destination) return;
+  moveToward(fighter, destination, fighter.movementStep);
+  if (
+    Math.hypot(
+      destination[0] - fighter.position[0],
+      destination[2] - fighter.position[2],
+    ) <= 0.001
+  ) {
+    fighter.movementDestination = null;
+    fighter.movementStep = 0;
+  }
+};
+
 const distanceBetween = (
   left: FighterWorldState,
   right: FighterWorldState,
@@ -808,6 +1249,8 @@ const createFighter = (
   damage: 0,
   movementActions: 0,
   engagementActions: 0,
+  movementDestination: null,
+  movementStep: 0,
   yieldAttackTick: -1,
   rangedLevel: preparation?.rangedLevel ?? 60,
   rangedAttackBonus: preparation?.rangedAttackBonus ?? 20,
@@ -825,7 +1268,7 @@ const createFighter = (
 const runDuel = async (
   seed: number,
   variant: (typeof VARIANTS)[number],
-  movementApplied = true,
+  fighterAMovementApplied = true,
   fighterARole: CombatRole = "ranged",
   fighterBRole: CombatRole = "melee",
   fixedOpponentStrategy = true,
@@ -859,7 +1302,10 @@ const runDuel = async (
           ? [
               { itemId: "bronze_longsword", quantity: 1 },
               { itemId: "shortbow", quantity: 1 },
-              { itemId: "bronze_arrow", quantity: 100 },
+              {
+                itemId: "bronze_arrow",
+                quantity: own.ammunitionRemaining ?? 100,
+              },
               { itemId: "staff_of_air", quantity: 1 },
               { itemId: "mind_rune", quantity: 100 },
             ].filter(
@@ -964,19 +1410,20 @@ const runDuel = async (
         newHealth: own.health,
       };
     },
-    executeAttack: async (targetId: string): Promise<void> => {
+    executeAttack: async (targetId: string): Promise<boolean> => {
       if (targetId !== opponent.id || !own.alive || !opponent.alive) {
         illegalActionAttempts++;
-        return;
+        return false;
       }
       own.inCombat = true;
       own.currentTarget = opponent.id;
       own.engagementActions++;
+      return true;
     },
     executeMove: async (
       target: [number, number, number],
       run: boolean,
-    ): Promise<void> => {
+    ): Promise<boolean> => {
       if (
         target.some((coordinate) => !Number.isFinite(coordinate)) ||
         target[0] < ARENA_MIN ||
@@ -985,10 +1432,14 @@ const runDuel = async (
         target[2] > ARENA_MAX
       ) {
         illegalActionAttempts++;
-        return;
+        return false;
       }
       own.movementActions++;
-      if (movementApplied) moveToward(own, target, run ? 2 : 1);
+      if (own.id === "fighter-b" || fighterAMovementApplied) {
+        own.movementDestination = [...target];
+        own.movementStep = run ? 2 : 1;
+      }
+      return true;
     },
     executeCombatApproach: (targetId: string): boolean => {
       if (targetId !== opponent.id || !own.alive || !opponent.alive) {
@@ -996,26 +1447,43 @@ const runDuel = async (
         return false;
       }
       own.movementActions++;
-      if (movementApplied) moveToward(own, opponent.position, 2.4);
+      if (own.id === "fighter-b" || fighterAMovementApplied) {
+        own.movementDestination = [...opponent.position];
+        own.movementStep = 2.4;
+      }
       return true;
     },
-    getMovementDebugState: () => ({
-      activePath: true,
-      currentTile: {
-        x: Math.round(own.position[0]),
-        z: Math.round(own.position[2]),
-      },
-      nextTile: {
-        x: Math.round(opponent.position[0]),
-        z: Math.round(opponent.position[2]),
-      },
-      destinationTile: {
-        x: Math.round(opponent.position[0]),
-        z: Math.round(opponent.position[2]),
-      },
-      remainingPathTiles: Math.ceil(distanceBetween(own, opponent)),
-      moveSeq: own.movementActions,
-    }),
+    getMovementDebugState: () => {
+      const destination = own.movementDestination;
+      return {
+        activePath: destination !== null,
+        currentTile: {
+          x: Math.round(own.position[0]),
+          z: Math.round(own.position[2]),
+        },
+        nextTile: destination
+          ? {
+              x: Math.round(destination[0]),
+              z: Math.round(destination[2]),
+            }
+          : null,
+        destinationTile: destination
+          ? {
+              x: Math.round(destination[0]),
+              z: Math.round(destination[2]),
+            }
+          : null,
+        remainingPathTiles: destination
+          ? Math.ceil(
+              Math.hypot(
+                destination[0] - own.position[0],
+                destination[2] - own.position[2],
+              ),
+            )
+          : 0,
+        moveSeq: own.movementActions,
+      };
+    },
     executeChangeStyle: async (style: string): Promise<boolean> => {
       if (
         ![
@@ -1024,6 +1492,7 @@ const runDuel = async (
           "controlled",
           "defensive",
           "rapid",
+          "longrange",
         ].includes(style)
       ) {
         illegalActionAttempts++;
@@ -1150,6 +1619,10 @@ const runDuel = async (
                 : role === "mage"
                   ? "staff_of_air"
                   : "bronze_longsword";
+            fighterA.ammunitionId = role === "ranged" ? "bronze_arrow" : null;
+            if (role === "ranged" && fighterA.ammunitionRemaining === null) {
+              fighterA.ammunitionRemaining = 100;
+            }
             fighterA.currentStyle = "accurate";
             fighterA.yieldAttackTick = currentTick;
             return { ok: true, retryable: false };
@@ -1306,6 +1779,8 @@ const runDuel = async (
     aiA.start();
     aiB.start();
     for (currentTick = 1; currentTick <= MAX_TICKS; currentTick++) {
+      if (fighterAMovementApplied) advanceMovementPath(fighterA);
+      advanceMovementPath(fighterB);
       await aiA.externalTick();
       await aiB.externalTick();
       const damageToB = resolveAttack(fighterA, fighterB);
@@ -1458,6 +1933,14 @@ const summarize = (
       0,
     ),
     cohortHash: sha256(results),
+    // The retained cohort hash intentionally binds the variant label as well
+    // as its outcomes. Keep a second label-free hash so a renamed or aliased
+    // macro cannot masquerade as a distinct tactical execution.
+    behaviorHash: sha256(
+      results.map(
+        ({ variant: _variant, ...executedOutcome }) => executedOutcome,
+      ),
+    ),
   };
 };
 
@@ -1506,6 +1989,19 @@ const summarizePreparation = (
   };
 };
 
+const summarizeSupplyChain = (
+  cohort: SupplyChainCohortSummary["cohort"],
+  profile: FighterPreparationProfile,
+  results: TacticalAblationDuelResult[],
+): SupplyChainCohortSummary => {
+  const summary = summarizePreparation(profile, results);
+  return {
+    ...summary,
+    cohort,
+    dimension: "gathering_processing",
+  };
+};
+
 export async function runCompetitiveTacticalAblation(
   seedCount = DEFAULT_SEED_COUNT,
 ): Promise<CompetitiveTacticalAblationReport> {
@@ -1514,6 +2010,10 @@ export async function runCompetitiveTacticalAblation(
   }
   const { profiles: preparationProfiles, authoredInputHash } =
     await loadAuthoredPreparationProfiles();
+  const {
+    lineage: authoredSupplyChainLineage,
+    authoredInputHash: authoredSupplyChainInputHash,
+  } = await loadAuthoredSupplyChainLineage();
   const {
     bonusesById: authoredPrayerBonuses,
     authoredInputHash: authoredPrayerInputHash,
@@ -1598,6 +2098,7 @@ export async function runCompetitiveTacticalAblation(
   const movementAblation = {
     macro: "deterministic_fallback" as const,
     facingAblationIncluded: false as const,
+    opponentMovementRetained: true as const,
     enabled: summarize(fallbackVariant, baseline),
     disabled: summarize(fallbackVariant, movementDisabled),
     disabledMinusEnabledMeanScore: round(disabledScoreDelta / seedCount),
@@ -1892,6 +2393,139 @@ export async function runCompetitiveTacticalAblation(
     profiles: preparationSummaries,
     pairedAgainstBaseline: preparationComparisons,
   };
+  const supplyChainBaseProfile = preparationProfiles.find(
+    (profile) => profile.cohort === "baseline",
+  );
+  if (!supplyChainBaseProfile) {
+    throw new Error("supply-chain combat profile is missing");
+  }
+  const supplyChainProfiles = {
+    one_batch_incomplete: {
+      ...supplyChainBaseProfile,
+      ammunitionQuantity: authoredSupplyChainLineage.incompleteOutputQuantity,
+    },
+    minimum_complete_batches: {
+      ...supplyChainBaseProfile,
+      ammunitionQuantity: authoredSupplyChainLineage.completeOutputQuantity,
+    },
+  } as const;
+  const runSupplyChainCohort = async (
+    profile: FighterPreparationProfile,
+    description: string,
+  ): Promise<TacticalAblationDuelResult[]> => {
+    const first: TacticalAblationDuelResult[] = [];
+    const replay: TacticalAblationDuelResult[] = [];
+    for (let index = 0; index < seedCount; index++) {
+      first.push(
+        await runDuel(
+          index + 1,
+          fallbackVariant,
+          true,
+          "ranged",
+          "melee",
+          true,
+          false,
+          profile,
+        ),
+      );
+    }
+    for (let index = 0; index < seedCount; index++) {
+      replay.push(
+        await runDuel(
+          index + 1,
+          fallbackVariant,
+          true,
+          "ranged",
+          "melee",
+          true,
+          false,
+          profile,
+        ),
+      );
+    }
+    if (sha256(first) !== sha256(replay)) {
+      throw new Error(
+        `non-deterministic supply-chain replay for ${description}`,
+      );
+    }
+    if (first.some((result) => result.illegalActionAttempts !== 0)) {
+      throw new Error(`illegal action requested by ${description}`);
+    }
+    return first;
+  };
+  const supplyIncomplete = await runSupplyChainCohort(
+    supplyChainProfiles.one_batch_incomplete,
+    "one_batch_incomplete",
+  );
+  const supplyCompleted = await runSupplyChainCohort(
+    supplyChainProfiles.minimum_complete_batches,
+    "minimum_complete_batches",
+  );
+  let completedImprovedSeeds = 0;
+  let completedRegressedSeeds = 0;
+  let supplyTiedSeeds = 0;
+  let completedScoreDelta = 0;
+  let completedHealthMarginDelta = 0;
+  for (let index = 0; index < seedCount; index++) {
+    const scoreDelta =
+      score(supplyCompleted[index]) - score(supplyIncomplete[index]);
+    const marginDelta =
+      healthMargin(supplyCompleted[index]) -
+      healthMargin(supplyIncomplete[index]);
+    completedScoreDelta += scoreDelta;
+    completedHealthMarginDelta += marginDelta;
+    if (marginDelta > 0) completedImprovedSeeds++;
+    else if (marginDelta < 0) completedRegressedSeeds++;
+    else supplyTiedSeeds++;
+  }
+  const supplyChainAblation = {
+    fighterA: "ranged" as const,
+    fighterB: "melee" as const,
+    authoredManifestInputs: true as const,
+    authoredManifestSourceFiles: [
+      AUTHORED_SUPPLY_CHAIN_SOURCES[0].reportPath,
+      AUTHORED_SUPPLY_CHAIN_SOURCES[1].reportPath,
+      AUTHORED_SUPPLY_CHAIN_SOURCES[2].reportPath,
+      AUTHORED_SUPPLY_CHAIN_SOURCES[3].reportPath,
+      AUTHORED_SUPPLY_CHAIN_SOURCES[4].reportPath,
+      AUTHORED_SUPPLY_CHAIN_SOURCES[5].reportPath,
+    ] as const,
+    authoredInputHash: authoredSupplyChainInputHash,
+    recipeGraphValidated: true as const,
+    commonRandomNumbers: true as const,
+    allCohortsReplayed: true as const,
+    technicalResultOnly: true as const,
+    productAcceptanceThreshold: null,
+    // Acquisition provenance must never alter combat math. The causal input is
+    // the conserved authored output quantity that preparation made available.
+    acquisitionProvenanceChangesCombatStats: false as const,
+    productionProcessingAuthorityIncluded: false as const,
+    productionInventoryAuthorityIncluded: false as const,
+    durableCustodyIncluded: false as const,
+    lineage: authoredSupplyChainLineage,
+    incomplete: summarizeSupplyChain(
+      "one_batch_incomplete",
+      supplyChainProfiles.one_batch_incomplete,
+      supplyIncomplete,
+    ),
+    completed: summarizeSupplyChain(
+      "minimum_complete_batches",
+      supplyChainProfiles.minimum_complete_batches,
+      supplyCompleted,
+    ),
+    completedMinusIncompleteMeanScore: round(completedScoreDelta / seedCount),
+    completedMinusIncompleteMeanHealthMargin: round(
+      completedHealthMarginDelta / seedCount,
+      3,
+    ),
+    completedImprovedSeeds,
+    completedRegressedSeeds,
+    tiedSeeds: supplyTiedSeeds,
+    twoSidedSignTestP: twoSidedSignTest(
+      completedImprovedSeeds,
+      completedRegressedSeeds,
+    ),
+  };
   const prayerRoles: PrayerAblationSummary[] = [];
   for (const fighterARole of combatRoles) {
     const enabled: TacticalAblationDuelResult[] = [];
@@ -2036,6 +2670,7 @@ export async function runCompetitiveTacticalAblation(
         roleMatrixSeedCount * combatRoles.length * combatRoles.length * 2 +
         seedCount * 4 +
         seedCount * preparationProfiles.length * 2 +
+        seedCount * 4 +
         seedCount * combatRoles.length * 4,
       tickMs: TICK_MS,
       maxTicks: MAX_TICKS,
@@ -2095,6 +2730,7 @@ export async function runCompetitiveTacticalAblation(
     roleMatrix,
     styleAblation,
     preparationAblation,
+    supplyChainAblation,
     prayerAblation,
   };
   return { ...unsigned, reportHash: sha256(unsigned) };

@@ -409,6 +409,7 @@ export default defineConfig(({ mode }) => {
       // Secret variables that must NEVER be exposed to client:
       //   - PRIVY_APP_SECRET
       //   - JWT_SECRET
+      //   - JWT_SIGNING_KEYS
       //   - DATABASE_URL
       //   - POSTGRES_PASSWORD
       //   - LIVEKIT_API_SECRET

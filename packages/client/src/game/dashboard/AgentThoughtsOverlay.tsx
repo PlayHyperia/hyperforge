@@ -1,4 +1,5 @@
 import { GAME_API_URL } from "@/lib/api-config";
+import { getApiAuthorizationHeaders } from "@/lib/api-client";
 import React, { useState, useEffect, useRef, useCallback } from "react";
 import { Agent } from "../../screens/DashboardScreen";
 import {
@@ -163,6 +164,7 @@ export const AgentThoughtsOverlay: React.FC<AgentThoughtsOverlayProps> = ({
           : "";
       const response = await fetch(
         `${GAME_API_URL}/api/agents/${agent.id}/thoughts?limit=${MAX_THOUGHTS_DISPLAYED}${sinceParam}`,
+        { headers: getApiAuthorizationHeaders() },
       );
 
       if (!response.ok) {

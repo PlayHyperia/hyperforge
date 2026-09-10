@@ -26,11 +26,35 @@ import type {
 } from "@hyperforge/shared";
 import { EventType, ALL_WORLD_AREAS } from "@hyperforge/shared";
 import type { BroadcastManager } from "./broadcast";
+import { PacketPriority } from "./BandwidthBudget";
 import { BankRepository } from "../../database/repositories/BankRepository";
 import type { StoreSystem } from "@hyperforge/shared";
 import type pg from "pg";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import type * as schema from "../../database/schema";
+
+export type ProjectileReplayPacketName =
+  | "projectileLaunched"
+  | "projectileHit"
+  | "projectileCancelled"
+  | "combatDamageDealt";
+
+export interface ProjectileReplayEvent {
+  sequence: number;
+  name: ProjectileReplayPacketName;
+  data: unknown;
+}
+
+export interface ProjectileReplayResponse {
+  sourceId: string;
+  requestedFromSequence: number;
+  requestedToSequence: number;
+  complete: boolean;
+  events: ProjectileReplayEvent[];
+}
+
+const MAX_PROJECTILE_REPLAY_SEQUENCES = 256;
+const MAX_PROJECTILE_REPLAY_REQUEST_SEQUENCES = 64;
 
 /**
  * EventBridge - Bridges world events to network messages
@@ -46,13 +70,15 @@ export class EventBridge {
    * Key format: "attackerId-targetId-tick"
    * Value: { tick, damages } — tick stored directly to avoid string parsing during cleanup
    */
-  private recentDamageEvents = new Map<
-    string,
-    { tick: number; damages: Set<number> }
-  >();
+  private recentDamageEvents = new Map<string, number>();
   private lastCleanupTick = 0;
   private readonly projectileNetworkEventSourceId = randomUUID();
   private projectileNetworkEventSequence = 0;
+  private readonly projectileReplayBySequence = new Map<
+    number,
+    ProjectileReplayEvent[]
+  >();
+  private readonly recentProjectileDamageById = new Map<string, unknown>();
 
   /**
    * Registered event handlers for cleanup.
@@ -96,6 +122,79 @@ export class EventBridge {
     return `${this.projectileNetworkEventSourceId}:${this.projectileNetworkEventSequence}`;
   }
 
+  private recordProjectileReplaySequence(
+    sequence: number,
+    events: Array<Omit<ProjectileReplayEvent, "sequence">>,
+  ): void {
+    this.projectileReplayBySequence.set(
+      sequence,
+      events.map((event) => ({ sequence, ...event })),
+    );
+    while (
+      this.projectileReplayBySequence.size > MAX_PROJECTILE_REPLAY_SEQUENCES
+    ) {
+      const oldest = this.projectileReplayBySequence.keys().next().value as
+        number | undefined;
+      if (oldest === undefined) break;
+      this.projectileReplayBySequence.delete(oldest);
+    }
+  }
+
+  private rememberProjectileDamage(projectileId: string, data: unknown): void {
+    this.recentProjectileDamageById.set(projectileId, data);
+    while (
+      this.recentProjectileDamageById.size > MAX_PROJECTILE_REPLAY_SEQUENCES
+    ) {
+      const oldest = this.recentProjectileDamageById.keys().next().value as
+        string | undefined;
+      if (oldest === undefined) break;
+      this.recentProjectileDamageById.delete(oldest);
+    }
+  }
+
+  /**
+   * Return an exact, bounded range from the current projectile event stream.
+   * A response is complete only when every requested lifecycle sequence is
+   * still retained; callers can safely replay its stable event identities.
+   */
+  getProjectileEventReplay(request: {
+    sourceId: string;
+    fromSequence: number;
+    toSequence: number;
+  }): ProjectileReplayResponse {
+    const fromSequence = Number.isSafeInteger(request.fromSequence)
+      ? request.fromSequence
+      : 0;
+    const toSequence = Number.isSafeInteger(request.toSequence)
+      ? request.toSequence
+      : -1;
+    const validRange =
+      fromSequence > 0 &&
+      toSequence >= fromSequence &&
+      toSequence - fromSequence + 1 <= MAX_PROJECTILE_REPLAY_REQUEST_SEQUENCES;
+    const sourceMatches =
+      request.sourceId === this.projectileNetworkEventSourceId;
+    const response: ProjectileReplayResponse = {
+      sourceId: this.projectileNetworkEventSourceId,
+      requestedFromSequence: fromSequence,
+      requestedToSequence: toSequence,
+      complete: validRange && sourceMatches,
+      events: [],
+    };
+
+    if (!response.complete) return response;
+
+    for (let sequence = fromSequence; sequence <= toSequence; sequence += 1) {
+      const events = this.projectileReplayBySequence.get(sequence);
+      if (!events) {
+        response.complete = false;
+        continue;
+      }
+      response.events.push(...events);
+    }
+    return response;
+  }
+
   /**
    * Cleanup all registered event listeners.
    * MUST be called when the ServerNetwork system is destroyed to prevent memory leaks.
@@ -107,6 +206,8 @@ export class EventBridge {
     }
     this.eventHandlers = [];
     this.recentDamageEvents.clear();
+    this.projectileReplayBySequence.clear();
+    this.recentProjectileDamageById.clear();
   }
 
   /**
@@ -192,20 +293,49 @@ export class EventBridge {
         },
       );
 
-      // classic MMORPG-STYLE: Forward gathering tool show/hide events (for fishing rod visual)
+      // Gathering tools are public action visuals. Nearby players and anonymous
+      // stream spectators must receive the same authoritative transition.
       this.on(EventType.GATHERING_TOOL_SHOW, (payload: unknown) => {
         const data = payload as EventMap[EventType.GATHERING_TOOL_SHOW];
         if (data.playerId) {
-          this.broadcast.sendToPlayer(data.playerId, "gatheringToolShow", data);
+          this.sendGatheringToolEvent("gatheringToolShow", data);
         }
       });
 
       this.on(EventType.GATHERING_TOOL_HIDE, (payload: unknown) => {
         const data = payload as EventMap[EventType.GATHERING_TOOL_HIDE];
         if (data.playerId) {
-          this.broadcast.sendToPlayer(data.playerId, "gatheringToolHide", data);
+          this.sendGatheringToolEvent("gatheringToolHide", data);
         }
       });
+
+      this.on(
+        EventType.FISHING_INTERACTION_PRESENTATION,
+        (payload: unknown) => {
+          const data =
+            payload as EventMap[EventType.FISHING_INTERACTION_PRESENTATION];
+          if (data.playerId) {
+            this.sendGatheringPresentationEvent(
+              "fishingInteractionPresentation",
+              data,
+            );
+          }
+        },
+      );
+
+      this.on(
+        EventType.PROCESSING_INTERACTION_PRESENTATION,
+        (payload: unknown) => {
+          const data =
+            payload as EventMap[EventType.PROCESSING_INTERACTION_PRESENTATION];
+          if (data.playerId) {
+            this.sendGatheringPresentationEvent(
+              "processingInteractionPresentation",
+              data,
+            );
+          }
+        },
+      );
     } catch (_err) {
       console.error("[EventBridge] Error setting up resource events:", _err);
     }
@@ -226,6 +356,17 @@ export class EventBridge {
         const data = payload as EventMap[EventType.INVENTORY_UPDATED];
         if (data.playerId) {
           this.broadcast.sendToPlayer(data.playerId, "inventoryUpdated", data);
+        }
+      });
+
+      this.on(EventType.ITEM_DROP_RESULT, (payload: unknown) => {
+        const data = payload as EventMap[EventType.ITEM_DROP_RESULT];
+        if (data.playerId) {
+          this.broadcast.sendToPlayer(
+            data.playerId,
+            "groundItemDropResult",
+            data,
+          );
         }
       });
 
@@ -550,21 +691,31 @@ export class EventBridge {
             // Broadcast to ALL players so they can:
             // 1. See death animation on the dying player
             // 2. Clear tile interpolator state (allows respawn position to apply)
-            this.broadcast.sendToAll("playerSetDead", {
-              playerId: data.playerId,
-              isDead: data.isDead,
-              deathPosition: data.deathPosition,
-            });
+            this.broadcast.sendToAll(
+              "playerSetDead",
+              {
+                playerId: data.playerId,
+                isDead: data.isDead,
+                deathPosition: data.deathPosition,
+              },
+              undefined,
+              PacketPriority.CRITICAL,
+            );
 
             if (data.isDead) {
               // Also broadcast entityModified with death animation. Without this,
               // remote players wait for the next dirty-entity sync cycle.
-              this.broadcast.sendToAll("entityModified", {
-                id: data.playerId,
-                changes: {
-                  e: "death",
+              this.broadcast.sendToAll(
+                "entityModified",
+                {
+                  id: data.playerId,
+                  changes: {
+                    e: "death",
+                  },
                 },
-              });
+                undefined,
+                PacketPriority.CRITICAL,
+              );
             }
           };
 
@@ -586,11 +737,21 @@ export class EventBridge {
             };
             globalThis.queueMicrotask(() => {
               if (this.destroyed) return;
-              this.broadcast.sendToAll("playerSetDead", deathData);
-              this.broadcast.sendToAll("entityModified", {
-                id: deathData.playerId,
-                changes: { e: "death" },
-              });
+              this.broadcast.sendToAll(
+                "playerSetDead",
+                deathData,
+                undefined,
+                PacketPriority.CRITICAL,
+              );
+              this.broadcast.sendToAll(
+                "entityModified",
+                {
+                  id: deathData.playerId,
+                  changes: { e: "death" },
+                },
+                undefined,
+                PacketPriority.CRITICAL,
+              );
             });
           } else {
             sendDeathState();
@@ -605,7 +766,12 @@ export class EventBridge {
 
         if (data.playerId) {
           // Broadcast to ALL players so they can see the respawned player
-          this.broadcast.sendToAll("playerRespawned", data);
+          this.broadcast.sendToAll(
+            "playerRespawned",
+            data,
+            undefined,
+            PacketPriority.CRITICAL,
+          );
         }
       });
 
@@ -671,13 +837,26 @@ export class EventBridge {
         // This can happen when both initial attack and auto-attack processing
         // fire for the same attack within the same tick
         const currentTick = this.world.currentTick;
-        const dedupeKey = `${data.attackerId}-${data.targetId}-${currentTick}`;
+        // Stable projectile identity is the only safe dedupe key for delayed
+        // ranged/magic damage. Two authoritative projectiles may legitimately
+        // land on the same pair, for the same amount, in one tick. The legacy
+        // tuple remains for melee/rolling-deploy payloads without an identity.
+        const dedupeKey = data.projectileId
+          ? `projectile|${data.projectileId}`
+          : [
+              "legacy",
+              data.attackerId,
+              data.targetId,
+              currentTick,
+              data.damage,
+              data.attackType ?? "",
+            ].join("|");
 
         // Cleanup old entries every tick (entries older than 2 ticks)
         // More aggressive cleanup to prevent memory buildup
         if (currentTick > this.lastCleanupTick) {
-          for (const [key, entry] of this.recentDamageEvents) {
-            if (entry.tick < currentTick - 1) {
+          for (const [key, tick] of this.recentDamageEvents) {
+            if (tick < currentTick - 1) {
               this.recentDamageEvents.delete(key);
             }
           }
@@ -695,20 +874,12 @@ export class EventBridge {
           }
         }
 
-        // Check if we've already processed this exact damage event
-        let entry = this.recentDamageEvents.get(dedupeKey);
-        if (!entry) {
-          entry = { tick: currentTick, damages: new Set<number>() };
-          this.recentDamageEvents.set(dedupeKey, entry);
-        }
-
-        if (entry.damages.has(data.damage)) {
+        if (this.recentDamageEvents.has(dedupeKey)) {
           // Duplicate event - skip broadcasting
           return;
         }
 
-        // Mark this damage as processed
-        entry.damages.add(data.damage);
+        this.recentDamageEvents.set(dedupeKey, currentTick);
 
         // Resolve position: prefer event payload, fall back to entity lookup.
         // Position is required for sendToNearby (spatial broadcast) and for
@@ -731,6 +902,7 @@ export class EventBridge {
           // Snapshot position as a plain object to avoid serializing
           // mutable Vector3 references that could change.
           const broadcastData = {
+            ...(data.projectileId ? { projectileId: data.projectileId } : {}),
             attackerId: data.attackerId,
             targetId: data.targetId,
             damage: data.damage,
@@ -740,11 +912,16 @@ export class EventBridge {
             position: { x: pos.x, y: pos.y, z: pos.z },
             tick: currentTick,
           };
+          if (data.projectileId) {
+            this.rememberProjectileDamage(data.projectileId, broadcastData);
+          }
           this.broadcast.sendToNearby(
             "combatDamageDealt",
             broadcastData,
             pos.x,
             pos.z,
+            undefined,
+            PacketPriority.CRITICAL,
           );
         }
       });
@@ -753,11 +930,17 @@ export class EventBridge {
       // Use tracked this.on() for proper cleanup in destroy()
       this.on(EventType.COMBAT_PROJECTILE_LAUNCHED, (payload: unknown) => {
         const data = payload as EventMap[EventType.COMBAT_PROJECTILE_LAUNCHED];
+        const networkEventId = this.nextProjectileNetworkEventId();
         const broadcastData = {
           ...data,
           tick: this.world.currentTick,
-          networkEventId: this.nextProjectileNetworkEventId(),
+          networkEventId,
         };
+
+        this.recordProjectileReplaySequence(
+          this.projectileNetworkEventSequence,
+          [{ name: "projectileLaunched", data: broadcastData }],
+        );
 
         // Broadcast to nearby clients so they see the projectile
         this.broadcast.sendToNearby(
@@ -765,6 +948,8 @@ export class EventBridge {
           broadcastData,
           data.sourcePosition.x,
           data.sourcePosition.z,
+          undefined,
+          PacketPriority.CRITICAL,
         );
       });
 
@@ -777,7 +962,9 @@ export class EventBridge {
         const target = this.world.entities?.get(data.targetId) as
           { position?: { x: number; y: number; z: number } } | undefined;
         const position = data.position ?? target?.position ?? null;
+        const networkEventId = this.nextProjectileNetworkEventId();
         const broadcastData = {
+          projectileId: data.projectileId,
           attackerId: data.attackerId,
           targetId: data.targetId,
           damage: data.damage,
@@ -786,8 +973,23 @@ export class EventBridge {
             ? { x: position.x, y: position.y, z: position.z }
             : null,
           tick: this.world.currentTick,
-          networkEventId: this.nextProjectileNetworkEventId(),
+          networkEventId,
         };
+        const replayEvents: Array<Omit<ProjectileReplayEvent, "sequence">> = [];
+        const pairedDamage = data.projectileId
+          ? this.recentProjectileDamageById.get(data.projectileId)
+          : undefined;
+        if (pairedDamage) {
+          replayEvents.push({ name: "combatDamageDealt", data: pairedDamage });
+        }
+        replayEvents.push({ name: "projectileHit", data: broadcastData });
+        this.recordProjectileReplaySequence(
+          this.projectileNetworkEventSequence,
+          replayEvents,
+        );
+        if (data.projectileId) {
+          this.recentProjectileDamageById.delete(data.projectileId);
+        }
 
         if (position) {
           this.broadcast.sendToNearby(
@@ -795,12 +997,59 @@ export class EventBridge {
             broadcastData,
             position.x,
             position.z,
+            undefined,
+            PacketPriority.CRITICAL,
           );
         } else {
           // A terminal hit can remove the target entity before this listener
           // runs. Full broadcast is rare and prevents a stuck projectile when
           // there is no remaining spatial anchor.
-          this.broadcast.sendToAll("projectileHit", broadcastData);
+          this.broadcast.sendToAll(
+            "projectileHit",
+            broadcastData,
+            undefined,
+            PacketPriority.CRITICAL,
+          );
+        }
+      });
+
+      // Every accepted launch has an authoritative terminal event. When
+      // combat teardown invalidates a queued hit, forward the exact projectile
+      // identity so clients remove only that visual instead of timing it out.
+      this.on(EventType.COMBAT_PROJECTILE_CANCELLED, (payload: unknown) => {
+        const data = payload as EventMap[EventType.COMBAT_PROJECTILE_CANCELLED];
+        const anchor = (this.world.entities?.get(data.targetId) ??
+          this.world.entities?.get(data.attackerId)) as
+          { position?: { x: number; y: number; z: number } } | undefined;
+        const networkEventId = this.nextProjectileNetworkEventId();
+        const broadcastData = {
+          ...data,
+          tick: this.world.currentTick,
+          networkEventId,
+        };
+
+        this.recordProjectileReplaySequence(
+          this.projectileNetworkEventSequence,
+          [{ name: "projectileCancelled", data: broadcastData }],
+        );
+        this.recentProjectileDamageById.delete(data.projectileId);
+
+        if (anchor?.position) {
+          this.broadcast.sendToNearby(
+            "projectileCancelled",
+            broadcastData,
+            anchor.position.x,
+            anchor.position.z,
+            undefined,
+            PacketPriority.CRITICAL,
+          );
+        } else {
+          this.broadcast.sendToAll(
+            "projectileCancelled",
+            broadcastData,
+            undefined,
+            PacketPriority.CRITICAL,
+          );
         }
       });
 
@@ -814,8 +1063,17 @@ export class EventBridge {
         // generic spectator topic rather than spectator:<playerId>, so routing
         // through sendToPlayerAndSpectators would leave the arena broadcast with
         // no target-facing information.
-        this.broadcast.sendToPlayer(data.playerId, "combatFaceTarget", data);
-        this.broadcast.sendToSpectators("combatFaceTarget", data);
+        this.broadcast.sendToPlayer(
+          data.playerId,
+          "combatFaceTarget",
+          data,
+          PacketPriority.CRITICAL,
+        );
+        this.broadcast.sendToSpectators(
+          "combatFaceTarget",
+          data,
+          PacketPriority.CRITICAL,
+        );
       });
 
       // Forward combat clear face target so clients stop rotating toward dead/disengaged targets
@@ -825,8 +1083,13 @@ export class EventBridge {
           data.playerId,
           "combatClearFaceTarget",
           data,
+          PacketPriority.CRITICAL,
         );
-        this.broadcast.sendToSpectators("combatClearFaceTarget", data);
+        this.broadcast.sendToSpectators(
+          "combatClearFaceTarget",
+          data,
+          PacketPriority.CRITICAL,
+        );
       });
 
       // Forward combat ended so clients/agents can clear inCombat flag
@@ -841,8 +1104,13 @@ export class EventBridge {
             data.attackerId,
             "combatEnded",
             combatEnded,
+            PacketPriority.CRITICAL,
           );
-          this.broadcast.sendToSpectators("combatEnded", combatEnded);
+          this.broadcast.sendToSpectators(
+            "combatEnded",
+            combatEnded,
+            PacketPriority.CRITICAL,
+          );
         }
       });
     } catch (_err) {
@@ -1585,12 +1853,64 @@ export class EventBridge {
     };
     const position = resourceEvent.position;
 
-    if (position) {
+    if (
+      position &&
+      Number.isFinite(position.x) &&
+      Number.isFinite(position.z)
+    ) {
       this.broadcast.sendToNearby(packetName, payload, position.x, position.z);
       return;
     }
 
     this.broadcast.sendToAll(packetName, payload);
+  }
+
+  private sendGatheringToolEvent(
+    packetName: "gatheringToolShow" | "gatheringToolHide",
+    payload: EventMap[
+      EventType.GATHERING_TOOL_SHOW | EventType.GATHERING_TOOL_HIDE],
+  ): void {
+    const entity = this.world.entities.get(payload.playerId) as
+      { position?: { x: number; z: number } } | undefined;
+    const position = entity?.position;
+
+    if (
+      position &&
+      Number.isFinite(position.x) &&
+      Number.isFinite(position.z)
+    ) {
+      this.broadcast.sendToNearby(packetName, payload, position.x, position.z);
+      return;
+    }
+
+    // Cleanup can run after the entity leaves the spatial index. Preserve the
+    // transition for its controlling client and the generic streaming client.
+    this.broadcast.sendToPlayer(payload.playerId, packetName, payload);
+    this.broadcast.sendToSpectators(packetName, payload);
+  }
+
+  private sendGatheringPresentationEvent(
+    packetName:
+      "fishingInteractionPresentation" | "processingInteractionPresentation",
+    payload: EventMap[
+      | EventType.FISHING_INTERACTION_PRESENTATION
+      | EventType.PROCESSING_INTERACTION_PRESENTATION],
+  ): void {
+    const entity = this.world.entities.get(payload.playerId) as
+      { position?: { x: number; z: number } } | undefined;
+    const position = entity?.position;
+
+    if (
+      position &&
+      Number.isFinite(position.x) &&
+      Number.isFinite(position.z)
+    ) {
+      this.broadcast.sendToNearby(packetName, payload, position.x, position.z);
+      return;
+    }
+
+    this.broadcast.sendToPlayer(payload.playerId, packetName, payload);
+    this.broadcast.sendToSpectators(packetName, payload);
   }
 
   /**

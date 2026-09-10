@@ -50,14 +50,19 @@ import path from "node:path";
 import { chromium, type Browser, type Page, type CDPSession } from "playwright";
 import {
   getRTMPBridge,
+  peekRTMPBridge,
   startRTMPBridge,
   generateCaptureScript,
   generateWebCodecsCaptureScript,
 } from "../src/streaming/index.js";
 import {
   applyCaptureFrameRateToUrl,
+  assertCaptureRenderProfileContract,
   buildDefaultCaptureLaunchArgs,
+  normalizeCaptureRenderProfileSnapshot,
   resolveAllowedCaptureOrigins,
+  resolveCaptureBrowserEndpoint,
+  resolveCaptureRenderProfileId,
   resolveCaptureUrlCandidates,
   resolveUnexpectedCaptureOrigin,
   shouldAcceptCaptureReadiness,
@@ -67,7 +72,20 @@ import { redactStreamingSecretsFromUrl } from "../src/streaming/redactStreamingU
 import {
   CaptureFramePacer,
   parseCaptureFrameRate,
+  resolveCaptureSourceFrameRate,
 } from "../src/streaming/capture-frame-pacer.js";
+import { CaptureFramePump } from "../src/streaming/capture-frame-pump.js";
+import {
+  normalizeCaptureSceneReadinessDiagnostics,
+  type CaptureSceneReadinessDiagnostics,
+} from "../src/streaming/capture-scene-readiness.js";
+import { observeRendererHealth } from "../src/streaming/capture-renderer-health-observation.js";
+import {
+  BROWSER_MASTER_AUDIO_CAPTURE_INSTALL_SOURCE,
+  BROWSER_MASTER_AUDIO_CAPTURE_STATUS_SOURCE,
+  BROWSER_MASTER_AUDIO_CAPTURE_STOP_SOURCE,
+  type BrowserMasterAudioCaptureInstallResult,
+} from "../src/streaming/browser-master-audio-capture-source.js";
 import {
   CaptureLifecycleTracker,
   type CaptureLifecycleSnapshot,
@@ -93,6 +111,12 @@ if (process.env.STREAM_EXIT_ON_ENCODER_CRASH == null) {
 }
 
 const TARGET_FPS = parseCaptureFrameRate(process.env.STREAM_FPS);
+const CAPTURE_SOURCE_FPS = resolveCaptureSourceFrameRate(
+  TARGET_FPS,
+  process.env.STREAM_CAPTURE_SOURCE_FPS,
+);
+const EXPECTED_CAPTURE_RENDER_PROFILE =
+  resolveCaptureRenderProfileId(CAPTURE_SOURCE_FPS);
 
 const GAME_URL_CANDIDATES_UNAUTHENTICATED = resolveCaptureUrlCandidates({
   primaryUrl: process.env.GAME_URL,
@@ -119,7 +143,9 @@ function withViewerAccessToken(rawUrl: string): string {
 const GAME_URL_CANDIDATES = Array.from(
   new Set(
     GAME_URL_CANDIDATES_UNAUTHENTICATED.map((candidate) =>
-      withViewerAccessToken(applyCaptureFrameRateToUrl(candidate, TARGET_FPS)),
+      withViewerAccessToken(
+        applyCaptureFrameRateToUrl(candidate, CAPTURE_SOURCE_FPS),
+      ),
     ),
   ),
 );
@@ -138,6 +164,9 @@ const CAPTURE_MODE = (process.env.STREAM_CAPTURE_MODE?.trim() || "cdp") as
 const STREAM_BROWSER_AUDIO_CAPTURE = !/^(0|false|no|off)$/i.test(
   process.env.STREAM_BROWSER_AUDIO_CAPTURE || "true",
 );
+const STREAM_BROWSER_AUDIO_REQUIRED = /^(1|true|yes|on)$/i.test(
+  process.env.STREAM_BROWSER_AUDIO_REQUIRED || "false",
+);
 const STREAM_CAPTURE_HEADLESS = process.env.STREAM_CAPTURE_HEADLESS === "true";
 const requestedCaptureChannel =
   process.env.STREAM_CAPTURE_CHANNEL?.trim() || "";
@@ -145,6 +174,9 @@ const STREAM_CAPTURE_CHANNEL =
   process.platform === "darwin" && requestedCaptureChannel === "chromium"
     ? "chrome"
     : requestedCaptureChannel;
+const STREAM_CAPTURE_BROWSER_ENDPOINT = resolveCaptureBrowserEndpoint(
+  process.env.STREAM_CAPTURE_BROWSER_ENDPOINT,
+);
 const ANGLE_BACKEND =
   process.env.STREAM_CAPTURE_ANGLE?.trim() ||
   (process.platform === "darwin" ? "metal" : "vulkan");
@@ -197,10 +229,24 @@ const VIEWPORT = {
   width: parseEvenDimension(process.env.STREAM_CAPTURE_WIDTH, 1280),
   height: parseEvenDimension(process.env.STREAM_CAPTURE_HEIGHT, 720),
 };
+const OUTPUT_VIEWPORT = {
+  width: parseEvenDimension(process.env.STREAM_OUTPUT_WIDTH, VIEWPORT.width),
+  height: parseEvenDimension(process.env.STREAM_OUTPUT_HEIGHT, VIEWPORT.height),
+};
+assertCaptureRenderProfileContract({
+  profileId: EXPECTED_CAPTURE_RENDER_PROFILE,
+  sourceFps: CAPTURE_SOURCE_FPS,
+  outputFps: TARGET_FPS,
+  viewportWidth: VIEWPORT.width,
+  viewportHeight: VIEWPORT.height,
+  outputWidth: OUTPUT_VIEWPORT.width,
+  outputHeight: OUTPUT_VIEWPORT.height,
+});
 
 let browser: Browser | null = null;
 let page: Page | null = null;
 let cdpSession: CDPSession | null = null;
+let browserExternallyOwned = false;
 let selectedGameUrl: string | null = null;
 let launchTime = Date.now();
 let browserAudioBridgeReady = false;
@@ -237,10 +283,8 @@ const CAPTURE_RECOVERY_MAX_FAILURES = Math.max(
 );
 const CDP_STARTUP_TIMEOUT_MS = Math.max(
   5_000,
-  Number.parseInt(
-    process.env.STREAM_CAPTURE_START_TIMEOUT_MS || "15_000",
-    10,
-  ) || 15_000,
+  Number.parseInt(process.env.STREAM_CAPTURE_START_TIMEOUT_MS || "15000", 10) ||
+    15_000,
 );
 
 // ── CDP Frame Rate Tracking ────────────────────────────────────────────────
@@ -249,6 +293,8 @@ let cdpFrameCount = 0;
 let cdpFps = 0;
 let cdpFpsIntervalId: ReturnType<typeof setInterval> | null = null;
 let cdpDroppedFrames = 0;
+let cdpFramePump: CaptureFramePump<Buffer> | null = null;
+let cdpFramePacer: CaptureFramePacer | null = null;
 
 function startFpsTracking() {
   if (cdpFpsIntervalId) clearInterval(cdpFpsIntervalId);
@@ -269,9 +315,17 @@ function stopFpsTracking() {
 
 type ActiveCaptureMode = "cdp" | "webcodecs" | "mediarecorder";
 
-type RendererHealthSnapshot = CaptureRendererHealthSnapshot & {
+type RendererHealthSnapshot = Omit<
+  CaptureRendererHealthSnapshot,
+  "diagnostics"
+> & {
   updatedAt: number | null;
   phase: string | null;
+  diagnostics:
+    | (NonNullable<CaptureRendererHealthSnapshot["diagnostics"]> & {
+        sceneReadiness: CaptureSceneReadinessDiagnostics | null;
+      })
+    | null;
   performance: StreamingPerformanceSnapshot | null;
 };
 
@@ -283,6 +337,11 @@ type BrowserAudioCaptureHealth = {
   channels: number | null;
   chunks: number;
   bytes: number;
+  contentChunks: number;
+  contentThreshold: number | null;
+  lastSamplePeak: number | null;
+  maxSamplePeak: number | null;
+  lastContentChunkAt: number | null;
   droppedChunks: number;
   pendingWrites: number;
   lastChunkAt: number | null;
@@ -295,6 +354,7 @@ let latestRendererHealth: RendererHealthSnapshot = {
   updatedAt: null,
   phase: null,
   diagnostics: null,
+  renderProfile: null,
   performance: null,
 };
 let rendererHealthProbeInFlight: Promise<RendererHealthSnapshot> | null = null;
@@ -384,6 +444,8 @@ function writeExternalStatusSnapshot(
   const processMemory = process.memoryUsage();
   const { performance: rendererPerformance, ...rendererHealth } =
     latestRendererHealth;
+  const framePumpStats =
+    captureMode === "cdp" ? (cdpFramePump?.getStats() ?? null) : null;
   const payload = {
     ...bridgeStatus,
     stats: {
@@ -413,6 +475,11 @@ function writeExternalStatusSnapshot(
       receivedFrames:
         captureMode === "cdp" ? bridge.getDirectFrameCount() : null,
       droppedFrames: captureMode === "cdp" ? cdpDroppedFrames : null,
+      sourceFrames: framePumpStats?.sourceFrames ?? null,
+      emittedFrames: framePumpStats?.emittedFrames ?? null,
+      repeatedFrames: framePumpStats?.repeatedFrames ?? null,
+      rejectedFrames: framePumpStats?.rejectedFrames ?? null,
+      skippedFrames: framePumpStats?.skippedFrames ?? null,
       acknowledgementPacing: captureMode === "cdp",
     },
     captureMode,
@@ -460,6 +527,11 @@ function normalizeBrowserAudioCaptureHealth(
     channels: finiteNumber(value.channels),
     chunks: nonNegativeInt(value.chunks),
     bytes: nonNegativeInt(value.bytes),
+    contentChunks: nonNegativeInt(value.contentChunks),
+    contentThreshold: finiteNumber(value.contentThreshold),
+    lastSamplePeak: finiteNumber(value.lastSamplePeak),
+    maxSamplePeak: finiteNumber(value.maxSamplePeak),
+    lastContentChunkAt: finiteNumber(value.lastContentChunkAt),
     droppedChunks: nonNegativeInt(value.droppedChunks),
     pendingWrites: nonNegativeInt(value.pendingWrites),
     lastChunkAt: finiteNumber(value.lastChunkAt),
@@ -475,16 +547,9 @@ async function refreshBrowserAudioCaptureHealth(
     return null;
   }
   try {
-    const value = await pageRef.evaluate(() => {
-      const control = (
-        window as unknown as {
-          __HYPERIA_BROWSER_AUDIO_CONTROL__?: {
-            getStatus: () => Record<string, unknown>;
-          };
-        }
-      ).__HYPERIA_BROWSER_AUDIO_CONTROL__;
-      return control?.getStatus?.() ?? null;
-    });
+    const value = await pageRef.evaluate(
+      BROWSER_MASTER_AUDIO_CAPTURE_STATUS_SOURCE,
+    );
     latestBrowserAudioCaptureHealth = normalizeBrowserAudioCaptureHealth(value);
   } catch (error) {
     if (!isTransientPageEvalError(error)) {
@@ -577,6 +642,8 @@ async function probeRendererHealth(
       } | null;
       __HYPERIA_STREAM_BOOT_STATUS__?: string | null;
       __HYPERIA_STREAM_PERFORMANCE__?: unknown;
+      __HYPERIA_STREAM_SCENE_READINESS__?: unknown;
+      __HYPERIA_STREAM_RENDER_PROFILE__?: unknown;
     };
     const explicitHealth =
       win.__HYPERIA_STREAM_RENDERER_HEALTH__ &&
@@ -622,6 +689,8 @@ async function probeRendererHealth(
       hasStreamingBootUi,
       hasCriticalErrorUi,
       performanceSnapshot: win.__HYPERIA_STREAM_PERFORMANCE__ ?? null,
+      sceneReadinessSnapshot: win.__HYPERIA_STREAM_SCENE_READINESS__ ?? null,
+      renderProfileSnapshot: win.__HYPERIA_STREAM_RENDER_PROFILE__ ?? null,
     };
   });
 
@@ -632,28 +701,32 @@ async function probeRendererHealth(
   const performanceSnapshot = normalizeStreamingPerformanceSnapshot(
     probe.performanceSnapshot,
   );
+  const sceneReadiness = normalizeCaptureSceneReadinessDiagnostics(
+    probe.sceneReadinessSnapshot,
+  );
+  const renderProfileCandidate = probe.renderProfileSnapshot;
+  const renderProfile = normalizeCaptureRenderProfileSnapshot(
+    renderProfileCandidate,
+  );
 
   if (explicitHealth) {
     const criticalUiVisible = probe.hasCriticalErrorUi === true;
+    const observedHealth = observeRendererHealth({
+      declared: explicitHealth,
+      probedAt,
+      criticalUiVisible,
+      criticalReason: normalizedCriticalErrorReason(probe),
+    });
     return {
-      ready: criticalUiVisible ? false : explicitHealth.ready === true,
-      degradedReason: criticalUiVisible
-        ? normalizedCriticalErrorReason(probe)
-        : typeof explicitHealth.degradedReason === "string"
-          ? explicitHealth.degradedReason
-          : null,
-      updatedAt:
-        typeof explicitHealth.updatedAt === "number"
-          ? explicitHealth.updatedAt
-          : probedAt,
-      phase:
-        typeof explicitHealth.phase === "string" ? explicitHealth.phase : null,
+      ...observedHealth,
       diagnostics: {
         hasCanvas: probe.hasCanvas === true,
         hasStreamingBootUi: probe.hasStreamingBootUi === true,
         hasCriticalErrorUi: criticalUiVisible,
         readyFlag: probe.readyFlag === true,
+        sceneReadiness,
       },
+      renderProfile,
       performance: performanceSnapshot,
     };
   }
@@ -680,7 +753,9 @@ async function probeRendererHealth(
       hasStreamingBootUi: probe.hasStreamingBootUi === true,
       hasCriticalErrorUi: probe.hasCriticalErrorUi === true,
       readyFlag: probe.readyFlag === true,
+      sceneReadiness,
     },
+    renderProfile,
     performance: performanceSnapshot,
   };
 }
@@ -737,6 +812,7 @@ async function refreshRendererHealthSnapshot(
       updatedAt: Date.now(),
       phase: null,
       diagnostics: null,
+      renderProfile: null,
       performance: null,
     };
     return latestRendererHealth;
@@ -756,6 +832,7 @@ async function refreshRendererHealthSnapshot(
         updatedAt: Date.now(),
         phase: null,
         diagnostics: null,
+        renderProfile: null,
         performance: null,
       };
     }
@@ -782,6 +859,7 @@ async function waitForStreamReadiness(
           snapshot: probe,
           startedAt,
           nowMs: Date.now(),
+          expectedRenderProfileId: EXPECTED_CAPTURE_RENDER_PROFILE,
         })
       ) {
         return true;
@@ -866,61 +944,111 @@ async function setupBrowser() {
   if (browser) await cleanup();
 
   transitionCaptureLifecycle("browser_launching");
-  console.log(
-    `[Main] Launching browser (headless=${STREAM_CAPTURE_HEADLESS}, angle=${ANGLE_BACKEND}${STREAM_CAPTURE_CHANNEL ? `, channel=${STREAM_CAPTURE_CHANNEL}` : ""}, mode=${CAPTURE_MODE})...`,
-  );
-  browser = await launchCaptureBrowser();
+  if (STREAM_CAPTURE_BROWSER_ENDPOINT) {
+    console.log(
+      `[Main] Attaching to supervised warm capture renderer at ${STREAM_CAPTURE_BROWSER_ENDPOINT} (mode=${CAPTURE_MODE})...`,
+    );
+    browser = await chromium.connectOverCDP(STREAM_CAPTURE_BROWSER_ENDPOINT);
+    browserExternallyOwned = true;
+    const configuredPaths = new Set(
+      GAME_URL_CANDIDATES.map((candidate) => new URL(candidate).pathname),
+    );
+    const matchingPages = browser
+      .contexts()
+      .flatMap((context) => context.pages())
+      .filter((candidatePage) => {
+        if (candidatePage.isClosed()) return false;
+        try {
+          const url = new URL(candidatePage.url());
+          return (
+            resolveUnexpectedCaptureOrigin(
+              candidatePage.url(),
+              ALLOWED_CAPTURE_ORIGINS,
+            ) === null && configuredPaths.has(url.pathname)
+          );
+        } catch {
+          return false;
+        }
+      });
+    if (matchingPages.length !== 1) {
+      throw new Error(
+        `Supervised capture browser must expose exactly one configured game page; found ${matchingPages.length}`,
+      );
+    }
+    page = matchingPages[0]!;
+    const attachedViewport = await page.evaluate(() => ({
+      devicePixelRatio: window.devicePixelRatio,
+      height: window.innerHeight,
+      width: window.innerWidth,
+    }));
+    if (
+      attachedViewport.width !== VIEWPORT.width ||
+      attachedViewport.height !== VIEWPORT.height ||
+      attachedViewport.devicePixelRatio !== 1
+    ) {
+      throw new Error(
+        `Supervised capture viewport ${attachedViewport.width}x${attachedViewport.height}@${attachedViewport.devicePixelRatio} does not match ${VIEWPORT.width}x${VIEWPORT.height}@1`,
+      );
+    }
+    assertAllowedCaptureNavigation(page.url());
+  } else {
+    console.log(
+      `[Main] Launching browser (headless=${STREAM_CAPTURE_HEADLESS}, angle=${ANGLE_BACKEND}${STREAM_CAPTURE_CHANNEL ? `, channel=${STREAM_CAPTURE_CHANNEL}` : ""}, mode=${CAPTURE_MODE})...`,
+    );
+    browserExternallyOwned = false;
+    browser = await launchCaptureBrowser();
 
-  const context = await browser.newContext({
-    viewport: VIEWPORT,
-    deviceScaleFactor: 1,
-  });
-  page = await context.newPage();
+    const context = await browser.newContext({
+      viewport: VIEWPORT,
+      deviceScaleFactor: 1,
+    });
+    page = await context.newPage();
 
-  // Keep compositor frames flowing for CDP screencast even when the scene is
-  // visually static (e.g. waiting overlays), otherwise some Chromium builds
-  // emit sparse frames and stall downstream HLS/RTMP cadence.
-  await page.addInitScript(() => {
-    const win = window as unknown as {
-      __HYPERIA_REPAINT_TICKER__?: boolean;
-    };
-    if (win.__HYPERIA_REPAINT_TICKER__) return;
-    win.__HYPERIA_REPAINT_TICKER__ = true;
+    // Keep compositor frames flowing for CDP screencast even when the scene is
+    // visually static (e.g. waiting overlays), otherwise some Chromium builds
+    // emit sparse frames and stall downstream HLS/RTMP cadence.
+    await page.addInitScript(() => {
+      const win = window as unknown as {
+        __HYPERIA_REPAINT_TICKER__?: boolean;
+      };
+      if (win.__HYPERIA_REPAINT_TICKER__) return;
+      win.__HYPERIA_REPAINT_TICKER__ = true;
 
-    const ticker = document.createElement("div");
-    ticker.id = "__hyperia-repaint-ticker";
-    ticker.style.position = "fixed";
-    ticker.style.right = "0";
-    ticker.style.bottom = "0";
-    ticker.style.width = "2px";
-    ticker.style.height = "2px";
-    ticker.style.opacity = "0.015";
-    ticker.style.backgroundColor = "#000000";
-    ticker.style.mixBlendMode = "difference";
-    ticker.style.zIndex = "2147483647";
-    ticker.style.pointerEvents = "none";
-    ticker.style.willChange = "transform,opacity,background-color";
+      const ticker = document.createElement("div");
+      ticker.id = "__hyperia-repaint-ticker";
+      ticker.style.position = "fixed";
+      ticker.style.right = "0";
+      ticker.style.bottom = "0";
+      ticker.style.width = "2px";
+      ticker.style.height = "2px";
+      ticker.style.opacity = "0.015";
+      ticker.style.backgroundColor = "#000000";
+      ticker.style.mixBlendMode = "difference";
+      ticker.style.zIndex = "2147483647";
+      ticker.style.pointerEvents = "none";
+      ticker.style.willChange = "transform,opacity,background-color";
 
-    const attach = () => {
-      const root = document.body || document.documentElement;
-      if (root && !root.contains(ticker)) {
-        root.appendChild(ticker);
-      }
-    };
+      const attach = () => {
+        const root = document.body || document.documentElement;
+        if (root && !root.contains(ticker)) {
+          root.appendChild(ticker);
+        }
+      };
 
-    attach();
-    let phase = 0;
-    const tick = () => {
-      phase = (phase + 1) & 3;
-      ticker.style.transform =
-        phase & 1 ? "translate3d(0.5px,0.5px,0)" : "translate3d(0,0,0)";
-      ticker.style.backgroundColor = phase >= 2 ? "#010101" : "#000000";
-      ticker.style.opacity = phase & 1 ? "0.02" : "0.015";
+      attach();
+      let phase = 0;
+      const tick = () => {
+        phase = (phase + 1) & 3;
+        ticker.style.transform =
+          phase & 1 ? "translate3d(0.5px,0.5px,0)" : "translate3d(0,0,0)";
+        ticker.style.backgroundColor = phase >= 2 ? "#010101" : "#000000";
+        ticker.style.opacity = phase & 1 ? "0.02" : "0.015";
+        requestAnimationFrame(tick);
+      };
       requestAnimationFrame(tick);
-    };
-    requestAnimationFrame(tick);
-    window.addEventListener("DOMContentLoaded", attach, { once: true });
-  });
+      window.addEventListener("DOMContentLoaded", attach, { once: true });
+    });
+  }
 
   page.on("console", (msg) => {
     const type = msg.type();
@@ -950,7 +1078,18 @@ async function setupBrowser() {
     void abortCaptureForUnexpectedNavigation(navigatedUrl);
   });
 
-  if (!selectedGameUrl) {
+  if (browserExternallyOwned) {
+    transitionCaptureLifecycle("renderer_waiting");
+    if (!(await waitForStreamReadiness(page, 30_000))) {
+      throw new Error(
+        "Supervised capture browser lost strict renderer readiness before encoder attachment",
+      );
+    }
+    transitionCaptureLifecycle("renderer_ready");
+    selectedGameUrl = page.url();
+  }
+
+  if (!browserExternallyOwned && !selectedGameUrl) {
     for (const candidateUrl of GAME_URL_CANDIDATES) {
       const redactedCandidateUrl = redactStreamingSecretsFromUrl(candidateUrl);
       console.log(`[Main] Navigating to ${redactedCandidateUrl}...`);
@@ -991,7 +1130,7 @@ async function setupBrowser() {
         `[Main] Stream readiness not detected on ${redactedCandidateUrl}, trying fallback...`,
       );
     }
-  } else {
+  } else if (!browserExternallyOwned) {
     transitionCaptureLifecycle("page_loading");
     try {
       await page.goto(selectedGameUrl, {
@@ -1042,15 +1181,7 @@ async function stopBrowserAudioCapture(): Promise<void> {
   latestBrowserAudioCaptureHealth = null;
   if (!page || page.isClosed()) return;
   try {
-    await page.evaluate(async () => {
-      const win = window as unknown as {
-        __HYPERIA_BROWSER_AUDIO_CONTROL__?: {
-          stop: () => Promise<void> | void;
-        };
-      };
-      await win.__HYPERIA_BROWSER_AUDIO_CONTROL__?.stop?.();
-      delete win.__HYPERIA_BROWSER_AUDIO_CONTROL__;
-    });
+    await page.evaluate(BROWSER_MASTER_AUDIO_CAPTURE_STOP_SOURCE);
   } catch (err) {
     if (!isTransientPageEvalError(err)) {
       console.warn("[AudioCapture] Failed to stop browser audio:", errMsg(err));
@@ -1078,7 +1209,10 @@ async function startBrowserAudioCapture(
           if (
             pendingBrowserAudioPcm.length >= MAX_PENDING_BROWSER_AUDIO_CHUNKS
           ) {
-            return false;
+            // Keep the most recent preflight audio. Music starts after world
+            // initialization, so retaining only the oldest continuity frames
+            // would discard the real soundtrack before FFmpeg is connected.
+            pendingBrowserAudioPcm.shift();
           }
           pendingBrowserAudioPcm.push(pcm);
           return true;
@@ -1089,204 +1223,9 @@ async function startBrowserAudioCapture(
     browserAudioBindingPage = page;
   }
 
-  const result = await page.evaluate(async () => {
-    const win = window as unknown as {
-      __HYPERIA_STREAM_AUDIO_CAPTURE__?: {
-        getStream: () => MediaStream;
-        getContextState: () => AudioContextState;
-        getSampleRate: () => number;
-        resume: () => Promise<void>;
-      };
-      __HYPERIA_WRITE_AUDIO_PCM__?: (encodedPcm: string) => Promise<boolean>;
-      __HYPERIA_BROWSER_AUDIO_CONTROL__?: {
-        stop: () => Promise<void> | void;
-        getStatus: () => Record<string, unknown>;
-      };
-    };
-    const capture = win.__HYPERIA_STREAM_AUDIO_CAPTURE__;
-    const pushPcm = win.__HYPERIA_WRITE_AUDIO_PCM__;
-    if (!capture || typeof pushPcm !== "function") {
-      return { ready: false, reason: "master_mix_unavailable" };
-    }
-
-    if (capture.getContextState() === "suspended") {
-      await capture.resume().catch(() => undefined);
-    }
-    if (capture.getContextState() !== "running") {
-      return {
-        ready: false,
-        reason: `audio_context_${capture.getContextState()}`,
-      };
-    }
-
-    const stream = capture.getStream();
-    const track = stream.getAudioTracks()[0];
-    if (!track || track.readyState !== "live") {
-      return { ready: false, reason: "master_mix_track_unavailable" };
-    }
-
-    const context = new AudioContext({ sampleRate: capture.getSampleRate() });
-    if (context.state === "suspended") {
-      await context.resume().catch(() => undefined);
-    }
-    if (context.state !== "running") {
-      await context.close().catch(() => undefined);
-      return { ready: false, reason: `capture_context_${context.state}` };
-    }
-
-    // Keep each stereo Float32 packet (8 KiB) below Node's 16 KiB child-pipe
-    // high-water mark. Larger packets report backpressure on every write on
-    // macOS and can stall a replacement encoder during input probing.
-    const bufferFrames = 1024;
-    const processorSource = `
-      class HyperiaMasterMixCaptureProcessor extends AudioWorkletProcessor {
-        constructor(options) {
-          super();
-          this.bufferFrames = options.processorOptions.bufferFrames;
-          this.left = new Float32Array(this.bufferFrames);
-          this.right = new Float32Array(this.bufferFrames);
-          this.offset = 0;
-        }
-        process(inputs) {
-          const input = inputs[0];
-          const left = input && input[0];
-          if (!left || left.length === 0) return true;
-          const right = input[1] || left;
-          let cursor = 0;
-          while (cursor < left.length) {
-            const count = Math.min(left.length - cursor, this.bufferFrames - this.offset);
-            this.left.set(left.subarray(cursor, cursor + count), this.offset);
-            this.right.set(right.subarray(cursor, cursor + count), this.offset);
-            this.offset += count;
-            cursor += count;
-            if (this.offset === this.bufferFrames) {
-              const interleaved = new Float32Array(this.bufferFrames * 2);
-              for (let frame = 0; frame < this.bufferFrames; frame += 1) {
-                interleaved[frame * 2] = this.left[frame];
-                interleaved[frame * 2 + 1] = this.right[frame];
-              }
-              this.port.postMessage(interleaved.buffer, [interleaved.buffer]);
-              this.left = new Float32Array(this.bufferFrames);
-              this.right = new Float32Array(this.bufferFrames);
-              this.offset = 0;
-            }
-          }
-          return true;
-        }
-      }
-      registerProcessor("hyperia-master-mix-capture", HyperiaMasterMixCaptureProcessor);
-    `;
-    const moduleUrl = URL.createObjectURL(
-      new Blob([processorSource], { type: "text/javascript" }),
-    );
-
-    try {
-      await context.audioWorklet.addModule(moduleUrl);
-    } catch (error) {
-      URL.revokeObjectURL(moduleUrl);
-      await context.close().catch(() => undefined);
-      return {
-        ready: false,
-        reason: `audio_worklet_unavailable:${error instanceof Error ? error.message : String(error)}`,
-      };
-    }
-
-    const source = context.createMediaStreamSource(stream);
-    const processor = new AudioWorkletNode(
-      context,
-      "hyperia-master-mix-capture",
-      {
-        numberOfInputs: 1,
-        numberOfOutputs: 1,
-        outputChannelCount: [2],
-        channelCount: 2,
-        channelCountMode: "explicit",
-        processorOptions: { bufferFrames },
-      },
-    );
-    const silentOutput = context.createGain();
-    silentOutput.gain.value = 0;
-    source.connect(processor);
-    processor.connect(silentOutput);
-    silentOutput.connect(context.destination);
-
-    let stopped = false;
-    let chunks = 0;
-    let bytes = 0;
-    let droppedChunks = 0;
-    let pendingWrites = 0;
-    let lastChunkAt: number | null = null;
-    let sendChain = Promise.resolve();
-
-    processor.port.onmessage = (event: MessageEvent<ArrayBuffer>) => {
-      if (stopped || !(event.data instanceof ArrayBuffer)) return;
-      if (pendingWrites >= 64) {
-        droppedChunks += 1;
-        return;
-      }
-      const pcm = new Uint8Array(event.data);
-      let binary = "";
-      const blockSize = 0x8000;
-      for (let offset = 0; offset < pcm.length; offset += blockSize) {
-        binary += String.fromCharCode(
-          ...pcm.subarray(offset, offset + blockSize),
-        );
-      }
-      const encoded = btoa(binary);
-      pendingWrites += 1;
-      sendChain = sendChain
-        .then(async () => {
-          if (stopped) return;
-          const accepted = await pushPcm(encoded);
-          if (accepted) {
-            chunks += 1;
-            bytes += pcm.byteLength;
-            lastChunkAt = Date.now();
-          } else {
-            droppedChunks += 1;
-          }
-        })
-        .catch(() => {
-          droppedChunks += 1;
-        })
-        .finally(() => {
-          pendingWrites -= 1;
-        });
-    };
-
-    win.__HYPERIA_BROWSER_AUDIO_CONTROL__ = {
-      getStatus: () => ({
-        contextState: context.state,
-        sourceContextState: capture.getContextState(),
-        trackState: track.readyState,
-        sampleRate: context.sampleRate,
-        channels: 2,
-        chunks,
-        bytes,
-        droppedChunks,
-        pendingWrites,
-        lastChunkAt,
-      }),
-      stop: async () => {
-        if (stopped) return;
-        stopped = true;
-        processor.port.onmessage = null;
-        processor.port.close();
-        source.disconnect();
-        processor.disconnect();
-        silentOutput.disconnect();
-        track.stop();
-        URL.revokeObjectURL(moduleUrl);
-        await context.close().catch(() => undefined);
-      },
-    };
-
-    return {
-      ready: true,
-      sampleRate: context.sampleRate,
-      channels: 2 as const,
-    };
-  });
+  const result = (await page.evaluate(
+    BROWSER_MASTER_AUDIO_CAPTURE_INSTALL_SOURCE,
+  )) as BrowserMasterAudioCaptureInstallResult;
 
   if (!result.ready || !result.sampleRate) {
     console.warn(
@@ -1301,18 +1240,23 @@ async function startBrowserAudioCapture(
   );
 
   const startupDeadline = Date.now() + BROWSER_AUDIO_STARTUP_TIMEOUT_MS;
+  let contentReady = false;
   while (
-    pendingBrowserAudioPcm.length === 0 &&
+    (pendingBrowserAudioPcm.length === 0 || !contentReady) &&
     Date.now() < startupDeadline &&
     page &&
     !page.isClosed()
   ) {
     await new Promise((resolve) => setTimeout(resolve, 50));
+    const health = await refreshBrowserAudioCaptureHealth(page);
+    contentReady =
+      (health?.contentChunks ?? 0) > 0 &&
+      (health?.maxSamplePeak ?? 0) >= (health?.contentThreshold ?? 1);
   }
   await refreshBrowserAudioCaptureHealth(page);
-  if (pendingBrowserAudioPcm.length === 0) {
+  if (pendingBrowserAudioPcm.length === 0 || !contentReady) {
     console.warn(
-      `[AudioCapture] Browser master mix emitted no PCM within ${BROWSER_AUDIO_STARTUP_TIMEOUT_MS}ms; capture status=${JSON.stringify(latestBrowserAudioCaptureHealth)}`,
+      `[AudioCapture] Browser master mix emitted no content-bearing PCM within ${BROWSER_AUDIO_STARTUP_TIMEOUT_MS}ms; capture status=${JSON.stringify(latestBrowserAudioCaptureHealth)}`,
     );
     await stopBrowserAudioCapture();
     return null;
@@ -1358,7 +1302,8 @@ async function startCdpCapture(bridge: ReturnType<typeof getRTMPBridge>) {
   if (!page) throw new Error("No page available for CDP capture");
 
   // Create CDP session
-  cdpSession = await page.context().newCDPSession(page);
+  const captureSession = await page.context().newCDPSession(page);
+  cdpSession = captureSession;
 
   console.log(
     `[CDP] Starting screencast capture (quality=${CDP_QUALITY}, fps=${TARGET_FPS}, ${VIEWPORT.width}x${VIEWPORT.height})...`,
@@ -1376,6 +1321,11 @@ async function startCdpCapture(bridge: ReturnType<typeof getRTMPBridge>) {
       return null;
     },
   );
+  if (STREAM_BROWSER_AUDIO_REQUIRED && !browserAudioInput) {
+    throw new Error(
+      "Required browser game-master audio did not pass PCM preflight",
+    );
+  }
 
   // Start FFmpeg in direct mode (JPEG video on stdin, optional PCM on fd 3).
   bridge.startFFmpegDirect({ browserAudioInput });
@@ -1386,62 +1336,81 @@ async function startCdpCapture(bridge: ReturnType<typeof getRTMPBridge>) {
   pendingBrowserAudioPcm = [];
 
   startFpsTracking();
-  const framePacer = new CaptureFramePacer(TARGET_FPS);
-
-  // Handle incoming frames from CDP
-  cdpSession.on("Page.screencastFrame", async (params) => {
-    const { sessionId, data: base64Data } = params;
-
-    // Chrome produces the next JPEG as soon as this frame is acknowledged.
-    // Pace acknowledgements so a 120 Hz compositor does not encode and pipe
-    // four times the 30 FPS that FFmpeg and the broadcast actually consume.
-    const pacingDelayMs = framePacer.getDelayMs(performance.now());
-    if (pacingDelayMs > 0) {
-      await new Promise((resolve) => setTimeout(resolve, pacingDelayMs));
-    }
-
-    // Decode base64 JPEG and feed to FFmpeg
-    const jpegBuffer = Buffer.from(base64Data, "base64");
-    const written = await bridge.feedFrame(jpegBuffer);
-
+  const framePacer = new CaptureFramePacer(CAPTURE_SOURCE_FPS);
+  const framePump = new CaptureFramePump<Buffer>(TARGET_FPS, async (frame) => {
+    const written = await bridge.feedFrame(frame);
     if (written) {
       cdpFrameCount++;
     } else {
       cdpDroppedFrames++;
     }
+    return written;
+  });
+  cdpFramePacer = framePacer;
+  cdpFramePump = framePump;
 
-    framePacer.markFrameAcknowledged(performance.now());
-    try {
-      await cdpSession?.send("Page.screencastFrameAck", { sessionId });
-    } catch {
-      // Session may have been destroyed during page navigation
-    }
+  // Handle incoming frames from CDP
+  captureSession.on("Page.screencastFrame", (params) => {
+    const { sessionId, data: base64Data } = params;
+    void framePacer
+      .runPaced(async () => {
+        // Decode the complete JPEG and publish it to the real-time output
+        // pump. Chromium may dispatch multiple async listener callbacks before
+        // the first acknowledgement completes, so pacing owns serialization as
+        // well as the delay between acknowledgements.
+        const jpegBuffer = Buffer.from(base64Data, "base64");
+        framePump.pushFrame(jpegBuffer);
+        await captureSession.send("Page.screencastFrameAck", { sessionId });
+      })
+      .catch(() => {
+        // Session may have been destroyed during page navigation.
+      });
   });
 
   // Start the screencast
-  await cdpSession.send("Page.startScreencast", {
+  await captureSession.send("Page.startScreencast", {
     format: "jpeg",
     quality: CDP_QUALITY,
     maxWidth: VIEWPORT.width,
     maxHeight: VIEWPORT.height,
     everyNthFrame: 1, // Capture every frame
   });
+  // Source and output commonly run at the same nominal cadence. Starting the
+  // output clock halfway between source deliveries prevents timer jitter from
+  // repeatedly selecting the previous JPEG and collapsing apparent motion to
+  // half-rate, while adding less than one frame of video latency.
+  framePump.start(1000 / (TARGET_FPS * 2));
 
-  console.log("[CDP] ✅ Screencast capture started — frames piping to FFmpeg");
+  console.log(
+    `[CDP] ✅ Screencast capture started — ${CAPTURE_SOURCE_FPS} FPS source feeding ${TARGET_FPS} FPS output pump`,
+  );
 }
 
 async function stopCdpCapture() {
-  stopFpsTracking();
-  await stopBrowserAudioCapture();
-
-  if (cdpSession) {
+  const captureSession = cdpSession;
+  cdpSession = null;
+  if (captureSession) {
     try {
-      await cdpSession.send("Page.stopScreencast");
-      await cdpSession.detach();
+      await captureSession.send("Page.stopScreencast");
+    } catch {
+      // Session may already be closed.
+    }
+  }
+  const framePacer = cdpFramePacer;
+  cdpFramePacer = null;
+  await framePacer?.drain();
+  await stopBrowserAudioCapture();
+  const framePump = cdpFramePump;
+  cdpFramePump = null;
+  await framePump?.stop();
+  stopFpsTracking();
+
+  if (captureSession) {
+    try {
+      await captureSession.detach();
     } catch {
       // Session may already be closed
     }
-    cdpSession = null;
   }
 }
 
@@ -1452,6 +1421,7 @@ async function startLegacyCapture(bridge: ReturnType<typeof getRTMPBridge>) {
 
   // Start WebSocket bridge for MediaRecorder chunks
   bridge.start(BRIDGE_PORT);
+  await bridge.waitForServerReady();
 
   const streamPageMayAlreadyCapture =
     !REQUIRE_IN_PAGE_READY_PROBE && selectedGameUrl?.includes("?page=stream");
@@ -1536,6 +1506,7 @@ async function startWebCodecsCapture(bridge: ReturnType<typeof getRTMPBridge>) {
 
   // Start WebSocket bridge for WebCodecs NAL chunks (stream copy)
   bridge.startWebCodecs(BRIDGE_PORT);
+  await bridge.waitForServerReady();
 
   const captureScript = generateWebCodecsCaptureScript({
     bridgeUrl: BRIDGE_URL,
@@ -1727,6 +1698,7 @@ async function main() {
         "CDP screencast startup",
       );
     } catch (err) {
+      if (STREAM_BROWSER_AUDIO_REQUIRED) throw err;
       console.warn(
         `[Main] CDP startup failed; falling back to MediaRecorder injection: ${errMsg(err)}`,
       );
@@ -1885,7 +1857,11 @@ async function main() {
           await withTimeout(
             (async () => {
               await stopCdpCapture();
-              await setupBrowser();
+              if (browserExternallyOwned && page && !page.isClosed()) {
+                bridge.stopProcessing();
+              } else {
+                await setupBrowser();
+              }
               await startCdpCapture(bridge);
             })(),
             CAPTURE_RECOVERY_TIMEOUT_MS,
@@ -1964,6 +1940,15 @@ async function main() {
 
     // Check for periodic restart to clear memory leaks
     if (Date.now() - launchTime > BROWSER_RESTART_INTERVAL_MS) {
+      if (browserExternallyOwned) {
+        // The separately supervised renderer owns browser lifetime. Reloading
+        // it here would replace a warm scene with a public black/loading gap.
+        launchTime = Date.now();
+        console.log(
+          "[Main] Supervised capture host retained; encoder rotation does not reload the warm renderer.",
+        );
+        return;
+      }
       // Guard: skip rotation if a CDP recovery is already in flight.
       if (cdpRecoveryInFlight) {
         console.warn(
@@ -2045,13 +2030,16 @@ async function cleanup() {
     }
   }
 
-  const bridge = getRTMPBridge();
-  bridge.stopProcessing();
+  peekRTMPBridge()?.stopProcessing();
 
   if (browser) {
-    await browser.close();
+    if (!browserExternallyOwned) {
+      await browser.close();
+    }
     browser = null;
   }
+  page = null;
+  browserExternallyOwned = false;
   browserAudioBindingPage = null;
 
   clearExternalStatusSnapshot();

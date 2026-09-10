@@ -2,7 +2,7 @@ import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 
-import { ITEMS } from "@hyperforge/shared";
+import { EntityOccupancyMap, ITEMS } from "@hyperforge/shared";
 import { migrate } from "drizzle-orm/node-postgres/migrator";
 import pg from "pg";
 
@@ -18,6 +18,16 @@ import {
   getOrdinaryBankStageOperationId,
   resolveOrdinaryBankingRecovery,
 } from "../src/eliza/ordinaryAgentBanking.js";
+import { AgentBehaviorBridge } from "../src/eliza/managers/AgentBehaviorBridge.js";
+import { TileMovementManager } from "../src/systems/ServerNetwork/tile-movement.js";
+import {
+  initializeItems,
+  processAgentTicks,
+} from "../src/eliza/worker/AgentBehaviorEngine.js";
+import type {
+  AgentTickInput,
+  AgentTickOutput,
+} from "../src/eliza/worker/workerTypes.js";
 
 const ATTEMPT_ID = "6de83f0c-52dd-4496-b234-d679a76152ad";
 const WITHDRAW_ATTEMPT_ID = "e2e81860-e084-4a56-a9df-d3bd368593a4";
@@ -26,6 +36,9 @@ const CHARACTER_ID = "ordinary-bank-process-kill-agent";
 const ACCOUNT_ID = "ordinary-bank-process-kill-account";
 const TOOL_ID = "ordinary_bank_process_tool";
 const RESOURCE_ID = "ordinary_bank_process_resource";
+const FOOD_ID = "ordinary_bank_process_food";
+const FILLER_ID = "ordinary_bank_process_filler";
+const RESOURCE_VARIANT_ID = "ordinary_bank_process_node";
 const COMPOSITE_ITEM_A = "ordinary_bank_process_composite_a";
 const COMPOSITE_ITEM_B = "ordinary_bank_process_composite_b";
 
@@ -57,6 +70,19 @@ function registerItems(): void {
     type: "resource",
     stackable: true,
   } as never);
+  ITEMS.set(FOOD_ID, {
+    id: FOOD_ID,
+    name: "Process Food",
+    type: "consumable",
+    healAmount: 40,
+    stackable: false,
+  } as never);
+  ITEMS.set(FILLER_ID, {
+    id: FILLER_ID,
+    name: "Process Filler",
+    type: "resource",
+    stackable: false,
+  } as never);
   ITEMS.set(COMPOSITE_ITEM_A, {
     id: COMPOSITE_ITEM_A,
     name: "Process Composite A",
@@ -71,11 +97,167 @@ function registerItems(): void {
   } as never);
 }
 
+function fullQuestInventoryItems() {
+  return [
+    { slot: 0, itemId: TOOL_ID, quantity: 1 },
+    { slot: 1, itemId: RESOURCE_ID, quantity: 7 },
+    { slot: 2, itemId: FOOD_ID, quantity: 1 },
+    ...Array.from({ length: 21 }, (_, index) => ({
+      slot: index + 3,
+      itemId: FILLER_ID,
+      quantity: 1,
+    })),
+  ];
+}
+
+function fullInventoryQuestState() {
+  return [
+    {
+      questId: "full-inventory-gather",
+      name: "Full inventory gather",
+      status: "in_progress" as const,
+      currentStage: "gather",
+      stageDescription: "Gather another resource",
+      stageProgress: {},
+      stageType: "gather",
+      stageTarget: RESOURCE_ID,
+      stageCount: 1,
+      startNpc: "miner",
+    },
+  ];
+}
+
+function proveFullQuestInventoryRoutesThroughBank(): {
+  travelling: AgentTickOutput;
+  arrived: AgentTickOutput;
+} {
+  initializeItems(
+    [TOOL_ID, RESOURCE_ID, FOOD_ID, FILLER_ID].map((itemId) => [
+      itemId,
+      ITEMS.get(itemId)!,
+    ]),
+    {
+      stores: [],
+      gathering: [
+        {
+          resourceId: RESOURCE_VARIANT_ID,
+          harvestSkill: "mining",
+          toolRequired: TOOL_ID,
+          levelRequired: 1,
+          outputItemIds: [RESOURCE_ID],
+        },
+      ],
+      firemaking: [],
+      crafting: [],
+      tanning: [],
+      fletching: [],
+      runecrafting: [],
+    },
+  );
+  const inventoryItems = fullQuestInventoryItems();
+  const input = {
+    characterId: CHARACTER_ID,
+    combatSpecialization: "melee",
+    behaviorEpoch: 0,
+    playerId: CHARACTER_ID,
+    name: "Ordinary Bank Process Kill Agent",
+    gameState: {
+      playerId: CHARACTER_ID,
+      position: [0.5, 0, 0.5],
+      health: 40,
+      maxHealth: 40,
+      alive: true,
+      skills: { mining: { level: 1, xp: 0 } },
+      inventory: [],
+      equipment: {},
+      nearbyEntities: [
+        {
+          id: "blocked-resource",
+          name: "Blocked resource",
+          type: "resource",
+          resourceId: RESOURCE_VARIANT_ID,
+          resourceType: "mining_rock",
+          position: [2, 0, 0],
+          distance: 2,
+        },
+      ],
+      inCombat: false,
+      currentTarget: null,
+      selectedSpell: null,
+      activePrayers: [],
+    },
+    inventoryItems,
+    equippedItems: { weapon: TOOL_ID },
+    questState: fullInventoryQuestState(),
+    availableQuests: [],
+    storeRetryAfter: 0,
+    coinRecoveryAuthorized: false,
+    attackObservationRetryAfter: 0,
+    bankStageRetryAfter: 0,
+    questEntryAcquisitionQuestId: null,
+    ordinaryProcessingAcquisitionAuthorized: false,
+    survivalFoodAcquisitionAuthorized: false,
+    ordinaryProcessingRetrySuppressions: [],
+    agentState: {
+      goal: null,
+      questsAccepted: [],
+      currentTargetId: null,
+      lastAteAt: 0,
+      dropCooldownUntil: 0,
+      lastGatherTargetId: null,
+      lastGatherQueuedAt: 0,
+      pendingChatReaction: null,
+      lastCombatChatAt: 0,
+    },
+    npcPositions: [],
+    otherAgentTargets: [],
+    resourceSystemAvailable: true,
+    spawnAnchors: [{ position: [0, 0, 0], name: "spawn" }],
+    worldResources: [],
+    worldMobs: [],
+    stationPositions: [
+      {
+        entityId: "bank-1",
+        name: "Process bank",
+        stationType: "bank",
+        position: [12, 0, 8],
+        interactionRange: 2,
+      },
+    ],
+    storePositions: [],
+  } satisfies AgentTickInput;
+  const travellingResult = processAgentTicks([input])[0];
+  const travelling = travellingResult?.action;
+  if (
+    travelling?.type !== "move" ||
+    travelling.runMode !== true ||
+    travelling.target[0] !== 11.5 ||
+    travelling.target[2] !== 8.5 ||
+    travelling.target[0] === input.gameState.position[0] ||
+    travelling.target[2] === input.gameState.position[2]
+  ) {
+    throw new Error(
+      `full quest inventory did not route diagonally to bank: ${JSON.stringify(travelling)}`,
+    );
+  }
+  input.gameState.position = [11.5, 0, 8.5];
+  const arrivedResult = processAgentTicks([input])[0];
+  const arrived = arrivedResult?.action;
+  if (arrived?.type !== "bankDepositAll" || arrived.bankId !== "bank-1") {
+    throw new Error(
+      `full quest inventory did not select bank deposit: ${JSON.stringify(arrived)}`,
+    );
+  }
+  return { travelling: travellingResult!, arrived: arrivedResult! };
+}
+
 async function runWriter(
   connectionString: string,
   mode: "deposit" | "withdraw" | "composite",
 ): Promise<never> {
   registerItems();
+  const plannedRoute =
+    mode === "deposit" ? proveFullQuestInventoryRoutesThroughBank() : null;
   const pool = new pg.Pool({ connectionString, max: 4 });
   const inventorySystem = {
     isInventoryReady: () => true,
@@ -93,91 +275,247 @@ async function runWriter(
       );
     },
   };
+  const startsAtBank = mode !== "deposit";
+  const initialPosition: [number, number, number] = startsAtBank
+    ? [11.5, 0, 8.5]
+    : [0.5, 0, 0.5];
+  const playerData: Record<string, unknown> = {
+    position: initialPosition,
+    quaternion: [0, 0, 0, 1],
+    inStreamingDuel: false,
+    isEmbeddedAgent: true,
+  };
+  const playerPosition = {
+    x: initialPosition[0],
+    y: initialPosition[1],
+    z: initialPosition[2],
+    set(x: number, y: number, z: number): void {
+      this.x = x;
+      this.y = y;
+      this.z = z;
+      playerData.position = [x, y, z];
+    },
+  };
   const entities = new Map<string, unknown>([
     [
       CHARACTER_ID,
-      { position: { x: 0, y: 0, z: 0 }, data: { inStreamingDuel: false } },
+      {
+        id: CHARACTER_ID,
+        position: playerPosition,
+        data: playerData,
+        node: { quaternion: { copy: () => undefined } },
+      },
     ],
-    ["bank-1", { position: { x: 1, y: 0, z: 1 }, data: { type: "bank" } }],
+    ["bank-1", { position: { x: 12, y: 0, z: 8 }, data: { type: "bank" } }],
   ]);
+  const blockedTiles = new Set(["1,1", "2,2", "3,3"]);
   const world = {
     pgPool: pool,
-    entities: { get: (id: string) => entities.get(id) },
+    entities,
+    entityOccupancy: new EntityOccupancyMap(),
+    collision: {
+      hasFlags: (x: number, z: number) => blockedTiles.has(`${x},${z}`),
+      isBlocked: (_fromX: number, _fromZ: number, toX: number, toZ: number) =>
+        blockedTiles.has(`${toX},${toZ}`),
+    },
+    emit: () => undefined,
+    faceDirectionManager: { markPlayerMoved: () => undefined },
     getSystem: (name: string) =>
       name === "inventory" ? inventorySystem : null,
   };
 
+  if (mode === "deposit") {
+    if (!plannedRoute) throw new Error("planned bank route missing");
+    if (plannedRoute.travelling.action.type !== "move") {
+      throw new Error("planned bank movement missing");
+    }
+    const movementSamples: Array<{ x: number; z: number }> = [
+      { x: playerPosition.x, z: playerPosition.z },
+    ];
+    const movement = new TileMovementManager(world as never, () => undefined);
+    movement.syncPlayerPosition(CHARACTER_ID, playerPosition);
+    movement.movePlayerToward(
+      CHARACTER_ID,
+      {
+        x: plannedRoute.travelling.action.target[0],
+        y: plannedRoute.travelling.action.target[1],
+        z: plannedRoute.travelling.action.target[2],
+      },
+      plannedRoute.travelling.action.runMode,
+      0,
+    );
+    for (let tick = 1; tick <= 32; tick += 1) {
+      movement.onTick(tick);
+      movementSamples.push({ x: playerPosition.x, z: playerPosition.z });
+      const current = movement.getCurrentTile(CHARACTER_ID);
+      if (current?.x === 11 && current.z === 8) break;
+    }
+    const finalTile = movement.getCurrentTile(CHARACTER_ID);
+    const usedDiagonalStep = movementSamples.some((sample, index) => {
+      if (index === 0) return false;
+      const previous = movementSamples[index - 1]!;
+      return sample.x !== previous.x && sample.z !== previous.z;
+    });
+    const enteredBlockedTile = movementSamples.some((sample) =>
+      blockedTiles.has(`${Math.floor(sample.x)},${Math.floor(sample.z)}`),
+    );
+    if (
+      finalTile?.x !== 11 ||
+      finalTile.z !== 8 ||
+      playerPosition.x !== 11.5 ||
+      playerPosition.z !== 8.5 ||
+      !usedDiagonalStep ||
+      enteredBlockedTile
+    ) {
+      throw new Error(
+        `production tile movement did not reach the bank diagonally: ${JSON.stringify({ finalTile, playerPosition, movementSamples })}`,
+      );
+    }
+    const inventory = fullQuestInventoryItems();
+    const instance = {
+      ...makeInstance(),
+      config: {
+        characterId: CHARACTER_ID,
+        accountId: ACCOUNT_ID,
+        name: "Ordinary Bank Process Kill Agent",
+        scriptedRole: "gatherer",
+        enableLlm: false,
+      },
+      service: {
+        getGameState: () => ({
+          playerId: CHARACTER_ID,
+          position: [11.5, 0, 8.5],
+          health: 40,
+          maxHealth: 40,
+          alive: true,
+          skills: { mining: { level: 1, xp: 0 } },
+          inventory,
+          equipment: {},
+          nearbyEntities: [],
+          inCombat: false,
+          currentTarget: null,
+          selectedSpell: null,
+          activePrayers: [],
+        }),
+        getQuestState: () => fullInventoryQuestState(),
+        getAvailableQuests: () => [],
+        executeBankDepositAll: (
+          operationId: string,
+          retainedItems: Array<{ itemId: string; quantity: number }>,
+          bankId: string,
+        ) =>
+          executeAuthoritativeAgentBankTransfer({
+            world: world as never,
+            playerId: CHARACTER_ID,
+            bankId,
+            action: "deposit_all",
+            operationId,
+            retainedItems,
+          }),
+      },
+      state: "running",
+      ordinaryProcessingAcquisition: null,
+      navigationTarget: null,
+      pendingLlmResult: undefined,
+      llmCallInFlight: false,
+      behaviorEpoch: 0,
+      questsAccepted: new Set<string>(),
+      currentTargetId: null,
+      lastCombatChatAt: 0,
+      pendingChatReaction: null,
+      ordinaryProcessingRetries: [],
+      operatorCommandAt: 0,
+      questCompleteFailures: new Map<string, number>(),
+    } as unknown as AgentInstance;
+    const bridge = new AgentBehaviorBridge(
+      world as never,
+      (characterId) => (characterId === CHARACTER_ID ? instance : undefined),
+      () => [CHARACTER_ID],
+      async (_current, result, attempt) => {
+        if (
+          result.outcome !== "completed" ||
+          result.appliedActionType !== "bankDepositAll" ||
+          attempt?.attemptId !== ATTEMPT_ID
+        ) {
+          throw new Error(
+            `bridge deposit result mismatch: ${JSON.stringify({ result, attempt })}`,
+          );
+        }
+        process.stdout.write(
+          "WORKER_BRIDGE_BANK_RECEIPT_AND_CUSTODY_COMMITTED\n",
+        );
+        await new Promise<never>(() => {});
+      },
+      (_current, actionType, decisionSource) =>
+        beginAgentAutonomyProgressionAttempt(pool, {
+          attemptId: ATTEMPT_ID,
+          characterId: CHARACTER_ID,
+          goalType: null,
+          actionType,
+          decisionSource,
+          startedAt: 10_000,
+        }),
+    );
+    await (
+      bridge as unknown as {
+        applyTickResult(result: AgentTickOutput): Promise<void>;
+      }
+    ).applyTickResult(plannedRoute.arrived);
+    throw new Error(
+      "bridge deposit unexpectedly completed its held checkpoint",
+    );
+  }
+
   const attempt = await beginAgentAutonomyProgressionAttempt(pool, {
-    attemptId:
-      mode === "deposit"
-        ? ATTEMPT_ID
-        : mode === "withdraw"
-          ? WITHDRAW_ATTEMPT_ID
-          : COMPOSITE_ATTEMPT_ID,
+    attemptId: mode === "withdraw" ? WITHDRAW_ATTEMPT_ID : COMPOSITE_ATTEMPT_ID,
     characterId: CHARACTER_ID,
     goalType: "banking",
-    actionType: mode === "deposit" ? "bankDepositAll" : "bankWithdraw",
+    actionType: "bankWithdraw",
     decisionSource: "scripted",
-    startedAt:
-      mode === "deposit" ? 10_000 : mode === "withdraw" ? 11_000 : 12_000,
+    startedAt: mode === "withdraw" ? 11_000 : 12_000,
   });
   const receipt =
-    mode === "deposit"
+    mode === "withdraw"
       ? await executeAuthoritativeAgentBankTransfer({
           world: world as never,
           playerId: CHARACTER_ID,
           bankId: "bank-1",
-          action: "deposit_all",
-          operationId: getOrdinaryBankOperationId(attempt.attemptId),
-          retainedItems: [{ itemId: TOOL_ID, quantity: 1 }],
+          action: "withdraw",
+          itemId: RESOURCE_ID,
+          quantity: 5,
+          operationId: getOrdinaryBankStageOperationId(attempt.attemptId),
         })
-      : mode === "withdraw"
-        ? await executeAuthoritativeAgentBankTransfer({
-            world: world as never,
-            playerId: CHARACTER_ID,
-            bankId: "bank-1",
-            action: "withdraw",
-            itemId: RESOURCE_ID,
-            quantity: 5,
-            operationId: getOrdinaryBankStageOperationId(attempt.attemptId),
-          })
-        : await executeAuthoritativeAgentBankTransfer({
-            world: world as never,
-            playerId: CHARACTER_ID,
-            bankId: "bank-1",
-            action: "withdraw",
-            withdrawItems: [
-              { itemId: COMPOSITE_ITEM_B, quantity: 3 },
-              { itemId: COMPOSITE_ITEM_A, quantity: 2 },
-            ],
-            operationId: getOrdinaryBankStageOperationId(attempt.attemptId),
-          });
+      : await executeAuthoritativeAgentBankTransfer({
+          world: world as never,
+          playerId: CHARACTER_ID,
+          bankId: "bank-1",
+          action: "withdraw",
+          withdrawItems: [
+            { itemId: COMPOSITE_ITEM_B, quantity: 3 },
+            { itemId: COMPOSITE_ITEM_A, quantity: 2 },
+          ],
+          operationId: getOrdinaryBankStageOperationId(attempt.attemptId),
+        });
   const valid =
-    mode === "deposit"
+    mode === "withdraw"
       ? receipt.success &&
-        receipt.committedQuantity === 7 &&
-        receipt.inventoryQuantityAfter === 1
-      : mode === "withdraw"
-        ? receipt.success &&
-          receipt.committedQuantity === 5 &&
-          receipt.inventoryQuantityAfter === 5 &&
-          receipt.bankQuantityAfter === 2
-        : receipt.success &&
-          receipt.itemId === null &&
-          receipt.committedQuantity === 5 &&
-          receipt.inventoryQuantityAfter === 5 &&
-          receipt.bankQuantityAfter === null;
+        receipt.committedQuantity === 5 &&
+        receipt.inventoryQuantityAfter === 6 &&
+        receipt.bankQuantityAfter === 1
+      : receipt.success &&
+        receipt.itemId === null &&
+        receipt.committedQuantity === 5 &&
+        receipt.inventoryQuantityAfter === 5 &&
+        receipt.bankQuantityAfter === null;
   if (!valid) {
     throw new Error(
       `writer ${mode} receipt mismatch: ${JSON.stringify(receipt)}`,
     );
   }
   process.stdout.write(
-    mode === "deposit"
-      ? "BANK_RECEIPT_AND_CUSTODY_COMMITTED\n"
-      : mode === "withdraw"
-        ? "BANK_WITHDRAWAL_RECEIPT_AND_CUSTODY_COMMITTED\n"
-        : "BANK_COMPOSITE_RECEIPT_AND_CUSTODY_COMMITTED\n",
+    mode === "withdraw"
+      ? "BANK_WITHDRAWAL_RECEIPT_AND_CUSTODY_COMMITTED\n"
+      : "BANK_COMPOSITE_RECEIPT_AND_CUSTODY_COMMITTED\n",
   );
   await new Promise<never>(() => {});
 }
@@ -273,8 +611,17 @@ async function runParent(): Promise<void> {
     );
     await pool.query(
       `INSERT INTO inventory ("playerId", "itemId", quantity, "slotIndex")
-       VALUES ($1, $2, 1, 0), ($1, $3, 7, 1)`,
-      [CHARACTER_ID, TOOL_ID, RESOURCE_ID],
+       VALUES
+         ($1, $2, 1, 0),
+         ($1, $3, 7, 1),
+         ($1, $4, 1, 2)`,
+      [CHARACTER_ID, TOOL_ID, RESOURCE_ID, FOOD_ID],
+    );
+    await pool.query(
+      `INSERT INTO inventory ("playerId", "itemId", quantity, "slotIndex")
+       SELECT $1, $2, 1, slot_index
+       FROM generate_series(3, 23) AS slot_index`,
+      [CHARACTER_ID, FILLER_ID],
     );
 
     child = spawn(
@@ -282,7 +629,10 @@ async function runParent(): Promise<void> {
       [fileURLToPath(import.meta.url), "--writer", testUrl.toString()],
       { stdio: ["ignore", "pipe", "pipe"] },
     );
-    await waitForWriterReady(child, "BANK_RECEIPT_AND_CUSTODY_COMMITTED");
+    await waitForWriterReady(
+      child,
+      "WORKER_BRIDGE_BANK_RECEIPT_AND_CUSTODY_COMMITTED",
+    );
     if (!child.kill("SIGKILL")) throw new Error("failed to kill bank writer");
     await waitForExit(child);
 
@@ -316,7 +666,10 @@ async function runParent(): Promise<void> {
       receipt_count: string;
       carried_tool: string;
       carried_resource: string;
+      carried_food: string;
+      carried_filler: string;
       banked_resource: string;
+      banked_filler: string;
       terminal_source: string;
       terminal_outcome: string;
       applied_action: string;
@@ -329,14 +682,20 @@ async function runParent(): Promise<void> {
           WHERE "playerId" = $1 AND "itemId" = $3), '0') AS carried_tool,
          COALESCE((SELECT sum(quantity)::text FROM inventory
           WHERE "playerId" = $1 AND "itemId" = $4), '0') AS carried_resource,
+         COALESCE((SELECT sum(quantity)::text FROM inventory
+          WHERE "playerId" = $1 AND "itemId" = $5), '0') AS carried_food,
+         COALESCE((SELECT sum(quantity)::text FROM inventory
+          WHERE "playerId" = $1 AND "itemId" = $6), '0') AS carried_filler,
          COALESCE((SELECT sum(quantity)::text FROM bank_storage
           WHERE "playerId" = $1 AND "itemId" = $4), '0') AS banked_resource,
+         COALESCE((SELECT sum(quantity)::text FROM bank_storage
+          WHERE "playerId" = $1 AND "itemId" = $6), '0') AS banked_filler,
          (SELECT event_source FROM agent_autonomy_progression_events
-          WHERE attempt_id = $5 AND event_type = 'attempt_terminal') AS terminal_source,
+          WHERE attempt_id = $7 AND event_type = 'attempt_terminal') AS terminal_source,
          (SELECT action_outcome FROM agent_autonomy_progression_events
-          WHERE attempt_id = $5 AND event_type = 'attempt_terminal') AS terminal_outcome,
+          WHERE attempt_id = $7 AND event_type = 'attempt_terminal') AS terminal_outcome,
          (SELECT applied_action_type FROM agent_autonomy_progression_events
-          WHERE attempt_id = $5 AND event_type = 'attempt_terminal') AS applied_action,
+          WHERE attempt_id = $7 AND event_type = 'attempt_terminal') AS applied_action,
          (SELECT open_attempt_id FROM agent_autonomy_progression_heads
           WHERE character_id = $1) AS open_attempt_id`,
       [
@@ -344,6 +703,8 @@ async function runParent(): Promise<void> {
         getOrdinaryBankOperationId(ATTEMPT_ID),
         TOOL_ID,
         RESOURCE_ID,
+        FOOD_ID,
+        FILLER_ID,
         ATTEMPT_ID,
       ],
     );
@@ -351,8 +712,11 @@ async function runParent(): Promise<void> {
     if (
       row.receipt_count !== "1" ||
       row.carried_tool !== "1" ||
-      row.carried_resource !== "0" ||
-      row.banked_resource !== "7" ||
+      row.carried_resource !== "1" ||
+      row.carried_food !== "1" ||
+      row.carried_filler !== "0" ||
+      row.banked_resource !== "6" ||
+      row.banked_filler !== "21" ||
       row.terminal_source !== "restart_reconciliation" ||
       row.terminal_outcome !== "completed" ||
       row.applied_action !== "bankDepositAll" ||
@@ -439,8 +803,8 @@ async function runParent(): Promise<void> {
     const withdrawalRow = withdrawalProof.rows[0];
     if (
       withdrawalRow.receipt_count !== "1" ||
-      withdrawalRow.carried_resource !== "5" ||
-      withdrawalRow.banked_resource !== "2" ||
+      withdrawalRow.carried_resource !== "6" ||
+      withdrawalRow.banked_resource !== "1" ||
       withdrawalRow.terminal_source !== "restart_reconciliation" ||
       withdrawalRow.terminal_outcome !== "completed" ||
       withdrawalRow.applied_action !== "bankWithdraw" ||
@@ -573,12 +937,21 @@ async function runParent(): Promise<void> {
     process.stdout.write(
       `${JSON.stringify({
         writerKilledAfterBankCommit: true,
+        plannerQuestInventoryRoutedDiagonally: true,
+        productionTileMovementReachedBankDiagonally: true,
+        productionTileMovementAvoidedBlockedTiles: true,
+        workerResultAppliedByProductionBridge: true,
+        bridgeSelectedRealBankDeposit: true,
+        plannerSnapshotMatchedCommittedCustody: true,
+        activeQuestTargetRetainedByProductionPolicy: true,
         startCommittedBeforeCustody: true,
         exactReceiptRecoveredAfterRestart: true,
         oneOfFiveReplacementWorkersRecovered: true,
         committedActionNotReplayed: row.receipt_count === "1",
         retainedToolQuantity: Number(row.carried_tool),
+        retainedFoodQuantity: Number(row.carried_food),
         bankedSurplusQuantity: Number(row.banked_resource),
+        bankedFillerQuantity: Number(row.banked_filler),
         withdrawalWriterKilledAfterCommit: true,
         exactWithdrawalReceiptRecoveredAfterRestart: true,
         oneOfFiveWithdrawalReplacementWorkersRecovered: true,

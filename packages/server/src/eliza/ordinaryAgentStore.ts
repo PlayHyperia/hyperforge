@@ -1,6 +1,6 @@
-import { randomUUID } from "node:crypto";
 import { eq } from "drizzle-orm";
 import { v5 as uuidv5 } from "uuid";
+import { getStoreById } from "@hyperforge/shared";
 
 import type { Database } from "../database/client.js";
 import { agentStoreOperations } from "../database/schema.js";
@@ -56,6 +56,10 @@ export function hasOrdinaryCoinRecoveryAuthorization(
     inventoryItems: ReturnType<AgentInstance["service"]["getInventoryItems"]>;
     equippedItems: ReturnType<AgentInstance["service"]["getEquippedItems"]>;
   },
+  privateAuthority?: {
+    coinBalance: number | null;
+    unitPrice: number | null;
+  },
 ): boolean {
   const recovery = instance.coinRecovery;
   if (!recovery) return false;
@@ -76,6 +80,40 @@ export function hasOrdinaryCoinRecoveryAuthorization(
   ).length;
   if (carriedQuantity + equippedQuantity >= recovery.quantity) {
     instance.coinRecovery = null;
+    return false;
+  }
+
+  const service = instance.service as typeof instance.service & {
+    getPrivateCoinBalance?: () => number | null;
+  };
+  const coinBalance = privateAuthority
+    ? privateAuthority.coinBalance
+    : (service.getPrivateCoinBalance?.() ?? null);
+  const unitPrice = privateAuthority
+    ? privateAuthority.unitPrice
+    : (getStoreById(recovery.storeId)?.items.find(
+        (item) => item.itemId === recovery.itemId,
+      )?.price ?? null);
+  if (
+    !Number.isSafeInteger(unitPrice) ||
+    Number(unitPrice) < 0 ||
+    !Number.isSafeInteger(recovery.quantity) ||
+    recovery.quantity <= 0
+  ) {
+    instance.coinRecovery = null;
+    return false;
+  }
+  const requiredCoins = Number(unitPrice) * recovery.quantity;
+  if (!Number.isSafeInteger(requiredCoins) || requiredCoins < 0) {
+    instance.coinRecovery = null;
+    return false;
+  }
+  if (!Number.isSafeInteger(coinBalance) || Number(coinBalance) < 0) {
+    return false;
+  }
+  if (Number(coinBalance) >= requiredCoins) {
+    instance.coinRecovery = null;
+    instance.storeRetryAfter = 0;
     return false;
   }
 
@@ -102,11 +140,9 @@ export async function executeOrdinaryStoreBuy(
   storeId: string,
   itemId: string,
   quantity: number,
-  attempt?: AgentAutonomyProgressionAttempt | null,
+  attempt: AgentAutonomyProgressionAttempt,
 ): Promise<OrdinaryStoreExecutionResult> {
-  const operationId = attempt
-    ? getOrdinaryStoreBuyOperationId(attempt.attemptId)
-    : randomUUID();
+  const operationId = getOrdinaryStoreBuyOperationId(attempt.attemptId);
   let reconciliationAttempts = 0;
   let delayMs = INITIAL_RECONCILIATION_DELAY_MS;
   let lastReceipt: StoreTransactionResult | null = null;

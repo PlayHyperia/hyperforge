@@ -26,7 +26,29 @@ interface MockPlayer {
   position: { x: number; y: number; z: number };
   skills: Record<string, { level: number; xp: number }>;
   emote?: string;
-  data?: { e?: string };
+  data?: {
+    e?: string;
+    gatheringToolPresentation?: { revision: number; itemId: string | null };
+    fishingInteractionPresentation?: {
+      revision: number;
+      interactionId: string | null;
+      resourceId: string | null;
+      itemId: "small_fishing_net" | "harpoon" | "lobster_pot" | null;
+      phase:
+        | "idle"
+        | "held"
+        | "released"
+        | "deployed"
+        | "striking"
+        | "retrieving"
+        | "recovering";
+      outcome: "none" | "pending" | "verifying" | "miss" | "caught";
+      attempt: number;
+      serverTick: number;
+      phaseStartedAtServerTimeMs?: number;
+      targetPosition: { x: number; y: number; z: number } | null;
+    };
+  };
   markNetworkDirty: ReturnType<typeof vi.fn>;
 }
 
@@ -403,6 +425,436 @@ describe("ResourceSystem Integration", () => {
         (e) => e.type === EventType.RESOURCE_GATHERING_STARTED,
       );
       expect(gatheringStarted.length).toBe(0);
+    });
+
+    it("presents the exact required fishing item and publishes a committed catch lifecycle", async () => {
+      const previousTools = (
+        globalThis as { EXTERNAL_TOOLS?: Map<string, unknown> }
+      ).EXTERNAL_TOOLS;
+      const previousResources = (
+        globalThis as { EXTERNAL_RESOURCES?: Map<string, unknown> }
+      ).EXTERNAL_RESOURCES;
+      (globalThis as { EXTERNAL_TOOLS?: Map<string, unknown> }).EXTERNAL_TOOLS =
+        new Map([
+          [
+            "fishing_rod",
+            {
+              itemId: "fishing_rod",
+              skill: "fishing",
+              tier: "unknown",
+              levelRequired: 1,
+              priority: 1,
+            },
+          ],
+        ]);
+      (
+        globalThis as { EXTERNAL_RESOURCES?: Map<string, unknown> }
+      ).EXTERNAL_RESOURCES = new Map([
+        [
+          "fishing_spot_net",
+          {
+            id: "fishing_spot_net",
+            levelRequired: 1,
+            baseCycleTicks: 5,
+            depleteChance: 0,
+            respawnTicks: 0,
+            harvestYield: [{ xpAmount: 10 }],
+          },
+        ],
+      ]);
+      const random = vi.spyOn(Math, "random").mockReturnValue(0);
+
+      try {
+        const player = createTestPlayer("player1", { fishing: 1 });
+        player.emote = "idle";
+        player.data = { e: "idle" };
+        mockWorld.addPlayer(player);
+        mockWorld.setInventory(
+          "player1",
+          createTestInventory([
+            { itemId: "small_fishing_net", quantity: 1 },
+            { itemId: "fishing_rod", quantity: 1 },
+          ]),
+        );
+
+        const resourceId = "fishing_spot_net_authority";
+        const internals = system as unknown as {
+          resources: Map<string, unknown>;
+          resourceVariants: Map<string, string>;
+          startGathering(data: {
+            playerId: string;
+            resourceId: string;
+            playerPosition: { x: number; y: number; z: number };
+          }): void;
+        };
+        internals.resources.set(resourceId, {
+          id: resourceId,
+          type: "fishing_spot",
+          name: "Net Fishing Spot",
+          position: { x: 11, y: 0, z: 10 },
+          skillRequired: "fishing",
+          levelRequired: 1,
+          toolRequired: "small_fishing_net",
+          respawnTime: 0,
+          isAvailable: true,
+          lastDepleted: 0,
+          drops: [
+            {
+              itemId: "raw_shrimp",
+              itemName: "Raw Shrimp",
+              quantity: 1,
+              chance: 1,
+              xpAmount: 10,
+              stackable: false,
+            },
+          ],
+        });
+        internals.resourceVariants.set(resourceId, "fishing_spot_net");
+
+        internals.startGathering({
+          playerId: "player1",
+          resourceId,
+          playerPosition: player.position,
+        });
+
+        const toolShows = mockWorld.$eventBus.emitEvent.mock.calls.filter(
+          ([eventType]) => eventType === EventType.GATHERING_TOOL_SHOW,
+        );
+        expect(toolShows).toHaveLength(1);
+        expect(toolShows[0]?.[1]).toEqual({
+          playerId: "player1",
+          itemId: "small_fishing_net",
+          slot: "weapon",
+          revision: 1,
+        });
+        expect(player.data?.gatheringToolPresentation).toEqual({
+          revision: 1,
+          itemId: "small_fishing_net",
+        });
+        expect(player.emote).toBe("small_fishing_net");
+        expect(player.data?.e).toBe("small_fishing_net");
+        expect(mockWorld.network.send).toHaveBeenCalledWith("entityModified", {
+          id: "player1",
+          e: "small_fishing_net",
+        });
+        expect(player.data?.fishingInteractionPresentation).toMatchObject({
+          revision: 1,
+          interactionId: expect.stringMatching(/^fishing:/u),
+          resourceId,
+          itemId: "small_fishing_net",
+          phase: "held",
+          outcome: "none",
+          attempt: 0,
+          serverTick: 0,
+          targetPosition: { x: 11, y: 0, z: 10 },
+        });
+
+        system.processGatheringTick(1);
+        expect(player.data?.fishingInteractionPresentation).toMatchObject({
+          revision: 2,
+          phase: "released",
+          serverTick: 1,
+        });
+        system.processGatheringTick(2);
+        expect(player.data?.fishingInteractionPresentation).toMatchObject({
+          revision: 3,
+          phase: "deployed",
+          serverTick: 2,
+        });
+        system.processGatheringTick(3);
+        expect(player.data?.fishingInteractionPresentation).toMatchObject({
+          revision: 4,
+          phase: "deployed",
+          outcome: "pending",
+          attempt: 1,
+          serverTick: 3,
+        });
+        const internalsAfterAttempt = system as unknown as {
+          pendingGatherRewards: Map<string, { state: string }>;
+        };
+        await vi.waitFor(() => {
+          expect(
+            internalsAfterAttempt.pendingGatherRewards.get("player1")?.state,
+          ).toBe("settled");
+        });
+        system.processGatheringTick(4);
+        expect(player.data?.fishingInteractionPresentation).toMatchObject({
+          revision: 5,
+          phase: "retrieving",
+          outcome: "caught",
+          attempt: 1,
+          serverTick: 4,
+        });
+
+        (
+          system as unknown as {
+            stopGathering(data: { playerId: string }): void;
+          }
+        ).stopGathering({ playerId: "player1" });
+        expect(player.data?.gatheringToolPresentation).toEqual({
+          revision: 2,
+          itemId: null,
+        });
+        expect(player.data?.fishingInteractionPresentation).toEqual({
+          revision: 6,
+          interactionId: null,
+          resourceId: null,
+          itemId: null,
+          phase: "idle",
+          outcome: "none",
+          attempt: 0,
+          serverTick: 4,
+          phaseStartedAtServerTimeMs: expect.any(Number),
+          targetPosition: null,
+        });
+        expect(
+          mockWorld.$eventBus.emitEvent.mock.calls.findLast(
+            ([eventType]) => eventType === EventType.GATHERING_TOOL_HIDE,
+          )?.[1],
+        ).toEqual({
+          playerId: "player1",
+          slot: "weapon",
+          revision: 2,
+        });
+        expect(player.emote).toBe("idle");
+        expect(player.data?.e).toBe("idle");
+      } finally {
+        random.mockRestore();
+        if (previousTools) {
+          (
+            globalThis as { EXTERNAL_TOOLS?: Map<string, unknown> }
+          ).EXTERNAL_TOOLS = previousTools;
+        } else {
+          delete (globalThis as { EXTERNAL_TOOLS?: Map<string, unknown> })
+            .EXTERNAL_TOOLS;
+        }
+        if (previousResources) {
+          (
+            globalThis as { EXTERNAL_RESOURCES?: Map<string, unknown> }
+          ).EXTERNAL_RESOURCES = previousResources;
+        } else {
+          delete (globalThis as { EXTERNAL_RESOURCES?: Map<string, unknown> })
+            .EXTERNAL_RESOURCES;
+        }
+      }
+    });
+
+    it("binds one harpoon body action to strike and recovery without retriggering it", () => {
+      const player = createTestPlayer("player1", { fishing: 35 });
+      player.emote = "idle";
+      player.data = { e: "idle" };
+      mockWorld.addPlayer(player);
+      const session = {
+        resourceId: "fishing_spot_harpoon_authority",
+        attempts: 1,
+        fishingInteraction: {
+          interactionId: "fishing:harpoon-authority",
+          itemId: "harpoon" as const,
+          phase: "held" as const,
+          outcome: "none" as const,
+          targetPosition: { x: 11, y: -0.25, z: 10 },
+          nextTransitionTick: null,
+          firstAttemptTick: 21,
+          awaitingOperationId: null,
+          phaseStartedAtServerTimeMs: 12_000,
+        },
+      };
+      const transition = (
+        system as unknown as {
+          transitionFishingInteraction(
+            playerId: string,
+            currentSession: typeof session,
+            phase: "held" | "striking" | "recovering",
+            outcome: "none" | "pending" | "miss",
+            nextTransitionTick: number | null,
+          ): void;
+        }
+      ).transitionFishingInteraction.bind(system);
+
+      transition("player1", session, "striking", "pending", 22);
+      expect(player.emote).toBe("harpoon");
+      expect(player.data?.e).toBe("harpoon");
+
+      session.fishingInteraction.awaitingOperationId = "gathering-reward:1";
+      const presentationInternals = system as unknown as {
+        activeGathering: Map<string, typeof session>;
+        advanceFishingInteractionPresentations(tickNumber: number): void;
+      };
+      presentationInternals.activeGathering.set("player1", session);
+      presentationInternals.advanceFishingInteractionPresentations(22);
+      expect(player.emote).toBe("harpoon");
+      expect(player.data?.e).toBe("harpoon");
+      expect(session.fishingInteraction.phase).toBe("recovering");
+      expect(session.fishingInteraction.outcome).toBe("verifying");
+
+      transition("player1", session, "held", "none", null);
+      expect(player.emote).toBe("idle");
+      expect(player.data?.e).toBe("idle");
+      expect(
+        mockWorld.network.send.mock.calls
+          .filter(([eventType]) => eventType === "entityModified")
+          .map(([, payload]) => payload),
+      ).toEqual([
+        { id: "player1", e: "harpoon" },
+        { id: "player1", e: "idle" },
+      ]);
+      expect(
+        mockWorld.$eventBus.emitEvent.mock.calls
+          .filter(
+            ([eventType]) =>
+              eventType === EventType.FISHING_INTERACTION_PRESENTATION,
+          )
+          .map(([, payload]) => payload),
+      ).toEqual([
+        expect.objectContaining({ phase: "striking", outcome: "pending" }),
+        expect.objectContaining({
+          phase: "recovering",
+          outcome: "verifying",
+        }),
+        expect.objectContaining({ phase: "held", outcome: "none" }),
+      ]);
+    });
+
+    it("does not apply an unrelated higher-priority fishing tool's level requirement", () => {
+      const previousTools = (
+        globalThis as { EXTERNAL_TOOLS?: Map<string, unknown> }
+      ).EXTERNAL_TOOLS;
+      const previousResources = (
+        globalThis as { EXTERNAL_RESOURCES?: Map<string, unknown> }
+      ).EXTERNAL_RESOURCES;
+      (globalThis as { EXTERNAL_TOOLS?: Map<string, unknown> }).EXTERNAL_TOOLS =
+        new Map([
+          [
+            "harpoon",
+            {
+              itemId: "harpoon",
+              skill: "fishing",
+              tier: "unknown",
+              levelRequired: 99,
+              priority: 1,
+            },
+          ],
+          [
+            "fishing_rod",
+            {
+              itemId: "fishing_rod",
+              skill: "fishing",
+              tier: "unknown",
+              levelRequired: 1,
+              priority: 2,
+            },
+          ],
+        ]);
+      (
+        globalThis as { EXTERNAL_RESOURCES?: Map<string, unknown> }
+      ).EXTERNAL_RESOURCES = new Map([
+        [
+          "fishing_spot_bait",
+          {
+            id: "fishing_spot_bait",
+            levelRequired: 1,
+            baseCycleTicks: 5,
+            depleteChance: 0,
+            respawnTicks: 0,
+            harvestYield: [{ xpAmount: 20 }],
+          },
+        ],
+      ]);
+
+      try {
+        const player = createTestPlayer("player1", { fishing: 1 });
+        player.emote = "idle";
+        player.data = { e: "idle" };
+        mockWorld.addPlayer(player);
+        mockWorld.setInventory(
+          "player1",
+          createTestInventory([
+            { itemId: "fishing_rod", quantity: 1 },
+            { itemId: "harpoon", quantity: 1 },
+            { itemId: "fishing_bait", quantity: 1 },
+          ]),
+        );
+
+        const resourceId = "fishing_spot_bait_authority";
+        const internals = system as unknown as {
+          resources: Map<string, unknown>;
+          resourceVariants: Map<string, string>;
+          startGathering(data: {
+            playerId: string;
+            resourceId: string;
+            playerPosition: { x: number; y: number; z: number };
+          }): void;
+        };
+        internals.resources.set(resourceId, {
+          id: resourceId,
+          type: "fishing_spot",
+          name: "Bait Fishing Spot",
+          position: { x: 11, y: 0, z: 10 },
+          skillRequired: "fishing",
+          levelRequired: 1,
+          toolRequired: "fishing_rod",
+          secondaryRequired: "fishing_bait",
+          respawnTime: 0,
+          isAvailable: true,
+          lastDepleted: 0,
+          drops: [
+            {
+              itemId: "raw_sardine",
+              itemName: "Raw Sardine",
+              quantity: 1,
+              chance: 1,
+              xpAmount: 20,
+              stackable: false,
+            },
+          ],
+        });
+        internals.resourceVariants.set(resourceId, "fishing_spot_bait");
+
+        internals.startGathering({
+          playerId: "player1",
+          resourceId,
+          playerPosition: player.position,
+        });
+
+        expect(
+          mockWorld.$eventBus.emitEvent.mock.calls.some(
+            ([eventType]) => eventType === EventType.RESOURCE_GATHERING_STARTED,
+          ),
+        ).toBe(true);
+        expect(
+          mockWorld.$eventBus.emitEvent.mock.calls.find(
+            ([eventType]) => eventType === EventType.GATHERING_TOOL_SHOW,
+          )?.[1],
+        ).toEqual({
+          playerId: "player1",
+          itemId: "fishing_rod",
+          slot: "weapon",
+          revision: 1,
+        });
+        expect(player.emote).toBe("fishing_rod");
+        expect(player.data?.e).toBe("fishing_rod");
+        expect(mockWorld.network.send).toHaveBeenCalledWith("entityModified", {
+          id: "player1",
+          e: "fishing_rod",
+        });
+      } finally {
+        if (previousTools) {
+          (
+            globalThis as { EXTERNAL_TOOLS?: Map<string, unknown> }
+          ).EXTERNAL_TOOLS = previousTools;
+        } else {
+          delete (globalThis as { EXTERNAL_TOOLS?: Map<string, unknown> })
+            .EXTERNAL_TOOLS;
+        }
+        if (previousResources) {
+          (
+            globalThis as { EXTERNAL_RESOURCES?: Map<string, unknown> }
+          ).EXTERNAL_RESOURCES = previousResources;
+        } else {
+          delete (globalThis as { EXTERNAL_RESOURCES?: Map<string, unknown> })
+            .EXTERNAL_RESOURCES;
+        }
+      }
     });
   });
 

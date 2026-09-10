@@ -2,11 +2,65 @@ import { describe, it, expect } from "vitest";
 import {
   deriveStreamingDuelEquipmentVisualContract,
   deriveStreamingRendererHealth,
+  getStreamingPreparationVisualFingerprint,
   getStreamingFailurePresentation,
   parseStreamingBettingConfig,
   shouldDismissStreamingLoading,
 } from "../../../src/screens/StreamingMode";
 import type { StreamingState } from "../../../src/screens/StreamingMode";
+
+describe("getStreamingPreparationVisualFingerprint", () => {
+  it("ignores diagnostic timestamps but reacts to viewer-visible activity", () => {
+    const createDiagnostics = (
+      updatedAt: number,
+      phase: "striking" | "recovering",
+    ) => ({
+      schemaVersion: 1 as const,
+      updatedAt,
+      activeCount: 1,
+      readyCount: 1,
+      ready: true,
+      players: [
+        {
+          playerId: "agent-a",
+          presentationActive: true,
+          gatheringToolItemId: "harpoon",
+          fishingPhase: phase,
+          desiredItemId: "harpoon",
+          attachedItemId: "harpoon",
+          heldVisualPresent: true,
+          heldVisualVisible: true,
+          worldVisualPresent: false,
+          worldVisualVisible: false,
+          attachedToCurrentAvatar: true,
+          gatheringRevision: 1,
+          fishingRevision: 1,
+          ready: true,
+        },
+      ],
+    });
+
+    expect(
+      getStreamingPreparationVisualFingerprint(
+        createDiagnostics(1_000, "striking"),
+      ),
+    ).toBe(
+      getStreamingPreparationVisualFingerprint(
+        createDiagnostics(2_000, "striking"),
+      ),
+    );
+    expect(
+      getStreamingPreparationVisualFingerprint(
+        createDiagnostics(2_000, "recovering"),
+      ),
+    ).not.toBe(
+      getStreamingPreparationVisualFingerprint(
+        createDiagnostics(2_000, "striking"),
+      ),
+    );
+    expect(getStreamingPreparationVisualFingerprint(null)).toBe("inactive");
+  });
+});
 
 describe("deriveStreamingDuelEquipmentVisualContract", () => {
   it("prewarms every visible frozen role item and declares exact current slots", () => {
@@ -176,6 +230,81 @@ describe("deriveStreamingDuelEquipmentVisualContract", () => {
         itemId: "bronze_shortsword",
       },
     ]);
+  });
+
+  it("requires current visible equipment for unfrozen no-money diagnostics", () => {
+    const state = {
+      type: "STREAMING_STATE_UPDATE",
+      cycle: {
+        cycleId: "cycle-diagnostic-visuals",
+        agent1: {
+          id: "diagnostic-melee",
+          loadoutFrozen: false,
+          equipment: { weapon: "bronze_2h_sword" },
+          combatLoadouts: {},
+        },
+        agent2: {
+          id: "diagnostic-ranged",
+          loadoutFrozen: false,
+          equipment: {
+            weapon: "magic_shortbow",
+            arrows: "rune_arrow",
+          },
+          combatLoadouts: {},
+        },
+      },
+    } as unknown as StreamingState;
+
+    const contract = deriveStreamingDuelEquipmentVisualContract(state);
+    expect(contract.requirements).toEqual([
+      {
+        playerId: "diagnostic-melee",
+        slot: "weapon",
+        itemId: "bronze_2h_sword",
+      },
+      {
+        playerId: "diagnostic-ranged",
+        slot: "weapon",
+        itemId: "magic_shortbow",
+      },
+    ]);
+    expect(contract.currentEquipment).toHaveLength(16);
+    expect(contract.currentEquipment).toContainEqual({
+      playerId: "diagnostic-ranged",
+      slot: "weapon",
+      itemId: "magic_shortbow",
+    });
+  });
+
+  it("does not let uncertified exploration gear block the private IDLE preparation view", () => {
+    const state = {
+      type: "STREAMING_STATE_UPDATE",
+      cycle: {
+        cycleId: "",
+        phase: "IDLE",
+        agent1: {
+          id: "ordinary-a",
+          loadoutFrozen: false,
+          equipment: {
+            weapon: "bronze_dagger",
+            helmet: "bronze_full_helm",
+          },
+          combatLoadouts: {},
+        },
+        agent2: {
+          id: "ordinary-b",
+          loadoutFrozen: false,
+          equipment: { boots: "leather_boots" },
+          combatLoadouts: {},
+        },
+      },
+    } as unknown as StreamingState;
+
+    expect(deriveStreamingDuelEquipmentVisualContract(state)).toEqual({
+      cycleId: "",
+      requirements: [],
+      currentEquipment: [],
+    });
   });
 });
 
@@ -463,6 +592,86 @@ describe("shouldDismissStreamingLoading", () => {
         },
       }).degradedReason,
     ).toBe("arena_positions_invalid");
+  });
+
+  it("keeps announcement readiness fail-closed until arena handoff is authoritative", () => {
+    const base = {
+      connected: true,
+      worldReady: true,
+      terrainReady: true,
+      sceneAssetsReady: true,
+      hasStreamingState: true,
+      initError: null,
+      needsCameraLock: false,
+      cameraLocked: false,
+      loadingDismissed: true,
+      phase: "ANNOUNCEMENT" as const,
+      agent1: {
+        id: "a",
+        name: "Agent A",
+        provider: "provider",
+        model: "model",
+        hp: 10,
+        maxHp: 10,
+        combatLevel: 1,
+        wins: 0,
+        losses: 0,
+        damageDealtThisFight: 0,
+        highestHit: 0,
+        attacksLanded: 0,
+        healsUsed: 0,
+        equipment: {},
+        inventory: [],
+        rank: 1,
+        headToHeadWins: 0,
+        headToHeadLosses: 0,
+      },
+      agent2: {
+        id: "b",
+        name: "Agent B",
+        provider: "provider",
+        model: "model",
+        hp: 10,
+        maxHp: 10,
+        combatLevel: 1,
+        wins: 0,
+        losses: 0,
+        damageDealtThisFight: 0,
+        highestHit: 0,
+        attacksLanded: 0,
+        healsUsed: 0,
+        equipment: {},
+        inventory: [],
+        rank: 2,
+        headToHeadWins: 0,
+        headToHeadLosses: 0,
+      },
+    };
+
+    expect(
+      deriveStreamingRendererHealth({
+        ...base,
+        arenaPositions: null,
+      }).degradedReason,
+    ).toBe("arena_positions_invalid");
+    expect(
+      deriveStreamingRendererHealth({
+        ...base,
+        arenaPositions: {
+          agent1: [2, 0, 2],
+          agent2: [2.1, 50, 2.1],
+        },
+      }).degradedReason,
+    ).toBe("arena_positions_invalid");
+    expect(
+      deriveStreamingRendererHealth({
+        ...base,
+        arenaPositions: {
+          agent1: [2, 0, 2],
+          agent2: [3, 0, 3],
+        },
+      }).ready,
+    ).toBe(true);
   });
 
   it("reports ready only after the live duel surface is sane and the overlay is gone", () => {

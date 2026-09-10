@@ -1,8 +1,17 @@
 import type {
   RecentDuelEntry,
   StreamingDuelOperationalMetrics,
+  StreamingStateUpdate,
   StreamingTerminalNotice,
 } from "../systems/StreamingDuelScheduler/types.js";
+import {
+  STREAMING_DUEL_ACTION_OBSERVATION_LIMIT,
+  hasValidStreamingGuardrailArenaPositions,
+  parseStreamingDuelActionObservation,
+  parseStreamingDuelPreparationSummary,
+  parseStreamingDuelStrategySummary,
+  type StreamingDuelActionObservation,
+} from "@hyperforge/shared";
 
 export type PublicCancellationReason =
   | "insufficient_verified_combat"
@@ -61,6 +70,154 @@ export function sanitizePublicTerminalNotice(
   return {
     ...notice,
     reason: toPublicCancellationReason(notice.reason),
+  };
+}
+
+/**
+ * Build the only scheduler state allowed onto spectator sockets or public
+ * REST/SSE. The persisted competitive snapshot is internal authority: it also
+ * contains custody, skill, provider, policy-fingerprint, and free-form planning
+ * fields. Spectators receive only the separately validated frozen summary.
+ */
+export function sanitizePublicStreamingState(
+  state: StreamingStateUpdate,
+): StreamingStateUpdate {
+  const sanitizeAgent = (
+    agent: StreamingStateUpdate["cycle"]["agent1"],
+  ): StreamingStateUpdate["cycle"]["agent1"] => {
+    if (!agent) return null;
+    const combatLoadouts: typeof agent.combatLoadouts = {};
+    for (const role of ["melee", "ranged", "mage"] as const) {
+      const loadout = agent.combatLoadouts[role];
+      if (!loadout) continue;
+      combatLoadouts[role] = {
+        role: loadout.role,
+        weaponId: loadout.weaponId,
+        arrowsId: loadout.arrowsId,
+        shieldId: loadout.shieldId,
+        spellId: loadout.spellId,
+        ...(loadout.armorIds ? { armorIds: { ...loadout.armorIds } } : {}),
+      };
+    }
+    return {
+      id: agent.id,
+      name: agent.name,
+      provider: agent.provider,
+      model: agent.model,
+      hp: agent.hp,
+      maxHp: agent.maxHp,
+      combatLevel: agent.combatLevel,
+      wins: agent.wins,
+      losses: agent.losses,
+      damageDealtThisFight: agent.damageDealtThisFight,
+      highestHit: agent.highestHit,
+      attacksLanded: agent.attacksLanded,
+      healsUsed: agent.healsUsed,
+      equipment: { ...agent.equipment },
+      inventory: agent.inventory.map((item) => (item ? { ...item } : null)),
+      itemIconPaths: { ...agent.itemIconPaths },
+      loadoutFingerprint: agent.loadoutFingerprint,
+      availableCombatStyles: [...agent.availableCombatStyles],
+      combatLoadouts,
+      loadoutFrozen: agent.loadoutFrozen,
+      strategySummary: agent.loadoutFrozen
+        ? parseStreamingDuelStrategySummary(agent.strategySummary)
+        : null,
+      prayerPointUnits: agent.prayerPointUnits,
+      prayerPoints: agent.prayerPoints,
+      prayerMaxPoints: agent.prayerMaxPoints,
+      rank: agent.rank,
+      headToHeadWins: agent.headToHeadWins,
+      headToHeadLosses: agent.headToHeadLosses,
+    };
+  };
+
+  const agent1 = sanitizeAgent(state.cycle.agent1);
+  const agent2 = sanitizeAgent(state.cycle.agent2);
+  const parsedPreparation = parseStreamingDuelPreparationSummary(
+    state.preparation,
+  );
+  const preparation =
+    state.cycle.phase === "IDLE" &&
+    parsedPreparation !== null &&
+    agent1 !== null &&
+    agent2 !== null &&
+    parsedPreparation.agent1.id === agent1.id &&
+    parsedPreparation.agent2.id === agent2.id
+      ? parsedPreparation
+      : null;
+  const contestantIds = new Set(
+    [agent1?.id, agent2?.id].filter((id): id is string => Boolean(id)),
+  );
+  const actionObservations = state.cycle.actionObservations
+    .map(parseStreamingDuelActionObservation)
+    .filter(
+      (observation): observation is StreamingDuelActionObservation =>
+        observation !== null &&
+        observation.cycleId === state.cycle.cycleId &&
+        observation.duelId === state.cycle.duelId &&
+        contestantIds.has(observation.actorId) &&
+        contestantIds.has(observation.opponentId),
+    )
+    .slice(-STREAMING_DUEL_ACTION_OBSERVATION_LIMIT);
+  const sourceArenaPositions = state.cycle.arenaPositions;
+  const arenaPositions = hasValidStreamingGuardrailArenaPositions(
+    sourceArenaPositions,
+  )
+    ? {
+        agent1: [...sourceArenaPositions.agent1] as [number, number, number],
+        agent2: [...sourceArenaPositions.agent2] as [number, number, number],
+      }
+    : null;
+
+  return {
+    type: "STREAMING_STATE_UPDATE",
+    cycle: {
+      cycleId: state.cycle.cycleId,
+      phase: state.cycle.phase,
+      cycleStartTime: state.cycle.cycleStartTime,
+      phaseStartTime: state.cycle.phaseStartTime,
+      phaseEndTime: state.cycle.phaseEndTime,
+      phaseVersion: state.cycle.phaseVersion,
+      timeRemaining: state.cycle.timeRemaining,
+      agent1,
+      agent2,
+      duelId: state.cycle.duelId,
+      duelKeyHex: state.cycle.duelKeyHex,
+      competitiveSnapshotVersion: state.cycle.competitiveSnapshotVersion,
+      competitiveSnapshotDigest: state.cycle.competitiveSnapshotDigest,
+      competitiveSnapshot: null,
+      betOpenTime: state.cycle.betOpenTime,
+      betCloseTime: state.cycle.betCloseTime,
+      countdown: state.cycle.countdown,
+      fightStartTime: state.cycle.fightStartTime,
+      firstHitAt: state.cycle.firstHitAt,
+      duelEndTime: state.cycle.duelEndTime,
+      arenaPositions,
+      winnerId: state.cycle.winnerId,
+      winnerName: state.cycle.winnerName,
+      outcome: state.cycle.outcome,
+      winReason: state.cycle.winReason,
+      seed: state.cycle.seed,
+      replayHash: state.cycle.replayHash,
+      actionObservations,
+    },
+    leaderboard: state.leaderboard.map((entry) => ({
+      rank: entry.rank,
+      characterId: entry.characterId,
+      name: entry.name,
+      provider: entry.provider,
+      model: entry.model,
+      wins: entry.wins,
+      losses: entry.losses,
+      draws: entry.draws,
+      winRate: entry.winRate,
+      combatLevel: entry.combatLevel,
+      currentStreak: entry.currentStreak,
+    })),
+    cameraTarget: state.cameraTarget,
+    terminalNotice: sanitizePublicTerminalNotice(state.terminalNotice),
+    preparation,
   };
 }
 

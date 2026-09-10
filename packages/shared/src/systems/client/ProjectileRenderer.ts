@@ -25,10 +25,12 @@
 
 import THREE from "../../extras/three/three";
 import { MeshBasicNodeMaterial } from "three/webgpu";
+import { COMBAT_CONSTANTS } from "../../constants/CombatConstants";
 import { System } from "../shared/infrastructure/System";
 import { EventType } from "../../types/events";
 import type { World } from "../../core/World";
 import type { WorldOptions } from "../../types/index";
+import type { CombatProjectileCancelledPayload } from "../../types/events/event-payloads";
 import {
   getSpellVisual,
   getArrowVisual,
@@ -80,7 +82,15 @@ interface ActiveProjectile {
   arrowId?: string;
   attackerId: string;
   targetId: string;
+  projectileId?: string;
   networkEventId?: string;
+  pendingImpact?: {
+    damage: number;
+    networkEventId: string | null;
+    receivedAtPerformanceMs: number;
+    position: THREE.Vector3;
+  };
+  arrivedAtPerformanceMs?: number;
   /** Visual config for this projectile */
   visualConfig: SpellVisualConfig | ArrowVisualConfig;
   /** Trail sprites for spell effects */
@@ -100,6 +110,7 @@ export interface StreamingArrowVisualSpawnEvent {
   attackerId: string;
   targetId: string;
   arrowId: string | null;
+  projectileId: string | null;
   networkEventId: string | null;
   performanceTimeMs: number;
   startPosition: [number, number, number];
@@ -107,20 +118,61 @@ export interface StreamingArrowVisualSpawnEvent {
   travelDurationMs: number | null;
 }
 
+export interface StreamingArrowVisualImpactEvent {
+  sequence: number;
+  launchSequence: number | null;
+  attackerId: string;
+  targetId: string;
+  arrowId: string | null;
+  projectileId: string | null;
+  networkEventId: string | null;
+  performanceTimeMs: number;
+  impactPosition: [number, number, number] | null;
+  travelledMetres: number | null;
+  flightProgress: number | null;
+  damage: number;
+  visualFound: boolean;
+  impactParticleCount: number;
+}
+
+export interface StreamingArrowVisualCancellationEvent {
+  sequence: number;
+  launchSequence: number | null;
+  attackerId: string;
+  targetId: string;
+  arrowId: string | null;
+  projectileId: string;
+  launchNetworkEventId: string | null;
+  networkEventId: string | null;
+  performanceTimeMs: number;
+  reason: CombatProjectileCancelledPayload["reason"];
+  visualFound: boolean;
+}
+
 export interface StreamingProjectileVisualDiagnostics {
   schemaVersion: 1;
   updatedAt: number;
   latestSequence: number;
+  latestImpactSequence: number;
+  latestCancellationSequence: number;
   arrowLaunchEventCount: number;
   arrowSpawnCount: number;
   arrowCancelledBeforeSpawnCount: number;
+  arrowImpactEventCount: number;
+  arrowCancellationEventCount: number;
+  arrowExpiredBeforeImpactCount: number;
   pendingArrowCount: number;
   activeArrows: Array<
     StreamingArrowVisualSpawnEvent & {
       currentPosition: [number, number, number];
+      elapsedMs: number;
+      distanceTraveled: number;
+      flightProgress: number | null;
     }
   >;
   recentArrowSpawns: StreamingArrowVisualSpawnEvent[];
+  recentArrowImpacts: StreamingArrowVisualImpactEvent[];
+  recentArrowCancellations: StreamingArrowVisualCancellationEvent[];
 }
 
 /**
@@ -131,8 +183,14 @@ interface ImpactParticle {
   velocity: THREE.Vector3;
   life: number;
   maxLife: number;
+  initialScale: number;
 }
 
+// The equipment controller owns the exact rendered bow-hand release. Its
+// timer and this fallback originate from the same launch packet, so a small
+// grace interval guarantees the controller wins without delaying the normal
+// synchronized path. The fallback still protects non-humanoid/legacy clients.
+const ARROW_RELEASE_SYNC_GRACE_MS = 50;
 /**
  * ProjectileRenderer - Client-side projectile visualization
  */
@@ -145,8 +203,18 @@ export class ProjectileRenderer extends System {
   private arrowLaunchEventCount = 0;
   private arrowSpawnCount = 0;
   private arrowCancelledBeforeSpawnCount = 0;
+  private arrowImpactDiagnosticSequence = 0;
+  private arrowImpactEventCount = 0;
+  private arrowCancellationDiagnosticSequence = 0;
+  private arrowCancellationEventCount = 0;
+  private arrowExpiredBeforeImpactCount = 0;
   private readonly recentArrowSpawns: StreamingArrowVisualSpawnEvent[] = [];
+  private readonly recentArrowImpacts: StreamingArrowVisualImpactEvent[] = [];
+  private readonly recentArrowCancellations: StreamingArrowVisualCancellationEvent[] =
+    [];
   private static readonly MAX_RECENT_ARROW_SPAWNS = 128;
+  private static readonly MAX_RECENT_ARROW_IMPACTS = 128;
+  private static readonly MAX_RECENT_ARROW_CANCELLATIONS = 128;
 
   /**
    * Arrow meshes are short-lived, but their dimensions come from a small
@@ -160,7 +228,13 @@ export class ProjectileRenderer extends System {
   private readonly PROJECTILE_SPEED = 12; // Units per second (tiles ~= 1 unit)
   private readonly ARROW_SPEED = 15; // Arrows are slightly faster
   private readonly HIT_THRESHOLD = 0.5; // Distance to consider projectile "hit"
-  private readonly MAX_LIFETIME = 5000; // Safety timeout in ms
+  // Keep the lightweight lifecycle record until the server's own hard-stop can
+  // resolve it, plus a bounded delivery allowance. The mesh is hidden when its
+  // authored flight ends, so a delayed packet cannot create a hovering arrow.
+  private readonly MAX_LIFETIME =
+    COMBAT_CONSTANTS.PROJECTILE_MAX_LIFETIME_TICKS *
+      COMBAT_CONSTANTS.TICK_DURATION_MS +
+    COMBAT_CONSTANTS.PROJECTILE_TERMINAL_DELIVERY_GRACE_MS;
   private readonly TRAIL_UPDATE_INTERVAL = 16; // ~60fps trail updates
 
   // Pre-allocated for performance
@@ -172,16 +246,26 @@ export class ProjectileRenderer extends System {
   // Bound handlers for cleanup
   private boundLaunchHandler: ((data: unknown) => void) | null = null;
   private boundHitHandler: ((data: unknown) => void) | null = null;
+  private boundCancellationHandler: ((data: unknown) => void) | null = null;
   private boundCombatEndedHandler: ((data: unknown) => void) | null = null;
 
-  // Tracks pending delayed-spawn timers so destroy() can cancel them
+  // Tracks the complete authoritative launch until its visual release. Keeping
+  // the payload lets the frame/release path finish a due launch even when a
+  // throttled browser delays its timer behind a later impact event.
   private readonly _pendingDelays = new Map<
     ReturnType<typeof setTimeout>,
     {
       attackerId: string;
       targetId: string;
       type: "arrow" | "spell";
+      sourcePosition: { x: number; y: number; z: number };
+      targetPosition: { x: number; y: number; z: number };
+      releaseAtPerformanceMs: number;
+      spellId?: string;
       arrowId?: string;
+      projectileId?: string;
+      travelDurationMs?: number;
+      networkEventId?: string;
     }
   >();
 
@@ -219,6 +303,7 @@ export class ProjectileRenderer extends System {
     // Create bound handlers
     this.boundLaunchHandler = this.onProjectileLaunched.bind(this);
     this.boundHitHandler = this.onProjectileHit.bind(this);
+    this.boundCancellationHandler = this.onProjectileCancelled.bind(this);
     this.boundCombatEndedHandler = this.onCombatEnded.bind(this);
 
     // Listen for projectile events
@@ -228,17 +313,28 @@ export class ProjectileRenderer extends System {
       this,
     );
     this.world.on(EventType.COMBAT_PROJECTILE_HIT, this.boundHitHandler, this);
+    this.world.on(
+      EventType.COMBAT_PROJECTILE_CANCELLED,
+      this.boundCancellationHandler,
+      this,
+    );
     this.world.on(EventType.COMBAT_ENDED, this.boundCombatEndedHandler, this);
   }
 
   getStreamingProjectileVisualDiagnostics(): StreamingProjectileVisualDiagnostics {
+    const now = performance.now();
     return {
       schemaVersion: 1,
       updatedAt: Date.now(),
       latestSequence: this.projectileDiagnosticSequence,
+      latestImpactSequence: this.arrowImpactDiagnosticSequence,
+      latestCancellationSequence: this.arrowCancellationDiagnosticSequence,
       arrowLaunchEventCount: this.arrowLaunchEventCount,
       arrowSpawnCount: this.arrowSpawnCount,
       arrowCancelledBeforeSpawnCount: this.arrowCancelledBeforeSpawnCount,
+      arrowImpactEventCount: this.arrowImpactEventCount,
+      arrowCancellationEventCount: this.arrowCancellationEventCount,
+      arrowExpiredBeforeImpactCount: this.arrowExpiredBeforeImpactCount,
       pendingArrowCount: [...this._pendingDelays.values()].filter(
         (pending) => pending.type === "arrow",
       ).length,
@@ -250,6 +346,7 @@ export class ProjectileRenderer extends System {
                 attackerId: projectile.attackerId,
                 targetId: projectile.targetId,
                 arrowId: projectile.arrowId ?? null,
+                projectileId: projectile.projectileId ?? null,
                 networkEventId: projectile.networkEventId ?? null,
                 performanceTimeMs: projectile.startTime,
                 startPosition: [
@@ -268,11 +365,39 @@ export class ProjectileRenderer extends System {
                   projectile.sprite.position.y,
                   projectile.sprite.position.z,
                 ] as [number, number, number],
+                elapsedMs: Math.max(0, now - projectile.startTime),
+                distanceTraveled: projectile.distanceTraveled,
+                flightProgress:
+                  projectile.travelDurationMs && projectile.travelDurationMs > 0
+                    ? Math.min(
+                        1,
+                        Math.max(
+                          0,
+                          (now - projectile.startTime) /
+                            projectile.travelDurationMs,
+                        ),
+                      )
+                    : projectile.totalDistance > 0
+                      ? Math.min(
+                          1,
+                          Math.max(
+                            0,
+                            projectile.distanceTraveled /
+                              projectile.totalDistance,
+                          ),
+                        )
+                      : null,
               },
             ]
           : [],
       ),
       recentArrowSpawns: this.recentArrowSpawns.map((event) => ({ ...event })),
+      recentArrowImpacts: this.recentArrowImpacts.map((event) => ({
+        ...event,
+      })),
+      recentArrowCancellations: this.recentArrowCancellations.map((event) => ({
+        ...event,
+      })),
     };
   }
 
@@ -485,6 +610,7 @@ export class ProjectileRenderer extends System {
     targetPosition: { x: number; y: number; z: number };
     spellId?: string;
     arrowId?: string;
+    projectileId?: string;
     delayMs?: number;
     travelDurationMs?: number;
     networkEventId?: string;
@@ -505,6 +631,14 @@ export class ProjectileRenderer extends System {
     // Optional fields - validate if present
     if (d.spellId !== undefined && typeof d.spellId !== "string") return false;
     if (d.arrowId !== undefined && typeof d.arrowId !== "string") return false;
+    if (
+      d.projectileId !== undefined &&
+      (typeof d.projectileId !== "string" ||
+        d.projectileId.length === 0 ||
+        d.projectileId.length > 160)
+    ) {
+      return false;
+    }
     if (
       d.networkEventId !== undefined &&
       (typeof d.networkEventId !== "string" ||
@@ -556,16 +690,44 @@ export class ProjectileRenderer extends System {
   /**
    * Type guard for projectile hit event payload
    */
-  private isValidHitPayload(
-    data: unknown,
-  ): data is { attackerId: string; targetId: string } {
+  private isValidHitPayload(data: unknown): data is {
+    projectileId?: string;
+    attackerId: string;
+    targetId: string;
+    damage: number;
+    projectileType: string;
+    position?: { x: number; y: number; z: number } | null;
+    networkEventId?: string;
+  } {
     if (typeof data !== "object" || data === null) return false;
     const d = data as Record<string, unknown>;
+    const projectileIdValid =
+      d.projectileId === undefined ||
+      (typeof d.projectileId === "string" &&
+        d.projectileId.length > 0 &&
+        d.projectileId.length <= 160);
+    const networkEventIdValid =
+      d.networkEventId === undefined ||
+      (typeof d.networkEventId === "string" &&
+        d.networkEventId.length > 0 &&
+        d.networkEventId.length <= 160);
+    const positionValid =
+      d.position === undefined ||
+      d.position === null ||
+      this.isValidPosition(d.position);
     return (
+      projectileIdValid &&
+      networkEventIdValid &&
+      positionValid &&
       typeof d.attackerId === "string" &&
       d.attackerId.length > 0 &&
       typeof d.targetId === "string" &&
-      d.targetId.length > 0
+      d.targetId.length > 0 &&
+      typeof d.damage === "number" &&
+      Number.isFinite(d.damage) &&
+      d.damage >= 0 &&
+      typeof d.projectileType === "string" &&
+      d.projectileType.length > 0
     );
   }
 
@@ -586,6 +748,7 @@ export class ProjectileRenderer extends System {
       targetPosition,
       spellId,
       arrowId,
+      projectileId,
       delayMs,
       travelDurationMs,
       networkEventId,
@@ -598,25 +761,25 @@ export class ProjectileRenderer extends System {
 
     // If there's a delay (e.g., for magic cast animation), wait before spawning
     if (delayMs && delayMs > 0) {
+      const fallbackDelayMs =
+        type === "arrow" && networkEventId
+          ? delayMs + ARROW_RELEASE_SYNC_GRACE_MS
+          : delayMs;
       const handle = setTimeout(() => {
-        this._pendingDelays.delete(handle);
-        this.createProjectile(
-          attackerId,
-          targetId,
-          type,
-          sourcePosition,
-          targetPosition,
-          spellId,
-          arrowId,
-          travelDurationMs,
-          networkEventId,
-        );
-      }, delayMs);
+        this.spawnPendingDelayedProjectile(handle);
+      }, fallbackDelayMs);
       this._pendingDelays.set(handle, {
         attackerId,
         targetId,
         type,
+        sourcePosition: { ...sourcePosition },
+        targetPosition: { ...targetPosition },
+        releaseAtPerformanceMs: performance.now() + delayMs,
+        ...(spellId ? { spellId } : {}),
         ...(arrowId ? { arrowId } : {}),
+        ...(projectileId ? { projectileId } : {}),
+        ...(travelDurationMs !== undefined ? { travelDurationMs } : {}),
+        ...(networkEventId ? { networkEventId } : {}),
       });
     } else {
       this.createProjectile(
@@ -627,11 +790,69 @@ export class ProjectileRenderer extends System {
         targetPosition,
         spellId,
         arrowId,
+        projectileId,
         travelDurationMs,
         networkEventId,
       );
     }
   };
+
+  private spawnPendingDelayedProjectile(
+    handle: ReturnType<typeof setTimeout>,
+    exactStartPosition?: readonly [number, number, number],
+  ): boolean {
+    const pending = this._pendingDelays.get(handle);
+    if (!pending) return false;
+    clearTimeout(handle);
+    this._pendingDelays.delete(handle);
+    this.createProjectile(
+      pending.attackerId,
+      pending.targetId,
+      pending.type,
+      pending.sourcePosition,
+      pending.targetPosition,
+      pending.spellId,
+      pending.arrowId,
+      pending.projectileId,
+      pending.travelDurationMs,
+      pending.networkEventId,
+      exactStartPosition,
+    );
+    return true;
+  }
+
+  /**
+   * Synchronize an authoritative bow release with its already-buffered arrow.
+   * The equipment controller owns the rendered draw hand at the exact release
+   * frame, so consuming that position avoids independent timers drifting apart
+   * under CPU throttling.
+   */
+  releaseDelayedArrow(
+    networkEventId: string,
+    drawHandWorldPosition: readonly [number, number, number],
+  ): boolean {
+    if (
+      typeof networkEventId !== "string" ||
+      networkEventId.length === 0 ||
+      networkEventId.length > 160 ||
+      drawHandWorldPosition.length !== 3 ||
+      !drawHandWorldPosition.every(Number.isFinite)
+    ) {
+      return false;
+    }
+    for (const [handle, pending] of this._pendingDelays) {
+      if (
+        pending.type === "arrow" &&
+        pending.networkEventId === networkEventId
+      ) {
+        return this.spawnPendingDelayedProjectile(
+          handle,
+          drawHandWorldPosition,
+        );
+      }
+    }
+    return false;
+  }
 
   /**
    * Handle projectile hit event - remove projectile early if still in flight
@@ -643,61 +864,194 @@ export class ProjectileRenderer extends System {
     }
 
     // A throttled background tab can receive the authoritative impact before
-    // its delayed visual-spawn timer fires. Cancel that timer so a projectile
-    // cannot appear after its damage splat.
-    for (const [handle, pair] of this._pendingDelays) {
-      if (
-        pair.attackerId === data.attackerId &&
-        pair.targetId === data.targetId
+    // its delayed visual-spawn timer fires. Match the stable server projectile
+    // identity so an older impact cannot cancel a newer draw from the same
+    // attacker/target pair. The pair fallback supports rolling deploys where
+    // one side does not yet provide projectile IDs.
+    for (const [handle, pair] of [...this._pendingDelays]) {
+      const matchesImpact = data.projectileId
+        ? pair.projectileId === data.projectileId
+        : pair.attackerId === data.attackerId &&
+          pair.targetId === data.targetId;
+      if (!matchesImpact) continue;
+
+      if (pair.type === "arrow" && data.projectileId) {
+        // An exact authoritative launch cannot be erased simply because client
+        // timers ran late. Ask the fitted bow to emit its ordinary release
+        // transition immediately; that transition consumes this pending arrow
+        // synchronously using the rendered hand position. If the controller is
+        // unavailable (cold avatar, role attachment race), materialize from the
+        // same launch payload as a fail-safe before applying the impact.
+        if (pair.networkEventId) {
+          const equipmentVisual = this.world.getSystem?.("equipment-visual") as
+            | {
+                releaseCommittedArrowNow?: (
+                  playerId: string,
+                  networkEventId: string,
+                ) => boolean;
+              }
+            | undefined;
+          equipmentVisual?.releaseCommittedArrowNow?.(
+            pair.attackerId,
+            pair.networkEventId,
+          );
+        }
+        if (this._pendingDelays.has(handle)) {
+          this.spawnPendingDelayedProjectile(handle);
+        }
+      } else if (
+        pair.type === "arrow" &&
+        performance.now() >= pair.releaseAtPerformanceMs
       ) {
+        // Legacy pair-only packets still preserve an overdue committed release,
+        // but cannot safely force an early one because another same-pair arrow
+        // may already be drawing.
+        this.spawnPendingDelayedProjectile(handle);
+      } else {
         if (pair.type === "arrow") this.arrowCancelledBeforeSpawnCount++;
         clearTimeout(handle);
         this._pendingDelays.delete(handle);
       }
     }
 
-    // Find and mark for removal any projectile matching this attacker/target
+    const receivedAtPerformanceMs = performance.now();
+    let visualFound = false;
+    // Resolve only the impacted projectile when its stable identity is present.
     for (let i = 0; i < this.activeProjectiles.length; i++) {
       const proj = this.activeProjectiles[i];
-      if (
-        proj.attackerId === data.attackerId &&
-        proj.targetId === data.targetId
-      ) {
-        // Set maxLifetime to 0 to remove on next update
-        proj.maxLifetime = 0;
+      const matchesImpact = data.projectileId
+        ? proj.projectileId === data.projectileId
+        : proj.attackerId === data.attackerId &&
+          proj.targetId === data.targetId;
+      if (matchesImpact) {
+        const impactPosition = proj.targetPos.clone();
+        if (data.position) {
+          impactPosition.x = data.position.x;
+          impactPosition.y = data.position.y + 1;
+          impactPosition.z = data.position.z;
+        } else {
+          this.getTargetPosition(data.targetId, impactPosition);
+        }
+        proj.pendingImpact = {
+          damage: data.damage,
+          networkEventId: data.networkEventId ?? null,
+          receivedAtPerformanceMs,
+          position: impactPosition,
+        };
+        visualFound = true;
       }
+    }
+    if (data.projectileType === "arrow" && !visualFound) {
+      let impactPosition: THREE.Vector3 | null = null;
+      if (data.position) {
+        impactPosition = new THREE.Vector3(
+          data.position.x,
+          data.position.y + 1,
+          data.position.z,
+        );
+      } else {
+        const resolved = new THREE.Vector3();
+        if (this.getTargetPosition(data.targetId, resolved)) {
+          impactPosition = resolved;
+        }
+      }
+      this.recordArrowImpact(null, data, impactPosition, 0);
     }
   };
 
-  /** Remove every pending/active visual for a combat pair without an impact. */
+  /** Remove only the exact visual whose queued server hit was invalidated. */
+  private onProjectileCancelled = (data: unknown): void => {
+    if (!this.isValidCancellationPayload(data)) return;
+
+    let pendingLaunchNetworkEventId: string | null = null;
+    let pendingArrowId: string | null = null;
+    for (const [handle, pending] of [...this._pendingDelays]) {
+      if (pending.projectileId !== data.projectileId) continue;
+      pendingLaunchNetworkEventId = pending.networkEventId ?? null;
+      pendingArrowId = pending.arrowId ?? null;
+      if (pending.type === "arrow" && pending.networkEventId) {
+        const equipmentVisual = this.world.getSystem?.("equipment-visual") as
+          | {
+              cancelCommittedArrow?: (
+                playerId: string,
+                networkEventId: string,
+              ) => boolean;
+            }
+          | undefined;
+        equipmentVisual?.cancelCommittedArrow?.(
+          pending.attackerId,
+          pending.networkEventId,
+        );
+      }
+      clearTimeout(handle);
+      this._pendingDelays.delete(handle);
+    }
+
+    const activeIndex = this.activeProjectiles.findIndex(
+      (projectile) => projectile.projectileId === data.projectileId,
+    );
+    const projectile =
+      activeIndex >= 0 ? this.activeProjectiles[activeIndex] : null;
+    if (projectile) {
+      this.removeProjectile(projectile);
+      this.activeProjectiles.splice(activeIndex, 1);
+    }
+
+    if (data.projectileType === "arrow") {
+      this.recordArrowCancellation(
+        projectile,
+        data,
+        pendingLaunchNetworkEventId,
+        pendingArrowId,
+      );
+    }
+  };
+
+  private isValidCancellationPayload(
+    data: unknown,
+  ): data is CombatProjectileCancelledPayload {
+    if (typeof data !== "object" || data === null) return false;
+    const candidate = data as Record<string, unknown>;
+    return Boolean(
+      typeof candidate.projectileId === "string" &&
+      candidate.projectileId.length > 0 &&
+      candidate.projectileId.length <= 160 &&
+      typeof candidate.attackerId === "string" &&
+      candidate.attackerId.length > 0 &&
+      typeof candidate.targetId === "string" &&
+      candidate.targetId.length > 0 &&
+      (candidate.projectileType === "arrow" ||
+        candidate.projectileType === "spell") &&
+      [
+        "combat_ended",
+        "entity_died",
+        "player_respawned",
+        "player_disconnected",
+        "combat_state_missing",
+        "projectile_expired",
+      ].includes(String(candidate.reason)),
+    );
+  }
+
+  /**
+   * A pair-wide end packet cannot safely identify a committed projectile.
+   */
   private onCombatEnded = (data: unknown): void => {
-    if (!this.isValidHitPayload(data)) return;
-
-    for (const [handle, pair] of this._pendingDelays) {
-      const matchesPair =
-        (pair.attackerId === data.attackerId &&
-          pair.targetId === data.targetId) ||
-        (pair.attackerId === data.targetId &&
-          pair.targetId === data.attackerId);
-      if (matchesPair) {
-        if (pair.type === "arrow") this.arrowCancelledBeforeSpawnCount++;
-        clearTimeout(handle);
-        this._pendingDelays.delete(handle);
-      }
+    if (typeof data !== "object" || data === null) return;
+    const candidate = data as Record<string, unknown>;
+    if (
+      typeof candidate.attackerId !== "string" ||
+      typeof candidate.targetId !== "string"
+    ) {
+      return;
     }
 
-    for (let i = this.activeProjectiles.length - 1; i >= 0; i--) {
-      const projectile = this.activeProjectiles[i];
-      const matchesPair =
-        (projectile.attackerId === data.attackerId &&
-          projectile.targetId === data.targetId) ||
-        (projectile.attackerId === data.targetId &&
-          projectile.targetId === data.attackerId);
-      if (matchesPair) {
-        this.removeProjectile(projectile);
-        this.activeProjectiles.splice(i, 1);
-      }
-    }
+    // COMBAT_ENDED carries neither cycle identity nor projectile identity. A
+    // delayed packet from the preceding duel can arrive after the same two
+    // contestants have launched in their next cycle. Already-authoritative
+    // launches therefore finish their bounded visual lifetime; exact
+    // COMBAT_PROJECTILE_HIT identities own early cleanup, while destroy()
+    // remains the unconditional resource-teardown boundary.
   };
 
   /**
@@ -774,18 +1128,18 @@ export class ProjectileRenderer extends System {
     targetPos: { x: number; y: number; z: number },
     spellId?: string,
     arrowId?: string,
+    projectileId?: string,
     travelDurationMs?: number,
     networkEventId?: string,
+    exactStartPosition?: readonly [number, number, number],
   ): void {
     if (!this.world.stage?.scene) {
       return;
     }
 
-    const start = this.resolveProjectileStartPosition(
-      attackerId,
-      type,
-      sourcePos,
-    );
+    const start = exactStartPosition
+      ? this._spawnOrigin.set(...exactStartPosition)
+      : this.resolveProjectileStartPosition(attackerId, type, sourcePos);
     const startX = start.x;
     const startY = start.y;
     const startZ = start.z;
@@ -902,6 +1256,7 @@ export class ProjectileRenderer extends System {
       arrowId,
       attackerId,
       targetId,
+      projectileId,
       networkEventId,
       visualConfig,
       trailSprites,
@@ -918,6 +1273,7 @@ export class ProjectileRenderer extends System {
         attackerId,
         targetId,
         arrowId: arrowId ?? null,
+        projectileId: projectileId ?? null,
         networkEventId: networkEventId ?? null,
         performanceTimeMs: startTime,
         startPosition: [spawnX, startY, spawnZ],
@@ -951,6 +1307,87 @@ export class ProjectileRenderer extends System {
     return false;
   }
 
+  private recordArrowImpact(
+    projectile: ActiveProjectile | null,
+    impact: {
+      projectileId?: string;
+      attackerId: string;
+      targetId: string;
+      damage: number;
+      networkEventId?: string;
+    },
+    impactPosition: THREE.Vector3 | null,
+    impactParticleCount: number,
+    receivedAtPerformanceMs = performance.now(),
+  ): void {
+    const elapsedMs = projectile
+      ? Math.max(0, receivedAtPerformanceMs - projectile.startTime)
+      : null;
+    const flightProgress =
+      projectile?.travelDurationMs && elapsedMs !== null
+        ? Math.min(1, elapsedMs / projectile.travelDurationMs)
+        : projectile && projectile.totalDistance > 0
+          ? Math.min(1, projectile.distanceTraveled / projectile.totalDistance)
+          : null;
+    this.arrowImpactEventCount++;
+    this.recentArrowImpacts.push({
+      sequence: ++this.arrowImpactDiagnosticSequence,
+      launchSequence: projectile?.diagnosticSequence ?? null,
+      attackerId: impact.attackerId,
+      targetId: impact.targetId,
+      arrowId: projectile?.arrowId ?? null,
+      projectileId: impact.projectileId ?? projectile?.projectileId ?? null,
+      networkEventId: impact.networkEventId ?? null,
+      performanceTimeMs: receivedAtPerformanceMs,
+      impactPosition: impactPosition
+        ? [impactPosition.x, impactPosition.y, impactPosition.z]
+        : null,
+      travelledMetres:
+        projectile && impactPosition
+          ? projectile.startPos.distanceTo(impactPosition)
+          : null,
+      flightProgress,
+      damage: impact.damage,
+      visualFound: projectile !== null,
+      impactParticleCount,
+    });
+    if (
+      this.recentArrowImpacts.length >
+      ProjectileRenderer.MAX_RECENT_ARROW_IMPACTS
+    ) {
+      this.recentArrowImpacts.shift();
+    }
+  }
+
+  private recordArrowCancellation(
+    projectile: ActiveProjectile | null,
+    cancellation: CombatProjectileCancelledPayload,
+    pendingLaunchNetworkEventId: string | null,
+    pendingArrowId: string | null,
+  ): void {
+    this.arrowCancellationEventCount++;
+    this.recentArrowCancellations.push({
+      sequence: ++this.arrowCancellationDiagnosticSequence,
+      launchSequence: projectile?.diagnosticSequence ?? null,
+      attackerId: cancellation.attackerId,
+      targetId: cancellation.targetId,
+      arrowId: projectile?.arrowId ?? pendingArrowId,
+      projectileId: cancellation.projectileId,
+      launchNetworkEventId:
+        projectile?.networkEventId ?? pendingLaunchNetworkEventId,
+      networkEventId: cancellation.networkEventId ?? null,
+      performanceTimeMs: performance.now(),
+      reason: cancellation.reason,
+      visualFound: projectile !== null || pendingLaunchNetworkEventId !== null,
+    });
+    if (
+      this.recentArrowCancellations.length >
+      ProjectileRenderer.MAX_RECENT_ARROW_CANCELLATIONS
+    ) {
+      this.recentArrowCancellations.shift();
+    }
+  }
+
   /**
    * Update projectile positions each frame using speed-based homing
    */
@@ -970,11 +1407,30 @@ export class ProjectileRenderer extends System {
       const proj = this.activeProjectiles[i];
       const elapsed = now - proj.startTime;
 
-      // Safety timeout or forced removal from hit event
-      if (elapsed >= proj.maxLifetime) {
-        // maxLifetime=0 means forced by hit event — spawn impact burst
-        if (proj.maxLifetime === 0) {
-          this.spawnImpactBurst(proj);
+      if (proj.pendingImpact) {
+        proj.currentPos.copy(proj.pendingImpact.position);
+        if (proj.type === "arrow") {
+          this._tempVec3b.copy(proj.pendingImpact.position).sub(proj.startPos);
+          if (this._tempVec3b.lengthSq() > 0.000001) {
+            proj.currentPos.addScaledVector(this._tempVec3b.normalize(), -0.28);
+          }
+        }
+        proj.sprite.position.copy(proj.currentPos);
+        const impactParticleCount = this.spawnImpactBurst(proj);
+        if (proj.type === "arrow") {
+          this.recordArrowImpact(
+            proj,
+            {
+              projectileId: proj.projectileId,
+              attackerId: proj.attackerId,
+              targetId: proj.targetId,
+              damage: proj.pendingImpact.damage,
+              networkEventId: proj.pendingImpact.networkEventId ?? undefined,
+            },
+            proj.currentPos,
+            impactParticleCount,
+            proj.pendingImpact.receivedAtPerformanceMs,
+          );
         }
         this.removeProjectile(proj);
         this._toRemove.push(i);
@@ -984,14 +1440,45 @@ export class ProjectileRenderer extends System {
       // Track moving target - update targetPos with current target position
       this.getTargetPosition(proj.targetId, proj.targetPos);
 
-      // The server's impact tick is authoritative. When its derived duration
-      // elapses locally, finish the visual even if frame cadence or target
-      // motion prevented the distance threshold from being crossed.
+      // Arrow damage is authoritative. Once the declared flight duration is
+      // complete, hold at the tracked target for one bounded delivery grace
+      // instead of manufacturing a local hit before the server event arrives.
+      if (
+        proj.type === "arrow" &&
+        proj.travelDurationMs !== undefined &&
+        elapsed >= proj.travelDurationMs
+      ) {
+        if (elapsed >= proj.maxLifetime) {
+          this.arrowExpiredBeforeImpactCount++;
+          this.removeProjectile(proj);
+          this._toRemove.push(i);
+        } else {
+          proj.arrivedAtPerformanceMs ??= now;
+          proj.currentPos.copy(proj.targetPos);
+          proj.sprite.position.copy(proj.targetPos);
+          proj.sprite.visible = false;
+          for (const trail of proj.trailSprites) {
+            trail.mesh.visible = false;
+          }
+        }
+        continue;
+      }
+
+      // Non-arrow effects retain their existing duration-complete fallback.
       if (
         proj.travelDurationMs !== undefined &&
         elapsed >= proj.travelDurationMs
       ) {
         this.spawnImpactBurst(proj);
+        this.removeProjectile(proj);
+        this._toRemove.push(i);
+        continue;
+      }
+
+      // Safety timeout. An arrow timeout is explicitly observable because it
+      // means no matching authoritative impact was presented.
+      if (elapsed >= proj.maxLifetime) {
+        if (proj.type === "arrow") this.arrowExpiredBeforeImpactCount++;
         this.removeProjectile(proj);
         this._toRemove.push(i);
         continue;
@@ -1008,9 +1495,25 @@ export class ProjectileRenderer extends System {
         proj.travelDurationMs === undefined &&
         distSqToTarget < this.HIT_THRESHOLD * this.HIT_THRESHOLD
       ) {
-        this.spawnImpactBurst(proj);
-        this.removeProjectile(proj);
-        this._toRemove.push(i);
+        if (proj.type === "arrow") {
+          proj.arrivedAtPerformanceMs ??= now;
+          if (elapsed >= proj.maxLifetime) {
+            this.arrowExpiredBeforeImpactCount++;
+            this.removeProjectile(proj);
+            this._toRemove.push(i);
+          } else {
+            proj.currentPos.copy(proj.targetPos);
+            proj.sprite.position.copy(proj.targetPos);
+            proj.sprite.visible = false;
+            for (const trail of proj.trailSprites) {
+              trail.mesh.visible = false;
+            }
+          }
+        } else {
+          this.spawnImpactBurst(proj);
+          this.removeProjectile(proj);
+          this._toRemove.push(i);
+        }
         continue;
       }
 
@@ -1134,7 +1637,7 @@ export class ProjectileRenderer extends System {
       }
 
       // Fade out when very close to target
-      if (distanceToTarget < this.HIT_THRESHOLD * 3) {
+      if (proj.type !== "arrow" && distanceToTarget < this.HIT_THRESHOLD * 3) {
         const fadeProgress = 1 - distanceToTarget / (this.HIT_THRESHOLD * 3);
 
         if (proj.sprite instanceof THREE.Group) {
@@ -1199,8 +1702,10 @@ export class ProjectileRenderer extends System {
       const mat = p.mesh.material as THREE.MeshBasicMaterial;
       mat.opacity = (1 - t) * (mat.userData.baseOpacity ?? 0.9);
 
-      // Shrink slightly
-      const scale = (1 - t * 0.5) * p.mesh.scale.x;
+      // Shrink from the authored starting size without compounding the scale
+      // on every frame (which made impacts collapse at frame-rate-dependent
+      // speeds).
+      const scale = (1 - t * 0.5) * p.initialScale;
       p.mesh.scale.setScalar(scale);
 
       // Billboard
@@ -1260,19 +1765,61 @@ export class ProjectileRenderer extends System {
    * Spawn a burst of impact particles at the projectile's current position.
    * Particles fly outward in random XZ directions with upward drift, then fade.
    */
-  private spawnImpactBurst(proj: ActiveProjectile): void {
-    if (proj.type !== "spell" || !this.world.stage?.scene) return;
+  private spawnImpactBurst(proj: ActiveProjectile): number {
+    if (!this.world.stage?.scene) return 0;
+
+    const geom = ProjectileRenderer.getParticleGeometry();
+    if (proj.type === "arrow") {
+      const config = proj.visualConfig as ArrowVisualConfig;
+      const count = 7;
+      for (let i = 0; i < count; i++) {
+        const centralFlash = i === 0;
+        const color = centralFlash ? 0xfff1c4 : config.headColor;
+        const mat = this.createGlowMaterial(
+          color,
+          centralFlash ? 2.8 : 3.6,
+          centralFlash ? 0.95 : 0.82,
+        );
+        const mesh = new THREE.Mesh(geom, mat);
+        const initialScale = centralFlash
+          ? Math.max(0.24, config.width * 3)
+          : Math.max(0.1, config.width * 1.5);
+        mesh.scale.setScalar(initialScale);
+        mesh.position.copy(proj.currentPos);
+        mesh.renderOrder = 1_000;
+        mesh.frustumCulled = false;
+
+        const angle = ((i - 1) / (count - 1)) * Math.PI * 2;
+        const velocity = centralFlash
+          ? new THREE.Vector3(0, 0.2, 0)
+          : new THREE.Vector3(
+              Math.cos(angle) * 1.35,
+              0.65 + ((i - 1) % 2) * 0.25,
+              Math.sin(angle) * 1.35,
+            );
+        const maxLife = centralFlash ? 0.22 : 0.32;
+
+        this.world.stage.scene.add(mesh);
+        this.activeImpactParticles.push({
+          mesh,
+          velocity,
+          life: 0,
+          maxLife,
+          initialScale,
+        });
+      }
+      return count;
+    }
 
     const config = proj.visualConfig as SpellVisualConfig;
     const palette = this.getSpellColorPalette(config);
-    const geom = ProjectileRenderer.getParticleGeometry();
     const count = 4 + Math.floor(Math.random() * 3); // 4-6 particles
 
     for (let i = 0; i < count; i++) {
       const mat = this.createGlowMaterial(palette.mid, 2.5, 0.9);
       const mesh = new THREE.Mesh(geom, mat);
-      const size = config.size * (0.2 + Math.random() * 0.3);
-      mesh.scale.set(size, size, size);
+      const initialScale = config.size * (0.2 + Math.random() * 0.3);
+      mesh.scale.setScalar(initialScale);
       mesh.position.copy(proj.currentPos);
       mesh.renderOrder = 1000;
       mesh.frustumCulled = false;
@@ -1289,8 +1836,15 @@ export class ProjectileRenderer extends System {
       const maxLife = 0.3 + Math.random() * 0.2; // 0.3-0.5s
 
       this.world.stage.scene.add(mesh);
-      this.activeImpactParticles.push({ mesh, velocity, life: 0, maxLife });
+      this.activeImpactParticles.push({
+        mesh,
+        velocity,
+        life: 0,
+        maxLife,
+        initialScale,
+      });
     }
+    return count;
   }
 
   /**
@@ -1349,6 +1903,13 @@ export class ProjectileRenderer extends System {
     if (this.boundHitHandler) {
       this.world.off(EventType.COMBAT_PROJECTILE_HIT, this.boundHitHandler);
       this.boundHitHandler = null;
+    }
+    if (this.boundCancellationHandler) {
+      this.world.off(
+        EventType.COMBAT_PROJECTILE_CANCELLED,
+        this.boundCancellationHandler,
+      );
+      this.boundCancellationHandler = null;
     }
     if (this.boundCombatEndedHandler) {
       this.world.off(EventType.COMBAT_ENDED, this.boundCombatEndedHandler);

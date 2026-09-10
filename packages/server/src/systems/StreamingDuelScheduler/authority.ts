@@ -6,6 +6,7 @@ import {
   getStreamingDuelScheduler,
   initStreamingDuelScheduler,
 } from "./index.js";
+import { resolveStreamingPreparationDuration } from "./types.js";
 
 export type StreamingDuelSchedulerRole = "authority" | "replica" | "disabled";
 
@@ -111,11 +112,8 @@ export function resolveStreamingDuelAuthorityConfig(
     rawRole === "authority" &&
     env.STREAMING_DUEL_ENABLED !== "false"
   ) {
-    const preparationRaw = env.STREAMING_DUEL_PREPARATION_MS?.trim();
-    const preparationMs = preparationRaw
-      ? Number.parseInt(preparationRaw, 10)
-      : Number.NaN;
-    if (!Number.isSafeInteger(preparationMs) || preparationMs < 1_000) {
+    const preparationMs = resolveStreamingPreparationDuration(env);
+    if (preparationMs === null) {
       throw new Error(
         "STREAMING_DUEL_PREPARATION_MS is required in production and must be at least 1000",
       );

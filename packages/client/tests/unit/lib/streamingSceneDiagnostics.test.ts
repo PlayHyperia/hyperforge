@@ -5,6 +5,7 @@ import {
   advanceStreamingReadinessStability,
   areStreamingSceneAssetsReady,
   collectStreamingSceneDiagnostics,
+  collectStreamingSceneReadinessEvidence,
   createStreamingColdRenderStability,
   type StreamingDiagnosticsWorld,
 } from "../../../src/lib/streamingSceneDiagnostics";
@@ -21,6 +22,7 @@ function vector(
   y: number,
   z: number,
   projected: [number, number, number] = [0, 0, 0],
+  projectValue?: (value: TestVector) => [number, number, number],
 ): TestVector {
   return {
     x,
@@ -33,15 +35,24 @@ function vector(
         z,
         clone: () => clone,
         project: () => {
-          clone.x = projected[0];
-          clone.y = projected[1];
-          clone.z = projected[2];
+          const next = projectValue?.(clone) ?? projected;
+          clone.x = next[0];
+          clone.y = next[1];
+          clone.z = next[2];
           return clone;
         },
       };
       return clone;
     },
   };
+}
+
+function matrixAt(x: number, y: number, z: number) {
+  const elements = Array.from({ length: 16 }, () => 0);
+  elements[12] = x;
+  elements[13] = y;
+  elements[14] = z;
+  return { elements };
 }
 
 function yaw(radians: number) {
@@ -88,12 +99,19 @@ describe("streaming scene diagnostics", () => {
     const agentA = {
       id: "internal-a",
       data: { characterId: "agent-a" },
-      node: { position: vector(348, 0.42, 402, [-0.25, 0.1, 0.5]) },
+      node: {
+        position: vector(348, 0.42, 402, [-0.25, 0.1, 0.5], (value) =>
+          value.y > 1 ? [-0.24, 0.48, 0.49] : [-0.25, 0.1, 0.5],
+        ),
+      },
       base: {
         position: vector(348.02, 0.42, 402.01),
         quaternion: yaw(-Math.PI / 2),
       },
-      avatar: { instance: { raw: { scene: { visible: true } } } },
+      avatar: {
+        getBoneTransform: () => matrixAt(348, 2.05, 402),
+        instance: { raw: { scene: { visible: true } } },
+      },
       lerpPosition: { current: vector(347, 0.42, 402) },
       active: true,
       destroyed: false,
@@ -101,12 +119,19 @@ describe("streaming scene diagnostics", () => {
     const agentB = {
       id: "agent-b",
       data: { id: "agent-b" },
-      node: { position: vector(352, 0.42, 402, [0.25, 0.1, 0.5]) },
+      node: {
+        position: vector(352, 0.42, 402, [0.25, 0.1, 0.5], (value) =>
+          value.y > 1 ? [0.24, 0.48, 0.49] : [0.25, 0.1, 0.5],
+        ),
+      },
       base: {
         position: vector(352, 0.42, 402),
         quaternion: yaw(Math.PI / 2),
       },
-      avatar: { instance: { raw: { scene: { visible: true } } } },
+      avatar: {
+        getBoneTransform: () => matrixAt(352, 2.05, 402),
+        instance: { raw: { scene: { visible: true } } },
+      },
       active: true,
       destroyed: false,
     };
@@ -114,6 +139,7 @@ describe("streaming scene diagnostics", () => {
       ["agent-a", vector(348.1, 0.42, 402)],
       ["agent-b", vector(351.9, 0.42, 402)],
     ]);
+    const lineOfSightTargets: Array<{ x: number; y: number; z: number }> = [];
     const world: StreamingDiagnosticsWorld = {
       camera: {
         position: vector(350, 8, 394),
@@ -138,6 +164,22 @@ describe("streaming scene diagnostics", () => {
               target: agentA,
               position: [350, 8, 394],
             }),
+            getStreamingCinematicLineOfSight: (target: {
+              x: number;
+              y: number;
+              z: number;
+            }) => {
+              lineOfSightTargets.push(target);
+              return true;
+            },
+            getStreamingCinematicEnvironmentLineOfSight: (target: {
+              x: number;
+              y: number;
+              z: number;
+            }) => {
+              lineOfSightTargets.push(target);
+              return true;
+            },
           };
         }
         if (name === "duel-arena-visuals") {
@@ -164,7 +206,10 @@ describe("streaming scene diagnostics", () => {
           facingTargetErrorDegrees: 0,
           avatarReady: true,
           ndcPosition: [-0.25, 0.1, 0.5],
+          ndcHeadPosition: [-0.24, 0.48, 0.49],
           insideCombatArena: true,
+          insideAssignedCombatArena: true,
+          cameraLineOfSight: { head: true, torso: true, lowerBody: true },
           visible: true,
           active: true,
         },
@@ -178,7 +223,10 @@ describe("streaming scene diagnostics", () => {
           facingTargetErrorDegrees: 0,
           avatarReady: true,
           ndcPosition: [0.25, 0.1, 0.5],
+          ndcHeadPosition: [0.24, 0.48, 0.49],
           insideCombatArena: true,
+          insideAssignedCombatArena: true,
+          cameraLineOfSight: { head: true, torso: true, lowerBody: true },
           visible: true,
           active: true,
         },
@@ -190,10 +238,21 @@ describe("streaming scene diagnostics", () => {
         position: [350, 8, 394],
         fov: 50,
         aspect: 16 / 9,
+        radius: null,
+        preparationShotActive: false,
+        preparationPairShotActive: false,
         targetId: "agent-a",
         expectedTargetId: "agent-a",
       },
     });
+    expect(lineOfSightTargets).toEqual([
+      { x: 348, y: 2.05, z: 402 },
+      { x: 348, y: 1.3654, z: 402 },
+      { x: 348, y: 0.746, z: 402 },
+      { x: 352, y: 2.05, z: 402 },
+      { x: 352, y: 1.3654, z: 402 },
+      { x: 352, y: 0.746, z: 402 },
+    ]);
     expect(areStreamingSceneAssetsReady(world, state())).toBe(true);
   });
 
@@ -220,12 +279,23 @@ describe("streaming scene diagnostics", () => {
       schemaVersion: 1 as const,
       updatedAt: 10,
       latestSequence: 3,
+      latestImpactSequence: 2,
       arrowLaunchEventCount: 3,
       arrowSpawnCount: 3,
       arrowCancelledBeforeSpawnCount: 0,
+      arrowImpactEventCount: 2,
+      arrowExpiredBeforeImpactCount: 0,
       pendingArrowCount: 0,
       activeArrows: [],
       recentArrowSpawns: [],
+      recentArrowImpacts: [],
+    };
+    const damage = {
+      schemaVersion: 1 as const,
+      updatedAt: 10,
+      latestSequence: 2,
+      activeSplatCount: 1,
+      recentEvents: [],
     };
     const world: StreamingDiagnosticsWorld = {
       camera: { position: vector(350, 8, 394), fov: 50, aspect: 16 / 9 },
@@ -245,6 +315,9 @@ describe("streaming scene diagnostics", () => {
         if (name === "projectile-renderer") {
           return { getStreamingProjectileVisualDiagnostics: () => projectiles };
         }
+        if (name === "damage-splat") {
+          return { getStreamingDamagePresentationDiagnostics: () => damage };
+        }
         return null;
       },
     };
@@ -256,6 +329,13 @@ describe("streaming scene diagnostics", () => {
         players: [{ playerId: "agent-a" }, { playerId: "agent-b" }],
       },
       projectiles,
+      damage,
+    });
+    expect(
+      collectStreamingSceneReadinessEvidence(world, state()),
+    ).toMatchObject({
+      damagePresentationAvailable: true,
+      activeDamageSplatCount: 1,
     });
   });
 
@@ -327,6 +407,34 @@ describe("streaming scene diagnostics", () => {
                 lastIntensity: 0.91,
                 lastSide: -1,
               },
+        getAuthoredMotionDiagnostics: () =>
+          invalid
+            ? {
+                schemaVersion: 1,
+                overflow: false,
+                invalidActionCount: 0,
+                actions: [
+                  {
+                    url: "asset://emotes/attack.glb?private=value",
+                    running: true,
+                    paused: false,
+                    effectiveWeight: 0.8,
+                  },
+                ],
+              }
+            : {
+                schemaVersion: 1,
+                overflow: false,
+                invalidActionCount: 0,
+                actions: [
+                  {
+                    url: "asset://emotes/emote_sword_swing.glb",
+                    running: true,
+                    paused: false,
+                    effectiveWeight: 0.8,
+                  },
+                ],
+              },
       },
     });
     const entities = new Map([
@@ -368,11 +476,26 @@ describe("streaming scene diagnostics", () => {
       currentWeight: 0.72,
       lastIntensity: 0.91,
       lastSide: -1,
+      requiredBoneCount: 5,
     });
     expect(diagnostics?.agents[0]?.avatarEmote).toBe(
       "asset://emotes/emote_sword_swing.glb",
     );
+    expect(diagnostics?.agents[0]?.authoredMotion).toEqual({
+      schemaVersion: 1,
+      overflow: false,
+      invalidActionCount: 0,
+      actions: [
+        {
+          url: "asset://emotes/emote_sword_swing.glb",
+          running: true,
+          paused: false,
+          effectiveWeight: 0.8,
+        },
+      ],
+    });
     expect(diagnostics?.agents[1]).not.toHaveProperty("hitReaction");
+    expect(diagnostics?.agents[1]).not.toHaveProperty("authoredMotion");
   });
 
   it("reports missing scene entities without throwing", () => {
@@ -400,7 +523,10 @@ describe("streaming scene diagnostics", () => {
         facingTargetErrorDegrees: null,
         avatarReady: false,
         ndcPosition: null,
+        ndcHeadPosition: null,
         insideCombatArena: false,
+        insideAssignedCombatArena: null,
+        cameraLineOfSight: null,
         visible: false,
         active: false,
       },
@@ -414,7 +540,10 @@ describe("streaming scene diagnostics", () => {
         facingTargetErrorDegrees: null,
         avatarReady: false,
         ndcPosition: null,
+        ndcHeadPosition: null,
         insideCombatArena: false,
+        insideAssignedCombatArena: null,
+        cameraLineOfSight: null,
         visible: false,
         active: false,
       },
@@ -579,6 +708,194 @@ describe("streaming scene diagnostics", () => {
     expect(areStreamingSceneAssetsReady(world, idleState)).toBe(true);
   });
 
+  it("requires visible contestants and attached preparation tools while idle preparation is active", () => {
+    const preparingAgent = (id: string, x: number) => ({
+      id,
+      data: {
+        characterId: id,
+        isAgent: true,
+        gatheringToolPresentation: { revision: 1, itemId: "harpoon" },
+        fishingInteractionPresentation: {
+          revision: 1,
+          itemId: "harpoon",
+          phase: "held",
+        },
+      },
+      node: { position: vector(x, 28.08, -12.5), visible: true },
+      base: { position: vector(x, 28.08, -12.5), visible: true },
+      avatar: { instance: { raw: { scene: { visible: true } } } },
+      active: true,
+    });
+    const agents = new Map<string, unknown>([
+      ["agent-a", preparingAgent("agent-a", -8.75)],
+      ["agent-b", preparingAgent("agent-b", -1.75)],
+    ]);
+    let preparationVisualsReady = false;
+    const world: StreamingDiagnosticsWorld = {
+      camera: { position: vector(-5.25, 35, -22), fov: 50, aspect: 16 / 9 },
+      entities: { get: (id) => agents.get(id), players: agents },
+      graphics: { isPrecompileIdle: () => true },
+      getSystem: (name) => {
+        if (name === "duel-arena-visuals") return { isReady: () => true };
+        if (name === "equipment-visual") {
+          return {
+            ...readyEquipmentVisuals(),
+            getStreamingPreparationVisualDiagnostics: () => ({
+              schemaVersion: 1,
+              updatedAt: 1,
+              activeCount: 2,
+              readyCount: preparationVisualsReady ? 2 : 1,
+              ready: preparationVisualsReady,
+              players: [],
+            }),
+          };
+        }
+        return null;
+      },
+    };
+    const idleState = {
+      ...state(),
+      cycle: { ...state().cycle, phase: "IDLE" },
+    };
+
+    const diagnostics = collectStreamingSceneDiagnostics(world, idleState);
+    expect(
+      diagnostics?.agents.map(
+        (agent) => agent?.preparationPresentation?.gatheringToolItemId,
+      ),
+    ).toEqual(["harpoon", "harpoon"]);
+    expect(areStreamingSceneAssetsReady(world, idleState)).toBe(false);
+
+    preparationVisualsReady = true;
+    expect(areStreamingSceneAssetsReady(world, idleState)).toBe(true);
+
+    const hidden = agents.get("agent-b") as {
+      avatar: { instance: { raw: { scene: { visible: boolean } } } };
+    };
+    hidden.avatar.instance.raw.scene.visible = false;
+    expect(areStreamingSceneAssetsReady(world, idleState)).toBe(false);
+  });
+
+  it("treats authoritative processing work as active fail-closed preparation", () => {
+    const processingAgent = (id: string, x: number) => ({
+      id,
+      data: {
+        characterId: id,
+        isAgent: true,
+        processingInteractionPresentation: {
+          revision: 4,
+          skill: "smithing",
+          phase: "working",
+          phaseStartedAtServerTimeMs: 2000,
+          targetPosition: { x: x + 1, y: 28, z: -10 },
+        },
+      },
+      node: { position: vector(x, 28, -11), visible: true },
+      base: { position: vector(x, 28, -11), visible: true },
+      avatar: { instance: { raw: { scene: { visible: true } } } },
+      active: true,
+    });
+    const agents = new Map<string, unknown>([
+      ["agent-a", processingAgent("agent-a", -4)],
+      ["agent-b", processingAgent("agent-b", 2)],
+    ]);
+    const world: StreamingDiagnosticsWorld = {
+      camera: { position: vector(-1, 35, -20), fov: 50, aspect: 16 / 9 },
+      entities: { get: (id) => agents.get(id), players: agents },
+      graphics: { isPrecompileIdle: () => true },
+      getSystem: (name) => {
+        if (name === "duel-arena-visuals") return { isReady: () => true };
+        if (name === "equipment-visual") {
+          return {
+            ...readyEquipmentVisuals(),
+            getStreamingPreparationVisualDiagnostics: () => ({
+              schemaVersion: 1,
+              updatedAt: 1,
+              activeCount: 2,
+              readyCount: 0,
+              ready: false,
+              players: [],
+            }),
+          };
+        }
+        return null;
+      },
+    };
+    const idleState = {
+      ...state(),
+      cycle: { ...state().cycle, phase: "IDLE" },
+    };
+
+    const diagnostics = collectStreamingSceneDiagnostics(world, idleState);
+    expect(
+      diagnostics?.agents.map(
+        (agent) => agent?.preparationPresentation?.processingSkill,
+      ),
+    ).toEqual(["smithing", "smithing"]);
+    expect(areStreamingSceneAssetsReady(world, idleState)).toBe(false);
+  });
+
+  it("accepts a settled ready preparation with no transient work visual while active unresolved work still fails closed", () => {
+    const readyAgent = (id: string, x: number) => ({
+      id,
+      data: { characterId: id, isAgent: true },
+      node: { position: vector(x, 28, -11), visible: true },
+      base: { position: vector(x, 28, -11), visible: true },
+      avatar: { instance: { raw: { scene: { visible: true } } } },
+      active: true,
+    });
+    const agents = new Map<string, unknown>([
+      ["agent-a", readyAgent("agent-a", -4)],
+      ["agent-b", readyAgent("agent-b", 2)],
+    ]);
+    let preparationVisuals = {
+      schemaVersion: 1 as const,
+      updatedAt: 1,
+      activeCount: 0,
+      readyCount: 0,
+      ready: false,
+      players: [],
+    };
+    const world: StreamingDiagnosticsWorld = {
+      camera: { position: vector(-1, 35, -20), fov: 50, aspect: 16 / 9 },
+      entities: { get: (id) => agents.get(id), players: agents },
+      graphics: { isPrecompileIdle: () => true },
+      getSystem: (name) => {
+        if (name === "duel-arena-visuals") return { isReady: () => true };
+        if (name === "equipment-visual") {
+          return {
+            ...readyEquipmentVisuals(),
+            getStreamingPreparationVisualDiagnostics: () => preparationVisuals,
+          };
+        }
+        return null;
+      },
+    };
+    const idleState = {
+      ...state(),
+      cycle: { ...state().cycle, phase: "IDLE" },
+      preparation: {
+        status: "ready",
+        agent1: { id: "agent-a" },
+        agent2: { id: "agent-b" },
+      },
+    };
+
+    expect(areStreamingSceneAssetsReady(world, idleState)).toBe(true);
+
+    idleState.preparation.status = "preparing";
+    expect(areStreamingSceneAssetsReady(world, idleState)).toBe(false);
+
+    idleState.preparation.status = "ready";
+    preparationVisuals = {
+      ...preparationVisuals,
+      activeCount: 1,
+      readyCount: 0,
+      ready: false,
+    };
+    expect(areStreamingSceneAssetsReady(world, idleState)).toBe(false);
+  });
+
   it("requires loaded contestants to be visible once an arena phase begins", () => {
     const hiddenAgent = (id: string) => ({
       id,
@@ -666,6 +983,7 @@ describe("streaming scene diagnostics", () => {
                 {
                   frameSequence: longFrameSequence,
                   uptimeMs: longFrameUptimeMs,
+                  frameWorkMs: 300,
                 },
               ],
       }) as never;
@@ -705,6 +1023,57 @@ describe("streaming scene diagnostics", () => {
       noMinimumObservation,
     );
     expect(stability.ready).toBe(true);
+  });
+
+  it("does not treat a scheduler-only interval miss as cold GPU work", () => {
+    const snapshot = (updatedAt: number, uptimeMs: number, sequence: number) =>
+      ({
+        schemaVersion: 1,
+        updatedAt,
+        uptimeMs,
+        overall: {
+          frames: sequence,
+          renderer: {
+            textures: { latest: 20 },
+            geometries: { latest: 30 },
+          },
+        },
+        longFrames: [
+          {
+            frameSequence: sequence,
+            uptimeMs,
+            frameIntervalMs: 66,
+            frameWorkMs: 20,
+          },
+        ],
+      }) as never;
+    const options = {
+      stableDurationMs: 2_000,
+      minimumSnapshots: 3,
+      minimumObservationMs: 0,
+    };
+    let stability = createStreamingColdRenderStability();
+    stability = advanceStreamingColdRenderStability(
+      stability,
+      snapshot(1_000, 1_000, 60),
+      options,
+    );
+    stability = advanceStreamingColdRenderStability(
+      stability,
+      snapshot(2_000, 2_000, 90),
+      options,
+    );
+    stability = advanceStreamingColdRenderStability(
+      stability,
+      snapshot(3_000, 3_000, 120),
+      options,
+    );
+
+    expect(stability).toMatchObject({
+      lastLongFrameSequence: 0,
+      consecutiveSnapshots: 3,
+      ready: true,
+    });
   });
 
   it("ignores duplicate performance publications and latches a settled renderer", () => {

@@ -4,10 +4,16 @@
  * Extracted from StreamingDuelScheduler to isolate matchmaking concerns.
  */
 
-import { calculateCombatLevel, type World } from "@hyperforge/shared";
+import {
+  calculateCombatLevel,
+  parseStreamingDuelActionObservation,
+  type World,
+} from "@hyperforge/shared";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import { Logger } from "../../ServerNetwork/services/index.js";
 import { MAX_DUEL_PREPARATION_OPPONENT_HISTORY } from "../types.js";
+import type { CompetitiveSnapshot } from "../competitive-snapshot.js";
+import { normalizePersistedCompetitiveOutcome } from "../competitive-outcome.js";
 import type {
   DuelPreparationOpponentHistoryEntry,
   LeaderboardEntry,
@@ -47,6 +53,7 @@ type MatchmakingConfig = {
 };
 
 type PersistedDuelHistoryRow = Record<string, unknown>;
+export { normalizePersistedCompetitiveOutcome } from "../competitive-outcome.js";
 
 const STREAMING_DUEL_WIN_REASONS = new Set([
   "kill",
@@ -246,7 +253,7 @@ export class MatchmakingManager {
 
   /**
    * Agent IDs opted out of streaming duels (DB `streaming_duel_enabled = false`).
-   * Skipped by registerAgent unless bypassStreamingDuelOptOut is set (debug matchups).
+   * Enforced by registerAgent until trusted persisted/API authority clears it.
    */
   private streamingDuelOptOut: Set<string> = new Set();
 
@@ -255,6 +262,16 @@ export class MatchmakingManager {
 
   /** Last-seen timestamps for agent stat pruning */
   agentStatsLastSeenAt: Map<string, number> = new Map();
+
+  /**
+   * A competitive snapshot must never advertise the zero-value registration
+   * placeholder while its persisted record is still loading. Successful
+   * hydrations are memoized; failures remain retryable and fail the private
+   * preparation gate closed.
+   */
+  private hydratedAgentStats: Set<string> = new Set();
+  private pendingAgentStatsHydrations: Map<string, Promise<void>> = new Map();
+  private agentStatsHydrationGeneration = 0;
 
   /** Recent completed duel history (newest first) */
   recentDuels: RecentDuelEntry[] = [];
@@ -317,23 +334,14 @@ export class MatchmakingManager {
   /**
    * Register an agent for duel scheduling
    */
-  registerAgent(
-    agentId: string,
-    options?: { bypassStreamingDuelOptOut?: boolean },
-  ): void {
-    if (
-      !options?.bypassStreamingDuelOptOut &&
-      this.streamingDuelOptOut.has(agentId)
-    ) {
+  registerAgent(agentId: string): void {
+    if (this.streamingDuelOptOut.has(agentId)) {
       return;
     }
     const now = Date.now();
     this.availableAgents.add(agentId);
     this.agentStatsLastSeenAt.set(agentId, now);
     this.callbacks?.onAgentRegistered?.(agentId, now);
-    if (this.availableAgents.size >= this.config.minAgents) {
-      this.refreshNextDuelPair(now);
-    }
 
     // Get agent info from entity
     const entity = this.world.entities.get(agentId);
@@ -390,9 +398,12 @@ export class MatchmakingManager {
           combatLevel,
           currentStreak: 0,
         });
+        this.leaderboardDirty = true;
 
-        // Load persisted stats from database asynchronously
-        this.loadStatsFromDatabase(agentId).catch((err) => {
+        // Warm the persisted record without blocking world registration. The
+        // private preparation gate awaits the same singleflight before it can
+        // freeze or disclose a competitive matchup.
+        this.ensureAgentStatsHydrated(agentId).catch((err) => {
           Logger.warn(
             "StreamingDuelScheduler",
             `Failed to load stats for ${agentId}: ${err}`,
@@ -407,64 +418,126 @@ export class MatchmakingManager {
         `Agent registered: ${data.name || agentId}`,
       );
     }
+
+    // Registration may be a socket reconnect for a contestant whose exact
+    // private pair is already durable. A newly available third contestant is
+    // likewise not authority to rewrite an announced on-deck matchup.
+    if (
+      this.availableAgents.size >= this.config.minAgents &&
+      !this.nextDuelPair
+    ) {
+      this.refreshNextDuelPair(now);
+    }
   }
 
   /**
    * Load persisted stats from database for an agent
    */
-  private async loadStatsFromDatabase(agentId: string): Promise<void> {
+  private async loadStatsFromDatabase(
+    agentId: string,
+    generation: number,
+  ): Promise<void> {
     const db = this.getDatabase();
     if (!db) {
-      return;
+      throw new Error("stats_database_unavailable");
     }
 
-    try {
-      const { agentDuelStats, playerCombatStats } =
-        await import("../../../database/schema.js");
-      const { eq } = await import("drizzle-orm");
+    const { agentDuelStats, playerCombatStats } =
+      await import("../../../database/schema.js");
+    const { eq } = await import("drizzle-orm");
 
-      const combatResult = await db
+    const [combatResult, agentResult] = await Promise.all([
+      db
         .select({
           totalDuelWins: playerCombatStats.totalDuelWins,
           totalDuelLosses: playerCombatStats.totalDuelLosses,
         })
         .from(playerCombatStats)
         .where(eq(playerCombatStats.playerId, agentId))
-        .limit(1);
-      const agentResult = await db
+        .limit(1),
+      db
         .select({
           wins: agentDuelStats.wins,
           losses: agentDuelStats.losses,
           draws: agentDuelStats.draws,
+          currentStreak: agentDuelStats.currentStreak,
         })
         .from(agentDuelStats)
         .where(eq(agentDuelStats.characterId, agentId))
-        .limit(1);
+        .limit(1),
+    ]);
 
-      const stats = this.agentStats.get(agentId);
-      if (stats && (combatResult.length > 0 || agentResult.length > 0)) {
-        if (combatResult.length > 0) {
-          stats.wins = combatResult[0].totalDuelWins;
-          stats.losses = combatResult[0].totalDuelLosses;
-        } else if (agentResult.length > 0) {
-          stats.wins = agentResult[0].wins;
-          stats.losses = agentResult[0].losses;
-        }
-        if (agentResult.length > 0) {
-          stats.draws = agentResult[0].draws;
-        }
-        this.leaderboardDirty = true;
-        Logger.info(
-          "StreamingDuelScheduler",
-          `Loaded persisted stats for ${agentId}: ${stats.wins}W ${stats.draws}D ${stats.losses}L`,
-        );
+    if (generation !== this.agentStatsHydrationGeneration) return;
+    const stats = this.agentStats.get(agentId);
+    if (stats && (combatResult.length > 0 || agentResult.length > 0)) {
+      if (combatResult.length > 0) {
+        stats.wins = combatResult[0].totalDuelWins;
+        stats.losses = combatResult[0].totalDuelLosses;
+      } else if (agentResult.length > 0) {
+        stats.wins = agentResult[0].wins;
+        stats.losses = agentResult[0].losses;
       }
-    } catch (err) {
-      Logger.warn(
+      if (agentResult.length > 0) {
+        stats.draws = agentResult[0].draws;
+        stats.currentStreak = agentResult[0].currentStreak;
+      }
+      this.leaderboardDirty = true;
+      Logger.info(
         "StreamingDuelScheduler",
-        `Error loading stats for ${agentId}: ${err}`,
+        `Loaded persisted stats for ${agentId}: ${stats.wins}W ${stats.draws}D ${stats.losses}L`,
       );
     }
+  }
+
+  private ensureAgentStatsHydrated(agentId: string): Promise<void> {
+    // A missing adapter means this scheduler is running in its supported
+    // non-persistent/local mode. A configured adapter that rejects a query is
+    // different: that error propagates and keeps the competitive gate closed.
+    if (!this.config.persistStatsToDatabase || !this.getDatabase()) {
+      this.hydratedAgentStats.add(agentId);
+      return Promise.resolve();
+    }
+    if (this.hydratedAgentStats.has(agentId)) return Promise.resolve();
+    const pending = this.pendingAgentStatsHydrations.get(agentId);
+    if (pending) return pending;
+
+    const generation = this.agentStatsHydrationGeneration;
+    const hydration = this.loadStatsFromDatabase(agentId, generation)
+      .then(() => {
+        if (
+          generation === this.agentStatsHydrationGeneration &&
+          this.agentStats.has(agentId)
+        ) {
+          this.hydratedAgentStats.add(agentId);
+        }
+      })
+      .finally(() => {
+        if (this.pendingAgentStatsHydrations.get(agentId) === hydration) {
+          this.pendingAgentStatsHydrations.delete(agentId);
+        }
+      });
+    this.pendingAgentStatsHydrations.set(agentId, hydration);
+    return hydration;
+  }
+
+  /**
+   * Await exact persisted records before private selection or market freeze.
+   * A transient database error rejects and remains retryable on the next gate
+   * pass instead of leaking placeholder records to bettors.
+   */
+  async waitForAgentStatsHydration(agentIds: readonly string[]): Promise<void> {
+    const uniqueAgentIds = [...new Set(agentIds)];
+    if (!this.config.persistStatsToDatabase || !this.getDatabase()) return;
+    if (
+      uniqueAgentIds.some(
+        (agentId) => !agentId || !this.agentStats.has(agentId),
+      )
+    ) {
+      throw new Error("competitive_agent_stats_unavailable");
+    }
+    await Promise.all(
+      uniqueAgentIds.map((agentId) => this.ensureAgentStatsHydrated(agentId)),
+    );
   }
 
   /**
@@ -492,6 +565,23 @@ export class MatchmakingManager {
     // Notify the scheduler so it can handle forfeit + camera cleanup
     this.callbacks?.onAgentUnregistered?.(agentId);
 
+    this.pruneInactiveAgentStats(now);
+  }
+
+  /**
+   * Make an agent unavailable to fresh pair selection while preserving an
+   * already-selected private preparation during the socket reconnect grace.
+   * The durable contestant-host lease remains the authority that either
+   * resumes the exact preparation or terminates it after the host disappears.
+   */
+  suspendAgentForReconnect(agentId: string): void {
+    const now = Date.now();
+    this.agentStatsLastSeenAt.set(agentId, now);
+    this.availableAgents.delete(agentId);
+    Logger.info(
+      "StreamingDuelScheduler",
+      `Agent suspended for reconnect grace: ${agentId}`,
+    );
     this.pruneInactiveAgentStats(now);
   }
 
@@ -582,7 +672,17 @@ export class MatchmakingManager {
    */
   refreshNextDuelPair(now: number): void {
     const validAgents = Array.from(this.availableAgents).filter((agentId) => {
-      if (!this.world.entities.get(agentId)) {
+      const entity = this.world.entities.get(agentId);
+      if (!entity) {
+        return false;
+      }
+      const data = entity.data as
+        { health?: unknown; alive?: unknown } | undefined;
+      const health = Number(data?.health);
+      // Matchmaking is allowed to retain a dead agent registration so normal
+      // respawn can make it eligible again, but it must never select that
+      // agent while its authoritative runtime state is dead or malformed.
+      if (data?.alive === false || !Number.isFinite(health) || health <= 0) {
         return false;
       }
       const retryAfter = this.preparationRetryAfterByAgent.get(agentId);
@@ -665,6 +765,8 @@ export class MatchmakingManager {
       if (!agentId) continue;
       this.agentStats.delete(agentId);
       this.agentStatsLastSeenAt.delete(agentId);
+      this.hydratedAgentStats.delete(agentId);
+      this.pendingAgentStatsHydrations.delete(agentId);
     }
 
     this.leaderboardDirty = true;
@@ -678,7 +780,11 @@ export class MatchmakingManager {
    * Update win/loss stats for a completed duel.
    * Marks leaderboard as dirty and optionally persists to database.
    */
-  updateStats(winnerId: string, loserId: string): void {
+  updateStats(
+    winnerId: string,
+    loserId: string,
+    options?: { persistToDatabase?: boolean },
+  ): void {
     const winnerStats = this.agentStats.get(winnerId);
     const loserStats = this.agentStats.get(loserId);
 
@@ -694,7 +800,10 @@ export class MatchmakingManager {
 
     this.leaderboardDirty = true;
 
-    if (!this.config.persistStatsToDatabase) {
+    if (
+      !this.config.persistStatsToDatabase ||
+      options?.persistToDatabase === false
+    ) {
       return;
     }
 
@@ -845,14 +954,23 @@ export class MatchmakingManager {
    * Update stats for a draw outcome (#24).
    * Draws are visible in records but do not affect win/loss counts or streaks.
    */
-  updateDrawStats(agent1Id: string, agent2Id: string): void {
+  updateDrawStats(
+    agent1Id: string,
+    agent2Id: string,
+    options?: { persistToDatabase?: boolean },
+  ): void {
     const agent1Stats = this.agentStats.get(agent1Id);
     const agent2Stats = this.agentStats.get(agent2Id);
     if (agent1Stats) agent1Stats.draws++;
     if (agent2Stats) agent2Stats.draws++;
     this.leaderboardDirty = true;
 
-    if (!this.config.persistStatsToDatabase) return;
+    if (
+      !this.config.persistStatsToDatabase ||
+      options?.persistToDatabase === false
+    ) {
+      return;
+    }
     this.persistDrawStatsToDatabase(agent1Id, agent2Id).catch((err) => {
       Logger.warn(
         "StreamingDuelScheduler",
@@ -926,7 +1044,9 @@ export class MatchmakingManager {
 
   /**
    * Record a recently completed duel (newest first, capped to maxRecentDuels).
-   * If database persistence is enabled, also writes to streaming_duel_history.
+   * If database persistence is enabled, also writes the compatibility history
+   * cache. Restart truth comes from the immutable competitive terminal plus
+   * exact public damage receipts, never from this best-effort cache write.
    */
   recordRecentDuel(duel: RecentDuelEntry): void {
     this.recentDuels = this.recentDuels.filter(
@@ -979,7 +1099,10 @@ export class MatchmakingManager {
   }
 
   /**
-   * Restore bounded recent history after a process restart.
+   * Restore bounded recent history after a process restart. Modern persisted
+   * duels are reconstructed from their frozen snapshot, terminal, digest, and
+   * exact public damage rows. The older history table is fallback-only for
+   * cycles with no competitive snapshot; it can never override or mask one.
    *
    * Rows that complete while the query is in flight are retained and win any
    * cycle-ID collision, so hydration cannot overwrite fresher in-memory state.
@@ -989,10 +1112,109 @@ export class MatchmakingManager {
     if (!db) return 0;
 
     const generation = ++this.recentDuelHydrationGeneration;
-    const { streamingDuelHistory } =
-      await import("../../../database/schema.js");
-    const { desc } = await import("drizzle-orm");
-    const rows = await db
+    const {
+      streamingDuelActionObservations,
+      streamingDuelCompetitiveSnapshots,
+      streamingDuelHistory,
+    } = await import("../../../database/schema.js");
+    const { and, desc, eq, inArray, isNotNull } = await import("drizzle-orm");
+    const competitiveRows = await db
+      .select()
+      .from(streamingDuelCompetitiveSnapshots)
+      .where(
+        and(
+          inArray(streamingDuelCompetitiveSnapshots.lifecycleStatus, [
+            "terminal",
+            "retired",
+          ]),
+          isNotNull(streamingDuelCompetitiveSnapshots.terminalAt),
+        ),
+      )
+      .orderBy(
+        desc(streamingDuelCompetitiveSnapshots.terminalAt),
+        desc(streamingDuelCompetitiveSnapshots.cycleId),
+      )
+      .limit(this.config.maxRecentDuels);
+    const competitiveCycleIds = new Set(
+      competitiveRows
+        .map((row) => nullableString(row.cycleId))
+        .filter((cycleId): cycleId is string => cycleId !== null),
+    );
+    const competitivePreviews = competitiveRows
+      .map((row) => normalizePersistedCompetitiveOutcome(row))
+      .filter((duel): duel is RecentDuelEntry => duel !== null);
+    const previewByCycle = new Map(
+      competitivePreviews.map((duel) => [duel.cycleId, duel]),
+    );
+    const damageByCycle = new Map<string, Map<string, number>>(
+      competitivePreviews.map((duel) => [
+        duel.cycleId,
+        new Map([
+          [duel.agent1Id!, 0],
+          [duel.agent2Id!, 0],
+        ]),
+      ]),
+    );
+    if (previewByCycle.size > 0) {
+      const damageRows = await db
+        .select({
+          cycleId: streamingDuelActionObservations.cycleId,
+          observation: streamingDuelActionObservations.observation,
+        })
+        .from(streamingDuelActionObservations)
+        .where(
+          and(
+            inArray(streamingDuelActionObservations.cycleId, [
+              ...previewByCycle.keys(),
+            ]),
+            eq(streamingDuelActionObservations.action, "damage"),
+          ),
+        );
+      for (const row of damageRows) {
+        const duel = previewByCycle.get(row.cycleId);
+        const damage = damageByCycle.get(row.cycleId);
+        const observation = parseStreamingDuelActionObservation(
+          row.observation,
+        );
+        if (
+          !duel ||
+          !damage ||
+          !observation ||
+          observation.action !== "damage" ||
+          observation.cycleId !== duel.cycleId ||
+          observation.duelId !== duel.duelId ||
+          !damage.has(observation.actorId) ||
+          observation.opponentId !==
+            (observation.actorId === duel.agent1Id
+              ? duel.agent2Id
+              : duel.agent1Id) ||
+          !Number.isSafeInteger(observation.amount) ||
+          Number(observation.amount) <= 0
+        ) {
+          throw new Error("competitive_outcome_damage_history_invalid");
+        }
+        const total =
+          (damage.get(observation.actorId) ?? 0) + Number(observation.amount);
+        if (!Number.isSafeInteger(total)) {
+          throw new Error("competitive_outcome_damage_history_invalid");
+        }
+        damage.set(observation.actorId, total);
+      }
+    }
+    const authoritative = competitiveRows
+      .map((row) => {
+        const snapshot = row.snapshot as CompetitiveSnapshot | undefined;
+        if (!snapshot || !previewByCycle.has(snapshot.cycleId)) return null;
+        const damage = damageByCycle.get(snapshot.cycleId);
+        return normalizePersistedCompetitiveOutcome(
+          row,
+          damage?.get(snapshot.contestants[0].agentId) ?? 0,
+          damage?.get(snapshot.contestants[1].agentId) ?? 0,
+        );
+      })
+      .filter((duel): duel is RecentDuelEntry => duel !== null);
+
+    const legacyRows = await db
       .select()
       .from(streamingDuelHistory)
       .orderBy(
@@ -1003,9 +1225,22 @@ export class MatchmakingManager {
 
     if (generation !== this.recentDuelHydrationGeneration) return 0;
 
-    const hydrated = rows
+    const legacy = legacyRows
       .map(normalizePersistedRecentDuel)
       .filter((duel): duel is RecentDuelEntry => duel !== null);
+    const hydratedByCycle = new Map<string, RecentDuelEntry>();
+    for (const duel of authoritative) {
+      hydratedByCycle.set(duel.cycleId, duel);
+    }
+    for (const duel of legacy) {
+      if (
+        !competitiveCycleIds.has(duel.cycleId) &&
+        !hydratedByCycle.has(duel.cycleId)
+      ) {
+        hydratedByCycle.set(duel.cycleId, duel);
+      }
+    }
+    const hydrated = [...hydratedByCycle.values()];
     const merged = new Map<string, RecentDuelEntry>();
 
     for (const duel of this.recentDuels) merged.set(duel.cycleId, duel);
@@ -1143,10 +1378,13 @@ export class MatchmakingManager {
    */
   reset(): void {
     this.recentDuelHydrationGeneration++;
+    this.agentStatsHydrationGeneration++;
     this.availableAgents.clear();
     this.streamingDuelOptOut.clear();
     this.agentStats.clear();
     this.agentStatsLastSeenAt.clear();
+    this.hydratedAgentStats.clear();
+    this.pendingAgentStatsHydrations.clear();
     this.recentDuels = [];
     this.cachedLeaderboard = [];
     this.leaderboardDirty = true;

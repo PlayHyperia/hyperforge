@@ -25,13 +25,18 @@ import type {
   Entity,
   StreamingDuelEquipmentVisualContract,
   StreamingDuelEquipmentVisualRequirement,
+  StreamingDuelActionObservation,
+  StreamingDuelPreparationSummary,
+  StreamingDuelStrategySummary,
   StreamingGuardrailAgentSnapshot,
   StreamingGuardrailPhase,
+  StreamingPreparationVisualDiagnostics,
 } from "@hyperforge/shared";
 import {
   EventType,
   STREAMING_DUEL_VISIBLE_EQUIPMENT_SLOTS,
   deriveStreamingGuardrailReason,
+  resolveExplicitStreamingRenderProfile,
 } from "@hyperforge/shared";
 import type { StreamingWindow } from "@/lib/streamingWindow";
 import {
@@ -44,6 +49,10 @@ import {
 } from "@/lib/streamingSceneDiagnostics";
 import { GAME_WS_URL, GAME_API_URL } from "../lib/api-config";
 import { getStreamingAccessToken } from "../lib/streamingAccessToken";
+import {
+  normalizeStreamingPreparationState,
+  sameStreamingPreparationState,
+} from "../lib/streamingPreparationState";
 
 /** Streaming state from server */
 export interface StreamingState {
@@ -68,9 +77,11 @@ export interface StreamingState {
     winnerName: string | null;
     outcome: "win" | "draw" | null;
     winReason: string | null;
+    actionObservations: readonly StreamingDuelActionObservation[];
   };
   leaderboard: LeaderboardEntry[];
   cameraTarget: string | null;
+  preparation?: StreamingDuelPreparationSummary | null;
   terminalNotice?: {
     cycleId: string;
     duelId: string | null;
@@ -106,6 +117,7 @@ export interface AgentInfo {
   availableCombatStyles?: Array<StreamingCombatRole | "prayer">;
   combatLoadouts?: FrozenStreamingCombatLoadouts;
   loadoutFrozen?: boolean;
+  strategySummary?: StreamingDuelStrategySummary | null;
   prayerPointUnits?: number;
   prayerPoints?: number;
   prayerMaxPoints?: number;
@@ -134,6 +146,51 @@ export type FrozenStreamingCombatLoadouts = Partial<
 >;
 
 const STREAMING_COMBAT_ROLES = ["melee", "ranged", "mage"] as const;
+const STREAMING_RENDER_PIXEL_BUDGET = 1280 * 720;
+
+export function getStreamingPreparationVisualFingerprint(
+  diagnostics: StreamingPreparationVisualDiagnostics | null | undefined,
+): string {
+  if (!diagnostics || diagnostics.activeCount <= 0) return "inactive";
+  return JSON.stringify({
+    activeCount: diagnostics.activeCount,
+    readyCount: diagnostics.readyCount,
+    ready: diagnostics.ready,
+    players: diagnostics.players.map((player) => ({
+      playerId: player.playerId,
+      presentationActive: player.presentationActive,
+      gatheringToolItemId: player.gatheringToolItemId,
+      fishingPhase: player.fishingPhase,
+      ready: player.ready,
+    })),
+  });
+}
+
+export function resolveStreamingRenderDpr(
+  viewportWidth: number,
+  viewportHeight: number,
+  renderPixelBudget = STREAMING_RENDER_PIXEL_BUDGET,
+  maximumDpr = 1,
+): number {
+  if (
+    !Number.isFinite(viewportWidth) ||
+    !Number.isFinite(viewportHeight) ||
+    viewportWidth <= 0 ||
+    viewportHeight <= 0 ||
+    !Number.isFinite(renderPixelBudget) ||
+    renderPixelBudget <= 0 ||
+    !Number.isFinite(maximumDpr) ||
+    maximumDpr <= 0
+  ) {
+    return 1;
+  }
+
+  return Math.min(
+    maximumDpr,
+    Math.sqrt(renderPixelBudget / (viewportWidth * viewportHeight)),
+  );
+}
+
 const STREAMING_ARMOR_VISUAL_SLOTS = [
   "helmet",
   "body",
@@ -167,13 +224,28 @@ export function deriveStreamingDuelEquipmentVisualContract(
   };
 
   for (const agent of [state.cycle.agent1, state.cycle.agent2]) {
-    if (!agent || agent.loadoutFrozen !== true) continue;
+    if (!agent) continue;
 
-    for (const slot of STREAMING_DUEL_VISIBLE_EQUIPMENT_SLOTS) {
-      const itemId = agent.equipment?.[slot]?.trim() || null;
-      currentEquipment.push({ playerId: agent.id, slot, itemId });
-      addRequirement(agent.id, slot, itemId);
+    const requiresExactCurrentVisual =
+      state.cycle.phase !== "IDLE" || agent.loadoutFrozen === true;
+    if (requiresExactCurrentVisual) {
+      // Market-open and explicit diagnostic cycles remain fully fail-closed:
+      // every visible item must be fitted, attached, and rendered. During the
+      // private ordinary-agent preparation window, unsupported exploration
+      // gear may be shown in the exact loadout overlay but cannot hold the
+      // entire broadcast behind a loading screen. Server readiness removes it
+      // before any public cycle or betting event can begin.
+      for (const slot of STREAMING_DUEL_VISIBLE_EQUIPMENT_SLOTS) {
+        const itemId = agent.equipment?.[slot]?.trim() || null;
+        currentEquipment.push({ playerId: agent.id, slot, itemId });
+        addRequirement(agent.id, slot, itemId);
+      }
     }
+
+    // Only a frozen competitive snapshot may advertise alternate role
+    // equipment for prewarming. Unfrozen diagnostic state contributes its
+    // exact current visual above, but never invents switchable loadouts.
+    if (agent.loadoutFrozen !== true) continue;
 
     for (const role of STREAMING_COMBAT_ROLES) {
       const loadout = agent.combatLoadouts?.[role];
@@ -229,6 +301,22 @@ function sameStreamingAgentVisualState(
     left.id === right.id &&
     left.loadoutFingerprint === right.loadoutFingerprint &&
     left.loadoutFrozen === right.loadoutFrozen &&
+    left.strategySummary?.schemaVersion ===
+      right.strategySummary?.schemaVersion &&
+    left.strategySummary?.approach === right.strategySummary?.approach &&
+    left.strategySummary?.tacticalMacro ===
+      right.strategySummary?.tacticalMacro &&
+    left.strategySummary?.attackStyle === right.strategySummary?.attackStyle &&
+    left.strategySummary?.prayer === right.strategySummary?.prayer &&
+    left.strategySummary?.preferredCombatRole ===
+      right.strategySummary?.preferredCombatRole &&
+    left.strategySummary?.foodThreshold ===
+      right.strategySummary?.foodThreshold &&
+    left.strategySummary?.switchDefensiveAt ===
+      right.strategySummary?.switchDefensiveAt &&
+    left.strategySummary?.source === right.strategySummary?.source &&
+    left.strategySummary?.policyVersion ===
+      right.strategySummary?.policyVersion &&
     sameStreamingEquipment(left.equipment, right.equipment)
   );
 }
@@ -466,6 +554,8 @@ export function StreamingMode() {
   const [worldReady, setWorldReady] = useState(false);
   const [terrainReady, setTerrainReady] = useState(false);
   const [sceneAssetsReady, setSceneAssetsReady] = useState(false);
+  const [preparationVisuals, setPreparationVisuals] =
+    useState<StreamingPreparationVisualDiagnostics | null>(null);
   const [cameraLocked, setCameraLocked] = useState(false);
   const [terrainStalled, setTerrainStalled] = useState(false);
   const [readyEventDelayed, setReadyEventDelayed] = useState(false);
@@ -495,6 +585,7 @@ export function StreamingMode() {
   });
   const coldRenderStabilityRef = useRef(createStreamingColdRenderStability());
   const sceneReadinessLogAtRef = useRef(0);
+  const preparationVisualFingerprintRef = useRef("inactive");
   const [streamAccessToken] = useState<string | null>(() =>
     getStreamingAccessToken(),
   );
@@ -541,12 +632,18 @@ export function StreamingMode() {
       win.__HYPERIA_STREAM_STATE__ = null;
       win.__HYPERIA_STREAM_SCENE_DIAGNOSTICS__ = null;
       win.__HYPERIA_STREAM_SCENE_READINESS__ = null;
+      const renderProfile = resolveExplicitStreamingRenderProfile(window);
+      win.__HYPERIA_STREAM_RENDER_PROFILE__ = renderProfile
+        ? { ...renderProfile, explicit: true }
+        : null;
       delete win.__HYPERIA_STREAM_AUDIO_CAPTURE__;
       latestStreamingStateRef.current = null;
       win.__HYPERIA_STREAM_BOOT_STATUS__ = "initializing";
       setWorldReady(false);
       setTerrainReady(false);
       setSceneAssetsReady(false);
+      setPreparationVisuals(null);
+      preparationVisualFingerprintRef.current = "inactive";
       sceneReadinessStabilityRef.current = {
         readySince: null,
         consecutiveSamples: 0,
@@ -558,8 +655,10 @@ export function StreamingMode() {
       setReadyEventDelayed(false);
       setClientInitError(null);
 
-      // Force potato-mode graphics tuned for stable 720p streaming output.
-      // Keep DPR at 1 so capture canvas stays at target resolution.
+      // Keep the capture surface at its requested size while holding 3D work
+      // to a roughly 720p pixel budget. This renders native 720p at DPR 1,
+      // 1080p at DPR 2/3, and preserves comparable detail in vertical/square
+      // crops without accidentally downscaling an already-720p broadcast.
       const prefs = world.getSystem("prefs") as {
         setDPR?: (v: number) => void;
         setShadows?: (v: string) => void;
@@ -571,7 +670,14 @@ export function StreamingMode() {
         setEntityHighlighting?: (v: boolean) => void;
       } | null;
       if (prefs) {
-        prefs.setDPR?.(1);
+        prefs.setDPR?.(
+          resolveStreamingRenderDpr(
+            window.innerWidth,
+            window.innerHeight,
+            renderProfile?.renderPixelBudget,
+            renderProfile?.maximumDpr,
+          ),
+        );
         prefs.setShadows?.("none");
         prefs.setPostprocessing?.(false);
         prefs.setBloom?.(false);
@@ -583,18 +689,32 @@ export function StreamingMode() {
 
       const streamAudio = world.getSystem("audio") as {
         ctx?: AudioContext;
+        getOutputCaptureNode?: () => GainNode;
         getOutputCaptureStream?: () => MediaStream;
+        activateForStreamingCapture?: () => Promise<void>;
       } | null;
       if (
         streamAudio?.ctx &&
-        typeof streamAudio.getOutputCaptureStream === "function"
+        typeof streamAudio.getOutputCaptureNode === "function" &&
+        typeof streamAudio.getOutputCaptureStream === "function" &&
+        typeof streamAudio.activateForStreamingCapture === "function"
       ) {
+        const activateStreamAudio = () =>
+          streamAudio.activateForStreamingCapture!();
         win.__HYPERIA_STREAM_AUDIO_CAPTURE__ = {
-          getStream: () => streamAudio.getOutputCaptureStream!(),
-          getContextState: () => streamAudio.ctx!.state,
-          getSampleRate: () => streamAudio.ctx!.sampleRate,
-          resume: () => streamAudio.ctx!.resume(),
+          stream: streamAudio.getOutputCaptureStream(),
+          context: streamAudio.ctx,
+          node: streamAudio.getOutputCaptureNode(),
+          activate: activateStreamAudio,
         };
+        // Begin loading the queued combat soundtrack while the renderer warms.
+        // The encoder invokes the same idempotent method before audio preflight.
+        void activateStreamAudio().catch((error: unknown) => {
+          console.error(
+            "[StreamingMode] Failed to activate broadcast audio:",
+            error,
+          );
+        });
       }
 
       const markWorldReady = () => {
@@ -645,7 +765,9 @@ export function StreamingMode() {
 
       // Subscribe to streaming state updates (forwarded from server via WebSocket)
       const onStreamingStateUpdate = (data: unknown) => {
-        const state = data as StreamingState;
+        const state = normalizeStreamingPreparationState(
+          data as StreamingState,
+        );
         latestStreamingStateRef.current = state;
         (window as StreamingWindow).__HYPERIA_STREAM_STATE__ = state;
         configureStreamingDuelEquipmentVisuals(world, state);
@@ -683,6 +805,8 @@ export function StreamingMode() {
             c.agent2?.hp === p.agent2?.hp &&
             c.agent1?.damageDealtThisFight === p.agent1?.damageDealtThisFight &&
             c.agent2?.damageDealtThisFight === p.agent2?.damageDealtThisFight &&
+            c.actionObservations?.at(-1)?.sequence ===
+              p.actionObservations?.at(-1)?.sequence &&
             sameStreamingAgentVisualState(c.agent1, p.agent1) &&
             sameStreamingAgentVisualState(c.agent2, p.agent2) &&
             Math.floor(c.timeRemaining / 1000) ===
@@ -691,7 +815,9 @@ export function StreamingMode() {
             state.terminalNotice?.cycleId === prev.terminalNotice?.cycleId &&
             state.terminalNotice?.outcome === prev.terminalNotice?.outcome &&
             state.terminalNotice?.reason === prev.terminalNotice?.reason &&
-            state.terminalNotice?.expiresAt === prev.terminalNotice?.expiresAt
+            state.terminalNotice?.expiresAt ===
+              prev.terminalNotice?.expiresAt &&
+            sameStreamingPreparationState(state.preparation, prev.preparation)
           ) {
             return prev; // Same reference = no re-render
           }
@@ -824,10 +950,13 @@ export function StreamingMode() {
         .then((data) => {
           if (!mounted) return;
           if (data && data.type === "STREAMING_STATE_UPDATE") {
-            latestStreamingStateRef.current = data;
-            (window as StreamingWindow).__HYPERIA_STREAM_STATE__ = data;
-            configureStreamingDuelEquipmentVisuals(worldRef.current, data);
-            setStreamingState(data);
+            const state = normalizeStreamingPreparationState(
+              data as StreamingState,
+            );
+            latestStreamingStateRef.current = state;
+            (window as StreamingWindow).__HYPERIA_STREAM_STATE__ = state;
+            configureStreamingDuelEquipmentVisuals(worldRef.current, state);
+            setStreamingState(state);
           }
         })
         .catch((err) => {
@@ -899,7 +1028,7 @@ export function StreamingMode() {
   useEffect(() => {
     if (!worldReady || !worldRef.current) return;
 
-    const musicSystem = worldRef.current.getSystem("music-system") as {
+    const musicSystem = worldRef.current.getSystem("music") as {
       setCategoryLock?: (category: "normal" | "combat" | null) => void;
     } | null;
 
@@ -1282,6 +1411,8 @@ export function StreamingMode() {
     const world = worldRef.current;
     if (!worldReady || !world || !streamingState) {
       setSceneAssetsReady(false);
+      setPreparationVisuals(null);
+      preparationVisualFingerprintRef.current = "inactive";
       return;
     }
 
@@ -1292,6 +1423,21 @@ export function StreamingMode() {
         world as unknown as StreamingDiagnosticsWorld,
         latestState,
       );
+      const nextPreparationVisuals = assetReadiness.preparationVisuals;
+      const nextPreparationFingerprint =
+        getStreamingPreparationVisualFingerprint(nextPreparationVisuals);
+      if (
+        nextPreparationFingerprint !== preparationVisualFingerprintRef.current
+      ) {
+        preparationVisualFingerprintRef.current = nextPreparationFingerprint;
+        if (active) {
+          setPreparationVisuals(
+            nextPreparationFingerprint === "inactive"
+              ? null
+              : nextPreparationVisuals,
+          );
+        }
+      }
       const win = window as StreamingWindow;
       coldRenderStabilityRef.current = advanceStreamingColdRenderStability(
         coldRenderStabilityRef.current,
@@ -1347,6 +1493,7 @@ export function StreamingMode() {
       win.__HYPERIA_STREAM_STATE__ = null;
       win.__HYPERIA_STREAM_SCENE_DIAGNOSTICS__ = null;
       win.__HYPERIA_STREAM_SCENE_READINESS__ = null;
+      win.__HYPERIA_STREAM_RENDER_PROFILE__ = null;
       win.__HYPERIA_STREAM_BOOT_STATUS__ = null;
       if (worldReadyTimeoutRef.current) {
         clearTimeout(worldReadyTimeoutRef.current);
@@ -1360,6 +1507,7 @@ export function StreamingMode() {
       worldListenerCleanupRef.current = null;
       worldRef.current = null;
       latestStreamingStateRef.current = null;
+      preparationVisualFingerprintRef.current = "inactive";
       worldReadyRef.current = false;
       clearTerrainPolling();
       clearCameraRetryTimeouts();
@@ -1548,7 +1696,11 @@ export function StreamingMode() {
       />
 
       {/* Streaming overlay (on top of game) */}
-      <StreamingOverlay state={streamingState} bettingConfig={bettingConfig} />
+      <StreamingOverlay
+        state={streamingState}
+        bettingConfig={bettingConfig}
+        preparationVisuals={preparationVisuals}
+      />
 
       {failurePresentation && !loadingDismissed && (
         <div

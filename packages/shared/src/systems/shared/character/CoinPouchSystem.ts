@@ -51,6 +51,13 @@ export class CoinPouchSystem extends SystemBase {
   /** Players whose coins have been initialized */
   private initializedPlayers = new Set<string>();
 
+  /**
+   * Per-player write-through queues. Currency mutations can overlap at async
+   * call sites; serializing their database writes prevents an older balance
+   * from committing after a newer one.
+   */
+  private persistenceQueues = new Map<PlayerID, Promise<void>>();
+
   /** Balance verification interval handle */
   private verificationInterval?: NodeJS.Timeout;
 
@@ -169,9 +176,13 @@ export class CoinPouchSystem extends SystemBase {
     const playerIdKey = toPlayerID(playerId);
     if (!playerIdKey) return;
 
-    // Persist before cleanup if on server
-    if (this.world.isServer) {
-      this.persistCoinsImmediate(playerId);
+    // Capture the authoritative balance before clearing memory. Persistence
+    // performs an asynchronous existence check; reading from the map after
+    // that await would observe the cleared entry as zero and destroy earned
+    // currency during disconnect or graceful shutdown.
+    const coins = this.coinBalances.get(playerIdKey);
+    if (this.world.isServer && coins !== undefined) {
+      void this.enqueueCoinBalancePersistence(playerId, playerIdKey, coins);
     }
 
     this.coinBalances.delete(playerIdKey);
@@ -381,14 +392,75 @@ export class CoinPouchSystem extends SystemBase {
   }
 
   async persistCoinsImmediate(playerId: string): Promise<void> {
+    const playerIdKey = toPlayerID(playerId);
+    if (!playerIdKey) return;
+    const coins = this.coinBalances.get(playerIdKey);
+    if (coins === undefined) return;
+    await this.enqueueCoinBalancePersistence(playerId, playerIdKey, coins);
+  }
+
+  /**
+   * Persist the current balance without swallowing unavailable/missing-player
+   * or database errors. Ground-item custody uses this before removing coins
+   * from the world, so success must mean the destination is durable.
+   */
+  async persistCoinsImmediateStrict(playerId: string): Promise<void> {
+    const playerIdKey = toPlayerID(playerId);
+    if (!playerIdKey) throw new Error("coin_persistence_player_invalid");
+    const coins = this.coinBalances.get(playerIdKey);
+    if (coins === undefined) {
+      throw new Error("coin_persistence_balance_unavailable");
+    }
+    const database = this.getDatabase();
+    if (!database) throw new Error("coin_persistence_database_unavailable");
+
+    const previous = this.persistenceQueues.get(playerIdKey);
+    const queued = (previous ?? Promise.resolve()).then(async () => {
+      const row = await database.getPlayerAsync(playerId);
+      if (!row) throw new Error("coin_persistence_player_missing");
+      await database.savePlayerAsync(playerId, { coins });
+    });
+    this.persistenceQueues.set(playerIdKey, queued);
+    try {
+      await queued;
+    } finally {
+      if (this.persistenceQueues.get(playerIdKey) === queued) {
+        this.persistenceQueues.delete(playerIdKey);
+      }
+    }
+  }
+
+  private async enqueueCoinBalancePersistence(
+    playerId: string,
+    playerIdKey: PlayerID,
+    coins: number,
+  ): Promise<void> {
+    const previous = this.persistenceQueues.get(playerIdKey);
+    const queued = (previous ?? Promise.resolve()).then(() =>
+      this.persistCoinBalanceImmediate(playerId, coins),
+    );
+    this.persistenceQueues.set(playerIdKey, queued);
+
+    try {
+      await queued;
+    } finally {
+      if (this.persistenceQueues.get(playerIdKey) === queued) {
+        this.persistenceQueues.delete(playerIdKey);
+      }
+    }
+  }
+
+  private async persistCoinBalanceImmediate(
+    playerId: string,
+    coins: number,
+  ): Promise<void> {
     const db = this.getDatabase();
     if (!db) return;
 
     try {
       const row = await db.getPlayerAsync(playerId);
       if (row) {
-        const coins = this.getCoins(playerId);
-        db.savePlayer(playerId, { coins });
+        await db.savePlayerAsync(playerId, { coins });
       }
     } catch (error) {
       Logger.systemError(
@@ -472,40 +544,30 @@ export class CoinPouchSystem extends SystemBase {
       this.verificationInterval = undefined;
     }
 
-    // Final save pass for all connected players before shutdown
+    // Final save pass for all connected players before shutdown. Enqueueing
+    // behind existing writes preserves mutation order and also drains any
+    // disconnect persistence already in flight.
     if (this.world.isServer) {
-      const db = this.getDatabase();
-      if (db) {
-        const savePromises: Promise<void>[] = [];
+      const savePromises = [...this.coinBalances.entries()].map(
+        ([playerIdKey, coins]) =>
+          this.enqueueCoinBalancePersistence(playerIdKey, playerIdKey, coins),
+      );
 
-        for (const playerId of this.coinBalances.keys()) {
-          const savePromise = (async () => {
-            const row = await db.getPlayerAsync(playerId);
-            if (row) {
-              const coins = this.getCoins(playerId);
-              await db.savePlayerAsync(playerId, { coins });
-            }
-          })();
-
-          savePromises.push(savePromise);
-        }
-
-        // Wait for all saves to complete (with error handling)
-        const results = await Promise.allSettled(savePromises);
-        const failures = results.filter((r) => r.status === "rejected");
-        if (failures.length > 0) {
-          Logger.systemError(
-            "CoinPouchSystem",
-            `${failures.length} coin saves failed during shutdown`,
-            new Error("Partial save failure on shutdown"),
-          );
-        }
+      const results = await Promise.allSettled(savePromises);
+      const failures = results.filter((result) => result.status === "rejected");
+      if (failures.length > 0) {
+        Logger.systemError(
+          "CoinPouchSystem",
+          `${failures.length} coin saves failed during shutdown`,
+          new Error("Partial save failure on shutdown"),
+        );
       }
     }
 
     this.coinBalances.clear();
     this.loadingPlayers.clear();
     this.initializedPlayers.clear();
+    this.persistenceQueues.clear();
 
     super.destroy();
   }

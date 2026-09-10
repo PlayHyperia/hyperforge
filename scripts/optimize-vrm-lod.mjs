@@ -201,6 +201,211 @@ function appendBufferView(binary, addition) {
   return { binary: result, byteOffset };
 }
 
+function compactReferencedBinary(document, sourceBinary) {
+  const usedAccessors = new Set();
+  const retainAccessor = (value, label) => {
+    if (!Number.isInteger(value) || !document.accessors?.[value]) {
+      throw new Error(`${label} references an invalid accessor`);
+    }
+    usedAccessors.add(value);
+  };
+  for (const [meshIndex, mesh] of (document.meshes ?? []).entries()) {
+    for (const [primitiveIndex, primitive] of (
+      mesh.primitives ?? []
+    ).entries()) {
+      if (primitive.extensions?.KHR_draco_mesh_compression) {
+        throw new Error("Draco-compressed avatar primitives are unsupported");
+      }
+      if (Number.isInteger(primitive.indices)) {
+        retainAccessor(
+          primitive.indices,
+          `Mesh ${meshIndex} primitive ${primitiveIndex} indices`,
+        );
+      }
+      for (const [semantic, accessor] of Object.entries(
+        primitive.attributes ?? {},
+      )) {
+        retainAccessor(
+          accessor,
+          `Mesh ${meshIndex} primitive ${primitiveIndex} attribute ${semantic}`,
+        );
+      }
+      for (const [targetIndex, target] of (primitive.targets ?? []).entries()) {
+        for (const [semantic, accessor] of Object.entries(target)) {
+          retainAccessor(
+            accessor,
+            `Mesh ${meshIndex} primitive ${primitiveIndex} target ${targetIndex} attribute ${semantic}`,
+          );
+        }
+      }
+      for (const [semantic, accessor] of Object.entries(
+        primitive.extensions?.EXT_mesh_gpu_instancing?.attributes ?? {},
+      )) {
+        retainAccessor(
+          accessor,
+          `Mesh ${meshIndex} primitive ${primitiveIndex} instancing attribute ${semantic}`,
+        );
+      }
+    }
+  }
+  for (const [skinIndex, skin] of (document.skins ?? []).entries()) {
+    if (Number.isInteger(skin.inverseBindMatrices)) {
+      retainAccessor(
+        skin.inverseBindMatrices,
+        `Skin ${skinIndex} inverse bind matrices`,
+      );
+    }
+  }
+  for (const [animationIndex, animation] of (
+    document.animations ?? []
+  ).entries()) {
+    for (const [samplerIndex, sampler] of (
+      animation.samplers ?? []
+    ).entries()) {
+      retainAccessor(
+        sampler.input,
+        `Animation ${animationIndex} sampler ${samplerIndex} input`,
+      );
+      retainAccessor(
+        sampler.output,
+        `Animation ${animationIndex} sampler ${samplerIndex} output`,
+      );
+    }
+  }
+
+  const accessorIndices = [...usedAccessors].sort(
+    (left, right) => left - right,
+  );
+  const accessorRemap = new Map(
+    accessorIndices.map((sourceIndex, outputIndex) => [
+      sourceIndex,
+      outputIndex,
+    ]),
+  );
+  const remapAccessor = (sourceIndex) => {
+    const outputIndex = accessorRemap.get(sourceIndex);
+    if (!Number.isInteger(outputIndex)) {
+      throw new Error(`Accessor ${sourceIndex} was not retained`);
+    }
+    return outputIndex;
+  };
+  for (const mesh of document.meshes ?? []) {
+    for (const primitive of mesh.primitives ?? []) {
+      if (Number.isInteger(primitive.indices)) {
+        primitive.indices = remapAccessor(primitive.indices);
+      }
+      for (const attributes of [
+        primitive.attributes,
+        ...(primitive.targets ?? []),
+        primitive.extensions?.EXT_mesh_gpu_instancing?.attributes,
+      ]) {
+        if (!attributes) continue;
+        for (const [semantic, accessor] of Object.entries(attributes)) {
+          attributes[semantic] = remapAccessor(accessor);
+        }
+      }
+    }
+  }
+  for (const skin of document.skins ?? []) {
+    if (Number.isInteger(skin.inverseBindMatrices)) {
+      skin.inverseBindMatrices = remapAccessor(skin.inverseBindMatrices);
+    }
+  }
+  for (const animation of document.animations ?? []) {
+    for (const sampler of animation.samplers ?? []) {
+      sampler.input = remapAccessor(sampler.input);
+      sampler.output = remapAccessor(sampler.output);
+    }
+  }
+  document.accessors = accessorIndices.map((index) =>
+    structuredClone(document.accessors[index]),
+  );
+
+  const usedViews = new Set();
+  const retainView = (value, label) => {
+    if (!Number.isInteger(value) || !document.bufferViews?.[value]) {
+      throw new Error(`${label} references an invalid buffer view`);
+    }
+    usedViews.add(value);
+  };
+  for (const [accessorIndex, accessor] of document.accessors.entries()) {
+    if (Number.isInteger(accessor.bufferView)) {
+      retainView(accessor.bufferView, `Accessor ${accessorIndex}`);
+    }
+    if (accessor.sparse) {
+      retainView(
+        accessor.sparse.indices?.bufferView,
+        `Accessor ${accessorIndex} sparse indices`,
+      );
+      retainView(
+        accessor.sparse.values?.bufferView,
+        `Accessor ${accessorIndex} sparse values`,
+      );
+    }
+  }
+  for (const [imageIndex, image] of (document.images ?? []).entries()) {
+    if (Number.isInteger(image.bufferView)) {
+      retainView(image.bufferView, `Image ${imageIndex}`);
+    }
+  }
+
+  const viewIndices = [...usedViews].sort((left, right) => left - right);
+  const viewRemap = new Map(
+    viewIndices.map((sourceIndex, outputIndex) => [sourceIndex, outputIndex]),
+  );
+  let binary = Buffer.alloc(0);
+  document.bufferViews = viewIndices.map((sourceIndex) => {
+    const view = document.bufferViews[sourceIndex];
+    if ((view.buffer ?? 0) !== 0 || view.extensions?.EXT_meshopt_compression) {
+      throw new Error(
+        `Buffer view ${sourceIndex} uses an unsupported buffer or compression extension`,
+      );
+    }
+    const start = view.byteOffset ?? 0;
+    const end = start + view.byteLength;
+    if (start < 0 || end > sourceBinary.length) {
+      throw new Error(`Buffer view ${sourceIndex} is truncated`);
+    }
+    const appended = appendBufferView(
+      binary,
+      sourceBinary.subarray(start, end),
+    );
+    binary = appended.binary;
+    return {
+      ...structuredClone(view),
+      buffer: 0,
+      byteOffset: appended.byteOffset,
+    };
+  });
+  const remapView = (sourceIndex) => {
+    const outputIndex = viewRemap.get(sourceIndex);
+    if (!Number.isInteger(outputIndex)) {
+      throw new Error(`Buffer view ${sourceIndex} was not retained`);
+    }
+    return outputIndex;
+  };
+  for (const accessor of document.accessors) {
+    if (Number.isInteger(accessor.bufferView)) {
+      accessor.bufferView = remapView(accessor.bufferView);
+    }
+    if (accessor.sparse) {
+      accessor.sparse.indices.bufferView = remapView(
+        accessor.sparse.indices.bufferView,
+      );
+      accessor.sparse.values.bufferView = remapView(
+        accessor.sparse.values.bufferView,
+      );
+    }
+  }
+  for (const image of document.images ?? []) {
+    if (Number.isInteger(image.bufferView)) {
+      image.bufferView = remapView(image.bufferView);
+    }
+  }
+  document.buffers = [{ byteLength: binary.length }];
+  return binary;
+}
+
 function embedDataUriImages(document, sourceBinary) {
   let binary = sourceBinary;
   for (const [index, image] of (document.images ?? []).entries()) {
@@ -241,7 +446,29 @@ function declareUsedExtensions(document) {
   document.extensionsUsed = [...declared].sort();
 }
 
-async function optimizeEmbeddedImages(document, maxTextureSize) {
+function readOptimizableImage(image, index, document, sourceBinary) {
+  if (typeof image.uri === "string") {
+    if (!image.uri.startsWith("data:")) return null;
+    const comma = image.uri.indexOf(",");
+    if (comma < 0 || !image.uri.slice(0, comma).endsWith(";base64")) {
+      throw new Error(`Image ${index} must use a base64 data URI`);
+    }
+    return Buffer.from(image.uri.slice(comma + 1), "base64");
+  }
+  if (!Number.isInteger(image.bufferView)) return null;
+  const view = document.bufferViews?.[image.bufferView];
+  if (!view || (view.buffer ?? 0) !== 0) {
+    throw new Error(`Image ${index} must reference embedded buffer 0`);
+  }
+  const start = view.byteOffset ?? 0;
+  const end = start + view.byteLength;
+  if (start < 0 || end > sourceBinary.length) {
+    throw new Error(`Image ${index} buffer view is truncated`);
+  }
+  return Buffer.from(sourceBinary.subarray(start, end));
+}
+
+async function optimizeEmbeddedImages(document, maxTextureSize, sourceBinary) {
   const sourceImages = document.images ?? [];
   const optimizedImages = [];
   const remap = new Map();
@@ -250,7 +477,8 @@ async function optimizeEmbeddedImages(document, maxTextureSize) {
 
   for (let index = 0; index < sourceImages.length; index += 1) {
     const image = sourceImages[index];
-    if (typeof image.uri !== "string" || !image.uri.startsWith("data:")) {
+    const source = readOptimizableImage(image, index, document, sourceBinary);
+    if (!source) {
       const nextIndex = optimizedImages.length;
       optimizedImages.push(image);
       remap.set(index, nextIndex);
@@ -261,11 +489,6 @@ async function optimizeEmbeddedImages(document, maxTextureSize) {
       });
       continue;
     }
-    const comma = image.uri.indexOf(",");
-    if (comma < 0 || !image.uri.slice(0, comma).endsWith(";base64")) {
-      throw new Error(`Image ${index} must use a base64 data URI`);
-    }
-    const source = Buffer.from(image.uri.slice(comma + 1), "base64");
     const metadata = await sharp(source).metadata();
     if (!metadata.width || !metadata.height) {
       throw new Error(`Image ${index} has no auditable dimensions`);
@@ -322,6 +545,71 @@ async function optimizeEmbeddedImages(document, maxTextureSize) {
   return details;
 }
 
+export function allocatePrimitiveTriangleBudgets(
+  sourceCounts,
+  minimumCounts,
+  maxTriangles,
+) {
+  if (
+    !Array.isArray(sourceCounts) ||
+    !Array.isArray(minimumCounts) ||
+    sourceCounts.length === 0 ||
+    sourceCounts.length !== minimumCounts.length
+  ) {
+    throw new Error("Primitive source/minimum triangle counts must align");
+  }
+  const normalizedMax = finitePositiveInteger(maxTriangles, "maxTriangles");
+  const capacities = sourceCounts.map((sourceCount, index) => {
+    const source = finitePositiveInteger(sourceCount, `sourceCounts[${index}]`);
+    const minimum = finitePositiveInteger(
+      minimumCounts[index],
+      `minimumCounts[${index}]`,
+    );
+    if (minimum > source) {
+      throw new Error(`minimumCounts[${index}] exceeds sourceCounts[${index}]`);
+    }
+    return source - minimum;
+  });
+  const sourceTotal = sourceCounts.reduce((sum, count) => sum + count, 0);
+  if (sourceTotal <= normalizedMax) return [...sourceCounts];
+  const minimumTotal = minimumCounts.reduce((sum, count) => sum + count, 0);
+  if (minimumTotal > normalizedMax) {
+    throw new Error(
+      `Mesh cannot reach ${normalizedMax} triangles within the error ceiling; minimum is ${minimumTotal}`,
+    );
+  }
+
+  const capacityTotal = capacities.reduce((sum, count) => sum + count, 0);
+  let remaining = normalizedMax - minimumTotal;
+  const budgets = [...minimumCounts];
+  const remainders = capacities.map((capacity, index) => {
+    const exact =
+      capacityTotal === 0 ? 0 : (capacity / capacityTotal) * remaining;
+    const whole = Math.min(capacity, Math.floor(exact));
+    budgets[index] += whole;
+    return { index, remainder: exact - whole };
+  });
+  remaining = normalizedMax - budgets.reduce((sum, count) => sum + count, 0);
+  remainders.sort(
+    (left, right) =>
+      right.remainder - left.remainder || left.index - right.index,
+  );
+  while (remaining > 0) {
+    let allocated = false;
+    for (const { index } of remainders) {
+      if (remaining === 0) break;
+      if (budgets[index] >= sourceCounts[index]) continue;
+      budgets[index] += 1;
+      remaining -= 1;
+      allocated = true;
+    }
+    if (!allocated) {
+      throw new Error("Unable to distribute the primitive triangle budget");
+    }
+  }
+  return budgets;
+}
+
 async function simplifyGeometry(
   document,
   sourceBinary,
@@ -352,32 +640,55 @@ async function simplifyGeometry(
       sourceTriangles,
       outputTriangles: sourceTriangles,
       errors: [],
+      primitiveDetails: sourceCounts.map((count, index) => ({
+        index,
+        sourceTriangles: count,
+        minimumTriangles: count,
+        targetTriangles: count,
+        outputTriangles: count,
+        error: 0,
+      })),
     };
   }
 
-  let remainingTarget = maxTriangles;
-  let remainingSource = sourceTriangles;
-  const errors = [];
-  let outputTriangles = 0;
-  for (let index = 0; index < trianglePrimitives.length; index += 1) {
-    const primitive = trianglePrimitives[index];
-    const sourceCount = sourceCounts[index];
-    const isLast = index === trianglePrimitives.length - 1;
-    const targetCount = isLast
-      ? remainingTarget
-      : Math.max(
-          1,
-          Math.floor((sourceCount / remainingSource) * remainingTarget),
-        );
-    remainingTarget -= targetCount;
-    remainingSource -= sourceCount;
-
+  const primitiveData = trianglePrimitives.map((primitive, index) => {
     const indices = readIndices(document, sourceBinary, primitive.indices);
     const positions = readPositions(
       document,
       sourceBinary,
       primitive.attributes?.POSITION,
     );
+    const [minimum, minimumError] = MeshoptSimplifier.simplify(
+      indices,
+      positions,
+      3,
+      Math.min(indices.length, 3),
+      maxError,
+    );
+    if (minimum.length === 0 || minimum.length % 3 !== 0) {
+      throw new Error(`Primitive ${index} has an invalid simplification floor`);
+    }
+    return {
+      primitive,
+      indices,
+      positions,
+      minimumTriangles: minimum.length / 3,
+      minimumError,
+    };
+  });
+  const targetCounts = allocatePrimitiveTriangleBudgets(
+    sourceCounts,
+    primitiveData.map(({ minimumTriangles }) => minimumTriangles),
+    maxTriangles,
+  );
+  const errors = [];
+  const primitiveDetails = [];
+  let outputTriangles = 0;
+  for (let index = 0; index < primitiveData.length; index += 1) {
+    const { primitive, indices, positions, minimumTriangles } =
+      primitiveData[index];
+    const sourceCount = sourceCounts[index];
+    const targetCount = targetCounts[index];
     const [simplified, error] = MeshoptSimplifier.simplify(
       indices,
       positions,
@@ -385,11 +696,6 @@ async function simplifyGeometry(
       Math.min(indices.length, targetCount * 3),
       maxError,
     );
-    if (simplified.length / 3 > targetCount) {
-      throw new Error(
-        `Mesh simplification stopped at ${simplified.length / 3} triangles; target is ${targetCount} within error ${maxError}`,
-      );
-    }
     const positionCount =
       document.accessors[primitive.attributes.POSITION].count;
     for (const vertexIndex of simplified) {
@@ -420,10 +726,25 @@ async function simplifyGeometry(
       max: [encoded.maximum],
     });
     primitive.indices = accessor;
-    outputTriangles += simplified.length / 3;
+    const primitiveOutputTriangles = simplified.length / 3;
+    outputTriangles += primitiveOutputTriangles;
     errors.push(error);
+    primitiveDetails.push({
+      index,
+      sourceTriangles: sourceCount,
+      minimumTriangles,
+      targetTriangles: targetCount,
+      outputTriangles: primitiveOutputTriangles,
+      error,
+    });
   }
-  return { binary, sourceTriangles, outputTriangles, errors };
+  return {
+    binary,
+    sourceTriangles,
+    outputTriangles,
+    errors,
+    primitiveDetails,
+  };
 }
 
 export async function optimizeVrmLod(
@@ -445,14 +766,19 @@ export async function optimizeVrmLod(
   const sourceSummary = summarizeVrmDocument(document, sourceBuffer);
   const sourceVrmSpec = document.extensions?.VRMC_vrm?.specVersion;
   if (!sourceVrmSpec) throw new Error(`${source} is missing VRMC_vrm metadata`);
-  const imageDetails = await optimizeEmbeddedImages(document, maxTextureSize);
+  const imageDetails = await optimizeEmbeddedImages(
+    document,
+    maxTextureSize,
+    binary,
+  );
   const geometry = await simplifyGeometry(
     document,
     binary,
     maxTriangles,
     maxError,
   );
-  const outputBinary = embedDataUriImages(document, geometry.binary);
+  const compactedBinary = compactReferencedBinary(document, geometry.binary);
+  const outputBinary = embedDataUriImages(document, compactedBinary);
   declareUsedExtensions(document);
   if (document.buffers?.[0])
     document.buffers[0].byteLength = outputBinary.length;
@@ -499,6 +825,7 @@ export async function optimizeVrmLod(
       maxTextureSize,
       maxError,
       simplificationErrors: geometry.errors,
+      primitiveDetails: geometry.primitiveDetails,
       sourceImageCount: sourceSummary.textureDimensions.length,
       outputImageCount: outputSummary.textureDimensions.length,
       imageDetails,

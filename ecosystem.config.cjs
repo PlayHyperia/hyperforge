@@ -35,8 +35,10 @@ for (const secretsPath of SECRETS_FILES) {
         const key = trimmed.slice(0, eqIdx).trim();
         let value = trimmed.slice(eqIdx + 1).trim();
         // Strip surrounding quotes
-        if ((value.startsWith('"') && value.endsWith('"')) ||
-          (value.startsWith("'") && value.endsWith("'"))) {
+        if (
+          (value.startsWith('"') && value.endsWith('"')) ||
+          (value.startsWith("'") && value.endsWith("'"))
+        ) {
           value = value.slice(1, -1);
         }
         if (!process.env[key]) {
@@ -44,7 +46,9 @@ for (const secretsPath of SECRETS_FILES) {
         }
       }
     }
-  } catch { /* ignore missing/unreadable files */ }
+  } catch {
+    /* ignore missing/unreadable files */
+  }
 }
 
 // Auto-detect DUEL_DATABASE_MODE from DATABASE_URL so sanitizeRuntimeEnv()
@@ -52,7 +56,9 @@ for (const secretsPath of SECRETS_FILES) {
 if (!process.env.DUEL_DATABASE_MODE && process.env.DATABASE_URL) {
   try {
     const dbHost = new URL(process.env.DATABASE_URL).hostname;
-    const isLocal = ["localhost", "127.0.0.1", "0.0.0.0", "::1"].includes(dbHost);
+    const isLocal = ["localhost", "127.0.0.1", "0.0.0.0", "::1"].includes(
+      dbHost,
+    );
     process.env.DUEL_DATABASE_MODE = isLocal ? "local" : "remote";
   } catch {
     process.env.DUEL_DATABASE_MODE = "remote";
@@ -99,8 +105,7 @@ function sanitizeRuntimeEnv() {
 
   runtimeEnv.DUEL_DATABASE_MODE = useRemoteDatabase ? "remote" : "local";
   runtimeEnv.USE_LOCAL_POSTGRES =
-    process.env.USE_LOCAL_POSTGRES ||
-    (useRemoteDatabase ? "false" : "true");
+    process.env.USE_LOCAL_POSTGRES || (useRemoteDatabase ? "false" : "true");
 
   if (!useRemoteDatabase && isLocalDatabaseUrl(process.env.DATABASE_URL)) {
     runtimeEnv.DATABASE_URL = process.env.DATABASE_URL;
@@ -119,7 +124,7 @@ module.exports = {
     {
       name: "hyperia-duel",
       script: "scripts/duel-stack.mjs",
-      interpreter: "bun",
+      interpreter: process.env.DUEL_HYPERIA_BUN_PATH || "bun",
       args: "--skip-betting --skip-bots",
       cwd: __dirname,
       autorestart: true,
@@ -151,17 +156,25 @@ module.exports = {
         SOLANA_ARENA_MARKET_PROGRAM_ID:
           process.env.SOLANA_ARENA_MARKET_PROGRAM_ID ||
           "9NdidShnVzy1fc1WHWJTvyuXmH47ynfNGA6QFdyfAuSU",
-        SOLANA_GOLD_MINT:
-          process.env.SOLANA_GOLD_MINT ||
-          "DK9nBUMfdu4XprPRWeh8f6KnQiGWD8Z4xz3yzs9gpump",
-
-        PUBLIC_CDN_URL: process.env.PUBLIC_CDN_URL || "https://assets.hyperia.club",
-        DISABLE_RATE_LIMIT: "true",
+        PUBLIC_CDN_URL:
+          process.env.PUBLIC_CDN_URL || "https://assets.hyperia.club",
+        DISABLE_RATE_LIMIT: "false",
+        HYPERIA_SOL_AGENT_AUTH_ENABLED:
+          process.env.HYPERIA_SOL_AGENT_AUTH_ENABLED || "false",
+        HYPERIA_SOL_AGENT_AUTH_DOMAIN:
+          process.env.HYPERIA_SOL_AGENT_AUTH_DOMAIN || "",
+        HYPERIA_SOL_AGENT_AUTH_ORIGIN:
+          process.env.HYPERIA_SOL_AGENT_AUTH_ORIGIN || "",
+        HYPERIA_SOL_AGENT_AUTH_CLUSTER:
+          process.env.HYPERIA_SOL_AGENT_AUTH_CLUSTER || "",
+        HYPERIA_SOL_AGENT_AUTH_TTL_SECONDS:
+          process.env.HYPERIA_SOL_AGENT_AUTH_TTL_SECONDS || "",
         ALLOW_DESTRUCTIVE_CHANGES: "false",
         AUTO_START_AGENTS: "true",
         AUTO_START_AGENTS_MAX: "10",
         SPAWN_MODEL_AGENTS: "true",
         MAX_MODEL_AGENTS: "4",
+        SPAWN_MODEL_AGENTS_WITH_EMBEDDED: "false",
         MALLOC_TRIM_THRESHOLD_: "-1",
         MIMALLOC_ALLOW_DECOMMIT: "0",
         MIMALLOC_ALLOW_RESET: "0",
@@ -177,8 +190,7 @@ module.exports = {
         STREAM_OUTPUT_HEIGHT: "720",
         FFMPEG_PATH: process.env.FFMPEG_PATH || "ffmpeg",
         TWITCH_STREAM_URL:
-          process.env.TWITCH_STREAM_URL ||
-          "rtmp://live.twitch.tv/app",
+          process.env.TWITCH_STREAM_URL || "rtmp://live.twitch.tv/app",
         TWITCH_STREAM_KEY:
           process.env.TWITCH_STREAM_KEY ||
           process.env.TWITCH_RTMP_STREAM_KEY ||
@@ -192,8 +204,7 @@ module.exports = {
           process.env.DUEL_STREAM_DESTINATIONS ||
           "",
         YOUTUBE_STREAM_URL:
-          process.env.YOUTUBE_STREAM_URL ||
-          "rtmp://a.rtmp.youtube.com/live2",
+          process.env.YOUTUBE_STREAM_URL || "rtmp://a.rtmp.youtube.com/live2",
         GAME_URL: "http://localhost:3333/?page=stream",
         GAME_FALLBACK_URLS:
           "http://localhost:3333/?page=stream,http://localhost:3333/?embedded=true&mode=spectator,http://localhost:3333/",

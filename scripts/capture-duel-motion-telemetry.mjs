@@ -15,7 +15,9 @@ import { parseArgs } from "node:util";
 import { chromium } from "playwright";
 import {
   buildDefaultCaptureLaunchArgs,
+  resolveDefaultCaptureFeatureFlags,
   applyCaptureFrameRateToUrl,
+  CANONICAL_CAPTURE_RENDER_PROFILE,
 } from "../packages/server/src/streaming/captureBrowserPolicy.ts";
 import {
   attachStreamingViewerToken,
@@ -25,6 +27,8 @@ import {
 } from "./duel-capture-scenarios.mjs";
 import {
   DUEL_MOTION_TELEMETRY_LIMITS,
+  cloneDuelScreenshotPerformanceSnapshot,
+  evaluateDuelScreenshotPerformanceSnapshot,
   evaluateDuelStyleSwitchTelemetry,
   isDuelMotionSamplingRace,
   parseDuelMotionRoles,
@@ -34,12 +38,83 @@ import {
   summarizeDuelStyleSwitchTelemetry,
   summarizeDuelMotionTelemetry,
 } from "./duel-motion-telemetry.mjs";
-import { summarizeDuelRangedTransitionTelemetry } from "./duel-ranged-transition-telemetry.mjs";
+import {
+  selectDuelRangedPresentationEvents,
+  summarizeDuelRangedTransitionTelemetry,
+} from "./duel-ranged-transition-telemetry.mjs";
 import { accumulateFightingObservation } from "./duel-fighting-observation.mjs";
 
 const COMBAT_ROLES = new Set(["melee", "ranged", "mage"]);
 const MAX_RETAINED_SAMPLES = 600;
 const MAX_RETAINED_ERRORS = 100;
+const MAX_RETAINED_SCREENSHOT_ATTEMPTS = 4;
+const SCREENSHOT_PERFORMANCE_TIMEOUT_MS = 3_000;
+
+async function readScreenshotPerformanceProbe(page, timeoutMs) {
+  let timeout;
+  try {
+    return await Promise.race([
+      page.evaluate(() => ({
+        clock: {
+          wallTimeMs: Date.now(),
+          timeOrigin: performance.timeOrigin,
+          performanceNowMs: performance.now(),
+        },
+        performance: window.__HYPERIA_STREAM_PERFORMANCE__ ?? null,
+      })),
+      new Promise((_, reject) => {
+        timeout = setTimeout(
+          () => reject(new Error("Screenshot performance probe timed out")),
+          timeoutMs,
+        );
+      }),
+    ]);
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+async function waitForScreenshotPerformance(page, attempt, immediateProbe) {
+  const deadline = performance.now() + SCREENSHOT_PERFORMANCE_TIMEOUT_MS;
+  let probe = immediateProbe;
+  while (true) {
+    attempt.afterPerformance = cloneDuelScreenshotPerformanceSnapshot(
+      probe.performance,
+    );
+    attempt.afterSnapshotClock = probe.clock;
+    if (probe.clock.timeOrigin !== attempt.beforeClock.timeOrigin) {
+      throw new Error("Screenshot browser clock epoch changed");
+    }
+    attempt.snapshotFreshness = evaluateDuelScreenshotPerformanceSnapshot({
+      before: attempt.beforePerformance,
+      after: attempt.afterPerformance,
+      captureEndedAt: attempt.immediateAfterClock.wallTimeMs,
+      afterObservedAt: probe.clock.wallTimeMs,
+    });
+    if (attempt.snapshotFreshness.status === "invalid") {
+      throw new Error(attempt.snapshotFreshness.reason);
+    }
+    if (attempt.snapshotFreshness.status === "ready") {
+      return attempt.afterPerformance;
+    }
+    const remainingMs = deadline - performance.now();
+    if (remainingMs <= 0) {
+      throw new Error(
+        "Screenshot performance snapshot did not advance within 3000ms",
+      );
+    }
+    await new Promise((resolve) =>
+      setTimeout(resolve, Math.min(100, remainingMs)),
+    );
+    const probeTimeoutMs = deadline - performance.now();
+    if (probeTimeoutMs <= 0) {
+      throw new Error(
+        "Screenshot performance snapshot did not advance within 3000ms",
+      );
+    }
+    probe = await readScreenshotPerformanceProbe(page, probeTimeoutMs);
+  }
+}
 
 const options = parseArgs({
   options: {
@@ -65,6 +140,7 @@ const options = parseArgs({
     "duration-s": { type: "string", default: "240" },
     "minimum-fighting-s": { type: "string" },
     "maximum-duration-s": { type: "string" },
+    "startup-timeout-s": { type: "string", default: "180" },
     "poll-ms": { type: "string", default: "100" },
     viewport: { type: "string", default: "1920x1080" },
     "safe-ndc-x": { type: "string" },
@@ -83,18 +159,19 @@ Usage:
   bun scripts/capture-duel-motion-telemetry.mjs [options]
 
 Options:
-  --stream-url <url>   Canonical stream page (streamFps=60 is enforced)
+  --stream-url <url>   Canonical stream page (the versioned 720p60 source profile is enforced)
   --state-url <url>    Authenticated public state API
   --output-dir <path>  New evidence directory; an existing manifest is never overwritten
   --roles <csv>        Exact fixed pair, or melee,ranged,mage in multi-style mode
   --multi-style        Require both contestants to switch frozen combat roles live
   --require-hit-reactions Require repeated health/reaction alignment in the real avatar mixer
-  --require-ranged-transitions Require repeated live nock/release/projectile continuity
+  --require-ranged-transitions Require repeated live nock/release/flight/impact/reaction continuity
   --network-latency-ms <n> Browser transport latency in milliseconds (0-2000)
   --cpu-throttle-rate <n> Browser CPU slowdown multiplier (1-20)
   --duration-s <n>     Minimum wall-clock capture window (default: 240)
   --minimum-fighting-s <n> Required accepted FIGHTING time; ranged-transition default: 60
   --maximum-duration-s <n> Hard wall-clock timeout; defaults to max(duration, 4x FIGHTING target)
+  --startup-timeout-s <n> Separate cold scene-admission timeout (default: 180)
   --poll-ms <n>        Browser/server poll interval (default: 100)
   --viewport <WxH>     Browser viewport (default: 1920x1080)
   --safe-ndc-x <n>     Optional maximum absolute fighter projection X (0,1]
@@ -213,12 +290,61 @@ async function readBrowserProbe(page) {
     const runtimeWindow = window;
     const documentElement = document.documentElement;
     const body = document.body;
+    const sceneReadiness =
+      runtimeWindow.__HYPERIA_STREAM_SCENE_READINESS__ ?? null;
+    const equipment = sceneReadiness?.equipmentVisuals ?? null;
+    const counter = (value) =>
+      Number.isSafeInteger(value) && value >= 0 ? value : null;
     return {
+      clock: {
+        wallTimeMs: Date.now(),
+        timeOrigin: performance.timeOrigin,
+        performanceNowMs: performance.now(),
+      },
       state: runtimeWindow.__HYPERIA_STREAM_STATE__ ?? null,
       rendererHealth: runtimeWindow.__HYPERIA_STREAM_RENDERER_HEALTH__ ?? null,
       performance: runtimeWindow.__HYPERIA_STREAM_PERFORMANCE__ ?? null,
       sceneDiagnostics:
         runtimeWindow.__HYPERIA_STREAM_SCENE_DIAGNOSTICS__ ?? null,
+      equipmentReadiness:
+        sceneReadiness && equipment
+          ? {
+              ready: sceneReadiness.ready === true,
+              cycleId:
+                typeof sceneReadiness.cycleId === "string"
+                  ? sceneReadiness.cycleId
+                  : null,
+              phase:
+                typeof sceneReadiness.phase === "string"
+                  ? sceneReadiness.phase
+                  : null,
+              equipmentVisualsReady:
+                sceneReadiness.equipmentVisualsReady === true,
+              configured: equipment.configured === true,
+              equipmentCycleId:
+                typeof equipment.cycleId === "string"
+                  ? equipment.cycleId
+                  : null,
+              requiredCount: counter(equipment.requiredCount),
+              requiredPlayerCount: counter(equipment.requiredPlayerCount),
+              readyCount: counter(equipment.readyCount),
+              expectedPlayerCount: counter(equipment.expectedPlayerCount),
+              activeVisualCount: counter(equipment.activeVisualCount),
+              activeVisibleCount: counter(equipment.activeVisibleCount),
+              activePlayerCount: counter(equipment.activePlayerCount),
+              activeVisiblePlayerCount: counter(
+                equipment.activeVisiblePlayerCount,
+              ),
+              unresolvedCount: Array.isArray(equipment.unresolved)
+                ? equipment.unresolved.length
+                : null,
+              attachmentMismatchCount: Array.isArray(
+                equipment.attachmentMismatches,
+              )
+                ? equipment.attachmentMismatches.length
+                : null,
+            }
+          : null,
       layout: {
         innerWidth: window.innerWidth,
         innerHeight: window.innerHeight,
@@ -247,6 +373,33 @@ async function readBrowserProbe(page) {
       },
     };
   });
+}
+
+function hasExactVisibleFightingEquipment(
+  equipment,
+  cycleId,
+  expectedAgentCount = 2,
+) {
+  return Boolean(
+    equipment?.ready === true &&
+    equipment?.phase === "FIGHTING" &&
+    equipment?.cycleId === cycleId &&
+    equipment?.equipmentVisualsReady === true &&
+    equipment?.configured === true &&
+    equipment?.equipmentCycleId === cycleId &&
+    equipment?.requiredPlayerCount === expectedAgentCount &&
+    equipment?.expectedPlayerCount === expectedAgentCount &&
+    equipment?.activePlayerCount === expectedAgentCount &&
+    equipment?.activeVisiblePlayerCount === expectedAgentCount &&
+    Number.isSafeInteger(equipment?.requiredCount) &&
+    equipment.requiredCount >= expectedAgentCount &&
+    equipment?.readyCount === equipment.requiredCount &&
+    Number.isSafeInteger(equipment?.activeVisualCount) &&
+    equipment.activeVisualCount >= expectedAgentCount &&
+    equipment?.activeVisibleCount === equipment.activeVisualCount &&
+    equipment?.unresolvedCount === 0 &&
+    equipment?.attachmentMismatchCount === 0,
+  );
 }
 
 function exactDiagnosticRole(agent) {
@@ -340,12 +493,16 @@ function buildMotionSample(browserState, diagnostics, observedAt, multiStyle) {
       avatarPosition: agent.avatarPosition,
       renderQuaternion: agent.renderQuaternion,
       ndcPosition: agent.ndcPosition,
+      ndcHeadPosition: agent.ndcHeadPosition,
       facingTargetErrorDegrees: agent.facingTargetErrorDegrees,
       insideCombatArena: agent.insideCombatArena,
+      insideAssignedCombatArena: agent.insideAssignedCombatArena,
+      cameraLineOfSight: agent.cameraLineOfSight ?? null,
       visible: agent.visible,
       active: agent.active,
       avatarReady: agent.avatarReady,
       hitReaction: agent.hitReaction ?? null,
+      authoredMotion: agent.authoredMotion ?? null,
       avatarEmote: agent.avatarEmote ?? null,
     })),
   };
@@ -378,6 +535,7 @@ function buildHitReactionLifecycleSample(state, diagnostics, observedAt) {
       id: agent.id,
       hp: publicAgents[index].hp,
       hitReaction: agent.hitReaction ?? null,
+      authoredMotion: agent.authoredMotion ?? null,
       avatarEmote: agent.avatarEmote ?? null,
     })),
   };
@@ -395,35 +553,62 @@ function buildRangedTransitionSnapshot(
   roles,
   observedAt,
 ) {
+  lastRangedTransitionDiagnosticRejectionReason = null;
   const rangedPlayerIds = normalizedDiagnostics.agents.flatMap(
     (agent, index) => (agent && roles[index] === "ranged" ? [agent.id] : []),
   );
-  if (rangedPlayerIds.length === 0) return null;
+  const duelPlayerIds = new Set(
+    normalizedDiagnostics.agents.flatMap((agent) =>
+      agent?.id ? [agent.id] : [],
+    ),
+  );
   const presentation = rawSceneDiagnostics?.combatPresentation;
   const bow = presentation?.bow;
   const projectiles = presentation?.projectiles;
+  const damage = presentation?.damage;
   if (
     bow?.schemaVersion !== 1 ||
     projectiles?.schemaVersion !== 1 ||
+    damage?.schemaVersion !== 1 ||
+    !Number.isFinite(bow.performanceTimeMs) ||
     !Number.isSafeInteger(bow.latestSequence) ||
     bow.latestSequence < 0 ||
     !Number.isSafeInteger(projectiles.latestSequence) ||
     projectiles.latestSequence < 0 ||
+    !Number.isSafeInteger(projectiles.latestImpactSequence) ||
+    projectiles.latestImpactSequence < 0 ||
+    !Number.isSafeInteger(projectiles.latestCancellationSequence) ||
+    projectiles.latestCancellationSequence < 0 ||
+    !Number.isSafeInteger(damage.latestSequence) ||
+    damage.latestSequence < 0 ||
     !Array.isArray(bow.players) ||
     !Array.isArray(bow.recentTransitions) ||
     !Array.isArray(projectiles.activeArrows) ||
     !Array.isArray(projectiles.recentArrowSpawns) ||
+    !Array.isArray(projectiles.recentArrowImpacts) ||
+    !Array.isArray(projectiles.recentArrowCancellations) ||
+    !Array.isArray(damage.recentEvents) ||
     !Number.isSafeInteger(projectiles.arrowCancelledBeforeSpawnCount) ||
-    projectiles.arrowCancelledBeforeSpawnCount < 0
+    projectiles.arrowCancelledBeforeSpawnCount < 0 ||
+    !Number.isSafeInteger(projectiles.arrowExpiredBeforeImpactCount) ||
+    projectiles.arrowExpiredBeforeImpactCount < 0
   ) {
+    lastRangedTransitionDiagnosticRejectionReason = "schema_invalid";
     return null;
   }
 
-  const rangedSet = new Set(rangedPlayerIds);
+  const roleByPlayerId = new Map(
+    normalizedDiagnostics.agents.flatMap((agent, index) =>
+      agent?.id && typeof roles[index] === "string"
+        ? [[agent.id, roles[index]]]
+        : [],
+    ),
+  );
   const players = bow.players
-    .filter((player) => rangedSet.has(player?.playerId))
+    .filter((player) => duelPlayerIds.has(player?.playerId))
     .map((player) => ({
       playerId: player.playerId,
+      role: roleByPlayerId.get(player.playerId) ?? null,
       itemId:
         typeof player.itemId === "string" && player.itemId.length <= 160
           ? player.itemId
@@ -436,11 +621,13 @@ function buildRangedTransitionSnapshot(
           : finitePositionTuple(player.nockedArrowWorldPosition),
     }));
   if (
-    players.length !== rangedPlayerIds.length ||
+    players.length !== duelPlayerIds.size ||
+    players.some((player) => typeof player.role !== "string") ||
     players.some(
       (player) => player.nockedArrowVisible && !player.nockedArrowWorldPosition,
     )
   ) {
+    lastRangedTransitionDiagnosticRejectionReason = "players_invalid";
     return null;
   }
 
@@ -448,7 +635,7 @@ function buildRangedTransitionSnapshot(
     if (
       !Number.isSafeInteger(transition?.sequence) ||
       transition.sequence < 0 ||
-      !rangedSet.has(transition.playerId) ||
+      !duelPlayerIds.has(transition.playerId) ||
       !["scheduled", "released", "cancelled"].includes(transition.kind) ||
       !Number.isFinite(transition.performanceTimeMs)
     ) {
@@ -463,6 +650,12 @@ function buildRangedTransitionSnapshot(
           : null,
       kind: transition.kind,
       performanceTimeMs: transition.performanceTimeMs,
+      networkEventId:
+        typeof transition.networkEventId === "string" &&
+        transition.networkEventId.length > 0 &&
+        transition.networkEventId.length <= 256
+          ? transition.networkEventId
+          : null,
     };
     if (transition.kind === "scheduled") {
       return Number.isFinite(transition.releaseAtPerformanceTimeMs)
@@ -489,19 +682,34 @@ function buildRangedTransitionSnapshot(
     }
     return normalized;
   };
-  const normalizeSpawn = (spawn) => {
+  const normalizeSpawn = (spawn, active = false) => {
     const startPosition = finitePositionTuple(spawn?.startPosition);
     const targetPosition = finitePositionTuple(spawn?.targetPosition);
+    const currentPosition = active
+      ? finitePositionTuple(spawn?.currentPosition)
+      : null;
     if (
       !Number.isSafeInteger(spawn?.sequence) ||
       spawn.sequence < 0 ||
-      !rangedSet.has(spawn.attackerId) ||
+      !duelPlayerIds.has(spawn.attackerId) ||
       typeof spawn.targetId !== "string" ||
       spawn.targetId.length === 0 ||
       spawn.targetId.length > 160 ||
+      typeof spawn.projectileId !== "string" ||
+      spawn.projectileId.length === 0 ||
+      spawn.projectileId.length > 160 ||
       !Number.isFinite(spawn.performanceTimeMs) ||
       !startPosition ||
-      !targetPosition
+      !targetPosition ||
+      (active &&
+        (!currentPosition ||
+          !Number.isFinite(spawn.elapsedMs) ||
+          spawn.elapsedMs < 0 ||
+          !Number.isFinite(spawn.distanceTraveled) ||
+          spawn.distanceTraveled < 0 ||
+          !Number.isFinite(spawn.flightProgress) ||
+          spawn.flightProgress < 0 ||
+          spawn.flightProgress > 1))
     ) {
       return null;
     }
@@ -509,6 +717,7 @@ function buildRangedTransitionSnapshot(
       sequence: spawn.sequence,
       attackerId: spawn.attackerId,
       targetId: spawn.targetId,
+      projectileId: spawn.projectileId,
       arrowId:
         typeof spawn.arrowId === "string" && spawn.arrowId.length <= 160
           ? spawn.arrowId
@@ -525,6 +734,166 @@ function buildRangedTransitionSnapshot(
       travelDurationMs: Number.isFinite(spawn.travelDurationMs)
         ? spawn.travelDurationMs
         : null,
+      ...(active
+        ? {
+            currentPosition,
+            elapsedMs: spawn.elapsedMs,
+            distanceTraveled: spawn.distanceTraveled,
+            flightProgress: spawn.flightProgress,
+          }
+        : {}),
+    };
+  };
+  const normalizeImpact = (impact) => {
+    const impactPosition =
+      impact?.impactPosition === null
+        ? null
+        : finitePositionTuple(impact?.impactPosition);
+    if (
+      !Number.isSafeInteger(impact?.sequence) ||
+      impact.sequence < 0 ||
+      !duelPlayerIds.has(impact.attackerId) ||
+      typeof impact.targetId !== "string" ||
+      !duelPlayerIds.has(impact.targetId) ||
+      typeof impact.projectileId !== "string" ||
+      impact.projectileId.length === 0 ||
+      impact.projectileId.length > 160 ||
+      typeof impact.networkEventId !== "string" ||
+      impact.networkEventId.length === 0 ||
+      impact.networkEventId.length > 160 ||
+      !Number.isFinite(impact.performanceTimeMs) ||
+      !Number.isFinite(impact.damage) ||
+      impact.damage < 0 ||
+      !(
+        impact.travelledMetres === null ||
+        (Number.isFinite(impact.travelledMetres) && impact.travelledMetres >= 0)
+      ) ||
+      !(
+        impact.flightProgress === null ||
+        (Number.isFinite(impact.flightProgress) &&
+          impact.flightProgress >= 0 &&
+          impact.flightProgress <= 1)
+      ) ||
+      typeof impact.visualFound !== "boolean" ||
+      !Number.isSafeInteger(impact.impactParticleCount) ||
+      impact.impactParticleCount < 0 ||
+      (impact.impactPosition !== null && !impactPosition)
+    ) {
+      return null;
+    }
+    return {
+      sequence: impact.sequence,
+      launchSequence: Number.isSafeInteger(impact.launchSequence)
+        ? impact.launchSequence
+        : null,
+      attackerId: impact.attackerId,
+      targetId: impact.targetId,
+      arrowId:
+        typeof impact.arrowId === "string" && impact.arrowId.length <= 160
+          ? impact.arrowId
+          : null,
+      projectileId: impact.projectileId,
+      networkEventId: impact.networkEventId,
+      performanceTimeMs: impact.performanceTimeMs,
+      impactPosition,
+      travelledMetres: Number.isFinite(impact.travelledMetres)
+        ? impact.travelledMetres
+        : null,
+      flightProgress: Number.isFinite(impact.flightProgress)
+        ? impact.flightProgress
+        : null,
+      damage: impact.damage,
+      visualFound: impact.visualFound,
+      impactParticleCount: impact.impactParticleCount,
+    };
+  };
+  const normalizeDamage = (event) => {
+    if (
+      !Number.isSafeInteger(event?.sequence) ||
+      event.sequence < 0 ||
+      typeof event.projectileId !== "string" ||
+      event.projectileId.length === 0 ||
+      event.projectileId.length > 160 ||
+      !duelPlayerIds.has(event.attackerId) ||
+      !duelPlayerIds.has(event.targetId) ||
+      !Number.isFinite(event.damage) ||
+      event.damage < 0 ||
+      !Number.isFinite(event.performanceTimeMs) ||
+      typeof event.hitReactionTriggered !== "boolean" ||
+      typeof event.damageSplatCreated !== "boolean" ||
+      !(
+        event.hitReactionTriggerCount === null ||
+        (Number.isSafeInteger(event.hitReactionTriggerCount) &&
+          event.hitReactionTriggerCount >= 0)
+      )
+    ) {
+      return null;
+    }
+    return {
+      sequence: event.sequence,
+      projectileId: event.projectileId,
+      attackerId: event.attackerId,
+      targetId: event.targetId,
+      attackType:
+        typeof event.attackType === "string" ? event.attackType : null,
+      targetType:
+        event.targetType === "player" || event.targetType === "mob"
+          ? event.targetType
+          : null,
+      damage: event.damage,
+      isCritical: event.isCritical === true,
+      performanceTimeMs: event.performanceTimeMs,
+      hitReactionTriggered: event.hitReactionTriggered,
+      hitReactionTriggerCount: event.hitReactionTriggerCount,
+      damageSplatCreated: event.damageSplatCreated,
+    };
+  };
+  const normalizeCancellation = (event) => {
+    if (
+      !Number.isSafeInteger(event?.sequence) ||
+      event.sequence < 0 ||
+      !duelPlayerIds.has(event.attackerId) ||
+      !duelPlayerIds.has(event.targetId) ||
+      typeof event.projectileId !== "string" ||
+      event.projectileId.length === 0 ||
+      event.projectileId.length > 160 ||
+      typeof event.networkEventId !== "string" ||
+      event.networkEventId.length === 0 ||
+      event.networkEventId.length > 160 ||
+      !Number.isFinite(event.performanceTimeMs) ||
+      ![
+        "combat_ended",
+        "entity_died",
+        "player_respawned",
+        "player_disconnected",
+        "combat_state_missing",
+      ].includes(event.reason) ||
+      typeof event.visualFound !== "boolean"
+    ) {
+      return null;
+    }
+    return {
+      sequence: event.sequence,
+      launchSequence: Number.isSafeInteger(event.launchSequence)
+        ? event.launchSequence
+        : null,
+      attackerId: event.attackerId,
+      targetId: event.targetId,
+      arrowId:
+        typeof event.arrowId === "string" && event.arrowId.length <= 160
+          ? event.arrowId
+          : null,
+      projectileId: event.projectileId,
+      launchNetworkEventId:
+        typeof event.launchNetworkEventId === "string" &&
+        event.launchNetworkEventId.length > 0 &&
+        event.launchNetworkEventId.length <= 160
+          ? event.launchNetworkEventId
+          : null,
+      networkEventId: event.networkEventId,
+      performanceTimeMs: event.performanceTimeMs,
+      reason: event.reason,
+      visualFound: event.visualFound,
     };
   };
 
@@ -532,49 +901,146 @@ function buildRangedTransitionSnapshot(
     rangedTransitionBaselineInitialized = true;
     lastBowTransitionSequence = bow.latestSequence;
     lastArrowSpawnSequence = projectiles.latestSequence;
+    lastArrowImpactSequence = projectiles.latestImpactSequence;
+    lastArrowCancellationSequence = projectiles.latestCancellationSequence;
+    lastDamagePresentationSequence = damage.latestSequence;
     rangedTransitionCancelledBeforeSpawnBaseline =
       projectiles.arrowCancelledBeforeSpawnCount;
+    rangedTransitionExpiredBeforeImpactBaseline =
+      projectiles.arrowExpiredBeforeImpactCount;
   }
   if (
     bow.latestSequence < lastBowTransitionSequence ||
-    projectiles.latestSequence < lastArrowSpawnSequence
+    projectiles.latestSequence < lastArrowSpawnSequence ||
+    projectiles.latestImpactSequence < lastArrowImpactSequence ||
+    projectiles.latestCancellationSequence < lastArrowCancellationSequence ||
+    damage.latestSequence < lastDamagePresentationSequence
   ) {
+    lastRangedTransitionDiagnosticRejectionReason = "sequence_regression";
     return null;
   }
-  const rawTransitions = bow.recentTransitions.filter(
-    (transition) => transition?.sequence > lastBowTransitionSequence,
-  );
+  const selectedEvents = selectDuelRangedPresentationEvents({
+    duelPlayerIds,
+    recentTransitions: bow.recentTransitions,
+    recentArrowSpawns: projectiles.recentArrowSpawns,
+    recentArrowImpacts: projectiles.recentArrowImpacts,
+    recentArrowCancellations: projectiles.recentArrowCancellations,
+    recentDamageEvents: damage.recentEvents,
+    activeArrows: projectiles.activeArrows,
+    lastBowTransitionSequence,
+    lastArrowSpawnSequence,
+    lastArrowImpactSequence,
+    lastArrowCancellationSequence,
+    lastDamageSequence: lastDamagePresentationSequence,
+  });
+  const rawTransitions = selectedEvents.transitions;
   const transitions = rawTransitions.map(normalizeTransition);
-  const rawSpawns = projectiles.recentArrowSpawns.filter(
-    (spawn) =>
-      spawn?.sequence > lastArrowSpawnSequence &&
-      rangedSet.has(spawn?.attackerId),
+  const rawSpawns = selectedEvents.spawnEvents;
+  // Do not pass normalizeSpawn directly to Array.map: map's numeric index
+  // would become the optional `active` flag and make every batched spawn after
+  // the first require active-flight-only fields.
+  const spawnEvents = rawSpawns.map((spawn) => normalizeSpawn(spawn));
+  const impactEvents = selectedEvents.impactEvents.map(normalizeImpact);
+  const cancellationEvents = selectedEvents.cancellationEvents.map(
+    normalizeCancellation,
   );
-  const spawnEvents = rawSpawns.map(normalizeSpawn);
-  const activeArrows = projectiles.activeArrows
-    .filter((arrow) => rangedSet.has(arrow?.attackerId))
-    .map(normalizeSpawn);
-  if (
-    transitions.some((transition) => transition === null) ||
-    spawnEvents.some((spawn) => spawn === null) ||
-    activeArrows.some((spawn) => spawn === null)
-  ) {
+  const damageEvents = selectedEvents.damageEvents
+    .filter((event) => typeof event?.projectileId === "string")
+    .map(normalizeDamage);
+  const activeArrows = selectedEvents.activeArrows.map((spawn) =>
+    normalizeSpawn(spawn, true),
+  );
+  const explainInvalidSpawn = (spawn, active) => {
+    if (!Number.isSafeInteger(spawn?.sequence) || spawn.sequence < 0) {
+      return "sequence";
+    }
+    if (!duelPlayerIds.has(spawn.attackerId)) return "attacker";
+    if (
+      typeof spawn.targetId !== "string" ||
+      spawn.targetId.length === 0 ||
+      spawn.targetId.length > 160
+    ) {
+      return "target_id";
+    }
+    if (
+      typeof spawn.projectileId !== "string" ||
+      spawn.projectileId.length === 0 ||
+      spawn.projectileId.length > 160
+    ) {
+      return "projectile_id";
+    }
+    if (!Number.isFinite(spawn.performanceTimeMs)) return "time";
+    if (!finitePositionTuple(spawn.startPosition)) return "start_position";
+    if (!finitePositionTuple(spawn.targetPosition)) return "target_position";
+    if (!active) return "unknown";
+    if (!finitePositionTuple(spawn.currentPosition)) {
+      return "current_position";
+    }
+    if (!Number.isFinite(spawn.elapsedMs) || spawn.elapsedMs < 0) {
+      return "elapsed";
+    }
+    if (
+      !Number.isFinite(spawn.distanceTraveled) ||
+      spawn.distanceTraveled < 0
+    ) {
+      return "distance";
+    }
+    if (
+      !Number.isFinite(spawn.flightProgress) ||
+      spawn.flightProgress < 0 ||
+      spawn.flightProgress > 1
+    ) {
+      return "progress";
+    }
+    return "unknown";
+  };
+  const invalidSpawnIndex = spawnEvents.findIndex((spawn) => spawn === null);
+  if (invalidSpawnIndex >= 0) {
+    lastRangedTransitionDiagnosticRejectionReason = `spawn_invalid_${explainInvalidSpawn(rawSpawns[invalidSpawnIndex], false)}`;
+    return null;
+  }
+  const invalidActiveArrowIndex = activeArrows.findIndex(
+    (spawn) => spawn === null,
+  );
+  if (invalidActiveArrowIndex >= 0) {
+    lastRangedTransitionDiagnosticRejectionReason = `active_arrow_invalid_${explainInvalidSpawn(selectedEvents.activeArrows[invalidActiveArrowIndex], true)}`;
+    return null;
+  }
+  const invalidEventGroup = [
+    ["transition_invalid", transitions],
+    ["impact_invalid", impactEvents],
+    ["cancellation_invalid", cancellationEvents],
+    ["damage_invalid", damageEvents],
+  ].find(([, events]) => events.some((event) => event === null));
+  if (invalidEventGroup) {
+    lastRangedTransitionDiagnosticRejectionReason = invalidEventGroup[0];
     return null;
   }
   lastBowTransitionSequence = bow.latestSequence;
   lastArrowSpawnSequence = projectiles.latestSequence;
+  lastArrowImpactSequence = projectiles.latestImpactSequence;
+  lastArrowCancellationSequence = projectiles.latestCancellationSequence;
+  lastDamagePresentationSequence = damage.latestSequence;
   return {
     observedAt,
+    performanceTimeMs: bow.performanceTimeMs,
     cycleId: normalizedDiagnostics.cycleId,
     rangedPlayerIds,
     players,
     transitions,
     spawnEvents,
+    impactEvents,
+    cancellationEvents,
+    damageEvents,
     activeArrows,
     arrowCancelledBeforeSpawnCount: projectiles.arrowCancelledBeforeSpawnCount,
     arrowCancelledBeforeSpawnDelta:
       projectiles.arrowCancelledBeforeSpawnCount -
       rangedTransitionCancelledBeforeSpawnBaseline,
+    arrowExpiredBeforeImpactCount: projectiles.arrowExpiredBeforeImpactCount,
+    arrowExpiredBeforeImpactDelta:
+      projectiles.arrowExpiredBeforeImpactCount -
+      rangedTransitionExpiredBeforeImpactBaseline,
   };
 }
 
@@ -633,6 +1099,15 @@ const stateAuthorizationMode = explicitStateBearerToken
 const outputDirectory = path.resolve(String(options["output-dir"]));
 const manifestPath = path.join(outputDirectory, "manifest.json");
 const screenshotPath = path.join(outputDirectory, "fighting-motion.png");
+// A failed performance budget is itself useful evidence and must not prevent
+// the verifier from retaining the exact visual frame that accompanied it.
+// Performance checks remain fatal in the final manifest; they are only
+// independent from screenshot eligibility.
+const SCREENSHOT_INDEPENDENT_PERFORMANCE_CHECKS = new Set([
+  "60 FPS cadence meets percentile budget",
+  "render work meets frame budget",
+  "slow-frame ratio remains bounded",
+]);
 const durationSeconds = parseBoundedInteger(
   options["duration-s"],
   240,
@@ -657,6 +1132,14 @@ const maximumDurationSeconds = parseBoundedInteger(
 const durationMs = durationSeconds * 1_000;
 const minimumFightingObservationMs = minimumFightingSeconds * 1_000;
 const maximumDurationMs = maximumDurationSeconds * 1_000;
+const startupTimeoutSeconds = parseBoundedInteger(
+  options["startup-timeout-s"],
+  180,
+  30,
+  900,
+  "startup-timeout-s",
+);
+const startupTimeoutMs = startupTimeoutSeconds * 1_000;
 const pollMs = parseBoundedInteger(
   options["poll-ms"],
   100,
@@ -691,16 +1174,22 @@ const browser = await chromium.launch({
   headless: captureHeadless,
   args: buildDefaultCaptureLaunchArgs({
     angleBackend: captureAngleBackend,
-    featureFlags: "--enable-features=Vulkan,UseSkiaRenderer,WebGPU",
+    featureFlags: resolveDefaultCaptureFeatureFlags(process.platform),
   }),
   ...(captureBrowserChannel ? { channel: captureBrowserChannel } : {}),
 });
-const context = await browser.newContext({ viewport });
+// A release gate must exercise the artifacts served by this exact stack run,
+// never a PWA service-worker response retained from an earlier local build.
+const context = await browser.newContext({
+  viewport,
+  serviceWorkers: "block",
+});
 const page = await context.newPage();
 const cdpSession = await context.newCDPSession(page);
 let browserConditionError = null;
 try {
   await cdpSession.send("Network.enable");
+  await cdpSession.send("Network.setCacheDisabled", { cacheDisabled: true });
   if (networkLatencyMs > 0) {
     await cdpSession.send("Network.emulateNetworkConditions", {
       offline: false,
@@ -708,11 +1197,6 @@ try {
       downloadThroughput: -1,
       uploadThroughput: -1,
       connectionType: "wifi",
-    });
-  }
-  if (cpuThrottleRate > 1) {
-    await cdpSession.send("Emulation.setCPUThrottlingRate", {
-      rate: cpuThrottleRate,
     });
   }
 } catch (error) {
@@ -733,24 +1217,60 @@ const samples = [];
 const hitReactionLifecycleSamples = [];
 const rangedTransitionSnapshots = [];
 let rangedTransitionBaselineInitialized = false;
+let lastRangedTransitionDiagnosticRejectionReason = null;
 let lastBowTransitionSequence = 0;
 let lastArrowSpawnSequence = 0;
+let lastArrowImpactSequence = 0;
+let lastArrowCancellationSequence = 0;
+let lastDamagePresentationSequence = 0;
 let rangedTransitionCancelledBeforeSpawnBaseline = 0;
+let rangedTransitionExpiredBeforeImpactBaseline = 0;
 let latestPerformance = null;
+let latestCoreSummarySatisfied = false;
+let sceneComplexity = null;
 let lastSceneUpdatedAt = null;
 let lastLifecycleSceneUpdatedAt = null;
 let screenshot = null;
+const screenshotAttempts = [];
+let screenshotAttemptCount = 0;
 let navigationError = null;
 let lastProgressAt = 0;
 let maximumUiStyleSwitchEvents = 0;
+let uiStyleSwitchBaseline = 0;
+let latestEquipmentReadiness = null;
 let fightingObservation = { totalMs: 0, previous: null };
 const startedAt = Date.now();
+let measurementStartedAt = null;
 
 const recordRejection = (reason) => {
   increment(rejectionCounts, reason);
   if (!isDuelMotionSamplingRace(reason)) {
     increment(integrityRejectionCounts, reason);
   }
+};
+
+const specializedEvidenceIsSatisfied = () => {
+  const styleChecks = multiStyle
+    ? evaluateDuelStyleSwitchTelemetry(
+        summarizeDuelStyleSwitchTelemetry(samples, maximumUiStyleSwitchEvents),
+        expectedRoles,
+      )
+    : [];
+  const hitReactionSatisfied = requireHitReactions
+    ? summarizeDuelHitReactionTelemetry(samples).ok &&
+      summarizeDuelHitReactionResolutionTelemetry(
+        samples,
+        hitReactionLifecycleSamples,
+      ).ok
+    : true;
+  const rangedSatisfied = requireRangedTransitions
+    ? summarizeDuelRangedTransitionTelemetry(rangedTransitionSnapshots).ok
+    : true;
+  return (
+    styleChecks.every((entry) => entry.pass) &&
+    hitReactionSatisfied &&
+    rangedSatisfied
+  );
 };
 
 page.on("console", (message) => {
@@ -810,9 +1330,15 @@ try {
   });
 
   while (
-    Date.now() - startedAt < maximumDurationMs &&
-    (Date.now() - startedAt < durationMs ||
-      fightingObservation.totalMs < minimumFightingObservationMs)
+    (measurementStartedAt === null
+      ? Date.now() - startedAt < startupTimeoutMs
+      : Date.now() - measurementStartedAt < maximumDurationMs) &&
+    (measurementStartedAt === null ||
+      Date.now() - measurementStartedAt < durationMs ||
+      fightingObservation.totalMs < minimumFightingObservationMs ||
+      !specializedEvidenceIsSatisfied() ||
+      !latestCoreSummarySatisfied ||
+      screenshot === null)
   ) {
     const observedAt = Date.now();
     let browserProbe;
@@ -838,10 +1364,14 @@ try {
     }
 
     latestPerformance = browserProbe.performance ?? latestPerformance;
-    maximumUiStyleSwitchEvents = Math.max(
-      maximumUiStyleSwitchEvents,
-      Number(browserProbe.layout.styleSwitchEventCount) || 0,
-    );
+    const currentUiStyleSwitchEvents =
+      Number(browserProbe.layout.styleSwitchEventCount) || 0;
+    if (measurementStartedAt !== null) {
+      maximumUiStyleSwitchEvents = Math.max(
+        maximumUiStyleSwitchEvents,
+        Math.max(0, currentUiStyleSwitchEvents - uiStyleSwitchBaseline),
+      );
+    }
     const normalizedState = normalizeDuelCaptureState(browserProbe.state);
     increment(phaseObservationCounts, normalizedState?.phase ?? "INVALID");
     if (
@@ -920,6 +1450,17 @@ try {
       await new Promise((resolve) => setTimeout(resolve, pollMs));
       continue;
     }
+    latestEquipmentReadiness = browserProbe.equipmentReadiness;
+    if (
+      !hasExactVisibleFightingEquipment(
+        latestEquipmentReadiness,
+        normalizedState.cycleId,
+      )
+    ) {
+      reject("active_equipment_not_visible");
+      await new Promise((resolve) => setTimeout(resolve, pollMs));
+      continue;
+    }
     const fightingLayoutReady =
       browserProbe.layout.activeHudCount === 1 &&
       (!multiStyle ||
@@ -929,6 +1470,35 @@ try {
           )));
     if (!fightingLayoutReady) {
       reject("renderer_or_layout_not_ready");
+      await new Promise((resolve) => setTimeout(resolve, pollMs));
+      continue;
+    }
+    if (measurementStartedAt === null) {
+      try {
+        if (cpuThrottleRate > 1) {
+          await cdpSession.send("Emulation.setCPUThrottlingRate", {
+            rate: cpuThrottleRate,
+          });
+        }
+        const telemetryReset = await page.evaluate(() =>
+          typeof window.__HYPERIA_RESET_STREAM_PERFORMANCE__ === "function"
+            ? window.__HYPERIA_RESET_STREAM_PERFORMANCE__()
+            : false,
+        );
+        if (!telemetryReset) {
+          throw new Error("stream performance reset hook unavailable");
+        }
+      } catch (error) {
+        browserConditionError = boundedMessage(
+          error instanceof Error ? error.message : String(error),
+        );
+        break;
+      }
+      measurementStartedAt = Date.now();
+      uiStyleSwitchBaseline = currentUiStyleSwitchEvents;
+      maximumUiStyleSwitchEvents = 0;
+      latestPerformance = null;
+      lastProgressAt = measurementStartedAt;
       await new Promise((resolve) => setTimeout(resolve, pollMs));
       continue;
     }
@@ -962,7 +1532,9 @@ try {
         observedAt,
       );
       if (!transitionSnapshot) {
-        reject("ranged_transition_diagnostics_invalid");
+        reject(
+          `ranged_transition_diagnostics_invalid:${lastRangedTransitionDiagnosticRejectionReason ?? "unknown"}`,
+        );
       } else {
         rangedTransitionSnapshots.push(transitionSnapshot);
         if (rangedTransitionSnapshots.length > MAX_RETAINED_SAMPLES) {
@@ -977,6 +1549,7 @@ try {
       expectedRoles,
       safeCrop,
     });
+    latestCoreSummarySatisfied = summary.ok;
     const liveStyleMetrics = summarizeDuelStyleSwitchTelemetry(
       samples,
       maximumUiStyleSwitchEvents,
@@ -1017,6 +1590,9 @@ try {
               released: agent.releasedCount,
               spawned: agent.spawnedCount,
               paired: agent.pairedCount,
+              completedFlights: agent.completedFlightCount,
+              impacts: agent.impactCount,
+              impactPresentations: agent.impactPresentationPassCount,
             })) ?? [],
           failingChecks: [
             ...summary.checks,
@@ -1037,7 +1613,11 @@ try {
 
     if (
       screenshot === null &&
-      summary.ok &&
+      summary.checks.every(
+        (entry) =>
+          entry.pass ||
+          SCREENSHOT_INDEPENDENT_PERFORMANCE_CHECKS.has(entry.label),
+      ) &&
       liveStyleChecks.every((entry) => entry.pass) &&
       (!requireHitReactions ||
         (liveHitReactionSummary.ok && liveHitReactionResolutionSummary.ok)) &&
@@ -1048,35 +1628,88 @@ try {
       requestFailures.length === 0 &&
       responseFailures.length === 0
     ) {
-      await page.screenshot({ path: screenshotPath });
-      await chmod(screenshotPath, 0o600);
-      const [afterBrowserProbe, afterServerState] = await Promise.all([
-        readBrowserProbe(page),
-        fetchState(stateUrl, stateBearerToken),
-      ]);
-      const afterState = normalizeDuelCaptureState(afterBrowserProbe.state);
-      const afterAgents = [
-        afterBrowserProbe.state?.cycle?.agent1,
-        afterBrowserProbe.state?.cycle?.agent2,
-      ];
-      if (
-        afterState?.phase !== "FIGHTING" ||
-        !duelCaptureStatesAgree(afterBrowserProbe.state, afterServerState) ||
-        !publicRoleStateMatches(afterAgents, expectedRoles, multiStyle) ||
-        afterBrowserProbe.rendererHealth?.ready !== true ||
-        afterBrowserProbe.layout.errorOverlayCount !== 0
-      ) {
-        await unlink(screenshotPath).catch(() => {});
-        recordRejection("post_screenshot_state_invalid");
-      } else {
-        latestPerformance = afterBrowserProbe.performance ?? latestPerformance;
-        screenshot = {
-          file: path.basename(screenshotPath),
-          sha256: await sha256(screenshotPath),
-          capturedAt: Date.now(),
-          cycleId: afterState.cycleId,
-          viewport,
-        };
+      const attempt = {
+        attempt: ++screenshotAttemptCount,
+        status: "pending",
+        captureRequestedAt: null,
+        captureCompletedAt: null,
+        sceneAdmittedAt: null,
+        beforeClock: null,
+        immediateAfterClock: null,
+        afterSnapshotClock: null,
+        beforePerformance: null,
+        immediateAfterPerformance: null,
+        afterPerformance: null,
+        snapshotFreshness: null,
+        error: null,
+      };
+      screenshotAttempts.push(attempt);
+      if (screenshotAttempts.length > MAX_RETAINED_SCREENSHOT_ATTEMPTS) {
+        screenshotAttempts.shift();
+      }
+      try {
+        const beforeProbe = await readScreenshotPerformanceProbe(
+          page,
+          SCREENSHOT_PERFORMANCE_TIMEOUT_MS,
+        );
+        attempt.beforeClock = beforeProbe.clock;
+        attempt.beforePerformance = cloneDuelScreenshotPerformanceSnapshot(
+          beforeProbe.performance,
+        );
+        attempt.captureRequestedAt = Date.now();
+        await page.screenshot({ path: screenshotPath });
+        attempt.captureCompletedAt = Date.now();
+        await chmod(screenshotPath, 0o600);
+        const [afterBrowserProbe, afterServerState] = await Promise.all([
+          readBrowserProbe(page),
+          fetchState(stateUrl, stateBearerToken),
+        ]);
+        const afterState = normalizeDuelCaptureState(afterBrowserProbe.state);
+        attempt.immediateAfterClock = afterBrowserProbe.clock;
+        attempt.immediateAfterPerformance =
+          cloneDuelScreenshotPerformanceSnapshot(afterBrowserProbe.performance);
+        const afterAgents = [
+          afterBrowserProbe.state?.cycle?.agent1,
+          afterBrowserProbe.state?.cycle?.agent2,
+        ];
+        if (
+          afterState?.phase !== "FIGHTING" ||
+          !duelCaptureStatesAgree(afterBrowserProbe.state, afterServerState) ||
+          !publicRoleStateMatches(afterAgents, expectedRoles, multiStyle) ||
+          !hasExactVisibleFightingEquipment(
+            afterBrowserProbe.equipmentReadiness,
+            afterState?.cycleId,
+          ) ||
+          afterBrowserProbe.rendererHealth?.ready !== true ||
+          afterBrowserProbe.layout.errorOverlayCount !== 0
+        ) {
+          await unlink(screenshotPath).catch(() => {});
+          recordRejection("post_screenshot_state_invalid");
+          attempt.status = "scene_rejected";
+        } else {
+          latestPerformance =
+            afterBrowserProbe.performance ?? latestPerformance;
+          screenshot = {
+            file: path.basename(screenshotPath),
+            sha256: await sha256(screenshotPath),
+            capturedAt: Date.now(),
+            cycleId: afterState.cycleId,
+            viewport,
+          };
+          attempt.sceneAdmittedAt = screenshot.capturedAt;
+          latestPerformance = await waitForScreenshotPerformance(
+            page,
+            attempt,
+            afterBrowserProbe,
+          );
+          attempt.status = "complete";
+        }
+      } catch (error) {
+        attempt.status = "failed";
+        attempt.error = boundedMessage(
+          error instanceof Error ? error.message : String(error),
+        );
+        throw error;
       }
     }
 
@@ -1087,6 +1720,13 @@ try {
     error instanceof Error ? error.message : String(error),
   );
 } finally {
+  sceneComplexity = await page
+    .evaluate(() =>
+      typeof window.__HYPERIA_GET_STREAM_SCENE_COMPLEXITY__ === "function"
+        ? window.__HYPERIA_GET_STREAM_SCENE_COMPLEXITY__()
+        : null,
+    )
+    .catch(() => null);
   await context.close().catch(() => {});
   await browser.close().catch(() => {});
 }
@@ -1113,6 +1753,7 @@ const hitReactionResolutionSummary =
 const rangedTransitionSummary = requireRangedTransitions
   ? summarizeDuelRangedTransitionTelemetry(rangedTransitionSnapshots)
   : null;
+const finalScreenshotAttempt = screenshotAttempts.at(-1) ?? null;
 const captureChecks = [
   ...motionSummary.checks,
   ...finalStyleSwitchChecks,
@@ -1138,9 +1779,35 @@ const captureChecks = [
     actual: streamUrl.searchParams.get("streamFps") ?? "missing",
   },
   {
+    label: "stream requested with the canonical versioned render profile",
+    pass:
+      streamUrl.searchParams.get("streamRenderProfile") ===
+      CANONICAL_CAPTURE_RENDER_PROFILE,
+    actual: streamUrl.searchParams.get("streamRenderProfile") ?? "missing",
+  },
+  {
     label: "motion screenshot retained",
     pass: screenshot !== null,
     actual: screenshot?.file ?? "missing",
+  },
+  {
+    label: "screenshot performance advances in the same session past capture",
+    pass:
+      screenshot !== null &&
+      finalScreenshotAttempt?.status === "complete" &&
+      finalScreenshotAttempt.snapshotFreshness?.status === "ready" &&
+      finalScreenshotAttempt.sceneAdmittedAt === screenshot.capturedAt &&
+      latestPerformance?.sessionStartedAt ===
+        finalScreenshotAttempt.afterPerformance?.sessionStartedAt &&
+      latestPerformance.updatedAt >=
+        finalScreenshotAttempt.afterPerformance.updatedAt &&
+      latestPerformance.overall.frames >=
+        finalScreenshotAttempt.afterPerformance.overall.frames,
+    actual:
+      finalScreenshotAttempt?.error ??
+      finalScreenshotAttempt?.snapshotFreshness?.reason ??
+      finalScreenshotAttempt?.status ??
+      "missing",
   },
   {
     label: "continuous samples have no integrity rejection",
@@ -1165,11 +1832,15 @@ const captureChecks = [
 const finishedAt = Date.now();
 const ok = captureChecks.every((entry) => entry.pass);
 const manifest = {
-  schemaVersion: 6,
+  schemaVersion: 8,
   ok,
   startedAt,
   finishedAt,
   elapsedMs: finishedAt - startedAt,
+  startupTimeoutMs,
+  measurementStartedAt,
+  measurementElapsedMs:
+    measurementStartedAt === null ? 0 : finishedAt - measurementStartedAt,
   minimumDurationMs: durationMs,
   maximumDurationMs,
   minimumFightingObservationMs,
@@ -1182,6 +1853,7 @@ const manifest = {
   requireHitReactions,
   requireRangedTransitions,
   expectedRoles,
+  equipmentReadiness: latestEquipmentReadiness,
   captureBrowser: {
     headless: captureHeadless,
     channel: captureBrowserChannel ?? "bundled",
@@ -1194,8 +1866,18 @@ const manifest = {
   safeCropNdc: safeCrop,
   limits: DUEL_MOTION_TELEMETRY_LIMITS,
   screenshot,
+  screenshotPerformanceDiagnostics: {
+    causality: "unattributed",
+    maximumRetainedAttempts: MAX_RETAINED_SCREENSHOT_ATTEMPTS,
+    maximumSnapshotCharacters: 262_144,
+    freshnessTimeoutMs: SCREENSHOT_PERFORMANCE_TIMEOUT_MS,
+    totalAttempts: screenshotAttemptCount,
+    omittedAttempts: screenshotAttemptCount - screenshotAttempts.length,
+    attempts: screenshotAttempts,
+  },
   checks: captureChecks,
   metrics: motionSummary.metrics,
+  sceneComplexity,
   styleSwitchMetrics,
   hitReactionMetrics: hitReactionSummary.metrics,
   hitReactionResolutionMetrics: hitReactionResolutionSummary.metrics,
@@ -1242,6 +1924,9 @@ console.log(
         released: agent.releasedCount,
         spawned: agent.spawnedCount,
         paired: agent.pairedCount,
+        completedFlights: agent.completedFlightCount,
+        impacts: agent.impactCount,
+        impactPresentations: agent.impactPresentationPassCount,
         maximumNockToSpawnMetres: agent.lastVisibleNockToSpawnMetres.max,
       })) ?? [],
     failingChecks: captureChecks

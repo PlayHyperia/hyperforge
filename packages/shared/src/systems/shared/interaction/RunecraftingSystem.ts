@@ -33,6 +33,11 @@ import type {
   InventorySystem,
 } from "../character/InventorySystem";
 import { canPlayerPerformPreparationAction } from "./ProcessingStationAuthority";
+import {
+  clearProcessingInteractionPresentation,
+  publishProcessingInteractionPresentation,
+} from "./ProcessingInteractionPresentation";
+import type { PlayerProcessingQuiescenceSystem } from "./ProcessingQuiescence";
 
 interface PendingRunecraftingAction {
   operationId: string;
@@ -51,6 +56,7 @@ interface PendingRunecraftingAction {
   state: "in_flight" | "retry_wait" | "settled";
   receipt: AtomicProcessingActionReceipt | null;
   disconnected: boolean;
+  presentationCancelled: boolean;
   requestId?: string;
 }
 
@@ -66,7 +72,10 @@ interface RunecraftingAltarLike {
   isPlayerInRange?: (position: PositionLike) => boolean;
 }
 
-export class RunecraftingSystem extends SystemBase {
+export class RunecraftingSystem
+  extends SystemBase
+  implements PlayerProcessingQuiescenceSystem
+{
   private readonly pendingActions = new Map<
     string,
     PendingRunecraftingAction
@@ -124,8 +133,50 @@ export class RunecraftingSystem extends SystemBase {
       EventType.PLAYER_UNREGISTERED,
       (data: { playerId: string }) => {
         this.playerSkills.delete(data.playerId);
+        clearProcessingInteractionPresentation(
+          this.world,
+          data.playerId,
+          "runecrafting",
+        );
         const pending = this.pendingActions.get(data.playerId);
         if (pending) pending.disconnected = true;
+      },
+    );
+    this.subscribe<{
+      playerId: string;
+      targetPosition: { x: number; y: number; z: number };
+    }>(EventType.MOVEMENT_CLICK_TO_MOVE, (data) => {
+      const pending = this.pendingActions.get(data.playerId);
+      if (pending) {
+        pending.presentationCancelled = true;
+        clearProcessingInteractionPresentation(
+          this.world,
+          data.playerId,
+          "runecrafting",
+        );
+      }
+    });
+    this.subscribe(
+      EventType.COMBAT_STARTED,
+      (data: { attackerId: string; targetId: string }) => {
+        const attackerPending = this.pendingActions.get(data.attackerId);
+        const targetPending = this.pendingActions.get(data.targetId);
+        if (attackerPending) {
+          attackerPending.presentationCancelled = true;
+          clearProcessingInteractionPresentation(
+            this.world,
+            data.attackerId,
+            "runecrafting",
+          );
+        }
+        if (targetPending) {
+          targetPending.presentationCancelled = true;
+          clearProcessingInteractionPresentation(
+            this.world,
+            data.targetId,
+            "runecrafting",
+          );
+        }
       },
     );
   }
@@ -316,9 +367,15 @@ export class RunecraftingSystem extends SystemBase {
       state: "in_flight",
       receipt: null,
       disconnected: false,
+      presentationCancelled: false,
       requestId,
     };
     this.pendingActions.set(playerId, pending);
+    publishProcessingInteractionPresentation(this.world, {
+      playerId,
+      skill: "runecrafting",
+      targetEntityId: altarId,
+    });
     this.reportProcessingRequestProgress(
       playerId,
       requestId,
@@ -410,6 +467,11 @@ export class RunecraftingSystem extends SystemBase {
           continue;
         }
         this.pendingActions.delete(pending.playerId);
+        clearProcessingInteractionPresentation(
+          this.world,
+          pending.playerId,
+          "runecrafting",
+        );
         this.rejectProcessingRequest(
           pending.playerId,
           pending.requestId,
@@ -435,15 +497,26 @@ export class RunecraftingSystem extends SystemBase {
         continue;
       }
 
-      this.pendingActions.delete(pending.playerId);
-      this.finishProcessingRequest(pending.requestId);
-      if (receipt.awardedXp > 0) {
-        this.emitTypedEvent(EventType.SKILLS_XP_GAINED, {
-          playerId: pending.playerId,
-          skill: "runecrafting",
-          amount: receipt.awardedXp,
+      if (receipt.xpAmount > 0) {
+        this.emitTypedEvent(EventType.SKILLS_PROGRESS_COMMITTED, {
+          playerId: receipt.playerId,
+          operationId: receipt.operationId,
+          replayed: receipt.replayed,
+          skill: receipt.skill,
+          xpAmount: receipt.xpAmount,
+          awardedXp: receipt.awardedXp,
+          operationCommittedXp: receipt.operationCommittedXp,
+          currentXp: receipt.currentXp,
+          currentLevel: receipt.currentLevel,
         });
       }
+      this.pendingActions.delete(pending.playerId);
+      clearProcessingInteractionPresentation(
+        this.world,
+        pending.playerId,
+        "runecrafting",
+      );
+      this.finishProcessingRequest(pending.requestId);
       this.emitTypedEvent(EventType.RUNECRAFTING_COMPLETE, {
         playerId: pending.playerId,
         runeType: pending.runeType,
@@ -467,7 +540,7 @@ export class RunecraftingSystem extends SystemBase {
         xpAwarded: receipt.awardedXp,
       });
 
-      if (!pending.disconnected) {
+      if (!pending.disconnected && !pending.presentationCancelled) {
         const multiplierText =
           pending.multiplier > 1 ? ` (${pending.multiplier}x multiplier)` : "";
         this.emitTypedEvent(EventType.UI_MESSAGE, {
@@ -587,6 +660,21 @@ export class RunecraftingSystem extends SystemBase {
     };
   }
 
+  requestPlayerProcessingQuiescence(playerId: string): void {
+    const pending = this.pendingActions.get(playerId);
+    if (!pending) return;
+    pending.presentationCancelled = true;
+    clearProcessingInteractionPresentation(
+      this.world,
+      playerId,
+      "runecrafting",
+    );
+  }
+
+  isPlayerProcessingQuiescent(playerId: string): boolean {
+    return !this.pendingActions.has(playerId);
+  }
+
   update(_dt: number): void {
     if (!this.world.isServer) return;
     this.processPendingActions(this.world.currentTick ?? 0);
@@ -594,6 +682,13 @@ export class RunecraftingSystem extends SystemBase {
 
   destroy(): void {
     this.destroyed = true;
+    for (const playerId of this.pendingActions.keys()) {
+      clearProcessingInteractionPresentation(
+        this.world,
+        playerId,
+        "runecrafting",
+      );
+    }
     this.pendingActions.clear();
     this.playerSkills.clear();
   }

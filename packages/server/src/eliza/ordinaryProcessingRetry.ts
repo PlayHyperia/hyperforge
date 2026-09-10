@@ -30,6 +30,8 @@ export interface OrdinaryProcessingRetryState extends OrdinaryProcessingRetrySup
 
 export interface OrdinaryProcessingRetryHolder {
   ordinaryProcessingRetries?: OrdinaryProcessingRetryState[];
+  ordinaryProcessingAcquisition?: { expiresAt: number } | null;
+  bankStageRetryAfter?: number;
 }
 
 type ProcessingActionOutcome = {
@@ -149,6 +151,10 @@ export function recordOrdinaryProcessingActionOutcome(
   ) {
     if (existingIndex >= 0) states.splice(existingIndex, 1);
     holder.ordinaryProcessingRetries = states;
+    if (holder.ordinaryProcessingAcquisition) {
+      holder.ordinaryProcessingAcquisition = null;
+      holder.bankStageRetryAfter = 0;
+    }
     return null;
   }
 

@@ -33,7 +33,11 @@ import THREE, {
   output,
 } from "../../../extras/three/three";
 import { SUN_LIGHT } from "./LightingConfig";
-import { applyAnimeShade, TERRAIN_SHADER_CONSTANTS } from "./TerrainShader";
+import {
+  applyAnimeShade,
+  TERRAIN_SHADER_CONSTANTS,
+  TerrainShadeUniforms,
+} from "./TerrainShader";
 import { MeshStandardNodeMaterial } from "three/webgpu";
 import type { TerrainQuadNode, QuadTreeListener } from "./TerrainQuadTree";
 import {
@@ -315,9 +319,9 @@ export interface GrassVisualProfile {
  * composition.
  */
 export const STREAMING_GRASS_VISUAL_PROFILE = {
-  clumpSpacingMultiplier: 1.5,
+  clumpSpacingMultiplier: 4,
   minimumLodLevel: 2,
-  maxRenderDistance: 250,
+  maxRenderDistance: 140,
   maxChunksPerFrame: 1,
 } as const satisfies GrassVisualProfile;
 
@@ -447,6 +451,7 @@ export class GrassVisualManager implements QuadTreeListener {
     },
     workerSetup?: GrassWorkerSetup,
     profile: GrassVisualProfile = {},
+    readonly shadeUniforms: TerrainShadeUniforms = new TerrainShadeUniforms(),
   ) {
     this.container = container;
     this.getHeightAt = getHeightAt;
@@ -1404,7 +1409,12 @@ export class GrassVisualManager implements QuadTreeListener {
         tipCol,
         smoothstep(float(0.0), float(1.0), t),
       );
-      return applyAnimeShade(bladeCol, terrainNormal, uSunDir);
+      return applyAnimeShade(
+        bladeCol,
+        terrainNormal,
+        uSunDir,
+        this.shadeUniforms,
+      );
     })();
 
     mat.outputNode = Fn(() => {

@@ -39,8 +39,31 @@ import type {
   DuelPreparationPlanRecoveryRequest,
   InventoryDebitCommitRequest,
   InventoryDebitCommitReceipt,
+  ProjectileRuneCostCommitRequest,
+  ProjectileRuneCostCommitReceipt,
+  ProjectileRuneCostSettlementRequest,
+  GroundItemSourceRegistrationRequest,
+  GroundItemSourceRegistrationReceipt,
+  GroundItemDropCommitRequest,
+  GroundItemDropCommitReceipt,
+  GroundItemDeathCommitRequest,
+  GroundItemDeathCommitReceipt,
+  GroundItemMobLootCommitRequest,
+  GroundItemMobLootCommitReceipt,
+  GroundItemSourceState,
+  GroundItemPickupCommitRequest,
+  GroundItemPickupCommitReceipt,
+  FoodConsumptionCommitRequest,
+  FoodConsumptionCompleteRequest,
+  FoodConsumptionCommitReceipt,
+  DuelDamageCommitRequest,
+  DuelDamageCommitReceipt,
   BoneBurialCommitRequest,
   BoneBurialCommitReceipt,
+  QuestStartCommitRequest,
+  QuestStartCommitReceipt,
+  QuestCompletionCommitRequest,
+  QuestCompletionCommitReceipt,
   GatheringRewardCommitRequest,
   GatheringRewardCommitReceipt,
   GatheringResourceState,
@@ -49,10 +72,20 @@ import type {
   ProcessingActionSkill,
   ProcessingActionFireEffect,
   ActiveProcessingFire,
+  ProcessingFireExtinguishCommitRequest,
+  ProcessingFireExtinguishCommitReceipt,
   EquipmentStackDebitCommitRequest,
   EquipmentStackDebitCommitReceipt,
+  AmmunitionShotCommitRequest,
+  AmmunitionShotCommitReceipt,
+  AmmunitionShotSettlementRequest,
   PrayerStateCommitRequest,
   PrayerStateCommitReceipt,
+  AttackStyleCommitRequest,
+  AttackStyleCommitReceipt,
+  StreamingDuelExecutorCommandRequest,
+  StreamingDuelExecutorCommandCompletionRequest,
+  StreamingDuelExecutorCommandReceipt,
   ItemRow,
 } from "../network/database";
 import type { FlatZone } from "../world/terrain";
@@ -223,6 +256,26 @@ export interface DatabaseSystem extends System {
     equipment: EquipmentSaveItem[],
   ): Promise<void>;
 
+  /** Atomically persist one weapon-valid attack style and optional public receipt. */
+  commitAttackStyleOperationAsync(
+    request: AttackStyleCommitRequest,
+  ): Promise<AttackStyleCommitReceipt>;
+
+  /** Stage one exact movement/engagement command before executor admission. */
+  stageStreamingDuelExecutorCommandAsync(
+    request: StreamingDuelExecutorCommandRequest,
+  ): Promise<StreamingDuelExecutorCommandReceipt>;
+
+  /** Co-commit the executor outcome and its public observation. */
+  completeStreamingDuelExecutorCommandAsync(
+    request: StreamingDuelExecutorCommandCompletionRequest,
+  ): Promise<StreamingDuelExecutorCommandReceipt>;
+
+  /** Recover pending commands for an active cycle after process replacement. */
+  listPendingStreamingDuelExecutorCommandsAsync(
+    cycleId: string,
+  ): Promise<StreamingDuelExecutorCommandReceipt[]>;
+
   /** Atomically persist inventory, equipment, autocast, and an idempotency receipt. */
   commitCombatLoadoutOperationAsync(
     request: CombatLoadoutCommitRequest,
@@ -243,10 +296,96 @@ export interface DatabaseSystem extends System {
     request: InventoryDebitCommitRequest,
   ): Promise<InventoryDebitCommitReceipt>;
 
+  /** Stage the exact rune cost before a spell projectile is admitted. */
+  commitProjectileRuneCostOperationAsync(
+    request: ProjectileRuneCostCommitRequest,
+  ): Promise<ProjectileRuneCostCommitReceipt>;
+
+  /** Finalize a staged rune cost after local projectile admission. */
+  completeProjectileRuneCostOperationAsync(
+    request: ProjectileRuneCostSettlementRequest,
+  ): Promise<ProjectileRuneCostCommitReceipt>;
+
+  /** Refund a staged rune cost whose projectile was never admitted. */
+  cancelProjectileRuneCostOperationAsync(
+    request: ProjectileRuneCostSettlementRequest,
+  ): Promise<ProjectileRuneCostCommitReceipt>;
+
+  /** Refund interrupted pre-launch rune costs before inventory hydration. */
+  recoverPendingProjectileRuneCostOperationsAsync(
+    playerId: string,
+  ): Promise<ProjectileRuneCostCommitReceipt[]>;
+
+  /** Commit or replay one source contribution before world presentation. */
+  registerGroundItemSourceAsync(
+    request: GroundItemSourceRegistrationRequest,
+  ): Promise<GroundItemSourceRegistrationReceipt>;
+
+  /** Commit a multi-item drop as one all-or-nothing source transaction. */
+  registerGroundItemSourcesAsync(
+    requests: GroundItemSourceRegistrationRequest[],
+  ): Promise<GroundItemSourceRegistrationReceipt[]>;
+
+  /** Atomically debit one owned item/coin quantity and create its source. */
+  commitGroundItemDropOperationAsync(
+    request: GroundItemDropCommitRequest,
+  ): Promise<GroundItemDropCommitReceipt>;
+
+  /** Atomically clear death custody and create every public ground source. */
+  commitGroundItemDeathOperationAsync(
+    request: GroundItemDeathCommitRequest,
+  ): Promise<GroundItemDeathCommitReceipt>;
+
+  /** Atomically record one mob death/loot roll and create every source. */
+  commitGroundItemMobLootOperationAsync(
+    request: GroundItemMobLootCommitRequest,
+  ): Promise<GroundItemMobLootCommitReceipt>;
+
+  /** Reconstruct only active, unclaimed, unexpired sources on replacement. */
+  listActiveGroundItemSourcesAsync(): Promise<GroundItemSourceState[]>;
+
+  /** Mark a source expired only after its database-owned deadline. */
+  expireGroundItemSourceAsync(sourceId: string): Promise<boolean>;
+
+  /** Atomically claim one ground source and credit its destination custody. */
+  commitGroundItemPickupOperationAsync(
+    request: GroundItemPickupCommitRequest,
+  ): Promise<GroundItemPickupCommitReceipt>;
+
+  /** Debit one food item and durably stage its exactly-once health effect. */
+  commitFoodConsumptionOperationAsync(
+    request: FoodConsumptionCommitRequest,
+  ): Promise<FoodConsumptionCommitReceipt>;
+
+  /** Complete or replay the health effect staged by a food operation. */
+  completeFoodConsumptionOperationAsync(
+    request: FoodConsumptionCompleteRequest,
+  ): Promise<FoodConsumptionCommitReceipt>;
+
+  /** Complete interrupted food effects before the player's health is loaded. */
+  recoverPendingFoodConsumptionOperationsAsync(
+    playerId: string,
+  ): Promise<FoodConsumptionCommitReceipt[]>;
+
+  /** Atomically commit duel target health and its exact public hit observation. */
+  commitDuelDamageOperationAsync(
+    request: DuelDamageCommitRequest,
+  ): Promise<DuelDamageCommitReceipt>;
+
   /** Atomically consume one bone, persist Prayer XP/level, and store a receipt. */
   commitBoneBurialOperationAsync(
     request: BoneBurialCommitRequest,
   ): Promise<BoneBurialCommitReceipt>;
+
+  /** Atomically create a quest incarnation and credit its starter items. */
+  commitQuestStartOperationAsync(
+    request: QuestStartCommitRequest,
+  ): Promise<QuestStartCommitReceipt>;
+
+  /** Atomically complete a quest and commit every authored reward. */
+  commitQuestCompletionOperationAsync(
+    request: QuestCompletionCommitRequest,
+  ): Promise<QuestCompletionCommitReceipt>;
 
   /** Atomically debit an input, credit a harvest, and persist its skill XP. */
   commitGatheringRewardOperationAsync(
@@ -309,16 +448,38 @@ export interface DatabaseSystem extends System {
     requestId: string,
   ): Promise<boolean>;
 
-  /** Reconstruct every committed fire whose authoritative lifetime remains active. */
+  /** Reconstruct every committed fire whose expiry is not yet settled. */
   getActiveProcessingFiresAsync(): Promise<ActiveProcessingFire[]>;
 
-  /** Idempotently mark a committed fire extinguished; true identifies the winner. */
-  markProcessingFireExtinguishedAsync(fireId: string): Promise<boolean>;
+  /** Atomically settle one expired fire and its exact ash source. */
+  commitProcessingFireExtinguishOperationAsync(
+    request: ProcessingFireExtinguishCommitRequest,
+  ): Promise<ProcessingFireExtinguishCommitReceipt>;
 
   /** Atomically debit one exact equipped stack and persist one receipt. */
   commitEquipmentStackDebitOperationAsync(
     request: EquipmentStackDebitCommitRequest,
   ): Promise<EquipmentStackDebitCommitReceipt>;
+
+  /** Atomically debit one fired arrow and freeze its recovery outcome/source. */
+  commitAmmunitionShotOperationAsync(
+    request: AmmunitionShotCommitRequest,
+  ): Promise<AmmunitionShotCommitReceipt>;
+
+  /** Finalize one staged ammunition debit only when its launch is admitted. */
+  completeAmmunitionShotOperationAsync(
+    request: AmmunitionShotSettlementRequest,
+  ): Promise<AmmunitionShotCommitReceipt>;
+
+  /** Refund one staged debit whose projectile was never admitted. */
+  cancelAmmunitionShotOperationAsync(
+    request: AmmunitionShotSettlementRequest,
+  ): Promise<AmmunitionShotCommitReceipt>;
+
+  /** Refund interrupted pre-launch debits before player custody hydration. */
+  recoverPendingAmmunitionShotOperationsAsync(
+    playerId: string,
+  ): Promise<AmmunitionShotCommitReceipt[]>;
 
   /** Atomically compare-and-swap fixed-point prayer state and persist a receipt. */
   commitPrayerStateOperationAsync(

@@ -456,6 +456,37 @@ describe("ordinary agent authored acquisition coverage", () => {
     }
   });
 
+  it("retains a direct public-source processing baseline for every ordinary combat specialization", () => {
+    const directlyAcquirable = new Set(
+      sources
+        .filter((source) => itemIds.has(source.itemId))
+        .map((source) => source.itemId),
+    );
+    const baselineFamilyBySpecialization = {
+      melee: "smelting",
+      ranged: "fletching",
+      mage: "runecrafting",
+    } as const;
+
+    for (const [specialization, family] of Object.entries(
+      baselineFamilyBySpecialization,
+    )) {
+      const candidates = recipes.filter((recipe) => recipe.family === family);
+      expect(
+        candidates.some((recipe) =>
+          recipe.requirementAlternatives.some((alternative) =>
+            [
+              ...alternative.map((entry) => entry.itemId),
+              ...recipe.tools,
+              ...recipe.consumables,
+            ].every((itemId) => directlyAcquirable.has(itemId)),
+          ),
+        ),
+        `${specialization} has no directly acquirable ${family} baseline`,
+      ).toBe(true);
+    }
+  });
+
   it("requires every production quest to declare the skill needed for its mandatory processing stages", () => {
     for (const quest of quests) {
       for (const stage of quest.stages) {

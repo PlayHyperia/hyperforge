@@ -4,6 +4,29 @@ import THREE from "../../../extras/three/three";
 import { ClientGraphics } from "../ClientGraphics";
 
 describe("ClientGraphics object precompile", () => {
+  it("waits for an in-flight WebGPU renderer initialization", async () => {
+    const scene = new THREE.Scene();
+    const camera = new THREE.PerspectiveCamera();
+    const compileAsync = vi.fn().mockResolvedValue(undefined);
+    const graphics = Object.create(ClientGraphics.prototype) as ClientGraphics;
+    Object.assign(graphics, {
+      world: { camera, stage: { scene } },
+      precompileQueue: Promise.resolve(),
+      pendingPrecompileCount: 0,
+    });
+    const object = new THREE.Group();
+
+    const compilation = graphics.precompileObject(object);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(compileAsync).not.toHaveBeenCalled();
+
+    Object.assign(graphics, { renderer: { compileAsync } });
+    await compilation;
+
+    expect(compileAsync).toHaveBeenCalledWith(object, camera, scene);
+    expect(graphics.isPrecompileIdle()).toBe(true);
+  });
+
   it("serializes compilation and restores visibility and frustum state before awaiting", async () => {
     let finishFirst: (() => void) | undefined;
     const firstBarrier = new Promise<void>((resolve) => {

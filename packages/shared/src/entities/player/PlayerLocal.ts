@@ -71,7 +71,11 @@
 import type PhysX from "@hyperforge/physx-js-webidl";
 import { createNode } from "../../extras/three/createNode";
 import { Layers } from "../../physics/Layers";
-import { Emotes, essentialEmotes } from "../../data/playerEmotes";
+import {
+  Emotes,
+  essentialEmotes,
+  GATHERING_PRESENTATION_EMOTE_URLS,
+} from "../../data/playerEmotes";
 import { DEFAULT_AVATAR_URL } from "../../data/avatars";
 import THREE from "../../extras/three/three";
 import { MeshBasicNodeMaterial } from "three/webgpu";
@@ -1047,9 +1051,7 @@ export class PlayerLocal extends Entity implements HotReloadable {
             sword_swing: Emotes.SWORD_SWING,
             range: Emotes.RANGE,
             spell_cast: Emotes.SPELL_CAST,
-            chopping: Emotes.CHOPPING,
-            mining: Emotes.CHOPPING, // Use chopping animation for mining (temporary)
-            fishing: Emotes.FISHING,
+            ...GATHERING_PRESENTATION_EMOTE_URLS,
             death: Emotes.DEATH,
             squat: Emotes.SQUAT, // Used for firemaking and cooking
             victory: Emotes.VICTORY, // Victory celebration (waving)

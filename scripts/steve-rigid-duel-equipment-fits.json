@@ -10,11 +10,74 @@
   },
   "fits": [
     {
+      "itemId": "bronze_2h_sword",
+      "slot": "weapon",
+      "grip": "two-hand",
+      "weaponType": "sword",
+      "attachmentBone": "rightHand",
+      "sourcePath": "models/swords/2h-swords/2h-bronze.glb",
+      "sourceSha256": "6752d2b92b282dea6d45124d7d5dfb3cff11d764874793a1992f019250a982e0",
+      "outputPath": "models/swords/2h-swords/candidates/2h-sword-bronze-semantic-grip-candidate.glb",
+      "targetLengthMetres": 1.25,
+      "desiredWorldEulerDegrees": [0, 0, 0],
+      "desiredWorldOffsetMetres": [0, 0, 0],
+      "sourceGripPoint": [0, 0.89, 0],
+      "primaryGripAnchor": "hand-mesh-center",
+      "alignHandleToSecondaryHand": {
+        "sourceHandleAxis": [0, -1, 0],
+        "secondaryGripAnchor": "hand-mesh-center"
+      },
+      "gripContact": {
+        "schemaVersion": 1,
+        "contentNodeName": "EquipmentContent",
+        "sourceAxis": [0, 1, 0],
+        "actionEnd": "minimum",
+        "zones": [
+          {
+            "id": "primary",
+            "boneName": "rightHand",
+            "minimumSourceProjection": 0.78,
+            "maximumSourceProjection": 0.97
+          },
+          {
+            "id": "secondary",
+            "boneName": "leftHand",
+            "minimumSourceProjection": 0.52,
+            "maximumSourceProjection": 0.72
+          }
+        ]
+      },
+      "referenceMotion": {
+        "path": "emotes/emote-2h-idle.glb",
+        "sha256": "11815b7477041a0b4ed5b622f01e636f091e918cdc46813ba30d5fd765c03b12",
+        "sampleRatio": 0.4
+      }
+    },
+    {
       "itemId": "shortbow",
       "slot": "weapon",
       "grip": "two-hand",
       "weaponType": "bow",
       "dynamicBowString": true,
+      "stableHeldPose": {
+        "avatarLocalEulerDegrees": [0, -90, 0],
+        "anchorToPrimaryHandMeshCenter": true,
+        "avatarLocalPositionOffset": [0.0555, 0, 0.005]
+      },
+      "gripContact": {
+        "schemaVersion": 1,
+        "contentNodeName": "EquipmentContent",
+        "sourceAxis": [0, 1, 0],
+        "actionEnd": "dynamic-aim",
+        "zones": [
+          {
+            "id": "primary",
+            "boneName": "leftHand",
+            "minimumSourceProjection": -0.16,
+            "maximumSourceProjection": 0.16
+          }
+        ]
+      },
       "attachmentBone": "leftHand",
       "sourcePath": "models/bows/bow-wood/bow-wood.glb",
       "sourceSha256": "ff92b029f9c2b34035c71b365aad3e5e87e024ffe8f021979bf8c124940111b3",
@@ -22,6 +85,7 @@
       "targetLengthMetres": 0.9,
       "desiredWorldEulerDegrees": [0, -90, 0],
       "desiredWorldOffsetMetres": [0, 0, 0],
+      "primaryGripAnchor": "hand-mesh-center",
       "referenceMotion": {
         "path": "emotes/emote-range.glb",
         "sha256": "72c27c15fb447e5f2b2e87ea5e01a2a9c632d201e33042a2c1c6ab696a2769cf",
@@ -34,6 +98,25 @@
       "grip": "two-hand",
       "weaponType": "bow",
       "dynamicBowString": true,
+      "stableHeldPose": {
+        "avatarLocalEulerDegrees": [0, -90, 0],
+        "anchorToPrimaryHandMeshCenter": true,
+        "avatarLocalPositionOffset": [0.0555, 0, 0.005]
+      },
+      "gripContact": {
+        "schemaVersion": 1,
+        "contentNodeName": "EquipmentContent",
+        "sourceAxis": [0, 1, 0],
+        "actionEnd": "dynamic-aim",
+        "zones": [
+          {
+            "id": "primary",
+            "boneName": "leftHand",
+            "minimumSourceProjection": -0.16,
+            "maximumSourceProjection": 0.16
+          }
+        ]
+      },
       "attachmentBone": "leftHand",
       "sourcePath": "models/bows/bow-wood/bow-wood.glb",
       "sourceSha256": "ff92b029f9c2b34035c71b365aad3e5e87e024ffe8f021979bf8c124940111b3",
@@ -41,6 +124,7 @@
       "targetLengthMetres": 0.9,
       "desiredWorldEulerDegrees": [0, -90, 0],
       "desiredWorldOffsetMetres": [0, 0, 0],
+      "primaryGripAnchor": "hand-mesh-center",
       "referenceMotion": {
         "path": "emotes/emote-range.glb",
         "sha256": "72c27c15fb447e5f2b2e87ea5e01a2a9c632d201e33042a2c1c6ab696a2769cf",
@@ -53,14 +137,28 @@
       "grip": "one-hand",
       "weaponType": "staff",
       "attachmentBone": "rightHand",
-      "sourcePath": "models/magic-staffs/air-staff/air-staff.glb",
-      "sourceSha256": "edd7dbd2a85282d0f31aaf7e7f7fad3f0cf192c57dc8f6dfee359a617b71315d",
-      "outputPath": "models/magic-staffs/air-staff/staff-of-air-steve-fitted.glb",
+      "sourcePath": "models/magic-staffs/air-staff/air-staff-3k.glb",
+      "sourceSha256": "7db84bcaeb194ede8b56aad9d80dd14951fa7d1bfa074bea640c5bc60fd46efc",
+      "outputPath": "models/magic-staffs/air-staff/candidates/staff-of-air-semantic-grip-candidate.glb",
       "targetLengthMetres": 1.3,
       "desiredWorldEulerDegrees": [0, 0, 0],
       "desiredWorldOffsetMetres": [0, 0, 0],
       "stableHeldPose": {
         "avatarLocalEulerDegrees": [0, 0, 32]
+      },
+      "gripContact": {
+        "schemaVersion": 1,
+        "contentNodeName": "EquipmentContent",
+        "sourceAxis": [0, 1, 0],
+        "actionEnd": "maximum",
+        "zones": [
+          {
+            "id": "primary",
+            "boneName": "rightHand",
+            "minimumSourceProjection": -0.18,
+            "maximumSourceProjection": 0.18
+          }
+        ]
       },
       "referenceMotion": {
         "path": "emotes/emote-spell-cast.glb",

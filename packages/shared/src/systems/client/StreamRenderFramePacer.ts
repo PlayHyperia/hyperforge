@@ -8,7 +8,11 @@ const MAX_STREAM_RENDER_FPS = 60;
  * and encoder processes during scene transitions.
  */
 export class StreamRenderFramePacer {
-  private static readonly SCHEDULER_TOLERANCE_MS = 0.5;
+  // A 120 Hz callback nearest a 60 FPS target can arrive about 0.7 ms before
+  // the ideal deadline after browser timer quantization. Accepting within this
+  // narrow window prevents a third-callback (~25 ms) wait without admitting
+  // the preceding 8 ms callback or materially raising lower requested rates.
+  private static readonly SCHEDULER_TOLERANCE_MS = 1.5;
   private readonly intervalMs: number;
   private nextFrameAt: number | null = null;
 

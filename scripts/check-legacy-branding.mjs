@@ -111,13 +111,12 @@ function findBinaryMatches(repository, files) {
   return lines(result.stdout);
 }
 
-function findWorkingTreeMatches() {
+function findWorkingTreeMatches(repository) {
   const args = [
     "-a",
     "-l",
     "-i",
     "--hidden",
-    "--no-ignore",
     "--glob",
     "!**/.git",
     "--glob",
@@ -126,16 +125,22 @@ function findWorkingTreeMatches() {
     "!**/node_modules",
     "--glob",
     "!**/node_modules/**",
+    "--glob",
+    "!**/*.dataless-backup-*",
+    "--glob",
+    "!**/*.dataless-backup-*/**",
   ];
   for (const term of prohibitedBinaryTerms) {
     args.push("-e", term);
   }
   args.push("--", ".");
 
-  const result = run("rg", args, workspaceRoot);
+  const result = run("rg", args, repository.directory);
   if (result.status === 1) return [];
   if (result.status !== 0) {
-    throw new Error(`Working-tree scan failed: ${result.stderr.trim()}`);
+    throw new Error(
+      `Working-tree scan failed in ${repository.label}: ${result.stderr.trim()}`,
+    );
   }
 
   return lines(result.stdout);
@@ -188,10 +193,13 @@ for (const repository of repositories) {
   for (const file of findBinaryMatches(repository, binaryFiles)) {
     violations.push({ repository: repository.label, file, kind: "binary" });
   }
-}
-
-for (const file of findWorkingTreeMatches()) {
-  violations.push({ repository: "workspace", file, kind: "working-tree" });
+  for (const file of findWorkingTreeMatches(repository)) {
+    violations.push({
+      repository: repository.label,
+      file,
+      kind: "working-tree",
+    });
+  }
 }
 
 if (violations.length > 0) {

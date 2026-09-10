@@ -21,6 +21,7 @@ type BankRow = {
 };
 type BankOperationRow = {
   operationId: string;
+  preparationId: string | null;
   requestFingerprint: string;
   committedQuantity: number;
   inventoryQuantityAfter: number;
@@ -35,6 +36,12 @@ type BankOperationItemRow = {
   inventoryQuantityAfter: number;
   bankQuantityAfter: number;
 };
+type BankOpenAuditRow = {
+  operationId: string;
+  preparationId: string;
+  playerId: string;
+  bankId: string;
+};
 
 function createBankHarness(input?: {
   inventory?: InventoryRow[];
@@ -43,6 +50,7 @@ function createBankHarness(input?: {
   commitFails?: boolean;
   connectFails?: boolean;
   reloadFails?: boolean;
+  onPreparationAccess?: () => void;
   preparation?: {
     preparationId: string;
     status?: "preparing" | "ready" | "frozen" | "cancelled" | "expired";
@@ -51,6 +59,7 @@ function createBankHarness(input?: {
     agent1ReadyAt?: number | null;
     agent2ReadyAt?: number | null;
     expiresAt?: number;
+    hostLeaseActive?: boolean;
     allowedBankActions?: Array<"open" | "deposit" | "withdraw" | "deposit_all">;
   };
 }) {
@@ -58,6 +67,7 @@ function createBankHarness(input?: {
   const bankRows = (input?.bank ?? []).map((row) => ({ ...row }));
   const bankOperationRows: BankOperationRow[] = [];
   const bankOperationItemRows: BankOperationItemRow[] = [];
+  const bankOpenAuditRows: BankOpenAuditRow[] = [];
   let commitFailuresRemaining = input?.commitFails ? 1 : 0;
   let nextId = 100;
   let transactionSnapshot: {
@@ -65,6 +75,7 @@ function createBankHarness(input?: {
     bank: BankRow[];
     operations: BankOperationRow[];
     operationItems: BankOperationItemRow[];
+    openAudits: BankOpenAuditRow[];
     nextId: number;
   } | null = null;
   const query = vi.fn(async (sqlInput: string, params: unknown[] = []) => {
@@ -75,6 +86,7 @@ function createBankHarness(input?: {
         bank: bankRows.map((row) => ({ ...row })),
         operations: bankOperationRows.map((row) => ({ ...row })),
         operationItems: bankOperationItemRows.map((row) => ({ ...row })),
+        openAudits: bankOpenAuditRows.map((row) => ({ ...row })),
         nextId,
       };
       return { rows: [] };
@@ -97,6 +109,11 @@ function createBankHarness(input?: {
           bankOperationItemRows.length,
           ...transactionSnapshot.operationItems,
         );
+        bankOpenAuditRows.splice(
+          0,
+          bankOpenAuditRows.length,
+          ...transactionSnapshot.openAudits,
+        );
         nextId = transactionSnapshot.nextId;
       }
       transactionSnapshot = null;
@@ -115,6 +132,7 @@ function createBankHarness(input?: {
       sql.includes('clock.now_ms AS "databaseNow"') &&
       sql.includes("FROM streaming_duel_preparations")
     ) {
+      input?.onPreparationAccess?.();
       const preparation = input?.preparation;
       if (!preparation || preparation.preparationId !== params[0]) {
         return { rows: [] };
@@ -142,13 +160,15 @@ function createBankHarness(input?: {
             cancellationReason: null,
             version: 1,
             databaseNow: Date.now(),
+            contestantUnavailable: false,
+            contestantHostLeaseActive: preparation.hostLeaseActive ?? true,
           },
         ],
       };
     }
     if (
       sql.startsWith(
-        'SELECT "requestFingerprint", "committedQuantity", "inventoryQuantityAfter", "bankQuantityAfter"',
+        'SELECT "preparationId", "requestFingerprint", "committedQuantity", "inventoryQuantityAfter", "bankQuantityAfter"',
       )
     ) {
       return {
@@ -160,11 +180,12 @@ function createBankHarness(input?: {
     if (sql.startsWith("INSERT INTO agent_bank_operations")) {
       bankOperationRows.push({
         operationId: String(params[0]),
-        committedQuantity: Number(params[6]),
-        inventoryQuantityAfter: Number(params[7]),
-        bankQuantityAfter: params[8] === null ? null : Number(params[8]),
-        requestFingerprint: String(params[9]),
-        itemCount: Number(params[10]),
+        preparationId: params[4] === null ? null : String(params[4]),
+        committedQuantity: Number(params[7]),
+        inventoryQuantityAfter: Number(params[8]),
+        bankQuantityAfter: params[9] === null ? null : Number(params[9]),
+        requestFingerprint: String(params[10]),
+        itemCount: Number(params[11]),
       });
       return { rows: [] };
     }
@@ -176,6 +197,15 @@ function createBankHarness(input?: {
         committedQuantity: Number(params[3]),
         inventoryQuantityAfter: Number(params[4]),
         bankQuantityAfter: Number(params[5]),
+      });
+      return { rows: [] };
+    }
+    if (sql.startsWith("INSERT INTO streaming_duel_bank_open_events")) {
+      bankOpenAuditRows.push({
+        operationId: String(params[0]),
+        preparationId: String(params[1]),
+        playerId: String(params[2]),
+        bankId: String(params[3]),
       });
       return { rows: [] };
     }
@@ -370,6 +400,7 @@ function createBankHarness(input?: {
     bankRows,
     bankOperationRows,
     bankOperationItemRows,
+    bankOpenAuditRows,
     inventorySystem,
     pool,
     client,
@@ -487,6 +518,60 @@ describe("authoritative embedded-agent banking", () => {
       bankId: getDuelPreparationBankId(preparationId),
       bankItems: [expect.objectContaining({ quantity: 3 })],
     });
+    expect(harness.bankOpenAuditRows).toEqual([
+      {
+        operationId: receipt.operationId,
+        preparationId,
+        playerId: "agent-1",
+        bankId: getDuelPreparationBankId(preparationId),
+      },
+    ]);
+    expect(harness.client.query).toHaveBeenCalledWith("BEGIN");
+    expect(harness.client.query).toHaveBeenCalledWith(
+      expect.stringContaining("FOR SHARE OF preparation"),
+      [preparationId, "agent-1"],
+    );
+    expect(harness.client.query).toHaveBeenCalledWith("COMMIT");
+    expect(harness.client.release).toHaveBeenCalledWith();
+  });
+
+  it("rejects a virtual preparation bank when no preparation capability is supplied", async () => {
+    const harness = createBankHarness();
+    const receipt = await openAuthoritativeAgentBank({
+      world: harness.world as never,
+      playerId: "agent-1",
+      bankId: getDuelPreparationBankId("6997b3ea-a485-4982-87e6-0dc18a091962"),
+    });
+
+    expect(receipt).toMatchObject({
+      success: false,
+      failureReason: "bank_target_invalid",
+    });
+    expect(harness.pool.query).not.toHaveBeenCalled();
+  });
+
+  it("rejects a virtual preparation transfer when no preparation capability is supplied", async () => {
+    const harness = createBankHarness({
+      inventory: [
+        { id: 1, itemId: "bank_test_item", quantity: 1, slotIndex: 0 },
+      ],
+    });
+    const receipt = await executeAuthoritativeAgentBankTransfer({
+      world: harness.world as never,
+      playerId: "agent-1",
+      bankId: getDuelPreparationBankId("3ce87d94-a55c-44cc-bd67-4791ecdd2842"),
+      action: "deposit",
+      itemId: "bank_test_item",
+      quantity: 1,
+    });
+
+    expect(receipt).toMatchObject({
+      success: false,
+      commitState: "not_committed",
+      failureReason: "bank_target_invalid",
+    });
+    expect(harness.pool.connect).not.toHaveBeenCalled();
+    expect(harness.inventoryRows).toHaveLength(1);
   });
 
   it("rejects preparation bank access for a non-contestant", async () => {
@@ -509,6 +594,9 @@ describe("authoritative embedded-agent banking", () => {
       success: false,
       failureReason: "preparation_agent_mismatch",
     });
+    expect(harness.bankOpenAuditRows).toEqual([]);
+    expect(harness.client.query).toHaveBeenCalledWith("ROLLBACK");
+    expect(harness.client.release).toHaveBeenCalledWith();
   });
 
   it("never permits preparation banking while the contestant is in a live duel", async () => {
@@ -532,6 +620,103 @@ describe("authoritative embedded-agent banking", () => {
       failureReason: "duel_locked",
     });
     expect(harness.pool.query).not.toHaveBeenCalled();
+  });
+
+  it("rejects preparation bank open for a dead contestant without writing an audit event", async () => {
+    const preparationId = "388c98e4-1e53-4f7f-9d6f-55143831e31f";
+    const harness = createBankHarness({ preparation: { preparationId } });
+    const player = harness.entities.get("agent-1") as {
+      data: { health?: number; alive?: boolean };
+    };
+    player.data.health = 0;
+    player.data.alive = false;
+
+    const receipt = await openAuthoritativeAgentBank({
+      world: harness.world as never,
+      playerId: "agent-1",
+      bankId: getDuelPreparationBankId(preparationId),
+      preparationId,
+    });
+
+    expect(receipt).toMatchObject({
+      success: false,
+      failureReason: "player_unavailable",
+    });
+    expect(harness.bankOpenAuditRows).toEqual([]);
+    expect(harness.pool.connect).not.toHaveBeenCalled();
+  });
+
+  it("rechecks contestant life after locking preparation authority before bank open", async () => {
+    const preparationId = "483509cf-8ef3-43c7-9628-7487cd4a88dd";
+    let markContestantDead = () => {};
+    const harness = createBankHarness({
+      preparation: { preparationId },
+      onPreparationAccess: () => markContestantDead(),
+    });
+    const player = harness.entities.get("agent-1") as {
+      data: { health?: number; alive?: boolean };
+    };
+    player.data.health = 10;
+    player.data.alive = true;
+    markContestantDead = () => {
+      player.data.health = 0;
+      player.data.alive = false;
+    };
+
+    const receipt = await openAuthoritativeAgentBank({
+      world: harness.world as never,
+      playerId: "agent-1",
+      bankId: getDuelPreparationBankId(preparationId),
+      preparationId,
+    });
+
+    expect(receipt).toMatchObject({
+      success: false,
+      failureReason: "player_unavailable",
+    });
+    expect(harness.client.query).toHaveBeenCalledWith("ROLLBACK");
+    expect(harness.bankOpenAuditRows).toEqual([]);
+  });
+
+  it("rechecks contestant life after locking preparation authority before mutation", async () => {
+    const preparationId = "db7f441a-bbbf-4dd2-8a99-9db7d71e80c9";
+    let markContestantDead = () => {};
+    const harness = createBankHarness({
+      preparation: { preparationId },
+      onPreparationAccess: () => markContestantDead(),
+      inventory: [
+        { id: 1, itemId: "bank_test_item", quantity: 1, slotIndex: 0 },
+      ],
+    });
+    const player = harness.entities.get("agent-1") as {
+      data: { health?: number; alive?: boolean };
+    };
+    player.data.health = 10;
+    player.data.alive = true;
+    markContestantDead = () => {
+      player.data.health = 0;
+      player.data.alive = false;
+    };
+
+    const receipt = await executeAuthoritativeAgentBankTransfer({
+      world: harness.world as never,
+      playerId: "agent-1",
+      bankId: getDuelPreparationBankId(preparationId),
+      preparationId,
+      action: "deposit",
+      itemId: "bank_test_item",
+      quantity: 1,
+    });
+
+    expect(receipt).toMatchObject({
+      success: false,
+      commitState: "not_committed",
+      failureReason: "player_unavailable",
+    });
+    expect(harness.inventoryRows).toEqual([
+      { id: 1, itemId: "bank_test_item", quantity: 1, slotIndex: 0 },
+    ]);
+    expect(harness.bankOperationRows).toEqual([]);
   });
 
   it("deposits exactly the owned quantity and returns committed post-state", async () => {
@@ -599,6 +784,33 @@ describe("authoritative embedded-agent banking", () => {
     });
     expect(harness.inventoryRows).toEqual([]);
     expect(harness.bankRows[0]?.quantity).toBe(1);
+    expect(harness.bankOperationRows).toEqual([
+      expect.objectContaining({ preparationId }),
+    ]);
+  });
+
+  it("rejects remote preparation-bank access when the contestant host lease is absent", async () => {
+    const preparationId = "d07b37e8-a46d-4d09-b11b-08ae4325e0dc";
+    const harness = createBankHarness({
+      bankPosition: [500, 0, 500],
+      preparation: { preparationId, hostLeaseActive: false },
+      bank: [
+        { id: 1, itemId: "bank_test_item", quantity: 3, slot: 0, tabIndex: 0 },
+      ],
+    });
+
+    await expect(
+      openAuthoritativeAgentBank({
+        world: harness.world as never,
+        playerId: "agent-1",
+        bankId: getDuelPreparationBankId(preparationId),
+        preparationId,
+      }),
+    ).resolves.toMatchObject({
+      success: false,
+      failureReason: "preparation_not_active",
+    });
+    expect(harness.bankOpenAuditRows).toEqual([]);
   });
 
   it("enforces the durable preparation operation allowlist", async () => {

@@ -232,9 +232,17 @@ export class Avatar extends Node {
     }
   }
 
-  setEmote(url: string | null) {
-    // DEPRECATED: use .emote
-    this.emote = url;
+  setEmote(url: string | null, startTimeSeconds?: number) {
+    // The explicit method remains necessary for authoritative phase seeking;
+    // the property setter intentionally represents an ordinary frame-zero
+    // emote change.
+    if (startTimeSeconds === undefined) {
+      this.emote = url;
+      return;
+    }
+    const normalizedUrl = url || defaults.emote;
+    this._emote = normalizedUrl;
+    this.instance?.setEmote(normalizedUrl, startTimeSeconds);
   }
 
   triggerHitReaction(intensity = 1, side: -1 | 1 = 1) {
@@ -292,9 +300,9 @@ export class Avatar extends Node {
         getBoneTransform(boneName: string) {
           return self.getBoneTransform(boneName);
         },
-        setEmote(url: string | null) {
+        setEmote(url: string | null, startTimeSeconds?: number) {
           // DEPRECATED: use .emote
-          return self.setEmote(url);
+          return self.setEmote(url, startTimeSeconds);
         },
         triggerHitReaction(intensity?: number, side?: -1 | 1) {
           return self.triggerHitReaction(intensity, side);

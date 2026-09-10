@@ -25,6 +25,7 @@ import {
   COMBAT_CONSTANTS,
   INPUT_LIMITS,
   DeathState,
+  generateGroundItemDropOperationId,
 } from "@hyperforge/shared";
 import { getTradingSystem } from "./trade/helpers";
 import {
@@ -287,47 +288,78 @@ export function handleDropItem(
 
   const payload = data as Record<string, unknown>;
 
-  // Idempotency check - prevent duplicate drop requests
-  const idempotencyKey = getIdempotencyService().generateKey(
-    playerEntity.id,
-    "drop",
-    { itemId: payload.itemId, slot: payload.slot },
-  );
-  if (!getIdempotencyService().checkAndMark(idempotencyKey)) {
-    // Duplicate request within 5 second window - silently ignore
-    return;
-  }
-
   // Validate itemId
   if (!isValidItemId(payload.itemId)) {
     console.warn("[Inventory] handleDropItem: invalid itemId");
     return;
   }
 
-  // Validate and clamp quantity
+  // Reject malformed quantities. Silent clamping can turn a zero/overflowing
+  // request into a different destructive action than the caller authorized.
   let quantity = 1;
   if (payload.quantity !== undefined) {
     if (
       typeof payload.quantity !== "number" ||
-      !Number.isInteger(payload.quantity)
+      !Number.isSafeInteger(payload.quantity) ||
+      payload.quantity <= 0 ||
+      payload.quantity > INPUT_LIMITS.MAX_QUANTITY
     ) {
-      console.warn("[Inventory] handleDropItem: invalid quantity type");
+      console.warn("[Inventory] handleDropItem: invalid quantity");
       return;
     }
-    quantity = Math.max(
-      1,
-      Math.min(payload.quantity, INPUT_LIMITS.MAX_QUANTITY),
-    );
+    quantity = payload.quantity;
   }
 
-  // Validate slot if provided
-  const slot =
-    typeof payload.slot === "number" &&
-    Number.isInteger(payload.slot) &&
-    payload.slot >= 0 &&
-    payload.slot < INPUT_LIMITS.MAX_INVENTORY_SLOTS
-      ? payload.slot
-      : undefined;
+  // A malformed supplied slot must not degrade into an aggregate debit.
+  let slot: number | undefined;
+  if (payload.slot !== undefined) {
+    if (
+      typeof payload.slot !== "number" ||
+      !Number.isSafeInteger(payload.slot) ||
+      payload.slot < 0 ||
+      payload.slot >= INPUT_LIMITS.MAX_INVENTORY_SLOTS
+    ) {
+      console.warn("[Inventory] handleDropItem: invalid slot");
+      return;
+    }
+    slot = payload.slot;
+  }
+
+  const suppliedOperationId =
+    payload.operationId === undefined
+      ? undefined
+      : typeof payload.operationId === "string"
+        ? payload.operationId.trim()
+        : "";
+  if (
+    suppliedOperationId !== undefined &&
+    !/^ground-item-drop:[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(
+      suppliedOperationId,
+    )
+  ) {
+    console.warn("[Inventory] handleDropItem: invalid operationId");
+    return;
+  }
+  let operationId: string;
+  try {
+    operationId = suppliedOperationId ?? generateGroundItemDropOperationId();
+  } catch {
+    console.warn("[Inventory] handleDropItem: secure identity unavailable");
+    return;
+  }
+
+  // Mark only a fully validated request. Modern clients bind retries to one
+  // durable operation; the legacy key retains the prior short dedup window.
+  if (!suppliedOperationId) {
+    const idempotencyKey = getIdempotencyService().generateKey(
+      playerEntity.id,
+      "drop",
+      { itemId: payload.itemId, quantity, slot },
+    );
+    if (!getIdempotencyService().checkAndMark(idempotencyKey)) {
+      return;
+    }
+  }
 
   // Block ALL drops during duel (can't drop any items while in duel)
   const duelSystem = world.getSystem("duel") as
@@ -342,12 +374,13 @@ export function handleDropItem(
     itemId: payload.itemId,
     quantity,
     slot,
+    operationId,
   });
 
   auditLog(
     "DROP",
     playerEntity.id,
-    { itemId: payload.itemId, quantity, slot },
+    { itemId: payload.itemId, quantity, slot, operationId },
     true,
   );
 }

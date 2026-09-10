@@ -1,4 +1,3 @@
-import EventEmitter from "eventemitter3";
 import {
   AttackType,
   EventBus,
@@ -23,6 +22,7 @@ import {
   vi,
 } from "vitest";
 import ammunitionManifest from "../../../world/assets/manifests/items/ammunition.json";
+import runesManifest from "../../../world/assets/manifests/items/runes.json";
 import weaponsManifest from "../../../world/assets/manifests/items/weapons.json";
 import prayersManifest from "../../../world/assets/manifests/prayers.json";
 import { EmbeddedHyperiaService } from "../../eliza/EmbeddedHyperiaService.js";
@@ -39,8 +39,13 @@ const fixtureItemIds = new Set([
   "shortbow",
   "bronze_arrow",
   "bronze_longsword",
+  "staff_of_air",
+  "fire_rune",
+  "mind_rune",
 ]);
 const previousFixtureItems = new Map<string, unknown>();
+
+type FixtureCombatRole = "melee" | "ranged" | "mage";
 
 type TestEntity = {
   id: string;
@@ -67,7 +72,11 @@ type PersistedPrayerOperation = {
 beforeAll(() => {
   prayerDataProvider.loadPrayers(prayersManifest);
   prayerDataProvider.rebuild();
-  for (const item of [...weaponsManifest, ...ammunitionManifest]) {
+  for (const item of [
+    ...weaponsManifest,
+    ...ammunitionManifest,
+    ...runesManifest,
+  ]) {
     if (!fixtureItemIds.has(item.id)) continue;
     previousFixtureItems.set(item.id, ITEMS.get(item.id));
     ITEMS.set(item.id, {
@@ -76,7 +85,9 @@ beforeAll(() => {
         ? { attackType: AttackType.RANGED }
         : item.id === "bronze_longsword"
           ? { attackType: AttackType.MELEE }
-          : {}),
+          : item.id === "staff_of_air"
+            ? { attackType: AttackType.MAGIC }
+            : {}),
     } as never);
   }
 });
@@ -145,7 +156,7 @@ function createEntity(id: string, x: number): TestEntity {
   };
 }
 
-function createCustodyWorld() {
+function createCustodyWorld(combatRole: FixtureCombatRole = "ranged") {
   const persisted = new Map<string, PrayerPersistenceSnapshot>([
     [
       AGENT_ID,
@@ -229,15 +240,28 @@ function createCustodyWorld() {
 
   const entityItems = new Map<string, TestEntity>([
     [AGENT_ID, createEntity(AGENT_ID, 0)],
-    [OPPONENT_ID, createEntity(OPPONENT_ID, 6)],
+    // Keep the prayer-custody fixture inside every role's authoritative attack
+    // range so this integration does not also depend on pursuit/pathfinding.
+    [OPPONENT_ID, createEntity(OPPONENT_ID, 1)],
   ]);
+  entityItems.get(AGENT_ID)!.data.selectedSpell =
+    combatRole === "mage" ? "fire_strike" : null;
   const equipment = new Map([
     [
       AGENT_ID,
-      {
-        weapon: { itemId: "shortbow", quantity: 1 },
-        arrows: { itemId: "bronze_arrow", quantity: 100 },
-      },
+      combatRole === "ranged"
+        ? {
+            weapon: { itemId: "shortbow", quantity: 1 },
+            arrows: { itemId: "bronze_arrow", quantity: 100 },
+          }
+        : {
+            weapon: {
+              itemId:
+                combatRole === "mage" ? "staff_of_air" : "bronze_longsword",
+              quantity: 1,
+            },
+            arrows: null,
+          },
     ],
     [
       OPPONENT_ID,
@@ -248,28 +272,48 @@ function createCustodyWorld() {
     ],
   ]);
   const inventory = new Map([
-    [AGENT_ID, { playerId: AGENT_ID, items: [], coins: 0 }],
+    [
+      AGENT_ID,
+      {
+        playerId: AGENT_ID,
+        items:
+          combatRole === "mage"
+            ? [
+                { slot: 0, itemId: "fire_rune", quantity: 60 },
+                { slot: 1, itemId: "mind_rune", quantity: 20 },
+              ]
+            : [],
+        coins: 0,
+      },
+    ],
     [OPPONENT_ID, { playerId: OPPONENT_ID, items: [], coins: 0 }],
   ]);
   const systems = new Map<string, unknown>();
   systems.set("database", database);
+  systems.set("player", {
+    isPlayerReady: (playerId: string) => entityItems.has(playerId),
+  });
   systems.set("inventory", {
     getInventory: (playerId: string) => inventory.get(playerId),
-    isInventoryReady: () => true,
+    isInventoryReady: (playerId: string) => inventory.has(playerId),
   });
   systems.set("equipment", {
     getPlayerEquipment: (playerId: string) => equipment.get(playerId),
+    isEquipmentReady: (playerId: string) => equipment.has(playerId),
   });
   const requestServerAttack = vi.fn(() => true);
   systems.set("network", {
     requestServerAttack,
     requestServerMove: vi.fn(() => true),
     getServerMovementDebug: vi.fn(() => null),
+    getPlayerWeaponRange: vi.fn(() => 1),
+    getPlayerAttackType: vi.fn(() => AttackType.MELEE),
+    isInAttackRange: vi.fn(() => true),
   });
   systems.set("combat", { forceEndCombat: vi.fn() });
   systems.set("terrain", { getHeightAt: () => 0 });
 
-  const emitter = new EventEmitter<string | symbol, unknown>();
+  const emitter = new EventBus();
   const world = Object.assign(emitter, {
     isServer: true,
     currentTick: 1,
@@ -302,137 +346,145 @@ function processDrainTicks(system: PrayerSystem, count: number): void {
 }
 
 describe("production duel prayer custody integration", () => {
-  it("carries one frozen ranged prayer through service activation, exact drain, and abort teardown", async () => {
-    const fixture = createCustodyWorld();
-    const prayerSystem = new PrayerSystem(fixture.world as unknown as World);
-    fixture.systems.set("prayer", prayerSystem);
-    await prayerSystem.init();
-    fixture.world.emit(EventType.PLAYER_REGISTERED, { playerId: AGENT_ID });
-    fixture.world.emit(EventType.PLAYER_REGISTERED, {
-      playerId: OPPONENT_ID,
-    });
-    await Promise.all([
-      prayerSystem.waitForPrayerIdle(AGENT_ID),
-      prayerSystem.waitForPrayerIdle(OPPONENT_ID),
-    ]);
+  it.each([
+    ["melee", "superhuman_strength"],
+    ["ranged", "hawk_eye"],
+    ["mage", "mystic_lore"],
+  ] as const)(
+    "carries one frozen %s prayer through service activation, exact drain, and abort teardown",
+    async (combatRole, expectedPrayer) => {
+      const fixture = createCustodyWorld(combatRole);
+      const prayerSystem = new PrayerSystem(fixture.world as unknown as World);
+      fixture.systems.set("prayer", prayerSystem);
+      await prayerSystem.init();
+      fixture.world.emit(EventType.PLAYER_REGISTERED, { playerId: AGENT_ID });
+      fixture.world.emit(EventType.PLAYER_REGISTERED, {
+        playerId: OPPONENT_ID,
+      });
+      await Promise.all([
+        prayerSystem.waitForPrayerIdle(AGENT_ID),
+        prayerSystem.waitForPrayerIdle(OPPONENT_ID),
+      ]);
 
-    let cycle: Record<string, unknown> | null = null;
-    const orchestrator = new DuelOrchestrator(
-      fixture.world as unknown as World,
-      () => cycle as never,
-      () => {},
-      () => new Map(),
-      () => {},
-      () => {},
-      () => [],
-      () => [],
-    );
-    const agent = orchestrator.createContestant(AGENT_ID, OPPONENT_ID)!;
-    const opponent = orchestrator.createContestant(OPPONENT_ID, AGENT_ID)!;
-    cycle = {
-      cycleId: "prayer-custody-cycle",
-      phase: "FIGHTING",
-      agent1: agent,
-      agent2: opponent,
-      competitiveSnapshot: { diagnostic: false },
-    };
+      let cycle: Record<string, unknown> | null = null;
+      const orchestrator = new DuelOrchestrator(
+        fixture.world as unknown as World,
+        () => cycle as never,
+        () => {},
+        () => new Map(),
+        () => {},
+        () => {},
+        () => [],
+        () => [],
+      );
+      const agent = orchestrator.createContestant(AGENT_ID, OPPONENT_ID)!;
+      const opponent = orchestrator.createContestant(OPPONENT_ID, AGENT_ID)!;
+      cycle = {
+        cycleId: `prayer-custody-${combatRole}-cycle`,
+        phase: "FIGHTING",
+        agent1: agent,
+        agent2: opponent,
+        competitiveSnapshot: { diagnostic: false },
+      };
 
-    const availablePrayerIds = getAvailablePrayerIdsForLevel(40);
-    expect(availablePrayerIds).toContain("hawk_eye");
-    const agentFreeze = orchestrator.freezeCompetitiveLoadout(agent);
-    const opponentFreeze = orchestrator.freezeCompetitiveLoadout(opponent);
-    expect(agentFreeze.ok, JSON.stringify(agentFreeze)).toBe(true);
-    expect(agentFreeze).toMatchObject({
-      ok: true,
-      diagnostic: false,
-    });
-    expect(opponentFreeze.ok, JSON.stringify(opponentFreeze)).toBe(true);
-    expect(opponentFreeze).toMatchObject({
-      ok: true,
-      diagnostic: false,
-    });
+      const availablePrayerIds = getAvailablePrayerIdsForLevel(40);
+      expect(availablePrayerIds).toContain(expectedPrayer);
+      const agentFreeze = orchestrator.freezeCompetitiveLoadout(agent);
+      const opponentFreeze = orchestrator.freezeCompetitiveLoadout(opponent);
+      expect(agentFreeze.ok, JSON.stringify(agentFreeze)).toBe(true);
+      expect(agentFreeze).toMatchObject({
+        ok: true,
+        diagnostic: false,
+      });
+      expect(opponentFreeze.ok, JSON.stringify(opponentFreeze)).toBe(true);
+      expect(opponentFreeze).toMatchObject({
+        ok: true,
+        diagnostic: false,
+      });
 
-    const service = new EmbeddedHyperiaService(
-      fixture.world as unknown as World,
-      AGENT_ID,
-      "prayer-custody-account",
-      "Prayer Custody Agent",
-    );
-    (
-      service as unknown as {
-        playerEntityId: string;
-        isActive: boolean;
-      }
-    ).playerEntityId = AGENT_ID;
-    (service as unknown as { isActive: boolean }).isActive = true;
-    const ai = new DuelCombatAI(service, OPPONENT_ID, {
-      combatRole: "ranged",
-      noFood: true,
-      availablePrayerIds,
-      tacticalStrategy: buildDeterministicCompetitiveTacticalStrategy(
-        "ranged",
+      const service = new EmbeddedHyperiaService(
+        fixture.world as unknown as World,
+        AGENT_ID,
+        "prayer-custody-account",
+        "Prayer Custody Agent",
+      );
+      (
+        service as unknown as {
+          playerEntityId: string;
+          isActive: boolean;
+        }
+      ).playerEntityId = AGENT_ID;
+      (service as unknown as { isActive: boolean }).isActive = true;
+      const ai = new DuelCombatAI(service, OPPONENT_ID, {
+        combatRole,
+        noFood: true,
         availablePrayerIds,
-      ),
-    });
-    ai.start();
-    await ai.externalTick();
+        tacticalStrategy: buildDeterministicCompetitiveTacticalStrategy(
+          combatRole,
+          availablePrayerIds,
+        ),
+      });
+      ai.start();
+      await ai.externalTick();
 
-    expect(ai.getStats()).toMatchObject({
-      prayerToggleAttempts: 1,
-      prayerToggleCommits: 1,
-      prayerToggleRejects: 0,
-    });
-    expect(prayerSystem.getPrayerCustody(AGENT_ID)).toMatchObject({
-      ready: true,
-      persistenceHealthy: true,
-      pointUnits: STARTING_POINT_UNITS,
-      activePrayers: ["hawk_eye"],
-    });
-    expect(fixture.requestServerAttack).toHaveBeenCalledWith(
-      AGENT_ID,
-      OPPONENT_ID,
-      "player",
-    );
+      expect(ai.getStats()).toMatchObject({
+        prayerToggleAttempts: 1,
+        prayerToggleCommits: 1,
+        prayerToggleRejects: 0,
+        combatRole,
+      });
+      expect(prayerSystem.getPrayerCustody(AGENT_ID)).toMatchObject({
+        ready: true,
+        persistenceHealthy: true,
+        pointUnits: STARTING_POINT_UNITS,
+        activePrayers: [expectedPrayer],
+      });
+      expect(fixture.requestServerAttack).toHaveBeenCalledWith(
+        AGENT_ID,
+        OPPONENT_ID,
+        "player",
+      );
 
-    processDrainTicks(prayerSystem, 4);
-    await prayerSystem.waitForPrayerIdle(AGENT_ID);
-    const expectedAfterDrain = STARTING_POINT_UNITS - 400_000;
-    expect(prayerSystem.getPrayerCustody(AGENT_ID)).toMatchObject({
-      pointUnits: expectedAfterDrain,
-      activePrayers: ["hawk_eye"],
-    });
-    expect(fixture.persisted.get(AGENT_ID)).toEqual({
-      pointUnits: expectedAfterDrain,
-      maxPoints: 40,
-      activePrayers: ["hawk_eye"],
-    });
+      processDrainTicks(prayerSystem, 4);
+      await prayerSystem.waitForPrayerIdle(AGENT_ID);
+      const expectedAfterDrain = STARTING_POINT_UNITS - 400_000;
+      expect(prayerSystem.getPrayerCustody(AGENT_ID)).toMatchObject({
+        pointUnits: expectedAfterDrain,
+        activePrayers: [expectedPrayer],
+      });
+      expect(fixture.persisted.get(AGENT_ID)).toEqual({
+        pointUnits: expectedAfterDrain,
+        maxPoints: 40,
+        activePrayers: [expectedPrayer],
+      });
 
-    ai.stop();
-    await orchestrator.cleanupAfterAbort(cycle as never);
+      ai.stop();
+      await orchestrator.cleanupAfterAbort(cycle as never);
 
-    expect(prayerSystem.getPrayerCustody(AGENT_ID)).toMatchObject({
-      ready: true,
-      persistenceHealthy: true,
-      pointUnits: expectedAfterDrain,
-      activePrayers: [],
-    });
-    expect(fixture.persisted.get(AGENT_ID)).toEqual({
-      pointUnits: expectedAfterDrain,
-      maxPoints: 40,
-      activePrayers: [],
-    });
-    const transitions = fixture.commitRequests.map(
-      ({ transition }) => transition,
-    );
-    expect(transitions[0]).toBe("toggle");
-    expect(transitions.at(-1)).toBe("deactivate_all");
-    expect(transitions.slice(1, -1).length).toBeGreaterThan(0);
-    expect(transitions.slice(1, -1).every((value) => value === "drain")).toBe(
-      true,
-    );
-    expect(fixture.commitRequests.at(-1)?.operationId).toBe(
-      `duel-prayer-teardown:prayer-custody-cycle:${AGENT_ID}`,
-    );
-    prayerSystem.destroy();
-  });
+      expect(prayerSystem.getPrayerCustody(AGENT_ID)).toMatchObject({
+        ready: true,
+        persistenceHealthy: true,
+        pointUnits: expectedAfterDrain,
+        activePrayers: [],
+      });
+      expect(fixture.persisted.get(AGENT_ID)).toEqual({
+        pointUnits: expectedAfterDrain,
+        maxPoints: 40,
+        activePrayers: [],
+      });
+      const transitions = fixture.commitRequests.map(
+        ({ transition }) => transition,
+      );
+      expect(transitions[0]).toBe("toggle");
+      expect(transitions.at(-1)).toBe("deactivate_all");
+      expect(transitions.slice(1, -1).length).toBeGreaterThan(0);
+      expect(transitions.slice(1, -1).every((value) => value === "drain")).toBe(
+        true,
+      );
+      expect(fixture.commitRequests.at(-1)?.operationId).toBe(
+        `duel-prayer-teardown:prayer-custody-${combatRole}-cycle:${AGENT_ID}`,
+      );
+      prayerSystem.destroy();
+    },
+  );
 });

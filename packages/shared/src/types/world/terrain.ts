@@ -147,6 +147,22 @@ export interface FlatZoneTileBounds {
 }
 
 /**
+ * Smooth radial basin profile for an authored pond.
+ * `FlatZone.height` is the bed height and `FlatZone.blendRadius` controls the
+ * final transition from the level bank back to procedural terrain.
+ */
+export interface RadialPondTerrainProfile {
+  /** Radius of the level underwater bed. */
+  bedRadius: number;
+  /** Radius where the rising shoreline reaches the level bank. */
+  bankInnerRadius: number;
+  /** Outer radius of the level bank. */
+  bankOuterRadius: number;
+  /** Height of the dry bank. */
+  bankHeight: number;
+}
+
+/**
  * Defines an area where terrain should be flattened.
  * Used for stations, buildings, and other world objects that need level ground.
  *
@@ -169,6 +185,8 @@ export interface FlatZone {
   height: number;
   /** Blend radius for smooth transition to procedural terrain (meters) */
   blendRadius: number;
+  /** Optional smooth radial pond basin instead of a rectangular flat zone. */
+  radialPond?: RadialPondTerrainProfile;
   /**
    * Optional carve inset for removing terrain triangles in the flat zone core.
    * If provided, terrain will be carved inside the core area shrunk by this inset.

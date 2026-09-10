@@ -30,6 +30,7 @@ function createFixture() {
   };
   const entity = {
     id: "atomic-prayer-agent",
+    data: {} as { skills?: typeof stats },
     position: { x: 4, y: 0, z: 7 },
     components: new Map([["stats", stats]]),
     getComponent: (name: string) => (name === "stats" ? stats : undefined),
@@ -41,7 +42,7 @@ function createFixture() {
     entities: new Map([[entity.id, entity]]),
     getSystem: vi.fn(() => undefined),
   };
-  return { stats, eventBus, world };
+  return { entity, stats, eventBus, world };
 }
 
 describe("SkillsSystem committed Prayer reconciliation", () => {
@@ -141,6 +142,36 @@ describe("SkillsSystem committed Prayer reconciliation", () => {
         skill: "prayer",
         oldLevel: 1,
         newLevel: 2,
+      }),
+      expect.anything(),
+    );
+    expect(emitEvent).toHaveBeenCalledWith(
+      EventType.SKILLS_UPDATED,
+      expect.objectContaining({
+        playerId: "atomic-prayer-agent",
+        persistence: "already_committed",
+      }),
+      expect.anything(),
+    );
+  });
+
+  it("publishes database-loaded skills without scheduling a write-back", async () => {
+    const fixture = createFixture();
+    fixture.entity.data = { skills: fixture.stats };
+    const emitEvent = vi.spyOn(fixture.eventBus, "emitEvent");
+    const system = new SkillsSystem(fixture.world as unknown as World);
+    await (
+      system as unknown as {
+        loadPlayerSkillsFromDatabase(playerId: string): Promise<void>;
+      }
+    ).loadPlayerSkillsFromDatabase("atomic-prayer-agent");
+
+    expect(emitEvent).toHaveBeenCalledWith(
+      EventType.SKILLS_UPDATED,
+      expect.objectContaining({
+        playerId: "atomic-prayer-agent",
+        skills: fixture.stats,
+        persistence: "already_committed",
       }),
       expect.anything(),
     );

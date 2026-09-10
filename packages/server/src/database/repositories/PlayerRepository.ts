@@ -17,7 +17,14 @@ import { eq, sql } from "drizzle-orm";
 import { BaseRepository } from "./BaseRepository";
 import * as schema from "../schema";
 import type { PlayerPersistenceUpdate, PlayerRow } from "../../shared/types";
-import { assertGenericPlayerUpdateExcludesPrayerAuthority } from "../prayer-custody-policy";
+import {
+  assertGenericPlayerUpdateExcludesAttackStyleAuthority,
+  assertGenericPlayerUpdateExcludesPrayerAuthority,
+} from "../prayer-custody-policy";
+import {
+  buildGenericCharacterUpdate,
+  type GenericCharacterUpdate,
+} from "../generic-player-update";
 
 /**
  * PlayerRepository class
@@ -75,73 +82,16 @@ export class PlayerRepository extends BaseRepository {
    */
   private buildUpdateData(
     data: PlayerPersistenceUpdate,
-  ): Partial<Omit<typeof schema.characters.$inferInsert, "id" | "accountId">> {
+  ): GenericCharacterUpdate {
     assertGenericPlayerUpdateExcludesPrayerAuthority(
       data,
       "PlayerRepository.buildUpdateData",
     );
-    type CharacterUpdate = Partial<
-      Omit<typeof schema.characters.$inferInsert, "id" | "accountId">
-    >;
-
-    const u: CharacterUpdate = {};
-
-    // Name — only update if explicitly provided and non-empty
-    if (data.name && data.name.trim().length > 0) u.name = data.name;
-    // Levels
-    if (data.combatLevel !== undefined) u.combatLevel = data.combatLevel;
-    if (data.attackLevel !== undefined) u.attackLevel = data.attackLevel;
-    if (data.strengthLevel !== undefined) u.strengthLevel = data.strengthLevel;
-    if (data.defenseLevel !== undefined) u.defenseLevel = data.defenseLevel;
-    if (data.constitutionLevel !== undefined)
-      u.constitutionLevel = data.constitutionLevel;
-    if (data.rangedLevel !== undefined) u.rangedLevel = data.rangedLevel;
-    if (data.magicLevel !== undefined) u.magicLevel = data.magicLevel;
-    if (data.woodcuttingLevel !== undefined)
-      u.woodcuttingLevel = data.woodcuttingLevel;
-    if (data.miningLevel !== undefined) u.miningLevel = data.miningLevel;
-    if (data.fishingLevel !== undefined) u.fishingLevel = data.fishingLevel;
-    if (data.firemakingLevel !== undefined)
-      u.firemakingLevel = data.firemakingLevel;
-    if (data.cookingLevel !== undefined) u.cookingLevel = data.cookingLevel;
-    if (data.smithingLevel !== undefined) u.smithingLevel = data.smithingLevel;
-    if (data.agilityLevel !== undefined) u.agilityLevel = data.agilityLevel;
-    if (data.craftingLevel !== undefined) u.craftingLevel = data.craftingLevel;
-    if (data.fletchingLevel !== undefined)
-      u.fletchingLevel = data.fletchingLevel;
-    if (data.runecraftingLevel !== undefined)
-      u.runecraftingLevel = data.runecraftingLevel;
-    // XP
-    if (data.attackXp !== undefined) u.attackXp = data.attackXp;
-    if (data.strengthXp !== undefined) u.strengthXp = data.strengthXp;
-    if (data.defenseXp !== undefined) u.defenseXp = data.defenseXp;
-    if (data.constitutionXp !== undefined)
-      u.constitutionXp = data.constitutionXp;
-    if (data.rangedXp !== undefined) u.rangedXp = data.rangedXp;
-    if (data.magicXp !== undefined) u.magicXp = data.magicXp;
-    if (data.woodcuttingXp !== undefined) u.woodcuttingXp = data.woodcuttingXp;
-    if (data.miningXp !== undefined) u.miningXp = data.miningXp;
-    if (data.fishingXp !== undefined) u.fishingXp = data.fishingXp;
-    if (data.firemakingXp !== undefined) u.firemakingXp = data.firemakingXp;
-    if (data.cookingXp !== undefined) u.cookingXp = data.cookingXp;
-    if (data.smithingXp !== undefined) u.smithingXp = data.smithingXp;
-    if (data.agilityXp !== undefined) u.agilityXp = data.agilityXp;
-    if (data.craftingXp !== undefined) u.craftingXp = data.craftingXp;
-    if (data.fletchingXp !== undefined) u.fletchingXp = data.fletchingXp;
-    if (data.runecraftingXp !== undefined)
-      u.runecraftingXp = data.runecraftingXp;
-    // Core
-    if (data.health !== undefined) u.health = data.health;
-    if (data.maxHealth !== undefined) u.maxHealth = data.maxHealth;
-    if (data.coins !== undefined) u.coins = data.coins;
-    if (data.positionX !== undefined) u.positionX = data.positionX;
-    if (data.positionY !== undefined) u.positionY = data.positionY;
-    if (data.positionZ !== undefined) u.positionZ = data.positionZ;
-    // Combat preferences
-    if (data.autoRetaliate !== undefined) u.autoRetaliate = data.autoRetaliate;
-    if (data.attackStyle !== undefined) u.attackStyle = data.attackStyle;
-    if (data.selectedSpell !== undefined) u.selectedSpell = data.selectedSpell;
-    return u;
+    assertGenericPlayerUpdateExcludesAttackStyleAuthority(
+      data,
+      "PlayerRepository.buildUpdateData",
+    );
+    return buildGenericCharacterUpdate(data);
   }
 
   async savePlayerAsync(
@@ -192,9 +142,7 @@ export class PlayerRepository extends BaseRepository {
     // Build all update objects up front, filter out empty updates
     const updates: Array<{
       playerId: string;
-      data: Partial<
-        Omit<typeof schema.characters.$inferInsert, "id" | "accountId">
-      >;
+      data: GenericCharacterUpdate;
     }> = [];
 
     for (const [playerId, playerData] of players) {

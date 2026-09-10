@@ -139,6 +139,7 @@ export class ClientGraphics extends System {
   private precompileQueue: Promise<void> = Promise.resolve();
   private pendingPrecompileCount = 0;
   private static readonly PRECOMPILE_TIMEOUT_MS = 15_000;
+  private static readonly RENDERER_READY_TIMEOUT_MS = 15_000;
 
   constructor(world: World) {
     super(world);
@@ -393,6 +394,21 @@ export class ClientGraphics extends System {
   }
 
   private async precompileObjectNow(object: THREE.Object3D): Promise<void> {
+    // Streaming equipment contracts can arrive while ClientGraphics.init() is
+    // still awaiting WebGPU adapter creation. Queue the compile until that
+    // exact renderer is ready instead of turning a healthy startup race into a
+    // failed asset pre-warm and a redundant reload.
+    const rendererReadyDeadline =
+      Date.now() + ClientGraphics.RENDERER_READY_TIMEOUT_MS;
+    while (!this.renderer) {
+      if (Date.now() >= rendererReadyDeadline) {
+        throw new Error(
+          `WebGPU renderer was not ready after ${ClientGraphics.RENDERER_READY_TIMEOUT_MS}ms`,
+        );
+      }
+      await new Promise<void>((resolve) => setTimeout(resolve, 16));
+    }
+
     const previousVisible = object.visible;
     const frustumStates: Array<{
       object: THREE.Object3D & { frustumCulled: boolean };

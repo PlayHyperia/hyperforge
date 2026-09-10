@@ -182,10 +182,17 @@ const validatePlayerBankAccess = (
 ): AgentBankFailureReason | null => {
   const player = world.entities.get(playerId);
   if (!player) return "player_unavailable";
-  return (player.data as { inStreamingDuel?: boolean } | undefined)
-    ?.inStreamingDuel === true
-    ? "duel_locked"
-    : null;
+  const data = player.data as
+    | {
+        alive?: boolean;
+        health?: number;
+        inStreamingDuel?: boolean;
+      }
+    | undefined;
+  if (data?.alive === false || (data?.health ?? 1) <= 0) {
+    return "player_unavailable";
+  }
+  return data?.inStreamingDuel === true ? "duel_locked" : null;
 };
 
 const getPool = (world: World): pg.Pool | null => {
@@ -350,6 +357,14 @@ export async function openAuthoritativeAgentBank(input: {
         { operationId },
       );
     }
+  } else if (input.bankId.startsWith("duel-preparation:")) {
+    return createAgentBankFailureReceipt(
+      "open",
+      input.playerId,
+      input.bankId,
+      "bank_target_invalid",
+      { operationId },
+    );
   } else {
     const accessFailure = validatePhysicalBankAccess(
       input.world,
@@ -379,19 +394,96 @@ export async function openAuthoritativeAgentBank(input: {
 
   try {
     if (input.preparationId) {
-      const preparationAccess = await authorizeDuelPreparationBankAccess(pool, {
-        preparationId: input.preparationId,
-        playerId: input.playerId,
-        action: "open",
-      });
-      if (!preparationAccess.ok) {
+      const client = await pool.connect();
+      try {
+        await client.query("BEGIN");
+        const preparationAccess = await authorizeDuelPreparationBankAccess(
+          client,
+          {
+            preparationId: input.preparationId,
+            playerId: input.playerId,
+            action: "open",
+            lockForTransaction: true,
+          },
+        );
+        if (!preparationAccess.ok) {
+          await client.query("ROLLBACK");
+          return createAgentBankFailureReceipt(
+            "open",
+            input.playerId,
+            input.bankId,
+            preparationAccess.reason,
+            { operationId },
+          );
+        }
+        const playerAccessAfterLock = validatePlayerBankAccess(
+          input.world,
+          input.playerId,
+        );
+        if (playerAccessAfterLock) {
+          await client.query("ROLLBACK");
+          return createAgentBankFailureReceipt(
+            "open",
+            input.playerId,
+            input.bankId,
+            playerAccessAfterLock,
+            { operationId },
+          );
+        }
+        const result = await client.query<{
+          itemId: string;
+          quantity: number | string;
+          slot: number | string;
+          tabIndex: number | string;
+        }>(
+          `SELECT "itemId", quantity, slot, "tabIndex"
+           FROM bank_storage
+           WHERE "playerId" = $1
+           ORDER BY "tabIndex", slot`,
+          [input.playerId],
+        );
+        await client.query(
+          `INSERT INTO streaming_duel_bank_open_events
+             ("operationId", "preparationId", "playerId", "bankId")
+           VALUES ($1, $2, $3, $4)`,
+          [operationId, input.preparationId, input.playerId, input.bankId],
+        );
+        await client.query("COMMIT");
+        return {
+          success: true,
+          operationId,
+          commitState: "not_applicable",
+          replayed: false,
+          action: "open",
+          playerId: input.playerId,
+          bankId: input.bankId,
+          itemId: null,
+          requestedQuantity: 0,
+          committedQuantity: 0,
+          inventoryQuantityAfter: null,
+          bankQuantityAfter: null,
+          bankItems: result.rows.map((row) => ({
+            itemId: row.itemId,
+            quantity: parseQuantity(row.quantity),
+            slot: parseQuantity(row.slot),
+            tabIndex: parseQuantity(row.tabIndex),
+          })),
+        };
+      } catch {
+        try {
+          await client.query("ROLLBACK");
+        } catch {
+          // Preserve the original preparation-bank failure.
+        }
         return createAgentBankFailureReceipt(
           "open",
           input.playerId,
           input.bankId,
-          preparationAccess.reason,
+          "operation_failed",
           { operationId },
         );
+      } finally {
+        client.release();
       }
     }
     const result = await pool.query<{
@@ -527,6 +619,18 @@ export async function executeAuthoritativeAgentBankTransfer(
       baseReceiptInput,
     );
   }
+  if (
+    !request.preparationId &&
+    request.bankId.startsWith("duel-preparation:")
+  ) {
+    return createAgentBankFailureReceipt(
+      request.action,
+      request.playerId,
+      request.bankId,
+      "bank_target_invalid",
+      baseReceiptInput,
+    );
+  }
 
   const pool = getPool(request.world);
   if (!pool) {
@@ -590,12 +694,13 @@ export async function executeAuthoritativeAgentBankTransfer(
           withdrawItems,
         );
         const priorResult = await client.query<{
+          preparationId: string | null;
           requestFingerprint: string;
           committedQuantity: number | string;
           inventoryQuantityAfter: number | string | null;
           bankQuantityAfter: number | string | null;
         }>(
-          `SELECT "requestFingerprint", "committedQuantity",
+          `SELECT "preparationId", "requestFingerprint", "committedQuantity",
                   "inventoryQuantityAfter", "bankQuantityAfter"
            FROM agent_bank_operations
            WHERE "operationId" = $1 FOR UPDATE`,
@@ -603,7 +708,10 @@ export async function executeAuthoritativeAgentBankTransfer(
         );
         const prior = priorResult.rows[0];
         if (prior) {
-          if (prior.requestFingerprint !== requestFingerprint) {
+          if (
+            prior.preparationId !== (request.preparationId ?? null) ||
+            prior.requestFingerprint !== requestFingerprint
+          ) {
             throw new BankOperationError("operation_id_conflict");
           }
           outcome = {
@@ -647,6 +755,13 @@ export async function executeAuthoritativeAgentBankTransfer(
             if (!preparationAccess.ok) {
               throw new BankOperationError(preparationAccess.reason);
             }
+            const playerAccessAfterPreparationLock = validatePlayerBankAccess(
+              request.world,
+              request.playerId,
+            );
+            if (playerAccessAfterPreparationLock) {
+              throw new BankOperationError(playerAccessAfterPreparationLock);
+            }
           } else {
             const accessFailure = validatePhysicalBankAccess(
               request.world,
@@ -685,16 +800,17 @@ export async function executeAuthoritativeAgentBankTransfer(
                   );
           await client.query(
             `INSERT INTO agent_bank_operations
-               ("operationId", "playerId", action, "bankId", "itemId",
+               ("operationId", "playerId", action, "bankId", "preparationId", "itemId",
                 "requestedQuantity", "committedQuantity",
                 "inventoryQuantityAfter", "bankQuantityAfter",
                 "requestFingerprint", "itemCount")
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
             [
               operationId,
               request.playerId,
               request.action,
               request.bankId,
+              request.preparationId ?? null,
               request.itemId ?? null,
               request.action === "deposit_all"
                 ? outcome.committedQuantity

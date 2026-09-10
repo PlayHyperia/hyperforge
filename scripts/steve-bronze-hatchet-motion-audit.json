@@ -1,0 +1,35 @@
+{
+  "schemaVersion": 1,
+  "motions": [
+    {
+      "id": "woodcutting-start",
+      "name": "Woodcutting start",
+      "asset": "artifacts/duel-launch-avatar-bakeoff/motions/steve-preparation/steve-woodcutting.glb",
+      "sampleRatio": 0.1
+    },
+    {
+      "id": "woodcutting-lift",
+      "name": "Woodcutting lift",
+      "asset": "artifacts/duel-launch-avatar-bakeoff/motions/steve-preparation/steve-woodcutting.glb",
+      "sampleRatio": 0.3
+    },
+    {
+      "id": "woodcutting",
+      "name": "Woodcutting contact",
+      "asset": "artifacts/duel-launch-avatar-bakeoff/motions/steve-preparation/steve-woodcutting.glb",
+      "sampleRatio": 0.55
+    },
+    {
+      "id": "woodcutting-follow-through",
+      "name": "Woodcutting follow-through",
+      "asset": "artifacts/duel-launch-avatar-bakeoff/motions/steve-preparation/steve-woodcutting.glb",
+      "sampleRatio": 0.7
+    },
+    {
+      "id": "woodcutting-recovery",
+      "name": "Woodcutting recovery",
+      "asset": "artifacts/duel-launch-avatar-bakeoff/motions/steve-preparation/steve-woodcutting.glb",
+      "sampleRatio": 0.9
+    }
+  ]
+}

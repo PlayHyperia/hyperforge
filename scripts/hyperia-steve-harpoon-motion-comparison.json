@@ -1,0 +1,78 @@
+{
+  "schemaVersion": 1,
+  "framing": "avatar-and-equipment",
+  "motions": [
+    {
+      "id": "steve-water-dig-windup",
+      "name": "Full dig · windup",
+      "asset": "artifacts/duel-launch-avatar-bakeoff/motions/harpoon-water-strike-candidates/kaykit-harpoon-water-dig.glb",
+      "sampleRatio": 0.1
+    },
+    {
+      "id": "steve-water-dig-drive",
+      "name": "Full dig · drive",
+      "asset": "artifacts/duel-launch-avatar-bakeoff/motions/harpoon-water-strike-candidates/kaykit-harpoon-water-dig.glb",
+      "sampleRatio": 0.35
+    },
+    {
+      "id": "steve-water-dig-extension",
+      "name": "Full dig · extension",
+      "asset": "artifacts/duel-launch-avatar-bakeoff/motions/harpoon-water-strike-candidates/kaykit-harpoon-water-dig.glb",
+      "sampleRatio": 0.65
+    },
+    {
+      "id": "steve-water-dig-recovery",
+      "name": "Full dig · recovery",
+      "asset": "artifacts/duel-launch-avatar-bakeoff/motions/harpoon-water-strike-candidates/kaykit-harpoon-water-dig.glb",
+      "sampleRatio": 0.9
+    },
+    {
+      "id": "steve-water-digging-windup",
+      "name": "Digging loop · windup",
+      "asset": "artifacts/duel-launch-avatar-bakeoff/motions/harpoon-water-strike-candidates/kaykit-harpoon-water-digging.glb",
+      "sampleRatio": 0.1
+    },
+    {
+      "id": "steve-water-digging-drive",
+      "name": "Digging loop · drive",
+      "asset": "artifacts/duel-launch-avatar-bakeoff/motions/harpoon-water-strike-candidates/kaykit-harpoon-water-digging.glb",
+      "sampleRatio": 0.35
+    },
+    {
+      "id": "steve-water-digging-extension",
+      "name": "Digging loop · extension",
+      "asset": "artifacts/duel-launch-avatar-bakeoff/motions/harpoon-water-strike-candidates/kaykit-harpoon-water-digging.glb",
+      "sampleRatio": 0.65
+    },
+    {
+      "id": "steve-water-digging-recovery",
+      "name": "Digging loop · recovery",
+      "asset": "artifacts/duel-launch-avatar-bakeoff/motions/harpoon-water-strike-candidates/kaykit-harpoon-water-digging.glb",
+      "sampleRatio": 0.9
+    },
+    {
+      "id": "steve-water-pickaxe-windup",
+      "name": "Full pickaxe · windup",
+      "asset": "artifacts/duel-launch-avatar-bakeoff/motions/harpoon-water-strike-candidates/kaykit-harpoon-water-pickaxe.glb",
+      "sampleRatio": 0.1
+    },
+    {
+      "id": "steve-water-pickaxe-drive",
+      "name": "Full pickaxe · drive",
+      "asset": "artifacts/duel-launch-avatar-bakeoff/motions/harpoon-water-strike-candidates/kaykit-harpoon-water-pickaxe.glb",
+      "sampleRatio": 0.35
+    },
+    {
+      "id": "steve-water-pickaxe-extension",
+      "name": "Full pickaxe · extension",
+      "asset": "artifacts/duel-launch-avatar-bakeoff/motions/harpoon-water-strike-candidates/kaykit-harpoon-water-pickaxe.glb",
+      "sampleRatio": 0.65
+    },
+    {
+      "id": "steve-water-pickaxe-recovery",
+      "name": "Full pickaxe · recovery",
+      "asset": "artifacts/duel-launch-avatar-bakeoff/motions/harpoon-water-strike-candidates/kaykit-harpoon-water-pickaxe.glb",
+      "sampleRatio": 0.9
+    }
+  ]
+}

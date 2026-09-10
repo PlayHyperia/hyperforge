@@ -5,6 +5,7 @@ import dts from "vite-plugin-dts";
 export default defineConfig({
   plugins: [
     dts({
+      tsconfigPath: resolve(import.meta.dirname, "tsconfig.build.json"),
       include: ["src/lib/**/*.ts", "src/index.ts"],
       outDir: "dist",
     }),
@@ -12,7 +13,7 @@ export default defineConfig({
   build: {
     lib: {
       entry: {
-        index: resolve(__dirname, "src/index.ts"),
+        index: resolve(import.meta.dirname, "src/index.ts"),
         // Viewer excluded from lib build due to WIP WebGPU support
         // 'viewer/index': resolve(__dirname, 'src/viewer/index.ts'),
       },

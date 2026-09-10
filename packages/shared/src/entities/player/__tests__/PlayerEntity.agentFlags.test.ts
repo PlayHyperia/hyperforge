@@ -80,6 +80,48 @@ describe("PlayerEntity agent identity", () => {
     expect(player.serialize()).not.toHaveProperty("isEmbeddedAgent");
   });
 
+  it("serializes versioned gathering-tool presentation for late viewers", () => {
+    const player = new PlayerEntity(
+      createWorld() as never,
+      createPlayerData({ isAgent: true }) as never,
+    );
+    player.data.gatheringToolPresentation = {
+      revision: 9,
+      itemId: "small_fishing_net",
+    };
+
+    expect(player.serialize()).toMatchObject({
+      gatheringToolPresentation: {
+        revision: 9,
+        itemId: "small_fishing_net",
+      },
+    });
+  });
+
+  it("serializes privacy-safe processing presentation for late viewers", () => {
+    const player = new PlayerEntity(
+      createWorld() as never,
+      createPlayerData({ isAgent: true }) as never,
+    );
+    player.data.processingInteractionPresentation = {
+      revision: 4,
+      skill: "smelting",
+      phase: "working",
+      phaseStartedAtServerTimeMs: 5000,
+      targetPosition: { x: 2, y: 0, z: -3 },
+    };
+
+    expect(player.serialize()).toMatchObject({
+      processingInteractionPresentation: {
+        revision: 4,
+        skill: "smelting",
+        phase: "working",
+        phaseStartedAtServerTimeMs: 5000,
+        targetPosition: { x: 2, y: 0, z: -3 },
+      },
+    });
+  });
+
   it("updates current and maximum health atomically", () => {
     const player = new PlayerEntity(
       createWorld() as never,

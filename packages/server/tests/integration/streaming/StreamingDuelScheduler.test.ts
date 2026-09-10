@@ -120,11 +120,23 @@ function createMockWorld(): MockWorld {
       if (name === "database") {
         return {
           getDb: vi.fn().mockReturnValue({
-            select: vi.fn().mockReturnValue({
-              from: vi.fn().mockReturnValue({
-                where: vi.fn().mockReturnValue([]),
-              }),
-            }),
+            select: vi
+              .fn()
+              .mockImplementation((selection?: Record<string, unknown>) => ({
+                from: vi.fn().mockReturnValue({
+                  where: vi.fn().mockReturnValue(
+                    selection && "streamingDuelEnabled" in selection
+                      ? {
+                          limit: vi.fn().mockResolvedValue([
+                            {
+                              streamingDuelEnabled: true,
+                            },
+                          ]),
+                        }
+                      : [],
+                  ),
+                }),
+              })),
             insert: vi.fn().mockReturnValue({
               values: vi.fn().mockResolvedValue(undefined),
               onConflictDoUpdate: vi.fn().mockReturnValue({

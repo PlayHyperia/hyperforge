@@ -126,6 +126,7 @@ describe("SmithingSystem durable reward custody", () => {
     };
     world.entities.set("launch_anvil", {
       entityType: "anvil",
+      position: { x: 2, y: 0, z: 1 },
       canInteract: vi.fn(() => true),
     });
     system = new SmithingSystem(world as unknown as World);
@@ -198,6 +199,15 @@ describe("SmithingSystem durable reward custody", () => {
       }),
     );
     startAndReachCompletionTick(requestId);
+
+    expect(
+      events(EventType.PROCESSING_INTERACTION_PRESENTATION).at(-1)?.data,
+    ).toMatchObject({
+      playerId: PLAYER_ID,
+      skill: "smithing",
+      phase: "working",
+      targetPosition: { x: 2, y: 0, z: 1 },
+    });
     expect(events(EventType.PROCESSING_REQUEST_PROGRESS)).toContainEqual(
       expect.objectContaining({
         data: {
@@ -241,7 +251,7 @@ describe("SmithingSystem durable reward custody", () => {
     );
     expect(events(EventType.INVENTORY_ITEM_REMOVED)).toHaveLength(0);
     expect(events(EventType.INVENTORY_ITEM_ADDED)).toHaveLength(0);
-    expect(events(EventType.SKILLS_XP_GAINED)).toHaveLength(0);
+    expect(events(EventType.SKILLS_PROGRESS_COMMITTED)).toHaveLength(0);
     expect(
       events(EventType.UI_MESSAGE).some(
         (event) => (event.data as { type?: string }).type === "success",
@@ -256,14 +266,27 @@ describe("SmithingSystem durable reward custody", () => {
 
     expect(events(EventType.INVENTORY_ITEM_REMOVED)).toHaveLength(0);
     expect(events(EventType.INVENTORY_ITEM_ADDED)).toHaveLength(0);
-    expect(events(EventType.SKILLS_XP_GAINED)).toEqual([
+    expect(events(EventType.SKILLS_PROGRESS_COMMITTED)).toEqual([
       expect.objectContaining({
-        data: { playerId: PLAYER_ID, skill: "smithing", amount: 12.5 },
+        data: {
+          playerId: PLAYER_ID,
+          operationId,
+          replayed: false,
+          skill: "smithing",
+          xpAmount: 12.5,
+          awardedXp: 12.5,
+          operationCommittedXp: 12.5,
+          currentXp: 12.5,
+          currentLevel: 1,
+        },
       }),
     ]);
     expect(events(EventType.SMITHING_COMPLETE)).toEqual([
       expect.objectContaining({ data: expect.objectContaining({ requestId }) }),
     ]);
+    expect(
+      events(EventType.PROCESSING_INTERACTION_PRESENTATION).at(-1)?.data,
+    ).toMatchObject({ playerId: PLAYER_ID, skill: null, phase: "idle" });
     expect(system.getSmithingCustodyStats()).toEqual({
       activeSessions: 0,
       pendingActions: 0,
@@ -284,7 +307,7 @@ describe("SmithingSystem durable reward custody", () => {
     await flushPromises();
     world.currentTick = 105;
     system.update(0.6);
-    expect(events(EventType.SKILLS_XP_GAINED)).toHaveLength(0);
+    expect(events(EventType.SKILLS_PROGRESS_COMMITTED)).toHaveLength(0);
 
     world.currentTick = 107;
     system.update(0.6);
@@ -296,7 +319,7 @@ describe("SmithingSystem durable reward custody", () => {
     expect(commitProcessingActionAtomic.mock.calls[0][1]).toBe(
       commitProcessingActionAtomic.mock.calls[1][1],
     );
-    expect(events(EventType.SKILLS_XP_GAINED)).toHaveLength(1);
+    expect(events(EventType.SKILLS_PROGRESS_COMMITTED)).toHaveLength(1);
   });
 
   it("reconciles a committed item once after disconnect cancels future work", async () => {
@@ -315,11 +338,84 @@ describe("SmithingSystem durable reward custody", () => {
     world.currentTick = 105;
     system.update(0.6);
 
-    expect(events(EventType.SKILLS_XP_GAINED)).toHaveLength(1);
+    expect(events(EventType.SKILLS_PROGRESS_COMMITTED)).toHaveLength(1);
     expect(events(EventType.SMITHING_COMPLETE)).toHaveLength(1);
     world.currentTick = 200;
     system.update(0.6);
     expect(commitProcessingActionAtomic).toHaveBeenCalledOnce();
-    expect(events(EventType.SKILLS_XP_GAINED)).toHaveLength(1);
+    expect(events(EventType.SKILLS_PROGRESS_COMMITTED)).toHaveLength(1);
+  });
+
+  it("keeps a late committed item but does not resurrect anvil presentation after movement", async () => {
+    let release: ((receipt: AtomicProcessingActionReceipt) => void) | undefined;
+    commitProcessingActionAtomic.mockImplementation(
+      (_playerId: string, operationId: string) =>
+        new Promise<AtomicProcessingActionReceipt>((resolve) => {
+          release = (receipt) => resolve({ ...receipt, operationId });
+        }),
+    );
+    startAndReachCompletionTick();
+    const operationId = commitProcessingActionAtomic.mock.calls[0][1];
+
+    emit(EventType.MOVEMENT_CLICK_TO_MOVE, {
+      playerId: PLAYER_ID,
+      targetPosition: { x: 10, y: 0, z: 10 },
+    });
+    expect(
+      events(EventType.PROCESSING_INTERACTION_PRESENTATION).at(-1)?.data,
+    ).toMatchObject({ skill: null, phase: "idle" });
+    release?.(successReceipt(operationId));
+    await flushPromises();
+    world.currentTick = 105;
+    system.update(0.6);
+
+    expect(events(EventType.SKILLS_PROGRESS_COMMITTED)).toHaveLength(1);
+    expect(events(EventType.SMITHING_COMPLETE)).toHaveLength(1);
+    expect(events(EventType.ANIMATION_PLAY)).toHaveLength(0);
+    expect(
+      events(EventType.UI_MESSAGE).some(
+        (event) => (event.data as { type?: string }).type === "success",
+      ),
+    ).toBe(false);
+  });
+
+  it("drains exactly one in-flight smith after quiescence with no later batch or presentation", async () => {
+    let release: ((receipt: AtomicProcessingActionReceipt) => void) | undefined;
+    commitProcessingActionAtomic.mockImplementation(
+      (_playerId: string, operationId: string) =>
+        new Promise<AtomicProcessingActionReceipt>((resolve) => {
+          release = (receipt) => resolve({ ...receipt, operationId });
+        }),
+    );
+    startAndReachCompletionTick();
+    const operationId = commitProcessingActionAtomic.mock.calls[0][1];
+    expect(system.isPlayerProcessingQuiescent(PLAYER_ID)).toBe(false);
+
+    const presentationBoundary = events(
+      EventType.PROCESSING_INTERACTION_PRESENTATION,
+    ).length;
+    system.requestPlayerProcessingQuiescence(PLAYER_ID);
+    expect(system.isPlayerProcessingQuiescent(PLAYER_ID)).toBe(false);
+    expect(
+      events(EventType.PROCESSING_INTERACTION_PRESENTATION).at(-1)?.data,
+    ).toMatchObject({ playerId: PLAYER_ID, skill: null, phase: "idle" });
+
+    release?.(successReceipt(operationId));
+    await flushPromises();
+    world.currentTick = 105;
+    system.update(0.6);
+    world.currentTick = 200;
+    system.update(0.6);
+
+    expect(system.isPlayerProcessingQuiescent(PLAYER_ID)).toBe(true);
+    expect(commitProcessingActionAtomic).toHaveBeenCalledOnce();
+    expect(events(EventType.SMITHING_COMPLETE)).toHaveLength(1);
+    expect(
+      events(EventType.PROCESSING_INTERACTION_PRESENTATION)
+        .slice(presentationBoundary)
+        .some(
+          (event) => (event.data as { phase?: string }).phase === "working",
+        ),
+    ).toBe(false);
   });
 });
