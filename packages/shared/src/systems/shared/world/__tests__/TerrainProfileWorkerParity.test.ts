@@ -315,7 +315,13 @@ describe("actual compact terrain height pipeline", () => {
       roadSegments: [],
       roadBlendWidth: 0,
       tileSize: 100,
-      flatZones: [],
+      terrainSurface: {
+        schemaVersion: 1,
+        zones: [],
+        arenaFloorIds: [],
+        arenaGradeHeight: null,
+        waterBodies: [],
+      },
     };
     try {
       const result = await worker.execute<GrassWorkerOutput>(input);
@@ -335,15 +341,20 @@ describe("actual compact terrain height pipeline", () => {
         );
       const empty = await worker.execute<GrassWorkerOutput>({
         ...input,
-        flatZones: [
-          {
-            centerX: 350,
-            centerZ: 400,
-            halfWidth: 50,
-            halfDepth: 50,
-            blendRadius: 0,
-          },
-        ],
+        terrainSurface: {
+          ...input.terrainSurface,
+          zones: [
+            {
+              id: "excluded-test-pad",
+              centerX: 350,
+              centerZ: 400,
+              width: 100,
+              depth: 100,
+              height: 30,
+              blendRadius: 0,
+            },
+          ],
+        },
       });
       expect(empty.count).toBe(0);
       expect(empty.terrainProfileIdentity).toBe(result.terrainProfileIdentity);

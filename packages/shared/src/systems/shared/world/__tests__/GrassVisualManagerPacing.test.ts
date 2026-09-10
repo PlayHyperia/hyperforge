@@ -16,6 +16,13 @@ const terrainProfileIdentity = worldTerrainProfileIdentity(
   COMPACT_WORLD_TERRAIN_PROFILE,
 );
 
+type WorkerTicket = {
+  node: TerrainQuadNode;
+  key: string;
+  lodLevel: number;
+  isLodSwap: boolean;
+};
+
 function workerOutput(key: string, count = 1): GrassWorkerOutput {
   return {
     terrainProfileIdentity,
@@ -43,20 +50,35 @@ describe("GrassVisualManager streaming pacing", () => {
   it("uploads only the configured number of settled worker chunks per frame", () => {
     const createChunkMeshFromWorkerData = vi.fn();
     const nodes = [1, 2, 3].map(
-      (id) => ({ id, isFinal: true }) as TerrainQuadNode,
+      (id) =>
+        ({
+          id,
+          depth: 0,
+          centerX: 0,
+          centerZ: 0,
+          isFinal: true,
+          isMaxDepth: true,
+        }) as TerrainQuadNode,
     );
+    const tickets = nodes.map((node, index) => ({
+      node,
+      key: `gq_${index}`,
+      lodLevel: 1,
+      isLodSwap: false,
+    }));
     const manager = Object.create(
       GrassVisualManager.prototype,
     ) as GrassVisualManager & {
       maxChunksPerFrame: number;
       settledWorkerResults: Array<{
-        node: TerrainQuadNode;
-        key: string;
+        ticket: WorkerTicket;
         data: GrassWorkerOutput;
-        lodLevel: number;
-        isLodSwap: boolean;
       }>;
-      workerInflight: Set<string>;
+      workerInflight: Map<string, WorkerTicket>;
+      pendingLodSwap: Map<
+        string,
+        { node: TerrainQuadNode; desiredLod: number }
+      >;
       chunks: Map<string, unknown>;
       completedNodes: Map<string, TerrainQuadNode>;
       destroyed: boolean;
@@ -66,14 +88,16 @@ describe("GrassVisualManager streaming pacing", () => {
     Object.assign(manager, {
       maxChunksPerFrame: 1,
       terrainProfileIdentity,
-      settledWorkerResults: nodes.map((node, index) => ({
-        node,
-        key: `gq_${index}`,
+      playerX: 0,
+      playerZ: 0,
+      maxRenderDistance: 500,
+      liveNodes: new Map(nodes.map((node) => [`gq_${node.id}_d0_0_0`, node])),
+      settledWorkerResults: tickets.map((ticket, index) => ({
+        ticket,
         data: workerOutput(`gq_${index}`),
-        lodLevel: 1,
-        isLodSwap: false,
       })),
-      workerInflight: new Set(["gq_0", "gq_1", "gq_2"]),
+      workerInflight: new Map(tickets.map((ticket) => [ticket.key, ticket])),
+      pendingLodSwap: new Map(),
       chunks: new Map(),
       completedNodes: new Map(),
       destroyed: false,
@@ -90,18 +114,40 @@ describe("GrassVisualManager streaming pacing", () => {
 
   it("discards cancelled settled results without spending the upload budget", () => {
     const createChunkMeshFromWorkerData = vi.fn();
+    const tickets = [
+      {
+        node: { isFinal: false } as TerrainQuadNode,
+        key: "cancelled",
+        lodLevel: 1,
+        isLodSwap: false,
+      },
+      {
+        node: {
+          id: 2,
+          depth: 0,
+          centerX: 0,
+          centerZ: 0,
+          isFinal: true,
+          isMaxDepth: true,
+        } as TerrainQuadNode,
+        key: "active",
+        lodLevel: 1,
+        isLodSwap: false,
+      },
+    ];
     const manager = Object.create(
       GrassVisualManager.prototype,
     ) as GrassVisualManager & {
       maxChunksPerFrame: number;
       settledWorkerResults: Array<{
-        node: TerrainQuadNode;
-        key: string;
+        ticket: WorkerTicket;
         data: GrassWorkerOutput;
-        lodLevel: number;
-        isLodSwap: boolean;
       }>;
-      workerInflight: Set<string>;
+      workerInflight: Map<string, WorkerTicket>;
+      pendingLodSwap: Map<
+        string,
+        { node: TerrainQuadNode; desiredLod: number }
+      >;
       chunks: Map<string, unknown>;
       completedNodes: Map<string, TerrainQuadNode>;
       destroyed: boolean;
@@ -111,23 +157,16 @@ describe("GrassVisualManager streaming pacing", () => {
     Object.assign(manager, {
       maxChunksPerFrame: 1,
       terrainProfileIdentity,
-      settledWorkerResults: [
-        {
-          node: { isFinal: false } as TerrainQuadNode,
-          key: "cancelled",
-          data: workerOutput("cancelled"),
-          lodLevel: 1,
-          isLodSwap: false,
-        },
-        {
-          node: { isFinal: true } as TerrainQuadNode,
-          key: "active",
-          data: workerOutput("active"),
-          lodLevel: 1,
-          isLodSwap: false,
-        },
-      ],
-      workerInflight: new Set(["cancelled", "active"]),
+      playerX: 0,
+      playerZ: 0,
+      maxRenderDistance: 500,
+      liveNodes: new Map([["gq_2_d0_0_0", tickets[1].node]]),
+      settledWorkerResults: tickets.map((ticket) => ({
+        ticket,
+        data: workerOutput(ticket.key),
+      })),
+      workerInflight: new Map(tickets.map((ticket) => [ticket.key, ticket])),
+      pendingLodSwap: new Map(),
       chunks: new Map(),
       completedNodes: new Map(),
       destroyed: false,

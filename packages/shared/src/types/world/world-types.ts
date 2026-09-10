@@ -535,6 +535,8 @@ export interface WorldArea {
     height?: number;
     heightOffset?: number;
     blendRadius: number;
+    /** Defaults to true; terrain shaping and grass exclusion are independent. */
+    excludeGrass?: boolean;
     radialPond?: {
       bedRadius: number;
       bankInnerRadius: number;

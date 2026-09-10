@@ -30,6 +30,12 @@ import {
   assertTerrainWorkerResult,
 } from "./TerrainWorkerShared";
 import type { TerrainWorkerConfig } from "./TerrainWorker";
+import { createAuthoredTerrainSurfaceOperations } from "../../systems/shared/world/AuthoredTerrainSurface";
+import {
+  createGrassTerrainSurfaceOperations,
+  GRASS_SURFACE_NORMAL_SAMPLE_DISTANCE,
+  type GrassTerrainSurfaceSnapshot,
+} from "./GrassTerrainSurfaceSnapshot";
 
 // ============================================================================
 // TYPES
@@ -101,13 +107,7 @@ export interface GrassWorkerInput {
   }>;
   roadBlendWidth: number;
   tileSize: number;
-  flatZones: Array<{
-    centerX: number;
-    centerZ: number;
-    halfWidth: number;
-    halfDepth: number;
-    blendRadius: number;
-  }>;
+  terrainSurface: GrassTerrainSurfaceSnapshot;
 }
 
 export interface GrassWorkerOutput {
@@ -360,6 +360,8 @@ function buildComputeTerrainColorJS(): string {
  */
 export const GRASS_WORKER_CODE = `
 ${buildTerrainWorkerProfileGuardJS()}
+var authoredSurface = (${createAuthoredTerrainSurfaceOperations.toString()})();
+var terrainSurfaceOperations = (${createGrassTerrainSurfaceOperations.toString()})();
 ${buildNoiseGeneratorJS()}
 ${buildBiomeConstantsJS()}
 
@@ -408,20 +410,11 @@ function calculateRoadInfluence(wx, wz, roadSegments, roadBlendWidth) {
   return t * t * (3 - 2 * t);
 }
 
-function isInFlatZone(wx, wz, flatZones) {
-  for (var i = 0; i < flatZones.length; i++) {
-    var fz = flatZones[i];
-    var dx = Math.abs(wx - fz.centerX);
-    var dz = Math.abs(wz - fz.centerZ);
-    if (dx <= fz.halfWidth + fz.blendRadius && dz <= fz.halfDepth + fz.blendRadius) {
-      return true;
-    }
-  }
-  return false;
-}
-
 function generateGrassInstances(input) {
   assertTerrainWorkerInput(input);
+  var surface = terrainSurfaceOperations.validateSnapshot(input.terrainSurface);
+  var zoneIndex = terrainSurfaceOperations.createZoneIndex(surface, input.tileSize);
+  var arenaFloorIds = new Set(surface.arenaFloorIds);
   var startTime = performance.now();
   var centerX = input.centerX, centerZ = input.centerZ, size = input.size;
   var spacingMul = input.spacingMul;
@@ -454,6 +447,15 @@ function generateGrassInstances(input) {
   ${buildHeightHelpersJS()}
   ${buildBiomeInfluencesJS()}
 
+  function getAuthoredHeight(wx, wz) {
+    var height = authoredSurface.resolveHeight(
+      zoneIndex.getZonesAt(wx, wz), wx, wz,
+      function() { return getHeightAtWithoutShore(wx, wz); },
+      arenaFloorIds, surface.arenaGradeHeight
+    );
+    return height === null ? getHeightComputed(wx, wz) : height;
+  }
+
   var spacing = input.clumpSpacing * spacingMul;
   var maxCount = Math.ceil((size * size) / (spacing * spacing));
   var rng = mulberry32(input.grassSeed ^ ((centerX * 374761393 + centerZ * 668265263) | 0));
@@ -476,21 +478,22 @@ function generateGrassInstances(input) {
 
     var wx = centerX + lx;
     var wz = centerZ + lz;
-    var ty = getHeightComputed(wx, wz);
+    var ty = getAuthoredHeight(wx, wz);
 
-    if (ty < WATER_THRESHOLD + 0.1) continue;
+    var waterSurface = terrainSurfaceOperations.getWaterSurfaceAt(surface, WATER_THRESHOLD, wx, wz);
+    if (ty < waterSurface + 0.1) continue;
 
-    if (input.flatZones.length > 0 && isInFlatZone(wx, wz, input.flatZones)) continue;
+    if (authoredSurface.isGrassExcluded(zoneIndex.getZonesAt(wx, wz), wx, wz)) continue;
 
     var roadInf = calculateRoadInfluence(wx, wz, input.roadSegments, input.roadBlendWidth);
     if (roadInf > 0.8) continue;
 
     // Normal via finite differences (matches TerrainSystem.getTerrainColorAt)
-    var sd = 0.5;
-    var hL = getHeightComputed(wx - sd, wz);
-    var hR = getHeightComputed(wx + sd, wz);
-    var hD = getHeightComputed(wx, wz - sd);
-    var hU = getHeightComputed(wx, wz + sd);
+    var sd = ${GRASS_SURFACE_NORMAL_SAMPLE_DISTANCE};
+    var hL = getAuthoredHeight(wx - sd, wz);
+    var hR = getAuthoredHeight(wx + sd, wz);
+    var hD = getAuthoredHeight(wx, wz - sd);
+    var hU = getAuthoredHeight(wx, wz + sd);
     var dhdx = (hR - hL) / (2 * sd);
     var dhdz = (hU - hD) / (2 * sd);
     var gradMag = Math.sqrt(dhdx * dhdx + dhdz * dhdz);
@@ -621,6 +624,7 @@ let grassWorkerPool: WorkerPool<GrassWorkerInput, GrassWorkerOutput> | null =
 
 let workersChecked = false;
 let workersAvailable = false;
+const surfaceOperations = createGrassTerrainSurfaceOperations();
 
 export function isGrassWorkerAvailable(): boolean {
   if (!workersChecked) {
@@ -666,11 +670,15 @@ export async function generateGrassPlacementsAsync(
   input: GrassWorkerInput,
 ): Promise<GrassWorkerOutput | null> {
   assertTerrainWorkerRequest(input.config, input.seed);
+  const request = {
+    ...input,
+    terrainSurface: surfaceOperations.cloneSnapshot(input.terrainSurface),
+  };
   const pool = getGrassWorkerPool();
   if (!pool) {
     return null;
   }
-  const result = await pool.execute(input);
+  const result = await pool.execute(request);
   assertTerrainWorkerResult(result, input.config);
   return result;
 }
@@ -678,8 +686,15 @@ export async function generateGrassPlacementsAsync(
 export async function generateGrassChunksBatch(
   inputs: GrassWorkerInput[],
 ): Promise<GrassBatchResult> {
-  for (const input of inputs)
+  // Validate and detach the entire batch before dispatch: a malformed later
+  // snapshot must not leave an earlier subset running after this call rejects.
+  const requests = inputs.map((input) => {
     assertTerrainWorkerRequest(input.config, input.seed);
+    return {
+      ...input,
+      terrainSurface: surfaceOperations.cloneSnapshot(input.terrainSurface),
+    };
+  });
   const pool = getGrassWorkerPool();
   if (!pool) {
     return { results: [], workersAvailable: false, failedCount: inputs.length };
@@ -688,7 +703,7 @@ export async function generateGrassChunksBatch(
   const results: GrassWorkerOutput[] = [];
   let failedCount = 0;
 
-  const promises = inputs.map((input) =>
+  const promises = requests.map((input) =>
     pool
       .execute(input)
       .then((result) => {

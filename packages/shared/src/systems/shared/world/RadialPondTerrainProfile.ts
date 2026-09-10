@@ -1,6 +1,7 @@
 import type { FlatZone } from "../../../types/world/terrain";
+import { createAuthoredTerrainSurfaceOperations } from "./AuthoredTerrainSurface";
 
-const smoothstep = (value: number): number => value * value * (3 - 2 * value);
+const surface = createAuthoredTerrainSurfaceOperations();
 
 export function validateRadialPondTerrainProfile(
   zone: FlatZone,
@@ -42,23 +43,10 @@ export function resolveRadialPondTerrainHeight(
   worldZ: number,
   getProceduralHeight: () => number,
 ): number | null {
-  const profile = zone.radialPond;
-  if (!profile) return null;
-  const radius = Math.hypot(worldX - zone.centerX, worldZ - zone.centerZ);
-  if (radius <= profile.bedRadius) return zone.height;
-  if (radius < profile.bankInnerRadius) {
-    const progress =
-      (radius - profile.bedRadius) /
-      (profile.bankInnerRadius - profile.bedRadius);
-    const weight = smoothstep(progress);
-    return zone.height + (profile.bankHeight - zone.height) * weight;
-  }
-  if (radius <= profile.bankOuterRadius) return profile.bankHeight;
-  const effectRadius = profile.bankOuterRadius + zone.blendRadius;
-  if (radius >= effectRadius) return null;
-  const progress = (radius - profile.bankOuterRadius) / zone.blendRadius;
-  const weight = smoothstep(progress);
-  return (
-    profile.bankHeight + (getProceduralHeight() - profile.bankHeight) * weight
+  return surface.resolveRadialPondTerrainHeight(
+    zone,
+    worldX,
+    worldZ,
+    getProceduralHeight,
   );
 }

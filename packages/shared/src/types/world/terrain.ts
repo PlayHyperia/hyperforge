@@ -185,6 +185,8 @@ export interface FlatZone {
   height: number;
   /** Blend radius for smooth transition to procedural terrain (meters) */
   blendRadius: number;
+  /** Defaults to true. Explicit false allows grass on a broad authored grade. */
+  excludeGrass?: boolean;
   /** Optional smooth radial pond basin instead of a rectangular flat zone. */
   radialPond?: RadialPondTerrainProfile;
   /**

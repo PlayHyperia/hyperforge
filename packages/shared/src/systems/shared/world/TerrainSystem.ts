@@ -33,10 +33,13 @@ import { createTerrainWorkerConfig } from "../../../utils/workers/TerrainWorkerS
 import type { ShorelineConfig, BiomeNoiseSet } from "./TerrainHeightParams";
 import { BiomeType, DEFAULT_BIOME, BIOME_LIST } from "./TerrainBiomeTypes";
 import { WaterBodyRegistry } from "./WaterBodyRegistry";
+import { validateRadialPondTerrainProfile } from "./RadialPondTerrainProfile";
+import { createAuthoredTerrainSurfaceOperations } from "./AuthoredTerrainSurface";
 import {
-  resolveRadialPondTerrainHeight,
-  validateRadialPondTerrainProfile,
-} from "./RadialPondTerrainProfile";
+  createGrassTerrainSurfaceSnapshot,
+  GRASS_SURFACE_NORMAL_SAMPLE_DISTANCE,
+  type GrassTerrainSurfaceSnapshot,
+} from "../../../utils/workers/GrassTerrainSurfaceSnapshot";
 import type { BridgeSystem } from "./BridgeSystem";
 // Import terrain generator from procgen package
 import { BiomeSystem, type BiomeDefinition } from "@hyperforge/procgen/terrain";
@@ -70,7 +73,6 @@ import { getDuelArenaConfig } from "../../../data/duel-manifest";
 import {
   createDuelArenaFloorZones,
   getDuelArenaGradeHeight,
-  resolveDuelArenaFloorHeight,
 } from "../../../data/arena-grading";
 import { DataManager } from "../../../data/DataManager";
 // NOTE: Import directly to avoid circular dependency through barrel file
@@ -212,6 +214,8 @@ export class TerrainSystem extends System {
   private flatZones = new Map<string, FlatZone>();
   private flatZonesByTile = new Map<string, FlatZone[]>(); // Spatial index by terrain tile
   private _flatZoneChecked = new Set<string>(); // PERF: reusable dedup set for flat zone queries
+  private readonly authoredSurface = createAuthoredTerrainSurfaceOperations();
+  private readonly authoredSurfaceCandidates: FlatZone[] = [];
   private _pendingTileRegeneration = new Set<string>(); // Tracks tiles being regenerated to avoid duplicates
   private _queuedTileRegenerations = new Map<
     string,
@@ -2105,15 +2109,17 @@ export class TerrainSystem extends System {
       this.grassVisualManager = new GrassVisualManager(
         worldTerrainProfileIdentity(this.getWorldTerrainProfile()),
         grassContainer,
-        (x: number, z: number) => this.getHeightAt(x, z),
+        (x: number, z: number) => this.getHeightAtComputed(x, z),
         this.CONFIG.WATER_THRESHOLD,
         (wx: number, wz: number) =>
           this.calculateRoadInfluenceAtVertex(wx, wz, 0, 0),
-        (wx: number, wz: number) => this.isInFlatZone(wx, wz),
-        (wx: number, wz: number) => this.getTerrainColorAt(wx, wz),
+        (wx: number, wz: number) => this.isGrassExcludedAt(wx, wz),
+        (wx: number, wz: number) => this.getTerrainColorAt(wx, wz, true),
         grassWorkerSetup,
         isStreamingViewport ? STREAMING_GRASS_VISUAL_PROFILE : undefined,
         terrainShade,
+        (wx: number, wz: number) =>
+          this.waterBodyRegistry.getWaterSurfaceAt(wx, wz),
       );
 
       // Wire terrain, water, grass managers to the same quad-tree via composite
@@ -2208,12 +2214,12 @@ export class TerrainSystem extends System {
         maxX: number,
         maxZ: number,
       ) => this.getWorldSpaceRoadSegmentsForRegion(minX, minZ, maxX, maxZ),
-      getFlatZonesForRegion: (
+      getTerrainSurfaceForRegion: (
         minX: number,
         minZ: number,
         maxX: number,
         maxZ: number,
-      ) => this.getFlatZonesForRegion(minX, minZ, maxX, maxZ),
+      ) => this.getTerrainSurfaceForRegion(minX, minZ, maxX, maxZ),
     };
   }
 
@@ -2272,58 +2278,68 @@ export class TerrainSystem extends System {
   }
 
   /**
-   * Collect flat zones overlapping a world-space AABB, returned as simplified
-   * rectangles for the grass worker to exclude grass from buildings/arenas.
+   * Capture the full authored surface, not just exclusion rectangles. The caller
+   * includes the normal stencil halo. Preserve registration order so the worker
+   * can reconstruct the same ordered 3x3 spatial lookup as the main thread.
    */
-  private getFlatZonesForRegion(
+  private getTerrainSurfaceForRegion(
     minX: number,
     minZ: number,
     maxX: number,
     maxZ: number,
-  ): Array<{
-    centerX: number;
-    centerZ: number;
-    halfWidth: number;
-    halfDepth: number;
-    blendRadius: number;
-  }> {
-    if (this.flatZones.size === 0) return [];
-
+  ): GrassTerrainSurfaceSnapshot {
+    if (
+      ![minX, minZ, maxX, maxZ].every(Number.isFinite) ||
+      minX > maxX ||
+      minZ > maxZ
+    ) {
+      throw new Error("Invalid grass surface query bounds");
+    }
     const tileSize = this.CONFIG.TILE_SIZE;
     const halfTile = tileSize / 2;
-    const minTX = Math.floor((minX + halfTile) / tileSize);
-    const minTZ = Math.floor((minZ + halfTile) / tileSize);
-    const maxTX = Math.floor((maxX + halfTile) / tileSize);
-    const maxTZ = Math.floor((maxZ + halfTile) / tileSize);
-
-    const seen = new Set<string>();
-    const result: Array<{
-      centerX: number;
-      centerZ: number;
-      halfWidth: number;
-      halfDepth: number;
-      blendRadius: number;
-    }> = [];
-
-    for (let tx = minTX; tx <= maxTX; tx++) {
-      for (let tz = minTZ; tz <= maxTZ; tz++) {
-        const zones = this.flatZonesByTile.get(`${tx}_${tz}`);
-        if (!zones) continue;
-        for (const zone of zones) {
-          if (seen.has(zone.id)) continue;
-          seen.add(zone.id);
-          result.push({
-            centerX: zone.centerX,
-            centerZ: zone.centerZ,
-            halfWidth: zone.width / 2,
-            halfDepth: zone.depth / 2,
-            blendRadius: zone.blendRadius,
-          });
-        }
-      }
+    const minTX = Math.floor((minX + halfTile) / tileSize) - 1;
+    const minTZ = Math.floor((minZ + halfTile) / tileSize) - 1;
+    const maxTX = Math.floor((maxX + halfTile) / tileSize) + 1;
+    const maxTZ = Math.floor((maxZ + halfTile) / tileSize) + 1;
+    if (![minTX, minTZ, maxTX, maxTZ].every(Number.isSafeInteger)) {
+      throw new Error("Grass surface query exceeds safe spatial index bounds");
     }
-
-    return result;
+    // Bound work by registered zones, never by an arbitrarily large query AABB.
+    // Match registerFlatZone's conservative square indexing, including neighbors
+    // that may change first-candidate tie ordering at a tile boundary.
+    const zones = [...this.flatZones.values()].filter((zone) => {
+      const radius = Math.max(zone.width, zone.depth) / 2 + zone.blendRadius;
+      const zoneMinTX = Math.floor(
+        (zone.centerX - radius + halfTile) / tileSize,
+      );
+      const zoneMaxTX = Math.floor(
+        (zone.centerX + radius + halfTile) / tileSize,
+      );
+      const zoneMinTZ = Math.floor(
+        (zone.centerZ - radius + halfTile) / tileSize,
+      );
+      const zoneMaxTZ = Math.floor(
+        (zone.centerZ + radius + halfTile) / tileSize,
+      );
+      return (
+        zoneMinTX <= maxTX &&
+        zoneMaxTX >= minTX &&
+        zoneMinTZ <= maxTZ &&
+        zoneMaxTZ >= minTZ
+      );
+    });
+    const seen = new Set(zones.map((zone) => zone.id));
+    const waterBodies = this.waterBodyRegistry.getAllBodies().filter((body) => {
+      const dx = body.centerX - Math.max(minX, Math.min(maxX, body.centerX));
+      const dz = body.centerZ - Math.max(minZ, Math.min(maxZ, body.centerZ));
+      return dx * dx + dz * dz <= body.radiusSq;
+    });
+    return createGrassTerrainSurfaceSnapshot({
+      zones,
+      arenaFloorIds: [...this.arenaFloorZoneIds].filter((id) => seen.has(id)),
+      arenaGradeHeight: this.arenaGradeHeight,
+      waterBodies,
+    });
   }
 
   private registerInstancedMeshes(): void {
@@ -4102,301 +4118,62 @@ export class TerrainSystem extends System {
    */
   // Debug counter to avoid log spam
   private _flatZoneHitCount = 0;
-  private _flatZoneLoggedZones = new Set<string>();
   private readonly arenaFloorZoneIds = new Set<string>();
   private arenaGradeHeight: number | null = null;
 
-  /**
-   * Classify a single flat zone relative to a world position.
-   * Calls onCore or onBlend if the zone affects this point.
-   */
-  private classifyZone(
-    zone: FlatZone,
+  /** Reused ordered candidates; consume synchronously without recursive lookup. */
+  private getAuthoredSurfaceCandidates(
     worldX: number,
     worldZ: number,
-    bestCoreDist: number,
-    bestBlendFactor: number,
-    onCore: (zone: FlatZone, dist: number) => void,
-    onBlend: (zone: FlatZone, factor: number) => void,
-  ): void {
-    if (zone.tileMask) {
-      const tileX = Math.floor(worldX);
-      const tileZ = Math.floor(worldZ);
-      const key = `${tileX},${tileZ}`;
-      if (zone.tileMask.has(key)) {
-        const dx = Math.abs(worldX - zone.centerX);
-        const dz = Math.abs(worldZ - zone.centerZ);
-        const halfWidth = zone.width / 2;
-        const halfDepth = zone.depth / 2;
-        const dist = Math.max(
-          halfWidth > 0 ? dx / halfWidth : 0,
-          halfDepth > 0 ? dz / halfDepth : 0,
-        );
-        if (dist < bestCoreDist) {
-          onCore(zone, dist);
-        }
-        return;
-      }
-
-      const blend = this.getTileMaskBlendFactor(zone, worldX, worldZ);
-      if (blend !== null && blend < bestBlendFactor) {
-        onBlend(zone, blend);
-      }
-      return;
-    }
-
-    const dx = Math.abs(worldX - zone.centerX);
-    const dz = Math.abs(worldZ - zone.centerZ);
-    const halfWidth = zone.width / 2;
-    const halfDepth = zone.depth / 2;
-
-    if (dx <= halfWidth && dz <= halfDepth) {
-      const dist = Math.max(
-        halfWidth > 0 ? dx / halfWidth : 0,
-        halfDepth > 0 ? dz / halfDepth : 0,
-      );
-      if (dist < bestCoreDist) {
-        onCore(zone, dist);
-      }
-    } else if (
-      dx <= halfWidth + zone.blendRadius &&
-      dz <= halfDepth + zone.blendRadius
-    ) {
-      const blendX = dx > halfWidth ? (dx - halfWidth) / zone.blendRadius : 0;
-      const blendZ = dz > halfDepth ? (dz - halfDepth) / zone.blendRadius : 0;
-      const blend = Math.max(blendX, blendZ);
-      if (blend < bestBlendFactor) {
-        onBlend(zone, blend);
-      }
-    }
-  }
-
-  private getTileMaskBlendFactor(
-    zone: FlatZone,
-    worldX: number,
-    worldZ: number,
-  ): number | null {
-    if (!zone.tileMaskTiles || zone.tileMaskTiles.length === 0) {
-      return null;
-    }
-    if (zone.blendRadius <= 0) {
-      return null;
-    }
-
-    const bounds = zone.tileMaskBounds;
-    if (bounds) {
-      const minX = bounds.minX;
-      const maxX = bounds.maxX + 1;
-      const minZ = bounds.minZ;
-      const maxZ = bounds.maxZ + 1;
-      const radius = zone.blendRadius;
-      if (
-        worldX < minX - radius ||
-        worldX > maxX + radius ||
-        worldZ < minZ - radius ||
-        worldZ > maxZ + radius
-      ) {
-        return null;
-      }
-    }
-
-    let bestDist = Infinity;
-    for (const tile of zone.tileMaskTiles) {
-      const tileMinX = tile.x;
-      const tileMaxX = tile.x + 1;
-      const tileMinZ = tile.z;
-      const tileMaxZ = tile.z + 1;
-
-      const dx =
-        worldX < tileMinX
-          ? tileMinX - worldX
-          : worldX > tileMaxX
-            ? worldX - tileMaxX
-            : 0;
-      const dz =
-        worldZ < tileMinZ
-          ? tileMinZ - worldZ
-          : worldZ > tileMaxZ
-            ? worldZ - tileMaxZ
-            : 0;
-
-      const dist = Math.sqrt(dx * dx + dz * dz);
-      if (dist < bestDist) {
-        bestDist = dist;
-        if (bestDist === 0) {
-          break;
-        }
-      }
-    }
-
-    if (bestDist <= zone.blendRadius) {
-      return bestDist / zone.blendRadius;
-    }
-
-    return null;
-  }
-
-  private getFlatZoneHeight(worldX: number, worldZ: number): number | null {
-    if (this.flatZones.size === 0) {
-      return null;
-    }
-
-    // Use spatial index: check the terrain tile containing this point
-    // and its 8 neighbors (zones can span tile boundaries via blend radius).
+  ): readonly FlatZone[] {
+    const candidates = this.authoredSurfaceCandidates;
+    candidates.length = 0;
+    this._flatZoneChecked.clear();
+    if (this.flatZones.size === 0) return candidates;
     const tileSize = this.CONFIG.TILE_SIZE;
     const halfTile = tileSize / 2;
     const terrainTileX = Math.floor((worldX + halfTile) / tileSize);
     const terrainTileZ = Math.floor((worldZ + halfTile) / tileSize);
-
-    // Collect candidate zones from this tile and neighbors (3x3 grid)
-    // PERF: reuse class-level Set to avoid allocation per call
-    this._flatZoneChecked.clear();
-    const checked = this._flatZoneChecked;
-    const result = {
-      radialZone: null as FlatZone | null,
-      radialDistance: Infinity,
-      coreZone: null as FlatZone | null,
-      coreDist: Infinity,
-      blendZone: null as FlatZone | null,
-      blendFactor: Infinity,
-      arenaFloorHeight: null as number | null,
-    };
-
     for (let dtx = -1; dtx <= 1; dtx++) {
       for (let dtz = -1; dtz <= 1; dtz++) {
         const key = `${terrainTileX + dtx}_${terrainTileZ + dtz}`;
         const zones = this.flatZonesByTile.get(key);
         if (!zones) continue;
-
         for (const zone of zones) {
-          // Deduplicate zones that span multiple terrain tiles
-          if (checked.has(zone.id)) continue;
-          checked.add(zone.id);
-
-          // Platforms are explicit overlays above the common authored campus.
-          // Ordinary nearest-core ranking would let the large campus suppress
-          // floor corners and their smooth ramps. Only factory-owned IDs qualify.
-          if (
-            this.arenaFloorZoneIds.has(zone.id) &&
-            this.arenaGradeHeight !== null
-          ) {
-            const height = resolveDuelArenaFloorHeight(
-              zone,
-              worldX,
-              worldZ,
-              this.arenaGradeHeight,
-            );
-            if (height !== null)
-              result.arenaFloorHeight =
-                result.arenaFloorHeight === null
-                  ? height
-                  : Math.max(result.arenaFloorHeight, height);
-            continue;
-          }
-
-          if (zone.radialPond) {
-            const distance = Math.hypot(
-              worldX - zone.centerX,
-              worldZ - zone.centerZ,
-            );
-            if (
-              distance < zone.radialPond.bankOuterRadius + zone.blendRadius &&
-              distance < result.radialDistance
-            ) {
-              result.radialZone = zone;
-              result.radialDistance = distance;
-            }
-            continue;
-          }
-
-          this.classifyZone(
-            zone,
-            worldX,
-            worldZ,
-            result.coreDist,
-            result.blendFactor,
-            (coreZone, coreDist) => {
-              result.coreZone = coreZone;
-              result.coreDist = coreDist;
-            },
-            (blendZone, blendFactor) => {
-              result.blendZone = blendZone;
-              result.blendFactor = blendFactor;
-            },
-          );
+          if (this._flatZoneChecked.has(zone.id)) continue;
+          this._flatZoneChecked.add(zone.id);
+          candidates.push(zone);
         }
       }
     }
-
-    const bestCoreZone = result.coreZone;
-    const bestBlendZone = result.blendZone;
-    const bestBlendFactor = result.blendFactor;
-
-    // Resolve the underlying non-radial surface only after every candidate has
-    // been classified. A pond's outer blend must meet the same authored grade
-    // returned just outside it, not jump back from raw procedural terrain.
-    // Do not recurse into getFlatZoneHeight: it reuses the shared checked Set.
-    const getUnderlyingHeight = (): number => {
-      if (result.arenaFloorHeight !== null) return result.arenaFloorHeight;
-      if (bestCoreZone) return bestCoreZone.height;
-      const proceduralHeight = this.getProceduralHeightAt(worldX, worldZ);
-      if (!bestBlendZone) return proceduralHeight;
-      const t = bestBlendFactor * bestBlendFactor * (3 - 2 * bestBlendFactor);
-      return (
-        bestBlendZone.height + (proceduralHeight - bestBlendZone.height) * t
-      );
-    };
-
-    if (result.radialZone) {
-      const radialHeight = resolveRadialPondTerrainHeight(
-        result.radialZone,
-        worldX,
-        worldZ,
-        getUnderlyingHeight,
-      );
-      if (radialHeight !== null) {
-        if (!this._flatZoneLoggedZones.has(result.radialZone.id)) {
-          this._flatZoneLoggedZones.add(result.radialZone.id);
-        }
-        this._flatZoneHitCount++;
-        return radialHeight;
-      }
-    }
-
-    if (result.arenaFloorHeight !== null) {
-      this._flatZoneHitCount++;
-      return result.arenaFloorHeight;
-    }
-
-    // If in a core area, return that zone's flat height.
-    if (bestCoreZone) {
-      // Retain first-hit bookkeeping for diagnostics without per-zone console spam.
-      if (!this._flatZoneLoggedZones.has(bestCoreZone.id)) {
-        this._flatZoneLoggedZones.add(bestCoreZone.id);
-      }
-      this._flatZoneHitCount++;
-      return bestCoreZone.height;
-    }
-
-    // If in a blend area, smoothly interpolate
-    if (bestBlendZone) {
-      return getUnderlyingHeight();
-    }
-
-    return null;
+    return candidates;
   }
 
-  /**
-   * Check if a world position is inside a flat zone's core area.
-   * Used by ProceduralGrassSystem to exclude grass from artificial flat areas (buildings, arenas, etc.)
-   *
-   * @param worldX - World X coordinate
-   * @param worldZ - World Z coordinate
-   * @returns true if position is in a flat zone's core area (not blend area)
-   */
+  private getFlatZoneHeight(worldX: number, worldZ: number): number | null {
+    const height = this.authoredSurface.resolveHeight(
+      this.getAuthoredSurfaceCandidates(worldX, worldZ),
+      worldX,
+      worldZ,
+      () => this.getProceduralHeightAt(worldX, worldZ),
+      this.arenaFloorZoneIds,
+      this.arenaGradeHeight,
+    );
+    if (height !== null) this._flatZoneHitCount++;
+    return height;
+  }
+
+  /** Whether authored shaping affects this point, including its blend region. */
   isInFlatZone(worldX: number, worldZ: number): boolean {
-    // PERF: delegate to getFlatZoneHeight instead of duplicating the spatial lookup logic
     return this.getFlatZoneHeight(worldX, worldZ) !== null;
+  }
+
+  /** Grass exclusion is independent of terrain shaping on broad natural grades. */
+  private isGrassExcludedAt(worldX: number, worldZ: number): boolean {
+    return this.authoredSurface.isGrassExcluded(
+      this.getAuthoredSurfaceCandidates(worldX, worldZ),
+      worldX,
+      worldZ,
+    );
   }
 
   /**
@@ -4438,6 +4215,14 @@ export class TerrainSystem extends System {
     if (!Number.isFinite(zone.blendRadius) || zone.blendRadius < 0) {
       throw new Error(
         `[TerrainSystem] registerFlatZone "${zone.id}": invalid blendRadius ${zone.blendRadius}`,
+      );
+    }
+    if (
+      zone.excludeGrass !== undefined &&
+      typeof zone.excludeGrass !== "boolean"
+    ) {
+      throw new Error(
+        `[TerrainSystem] registerFlatZone "${zone.id}": excludeGrass must be boolean`,
       );
     }
     const radialProfileError = validateRadialPondTerrainProfile(zone);
@@ -4807,6 +4592,7 @@ export class TerrainSystem extends System {
             height?: number;
             heightOffset?: number;
             blendRadius: number;
+            excludeGrass?: boolean;
             radialPond?: RadialPondTerrainProfile;
           }>;
         },
@@ -4833,6 +4619,7 @@ export class TerrainSystem extends System {
           depth: zoneConfig.depth,
           height: flatHeight,
           blendRadius: zoneConfig.blendRadius,
+          excludeGrass: zoneConfig.excludeGrass,
           radialPond: zoneConfig.radialPond
             ? { ...zoneConfig.radialPond }
             : undefined,
@@ -5231,6 +5018,7 @@ export class TerrainSystem extends System {
   getTerrainColorAt(
     wx: number,
     wz: number,
+    computedSurface = false,
   ): {
     r: number;
     g: number;
@@ -5246,13 +5034,18 @@ export class TerrainSystem extends System {
     ny: number;
     nz: number;
   } {
-    const height = this.getHeightAt(wx, wz);
+    // Grass uses the worker's computed authored surface, independent of loaded
+    // tile interpolation. Other callers retain their existing cached sampler.
+    const sampleHeight = computedSurface
+      ? this.getHeightAtComputed
+      : this.getHeightAt;
+    const height = sampleHeight.call(this, wx, wz);
 
-    const sd = 0.5;
-    const hL = this.getHeightAt(wx - sd, wz);
-    const hR = this.getHeightAt(wx + sd, wz);
-    const hD = this.getHeightAt(wx, wz - sd);
-    const hU = this.getHeightAt(wx, wz + sd);
+    const sd = GRASS_SURFACE_NORMAL_SAMPLE_DISTANCE;
+    const hL = sampleHeight.call(this, wx - sd, wz);
+    const hR = sampleHeight.call(this, wx + sd, wz);
+    const hD = sampleHeight.call(this, wx, wz - sd);
+    const hU = sampleHeight.call(this, wx, wz + sd);
     const dhdx = (hR - hL) / (2 * sd);
     const dhdz = (hU - hD) / (2 * sd);
     const gradMag = Math.sqrt(dhdx * dhdx + dhdz * dhdz);
@@ -7652,7 +7445,7 @@ export class TerrainSystem extends System {
     this.flatZones.clear();
     this.flatZonesByTile.clear();
     this._flatZoneChecked.clear();
-    this._flatZoneLoggedZones.clear();
+    this.authoredSurfaceCandidates.length = 0;
     this.arenaFloorZoneIds.clear();
     this.arenaGradeHeight = null;
 

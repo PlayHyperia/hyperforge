@@ -134,7 +134,13 @@ function grassSetup(profile: WorldTerrainProfile): GrassWorkerSetup {
     grassConfigs: { forest: settings, tundra: settings, canyon: settings },
     tileSize: profile.terrainTileSize,
     getRoadSegmentsForRegion: () => [],
-    getFlatZonesForRegion: () => [],
+    getTerrainSurfaceForRegion: () => ({
+      schemaVersion: 1,
+      zones: [],
+      arenaFloorIds: [],
+      arenaGradeHeight: null,
+      waterBodies: [],
+    }),
   };
 }
 
@@ -198,17 +204,25 @@ async function grassData(
     roadSegments: [],
     roadBlendWidth: 0,
     tileSize: profile.terrainTileSize,
-    flatZones: empty
-      ? [
-          {
-            centerX: 350,
-            centerZ: 400,
-            halfWidth: 50,
-            halfDepth: 50,
-            blendRadius: 0,
-          },
-        ]
-      : [],
+    terrainSurface: {
+      schemaVersion: 1,
+      zones: empty
+        ? [
+            {
+              id: "excluded-test-pad",
+              centerX: 350,
+              centerZ: 400,
+              width: 100,
+              depth: 100,
+              height: 30,
+              blendRadius: 0,
+            },
+          ]
+        : [],
+      arenaFloorIds: [],
+      arenaGradeHeight: null,
+      waterBodies: [],
+    },
   };
   const worker = new Worker(
     `
@@ -406,15 +420,12 @@ describe("terrain visual profile admission with real geometry and workers", () =
     const key = manager["chunkKey"](node);
     try {
       manager.setPlayerPosition(350, 400);
+      manager.onNodeNeedsGeometry(node);
       const stale = await grassData(changed, key, true);
       expect(stale.count).toBe(0);
-      manager["workerInflight"].add(key);
       manager["settledWorkerResults"].push({
-        node,
-        key,
+        ticket: manager["createWorkerTicket"](node, key, 0, false),
         data: stale,
-        lodLevel: 0,
-        isLodSwap: false,
       });
       expect(manager["processSettledWorkerResults"]()).toBe(0);
       expect(manager["workerInflight"].has(key)).toBe(false);
@@ -423,11 +434,8 @@ describe("terrain visual profile admission with real geometry and workers", () =
       const current = await grassData(compact, key, true);
       expect(current.count).toBe(0);
       manager["settledWorkerResults"].push({
-        node,
-        key,
+        ticket: manager["createWorkerTicket"](node, key, 0, false),
         data: current,
-        lodLevel: 0,
-        isLodSwap: false,
       });
       expect(manager["processSettledWorkerResults"]()).toBe(0);
       expect(manager.getStreamingReadiness([node], 50).ready).toBe(true);
@@ -446,17 +454,16 @@ describe("terrain visual profile admission with real geometry and workers", () =
       resolution: 4,
     });
     const node = leaf(tree);
+    manager.setPlayerPosition(350, 400);
+    manager.onNodeNeedsGeometry(node);
     const key = manager["chunkKey"](node);
     let geometryDisposed = false;
     try {
       const current = await grassData(compact, key);
       expect(current.count).toBeGreaterThan(0);
       manager["settledWorkerResults"].push({
-        node,
-        key,
+        ticket: manager["createWorkerTicket"](node, key, 0, false),
         data: current,
-        lodLevel: 0,
-        isLodSwap: false,
       });
       expect(manager["processSettledWorkerResults"]()).toBe(1);
       const mesh = container.children[0] as THREE.InstancedMesh;
@@ -466,11 +473,8 @@ describe("terrain visual profile admission with real geometry and workers", () =
       });
       const stale = await grassData(changed, key);
       manager["settledWorkerResults"].push({
-        node,
-        key,
+        ticket: manager["createWorkerTicket"](node, key, 1, true),
         data: stale,
-        lodLevel: 1,
-        isLodSwap: true,
       });
       expect(manager["processSettledWorkerResults"]()).toBe(0);
       expect(container.children).toEqual([mesh]);

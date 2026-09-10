@@ -1,4 +1,5 @@
 import type { FlatZone } from "../types/world/terrain";
+import { createAuthoredTerrainSurfaceOperations } from "../systems/shared/world/AuthoredTerrainSurface";
 import { ALL_WORLD_AREAS, type WorldArea } from "./world-areas";
 import { getDuelArenaConfig, type DuelArenaConfig } from "./duel-manifest";
 import {
@@ -200,22 +201,7 @@ export function resolveDuelArenaFloorHeight(
   z: number,
   baseHeight: number,
 ): number | null {
-  const dx = Math.abs(x - zone.centerX);
-  const dz = Math.abs(z - zone.centerZ);
-  const halfWidth = zone.width / 2;
-  const halfDepth = zone.depth / 2;
-  if (dx <= halfWidth && dz <= halfDepth) return zone.height;
-  if (
-    zone.blendRadius <= 0 ||
-    dx > halfWidth + zone.blendRadius ||
-    dz > halfDepth + zone.blendRadius
-  )
-    return null;
-  const factor = Math.max(
-    0,
-    (dx - halfWidth) / zone.blendRadius,
-    (dz - halfDepth) / zone.blendRadius,
-  );
-  const smooth = factor * factor * (3 - 2 * factor);
-  return zone.height + (baseHeight - zone.height) * smooth;
+  return authoredSurface.resolveDuelArenaFloorHeight(zone, x, z, baseHeight);
 }
+
+const authoredSurface = createAuthoredTerrainSurfaceOperations();

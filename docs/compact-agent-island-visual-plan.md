@@ -86,6 +86,24 @@ the island's coherent composition and materials. Actual grass-to-triangle contac
 must be measured separately from computed-height parity. Full daylight/night art,
 gameplay, collision/navigation and representative performance remain open.
 
+### Calculated grass correction: probe08, not visual acceptance
+
+The calculated authored-surface, exclusion, elevated-water and worker-lifecycle
+slice now passes its focused checks. Actual probe08 completes all 11 views with
+clean owned-resource shutdown and unchanged pins, but still fails its outer run
+on missing cow content and retains the canonical dagger blocker. Six resident
+grass anchors match computed height within 0.000001 m; one differs from retained
+rendered terrain by 0.074249 m. Repeated observations of those six anchors are not
+whole-island or performance evidence. See the [checkpoint](grass-authored-surface-checkpoint-20260910.md).
+
+Matched island, hub, pond and campus-link images show no material visual art
+improvement from this correctness change. Next prioritize a coherent island
+landform, then one finished pond-to-workshop route with paths/banks/vegetation,
+and corrected foliage/material response under a consistent lighting setup.
+Procedural detail should support that composition rather than dictate biome
+wedges and broad grade cuts. Keep the contact correction and actual performance
+qualification as explicit gates; adding grass density alone is insufficient.
+
 ## Sequential implementation tasks
 
 ### 1. Verify lighting and material presentation at fixed cameras
