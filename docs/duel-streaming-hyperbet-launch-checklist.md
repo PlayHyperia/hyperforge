@@ -34,6 +34,59 @@ verification, secret scanning and exact remote-ref checks. These checkpoints are
 not release approval and do not certify the whole workspace clean or backed up.
 
 
+## Ground-material and preparation-scene pass — in progress, 2026-09-10
+
+Actual WebGPU review now shows detailed ground, readable connecting paths and
+correctly lit overhead terrain. This is an implemented development checkpoint,
+not AAA art, representative performance, full-loop, streaming or launch approval.
+
+- [x] Implement compact turf/soil/rock PBR surfaces with six hash-locked 1024px
+  packed maps, explicit colour/decode handling and isolated texture lifetimes.
+  Browser probe13 received all six exact PNG bodies. Deployment preflight now
+  rejects every missing/stale map using the same digest contract as runtime.
+- [x] Render six curved preparation paths through the existing shared road mask.
+  Actual screenshots exposed and verified the remedy for an undersized GPU
+  texture allocation; CPU producer/graph ownership alone had missed it.
+- [x] Correct compact world→view normals. The faulty inverse transform blackened
+  the overhead island; real camera-angle tests and matched probe13 pixels verify
+  the correction without increasing exposure or lighting.
+- [x] Verify fixed localized geometry: only two 100 m streaming leaves increase
+  from 16 to 64 vertices/axis. CPU pond RMS error improves 0.2834→0.0792 m across
+  7,921 samples; maximum remains 0.4676 m. Added assembled geometry is 15,744
+  triangles and 640,512 bytes, not measured frame-time cost or full grounding.
+- [x] Verify compact ocean/pond material ownership in all 45 probe13 observations;
+  ocean-level chunks now use ocean material, elevated pond height is unchanged.
+- [x] Cancel superseded/destroyed yielding road refreshes and reject stale
+  tile/chunk/mesh/geometry owners; eleven real lifecycle regressions pass.
+- [ ] Finish ground art: irregular coast/pond banks and wet margins, better
+  texture-scale/repetition control, authored rock/fern/bush/grass groups, coherent
+  tree palettes, and a preparation setting with deliberate visual composition.
+  Existing vegetation loading must preserve GLB transforms/maps/alpha cutouts.
+- [ ] Integrate the reviewed Blender workshop canopy candidate after flue/roof,
+  overhead-camera visibility, navigation/collision and performance qualification.
+- [ ] Qualify stream grass density/contact across the preparation area and pond;
+  probe13 still observes zero grass anchors in both regions, not a passed gate.
+- [ ] Resolve hospital-floor striping, cow-content and canonical dagger-fit errors;
+  avatar/equipment and the complete agent/SOL/stream experience remain open.
+- [ ] Measure representative moving-camera/multi-agent frame times, GPU/memory,
+  loading and stream continuity; screenshots and CPU counts do not replace this.
+- [ ] Resolve intermittent owned-launcher process-group shutdown inspection:
+  probe13 records EPERM while the exact owned client leader is a zombie, followed
+  by its exit/close; browser and ports are clear, but that run remains failed.
+
+Final source verification: 530 shared tests/40 files, 128 server tests/nine files,
+15 launch-validator tests, 33 unchanged-camera harness tests, three typechecks,
+scoped lint/format, packing validation and fresh shared/server builds pass.
+Probe12 failed art review; probes13/14 visibly confirm the two rendering remedies.
+Probe13 retains its shutdown failure. Identical-build probe14 passes teardown,
+with all 160 source pins unchanged, six exact texture deliveries, no page/GPU
+console errors, browser closed and ports clear. Existing cow/dagger errors still
+fail the overall run; this repeat does not erase the intermittent shutdown issue.
+Asset kit pushed as `03f5fd5203271ac296bf0dd4d5a6ed7296501960` on the assets branch;
+GitHub author/committer are both `dreaminglucid`. Runtime source checkpoint:
+`ed8ce253689a289a2952488dd897a8a7b1bf7672` on `codex/sol-duel-stream-launch`.
+See `docs/compact-preparation-art-checkpoint-20260910.md` for exact evidence.
+
 ## Sculpted island and retained-triangle contact — 2026-09-10
 
 User review: terrain remains lackluster. The main next deliverable is a genuinely

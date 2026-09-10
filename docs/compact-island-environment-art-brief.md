@@ -4,6 +4,10 @@ User review, 2026-09-10: the current terrain is still lackluster and low quality
 This is accurate. Removing biome wedges and correcting sampled grass contact
 did not turn the bare grass/dirt blockout into a finished game environment.
 
+Current work and explicit source-test/cost limits are recorded in
+`compact-preparation-art-checkpoint-20260910.md`. The material/path/local-detail
+candidate is implemented; it is not yet an accepted finished environment.
+
 ## Visual target, not a game screenshot
 
 The imagegen skill was used to establish a concrete environment-art reference
