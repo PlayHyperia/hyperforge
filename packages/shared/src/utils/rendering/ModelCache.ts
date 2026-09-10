@@ -23,6 +23,7 @@
 import THREE, { MeshStandardNodeMaterial } from "../../extras/three/three";
 import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
 import { MeshoptDecoder } from "three/examples/jsm/libs/meshopt_decoder.module.js";
+import { clone as cloneSkeleton } from "three/examples/jsm/utils/SkeletonUtils.js";
 import type { World } from "../../core/World";
 import {
   lodManager,
@@ -423,8 +424,7 @@ export class ModelCache {
           type: node instanceof THREE.SkinnedMesh ? "SkinnedMesh" : "Mesh",
           positions: extractAttr(
             geo.getAttribute("position") as
-              | THREE.BufferAttribute
-              | THREE.InterleavedBufferAttribute,
+              THREE.BufferAttribute | THREE.InterleavedBufferAttribute,
           ),
           material: Array.isArray(node.material)
             ? node.material.map((m) => this.serializeMaterialProps(m))
@@ -471,14 +471,12 @@ export class ModelCache {
           if (skinWeights)
             sm.skinWeights = extractAttr(
               skinWeights as
-                | THREE.BufferAttribute
-                | THREE.InterleavedBufferAttribute,
+                THREE.BufferAttribute | THREE.InterleavedBufferAttribute,
             );
           if (skinIndices)
             sm.skinIndices = extractAttr(
               skinIndices as
-                | THREE.BufferAttribute
-                | THREE.InterleavedBufferAttribute,
+                THREE.BufferAttribute | THREE.InterleavedBufferAttribute,
             );
         }
 
@@ -1386,8 +1384,8 @@ export class ModelCache {
 
       cached.cloneCount++;
 
-      // Clone the scene for this instance
-      const clonedScene = cached.scene.clone(true);
+      // Bones/skeletons belong to the instance; geometry/materials remain shared.
+      const clonedScene = cloneSkeleton(cached.scene);
 
       if (shareMaterials && cached.sharedMaterials.size > 0) {
         // Reuse shared materials (reduces draw calls)
@@ -1424,7 +1422,7 @@ export class ModelCache {
     if (loadingPromise) {
       const result = await loadingPromise;
       result.cloneCount++;
-      const clonedScene = result.scene.clone(true);
+      const clonedScene = cloneSkeleton(result.scene);
 
       if (shareMaterials && result.sharedMaterials.size > 0) {
         // Reuse shared materials (reduces draw calls)
@@ -1677,7 +1675,7 @@ export class ModelCache {
     const result = await promise;
     result.cloneCount++;
 
-    const clonedScene = result.scene.clone(true);
+    const clonedScene = cloneSkeleton(result.scene);
 
     // FINAL VALIDATION: Ensure we're returning pure THREE.Object3D
     if ("ctx" in clonedScene || "isDirty" in clonedScene) {
