@@ -25,7 +25,21 @@ woodcutting trees.
   response, wind, near/far transitions and measured frame/memory cost with the
   actual agents and stream cameras.
 
+- [ ] Before expanding distribution, add real boundary regressions for resource
+  generation versus tile-unload ownership, resample grounded Y after tile-center
+  snapping, and preserve unique resource IDs/persisted state during relocation.
+- [ ] Review depleted-tree visual/collision behavior explicitly: the current
+  batch uses a dissolve, not the manifest stump model, and keeps its blocker.
+  Verify that agents and spectators receive a coherent, readable lifecycle.
+
 This records required work, not completed redistribution or launch approval.
+
+Research and ordered acceptance: the implementation's
+`docs/aaa-compact-world-research-20260910.md` preserves the terrain/resource-tree,
+lighting/sky/water, animation/audio/stream and dependency qualification briefs.
+Game checkpoint `c1933e898b64afa77a5b964200c90becfb7c7fd6` and asset checkpoint
+`fb41785c68c6324903559552a26af11da07c7143` are pushed; exact remote refs and GitHub
+author/committer `dreaminglucid` verified. All 179 capture pins still match.
 
 ## Current delivery direction — 2026-09-10 user clarification
 

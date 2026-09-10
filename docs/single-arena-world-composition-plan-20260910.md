@@ -95,6 +95,15 @@ against that authoritative population without silently reducing resource supply.
 
 ## 3. Acceptance from the actual experience
 
+Resource-tree audit follow-through is recorded in
+`research/terrain-vegetation-assets-20260910.md`. Five explicit preparation trees
+coexist with active procedural resource trees; five is not the total live count.
+Before expanding their distribution, verify generation/unload tile ownership,
+Y after X/Z snapping, persistent-ID uniqueness/relocation, station/building
+clearance and reachable harvesting adjacency. The current depleted-tree batch
+dissolves instead of swapping the declared stump mesh and retains collision;
+qualify that complete lifecycle rather than assuming a stump transition works.
+
 - [ ] New immutable WebGPU close/hub/approach/wide views show one ring, a coherent
       village and landscape rather than isolated props on a flat grass patch.
 - [ ] Visually inspect texture scale/repetition, wet banks, roots/ground contact,
