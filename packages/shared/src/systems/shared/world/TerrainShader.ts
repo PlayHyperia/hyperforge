@@ -1213,13 +1213,13 @@ export function createTerrainMaterial(
   const compactTextures = options.compactPbr
     ? new CompactTerrainTextureSet(getCdnUrl())
     : null;
-  const compactLayers = compactTextures
-    ? createCompactTerrainLayers(compactTextures, distSq)
-    : null;
 
   // Sample Perlin noise
   const noiseUV = mul(vec2(worldPos.x, worldPos.z), noiseScale);
   const noiseValue = texture(noiseTex, noiseUV).r;
+  const compactLayers = compactTextures
+    ? createCompactTerrainLayers(compactTextures, distSq, noiseValue)
+    : null;
   const noiseValue2 = add(
     mul(sin(mul(noiseValue, float(6.28))), float(0.3)),
     float(0.5),
@@ -1568,7 +1568,12 @@ export function createTerrainMaterial(
   const compactedRoadColor = sub(roadDetailColor, vec3(roadCenterDarken));
 
   const compactWeights = compactLayers
-    ? createCompactTerrainLayerWeights(noiseValue, slope, roadInfluenceRaw)
+    ? createCompactTerrainLayerWeights(
+        noiseValue,
+        slope,
+        roadInfluenceRaw,
+        distortNoise,
+      )
     : null;
   const compactSurface =
     compactLayers && compactWeights

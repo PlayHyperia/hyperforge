@@ -36,19 +36,20 @@ not another generic noise or palette adjustment across the entire map.
 - [ ] Give the bank, furnace/anvil and cooking locations a shared architectural
   setting and worn ground. Use a small reusable stone/timber kit; avoid isolated
   stations sprinkled on a lawn. Keep authoritative interaction positions valid.
-- [ ] Establish distinct ground materials with actual normal/roughness data,
-  consistent texel density and believable stone/soil/turf/wet transitions.
-  Inspect the existing local PBR assets before creating or acquiring replacements.
+- [x] Integrate six packed soil/turf/rock maps with actual normal/roughness/AO,
+  exact-byte preflight and decode controls. Follow-up adds anti-repeat grass/dirt
+  projections and worn path edges; finished wet-bank transitions remain open.
 - [ ] Compose bounded rock, shrub and grass clusters around banks/paths, with
   intentional open circulation. Preserve batching, shared materials and LODs;
   do not blindly turn on bulk procedural population or grass everywhere.
-- [ ] Resolve ocean material ownership and visible square water transitions.
+- [x] Resolve ocean material ownership and visible square water transitions.
   Ocean appearance must not change simply because a chunk center crosses a mask.
-- [ ] Choose enough actual terrain geometry for the intended bank/detail shapes.
-  Current final streaming leaves have 6.67 m grid spacing: grass projection fixes
-  contact but cannot create missing terrain detail. Compare an explicit denser or
-  local-detail candidate to the current baseline with recorded cost; do not hide
-  resolution changes or claim arbitrary tessellation is free.
+- [x] Compare bounded denser preparation geometry: two 100 m streaming leaves
+  now use 64 vertices/axis (1.587 m spacing), others retain 16 (6.667 m).
+  Pond sampled RMS error falls 0.2834 to 0.0792 m; maximum remains 0.4676 m.
+  Added 15,744 triangles/640,512 geometry bytes are not frame-time acceptance.
+- [ ] Finish pond/coastal topology and all-footprint prop contact; the measured
+  residual bank error and circular silhouette are not a finished terrain gate.
 - [ ] Capture actual close, preparation-wide and arena-approach gameplay views in
   consistent daylight, then moving-camera and night views. Evaluate composition,
   scale, material response, contact, silhouette and UI/agent readability together.
@@ -63,16 +64,19 @@ The full island, equipment, reliability and launch checklist remain open.
 
 ## Existing-kit starting point
 
-Read-only local inventory identifies `models/rocks/med_rock_v2.glb` and
-`big_rock_v2.glb` (778/910 triangles, one primitive each, embedded albedo/normal/ORM)
+Read-only local inventory identifies `rocks/med_rock_v2.glb` and
+`rocks/big_rock_v2.glb` (778/910 triangles, one primitive each, embedded albedo/normal/ORM)
 as a small starting boulder pair. Existing round/path stones, ferns, shrubs and
 oak variants can supply selected clusters after visual/texture-budget review.
 The local `terrain/textures/{stylized_grass,dirt_ground,rock}` folders contain
-normal/roughness maps that the active terrain shader does not currently use.
+normal/roughness maps now used through the six losslessly packed terrain maps.
 
 Do not enable the current generic vegetation path unchanged: it extracts only
 the first mesh of an asset and its water-clearance policy excludes pond-bank
 placements. Some low-triangle assets have large 2K textures; triangle counts alone
-do not qualify them. A small authored workshop/shelter and reed/bank kit are still
-missing. Imported asset creator/license attribution remains unresolved; this
+do not qualify them. An isolated Blender pond kit now contains boulder, flat
+stone, fern, bush and original reeds (22.61 MiB estimated texture+mip allocation).
+The runtime uses 32 instances in five batches; actual scene review is required.
+A reviewed workshop-canopy candidate still awaits collision, flue and camera
+integration. Imported asset creator/license attribution remains unresolved; this
 inventory is reuse research, not a distribution-rights or performance approval.

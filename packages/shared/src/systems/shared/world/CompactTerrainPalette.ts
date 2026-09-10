@@ -20,6 +20,11 @@ export function createCompactTerrainColorOperations() {
     cliffEnd: 0.55,
     variationLow: 0.98,
     variationHigh: 1.02,
+    pathEdgeNoiseContrast: 2.5,
+    pathEdgeStartLow: 0.04,
+    pathEdgeStartHigh: 0.26,
+    pathEdgeEndLow: 0.74,
+    pathEdgeEndHigh: 0.96,
   };
   const palette = {
     grass: [0.033681753576253116, 0.14414087466070133, 0.013722332612374167],
@@ -50,6 +55,7 @@ export function createCompactTerrainColorOperations() {
       noiseValue: number;
       slope: number;
       roadInfluence: number;
+      distortNoise?: number;
     }) {
       // Meadow dirt is restrained; steep rock follows actual geometric slope,
       // never the legacy high-frequency distorted normal classification.
@@ -74,10 +80,31 @@ export function createCompactTerrainColorOperations() {
           slope,
         ) *
         composition.slopeDirtStrength;
+      const edgeNoise = Math.max(
+        0,
+        Math.min(
+          1,
+          ((input.distortNoise ?? 0.5) - 0.5) *
+            composition.pathEdgeNoiseContrast +
+            0.5,
+        ),
+      );
       return {
         dirt: 1 - (1 - patch) * (1 - slopeDirt),
         cliff: math.smooth(composition.cliffStart, composition.cliffEnd, slope),
-        road: math.smooth(0, 1, input.roadInfluence),
+        road: math.smooth(
+          math.mix(
+            composition.pathEdgeStartLow,
+            composition.pathEdgeStartHigh,
+            edgeNoise,
+          ),
+          math.mix(
+            composition.pathEdgeEndLow,
+            composition.pathEdgeEndHigh,
+            edgeNoise,
+          ),
+          input.roadInfluence,
+        ),
         variation: math.mix(
           composition.variationLow,
           composition.variationHigh,
@@ -96,8 +123,8 @@ export function createCompactTerrainColorOperations() {
       slope: number;
       roadInfluence: number;
     }) {
-      // Keep the input shape used by existing worker callers. Distortion noise
-      // no longer turns the compact meadow into arbitrary rocky patches.
+      // Distortion noise only wears the path margin; it never changes meadow
+      // or cliff classification. The same mean applies to both PBR projections.
       const { dirt, cliff, road, variation } = operations.weights(input);
       const result = palette.grass.map(
         (grass, channel) =>

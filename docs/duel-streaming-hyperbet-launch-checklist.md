@@ -34,6 +34,45 @@ verification, secret scanning and exact remote-ref checks. These checkpoints are
 not release approval and do not certify the whole workspace clean or backed up.
 
 
+## Ground repetition and pond habitat — development checkpoint, 2026-09-10
+
+The user’s terrain-quality concern remains valid. Actual probe15 improves texture
+scale/repetition, but the full environment is not art-ready or performance-approved.
+
+- [x] Reduce obvious turf tiling and oversized path stones using two blended
+  ground projections with explicit mip gradients; preserve CPU/worker edge colour.
+  Same six maps, fourteen surface fetches instead of ten: added cost is explicit.
+- [x] Tone down compact maple/magic leaf colours without changing bark, alpha,
+  wind, resource identity or harvesting semantics.
+- [x] Integrate five optimized Blender pond models as 32 shared-material instances
+  in five batches (20,044 submitted triangles, plus shadow passes). Validate
+  whole rock envelopes against existing water; retain the open southern approach.
+- [x] Preserve every static model primitive/material group and transform, exact
+  current terrain pivot grounding, bounded revision updates and late-load teardown.
+  Deployment preflight rejects all five missing/stale model hashes.
+- [x] Inspect matched actual WebGPU pond/hub/wide views: finer grass/path scale,
+  less grid repetition, all five models visibly present. All 45 runtime art-owner
+  observations pass; six PNGs and five GLBs delivered with exact hashes/bytes.
+- [ ] Finish the pond as one coherent habitat: break the pale circular bank with
+  irregular wet soil/shallow-water transitions; regroup and harmonize dark rocks,
+  pale stones, mint ferns and saturated bushes. Verify full-footprint contact and
+  live fishing-marker access, not only pivot positions or installed counts.
+- [ ] Finish deliberate compact landforms/coastlines, architectural station
+  setting and grass coverage; eliminate the uniform empty-lawn appearance.
+- [ ] Verify moving-camera/day-night/multi-agent GPU/CPU frame distributions,
+  loading/memory and production-stream continuity at unchanged quality.
+- [ ] Keep hospital stripes, cow404, canonical dagger metadata, avatar/equipment,
+  meaningful preparation/combat/SOL and intermittent shutdown gates open.
+
+Verification: 540 shared tests/42 files, 128 server tests/nine files, 17 launch
+preflight tests, 37 study tests, six art-pin tests, three typechecks, scoped
+lint/format and fresh shared/server builds pass. Probe15 retains 172 unchanged
+source/art pins, 22 scene PNGs, zero page/GPU diagnostic errors and clean teardown.
+Overall run still fails the retained cow/dagger content errors; art review remains
+unapproved. Readiness counters do not prove visible pixels or finished quality.
+See `docs/compact-pond-material-checkpoint-20260910.md` for evidence, budgets,
+limits and the next implementation acceptance criteria.
+
 ## Ground-material and preparation-scene pass — in progress, 2026-09-10
 
 Actual WebGPU review now shows detailed ground, readable connecting paths and

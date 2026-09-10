@@ -21,7 +21,13 @@ export const COMPACT_TERRAIN_MATERIAL = {
   textureSize: 1024,
   repeatsPerMeter: 0.3,
   textureCount: 6,
-  surfaceSampleCount: 10,
+  surfaceSampleCount: 14,
+  grassRepeatsPerMeter: 0.85,
+  dirtRepeatsPerMeter: 0.95,
+  groundPatternBands: 32,
+  groundPatternBlendStart: 0.18,
+  groundPatternBlendEnd: 0.82,
+  groundPatternScaleVariation: 0.18,
   normalFadeNear: 45,
   normalFadeFar: 120,
   minimumRoughness: 0.65,
@@ -325,6 +331,7 @@ export function createCompactTerrainLayerWeights(
   noise: Node<"float">,
   geometricSlope: Node<"float">,
   rawRoadInfluence: Node<"float">,
+  edgeNoise: Node<"float"> = float(0.5),
 ) {
   const c = COMPACT_TERRAIN_COMPOSITION;
   const slope = geometricSlope.clamp(0, 1);
@@ -338,11 +345,70 @@ export function createCompactTerrainLayerWeights(
   )
     .mul(smoothstep(float(c.slopeDirtEnd), float(c.slopeDirtFall), slope))
     .mul(c.slopeDirtStrength);
+  const wornEdge = edgeNoise
+    .sub(0.5)
+    .mul(c.pathEdgeNoiseContrast)
+    .add(0.5)
+    .clamp(0, 1);
   return {
     dirt: float(1).sub(float(1).sub(patch).mul(float(1).sub(slopeDirt))),
     cliff: smoothstep(float(c.cliffStart), float(c.cliffEnd), slope),
-    road: smoothstep(float(0), float(1), rawRoadInfluence),
+    road: smoothstep(
+      mix(float(c.pathEdgeStartLow), float(c.pathEdgeStartHigh), wornEdge),
+      mix(float(c.pathEdgeEndLow), float(c.pathEdgeEndHigh), wornEdge),
+      rawRoadInfluence,
+    ),
     variation: mix(float(c.variationLow), float(c.variationHigh), noise),
+  };
+}
+
+/**
+ * Two noise-selected projections share one smooth transition. At every band
+ * boundary the outgoing B projection is exactly the incoming A projection.
+ * Gradients exclude the discrete selection/offset: implicit derivatives across
+ * a band would select false coarse mip levels and corrupt the normal frame.
+ * See NVIDIA GPU Gems, chapter 20, "Texture Bombing", filtering discussion.
+ */
+export function createCompactGroundProjections(
+  worldXZ: Node<"vec2">,
+  patternNoise: Node<"float">,
+  repeatsPerMeter: number,
+  worldDx: Node<"vec2"> = worldXZ.dFdx(),
+  worldDy: Node<"vec2"> = worldXZ.dFdy(),
+) {
+  const c = COMPACT_TERRAIN_MATERIAL;
+  const selector = patternNoise.mul(c.groundPatternBands);
+  const index = selector.floor();
+  const project = (id: Node<"float">) => {
+    const angle = id.mul(2.399963229728653);
+    const cosine = angle.cos(),
+      sine = angle.sin();
+    const scale = id
+      .mul(1.61803398875)
+      .sin()
+      .mul(c.groundPatternScaleVariation)
+      .add(1)
+      .mul(repeatsPerMeter);
+    const rotate = (value: Node<"vec2">) =>
+      vec2(
+        value.x.mul(cosine).sub(value.y.mul(sine)),
+        value.x.mul(sine).add(value.y.mul(cosine)),
+      ).mul(scale);
+    const offset = vec2(id.mul(3.17).sin(), id.mul(7.13).sin()).mul(17);
+    return {
+      uv: rotate(worldXZ).add(offset),
+      dx: rotate(worldDx),
+      dy: rotate(worldDy),
+    };
+  };
+  return {
+    a: project(index),
+    b: project(index.add(1)),
+    weight: smoothstep(
+      float(c.groundPatternBlendStart),
+      float(c.groundPatternBlendEnd),
+      selector.fract(),
+    ),
   };
 }
 
@@ -399,6 +465,7 @@ export function createCompactCotangentNormal(
 export function createCompactTerrainLayers(
   textures: CompactTerrainTextureSet,
   distanceSquared: Node<"float">,
+  patternNoise: Node<"float"> = float(0.5),
 ): Record<Layer, CompactTerrainLayer> {
   const controls = COMPACT_TERRAIN_MATERIAL;
   const flatUV = vec2(positionWorld.x, positionWorld.z).mul(
@@ -421,18 +488,48 @@ export function createCompactTerrainLayers(
     layer: Layer,
     uv: Node<"vec2">,
     normalStrength: number,
+    gradients?: { dx: Node<"vec2">; dy: Node<"vec2"> },
   ): CompactTerrainLayer => {
-    const ar = textures.getNode(layer, "albedo-roughness").sample(uv);
-    const na = textures.getNode(layer, "normal-ao").sample(uv);
+    const sample = (channel: Channel) => {
+      const base = textures.getNode(layer, channel);
+      return gradients
+        ? base.grad(gradients.dx, gradients.dy).sample(uv)
+        : base.sample(uv);
+    };
+    const ar = sample("albedo-roughness");
+    const na = sample("normal-ao");
     return {
       albedo: ar.rgb,
       roughness: ar.a.max(controls.minimumRoughness),
       ao: mix(float(1), na.a, float(controls.aoStrength)),
-      worldNormal: createCompactProjectedNormal(
+      worldNormal: createCompactCotangentNormal(
         na.rgb,
-        uv,
+        normalWorldGeometry,
+        positionWorld.dFdx(),
+        positionWorld.dFdy(),
+        gradients?.dx ?? uv.dFdx(),
+        gradients?.dy ?? uv.dFdy(),
         nearDetail.mul(normalStrength),
       ),
+    };
+  };
+  const ground = (
+    layer: "grass" | "dirt",
+    repeats: number,
+    normalStrength: number,
+  ): CompactTerrainLayer => {
+    const p = createCompactGroundProjections(
+      vec2(positionWorld.x, positionWorld.z),
+      patternNoise,
+      repeats,
+    );
+    const a = project(layer, p.a.uv, normalStrength, p.a);
+    const b = project(layer, p.b.uv, normalStrength, p.b);
+    return {
+      albedo: mix(a.albedo, b.albedo, p.weight),
+      roughness: mix(a.roughness, b.roughness, p.weight),
+      ao: mix(a.ao, b.ao, p.weight),
+      worldNormal: normalize(mix(a.worldNormal, b.worldNormal, p.weight)),
     };
   };
   const weights = normalWorldGeometry.abs().pow(vec3(4));
@@ -463,8 +560,12 @@ export function createCompactTerrainLayers(
       .add(b.mul(normalizedWeights.y))
       .add(c.mul(normalizedWeights.z));
   return {
-    grass: project("grass", flatUV, 1),
-    dirt: project("dirt", flatUV, controls.dirtNormalStrength),
+    grass: ground("grass", controls.grassRepeatsPerMeter, 1),
+    dirt: ground(
+      "dirt",
+      controls.dirtRepeatsPerMeter,
+      controls.dirtNormalStrength,
+    ),
     rock: {
       albedo: blendVector(sides[0].albedo, sides[1].albedo, sides[2].albedo),
       roughness: blendScalar(

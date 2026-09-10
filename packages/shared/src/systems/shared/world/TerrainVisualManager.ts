@@ -214,6 +214,24 @@ export class TerrainVisualManager implements QuadTreeListener {
     return chunk.surface;
   }
 
+  /** Exact installed surface only; no parent/child overlap or stale geometry. */
+  getRetainedSurfaceAt(x: number, z: number): RetainedTerrainSurface | null {
+    for (const chunk of this.chunks.values()) {
+      const node = chunk.node,
+        half = node.size / 2;
+      if (
+        x < node.centerX - half ||
+        x >= node.centerX + half ||
+        z < node.centerZ - half ||
+        z >= node.centerZ + half
+      )
+        continue;
+      const surface = this.getRetainedSurface(node);
+      if (surface) return surface;
+    }
+    return null;
+  }
+
   /**
    * Compile the exact quad-tree terrain pipeline before the first generated
    * chunk reaches the scene. A flat-grid terrain tile is not representative:

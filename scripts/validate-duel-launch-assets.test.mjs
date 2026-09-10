@@ -297,6 +297,49 @@ function detachCompactTerrainKit(assetsRoot) {
   return detachAssetDirectory(assetsRoot, "terrain/textures/compact-pbr");
 }
 
+for (const mode of ["missing", "stale"]) {
+  test(`rejects every ${mode} compact pond model`, () => {
+    const assetsRoot = createAssetsFixture();
+    const contract = JSON.parse(
+      readFileSync(
+        path.join(
+          WORKSPACE_ROOT,
+          "packages/shared/src/data/compact-pond-models.json",
+        ),
+        "utf8",
+      ),
+    );
+    assert.equal(Object.keys(contract).length, 5);
+    try {
+      detachAssetDirectory(assetsRoot, "vegetation");
+      const kit = detachAssetDirectory(
+        assetsRoot,
+        "vegetation/compact-pond-v1",
+      );
+      for (const file of Object.keys(contract)) {
+        const destination = path.join(kit, file);
+        rmSync(destination); // Remove the isolated fixture link, never its target.
+        if (mode === "stale") writeFileSync(destination, Buffer.from("stale"));
+      }
+      const result = runValidator(assetsRoot);
+      assert.equal(result.status, 1, result.stderr);
+      for (const [file, hash] of Object.entries(contract)) {
+        assert(
+          result.stderr.includes(
+            `compact pond ${file} ` +
+              (mode === "missing"
+                ? "references a missing asset"
+                : `drifted from SHA-256 ${hash}`),
+          ),
+          result.stderr,
+        );
+      }
+    } finally {
+      rmSync(assetsRoot, { recursive: true, force: true });
+    }
+  });
+}
+
 test("rejects every missing packed compact terrain map", () => {
   const assetsRoot = createAssetsFixture();
   const contract = JSON.parse(

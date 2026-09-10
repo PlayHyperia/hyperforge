@@ -66,6 +66,7 @@ import { FOG_NEAR_SQ, FOG_FAR_SQ, fogRenderTarget } from "./FogConfig";
 import { TERRAIN_CONSTANTS } from "../../../constants/GameConstants";
 import { SUN_SHADE, SUN_LIGHT, NIGHT, applySunShade } from "./LightingConfig";
 import { WorldIlluminationUniforms } from "./WorldIlluminationUniforms";
+import type { WorldTerrainProfile } from "./WorldTerrainProfile";
 
 // ============================================================================
 // CONFIGURATION
@@ -977,7 +978,20 @@ export function applyRimHighlight(
 /**
  * Options for creating tree dissolve materials.
  */
-export type TreeMaterialOptions = DissolveMaterialOptions;
+export type TreeMaterialOptions = DissolveMaterialOptions & {
+  /** Per-world art direction; never inferred from shared material/cache state. */
+  treePalette?: {
+    terrainProfile: WorldTerrainProfile;
+    species: string;
+  };
+};
+
+// The current source leaf maps have uniform visible RGB. Work in linear RGB so
+// map detail/alpha remain intact; these muted hues preserve species recognition.
+const COMPACT_TREE_LEAF_PALETTE = {
+  maple: { source: 0xb75757, target: 0x96534c },
+  magic: { source: 0x1a7c8d, target: 0x4f7e77 },
+} as const;
 
 /**
  * Tree-specific dissolve material with toon shading.
@@ -1027,6 +1041,25 @@ export function createTreeDissolveMaterial(
   });
 
   const material = baseDm as unknown as THREE.MeshStandardNodeMaterial;
+
+  const palette = options.treePalette;
+  if (
+    source.name === "leaf" &&
+    palette?.terrainProfile.kind === "compact-candidate" &&
+    palette.terrainProfile.algorithm === "compact-island-sculpt-v1" &&
+    (palette.species === "maple" || palette.species === "magic")
+  ) {
+    const colors = COMPACT_TREE_LEAF_PALETTE[palette.species];
+    const original = new THREE.Color(colors.source);
+    const target = new THREE.Color(colors.target);
+    material.color.multiply(
+      new THREE.Color(
+        target.r / original.r,
+        target.g / original.g,
+        target.b / original.b,
+      ),
+    );
+  }
 
   const srcMat = source as any;
   const hasVertexColors =

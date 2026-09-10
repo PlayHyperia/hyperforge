@@ -26,6 +26,7 @@ import {
   type TreeMaterialOptions,
 } from "./GPUMaterials";
 import type { Wind } from "./Wind";
+import type { TerrainSystem } from "./TerrainSystem";
 import { getLODDistances, inferLOD1Path, inferLOD2Path } from "./LODConfig";
 import {
   type DissolveAnim,
@@ -360,6 +361,8 @@ async function ensureTreeTypePool(
   if (pending) return pending;
 
   const promise = (async (): Promise<TreeTypePool> => {
+    const terrain = world!.getSystem<TerrainSystem>("terrain");
+    const terrainProfile = terrain?.getWorldTerrainProfile();
     const dissolveOpts = {
       fadeStart: GPU_VEG_CONFIG.FADE_START,
       fadeEnd: GPU_VEG_CONFIG.FADE_END,
@@ -373,6 +376,9 @@ async function ensureTreeTypePool(
       const dm = createTreeDissolveMaterial(p.material, {
         ...dissolveOpts,
         batched: true,
+        treePalette: terrainProfile
+          ? { terrainProfile, species: treeType }
+          : undefined,
       } as TreeMaterialOptions);
       dm.side = THREE.DoubleSide;
       enableTextureRepeat(dm);

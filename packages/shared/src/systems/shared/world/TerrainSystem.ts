@@ -33,6 +33,8 @@ import { createTerrainWorkerConfig } from "../../../utils/workers/TerrainWorkerS
 import type { ShorelineConfig, BiomeNoiseSet } from "./TerrainHeightParams";
 import { BiomeType, DEFAULT_BIOME, BIOME_LIST } from "./TerrainBiomeTypes";
 import { WaterBodyRegistry } from "./WaterBodyRegistry";
+import { createCompactPondDressing } from "./CompactPondDressing";
+import { CompactPondDressingVisuals } from "./CompactPondDressingVisuals";
 import { validateRadialPondTerrainProfile } from "./RadialPondTerrainProfile";
 import { createAuthoredTerrainSurfaceOperations } from "./AuthoredTerrainSurface";
 import {
@@ -324,6 +326,7 @@ export class TerrainSystem extends System {
   // Quad-tree LOD visual manager (client-only, when CONFIG.USE_QUADTREE_LOD is true)
   private quadTreeVisualManager: TerrainVisualManager | null = null;
   private waterVisualManager: WaterVisualManager | null = null;
+  private compactPondDressing: CompactPondDressingVisuals | null = null;
   private grassVisualManager: GrassVisualManager | null = null;
 
   // Unified terrain generator from @hyperforge/procgen
@@ -2085,6 +2088,19 @@ export class TerrainSystem extends System {
       maxSyncChunksPerFrame,
       maxAssembliesPerFrame,
     );
+
+    const pondPlacements = createCompactPondDressing(
+      this.getWorldTerrainProfile(),
+      DataManager.getInstance().getAllWorldAreas(),
+      (x, z) => this.getHeightAtComputed(x, z),
+    );
+    if (pondPlacements.length) {
+      this.compactPondDressing = new CompactPondDressingVisuals(
+        containerParent,
+        pondPlacements,
+      );
+      void this.compactPondDressing.load(this.world);
+    }
 
     // Water quad-tree visual manager — flat water meshes aligned with terrain chunks
     if (this.waterSystem) {
@@ -5762,6 +5778,11 @@ export class TerrainSystem extends System {
         }
 
         this.quadTreeVisualManager.update(pos.x, pos.z);
+        this.compactPondDressing?.update(
+          _deltaTime,
+          (x, z) =>
+            this.quadTreeVisualManager?.getRetainedSurfaceAt(x, z) ?? null,
+        );
 
         if (this.grassVisualManager) {
           this.grassVisualManager.update(pos.x, pos.z, this.world.camera);
@@ -7461,6 +7482,8 @@ export class TerrainSystem extends System {
     this.world.off(EventType.ROADS_MASK_READY, this.onRoadMaskReady);
     this.roadEventsSubscribed = false;
     clearRoadInfluenceTexture(this);
+    this.compactPondDressing?.destroy();
+    this.compactPondDressing = null;
     // Dispose quad-tree visual manager
     if (this.quadTreeVisualManager) {
       this.quadTreeVisualManager.dispose();
@@ -8202,11 +8225,18 @@ export class TerrainSystem extends System {
         : null;
     return {
       ready: Boolean(
-        terrain?.ready && (!this.grassVisualManager || grass?.ready),
+        terrain?.ready &&
+        (!this.grassVisualManager || grass?.ready) &&
+        (!this.compactPondDressing ||
+          this.compactPondDressing.getReceipt().ready),
       ),
       terrain,
       grass,
     };
+  }
+
+  public getCompactPondDressingReceipt() {
+    return this.compactPondDressing?.getReceipt() ?? null;
   }
 
   public getTileSize(): number {

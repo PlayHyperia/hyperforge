@@ -196,6 +196,32 @@ if (
   }
 }
 
+const compactPondModels = readWorkspaceJson(
+  "packages/shared/src/data/compact-pond-models.json",
+);
+const compactPondFiles = [
+  "boulder",
+  "flat_stone",
+  "fern",
+  "bush",
+  "reed_clump",
+].map((name) => `pond_${name}.glb`);
+if (
+  !isRecord(compactPondModels) ||
+  Object.keys(compactPondModels).sort().join("|") !==
+    [...compactPondFiles].sort().join("|")
+) {
+  fail("Compact pond model contract must contain exactly five models");
+} else {
+  for (const file of compactPondFiles) {
+    assertLockedAssetUrl(
+      `compact pond ${file}`,
+      `asset://vegetation/compact-pond-v1/${file}`,
+      compactPondModels[file],
+    );
+  }
+}
+
 const buildings = readJson("buildings.json");
 if (
   !isRecord(buildings) ||

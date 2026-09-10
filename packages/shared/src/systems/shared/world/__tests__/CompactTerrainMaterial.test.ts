@@ -13,7 +13,11 @@ import THREE, {
   vec3,
 } from "../../../../extras/three/three";
 import type { Node } from "three/webgpu";
-import { createTerrainMaterial, TerrainShadeUniforms } from "../TerrainShader";
+import {
+  createTerrainMaterial,
+  TerrainShadeUniforms,
+  sampleNoiseCPU,
+} from "../TerrainShader";
 import {
   COMPACT_TERRAIN_BITMAP_OPTIONS,
   COMPACT_TERRAIN_MATERIAL,
@@ -24,6 +28,7 @@ import {
   createCompactTerrainLayerWeights,
   blendCompactTerrainLayers,
   compactTerrainNormalToView,
+  createCompactGroundProjections,
   type CompactTerrainLayer,
 } from "../CompactTerrainMaterial";
 import { createCompactTerrainColorOperations } from "../CompactTerrainPalette";
@@ -130,6 +135,14 @@ function vectorValue(node: Node): number[] {
     }
   }
   switch (read("method")) {
+    case "floor":
+      return child("aNode").map(Math.floor);
+    case "fract":
+      return child("aNode").map((value) => value - Math.floor(value));
+    case "sin":
+      return child("aNode").map(Math.sin);
+    case "cos":
+      return child("aNode").map(Math.cos);
     case "max":
       return pair(Math.max);
     case "clamp":
@@ -244,6 +257,9 @@ describe("compact terrain actual texture ownership and CPU material graph", () =
       for (const entry of entries.values()) {
         const old = entry.node.value;
         const sampled = entry.node.sample(vec2(0.3, 0.4));
+        const gradientSample = entry.node
+          .grad(vec2(0.01, 0), vec2(0, 0.01))
+          .sample(vec2(0.3, 0.4));
         let disposed = 0;
         old.addEventListener("dispose", () => disposed++);
         // Real decoder -> real DataTexture -> exact production admission method.
@@ -258,6 +274,7 @@ describe("compact terrain actual texture ownership and CPU material graph", () =
           ),
         ).toBe(true);
         expect(sampled.value).toBe(decoded);
+        expect(gradientSample.value).toBe(decoded);
         expect(disposed).toBe(1);
         expect(decoded.colorSpace).toBe(
           entry.key.endsWith("normal-ao")
@@ -378,6 +395,7 @@ describe("compact terrain actual texture ownership and CPU material graph", () =
         owner.getReceipt().textures.map((entry) => entry.textureUuid),
       );
       const seenOwned = new Set<string>();
+      const samples = new Set<Node>();
       const methods = new Set<string>();
       for (const root of [
         material.colorNode!,
@@ -389,14 +407,24 @@ describe("compact terrain actual texture ownership and CPU material graph", () =
           const value: unknown = Reflect.get(node, "value");
           if (value instanceof THREE.Texture && owned.has(value.uuid))
             seenOwned.add(value.uuid);
+          if (
+            value instanceof THREE.Texture &&
+            owned.has(value.uuid) &&
+            Reflect.get(node, "uvNode")
+          )
+            samples.add(node);
           const method: unknown = Reflect.get(node, "method");
           if (typeof method === "string") methods.add(method);
         }
       }
       expect(seenOwned.size).toBe(6);
+      expect(samples.size).toBe(14);
+      expect(
+        [...samples].filter((node) => Reflect.get(node, "gradNode")).length,
+      ).toBe(8);
       expect(methods.has("dFdx")).toBe(true);
       expect(methods.has("dFdy")).toBe(true);
-      expect(COMPACT_TERRAIN_MATERIAL.surfaceSampleCount).toBe(10);
+      expect(COMPACT_TERRAIN_MATERIAL.surfaceSampleCount).toBe(14);
       expect(COMPACT_TERRAIN_BITMAP_OPTIONS).toEqual({
         imageOrientation: "flipY",
         premultiplyAlpha: "none",
@@ -539,6 +567,127 @@ describe("compact terrain actual texture ownership and CPU material graph", () =
       }
     }
   });
+
+  it("keeps antirepeat projection transitions continuous and normals aligned with each actual rotated UV", () => {
+    const at = (noise: number, x = 350, z = 320) =>
+      createCompactGroundProjections(
+        vec2(x, z),
+        float(noise),
+        COMPACT_TERRAIN_MATERIAL.grassRepeatsPerMeter,
+        vec2(1, 0),
+        vec2(0, -1),
+      );
+    const eps = 1e-8;
+    for (const id of [-3, 0, 1, 7, 13, 24, 32]) {
+      const left = at(id / 32 - eps),
+        right = at(id / 32 + eps);
+      expect(vectorValue(left.weight)[0]).toBe(1);
+      expect(vectorValue(right.weight)[0]).toBe(0);
+      for (const key of ["uv", "dx", "dy"] as const)
+        expect(vectorValue(left.b[key])).toEqual(vectorValue(right.a[key]));
+      for (const p of [left.a, left.b, right.a, right.b]) {
+        const dx = vectorValue(p.dx),
+          dy = vectorValue(p.dy);
+        const magnitude = Math.hypot(...dx);
+        expect(magnitude).toBeGreaterThan(0.85 * 0.81);
+        expect(magnitude).toBeLessThan(0.85 * 1.19);
+        expect(dx[0] * dy[0] + dx[1] * dy[1]).toBeCloseTo(0, 12);
+        const normal = createCompactCotangentNormal(
+          vec3(0.75, 0.5, 1),
+          vec3(0, 1, 0),
+          vec3(1, 0, 0),
+          vec3(0, 0, -1),
+          p.dx,
+          p.dy,
+          float(1),
+        );
+        const expected = new THREE.Vector3(
+          (dx[0] / magnitude) * 0.5,
+          1,
+          (-dy[0] / magnitude) * 0.5,
+        ).normalize();
+        const actual = new THREE.Vector3(
+          ...(vectorValue(normal) as [number, number, number]),
+        );
+        expect(actual.distanceTo(expected)).toBeLessThan(1e-12);
+      }
+    }
+    // World anchoring does not depend on node-local UVs or quadtree density.
+    const origin = at(0.431, 350, 320),
+      near = at(0.431, 350 + eps, 320);
+    expect(
+      Math.hypot(
+        ...vectorValue(origin.a.uv).map(
+          (v, i) => v - vectorValue(near.a.uv)[i],
+        ),
+      ),
+    ).toBeLessThan(2e-8);
+  });
+
+  it("removes the old exact 3.33m stamp in actual packed diffuse samples without modifying their bytes", async () => {
+    // CPU bilinear sampling of the real admitted input images demonstrates
+    // texture-coordinate repeat reduction only, not rendering/performance.
+    for (const layer of ["grass", "dirt"] as const) {
+      const png = PNG.sync.read(
+        await readFile(
+          new URL(`${layer}-albedo-roughness.png`, assetDirectory),
+        ),
+      );
+      const texel = (uv: number[]): number[] => {
+        const px = (((uv[0] % 1) + 1) % 1) * png.width - 0.5;
+        const py = (((uv[1] % 1) + 1) % 1) * png.height - 0.5;
+        const x0 = Math.floor(px),
+          y0 = Math.floor(py),
+          fx = px - x0,
+          fy = py - y0;
+        const at = (x: number, y: number, c: number) =>
+          png.data[
+            ((((y % png.height) + png.height) % png.height) * png.width +
+              (((x % png.width) + png.width) % png.width)) *
+              4 +
+              c
+          ] / 255;
+        return [0, 1, 2].map(
+          (c) =>
+            (at(x0, y0, c) * (1 - fx) + at(x0 + 1, y0, c) * fx) * (1 - fy) +
+            (at(x0, y0 + 1, c) * (1 - fx) + at(x0 + 1, y0 + 1, c) * fx) * fy,
+        );
+      };
+      const sample = (x: number, z: number) => {
+        const p = createCompactGroundProjections(
+          vec2(x, z),
+          float(sampleNoiseCPU(x, z, 0.0008)),
+          layer === "grass"
+            ? COMPACT_TERRAIN_MATERIAL.grassRepeatsPerMeter
+            : COMPACT_TERRAIN_MATERIAL.dirtRepeatsPerMeter,
+          vec2(1, 0),
+          vec2(0, 1),
+        );
+        const a = texel(vectorValue(p.a.uv)),
+          b = texel(vectorValue(p.b.uv));
+        const w = vectorValue(p.weight)[0];
+        return a.map((value, i) => value * (1 - w) + b[i] * w);
+      };
+      let baselineDifference = 0,
+        revisedDifference = 0;
+      const oldPeriod = 1 / COMPACT_TERRAIN_MATERIAL.repeatsPerMeter;
+      for (let ix = 0; ix < 8; ix++)
+        for (let iz = 0; iz < 8; iz++) {
+          const x = 260 + ix * 11.7,
+            z = 240 + iz * 13.1;
+          const oldA = texel([x * 0.3, z * 0.3]),
+            oldB = texel([(x + oldPeriod) * 0.3, z * 0.3]);
+          const a = sample(x, z),
+            b = sample(x + oldPeriod, z);
+          for (let c = 0; c < 3; c++) {
+            baselineDifference += (oldA[c] - oldB[c]) ** 2;
+            revisedDifference += (a[c] - b[c]) ** 2;
+          }
+        }
+      expect(Math.sqrt(baselineDifference / 192)).toBeLessThan(1e-10);
+      expect(Math.sqrt(revisedDifference / 192)).toBeGreaterThan(1 / 255);
+    }
+  });
 });
 
 describe("compact grass base palette without changing ecology", () => {
@@ -595,6 +744,7 @@ describe("compact grass base palette without changing ecology", () => {
             float(noiseValue),
             float(slope),
             float(roadInfluence),
+            float(input.distortNoise),
           );
           for (const key of ["dirt", "cliff", "road", "variation"] as const)
             expect(vectorValue(actual[key])[0]).toBeCloseTo(cpu[key], 13);
@@ -614,13 +764,58 @@ describe("compact grass base palette without changing ecology", () => {
           expect(rgb[0]).toBeCloseTo(expected.r, 13);
           expect(rgb[1]).toBeCloseTo(expected.g, 13);
           expect(rgb[2]).toBeCloseTo(expected.b, 13);
-          expect(ops.sample({ ...input, distortNoise: 0.9 })).toEqual(expected);
+          if (roadInfluence <= 0 || roadInfluence >= 1)
+            expect(ops.sample({ ...input, distortNoise: 0.9 })).toEqual(
+              expected,
+            );
         }
     expect(COMPACT_TERRAIN_MATERIAL.dirtNormalStrength).toBe(0.25);
     expect(COMPACT_TERRAIN_MATERIAL.rockNormalStrength).toBe(0.4);
     expect(COMPACT_TERRAIN_MATERIAL.repeatsPerMeter).toBe(0.3);
     expect(COMPACT_TERRAIN_MATERIAL.textureCount).toBe(6);
-    expect(COMPACT_TERRAIN_MATERIAL.surfaceSampleCount).toBe(10);
+    expect(COMPACT_TERRAIN_MATERIAL.surfaceSampleCount).toBe(14);
+  });
+
+  it("wears only the soft path margin with matching CPU and actual TSL weights", () => {
+    const ops = createCompactTerrainColorOperations();
+    for (const edge of [0, 0.1, 0.3, 0.5, 0.7, 1]) {
+      let previous = -1;
+      for (let i = 0; i <= 100; i++) {
+        const road = i / 100;
+        const input = {
+          noiseValue: 0.4,
+          distortNoise: edge,
+          slope: 0,
+          roadInfluence: road,
+        };
+        const actual = createCompactTerrainLayerWeights(
+          float(input.noiseValue),
+          float(0),
+          float(road),
+          float(edge),
+        );
+        const cpu = ops.weights(input);
+        expect(vectorValue(actual.road)[0]).toBeCloseTo(cpu.road, 13);
+        expect(cpu.road).toBeGreaterThanOrEqual(previous);
+        if (i === 0 || i === 100) expect(cpu.road).toBe(road);
+        previous = cpu.road;
+      }
+    }
+    expect(
+      ops.weights({
+        noiseValue: 0.4,
+        slope: 0,
+        roadInfluence: 0.5,
+        distortNoise: 0.1,
+      }).road,
+    ).toBeGreaterThan(
+      ops.weights({
+        noiseValue: 0.4,
+        slope: 0,
+        roadInfluence: 0.5,
+        distortNoise: 0.9,
+      }).road,
+    );
   });
 
   it("runs the actual minified keepNames factory in a fresh worker without bundle helpers", async () => {
