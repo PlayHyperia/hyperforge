@@ -290,6 +290,79 @@ test("preflights every terrain-biome texture loaded by the runtime shader", () =
   }
 });
 
+function detachCompactTerrainKit(assetsRoot) {
+  // Each operation removes only a fixture symlink, never the source directory.
+  detachAssetDirectory(assetsRoot, "terrain");
+  detachAssetDirectory(assetsRoot, "terrain/textures");
+  return detachAssetDirectory(assetsRoot, "terrain/textures/compact-pbr");
+}
+
+test("rejects every missing packed compact terrain map", () => {
+  const assetsRoot = createAssetsFixture();
+  const contract = JSON.parse(
+    readFileSync(
+      path.join(
+        WORKSPACE_ROOT,
+        "packages/shared/src/data/compact-terrain-textures.json",
+      ),
+      "utf8",
+    ),
+  );
+  assert.equal(Object.keys(contract).length, 6);
+  try {
+    const kit = detachCompactTerrainKit(assetsRoot);
+    for (const key of Object.keys(contract))
+      rmSync(path.join(kit, `${key}.png`));
+    const result = runValidator(assetsRoot);
+    assert.equal(result.status, 1, result.stderr);
+    for (const key of Object.keys(contract)) {
+      assert(
+        result.stderr.includes(
+          `compact terrain ${key} references a missing asset`,
+        ),
+        result.stderr,
+      );
+    }
+  } finally {
+    rmSync(assetsRoot, { recursive: true, force: true });
+  }
+});
+
+test("rejects stale bytes in every packed compact terrain map", () => {
+  const assetsRoot = createAssetsFixture();
+  const contract = JSON.parse(
+    readFileSync(
+      path.join(
+        WORKSPACE_ROOT,
+        "packages/shared/src/data/compact-terrain-textures.json",
+      ),
+      "utf8",
+    ),
+  );
+  try {
+    const kit = detachCompactTerrainKit(assetsRoot);
+    for (const key of Object.keys(contract)) {
+      const file = path.join(kit, `${key}.png`);
+      const stale = Buffer.from(readFileSync(file));
+      stale[stale.length - 1] ^= 1;
+      rmSync(file);
+      writeFileSync(file, stale);
+    }
+    const result = runValidator(assetsRoot);
+    assert.equal(result.status, 1, result.stderr);
+    for (const [key, digest] of Object.entries(contract)) {
+      assert(
+        result.stderr.includes(
+          `compact terrain ${key} drifted from SHA-256 ${digest}`,
+        ),
+        result.stderr,
+      );
+    }
+  } finally {
+    rmSync(assetsRoot, { recursive: true, force: true });
+  }
+});
+
 test("preflights every emote unconditionally loaded by ClientNetwork", () => {
   const validatorSource = readFileSync(VALIDATOR_PATH, "utf8");
   const playerEmotesSource = readFileSync(PLAYER_EMOTES_PATH, "utf8");

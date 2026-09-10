@@ -18,6 +18,7 @@ import {
   texture,
   positionWorld,
   normalWorld,
+  normalWorldGeometry,
   screenUV,
   cameraPosition,
   attribute,
@@ -51,6 +52,12 @@ import { getLamppostLightTextureState } from "./LamppostLightMask";
 import { TERRAIN_CONSTANTS } from "../../../constants/GameConstants";
 import { FOG_NEAR_SQ, FOG_FAR_SQ, fogRenderTarget } from "./FogConfig";
 import { SUN_LIGHT, SUN_SHADE } from "./LightingConfig";
+import {
+  CompactTerrainTextureSet,
+  createCompactTerrainLayers,
+  blendCompactTerrainLayers,
+  createCompactTerrainLayerWeights,
+} from "./CompactTerrainMaterial";
 
 export const TERRAIN_SHADER_CONSTANTS = {
   TRIPLANAR_SCALE: 0.5,
@@ -833,7 +840,11 @@ function blendBiome(
   };
 }
 
-function sampleNoiseCPU(worldX: number, worldZ: number, scale: number): number {
+export function sampleNoiseCPU(
+  worldX: number,
+  worldZ: number,
+  scale: number,
+): number {
   const tex = cachedNoiseTexture;
   if (tex?.image?.data) {
     const data = tex.image.data as Uint8Array;
@@ -1152,8 +1163,10 @@ export function updateTerrainVertexLights(
  */
 export function createTerrainMaterial(
   shade = new TerrainShadeUniforms(),
+  options: { compactPbr?: boolean } = {},
 ): THREE.Material & {
   terrainUniforms: TerrainUniforms;
+  compactTerrainSurface?: CompactTerrainTextureSet;
 } {
   // Ensure noise texture is generated (still used for dirt patch variation)
   const noiseTex = generateNoiseTexture();
@@ -1185,7 +1198,9 @@ export function createTerrainMaterial(
   }
 
   const worldPos = positionWorld;
-  const worldNormal = normalWorld;
+  // Material detail must never feed back into ecological slope, layer weights,
+  // or the shared grass macro-shade. Only PBR light response uses normalNode.
+  const worldNormal = options.compactPbr ? normalWorldGeometry : normalWorld;
   const height = worldPos.y;
   const slope = sub(float(1.0), abs(worldNormal.y));
 
@@ -1195,6 +1210,12 @@ export function createTerrainMaterial(
 
   const toCamera = sub(worldPos, cameraPosition);
   const distSq = dot(toCamera, toCamera);
+  const compactTextures = options.compactPbr
+    ? new CompactTerrainTextureSet(getCdnUrl())
+    : null;
+  const compactLayers = compactTextures
+    ? createCompactTerrainLayers(compactTextures, distSq)
+    : null;
 
   // Sample Perlin noise
   const noiseUV = mul(vec2(worldPos.x, worldPos.z), noiseScale);
@@ -1242,15 +1263,20 @@ export function createTerrainMaterial(
     return createTerrainBiomeTex(`${texBase}/${cfg.file}`, ...cfg.fallback);
   };
 
-  const tGrass = loadBiomeTex("grass");
-  const tDirt = loadBiomeTex("dirt");
-  const tCliff = loadBiomeTex("cliff");
-  const tDesertGrass = loadBiomeTex("desertGrass");
-  const tDesertDirt = loadBiomeTex("desertDirt");
-  const tDesertCliff = loadBiomeTex("desertCliff");
-  const tSnowGrass = loadBiomeTex("snowGrass");
-  const tSnowDirt = loadBiomeTex("snowDirt");
-  const tSnowCliff = loadBiomeTex("snowCliff");
+  // Compile-time material choice: compact never loads or binds old biome maps.
+  const legacyTextures = compactLayers
+    ? null
+    : {
+        grass: loadBiomeTex("grass"),
+        dirt: loadBiomeTex("dirt"),
+        cliff: loadBiomeTex("cliff"),
+        desertGrass: loadBiomeTex("desertGrass"),
+        desertDirt: loadBiomeTex("desertDirt"),
+        desertCliff: loadBiomeTex("desertCliff"),
+        snowGrass: loadBiomeTex("snowGrass"),
+        snowDirt: loadBiomeTex("snowDirt"),
+        snowCliff: loadBiomeTex("snowCliff"),
+      };
 
   // UV projections — dual-scale blend to break visible texture tiling.
   // Sample at primary scale and a non-harmonic secondary scale (×0.27),
@@ -1280,12 +1306,20 @@ export function createTerrainMaterial(
   // Flat textures — blend two scales per biome texture
   const dualFlat = (t: THREE.Texture) =>
     mix(texture(t, uvFlat).rgb, texture(t, uvFlat2).rgb, tileBlend);
-  const sGrass = dualFlat(tGrass);
-  const sDirt = dualFlat(tDirt);
-  const sDesertGrass = dualFlat(tDesertGrass);
-  const sDesertDirt = dualFlat(tDesertDirt);
-  const sSnowGrass = dualFlat(tSnowGrass);
-  const sSnowDirt = dualFlat(tSnowDirt);
+  const sGrass = compactLayers?.grass.albedo ?? dualFlat(legacyTextures!.grass);
+  const sDirt = compactLayers?.dirt.albedo ?? dualFlat(legacyTextures!.dirt);
+  const sDesertGrass = compactLayers
+    ? vec3(0)
+    : dualFlat(legacyTextures!.desertGrass);
+  const sDesertDirt = compactLayers
+    ? vec3(0)
+    : dualFlat(legacyTextures!.desertDirt);
+  const sSnowGrass = compactLayers
+    ? vec3(0)
+    : dualFlat(legacyTextures!.snowGrass);
+  const sSnowDirt = compactLayers
+    ? vec3(0)
+    : dualFlat(legacyTextures!.snowDirt);
 
   // Cliff textures — triplanar with dual-scale blend
   const triCliff = (t: THREE.Texture) => {
@@ -1299,9 +1333,13 @@ export function createTerrainMaterial(
     );
     return mix(s1, s2, tileBlend);
   };
-  const sCliff = triCliff(tCliff);
-  const sDesertCliff = triCliff(tDesertCliff);
-  const sSnowCliff = triCliff(tSnowCliff);
+  const sCliff = compactLayers?.rock.albedo ?? triCliff(legacyTextures!.cliff);
+  const sDesertCliff = compactLayers
+    ? vec3(0)
+    : triCliff(legacyTextures!.desertCliff);
+  const sSnowCliff = compactLayers
+    ? vec3(0)
+    : triCliff(legacyTextures!.snowCliff);
 
   const TEX_DARKEN = float(0.65);
 
@@ -1529,7 +1567,21 @@ export function createTerrainMaterial(
   const roadCenterDarken = mul(roadInfluence, float(0.08));
   const compactedRoadColor = sub(roadDetailColor, vec3(roadCenterDarken));
 
-  const baseWithRoads = mix(variedColor, compactedRoadColor, roadInfluence);
+  const compactWeights = compactLayers
+    ? createCompactTerrainLayerWeights(noiseValue, slope, roadInfluenceRaw)
+    : null;
+  const compactSurface =
+    compactLayers && compactWeights
+      ? blendCompactTerrainLayers(
+          compactLayers,
+          compactWeights.dirt,
+          compactWeights.cliff,
+          compactWeights.road,
+        )
+      : null;
+  const baseWithRoads = compactSurface
+    ? mul(compactSurface.albedo, compactWeights!.variation)
+    : mix(variedColor, compactedRoadColor, roadInfluence);
 
   // Half-lambert cool tint + fresnel rim — tints the ALBEDO before PBR.
   // PBR then adds a single Lambert N·L + shadow on top.
@@ -1694,7 +1746,11 @@ export function createTerrainMaterial(
   const material = new MeshStandardNodeMaterial();
   material.colorNode = litTerrain;
   material.roughness = 1.0;
-  material.roughnessNode = surfaceRoughness;
+  material.roughnessNode = compactSurface?.roughness ?? surfaceRoughness;
+  if (compactSurface) {
+    material.normalNode = compactSurface.normal;
+    material.aoNode = compactSurface.ao;
+  }
   material.metalness = 0.0;
   material.side = THREE.FrontSide;
   material.fog = false;
@@ -1718,7 +1774,12 @@ export function createTerrainMaterial(
   };
   const result = material as typeof material & {
     terrainUniforms: TerrainUniforms;
+    compactTerrainSurface?: CompactTerrainTextureSet;
   };
   result.terrainUniforms = terrainUniforms;
+  if (compactTextures) {
+    result.compactTerrainSurface = compactTextures;
+    material.addEventListener("dispose", () => compactTextures.dispose());
+  }
   return result;
 }

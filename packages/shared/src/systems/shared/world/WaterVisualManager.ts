@@ -13,6 +13,10 @@ import THREE from "../../../extras/three/three";
 import type { TerrainQuadNode, QuadTreeListener } from "./TerrainQuadTree";
 import type { ElevatedWaterBody } from "./WaterBodyRegistry";
 import type { WaterSystem, WaterBodyType } from "./WaterSystem";
+import {
+  validateWorldTerrainProfile,
+  type WorldTerrainProfile,
+} from "./WorldTerrainProfile";
 
 const WATER_RESOLUTION_BY_DEPTH: Record<number, number> = {
   0: 2,
@@ -35,6 +39,7 @@ export class WaterVisualManager implements QuadTreeListener {
   private getHeightAt: (x: number, z: number) => number;
   private getIslandMask: (x: number, z: number) => number;
   private waterThreshold: number;
+  private readonly compactOceanOwnership: boolean;
   private chunks = new Map<string, WaterChunk>();
   private elevatedWaterMeshes: THREE.Mesh[] = [];
 
@@ -45,7 +50,16 @@ export class WaterVisualManager implements QuadTreeListener {
     getIslandMask: (x: number, z: number) => number,
     waterThreshold: number,
     elevatedWaterBodies: readonly ElevatedWaterBody[] = [],
+    terrainProfile?: WorldTerrainProfile,
   ) {
+    const profile =
+      terrainProfile === undefined
+        ? undefined
+        : validateWorldTerrainProfile(terrainProfile);
+    if (profile && profile.water.threshold !== waterThreshold) {
+      throw new Error("Water visual threshold differs from terrain profile");
+    }
+    this.compactOceanOwnership = profile?.kind === "compact-candidate";
     this.container = container;
     this.waterSystem = waterSystem;
     this.getHeightAt = getHeightAt;
@@ -141,6 +155,10 @@ export class WaterVisualManager implements QuadTreeListener {
   }
 
   private determineWaterType(node: TerrainQuadNode): WaterBodyType {
+    // Compact terrain has one ocean-level surface. A coastal leaf can be
+    // centered inland while containing ocean: its center mask is not water
+    // ownership. Authored elevated ponds have their own lake meshes below.
+    if (this.compactOceanOwnership) return "ocean";
     const mask = this.getIslandMask(node.centerX, node.centerZ);
     return mask < 0.3 ? "ocean" : "lake";
   }

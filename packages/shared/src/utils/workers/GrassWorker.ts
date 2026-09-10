@@ -31,6 +31,8 @@ import {
 } from "./TerrainWorkerShared";
 import type { TerrainWorkerConfig } from "./TerrainWorker";
 import { createAuthoredTerrainSurfaceOperations } from "../../systems/shared/world/AuthoredTerrainSurface";
+import { createRoadInfluenceOperations } from "../../systems/shared/world/RoadInfluence";
+import { createCompactTerrainColorOperations } from "../../systems/shared/world/CompactTerrainPalette";
 import {
   createGrassTerrainSurfaceOperations,
   GRASS_SURFACE_NORMAL_SAMPLE_DISTANCE,
@@ -372,6 +374,8 @@ BIOME_IDS[BT_CANYON] = 2;
 
 ${buildSampleNoiseJS()}
 ${buildComputeTerrainColorJS()}
+var roadInfluenceOperations = (${createRoadInfluenceOperations.toString()})();
+var compactTerrainColorOperations = (${createCompactTerrainColorOperations.toString()})();
 
 function mulberry32(seed) {
   var s = seed | 0;
@@ -383,31 +387,14 @@ function mulberry32(seed) {
   };
 }
 
-function distToSegSq(px, pz, x1, z1, x2, z2) {
-  var dx = x2 - x1, dz = z2 - z1;
-  var lenSq = dx * dx + dz * dz;
-  if (lenSq === 0) { var ddx = px - x1, ddz = pz - z1; return ddx * ddx + ddz * ddz; }
-  var t = Math.max(0, Math.min(1, ((px - x1) * dx + (pz - z1) * dz) / lenSq));
-  var projX = x1 + t * dx, projZ = z1 + t * dz;
-  var ddx2 = px - projX, ddz2 = pz - projZ;
-  return ddx2 * ddx2 + ddz2 * ddz2;
-}
-
 function calculateRoadInfluence(wx, wz, roadSegments, roadBlendWidth) {
-  if (roadSegments.length === 0) return 0;
-  var minDistSq = Infinity, closestWidth = 6;
+  var influence = 0;
   for (var i = 0; i < roadSegments.length; i++) {
     var seg = roadSegments[i];
-    var dSq = distToSegSq(wx, wz, seg.startX, seg.startZ, seg.endX, seg.endZ);
-    if (dSq < minDistSq) { minDistSq = dSq; closestWidth = seg.width; }
+    influence = Math.max(influence, roadInfluenceOperations.sampleSegment(wx, wz, seg.startX, seg.startZ, seg.endX, seg.endZ, seg.width, roadBlendWidth));
+    if (influence === 1) return 1;
   }
-  var halfW = closestWidth / 2;
-  var totalW = halfW + roadBlendWidth;
-  if (minDistSq >= totalW * totalW) return 0;
-  if (minDistSq <= halfW * halfW) return 1.0;
-  var minDist = Math.sqrt(minDistSq);
-  var t = 1.0 - (minDist - halfW) / roadBlendWidth;
-  return t * t * (3 - 2 * t);
+  return influence;
 }
 
 function generateGrassInstances(input) {
@@ -511,6 +498,14 @@ function generateGrassInstances(input) {
     var tundraW = 1 - forestW - canyonW;
 
     var color = computeTerrainColorCPU(wx, wz, ty, slope, forestW, canyonW, sc);
+    if (input.config.TERRAIN_PROFILE.algorithm === "compact-island-sculpt-v1") {
+      var compactRGB = compactTerrainColorOperations.sample({
+        noiseValue: sampleNoiseCPU(wx, wz, sc.NOISE_SCALE),
+        distortNoise: sampleNoiseCPU(wx, wz, sc.DISTORT_NOISE_SCALE),
+        slope: slope, roadInfluence: roadInf
+      });
+      color.r = compactRGB.r; color.g = compactRGB.g; color.b = compactRGB.b;
+    }
 
     // Biome-blended grass params
     var maxSlope = tCfg.maxSlope * tundraW + fCfg.maxSlope * forestW + cCfg.maxSlope * canyonW;

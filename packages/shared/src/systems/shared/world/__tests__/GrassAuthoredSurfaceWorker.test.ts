@@ -12,7 +12,10 @@ import {
   type GrassTerrainSurfaceZone,
 } from "../../../../utils/workers/GrassTerrainSurfaceSnapshot";
 import { TerrainSystem } from "../TerrainSystem";
-import { TERRAIN_SHADER_CONSTANTS } from "../TerrainShader";
+import {
+  TERRAIN_SHADER_CONSTANTS,
+  computeTerrainColorCPU,
+} from "../TerrainShader";
 import { adjustShorelineHeight } from "../TerrainHeightParams";
 import { createTerrainWorkerConfig } from "../../../../utils/workers/TerrainWorkerShared";
 import type { GrassWorkerSetup } from "../GrassVisualManager";
@@ -247,6 +250,40 @@ function broadGrade(): GrassTerrainSurfaceZone {
 }
 
 describe("actual authored-surface grass worker", () => {
+  it("uses the compact diffuse palette in actual worker and main grass bases without changing placement ecology", async () => {
+    await withTerrain(async (terrain, internals, worker) => {
+      terrain.registerFlatZone(broadGrade());
+      const input = {
+        ...request(terrain, internals, 350, 400, 12),
+        clumpSpacing: 0.2,
+      };
+      const result = await worker.run(input);
+      expect(result.count).toBeGreaterThan(50);
+      let differsFromOldPalette = 0;
+      for (const point of points(input, result)) {
+        const main = terrain.getTerrainColorAt(point.x, point.z, true);
+        const legacy = computeTerrainColorCPU(
+          point.x,
+          point.z,
+          point.y,
+          1 - main.ny,
+          1,
+          0,
+        );
+        expect(main.grassWeight).toBeCloseTo(legacy.grassWeight, 4);
+        for (const [axis, channel] of (["r", "g", "b"] as const).entries()) {
+          expect(
+            Math.abs(
+              result.groundColors[point.index * 3 + axis] - main[channel],
+            ),
+          ).toBeLessThan(0.0002);
+        }
+        if (Math.abs(main.g - legacy.g) > 0.03) differsFromOldPalette++;
+      }
+      expect(differsFromOldPalette).toBeGreaterThan(50);
+    });
+  });
+
   it.each([
     {
       label: "explicit raised-grade regression (not the deployed grade)",

@@ -3,19 +3,29 @@ import type { UniformNode } from "three/webgpu";
 
 // Road influence texture (shared across terrain/grass/flowers)
 // Initialized with dummy 1x1 texture so shaders compile before real data loads
-const dummyRoadData = new Float32Array([0]);
-const roadInfluenceTexture: THREE.DataTexture = new THREE.DataTexture(
-  dummyRoadData,
+function createRoadInfluenceTexture(
+  data: Float32Array,
+  width: number,
+  height: number,
+): THREE.DataTexture {
+  const image = new THREE.DataTexture(
+    data,
+    width,
+    height,
+    THREE.RedFormat,
+    THREE.FloatType,
+  );
+  image.wrapS = image.wrapT = THREE.ClampToEdgeWrapping;
+  image.minFilter = image.magFilter = THREE.LinearFilter;
+  image.needsUpdate = true;
+  return image;
+}
+
+let roadInfluenceTexture = createRoadInfluenceTexture(
+  new Float32Array([0]),
   1,
   1,
-  THREE.RedFormat,
-  THREE.FloatType,
 );
-roadInfluenceTexture.wrapS = THREE.ClampToEdgeWrapping;
-roadInfluenceTexture.wrapT = THREE.ClampToEdgeWrapping;
-roadInfluenceTexture.minFilter = THREE.LinearFilter;
-roadInfluenceTexture.magFilter = THREE.LinearFilter;
-roadInfluenceTexture.needsUpdate = true;
 
 const roadInfluenceTextureNode: ReturnType<typeof texture> =
   texture(roadInfluenceTexture);
@@ -23,6 +33,7 @@ const uRoadInfluenceWorldSize = uniform(1); // World size covered by road textur
 const uRoadInfluenceCenterX = uniform(0); // World center X
 const uRoadInfluenceCenterZ = uniform(0); // World center Z
 const uRoadInfluenceThreshold = uniform(0.15); // Cull threshold
+let activeOwner: object | undefined;
 
 export type RoadInfluenceTextureState = {
   textureNode: ReturnType<typeof texture>;
@@ -53,21 +64,30 @@ export function setRoadInfluenceTextureData(
   worldSize: number,
   centerX = 0,
   centerZ = 0,
+  owner?: object,
 ): void {
-  roadInfluenceTexture.image = { data, width, height };
-  roadInfluenceTexture.needsUpdate = true;
+  activeOwner = owner;
+  const previous = roadInfluenceTexture;
+  if (previous.image.width !== width || previous.image.height !== height) {
+    // A DataTexture's allocated WebGPU dimensions cannot change via needsUpdate.
+    // Keep the base node stable: existing sample() clones follow its new value.
+    roadInfluenceTexture = createRoadInfluenceTexture(data, width, height);
+    roadInfluenceTextureNode.value = roadInfluenceTexture;
+  } else {
+    roadInfluenceTexture.image = { data, width, height };
+    roadInfluenceTexture.needsUpdate = true;
+  }
   uRoadInfluenceWorldSize.value = worldSize;
   uRoadInfluenceCenterX.value = centerX;
   uRoadInfluenceCenterZ.value = centerZ;
+  // Publish the complete replacement before notifying existing GPU bindings.
+  // Three's dispose listeners release the old allocation and invalidate them.
+  if (previous !== roadInfluenceTexture) previous.dispose();
 }
 
-export function clearRoadInfluenceTexture(): void {
-  const emptyData = new Float32Array([0]);
-  roadInfluenceTexture.image = { data: emptyData, width: 1, height: 1 };
-  roadInfluenceTexture.needsUpdate = true;
-  uRoadInfluenceWorldSize.value = 1;
-  uRoadInfluenceCenterX.value = 0;
-  uRoadInfluenceCenterZ.value = 0;
+export function clearRoadInfluenceTexture(owner?: object): void {
+  if (owner && activeOwner !== owner) return;
+  setRoadInfluenceTextureData(new Float32Array([0]), 1, 1, 1);
 }
 
 export function setRoadInfluenceThreshold(threshold: number): void {

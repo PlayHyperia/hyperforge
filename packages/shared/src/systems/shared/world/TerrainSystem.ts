@@ -75,6 +75,8 @@ import {
   getDuelArenaGradeHeight,
 } from "../../../data/arena-grading";
 import { DataManager } from "../../../data/DataManager";
+import { createCompactPreparationDetailRegions } from "./CompactIslandDetail";
+import { createCompactTerrainColorOperations } from "./CompactTerrainPalette";
 // NOTE: Import directly to avoid circular dependency through barrel file
 import { WaterSystem } from "./WaterSystem";
 import {
@@ -112,10 +114,17 @@ import {
   createTerrainMaterial,
   TerrainUniforms,
   computeTerrainColorCPU,
+  sampleNoiseCPU,
+  TERRAIN_SHADER_CONSTANTS,
 } from "./TerrainShader";
 import { isLamppostLightTextureReady } from "./LamppostLightMask";
 import { isCsmEnabled } from "./Environment";
 import type { RoadNetworkSystem } from "./RoadNetworkSystem";
+import { roadInfluenceOperations } from "./RoadInfluence";
+import {
+  setRoadInfluenceTextureData,
+  clearRoadInfluenceTexture,
+} from "./RoadInfluenceMask";
 import type { TownSystem } from "./TownSystem";
 import { TERRAIN_CONSTANTS } from "../../../constants/GameConstants";
 import {
@@ -156,6 +165,7 @@ const SERVER_LAUNCH_PREPARATION_AREA_IDS = [
 
 // Road influence blending - used for shader's roadInfluence attribute
 const ROAD_BLEND_WIDTH = 0.5; // Extra blend distance beyond road width (meters)
+const compactTerrainColorOperations = createCompactTerrainColorOperations();
 const TERRAIN_ROAD_INFLUENCE_DEBUG =
   process.env.TERRAIN_ROAD_INFLUENCE_DEBUG === "true";
 const TERRAIN_TIMING_DEBUG = process.env.TERRAIN_TIMING_DEBUG === "true";
@@ -226,6 +236,7 @@ export class TerrainSystem extends System {
   private _terrainInitialized = false;
   private _initialTilesReady = false; // Track when initial tiles are loaded
   private destroyed = false;
+  private roadInfluenceRefreshGeneration = 0;
   private lastPlayerTile = { x: 0, z: 0 };
   private updateTimer = 0;
   private terrainTime = 0; // For animated caustics
@@ -299,6 +310,7 @@ export class TerrainSystem extends System {
   private waterSystem?: WaterSystem;
   private waterBodyRegistry!: WaterBodyRegistry;
   private roadNetworkSystem?: RoadNetworkSystem;
+  private roadEventsSubscribed = false;
   private _cachedRoadTileX = Number.NaN;
   private _cachedRoadTileZ = Number.NaN;
   private _cachedRoadSegments: ReadonlyArray<RoadTileSegment> = [];
@@ -472,16 +484,16 @@ export class TerrainSystem extends System {
 
   /**
    * Load terrain textures and create the shared terrain material.
-   * Automatically uses KTX2 GPU-compressed textures when available.
+   * Compact terrain uses six channel-packed PBR maps; legacy defaults are kept.
    *
    * This material includes road influence support via the roadInfluence vertex attribute.
    * No fallback material - roads require the full shader to render correctly.
    */
   private initTerrainMaterial(): void {
     const profile = this.getWorldTerrainProfile();
-    // Create the shared terrain material (uses procedural classic MMORPG-style colors, no textures needed)
-    // This material reads the roadInfluence attribute and blends road colors
-    const material = createTerrainMaterial();
+    const material = createTerrainMaterial(undefined, {
+      compactPbr: profile.algorithm === "compact-island-sculpt-v1",
+    });
     // The generator initializes before this client-only material exists. Apply
     // profile-owned options here so the actual published material is configured
     // before shadow setup or any terrain mesh can consume it.
@@ -524,17 +536,13 @@ export class TerrainSystem extends System {
    * Get the terrain material with uniforms for external access (e.g., minimap fog control)
    * Returns null on server since server uses a basic material without uniforms.
    */
-  public getTerrainMaterialWithUniforms():
-    | (THREE.Material & {
-        terrainUniforms: TerrainUniforms;
-      })
-    | null {
+  public getTerrainMaterialWithUniforms(): ReturnType<
+    typeof createTerrainMaterial
+  > | null {
     if (!this.terrainMaterial) return null;
     // Check if material has terrainUniforms (client-only)
     if ("terrainUniforms" in this.terrainMaterial) {
-      return this.terrainMaterial as THREE.Material & {
-        terrainUniforms: TerrainUniforms;
-      };
+      return this.terrainMaterial as ReturnType<typeof createTerrainMaterial>;
     }
     return null;
   }
@@ -1648,6 +1656,21 @@ export class TerrainSystem extends System {
     // Initialize terrain material (client-side only)
     if (this.runtimeIsClient) {
       this.initTerrainMaterial();
+      const material = this.terrainMaterial as ReturnType<
+        typeof createTerrainMaterial
+      >;
+      if (material.compactTerrainSurface) {
+        try {
+          // Generator/height sampling already exists. Admit all actual PBR maps
+          // before this client init can become ready; placeholders are not proof.
+          await material.compactTerrainSurface.load();
+          if (this.destroyed)
+            throw new Error("Terrain destroyed during material admission");
+        } catch (error) {
+          material.dispose();
+          throw error;
+        }
+      }
 
       // TEMPORARILY DISABLED - rock system disabled
       // setProcgenRockWorld(this.world);
@@ -1835,34 +1858,7 @@ export class TerrainSystem extends System {
       }
     }
 
-    // Refresh road influence after the road network becomes available.
-    this.world.on(EventType.ROADS_GENERATED, (...args: unknown[]) => {
-      // Extract road data from event args
-      const data = (args[0] ?? {}) as {
-        roadCount?: number;
-        townCount?: number;
-      };
-      console.log(
-        `[TerrainSystem] ROADS_GENERATED event received: ${data.roadCount ?? 0} roads, ${data.townCount ?? 0} towns`,
-      );
-
-      this.roadNetworkSystem = this.world.getSystem("roads") as
-        RoadNetworkSystem | undefined;
-
-      // Tiles already exist by this point in normal client flow. Refresh them
-      // so roads appear without making road generation block first terrain.
-      if (this.terrainTiles.size > 0) {
-        console.log(
-          "[TerrainSystem] Roads ready, refreshing road influence on loaded tiles...",
-        );
-        this.refreshRoadInfluence();
-      }
-
-      // Rebuild grass chunks so road influence is reflected
-      if (this.grassVisualManager) {
-        this.grassVisualManager.rebuildAllChunks();
-      }
-    });
+    this.subscribeRoadNetworkEvents();
 
     // Start player-based terrain update loop
     // On server, getTerrainCenters() filters out agent players to prevent 25+ agents
@@ -2062,6 +2058,13 @@ export class TerrainSystem extends System {
         splitRatio: this.CONFIG.QUADTREE_SPLIT_RATIO,
         unsplitMultiplier: this.CONFIG.QUADTREE_UNSPLIT_MULTIPLIER,
         resolution: quadTreeResolution,
+        fineDetailRegions: isStreamingViewport
+          ? createCompactPreparationDetailRegions(
+              this.getWorldTerrainProfile(),
+              DataManager.getInstance().getAllWorldAreas(),
+              this.CONFIG.QUADTREE_RESOLUTION,
+            )
+          : [],
         skirtDrop: this.CONFIG.QUADTREE_SKIRT_DROP,
         // The broadcast camera is pinned to the compact arena complex. One
         // 1,600 m root covers the complete 250 m critical scene radius, so
@@ -2100,6 +2103,7 @@ export class TerrainSystem extends System {
         (x: number, z: number) => this.getIslandMask(x, z),
         this.CONFIG.WATER_THRESHOLD,
         this.waterBodyRegistry.getAllBodies(),
+        this.getWorldTerrainProfile(),
       );
 
       const grassContainer = new THREE.Group();
@@ -2145,6 +2149,52 @@ export class TerrainSystem extends System {
         `(minSize=${this.CONFIG.QUADTREE_MIN_SIZE}, maxDepth=${this.CONFIG.QUADTREE_MAX_DEPTH}, ` +
         `resolution=${quadTreeResolution}, splitRatio=${this.CONFIG.QUADTREE_SPLIT_RATIO})`,
     );
+  }
+
+  private readonly onRoadsGenerated = (): void => {
+    if (this.destroyed) return;
+    this.roadNetworkSystem = this.world.getSystem("roads") as
+      RoadNetworkSystem | undefined;
+    // A quadtree-only stream may never have terrainTiles. Always invalidate
+    // cached empty pre-road segments before grass or geometry asks again.
+    this._cachedRoadTileX = Number.NaN;
+    this._cachedRoadTileZ = Number.NaN;
+    this._cachedRoadSegments = [];
+    void this.refreshRoadInfluence().catch((error) => {
+      console.error("[TerrainSystem] Failed to refresh road influence", error);
+    });
+    this.grassVisualManager?.rebuildAllChunks();
+  };
+
+  private readonly onRoadMaskReady = (): void => {
+    if (this.destroyed || !this.runtimeIsClient) return;
+    // Read the registered producer rather than trusting an unrelated event payload.
+    const roads = this.world.getSystem("roads") as
+      RoadNetworkSystem | undefined;
+    const mask = roads?.getRoadInfluenceTextureData();
+    if (!mask) return;
+    setRoadInfluenceTextureData(
+      mask.data,
+      mask.width,
+      mask.height,
+      mask.worldSize,
+      mask.centerX,
+      mask.centerZ,
+      this,
+    );
+  };
+
+  private subscribeRoadNetworkEvents(): void {
+    if (this.roadEventsSubscribed) return;
+    this.roadEventsSubscribed = true;
+    if (this.runtimeIsClient) {
+      setRoadInfluenceTextureData(new Float32Array([0]), 1, 1, 1, 0, 0, this);
+    }
+    this.world.on(EventType.ROADS_GENERATED, this.onRoadsGenerated);
+    this.world.on(EventType.ROADS_MASK_READY, this.onRoadMaskReady);
+    // Admit an already-generated network too, independent of start ordering.
+    if (this.world.getSystem("roads")) this.onRoadsGenerated();
+    this.onRoadMaskReady();
   }
 
   private buildGrassWorkerSetup(): GrassWorkerSetup {
@@ -3362,38 +3412,26 @@ export class TerrainSystem extends System {
     const localX = worldX - roadTileX * this.CONFIG.TILE_SIZE;
     const localZ = worldZ - roadTileZ * this.CONFIG.TILE_SIZE;
 
-    // Find minimum distance and width to any road segment
-    let minDistanceSq = Infinity;
-    let closestWidth = this.CONFIG.ROAD_WIDTH;
-
+    // Union actual path widths; a nearer narrow spur must not erase a wider
+    // path at their junction. This is also used by the worker and road mask.
+    let influence = 0;
     for (const segment of segments) {
-      const distanceSq = this.distanceToLineSegmentLocalSq(
-        localX,
-        localZ,
-        segment.start.x,
-        segment.start.z,
-        segment.end.x,
-        segment.end.z,
+      influence = Math.max(
+        influence,
+        roadInfluenceOperations.sampleSegment(
+          localX,
+          localZ,
+          segment.start.x,
+          segment.start.z,
+          segment.end.x,
+          segment.end.z,
+          segment.width,
+          ROAD_BLEND_WIDTH,
+        ),
       );
-      if (distanceSq < minDistanceSq) {
-        minDistanceSq = distanceSq;
-        closestWidth = segment.width;
-      }
+      if (influence === 1) return 1;
     }
-
-    // Calculate influence based on distance
-    const halfWidth = closestWidth / 2;
-    const totalInfluenceWidth = halfWidth + ROAD_BLEND_WIDTH;
-    const halfWidthSq = halfWidth * halfWidth;
-    const totalInfluenceWidthSq = totalInfluenceWidth * totalInfluenceWidth;
-
-    if (minDistanceSq >= totalInfluenceWidthSq) return 0;
-    if (minDistanceSq <= halfWidthSq) return 1.0;
-
-    // In blend zone - apply smoothstep falloff
-    const minDistance = Math.sqrt(minDistanceSq);
-    const t = 1.0 - (minDistance - halfWidth) / ROAD_BLEND_WIDTH;
-    return t * t * (3 - 2 * t); // smoothstep
+    return influence;
   }
 
   /**
@@ -3562,39 +3600,24 @@ export class TerrainSystem extends System {
       const localX = vertices[i * 2];
       const localZ = vertices[i * 2 + 1];
 
-      let minDistanceSq = Infinity;
-      let closestWidth = this.CONFIG.ROAD_WIDTH;
-
+      let influence = 0;
       for (const segment of segments) {
-        const distanceSq = this.distanceToLineSegmentLocalSq(
-          localX,
-          localZ,
-          segment.start.x,
-          segment.start.z,
-          segment.end.x,
-          segment.end.z,
+        influence = Math.max(
+          influence,
+          roadInfluenceOperations.sampleSegment(
+            localX,
+            localZ,
+            segment.start.x,
+            segment.start.z,
+            segment.end.x,
+            segment.end.z,
+            segment.width,
+            ROAD_BLEND_WIDTH,
+          ),
         );
-        if (distanceSq < minDistanceSq) {
-          minDistanceSq = distanceSq;
-          closestWidth = segment.width;
-        }
+        if (influence === 1) break;
       }
-
-      // Calculate influence
-      const halfWidth = closestWidth / 2;
-      const totalInfluenceWidth = halfWidth + ROAD_BLEND_WIDTH;
-      const halfWidthSq = halfWidth * halfWidth;
-      const totalInfluenceWidthSq = totalInfluenceWidth * totalInfluenceWidth;
-
-      if (minDistanceSq >= totalInfluenceWidthSq) {
-        influences[i] = 0;
-      } else if (minDistanceSq <= halfWidthSq) {
-        influences[i] = 1.0;
-      } else {
-        const minDistance = Math.sqrt(minDistanceSq);
-        const t = 1.0 - (minDistance - halfWidth) / ROAD_BLEND_WIDTH;
-        influences[i] = t * t * (3 - 2 * t); // smoothstep
-      }
+      influences[i] = influence;
     }
 
     return influences;
@@ -3617,34 +3640,59 @@ export class TerrainSystem extends System {
    * MAIN THREAD PROTECTION: Processes tiles in batches with yielding.
    */
   private async refreshRoadInfluence(): Promise<void> {
-    if (!this.roadNetworkSystem) {
+    const generation = ++this.roadInfluenceRefreshGeneration;
+    if (this.destroyed) return;
+    const roadNetwork = this.roadNetworkSystem;
+    if (!roadNetwork) {
       console.warn(
         "[TerrainSystem] Cannot refresh road influence - road system not available",
       );
       return;
     }
+    const isCurrent = (): boolean =>
+      !this.destroyed &&
+      generation === this.roadInfluenceRefreshGeneration &&
+      this.roadNetworkSystem === roadNetwork;
 
     // Invalidate per-tile road segment lookup cache before recomputing attributes.
     this._cachedRoadTileX = Number.NaN;
     this._cachedRoadTileZ = Number.NaN;
     this._cachedRoadSegments = [];
 
-    const roads = this.roadNetworkSystem.getRoads();
+    const roads = roadNetwork.getRoads();
     console.log(
       `[TerrainSystem] Refreshing road influence for ${this.terrainTiles.size} tiles (${roads.length} roads in network)`,
     );
 
-    const tiles = Array.from(this.terrainTiles.values());
+    // Capture mesh/geometry ownership as well as the map entry: a tile can be
+    // regenerated in place while a batch is yielding.
+    const tiles = Array.from(this.terrainTiles, ([key, tile]) => ({
+      key,
+      tile,
+      mesh: tile.mesh,
+      geometry: tile.mesh?.geometry,
+      parent: tile.mesh?.parent,
+    }));
     const TILES_PER_BATCH = 4; // Process 4 tiles per batch
     let tilesUpdated = 0;
     let totalVerticesWithRoads = 0;
 
     for (let tileIdx = 0; tileIdx < tiles.length; tileIdx += TILES_PER_BATCH) {
+      if (!isCurrent()) return;
       const batchEnd = Math.min(tileIdx + TILES_PER_BATCH, tiles.length);
 
       for (let t = tileIdx; t < batchEnd; t++) {
-        const tile = tiles[t];
-        if (!tile.mesh) continue;
+        const { key, tile, mesh, geometry, parent } = tiles[t];
+        if (
+          !isCurrent() ||
+          this.terrainTiles.get(key) !== tile ||
+          !mesh ||
+          tile.mesh !== mesh ||
+          mesh.geometry !== geometry ||
+          mesh.parent !== parent ||
+          !geometry
+        )
+          continue;
 
         const tileX = tile.x;
         const tileZ = tile.z;
@@ -3675,20 +3723,13 @@ export class TerrainSystem extends System {
             rz <= roadTileMaxZ && !hasRoadSegments;
             rz++
           ) {
-            const segments = this.roadNetworkSystem.getRoadSegmentsForTile(
-              rx,
-              rz,
-            );
+            const segments = roadNetwork.getRoadSegmentsForTile(rx, rz);
             if (segments.length > 0) hasRoadSegments = true;
           }
         }
         if (!hasRoadSegments) continue;
 
         // Get geometry and roadInfluence attribute
-        const geometry = (tile.mesh as THREE.Mesh)
-          .geometry as THREE.BufferGeometry;
-        if (!geometry) continue;
-
         const positions = geometry.attributes.position;
         const roadInfluenceAttr = geometry.getAttribute("roadInfluence");
         if (!positions || !(roadInfluenceAttr instanceof THREE.BufferAttribute))
@@ -3725,28 +3766,48 @@ export class TerrainSystem extends System {
       // Yield to main thread between batches
       if (batchEnd < tiles.length) {
         await new Promise<void>((resolve) => setTimeout(resolve, 0));
+        if (!isCurrent()) return;
       }
     }
+
+    if (!isCurrent()) return;
 
     console.log(
       `[TerrainSystem] Road influence refresh (tiles): ${tilesUpdated}/${tiles.length} tiles updated, ${totalVerticesWithRoads} vertices with road influence`,
     );
 
     // Also refresh quad-tree LOD chunks if enabled
-    if (this.quadTreeVisualManager) {
+    const visualManager = this.quadTreeVisualManager;
+    if (visualManager) {
       let quadChunksUpdated = 0;
       let quadVerticesWithRoads = 0;
-      const chunks = this.quadTreeVisualManager.getChunks();
-      const chunkEntries = Array.from(chunks.values());
+      const chunks = visualManager.getChunks();
+      const chunkEntries = Array.from(chunks, ([key, chunk]) => ({
+        key,
+        chunk,
+        mesh: chunk.mesh,
+        geometry: chunk.mesh.geometry,
+        parent: chunk.mesh.parent,
+      }));
       const CHUNKS_PER_BATCH = 4;
 
       for (let ci = 0; ci < chunkEntries.length; ci += CHUNKS_PER_BATCH) {
+        if (!isCurrent() || this.quadTreeVisualManager !== visualManager)
+          return;
         const batchEnd = Math.min(ci + CHUNKS_PER_BATCH, chunkEntries.length);
 
         for (let c = ci; c < batchEnd; c++) {
-          const chunk = chunkEntries[c];
-          const geometry = chunk.mesh.geometry as THREE.BufferGeometry;
-          if (!geometry) continue;
+          const { key, chunk, mesh, geometry, parent } = chunkEntries[c];
+          if (
+            !isCurrent() ||
+            this.quadTreeVisualManager !== visualManager ||
+            chunks.get(key) !== chunk ||
+            chunk.mesh !== mesh ||
+            mesh.geometry !== geometry ||
+            !parent ||
+            mesh.parent !== parent
+          )
+            continue;
 
           const positions = geometry.attributes.position;
           const roadInfluenceAttr = geometry.getAttribute("roadInfluence");
@@ -3758,8 +3819,8 @@ export class TerrainSystem extends System {
 
           const posArray = positions.array as Float32Array;
           const roadArray = roadInfluenceAttr.array as Float32Array;
-          const cx = chunk.mesh.position.x;
-          const cz = chunk.mesh.position.z;
+          const cx = mesh.position.x;
+          const cz = mesh.position.z;
           let vertsWithRoad = 0;
 
           for (let i = 0; i < positions.count; i++) {
@@ -3784,6 +3845,8 @@ export class TerrainSystem extends System {
 
         if (batchEnd < chunkEntries.length) {
           await new Promise<void>((resolve) => setTimeout(resolve, 0));
+          if (!isCurrent() || this.quadTreeVisualManager !== visualManager)
+            return;
         }
       }
 
@@ -5085,6 +5148,29 @@ export class TerrainSystem extends System {
       forestW,
       canyonW,
     );
+    if (
+      this.getWorldTerrainProfile().algorithm === "compact-island-sculpt-v1"
+    ) {
+      // Match the compact diffuse palette, not the superseded biome colors.
+      // Ecology/grassWeight remains independent from the visible base colour.
+      Object.assign(
+        color,
+        compactTerrainColorOperations.sample({
+          noiseValue: sampleNoiseCPU(
+            wx,
+            wz,
+            TERRAIN_SHADER_CONSTANTS.NOISE_SCALE,
+          ),
+          distortNoise: sampleNoiseCPU(
+            wx,
+            wz,
+            TERRAIN_SHADER_CONSTANTS.DISTORT_NOISE_SCALE,
+          ),
+          slope,
+          roadInfluence: this.calculateRoadInfluenceAtVertex(wx, wz, 0, 0),
+        }),
+      );
+    }
 
     const tCfg = getGrassConfigForBiome(BiomeType.Tundra);
     const fCfg = getGrassConfigForBiome(BiomeType.Forest);
@@ -7370,6 +7456,11 @@ export class TerrainSystem extends System {
 
   destroy(): void {
     this.destroyed = true;
+    this.roadInfluenceRefreshGeneration++;
+    this.world.off(EventType.ROADS_GENERATED, this.onRoadsGenerated);
+    this.world.off(EventType.ROADS_MASK_READY, this.onRoadMaskReady);
+    this.roadEventsSubscribed = false;
+    clearRoadInfluenceTexture(this);
     // Dispose quad-tree visual manager
     if (this.quadTreeVisualManager) {
       this.quadTreeVisualManager.dispose();
@@ -7465,6 +7556,9 @@ export class TerrainSystem extends System {
       this.terrainComputeContext = null;
       this.gpuComputeAvailable = false;
     }
+    // Also cancels pending compact texture admission and rejects late loads.
+    this.terrainMaterial?.dispose();
+    this.terrainMaterial = undefined;
   }
 
   private emitTileUnloaded(tileId: string, tileX: number, tileZ: number): void {

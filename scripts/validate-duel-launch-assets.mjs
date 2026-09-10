@@ -171,6 +171,31 @@ function assertLockedAssetUrl(location, value, expectedSha256) {
   }
 }
 
+// The compact client and deployment preflight share one hash-locked kit.
+// Exact known PNG bytes imply the authored dimensions/channels; browser loading
+// additionally validates decode dimensions and explicit non-premultiplied upload.
+const compactTerrainTextures = readWorkspaceJson(
+  "packages/shared/src/data/compact-terrain-textures.json",
+);
+const compactTerrainKeys = ["grass", "dirt", "rock"].flatMap((layer) =>
+  ["albedo-roughness", "normal-ao"].map((channels) => `${layer}-${channels}`),
+);
+if (
+  !isRecord(compactTerrainTextures) ||
+  Object.keys(compactTerrainTextures).sort().join("|") !==
+    [...compactTerrainKeys].sort().join("|")
+) {
+  fail("Compact terrain texture contract must contain exactly six packed maps");
+} else {
+  for (const key of compactTerrainKeys) {
+    assertLockedAssetUrl(
+      `compact terrain ${key}`,
+      `asset://terrain/textures/compact-pbr/${key}.png`,
+      compactTerrainTextures[key],
+    );
+  }
+}
+
 const buildings = readJson("buildings.json");
 if (
   !isRecord(buildings) ||
