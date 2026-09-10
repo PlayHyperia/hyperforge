@@ -220,6 +220,27 @@ Both are pushed and exact-remote verified by the coordinating agent, with GitHub
 author/committer `dreaminglucid` and no post-commit secret-scan findings. All 63
 probe03 input pins still matched after the game commit hooks.
 
+## Follow-up: bounded shutdown diagnostics (2026-09-10)
+
+The launcher shutdown helper now records bounded lifecycle and numeric-only OS
+metadata for its original owned process handles when process-group inspection
+fails. Every such error still fails shutdown, including EPERM if the group later
+disappears. No discovered process becomes a signal target; command lines and
+environment values are not retained. Observations are explicitly non-atomic and
+do not establish historical close events or PID/PGID generation identity.
+
+The coordinating agent reran
+`/opt/homebrew/opt/node@22/bin/node --test scripts/duel-stack-shutdown.test.mjs`:
+20/20 tests passed, zero skipped, in 5.061 seconds (session `12248`). This includes
+a real self-restricted Darwin child returning EPERM, eventual natural child exit,
+and the expected retained failure verdict. The contributing agent separately ran
+all 20 tests with Bun 1.3.14 from `/private/tmp`; running Bun's test command from
+the repository root exited 1 without diagnostics and is not reported as a pass.
+
+This is diagnostic coverage, not an explanation or resolution of probe03's
+natural EPERM. No replacement full-stack/GPU probe has passed from this change,
+and the historical report remains `passed: false`.
+
 ## Remaining common-grade, vegetation and qualification work
 
 An explicit vegetation limitation remains in the candidate: the 72 x 72 m campus

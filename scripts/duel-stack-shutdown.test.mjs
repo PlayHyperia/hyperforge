@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import test from "node:test";
 import {
+  inspectOwnedProcessGroupMetadata,
   observeGameServerShutdown,
   parseGameServerShutdownCompletion,
   resolveDuelStackShutdownPolicy,
@@ -443,6 +444,278 @@ test("startup failure and no owned server keep their existing exit intent", asyn
   const empty = await shutdownDuelStackChildren({ entries: [] });
   assert.equal(empty.exitCode, 0);
   assert.equal(empty.gameServer, null);
+});
+
+test("real owned process metadata contains bounded numeric columns, never command lines", async (t) => {
+  if (process.platform !== "darwin" && process.platform !== "linux") {
+    t.skip("numeric-only ps snapshot is supported on Darwin and Linux");
+    return;
+  }
+  const privateMarker = "shutdown-test-command-text-must-not-be-retained";
+  const owned = await child(t, `${dependencySource}\n// ${privateMarker}`);
+  const metadata = inspectOwnedProcessGroupMetadata(owned.proc);
+  assert.equal(metadata.status, "observed");
+  assert.equal(metadata.ownedPid, owned.proc.pid);
+  assert.equal(metadata.ownedPgid, owned.proc.pid);
+  assert(metadata.completedAt >= metadata.startedAt);
+  assert.equal(metadata.exitCode, 0);
+  assert.equal(metadata.rowsTruncated, false);
+  assert(metadata.rows.length > 0 && metadata.rows.length <= 32);
+  const leader = metadata.rows.find((row) => row.pid === owned.proc.pid);
+  assert(leader, "actual OS snapshot includes the live owned group leader");
+  assert.equal(leader.ppid, process.pid);
+  assert.equal(leader.pgid, owned.proc.pid);
+  assert.equal(leader.uid, process.getuid());
+  for (const row of metadata.rows) {
+    assert(row.pid === owned.proc.pid || row.pgid === owned.proc.pid);
+    assert.deepEqual(Object.keys(row).sort(), [
+      "elapsed",
+      "pgid",
+      "pid",
+      "ppid",
+      "state",
+      "uid",
+    ]);
+  }
+  assert.doesNotMatch(JSON.stringify(metadata), new RegExp(privateMarker, "u"));
+  const result = await shutdownDuelStackChildren({
+    entries: [{ name: "owned-metadata-test", proc: owned.proc }],
+    residualGraceMs: 200,
+    killGraceMs: 1_000,
+  });
+  assert.equal(result.ok, true);
+  assert.equal(
+    result.processGroupDiagnostics.metadataSamples,
+    0,
+    "ordinary shutdown does not invoke ps",
+  );
+  assert.deepEqual(result.processGroupDiagnostics.errors, []);
+  const after = inspectOwnedProcessGroupMetadata(owned.proc);
+  assert.equal(after.status, "observed");
+  assert.deepEqual(after.rows, []);
+});
+
+test("real clean game records leader exit and close and detaches diagnostic listeners", async (t) => {
+  const { result, game, dependency } = await run(
+    t,
+    gameSource(`${emit()} process.exit(0);`),
+  );
+  assert.equal(result.ok, true);
+  const diagnostics = result.processGroupDiagnostics;
+  assert.equal(diagnostics.schemaVersion, 1);
+  assert.equal(diagnostics.runtime.launcherPid, process.pid);
+  assert.equal(diagnostics.runtime.nodeVersion, process.versions.node);
+  assert.equal(diagnostics.runtime.bunVersion, process.versions.bun ?? null);
+  assert.equal(diagnostics.metadataSamples, 0);
+  assert.equal(diagnostics.inspectionErrorCount, 0);
+  assert.equal(diagnostics.omittedOwnedProcesses, 0);
+  const leader = diagnostics.ownedProcesses.find(
+    (entry) => entry.ownedPid === game.proc.pid,
+  );
+  assert.equal(leader.ownedPgid, game.proc.pid);
+  assert.equal(leader.initial.exitCode, null);
+  assert.equal(leader.initial.closeAlreadyObserved, null);
+  assert.equal(leader.current.exitCode, 0);
+  assert.equal(leader.exitObservedSinceShutdownEntry.code, 0);
+  assert.equal(leader.closeObservedSinceShutdownEntry.code, 0);
+  assert(
+    leader.closeObservedSinceShutdownEntry.at >=
+      leader.exitObservedSinceShutdownEntry.at,
+  );
+  for (const proc of [game.proc, dependency.proc]) {
+    assert.equal(proc.listenerCount("exit"), 0);
+    assert.equal(proc.listenerCount("close"), 0);
+  }
+});
+
+test("already-closed real leader does not invent historical close observations", async (t) => {
+  const owned = await child(t, dependencySource);
+  const closed = new Promise((resolve) => owned.proc.once("close", resolve));
+  owned.proc.send("exit");
+  await closed;
+  const result = await shutdownDuelStackChildren({
+    entries: [{ name: "already-closed", proc: owned.proc }],
+  });
+  assert.equal(result.ok, true);
+  const leader = result.processGroupDiagnostics.ownedProcesses[0];
+  assert.equal(leader.initial.exitCode, 9);
+  assert.equal(leader.initial.closeAlreadyObserved, null);
+  assert.equal(leader.exitObservedSinceShutdownEntry, null);
+  assert.equal(leader.closeObservedSinceShutdownEntry, null);
+  assert.match(
+    leader.scope,
+    /earlier close history and PID\/PGID reuse are not established/u,
+  );
+  assert.equal(owned.proc.listenerCount("exit"), 0);
+  assert.equal(owned.proc.listenerCount("close"), 0);
+});
+
+test("real Darwin self-restricted EPERM stays failed after its owned group disappears", async (t) => {
+  if (process.platform !== "darwin" || !existsSync("/usr/bin/sandbox-exec")) {
+    t.skip(
+      "requires Darwin sandbox-exec to deny signals without mocks or privilege changes",
+    );
+    return;
+  }
+  const moduleUrl = new URL("./duel-stack-shutdown.mjs", import.meta.url).href;
+  // Only this subprocess is restricted. Its own child has a short automatic
+  // lifetime, and the test parent retains exact owned handles for cleanup.
+  const source = `
+    import { spawn } from "node:child_process";
+    import { shutdownDuelStackChildren } from ${JSON.stringify(moduleUrl)};
+    const owned = spawn(process.execPath, ["-e", "setTimeout(()=>process.exit(0),700);process.send('ready')"], {
+      detached: true, stdio: ["ignore", "ignore", "ignore", "ipc"], env: {}
+    });
+    process.send({ event: "owned-child", pid: owned.pid });
+    await new Promise((resolve, reject) => {
+      owned.once("message", resolve); owned.once("error", reject);
+    });
+    let inspectionCode = null;
+    try { process.kill(-owned.pid, 0); } catch (error) { inspectionCode = error.code; }
+    if (inspectionCode !== "EPERM") {
+      process.send({ event: "unsupported", inspectionCode });
+      await new Promise((resolve) => owned.once("close", resolve));
+    } else {
+      const result = await shutdownDuelStackChildren({
+        entries: [{ name: "self-restricted-owned", proc: owned }],
+        graceMs: 100, residualGraceMs: 100, killGraceMs: 1_000
+      });
+      process.send({ event: "result", result });
+    }
+    process.disconnect();
+  `;
+  const restricted = spawn(
+    "/usr/bin/sandbox-exec",
+    [
+      "-p",
+      "(version 1)(allow default)(deny signal)",
+      process.execPath,
+      "--input-type=module",
+      "-e",
+      source,
+    ],
+    { detached: true, stdio: ["ignore", "pipe", "pipe", "ipc"], env: {} },
+  );
+  let ownedPid = null;
+  let receipt = null;
+  let unsupported = null;
+  let closed = false;
+  let stderr = "";
+  let spawnError = null;
+  restricted.stdout.resume();
+  restricted.stderr.on("data", (chunk) => {
+    stderr = (stderr + chunk).slice(0, 4_096);
+  });
+  restricted.on("error", (error) => {
+    spawnError = error;
+  });
+  restricted.once("close", () => {
+    closed = true;
+  });
+  restricted.on("message", (message) => {
+    if (message.event === "owned-child") {
+      assert(Number.isSafeInteger(message.pid) && message.pid > 0);
+      assert.notEqual(message.pid, process.pid);
+      assert.notEqual(message.pid, restricted.pid);
+      ownedPid = message.pid;
+    } else if (message.event === "result") receipt = message.result;
+    else if (message.event === "unsupported") unsupported = message;
+  });
+  t.after(async () => {
+    for (const pid of [ownedPid, restricted.pid]) {
+      if (!pid) continue;
+      try {
+        process.kill(-pid, "SIGKILL");
+      } catch (error) {
+        if (error.code !== "ESRCH") throw error;
+      }
+      const deadline = Date.now() + 2_000;
+      while (alive(-pid) && Date.now() < deadline) await delay(10);
+      assert.equal(
+        alive(-pid),
+        false,
+        "exact owned sandbox test group must be gone",
+      );
+    }
+  });
+  const deadline = Date.now() + 5_000;
+  while (!closed && !spawnError && Date.now() < deadline) await delay(10);
+  assert.equal(spawnError, null);
+  assert.equal(closed, true, "self-restricted test is bounded");
+  if (
+    !ownedPid &&
+    /sandbox-exec:.*(?:sandbox_apply|Operation not permitted|not supported)/u.test(
+      stderr,
+    )
+  ) {
+    t.skip("Darwin declined to apply the self-restricted sandbox profile");
+    return;
+  }
+  assert.equal(restricted.exitCode, 0, stderr);
+  if (unsupported) {
+    t.skip(
+      `this Darwin sandbox did not deny owned group inspection (code=${unsupported.inspectionCode})`,
+    );
+    return;
+  }
+  assert(receipt, "actual self-restricted helper produced its receipt");
+  assert.equal(receipt.ok, false);
+  assert.equal(receipt.exitCode, 1);
+  assert.match(
+    receipt.failures.join("; "),
+    /process-group inspection failed:.*EPERM/u,
+  );
+  assert.deepEqual(
+    receipt.remainingGroups,
+    [],
+    "natural child exit does not erase an earlier EPERM",
+  );
+  assert.equal(alive(-ownedPid), false);
+  const diagnostics = receipt.processGroupDiagnostics;
+  assert.equal(diagnostics.runtime.platform, "darwin");
+  assert.equal(diagnostics.runtime.launcherPid, restricted.pid);
+  assert.equal(
+    diagnostics.metadataSamples,
+    1,
+    "repeated EPERM does not resample ps in the poll loop",
+  );
+  assert.equal(diagnostics.errors.length, 1);
+  assert.equal(diagnostics.omittedInspectionErrors, 0);
+  const error = diagnostics.errors[0];
+  assert.equal(error.ownedPid, ownedPid);
+  assert.equal(error.ownedPgid, ownedPid);
+  assert.equal(error.firstError.code, "EPERM");
+  assert.equal(error.firstError.syscall, "kill");
+  assert.equal(error.firstPhase, "before-sigterm");
+  assert(error.occurrences > 1);
+  assert.equal(error.occurrences, diagnostics.inspectionErrorCount);
+  assert(error.lastObservedAt >= error.firstObservedAt);
+  assert.equal(error.leaderAtFirstError.current.exitCode, null);
+  assert(error.metadata.startedAt >= error.firstObservedAt);
+  if (error.metadata.status === "observed") {
+    assert(
+      error.metadata.rows.some(
+        (row) => row.pid === ownedPid && row.pgid === ownedPid,
+      ),
+    );
+    assert(
+      error.metadata.rows.every(
+        (row) => row.pid === ownedPid || row.pgid === ownedPid,
+      ),
+    );
+  } else {
+    // Darwin may also deny spawnSync under this self-restricted profile. That
+    // diagnostic failure must be explicit, not fabricated as an empty ps sample.
+    assert.equal(error.metadata.status, "inspection-failed");
+    assert.equal(error.metadata.error.code, "EPERM");
+    assert.match(error.metadata.error.syscall, /spawnSync.*\/bin\/ps/u);
+    assert.deepEqual(error.metadata.rows, []);
+  }
+  const leader = diagnostics.ownedProcesses[0];
+  assert.equal(leader.current.exitCode, 0);
+  assert.equal(leader.exitObservedSinceShutdownEntry.code, 0);
+  assert.equal(leader.closeObservedSinceShutdownEntry.code, 0);
+  assert(receipt.elapsedMs < 2_000);
 });
 
 test("real game spawn failure is not misrepresented as an active terminal drain", async () => {
