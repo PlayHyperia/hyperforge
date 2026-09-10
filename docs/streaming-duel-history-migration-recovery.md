@@ -15,21 +15,16 @@ incident; that would destroy draw/cancellation evidence.
 - Record the application SHA, database server/version, migration journal,
   database name, table row count, minimum/maximum `finishedAt`, and backup
   checksum in the incident/change record.
-- Take a custom-format PostgreSQL backup that includes schema and data for
-  `streaming_duel_history`; retain the full database backup required by the
-  normal production policy as the authoritative recovery point.
+- Take the full, release-bound custom-format PostgreSQL backup required by
+  [`hyperia-postgres-backup-recovery.md`](./hyperia-postgres-backup-recovery.md).
+  Its evidence includes `streaming_duel_history` and every other public table;
+  a detached table-only dump is not the authoritative recovery point.
 - Restore into a separate recovery database first. Never test a restore by
   overwriting the only production copy.
 
-Example backup command (replace every placeholder explicitly):
-
-```sh
-pg_dump --format=custom \
-  --table='public.streaming_duel_history' \
-  --file='/approved/backup/location/streaming-duel-history.dump' \
-  'postgresql://USER@HOST:PORT/DATABASE'
-sha256sum '/approved/backup/location/streaming-duel-history.dump'
-```
+Use the canonical create and independent-verify commands in the full recovery
+runbook. They reject password-bearing URLs and aliases, bind the archive and TOC
+to the exact release/boundary/schema/migration journal, and refuse overwrite.
 
 ## Migration verification
 
@@ -69,17 +64,38 @@ stable SHA-256 fingerprint.
 1. Stop all history writers and capture a second forensic backup of the current
    state before changing anything.
 2. Create a separate recovery database with the same PostgreSQL major version.
-3. Restore the approved full backup or table backup into that database with
-   `pg_restore`; apply migrations through `0058`; then run row counts, outcome
-   counts, nullability checks, timestamp bounds, and application hydration/API
-   validation.
-4. Compare the restored artifact checksum and database evidence with the change
+3. Restore the approved full backup into that database with `pg_restore`, then
+   run the canonical `verify-restored` command before the history-specific
+   outcome counts, nullability checks, and timestamp bounds. Create and
+   independently verify both the restore certificate and the
+   `db:restored-duel-application-readiness` certificate from
+   [`hyperia-postgres-backup-recovery.md`](./hyperia-postgres-backup-recovery.md)
+   before any application startup. The latter runs the production recent-duel
+   hydrator and public-history sanitizer twice against the isolated database,
+   retains the exact bounded competitive public facts for independent digest
+   and restored-terminal comparison, and does not authorize writers or
+   cutover. Do not apply migrations on top of
+   an archive whose checked-in migration journal does not already match.
+4. Build and start the exact approved production server artifact against the
+   isolated database with migrations and all scheduler, capture, agent, oracle,
+   web3, external-value, and alert-delivery authorities disabled. Require
+   bounded healthy startup, exact restored public history, the expected
+   capture-disabled streaming-health response, and graceful termination. The
+   only accepted startup mutations are one monotonic betting-source-epoch
+   advance and the exact named scheduler lease lifecycle. Do not rewind or
+   delete those records on a real recovery candidate; the disposable local
+   qualifier's targeted cleanup is test-fixture behavior only.
+5. Compare the restored artifact checksum and database evidence with the change
    record. Have a second operator approve the recovery target and evidence.
-5. Promote the recovered database using the infrastructure's approved database
+6. Promote the recovered database using the infrastructure's approved database
    cutover procedure. Keep streaming duels disabled until the public history,
    authenticated monitor, and scheduler startup load all agree.
 
 This local verifier proves migration semantics, legacy-writer compatibility,
-and exact table-data restoration. A production-volume anonymized copy, external
-backup/restore rehearsal, measured timing, and two-person staging cutover remain
-required before this runbook can be signed off for launch.
+exact table-data restoration, and the restored production Hyperia server's
+bounded startup/read-path compatibility. The cross-repository owned-local
+recovery qualification separately proves the actual Hyperbet production read
+service against the exact materialized Keeper state. Finalized Solana
+reconciliation, a production-volume anonymized copy, external backup/restore
+rehearsal, measured timing, and two-person staging cutover remain required
+before this runbook can be signed off for launch.

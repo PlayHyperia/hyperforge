@@ -1,0 +1,30 @@
+{
+  "schemaVersion": 1,
+  "date": "2026-09-05",
+  "scope": "Opt-in neutral shorts replacement lifecycle; not finished asset or browser rendering approval",
+  "rootIndependentlyReran": true,
+  "testFilesPassed": 4,
+  "testsPassed": 111,
+  "newWearStateTests": 36,
+  "existingRegressionTests": 75,
+  "vitestVersion": "4.1.10",
+  "sharedTypecheckPassed": true,
+  "fiveFileEslintPassed": true,
+  "scopedExistingFileDiffCheckPassed": true,
+  "reviewFindingsFixed": [
+    "Cross-slot attachment hid old-VRM ownership during avatar replacement",
+    "Hidden-avatar attachment did not reacquire clothing visibility at readiness"
+  ],
+  "files": {
+    "packages/shared/src/systems/client/NeutralShortsWearState.ts": "7a8186739ed1eba2b7e59315203ad95facee3ad6fc9cfa4eae51ecab29da6a16",
+    "packages/shared/src/systems/client/EquipmentVisualSystem.ts": "dd07f1cd83e337ecb4cbd7261b7b1a60952559dfc0524e9743dc56d27ecc662b",
+    "packages/shared/src/systems/client/EquipmentVisualHelpers.ts": "0be74c472fde0a825bdf3b41a19d5a17251bf39e94877424a05615fd1fd7c79d",
+    "packages/shared/src/systems/client/__tests__/NeutralShortsWearState.test.ts": "a1767551346d67143a5c1e1eda542103e77cd648be553d82db60834da87ad31a",
+    "packages/shared/src/systems/client/__tests__/EquipmentVisualSystem.test.ts": "0e415908cfe51d568c16ddc39c816f54d332008b3f5fcbf3a26606948b5604a2"
+  },
+  "assetsOptedIn": false,
+  "defaultOrProductionAssetsPromoted": false,
+  "actualAssetExportCloneLodVerified": false,
+  "hardwareWebgpuWearStateVerified": false,
+  "fullGarmentFitApproved": false
+}

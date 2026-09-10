@@ -166,6 +166,10 @@ icloud-placeholders-*/
 /packages/plugin-hyperia/dist.partial-*/
 /packages/procgen/src.head-*/
 /bun 2.lock
+/.git-dataless-backup-*
+node_modules.*backup*/
+node_modules.asset-test-links-*/
+/packages/web3/dist 2/
 
 # Generated diagnostic runs: retain locally; commit reviewed summaries separately
 /artifacts/
