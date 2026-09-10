@@ -4318,7 +4318,6 @@ export class TerrainSystem extends System {
     const checked = this._flatZoneChecked;
     const result = {
       radialZone: null as FlatZone | null,
-      radialHeight: null as number | null,
       radialDistance: Infinity,
       coreZone: null as FlatZone | null,
       coreDist: Infinity,
@@ -4338,22 +4337,16 @@ export class TerrainSystem extends System {
           checked.add(zone.id);
 
           if (zone.radialPond) {
-            const radialHeight = resolveRadialPondTerrainHeight(
-              zone,
-              worldX,
-              worldZ,
-              () => this.getProceduralHeightAt(worldX, worldZ),
+            const distance = Math.hypot(
+              worldX - zone.centerX,
+              worldZ - zone.centerZ,
             );
-            if (radialHeight !== null) {
-              const distance = Math.hypot(
-                worldX - zone.centerX,
-                worldZ - zone.centerZ,
-              );
-              if (distance < result.radialDistance) {
-                result.radialZone = zone;
-                result.radialHeight = radialHeight;
-                result.radialDistance = distance;
-              }
+            if (
+              distance < zone.radialPond.bankOuterRadius + zone.blendRadius &&
+              distance < result.radialDistance
+            ) {
+              result.radialZone = zone;
+              result.radialDistance = distance;
             }
             continue;
           }
@@ -4377,17 +4370,39 @@ export class TerrainSystem extends System {
       }
     }
 
-    if (result.radialZone && result.radialHeight !== null) {
-      if (!this._flatZoneLoggedZones.has(result.radialZone.id)) {
-        this._flatZoneLoggedZones.add(result.radialZone.id);
-      }
-      this._flatZoneHitCount++;
-      return result.radialHeight;
-    }
-
     const bestCoreZone = result.coreZone;
     const bestBlendZone = result.blendZone;
     const bestBlendFactor = result.blendFactor;
+
+    // Resolve the underlying non-radial surface only after every candidate has
+    // been classified. A pond's outer blend must meet the same authored grade
+    // returned just outside it, not jump back from raw procedural terrain.
+    // Do not recurse into getFlatZoneHeight: it reuses the shared checked Set.
+    const getUnderlyingHeight = (): number => {
+      if (bestCoreZone) return bestCoreZone.height;
+      const proceduralHeight = this.getProceduralHeightAt(worldX, worldZ);
+      if (!bestBlendZone) return proceduralHeight;
+      const t = bestBlendFactor * bestBlendFactor * (3 - 2 * bestBlendFactor);
+      return (
+        bestBlendZone.height + (proceduralHeight - bestBlendZone.height) * t
+      );
+    };
+
+    if (result.radialZone) {
+      const radialHeight = resolveRadialPondTerrainHeight(
+        result.radialZone,
+        worldX,
+        worldZ,
+        getUnderlyingHeight,
+      );
+      if (radialHeight !== null) {
+        if (!this._flatZoneLoggedZones.has(result.radialZone.id)) {
+          this._flatZoneLoggedZones.add(result.radialZone.id);
+        }
+        this._flatZoneHitCount++;
+        return radialHeight;
+      }
+    }
 
     // If in a core area, return that zone's flat height.
     if (bestCoreZone) {
@@ -4401,15 +4416,7 @@ export class TerrainSystem extends System {
 
     // If in a blend area, smoothly interpolate
     if (bestBlendZone) {
-      const proceduralHeight = this.getProceduralHeightAt(worldX, worldZ);
-
-      // Smoothstep: t² × (3 - 2t) for C1 continuous transition
-      const t = bestBlendFactor * bestBlendFactor * (3 - 2 * bestBlendFactor);
-
-      // Interpolate from flat height (t=0) to procedural height (t=1)
-      return (
-        bestBlendZone.height + (proceduralHeight - bestBlendZone.height) * t
-      );
+      return getUnderlyingHeight();
     }
 
     return null;
@@ -4816,29 +4823,57 @@ export class TerrainSystem extends System {
       console.warn(`[TerrainSystem] duel_arena NOT in ALL_WORLD_AREAS!`);
     }
 
-    for (const [areaId, area] of Object.entries(ALL_WORLD_AREAS)) {
-      // Check for both stations and explicit flatZones
-      const areaConfig = area as {
-        stations?: typeof area.stations;
-        flatZones?: Array<{
-          id: string;
-          centerX: number;
-          centerZ: number;
-          width: number;
-          depth: number;
-          height?: number;
-          heightOffset?: number;
-          blendRadius: number;
-          radialPond?: RadialPondTerrainProfile;
-        }>;
-      };
+    const areaConfigs = Object.values(ALL_WORLD_AREAS).map(
+      (area) =>
+        area as {
+          stations?: typeof area.stations;
+          flatZones?: Array<{
+            id: string;
+            centerX: number;
+            centerZ: number;
+            width: number;
+            depth: number;
+            height?: number;
+            heightOffset?: number;
+            blendRadius: number;
+            radialPond?: RadialPondTerrainProfile;
+          }>;
+        },
+    );
 
-      // Skip areas with neither stations nor flatZones
-      if (!areaConfig.stations?.length && !areaConfig.flatZones?.length) {
-        continue;
+    // Establish authored grading across ALL areas before sampling station pads.
+    // A station may sit on a plaza or pond declared in a different, later area.
+    for (const areaConfig of areaConfigs) {
+      for (const zoneConfig of areaConfig.flatZones ?? []) {
+        const proceduralHeight = this.getProceduralHeightAt(
+          zoneConfig.centerX,
+          zoneConfig.centerZ,
+        );
+        const flatHeight =
+          zoneConfig.height !== undefined
+            ? zoneConfig.height
+            : proceduralHeight + (zoneConfig.heightOffset ?? 0);
+
+        this.registerFlatZone({
+          id: zoneConfig.id,
+          centerX: zoneConfig.centerX,
+          centerZ: zoneConfig.centerZ,
+          width: zoneConfig.width,
+          depth: zoneConfig.depth,
+          height: flatHeight,
+          blendRadius: zoneConfig.blendRadius,
+          radialPond: zoneConfig.radialPond
+            ? { ...zoneConfig.radialPond }
+            : undefined,
+        });
+        loadedCount++;
       }
+    }
 
-      // Process stations (if any)
+    // Collect every pad before registering any of them. Sampling and registering
+    // sequentially would let an earlier station's pad change a later one's grade.
+    const stationZones: FlatZone[] = [];
+    for (const areaConfig of areaConfigs) {
       if (areaConfig.stations) {
         for (const station of areaConfig.stations) {
           const stationData = stationDataProvider.getStationData(station.type);
@@ -4862,11 +4897,11 @@ export class TerrainSystem extends System {
           const width = size.x * MOVEMENT_TILE_SIZE + padding * 2;
           const depth = size.z * MOVEMENT_TILE_SIZE + padding * 2;
 
-          // Get procedural height at station center (what terrain would be without flattening)
-          const flatHeight = this.getProceduralHeightAt(
-            station.position.x,
-            station.position.z,
-          );
+          // Use explicit-only grading, preserving radial pond/core/blend
+          // precedence. Stations outside authored grading retain raw terrain.
+          const flatHeight =
+            this.getFlatZoneHeight(station.position.x, station.position.z) ??
+            this.getProceduralHeightAt(station.position.x, station.position.z);
 
           const zone: FlatZone = {
             id: `station_${station.id}`,
@@ -4878,43 +4913,13 @@ export class TerrainSystem extends System {
             blendRadius,
           };
 
-          this.registerFlatZone(zone);
-          loadedCount++;
+          stationZones.push(zone);
         }
       }
-
-      // Also load explicit flatZones defined in the area config (e.g., duel arenas, special platforms)
-      if (areaConfig.flatZones) {
-        for (const zoneConfig of areaConfig.flatZones) {
-          // Calculate base height from procedural terrain
-          const proceduralHeight = this.getProceduralHeightAt(
-            zoneConfig.centerX,
-            zoneConfig.centerZ,
-          );
-
-          // Use explicit height if provided, otherwise procedural + offset
-          const flatHeight =
-            zoneConfig.height !== undefined
-              ? zoneConfig.height
-              : proceduralHeight + (zoneConfig.heightOffset ?? 0);
-
-          const zone: FlatZone = {
-            id: zoneConfig.id,
-            centerX: zoneConfig.centerX,
-            centerZ: zoneConfig.centerZ,
-            width: zoneConfig.width,
-            depth: zoneConfig.depth,
-            height: flatHeight,
-            blendRadius: zoneConfig.blendRadius,
-            radialPond: zoneConfig.radialPond
-              ? { ...zoneConfig.radialPond }
-              : undefined,
-          };
-
-          this.registerFlatZone(zone);
-          loadedCount++;
-        }
-      }
+    }
+    for (const zone of stationZones) {
+      this.registerFlatZone(zone);
+      loadedCount++;
     }
 
     console.log(

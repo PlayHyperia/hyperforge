@@ -16,6 +16,10 @@ import type { World } from "../../../types/index";
 import { SystemBase } from "../infrastructure/SystemBase";
 import { EntityType } from "../../../types/entities";
 
+// Authored station model offsets compensate for this entity-origin clearance.
+// Keep it shared with the real-asset grounding regression, not duplicated there.
+export const STATION_GROUND_CLEARANCE = 0.1;
+
 export class StationSpawnerSystem extends SystemBase {
   constructor(world: World) {
     super(world, {
@@ -81,7 +85,7 @@ export class StationSpawnerSystem extends SystemBase {
             station.position.x,
             station.position.z,
           ) ?? 40;
-        const spawnY = groundY + 0.1; // Slight offset to sit on ground
+        const spawnY = groundY + STATION_GROUND_CLEARANCE;
 
         // Get station manifest data for display name
         const stationData = stationDataProvider.getStationData(station.type);

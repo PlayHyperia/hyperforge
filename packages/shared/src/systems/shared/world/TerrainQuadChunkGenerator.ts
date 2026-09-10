@@ -68,6 +68,7 @@ export interface FullTerrainProvider extends ChunkTerrainProvider {
 
 export interface ChunkGeometryResult {
   geometry: THREE.BufferGeometry;
+  /** Final main-grid heights, including live flat zones, without skirt vertices. */
   heightData: Float32Array;
 }
 
@@ -109,6 +110,10 @@ export function assembleQuadChunkGeometry(
   const riverProximities = new Float32Array(totalVertices);
 
   let flatZoneModified = false;
+  // Preserve the worker result: it can still be held by a caller/cache. Chunks
+  // without live overrides keep the original allocation; modified chunks expose
+  // the same Float32 heights as their rendered main-grid position attribute.
+  let surfaceHeights = heightData;
 
   for (let iz = 0; iz < segments; iz++) {
     const localZ = -halfSize + iz * gridStep;
@@ -125,6 +130,8 @@ export function assembleQuadChunkGeometry(
       const flatHeight = provider.getFlatZoneHeight(worldX, worldZ);
       if (flatHeight !== null) {
         height = flatHeight;
+        if (!flatZoneModified) surfaceHeights = heightData.slice();
+        surfaceHeights[idx] = height;
         flatZoneModified = true;
       }
 
@@ -156,8 +163,28 @@ export function assembleQuadChunkGeometry(
     }
   }
 
-  if (flatZoneModified) {
-    recomputeNormals(positions, normals, segments, gridStep);
+  // A neighboring grade can change an edge normal without touching any vertex
+  // inside this chunk. Check only the normal stencil's outer samples in that
+  // case; ungraded chunks still avoid all computed-height queries.
+  if (
+    flatZoneModified ||
+    hasGradingInNormalBorder(
+      segments,
+      gridStep,
+      centerX - halfSize,
+      centerZ - halfSize,
+      provider,
+    )
+  ) {
+    recomputeNormals(
+      positions,
+      normals,
+      segments,
+      gridStep,
+      centerX - halfSize,
+      centerZ - halfSize,
+      provider,
+    );
   }
 
   // =========================================================================
@@ -303,18 +330,54 @@ export function assembleQuadChunkGeometry(
   geometry.computeBoundingBox();
   geometry.computeBoundingSphere();
 
-  return { geometry, heightData };
+  return { geometry, heightData: surfaceHeights };
+}
+
+/**
+ * Test the four one-step-outside normal stencils, not the whole neighboring
+ * chunk. At most 4N grading queries are needed; stop at the first affected one.
+ * No height query is needed when all these samples are ungraded.
+ */
+function hasGradingInNormalBorder(
+  segments: number,
+  gridStep: number,
+  minX: number,
+  minZ: number,
+  provider: ChunkTerrainProvider,
+): boolean {
+  const maxX = minX + (segments - 1) * gridStep;
+  const maxZ = minZ + (segments - 1) * gridStep;
+  for (let i = 0; i < segments; i++) {
+    const x = minX + i * gridStep;
+    const z = minZ + i * gridStep;
+    if (
+      provider.getFlatZoneHeight(minX - gridStep, z) !== null ||
+      provider.getFlatZoneHeight(maxX + gridStep, z) !== null ||
+      provider.getFlatZoneHeight(x, minZ - gridStep) !== null ||
+      provider.getFlatZoneHeight(x, maxZ + gridStep) !== null
+    ) {
+      return true;
+    }
+  }
+  return false;
 }
 
 /**
  * Recompute normals for the main grid after flat-zone height overrides.
- * Uses simple centered finite differences from the position buffer.
+ * Uses centered finite differences from the final position buffer. At chunk
+ * edges, sample the final height field one grid step beyond the chunk rather
+ * than clamping to the edge (which halves the slope and creates lighting seams).
+ * Extra terrain work is bounded to four samples per grid row/column, not one
+ * procedural evaluation per interior vertex.
  */
 function recomputeNormals(
   positions: Float32Array,
   normals: Float32Array,
   segments: number,
   gridStep: number,
+  minX: number,
+  minZ: number,
+  provider: ChunkTerrainProvider,
 ): void {
   const invTwoStep = 1 / (2 * gridStep);
 
@@ -323,15 +386,32 @@ function recomputeNormals(
       const idx = iz * segments + ix;
       const i3 = idx * 3;
 
-      const izN = Math.max(0, iz - 1);
-      const izS = Math.min(segments - 1, iz + 1);
-      const ixW = Math.max(0, ix - 1);
-      const ixE = Math.min(segments - 1, ix + 1);
-
-      const hL = positions[(iz * segments + ixW) * 3 + 1];
-      const hR = positions[(iz * segments + ixE) * 3 + 1];
-      const hD = positions[(izN * segments + ix) * 3 + 1];
-      const hU = positions[(izS * segments + ix) * 3 + 1];
+      const worldX = minX + ix * gridStep;
+      const worldZ = minZ + iz * gridStep;
+      const hL =
+        ix > 0
+          ? positions[(idx - 1) * 3 + 1]
+          : Math.fround(
+              provider.getHeightAtComputed(worldX - gridStep, worldZ),
+            );
+      const hR =
+        ix < segments - 1
+          ? positions[(idx + 1) * 3 + 1]
+          : Math.fround(
+              provider.getHeightAtComputed(worldX + gridStep, worldZ),
+            );
+      const hD =
+        iz > 0
+          ? positions[(idx - segments) * 3 + 1]
+          : Math.fround(
+              provider.getHeightAtComputed(worldX, worldZ - gridStep),
+            );
+      const hU =
+        iz < segments - 1
+          ? positions[(idx + segments) * 3 + 1]
+          : Math.fround(
+              provider.getHeightAtComputed(worldX, worldZ + gridStep),
+            );
 
       const dhdx = (hR - hL) * invTwoStep;
       const dhdz = (hU - hD) * invTwoStep;
