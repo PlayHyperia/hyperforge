@@ -1,5 +1,6 @@
 import { Worker } from "node:worker_threads";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
+import { RetainedGridFixture } from "./terrain-grid.fixture";
 import THREE from "../../../../extras/three/three";
 import {
   GRASS_WORKER_CODE,
@@ -144,15 +145,23 @@ function grassSetup(profile: WorldTerrainProfile): GrassWorkerSetup {
   };
 }
 
+const retainedFixtures: RetainedGridFixture[] = [];
+afterEach(() => {
+  for (const fixture of retainedFixtures.splice(0)) fixture.dispose();
+});
+
 function grassManager(
   container: THREE.Group,
   setup: GrassWorkerSetup | undefined = grassSetup(compact),
   terrainIdentity = identity,
   waterThreshold = compact.water.threshold,
 ) {
+  const grid = new RetainedGridFixture(terrainIdentity, () => 25);
+  retainedFixtures.push(grid);
   return new GrassVisualManager(
     terrainIdentity,
     container,
+    grid.get,
     () => 25,
     waterThreshold,
     () => 0,
@@ -480,7 +489,12 @@ describe("terrain visual profile admission with real geometry and workers", () =
       expect(container.children).toEqual([mesh]);
       expect(geometryDisposed).toBe(false);
       expect(() =>
-        manager["createChunkMeshFromWorkerData"](node, stale, 1),
+        manager["createChunkMeshFromWorkerData"](node, stale, 1, {
+          schemaVersion: 1,
+          surfaceRevision: "not-admitted",
+          computedHeights: new Float32Array(stale.count),
+          ecologicalNormals: new Float32Array(stale.count * 3),
+        }),
       ).toThrow(/result profile identity mismatch/);
     } finally {
       manager.destroy();
@@ -488,5 +502,97 @@ describe("terrain visual profile admission with real geometry and workers", () =
     }
     expect(geometryDisposed).toBe(true);
     expect(container.children).toHaveLength(0);
+  });
+
+  it("exposes only the actual retained terrain revision and retires invalidated or mutated geometry", () => {
+    const container = new THREE.Group();
+    const material = new THREE.MeshBasicMaterial();
+    const manager = terrainManager(
+      new ProfileTerrain(compact),
+      container,
+      material,
+    );
+    const node = leaf(manager.getQuadTree());
+    try {
+      expect(manager.getRetainedSurface(node)).toBeNull();
+      manager["generateChunkSync"](node);
+      const first = manager.getRetainedSurface(node)!;
+      expect(first).not.toBeNull();
+      expect(first.revision).toBe(
+        (container.children[0] as THREE.Mesh).geometry.uuid,
+      );
+      expect(first.nodeId).toBe(node.id);
+      manager.invalidateRegion(349, 399, 351, 401);
+      expect(manager.getRetainedSurface(node)).toBeNull();
+      manager["generateChunkSync"](node);
+      const second = manager.getRetainedSurface(node)!;
+      expect(second.revision).not.toBe(first.revision);
+      (container.children[0] as THREE.Mesh).geometry.getAttribute(
+        "position",
+      ).needsUpdate = true;
+      expect(manager.getRetainedSurface(node)).toBeNull();
+      manager.invalidateRegion(349, 399, 351, 401);
+      manager["generateChunkSync"](node);
+      const geometry = (container.children[0] as THREE.Mesh).geometry;
+      expect(manager.getRetainedSurface(node)).not.toBeNull();
+      geometry.setIndex(geometry.getIndex()!.clone());
+      expect(manager.getRetainedSurface(node)).toBeNull();
+    } finally {
+      manager.dispose();
+      material.dispose();
+    }
+  });
+
+  it("withholds child grass contact while a retained ancestor still overlaps the child", () => {
+    const container = new THREE.Group();
+    const material = new THREE.MeshBasicMaterial();
+    const manager = terrainManager(
+      new ProfileTerrain(compact),
+      container,
+      material,
+    );
+    const tree = manager.getQuadTree();
+    const parent = tree.createNode(null, null, 32, 350, 400, 0);
+    try {
+      manager["generateChunkSync"](parent);
+      parent.split();
+      const children = [...parent.children.values()];
+      manager["generateChunkSync"](children[0]);
+      expect(manager.getRetainedSurface(children[0])).toBeNull();
+      for (const child of children.slice(1))
+        manager["generateChunkSync"](child);
+      expect(parent.visualChunkKey).toBeNull();
+      expect(manager.getRetainedSurface(children[0])).not.toBeNull();
+    } finally {
+      manager.dispose();
+      material.dispose();
+    }
+  });
+
+  it("rejects an invalid retained grid before attaching any terrain mesh or marking its node ready", () => {
+    const container = new THREE.Group();
+    const material = new THREE.MeshBasicMaterial();
+    const provider = new ProfileTerrain(compact);
+    const manager = terrainManager(provider, container, material);
+    const node = leaf(manager.getQuadTree());
+    try {
+      const data = generateQuadChunkDataSync(
+        node.centerX,
+        node.centerZ,
+        node.size,
+        node.resolution,
+        provider,
+      );
+      data.heightData[0] = NaN;
+      manager["assembleAndAddChunk"](node, data);
+      expect(container.children).toHaveLength(0);
+      expect(manager.getChunks().size).toBe(0);
+      expect(node.visualChunkKey).toBeNull();
+      expect(node.ready).toBe(false);
+      expect(manager.getRetainedSurface(node)).toBeNull();
+    } finally {
+      manager.dispose();
+      material.dispose();
+    }
   });
 });

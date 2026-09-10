@@ -478,9 +478,16 @@ export class TerrainSystem extends System {
    * No fallback material - roads require the full shader to render correctly.
    */
   private initTerrainMaterial(): void {
+    const profile = this.getWorldTerrainProfile();
     // Create the shared terrain material (uses procedural classic MMORPG-style colors, no textures needed)
     // This material reads the roadInfluence attribute and blends road colors
-    this.terrainMaterial = createTerrainMaterial();
+    const material = createTerrainMaterial();
+    // The generator initializes before this client-only material exists. Apply
+    // profile-owned options here so the actual published material is configured
+    // before shadow setup or any terrain mesh can consume it.
+    material.terrainUniforms.surfaceDetailStrength.value =
+      profile.algorithm === "compact-island-sculpt-v1" ? 1 : 0;
+    this.terrainMaterial = material;
 
     // Setup for CSM shadows
     if (this.world.setupMaterial) {
@@ -1478,7 +1485,9 @@ export class TerrainSystem extends System {
     const profile = this.getWorldTerrainProfile();
     const influence = profile.island.radius * 0.6;
     const centers = BiomeSystem.computePolygonCenters(
-      BIOME_LIST as string[],
+      profile.algorithm === "compact-island-sculpt-v1"
+        ? [BiomeType.Forest]
+        : (BIOME_LIST as string[]),
       profile.island.radius * 0.45,
       influence,
     ).map((center) => ({
@@ -2109,6 +2118,7 @@ export class TerrainSystem extends System {
       this.grassVisualManager = new GrassVisualManager(
         worldTerrainProfileIdentity(this.getWorldTerrainProfile()),
         grassContainer,
+        (node) => this.quadTreeVisualManager!.getRetainedSurface(node),
         (x: number, z: number) => this.getHeightAtComputed(x, z),
         this.CONFIG.WATER_THRESHOLD,
         (wx: number, wz: number) =>

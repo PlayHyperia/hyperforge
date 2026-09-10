@@ -144,6 +144,22 @@ export function shouldRenderArenaCenterMarker(win?: Window): boolean {
   return !isStreamingLikeViewport(win);
 }
 
+/**
+ * Opaque authored floors sit only 2 cm above the navigation terrain. At distant
+ * broadcast cameras that separation can quantize to the same conventional
+ * depth value. One fixed depth unit resolves the tie without moving geometry,
+ * changing collision heights, or adding a slope-dependent bias at grazing views.
+ */
+export function createDuelFloorMaterial(
+  parameters?: ConstructorParameters<typeof MeshStandardNodeMaterial>[0],
+): MeshStandardNodeMaterial {
+  const material = new MeshStandardNodeMaterial(parameters);
+  material.polygonOffset = true;
+  material.polygonOffsetUnits = -1;
+  material.polygonOffsetFactor = 0;
+  return material;
+}
+
 // Instanced mesh counts (fence posts, rails, pillars) are derived from DuelArenaConfig at runtime.
 
 // ============================================================================
@@ -565,7 +581,7 @@ export class DuelArenaVisualsSystem extends System {
    * World-space UVs make each arena look unique despite sharing the material.
    */
   private createArenaFloorMaterial(): MeshStandardNodeMaterial {
-    const material = new MeshStandardNodeMaterial();
+    const material = createDuelFloorMaterial();
 
     material.colorNode = Fn(() => {
       const worldPos = positionWorld;
@@ -1320,7 +1336,7 @@ export class DuelArenaVisualsSystem extends System {
         LOBBY_LENGTH / TILE_TEXTURE_WORLD_SIZE,
       );
 
-      const material = new MeshStandardNodeMaterial({
+      const material = createDuelFloorMaterial({
         color: LOBBY_FLOOR_COLOR,
         map: tileTexture,
       });
@@ -1425,7 +1441,7 @@ export class DuelArenaVisualsSystem extends System {
         HOSPITAL_LENGTH,
       );
 
-      const material = new MeshStandardNodeMaterial({
+      const material = createDuelFloorMaterial({
         color: HOSPITAL_FLOOR_COLOR,
       });
 

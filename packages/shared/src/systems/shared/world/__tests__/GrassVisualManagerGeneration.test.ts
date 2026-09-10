@@ -16,6 +16,7 @@ import {
   type GrassVisualProfile,
 } from "../GrassVisualManager";
 import { TerrainQuadTree } from "../TerrainQuadTree";
+import { RetainedGridFixture } from "./terrain-grid.fixture";
 import {
   COMPACT_WORLD_TERRAIN_PROFILE,
   worldTerrainProfileIdentity,
@@ -85,9 +86,14 @@ function fixture(
     },
   };
   const container = new THREE.Group();
+  const grids = new RetainedGridFixture(
+    worldTerrainProfileIdentity(profile),
+    () => state.height,
+  );
   const manager = new GrassVisualManager(
     worldTerrainProfileIdentity(profile),
     container,
+    grids.get,
     () => {
       state.heightSamples++;
       return state.height;
@@ -127,9 +133,11 @@ function fixture(
     node,
     key,
     state,
+    grids,
     requestedRegions,
     close() {
       manager.destroy();
+      grids.dispose();
       tree.dispose();
     },
   };
@@ -629,6 +637,75 @@ describe("GrassVisualManager request ownership with real workers and geometry", 
     } finally {
       wet.close();
       dry.close();
+    }
+  });
+
+  it("waits for retained terrain without sampling or marking empty-ready, then installs on arrival", () => {
+    const f = fixture();
+    try {
+      f.grids.available = false;
+      for (let i = 0; i < 3; i++) f.manager.update(350, 320);
+      expect(f.state.heightSamples).toBe(0);
+      expect(f.container.children).toHaveLength(0);
+      expect(f.manager.getStreamingReadiness([f.node]).ready).toBe(false);
+      f.grids.available = true;
+      f.manager.update(350, 320);
+      expect(f.container.children).toHaveLength(1);
+      expect(f.manager.getStreamingReadiness([f.node]).ready).toBe(true);
+    } finally {
+      f.close();
+    }
+  });
+
+  it.each([false, true])(
+    "rejects a replaced retained revision with an actual delayed worker (already settled=%s)",
+    async (alreadySettled) => {
+      const f = fixture();
+      try {
+        const old = f.manager["createWorkerTicket"](f.node, f.key, 0, false);
+        const result = await actualWorker(
+          f.manager["createWorkerInput"](f.node, f.key, 0),
+        );
+        if (alreadySettled) f.manager["settleWorkerResult"](old, result);
+        f.state.height = 31;
+        if (!alreadySettled) f.manager["settleWorkerResult"](old, result);
+        expect(f.manager["processSettledWorkerResults"]()).toBe(0);
+        expect(f.container.children).toHaveLength(0);
+        expect(f.manager.getStreamingReadiness([f.node]).ready).toBe(false);
+        f.manager.update(350, 320);
+        const mesh = f.container.children[0] as THREE.InstancedMesh;
+        expect(mesh.geometry.getAttribute("instanceOffset").getY(0)).toBe(31);
+        expect(mesh.userData.grassGrounding.surfaceRevision).toBe(
+          f.grids.get(f.node)!.revision,
+        );
+        expect(mesh.userData.grassGrounding.surfaceRevision).not.toBe(
+          old.surface.revision,
+        );
+      } finally {
+        f.close();
+      }
+    },
+  );
+
+  it("retires installed grass on terrain loss and rebuilds only against the recovered surface", async () => {
+    const f = fixture();
+    try {
+      const old = await populate(f);
+      let disposed = 0;
+      old.geometry.addEventListener("dispose", () => disposed++);
+      f.grids.available = false;
+      expect(f.manager.getStreamingReadiness([f.node]).ready).toBe(false);
+      f.manager.update(350, 320);
+      expect(disposed).toBe(1);
+      expect(f.container.children).toHaveLength(0);
+      expect(f.manager["completedSurfaces"].size).toBe(0);
+      f.grids.available = true;
+      f.manager.update(350, 320);
+      expect(f.container.children).toHaveLength(1);
+      expect(f.container.children[0]).not.toBe(old);
+      expect(f.manager.getStreamingReadiness([f.node]).ready).toBe(true);
+    } finally {
+      f.close();
     }
   });
 });

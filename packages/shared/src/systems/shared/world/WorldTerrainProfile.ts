@@ -28,7 +28,7 @@ type NumericFields<T> = { readonly [K in keyof T]: number };
 
 export type WorldTerrainProfile = Readonly<{
   schemaVersion: 1;
-  algorithm: "terrain-height-params-v1";
+  algorithm: "terrain-height-params-v1" | "compact-island-sculpt-v1";
   id: string;
   kind: "large-world" | "compact-candidate";
   seed: number;
@@ -111,6 +111,26 @@ export const COMPACT_WORLD_TERRAIN_PROFILE: WorldTerrainProfile =
     },
   });
 
+/** Explicit new authoring candidate; v1 remains a numeric regression fixture. */
+export const SCULPTED_COMPACT_WORLD_TERRAIN_PROFILE: WorldTerrainProfile =
+  validateWorldTerrainProfile({
+    ...COMPACT_WORLD_TERRAIN_PROFILE,
+    algorithm: "compact-island-sculpt-v1",
+    id: "compact-duel-island-v2",
+    island: {
+      ...COMPACT_WORLD_TERRAIN_PROFILE.island,
+      falloff: 42,
+      deepOceanBuffer: 15,
+      maxCoastVariation: 0.12,
+    },
+    height: {
+      maxHeightParameter: 50,
+      terrainScale: 12,
+      baseOffset: 28.15,
+      featureScale: 1.4,
+    },
+  });
+
 function fail(field: string): never {
   throw new Error(`Invalid WorldTerrainProfile: ${field}`);
 }
@@ -170,7 +190,8 @@ export function validateWorldTerrainProfile(
   const data = record(input, Object.keys(base), "profile");
   if (
     data.schemaVersion !== 1 ||
-    data.algorithm !== base.algorithm ||
+    (data.algorithm !== "terrain-height-params-v1" &&
+      data.algorithm !== "compact-island-sculpt-v1") ||
     data.boundsMeaning !== base.boundsMeaning
   )
     fail("version/algorithm/boundsMeaning");
@@ -245,7 +266,7 @@ export function validateWorldTerrainProfile(
     fail("shoreline ranges");
   const profile: WorldTerrainProfile = Object.freeze({
     schemaVersion: 1,
-    algorithm: base.algorithm,
+    algorithm: data.algorithm,
     id: data.id,
     kind: data.kind,
     seed,

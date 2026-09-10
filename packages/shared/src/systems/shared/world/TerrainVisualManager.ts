@@ -28,6 +28,7 @@ import {
   type QuadChunkWorkerOutput,
 } from "../../../utils/workers/QuadChunkWorker";
 import { assertTerrainWorkerRequest } from "../../../utils/workers/TerrainWorkerShared";
+import { RetainedTerrainSurface } from "./TerrainGridSurface";
 
 export type VisualManagerTerrainProvider = FullTerrainProvider;
 
@@ -36,6 +37,7 @@ export interface TerrainVisualChunk {
   node: TerrainQuadNode;
   mesh: THREE.Mesh;
   heightData: Float32Array;
+  surface: RetainedTerrainSurface;
 }
 
 export interface TerrainVisualReadiness {
@@ -195,6 +197,21 @@ export class TerrainVisualManager implements QuadTreeListener {
 
   getChunks(): ReadonlyMap<string, TerrainVisualChunk> {
     return this.chunks;
+  }
+
+  getRetainedSurface(node: TerrainQuadNode): RetainedTerrainSurface | null {
+    if (!node.isFinal || node.visualChunkKey === null) return null;
+    const chunk = this.chunks.get(node.visualChunkKey);
+    if (!chunk || chunk.node !== node || chunk.mesh.parent !== this.container)
+      return null;
+    if (!chunk.surface.matchesGeometry(chunk.mesh.geometry)) return null;
+    // A split keeps its old parent mesh until all children are ready. Do not
+    // place grass against one surface while an overlapping ancestor is drawn.
+    for (let parent = node.parent; parent; parent = parent.parent) {
+      if (parent.visualChunkKey && this.chunks.has(parent.visualChunkKey))
+        return null;
+    }
+    return chunk.surface;
   }
 
   /**
@@ -528,13 +545,13 @@ export class TerrainVisualManager implements QuadTreeListener {
         this.provider,
         this.quadTree.config.skirtDrop,
       );
+      this.addMeshToScene(node, key, result);
     } catch (err) {
+      result?.geometry.dispose();
       console.error(`[TerrainVisualManager] Assembly failed for ${key}:`, err);
       this.handleGenerationFailure(node);
       return;
     }
-
-    this.addMeshToScene(node, key, result);
   }
 
   private generateChunkSync(node: TerrainQuadNode): void {
@@ -587,6 +604,17 @@ export class TerrainVisualManager implements QuadTreeListener {
     key: string,
     result: { geometry: THREE.BufferGeometry; heightData: Float32Array },
   ): void {
+    // Validate before allocating a material/mesh or publishing it to the scene.
+    // The assembly caller owns and disposes the geometry if admission fails.
+    const surface = new RetainedTerrainSurface(
+      node.id,
+      this.terrainProfileIdentity,
+      node.centerX,
+      node.centerZ,
+      node.size,
+      node.resolution,
+      result.geometry,
+    );
     let meshMaterial: THREE.Material;
     if (this.debugWireframe) {
       const depthColor =
@@ -628,6 +656,7 @@ export class TerrainVisualManager implements QuadTreeListener {
       node,
       mesh,
       heightData: result.heightData,
+      surface,
     };
 
     this.chunks.set(key, chunk);

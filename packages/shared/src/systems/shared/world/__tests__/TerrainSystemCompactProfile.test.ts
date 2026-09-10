@@ -8,7 +8,7 @@ import type { FullTerrainProvider } from "../TerrainQuadChunkGenerator";
 import { loadTownConfig } from "../TownSystem";
 import { loadPOIConfig } from "../POISystem";
 import {
-  COMPACT_WORLD_TERRAIN_PROFILE,
+  SCULPTED_COMPACT_WORLD_TERRAIN_PROFILE,
   worldTerrainProfileIdentity,
 } from "../WorldTerrainProfile";
 
@@ -60,7 +60,7 @@ describe("real manifest to compact TerrainSystem integration", () => {
     const { terrain } = createTerrain();
     expect(DataManager.getInstance().isReady()).toBe(true);
     expect(terrain.getWorldTerrainProfile()).toEqual(
-      COMPACT_WORLD_TERRAIN_PROFILE,
+      SCULPTED_COMPACT_WORLD_TERRAIN_PROFILE,
     );
     const profile = terrain.getWorldTerrainProfile();
     expect(terrain.getWorldTerrainProfile()).toBe(profile);
@@ -92,7 +92,18 @@ describe("real manifest to compact TerrainSystem integration", () => {
     expect(sync.WATER_LEVEL_NORMALIZED).toBe(
       profile.water.threshold / profile.height.maxHeightParameter,
     );
-    expect(worker.biomeCenters).toHaveLength(3);
+    expect(worker.biomeCenters).toHaveLength(1);
+    expect(worker.biomeCenters[0].type).toBe("forest");
+    for (const [x, z] of [
+      [350, 320],
+      [343, 302],
+      [368, 419],
+      [250, 400],
+    ]) {
+      expect(terrain.computeBiomeWeightsByPosition(x, z)).toEqual({
+        forest: 1,
+      });
+    }
     for (const center of worker.biomeCenters) {
       expect(
         Math.hypot(

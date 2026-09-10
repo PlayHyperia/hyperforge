@@ -199,7 +199,7 @@ describe("actual compact TerrainSystem biome/shore/worker integration", () => {
     }
   });
 
-  it("matches real translated blended biomes before grading, then assembles actual authored campus/pond/floor heights", async () => {
+  it("matches the real sculpted compact landform before grading, then assembles actual authored campus/pond/floor heights", async () => {
     expect(DataManager.getInstance().isReady()).toBe(true);
     const terrain = new TerrainSystem(new World());
     const internals = terrain as unknown as TerrainInternals;
@@ -212,12 +212,13 @@ describe("actual compact TerrainSystem biome/shore/worker integration", () => {
     const samples: QuadChunkWorkerOutput[] = [];
     const worker = createActualWorker();
     let shoreCount = 0;
-    let mixedBiomeCount = 0;
+    let temperateBiomeCount = 0;
     let rawMaximumError = 0;
     let rawWorst = "";
     try {
-      // Actual production resolution, six regions spanning coast, all three
-      // biome territories, preparation campus, arena platforms and pond.
+      // Actual production resolution, eight regions spanning coast, authored
+      // relief, preparation campus, arena platforms and pond. Mixed-biome
+      // numeric coverage remains in TerrainProfileWorkerParity.test.ts.
       for (const [centerX, centerZ] of [
         [200, 250],
         [300, 350],
@@ -225,6 +226,8 @@ describe("actual compact TerrainSystem biome/shore/worker integration", () => {
         [300, 450],
         [400, 450],
         [500, 550],
+        [500, 400],
+        [350, 550],
       ]) {
         const output = await worker.run({
           type: "generateQuadChunk",
@@ -259,16 +262,14 @@ describe("actual compact TerrainSystem biome/shore/worker integration", () => {
               base < profile.water.threshold + profile.shoreline.LAND_BAND
             )
               shoreCount++;
-            if (
-              Object.values(terrain.computeBiomeWeightsByPosition(x, z)).filter(
-                (weight) => weight > 0.01,
-              ).length > 1
-            )
-              mixedBiomeCount++;
+            if (terrain.computeBiomeWeightsByPosition(x, z).forest === 1)
+              temperateBiomeCount++;
           }
       }
       expect(shoreCount).toBeGreaterThan(100);
-      expect(mixedBiomeCount).toBeGreaterThan(100);
+      expect(temperateBiomeCount).toBe(
+        resolution * resolution * samples.length,
+      );
       expect(rawMaximumError, rawWorst).toBe(0);
 
       internals.loadFlatZonesFromManifest();

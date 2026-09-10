@@ -92,7 +92,7 @@ function assertTerrainWorkerInput(input) {
   if (!Object.values(p.${group}).every(Number.isFinite)) fail();`,
     )
     .join("\n")}
-  if (p.schemaVersion !== 1 || p.algorithm !== "terrain-height-params-v1" ||
+  if (p.schemaVersion !== 1 || (p.algorithm !== "terrain-height-params-v1" && p.algorithm !== "compact-island-sculpt-v1") ||
       p.boundsMeaning !== "nominal-generation-envelope" || typeof p.id !== "string" ||
       !/^[a-z][a-z0-9-]{0,63}$/.test(p.id) ||
       p.kind !== "compact-candidate" || p.id === "large-world-v1" ||

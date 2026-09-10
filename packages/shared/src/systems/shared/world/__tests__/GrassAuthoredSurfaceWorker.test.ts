@@ -247,49 +247,74 @@ function broadGrade(): GrassTerrainSurfaceZone {
 }
 
 describe("actual authored-surface grass worker", () => {
-  it("uses actual compact campus heights and five deterministic transferred attributes", async () => {
-    await withTerrain(async (terrain, internals, worker) => {
-      internals.loadWaterBodiesFromManifest();
-      internals.loadFlatZonesFromManifest();
-      const campus = internals.flatZones.get("preparation_campus_grade");
-      if (!campus) throw new Error("Missing registered compact campus");
-      terrain.registerFlatZone({ ...campus, excludeGrass: false });
-      const input = {
-        ...request(terrain, internals, 323, 331, 16),
-        clumpSpacing: 0.2,
-      };
-      const result = await worker.run(input);
-      expect(result.count).toBeGreaterThan(50);
-      const parity = assertSurfaceParity(input, result, internals);
-      expect(parity.graded).toBeGreaterThan(50);
-      // Locate a real accepted clump where grading materially changes raw
-      // terrain, then inspect that small region densely, without changing noise.
-      const focus = points(input, result).sort(
-        (a, b) =>
-          Math.abs(b.y - terrain.getProceduralHeightAt(b.x, b.z)) -
-          Math.abs(a.y - terrain.getProceduralHeightAt(a.x, a.z)),
-      )[0];
-      expect(
-        Math.abs(focus.y - terrain.getProceduralHeightAt(focus.x, focus.z)),
-      ).toBeGreaterThan(1);
-      const focusedInput = {
-        ...request(terrain, internals, focus.x, focus.z, 0.5),
-        clumpSpacing: 0.01,
-      };
-      const focused = await worker.run(focusedInput);
-      assertSurfaceParity(focusedInput, focused, internals);
-      const differentFromRaw = points(focusedInput, focused).filter(
-        (point) =>
-          Math.abs(point.y - terrain.getProceduralHeightAt(point.x, point.z)) >
-          1,
-      );
-      expect(differentFromRaw.length).toBeGreaterThan(50);
-      const repeated = await worker.run(input);
-      expect(repeated.count).toBe(result.count);
-      for (const name of Object.keys(attributes) as (keyof typeof attributes)[])
-        expect(repeated[name]).toEqual(result[name]);
-    });
-  });
+  it.each([
+    {
+      label: "explicit raised-grade regression (not the deployed grade)",
+      heightOffset: 2,
+      minimumRawDifference: 1,
+    },
+    // The sculpted meadow deliberately meets the functional grade much more
+    // closely. A 10cm raw-height discriminator still exceeds the actual Float32
+    // parity tolerance by orders of magnitude. A separate explicit raised grade
+    // preserves a >1m discriminator without weakening startup profile admission.
+    {
+      label: "sculpted v2 meadow",
+      heightOffset: 0,
+      minimumRawDifference: 0.1,
+    },
+  ])(
+    "uses authored campus heights and five deterministic attributes: $label",
+    async ({ heightOffset, minimumRawDifference }) => {
+      await withTerrain(async (terrain, internals, worker) => {
+        internals.loadWaterBodiesFromManifest();
+        internals.loadFlatZonesFromManifest();
+        const campus = internals.flatZones.get("preparation_campus_grade");
+        if (!campus) throw new Error("Missing registered compact campus");
+        terrain.registerFlatZone({
+          ...campus,
+          height: campus.height + heightOffset,
+          excludeGrass: false,
+        });
+        const input = {
+          ...request(terrain, internals, 323, 331, 16),
+          clumpSpacing: 0.2,
+        };
+        const result = await worker.run(input);
+        expect(result.count).toBeGreaterThan(50);
+        const parity = assertSurfaceParity(input, result, internals);
+        expect(parity.graded).toBeGreaterThan(50);
+        // Locate a real accepted clump where grading materially changes raw
+        // terrain, then inspect that small region densely, without changing noise.
+        const focus = points(input, result).sort(
+          (a, b) =>
+            Math.abs(b.y - terrain.getProceduralHeightAt(b.x, b.z)) -
+            Math.abs(a.y - terrain.getProceduralHeightAt(a.x, a.z)),
+        )[0];
+        expect(
+          Math.abs(focus.y - terrain.getProceduralHeightAt(focus.x, focus.z)),
+        ).toBeGreaterThan(minimumRawDifference);
+        const focusedInput = {
+          ...request(terrain, internals, focus.x, focus.z, 0.5),
+          clumpSpacing: 0.01,
+        };
+        const focused = await worker.run(focusedInput);
+        assertSurfaceParity(focusedInput, focused, internals);
+        const differentFromRaw = points(focusedInput, focused).filter(
+          (point) =>
+            Math.abs(
+              point.y - terrain.getProceduralHeightAt(point.x, point.z),
+            ) > minimumRawDifference,
+        );
+        expect(differentFromRaw.length).toBeGreaterThan(50);
+        const repeated = await worker.run(input);
+        expect(repeated.count).toBe(result.count);
+        for (const name of Object.keys(
+          attributes,
+        ) as (keyof typeof attributes)[])
+          expect(repeated[name]).toEqual(result[name]);
+      });
+    },
+  );
 
   it("allows grass on broad grades but honors independent default pad exclusions and empty outputs", async () => {
     await withTerrain(async (terrain, internals, worker) => {

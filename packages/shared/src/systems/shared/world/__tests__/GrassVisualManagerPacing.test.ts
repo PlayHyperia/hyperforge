@@ -1,8 +1,7 @@
-import { describe, expect, it, vi } from "vitest";
-
+import { describe, expect, it } from "vitest";
 import THREE from "../../../../extras/three/three";
 import type { GrassWorkerOutput } from "../../../../utils/workers/GrassWorker";
-import type { TerrainQuadNode } from "../TerrainQuadTree";
+import { TerrainQuadTree } from "../TerrainQuadTree";
 import {
   GrassVisualManager,
   STREAMING_GRASS_VISUAL_PROFILE,
@@ -11,34 +10,80 @@ import {
   COMPACT_WORLD_TERRAIN_PROFILE,
   worldTerrainProfileIdentity,
 } from "../WorldTerrainProfile";
+import { RetainedGridFixture } from "./terrain-grid.fixture";
 
-const terrainProfileIdentity = worldTerrainProfileIdentity(
-  COMPACT_WORLD_TERRAIN_PROFILE,
-);
-
-type WorkerTicket = {
-  node: TerrainQuadNode;
-  key: string;
-  lodLevel: number;
-  isLodSwap: boolean;
-};
-
-function workerOutput(key: string, count = 1): GrassWorkerOutput {
+function fixture(water = 16, minimumLodLevel = 0) {
+  const identity = worldTerrainProfileIdentity(COMPACT_WORLD_TERRAIN_PROFILE);
+  const grids = new RetainedGridFixture(identity, () => 28);
+  const container = new THREE.Group();
+  const manager = new GrassVisualManager(
+    identity,
+    container,
+    grids.get,
+    () => 28,
+    16,
+    () => 0,
+    () => false,
+    () => ({
+      r: 0.2,
+      g: 0.4,
+      b: 0.1,
+      grassWeight: 1,
+      grassPlacement: 1,
+      grassHeightScale: 1,
+      nx: 0,
+      ny: 1,
+      nz: 0,
+      tintR: 0,
+      tintG: 0,
+      tintB: 0,
+      tintStrength: 0,
+    }),
+    undefined,
+    { maxChunksPerFrame: 1, minimumLodLevel },
+    undefined,
+    () => water,
+  );
+  const tree = new TerrainQuadTree({ minSize: 8, maxDepth: 1, resolution: 4 });
+  const nodes = [0, 1, 2].map((i) =>
+    tree.createNode(null, null, 8, 350 + i * 8, 320, 1),
+  );
+  manager.setPlayerPosition(350, 320);
+  for (const node of nodes) manager.onNodeNeedsGeometry(node);
+  const queue = (index: number) => {
+    const node = nodes[index];
+    const key = manager["chunkKey"](node);
+    const ticket = manager["createWorkerTicket"](node, key, 1, false);
+    const output: GrassWorkerOutput = {
+      type: "grassInstanceResult",
+      terrainProfileIdentity: identity,
+      chunkKey: key,
+      count: 1,
+      offsets: new Float32Array([0, 28, 0]),
+      rotScaleHash: new Float32Array([0, 1, 0.5]),
+      groundColors: new Float32Array([0.2, 0.4, 0.1]),
+      grassTints: new Float32Array([0, 0, 0, 0]),
+      groundNormals: new Float32Array([0, 1, 0]),
+    };
+    manager["settleWorkerResult"](ticket, output);
+    return { ticket, output, key };
+  };
   return {
-    terrainProfileIdentity,
-    type: "grassInstanceResult",
-    chunkKey: key,
-    offsets: new Float32Array(count * 3),
-    rotScaleHash: new Float32Array(count * 3),
-    groundColors: new Float32Array(count * 3),
-    grassTints: new Float32Array(count * 4),
-    groundNormals: new Float32Array(count * 3),
-    count,
+    manager,
+    container,
+    nodes,
+    queue,
+    grids,
+    close() {
+      manager.destroy();
+      tree.dispose();
+      grids.dispose();
+    },
   };
 }
 
-describe("GrassVisualManager streaming pacing", () => {
-  it("uses only the far-detail grass tier within the bounded broadcast horizon", () => {
+describe("GrassVisualManager streaming pacing with real managers and meshes", () => {
+  it("keeps the bounded broadcast profile", () => {
     expect(STREAMING_GRASS_VISUAL_PROFILE).toEqual({
       clumpSpacingMultiplier: 4,
       minimumLodLevel: 2,
@@ -46,244 +91,72 @@ describe("GrassVisualManager streaming pacing", () => {
       maxChunksPerFrame: 1,
     });
   });
-
-  it("uploads only the configured number of settled worker chunks per frame", () => {
-    const createChunkMeshFromWorkerData = vi.fn();
-    const nodes = [1, 2, 3].map(
-      (id) =>
-        ({
-          id,
-          depth: 0,
-          centerX: 0,
-          centerZ: 0,
-          isFinal: true,
-          isMaxDepth: true,
-        }) as TerrainQuadNode,
-    );
-    const tickets = nodes.map((node, index) => ({
-      node,
-      key: `gq_${index}`,
-      lodLevel: 1,
-      isLodSwap: false,
-    }));
-    const manager = Object.create(
-      GrassVisualManager.prototype,
-    ) as GrassVisualManager & {
-      maxChunksPerFrame: number;
-      settledWorkerResults: Array<{
-        ticket: WorkerTicket;
-        data: GrassWorkerOutput;
-      }>;
-      workerInflight: Map<string, WorkerTicket>;
-      pendingLodSwap: Map<
-        string,
-        { node: TerrainQuadNode; desiredLod: number }
-      >;
-      chunks: Map<string, unknown>;
-      completedNodes: Map<string, TerrainQuadNode>;
-      destroyed: boolean;
-      createChunkMeshFromWorkerData: typeof createChunkMeshFromWorkerData;
-      processSettledWorkerResults(): number;
-    };
-    Object.assign(manager, {
-      maxChunksPerFrame: 1,
-      terrainProfileIdentity,
-      playerX: 0,
-      playerZ: 0,
-      maxRenderDistance: 500,
-      liveNodes: new Map(nodes.map((node) => [`gq_${node.id}_d0_0_0`, node])),
-      settledWorkerResults: tickets.map((ticket, index) => ({
-        ticket,
-        data: workerOutput(`gq_${index}`),
-      })),
-      workerInflight: new Map(tickets.map((ticket) => [ticket.key, ticket])),
-      pendingLodSwap: new Map(),
-      chunks: new Map(),
-      completedNodes: new Map(),
-      destroyed: false,
-      createChunkMeshFromWorkerData,
-    });
-
-    expect(manager.processSettledWorkerResults()).toBe(1);
-    expect(createChunkMeshFromWorkerData).toHaveBeenCalledOnce();
-    expect(manager.settledWorkerResults).toHaveLength(2);
-    expect(manager.workerInflight.has("gq_0")).toBe(false);
-    expect(manager.workerInflight.has("gq_1")).toBe(true);
-    expect(manager.completedNodes.has("gq_0")).toBe(true);
+  it("uploads only one of three settled chunks per frame", () => {
+    const f = fixture();
+    try {
+      const queued = [0, 1, 2].map(f.queue);
+      expect(f.manager["processSettledWorkerResults"]()).toBe(1);
+      expect(f.container.children).toHaveLength(1);
+      expect(f.manager["settledWorkerResults"]).toHaveLength(2);
+      expect(f.manager["workerInflight"].has(queued[0].key)).toBe(false);
+      expect(f.manager["workerInflight"].has(queued[1].key)).toBe(true);
+      expect(f.manager.getStreamingReadiness(f.nodes).readyChunks).toBe(1);
+    } finally {
+      f.close();
+    }
   });
-
-  it("discards cancelled settled results without spending the upload budget", () => {
-    const createChunkMeshFromWorkerData = vi.fn();
-    const tickets = [
-      {
-        node: { isFinal: false } as TerrainQuadNode,
-        key: "cancelled",
-        lodLevel: 1,
-        isLodSwap: false,
-      },
-      {
-        node: {
-          id: 2,
-          depth: 0,
-          centerX: 0,
-          centerZ: 0,
-          isFinal: true,
-          isMaxDepth: true,
-        } as TerrainQuadNode,
-        key: "active",
-        lodLevel: 1,
-        isLodSwap: false,
-      },
-    ];
-    const manager = Object.create(
-      GrassVisualManager.prototype,
-    ) as GrassVisualManager & {
-      maxChunksPerFrame: number;
-      settledWorkerResults: Array<{
-        ticket: WorkerTicket;
-        data: GrassWorkerOutput;
-      }>;
-      workerInflight: Map<string, WorkerTicket>;
-      pendingLodSwap: Map<
-        string,
-        { node: TerrainQuadNode; desiredLod: number }
-      >;
-      chunks: Map<string, unknown>;
-      completedNodes: Map<string, TerrainQuadNode>;
-      destroyed: boolean;
-      createChunkMeshFromWorkerData: typeof createChunkMeshFromWorkerData;
-      processSettledWorkerResults(): number;
-    };
-    Object.assign(manager, {
-      maxChunksPerFrame: 1,
-      terrainProfileIdentity,
-      playerX: 0,
-      playerZ: 0,
-      maxRenderDistance: 500,
-      liveNodes: new Map([["gq_2_d0_0_0", tickets[1].node]]),
-      settledWorkerResults: tickets.map((ticket) => ({
-        ticket,
-        data: workerOutput(ticket.key),
-      })),
-      workerInflight: new Map(tickets.map((ticket) => [ticket.key, ticket])),
-      pendingLodSwap: new Map(),
-      chunks: new Map(),
-      completedNodes: new Map(),
-      destroyed: false,
-      createChunkMeshFromWorkerData,
-    });
-
-    expect(manager.processSettledWorkerResults()).toBe(1);
-    expect(createChunkMeshFromWorkerData).toHaveBeenCalledOnce();
-    expect(createChunkMeshFromWorkerData).toHaveBeenCalledWith(
-      expect.objectContaining({ isFinal: true }),
-      expect.objectContaining({ chunkKey: "active" }),
-      1,
-    );
-    expect(manager.settledWorkerResults).toHaveLength(0);
+  it("discards cancelled results without consuming a valid upload slot", () => {
+    const f = fixture();
+    try {
+      f.queue(0);
+      f.queue(1);
+      f.manager.onNodeDestroyGeometry(f.nodes[0]);
+      expect(f.manager["processSettledWorkerResults"]()).toBe(1);
+      expect(f.container.children).toHaveLength(1);
+      expect(f.manager["chunks"].has(f.manager["chunkKey"](f.nodes[1]))).toBe(
+        true,
+      );
+    } finally {
+      f.close();
+    }
   });
-
-  it("treats completed empty grass chunks as stable scene coverage", () => {
-    const near = {
-      id: 1,
-      centerX: 0,
-      centerZ: 0,
-      isFinal: true,
-      isMaxDepth: true,
-    } as TerrainQuadNode;
-    const far = {
-      id: 2,
-      centerX: 500,
-      centerZ: 0,
-      isFinal: true,
-      isMaxDepth: true,
-    } as TerrainQuadNode;
-    const manager = Object.create(
-      GrassVisualManager.prototype,
-    ) as GrassVisualManager & {
-      playerX: number;
-      playerZ: number;
-      maxRenderDistance: number;
-      completedNodes: Map<string, TerrainQuadNode>;
-      chunkKey(node: TerrainQuadNode): string;
-    };
-    Object.assign(manager, {
-      playerX: 0,
-      playerZ: 0,
-      maxRenderDistance: 350,
-      completedNodes: new Map(),
-    });
-    const key = manager.chunkKey(near);
-
-    expect(manager.getStreamingReadiness([near, far], 250)).toEqual({
-      ready: false,
-      criticalRadius: 250,
-      requiredChunks: 1,
-      readyChunks: 0,
-      pendingChunks: 1,
-    });
-    manager.completedNodes.set(key, near);
-    expect(manager.getStreamingReadiness([near, far], 250).ready).toBe(true);
+  it("budgets nonempty projection even when elevated water removes every anchor", () => {
+    const f = fixture(29);
+    try {
+      [0, 1, 2].forEach(f.queue);
+      expect(f.manager["processSettledWorkerResults"]()).toBe(1);
+      expect(f.container.children).toHaveLength(0);
+      expect(f.manager["settledWorkerResults"]).toHaveLength(2);
+      expect(f.manager.getStreamingReadiness(f.nodes).readyChunks).toBe(1);
+    } finally {
+      f.close();
+    }
   });
-
-  it("precompiles the instanced grass layout and always disposes the sample", async () => {
-    const manager = Object.create(
-      GrassVisualManager.prototype,
-    ) as GrassVisualManager & {
-      minimumLodLevel: number;
-      lodGeometries: THREE.BufferGeometry[];
-      material: THREE.Material;
-    };
-    const material = new THREE.MeshBasicMaterial();
-    Object.assign(manager, {
-      minimumLodLevel: 0,
-      lodGeometries: [new THREE.PlaneGeometry(1, 1)],
-      material,
-    });
-
-    let sampleGeometry: THREE.BufferGeometry | undefined;
-    await expect(
-      manager.precompileRepresentativeChunk(async (object) => {
-        const mesh = object as THREE.InstancedMesh;
-        sampleGeometry = mesh.geometry;
-        vi.spyOn(sampleGeometry, "dispose");
-        expect(mesh.material).toBe(material);
-        expect(mesh.count).toBe(1);
-        expect(Object.keys(mesh.geometry.attributes)).toEqual(
-          expect.arrayContaining([
-            "instanceOffset",
-            "instanceRotScaleHash",
-            "instanceGroundColor",
-            "instanceGrassTint",
-            "instanceGroundNormal",
-          ]),
-        );
-        throw new Error("compile failed");
-      }),
-    ).rejects.toThrow("compile failed");
-    expect(sampleGeometry?.dispose).toHaveBeenCalledOnce();
+  it("retires rendered and completed ownership when a live leaf leaves the horizon", () => {
+    const f = fixture();
+    try {
+      f.queue(0);
+      f.manager["processSettledWorkerResults"]();
+      const geometry = (f.container.children[0] as THREE.Mesh).geometry;
+      let disposed = 0;
+      geometry.addEventListener("dispose", () => disposed++);
+      f.manager.update(1000, 1000);
+      expect(f.container.children).toHaveLength(0);
+      expect(disposed).toBe(1);
+      expect(f.manager["completedNodes"].size).toBe(0);
+      expect(f.manager["completedSurfaces"].size).toBe(0);
+    } finally {
+      f.close();
+    }
   });
-
-  it("honors a minimum LOD tier for the fixed streaming camera", () => {
-    const manager = Object.create(
-      GrassVisualManager.prototype,
-    ) as GrassVisualManager & {
-      playerX: number;
-      playerZ: number;
-      minimumLodLevel: number;
-      getLodLevel(node: TerrainQuadNode): number;
-    };
-    Object.assign(manager, {
-      playerX: 0,
-      playerZ: 0,
-      minimumLodLevel: 1,
-    });
-
-    expect(
-      manager.getLodLevel({ centerX: 0, centerZ: 0 } as TerrainQuadNode),
-    ).toBe(1);
-    expect(
-      manager.getLodLevel({ centerX: 250, centerZ: 0 } as TerrainQuadNode),
-    ).toBe(2);
+  it("honors minimum geometry tier without disabling distance tiers", () => {
+    const f = fixture(16, 1);
+    try {
+      expect(f.manager["getLodLevel"](f.nodes[0])).toBe(1);
+      f.manager.setPlayerPosition(100, 320);
+      expect(f.manager["getLodLevel"](f.nodes[0])).toBe(2);
+    } finally {
+      f.close();
+    }
   });
 });

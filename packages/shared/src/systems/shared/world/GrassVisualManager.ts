@@ -40,6 +40,11 @@ import {
 } from "./TerrainShader";
 import { MeshStandardNodeMaterial } from "three/webgpu";
 import type { TerrainQuadNode, QuadTreeListener } from "./TerrainQuadTree";
+import type { RetainedTerrainSurface } from "./TerrainGridSurface";
+import {
+  projectGrassAnchors,
+  type GrassGrounding,
+} from "./GrassTerrainProjection";
 import {
   getGrassWorkerPool,
   terminateGrassWorkerPool,
@@ -305,6 +310,7 @@ interface GrassWorkerTicket {
   readonly key: string;
   readonly lodLevel: number;
   readonly isLodSwap: boolean;
+  readonly surface: RetainedTerrainSurface;
 }
 
 interface SettledGrassWorkerResult {
@@ -431,6 +437,7 @@ export class GrassVisualManager implements QuadTreeListener {
   private liveNodes = new Map<string, TerrainQuadNode>();
   /** Includes successful empty chunks so flat arena ground can become ready. */
   private completedNodes = new Map<string, TerrainQuadNode>();
+  private completedSurfaces = new Map<string, RetainedTerrainSurface>();
   private pendingLodSwap = new Map<
     string,
     { node: TerrainQuadNode; desiredLod: number }
@@ -440,6 +447,9 @@ export class GrassVisualManager implements QuadTreeListener {
   constructor(
     private readonly terrainProfileIdentity: string,
     container: THREE.Group,
+    private readonly getRenderedSurface: (
+      node: TerrainQuadNode,
+    ) => RetainedTerrainSurface | null,
     getHeightAt: (x: number, z: number) => number,
     waterThreshold: number,
     getRoadInfluence: (wx: number, wz: number) => number,
@@ -566,7 +576,12 @@ export class GrassVisualManager implements QuadTreeListener {
     });
     let readyChunks = 0;
     for (const node of requiredNodes) {
-      if (this.completedNodes.has(this.chunkKey(node))) readyChunks++;
+      const key = this.chunkKey(node);
+      if (
+        this.completedNodes.has(key) &&
+        this.completedSurfaces.get(key) === this.getRenderedSurface(node)
+      )
+        readyChunks++;
     }
     const requiredChunks = requiredNodes.length;
     return {
@@ -639,6 +654,7 @@ export class GrassVisualManager implements QuadTreeListener {
     ) {
       const { node, lod } = this.pendingNodes.shift()!;
       if (!this.isNodeInGrassHorizon(node)) continue;
+      if (!this.getRenderedSurface(node)) continue;
       const key = this.chunkKey(node);
       if (
         this.chunks.has(key) ||
@@ -705,10 +721,7 @@ export class GrassVisualManager implements QuadTreeListener {
               dispatched++;
             }
           } else {
-            if (chunk.mesh.parent) chunk.mesh.parent.remove(chunk.mesh);
-            chunk.mesh.geometry.dispose();
-            this.chunks.delete(nodeKey);
-            this.createChunkMesh(chunk.node, desiredLod);
+            this.createChunkMesh(chunk.node, desiredLod, true);
             built++;
           }
         }
@@ -736,6 +749,7 @@ export class GrassVisualManager implements QuadTreeListener {
     this.workerInflight.delete(key);
     this.pendingLodSwap.delete(key);
     this.completedNodes.delete(key);
+    this.completedSurfaces.delete(key);
     const chunk = this.chunks.get(key);
     if (chunk) {
       if (chunk.mesh.parent) chunk.mesh.parent.remove(chunk.mesh);
@@ -768,6 +782,17 @@ export class GrassVisualManager implements QuadTreeListener {
         }
         continue;
       }
+      const surface = this.getRenderedSurface(node);
+      const previous =
+        this.completedSurfaces.get(key) ??
+        this.workerInflight.get(key)?.surface;
+      if (previous && previous !== surface) {
+        this.retireGrassWork(key);
+        this.settledWorkerResults = this.settledWorkerResults.filter(
+          (entry) => entry.ticket.key !== key,
+        );
+      }
+      if (!surface) continue;
       if (
         !this.chunks.has(key) &&
         !this.completedNodes.has(key) &&
@@ -877,7 +902,14 @@ export class GrassVisualManager implements QuadTreeListener {
     lodLevel: number,
     isLodSwap: boolean,
   ): GrassWorkerTicket {
-    const ticket = Object.freeze({ node, key, lodLevel, isLodSwap });
+    const surface = this.getRenderedSurface(node);
+    if (
+      !surface ||
+      surface.nodeId !== node.id ||
+      surface.terrainProfileIdentity !== this.terrainProfileIdentity
+    )
+      throw new Error("Grass requires the current retained terrain surface");
+    const ticket = Object.freeze({ node, key, lodLevel, isLodSwap, surface });
     this.workerInflight.set(key, ticket);
     return ticket;
   }
@@ -891,6 +923,11 @@ export class GrassVisualManager implements QuadTreeListener {
     output: GrassWorkerOutput,
   ): void {
     if (!this.isCurrentWorkerTicket(ticket)) return;
+    if (this.getRenderedSurface(ticket.node) !== ticket.surface) {
+      this.workerInflight.delete(ticket.key);
+      this.pendingLodSwap.delete(ticket.key);
+      return;
+    }
     if (!this.isNodeInGrassHorizon(ticket.node)) {
       this.workerInflight.delete(ticket.key);
       this.pendingLodSwap.delete(ticket.key);
@@ -929,6 +966,7 @@ export class GrassVisualManager implements QuadTreeListener {
   ): void {
     if (!this.isNodeInGrassHorizon(node) || this.workerInflight.has(key))
       return;
+    if (!this.getRenderedSurface(node)) return;
     const pool = getGrassWorkerPool()!;
     const input = this.createWorkerInput(node, key, lodLevel);
     const ticket = this.createWorkerTicket(node, key, lodLevel, isLodSwap);
@@ -954,6 +992,7 @@ export class GrassVisualManager implements QuadTreeListener {
     node: TerrainQuadNode,
     data: GrassWorkerOutput,
     lodLevel: number,
+    grounding: GrassGrounding,
   ): void {
     this.assertWorkerProfileIdentity(data);
     if (!this.isNodeInGrassHorizon(node)) return;
@@ -987,7 +1026,12 @@ export class GrassVisualManager implements QuadTreeListener {
     mesh.frustumCulled = false;
     mesh.receiveShadow = true;
     mesh.castShadow = false;
-    mesh.userData = { type: "grass", walkable: false, clickable: false };
+    mesh.userData = {
+      type: "grass",
+      walkable: false,
+      clickable: false,
+      grassGrounding: grounding,
+    };
 
     const identity = new THREE.Matrix4();
     for (let i = 0; i < data.count; i++) {
@@ -1016,10 +1060,16 @@ export class GrassVisualManager implements QuadTreeListener {
       // Identity precedes every mutation: an obsolete result must never clear
       // a newer request at the same spatial key, even when the old result is empty.
       if (!this.isCurrentWorkerTicket(ticket)) continue;
+      if (this.getRenderedSurface(ticket.node) !== ticket.surface) {
+        this.workerInflight.delete(ticket.key);
+        this.pendingLodSwap.delete(ticket.key);
+        continue;
+      }
       if (!this.isNodeInGrassHorizon(ticket.node)) {
         this.workerInflight.delete(ticket.key);
         this.pendingLodSwap.delete(ticket.key);
         this.completedNodes.delete(ticket.key);
+        this.completedSurfaces.delete(ticket.key);
         continue;
       }
 
@@ -1061,6 +1111,24 @@ export class GrassVisualManager implements QuadTreeListener {
         continue;
       }
       this.pendingLodSwap.delete(ticket.key);
+      if (result.data.count > 0) built++;
+      let projected;
+      try {
+        projected = projectGrassAnchors(
+          result.data,
+          ticket.surface,
+          this.getWaterSurfaceAt,
+          this.isInFlatZone,
+        );
+      } catch (error) {
+        console.error(
+          "[GrassVisualManager] Rejected terrain projection:",
+          error,
+        );
+        continue;
+      }
+      // Nonempty projections consume the install budget even if every anchor
+      // was rejected by water/exclusion. Otherwise failed coverage is unbounded.
       if (ticket.isLodSwap) {
         const oldChunk = this.chunks.get(ticket.key);
         if (oldChunk) {
@@ -1073,17 +1141,19 @@ export class GrassVisualManager implements QuadTreeListener {
         continue;
       }
 
-      if (result.data.count === 0) {
+      if (projected.count === 0) {
         this.completedNodes.set(ticket.key, ticket.node);
+        this.completedSurfaces.set(ticket.key, ticket.surface);
         continue;
       }
       this.createChunkMeshFromWorkerData(
         ticket.node,
-        result.data,
+        projected,
         ticket.lodLevel,
+        projected.grounding,
       );
       this.completedNodes.set(ticket.key, ticket.node);
-      built++;
+      this.completedSurfaces.set(ticket.key, ticket.surface);
     }
     return built;
   }
@@ -1099,6 +1169,7 @@ export class GrassVisualManager implements QuadTreeListener {
     }
     this.workerInflight.delete(key);
     this.completedNodes.delete(key);
+    this.completedSurfaces.delete(key);
     this.pendingLodSwap.delete(key);
     this.settledWorkerResults = this.settledWorkerResults.filter(
       (entry) => entry.ticket.key !== key,
@@ -1116,6 +1187,7 @@ export class GrassVisualManager implements QuadTreeListener {
     this.workerInflight.clear();
     this.liveNodes.clear();
     this.completedNodes.clear();
+    this.completedSurfaces.clear();
     this.pendingLodSwap.clear();
     terminateGrassWorkerPool();
     for (const [, chunk] of this.chunks) {
@@ -1145,6 +1217,7 @@ export class GrassVisualManager implements QuadTreeListener {
     }
     this.chunks.clear();
     this.completedNodes.clear();
+    this.completedSurfaces.clear();
     this.workerInflight.clear();
     this.pendingLodSwap.clear();
     this.settledWorkerResults.length = 0;
@@ -1191,6 +1264,7 @@ export class GrassVisualManager implements QuadTreeListener {
       affectedKeys.add(key);
       this.workerInflight.delete(key);
       this.completedNodes.delete(key);
+      this.completedSurfaces.delete(key);
       this.pendingLodSwap.delete(key);
       const chunk = this.chunks.get(key);
       if (chunk) {
@@ -1224,66 +1298,55 @@ export class GrassVisualManager implements QuadTreeListener {
 
   // -- Chunk mesh creation --------------------------------------------------
 
-  private createChunkMesh(node: TerrainQuadNode, lodLevel?: number): void {
+  private createChunkMesh(
+    node: TerrainQuadNode,
+    lodLevel?: number,
+    replace = false,
+  ): void {
     if (!this.isNodeInGrassHorizon(node)) return;
     const key = this.chunkKey(node);
-    if (this.chunks.has(key)) {
-      this.completedNodes.set(key, node);
-      return;
-    }
-
+    if (this.chunks.has(key) && !replace) return;
+    const surface = this.getRenderedSurface(node);
+    if (!surface) return;
+    if (
+      surface.nodeId !== node.id ||
+      surface.terrainProfileIdentity !== this.terrainProfileIdentity
+    )
+      throw new Error("Grass requires the current retained terrain surface");
     const lod = lodLevel ?? this.getLodLevel(node);
     const tier = GRASS_CONFIG.LOD_TIERS[lod];
     const instanceData = this.generateInstanceData(node, tier.spacingMul);
-    this.completedNodes.set(key, node);
-    if (!instanceData || instanceData.count === 0) return;
-
-    const geo = this.lodGeometries[lod].clone();
-    geo.setAttribute(
-      "instanceOffset",
-      new THREE.InstancedBufferAttribute(instanceData.offsets, 3),
-    );
-    geo.setAttribute(
-      "instanceRotScaleHash",
-      new THREE.InstancedBufferAttribute(instanceData.rotScaleHash, 3),
-    );
-    setColorTintInterleaved(
-      geo,
-      instanceData.groundColors,
-      instanceData.grassTints,
-      instanceData.count,
-    );
-    geo.setAttribute(
-      "instanceGroundNormal",
-      new THREE.InstancedBufferAttribute(instanceData.groundNormals, 3),
-    );
-
-    const mesh = new THREE.InstancedMesh(
-      geo,
-      this.material,
-      instanceData.count,
-    );
-    mesh.position.set(node.centerX, 0, node.centerZ);
-    mesh.name = `GrassQT_${key}`;
-    mesh.frustumCulled = false;
-    mesh.receiveShadow = true;
-    mesh.castShadow = false;
-    mesh.userData = { type: "grass", walkable: false, clickable: false };
-
-    const identity = new THREE.Matrix4();
-    for (let i = 0; i < instanceData.count; i++) {
-      mesh.setMatrixAt(i, identity);
+    let projected;
+    if (instanceData) {
+      projected = projectGrassAnchors(
+        {
+          ...instanceData,
+          type: "grassInstanceResult" as const,
+          chunkKey: key,
+          terrainProfileIdentity: this.terrainProfileIdentity,
+        },
+        surface,
+        this.getWaterSurfaceAt,
+        this.isInFlatZone,
+      );
     }
-    mesh.instanceMatrix.needsUpdate = true;
-
-    const half = node.halfSize;
-    const box = new THREE.Box3(
-      new THREE.Vector3(node.centerX - half, -50, node.centerZ - half),
-      new THREE.Vector3(node.centerX + half, 200, node.centerZ + half),
-    );
-
-    this.container.add(mesh);
-    this.chunks.set(key, { nodeId: node.id, mesh, box, lodLevel: lod, node });
+    if (replace) {
+      const previous = this.chunks.get(key);
+      if (previous) {
+        previous.mesh.removeFromParent();
+        previous.mesh.geometry.dispose();
+        this.chunks.delete(key);
+      }
+    }
+    if (projected?.count)
+      this.createChunkMeshFromWorkerData(
+        node,
+        projected,
+        lod,
+        projected.grounding,
+      );
+    this.completedNodes.set(key, node);
+    this.completedSurfaces.set(key, surface);
   }
 
   // -- Instance data generation ---------------------------------------------

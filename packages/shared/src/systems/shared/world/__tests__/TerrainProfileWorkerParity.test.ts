@@ -33,6 +33,7 @@ import { BiomeType, buildBiomeConstantsJS } from "../TerrainBiomeTypes";
 import { TERRAIN_SHADER_CONSTANTS } from "../TerrainShader";
 import {
   COMPACT_WORLD_TERRAIN_PROFILE as compact,
+  SCULPTED_COMPACT_WORLD_TERRAIN_PROFILE as sculpted,
   LEGACY_TERRAIN_PROFILE_FIXTURE as legacy,
   validateWorldTerrainProfile,
   worldTerrainProfileIdentity,
@@ -167,6 +168,9 @@ describe("actual compact terrain height pipeline", () => {
     const profiles = [
       legacy,
       ...[0, 41, 0xffffffff].map((seed) =>
+        validateWorldTerrainProfile({ ...sculpted, seed }),
+      ),
+      ...[0, 41, 0xffffffff].map((seed) =>
         validateWorldTerrainProfile({ ...compact, seed }),
       ),
     ];
@@ -203,6 +207,9 @@ describe("actual compact terrain height pipeline", () => {
     let shoreSamples = 0;
     try {
       const profiles = [
+        ...[0, 41, 0xffffffff].map((seed) =>
+          validateWorldTerrainProfile({ ...sculpted, seed }),
+        ),
         ...[0, 41, 0xffffffff].map((seed) =>
           validateWorldTerrainProfile({ ...compact, seed }),
         ),

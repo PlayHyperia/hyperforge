@@ -106,6 +106,29 @@ qualification as explicit gates; adding grass density alone is insufficient.
 
 ## Sequential implementation tasks
 
+### Sculpted candidate: probe10, limited improvement
+
+The active compact-v2 profile now uses one shared authored ridge/meadow/coast
+landform and one forest biome. Actual matched probe08/probe10 images visibly
+remove the biome wedges, deep cuts and inappropriate foliage snow. The material
+initialization failure retained in probe09 is corrected and verified live.
+Grass anchors now fit current retained terrain triangles with sub-micrometer
+maximum sampled gaps, but only twelve unique anchors are observed and none are
+in the campus or pond bank. Coherent shape is progress, not a finished environment.
+
+The current review remains rejected for art acceptance: bare mottled ground,
+missing paths and landscape composition, a hard circular pond edge, rectangular
+ocean color transitions, unresolved offshore structures and a newly visible
+distant hospital-floor cut-through require work. The source water manager chooses
+lake/ocean material from each chunk center's island mask; qualify consistent
+ocean ownership instead of treating those square color boundaries as intentional
+shore art. Confirm full floor footprints and depth behavior before approval.
+
+See [the sculpted-island checkpoint](compact-sculpted-island-checkpoint-20260910.md)
+for tests, hashes, failed and completed live attempts, coverage and open gates.
+The outer diagnostic still fails on cow content and retains dagger fit errors.
+It does not run the real keeper/stream or qualify representative performance.
+
 ### 1. Verify lighting and material presentation at fixed cameras
 
 - [ ] Retain a baseline with exact source/build hashes, camera matrices, renderer profile, resolution/DPR, exposure, tone mapping, day phase, lights and material/map values.

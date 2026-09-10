@@ -1040,6 +1040,60 @@ export function computeTerrainColorCPU(
  */
 export const MAX_VERTEX_LIGHTS = 8;
 
+/**
+ * Interim roughness art controls, not measured material properties. Texture
+ * color is not a height field: do not derive geometry or normals from it.
+ */
+export const TERRAIN_SURFACE_DETAIL = {
+  GRASS_ROUGHNESS: 0.94,
+  DIRT_ROUGHNESS: 0.87,
+  CLIFF_ROUGHNESS: 0.82,
+  DETAIL_VARIATION: 0.06,
+  MIN_ROUGHNESS: 0.78,
+  MAX_ROUGHNESS: 0.99,
+  DETAIL_FULL_DISTANCE: 55,
+  DETAIL_END_DISTANCE: 110,
+} as const;
+
+/** Pure arithmetic TSL graph; all texture samples are supplied by the owner. */
+export function createTerrainSurfaceRoughnessNode(
+  strength: Node<"float">,
+  distanceSquared: Node<"float">,
+  dirtWeight: Node<"float">,
+  cliffWeight: Node<"float">,
+  textureDetail: Node<"float">,
+): Node<"float"> {
+  const controls = TERRAIN_SURFACE_DETAIL;
+  const dryGround = mix(
+    float(controls.GRASS_ROUGHNESS),
+    float(controls.DIRT_ROUGHNESS),
+    clamp(dirtWeight, 0, 1),
+  );
+  const surface = mix(
+    dryGround,
+    float(controls.CLIFF_ROUGHNESS),
+    clamp(cliffWeight, 0, 1),
+  );
+  const nearDetail = sub(
+    float(1),
+    smoothstep(
+      float(controls.DETAIL_FULL_DISTANCE ** 2),
+      float(controls.DETAIL_END_DISTANCE ** 2),
+      distanceSquared,
+    ),
+  );
+  const variation = mul(
+    mul(sub(clamp(textureDetail, 0, 1), float(0.5)), nearDetail),
+    float(controls.DETAIL_VARIATION),
+  );
+  const candidate = clamp(
+    add(surface, variation),
+    controls.MIN_ROUGHNESS,
+    controls.MAX_ROUGHNESS,
+  );
+  return mix(float(1), candidate, clamp(strength, 0, 1));
+}
+
 export type TerrainUniforms = {
   shade: TerrainShadeUniforms;
   sunPosition: UniformNode<"vec3", THREE.Vector3>;
@@ -1047,6 +1101,8 @@ export type TerrainUniforms = {
   time: UniformNode<"float", number>;
   fogEnabled: UniformNode<"float", number>; // 1.0 = fog enabled, 0.0 = fog disabled (for minimap)
   dayIntensity: UniformNode<"float", number>; // 0 = night, 1 = day
+  /** Opt-in roughness detail candidate; zero preserves the original matte surface. */
+  surfaceDetailStrength: UniformNode<"float", number>;
   // Vertex lighting uniforms (lampposts, etc.)
   vertexLightPositions: UniformNode<"vec3", THREE.Vector3>[]; // Array of 8 light positions
   vertexLightColors: UniformNode<"vec3", THREE.Vector3>[]; // Array of 8 light colors
@@ -1107,6 +1163,7 @@ export function createTerrainMaterial(
     new THREE.Vector3(...SUN_LIGHT.DEFAULT_DIRECTION),
   );
   const timeUniform = uniform(0);
+  const surfaceDetailStrength = uniform(0);
   const noiseScale = uniform(TERRAIN_SHADER_CONSTANTS.NOISE_SCALE);
 
   // Sky-color fog: uses the shared render target texture (updated in-place by SkySystem)
@@ -1337,20 +1394,42 @@ export function createTerrainMaterial(
     noiseValue,
   );
   const flatnessFactor = smoothstep(float(0.3), float(0.05), dSlope);
-  baseColor = mix(baseColor, dirtColor, mul(dirtPatchFactor, flatnessFactor));
+  const dirtPatchWeight = mul(dirtPatchFactor, flatnessFactor);
+  baseColor = mix(baseColor, dirtColor, dirtPatchWeight);
 
   // Dirt on moderate slopes (bell curve, using distorted slope)
   const dirtSlopeFactor = mul(
     smoothstep(float(0.15), float(0.4), dSlope),
     smoothstep(float(0.6), float(0.3), dSlope),
   );
-  baseColor = mix(baseColor, dirtColor, mul(dirtSlopeFactor, float(0.6)));
+  const dirtSlopeWeight = mul(dirtSlopeFactor, float(0.6));
+  baseColor = mix(baseColor, dirtColor, dirtSlopeWeight);
 
   // Cliff on steep slopes (using distorted slope)
-  baseColor = mix(
-    baseColor,
-    cliffColor,
-    smoothstep(float(0.3), float(0.55), dSlope),
+  const cliffWeight = smoothstep(float(0.3), float(0.55), dSlope);
+  baseColor = mix(baseColor, cliffColor, cliffWeight);
+
+  // Reuse the same existing texture nodes and layer weights. This adjusts PBR
+  // roughness only, never paints light into albedo or adds texture assets.
+  const dirtWeight = sub(
+    float(1),
+    mul(sub(float(1), dirtPatchWeight), sub(float(1), dirtSlopeWeight)),
+  );
+  const surfaceSample = mix(
+    mix(sGrass, sDirt, dirtWeight),
+    sCliff,
+    cliffWeight,
+  );
+  const surfaceTextureDetail = add(
+    dot(surfaceSample, vec3(0.2126, 0.7152, 0.0722)),
+    mul(sub(fineNoise, float(0.5)), float(0.2)),
+  );
+  const surfaceRoughness = createTerrainSurfaceRoughnessNode(
+    surfaceDetailStrength,
+    distSq,
+    dirtWeight,
+    cliffWeight,
+    surfaceTextureDetail,
   );
 
   // Sand near water (flat areas, stronger in canyon — using distorted height)
@@ -1615,6 +1694,7 @@ export function createTerrainMaterial(
   const material = new MeshStandardNodeMaterial();
   material.colorNode = litTerrain;
   material.roughness = 1.0;
+  material.roughnessNode = surfaceRoughness;
   material.metalness = 0.0;
   material.side = THREE.FrontSide;
   material.fog = false;
@@ -1630,6 +1710,7 @@ export function createTerrainMaterial(
     time: timeUniform,
     fogEnabled: fogEnabledUniform,
     dayIntensity: dayIntensityUniform,
+    surfaceDetailStrength,
     // Vertex lighting arrays
     vertexLightPositions: vertexLightPositionUniforms,
     vertexLightColors: vertexLightColorUniforms,

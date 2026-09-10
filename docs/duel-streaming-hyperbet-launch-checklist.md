@@ -34,6 +34,50 @@ verification, secret scanning and exact remote-ref checks. These checkpoints are
 not release approval and do not certify the whole workspace clean or backed up.
 
 
+## Sculpted island and retained-triangle contact — 2026-09-10
+
+User review: terrain remains lackluster. The main next deliverable is a genuinely
+finished pond → workshop/bank → arena-approach environment, with authored banks,
+rock formations, differentiated PBR ground, connected paths and grouped foliage.
+See the game repository's `docs/compact-island-environment-art-brief.md`. The new
+imagegen reference is concept art only; it is not a game capture or approval.
+
+- [x] Build the compact-v2 candidate with a shared authored landform, continuous
+  coast, one forest biome and unchanged station/arena coordinates. Main-thread,
+  actual worker and assembled geometry regressions pass. The final shared run
+  passes 286 tests / 31 files; server regressions 273 / nine files, launch
+  validator 13, three typechecks and fresh shared/server builds pass.
+- [x] Fit grass anchors to revision-owned retained terrain triangles during
+  bounded installation. Keep worker ecological evidence separate, recheck water
+  and exclusions, reject stale results and validate geometry before publication.
+  Density, range, terrain resolution and upload budgets are unchanged.
+- [x] Retain failed probe09 and fix the material initialization order it exposed.
+  Probe10 confirms the actual compact material option, completes 11 views /
+  22 spatial PNGs, verifies 125 unchanged pins and cleans up the owned browser,
+  stack and ports. Inner study passes; outer run still fails on cow content and
+  retains the fourteen canonical dagger fit errors.
+- [x] Record actual limited improvement versus probe08: biome wedges/deep cuts
+  and inappropriate foliage snow are gone. Twelve unique grass anchors pass
+  strict independent triangle-ray contact (maximum gap below 0.000001 m).
+  The 528 inspections / 525 rays are repeated observations, not unique plants.
+- [ ] Resolve newly visible distant hospital-floor green cut-through strips seen in
+  probe10's island-wide image; the closer view and point samples do not prove
+  the complete floor is clear. Diagnose actual geometry and depth handling.
+- [ ] Finish ground dressing and material detail: preparation-campus and pond-bank
+  still have zero observed grass anchors. Verify clump/blade footprints,
+  moving-camera/LOD continuity and elevated-water contact after actual coverage.
+- [ ] Finish connected paths, believable pond/coast banks, coherent foliage,
+  water-tile seams and misplaced/offshore structure presentation. Probe10 is
+  visibly improved but still a bare prototype, not AAA art acceptance.
+- [ ] Qualify representative CPU/GPU frame times, memory, loading, live-agent
+  activity and streaming. This intrusive static diagnostic is not that workload.
+
+Evidence and hashes: the game repository's
+`docs/compact-sculpted-island-checkpoint-20260910.md` and local
+`asset-studio/game-test-integration/compact-world-probe09/` / `compact-world-probe10/`.
+Source Git does not back up the large local captures. These are development
+checkpoints, not deployment or main-merge approval.
+
 ## Compact daylight baseline and grass correction — 2026-09-10
 
 - [ ] Finish actual cached-GLB actor ownership: shared geometry must survive another actor's removal, owned skeleton/mixer state must be released, and failed/late async loading must not retain or reinstall models. Add real MobEntity lifecycle tests and WebGPU churn evidence. Source findings are recorded in the game repository's `docs/glb-actor-lifecycle-audit-20260910.md`; independent skeleton-clone tests are not full teardown qualification.

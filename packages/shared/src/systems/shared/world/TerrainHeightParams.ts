@@ -9,6 +9,7 @@
 import { BiomeType, DEFAULT_BIOME } from "./TerrainBiomeTypes";
 import { TERRAIN_CONSTANTS } from "../../../constants/GameConstants";
 import type { WorldTerrainProfile } from "./WorldTerrainProfile";
+import { createCompactIslandLandform } from "./CompactIslandLandform";
 import {
   smoothstep,
   mapRangeSmooth,
@@ -107,6 +108,7 @@ export const BASE_OFFSET = 22;
 export const FEATURE_SCALE = 1.4;
 
 const NOISE_COORD_SCALE = 55 / 2450;
+const compactIslandLandform = createCompactIslandLandform();
 
 // ---------------------------------------------------------------------------
 // Per-biome config defaults
@@ -454,6 +456,9 @@ export function computeBaseHeight(
   profile: WorldTerrainProfile,
 ): number {
   // ── 1. Blend per-biome heights ──────────────────────────────────────
+  if (profile.algorithm === "compact-island-sculpt-v1") {
+    return compactIslandLandform.height(worldX, worldZ, sharedNoise, profile);
+  }
   const coordScale = NOISE_COORD_SCALE * profile.height.featureScale;
   let height = 0;
   for (const key of Object.keys(biomeWeights)) {
@@ -480,6 +485,9 @@ export function computeIslandMask(
   sharedNoise: TerrainNoiseAdapter,
   profile: WorldTerrainProfile,
 ): number {
+  if (profile.algorithm === "compact-island-sculpt-v1") {
+    return compactIslandLandform.mask(worldX, worldZ, sharedNoise, profile);
+  }
   const island = profile.island;
   const x = worldX - island.centerX;
   const z = worldZ - island.centerZ;
@@ -656,6 +664,7 @@ const BIOME_CONFIGS_JS = `
 export function buildGetBaseHeightAtJS(): string {
   return `
   ${BIOME_CONFIGS_JS}
+  var compactIslandLandform = (${createCompactIslandLandform.toString()})();
 
   var NOISE_COORD_SCALE = ${NOISE_COORD_SCALE};
   var TERRAIN_SCALE_VAL = config.TERRAIN_PROFILE.height.terrainScale;
@@ -718,6 +727,9 @@ export function buildGetBaseHeightAtJS(): string {
   }
 
   function getBaseHeightAt(worldX, worldZ, biomeWeights) {
+    if (config.TERRAIN_PROFILE.algorithm === "compact-island-sculpt-v1") {
+      return compactIslandLandform.height(worldX, worldZ, noise, config.TERRAIN_PROFILE);
+    }
     var bw = biomeWeights || computeBiomeWeightsByPosition(worldX, worldZ);
     var coordScale = NOISE_COORD_SCALE * FEATURE_SCALE_VAL;
     var height = 0;
@@ -740,6 +752,9 @@ export function buildGetBaseHeightAtJS(): string {
   }
 
   function getIslandMask(worldX, worldZ) {
+    if (config.TERRAIN_PROFILE.algorithm === "compact-island-sculpt-v1") {
+      return compactIslandLandform.mask(worldX, worldZ, noise, config.TERRAIN_PROFILE);
+    }
     var island = config.TERRAIN_PROFILE.island;
     var x = worldX - island.centerX;
     var z = worldZ - island.centerZ;
