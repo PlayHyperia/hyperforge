@@ -1,10 +1,13 @@
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   EventType,
   getDuelArenaConfig,
   isPositionInsideCombatArena,
 } from "@hyperforge/shared";
 import { EmbeddedHyperiaService } from "../EmbeddedHyperiaService";
+import { loadWorldProfileTestFixture } from "./worldProfileTestFixture";
+
+beforeEach(loadWorldProfileTestFixture);
 
 /**
  * Minimal mock of the World event emitter used by EmbeddedHyperiaService.

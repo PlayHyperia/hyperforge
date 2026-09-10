@@ -15,10 +15,13 @@
  */
 
 import type { World, StakedItem } from "@hyperforge/shared";
-import { EventType, PlayerEntity } from "@hyperforge/shared";
+import {
+  EventType,
+  PlayerEntity,
+  getDuelArenaLobbyReturnPosition,
+} from "@hyperforge/shared";
 import type { ServerDuelSession } from "./DuelSessionManager";
 import { AuditLogger, Logger } from "../ServerNetwork/services";
-import { LOBBY_SPAWN_WINNER, LOBBY_SPAWN_LOSER } from "./config";
 import crypto from "node:crypto";
 
 // ============================================================================
@@ -146,7 +149,7 @@ export class DuelCombatResolver {
     try {
       const restore = this.restorePlayerHealth(
         winnerId,
-        LOBBY_SPAWN_WINNER,
+        getDuelArenaLobbyReturnPosition(true),
         `ordinary-duel-resolution-prayer:${session.duelId}:${winnerId}`,
       );
       if (restore)
@@ -162,7 +165,7 @@ export class DuelCombatResolver {
     try {
       const restore = this.restorePlayerHealth(
         loserId,
-        LOBBY_SPAWN_LOSER,
+        getDuelArenaLobbyReturnPosition(false),
         `ordinary-duel-resolution-prayer:${session.duelId}:${loserId}`,
       );
       if (restore) prayerRestores.push({ playerId: loserId, promise: restore });
@@ -605,7 +608,7 @@ export class DuelCombatResolver {
    * Uses different spawn positions so winner and loser don't overlap
    */
   private teleportToLobby(playerId: string, isWinner: boolean): void {
-    const lobbySpawn = isWinner ? LOBBY_SPAWN_WINNER : LOBBY_SPAWN_LOSER;
+    const lobbySpawn = getDuelArenaLobbyReturnPosition(isWinner);
 
     this.world.emit("player:teleport", {
       playerId,

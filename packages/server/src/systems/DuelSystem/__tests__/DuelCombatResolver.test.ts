@@ -5,17 +5,18 @@
  * teleportation, and error resilience of the resolver.
  */
 
-import { describe, it, expect, beforeEach, vi } from "vitest";
+import { describe, it, expect, beforeEach, beforeAll, vi } from "vitest";
 import { DuelCombatResolver } from "../DuelCombatResolver";
 import { createMockWorld, createDuelPlayers, type MockWorld } from "./mocks";
 import type { ServerDuelSession } from "../DuelSessionManager";
 import {
   EventType,
   PlayerEntity,
+  DataManager,
+  getDuelArenaLobbyReturnPosition,
   createSlotNumber,
   createItemID,
 } from "@hyperforge/shared";
-import { LOBBY_SPAWN_WINNER, LOBBY_SPAWN_LOSER } from "../config";
 
 // Stable singleton mock so tests can verify calls
 const mockAuditLoggerInstance = {
@@ -36,6 +37,10 @@ vi.mock("../../ServerNetwork/services", () => ({
 }));
 
 import { Logger } from "../../ServerNetwork/services";
+
+beforeAll(async () => {
+  await DataManager.getInstance().initialize();
+});
 
 // ============================================================================
 // Helpers
@@ -314,10 +319,10 @@ describe("DuelCombatResolver", () => {
       expect(loserRespawn).toBeDefined();
       expect(
         (winnerRespawn![1] as { spawnPosition: unknown }).spawnPosition,
-      ).toEqual(LOBBY_SPAWN_WINNER);
+      ).toEqual(getDuelArenaLobbyReturnPosition(true));
       expect(
         (loserRespawn![1] as { spawnPosition: unknown }).spawnPosition,
-      ).toEqual(LOBBY_SPAWN_LOSER);
+      ).toEqual(getDuelArenaLobbyReturnPosition(false));
     });
 
     it("emits PLAYER_SET_DEAD false for both players", () => {
@@ -334,7 +339,7 @@ describe("DuelCombatResolver", () => {
       }
     });
 
-    it("emits player:teleport for winner with LOBBY_SPAWN_WINNER", () => {
+    it("emits player:teleport for winner with getDuelArenaLobbyReturnPosition(true)", () => {
       const session = createTestSession();
 
       resolver.resolveDuel(session, "player1", "player2", "death");
@@ -347,11 +352,11 @@ describe("DuelCombatResolver", () => {
       );
       expect(winnerTeleport).toBeDefined();
       expect((winnerTeleport![1] as { position: unknown }).position).toEqual(
-        LOBBY_SPAWN_WINNER,
+        getDuelArenaLobbyReturnPosition(true),
       );
     });
 
-    it("emits player:teleport for loser with LOBBY_SPAWN_LOSER", () => {
+    it("emits player:teleport for loser with getDuelArenaLobbyReturnPosition(false)", () => {
       const session = createTestSession();
 
       resolver.resolveDuel(session, "player1", "player2", "death");
@@ -364,7 +369,7 @@ describe("DuelCombatResolver", () => {
       );
       expect(loserTeleport).toBeDefined();
       expect((loserTeleport![1] as { position: unknown }).position).toEqual(
-        LOBBY_SPAWN_LOSER,
+        getDuelArenaLobbyReturnPosition(false),
       );
     });
 

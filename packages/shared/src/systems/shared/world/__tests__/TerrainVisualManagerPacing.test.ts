@@ -4,6 +4,10 @@ import THREE from "../../../../extras/three/three";
 import type { TerrainQuadNode } from "../TerrainQuadTree";
 import type { VisualManagerTerrainProvider } from "../TerrainVisualManager";
 import { TerrainVisualManager } from "../TerrainVisualManager";
+import {
+  COMPACT_WORLD_TERRAIN_PROFILE,
+  worldTerrainProfileIdentity,
+} from "../WorldTerrainProfile";
 
 type FakeNode = Pick<
   TerrainQuadNode,
@@ -63,6 +67,9 @@ describe("TerrainVisualManager startup pacing", () => {
 
   it("precompiles the production quad-chunk layout and disposes its sample", async () => {
     const provider: VisualManagerTerrainProvider = {
+      terrainProfileIdentity: worldTerrainProfileIdentity(
+        COMPACT_WORLD_TERRAIN_PROFILE,
+      ),
       calculateRoadInfluenceAtVertex: () => 0,
       getFlatZoneHeight: () => null,
       getHeightAtComputed: (x, z) => (x + z) * 0.01,
@@ -145,6 +152,9 @@ describe("TerrainVisualManager startup pacing", () => {
       };
     };
     const provider = {
+      terrainProfileIdentity: worldTerrainProfileIdentity(
+        COMPACT_WORLD_TERRAIN_PROFILE,
+      ),
       calculateRoadInfluenceAtVertex: () => 0,
       getFlatZoneHeight: () => null,
       getHeightAtComputed: () => 0,

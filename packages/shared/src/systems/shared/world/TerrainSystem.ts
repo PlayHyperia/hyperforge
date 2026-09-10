@@ -18,16 +18,18 @@ import {
   type TerrainWorkerOutput,
 } from "../../../utils/workers";
 import {
-  ISLAND_RADIUS,
   computeBaseHeight,
+  computeIslandMask,
   adjustShorelineHeight,
   buildComputeBiomeWeightsJS,
-  MAX_HEIGHT,
-  WATER_LEVEL_NORMALIZED,
-  SHORELINE_CONFIG,
   BIOME_CONFIG,
   BIOME_CONFIGS,
 } from "./TerrainHeightParams";
+import {
+  worldTerrainProfileIdentity,
+  type WorldTerrainProfile,
+} from "./WorldTerrainProfile";
+import { createTerrainWorkerConfig } from "../../../utils/workers/TerrainWorkerShared";
 import type { ShorelineConfig, BiomeNoiseSet } from "./TerrainHeightParams";
 import { BiomeType, DEFAULT_BIOME, BIOME_LIST } from "./TerrainBiomeTypes";
 import { WaterBodyRegistry } from "./WaterBodyRegistry";
@@ -37,19 +39,14 @@ import {
 } from "./RadialPondTerrainProfile";
 import type { BridgeSystem } from "./BridgeSystem";
 // Import terrain generator from procgen package
-import {
-  TerrainGenerator,
-  BiomeSystem,
-  type TerrainConfig,
-  type BiomeDefinition,
-} from "@hyperforge/procgen/terrain";
+import { BiomeSystem, type BiomeDefinition } from "@hyperforge/procgen/terrain";
 
 /**
  * Terrain System
  *
  * Specifications:
  * - 100x100m tiles (100m x 100m each)
- * - 100x100 world grid = 10km x 10km total world
+ * - Explicit compact-world profile shared by authoritative and worker sampling
  * - Only load current tile + adjacent tiles (3x3 = 9 tiles max)
  * - Procedural heightmap generation with biomes
  * - PhysX collision support
@@ -70,6 +67,11 @@ import { Layers } from "../../../physics/Layers";
 import { BIOMES } from "../../../data/world-structure";
 import { ALL_WORLD_AREAS } from "../../../data/world-areas";
 import { getDuelArenaConfig } from "../../../data/duel-manifest";
+import {
+  createDuelArenaFloorZones,
+  getDuelArenaGradeHeight,
+  resolveDuelArenaFloorHeight,
+} from "../../../data/arena-grading";
 import { DataManager } from "../../../data/DataManager";
 // NOTE: Import directly to avoid circular dependency through barrel file
 import { WaterSystem } from "./WaterSystem";
@@ -310,7 +312,7 @@ export class TerrainSystem extends System {
 
   // Unified terrain generator from @hyperforge/procgen
   // Provides deterministic height/biome calculation independent of rendering
-  private terrainGenerator!: TerrainGenerator;
+  private biomeSystem!: BiomeSystem;
 
   // PERFORMANCE: Template geometry and pre-allocated buffers for tile creation
   private templateGeometry: THREE.PlaneGeometry | null = null;
@@ -374,26 +376,68 @@ export class TerrainSystem extends System {
     return process.env.NODE_ENV === "production";
   })();
 
-  // Deterministic noise seeding
+  private activeTerrainProfile: WorldTerrainProfile | null = null;
+
+  /** Capture once: an existing world must never silently switch terrain profiles. */
+  public getWorldTerrainProfile(): WorldTerrainProfile {
+    if (!this.activeTerrainProfile) {
+      const profile = DataManager.getWorldTerrainProfile();
+      const config = DataManager.getWorldConfig();
+      if (!config)
+        throw new Error("Terrain requires loaded world configuration");
+      this.CONFIG.TILE_SIZE = profile.terrainTileSize;
+      this.CONFIG.WORLD_SIZE =
+        (profile.bounds.maxX - profile.bounds.minX) / profile.terrainTileSize;
+      this.CONFIG.TILE_RESOLUTION = config.terrain.tileResolution;
+      this.CONFIG.QUADTREE_RESOLUTION = config.terrain.tileResolution;
+      this.CONFIG.QUADTREE_MIN_SIZE = profile.terrainTileSize;
+      this.CONFIG.WATER_THRESHOLD = profile.water.threshold;
+      this.CONFIG.ISLAND_MAX_WORLD_SIZE_TILES = this.CONFIG.WORLD_SIZE;
+      this.CONFIG.ISLAND_FALLOFF_TILES =
+        profile.island.falloff / profile.terrainTileSize;
+      this.tileSize = profile.terrainTileSize;
+      this.activeTerrainProfile = profile;
+    }
+    return this.activeTerrainProfile;
+  }
+
+  private get maxHeightParameter(): number {
+    return this.getWorldTerrainProfile().height.maxHeightParameter;
+  }
+
+  private get waterLevelNormalized(): number {
+    const profile = this.getWorldTerrainProfile();
+    return profile.water.threshold / profile.height.maxHeightParameter;
+  }
+
+  private get shorelineParameters(): WorldTerrainProfile["shoreline"] {
+    return this.getWorldTerrainProfile().shoreline;
+  }
+
+  // Explicit overrides may confirm the manifest, never select a different seed.
   private computeSeedFromWorldId(): number {
-    // Check for explicit seed in world config or environment
+    const seed = this.getWorldTerrainProfile().seed;
     const worldConfig = (this.world as { config?: { terrainSeed?: number } })
       .config;
-    if (worldConfig?.terrainSeed !== undefined) {
-      return worldConfig.terrainSeed;
+    if (
+      worldConfig?.terrainSeed !== undefined &&
+      worldConfig.terrainSeed !== seed
+    ) {
+      throw new Error(
+        "World terrainSeed conflicts with admitted terrain profile",
+      );
     }
-
-    // Check environment variable
-    if (typeof process !== "undefined" && process.env?.TERRAIN_SEED) {
-      const envSeed = parseInt(process.env.TERRAIN_SEED, 10);
-      if (!isNaN(envSeed)) {
-        return envSeed;
+    if (typeof process !== "undefined") {
+      const raw = process.env?.TERRAIN_SEED;
+      if (
+        raw !== undefined &&
+        raw !== "" &&
+        (!/^(0|[1-9][0-9]*)$/.test(raw) || Number(raw) !== seed)
+      ) {
+        throw new Error("TERRAIN_SEED conflicts with admitted terrain profile");
       }
     }
-
-    // Always use fixed seed of 0 for deterministic terrain on both client and server
-    const FIXED_SEED = 0;
-    return FIXED_SEED;
+    return seed;
   }
 
   private resolveRuntimeRole(): { isServer: boolean; isClient: boolean } {
@@ -412,12 +456,10 @@ export class TerrainSystem extends System {
   }
 
   private getActiveWorldSizeTiles(): number {
-    if (!this.CONFIG.ISLAND_MASK_ENABLED) {
-      return this.CONFIG.WORLD_SIZE;
-    }
-
-    const maxTiles = this.CONFIG.ISLAND_MAX_WORLD_SIZE_TILES;
-    return maxTiles > 0 ? maxTiles : this.CONFIG.WORLD_SIZE;
+    const profile = this.getWorldTerrainProfile();
+    return (
+      (profile.bounds.maxX - profile.bounds.minX) / profile.terrainTileSize
+    );
   }
 
   private getActiveWorldSizeMeters(): number {
@@ -907,26 +949,10 @@ export class TerrainSystem extends System {
     try {
       // Build worker config from current CONFIG
       // MUST match TerrainWorkerConfig interface exactly
-      const workerConfig: TerrainWorkerConfig = {
-        TILE_SIZE: this.CONFIG.TILE_SIZE,
-        TILE_RESOLUTION: this.CONFIG.TILE_RESOLUTION,
-        MAX_HEIGHT: MAX_HEIGHT,
-        // Biome calculation - MUST match getBiomeInfluencesAtPosition()
-        BIOME_GAUSSIAN_COEFF: BIOME_CONFIG.gaussianCoeff,
-        BIOME_BOUNDARY_NOISE_SCALE: BIOME_CONFIG.boundaryNoiseScale,
-        BIOME_BOUNDARY_NOISE_AMOUNT: BIOME_CONFIG.boundaryNoiseAmount,
-        WATER_THRESHOLD: this.CONFIG.WATER_THRESHOLD,
-        WATER_LEVEL_NORMALIZED: WATER_LEVEL_NORMALIZED,
-        SHORELINE_THRESHOLD: SHORELINE_CONFIG.THRESHOLD,
-        SHORELINE_STRENGTH: SHORELINE_CONFIG.STRENGTH,
-        SHORELINE_MIN_SLOPE: SHORELINE_CONFIG.MIN_SLOPE,
-        SHORELINE_SLOPE_SAMPLE_DISTANCE: SHORELINE_CONFIG.SLOPE_SAMPLE_DISTANCE,
-        SHORELINE_LAND_BAND: SHORELINE_CONFIG.LAND_BAND,
-        SHORELINE_LAND_MAX_MULTIPLIER: SHORELINE_CONFIG.LAND_MAX_MULTIPLIER,
-        SHORELINE_UNDERWATER_BAND: SHORELINE_CONFIG.UNDERWATER_BAND,
-        UNDERWATER_DEPTH_MULTIPLIER:
-          SHORELINE_CONFIG.UNDERWATER_DEPTH_MULTIPLIER,
-      };
+      const workerConfig: TerrainWorkerConfig = createTerrainWorkerConfig(
+        this.getWorldTerrainProfile(),
+        this.CONFIG.TILE_RESOLUTION,
+      );
 
       // Build simplified biome data for worker
       const biomeData: Record<
@@ -947,9 +973,7 @@ export class TerrainSystem extends System {
         tilesToProcess,
         workerConfig,
         this.computeSeedFromWorldId(),
-        this.terrainGenerator
-          .getBiomeSystem()
-          .getBiomeCenters() as BiomeCenter[],
+        this.biomeSystem.getBiomeCenters() as BiomeCenter[],
         biomeData,
       );
       if (this.destroyed) return;
@@ -1427,10 +1451,7 @@ export class TerrainSystem extends System {
     return tile;
   }
 
-  /**
-   * Initialize the unified TerrainGenerator from @hyperforge/procgen
-   * This creates a standalone generator that matches this system's configuration
-   */
+  /** Initialize shared biome placement using the admitted compact terrain profile. */
   private initializeTerrainGenerator(): void {
     const seed = this.computeSeedFromWorldId();
     const worldSizeMeters = this.getActiveWorldSizeMeters();
@@ -1450,101 +1471,48 @@ export class TerrainSystem extends System {
       };
     }
 
-    // Create configuration that matches this system's CONFIG
-    const terrainConfig: Partial<TerrainConfig> = {
+    const profile = this.getWorldTerrainProfile();
+    const influence = profile.island.radius * 0.6;
+    const centers = BiomeSystem.computePolygonCenters(
+      BIOME_LIST as string[],
+      profile.island.radius * 0.45,
+      influence,
+    ).map((center) => ({
+      ...center,
+      x: center.x + profile.island.centerX,
+      z: center.z + profile.island.centerZ,
+    }));
+    // Retain the shared biome implementation, not a second terrain-height
+    // generator with an independent island mask and origin-centered bounds.
+    this.biomeSystem = new BiomeSystem(
       seed,
-      tileSize: this.CONFIG.TILE_SIZE,
-      worldSize: this.CONFIG.WORLD_SIZE,
-      tileResolution: this.CONFIG.TILE_RESOLUTION,
-      maxHeight: MAX_HEIGHT,
-      waterThreshold: this.CONFIG.WATER_THRESHOLD,
-      noise: {
-        continent: {
-          scale: 0.0008,
-          weight: 0.4,
-          octaves: 5,
-          persistence: 0.7,
-          lacunarity: 2.0,
-        },
-        ridge: { scale: 0.003, weight: 0.1 },
-        hill: {
-          scale: 0.012,
-          weight: 0.12,
-          octaves: 4,
-          persistence: 0.5,
-          lacunarity: 2.2,
-        },
-        erosion: { scale: 0.005, weight: 0.08, octaves: 3 },
-        detail: {
-          scale: 0.04,
-          weight: 0.03,
-          octaves: 2,
-          persistence: 0.3,
-          lacunarity: 2.5,
-        },
-      },
-      biomes: {
+      worldSizeMeters,
+      {
         gridSize: 3,
         jitter: 0,
-        minInfluence: BIOME_CONFIG.influenceRadius,
-        maxInfluence: BIOME_CONFIG.influenceRadius,
+        minInfluence: influence,
+        maxInfluence: influence,
         gaussianCoeff: BIOME_CONFIG.gaussianCoeff,
         boundaryNoiseScale: BIOME_CONFIG.boundaryNoiseScale,
         boundaryNoiseAmount: BIOME_CONFIG.boundaryNoiseAmount,
-        explicitCenters: BiomeSystem.computePolygonCenters(
-          BIOME_LIST as string[],
-          BIOME_CONFIG.placementRadius,
-          BIOME_CONFIG.influenceRadius,
-        ),
+        explicitCenters: centers,
       },
-      island: {
-        enabled: this.CONFIG.ISLAND_MASK_ENABLED,
-        maxWorldSizeTiles: this.CONFIG.ISLAND_MAX_WORLD_SIZE_TILES,
-        falloffTiles: this.CONFIG.ISLAND_FALLOFF_TILES,
-        edgeNoiseScale: this.CONFIG.ISLAND_EDGE_NOISE_SCALE,
-        edgeNoiseStrength: this.CONFIG.ISLAND_EDGE_NOISE_STRENGTH,
-      },
-      shoreline: {
-        waterLevelNormalized: WATER_LEVEL_NORMALIZED,
-        threshold: SHORELINE_CONFIG.THRESHOLD,
-        colorStrength: SHORELINE_CONFIG.STRENGTH,
-        minSlope: SHORELINE_CONFIG.MIN_SLOPE,
-        slopeSampleDistance: SHORELINE_CONFIG.SLOPE_SAMPLE_DISTANCE,
-        landBand: SHORELINE_CONFIG.LAND_BAND,
-        landMaxMultiplier: SHORELINE_CONFIG.LAND_MAX_MULTIPLIER,
-        underwaterBand: SHORELINE_CONFIG.UNDERWATER_BAND,
-        underwaterDepthMultiplier: SHORELINE_CONFIG.UNDERWATER_DEPTH_MULTIPLIER,
-      },
-    };
-
-    this.terrainGenerator = new TerrainGenerator(
-      terrainConfig,
       biomeDefinitions,
     );
-
     console.log(
-      `[TerrainSystem] Initialized unified TerrainGenerator with seed ${seed}, ` +
-        `world size ${worldSizeMeters}m, ${Object.keys(biomeDefinitions).length} biomes`,
+      `[TerrainSystem] Initialized profile ${profile.id}, seed ${seed}, ${worldSizeMeters}m envelope`,
     );
-  }
-
-  /**
-   * Get the unified terrain generator for external use
-   * Useful for systems that need standalone terrain queries
-   */
-  public getTerrainGenerator(): TerrainGenerator {
-    return this.terrainGenerator;
   }
 
   // World Configuration - Your Specifications
   // classic MMORPG-STYLE: Rolling terrain with visible hills
   private readonly CONFIG = {
     // Core World Specs
-    TILE_SIZE: TERRAIN_CONSTANTS.TERRAIN_TILE_SIZE,
-    WORLD_SIZE: 100, // 100x100 grid = 10km x 10km world
+    TILE_SIZE: Number(TERRAIN_CONSTANTS.TERRAIN_TILE_SIZE),
+    WORLD_SIZE: 0, // Resolved from the required admitted terrain profile.
     TILE_RESOLUTION: 64, // 64x64 vertices per tile for smooth terrain
     SERVER_COLLISION_RESOLUTION: 16, // 16x16 vertices for PhysX collision (server only)
-    WATER_THRESHOLD: TERRAIN_CONSTANTS.WATER_THRESHOLD,
+    WATER_THRESHOLD: Number(TERRAIN_CONSTANTS.WATER_THRESHOLD),
 
     // LOD (Level of Detail) - Resolution tiers based on distance
     LOD_DISTANCES: [200, 400, 700], // Distance thresholds
@@ -1584,8 +1552,8 @@ export class TerrainSystem extends System {
 
     // Island Mask (default for main world)
     ISLAND_MASK_ENABLED: true,
-    ISLAND_MAX_WORLD_SIZE_TILES: 100, // 10km x 10km island
-    ISLAND_FALLOFF_TILES: 4, // Coastline falloff width in tiles
+    ISLAND_MAX_WORLD_SIZE_TILES: 0, // Resolved before any terrain work.
+    ISLAND_FALLOFF_TILES: 0,
     ISLAND_EDGE_NOISE_SCALE: 0.0015, // Noise scale for coastline irregularity
     ISLAND_EDGE_NOISE_STRENGTH: 0.03, // Radius variance as fraction of radius
 
@@ -1629,7 +1597,17 @@ export class TerrainSystem extends System {
   }
 
   async init(): Promise<void> {
-    console.log("[TerrainSystem] init() v2 — river valley carving enabled");
+    // Manifest loading is also used by other init waves; its in-flight promise
+    // is shared. Do not generate terrain or create GPU work from fallback data.
+    const dataManager = DataManager.getInstance();
+    // System registration normally admits the manifests first. Do not yield
+    // that already-ready path before synchronous terrain sampling is installed:
+    // other systems in the same init wave can request terrain immediately.
+    if (!dataManager.isReady()) await dataManager.initialize();
+    this.getWorldTerrainProfile();
+    console.log(
+      "[TerrainSystem] Initializing admitted compact terrain profile",
+    );
     // Initialize tile size
     this.tileSize = this.CONFIG.TILE_SIZE;
     const runtimeRole = this.resolveRuntimeRole();
@@ -1639,7 +1617,7 @@ export class TerrainSystem extends System {
     // Initialize deterministic noise from world id + per-biome noise sets
     this.ensureNoiseInitialized();
 
-    // Initialize the unified terrain generator from @hyperforge/procgen
+    // Initialize the shared biome generator; height sampling stays profile-owned.
     this.initializeTerrainGenerator();
 
     // Water body registry — ocean level only (no manual rivers/ponds)
@@ -1969,10 +1947,14 @@ export class TerrainSystem extends System {
       getFlatZoneHeight: (worldX: number, worldZ: number) =>
         this.getFlatZoneHeight(worldX, worldZ),
 
-      WATER_LEVEL_NORMALIZED: WATER_LEVEL_NORMALIZED,
-      SHORELINE_THRESHOLD: SHORELINE_CONFIG.THRESHOLD,
-      SHORELINE_STRENGTH: SHORELINE_CONFIG.STRENGTH,
-      MAX_HEIGHT: MAX_HEIGHT,
+      terrainProfileIdentity: worldTerrainProfileIdentity(
+        this.getWorldTerrainProfile(),
+      ),
+
+      WATER_LEVEL_NORMALIZED: this.waterLevelNormalized,
+      SHORELINE_THRESHOLD: this.shorelineParameters.THRESHOLD,
+      SHORELINE_STRENGTH: this.shorelineParameters.STRENGTH,
+      MAX_HEIGHT: this.maxHeightParameter,
       TILE_SIZE: this.CONFIG.TILE_SIZE,
     };
   }
@@ -2002,26 +1984,12 @@ export class TerrainSystem extends System {
 
     const provider = this.buildChunkTerrainProvider();
 
-    const workerConfig: QuadChunkWorkerConfig = {
-      MAX_HEIGHT: MAX_HEIGHT,
-      BIOME_GAUSSIAN_COEFF: BIOME_CONFIG.gaussianCoeff,
-      BIOME_BOUNDARY_NOISE_SCALE: BIOME_CONFIG.boundaryNoiseScale,
-      BIOME_BOUNDARY_NOISE_AMOUNT: BIOME_CONFIG.boundaryNoiseAmount,
-      WATER_THRESHOLD: this.CONFIG.WATER_THRESHOLD,
-      WATER_LEVEL_NORMALIZED: WATER_LEVEL_NORMALIZED,
-      SHORELINE_THRESHOLD: SHORELINE_CONFIG.THRESHOLD,
-      SHORELINE_STRENGTH: SHORELINE_CONFIG.STRENGTH,
-      SHORELINE_MIN_SLOPE: SHORELINE_CONFIG.MIN_SLOPE,
-      SHORELINE_SLOPE_SAMPLE_DISTANCE: SHORELINE_CONFIG.SLOPE_SAMPLE_DISTANCE,
-      SHORELINE_LAND_BAND: SHORELINE_CONFIG.LAND_BAND,
-      SHORELINE_LAND_MAX_MULTIPLIER: SHORELINE_CONFIG.LAND_MAX_MULTIPLIER,
-      SHORELINE_UNDERWATER_BAND: SHORELINE_CONFIG.UNDERWATER_BAND,
-      UNDERWATER_DEPTH_MULTIPLIER: SHORELINE_CONFIG.UNDERWATER_DEPTH_MULTIPLIER,
-    };
+    const workerConfig: QuadChunkWorkerConfig = createTerrainWorkerConfig(
+      this.getWorldTerrainProfile(),
+      this.CONFIG.TILE_RESOLUTION,
+    );
 
-    const biomeCenters = [
-      ...this.terrainGenerator.getBiomeSystem().getBiomeCenters(),
-    ].map((c) => ({
+    const biomeCenters = [...this.biomeSystem.getBiomeCenters()].map((c) => ({
       x: c.x,
       z: c.z,
       type: c.type,
@@ -2135,6 +2103,7 @@ export class TerrainSystem extends System {
         );
       }
       this.grassVisualManager = new GrassVisualManager(
+        worldTerrainProfileIdentity(this.getWorldTerrainProfile()),
         grassContainer,
         (x: number, z: number) => this.getHeightAt(x, z),
         this.CONFIG.WATER_THRESHOLD,
@@ -2163,24 +2132,10 @@ export class TerrainSystem extends System {
   }
 
   private buildGrassWorkerSetup(): GrassWorkerSetup {
-    const workerConfig: TerrainWorkerConfig = {
-      TILE_SIZE: this.CONFIG.TILE_SIZE,
-      TILE_RESOLUTION: this.CONFIG.TILE_RESOLUTION,
-      MAX_HEIGHT: MAX_HEIGHT,
-      BIOME_GAUSSIAN_COEFF: BIOME_CONFIG.gaussianCoeff,
-      BIOME_BOUNDARY_NOISE_SCALE: BIOME_CONFIG.boundaryNoiseScale,
-      BIOME_BOUNDARY_NOISE_AMOUNT: BIOME_CONFIG.boundaryNoiseAmount,
-      WATER_THRESHOLD: this.CONFIG.WATER_THRESHOLD,
-      WATER_LEVEL_NORMALIZED: WATER_LEVEL_NORMALIZED,
-      SHORELINE_THRESHOLD: SHORELINE_CONFIG.THRESHOLD,
-      SHORELINE_STRENGTH: SHORELINE_CONFIG.STRENGTH,
-      SHORELINE_MIN_SLOPE: SHORELINE_CONFIG.MIN_SLOPE,
-      SHORELINE_SLOPE_SAMPLE_DISTANCE: SHORELINE_CONFIG.SLOPE_SAMPLE_DISTANCE,
-      SHORELINE_LAND_BAND: SHORELINE_CONFIG.LAND_BAND,
-      SHORELINE_LAND_MAX_MULTIPLIER: SHORELINE_CONFIG.LAND_MAX_MULTIPLIER,
-      SHORELINE_UNDERWATER_BAND: SHORELINE_CONFIG.UNDERWATER_BAND,
-      UNDERWATER_DEPTH_MULTIPLIER: SHORELINE_CONFIG.UNDERWATER_DEPTH_MULTIPLIER,
-    };
+    const workerConfig: TerrainWorkerConfig = createTerrainWorkerConfig(
+      this.getWorldTerrainProfile(),
+      this.CONFIG.TILE_RESOLUTION,
+    );
 
     const biomeData: Record<
       string,
@@ -2194,9 +2149,7 @@ export class TerrainSystem extends System {
       };
     }
 
-    const biomeCenters = this.terrainGenerator
-      .getBiomeSystem()
-      .getBiomeCenters() as BiomeCenter[];
+    const biomeCenters = this.biomeSystem.getBiomeCenters() as BiomeCenter[];
 
     const tCfg = getGrassConfigForBiome(BiomeType.Tundra);
     const fCfg = getGrassConfigForBiome(BiomeType.Forest);
@@ -3827,35 +3780,13 @@ export class TerrainSystem extends System {
   }
 
   private getIslandMask(worldX: number, worldZ: number): number {
-    if (!this.CONFIG.ISLAND_MASK_ENABLED) return 1;
-
-    const maxRadiusMeters = this.getActiveWorldSizeMeters() / 2;
-    if (maxRadiusMeters <= 0) return 1;
-
-    const falloffMeters = Math.max(
-      this.CONFIG.ISLAND_FALLOFF_TILES * this.CONFIG.TILE_SIZE,
-      this.CONFIG.TILE_SIZE,
+    this.ensureNoiseInitialized();
+    return computeIslandMask(
+      worldX,
+      worldZ,
+      this.noise,
+      this.getWorldTerrainProfile(),
     );
-    const noiseScale = this.CONFIG.ISLAND_EDGE_NOISE_SCALE;
-    const noiseStrength = this.CONFIG.ISLAND_EDGE_NOISE_STRENGTH;
-    const edgeNoise =
-      noiseScale > 0 && noiseStrength > 0
-        ? this.noise.simplex2D(worldX * noiseScale, worldZ * noiseScale)
-        : 0;
-    const radiusVariance = maxRadiusMeters * noiseStrength * edgeNoise;
-    const adjustedRadius = Math.max(
-      falloffMeters,
-      maxRadiusMeters + radiusVariance,
-    );
-    const falloffStart = adjustedRadius - falloffMeters;
-
-    const distance = Math.sqrt(worldX * worldX + worldZ * worldZ);
-    if (distance <= falloffStart) return 1;
-    if (distance >= adjustedRadius) return 0;
-
-    const t = (distance - falloffStart) / falloffMeters;
-    const smooth = t * t * (3 - 2 * t);
-    return 1 - smooth;
   }
 
   /**
@@ -3892,6 +3823,7 @@ export class TerrainSystem extends System {
       this.noise,
       this.biomeNoiseSets,
       weights,
+      this.getWorldTerrainProfile(),
     );
   }
 
@@ -3914,7 +3846,7 @@ export class TerrainSystem extends System {
     worldZ: number,
     centerHeight: number,
   ): number {
-    const checkDistance = SHORELINE_CONFIG.SLOPE_SAMPLE_DISTANCE;
+    const checkDistance = this.shorelineParameters.SLOPE_SAMPLE_DISTANCE;
     const northHeight = this.getHeightAtWithoutShore(
       worldX,
       worldZ + checkDistance,
@@ -3948,11 +3880,13 @@ export class TerrainSystem extends System {
     if (!this._shorelineConfig) {
       this._shorelineConfig = {
         waterThreshold: this.CONFIG.WATER_THRESHOLD,
-        shorelineLandBand: SHORELINE_CONFIG.LAND_BAND,
-        shorelineUnderwaterBand: SHORELINE_CONFIG.UNDERWATER_BAND,
-        shorelineMinSlope: SHORELINE_CONFIG.MIN_SLOPE,
-        shorelineLandMaxMultiplier: SHORELINE_CONFIG.LAND_MAX_MULTIPLIER,
-        underwaterDepthMultiplier: SHORELINE_CONFIG.UNDERWATER_DEPTH_MULTIPLIER,
+        shorelineLandBand: this.shorelineParameters.LAND_BAND,
+        shorelineUnderwaterBand: this.shorelineParameters.UNDERWATER_BAND,
+        shorelineMinSlope: this.shorelineParameters.MIN_SLOPE,
+        shorelineLandMaxMultiplier:
+          this.shorelineParameters.LAND_MAX_MULTIPLIER,
+        underwaterDepthMultiplier:
+          this.shorelineParameters.UNDERWATER_DEPTH_MULTIPLIER,
       };
     }
     return this._shorelineConfig;
@@ -4089,8 +4023,8 @@ export class TerrainSystem extends System {
   ): number {
     const baseHeight = this.getHeightAtWithoutShore(worldX, worldZ);
     const waterThreshold = this.CONFIG.WATER_THRESHOLD;
-    const landBand = SHORELINE_CONFIG.LAND_BAND;
-    const underwaterBand = SHORELINE_CONFIG.UNDERWATER_BAND;
+    const landBand = this.shorelineParameters.LAND_BAND;
+    const underwaterBand = this.shorelineParameters.UNDERWATER_BAND;
 
     if (
       baseHeight >= waterThreshold + landBand ||
@@ -4169,6 +4103,8 @@ export class TerrainSystem extends System {
   // Debug counter to avoid log spam
   private _flatZoneHitCount = 0;
   private _flatZoneLoggedZones = new Set<string>();
+  private readonly arenaFloorZoneIds = new Set<string>();
+  private arenaGradeHeight: number | null = null;
 
   /**
    * Classify a single flat zone relative to a world position.
@@ -4323,6 +4259,7 @@ export class TerrainSystem extends System {
       coreDist: Infinity,
       blendZone: null as FlatZone | null,
       blendFactor: Infinity,
+      arenaFloorHeight: null as number | null,
     };
 
     for (let dtx = -1; dtx <= 1; dtx++) {
@@ -4335,6 +4272,27 @@ export class TerrainSystem extends System {
           // Deduplicate zones that span multiple terrain tiles
           if (checked.has(zone.id)) continue;
           checked.add(zone.id);
+
+          // Platforms are explicit overlays above the common authored campus.
+          // Ordinary nearest-core ranking would let the large campus suppress
+          // floor corners and their smooth ramps. Only factory-owned IDs qualify.
+          if (
+            this.arenaFloorZoneIds.has(zone.id) &&
+            this.arenaGradeHeight !== null
+          ) {
+            const height = resolveDuelArenaFloorHeight(
+              zone,
+              worldX,
+              worldZ,
+              this.arenaGradeHeight,
+            );
+            if (height !== null)
+              result.arenaFloorHeight =
+                result.arenaFloorHeight === null
+                  ? height
+                  : Math.max(result.arenaFloorHeight, height);
+            continue;
+          }
 
           if (zone.radialPond) {
             const distance = Math.hypot(
@@ -4379,6 +4337,7 @@ export class TerrainSystem extends System {
     // returned just outside it, not jump back from raw procedural terrain.
     // Do not recurse into getFlatZoneHeight: it reuses the shared checked Set.
     const getUnderlyingHeight = (): number => {
+      if (result.arenaFloorHeight !== null) return result.arenaFloorHeight;
       if (bestCoreZone) return bestCoreZone.height;
       const proceduralHeight = this.getProceduralHeightAt(worldX, worldZ);
       if (!bestBlendZone) return proceduralHeight;
@@ -4402,6 +4361,11 @@ export class TerrainSystem extends System {
         this._flatZoneHitCount++;
         return radialHeight;
       }
+    }
+
+    if (result.arenaFloorHeight !== null) {
+      this._flatZoneHitCount++;
+      return result.arenaFloorHeight;
     }
 
     // If in a core area, return that zone's flat height.
@@ -4483,6 +4447,9 @@ export class TerrainSystem extends System {
       );
     }
 
+    // A replacement must remove the previous bounds before indexing the new
+    // zone, including when an authored layout is rebuilt with the same IDs.
+    if (this.flatZones.has(zone.id)) this.unregisterFlatZone(zone.id);
     this.flatZones.set(zone.id, zone);
 
     // Calculate affected terrain tiles
@@ -4682,20 +4649,23 @@ export class TerrainSystem extends System {
     if (!zone) return;
 
     this.flatZones.delete(id);
+    this.arenaFloorZoneIds.delete(id);
+    if (this.arenaFloorZoneIds.size === 0) this.arenaGradeHeight = null;
 
     // Remove from spatial index
     const totalRadius = Math.max(zone.width, zone.depth) / 2 + zone.blendRadius;
+    const halfTile = this.CONFIG.TILE_SIZE / 2;
     const minTileX = Math.floor(
-      (zone.centerX - totalRadius) / this.CONFIG.TILE_SIZE,
+      (zone.centerX - totalRadius + halfTile) / this.CONFIG.TILE_SIZE,
     );
     const maxTileX = Math.floor(
-      (zone.centerX + totalRadius) / this.CONFIG.TILE_SIZE,
+      (zone.centerX + totalRadius + halfTile) / this.CONFIG.TILE_SIZE,
     );
     const minTileZ = Math.floor(
-      (zone.centerZ - totalRadius) / this.CONFIG.TILE_SIZE,
+      (zone.centerZ - totalRadius + halfTile) / this.CONFIG.TILE_SIZE,
     );
     const maxTileZ = Math.floor(
-      (zone.centerZ + totalRadius) / this.CONFIG.TILE_SIZE,
+      (zone.centerZ + totalRadius + halfTile) / this.CONFIG.TILE_SIZE,
     );
 
     for (let tx = minTileX; tx <= maxTileX; tx++) {
@@ -4730,8 +4700,9 @@ export class TerrainSystem extends System {
    * Get a flat zone at a position (if any).
    */
   getFlatZoneAt(worldX: number, worldZ: number): FlatZone | null {
-    const tileX = Math.floor(worldX / this.CONFIG.TILE_SIZE);
-    const tileZ = Math.floor(worldZ / this.CONFIG.TILE_SIZE);
+    const halfTile = this.CONFIG.TILE_SIZE / 2;
+    const tileX = Math.floor((worldX + halfTile) / this.CONFIG.TILE_SIZE);
+    const tileZ = Math.floor((worldZ + halfTile) / this.CONFIG.TILE_SIZE);
     const key = `${tileX}_${tileZ}`;
 
     const zones = this.flatZonesByTile.get(key);
@@ -4868,6 +4839,23 @@ export class TerrainSystem extends System {
         });
         loadedCount++;
       }
+    }
+
+    // Terrain owns these surfaces on BOTH roles before meshes/navigation bake.
+    // Rendering borrows the same base; it must not register client-only grades.
+    this.arenaFloorZoneIds.clear();
+    this.arenaGradeHeight = null;
+    if (ALL_WORLD_AREAS.duel_arena) {
+      const baseHeight = getDuelArenaGradeHeight();
+      for (const zone of createDuelArenaFloorZones(
+        getDuelArenaConfig(),
+        baseHeight,
+      )) {
+        this.registerFlatZone(zone);
+        this.arenaFloorZoneIds.add(zone.id);
+        loadedCount++;
+      }
+      this.arenaGradeHeight = baseHeight;
     }
 
     // Collect every pad before registering any of them. Sampling and registering
@@ -5202,27 +5190,29 @@ export class TerrainSystem extends System {
   }
 
   private getBiomeAt(tileX: number, tileZ: number): string {
-    return this.terrainGenerator
-      .getBiomeSystem()
-      .getBiomeForTile(tileX, tileZ, this.CONFIG.TILE_SIZE);
+    return this.biomeSystem.getBiomeForTile(
+      tileX,
+      tileZ,
+      this.CONFIG.TILE_SIZE,
+    );
   }
 
   private getBiomeInfluencesAtPosition(
     worldX: number,
     worldZ: number,
   ): Array<{ type: string; weight: number }> {
-    return this.terrainGenerator
-      .getBiomeSystem()
-      .getBiomeInfluencesAtPosition(worldX, worldZ, 0);
+    return this.biomeSystem.getBiomeInfluencesAtPosition(worldX, worldZ, 0);
   }
 
   private computeBiomeWeightsAtPosition(
     worldX: number,
     worldZ: number,
   ): { biomeWeightMap: Map<string, number>; totalWeight: number } {
-    const influences = this.terrainGenerator
-      .getBiomeSystem()
-      .getBiomeInfluencesAtPosition(worldX, worldZ, 0);
+    const influences = this.biomeSystem.getBiomeInfluencesAtPosition(
+      worldX,
+      worldZ,
+      0,
+    );
     const biomeWeightMap = new Map<string, number>();
     let totalWeight = 0;
     for (const inf of influences) {
@@ -5376,9 +5366,11 @@ export class TerrainSystem extends System {
     worldX: number,
     worldZ: number,
   ): Record<string, number> {
-    const influences = this.terrainGenerator
-      .getBiomeSystem()
-      .getBiomeInfluencesAtPosition(worldX, worldZ, 0);
+    const influences = this.biomeSystem.getBiomeInfluencesAtPosition(
+      worldX,
+      worldZ,
+      0,
+    );
     const result: Record<string, number> = {};
     for (const inf of influences) {
       result[inf.type] = inf.weight;
@@ -5390,9 +5382,7 @@ export class TerrainSystem extends System {
   }
 
   private getBiomeAtWorldPosition(worldX: number, worldZ: number): string {
-    return this.terrainGenerator
-      .getBiomeSystem()
-      .getDominantBiome(worldX, worldZ, 0);
+    return this.biomeSystem.getDominantBiome(worldX, worldZ, 0);
   }
 
   private generateTileResources(tile: TerrainTile): void {
@@ -5537,7 +5527,7 @@ export class TerrainSystem extends System {
     // getDominantBiome lets generateTrees() resolve the actual biome at each
     // tree position instead of using the single tile-center biome, which
     // prevents wrong tree types appearing near biome boundaries.
-    const biomeSystem = this.terrainGenerator.getBiomeSystem();
+    const biomeSystem = this.biomeSystem;
     const ctx: ResourceGenerationContext = {
       tileX: tile.x,
       tileZ: tile.z,
@@ -7406,8 +7396,7 @@ export class TerrainSystem extends System {
 
     this.ensureNoiseInitialized();
 
-    const worldSizeMeters = this.getActiveWorldSizeMeters();
-    const halfWorld = worldSizeMeters / 2;
+    const bounds = this.getWorldTerrainProfile().bounds;
     const step = this.CONFIG.BOSS_HOTSPOT_GRID_STEP;
     const minScalar = this.CONFIG.BOSS_HOTSPOT_MIN_SCALAR;
     const candidates: Array<{
@@ -7417,11 +7406,16 @@ export class TerrainSystem extends System {
       seed: number;
     }> = [];
 
-    const start = -halfWorld + step * 0.5;
-    const end = halfWorld - step * 0.5;
-
-    for (let x = start; x <= end; x += step) {
-      for (let z = start; z <= end; z += step) {
+    for (
+      let x = bounds.minX + step * 0.5;
+      x <= bounds.maxX - step * 0.5;
+      x += step
+    ) {
+      for (
+        let z = bounds.minZ + step * 0.5;
+        z <= bounds.maxZ - step * 0.5;
+        z += step
+      ) {
         const sample = this.getDifficultyAtWorldPosition(x, z);
         if (sample.isSafe || sample.scalar < minScalar) continue;
 
@@ -7655,6 +7649,12 @@ export class TerrainSystem extends System {
     this.pendingTileKeys.length = 0;
     this.pendingTileSet.clear();
     this.pendingTileContent.clear();
+    this.flatZones.clear();
+    this.flatZonesByTile.clear();
+    this._flatZoneChecked.clear();
+    this._flatZoneLoggedZones.clear();
+    this.arenaFloorZoneIds.clear();
+    this.arenaGradeHeight = null;
 
     // Cleanup GPU compute context
     if (this.terrainComputeContext) {
@@ -7717,6 +7717,8 @@ export class TerrainSystem extends System {
    * Get comprehensive terrain statistics for testing
    */
   getTerrainStats(): {
+    terrainProfileId: string;
+    worldContentIdentity: string;
     tileSize: string;
     worldSize: string;
     totalArea: string;
@@ -7737,6 +7739,8 @@ export class TerrainSystem extends System {
     const worldSizeKm = worldSizeMeters / 1000;
     const activeChunks = Array.from(this.terrainTiles.keys());
     return {
+      terrainProfileId: this.getWorldTerrainProfile().id,
+      worldContentIdentity: DataManager.getWorldContentIdentity(),
       tileSize: `${this.CONFIG.TILE_SIZE}x${this.CONFIG.TILE_SIZE}m`,
       worldSize: `${worldSizeTiles}x${worldSizeTiles}`,
       totalArea: `${worldSizeKm}km x ${worldSizeKm}km`,
@@ -7746,8 +7750,14 @@ export class TerrainSystem extends System {
       biomeCount: Object.keys(BIOMES).length,
       chunkSize: this.CONFIG.TILE_SIZE,
       worldBounds: {
-        min: { x: -worldSizeMeters / 2, z: -worldSizeMeters / 2 },
-        max: { x: worldSizeMeters / 2, z: worldSizeMeters / 2 },
+        min: {
+          x: this.getWorldTerrainProfile().bounds.minX,
+          z: this.getWorldTerrainProfile().bounds.minZ,
+        },
+        max: {
+          x: this.getWorldTerrainProfile().bounds.maxX,
+          z: this.getWorldTerrainProfile().bounds.maxZ,
+        },
       },
       activeBiomes: Array.from(
         new Set(Array.from(this.terrainTiles.values()).map((t) => t.biome)),
@@ -7835,13 +7845,8 @@ export class TerrainSystem extends System {
    * Initialize bounding box verification system
    */
   private initializeBoundingBoxSystem(): void {
-    // Set world bounds based on active world size
-    const halfWorldMeters = this.getActiveWorldSizeMeters() / 2;
     this.worldBounds = {
-      minX: -halfWorldMeters,
-      maxX: halfWorldMeters,
-      minZ: -halfWorldMeters,
-      maxZ: halfWorldMeters,
+      ...this.getWorldTerrainProfile().bounds,
       minY: -50,
       maxY: 100,
     };

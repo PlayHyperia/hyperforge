@@ -224,6 +224,11 @@ export class BridgeSystem extends SystemBase {
     });
   }
 
+  /** World initialization must finish terrain before sampling deck endpoints. */
+  getDependencies() {
+    return { required: ["terrain"], optional: ["stage"] };
+  }
+
   async init(): Promise<void> {
     // Pre-compute deck heights for ALL bridge tiles eagerly at init.
     // This ensures getDeckHeightAt() returns values immediately, before

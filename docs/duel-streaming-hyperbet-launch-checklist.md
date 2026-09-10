@@ -33,6 +33,60 @@ Continue small, scoped commits and pushes as work progresses, with proportional
 verification, secret scanning and exact remote-ref checks. These checkpoints are
 not release approval and do not certify the whole workspace clean or backed up.
 
+
+## Compact island integration checkpoint — 2026-09-10 (in progress)
+
+- [x] Push bounded shutdown diagnostics as `f26d5a02b6f3882235da879a0721e03c7a6c48f9`
+  on the existing game work branch, with GitHub author/committer `dreaminglucid`.
+  All 20 real Node process tests pass, including controlled Darwin EPERM. This
+  does not explain or erase the retained probe03 cleanup failure.
+- [x] Add an explicit compact development profile and connect terrain CPU/worker
+  inputs, shared biome placement and stale-result rejection. Source/worker checks
+  pass; the translated island is not yet qualified by an actual WebGPU run.
+- [x] Relocate the three preparation areas beside the existing arena, preserving
+  IDs and explicit pond/common-grade elevations. The source-based topology audit
+  passes all 59 targets; longest modeled agent run is 5.4 seconds. This does not
+  prove live transactions, campus-to-arena traversal or visually correct contact.
+- [x] Implement common arena/lobby/hospital grading, ordinary return/egress and
+  arena-pool spawn heights. Eleven focused shared grading tests pass; actual
+  generated worker parity covers 24,576 samples. This closes the implementation
+  mismatch, not between-vertex collision, visible contact or live duel acceptance.
+- [x] Correct compact startup ordering and remove one obsolete bridge and one
+  obsolete dock outside the new envelope, retaining their reusable systems.
+  Nine real terrain/infrastructure initialization tests pass. Shared/server
+  builds and shared/client/server typechecks pass; the combined server regression
+  run passes 499 tests across 19 files.
+- [ ] Resolve fresh actual Chrome/Metal/WebGPU probe06 failures: required-content
+  readiness timed out before spatial measurements; the three cow actors request
+  missing models/cow/cow.vrm (404). The model is absent from the local asset tree
+  and its current Git tree. Do not hide or substitute away this functional actor.
+  Retained 14 canonical dagger fit-metadata errors also remain launch blockers.
+- [ ] Qualify shutdown on this Mac. Probe06 recorded game-client kill(0) EPERM;
+  the later diagnostic sample saw the owned leader in zombie state, followed by
+  its close event. This does not turn the failed inspection into a cleanup pass.
+  The browser closed, PostgreSQL exited, all four owned ports were free, all 14
+  diagnostic gear attachments detached, and pinned sources were unchanged.
+- [ ] Verify live browser/CDN content identity admission, reconnection and saved
+  position recovery. SHA-256 covers 11 placement manifests, not source/build or
+  whole gameplay content. Add server-side acknowledgement/version enforcement
+  for obsolete clients; new-client snapshot rejection alone is insufficient.
+- [ ] Audit legacy generic entity hydration and all remaining coordinate consumers.
+  Procedural-road bounds/seed/water assumptions remain origin-centered/static;
+  current zero generated towns/POIs do not qualify future authored roads.
+- [ ] Capture a new, separately versioned compact-world study using actual new
+  positions, exact content identity and contemporaneous mesh/grounding records.
+  Keep previous failures unchanged; do not reuse origin-based study02 as proof.
+- [ ] Build the cohesive art-directed terrain/shore/path/vegetation presentation,
+  separate grass exclusion from grading, resolve avatar/material issues, and
+  qualify representative gameplay/broadcast frame times and lifecycle cleanup.
+
+This source integration and paired assets commit
+`cd6c447cd473a1a223d7569138531a49e9a63c6b` form a development checkpoint;
+visual and launch qualification remain open. The game checkpoint is documented in
+`docs/compact-world-checkpoint-20260910.md`. Neither this checkpoint nor passing
+unit tests authorize deployment or establish AAA quality.
+
+
 Historical statements forbidding unrequested commits/pushes are superseded by
 this explicit request. Deployment, purchases and unqualified default promotion
 remain separate from committing development work.

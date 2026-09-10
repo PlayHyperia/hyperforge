@@ -106,9 +106,10 @@ describe("TerrainSystem deterministic manifest station grading", () => {
     const { terrain, internals } = terrainFor(actualAreas);
     const plaza = haven.flatZones![0];
     const plazaHeight = internals.flatZones.get(plaza.id)!.height;
-    expect(plazaHeight).toBe(
-      terrain.getProceduralHeightAt(plaza.centerX, plaza.centerZ),
-    );
+    // The relocated campus keeps its explicitly authored common elevation,
+    // independently of the procedural surface at the new world coordinates.
+    expect(plaza.height).toBeDefined();
+    expect(plazaHeight).toBe(plaza.height);
     let largestRawDifference = 0;
     for (const station of haven.stations!) {
       const pad = internals.flatZones.get(`station_${station.id}`)!;
@@ -213,16 +214,17 @@ describe("TerrainSystem deterministic manifest station grading", () => {
   });
 
   it("retains each raw procedural fallback when no explicit zone applies", () => {
+    const { centerX, centerZ } = haven.flatZones![0];
     const { terrain, internals } = terrainFor({
-      west: stationArea("west", 0, 0),
-      east: stationArea("east", 2.25, 0),
+      west: stationArea("west", centerX, centerZ),
+      east: stationArea("east", centerX + 2.25, centerZ),
     });
     for (const [id, x] of [
-      ["west", 0],
-      ["east", 2.25],
+      ["west", centerX],
+      ["east", centerX + 2.25],
     ] as const) {
       expect(internals.flatZones.get(`station_${id}`)!.height).toBe(
-        terrain.getProceduralHeightAt(x, 0),
+        terrain.getProceduralHeightAt(x, centerZ),
       );
     }
     expect(internals.flatZones.get("station_west")!.height).not.toBe(

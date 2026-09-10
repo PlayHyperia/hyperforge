@@ -27,6 +27,7 @@ import {
   EventType,
   PlayerEntity,
   getDuelArenaConfig,
+  getDuelArenaEgressPosition,
   isPositionInsideCombatArena,
   type DuelRules,
   type DuelState,
@@ -2252,21 +2253,7 @@ export class DuelSystem {
   }
 
   private getArenaEgressPosition(): { x: number; y: number; z: number } {
-    // Send ejected players to the starter area center (0, 0) instead of the
-    // lobby (105, 60) which is right next to the arenas and causes re-entry loops.
-    const safeX = 0;
-    const safeZ = 0;
-    const terrain = this.world.getSystem("terrain") as {
-      getHeightAt?: (x: number, z: number) => number;
-    } | null;
-
-    const sampledY = terrain?.getHeightAt?.(safeX, safeZ);
-    const y =
-      typeof sampledY === "number" && Number.isFinite(sampledY)
-        ? sampledY + 0.1
-        : 0.42;
-
-    return { x: safeX, y, z: safeZ };
+    return getDuelArenaEgressPosition();
   }
 
   /**

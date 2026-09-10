@@ -1342,6 +1342,8 @@ export interface POIConfigManifest {
 export interface WorldConfigManifest {
   /** Manifest version for compatibility checking */
   version: number;
+  /** Explicit, validated terrain identity consumed by every world height path. */
+  terrainProfile?: import("../../systems/shared/world/WorldTerrainProfile").WorldTerrainProfile;
   /** Terrain generation configuration */
   terrain: TerrainConfigManifest;
   /** Town generation configuration */

@@ -87,30 +87,6 @@ export { TICK_DURATION_MS };
 export const CHALLENGE_DISTANCE_TILES = 15;
 
 // ============================================================================
-// SPAWN LOCATIONS
-// ============================================================================
-
-/**
- * Lobby spawn position for the duel winner
- */
-export const LOBBY_SPAWN_WINNER = { x: 102, y: 0, z: 60 } as const;
-
-/**
- * Lobby spawn position for the duel loser
- */
-export const LOBBY_SPAWN_LOSER = { x: 108, y: 0, z: 60 } as const;
-
-/**
- * General lobby spawn position (center)
- */
-export const LOBBY_SPAWN_CENTER = { x: 105, y: 0, z: 60 } as const;
-
-/**
- * Hospital spawn position (for deaths outside of duels)
- */
-export const HOSPITAL_SPAWN = { x: 60, y: 0, z: 60 } as const;
-
-// ============================================================================
 // LIMITS
 // ============================================================================
 

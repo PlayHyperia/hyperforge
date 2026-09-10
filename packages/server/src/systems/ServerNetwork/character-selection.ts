@@ -18,12 +18,16 @@ import type {
 } from "../../shared/types";
 import {
   EventType,
+  DataManager,
   DEFAULT_AVATAR_URL,
   uuid,
   getItem,
   TerrainSystem,
   Entity,
   World,
+  getDuelArenaConfig,
+  isPositionInsideCombatArena,
+  resolveWorldSpawnPosition,
   type EquipmentSyncData,
   type InventorySyncData,
 } from "@hyperforge/shared";
@@ -818,9 +822,7 @@ export async function handleEnterWorld(
   }
 
   // Load saved position from character data if available
-  let position = Array.isArray(spawn.position)
-    ? ([...spawn.position] as [number, number, number])
-    : [0, 50, 0];
+  let requestedPosition: unknown = spawn.position;
   const quaternion = Array.isArray(spawn.quaternion)
     ? ([...spawn.quaternion] as [number, number, number, number])
     : [0, 0, 0, 1];
@@ -837,19 +839,11 @@ export async function handleEnterWorld(
         const savedData = await databaseSystem.getPlayerAsync(characterId);
         if (savedData) {
           // Load position
-          if (savedData.positionX !== undefined) {
-            const savedY =
-              savedData.positionY !== undefined && savedData.positionY !== null
-                ? Number(savedData.positionY)
-                : 10;
-            if (savedY >= 5 && savedY <= 200) {
-              position = [
-                Number(savedData.positionX) || 0,
-                savedY,
-                Number(savedData.positionZ) || 0,
-              ];
-            }
-          }
+          requestedPosition = [
+            savedData.positionX,
+            savedData.positionY,
+            savedData.positionZ,
+          ];
           // Load skills
           savedSkills = {
             attack: { level: savedData.attackLevel, xp: savedData.attackXp },
@@ -931,21 +925,35 @@ export async function handleEnterWorld(
 
   // Check if player logged out inside a combat arena (server restart edge case)
   // If so, teleport them to the duel arena lobby spawn point
-  const { isPositionInsideCombatArena, getDuelArenaConfig } =
-    await import("@hyperforge/shared");
+  const lobbySpawn = getDuelArenaConfig().lobbySpawnPoint;
+  const lobbyPosition: [number, number, number] = [
+    lobbySpawn.x,
+    lobbySpawn.y,
+    lobbySpawn.z,
+  ];
 
   // Duel harness bots should always begin from the normal duel arena lobby.
   if (isLoadTestBot && isDuelBot) {
-    const lobby = getDuelArenaConfig().lobbySpawnPoint;
-    position = [lobby.x, lobby.y, lobby.z];
+    requestedPosition = lobbyPosition;
+  }
+
+  const spawnAdmission = resolveWorldSpawnPosition(
+    requestedPosition,
+    lobbyPosition,
+    DataManager.getWorldTerrainProfile(),
+  );
+  let position = spawnAdmission.position;
+  if (spawnAdmission.rehomed) {
+    console.warn(
+      `[CharacterSelection] Rehoming ${characterId || entityId} to the world lobby: ${spawnAdmission.reason}`,
+    );
   }
 
   if (isPositionInsideCombatArena(position[0], position[2])) {
-    const lobbySpawn = getDuelArenaConfig().lobbySpawnPoint;
     console.log(
       `[CharacterSelection] Player ${characterId} was inside combat arena, teleporting to lobby`,
     );
-    position = [lobbySpawn.x, lobbySpawn.y, lobbySpawn.z];
+    position = [...lobbyPosition];
   }
 
   // Ground to terrain (wait briefly for terrain readiness to avoid below-ground spawns)

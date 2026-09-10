@@ -96,6 +96,7 @@
 
 // moment removed; use native Date
 import { emoteUrls, Emotes } from "../../data/playerEmotes";
+import { DataManager } from "../../data/DataManager";
 import { EQUIPMENT_SLOT_NAMES } from "../../constants/EquipmentConstants";
 import THREE from "../../extras/three/three";
 import { readPacket, writePacket } from "../../platform/shared/packets";
@@ -127,6 +128,7 @@ import { uuid } from "../../utils";
 import { SystemBase } from "../shared/infrastructure/SystemBase";
 import { resolveClientConnectionAuthMode } from "./clientNetworkAuthPolicy";
 import { PendingActionTracker } from "./network/PendingActionTracker";
+import { WorldContentAdmission } from "../../runtime/WorldContentAdmission";
 import {
   isStreamingLikeViewport,
   shouldAdmitNetworkEntityInViewport,
@@ -241,6 +243,10 @@ export class ClientNetwork extends SystemBase {
   isClient: boolean;
   isServer: boolean;
   connected: boolean;
+  private readonly worldAdmission = new WorldContentAdmission(() =>
+    DataManager.getWorldContentIdentity(),
+  );
+  private flushing = false;
   queue: Array<[string, unknown]>;
   /** Queue read index for O(1) dequeue (avoids shift() which is O(n)) */
   private _queueReadIndex = 0;
@@ -592,6 +598,13 @@ export class ClientNetwork extends SystemBase {
       this.id = null;
     }
 
+    this.worldAdmission.beginConnection();
+    this.connected = false;
+    this.intentionalDisconnect = false;
+    // Packets from a previous transport cannot be replayed into this admission.
+    this.queue.length = 0;
+    this._queueReadIndex = 0;
+
     // AUTHENTICATION: Include authToken in URL for reliable authentication
     // The server supports both URL-based auth and first-message auth.
     // Using URL-based auth for reliability - it works consistently across all environments.
@@ -754,16 +767,22 @@ export class ClientNetwork extends SystemBase {
       isStreamingConnection || isSpectatorConnection ? 120_000 : 30_000;
 
     return new Promise((resolve, reject) => {
-      this.ws = new WebSocket(url);
-      this.ws.binaryType = "arraybuffer";
+      const transport = new WebSocket(url);
+      this.ws = transport;
+      transport.binaryType = "arraybuffer";
 
       const timeout = setTimeout(() => {
+        if (this.ws !== transport) {
+          reject(new Error("WebSocket connection superseded"));
+          return;
+        }
         this.logger.warn("WebSocket connection timeout");
         reject(new Error("WebSocket connection timeout"));
       }, connectionTimeoutMs);
 
       // Handler for first-message auth response
       const handleAuthResult = (event: MessageEvent) => {
+        if (this.ws !== transport || this.worldAdmission.rejected) return;
         const packet = readPacket(event.data as ArrayBuffer);
         if (!packet || packet.length === 0) return;
 
@@ -772,7 +791,7 @@ export class ClientNetwork extends SystemBase {
           const result = data as { success: boolean; error?: string };
 
           // Remove auth handler - we're done with auth phase
-          this.ws?.removeEventListener("message", handleAuthResult);
+          transport.removeEventListener("message", handleAuthResult);
 
           if (result.success) {
             this.logger.debug("First-message authentication successful");
@@ -787,7 +806,8 @@ export class ClientNetwork extends SystemBase {
         }
       };
 
-      this.ws.addEventListener("open", () => {
+      transport.addEventListener("open", () => {
+        if (this.ws !== transport || this.worldAdmission.rejected) return;
         this.logger.debug("WebSocket connected successfully");
 
         if (useFirstMessageAuth) {
@@ -795,7 +815,7 @@ export class ClientNetwork extends SystemBase {
           this.logger.debug("Sending first-message authentication...");
 
           // Add auth result handler BEFORE sending authenticate packet
-          this.ws?.addEventListener("message", handleAuthResult);
+          transport.addEventListener("message", handleAuthResult);
 
           // Send authentication credentials
           const authPacket = writePacket("authenticate", {
@@ -804,7 +824,7 @@ export class ClientNetwork extends SystemBase {
             name,
             avatar,
           });
-          this.ws?.send(authPacket);
+          transport.send(authPacket);
 
           // Don't resolve yet - wait for authResult
         } else {
@@ -813,14 +833,18 @@ export class ClientNetwork extends SystemBase {
         }
       });
 
-      this.ws.addEventListener("message", this.onPacket);
-      this.ws.addEventListener("close", this.onClose);
+      transport.addEventListener("message", this.onPacket);
+      transport.addEventListener("close", this.onClose);
 
-      this.ws.addEventListener("error", (e) => {
+      transport.addEventListener("error", (e) => {
         clearTimeout(timeout);
+        if (this.ws !== transport) {
+          reject(new Error("WebSocket connection superseded"));
+          return;
+        }
         const isExpectedDisconnect =
-          this.ws?.readyState === WebSocket.CLOSED ||
-          this.ws?.readyState === WebSocket.CLOSING;
+          transport.readyState === WebSocket.CLOSED ||
+          transport.readyState === WebSocket.CLOSING;
         if (!isExpectedDisconnect) {
           // Extract error message - handle both browser ErrorEvent and Node.js Event
           const errorMessage =
@@ -844,36 +868,10 @@ export class ClientNetwork extends SystemBase {
     timeout: ReturnType<typeof setTimeout>,
     resolve: () => void,
   ): void {
-    this.connected = true;
+    // World.init must finish before the packet loop starts: resolve transport
+    // setup here, but do not claim world admission or flush gameplay messages.
     this.initialized = true;
     clearTimeout(timeout);
-
-    // Handle reconnection success
-    if (this.isReconnecting) {
-      this.logger.debug(`Reconnected after ${this.reconnectAttempts} attempts`);
-      this.emitTypedEvent("NETWORK_RECONNECTED", {
-        attempts: this.reconnectAttempts,
-      });
-      this.world.chat.add(
-        {
-          id: uuid(),
-          from: "System",
-          fromId: undefined,
-          body: "Connection restored.",
-          text: "Connection restored.",
-          timestamp: Date.now(),
-          createdAt: new Date().toISOString(),
-        },
-        false,
-      );
-      // Flush outgoing queue after reconnection
-      this.flushOutgoingQueue();
-    }
-
-    // Reset reconnection state
-    this.isReconnecting = false;
-    this.reconnectAttempts = 0;
-    this.intentionalDisconnect = false;
     if (this.reconnectTimeoutId) {
       clearTimeout(this.reconnectTimeoutId);
       this.reconnectTimeoutId = null;
@@ -934,11 +932,20 @@ export class ClientNetwork extends SystemBase {
   }
 
   send<T = unknown>(name: string, data?: T) {
-    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+    if (this.worldAdmission.rejected) return;
+    if (
+      this.connected &&
+      this.worldAdmission.admitted &&
+      this.ws &&
+      this.ws.readyState === WebSocket.OPEN
+    ) {
       // console.debug(`[ClientNetwork] Sending packet: ${name}`, data)
       const packet = writePacket(name, data);
       this.ws.send(packet);
-    } else if (this.isReconnecting) {
+    } else if (
+      this.isReconnecting ||
+      (this.ws && this.ws.readyState === WebSocket.OPEN)
+    ) {
       // Queue message for later delivery when reconnected
       this.queueOutgoingMessage(name, data);
     } else {
@@ -989,7 +996,11 @@ export class ClientNetwork extends SystemBase {
    * Flush queued outgoing messages after reconnection
    */
   private flushOutgoingQueue(): void {
-    if (this.outgoingQueue.length === 0) {
+    if (
+      !this.connected ||
+      !this.worldAdmission.admitted ||
+      this.outgoingQueue.length === 0
+    ) {
       return;
     }
 
@@ -1024,76 +1035,95 @@ export class ClientNetwork extends SystemBase {
   }
 
   enqueue(method: string, data: unknown) {
+    if (this.worldAdmission.rejected) return;
     this.queue.push([method, data]);
   }
 
   async flush() {
     // Don't process queue if WebSocket is not connected
-    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+    if (
+      this.flushing ||
+      this.worldAdmission.rejected ||
+      !this.ws ||
+      this.ws.readyState !== WebSocket.OPEN
+    ) {
       return;
     }
 
-    // OPTIMIZATION: Use read index instead of shift() - O(1) vs O(n)
-    // Process from _queueReadIndex to queue.length, with per-frame limit to prevent jank
-    const MAX_PACKETS_PER_FRAME = 50; // Prevent packet storm from blocking main thread
-    let packetsProcessed = 0;
+    this.flushing = true;
+    const transport = this.ws;
+    try {
+      // OPTIMIZATION: Use read index instead of shift() - O(1) vs O(n)
+      // Process from _queueReadIndex to queue.length, with per-frame limit to prevent jank
+      const MAX_PACKETS_PER_FRAME = 50; // Prevent packet storm from blocking main thread
+      let packetsProcessed = 0;
 
-    while (
-      this._queueReadIndex < this.queue.length &&
-      packetsProcessed < MAX_PACKETS_PER_FRAME
-    ) {
-      const packet = this.queue[this._queueReadIndex++];
-      const method = packet[0];
-      const data = packet[1];
-      packetsProcessed++;
+      while (
+        this._queueReadIndex < this.queue.length &&
+        packetsProcessed < MAX_PACKETS_PER_FRAME &&
+        this.ws === transport &&
+        transport.readyState === WebSocket.OPEN &&
+        !this.worldAdmission.rejected
+      ) {
+        const packet = this.queue[this._queueReadIndex++];
+        const method = packet[0];
+        const data = packet[1];
+        packetsProcessed++;
 
-      // OPTIMIZATION: Cache handler lookups to avoid string operations per packet
-      let handler = this._handlerCache.get(method);
-      if (handler === undefined) {
-        // First time seeing this method - look it up and cache
-        handler = (this as Record<string, unknown>)[method] as
-          Function | undefined;
-        if (!handler) {
-          // Try onX format (e.g., onSnapshot)
-          const onName = `on${method.charAt(0).toUpperCase()}${method.slice(1)}`;
-          handler = (this as Record<string, unknown>)[onName] as
+        // Broadcasts can arrive before the initial snapshot. Its authoritative
+        // state supersedes these deltas; never apply them before admission.
+        if (!this.worldAdmission.allowsPacket(method)) continue;
+
+        // OPTIMIZATION: Cache handler lookups to avoid string operations per packet
+        let handler = this._handlerCache.get(method);
+        if (handler === undefined) {
+          // First time seeing this method - look it up and cache
+          handler = (this as Record<string, unknown>)[method] as
             Function | undefined;
+          if (!handler) {
+            // Try onX format (e.g., onSnapshot)
+            const onName = `on${method.charAt(0).toUpperCase()}${method.slice(1)}`;
+            handler = (this as Record<string, unknown>)[onName] as
+              Function | undefined;
+          }
+          // Cache result (even if null, to avoid repeated lookups)
+          this._handlerCache.set(method, handler ?? null);
         }
-        // Cache result (even if null, to avoid repeated lookups)
-        this._handlerCache.set(method, handler ?? null);
-      }
 
-      if (!handler) {
-        console.error(`[ClientNetwork] No handler for packet '${method}'`);
-        continue; // Skip unknown packets instead of throwing to avoid breaking queue
-      }
-
-      try {
-        // Strong type assumption - handler is a function
-        const result = handler.call(this, data);
-        if (result instanceof Promise) {
-          await result;
+        if (!handler) {
+          console.error(`[ClientNetwork] No handler for packet '${method}'`);
+          continue; // Skip unknown packets instead of throwing to avoid breaking queue
         }
-      } catch (err) {
-        console.error(
-          `[ClientNetwork] Error handling packet '${method}':`,
-          err,
-        );
-        // Continue processing remaining packets even if one fails
-      }
-    }
 
-    // Compact processed entries periodically without discarding unread packets.
-    // A frame can intentionally leave work behind at MAX_PACKETS_PER_FRAME; clearing
-    // the whole array here used to drop that tail whenever the read index crossed
-    // 1,000 during a packet burst (including adjacent combat terminal packets).
-    if (this._queueReadIndex > 1000) {
-      if (this._queueReadIndex >= this.queue.length) {
-        this.queue.length = 0;
-      } else {
-        this.queue = this.queue.slice(this._queueReadIndex);
+        try {
+          // Strong type assumption - handler is a function
+          const result = handler.call(this, data);
+          if (result instanceof Promise) {
+            await result;
+          }
+        } catch (err) {
+          console.error(
+            `[ClientNetwork] Error handling packet '${method}':`,
+            err,
+          );
+          // Continue processing remaining packets even if one fails
+        }
       }
-      this._queueReadIndex = 0;
+
+      // Compact processed entries periodically without discarding unread packets.
+      // A frame can intentionally leave work behind at MAX_PACKETS_PER_FRAME; clearing
+      // the whole array here used to drop that tail whenever the read index crossed
+      // 1,000 during a packet burst (including adjacent combat terminal packets).
+      if (this._queueReadIndex > 1000) {
+        if (this._queueReadIndex >= this.queue.length) {
+          this.queue.length = 0;
+        } else {
+          this.queue = this.queue.slice(this._queueReadIndex);
+        }
+        this._queueReadIndex = 0;
+      }
+    } finally {
+      this.flushing = false;
     }
   }
 
@@ -1102,6 +1132,11 @@ export class ClientNetwork extends SystemBase {
   }
 
   onPacket = (e: MessageEvent) => {
+    if (
+      this.worldAdmission.rejected ||
+      (e.currentTarget && e.currentTarget !== this.ws)
+    )
+      return;
     const result = readPacket(e.data);
     if (result && result[0]) {
       const [method, data] = result;
@@ -1122,6 +1157,14 @@ export class ClientNetwork extends SystemBase {
   }
 
   async onSnapshot(data: SnapshotData) {
+    // This must precede every snapshot side effect, including enterWorld.
+    const admission = this.worldAdmission.admitSnapshot(
+      data?.worldContentIdentity,
+    );
+    if (admission === null) {
+      this.rejectWorldAdmission();
+      return;
+    }
     this.id = data.id; // Store our network ID
     this.connected = true; // Mark as connected when we get the snapshot
 
@@ -1218,6 +1261,7 @@ export class ClientNetwork extends SystemBase {
       let attempts = 0;
       while (!physicsSystem.physics && attempts < 50) {
         await new Promise((resolve) => setTimeout(resolve, 10));
+        if (!this.worldAdmission.isCurrent(admission)) return;
         attempts++;
       }
       if (!physicsSystem.physics) {
@@ -1311,6 +1355,7 @@ export class ClientNetwork extends SystemBase {
       const snapshotEntities = this.filterNetworkEntities(data.entities);
       try {
         await this.world.entities.deserialize(snapshotEntities);
+        if (!this.worldAdmission.isCurrent(admission)) return;
       } catch (err) {
         this.logger.error(
           "Failed to deserialize entity snapshot:",
@@ -1431,6 +1476,7 @@ export class ClientNetwork extends SystemBase {
 
       // Helper to attempt following the entity
       const attemptFollow = (): boolean => {
+        if (!this.worldAdmission.isCurrent(admission)) return false;
         const targetEntity =
           this.resolveSpectatorTargetEntity(spectatorFollowId);
 
@@ -1454,6 +1500,7 @@ export class ClientNetwork extends SystemBase {
 
       // Try immediately after a short delay for entity initialization
       setTimeout(() => {
+        if (!this.worldAdmission.isCurrent(admission)) return;
         if (!attemptFollow()) {
           this.logger.info(
             `👁️ Spectator target entity ${spectatorFollowId} not found - starting retry loop`,
@@ -1461,6 +1508,15 @@ export class ClientNetwork extends SystemBase {
 
           // Start retry interval - check every 1 second for up to 15 seconds
           this.spectatorRetryInterval = setInterval(() => {
+            if (!this.worldAdmission.isCurrent(admission)) {
+              if (this.spectatorRetryInterval !== null) {
+                clearInterval(
+                  this.spectatorRetryInterval as ReturnType<typeof setInterval>,
+                );
+                this.spectatorRetryInterval = null;
+              }
+              return;
+            }
             retryCount++;
 
             if (attemptFollow()) {
@@ -1504,6 +1560,64 @@ export class ClientNetwork extends SystemBase {
     }
 
     storage?.set("authToken", data.authToken);
+
+    // Transport reconnection is not success until its world snapshot validates.
+    if (this.isReconnecting) {
+      this.emitTypedEvent("NETWORK_RECONNECTED", {
+        attempts: this.reconnectAttempts,
+      });
+      this.world.chat.add(
+        {
+          id: uuid(),
+          from: "System",
+          fromId: undefined,
+          body: "Connection restored.",
+          text: "Connection restored.",
+          timestamp: Date.now(),
+          createdAt: new Date().toISOString(),
+        },
+        false,
+      );
+    }
+    this.isReconnecting = false;
+    this.reconnectAttempts = 0;
+    this.flushOutgoingQueue();
+  }
+
+  /** Persistent diagnostic; cleared only by a fresh matching admission. */
+  get worldAdmissionError(): string | null {
+    return this.worldAdmission.failure;
+  }
+
+  /** Exact remote digest validated for this transport, never a pending/stale hash. */
+  get admittedWorldContentIdentity(): string | null {
+    return this.worldAdmission.admittedIdentity;
+  }
+
+  private rejectWorldAdmission(): void {
+    const reason =
+      this.worldAdmission.failure ??
+      "World snapshot arrived outside an active connection.";
+    this.worldAdmission.reject(reason);
+    this.connected = false;
+    this.intentionalDisconnect = true;
+    this.cancelReconnect();
+    this.queue.length = 0;
+    this._queueReadIndex = 0;
+    this.outgoingQueue = [];
+    this.outgoingQueueSequence = 0;
+    if (this.keepaliveIntervalId) {
+      clearInterval(this.keepaliveIntervalId);
+      this.keepaliveIntervalId = null;
+    }
+    this.logger.error(reason);
+    if (
+      this.ws &&
+      (this.ws.readyState === WebSocket.OPEN ||
+        this.ws.readyState === WebSocket.CONNECTING)
+    ) {
+      this.ws.close(4005, "World content mismatch; update assets and reload");
+    }
   }
 
   onSettingsModified = (data: { key: string; value: unknown }) => {
@@ -5919,6 +6033,8 @@ export class ClientNetwork extends SystemBase {
   };
 
   onClose = (code: CloseEvent) => {
+    if (code.currentTarget && code.currentTarget !== this.ws) return;
+    this.worldAdmission.close();
     console.error("[ClientNetwork] 🔌 WebSocket CLOSED:", {
       code: code.code,
       reason: code.reason,
@@ -5964,6 +6080,7 @@ export class ClientNetwork extends SystemBase {
       4002, // Invalid token
       4003, // Banned
       4004, // Server full
+      4005, // World content identity mismatch (requires an asset/client update)
       1000, // Normal closure (server initiated clean disconnect)
     ];
     if (noReconnectCodes.includes(code.code)) {
@@ -6102,6 +6219,7 @@ export class ClientNetwork extends SystemBase {
   }
 
   destroy = () => {
+    this.worldAdmission.close();
     // Mark as intentional disconnect to prevent reconnection
     this.intentionalDisconnect = true;
     this.cancelReconnect();
@@ -6125,6 +6243,7 @@ export class ClientNetwork extends SystemBase {
     }
     // Clear any pending queue items
     this.queue.length = 0;
+    this._queueReadIndex = 0;
     // Clear outgoing queue
     this.outgoingQueue = [];
     this.outgoingQueueSequence = 0;

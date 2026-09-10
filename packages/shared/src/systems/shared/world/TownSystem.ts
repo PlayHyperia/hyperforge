@@ -30,6 +30,7 @@ import type {
   TownPath,
   TownLandmark,
   TownPlaza,
+  WorldConfigManifest,
 } from "../../../types/world/world-types";
 import type { BuildingLayoutInput } from "../../../types/world/building-collision-types";
 import { Logger } from "../../../utils/Logger";
@@ -121,9 +122,11 @@ export interface TownConfig {
   landmarks: LandmarkConfig;
 }
 
-/** Load town configuration from DataManager (exported for testing) */
-export function loadTownConfig(): TownConfig {
-  const manifest = DataManager.getWorldConfig()?.towns;
+/** Project a supplied manifest, or the admitted startup manifest, into town settings. */
+export function loadTownConfig(
+  worldConfig: WorldConfigManifest | null = DataManager.getWorldConfig(),
+): TownConfig {
+  const manifest = worldConfig?.towns;
   const sizes = { ...DEFAULT_TOWN_SIZES };
   const suitability = { ...DEFAULT_BIOME_SUITABILITY };
   const manifestLandmarks = manifest?.landmarks;
@@ -168,7 +171,9 @@ export function loadTownConfig(): TownConfig {
 
   return {
     townCount: manifest?.townCount ?? DEFAULTS.townCount,
-    worldSize: DEFAULTS.worldSize,
+    worldSize: worldConfig
+      ? worldConfig.terrain.worldSize * worldConfig.terrain.tileSize
+      : DEFAULTS.worldSize,
     minTownSpacing: manifest?.minTownSpacing ?? DEFAULTS.minTownSpacing,
     flatnessSampleRadius:
       manifest?.flatnessSampleRadius ?? DEFAULTS.flatnessSampleRadius,
@@ -277,9 +282,8 @@ export class TownSystem extends System {
   }
 
   async init(): Promise<void> {
-    const worldConfig = (this.world as { config?: { terrainSeed?: number } })
-      .config;
-    this.seed = worldConfig?.terrainSeed ?? 0;
+    await DataManager.getInstance().initialize();
+    this.seed = DataManager.getWorldTerrainProfile().seed;
     this.config = loadTownConfig();
     this.terrainSystem = this.world.getSystem("terrain") as
       | {

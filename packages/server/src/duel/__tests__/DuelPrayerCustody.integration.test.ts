@@ -1,10 +1,13 @@
 import {
   AttackType,
+  DataManager,
   EventBus,
   EventType,
   ITEMS,
   PRAYER_POINT_UNITS_PER_POINT,
   PrayerSystem,
+  getDuelArenaEgressPosition,
+  getDuelArenaGradeHeight,
   prayerDataProvider,
   type PrayerPersistenceSnapshot,
   type PrayerStateCommitRequest,
@@ -69,7 +72,9 @@ type PersistedPrayerOperation = {
   committed: PrayerPersistenceSnapshot;
 };
 
-beforeAll(() => {
+beforeAll(async () => {
+  const validation = await DataManager.getInstance().initialize();
+  expect(validation.isValid).toBe(true);
   prayerDataProvider.loadPrayers(prayersManifest);
   prayerDataProvider.rebuild();
   for (const item of [
@@ -109,11 +114,13 @@ afterEach(() => {
   else process.env.NODE_ENV = originalNodeEnv;
 });
 
-function createEntity(id: string, x: number): TestEntity {
+function createEntity(id: string, xOffset: number): TestEntity {
+  const lobby = getDuelArenaEgressPosition();
+  const x = lobby.x + xOffset;
   const position = {
     x,
-    y: 0,
-    z: 0,
+    y: lobby.y,
+    z: lobby.z,
     set(nextX: number, nextY: number, nextZ: number): void {
       this.x = nextX;
       this.y = nextY;
@@ -138,7 +145,7 @@ function createEntity(id: string, x: number): TestEntity {
     data: {
       type: "player",
       name: id,
-      position: [x, 0, 0],
+      position: [x, lobby.y, lobby.z],
       health: 40,
       maxHealth: 40,
       alive: true,
@@ -311,7 +318,7 @@ function createCustodyWorld(combatRole: FixtureCombatRole = "ranged") {
     isInAttackRange: vi.fn(() => true),
   });
   systems.set("combat", { forceEndCombat: vi.fn() });
-  systems.set("terrain", { getHeightAt: () => 0 });
+  systems.set("terrain", { getHeightAt: () => getDuelArenaGradeHeight() });
 
   const emitter = new EventBus();
   const world = Object.assign(emitter, {

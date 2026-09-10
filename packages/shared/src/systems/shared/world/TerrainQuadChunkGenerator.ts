@@ -27,6 +27,8 @@ import { BiomeType, DEFAULT_BIOME } from "./TerrainBiomeTypes";
  * Used by assembleQuadChunkGeometry for road influence and flat-zone overrides.
  */
 export interface ChunkTerrainProvider {
+  /** Cached identity of the explicitly selected world terrain profile. */
+  readonly terrainProfileIdentity: string;
   calculateRoadInfluenceAtVertex(
     worldX: number,
     worldZ: number,
@@ -81,6 +83,14 @@ export function assembleQuadChunkGeometry(
   provider: ChunkTerrainProvider,
   skirtDrop: number,
 ): ChunkGeometryResult {
+  // Reject cross-world or unversioned output before allocating any geometry.
+  if (
+    typeof provider.terrainProfileIdentity !== "string" ||
+    provider.terrainProfileIdentity.length === 0 ||
+    workerData.terrainProfileIdentity !== provider.terrainProfileIdentity
+  ) {
+    throw new Error("Quad chunk terrain profile identity mismatch");
+  }
   const {
     centerX,
     centerZ,
@@ -439,6 +449,10 @@ export function generateQuadChunkDataSync(
   resolution: number,
   provider: FullTerrainProvider,
 ): QuadChunkWorkerOutput {
+  const terrainProfileIdentity = provider.terrainProfileIdentity;
+  if (typeof terrainProfileIdentity !== "string" || !terrainProfileIdentity) {
+    throw new Error("Quad chunk terrain profile identity is required");
+  }
   const segments = resolution;
   const halfSize = size * 0.5;
   const gridStep = size / (segments - 1);
@@ -576,6 +590,7 @@ export function generateQuadChunkDataSync(
 
   return {
     type: "quadChunkResult",
+    terrainProfileIdentity,
     centerX,
     centerZ,
     size,

@@ -1,8 +1,9 @@
 /**
- * Unconnected, explicit terrain-profile contract; importing this changes no world.
+ * Explicit terrain-profile contract; importing this selects no runtime world.
  *
- * Future consumers: TerrainSystem height/walkability, TerrainWorker's generated
- * height code, and network manifest/profile admission. The current standalone
+ * Consumers supply an explicitly admitted profile to CPU/worker height code.
+ * Terrain, navigation and network admission must agree before world startup.
+ * The current standalone
  * GPUComputeIntegration heightmap shader uses a DIFFERENT noise/coast algorithm;
  * sharing these values does not establish CPU/worker/GPU height parity.
  *
@@ -42,6 +43,8 @@ export type WorldTerrainProfile = Readonly<{
     falloff: number;
     deepOceanBuffer: number;
     beachProfilePower: number;
+    /** Absolute bound on fractional noisy-radius variation, enforced by height code. */
+    maxCoastVariation: number;
   }>;
   height: Readonly<{
     /** Existing MAX_HEIGHT parameter; not a proven bound on generated heights. */
@@ -54,39 +57,59 @@ export type WorldTerrainProfile = Readonly<{
   shoreline: NumericFields<typeof SHORELINE_CONFIG>;
 }>;
 
-/** Actual legacy defaults, without an invented compact layout or env reads.
+/** Historical numeric regression fixture only, never a runtime selection.
  * TerrainSystem's nominal envelope is ±(100 tiles × 100 m)/2; centered chunks
  * may extend outside it. Island radius is NOT the 10 km envelope's half-width.
  */
-export const LARGE_WORLD_TERRAIN_PROFILE: WorldTerrainProfile = Object.freeze({
-  schemaVersion: 1,
-  algorithm: "terrain-height-params-v1",
-  id: "large-world-v1",
-  kind: "large-world",
-  seed: 0,
-  boundsMeaning: "nominal-generation-envelope",
-  bounds: Object.freeze({ minX: -5000, maxX: 5000, minZ: -5000, maxZ: 5000 }),
-  terrainTileSize: TERRAIN_CONSTANTS.TERRAIN_TILE_SIZE,
-  island: Object.freeze({
-    centerX: 0,
-    centerZ: 0,
-    radius: ISLAND_RADIUS,
-    falloff: ISLAND_FALLOFF,
-    deepOceanBuffer: ISLAND_DEEP_OCEAN_BUFFER,
-    beachProfilePower: BEACH_PROFILE_POWER,
-  }),
-  height: Object.freeze({
-    maxHeightParameter: MAX_HEIGHT,
-    terrainScale: TERRAIN_SCALE,
-    baseOffset: BASE_OFFSET,
-    featureScale: FEATURE_SCALE,
-  }),
-  water: Object.freeze({
-    threshold: TERRAIN_CONSTANTS.WATER_THRESHOLD,
-    oceanFloorHeight: OCEAN_FLOOR_HEIGHT,
-  }),
-  shoreline: Object.freeze({ ...SHORELINE_CONFIG }),
-});
+export const LEGACY_TERRAIN_PROFILE_FIXTURE: WorldTerrainProfile =
+  Object.freeze({
+    schemaVersion: 1,
+    algorithm: "terrain-height-params-v1",
+    id: "large-world-v1",
+    kind: "large-world",
+    seed: 0,
+    boundsMeaning: "nominal-generation-envelope",
+    bounds: Object.freeze({ minX: -5000, maxX: 5000, minZ: -5000, maxZ: 5000 }),
+    terrainTileSize: TERRAIN_CONSTANTS.TERRAIN_TILE_SIZE,
+    island: Object.freeze({
+      centerX: 0,
+      centerZ: 0,
+      radius: ISLAND_RADIUS,
+      falloff: ISLAND_FALLOFF,
+      deepOceanBuffer: ISLAND_DEEP_OCEAN_BUFFER,
+      beachProfilePower: BEACH_PROFILE_POWER,
+      maxCoastVariation: 0.3,
+    }),
+    height: Object.freeze({
+      maxHeightParameter: MAX_HEIGHT,
+      terrainScale: TERRAIN_SCALE,
+      baseOffset: BASE_OFFSET,
+      featureScale: FEATURE_SCALE,
+    }),
+    water: Object.freeze({
+      threshold: TERRAIN_CONSTANTS.WATER_THRESHOLD,
+      oceanFloorHeight: OCEAN_FLOOR_HEIGHT,
+    }),
+    shoreline: Object.freeze({ ...SHORELINE_CONFIG }),
+  });
+
+/** Candidate parameters only: consumers must explicitly select and admit it. */
+export const COMPACT_WORLD_TERRAIN_PROFILE: WorldTerrainProfile =
+  validateWorldTerrainProfile({
+    ...LEGACY_TERRAIN_PROFILE_FIXTURE,
+    id: "compact-duel-island-v1",
+    kind: "compact-candidate",
+    bounds: { minX: 150, maxX: 550, minZ: 200, maxZ: 600 },
+    island: {
+      centerX: 350,
+      centerZ: 400,
+      radius: 165,
+      falloff: 30,
+      deepOceanBuffer: 25,
+      beachProfilePower: BEACH_PROFILE_POWER,
+      maxCoastVariation: 0.06,
+    },
+  });
 
 function fail(field: string): never {
   throw new Error(`Invalid WorldTerrainProfile: ${field}`);
@@ -137,13 +160,13 @@ function numericGroup<T extends Readonly<Record<string, number>>>(
 }
 
 /** Strict complete input only: no partial merge, coercion or unknown fields.
- * Compact inputs are structurally valid authoring candidates, NOT approved land,
- * shoreline containment, navigation or performance. No compact preset is supplied.
+ * Compact inputs have a bounded procedural coast, but are NOT approval of
+ * authored grading/content containment, navigation, rendering or performance.
  */
 export function validateWorldTerrainProfile(
   input: unknown,
 ): WorldTerrainProfile {
-  const base = LARGE_WORLD_TERRAIN_PROFILE;
+  const base = LEGACY_TERRAIN_PROFILE_FIXTURE;
   const data = record(input, Object.keys(base), "profile");
   if (
     data.schemaVersion !== 1 ||
@@ -183,10 +206,13 @@ export function validateWorldTerrainProfile(
     island.falloff <= 0 ||
     island.falloff > island.radius ||
     island.deepOceanBuffer < 0 ||
-    island.beachProfilePower <= 0
+    island.beachProfilePower <= 0 ||
+    island.maxCoastVariation < 0 ||
+    island.maxCoastVariation >= 1
   )
     fail("island dimensions");
-  const nominalExtent = island.radius + island.deepOceanBuffer;
+  const nominalExtent =
+    island.radius * (1 + island.maxCoastVariation) + island.deepOceanBuffer;
   if (
     !Number.isFinite(nominalExtent) ||
     island.centerX - nominalExtent < bounds.minX ||
@@ -194,8 +220,8 @@ export function validateWorldTerrainProfile(
     island.centerZ - nominalExtent < bounds.minZ ||
     island.centerZ + nominalExtent > bounds.maxZ
   )
-    fail("nominal island extent outside bounds");
-  // No assertion that noisy coastline/flat zones fit this nominal radius.
+    fail("bounded noisy island extent outside bounds");
+  // Authored flat zones still require separate content containment admission.
   if (
     height.maxHeightParameter <= 0 ||
     height.terrainScale <= 0 ||
@@ -240,13 +266,14 @@ export function validateWorldTerrainProfile(
   return profile;
 }
 
-/** Omission alone selects the untouched default; null/unknown selections fail. */
+/** Runtime selection is always explicit; omission never restores the old world. */
 export function resolveWorldTerrainProfile(
   input?: unknown,
 ): WorldTerrainProfile {
-  return input === undefined
-    ? LARGE_WORLD_TERRAIN_PROFILE
-    : validateWorldTerrainProfile(input);
+  const profile = validateWorldTerrainProfile(input);
+  if (profile.kind !== "compact-candidate")
+    fail("legacy regression fixture is not a runtime world");
+  return profile;
 }
 
 /** Fixed field order, finite numbers and canonical zero; independent of input order. */
@@ -268,7 +295,12 @@ export function deserializeWorldTerrainProfile(
 export function worldTerrainProfileIdentityInput(
   profile: WorldTerrainProfile,
 ): Uint8Array {
-  return new TextEncoder().encode(
-    `hyperia-world-terrain-profile-v1\n${serializeWorldTerrainProfile(profile)}`,
-  );
+  return new TextEncoder().encode(worldTerrainProfileIdentity(profile));
+}
+
+/** Canonical identity payload, not a cryptographic digest or asset-manifest identity. */
+export function worldTerrainProfileIdentity(
+  profile: WorldTerrainProfile,
+): string {
+  return `hyperia-world-terrain-profile-v1\n${serializeWorldTerrainProfile(profile)}`;
 }

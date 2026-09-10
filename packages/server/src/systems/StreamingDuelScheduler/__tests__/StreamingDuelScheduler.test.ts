@@ -1,10 +1,21 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  afterEach,
+  beforeAll,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  vi,
+} from "vitest";
+import {
+  ALL_WORLD_AREAS,
   AttackType,
+  DataManager,
   EventType,
   ITEMS,
   calculateCombatLevel,
   canPlayerPerformPreparationAction,
+  getDuelArenaConfig,
   getStreamingDuelDamageAuthority,
   isPositionInsideCombatArena,
 } from "@hyperforge/shared";
@@ -456,6 +467,22 @@ function createAgentEntity(
   };
 }
 
+/** Preparation positions follow the admitted manifest, not retired coordinates. */
+function preparationPosition(
+  offsetX: number,
+  offsetZ: number,
+  y = 0.2,
+): [number, number, number] {
+  const haven = ALL_WORLD_AREAS.central_haven;
+  if (!haven) throw new Error("Admitted preparation town is required");
+  const { bounds } = haven;
+  return [
+    (bounds.minX + bounds.maxX) / 2 + offsetX,
+    y,
+    (bounds.minZ + bounds.maxZ) / 2 + offsetZ,
+  ];
+}
+
 function createMockWorld(options?: {
   alphaInventory?: InventoryItem[];
   betaInventory?: InventoryItem[];
@@ -528,8 +555,16 @@ function createMockWorld(options?: {
     }
   >();
 
-  const alpha = createAgentEntity("agent-alpha", "Alpha", [10, 0.2, 10]);
-  const beta = createAgentEntity("agent-beta", "Beta", [20, 0.2, 20]);
+  const alpha = createAgentEntity(
+    "agent-alpha",
+    "Alpha",
+    preparationPosition(-5, -5),
+  );
+  const beta = createAgentEntity(
+    "agent-beta",
+    "Beta",
+    preparationPosition(5, 5),
+  );
   entities.set(alpha.id, alpha);
   entities.set(beta.id, beta);
   alpha.data.selectedSpell = options?.alphaSelectedSpell ?? null;
@@ -1050,6 +1085,22 @@ function expectContestantRestored(
 }
 
 describe("StreamingDuelScheduler", () => {
+  beforeAll(async () => {
+    await DataManager.getInstance().initialize();
+    expect(DataManager.getWorldContentIdentity()).toMatch(/^[a-f0-9]{64}$/u);
+    const { bounds } = DataManager.getWorldTerrainProfile();
+    for (const [x, , z] of [
+      preparationPosition(-5, -5),
+      preparationPosition(5, 5),
+    ]) {
+      expect(x).toBeGreaterThanOrEqual(bounds.minX);
+      expect(x).toBeLessThanOrEqual(bounds.maxX);
+      expect(z).toBeGreaterThanOrEqual(bounds.minZ);
+      expect(z).toBeLessThanOrEqual(bounds.maxZ);
+      expect(isPositionInsideCombatArena(x, z)).toBe(false);
+    }
+  });
+
   beforeEach(() => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-01-01T00:00:00.000Z"));
@@ -3402,23 +3453,9 @@ describe("StreamingDuelScheduler", () => {
   });
 
   it("does not replace an already-equipped weapon during duel prep", async () => {
-    const equippedWeaponId = "test_iron_longsword";
-    ITEMS.set(equippedWeaponId, {
-      id: equippedWeaponId,
-      name: "Test Iron Longsword",
-      type: "weapon",
-      description: "A classified melee fixture.",
-      examine: "A classified melee fixture.",
-      tradeable: true,
-      rarity: "common",
-      modelPath: null,
-      equipSlot: "weapon",
-      equipable: true,
-      tier: "iron",
-      weaponType: "LONGSWORD",
-      attackType: AttackType.MELEE,
-      bonuses: { attack: 10 },
-    } as never);
+    // The actual iron longsword outranks the diagnostic bronze provision.
+    const equippedWeaponId = "iron_longsword";
+    expect(ITEMS.get(equippedWeaponId)?.attackType).toBe(AttackType.MELEE);
     const ctx = createMockWorld({
       alphaWeaponId: equippedWeaponId,
       betaWeaponId: null,
@@ -3439,7 +3476,6 @@ describe("StreamingDuelScheduler", () => {
       ).toBe(true);
     } finally {
       scheduler.destroy();
-      ITEMS.delete(equippedWeaponId);
     }
   });
 
@@ -3516,7 +3552,9 @@ describe("StreamingDuelScheduler", () => {
   it("restores the exact pre-duel loadout, autocast, ammunition, and runes after a win", async () => {
     const ctx = createMockWorld({
       alphaInventory: [
-        { slot: 0, itemId: "bronze_arrow", quantity: 37 },
+        // Actual level-one diagnostics provision iron arrows. Keep an owned
+        // stack of that same item to verify cleanup conserves its baseline.
+        { slot: 0, itemId: "iron_arrow", quantity: 37 },
         { slot: 1, itemId: "air_rune", quantity: 11 },
       ],
       betaInventory: [
@@ -3525,7 +3563,7 @@ describe("StreamingDuelScheduler", () => {
       ],
       alphaWeaponId: "iron_sword",
       betaWeaponId: "bronze_longsword",
-      alphaArrowId: "iron_arrow",
+      alphaArrowId: "bronze_arrow",
       alphaArrowQuantity: 17,
       betaArrowId: "steel_arrow",
       betaArrowQuantity: 23,
@@ -3544,24 +3582,24 @@ describe("StreamingDuelScheduler", () => {
 
     expect(ctx.getEquippedWeapon("agent-alpha")).not.toBe("iron_sword");
     expect(ctx.getEquipmentSlot("agent-alpha", "arrows")?.itemId).toBe(
-      "bronze_arrow",
+      "iron_arrow",
     );
     expect(ctx.equipCalls).toContainEqual({
       playerId: "agent-alpha",
-      itemId: "bronze_arrow",
+      itemId: "iron_arrow",
       quantity: 500,
     });
     expect(ctx.entities.get("agent-beta")?.data.selectedSpell).not.toBe(
       "earth_strike",
     );
-    expect(ctx.countItem("agent-alpha", "bronze_arrow")).toBeGreaterThan(37);
+    expect(ctx.countItem("agent-alpha", "iron_arrow")).toBeGreaterThan(37);
     expect(ctx.countItem("agent-beta", "mind_rune")).toBeGreaterThan(9);
 
     // Simulate duel consumption from the scheduler-provisioned stacks. Cleanup
     // must remove only the remaining provision and preserve owned baselines.
     const alphaProvisionedArrows = ctx
       .getInventory("agent-alpha")
-      .items.find((item) => item.itemId === "bronze_arrow")!;
+      .items.find((item) => item.itemId === "iron_arrow")!;
     const betaProvisionedRunes = ctx
       .getInventory("agent-beta")
       .items.find((item) => item.itemId === "mind_rune")!;
@@ -3580,7 +3618,7 @@ describe("StreamingDuelScheduler", () => {
       expect.objectContaining({ itemId: "iron_sword" }),
     );
     expect(ctx.getEquipmentSlot("agent-alpha", "arrows")).toEqual({
-      itemId: "iron_arrow",
+      itemId: "bronze_arrow",
       quantity: 17,
     });
     expect(ctx.getEquipmentSlot("agent-alpha", "shield")).toEqual(
@@ -3602,7 +3640,7 @@ describe("StreamingDuelScheduler", () => {
     expect(ctx.entities.get("agent-beta")?.data.selectedSpell).toBe(
       "earth_strike",
     );
-    expect(ctx.countItem("agent-alpha", "bronze_arrow")).toBe(37);
+    expect(ctx.countItem("agent-alpha", "iron_arrow")).toBe(37);
     expect(ctx.countItem("agent-alpha", "air_rune")).toBe(11);
     expect(ctx.countItem("agent-beta", "mind_rune")).toBe(9);
     expect(ctx.countItem("agent-beta", "air_rune")).toBe(13);
@@ -3752,7 +3790,12 @@ describe("StreamingDuelScheduler", () => {
 
   it("sanitizes invalid original restore heights to grounded terrain", async () => {
     const ctx = createMockWorld({ terrainHeight: 14.5 });
-    ctx.entities.get("agent-alpha")!.data.position = [10, -250, 10];
+    const [originalX, , originalZ] = preparationPosition(-5, -5);
+    ctx.entities.get("agent-alpha")!.data.position = [
+      originalX,
+      -250,
+      originalZ,
+    ];
     const scheduler = new StreamingDuelScheduler(ctx.world as never);
 
     scheduler.init();
@@ -3774,8 +3817,8 @@ describe("StreamingDuelScheduler", () => {
     await Promise.resolve();
 
     const alpha = ctx.entities.get("agent-alpha")!;
-    expect(alpha.data.position[0]).toBe(10);
-    expect(alpha.data.position[2]).toBe(10);
+    expect(alpha.data.position[0]).toBe(originalX);
+    expect(alpha.data.position[2]).toBe(originalZ);
     expect(alpha.data.position[1]).toBe(14.5);
 
     scheduler.destroy();
@@ -3783,8 +3826,11 @@ describe("StreamingDuelScheduler", () => {
 
   it("does not restore agents into combat arena tiles after duel cleanup", async () => {
     const ctx = createMockWorld({ terrainHeight: 9.5 });
-    // Arena 1 bounds include x=70, z=90 with default manifest config.
-    ctx.entities.get("agent-alpha")!.data.position = [70, 9.5, 90];
+    const arena = getDuelArenaConfig();
+    const arenaX = arena.baseX + arena.arenaWidth / 2;
+    const arenaZ = arena.baseZ + arena.arenaLength / 2;
+    expect(isPositionInsideCombatArena(arenaX, arenaZ)).toBe(true);
+    ctx.entities.get("agent-alpha")!.data.position = [arenaX, 9.5, arenaZ];
 
     const scheduler = new StreamingDuelScheduler(ctx.world as never);
     scheduler.init();
@@ -5083,8 +5129,8 @@ describe("StreamingDuelScheduler", () => {
     // to its original position, then the new ANNOUNCEMENT stages it in-ring.
     expect(teleportSpy).toHaveBeenCalledTimes(4);
     for (const [agentId, originalPosition] of [
-      ["agent-alpha", [10, 0.2, 10]],
-      ["agent-beta", [20, 0.2, 20]],
+      ["agent-alpha", preparationPosition(-5, -5)],
+      ["agent-beta", preparationPosition(5, 5)],
     ] as const) {
       const calls = teleportSpy.mock.calls.filter(
         ([calledAgentId]) => calledAgentId === agentId,

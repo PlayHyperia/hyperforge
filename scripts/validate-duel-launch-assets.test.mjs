@@ -90,12 +90,155 @@ function runValidator(assetsRoot) {
   });
 }
 
-test("accepts the exact active 17-authority preparation manifest", () => {
+test("accepts the exact active preparation manifest and rectangular campus grade", () => {
   const assetsRoot = createAssetsFixture();
   try {
+    const manifest = JSON.parse(
+      readFileSync(path.join(assetsRoot, "manifests/world-areas.json"), "utf8"),
+    );
+    const area = manifest.specialAreas.duel_arena;
+    const grade = area.flatZones.find(
+      (zone) => zone.id === "duel_arena_campus_grade",
+    );
+    assert.equal(grade.width, 104);
+    assert.equal(grade.depth, 140.5);
+    assert.deepEqual(
+      {
+        minX: grade.centerX - grade.width / 2,
+        maxX: grade.centerX + grade.width / 2,
+        minZ: grade.centerZ - grade.depth / 2,
+        maxZ: grade.centerZ + grade.depth / 2,
+      },
+      area.bounds,
+    );
     const result = runValidator(assetsRoot);
     assert.equal(result.status, 0, result.stderr);
     assert.match(result.stdout, /Duel launch asset validation passed/u);
+  } finally {
+    rmSync(assetsRoot, { recursive: true, force: true });
+  }
+});
+
+test("accepts independent rectangular extents and circular water tangent to every boundary", () => {
+  const assetsRoot = createAssetsFixture();
+  try {
+    mutateJson(assetsRoot, "world-areas.json", (manifest) => {
+      const area = manifest.specialAreas.duel_arena;
+      const grade = area.flatZones.find(
+        (zone) => zone.id === "duel_arena_campus_grade",
+      );
+      // The active grade is Z-long; this second rectangle is X-long.
+      area.flatZones.push({
+        ...grade,
+        id: "wide_rectangle_regression",
+        depth: 2,
+      });
+      const radius = 2;
+      area.waterBodies ??= [];
+      for (const [side, centerX, centerZ] of [
+        ["min_x", area.bounds.minX + radius, grade.centerZ],
+        ["max_x", area.bounds.maxX - radius, grade.centerZ],
+        ["min_z", grade.centerX, area.bounds.minZ + radius],
+        ["max_z", grade.centerX, area.bounds.maxZ - radius],
+      ]) {
+        area.waterBodies.push({
+          id: `tangent_water_${side}`,
+          centerX,
+          centerZ,
+          radius,
+          surfaceY: grade.height,
+        });
+      }
+    });
+    const result = runValidator(assetsRoot);
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /Duel launch asset validation passed/u);
+  } finally {
+    rmSync(assetsRoot, { recursive: true, force: true });
+  }
+});
+
+test("rejects each rectangular boundary overrun and nonpositive dimensions", () => {
+  const assetsRoot = createAssetsFixture();
+  try {
+    mutateJson(assetsRoot, "world-areas.json", (manifest) => {
+      const area = manifest.specialAreas.duel_arena;
+      const grade = area.flatZones.find(
+        (zone) => zone.id === "duel_arena_campus_grade",
+      );
+      for (const [side, dx, dz] of [
+        ["min_x", -0.000001, 0],
+        ["max_x", 0.000001, 0],
+        ["min_z", 0, -0.000001],
+        ["max_z", 0, 0.000001],
+      ]) {
+        area.flatZones.push({
+          ...grade,
+          id: `outside_rectangle_${side}`,
+          centerX: grade.centerX + dx,
+          centerZ: grade.centerZ + dz,
+        });
+      }
+      area.flatZones.push(
+        { ...grade, id: "zero_width_regression", width: 0 },
+        { ...grade, id: "negative_depth_regression", depth: -1 },
+      );
+    });
+    const result = runValidator(assetsRoot);
+    assert.equal(result.status, 1);
+    for (const side of ["min_x", "max_x", "min_z", "max_z"]) {
+      assert.match(
+        result.stderr,
+        new RegExp(
+          `flat zone outside_rectangle_${side} .* falls outside duel_arena bounds`,
+          "u",
+        ),
+      );
+    }
+    assert.match(result.stderr, /invalid flat zone zero_width_regression/u);
+    assert.match(result.stderr, /invalid flat zone negative_depth_regression/u);
+  } finally {
+    rmSync(assetsRoot, { recursive: true, force: true });
+  }
+});
+
+test("keeps circular water radius containment on both axes and every boundary", () => {
+  const assetsRoot = createAssetsFixture();
+  try {
+    mutateJson(assetsRoot, "world-areas.json", (manifest) => {
+      const area = manifest.specialAreas.duel_arena;
+      const grade = area.flatZones.find(
+        (zone) => zone.id === "duel_arena_campus_grade",
+      );
+      const radius = 2;
+      const overrun = 0.000001;
+      area.waterBodies ??= [];
+      for (const [side, centerX, centerZ] of [
+        ["min_x", area.bounds.minX + radius - overrun, grade.centerZ],
+        ["max_x", area.bounds.maxX - radius + overrun, grade.centerZ],
+        ["min_z", grade.centerX, area.bounds.minZ + radius - overrun],
+        ["max_z", grade.centerX, area.bounds.maxZ - radius + overrun],
+      ]) {
+        area.waterBodies.push({
+          id: `outside_water_${side}`,
+          centerX,
+          centerZ,
+          radius,
+          surfaceY: grade.height,
+        });
+      }
+    });
+    const result = runValidator(assetsRoot);
+    assert.equal(result.status, 1);
+    for (const side of ["min_x", "max_x", "min_z", "max_z"]) {
+      assert.match(
+        result.stderr,
+        new RegExp(
+          `water body outside_water_${side} .* with radius 2 falls outside duel_arena bounds`,
+          "u",
+        ),
+      );
+    }
   } finally {
     rmSync(assetsRoot, { recursive: true, force: true });
   }

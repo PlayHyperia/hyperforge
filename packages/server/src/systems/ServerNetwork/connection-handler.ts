@@ -33,6 +33,7 @@
 import type { World } from "@hyperforge/shared";
 import {
   Socket,
+  DataManager,
   EventType,
   getDuelArenaConfig,
   writePacket,
@@ -711,6 +712,7 @@ export class ConnectionHandler {
   ): Promise<void> {
     const baseSnapshot = {
       id: socket.id,
+      worldContentIdentity: DataManager.getWorldContentIdentity(),
       serverTime: performance.now(),
       worldTime: this.world.getTime(), // Synced world time for day/night cycle
       assetsUrl: this.world.assetsUrl,
@@ -1820,6 +1822,7 @@ export class ConnectionHandler {
 
     const streamingSnapshot = {
       id: socket.id,
+      worldContentIdentity: DataManager.getWorldContentIdentity(),
       serverTime: performance.now(),
       worldTime: this.world.getTime(), // Synced world time for day/night cycle
       assetsUrl: this.world.assetsUrl,
@@ -1976,6 +1979,7 @@ export class ConnectionHandler {
 
     const spectatorSnapshot = {
       id: socket.id,
+      worldContentIdentity: DataManager.getWorldContentIdentity(),
       serverTime: performance.now(),
       assetsUrl: this.world.assetsUrl,
       apiUrl: process.env.PUBLIC_API_URL,

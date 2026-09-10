@@ -58,6 +58,17 @@
 
 // Export world factories from runtime/
 export * from "./runtime";
+export { DataManager } from "./data/DataManager";
+export {
+  getDuelArenaLobbyReturnPosition,
+  getDuelArenaEgressPosition,
+  getDuelArenaGradeHeight,
+  DUEL_ARENA_FLOOR_GROUND_OFFSET,
+} from "./data/arena-grading";
+export {
+  resolveWorldSpawnPosition,
+  type WorldSpawnPositionResolution,
+} from "./runtime/WorldSpawnAdmission";
 
 // Export terrain shader for unified rendering (used by Asset Forge)
 export {

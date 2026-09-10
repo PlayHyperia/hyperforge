@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { EntityData, World } from "../../../types";
 import { ClientNetwork } from "../ClientNetwork";
+import { WorldContentAdmission } from "../../../runtime/WorldContentAdmission";
 
 function makeWindow(pathname: string, search = ""): Window {
   return { location: { pathname, search } } as unknown as Window;
@@ -48,6 +49,12 @@ describe("ClientNetwork streaming entity admission", () => {
     });
     const { deserialize, world } = createWorld();
     const network = new ClientNetwork(world);
+    // This entity-filter fixture has no loaded manifests. Supply the real
+    // admission policy with an explicit synthetic content identity, not a bypass.
+    const identity = "a".repeat(64);
+    const admission = new WorldContentAdmission(() => identity);
+    admission.beginConnection();
+    Object.assign(network, { worldAdmission: admission });
     const snapshotEntities = [
       entity("tree", "resource"),
       entity("fighter-a", "player"),
@@ -57,6 +64,7 @@ describe("ClientNetwork streaming entity admission", () => {
 
     await network.onSnapshot({
       id: "spectator",
+      worldContentIdentity: identity,
       serverTime: 0,
       spectatorMode: true,
       entities: snapshotEntities,

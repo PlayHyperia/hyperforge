@@ -18,8 +18,6 @@ import { WorkerPool } from "./WorkerPool";
 import {
   buildGetBaseHeightAtJS,
   buildComputeBiomeWeightsJS,
-  MAX_HEIGHT,
-  WATER_LEVEL_NORMALIZED,
 } from "../../systems/shared/world/TerrainHeightParams";
 import { buildBiomeConstantsJS } from "../../systems/shared/world/TerrainBiomeTypes";
 import {
@@ -27,6 +25,9 @@ import {
   buildHeightHelpersJS,
   buildBiomeInfluencesJS,
   buildCreateBiomeNoiseSetsJS,
+  buildTerrainWorkerProfileGuardJS,
+  assertTerrainWorkerRequest,
+  assertTerrainWorkerResult,
 } from "./TerrainWorkerShared";
 import type { TerrainWorkerConfig } from "./TerrainWorker";
 
@@ -110,6 +111,7 @@ export interface GrassWorkerInput {
 }
 
 export interface GrassWorkerOutput {
+  terrainProfileIdentity: string;
   type: "grassInstanceResult";
   chunkKey: string;
   offsets: Float32Array;
@@ -356,7 +358,8 @@ function buildComputeTerrainColorJS(): string {
  * Embeds: terrain height, biome weights, terrain color, road influence,
  * grass placement, and instance attribute generation.
  */
-const GRASS_WORKER_CODE = `
+export const GRASS_WORKER_CODE = `
+${buildTerrainWorkerProfileGuardJS()}
 ${buildNoiseGeneratorJS()}
 ${buildBiomeConstantsJS()}
 
@@ -418,6 +421,7 @@ function isInFlatZone(wx, wz, flatZones) {
 }
 
 function generateGrassInstances(input) {
+  assertTerrainWorkerInput(input);
   var startTime = performance.now();
   var centerX = input.centerX, centerZ = input.centerZ, size = input.size;
   var spacingMul = input.spacingMul;
@@ -562,6 +566,7 @@ function generateGrassInstances(input) {
   if (count === 0) {
     return {
       type: "grassInstanceResult",
+      terrainProfileIdentity: config.TERRAIN_PROFILE_IDENTITY,
       chunkKey: input.chunkKey,
       offsets: new Float32Array(0),
       rotScaleHash: new Float32Array(0),
@@ -574,6 +579,7 @@ function generateGrassInstances(input) {
 
   return {
     type: "grassInstanceResult",
+    terrainProfileIdentity: config.TERRAIN_PROFILE_IDENTITY,
     chunkKey: input.chunkKey,
     offsets: offsets.subarray(0, count * 3),
     rotScaleHash: rotScaleHash.subarray(0, count * 3),
@@ -659,16 +665,21 @@ export function getGrassWorkerPool(
 export async function generateGrassPlacementsAsync(
   input: GrassWorkerInput,
 ): Promise<GrassWorkerOutput | null> {
+  assertTerrainWorkerRequest(input.config, input.seed);
   const pool = getGrassWorkerPool();
   if (!pool) {
     return null;
   }
-  return pool.execute(input);
+  const result = await pool.execute(input);
+  assertTerrainWorkerResult(result, input.config);
+  return result;
 }
 
 export async function generateGrassChunksBatch(
   inputs: GrassWorkerInput[],
 ): Promise<GrassBatchResult> {
+  for (const input of inputs)
+    assertTerrainWorkerRequest(input.config, input.seed);
   const pool = getGrassWorkerPool();
   if (!pool) {
     return { results: [], workersAvailable: false, failedCount: inputs.length };
@@ -681,6 +692,7 @@ export async function generateGrassChunksBatch(
     pool
       .execute(input)
       .then((result) => {
+        assertTerrainWorkerResult(result, input.config);
         results.push(result);
       })
       .catch(() => {

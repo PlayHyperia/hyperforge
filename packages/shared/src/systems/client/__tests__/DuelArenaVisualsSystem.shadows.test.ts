@@ -1,6 +1,10 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { World } from "../../../core/World";
 import {
+  getDuelArenaGradeHeight,
+  DUEL_ARENA_FLOOR_CENTER_OFFSET,
+} from "../../../data/arena-grading";
+import {
   getDuelArenaConfig,
   type DuelArenaConfig,
 } from "../../../data/duel-manifest";
@@ -78,7 +82,7 @@ describe("Duel arena floor shadow receivers", () => {
           cfg.baseX +
             col * (cfg.arenaWidth + cfg.arenaGap) +
             cfg.arenaWidth / 2,
-          0.27,
+          getDuelArenaGradeHeight() + DUEL_ARENA_FLOOR_CENTER_OFFSET,
           cfg.baseZ +
             row * (cfg.arenaLength + cfg.arenaGap) +
             cfg.arenaLength / 2,

@@ -1267,6 +1267,8 @@ export interface GLBData {
 // Network Types
 export interface SnapshotData {
   id: string;
+  /** SHA-256 of the validated terrain profile and loaded world manifests. */
+  worldContentIdentity: string;
   serverTime: number;
   apiUrl?: string;
   maxUploadSize?: number;

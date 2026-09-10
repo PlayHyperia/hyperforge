@@ -22,6 +22,8 @@ import {
   type ICollisionMatrix,
   CollisionFlag,
   getDuelArenaConfig,
+  getDuelArenaGradeHeight,
+  DUEL_ARENA_FLOOR_GROUND_OFFSET,
 } from "@hyperforge/shared";
 
 // ============================================================================
@@ -39,6 +41,7 @@ interface ArenaState {
  */
 function generateArenaConfig(arenaId: number): Arena {
   const config = getDuelArenaConfig();
+  const groundY = getDuelArenaGradeHeight() + DUEL_ARENA_FLOOR_GROUND_OFFSET;
 
   // Calculate row and column based on grid layout
   const row = Math.floor((arenaId - 1) / config.columns);
@@ -58,12 +61,12 @@ function generateArenaConfig(arenaId: number): Arena {
   const bounds: ArenaBounds = {
     min: {
       x: centerX - config.arenaWidth / 2,
-      y: config.baseY - 1,
+      y: groundY - 1,
       z: centerZ - config.arenaLength / 2,
     },
     max: {
       x: centerX + config.arenaWidth / 2,
-      y: config.baseY + 10,
+      y: groundY + 10,
       z: centerZ + config.arenaLength / 2,
     },
   };
@@ -74,18 +77,18 @@ function generateArenaConfig(arenaId: number): Arena {
       ? [
           {
             x: centerX - config.spawnOffset,
-            y: config.baseY,
+            y: groundY,
             z: centerZ,
           },
           {
             x: centerX + config.spawnOffset,
-            y: config.baseY,
+            y: groundY,
             z: centerZ,
           },
         ]
       : [
-          { x: centerX, y: config.baseY, z: centerZ - config.spawnOffset },
-          { x: centerX, y: config.baseY, z: centerZ + config.spawnOffset },
+          { x: centerX, y: groundY, z: centerZ - config.spawnOffset },
+          { x: centerX, y: groundY, z: centerZ + config.spawnOffset },
         ];
 
   return {

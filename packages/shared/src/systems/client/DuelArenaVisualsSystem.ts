@@ -50,8 +50,14 @@ import { Layers } from "../../physics/Layers";
 import type { Physics } from "../shared/interaction/Physics";
 import type { PxRigidStatic } from "../../types/systems/physics";
 import type { ParticleSystem } from "../shared/presentation/ParticleSystem";
-import type { FlatZone } from "../../types/world/terrain";
 import { isStreamingLikeViewport } from "../../runtime/clientViewportMode";
+import {
+  createDuelArenaFloorZones,
+  getDuelArenaGradeHeight,
+  DUEL_ARENA_FLOOR_GROUND_OFFSET,
+  DUEL_ARENA_FLOOR_CENTER_OFFSET as FLOOR_HEIGHT_OFFSET,
+  DUEL_ARENA_FLOOR_THICKNESS as FLOOR_THICKNESS,
+} from "../../data/arena-grading";
 import {
   getDuelArenaConfig,
   type DuelArenaConfig,
@@ -79,8 +85,6 @@ const FENCE_POST_SIZE = 0.2;
 const FENCE_RAIL_HEIGHT = 0.08;
 const FENCE_RAIL_DEPTH = 0.08;
 const FENCE_RAIL_HEIGHTS = [0.3, 0.75, 1.2];
-const FLOOR_THICKNESS = 0.3;
-const FLOOR_HEIGHT_OFFSET = 0.27;
 
 const LOBBY_FLOOR_COLOR = 0xc9b896;
 const HOSPITAL_FLOOR_COLOR = 0xffffff;
@@ -261,12 +265,9 @@ export class DuelArenaVisualsSystem extends System {
 
   private terrainSystem: {
     getHeightAt?: (x: number, z: number) => number;
-    getProceduralHeightAt?: (x: number, z: number) => number;
-    registerFlatZone?: (zone: FlatZone) => void;
-    unregisterFlatZone?: (id: string) => void;
   } | null = null;
 
-  private flatZoneIds: string[] = [];
+  private arenaGradeHeight: number | null = null;
   private physicsSystem: Physics | null = null;
   private physicsBodies: PxRigidStatic[] = [];
   private particleEmitterIds: string[] = [];
@@ -312,28 +313,45 @@ export class DuelArenaVisualsSystem extends System {
     return this.visualsCreated;
   }
 
-  private getTerrainHeight(x: number, z: number): number {
-    if (this.terrainSystem?.getHeightAt) {
-      try {
-        const height = this.terrainSystem.getHeightAt(x, z);
-        return height ?? 0;
-      } catch {
-        return 0;
-      }
-    }
-    return 0;
+  private getArenaBaseHeight(): number {
+    this.arenaGradeHeight ??= getDuelArenaGradeHeight();
+    return this.arenaGradeHeight;
   }
 
-  private getProceduralTerrainHeight(x: number, z: number): number {
-    if (this.terrainSystem?.getProceduralHeightAt) {
-      try {
-        const height = this.terrainSystem.getProceduralHeightAt(x, z);
-        return height ?? 0;
-      } catch {
-        return 0;
+  private getFloorGroundHeight(): number {
+    return this.getArenaBaseHeight() + DUEL_ARENA_FLOOR_GROUND_OFFSET;
+  }
+
+  /** Fail before visual allocation if authoritative terrain missed its shared floors. */
+  private assertSharedArenaFloors(): void {
+    const sample = this.terrainSystem?.getHeightAt;
+    if (!sample)
+      throw new Error(
+        "Duel arena visuals require authoritative terrain heights",
+      );
+    for (const zone of createDuelArenaFloorZones(
+      this.arenaCfg,
+      this.getArenaBaseHeight(),
+    )) {
+      const halfWidth = zone.width / 2 - 0.5;
+      const halfDepth = zone.depth / 2 - 0.5;
+      for (const [dx, dz] of [
+        [0, 0],
+        [-halfWidth, -halfDepth],
+        [-halfWidth, halfDepth],
+        [halfWidth, -halfDepth],
+        [halfWidth, halfDepth],
+      ]) {
+        const height = sample.call(
+          this.terrainSystem,
+          zone.centerX + dx,
+          zone.centerZ + dz,
+        );
+        if (!Number.isFinite(height) || Math.abs(height - zone.height) > 1e-6) {
+          throw new Error(`Duel arena shared floor is not ready: ${zone.id}`);
+        }
       }
     }
-    return this.getTerrainHeight(x, z);
   }
 
   async init(options?: WorldOptions): Promise<void> {
@@ -346,19 +364,13 @@ export class DuelArenaVisualsSystem extends System {
 
   start(): void {
     this.arenaCfg = getDuelArenaConfig();
+    this.getArenaBaseHeight();
 
     this.terrainSystem = this.world.getSystem("terrain") as {
       getHeightAt?: (x: number, z: number) => number;
-      getProceduralHeightAt?: (x: number, z: number) => number;
-      registerFlatZone?: (zone: FlatZone) => void;
-      unregisterFlatZone?: (id: string) => void;
     } | null;
 
-    if (!this.terrainSystem?.getHeightAt) {
-      console.warn(
-        "[DuelArenaVisualsSystem] TerrainSystem not available, using fallback heights",
-      );
-    }
+    this.assertSharedArenaFloors();
 
     this.physicsSystem = this.world.getSystem("physics") as Physics | null;
     if (!this.physicsSystem) {
@@ -373,100 +385,10 @@ export class DuelArenaVisualsSystem extends System {
       }
     }
 
-    this.registerArenaFlatZones();
-
     console.log(
       "[DuelArenaVisualsSystem] start() called, creating arena visuals...",
     );
     this.createArenaVisuals();
-  }
-
-  // ============================================================================
-  // Flat Zone Registration
-  // ============================================================================
-
-  private registerArenaFlatZones(): void {
-    if (!this.terrainSystem?.registerFlatZone) {
-      console.warn(
-        "[DuelArenaVisualsSystem] TerrainSystem.registerFlatZone not available, skipping flat zone registration",
-      );
-      return;
-    }
-
-    const FLAT_ZONE_HEIGHT_OFFSET = 0.4;
-    const BLEND_RADIUS = 1.0;
-    const CARVE_INSET = 1.0;
-
-    const cfg = this.arenaCfg;
-    for (let i = 0; i < cfg.arenaCount; i++) {
-      const { cx: centerX, cz: centerZ } = this.arenaCell(i);
-
-      const proceduralHeight = this.getProceduralTerrainHeight(
-        centerX,
-        centerZ,
-      );
-      const zoneId = `duel_arena_floor_${i + 1}`;
-
-      const zone: FlatZone = {
-        id: zoneId,
-        centerX,
-        centerZ,
-        width: cfg.arenaWidth,
-        depth: cfg.arenaLength,
-        height: proceduralHeight + FLAT_ZONE_HEIGHT_OFFSET,
-        blendRadius: BLEND_RADIUS,
-        carveInset: CARVE_INSET,
-      };
-
-      this.terrainSystem.registerFlatZone(zone);
-      this.flatZoneIds.push(zoneId);
-    }
-
-    // Lobby flat zone
-    {
-      const proceduralHeight = this.getProceduralTerrainHeight(
-        LOBBY_CENTER_X,
-        LOBBY_CENTER_Z,
-      );
-      const zoneId = "duel_lobby_floor";
-      const zone: FlatZone = {
-        id: zoneId,
-        centerX: LOBBY_CENTER_X,
-        centerZ: LOBBY_CENTER_Z,
-        width: LOBBY_WIDTH,
-        depth: LOBBY_LENGTH,
-        height: proceduralHeight + FLAT_ZONE_HEIGHT_OFFSET,
-        blendRadius: BLEND_RADIUS,
-        carveInset: CARVE_INSET,
-      };
-      this.terrainSystem.registerFlatZone(zone);
-      this.flatZoneIds.push(zoneId);
-    }
-
-    // Hospital flat zone
-    {
-      const proceduralHeight = this.getProceduralTerrainHeight(
-        HOSPITAL_CENTER_X,
-        HOSPITAL_CENTER_Z,
-      );
-      const zoneId = "duel_hospital_floor";
-      const zone: FlatZone = {
-        id: zoneId,
-        centerX: HOSPITAL_CENTER_X,
-        centerZ: HOSPITAL_CENTER_Z,
-        width: HOSPITAL_WIDTH,
-        depth: HOSPITAL_LENGTH,
-        height: proceduralHeight + FLAT_ZONE_HEIGHT_OFFSET,
-        blendRadius: BLEND_RADIUS,
-        carveInset: CARVE_INSET,
-      };
-      this.terrainSystem.registerFlatZone(zone);
-      this.flatZoneIds.push(zoneId);
-    }
-
-    console.log(
-      `[DuelArenaVisualsSystem] Registered ${this.flatZoneIds.length} flat zones (${this.arenaCfg.arenaCount} arenas + lobby + hospital)`,
-    );
   }
 
   // ============================================================================
@@ -778,7 +700,7 @@ export class DuelArenaVisualsSystem extends System {
 
     for (let a = 0; a < cfg.arenaCount; a++) {
       const { cx, cz } = this.arenaCell(a);
-      const terrainY = this.getTerrainHeight(cx, cz);
+      const terrainY = this.getFloorGroundHeight();
       const halfW = cfg.arenaWidth / 2;
       const halfL = cfg.arenaLength / 2;
 
@@ -836,7 +758,7 @@ export class DuelArenaVisualsSystem extends System {
     let railXIdx = 0;
     for (let a = 0; a < cfg.arenaCount; a++) {
       const { cx, cz } = this.arenaCell(a);
-      const terrainY = this.getTerrainHeight(cx, cz);
+      const terrainY = this.getFloorGroundHeight();
       const halfL = cfg.arenaLength / 2;
 
       for (const railY of FENCE_RAIL_HEIGHTS) {
@@ -870,7 +792,7 @@ export class DuelArenaVisualsSystem extends System {
     let railZIdx = 0;
     for (let a = 0; a < cfg.arenaCount; a++) {
       const { cx, cz } = this.arenaCell(a);
-      const terrainY = this.getTerrainHeight(cx, cz);
+      const terrainY = this.getFloorGroundHeight();
       const halfW = cfg.arenaWidth / 2;
 
       for (const railY of FENCE_RAIL_HEIGHTS) {
@@ -941,7 +863,7 @@ export class DuelArenaVisualsSystem extends System {
     // Arena corner pillars
     for (let a = 0; a < cfg.arenaCount; a++) {
       const { cx, cz } = this.arenaCell(a);
-      const terrainY = this.getTerrainHeight(cx, cz);
+      const terrainY = this.getFloorGroundHeight();
       const halfW = cfg.arenaWidth / 2;
       const halfL = cfg.arenaLength / 2;
 
@@ -964,7 +886,7 @@ export class DuelArenaVisualsSystem extends System {
     ]) {
       positions.push({
         ...c,
-        terrainY: this.getTerrainHeight(c.x, c.z),
+        terrainY: this.getFloorGroundHeight(),
       });
     }
 
@@ -979,7 +901,7 @@ export class DuelArenaVisualsSystem extends System {
     ]) {
       positions.push({
         ...c,
-        terrainY: this.getTerrainHeight(c.x, c.z),
+        terrainY: this.getFloorGroundHeight(),
       });
     }
 
@@ -1041,7 +963,7 @@ export class DuelArenaVisualsSystem extends System {
 
     for (let a = 0; a < cfg.arenaCount; a++) {
       const { cx, cz } = this.arenaCell(a);
-      const terrainY = this.getTerrainHeight(cx, cz);
+      const terrainY = this.getFloorGroundHeight();
       const pillarTopY = terrainY + PILLAR_TOTAL_HEIGHT;
       const halfW = cfg.arenaWidth / 2;
       const halfL = cfg.arenaLength / 2;
@@ -1104,7 +1026,7 @@ export class DuelArenaVisualsSystem extends System {
 
     for (let a = 0; a < cfg.arenaCount; a++) {
       const { cx, cz } = this.arenaCell(a);
-      const terrainY = this.getProceduralTerrainHeight(cx, cz);
+      const terrainY = this.getArenaBaseHeight();
       const floorY = terrainY + FLOOR_HEIGHT_OFFSET;
       const borderY = floorY + FLOOR_THICKNESS / 2 + BORDER_HEIGHT / 2;
       const halfW = floorWidth / 2;
@@ -1154,7 +1076,7 @@ export class DuelArenaVisualsSystem extends System {
 
     for (let a = 0; a < cfg.arenaCount; a++) {
       const { cx, cz } = this.arenaCell(a);
-      const terrainY = this.getTerrainHeight(cx, cz);
+      const terrainY = this.getFloorGroundHeight();
       const halfW = cfg.arenaWidth / 2;
 
       matrix.makeTranslation(
@@ -1193,7 +1115,7 @@ export class DuelArenaVisualsSystem extends System {
 
     for (let i = 0; i < cfg.arenaCount; i++) {
       const { cx, cz } = this.arenaCell(i);
-      const terrainY = this.getProceduralTerrainHeight(cx, cz);
+      const terrainY = this.getArenaBaseHeight();
       const floorY = terrainY + FLOOR_HEIGHT_OFFSET;
 
       if (this.world.isClient) {
@@ -1265,7 +1187,7 @@ export class DuelArenaVisualsSystem extends System {
 
     for (let a = 0; a < cfg.arenaCount; a++) {
       const { cx, cz } = this.arenaCell(a);
-      const terrainY = this.getProceduralTerrainHeight(cx, cz);
+      const terrainY = this.getArenaBaseHeight();
       const floorY =
         terrainY + FLOOR_HEIGHT_OFFSET + FLOOR_THICKNESS / 2 + 0.02;
 
@@ -1294,7 +1216,7 @@ export class DuelArenaVisualsSystem extends System {
     const cfg = this.arenaCfg;
     for (let a = 0; a < cfg.arenaCount; a++) {
       const { cx, cz } = this.arenaCell(a);
-      const terrainY = this.getTerrainHeight(cx, cz);
+      const terrainY = this.getFloorGroundHeight();
 
       const cornerOffset = {
         x: cfg.arenaWidth / 2 - ARENA_FORFEIT_PILLAR_INSET,
@@ -1352,7 +1274,7 @@ export class DuelArenaVisualsSystem extends System {
     const cfg = this.arenaCfg;
     for (let a = 0; a < cfg.arenaCount; a++) {
       const { cx, cz } = this.arenaCell(a);
-      const terrainY = this.getTerrainHeight(cx, cz);
+      const terrainY = this.getFloorGroundHeight();
       const halfW = cfg.arenaWidth / 2;
       const matIndex = Math.min(
         Math.floor(a / cfg.columns),
@@ -1382,10 +1304,7 @@ export class DuelArenaVisualsSystem extends System {
   // ============================================================================
 
   private createLobbyFloor(): void {
-    const terrainY = this.getProceduralTerrainHeight(
-      LOBBY_CENTER_X,
-      LOBBY_CENTER_Z,
-    );
+    const terrainY = this.getArenaBaseHeight();
     const floorY = terrainY + FLOOR_HEIGHT_OFFSET;
 
     if (this.world.isClient) {
@@ -1496,10 +1415,7 @@ export class DuelArenaVisualsSystem extends System {
   // ============================================================================
 
   private createHospitalFloor(): void {
-    const terrainY = this.getProceduralTerrainHeight(
-      HOSPITAL_CENTER_X,
-      HOSPITAL_CENTER_Z,
-    );
+    const terrainY = this.getArenaBaseHeight();
     const floorY = terrainY + FLOOR_HEIGHT_OFFSET;
 
     if (this.world.isClient) {
@@ -1591,7 +1507,7 @@ export class DuelArenaVisualsSystem extends System {
     const cfg = this.arenaCfg;
     for (let a = 0; a < cfg.arenaCount; a++) {
       const { cx, cz } = this.arenaCell(a);
-      const terrainY = this.getTerrainHeight(cx, cz);
+      const terrainY = this.getFloorGroundHeight();
       const pillarTopY = terrainY + PILLAR_TOTAL_HEIGHT;
       const halfW = cfg.arenaWidth / 2;
       const halfL = cfg.arenaLength / 2;
@@ -1621,10 +1537,7 @@ export class DuelArenaVisualsSystem extends System {
       ParticleSystem | undefined;
     if (!particleSystem) return;
 
-    const terrainY = this.getProceduralTerrainHeight(
-      LOBBY_CENTER_X,
-      LOBBY_CENTER_Z,
-    );
+    const terrainY = this.getArenaBaseHeight();
     const topY = terrainY + LOBBY_BRAZIER_HEIGHT;
     const inset = 2.5;
 
@@ -1794,7 +1707,7 @@ export class DuelArenaVisualsSystem extends System {
 
     for (let a = 0; a < cfg.arenaCount; a++) {
       const { cx, cz } = this.arenaCell(a);
-      const terrainY = this.getProceduralTerrainHeight(cx, cz);
+      const terrainY = this.getArenaBaseHeight();
       const floorCenterY = terrainY + FLOOR_HEIGHT_OFFSET;
       const wallCenterY = floorCenterY + FLOOR_THICKNESS / 2 + wallH / 2;
       const halfW = cfg.arenaWidth / 2;
@@ -1963,12 +1876,7 @@ export class DuelArenaVisualsSystem extends System {
   }
 
   destroy(): void {
-    if (this.terrainSystem?.unregisterFlatZone) {
-      for (const id of this.flatZoneIds) {
-        this.terrainSystem.unregisterFlatZone(id);
-      }
-    }
-    this.flatZoneIds = [];
+    // Shared terrain floors outlive this visual owner; never unregister them here.
 
     const particleSystem = this.world.getSystem("particle") as
       ParticleSystem | undefined;

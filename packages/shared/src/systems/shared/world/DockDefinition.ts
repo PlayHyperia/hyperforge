@@ -25,17 +25,7 @@ export interface DockDefinition {
 }
 
 /**
- * Dock placements — devs define exact positions and directions.
- * Add entries here to place docks anywhere on the map.
+ * The compact island currently has no authored dock placements.
+ * Future placements must fit the admitted terrain profile.
  */
-export const ISLAND_DOCKS: DockDefinition[] = [
-  {
-    id: "dock_test",
-    x: 1075.5,
-    z: 1172.5,
-    rotation: 180, // south
-    width: 3,
-    length: 12,
-    label: "Dock",
-  },
-];
+export const ISLAND_DOCKS: DockDefinition[] = [];

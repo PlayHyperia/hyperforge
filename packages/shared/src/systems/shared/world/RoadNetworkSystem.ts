@@ -25,6 +25,7 @@ import type {
   RoadEndpointType,
   RoadBoundaryExit,
   TileEdge,
+  WorldConfigManifest,
 } from "../../../types/world/world-types";
 import { NoiseGenerator } from "../../../utils/NoiseGenerator";
 import type { TownSystem } from "./TownSystem";
@@ -91,9 +92,11 @@ export interface RoadConfig {
   biomeCosts: Record<string, number>;
 }
 
-/** Load road configuration from DataManager (exported for testing) */
-export function loadRoadConfig(): RoadConfig {
-  const manifest = DataManager.getWorldConfig()?.roads;
+/** Project a supplied manifest, or the admitted startup manifest, into road settings. */
+export function loadRoadConfig(
+  worldConfig: WorldConfigManifest | null = DataManager.getWorldConfig(),
+): RoadConfig {
+  const manifest = worldConfig?.roads;
   const biomeCosts = { ...DEFAULT_BIOME_COSTS };
   if (manifest?.costBiomeMultipliers) {
     Object.assign(biomeCosts, manifest.costBiomeMultipliers);

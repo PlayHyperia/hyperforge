@@ -1,6 +1,9 @@
 import { describe, expect, it, vi, beforeEach } from "vitest";
 import { EventType } from "@hyperforge/shared";
 import { EmbeddedHyperiaService } from "../EmbeddedHyperiaService";
+import { loadWorldProfileTestFixture } from "./worldProfileTestFixture";
+
+beforeEach(loadWorldProfileTestFixture);
 
 type TestEntity = {
   id: string;

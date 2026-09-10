@@ -4,17 +4,22 @@ import {
   AttackType,
   CollisionFlag,
   CollisionMatrix,
+  DataManager,
   THREE,
   TILES_PER_TICK_RUN,
   type FoodConsumptionReceipt,
 } from "@hyperforge/shared";
-import { describe, expect, it, vi } from "vitest";
+import { beforeAll, describe, expect, it, vi } from "vitest";
 
 import type { EmbeddedGameState } from "../../eliza/types.js";
 import { ArenaPoolManager } from "../../systems/DuelSystem/ArenaPoolManager.js";
 import { TileMovementManager } from "../../systems/ServerNetwork/tile-movement.js";
 import type { CompetitiveTacticalStrategy } from "../../systems/StreamingDuelScheduler/competitive-tactical-strategy.js";
 import { DuelCombatAI } from "../DuelCombatAI.js";
+
+beforeAll(async () => {
+  await DataManager.getInstance().initialize();
+});
 
 const TICK_MS = 600;
 const SCENARIO_TICKS = 72;

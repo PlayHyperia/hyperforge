@@ -2,6 +2,10 @@ import { describe, expect, it } from "vitest";
 
 import { BiomeType } from "../TerrainBiomeTypes";
 import {
+  COMPACT_WORLD_TERRAIN_PROFILE,
+  worldTerrainProfileIdentity,
+} from "../WorldTerrainProfile";
+import {
   assembleQuadChunkGeometry,
   generateQuadChunkDataSync,
   type FullTerrainProvider,
@@ -12,6 +16,9 @@ type GradingField = (x: number, z: number) => number | null;
 
 /** Analytic terrain input: production generators and real geometry run unchanged. */
 class AnalyticTerrain implements FullTerrainProvider {
+  readonly terrainProfileIdentity = worldTerrainProfileIdentity(
+    COMPACT_WORLD_TERRAIN_PROFILE,
+  );
   readonly TILE_SIZE = 100;
   readonly WATER_LEVEL_NORMALIZED = 0.32;
   readonly SHORELINE_THRESHOLD = 0.25;

@@ -1,14 +1,19 @@
 import {
+  DataManager,
   EntityOccupancyMap,
   createEntityID,
   getDuelArenaConfig,
   isPositionInsideCombatArena,
   worldToTile,
 } from "@hyperforge/shared";
-import { describe, expect, it, vi } from "vitest";
+import { beforeAll, describe, expect, it, vi } from "vitest";
 
 import { TileMovementManager } from "../../ServerNetwork/tile-movement";
 import { DuelOrchestrator } from "../managers/DuelOrchestrator";
+
+beforeAll(async () => {
+  await DataManager.getInstance().initialize();
+});
 
 type TestEntity = {
   position: {
@@ -147,8 +152,8 @@ describe("DuelOrchestrator production-population occupancy", () => {
     for (let index = 0; index < ids.length; index++) {
       harness.addPlayer(
         ids[index],
-        -30.5 + (index % 5) * 3,
-        -30.5 + Math.floor(index / 5) * 3,
+        319.5 + (index % 5) * 3,
+        289.5 + Math.floor(index / 5) * 3,
       );
     }
     assertUniquePlayerOccupancy(harness.entities, harness.occupancy);
@@ -225,8 +230,8 @@ describe("DuelOrchestrator production-population occupancy", () => {
 
   it("refuses ingress without disturbing contestants when a live mob owns a mark", () => {
     const harness = createPopulationHarness();
-    harness.addPlayer("agent-a", 0.5, 0.5);
-    harness.addPlayer("agent-b", 1.5, 0.5);
+    harness.addPlayer("agent-a", 350.5, 320.5);
+    harness.addPlayer("agent-b", 351.5, 320.5);
     const marks = streamingCombatMarks();
     const blockedMark = worldToTile(marks[0][0], marks[0][2]);
     harness.entities.set("arena-mob", {
@@ -250,10 +255,10 @@ describe("DuelOrchestrator production-population occupancy", () => {
       harness.orchestrator.teleportToCombatPositions("agent-a", "agent-b"),
     ).toThrow("streaming_arena_mark_occupied_by_live_mob");
     expect(
-      String(harness.occupancy.getOccupant({ x: 0, z: 0 })?.entityId),
+      String(harness.occupancy.getOccupant({ x: 350, z: 320 })?.entityId),
     ).toBe("agent-a");
     expect(
-      String(harness.occupancy.getOccupant({ x: 1, z: 0 })?.entityId),
+      String(harness.occupancy.getOccupant({ x: 351, z: 320 })?.entityId),
     ).toBe("agent-b");
     expect(String(harness.occupancy.getOccupant(blockedMark)?.entityId)).toBe(
       "arena-mob",

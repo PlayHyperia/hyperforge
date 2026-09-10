@@ -1,5 +1,14 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  afterEach,
+  beforeAll,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  vi,
+} from "vitest";
+import {
+  DataManager,
   EntityOccupancyMap,
   ITEMS,
   type PrayerActionReceipt,
@@ -27,6 +36,10 @@ import {
 import { buildDeterministicCompetitiveTacticalStrategy } from "../competitive-tactical-strategy.js";
 import { TileMovementManager } from "../../ServerNetwork/tile-movement";
 import { isStreamingDuelEquipmentPresentationEligible } from "../../../streaming/duel-equipment-presentation.js";
+
+beforeAll(async () => {
+  await DataManager.getInstance().initialize();
+});
 
 describe("local diagnostic duel runtime boundary", () => {
   const validEnvironment = {
@@ -231,8 +244,8 @@ describe("DuelOrchestrator autonomy ownership", () => {
         false,
       );
     };
-    addEntity("agent-a", 0.5, 0.5);
-    addEntity("agent-b", 1.5, 0.5);
+    addEntity("agent-a", 350.5, 320.5);
+    addEntity("agent-b", 351.5, 320.5);
     addEntity("spectator", marks[0].x + 0.5, marks[0].z + 0.5);
     occupancy.occupy(
       createEntityID("stale-player"),
@@ -347,7 +360,7 @@ describe("DuelOrchestrator autonomy ownership", () => {
     };
     addEntity("agent-a", 350.5, 405.5);
     addEntity("agent-b", 350.5, 406.5);
-    addEntity("spectator", 10.5, 10.5);
+    addEntity("spectator", 360.5, 330.5);
 
     let movement: TileMovementManager;
     const emit = vi.fn(
@@ -400,7 +413,7 @@ describe("DuelOrchestrator autonomy ownership", () => {
     ): { characterId: string; originalPosition: [number, number, number] } => ({
       characterId: id,
       // Deliberately request the same occupied recovery tile for both agents.
-      originalPosition: [10.5, 0, 10.5],
+      originalPosition: [360.5, 0, 330.5],
     });
 
     (
@@ -426,7 +439,7 @@ describe("DuelOrchestrator autonomy ownership", () => {
       return worldToTile(position.x, position.z);
     });
     expect(new Set(finalTiles.map(({ x, z }) => `${x},${z}`)).size).toBe(3);
-    expect(finalTiles[2]).toEqual({ x: 10, z: 10 });
+    expect(finalTiles[2]).toEqual({ x: 360, z: 330 });
     for (const id of ["agent-a", "agent-b"]) {
       const position = entities.get(id)!.position;
       expect(isPositionInsideCombatArena(position.x, position.z)).toBe(false);
@@ -994,8 +1007,8 @@ describe("DuelOrchestrator autonomy ownership", () => {
   it("does not cancel AI spacing paths with separation teleports", () => {
     const emit = vi.fn();
     const entities = new Map([
-      ["ranged", { position: { x: 10, y: 0, z: 10 } }],
-      ["mage", { position: { x: 10.1, y: 0, z: 10 } }],
+      ["ranged", { position: { x: 350, y: 0, z: 406 } }],
+      ["mage", { position: { x: 350.1, y: 0, z: 406 } }],
     ]);
     const orchestrator = new DuelOrchestrator(
       { entities: { get: (id: string) => entities.get(id) }, emit } as never,
@@ -1022,8 +1035,8 @@ describe("DuelOrchestrator autonomy ownership", () => {
   it("retains separation fallback for fights without movement AI", () => {
     const emit = vi.fn();
     const entities = new Map([
-      ["legacy-1", { position: { x: 10, y: 0, z: 10 } }],
-      ["legacy-2", { position: { x: 10.1, y: 0, z: 10 } }],
+      ["legacy-1", { position: { x: 350, y: 0, z: 406 } }],
+      ["legacy-2", { position: { x: 350.1, y: 0, z: 406 } }],
     ]);
     const orchestrator = new DuelOrchestrator(
       { entities: { get: (id: string) => entities.get(id) }, emit } as never,
@@ -1302,12 +1315,12 @@ function createCompetitiveFixture(options: CompetitiveFixtureOptions = {}) {
       id,
       {
         id,
-        position: { x: index * 2, y: 0, z: 0 },
+        position: { x: 350 + index * 2, y: 0, z: 320 },
         data: {
           name: id,
           health: options.staleEntityHealth ? 10 : 40,
           maxHealth: options.staleEntityHealth ? 10 : 40,
-          position: [index * 2, 0, 0] as [number, number, number],
+          position: [350 + index * 2, 0, 320] as [number, number, number],
           skills: options.skillsSystemOnly ? undefined : makeSkills(),
           selectedSpell:
             index === 0

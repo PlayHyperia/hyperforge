@@ -48,6 +48,7 @@ import {
 } from "../../../utils/workers/GrassWorker";
 import type { TerrainWorkerConfig } from "../../../utils/workers/TerrainWorker";
 import type { BiomeGrassConfigWorker } from "../../../utils/workers/GrassWorker";
+import { assertTerrainWorkerRequest } from "../../../utils/workers/TerrainWorkerShared";
 
 // ---------------------------------------------------------------------------
 // Configuration — tweak these to control grass appearance & performance
@@ -433,6 +434,7 @@ export class GrassVisualManager implements QuadTreeListener {
   private destroyed = false;
 
   constructor(
+    private readonly terrainProfileIdentity: string,
     container: THREE.Group,
     getHeightAt: (x: number, z: number) => number,
     waterThreshold: number,
@@ -453,6 +455,28 @@ export class GrassVisualManager implements QuadTreeListener {
     profile: GrassVisualProfile = {},
     readonly shadeUniforms: TerrainShadeUniforms = new TerrainShadeUniforms(),
   ) {
+    if (typeof terrainProfileIdentity !== "string" || !terrainProfileIdentity) {
+      throw new Error("Grass visual terrain profile identity is required");
+    }
+    if (workerSetup) {
+      // No geometry, material or worker pool may be allocated with a different
+      // profile from the main-thread terrain callbacks supplied by the caller.
+      assertTerrainWorkerRequest(workerSetup.terrainConfig, workerSetup.seed);
+      if (
+        terrainProfileIdentity !==
+        workerSetup.terrainConfig.TERRAIN_PROFILE_IDENTITY
+      ) {
+        throw new Error(
+          "Grass visual provider/worker profile identity mismatch",
+        );
+      }
+      if (
+        waterThreshold !== workerSetup.terrainConfig.WATER_THRESHOLD ||
+        workerSetup.tileSize !== workerSetup.terrainConfig.TILE_SIZE
+      ) {
+        throw new Error("Grass visual provider/worker derived config mismatch");
+      }
+    }
     this.container = container;
     this.getHeightAt = getHeightAt;
     this.waterThreshold = waterThreshold;
@@ -772,6 +796,7 @@ export class GrassVisualManager implements QuadTreeListener {
       .execute(input)
       .then((output: GrassWorkerOutput) => {
         if (this.destroyed) return;
+        this.assertWorkerProfileIdentity(output);
 
         const latest = this.pendingLodSwap.get(key);
         const finalLod = latest ? latest.desiredLod : desiredLod;
@@ -855,6 +880,7 @@ export class GrassVisualManager implements QuadTreeListener {
       .execute(input)
       .then((output: GrassWorkerOutput) => {
         if (this.destroyed) return;
+        this.assertWorkerProfileIdentity(output);
         this.settledWorkerResults.push({
           node,
           key,
@@ -879,11 +905,18 @@ export class GrassVisualManager implements QuadTreeListener {
       });
   }
 
+  private assertWorkerProfileIdentity(data: GrassWorkerOutput): void {
+    if (data.terrainProfileIdentity !== this.terrainProfileIdentity) {
+      throw new Error("Grass visual result profile identity mismatch");
+    }
+  }
+
   private createChunkMeshFromWorkerData(
     node: TerrainQuadNode,
     data: GrassWorkerOutput,
     lodLevel: number,
   ): void {
+    this.assertWorkerProfileIdentity(data);
     const key = data.chunkKey;
     if (this.chunks.has(key)) return;
     if (data.count === 0) return;
@@ -941,6 +974,15 @@ export class GrassVisualManager implements QuadTreeListener {
       const result = this.settledWorkerResults.shift()!;
       this.workerInflight.delete(result.key);
       if (this.destroyed || !result.node.isFinal) continue;
+
+      try {
+        this.assertWorkerProfileIdentity(result.data);
+      } catch (error) {
+        // Reject before marking even an empty result ready, or disposing a
+        // previously valid LOD mesh. No stale geometry enters the scene.
+        console.error("[GrassVisualManager] Rejected worker result:", error);
+        continue;
+      }
 
       if (result.isLodSwap) {
         const oldChunk = this.chunks.get(result.key);

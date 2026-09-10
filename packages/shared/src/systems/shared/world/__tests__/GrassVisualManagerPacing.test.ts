@@ -7,9 +7,18 @@ import {
   GrassVisualManager,
   STREAMING_GRASS_VISUAL_PROFILE,
 } from "../GrassVisualManager";
+import {
+  COMPACT_WORLD_TERRAIN_PROFILE,
+  worldTerrainProfileIdentity,
+} from "../WorldTerrainProfile";
+
+const terrainProfileIdentity = worldTerrainProfileIdentity(
+  COMPACT_WORLD_TERRAIN_PROFILE,
+);
 
 function workerOutput(key: string, count = 1): GrassWorkerOutput {
   return {
+    terrainProfileIdentity,
     type: "grassInstanceResult",
     chunkKey: key,
     offsets: new Float32Array(count * 3),
@@ -56,6 +65,7 @@ describe("GrassVisualManager streaming pacing", () => {
     };
     Object.assign(manager, {
       maxChunksPerFrame: 1,
+      terrainProfileIdentity,
       settledWorkerResults: nodes.map((node, index) => ({
         node,
         key: `gq_${index}`,
@@ -100,6 +110,7 @@ describe("GrassVisualManager streaming pacing", () => {
     };
     Object.assign(manager, {
       maxChunksPerFrame: 1,
+      terrainProfileIdentity,
       settledWorkerResults: [
         {
           node: { isFinal: false } as TerrainQuadNode,

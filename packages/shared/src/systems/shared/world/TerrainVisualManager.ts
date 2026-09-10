@@ -27,6 +27,7 @@ import {
   type QuadChunkWorkerInput,
   type QuadChunkWorkerOutput,
 } from "../../../utils/workers/QuadChunkWorker";
+import { assertTerrainWorkerRequest } from "../../../utils/workers/TerrainWorkerShared";
 
 export type VisualManagerTerrainProvider = FullTerrainProvider;
 
@@ -58,6 +59,7 @@ interface SettledWorkerResult {
 export class TerrainVisualManager implements QuadTreeListener {
   private quadTree: TerrainQuadTree;
   private provider: VisualManagerTerrainProvider;
+  private readonly terrainProfileIdentity: string;
   private container: THREE.Group;
   private material: THREE.Material;
   private chunks = new Map<string, TerrainVisualChunk>();
@@ -108,6 +110,26 @@ export class TerrainVisualManager implements QuadTreeListener {
     maxSyncChunksPerFrame = 4,
     maxAssembliesPerFrame = 6,
   ) {
+    // Validate once, before tree creation or worker dispatch. Result admission
+    // below uses cached string equality, never per-vertex profile serialization.
+    assertTerrainWorkerRequest(workerConfig, workerSeed);
+    if (
+      provider.terrainProfileIdentity !== workerConfig.TERRAIN_PROFILE_IDENTITY
+    ) {
+      throw new Error(
+        "Terrain visual provider/worker profile identity mismatch",
+      );
+    }
+    if (
+      provider.TILE_SIZE !== workerConfig.TILE_SIZE ||
+      provider.MAX_HEIGHT !== workerConfig.MAX_HEIGHT ||
+      provider.WATER_LEVEL_NORMALIZED !== workerConfig.WATER_LEVEL_NORMALIZED ||
+      provider.SHORELINE_THRESHOLD !== workerConfig.SHORELINE_THRESHOLD ||
+      provider.SHORELINE_STRENGTH !== workerConfig.SHORELINE_STRENGTH
+    ) {
+      throw new Error("Terrain visual provider/worker derived config mismatch");
+    }
+    this.terrainProfileIdentity = provider.terrainProfileIdentity;
     this.provider = provider;
     this.container = container;
     this.material = material;
@@ -495,6 +517,12 @@ export class TerrainVisualManager implements QuadTreeListener {
 
     let result;
     try {
+      if (
+        workerData.terrainProfileIdentity !== this.terrainProfileIdentity ||
+        this.provider.terrainProfileIdentity !== this.terrainProfileIdentity
+      ) {
+        throw new Error("Terrain visual result profile identity mismatch");
+      }
       result = assembleQuadChunkGeometry(
         workerData,
         this.provider,

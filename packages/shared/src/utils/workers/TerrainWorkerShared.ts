@@ -1,9 +1,143 @@
+import { BIOME_CONFIG } from "../../systems/shared/world/TerrainHeightParams";
+import {
+  COMPACT_WORLD_TERRAIN_PROFILE,
+  resolveWorldTerrainProfile,
+  worldTerrainProfileIdentity,
+  type WorldTerrainProfile,
+} from "../../systems/shared/world/WorldTerrainProfile";
+import type { TerrainWorkerConfig } from "./TerrainWorker";
+
+/** One immutable config for tile, quad and grass workers. No environment defaults. */
+export function createTerrainWorkerConfig(
+  input: WorldTerrainProfile,
+  tileResolution: number,
+): TerrainWorkerConfig {
+  const profile = resolveWorldTerrainProfile(input);
+  if (
+    !Number.isSafeInteger(tileResolution) ||
+    tileResolution < 2 ||
+    tileResolution > 1024
+  )
+    throw new Error("Terrain worker resolution must be 2..1024");
+  return Object.freeze({
+    TERRAIN_PROFILE: profile,
+    TERRAIN_PROFILE_IDENTITY: worldTerrainProfileIdentity(profile),
+    TILE_SIZE: profile.terrainTileSize,
+    TILE_RESOLUTION: tileResolution,
+    MAX_HEIGHT: profile.height.maxHeightParameter,
+    BIOME_GAUSSIAN_COEFF: BIOME_CONFIG.gaussianCoeff,
+    BIOME_BOUNDARY_NOISE_SCALE: BIOME_CONFIG.boundaryNoiseScale,
+    BIOME_BOUNDARY_NOISE_AMOUNT: BIOME_CONFIG.boundaryNoiseAmount,
+    WATER_THRESHOLD: profile.water.threshold,
+    WATER_LEVEL_NORMALIZED:
+      profile.water.threshold / profile.height.maxHeightParameter,
+    SHORELINE_THRESHOLD: profile.shoreline.THRESHOLD,
+    SHORELINE_STRENGTH: profile.shoreline.STRENGTH,
+    SHORELINE_MIN_SLOPE: profile.shoreline.MIN_SLOPE,
+    SHORELINE_SLOPE_SAMPLE_DISTANCE: profile.shoreline.SLOPE_SAMPLE_DISTANCE,
+    SHORELINE_LAND_BAND: profile.shoreline.LAND_BAND,
+    SHORELINE_LAND_MAX_MULTIPLIER: profile.shoreline.LAND_MAX_MULTIPLIER,
+    SHORELINE_UNDERWATER_BAND: profile.shoreline.UNDERWATER_BAND,
+    UNDERWATER_DEPTH_MULTIPLIER: profile.shoreline.UNDERWATER_DEPTH_MULTIPLIER,
+  });
+}
+
+export function assertTerrainWorkerRequest(
+  config: TerrainWorkerConfig,
+  seed: number,
+): void {
+  const expected = createTerrainWorkerConfig(
+    config.TERRAIN_PROFILE,
+    config.TILE_RESOLUTION,
+  );
+  if (
+    seed !== expected.TERRAIN_PROFILE.seed ||
+    config.TERRAIN_PROFILE_IDENTITY !== expected.TERRAIN_PROFILE_IDENTITY
+  )
+    throw new Error("Terrain worker profile identity or seed mismatch");
+  for (const key of Object.keys(expected) as Array<keyof TerrainWorkerConfig>) {
+    if (key !== "TERRAIN_PROFILE" && config[key] !== expected[key])
+      throw new Error(`Terrain worker derived config mismatch: ${key}`);
+  }
+}
+
+export function assertTerrainWorkerResult(
+  result: { terrainProfileIdentity: string },
+  config: TerrainWorkerConfig,
+): void {
+  if (result.terrainProfileIdentity !== config.TERRAIN_PROFILE_IDENTITY)
+    throw new Error("Terrain worker result profile identity mismatch");
+}
+
+/** Guard executes inside the actual module-load-built worker source, per request. */
+export function buildTerrainWorkerProfileGuardJS(): string {
+  const shape = COMPACT_WORLD_TERRAIN_PROFILE;
+  const groups = ["bounds", "island", "height", "water", "shoreline"] as const;
+  return `
+function assertTerrainWorkerInput(input) {
+  var config = input.config;
+  var p = config && config.TERRAIN_PROFILE;
+  function fail() { throw new Error("Terrain worker invalid profile/config identity"); }
+  function keys(value, expected) {
+    if (!value || typeof value !== "object" || Array.isArray(value)) fail();
+    var actual = Object.keys(value);
+    if (actual.length !== expected.length || actual.some(k => !expected.includes(k))) fail();
+  }
+  keys(p, ${JSON.stringify(Object.keys(shape))});
+  ${groups
+    .map(
+      (
+        group,
+      ) => `keys(p.${group}, ${JSON.stringify(Object.keys(shape[group]))});
+  if (!Object.values(p.${group}).every(Number.isFinite)) fail();`,
+    )
+    .join("\n")}
+  if (p.schemaVersion !== 1 || p.algorithm !== "terrain-height-params-v1" ||
+      p.boundsMeaning !== "nominal-generation-envelope" || typeof p.id !== "string" ||
+      !/^[a-z][a-z0-9-]{0,63}$/.test(p.id) ||
+      p.kind !== "compact-candidate" || p.id === "large-world-v1" ||
+      !Number.isInteger(p.seed) || p.seed < 0 || p.seed > 0xffffffff || input.seed !== p.seed) fail();
+  var b = p.bounds, i = p.island, h = p.height, w = p.water, s = p.shoreline;
+  if (!Number.isFinite(p.terrainTileSize) || p.terrainTileSize <= 0 ||
+      b.minX >= b.maxX || b.minZ >= b.maxZ ||
+      !Number.isSafeInteger((b.maxX-b.minX)/p.terrainTileSize) ||
+      !Number.isSafeInteger((b.maxZ-b.minZ)/p.terrainTileSize) ||
+      i.radius <= 0 || i.falloff <= 0 || i.falloff > i.radius || i.deepOceanBuffer < 0 ||
+      i.beachProfilePower <= 0 || i.maxCoastVariation < 0 || i.maxCoastVariation >= 1) fail();
+  var extent = i.radius * (1+i.maxCoastVariation) + i.deepOceanBuffer;
+  if (!Number.isFinite(extent) || i.centerX-extent < b.minX || i.centerX+extent > b.maxX ||
+      i.centerZ-extent < b.minZ || i.centerZ+extent > b.maxZ ||
+      h.maxHeightParameter <= 0 || h.terrainScale <= 0 || h.featureScale <= 0 ||
+      w.threshold <= w.oceanFloorHeight || w.threshold >= h.maxHeightParameter ||
+      s.THRESHOLD < 0 || s.THRESHOLD > 1 || s.STRENGTH < 0 || s.STRENGTH > 1 ||
+      s.MIN_SLOPE < 0 || s.SLOPE_SAMPLE_DISTANCE <= 0 || s.LAND_BAND <= 0 ||
+      s.LAND_MAX_MULTIPLIER <= 0 || s.UNDERWATER_BAND <= 0 || s.UNDERWATER_DEPTH_MULTIPLIER <= 0) fail();
+  var identity = "hyperia-world-terrain-profile-v1\\n" + JSON.stringify(p);
+  if (identity !== config.TERRAIN_PROFILE_IDENTITY) fail();
+  if (!Number.isSafeInteger(config.TILE_RESOLUTION) || config.TILE_RESOLUTION < 2 || config.TILE_RESOLUTION > 1024) fail();
+  var derived = {
+    TILE_SIZE:p.terrainTileSize, MAX_HEIGHT:h.maxHeightParameter,
+    WATER_THRESHOLD:w.threshold, WATER_LEVEL_NORMALIZED:w.threshold/h.maxHeightParameter,
+    BIOME_GAUSSIAN_COEFF:${BIOME_CONFIG.gaussianCoeff},
+    BIOME_BOUNDARY_NOISE_SCALE:${BIOME_CONFIG.boundaryNoiseScale},
+    BIOME_BOUNDARY_NOISE_AMOUNT:${BIOME_CONFIG.boundaryNoiseAmount},
+    SHORELINE_THRESHOLD:s.THRESHOLD, SHORELINE_STRENGTH:s.STRENGTH,
+    SHORELINE_MIN_SLOPE:s.MIN_SLOPE, SHORELINE_SLOPE_SAMPLE_DISTANCE:s.SLOPE_SAMPLE_DISTANCE,
+    SHORELINE_LAND_BAND:s.LAND_BAND, SHORELINE_LAND_MAX_MULTIPLIER:s.LAND_MAX_MULTIPLIER,
+    SHORELINE_UNDERWATER_BAND:s.UNDERWATER_BAND, UNDERWATER_DEPTH_MULTIPLIER:s.UNDERWATER_DEPTH_MULTIPLIER
+  };
+  for (var key of Object.keys(derived)) if (config[key] !== derived[key]) fail();
+  if (input.type === "generateGrassInstances" &&
+      (input.waterThreshold !== w.threshold || input.tileSize !== p.terrainTileSize)) fail();
+}`;
+}
+
 /**
  * TerrainWorkerShared — Single source of truth for inline worker JS code
- * shared between QuadChunkWorker and TerrainWorker.
+ * shared between QuadChunkWorker, TerrainWorker and GrassWorker.
  *
  * Workers can't import TS modules, so we build JS strings that get injected
- * into the inline worker code. Both workers call these builders to get
+ * into the inline worker code. All three workers call these builders to get
  * identical copies of the shared logic.
  *
  * If you need to change noise generation, height helpers, biome influence

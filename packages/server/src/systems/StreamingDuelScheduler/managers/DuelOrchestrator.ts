@@ -24,6 +24,7 @@ import {
   AttackType,
   COMBAT_SPELLS,
   DeathState,
+  DataManager,
   DEFAULT_DUEL_RULES,
   ELEMENTAL_STAVES,
   EventType,
@@ -40,6 +41,7 @@ import {
   runeService,
   worldToTile,
   createEntityID,
+  resolveWorldSpawnPosition,
 } from "@hyperforge/shared";
 import {
   DuelCombatAI,
@@ -4466,19 +4468,21 @@ export class DuelOrchestrator {
     }
 
     const [x, y, z] = position;
-    if (!Number.isFinite(x) || !Number.isFinite(z)) {
+    // A recovered cycle may contain a retired-world position, including the
+    // hydration sentinel [0,0,0]. Admit X/Z against the current explicit bounds
+    // before restoring custody. Keep the existing vertical repair policy below:
+    // an invalid saved Y must not discard an otherwise valid preparation spot.
+    const admitted = resolveWorldSpawnPosition(
+      [x, fallback[1], z],
+      fallback,
+      DataManager.getWorldTerrainProfile(),
+    );
+    if (admitted.rehomed) {
       return fallback;
     }
 
     // Never restore non-dueling agents back into combat arena tiles.
     if (isPositionInsideCombatArena(x, z)) {
-      return fallback;
-    }
-
-    // Only reject positions that are clearly out-of-world (very far from origin).
-    // Agents should be free to roam the world between duels.
-    const distFromOrigin = Math.hypot(x, z);
-    if (distFromOrigin > 2000) {
       return fallback;
     }
 

@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import type { World } from "../../../types";
 import { ClientNetwork } from "../ClientNetwork";
+import { WorldContentAdmission } from "../../../runtime/WorldContentAdmission";
 
 function createWorld() {
   return {
@@ -18,6 +19,13 @@ describe("ClientNetwork inbound queue", () => {
   it("preserves unread packets while compacting a sustained burst", async () => {
     const network = new ClientNetwork(createWorld());
     const handled: number[] = [];
+
+    // Queue behavior is exercised after the same production admission policy.
+    const identity = "a".repeat(64);
+    const admission = new WorldContentAdmission(() => identity);
+    admission.beginConnection();
+    expect(admission.admitSnapshot(identity)).not.toBeNull();
+    Object.assign(network, { worldAdmission: admission });
 
     network.ws = { readyState: WebSocket.OPEN } as WebSocket;
     Object.assign(network, {

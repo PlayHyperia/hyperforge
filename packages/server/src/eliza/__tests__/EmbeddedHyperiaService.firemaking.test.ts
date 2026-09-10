@@ -8,6 +8,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { EventType, processingDataProvider } from "@hyperforge/shared";
 import { EmbeddedHyperiaService } from "../EmbeddedHyperiaService";
+import { loadWorldProfileTestFixture } from "./worldProfileTestFixture";
+
+beforeEach(loadWorldProfileTestFixture);
 
 function createMockWorld(options?: {
   inventorySystem?: Record<string, unknown> | null;

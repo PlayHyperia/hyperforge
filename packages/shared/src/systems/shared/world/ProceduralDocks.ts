@@ -178,6 +178,10 @@ export class ProceduralDocks extends System {
     this.generator = new DockGenerator();
   }
 
+  getDependencies() {
+    return { required: ["terrain"], optional: ["stage"] };
+  }
+
   async init(): Promise<void> {
     const terrain = this.world.getSystem("terrain");
     if (terrain && "getHeightAt" in terrain) {

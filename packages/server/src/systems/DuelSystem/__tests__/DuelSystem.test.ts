@@ -11,11 +11,21 @@
  * - Error handling and edge cases
  */
 
-import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import {
+  describe,
+  it,
+  expect,
+  beforeEach,
+  afterEach,
+  vi,
+  beforeAll,
+} from "vitest";
 import {
   EventType,
   PlayerEntity,
   getDuelArenaConfig,
+  DataManager,
+  getDuelArenaEgressPosition,
 } from "@hyperforge/shared";
 import { DuelSystem } from "../index";
 import { createMockWorld, createDuelPlayers, type MockWorld } from "./mocks";
@@ -23,6 +33,10 @@ import {
   STREAMING_DUEL_ARENA_ID,
   STREAMING_DUEL_ARENA_RESERVATION_ID,
 } from "../streaming-arena";
+
+beforeAll(async () => {
+  await DataManager.getInstance().initialize();
+});
 
 // Helper to create a challenge with proper parameters
 function createTestChallenge(
@@ -966,11 +980,11 @@ describe("DuelSystem", () => {
         (call: unknown[]) => call[0] === "player:teleport",
       );
       expect(teleports).toHaveLength(1);
-      // Ejected players are sent to the starter area center (0, 0) to avoid re-entry loops
+      // Egress remains on the shared island lobby floor, outside every combat ring.
       expect(teleports[0][1]).toEqual(
         expect.objectContaining({
           playerId: "player1",
-          position: expect.objectContaining({ x: 0, z: 0 }),
+          position: getDuelArenaEgressPosition(),
         }),
       );
     });
@@ -984,7 +998,7 @@ describe("DuelSystem", () => {
       expect(getHeightAt).not.toHaveBeenCalled();
     });
 
-    it("samples one egress height for an entire ejection batch", () => {
+    it("uses the shared authored egress height for an entire ejection batch", () => {
       const arenaPos = getCombatArenaPosition();
       const getHeightAt = vi.fn(() => 7);
       world.getSystem.mockReturnValue({ getHeightAt });
@@ -1003,8 +1017,7 @@ describe("DuelSystem", () => {
 
       duelSystem.processTick();
 
-      expect(getHeightAt).toHaveBeenCalledOnce();
-      expect(getHeightAt).toHaveBeenCalledWith(0, 0);
+      expect(getHeightAt).not.toHaveBeenCalled();
       const teleports = world._emit.mock.calls.filter(
         (call: unknown[]) => call[0] === "player:teleport",
       );
@@ -1012,7 +1025,8 @@ describe("DuelSystem", () => {
       expect(
         teleports.every(
           (call: unknown[]) =>
-            (call[1] as { position?: { y?: number } }).position?.y === 7.1,
+            (call[1] as { position?: { y?: number } }).position?.y ===
+            getDuelArenaEgressPosition().y,
         ),
       ).toBe(true);
     });

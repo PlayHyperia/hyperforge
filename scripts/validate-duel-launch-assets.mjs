@@ -317,7 +317,12 @@ for (const area of areas) {
     fail(`${areaId} must define finite, ordered X/Z bounds`);
   }
 
-  const assertInsideArea = (location, position, radius = 0) => {
+  const assertInsideArea = (
+    location,
+    position,
+    halfWidth = 0,
+    halfDepth = halfWidth,
+  ) => {
     if (
       !isRecord(position) ||
       !Number.isFinite(position.x) ||
@@ -328,13 +333,17 @@ for (const area of areas) {
     }
     if (
       validBounds &&
-      (position.x - radius < bounds.minX ||
-        position.x + radius > bounds.maxX ||
-        position.z - radius < bounds.minZ ||
-        position.z + radius > bounds.maxZ)
+      (position.x - halfWidth < bounds.minX ||
+        position.x + halfWidth > bounds.maxX ||
+        position.z - halfDepth < bounds.minZ ||
+        position.z + halfDepth > bounds.maxZ)
     ) {
+      const extent =
+        halfWidth === halfDepth
+          ? `radius ${halfWidth}`
+          : `X/Z half-extents (${halfWidth}, ${halfDepth})`;
       fail(
-        `${location} at (${position.x}, ${position.z}) with radius ${radius} falls outside ${areaId} bounds`,
+        `${location} at (${position.x}, ${position.z}) with ${extent} falls outside ${areaId} bounds`,
       );
     }
   };
@@ -399,7 +408,8 @@ for (const area of areas) {
     assertInsideArea(
       `${areaId} flat zone ${zone.id}`,
       { x: zone.centerX, z: zone.centerZ },
-      Math.max(zone.width, zone.depth) / 2,
+      zone.width / 2,
+      zone.depth / 2,
     );
   }
   for (const body of Array.isArray(area?.waterBodies) ? area.waterBodies : []) {

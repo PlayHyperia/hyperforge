@@ -1,5 +1,4 @@
 import { createHash } from "node:crypto";
-import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { TERRAIN_CONSTANTS } from "../../../../constants/GameConstants";
 import {
@@ -15,7 +14,8 @@ import {
   TERRAIN_SCALE,
 } from "../TerrainHeightParams";
 import {
-  LARGE_WORLD_TERRAIN_PROFILE as large,
+  LEGACY_TERRAIN_PROFILE_FIXTURE as large,
+  COMPACT_WORLD_TERRAIN_PROFILE as compact,
   deserializeWorldTerrainProfile,
   resolveWorldTerrainProfile,
   serializeWorldTerrainProfile,
@@ -56,6 +56,7 @@ describe("WorldTerrainProfile isolated contract", () => {
       falloff: ISLAND_FALLOFF,
       deepOceanBuffer: ISLAND_DEEP_OCEAN_BUFFER,
       beachProfilePower: BEACH_PROFILE_POWER,
+      maxCoastVariation: 0.3,
     });
     expect(large.height).toEqual({
       maxHeightParameter: MAX_HEIGHT,
@@ -72,31 +73,36 @@ describe("WorldTerrainProfile isolated contract", () => {
     expect(large.seed).toBe(0);
   });
 
-  it("records TerrainSystem's nominal envelope, not the centered mesh endpoint", () => {
-    const source = readFileSync(
-      new URL("../TerrainSystem.ts", import.meta.url),
-      "utf8",
-    );
-    const worldSize = source.match(/WORLD_SIZE:\s*(\d+),/);
-    const islandSize = source.match(/ISLAND_MAX_WORLD_SIZE_TILES:\s*(\d+),/);
-    expect(worldSize?.[1]).toBe("100");
-    expect(islandSize?.[1]).toBe("100");
-    expect(source).toContain(
-      "min: { x: -worldSizeMeters / 2, z: -worldSizeMeters / 2 }",
-    );
-    const halfWidth =
-      (Number(islandSize?.[1]) * TERRAIN_CONSTANTS.TERRAIN_TILE_SIZE) / 2;
-    expect(large.bounds).toEqual({
-      minX: -halfWidth,
-      maxX: halfWidth,
-      minZ: -halfWidth,
-      maxZ: halfWidth,
+  it("contains the compact candidate's worst-case noisy coast and buffer", () => {
+    expect(compact.bounds).toEqual({
+      minX: 150,
+      maxX: 550,
+      minZ: 200,
+      maxZ: 600,
     });
-    expect(large.boundsMeaning).toBe("nominal-generation-envelope");
+    const extent =
+      compact.island.radius * (1 + compact.island.maxCoastVariation) +
+      compact.island.deepOceanBuffer;
+    expect(extent).toBeCloseTo(199.9, 10);
+    expect(compact.island.centerX - extent).toBeGreaterThanOrEqual(
+      compact.bounds.minX,
+    );
+    expect(compact.island.centerZ + extent).toBeLessThanOrEqual(
+      compact.bounds.maxZ,
+    );
+    expect(() =>
+      validateWorldTerrainProfile({
+        ...compact,
+        island: { ...compact.island, maxCoastVariation: 0.061 },
+      }),
+    ).toThrow(/extent/);
   });
 
-  it("selects default only on omission and freezes every nested numeric group", () => {
-    expect(resolveWorldTerrainProfile()).toBe(large);
+  it("requires explicit selection and freezes every nested numeric group", () => {
+    expect(() => resolveWorldTerrainProfile()).toThrow();
+    expect(() => resolveWorldTerrainProfile(large)).toThrow(
+      /not a runtime world/,
+    );
     for (const value of [
       large,
       large.bounds,
@@ -246,6 +252,8 @@ describe("WorldTerrainProfile isolated contract", () => {
       { island: { ...input.island, falloff: 101 } },
       { island: { ...input.island, centerX: 190 } },
       { island: { ...input.island, deepOceanBuffer: -1 } },
+      { island: { ...input.island, maxCoastVariation: -0.1 } },
+      { island: { ...input.island, maxCoastVariation: 1 } },
       { height: { ...input.height, maxHeightParameter: 16 } },
       { height: { ...input.height, terrainScale: 0 } },
       { water: { ...input.water, oceanFloorHeight: 16 } },

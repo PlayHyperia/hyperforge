@@ -10,11 +10,13 @@
 
 import {
   COMBAT_SPELLS,
+  DataManager,
   EventType,
   INTERACTION_DISTANCE,
   SessionType,
   type AttackType,
   getDuelArenaConfig,
+  resolveWorldSpawnPosition,
   getItem,
   getProcessingRequestOperationId,
   getGatheringRewardOperationIdForAttempt,
@@ -535,21 +537,34 @@ export class EmbeddedHyperiaService implements IEmbeddedHyperiaService {
     }
 
     // Determine spawn position
-    const hasSavedPosition = savedData?.positionX !== undefined;
-    let position: [number, number, number];
+    const profile = DataManager.getWorldTerrainProfile();
+    const lobby = getDuelArenaConfig().lobbySpawnPoint;
+    const lobbyPosition: [number, number, number] = [lobby.x, lobby.y, lobby.z];
+    let requestedPosition: unknown;
     if (this.shouldUseStreamingSpawnPosition()) {
-      position = this.getStreamingAgentSpawnPosition();
-    } else if (hasSavedPosition) {
-      const playerPosition = savedData as NonNullable<typeof savedData>;
-      position = [
-        playerPosition.positionX ?? 0,
-        playerPosition.positionY ?? 10,
-        playerPosition.positionZ ?? 0,
+      requestedPosition = this.getStreamingAgentSpawnPosition();
+    } else if (savedData) {
+      requestedPosition = [
+        savedData.positionX,
+        savedData.positionY,
+        savedData.positionZ,
       ];
     } else {
-      position = this.getStreamingAgentSpawnPosition();
+      requestedPosition = this.getStreamingAgentSpawnPosition();
       console.warn(
         `[EmbeddedHyperiaService] No saved spawn for ${this.characterId}; using dynamic fallback spawn`,
+      );
+    }
+
+    const spawnAdmission = resolveWorldSpawnPosition(
+      requestedPosition,
+      lobbyPosition,
+      profile,
+    );
+    let position = spawnAdmission.position;
+    if (spawnAdmission.rehomed) {
+      console.warn(
+        `[EmbeddedHyperiaService] Rehoming ${this.characterId} to the world lobby: ${spawnAdmission.reason}`,
       );
     }
 
@@ -557,7 +572,11 @@ export class EmbeddedHyperiaService implements IEmbeddedHyperiaService {
     // the scheduler has already retired its ownership. Never respawn an
     // embedded agent inside a combat ring without a new authoritative cycle.
     if (isPositionInsideCombatArena(position[0], position[2])) {
-      position = this.getStreamingAgentSpawnPosition();
+      position = resolveWorldSpawnPosition(
+        this.getStreamingAgentSpawnPosition(),
+        lobbyPosition,
+        profile,
+      ).position;
     }
 
     // Snap agent spawns to terrain height for consistent grounded placement.
