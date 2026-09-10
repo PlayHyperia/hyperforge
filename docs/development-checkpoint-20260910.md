@@ -14,6 +14,37 @@ WebGPU, LOD, instancing, culling, streaming and authoritative gameplay systems.
 Persisted positions and user data still need safe migration. This supersedes
 older large-world-preservation requirements in historical notes.
 
+## Subsequent station-grounding checkpoint
+
+See [the grounding evidence and remaining gates](world-grounding-checkpoint-20260910.md).
+Game runtime revision `f191bddf32563df45bd623cd8e1d273615da54b4` on
+`codex/sol-duel-stream-launch` is pushed and exact-remote verified. The paired
+runtime-asset revision is
+`233ba489fa97e72154fc8ab98060f4457dee8142` on
+`codex/duel-arena-launch-assets`, verified on GitHub with both author and
+committer `dreaminglucid` for both revisions. Normal formatting hooks ran; all
+63 probe03 source/build/asset pins still matched afterward. Staged and committed
+secret scans found no credentials. Hyperbet remains at the verified revision below.
+
+Explicit-first station grading, pond outer blending into surrounding grading,
+final chunk-height metadata, bounded edge-normal corrections and six actual
+model-origin calibrations are implemented. The focused suite passes 73 tests in
+11 files; shared/server/client typechecks, fresh shared/server builds and scoped
+lint/format checks pass. These are not complete gameplay or performance gates.
+
+Actual Chrome/Metal probe03 retained eight spatial views (16 PNGs in eight
+ordinary/diagnostic pairs).
+Ten station bases align with sampled rendered terrain; the prayer altar still
+has a maximum sampled corner gap of about 0.15314 m. The spatial study passed,
+but the outer run remains **failed** on a game-client process-group inspection
+`EPERM` during shutdown. Browser, database and recorded ports closed; this does
+not erase the failed cleanup audit. Grass exclusion, coarse pond triangles,
+lighting, art, equipment fit and full compact-world qualification remain open.
+
+Editable Blender sources are not remotely backed up. The separately reviewed
+[source-backup plan](asset-authoring-backup-plan.md) awaits the user's private
+repository destination decision; runtime exports are not editable-source backup.
+
 ## Source backlog and repository hygiene
 
 - The application backlog spans runtime/build tooling, Three WebGPU lifecycle,
@@ -50,7 +81,7 @@ older large-world-preservation requirements in historical notes.
 - Unified patch files intentionally preserve upstream context whitespace.
   Validate the actual Three patch and applyability, not by stripping its context.
 
-## Latest actual world review: rejected candidate
+## Initial actual world review: rejected candidate
 
 The local `asset-studio/game-test-integration/outdoor-world-probe01` run completed
 42 day/night comparisons (84 paired PNGs), plus three baseline comparisons.

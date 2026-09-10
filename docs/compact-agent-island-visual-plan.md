@@ -1,6 +1,6 @@
 # Compact agent island: visual and implementation plan
 
-Status: **planned, not implemented or qualified**. Source audit and revised user direction: 2026-09-10. The compact agent island is the only target world; the large island does not need preservation or a separate playable preset. Build a cohesive island with banks, gathering resources and workstations beside the duel arena. A roughly **300–400 m footprint is an initial authoring candidate**, not an approved size or performance budget. Terrain shape, texture quality, shoreline, layout and vegetation may be substantially rebuilt, not merely recolored.
+Status: **compact replacement planned, not complete or qualified**. Optional preparation admission and initial grounding corrections now exist as foundations, not a finished island. Source audit and revised user direction: 2026-09-10. The compact agent island is the only target world; the large island does not need preservation or a separate playable preset. Build a cohesive island with banks, gathering resources and workstations beside the duel arena. A roughly **300–400 m footprint is an initial authoring candidate**, not an approved size or performance budget. Terrain shape, texture quality, shoreline, layout and vegetation may be substantially rebuilt, not merely recolored.
 
 ## Replacement scope and safety
 
@@ -21,7 +21,8 @@ Paths below are relative to this repository unless an adjacent `asset-studio` ev
 | Terrain | `packages/shared/src/systems/shared/world/TerrainSystem.ts`: 100 m chunks, 100×100-chunk world envelope, default seed 0, view radius 5 chunks, visual quadtree enabled. `TerrainHeightParams.ts`: actual island-mask radius 2,419 m, falloff 450 m, ocean floor Y2.5 and maximum-height parameter 50. `GameConstants.ts`: water Y16 and 1 m movement tiles. The 10 km world envelope is not the island's land diameter. |
 | Configuration gap | `world-config.json` is loaded by `packages/shared/src/data/DataManager.ts`, but current `TerrainSystem` does not consume its terrain configuration. Its seed comes from `world.config.terrainSeed`, `TERRAIN_SEED`, then 0. Manifest-only resizing is insufficient. Manifest maximum height 30 and fog 150–350 differ from height parameters and `FogConfig.ts` fog 400–800. |
 | Profile isolation hook | `DataManager.ts` checks `ASSETS_DIR/manifests` on the server; clients fetch manifests from their asset base URL. Both sides must resolve the same island profile and content, not silently fall back to different roots. |
-| Broadcast omission | `packages/shared/src/runtime/clientViewportMode.ts` currently disables exploration resources, world entities, local physics and procedural exploration systems for stream/spectator views; network admission is player-only. This saves arena cost but would omit preparation content. |
+| Broadcast admission | `packages/shared/src/runtime/clientViewportMode.ts` now supports the optional, startup-only `streamWorld=preparation-v1` selection on stream/spectator routes. It enables existing authoritative resources, world entities/NPCs/stations, scenery and vegetation; local physics, procedural towns/POIs and eager tree-cache prewarming remain disabled. `createClientWorld.ts` and `SystemLoader.ts` honor these options. `ClientNetwork.ts` applies admission to snapshots, individual adds and batched adds. Without the selection, arena broadcast admission remains player-only. The preparation option retains the server-authored snapshot; it is not yet an island/phase-specific content filter or full-stream qualification. |
+| Preparation terrain focus | `TerrainSystem.ts:getTerrainCenters()` bypasses the default stream-page arena-focus branch for explicit `preparation-v1`, allowing server-assigned/configured followed-agent positions, then spectator camera-target fallbacks, to center terrain. This does not move agents, change server authority, or guarantee a continuous preparation-to-duel broadcast. |
 | Existing optimization | `DuelArenaVisualsSystem.ts` uses instanced architecture and emissive braziers rather than many point lights. `TerrainSystem.ts` has worker generation and quadtree work limits; streaming uses resolution 16, one root, at most one synchronous chunk and two assemblies per frame. `LODConfig.ts`, animation LOD and spatial simulation already exist. These mechanisms are reusable, not proof of island performance. |
 
 Lighting, terrain materials and composition must be developed together; further palette-only diagnostics must not block actual island construction. The earlier `shadows=none` path incorrectly removed directional sunlight; that behavior has now been corrected separately. It is not evidence that shadow maps or a new island are approved.
@@ -29,6 +30,22 @@ Lighting, terrain materials and composition must be developed together; further 
 Retained [session03 wide-front metadata](../../asset-studio/game-test-integration/avatar-render-review01/session03/wide-front.json) explicitly records **night**, `dayPhase=0.9840922503`, `dayIntensity=0`, and `SunLight_NoShadows`; do not relabel that image as noon. Its teal ambient/hemisphere palette is consistent with `packages/shared/src/systems/shared/world/LightingConfig.ts`, not evidence that terrain became water. `DAY_CYCLE.DURATION_SEC` is 240 seconds, so uncontrolled before/after images can change lighting substantially within one review.
 
 ## Foundational checkpoint — island gates still open
+
+The optional `/stream.html?streamWorld=preparation-v1` route now makes existing
+preparation content available for actual local review while preserving the default
+arena admission scope and the stream's local-physics/town/POI exclusions. It is
+independent of the selected render profile and is not a dynamic phase transition
+or a newly constructed compact world. The retained [world-grounding checkpoint](world-grounding-checkpoint-20260910.md)
+records probe01's station failures, probe02's central improvement/peripheral
+altar regression, and probe03's common-grade/model-offset improvement. Probe03's
+inner study completes eight views/16 PNGs; ten static station bases match center
+and four-corner terrain samples within `1e-6 m`. The prayer altar still differs by
+up to 0.153139 m, the mind-altar view is tree-occluded, and outer `passed: false`
+retains an EPERM process-group cleanup failure. The 73 focused tests, three
+typechecks, shared/server builds and scoped lint/format pass do not turn that run
+into a complete visual or cleanup pass. The 72 x 72 m grade still excludes grass
+over 96 x 96 m: separate vegetation exclusion from grading and make GrassWorker
+sample the final authored grade. All full compact-world gates remain open.
 
 The validated `packages/shared/src/systems/shared/world/WorldTerrainProfile.ts` contract has **19 passing tests**, but is **unconnected** to terrain consumers. It provides validation, canonical serialization and identity input for the selected parameters only. There is no compact numeric preset, compact content selection, default change or consumer integration. CPU/worker/GPU terrain parity remains unresolved; the contract does not establish it.
 
@@ -73,7 +90,7 @@ References: `world-areas.json`, `stations.json`, `gathering/`, `stores.json`, `r
 
 ### 4. Admit preparation content without re-enabling the whole exploration world
 
-- [ ] Add explicit island/phase-scoped client admission for the authoritative preparation resources, stations, NPCs and visible activity required by the camera and agents.
+- [ ] Extend and qualify the existing startup-only `preparation-v1` admission into explicit compact-island/phase-scoped content for the authoritative resources, stations, NPCs and visible activity required by the camera and agents. Current server-snapshot admission is not that completed selection/transition contract.
 - [ ] Preserve the existing arena-only broadcast optimization where appropriate. Do not globally turn on all procedural towns, POIs, vegetation and world entities merely to make a bank visible.
 - [ ] Test transition from preparation to arena and back, including network creation/removal, gathering state, workstations, inventory custody and camera continuity. Functional objects must remain discoverable and interactable when their rendering changes LOD.
 
@@ -97,4 +114,4 @@ References: `packages/shared/src/systems/shared/world/LODConfig.ts`, `packages/s
 4. [ ] **Visual cohesion/readability:** matched noon/night and route views show coherent materials, lighting, shoreline, landmarks and preparation/arena interfaces. No missing resource content, camera-obscured action or unexplained day/night comparison.
 5. [ ] **Measured performance/lifecycle:** representative interactive and broadcast workloads meet explicitly selected targets without an unaccepted regression from the matched baseline; report frame/tick distributions, memory and teardown, not an invented universal budget.
 
-All tasks and gates above remain open. The foundational contract, opt-in helpers and bounded lighting checkpoint do not complete the compact island, content selection, art approval, gameplay qualification or performance acceptance.
+All full tasks and gates above remain open. The foundational contract, optional preparation admission, initial grounding corrections, opt-in helpers and bounded lighting checkpoint do not complete the compact island, content selection, art approval, gameplay qualification or performance acceptance.

@@ -37,6 +37,41 @@ Historical statements forbidding unrequested commits/pushes are superseded by
 this explicit request. Deployment, purchases and unqualified default promotion
 remain separate from committing development work.
 
+## G04/G05 spatial grounding checkpoint03 — 2026-09-10
+
+- [x] Implement common campus/pond grading and calibrated station-model offsets.
+  The focused suite passes 73 tests across 11 files; shared/server/client
+  typechecks, fresh shared/server builds and scoped ESLint/Prettier pass.
+  Actual GLB offset verification passes seven tests. Task execution receipts
+  and exact commands are recorded in the grounding checkpoint, not invented logs.
+- [x] Complete the actual probe03 spatial study in WebGPU at 1280 x 720/DPR 1:
+  eight views / 16 spatial PNGs, 16 per-image brackets / 32 terrain snapshots.
+  Ten station model bases agree with the initial center/four-corner terrain
+  samples within 1e-6 m. Source pins remain unchanged. These are bounded static
+  measurements and node-height capture brackets, not live whole-footprint,
+  visible-pixel, continuous LOD, art or full-stream approval.
+- [ ] Finish complete grounding: the prayer-altar base remains +0.067860 m at
+  center and up to +0.153139 m at a corner beside the coarse pond triangles.
+  Separate the 72 x 72 m campus grade from its 96 x 96 m grass exclusion and
+  make GrassWorker sample the final authored grade, not just bypass exclusion.
+- [ ] Resolve and requalify outer cleanup. The inner study passed, but outer
+  `passed: false` retains the game-client process-group EPERM inspection failure
+  and launcher exit 1. Browser/port checks, 14/14 detachments, four CPU geometry
+  disposals and one environment disposal do not constitute a fully clean run.
+- [ ] Complete art, gameplay, streaming and performance qualification. The
+  mind-altar view is tree-occluded; terrain/pond/vegetation/lighting remain below
+  the quality bar. All 14 real canonical dagger fit-metadata console errors
+  remain retained production blockers; no full compact-world gate is closed.
+
+Evidence and report hashes:
+`hyperia-implementation/docs/world-grounding-checkpoint-20260910.md`.
+Paired pushed game checkpoint:
+`f191bddf32563df45bd623cd8e1d273615da54b4`; paired two-manifest asset checkpoint:
+`233ba489fa97e72154fc8ab98060f4457dee8142`. Exact remote revisions and GitHub
+author/committer `dreaminglucid` were verified; post-commit secret scans passed.
+Editable-source backup destination remains pending; runtime exports are not a
+backup of the original Blender/authoring work.
+
 
 Last updated: 2026-09-10
 
