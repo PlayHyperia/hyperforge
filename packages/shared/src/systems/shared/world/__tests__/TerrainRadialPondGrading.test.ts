@@ -102,12 +102,16 @@ describe("TerrainSystem radial pond underlying grading", () => {
     expect(largestBoundaryDifference).toBeLessThan(0.001);
   });
 
-  it("preserves bed and bank priority while blending to the winning underlying core, including zero", () => {
+  it("preserves circular regression bed/bank priority and blends to the winning underlying core, including zero", () => {
     const profile = actualPond.radialPond!;
+    const circularPond = {
+      ...actualPond,
+      radialPond: { ...profile, shorelineAmplitude: 0 },
+    };
     for (const height of [0, 40]) {
       for (const reverse of [false, true]) {
         const { terrain } = terrainFor();
-        const zones = [actualPond, grade({ height })];
+        const zones = [circularPond, grade({ height })];
         for (const zone of reverse ? zones.reverse() : zones) {
           terrain.registerFlatZone(zone);
         }

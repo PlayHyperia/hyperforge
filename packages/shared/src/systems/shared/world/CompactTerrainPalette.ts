@@ -4,6 +4,14 @@
  * reproduce these values. Texel detail stays on the GPU, ecology is unchanged.
  * Self-contained so GrassWorker embeds exactly this factory after bundling.
  */
+export type CompactTerrainPond = Readonly<{
+  id: string;
+  centerX: number;
+  centerZ: number;
+  radius: number;
+  surfaceY: number;
+}>;
+
 export function createCompactTerrainColorOperations() {
   const composition = {
     patchStart: 0.5,
@@ -25,6 +33,15 @@ export function createCompactTerrainColorOperations() {
     pathEdgeStartHigh: 0.26,
     pathEdgeEndLow: 0.74,
     pathEdgeEndHigh: 0.96,
+    pondBankReach: 3,
+    pondRadialFade: 0.75,
+    pondSoilFullHeight: 0,
+    pondSoilEndHeight: 0.22,
+    pondBankNoiseHeight: 0.06,
+    pondWetFullHeight: 0.02,
+    pondWetEndHeight: 0.18,
+    pondWetAlbedo: 0.72,
+    pondWetRoughness: 0.62,
   };
   const palette = {
     grass: [0.033681753576253116, 0.14414087466070133, 0.013722332612374167],
@@ -41,6 +58,66 @@ export function createCompactTerrainColorOperations() {
     },
   };
   const operations = {
+    validatePond(value: CompactTerrainPond | null): CompactTerrainPond | null {
+      if (value === null) return null;
+      if (
+        !value ||
+        typeof value.id !== "string" ||
+        !value.id.length ||
+        ![value.centerX, value.centerZ, value.radius, value.surfaceY].every(
+          Number.isFinite,
+        ) ||
+        value.radius <= 0 ||
+        value.radius > 128
+      )
+        throw new Error("Invalid admitted compact terrain pond");
+      return Object.freeze({
+        id: value.id,
+        centerX: value.centerX,
+        centerZ: value.centerZ,
+        radius: value.radius,
+        surfaceY: value.surfaceY,
+      });
+    },
+    pondWeights(input: {
+      x: number;
+      z: number;
+      height: number;
+      noiseValue: number;
+      pond: CompactTerrainPond | null;
+    }) {
+      if (!input.pond) return { soil: 0, wetness: 0 };
+      const p = input.pond,
+        c = composition;
+      const distance = Math.hypot(input.x - p.centerX, input.z - p.centerZ);
+      const region =
+        1 -
+        math.smooth(
+          p.radius + c.pondBankReach - c.pondRadialFade,
+          p.radius + c.pondBankReach,
+          distance,
+        );
+      const relativeHeight = input.height - p.surfaceY;
+      const noiseHeight = (input.noiseValue - 0.5) * 2 * c.pondBankNoiseHeight;
+      return {
+        soil:
+          region *
+          (1 -
+            math.smooth(
+              c.pondSoilFullHeight + noiseHeight,
+              c.pondSoilEndHeight + noiseHeight,
+              relativeHeight,
+            )),
+        wetness:
+          region *
+          (1 -
+            math.smooth(
+              c.pondWetFullHeight,
+              c.pondWetEndHeight,
+              relativeHeight,
+            )),
+      };
+    },
     getComposition() {
       return { ...composition };
     },
@@ -56,6 +133,7 @@ export function createCompactTerrainColorOperations() {
       slope: number;
       roadInfluence: number;
       distortNoise?: number;
+      pondSurface?: { soil: number; wetness: number };
     }) {
       // Meadow dirt is restrained; steep rock follows actual geometric slope,
       // never the legacy high-frequency distorted normal classification.
@@ -90,8 +168,12 @@ export function createCompactTerrainColorOperations() {
         ),
       );
       return {
-        dirt: 1 - (1 - patch) * (1 - slopeDirt),
-        cliff: math.smooth(composition.cliffStart, composition.cliffEnd, slope),
+        dirt:
+          1 -
+          (1 - patch) * (1 - slopeDirt) * (1 - (input.pondSurface?.soil ?? 0)),
+        cliff:
+          math.smooth(composition.cliffStart, composition.cliffEnd, slope) *
+          (1 - (input.pondSurface?.soil ?? 0)),
         road: math.smooth(
           math.mix(
             composition.pathEdgeStartLow,
@@ -122,10 +204,30 @@ export function createCompactTerrainColorOperations() {
       distortNoise: number;
       slope: number;
       roadInfluence: number;
+      surface?: {
+        x: number;
+        z: number;
+        height: number;
+        pond: CompactTerrainPond | null;
+      };
     }) {
-      // Distortion noise only wears the path margin; it never changes meadow
-      // or cliff classification. The same mean applies to both PBR projections.
-      const { dirt, cliff, road, variation } = operations.weights(input);
+      // Distortion noise wears path and pond margins, not meadow or cliff
+      // classification. The same mean applies to both PBR projections.
+      const pondSurface = input.surface
+        ? operations.pondWeights({
+            ...input.surface,
+            noiseValue: input.distortNoise,
+          })
+        : { soil: 0, wetness: 0 };
+      const { dirt, cliff, road, variation } = operations.weights({
+        ...input,
+        pondSurface,
+      });
+      const wetAlbedo = math.mix(
+        1,
+        composition.pondWetAlbedo,
+        pondSurface.wetness,
+      );
       const result = palette.grass.map(
         (grass, channel) =>
           math.mix(
@@ -136,7 +238,9 @@ export function createCompactTerrainColorOperations() {
             ),
             palette.dirt[channel],
             road,
-          ) * variation,
+          ) *
+          variation *
+          wetAlbedo,
       );
       return { r: result[0], g: result[1], b: result[2] };
     },

@@ -801,6 +801,15 @@ if (!isRecord(preparationPond)) {
     radialPond.bedRadius >= radialPond.bankInnerRadius ||
     radialPond.bankInnerRadius >= radialPond.bankOuterRadius ||
     radialPond.bankHeight <= pondWater?.surfaceY ||
+    (radialPond.shorelineAmplitude !== undefined &&
+      (!Number.isFinite(radialPond.shorelineAmplitude) ||
+        radialPond.shorelineAmplitude < 0 ||
+        radialPond.shorelineAmplitude >
+          Math.min(
+            1,
+            radialPond.bedRadius * 0.25,
+            (radialPond.bankOuterRadius - radialPond.bankInnerRadius) * 0.5,
+          ))) ||
     pondWater?.radius <= radialPond.bankInnerRadius ||
     pondWater?.radius >= radialPond.bankOuterRadius ||
     pondFloor?.blendRadius <= 0 ||

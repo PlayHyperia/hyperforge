@@ -400,6 +400,8 @@ function calculateRoadInfluence(wx, wz, roadSegments, roadBlendWidth) {
 function generateGrassInstances(input) {
   assertTerrainWorkerInput(input);
   var surface = terrainSurfaceOperations.validateSnapshot(input.terrainSurface);
+  var compactPondMaterial = input.config.TERRAIN_PROFILE.algorithm === "compact-island-sculpt-v1"
+    ? compactTerrainColorOperations.validatePond(surface.waterBodies.find(function(body){return body.id === "haven_pond_water";}) || null) : null;
   var zoneIndex = terrainSurfaceOperations.createZoneIndex(surface, input.tileSize);
   var arenaFloorIds = new Set(surface.arenaFloorIds);
   var startTime = performance.now();
@@ -502,7 +504,8 @@ function generateGrassInstances(input) {
       var compactRGB = compactTerrainColorOperations.sample({
         noiseValue: sampleNoiseCPU(wx, wz, sc.NOISE_SCALE),
         distortNoise: sampleNoiseCPU(wx, wz, sc.DISTORT_NOISE_SCALE),
-        slope: slope, roadInfluence: roadInf
+        slope: slope, roadInfluence: roadInf,
+        surface: {x:wx,z:wz,height:ty,pond:compactPondMaterial}
       });
       color.r = compactRGB.r; color.g = compactRGB.g; color.b = compactRGB.b;
     }

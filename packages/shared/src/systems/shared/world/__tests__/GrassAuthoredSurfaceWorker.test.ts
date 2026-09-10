@@ -15,7 +15,9 @@ import { TerrainSystem } from "../TerrainSystem";
 import {
   TERRAIN_SHADER_CONSTANTS,
   computeTerrainColorCPU,
+  sampleNoiseCPU,
 } from "../TerrainShader";
+import { createCompactTerrainColorOperations } from "../CompactTerrainPalette";
 import { adjustShorelineHeight } from "../TerrainHeightParams";
 import { createTerrainWorkerConfig } from "../../../../utils/workers/TerrainWorkerShared";
 import type { GrassWorkerSetup } from "../GrassVisualManager";
@@ -250,6 +252,63 @@ function broadGrade(): GrassTerrainSurfaceZone {
 }
 
 describe("actual authored-surface grass worker", () => {
+  it("keeps actual pond-bank worker colours aligned with main and includes the exterior soil halo", async () => {
+    await withTerrain(async (terrain, internals, worker) => {
+      internals.loadWaterBodiesFromManifest();
+      internals.loadFlatZonesFromManifest();
+      const pond = ALL_WORLD_AREAS.haven_pond.waterBodies![0];
+      const setup = internals.buildGrassWorkerSetup();
+      const halo = setup.getTerrainSurfaceForRegion(
+        pond.centerX + pond.radius + 1,
+        pond.centerZ - 0.1,
+        pond.centerX + pond.radius + 1.2,
+        pond.centerZ + 0.1,
+      );
+      expect(halo.waterBodies.some((b) => b.id === pond.id)).toBe(true);
+      const far = setup.getTerrainSurfaceForRegion(
+        pond.centerX + pond.radius + 4,
+        pond.centerZ - 0.1,
+        pond.centerX + pond.radius + 4.2,
+        pond.centerZ + 0.1,
+      );
+      expect(far.waterBodies.some((b) => b.id === pond.id)).toBe(false);
+      const input = {
+        ...request(terrain, internals, pond.centerX, pond.centerZ, 22),
+        clumpSpacing: 0.2,
+      };
+      const result = await worker.run(input);
+      expect(result.count).toBeGreaterThan(50);
+      const ops = createCompactTerrainColorOperations();
+      let dryShoulderSamples = 0;
+      for (const p of points(input, result)) {
+        const main = terrain.getTerrainColorAt(p.x, p.z, true);
+        const height = terrain.getHeightAtComputed(p.x, p.z);
+        for (const [axis, channel] of (["r", "g", "b"] as const).entries())
+          expect(
+            Math.abs(result.groundColors[p.index * 3 + axis] - main[channel]),
+          ).toBeLessThan(0.0002);
+        if (height >= pond.surfaceY + 0.28) {
+          const weights = ops.pondWeights({
+            x: p.x,
+            z: p.z,
+            height,
+            pond,
+            noiseValue: sampleNoiseCPU(
+              p.x,
+              p.z,
+              TERRAIN_SHADER_CONSTANTS.DISTORT_NOISE_SCALE,
+            ),
+          });
+          expect(weights.soil).toBeCloseTo(0, 12);
+          expect(weights.wetness).toBe(0);
+          dryShoulderSamples++;
+        }
+      }
+      // The actual grass worker rejects the water footprint. Its surviving
+      // dry bank must no longer be forced into the broad soil ring in probe16.
+      expect(dryShoulderSamples).toBeGreaterThan(50);
+    });
+  });
   it("uses the compact diffuse palette in actual worker and main grass bases without changing placement ecology", async () => {
     await withTerrain(async (terrain, internals, worker) => {
       terrain.registerFlatZone(broadGrade());

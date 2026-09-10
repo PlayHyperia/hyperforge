@@ -203,6 +203,7 @@ export class WaterVisualManager implements QuadTreeListener {
         waterType: "lake",
         waterBodyId: body.id,
         elevated: true,
+        compactQuietPond: this.compactOceanOwnership && body.radius <= 12,
         walkable: false,
         clickable: false,
       };

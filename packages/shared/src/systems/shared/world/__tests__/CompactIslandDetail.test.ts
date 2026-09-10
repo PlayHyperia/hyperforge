@@ -44,9 +44,10 @@ describe("bounded preparation terrain detail", () => {
     expect(
       detailed.every(
         (node) =>
-          node.isMaxDepth && node.size === 100 && node.resolution === 64,
+          node.isMaxDepth && node.size === 100 && node.resolution === 128,
       ),
     ).toBe(true);
+    expect(regions.map((region) => region.resolution)).toEqual([64, 128]);
     expect(
       tree
         .getFinalNodes()
@@ -91,7 +92,7 @@ describe("bounded preparation terrain detail", () => {
     ).toThrow("Missing compact preparation area");
   });
 
-  it("measures the actual pond mesh error and explicit geometry cost at both densities", async () => {
+  it("measures pond mesh error and the explicit local geometry budget at all three densities", async () => {
     await DataManager.getInstance().initialize();
     const world = new World();
     const terrain = world.register("terrain", TerrainSystem) as TerrainSystem;
@@ -107,6 +108,7 @@ describe("bounded preparation terrain detail", () => {
       const measurements = [
         STREAMING_TERRAIN_QUADTREE_RESOLUTION,
         internals.CONFIG.QUADTREE_RESOLUTION,
+        128,
       ].map((resolution) => {
         const chunks = [250, 350].map((z, i) => {
           const result = assembleQuadChunkGeometry(
@@ -173,7 +175,7 @@ describe("bounded preparation terrain detail", () => {
           for (const chunk of chunks) chunk.geometry.dispose();
         }
       });
-      const [baseline, candidate] = measurements;
+      const [baseline, candidate, pondDetail] = measurements;
       expect(candidate.resolution).toBe(64);
       expect(candidate.samples).toBe(7921);
       expect(candidate.rmsError).toBeLessThan(baseline.rmsError * 0.5);
@@ -182,6 +184,15 @@ describe("bounded preparation terrain detail", () => {
       expect(candidate.bufferBytes - baseline.bufferBytes).toBeLessThan(
         700_000,
       );
+      expect(pondDetail.resolution).toBe(128);
+      expect(pondDetail.samples).toBe(7921);
+      expect(pondDetail.rmsError).toBeLessThan(0.03);
+      expect(pondDetail.maxError).toBeLessThan(0.18);
+      expect(pondDetail.rmsError).toBeLessThan(candidate.rmsError * 0.35);
+      expect(pondDetail.triangles).toBe(66_548);
+      expect(pondDetail.bufferBytes).toBe(2_690_928);
+      expect(pondDetail.triangles - candidate.triangles).toBe(49_664);
+      expect(pondDetail.bufferBytes - candidate.bufferBytes).toBe(2_000_896);
       process.stdout.write(
         `Compact pond geometry comparison (CPU only, not frame-time acceptance): ${JSON.stringify(measurements)}\n`,
       );

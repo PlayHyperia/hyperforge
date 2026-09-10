@@ -30,6 +30,18 @@ export function validateRadialPondTerrainProfile(
     return "bankHeight must exceed the bed height";
   }
   if (zone.blendRadius <= 0) return "blendRadius must be positive";
+  if (
+    profile.shorelineAmplitude !== undefined &&
+    (!Number.isFinite(profile.shorelineAmplitude) ||
+      profile.shorelineAmplitude < 0 ||
+      profile.shorelineAmplitude >
+        Math.min(
+          1,
+          profile.bedRadius * 0.25,
+          (profile.bankOuterRadius - profile.bankInnerRadius) * 0.5,
+        ))
+  )
+    return "shorelineAmplitude exceeds the bounded monotonic shoreline profile";
   const requiredDiameter = 2 * (profile.bankOuterRadius + zone.blendRadius);
   if (zone.width < requiredDiameter || zone.depth < requiredDiameter) {
     return `width and depth must each be at least ${requiredDiameter}m`;

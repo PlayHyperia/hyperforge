@@ -1,5 +1,32 @@
 # Duel Arena, Streaming, and Hyperbet Launch Checklist
 
+## Island tree population — resource-authoritative direction, 2026-09-10
+
+The existing **choppable resource trees are the island's tree population**.
+Distribute those real gameplay resources throughout the compact world in natural
+groves and scattered groups. Do not add a separate decorative forest or duplicate
+tree visuals to fill the landscape. Decorative grass, shrubs and rocks remain
+separate dressing; the decorative vegetation manifest is not the authority for
+woodcutting trees.
+
+- [ ] Inventory the existing resource-tree identities, species, placements,
+  shared models/materials, collider ownership and harvesting lifecycle.
+- [ ] Redistribute resource trees across the final compact island around one
+  arena, with readable paths, reachable trunk interaction approaches and clear
+  station, water, arena and spectator sightline exclusions.
+- [ ] Keep visible tree, selectable resource, collision, agent target, depletion
+  state and regrowth synchronized. Verify real harvesting, yields, contention,
+  respawn, reconnect and restart; never leave invisible live trees or decorative
+  copies of a depleted resource.
+- [ ] Preserve tier availability and preparation balance. Record any proposed
+  total-count or replenishment changes explicitly instead of silently increasing
+  resource supply during an art pass.
+- [ ] Reuse resource-tree batching, culling and LODs; verify root contact, material
+  response, wind, near/far transitions and measured frame/memory cost with the
+  actual agents and stream cameras.
+
+This records required work, not completed redistribution or launch approval.
+
 ## Current delivery direction — 2026-09-10 user clarification
 
 The compact agent island is the only target world. **The large island does not
@@ -11,6 +38,12 @@ WebGPU, instancing, culling, LOD, streaming, gameplay and custody systems—not 
 visual results merely because they already exist. Preserve unrelated user data
 and migrate persisted coordinates safely; do not delete databases or unreviewed
 assets to implement this direction.
+
+The launch world needs **one duel arena, not six**. Remove surplus runtime
+arenas and their authority/collision/visual ownership; do not retain hidden
+backup rings. The full environment must become a composed landscape and compact
+preparation village, not isolated props on a uniform lawn. The concrete next
+implementation scope is `docs/single-arena-world-composition-plan-20260910.md`.
 
 - [ ] Replace the current coarse/washed-out terrain with a deliberately authored
   compact island, cohesive ground materials, believable scale and ground contact.
@@ -33,6 +66,42 @@ Continue small, scoped commits and pushes as work progresses, with proportional
 verification, secret scanning and exact remote-ref checks. These checkpoints are
 not release approval and do not certify the whole workspace clean or backed up.
 
+
+## Pond bank correction and rendering audit — development checkpoint, 2026-09-10
+
+- [x] Add bounded irregular pond grading shared by main/worker/validator, and
+  narrow wet-soil margins so dry shoulders remain grass.
+- [x] Suppress the small-pond foam ring without an extra water material.
+- [x] Use actual root geometry for plant support and full rock footprints for
+  conservative retained-triangle contact; retain full crown culling bounds.
+- [x] Replace the sparse fern with an optimized CC0 Fern02 candidate, preserve
+  source alpha/normal/ORM and hash-lock delivery. Same 32 instances/five batches;
+  37,068 submitted main-pass triangles, 5,622,276 GLB bytes and approximately
+  21.9427 MiB estimated texture/mips. Shadows and alpha cost are additional.
+- [x] Inspect actual probe17 pond/hub/wide images against rejected probe16.
+  The broad brown annulus is gone and plants are no longer canopy-grounded.
+  All 179 pins unchanged, 45 complete art observations, exact six-map/five-GLB
+  delivery, no page/GPU diagnostic errors, and clean owned-stack teardown.
+- [ ] Finish habitat/composition: bowl silhouette, isolated plant groups,
+  dark/faceted rocks, fishing-marker contact, empty lawn and zero observed
+  campus/pond-bank grass coverage remain visibly unfinished.
+- [ ] Implement one authoritative arena and distribute existing choppable
+  resource trees across the compact island; no separate decorative forest.
+- [ ] Qualify Three/VRM upgrades independently. Actual installed versions are
+  0.183.2/3.4.3 despite newer declarations; retain/rebase the local render-pass
+  patch and test shadows, materials, avatars, lifecycle and actual frame/stream
+  behavior. No dependencies have changed in this checkpoint.
+- [ ] Keep hospital striping, missing cow/dagger content, avatar/gear, complete
+  preparation/combat/SOL, representative performance and stream launch gates open.
+
+Final verification: 552 shared tests/42 files, 128 server tests/nine files,
+20 launch-preflight tests, 40 immutable study11 tests, four art-pin helper02
+tests, three typechecks, scoped lint/format, shared/server builds and client
+production build pass. Overall probe17 still FAILS retained cow404/dagger errors.
+This is neither art approval nor production-stream/performance acceptance.
+See the implementation's `docs/compact-pond-bank-checkpoint-20260910.md` and
+`docs/renderer-dependency-audit-20260910.md`. Runtime asset checkpoint:
+`fb41785c68c6324903559552a26af11da07c7143`.
 
 ## Ground repetition and pond habitat — development checkpoint, 2026-09-10
 

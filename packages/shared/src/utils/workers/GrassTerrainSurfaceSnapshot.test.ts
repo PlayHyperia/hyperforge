@@ -133,6 +133,7 @@ describe("detached grass terrain surface requests", () => {
         bankInnerRadius: 5,
         bankOuterRadius: 7,
         bankHeight: 24,
+        shorelineAmplitude: 0.6,
       },
     });
     const input = snapshot([
@@ -153,6 +154,7 @@ describe("detached grass terrain surface requests", () => {
     const clone = createGrassTerrainSurfaceSnapshot(input);
     input.zones[0].height = 999;
     radial.radialPond!.bankHeight = 888;
+    radial.radialPond!.shorelineAmplitude = 0.1;
     input.zones[2].tileMask!.clear();
     input.zones[2].tileMaskTiles![0].x = 555;
     input.zones[2].tileMaskBounds!.minX = 444;
@@ -279,6 +281,9 @@ describe("detached grass terrain surface requests", () => {
       { bankInnerRadius: 3 },
       { bankOuterRadius: 4 },
       { bankHeight: 21 },
+      { shorelineAmplitude: NaN },
+      { shorelineAmplitude: -0.1 },
+      { shorelineAmplitude: 0.751 },
     ]) {
       const invalid = {
         ...base,

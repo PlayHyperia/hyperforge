@@ -46,6 +46,7 @@ function pond(
       bankInnerRadius: 7,
       bankOuterRadius: 9,
       bankHeight: 28.08,
+      shorelineAmplitude: 0.9,
     },
     ...overrides,
   });

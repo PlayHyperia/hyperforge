@@ -184,6 +184,13 @@ export type WaterUniforms = {
  */
 export type WaterBodyType = "lake" | "ocean";
 
+/** Per-draw state: an elevated quiet pond must not recolour another lake mesh. */
+export function createQuietPondUniform() {
+  return uniform(0).onObjectUpdate(({ object }) =>
+    object?.userData.compactQuietPond === true ? 1 : 0,
+  );
+}
+
 // ============================================================================
 // WATER SYSTEM
 // ============================================================================
@@ -192,6 +199,8 @@ export class WaterSystem {
   private world: World;
   private waterTime = 0;
   private lakeMaterial?: MeshStandardNodeMaterial;
+  private quietPondUniform: ReturnType<typeof createQuietPondUniform> | null =
+    null;
   private oceanMaterial?: MeshStandardNodeMaterial;
   private uniforms: WaterUniforms | null = null;
   private oceanUniforms: WaterUniforms | null = null;
@@ -269,6 +278,10 @@ export class WaterSystem {
    */
   getMaterial(type: WaterBodyType): MeshStandardNodeMaterial | undefined {
     return type === "ocean" ? this.oceanMaterial : this.lakeMaterial;
+  }
+
+  getQuietPondUniform() {
+    return this.quietPondUniform;
   }
 
   /**
@@ -622,6 +635,8 @@ export class WaterSystem {
    * MeshStandardNodeMaterial + outputNode override + applySunShade + nightDim.
    */
   private createLakeMaterial(): MeshStandardNodeMaterial {
+    const quietPond = createQuietPondUniform();
+    this.quietPondUniform = quietPond;
     const illumination = new WorldIlluminationUniforms();
     const uTime = uniform(0);
     const uSunDir = uniform(new THREE.Vector3(0.4, 0.8, 0.4));
@@ -945,6 +960,14 @@ export class WaterSystem {
         max(shoreFoam, mul(crestFoam, float(WATER.FOAM_CREST_MULTIPLIER))),
         foamPattern,
       );
+      // Sheltered freshwater ponds have no surf. Keep existing lake/ocean foam
+      // unchanged and remove the broad screen-depth white halo only for the
+      // explicitly tagged compact elevated mesh. One scalar, no new textures.
+      const foamOpacity = clamp(
+        foamIntensity,
+        float(0),
+        float(WATER.FOAM_MAX_OPACITY),
+      ).mul(float(1).sub(quietPond));
 
       // --- Composite ---
       const diffusePart = add(mul(diffuseLight, float(0.3)), scatter);
@@ -963,7 +986,7 @@ export class WaterSystem {
       color = mix(
         color,
         vec3(WATER.FOAM_COLOR.r, WATER.FOAM_COLOR.g, WATER.FOAM_COLOR.b),
-        clamp(foamIntensity, float(0), float(WATER.FOAM_MAX_OPACITY)),
+        foamOpacity,
       );
 
       // --- applySunShade (same as tree shader) ---
@@ -1028,7 +1051,7 @@ export class WaterSystem {
           vec3(WATER.FOAM_COLOR.r, WATER.FOAM_COLOR.g, WATER.FOAM_COLOR.b),
           surfaceNormal,
         ),
-        clamp(foamIntensity, float(0), float(WATER.FOAM_MAX_OPACITY)),
+        foamOpacity,
       );
       color = illumination.select(color, worldColor);
 
@@ -1726,6 +1749,7 @@ export class WaterSystem {
     // Dispose materials
     this.lakeMaterial?.dispose();
     this.lakeMaterial = undefined;
+    this.quietPondUniform = null;
     this.oceanMaterial?.dispose();
     this.oceanMaterial = undefined;
 

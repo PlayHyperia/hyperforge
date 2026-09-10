@@ -542,6 +542,7 @@ export interface WorldArea {
       bankInnerRadius: number;
       bankOuterRadius: number;
       bankHeight: number;
+      shorelineAmplitude?: number;
     };
   }>;
   /** Explicit elevated water bodies used for compact ponds and lakes. */

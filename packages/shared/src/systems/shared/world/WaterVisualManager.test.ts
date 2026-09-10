@@ -7,7 +7,8 @@ import { TerrainSystem } from "./TerrainSystem";
 import { TerrainQuadTree } from "./TerrainQuadTree";
 import type { WaterBodyRegistry } from "./WaterBodyRegistry";
 import { WaterVisualManager } from "./WaterVisualManager";
-import { WaterSystem } from "./WaterSystem";
+import { WaterSystem, createQuietPondUniform } from "./WaterSystem";
+import NodeFrame from "three/src/nodes/core/NodeFrame.js";
 import { LEGACY_TERRAIN_PROFILE_FIXTURE } from "./WorldTerrainProfile";
 
 type TerrainInternals = {
@@ -46,6 +47,24 @@ async function createActualWorld() {
 }
 
 describe("WaterVisualManager explicit compact water ownership", () => {
+  it("updates quiet-pond foam per object, never per frame or shared lake state", () => {
+    const control = createQuietPondUniform();
+    const frame = new NodeFrame();
+    const pond = new THREE.Mesh(),
+      lake = new THREE.Mesh();
+    pond.userData.compactQuietPond = true;
+    expect(control.getUpdateType()).toBe("object");
+    for (const [object, expected] of [
+      [pond, 1],
+      [lake, 0],
+      [pond, 1],
+      [lake, 0],
+    ] as const) {
+      frame.object = object;
+      frame.updateNode(control);
+      expect(control.value).toBe(expected);
+    }
+  });
   it("uses one ocean material across dry-centered coastal and ocean-centered leaves", async () => {
     const { terrain, water, internals, tree, close } =
       await createActualWorld();
@@ -130,6 +149,39 @@ describe("WaterVisualManager explicit compact water ownership", () => {
     } finally {
       manager.destroy();
       expect(water.waterMeshCount).toBe(0);
+      close();
+    }
+  });
+
+  it("limits quiet foam suppression to compact small ponds without allocating another material", async () => {
+    const { terrain, water, internals, close } = await createActualWorld();
+    const authored = internals.waterBodyRegistry.getAllBodies()[0];
+    const managers: WaterVisualManager[] = [];
+    try {
+      for (const [radius, profile, expected] of [
+        [7.5, undefined, false],
+        [12, terrain.getWorldTerrainProfile(), true],
+        [12.01, terrain.getWorldTerrainProfile(), false],
+      ] as const) {
+        const container = new THREE.Group();
+        managers.push(
+          new WaterVisualManager(
+            container,
+            water,
+            (x, z) => terrain.getHeightAtComputed(x, z),
+            (x, z) => internals.getIslandMask(x, z),
+            terrain.getWorldTerrainProfile().water.threshold,
+            [{ ...authored, radius }],
+            profile,
+          ),
+        );
+        expect(container.children).toHaveLength(1);
+        const mesh = container.children[0] as THREE.Mesh;
+        expect(mesh.userData.compactQuietPond).toBe(expected);
+        expect(mesh.material).toBe(water.getMaterial("lake"));
+      }
+    } finally {
+      for (const manager of managers) manager.destroy();
       close();
     }
   });
@@ -221,6 +273,7 @@ describe("WaterVisualManager explicit compact water ownership", () => {
           waterType: "lake",
           elevated: true,
           walkable: false,
+          compactQuietPond: true,
         });
         const positions = mesh.geometry.getAttribute("position");
         const shores = mesh.geometry.getAttribute("shoreDistance");

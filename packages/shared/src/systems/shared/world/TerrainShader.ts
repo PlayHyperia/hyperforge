@@ -57,7 +57,13 @@ import {
   createCompactTerrainLayers,
   blendCompactTerrainLayers,
   createCompactTerrainLayerWeights,
+  createCompactPondSurfaceWeights,
+  applyCompactPondWetness,
 } from "./CompactTerrainMaterial";
+import {
+  createCompactTerrainColorOperations,
+  type CompactTerrainPond,
+} from "./CompactTerrainPalette";
 
 export const TERRAIN_SHADER_CONSTANTS = {
   TRIPLANAR_SCALE: 0.5,
@@ -1163,11 +1169,33 @@ export function updateTerrainVertexLights(
  */
 export function createTerrainMaterial(
   shade = new TerrainShadeUniforms(),
-  options: { compactPbr?: boolean } = {},
+  options: {
+    compactPbr?: boolean;
+    compactPond?: CompactTerrainPond | null;
+  } = {},
 ): THREE.Material & {
   terrainUniforms: TerrainUniforms;
   compactTerrainSurface?: CompactTerrainTextureSet;
+  compactPondMaterial?: {
+    profile: CompactTerrainPond;
+    parameters: UniformNode<"vec4", THREE.Vector4>;
+  };
 } {
+  const compactPond = options.compactPbr
+    ? createCompactTerrainColorOperations().validatePond(
+        options.compactPond ?? null,
+      )
+    : null;
+  const pondParameters = compactPond
+    ? uniform(
+        new THREE.Vector4(
+          compactPond.centerX,
+          compactPond.centerZ,
+          compactPond.radius,
+          compactPond.surfaceY,
+        ),
+      )
+    : null;
   // Ensure noise texture is generated (still used for dirt patch variation)
   const noiseTex = generateNoiseTexture();
 
@@ -1567,15 +1595,19 @@ export function createTerrainMaterial(
   const roadCenterDarken = mul(roadInfluence, float(0.08));
   const compactedRoadColor = sub(roadDetailColor, vec3(roadCenterDarken));
 
+  const pondSurface = pondParameters
+    ? createCompactPondSurfaceWeights(worldPos, distortNoise, pondParameters)
+    : { soil: float(0), wetness: float(0) };
   const compactWeights = compactLayers
     ? createCompactTerrainLayerWeights(
         noiseValue,
         slope,
         roadInfluenceRaw,
         distortNoise,
+        pondSurface,
       )
     : null;
-  const compactSurface =
+  const compactBaseSurface =
     compactLayers && compactWeights
       ? blendCompactTerrainLayers(
           compactLayers,
@@ -1584,6 +1616,9 @@ export function createTerrainMaterial(
           compactWeights.road,
         )
       : null;
+  const compactSurface = compactBaseSurface
+    ? applyCompactPondWetness(compactBaseSurface, pondSurface.wetness)
+    : null;
   const baseWithRoads = compactSurface
     ? mul(compactSurface.albedo, compactWeights!.variation)
     : mix(variedColor, compactedRoadColor, roadInfluence);
@@ -1780,8 +1815,17 @@ export function createTerrainMaterial(
   const result = material as typeof material & {
     terrainUniforms: TerrainUniforms;
     compactTerrainSurface?: CompactTerrainTextureSet;
+    compactPondMaterial?: {
+      profile: CompactTerrainPond;
+      parameters: UniformNode<"vec4", THREE.Vector4>;
+    };
   };
   result.terrainUniforms = terrainUniforms;
+  if (compactPond && pondParameters)
+    result.compactPondMaterial = {
+      profile: compactPond,
+      parameters: pondParameters,
+    };
   if (compactTextures) {
     result.compactTerrainSurface = compactTextures;
     material.addEventListener("dispose", () => compactTextures.dispose());

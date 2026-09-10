@@ -332,6 +332,10 @@ export function createCompactTerrainLayerWeights(
   geometricSlope: Node<"float">,
   rawRoadInfluence: Node<"float">,
   edgeNoise: Node<"float"> = float(0.5),
+  pondSurface: { soil: Node<"float">; wetness: Node<"float"> } = {
+    soil: float(0),
+    wetness: float(0),
+  },
 ) {
   const c = COMPACT_TERRAIN_COMPOSITION;
   const slope = geometricSlope.clamp(0, 1);
@@ -351,14 +355,74 @@ export function createCompactTerrainLayerWeights(
     .add(0.5)
     .clamp(0, 1);
   return {
-    dirt: float(1).sub(float(1).sub(patch).mul(float(1).sub(slopeDirt))),
-    cliff: smoothstep(float(c.cliffStart), float(c.cliffEnd), slope),
+    dirt: float(1).sub(
+      float(1)
+        .sub(patch)
+        .mul(float(1).sub(slopeDirt))
+        .mul(float(1).sub(pondSurface.soil)),
+    ),
+    cliff: smoothstep(float(c.cliffStart), float(c.cliffEnd), slope).mul(
+      float(1).sub(pondSurface.soil),
+    ),
     road: smoothstep(
       mix(float(c.pathEdgeStartLow), float(c.pathEdgeStartHigh), wornEdge),
       mix(float(c.pathEdgeEndLow), float(c.pathEdgeEndHigh), wornEdge),
       rawRoadInfluence,
     ),
     variation: mix(float(c.variationLow), float(c.variationHigh), noise),
+  };
+}
+
+/** World-space localized soil/wetness; pond = centerX, centerZ, radius, waterY. */
+export function createCompactPondSurfaceWeights(
+  world: Node<"vec3">,
+  noise: Node<"float">,
+  pond: Node<"vec4">,
+) {
+  const c = COMPACT_TERRAIN_COMPOSITION;
+  const radial = vec2(world.x.sub(pond.x), world.z.sub(pond.y)).length();
+  const end = pond.z.add(c.pondBankReach);
+  const region = float(1).sub(
+    smoothstep(end.sub(c.pondRadialFade), end, radial),
+  );
+  const height = world.y.sub(pond.w);
+  const noiseHeight = noise.sub(0.5).mul(2 * c.pondBankNoiseHeight);
+  return {
+    soil: region.mul(
+      float(1).sub(
+        smoothstep(
+          noiseHeight.add(c.pondSoilFullHeight),
+          noiseHeight.add(c.pondSoilEndHeight),
+          height,
+        ),
+      ),
+    ),
+    wetness: region.mul(
+      float(1).sub(
+        smoothstep(
+          float(c.pondWetFullHeight),
+          float(c.pondWetEndHeight),
+          height,
+        ),
+      ),
+    ),
+  };
+}
+
+export function applyCompactPondWetness(
+  surface: ReturnType<typeof blendCompactTerrainLayers>,
+  wetness: Node<"float">,
+) {
+  return {
+    ...surface,
+    albedo: surface.albedo.mul(
+      mix(float(1), float(COMPACT_TERRAIN_COMPOSITION.pondWetAlbedo), wetness),
+    ),
+    roughness: mix(
+      surface.roughness,
+      surface.roughness.min(COMPACT_TERRAIN_COMPOSITION.pondWetRoughness),
+      wetness,
+    ),
   };
 }
 

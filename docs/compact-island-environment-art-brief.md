@@ -5,7 +5,7 @@ This is accurate. Removing biome wedges and correcting sampled grass contact
 did not turn the bare grass/dirt blockout into a finished game environment.
 
 Current work and explicit source-test/cost limits are recorded in
-`compact-preparation-art-checkpoint-20260910.md`. The material/path/local-detail
+`compact-pond-bank-checkpoint-20260910.md`. The material/path/local-detail
 candidate is implemented; it is not yet an accepted finished environment.
 
 ## Visual target, not a game screenshot
@@ -31,31 +31,36 @@ The first real art slice is the existing pond → bank/workshop → arena approa
 not another generic noise or palette adjustment across the entire map.
 
 - [ ] Author clear primary/secondary landforms: low rocky ridge and coherent
-  coastal silhouette; believable local pond banks and shallow depth; usable
-  paths, flat interaction areas and unobstructed combat-camera sightlines.
+      coastal silhouette; believable local pond banks and shallow depth; usable
+      paths, flat interaction areas and unobstructed combat-camera sightlines.
 - [ ] Give the bank, furnace/anvil and cooking locations a shared architectural
-  setting and worn ground. Use a small reusable stone/timber kit; avoid isolated
-  stations sprinkled on a lawn. Keep authoritative interaction positions valid.
+      setting and worn ground. Use a small reusable stone/timber kit; avoid isolated
+      stations sprinkled on a lawn. Keep authoritative interaction positions valid.
 - [x] Integrate six packed soil/turf/rock maps with actual normal/roughness/AO,
-  exact-byte preflight and decode controls. Follow-up adds anti-repeat grass/dirt
-  projections and worn path edges; finished wet-bank transitions remain open.
+      exact-byte preflight and decode controls. Follow-up adds anti-repeat grass/dirt
+      projections and worn path edges; finished wet-bank transitions remain open.
 - [ ] Compose bounded rock, shrub and grass clusters around banks/paths, with
-  intentional open circulation. Preserve batching, shared materials and LODs;
-  do not blindly turn on bulk procedural population or grass everywhere.
+      intentional open circulation. Preserve batching, shared materials and LODs;
+      do not blindly turn on bulk procedural population or grass everywhere.
+- [ ] Use the existing choppable resource trees as the island's tree population,
+      naturally distributed around the compact one-arena layout. Preserve reachable
+      resource targets, tier availability, collision, depletion/regrowth and agent
+      preparation. Do not fill the landscape with a separate decorative forest.
 - [x] Resolve ocean material ownership and visible square water transitions.
-  Ocean appearance must not change simply because a chunk center crosses a mask.
-- [x] Compare bounded denser preparation geometry: two 100 m streaming leaves
-  now use 64 vertices/axis (1.587 m spacing), others retain 16 (6.667 m).
-  Pond sampled RMS error falls 0.2834 to 0.0792 m; maximum remains 0.4676 m.
-  Added 15,744 triangles/640,512 geometry bytes are not frame-time acceptance.
+      Ocean appearance must not change simply because a chunk center crosses a mask.
+- [x] Compare bounded denser pond geometry: two100m streaming leaves now use128
+      vertices/axis; hub policy64, other streaming leaves16. Final irregular-pond
+      RMS error0.02764650m, maximum0.17675727m over7,921sample points. The two actual
+      leaves have66,548triangles/2,690,928geometry bytes, +49,664triangles/+2,000,896
+      bytes versus64. These are explicit costs, not frame-time acceptance.
 - [ ] Finish pond/coastal topology and all-footprint prop contact; the measured
-  residual bank error and circular silhouette are not a finished terrain gate.
+      residual bank error and circular silhouette are not a finished terrain gate.
 - [ ] Capture actual close, preparation-wide and arena-approach gameplay views in
-  consistent daylight, then moving-camera and night views. Evaluate composition,
-  scale, material response, contact, silhouette and UI/agent readability together.
+      consistent daylight, then moving-camera and night views. Evaluate composition,
+      scale, material response, contact, silhouette and UI/agent readability together.
 - [ ] Measure representative loading, CPU/GPU frame distributions and memory with
-  the real agents/assets/stream workload before accepting performance. An image
-  reference or intrusive static diagnostic cannot satisfy this gate.
+      the real agents/assets/stream workload before accepting performance. An image
+      reference or intrusive static diagnostic cannot satisfy this gate.
 
 Acceptance is an actual recognizably finished scene, visibly beyond the current
 blockout while retaining the working preparation/duel loop. Numerical correctness
@@ -75,8 +80,10 @@ Do not enable the current generic vegetation path unchanged: it extracts only
 the first mesh of an asset and its water-clearance policy excludes pond-bank
 placements. Some low-triangle assets have large 2K textures; triangle counts alone
 do not qualify them. An isolated Blender pond kit now contains boulder, flat
-stone, fern, bush and original reeds (22.61 MiB estimated texture+mip allocation).
-The runtime uses 32 instances in five batches; actual scene review is required.
+stone, fern, bush and original reeds. The promoted CC0 Fern02 brings the kit to
+approximately21.9427MiB estimated texture/mip allocation and37,068submitted
+main-pass triangles across32instances/five batches. Probe17 verifies improved
+wet margins/root contact, not finished habitat or representative performance.
 A reviewed workshop-canopy candidate still awaits collision, flue and camera
 integration. Imported asset creator/license attribution remains unresolved; this
 inventory is reuse research, not a distribution-rights or performance approval.

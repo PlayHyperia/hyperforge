@@ -234,6 +234,16 @@ export function createGrassTerrainSurfaceOperations(): GrassTerrainSurfaceOperat
           "pond bankOuterRadius",
         );
         const bank = helpers.finite(radial.bankHeight, "pond bankHeight");
+        if (radial.shorelineAmplitude !== undefined) {
+          const amplitude = helpers.nonnegative(
+            radial.shorelineAmplitude,
+            "pond shorelineAmplitude",
+          );
+          if (amplitude > Math.min(1, bed * 0.25, (outer - inner) * 0.5))
+            return helpers.fail(
+              "pond shorelineAmplitude exceeds monotonic profile bounds",
+            );
+        }
         const diameter = 2 * (outer + blend);
         if (
           inner <= bed ||
@@ -353,6 +363,9 @@ export function createGrassTerrainSurfaceOperations(): GrassTerrainSurfaceOperat
             bankInnerRadius: zone.radialPond.bankInnerRadius,
             bankOuterRadius: zone.radialPond.bankOuterRadius,
             bankHeight: zone.radialPond.bankHeight,
+            ...(zone.radialPond.shorelineAmplitude !== undefined
+              ? { shorelineAmplitude: zone.radialPond.shorelineAmplitude }
+              : {}),
           };
         if (zone.tileMask !== undefined)
           clone.tileMask = new Set(zone.tileMask);

@@ -10,6 +10,7 @@ import {
 import { createAuthoredTerrainSurfaceOperations } from "../AuthoredTerrainSurface";
 import { TerrainSystem } from "../TerrainSystem";
 import type { GrassWorkerSetup } from "../GrassVisualManager";
+import { COMPACT_TERRAIN_COMPOSITION } from "../CompactTerrainPalette";
 
 type Internals = {
   flatZones: Map<string, GrassTerrainSurfaceZone>;
@@ -184,7 +185,7 @@ describe("actual TerrainSystem regional grass snapshots", () => {
     });
   });
 
-  it("includes exact intersecting water boundaries and excludes outside-only bodies", async () => {
+  it("retains pond-bank material metadata for 3m without expanding the actual water circle", async () => {
     await withTerrain((terrain, internals) => {
       const pond = terrain.getWaterBodyRegistry().getAllBodies()[0];
       const edge = pond.centerX + pond.radius;
@@ -204,7 +205,8 @@ describe("actual TerrainSystem regional grass snapshots", () => {
       expect(
         snapshotOperations.getWaterSurfaceAt(atEdge, 16, edge, pond.centerZ),
       ).toBe(pond.surfaceY);
-      expect(outside.waterBodies).toEqual([]);
+      expect(outside.waterBodies.map((body) => body.id)).toEqual([pond.id]);
+      expect(outside.waterBodies[0].radius).toBe(pond.radius);
       expect(
         snapshotOperations.getWaterSurfaceAt(
           outside,
@@ -213,6 +215,25 @@ describe("actual TerrainSystem regional grass snapshots", () => {
           pond.centerZ,
         ),
       ).toBe(16);
+      expect(COMPACT_TERRAIN_COMPOSITION.pondBankReach).toBe(3);
+      const haloEdge = edge + COMPACT_TERRAIN_COMPOSITION.pondBankReach;
+      const halo = internals.getTerrainSurfaceForRegion(
+        haloEdge,
+        pond.centerZ,
+        haloEdge,
+        pond.centerZ,
+      );
+      expect(halo.waterBodies.map((body) => body.id)).toEqual([pond.id]);
+      expect(
+        snapshotOperations.getWaterSurfaceAt(halo, 16, haloEdge, pond.centerZ),
+      ).toBe(16);
+      const beyond = internals.getTerrainSurfaceForRegion(
+        haloEdge + 1e-6,
+        pond.centerZ,
+        haloEdge + 2e-6,
+        pond.centerZ,
+      );
+      expect(beyond.waterBodies).toEqual([]);
     });
   });
 

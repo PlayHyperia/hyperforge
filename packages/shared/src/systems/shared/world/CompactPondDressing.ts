@@ -9,6 +9,12 @@ export const COMPACT_POND_MODELS = Object.freeze({
   reed: { file: "pond_reed_clump.glb", radius: 0.663 },
 });
 export type CompactPondModel = keyof typeof COMPACT_POND_MODELS;
+// Authored plant support is the low central stem cluster, not low drooping
+// leaves or the complete crown. Validated against the five canonical GLBs.
+export const COMPACT_POND_ROOT_SUPPORT = Object.freeze({
+  sliceHeight: 0.05,
+  centerRadius: 0.18,
+});
 export type CompactPondPlacement = Readonly<{
   id: string;
   model: CompactPondModel;
@@ -44,48 +50,85 @@ export function createCompactPondDressing(
   )
     throw new Error("Unsupported compact dressing pond dimensions");
 
-  // angle degrees, fraction of water radius, uniform scale, rotation degrees.
-  const layout: readonly [CompactPondModel, number, number, number, number][] =
-    [
-      ["boulder", 219, 0.68, 1.15, 24],
-      ["boulder", 233, 0.76, 0.72, 153],
-      ["boulder", 302, 0.73, 0.92, 270],
-      ["boulder", 341, 0.73, 0.82, 83],
-      ["stone", 212, 0.78, 0.55, 31],
-      ["stone", 226, 0.77, 0.58, 116],
-      ["stone", 240, 0.79, 0.44, 241],
-      ["stone", 298, 0.78, 0.55, 23],
-      ["stone", 312, 0.79, 0.43, 172],
-      ["stone", 339, 0.79, 0.46, 96],
-      ["fern", 216, 1.15, 0.95, 17],
-      ["fern", 224, 1.2, 0.8, 125],
-      ["fern", 236, 1.12, 1.05, 240],
-      ["fern", 246, 1.19, 0.75, 73],
-      ["fern", 300, 1.16, 1.0, 112],
-      ["fern", 310, 1.2, 0.75, 267],
-      ["fern", 337, 1.15, 0.85, 38],
-      ["fern", 348, 1.12, 0.7, 195],
-      ["bush", 228, 1.35, 0.9, 27],
-      ["bush", 305, 1.35, 0.85, 211],
-      ["bush", 343, 1.32, 0.72, 130],
-      ["reed", 209, 0.95, 0.9, 27],
-      ["reed", 217, 0.94, 0.73, 121],
-      ["reed", 225, 0.99, 1.08, 232],
-      ["reed", 234, 0.94, 0.82, 67],
-      ["reed", 243, 0.97, 0.92, 178],
-      ["reed", 294, 0.95, 0.88, 300],
-      ["reed", 303, 0.97, 1.04, 57],
-      ["reed", 313, 0.94, 0.78, 213],
-      ["reed", 332, 0.95, 0.72, 147],
-      ["reed", 341, 0.97, 0.96, 19],
-      ["reed", 350, 0.96, 0.75, 271],
-    ];
+  // Habitat direction, tangent offset in metres, bank offset in metres,
+  // scale, yaw. Unequal, interlocking groups replace concentric specimens.
+  // Rock offset is additional to its complete radius: the shore-marker band
+  // stays clear even where the authored shoreline moves in or out.
+  const layout: readonly [
+    CompactPondModel,
+    number,
+    number,
+    number,
+    number,
+    number,
+  ][] = [
+    ["boulder", 227, -0.65, -0.7, 1.25, 24],
+    ["boulder", 227, 0.55, -0.8, 1.07, 153],
+    ["stone", 227, -1.15, -0.18, 0.55, 31],
+    ["stone", 227, 0.05, -0.18, 0.58, 116],
+    ["stone", 227, 1.0, -0.2, 0.44, 241],
+    ["fern", 227, -1.0, 1.2, 0.95, 17],
+    ["fern", 227, -0.15, 1.8, 0.8, 125],
+    ["fern", 227, 0.75, 1.1, 1.05, 240],
+    ["fern", 227, 1.2, 1.6, 0.75, 73],
+    ["bush", 227, -0.3, 2.05, 0.9, 27],
+    ["reed", 227, -1.05, 0.5, 0.9, 27],
+    ["reed", 227, -0.45, 0.8, 0.73, 121],
+    ["reed", 227, 0.1, 0.45, 1.08, 232],
+    ["reed", 227, 0.6, 0.7, 0.82, 67],
+    ["reed", 227, 1.0, 0.35, 0.92, 178],
+    ["boulder", 294, 0.05, -0.8, 1.16, 270],
+    ["stone", 294, -0.6, -0.18, 0.55, 23],
+    ["stone", 294, 0.65, -0.2, 0.43, 172],
+    ["fern", 294, -0.55, 1.3, 1.0, 112],
+    ["fern", 294, 0.3, 1.7, 0.75, 267],
+    ["bush", 294, 0.65, 2.0, 0.85, 211],
+    ["reed", 294, -0.8, 0.65, 0.88, 300],
+    ["reed", 294, -0.05, 0.4, 1.04, 57],
+    ["reed", 294, 0.65, 0.65, 0.78, 213],
+    ["boulder", 333, -0.25, -0.75, 1.11, 83],
+    ["stone", 333, 0.6, -0.18, 0.46, 96],
+    ["fern", 333, -0.4, 1.15, 0.85, 38],
+    ["fern", 333, 0.45, 1.5, 0.7, 195],
+    ["bush", 333, -0.15, 1.9, 0.72, 130],
+    ["reed", 333, -0.65, 0.7, 0.72, 147],
+    ["reed", 333, 0.05, 0.35, 0.96, 19],
+    ["reed", 333, 0.65, 0.65, 0.75, 271],
+  ];
+  const shorelineAt = (angle: number): number => {
+    let low = 0,
+      high = pond.radius;
+    const sample = (radius: number) =>
+      heightAt(
+        pond.centerX + Math.cos(angle) * radius,
+        pond.centerZ + Math.sin(angle) * radius,
+      );
+    if (!(sample(low) < pond.surfaceY) || !(sample(high) > pond.surfaceY))
+      throw new Error(
+        "Pond dressing requires a finite underwater-to-bank shoreline",
+      );
+    // Current admitted pond has a monotonic bed-to-bank transition. Fourteen
+    // bisections give <0.5 mm placement precision without a second shape model.
+    for (let step = 0; step < 14; step++) {
+      const mid = (low + high) / 2,
+        height = sample(mid);
+      if (!Number.isFinite(height))
+        throw new Error("Invalid pond shoreline height");
+      if (height < pond.surfaceY) low = mid;
+      else high = mid;
+    }
+    return (low + high) / 2;
+  };
   return Object.freeze(
-    layout.map(([model, angle, radial, scale, rotation], i) => {
-      const radians = (angle * Math.PI) / 180;
-      const x = pond.centerX + Math.cos(radians) * pond.radius * radial;
-      const z = pond.centerZ + Math.sin(radians) * pond.radius * radial;
+    layout.map(([model, angle, tangent, bankOffset, scale, rotation], i) => {
+      const radians =
+        (angle * Math.PI) / 180 +
+        Math.atan2(tangent, shorelineAt((angle * Math.PI) / 180));
       const radius = COMPACT_POND_MODELS[model].radius * scale;
+      const rock = model === "boulder" || model === "stone";
+      const radial = shorelineAt(radians) + bankOffset - (rock ? radius : 0);
+      const x = pond.centerX + Math.cos(radians) * radial;
+      const z = pond.centerZ + Math.sin(radians) * radial;
       if (model === "boulder" || model === "stone") {
         // Conservative disk bounds contain every rotated model vertex. Also
         // check a bounded .25 m lattice including the enclosing square edges;

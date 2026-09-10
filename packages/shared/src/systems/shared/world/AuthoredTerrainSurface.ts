@@ -117,7 +117,33 @@ export function createAuthoredTerrainSurfaceOperations(): AuthoredTerrainSurface
     resolveRadialPondTerrainHeight(zone, x, z, getUnderlyingHeight) {
       const profile = zone.radialPond;
       if (!profile) return null;
-      const radius = Math.hypot(x - zone.centerX, z - zone.centerZ);
+      const dx = x - zone.centerX,
+        dz = z - zone.centerZ;
+      let radius = Math.hypot(dx, dz);
+      const amplitude = profile.shorelineAmplitude ?? 0;
+      if (amplitude > 0 && radius < profile.bankOuterRadius) {
+        const angle = Math.atan2(dz, dx);
+        // Fixed low-frequency lobes give the basin a deliberate silhouette.
+        // Fade to the unchanged circular outer bank so its indexing envelope,
+        // surrounding terrain blend and station/path grade stay identical.
+        const innerFade = helpers.smoothstep(
+          Math.min(1, radius / (profile.bedRadius * 0.5)),
+        );
+        const outerFade =
+          1 -
+          helpers.smoothstep(
+            Math.max(
+              0,
+              (radius - profile.bankInnerRadius) /
+                (profile.bankOuterRadius - profile.bankInnerRadius),
+            ),
+          );
+        const lobe =
+          0.55 * Math.sin(2 * angle + 0.7) +
+          0.3 * Math.sin(3 * angle - 0.4) +
+          0.15 * Math.sin(5 * angle + 1.2);
+        radius -= amplitude * lobe * innerFade * outerFade;
+      }
       if (radius <= profile.bedRadius) return zone.height;
       if (radius < profile.bankInnerRadius) {
         const progress =

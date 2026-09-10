@@ -97,6 +97,12 @@ test("accepts the exact active preparation manifest and rectangular campus grade
       readFileSync(path.join(assetsRoot, "manifests/world-areas.json"), "utf8"),
     );
     const area = manifest.specialAreas.duel_arena;
+    assert.equal(
+      manifest.level1Areas.haven_pond.flatZones.find(
+        (zone) => zone.id === "haven_pond_floor",
+      ).radialPond.shorelineAmplitude,
+      0.9,
+    );
     const grade = area.flatZones.find(
       (zone) => zone.id === "duel_arena_campus_grade",
     );
@@ -118,6 +124,24 @@ test("accepts the exact active preparation manifest and rectangular campus grade
     rmSync(assetsRoot, { recursive: true, force: true });
   }
 });
+
+for (const amplitude of [-0.1, 1.001, "0.9"]) {
+  test(`rejects invalid pond shoreline amplitude ${JSON.stringify(amplitude)}`, () => {
+    const assetsRoot = createAssetsFixture();
+    try {
+      mutateJson(assetsRoot, "world-areas.json", (manifest) => {
+        manifest.level1Areas.haven_pond.flatZones.find(
+          (zone) => zone.id === "haven_pond_floor",
+        ).radialPond.shorelineAmplitude = amplitude;
+      });
+      const result = runValidator(assetsRoot);
+      assert.notEqual(result.status, 0);
+      assert.match(result.stderr, /finite radial bed, visible shoreline/u);
+    } finally {
+      rmSync(assetsRoot, { recursive: true, force: true });
+    }
+  });
+}
 
 test("accepts independent rectangular extents and circular water tangent to every boundary", () => {
   const assetsRoot = createAssetsFixture();

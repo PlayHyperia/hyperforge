@@ -78,7 +78,11 @@ import {
 } from "../../../data/arena-grading";
 import { DataManager } from "../../../data/DataManager";
 import { createCompactPreparationDetailRegions } from "./CompactIslandDetail";
-import { createCompactTerrainColorOperations } from "./CompactTerrainPalette";
+import {
+  createCompactTerrainColorOperations,
+  COMPACT_TERRAIN_COMPOSITION,
+  type CompactTerrainPond,
+} from "./CompactTerrainPalette";
 // NOTE: Import directly to avoid circular dependency through barrel file
 import { WaterSystem } from "./WaterSystem";
 import {
@@ -327,6 +331,7 @@ export class TerrainSystem extends System {
   private quadTreeVisualManager: TerrainVisualManager | null = null;
   private waterVisualManager: WaterVisualManager | null = null;
   private compactPondDressing: CompactPondDressingVisuals | null = null;
+  private compactPondMaterial: CompactTerrainPond | null = null;
   private grassVisualManager: GrassVisualManager | null = null;
 
   // Unified terrain generator from @hyperforge/procgen
@@ -496,6 +501,7 @@ export class TerrainSystem extends System {
     const profile = this.getWorldTerrainProfile();
     const material = createTerrainMaterial(undefined, {
       compactPbr: profile.algorithm === "compact-island-sculpt-v1",
+      compactPond: this.getCompactPondMaterial(),
     });
     // The generator initializes before this client-only material exists. Apply
     // profile-owned options here so the actual published material is configured
@@ -512,6 +518,21 @@ export class TerrainSystem extends System {
     console.log(
       "[TerrainSystem] Terrain material created with road influence support",
     );
+  }
+
+  private getCompactPondMaterial(): CompactTerrainPond | null {
+    if (this.getWorldTerrainProfile().algorithm !== "compact-island-sculpt-v1")
+      return null;
+    if (this.compactPondMaterial) return this.compactPondMaterial;
+    const ponds = ALL_WORLD_AREAS.haven_pond?.waterBodies;
+    if (ponds?.length !== 1 || ponds[0].id !== "haven_pond_water")
+      throw new Error(
+        "Compact terrain requires the single admitted Haven pond",
+      );
+    this.compactPondMaterial = compactTerrainColorOperations.validatePond(
+      ponds[0],
+    );
+    return this.compactPondMaterial;
   }
 
   /**
@@ -1628,7 +1649,7 @@ export class TerrainSystem extends System {
     // that already-ready path before synchronous terrain sampling is installed:
     // other systems in the same init wave can request terrain immediately.
     if (!dataManager.isReady()) await dataManager.initialize();
-    this.getWorldTerrainProfile();
+    this.getCompactPondMaterial();
     console.log(
       "[TerrainSystem] Initializing admitted compact terrain profile",
     );
@@ -2061,13 +2082,11 @@ export class TerrainSystem extends System {
         splitRatio: this.CONFIG.QUADTREE_SPLIT_RATIO,
         unsplitMultiplier: this.CONFIG.QUADTREE_UNSPLIT_MULTIPLIER,
         resolution: quadTreeResolution,
-        fineDetailRegions: isStreamingViewport
-          ? createCompactPreparationDetailRegions(
-              this.getWorldTerrainProfile(),
-              DataManager.getInstance().getAllWorldAreas(),
-              this.CONFIG.QUADTREE_RESOLUTION,
-            )
-          : [],
+        fineDetailRegions: createCompactPreparationDetailRegions(
+          this.getWorldTerrainProfile(),
+          DataManager.getInstance().getAllWorldAreas(),
+          this.CONFIG.QUADTREE_RESOLUTION,
+        ),
         skirtDrop: this.CONFIG.QUADTREE_SKIRT_DROP,
         // The broadcast camera is pinned to the compact arena complex. One
         // 1,600 m root covers the complete 250 m critical scene radius, so
@@ -2408,7 +2427,12 @@ export class TerrainSystem extends System {
     const waterBodies = this.waterBodyRegistry.getAllBodies().filter((body) => {
       const dx = body.centerX - Math.max(minX, Math.min(maxX, body.centerX));
       const dz = body.centerZ - Math.max(minZ, Math.min(maxZ, body.centerZ));
-      return dx * dx + dz * dz <= body.radiusSq;
+      const radius =
+        body.radius +
+        (body.id === this.compactPondMaterial?.id
+          ? COMPACT_TERRAIN_COMPOSITION.pondBankReach
+          : 0);
+      return dx * dx + dz * dz <= radius * radius;
     });
     return createGrassTerrainSurfaceSnapshot({
       zones,
@@ -5184,6 +5208,7 @@ export class TerrainSystem extends System {
           ),
           slope,
           roadInfluence: this.calculateRoadInfluenceAtVertex(wx, wz, 0, 0),
+          surface: { x: wx, z: wz, height, pond: this.compactPondMaterial },
         }),
       );
     }

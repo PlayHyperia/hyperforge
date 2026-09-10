@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { World } from "../../../../core/World";
 import { DataManager } from "../../../../data/DataManager";
+import { ALL_WORLD_AREAS } from "../../../../data/world-areas";
 import { TerrainSystem } from "../TerrainSystem";
 import {
   COMPACT_WORLD_TERRAIN_PROFILE,
@@ -50,6 +51,13 @@ describe("actual TerrainSystem material initialization order", () => {
           strength,
         );
         expect(terrain.getTerrainMaterialWithUniforms()).toBe(material);
+        const pond = ALL_WORLD_AREAS.haven_pond.waterBodies![0];
+        if (strength === 1) {
+          expect(material!.compactPondMaterial!.profile).toEqual(pond);
+          expect(
+            material!.compactPondMaterial!.parameters.value.toArray(),
+          ).toEqual([pond.centerX, pond.centerZ, pond.radius, pond.surfaceY]);
+        } else expect(material!.compactPondMaterial).toBeUndefined();
         expect(DataManager.getWorldTerrainProfile()).toEqual(
           SCULPTED_COMPACT_WORLD_TERRAIN_PROFILE,
         );
@@ -72,6 +80,9 @@ describe("actual TerrainSystem material initialization order", () => {
         terrain.getTerrainMaterialWithUniforms()!.terrainUniforms
           .surfaceDetailStrength.value,
       ).toBe(1);
+      expect(
+        terrain.getTerrainMaterialWithUniforms()!.compactPondMaterial!.profile,
+      ).toEqual(ALL_WORLD_AREAS.haven_pond.waterBodies![0]);
     } finally {
       terrain.getTerrainMaterialWithUniforms()?.dispose();
       world.destroy();

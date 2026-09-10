@@ -11,6 +11,7 @@ import THREE, {
   texture,
   vec2,
   vec3,
+  vec4,
 } from "../../../../extras/three/three";
 import type { Node } from "three/webgpu";
 import {
@@ -29,9 +30,12 @@ import {
   blendCompactTerrainLayers,
   compactTerrainNormalToView,
   createCompactGroundProjections,
+  createCompactPondSurfaceWeights,
+  applyCompactPondWetness,
   type CompactTerrainLayer,
 } from "../CompactTerrainMaterial";
 import { createCompactTerrainColorOperations } from "../CompactTerrainPalette";
+import { ALL_WORLD_AREAS } from "../../../../data/world-areas";
 
 const assetDirectory = new URL(
   "../../../../../../server/world/assets/terrain/textures/compact-pbr/",
@@ -80,7 +84,11 @@ function vectorValue(node: Node): number[] {
   };
   const value = read("value");
   if (typeof value === "number") return [value];
-  if (value instanceof THREE.Vector2 || value instanceof THREE.Vector3)
+  if (
+    value instanceof THREE.Vector2 ||
+    value instanceof THREE.Vector3 ||
+    value instanceof THREE.Vector4
+  )
     return value.toArray();
   if (value instanceof THREE.Matrix4) return value.toArray();
   if (node.type === "ConvertNode" || node.type === "VarNode")
@@ -135,6 +143,10 @@ function vectorValue(node: Node): number[] {
     }
   }
   switch (read("method")) {
+    case "length":
+      return [Math.hypot(...child("aNode"))];
+    case "min":
+      return pair(Math.min);
     case "floor":
       return child("aNode").map(Math.floor);
     case "fract":
@@ -374,6 +386,7 @@ describe("compact terrain actual texture ownership and CPU material graph", () =
     const shade = new TerrainShadeUniforms();
     const material = createTerrainMaterial(shade, {
       compactPbr: true,
+      compactPond: ALL_WORLD_AREAS.haven_pond.waterBodies![0],
     }) as THREE.MeshStandardNodeMaterial &
       ReturnType<typeof createTerrainMaterial>;
     const legacy = createTerrainMaterial() as THREE.MeshStandardNodeMaterial;
@@ -387,6 +400,15 @@ describe("compact terrain actual texture ownership and CPU material graph", () =
       expect(material.metalness).toBe(0);
       expect(material.fog).toBe(false);
       expect(material.outputNode).toBeTruthy();
+      expect(Object.isFrozen(material.compactPondMaterial!.profile)).toBe(true);
+      for (const root of [
+        material.colorNode!,
+        material.normalNode!,
+        material.roughnessNode!,
+      ])
+        expect(graph(root).has(material.compactPondMaterial!.parameters)).toBe(
+          true,
+        );
       expect(legacy.normalNode).toBeNull();
       expect(legacy.aoNode).toBeNull();
       expect(Reflect.get(legacy, "compactTerrainSurface")).toBeUndefined();
@@ -691,6 +713,106 @@ describe("compact terrain actual texture ownership and CPU material graph", () =
 });
 
 describe("compact grass base palette without changing ecology", () => {
+  it("matches real TSL wet-soil/bed layers and CPU colour without affecting remote terrain", () => {
+    const ops = createCompactTerrainColorOperations();
+    const pond = ops.validatePond(ALL_WORLD_AREAS.haven_pond.waterBodies![0])!;
+    const uniform = vec4(
+      pond.centerX,
+      pond.centerZ,
+      pond.radius,
+      pond.surfaceY,
+    );
+    const palette = ops.getPalette();
+    const layer = (rgb: number[]): CompactTerrainLayer => ({
+      albedo: vec3(...(rgb as [number, number, number])),
+      roughness: float(0.85),
+      ao: float(1),
+      worldNormal: vec3(0, 1, 0),
+    });
+    const layers = {
+      grass: layer(palette.grass),
+      dirt: layer(palette.dirt),
+      rock: layer(palette.rock),
+    };
+    for (const distance of [0, 5, 7.5, 9, 10.4, 11, 80])
+      for (const relativeHeight of [-2, -0.1, 0.1, 0.28, 0.6, 1, 1.5])
+        for (const noise of [0, 0.25, 0.5, 0.75, 1]) {
+          const input = {
+            x: pond.centerX + distance,
+            z: pond.centerZ,
+            height: pond.surfaceY + relativeHeight,
+            pond,
+            noiseValue: noise,
+          };
+          const cpu = ops.pondWeights(input);
+          const gpu = createCompactPondSurfaceWeights(
+            vec3(input.x, input.height, input.z),
+            float(noise),
+            uniform,
+          );
+          expect(vectorValue(gpu.soil)[0]).toBeCloseTo(cpu.soil, 12);
+          expect(vectorValue(gpu.wetness)[0]).toBeCloseTo(cpu.wetness, 12);
+          if (distance > pond.radius + 3)
+            expect(cpu).toEqual({ soil: 0, wetness: 0 });
+          if (distance <= pond.radius && relativeHeight < -0.1)
+            expect(cpu).toEqual({ soil: 1, wetness: 1 });
+          // The actual dry bank is only 0.28m above this water surface. It
+          // must retain turf rather than becoming a wide bare-soil annulus.
+          if (relativeHeight >= 0.28) {
+            expect(cpu.soil).toBeCloseTo(0, 12);
+            expect(cpu.wetness).toBe(0);
+          }
+          const weights = createCompactTerrainLayerWeights(
+            float(0.5),
+            float(0.4),
+            float(0),
+            float(noise),
+            gpu,
+          );
+          const material = applyCompactPondWetness(
+            blendCompactTerrainLayers(
+              layers,
+              weights.dirt,
+              weights.cliff,
+              weights.road,
+            ),
+            gpu.wetness,
+          );
+          const rgb = vectorValue(material.albedo);
+          const colour = ops.sample({
+            noiseValue: 0.5,
+            distortNoise: noise,
+            slope: 0.4,
+            roadInfluence: 0,
+            surface: input,
+          });
+          expect(rgb[0]).toBeCloseTo(colour.r, 12);
+          expect(rgb[1]).toBeCloseTo(colour.g, 12);
+          expect(rgb[2]).toBeCloseTo(colour.b, 12);
+          expect(vectorValue(material.roughness)[0]).toBeCloseTo(
+            0.85 + (0.62 - 0.85) * cpu.wetness,
+            12,
+          );
+        }
+    expect(ops.validatePond(null)).toBeNull();
+    for (const radius of [0, -1, Infinity, NaN, 129])
+      expect(() => ops.validatePond({ ...pond, radius })).toThrow();
+    const moved = ops.validatePond({
+      ...pond,
+      centerX: pond.centerX + 100,
+      centerZ: pond.centerZ - 40,
+      surfaceY: pond.surfaceY + 3,
+    })!;
+    expect(
+      ops.pondWeights({
+        x: moved.centerX,
+        z: moved.centerZ,
+        height: moved.surfaceY - 1,
+        noiseValue: 0.5,
+        pond: moved,
+      }),
+    ).toEqual({ soil: 1, wetness: 1 });
+  });
   it("uses identical layer and full-path selection with restrained macro variation", () => {
     const ops = createCompactTerrainColorOperations();
     const palette = ops.getPalette();
@@ -838,6 +960,14 @@ describe("compact grass base palette without changing ecology", () => {
       distortNoise: 0.31,
       slope: 0.42,
       roadInfluence: 0.63,
+      surface: {
+        x: 343,
+        z: 310,
+        height: 28.08,
+        pond: createCompactTerrainColorOperations().validatePond(
+          ALL_WORLD_AREAS.haven_pond.waterBodies![0],
+        ),
+      },
     };
     const worker = new Worker(
       `const {parentPort}=require('node:worker_threads'); const operations=(${loaded.createCompactTerrainColorOperations.toString()})(); parentPort.postMessage(operations.sample(${JSON.stringify(input)}));`,

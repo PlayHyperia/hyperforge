@@ -4,8 +4,10 @@ import type { TerrainDetailRegion } from "./TerrainQuadTree";
 
 /**
  * The broadcast's coarse terrain cannot describe a 15 m pond with 6.67 m cells.
- * Use the admitted gameplay grid density for its banks and the preparation hub,
- * not for every ocean/root chunk. No authoritative height or collision changes.
+ * Retain gameplay density at the hub and a finer grid at the irregular pond
+ * bank, not every ocean/root chunk. The two intersecting pond leaves cost
+ * 49,664 more triangles and 2,000,896 more geometry bytes than their 64 grid.
+ * This changes visual sampling, not authoritative height or collision rules.
  */
 export function createCompactPreparationDetailRegions(
   profile: WorldTerrainProfile,
@@ -23,6 +25,9 @@ export function createCompactPreparationDetailRegions(
   return ["central_haven", "haven_pond"].map((id) => {
     const area = areas[id];
     if (!area) throw new Error(`Missing compact preparation area: ${id}`);
-    return { ...area.bounds, resolution: gameplayResolution };
+    return {
+      ...area.bounds,
+      resolution: id === "haven_pond" ? 128 : gameplayResolution,
+    };
   });
 }

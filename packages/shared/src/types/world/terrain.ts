@@ -160,6 +160,8 @@ export interface RadialPondTerrainProfile {
   bankOuterRadius: number;
   /** Height of the dry bank. */
   bankHeight: number;
+  /** Metres of bounded angular shoreline variation; zero/absent is circular. */
+  shorelineAmplitude?: number;
 }
 
 /**
