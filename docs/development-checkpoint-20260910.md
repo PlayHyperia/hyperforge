@@ -32,15 +32,15 @@ older large-world-preservation requirements in historical notes.
   repositories. External `asset-studio` authoring/harness files have no configured
   remote of their own; committing the application does not back them up.
 
-## Verification at the checkpoint
+## Verification at the initial source checkpoint
 
 - Client and agent-plugin package typechecks pass.
 - Shared typecheck/build and server bundle build passed for the captured world
   candidate. The latest focused shared suite passed 30 tests in three files.
-- **Server package typecheck fails** under its stricter compiler settings on
+- **The initial server package typecheck failed** under its stricter settings on
   imported shared-source implicit types/index signatures and a missing Three
-  WebGPU utility declaration. This remains an open gate; a successful bundle
-  build or shared-only check does not replace the server typecheck.
+  WebGPU utility declaration. The type-only follow-up below closes this specific
+  gate; a successful bundle build or shared-only check did not replace it.
 - Existing PhysX copy/prebuilt/runtime controls pass 7/7; both WASMs validate.
 - A staged-change Gitleaks scan uses the checksum-verified official 8.30.1
   executable. The initial five findings were the same public authentication
@@ -86,8 +86,12 @@ Images and large raw reports are local evidence, not included in this Git commit
 ## Next gates
 
 - [x] Clear the strict server typecheck without weakening compiler settings.
-- [ ] Finish checkpointing Hyperbet, actual world assets and authoring sources
-  through their intended repositories/storage; verify remote branch tips.
+- [x] Checkpoint Hyperbet source on its existing work branch and verify GitHub
+  author/committer identity and the exact remote revision.
+- [x] Finish the actual world-asset upload and verify its remote revision and
+  GitHub author/committer identity.
+- [ ] Back up external editable Blender/authoring and diagnostic harness sources
+  through appropriate repository/storage; application commits do not cover them.
 - [ ] Correct actual terrain/contact and design the compact island and materials
   as one coherent composition, not another palette-only iteration.
 - [ ] Complete gear coverage/bindings, equipped motion and shared outdoor lighting.
@@ -120,7 +124,59 @@ bun run test \
   src/systems/shared/death/__tests__/PreparationDeathCustodyPolicy.test.ts
 ```
 
-Run from `packages/shared`. The separate world/viewport suite also passes30/30.
+Run from `packages/shared`. The separate world/viewport suite also passes 30/30.
 These checks close the reported compiler failure, not visual/performance or
 end-to-end launch acceptance. Existing game bundles were not rebuilt during
 this type-only follow-up; rebuild before the next source-pinned GPU session.
+
+## Cross-repository source checkpoints
+
+These are paired WIP revisions, not a release manifest or permission to promote
+candidate assets to production defaults. Branch tips may advance through normal,
+small follow-up commits; the immutable revisions below retain this checkpoint.
+
+| Repository | Work branch | Checkpoint revision | Remote verification |
+| --- | --- | --- | --- |
+| Hyperia application (`PlayHyperia/hyperforge`) | `codex/sol-duel-stream-launch` | `7f50b5abfd0e41504645331390673af879115743` | Exact GitHub branch tip and account verified |
+| Hyperbet (`PlayHyperia/hyperbet`) | `codex/sol-only-launch` | `25d8b41b9f4c2617fd9b885bb666a9f631f95be7` | Exact GitHub branch tip and account verified |
+| Runtime assets (`PlayHyperia/assets`) | `codex/duel-arena-launch-assets` | `1a308a23d2c0f367d033d63698d60e68baa7e464` | All 212 LFS objects uploaded; exact GitHub branch tip and account verified |
+
+All three commits map to GitHub user `dreaminglucid` as author and committer.
+Both application-source branches were zero commits ahead/behind their upstream
+after pushing; the asset branch was independently verified directly with
+`git ls-remote` and GitHub's commit API. No branch was force-pushed, merged to
+main, or deployed.
+
+Hyperbet verification passed 125 Node tests, 79 Bun tests and the app typecheck.
+Five other typechecks timed out and remain incomplete; generated-client
+regeneration and launch E2E are still open. Its own full receipt is
+`docs/release/2026-09-10-source-checkpoint.md` in the Hyperbet repository.
+No GitHub Actions runs were returned for either source work branch at this check;
+the local test receipts must not be described as a green GitHub CI run.
+
+The asset commit contains 289 selected paths and no deletions. All 224 selected
+GLB/VRM containers validate, all 54 selected JSON files parse, and the 212 unique
+referenced LFS objects were verified against their exact hashes and sizes before
+upload (834,881,528 bytes). Missing legacy files, cloud-only candidates, backup
+copies and original authoring sources were not silently removed or certified.
+
+The existing fresh-checkout asset bootstrap accepts `HYPERIA_ASSETS_REV` as a full
+40-character revision. Use the asset revision above when reproducing this
+checkpoint in a **new, isolated checkout**; the current bootstrap's existing-full-
+asset fast path does not switch an already-populated checkout to that revision.
+Verify the actual assets HEAD explicitly. Do not run bootstrap against a working
+asset directory to discard or overwrite local work.
+
+Redacted staged and committed-range secret scans passed with the reviewed narrow
+noncredential exceptions documented in each repository. They are not proof of
+the absence of every possible secret. Normal commit/LFS hooks remained enabled.
+Stale owned-by-no-process Git locks were moved recoverably. A cloud-placeholder
+asset branch reflog that blocked Git was preserved under a distinct recovery name
+in the same metadata directory; normal Git writes then resumed. No commit
+history or asset contents were discarded.
+
+The workspace is intentionally **not described as entirely clean or backed up**:
+six application permission-only changes, numbered local copies, local package-
+manager files, cloud-only legacy content and external `asset-studio` sources
+remain outside these checkpoints. Continue small, scoped commits with explicit
+staging, proportional tests, secret scanning and exact remote-ref verification.

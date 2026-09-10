@@ -18,11 +18,20 @@ assets to implement this direction.
   only an analytic height function; then verify paths, shores and transitions.
 - [ ] Measure representative frame/loading/memory cost as visual quality improves.
   Do not hide quality or resolution reductions inside a performance pass.
-- [ ] Organize the existing backlog into reviewable, verified commits and push
-  them to the existing work branches using the user's verified Git identity.
-  Exclude secrets, runtime databases, temporary files and bulky test captures;
-  retain source assets and reproducible evidence in their appropriate storage.
-  Continue committing/pushing coherent checkpoints as work progresses.
+- [x] Commit and push the application, Hyperbet and runtime-asset source backlog
+  to their existing work branches; verify the exact remote revisions and GitHub
+  author/committer `dreaminglucid`. Paired WIP checkpoints: Hyperia `7f50b5abf`,
+  Hyperbet `25d8b41b9`, assets `1a308a23d` (all 212 LFS objects uploaded).
+  Full revisions, tests, exclusions and open gates are recorded in the Hyperia
+  implementation's `docs/development-checkpoint-20260910.md`.
+- [ ] Back up external editable Blender/authoring and diagnostic harness sources
+  separately. Runtime GLB/VRM exports being pushed does not preserve their editable
+  source files. Retain original sources; exclude huge generated capture/recovery
+  directories and secrets from ordinary source commits.
+
+Continue small, scoped commits and pushes as work progresses, with proportional
+verification, secret scanning and exact remote-ref checks. These checkpoints are
+not release approval and do not certify the whole workspace clean or backed up.
 
 Historical statements forbidding unrequested commits/pushes are superseded by
 this explicit request. Deployment, purchases and unqualified default promotion
