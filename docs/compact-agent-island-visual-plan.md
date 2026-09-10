@@ -70,6 +70,22 @@ The bounded actual WebGPU **run02** completed **20 cases with zero recorded erro
 
 The balanced lighting candidate improves the compared presentation, but the shield remains dark, night fences remain weakly readable, and the studio reflection is unsuitable. No candidate is a new default or a complete visual pass. See the retained [world-lighting checkpoint evidence](../../asset-studio/game-test-integration/world-lighting-review01/RESULT.md) for the matched cases, limitations and cleanup.
 
+### Current actual compact baseline: probe07
+
+The corrected resource-subject study now completes 11 views/22 spatial PNGs with
+all 16 expected resources admitted. Actual Chrome/Metal/WebGPU stays at 1280×720,
+DPR 1; owned browser, process, PostgreSQL and port cleanup passes. The outer run
+still fails on the missing cow model, and canonical dagger metadata is still a
+release blocker. This is not a streaming, performance or live-agent-cycle pass.
+
+Manual review rejects the abrupt three-biome partitions, oversized terrain cuts,
+sparse ground dressing and pond-bank presentation. Preserve probe07 as the
+before-baseline. First correct authored grass heights/normals, elevated-water and
+exclusion handling without changing density/range/upload budgets; then rebuild
+the island's coherent composition and materials. Actual grass-to-triangle contact
+must be measured separately from computed-height parity. Full daylight/night art,
+gameplay, collision/navigation and representative performance remain open.
+
 ## Sequential implementation tasks
 
 ### 1. Verify lighting and material presentation at fixed cameras

@@ -4,7 +4,7 @@ Status: development checkpoint, **not a visual, performance, MVP or production p
 
 ## Pair the repositories
 
-The game commit containing this document requires assets commit `cd6c447cd473a1a223d7569138531a49e9a63c6b` on `codex/duel-arena-launch-assets` in `PlayHyperia/assets`. Do not deploy just one side. That assets commit changes only `manifests/world-config.json` and `manifests/world-areas.json`.
+The foundation game commit `85984a42ca50f959bf221457405fe3beec8aad4c` pairs with assets commit `cd6c447cd473a1a223d7569138531a49e9a63c6b` on `codex/duel-arena-launch-assets` in `PlayHyperia/assets`. This section records that historical pair, not any later grass opt-in checkpoint. Do not deploy just one side. That assets commit changes only `manifests/world-config.json` and `manifests/world-areas.json`.
 
 The admitted world-content SHA-256 is `53c47dbbfd0962e6da465d4c64d41b3240a0c31a94b8f0bd9001d8bf09340620`. It covers eleven placement manifests, not source, every item, art or whole-gameplay compatibility. New clients verify this identity before applying snapshots. Server-enforced compatibility acknowledgement for old clients remains required.
 
@@ -49,9 +49,38 @@ Probe06 receipts:
 
 The six baseline PNGs are not a complete terrain review: the normal baseline retains the readiness overlay; under-overlay images are explicitly diagnostic.
 
+## Later immutable baseline: probe07
+
+The corrected source-backed tile-snap/resource-ID study completes all 11 views and
+22 spatial PNGs in actual headful Chrome/Metal/WebGPU at 1280×720, DPR 1. All
+16 expected resources are admitted; terrain-only, combined authored-floor and
+per-PNG finite coverage checks pass. There are 37 custody receipts and zero
+page/GPU errors. The browser closes, all owned ports are free, PostgreSQL exits,
+and cleanupErrors is empty. All 96 source/build/asset pins remain unchanged.
+
+The outer run still **fails**: the missing cow model yields one 404 and five
+unexpected console errors. Fourteen canonical dagger fit-metadata errors remain
+explicit release blockers. This clean shutdown does not erase the earlier EPERM.
+The runner deliberately skips streaming and betting, so this is neither stream
+proof nor a complete preparation/duel cycle.
+
+Manual review of island-wide, hub and pond images rejects the current art:
+abrupt snow/canyon/forest partitions, oversized terrain cuts, very sparse ground
+dressing and a washed-out, poorly integrated pond. Keep these as the before
+baseline. Shared grass heights alone cannot resolve composition or material
+quality, and matching computed heights does not prove contact with the rendered
+triangles between vertices.
+
+Probe07 report SHA-256:
+`d629642874cbb63d5da92c49ba7a9dd0efbe29094aff7c38e7d4d02dcb5309e2`.
+Spatial study:
+`8ce978da41d286ec112a981dc7dd5391a3ca4e132b14a255da857311ee3e8175`.
+Launcher log:
+`3131818343bb9e992bfbfdec1d0217841081853beb7e4f72bfd2719b881a029c`.
+
 ## Next gates
 
-1. Correct diagnostic subject admission, retain a complete compact-island daylight/night review, resolve the missing cow model and qualify shutdown.
+1. Extend the admitted probe07 daylight baseline to a complete daylight/night review, resolve the missing cow model and qualify repeated shutdown.
 2. Share final authored-grade/pond heights and normals with GrassWorker; separate grass exclusion from grading and reject stale results after invalidation. Preserve current instancing, LOD, density/range and upload limits for the first correctness comparison.
 3. Art-direct landforms, shoreline, paths, materials and vegetation together. Current noise modulation is not hydraulic erosion; terrain roughness is uniform and per-surface normal/roughness detail remains work. AAA is an acceptance bar, not a property of the procedural algorithm.
 4. Qualify actual live preparation, banking, dynamic combat, reconnect/restart, streaming, SOL-only betting and representative long-duration performance. Bounds-only spawn admission, generic legacy hydration, road assumptions, old-client admission and startup timeouts remain open.

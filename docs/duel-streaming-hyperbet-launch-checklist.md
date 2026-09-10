@@ -34,6 +34,18 @@ verification, secret scanning and exact remote-ref checks. These checkpoints are
 not release approval and do not certify the whole workspace clean or backed up.
 
 
+## Compact daylight baseline and grass correction — 2026-09-10
+
+- [x] Push independent GLB skeleton cloning as `73df923604bfb1310274ee38d835cff9817ebb98`, with GitHub author/committer `dreaminglucid`. Two real HTTP/GLB/animation regressions cover fresh, in-flight and cache-hit instances, shared geometry/materials, independent poses and explicit skeleton disposal. This does not qualify full MobEntity teardown, cow loading or embedded animations.
+- [x] Push the compact foundation as game `85984a42ca50f959bf221457405fe3beec8aad4c` paired with assets `cd6c447cd473a1a223d7569138531a49e9a63c6b`. Both GitHub author and committer are `dreaminglucid`; no deployment or main merge.
+- [x] Correct the diagnostic resource identity expectations using the actual tile-snap and spawn-ID source. Probe07 admits all 16 expected resources and completes 11 views/22 spatial PNGs in actual Chrome/Metal/WebGPU at 1280×720, DPR 1. It retains 37 custody receipts, zero page/GPU errors and clean owned-stack/browser/port cleanup.
+- [ ] Resolve probe07's outer failure: the missing cow model produces a 404 and five unexpected console errors. Fourteen retained canonical dagger fit-metadata errors remain release blockers. Passing inner coverage is not an error-free world.
+- [ ] Replace the visibly weak compact blockout: abrupt snow/canyon/forest partitions, oversized terrain cuts, sparse ground dressing and poorly integrated pond banks are not accepted art. Probe07 is a before-baseline, not AAA, performance, live-cycle or streaming approval.
+- [ ] Complete and verify the grass surface correction: shared authored height/normal sampling, independent exclusion, elevated-water clearance and stale-generation rejection. Preparation ground and the pond bank may grow grass; station pads, plaza and arena exclusions remain. Keep the existing density, range, LOD and upload budgets for the first comparison.
+- [ ] Record actual instance-to-rendered-terrain contact as well as computed-height parity. Coarse rendered triangles can still differ between vertices; unit tests must not conceal that gap.
+
+Evidence: local `asset-studio/game-test-integration/compact-world-probe07/`. Report SHA-256 `d629642874cbb63d5da92c49ba7a9dd0efbe29094aff7c38e7d4d02dcb5309e2`; spatial study `8ce978da41d286ec112a981dc7dd5391a3ca4e132b14a255da857311ee3e8175`. All 96 source/build/asset pins remained unchanged. This later clean shutdown does not erase probe06's retained macOS EPERM failure.
+
 ## Compact island integration checkpoint — 2026-09-10 (in progress)
 
 - [x] Push bounded shutdown diagnostics as `f26d5a02b6f3882235da879a0721e03c7a6c48f9`
