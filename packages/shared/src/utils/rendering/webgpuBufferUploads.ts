@@ -1,9 +1,16 @@
-import WebGPUAttributeUtils from "three/src/renderers/webgpu/utils/WebGPUAttributeUtils.js";
+/// <reference path="../../types/rendering/webgpu-attribute-utils.d.ts" />
 
-interface BufferAttributeLike {
-  array: ArrayBufferView;
+import WebGPUAttributeUtils from "three/src/renderers/webgpu/utils/WebGPUAttributeUtils.js";
+import type {
+  BufferAttribute,
+  InterleavedBuffer,
+  InterleavedBufferAttribute,
+} from "three";
+
+type BufferAttributeLike = BufferAttribute | InterleavedBufferAttribute;
+type UploadBufferAttribute = (BufferAttribute | InterleavedBuffer) & {
   name?: string;
-}
+};
 
 interface BufferDataLike {
   buffer?: GPUBuffer;
@@ -12,9 +19,11 @@ interface BufferDataLike {
 interface WebGPUAttributeUtilsLike {
   backend: {
     device: GPUDevice;
-    get: (attribute: BufferAttributeLike) => BufferDataLike;
+    get: (attribute: UploadBufferAttribute) => BufferDataLike;
   };
-  _getBufferAttribute: (attribute: BufferAttributeLike) => BufferAttributeLike;
+  _getBufferAttribute: (
+    attribute: BufferAttributeLike,
+  ) => UploadBufferAttribute;
   createAttribute: (
     attribute: BufferAttributeLike,
     usage: GPUBufferUsageFlags,
@@ -39,8 +48,10 @@ function isMappedAtCreationCreateBufferFailure(error: unknown): boolean {
 }
 
 export function installWebGPUAttributeUploadFallback(): void {
-  const prototype = WebGPUAttributeUtils.prototype as WebGPUAttributeUtilsLike &
-    Record<PropertyKey, unknown>;
+  const prototype =
+    WebGPUAttributeUtils.prototype as WebGPUAttributeUtilsLike & {
+      [WEBGPU_ATTRIBUTE_UPLOAD_PATCH]?: boolean;
+    };
 
   if (prototype[WEBGPU_ATTRIBUTE_UPLOAD_PATCH] === true) {
     return;

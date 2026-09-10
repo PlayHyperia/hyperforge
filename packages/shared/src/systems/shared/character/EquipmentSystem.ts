@@ -1418,7 +1418,7 @@ export class EquipmentSystem extends SystemBase {
     }
 
     // DUPLICATION FIX: Acquire transaction lock to prevent race conditions
-    const inventorySystem = this.world.getSystem("inventory");
+    const inventorySystem = this.world.getSystem<InventorySystem>("inventory");
     if (inventorySystem && !inventorySystem.lockForTransaction(data.playerId)) {
       // Another transaction in progress, abort to prevent duplication
       this.sendMessage(
@@ -1568,7 +1568,7 @@ export class EquipmentSystem extends SystemBase {
     const quantityToReturn = equipmentSlot.quantity ?? 1;
 
     // DUPLICATION FIX: Check inventory has space FIRST
-    const inventorySystem = this.world.getSystem("inventory");
+    const inventorySystem = this.world.getSystem<InventorySystem>("inventory");
     if (inventorySystem && !inventorySystem.hasSpace(data.playerId, 1)) {
       this.sendMessage(
         data.playerId,
@@ -1865,7 +1865,7 @@ export class EquipmentSystem extends SystemBase {
     const itemIdStr = itemId.toString();
 
     // Check with InventorySystem directly (not via events - events require subscriber)
-    const inventorySystem = this.world.getSystem("inventory");
+    const inventorySystem = this.world.getSystem<InventorySystem>("inventory");
     if (inventorySystem && inventorySystem.hasItem(playerId, itemIdStr, 1)) {
       return true;
     }
@@ -2008,7 +2008,7 @@ export class EquipmentSystem extends SystemBase {
       };
     }
 
-    const inventorySystem = this.world.getSystem("inventory");
+    const inventorySystem = this.world.getSystem<InventorySystem>("inventory");
     const equipmentSlot = equipment[slot];
     const alreadyEquipped = equipmentSlot?.itemId?.toString() === itemId;
     const equippedQuantityBefore = equipmentSlot?.quantity ?? 0;

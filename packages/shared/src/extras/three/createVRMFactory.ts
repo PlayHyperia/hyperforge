@@ -767,7 +767,7 @@ export function createVRMFactory(
     let rateCheckedAt = 999;
     let rateCheck = true;
     let hasLoggedUpdatePipeline = false;
-    const update = (delta) => {
+    const update = (delta: number) => {
       elapsed += delta;
       let should = true;
       if (rateCheck) {
@@ -968,8 +968,8 @@ export function createVRMFactory(
       }
     };
 
-    const bonesByName = {};
-    const findBone = (name) => {
+    const bonesByName: Record<string, THREE.Bone | undefined> = {};
+    const findBone = (name: string): THREE.Bone | undefined => {
       // name is the official vrm bone name eg 'leftHand'
       // actualName is the actual bone name used in the skeleton which may different across vrms
       // CRITICAL: Use clonedHumanoid (not original humanoid) for bone lookups
@@ -985,7 +985,7 @@ export function createVRMFactory(
     };
 
     let firstPersonActive = false;
-    const setFirstPerson = (active) => {
+    const setFirstPerson = (active: boolean) => {
       if (firstPersonActive === active) return;
       const head = findBone("neck");
       if (!head) return;
@@ -1253,11 +1253,11 @@ function createCapsule(radius: number, height: number): THREE.BufferGeometry {
   return geometry;
 }
 
-const queryParams = {};
+const queryParams: Record<string, Record<string, string>> = {};
 function getQueryParams(url: string): Record<string, string> {
   if (!queryParams[url]) {
     const urlObj = new URL(url);
-    const params = {};
+    const params: Record<string, string> = {};
     for (const [key, value] of urlObj.searchParams.entries()) {
       params[key] = value;
     }

@@ -3041,7 +3041,9 @@ export class Entity implements IEntity {
 
   // Property management
   getProperty<T>(key: string, defaultValue?: T): T {
-    return (this.config.properties?.[key] ?? defaultValue) as T;
+    return ((this.config.properties as unknown as Record<string, unknown>)?.[
+      key
+    ] ?? defaultValue) as T;
   }
 
   setProperty(key: string, value: unknown): void {

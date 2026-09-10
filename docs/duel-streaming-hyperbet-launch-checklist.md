@@ -260,9 +260,11 @@ remain untouched. [Full results and retained failures](../../asset-studio/game-t
   defaults; no complete fit, performance, stream or production gate is closed.
 
 Main source checkpoint:50a75f204; operational/checklist checkpoint:446b8d1bd.
-Both are pushed to codex/sol-duel-stream-launch under dreaminglucid. Client/plugin
-checks pass; the strict server typecheck remains an explicitly documented open
-gate. Hyperbet/assets/authoring backup completion is tracked separately.
+Both are pushed to codex/sol-duel-stream-launch under dreaminglucid. The initial
+strict server compiler failure is resolved in a subsequent type-only correction:
+server/shared/client checks and68 focused tests pass; all10 changed runtime files
+emit identical JavaScript token streams. No compiler setting or runtime logic
+changed. Hyperbet/assets/authoring backup completion is tracked separately.
 
 
 ### G02/G07 shared-world checkpoint31 — 2026-09-10

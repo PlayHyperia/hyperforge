@@ -85,7 +85,7 @@ Images and large raw reports are local evidence, not included in this Git commit
 
 ## Next gates
 
-- [ ] Clear the strict server typecheck without weakening compiler settings.
+- [x] Clear the strict server typecheck without weakening compiler settings.
 - [ ] Finish checkpointing Hyperbet, actual world assets and authoring sources
   through their intended repositories/storage; verify remote branch tips.
 - [ ] Correct actual terrain/contact and design the compact island and materials
@@ -93,3 +93,34 @@ Images and large raw reports are local evidence, not included in this Git commit
 - [ ] Complete gear coverage/bindings, equipped motion and shared outdoor lighting.
 - [ ] Meet measured performance, real agent preparation/duel, streaming, SOL-only
   market lifecycle and endurance acceptance in the launch checklist.
+
+## Follow-up: strict typing restored
+
+The initial checkpoint's 53 strict server diagnostics are now resolved by
+explicit shared-source parameter/dictionary types, concrete inventory-system
+lookups, UI hit-test types and a narrow declaration for the installed Three
+WebGPU upload API. No compiler flags, dependency versions, assets or runtime
+logic changed. Server, shared and client package typechecks all pass.
+
+Both implementation review and independent root verification compare the ten
+modified runtime TypeScript files with the prior committed source: all ten
+emitted JavaScript token streams match exactly, excluding whitespace/comments.
+Eight emitted files match byte-for-byte; the two instancer files differ only in
+printer line wrapping. The additional declaration has no runtime output.
+
+ESLint with zero warnings, Prettier and scoped whitespace checks pass. The
+following existing shared tests pass 68/68 across five files:
+
+```sh
+bun run test \
+  src/extras/three/__tests__/createVRMFactory.materials.test.ts \
+  src/extras/three/__tests__/createVRMFactory.boneTransform.test.ts \
+  src/utils/rendering/__tests__/ModelCacheGeometry.test.ts \
+  src/systems/shared/combat/__tests__/DeathUtils.test.ts \
+  src/systems/shared/death/__tests__/PreparationDeathCustodyPolicy.test.ts
+```
+
+Run from `packages/shared`. The separate world/viewport suite also passes30/30.
+These checks close the reported compiler failure, not visual/performance or
+end-to-end launch acceptance. Existing game bundles were not rebuilt during
+this type-only follow-up; rebuild before the next source-pinned GPU session.

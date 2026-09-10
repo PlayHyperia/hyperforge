@@ -129,9 +129,10 @@ function createSharedGeometry(
   if (source.index) geo.setIndex(source.index.clone());
   if (source.morphAttributes) {
     for (const name in source.morphAttributes) {
-      geo.morphAttributes[name] = source.morphAttributes[name].map((a) =>
-        a.clone(),
-      );
+      geo.morphAttributes[name as keyof typeof source.morphAttributes] =
+        source.morphAttributes[
+          name as keyof typeof source.morphAttributes
+        ]!.map((a) => a.clone());
     }
   }
   if (source.groups.length > 0) {

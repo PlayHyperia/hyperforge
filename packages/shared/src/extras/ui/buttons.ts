@@ -117,7 +117,7 @@ export const buttons = new Set([
  *
  * Used by ClientInput to normalize keyboard events to consistent property names.
  */
-export const codeToProp = {
+export const codeToProp: Record<string, string> = {
   KeyA: "keyA",
   KeyB: "keyB",
   KeyC: "keyC",

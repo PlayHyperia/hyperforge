@@ -710,7 +710,7 @@ export class PlayerDeathSystem extends SystemBase {
     }
 
     // Get inventory system
-    const inventorySystem = this.world.getSystem("inventory");
+    const inventorySystem = this.world.getSystem<InventorySystem>("inventory");
     if (!inventorySystem) {
       if (isPreparationCustody) {
         throw new Error("preparation_death_custody_inventory_unavailable");
