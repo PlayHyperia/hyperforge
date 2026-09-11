@@ -34,6 +34,15 @@ export const DAY_CYCLE = {
 // DIRECTIONAL LIGHT (SUN / MOON)
 // ============================================================================
 
+/**
+ * Chromaticity calibration candidate: the four night RGB endpoints and shared
+ * shade tint below retain 25% of their original chroma and 75% achromatic Y.
+ * Values are linear RGB, with Rec709 Y = .2126 R + .7152 G + .0722 B; each
+ * precomputed endpoint preserves its original Y without per-frame work.
+ * This conserves palette luminance, not every colored surface's rendered
+ * luminance. Intensities, exposure and timing are unchanged; art approval still
+ * requires actual day/night captures with the shared shade treatment.
+ */
 export const SUN_LIGHT = {
   /** Fallback sun direction before SkySystem takes over */
   DEFAULT_DIRECTION: [0.5, 0.8, 0.3] as readonly [number, number, number],
@@ -51,7 +60,11 @@ export const SUN_LIGHT = {
 
   /** Moon intensity = nightIntensity × this × transitionFade */
   MOON_INTENSITY_MULTIPLIER: 0.35,
-  MOON_COLOR: [0.05, 0.5, 0.7] as readonly [number, number, number],
+  MOON_COLOR: [0.3265775, 0.4390775, 0.4890775] as readonly [
+    number,
+    number,
+    number,
+  ],
 
   /** Z-axis tilt of the sun arc (0 = flat E-W, 1 = full N-S) */
   TILT: 0.3,
@@ -73,11 +86,15 @@ export const SUN_SHADE = {
   STRENGTH: 1.0,
 
   /**
-   * Fixed shade tint color: vec3(0.0, 0.5, 0.7).
+   * Luminance-preserving, lower-chroma calibration of the original teal tint.
    * Applied as: tinted = color × TINT_COLOR, then mixed by shade factor.
    * Dynamic behavior comes from the shade factor (sun position), not this color.
    */
-  TINT_COLOR: [0.0, 0.5, 0.7] as readonly [number, number, number],
+  TINT_COLOR: [0.306105, 0.431105, 0.481105] as readonly [
+    number,
+    number,
+    number,
+  ],
 } as const;
 
 // ============================================================================
@@ -107,11 +124,19 @@ export const HEMISPHERE_LIGHT = {
 
   /** Sky color lerped between NIGHT → DAY based on dayIntensity */
   DAY_SKY_COLOR: [0.53, 0.81, 0.92] as readonly [number, number, number],
-  NIGHT_SKY_COLOR: [0.0, 0.15, 0.3] as readonly [number, number, number],
+  NIGHT_SKY_COLOR: [0.096705, 0.134205, 0.171705] as readonly [
+    number,
+    number,
+    number,
+  ],
 
   /** Ground color lerped between NIGHT → DAY */
   DAY_GROUND_COLOR: [0.36, 0.27, 0.18] as readonly [number, number, number],
-  NIGHT_GROUND_COLOR: [0.02, 0.05, 0.1] as readonly [number, number, number],
+  NIGHT_GROUND_COLOR: [0.040424, 0.047924, 0.060424] as readonly [
+    number,
+    number,
+    number,
+  ],
 } as const;
 
 // ============================================================================
@@ -130,7 +155,11 @@ export const AMBIENT_LIGHT = {
 
   /** Color lerped between NIGHT → DAY */
   DAY_COLOR: [1.0, 0.95, 0.95] as readonly [number, number, number],
-  NIGHT_COLOR: [0.05, 0.35, 0.5] as readonly [number, number, number],
+  NIGHT_COLOR: [0.2352875, 0.3102875, 0.3477875] as readonly [
+    number,
+    number,
+    number,
+  ],
 } as const;
 
 // ============================================================================

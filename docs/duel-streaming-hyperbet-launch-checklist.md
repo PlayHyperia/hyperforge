@@ -101,6 +101,35 @@ Current evidence and exact scope: the implementation's
 `docs/renderer-upgrade-qualification-20260911.md`. Historical probe17 and its
 executed source pins remain preserved; they describe the pre-upgrade baseline.
 
+## Lighting calibration and retained renderer fix — 2026-09-11
+
+- [x] Push scoped viewport-source fix `4d26f30ef243613033fd3dbdbad6345f1560ede8`;
+  exact remote revision and GitHub author/committer `dreaminglucid` verified.
+- [x] Reduce extreme cyan in five light/shade endpoints without changing their
+  linear luminance, intensity, exposure, timing or source assets. New 12 real-color/
+  material tests pass; wider focused suite 54 tests, shared typecheck and all
+  three builds pass. Actual probe25 retains zero GPU/TSL/page errors, 258 unchanged
+  pins, 11 spatial views and clean owned teardown.
+- [ ] Finish shared outdoor lighting: probe25 skin is no longer teal, but still
+  dark/ashy against studio-lit bronze. Match skin/gear/terrain environment policy,
+  authored metallicity, tree/water response, shadow/contact and visible sky.
+  Do not promote the rejected scene-wide studio reference or call this finished.
+- [ ] Qualify day/dusk/night motion and actual stream output at measured sustained
+  performance. Current matched views have naturally advancing time/animation,
+  retain a baseline loading overlay and are not a pixel-identical A/B or FPS test.
+- [ ] Resolve actual cow model/animation closure: three spawned cows request an
+  absent VRM; current preflight does not validate active mob dependency bytes.
+  A native quadruped asset and inline/external animation lifecycle need real tests.
+- [ ] Qualify canonical authored-avatar equipment delivery. The legacy dagger
+  and separately injected authored dagger both lack valid fit certification;
+  displaying the latter does not qualify the former. Preserve readiness gates
+  until genuine byte/fit evidence and normal equip/replication pass.
+
+Evidence and remaining scope: `docs/lighting-chromaticity-qualification-20260911.md`.
+The whole-world result still fails 19 cow/dagger content errors. Single-arena
+composition, terrain/shoreline, resource-tree distribution, world art, animation,
+audio, streaming and launch performance remain open.
+
 ## Current delivery direction — 2026-09-10 user clarification
 
 The compact agent island is the only target world. **The large island does not
