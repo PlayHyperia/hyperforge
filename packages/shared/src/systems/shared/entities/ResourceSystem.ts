@@ -47,6 +47,7 @@ import { isPositionInsideDuelArenaZone } from "../../../data/duel-manifest";
 import { GATHERING_CONSTANTS } from "../../../constants/GatheringConstants";
 import { TERRAIN_CONSTANTS } from "../../../constants/GameConstants";
 import { findFishingSpotTiles, shuffleArray } from "../../../utils/ShoreUtils";
+import { validateAuthoredTreeInstanceId } from "../../../data/ResourceInstanceIdentity";
 import type { WorldArea } from "../../../types/world/world-types";
 // Note: quaternionPool no longer used here - face rotation is deferred to FaceDirectionManager
 
@@ -1101,6 +1102,7 @@ export class ResourceSystem extends SystemBase {
           position: { x: r.position.x, y: groundedY, z: r.position.z },
           type: mappedType as TerrainResourceSpawnPoint["type"],
           subType: subType as TerrainResourceSpawnPoint["subType"],
+          instanceId: r.instanceId,
         });
       }
 
@@ -2111,6 +2113,11 @@ export class ResourceSystem extends SystemBase {
     groundAuthoredLand = false,
   ): Resource | undefined {
     const { position, type } = spawnPoint;
+    const authoredId = validateAuthoredTreeInstanceId(
+      spawnPoint.instanceId,
+      type,
+      groundAuthoredLand,
+    );
 
     // Map spawn type to resource type for manifest lookup
     const resourceType: "tree" | "fishing_spot" | "ore" | "herb_patch" =
@@ -2163,7 +2170,9 @@ export class ResourceSystem extends SystemBase {
 
     // All values come from manifest - no hardcoding
     const resource: Resource = {
-      id: `${type}_${snappedPosition.x.toFixed(0)}_${snappedPosition.z.toFixed(0)}`,
+      id:
+        authoredId ??
+        `${type}_${snappedPosition.x.toFixed(0)}_${snappedPosition.z.toFixed(0)}`,
       type: resourceType,
       name: manifestData.name,
       position: {

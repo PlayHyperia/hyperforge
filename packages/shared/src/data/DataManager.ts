@@ -30,6 +30,7 @@ import {
   getNPCsInArea,
 } from "./world-areas";
 import { BIOMES } from "./world-structure";
+import { validateAuthoredResourceIdentities } from "./ResourceInstanceIdentity";
 import {
   canonicalWorldJson,
   WorldManifestIdentityBuilder,
@@ -628,6 +629,13 @@ export class DataManager {
             level3Areas: Record<string, WorldArea>;
             specialAreas?: Record<string, WorldArea>;
           }>(`${baseUrl}/world-areas.json`, "world-areas.json");
+          validateAuthoredResourceIdentities([
+            worldAreasData.starterTowns,
+            worldAreasData.level1Areas,
+            worldAreasData.level2Areas,
+            worldAreasData.level3Areas,
+            worldAreasData.specialAreas,
+          ]);
           Object.assign(
             ALL_WORLD_AREAS,
             worldAreasData.starterTowns,
@@ -926,6 +934,13 @@ export class DataManager {
         specialAreas?: Record<string, WorldArea>;
       };
       // Merge all areas into ALL_WORLD_AREAS (including specialAreas like duel_arena)
+      validateAuthoredResourceIdentities([
+        worldAreas.starterTowns,
+        worldAreas.level1Areas,
+        worldAreas.level2Areas,
+        worldAreas.level3Areas,
+        worldAreas.specialAreas,
+      ]);
       Object.assign(
         ALL_WORLD_AREAS,
         worldAreas.starterTowns,

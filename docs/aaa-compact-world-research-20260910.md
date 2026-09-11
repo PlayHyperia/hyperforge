@@ -145,7 +145,22 @@ instrumented correctness captures from representative performance runs.
 
 ## Current implementation and evidence limits — 2026-09-11
 
-The paired pushed checkpoints are game
+Current uncommitted follow-up: five-tree authored redistribution and actual
+daylight sole/floor measurements pass their evidence gates in probes37/38, while
+both whole runs retain inherited content failures. The physical 9cm player-root
+disagreement and large-scale island composition remain defects. See
+[grove/contact qualification](authored-grove-contact-qualification-20260911.md).
+
+Latest pushed game checkpoint is
+`426cb8039deab0e96848dcab7b32ff3a91687061`, including resource lifetime checkpoint
+`72621c1bc871473faee161ae56faff843f1f2ee3`; assets remain
+`d6f52841f5d9173247e4499902ba1c27f96c2a89`. Probe34's focused daylight study and
+probe35's complete spatial study pass, but both whole runs retain cow/dagger
+content failures. Their reviewed pixels remain below the intended art standard:
+detached-looking character shadows, weak armor/material depth, uniform sparse
+lawn and crowded resource crowns. See [exact evidence and remaining gates](resource-grove-prerequisites-20260911.md).
+
+The preceding paired presentation checkpoints were game
 `621f6e94a7da83b298c085ca0d1e48d88c1a9bee` and assets
 `d6f52841f5d9173247e4499902ba1c27f96c2a89`. There is now one authoritative
 arena, a smaller campus grade, native compact-tree lighting and corrected
@@ -155,13 +170,43 @@ inherited cow/dagger content errors. The image remains below the intended art
 standard; this is not a release qualification. See
 [compact presentation evidence](compact-presentation-qualification-20260911.md).
 
-The next uncommitted slice adds an explicit sunlight-shadow profile with startup
+Subsequent checkpoint `9c004c2ad82dc5291c385cfada73c1e614e09145` added the explicit sunlight-shadow profile with startup
 preference ownership and actual configuration receipts. Fresh package builds,
 typechecks and 239 focused tests pass after correcting the browser export boundary
-and embedded-route scope. GPU, visual and representative performance checks are
-still pending; see [shadow qualification](shadow-stream-profile-qualification-20260911.md).
+and embedded-route scope. Probes31–33 retained actual WebGPU evidence; visual
+approval and representative performance remain open. See [shadow qualification](shadow-stream-profile-qualification-20260911.md).
 No optional effect is promoted by this research document. Heavy diagnostic
 captures must not be presented as representative frame-time benchmarks.
+
+### Follow-up: contact before effects, stable coverage before more maps
+
+The current single4096² map spans400m, or9.77cm per texel. Actual r186 shadow
+coordinates also expose roughly11.99cm of light-depth-equivalent bias at the
+current near/far0.5/600 and bias0.0002; that is not a measured vertical foot gap.
+Probe34 instead confirms two actor roots differing by9cm over one flat lobby
+floor. Actual deformed sole measurements are needed before either root placement
+or shadow bias is corrected; stale copied-logic grounding tests are not runtime
+evidence.
+
+The next shadow experiment should retain one map, qualify tighter useful coverage
+and snap its centre in light space. Avoid continuously changing the projection
+scale: conservative quantized spans and grow-immediately/shrink-on-cut hysteresis
+are a candidate, not yet implemented. Include off-camera casters whose projected
+shadows enter the view; current tree `setVisibleAt(false)` culling can remove them.
+Do not duplicate decorative trees or silently shrink shadow distance to make a
+small image look sharper. Fitting and stabilization are established approaches;
+see [Microsoft shadow-map guidance](https://learn.microsoft.com/en-us/windows/win32/dxtecharts/common-techniques-to-improve-shadow-depth-maps).
+
+CSM remains a separate option, not a toggle-ready fix: each cascade owns another
+shadow-casting light, and camera changes require updated frustums. Locally,
+terrain currently disables shadow receiving when CSM is enabled, so that
+incompatibility must be solved and measured first. [Three CSM documentation](https://threejs.org/docs/pages/CSMShadowNode.html).
+
+Later contact-AO trials should compare small-radius half-resolution GTAO with
+full resolution and include its depth/normal and denoising cost. More samples
+increase work; temporal filtering requires TRAA and can introduce ghosting.
+AO cannot repair physically floating feet or missing directional casters.
+[Three GTAO documentation](https://threejs.org/docs/pages/GTAONode.html).
 
 ## Historical pond checkpoint
 

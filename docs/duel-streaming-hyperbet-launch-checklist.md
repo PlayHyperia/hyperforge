@@ -1,7 +1,48 @@
 # Duel Arena, Streaming, and Hyperbet Launch Checklist
 
+## Authored grove relocation and measured contact — in verification, 2026-09-11
+
+- [x] Move the same five authored harvestable trees away from the crowded altar
+  cluster; preserve legacy IDs, species/model selection, scales, yields, original
+  area membership, bounds, safety/death policy and terrain grades. No population
+  increase or separate decorative forest. Eight procedural trees remain unchanged.
+- [x] Validate explicit tree identity before manifest publication; reject malformed,
+  non-tree/procedural overrides, duplicate IDs/anchors and live conflicting moves.
+- [x] Check actual transformed LOD0 GLB bounds against roads, stations, NPCs and
+  pond; retain four cardinal approaches and the existing 32-tile preparation
+  envelope. Probe36 correctly failed preflight before opening the game; adjust
+  positions inside the gate, never widen or bypass it. Native preflight now passes.
+- [x] Shared resource/placement regression84, contact harness48, spatial harness80,
+  shared/client/server typechecks, scoped lint and fresh client/server builds pass.
+  Spatial80 excludes only the retired eight-floor assertion; its complete current
+  three-floor replacement passes. Counts are scoped and can overlap.
+- [x] Real PostgreSQL restart regression3/3 passes with final positions and actual
+  authored water/flat grades. All five depletion records and original absolute
+  deadlines survive new World/pool owners; owned test databases are cleaned up.
+- [x] Inspect actual daylight contact37 and full spatial38 captures. Their studies
+  pass, but whole runs still FAIL inherited19 cow/dagger errors/cow404. Zero recorded
+  GPU/page errors, clean owned cleanup;18+28 PNGs retained. No visual approval.
+- [ ] Fix measured physical contact: first actor floats76–80mm; second clips10–14mm.
+  Root heights differ exactly90mm. Unify real support/clearance across spawn,
+  movement and interpolation; preserve avatar/gear geometry and terrain grading.
+- [ ] Complete large-scale composition: coastal ridge/inlet, coherent ground regions
+  and campus materials. Grove framing improved; the broad sparse lawn and oversized
+  empty southern island remain below the intended standard. Captures are not
+  representative performance or decoded-stream proof.
+- [ ] Qualify actual agent walking/gathering, depletion/regrowth and reconnect at
+  these positions. CPU routes omit complete station/NPC movement occupancy; magic
+  canopy overlaps part of the bandit encounter region and needs image review.
+- [ ] Continue island-wide functional woodland, landforms, surface/grass art,
+  stable fine shadows, off-camera casters, animation/audio and decoded streaming.
+  This is a composition candidate, not AAA/art/default/production acceptance.
+
 ## Resource lifetimes and daylight character shadows — candidate, 2026-09-11
 
+- [x] Push resource checkpoint72621c1bc871473faee161ae56faff843f1f2ee3 and
+  shadow checkpoint426cb8039deab0e96848dcab7b32ff3a91687061. GitHub verifies both
+  author/committer dreaminglucid; normal hooks and staged secret scans pass.
+  All25 changed pinned runtime/test files match probe35 after commit. Paired
+  assets remain d6f52841f5d9173247e4499902ba1c27f96c2a89; no default promotion.
 - [x] Preserve the eight procedural tree IDs/species/count while assigning
   centred chunk ownership and grounding final snapped anchors. Maximum measured
   Y correction0.466842m; no grove relocation/density change in this checkpoint.

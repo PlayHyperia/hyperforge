@@ -409,6 +409,8 @@ export interface BiomeResource {
   type: "tree" | "fishing_spot" | "mine" | "herb_patch";
   position: WorldPosition;
   resourceId: string;
+  /** Optional durable existing identity for an authored tree; layout changes require restart. */
+  instanceId?: string;
   respawnTime: number;
   level: number; // Required level to harvest
 }

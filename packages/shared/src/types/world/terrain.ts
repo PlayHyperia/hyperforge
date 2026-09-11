@@ -32,8 +32,10 @@ export type OreSubType =
 export type ResourceSubType = TreeSubType | OreSubType;
 
 export interface TerrainResourceSpawnPoint {
-  /** Seeded candidate provenance; runtime resource identity remains coordinate-based. */
+  /** Seeded candidate provenance only; never an override for runtime identity. */
   id?: string;
+  /** Validated durable tree identity, accepted only on authored manifest batches. */
+  instanceId?: string;
   position: Position3D;
   type: "tree" | "rock" | "ore" | "herb" | "fish" | "gem" | "rare_ore";
   /** Optional subtype for variant selection (e.g., "oak" for tree_oak, "copper" for ore_copper) */

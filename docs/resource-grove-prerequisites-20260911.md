@@ -2,15 +2,26 @@
 
 ## Scope and status
 
-In progress. This is an authority, grounding and visual-lifetime prerequisite,
+Follow-up: the authored five-tree relocation and actual 24-boundary boot-contact
+measurement are now implemented and captured in probes37/38. See
+[grove/contact qualification](authored-grove-contact-qualification-20260911.md)
+for final positions, retained failed preflight36, PostgreSQL restart evidence,
+visible floating/clipping and remaining art/gameplay/performance gates. The
+prerequisite checkpoint described below remains historical, not a new claim that
+its original crowded layout is still current.
+
+Implemented and checkpointed, with visual/launch qualifications still open.
+This is an authority, grounding and visual-lifetime prerequisite,
 **not completed grove composition or production acceptance**. The user wants
 the existing harvestable trees to populate the compact island, with one arena
 and no retained large island or duplicate decorative forest.
 
-The last pushed renderer checkpoint is
-`9c004c2ad82dc5291c385cfada73c1e614e09145`, paired with unchanged assets
-`d6f52841f5d9173247e4499902ba1c27f96c2a89`. The changes below are a subsequent
-working-tree candidate until a verified checkpoint is recorded.
+Pushed resource checkpoint `72621c1bc871473faee161ae56faff843f1f2ee3` and shadow
+checkpoint `426cb8039deab0e96848dcab7b32ff3a91687061` retain unchanged assets
+`d6f52841f5d9173247e4499902ba1c27f96c2a89`. GitHub verifies both author and
+committer as dreaminglucid. Normal hooks and staged secret scans pass; all25
+changed pinned runtime/test files match probe35 after commit. These are tested
+implementation checkpoints, not visual/default/performance/launch promotion.
 
 ## Why the landscape is still sparse
 
@@ -114,7 +125,7 @@ separate qualifications.
   are not sole-vertex measurements and must not be treated as proven boot gaps.
 - [ ] Complete spatial regression, rendered hillside root contact and no ghost
   resources after actual streaming/unload/reconnect/depletion/respawn.
-- [ ] Scoped commits/pushes with verified identity and exact evidence revisions.
+- [x] Scoped commits/pushes with verified identity and exact evidence revisions.
 
 ### Probe34 evidence and limits
 
