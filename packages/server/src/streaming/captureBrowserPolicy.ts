@@ -24,11 +24,13 @@ export const DEFAULT_CAPTURE_GAME_URL = "http://localhost:3333/stream.html";
 export const CANONICAL_CAPTURE_RENDER_PROFILE = "canonical-720p60-v1";
 export const FALLBACK_CAPTURE_RENDER_PROFILE = "fallback-720p30-v1";
 export const SHADOWS_CAPTURE_RENDER_PROFILE = "shadows-720p60-v1";
+export const ISLAND_CAPTURE_RENDER_PROFILE = "island-720p60-v1";
 
 export type CaptureRenderProfileId =
   | typeof CANONICAL_CAPTURE_RENDER_PROFILE
   | typeof FALLBACK_CAPTURE_RENDER_PROFILE
-  | typeof SHADOWS_CAPTURE_RENDER_PROFILE;
+  | typeof SHADOWS_CAPTURE_RENDER_PROFILE
+  | typeof ISLAND_CAPTURE_RENDER_PROFILE;
 
 export type CaptureRenderProfileSnapshot = {
   id: string;
@@ -105,6 +107,24 @@ export const CAPTURE_RENDER_PROFILE_CONTRACTS = Object.freeze({
     shadows: "med",
     postprocessing: false,
     grassProfile: "fixed-arena-v1",
+    avatarLodPolicy: "distance-authoritative-v1",
+  }),
+  // Explicit vegetation qualification candidate, never inferred from frame rate.
+  [ISLAND_CAPTURE_RENDER_PROFILE]: Object.freeze({
+    id: ISLAND_CAPTURE_RENDER_PROFILE,
+    targetFps: 60,
+    sourceFps: 60,
+    outputFps: 60,
+    viewportWidth: 1280,
+    viewportHeight: 720,
+    outputWidth: 1280,
+    outputHeight: 720,
+    renderPixelBudget: 1280 * 720,
+    maximumDpr: 1,
+    antialiasing: true,
+    shadows: "med",
+    postprocessing: false,
+    grassProfile: "compact-island-v1",
     avatarLodPolicy: "distance-authoritative-v1",
   }),
 }) satisfies Readonly<
@@ -189,7 +209,11 @@ export function normalizeCaptureRenderProfileSnapshot(
     );
     return application ? { ...contract, explicit: true, application } : null;
   }
-  if (id === SHADOWS_CAPTURE_RENDER_PROFILE) return null;
+  if (
+    id === SHADOWS_CAPTURE_RENDER_PROFILE ||
+    id === ISLAND_CAPTURE_RENDER_PROFILE
+  )
+    return null;
   return { ...contract, explicit: true };
 }
 
@@ -259,6 +283,30 @@ function isAppliedRenderState(
       value.water.activeReflectionCount < 0)
   )
     return false;
+  if (value.grass !== undefined && value.grass !== null) {
+    const grass = value.grass;
+    if (
+      !isRecord(grass) ||
+      grass.schemaVersion !== 1 ||
+      typeof grass.profileId !== "string" ||
+      typeof grass.eligibility !== "string" ||
+      typeof grass.terrainProfileIdentity !== "string" ||
+      !grass.terrainProfileIdentity.trim() ||
+      grass.terrainProfileIdentity.length > 16_384 ||
+      typeof grass.castShadow !== "boolean" ||
+      typeof grass.destroyed !== "boolean" ||
+      ![
+        "minimumLodLevel",
+        "clumpSpacingMultiplier",
+        "clumpSpacing",
+        "maxRenderDistance",
+        "maxChunksPerFrame",
+      ].every(
+        (key) => typeof grass[key] === "number" && Number.isFinite(grass[key]),
+      )
+    )
+      return false;
+  }
   const sun = value.sunlight;
   return (
     sun === null ||

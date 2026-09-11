@@ -1,9 +1,11 @@
 import type { WorldTerrainProfile } from "./WorldTerrainProfile";
+import type { GrassSurfaceEligibility } from "../../../runtime/clientViewportMode";
 
 /**
  * CPU grass-base approximation of compact PBR diffuse, not a lighting bake.
  * Linear means of the original 1024px RGB maps; the packing manifest and tests
- * reproduce these values. Texel detail stays on the GPU, ecology is unchanged.
+ * reproduce these values. Texel detail stays on the GPU. Legacy ecology stays
+ * unchanged; explicit compact decorative grass may opt into layer support.
  * Self-contained so GrassWorker embeds exactly this factory after bundling.
  */
 export type CompactTerrainPond = Readonly<{
@@ -98,6 +100,20 @@ export function createCompactTerrainColorOperations() {
     },
   };
   const operations = {
+    grassEligibility(
+      value: unknown,
+      algorithm: string,
+    ): GrassSurfaceEligibility {
+      if (value === undefined || value === "legacy-biome-v1")
+        return "legacy-biome-v1";
+      if (
+        value !== "compact-pbr-v1" ||
+        algorithm !== "compact-island-sculpt-v2"
+      ) {
+        throw new Error("Invalid compact grass surface eligibility");
+      }
+      return "compact-pbr-v1";
+    },
     macroField(profile: WorldTerrainProfile): CompactTerrainMacroField | null {
       if (profile.algorithm !== "compact-island-sculpt-v2") return null;
       const ridge = profile.landform;
@@ -342,6 +358,37 @@ export function createCompactTerrainColorOperations() {
           input.noiseValue,
         ),
       };
+    },
+    /** Physical grass-layer support BEFORE road suppression by the generator. */
+    grassSupport(input: {
+      noiseValue: number;
+      distortNoise: number;
+      slope: number;
+      surface: {
+        x: number;
+        z: number;
+        height: number;
+        pond: CompactTerrainPond | null;
+        macroField?: CompactTerrainMacroField | null;
+      };
+    }) {
+      const { dirt, cliff } = operations.weights({
+        noiseValue: input.noiseValue,
+        distortNoise: input.distortNoise,
+        slope: input.slope,
+        roadInfluence: 0,
+        pondSurface: operations.pondWeights({
+          ...input.surface,
+          noiseValue: input.distortNoise,
+        }),
+        macroSurface: operations.macroWeights(
+          input.surface.x,
+          input.surface.z,
+          input.noiseValue,
+          input.surface.macroField ?? null,
+        ),
+      });
+      return (1 - dirt) * (1 - cliff);
     },
     /**
      * sampleNoiseCPU(x,z,0.0008) and geometric

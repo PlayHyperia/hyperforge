@@ -6,19 +6,25 @@ function makeWindow(pathname: string, search = ""): Window {
 }
 
 describe("ZoneVisualsSystem streaming marker policy", () => {
-  it("suppresses only the arena marker in broadcast and embedded spectator viewports", () => {
+  it("suppresses navigation emojis throughout broadcast preparation and arena views", () => {
     for (const win of [
       makeWindow("/stream.html"),
       makeWindow("/", "?embedded=true&mode=spectator"),
     ]) {
-      expect(shouldRenderZoneMarker("duel_arena", win)).toBe(false);
-      expect(shouldRenderZoneMarker("central_haven", win)).toBe(true);
+      for (const areaId of [
+        "duel_arena",
+        "central_haven",
+        "haven_pond",
+        "future_navigation_marker",
+      ]) {
+        expect(shouldRenderZoneMarker(areaId, win)).toBe(false);
+      }
     }
   });
 
-  it("preserves the arena marker for ordinary gameplay", () => {
-    expect(shouldRenderZoneMarker("duel_arena", makeWindow("/play"))).toBe(
-      true,
-    );
+  it("preserves every navigation marker for ordinary gameplay", () => {
+    for (const areaId of ["duel_arena", "central_haven", "haven_pond"]) {
+      expect(shouldRenderZoneMarker(areaId, makeWindow("/play"))).toBe(true);
+    }
   });
 });

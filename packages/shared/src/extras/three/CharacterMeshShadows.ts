@@ -3,7 +3,7 @@ import { resolveExplicitStreamingRenderProfile } from "../../runtime/clientViewp
 
 /** Resolve the same startup-only candidate as the actual streaming viewport. */
 export function isCharacterShadowCandidateActive(): boolean {
-  return resolveExplicitStreamingRenderProfile()?.id === "shadows-720p60-v1";
+  return resolveExplicitStreamingRenderProfile()?.shadows === "med";
 }
 
 function isSolidShadowSurface(material: Material): boolean {

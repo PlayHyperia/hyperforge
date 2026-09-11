@@ -31,6 +31,8 @@ export {
   evaluateStreamingRenderProfileApplication,
   type StreamingRenderPreferences,
   type StreamingRenderAppliedState,
+  type StreamingGrassProfileReceipt,
+  type GrassSurfaceEligibility,
   type StreamingRenderProfileApplication,
   type StreamingRenderProfile,
   type StreamingRenderProfileId,

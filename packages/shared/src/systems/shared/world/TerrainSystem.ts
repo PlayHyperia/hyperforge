@@ -153,6 +153,7 @@ import {
 import { WaterVisualManager } from "./WaterVisualManager";
 import {
   GrassVisualManager,
+  COMPACT_ISLAND_GRASS_VISUAL_PROFILE,
   STREAMING_GRASS_VISUAL_PROFILE,
   type GrassWorkerSetup,
 } from "./GrassVisualManager";
@@ -164,6 +165,8 @@ import {
   isStreamPageRoute,
   isStreamingLikeViewport,
   resolveExplicitStreamingWorldProfile,
+  resolveExplicitStreamingRenderProfile,
+  type GrassSurfaceEligibility,
 } from "../../../runtime/clientViewportMode";
 import {
   hasActiveStreamingPreparationPresentation,
@@ -289,6 +292,10 @@ export class TerrainSystem extends System {
   private pendingTileSet = new Set<string>();
   /** Preserve full-content versus geometry-only intent while a tile is queued. */
   private pendingTileContent = new Map<string, boolean>();
+  /** Geometry-only residents entering the core; ownership is the exact tile, not its key. */
+  private pendingContentPromotions = new Map<string, TerrainTile>();
+  private pendingTileGenerations = new Map<string, object>();
+  private workerBatchLease: object | null = null;
   private pendingCollisionKeys: string[] = [];
   private pendingCollisionSet = new Set<string>();
   // Deferred walkability baking queue — spreads 10,000 iterations across ticks
@@ -635,14 +642,21 @@ export class TerrainSystem extends System {
     tileZ: number,
     generateContent = true,
   ): void {
+    if (this.destroyed) return;
     const key = `${tileX}_${tileZ}`;
-    if (this.terrainTiles.has(key)) return;
+    const resident = this.terrainTiles.get(key);
+    if (resident) {
+      if (generateContent && resident.contentGenerated === false)
+        this.pendingContentPromotions.set(key, resident);
+      return;
+    }
     if (this.pendingTileSet.has(key)) {
       // A core/ring request upgrades an earlier horizon-only request.
       if (generateContent) this.pendingTileContent.set(key, true);
       return;
     }
     this.pendingTileSet.add(key);
+    this.pendingTileGenerations.set(key, {});
     this.pendingTileKeys.push(key);
     this.pendingTileContent.set(key, generateContent);
 
@@ -697,18 +711,36 @@ export class TerrainSystem extends System {
    * Prefers using pre-computed worker data when available
    */
   private processTileGenerationQueue(): void {
-    if (this.pendingTileKeys.length === 0) return;
+    if (this.destroyed) return;
+    if (
+      this.pendingTileKeys.length === 0 &&
+      this.pendingContentPromotions.size === 0
+    )
+      return;
     const nowFn =
       typeof performance !== "undefined" && performance.now
         ? () => performance.now()
         : () => Date.now();
     const start = nowFn();
     let generated = 0;
+    // Promotions share the geometry queue's existing per-frame work budget.
+    // They do not rebuild terrain, collision, or any previously generated content.
+    for (const [key, tile] of this.pendingContentPromotions) {
+      if (this.destroyed) return;
+      if (
+        generated >= this.maxTilesPerFrame ||
+        nowFn() - start > this.generationBudgetMsPerFrame
+      )
+        break;
+      this.pendingContentPromotions.delete(key);
+      if (this.promoteTileContent(tile)) generated++;
+    }
     // Inspect each entry at most once per frame. Worker-backed entries rotate
     // to the tail until their result or an explicit fallback arrives.
     const inspectionLimit = this.pendingTileKeys.length;
     let inspected = 0;
     while (this.pendingTileKeys.length > 0 && inspected < inspectionLimit) {
+      if (this.destroyed) return;
       if (generated >= this.maxTilesPerFrame) break;
       if (nowFn() - start > this.generationBudgetMsPerFrame) break;
       const key = this.pendingTileKeys.shift()!;
@@ -729,6 +761,7 @@ export class TerrainSystem extends System {
       this.pendingTileSet.delete(key);
       const generateContent = this.pendingTileContent.get(key) ?? true;
       this.pendingTileContent.delete(key);
+      this.pendingTileGenerations.delete(key);
       const [x, z] = key.split("_").map(Number);
 
       // Check if we have pre-computed worker data for this tile
@@ -767,17 +800,28 @@ export class TerrainSystem extends System {
    * retaining them makes the server generate, populate, and immediately unload
    * obsolete world regions for minutes after the camera has moved on.
    */
-  private prunePendingTileQueue(neededTiles: ReadonlySet<string>): void {
+  private prunePendingTileQueue(
+    neededTiles: ReadonlySet<string>,
+    contentTiles: ReadonlySet<string> = neededTiles,
+  ): void {
+    for (const [key, tile] of this.pendingContentPromotions) {
+      if (!contentTiles.has(key) || this.terrainTiles.get(key) !== tile)
+        this.pendingContentPromotions.delete(key);
+    }
     if (this.pendingTileKeys.length === 0) return;
 
     const retainedKeys: string[] = [];
     for (const key of this.pendingTileKeys) {
       if (neededTiles.has(key)) {
+        // A pending worker computes geometry only. Its current content intent
+        // must follow the latest core, not the center that dispatched it.
+        this.pendingTileContent.set(key, contentTiles.has(key));
         retainedKeys.push(key);
         continue;
       }
       this.pendingTileSet.delete(key);
       this.pendingTileContent.delete(key);
+      this.pendingTileGenerations.delete(key);
       this.pendingWorkerResults.delete(key);
       this.pendingWorkerTileKeys.delete(key);
       this.workerFallbackTileKeys.delete(key);
@@ -973,6 +1017,82 @@ export class TerrainSystem extends System {
     }
   }
 
+  /** Shared sync/worker/promotion content path. Geometry and collision are untouched. */
+  private generateTileContent(tile: TerrainTile): void {
+    if (tile.contentGenerated === true) return;
+    const isServer =
+      this.runtimeIsServer || this.world.network?.isServer === true;
+    if (isServer || this.runtimeIsClient) this.generateTileResources(tile);
+    if (this.runtimeIsClient) {
+      this.generateVisualFeatures(tile);
+      if (!this.CONFIG.USE_QUADTREE_LOD) this.generateWaterMeshes(tile);
+      if (tile.resources.length > 0) this.queueResourceInstances(tile);
+    }
+    // Publish once, including empty full-content batches. Re-entrant requests
+    // cannot initialize resource state again after an event listener runs.
+    tile.contentGenerated = true;
+  }
+
+  private emitTileGenerated(tile: TerrainTile): void {
+    if (this.destroyed || this.terrainTiles.get(tile.key) !== tile) return;
+    const originX = tile.x * this.CONFIG.TILE_SIZE;
+    const originZ = tile.z * this.CONFIG.TILE_SIZE;
+    const spawnPoints = tile.resources.map(
+      (resource): TerrainResourceSpawnPoint => ({
+        id: resource.id,
+        type: resource.type,
+        subType:
+          resource.subType ?? (resource.type === "tree" ? "normal" : undefined),
+        position: {
+          x: originX + resource.position.x,
+          y: resource.position.y,
+          z: originZ + resource.position.z,
+        },
+        scale: resource.scale,
+        rotation: resource.rotation,
+      }),
+    );
+    this.world.emit(EventType.TERRAIN_TILE_GENERATED, {
+      tileId: `${tile.x},${tile.z}`,
+      position: { x: originX, z: originZ },
+      tileX: tile.x,
+      tileZ: tile.z,
+      biome: (tile.biome as BiomeType) || DEFAULT_BIOME,
+      contentGenerated: tile.contentGenerated === true,
+      resources: spawnPoints.map(({ id, type, position }) => ({
+        id: id!,
+        type,
+        position,
+      })),
+    });
+    // A synchronous tile listener can unload/destroy the owner. Never publish a
+    // resource batch after its corresponding unload event has already retired it.
+    if (
+      !this.destroyed &&
+      this.terrainTiles.get(tile.key) === tile &&
+      tile.contentGenerated === true &&
+      (this.runtimeIsServer ||
+        this.runtimeIsClient ||
+        this.world.network?.isServer)
+    )
+      this.world.emit(EventType.RESOURCE_SPAWN_POINTS_REGISTERED, {
+        owner: { tileX: tile.x, tileZ: tile.z },
+        spawnPoints,
+      });
+  }
+
+  private promoteTileContent(tile: TerrainTile): boolean {
+    if (
+      this.destroyed ||
+      this.terrainTiles.get(tile.key) !== tile ||
+      tile.contentGenerated !== false
+    )
+      return false;
+    this.generateTileContent(tile);
+    this.emitTileGenerated(tile);
+    return true;
+  }
+
   /**
    * Pre-compute terrain data for multiple tiles using web workers
    *
@@ -1006,6 +1126,16 @@ export class TerrainSystem extends System {
     }
 
     this.workerBatchInProgress = true;
+    const batchLease = {};
+    this.workerBatchLease = batchLease;
+    const generations = new Map(
+      tilesToProcess.map(({ tileX, tileZ }) => {
+        const key = `${tileX}_${tileZ}`;
+        return [key, this.pendingTileGenerations.get(key)] as const;
+      }),
+    );
+    const isCurrent = (key: string) =>
+      this.isCurrentTileRequest(key, generations.get(key));
 
     try {
       // Build worker config from current CONFIG
@@ -1047,6 +1177,7 @@ export class TerrainSystem extends System {
         );
         for (const tile of tilesToProcess) {
           const key = `${tile.tileX}_${tile.tileZ}`;
+          if (!isCurrent(key)) continue;
           this.pendingWorkerTileKeys.delete(key);
           this.workerFallbackTileKeys.add(key);
         }
@@ -1062,13 +1193,7 @@ export class TerrainSystem extends System {
 
       // Store successful results for later geometry creation
       for (const result of batchResult.results) {
-        this.pendingWorkerTileKeys.delete(result.tileKey);
-        if (
-          this.pendingTileSet.has(result.tileKey) &&
-          !this.terrainTiles.has(result.tileKey)
-        ) {
-          this.pendingWorkerResults.set(result.tileKey, result);
-        }
+        this.acceptTerrainWorkerResult(result, generations.get(result.tileKey));
       }
 
       if (batchResult.failedCount > 0) {
@@ -1077,6 +1202,7 @@ export class TerrainSystem extends System {
         );
         for (const tile of tilesToProcess) {
           const key = `${tile.tileX}_${tile.tileZ}`;
+          if (!isCurrent(key)) continue;
           if (completedKeys.has(key)) continue;
           this.pendingWorkerTileKeys.delete(key);
           this.workerFallbackTileKeys.add(key);
@@ -1087,12 +1213,38 @@ export class TerrainSystem extends System {
       console.error("[TerrainSystem] Worker batch failed:", error);
       for (const tile of tilesToProcess) {
         const key = `${tile.tileX}_${tile.tileZ}`;
+        if (!isCurrent(key)) continue;
         this.pendingWorkerTileKeys.delete(key);
         this.workerFallbackTileKeys.add(key);
       }
     } finally {
-      this.workerBatchInProgress = false;
+      if (this.workerBatchLease === batchLease) {
+        this.workerBatchLease = null;
+        this.workerBatchInProgress = false;
+      }
     }
+  }
+
+  private isCurrentTileRequest(
+    key: string,
+    generation: object | undefined,
+  ): boolean {
+    return (
+      !this.destroyed &&
+      generation !== undefined &&
+      this.pendingTileGenerations.get(key) === generation &&
+      this.pendingTileSet.has(key)
+    );
+  }
+
+  private acceptTerrainWorkerResult(
+    result: TerrainWorkerOutput,
+    generation: object | undefined,
+  ): void {
+    if (!this.isCurrentTileRequest(result.tileKey, generation)) return;
+    this.pendingWorkerTileKeys.delete(result.tileKey);
+    if (!this.terrainTiles.has(result.tileKey))
+      this.pendingWorkerResults.set(result.tileKey, result);
   }
 
   /**
@@ -1271,6 +1423,7 @@ export class TerrainSystem extends System {
     // Check if tile already exists
     if (this.terrainTiles.has(key)) {
       geometry.dispose();
+      this.enqueueTileForGeneration(tileX, tileZ, generateContent);
       return this.terrainTiles.get(key)!;
     }
 
@@ -1306,7 +1459,7 @@ export class TerrainSystem extends System {
       resources: [],
       roads: [],
       generated: true,
-      contentGenerated: generateContent,
+      contentGenerated: false,
       lastActiveTime: new Date(),
       playerCount: 0,
       needsSave: true,
@@ -1399,102 +1552,12 @@ export class TerrainSystem extends System {
       this.terrainContainer.add(mesh);
     }
 
-    // Generate content (resources, visual features, water)
-    const isServer =
-      this.runtimeIsServer || this.world.network?.isServer || false;
-    const isClient = this.runtimeIsClient;
-
-    if (generateContent && isServer) {
-      this.generateTileResources(tile);
-    }
-
-    if (generateContent && isClient) {
-      if (!isServer && tile.resources.length === 0) {
-        this.generateTileResources(tile);
-      }
-      this.generateVisualFeatures(tile);
-      if (!this.CONFIG.USE_QUADTREE_LOD) {
-        this.generateWaterMeshes(tile);
-      }
-
-      // Queue resource instances for deferred creation (spreads work across frames)
-      if (tile.resources.length > 0 && tile.mesh) {
-        this.queueResourceInstances(tile);
-      }
-    }
-
-    // Emit tile generated event
-    const originX = tileX * this.CONFIG.TILE_SIZE;
-    const originZ = tileZ * this.CONFIG.TILE_SIZE;
-    const resourcesPayload = tile.resources.map((r) => ({
-      id: r.id,
-      type: r.type,
-      position: {
-        x: originX + r.position.x,
-        y: r.position.y,
-        z: originZ + r.position.z,
-      },
-    }));
-    const genericBiome = (tile.biome as BiomeType) || DEFAULT_BIOME;
-    this.world.emit(EventType.TERRAIN_TILE_GENERATED, {
-      tileId: `${tileX},${tileZ}`,
-      position: { x: originX, z: originZ },
-      tileX,
-      tileZ,
-      biome: genericBiome,
-      contentGenerated: generateContent,
-      resources: resourcesPayload,
-    });
-
-    // Register resource spawn points (same as generateTile)
-    if (generateContent && isServer) {
-      const spawnPoints = tile.resources.map((r): TerrainResourceSpawnPoint => {
-        const worldPos = {
-          x: originX + r.position.x,
-          y: r.position.y,
-          z: originZ + r.position.z,
-        };
-        return {
-          id: r.id,
-          type: r.type,
-          // Use actual subType from resource node, or derive from type
-          subType: r.subType ?? (r.type === "tree" ? "normal" : undefined),
-          position: worldPos,
-          // Pass scale and rotation for visual variation
-          scale: r.scale,
-          rotation: r.rotation,
-        };
-      });
-      this.world.emit(EventType.RESOURCE_SPAWN_POINTS_REGISTERED, {
-        spawnPoints,
-        owner: { tileX, tileZ },
-      });
-    } else if (generateContent && isClient && !isServer) {
-      const spawnPoints = tile.resources.map((r): TerrainResourceSpawnPoint => {
-        const worldPos = {
-          x: originX + r.position.x,
-          y: r.position.y,
-          z: originZ + r.position.z,
-        };
-        return {
-          id: r.id,
-          type: r.type,
-          // Use actual subType from resource node, or derive from type
-          subType: r.subType ?? (r.type === "tree" ? "normal" : undefined),
-          position: worldPos,
-          // Pass scale and rotation for visual variation
-          scale: r.scale,
-          rotation: r.rotation,
-        };
-      });
-      this.world.emit(EventType.RESOURCE_SPAWN_POINTS_REGISTERED, {
-        spawnPoints,
-        owner: { tileX, tileZ },
-      });
-    }
-
     this.terrainTiles.set(key, tile);
     this.activeChunks.add(key);
+    if (generateContent) this.generateTileContent(tile);
+    this.emitTileGenerated(tile);
+
+    if (this.destroyed || this.terrainTiles.get(key) !== tile) return tile;
 
     // Store height data NOW that the tile is in the map.
     // createTileGeometryFromWorkerData attaches heightData to geometry.userData
@@ -1507,7 +1570,7 @@ export class TerrainSystem extends System {
     // Synchronously bake WATER and STEEP_SLOPE collision flags (server-only).
     // Must match generateTile() — worker-generated tiles need the same
     // walkability baking (WATER flags, bridge collision overrides, etc.).
-    if (isServer) {
+    if (this.runtimeIsServer || this.world.network?.isServer) {
       this.bakeWalkabilityFlags(tileX, tileZ);
     }
 
@@ -2183,9 +2246,15 @@ export class TerrainSystem extends System {
         (wx: number, wz: number) =>
           this.calculateRoadInfluenceAtVertex(wx, wz, 0, 0),
         (wx: number, wz: number) => this.isGrassExcludedAt(wx, wz),
-        (wx: number, wz: number) => this.getTerrainColorAt(wx, wz, true),
+        (wx: number, wz: number, eligibility?: GrassSurfaceEligibility) =>
+          this.getTerrainColorAt(wx, wz, true, eligibility),
         grassWorkerSetup,
-        isStreamingViewport ? STREAMING_GRASS_VISUAL_PROFILE : undefined,
+        resolveExplicitStreamingRenderProfile()?.grassProfile ===
+          "compact-island-v1"
+          ? COMPACT_ISLAND_GRASS_VISUAL_PROFILE
+          : isStreamingViewport
+            ? STREAMING_GRASS_VISUAL_PROFILE
+            : undefined,
         terrainShade,
         (wx: number, wz: number) =>
           this.waterBodyRegistry.getWaterSurfaceAt(wx, wz),
@@ -2895,8 +2964,8 @@ export class TerrainSystem extends System {
       this.world.camera?.position ??
       new THREE.Vector3(0, 0, 0);
 
-    const centerTileX = Math.floor(centerPos.x / this.CONFIG.TILE_SIZE);
-    const centerTileZ = Math.floor(centerPos.z / this.CONFIG.TILE_SIZE);
+    const centerTileX = this.worldToTerrainTileIndex(centerPos.x);
+    const centerTileZ = this.worldToTerrainTileIndex(centerPos.z);
 
     // Full-content core range + terrain-only ring (preload around player)
     const coreRange = this.coreChunkRange;
@@ -2930,7 +2999,11 @@ export class TerrainSystem extends System {
     const preparationTileKeys = new Set<string>();
     this.addServerLaunchPreparationTiles(preparationTileKeys);
     for (const key of preparationTileKeys) {
-      if (this.terrainTiles.has(key)) continue;
+      const resident = this.terrainTiles.get(key);
+      if (resident) {
+        this.enqueueTileForGeneration(resident.x, resident.z, true);
+        continue;
+      }
       const [tileX, tileZ] = key.split("_").map(Number);
       this.generateTile(tileX, tileZ, true);
       _tilesGenerated++;
@@ -2962,6 +3035,7 @@ export class TerrainSystem extends System {
 
     // Check if tile already exists
     if (this.terrainTiles.has(key)) {
+      this.enqueueTileForGeneration(tileX, tileZ, generateContent);
       return this.terrainTiles.get(key)!;
     }
 
@@ -3020,7 +3094,7 @@ export class TerrainSystem extends System {
       resources: [],
       roads: [],
       generated: true,
-      contentGenerated: generateContent,
+      contentGenerated: false,
       lastActiveTime: new Date(),
       playerCount: 0,
       needsSave: true,
@@ -3130,116 +3204,12 @@ export class TerrainSystem extends System {
       this.terrainContainer.add(mesh);
     }
 
-    if (generateContent) {
-      const isServer =
-        this.runtimeIsServer || this.world.network?.isServer || false;
-      const isClient = this.runtimeIsClient;
-
-      // Server generates authoritative resources
-      if (isServer) {
-        this.generateTileResources(tile);
-      }
-
-      // Client visual path
-      if (isClient) {
-        // If no server-generated resources are present (e.g., single-player/dev), generate locally for visuals only
-        if (!isServer && tile.resources.length === 0) {
-          this.generateTileResources(tile);
-        }
-
-        // Generate visual features and water meshes
-        this.generateVisualFeatures(tile);
-        if (!this.CONFIG.USE_QUADTREE_LOD) {
-          this.generateWaterMeshes(tile);
-        }
-        // NOTE: Grass rendering is handled by ProceduralGrassSystem
-
-        // Queue resource instances for deferred creation (spreads work across frames)
-        if (tile.resources.length > 0 && tile.mesh) {
-          this.queueResourceInstances(tile);
-        }
-      }
-    }
-
-    // Emit typed event for other systems (resources, AI nav, etc.)
-    const originX = tile.x * this.CONFIG.TILE_SIZE;
-    const originZ = tile.z * this.CONFIG.TILE_SIZE;
-    const resourcesPayload = tile.resources.map((r) => {
-      const pos = {
-        x: originX + r.position.x,
-        y: r.position.y,
-        z: originZ + r.position.z,
-      };
-      return { id: r.id, type: r.type, position: pos };
-    });
-    const genericBiome = (tile.biome as BiomeType) || DEFAULT_BIOME;
-    this.world.emit(EventType.TERRAIN_TILE_GENERATED, {
-      tileId: `${tileX},${tileZ}`,
-      position: { x: originX, z: originZ },
-      biome: genericBiome,
-      tileX,
-      tileZ,
-      contentGenerated: generateContent,
-      resources: resourcesPayload,
-    });
-
-    // Also emit resource spawn points for ResourceSystem (server-only authoritative)
-    if (
-      generateContent &&
-      (this.runtimeIsServer || this.world.network?.isServer)
-    ) {
-      const spawnPoints = tile.resources.map((r): TerrainResourceSpawnPoint => {
-        const worldPos = {
-          x: originX + r.position.x,
-          y: r.position.y,
-          z: originZ + r.position.z,
-        };
-        return {
-          id: r.id,
-          type: r.type,
-          // Use actual subType from resource node, or derive from type
-          subType: r.subType ?? (r.type === "tree" ? "normal" : undefined),
-          position: worldPos,
-          // Pass scale and rotation for visual variation
-          scale: r.scale,
-          rotation: r.rotation,
-        };
-      });
-      this.world.emit(EventType.RESOURCE_SPAWN_POINTS_REGISTERED, {
-        spawnPoints,
-        owner: { tileX, tileZ },
-      });
-    } else if (
-      generateContent &&
-      this.runtimeIsClient &&
-      !this.world.network?.isServer
-    ) {
-      const spawnPoints = tile.resources.map((r): TerrainResourceSpawnPoint => {
-        const worldPos = {
-          x: originX + r.position.x,
-          y: r.position.y,
-          z: originZ + r.position.z,
-        };
-        return {
-          id: r.id,
-          type: r.type,
-          // Use actual subType from resource node, or derive from type
-          subType: r.subType ?? (r.type === "tree" ? "normal" : undefined),
-          position: worldPos,
-          // Pass scale and rotation for visual variation
-          scale: r.scale,
-          rotation: r.rotation,
-        };
-      });
-      this.world.emit(EventType.RESOURCE_SPAWN_POINTS_REGISTERED, {
-        spawnPoints,
-        owner: { tileX, tileZ },
-      });
-    }
-
-    // Store tile
     this.terrainTiles.set(key, tile);
     this.activeChunks.add(key);
+    if (generateContent) this.generateTileContent(tile);
+    this.emitTileGenerated(tile);
+
+    if (this.destroyed || this.terrainTiles.get(key) !== tile) return tile;
 
     // Store height data NOW that the tile is in the map.
     // createTileGeometry attaches heightData to geometry.userData because
@@ -5163,6 +5133,7 @@ export class TerrainSystem extends System {
     wx: number,
     wz: number,
     computedSurface = false,
+    grassEligibility?: GrassSurfaceEligibility,
   ): {
     r: number;
     g: number;
@@ -5178,6 +5149,10 @@ export class TerrainSystem extends System {
     ny: number;
     nz: number;
   } {
+    const eligibility = compactTerrainColorOperations.grassEligibility(
+      grassEligibility,
+      this.getWorldTerrainProfile().algorithm,
+    );
     // Grass uses the worker's computed authored surface, independent of loaded
     // tile interpolation. Other callers retain their existing cached sampler.
     const sampleHeight = computedSurface
@@ -5221,31 +5196,34 @@ export class TerrainSystem extends System {
     );
     if (isCompactSculptProfile(this.getWorldTerrainProfile())) {
       // Match the compact diffuse palette, not the superseded biome colors.
-      // Ecology/grassWeight remains independent from the visible base colour.
-      Object.assign(
-        color,
-        compactTerrainColorOperations.sample({
-          noiseValue: sampleNoiseCPU(
-            wx,
-            wz,
-            TERRAIN_SHADER_CONSTANTS.NOISE_SCALE,
-          ),
-          distortNoise: sampleNoiseCPU(
-            wx,
-            wz,
-            TERRAIN_SHADER_CONSTANTS.DISTORT_NOISE_SCALE,
-          ),
-          slope,
-          roadInfluence: this.calculateRoadInfluenceAtVertex(wx, wz, 0, 0),
-          surface: {
-            x: wx,
-            z: wz,
-            height,
-            pond: this.compactPondMaterial,
-            macroField: this.getCompactMacroMaterial(),
-          },
-        }),
-      );
+      // Legacy ecology remains independent of colour. The explicit compact
+      // candidate instead uses physical layer support, before road suppression.
+      const paletteInput = {
+        noiseValue: sampleNoiseCPU(
+          wx,
+          wz,
+          TERRAIN_SHADER_CONSTANTS.NOISE_SCALE,
+        ),
+        distortNoise: sampleNoiseCPU(
+          wx,
+          wz,
+          TERRAIN_SHADER_CONSTANTS.DISTORT_NOISE_SCALE,
+        ),
+        slope,
+        roadInfluence: this.calculateRoadInfluenceAtVertex(wx, wz, 0, 0),
+        surface: {
+          x: wx,
+          z: wz,
+          height,
+          pond: this.compactPondMaterial,
+          macroField: this.getCompactMacroMaterial(),
+        },
+      };
+      Object.assign(color, compactTerrainColorOperations.sample(paletteInput));
+      if (eligibility === "compact-pbr-v1") {
+        color.grassWeight =
+          compactTerrainColorOperations.grassSupport(paletteInput);
+      }
     }
 
     const tCfg = getGrassConfigForBiome(BiomeType.Tundra);
@@ -5276,7 +5254,13 @@ export class TerrainSystem extends System {
       cCfg.patchScale * canyonW;
 
     const slopeOk = slope <= maxSlope ? 1.0 : 0.0;
-    const weightOk = color.grassWeight >= minGW ? 1.0 : 0.0;
+    const weightOk = (
+      eligibility === "compact-pbr-v1"
+        ? color.grassWeight > 0
+        : color.grassWeight >= minGW
+    )
+      ? 1.0
+      : 0.0;
 
     // Noise-based patch mask: patchiness 0 = uniform, 1 = tight clusters
     const patchThreshold = patchiness * 2 - 1; // maps [0,1] -> [-1,1]
@@ -6119,6 +6103,9 @@ export class TerrainSystem extends System {
   }
 
   private unloadTile(tile: TerrainTile): void {
+    if (this.terrainTiles.get(tile.key) !== tile) return;
+    if (this.pendingContentPromotions.get(tile.key) === tile)
+      this.pendingContentPromotions.delete(tile.key);
     // Cancel any pending/in-progress walkability baking for this tile
     if (this.runtimeIsServer) {
       this.pendingWalkabilityTiles = this.pendingWalkabilityTiles.filter(
@@ -7547,6 +7534,7 @@ export class TerrainSystem extends System {
 
   destroy(): void {
     this.destroyed = true;
+    this.workerBatchLease = null;
     this.roadInfluenceRefreshGeneration++;
     this.world.off(EventType.ROADS_GENERATED, this.onRoadsGenerated);
     this.world.off(EventType.ROADS_MASK_READY, this.onRoadMaskReady);
@@ -7636,6 +7624,8 @@ export class TerrainSystem extends System {
     this.pendingTileKeys.length = 0;
     this.pendingTileSet.clear();
     this.pendingTileContent.clear();
+    this.pendingContentPromotions.clear();
+    this.pendingTileGenerations.clear();
     this.flatZones.clear();
     this.flatZonesByTile.clear();
     this._flatZoneChecked.clear();
@@ -7848,7 +7838,7 @@ export class TerrainSystem extends System {
    * Player-based terrain update with 9 core + ring strategy
    */
   private updatePlayerBasedTerrain(): void {
-    if (this.isGenerating) return;
+    if (this.destroyed || this.isGenerating) return;
 
     // Resolve terrain centers (local players, or spectator camera target).
     const centers = this.getTerrainCenters();
@@ -7869,10 +7859,10 @@ export class TerrainSystem extends System {
       const z = playerPos.z;
 
       // Calculate tile position
-      const tileX = Math.floor(x / this.CONFIG.TILE_SIZE);
-      const tileZ = Math.floor(z / this.CONFIG.TILE_SIZE);
+      const tileX = this.worldToTerrainTileIndex(x);
+      const tileZ = this.worldToTerrainTileIndex(z);
 
-      // 9 core chunks (5x5 grid) - these get full simulation
+      // Core chunks get content and simulation; the outer ring is terrain-only.
       const coreChunks = new Set<string>();
       for (let dx = -this.coreChunkRange; dx <= this.coreChunkRange; dx++) {
         for (let dz = -this.coreChunkRange; dz <= this.coreChunkRange; dz++) {
@@ -7941,7 +7931,9 @@ export class TerrainSystem extends System {
     // Launch preparation is a compact authoritative service region, not a
     // second terrain viewer. Retain only the exact manifest-intersecting tiles
     // so banking/gathering stays live without generating another 5x5 horizon.
-    this.addServerLaunchPreparationTiles(neededTiles);
+    const contentTiles = new Set(simulationTiles);
+    this.addServerLaunchPreparationTiles(contentTiles);
+    for (const key of contentTiles) neededTiles.add(key);
 
     // Update simulated chunks - only chunks with players get simulation
     this.simulatedChunks.clear();
@@ -7956,8 +7948,8 @@ export class TerrainSystem extends System {
     for (const center of centers) {
       const playerPos = center.position;
       if (playerPos) {
-        const tileX = Math.floor(playerPos.x / this.CONFIG.TILE_SIZE);
-        const tileZ = Math.floor(playerPos.z / this.CONFIG.TILE_SIZE);
+        const tileX = this.worldToTerrainTileIndex(playerPos.x);
+        const tileZ = this.worldToTerrainTileIndex(playerPos.z);
         playerCenters.push({ x: tileX, z: tileZ });
       }
     }
@@ -7965,28 +7957,13 @@ export class TerrainSystem extends System {
     // A duel teleport or camera retarget invalidates queued work immediately.
     // Prune before adding current requests so old regions never compete with
     // the arena for the authoritative loop.
-    this.prunePendingTileQueue(neededTiles);
+    this.prunePendingTileQueue(neededTiles, contentTiles);
 
-    // Queue missing tiles for smooth generation
+    // Queue missing geometry and exact resident promotions. Full-content tiles
+    // are never regenerated when centers move or requests repeat.
     for (const tileKey of neededTiles) {
-      if (!this.terrainTiles.has(tileKey)) {
-        const [x, z] = tileKey.split("_").map(Number);
-
-        let generateContent = true;
-
-        if (playerCenters.length > 0) {
-          let minChebyshev = Infinity;
-          for (const c of playerCenters) {
-            const d = Math.max(Math.abs(x - c.x), Math.abs(z - c.z));
-            if (d < minChebyshev) minChebyshev = d;
-          }
-          if (minChebyshev > this.ringChunkRange) {
-            generateContent = false;
-          }
-        }
-
-        this.enqueueTileForGeneration(x, z, generateContent);
-      }
+      const [x, z] = tileKey.split("_").map(Number);
+      this.enqueueTileForGeneration(x, z, contentTiles.has(tileKey));
     }
 
     // Remove tiles that are no longer needed, with hysteresis padding
@@ -8307,6 +8284,10 @@ export class TerrainSystem extends System {
 
   public getCompactPondDressingReceipt() {
     return this.compactPondDressing?.getReceipt() ?? null;
+  }
+
+  public getGrassProfileReceipt() {
+    return this.grassVisualManager?.getProfileReceipt() ?? null;
   }
 
   public getTileSize(): number {

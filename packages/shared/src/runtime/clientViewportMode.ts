@@ -58,6 +58,24 @@ export const STREAMING_RENDER_PROFILES = Object.freeze({
     grassProfile: "fixed-arena-v1" as const,
     avatarLodPolicy: "distance-authoritative-v1" as const,
   }),
+  // Explicit island vegetation experiment; FPS/default selection stays unchanged.
+  "island-720p60-v1": Object.freeze({
+    id: "island-720p60-v1" as const,
+    targetFps: 60,
+    sourceFps: 60,
+    outputFps: 60,
+    viewportWidth: 1280,
+    viewportHeight: 720,
+    outputWidth: 1280,
+    outputHeight: 720,
+    renderPixelBudget: 1280 * 720,
+    maximumDpr: 1,
+    antialiasing: true,
+    shadows: "med" as const,
+    postprocessing: false,
+    grassProfile: "compact-island-v1" as const,
+    avatarLodPolicy: "distance-authoritative-v1" as const,
+  }),
 });
 
 export type StreamingRenderProfileId = keyof typeof STREAMING_RENDER_PROFILES;
@@ -85,7 +103,7 @@ export function resolveExplicitStreamingRenderProfile(
   const profile =
     STREAMING_RENDER_PROFILES[rawProfile as StreamingRenderProfileId];
   if (
-    profile.id === "shadows-720p60-v1" &&
+    profile.shadows === "med" &&
     (!isStreamPageRoute(windowRef) ||
       parseTruthy(params?.get("embedded")) ||
       windowRef.__HYPERIA_EMBEDDED__ === true)
@@ -153,6 +171,28 @@ export function resolveStreamingRenderPreferences(
 }
 
 /** Read-only observations, not an assertion that a GPU render succeeded. */
+export type GrassSurfaceEligibility = "legacy-biome-v1" | "compact-pbr-v1";
+
+export type StreamingGrassProfileReceipt = {
+  schemaVersion: 1;
+  profileId: "ordinary-v1" | "fixed-arena-v1" | "compact-island-v1";
+  eligibility: GrassSurfaceEligibility;
+  terrainProfileIdentity: string;
+  minimumLodLevel: number;
+  clumpSpacingMultiplier: number;
+  clumpSpacing: number;
+  maxRenderDistance: number;
+  maxChunksPerFrame: number;
+  castShadow: boolean;
+  destroyed: boolean;
+  liveNodes: number;
+  pendingChunks: number;
+  inflightChunks: number;
+  settledChunks: number;
+  installedChunks: number;
+  installedClumps: number;
+};
+
 export type StreamingRenderAppliedState = {
   preferences: StreamingRenderPreferences;
   renderer: {
@@ -178,6 +218,8 @@ export type StreamingRenderAppliedState = {
     normalBias: number;
   } | null;
   water: { reflectionsEnabled: boolean; activeReflectionCount: number } | null;
+  /** Required only for the opt-in island profile; older receipts stay valid. */
+  grass?: StreamingGrassProfileReceipt | null;
 };
 
 export type StreamingRenderProfileApplication = {
@@ -214,6 +256,37 @@ export function evaluateStreamingRenderProfileApplication(
     if (requested[key] !== expected[key]) return finish(`requested.${key}`);
   }
   if (!applied) return finish("renderer_unavailable");
+  if (profile.grassProfile === "compact-island-v1") {
+    const grass = applied.grass;
+    if (!grass) return finish("grass_unavailable");
+    if (
+      grass.schemaVersion !== 1 ||
+      grass.profileId !== profile.grassProfile ||
+      grass.eligibility !== "compact-pbr-v1" ||
+      typeof grass.terrainProfileIdentity !== "string" ||
+      grass.terrainProfileIdentity.trim().length === 0 ||
+      grass.terrainProfileIdentity.length > 16384 ||
+      grass.minimumLodLevel !== 1 ||
+      grass.clumpSpacingMultiplier !== 4 ||
+      grass.clumpSpacing !== 2.8 ||
+      grass.maxRenderDistance !== 140 ||
+      grass.maxChunksPerFrame !== 1 ||
+      grass.castShadow !== false ||
+      grass.destroyed !== false
+    )
+      return finish("grass_profile");
+    for (const value of [
+      grass.liveNodes,
+      grass.pendingChunks,
+      grass.inflightChunks,
+      grass.settledChunks,
+      grass.installedChunks,
+      grass.installedClumps,
+    ]) {
+      if (!Number.isSafeInteger(value) || value < 0)
+        return finish("grass_state");
+    }
+  }
   for (const key of Object.keys(
     expected,
   ) as (keyof StreamingRenderPreferences)[]) {

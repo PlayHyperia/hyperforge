@@ -85,6 +85,7 @@ function fixture(water = 16, minimumLodLevel = 0) {
 describe("GrassVisualManager streaming pacing with real managers and meshes", () => {
   it("keeps the bounded broadcast profile", () => {
     expect(STREAMING_GRASS_VISUAL_PROFILE).toEqual({
+      id: "fixed-arena-v1",
       clumpSpacingMultiplier: 4,
       minimumLodLevel: 2,
       maxRenderDistance: 140,

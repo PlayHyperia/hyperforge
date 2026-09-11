@@ -16,6 +16,8 @@ export {
   type StreamingRenderProfileId,
   type StreamingRenderPreferences,
   type StreamingRenderAppliedState,
+  type StreamingGrassProfileReceipt,
+  type GrassSurfaceEligibility,
   type StreamingRenderProfileApplication,
 } from "./clientViewportMode";
 export {

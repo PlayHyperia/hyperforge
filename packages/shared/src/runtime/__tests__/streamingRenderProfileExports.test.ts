@@ -6,7 +6,10 @@ import {
   resolveStreamingRenderPreferences,
   STREAMING_RENDER_PROFILES,
 } from "../clientViewportMode";
-import type { StreamingRenderProfileApplication } from "../../index.client";
+import type {
+  StreamingRenderProfileApplication,
+  StreamingGrassProfileReceipt,
+} from "../../index.client";
 
 // Import the actual client bundle source entry, not the broader Node/runtime
 // barrel. This catches exports that typecheck through framework.d.ts but are
@@ -53,5 +56,24 @@ describe("stream render profile client package boundary", () => {
       ready: false,
       mismatchReason: "renderer_unavailable",
     });
+  });
+
+  it("exports the island contract through the actual client package boundary and collects its real owner", () => {
+    const profile = clientEntry.STREAMING_RENDER_PROFILES["island-720p60-v1"];
+    expect(profile.grassProfile).toBe("compact-island-v1");
+    const beforeInitialization: StreamingGrassProfileReceipt | null = null;
+    expect(beforeInitialization).toBeNull();
+    const source = readFileSync(
+      new URL(
+        "../../../../client/src/screens/StreamingMode.tsx",
+        import.meta.url,
+      ),
+      "utf8",
+    );
+    expect(source).toContain('profile.grassProfile === "compact-island-v1"');
+    expect(source).toContain(
+      "grass: terrain?.getGrassProfileReceipt() ?? null",
+    );
+    // This source-boundary assertion is not a substitute for the live GPU receipt.
   });
 });

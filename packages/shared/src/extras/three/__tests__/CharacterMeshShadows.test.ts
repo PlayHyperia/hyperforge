@@ -89,6 +89,12 @@ describe("explicit character shadow candidate", () => {
     window.history.replaceState(
       null,
       "",
+      "/stream.html?streamRenderProfile=island-720p60-v1",
+    );
+    expect(isCharacterShadowCandidateActive()).toBe(true);
+    window.history.replaceState(
+      null,
+      "",
       "/?page=stream&streamRenderProfile=shadows-720p60-v1",
     );
     expect(isCharacterShadowCandidateActive()).toBe(true);

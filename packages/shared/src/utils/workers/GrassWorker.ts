@@ -15,6 +15,7 @@
  */
 
 import { WorkerPool } from "./WorkerPool";
+import type { GrassSurfaceEligibility } from "../../runtime/clientViewportMode";
 import {
   buildGetBaseHeightAtJS,
   buildComputeBiomeWeightsJS,
@@ -67,6 +68,8 @@ export interface BiomeGrassConfigWorker {
 }
 
 export interface GrassWorkerInput {
+  /** Absent retains historical biome eligibility. Never inferred from terrain. */
+  grassEligibility?: GrassSurfaceEligibility;
   type: "generateGrassInstances";
   chunkKey: string;
   centerX: number;
@@ -113,6 +116,7 @@ export interface GrassWorkerInput {
 }
 
 export interface GrassWorkerOutput {
+  grassEligibility?: GrassSurfaceEligibility;
   terrainProfileIdentity: string;
   type: "grassInstanceResult";
   chunkKey: string;
@@ -399,6 +403,7 @@ function calculateRoadInfluence(wx, wz, roadSegments, roadBlendWidth) {
 
 function generateGrassInstances(input) {
   assertTerrainWorkerInput(input);
+  var grassEligibility = compactTerrainColorOperations.grassEligibility(input.grassEligibility, input.config.TERRAIN_PROFILE.algorithm);
   var compactMacroField = compactTerrainColorOperations.macroField(input.config.TERRAIN_PROFILE);
   var surface = terrainSurfaceOperations.validateSnapshot(input.terrainSurface);
   var compactPondMaterial = (input.config.TERRAIN_PROFILE.algorithm === "compact-island-sculpt-v1" || input.config.TERRAIN_PROFILE.algorithm === "compact-island-sculpt-v2")
@@ -502,13 +507,17 @@ function generateGrassInstances(input) {
 
     var color = computeTerrainColorCPU(wx, wz, ty, slope, forestW, canyonW, sc);
     if (input.config.TERRAIN_PROFILE.algorithm === "compact-island-sculpt-v1" || input.config.TERRAIN_PROFILE.algorithm === "compact-island-sculpt-v2") {
-      var compactRGB = compactTerrainColorOperations.sample({
+      var compactInput = {
         noiseValue: sampleNoiseCPU(wx, wz, sc.NOISE_SCALE),
         distortNoise: sampleNoiseCPU(wx, wz, sc.DISTORT_NOISE_SCALE),
         slope: slope, roadInfluence: roadInf,
         surface: {x:wx,z:wz,height:ty,pond:compactPondMaterial,macroField:compactMacroField}
-      });
+      };
+      var compactRGB = compactTerrainColorOperations.sample(compactInput);
       color.r = compactRGB.r; color.g = compactRGB.g; color.b = compactRGB.b;
+      if (grassEligibility === "compact-pbr-v1") {
+        color.grassWeight = compactTerrainColorOperations.grassSupport(compactInput);
+      }
     }
 
     // Biome-blended grass params
@@ -520,7 +529,7 @@ function generateGrassInstances(input) {
     var patchScale = tCfg.patchScale * tundraW + fCfg.patchScale * forestW + cCfg.patchScale * canyonW;
 
     var slopeOk = slope <= maxSlope ? 1.0 : 0.0;
-    var weightOk = color.grassWeight >= minGW ? 1.0 : 0.0;
+    var weightOk = (grassEligibility === "compact-pbr-v1" ? color.grassWeight > 0 : color.grassWeight >= minGW) ? 1.0 : 0.0;
 
     var patchThreshold = patchiness * 2 - 1;
     var noiseVal = noise.simplex2D(wx * patchScale, wz * patchScale);
@@ -568,6 +577,7 @@ function generateGrassInstances(input) {
   if (count === 0) {
     return {
       type: "grassInstanceResult",
+      grassEligibility: grassEligibility,
       terrainProfileIdentity: config.TERRAIN_PROFILE_IDENTITY,
       chunkKey: input.chunkKey,
       offsets: new Float32Array(0),
@@ -581,6 +591,7 @@ function generateGrassInstances(input) {
 
   return {
     type: "grassInstanceResult",
+    grassEligibility: grassEligibility,
     terrainProfileIdentity: config.TERRAIN_PROFILE_IDENTITY,
     chunkKey: input.chunkKey,
     offsets: offsets.subarray(0, count * 3),
@@ -624,6 +635,7 @@ let grassWorkerPool: WorkerPool<GrassWorkerInput, GrassWorkerOutput> | null =
 let workersChecked = false;
 let workersAvailable = false;
 const surfaceOperations = createGrassTerrainSurfaceOperations();
+const colorOperations = createCompactTerrainColorOperations();
 
 export function isGrassWorkerAvailable(): boolean {
   if (!workersChecked) {
@@ -669,6 +681,10 @@ export async function generateGrassPlacementsAsync(
   input: GrassWorkerInput,
 ): Promise<GrassWorkerOutput | null> {
   assertTerrainWorkerRequest(input.config, input.seed);
+  const eligibility = colorOperations.grassEligibility(
+    input.grassEligibility,
+    input.config.TERRAIN_PROFILE.algorithm,
+  );
   const request = {
     ...input,
     terrainSurface: surfaceOperations.cloneSnapshot(input.terrainSurface),
@@ -679,6 +695,8 @@ export async function generateGrassPlacementsAsync(
   }
   const result = await pool.execute(request);
   assertTerrainWorkerResult(result, input.config);
+  if ((result.grassEligibility ?? "legacy-biome-v1") !== eligibility)
+    throw new Error("Grass worker eligibility mismatch");
   return result;
 }
 
@@ -689,6 +707,10 @@ export async function generateGrassChunksBatch(
   // snapshot must not leave an earlier subset running after this call rejects.
   const requests = inputs.map((input) => {
     assertTerrainWorkerRequest(input.config, input.seed);
+    colorOperations.grassEligibility(
+      input.grassEligibility,
+      input.config.TERRAIN_PROFILE.algorithm,
+    );
     return {
       ...input,
       terrainSurface: surfaceOperations.cloneSnapshot(input.terrainSurface),
@@ -707,6 +729,11 @@ export async function generateGrassChunksBatch(
       .execute(input)
       .then((result) => {
         assertTerrainWorkerResult(result, input.config);
+        if (
+          (result.grassEligibility ?? "legacy-biome-v1") !==
+          (input.grassEligibility ?? "legacy-biome-v1")
+        )
+          throw new Error("Grass worker eligibility mismatch");
         results.push(result);
       })
       .catch(() => {

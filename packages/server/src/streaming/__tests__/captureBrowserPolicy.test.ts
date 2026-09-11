@@ -9,6 +9,7 @@ import {
   CAPTURE_RENDER_PROFILE_CONTRACTS,
   DEFAULT_CAPTURE_GAME_URL,
   FALLBACK_CAPTURE_RENDER_PROFILE,
+  ISLAND_CAPTURE_RENDER_PROFILE,
   SHADOWS_CAPTURE_RENDER_PROFILE,
   matchesExpectedCaptureRenderProfile,
   normalizeCaptureRenderProfileSnapshot,
@@ -72,7 +73,128 @@ function shadowApplicationSnapshot() {
   };
 }
 
+function islandApplicationSnapshot() {
+  const snapshot = shadowApplicationSnapshot();
+  return {
+    ...snapshot,
+    ...CAPTURE_RENDER_PROFILE_CONTRACTS[ISLAND_CAPTURE_RENDER_PROFILE],
+    application: {
+      ...snapshot.application,
+      applied: {
+        ...snapshot.application.applied,
+        grass: {
+          schemaVersion: 1 as const,
+          profileId: "compact-island-v1" as const,
+          eligibility: "compact-pbr-v1" as const,
+          terrainProfileIdentity: "wire-contract-terrain-fixture",
+          minimumLodLevel: 1,
+          clumpSpacingMultiplier: 4,
+          clumpSpacing: 2.8,
+          maxRenderDistance: 140,
+          maxChunksPerFrame: 1,
+          castShadow: false,
+          destroyed: false,
+          liveNodes: 0,
+          pendingChunks: 0,
+          inflightChunks: 0,
+          settledChunks: 0,
+          installedChunks: 0,
+          installedClumps: 0,
+        },
+      },
+    },
+  };
+}
+
 describe("captureBrowserPolicy", () => {
+  it("requires an explicit island profile and matching encoder/fallback contracts", () => {
+    const candidate =
+      "https://game.example/stream.html?streamRenderProfile=island-720p60-v1&streamFps=60";
+    expect(applyCaptureFrameRateToUrl(candidate, 60)).toBe(candidate);
+    expect(resolveCaptureRenderProfileForUrls([candidate], 60)).toBe(
+      ISLAND_CAPTURE_RENDER_PROFILE,
+    );
+    expect(() => applyCaptureFrameRateToUrl(candidate, 30)).toThrow(
+      "contradicts streamFps=30",
+    );
+    expect(() =>
+      resolveCaptureRenderProfileForUrls(
+        [candidate, DEFAULT_CAPTURE_GAME_URL],
+        60,
+      ),
+    ).toThrow("same render profile");
+    expect(resolveCaptureRenderProfileId(60)).toBe(
+      CANONICAL_CAPTURE_RENDER_PROFILE,
+    );
+    expect(() =>
+      assertCaptureRenderProfileContract({
+        profileId: ISLAND_CAPTURE_RENDER_PROFILE,
+        sourceFps: 60,
+        outputFps: 60,
+        viewportWidth: 1280,
+        viewportHeight: 720,
+        outputWidth: 1280,
+        outputHeight: 720,
+      }),
+    ).not.toThrow();
+  });
+
+  it("requires independently checked actual grass configuration for island admission", () => {
+    const snapshot = islandApplicationSnapshot();
+    expect(normalizeCaptureRenderProfileSnapshot(snapshot)).toEqual(snapshot);
+    expect(
+      matchesExpectedCaptureRenderProfile(
+        snapshot,
+        ISLAND_CAPTURE_RENDER_PROFILE,
+      ),
+    ).toBe(true);
+    for (const application of [undefined, null]) {
+      expect(
+        normalizeCaptureRenderProfileSnapshot({ ...snapshot, application }),
+      ).toBeNull();
+    }
+    for (const grass of [undefined, null, {}]) {
+      expect(
+        normalizeCaptureRenderProfileSnapshot({
+          ...snapshot,
+          application: {
+            ...snapshot.application,
+            applied: { ...snapshot.application.applied, grass },
+          },
+        }),
+      ).toBeNull();
+    }
+  });
+
+  it.each([
+    ["schemaVersion", 2],
+    ["profileId", "fixed-arena-v1"],
+    ["eligibility", "legacy-biome-v1"],
+    ["terrainProfileIdentity", ""],
+    ["terrainProfileIdentity", " "],
+    ["terrainProfileIdentity", "x".repeat(16_385)],
+    ["minimumLodLevel", 2],
+    ["clumpSpacingMultiplier", 1],
+    ["clumpSpacing", 14],
+    ["clumpSpacing", NaN],
+    ["maxRenderDistance", 90],
+    ["maxChunksPerFrame", 2],
+    ["castShadow", true],
+    ["castShadow", "false"],
+    ["destroyed", true],
+    ["installedClumps", -1],
+    ["installedChunks", NaN],
+    ["liveNodes", 0.5],
+    ["pendingChunks", "0"],
+    ["inflightChunks", Number.MAX_SAFE_INTEGER + 1],
+    ["settledChunks", null],
+  ])("rejects a claimed ready island with invalid grass.%s", (field, value) => {
+    const snapshot = islandApplicationSnapshot();
+    const grass: Record<string, unknown> = snapshot.application.applied.grass;
+    grass[String(field)] = value;
+    expect(normalizeCaptureRenderProfileSnapshot(snapshot)).toBeNull();
+  });
+
   it("keeps server contracts equal to the actual shared profiles without changing defaults", () => {
     expect(CAPTURE_RENDER_PROFILE_CONTRACTS).toEqual(STREAMING_RENDER_PROFILES);
     expect(resolveCaptureRenderProfileId(60)).toBe(

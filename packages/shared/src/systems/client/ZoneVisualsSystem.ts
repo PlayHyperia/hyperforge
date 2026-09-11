@@ -35,13 +35,13 @@ const ZONE_COLORS = {
 type ZoneEmojiType = "skull" | "home" | "swords";
 
 /**
- * The dedicated broadcast already identifies the arena through its HUD and
- * camera treatment. The generic eight-metre world marker sits inside that
- * camera volume and can obscure the fight, while ordinary gameplay still
- * benefits from it for navigation.
+ * Broadcast and embedded spectator cameras cover preparation as well as the
+ * arena. Eight-metre floating navigation emojis obscure those scenes and can
+ * be mistaken for buildings. Keep navigation markers for ordinary gameplay;
+ * this presentation policy does not affect zone detection, borders or warnings.
  */
-export function shouldRenderZoneMarker(areaId: string, win?: Window): boolean {
-  return areaId !== "duel_arena" || !isStreamingLikeViewport(win);
+export function shouldRenderZoneMarker(_areaId: string, win?: Window): boolean {
+  return !isStreamingLikeViewport(win);
 }
 
 // Visual configuration

@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { BIOMES } from "../../../../data/world-structure";
+import { DataManager } from "../../../../data/DataManager";
 import { EventType } from "../../../../types/events";
 import { EventBus } from "../../infrastructure/EventBus";
 import { MobNPCSpawnerSystem } from "../../entities/MobNPCSpawnerSystem";
@@ -461,7 +462,9 @@ describe("terrain generation intent", () => {
       mobTypes: ["test-mob"],
     } as (typeof BIOMES)[string];
 
-    const terrain = new TerrainSystem({ config: { terrainSeed: 91 } } as never);
+    const terrain = new TerrainSystem({
+      config: { terrainSeed: DataManager.getWorldTerrainProfile().seed },
+    } as never);
     const internals = terrain as unknown as {
       getBiomeAt: (tileX: number, tileZ: number) => string;
       getTerrainInfoAt: (

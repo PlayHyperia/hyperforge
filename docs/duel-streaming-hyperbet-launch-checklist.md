@@ -1,5 +1,34 @@
 # Duel Arena, Streaming, and Hyperbet Launch Checklist
 
+## Active island vegetation and readability pass — 2026-09-11
+
+- [x] Push verified material checkpoint `f5687e535`; remote and GitHub author/
+  committer `dreaminglucid` verified, all eight committed TS blobs match probe44.
+- [x] Reproduce tree-residency defects and insufficient grass with actual CPU
+  production classes/workers. Keep live evidence distinct from reproduction.
+- [x] Remove broadcast/embedded navigation emojis in source; ordinary gameplay,
+  safety and warnings unchanged. Two policy tests and all 67 live scene checks pass.
+- [x] Correct centered tile ownership and bounded one-time content promotion,
+  preserving identities, depletion, tile geometry/colliders and stale-work safety.
+- [x] Implement explicit island grass profile and compact-material eligibility,
+  leaving normal defaults unchanged. Six-leaf CPU candidate: 2,130 clumps /
+  76,680 triangles versus 12 / 48; this is an explicit cost increase, not free.
+- [x] Pass normal shared/client/server builds and typechecks, scoped lint/format,
+  and 365 unique runtime regressions across 25 files. These are source/CPU gates.
+- [x] Complete probe47 actual WebGPU study: exact 13 trees before/after, 2,130
+  grass clumps / six batches, all 39 PNGs and 67 scene/material/geometry checks.
+  Zero GPU/page errors, exact HUD/camera restoration, clean owned shutdown.
+  Whole run FAILS the same 19 cow/dagger errors; preserve failed probes45/46.
+- [ ] Reach visual acceptance: actual wide/bank images still show an empty,
+  artificial coast, wispy grass and unfinished architecture/lighting. Next:
+  tapered bay, prepared CC0 cliff modules, fuller functional woodland and paving.
+- [ ] Repair authoritative late-join resource snapshots and state before local
+  publication; 13-tree presence is not depletion/respawn/reconnect qualification.
+- [ ] Qualify motion, GPU/frame tails, thermal/minimum-client and decoded-stream
+  performance. No new art/performance/production approval; cow/dagger remain.
+
+Details: game `docs/compact-island-vegetation-20260911.md`.
+
 ## Connected ground regions and clear world captures — candidate, 2026-09-11
 
 - [x] Implement an admitted-ridge color field for connected straw/sage meadow and

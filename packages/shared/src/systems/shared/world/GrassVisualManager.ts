@@ -33,6 +33,11 @@ import THREE, {
   output,
 } from "../../../extras/three/three";
 import { SUN_LIGHT } from "./LightingConfig";
+import { createCompactTerrainColorOperations } from "./CompactTerrainPalette";
+import type {
+  GrassSurfaceEligibility,
+  StreamingGrassProfileReceipt,
+} from "../../../runtime/clientViewportMode";
 import {
   applyAnimeShade,
   TERRAIN_SHADER_CONSTANTS,
@@ -319,6 +324,8 @@ interface SettledGrassWorkerResult {
 }
 
 export interface GrassVisualProfile {
+  id?: "fixed-arena-v1" | "compact-island-v1";
+  eligibility?: GrassSurfaceEligibility;
   /** Multiplies the global spacing without changing deterministic placement. */
   clumpSpacingMultiplier?: number;
   /** Prevents expensive close-up geometry tiers in fixed spectator views. */
@@ -334,11 +341,22 @@ export interface GrassVisualProfile {
  * composition.
  */
 export const STREAMING_GRASS_VISUAL_PROFILE = {
+  id: "fixed-arena-v1",
   clumpSpacingMultiplier: 4,
   minimumLodLevel: 2,
   maxRenderDistance: 140,
   maxChunksPerFrame: 1,
 } as const satisfies GrassVisualProfile;
+
+/** Opt-in only. Changing profile requires a new manager, retiring all old tickets. */
+export const COMPACT_ISLAND_GRASS_VISUAL_PROFILE = Object.freeze({
+  id: "compact-island-v1",
+  eligibility: "compact-pbr-v1",
+  clumpSpacingMultiplier: 4,
+  minimumLodLevel: 1,
+  maxRenderDistance: 140,
+  maxChunksPerFrame: 1,
+} as const satisfies GrassVisualProfile);
 
 export interface GrassVisualReadiness {
   ready: boolean;
@@ -396,6 +414,7 @@ export class GrassVisualManager implements QuadTreeListener {
   private getTerrainColorAt: (
     wx: number,
     wz: number,
+    eligibility?: GrassSurfaceEligibility,
   ) => {
     r: number;
     g: number;
@@ -430,6 +449,8 @@ export class GrassVisualManager implements QuadTreeListener {
   private clumpSpacing: number;
   private minimumLodLevel: number;
   private maxRenderDistance: number;
+  private readonly profileId: StreamingGrassProfileReceipt["profileId"];
+  private readonly grassEligibility: GrassSurfaceEligibility;
 
   private workerSetup: GrassWorkerSetup | null = null;
   private workerInflight = new Map<string, GrassWorkerTicket>();
@@ -457,6 +478,7 @@ export class GrassVisualManager implements QuadTreeListener {
     getTerrainColorAt: (
       wx: number,
       wz: number,
+      eligibility?: GrassSurfaceEligibility,
     ) => {
       r: number;
       g: number;
@@ -492,6 +514,28 @@ export class GrassVisualManager implements QuadTreeListener {
       ) {
         throw new Error("Grass visual provider/worker derived config mismatch");
       }
+    }
+    this.profileId = profile.id ?? "ordinary-v1";
+    this.grassEligibility =
+      createCompactTerrainColorOperations().grassEligibility(
+        profile.eligibility,
+        workerSetup?.terrainConfig.TERRAIN_PROFILE.algorithm ?? "",
+      );
+    if (
+      this.profileId === "compact-island-v1" ||
+      this.grassEligibility === "compact-pbr-v1"
+    ) {
+      for (const [key, value] of Object.entries(
+        COMPACT_ISLAND_GRASS_VISUAL_PROFILE,
+      )) {
+        if (profile[key] !== value)
+          throw new Error(`Compact grass profile mismatch: ${key}`);
+      }
+    } else if (
+      this.profileId !== "ordinary-v1" &&
+      this.profileId !== "fixed-arena-v1"
+    ) {
+      throw new Error("Unknown grass visual profile");
     }
     this.container = container;
     this.getHeightAt = getHeightAt;
@@ -545,6 +589,35 @@ export class GrassVisualManager implements QuadTreeListener {
   }
 
   // -- Public API -----------------------------------------------------------
+
+  /** Current owner configuration/counters, not a GPU or visibility qualification. */
+  getProfileReceipt(): StreamingGrassProfileReceipt {
+    let installedClumps = 0;
+    let castShadow = false;
+    for (const { mesh } of this.chunks.values()) {
+      installedClumps += mesh.count;
+      castShadow ||= mesh.castShadow;
+    }
+    return {
+      schemaVersion: 1,
+      profileId: this.profileId,
+      eligibility: this.grassEligibility,
+      terrainProfileIdentity: this.terrainProfileIdentity,
+      minimumLodLevel: this.minimumLodLevel,
+      clumpSpacingMultiplier: this.clumpSpacing / GRASS_CONFIG.CLUMP_SPACING,
+      clumpSpacing: this.clumpSpacing,
+      maxRenderDistance: this.maxRenderDistance,
+      maxChunksPerFrame: this.maxChunksPerFrame,
+      castShadow,
+      destroyed: this.destroyed,
+      liveNodes: this.liveNodes.size,
+      pendingChunks: this.pendingNodes.length,
+      inflightChunks: this.workerInflight.size,
+      settledChunks: this.settledWorkerResults.length,
+      installedChunks: this.chunks.size,
+      installedClumps,
+    };
+  }
 
   setPlayerPosition(x: number, z: number): void {
     this.playerX = x;
@@ -853,6 +926,7 @@ export class GrassVisualManager implements QuadTreeListener {
     const half = node.halfSize;
     const normalHalo = GRASS_SURFACE_NORMAL_SAMPLE_DISTANCE;
     return {
+      grassEligibility: this.grassEligibility,
       type: "generateGrassInstances",
       chunkKey: key,
       centerX: node.centerX,
@@ -986,6 +1060,8 @@ export class GrassVisualManager implements QuadTreeListener {
     if (data.terrainProfileIdentity !== this.terrainProfileIdentity) {
       throw new Error("Grass visual result profile identity mismatch");
     }
+    if ((data.grassEligibility ?? "legacy-biome-v1") !== this.grassEligibility)
+      throw new Error("Grass visual result eligibility mismatch");
   }
 
   private createChunkMeshFromWorkerData(
@@ -1324,6 +1400,7 @@ export class GrassVisualManager implements QuadTreeListener {
           type: "grassInstanceResult" as const,
           chunkKey: key,
           terrainProfileIdentity: this.terrainProfileIdentity,
+          grassEligibility: this.grassEligibility,
         },
         surface,
         this.getWaterSurfaceAt,
@@ -1406,7 +1483,7 @@ export class GrassVisualManager implements QuadTreeListener {
         nx,
         ny,
         nz,
-      } = this.getTerrainColorAt(wx, wz);
+      } = this.getTerrainColorAt(wx, wz, this.grassEligibility);
       const grassPlacement = Math.max(0, rawGP - roadInf);
 
       if (grassPlacement <= 0) continue;

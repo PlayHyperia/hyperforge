@@ -13,6 +13,7 @@ import {
   resolveStreamingRenderPreferences,
   evaluateStreamingRenderProfileApplication,
   type StreamingRenderAppliedState,
+  type StreamingGrassProfileReceipt,
 } from "../clientViewportMode";
 
 function makeWindow(pathname: string, search = ""): Window {
@@ -134,6 +135,102 @@ describe("opt-in shadows render contract (CPU validation, not GPU execution)", (
     expect(
       evaluateStreamingRenderProfileApplication(profile, requested, observed()),
     ).toMatchObject({ schemaVersion: 1, ready: true, mismatchReason: null });
+  });
+
+  it("keeps the island candidate explicit and changes only its grass profile", () => {
+    const island = STREAMING_RENDER_PROFILES["island-720p60-v1"];
+    expect({
+      ...island,
+      id: profile.id,
+      grassProfile: profile.grassProfile,
+    }).toEqual(profile);
+    for (const route of ["/stream.html", "/?page=stream"]) {
+      const [path, query] = route.split("?");
+      expect(
+        resolveExplicitStreamingRenderProfile(
+          makeWindow(
+            path,
+            `?${query ? `${query}&` : ""}streamRenderProfile=island-720p60-v1`,
+          ),
+        ),
+      ).toBe(island);
+    }
+    for (const [path, query] of [
+      ["/play", ""],
+      ["/", "embedded=true&mode=spectator&"],
+      ["/stream.html", "embedded=true&"],
+      ["/stream.html", "streamFps=30&"],
+      ["/stream.html", "streamRenderProfile=canonical-720p60-v1&"],
+    ])
+      expect(() =>
+        resolveExplicitStreamingRenderProfile(
+          makeWindow(path, `?${query}streamRenderProfile=island-720p60-v1`),
+        ),
+      ).toThrow();
+    expect(
+      resolveExplicitStreamingRenderProfile(
+        makeWindow("/stream.html", "?streamFps=60"),
+      ),
+    ).toBeNull();
+  });
+
+  it("requires actual island grass configuration, not an advertised ready bit or clump quota", () => {
+    const island = STREAMING_RENDER_PROFILES["island-720p60-v1"];
+    const state = observed();
+    expect(
+      evaluateStreamingRenderProfileApplication(island, requested, state)
+        .mismatchReason,
+    ).toBe("grass_unavailable");
+    const grass: StreamingGrassProfileReceipt = {
+      schemaVersion: 1,
+      profileId: "compact-island-v1",
+      eligibility: "compact-pbr-v1",
+      terrainProfileIdentity: "admitted-terrain",
+      minimumLodLevel: 1,
+      clumpSpacingMultiplier: 4,
+      clumpSpacing: 2.8,
+      maxRenderDistance: 140,
+      maxChunksPerFrame: 1,
+      castShadow: false,
+      destroyed: false,
+      liveNodes: 0,
+      pendingChunks: 0,
+      inflightChunks: 0,
+      settledChunks: 0,
+      installedChunks: 0,
+      installedClumps: 0,
+    };
+    state.grass = grass;
+    expect(
+      evaluateStreamingRenderProfileApplication(island, requested, state).ready,
+    ).toBe(true);
+    const invalid: Partial<StreamingGrassProfileReceipt>[] = [
+      { profileId: "fixed-arena-v1" },
+      { eligibility: "legacy-biome-v1" },
+      { minimumLodLevel: 2 },
+      { clumpSpacingMultiplier: 1 },
+      { clumpSpacing: 0.7 },
+      { maxRenderDistance: 500 },
+      { maxChunksPerFrame: 2 },
+      { castShadow: true },
+      { destroyed: true },
+      { terrainProfileIdentity: "" },
+      { installedClumps: NaN },
+      { pendingChunks: -1 },
+      { settledChunks: 0.5 },
+    ];
+    for (const change of invalid) {
+      state.grass = { ...grass, ...change };
+      expect(
+        evaluateStreamingRenderProfileApplication(island, requested, state)
+          .ready,
+      ).toBe(false);
+    }
+    state.grass = null;
+    expect(
+      evaluateStreamingRenderProfileApplication(profile, requested, state)
+        .ready,
+    ).toBe(true);
   });
 
   it.each([
