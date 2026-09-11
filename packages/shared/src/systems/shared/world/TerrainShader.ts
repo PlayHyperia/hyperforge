@@ -60,6 +60,8 @@ import {
   createCompactPondSurfaceWeights,
   applyCompactPondWetness,
   applyCompactMeadowTint,
+  createCompactCoastWeights,
+  applyCompactCoastRock,
   createCompactTerrainMacroWeights,
 } from "./CompactTerrainMaterial";
 import type { WorldTerrainProfile } from "./WorldTerrainProfile";
@@ -1618,6 +1620,19 @@ export function createTerrainMaterial(
   const pondSurface = pondParameters
     ? createCompactPondSurfaceWeights(worldPos, distortNoise, pondParameters)
     : { soil: float(0), wetness: float(0) };
+  if (compactLayers && macroField) {
+    compactLayers.rock = applyCompactCoastRock(
+      compactLayers.rock,
+      compactLayers.dirt,
+      createCompactCoastWeights(
+        worldPos,
+        noiseValue,
+        distortNoise,
+        macroSurface.westRock,
+        macroField,
+      ),
+    );
+  }
   const compactWeights = compactLayers
     ? createCompactTerrainLayerWeights(
         noiseValue,

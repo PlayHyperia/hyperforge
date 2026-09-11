@@ -107,6 +107,10 @@ and five existing authored/network-owned trees.
   same old dimension failure, passed all twelve selected negative/legacy cases,
   then passed the corrected active-v2 process case. Direct Node22 and pinned
   Bun1.3.14 validators pass, as do scoped lint/format checks.
+- Root subsequently ran the complete unchanged validator suite again under
+  Node22 and pinned Bun1.3.14: **32/32 passed**, zero skipped/cancelled, in
+  189.96 seconds. The earlier failure and cross-run result above are historical,
+  not substituted for this fresh complete run.
 
 The three pre-build gate files are separately attested, not included in the
 world runner's inherited source archive: validator
@@ -123,9 +127,9 @@ Probe50 report SHA-256:
 `8442a1e96308b98e21eace5ce92d97684bc250a859740e16f453456f941bebce`.
 Probe51, including the subsequent compact lighting correction:
 `b845a0c8526fa720528aba9aa75ed3b8419ba97e9853f792f031d7f4df651cd0`.
-Root independently verifies all468 probe51 current pins and399 archives; all39
-original images total37,711,129 bytes at1280×720. Its combined regression run
-passes422/422 tests across41 files, plus all three builds/typechecks. See
+Root independently verifies all 468 probe51 current pins and 399 archives; all 39
+original images total 37,711,129 bytes at 1280×720. Its combined regression run
+passes 422/422 tests across 41 files, plus all three builds/typechecks. See
 [lighting evidence](compact-lighting-correction-20260911.md) for the exact
 camera-shadow correction, retained error gates and visual/performance limits.
 

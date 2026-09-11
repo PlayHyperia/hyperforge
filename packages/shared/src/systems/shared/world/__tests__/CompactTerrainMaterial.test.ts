@@ -34,12 +34,20 @@ import {
   applyCompactPondWetness,
   applyCompactMeadowTint,
   createCompactTerrainMacroWeights,
+  createCompactCoastWeights,
+  applyCompactCoastRock,
   type CompactTerrainLayer,
 } from "../CompactTerrainMaterial";
 import { createCompactTerrainColorOperations } from "../CompactTerrainPalette";
 import { ALL_WORLD_AREAS } from "../../../../data/world-areas";
 import { DataManager } from "../../../../data/DataManager";
-import { SCULPTED_COMPACT_WORLD_TERRAIN_PROFILE } from "../WorldTerrainProfile";
+import { World } from "../../../../core/World";
+import { TerrainSystem } from "../TerrainSystem";
+import {
+  SCULPTED_COMPACT_WORLD_TERRAIN_PROFILE,
+  SCULPTED_COMPACT_V1_PROFILE_FIXTURE,
+  validateWorldTerrainProfile,
+} from "../WorldTerrainProfile";
 
 beforeAll(async () => {
   await DataManager.getInstance().initialize();
@@ -129,6 +137,8 @@ function vectorValue(node: Node): number[] {
     );
   };
   switch (read("op")) {
+    case "/":
+      return pair((a, b) => a / b);
     case "+":
       return pair((a, b) => a + b);
     case "-":
@@ -737,6 +747,314 @@ describe("compact terrain actual texture ownership and CPU material graph", () =
 });
 
 describe("compact grass base palette without changing ecology", () => {
+  it("redistributes real v4 coastal rock while retaining west-headland contrast", async () => {
+    const world = new World();
+    const terrain = world.register("terrain", TerrainSystem) as TerrainSystem;
+    const ops = createCompactTerrainColorOperations();
+    try {
+      await terrain.init();
+      const profile = terrain.getWorldTerrainProfile();
+      const field = ops.macroField(profile)!;
+      const target =
+        field.seaLevel + (field.baseElevation - field.seaLevel) * 0.25;
+      const samples = [];
+      for (let sector = 0; sector < 12; sector++) {
+        const angle = (sector * Math.PI) / 6;
+        const xz = (radius: number) =>
+          [
+            profile.island.centerX + Math.cos(angle) * radius,
+            profile.island.centerZ + Math.sin(angle) * radius,
+          ] as const;
+        const height = (radius: number) =>
+          terrain["getHeightAtComputed"](...xz(radius));
+        let low = 0,
+          high = 5;
+        while (height(high) > target && high < 240) {
+          low = high;
+          high += 5;
+        }
+        expect(height(low)).toBeGreaterThan(target);
+        expect(height(high)).toBeLessThanOrEqual(target);
+        for (let i = 0; i < 30; i++) {
+          const middle = (low + high) / 2;
+          if (height(middle) > target) low = middle;
+          else high = middle;
+        }
+        const [x, z] = xz((low + high) / 2);
+        const y = terrain["getHeightAtComputed"](x, z);
+        const color = terrain.getTerrainColorAt(x, z, true, "compact-pbr-v1");
+        const noiseValue = sampleNoiseCPU(x, z, 0.0008);
+        const distortNoise = sampleNoiseCPU(x, z, 0.067);
+        const macro = ops.macroWeights(x, z, noiseValue, field);
+        const coast = ops.coastWeights({
+          x,
+          z,
+          height: y,
+          noiseValue,
+          distortNoise,
+          westRock: macro.westRock,
+          field,
+        });
+        const gpu = createCompactCoastWeights(
+          vec3(x, y, z),
+          float(noiseValue),
+          float(distortNoise),
+          float(macro.westRock),
+          field,
+        );
+        expect(vectorValue(gpu.soil)[0]).toBeCloseTo(coast.soil, 13);
+        expect(coast.soil).toBeGreaterThan(0.03);
+        expect(coast.wetness).toBe(0);
+        const cliff = ops.weights({
+          noiseValue,
+          distortNoise,
+          slope: 1 - color.ny,
+          roadInfluence: 0,
+          macroSurface: macro,
+        }).cliff;
+        expect(cliff).toBeGreaterThan(0.95);
+        expect(color.grassWeight).toBeLessThan(0.05);
+        const expected = ops.sample({
+          noiseValue,
+          distortNoise,
+          slope: 1 - color.ny,
+          roadInfluence: 0,
+          surface: { x, z, height: y, pond: null, macroField: field },
+        });
+        expect(color.r).toBeCloseTo(expected.r, 12);
+        expect(color.g).toBeCloseTo(expected.g, 12);
+        expect(color.b).toBeCloseTo(expected.b, 12);
+        samples.push({ sector, x, z, y, soil: coast.soil, cliff });
+      }
+      // Authored west bearing is pi. Compare actual shore, not a renamed noise patch.
+      expect(samples[6].soil).toBeLessThan(samples[0].soil * 0.6);
+      process.stdout.write(
+        `Compact coast CPU anchors (not GPU/contact proof): ${JSON.stringify(samples)}\n`,
+      );
+    } finally {
+      world.destroy();
+    }
+  });
+
+  it("uses admitted sea/base/headland fields with narrow wetness and independent coast expectations", () => {
+    const ops = createCompactTerrainColorOperations();
+    const profile = SCULPTED_COMPACT_WORLD_TERRAIN_PROFILE;
+    const field = ops.macroField(profile)!;
+    const rise = profile.height.baseOffset - profile.water.threshold;
+    const input = {
+      x: profile.island.centerX + profile.island.radius,
+      z: profile.island.centerZ,
+      height: profile.water.threshold + rise * 0.2,
+      noiseValue: 0.5,
+      distortNoise: 0.5,
+      westRock: 0,
+      field,
+    };
+    // Independent fixed arithmetic: smoothstep(.35,.65,.5)=.5, giving
+    // soil=.35+(.9-.35)*.5=.625 east; authored west headland retains72% rock.
+    expect(ops.coastWeights(input)).toEqual({ soil: 0.625, wetness: 0 });
+    expect(
+      ops.coastWeights({
+        ...input,
+        x: profile.island.centerX - profile.island.radius,
+      }).soil,
+    ).toBeCloseTo(0.175, 14);
+    expect(ops.coastWeights({ ...input, westRock: 1 }).soil).toBeCloseTo(
+      0.40625,
+      14,
+    );
+    expect(
+      ops.coastWeights({ ...input, height: profile.water.threshold }).wetness,
+    ).toBeCloseTo(0.896, 14);
+    expect(
+      ops.coastWeights({
+        ...input,
+        height: profile.water.threshold + rise * 0.04,
+      }).wetness,
+    ).toBe(0);
+    expect(
+      ops.coastWeights({
+        ...input,
+        height: profile.water.threshold - rise * 0.01,
+      }).wetness,
+    ).toBe(1);
+    expect(ops.coastWeights({ ...input, height: field.baseElevation })).toEqual(
+      { soil: 0, wetness: 0 },
+    );
+    expect(ops.coastWeights({ ...input, field: null })).toEqual({
+      soil: 0,
+      wetness: 0,
+    });
+    expect(ops.macroField(SCULPTED_COMPACT_V1_PROFILE_FIXTURE)).toBeNull();
+    expect(() =>
+      ops.macroField({
+        ...profile,
+        height: { ...profile.height, baseOffset: profile.water.threshold },
+      }),
+    ).toThrow("Invalid admitted macro surface field");
+    const shifted = validateWorldTerrainProfile({
+      ...profile,
+      id: "coast-elevation-regression",
+      water: { ...profile.water, threshold: profile.water.threshold - 4 },
+      height: { ...profile.height, baseOffset: profile.height.baseOffset - 4 },
+    });
+    const shiftedField = ops.macroField(shifted)!;
+    for (const h of [-0.1, 0, 0.02, 0.55, 0.74, 0.97, 1.1]) {
+      const height = profile.water.threshold + h * rise;
+      const a = ops.coastWeights({ ...input, height });
+      const b = ops.coastWeights({
+        ...input,
+        height: height - 4,
+        field: shiftedField,
+      });
+      expect(b.soil).toBeCloseTo(a.soil, 14);
+      expect(b.wetness).toBeCloseTo(a.wetness, 14);
+    }
+  });
+
+  it("matches coastal TSL arithmetic, continuous edges and full soil priorities without changing grass support", () => {
+    const ops = createCompactTerrainColorOperations();
+    const field = ops.macroField(SCULPTED_COMPACT_WORLD_TERRAIN_PROFILE)!;
+    const palette = ops.getPalette();
+    const layer = (
+      rgb: number[],
+      roughness: number,
+      ao: number,
+    ): CompactTerrainLayer => ({
+      albedo: vec3(...(rgb as [number, number, number])),
+      roughness: float(roughness),
+      ao: float(ao),
+      worldNormal: vec3(0, 1, 0),
+    });
+    const layers = {
+      grass: layer(palette.grass, 0.91, 0.8),
+      dirt: layer(palette.dirt, 0.88, 0.9),
+      rock: layer(palette.rock, 0.76, 0.7),
+    };
+    for (const [x, z] of [
+      [190, 400],
+      [350, 235],
+      [510, 400],
+      [430, 478],
+      [350, 565],
+      [350, 400],
+    ])
+      for (const relative of [-0.02, 0, 0.02, 0.5, 0.72, 0.97, 1.1])
+        for (const noise of [0.1, 0.5, 0.9]) {
+          const height =
+            field.seaLevel + relative * (field.baseElevation - field.seaLevel);
+          const edge = 1 - noise;
+          const macro = ops.macroWeights(x, z, noise, field);
+          const coast = ops.coastWeights({
+            x,
+            z,
+            height,
+            noiseValue: noise,
+            distortNoise: edge,
+            westRock: macro.westRock,
+            field,
+          });
+          const actual = createCompactCoastWeights(
+            vec3(x, height, z),
+            float(noise),
+            float(edge),
+            float(macro.westRock),
+            field,
+          );
+          for (const key of ["soil", "wetness"] as const) {
+            expect(vectorValue(actual[key])[0]).toBeCloseTo(coast[key], 13);
+            expect(coast[key]).toBeGreaterThanOrEqual(0);
+            expect(coast[key]).toBeLessThanOrEqual(1);
+            const beside = ops.coastWeights({
+              x: x + 1e-6,
+              z,
+              height: height + 1e-6,
+              noiseValue: noise,
+              distortNoise: edge,
+              westRock: macro.westRock,
+              field,
+            });
+            expect(Math.abs(coast[key] - beside[key])).toBeLessThan(1e-4);
+          }
+          const coastalRock = applyCompactCoastRock(
+            layers.rock,
+            layers.dirt,
+            actual,
+          );
+          const expectedRoughness = 0.76 + (0.88 - 0.76) * coast.soil;
+          expect(vectorValue(coastalRock.roughness)[0]).toBeCloseTo(
+            expectedRoughness + (0.58 - expectedRoughness) * coast.wetness,
+            13,
+          );
+          expect(vectorValue(coastalRock.ao)[0]).toBeCloseTo(
+            0.7 + 0.2 * coast.soil,
+            13,
+          );
+          expect(vectorValue(coastalRock.worldNormal)).toEqual([0, 1, 0]);
+          for (const slope of [0, 0.1, 0.5])
+            for (const road of [0, 1]) {
+              const input = {
+                noiseValue: noise,
+                distortNoise: edge,
+                slope,
+                roadInfluence: road,
+                surface: { x, z, height, pond: null, macroField: field },
+              };
+              const weights = ops.weights({ ...input, macroSurface: macro });
+              const surface = blendCompactTerrainLayers(
+                {
+                  ...layers,
+                  grass: applyCompactMeadowTint(
+                    layers.grass,
+                    float(noise),
+                    float(macro.dry),
+                  ),
+                  rock: coastalRock,
+                },
+                float(weights.dirt),
+                float(weights.cliff),
+                float(weights.road),
+              );
+              const rgb = vectorValue(surface.albedo.mul(weights.variation));
+              const cpu = ops.sample(input);
+              for (const [i, key] of ["r", "g", "b"].entries())
+                expect(rgb[i]).toBeCloseTo(cpu[key as "r" | "g" | "b"], 13);
+              const support = ops.grassSupport(input);
+              expect(support).toBe((1 - weights.dirt) * (1 - weights.cliff));
+              if (road === 1) {
+                expect(vectorValue(surface.roughness)[0]).toBeCloseTo(0.88, 13);
+                rgb.forEach((value, i) =>
+                  expect(value).toBeCloseTo(
+                    palette.dirt[i] * weights.variation,
+                    13,
+                  ),
+                );
+              }
+              if (slope === 0) {
+                const withoutCoast = ops.sample({
+                  ...input,
+                  surface: { ...input.surface, height: field.baseElevation },
+                });
+                expect(cpu).toEqual(withoutCoast);
+              }
+            }
+          // Full pond soil wins even in an artificial below-ocean overlap.
+          const pondSurface = applyCompactPondWetness(
+            blendCompactTerrainLayers(
+              { ...layers, rock: coastalRock },
+              float(1),
+              float(0),
+              float(0),
+            ),
+            float(1),
+          );
+          expect(vectorValue(pondSurface.albedo)).toEqual(
+            palette.dirt.map((v) => v * 0.72),
+          );
+          expect(vectorValue(pondSurface.roughness)[0]).toBeCloseTo(0.62, 13);
+        }
+  });
+
   it("matches admitted ridge-field TSL, physical-layer weights and CPU RGB with protected soil overrides", () => {
     const ops = createCompactTerrainColorOperations();
     const field = ops.macroField(SCULPTED_COMPACT_WORLD_TERRAIN_PROFILE)!;
@@ -1210,9 +1528,18 @@ describe("compact grass base palette without changing ecology", () => {
         pond: createCompactTerrainColorOperations().validatePond(
           ALL_WORLD_AREAS.haven_pond.waterBodies![0],
         ),
+        macroField: createCompactTerrainColorOperations().macroField(
+          SCULPTED_COMPACT_WORLD_TERRAIN_PROFILE,
+        ),
       },
     };
     const inputs = [input];
+    for (const x of [190, 350, 510])
+      for (const height of [15.8, 16, 16.2, 20, 25, 28.15])
+        inputs.push({
+          ...input,
+          surface: { ...input.surface, x, z: 400, height },
+        });
     for (const slope of [0, 0.07, 0.15, 0.23, 0.8])
       for (const noiseValue of [0, 0.28, 0.5, 0.72, 1])
         for (const roadInfluence of [0, 0.5, 1])

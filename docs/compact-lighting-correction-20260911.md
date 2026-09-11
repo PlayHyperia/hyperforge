@@ -10,7 +10,7 @@ checkpoint, not AAA, motion, streaming or production approval.
 
 The recorded light and shadow-camera matrices establish a camera-height coverage
 bug. Across six wide-view observations, all 66 station-ground receiver samples
-are beyond far600 (depths 678.138–734.499m); 53 also lie below the light frustum.
+are beyond the 600m far plane (depths 678.138–734.499m); 53 also lie below the light frustum.
 All 660 corresponding samples from the other views are inside. These are repeated
 measurements of eleven actual station-ground points, not 726 unique world sites.
 The initial observation has no station-ground coordinates and remains unavailable.
@@ -43,8 +43,8 @@ Derived station coverage in `asset-studio/compact-shadow-coverage01/`:
    material samples, normals, AO, roughness, pond/path/macro weights, blade
    gradients, geometry, wind, fog/output and shared sky/IBL remain unchanged.
 
-Shadow allocation remains one 4096² map with ±200m extents, near/far0.5/600,
-bias0.0002 and normalBias0.01. No new textures, render passes or instances are
+Shadow allocation remains one 4096² map with ±200m extents, near/far 0.5/600,
+bias 0.0002 and normalBias 0.01. No new textures, render passes or instances are
 introduced. More correctly included casters may increase GPU work; unchanged
 allocation is not a performance result. The material change removes expressions,
 but no frame-time improvement is claimed before measurement.
@@ -62,7 +62,7 @@ but no frame-time improvement is claimed before measurement.
 - Actual terrain/grass node graphs verify the removed albedo dependencies,
   retained legacy dependencies, independent normal/output paths and precise
   root/middle/tip color arithmetic. Existing geometry hashes and complete compact
-  texture/sample checks remain. The implementer's five focused suites pass40/40.
+  texture/sample checks remain. The implementer's five focused suites pass 40/40.
 - All three normal builds and all three package typechecks pass, together with
   six-file lint/format/diff checks.
 - Actual headful Chrome/Apple Metal 3 WebGPU probe51 passes the spatial,
@@ -76,7 +76,7 @@ but no frame-time improvement is claimed before measurement.
   separately attested before and after the run, not silently added to its archive.
 - The unchanged recorded-matrix assessor places all 726 station samples inside
   the map: 66 observations of eleven ground points. The 66 wide-view samples
-  previously outside are now inside, at depths457.531–476.350m. The initial
+  previously outside are now inside, at depths 457.531–476.350m. The initial
   observation still lacks station points and is explicitly unavailable. This
   does not certify shadow-map freshness, pixels or complete caster coverage.
 
@@ -89,9 +89,9 @@ The shared client build is
 
 Root reviewed the actual bank and wide images. Ground/grass appear more coherent
 and tree shadows more readable; the broad lawn, repeated material and uniform
-pale coast remain below the art target. Bank/wide phases are0.461897/0.637210,
+pale coast remain below the art target. Bank/wide phases are 0.461897/0.637210,
 different from probe50. This is not a matched-phase visual or performance A/B.
-The real profile stays1280×720, DPR1, MSAA4 and one4096² map; no resolution,
+The real profile stays 1280×720, DPR1, MSAA4 and one 4096² map; no resolution,
 population or quality reduction was used. Native timing and minimum hardware
 remain unqualified.
 
@@ -102,7 +102,7 @@ Near-contact resolution, self-shadow bias, all caster bounds, off-camera caster
 culling, shortened sun/moon interpolation rays and actual sustained rendering
 cost remain open. An optional partial land/tree bound excludes stations, moving
 actors, grading overlays and unbounded ocean; it does not authorize widening
-depth. Its preliminary test run is3/4, with a vertical-camera basis fixture issue,
+depth. Its preliminary test run is 3/4, with a vertical-camera basis fixture issue,
 and is not represented as a complete certificate.
 
 The terrain's existing lamp/vertex-light albedo multiplier and grass's terrain-

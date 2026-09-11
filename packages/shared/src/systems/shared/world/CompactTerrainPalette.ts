@@ -28,6 +28,12 @@ export type CompactTerrainMacroField = Readonly<{
   ridgeEndFade: number;
   ridgeWestWidth: number;
   ridgeEastWidth: number;
+  seaLevel: number;
+  baseElevation: number;
+  headlandDirectionX: number;
+  headlandDirectionZ: number;
+  headlandOuterCos: number;
+  headlandInnerCos: number;
 }>;
 
 export function createCompactTerrainColorOperations() {
@@ -68,6 +74,23 @@ export function createCompactTerrainColorOperations() {
     macroDryRed: 5.2,
     macroDryGreen: 1.05,
     macroDryBlue: 2.6,
+    // Fractions of the admitted sea-to-interior rise, not absolute world Y.
+    coastFadeStartLow: 0.5,
+    coastFadeStartHigh: 0.65,
+    coastFadeEndLow: 0.82,
+    coastFadeEndHigh: 0.97,
+    coastPatchStart: 0.35,
+    coastPatchEnd: 0.65,
+    coastEdgeNoise: 0.12,
+    coastSoilLow: 0.35,
+    coastSoilHigh: 0.9,
+    coastHeadlandRock: 0.72,
+    coastRidgeRock: 0.35,
+    coastWetStart: -0.01,
+    coastWetEndLow: 0.025,
+    coastWetEndHigh: 0.055,
+    coastWetAlbedo: 0.66,
+    coastWetRoughness: 0.58,
     variationLow: 0.98,
     variationHigh: 1.02,
     pathEdgeNoiseContrast: 2.5,
@@ -134,6 +157,12 @@ export function createCompactTerrainColorOperations() {
         ridgeEndFade: ridge.ridgeEndFade,
         ridgeWestWidth: ridge.ridgeWestWidth,
         ridgeEastWidth: ridge.ridgeEastWidth,
+        seaLevel: profile.water.threshold,
+        baseElevation: profile.height.baseOffset,
+        headlandDirectionX: Math.cos(ridge.westHeadlandBearing),
+        headlandDirectionZ: Math.sin(ridge.westHeadlandBearing),
+        headlandOuterCos: Math.cos(ridge.westHeadlandHalfWidth),
+        headlandInnerCos: Math.cos(ridge.westHeadlandHalfWidth * 0.5),
       };
       if (
         !Object.values(field).every(Number.isFinite) ||
@@ -141,7 +170,9 @@ export function createCompactTerrainColorOperations() {
         field.ridgeEndZ <= field.ridgeStartZ ||
         field.ridgeEndFade <= 0 ||
         field.ridgeWestWidth <= 0 ||
-        field.ridgeEastWidth <= 0
+        field.ridgeEastWidth <= 0 ||
+        field.baseElevation <= field.seaLevel ||
+        field.headlandInnerCos <= field.headlandOuterCos
       )
         throw new Error("Invalid admitted macro surface field");
       return Object.freeze(field);
@@ -192,6 +223,60 @@ export function createCompactTerrainColorOperations() {
         dry: shoulder,
         westRock:
           shoulder * math.smooth(c.macroWestStart, c.macroWestEnd, west),
+      };
+    },
+    /** Redistribute existing rock only: grassSupport and its RNG stay unchanged. */
+    coastWeights(input: {
+      x: number;
+      z: number;
+      height: number;
+      noiseValue: number;
+      distortNoise: number;
+      westRock: number;
+      field: CompactTerrainMacroField | null;
+    }) {
+      const f = input.field;
+      if (!f) return { soil: 0, wetness: 0 };
+      const c = composition;
+      const noise = Math.max(0, Math.min(1, input.noiseValue));
+      const edge = Math.max(0, Math.min(1, input.distortNoise));
+      const relative =
+        (input.height - f.seaLevel) / (f.baseElevation - f.seaLevel);
+      const coverage =
+        1 -
+        math.smooth(
+          math.mix(c.coastFadeStartLow, c.coastFadeStartHigh, noise),
+          math.mix(c.coastFadeEndLow, c.coastFadeEndHigh, noise),
+          relative,
+        );
+      const dx = input.x - f.centerX,
+        dz = input.z - f.centerZ;
+      const direction =
+        (dx * f.headlandDirectionX + dz * f.headlandDirectionZ) /
+        Math.max(1e-6, Math.hypot(dx, dz));
+      const headland = math.smooth(
+        f.headlandOuterCos,
+        f.headlandInnerCos,
+        direction,
+      );
+      const patch = math.smooth(
+        c.coastPatchStart,
+        c.coastPatchEnd,
+        noise + (edge - 0.5) * c.coastEdgeNoise,
+      );
+      return {
+        soil:
+          coverage *
+          math.mix(c.coastSoilLow, c.coastSoilHigh, patch) *
+          (1 - c.coastHeadlandRock * headland) *
+          (1 - c.coastRidgeRock * Math.max(0, Math.min(1, input.westRock))),
+        wetness:
+          1 -
+          math.smooth(
+            c.coastWetStart,
+            math.mix(c.coastWetEndLow, c.coastWetEndHigh, edge),
+            relative,
+          ),
       };
     },
     validatePond(value: CompactTerrainPond | null): CompactTerrainPond | null {
@@ -434,6 +519,15 @@ export function createCompactTerrainColorOperations() {
         pondSurface,
         macroSurface,
       });
+      const coast = input.surface
+        ? operations.coastWeights({
+            ...input.surface,
+            noiseValue: input.noiseValue,
+            distortNoise: input.distortNoise,
+            westRock: macroSurface.westRock,
+            field: input.surface.macroField ?? null,
+          })
+        : { soil: 0, wetness: 0 };
       const wetAlbedo = math.mix(
         1,
         composition.pondWetAlbedo,
@@ -454,7 +548,11 @@ export function createCompactTerrainColorOperations() {
                 palette.dirt[channel],
                 dirt,
               ),
-              palette.rock[channel],
+              math.mix(
+                palette.rock[channel],
+                palette.dirt[channel],
+                coast.soil,
+              ) * math.mix(1, composition.coastWetAlbedo, coast.wetness),
               cliff,
             ),
             palette.dirt[channel],

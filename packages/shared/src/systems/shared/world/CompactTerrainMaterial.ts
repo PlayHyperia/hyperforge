@@ -475,6 +475,80 @@ export function createCompactTerrainLayerWeights(
   };
 }
 
+/** Existing coastal mineral surface only; does not change grass eligibility. */
+export function createCompactCoastWeights(
+  world: Node<"vec3">,
+  noiseValue: Node<"float">,
+  edgeNoise: Node<"float">,
+  westRock: Node<"float">,
+  field: CompactTerrainMacroField | null,
+) {
+  if (!field) return { soil: float(0), wetness: float(0) };
+  const c = COMPACT_TERRAIN_COMPOSITION;
+  const noise = noiseValue.clamp(0, 1),
+    edge = edgeNoise.clamp(0, 1);
+  const relative = world.y
+    .sub(field.seaLevel)
+    .div(field.baseElevation - field.seaLevel);
+  const coverage = float(1).sub(
+    smoothstep(
+      mix(float(c.coastFadeStartLow), float(c.coastFadeStartHigh), noise),
+      mix(float(c.coastFadeEndLow), float(c.coastFadeEndHigh), noise),
+      relative,
+    ),
+  );
+  const delta = vec2(world.x.sub(field.centerX), world.z.sub(field.centerZ));
+  const direction = delta.x
+    .mul(field.headlandDirectionX)
+    .add(delta.y.mul(field.headlandDirectionZ))
+    .div(delta.length().max(1e-6));
+  const headland = smoothstep(
+    float(field.headlandOuterCos),
+    float(field.headlandInnerCos),
+    direction,
+  );
+  const patch = smoothstep(
+    float(c.coastPatchStart),
+    float(c.coastPatchEnd),
+    noise.add(edge.sub(0.5).mul(c.coastEdgeNoise)),
+  );
+  return {
+    soil: coverage
+      .mul(mix(float(c.coastSoilLow), float(c.coastSoilHigh), patch))
+      .mul(float(1).sub(headland.mul(c.coastHeadlandRock)))
+      .mul(float(1).sub(westRock.clamp(0, 1).mul(c.coastRidgeRock))),
+    wetness: float(1).sub(
+      smoothstep(
+        float(c.coastWetStart),
+        mix(float(c.coastWetEndLow), float(c.coastWetEndHigh), edge),
+        relative,
+      ),
+    ),
+  };
+}
+
+/** Reuse soil/rock maps together; never tint grass or full path/pond overrides. */
+export function applyCompactCoastRock(
+  rock: CompactTerrainLayer,
+  soil: CompactTerrainLayer,
+  coast: { soil: Node<"float">; wetness: Node<"float"> },
+): CompactTerrainLayer {
+  const c = COMPACT_TERRAIN_COMPOSITION;
+  const roughness = mix(rock.roughness, soil.roughness, coast.soil);
+  return {
+    albedo: mix(rock.albedo, soil.albedo, coast.soil).mul(
+      mix(float(1), float(c.coastWetAlbedo), coast.wetness),
+    ),
+    roughness: mix(
+      roughness,
+      roughness.min(c.coastWetRoughness),
+      coast.wetness,
+    ),
+    ao: mix(rock.ao, soil.ao, coast.soil),
+    worldNormal: normalize(mix(rock.worldNormal, soil.worldNormal, coast.soil)),
+  };
+}
+
 /** World-space localized soil/wetness; pond = centerX, centerZ, radius, waterY. */
 export function createCompactPondSurfaceWeights(
   world: Node<"vec3">,

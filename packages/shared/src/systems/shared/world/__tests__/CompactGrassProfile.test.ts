@@ -1,4 +1,5 @@
 import { Worker } from "node:worker_threads";
+import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import THREE from "../../../../extras/three/three";
 import { World } from "../../../../core/World";
@@ -177,6 +178,100 @@ async function fixture(
 }
 
 describe("opt-in compact grass, actual terrain and native worker (not GPU proof)", () => {
+  it("retains coast-baseline non-color buffers in all six actual v4 leaves", async () => {
+    // Measured 2026-09-11 against published b6b3af00e factory in a real worker.
+    // Palette SHA256:15cf7643c8dec05ac6f480c0b03ca20aab10bc5f74207ec0f9340b5b9812f910.
+    // Worker source SHA256:8e4b4c4fe4f2a5a5639e8ae214f19b6c4e66ce753b30b9f34d99538675fffdb1,
+    // byte-identical before/after. One-off comparison used the original factory,
+    // not reimplemented algebra, and compared every element before hashing.
+    // No Git CLI/history is required to run this retained regression.
+    const expected = [
+      [
+        450,
+        350,
+        271,
+        "f182c957130d903f1d09ce99efe3d92d0a440560b37af7ee5fd40ad8e7daa164",
+        "6414005f88a7bb2afc20c4433d3e8562882a855a54918d6257ca0a9ed06d0956",
+        "781177c879353a2be1aa5089c7b5f31a3532134f26a5a5d1a80a5e0c1f747d3e",
+        "50929c953a47d2831ab4bb9e03a07331068fee50e54a862cd0d7bb2decb82410",
+      ],
+      [
+        250,
+        350,
+        503,
+        "b874a69c16b795ed2b6a62cab29e37d3fc8aecc18617b8ff2645604441f38f45",
+        "b75a842bc5bc9d6ac0d76121f0793bc345e0591ace456659139b0a274d11660a",
+        "7e6740c91f7c21b361fbb73984f22afef3896b669f9e2a87d31f6e18e9a48432",
+        "c91d3c58a0037f1a43aa536e6797b2585210604c7aa006f351731c3fefbffe10",
+      ],
+      [
+        350,
+        350,
+        139,
+        "4c3de808146aaf1e5f7f2bd63b8ca6ac20fb1beec20cfb8751fc4859a832c647",
+        "f544f7e4c3d5bc4397762c29a2d27e7550c1cb1d393e5f954e68750679bcd06d",
+        "0490457beeeb50176ad0e3eb207977b25d0883c2d401c3543eb6017bf728de92",
+        "55c40ebad9297b397ddeb92e1617b8d26e8b59150061116efdf2ea4e0f2a2ff6",
+      ],
+      [
+        350,
+        450,
+        532,
+        "95fc9dac164150df8288083d6983d0bdb531b1b4b3dc61df534f15ecb129ba34",
+        "b40e2116d3fa9b4216be2509e52041becfc729c651259f263e164660eabd3337",
+        "2b1b920dc641c4fc04e479010122eb7e8861af9fc9ee2fe3b1e9fcdaaf44ce3b",
+        "886eeedcc8a55990839487362ca1279209fc91b5927b1d58db123b6a941398c3",
+      ],
+      [
+        450,
+        450,
+        493,
+        "a290d43449bbfbaf0df4c52b419568ea6f325df588c18b577cdd257797232e04",
+        "a00280c1860355b98de6603362f205125c465cd57080f29a29c09f5ee40bf226",
+        "e06df083901ad7705f627b9bd377a232b94303edbfbc89b41fa801708314f467",
+        "4f0ebfbfd7b91ffe35b255a9545ec0b201df093e4763db8c4236c5b9116d7dfa",
+      ],
+      [
+        350,
+        250,
+        343,
+        "4b0fda3b503bb9545c92b8a3c343700f4de8b66b5c74c0ebe34081deb293f218",
+        "e62e719e8e67862b061b19db348ee13d2236f0dd6dc1b10ab0be83e7ebd4d163",
+        "1dfd030cba9544202ffa3b1402e496443211a1ffafc714ebe7acb33b5f67b859",
+        "c7c9709722f56bbefdd377ae17a1733a253ac9ec847749a397440e0d2c9fe90b",
+      ],
+    ];
+    const f = await fixture();
+    try {
+      const owner = f.manager(COMPACT_ISLAND_GRASS_VISUAL_PROFILE).owner;
+      const receipts = [];
+      for (const node of f.nodes) {
+        const input = owner["createWorkerInput"](node, `coast_${node.id}`, 1);
+        const after = await f.worker.run(input);
+        const hashes: string[] = [];
+        for (const key of [
+          "offsets",
+          "rotScaleHash",
+          "grassTints",
+          "groundNormals",
+        ] as const) {
+          const data = after[key];
+          hashes.push(
+            createHash("sha256")
+              .update(
+                new Uint8Array(data.buffer, data.byteOffset, data.byteLength),
+              )
+              .digest("hex"),
+          );
+        }
+        receipts.push([node.centerX, node.centerZ, after.count, ...hashes]);
+      }
+      expect(receipts).toEqual(expected);
+    } finally {
+      await f.close();
+    }
+  }, 20000);
+
   it("matches physical layer algebra and fails closed on unknown/legacy terrain opt-ins", () => {
     const ops = createCompactTerrainColorOperations();
     const surface = {

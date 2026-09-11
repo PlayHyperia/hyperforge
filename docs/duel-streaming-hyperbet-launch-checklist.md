@@ -6,9 +6,20 @@
   asset manifest `5c2cfda`. Exact remote heads and GitHub author/committer
   `dreaminglucid` verified; all 15 committed game source/test blobs and the
   manifest match the native or separately attested inputs. No merge/deployment.
-- [ ] Qualify the next compact ocean-relative surface composition: irregular
-  earth/rock coast and narrow wet margin using existing PBR inputs. Preserve
-  pond/path priority and functional trees; measure any decorative grass change.
+- [x] Verify the first ocean-relative rock/soil and wet-margin material pass:
+  root passes 426 tests / 41 files, all three builds/typechecks and scoped lint.
+  Native52 retains 29 trees; CPU tests preserve four non-color buffers in all six leaves;
+  39 images, 468 pins and 399 archives independently verified. No new texture
+  samples or render passes. Whole run still fails 19 cow/dagger errors.
+- [ ] Finish coastal geometry/material art, fuller meadow coverage and village
+  composition. Probe52's darker coast is a modest improvement, not the target;
+  smooth uniform ramps and broad repetitive lawns remain. No GPU-cost approval.
+- [ ] Correct buried exterior building steps before installing the preparation
+  lodge. Actual generated lower steps currently override higher terrain support;
+  preserve interior stairs/basements and shared client/server surface behavior.
+- [ ] Qualify one bounded gabled lodge with exact shared layout, visual/collision
+  ownership and service approaches. Reject the first stock-bank candidate's
+  tree overlap and unblocked counter geometry; no global town/NPC activation.
 - [x] Commit and push static-cache checkpoint `ed99ac7cf`; exact remote head,
   committed native-tested source pins and GitHub author/committer
   `dreaminglucid` verified. No merge or deployment.
@@ -23,8 +34,9 @@
 - [x] Correct the pre-build launch validator's version-1-only check using the
   actual production version-2/profile/grove validator; retain all asset gates.
   Probe49 stopped before browser creation and provides no rendered evidence.
-  Direct Node/Bun, all 32 process cases across runs and 12 launch-safety tests
-  pass after updating the obsolete campus-depth test. Native50/51 launch normally.
+  Root's fresh complete process suite passes 32/32 (189.96s); 12 launch-safety
+  tests also pass. The obsolete campus-depth expectation is corrected, not waived.
+  Native50/51 launch normally; missing cow/current-avatar dagger remain open.
 - [x] Prepare three smaller CC0 moss-rock variants with authored near/medium/far
   geometry (23,928 / 6,000 / 1,500 triangles across three variants). Source-near
   geometry/UV correspondence and shared image bytes verified; CPU preview
@@ -39,13 +51,13 @@
 - [ ] Resolve fern upload/two-sided shading independently; qualify any leaf
   translucency only after the current source/material behavior is understood.
 - [x] Qualify the compact lighting correction in actual probe51: fixed island
-  shadow anchor, no extra pre-PBR teal tint/rim on compact terrain/grass. All726
+  shadow anchor, no extra pre-PBR teal tint/rim on compact terrain/grass. All 726
   station samples are inside the map; wide-view far clipping is corrected.
-  Combined422 tests /41 files, all three builds/typechecks and scoped lint pass.
+  Combined 422 tests / 41 files, all three builds/typechecks and scoped lint pass.
   No extra map resolution, texture count, geometry or render pass was introduced.
-- [x] Capture/review all39 native images; independently verify468 current pins,
-  399 archives, 67 lighting observations and11 restored HUD leases. No GPU/page
-  errors; clean owned shutdown. Whole run still FAILS19 cow/dagger content errors.
+- [x] Capture/review all 39 native images; independently verify 468 current pins,
+  399 archives, 67 lighting observations and 11 restored HUD leases. No GPU/page
+  errors; clean owned shutdown. Whole run still FAILS 19 cow/dagger content errors.
 - [ ] Reach the actual art target and qualify sustained rendering cost. The broad
   lawn, uniform pale shoreline, sparse architecture, motion and sound remain
   unfinished; static study success is not AAA, streaming or performance approval.
