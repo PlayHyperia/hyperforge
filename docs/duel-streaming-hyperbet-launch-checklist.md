@@ -2,6 +2,9 @@
 
 ## Active functional woodland and surface fidelity — 2026-09-11
 
+- [x] Push groundwork checkpoint `a1d4eef9e`; exact remote ref, all eight tested/
+  reviewed source blobs and GitHub author/committer `dreaminglucid` verified.
+  No lodge/denser meadow installed, merge or deployment.
 - [x] Push coast checkpoint `55bed186c`; exact remote head, GitHub author/
   committer `dreaminglucid` and all five native52-tested source blobs verified.
   No merge, deployment or runtime-error waiver.
@@ -17,6 +20,12 @@
 - [ ] Finish coastal geometry/material art, fuller meadow coverage and village
   composition. Probe52's darker coast is a modest improvement, not the target;
   smooth uniform ramps and broad repetitive lawns remain. No GPU-cost approval.
+- [x] Measure denser meadow against actual worker/retained terrain: 4,019 raw
+  clumps expose existing and added root gaps; larger blades are rejected.
+  A contact-filtered candidate leaves 2,437, only 6.84% fuller overall.
+- [ ] Implement/qualify per-blade terrain conformance with complete edge support,
+  neighbor revision tracking, exclusion envelopes and bounded install/GPU cost.
+  No denser grass candidate is installed or visually approved yet.
 - [x] Implement shared exposed exterior-step support for players: root independently
   passes 225 movement/collision tests, including real client walking and arrival;
   combined terrain/resource/light/support regression passes 651 tests / 47 files.
@@ -29,6 +38,12 @@
 - [ ] Qualify one bounded gabled lodge with exact shared layout, visual/collision
   ownership and service approaches. Reject the first stock-bank candidate's
   tree overlap and unblocked counter geometry; no global town/NPC activation.
+- [x] Measure the preparation-pad lodge at (398,370), using the actual solid
+  platform top. Complete footprint clears all current tree/service/path/combat
+  bounds; nine routes pass and return supports remain unchanged. CPU only.
+- [ ] Integrate that exact descriptor/layout through compact-only collision and
+  visual owners, disable the phantom flat roof, preserve actual door openings,
+  qualify native PBR/shadows/contact/camera composition and measured cost.
 - [x] Commit and push static-cache checkpoint `ed99ac7cf`; exact remote head,
   committed native-tested source pins and GitHub author/committer
   `dreaminglucid` verified. No merge or deployment.

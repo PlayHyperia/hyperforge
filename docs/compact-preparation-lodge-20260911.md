@@ -77,6 +77,31 @@ its source closure must not be cited as testing these changes.
 
 ## Required before installation and approval
 
+The alternate gabled bank-side candidate at (354,316) is also not approved.
+Its actual full envelope is approximately 9×11m, with 1,116 triangles and
+134,680 geometry bytes. All three external service routes succeed, but the
+bank–altar path crosses the proposed floor and the bank–lobby path band also
+overlaps. One tree's conservative all-LOD envelope overlaps the roof; this is
+not proven triangle intersection. No path or tree was moved to hide the issue.
+External `asset-studio/compact-bank-lodge01/report03.json`:
+`430d0745fe2473f5291d41858055d5122417d9446be0ab0f17d790590acac693`.
+
+The deliberate preparation-lobby candidate at (398,370) passes bounded CPU
+placement checks. It uses the actual solid platform Y=28.8393015231, not the
+navigation terrain 2cm below it. The full envelope is X393.5023–402.4977 /
+Z365.55–376.55, at least 2.05m inside the lobby boundary. No current tree,
+station, NPC-clearance, path, hospital or combat-floor envelope conflicts remain.
+All nine BFS routes from the three return/egress marks to campus, arena and door
+targets succeed; return supports remain unchanged and all 64 interior samples
+resolve to the floor plus player clearance. Root independently verifies all 32
+named current source pins and the nine route receipts.
+
+This is still not native contact, PhysX or installation approval. The study
+retains the first candidate's exact layout recipe/seed and changes only its
+position, gabled option and omitted props; a different seed is not this tested
+layout. External `asset-studio/compact-bank-lodge01/report04.json`:
+`5caff823bf8948c5bd360d40efcaec5b3dc47c074ba92438b655f895214c0c30`.
+
 - Select and verify one full foundation/eaves/step footprint against current
   paths, pond, service approaches, trees and retained terrain; no blind placement.
 - Validate/freeze its manifest descriptor and content identity on client/server.
