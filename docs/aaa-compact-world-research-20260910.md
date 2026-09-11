@@ -145,16 +145,21 @@ instrumented correctness captures from representative performance runs.
 
 ## Current implementation and evidence limits — 2026-09-11
 
-The current uncommitted candidate adds an explicit v3 headland/inlet shape,
-warmer meadow and shared stone campus surfaces. Actual contact probe39 reduced
-the root mismatch from90mm to20mm and exposed occupied-spawn relocation still
-using the old support path; that path is now corrected but awaits recapture.
+The pushed game `cf3212ddcaa0441ff316ce1692d1b453a83e8db8` and asset profile
+`d50abdadd50df4dd704bf9a03a20410f2e7dd559` add an explicit v3 headland/inlet shape,
+warmer meadow and shared stone campus surfaces. Probe40 verifies the paired
+geometry/material candidate. Probe41 confirms both roots match after fixing the
+occupied-spawn path; all 24 contact boundaries have zero root-height difference.
+Both actual studies pass and have no new GPU/page failures, but the whole runs
+retain 19 inherited cow/dagger content errors and fail overall. Current pixels
+remain below the intended art standard. The next material-only candidate builds
+connected dry meadow and exposed ridge regions with the existing PBR layers.
 See [landscape and grounding qualification](compact-landscape-grounding-20260911.md).
 
-Current pushed follow-up: game84a18a123 and assets e26cc737 preserve five-tree authored redistribution and actual
+The preceding game `84a18a123` and assets `e26cc737` preserve five-tree authored redistribution and actual
 daylight sole/floor measurements pass their evidence gates in probes37/38, while
-both whole runs retain inherited content failures. The physical 9cm player-root
-disagreement and large-scale island composition remain defects. See
+both whole runs retain inherited content failures. Their historical 9cm player-root
+disagreement is superseded by probe41; large-scale island composition remains open. See
 [grove/contact qualification](authored-grove-contact-qualification-20260911.md).
 
 An earlier pushed game checkpoint is
@@ -213,6 +218,33 @@ full resolution and include its depth/normal and denoising cost. More samples
 increase work; temporal filtering requires TRAA and can introduce ghosting.
 AO cannot repair physically floating feet or missing directional casters.
 [Three GTAO documentation](https://threejs.org/docs/pages/GTAONode.html).
+
+### Next performance measurement boundary
+
+The current lightweight captures distinguish RAF callbacks, actual render-call
+progress and device/profile identity; none is GPU execution time or presented /
+decoded FPS. The installed r186 backend supports optional timestamp queries,
+disabled by default. Any experiment must admit the actual device feature, bound
+and drain query readbacks, attribute results to actual renderer frame/context IDs,
+retain unavailable/dropped samples, and remove its exact owned resources. Its
+asynchronous result is not a wall-clock frame duration. See the official
+[Three backend API](https://threejs.org/docs/pages/Backend.html).
+
+Keep such a timing experiment separate from screenshot/large scene-traversal
+diagnostics and compare matched routes, day phase, population and encoding load.
+Measure CPU work, throughput/frame tails and thermal stability as well as GPU
+pass durations; timestamps alone cannot establish launch smoothness or capacity.
+No timestamp flag, developer-only feature, density reduction or new quality
+default is enabled by this research note.
+
+The current fixed-stream grass policy forces LOD2 with 0.7×4×5 = 14m clump
+spacing and four blades per clump, within a 140m range. That is not a lush
+preparation-island target. After the surface composition comparison, qualify an
+explicit camera-aware foliage profile using existing instancing, exclusions,
+generation pacing, culling and LOD transitions. Record its actual extra instance,
+triangle, memory, upload and frame costs; do not silently change the comparison's
+population or claim unchanged cost. Functional resource trees remain the only
+canopy population.
 
 ## Historical pond checkpoint
 

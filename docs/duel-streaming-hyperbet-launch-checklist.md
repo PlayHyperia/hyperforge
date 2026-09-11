@@ -2,8 +2,9 @@
 
 ## Landscape, stone and physical grounding — verified candidate, 2026-09-11
 
-- [x] Push the preceding grove checkpoint: game `84a18a123` / assets `e26cc737`;
-  GitHub author and committer verified as dreaminglucid.
+- [x] Push the verified landscape/support checkpoint: game `cf3212ddc` / assets
+  `d50abda`; exact remote heads and GitHub author/committer dreaminglucid verified.
+  All 44 committed TypeScript files and the asset profile match both live captures.
 - [x] Unify embedded/duel spawning, both movement loops and player interpolation
   on actual floor/stair/platform support plus one clearance. Correct lost facing/
   teleport Y and occupied-spawn relocation without changing avatar/gear geometry,
@@ -28,9 +29,11 @@
   IK, animation or screenshot-pose GPU deformation approval.
 - [ ] Complete the next landform-aligned ground-material pass. Actual probe40 art
   still fails: uniform green ground, artificial-looking inlet, sparse functional
-  woodland, unresolved night materials and the black northern building. Retain
+  woodland and unresolved night materials. The apparent black northern building
+  was the fixed countdown HUD, not a verified building defect; add unobstructed
+  world captures alongside original stream views. Retain
   one arena and only choppable resource trees, not a separate decorative forest.
-  The new [art-direction concept](/Users/lucid/Documents/hyperia/asset-studio/compact-island-art-direction-20260911/PROMPT.md)
+  The new [art-direction concept](/Users/lucid/Documents/hyperia/hyperia-implementation/docs/art-direction/compact-island-20260911/PROMPT.md)
   is generated reference art, not an actual renderer result or approved layout.
 - [ ] Qualify motion/shimmer, representative GPU/CPU frame tails and thermal cost;
   no silent quality/resolution/population reductions or diagnostic-as-performance

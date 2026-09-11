@@ -7,6 +7,18 @@ AAA, launch, default-render-profile, performance or decoded-stream approval.
 There is one arena, no retained large runtime world, and no decorative forest.
 Historical terrain constants are regression fixtures, not selectable legacy worlds.
 
+### Saved checkpoint
+
+Game `cf3212ddcaa0441ff316ce1692d1b453a83e8db8` and assets
+`d50abdadd50df4dd704bf9a03a20410f2e7dd559` are pushed to their existing branches.
+Exact remote heads and GitHub author/committer `dreaminglucid` were verified.
+Normal formatting hooks passed; all 44 committed TypeScript blobs and the asset
+profile match both probe40 and probe41 source pins after the hooks. The four docs
+and secret-scanner configuration are deliberately outside the rendering pins.
+Staged secret scans passed. One public terrain chunk fixture label produced a
+false positive; its complete exact field expression is allowlisted, not its file
+or test directory. Unrelated existing workspace changes were not staged.
+
 ## Actual contact correction
 
 One player support rule resolves actual building floors, interior stairs, entrance
@@ -172,13 +184,21 @@ a 349.2ms maximum RAF interval. Population was stable within each measured windo
 The root and an independent visual reviewer inspected actual wide and campus-link
 images. The silhouette and shared floor materials improved, but **art acceptance
 still fails**: ground remains a mostly uninterrupted green carpet, turf repetition
-is visible, the inlet is too geometric, canopy coverage is sparse, the north
-building appears black, and pale rectangular platforms dominate the composition.
+is visible, the inlet is too geometric, canopy coverage is sparse, and pale
+rectangular platforms dominate the composition.
 The close-up actors still need skin/metal lighting and finer shadow qualification.
 
-An image-generated concept is retained separately at
-`asset-studio/compact-island-art-direction-20260911/compact-island-target-concept-v1.png`,
-with its exact built-in generation prompt in `PROMPT.md`. It is **not engine output**.
+**Corrected image attribution:** the initially suspected black northern building
+is the fixed streaming countdown HUD. Its hexagonal plate and dash stay at the
+same screen position/size across both cameras; `StreamingOverlay.tsx` renders
+that exact timer above “Readiness pending.” The under-overlay diagnostic hides
+only the loading screen, not the stream HUD. This is not evidence of broken
+building lighting. Add a separately labeled no-2D-HUD capture while retaining
+original images, all 3D content, and exact camera/restoration evidence.
+
+An [image-generated target concept and exact prompt](art-direction/compact-island-20260911/PROMPT.md)
+are retained in this repository, with a working copy under
+`asset-studio/compact-island-art-direction-20260911`. It is **not engine output**.
 Its material/region hierarchy is a reference; generated prop counts, paths, tents
 and cliffs do not override authoritative gameplay layout or resource identities.
 The next bounded implementation is landform-aligned dry meadow, exposed ridge
