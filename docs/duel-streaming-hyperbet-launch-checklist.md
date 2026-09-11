@@ -1,5 +1,34 @@
 # Duel Arena, Streaming, and Hyperbet Launch Checklist
 
+## Active material fidelity and cliff integration — 2026-09-11
+
+- [x] Push game `5f967b0f7` and world assets `42d2bf8`; exact remote heads,
+  18 committed source pins and GitHub author/committer `dreaminglucid` verified.
+- [x] Reproduce processed-cache material/texture duplication and lost sampling/
+  UV state with actual CPU classes; identify cold optical-policy and clone issues.
+- [x] Prepare isolated PBR copy helper: four actual-class tests and lint pass,
+  including alpha cutoff, precise physical scalars and borrowed-map ownership.
+  Not wired into the runtime; no rendered/material-policy acceptance yet.
+- [x] Implement static v7 persistence: exact successful source bytes, shared
+  identity tables, bounded state and whole-scene fallback. Root independently
+  passes 60 tests in six suites plus scoped lint; native qualification is separate.
+- [x] Qualify actual Metal/WebGPU native02: four fresh-page cold/warm cases,
+  eight images/readbacks and exact parity in all four matched pairs. Fern takes
+  safe cached-File parsing; the supported fixture takes a real v7 processed hit.
+  Root verifies all 1,226 source/archive pins and inspects all images; zero GPU/
+  browser/cleanup errors. This is cache consistency, not finished shading or FPS.
+- [ ] Integrate cold material sharing/independent clones and deliberately qualify
+  authored physical IOR/specular/metalness under the real outdoor lighting.
+- [x] Reject the full cliff facade at both bounded study windows: bay edges float
+  up to 20.2m; ridge burial leaves only small/sliver exposure or movement conflicts.
+  Do not install the 11.16MB candidate for that result; preserve both failed studies.
+- [ ] Select a smaller closed outcrop or capped segment; prove placement, visible
+  collision/navigation, materials, seams/mips, LOD transitions and measured cost.
+- [ ] Reach the art target: coherent woodland, architecture, terrain/shore detail,
+  lighting, water, motion and sound. Probe48 is a checkpoint, not AAA approval.
+
+Details: game `docs/material-cache-fidelity-20260911.md`.
+
 ## Active natural-coast and meadow refinement — 2026-09-11
 
 - [x] Push vegetation checkpoint `2bc7c5a89`; exact remote HEAD, committed
