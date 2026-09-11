@@ -13,7 +13,7 @@
  */
 
 import * as THREE from "three";
-import { MeshStandardNodeMaterial } from "three/webgpu";
+import { MeshStandardNodeMaterial, type Node } from "three/webgpu";
 import {
   Fn,
   uv,
@@ -162,14 +162,14 @@ export const DEFAULT_MATERIAL_CONFIGS: Record<
 /**
  * Hash function for pseudo-random values (TSL)
  */
-const tslHash = Fn(([p]: [ReturnType<typeof vec2>]) => {
+const tslHash = Fn(([p]: [Node<"vec2">]) => {
   return fract(sin(dot(p, vec2(127.1, 311.7))).mul(43758.5453123));
 });
 
 /**
  * 2D noise function (TSL)
  */
-const tslNoise2D = Fn(([p]: [ReturnType<typeof vec2>]) => {
+const tslNoise2D = Fn(([p]: [Node<"vec2">]) => {
   const i = floor(p);
   const f = fract(p);
   const smoothF = f.mul(f).mul(float(3.0).sub(f.mul(2.0)));
@@ -185,7 +185,7 @@ const tslNoise2D = Fn(([p]: [ReturnType<typeof vec2>]) => {
 /**
  * FBM (Fractal Brownian Motion) noise (TSL)
  */
-const tslFBM = Fn(([p]: [ReturnType<typeof vec2>]) => {
+const tslFBM = Fn(([p]: [Node<"vec2">]) => {
   const value = float(0.0).toVar();
   const amplitude = float(0.5).toVar();
   const frequency = float(1.0).toVar();
@@ -215,7 +215,7 @@ const tslFBM = Fn(([p]: [ReturnType<typeof vec2>]) => {
 /**
  * Brick pattern - returns (isBrick, brickIdX, brickIdY, 0)
  */
-const brickPattern = Fn(([uvIn]: [ReturnType<typeof vec2>]) => {
+const brickPattern = Fn(([uvIn]: [Node<"vec2">]) => {
   const brickWidth = float(0.25);
   const brickHeight = float(0.065);
   const mortarWidth = float(0.01);
@@ -246,7 +246,7 @@ const brickPattern = Fn(([uvIn]: [ReturnType<typeof vec2>]) => {
 /**
  * Ashlar stone pattern - returns (isStone, stoneIdX, stoneIdY, bevel)
  */
-const ashlarPattern = Fn(([uvIn]: [ReturnType<typeof vec2>]) => {
+const ashlarPattern = Fn(([uvIn]: [Node<"vec2">]) => {
   const blockWidth = float(0.6);
   const blockHeight = float(0.3);
   const mortarWidth = float(0.015);
@@ -282,7 +282,7 @@ const ashlarPattern = Fn(([uvIn]: [ReturnType<typeof vec2>]) => {
 /**
  * Rubble stone pattern (Voronoi-based) - returns (isStone, cellIdX, cellIdY, 0)
  */
-const rubblePattern = Fn(([uvIn]: [ReturnType<typeof vec2>]) => {
+const rubblePattern = Fn(([uvIn]: [Node<"vec2">]) => {
   const scale = float(0.15);
   const scaled = uvIn.div(scale);
   const cellId = floor(scaled);
@@ -326,7 +326,7 @@ const rubblePattern = Fn(([uvIn]: [ReturnType<typeof vec2>]) => {
 /**
  * Wood plank pattern - returns (isPlank, plankId, grainOffset, 0)
  */
-const woodPlankPattern = Fn(([uvIn]: [ReturnType<typeof vec2>]) => {
+const woodPlankPattern = Fn(([uvIn]: [Node<"vec2">]) => {
   const plankWidth = float(0.15);
   const plankHeight = float(2.0);
   const gapWidth = float(0.005);
@@ -352,7 +352,7 @@ const woodPlankPattern = Fn(([uvIn]: [ReturnType<typeof vec2>]) => {
 /**
  * Shingle pattern - returns (isShingle, shingleIdX, shingleIdY, thickness)
  */
-const shinglePattern = Fn(([uvIn]: [ReturnType<typeof vec2>]) => {
+const shinglePattern = Fn(([uvIn]: [Node<"vec2">]) => {
   const shingleWidth = float(0.2);
   const shingleHeight = float(0.15);
   const overlap = float(0.3);
@@ -380,7 +380,7 @@ const shinglePattern = Fn(([uvIn]: [ReturnType<typeof vec2>]) => {
 /**
  * Plaster pattern - returns (1.0, variationValue, 0, 0)
  */
-const plasterPattern = Fn(([uvIn]: [ReturnType<typeof vec2>]) => {
+const plasterPattern = Fn(([uvIn]: [Node<"vec2">]) => {
   const scaled = uvIn.mul(2.0);
   const noise1 = tslFBM(scaled);
   const noise2 = tslFBM(scaled.mul(3.0));

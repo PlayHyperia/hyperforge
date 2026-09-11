@@ -314,7 +314,7 @@ export function createTSLImpostorMaterial(
   const uColorTint = uniform(vec3(defaultTint.r, defaultTint.g, defaultTint.b));
 
   // ========== HELPER: Convert flat index to grid coords ==========
-  const flatToCoords = Fn(([flatIndex]: [ReturnType<typeof float>]) => {
+  const flatToCoords = Fn(([flatIndex]: [THREE_NAMESPACE.Node<"float">]) => {
     const row = floor(div(flatIndex, uGridSize.x));
     const col = sub(flatIndex, mul(row, uGridSize.x));
     return vec2(col, row);
@@ -322,7 +322,10 @@ export function createTSLImpostorMaterial(
 
   // ========== HELPER: Fresnel Schlick ==========
   const fresnelSchlick = Fn(
-    ([cosTheta, f0]: [ReturnType<typeof float>, ReturnType<typeof vec3>]) => {
+    ([cosTheta, f0]: [
+      THREE_NAMESPACE.Node<"float">,
+      THREE_NAMESPACE.Node<"vec3">,
+    ]) => {
       return add(
         f0,
         mul(

@@ -12,6 +12,10 @@ import {
   createGrassMaterial,
   updateGrassTime,
 } from "../grass/GrassMaterialTSL";
+import {
+  createGameGrassMaterial,
+  createGameGrassUniforms,
+} from "../grass/GrassShaderTSL";
 import { createInstancedLeafMaterialTSL } from "../geometry/LeafMaterialTSL";
 import { createDockMaterial } from "../items/dock/DockMaterialTSL";
 import { WoodType } from "../items/types";
@@ -21,6 +25,25 @@ import { TexturePattern } from "../rock/types";
 import { createTerrainMaterial } from "../terrain/TerrainShaderTSL";
 
 describe("procgen TSL material construction", () => {
+  it("constructs sprite grass graphs with both owned and shared uniforms", () => {
+    const sharedUniforms = createGameGrassUniforms();
+    const owned = createGameGrassMaterial();
+    const shared = createGameGrassMaterial({ uniforms: sharedUniforms });
+
+    expect(shared.uniforms).toBe(sharedUniforms);
+    expect(owned.uniforms).not.toBe(sharedUniforms);
+    sharedUniforms.uDayNightMix.value = 0.4;
+    expect(shared.uniforms.uDayNightMix.value).toBe(0.4);
+    expect(owned.uniforms.uDayNightMix.value).toBe(1);
+
+    for (const { material } of [owned, shared]) {
+      expect(material.colorNode).toBeTruthy();
+      expect(material.opacityNode).toBeTruthy();
+      expect(material.scaleNode).toBeTruthy();
+      material.dispose();
+    }
+  });
+
   it("constructs animated vegetation graphs with typed runtime uniforms", () => {
     const flower = createFlowerMaterial();
     const grass = createGrassMaterial();

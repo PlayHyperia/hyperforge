@@ -14,7 +14,7 @@
  */
 
 import * as THREE from "three";
-import { MeshStandardNodeMaterial } from "three/webgpu";
+import { MeshStandardNodeMaterial, type Node } from "three/webgpu";
 import type { MeshStandardNodeMaterial as MeshStandardNodeMaterialType } from "three/webgpu";
 import {
   Fn,
@@ -24,9 +24,7 @@ import {
   attribute,
   uniform,
   float,
-  vec2,
   vec3,
-  vec4,
   add,
   sub,
   mul,
@@ -129,28 +127,26 @@ export function createInstancedLeafMaterialTSL(
   // ========== HELPER FUNCTIONS ==========
 
   // Hash function for randomness
-  const hash = Fn(([n]: [ReturnType<typeof float>]) => {
+  const hash = Fn(([n]: [Node<"float">]) => {
     return fract(mul(sin(n), 43758.5453123));
   });
 
   // Hash3 for color variation
-  const hash3 = Fn(([n]: [ReturnType<typeof float>]) => {
+  const hash3 = Fn(([n]: [Node<"float">]) => {
     return vec3(hash(n), hash(add(n, 127.1)), hash(add(n, 269.5)));
   });
 
   // Quaternion rotation: rotate vector v by quaternion q
-  const rotateByQuat = Fn(
-    ([v, q]: [ReturnType<typeof vec3>, ReturnType<typeof vec4>]) => {
-      const qxyz = vec3(q.x, q.y, q.z);
-      const t = mul(2.0, cross(qxyz, v));
-      return add(v, add(mul(q.w, t), cross(qxyz, t)));
-    },
-  );
+  const rotateByQuat = Fn(([v, q]: [Node<"vec3">, Node<"vec4">]) => {
+    const qxyz = vec3(q.x, q.y, q.z);
+    const t = mul(2.0, cross(qxyz, v));
+    return add(v, add(mul(q.w, t), cross(qxyz, t)));
+  });
 
   // ========== LEAF SHAPE FUNCTIONS ==========
 
   // Elliptic leaf shape - improved with proper taper and serration
-  const leafShapeElliptic = Fn(([uvCoord]: [ReturnType<typeof vec2>]) => {
+  const leafShapeElliptic = Fn(([uvCoord]: [Node<"vec2">]) => {
     const px = sub(uvCoord.x, 0.5);
     const py = sub(uvCoord.y, 0.35);
 
@@ -191,7 +187,7 @@ export function createInstancedLeafMaterialTSL(
   });
 
   // Ovate leaf shape - egg-shaped, wider at base
-  const leafShapeOvate = Fn(([uvCoord]: [ReturnType<typeof vec2>]) => {
+  const leafShapeOvate = Fn(([uvCoord]: [Node<"vec2">]) => {
     const px = sub(uvCoord.x, 0.5);
     const py = sub(uvCoord.y, 0.3);
 
@@ -230,7 +226,7 @@ export function createInstancedLeafMaterialTSL(
   });
 
   // Maple leaf shape - 5 pointed lobes with serrated edges
-  const leafShapeMaple = Fn(([uvCoord]: [ReturnType<typeof vec2>]) => {
+  const leafShapeMaple = Fn(([uvCoord]: [Node<"vec2">]) => {
     const px = sub(uvCoord.x, 0.5);
     const py = sub(uvCoord.y, 0.45);
 
@@ -278,7 +274,7 @@ export function createInstancedLeafMaterialTSL(
   });
 
   // Oak leaf shape - with proper rounded lobes
-  const leafShapeOak = Fn(([uvCoord]: [ReturnType<typeof vec2>]) => {
+  const leafShapeOak = Fn(([uvCoord]: [Node<"vec2">]) => {
     const px = sub(uvCoord.x, 0.5);
     const py = sub(uvCoord.y, 0.35);
 
@@ -323,7 +319,7 @@ export function createInstancedLeafMaterialTSL(
   });
 
   // Palm/frond leaf shape - long narrow leaf with parallel veins
-  const leafShapePalm = Fn(([uvCoord]: [ReturnType<typeof vec2>]) => {
+  const leafShapePalm = Fn(([uvCoord]: [Node<"vec2">]) => {
     const px = sub(uvCoord.x, 0.5);
     const py = sub(uvCoord.y, 0.5);
 
@@ -355,7 +351,7 @@ export function createInstancedLeafMaterialTSL(
   });
 
   // Needle leaf shape - very thin, conifer-style
-  const leafShapeNeedle = Fn(([uvCoord]: [ReturnType<typeof vec2>]) => {
+  const leafShapeNeedle = Fn(([uvCoord]: [Node<"vec2">]) => {
     const px = sub(uvCoord.x, 0.5);
     const py = sub(uvCoord.y, 0.5);
 
@@ -383,7 +379,7 @@ export function createInstancedLeafMaterialTSL(
   });
 
   // Select leaf shape based on option
-  const getLeafAlpha = Fn(([uvCoord]: [ReturnType<typeof vec2>]) => {
+  const getLeafAlpha = Fn(([uvCoord]: [Node<"vec2">]) => {
     switch (leafShape) {
       case "ovate":
         return leafShapeOvate(uvCoord);
@@ -402,7 +398,7 @@ export function createInstancedLeafMaterialTSL(
   });
 
   // Leaf vein pattern - central vein with branching secondary veins
-  const leafVeins = Fn(([uvCoord]: [ReturnType<typeof vec2>]) => {
+  const leafVeins = Fn(([uvCoord]: [Node<"vec2">]) => {
     const px = sub(uvCoord.x, 0.5);
     const py = uvCoord.y;
 
@@ -480,7 +476,7 @@ export function createInstancedLeafMaterialTSL(
 
     // Instance-based color variation
     const variation = sub(mul(hash3(instIdx), 2.0), 1.0);
-    const leafColor = add(vec3(uColor), mul(variation, uColorVariation));
+    const leafColor = add(vec3(uColor.rgb), mul(variation, uColorVariation));
 
     // Darken edges slightly for depth
     const edgeDark = add(mul(smoothstep(0.3, 0.8, alpha), 0.2), 0.8);
@@ -521,7 +517,7 @@ export function createInstancedLeafMaterialTSL(
 
     // Get base leaf color for subsurface tint
     const variation = sub(mul(hash3(instIdx), 2.0), 1.0);
-    const leafColor = add(vec3(uColor), mul(variation, uColorVariation));
+    const leafColor = add(vec3(uColor.rgb), mul(variation, uColorVariation));
 
     // View direction (from fragment to camera)
     const worldPos = positionWorld;

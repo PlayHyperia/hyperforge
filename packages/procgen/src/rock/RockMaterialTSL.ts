@@ -14,7 +14,7 @@
  */
 
 import * as THREE from "three";
-import { MeshStandardNodeMaterial } from "three/webgpu";
+import { MeshStandardNodeMaterial, type Node } from "three/webgpu";
 import type { UniformNode } from "three/webgpu";
 import {
   Fn,
@@ -79,7 +79,7 @@ export interface RockMaterialResult {
 /**
  * Hash function for pseudo-random values (TSL)
  */
-const tslHash = Fn(([p]: [ReturnType<typeof vec2>]) => {
+const tslHash = Fn(([p]: [Node<"vec2">]) => {
   return fract(sin(dot(p, vec2(127.1, 311.7))).mul(43758.5453123));
 });
 
@@ -87,7 +87,7 @@ const tslHash = Fn(([p]: [ReturnType<typeof vec2>]) => {
  * Hash function for vec3 input
  * @remarks Exported for use in custom rock patterns (cellular, etc.)
  */
-export const tslHash3 = Fn(([p]: [ReturnType<typeof vec3>]) => {
+export const tslHash3 = Fn(([p]: [Node<"vec3">]) => {
   const p2 = vec2(
     dot(p, vec3(127.1, 311.7, 74.7)),
     dot(p, vec3(269.5, 183.3, 246.1)),
@@ -98,7 +98,7 @@ export const tslHash3 = Fn(([p]: [ReturnType<typeof vec3>]) => {
 /**
  * 2D noise function (TSL)
  */
-const tslNoise2D = Fn(([p]: [ReturnType<typeof vec2>]) => {
+const tslNoise2D = Fn(([p]: [Node<"vec2">]) => {
   const i = floor(p);
   const f = fract(p);
   const smoothF = f.mul(f).mul(float(3.0).sub(f.mul(2.0)));
@@ -114,7 +114,7 @@ const tslNoise2D = Fn(([p]: [ReturnType<typeof vec2>]) => {
 /**
  * FBM (Fractal Brownian Motion) noise - 4 octaves (TSL)
  */
-const tslFBM = Fn(([p]: [ReturnType<typeof vec2>]) => {
+const tslFBM = Fn(([p]: [Node<"vec2">]) => {
   const value = float(0.0).toVar();
   const amplitude = float(0.5).toVar();
   const frequency = float(1.0).toVar();
@@ -141,7 +141,7 @@ const tslFBM = Fn(([p]: [ReturnType<typeof vec2>]) => {
  * Ridged noise for cracks/crevices (TSL)
  * @remarks Exported for use in custom cracked rock patterns
  */
-export const tslRidgedNoise = Fn(([p]: [ReturnType<typeof vec2>]) => {
+export const tslRidgedNoise = Fn(([p]: [Node<"vec2">]) => {
   const value = float(0.0).toVar();
   const amplitude = float(0.5).toVar();
   const frequency = float(1.0).toVar();
@@ -165,119 +165,107 @@ export const tslRidgedNoise = Fn(([p]: [ReturnType<typeof vec2>]) => {
 /**
  * Standard FBM noise pattern
  */
-const noisePattern = Fn(
-  ([uv, _detail]: [ReturnType<typeof vec2>, ReturnType<typeof float>]) => {
-    return tslFBM(uv).mul(0.5).add(0.5);
-  },
-);
+const noisePattern = Fn(([uv, _detail]: [Node<"vec2">, Node<"float">]) => {
+  return tslFBM(uv).mul(0.5).add(0.5);
+});
 
 /**
  * Layered/stratified pattern (sandstone-like)
  */
-const layeredPattern = Fn(
-  ([uv, _detail]: [ReturnType<typeof vec2>, ReturnType<typeof float>]) => {
-    const layerNoise = tslFBM(vec2(uv.x.mul(0.5), uv.y.mul(3.0)));
-    const layerY = uv.y.mul(4.0).add(layerNoise.mul(0.5));
-    const value = sin(layerY.mul(3.14159).mul(2.0)).mul(0.5).add(0.5);
-    return pow(value, float(0.7));
-  },
-);
+const layeredPattern = Fn(([uv, _detail]: [Node<"vec2">, Node<"float">]) => {
+  const layerNoise = tslFBM(vec2(uv.x.mul(0.5), uv.y.mul(3.0)));
+  const layerY = uv.y.mul(4.0).add(layerNoise.mul(0.5));
+  const value = sin(layerY.mul(3.14159).mul(2.0)).mul(0.5).add(0.5);
+  return pow(value, float(0.7));
+});
 
 /**
  * Speckled pattern (granite-like)
  */
-const speckledPattern = Fn(
-  ([uv, _detail]: [ReturnType<typeof vec2>, ReturnType<typeof float>]) => {
-    const speckle = tslFBM(uv.mul(2.2));
-    const spots = tslNoise2D(uv.mul(0.8));
-    const darkSpots = tslNoise2D(uv.mul(15.0));
+const speckledPattern = Fn(([uv, _detail]: [Node<"vec2">, Node<"float">]) => {
+  const speckle = tslFBM(uv.mul(2.2));
+  const spots = tslNoise2D(uv.mul(0.8));
+  const darkSpots = tslNoise2D(uv.mul(15.0));
 
-    const value = speckle.mul(0.6).toVar();
-    value.addAssign(smoothstep(float(0.3), float(1.0), spots).mul(0.3));
-    value.subAssign(smoothstep(float(0.6), float(1.0), darkSpots).mul(0.3));
+  const value = speckle.mul(0.6).toVar();
+  value.addAssign(smoothstep(float(0.3), float(1.0), spots).mul(0.3));
+  value.subAssign(smoothstep(float(0.6), float(1.0), darkSpots).mul(0.3));
 
-    return clamp(value, float(0.0), float(1.0));
-  },
-);
+  return clamp(value, float(0.0), float(1.0));
+});
 
 /**
  * Veined pattern (marble-like)
  */
-const veinedPattern = Fn(
-  ([uv, _detail]: [ReturnType<typeof vec2>, ReturnType<typeof float>]) => {
-    const warp = tslFBM(uv);
-    const veinUV = uv.add(warp.mul(0.5));
+const veinedPattern = Fn(([uv, _detail]: [Node<"vec2">, Node<"float">]) => {
+  const warp = tslFBM(uv);
+  const veinUV = uv.add(warp.mul(0.5));
 
-    // Primary vein
-    const vein1 = sin(veinUV.x.add(veinUV.y).mul(3.14159).mul(2.0));
-    const vein1Abs = pow(abs(vein1), float(0.3));
+  // Primary vein
+  const vein1 = sin(veinUV.x.add(veinUV.y).mul(3.14159).mul(2.0));
+  const vein1Abs = pow(abs(vein1), float(0.3));
 
-    // Secondary vein
-    const vein2 = sin(
-      veinUV.x.mul(1.5).sub(veinUV.y.mul(0.8)).mul(3.14159).mul(3.0),
-    );
-    const vein2Abs = pow(abs(vein2), float(0.5));
+  // Secondary vein
+  const vein2 = sin(
+    veinUV.x.mul(1.5).sub(veinUV.y.mul(0.8)).mul(3.14159).mul(3.0),
+  );
+  const vein2Abs = pow(abs(vein2), float(0.5));
 
-    const value = float(1.0).sub(min(vein1Abs, vein2Abs).mul(0.7));
-    return clamp(value, float(0.0), float(1.0));
-  },
-);
+  const value = float(1.0).sub(min(vein1Abs, vein2Abs).mul(0.7));
+  return clamp(value, float(0.0), float(1.0));
+});
 
 /**
  * Cellular/Voronoi pattern (basalt-like)
  */
-const cellularPattern = Fn(
-  ([uv, _detail]: [ReturnType<typeof vec2>, ReturnType<typeof float>]) => {
-    const cellSize = float(0.15);
-    const scaled = uv.div(cellSize);
-    const cellId = floor(scaled);
-    const localPos = fract(scaled);
+const cellularPattern = Fn(([uv, _detail]: [Node<"vec2">, Node<"float">]) => {
+  const cellSize = float(0.15);
+  const scaled = uv.div(cellSize);
+  const cellId = floor(scaled);
+  const localPos = fract(scaled);
 
-    // Find closest cell (simplified 3x3 search)
-    const minDist = float(10.0).toVar();
+  // Find closest cell (simplified 3x3 search)
+  const minDist = float(10.0).toVar();
 
-    // Check center and neighbors - unrolled loop
-    const offsets = [
-      vec2(-1, -1),
-      vec2(0, -1),
-      vec2(1, -1),
-      vec2(-1, 0),
-      vec2(0, 0),
-      vec2(1, 0),
-      vec2(-1, 1),
-      vec2(0, 1),
-      vec2(1, 1),
-    ];
+  // Check center and neighbors - unrolled loop
+  const offsets = [
+    vec2(-1, -1),
+    vec2(0, -1),
+    vec2(1, -1),
+    vec2(-1, 0),
+    vec2(0, 0),
+    vec2(1, 0),
+    vec2(-1, 1),
+    vec2(0, 1),
+    vec2(1, 1),
+  ];
 
-    for (const offset of offsets) {
-      const neighbor = cellId.add(offset);
-      const cellHash = tslHash(neighbor);
-      const cellCenter = vec2(0.5, 0.5).add(cellHash.sub(0.5).mul(0.8));
-      const toCenter = localPos.sub(cellCenter).add(offset);
-      const dist = dot(toCenter, toCenter);
-      minDist.assign(min(minDist, dist));
-    }
+  for (const offset of offsets) {
+    const neighbor = cellId.add(offset);
+    const cellHash = tslHash(neighbor);
+    const cellCenter = vec2(0.5, 0.5).add(cellHash.sub(0.5).mul(0.8));
+    const toCenter = localPos.sub(cellCenter).add(offset);
+    const dist = dot(toCenter, toCenter);
+    minDist.assign(min(minDist, dist));
+  }
 
-    const edge = sqrt(minDist);
-    const value = smoothstep(float(0.08), float(0.12), edge);
-    return pow(value, float(0.5));
-  },
-);
+  const edge = sqrt(minDist);
+  const value = smoothstep(float(0.08), float(0.12), edge);
+  return pow(value, float(0.5));
+});
 
 /**
  * Flow pattern (obsidian-like)
  */
-const flowPattern = Fn(
-  ([uv, _detail]: [ReturnType<typeof vec2>, ReturnType<typeof float>]) => {
-    const flowWarp = tslFBM(uv.mul(0.5));
-    const flowUV = uv.add(flowWarp.mul(1.5));
-    const flow = tslFBM(vec2(flowUV.x, flowUV.y.mul(0.3)));
-    const flowNorm = flow.mul(0.5).add(0.5);
-    const streak = sin(flowUV.x.mul(2.0).add(flowNorm.mul(3.0)).mul(3.14159));
+const flowPattern = Fn(([uv, _detail]: [Node<"vec2">, Node<"float">]) => {
+  const flowWarp = tslFBM(uv.mul(0.5));
+  const flowUV = uv.add(flowWarp.mul(1.5));
+  const flow = tslFBM(vec2(flowUV.x, flowUV.y.mul(0.3)));
+  const flowNorm = flow.mul(0.5).add(0.5);
+  const streak = sin(flowUV.x.mul(2.0).add(flowNorm.mul(3.0)).mul(3.14159));
 
-    return flowNorm.mul(0.7).add(streak.mul(0.15)).add(0.15);
-  },
-);
+  return flowNorm.mul(0.7).add(streak.mul(0.15)).add(0.15);
+});
 
 // ============================================================================
 // TRIPLANAR MAPPING
@@ -288,11 +276,11 @@ const flowPattern = Fn(
  */
 const triplanarSample = Fn(
   ([worldPos, worldNormal, scale, detail, sharpness, patternIndex]: [
-    ReturnType<typeof vec3>,
-    ReturnType<typeof vec3>,
-    ReturnType<typeof float>,
-    ReturnType<typeof float>,
-    ReturnType<typeof float>,
+    Node<"vec3">,
+    Node<"vec3">,
+    Node<"float">,
+    Node<"float">,
+    Node<"float">,
     number,
   ]) => {
     // Triplanar blend weights

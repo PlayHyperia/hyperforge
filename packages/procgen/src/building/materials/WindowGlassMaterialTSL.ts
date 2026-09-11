@@ -13,12 +13,11 @@
  */
 
 import * as THREE from "three";
-import { MeshStandardNodeMaterial } from "three/webgpu";
+import { MeshStandardNodeMaterial, type Node } from "three/webgpu";
 import {
   Fn,
   uv,
   uniform,
-  vec2,
   vec3,
   float,
   floor,
@@ -37,7 +36,7 @@ import {
  * Calculate Bayer dither threshold for a given screen position.
  * Uses a 4x4 Bayer matrix pattern.
  */
-const bayerDither4x4 = Fn(([screenPos]: [ReturnType<typeof vec2>]) => {
+const bayerDither4x4 = Fn(([screenPos]: [Node<"vec2">]) => {
   // Get position within 4x4 grid
   const x = mod(floor(screenPos.x), 4.0);
   const y = mod(floor(screenPos.y), 4.0);
@@ -105,7 +104,7 @@ const bayerDither4x4 = Fn(([screenPos]: [ReturnType<typeof vec2>]) => {
 /**
  * 8x8 Bayer dither for higher quality at the cost of more pattern visibility
  */
-const bayerDither8x8 = Fn(([screenPos]: [ReturnType<typeof vec2>]) => {
+const bayerDither8x8 = Fn(([screenPos]: [Node<"vec2">]) => {
   // Simplified 8x8 using two 4x4 lookups with offset
   const base = bayerDither4x4(screenPos);
   const offset = bayerDither4x4(screenPos.mul(0.5)).mul(0.25);
@@ -176,7 +175,7 @@ export function createWindowGlassMaterial(
 
   // Color node - glass tint color
   const colorNode = Fn(() => {
-    const baseColor = uTintColor;
+    const baseColor = uTintColor.rgb;
 
     // Optionally blend with vertex colors
     if (fullConfig.useVertexColors) {
