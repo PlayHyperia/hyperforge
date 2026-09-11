@@ -64,12 +64,23 @@ For active LOD1 this is 24 float32 values / 96 bytes per clump: 385,824 bytes
 at the 4,019 raw-candidate count, plus GPU storage. A single read-only vertex
 storage buffer avoids exhausting portable vertex attribute limits when the
 renderer switches instance matrices to attribute storage. It adds a binding
-and two scalar loads per vertex, not free GPU work.
+and one vec2 read per vertex, not free GPU work. LOD0/1/2 correction storage is
+192/96/32 bytes per clump respectively; the final retained population is still
+unmeasured.
 
 Endpoint correction still needs a complete base-edge check across terrain
 creases and conservative exclusion/wind/culling bounds. Exact retained neighbor
 identities must govern retirement/requeue. No storage/shader change has been
 implemented by this design note.
+
+The current grass material is shared. A proposed per-chunk correction buffer
+must have an explicit per-chunk position node/material owner while borrowing
+the existing lighting/fade uniform nodes; switching a shared storage binding
+between draws without proving refresh is not acceptable. The current material
+factory overwrites manager-held uniform references, so it cannot simply be
+called once per chunk. Every retirement/LOD/reconcile path must dispose the
+new buffer/material along with geometry. Shader/pipeline sharing, actual
+compiled binding limits and all lifetime transitions require native tests.
 
 ## Evidence
 
