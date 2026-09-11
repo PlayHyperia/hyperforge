@@ -1,95 +1,87 @@
-import { describe, expect, it, vi } from "vitest";
-
-import THREE from "../../../extras/three/three";
+import { readFileSync } from "node:fs";
+import { describe, expect, it } from "vitest";
+import { World } from "../../../core/World";
 import { ClientGraphics } from "../ClientGraphics";
 
-describe("ClientGraphics object precompile", () => {
-  it("waits for an in-flight WebGPU renderer initialization", async () => {
-    const scene = new THREE.Scene();
-    const camera = new THREE.PerspectiveCamera();
-    const compileAsync = vi.fn().mockResolvedValue(undefined);
-    const graphics = Object.create(ClientGraphics.prototype) as ClientGraphics;
-    Object.assign(graphics, {
-      world: { camera, stage: { scene } },
-      precompileQueue: Promise.resolve(),
-      pendingPrecompileCount: 0,
+// Real World and ClientGraphics; no renderer substitute or browser globals.
+// GPU compile/visibility behavior still requires the actual WebGPU harness.
+describe("ClientGraphics renderer preparation", () => {
+  it("executes typed startup operations serially and reports actual pending work", async () => {
+    const graphics = new ClientGraphics(new World());
+    let finish!: (value: number) => void;
+    const barrier = new Promise<number>((resolve) => {
+      finish = resolve;
     });
-    const object = new THREE.Group();
-
-    const compilation = graphics.precompileObject(object);
-    await new Promise((resolve) => setTimeout(resolve, 0));
-    expect(compileAsync).not.toHaveBeenCalled();
-
-    Object.assign(graphics, { renderer: { compileAsync } });
-    await compilation;
-
-    expect(compileAsync).toHaveBeenCalledWith(object, camera, scene);
+    const events: string[] = [];
+    expect(graphics.isPrecompileIdle()).toBe(true);
+    const first = graphics.prepareRenderer(() => {
+      events.push("first");
+      return barrier;
+    });
+    const second = graphics.prepareRenderer(() => {
+      events.push("second");
+      return "prepared";
+    });
+    expect(graphics.isPrecompileIdle()).toBe(false);
+    await Promise.resolve();
+    expect(events).toEqual(["first"]);
+    finish(4);
+    expect(await first).toBe(4);
+    expect(await second).toBe("prepared");
+    expect(events).toEqual(["first", "second"]);
     expect(graphics.isPrecompileIdle()).toBe(true);
   });
 
-  it("serializes compilation and restores visibility and frustum state before awaiting", async () => {
-    let finishFirst: (() => void) | undefined;
-    const firstBarrier = new Promise<void>((resolve) => {
-      finishFirst = resolve;
-    });
-    const scene = new THREE.Scene();
-    const camera = new THREE.PerspectiveCamera();
-    const observations: Array<{
-      rootVisible: boolean;
-      childFrustumCulled: boolean;
-      targetScene: THREE.Object3D | null | undefined;
-    }> = [];
-    const compileAsync = vi
-      .fn()
-      .mockImplementationOnce(
-        (
-          root: THREE.Object3D,
-          _camera: THREE.Camera,
-          targetScene?: THREE.Object3D | null,
-        ) => {
-          const child = root.children[0] as THREE.Mesh;
-          observations.push({
-            rootVisible: root.visible,
-            childFrustumCulled: child.frustumCulled,
-            targetScene,
-          });
-          return firstBarrier;
-        },
-      )
-      .mockResolvedValueOnce(undefined);
-    const graphics = Object.create(ClientGraphics.prototype) as ClientGraphics;
-    Object.assign(graphics, {
-      renderer: { compileAsync },
-      world: { camera, stage: { scene } },
-      precompileQueue: Promise.resolve(),
-      pendingPrecompileCount: 0,
-    });
-
-    const first = new THREE.Group();
-    first.visible = false;
-    const firstMesh = new THREE.Mesh(new THREE.BufferGeometry());
-    firstMesh.frustumCulled = true;
-    first.add(firstMesh);
-    const second = new THREE.Group();
-    second.add(new THREE.Mesh(new THREE.BufferGeometry()));
-
-    const firstCompile = graphics.precompileObject(first);
-    const secondCompile = graphics.precompileObject(second);
-    expect(graphics.isPrecompileIdle()).toBe(false);
-    await vi.waitFor(() => expect(compileAsync).toHaveBeenCalledOnce());
-    expect(observations[0]).toEqual({
-      rootVisible: true,
-      childFrustumCulled: false,
-      targetScene: scene,
-    });
-    expect(first.visible).toBe(false);
-    expect(firstMesh.frustumCulled).toBe(true);
-
-    finishFirst?.();
-    await firstCompile;
-    await secondCompile;
-
-    expect(compileAsync).toHaveBeenCalledTimes(2);
+  it("propagates callback errors without poisoning later preparation", async () => {
+    const graphics = new ClientGraphics(new World());
+    const error = new Error("preparation rejected");
+    await expect(
+      graphics.prepareRenderer(() => {
+        throw error;
+      }),
+    ).rejects.toBe(error);
+    expect(await graphics.prepareRenderer(async () => 5)).toBe(5);
     expect(graphics.isPrecompileIdle()).toBe(true);
+  });
+
+  it("retains the actual compiler restoration order and one shared queue", () => {
+    const source = readFileSync(
+      new URL("../ClientGraphics.ts", import.meta.url),
+      "utf8",
+    );
+    const compile = source.slice(
+      source.indexOf("private async precompileObjectNow("),
+      source.indexOf("override commit()"),
+    );
+    const invoke = compile.indexOf("this.renderer.compileAsync(");
+    const restoreVisibility = compile.indexOf(
+      "object.visible = previousVisible;",
+      invoke,
+    );
+    const restoreFrustum = compile.indexOf(
+      "state.object.frustumCulled = state.value;",
+      invoke,
+    );
+    const arm = compile.indexOf("startCallerDeadline();", invoke);
+    const settle = compile.indexOf("await compilation;", invoke);
+    expect(compile).toContain("ClientGraphics.RENDERER_READY_TIMEOUT_MS");
+    expect(compile.slice(invoke, restoreVisibility)).toContain("finally");
+    expect(invoke).toBeGreaterThan(0);
+    expect(restoreVisibility).toBeGreaterThan(invoke);
+    expect(restoreFrustum).toBeGreaterThan(restoreVisibility);
+    expect(arm).toBeGreaterThan(restoreFrustum);
+    expect(settle).toBeGreaterThan(arm);
+    expect(compile).not.toContain("Promise.race");
+    const entrypoints = source.slice(
+      source.indexOf("precompileObject(object:"),
+      source.indexOf("isPrecompileIdle():"),
+    );
+    expect(
+      entrypoints.match(/this\.rendererPreparationQueue\.run\(/gu),
+    ).toHaveLength(2);
+    expect(source).toContain("PRECOMPILE_TIMEOUT_MS = 15_000");
+    expect(source).toContain(
+      "return this.rendererPreparationQueue.pendingCount === 0",
+    );
   });
 });

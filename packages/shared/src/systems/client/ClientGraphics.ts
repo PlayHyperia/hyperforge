@@ -94,6 +94,7 @@ import {
   cleanupGPUCompute,
   type GPUComputeManager,
 } from "../../utils/compute";
+import { RendererPreparationQueue } from "../../utils/rendering/RendererPreparationQueue";
 
 let renderer: WebGPURenderer | undefined;
 
@@ -136,8 +137,7 @@ export class ClientGraphics extends System {
   isWebGPU: boolean = true;
   hasRendered: boolean = false;
   gpuCompute: GPUComputeManager | null = null;
-  private precompileQueue: Promise<void> = Promise.resolve();
-  private pendingPrecompileCount = 0;
+  private readonly rendererPreparationQueue = new RendererPreparationQueue();
   private static readonly PRECOMPILE_TIMEOUT_MS = 15_000;
   private static readonly RENDERER_READY_TIMEOUT_MS = 15_000;
 
@@ -376,24 +376,40 @@ export class ClientGraphics extends System {
    * before the compiler waits on backend pipeline promises.
    */
   precompileObject(object: THREE.Object3D): Promise<void> {
-    this.pendingPrecompileCount++;
-    const run = this.precompileQueue
-      .catch(() => undefined)
-      .then(() => this.precompileObjectNow(object));
-    this.precompileQueue = run.catch(() => undefined);
-    return run.finally(() => {
-      this.pendingPrecompileCount = Math.max(
-        0,
-        this.pendingPrecompileCount - 1,
-      );
-    });
+    return this.rendererPreparationQueue.run(
+      (startCallerDeadline) =>
+        this.precompileObjectNow(object, startCallerDeadline),
+      ClientGraphics.PRECOMPILE_TIMEOUT_MS,
+      `WebGPU object precompile timed out after ${ClientGraphics.PRECOMPILE_TIMEOUT_MS}ms`,
+    );
+  }
+
+  /**
+   * Awaited startup preparation shares the object compiler's serialization.
+   * Timeout rejects this caller after 15s of execution, but DOES NOT cancel the
+   * operation: the queue stays busy until it settles. The operation owner must
+   * guard late publication/disposal after timeout or world teardown. Do not
+   * await another prepareRenderer/precompileObject call inside this callback.
+   */
+  prepareRenderer<T>(operation: () => T | Promise<T>): Promise<T> {
+    return this.rendererPreparationQueue.run(
+      (startCallerDeadline) => {
+        startCallerDeadline();
+        return operation();
+      },
+      ClientGraphics.PRECOMPILE_TIMEOUT_MS,
+      `WebGPU renderer preparation timed out after ${ClientGraphics.PRECOMPILE_TIMEOUT_MS}ms`,
+    );
   }
 
   isPrecompileIdle(): boolean {
-    return this.pendingPrecompileCount === 0;
+    return this.rendererPreparationQueue.pendingCount === 0;
   }
 
-  private async precompileObjectNow(object: THREE.Object3D): Promise<void> {
+  private async precompileObjectNow(
+    object: THREE.Object3D,
+    startCallerDeadline: () => void,
+  ): Promise<void> {
     // Streaming equipment contracts can arrive while ClientGraphics.init() is
     // still awaiting WebGPU adapter creation. Queue the compile until that
     // exact renderer is ready instead of turning a healthy startup race into a
@@ -443,25 +459,8 @@ export class ClientGraphics extends System {
       }
     }
 
-    let timeout: ReturnType<typeof setTimeout> | undefined;
-    try {
-      await Promise.race([
-        compilation,
-        new Promise<never>((_, reject) => {
-          timeout = setTimeout(
-            () =>
-              reject(
-                new Error(
-                  `WebGPU object precompile timed out after ${ClientGraphics.PRECOMPILE_TIMEOUT_MS}ms`,
-                ),
-              ),
-            ClientGraphics.PRECOMPILE_TIMEOUT_MS,
-          );
-        }),
-      ]);
-    } finally {
-      if (timeout) clearTimeout(timeout);
-    }
+    startCallerDeadline();
+    await compilation;
   }
 
   override commit() {
