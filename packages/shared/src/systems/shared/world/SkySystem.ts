@@ -927,14 +927,14 @@ export class SkySystem extends System {
       // SKY COLORS - Darker night sky
       // =====================
       // Day sky gradient: deep blue at zenith, lighter at horizon
-      const dayZenith = vec3(this.skyPaletteUniforms.dayZenith); // Rich blue
-      const dayHorizon = vec3(this.skyPaletteUniforms.dayHorizon); // Light blue/white
+      const dayZenith = this.skyPaletteUniforms.dayZenith.rgb; // Rich blue
+      const dayHorizon = this.skyPaletteUniforms.dayHorizon.rgb; // Light blue/white
       const dayGradient = pow(sub(float(1.0), elevation), float(1.5));
       const daySkyColor = mix(dayZenith, dayHorizon, dayGradient);
 
       // Night sky gradient: MUCH darker for proper night feel
-      const nightZenith = vec3(this.skyPaletteUniforms.nightZenith); // Almost black with blue tint
-      const nightHorizon = vec3(this.skyPaletteUniforms.nightHorizon); // Very dark blue-gray
+      const nightZenith = this.skyPaletteUniforms.nightZenith.rgb; // Almost black with blue tint
+      const nightHorizon = this.skyPaletteUniforms.nightHorizon.rgb; // Very dark blue-gray
       const nightGradient = pow(sub(float(1.0), elevation), float(2.0));
       const nightSkyColor = mix(nightZenith, nightHorizon, nightGradient);
 
@@ -960,8 +960,8 @@ export class SkySystem extends System {
       const angleToSun = dot(localPos, sunDir);
 
       // Sunrise/sunset colors near sun
-      const sunriseColor = vec3(this.skyPaletteUniforms.sunrise); // Orange
-      const sunsetPinkColor = vec3(this.skyPaletteUniforms.sunsetPink); // Pink/red
+      const sunriseColor = this.skyPaletteUniforms.sunrise.rgb; // Orange
+      const sunsetPinkColor = this.skyPaletteUniforms.sunsetPink.rgb; // Pink/red
 
       // Glow strongest near sun, with gradual falloff across radius
       // Use power function for smooth natural falloff instead of smoothstep
@@ -1087,7 +1087,7 @@ export class SkySystem extends System {
       // Use power function for gradual falloff instead of smoothstep
       const moonGlowRaw = clamp(angleToMoon, float(0.0), float(1.0));
       const moonGlowAngle = pow(moonGlowRaw, float(6.0)); // Softer glow
-      const moonGlowColor = vec3(this.skyPaletteUniforms.moonGlow); // Cool blue glow
+      const moonGlowColor = this.skyPaletteUniforms.moonGlow.rgb; // Cool blue glow
       const moonGlowIntensity = mul(
         mul(moonGlowAngle, nightIntensity),
         float(0.4), // Stronger moon glow
@@ -1097,7 +1097,7 @@ export class SkySystem extends System {
       // =====================
       // HORIZON HAZE (subtle atmosphere)
       // =====================
-      const hazeColor = vec3(this.skyPaletteUniforms.haze); // Warm beige
+      const hazeColor = this.skyPaletteUniforms.haze.rgb; // Warm beige
       // Haze strongest near horizon (low elevation), fades as you go higher
       // Use elevation (which is now abs(localPos.y)) for symmetric reflections
       const hazeStrength = smoothstep(float(0.15), float(0.0), elevation);
@@ -1170,13 +1170,13 @@ export class SkySystem extends System {
       const dayIntensity = uDayIntensity;
       const nightIntensity = sub(float(1.0), dayIntensity);
 
-      const dayZenith = vec3(this.skyPaletteUniforms.dayZenith);
-      const dayHorizon = vec3(this.skyPaletteUniforms.dayHorizon);
+      const dayZenith = this.skyPaletteUniforms.dayZenith.rgb;
+      const dayHorizon = this.skyPaletteUniforms.dayHorizon.rgb;
       const dayGradient = pow(sub(float(1.0), elevation), float(1.5));
       const daySkyColor = mix(dayZenith, dayHorizon, dayGradient);
 
-      const nightZenith = vec3(this.skyPaletteUniforms.nightZenith);
-      const nightHorizon = vec3(this.skyPaletteUniforms.nightHorizon);
+      const nightZenith = this.skyPaletteUniforms.nightZenith.rgb;
+      const nightHorizon = this.skyPaletteUniforms.nightHorizon.rgb;
       const nightGradient = pow(sub(float(1.0), elevation), float(2.0));
       const nightSkyColor = mix(nightZenith, nightHorizon, nightGradient);
 
@@ -1195,8 +1195,8 @@ export class SkySystem extends System {
       const sunDir = normalize(uSunPosition);
       const angleToSun = dot(localPos, sunDir);
 
-      const sunriseColor = vec3(this.skyPaletteUniforms.sunrise);
-      const sunsetPinkColor = vec3(this.skyPaletteUniforms.sunsetPink);
+      const sunriseColor = this.skyPaletteUniforms.sunrise.rgb;
+      const sunsetPinkColor = this.skyPaletteUniforms.sunsetPink.rgb;
       const sunGlowRaw = clamp(angleToSun, float(0.0), float(1.0));
       const sunGlowAngle = pow(sunGlowRaw, float(4.0));
       const horizonGlow = pow(
@@ -1220,7 +1220,7 @@ export class SkySystem extends System {
       const angleToMoon = dot(localPos, moonPos);
       const moonGlowRaw = clamp(angleToMoon, float(0.0), float(1.0));
       const moonGlowAngle = pow(moonGlowRaw, float(6.0));
-      const moonGlowColor = vec3(this.skyPaletteUniforms.moonGlow);
+      const moonGlowColor = this.skyPaletteUniforms.moonGlow.rgb;
       const moonGlowIntensity = mul(
         mul(moonGlowAngle, nightIntensity),
         float(0.4),
@@ -1228,7 +1228,7 @@ export class SkySystem extends System {
       skyColor = add(skyColor, mul(moonGlowColor, moonGlowIntensity));
 
       // Horizon haze
-      const hazeColor = vec3(this.skyPaletteUniforms.haze);
+      const hazeColor = this.skyPaletteUniforms.haze.rgb;
       const hazeStrength = smoothstep(float(0.15), float(0.0), elevation);
       const hazeAmount = mul(
         hazeStrength,
@@ -1371,13 +1371,13 @@ export class SkySystem extends System {
           div(uSunPos.y, uCloudRadius),
         );
         const brightColor = mix(
-          vec3(this.cloudPaletteUniforms.nightBright),
-          vec3(this.cloudPaletteUniforms.dayBright),
+          this.cloudPaletteUniforms.nightBright.rgb,
+          this.cloudPaletteUniforms.dayBright.rgb,
           sunNightStep,
         );
         const darkColor = mix(
-          vec3(this.cloudPaletteUniforms.nightDark),
-          vec3(this.cloudPaletteUniforms.dayDark),
+          this.cloudPaletteUniforms.nightDark.rgb,
+          this.cloudPaletteUniforms.dayDark.rgb,
           sunNightStep,
         );
 

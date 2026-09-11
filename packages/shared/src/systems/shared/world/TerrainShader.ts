@@ -113,7 +113,7 @@ export function applyAnimeShade(
   const halfLambert = add(mul(NdotL, float(0.5)), float(0.5));
   const shadeFactor = sub(float(1.0), halfLambert);
   const coolTint = palette
-    ? vec3(palette.tint)
+    ? palette.tint.rgb
     : vec3(...TERRAIN_SHADE.TINT_COLOR);
   const tintedBase = mul(baseColor, coolTint);
   const shaded = mix(

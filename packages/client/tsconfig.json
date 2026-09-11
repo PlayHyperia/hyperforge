@@ -24,14 +24,11 @@
     "isolatedModules": true,
     "forceConsistentCasingInFileNames": true,
     "skipLibCheck": true,
-    "types": ["node", "bun-types", "vite/client"],
+    "types": ["node", "bun-types", "vite/client", "@webgpu/types"],
     "jsx": "react-jsx",
     "jsxImportSource": "react"
   },
-  "include": [
-    "src/**/*",
-    "tests/**/*"
-  ],
+  "include": ["src/**/*", "tests/**/*"],
   "exclude": [
     "node_modules",
     "dist",

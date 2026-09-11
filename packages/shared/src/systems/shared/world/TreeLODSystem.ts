@@ -1162,7 +1162,7 @@ export class ComputeLeafInstancer {
     material.colorNode = Fn(() => {
       const uvCoord = uv();
       const variation = mul(sub(uvCoord.y, float(0.5)), float(0.1));
-      return vec3(baseColor).add(vec3(variation, variation, variation));
+      return baseColor.rgb.add(vec3(variation, variation, variation));
     })();
 
     // Leaf silhouette opacity

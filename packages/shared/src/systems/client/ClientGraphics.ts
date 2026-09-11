@@ -200,7 +200,7 @@ export class ClientGraphics extends System {
     // Configure shadows
     configureShadowMaps(this.renderer, {
       enabled: true,
-      type: THREE.PCFSoftShadowMap,
+      type: THREE.PCFShadowMap,
     });
 
     // Get max anisotropy

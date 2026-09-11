@@ -1,5 +1,5 @@
 import THREE, { texture, uniform } from "../../../extras/three/three";
-import type { UniformNode } from "three/webgpu";
+import type { TextureNode, UniformNode } from "three/webgpu";
 
 // Road influence texture (shared across terrain/grass/flowers)
 // Initialized with dummy 1x1 texture so shaders compile before real data loads
@@ -27,7 +27,7 @@ let roadInfluenceTexture = createRoadInfluenceTexture(
   1,
 );
 
-const roadInfluenceTextureNode: ReturnType<typeof texture> =
+const roadInfluenceTextureNode: TextureNode<"vec4"> =
   texture(roadInfluenceTexture);
 const uRoadInfluenceWorldSize = uniform(1); // World size covered by road texture
 const uRoadInfluenceCenterX = uniform(0); // World center X
@@ -36,7 +36,7 @@ const uRoadInfluenceThreshold = uniform(0.15); // Cull threshold
 let activeOwner: object | undefined;
 
 export type RoadInfluenceTextureState = {
-  textureNode: ReturnType<typeof texture>;
+  textureNode: TextureNode<"vec4">;
   uWorldSize: UniformNode<"float", number>;
   uCenterX: UniformNode<"float", number>;
   uCenterZ: UniformNode<"float", number>;

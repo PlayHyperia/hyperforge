@@ -10,7 +10,6 @@ import {
   normalize,
   select,
   uniform,
-  vec3,
 } from "three/tsl";
 
 /**
@@ -42,7 +41,7 @@ export class WorldIlluminationUniforms {
     return mul(
       albedo,
       mul(
-        add(mul(vec3(this.keyColor), cosine), vec3(this.fillColor)),
+        add(mul(this.keyColor.rgb, cosine), this.fillColor.rgb),
         float(1 / Math.PI),
       ),
     );
@@ -50,7 +49,7 @@ export class WorldIlluminationUniforms {
 
   /** Isotropic radiance corresponding to fill irradiance; water approximation. */
   fillRadiance(): Node<"vec3"> {
-    return mul(vec3(this.fillColor), float(1 / Math.PI));
+    return mul(this.fillColor.rgb, float(1 / Math.PI));
   }
 
   /** Exact legacy selection at zero; changing values never rebuilds the graph. */

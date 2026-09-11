@@ -12,7 +12,7 @@ import THREE, {
   normalize,
   smoothstep,
 } from "../../../extras/three/three";
-import type { Node } from "three/webgpu";
+import type { Node, TextureNode } from "three/webgpu";
 import { COMPACT_TERRAIN_COMPOSITION } from "./CompactTerrainPalette";
 import compactTerrainTextureDigests from "../../../data/compact-terrain-textures.json";
 
@@ -52,11 +52,10 @@ const CHANNELS = ["albedo-roughness", "normal-ao"] as const;
 type Layer = (typeof LAYERS)[number];
 type Channel = (typeof CHANNELS)[number];
 type Key = `${Layer}-${Channel}`;
-type TextureNode = ReturnType<typeof texture>;
 type Entry = {
   key: Key;
   url: string;
-  node: TextureNode;
+  node: TextureNode<"vec4">;
   status: "idle" | "loading" | "loaded" | "error" | "disposed";
   error: string | null;
   width: number;
@@ -134,7 +133,7 @@ export class CompactTerrainTextureSet {
     };
   }
 
-  getNode(layer: Layer, channel: Channel): TextureNode {
+  getNode(layer: Layer, channel: Channel): TextureNode<"vec4"> {
     return this.entries.get(`${layer}-${channel}`)!.node;
   }
 

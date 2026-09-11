@@ -401,14 +401,14 @@ export const BUILDING_OCCLUSION_CONFIG = {
 /**
  * Hash function for pseudo-random values
  */
-const tslHash = Fn(([p]: [ReturnType<typeof vec2>]) => {
+const tslHash = Fn(([p]: [Node<"vec2">]) => {
   return fract(sin(dot(p, vec2(127.1, 311.7))).mul(43758.5453123));
 });
 
 /**
  * 2D noise function
  */
-const tslNoise2D = Fn(([p]: [ReturnType<typeof vec2>]) => {
+const tslNoise2D = Fn(([p]: [Node<"vec2">]) => {
   const i = floor(p);
   const f = fract(p);
   const smoothF = f.mul(f).mul(float(3.0).sub(f.mul(2.0)));
@@ -429,7 +429,7 @@ const tslNoise2D = Fn(([p]: [ReturnType<typeof vec2>]) => {
  * pixels, the pattern frequency exceeds Nyquist and causes aliasing. We detect
  * this and fade to the average color instead.
  */
-const calcProceduralLOD = Fn(([uvIn]: [ReturnType<typeof vec2>]) => {
+const calcProceduralLOD = Fn(([uvIn]: [Node<"vec2">]) => {
   // Calculate how fast UVs change per pixel (filter width)
   const dUVdx = dFdx(uvIn);
   const dUVdy = dFdy(uvIn);
@@ -450,41 +450,37 @@ const calcProceduralLOD = Fn(([uvIn]: [ReturnType<typeof vec2>]) => {
  * This prevents the "screen door" / bayer dithering effect at distance
  * by using smooth transitions based on how fast the value changes on screen
  */
-const aaStep = Fn(
-  ([edge, x]: [ReturnType<typeof float>, ReturnType<typeof float>]) => {
-    // Calculate filter width from screen-space derivatives
-    // fwidth(x) = abs(dFdx(x)) + abs(dFdy(x))
-    const derivativeInput = vec2(x, float(0));
-    const fw = abs(dFdx(derivativeInput).x).add(abs(dFdy(derivativeInput).x));
-    // Scale filter width more aggressively to prevent aliasing
-    const filterWidth = max(fw.mul(1.5), float(0.001));
-    // Use smoothstep for anti-aliased transition
-    return smoothstep(edge.sub(filterWidth), edge.add(filterWidth), x);
-  },
-);
+const aaStep = Fn(([edge, x]: [Node<"float">, Node<"float">]) => {
+  // Calculate filter width from screen-space derivatives
+  // fwidth(x) = abs(dFdx(x)) + abs(dFdy(x))
+  const derivativeInput = vec2(x, float(0));
+  const fw = abs(dFdx(derivativeInput).x).add(abs(dFdy(derivativeInput).x));
+  // Scale filter width more aggressively to prevent aliasing
+  const filterWidth = max(fw.mul(1.5), float(0.001));
+  // Use smoothstep for anti-aliased transition
+  return smoothstep(edge.sub(filterWidth), edge.add(filterWidth), x);
+});
 
 /**
  * Anti-aliased step for comparing if x is less than edge
  * Returns 1 when x < edge, 0 when x > edge, with smooth transition
  */
-const aaStepLt = Fn(
-  ([edge, x]: [ReturnType<typeof float>, ReturnType<typeof float>]) => {
-    const derivativeInput = vec2(x, float(0));
-    const fw = abs(dFdx(derivativeInput).x).add(abs(dFdy(derivativeInput).x));
-    const filterWidth = max(fw.mul(1.5), float(0.001));
-    // Inverted: 1 when x < edge
-    return float(1.0).sub(
-      smoothstep(edge.sub(filterWidth), edge.add(filterWidth), x),
-    );
-  },
-);
+const aaStepLt = Fn(([edge, x]: [Node<"float">, Node<"float">]) => {
+  const derivativeInput = vec2(x, float(0));
+  const fw = abs(dFdx(derivativeInput).x).add(abs(dFdy(derivativeInput).x));
+  const filterWidth = max(fw.mul(1.5), float(0.001));
+  // Inverted: 1 when x < edge
+  return float(1.0).sub(
+    smoothstep(edge.sub(filterWidth), edge.add(filterWidth), x),
+  );
+});
 
 /**
  * Brick pattern - returns (isBrick, brickIdX, brickIdY, lodFade)
  * Uses anti-aliased step functions to prevent screen-door effect at distance.
  * lodFade indicates how much to blend toward average color (0=full detail, 1=solid)
  */
-const brickPattern = Fn(([uvIn]: [ReturnType<typeof vec2>]) => {
+const brickPattern = Fn(([uvIn]: [Node<"vec2">]) => {
   // Larger bricks for more visible pattern (was 0.25 x 0.065)
   const brickWidth = float(0.4);
   const brickHeight = float(0.1);
@@ -531,7 +527,7 @@ const brickPattern = Fn(([uvIn]: [ReturnType<typeof vec2>]) => {
  * Uses anti-aliased step functions to prevent screen-door effect at distance
  * bevelAndLod encodes both bevel (lower bits) and lodFade (combined with isStone)
  */
-const ashlarPattern = Fn(([uvIn]: [ReturnType<typeof vec2>]) => {
+const ashlarPattern = Fn(([uvIn]: [Node<"vec2">]) => {
   // Larger stone blocks for more visible pattern (was 0.6 x 0.3)
   const blockWidth = float(0.9);
   const blockHeight = float(0.45);
@@ -580,7 +576,7 @@ const ashlarPattern = Fn(([uvIn]: [ReturnType<typeof vec2>]) => {
  * Creates a smooth plaster surface with subtle texture variation
  * Reduces detail noise at distance to prevent aliasing
  */
-const stuccoPattern = Fn(([uvIn]: [ReturnType<typeof vec2>]) => {
+const stuccoPattern = Fn(([uvIn]: [Node<"vec2">]) => {
   // Calculate LOD fade factor based on fine detail frequency
   const lodFade = calcProceduralLOD(uvIn.mul(8.0));
 
@@ -613,7 +609,7 @@ const stuccoPattern = Fn(([uvIn]: [ReturnType<typeof vec2>]) => {
  * Creates Tudor-style half-timbered walls with horizontal and vertical beams (no diagonal X braces)
  * Uses anti-aliased step functions to prevent screen-door effect at distance
  */
-const timberFramePattern = Fn(([uvIn]: [ReturnType<typeof vec2>]) => {
+const timberFramePattern = Fn(([uvIn]: [Node<"vec2">]) => {
   const frameThickness = float(0.08); // Timber beam width
   const cellWidth = float(1.0); // Distance between vertical beams
   const cellHeight = float(1.5); // Distance between horizontal beams
@@ -655,7 +651,7 @@ const timberFramePattern = Fn(([uvIn]: [ReturnType<typeof vec2>]) => {
  * Creates vertical wood panel walls (board-and-batten style) for rustic buildings
  * Uses anti-aliased step functions to prevent screen-door effect at distance
  */
-const woodPanelPattern = Fn(([uvIn]: [ReturnType<typeof vec2>]) => {
+const woodPanelPattern = Fn(([uvIn]: [Node<"vec2">]) => {
   const plankWidth = float(0.18); // Width of each vertical board
   const gapWidth = float(0.006); // Gap between boards
 
@@ -687,7 +683,7 @@ const woodPanelPattern = Fn(([uvIn]: [ReturnType<typeof vec2>]) => {
  * Creates horizontal clapboard/lap siding for buildings
  * Uses anti-aliased step functions to prevent screen-door effect at distance
  */
-const woodSidingPattern = Fn(([uvIn]: [ReturnType<typeof vec2>]) => {
+const woodSidingPattern = Fn(([uvIn]: [Node<"vec2">]) => {
   const plankHeight = float(0.12); // Height of each horizontal board
   const gapWidth = float(0.004); // Gap between boards
 
@@ -718,7 +714,7 @@ const woodSidingPattern = Fn(([uvIn]: [ReturnType<typeof vec2>]) => {
  * Wood plank pattern - returns (isPlank, plankId, grainOffset, lodFade)
  * Uses anti-aliased step functions to prevent screen-door effect at distance
  */
-const woodPlankPattern = Fn(([uvIn]: [ReturnType<typeof vec2>]) => {
+const woodPlankPattern = Fn(([uvIn]: [Node<"vec2">]) => {
   const plankWidth = float(0.15);
   const plankHeight = float(2.0);
   const gapWidth = float(0.005);
@@ -754,7 +750,7 @@ const woodPlankPattern = Fn(([uvIn]: [ReturnType<typeof vec2>]) => {
  * Shingle pattern for roofs - returns (isShingle, shingleIdX, shingleIdY, thicknessAndLod)
  * Uses anti-aliased step functions to prevent screen-door effect at distance
  */
-const shinglePattern = Fn(([uvIn]: [ReturnType<typeof vec2>]) => {
+const shinglePattern = Fn(([uvIn]: [Node<"vec2">]) => {
   const shingleWidth = float(0.2);
   const shingleHeight = float(0.15);
   const overlap = float(0.3);
@@ -804,10 +800,7 @@ const shinglePattern = Fn(([uvIn]: [ReturnType<typeof vec2>]) => {
  * @returns Tangent-space normal perturbation (x, y, z)
  */
 const _brickNormalPerturbation = Fn(
-  ([uvIn, textureScale]: [
-    ReturnType<typeof vec2>,
-    ReturnType<typeof float>,
-  ]) => {
+  ([uvIn, textureScale]: [Node<"vec2">, Node<"float">]) => {
     const scaledUV = uvIn.div(textureScale);
     // Match the larger brick pattern size
     const brickWidth = float(0.4);
@@ -890,10 +883,7 @@ const _brickNormalPerturbation = Fn(
  * @returns Tangent-space normal perturbation (x, y, z)
  */
 const _shingleNormalPerturbation = Fn(
-  ([uvIn, textureScale]: [
-    ReturnType<typeof vec2>,
-    ReturnType<typeof float>,
-  ]) => {
+  ([uvIn, textureScale]: [Node<"vec2">, Node<"float">]) => {
     const scaledUV = uvIn.div(textureScale);
     const shingleWidth = float(0.2);
     const shingleHeight = float(0.15);
@@ -962,10 +952,7 @@ const _shingleNormalPerturbation = Fn(
  * @returns Tangent-space normal perturbation (x, y, z)
  */
 const _woodNormalPerturbation = Fn(
-  ([uvIn, textureScale]: [
-    ReturnType<typeof vec2>,
-    ReturnType<typeof float>,
-  ]) => {
+  ([uvIn, textureScale]: [Node<"vec2">, Node<"float">]) => {
     const scaledUV = uvIn.div(textureScale);
     const plankWidth = float(0.15);
     const plankHeight = float(2.0);

@@ -761,7 +761,7 @@ export function createDissolveMaterial(
 
       // Gentle brighten + rim-only highlight color
       const brightened = add(litColor.rgb, float(BRIGHTEN));
-      const rimGlow = mul(vec3(uHighlightColor), rim);
+      const rimGlow = mul(uHighlightColor.rgb, rim);
       const highlighted = add(brightened, rimGlow);
 
       const finalRgb = mix(litColor.rgb, highlighted, hlIntensity);
@@ -960,7 +960,7 @@ export function applyRimHighlight(
     );
 
     const brightened = add(litColor.rgb, float(BRIGHTEN));
-    const rimGlow = mul(vec3(uHighlightColor), rim);
+    const rimGlow = mul(uHighlightColor.rgb, rim);
     const highlighted = add(brightened, rimGlow);
 
     const finalRgb = mix(litColor.rgb, highlighted, hlIntensity);
@@ -1196,7 +1196,7 @@ export function createTreeDissolveMaterial(
     const dayFactor = div(sunI, float(2.0));
 
     // ---- Sun shade on albedo ----
-    baseAlbedo = applySunShade(baseAlbedo, uDayIntensity, vec3(uShadeColor));
+    baseAlbedo = applySunShade(baseAlbedo, uDayIntensity, uShadeColor.rgb);
 
     // ---- Smooth diffuse ramp (warm highlights -> cool shadows) ----
     const leafMask = vtxColor.x;
@@ -1290,7 +1290,7 @@ export function createTreeDissolveMaterial(
       float(HL_RIM_STRENGTH),
     );
     const brightened = add(litRgb, float(HL_BRIGHTEN));
-    const rimGlow = mul(vec3(uHighlightColor), hlRim);
+    const rimGlow = mul(uHighlightColor.rgb, hlRim);
     const highlighted = add(brightened, rimGlow);
     const finalRgb = mix(litRgb, highlighted, hlIntensity);
 

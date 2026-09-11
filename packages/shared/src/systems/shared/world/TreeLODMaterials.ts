@@ -11,6 +11,7 @@
  * @module TreeLODMaterials
  */
 
+import type { Node } from "three/webgpu";
 import THREE, {
   uniform,
   Fn,
@@ -134,43 +135,38 @@ function createWindDisplacement(
   const MICRO_SPEED = 5.0;
   const MICRO_AMP = 0.01;
 
-  return Fn(
-    ([pos, heightFactor]: [
-      ReturnType<typeof vec3>,
-      ReturnType<typeof float>,
-    ]) => {
-      // Spatial phase based on position
-      const phase = add(mul(pos.x, float(0.5)), mul(pos.z, float(0.7)));
+  return Fn(([pos, heightFactor]: [Node<"vec3">, Node<"float">]) => {
+    // Spatial phase based on position
+    const phase = add(mul(pos.x, float(0.5)), mul(pos.z, float(0.7)));
 
-      // Main wind wave (slow, large sway)
-      const mainWave = sin(add(mul(uTime, float(MAIN_SPEED)), phase));
+    // Main wind wave (slow, large sway)
+    const mainWave = sin(add(mul(uTime, float(MAIN_SPEED)), phase));
 
-      // Gust wave (medium speed, adds variation)
-      const gustPhase = mul(phase, float(1.3));
-      const gustWave = sin(add(mul(uTime, float(GUST_SPEED)), gustPhase));
+    // Gust wave (medium speed, adds variation)
+    const gustPhase = mul(phase, float(1.3));
+    const gustWave = sin(add(mul(uTime, float(GUST_SPEED)), gustPhase));
 
-      // Micro flutter (fast, small, per-leaf variation)
-      const microPhase = add(phase, mul(float(instanceIndex), float(0.1)));
-      const microWave = sin(add(mul(uTime, float(MICRO_SPEED)), microPhase));
+    // Micro flutter (fast, small, per-leaf variation)
+    const microPhase = add(phase, mul(float(instanceIndex), float(0.1)));
+    const microWave = sin(add(mul(uTime, float(MICRO_SPEED)), microPhase));
 
-      // Combine waves
-      const totalWave = add(
-        add(mul(mainWave, float(MAIN_AMP)), mul(gustWave, float(GUST_AMP))),
-        mul(microWave, float(MICRO_AMP)),
-      );
+    // Combine waves
+    const totalWave = add(
+      add(mul(mainWave, float(MAIN_AMP)), mul(gustWave, float(GUST_AMP))),
+      mul(microWave, float(MICRO_AMP)),
+    );
 
-      // Apply height factor and wind strength
-      const displacement = mul(mul(totalWave, heightFactor), uStrength);
+    // Apply height factor and wind strength
+    const displacement = mul(mul(totalWave, heightFactor), uStrength);
 
-      // Displacement along wind direction
-      const offsetX = mul(displacement, uDirection.x);
-      const offsetZ = mul(displacement, uDirection.z);
-      // Slight vertical bob
-      const offsetY = mul(mul(mainWave, float(0.02)), heightFactor);
+    // Displacement along wind direction
+    const offsetX = mul(displacement, uDirection.x);
+    const offsetZ = mul(displacement, uDirection.z);
+    // Slight vertical bob
+    const offsetY = mul(mul(mainWave, float(0.02)), heightFactor);
 
-      return vec3(offsetX, offsetY, offsetZ);
-    },
-  );
+    return vec3(offsetX, offsetY, offsetZ);
+  });
 }
 
 /**
@@ -178,7 +174,7 @@ function createWindDisplacement(
  * Returns opacity value (0-1).
  */
 function createLeafShapeSDF() {
-  return Fn(([uvCoord]: [ReturnType<typeof vec2>]) => {
+  return Fn(([uvCoord]: [Node<"vec2">]) => {
     // Centered coordinates
     const px = sub(uvCoord.x, float(0.5));
     const py = sub(uvCoord.y, float(0.35));
@@ -235,7 +231,7 @@ function createLeafShapeSDF() {
  * Returns darkening factor for veins (0 = dark vein, 1 = no vein).
  */
 function createLeafVeins() {
-  return Fn(([uvCoord]: [ReturnType<typeof vec2>]) => {
+  return Fn(([uvCoord]: [Node<"vec2">]) => {
     const px = sub(uvCoord.x, float(0.5));
     const py = sub(uvCoord.y, float(0.35));
     const normalizedY = add(mul(py, float(1.3)), float(0.5));
@@ -506,7 +502,7 @@ export function createInstancedLeafMaterial(): InstancedLeafMaterial {
       uDayNightMix,
     );
 
-    return mul(vec3(uSubsurfaceColor), sssIntensity);
+    return mul(uSubsurfaceColor.rgb, sssIntensity);
   })();
 
   // Alpha test node - required for TSL materials to enable alpha cutoff

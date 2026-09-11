@@ -60,6 +60,7 @@
  * - Pre-bake cluster impostors during asset pipeline
  */
 
+import type { Node } from "three/webgpu";
 import * as THREE from "three";
 import * as THREE_WEBGPU from "three/webgpu";
 import { MeshBasicNodeMaterial } from "three/webgpu";
@@ -976,12 +977,12 @@ function createProceduralCrownMaterialTSL(
   // ========== TSL HELPER FUNCTIONS ==========
 
   // Hash function for noise
-  const hashFn = Fn(([p]: [ReturnType<typeof vec2>]) => {
+  const hashFn = Fn(([p]: [Node<"vec2">]) => {
     return fract(mul(sin(dot(p, vec2(127.1, 311.7))), float(43758.5453123)));
   });
 
   // 2D noise function
-  const noiseFn = Fn(([p]: [ReturnType<typeof vec2>]) => {
+  const noiseFn = Fn(([p]: [Node<"vec2">]) => {
     const i = floor(p);
     const f = fract(p);
     const smoothF = mul(mul(f, f), sub(vec2(3.0, 3.0), mul(f, float(2.0))));
@@ -995,7 +996,7 @@ function createProceduralCrownMaterialTSL(
   });
 
   // 4-octave FBM (unrolled loop)
-  const fbmFn = Fn(([p]: [ReturnType<typeof vec2>]) => {
+  const fbmFn = Fn(([p]: [Node<"vec2">]) => {
     const n1 = mul(noiseFn(p), float(0.5));
     const n2 = mul(noiseFn(mul(p, float(2.0))), float(0.25));
     const n3 = mul(noiseFn(mul(p, float(4.0))), float(0.125));
@@ -1005,7 +1006,7 @@ function createProceduralCrownMaterialTSL(
 
   // Crown shape functions based on type (compile-time selection)
   const getCrownRadiusFn = Fn(
-    ([p, edgeNoise]: [ReturnType<typeof vec2>, ReturnType<typeof float>]) => {
+    ([p, edgeNoise]: [Node<"vec2">, Node<"float">]) => {
       if (crownType === "conical") {
         // Conical/pyramidal shape for conifers
         const baseRadius = add(
@@ -1077,8 +1078,8 @@ function createProceduralCrownMaterialTSL(
     const clusterDark = smoothstep(float(0.3), float(0.7), internalNoise);
 
     // Color variation - simulate light/shadow on leaf clusters
-    const darkColor = vec3(uColor).mul(0.6);
-    const lightColor = vec3(uColor).mul(1.2);
+    const darkColor = uColor.rgb.mul(0.6);
+    const lightColor = uColor.rgb.mul(1.2);
     const baseColor = mix(darkColor, lightColor, clusterDark);
 
     // Add slight ambient occlusion at edges

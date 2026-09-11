@@ -254,7 +254,7 @@ export async function createRenderer(
     // so the retry can acquire a fresh context on the same canvas.
     if (renderer) {
       try {
-        renderer.dispose();
+        await renderer.dispose();
       } catch {
         // Ignore dispose errors on a partially-initialized renderer
       }
@@ -396,7 +396,7 @@ export function configureShadowMaps(
     type?: THREE.ShadowMapType;
   } = {},
 ): void {
-  const { enabled = true, type = THREE.PCFSoftShadowMap } = options;
+  const { enabled = true, type = THREE.PCFShadowMap } = options;
 
   renderer.shadowMap.enabled = enabled;
   renderer.shadowMap.type = type;

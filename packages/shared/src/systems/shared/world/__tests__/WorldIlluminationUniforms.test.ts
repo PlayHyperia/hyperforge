@@ -59,6 +59,17 @@ function numeric(node: Node): number[] {
   if (node.type === "JoinNode")
     return (get("nodes") as Node[]).flatMap(numeric);
   if (node.type === "ConvertNode") return input("node");
+  if (node.type === "SplitNode") {
+    const components = get("components");
+    if (typeof components !== "string" || !/^[xyzw]{1,4}$/.test(components))
+      throw new Error("Unsupported real swizzle components");
+    const source = input("node");
+    return [...components].map((component) => {
+      const value = source["xyzw".indexOf(component)];
+      if (!Number.isFinite(value)) throw new Error("Swizzle exceeds source");
+      return value;
+    });
+  }
   const op = get("op"),
     method = get("method");
   const pair = (fn: (a: number, b: number) => number): number[] => {
@@ -84,6 +95,20 @@ function numeric(node: Node): number[] {
 }
 
 describe("custom world illumination (CPU real-graph scope)", () => {
+  it("reads actual color channels without decoding, reordering or stale values", () => {
+    const u = new WorldIlluminationUniforms();
+    const rgb = u.keyColor.rgb;
+    const bgr = u.keyColor.bgr;
+    const builder = new THREE.NodeBuilder(null, null);
+    u.keyColor.value.setRGB(0.125, 0.75, 4);
+    expect(rgb.getNodeType(builder)).toBe("vec3");
+    expect(numeric(rgb)).toEqual([0.125, 0.75, 4]);
+    expect(numeric(bgr)).toEqual([4, 0.75, 0.125]);
+    u.keyColor.value.setRGB(3, 2, 1);
+    expect(numeric(rgb)).toEqual([3, 2, 1]);
+    expect(numeric(bgr)).toEqual([1, 2, 3]);
+  });
+
   it("owns independent default-off real uniforms with exact linear defaults", () => {
     const a = new WorldIlluminationUniforms(),
       b = new WorldIlluminationUniforms();

@@ -990,7 +990,7 @@ export class WaterSystem {
       );
 
       // --- applySunShade (same as tree shader) ---
-      color = applySunShade(color, uDayIntensity, vec3(uShadeColor));
+      color = applySunShade(color, uDayIntensity, uShadeColor.rgb);
 
       // --- nightDim (same as tree shader: mix(NIGHT.BRIGHTNESS, 1.0, dayFactor)) ---
       const dayFactor = div(clamp(uSunIntensity, float(0), float(2)), float(2));
@@ -1017,7 +1017,7 @@ export class WaterSystem {
       // Retained Phong-shaped approximation, not an energy-conserving BRDF:
       // actual key direction/color and no below-surface direct highlight.
       const worldSpecular = mul(
-        vec3(illumination.keyColor),
+        illumination.keyColor.rgb,
         mul(
           pow(
             max(dot(V, worldReflectDir), float(0)),
@@ -1373,7 +1373,7 @@ export class WaterSystem {
       );
 
       // --- applySunShade (same as tree shader) ---
-      color = applySunShade(color, uDayIntensity, vec3(uShadeColor));
+      color = applySunShade(color, uDayIntensity, uShadeColor.rgb);
 
       // --- nightDim (same as tree shader) ---
       const dayFactor = div(clamp(uSunIntensity, float(0), float(2)), float(2));

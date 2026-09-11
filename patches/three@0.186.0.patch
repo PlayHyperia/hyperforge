@@ -1,0 +1,99 @@
+diff --git a/build/three.webgpu.js b/build/three.webgpu.js
+--- a/build/three.webgpu.js
++++ b/build/three.webgpu.js
+@@ -64383,7 +64383,8 @@ class Renderer {
+ 		}
+ 
+ 		this.setRenderTarget( null );
+-		this.setAnimationLoop( null );
++		// Disposal must not restart initialization on a failed renderer.
++		if ( this._animation !== null ) this._animation.setAnimationLoop( null );
+ 
+ 	}
+ 
+@@ -88477,6 +88478,10 @@ class WebGPUBackend extends Backend {
+ 
+ 		}
+ 
++		// A completed context can be reused by compileAsync framebuffer copies.
++		// Only an active render pass may resume on this encoder.
++		renderContextData.currentPass = null;
++
+ 		if ( occlusionQueryCount > 0 ) {
+ 
+ 			const bufferSize = occlusionQueryCount * 8; // 8 byte entries for query results
+@@ -88520,6 +88525,7 @@ class WebGPUBackend extends Backend {
+ 		}
+ 
+ 		submit( this.device, renderContextData.encoder.finish() );
++		renderContextData.encoder = null;
+ 
+ 
+ 		//
+diff --git a/build/three.webgpu.nodes.js b/build/three.webgpu.nodes.js
+--- a/build/three.webgpu.nodes.js
++++ b/build/three.webgpu.nodes.js
+@@ -64383,7 +64383,8 @@ class Renderer {
+ 		}
+ 
+ 		this.setRenderTarget( null );
+-		this.setAnimationLoop( null );
++		// Disposal must not restart initialization on a failed renderer.
++		if ( this._animation !== null ) this._animation.setAnimationLoop( null );
+ 
+ 	}
+ 
+@@ -88477,6 +88478,10 @@ class WebGPUBackend extends Backend {
+ 
+ 		}
+ 
++		// A completed context can be reused by compileAsync framebuffer copies.
++		// Only an active render pass may resume on this encoder.
++		renderContextData.currentPass = null;
++
+ 		if ( occlusionQueryCount > 0 ) {
+ 
+ 			const bufferSize = occlusionQueryCount * 8; // 8 byte entries for query results
+@@ -88520,6 +88525,7 @@ class WebGPUBackend extends Backend {
+ 		}
+ 
+ 		submit( this.device, renderContextData.encoder.finish() );
++		renderContextData.encoder = null;
+ 
+ 
+ 		//
+diff --git a/src/renderers/common/Renderer.js b/src/renderers/common/Renderer.js
+--- a/src/renderers/common/Renderer.js
++++ b/src/renderers/common/Renderer.js
+@@ -2721,7 +2721,8 @@ class Renderer {
+ 		}
+ 
+ 		this.setRenderTarget( null );
+-		this.setAnimationLoop( null );
++		// Disposal must not restart initialization on a failed renderer.
++		if ( this._animation !== null ) this._animation.setAnimationLoop( null );
+ 
+ 	}
+ 
+diff --git a/src/renderers/webgpu/WebGPUBackend.js b/src/renderers/webgpu/WebGPUBackend.js
+--- a/src/renderers/webgpu/WebGPUBackend.js
++++ b/src/renderers/webgpu/WebGPUBackend.js
+@@ -1520,6 +1520,10 @@ class WebGPUBackend extends Backend {
+ 
+ 		}
+ 
++		// A completed context can be reused by compileAsync framebuffer copies.
++		// Only an active render pass may resume on this encoder.
++		renderContextData.currentPass = null;
++
+ 		if ( occlusionQueryCount > 0 ) {
+ 
+ 			const bufferSize = occlusionQueryCount * 8; // 8 byte entries for query results
+@@ -1563,6 +1567,7 @@ class WebGPUBackend extends Backend {
+ 		}
+ 
+ 		submit( this.device, renderContextData.encoder.finish() );
++		renderContextData.encoder = null;
+ 
+ 
+ 		//

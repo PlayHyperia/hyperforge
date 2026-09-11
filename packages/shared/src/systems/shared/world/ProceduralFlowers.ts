@@ -11,6 +11,7 @@
  * @module ProceduralFlowers
  */
 
+import type { Node } from "three/webgpu";
 import THREE, {
   uniform,
   Fn,
@@ -343,7 +344,7 @@ class FlowerSsbo {
       hmUvZ.clamp(float(0.001), float(0.999)),
     );
 
-    let heightmapY: ReturnType<typeof float>;
+    let heightmapY: Node<"float">;
     if (grassHeightmap) {
       const hmSample = grassHeightmap.sample(hmUV);
       heightmapY = hmSample.r.mul(grassUniforms.uHeightmapMax);
@@ -462,7 +463,7 @@ class FlowerSsbo {
 
     // Sample terrain noise at world position - MATCHES grass exactly
     const noiseUV = vec2(worldX, worldZ).mul(TERRAIN_NOISE_SCALE);
-    let terrainNoiseValue: ReturnType<typeof float>;
+    let terrainNoiseValue: Node<"float">;
     if (terrainNoiseTexture) {
       // Use shared terrain noise texture for exact dirt patch matching
       terrainNoiseValue = texture(terrainNoiseTexture, noiseUV).r;

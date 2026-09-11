@@ -12,6 +12,7 @@
  * @module ProceduralDocks
  */
 
+import type { Node } from "three/webgpu";
 import * as THREE from "three";
 import { System } from "../infrastructure/System";
 import type { World } from "../../../types";
@@ -74,11 +75,11 @@ const DOCK_FENCE_POST_SPACING = 1.5;
 // TSL Procedural Wood Functions (matching BridgeSystem quality)
 // ============================================================================
 
-const tslHash = Fn(([p]: [ReturnType<typeof vec2>]) => {
+const tslHash = Fn(([p]: [Node<"vec2">]) => {
   return fract(sin(dot(p, vec2(127.1, 311.7))).mul(43758.5453123));
 });
 
-const tslNoise2D = Fn(([p]: [ReturnType<typeof vec2>]) => {
+const tslNoise2D = Fn(([p]: [Node<"vec2">]) => {
   const i = tslFloor(p);
   const f = fract(p);
   const smoothF = f.mul(f).mul(float(3.0).sub(f.mul(2.0)));
@@ -93,7 +94,7 @@ const tslNoise2D = Fn(([p]: [ReturnType<typeof vec2>]) => {
  * Wood plank pattern — horizontal planks with thin gaps.
  * Returns vec4(isPlank, plankIndex, 0, bevel).
  */
-const dockPlankPattern = Fn(([uvIn]: [ReturnType<typeof vec2>]) => {
+const dockPlankPattern = Fn(([uvIn]: [Node<"vec2">]) => {
   const plankWidth = float(0.4);
   const gapWidth = float(0.01);
 

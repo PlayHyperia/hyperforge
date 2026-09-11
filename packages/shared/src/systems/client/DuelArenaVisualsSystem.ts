@@ -21,6 +21,7 @@
  * - Base coordinates: see arena-layout.ts (single source of truth)
  */
 
+import type { Node } from "three/webgpu";
 import THREE, {
   MeshStandardNodeMaterial,
   uniform,
@@ -166,11 +167,11 @@ export function createDuelFloorMaterial(
 // TSL Procedural Stone Functions
 // ============================================================================
 
-const tslHash = Fn(([p]: [ReturnType<typeof vec2>]) => {
+const tslHash = Fn(([p]: [Node<"vec2">]) => {
   return fract(sin(dot(p, vec2(127.1, 311.7))).mul(43758.5453123));
 });
 
-const tslNoise2D = Fn(([p]: [ReturnType<typeof vec2>]) => {
+const tslNoise2D = Fn(([p]: [Node<"vec2">]) => {
   const i = tslFloor(p);
   const f = fract(p);
   const smoothF = f.mul(f).mul(float(3.0).sub(f.mul(2.0)));
@@ -187,7 +188,7 @@ const tslNoise2D = Fn(([p]: [ReturnType<typeof vec2>]) => {
  * Running-bond stone block pattern for sandstone fences.
  * Returns vec4(isStone, blockId.x, blockId.y, bevel).
  */
-const sandstoneBlockPattern = Fn(([uvIn]: [ReturnType<typeof vec2>]) => {
+const sandstoneBlockPattern = Fn(([uvIn]: [Node<"vec2">]) => {
   const blockWidth = float(0.6);
   const blockHeight = float(0.3);
   const mortarWidth = float(0.015);
@@ -228,7 +229,7 @@ const sandstoneBlockPattern = Fn(([uvIn]: [ReturnType<typeof vec2>]) => {
  * Returns vec4(isStone, tileId.x, tileId.y, bevel).
  * Uses positionWorld.xz for seamless world-space tiling.
  */
-const floorTilePattern = Fn(([uvIn]: [ReturnType<typeof vec2>]) => {
+const floorTilePattern = Fn(([uvIn]: [Node<"vec2">]) => {
   const tileSize = float(1.2);
   const mortarWidth = float(0.02);
 

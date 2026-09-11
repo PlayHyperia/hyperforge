@@ -43,10 +43,10 @@
     "zod": "^4.3.6"
   },
   "devDependencies": {
-    "@types/three": "0.184.1",
+    "@types/three": "0.185.4",
     "@types/ws": "^8.5.14",
     "eslint": "^10.0.2",
-    "three": "^0.184.0",
+    "three": "0.186.0",
     "typescript": "^6.0.3",
     "vitest": "^4.1.8"
   },

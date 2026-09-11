@@ -18,6 +18,7 @@
  * LOD Levels: LOD0 (0-30m) → LOD1 (30-60m) → LOD2 (60-120m) → Impostor (120-200m) → Culled
  */
 
+import type { Node } from "three/webgpu";
 import THREE, {
   uniform,
   Fn,
@@ -532,7 +533,7 @@ class GlobalLeafInstancer {
 
     // ========== LEAF SHAPE FUNCTION ==========
     // Define leaf shape as a separate function (matching procgen pattern)
-    const getLeafAlpha = Fn(([uvCoord]: [ReturnType<typeof vec2>]) => {
+    const getLeafAlpha = Fn(([uvCoord]: [Node<"vec2">]) => {
       // Centered coordinates
       const px = sub(uvCoord.x, float(0.5));
       const py = sub(uvCoord.y, float(0.35));
@@ -1022,18 +1023,18 @@ class GlobalLeafClusterInstancer {
     // const instanceCellId = attribute("instanceCellId", "float");
 
     // TSL hash function for variation
-    const hash = Fn(([n]: [ReturnType<typeof float>]) => {
+    const hash = Fn(([n]: [Node<"float">]) => {
       return fract(mul(sin(mul(n, 127.1)), 43758.5453123));
     });
 
     // TSL hash2D function for noise
-    const hash2D = Fn(([p]: [ReturnType<typeof vec2>]) => {
+    const hash2D = Fn(([p]: [Node<"vec2">]) => {
       const dotProd = add(mul(p.x, 127.1), mul(p.y, 311.7));
       return fract(mul(sin(dotProd), 43758.5453123));
     });
 
     // TSL value noise function
-    const noise2D = Fn(([p]: [ReturnType<typeof vec2>]) => {
+    const noise2D = Fn(([p]: [Node<"vec2">]) => {
       const i = floor(p);
       const f = fract(p);
       // Smoothstep interpolation: f * f * (3.0 - 2.0 * f)
@@ -1139,10 +1140,10 @@ class GlobalLeafClusterInstancer {
     // Single leaf silhouette - creates an actual leaf shape with pointed tip and lobed edges
     const leafSilhouette = Fn(
       ([p, leafAngle, leafScale, seed]: [
-        ReturnType<typeof vec2>,
-        ReturnType<typeof float>,
-        ReturnType<typeof float>,
-        ReturnType<typeof float>,
+        Node<"vec2">,
+        Node<"float">,
+        Node<"float">,
+        Node<"float">,
       ]) => {
         // Rotate point to leaf orientation
         const cosA = cos(leafAngle);

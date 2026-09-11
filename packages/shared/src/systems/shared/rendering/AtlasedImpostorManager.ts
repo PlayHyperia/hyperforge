@@ -13,6 +13,7 @@
  * For rocks/plants, use AtlasedRockPlantImpostorManager instead.
  */
 
+import type { Node } from "three/webgpu";
 import THREE, {
   uniform,
   Fn,
@@ -295,7 +296,7 @@ export class AtlasedImpostorManager {
     this.uAmbientColor = uniform(new THREE.Vector3(0.4, 0.45, 0.5));
 
     // Convert flat octahedral index to grid coords
-    const flatToCoords = Fn(([idx]: [ReturnType<typeof float>]) => {
+    const flatToCoords = Fn(([idx]: [Node<"float">]) => {
       const row = floor(div(idx, uGridSize.x));
       const col = sub(idx, mul(row, uGridSize.x));
       return vec2(col, row);

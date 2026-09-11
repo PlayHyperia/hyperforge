@@ -11,6 +11,7 @@
  * matching the duel arena fencing style but with a warm wood plank material.
  */
 
+import type { Node } from "three/webgpu";
 import type { World } from "../../../types";
 import { SystemBase } from "../infrastructure/SystemBase";
 import { ISLAND_BRIDGES, type BridgeDefinition } from "./BridgeDefinition";
@@ -80,11 +81,11 @@ function bridgeTileKey(tileX: number, tileZ: number): number {
 // TSL Procedural Wood Functions (matching DuelArenaVisualsSystem quality)
 // ============================================================================
 
-const tslHash = Fn(([p]: [ReturnType<typeof vec2>]) => {
+const tslHash = Fn(([p]: [Node<"vec2">]) => {
   return fract(sin(dot(p, vec2(127.1, 311.7))).mul(43758.5453123));
 });
 
-const tslNoise2D = Fn(([p]: [ReturnType<typeof vec2>]) => {
+const tslNoise2D = Fn(([p]: [Node<"vec2">]) => {
   const i = tslFloor(p);
   const f = fract(p);
   const smoothF = f.mul(f).mul(float(3.0).sub(f.mul(2.0)));
@@ -99,7 +100,7 @@ const tslNoise2D = Fn(([p]: [ReturnType<typeof vec2>]) => {
  * Wood plank pattern — simple horizontal planks spanning full bridge width.
  * Returns vec4(isPlank, plankIndex, 0, bevel).
  */
-const woodPlankPattern = Fn(([uvIn]: [ReturnType<typeof vec2>]) => {
+const woodPlankPattern = Fn(([uvIn]: [Node<"vec2">]) => {
   const plankWidth = float(0.45); // Wide planks — 45cm each
   const gapWidth = float(0.008); // Thin gap between planks
 
@@ -125,7 +126,7 @@ const woodPlankPattern = Fn(([uvIn]: [ReturnType<typeof vec2>]) => {
  * Running-bond stone block pattern for bridge support pillars.
  * Returns vec4(isStone, blockId.x, blockId.y, bevel).
  */
-const stoneBlockPattern = Fn(([uvIn]: [ReturnType<typeof vec2>]) => {
+const stoneBlockPattern = Fn(([uvIn]: [Node<"vec2">]) => {
   const blockWidth = float(0.5);
   const blockHeight = float(0.25);
   const mortarWidth = float(0.012);

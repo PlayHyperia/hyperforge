@@ -1045,7 +1045,13 @@ export class ClientLoader extends SystemBase {
         if (type === "hdr") {
           const buffer = await file.arrayBuffer();
           const result = this.hdrLoader.parse(buffer as ArrayBuffer);
-          // we just mimicing what hdrLoader.load() does behind the scenes
+          if (
+            result.type !== THREE.HalfFloatType &&
+            result.type !== THREE.FloatType
+          ) {
+            throw new Error(`Unsupported HDR texture type: ${resolvedUrl}`);
+          }
+          // Match HDRLoader's supported floating-point texture output.
           const texture = new THREE.DataTexture(
             result.data,
             result.width,

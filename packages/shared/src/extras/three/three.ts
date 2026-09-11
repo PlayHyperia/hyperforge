@@ -4,11 +4,11 @@
  * Enhanced Three.js import with WebGPU renderer and BVH raycasting.
  * Exports WebGPU build of Three.js with TSL (Three Shading Language) functions.
  *
- * TSL API Notes (three.js 0.180.0):
+ * TSL API Notes:
  * - TSL functions are in THREE_NAMESPACE.TSL, not direct exports from three/webgpu
  * - Node materials (MeshStandardNodeMaterial, etc.) ARE direct exports
  * - Bloom effect is in three/examples/jsm/tsl/display/BloomNode.js
- * - TSL requires WebGPU context - cannot run in Node.js or WebGL fallback
+ * - TSL graphs can be constructed in Node.js; GPU execution uses WebGPU only
  *
  * Browser Requirements:
  * - Chrome 113+, Edge 113+, Safari 17+ for WebGPU support

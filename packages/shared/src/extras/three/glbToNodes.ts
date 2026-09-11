@@ -385,11 +385,15 @@ function setupSplatmapTSL(mesh: THREE.Mesh) {
   const bTex = original.normalMap;
   const aTex = original.transmissionMap;
 
-  // Get scale values from mesh userData
-  const rScale = uniform(mesh.userData.red_scale || 1);
-  const gScale = uniform(mesh.userData.green_scale || 1);
-  const bScale = uniform(mesh.userData.blue_scale || 1);
-  const aScale = uniform(mesh.userData.alpha_scale || 1);
+  // GLB extras are untyped input; only finite numeric UV scales become uniforms.
+  const scaleValue = (value: unknown): number =>
+    typeof value === "number" && Number.isFinite(value) && value !== 0
+      ? value
+      : 1;
+  const rScale = uniform(scaleValue(mesh.userData.red_scale));
+  const gScale = uniform(scaleValue(mesh.userData.green_scale));
+  const bScale = uniform(scaleValue(mesh.userData.blue_scale));
+  const aScale = uniform(scaleValue(mesh.userData.alpha_scale));
 
   // Create TSL Node Material
   const material = new MeshStandardNodeMaterial();

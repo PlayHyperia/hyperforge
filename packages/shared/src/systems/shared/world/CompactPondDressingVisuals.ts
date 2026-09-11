@@ -1,6 +1,6 @@
 import THREE from "../../../extras/three/three";
 import { materialColor, vec3, vec4, mix, dot } from "three/tsl";
-import type { Node } from "three/webgpu";
+import { ConvertNode, type Node } from "three/webgpu";
 import type { World } from "../../../types";
 import { modelCache } from "../../../utils/rendering/ModelCache";
 import {
@@ -237,10 +237,13 @@ export class CompactPondDressingVisuals {
         material,
         source as THREE.MeshStandardNodeMaterial,
       );
-      const original = vec4(
-        ((source as THREE.MeshStandardNodeMaterial)
-          .colorNode as Node<"vec4"> | null) ?? materialColor,
-      );
+      const sourceColor = (source as THREE.MeshStandardNodeMaterial)
+        .colorNode as Node<"vec4"> | null;
+      // MaterialNode resolves to RGBA when a map exists, RGB otherwise.
+      // Convert (do not append alpha) so mapped alpha survives unchanged.
+      const original = sourceColor
+        ? vec4(sourceColor)
+        : new ConvertNode<"vec4">(materialColor, "vec4").toVarIntent();
       const palette = PALETTE[model];
       const luminance = dot(original.rgb, vec3(0.2126, 0.7152, 0.0722));
       material.colorNode = vec4(

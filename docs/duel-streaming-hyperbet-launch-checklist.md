@@ -41,6 +41,41 @@ Game checkpoint `c1933e898b64afa77a5b964200c90becfb7c7fd6` and asset checkpoint
 `fb41785c68c6324903559552a26af11da07c7143` are pushed; exact remote refs and GitHub
 author/committer `dreaminglucid` verified. All 179 capture pins still match.
 
+## Renderer upgrade qualification — in progress, 2026-09-11
+
+- [x] Install the exact r186/VRM candidate reproducibly, reconcile runtime owners,
+  and verify all 966 maintained declarations plus metadata and archive integrity.
+  Runtime/type/identity checks: 17 passed. No global permission workaround.
+- [x] Run actual isolated Chrome/Metal WebGPU lifecycle04: failed-limit admission,
+  disposal without reinitialization, same-canvas retry, target-copy and warmed
+  viewport-compile pixel readback passed; owned browser/server closed.
+- [x] Resolve the initial 280 shared type diagnostics; shared/server/client
+  typechecks and fresh builds pass. Shared 994 tests and server 128 tests pass.
+  Existing unchecked shader files are not certified by the passing typechecks.
+- [x] Qualify historical PMREM coordinate mapping with an independent CPU oracle;
+  preserve the original atlas. Actual rendered appearance remains unapproved.
+- [x] Run actual isolated effects GPU02 on Apple Metal: identity LUT, HDR,
+  ACES/sRGB, blur, outline, toggles and texture teardown passed. This is a
+  64x64 correctness test, not a game frame-time or art acceptance measurement.
+- [x] Complete matched actual-world probe20: 11 views/22 PNGs and 234 unchanged
+  pins. Probes18/19 and their diagnostic-helper failures remain preserved.
+- [x] Correct the pond RGB/RGBA conversion identified after probe20; five new
+  real-material/node tests plus nine existing pond tests pass. Fresh shared
+  typecheck/build passed. Actual-world GPU requalification is still required.
+- [ ] Resolve probe20's FAILED integration: eight TSL construction errors and
+  90 destroyed-texture GPU errors. Spatial observations passed, but the whole
+  renderer did not. No merge, deployment, art or performance approval.
+- [ ] Verify integrated effects, real gameplay/resource lifecycle and actual stream
+  output. Retain the direct-canvas/no-intermediate framebuffer-copy failure as
+  an explicit unresolved scenario, not a waived gate.
+- [ ] Save the renderer work-in-progress branch checkpoint with its failed
+  integration clearly documented. Fix the GPU/shader blockers before promotion;
+  then continue one-arena authority and real resource-tree distribution.
+
+Current evidence and exact scope: the implementation's
+`docs/renderer-upgrade-qualification-20260911.md`. Historical probe17 and its
+executed source pins remain preserved; they describe the pre-upgrade baseline.
+
 ## Current delivery direction — 2026-09-10 user clarification
 
 The compact agent island is the only target world. **The large island does not

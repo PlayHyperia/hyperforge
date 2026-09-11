@@ -45,7 +45,7 @@
   },
   "devDependencies": {
     "@tweakpane/core": "^2.0.5",
-    "@types/three": "0.183.1",
+    "@types/three": "0.185.4",
     "@vitest/browser": "^4.1.4",
     "jsdom": "29.1.1",
     "playwright": "^1.55.1",
@@ -55,7 +55,7 @@
     "vitest": "^4.1.8"
   },
   "dependencies": {
-    "three": "0.183.2",
+    "three": "0.186.0",
     "troika-three-text": "^0.52.3",
     "tweakpane": "^4.0.5"
   }
