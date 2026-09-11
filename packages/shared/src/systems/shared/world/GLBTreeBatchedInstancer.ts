@@ -34,6 +34,7 @@ import {
   tickDissolveAnims,
 } from "./DissolveAnimation";
 import { shouldStreamVegetationBackgroundLods } from "../../../runtime/clientViewportMode";
+import type { TreeInstanceLifetime } from "./GLBTreeInstancer";
 
 const MAX_INSTANCES = 512;
 
@@ -72,6 +73,7 @@ const HL_COLOR_INTENSITY = 1.15;
 
 interface TreeSlot {
   entityId: string;
+  lifetime?: TreeInstanceLifetime;
   position: THREE.Vector3;
   rotation: number;
   scale: number;
@@ -116,8 +118,11 @@ const resourceLOD = getLODDistances("tree");
 // ---- Module state ----
 let scene: THREE.Scene | null = null;
 let world: World | null = null;
+let poolGeneration = 0;
+const cancelledPoolLoad = new Error("Tree pool world lifetime ended");
 const pools = new Map<string, TreeTypePool>();
 const entityToTreeType = new Map<string, string>();
+const pendingInstances = new Map<string, { lifetime?: TreeInstanceLifetime }>();
 
 // ---- Geometry extraction ----
 
@@ -227,9 +232,12 @@ function computeModelBounds(
   return { yOffset: 0, height, radius: Math.max(dx, dz) };
 }
 
-async function loadLODParts(path: string): Promise<MeshPart[] | null> {
+async function loadLODParts(
+  path: string,
+  loadWorld: World,
+): Promise<MeshPart[] | null> {
   try {
-    const { scene: lodScene } = await modelCache.loadModel(path, world!);
+    const { scene: lodScene } = await modelCache.loadModel(path, loadWorld);
     const parts = extractAllMeshParts(lodScene);
     return parts.length > 0 ? parts : null;
   } catch {
@@ -362,8 +370,22 @@ async function ensureTreeTypePool(
   const pending = pendingEnsure.get(treeType);
   if (pending) return pending;
 
+  if (!world || !scene) throw cancelledPoolLoad;
+  const loadWorld = world;
+  const loadScene = scene;
+  const generation = poolGeneration;
+  const assertCurrent = () => {
+    if (
+      generation !== poolGeneration ||
+      world !== loadWorld ||
+      scene !== loadScene
+    ) {
+      throw cancelledPoolLoad;
+    }
+  };
+
   const promise = (async (): Promise<TreeTypePool> => {
-    const terrain = world!.getSystem<TerrainSystem>("terrain");
+    const terrain = loadWorld.getSystem<TerrainSystem>("terrain");
     const terrainProfile = terrain?.getWorldTerrainProfile();
     const dissolveOpts = {
       fadeStart: GPU_VEG_CONFIG.FADE_START,
@@ -384,17 +406,18 @@ async function ensureTreeTypePool(
       } as TreeMaterialOptions);
       dm.side = THREE.DoubleSide;
       enableTextureRepeat(dm);
-      world!.setupMaterial(dm);
+      loadWorld.setupMaterial(dm);
       return dm;
     }
 
     // Load all variant LOD0s in parallel
     const lod0Scenes = await Promise.all(
       variantPaths.map(async (vp) => {
-        const { scene: s } = await modelCache.loadModel(vp, world!);
+        const { scene: s } = await modelCache.loadModel(vp, loadWorld);
         return s;
       }),
     );
+    assertCurrent();
 
     // Extract parts per variant
     const allLod0Parts = lod0Scenes.map((s) => extractAllMeshParts(s));
@@ -402,6 +425,22 @@ async function ensureTreeTypePool(
       throw new Error(`No mesh found in ${variantPaths[0]}`);
 
     const numSlots = allLod0Parts[0].length;
+
+    // Decode before allocating scene-owned batches. No partially published pool
+    // can survive a world teardown while another LOD is still awaiting I/O.
+    const loadBackgroundLods = shouldStreamVegetationBackgroundLods();
+    const lod1Results = loadBackgroundLods
+      ? await Promise.all(
+          variantPaths.map((vp) => loadLODParts(inferLOD1Path(vp), loadWorld)),
+        )
+      : [];
+    assertCurrent();
+    const lod2Results = loadBackgroundLods
+      ? await Promise.all(
+          variantPaths.map((vp) => loadLODParts(inferLOD2Path(vp), loadWorld)),
+        )
+      : [];
+    assertCurrent();
 
     // Build a texture fingerprint for each part in variant 0 to define slot identity
     const refFingerprints = allLod0Parts[0].map((p) =>
@@ -443,18 +482,8 @@ async function ensureTreeTypePool(
     // Compute bounds from first variant
     const bounds = computeModelBounds(lod0Scenes[0], 1);
 
-    // Broadcast/spectator viewports do not traverse the exploration world.
-    // Keep their LOD0 fallback and omit the two background model/decode/upload
-    // waves that otherwise interrupt the first arena frames.
-    const loadBackgroundLods = shouldStreamVegetationBackgroundLods();
-
-    // Load LOD1 variants in parallel
+    // Background LODs remain omitted in fixed broadcast viewports.
     let lod1Pool: BatchedLODPool | null = null;
-    const lod1Results = loadBackgroundLods
-      ? await Promise.all(
-          variantPaths.map((vp) => loadLODParts(inferLOD1Path(vp))),
-        )
-      : [];
     const validLod1 = lod1Results.filter(
       (r): r is MeshPart[] => r !== null && r.length === numSlots,
     );
@@ -478,11 +507,6 @@ async function ensureTreeTypePool(
 
     // Load LOD2 variants in parallel
     let lod2Pool: BatchedLODPool | null = null;
-    const lod2Results = loadBackgroundLods
-      ? await Promise.all(
-          variantPaths.map((vp) => loadLODParts(inferLOD2Path(vp))),
-        )
-      : [];
     const validLod2 = lod2Results.filter(
       (r): r is MeshPart[] => r !== null && r.length === numSlots,
     );
@@ -524,7 +548,7 @@ async function ensureTreeTypePool(
   try {
     return await promise;
   } finally {
-    pendingEnsure.delete(treeType);
+    if (pendingEnsure.get(treeType) === promise) pendingEnsure.delete(treeType);
   }
 }
 
@@ -612,6 +636,7 @@ function applyHighlightColor(
 // ---- Public API ----
 
 export function initGLBTreeBatchedInstancer(s: THREE.Scene, w: World): void {
+  poolGeneration++;
   scene = s;
   world = w;
 }
@@ -621,6 +646,7 @@ export function initGLBTreeBatchedInstancer(s: THREE.Scene, w: World): void {
  * after this to dispose cached proxy geometries that reference sourceGeometries.
  */
 export function destroyGLBTreeBatchedInstancer(): void {
+  poolGeneration++;
   for (const pool of pools.values()) {
     for (const lodPool of [pool.lod0, pool.lod1, pool.lod2]) {
       if (!lodPool) continue;
@@ -634,6 +660,7 @@ export function destroyGLBTreeBatchedInstancer(): void {
   }
   pools.clear();
   entityToTreeType.clear();
+  pendingInstances.clear();
   pendingEnsure.clear();
   dissolveAnims.clear();
   scene = null;
@@ -649,15 +676,32 @@ export async function addInstance(
   rotation: number,
   scale: number,
   initialDissolve = 0,
+  lifetime?: TreeInstanceLifetime,
 ): Promise<boolean> {
-  if (!scene || !world) return false;
+  if (!scene || !world || (lifetime && !lifetime.isCurrent())) return false;
+  const instanceWorld = world;
+  const instanceScene = scene;
+  const generation = poolGeneration;
 
-  if (entityToTreeType.has(entityId)) {
+  if (!lifetime && entityToTreeType.has(entityId)) {
     removeInstance(entityId);
   }
+  const request = { lifetime };
+  pendingInstances.set(entityId, request);
 
   try {
     const pool = await ensureTreeTypePool(treeType, variantPaths);
+    if (
+      pendingInstances.get(entityId) !== request ||
+      world !== instanceWorld ||
+      scene !== instanceScene ||
+      generation !== poolGeneration ||
+      (lifetime && !lifetime.isCurrent())
+    )
+      return false;
+
+    const insertionDissolve = lifetime?.getInitialDissolve() ?? initialDissolve;
+    removeInstance(entityId);
 
     // Pick initial LOD based on camera distance to avoid LOD0 pop-in at range
     let initialLOD: 0 | 1 | 2 = 0;
@@ -699,6 +743,7 @@ export async function addInstance(
 
     const slot: TreeSlot = {
       entityId,
+      lifetime,
       position: position.clone(),
       rotation,
       scale,
@@ -720,21 +765,32 @@ export async function addInstance(
         entityId,
         mat,
         variantIndex,
-        initialDissolve,
+        insertionDissolve,
         snowWeight,
       );
 
     return true;
   } catch (error) {
+    if (error === cancelledPoolLoad) return false;
     console.warn(
       `[GLBTreeBatchedInstancer] Failed to add instance ${entityId}:`,
       error,
     );
     return false;
+  } finally {
+    if (pendingInstances.get(entityId) === request)
+      pendingInstances.delete(entityId);
   }
 }
 
-export function removeInstance(entityId: string): void {
+export function removeInstance(
+  entityId: string,
+  lifetime?: TreeInstanceLifetime,
+): void {
+  const pending = pendingInstances.get(entityId);
+  if (pending && (!lifetime || pending.lifetime === lifetime)) {
+    pendingInstances.delete(entityId);
+  }
   const treeType = entityToTreeType.get(entityId);
   if (!treeType) return;
 
@@ -742,7 +798,7 @@ export function removeInstance(entityId: string): void {
   if (!pool) return;
 
   const slot = pool.instances.get(entityId);
-  if (!slot) return;
+  if (!slot || (lifetime && slot.lifetime !== lifetime)) return;
 
   const lodPool = getLodPool(pool, slot);
   if (lodPool) removeFromPool(lodPool, entityId);
@@ -760,8 +816,16 @@ function getLodPool(pool: TreeTypePool, slot: TreeSlot): BatchedLODPool | null {
       : pool.lod2;
 }
 
-export function hasInstance(entityId: string): boolean {
-  return entityToTreeType.has(entityId);
+export function hasInstance(
+  entityId: string,
+  lifetime?: TreeInstanceLifetime,
+): boolean {
+  const treeType = entityToTreeType.get(entityId);
+  if (!treeType) return false;
+  return (
+    !lifetime ||
+    pools.get(treeType)?.instances.get(entityId)?.lifetime === lifetime
+  );
 }
 
 export function getModelDimensions(

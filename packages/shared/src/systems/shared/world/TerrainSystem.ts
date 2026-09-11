@@ -61,17 +61,22 @@ import { BiomeSystem, type BiomeDefinition } from "@hyperforge/procgen/terrain";
 import type { BiomeData } from "../../../types/core/core";
 import type {
   ResourceNode,
+  TerrainResourceSpawnPoint,
   TerrainTile,
   FlatZone,
   RadialPondTerrainProfile,
 } from "../../../types/world/terrain";
+import { centeredTerrainTileIndex } from "../../../types/world/terrain";
 import type { RoadTileSegment } from "../../../types/world/world-types";
 import { PhysicsHandle } from "../../../types/systems/physics";
 import { getPhysX } from "../../../physics/PhysXManager";
 import { Layers } from "../../../physics/Layers";
 import { BIOMES } from "../../../data/world-structure";
 import { ALL_WORLD_AREAS } from "../../../data/world-areas";
-import { getDuelArenaConfig } from "../../../data/duel-manifest";
+import {
+  getDuelArenaConfig,
+  isPositionInsideDuelArenaZone,
+} from "../../../data/duel-manifest";
 import {
   createDuelArenaFloorZones,
   getDuelArenaGradeHeight,
@@ -86,11 +91,12 @@ import {
 // NOTE: Import directly to avoid circular dependency through barrel file
 import { WaterSystem } from "./WaterSystem";
 import {
-  generateTrees,
+  generateCenteredTrees,
   generateOres,
   generateRocks,
   // generatePlants, // DISABLED - plants not working/looking good yet
   type ResourceGenerationContext,
+  type TreeGenerationSource,
 } from "./BiomeResourceGenerator";
 import {
   getTreeConfigForBiome,
@@ -1429,8 +1435,8 @@ export class TerrainSystem extends System {
     });
 
     // Register resource spawn points (same as generateTile)
-    if (isServer && tile.resources.length > 0) {
-      const spawnPoints = tile.resources.map((r) => {
+    if (generateContent && isServer) {
+      const spawnPoints = tile.resources.map((r): TerrainResourceSpawnPoint => {
         const worldPos = {
           x: originX + r.position.x,
           y: r.position.y,
@@ -1449,9 +1455,10 @@ export class TerrainSystem extends System {
       });
       this.world.emit(EventType.RESOURCE_SPAWN_POINTS_REGISTERED, {
         spawnPoints,
+        owner: { tileX, tileZ },
       });
-    } else if (tile.resources.length > 0 && isClient && !isServer) {
-      const spawnPoints = tile.resources.map((r) => {
+    } else if (generateContent && isClient && !isServer) {
+      const spawnPoints = tile.resources.map((r): TerrainResourceSpawnPoint => {
         const worldPos = {
           x: originX + r.position.x,
           y: r.position.y,
@@ -1470,6 +1477,7 @@ export class TerrainSystem extends System {
       });
       this.world.emit(EventType.RESOURCE_SPAWN_POINTS_REGISTERED, {
         spawnPoints,
+        owner: { tileX, tileZ },
       });
     }
 
@@ -3164,8 +3172,11 @@ export class TerrainSystem extends System {
     });
 
     // Also emit resource spawn points for ResourceSystem (server-only authoritative)
-    if (tile.resources.length > 0 && this.world.network?.isServer) {
-      const spawnPoints = tile.resources.map((r) => {
+    if (
+      generateContent &&
+      (this.runtimeIsServer || this.world.network?.isServer)
+    ) {
+      const spawnPoints = tile.resources.map((r): TerrainResourceSpawnPoint => {
         const worldPos = {
           x: originX + r.position.x,
           y: r.position.y,
@@ -3184,13 +3195,14 @@ export class TerrainSystem extends System {
       });
       this.world.emit(EventType.RESOURCE_SPAWN_POINTS_REGISTERED, {
         spawnPoints,
+        owner: { tileX, tileZ },
       });
     } else if (
-      tile.resources.length > 0 &&
+      generateContent &&
       this.runtimeIsClient &&
       !this.world.network?.isServer
     ) {
-      const spawnPoints = tile.resources.map((r) => {
+      const spawnPoints = tile.resources.map((r): TerrainResourceSpawnPoint => {
         const worldPos = {
           x: originX + r.position.x,
           y: r.position.y,
@@ -3209,6 +3221,7 @@ export class TerrainSystem extends System {
       });
       this.world.emit(EventType.RESOURCE_SPAWN_POINTS_REGISTERED, {
         spawnPoints,
+        owner: { tileX, tileZ },
       });
     }
 
@@ -4041,9 +4054,7 @@ export class TerrainSystem extends System {
    * Tile N's geometry spans world [(N-0.5)*SIZE, (N+0.5)*SIZE).
    */
   private worldToTerrainTileIndex(worldCoord: number): number {
-    return Math.floor(
-      (worldCoord + this.CONFIG.TILE_SIZE * 0.5) / this.CONFIG.TILE_SIZE,
-    );
+    return centeredTerrainTileIndex(worldCoord, this.CONFIG.TILE_SIZE);
   }
 
   /**
@@ -4140,6 +4151,14 @@ export class TerrainSystem extends System {
     }
 
     return this.getHeightAtComputedSkipFlatZone(worldX, worldZ);
+  }
+
+  /** Stable authored ground for resources, independent of resident mesh caches/decks. */
+  getResourceGroundHeight(worldX: number, worldZ: number): number {
+    if (!Number.isFinite(worldX) || !Number.isFinite(worldZ)) {
+      throw new Error("Resource grounding requires finite world coordinates");
+    }
+    return this.getHeightAtComputed(worldX, worldZ);
   }
 
   /**
@@ -5327,7 +5346,7 @@ export class TerrainSystem extends System {
     }
 
     // Re-enabled: tree spawning with optimized LOD system
-    this.generateTreesForTile(tile, biomeData);
+    this.generateTreesForTile(tile);
 
     // Re-enabled for ore LOD testing
     // this.generateOtherResourcesForTile(tile, biomeData);
@@ -5447,37 +5466,47 @@ export class TerrainSystem extends System {
    * Uses the extracted BiomeResourceGenerator for the actual algorithm.
    * getTreeConfigForBiome always returns a config (falls back to forest).
    */
-  private generateTreesForTile(tile: TerrainTile, biomeData: BiomeData): void {
-    const treeConfig = biomeData.trees ?? getTreeConfigForBiome(tile.biome);
-    if (!treeConfig.enabled) {
-      return;
-    }
-
+  private createTreeGenerationSource(
+    tileX: number,
+    tileZ: number,
+  ): TreeGenerationSource {
+    const biome = this.getBiomeAt(tileX, tileZ);
+    const treeConfig = BIOMES[biome]?.trees ?? getTreeConfigForBiome(biome);
     // Create context for resource generation.
     // getDominantBiome lets generateTrees() resolve the actual biome at each
     // tree position instead of using the single tile-center biome, which
     // prevents wrong tree types appearing near biome boundaries.
     const biomeSystem = this.biomeSystem;
     const ctx: ResourceGenerationContext = {
-      tileX: tile.x,
-      tileZ: tile.z,
-      tileKey: tile.key,
+      tileX,
+      tileZ,
+      tileKey: `${tileX}_${tileZ}`,
       tileSize: this.CONFIG.TILE_SIZE,
       waterThreshold: this.CONFIG.WATER_THRESHOLD,
-      getHeightAt: (worldX, worldZ) => this.getHeightAt(worldX, worldZ),
+      // Placement must not depend on which neighbouring mesh is resident.
+      getHeightAt: (worldX, worldZ) =>
+        this.getResourceGroundHeight(worldX, worldZ),
       getWaterSurfaceAt: (worldX, worldZ) =>
         this.waterBodyRegistry.getWaterSurfaceAt(worldX, worldZ),
       isOnRoad: this.roadNetworkSystem
         ? (worldX, worldZ) => this.roadNetworkSystem!.isOnRoad(worldX, worldZ)
         : undefined,
-      createRng: (salt) => this.createTileRng(tile.x, tile.z, salt),
+      createRng: (salt) => this.createTileRng(tileX, tileZ, salt),
       getDominantBiome: (worldX, worldZ) =>
         biomeSystem.getDominantBiome(worldX, worldZ, 0),
     };
 
-    // Generate trees using the extracted algorithm
-    const trees = generateTrees(ctx, treeConfig);
-    tile.resources.push(...trees);
+    return { context: ctx, config: treeConfig };
+  }
+
+  private generateTreesForTile(tile: TerrainTile): void {
+    const result = generateCenteredTrees(
+      { tileX: tile.x, tileZ: tile.z },
+      this.CONFIG.TILE_SIZE,
+      (x, z) => this.createTreeGenerationSource(x, z),
+      isPositionInsideDuelArenaZone,
+    );
+    tile.resources.push(...result.resources);
   }
 
   /**

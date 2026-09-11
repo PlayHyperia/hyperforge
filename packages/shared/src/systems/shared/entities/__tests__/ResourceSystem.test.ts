@@ -108,8 +108,16 @@ describe("ResourceSystem", () => {
       type: string;
       subType?: string;
     }>;
+    const authoredFishing = Object.values(ALL_WORLD_AREAS)
+      .flatMap((area) => area.resources)
+      .find((resource) => resource.resourceId === "fishing_spot_net");
+    expect(authoredFishing).toBeDefined();
     expect(spawnPoints).toContainEqual({
-      position: { x: -9.5, y: 28.2, z: -13 },
+      position: {
+        x: authoredFishing!.position.x,
+        y: 28.2,
+        z: authoredFishing!.position.z,
+      },
       type: "fish",
       subType: "net",
     });

@@ -4,6 +4,9 @@ import { TerrainSystem } from "../world/TerrainSystem";
 import { uuid } from "../../../utils";
 import type { World } from "../../../types";
 import { ResourceEntity } from "../../../entities/world/ResourceEntity";
+import type { Entity } from "../../../entities/Entity";
+import type { EntityManager } from "./EntityManager";
+import { EntityType, InteractionType } from "../../../types/entities";
 import { disposeFishingSpotTextures } from "../../../entities/world/visuals/FishingSpotVisualStrategy";
 
 import { EventType } from "../../../types/events";
@@ -17,7 +20,11 @@ import {
   createPlayerID,
   createResourceID,
 } from "../../../utils/IdentifierUtils";
-import type { TerrainResourceSpawnPoint } from "../../../types/world/terrain";
+import {
+  centeredTerrainTileIndex,
+  type TerrainResourceSpawnBatch,
+  type TerrainResourceSpawnPoint,
+} from "../../../types/world/terrain";
 import {
   TICK_DURATION_MS,
   snapToTileCenter,
@@ -116,6 +123,22 @@ type GatheringRequest = {
   playerPosition: { x: number; y: number; z: number };
   /** Optional immutable autonomy attempt whose first reward completes it. */
   completionAttemptId?: string;
+};
+
+type TerrainResourceRegistration = {
+  spawnPoint: TerrainResourceSpawnPoint;
+  resource: Resource;
+  signature: string;
+  entity: Entity | null;
+};
+
+type TerrainResourceLease = {
+  key: string;
+  isManifest: boolean;
+  signature: string;
+  active: boolean;
+  registrations: Map<ResourceID, TerrainResourceRegistration>;
+  completion: Promise<void>;
 };
 
 export interface ResourceEcologyStats {
@@ -286,6 +309,14 @@ export class ResourceSystem extends SystemBase {
   private resourceVariants = new Map<ResourceID, string>();
   // Track manifest-spawned resources (from world-areas.json) - these should NOT be deleted on tile unload
   private manifestResourceIds = new Set<ResourceID>();
+  /** Current tile generation, including empty tiles and work awaiting persistence. */
+  private terrainResourceLeases = new Map<string, TerrainResourceLease>();
+  /** Keeps a replacement behind late EntityManager.init() completion and cleanup. */
+  private terrainResourceTails = new Map<string, Promise<void>>();
+  private terrainResourceRegistrations = new Map<
+    ResourceID,
+    { lease: TerrainResourceLease; registration: TerrainResourceRegistration }
+  >();
   // Terrain system reference for height lookups
   private terrainSystem: TerrainSystem | null = null;
 
@@ -435,7 +466,7 @@ export class ResourceSystem extends SystemBase {
 
   async init(): Promise<void> {
     // Set up type-safe event subscriptions for resource management
-    this.subscribe<{ spawnPoints: TerrainResourceSpawnPoint[] }>(
+    this.subscribe<TerrainResourceSpawnBatch>(
       EventType.RESOURCE_SPAWN_POINTS_REGISTERED,
       async (data) => {
         await this.registerTerrainResources(data);
@@ -1054,17 +1085,13 @@ export class ResourceSystem extends SystemBase {
         const suffix = r.resourceId.replace(resourceData.type + "_", "");
         const subType = suffix === "normal" ? undefined : suffix;
 
-        // Land resources sit on terrain. Authored fishing spots sit on the
-        // visible water plane so their deterministic placement matches the
-        // same interaction geometry as dynamically discovered shore spots.
+        // Fishing retains its authored water-surface contract. Land is grounded
+        // once, after tile-center snapping, by createResourceFromSpawnPoint.
         let groundedY = r.position.y;
-        if (this.terrainSystem) {
-          const authoredHeight =
-            resourceData.type === "fishing_spot"
-              ? this.terrainSystem
-                  .getWaterBodyRegistry()
-                  .getWaterSurfaceAt(r.position.x, r.position.z)
-              : this.terrainSystem.getHeightAt(r.position.x, r.position.z);
+        if (this.terrainSystem && resourceData.type === "fishing_spot") {
+          const authoredHeight = this.terrainSystem
+            .getWaterBodyRegistry()
+            .getWaterSurfaceAt(r.position.x, r.position.z);
           if (Number.isFinite(authoredHeight)) {
             groundedY = authoredHeight;
           }
@@ -1267,18 +1294,265 @@ export class ResourceSystem extends SystemBase {
    * @param data.spawnPoints - Resource spawn points to register
    * @param data.isManifest - If true, resources are from world-areas.json and won't be deleted on tile unload
    */
-  private async registerTerrainResources(data: {
-    spawnPoints: TerrainResourceSpawnPoint[];
-    isManifest?: boolean;
-  }): Promise<void> {
-    const { spawnPoints, isManifest = false } = data;
+  private async registerTerrainResources(
+    data: TerrainResourceSpawnBatch,
+  ): Promise<void> {
+    if (this.isDestroying) return;
+    const { isManifest = false, owner } = data;
+    if (isManifest && owner) {
+      throw new Error(
+        "[ResourceSystem] Authored resources cannot have a tile owner",
+      );
+    }
+    if (
+      owner &&
+      (!Number.isSafeInteger(owner.tileX) || !Number.isSafeInteger(owner.tileZ))
+    ) {
+      throw new Error("[ResourceSystem] Invalid terrain resource owner");
+    }
+    // Older callers may omit the owner. Split those batches using the same
+    // centered convention; production TerrainSystem always sends an owner.
+    if (!isManifest && !owner) {
+      const groups = new Map<string, TerrainResourceSpawnBatch>();
+      for (const point of data.spawnPoints) {
+        const tileX = centeredTerrainTileIndex(
+          point.position.x,
+          TERRAIN_CONSTANTS.TERRAIN_TILE_SIZE,
+        );
+        const tileZ = centeredTerrainTileIndex(
+          point.position.z,
+          TERRAIN_CONSTANTS.TERRAIN_TILE_SIZE,
+        );
+        const key = `${tileX},${tileZ}`;
+        let group = groups.get(key);
+        if (!group) {
+          group = { owner: { tileX, tileZ }, spawnPoints: [] };
+          groups.set(key, group);
+        }
+        group.spawnPoints.push(point);
+      }
+      await Promise.all(
+        [...groups.values()].map((group) =>
+          this.registerTerrainResources(group),
+        ),
+      );
+      return;
+    }
 
-    if (spawnPoints.length === 0) return;
+    const registrations = new Map<ResourceID, TerrainResourceRegistration>();
+    for (const input of data.spawnPoints) {
+      // Detach from the generator's mutable tile storage before the first await.
+      const spawnPoint = { ...input, position: { ...input.position } };
+      const { x, y, z } = spawnPoint.position;
+      if (
+        ![x, y, z].every(Number.isFinite) ||
+        (spawnPoint.scale !== undefined &&
+          (!Number.isFinite(spawnPoint.scale) || spawnPoint.scale <= 0)) ||
+        (spawnPoint.rotation !== undefined &&
+          !Number.isFinite(spawnPoint.rotation))
+      ) {
+        throw new Error("[ResourceSystem] Invalid terrain resource transform");
+      }
+      const resource = this.createResourceFromSpawnPoint(
+        spawnPoint,
+        isManifest,
+      );
+      if (!resource) continue;
+      if (
+        owner &&
+        (centeredTerrainTileIndex(
+          resource.position.x,
+          TERRAIN_CONSTANTS.TERRAIN_TILE_SIZE,
+        ) !== owner.tileX ||
+          centeredTerrainTileIndex(
+            resource.position.z,
+            TERRAIN_CONSTANTS.TERRAIN_TILE_SIZE,
+          ) !== owner.tileZ)
+      ) {
+        throw new Error(
+          `[ResourceSystem] Resource ${resource.id} lies outside its tile owner`,
+        );
+      }
+      const signature = JSON.stringify([
+        spawnPoint.type,
+        spawnPoint.subType ?? null,
+        resource.position.x,
+        resource.position.y,
+        resource.position.z,
+        spawnPoint.scale ?? 1,
+        spawnPoint.rotation ?? null,
+      ]);
+      const id = createResourceID(resource.id);
+      const duplicate = registrations.get(id);
+      const existing = this.terrainResourceRegistrations.get(id);
+      if (
+        (duplicate && duplicate.signature !== signature) ||
+        (existing && existing.registration.signature !== signature)
+      ) {
+        throw new Error(
+          `[ResourceSystem] Conflicting registration for ${resource.id}`,
+        );
+      }
+      registrations.set(id, { spawnPoint, resource, signature, entity: null });
+    }
+    const key = isManifest
+      ? `manifest:${[...registrations.keys()].sort().join("|")}`
+      : `tile:${owner!.tileX},${owner!.tileZ}`;
+    const signature = JSON.stringify(
+      [...registrations].map(([id, entry]) => [id, entry.signature]).sort(),
+    );
+    const previous = this.terrainResourceLeases.get(key);
+    if (previous?.signature === signature) {
+      await previous.completion;
+      return;
+    }
+    for (const [id] of registrations) {
+      const existing = this.terrainResourceRegistrations.get(id);
+      if (!existing || existing.lease === previous) continue;
+      if (isManifest && existing.lease.isManifest) {
+        // Overlapping authored calls can repeat identical nodes without taking
+        // ownership away from their original permanent batch.
+        registrations.delete(id);
+        continue;
+      }
+      throw new Error(`[ResourceSystem] Conflicting resource owner for ${id}`);
+    }
+    const priorCompletion = this.terrainResourceTails.get(key);
+    if (previous) this.retireTerrainResourceLease(previous);
+    const lease: TerrainResourceLease = {
+      key,
+      isManifest,
+      signature,
+      active: true,
+      registrations,
+      completion: Promise.resolve(),
+    };
+    this.terrainResourceLeases.set(key, lease);
+    for (const [id, registration] of registrations) {
+      this.terrainResourceRegistrations.set(id, { lease, registration });
+    }
+    const completion = (async () => {
+      try {
+        if (priorCompletion) await priorCompletion.catch(() => undefined);
+        if (!this.isTerrainResourceLeaseCurrent(lease)) return;
+        await this.spawnTerrainResourceLease(lease);
+      } catch (error) {
+        if (this.isTerrainResourceLeaseCurrent(lease))
+          this.retireTerrainResourceLease(lease);
+        throw error;
+      }
+    })();
+    lease.completion = completion;
+    this.terrainResourceTails.set(key, completion);
+    try {
+      await completion;
+    } finally {
+      if (this.terrainResourceTails.get(key) === completion)
+        this.terrainResourceTails.delete(key);
+    }
+  }
+
+  private isTerrainResourceLeaseCurrent(lease: TerrainResourceLease): boolean {
+    return (
+      !this.isDestroying &&
+      lease.active &&
+      this.terrainResourceLeases.get(lease.key) === lease
+    );
+  }
+
+  /** An actual authoritative add can reuse a client-created terrain instance. */
+  claimNetworkResourceOwnership(entity: Entity): void {
+    if (
+      this.world.isServer ||
+      this.isDestroying ||
+      !(entity instanceof ResourceEntity) ||
+      this.world.entities.get(entity.id) !== entity
+    )
+      return;
+    const registration = this.terrainResourceRegistrations.get(
+      createResourceID(entity.id),
+    )?.registration;
+    if (registration?.entity === entity) registration.entity = null;
+    if (registration) {
+      registration.resource.isAvailable = !entity.config.depleted;
+      registration.resource.position = {
+        x: entity.position.x,
+        y: entity.position.y,
+        z: entity.position.z,
+      };
+    }
+  }
+
+  private removeTerrainResourceState(id: ResourceID): void {
+    for (const [playerId, session] of this.activeGathering) {
+      if (session.resourceId === id)
+        this.cancelGatheringForPlayer(playerId, "terrain_tile_unloaded");
+    }
+    this.resources.delete(id);
+    this.resourceVariants.delete(id);
+    this.resourceTimers.delete(id);
+    this.respawnAtTick.delete(id);
+    this.fishingSpotMoveTimers.delete(id);
+    this.manifestResourceIds.delete(id);
+  }
+
+  private destroyOwnedTerrainEntity(entity: Entity): void {
+    const manager = this.world.getSystem<EntityManager>("entity-manager");
+    if (this.world.isServer) {
+      // Never delete an entity which another owner installed under the same ID.
+      if (
+        manager?.getEntity(entity.id) === entity &&
+        this.world.entities.get(entity.id) === entity
+      )
+        manager.destroyEntity(entity.id);
+    } else if (this.world.entities.get(entity.id) === entity) {
+      this.world.entities.remove(entity.id);
+    }
+  }
+
+  private retireTerrainResourceLease(lease: TerrainResourceLease): void {
+    lease.active = false;
+    if (this.terrainResourceLeases.get(lease.key) === lease)
+      this.terrainResourceLeases.delete(lease.key);
+    for (const [id, registration] of lease.registrations) {
+      if (this.terrainResourceRegistrations.get(id)?.lease !== lease) continue;
+      this.terrainResourceRegistrations.delete(id);
+      this.removeTerrainResourceState(id);
+      if (registration.entity)
+        this.destroyOwnedTerrainEntity(registration.entity);
+    }
+  }
+
+  private async spawnTerrainResourceLease(
+    lease: TerrainResourceLease,
+  ): Promise<void> {
+    const { isManifest } = lease;
+    const preparedResources = [...lease.registrations.values()];
+    const spawnPoints = preparedResources.map(({ spawnPoint }) => spawnPoint);
 
     if (!this.world.isServer) {
-      for (const spawnPoint of spawnPoints) {
-        const resource = this.createResourceFromSpawnPoint(spawnPoint);
-        if (!resource) continue;
+      for (const registration of preparedResources) {
+        if (!this.isTerrainResourceLeaseCurrent(lease)) return;
+        const { spawnPoint, resource } = registration;
+        const existingEntity = this.world.entities.get(resource.id);
+        if (
+          existingEntity &&
+          (!(existingEntity instanceof ResourceEntity) ||
+            existingEntity.config.resourceId !==
+              `${resource.type}_${spawnPoint.subType ?? "normal"}`)
+        ) {
+          throw new Error(
+            `[ResourceSystem] Conflicting network resource: ${resource.id}`,
+          );
+        }
+        if (existingEntity instanceof ResourceEntity) {
+          resource.isAvailable = !existingEntity.config.depleted;
+          resource.position = {
+            x: existingEntity.position.x,
+            y: existingEntity.position.y,
+            z: existingEntity.position.z,
+          };
+        }
 
         const rid = createResourceID(resource.id);
         this.resources.set(rid, resource);
@@ -1367,25 +1641,16 @@ export class ResourceSystem extends SystemBase {
           occupiedTiles,
         };
 
-        this.world.entities.add(entityData);
+        const entity = this.world.entities.add(entityData);
+        if (!(entity instanceof ResourceEntity))
+          throw new Error(
+            `[ResourceSystem] Unexpected resource entity: ${resource.id}`,
+          );
+        // A snapshot may have installed this entity before its terrain tile.
+        // Borrow it; unloading local terrain must not dispose network ownership.
+        if (!existingEntity) registration.entity = entity;
       }
       return;
-    }
-
-    const preparedResources: Array<{
-      spawnPoint: TerrainResourceSpawnPoint;
-      resource: Resource;
-    }> = [];
-    for (const spawnPoint of spawnPoints) {
-      try {
-        const resource = this.createResourceFromSpawnPoint(spawnPoint);
-        if (resource) preparedResources.push({ spawnPoint, resource });
-      } catch (error) {
-        console.error(
-          `[ResourceSystem] Failed to prepare resource "${spawnPoint.subType ?? "normal"}" (type=${spawnPoint.type}):`,
-          error,
-        );
-      }
     }
 
     const activeResourceStates = new Map<
@@ -1402,6 +1667,7 @@ export class ResourceSystem extends SystemBase {
         const persisted = await databaseSystem.getGatheringResourceStatesAsync(
           preparedResources.map(({ resource }) => resource.id),
         );
+        if (!this.isTerrainResourceLeaseCurrent(lease)) return;
         for (const state of persisted) {
           if (
             Number.isSafeInteger(state.depletedAt) &&
@@ -1416,73 +1682,53 @@ export class ResourceSystem extends SystemBase {
           "[ResourceSystem] Durable gathering state could not be loaded; refusing to expose this resource batch.",
           error,
         );
-        return;
+        throw error;
       }
     }
 
-    // Get EntityManager for spawning
-    const entityManager = this.world.getSystem("entity-manager") as {
-      spawnEntity?: (
-        config: unknown,
-        options?: { suppressBroadcast?: boolean },
-      ) => Promise<{ id?: string; serialize?: () => unknown } | null>;
-    } | null;
+    // Preserve the existing resource input (properties: {}). EntityConfig's
+    // general-purpose property type requires component fields, but the actual
+    // Entity/ResourceEntity constructors supply defaults. Keep that narrow input
+    // adapter; the returned instance and cleanup methods are now precisely typed.
+    const entityManager:
+      | {
+          spawnEntity(
+            config: unknown,
+            options?: { suppressBroadcast?: boolean },
+          ): Promise<Entity | null>;
+          getEntity: EntityManager["getEntity"];
+          destroyEntity: EntityManager["destroyEntity"];
+        }
+      | undefined = this.world.getSystem<EntityManager>("entity-manager");
     if (!entityManager?.spawnEntity) {
-      console.error(
+      throw new Error(
         "[ResourceSystem] EntityManager not available, cannot spawn resources!",
       );
-      return;
     }
 
     let spawned = 0;
     const batchedEntityData: unknown[] = [];
 
-    for (const { spawnPoint, resource } of preparedResources) {
+    for (const registration of preparedResources) {
+      if (!this.isTerrainResourceLeaseCurrent(lease)) return;
+      const { spawnPoint, resource } = registration;
       try {
+        if (this.world.entities.get(resource.id)) {
+          throw new Error(
+            `[ResourceSystem] Entity already owned: ${resource.id}`,
+          );
+        }
         const persistedState = activeResourceStates.get(resource.id);
         const isPersistedDepleted = Boolean(persistedState);
         if (persistedState) {
           resource.isAvailable = false;
           resource.lastDepleted = persistedState.depletedAt;
-          const remainingTicks = Math.max(
-            1,
-            Math.ceil(
-              (persistedState.respawnAt - Date.now()) / TICK_DURATION_MS,
-            ),
-          );
-          this.respawnAtTick.set(
-            createResourceID(resource.id),
-            (this.world.currentTick || 0) + remainingTicks,
-          );
         }
-
-        // Store in map for tracking
         const rid = createResourceID(resource.id);
-        this.resources.set(rid, resource);
-
-        // Mark manifest resources so they're not deleted on tile unload
-        if (isManifest) {
-          this.manifestResourceIds.add(rid);
-        }
-
-        if (DEBUG_GATHERING) {
-          console.log(
-            `[ResourceSystem] Stored resource in map: id="${resource.id}", rid="${rid}", map size=${this.resources.size}${isManifest ? " (manifest)" : ""}`,
-          );
-        }
         // Track variant/subtype for tuning (e.g., 'tree_oak', 'ore_copper')
         const variant = spawnPoint.subType
           ? `${resource.type}_${spawnPoint.subType}`
           : `${resource.type}_normal`;
-        this.resourceVariants.set(rid, variant);
-
-        // RULES ACCURACY: Initialize fishing spot movement timer
-        if (
-          resource.type === "fishing_spot" ||
-          resource.skillRequired === "fishing"
-        ) {
-          this.initializeFishingSpotTimer(rid, resource.position);
-        }
 
         // Spawn actual ResourceEntity instance
         // Use rotation from spawn point if available (deterministic from BiomeResourceGenerator)
@@ -1520,7 +1766,7 @@ export class ResourceSystem extends SystemBase {
 
         const resourceConfig = {
           id: resource.id,
-          type: "resource" as const,
+          type: EntityType.RESOURCE,
           name: resource.name,
           position: {
             x: resource.position.x,
@@ -1531,7 +1777,7 @@ export class ResourceSystem extends SystemBase {
           scale: { x: 1, y: 1, z: 1 }, // ALWAYS uniform scale - ResourceEntity handles mesh scale
           visible: true,
           interactable: true,
-          interactionType: "harvest",
+          interactionType: InteractionType.HARVEST,
           interactionDistance: 3,
           description: `${resource.name} - Requires level ${resource.levelRequired} ${resource.skillRequired}`,
           model: this.getModelPathForResource(
@@ -1595,24 +1841,57 @@ export class ResourceSystem extends SystemBase {
         const spawnedEntity = await entityManager.spawnEntity(resourceConfig, {
           suppressBroadcast: true,
         });
-        if (spawnedEntity) {
-          spawned++;
-          if (typeof spawnedEntity.serialize === "function") {
-            batchedEntityData.push(spawnedEntity.serialize());
-          }
+        if (!spawnedEntity)
+          throw new Error(
+            `[ResourceSystem] Resource spawn refused: ${resource.id}`,
+          );
+        if (!this.isTerrainResourceLeaseCurrent(lease)) {
+          this.destroyOwnedTerrainEntity(spawnedEntity);
+          return;
         }
+        registration.entity = spawnedEntity;
+        this.resources.set(rid, resource);
+        this.resourceVariants.set(rid, variant);
+        if (isManifest) this.manifestResourceIds.add(rid);
+        if (persistedState) {
+          // The absolute durable deadline remains authoritative even if entity
+          // initialization waited. Never restart its full respawn duration.
+          this.respawnAtTick.set(
+            rid,
+            (this.world.currentTick || 0) +
+              Math.max(
+                1,
+                Math.ceil(
+                  (persistedState.respawnAt - Date.now()) / TICK_DURATION_MS,
+                ),
+              ),
+          );
+        }
+        if (
+          resource.type === "fishing_spot" ||
+          resource.skillRequired === "fishing"
+        ) {
+          this.initializeFishingSpotTimer(rid, resource.position);
+        }
+        spawned++;
+        batchedEntityData.push(spawnedEntity.serialize());
       } catch (err) {
         console.error(
           `[ResourceSystem] Failed to spawn resource "${spawnPoint.subType ?? "normal"}" (type=${spawnPoint.type}):`,
           err,
         );
+        throw err;
       }
     }
 
     // Send all entities for this tile as a single batch packet to avoid
     // per-entity bandwidth-budget drops during rapid tile generation.
     // useHighPriorityBatch controls whether HIGH or NORMAL priority is used.
-    if (batchedEntityData.length > 0 && this.world.isServer) {
+    if (
+      this.isTerrainResourceLeaseCurrent(lease) &&
+      batchedEntityData.length > 0 &&
+      this.world.isServer
+    ) {
       const network = this.world.network as {
         sendHighPriority?: (name: string, data: unknown) => void;
         send?: (name: string, data: unknown) => void;
@@ -1829,6 +2108,7 @@ export class ResourceSystem extends SystemBase {
    */
   private createResourceFromSpawnPoint(
     spawnPoint: TerrainResourceSpawnPoint,
+    groundAuthoredLand = false,
   ): Resource | undefined {
     const { position, type } = spawnPoint;
 
@@ -1861,6 +2141,20 @@ export class ResourceSystem extends SystemBase {
     // RULES ACCURACY: Snap position to tile center for proper face direction and interaction
     // This ensures resources are always at tile centers (e.g., 15.5, -9.5) not corners (15, -10)
     const snappedPosition = snapToTileCenter(position);
+    if (groundAuthoredLand && resourceType !== "fishing_spot") {
+      const terrain =
+        this.terrainSystem ?? this.world.getSystem<TerrainSystem>("terrain");
+      if (!terrain)
+        throw new Error(
+          "[ResourceSystem] Authored land requires terrain grounding",
+        );
+      snappedPosition.y = terrain.getResourceGroundHeight(
+        snappedPosition.x,
+        snappedPosition.z,
+      );
+      if (!Number.isFinite(snappedPosition.y))
+        throw new Error("[ResourceSystem] Non-finite authored resource ground");
+    }
 
     // Duel arena tiles should not contain harvestable resources or trees.
     if (isPositionInsideDuelArenaZone(snappedPosition.x, snappedPosition.z)) {
@@ -1901,6 +2195,10 @@ export class ResourceSystem extends SystemBase {
     tileX: number;
     tileZ: number;
   }): void {
+    const lease = this.terrainResourceLeases.get(
+      `tile:${data.tileX},${data.tileZ}`,
+    );
+    if (lease) this.retireTerrainResourceLease(lease);
     const entityManager = this.world.getSystem("entity-manager") as {
       destroyEntity?: (id: string) => boolean;
     } | null;
@@ -4439,6 +4737,14 @@ export class ResourceSystem extends SystemBase {
    */
   destroy(): void {
     this.isDestroying = true;
+    for (const lease of this.terrainResourceLeases.values()) {
+      this.retireTerrainResourceLease(lease);
+    }
+    this.terrainResourceLeases.clear();
+    this.terrainResourceRegistrations.clear();
+    // Pending tails keep their own lease references and exact entity cleanup.
+    // Do not allow a destroyed system to retain completed queue entries.
+    this.terrainResourceTails.clear();
 
     // Clear all active gathering sessions
     this.activeGathering.clear();

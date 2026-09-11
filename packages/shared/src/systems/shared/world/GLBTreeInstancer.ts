@@ -44,8 +44,16 @@ const _quaternion = new THREE.Quaternion();
 const _scale = new THREE.Vector3();
 const _swapMatrix = new THREE.Matrix4();
 
+/** Optional exact actor lifetime; legacy callers may continue to omit it. */
+export interface TreeInstanceLifetime {
+  isCurrent(): boolean;
+  /** Read at insertion, after shared model loading, to avoid a depletion flash. */
+  getInitialDissolve(): number;
+}
+
 interface TreeSlot {
   entityId: string;
+  lifetime?: TreeInstanceLifetime;
   position: THREE.Vector3;
   rotation: number;
   scale: number;
@@ -93,8 +101,11 @@ const resourceLOD = getLODDistances("resource");
 // ---- Module state ----
 let scene: THREE.Scene | null = null;
 let world: World | null = null;
+let poolGeneration = 0;
+const cancelledPoolLoad = new Error("Tree pool world lifetime ended");
 const pools = new Map<string, ModelPool>();
 const entityToModel = new Map<string, string>();
+const pendingInstances = new Map<string, { lifetime?: TreeInstanceLifetime }>();
 
 // ---- Geometry extraction (reference, not clone) ----
 
@@ -210,9 +221,12 @@ function createLODPool(
   };
 }
 
-async function loadLODParts(path: string): Promise<MeshPart[] | null> {
+async function loadLODParts(
+  path: string,
+  loadWorld: World,
+): Promise<MeshPart[] | null> {
   try {
-    const { scene: lodScene } = await modelCache.loadModel(path, world!);
+    const { scene: lodScene } = await modelCache.loadModel(path, loadWorld);
     const parts = extractAllMeshParts(lodScene);
     return parts.length > 0 ? parts : null;
   } catch {
@@ -256,6 +270,25 @@ async function ensureModelPool(
   const pending = pendingEnsure.get(modelPath);
   if (pending) return pending;
 
+  if (!world || !scene) throw cancelledPoolLoad;
+  const loadWorld = world;
+  const loadScene = scene;
+  const generation = poolGeneration;
+  const assertCurrent = () => {
+    if (
+      generation !== poolGeneration ||
+      world !== loadWorld ||
+      scene !== loadScene
+    ) {
+      throw cancelledPoolLoad;
+    }
+  };
+  const loadParts = async (path: string) => {
+    const parts = await loadLODParts(path, loadWorld);
+    assertCurrent();
+    return parts;
+  };
+
   const promise = (async (): Promise<ModelPool> => {
     const dissolveOpts = {
       fadeStart: GPU_VEG_CONFIG.FADE_START,
@@ -275,20 +308,22 @@ async function ensureModelPool(
         } as TreeMaterialOptions);
         dm.side = THREE.DoubleSide;
         enableTextureRepeat(dm);
-        world!.setupMaterial(dm);
+        loadWorld.setupMaterial(dm);
         return { geometry: p.geometry, material: dm };
       });
     }
 
     // LOD0
-    const { scene: lod0Scene } = await modelCache.loadModel(modelPath, world!);
+    const { scene: lod0Scene } = await modelCache.loadModel(
+      modelPath,
+      loadWorld,
+    );
+    assertCurrent();
     const lod0Parts = extractAllMeshParts(lod0Scene);
     if (lod0Parts.length === 0)
       throw new Error(`No mesh found in ${modelPath}`);
 
     const bounds = computeModelBounds(lod0Scene, 1);
-
-    const lod0Pool = createLODPool(buildTreeParts(lod0Parts));
 
     // The fixed broadcast viewport has no exploration traversal and keeps LOD0
     // available as the visual fallback. Avoid decoding and uploading distant
@@ -296,34 +331,33 @@ async function ensureModelPool(
     const loadBackgroundLods = shouldStreamVegetationBackgroundLods();
 
     // LOD1 — explicit path first, fall back to inferred naming convention
-    let lod1Pool: LODPool | null = null;
+    let lod1Parts: MeshPart[] | null = null;
     if (loadBackgroundLods && lod1ModelPath) {
-      const lod1Parts = await loadLODParts(lod1ModelPath);
-      if (lod1Parts) {
-        lod1Pool = createLODPool(buildTreeParts(lod1Parts));
-      }
+      lod1Parts = await loadParts(lod1ModelPath);
     }
-    if (loadBackgroundLods && !lod1Pool) {
-      const lod1Parts = await loadLODParts(inferLOD1Path(modelPath));
-      if (lod1Parts) {
-        lod1Pool = createLODPool(buildTreeParts(lod1Parts));
-      }
+    if (loadBackgroundLods && !lod1Parts) {
+      lod1Parts = await loadParts(inferLOD1Path(modelPath));
     }
 
     // LOD2 — explicit path first, fall back to inferred naming convention
-    let lod2Pool: LODPool | null = null;
+    let lod2Parts: MeshPart[] | null = null;
     if (loadBackgroundLods && lod2ModelPath) {
-      const lod2Parts = await loadLODParts(lod2ModelPath);
-      if (lod2Parts) {
-        lod2Pool = createLODPool(buildTreeParts(lod2Parts));
-      }
+      lod2Parts = await loadParts(lod2ModelPath);
     }
-    if (loadBackgroundLods && !lod2Pool) {
-      const lod2Parts = await loadLODParts(inferLOD2Path(modelPath));
-      if (lod2Parts) {
-        lod2Pool = createLODPool(buildTreeParts(lod2Parts));
-      }
+    if (loadBackgroundLods && !lod2Parts) {
+      lod2Parts = await loadParts(inferLOD2Path(modelPath));
     }
+
+    // Publish scene-owned resources only after every load is admitted. Teardown
+    // during an LOD await cannot leave a partly built pool outside the registry.
+    assertCurrent();
+    const lod0Pool = createLODPool(buildTreeParts(lod0Parts));
+    const lod1Pool = lod1Parts
+      ? createLODPool(buildTreeParts(lod1Parts))
+      : null;
+    const lod2Pool = lod2Parts
+      ? createLODPool(buildTreeParts(lod2Parts))
+      : null;
 
     const pool: ModelPool = {
       modelPath,
@@ -344,7 +378,8 @@ async function ensureModelPool(
   try {
     return await promise;
   } finally {
-    pendingEnsure.delete(modelPath);
+    if (pendingEnsure.get(modelPath) === promise)
+      pendingEnsure.delete(modelPath);
   }
 }
 
@@ -418,6 +453,7 @@ function removeFromPool(pool: LODPool, entityId: string): void {
 // ---- Public API ----
 
 export function initGLBTreeInstancer(s: THREE.Scene, w: World): void {
+  poolGeneration++;
   scene = s;
   world = w;
 }
@@ -427,6 +463,7 @@ export function initGLBTreeInstancer(s: THREE.Scene, w: World): void {
  * after this to dispose cached proxy geometries that reference sourceGeometries.
  */
 export function destroyGLBTreeInstancer(): void {
+  poolGeneration++;
   for (const pool of pools.values()) {
     for (const lodPool of [pool.lod0, pool.lod1, pool.lod2]) {
       if (!lodPool) continue;
@@ -440,6 +477,7 @@ export function destroyGLBTreeInstancer(): void {
   }
   pools.clear();
   entityToModel.clear();
+  pendingInstances.clear();
   pendingEnsure.clear();
   dissolveAnims.clear();
   scene = null;
@@ -455,15 +493,36 @@ export async function addInstance(
   lod1ModelPath?: string | null,
   lod2ModelPath?: string | null,
   initialDissolve = 0,
+  lifetime?: TreeInstanceLifetime,
 ): Promise<boolean> {
-  if (!scene || !world) return false;
+  if (!scene || !world || (lifetime && !lifetime.isCurrent())) return false;
+  const instanceWorld = world;
+  const instanceScene = scene;
+  const generation = poolGeneration;
 
-  if (entityToModel.has(entityId)) {
+  // Untokenized callers retain their immediate replacement behavior. An actor
+  // lifetime must not remove a valid replacement until its own load is admitted.
+  if (!lifetime && entityToModel.has(entityId)) {
     removeInstance(entityId);
   }
+  const request = { lifetime };
+  pendingInstances.set(entityId, request);
 
   try {
     const pool = await ensureModelPool(modelPath, lod1ModelPath, lod2ModelPath);
+    if (
+      pendingInstances.get(entityId) !== request ||
+      world !== instanceWorld ||
+      scene !== instanceScene ||
+      generation !== poolGeneration ||
+      (lifetime && !lifetime.isCurrent())
+    )
+      return false;
+
+    // No await from admission through insertion. Read authoritative depletion
+    // now, not when the potentially slow shared load began.
+    const insertionDissolve = lifetime?.getInitialDissolve() ?? initialDissolve;
+    removeInstance(entityId);
 
     // Pick initial LOD based on camera distance to avoid LOD0 pop-in at range
     let initialLOD: 0 | 1 | 2 = 0;
@@ -481,6 +540,7 @@ export async function addInstance(
 
     const slot: TreeSlot = {
       entityId,
+      lifetime,
       position: position.clone(),
       rotation,
       scale,
@@ -496,7 +556,7 @@ export async function addInstance(
       initialLOD === 0 ? pool.lod0 : initialLOD === 1 ? pool.lod1 : pool.lod2;
     if (
       initialPool &&
-      !addToPool(initialPool, entityId, mat, initialDissolve)
+      !addToPool(initialPool, entityId, mat, insertionDissolve)
     ) {
       console.warn(
         `[GLBTreeInstancer] LOD${initialLOD} pool full for ${modelPath}, cannot add ${entityId}`,
@@ -508,15 +568,26 @@ export async function addInstance(
 
     return true;
   } catch (error) {
+    if (error === cancelledPoolLoad) return false;
     console.warn(
       `[GLBTreeInstancer] Failed to add instance ${entityId}:`,
       error,
     );
     return false;
+  } finally {
+    if (pendingInstances.get(entityId) === request)
+      pendingInstances.delete(entityId);
   }
 }
 
-export function removeInstance(entityId: string): void {
+export function removeInstance(
+  entityId: string,
+  lifetime?: TreeInstanceLifetime,
+): void {
+  const pending = pendingInstances.get(entityId);
+  if (pending && (!lifetime || pending.lifetime === lifetime)) {
+    pendingInstances.delete(entityId);
+  }
   const modelPath = entityToModel.get(entityId);
   if (!modelPath) return;
 
@@ -524,7 +595,7 @@ export function removeInstance(entityId: string): void {
   if (!pool) return;
 
   const slot = pool.instances.get(entityId);
-  if (!slot) return;
+  if (!slot || (lifetime && slot.lifetime !== lifetime)) return;
 
   const lodPool =
     slot.currentLOD === 0
@@ -539,8 +610,15 @@ export function removeInstance(entityId: string): void {
   dissolveAnims.delete(entityId);
 }
 
-export function hasInstance(entityId: string): boolean {
-  return entityToModel.has(entityId);
+export function hasInstance(
+  entityId: string,
+  lifetime?: TreeInstanceLifetime,
+): boolean {
+  const path = entityToModel.get(entityId);
+  if (!path) return false;
+  return (
+    !lifetime || pools.get(path)?.instances.get(entityId)?.lifetime === lifetime
+  );
 }
 
 /**

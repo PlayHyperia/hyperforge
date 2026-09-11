@@ -47,6 +47,7 @@ export enum InteractionType {
   PICKUP = "pickup",
   TALK = "talk",
   GATHER = "gather",
+  HARVEST = "harvest",
   USE = "use",
   LOOT = "loot",
   BANK = "bank",

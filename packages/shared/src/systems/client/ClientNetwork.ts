@@ -97,6 +97,7 @@
 // moment removed; use native Date
 import { emoteUrls, Emotes } from "../../data/playerEmotes";
 import { DataManager } from "../../data/DataManager";
+import type { TerrainResourceSpawnBatch } from "../../types/world/terrain";
 import { EQUIPMENT_SLOT_NAMES } from "../../constants/EquipmentConstants";
 import THREE from "../../extras/three/three";
 import { readPacket, writePacket } from "../../platform/shared/packets";
@@ -109,7 +110,8 @@ import type {
   WorldOptions,
 } from "../../types";
 import type { Entity } from "../../entities/Entity";
-import type { ResourceEntity } from "../../entities/world/ResourceEntity";
+import { ResourceEntity } from "../../entities/world/ResourceEntity";
+import type { ResourceSystem } from "../shared/entities/ResourceSystem";
 import { EventType, type EventMap } from "../../types/events";
 import type {
   FishingInteractionPresentationPayload,
@@ -1357,6 +1359,10 @@ export class ClientNetwork extends SystemBase {
       try {
         await this.world.entities.deserialize(snapshotEntities);
         if (!this.worldAdmission.isCurrent(admission)) return;
+        for (const entityData of snapshotEntities) {
+          const entity = this.world.entities.get(entityData.id);
+          if (entity) this.admitAuthoritativeResourceEntity(entity, entityData);
+        }
       } catch (err) {
         this.logger.error(
           "Failed to deserialize entity snapshot:",
@@ -1667,6 +1673,7 @@ export class ClientNetwork extends SystemBase {
     // Add entity if method exists
     const newEntity = this.world.entities.add(data);
     if (newEntity) {
+      this.admitAuthoritativeResourceEntity(newEntity, data);
       this.applyPendingModifications(newEntity.id);
       // If this is the local player added after character select, force-set initial position
       const isLocalPlayer =
@@ -1748,10 +1755,42 @@ export class ClientNetwork extends SystemBase {
     for (const data of this.filterNetworkEntities(batch)) {
       const newEntity = this.world.entities.add(data);
       if (newEntity) {
+        this.admitAuthoritativeResourceEntity(newEntity, data);
         this.applyPendingModifications(newEntity.id);
       }
     }
   };
+
+  private admitAuthoritativeResourceEntity(
+    entity: Entity,
+    data: EntityData,
+  ): void {
+    if (!(entity instanceof ResourceEntity)) return;
+    if (
+      typeof data.resourceId === "string" &&
+      data.resourceId !== entity.config.resourceId
+    ) {
+      throw new Error(
+        `[ClientNetwork] Conflicting authoritative resource variant: ${entity.id}`,
+      );
+    }
+    // Entities.add deliberately reuses duplicate IDs. Reconcile settled resource
+    // state even when an eager local terrain registration created it first.
+    this.onEntityModified({
+      id: entity.id,
+      changes: {
+        position: data.position,
+        quaternion: data.quaternion,
+      },
+    });
+    if (typeof data.depleted === "boolean") {
+      entity.updateFromNetwork({ depleted: data.depleted });
+      entity.data.depleted = data.depleted;
+    }
+    this.world
+      .getSystem<ResourceSystem>("resource")
+      ?.claimNetworkResourceOwnership(entity);
+  }
 
   onEntityModified = (
     data: { id: string; changes?: Record<string, unknown> } & Record<
@@ -2524,13 +2563,7 @@ export class ClientNetwork extends SystemBase {
         });
     }
   };
-  onResourceSpawnPoints = (data: {
-    spawnPoints: Array<{
-      id: string;
-      type: string;
-      position: { x: number; y: number; z: number };
-    }>;
-  }) => {
+  onResourceSpawnPoints = (data: TerrainResourceSpawnBatch) => {
     this.world.emit(EventType.RESOURCE_SPAWN_POINTS_REGISTERED, data);
   };
   onResourceSpawned = (data: {

@@ -1298,9 +1298,11 @@ export class Entity implements IEntity {
   }
 
   async init(): Promise<void> {
+    if (this.destroyed) return;
     // Create the visual representation (mesh)
     // Note: createMesh() in subclasses may call loadModel() internally
     await this.createMesh();
+    if (this.destroyed) return;
 
     // Initialize UI elements (name tag, health bar) - only on client
     // Check if we're in a real browser environment with full Canvas API support
@@ -1315,6 +1317,7 @@ export class Entity implements IEntity {
 
     // Call custom initialization
     await this.onInit();
+    if (this.destroyed) return;
 
     // FINAL VALIDATION (only on client where we have meshes)
     if (!this.world.isServer) {

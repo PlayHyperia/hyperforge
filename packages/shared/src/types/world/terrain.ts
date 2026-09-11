@@ -32,14 +32,36 @@ export type OreSubType =
 export type ResourceSubType = TreeSubType | OreSubType;
 
 export interface TerrainResourceSpawnPoint {
+  /** Seeded candidate provenance; runtime resource identity remains coordinate-based. */
+  id?: string;
   position: Position3D;
   type: "tree" | "rock" | "ore" | "herb" | "fish" | "gem" | "rare_ore";
   /** Optional subtype for variant selection (e.g., "oak" for tree_oak, "copper" for ore_copper) */
-  subType?: ResourceSubType;
+  subType?: ResourceSubType | "normal";
   /** Scale multiplier for visual variation (default: 1.0) */
   scale?: number;
   /** Y-axis rotation in radians for visual variation */
   rotation?: number;
+}
+
+/** Gameplay terrain tiles are centred on tileIndex * tileSize. */
+export interface TerrainResourceBatchOwner {
+  tileX: number;
+  tileZ: number;
+}
+
+export interface TerrainResourceSpawnBatch {
+  spawnPoints: TerrainResourceSpawnPoint[];
+  /** Present on procedural batches, including an empty full-content tile. */
+  owner?: TerrainResourceBatchOwner;
+  isManifest?: boolean;
+}
+
+export function centeredTerrainTileIndex(
+  coordinate: number,
+  tileSize: number,
+): number {
+  return Math.floor((coordinate + tileSize * 0.5) / tileSize);
 }
 
 export interface TerrainTileData {

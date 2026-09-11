@@ -22,6 +22,7 @@ import {
   hasInstance as isInInstancedPool,
   updateGLBTreeInstancer,
   startDissolve as startInstancedDissolve,
+  type TreeInstanceLifetime,
 } from "../../../systems/shared/world/GLBTreeInstancer";
 import {
   addInstance as addBatchedTree,
@@ -152,11 +153,16 @@ function getOrCreateProxyGeometry(
   return scaled;
 }
 
+interface OwnedTreeProxy {
+  mesh: THREE.Mesh<THREE.BufferGeometry, MeshBasicNodeMaterial>;
+  ownsGeometry: boolean;
+}
+
 function createCollisionProxy(
   ctx: ResourceVisualContext,
   scale: number,
   batched: boolean,
-): void {
+): OwnedTreeProxy {
   // Try to use the actual LOD2 model geometry for a pixel-accurate collision proxy.
   // This matches the visible tree silhouette so clicks only register on the model itself.
   const proxyData = batched
@@ -211,15 +217,48 @@ function createCollisionProxy(
 
   ctx.node.add(proxy);
   ctx.setMesh(proxy);
-}
-
-function isBatched(entityId: string): boolean {
-  return isInBatchedPool(entityId);
+  return { mesh: proxy, ownsGeometry: !cachedGeometry };
 }
 
 export class TreeGLBVisualStrategy implements ResourceVisualStrategy {
+  private destroyed = false;
+  private lifetime: TreeInstanceLifetime | undefined;
+  private proxy: OwnedTreeProxy | undefined;
+
+  private removeProxy(ctx: ResourceVisualContext): void {
+    const proxy = this.proxy;
+    if (!proxy) return;
+    this.proxy = undefined;
+    proxy.mesh.removeFromParent();
+    if (ctx.getMesh() === proxy.mesh) ctx.setMesh(null);
+    proxy.mesh.material.dispose();
+    if (proxy.ownsGeometry) proxy.mesh.geometry.dispose();
+  }
+
+  private ownsInstance(ctx: ResourceVisualContext): boolean {
+    return (
+      !!this.lifetime &&
+      this.lifetime.isCurrent() &&
+      (isInBatchedPool(ctx.id, this.lifetime) ||
+        isInInstancedPool(ctx.id, this.lifetime))
+    );
+  }
+
   async createVisual(ctx: ResourceVisualContext): Promise<void> {
+    if (this.destroyed) return;
     const { config, id, position } = ctx;
+    const previous = this.lifetime;
+    const lifetime: TreeInstanceLifetime = {
+      isCurrent: () => !this.destroyed && this.lifetime === lifetime,
+      getInitialDissolve: () =>
+        config.depleted ? GPU_VEG_CONFIG.DISSOLVE_MAX : 0,
+    };
+    this.lifetime = lifetime;
+    this.removeProxy(ctx);
+    if (previous) {
+      removeBatchedTree(id, previous);
+      removeInstancedTree(id, previous);
+    }
 
     const baseScale = config.modelScale ?? 3.0;
     const worldPos = new THREE.Vector3();
@@ -230,9 +269,7 @@ export class TreeGLBVisualStrategy implements ResourceVisualStrategy {
     );
     const rotation = ((rotHash % 1000) / 1000) * Math.PI * 2;
 
-    // Pass initial dissolve through addInstance so the GPU attribute is set
-    // atomically with pool insertion — no 1-frame flash on initial load.
-    const initialDissolve = config.depleted ? GPU_VEG_CONFIG.DISSOLVE_MAX : 0;
+    // The lifetime reads current depletion at pool insertion, after all loading.
     let success = false;
 
     if (config.modelVariants?.length) {
@@ -248,7 +285,8 @@ export class TreeGLBVisualStrategy implements ResourceVisualStrategy {
         worldPos,
         rotation,
         baseScale,
-        initialDissolve,
+        0,
+        lifetime,
       );
     } else {
       let modelPath = config.model;
@@ -262,12 +300,17 @@ export class TreeGLBVisualStrategy implements ResourceVisualStrategy {
         baseScale,
         null, // lod1ModelPath — auto-inferred by instancer
         null, // lod2ModelPath — auto-inferred by instancer
-        initialDissolve,
+        0,
+        lifetime,
       );
     }
 
-    if (success) {
-      createCollisionProxy(ctx, baseScale, !!config.modelVariants?.length);
+    if (success && lifetime.isCurrent() && this.ownsInstance(ctx)) {
+      this.proxy = createCollisionProxy(
+        ctx,
+        baseScale,
+        !!config.modelVariants?.length,
+      );
 
       if (config.depleted) {
         const proxy = ctx.getMesh();
@@ -283,7 +326,8 @@ export class TreeGLBVisualStrategy implements ResourceVisualStrategy {
     // Always returns true — dissolve handles depletion for all trees.
     // Returning false would trigger ResourceEntity.loadDepletedModel() fallback,
     // which is only needed by non-tree strategies (e.g. InstancedModelVisualStrategy).
-    if (isBatched(ctx.id)) {
+    if (!this.ownsInstance(ctx)) return true;
+    if (isInBatchedPool(ctx.id, this.lifetime)) {
       startBatchedDissolve(ctx.id, 1, true);
     } else {
       startInstancedDissolve(ctx.id, 1, true);
@@ -297,7 +341,8 @@ export class TreeGLBVisualStrategy implements ResourceVisualStrategy {
   }
 
   setShaderHighlight(ctx: ResourceVisualContext, on: boolean): void {
-    if (isBatched(ctx.id)) {
+    if (!this.ownsInstance(ctx)) return;
+    if (isInBatchedPool(ctx.id, this.lifetime)) {
       setBatchedHighlight(ctx.id, on);
     } else {
       setInstancedHighlight(ctx.id, on);
@@ -305,8 +350,9 @@ export class TreeGLBVisualStrategy implements ResourceVisualStrategy {
   }
 
   async onRespawn(ctx: ResourceVisualContext): Promise<void> {
+    if (!this.ownsInstance(ctx)) return;
     // Start reverse dissolve animation (trunk → canopy)
-    if (isBatched(ctx.id)) {
+    if (isInBatchedPool(ctx.id, this.lifetime)) {
       startBatchedDissolve(ctx.id, -1);
     } else {
       startInstancedDissolve(ctx.id, -1);
@@ -324,10 +370,11 @@ export class TreeGLBVisualStrategy implements ResourceVisualStrategy {
   }
 
   destroy(ctx: ResourceVisualContext): void {
-    if (isBatched(ctx.id)) {
-      removeBatchedTree(ctx.id);
-    } else {
-      removeInstancedTree(ctx.id);
+    this.destroyed = true;
+    if (this.lifetime) {
+      removeBatchedTree(ctx.id, this.lifetime);
+      removeInstancedTree(ctx.id, this.lifetime);
     }
+    this.removeProxy(ctx);
   }
 }

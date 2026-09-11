@@ -8,6 +8,7 @@ import { Entity } from "../../entities/Entity";
 import { PlayerLocal } from "../../entities/player/PlayerLocal";
 import { Skills, InventoryItem, Position3D } from "../core/core";
 import type { Item } from "../core/core";
+import type { TerrainResourceSpawnBatch } from "../world/terrain";
 import type { EntitySpawnedEvent } from "../systems/system-interfaces";
 import { EventType } from "./event-types";
 import { AttackType } from "../game/item-types";
@@ -1546,19 +1547,7 @@ export interface EventMap {
     resourceId: string;
     position?: { x: number; y: number; z: number };
   };
-  [EventType.RESOURCE_SPAWN_POINTS_REGISTERED]: {
-    spawnPoints: Array<{
-      id: string;
-      type: string;
-      /** Specific variant (e.g., "oak" for tree_oak, "copper" for ore_copper) */
-      subType?: string;
-      position: { x: number; y: number; z: number };
-      /** Scale multiplier for visual variation */
-      scale?: number;
-      /** Y-axis rotation in radians for visual variation */
-      rotation?: number;
-    }>;
-  };
+  [EventType.RESOURCE_SPAWN_POINTS_REGISTERED]: TerrainResourceSpawnBatch;
   [EventType.RESOURCE_MESH_CREATED]: {
     mesh: unknown;
     instanceId: number | null;

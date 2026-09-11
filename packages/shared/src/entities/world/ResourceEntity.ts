@@ -317,9 +317,9 @@ export class ResourceEntity extends InteractableEntity {
   // ===========================================================================
 
   protected async createMesh(): Promise<void> {
-    if (this.world.isServer) return;
+    if (this.world.isServer || this.destroyed) return;
     await this.visual.createVisual(this.getVisualCtx());
-    this.world.setHot(this, true);
+    if (!this.destroyed) this.world.setHot(this, true);
   }
 
   protected clientUpdate(deltaTime: number): void {
@@ -415,6 +415,7 @@ export class ResourceEntity extends InteractableEntity {
   // ===========================================================================
 
   destroy(local?: boolean): void {
+    if (this.destroyed) return;
     if (this.world.isServer && this.collisionTiles.length > 0) {
       this.unregisterCollision();
     }
