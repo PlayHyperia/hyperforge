@@ -60,7 +60,9 @@ import {
   createCompactPondSurfaceWeights,
   applyCompactPondWetness,
   applyCompactMeadowTint,
+  createCompactTerrainMacroWeights,
 } from "./CompactTerrainMaterial";
+import type { WorldTerrainProfile } from "./WorldTerrainProfile";
 import {
   createCompactTerrainColorOperations,
   type CompactTerrainPond,
@@ -1173,6 +1175,7 @@ export function createTerrainMaterial(
   options: {
     compactPbr?: boolean;
     compactPond?: CompactTerrainPond | null;
+    compactProfile?: WorldTerrainProfile;
   } = {},
 ): THREE.Material & {
   terrainUniforms: TerrainUniforms;
@@ -1182,6 +1185,10 @@ export function createTerrainMaterial(
     parameters: UniformNode<"vec4", THREE.Vector4>;
   };
 } {
+  const macroField =
+    options.compactPbr && options.compactProfile
+      ? createCompactTerrainColorOperations().macroField(options.compactProfile)
+      : null;
   const compactPond = options.compactPbr
     ? createCompactTerrainColorOperations().validatePond(
         options.compactPond ?? null,
@@ -1246,6 +1253,11 @@ export function createTerrainMaterial(
   // Sample Perlin noise
   const noiseUV = mul(vec2(worldPos.x, worldPos.z), noiseScale);
   const noiseValue = texture(noiseTex, noiseUV).r;
+  const macroSurface = createCompactTerrainMacroWeights(
+    vec2(worldPos.x, worldPos.z),
+    noiseValue,
+    macroField,
+  );
   const compactLayers = compactTextures
     ? createCompactTerrainLayers(compactTextures, distSq, noiseValue)
     : null;
@@ -1253,6 +1265,7 @@ export function createTerrainMaterial(
     compactLayers.grass = applyCompactMeadowTint(
       compactLayers.grass,
       noiseValue,
+      macroSurface.dry,
     );
   }
   const noiseValue2 = add(
@@ -1612,6 +1625,7 @@ export function createTerrainMaterial(
         roadInfluenceRaw,
         distortNoise,
         pondSurface,
+        macroSurface,
       )
     : null;
   const compactBaseSurface =

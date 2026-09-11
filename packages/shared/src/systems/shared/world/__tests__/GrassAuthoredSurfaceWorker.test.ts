@@ -252,6 +252,66 @@ function broadGrade(): GrassTerrainSurfaceZone {
 }
 
 describe("actual authored-surface grass worker", () => {
+  it("matches ridge macro colours in actual main/worker grass without changing height, normal or ecology", async () => {
+    await withTerrain(async (terrain, internals, worker) => {
+      internals.loadWaterBodiesFromManifest();
+      internals.loadFlatZonesFromManifest();
+      const ops = createCompactTerrainColorOperations();
+      let recolored = 0;
+      for (const [x, z] of [
+        [225, 410],
+        [260, 410],
+        [280, 410],
+      ]) {
+        const input = {
+          ...request(terrain, internals, x, z, 6),
+          clumpSpacing: 0.2,
+        };
+        const result = await worker.run(input);
+        expect(result.count).toBeGreaterThan(50);
+        assertSurfaceParity(input, result, internals);
+        for (const point of points(input, result)) {
+          const main = terrain.getTerrainColorAt(point.x, point.z, true);
+          const noiseValue = sampleNoiseCPU(
+            point.x,
+            point.z,
+            TERRAIN_SHADER_CONSTANTS.NOISE_SCALE,
+          );
+          const distortNoise = sampleNoiseCPU(
+            point.x,
+            point.z,
+            TERRAIN_SHADER_CONSTANTS.DISTORT_NOISE_SCALE,
+          );
+          const beforeField = ops.sample({
+            noiseValue,
+            distortNoise,
+            slope: 1 - main.ny,
+            roadInfluence: 0,
+          });
+          const ecology = computeTerrainColorCPU(
+            point.x,
+            point.z,
+            point.y,
+            1 - main.ny,
+            1,
+            0,
+          );
+          // Compact forest classification is unchanged. Visible RGB is not
+          // allowed to feed back into the legacy ecology/acceptance weight.
+          expect(main.grassWeight).toBeCloseTo(ecology.grassWeight, 4);
+          for (const [axis, channel] of (["r", "g", "b"] as const).entries())
+            expect(
+              Math.abs(
+                result.groundColors[point.index * 3 + axis] - main[channel],
+              ),
+            ).toBeLessThan(0.0002);
+          if (Math.abs(main.r - beforeField.r) > 0.02) recolored++;
+        }
+      }
+      expect(recolored).toBeGreaterThan(100);
+    });
+  });
+
   it("keeps actual pond-bank worker colours aligned with main and includes the exterior soil halo", async () => {
     await withTerrain(async (terrain, internals, worker) => {
       internals.loadWaterBodiesFromManifest();

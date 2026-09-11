@@ -1,3 +1,5 @@
+import type { WorldTerrainProfile } from "./WorldTerrainProfile";
+
 /**
  * CPU grass-base approximation of compact PBR diffuse, not a lighting bake.
  * Linear means of the original 1024px RGB maps; the packing manifest and tests
@@ -10,6 +12,20 @@ export type CompactTerrainPond = Readonly<{
   centerZ: number;
   radius: number;
   surfaceY: number;
+}>;
+
+/** Detached colour-only view of the already admitted landform, not new terrain. */
+export type CompactTerrainMacroField = Readonly<{
+  centerX: number;
+  centerZ: number;
+  scale: number;
+  ridgeBaseX: number;
+  ridgeBend: number;
+  ridgeStartZ: number;
+  ridgeEndZ: number;
+  ridgeEndFade: number;
+  ridgeWestWidth: number;
+  ridgeEastWidth: number;
 }>;
 
 export function createCompactTerrainColorOperations() {
@@ -37,6 +53,19 @@ export function createCompactTerrainColorOperations() {
     meadowDryRed: 3.4,
     meadowDryGreen: 0.92,
     meadowDryBlue: 1.25,
+    macroShoulderStart: 0.25,
+    macroShoulderEnd: 1.85,
+    macroBoundaryNoise: 0.2,
+    macroWestStart: -0.1,
+    macroWestEnd: 0.65,
+    macroRockSlopeStart: 0.015,
+    macroRockSlopeEnd: 0.1,
+    macroSoilStrength: 0.22,
+    // Warm muted straw in LINEAR reflectance; no light or exposure multiplier.
+    // This affects only grass within the admitted ridge shoulder, not soil.
+    macroDryRed: 5.2,
+    macroDryGreen: 1.05,
+    macroDryBlue: 2.6,
     variationLow: 0.98,
     variationHigh: 1.02,
     pathEdgeNoiseContrast: 2.5,
@@ -69,6 +98,81 @@ export function createCompactTerrainColorOperations() {
     },
   };
   const operations = {
+    macroField(profile: WorldTerrainProfile): CompactTerrainMacroField | null {
+      if (profile.algorithm !== "compact-island-sculpt-v2") return null;
+      const ridge = profile.landform;
+      if (!ridge) throw new Error("Macro surface requires admitted ridge");
+      const field = {
+        centerX: profile.island.centerX,
+        centerZ: profile.island.centerZ,
+        scale: 165 / profile.island.radius,
+        ridgeBaseX: ridge.ridgeBaseX,
+        ridgeBend: ridge.ridgeBend,
+        ridgeStartZ: ridge.ridgeStartZ,
+        ridgeEndZ: ridge.ridgeEndZ,
+        ridgeEndFade: ridge.ridgeEndFade,
+        ridgeWestWidth: ridge.ridgeWestWidth,
+        ridgeEastWidth: ridge.ridgeEastWidth,
+      };
+      if (
+        !Object.values(field).every(Number.isFinite) ||
+        field.scale <= 0 ||
+        field.ridgeEndZ <= field.ridgeStartZ ||
+        field.ridgeEndFade <= 0 ||
+        field.ridgeWestWidth <= 0 ||
+        field.ridgeEastWidth <= 0
+      )
+        throw new Error("Invalid admitted macro surface field");
+      return Object.freeze(field);
+    },
+    macroWeights(
+      x: number,
+      z: number,
+      noiseValue: number,
+      field: CompactTerrainMacroField | null,
+    ) {
+      if (!field) return { dry: 0, westRock: 0 };
+      const c = composition;
+      const ax = (x - field.centerX) * field.scale;
+      const az = (z - field.centerZ) * field.scale;
+      const progress = Math.max(
+        0,
+        Math.min(
+          1,
+          (az - field.ridgeStartZ) / (field.ridgeEndZ - field.ridgeStartZ),
+        ),
+      );
+      const cross =
+        ax -
+        (field.ridgeBaseX - field.ridgeBend * Math.sin(Math.PI * progress));
+      const ends =
+        math.smooth(
+          field.ridgeStartZ,
+          field.ridgeStartZ + field.ridgeEndFade,
+          az,
+        ) *
+        (1 -
+          math.smooth(
+            field.ridgeEndZ - field.ridgeEndFade,
+            field.ridgeEndZ,
+            az,
+          ));
+      const west = -cross / field.ridgeWestWidth;
+      const across = Math.max(cross / field.ridgeEastWidth, west);
+      const shoulder =
+        ends *
+        (1 -
+          math.smooth(
+            c.macroShoulderStart,
+            c.macroShoulderEnd,
+            across + (noiseValue - 0.5) * c.macroBoundaryNoise,
+          ));
+      return {
+        dry: shoulder,
+        westRock:
+          shoulder * math.smooth(c.macroWestStart, c.macroWestEnd, west),
+      };
+    },
     validatePond(value: CompactTerrainPond | null): CompactTerrainPond | null {
       if (value === null) return null;
       if (
@@ -139,7 +243,7 @@ export function createCompactTerrainColorOperations() {
         rock: [...palette.rock],
       };
     },
-    meadowTint(noiseValue: number) {
+    meadowTint(noiseValue: number, macroDry = 0) {
       const c = composition;
       const dryness = math.mix(
         c.meadowDryLow,
@@ -147,9 +251,17 @@ export function createCompactTerrainColorOperations() {
         math.smooth(c.meadowDryStart, c.meadowDryEnd, noiseValue),
       );
       return [
-        math.mix(1, c.meadowDryRed, dryness),
-        math.mix(1, c.meadowDryGreen, dryness),
-        math.mix(1, c.meadowDryBlue, dryness),
+        math.mix(math.mix(1, c.meadowDryRed, dryness), c.macroDryRed, macroDry),
+        math.mix(
+          math.mix(1, c.meadowDryGreen, dryness),
+          c.macroDryGreen,
+          macroDry,
+        ),
+        math.mix(
+          math.mix(1, c.meadowDryBlue, dryness),
+          c.macroDryBlue,
+          macroDry,
+        ),
       ];
     },
     weights(input: {
@@ -158,6 +270,7 @@ export function createCompactTerrainColorOperations() {
       roadInfluence: number;
       distortNoise?: number;
       pondSurface?: { soil: number; wetness: number };
+      macroSurface?: { dry: number; westRock: number };
     }) {
       // Meadow dirt is restrained; steep rock follows actual geometric slope,
       // never the legacy high-frequency distorted normal classification.
@@ -194,9 +307,21 @@ export function createCompactTerrainColorOperations() {
       return {
         dirt:
           1 -
-          (1 - patch) * (1 - slopeDirt) * (1 - (input.pondSurface?.soil ?? 0)),
+          (1 - patch) *
+            (1 - slopeDirt) *
+            (1 -
+              (input.macroSurface?.dry ?? 0) * composition.macroSoilStrength) *
+            (1 - (input.pondSurface?.soil ?? 0)),
         cliff:
-          math.smooth(composition.cliffStart, composition.cliffEnd, slope) *
+          Math.max(
+            math.smooth(composition.cliffStart, composition.cliffEnd, slope),
+            (input.macroSurface?.westRock ?? 0) *
+              math.smooth(
+                composition.macroRockSlopeStart,
+                composition.macroRockSlopeEnd,
+                slope,
+              ),
+          ) *
           (1 - (input.pondSurface?.soil ?? 0)),
         road: math.smooth(
           math.mix(
@@ -233,6 +358,7 @@ export function createCompactTerrainColorOperations() {
         z: number;
         height: number;
         pond: CompactTerrainPond | null;
+        macroField?: CompactTerrainMacroField | null;
       };
     }) {
       // Distortion noise wears path and pond margins, not meadow or cliff
@@ -243,9 +369,18 @@ export function createCompactTerrainColorOperations() {
             noiseValue: input.distortNoise,
           })
         : { soil: 0, wetness: 0 };
+      const macroSurface = input.surface
+        ? operations.macroWeights(
+            input.surface.x,
+            input.surface.z,
+            input.noiseValue,
+            input.surface.macroField ?? null,
+          )
+        : { dry: 0, westRock: 0 };
       const { dirt, cliff, road, variation } = operations.weights({
         ...input,
         pondSurface,
+        macroSurface,
       });
       const wetAlbedo = math.mix(
         1,
@@ -254,7 +389,10 @@ export function createCompactTerrainColorOperations() {
       );
       // Tint only the grass diffuse before physical-layer blending. Full
       // paths and pond beds remain the original soil, not yellowed dirt.
-      const meadowTint = operations.meadowTint(input.noiseValue);
+      const meadowTint = operations.meadowTint(
+        input.noiseValue,
+        macroSurface.dry,
+      );
       const result = palette.grass.map(
         (grass, channel) =>
           math.mix(

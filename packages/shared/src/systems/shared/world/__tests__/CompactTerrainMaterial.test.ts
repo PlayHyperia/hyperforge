@@ -33,10 +33,12 @@ import {
   createCompactPondSurfaceWeights,
   applyCompactPondWetness,
   applyCompactMeadowTint,
+  createCompactTerrainMacroWeights,
   type CompactTerrainLayer,
 } from "../CompactTerrainMaterial";
 import { createCompactTerrainColorOperations } from "../CompactTerrainPalette";
 import { ALL_WORLD_AREAS } from "../../../../data/world-areas";
+import { SCULPTED_COMPACT_WORLD_TERRAIN_PROFILE } from "../WorldTerrainProfile";
 
 const assetDirectory = new URL(
   "../../../../../../server/world/assets/terrain/textures/compact-pbr/",
@@ -388,6 +390,7 @@ describe("compact terrain actual texture ownership and CPU material graph", () =
     const material = createTerrainMaterial(shade, {
       compactPbr: true,
       compactPond: ALL_WORLD_AREAS.haven_pond.waterBodies![0],
+      compactProfile: SCULPTED_COMPACT_WORLD_TERRAIN_PROFILE,
     }) as THREE.MeshStandardNodeMaterial &
       ReturnType<typeof createTerrainMaterial>;
     const legacy = createTerrainMaterial() as THREE.MeshStandardNodeMaterial;
@@ -714,6 +717,110 @@ describe("compact terrain actual texture ownership and CPU material graph", () =
 });
 
 describe("compact grass base palette without changing ecology", () => {
+  it("matches admitted ridge-field TSL, physical-layer weights and CPU RGB with protected soil overrides", () => {
+    const ops = createCompactTerrainColorOperations();
+    const field = ops.macroField(SCULPTED_COMPACT_WORLD_TERRAIN_PROFILE)!;
+    const palette = ops.getPalette();
+    const layer = (rgb: number[]): CompactTerrainLayer => ({
+      albedo: vec3(...(rgb as [number, number, number])),
+      roughness: float(0.8),
+      ao: float(1),
+      worldNormal: vec3(0, 1, 0),
+    });
+    const layers = {
+      grass: layer(palette.grass),
+      dirt: layer(palette.dirt),
+      rock: layer(palette.rock),
+    };
+    for (const [x, z] of [
+      [225, 410],
+      [238, 410],
+      [260, 410],
+      [280, 410],
+      [246, 365],
+      [256, 457],
+      [350, 320],
+      [343, 302],
+    ]) {
+      for (const noise of [0, 0.5, 1]) {
+        const cpuMacro = ops.macroWeights(x, z, noise, field);
+        const gpuMacro = createCompactTerrainMacroWeights(
+          vec2(x, z),
+          float(noise),
+          field,
+        );
+        for (const key of ["dry", "westRock"] as const)
+          expect(vectorValue(gpuMacro[key])[0]).toBeCloseTo(cpuMacro[key], 13);
+        for (const slope of [0, 0.03, 0.07, 0.15, 0.5]) {
+          for (const road of [0, 0.4, 1]) {
+            const cpuWeights = ops.weights({
+              noiseValue: noise,
+              slope,
+              roadInfluence: road,
+              macroSurface: cpuMacro,
+            });
+            const weights = createCompactTerrainLayerWeights(
+              float(noise),
+              float(slope),
+              float(road),
+              float(0.5),
+              undefined,
+              gpuMacro,
+            );
+            for (const key of ["dirt", "cliff", "road", "variation"] as const)
+              expect(vectorValue(weights[key])[0]).toBeCloseTo(
+                cpuWeights[key],
+                13,
+              );
+            const surface = blendCompactTerrainLayers(
+              {
+                ...layers,
+                grass: applyCompactMeadowTint(
+                  layers.grass,
+                  float(noise),
+                  gpuMacro.dry,
+                ),
+              },
+              weights.dirt,
+              weights.cliff,
+              weights.road,
+            );
+            const rgb = vectorValue(surface.albedo.mul(weights.variation));
+            const expected = ops.sample({
+              noiseValue: noise,
+              distortNoise: 0.5,
+              slope,
+              roadInfluence: road,
+              surface: { x, z, height: 30, pond: null, macroField: field },
+            });
+            expect(rgb[0]).toBeCloseTo(expected.r, 13);
+            expect(rgb[1]).toBeCloseTo(expected.g, 13);
+            expect(rgb[2]).toBeCloseTo(expected.b, 13);
+            if (road === 1) {
+              for (let channel = 0; channel < 3; channel++)
+                expect(rgb[channel]).toBeCloseTo(
+                  palette.dirt[channel] * cpuWeights.variation,
+                  13,
+                );
+            }
+          }
+          // Explicit overlap stress case: soil must win even if a future admitted
+          // pond occupies the ridge. This does not move any runtime water body.
+          const pondWeights = createCompactTerrainLayerWeights(
+            float(noise),
+            float(slope),
+            float(0),
+            float(0.5),
+            { soil: float(1), wetness: float(1) },
+            gpuMacro,
+          );
+          expect(vectorValue(pondWeights.dirt)[0]).toBe(1);
+          expect(vectorValue(pondWeights.cliff)[0]).toBe(0);
+        }
+      }
+    }
+  });
+
   it("warms only grass linear albedo with bounded, matching CPU and real TSL arithmetic", async () => {
     const ops = createCompactTerrainColorOperations();
     const palette = ops.getPalette();
@@ -767,7 +874,7 @@ describe("compact grass base palette without changing ecology", () => {
           maximum[channel],
           image.data[offset + channel],
         );
-    const strongest = ops.meadowTint(1);
+    const strongest = ops.meadowTint(1, 1);
     for (let channel = 0; channel < 3; channel++) {
       const srgb = maximum[channel] / 255;
       const linear =

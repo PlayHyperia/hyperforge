@@ -246,6 +246,24 @@ triangle, memory, upload and frame costs; do not silently change the comparison'
 population or claim unchanged cost. Functional resource trees remain the only
 canopy population.
 
+The next environment slice must improve composition at island, grove and
+ground-cover scales together; isolated color adjustments cannot meet the target.
+Use spatially bounded instances of repeated grass/rock/tree geometry and preserve
+accurate bounds after transforms. Three's [InstancedMesh documentation](https://threejs.org/docs/pages/InstancedMesh.html)
+specifies the shared geometry/material use case and bound updates; instancing
+reduces submissions, not vertex work or shaded pixels. For genuinely different
+geometry sharing one material, [BatchedMesh](https://threejs.org/docs/pages/BatchedMesh.html)
+offers per-object frustum culling, but it is not a reason to discard existing
+resource ownership, LOD or material semantics. Neither replacement is enabled here.
+
+Temporal antialiasing is a separately qualified option for fine foliage and
+specular stability, not an additive switch on the existing MSAA comparison.
+[TRAANode](https://threejs.org/docs/pages/TRAANode.html) requires beauty, depth and
+velocity inputs and explicitly disables MSAA. Any future trial must preserve
+correct motion for skinned avatars and wind-deformed vegetation, reset history
+for camera cuts, test disocclusion/ghosting and state the extra buffers/passes.
+Do not treat a still screenshot as evidence that moving foliage is stable.
+
 ## Historical pond checkpoint
 
 The preceding pond runtime checkpoint was game

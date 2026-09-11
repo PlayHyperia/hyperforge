@@ -1,5 +1,50 @@
 # Duel Arena, Streaming, and Hyperbet Launch Checklist
 
+## Connected ground regions and clear world captures — candidate, 2026-09-11
+
+- [x] Implement an admitted-ridge color field for connected straw/sage meadow and
+  exposed western rock. Reuse existing six maps / 14 surface fetches; no geometry,
+  population, height, collision, light, exposure or render-pass change.
+- [x] Match main/worker grass RGB without changing ecology. Root regression:
+  109 cases across 15 files; builds, all three typechecks and scoped lint pass.
+  Independent 48-world-coordinate / 288-scalar oracle differs by at most 3.33e-16;
+  all six sampled path midpoints and five pond samples retain exact prior RGB.
+  The southwest preparation edge has a small intentional continuous transition.
+- [x] Preserve original stream views and add an owned no-2D-HUD capture lease.
+  Successor capture tests pass; actual budget is 39 PNGs / 67 observations.
+  Do not hide 3D content or call these images UI-free. The former suspected black
+  northern building was the countdown HUD, not a verified world-material defect.
+- [x] Retain actual probe42 as FAIL: the new HUD helper observed visibility before
+  existing 0.2s CSS transitions settled; inherited content errors and the known
+  launcher EPERM inspection race also remain. Zero GPU/page errors, but this is
+  not a passing capture. Inventory rectangles are transitioning 2D HUD, not 3D.
+- [x] Verify probe44's bounded native transition settling: all 11 leases restore
+  exact DOM state, all 67 observation and final aggregate gates pass, 419 source
+  pins / 350 archives / 39 PNGs verify. Zero GPU/page errors; launcher exit 0,
+  owned browser closed and all four ports free. Whole run still FAILS the same
+  19 cow/dagger errors. Probe43's prelaunch 400-pin capacity failure is retained.
+- [ ] Reach visual and smoothness acceptance. Actual wide/link/bank views still
+  show sparse/artificial scenery; the material checkpoint is not AAA approval.
+- [ ] Fix centered terrain-tile ownership and one-time content promotion. Actual
+  server startup reproduces only eight of 13 potential resource trees: distant
+  terrain-only tiles never promote to content. Preserve resource identities,
+  depletion state and bounded loading; verify server creation and client delivery.
+- [ ] Qualify compact-surface grass coverage with explicit LOD cost. Current
+  capture has only 12 clumps (48 triangles); legacy biome thresholds also reject
+  visibly grassy campus/pond ground. Do not replace functional trees with props.
+- [ ] Replace oversized compact/broadcast zone-marker presentation. Actual eight-
+  metre house emojis are 3D zone sprites, not buildings; preserve zone safety and
+  station gameplay. Town/building population is currently absent in this viewport.
+- [ ] Qualify the added shader arithmetic, motion/shimmer, frame tails and thermal
+  cost separately. Same texture/draw counts do not prove unchanged performance.
+- [ ] Finish natural inlet/coastal dressing, functional woodland and a camera-aware
+  grass profile, then lighting/skin/metal/shadows and whole-loop/audio/stream gates.
+  Existing rock-kit provenance remains unestablished; local reuse is not launch
+  redistribution approval. Keep the separate cow/dagger content blockers open.
+
+Details: game `docs/compact-surface-regions-20260911.md`.
+The generated target concept remains reference art, not implemented engine output.
+
 ## Landscape, stone and physical grounding — verified candidate, 2026-09-11
 
 - [x] Push the verified landscape/support checkpoint: game `cf3212ddc` / assets

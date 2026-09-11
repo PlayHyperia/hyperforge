@@ -13,7 +13,10 @@ import THREE, {
   smoothstep,
 } from "../../../extras/three/three";
 import type { Node, TextureNode } from "three/webgpu";
-import { COMPACT_TERRAIN_COMPOSITION } from "./CompactTerrainPalette";
+import {
+  COMPACT_TERRAIN_COMPOSITION,
+  type CompactTerrainMacroField,
+} from "./CompactTerrainPalette";
 import compactTerrainTextureDigests from "../../../data/compact-terrain-textures.json";
 
 export const COMPACT_TERRAIN_MATERIAL = {
@@ -333,6 +336,7 @@ export type CompactTerrainLayer = {
 export function applyCompactMeadowTint(
   grass: CompactTerrainLayer,
   noise: Node<"float">,
+  macroDry: Node<"float"> = float(0),
 ): CompactTerrainLayer {
   const c = COMPACT_TERRAIN_COMPOSITION;
   const dryness = mix(
@@ -344,10 +348,70 @@ export function applyCompactMeadowTint(
     ...grass,
     albedo: grass.albedo.mul(
       mix(
-        vec3(1),
-        vec3(c.meadowDryRed, c.meadowDryGreen, c.meadowDryBlue),
-        dryness,
+        mix(
+          vec3(1),
+          vec3(c.meadowDryRed, c.meadowDryGreen, c.meadowDryBlue),
+          dryness,
+        ),
+        vec3(c.macroDryRed, c.macroDryGreen, c.macroDryBlue),
+        macroDry,
       ),
+    ),
+  };
+}
+
+/**
+ * Colour-only ridge field in admitted profile coordinates. One sine and four
+ * smoothsteps here, one slope transition in layer weights, no new texture fetch.
+ * Noise only perturbs the soft shoulder;
+ * there are no height contours, discrete cells or camera-dependent regions.
+ */
+export function createCompactTerrainMacroWeights(
+  worldXZ: Node<"vec2">,
+  noise: Node<"float">,
+  field: CompactTerrainMacroField | null,
+) {
+  if (!field) return { dry: float(0), westRock: float(0) };
+  const c = COMPACT_TERRAIN_COMPOSITION;
+  const ax = worldXZ.x.sub(field.centerX).mul(field.scale);
+  const az = worldXZ.y.sub(field.centerZ).mul(field.scale);
+  const progress = az
+    .sub(field.ridgeStartZ)
+    .mul(1 / (field.ridgeEndZ - field.ridgeStartZ))
+    .clamp(0, 1);
+  const cross = ax.sub(
+    float(field.ridgeBaseX).sub(
+      progress.mul(Math.PI).sin().mul(field.ridgeBend),
+    ),
+  );
+  const ends = smoothstep(
+    float(field.ridgeStartZ),
+    float(field.ridgeStartZ + field.ridgeEndFade),
+    az,
+  ).mul(
+    float(1).sub(
+      smoothstep(
+        float(field.ridgeEndZ - field.ridgeEndFade),
+        float(field.ridgeEndZ),
+        az,
+      ),
+    ),
+  );
+  const west = cross.mul(-1 / field.ridgeWestWidth);
+  const across = max(cross.mul(1 / field.ridgeEastWidth), west);
+  const shoulder = ends.mul(
+    float(1).sub(
+      smoothstep(
+        float(c.macroShoulderStart),
+        float(c.macroShoulderEnd),
+        across.add(noise.sub(0.5).mul(c.macroBoundaryNoise)),
+      ),
+    ),
+  );
+  return {
+    dry: shoulder,
+    westRock: shoulder.mul(
+      smoothstep(float(c.macroWestStart), float(c.macroWestEnd), west),
     ),
   };
 }
@@ -361,6 +425,10 @@ export function createCompactTerrainLayerWeights(
   pondSurface: { soil: Node<"float">; wetness: Node<"float"> } = {
     soil: float(0),
     wetness: float(0),
+  },
+  macroSurface: { dry: Node<"float">; westRock: Node<"float"> } = {
+    dry: float(0),
+    westRock: float(0),
   },
 ) {
   const c = COMPACT_TERRAIN_COMPOSITION;
@@ -385,11 +453,19 @@ export function createCompactTerrainLayerWeights(
       float(1)
         .sub(patch)
         .mul(float(1).sub(slopeDirt))
+        .mul(float(1).sub(macroSurface.dry.mul(c.macroSoilStrength)))
         .mul(float(1).sub(pondSurface.soil)),
     ),
-    cliff: smoothstep(float(c.cliffStart), float(c.cliffEnd), slope).mul(
-      float(1).sub(pondSurface.soil),
-    ),
+    cliff: max(
+      smoothstep(float(c.cliffStart), float(c.cliffEnd), slope),
+      macroSurface.westRock.mul(
+        smoothstep(
+          float(c.macroRockSlopeStart),
+          float(c.macroRockSlopeEnd),
+          slope,
+        ),
+      ),
+    ).mul(float(1).sub(pondSurface.soil)),
     road: smoothstep(
       mix(float(c.pathEdgeStartLow), float(c.pathEdgeStartHigh), wornEdge),
       mix(float(c.pathEdgeEndLow), float(c.pathEdgeEndHigh), wornEdge),

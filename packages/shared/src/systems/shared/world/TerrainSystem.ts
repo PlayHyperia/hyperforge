@@ -88,6 +88,7 @@ import {
   createCompactTerrainColorOperations,
   COMPACT_TERRAIN_COMPOSITION,
   type CompactTerrainPond,
+  type CompactTerrainMacroField,
 } from "./CompactTerrainPalette";
 // NOTE: Import directly to avoid circular dependency through barrel file
 import { WaterSystem } from "./WaterSystem";
@@ -339,6 +340,7 @@ export class TerrainSystem extends System {
   private waterVisualManager: WaterVisualManager | null = null;
   private compactPondDressing: CompactPondDressingVisuals | null = null;
   private compactPondMaterial: CompactTerrainPond | null = null;
+  private compactMacroMaterial: CompactTerrainMacroField | null | undefined;
   private grassVisualManager: GrassVisualManager | null = null;
 
   // Unified terrain generator from @hyperforge/procgen
@@ -509,6 +511,7 @@ export class TerrainSystem extends System {
     const material = createTerrainMaterial(undefined, {
       compactPbr: isCompactSculptProfile(profile),
       compactPond: this.getCompactPondMaterial(),
+      compactProfile: profile,
     });
     // The generator initializes before this client-only material exists. Apply
     // profile-owned options here so the actual published material is configured
@@ -539,6 +542,15 @@ export class TerrainSystem extends System {
       ponds[0],
     );
     return this.compactPondMaterial;
+  }
+
+  /** Restart-owned colour field; never changes terrain height or grass ecology. */
+  private getCompactMacroMaterial(): CompactTerrainMacroField | null {
+    if (this.compactMacroMaterial === undefined)
+      this.compactMacroMaterial = compactTerrainColorOperations.macroField(
+        this.getWorldTerrainProfile(),
+      );
+    return this.compactMacroMaterial;
   }
 
   /**
@@ -5225,7 +5237,13 @@ export class TerrainSystem extends System {
           ),
           slope,
           roadInfluence: this.calculateRoadInfluenceAtVertex(wx, wz, 0, 0),
-          surface: { x: wx, z: wz, height, pond: this.compactPondMaterial },
+          surface: {
+            x: wx,
+            z: wz,
+            height,
+            pond: this.compactPondMaterial,
+            macroField: this.getCompactMacroMaterial(),
+          },
         }),
       );
     }
