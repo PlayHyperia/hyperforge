@@ -65,7 +65,9 @@ function actualLeafSource(species: "maple" | "magic") {
 }
 
 function outputNodes(material: THREE.MeshStandardNodeMaterial): Set<Node> {
-  let node = material.outputNode!;
+  // Compact trees now feed tinted albedo into native PBR before output, rather
+  // than rebuilding it in outputNode. Inspect that actual graph stage.
+  let node = material.colorNode ?? material.outputNode!;
   while (Reflect.get(node, "isVarNode")) node = Reflect.get(node, "node");
   const shader: object = Reflect.get(node, "shaderNode");
   const callback: unknown = Reflect.get(shader, "jsFunc");
@@ -138,7 +140,8 @@ describe("compact authored tree leaf palette", () => {
         expect(source.color.getHex()).toBe(0xffffff);
         expect(material.map).toBe(map);
         expect(data).toEqual(before);
-        expect(material.vertexColors).toBe(true);
+        // COLOR_0 remains available as wind/AO masks, not a PBR RGB multiplier.
+        expect(material.vertexColors).toBe(false);
         expect(material.alphaTest).toBe(0.5);
         expect(material.opacityNode).toBeTruthy();
         expect(material.positionNode).toBeTruthy();

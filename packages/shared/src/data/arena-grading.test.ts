@@ -58,16 +58,11 @@ describe("authored shared duel arena grade", () => {
     }
   });
 
-  it("preserves all eight floor IDs, sizes and carving contracts at one common height", () => {
+  it("retains only the single arena, lobby and hospital floors at one common height", () => {
     const cfg = getDuelArenaConfig();
     const zones = createDuelArenaFloorZones(cfg, getDuelArenaGradeHeight());
     expect(zones.map((zone) => zone.id)).toEqual([
       "duel_arena_floor_1",
-      "duel_arena_floor_2",
-      "duel_arena_floor_3",
-      "duel_arena_floor_4",
-      "duel_arena_floor_5",
-      "duel_arena_floor_6",
       "duel_lobby_floor",
       "duel_hospital_floor",
     ]);
@@ -85,13 +80,15 @@ describe("authored shared duel arena grade", () => {
       width: 20,
       depth: 24,
     });
-    expect(zones[6]).toMatchObject({
+    expect(zones.find((zone) => zone.id === "duel_lobby_floor")).toMatchObject({
       centerX: 385,
       centerZ: 376,
       width: 40,
       depth: 25,
     });
-    expect(zones[7]).toMatchObject({
+    expect(
+      zones.find((zone) => zone.id === "duel_hospital_floor"),
+    ).toMatchObject({
       centerX: 345,
       centerZ: 376,
       width: 28,
@@ -108,8 +105,8 @@ describe("authored shared duel arena grade", () => {
     const b = actualTerrain().terrain;
     const base = getDuelArenaGradeHeight();
     const zones = createDuelArenaFloorZones(getDuelArenaConfig(), base);
-    expect(a["flatZones"].size).toBe(23);
-    expect(b["flatZones"].size).toBe(23);
+    expect(a["flatZones"].size).toBe(18);
+    expect(b["flatZones"].size).toBe(18);
     let sampled = 0;
     for (const zone of zones) {
       for (let dx = -zone.width / 2; dx <= zone.width / 2; dx += 1) {
@@ -145,7 +142,12 @@ describe("authored shared duel arena grade", () => {
         }
       }
     }
-    expect(sampled).toBeGreaterThan(4000);
+    expect(sampled).toBe(
+      zones.reduce(
+        (total, zone) => total + (zone.width + 1) * (zone.depth + 1),
+        0,
+      ),
+    );
     // Same-grade overlap links the preparation campus to both southern rooms.
     for (let z = 340; z <= 363; z += 0.25) {
       expect(a.getHeightAt(350, z)).toBe(base);
@@ -171,7 +173,10 @@ describe("authored shared duel arena grade", () => {
           object.name.startsWith("ArenaFloor_") ||
           object.name === "HospitalFloor",
       );
-      expect(floors).toHaveLength(7);
+      expect(floors.map((floor) => floor.name)).toEqual([
+        "ArenaFloor_1",
+        "HospitalFloor",
+      ]);
       for (const floor of floors) {
         const bounds = new THREE.Box3().setFromObject(floor);
         expect(floor.position.y).toBe(

@@ -2,18 +2,23 @@
 
 User direction, 2026-09-10: **one duel arena, not six**. The entire 3D world
 still needs a substantial quality improvement. This is the next implementation
-scope, not a claim that the following tasks are complete. Historical six-ring
+scope; checked items below have implementation evidence. Historical six-ring
 captures remain historical evidence; do not overwrite them.
+
+Update2026-09-11: the one-arena structural candidate passes focused shared/server
+regressions and is visible in actual WebGPU probes29/30. Whole integration and
+art/performance approval remain open; see
+[compact presentation qualification](compact-presentation-qualification-20260911.md).
 
 ## 1. One authoritative arena
 
-- [ ] Set shared `arena-layout.ts` and both arena/world manifests to one column,
+- [x] Set shared `arena-layout.ts` and both arena/world manifests to one column,
       one row, one arena, ID1. Initially retain its 20x24m combat footprint
       (x340–360, z394–418), not hidden off-camera backup rings.
-- [ ] Remove IDs2–6 and their derived floor, fence, brazier, pillar, perimeter
+- [x] Remove IDs2–6 and their derived floor, fence, brazier, pillar, perimeter
       collision and combat-zone ownership. Three authored floor owners must remain:
       arena1, lobby and hospital. Generic pool test fixtures are not playable content.
-- [ ] Remove 2x3 parser fallbacks and make combat containment enumerate the actual
+- [x] Remove 2x3 parser fallbacks and make combat containment enumerate the actual
       configured arenas. Derive zone bounds from the full union of all three floor
       rectangles on both axes; current max-bound shortcuts happen to fit six rings.
 - [ ] Preserve ID1's streaming reservation. While streaming owns the sole arena,
@@ -22,7 +27,9 @@ captures remain historical evidence; do not overwrite them.
       creation. Recheck after delayed movement and retain final atomic allocation.
       With streaming disabled, ordinary duels may allocate/release the same arena.
       No new queue, settlement behavior or competing reservation is needed.
-- [ ] Reduce the campus grade and area together. A count-only reduction with
+      Server rejection/allocation implementation is tested; finishing both-client
+      consumed-invite notification and final-acceptance reset remains open.
+- [x] Reduce the campus grade and area together. A count-only reduction with
       existing landmarks gives x316–420,z348.5–433, center368,390.75 and104x84.5m.
       Treat that as an initial safe reduction, not the final composition. Preserve
       the common grade28.419301523097687 and verified platform offsets initially.

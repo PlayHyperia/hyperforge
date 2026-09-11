@@ -145,8 +145,8 @@ describe("actual compact TerrainSystem biome/shore/worker integration", () => {
     let indexedReferenceCount: number | null = null;
     for (let pass = 0; pass < 3; pass++) {
       internals.loadFlatZonesFromManifest();
-      expect(internals.flatZones.size).toBe(23);
-      expect(internals.arenaFloorZoneIds.size).toBe(8);
+      expect(internals.flatZones.size).toBe(18);
+      expect(internals.arenaFloorZoneIds.size).toBe(3);
       let references = 0;
       for (const zones of internals.flatZonesByTile.values()) {
         references += zones.length;

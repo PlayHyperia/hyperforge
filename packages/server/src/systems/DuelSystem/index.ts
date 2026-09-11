@@ -436,6 +436,16 @@ export class DuelSystem {
       };
     }
 
+    // Rechecked here after any walk-to-target delay, before publishing pending
+    // state. The streaming owner may hold the only arena for its full lifetime.
+    if (this.arenaPool.getAvailableCount() === 0) {
+      return {
+        success: false,
+        error: DUEL_ERRORS.NO_ARENA_AVAILABLE,
+        errorCode: DuelErrorCode.NO_ARENA_AVAILABLE,
+      };
+    }
+
     // Create pending challenge
     const result = this.pendingDuels.createChallenge(
       createPlayerID(challengerId),
@@ -478,6 +488,16 @@ export class DuelSystem {
           success: false,
           error: DUEL_ERRORS.CHALLENGE_NOT_FOUND_EXPIRED,
           errorCode: DuelErrorCode.CHALLENGE_NOT_FOUND,
+        };
+      }
+
+      // Capacity can change while an invitation is outstanding. Retire the
+      // accepted invitation without opening setup/custody when the ring is busy.
+      if (this.arenaPool.getAvailableCount() === 0) {
+        return {
+          success: false,
+          error: DUEL_ERRORS.NO_ARENA_AVAILABLE,
+          errorCode: DuelErrorCode.NO_ARENA_AVAILABLE,
         };
       }
 

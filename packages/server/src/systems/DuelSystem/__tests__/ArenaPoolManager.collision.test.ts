@@ -22,7 +22,8 @@ describe("ArenaPoolManager authoritative collision", () => {
     const groundY = getDuelArenaGradeHeight() + DUEL_ARENA_FLOOR_GROUND_OFFSET;
     const floors = createDuelArenaFloorZones(config, getDuelArenaGradeHeight());
 
-    expect(pool.totalArenas).toBe(6);
+    expect(pool.totalArenas).toBe(1);
+    expect(pool.getAllArenaIds()).toEqual([1]);
     expect(groundY).toBeCloseTo(28.819301523097685, 12);
     expect(groundY).not.toBe(config.baseY);
     for (const id of pool.getAllArenaIds()) {
@@ -59,13 +60,49 @@ describe("ArenaPoolManager authoritative collision", () => {
     expect(pool.reserveSpecificArena(1, "streaming-owner")).toBe(true);
     expect(pool.reserveSpecificArena(1, "second-owner")).toBe(false);
     expect(pool.getDuelIdForArena(1)).toBe("streaming-owner");
-    expect(pool.reserveArena("ordinary-duel")).toBe(2);
-    expect(pool.getAvailableCount()).toBe(pool.totalArenas - 2);
+    expect(pool.reserveArena("ordinary-duel")).toBeNull();
+    expect(pool.getAvailableCount()).toBe(0);
 
     expect(pool.releaseSpecificArena(1, "wrong-owner")).toBe(false);
     expect(pool.getDuelIdForArena(1)).toBe("streaming-owner");
     expect(pool.releaseSpecificArena(1, "streaming-owner")).toBe(true);
     expect(pool.reserveArena("next-duel")).toBe(1);
+  });
+
+  it("has no retired rings, reservations or perimeter collision", () => {
+    const pool = new ArenaPoolManager();
+    const collision = new CollisionMatrix();
+    pool.registerArenaWallCollision(collision);
+
+    for (let id = 2; id <= 6; id++) {
+      expect(pool.getArena(id)).toBeUndefined();
+      expect(pool.getSpawnPoints(id)).toBeUndefined();
+      expect(pool.reserveSpecificArena(id, "retired-owner")).toBe(false);
+      const column = (id - 1) % 2;
+      const row = Math.floor((id - 1) / 2);
+      const minX = 340 + column * 24;
+      const minZ = 394 + row * 28;
+      for (let x = minX - 1; x <= minX + 21; x++) {
+        expect(collision.hasFlags(x, minZ - 1, CollisionFlag.BLOCKED)).toBe(
+          false,
+        );
+        expect(collision.hasFlags(x, minZ + 25, CollisionFlag.BLOCKED)).toBe(
+          false,
+        );
+      }
+      for (let z = minZ; z <= minZ + 24; z++) {
+        expect(collision.hasFlags(minX - 1, z, CollisionFlag.BLOCKED)).toBe(
+          false,
+        );
+        expect(collision.hasFlags(minX + 21, z, CollisionFlag.BLOCKED)).toBe(
+          false,
+        );
+      }
+    }
+    expect(pool.reserveArena("ordinary-owner")).toBe(1);
+    expect(pool.reserveArena("second-owner")).toBeNull();
+    expect(pool.releaseSpecificArena(1, "ordinary-owner")).toBe(true);
+    expect(pool.reserveArena("next-owner")).toBe(1);
   });
 
   it("closes every arena perimeter against cardinal and diagonal traversal", () => {

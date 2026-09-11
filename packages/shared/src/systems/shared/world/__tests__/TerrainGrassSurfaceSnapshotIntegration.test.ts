@@ -141,8 +141,8 @@ describe("actual TerrainSystem regional grass snapshots", () => {
         bounds.maxX,
         bounds.maxZ,
       );
-      expect(complete.zones).toHaveLength(23);
-      expect(complete.arenaFloorIds).toHaveLength(8);
+      expect(complete.zones).toHaveLength(18);
+      expect(complete.arenaFloorIds).toHaveLength(3);
       expect(complete.waterBodies).toHaveLength(1);
     });
   });
@@ -181,7 +181,7 @@ describe("actual TerrainSystem regional grass snapshots", () => {
       expect(
         snapshot.zones.find((zone) => zone.id === masked.id)?.tileMask,
       ).toEqual(new Set(["319,319", "320,319", "320,320"]));
-      expect(snapshot.arenaFloorIds).toHaveLength(8);
+      expect(snapshot.arenaFloorIds).toHaveLength(3);
     });
   });
 
@@ -262,7 +262,7 @@ describe("actual TerrainSystem regional grass snapshots", () => {
       expect(snapshot.zones.map((zone) => zone.id)).toEqual([
         ...internals.flatZones.keys(),
       ]);
-      expect(snapshot.zones).toHaveLength(23);
+      expect(snapshot.zones).toHaveLength(18);
       expect(snapshot.waterBodies).toHaveLength(1);
     });
   });

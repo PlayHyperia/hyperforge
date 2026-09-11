@@ -15,9 +15,9 @@ export const ARENA_BASE_Y = 0.42;
 export const ARENA_WIDTH = 20;
 export const ARENA_LENGTH = 24;
 export const ARENA_GAP = 4;
-export const ARENA_COLUMNS = 2;
-export const ARENA_ROWS = 3;
-export const ARENA_COUNT = 6;
+export const ARENA_COLUMNS = 1;
+export const ARENA_ROWS = 1;
+export const ARENA_COUNT = 1;
 export const ARENA_SPAWN_OFFSET = 8;
 export const ARENA_FORFEIT_PILLAR_INSET = 2;
 
@@ -54,13 +54,18 @@ const gridMaxZ =
 const lobbyMinX = LOBBY_CENTER_X - LOBBY_WIDTH / 2;
 const lobbyMaxX = LOBBY_CENTER_X + LOBBY_WIDTH / 2;
 const lobbyMinZ = LOBBY_CENTER_Z - LOBBY_LENGTH / 2;
+const lobbyMaxZ = LOBBY_CENTER_Z + LOBBY_LENGTH / 2;
 const hospMinX = HOSPITAL_CENTER_X - HOSPITAL_WIDTH / 2;
+const hospMaxX = HOSPITAL_CENTER_X + HOSPITAL_WIDTH / 2;
 const hospMinZ = HOSPITAL_CENTER_Z - HOSPITAL_LENGTH / 2;
+const hospMaxZ = HOSPITAL_CENTER_Z + HOSPITAL_LENGTH / 2;
 
 const MARGIN = 15;
 export const ZONE_BOUNDS_MIN_X =
   Math.min(ARENA_BASE_X, lobbyMinX, hospMinX) - MARGIN;
-export const ZONE_BOUNDS_MAX_X = Math.max(gridMaxX, lobbyMaxX) + MARGIN;
+export const ZONE_BOUNDS_MAX_X =
+  Math.max(gridMaxX, lobbyMaxX, hospMaxX) + MARGIN;
 export const ZONE_BOUNDS_MIN_Z =
   Math.min(ARENA_BASE_Z, lobbyMinZ, hospMinZ) - MARGIN;
-export const ZONE_BOUNDS_MAX_Z = Math.max(gridMaxZ) + MARGIN;
+export const ZONE_BOUNDS_MAX_Z =
+  Math.max(gridMaxZ, lobbyMaxZ, hospMaxZ) + MARGIN;

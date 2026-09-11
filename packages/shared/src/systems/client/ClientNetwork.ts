@@ -109,6 +109,7 @@ import type {
   WorldOptions,
 } from "../../types";
 import type { Entity } from "../../entities/Entity";
+import type { ResourceEntity } from "../../entities/world/ResourceEntity";
 import { EventType, type EventMap } from "../../types/events";
 import type {
   FishingInteractionPresentationPayload,
@@ -1833,6 +1834,66 @@ export class ClientNetwork extends SystemBase {
         Object.entries(data).filter(([k]) => k !== "id" && k !== "changes"),
       );
 
+    // Resources relocate atomically; they are not characters walking a path.
+    // In particular, a fishing spot's authoritative Y is its water surface.
+    // A routine p/q update must not create combat-facing state whose next
+    // TileInterpolator update would replace that Y with the pond bed height.
+    if (entity.type === "resource") {
+      const resource = entity as ResourceEntity;
+      this.deleteInterpolationState(id);
+      this.tileInterpolator.removeEntity(id);
+      // Keep normal data updates, but do not merge unvalidated transform aliases
+      // into canonical data.position/data.quaternion before applying them.
+      const {
+        p,
+        q,
+        position: namedPosition,
+        quaternion,
+        ...restChanges
+      } = changes;
+      entity.modify(restChanges);
+      const position = p ?? namedPosition;
+      if (
+        Array.isArray(position) &&
+        position.length === 3 &&
+        position.every(Number.isFinite)
+      ) {
+        this.applyResourcePosition(resource, {
+          x: position[0],
+          y: position[1],
+          z: position[2],
+        });
+      }
+      const rotation = q ?? quaternion;
+      if (
+        Array.isArray(rotation) &&
+        rotation.length === 4 &&
+        rotation.every(Number.isFinite)
+      ) {
+        entity.node.quaternion.set(
+          rotation[0],
+          rotation[1],
+          rotation[2],
+          rotation[3],
+        );
+        resource.config.rotation = {
+          x: rotation[0],
+          y: rotation[1],
+          z: rotation[2],
+          w: rotation[3],
+        };
+        entity.data.quaternion = [
+          rotation[0],
+          rotation[1],
+          rotation[2],
+          rotation[3],
+        ];
+      }
+      if (typeof changes.e === "string") entity.data.emote = changes.e;
+      this.world.emit(EventType.ENTITY_MODIFIED, { id, changes });
+      return;
+    }
+
     // Check if this is the local player
     const isLocal = (() => {
       const localEntityId = this.world.entities.player?.id;
@@ -2558,6 +2619,19 @@ export class ClientNetwork extends SystemBase {
     this.world.emit(EventType.FIRE_LIGHTING_CANCELLED, data);
   };
 
+  private applyResourcePosition(
+    entity: ResourceEntity,
+    position: { x: number; y: number; z: number },
+  ): void {
+    if (![position.x, position.y, position.z].every(Number.isFinite)) return;
+    this.deleteInterpolationState(entity.id);
+    this.tileInterpolator.removeEntity(entity.id);
+    // Do not mark the replicated entity network-dirty or retain packet objects.
+    entity.position.set(position.x, position.y, position.z);
+    entity.config.position = { ...position };
+    entity.data.position = [position.x, position.y, position.z];
+  }
+
   onFishingSpotMoved = (data: {
     resourceId: string;
     oldPosition: { x: number; y: number; z: number };
@@ -2565,20 +2639,8 @@ export class ClientNetwork extends SystemBase {
   }) => {
     // Update the fishing spot entity position
     const entity = this.world.entities.get(data.resourceId);
-    if (entity) {
-      // Update entity position
-      if (entity.position) {
-        entity.position.x = data.newPosition.x;
-        entity.position.y = data.newPosition.y;
-        entity.position.z = data.newPosition.z;
-      }
-      if (entity.node?.position) {
-        entity.node.position.set(
-          data.newPosition.x,
-          data.newPosition.y,
-          data.newPosition.z,
-        );
-      }
+    if (entity?.type === "resource") {
+      this.applyResourcePosition(entity as ResourceEntity, data.newPosition);
     }
 
     // Emit event for other systems that might need to react

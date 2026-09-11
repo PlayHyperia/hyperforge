@@ -287,7 +287,9 @@ function createBatchedLODPool(
     bm.perObjectFrustumCulled = false;
     bm.sortObjects = false;
     bm.castShadow = true;
-    bm.receiveShadow = false;
+    bm.receiveShadow =
+      (mat as TreeDissolveMaterial).treeLighting.mode ===
+      "scene-pbr-mask-safe-v1";
     bm.layers.set(1);
 
     const slotGeoIds: number[] = [];

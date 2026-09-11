@@ -252,6 +252,10 @@ import {
   LOBBY_SPAWN_X,
   LOBBY_SPAWN_Y,
   LOBBY_SPAWN_Z,
+  LOBBY_CENTER_X,
+  LOBBY_CENTER_Z,
+  LOBBY_WIDTH,
+  LOBBY_LENGTH,
 } from "./arena-layout";
 
 /**
@@ -286,7 +290,7 @@ export interface DuelArenaConfig {
 }
 
 /**
- * Default arena config (fallback if manifest not loaded)
+ * Canonical single-arena layout, also used when no sub-zone override is present.
  */
 const DEFAULT_ARENA_CONFIG: DuelArenaConfig = {
   baseX: ARENA_BASE_X,
@@ -306,60 +310,129 @@ const DEFAULT_ARENA_CONFIG: DuelArenaConfig = {
 /**
  * Get duel arena configuration from manifest.
  * Reads from ALL_WORLD_AREAS["duel_arena"].subZones.arenas
- * Falls back to default values if manifest not loaded.
+ * The canonical layout is used when no sub-zone override is present. Invalid
+ * explicit overrides fail closed instead of silently selecting another ring.
  */
 export function getDuelArenaConfig(): DuelArenaConfig {
   const duelArena = ALL_WORLD_AREAS["duel_arena"];
-  if (!duelArena?.subZones?.arenas) {
-    return DEFAULT_ARENA_CONFIG;
+  if (duelArena?.subZones === undefined) {
+    return {
+      ...DEFAULT_ARENA_CONFIG,
+      lobbySpawnPoint: { ...DEFAULT_ARENA_CONFIG.lobbySpawnPoint },
+    };
   }
 
-  const arenas = duelArena.subZones.arenas;
-  const lobby = duelArena.subZones.lobby;
+  const arenas = duelArena.subZones?.arenas;
+  const lobby = duelArena.subZones?.lobby;
+  if (
+    !arenas ||
+    typeof arenas !== "object" ||
+    !arenas.bounds ||
+    typeof arenas.bounds !== "object" ||
+    (lobby !== undefined && (!lobby || typeof lobby !== "object")) ||
+    (arenas.arenaSize !== undefined &&
+      (!arenas.arenaSize || typeof arenas.arenaSize !== "object"))
+  ) {
+    throw new Error("Invalid duel arena configuration: missing arena bounds");
+  }
 
-  // Parse layout (e.g., "2x3" -> columns=2, rows=3)
-  let columns = 2;
-  let rows = 3;
-  if (arenas.arenaLayout) {
-    const match = arenas.arenaLayout.match(/(\d+)x(\d+)/);
-    if (match) {
-      columns = parseInt(match[1], 10);
-      rows = parseInt(match[2], 10);
+  let columns = ARENA_COLUMNS;
+  let rows = ARENA_ROWS;
+  if (arenas.arenaLayout !== undefined) {
+    const match =
+      typeof arenas.arenaLayout === "string"
+        ? arenas.arenaLayout.match(/^([1-9]\d*)x([1-9]\d*)$/)
+        : null;
+    if (!match) {
+      throw new Error("Invalid duel arena configuration: malformed layout");
     }
+    columns = Number(match[1]);
+    rows = Number(match[2]);
   }
 
-  const rawLayout = (arenas as { spawnLayout?: string }).spawnLayout;
-  const spawnLayout: DuelArenaConfig["spawnLayout"] =
-    rawLayout === "alongWidth" ? "alongWidth" : "alongLength";
+  const spawnLayout =
+    arenas.spawnLayout === undefined ? "alongLength" : arenas.spawnLayout;
+  const lobbySpawn =
+    lobby?.spawnPoint === undefined
+      ? DEFAULT_ARENA_CONFIG.lobbySpawnPoint
+      : lobby.spawnPoint;
+  if (!lobbySpawn || typeof lobbySpawn !== "object") {
+    throw new Error("Invalid duel arena configuration: malformed lobby spawn");
+  }
 
   const config: DuelArenaConfig = {
     baseX: arenas.bounds.minX,
     baseZ: arenas.bounds.minZ,
     baseY: 0,
-    arenaWidth: arenas.arenaSize?.width ?? DEFAULT_ARENA_CONFIG.arenaWidth,
-    arenaLength: arenas.arenaSize?.length ?? DEFAULT_ARENA_CONFIG.arenaLength,
-    arenaGap: arenas.arenaGap ?? DEFAULT_ARENA_CONFIG.arenaGap,
+    arenaWidth:
+      arenas.arenaSize === undefined
+        ? DEFAULT_ARENA_CONFIG.arenaWidth
+        : arenas.arenaSize.width,
+    arenaLength:
+      arenas.arenaSize === undefined
+        ? DEFAULT_ARENA_CONFIG.arenaLength
+        : arenas.arenaSize.length,
+    arenaGap:
+      arenas.arenaGap === undefined
+        ? DEFAULT_ARENA_CONFIG.arenaGap
+        : arenas.arenaGap,
     columns,
     rows,
-    arenaCount: arenas.arenaCount ?? columns * rows,
+    arenaCount:
+      arenas.arenaCount === undefined ? ARENA_COUNT : arenas.arenaCount,
     spawnOffset: DEFAULT_ARENA_CONFIG.spawnOffset,
     spawnLayout,
-    lobbySpawnPoint: lobby?.spawnPoint ?? DEFAULT_ARENA_CONFIG.lobbySpawnPoint,
+    lobbySpawnPoint: { ...lobbySpawn },
   };
+  const areaBounds = duelArena.bounds;
 
-  // Validate numeric fields are finite and positive where required
+  // Exactly one authoritative ring. Keep numeric/grid/bounds admission aligned
+  // with pool allocation, floor generation and both containment queries.
   if (
-    !Number.isFinite(config.arenaWidth) ||
+    ![
+      config.baseX,
+      config.baseZ,
+      config.baseY,
+      config.arenaWidth,
+      config.arenaLength,
+      config.arenaGap,
+      config.spawnOffset,
+      arenas.bounds.maxX,
+      arenas.bounds.maxZ,
+      lobbySpawn.x,
+      lobbySpawn.y,
+      lobbySpawn.z,
+      areaBounds?.minX,
+      areaBounds?.maxX,
+      areaBounds?.minZ,
+      areaBounds?.maxZ,
+    ].every(Number.isFinite) ||
     config.arenaWidth <= 0 ||
-    !Number.isFinite(config.arenaLength) ||
     config.arenaLength <= 0 ||
-    !Number.isFinite(config.arenaGap) ||
     config.arenaGap < 0 ||
-    config.columns <= 0 ||
-    config.rows <= 0 ||
-    config.arenaCount <= 0
+    config.columns !== ARENA_COLUMNS ||
+    config.rows !== ARENA_ROWS ||
+    config.arenaCount !== ARENA_COUNT ||
+    config.arenaCount !== config.columns * config.rows ||
+    (spawnLayout !== "alongLength" && spawnLayout !== "alongWidth") ||
+    config.spawnOffset <= 0 ||
+    config.spawnOffset >=
+      (spawnLayout === "alongWidth" ? config.arenaWidth : config.arenaLength) /
+        2 ||
+    arenas.bounds.maxX !== config.baseX + config.arenaWidth ||
+    arenas.bounds.maxZ !== config.baseZ + config.arenaLength ||
+    arenas.bounds.maxX <= config.baseX ||
+    arenas.bounds.maxZ <= config.baseZ ||
+    config.baseX < areaBounds.minX ||
+    arenas.bounds.maxX > areaBounds.maxX ||
+    config.baseZ < areaBounds.minZ ||
+    arenas.bounds.maxZ > areaBounds.maxZ ||
+    Math.abs(lobbySpawn.x - LOBBY_CENTER_X) >= LOBBY_WIDTH / 2 ||
+    Math.abs(lobbySpawn.z - LOBBY_CENTER_Z) >= LOBBY_LENGTH / 2
   ) {
-    return DEFAULT_ARENA_CONFIG;
+    throw new Error(
+      "Invalid duel arena configuration: expected one valid ring",
+    );
   }
 
   return config;
@@ -394,23 +467,18 @@ export function isPositionInsideDuelArenaZone(x: number, z: number): boolean {
 export function isPositionInsideCombatArena(x: number, z: number): boolean {
   const config = getDuelArenaConfig();
 
-  for (let row = 0; row < config.rows; row++) {
-    for (let col = 0; col < config.columns; col++) {
-      const arenaMinX =
-        config.baseX + col * (config.arenaWidth + config.arenaGap);
-      const arenaMaxX = arenaMinX + config.arenaWidth;
-      const arenaMinZ =
-        config.baseZ + row * (config.arenaLength + config.arenaGap);
-      const arenaMaxZ = arenaMinZ + config.arenaLength;
+  for (let index = 0; index < config.arenaCount; index++) {
+    const row = Math.floor(index / config.columns);
+    const col = index % config.columns;
+    const arenaMinX =
+      config.baseX + col * (config.arenaWidth + config.arenaGap);
+    const arenaMaxX = arenaMinX + config.arenaWidth;
+    const arenaMinZ =
+      config.baseZ + row * (config.arenaLength + config.arenaGap);
+    const arenaMaxZ = arenaMinZ + config.arenaLength;
 
-      if (
-        x >= arenaMinX &&
-        x <= arenaMaxX &&
-        z >= arenaMinZ &&
-        z <= arenaMaxZ
-      ) {
-        return true;
-      }
+    if (x >= arenaMinX && x <= arenaMaxX && z >= arenaMinZ && z <= arenaMaxZ) {
+      return true;
     }
   }
 
@@ -431,30 +499,29 @@ export function getCombatArenaBoundsContainingPositions(
   if (positions.length === 0) return null;
   const config = getDuelArenaConfig();
 
-  for (let row = 0; row < config.rows; row += 1) {
-    for (let column = 0; column < config.columns; column += 1) {
-      const minX =
-        config.baseX + column * (config.arenaWidth + config.arenaGap);
-      const minZ = config.baseZ + row * (config.arenaLength + config.arenaGap);
-      const bounds = {
-        minX,
-        maxX: minX + config.arenaWidth,
-        minZ,
-        maxZ: minZ + config.arenaLength,
-      };
-      if (
-        positions.every(
-          ([x, , z]) =>
-            Number.isFinite(x) &&
-            Number.isFinite(z) &&
-            x >= bounds.minX &&
-            x <= bounds.maxX &&
-            z >= bounds.minZ &&
-            z <= bounds.maxZ,
-        )
-      ) {
-        return bounds;
-      }
+  for (let index = 0; index < config.arenaCount; index += 1) {
+    const row = Math.floor(index / config.columns);
+    const column = index % config.columns;
+    const minX = config.baseX + column * (config.arenaWidth + config.arenaGap);
+    const minZ = config.baseZ + row * (config.arenaLength + config.arenaGap);
+    const bounds = {
+      minX,
+      maxX: minX + config.arenaWidth,
+      minZ,
+      maxZ: minZ + config.arenaLength,
+    };
+    if (
+      positions.every(
+        ([x, , z]) =>
+          Number.isFinite(x) &&
+          Number.isFinite(z) &&
+          x >= bounds.minX &&
+          x <= bounds.maxX &&
+          z >= bounds.minZ &&
+          z <= bounds.maxZ,
+      )
+    ) {
+      return bounds;
     }
   }
 

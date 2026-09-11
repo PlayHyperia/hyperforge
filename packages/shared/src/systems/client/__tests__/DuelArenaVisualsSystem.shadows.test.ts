@@ -57,6 +57,12 @@ describe("Duel arena floor shadow receivers", () => {
     build.createArenaFloors();
     const floors = build.arenaGroup.children as THREE.Mesh[];
     expect(floors).toHaveLength(cfg.arenaCount);
+    expect(floors.map((floor) => floor.name)).toEqual(["ArenaFloor_1"]);
+    for (let id = 2; id <= 6; id++) {
+      expect(
+        build.arenaGroup.getObjectByName(`ArenaFloor_${id}`),
+      ).toBeUndefined();
+    }
     const expected = new THREE.BoxGeometry(
       cfg.arenaWidth - 1,
       0.3,

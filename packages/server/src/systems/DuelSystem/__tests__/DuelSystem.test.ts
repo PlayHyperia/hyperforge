@@ -162,7 +162,8 @@ describe("DuelSystem", () => {
             STREAMING_DUEL_ARENA_ID,
           ),
         ).toBe(STREAMING_DUEL_ARENA_RESERVATION_ID);
-        expect(streamingDuelSystem.reserveArena("ordinary-duel")).toBe(2);
+        expect(streamingDuelSystem.arenaPool.totalArenas).toBe(1);
+        expect(streamingDuelSystem.reserveArena("ordinary-duel")).toBeNull();
 
         streamingDuelSystem.destroy();
         expect(
@@ -170,6 +171,9 @@ describe("DuelSystem", () => {
             STREAMING_DUEL_ARENA_ID,
           ),
         ).toBeNull();
+        expect(streamingDuelSystem.reserveArena("after-stream-teardown")).toBe(
+          1,
+        );
       } finally {
         if (previous === undefined) {
           delete process.env.STREAMING_DUEL_ENABLED;
@@ -1340,6 +1344,12 @@ describe("DuelSystem", () => {
     });
 
     it("canMove returns false during COUNTDOWN", () => {
+      // This fixture starts with a fight occupying the only arena. Retire that
+      // owner normally before creating the separate countdown-boundary case.
+      expect(duelSystem.cancelDuel(duelId, "test-phase-boundary").success).toBe(
+        true,
+      );
+      expect(duelSystem.arenaPool.getAvailableCount()).toBe(1);
       // Create a new duel and progress to countdown
       world.addPlayer({ id: "player3", position: { x: 70, y: 0, z: 70 } });
       world.addPlayer({ id: "player4", position: { x: 72, y: 0, z: 70 } });
@@ -1698,6 +1708,10 @@ describe("DuelSystem", () => {
     });
 
     it("concurrent acceptRules calls only transition once", () => {
+      expect(duelSystem.cancelDuel(duelId, "test-phase-boundary").success).toBe(
+        true,
+      );
+      expect(duelSystem.arenaPool.getAvailableCount()).toBe(1);
       // Create a new duel in RULES state
       world.addPlayer({ id: "player3", position: { x: 70, y: 0, z: 70 } });
       world.addPlayer({ id: "player4", position: { x: 72, y: 0, z: 70 } });

@@ -1,7 +1,71 @@
 # Duel Arena, Streaming, and Hyperbet Launch Checklist
 
+## Compact presentation and startup responsiveness — candidate, 2026-09-11
+
+- [x] Implement exactly one authoritative arena, with unchanged ring1 spawns,
+  lobby and hospital; remove retired floor/collision/combat regions and shrink
+  campus grading by5,824m². Shared and paired asset manifests must ship together.
+  Streaming keeps its exclusive reservation. Real admission/loopback tests reject
+  busy ordinary challenges before movement and recheck delayed acceptance.
+- [x] Implement mask-safe standard lighting and existing-shadow reception for
+  compact resource-tree batches. Preserve geometry, LOD/culling budgets, wind,
+  cutouts and depletion. No duplicate decorative forest or private tree lights.
+  Actual r186 class/node tests pass; pixels and real shading cost remain open.
+- [x] Reproduce the fishing-resource0.817345m drop with actual entity/network/
+  terrain/interpolation classes; keep resources out of character grounding and
+  synchronize finite node/config/data transforms. Character motion tests pass.
+  Full relocation lineage, water contact and resource lifecycle remain open.
+- [x] Pass focused shared arena128, server arena/admission167, tree/material171
+  and resource/character25 tests (suite totals may overlap). Shared/server/client
+  typechecks and normal client/fresh server builds pass; server prefix
+  `51a859314bd0`. This is not full monorepo or GPU/performance qualification.
+- [x] Preserve failed actual Chrome/Metal probe28 with309 verified current source
+  pins: first equipment event arrived about19.318s after HTTP200, exceeding the
+  unchanged15s admission. No images or spatial study completed. Zero recorded
+  GPU/page errors do not make this run pass; cow/dagger content failures remain.
+- [x] Capture probe29: spatial study passes,28 PNGs show the retained single
+  arena and current tree materials; zero recorded GPU/page errors. Whole run
+  still FAILS19 content errors and a launcher process-group inspection EPERM.
+  Owned ports are free; no cleanup failure or art defect is waived.
+- [x] Attribute this instrumented run's long pauses to synchronous rendering:
+  357 node builds total55.33s; longest render9.56s. Equipment handlers<=1.8ms.
+  Timings overlap and cannot be summed or assigned entirely to trees.
+- [x] Measure probe30's default-setting control without changing runtime/assets:
+  352 builds total2.52s versus357/55.33s with diagnostic node stacks. The actual
+  defaultfalse descriptor stays unchanged. This corrects measurement overhead;
+  it is not an implemented production speedup or representative FPS approval.
+  All320 pins/251 archives/28 PNGs verify; study/37actions/cleanup pass, with
+  zero GPU/page errors. WholeFAIL remains19 cow/dagger content errors.
+- [ ] Qualify remaining1.10s initial/211ms spatial render spikes, including
+  remaining instrumentation overhead, before runtime-preparation changes or
+  steady-state performance claims. Keep the original15s equipment gate.
+- [ ] Replace the shadowless stream presentation with an explicitly versioned,
+  visually reviewed high-quality candidate. Current profiles AND stream startup
+  force shadows off; batch cast/receive flags are not rendered-shadow proof.
+  Preserve resolution and qualify shadow/contact quality, motion and real cost.
+- [ ] Attribute and fix the startup client/frame/queue stall using bounded
+  native pipeline, long-task/frame and actual network-progress diagnostics.
+  Preserve the failed capture, original timeout and identity/error gates.
+  Instrumented timings are not benchmark results.
+- [ ] Finish both-client busy-arena outcomes: retire a consumed invitation for
+  both participants, broadcast reset acceptance on final allocation failure,
+  and verify retry without a disabled stale confirmation button.
+- [ ] Fix the separately observed shutdown database-pool ordering error.
+  Probe28 closed owned browser/services/ports, but application shutdown logged
+  a late player-session write after pool closure.
+- [ ] Approve the combined candidate in actual day/night and moving gameplay:
+  tree color/shadows, compact single-arena composition, resource contact,
+  representative frame-time tails and memory, reconnect and real stream output.
+
+Details: implementation `docs/compact-presentation-qualification-20260911.md`.
+These are implementation checkpoints and preserved failures, not AAA, MVP,
+production, merge or launch acceptance.
+
 ## Shared outdoor lighting — implementation candidate, 2026-09-11
 
+- [x] Save lighting candidate checkpoint `e3540612e9764c9584ebbd1ded389a290e8fd244`;
+  exact remote revision and GitHub author/committer `dreaminglucid` verified.
+  This is a reviewed work-in-progress checkpoint, not art or launch approval.
 - [x] Preserve renderer preparation serialization after caller timeout. The
   underlying operation retains its queue slot and resources until it settles.
   Checkpoint `027d7552bf50c11daa40b4166709ae7892e3f25e` is pushed; exact remote
