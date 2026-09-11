@@ -1,6 +1,10 @@
 import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import THREE from "../../../../extras/three/three";
+import THREE, {
+  cameraViewMatrix,
+  output,
+} from "../../../../extras/three/three";
+import type { Node } from "three/webgpu";
 import { createTerrainWorkerConfig } from "../../../../utils/workers/TerrainWorkerShared";
 import {
   COMPACT_ISLAND_GRASS_VISUAL_PROFILE,
@@ -11,11 +15,17 @@ import {
   type GrassVisualProfile,
   type GrassWorkerSetup,
 } from "../GrassVisualManager";
-import { SCULPTED_COMPACT_WORLD_TERRAIN_PROFILE } from "../WorldTerrainProfile";
+import {
+  COMPACT_WORLD_TERRAIN_PROFILE,
+  SCULPTED_COMPACT_WORLD_TERRAIN_PROFILE,
+} from "../WorldTerrainProfile";
 
 /** Real geometry/material construction; no renderer or GPU is simulated. */
-function manager(profile: GrassVisualProfile = {}) {
-  const terrain = SCULPTED_COMPACT_WORLD_TERRAIN_PROFILE;
+function manager(
+  profile: GrassVisualProfile = {},
+  terrain = SCULPTED_COMPACT_WORLD_TERRAIN_PROFILE,
+  withWorkerSetup = true,
+) {
   const config = createTerrainWorkerConfig(terrain, 16);
   const setup: GrassWorkerSetup = {
     terrainConfig: config,
@@ -45,8 +55,76 @@ function manager(profile: GrassVisualProfile = {}) {
       grassPlacement: 1,
       grassHeightScale: 1,
     }),
-    setup,
+    withWorkerSetup ? setup : undefined,
     profile,
+  );
+}
+
+// Expand the actual material's construction-time Fn, not a replacement shader.
+function expand(node: Node): Node {
+  while (Reflect.get(node, "isVarNode")) node = Reflect.get(node, "node");
+  const shaderNode: unknown = Reflect.get(node, "shaderNode");
+  if (shaderNode instanceof THREE.Node) {
+    const jsFunc: unknown = Reflect.get(shaderNode, "jsFunc");
+    if (typeof jsFunc === "function") {
+      const result: unknown = jsFunc();
+      if (!(result instanceof THREE.Node)) throw new Error("Expected Fn node");
+      return result;
+    }
+  }
+  return node;
+}
+
+function graph(root: Node): Set<Node> {
+  const nodes = new Set<Node>();
+  const visit = (node: Node) => {
+    if (nodes.has(node)) return;
+    expect(nodes.size).toBeLessThan(4096);
+    nodes.add(node);
+    for (const child of node.getChildren()) visit(child);
+  };
+  visit(expand(root));
+  return nodes;
+}
+
+// Concrete color arithmetic only. Unknown operations fail; no GPU is simulated.
+function colorValue(
+  node: Node,
+  attributes: Record<string, number[]>,
+): number[] {
+  const read = (key: string): unknown => Reflect.get(node, key);
+  const child = (key: string): number[] => {
+    const value = read(key);
+    if (!(value instanceof THREE.Node)) throw new Error(`Missing ${key}`);
+    return colorValue(value, attributes);
+  };
+  if (node.type === "AttributeNode") {
+    const value = attributes[String(read("_attributeName"))];
+    if (!value) throw new Error("Unexpected albedo attribute");
+    return value;
+  }
+  const value = read("value");
+  if (typeof value === "number") return [value];
+  if (node.type === "ConvertNode" || node.type === "VarNode")
+    return child("node");
+  if (node.type === "SplitNode")
+    return [...String(read("components"))].map(
+      (component) => child("node")["xyzw".indexOf(component)],
+    );
+  const operands = [child("aNode"), child("bNode")];
+  if (read("cNode") instanceof THREE.Node) operands.push(child("cNode"));
+  return Array.from(
+    { length: Math.max(...operands.map((v) => v.length)) },
+    (_, i) => {
+      const [a, b, c] = operands.map((v) => v[v.length === 1 ? 0 : i]);
+      if (read("op") === "*") return a * b;
+      if (read("method") === "mix") return a + (b - a) * c;
+      if (read("method") === "smoothstep") {
+        const t = Math.max(0, Math.min(1, (c - a) / (b - a)));
+        return t * t * (3 - 2 * t);
+      }
+      throw new Error(`Unexpected color operation ${node.type}`);
+    },
   );
 }
 
@@ -190,6 +268,99 @@ describe("compact meadow appearance candidate (CPU only)", () => {
       expect(owner["minimumLodLevel"]).toBe(1);
       expect(owner["clumpSpacing"]).toBe(2.8);
       expect(owner["maxChunksPerFrame"]).toBe(1);
+    } finally {
+      owner.destroy();
+    }
+  });
+
+  it.each([
+    ["ordinary", {}],
+    ["fixed-arena", STREAMING_GRASS_VISUAL_PROFILE],
+    ["compact-meadow", COMPACT_ISLAND_GRASS_VISUAL_PROFILE],
+  ] as const)(
+    "keeps %s compact albedo independent of sun/view shading",
+    (_, profile) => {
+      const owner = manager(profile);
+      try {
+        const material = owner["material"];
+        const albedo = graph(material.colorNode!);
+        expect(albedo.has(owner.shadeUniforms.tint)).toBe(false);
+        expect(albedo.has(owner.shadeUniforms.strength)).toBe(false);
+        expect(albedo.has(owner["sunDirUniform"]!)).toBe(false);
+        expect(
+          [...albedo]
+            .filter((n) => n.type === "AttributeNode")
+            .map((n) => Reflect.get(n, "_attributeName"))
+            .sort(),
+        ).toEqual(["instanceGrassTint", "instanceGroundColor", "uv"]);
+        const normals = graph(material.normalNode!);
+        expect(normals.has(cameraViewMatrix)).toBe(true);
+        expect(
+          [...normals].some(
+            (n) => Reflect.get(n, "_attributeName") === "instanceGroundNormal",
+          ),
+        ).toBe(true);
+        expect(graph(material.outputNode!).has(output)).toBe(true);
+        expect(material.vertexColors).toBe(false);
+        expect(material.envMap).toBeNull();
+        expect(material.envNode).toBeNull();
+        expect(material.lights).toBe(true);
+      } finally {
+        owner.destroy();
+      }
+    },
+  );
+
+  it.each([
+    ["ordinary", {}],
+    ["fixed-arena", STREAMING_GRASS_VISUAL_PROFILE],
+  ] as const)(
+    "retains %s legacy shade graph and no-owner fallback",
+    (_, profile) => {
+      for (const withWorkerSetup of [true, false]) {
+        const owner = manager(
+          profile,
+          withWorkerSetup
+            ? COMPACT_WORLD_TERRAIN_PROFILE
+            : SCULPTED_COMPACT_WORLD_TERRAIN_PROFILE,
+          withWorkerSetup,
+        );
+        try {
+          const albedo = graph(owner["material"].colorNode!);
+          expect(albedo.has(owner.shadeUniforms.tint)).toBe(true);
+          expect(albedo.has(owner.shadeUniforms.strength)).toBe(true);
+          expect(albedo.has(owner["sunDirUniform"]!)).toBe(true);
+          expect(
+            [...albedo].some(
+              (n) =>
+                Reflect.get(n, "_attributeName") === "instanceGroundNormal",
+            ),
+          ).toBe(true);
+        } finally {
+          owner.destroy();
+        }
+      }
+    },
+  );
+
+  it("preserves actual compact root/middle/tip albedo arithmetic", () => {
+    const owner = manager(COMPACT_ISLAND_GRASS_VISUAL_PROFILE);
+    try {
+      const albedo = expand(owner["material"].colorNode!);
+      for (const [height, expected] of [
+        [0, [0.144, 0.288, 0.072]],
+        [0.5, [0.1893, 0.35565, 0.1023]],
+        [1, [0.2346, 0.4233, 0.1326]],
+      ] as const) {
+        const actual = colorValue(albedo, {
+          instanceGroundColor: [0.2, 0.4, 0.1],
+          instanceGrassTint: [0.3, 0.45, 0.2, 0.3],
+          uv: [0.5, height],
+        });
+        actual.forEach((value, i) =>
+          expect(value).toBeCloseTo(expected[i], 12),
+        );
+      }
     } finally {
       owner.destroy();
     }

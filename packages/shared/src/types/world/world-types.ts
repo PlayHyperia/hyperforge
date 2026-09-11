@@ -1340,9 +1340,35 @@ export interface POIConfigManifest {
   biomeSuitability?: Partial<Record<POICategory, Record<string, number>>>;
 }
 
+/** Frozen functional tree anchor, admitted through centered terrain ownership. */
+export interface CompactResourceGroveAnchor {
+  /** Checked coordinate-derived identity; never forwarded as instanceId. */
+  readonly id: string;
+  readonly subType: "general" | "oak";
+  readonly position: Readonly<{ x: number; y: number; z: number }>;
+  readonly scale: number;
+  readonly rotation: number;
+}
+
+export interface CompactResourceGrovesManifest {
+  readonly schemaVersion: 1;
+  readonly layoutId: "compact-functional-groves-v1";
+  readonly terrainProfileId: "compact-duel-island-v4";
+  readonly regions: readonly {
+    readonly id: "west-ridge-foot" | "southern-meadow" | "eastern-shoulder";
+    readonly bounds: Readonly<{
+      minX: number;
+      maxX: number;
+      minZ: number;
+      maxZ: number;
+    }>;
+    readonly anchors: readonly CompactResourceGroveAnchor[];
+  }[];
+}
+
 /**
- * Complete world configuration manifest
- * Loaded from assets/manifests/world-config.json
+ * Complete world configuration manifest.
+ * Loaded from assets/manifests/world-config.json.
  */
 export interface WorldConfigManifest {
   /** Manifest version for compatibility checking */
@@ -1359,6 +1385,8 @@ export interface WorldConfigManifest {
   pois?: POIConfigManifest;
   /** World seed for procedural generation */
   seed: number;
+  /** Version-2 compact-only frozen functional trees, using normal tile ownership. */
+  compactResourceGroves?: CompactResourceGrovesManifest;
 }
 
 // ============== BUILDINGS MANIFEST TYPES ==============

@@ -145,6 +145,31 @@ instrumented correctness captures from representative performance runs.
 
 ## Current implementation and evidence limits — 2026-09-11
 
+### Qualified compact lighting correction; final art remains open
+
+The compact terrain and grass now bypass the custom cool half-Lambert tint and
+camera-dependent rim in their albedo before native Standard PBR. Compact trees
+already use the native lighting response. Surface maps, geometry, sky,
+environment intensity and exposure are unchanged. This does not remove
+the existing terrain lamp approximation or grass terrain-normal approximation.
+
+The compact single-map light now uses the admitted island center/base elevation
+instead of following camera XYZ. Actual probe50 matrices put all66 wide-view
+station-ground samples beyond far600; probe51 puts all726 sampled points inside,
+including those66. The same4096² allocation, extents, depth and nonunit light ray
+are retained. The real Metal/WebGPU study passes, but the whole run still fails
+19 inherited cow/dagger content errors. The combined422-test regression and all
+three builds/typechecks pass. Root reviewed actual bank/wide views; they remain
+below the art target. Coverage is not shadow-pixel, GPU-timing or all-world proof.
+See [the complete lighting evidence](compact-lighting-correction-20260911.md).
+Do not widen map resolution or enable cascades to conceal a coverage bug. Three's
+[LightShadow documentation](https://threejs.org/docs/pages/LightShadow.html)
+defines bias in normalized depth and identifies map-size cost, so changing the
+depth range also requires explicit bias treatment. Its
+[WebGPU CSM documentation](https://threejs.org/docs/pages/CSMShadowNode.html)
+confirms one directional shadow light per cascade and camera-setting update
+requirements. Neither option is a free performance improvement.
+
 The pushed game `cf3212ddcaa0441ff316ce1692d1b453a83e8db8` and asset profile
 `d50abdadd50df4dd704bf9a03a20410f2e7dd559` add an explicit v3 headland/inlet shape,
 warmer meadow and shared stone campus surfaces. Probe40 verifies the paired

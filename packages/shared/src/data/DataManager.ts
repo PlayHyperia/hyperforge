@@ -31,6 +31,7 @@ import {
 } from "./world-areas";
 import { BIOMES } from "./world-structure";
 import { validateAuthoredResourceIdentities } from "./ResourceInstanceIdentity";
+import { validateCompactResourceGroves } from "../systems/shared/world/CompactResourceGroves";
 import {
   canonicalWorldJson,
   WorldManifestIdentityBuilder,
@@ -398,6 +399,11 @@ export class DataManager {
         "World configuration tileResolution must be an integer in 2..256",
       );
     const profile = resolveWorldTerrainProfile(copy.terrainProfile);
+    const compactResourceGroves = validateCompactResourceGroves(
+      copy.compactResourceGroves,
+      profile,
+      copy.version,
+    );
     config = copy;
     if (
       config.seed !== profile.seed ||
@@ -414,6 +420,7 @@ export class DataManager {
     const normalized = freezeWorldConfig({
       ...config,
       terrainProfile: profile,
+      ...(compactResourceGroves ? { compactResourceGroves } : {}),
     });
     if (DataManager.worldContentIdentity !== null) {
       if (

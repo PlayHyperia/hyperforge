@@ -33,6 +33,7 @@ import THREE, {
   output,
 } from "../../../extras/three/three";
 import { SUN_LIGHT } from "./LightingConfig";
+import { isCompactSculptProfile } from "./WorldTerrainProfile";
 import { createCompactTerrainColorOperations } from "./CompactTerrainPalette";
 import type {
   GrassSurfaceEligibility,
@@ -1565,6 +1566,12 @@ export class GrassVisualManager implements QuadTreeListener {
 
   private createMaterial(): MeshStandardNodeMaterial {
     const compactMeadow = this.profileId === "compact-island-v1";
+    // The validated terrain owner selects lighting, independently of blade
+    // shape/density. Callers without that owner retain their legacy graph.
+    const terrainProfile = this.workerSetup?.terrainConfig.TERRAIN_PROFILE;
+    const compactPhysical =
+      terrainProfile?.kind === "compact-candidate" &&
+      isCompactSculptProfile(terrainProfile);
     const mat = new MeshStandardNodeMaterial();
     mat.name = compactMeadow
       ? COMPACT_MEADOW_APPEARANCE.id
@@ -1721,12 +1728,14 @@ export class GrassVisualManager implements QuadTreeListener {
           tintedCol.mul(COMPACT_MEADOW_APPEARANCE.TIP_BRIGHTNESS),
           smoothstep(float(0.0), float(1.0), t),
         );
-        return applyAnimeShade(
-          bladeCol,
-          terrainNormal,
-          uSunDir,
-          this.shadeUniforms,
-        );
+        return compactPhysical
+          ? bladeCol
+          : applyAnimeShade(
+              bladeCol,
+              terrainNormal,
+              uSunDir,
+              this.shadeUniforms,
+            );
       }
       const tipCol = mix(
         groundCol,
@@ -1738,12 +1747,9 @@ export class GrassVisualManager implements QuadTreeListener {
         tipCol,
         smoothstep(float(0.0), float(1.0), t),
       );
-      return applyAnimeShade(
-        bladeCol,
-        terrainNormal,
-        uSunDir,
-        this.shadeUniforms,
-      );
+      return compactPhysical
+        ? bladeCol
+        : applyAnimeShade(bladeCol, terrainNormal, uSunDir, this.shadeUniforms);
     })();
 
     mat.outputNode = Fn(() => {

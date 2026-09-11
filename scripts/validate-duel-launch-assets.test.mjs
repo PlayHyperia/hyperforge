@@ -76,10 +76,10 @@ function detachAssetDirectory(assetsRoot, directoryName) {
   return fixtureDirectory;
 }
 
-function runValidator(assetsRoot) {
+function runValidator(assetsRoot, environment = {}) {
   return spawnSync(process.execPath, [VALIDATOR_PATH], {
     cwd: WORKSPACE_ROOT,
-    env: { ...process.env, ASSETS_DIR: assetsRoot },
+    env: { ...process.env, ASSETS_DIR: assetsRoot, ...environment },
     encoding: "utf8",
     // One byte-read probe may legitimately consume the validator's 15-second
     // bounded timeout. The outer harness must leave room for that child to
@@ -93,6 +93,14 @@ function runValidator(assetsRoot) {
 test("accepts the exact active preparation manifest and rectangular campus grade", () => {
   const assetsRoot = createAssetsFixture();
   try {
+    const worldConfig = JSON.parse(
+      readFileSync(
+        path.join(assetsRoot, "manifests/world-config.json"),
+        "utf8",
+      ),
+    );
+    assert.equal(worldConfig.version, 2);
+    assert.equal(worldConfig.compactResourceGroves.schemaVersion, 1);
     const manifest = JSON.parse(
       readFileSync(path.join(assetsRoot, "manifests/world-areas.json"), "utf8"),
     );
@@ -107,7 +115,7 @@ test("accepts the exact active preparation manifest and rectangular campus grade
       (zone) => zone.id === "duel_arena_campus_grade",
     );
     assert.equal(grade.width, 104);
-    assert.equal(grade.depth, 140.5);
+    assert.equal(grade.depth, 84.5);
     assert.deepEqual(
       {
         minX: grade.centerX - grade.width / 2,
@@ -124,6 +132,123 @@ test("accepts the exact active preparation manifest and rectangular campus grade
     rmSync(assetsRoot, { recursive: true, force: true });
   }
 });
+
+test("accepts supported legacy version 1 without a grove layout", () => {
+  const assetsRoot = createAssetsFixture();
+  try {
+    mutateJson(assetsRoot, "world-config.json", (config) => {
+      config.version = 1;
+      delete config.compactResourceGroves;
+    });
+    const result = runValidator(assetsRoot);
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /Duel launch asset validation passed/u);
+  } finally {
+    rmSync(assetsRoot, { recursive: true, force: true });
+  }
+});
+
+for (const version of [0, 3, "2"]) {
+  test(`rejects unsupported world configuration version ${JSON.stringify(version)}`, () => {
+    const assetsRoot = createAssetsFixture();
+    try {
+      mutateJson(assetsRoot, "world-config.json", (config) => {
+        config.version = version;
+      });
+      const result = runValidator(assetsRoot);
+      assert.equal(result.status, 1);
+      assert.match(result.stderr, /requires supported version 1 or 2/u);
+    } finally {
+      rmSync(assetsRoot, { recursive: true, force: true });
+    }
+  });
+}
+
+for (const [label, mutate, expected] of [
+  [
+    "missing grove",
+    (config) => {
+      delete config.compactResourceGroves;
+    },
+    /version 2 requires its explicit grove layout/u,
+  ],
+  [
+    "null grove",
+    (config) => {
+      config.compactResourceGroves = null;
+    },
+    /Invalid compactResourceGroves: layout/u,
+  ],
+  [
+    "wrong layout identity",
+    (config) => {
+      config.compactResourceGroves.layoutId = "other";
+    },
+    /Invalid compactResourceGroves: layout identity/u,
+  ],
+  [
+    "non-coordinate tree ID",
+    (config) => {
+      config.compactResourceGroves.regions[0].anchors[0].id = "tree_wrong";
+    },
+    /Invalid compactResourceGroves: duplicate or non-coordinate ID/u,
+  ],
+  [
+    "unsupported tree species",
+    (config) => {
+      config.compactResourceGroves.regions[0].anchors[0].subType = "magic";
+    },
+    /Invalid compactResourceGroves: species/u,
+  ],
+  [
+    "conflicting profile",
+    (config) => {
+      config.terrainProfile.seed++;
+    },
+    /World configuration conflicts with its terrain profile/u,
+  ],
+  [
+    "grove under legacy version",
+    (config) => {
+      config.version = 1;
+    },
+    /Invalid compactResourceGroves: version\/profile/u,
+  ],
+]) {
+  test(`production DataManager rejects ${label} in an actual validator process`, () => {
+    const assetsRoot = createAssetsFixture();
+    try {
+      mutateJson(assetsRoot, "world-config.json", mutate);
+      const result = runValidator(assetsRoot);
+      assert.equal(result.status, 1);
+      assert.match(
+        result.stderr,
+        /world-config.json production validation failed/u,
+      );
+      assert.match(result.stderr, expected);
+    } finally {
+      rmSync(assetsRoot, { recursive: true, force: true });
+    }
+  });
+}
+
+// A running pinned Bun is itself a valid policy candidate. This negative applies
+// to the supported Node CLI, which genuinely needs to find a pinned Bun child.
+if (!process.versions.bun) {
+  test("Node CLI fails closed when no pinned Bun runtime can validate the world", () => {
+    const assetsRoot = createAssetsFixture();
+    try {
+      const result = runValidator(assetsRoot, {
+        DUEL_HYPERIA_BUN_PATH: path.join(assetsRoot, "missing-bun"),
+        PATH: "",
+      });
+      assert.equal(result.status, 1);
+      assert.match(result.stderr, /requires Bun .*no exact runtime was found/u);
+    } finally {
+      rmSync(assetsRoot, { recursive: true, force: true });
+    }
+  });
+}
 
 for (const amplitude of [-0.1, 1.001, "0.9"]) {
   test(`rejects invalid pond shoreline amplitude ${JSON.stringify(amplitude)}`, () => {
@@ -151,7 +276,7 @@ test("accepts independent rectangular extents and circular water tangent to ever
       const grade = area.flatZones.find(
         (zone) => zone.id === "duel_arena_campus_grade",
       );
-      // The active grade is Z-long; this second rectangle is X-long.
+      // Exercise a second, narrow rectangular zone.
       area.flatZones.push({
         ...grade,
         id: "wide_rectangle_regression",

@@ -74,6 +74,7 @@ import { getPhysX } from "../../../physics/PhysXManager";
 import { Layers } from "../../../physics/Layers";
 import { BIOMES } from "../../../data/world-structure";
 import { ALL_WORLD_AREAS } from "../../../data/world-areas";
+import { createCompactResourceGroveNodes } from "./CompactResourceGroves";
 import {
   getDuelArenaConfig,
   isPositionInsideDuelArenaZone,
@@ -5506,7 +5507,38 @@ export class TerrainSystem extends System {
       (x, z) => this.createTreeGenerationSource(x, z),
       isPositionInsideDuelArenaZone,
     );
-    tile.resources.push(...result.resources);
+    const layout = DataManager.getWorldConfig()?.compactResourceGroves;
+    if (!layout) {
+      tile.resources.push(...result.resources);
+      return;
+    }
+    const reservedIds = new Set(
+      result.resources.map(
+        ({ position }) =>
+          `tree_${(tile.x * this.CONFIG.TILE_SIZE + position.x).toFixed(0)}_${(tile.z * this.CONFIG.TILE_SIZE + position.z).toFixed(0)}`,
+      ),
+    );
+    for (const area of Object.values(ALL_WORLD_AREAS)) {
+      for (const point of area.resources ?? []) {
+        if (point.type !== "tree") continue;
+        const x = Math.floor(point.position.x) + 0.5;
+        const z = Math.floor(point.position.z) + 0.5;
+        // A relocated authored actor reserves both its durable old ID and its
+        // actual occupied anchor, which can have a different coordinate ID.
+        reservedIds.add(`tree_${x.toFixed(0)}_${z.toFixed(0)}`);
+        if (point.instanceId) reservedIds.add(point.instanceId);
+      }
+    }
+    const groves = createCompactResourceGroveNodes(
+      layout,
+      { tileX: tile.x, tileZ: tile.z },
+      this.createTreeGenerationSource(tile.x, tile.z),
+      reservedIds,
+      isPositionInsideDuelArenaZone,
+    );
+    // Publish only after the entire frozen owner passes. Never backfill/drop an
+    // unsafe anchor or replace the existing seeded candidate population.
+    tile.resources.push(...result.resources, ...groves);
   }
 
   /**

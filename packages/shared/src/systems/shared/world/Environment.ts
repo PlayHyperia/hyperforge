@@ -7,6 +7,8 @@ import { System } from "../infrastructure/System";
 // NOTE: Import directly to avoid circular dependency through barrel file
 import { SkySystem } from "./SkySystem";
 import { OutdoorEnvironment } from "./OutdoorEnvironment";
+import { DataManager } from "../../../data/DataManager";
+import { isCompactSculptProfile } from "./WorldTerrainProfile";
 import { setLamppostNightMix } from "./LamppostLightMask";
 import { FOG_NEAR, FOG_FAR } from "./FogConfig";
 import {
@@ -46,7 +48,7 @@ const _sunDirection = new THREE.Vector3(0, -1, 0);
 // - CSMShadowNode handles texel snapping internally - don't add extra snapping
 //
 // Set ENABLE_CSM=true to use cascaded shadow maps (heavy GPU cost).
-// Default: false — uses a single 2048 shadow map centered on the player.
+// Default: false — uses one 4096 map, island-anchored for compact terrain.
 export function isCsmEnabled(): boolean {
   try {
     if (
@@ -166,7 +168,9 @@ export class Environment extends System {
 
   // Shadow stabilization - prevents flickering/swimming
   private targetLightDirection: THREE.Vector3 = new THREE.Vector3(0, -1, 0);
-  private lastLightAnchor: THREE.Vector3 = new THREE.Vector3(); // Camera anchor position
+  private lastLightAnchor: THREE.Vector3 = new THREE.Vector3();
+  private readonly compactLightAnchor = new THREE.Vector3();
+  private useCompactLightAnchor = false;
   private readonly LIGHT_DISTANCE = 400; // Distance from target to light
 
   private currentExposure: number = EXPOSURE.DAY;
@@ -616,7 +620,7 @@ export class Environment extends System {
         }
 
         // ===================
-        // UPDATE LIGHT POSITION - Follow camera for consistent shadows
+        // UPDATE LIGHT POSITION - Use the active world/shadow anchor
         // ===================
         this.updateSunLightPosition();
       }
@@ -659,24 +663,20 @@ export class Environment extends System {
   }
 
   /**
-   * Update sun light position to follow camera for consistent shadow coverage.
-   *
-   * SHADOW STABILIZATION:
-   * CSMShadowNode handles texel snapping internally per cascade in its updateBefore() method.
-   * We only need to position the main light - CSMShadowNode creates internal lights for each
-   * cascade and snaps them to texel boundaries using the correct per-cascade frustum size.
-   *
-   * Light direction is smoothly interpolated in update() to prevent sudden direction changes.
+   * Compact single-map shadows stay anchored to the island, not the altitude of
+   * an overview camera. Camera cuts therefore cannot translate the shadow volume
+   * above the ground. This is not an all-world depth/texel-quality certificate.
+   * CSM retains its camera anchor and internal per-cascade fitting/snapping.
+   * The existing interpolated light ray is deliberately not normalized here.
    */
   private updateSunLightPosition(): void {
     if (!this.sunLight) return;
 
-    // Get camera position (where shadows should be centered)
-    const cameraPos = this.world.camera.position;
-
-    // Use camera position directly - CSMShadowNode handles texel snapping per cascade
-    // Adding our own snapping here would conflict with CSM's internal snapping
-    this.lastLightAnchor.copy(cameraPos);
+    this.lastLightAnchor.copy(
+      this.useCompactLightAnchor
+        ? this.compactLightAnchor
+        : this.world.camera.position,
+    );
 
     // Position light OPPOSITE to light direction (light comes FROM this position)
     this.sunLight.position.set(
@@ -687,7 +687,7 @@ export class Environment extends System {
       this.lastLightAnchor.z - this.lightDirection.z * this.LIGHT_DISTANCE,
     );
 
-    // Target is where shadows should be centered (camera position)
+    // Target and light translate together, preserving direction and radiometry.
     this.sunLight.target.position.copy(this.lastLightAnchor);
     this.sunLight.target.updateMatrixWorld();
 
@@ -969,7 +969,7 @@ export class Environment extends System {
    * Build directional light (sun/moon) with optional CSMShadowNode.
    * Shadow quality "none" retains directional illumination without shadow maps.
    * When ENABLE_CSM=true: uses cascaded shadow maps (multiple passes, heavy).
-   * When ENABLE_CSM=false (default): uses a single shadow map centered on the player.
+   * When ENABLE_CSM=false: one map, fixed to admitted compact terrain when present.
    */
   buildSunLight(): void {
     if (!this.isClientWithGraphics) return;
@@ -988,6 +988,21 @@ export class Environment extends System {
     }
 
     const scene = this.world.stage.scene;
+
+    // Startup/quality-change only: no per-frame terrain sampling, scene traversal
+    // or allocation. DataManager already admitted and froze this world profile.
+    this.useCompactLightAnchor = false;
+    if (!useCSM && csmConfig.enabled && DataManager.getWorldConfig()) {
+      const profile = DataManager.getWorldTerrainProfile();
+      if (isCompactSculptProfile(profile)) {
+        this.compactLightAnchor.set(
+          profile.island.centerX,
+          profile.height.baseOffset,
+          profile.island.centerZ,
+        );
+        this.useCompactLightAnchor = true;
+      }
+    }
 
     // Dispose existing light and CSM
     if (this.csmShadowNode) {
@@ -1097,6 +1112,7 @@ export class Environment extends System {
 
     scene.add(this.sunLight);
     scene.add(this.sunLight.target);
+    if (this.useCompactLightAnchor) this.updateSunLightPosition();
   }
 
   /**

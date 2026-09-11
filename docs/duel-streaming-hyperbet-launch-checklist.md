@@ -1,5 +1,52 @@
 # Duel Arena, Streaming, and Hyperbet Launch Checklist
 
+## Active functional woodland and surface fidelity — 2026-09-11
+
+- [x] Commit and push static-cache checkpoint `ed99ac7cf`; exact remote head,
+  committed native-tested source pins and GitHub author/committer
+  `dreaminglucid` verified. No merge or deployment.
+- [x] Author the first 16 additional functional tree anchors: 14 general and two
+  oak, across three bounded groves. Actual CPU terrain/resource/path checks pass;
+  preserve the original 13 trees. Do not force the earlier 32-tree target.
+- [x] Integrate the frozen groves through normal tile/resource ownership and
+  strict version-2 admission. Actual Metal/WebGPU probes50/51 verify exactly
+  29 trees: 24 terrain-owned and five authored, all with authoritative state.
+- [ ] Qualify live harvesting, regrowth, reconnect, motion, composition and cost;
+  startup census and static screenshots do not establish these.
+- [x] Correct the pre-build launch validator's version-1-only check using the
+  actual production version-2/profile/grove validator; retain all asset gates.
+  Probe49 stopped before browser creation and provides no rendered evidence.
+  Direct Node/Bun, all 32 process cases across runs and 12 launch-safety tests
+  pass after updating the obsolete campus-depth test. Native50/51 launch normally.
+- [x] Prepare three smaller CC0 moss-rock variants with authored near/medium/far
+  geometry (23,928 / 6,000 / 1,500 triangles across three variants). Source-near
+  geometry/UV correspondence and shared image bytes verified; CPU preview
+  sheets reviewed. These are not installed or qualified in the engine.
+- [ ] Select a runtime consumer that preserves one shared rock atlas, explicitly
+  selects one LOD per instance, and provides safe placement/collision and disposal.
+  Do not install the nine-mesh authoring scene as a ready-made world prop.
+- [x] Compare actual fern source versus cold cache in native Metal/WebGPU:
+  six matched views, controlled geometry/tangents and 1,224 verified source pins.
+  Major dark patches exist in both; smaller cache-path darkening remains.
+  Root's 12 diagnostic tests pass. No source-parity or finished-shading approval.
+- [ ] Resolve fern upload/two-sided shading independently; qualify any leaf
+  translucency only after the current source/material behavior is understood.
+- [x] Qualify the compact lighting correction in actual probe51: fixed island
+  shadow anchor, no extra pre-PBR teal tint/rim on compact terrain/grass. All726
+  station samples are inside the map; wide-view far clipping is corrected.
+  Combined422 tests /41 files, all three builds/typechecks and scoped lint pass.
+  No extra map resolution, texture count, geometry or render pass was introduced.
+- [x] Capture/review all39 native images; independently verify468 current pins,
+  399 archives, 67 lighting observations and11 restored HUD leases. No GPU/page
+  errors; clean owned shutdown. Whole run still FAILS19 cow/dagger content errors.
+- [ ] Reach the actual art target and qualify sustained rendering cost. The broad
+  lawn, uniform pale shoreline, sparse architecture, motion and sound remain
+  unfinished; static study success is not AAA, streaming or performance approval.
+- [ ] Add bounded preparation-village architecture through real world owners:
+  normal clients currently do not register building rendering, and streaming
+  skips procedural towns. Connect compact-only layout/rendering and service
+  access deliberately; do not enable unrelated exploration or claim inactive LODs.
+
 ## Active material fidelity and cliff integration — 2026-09-11
 
 - [x] Push game `5f967b0f7` and world assets `42d2bf8`; exact remote heads,

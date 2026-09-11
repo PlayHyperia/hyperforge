@@ -148,6 +148,29 @@ const authoredIds = [
   "tree_379_304",
   "tree_375_299",
 ].sort();
+// Frozen v2 collection: explicit expected centered owners, not read from config.
+const groveIdsByOwner = {
+  "3_4": [
+    "tree_288_387",
+    "tree_290_432",
+    "tree_294_422",
+    "tree_297_449",
+    "tree_305_410",
+  ],
+  "3_5": [
+    "tree_293_460",
+    "tree_310_471",
+    "tree_315_492",
+    "tree_318_465",
+    "tree_320_501",
+    "tree_328_484",
+    "tree_330_500",
+    "tree_333_466",
+  ],
+  "4_4": ["tree_443_383"],
+  "5_4": ["tree_459_383", "tree_461_396"],
+};
+const groveIds = Object.values(groveIdsByOwner).flat().sort();
 
 /** Real generated worker JS, native Promise and transferred Float32 output. */
 function workerJob(setup: GrassWorkerSetup, tileX: number, tileZ: number) {
@@ -183,7 +206,7 @@ function workerJob(setup: GrassWorkerSetup, tileX: number, tileZ: number) {
 }
 
 describe("actual terrain content residency", () => {
-  it("starts the real lobby core with all13 admitted trees, retaining terrain-only preload and no repeated spawn", async () => {
+  it("starts the real lobby core with all 29 admitted trees, retaining terrain-only preload and no repeated spawn", async () => {
     const f = await fixture();
     await f.terrain.start();
     await f.settle();
@@ -205,7 +228,23 @@ describe("actual terrain content residency", () => {
         .filter((r) => r.type === "tree")
         .map((r) => r.id)
         .sort();
-    expect(trees()).toEqual([...proceduralIds, ...authoredIds].sort());
+    expect(trees()).toEqual(
+      [...proceduralIds, ...authoredIds, ...groveIds].sort(),
+    );
+    // Retain the exact original 13 independently of the added collection.
+    expect(trees().filter((id) => !groveIds.includes(id))).toEqual(
+      [...proceduralIds, ...authoredIds].sort(),
+    );
+    for (const [owner, expected] of Object.entries(groveIdsByOwner)) {
+      expect(
+        f.terrain
+          .getTiles()
+          .get(owner)!
+          .resources.map((r) => r.id)
+          .filter((id) => groveIds.includes(id))
+          .sort(),
+      ).toEqual([...expected].sort());
+    }
     const entities = trees().map((id) => f.manager.getEntity(id));
     for (const entity of entities)
       expect(entity).toBeInstanceOf(ResourceEntity);
@@ -216,9 +255,12 @@ describe("actual terrain content residency", () => {
     expect(f.batches).toHaveLength(count);
     expect(f.internal.pendingContentPromotions.size).toBe(0);
     expect(trees().map((id) => f.manager.getEntity(id))).toEqual(entities);
-    // Before correction the actual startup core2..4 produced only3 procedural
-    // plus5 authored. This is a declared8→13 live population change, not free rendering.
+    // Before the residency correction, core 2..4 produced only 3 procedural
+    // plus 5 authored trees. The new collection separately changes 13 → 29;
+    // neither population increase is free rendering.
     expect(proceduralIds).toHaveLength(8);
+    expect(authoredIds).toHaveLength(5);
+    expect(groveIds).toHaveLength(16);
   });
 
   it("uses centered half-open ownership in actual movement demand at positive and negative seams", async () => {
@@ -308,6 +350,8 @@ describe("actual terrain content residency", () => {
         "tree_281_513",
         "tree_503_432",
         "tree_502_419",
+        ...groveIdsByOwner["3_5"],
+        ...groveIdsByOwner["5_4"],
       ].sort(),
     );
     const id = "tree_289_508";
@@ -444,7 +488,21 @@ describe("actual terrain content residency", () => {
       await f.settle();
       expect(f.terrain.getTiles().get("3_5")?.contentGenerated).toBe(true);
       expect(f.batches).toHaveLength(1);
-      expect(f.batches[0].spawnPoints).toHaveLength(3);
+      expect(f.batches[0].owner).toEqual({ tileX: 3, tileZ: 5 });
+      expect(
+        f.batches[0].spawnPoints
+          .map(
+            (p) => `tree_${p.position.x.toFixed(0)}_${p.position.z.toFixed(0)}`,
+          )
+          .sort(),
+      ).toEqual(
+        [
+          "tree_289_508",
+          "tree_281_518",
+          "tree_281_513",
+          ...groveIdsByOwner["3_5"],
+        ].sort(),
+      );
       expect(f.internal.pendingTileGenerations.size).toBe(0);
       f.internal.acceptTerrainWorkerResult(output, generation);
       expect(f.internal.pendingWorkerResults.size).toBe(0);

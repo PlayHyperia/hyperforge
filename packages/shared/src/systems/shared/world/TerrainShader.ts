@@ -1644,14 +1644,11 @@ export function createTerrainMaterial(
     ? mul(compactSurface.albedo, compactWeights!.variation)
     : mix(variedColor, compactedRoadColor, roadInfluence);
 
-  // Half-lambert cool tint + fresnel rim — tints the ALBEDO before PBR.
-  // PBR then adds a single Lambert N·L + shadow on top.
-  const animeBase = applyAnimeShade(
-    baseWithRoads,
-    worldNormal,
-    sunDirectionUniform,
-    shade,
-  );
+  // Compact PBR keeps authored albedo independent of the sun/view direction.
+  // Preserve the legacy half-Lambert tint and Fresnel rim for other worlds.
+  const surfaceAlbedo = options.compactPbr
+    ? baseWithRoads
+    : applyAnimeShade(baseWithRoads, worldNormal, sunDirectionUniform, shade);
 
   // ============================================================================
   // VERTEX LIGHTING (lampposts, torches, etc.)
@@ -1789,7 +1786,7 @@ export function createTerrainMaterial(
 
   // Apply vertex lighting additively (multiply base by (1 + lightAccum))
   // This brightens terrain near lights without washing out colors
-  const litTerrain = mul(animeBase, add(vec3(1, 1, 1), lightAccum));
+  const litTerrain = mul(surfaceAlbedo, add(vec3(1, 1, 1), lightAccum));
 
   // === DISTANCE FOG (smoothstep with squared distances — avoids per-fragment sqrt) ===
   const baseFogFactor = smoothstep(

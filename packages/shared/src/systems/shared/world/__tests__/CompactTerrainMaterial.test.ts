@@ -2,7 +2,7 @@ import { readFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { Worker } from "node:worker_threads";
 import { build } from "esbuild";
-import { describe, expect, it } from "vitest";
+import { beforeAll, describe, expect, it } from "vitest";
 import { PNG } from "pngjs";
 import THREE, {
   float,
@@ -38,7 +38,12 @@ import {
 } from "../CompactTerrainMaterial";
 import { createCompactTerrainColorOperations } from "../CompactTerrainPalette";
 import { ALL_WORLD_AREAS } from "../../../../data/world-areas";
+import { DataManager } from "../../../../data/DataManager";
 import { SCULPTED_COMPACT_WORLD_TERRAIN_PROFILE } from "../WorldTerrainProfile";
+
+beforeAll(async () => {
+  await DataManager.getInstance().initialize();
+});
 
 const assetDirectory = new URL(
   "../../../../../../server/world/assets/terrain/textures/compact-pbr/",
@@ -393,9 +398,24 @@ describe("compact terrain actual texture ownership and CPU material graph", () =
       compactProfile: SCULPTED_COMPACT_WORLD_TERRAIN_PROFILE,
     }) as THREE.MeshStandardNodeMaterial &
       ReturnType<typeof createTerrainMaterial>;
-    const legacy = createTerrainMaterial() as THREE.MeshStandardNodeMaterial;
+    const legacy = createTerrainMaterial() as THREE.MeshStandardNodeMaterial &
+      ReturnType<typeof createTerrainMaterial>;
     try {
       expect(material.terrainUniforms.shade).toBe(shade);
+      const compactAlbedo = graph(material.colorNode!);
+      const legacyAlbedo = graph(legacy.colorNode!);
+      for (const node of [
+        shade.tint,
+        shade.strength,
+        material.terrainUniforms.sunDirection,
+      ])
+        expect(compactAlbedo.has(node)).toBe(false);
+      for (const node of [
+        legacy.terrainUniforms.shade.tint,
+        legacy.terrainUniforms.shade.strength,
+        legacy.terrainUniforms.sunDirection,
+      ])
+        expect(legacyAlbedo.has(node)).toBe(true);
       expect(material.normalNode).toBeTruthy();
       expect(material.roughnessNode).toBeTruthy();
       expect(material.aoNode).toBeTruthy();

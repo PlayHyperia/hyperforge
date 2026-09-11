@@ -1,8 +1,10 @@
 #!/usr/bin/env node
 
 import { existsSync, readFileSync, statSync } from "node:fs";
+import { spawnSync } from "node:child_process";
 import path from "path";
 import { fileURLToPath } from "url";
+import { resolvePinnedBunRuntime } from "./duel-bun-runtime-policy.mjs";
 import { validateLaunchWorldAreaSafety } from "./lib/launch-world-area-safety.mjs";
 import {
   readLaunchAssetByteEvidence,
@@ -114,6 +116,61 @@ function readWorkspaceJson(relativePath) {
 
 function isRecord(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function validateProductionWorldConfig(config) {
+  // Launch validation precedes the shared build. Use the actual source validator
+  // under the game's existing pinned Bun policy, not a second grove schema or a
+  // stale bundle. This child does not initialize a world, services or a database.
+  const input = JSON.stringify(config);
+  if (Buffer.byteLength(input, "utf8") > 8 * 1024 * 1024) {
+    throw new Error("World configuration exceeds the 8 MiB input bound");
+  }
+  const runtime = resolvePinnedBunRuntime({
+    label: "Hyperia world configuration validation",
+    workspaceRoot,
+    configuredPath: process.env.DUEL_HYPERIA_BUN_PATH,
+  });
+  const sourceUrl = new URL(
+    "../packages/shared/src/data/DataManager.ts",
+    import.meta.url,
+  ).href;
+  const result = spawnSync(
+    runtime.path,
+    [
+      "--eval",
+      `import { DataManager } from ${JSON.stringify(sourceUrl)};
+       try {
+         DataManager.setWorldConfig(JSON.parse(await Bun.stdin.text()));
+         console.log("HYPERIA_WORLD_CONFIG_VALID");
+       } catch (error) {
+         console.error(error instanceof Error ? error.message : String(error));
+         process.exitCode = 1;
+       }`,
+    ],
+    {
+      cwd: workspaceRoot,
+      input,
+      encoding: "utf8",
+      timeout: 10_000,
+      killSignal: "SIGKILL",
+      maxBuffer: 64 * 1024,
+    },
+  );
+  if (result.error) {
+    throw new Error(
+      `World configuration validator failed: ${result.error.message}`,
+    );
+  }
+  if (result.status !== 0 || result.signal !== null) {
+    const detail = String(result.stderr || "").trim();
+    throw new Error(
+      `World configuration validator exited code=${String(result.status)} signal=${String(result.signal)}${detail ? `: ${detail}` : ""}`,
+    );
+  }
+  if (result.stdout.trim() !== "HYPERIA_WORLD_CONFIG_VALID") {
+    throw new Error("World configuration validator returned no valid receipt");
+  }
 }
 
 function readAssetEvidence(location, value, absolutePath) {
@@ -236,13 +293,22 @@ if (
 const worldConfig = readJson("world-config.json");
 if (
   !isRecord(worldConfig) ||
-  worldConfig.version !== 1 ||
+  (worldConfig.version !== 1 && worldConfig.version !== 2) ||
   !isRecord(worldConfig.terrain) ||
   !isRecord(worldConfig.towns) ||
   !isRecord(worldConfig.roads)
 ) {
-  fail("world-config.json does not contain the required launch sections");
+  fail(
+    "world-config.json requires supported version 1 or 2 and the required launch sections",
+  );
 } else {
+  try {
+    validateProductionWorldConfig(worldConfig);
+  } catch (error) {
+    fail(
+      `world-config.json production validation failed: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
   const terrainWater = worldConfig.terrain.waterThreshold;
   const townWater = worldConfig.towns.waterThreshold;
   if (terrainWater !== 16 || townWater !== terrainWater) {
