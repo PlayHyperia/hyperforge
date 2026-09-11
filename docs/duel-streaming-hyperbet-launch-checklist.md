@@ -39,7 +39,9 @@ Research and ordered acceptance: the implementation's
 lighting/sky/water, animation/audio/stream and dependency qualification briefs.
 Game checkpoint `c1933e898b64afa77a5b964200c90becfb7c7fd6` and asset checkpoint
 `fb41785c68c6324903559552a26af11da07c7143` are pushed; exact remote refs and GitHub
-author/committer `dreaminglucid` verified. All 179 capture pins still match.
+author/committer `dreaminglucid` verified. Their capture archives preserve the
+179 baseline source pins; current runtime bytes have since changed for the
+renderer qualification recorded below.
 
 ## Renderer upgrade qualification — in progress, 2026-09-11
 
@@ -68,9 +70,11 @@ author/committer `dreaminglucid` verified. All 179 capture pins still match.
 - [ ] Verify integrated effects, real gameplay/resource lifecycle and actual stream
   output. Retain the direct-canvas/no-intermediate framebuffer-copy failure as
   an explicit unresolved scenario, not a waived gate.
-- [ ] Save the renderer work-in-progress branch checkpoint with its failed
-  integration clearly documented. Fix the GPU/shader blockers before promotion;
-  then continue one-arena authority and real resource-tree distribution.
+- [x] Save and push work-in-progress code checkpoint
+  `eb2270cc7821bada884a85944f2f2ab3b5a20ad2`; exact remote revision and GitHub
+  author/committer `dreaminglucid` verified. Its failed integration is explicit.
+- [ ] Fix the GPU/shader blockers before promotion, then continue one-arena
+  authority and real resource-tree distribution.
 
 Current evidence and exact scope: the implementation's
 `docs/renderer-upgrade-qualification-20260911.md`. Historical probe17 and its

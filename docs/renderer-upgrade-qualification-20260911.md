@@ -257,8 +257,10 @@ remain separately unresolved.
 - [ ] Exercise enabled post-processing, HDR/IBL, animation, resource harvesting,
       actual stream encoding and representative performance/reconnect/teardown.
 - [ ] Resolve or bound the recorded direct-canvas copy limitation explicitly.
-- [ ] Save this scoped work-in-progress checkpoint, verify author/committer and
-      exact remote revision. Do not merge or deploy the failed candidate.
+- [x] Save and push scoped work-in-progress code checkpoint
+      `eb2270cc7821bada884a85944f2f2ab3b5a20ad2`. The exact remote revision and
+      GitHub author/committer `dreaminglucid` were verified. Do not merge or
+      deploy the failed candidate.
 - [ ] Continue one-arena authority and resource-tree distribution work, including
       stable IDs, snapped grounding, tile-unload boundaries, depletion/respawn,
       navigation and actual spectator presentation.
