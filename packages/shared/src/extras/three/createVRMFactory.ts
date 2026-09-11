@@ -58,6 +58,10 @@ import {
 } from "./AvatarAuthoredMotionDiagnostics";
 import { applyAnimationActionStartTime } from "./AnimationActionStartTime";
 import {
+  applyCharacterMeshShadowPolicy,
+  isCharacterShadowCandidateActive,
+} from "./CharacterMeshShadows";
+import {
   avatarEmoteBlendSecondsFor,
   fadeInAvatarEmote,
   fadeOutAvatarEmote,
@@ -141,6 +145,7 @@ export function copyAvatarBoneWorldTransform(
 
 /** Use the same node-material conversion in the game and avatar review. */
 export function prepareVRMMaterialsForWebGPU(root: THREE.Object3D): void {
+  const shadowCandidate = isCharacterShadowCandidateActive();
   const convertedMaterials = new Map<
     THREE.Material,
     MeshStandardNodeMaterial
@@ -247,6 +252,7 @@ export function prepareVRMMaterialsForWebGPU(root: THREE.Object3D): void {
       } else {
         obj.material = convertMaterial(obj.material);
       }
+      applyCharacterMeshShadowPolicy(obj, shadowCandidate);
     }
   });
 }

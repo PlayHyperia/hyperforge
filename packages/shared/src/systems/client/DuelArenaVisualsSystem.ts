@@ -1343,6 +1343,7 @@ export class DuelArenaVisualsSystem extends System {
       });
 
       const floor = new THREE.Mesh(geometry, material);
+      floor.receiveShadow = true;
       floor.position.set(LOBBY_CENTER_X, floorY, LOBBY_CENTER_Z);
       floor.name = "LobbyFloor";
       floor.layers.set(2);
@@ -1447,6 +1448,7 @@ export class DuelArenaVisualsSystem extends System {
       });
 
       const floor = new THREE.Mesh(geometry, material);
+      floor.receiveShadow = true;
       floor.position.set(HOSPITAL_CENTER_X, floorY, HOSPITAL_CENTER_Z);
       floor.name = "HospitalFloor";
       floor.layers.set(2);

@@ -2,6 +2,10 @@ import { getItem } from "../../data/items";
 import { getArrowVisual } from "../../data/spell-visuals";
 import type { VRM, VRMHumanBoneName } from "@pixiv/three-vrm";
 import * as THREE from "three";
+import {
+  applyCharacterMeshShadowPolicy,
+  isCharacterShadowCandidateActive,
+} from "../../extras/three/CharacterMeshShadows";
 import type { NeutralShortsReplacementData } from "./NeutralShortsWearState";
 import {
   createArrowVisualInstance,
@@ -1628,6 +1632,7 @@ export function attachEquipmentVisualToVRM(options: {
 }): boolean {
   const { slot, modelRoot, visuals, vrm } = options;
   if (!hasUsableEquipmentLighting(modelRoot, options.lighting)) return false;
+  const shadowCandidate = isCharacterShadowCandidateActive();
   const slotKey = slot.toLowerCase();
   const avatarRoot = options.avatarRoot ?? vrm.scene;
   const attachmentData = extractEquipmentAttachmentData(modelRoot);
@@ -1655,6 +1660,10 @@ export function attachEquipmentVisualToVRM(options: {
         child.renderOrder = 100;
         applyEquipmentLighting(child, options.lighting);
       }
+      // Rigid buckles/trim can share a skinned wearable's root without owning
+      // skin data. Include their physical surfaces without rebinding them.
+      if (child instanceof THREE.Mesh)
+        applyCharacterMeshShadowPolicy(child, shadowCandidate);
     });
 
     removeReplacedEquipmentVisual(visuals, slot, modelRoot);
@@ -1677,6 +1686,7 @@ export function attachEquipmentVisualToVRM(options: {
     if (child instanceof THREE.Mesh) {
       child.renderOrder = 100;
       applyEquipmentLighting(child, options.lighting);
+      applyCharacterMeshShadowPolicy(child, shadowCandidate);
     }
   });
 

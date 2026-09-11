@@ -129,7 +129,7 @@ describe("Duel arena floor shadow receivers", () => {
       receive: mesh.receiveShadow,
     }));
     const hospital = build.arenaGroup.getObjectByName("HospitalFloor")!;
-    expect(hospital.receiveShadow).toBe(false);
+    expect(hospital.receiveShadow).toBe(true);
     expect(hospital.castShadow).toBe(false);
     const unrelated = new THREE.Object3D();
     world.stage.scene.add(unrelated);

@@ -27,7 +27,10 @@ vi.mock("three/examples/jsm/libs/meshopt_decoder.module.js", () => ({
   MeshoptDecoder: {},
 }));
 
-vi.mock("../../../runtime/clientViewportMode", () => ({
+vi.mock("../../../runtime/clientViewportMode", async (importOriginal) => ({
+  ...(await importOriginal<
+    typeof import("../../../runtime/clientViewportMode")
+  >()),
   isStreamingLikeViewport: vi.fn(() => false),
 }));
 

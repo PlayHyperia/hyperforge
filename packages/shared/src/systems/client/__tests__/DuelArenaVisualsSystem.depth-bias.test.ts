@@ -76,7 +76,7 @@ describe("actual duel floor material depth bias", () => {
         expect(floor.scale.toArray()).toEqual([1, 1, 1]);
         expect(floor.renderOrder).toBe(0);
         expect(floor.castShadow).toBe(false);
-        expect(floor.receiveShadow).toBe(floor.name.startsWith("ArenaFloor_"));
+        expect(floor.receiveShadow).toBe(true);
         if (floor.name.startsWith("ArenaFloor_")) {
           expect(floor.material).toBe(build.arenaFloorMat);
         } else {
@@ -134,6 +134,7 @@ describe("actual duel floor material depth bias", () => {
       ).createLobbyFloor.toString();
       expect(lobbyConstructor).toContain("createDuelFloorMaterial({");
       expect(lobbyConstructor).toContain("map: tileTexture");
+      expect(lobbyConstructor).toContain("floor.receiveShadow = true");
     } finally {
       floor.dispose();
       ordinary.dispose();

@@ -1,7 +1,48 @@
 # Duel Arena, Streaming, and Hyperbet Launch Checklist
 
+## Resource lifetimes and daylight character shadows — candidate, 2026-09-11
+
+- [x] Preserve the eight procedural tree IDs/species/count while assigning
+  centred chunk ownership and grounding final snapped anchors. Maximum measured
+  Y correction0.466842m; no grove relocation/density change in this checkpoint.
+- [x] Protect registration across DB/model awaits, unload/reload and world
+  replacement; reconcile actual authoritative client packets. Exact tree tokens
+  prevent stale insertion/removal; private proxy disposal preserves shared pools.
+- [x] Verify placement59, resource97, shadow/equipment139 and tree lifetime16
+  root cases (suite totals overlap), independent review, shared/client/server
+  typechecks and fresh builds. Real PostgreSQL4/4 includes two new cancellation/
+  durable-deadline cases. These are not GPU or delivered-asset tests.
+- [x] Enable physical avatar/gear casting and reception only for the explicit
+  shadow candidate; lobby/hospital floors now receive shadows. Preserve ordinary
+  defaults, geometry, materials, body/rest/weights and attachment transforms.
+- [x] Probe34 detailed daylight study PASS:354 source pins/285 archives/18 PNGs
+  verified,37 HTTP200 actions, zero recorded GPU/page errors, clean owned cleanup.
+  Foot-shadow separation and flat armor remain visually UNAPPROVED. The labeled
+  scene-only diagnostic still contains inventory canvases; it is not UI-free.
+- [x] Probe35 complete spatial study PASS:357 pins/288 archives/28 PNGs verified,
+  37 HTTP200 actions, zero recorded GPU/page errors and clean owned cleanup.
+  Both whole runs still FAIL19 inherited cow/dagger errors/cow404. No waiver.
+- [ ] Resolve real sole/floor contact, stable fine shadow projection and off-screen
+  tree-caster visibility; qualify motion, wind, LOD and actual GPU frame-time tails.
+  Probe35's post-equip window includes a1.092s RAF interval; no smoothness approval.
+- [ ] Relocate the five existing authored harvestable trees out of the crowded
+  altar/NPC cluster with explicit same-ID persistence and accessible approach
+  tests; then compose the wider functional woodland without decorative duplicates.
+- [ ] Eliminate speculative pre-hydration client resource availability and verify
+  live unload/reconnect/deplete/respawn behavior. Finish terrain, shoreline,
+  material richness, lighting, sound and decoded stream/production acceptance.
+
+Details: game `docs/resource-grove-prerequisites-20260911.md`.
+This candidate is not AAA, MVP, performance, merge or launch approval.
+
+
 ## Shadow-enabled stream profile — unqualified candidate, 2026-09-11
 
+- [x] Save and push game checkpoint9c004c2ad82dc5291c385cfada73c1e614e09145,
+  paired with unchanged assetsd6f52841f5d9173247e4499902ba1c27f96c2a89.
+  GitHub confirms author/committer dreaminglucid; normal hook and staged secret
+  scan pass. All14 changed pinned source/test files exactly match probe33.
+  This checkpoint is not default promotion, art acceptance or launch approval.
 - [x] Implement opt-in `shadows-720p60-v1`: same 720p/DPR1/60 target/MSAA,
   assets, population and LOD; existing sunlight shadows only, no default change.
   Startup policy wins over stored preferences without persisting candidate values.
@@ -78,8 +119,9 @@
   remaining instrumentation overhead, before runtime-preparation changes or
   steady-state performance claims. Keep the original15s equipment gate.
 - [ ] Replace the shadowless stream presentation with an explicitly versioned,
-  visually reviewed high-quality candidate. Current profiles AND stream startup
-  force shadows off; batch cast/receive flags are not rendered-shadow proof.
+  visually approved high-quality candidate. Canonical profiles still force
+  shadows off; the explicit candidate above now has actual tree-shadow evidence,
+  but is not art/performance approved. Mesh flags alone are not pixel proof.
   Preserve resolution and qualify shadow/contact quality, motion and real cost.
 - [ ] Attribute and fix the startup client/frame/queue stall using bounded
   native pipeline, long-task/frame and actual network-progress diagnostics.
