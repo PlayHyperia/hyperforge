@@ -1,5 +1,11 @@
 # Compact functional woodland qualification
 
+Verified checkpoint: game `b6b3af00e4e14231cdc1474928d97c01bc82d2cb` and assets
+`5c2cfda40063552eab655ee259a7346411b2245b` are pushed to their existing launch
+branches. Remote heads, all fifteen committed game source/test blobs, the asset
+manifest and GitHub author/committer `dreaminglucid` are verified. No merge or
+deployment was performed; unrelated dirty files remain untouched.
+
 ## Intended visible change
 
 Add a first, bounded woodland layer around the preparation campus and one duel

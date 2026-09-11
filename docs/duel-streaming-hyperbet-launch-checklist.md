@@ -2,6 +2,13 @@
 
 ## Active functional woodland and surface fidelity — 2026-09-11
 
+- [x] Push verified woodland/lighting game checkpoint `b6b3af00e` with paired
+  asset manifest `5c2cfda`. Exact remote heads and GitHub author/committer
+  `dreaminglucid` verified; all 15 committed game source/test blobs and the
+  manifest match the native or separately attested inputs. No merge/deployment.
+- [ ] Qualify the next compact ocean-relative surface composition: irregular
+  earth/rock coast and narrow wet margin using existing PBR inputs. Preserve
+  pond/path priority and functional trees; measure any decorative grass change.
 - [x] Commit and push static-cache checkpoint `ed99ac7cf`; exact remote head,
   committed native-tested source pins and GitHub author/committer
   `dreaminglucid` verified. No merge or deployment.

@@ -145,6 +145,26 @@ instrumented correctness captures from representative performance runs.
 
 ## Current implementation and evidence limits — 2026-09-11
 
+### Surface composition and texture repetition
+
+Activision's [2023 terrain rendering presentation](https://advances.realtimerendering.com/s2023/Etienne%28ATVI%29-Large%20Scale%20Terrain%20Rendering%20with%20notes%20%28Advances%202023%29.pdf)
+separates bounded material selection, tile hiding, distance-scale detail and
+material transitions. It explicitly discusses the extra sampling cost of rotated
+layers and the memory cost of separately authored transition textures. The useful
+lesson for this compact island is controlled surface composition at multiple
+scales, not copying its large-world virtual-texture architecture. Reusing three
+existing PBR layers for coastal earth/rock transitions is our current inference;
+it remains a visual candidate until rendered. A smooth ramp still needs real
+landform/prop work to read as a rocky coast.
+
+[NVIDIA's texture-bombing chapter](https://developer.nvidia.com/gpugems/gpugems/part-iii-materials/chapter-20-texture-bombing)
+explains both the repetition benefit and mip artifacts from discontinuous random
+coordinates. Existing derivative-aware ground projections must remain intact.
+The coastal mask should reuse already sampled low/high-frequency noise and
+admitted water/base heights, without adding unbounded layers or defeating mip
+selection. New arithmetic is not free even when texture count is unchanged;
+sustained GPU timing, motion and thermal qualification remain required.
+
 ### Qualified compact lighting correction; final art remains open
 
 The compact terrain and grass now bypass the custom cool half-Lambert tint and
