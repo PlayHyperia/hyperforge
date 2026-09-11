@@ -6,6 +6,7 @@ import { System } from "../infrastructure/System";
 
 // NOTE: Import directly to avoid circular dependency through barrel file
 import { SkySystem } from "./SkySystem";
+import { OutdoorEnvironment } from "./OutdoorEnvironment";
 import { setLamppostNightMix } from "./LamppostLightMask";
 import { FOG_NEAR, FOG_FAR } from "./FogConfig";
 import {
@@ -147,6 +148,12 @@ export class Environment extends System {
   hdrUrl?: string;
   skyInfo!: SkyInfo;
   private skySystem?: SkySystem;
+  private outdoorEnvironment?: OutdoorEnvironment;
+
+  /** Diagnostic receipt only; material inheritance is owned by the scene. */
+  getOutdoorLightingStatus() {
+    return this.outdoorEnvironment?.getStatus() ?? null;
+  }
 
   /** Sky fog texture from SkySystem — used by terrain, water, vegetation for sky-color fog */
   get skyFogTexture(): THREE.Texture | null {
@@ -246,9 +253,16 @@ export class Environment extends System {
     // Re-evaluate sky state now that SkySystem exists
     await this.updateSky();
 
-    // No environment map - using planar reflections for water, toon/rough style for everything else
-    if (this.world.stage?.scene) {
-      this.world.stage.scene.environment = null;
+    // Prepare one shared sky IBL before world startup completes. Standard PBR
+    // actors, equipment and terrain inherit it; planar water remains separate.
+    if (this.world.stage?.scene && this.world.graphics) {
+      this.outdoorEnvironment = new OutdoorEnvironment(this.world.stage.scene);
+      await this.outdoorEnvironment.initialize(
+        this.world.graphics,
+        this.skySystem.createLightingCapture(),
+        this.skySystem.dayPhase,
+      );
+      this.updateAmbientLighting(this.skySystem.dayIntensity);
     }
 
     this.world.settings?.on("change", this.onSettingsChange);
@@ -405,9 +419,8 @@ export class Environment extends System {
     if (this.sky.parent) {
       this.sky.parent.remove(this.sky);
     }
-    // Completely remove environment map when using SkySystem
-    // This ensures planar reflections don't pick up the HDR
-    this.world.stage.scene.environment = null;
+    // The procedural sky owns the visible background; IBL is independent and
+    // must survive shadow preference/legacy sky refreshes.
     this.world.stage.scene.background = null;
 
     // Set initial light direction and apply to sun light
@@ -438,6 +451,8 @@ export class Environment extends System {
   }
 
   override destroy(): void {
+    this.outdoorEnvironment?.dispose();
+    this.outdoorEnvironment = undefined;
     if (this.skySystem) {
       this.skySystem.destroy();
       this.skySystem = undefined;
@@ -470,14 +485,6 @@ export class Environment extends System {
       this.sky.geometry.dispose();
       if (this.sky.parent) this.sky.parent.remove(this.sky);
       this.sky = null;
-    }
-
-    if (
-      this.world.stage?.scene?.environment &&
-      this.world.stage.scene.environment instanceof THREE.Texture
-    ) {
-      this.world.stage.scene.environment.dispose();
-      this.world.stage.scene.environment = null;
     }
 
     // Dispose sun light and CSM
@@ -524,6 +531,7 @@ export class Environment extends System {
     // Update sky system first to get current sun position
     if (this.skySystem) {
       this.skySystem.update(_delta);
+      this.outdoorEnvironment?.update(this.skySystem.dayPhase);
 
       // Sync directional light (sun/moon) with sky position
       if (this.sunLight) {
@@ -754,6 +762,14 @@ export class Environment extends System {
    * @param dayIntensity 0-1 (0 = night, 1 = day)
    */
   private updateAmbientLighting(dayIntensity: number): void {
+    // The calibrated environment replaces this fill budget, not adds to it.
+    // Keep analytic lights available during preparation and on server-free
+    // legacy test worlds, but never double-count them in the ready scene.
+    if (this.outdoorEnvironment?.ready) {
+      if (this.hemisphereLight) this.hemisphereLight.intensity = 0;
+      if (this.ambientLight) this.ambientLight.intensity = 0;
+      return;
+    }
     const nightIntensity = 1 - dayIntensity;
 
     if (this.hemisphereLight) {

@@ -1,5 +1,52 @@
 # Duel Arena, Streaming, and Hyperbet Launch Checklist
 
+## Shared outdoor lighting — implementation candidate, 2026-09-11
+
+- [x] Preserve renderer preparation serialization after caller timeout. The
+  underlying operation retains its queue slot and resources until it settles.
+  Checkpoint `027d7552bf50c11daa40b4166709ae7892e3f25e` is pushed; exact remote
+  revision and GitHub author/committer `dreaminglucid` are verified.
+- [x] Implement a world-owned twelve-phase sky PMREM cache, continuous two-map
+  blending and authored-scene equipment inheritance. No per-frame captures,
+  private studio map, avatar reshaping or source-texture recoloring.
+- [x] Pass 100 focused CPU tests across seven suites, including actual sky-node
+  arithmetic, authored material ownership, interval transitions, failure cleanup
+  and queue semantics. These are not GPU radiometry, art or performance approval.
+- [x] Actual Chrome/Metal probe26: 12 maps ready in 1,865.7ms observed startup
+  time, 45 sampled scene/gear inheritance receipts, 11 views/28 total PNGs,
+  292 unchanged pins, zero GPU/TSL/page errors and clean owned test teardown.
+  Whole integration still FAILS on 19 cow/dagger content errors; no art approval.
+- [x] Capture actual natural-night probe27 without clock/light/exposure writes:
+  six baseline PNGs, 294 unchanged pins, zero GPU/page errors, clean owned
+  teardown. Same kit cameras as25; phase .161-.163, day intensity0, exposure1.10.
+  Skin reads pale lavender/gray without pronounced cyan here; bronze remains
+  too dark and weakly defined. This is evidence collected, not art approval.
+- [ ] Resolve night skin/metal readability, directional RGB/roughness, full-cycle
+  transitions, live runtime-owner disposal/reconnect and normal-client previews.
+- [ ] Preserve probe27's FAIL: its later spatial admission requires initial
+  fishing coordinates, but the exact-ID spot had moved by (+7,-1.25) after the
+  natural-night wait. Record authoritative relocation lineage in a future
+  lifecycle-aware study; do not waive identity/position gates or certify this
+  relocated target from client observations alone. No spatial views completed.
+  The existing 19 cow/dagger content errors remain separate failures.
+- [x] Resolve five impostor and 90 procgen r186 TSL boundary diagnostics without
+  changing shader formulas or legacy integer coercion. Procgen's 673 CPU tests
+  pass. Normal client build including its dependency graph, shared build and
+  refreshed server build pass; the separate all-package build is not certified.
+  Compatibility checkpoint `307aa030f6ea14807e162c6a025f101480d0db21` is pushed
+  with exact remote revision and GitHub author/committer `dreaminglucid` verified.
+- [ ] Measure the real cost. Twelve RGBA16F atlases contain 18 MiB of base color
+  storage, not total GPU memory. Two-map IBL sampling and loading work require
+  representative frame-time and memory evidence.
+- [ ] Finish custom tree/water lighting coherence, shadow/contact, compact-only
+  terrain composition, one authoritative arena and real resource-tree groves.
+  Cow/dagger content failures and native equipment delivery remain separate open
+  gates; injected diagnostic equipment is not production integration.
+
+Details and calibration limitations are in the implementation's
+`docs/outdoor-lighting-qualification-20260911.md`. This remains an unqualified
+graphics candidate, not AAA, launch, merge or performance acceptance.
+
 ## Island tree population — resource-authoritative direction, 2026-09-10
 
 The existing **choppable resource trees are the island's tree population**.
@@ -90,9 +137,9 @@ renderer qualification recorded below.
   author/committer `dreaminglucid` verified. Its failed integration is explicit.
 - [ ] Fix the GPU/shader blockers before promotion, then continue one-arena
   authority and real resource-tree distribution.
-- [ ] Preserve shader-precompile serialization through timeout: the current
-  timeout rejects the wait without stopping the underlying compilation. Verify
-  a timed-out job cannot overlap its successor or falsely report an idle queue.
+- [x] Implement shader-precompile serialization through caller timeout; real
+  deferred-operation regressions verify that unfinished work blocks successors
+  and retains busy status. Actual GPU/lifecycle qualification remains separate.
 - [ ] Release the actual water reflector's owned render targets at teardown and
   verify restart/reconnect resource counts. The existing lookup checks the wrong
   property; neither finding is yet proven to cause probe20's GPU errors.

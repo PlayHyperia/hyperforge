@@ -446,6 +446,146 @@ type MoonMaterialUniforms = {
   uOpacity: TSLUniformFloat;
 };
 
+function skyCycleSmoothstep(edge0: number, edge1: number, x: number): number {
+  const t = Math.max(0, Math.min(1, (x - edge0) / (edge1 - edge0)));
+  return t * t * (3 - 2 * t);
+}
+
+/**
+ * Existing cycle math, without reading or changing any clock. Writes the caller's
+ * direction, with no allocation. Deliberately retains the existing intensity
+ * jumps at DAWN_END (.28: 1 -> .934) and DUSK_START (.72: .934 -> 1).
+ */
+export function sampleSkyCycle(
+  phase: number,
+  direction: THREE.Vector3,
+): number {
+  let dayIntensity: number;
+  if (phase < DAY_CYCLE.DAWN_START || phase >= DAY_CYCLE.DUSK_END) {
+    dayIntensity = 0;
+  } else if (phase < DAY_CYCLE.DAWN_END) {
+    dayIntensity = skyCycleSmoothstep(
+      DAY_CYCLE.DAWN_START,
+      DAY_CYCLE.DAWN_END,
+      phase,
+    );
+  } else if (phase < DAY_CYCLE.DUSK_START) {
+    const noonFactor = 1 - Math.abs(phase - 0.5) * 2;
+    dayIntensity =
+      DAY_CYCLE.NOON_MIN_INTENSITY +
+      noonFactor * (1 - DAY_CYCLE.NOON_MIN_INTENSITY);
+  } else {
+    dayIntensity =
+      1 - skyCycleSmoothstep(DAY_CYCLE.DUSK_START, DAY_CYCLE.DUSK_END, phase);
+  }
+
+  const sunArcAngle = (phase - 0.25) * Math.PI * 2;
+  const sunElevation = Math.sin(sunArcAngle);
+  const sunAzimuth = Math.cos(sunArcAngle);
+  direction
+    .set(
+      sunAzimuth * Math.max(0.1, 1 - Math.abs(sunElevation)),
+      sunElevation,
+      SUN_LIGHT.TILT * sunAzimuth,
+    )
+    .normalize();
+  return dayIntensity;
+}
+
+/** Literal shared starless atmosphere; no sun disc, stars, clouds or exposure. */
+function createStarlessSkyColorNode(
+  direction: Node<"vec3">,
+  uDayCycleProgress: Node<"float">,
+  uDayIntensity: Node<"float">,
+  uSunPosition: Node<"vec3">,
+  palette: SkyPaletteUniforms,
+): Node<"vec4"> {
+  return Fn(() => {
+    const localPos = normalize(direction);
+    const elevation = abs(localPos.y);
+
+    const dayIntensity = uDayIntensity;
+    const nightIntensity = sub(float(1.0), dayIntensity);
+
+    const dayZenith = palette.dayZenith.rgb;
+    const dayHorizon = palette.dayHorizon.rgb;
+    const dayGradient = pow(sub(float(1.0), elevation), float(1.5));
+    const daySkyColor = mix(dayZenith, dayHorizon, dayGradient);
+
+    const nightZenith = palette.nightZenith.rgb;
+    const nightHorizon = palette.nightHorizon.rgb;
+    const nightGradient = pow(sub(float(1.0), elevation), float(2.0));
+    const nightSkyColor = mix(nightZenith, nightHorizon, nightGradient);
+
+    let skyColor: Node<"vec3"> = mix(nightSkyColor, daySkyColor, dayIntensity);
+
+    const sunY = uSunPosition.y;
+    const dawnDuskFactor = smoothstep(float(-0.2), float(0.0), sunY);
+    const dawnDuskFade = smoothstep(float(0.4), float(0.15), sunY);
+    const sunriseSunsetIntensity = mul(dawnDuskFactor, dawnDuskFade);
+
+    const sunDir = normalize(uSunPosition);
+    const angleToSun = dot(localPos, sunDir);
+
+    const sunriseColor = palette.sunrise.rgb;
+    const sunsetPinkColor = palette.sunsetPink.rgb;
+    const sunGlowRaw = clamp(angleToSun, float(0.0), float(1.0));
+    const sunGlowAngle = pow(sunGlowRaw, float(4.0));
+    const horizonGlow = pow(
+      clamp(
+        sub(float(1.0), mul(elevation, float(2.0))),
+        float(0.0),
+        float(1.0),
+      ),
+      float(2.0),
+    );
+    const glowIntensity = mul(
+      mul(sunGlowAngle, horizonGlow),
+      mul(sunriseSunsetIntensity, float(0.6)),
+    );
+    const dawnOrDusk = smoothstep(float(0.2), float(0.3), uDayCycleProgress);
+    const glowColor = mix(sunriseColor, sunsetPinkColor, dawnOrDusk);
+    skyColor = add(skyColor, mul(glowColor, glowIntensity));
+
+    const moonPos = mul(sunDir, float(-1.0));
+    const angleToMoon = dot(localPos, moonPos);
+    const moonGlowRaw = clamp(angleToMoon, float(0.0), float(1.0));
+    const moonGlowAngle = pow(moonGlowRaw, float(6.0));
+    const moonGlowColor = palette.moonGlow.rgb;
+    const moonGlowIntensity = mul(
+      mul(moonGlowAngle, nightIntensity),
+      float(0.4),
+    );
+    skyColor = add(skyColor, mul(moonGlowColor, moonGlowIntensity));
+
+    const hazeColor = palette.haze.rgb;
+    const hazeStrength = smoothstep(float(0.15), float(0.0), elevation);
+    const hazeAmount = mul(
+      hazeStrength,
+      mul(float(0.3), mul(dayIntensity, float(0.9))),
+    );
+    skyColor = mix(skyColor, hazeColor, hazeAmount);
+
+    return vec4(skyColor, float(1.0));
+  })();
+}
+
+export interface SkyLightingCapture {
+  readonly scene: THREE.Scene;
+  /** Unscaled starless atmosphere using this capture's palette snapshot. */
+  sampleRadiance(
+    phase: number,
+    direction: THREE.Vector3,
+    target: THREE.Color,
+  ): void;
+  setPhase(
+    phase: number,
+    skyRadianceScale: number,
+    groundRadiance: readonly [number, number, number],
+  ): void;
+  dispose(): void;
+}
+
 // -----------------------------
 // SkySystem
 // -----------------------------
@@ -1162,82 +1302,13 @@ export class SkySystem extends System {
       uDayIntensity: uDayIntensity,
     } as SkyMaterialUniforms;
 
-    // Same as main sky dome but WITHOUT stars and galaxy (they'd bleed bright spots into fog)
-    const fogSkyColorNode = Fn(() => {
-      const localPos = normalize(positionLocal);
-      const elevation = abs(localPos.y);
-
-      const dayIntensity = uDayIntensity;
-      const nightIntensity = sub(float(1.0), dayIntensity);
-
-      const dayZenith = this.skyPaletteUniforms.dayZenith.rgb;
-      const dayHorizon = this.skyPaletteUniforms.dayHorizon.rgb;
-      const dayGradient = pow(sub(float(1.0), elevation), float(1.5));
-      const daySkyColor = mix(dayZenith, dayHorizon, dayGradient);
-
-      const nightZenith = this.skyPaletteUniforms.nightZenith.rgb;
-      const nightHorizon = this.skyPaletteUniforms.nightHorizon.rgb;
-      const nightGradient = pow(sub(float(1.0), elevation), float(2.0));
-      const nightSkyColor = mix(nightZenith, nightHorizon, nightGradient);
-
-      let skyColor: Node<"vec3"> = mix(
-        nightSkyColor,
-        daySkyColor,
-        dayIntensity,
-      );
-
-      // Sunrise/sunset glow
-      const sunY = uSunPosition.y;
-      const dawnDuskFactor = smoothstep(float(-0.2), float(0.0), sunY);
-      const dawnDuskFade = smoothstep(float(0.4), float(0.15), sunY);
-      const sunriseSunsetIntensity = mul(dawnDuskFactor, dawnDuskFade);
-
-      const sunDir = normalize(uSunPosition);
-      const angleToSun = dot(localPos, sunDir);
-
-      const sunriseColor = this.skyPaletteUniforms.sunrise.rgb;
-      const sunsetPinkColor = this.skyPaletteUniforms.sunsetPink.rgb;
-      const sunGlowRaw = clamp(angleToSun, float(0.0), float(1.0));
-      const sunGlowAngle = pow(sunGlowRaw, float(4.0));
-      const horizonGlow = pow(
-        clamp(
-          sub(float(1.0), mul(elevation, float(2.0))),
-          float(0.0),
-          float(1.0),
-        ),
-        float(2.0),
-      );
-      const glowIntensity = mul(
-        mul(sunGlowAngle, horizonGlow),
-        mul(sunriseSunsetIntensity, float(0.6)),
-      );
-      const dawnOrDusk = smoothstep(float(0.2), float(0.3), uDayCycleProgress);
-      const glowColor = mix(sunriseColor, sunsetPinkColor, dawnOrDusk);
-      skyColor = add(skyColor, mul(glowColor, glowIntensity));
-
-      // Moon glow
-      const moonPos = mul(sunDir, float(-1.0));
-      const angleToMoon = dot(localPos, moonPos);
-      const moonGlowRaw = clamp(angleToMoon, float(0.0), float(1.0));
-      const moonGlowAngle = pow(moonGlowRaw, float(6.0));
-      const moonGlowColor = this.skyPaletteUniforms.moonGlow.rgb;
-      const moonGlowIntensity = mul(
-        mul(moonGlowAngle, nightIntensity),
-        float(0.4),
-      );
-      skyColor = add(skyColor, mul(moonGlowColor, moonGlowIntensity));
-
-      // Horizon haze
-      const hazeColor = this.skyPaletteUniforms.haze.rgb;
-      const hazeStrength = smoothstep(float(0.15), float(0.0), elevation);
-      const hazeAmount = mul(
-        hazeStrength,
-        mul(float(0.3), mul(dayIntensity, float(0.9))),
-      );
-      skyColor = mix(skyColor, hazeColor, hazeAmount);
-
-      return vec4(skyColor, float(1.0));
-    })();
+    const fogSkyColorNode = createStarlessSkyColorNode(
+      positionLocal,
+      uDayCycleProgress,
+      uDayIntensity,
+      uSunPosition,
+      this.skyPaletteUniforms,
+    );
 
     const fogSkyMat = new MeshBasicNodeMaterial();
     fogSkyMat.colorNode = fogSkyColorNode;
@@ -1253,6 +1324,188 @@ export class SkySystem extends System {
     console.log(
       `[SkySystem] Fog sky scene created, rendering to shared fogRenderTarget (${fogRenderTarget.width}x${fogRenderTarget.height})`,
     );
+  }
+
+  /**
+   * Isolated, CPU-only scene boundary for the caller's PMREM preparation.
+   * Captures a palette snapshot and never borrows live mesh/phase ownership.
+   * Ground is explicit linear radiance, not a claim of measured terrain bounce.
+   * The caller owns filtering/render targets and must dispose this capture.
+   */
+  createLightingCapture(): SkyLightingCapture {
+    const copy = (source: PaletteColorUniform): PaletteColorUniform => {
+      if (!source.value.toArray().every((c) => Number.isFinite(c) && c >= 0)) {
+        throw new Error(
+          "Lighting capture requires finite nonnegative sky colors",
+        );
+      }
+      return uniform(source.value.clone());
+    };
+    const palette: SkyPaletteUniforms = {
+      dayZenith: copy(this.skyPaletteUniforms.dayZenith),
+      dayHorizon: copy(this.skyPaletteUniforms.dayHorizon),
+      nightZenith: copy(this.skyPaletteUniforms.nightZenith),
+      nightHorizon: copy(this.skyPaletteUniforms.nightHorizon),
+      sunrise: copy(this.skyPaletteUniforms.sunrise),
+      sunsetPink: copy(this.skyPaletteUniforms.sunsetPink),
+      moonGlow: copy(this.skyPaletteUniforms.moonGlow),
+      haze: copy(this.skyPaletteUniforms.haze),
+    };
+    const phase = uniform(0);
+    const sunDirection = uniform(new THREE.Vector3());
+    const dayIntensity = uniform(sampleSkyCycle(0, sunDirection.value));
+    const skyScale = uniform(1);
+    const groundColor = uniform(new THREE.Color(0, 0, 0));
+    // Startup integration reuses these private values; sampling never changes
+    // the scene's phase, sun, intensity, scale or explicit ground radiance.
+    const sampleSun = new THREE.Vector3();
+    const sampleDay = new THREE.Color();
+    const sampleGlow = new THREE.Color();
+    const scene = new THREE.Scene();
+    scene.name = "SkyLightingCapture";
+    scene.background = new THREE.Color(0, 0, 0);
+    const skyMaterial = new MeshBasicNodeMaterial({
+      side: THREE.BackSide,
+      depthTest: false,
+      depthWrite: false,
+      fog: false,
+      toneMapped: false,
+    });
+    const skyColor = createStarlessSkyColorNode(
+      positionLocal,
+      phase,
+      dayIntensity,
+      sunDirection,
+      palette,
+    );
+    skyMaterial.colorNode = vec4(skyColor.rgb.mul(skyScale), float(1));
+    const skyGeometry = new THREE.SphereGeometry(10, 64, 32);
+    const skyMesh = new THREE.Mesh(skyGeometry, skyMaterial);
+    skyMesh.name = "LightingCaptureSky";
+    skyMesh.frustumCulled = false;
+    skyMesh.renderOrder = -1;
+    scene.add(skyMesh);
+
+    // Cover the starless shader's mirrored lower hemisphere, without capturing
+    // actors, water/viewport nodes or any other part of the live world scene.
+    const groundGeometry = new THREE.SphereGeometry(
+      9,
+      32,
+      16,
+      0,
+      Math.PI * 2,
+      Math.PI / 2,
+      Math.PI / 2,
+    );
+    const groundMaterial = new MeshBasicNodeMaterial({
+      side: THREE.BackSide,
+      depthTest: false,
+      depthWrite: false,
+      fog: false,
+      toneMapped: false,
+    });
+    groundMaterial.colorNode = groundColor.rgb;
+    const groundMesh = new THREE.Mesh(groundGeometry, groundMaterial);
+    groundMesh.name = "LightingCaptureGround";
+    groundMesh.frustumCulled = false;
+    groundMesh.renderOrder = 1;
+    scene.add(groundMesh);
+
+    let disposed = false;
+    return {
+      scene,
+      sampleRadiance(samplePhase, direction, target) {
+        if (disposed) throw new Error("Lighting capture is disposed");
+        const length = direction.length();
+        if (
+          !Number.isFinite(samplePhase) ||
+          samplePhase < 0 ||
+          samplePhase > 1 ||
+          !Number.isFinite(length) ||
+          length <= 0
+        ) {
+          throw new Error(
+            "Invalid lighting capture sampling phase or direction",
+          );
+        }
+        const intensity = sampleSkyCycle(samplePhase, sampleSun);
+        const x = direction.x / length,
+          y = direction.y / length,
+          z = direction.z / length;
+        const elevation = Math.abs(y);
+        const dayGradient = Math.pow(1 - elevation, 1.5);
+        const nightGradient = Math.pow(1 - elevation, 2);
+        sampleDay
+          .copy(palette.dayZenith.value)
+          .lerp(palette.dayHorizon.value, dayGradient);
+        target
+          .copy(palette.nightZenith.value)
+          .lerp(palette.nightHorizon.value, nightGradient)
+          .lerp(sampleDay, intensity);
+        const sunriseSunsetIntensity =
+          skyCycleSmoothstep(-0.2, 0, sampleSun.y) *
+          skyCycleSmoothstep(0.4, 0.15, sampleSun.y);
+        const angleToSun = x * sampleSun.x + y * sampleSun.y + z * sampleSun.z;
+        const sunGlowAngle = Math.pow(Math.max(0, Math.min(1, angleToSun)), 4);
+        const horizonGlow = Math.pow(
+          Math.max(0, Math.min(1, 1 - elevation * 2)),
+          2,
+        );
+        const glowIntensity =
+          sunGlowAngle * horizonGlow * (sunriseSunsetIntensity * 0.6);
+        sampleGlow
+          .copy(palette.sunrise.value)
+          .lerp(
+            palette.sunsetPink.value,
+            skyCycleSmoothstep(0.2, 0.3, samplePhase),
+          )
+          .multiplyScalar(glowIntensity);
+        target.add(sampleGlow);
+        const moonGlowAngle = Math.pow(
+          Math.max(0, Math.min(1, -angleToSun)),
+          6,
+        );
+        const moonGlowIntensity = moonGlowAngle * (1 - intensity) * 0.4;
+        target.r += palette.moonGlow.value.r * moonGlowIntensity;
+        target.g += palette.moonGlow.value.g * moonGlowIntensity;
+        target.b += palette.moonGlow.value.b * moonGlowIntensity;
+        const hazeAmount =
+          skyCycleSmoothstep(0.15, 0, elevation) * (0.3 * (intensity * 0.9));
+        target.lerp(palette.haze.value, hazeAmount);
+      },
+      setPhase(nextPhase, skyRadianceScale, groundRadiance) {
+        if (disposed) throw new Error("Lighting capture is disposed");
+        if (
+          !Number.isFinite(nextPhase) ||
+          nextPhase < 0 ||
+          nextPhase > 1 ||
+          !Number.isFinite(skyRadianceScale) ||
+          skyRadianceScale < 0 ||
+          !Array.isArray(groundRadiance) ||
+          groundRadiance.length !== 3 ||
+          !groundRadiance.every((c) => Number.isFinite(c) && c >= 0)
+        ) {
+          throw new Error("Invalid lighting capture phase or linear radiance");
+        }
+        dayIntensity.value = sampleSkyCycle(nextPhase, sunDirection.value);
+        phase.value = nextPhase;
+        skyScale.value = skyRadianceScale;
+        groundColor.value.setRGB(
+          groundRadiance[0],
+          groundRadiance[1],
+          groundRadiance[2],
+        );
+      },
+      dispose() {
+        if (disposed) return;
+        disposed = true;
+        scene.remove(skyMesh, groundMesh);
+        skyMaterial.dispose();
+        groundMaterial.dispose();
+        skyGeometry.dispose();
+        groundGeometry.dispose();
+      },
+    };
   }
 
   // Store cloud group for rotation animation
@@ -1449,57 +1702,8 @@ export class SkySystem extends System {
     // Sun is above horizon from dayPhase 0.25 (sunrise) to 0.75 (sunset)
     const isDay = this.isDay;
 
-    // Calculate day intensity with SHARP transitions at sunrise/sunset
-    // Night stays truly dark until sunrise, then rapid transition
-    // This creates the feeling of "darkest before dawn" then sudden light
-    const smoothstep = (edge0: number, edge1: number, x: number) => {
-      const t = Math.max(0, Math.min(1, (x - edge0) / (edge1 - edge0)));
-      return t * t * (3 - 2 * t);
-    };
-
-    let dayIntensity: number;
-    if (dayPhase < DAY_CYCLE.DAWN_START || dayPhase >= DAY_CYCLE.DUSK_END) {
-      dayIntensity = 0;
-    } else if (dayPhase < DAY_CYCLE.DAWN_END) {
-      dayIntensity = smoothstep(
-        DAY_CYCLE.DAWN_START,
-        DAY_CYCLE.DAWN_END,
-        dayPhase,
-      );
-    } else if (dayPhase < DAY_CYCLE.DUSK_START) {
-      const noonFactor = 1 - Math.abs(dayPhase - 0.5) * 2;
-      dayIntensity =
-        DAY_CYCLE.NOON_MIN_INTENSITY +
-        noonFactor * (1 - DAY_CYCLE.NOON_MIN_INTENSITY);
-    } else {
-      dayIntensity =
-        1 - smoothstep(DAY_CYCLE.DUSK_START, DAY_CYCLE.DUSK_END, dayPhase);
-    }
-
+    const dayIntensity = sampleSkyCycle(dayPhase, this._sunDir);
     this._dayIntensity = dayIntensity;
-
-    // Sun direction - traces arc across sky from east to west
-    // dayPhase: 0 = midnight, 0.25 = sunrise, 0.5 = noon, 0.75 = sunset, 1 = midnight
-    //
-    // The sun arc angle: -π/2 at midnight, 0 at sunrise, π/2 at noon, π at sunset
-    const sunArcAngle = (dayPhase - 0.25) * Math.PI * 2;
-
-    // Sun position in sky:
-    // - X: East-West position (positive = east, negative = west)
-    // - Y: Height above horizon (positive = above, negative = below)
-    // - Z: North-South offset (slight tilt for more natural path)
-    const sunElevation = Math.sin(sunArcAngle); // -1 to 1, peaks at noon
-    const sunAzimuth = Math.cos(sunArcAngle); // 1 at sunrise, -1 at sunset
-
-    const sunTilt = SUN_LIGHT.TILT;
-
-    this._sunDir
-      .set(
-        sunAzimuth * Math.max(0.1, 1 - Math.abs(sunElevation)), // X: E-W, compressed when high
-        sunElevation, // Y: height
-        sunTilt * sunAzimuth, // Z: slight tilt
-      )
-      .normalize();
 
     // Update uniforms
     this.skyUniforms.time.value = this.elapsed;

@@ -61,11 +61,15 @@ approval follows.
 
 ## Remaining coordinated lighting work
 
-The production scene explicitly has no shared PBR environment. The diagnostic
-armor still borrows a neutral studio map while baseline skin does not; ordinary
+Probe25's production scene explicitly had no shared PBR environment. Its diagnostic
+armor borrowed a neutral studio map while baseline skin did not; ordinary
 equipment also has a distinct metallicity fallback. Unify these with a bounded,
 outdoor-calibrated environment and correct ownership. Do not promote the earlier
 scene-wide neutral reference: its actual checkpoint31 made night ground too bright.
+
+The subsequent shared-sky implementation candidate is recorded separately in
+`outdoor-lighting-qualification-20260911.md`; probe25 does not qualify its changed
+lighting, filtering or material-inheritance behavior.
 
 Tree/water custom illumination remains opt-in and is not full shadowed PBR/IBL.
 Keep their wind, alpha, normal/depth, foam and fog behavior while bringing their

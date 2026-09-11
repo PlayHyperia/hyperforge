@@ -7,6 +7,7 @@ import {
   disposeEquipmentVisualMaterials,
   isolateEquipmentVisualMaterials,
   removeEquipmentVisual,
+  type EquipmentVisualLighting,
   type EquipmentVisualStore,
 } from "../EquipmentVisualHelpers";
 
@@ -98,6 +99,229 @@ function avatar() {
 }
 
 describe("equipment-instance material ownership", () => {
+  it("inherits the live scene environment for early and late equipment without private maps", () => {
+    const source = template();
+    source.metal.metalnessMap = source.texture;
+    source.metal.roughnessMap = source.texture;
+    const sourceEnvironment = new THREE.Texture();
+    const earlyEnvironment = new THREE.Texture();
+    const lateEnvironment = new THREE.Texture();
+    cleanup.push(() => {
+      sourceEnvironment.dispose();
+      earlyEnvironment.dispose();
+      lateEnvironment.dispose();
+    });
+    source.metal.envMap = sourceEnvironment;
+    source.metal.envMapIntensity = 0.4;
+    const sourceDisposals = disposalCounter(source.metal);
+    const textureDisposals = disposalCounter(source.texture);
+    const environmentDisposals = [
+      sourceEnvironment,
+      earlyEnvironment,
+      lateEnvironment,
+    ].map(disposalCounter);
+    const stage = new THREE.Scene();
+    const actors = [avatar(), avatar()];
+    actors.forEach((actor) => stage.add(actor.vrm.scene));
+    const early = privateClone(source.root);
+    const waiting = privateClone(source.root);
+    stage.environment = earlyEnvironment;
+    stage.environmentIntensity = 0.7;
+    const earlyMaterial = firstMaterial(early);
+    const cacheCallback = earlyMaterial.customProgramCacheKey;
+    const cacheDescriptor = Object.getOwnPropertyDescriptor(
+      earlyMaterial,
+      "customProgramCacheKey",
+    );
+    const earlyDisposals = disposalCounter(earlyMaterial);
+    const attach = (model: THREE.Object3D, index: number) =>
+      attachEquipmentVisualToVRM({
+        slot: "weapon",
+        modelRoot: model,
+        ...actors[index],
+        lighting: { mode: "authored-scene" },
+      });
+
+    expect(attach(early, 0)).toBe(true);
+    const version = earlyMaterial.version;
+    expect(attach(early, 0)).toBe(true);
+    expect(earlyMaterial.version).toBe(version);
+    expect(firstMaterial(early)).toBe(earlyMaterial);
+    expect(earlyMaterial.customProgramCacheKey).toBe(cacheCallback);
+    expect(
+      Object.getOwnPropertyDescriptor(earlyMaterial, "customProgramCacheKey"),
+    ).toEqual(cacheDescriptor);
+    expect(stage.environment).toBe(earlyEnvironment);
+    expect(stage.environmentIntensity).toBe(0.7);
+    expect(firstMaterial(waiting).envMap).toBe(sourceEnvironment);
+    expect(firstMaterial(waiting).metalness).toBe(0.84);
+
+    // An already-cloned pending item must not pin the old scene map when it
+    // attaches later. No lighting-policy update is needed on the early item.
+    stage.environment = lateEnvironment;
+    stage.environmentIntensity = 0.2;
+    expect(attach(waiting, 1)).toBe(true);
+    const lateMaterial = firstMaterial(waiting);
+    for (const material of [earlyMaterial, lateMaterial]) {
+      expect(material.envMap).toBeNull();
+      expect(material.metalness).toBe(0.84);
+      expect(material.envMapIntensity).toBe(0.4);
+      expect(material.roughness).toBe(0.3);
+      expect(material.ior).toBe(1.5);
+      expect(material.metalnessMap).toBe(source.texture);
+      expect(material.roughnessMap).toBe(source.texture);
+      expect(material.map).toBe(source.texture);
+      expect(material.normalMap).toBe(source.texture);
+      expect(material.color.equals(source.metal.color)).toBe(true);
+    }
+    expect(earlyMaterial.version).toBe(version);
+    expect(lateMaterial).not.toBe(earlyMaterial);
+    expect(source.metal.envMap).toBe(sourceEnvironment);
+    expect(source.metal.metalness).toBe(0.84);
+    expect(stage.environment).toBe(lateEnvironment);
+    expect(stage.environmentIntensity).toBe(0.2);
+    removeEquipmentVisual(actors[0].visuals, "weapon");
+    removeEquipmentVisual(actors[0].visuals, "weapon");
+    expect(earlyDisposals()).toBe(1);
+    expect(actors[1].visuals.weapon?.parent).toBe(actors[1].hand);
+    expect(sourceDisposals()).toBe(0);
+    expect(textureDisposals()).toBe(0);
+    expect(environmentDisposals.map((count) => count())).toEqual([0, 0, 0]);
+  });
+
+  it.each([false, true])(
+    "restores cache ownership through explicit, scene and legacy policies (own callback: %s)",
+    (custom) => {
+      const source = template();
+      const sourceEnvironment = new THREE.Texture();
+      const borrowedEnvironment = new THREE.Texture();
+      cleanup.push(() => {
+        sourceEnvironment.dispose();
+        borrowedEnvironment.dispose();
+      });
+      source.metal.envMap = sourceEnvironment;
+      source.metal.envMapIntensity = 0.4;
+      const a = avatar();
+      const model = privateClone(source.root);
+      const material = firstMaterial(model);
+      if (custom)
+        Object.defineProperty(material, "customProgramCacheKey", {
+          value: function (this: THREE.Material) {
+            return `authored:${this.type}`;
+          },
+          configurable: true,
+          enumerable: false,
+          writable: false,
+        });
+      const original = Object.getOwnPropertyDescriptor(
+        material,
+        "customProgramCacheKey",
+      );
+      const originalKeys = Object.keys(material);
+      const originalCallback = material.customProgramCacheKey;
+      const attach = (lighting?: EquipmentVisualLighting) =>
+        attachEquipmentVisualToVRM({
+          slot: "weapon",
+          modelRoot: model,
+          ...a,
+          lighting,
+        });
+      for (let cycle = 0; cycle < 2; cycle++) {
+        expect(attach()).toBe(true);
+        expect(material.metalness).toBe(0);
+        expect(
+          attach({
+            mode: "authored-pbr",
+            environmentMap: borrowedEnvironment,
+            intensity: 0.75,
+          }),
+        ).toBe(true);
+        expect(material.envMap).toBe(borrowedEnvironment);
+        const borrowedVersion = material.version;
+        expect(attach({ mode: "authored-scene" })).toBe(true);
+        expect(material.version).toBeGreaterThan(borrowedVersion);
+        expect(material.metalness).toBe(0.84);
+        expect(material.envMap).toBeNull();
+        expect(material.envMapIntensity).toBe(0.4);
+        expect(material.customProgramCacheKey).toBe(originalCallback);
+        expect(
+          Object.getOwnPropertyDescriptor(material, "customProgramCacheKey"),
+        ).toEqual(original);
+        expect(Object.keys(material)).toEqual(originalKeys);
+        const sceneVersion = material.version;
+        expect(attach({ mode: "authored-scene" })).toBe(true);
+        expect(material.version).toBe(sceneVersion);
+        expect(attach()).toBe(true);
+        expect(material.metalness).toBe(0);
+        expect(material.envMap).toBe(sourceEnvironment);
+        expect(material.envMapIntensity).toBe(0.4);
+      }
+    },
+  );
+
+  it("does not require a writable cache override for direct scene inheritance", () => {
+    const source = template();
+    const a = avatar();
+    const model = privateClone(source.root);
+    const material = firstMaterial(model);
+    Object.defineProperty(material, "customProgramCacheKey", {
+      value: () => "immutable-authored-key",
+      configurable: false,
+      writable: false,
+    });
+    const original = Object.getOwnPropertyDescriptor(
+      material,
+      "customProgramCacheKey",
+    );
+    expect(
+      attachEquipmentVisualToVRM({
+        slot: "weapon",
+        modelRoot: model,
+        ...a,
+        lighting: { mode: "authored-scene" },
+      }),
+    ).toBe(true);
+    expect(material.envMap).toBeNull();
+    expect(material.metalness).toBe(0.84);
+    expect(
+      Object.getOwnPropertyDescriptor(material, "customProgramCacheKey"),
+    ).toEqual(original);
+  });
+
+  it("recovers authored metalness from a legacy-held clone for scene-lit reattachment", () => {
+    const source = template();
+    source.metal.metalnessMap = source.texture;
+    const a = avatar();
+    const b = avatar();
+    const legacy = privateClone(source.root);
+    expect(
+      attachEquipmentVisualToVRM({ slot: "weapon", modelRoot: legacy, ...a }),
+    ).toBe(true);
+    expect(firstMaterial(legacy).metalness).toBe(0);
+    const sceneLit = privateClone(legacy);
+    const material = firstMaterial(sceneLit);
+    expect(material.metalness).toBe(0);
+    const count = disposalCounter(material);
+    expect(
+      attachEquipmentVisualToVRM({
+        slot: "weapon",
+        modelRoot: sceneLit,
+        ...b,
+        lighting: { mode: "authored-scene" },
+      }),
+    ).toBe(true);
+    expect(material.metalness).toBe(0.84);
+    expect(material.metalnessMap).toBe(source.texture);
+    expect(material.envMap).toBeNull();
+    expect(firstMaterial(legacy).metalness).toBe(0);
+    expect(source.metal.metalness).toBe(0.84);
+    removeEquipmentVisual(a.visuals, "weapon");
+    expect(count()).toBe(0);
+    expect(b.visuals.weapon?.parent).toBe(b.hand);
+    removeEquipmentVisual(b.visuals, "weapon");
+    expect(count()).toBe(1);
+  });
+
   it("borrows a per-item environment without changing authored PBR or the global scene", () => {
     const source = template();
     source.metal.roughnessMap = source.texture;
@@ -329,9 +553,18 @@ describe("equipment-instance material ownership", () => {
     )!;
     const replacement = () => "controller";
     material.customProgramCacheKey = replacement;
-    expect(
-      attachEquipmentVisualToVRM({ slot: "weapon", modelRoot: model, ...a }),
-    ).toBe(false);
+    for (const lighting of [undefined, { mode: "authored-scene" }] satisfies (
+      EquipmentVisualLighting | undefined
+    )[]) {
+      expect(
+        attachEquipmentVisualToVRM({
+          slot: "weapon",
+          modelRoot: model,
+          ...a,
+          lighting,
+        }),
+      ).toBe(false);
+    }
     expect(material.customProgramCacheKey).toBe(replacement);
     expect(material.envMap).toBe(environmentMap);
     expect(material.metalness).toBe(0.84);
@@ -383,14 +616,19 @@ describe("equipment-instance material ownership", () => {
     Object.defineProperty(firstMaterial(model), "envNode", {
       value: new THREE.Vector3(),
     });
-    expect(
-      attachEquipmentVisualToVRM({
-        slot: "weapon",
-        modelRoot: model,
-        ...a,
-        lighting: { mode: "authored-pbr", environmentMap, intensity: 1 },
-      }),
-    ).toBe(false);
+    for (const lighting of [
+      { mode: "authored-pbr", environmentMap, intensity: 1 },
+      { mode: "authored-scene" },
+    ] satisfies EquipmentVisualLighting[]) {
+      expect(
+        attachEquipmentVisualToVRM({
+          slot: "weapon",
+          modelRoot: model,
+          ...a,
+          lighting,
+        }),
+      ).toBe(false);
+    }
     expect(a.visuals.weapon).toBe(previous);
     expect(model.parent).toBeNull();
     expect(firstMaterial(model).envMap).toBeNull();
@@ -408,14 +646,19 @@ describe("equipment-instance material ownership", () => {
       environmentMap.dispose();
     });
     const model = new THREE.Mesh(geometry, material);
-    expect(
-      attachEquipmentVisualToVRM({
-        slot: "weapon",
-        modelRoot: model,
-        ...a,
-        lighting: { mode: "authored-pbr", environmentMap, intensity: 1 },
-      }),
-    ).toBe(false);
+    for (const lighting of [
+      { mode: "authored-pbr", environmentMap, intensity: 1 },
+      { mode: "authored-scene" },
+    ] satisfies EquipmentVisualLighting[]) {
+      expect(
+        attachEquipmentVisualToVRM({
+          slot: "weapon",
+          modelRoot: model,
+          ...a,
+          lighting,
+        }),
+      ).toBe(false);
+    }
     expect(model.material).toBe(material);
     expect(model.parent).toBeNull();
     expect(a.visuals.weapon).toBeUndefined();
@@ -670,6 +913,17 @@ describe("equipment-instance material ownership", () => {
     expect((gear.material as THREE.MeshPhysicalMaterial).envMap).toBe(
       environmentMap,
     );
+    expect(
+      attachEquipmentVisualToVRM({
+        slot: "body",
+        modelRoot: model,
+        ...a,
+        lighting: { mode: "authored-scene" },
+      }),
+    ).toBe(true);
+    expect((gear.material as THREE.MeshPhysicalMaterial).envMap).toBeNull();
+    expect((gear.material as THREE.MeshPhysicalMaterial).metalness).toBe(0.84);
+    expect(gear.skeleton).toBe(skeleton);
     expect(source.metal.envMap).toBeNull();
     removeEquipmentVisual(a.visuals, "body");
     expect(gearMaterialCount()).toBe(1);

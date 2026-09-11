@@ -1696,6 +1696,7 @@ export class EquipmentVisualSystem extends SystemBase {
         visuals: equipment as EquipmentVisualStore,
         vrm: activeVrm,
         avatarRoot,
+        lighting: { mode: "authored-scene" },
       });
 
       if (!attached) {

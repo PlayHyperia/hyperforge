@@ -311,12 +311,18 @@ const equipmentMaterialOwners = new WeakMap<
   Set<THREE.Material>
 >();
 
-/** Borrowed, renderer-owned lighting. Omission retains the legacy policy. */
-export type EquipmentVisualLighting = {
-  mode: "authored-pbr";
-  environmentMap: THREE.Texture;
-  intensity: number;
-};
+/** Explicit lighting ownership. Omission retains the legacy policy. */
+export type EquipmentVisualLighting =
+  | {
+      /** Borrow an explicit renderer-owned map, independently of the scene. */
+      mode: "authored-pbr";
+      environmentMap: THREE.Texture;
+      intensity: number;
+    }
+  | {
+      /** Inherit the scene's live environment and intensity without a map lease. */
+      mode: "authored-scene";
+    };
 
 // Keep the authored values even after legacy attachment zeroes metalness.
 // A clone of held gear inherits this baseline, but not its disposal rights.
@@ -664,13 +670,15 @@ export function resolveEquipmentVisualData(options: {
 }
 
 /**
- * Legacy worlds have no global IBL. Authored PBR is opt-in with a borrowed
- * per-material environment; never change the global sky/water environment.
+ * Keep the legacy nonmetal policy unless explicitly asked to retain authored
+ * PBR. Scene inheritance must not retain a private map or its cache override.
+ * None of these policies owns or mutates the scene's lighting or textures.
  */
 function applyEquipmentLighting(
   mesh: THREE.Mesh,
   lighting: EquipmentVisualLighting | undefined,
 ): void {
+  const borrowed = lighting?.mode === "authored-pbr" ? lighting : undefined;
   const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
   for (const mat of mats) {
     const authored = equipmentAuthoredLighting.get(mat);
@@ -678,7 +686,7 @@ function applyEquipmentLighting(
     const standard = mat as THREE.MeshStandardMaterial;
     const cacheKey = equipmentLightingCacheKeys.get(mat);
     let policyChanged = false;
-    if (lighting && !cacheKey) {
+    if (borrowed && !cacheKey) {
       const originalKey = mat.customProgramCacheKey;
       const original = Object.getOwnPropertyDescriptor(
         mat,
@@ -696,7 +704,7 @@ function applyEquipmentLighting(
       });
       equipmentLightingCacheKeys.set(mat, { original, installed });
       policyChanged = true;
-    } else if (!lighting && cacheKey) {
+    } else if (!borrowed && cacheKey) {
       // WebGPU also includes enumerable own properties in its cache key.
       // Restore the descriptor/property set, not just the callback's result.
       if (cacheKey.original) {
@@ -707,11 +715,16 @@ function applyEquipmentLighting(
       equipmentLightingCacheKeys.delete(mat);
       policyChanged = true;
     }
-    const envMap = lighting?.environmentMap ?? authored.envMap;
+    const envMap =
+      lighting?.mode === "authored-scene"
+        ? null
+        : (borrowed?.environmentMap ?? authored.envMap);
     const changed = standard.envMap !== envMap;
     standard.metalness = lighting ? authored.metalness : 0;
     standard.envMap = envMap;
-    standard.envMapIntensity = lighting?.intensity ?? authored.envMapIntensity;
+    // Three uses Scene.environmentIntensity when envMap is null. Retain the
+    // authored material factor for an eventual explicit/legacy policy restore.
+    standard.envMapIntensity = borrowed?.intensity ?? authored.envMapIntensity;
     // WebGPU caches the environment node at shader setup, including its map.
     if (changed || policyChanged) standard.needsUpdate = true;
   }
@@ -723,6 +736,7 @@ function hasUsableEquipmentLighting(
 ): boolean {
   if (
     lighting &&
+    lighting.mode !== "authored-scene" &&
     (lighting.mode !== "authored-pbr" ||
       !lighting.environmentMap?.isTexture ||
       !Number.isFinite(lighting.intensity) ||
@@ -746,7 +760,7 @@ function hasUsableEquipmentLighting(
         )
           usable = false;
       } else if (
-        lighting &&
+        lighting?.mode === "authored-pbr" &&
         (typeof material.customProgramCacheKey !== "function" ||
           (descriptor
             ? !descriptor.configurable
@@ -761,7 +775,7 @@ function hasUsableEquipmentLighting(
           material.isMeshStandardNodeMaterial === true);
       if (!standard) usable = false;
       // A custom environment node wins over envMap. Reject instead of silently
-      // claiming that a caller-supplied environment is being used.
+      // claiming that the explicit map or scene environment is being used.
       if ("envNode" in material && material.envNode != null) usable = false;
     }
   });
