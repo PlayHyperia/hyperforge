@@ -24,6 +24,8 @@ import {
   getDuelArenaConfig,
   getDuelArenaGradeHeight,
   DUEL_ARENA_FLOOR_GROUND_OFFSET,
+  DUEL_ARENA_FLOOR_SOLID_OFFSET,
+  PLAYER_ROOT_CLEARANCE,
 } from "@hyperforge/shared";
 
 // ============================================================================
@@ -42,6 +44,10 @@ interface ArenaState {
 function generateArenaConfig(arenaId: number): Arena {
   const config = getDuelArenaConfig();
   const groundY = getDuelArenaGradeHeight() + DUEL_ARENA_FLOOR_GROUND_OFFSET;
+  const rootY =
+    getDuelArenaGradeHeight() +
+    DUEL_ARENA_FLOOR_SOLID_OFFSET +
+    PLAYER_ROOT_CLEARANCE;
 
   // Calculate row and column based on grid layout
   const row = Math.floor((arenaId - 1) / config.columns);
@@ -77,18 +83,18 @@ function generateArenaConfig(arenaId: number): Arena {
       ? [
           {
             x: centerX - config.spawnOffset,
-            y: groundY,
+            y: rootY,
             z: centerZ,
           },
           {
             x: centerX + config.spawnOffset,
-            y: groundY,
+            y: rootY,
             z: centerZ,
           },
         ]
       : [
-          { x: centerX, y: groundY, z: centerZ - config.spawnOffset },
-          { x: centerX, y: groundY, z: centerZ + config.spawnOffset },
+          { x: centerX, y: rootY, z: centerZ - config.spawnOffset },
+          { x: centerX, y: rootY, z: centerZ + config.spawnOffset },
         ];
 
   return {

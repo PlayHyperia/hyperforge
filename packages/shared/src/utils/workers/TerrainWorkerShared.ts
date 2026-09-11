@@ -1,6 +1,7 @@
 import { BIOME_CONFIG } from "../../systems/shared/world/TerrainHeightParams";
 import {
   COMPACT_WORLD_TERRAIN_PROFILE,
+  COMPACT_LANDFORM_PARAMETERS,
   resolveWorldTerrainProfile,
   worldTerrainProfileIdentity,
   type WorldTerrainProfile,
@@ -83,7 +84,26 @@ function assertTerrainWorkerInput(input) {
     var actual = Object.keys(value);
     if (actual.length !== expected.length || actual.some(k => !expected.includes(k))) fail();
   }
-  keys(p, ${JSON.stringify(Object.keys(shape))});
+  var sculpt2 = p && p.algorithm === "compact-island-sculpt-v2";
+  keys(p, ${JSON.stringify(Object.keys(shape))}.concat(sculpt2 ? ["landform"] : []));
+  if (sculpt2) {
+    keys(p.landform, ${JSON.stringify(Object.keys(COMPACT_LANDFORM_PARAMETERS))});
+    if (!Object.values(p.landform).every(Number.isFinite)) fail();
+    var l = p.landform;
+    if (Math.abs(l.westHeadlandBearing) > Math.PI || Math.abs(l.inletBearing) > Math.PI ||
+        l.westHeadlandHalfWidth < 0.1 || l.westHeadlandHalfWidth > Math.PI/2 ||
+        l.westHeadlandStrength < 0 || l.westHeadlandStrength > 0.3 ||
+        l.inletTipDistance <= 0 || l.inletTipDistance >= 165 ||
+        l.inletTipTransition < 16 || l.inletTipTransition > 80 ||
+        l.inletHalfWidth < 20 || l.inletHalfWidth > 80 ||
+        l.inletBankTransition < 12 || l.inletBankTransition >= l.inletHalfWidth ||
+        l.ridgeStartZ < -165 || l.ridgeEndZ > 165 || l.ridgeStartZ >= l.ridgeEndZ ||
+        Math.abs(l.ridgeBaseX) + Math.abs(l.ridgeBend) > 165 ||
+        l.ridgeWestWidth < 16 || l.ridgeWestWidth > 80 ||
+        l.ridgeEastWidth < 16 || l.ridgeEastWidth > 80 ||
+        l.ridgeHeight <= 0 || l.ridgeHeight > 24 ||
+        l.ridgeEndFade < 16 || l.ridgeEndFade > (l.ridgeEndZ-l.ridgeStartZ)/2) fail();
+  }
   ${groups
     .map(
       (
@@ -92,7 +112,7 @@ function assertTerrainWorkerInput(input) {
   if (!Object.values(p.${group}).every(Number.isFinite)) fail();`,
     )
     .join("\n")}
-  if (p.schemaVersion !== 1 || (p.algorithm !== "terrain-height-params-v1" && p.algorithm !== "compact-island-sculpt-v1") ||
+  if (p.schemaVersion !== 1 || (p.algorithm !== "terrain-height-params-v1" && p.algorithm !== "compact-island-sculpt-v1" && !sculpt2) ||
       p.boundsMeaning !== "nominal-generation-envelope" || typeof p.id !== "string" ||
       !/^[a-z][a-z0-9-]{0,63}$/.test(p.id) ||
       p.kind !== "compact-candidate" || p.id === "large-world-v1" ||

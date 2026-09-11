@@ -7,6 +7,7 @@ import { EventType } from "../../../types/events";
 import { EntityType, ResourceType } from "../../../types/entities";
 import { TerrainSystem } from "../../shared/world/TerrainSystem";
 import { ClientNetwork } from "../ClientNetwork";
+import { PLAYER_ROOT_CLEARANCE } from "../../../utils/movement/PlayerSupport";
 
 type AuthoredTerrainInitialization = {
   loadWaterBodiesFromManifest(): void;
@@ -298,7 +299,7 @@ describe("actual resource network transform ownership", () => {
     expect(spot.networkDirty).toBe(false);
   });
 
-  it("keeps actual PlayerEntity ground-following and smooth stationary facing on the unchanged character path", async () => {
+  it("keeps actual PlayerEntity ground-following with player clearance and smooth stationary facing", async () => {
     const { world, terrain, network } = await createWorld();
     const player = new PlayerEntity(world, {
       id: "resource-regression-player",
@@ -318,7 +319,9 @@ describe("actual resource network transform ownership", () => {
     });
     network.lateUpdate(1 / 60);
     expect(network.tileInterpolator.hasState(player.id)).toBe(true);
-    expect(player.position.y).toBe(terrain.getHeightAt(347.5, 306.25));
+    expect(player.position.y).toBe(
+      terrain.getHeightAt(347.5, 306.25) + PLAYER_ROOT_CLEARANCE,
+    );
     const before = player.node.quaternion.clone();
     const target = new THREE.Quaternion().setFromAxisAngle(
       new THREE.Vector3(0, 1, 0),
@@ -333,6 +336,8 @@ describe("actual resource network transform ownership", () => {
     expect(player.node.quaternion.angleTo(target)).toBeGreaterThan(0.1);
     for (let frame = 0; frame < 120; frame++) network.lateUpdate(1 / 60);
     expect(player.node.quaternion.angleTo(target)).toBeLessThan(0.001);
-    expect(player.position.y).toBe(terrain.getHeightAt(347.5, 306.25));
+    expect(player.position.y).toBe(
+      terrain.getHeightAt(347.5, 306.25) + PLAYER_ROOT_CLEARANCE,
+    );
   });
 });

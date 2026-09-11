@@ -59,6 +59,7 @@ import {
   createCompactTerrainLayerWeights,
   createCompactPondSurfaceWeights,
   applyCompactPondWetness,
+  applyCompactMeadowTint,
 } from "./CompactTerrainMaterial";
 import {
   createCompactTerrainColorOperations,
@@ -1248,6 +1249,12 @@ export function createTerrainMaterial(
   const compactLayers = compactTextures
     ? createCompactTerrainLayers(compactTextures, distSq, noiseValue)
     : null;
+  if (compactLayers) {
+    compactLayers.grass = applyCompactMeadowTint(
+      compactLayers.grass,
+      noiseValue,
+    );
+  }
   const noiseValue2 = add(
     mul(sin(mul(noiseValue, float(6.28))), float(0.3)),
     float(0.5),

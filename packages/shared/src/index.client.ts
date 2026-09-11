@@ -17,6 +17,13 @@ export {
 export type { EditorWorldOptions } from "./runtime/createEditorWorld";
 export { World } from "./core/World";
 export {
+  PLAYER_ROOT_CLEARANCE,
+  resolvePlayerSupportHeight,
+  resolvePlayerRootHeight,
+  type PlayerTerrainSupport,
+  type PlayerBuildingSupport,
+} from "./utils/movement/PlayerSupport";
+export {
   STREAMING_RENDER_PROFILES,
   resolveExplicitStreamingRenderProfile,
   resolveStreamingRenderFrameRate,

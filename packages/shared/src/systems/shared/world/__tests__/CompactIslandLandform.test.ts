@@ -6,7 +6,7 @@ import { NoiseGenerator } from "../../../../utils/NoiseGenerator";
 import { createCompactIslandLandform } from "../CompactIslandLandform";
 import { computeBaseHeight, computeIslandMask } from "../TerrainHeightParams";
 import {
-  SCULPTED_COMPACT_WORLD_TERRAIN_PROFILE as sculpted,
+  SCULPTED_COMPACT_V1_PROFILE_FIXTURE as sculpted,
   COMPACT_WORLD_TERRAIN_PROFILE as blockout,
   deserializeWorldTerrainProfile,
   resolveWorldTerrainProfile,

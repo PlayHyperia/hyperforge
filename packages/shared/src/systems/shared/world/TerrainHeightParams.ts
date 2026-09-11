@@ -456,7 +456,10 @@ export function computeBaseHeight(
   profile: WorldTerrainProfile,
 ): number {
   // ── 1. Blend per-biome heights ──────────────────────────────────────
-  if (profile.algorithm === "compact-island-sculpt-v1") {
+  if (
+    profile.algorithm === "compact-island-sculpt-v1" ||
+    profile.algorithm === "compact-island-sculpt-v2"
+  ) {
     return compactIslandLandform.height(worldX, worldZ, sharedNoise, profile);
   }
   const coordScale = NOISE_COORD_SCALE * profile.height.featureScale;
@@ -485,7 +488,10 @@ export function computeIslandMask(
   sharedNoise: TerrainNoiseAdapter,
   profile: WorldTerrainProfile,
 ): number {
-  if (profile.algorithm === "compact-island-sculpt-v1") {
+  if (
+    profile.algorithm === "compact-island-sculpt-v1" ||
+    profile.algorithm === "compact-island-sculpt-v2"
+  ) {
     return compactIslandLandform.mask(worldX, worldZ, sharedNoise, profile);
   }
   const island = profile.island;
@@ -727,7 +733,7 @@ export function buildGetBaseHeightAtJS(): string {
   }
 
   function getBaseHeightAt(worldX, worldZ, biomeWeights) {
-    if (config.TERRAIN_PROFILE.algorithm === "compact-island-sculpt-v1") {
+    if (config.TERRAIN_PROFILE.algorithm === "compact-island-sculpt-v1" || config.TERRAIN_PROFILE.algorithm === "compact-island-sculpt-v2") {
       return compactIslandLandform.height(worldX, worldZ, noise, config.TERRAIN_PROFILE);
     }
     var bw = biomeWeights || computeBiomeWeightsByPosition(worldX, worldZ);
@@ -752,7 +758,7 @@ export function buildGetBaseHeightAtJS(): string {
   }
 
   function getIslandMask(worldX, worldZ) {
-    if (config.TERRAIN_PROFILE.algorithm === "compact-island-sculpt-v1") {
+    if (config.TERRAIN_PROFILE.algorithm === "compact-island-sculpt-v1" || config.TERRAIN_PROFILE.algorithm === "compact-island-sculpt-v2") {
       return compactIslandLandform.mask(worldX, worldZ, noise, config.TERRAIN_PROFILE);
     }
     var island = config.TERRAIN_PROFILE.island;

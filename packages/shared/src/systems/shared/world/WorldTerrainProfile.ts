@@ -26,9 +26,32 @@ import {
 
 type NumericFields<T> = { readonly [K in keyof T]: number };
 
+/** Metre offsets from the island centre at a 165 m authoring radius. */
+export const COMPACT_LANDFORM_PARAMETERS = Object.freeze({
+  westHeadlandBearing: Math.PI,
+  westHeadlandHalfWidth: (35 * Math.PI) / 180,
+  westHeadlandStrength: 0.19,
+  inletBearing: (48 * Math.PI) / 180,
+  inletTipDistance: 84,
+  inletTipTransition: 26,
+  inletHalfWidth: 42,
+  inletBankTransition: 18,
+  ridgeStartZ: -65,
+  ridgeEndZ: 75,
+  ridgeBaseX: -82,
+  ridgeBend: 30,
+  ridgeWestWidth: 26,
+  ridgeEastWidth: 48,
+  ridgeHeight: 18,
+  ridgeEndFade: 35,
+});
+
 export type WorldTerrainProfile = Readonly<{
   schemaVersion: 1;
-  algorithm: "terrain-height-params-v1" | "compact-island-sculpt-v1";
+  algorithm:
+    | "terrain-height-params-v1"
+    | "compact-island-sculpt-v1"
+    | "compact-island-sculpt-v2";
   id: string;
   kind: "large-world" | "compact-candidate";
   seed: number;
@@ -55,6 +78,8 @@ export type WorldTerrainProfile = Readonly<{
   }>;
   water: Readonly<{ threshold: number; oceanFloorHeight: number }>;
   shoreline: NumericFields<typeof SHORELINE_CONFIG>;
+  /** Required only by sculpt-v2; included in CPU/worker/content identity. */
+  landform?: NumericFields<typeof COMPACT_LANDFORM_PARAMETERS>;
 }>;
 
 /** Historical numeric regression fixture only, never a runtime selection.
@@ -112,7 +137,7 @@ export const COMPACT_WORLD_TERRAIN_PROFILE: WorldTerrainProfile =
   });
 
 /** Explicit new authoring candidate; v1 remains a numeric regression fixture. */
-export const SCULPTED_COMPACT_WORLD_TERRAIN_PROFILE: WorldTerrainProfile =
+export const SCULPTED_COMPACT_V1_PROFILE_FIXTURE: WorldTerrainProfile =
   validateWorldTerrainProfile({
     ...COMPACT_WORLD_TERRAIN_PROFILE,
     algorithm: "compact-island-sculpt-v1",
@@ -130,6 +155,23 @@ export const SCULPTED_COMPACT_WORLD_TERRAIN_PROFILE: WorldTerrainProfile =
       featureScale: 1.4,
     },
   });
+
+/** Sole active sculpt candidate; prior shapes above are regression fixtures. */
+export const SCULPTED_COMPACT_WORLD_TERRAIN_PROFILE: WorldTerrainProfile =
+  validateWorldTerrainProfile({
+    ...SCULPTED_COMPACT_V1_PROFILE_FIXTURE,
+    algorithm: "compact-island-sculpt-v2",
+    id: "compact-duel-island-v3",
+    landform: COMPACT_LANDFORM_PARAMETERS,
+  });
+
+/** Styling/ecology family, not a substitute for strict profile admission. */
+export function isCompactSculptProfile(profile: WorldTerrainProfile): boolean {
+  return (
+    profile.algorithm === "compact-island-sculpt-v1" ||
+    profile.algorithm === "compact-island-sculpt-v2"
+  );
+}
 
 function fail(field: string): never {
   throw new Error(`Invalid WorldTerrainProfile: ${field}`);
@@ -187,11 +229,21 @@ export function validateWorldTerrainProfile(
   input: unknown,
 ): WorldTerrainProfile {
   const base = LEGACY_TERRAIN_PROFILE_FIXTURE;
-  const data = record(input, Object.keys(base), "profile");
+  const v2 =
+    input !== null &&
+    typeof input === "object" &&
+    Object.getOwnPropertyDescriptor(input, "algorithm")?.value ===
+      "compact-island-sculpt-v2";
+  const data = record(
+    input,
+    v2 ? [...Object.keys(base), "landform"] : Object.keys(base),
+    "profile",
+  );
   if (
     data.schemaVersion !== 1 ||
     (data.algorithm !== "terrain-height-params-v1" &&
-      data.algorithm !== "compact-island-sculpt-v1") ||
+      data.algorithm !== "compact-island-sculpt-v1" &&
+      data.algorithm !== "compact-island-sculpt-v2") ||
     data.boundsMeaning !== base.boundsMeaning
   )
     fail("version/algorithm/boundsMeaning");
@@ -209,6 +261,39 @@ export function validateWorldTerrainProfile(
   const height = numericGroup(data.height, base.height, "height");
   const water = numericGroup(data.water, base.water, "water");
   const shoreline = numericGroup(data.shoreline, base.shoreline, "shoreline");
+  const landform = v2
+    ? numericGroup(data.landform, COMPACT_LANDFORM_PARAMETERS, "landform")
+    : undefined;
+  if (
+    landform &&
+    (Math.abs(landform.westHeadlandBearing) > Math.PI ||
+      Math.abs(landform.inletBearing) > Math.PI ||
+      landform.westHeadlandHalfWidth < 0.1 ||
+      landform.westHeadlandHalfWidth > Math.PI / 2 ||
+      landform.westHeadlandStrength < 0 ||
+      landform.westHeadlandStrength > 0.3 ||
+      landform.inletTipDistance <= 0 ||
+      landform.inletTipDistance >= 165 ||
+      landform.inletTipTransition < 16 ||
+      landform.inletTipTransition > 80 ||
+      landform.inletHalfWidth < 20 ||
+      landform.inletHalfWidth > 80 ||
+      landform.inletBankTransition < 12 ||
+      landform.inletBankTransition >= landform.inletHalfWidth ||
+      landform.ridgeStartZ < -165 ||
+      landform.ridgeEndZ > 165 ||
+      landform.ridgeStartZ >= landform.ridgeEndZ ||
+      Math.abs(landform.ridgeBaseX) + Math.abs(landform.ridgeBend) > 165 ||
+      landform.ridgeWestWidth < 16 ||
+      landform.ridgeWestWidth > 80 ||
+      landform.ridgeEastWidth < 16 ||
+      landform.ridgeEastWidth > 80 ||
+      landform.ridgeHeight <= 0 ||
+      landform.ridgeHeight > 24 ||
+      landform.ridgeEndFade < 16 ||
+      landform.ridgeEndFade > (landform.ridgeEndZ - landform.ridgeStartZ) / 2)
+  )
+    fail("landform ranges");
   if (
     terrainTileSize <= 0 ||
     bounds.minX >= bounds.maxX ||
@@ -277,6 +362,7 @@ export function validateWorldTerrainProfile(
     height,
     water,
     shoreline,
+    ...(landform ? { landform } : {}),
   });
   // Reserved legacy ID/kind cannot silently be reused for changed parameters.
   if (

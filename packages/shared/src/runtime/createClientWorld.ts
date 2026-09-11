@@ -47,6 +47,7 @@
 
 import { World } from "../core/World";
 import { DataManager } from "../data/DataManager";
+import { isCompactSculptProfile } from "../systems/shared/world/WorldTerrainProfile";
 import { FrameBudgetManager } from "../utils/FrameBudgetManager";
 
 // Core client systems
@@ -446,10 +447,7 @@ export function createClientWorld() {
       });
       // Authored compact paths are shared by terrain and grass in every viewport;
       // this does not activate procedural town/POI generation for broadcasts.
-      if (
-        DataManager.getWorldTerrainProfile().algorithm ===
-        "compact-island-sculpt-v1"
-      ) {
+      if (isCompactSculptProfile(DataManager.getWorldTerrainProfile())) {
         world.register("roads", RoadNetworkSystem);
       }
       if (traceInit) {

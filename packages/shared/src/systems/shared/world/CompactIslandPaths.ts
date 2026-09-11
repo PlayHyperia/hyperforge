@@ -2,7 +2,10 @@ import type {
   WorldArea,
   RoadPathPoint,
 } from "../../../types/world/world-types";
-import type { WorldTerrainProfile } from "./WorldTerrainProfile";
+import {
+  isCompactSculptProfile,
+  type WorldTerrainProfile,
+} from "./WorldTerrainProfile";
 import type { DuelArenaConfig } from "../../../data/duel-manifest";
 import {
   createDuelArenaFloorZones,
@@ -89,8 +92,7 @@ export function createCompactIslandPaths(
   arena: DuelArenaConfig,
   getHeightAt: (x: number, z: number) => number,
 ): readonly CompactIslandPath[] {
-  if (profile.algorithm !== "compact-island-sculpt-v1")
-    return Object.freeze([]);
+  if (!isCompactSculptProfile(profile)) return Object.freeze([]);
   const haven = areas.central_haven,
     pondArea = areas.haven_pond;
   const station = (type: string): Point => {

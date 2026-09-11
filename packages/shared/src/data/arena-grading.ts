@@ -1,4 +1,5 @@
 import type { FlatZone } from "../types/world/terrain";
+import { PLAYER_ROOT_CLEARANCE } from "../utils/movement/PlayerSupportConstants";
 import { createAuthoredTerrainSurfaceOperations } from "../systems/shared/world/AuthoredTerrainSurface";
 import { ALL_WORLD_AREAS, type WorldArea } from "./world-areas";
 import { getDuelArenaConfig, type DuelArenaConfig } from "./duel-manifest";
@@ -17,6 +18,43 @@ export const DUEL_ARENA_CAMPUS_GRADE_ID = "duel_arena_campus_grade";
 export const DUEL_ARENA_FLOOR_GROUND_OFFSET = 0.4;
 export const DUEL_ARENA_FLOOR_CENTER_OFFSET = 0.27;
 export const DUEL_ARENA_FLOOR_THICKNESS = 0.3;
+/** Solid visual and PhysX box top; navigation terrain remains 2 cm below it. */
+export const DUEL_ARENA_FLOOR_SOLID_OFFSET =
+  DUEL_ARENA_FLOOR_CENTER_OFFSET + DUEL_ARENA_FLOOR_THICKNESS / 2;
+
+// Admitted area edits require a world restart, not in-place hot reload. A new
+// content load replaces the object and its compiled footprint cache identity.
+const solidFloors = new WeakMap<WorldArea, readonly FlatZone[]>();
+
+/** Allocation-free after first admitted-area lookup; excludes blend ramps. */
+export function getDuelArenaSolidSurfaceHeight(
+  x: number,
+  z: number,
+): number | null {
+  if (!Number.isFinite(x) || !Number.isFinite(z)) return null;
+  const area = ALL_WORLD_AREAS.duel_arena;
+  if (!area) return null;
+  let floors = solidFloors.get(area);
+  if (!floors) {
+    floors = createDuelArenaFloorZones(
+      getDuelArenaConfig(),
+      getDuelArenaGradeHeight(),
+    );
+    solidFloors.set(area, floors);
+  }
+  for (const floor of floors) {
+    if (
+      Math.abs(x - floor.centerX) <= floor.width / 2 &&
+      Math.abs(z - floor.centerZ) <= floor.depth / 2
+    )
+      return (
+        floor.height +
+        DUEL_ARENA_FLOOR_SOLID_OFFSET -
+        DUEL_ARENA_FLOOR_GROUND_OFFSET
+      );
+  }
+  return null;
+}
 
 function lobbyDestination(offsetX: number): {
   x: number;
@@ -37,7 +75,10 @@ function lobbyDestination(offsetX: number): {
   }
   return {
     x,
-    y: getDuelArenaGradeHeight() + DUEL_ARENA_FLOOR_GROUND_OFFSET,
+    y:
+      getDuelArenaGradeHeight() +
+      DUEL_ARENA_FLOOR_SOLID_OFFSET +
+      PLAYER_ROOT_CLEARANCE,
     z,
   };
 }

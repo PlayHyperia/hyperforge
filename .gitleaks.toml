@@ -8,3 +8,10 @@ useDefault = true
 description = "Public versioned Solana authentication-method discriminator"
 regexTarget = "match"
 regexes = ['''^authMethod:\s*"sol-wallet-signature-v1"$''']
+
+# Public terrain-worker fixture label, not a credential. Keep the exact complete
+# expression so unrelated keys in this test and all other files remain scanned.
+[[allowlists]]
+description = "Public sculpt-v2 bay terrain chunk fixture label"
+regexTarget = "match"
+regexes = ['''^chunkKey:\s*"sculpt-v2-bay"$''']

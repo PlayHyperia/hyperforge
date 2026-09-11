@@ -5,6 +5,8 @@ import {
   getDuelArenaConfig,
   getDuelArenaGradeHeight,
   DUEL_ARENA_FLOOR_GROUND_OFFSET,
+  getDuelArenaSolidSurfaceHeight,
+  PLAYER_ROOT_CLEARANCE,
 } from "@hyperforge/shared";
 import { createDuelArenaFloorZones } from "../../../../../shared/src/data/arena-grading";
 import { beforeAll, describe, expect, it, vi } from "vitest";
@@ -45,7 +47,9 @@ describe("ArenaPoolManager authoritative collision", () => {
         const offset = (index === 0 ? -1 : 1) * config.spawnOffset;
         expect(spawn).toEqual({
           x: floor.centerX + (config.spawnLayout === "alongWidth" ? offset : 0),
-          y: floor.height,
+          y:
+            getDuelArenaSolidSurfaceHeight(spawn.x, spawn.z)! +
+            PLAYER_ROOT_CLEARANCE,
           z: floor.centerZ + (config.spawnLayout === "alongWidth" ? 0 : offset),
         });
         expect(Math.abs(spawn.x - floor.centerX)).toBeLessThan(floor.width / 2);

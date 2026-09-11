@@ -325,6 +325,33 @@ export type CompactTerrainLayer = {
   worldNormal: Node<"vec3">;
 };
 
+/**
+ * Broad dry-meadow reflectance variation using the already sampled world noise.
+ * This is an art-directed linear-albedo tint, not a lighting bake or a new PBR
+ * scan. Normals, roughness and AO retain the original grass layer references.
+ */
+export function applyCompactMeadowTint(
+  grass: CompactTerrainLayer,
+  noise: Node<"float">,
+): CompactTerrainLayer {
+  const c = COMPACT_TERRAIN_COMPOSITION;
+  const dryness = mix(
+    float(c.meadowDryLow),
+    float(c.meadowDryHigh),
+    smoothstep(float(c.meadowDryStart), float(c.meadowDryEnd), noise),
+  );
+  return {
+    ...grass,
+    albedo: grass.albedo.mul(
+      mix(
+        vec3(1),
+        vec3(c.meadowDryRed, c.meadowDryGreen, c.meadowDryBlue),
+        dryness,
+      ),
+    ),
+  };
+}
+
 /** Same constants/arithmetic as the serializable CPU grass palette factory. */
 export function createCompactTerrainLayerWeights(
   noise: Node<"float">,

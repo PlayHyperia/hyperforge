@@ -17,6 +17,11 @@ import {
   type AttackType,
   getDuelArenaConfig,
   resolveWorldSpawnPosition,
+  resolvePlayerRootHeight,
+  type TerrainSystem,
+  type BuildingCollisionService,
+  type TownSystem,
+  type EntityID,
   getItem,
   getProcessingRequestOperationId,
   getGatheringRewardOperationIdForAttempt,
@@ -5991,17 +5996,18 @@ export class EmbeddedHyperiaService implements IEmbeddedHyperiaService {
   private groundSpawnPosition(
     position: [number, number, number],
   ): [number, number, number] {
-    const terrain = this.world.getSystem("terrain") as
-      | {
-          getHeightAt?: (x: number, z: number) => number;
-        }
-      | undefined;
-
-    const terrainY = terrain?.getHeightAt?.(position[0], position[2]);
-    if (typeof terrainY !== "number" || !Number.isFinite(terrainY)) {
-      return position;
-    }
-
-    return [position[0], terrainY + 0.1, position[2]];
+    const terrain = this.world.getSystem<TerrainSystem>("terrain");
+    const buildings =
+      (this.world.getSystem("buildingCollision") as unknown as
+        BuildingCollisionService | undefined) ??
+      this.world.getSystem<TownSystem>("towns")?.getCollisionService();
+    const rootY = resolvePlayerRootHeight(
+      position[0],
+      position[2],
+      terrain,
+      buildings,
+      buildings?.getPlayerFloor(this.characterId as EntityID) ?? 0,
+    );
+    return rootY === null ? position : [position[0], rootY, position[2]];
   }
 }

@@ -64,7 +64,16 @@ export {
   getDuelArenaEgressPosition,
   getDuelArenaGradeHeight,
   DUEL_ARENA_FLOOR_GROUND_OFFSET,
+  DUEL_ARENA_FLOOR_SOLID_OFFSET,
+  getDuelArenaSolidSurfaceHeight,
 } from "./data/arena-grading";
+export {
+  PLAYER_ROOT_CLEARANCE,
+  resolvePlayerSupportHeight,
+  resolvePlayerRootHeight,
+  type PlayerTerrainSupport,
+  type PlayerBuildingSupport,
+} from "./utils/movement/PlayerSupport";
 export {
   resolveWorldSpawnPosition,
   type WorldSpawnPositionResolution,

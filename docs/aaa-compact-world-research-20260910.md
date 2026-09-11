@@ -145,13 +145,19 @@ instrumented correctness captures from representative performance runs.
 
 ## Current implementation and evidence limits — 2026-09-11
 
-Current uncommitted follow-up: five-tree authored redistribution and actual
+The current uncommitted candidate adds an explicit v3 headland/inlet shape,
+warmer meadow and shared stone campus surfaces. Actual contact probe39 reduced
+the root mismatch from90mm to20mm and exposed occupied-spawn relocation still
+using the old support path; that path is now corrected but awaits recapture.
+See [landscape and grounding qualification](compact-landscape-grounding-20260911.md).
+
+Current pushed follow-up: game84a18a123 and assets e26cc737 preserve five-tree authored redistribution and actual
 daylight sole/floor measurements pass their evidence gates in probes37/38, while
 both whole runs retain inherited content failures. The physical 9cm player-root
 disagreement and large-scale island composition remain defects. See
 [grove/contact qualification](authored-grove-contact-qualification-20260911.md).
 
-Latest pushed game checkpoint is
+An earlier pushed game checkpoint is
 `426cb8039deab0e96848dcab7b32ff3a91687061`, including resource lifetime checkpoint
 `72621c1bc871473faee161ae56faff843f1f2ee3`; assets remain
 `d6f52841f5d9173247e4499902ba1c27f96c2a89`. Probe34's focused daylight study and

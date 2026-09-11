@@ -106,7 +106,7 @@ describe("actual duel floor material depth bias", () => {
     }
   });
 
-  it("uses the same actual factory for textured lobby floors without altering texture/material response", () => {
+  it("preserves generic floor material parameters independently of the campus stone surface", () => {
     const texture = new THREE.DataTexture(
       new Uint8Array([180, 150, 100, 255]),
       1,
@@ -126,15 +126,6 @@ describe("actual duel floor material depth bias", () => {
       expect(floor.side).toBe(ordinary.side);
       expect(floor.opacity).toBe(ordinary.opacity);
       expect(ordinary.polygonOffset).toBe(false);
-      // CPU scope: verify the real canvas-backed lobby constructor delegates to
-      // this tested material factory. Actual canvas/mesh/GPU output is the live
-      // paired spatial probe, not a mocked DOM or renderer in this test.
-      const lobbyConstructor = (
-        DuelArenaVisualsSystem.prototype as unknown as ConstructionAccess
-      ).createLobbyFloor.toString();
-      expect(lobbyConstructor).toContain("createDuelFloorMaterial({");
-      expect(lobbyConstructor).toContain("map: tileTexture");
-      expect(lobbyConstructor).toContain("floor.receiveShadow = true");
     } finally {
       floor.dispose();
       ordinary.dispose();

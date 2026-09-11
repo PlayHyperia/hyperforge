@@ -15,6 +15,9 @@ import type {
   StreamingDuelExecutorCommandReceipt,
   StreamingDuelRoleSwitchObservationContext,
   World,
+  TerrainSystem,
+  BuildingCollisionService,
+  TownSystem,
 } from "@hyperforge/shared";
 import crypto from "node:crypto";
 import { realpathSync, statSync } from "node:fs";
@@ -42,6 +45,7 @@ import {
   worldToTile,
   createEntityID,
   resolveWorldSpawnPosition,
+  resolvePlayerRootHeight,
 } from "@hyperforge/shared";
 import {
   DuelCombatAI,
@@ -4401,17 +4405,15 @@ export class DuelOrchestrator {
   }
 
   /**
-   * Get grounded Y using terrain height when available.
+   * Get the player root above its actual solid support, without changing grade.
    */
   getGroundedY(x: number, z: number, fallbackY: number): number {
-    const terrain = this.world.getSystem("terrain") as {
-      getHeightAt?: (x: number, z: number) => number;
-    } | null;
-
-    const sampledY = terrain?.getHeightAt?.(x, z);
-    return typeof sampledY === "number" && Number.isFinite(sampledY)
-      ? sampledY
-      : fallbackY;
+    const terrain = this.world.getSystem<TerrainSystem>("terrain");
+    const buildings =
+      (this.world.getSystem("buildingCollision") as unknown as
+        BuildingCollisionService | undefined) ??
+      this.world.getSystem<TownSystem>("towns")?.getCollisionService();
+    return resolvePlayerRootHeight(x, z, terrain, buildings) ?? fallbackY;
   }
 
   normalizePosition(position: unknown): [number, number, number] | null {

@@ -1,5 +1,8 @@
 import type { WorldArea } from "../../../types/world/world-types";
-import type { WorldTerrainProfile } from "./WorldTerrainProfile";
+import {
+  isCompactSculptProfile,
+  type WorldTerrainProfile,
+} from "./WorldTerrainProfile";
 
 export const COMPACT_POND_MODELS = Object.freeze({
   boulder: { file: "pond_boulder.glb", radius: 0.887 },
@@ -36,7 +39,7 @@ export function createCompactPondDressing(
   areas: Readonly<Record<string, WorldArea>>,
   heightAt: (x: number, z: number) => number,
 ): readonly CompactPondPlacement[] {
-  if (profile.algorithm !== "compact-island-sculpt-v1") return [];
+  if (!isCompactSculptProfile(profile)) return [];
   const ponds = areas.haven_pond?.waterBodies;
   if (ponds?.length !== 1)
     throw new Error("Compact dressing requires Haven pond");

@@ -19,6 +19,8 @@ export interface TerrainDetailRegion {
   readonly minZ: number;
   readonly maxZ: number;
   readonly resolution: number;
+  /** Retain minimum-size descendants inside existing roots, independent of focus. */
+  readonly keepMinSize?: boolean;
 }
 
 export interface QuadTreeConfig {
@@ -140,12 +142,7 @@ export class TerrainQuadNode {
     let resolution = this.tree.config.resolution;
     if (this.isMaxDepth) {
       for (const region of this.tree.config.fineDetailRegions ?? []) {
-        if (
-          this.boundingBox.xMin < region.maxX &&
-          this.boundingBox.xMax > region.minX &&
-          this.boundingBox.zMin < region.maxZ &&
-          this.boundingBox.zMax > region.minZ
-        ) {
+        if (this.intersectsDetailRegion(region)) {
           resolution = Math.max(resolution, region.resolution);
         }
       }
@@ -153,15 +150,31 @@ export class TerrainQuadNode {
     return resolution;
   }
 
+  private intersectsDetailRegion(region: TerrainDetailRegion): boolean {
+    // Touching edges do not cover area; match the per-leaf resolution rule.
+    return (
+      this.boundingBox.xMin < region.maxX &&
+      this.boundingBox.xMax > region.minX &&
+      this.boundingBox.zMin < region.maxZ &&
+      this.boundingBox.zMax > region.minZ
+    );
+  }
+
+  private requiresMinimumSize(): boolean {
+    for (const region of this.tree.config.fineDetailRegions ?? []) {
+      if (region.keepMinSize === true && this.intersectsDetailRegion(region))
+        return true;
+    }
+    return false;
+  }
+
   check(): void {
     if (!this.needsCheck) return;
     this.needsCheck = false;
 
-    const underSplit = this.tree.isUnderSplitDistance(
-      this.size,
-      this.centerX,
-      this.centerZ,
-    );
+    const underSplit =
+      this.requiresMinimumSize() ||
+      this.tree.isUnderSplitDistance(this.size, this.centerX, this.centerZ);
 
     if (underSplit) {
       if (!this.isMaxDepth && !this.splitted) {
@@ -297,7 +310,7 @@ export class TerrainQuadNode {
   }
 
   unsplit(): void {
-    if (!this.splitted) return;
+    if (!this.splitted || this.requiresMinimumSize()) return;
     this.splitted = false;
     this.unsplitting = true;
     this.unsetReady();
@@ -411,7 +424,9 @@ export class TerrainQuadTree {
         region.minZ >= region.maxZ ||
         !Number.isInteger(region.resolution) ||
         region.resolution < 2 ||
-        region.resolution > 128
+        region.resolution > 128 ||
+        (region.keepMinSize !== undefined &&
+          typeof region.keepMinSize !== "boolean")
       )
         throw new Error("Invalid terrain detail region");
     }

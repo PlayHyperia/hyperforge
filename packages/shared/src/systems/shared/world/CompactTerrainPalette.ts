@@ -24,8 +24,19 @@ export function createCompactTerrainColorOperations() {
     slopeDirtEnd: 0.6,
     slopeDirtFall: 0.3,
     slopeDirtStrength: 0.2,
-    cliffStart: 0.3,
-    cliffEnd: 0.55,
+    // slope = 1 - abs(normal.y): roughly 22–40 degrees, not the former
+    // 46–63 degree range that left the compact ridges covered in turf.
+    cliffStart: 0.07,
+    cliffEnd: 0.23,
+    meadowDryStart: 0.28,
+    meadowDryEnd: 0.72,
+    meadowDryLow: 0.15,
+    meadowDryHigh: 0.65,
+    // Linear-reflectance multipliers, not sRGB values or baked illumination.
+    // The pinned grass diffuse remains below 1 in every channel after tint.
+    meadowDryRed: 3.4,
+    meadowDryGreen: 0.92,
+    meadowDryBlue: 1.25,
     variationLow: 0.98,
     variationHigh: 1.02,
     pathEdgeNoiseContrast: 2.5,
@@ -128,6 +139,19 @@ export function createCompactTerrainColorOperations() {
         rock: [...palette.rock],
       };
     },
+    meadowTint(noiseValue: number) {
+      const c = composition;
+      const dryness = math.mix(
+        c.meadowDryLow,
+        c.meadowDryHigh,
+        math.smooth(c.meadowDryStart, c.meadowDryEnd, noiseValue),
+      );
+      return [
+        math.mix(1, c.meadowDryRed, dryness),
+        math.mix(1, c.meadowDryGreen, dryness),
+        math.mix(1, c.meadowDryBlue, dryness),
+      ];
+    },
     weights(input: {
       noiseValue: number;
       slope: number;
@@ -228,11 +252,18 @@ export function createCompactTerrainColorOperations() {
         composition.pondWetAlbedo,
         pondSurface.wetness,
       );
+      // Tint only the grass diffuse before physical-layer blending. Full
+      // paths and pond beds remain the original soil, not yellowed dirt.
+      const meadowTint = operations.meadowTint(input.noiseValue);
       const result = palette.grass.map(
         (grass, channel) =>
           math.mix(
             math.mix(
-              math.mix(grass, palette.dirt[channel], dirt),
+              math.mix(
+                grass * meadowTint[channel],
+                palette.dirt[channel],
+                dirt,
+              ),
               palette.rock[channel],
               cliff,
             ),

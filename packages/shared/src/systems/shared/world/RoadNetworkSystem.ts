@@ -35,6 +35,7 @@ import { Logger } from "../../../utils/Logger";
 import { DataManager } from "../../../data/DataManager";
 import { getDuelArenaConfig } from "../../../data/duel-manifest";
 import { createCompactIslandPaths } from "./CompactIslandPaths";
+import { isCompactSculptProfile } from "./WorldTerrainProfile";
 import { roadInfluenceOperations } from "./RoadInfluence";
 import {
   smoothPathAsync,
@@ -235,7 +236,7 @@ export class RoadNetworkSystem extends System {
     const tileSize = terrainConfig?.tileSize ?? 100; // meters
     this.worldHalfSize = (worldSize * tileSize) / 2;
     const profile = DataManager.getWorldConfig()?.terrainProfile;
-    if (profile?.algorithm === "compact-island-sculpt-v1") {
+    if (profile && isCompactSculptProfile(profile)) {
       this.worldCenterX = (profile.bounds.minX + profile.bounds.maxX) / 2;
       this.worldCenterZ = (profile.bounds.minZ + profile.bounds.maxZ) / 2;
     }
@@ -262,7 +263,7 @@ export class RoadNetworkSystem extends System {
     if (!this.terrainSystem)
       throw new Error("RoadNetworkSystem requires TerrainSystem");
     const profile = DataManager.getWorldConfig()?.terrainProfile;
-    if (profile?.algorithm === "compact-island-sculpt-v1") {
+    if (profile && isCompactSculptProfile(profile)) {
       const paths = createCompactIslandPaths(
         profile,
         DataManager.getInstance().getAllWorldAreas(),

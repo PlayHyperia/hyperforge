@@ -38,6 +38,20 @@ export function createCompactIslandLandform() {
       const x = worldX - island.centerX;
       const z = worldZ - island.centerZ;
       const angle = Math.atan2(z, x);
+      const authored =
+        profile.algorithm === "compact-island-sculpt-v2"
+          ? profile.landform
+          : undefined;
+      if (profile.algorithm === "compact-island-sculpt-v2" && !authored)
+        throw new Error("Sculpt-v2 requires admitted landform parameters");
+      const headland = authored
+        ? authored.westHeadlandStrength *
+          helpers.smooth(
+            (Math.cos(angle - authored.westHeadlandBearing) -
+              Math.cos(authored.westHeadlandHalfWidth)) /
+              (1 - Math.cos(authored.westHeadlandHalfWidth)),
+          )
+        : 0;
       // Periodic angular terms avoid a seam at +/-pi. The same coast controls
       // geometry and water classification, not a separate visual-only mask.
       const variation = Math.max(
@@ -46,7 +60,8 @@ export function createCompactIslandLandform() {
           island.maxCoastVariation,
           0.065 * Math.sin(3 * angle + 0.4) +
             0.035 * Math.cos(5 * angle - 1.1) +
-            0.018 * noise.simplex2D(Math.cos(angle) * 4, Math.sin(angle) * 4),
+            0.018 * noise.simplex2D(Math.cos(angle) * 4, Math.sin(angle) * 4) +
+            headland,
         ),
       );
       const coast = island.radius * (1 + variation);
@@ -57,7 +72,24 @@ export function createCompactIslandLandform() {
           (Math.hypot(x, z) - coast + island.falloff) / island.falloff,
         ),
       );
-      return 1 - helpers.smooth(Math.pow(t, island.beachProfilePower / 3));
+      const coastMask =
+        1 - helpers.smooth(Math.pow(t, island.beachProfilePower / 3));
+      if (!authored || coastMask === 0) return coastMask;
+      // Inward-only open bay: it can remove land, never extend the admitted
+      // positive coast envelope. Smooth tip and banks join the same seabed.
+      const scale = 165 / island.radius;
+      const c = Math.cos(authored.inletBearing),
+        s = Math.sin(authored.inletBearing);
+      const along = (x * c + z * s) * scale;
+      const across = Math.abs((-x * s + z * c) * scale);
+      const bite =
+        helpers.smooth(
+          (along - authored.inletTipDistance) / authored.inletTipTransition,
+        ) *
+        helpers.smooth(
+          (authored.inletHalfWidth - across) / authored.inletBankTransition,
+        );
+      return coastMask * (1 - bite);
     },
 
     height(
@@ -74,7 +106,36 @@ export function createCompactIslandLandform() {
       const z = dz / profile.island.radius;
       // Put the highest relief beside, not beneath, the existing work/duel
       // campus. Its explicit functional grades remain authoritative overlays.
-      const ridge = helpers.hill(x, z, -0.59, 0.02, 0.31, 0.69);
+      const legacyRidge = helpers.hill(x, z, -0.59, 0.02, 0.31, 0.69);
+      let ridgeHeight = profile.height.terrainScale * legacyRidge;
+      if (profile.algorithm === "compact-island-sculpt-v2") {
+        const authored = profile.landform;
+        if (!authored)
+          throw new Error("Sculpt-v2 requires admitted landform parameters");
+        const ax = x * 165,
+          az = z * 165;
+        const progress = Math.max(
+          0,
+          Math.min(
+            1,
+            (az - authored.ridgeStartZ) /
+              (authored.ridgeEndZ - authored.ridgeStartZ),
+          ),
+        );
+        const spineX =
+          authored.ridgeBaseX -
+          authored.ridgeBend * Math.sin(Math.PI * progress);
+        const cross = ax - spineX;
+        const width =
+          cross < 0 ? authored.ridgeWestWidth : authored.ridgeEastWidth;
+        const ends =
+          helpers.smooth((az - authored.ridgeStartZ) / authored.ridgeEndFade) *
+          helpers.smooth((authored.ridgeEndZ - az) / authored.ridgeEndFade);
+        ridgeHeight =
+          authored.ridgeHeight *
+          helpers.smooth(1 - Math.abs(cross) / width) *
+          ends;
+      }
       const northernKnoll = helpers.hill(x, z, 0.3, -0.66, 0.3, 0.27);
       const easternGrove = helpers.hill(x, z, 0.56, -0.13, 0.24, 0.38);
       const southernHeadland = helpers.hill(x, z, -0.21, 0.62, 0.44, 0.32);
@@ -85,13 +146,21 @@ export function createCompactIslandLandform() {
         0.18 *
           noise.simplex2D(dx * 0.065 * detailScale, dz * 0.065 * detailScale);
       const interior =
-        profile.height.baseOffset +
-        profile.height.terrainScale *
-          (ridge +
-            northernKnoll * 0.38 +
-            easternGrove * 0.27 +
-            southernHeadland * 0.32) +
-        detail;
+        profile.algorithm === "compact-island-sculpt-v2"
+          ? profile.height.baseOffset +
+            ridgeHeight +
+            profile.height.terrainScale *
+              (northernKnoll * 0.38 +
+                easternGrove * 0.27 +
+                southernHeadland * 0.32) +
+            detail
+          : profile.height.baseOffset +
+            profile.height.terrainScale *
+              (legacyRidge +
+                northernKnoll * 0.38 +
+                easternGrove * 0.27 +
+                southernHeadland * 0.32) +
+            detail;
       // Unlike multiplication around zero, interpolation reaches the seabed
       // continuously, with zero coast-end slope and no height discontinuity.
       return (

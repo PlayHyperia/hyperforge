@@ -39,6 +39,9 @@ import {
   CollisionMask,
   CollisionFlag,
   BuildingCollisionService,
+  TownSystem,
+  resolvePlayerRootHeight,
+  PLAYER_ROOT_CLEARANCE,
   type EntityID,
 } from "@hyperforge/shared";
 import type {
@@ -372,7 +375,9 @@ export class TileMovementManager {
     return (
       (this.world.getSystem(
         "buildingCollision",
-      ) as unknown as BuildingCollisionService) || null
+      ) as unknown as BuildingCollisionService) ||
+      this.world.getSystem<TownSystem>("towns")?.getCollisionService() ||
+      null
     );
   }
 
@@ -1558,49 +1563,15 @@ export class TileMovementManager {
       // Convert tile to world position (zero-allocation)
       tileToWorldInto(state.currentTile, this._worldPos);
 
-      // determine Y elevation — building floor > terrain (bridge-aware)
-      // getHeightAt() returns bridge deck height on bridge tiles (single source of truth),
-      // so no explicit bridge check is needed here.
-      {
-        if (buildingService) {
-          const currentFloor = buildingService.getPlayerFloor(
-            playerId as EntityID,
-          );
-          const buildingId = buildingService.getBuildingAt(
-            this._worldPos.x,
-            this._worldPos.z,
-          );
-
-          let floorHeight: number | null = null;
-          if (buildingId) {
-            floorHeight = buildingService.getFloorHeight(
-              buildingId,
-              currentFloor,
-            );
-          }
-
-          if (floorHeight !== null) {
-            this._worldPos.y = floorHeight + 0.01;
-          } else if (terrain) {
-            const h = terrain.getHeightAt(this._worldPos.x, this._worldPos.z);
-            if (h !== null && Number.isFinite(h)) {
-              this._worldPos.y = h! + 0.01;
-            } else {
-              this._worldPos.y = 0.01;
-            }
-          } else {
-            this._worldPos.y = 0.01;
-          }
-        } else if (terrain) {
-          const height = terrain.getHeightAt(
-            this._worldPos.x,
-            this._worldPos.z,
-          );
-          if (height !== null && Number.isFinite(height)) {
-            this._worldPos.y = (height as number) + 0.01;
-          }
-        }
-      }
+      const rootY = resolvePlayerRootHeight(
+        this._worldPos.x,
+        this._worldPos.z,
+        terrain,
+        buildingService,
+        buildingService?.getPlayerFloor(playerId as EntityID) ?? 0,
+      );
+      if (rootY !== null) this._worldPos.y = rootY;
+      else if (buildingService) this._worldPos.y = PLAYER_ROOT_CLEARANCE;
 
       // Update entity position on server
       entity.position.set(this._worldPos.x, this._worldPos.y, this._worldPos.z);
@@ -1910,39 +1881,15 @@ export class TileMovementManager {
     // Convert tile to world position (zero-allocation)
     tileToWorldInto(state.currentTile, this._worldPos);
 
-    // determine Y elevation — building floor > terrain (bridge-aware)
-    // getHeightAt() returns bridge deck height on bridge tiles (single source of truth),
-    // so no explicit bridge check is needed here.
-    if (buildingService) {
-      const currentFloor = buildingService.getPlayerFloor(playerId as EntityID);
-      const buildingId = buildingService.getBuildingAt(
-        state.currentTile.x,
-        state.currentTile.z,
-      );
-
-      let floorHeight: number | null = null;
-      if (buildingId) {
-        floorHeight = buildingService.getFloorHeight(buildingId, currentFloor);
-      }
-
-      if (floorHeight !== null) {
-        this._worldPos.y = floorHeight + 0.01;
-      } else if (terrain) {
-        const h = terrain.getHeightAt(this._worldPos.x, this._worldPos.z);
-        if (h !== null && Number.isFinite(h)) {
-          this._worldPos.y = h! + 0.01;
-        } else {
-          this._worldPos.y = 0.01;
-        }
-      } else {
-        this._worldPos.y = 0.01;
-      }
-    } else if (terrain) {
-      const height = terrain.getHeightAt(this._worldPos.x, this._worldPos.z);
-      if (height !== null && Number.isFinite(height)) {
-        this._worldPos.y = (height as number) + 0.01;
-      }
-    }
+    const rootY = resolvePlayerRootHeight(
+      this._worldPos.x,
+      this._worldPos.z,
+      terrain,
+      buildingService,
+      buildingService?.getPlayerFloor(playerId as EntityID) ?? 0,
+    );
+    if (rootY !== null) this._worldPos.y = rootY;
+    else if (buildingService) this._worldPos.y = PLAYER_ROOT_CLEARANCE;
 
     // Update entity position on server
     entity.position.set(this._worldPos.x, this._worldPos.y, this._worldPos.z);
@@ -2491,9 +2438,16 @@ export class TileMovementManager {
       const corrected = tileToWorld(newTile);
       corrected.y = position.y;
       const terrain = this.getTerrain();
-      const height = terrain?.getHeightAt(corrected.x, corrected.z);
-      if (height !== null && height !== undefined && Number.isFinite(height)) {
-        corrected.y = height + 0.01;
+      const buildings = this.getBuildingCollision();
+      const height = resolvePlayerRootHeight(
+        corrected.x,
+        corrected.z,
+        terrain,
+        buildings,
+        buildings?.getPlayerFloor(playerId as EntityID) ?? 0,
+      );
+      if (height !== null) {
+        corrected.y = height;
       }
       entity?.position?.set(corrected.x, corrected.y, corrected.z);
       if (entity?.data) {

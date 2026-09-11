@@ -97,6 +97,11 @@
 // moment removed; use native Date
 import { emoteUrls, Emotes } from "../../data/playerEmotes";
 import { DataManager } from "../../data/DataManager";
+import type { TerrainSystem } from "../shared/world/TerrainSystem";
+import {
+  PLAYER_ROOT_CLEARANCE,
+  resolvePlayerRootHeight,
+} from "../../utils/movement/PlayerSupport";
 import type { TerrainResourceSpawnBatch } from "../../types/world/terrain";
 import { EQUIPMENT_SLOT_NAMES } from "../../constants/EquipmentConstants";
 import THREE from "../../extras/three/three";
@@ -4318,9 +4323,7 @@ export class ClientNetwork extends SystemBase {
     this.refreshProcessingFaceRotations();
 
     // Get terrain system for height lookups
-    const terrain = this.world.getSystem("terrain") as {
-      getHeightAt?: (x: number, z: number) => number | null;
-    } | null;
+    const terrain = this.world.getSystem<TerrainSystem>("terrain");
 
     // Get building collision service for building proximity and step height checks
     const townSystem = this.world.getSystem("towns") as {
@@ -4350,11 +4353,14 @@ export class ClientNetwork extends SystemBase {
           modify: (data: Record<string, unknown>) => entity.modify(data),
         };
       },
-      // Pass terrain height function for smooth Y updates.
-      // getHeightAt() is bridge-aware (returns deck height on bridge tiles),
-      // so no per-caller bridge check is needed.
+      // Player roots use the same solid-surface/clearance contract as the server.
+      // Building floor Y remains authoritative through the proximity callback.
+      // Do not apply character clearance to resource or other entity transforms.
       terrain?.getHeightAt
-        ? (x: number, z: number) => terrain.getHeightAt!(x, z)
+        ? (x: number, z: number, entityId: string) =>
+            this.world.entities.get(entityId)?.type === "player"
+              ? resolvePlayerRootHeight(x, z, terrain)
+              : terrain.getHeightAt!(x, z)
         : undefined,
       // Callback when entity finishes moving - emit ENTITY_MODIFIED for InteractionSystem
       // This enables event-based pending interactions (NPC trade, bank open, etc.)
@@ -4375,7 +4381,13 @@ export class ClientNetwork extends SystemBase {
         : undefined,
       // Pass step height function for smooth entrance stair walking
       collisionService
-        ? (x: number, z: number) => collisionService.getStepHeightAtWorld(x, z)
+        ? (x: number, z: number, entityId: string) => {
+            const stepY = collisionService.getStepHeightAtWorld(x, z);
+            if (stepY === null || !Number.isFinite(stepY)) return null;
+            return this.world.entities.get(entityId)?.type === "player"
+              ? stepY + PLAYER_ROOT_CLEARANCE
+              : stepY;
+          }
         : undefined,
       this.world.frameBudget
         ? (minimumMs: number = 1) =>

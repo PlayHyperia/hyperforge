@@ -27,6 +27,7 @@ import {
 } from "./TerrainHeightParams";
 import {
   worldTerrainProfileIdentity,
+  isCompactSculptProfile,
   type WorldTerrainProfile,
 } from "./WorldTerrainProfile";
 import { createTerrainWorkerConfig } from "../../../utils/workers/TerrainWorkerShared";
@@ -506,14 +507,14 @@ export class TerrainSystem extends System {
   private initTerrainMaterial(): void {
     const profile = this.getWorldTerrainProfile();
     const material = createTerrainMaterial(undefined, {
-      compactPbr: profile.algorithm === "compact-island-sculpt-v1",
+      compactPbr: isCompactSculptProfile(profile),
       compactPond: this.getCompactPondMaterial(),
     });
     // The generator initializes before this client-only material exists. Apply
     // profile-owned options here so the actual published material is configured
     // before shadow setup or any terrain mesh can consume it.
     material.terrainUniforms.surfaceDetailStrength.value =
-      profile.algorithm === "compact-island-sculpt-v1" ? 1 : 0;
+      isCompactSculptProfile(profile) ? 1 : 0;
     this.terrainMaterial = material;
 
     // Setup for CSM shadows
@@ -527,8 +528,7 @@ export class TerrainSystem extends System {
   }
 
   private getCompactPondMaterial(): CompactTerrainPond | null {
-    if (this.getWorldTerrainProfile().algorithm !== "compact-island-sculpt-v1")
-      return null;
+    if (!isCompactSculptProfile(this.getWorldTerrainProfile())) return null;
     if (this.compactPondMaterial) return this.compactPondMaterial;
     const ponds = ALL_WORLD_AREAS.haven_pond?.waterBodies;
     if (ponds?.length !== 1 || ponds[0].id !== "haven_pond_water")
@@ -1525,7 +1525,7 @@ export class TerrainSystem extends System {
     const profile = this.getWorldTerrainProfile();
     const influence = profile.island.radius * 0.6;
     const centers = BiomeSystem.computePolygonCenters(
-      profile.algorithm === "compact-island-sculpt-v1"
+      isCompactSculptProfile(profile)
         ? [BiomeType.Forest]
         : (BIOME_LIST as string[]),
       profile.island.radius * 0.45,
@@ -5207,9 +5207,7 @@ export class TerrainSystem extends System {
       forestW,
       canyonW,
     );
-    if (
-      this.getWorldTerrainProfile().algorithm === "compact-island-sculpt-v1"
-    ) {
+    if (isCompactSculptProfile(this.getWorldTerrainProfile())) {
       // Match the compact diffuse palette, not the superseded biome colors.
       // Ecology/grassWeight remains independent from the visible base colour.
       Object.assign(

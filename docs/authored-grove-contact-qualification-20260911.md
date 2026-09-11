@@ -8,9 +8,11 @@ Eight procedural trees remain unchanged. Resource identities, species/variants,
 scales, yields, original area membership, safety/death policy, bounds and grading
 remain unchanged. There is still one arena and no retained large island.
 
-The source candidate extends game checkpoint
-`426cb8039deab0e96848dcab7b32ff3a91687061` and assets
-`d6f52841f5d9173247e4499902ba1c27f96c2a89`. No default render profile, avatar body,
+The source candidate is saved and pushed as game checkpoint
+`84a18a123302e5d8114dff47f597bede8dfd8877` and assets
+`e26cc737543f4762fd421bca75ccea27edba9c17`. GitHub confirms author and committer
+dreaminglucid for both. Scoped staged secret scans and normal hooks pass; unrelated
+work is preserved. No merge or deployment was performed. No default render profile, avatar body,
 rest pose, weights, equipment fit or gameplay population change is included.
 
 ## Placement and durable identity

@@ -1,6 +1,7 @@
-import { describe, it, expect, beforeEach, vi } from "vitest";
+import { describe, it, expect, beforeEach, beforeAll, vi } from "vitest";
 import {
   AttackType,
+  DataManager,
   canPlayerPerformPreparationAction,
   DeathState,
   EntityOccupancyMap,
@@ -12,6 +13,10 @@ import modelBoundsManifest from "../../../../world/assets/manifests/model-bounds
 import stationsManifest from "../../../../world/assets/manifests/stations.json";
 import worldAreasManifest from "../../../../world/assets/manifests/world-areas.json";
 import { TileMovementManager } from "../tile-movement";
+
+beforeAll(async () => {
+  await DataManager.getInstance().initialize();
+});
 
 // Mocks
 const createMockWorld = () => ({
@@ -47,6 +52,8 @@ const createMockBuildingService = () => ({
   getBuildingAt: vi.fn(),
   getPlayerFloor: vi.fn(),
   getFloorHeight: vi.fn(),
+  getFloor: vi.fn().mockReturnValue(undefined),
+  getStepHeightAtWorld: vi.fn().mockReturnValue(null),
   handleStairTransition: vi.fn(),
   isTileWalkableInBuilding: vi.fn(),
   checkBuildingMovement: vi.fn().mockReturnValue({
@@ -292,6 +299,11 @@ describe("TileMovementManager - Building Integration", () => {
     mockBuildingService.getPlayerFloor.mockReturnValue(1);
     mockBuildingService.getBuildingAt.mockReturnValue("building1");
     mockBuildingService.getFloorHeight.mockReturnValue(5.0);
+    mockBuildingService.getFloor.mockReturnValue({
+      elevation: 5.0,
+      walkableTiles: new Set(["11,10"]),
+    });
+    mockBuildingService.isTileWalkableInBuilding.mockReturnValue(true);
 
     manager.processPlayerTick(playerId, 1);
 

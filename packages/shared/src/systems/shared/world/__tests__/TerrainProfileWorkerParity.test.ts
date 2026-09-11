@@ -34,6 +34,7 @@ import { TERRAIN_SHADER_CONSTANTS } from "../TerrainShader";
 import {
   COMPACT_WORLD_TERRAIN_PROFILE as compact,
   SCULPTED_COMPACT_WORLD_TERRAIN_PROFILE as sculpted,
+  SCULPTED_COMPACT_V1_PROFILE_FIXTURE as previousSculpt,
   LEGACY_TERRAIN_PROFILE_FIXTURE as legacy,
   validateWorldTerrainProfile,
   worldTerrainProfileIdentity,
@@ -167,6 +168,7 @@ describe("actual compact terrain height pipeline", () => {
     ];
     const profiles = [
       legacy,
+      previousSculpt,
       ...[0, 41, 0xffffffff].map((seed) =>
         validateWorldTerrainProfile({ ...sculpted, seed }),
       ),
@@ -207,6 +209,7 @@ describe("actual compact terrain height pipeline", () => {
     let shoreSamples = 0;
     try {
       const profiles = [
+        previousSculpt,
         ...[0, 41, 0xffffffff].map((seed) =>
           validateWorldTerrainProfile({ ...sculpted, seed }),
         ),
@@ -290,6 +293,67 @@ describe("actual compact terrain height pipeline", () => {
     }
   }, 20000);
 
+  it("transfers the new western ridge and southeast bay through both real workers", async () => {
+    const tile = actualWorker(TERRAIN_WORKER_CODE),
+      quad = actualWorker(QUAD_CHUNK_WORKER_CODE);
+    let changedSamples = 0,
+      seabedSamples = 0;
+    try {
+      for (const seed of [0, 41]) {
+        const profile = validateWorldTerrainProfile({ ...sculpted, seed });
+        const reference = cpu(profile, { forest: 1 });
+        const old = cpu(
+          validateWorldTerrainProfile({ ...previousSculpt, seed }),
+          { forest: 1 },
+        );
+        for (const [tileX, tileZ] of [
+          [2, 4],
+          [3, 4],
+          [4, 5],
+          [5, 5],
+        ]) {
+          const input = request(profile);
+          const a = await tile.execute<TerrainWorkerOutput>({
+            ...input,
+            type: "generateHeightmap",
+            tileX,
+            tileZ,
+          });
+          const b = await quad.execute<QuadChunkWorkerOutput>({
+            ...input,
+            type: "generateQuadChunk",
+            centerX: tileX * 100,
+            centerZ: tileZ * 100,
+            size: 100,
+            resolution: 16,
+          });
+          expect(a.terrainProfileIdentity).toBe(
+            worldTerrainProfileIdentity(profile),
+          );
+          expect(b.terrainProfileIdentity).toBe(a.terrainProfileIdentity);
+          expect(b.heightData).toEqual(a.heightData);
+          expect(b.normalData).toEqual(a.normalData);
+          for (let z = 0; z < 16; z++)
+            for (let x = 0; x < 16; x++) {
+              const wx = tileX * 100 - 50 + (x * 100) / 15,
+                wz = tileZ * 100 - 50 + (z * 100) / 15;
+              expect(a.heightData[z * 16 + x]).toBe(
+                Math.fround(reference.final(wx, wz)),
+              );
+              if (Math.abs(reference.final(wx, wz) - old.final(wx, wz)) > 2)
+                changedSamples++;
+              if (a.heightData[z * 16 + x] === profile.water.oceanFloorHeight)
+                seabedSamples++;
+            }
+        }
+      }
+      expect(changedSamples).toBeGreaterThan(100);
+      expect(seabedSamples).toBeGreaterThan(100);
+    } finally {
+      await Promise.all([tile.close(), quad.close()]);
+    }
+  });
+
   it("uses the same profile in actual grass placement, including identity on empty outputs", async () => {
     const worker = actualWorker(GRASS_WORKER_CODE);
     const settings = {
@@ -365,6 +429,27 @@ describe("actual compact terrain height pipeline", () => {
       });
       expect(empty.count).toBe(0);
       expect(empty.terrainProfileIdentity).toBe(result.terrainProfileIdentity);
+      const bay = await worker.execute<GrassWorkerOutput>({
+        ...input,
+        ...request(sculpted),
+        chunkKey: "sculpt-v2-bay",
+        centerX: 430,
+        centerZ: 480,
+        size: 32,
+      });
+      expect(bay.terrainProfileIdentity).toBe(
+        worldTerrainProfileIdentity(sculpted),
+      );
+      expect(bay.count).toBeGreaterThan(0);
+      const bayHeight = cpu(sculpted, { forest: 1 });
+      for (let i = 0; i < bay.count; i++) {
+        const expected = bayHeight.final(
+          430 + bay.offsets[i * 3],
+          480 + bay.offsets[i * 3 + 2],
+        );
+        expect(bay.offsets[i * 3 + 1]).toBeCloseTo(expected, 4);
+        expect(expected).toBeGreaterThan(sculpted.water.threshold);
+      }
     } finally {
       await worker.close();
     }
@@ -406,6 +491,35 @@ describe("actual compact terrain height pipeline", () => {
               TERRAIN_PROFILE: {
                 ...compact,
                 island: { ...compact.island, radius: -1 },
+              },
+            },
+          },
+          ...[
+            {
+              ...sculpted,
+              landform: { ...sculpted.landform, ridgeWestWidth: 0 },
+            },
+            {
+              ...sculpted,
+              landform: { ...sculpted.landform, westHeadlandHalfWidth: 1e-12 },
+            },
+            { ...sculpted, landform: { ...sculpted.landform, unexpected: 1 } },
+          ].map((profile) => ({
+            config: {
+              ...createTerrainWorkerConfig(sculpted, 16),
+              TERRAIN_PROFILE: profile,
+              // Match the malformed payload so numerical/schema guards, not
+              // an unrelated stale identity, must reject it in every worker.
+              TERRAIN_PROFILE_IDENTITY:
+                "hyperia-world-terrain-profile-v1\n" + JSON.stringify(profile),
+            },
+          })),
+          {
+            config: {
+              ...createTerrainWorkerConfig(sculpted, 16),
+              TERRAIN_PROFILE: {
+                ...sculpted,
+                landform: { ...sculpted.landform, ridgeBend: 31 },
               },
             },
           },

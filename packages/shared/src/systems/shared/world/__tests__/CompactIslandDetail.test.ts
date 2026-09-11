@@ -10,6 +10,7 @@ import {
 import {
   COMPACT_WORLD_TERRAIN_PROFILE,
   SCULPTED_COMPACT_WORLD_TERRAIN_PROFILE,
+  SCULPTED_COMPACT_V1_PROFILE_FIXTURE,
 } from "../WorldTerrainProfile";
 import {
   assembleQuadChunkGeometry,
@@ -22,7 +23,7 @@ describe("bounded preparation terrain detail", () => {
   it("uses only the two admitted preparation leaves and retains coarse ocean/ancestor geometry", async () => {
     await DataManager.getInstance().initialize();
     const regions = createCompactPreparationDetailRegions(
-      SCULPTED_COMPACT_WORLD_TERRAIN_PROFILE,
+      SCULPTED_COMPACT_V1_PROFILE_FIXTURE,
       DataManager.getInstance().getAllWorldAreas(),
       64,
     );

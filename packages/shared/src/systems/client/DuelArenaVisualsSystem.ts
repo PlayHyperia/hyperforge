@@ -3,21 +3,19 @@
  *
  * Creates visual geometry for the duel arena without requiring external models.
  * Uses procedural Three.js geometry, InstancedMesh, and TSL shader materials:
- * - 6 arena floors with TSL stone tile textures and border trim
+ * - One arena plus lobby/hospital floors sharing weathered TSL limestone
  * - Stone pillar architecture at corners with TSL-animated brazier glow
  * - Continuous stone fences (fully enclosed, TSL procedural sandstone material)
  * - Colored banners mounted on east/west arena fences
- * - Lobby with textured floor and corner braziers (TSL glow)
+ * - Lobby with stone floor and corner braziers (TSL glow)
  * - Hospital with 3D cross and healing particle glow
  * - Decorative border pillars at lobby/hospital corners
  *
- * Performance: ~22 draw calls via InstancedMesh (down from ~846 individual meshes).
- * All 28 PointLights replaced with GPU-animated TSL emissive brazier materials.
+ * Repeated architecture uses InstancedMesh. Braziers use GPU-animated emissive
+ * surfaces instead of per-brazier PointLights; actual costs require measurement.
  *
  * Arena Layout (classic MMORPG-style):
- * - 6 rectangular arenas in a 2x3 grid
- * - Each arena is 20m wide x 24m long
- * - 4m gap between arenas
+ * - The admitted manifest owns the single arena's dimensions and placement
  * - Base coordinates: see arena-layout.ts (single source of truth)
  */
 
@@ -52,6 +50,7 @@ import type { Physics } from "../shared/interaction/Physics";
 import type { PxRigidStatic } from "../../types/systems/physics";
 import type { ParticleSystem } from "../shared/presentation/ParticleSystem";
 import { isStreamingLikeViewport } from "../../runtime/clientViewportMode";
+import { applyDuelStoneSurface } from "./DuelStoneMaterial";
 import {
   createDuelArenaFloorZones,
   getDuelArenaGradeHeight,
@@ -86,14 +85,6 @@ const FENCE_POST_SIZE = 0.2;
 const FENCE_RAIL_HEIGHT = 0.08;
 const FENCE_RAIL_DEPTH = 0.08;
 const FENCE_RAIL_HEIGHTS = [0.3, 0.75, 1.2];
-
-const LOBBY_FLOOR_COLOR = 0xc9b896;
-const HOSPITAL_FLOOR_COLOR = 0xffffff;
-
-const TILE_TEXTURE_SIZE = 512;
-const TILE_TEXTURE_WORLD_SIZE = 8;
-const LOBBY_TILE_GRID = 3;
-const LOBBY_TILE_GROUT_WIDTH = 6;
 
 const TORCH_BRAZIER_RADIUS = 0.12;
 
@@ -222,49 +213,6 @@ const sandstoneBlockPattern = Fn(([uvIn]: [Node<"vec2">]) => {
     );
 
   return vec4(isStone, blockId.x, blockId.y, bevel);
-});
-
-/**
- * Square grid tile pattern for arena floors (large flagstones).
- * Returns vec4(isStone, tileId.x, tileId.y, bevel).
- * Uses positionWorld.xz for seamless world-space tiling.
- */
-const floorTilePattern = Fn(([uvIn]: [Node<"vec2">]) => {
-  const tileSize = float(1.2);
-  const mortarWidth = float(0.02);
-
-  const scaled = uvIn.div(tileSize);
-  const tileId = tslFloor(scaled);
-  const localUV = fract(scaled);
-
-  const mortarFrac = mortarWidth.div(tileSize);
-
-  const edgeDistX = tslMin(localUV.x, float(1.0).sub(localUV.x));
-  const edgeDistY = tslMin(localUV.y, float(1.0).sub(localUV.y));
-  const bevel = smoothstep(
-    float(0.0),
-    float(0.05),
-    tslMin(edgeDistX, edgeDistY),
-  );
-
-  const isStone = smoothstep(mortarFrac, mortarFrac.add(float(0.01)), localUV.x)
-    .mul(
-      smoothstep(
-        mortarFrac,
-        mortarFrac.add(float(0.01)),
-        float(1.0).sub(localUV.x),
-      ),
-    )
-    .mul(smoothstep(mortarFrac, mortarFrac.add(float(0.01)), localUV.y))
-    .mul(
-      smoothstep(
-        mortarFrac,
-        mortarFrac.add(float(0.01)),
-        float(1.0).sub(localUV.y),
-      ),
-    );
-
-  return vec4(isStone, tileId.x, tileId.y, bevel);
 });
 
 // ============================================================================
@@ -578,53 +526,10 @@ export class DuelArenaVisualsSystem extends System {
   }
 
   /**
-   * TSL procedural floor material with square flagstone pattern.
-   * World-space UVs make each arena look unique despite sharing the material.
+   * One weathered stone surface shared by every campus floor.
    */
   private createArenaFloorMaterial(): MeshStandardNodeMaterial {
-    const material = createDuelFloorMaterial();
-
-    material.colorNode = Fn(() => {
-      const worldPos = positionWorld;
-      const uvCoord = vec2(worldPos.x, worldPos.z);
-
-      const pattern = floorTilePattern(uvCoord);
-      const isStone = pattern.x;
-      const tileId = vec2(pattern.y, pattern.z);
-      const bevel = pattern.w;
-
-      const hashVal = tslHash(tileId);
-      const r = float(0.68).add(hashVal.mul(0.12));
-      const g = float(0.54).add(hashVal.mul(0.1));
-      const b = float(0.36).add(hashVal.mul(0.08));
-      const stoneColor = vec3(r, g, b);
-
-      const grain = tslNoise2D(uvCoord.mul(12.0)).mul(0.06);
-      const grainedStone = stoneColor.add(vec3(grain, grain, grain));
-
-      const groutColor = vec3(0.4, 0.32, 0.22);
-      const baseColor = mix(groutColor, grainedStone.mul(bevel), isStone);
-
-      return vec4(baseColor, 1.0);
-    })();
-
-    material.roughnessNode = Fn(() => {
-      const worldPos = positionWorld;
-      const uvCoord = vec2(worldPos.x, worldPos.z);
-
-      const pattern = floorTilePattern(uvCoord);
-      const isStone = pattern.x;
-      const tileId = vec2(pattern.y, pattern.z);
-
-      const stoneRough = float(0.6).add(
-        tslHash(tileId.add(vec2(7.0, 11.0))).mul(0.12),
-      );
-      const groutRough = float(0.9);
-
-      return mix(groutRough, stoneRough, isStone);
-    })();
-
-    return material;
+    return applyDuelStoneSurface(createDuelFloorMaterial());
   }
 
   /**
@@ -1331,16 +1236,7 @@ export class DuelArenaVisualsSystem extends System {
         LOBBY_LENGTH,
       );
 
-      const tileTexture = this.generateLobbyTileTexture();
-      tileTexture.repeat.set(
-        LOBBY_WIDTH / TILE_TEXTURE_WORLD_SIZE,
-        LOBBY_LENGTH / TILE_TEXTURE_WORLD_SIZE,
-      );
-
-      const material = createDuelFloorMaterial({
-        color: LOBBY_FLOOR_COLOR,
-        map: tileTexture,
-      });
+      const material = this.arenaFloorMat!;
 
       const floor = new THREE.Mesh(geometry, material);
       floor.receiveShadow = true;
@@ -1355,7 +1251,6 @@ export class DuelArenaVisualsSystem extends System {
       );
 
       this.geometries.push(geometry);
-      this.materials.push(material);
       this.arenaGroup!.add(floor);
 
       this.createLobbyBraziers(terrainY);
@@ -1443,9 +1338,7 @@ export class DuelArenaVisualsSystem extends System {
         HOSPITAL_LENGTH,
       );
 
-      const material = createDuelFloorMaterial({
-        color: HOSPITAL_FLOOR_COLOR,
-      });
+      const material = this.arenaFloorMat!;
 
       const floor = new THREE.Mesh(geometry, material);
       floor.receiveShadow = true;
@@ -1462,7 +1355,6 @@ export class DuelArenaVisualsSystem extends System {
       this.createHospitalCross(HOSPITAL_CENTER_X, HOSPITAL_CENTER_Z, floorY);
 
       this.geometries.push(geometry);
-      this.materials.push(material);
       this.arenaGroup!.add(floor);
     }
 
@@ -1590,60 +1482,6 @@ export class DuelArenaVisualsSystem extends System {
       });
       this.particleEmitterIds.push(emitterId);
     }
-  }
-
-  // ============================================================================
-  // Lobby Tile Texture
-  // ============================================================================
-
-  private generateLobbyTileTexture(): THREE.CanvasTexture {
-    const canvas = document.createElement("canvas");
-    canvas.width = TILE_TEXTURE_SIZE;
-    canvas.height = TILE_TEXTURE_SIZE;
-    const ctx = canvas.getContext("2d")!;
-
-    const tileSize = TILE_TEXTURE_SIZE / LOBBY_TILE_GRID;
-
-    ctx.fillStyle = "#8a7a5e";
-    ctx.fillRect(0, 0, TILE_TEXTURE_SIZE, TILE_TEXTURE_SIZE);
-
-    for (let row = 0; row < LOBBY_TILE_GRID; row++) {
-      for (let col = 0; col < LOBBY_TILE_GRID; col++) {
-        const x = col * tileSize + LOBBY_TILE_GROUT_WIDTH / 2;
-        const y = row * tileSize + LOBBY_TILE_GROUT_WIDTH / 2;
-        const w = tileSize - LOBBY_TILE_GROUT_WIDTH;
-        const h = tileSize - LOBBY_TILE_GROUT_WIDTH;
-
-        const rBase = 200 + Math.floor(Math.random() * 25);
-        const gBase = 175 + Math.floor(Math.random() * 20);
-        const bBase = 140 + Math.floor(Math.random() * 20);
-        ctx.fillStyle = `rgb(${rBase},${gBase},${bBase})`;
-        ctx.fillRect(x, y, w, h);
-
-        for (let s = 0; s < 100; s++) {
-          const sx = x + Math.random() * w;
-          const sy = y + Math.random() * h;
-          const brightness = Math.random() * 30 - 15;
-          const r = Math.min(255, Math.max(0, rBase + brightness));
-          const g = Math.min(255, Math.max(0, gBase + brightness));
-          const b = Math.min(255, Math.max(0, bBase + brightness));
-          ctx.fillStyle = `rgba(${Math.floor(r)},${Math.floor(g)},${Math.floor(b)},0.35)`;
-          ctx.fillRect(sx, sy, 2 + Math.random() * 3, 2 + Math.random() * 3);
-        }
-
-        ctx.strokeStyle = "rgba(0,0,0,0.06)";
-        ctx.lineWidth = 2;
-        ctx.strokeRect(x + 1, y + 1, w - 2, h - 2);
-      }
-    }
-
-    const texture = new THREE.CanvasTexture(canvas);
-    texture.wrapS = THREE.RepeatWrapping;
-    texture.wrapT = THREE.RepeatWrapping;
-    texture.generateMipmaps = true;
-    texture.needsUpdate = true;
-    this.textures.push(texture);
-    return texture;
   }
 
   // ============================================================================

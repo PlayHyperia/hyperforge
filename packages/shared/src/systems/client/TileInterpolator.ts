@@ -1051,13 +1051,17 @@ export class TileInterpolator {
           modify: (data: Record<string, unknown>) => void;
         }
       | undefined,
-    getTerrainHeight?: (x: number, z: number) => number | null,
+    getTerrainHeight?: (
+      x: number,
+      z: number,
+      entityId: string,
+    ) => number | null,
     onMovementComplete?: (
       entityId: string,
       position: { x: number; y: number; z: number },
     ) => void,
     isNearBuilding?: (x: number, z: number) => boolean,
-    getStepHeight?: (x: number, z: number) => number | null,
+    getStepHeight?: (x: number, z: number, entityId: string) => number | null,
     hasTimeRemaining?: (minimumMs?: number) => boolean,
   ): void {
     const frameDelta =
@@ -1136,6 +1140,7 @@ export class TileInterpolator {
           const stepY = getStepHeight(
             state.visualPosition.x,
             state.visualPosition.z,
+            entityId,
           );
           if (stepY !== null && Number.isFinite(stepY)) {
             state.visualPosition.y = stepY;
@@ -1144,6 +1149,7 @@ export class TileInterpolator {
             const height = getTerrainHeight(
               state.visualPosition.x,
               state.visualPosition.z,
+              entityId,
             );
             if (height !== null && Number.isFinite(height)) {
               state.visualPosition.y = height; // Feet at ground level
@@ -1154,6 +1160,7 @@ export class TileInterpolator {
           const height = getTerrainHeight(
             state.visualPosition.x,
             state.visualPosition.z,
+            entityId,
           );
           if (height !== null && Number.isFinite(height)) {
             state.visualPosition.y = height; // Feet at ground level
@@ -1442,6 +1449,7 @@ export class TileInterpolator {
         const stepY = getStepHeight(
           state.visualPosition.x,
           state.visualPosition.z,
+          entityId,
         );
         if (stepY !== null && Number.isFinite(stepY)) {
           state.visualPosition.y = stepY;
@@ -1450,6 +1458,7 @@ export class TileInterpolator {
           const height = getTerrainHeight(
             state.visualPosition.x,
             state.visualPosition.z,
+            entityId,
           );
           if (height !== null && Number.isFinite(height)) {
             state.visualPosition.y = height; // Feet at ground level
@@ -1460,6 +1469,7 @@ export class TileInterpolator {
         const height = getTerrainHeight(
           state.visualPosition.x,
           state.visualPosition.z,
+          entityId,
         );
         if (height !== null && Number.isFinite(height)) {
           state.visualPosition.y = height; // Feet at ground level
@@ -1632,7 +1642,7 @@ export class TileInterpolator {
         inCombatRotation: false,
         combatRotationLocked: false,
         serverConfirmedTile: initTile,
-        serverConfirmedY: 0,
+        serverConfirmedY: initPos.y,
         lastServerTick: 0,
         catchUpMultiplier: 1.0,
         targetCatchUpMultiplier: 1.0,
@@ -1713,6 +1723,7 @@ export class TileInterpolator {
       state.visualPosition.set(worldPos.x, position.y, worldPos.z);
       state.targetWorldPos.set(worldPos.x, position.y, worldPos.z);
       state.serverConfirmedTile = { ...newTile };
+      state.serverConfirmedY = position.y;
       state.isMoving = false;
       state.pendingArrivalEmote = null;
       // Only track idle state if current emote is movement-related

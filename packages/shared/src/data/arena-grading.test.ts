@@ -5,6 +5,7 @@ import { DuelArenaVisualsSystem } from "../systems/client/DuelArenaVisualsSystem
 import { TerrainSystem } from "../systems/shared/world/TerrainSystem";
 import { WaterBodyRegistry } from "../systems/shared/world/WaterBodyRegistry";
 import { ALL_WORLD_AREAS } from "./world-areas";
+import { resolvePlayerRootHeight } from "../utils/movement/PlayerSupport";
 import {
   getDuelArenaConfig,
   isPositionInsideCombatArena,
@@ -219,7 +220,10 @@ describe("authored shared duel arena grade", () => {
     const bounds = terrain.getWorldTerrainProfile().bounds;
     for (const position of [winner, loser, egress]) {
       expect(position.z).toBe(374);
-      expect(position.y).toBe(terrain.getHeightAt(position.x, position.z));
+      expect(position.y).toBeCloseTo(
+        resolvePlayerRootHeight(position.x, position.z, terrain)!,
+        12,
+      );
       expect(isPositionInsideCombatArena(position.x, position.z)).toBe(false);
       expect(position.x).toBeGreaterThan(bounds.minX);
       expect(position.x).toBeLessThan(bounds.maxX);

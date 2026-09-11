@@ -1,5 +1,47 @@
 # Duel Arena, Streaming, and Hyperbet Launch Checklist
 
+## Landscape, stone and physical grounding — verified candidate, 2026-09-11
+
+- [x] Push the preceding grove checkpoint: game `84a18a123` / assets `e26cc737`;
+  GitHub author and committer verified as dreaminglucid.
+- [x] Unify embedded/duel spawning, both movement loops and player interpolation
+  on actual floor/stair/platform support plus one clearance. Correct lost facing/
+  teleport Y and occupied-spawn relocation without changing avatar/gear geometry,
+  terrain grades or non-player resource transforms.
+- [x] Build the paired v3 western ridge/headland and deep southeast inlet with
+  actual worker parity, unchanged functional grades and the exact 13-tree census.
+  Root integration: 100 tests across 14 files; spatial/contact harness: 89/54 checks.
+  Scoped suite counts overlap; they are not live performance or art approval.
+- [x] Implement warmer meadow/earlier slope-rock and shared weathered stone floors.
+  Their material changes add no textures or population. Separately, actual probe40
+  verifies ten coastal 64-grid leaves: 84,420 triangles / 3,450,160 geometry bytes
+  (+78,720 / +3,202,560 over base16); the two pond128 leaves remain unchanged.
+- [x] Verify full spatial40 and contact41 on the rebuilt candidate: respectively
+  396/401 source pins, 327/331 archives and 28/18 unique PNGs, all hashes matched.
+  Both studies PASS, with 37 action receipts each, zero GPU/page errors and clean
+  owned cleanup. Both whole runs still FAIL 19 inherited cow/dagger content errors.
+- [x] Verify the final occupied-spawn root correction in actual contact41: both
+  actors remain at Y 28.8493015231 m over solid floor top 28.8393015291 m across
+  all 24 measurement boundaries; the former 20 mm root difference is now zero.
+  Boot minima are +5.656 to +9.975 mm; 12 owner brackets remain stable while poses
+  advance naturally. `contactApproved` remains false; this is not perfect contact,
+  IK, animation or screenshot-pose GPU deformation approval.
+- [ ] Complete the next landform-aligned ground-material pass. Actual probe40 art
+  still fails: uniform green ground, artificial-looking inlet, sparse functional
+  woodland, unresolved night materials and the black northern building. Retain
+  one arena and only choppable resource trees, not a separate decorative forest.
+  The new [art-direction concept](/Users/lucid/Documents/hyperia/asset-studio/compact-island-art-direction-20260911/PROMPT.md)
+  is generated reference art, not an actual renderer result or approved layout.
+- [ ] Qualify motion/shimmer, representative GPU/CPU frame tails and thermal cost;
+  no silent quality/resolution/population reductions or diagnostic-as-performance
+  claims. Static images and bounded diagnostic traces do not establish scalability.
+- [ ] Finish functional woodland/understory, lighting/environment agreement, fine
+  shadows, off-camera casters, animation and audio. Resolve content failures and
+  verify actual gathering, reconnect and decoded streaming before launch.
+
+Details: game `docs/compact-landscape-grounding-20260911.md`.
+Earlier sections are historical evidence; this block records the current candidate.
+
 ## Authored grove relocation and measured contact — in verification, 2026-09-11
 
 - [x] Move the same five authored harvestable trees away from the crowded altar

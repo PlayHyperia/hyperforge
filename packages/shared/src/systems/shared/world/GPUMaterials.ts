@@ -66,7 +66,10 @@ import { FOG_NEAR_SQ, FOG_FAR_SQ, fogRenderTarget } from "./FogConfig";
 import { TERRAIN_CONSTANTS } from "../../../constants/GameConstants";
 import { SUN_SHADE, SUN_LIGHT, NIGHT, applySunShade } from "./LightingConfig";
 import { WorldIlluminationUniforms } from "./WorldIlluminationUniforms";
-import type { WorldTerrainProfile } from "./WorldTerrainProfile";
+import {
+  isCompactSculptProfile,
+  type WorldTerrainProfile,
+} from "./WorldTerrainProfile";
 
 // ============================================================================
 // CONFIGURATION
@@ -1071,7 +1074,7 @@ export function createTreeDissolveMaterial(
   const palette = options.treePalette;
   const compact =
     palette?.terrainProfile.kind === "compact-candidate" &&
-    palette.terrainProfile.algorithm === "compact-island-sculpt-v1";
+    isCompactSculptProfile(palette.terrainProfile);
   const compactMaterial = compact ? new CompactTreePBRMaterial() : null;
   const baseDm = configureDissolveMaterial(
     source,
