@@ -1,7 +1,7 @@
 import React, { useEffect } from "react";
 import { act, render, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { EventType } from "@hyperforge/shared";
+import { EventType, World, ClientInterface } from "@hyperforge/shared";
 import {
   resolveStreamingRenderDpr,
   STREAMING_BOOT_TIMEOUT_MS,
@@ -48,16 +48,8 @@ function createMockWorld() {
       attachmentMismatches: [],
     }),
   };
-  const prefs = {
-    setDPR: vi.fn(),
-    setShadows: vi.fn(),
-    setPostprocessing: vi.fn(),
-    setBloom: vi.fn(),
-    setColorGrading: vi.fn(),
-    setDepthBlur: vi.fn(),
-    setWaterReflections: vi.fn(),
-    setEntityHighlighting: vi.fn(),
-  };
+  // Real preference owner even in this existing UI-only transport fixture.
+  const prefs = new ClientInterface(new World());
   const captureStream = {} as MediaStream;
   const captureNode = {} as GainNode;
   const audio = {
@@ -431,12 +423,8 @@ describe("StreamingMode component", () => {
           explicit: true,
         }),
       );
-      expect(gameClientState.world?.prefs.setShadows).toHaveBeenCalledWith(
-        "none",
-      );
-      expect(
-        gameClientState.world?.prefs.setPostprocessing,
-      ).toHaveBeenCalledWith(false);
+      expect(gameClientState.world?.prefs.shadows).toBe("none");
+      expect(gameClientState.world?.prefs.postprocessing).toBe(false);
     });
   });
 
@@ -446,9 +434,40 @@ describe("StreamingMode component", () => {
     render(<StreamingMode />);
 
     await waitFor(() => {
-      expect(gameClientState.world?.prefs.setDPR).toHaveBeenCalledWith(
-        expect.closeTo(2 / 3, 10),
-      );
+      expect(gameClientState.world?.prefs.dpr).toBeCloseTo(2 / 3, 10);
+    });
+  });
+
+  it("requests only shadows for the candidate and stays unqualified without an actual renderer", async () => {
+    window.history.replaceState(
+      null,
+      "",
+      "/stream.html?streamRenderProfile=shadows-720p60-v1&streamFps=60",
+    );
+    vi.stubGlobal("innerWidth", 1280);
+    vi.stubGlobal("innerHeight", 720);
+    render(<StreamingMode />);
+    await waitFor(() => {
+      expect(gameClientState.world?.prefs).toMatchObject({
+        dpr: 1,
+        shadows: "med",
+        postprocessing: false,
+        bloom: false,
+        depthBlur: false,
+        waterReflections: false,
+        entityHighlighting: false,
+      });
+      const receipt = (
+        window as Window & {
+          __HYPERIA_STREAM_RENDER_PROFILE__?: {
+            application?: { ready: boolean; mismatchReason: string | null };
+          };
+        }
+      ).__HYPERIA_STREAM_RENDER_PROFILE__;
+      expect(receipt?.application).toMatchObject({
+        ready: false,
+        mismatchReason: "renderer_unavailable",
+      });
     });
   });
 

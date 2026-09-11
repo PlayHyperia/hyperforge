@@ -143,9 +143,29 @@ establish a performance budget. Chrome's
 must not become production requirements. Retain failed evidence and separate
 instrumented correctness captures from representative performance runs.
 
-## Current checkpoint and evidence limits
+## Current implementation and evidence limits — 2026-09-11
 
-The latest pond runtime checkpoint is game
+The paired pushed checkpoints are game
+`621f6e94a7da83b298c085ca0d1e48d88c1a9bee` and assets
+`d6f52841f5d9173247e4499902ba1c27f96c2a89`. There is now one authoritative
+arena, a smaller campus grade, native compact-tree lighting and corrected
+resource transform handling. Probe30 has 28 reviewed images, no recorded
+GPU/page errors and clean owned cleanup, but the complete run still fails
+inherited cow/dagger content errors. The image remains below the intended art
+standard; this is not a release qualification. See
+[compact presentation evidence](compact-presentation-qualification-20260911.md).
+
+The next uncommitted slice adds an explicit sunlight-shadow profile with startup
+preference ownership and actual configuration receipts. Fresh package builds,
+typechecks and 239 focused tests pass after correcting the browser export boundary
+and embedded-route scope. GPU, visual and representative performance checks are
+still pending; see [shadow qualification](shadow-stream-profile-qualification-20260911.md).
+No optional effect is promoted by this research document. Heavy diagnostic
+captures must not be presented as representative frame-time benchmarks.
+
+## Historical pond checkpoint
+
+The preceding pond runtime checkpoint was game
 `c1933e898b64afa77a5b964200c90becfb7c7fd6` paired with assets
 `fb41785c68c6324903559552a26af11da07c7143`. Both exact branch refs and GitHub
 author/committer `dreaminglucid` are verified. The source checkpoint retains all

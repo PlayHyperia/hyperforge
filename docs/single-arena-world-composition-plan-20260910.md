@@ -102,6 +102,43 @@ against that authoritative population without silently reducing resource supply.
 
 ## 3. Acceptance from the actual experience
 
+### Next focused landscape slice after shadow qualification
+
+Probe30's actual tree/pond/campus/wide views show crowded crowns near the
+preparation altars and broad empty lawn elsewhere. Redistribute the existing
+functional resource budget into landform-following groves before increasing
+tree count or terrain resolution. Keep current functional grades and floors
+unchanged in this slice.
+
+Candidate envelopes for ground/path/crown testing, **not approved spawn areas**:
+
+| Grove | Proposed X/Z envelope | Role |
+| --- | --- | --- |
+| Western working woodland | X 282–314, Z 344–412 | Eastern foot of the existing western ridge |
+| Eastern grove | X 428–460, Z 344–408 | Smaller group following the existing eastern hill |
+| Southern continuation | X 300–337, Z 466–494 | Sparse secondary group, not another dense forest |
+
+Keep the bank–lobby–arena corridor and southern pond approach readable. Preserve
+the five authored training-tree species and availability; investigate moving the
+four compressed into X 372–378 / Z 298–312 toward the western preparation shoulder
+only after checking actual crown bounds, interaction approaches and rune stations.
+
+- [ ] Resolve the authoritative tile convention first: generator-local `[0,100)`
+  plus `tile*100` disagrees with centred unload ownership `floor((x+50)/100)`.
+  Test adjacent tile generation/unload in either order with actual resource owners.
+- [ ] Snap the final X/Z anchor before sampling Y and validating land/water/slope
+  and keep-out clearance. Test root contact using actual compact terrain heights.
+- [ ] Preserve IDs for unchanged resources; explicitly handle relocated identities
+  and depletion state. Reject same-type snapped-cell collisions instead of silently
+  dropping or replacing resources. Generator IDs are currently reconstructed later.
+- [ ] Verify deterministic species/count/position receipts, actual pathfinder access
+  from bank/workshop, collision footprints and depletion/regrowth/reconnect.
+- [ ] Inspect matched wide/close/moving WebGPU views with qualified shadows before
+  accepting visual benefit or measured rendering cost. A visual path mask alone
+  does not prove that an agent can reach and harvest a tree.
+
+### Whole-experience gates
+
 Resource-tree audit follow-through is recorded in
 `research/terrain-vegetation-assets-20260910.md`. Five explicit preparation trees
 coexist with active procedural resource trees; five is not the total live count.

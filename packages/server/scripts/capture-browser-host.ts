@@ -26,7 +26,7 @@ import {
   matchesExpectedCaptureRenderProfile,
   normalizeCaptureRenderProfileSnapshot,
   resolveAllowedCaptureOrigins,
-  resolveCaptureRenderProfileId,
+  resolveCaptureRenderProfileForUrls,
   resolveCaptureUrlCandidates,
   resolveDefaultCaptureFeatureFlags,
   resolveUnexpectedCaptureOrigin,
@@ -92,7 +92,14 @@ const sourceTargetFps = resolveCaptureSourceFrameRate(
   outputFps,
   process.env.STREAM_CAPTURE_SOURCE_FPS,
 );
-const expectedRenderProfileId = resolveCaptureRenderProfileId(sourceTargetFps);
+const configuredCaptureUrls = resolveCaptureUrlCandidates({
+  primaryUrl: process.env.GAME_URL,
+  fallbackUrls: process.env.GAME_FALLBACK_URLS,
+});
+const expectedRenderProfileId = resolveCaptureRenderProfileForUrls(
+  configuredCaptureUrls,
+  sourceTargetFps,
+);
 const outputViewport = {
   width: evenDimension(process.env.STREAM_OUTPUT_WIDTH, viewport.width),
   height: evenDimension(process.env.STREAM_OUTPUT_HEIGHT, viewport.height),
@@ -128,10 +135,7 @@ function withViewerAccessToken(rawUrl: string): string {
   return url.toString();
 }
 
-const captureUrls = resolveCaptureUrlCandidates({
-  primaryUrl: process.env.GAME_URL,
-  fallbackUrls: process.env.GAME_FALLBACK_URLS,
-}).map((url) =>
+const captureUrls = configuredCaptureUrls.map((url) =>
   withViewerAccessToken(applyCaptureFrameRateToUrl(url, sourceTargetFps)),
 );
 const allowedOrigins = resolveAllowedCaptureOrigins(captureUrls);

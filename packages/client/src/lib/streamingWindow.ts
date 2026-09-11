@@ -1,6 +1,7 @@
 import type {
   StreamingPerformanceSnapshot,
   StreamingRenderProfile,
+  StreamingRenderProfileApplication,
 } from "@hyperforge/shared";
 import type {
   StreamingSceneDiagnostics,
@@ -28,6 +29,7 @@ export type StreamingWindowRendererHealth = {
 
 export type StreamingWindowRenderProfile = StreamingRenderProfile & {
   explicit: true;
+  application?: StreamingRenderProfileApplication;
 };
 
 export type CaptureControlStatus = {

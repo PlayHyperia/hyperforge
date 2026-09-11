@@ -20,6 +20,11 @@ export {
   STREAMING_RENDER_PROFILES,
   resolveExplicitStreamingRenderProfile,
   resolveStreamingRenderFrameRate,
+  resolveStreamingRenderPreferences,
+  evaluateStreamingRenderProfileApplication,
+  type StreamingRenderPreferences,
+  type StreamingRenderAppliedState,
+  type StreamingRenderProfileApplication,
   type StreamingRenderProfile,
   type StreamingRenderProfileId,
 } from "./runtime/clientViewportMode";

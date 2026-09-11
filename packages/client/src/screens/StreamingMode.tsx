@@ -31,12 +31,22 @@ import type {
   StreamingGuardrailAgentSnapshot,
   StreamingGuardrailPhase,
   StreamingPreparationVisualDiagnostics,
+  ClientGraphics,
+  ClientInterface,
+  Environment,
+  TerrainSystem,
+  StreamingRenderProfile,
+  StreamingRenderPreferences,
+  StreamingRenderProfileApplication,
 } from "@hyperforge/shared";
 import {
   EventType,
   STREAMING_DUEL_VISIBLE_EQUIPMENT_SLOTS,
   deriveStreamingGuardrailReason,
   resolveExplicitStreamingRenderProfile,
+  resolveStreamingRenderPreferences,
+  evaluateStreamingRenderProfileApplication,
+  THREE,
 } from "@hyperforge/shared";
 import type { StreamingWindow } from "@/lib/streamingWindow";
 import {
@@ -189,6 +199,79 @@ export function resolveStreamingRenderDpr(
     maximumDpr,
     Math.sqrt(renderPixelBudget / (viewportWidth * viewportHeight)),
   );
+}
+
+/** Observe existing owners only. No shadow map/renderer/cache is initialized by this receipt. */
+export function collectStreamingRenderProfileApplication(
+  world: World,
+  profile: StreamingRenderProfile,
+  requested: StreamingRenderPreferences,
+): StreamingRenderProfileApplication {
+  const prefs = world.getSystem<ClientInterface>("prefs");
+  const graphics = world.getSystem<ClientGraphics>("graphics");
+  const environment = world.getSystem<Environment>("environment");
+  const terrain = world.getSystem<TerrainSystem>("terrain");
+  const renderer = graphics?.renderer;
+  if (!prefs || !graphics || !renderer) {
+    return evaluateStreamingRenderProfileApplication(profile, requested, null);
+  }
+  const size = renderer.getDrawingBufferSize(new THREE.Vector2());
+  const sun = environment?.sunLight;
+  const water = terrain?.["waterSystem"];
+  return evaluateStreamingRenderProfileApplication(profile, requested, {
+    preferences: {
+      dpr: prefs.dpr,
+      shadows: prefs.shadows,
+      postprocessing: prefs.postprocessing,
+      bloom: prefs.bloom,
+      colorGrading: prefs.colorGrading,
+      depthBlur: prefs.depthBlur,
+      waterReflections: prefs.waterReflections,
+      entityHighlighting: prefs.entityHighlighting,
+    },
+    renderer: {
+      isWebGPU:
+        graphics.isWebGPU &&
+        (renderer.backend as { isWebGPUBackend?: boolean }).isWebGPUBackend ===
+          true,
+      hasRendered: graphics.hasRendered,
+      dpr: renderer.getPixelRatio(),
+      width: size.x,
+      height: size.y,
+      samples: renderer.samples,
+      shadowsEnabled: renderer.shadowMap.enabled,
+      shadowType: renderer.shadowMap.type,
+      postprocessing: graphics.usePostprocessing,
+      composerPresent: graphics.composer !== null,
+    },
+    sunlight: sun
+      ? {
+          name: sun.name,
+          castShadow: sun.castShadow,
+          cascaded: environment?.["csmShadowNode"] !== null,
+          mapSize: [sun.shadow.mapSize.width, sun.shadow.mapSize.height],
+          allocatedMapSize: sun.shadow.map
+            ? [sun.shadow.map.width, sun.shadow.map.height]
+            : null,
+          frustum: [
+            sun.shadow.camera.left,
+            sun.shadow.camera.right,
+            sun.shadow.camera.top,
+            sun.shadow.camera.bottom,
+            sun.shadow.camera.near,
+            sun.shadow.camera.far,
+          ],
+          bias: sun.shadow.bias,
+          normalBias: sun.shadow.normalBias,
+        }
+      : null,
+    water: water
+      ? {
+          reflectionsEnabled: water.reflectionsEnabled,
+          activeReflectionCount: water.activeReflectionCameraCount,
+        }
+      : null,
+  });
 }
 
 const STREAMING_ARMOR_VISUAL_SLOTS = [
@@ -565,6 +648,8 @@ export function StreamingMode() {
   // Fade-out animation: true while the loading overlay is fading away
   const [fadingOut, setFadingOut] = useState(false);
   const worldRef = useRef<World | null>(null);
+  const renderProfileRef = useRef<StreamingRenderProfile | null>(null);
+  const renderPreferencesRef = useRef<StreamingRenderPreferences | null>(null);
   const latestStreamingStateRef = useRef<StreamingState | null>(null);
   const worldReadyRef = useRef(false);
   const lastCameraTargetRef = useRef<string | null>(null);
@@ -633,8 +718,23 @@ export function StreamingMode() {
       win.__HYPERIA_STREAM_SCENE_DIAGNOSTICS__ = null;
       win.__HYPERIA_STREAM_SCENE_READINESS__ = null;
       const renderProfile = resolveExplicitStreamingRenderProfile(window);
+      const renderPreferences = resolveStreamingRenderPreferences(
+        window.innerWidth,
+        window.innerHeight,
+        renderProfile,
+      );
+      renderProfileRef.current = renderProfile;
+      renderPreferencesRef.current = renderPreferences;
       win.__HYPERIA_STREAM_RENDER_PROFILE__ = renderProfile
-        ? { ...renderProfile, explicit: true }
+        ? {
+            ...renderProfile,
+            explicit: true,
+            application: evaluateStreamingRenderProfileApplication(
+              renderProfile,
+              renderPreferences,
+              null,
+            ),
+          }
         : null;
       delete win.__HYPERIA_STREAM_AUDIO_CAPTURE__;
       latestStreamingStateRef.current = null;
@@ -659,33 +759,9 @@ export function StreamingMode() {
       // to a roughly 720p pixel budget. This renders native 720p at DPR 1,
       // 1080p at DPR 2/3, and preserves comparable detail in vertical/square
       // crops without accidentally downscaling an already-720p broadcast.
-      const prefs = world.getSystem("prefs") as {
-        setDPR?: (v: number) => void;
-        setShadows?: (v: string) => void;
-        setPostprocessing?: (v: boolean) => void;
-        setBloom?: (v: boolean) => void;
-        setColorGrading?: (v: string) => void;
-        setDepthBlur?: (v: boolean) => void;
-        setWaterReflections?: (v: boolean) => void;
-        setEntityHighlighting?: (v: boolean) => void;
-      } | null;
-      if (prefs) {
-        prefs.setDPR?.(
-          resolveStreamingRenderDpr(
-            window.innerWidth,
-            window.innerHeight,
-            renderProfile?.renderPixelBudget,
-            renderProfile?.maximumDpr,
-          ),
-        );
-        prefs.setShadows?.("none");
-        prefs.setPostprocessing?.(false);
-        prefs.setBloom?.(false);
-        prefs.setColorGrading?.("none");
-        prefs.setDepthBlur?.(false);
-        prefs.setWaterReflections?.(false);
-        prefs.setEntityHighlighting?.(false);
-      }
+      const prefs = world.getSystem<ClientInterface>("prefs");
+      if (!prefs) throw new Error("Streaming render preferences unavailable");
+      prefs.configureStreamingRenderPreferences(renderPreferences);
 
       const streamAudio = world.getSystem("audio") as {
         ctx?: AudioContext;
@@ -1439,14 +1515,34 @@ export function StreamingMode() {
         }
       }
       const win = window as StreamingWindow;
+      const profile = renderProfileRef.current;
+      const requested = renderPreferencesRef.current;
+      const application =
+        profile && requested
+          ? collectStreamingRenderProfileApplication(world, profile, requested)
+          : null;
+      if (profile && application) {
+        win.__HYPERIA_STREAM_RENDER_PROFILE__ = {
+          ...profile,
+          explicit: true,
+          application,
+        };
+      }
       coldRenderStabilityRef.current = advanceStreamingColdRenderStability(
         coldRenderStabilityRef.current,
         win.__HYPERIA_STREAM_PERFORMANCE__,
-        { sceneAssetsReady: assetReadiness.ready },
+        {
+          sceneAssetsReady:
+            assetReadiness.ready && (application?.ready ?? true),
+        },
       );
       const readiness = {
         ...assetReadiness,
-        ready: assetReadiness.ready && coldRenderStabilityRef.current.ready,
+        ready:
+          assetReadiness.ready &&
+          coldRenderStabilityRef.current.ready &&
+          (application?.ready ?? true),
+        renderProfileApplication: application,
         coldRenderSettled: coldRenderStabilityRef.current.ready,
         coldRender: coldRenderStabilityRef.current,
       };
@@ -1506,6 +1602,8 @@ export function StreamingMode() {
       worldListenerCleanupRef.current?.();
       worldListenerCleanupRef.current = null;
       worldRef.current = null;
+      renderProfileRef.current = null;
+      renderPreferencesRef.current = null;
       latestStreamingStateRef.current = null;
       preparationVisualFingerprintRef.current = "inactive";
       worldReadyRef.current = false;

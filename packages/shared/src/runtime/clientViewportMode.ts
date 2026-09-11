@@ -40,6 +40,24 @@ export const STREAMING_RENDER_PROFILES = Object.freeze({
     grassProfile: "fixed-arena-v1" as const,
     avatarLodPolicy: "distance-authoritative-v1" as const,
   }),
+  // Explicit qualification candidate. Never selected by the FPS/default route.
+  "shadows-720p60-v1": Object.freeze({
+    id: "shadows-720p60-v1" as const,
+    targetFps: 60,
+    sourceFps: 60,
+    outputFps: 60,
+    viewportWidth: 1280,
+    viewportHeight: 720,
+    outputWidth: 1280,
+    outputHeight: 720,
+    renderPixelBudget: 1280 * 720,
+    maximumDpr: 1,
+    antialiasing: true,
+    shadows: "med" as const,
+    postprocessing: false,
+    grassProfile: "fixed-arena-v1" as const,
+    avatarLodPolicy: "distance-authoritative-v1" as const,
+  }),
 });
 
 export type StreamingRenderProfileId = keyof typeof STREAMING_RENDER_PROFILES;
@@ -52,14 +70,33 @@ export function resolveExplicitStreamingRenderProfile(
   const windowRef = getWindowRef(win);
   if (!windowRef) return null;
   const params = getSearchParams(windowRef);
-  const rawProfile = (params?.get("streamRenderProfile") || "").trim();
+  const selections = params?.getAll("streamRenderProfile") ?? [];
+  if (selections.length > 1) {
+    throw new Error("streamRenderProfile requires exactly one value");
+  }
+  const rawProfile = (selections[0] || "").trim();
   if (!rawProfile) return null;
-  if (!(rawProfile in STREAMING_RENDER_PROFILES)) {
+  if (
+    !Object.prototype.hasOwnProperty.call(STREAMING_RENDER_PROFILES, rawProfile)
+  ) {
     throw new Error(`Unknown streaming render profile: ${rawProfile}`);
   }
 
   const profile =
     STREAMING_RENDER_PROFILES[rawProfile as StreamingRenderProfileId];
+  if (
+    profile.id === "shadows-720p60-v1" &&
+    (!isStreamPageRoute(windowRef) ||
+      parseTruthy(params?.get("embedded")) ||
+      windowRef.__HYPERIA_EMBEDDED__ === true)
+  ) {
+    throw new Error(
+      "The shadows render candidate requires the non-embedded StreamingMode route",
+    );
+  }
+  if ((params?.getAll("streamFps").length ?? 0) > 1) {
+    throw new Error("streamFps requires exactly one value");
+  }
   const rawFps = (params?.get("streamFps") || "").trim();
   if (rawFps && !/^\d+$/u.test(rawFps)) {
     throw new Error(
@@ -72,6 +109,171 @@ export function resolveExplicitStreamingRenderProfile(
     );
   }
   return profile;
+}
+
+/** Settings locked for the lifetime of a broadcast, never persisted as user prefs. */
+export type StreamingRenderPreferences = {
+  dpr: number;
+  shadows: string;
+  postprocessing: boolean;
+  bloom: boolean;
+  colorGrading: string;
+  depthBlur: boolean;
+  waterReflections: boolean;
+  entityHighlighting: boolean;
+};
+
+export function resolveStreamingRenderPreferences(
+  width: number,
+  height: number,
+  profile: StreamingRenderProfile | null,
+): StreamingRenderPreferences {
+  const validSize =
+    Number.isFinite(width) &&
+    width > 0 &&
+    Number.isFinite(height) &&
+    height > 0;
+  return {
+    dpr: validSize
+      ? Math.min(
+          profile?.maximumDpr ?? 1,
+          Math.sqrt(
+            (profile?.renderPixelBudget ?? 1280 * 720) / (width * height),
+          ),
+        )
+      : 1,
+    shadows: profile?.shadows ?? "none",
+    postprocessing: profile?.postprocessing ?? false,
+    bloom: false,
+    colorGrading: "none",
+    depthBlur: false,
+    waterReflections: false,
+    entityHighlighting: false,
+  };
+}
+
+/** Read-only observations, not an assertion that a GPU render succeeded. */
+export type StreamingRenderAppliedState = {
+  preferences: StreamingRenderPreferences;
+  renderer: {
+    isWebGPU: boolean;
+    hasRendered: boolean;
+    dpr: number;
+    width: number;
+    height: number;
+    samples: number;
+    shadowsEnabled: boolean;
+    shadowType: number;
+    postprocessing: boolean;
+    composerPresent: boolean;
+  };
+  sunlight: {
+    name: string;
+    castShadow: boolean;
+    cascaded: boolean;
+    mapSize: readonly [number, number];
+    allocatedMapSize: readonly [number, number] | null;
+    frustum: readonly [number, number, number, number, number, number];
+    bias: number;
+    normalBias: number;
+  } | null;
+  water: { reflectionsEnabled: boolean; activeReflectionCount: number } | null;
+};
+
+export type StreamingRenderProfileApplication = {
+  schemaVersion: 1;
+  ready: boolean;
+  mismatchReason: string | null;
+  requested: StreamingRenderPreferences;
+  applied: StreamingRenderAppliedState | null;
+};
+
+/** Fail closed on missing/unapplied settings; native rendering remains a separate gate. */
+export function evaluateStreamingRenderProfileApplication(
+  profile: StreamingRenderProfile,
+  requested: StreamingRenderPreferences,
+  applied: StreamingRenderAppliedState | null,
+): StreamingRenderProfileApplication {
+  const finish = (
+    mismatchReason: string | null,
+  ): StreamingRenderProfileApplication => ({
+    schemaVersion: 1,
+    ready: mismatchReason === null,
+    mismatchReason,
+    requested,
+    applied,
+  });
+  const expected = resolveStreamingRenderPreferences(
+    profile.viewportWidth,
+    profile.viewportHeight,
+    profile,
+  );
+  for (const key of Object.keys(
+    expected,
+  ) as (keyof StreamingRenderPreferences)[]) {
+    if (requested[key] !== expected[key]) return finish(`requested.${key}`);
+  }
+  if (!applied) return finish("renderer_unavailable");
+  for (const key of Object.keys(
+    expected,
+  ) as (keyof StreamingRenderPreferences)[]) {
+    if (applied.preferences[key] !== expected[key])
+      return finish(`preferences.${key}`);
+  }
+  const renderer = applied.renderer;
+  if (!renderer.isWebGPU || !renderer.hasRendered)
+    return finish("renderer_not_rendered");
+  if (
+    renderer.dpr !== expected.dpr ||
+    renderer.width !== profile.outputWidth ||
+    renderer.height !== profile.outputHeight
+  )
+    return finish("render_dimensions");
+  if (renderer.samples !== 4) return finish("antialiasing_samples");
+  // THREE.PCFShadowMap's stable wire value. The collector reads the actual enum.
+  if (!renderer.shadowsEnabled || renderer.shadowType !== 1)
+    return finish("renderer_shadow_map");
+  if (renderer.postprocessing || renderer.composerPresent)
+    return finish("postprocessing");
+  if (
+    !applied.water ||
+    applied.water.reflectionsEnabled ||
+    applied.water.activeReflectionCount !== 0
+  ) {
+    return finish("water_reflections");
+  }
+  const sun = applied.sunlight;
+  if (!sun) return finish("sunlight_unavailable");
+  if (sun.cascaded) return finish("unexpected_cascaded_shadows");
+  if (profile.shadows === "none") {
+    if (
+      sun.castShadow ||
+      sun.allocatedMapSize !== null ||
+      sun.name !== "SunLight_NoShadows"
+    ) {
+      return finish("unexpected_sun_shadows");
+    }
+  } else {
+    if (!sun.castShadow || sun.name !== "SunLight_Single")
+      return finish("sun_shadows_disabled");
+    if (
+      sun.mapSize[0] !== 4096 ||
+      sun.mapSize[1] !== 4096 ||
+      sun.allocatedMapSize?.[0] !== 4096 ||
+      sun.allocatedMapSize?.[1] !== 4096
+    ) {
+      return finish("sun_shadow_map_size");
+    }
+    const frustum = [-200, 200, 200, -200, 0.5, 600];
+    if (
+      sun.frustum.length !== frustum.length ||
+      sun.frustum.some((value, index) => value !== frustum[index]) ||
+      sun.bias !== 0.0002 ||
+      sun.normalBias !== 0.01
+    )
+      return finish("sun_shadow_projection");
+  }
+  return finish(null);
 }
 
 function parseTruthy(value: string | null | undefined): boolean {

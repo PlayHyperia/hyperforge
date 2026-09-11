@@ -10,8 +10,13 @@ export {
   STREAMING_RENDER_PROFILES,
   resolveExplicitStreamingRenderProfile,
   resolveStreamingRenderFrameRate,
+  resolveStreamingRenderPreferences,
+  evaluateStreamingRenderProfileApplication,
   type StreamingRenderProfile,
   type StreamingRenderProfileId,
+  type StreamingRenderPreferences,
+  type StreamingRenderAppliedState,
+  type StreamingRenderProfileApplication,
 } from "./clientViewportMode";
 export {
   createEditorWorld,

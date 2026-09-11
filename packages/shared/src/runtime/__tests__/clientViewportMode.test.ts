@@ -9,11 +9,236 @@ import {
   resolveStreamingRenderFrameRate,
   shouldAdmitNetworkEntityInViewport,
   shouldStreamVegetationBackgroundLods,
+  STREAMING_RENDER_PROFILES,
+  resolveStreamingRenderPreferences,
+  evaluateStreamingRenderProfileApplication,
+  type StreamingRenderAppliedState,
 } from "../clientViewportMode";
 
 function makeWindow(pathname: string, search = ""): Window {
   return { location: { pathname, search } } as unknown as Window;
 }
+
+describe("opt-in shadows render contract (CPU validation, not GPU execution)", () => {
+  const profile = STREAMING_RENDER_PROFILES["shadows-720p60-v1"];
+  const requested = resolveStreamingRenderPreferences(1280, 720, profile);
+  const observed = (): StreamingRenderAppliedState => ({
+    preferences: { ...requested },
+    renderer: {
+      isWebGPU: true,
+      hasRendered: true,
+      dpr: 1,
+      width: 1280,
+      height: 720,
+      samples: 4,
+      shadowsEnabled: true,
+      shadowType: 1,
+      postprocessing: false,
+      composerPresent: false,
+    },
+    sunlight: {
+      name: "SunLight_Single",
+      castShadow: true,
+      cascaded: false,
+      mapSize: [4096, 4096],
+      allocatedMapSize: [4096, 4096],
+      frustum: [-200, 200, 200, -200, 0.5, 600],
+      bias: 0.0002,
+      normalBias: 0.01,
+    },
+    water: { reflectionsEnabled: false, activeReflectionCount: 0 },
+  });
+
+  it("only changes the explicit id and shadows; population and all other budgets stay identical", () => {
+    expect({ ...profile, id: "canonical-720p60-v1", shadows: "none" }).toEqual(
+      STREAMING_RENDER_PROFILES["canonical-720p60-v1"],
+    );
+    expect(
+      resolveExplicitStreamingRenderProfile(makeWindow("/stream.html")),
+    ).toBeNull();
+    expect(
+      resolveExplicitStreamingRenderProfile(
+        makeWindow(
+          "/stream.html",
+          "?streamRenderProfile=shadows-720p60-v1&streamFps=60",
+        ),
+      ),
+    ).toBe(profile);
+    expect(
+      resolveClientViewportRuntimeProfile(
+        makeWindow(
+          "/stream.html",
+          "?streamWorld=preparation-v1&streamRenderProfile=shadows-720p60-v1",
+        ),
+      ),
+    ).toEqual(
+      resolveClientViewportRuntimeProfile(
+        makeWindow("/stream.html", "?streamWorld=preparation-v1"),
+      ),
+    );
+  });
+
+  it.each([
+    "?streamRenderProfile=shadows-720p60-v1&streamFps=30",
+    "?streamRenderProfile=shadows-720p60-v1&streamRenderProfile=shadows-720p60-v1",
+    "?streamRenderProfile=shadows-720p60-v1&streamFps=60&streamFps=60",
+    "?streamRenderProfile=toString",
+    "?streamRenderProfile=__proto__",
+  ])("rejects ambiguous or contradictory selections %s", (query) => {
+    expect(() =>
+      resolveExplicitStreamingRenderProfile(makeWindow("/stream.html", query)),
+    ).toThrow();
+  });
+
+  it("does not admit the experimental profile in an ordinary viewport", () => {
+    expect(() =>
+      resolveExplicitStreamingRenderProfile(
+        makeWindow("/play", "?streamRenderProfile=shadows-720p60-v1"),
+      ),
+    ).toThrow(/non-embedded StreamingMode/);
+  });
+
+  it("admits the existing page=stream alias but rejects embedded routing before it", () => {
+    expect(
+      resolveExplicitStreamingRenderProfile(
+        makeWindow("/", "?page=stream&streamRenderProfile=shadows-720p60-v1"),
+      ),
+    ).toBe(profile);
+    for (const query of [
+      "?embedded=true&mode=spectator&streamRenderProfile=shadows-720p60-v1",
+      "?embedded=true&mode=spectator&page=stream&streamRenderProfile=shadows-720p60-v1",
+      "?embedded=true&mode=agent&page=stream&streamRenderProfile=shadows-720p60-v1",
+    ]) {
+      expect(() =>
+        resolveExplicitStreamingRenderProfile(makeWindow("/", query)),
+      ).toThrow(/non-embedded StreamingMode/);
+    }
+    const configured = makeWindow(
+      "/",
+      "?page=stream&streamRenderProfile=shadows-720p60-v1",
+    );
+    Object.assign(configured, { __HYPERIA_EMBEDDED__: true });
+    expect(() => resolveExplicitStreamingRenderProfile(configured)).toThrow(
+      /non-embedded StreamingMode/,
+    );
+  });
+
+  it("requires observed renderer work; requested constants alone cannot qualify", () => {
+    expect(
+      evaluateStreamingRenderProfileApplication(profile, requested, null),
+    ).toMatchObject({
+      ready: false,
+      mismatchReason: "renderer_unavailable",
+      applied: null,
+    });
+    expect(
+      evaluateStreamingRenderProfileApplication(profile, requested, observed()),
+    ).toMatchObject({ schemaVersion: 1, ready: true, mismatchReason: null });
+  });
+
+  it.each([
+    [
+      "preferences",
+      (state: StreamingRenderAppliedState) => {
+        state.preferences.shadows = "none";
+      },
+    ],
+    [
+      "DPR",
+      (state: StreamingRenderAppliedState) => {
+        state.renderer.dpr = 0.5;
+      },
+    ],
+    [
+      "resolution",
+      (state: StreamingRenderAppliedState) => {
+        state.renderer.width = 640;
+      },
+    ],
+    [
+      "AA",
+      (state: StreamingRenderAppliedState) => {
+        state.renderer.samples = 0;
+      },
+    ],
+    [
+      "global shadow gate",
+      (state: StreamingRenderAppliedState) => {
+        state.renderer.shadowsEnabled = false;
+      },
+    ],
+    [
+      "unrendered",
+      (state: StreamingRenderAppliedState) => {
+        state.renderer.hasRendered = false;
+      },
+    ],
+    [
+      "CSM",
+      (state: StreamingRenderAppliedState) => {
+        state.sunlight!.cascaded = true;
+      },
+    ],
+    [
+      "unallocated",
+      (state: StreamingRenderAppliedState) => {
+        state.sunlight!.allocatedMapSize = null;
+      },
+    ],
+    [
+      "map size",
+      (state: StreamingRenderAppliedState) => {
+        state.sunlight!.mapSize = [2048, 2048];
+      },
+    ],
+    [
+      "frustum",
+      (state: StreamingRenderAppliedState) => {
+        state.sunlight!.frustum = [-100, 100, 100, -100, 0.5, 600];
+      },
+    ],
+    [
+      "postprocessing",
+      (state: StreamingRenderAppliedState) => {
+        state.renderer.composerPresent = true;
+      },
+    ],
+    [
+      "water",
+      (state: StreamingRenderAppliedState) => {
+        state.water!.reflectionsEnabled = true;
+      },
+    ],
+    [
+      "missing water",
+      (state: StreamingRenderAppliedState) => {
+        state.water = null;
+      },
+    ],
+    [
+      "non-finite bias",
+      (state: StreamingRenderAppliedState) => {
+        state.sunlight!.bias = NaN;
+      },
+    ],
+  ] as const)("rejects applied mismatch: %s", (_label, change) => {
+    const state = observed();
+    change(state);
+    expect(
+      evaluateStreamingRenderProfileApplication(profile, requested, state)
+        .ready,
+    ).toBe(false);
+  });
+
+  it("keeps adaptive pixel budgets but refuses to call a noncanonical viewport a matched capture", () => {
+    const adaptive = resolveStreamingRenderPreferences(1920, 1080, profile);
+    expect(adaptive.dpr).toBeCloseTo(2 / 3);
+    expect(
+      evaluateStreamingRenderProfileApplication(profile, adaptive, observed())
+        .mismatchReason,
+    ).toBe("requested.dpr");
+  });
+});
 
 describe("client viewport mode", () => {
   it("recognizes the canonical stream page without relying on a global window", () => {

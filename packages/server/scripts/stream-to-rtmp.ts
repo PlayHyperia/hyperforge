@@ -62,7 +62,7 @@ import {
   normalizeCaptureRenderProfileSnapshot,
   resolveAllowedCaptureOrigins,
   resolveCaptureBrowserEndpoint,
-  resolveCaptureRenderProfileId,
+  resolveCaptureRenderProfileForUrls,
   resolveCaptureUrlCandidates,
   resolveUnexpectedCaptureOrigin,
   shouldAcceptCaptureReadiness,
@@ -115,13 +115,14 @@ const CAPTURE_SOURCE_FPS = resolveCaptureSourceFrameRate(
   TARGET_FPS,
   process.env.STREAM_CAPTURE_SOURCE_FPS,
 );
-const EXPECTED_CAPTURE_RENDER_PROFILE =
-  resolveCaptureRenderProfileId(CAPTURE_SOURCE_FPS);
-
 const GAME_URL_CANDIDATES_UNAUTHENTICATED = resolveCaptureUrlCandidates({
   primaryUrl: process.env.GAME_URL,
   fallbackUrls: process.env.GAME_FALLBACK_URLS,
 });
+const EXPECTED_CAPTURE_RENDER_PROFILE = resolveCaptureRenderProfileForUrls(
+  GAME_URL_CANDIDATES_UNAUTHENTICATED,
+  CAPTURE_SOURCE_FPS,
+);
 const STREAMING_VIEWER_ACCESS_TOKEN = (
   process.env.STREAMING_VIEWER_ACCESS_TOKEN || ""
 ).trim();

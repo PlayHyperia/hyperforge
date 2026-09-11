@@ -1,7 +1,45 @@
 # Duel Arena, Streaming, and Hyperbet Launch Checklist
 
+## Shadow-enabled stream profile — unqualified candidate, 2026-09-11
+
+- [x] Implement opt-in `shadows-720p60-v1`: same 720p/DPR1/60 target/MSAA,
+  assets, population and LOD; existing sunlight shadows only, no default change.
+  Startup policy wins over stored preferences without persisting candidate values.
+  Actual applied-state receipt is required; capture fallback profiles must agree.
+- [x] Fix fresh-build browser-entry exports and reject unimplemented embedded
+  candidate routes. Root reruns pass 44 shared, 48 built-client and 120 server
+  tests plus 27 Three ownership/patch tests. Three package typechecks and normal
+  client/fresh server builds pass; competitive prefix `17edc5f9239d`.
+- [ ] Qualify actual shadow pixels, coverage, temporal stability and GPU errors.
+  Configuration receipts and CPU tests are not visual or performance approval.
+- [x] Capture pinned actual Chrome/Metal lightweight canonical31 and shadow32:
+  each spatial study passes 28 PNGs/37 HTTP receipts, with 337 current pins and
+  268 archives independently verified; zero recorded GPU/page/device errors.
+  Daylight tree/hub views show useful resource-tree contact shadows. Both whole
+  runs still FAIL inherited19 content errors/cow404;31 also retains cleanup EPERM.
+  Probe32 has clean owned cleanup. Neither is visually or performance approved.
+- [x] Separate cold startup/daylight waits from two10s scheduling windows.
+  Shadow32 observes59.4/60 render-progress groups per second, not presented FPS;
+  moving cameras differ from31, so this is not matched shadow-cost evidence.
+- [x] Retain detailed shadow33:337 pins/268 archives/28 PNGs verified; spatial
+  PASS,36 HTTP200 receipts, wholeFAIL19 content errors/cow404. Native trace has
+  64,303 matched pass begins/ends,31,985 finishes,zero recorded violations/GPU
+  errors and clean owned cleanup. Unknown sampling/descriptor scope remains;
+  this bounded trace does not prove every GPU use or production performance.
+- [ ] Fix lobby/hospital shadow reception; qualify avatar/gear contact and
+  self-shadowing in daylight. Keep tree roots and full resource lifecycle correct
+  when composing functional groves. No decorative-tree duplication.
+- [ ] Qualify matched frame times,
+  memory and temporal stability. Finish terrain/shoreline/grove composition,
+  small-subject shadow coverage and actual decoded-stream approval.
+
 ## Compact presentation and startup responsiveness — candidate, 2026-09-11
 
+- [x] Save reviewed game checkpoint `621f6e94a7da83b298c085ca0d1e48d88c1a9bee`
+  paired with assets `d6f52841f5d9173247e4499902ba1c27f96c2a89`.
+  Both pushed; exact remote revisions and GitHub author/committer dreaminglucid
+  verified. Normal game hook passed; all18 changed pinned runtime/test files
+  match probe30 after commit. This is not default promotion or launch approval.
 - [x] Implement exactly one authoritative arena, with unchanged ring1 spawns,
   lobby and hospital; remove retired floor/collision/combat regions and shrink
   campus grading by5,824m². Shared and paired asset manifests must ship together.

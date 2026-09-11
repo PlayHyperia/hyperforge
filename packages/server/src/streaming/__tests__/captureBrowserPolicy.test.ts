@@ -1,4 +1,6 @@
 import { describe, expect, it } from "vitest";
+import { readFileSync } from "node:fs";
+import { STREAMING_RENDER_PROFILES } from "../../../../shared/src/runtime/clientViewportMode";
 import {
   applyCaptureFrameRateToUrl,
   assertCaptureRenderProfileContract,
@@ -7,17 +9,232 @@ import {
   CAPTURE_RENDER_PROFILE_CONTRACTS,
   DEFAULT_CAPTURE_GAME_URL,
   FALLBACK_CAPTURE_RENDER_PROFILE,
+  SHADOWS_CAPTURE_RENDER_PROFILE,
   matchesExpectedCaptureRenderProfile,
   normalizeCaptureRenderProfileSnapshot,
   resolveAllowedCaptureOrigins,
   resolveCaptureBrowserEndpoint,
+  resolveCaptureRenderProfileForUrls,
+  resolveCaptureRenderProfileId,
   resolveDefaultCaptureFeatureFlags,
   resolveCaptureUrlCandidates,
   resolveUnexpectedCaptureOrigin,
   shouldAcceptCaptureReadiness,
 } from "../captureBrowserPolicy";
 
+// Pure wire-contract fixture, not a renderer or GPU qualification substitute.
+function shadowApplicationSnapshot() {
+  const preferences = {
+    dpr: 1,
+    shadows: "med",
+    postprocessing: false,
+    bloom: false,
+    colorGrading: "none",
+    depthBlur: false,
+    waterReflections: false,
+    entityHighlighting: false,
+  };
+  return {
+    ...CAPTURE_RENDER_PROFILE_CONTRACTS[SHADOWS_CAPTURE_RENDER_PROFILE],
+    explicit: true,
+    application: {
+      schemaVersion: 1 as const,
+      ready: true,
+      mismatchReason: null,
+      requested: { ...preferences },
+      applied: {
+        preferences: { ...preferences },
+        renderer: {
+          isWebGPU: true,
+          hasRendered: true,
+          dpr: 1,
+          width: 1280,
+          height: 720,
+          samples: 4,
+          shadowsEnabled: true,
+          shadowType: 1,
+          postprocessing: false,
+          composerPresent: false,
+        },
+        sunlight: {
+          name: "SunLight_Single",
+          castShadow: true,
+          cascaded: false,
+          mapSize: [4096, 4096] as const,
+          allocatedMapSize: [4096, 4096] as const,
+          frustum: [-200, 200, 200, -200, 0.5, 600] as const,
+          bias: 0.0002,
+          normalBias: 0.01,
+        },
+        water: { reflectionsEnabled: false, activeReflectionCount: 0 },
+      },
+    },
+  };
+}
+
 describe("captureBrowserPolicy", () => {
+  it("keeps server contracts equal to the actual shared profiles without changing defaults", () => {
+    expect(CAPTURE_RENDER_PROFILE_CONTRACTS).toEqual(STREAMING_RENDER_PROFILES);
+    expect(resolveCaptureRenderProfileId(60)).toBe(
+      CANONICAL_CAPTURE_RENDER_PROFILE,
+    );
+    expect(resolveCaptureRenderProfileId(30)).toBe(
+      FALLBACK_CAPTURE_RENDER_PROFILE,
+    );
+    expect(resolveCaptureRenderProfileId(45)).toBeNull();
+  });
+
+  it("preserves the explicit shadow candidate and requires consistent navigation fallbacks", () => {
+    const candidate =
+      "https://game.example/stream.html?streamRenderProfile=shadows-720p60-v1&streamFps=60#access";
+    expect(applyCaptureFrameRateToUrl(candidate, 60)).toBe(candidate);
+    expect(
+      resolveCaptureRenderProfileForUrls(
+        [candidate, candidate.replace("game.example", "fallback.example")],
+        60,
+      ),
+    ).toBe(SHADOWS_CAPTURE_RENDER_PROFILE);
+    expect(
+      resolveCaptureRenderProfileForUrls([DEFAULT_CAPTURE_GAME_URL], 60),
+    ).toBe(CANONICAL_CAPTURE_RENDER_PROFILE);
+    expect(() =>
+      resolveCaptureRenderProfileForUrls(
+        [candidate, DEFAULT_CAPTURE_GAME_URL],
+        60,
+      ),
+    ).toThrow("same render profile");
+    expect(() => resolveCaptureRenderProfileForUrls([], 60)).toThrow(
+      "at least one",
+    );
+    expect(() =>
+      resolveCaptureRenderProfileForUrls(["invalid-url"], 60),
+    ).toThrow("valid game URL");
+    expect(() => applyCaptureFrameRateToUrl(candidate, 30)).toThrow(
+      "contradicts streamFps=30",
+    );
+    expect(() =>
+      assertCaptureRenderProfileContract({
+        profileId: SHADOWS_CAPTURE_RENDER_PROFILE,
+        sourceFps: 60,
+        outputFps: 60,
+        viewportWidth: 1280,
+        viewportHeight: 720,
+        outputWidth: 1280,
+        outputHeight: 720,
+      }),
+    ).not.toThrow();
+  });
+
+  it.each([
+    "streamRenderProfile=shadows-720p60-v1&streamRenderProfile=shadows-720p60-v1",
+    "streamRenderProfile=canonical-720p60-v1&streamRenderProfile=shadows-720p60-v1",
+    "streamRenderProfile=unknown",
+    "streamRenderProfile=toString",
+    "streamRenderProfile=",
+    "streamFps=60&streamFps=60",
+    "streamFps=60&streamFps=30",
+    "streamFps=30",
+    "streamFps=NaN",
+    "streamFps=60.0",
+    "streamFps=",
+  ])("rejects ambiguous/contradictory capture selection: %s", (query) => {
+    expect(() =>
+      applyCaptureFrameRateToUrl(
+        "https://game.example/stream.html?" + query,
+        60,
+      ),
+    ).toThrow();
+  });
+
+  it("requires and retains an independently checked applied-state receipt for shadow admission", () => {
+    const snapshot = shadowApplicationSnapshot();
+    expect(normalizeCaptureRenderProfileSnapshot(snapshot)).toEqual(snapshot);
+    expect(
+      matchesExpectedCaptureRenderProfile(
+        snapshot,
+        SHADOWS_CAPTURE_RENDER_PROFILE,
+      ),
+    ).toBe(true);
+    expect(
+      normalizeCaptureRenderProfileSnapshot({
+        ...snapshot,
+        application: undefined,
+      }),
+    ).toBeNull();
+    expect(
+      normalizeCaptureRenderProfileSnapshot({ ...snapshot, application: null }),
+    ).toBeNull();
+    expect(
+      normalizeCaptureRenderProfileSnapshot({ id: "toString", explicit: true }),
+    ).toBeNull();
+    expect(
+      shouldAcceptCaptureReadiness({
+        snapshot: {
+          ready: true,
+          degradedReason: null,
+          diagnostics: null,
+          renderProfile: { ...snapshot, application: undefined },
+        },
+        expectedRenderProfileId: SHADOWS_CAPTURE_RENDER_PROFILE,
+        startedAt: 0,
+        nowMs: 1_000_000,
+      }),
+    ).toBe(false);
+  });
+
+  it.each([
+    ["schemaVersion", 2],
+    ["ready", false],
+    ["mismatchReason", "not_ready"],
+    ["requested", null],
+    ["requested.shadows", "none"],
+    ["applied", null],
+    ["applied.preferences.bloom", true],
+    ["applied.renderer.isWebGPU", false],
+    ["applied.renderer.isWebGPU", "true"],
+    ["applied.renderer.hasRendered", false],
+    ["applied.renderer.samples", 1],
+    ["applied.renderer.dpr", 2],
+    ["applied.renderer.width", 1920],
+    ["applied.renderer.shadowsEnabled", false],
+    ["applied.renderer.shadowType", 2],
+    ["applied.renderer.composerPresent", true],
+    ["applied.sunlight", null],
+    ["applied.sunlight.castShadow", false],
+    ["applied.sunlight.cascaded", true],
+    ["applied.sunlight.mapSize", [2048, 2048]],
+    ["applied.sunlight.allocatedMapSize", null],
+    ["applied.sunlight.frustum", [-200, 200, 200, -200, 0.5, 500]],
+    ["applied.sunlight.frustum", Array(6)],
+    ["applied.sunlight.bias", NaN],
+    ["applied.sunlight.normalBias", 0.02],
+    ["applied.water", null],
+    ["applied.water.reflectionsEnabled", true],
+    ["applied.water.activeReflectionCount", 1],
+  ])(
+    "does not trust ready:true with invalid application.%s",
+    (field, value) => {
+      const snapshot = shadowApplicationSnapshot();
+      const keys = String(field).split(".");
+      let target: Record<string, unknown> = snapshot.application;
+      for (const key of keys.slice(0, -1))
+        target = target[key] as Record<string, unknown>;
+      target[keys[keys.length - 1]] = value;
+      expect(normalizeCaptureRenderProfileSnapshot(snapshot)).toBeNull();
+    },
+  );
+
+  it("makes both capture entry points derive their expected contract from the validated URL set", () => {
+    for (const name of ["capture-browser-host.ts", "stream-to-rtmp.ts"]) {
+      const source = readFileSync(
+        new URL("../../../scripts/" + name, import.meta.url),
+        "utf8",
+      );
+      expect(source).toContain("resolveCaptureRenderProfileForUrls(");
+      expect(source).not.toContain("resolveCaptureRenderProfileId(");
+      expect(source).toContain("applyCaptureFrameRateToUrl(");
+    }
+  });
   it("uses only the canonical stream page when no fallback is explicit", () => {
     expect(resolveCaptureUrlCandidates({})).toEqual([DEFAULT_CAPTURE_GAME_URL]);
     expect(DEFAULT_CAPTURE_GAME_URL.endsWith("/stream.html")).toBe(true);
