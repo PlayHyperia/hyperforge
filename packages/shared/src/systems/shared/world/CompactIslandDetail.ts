@@ -33,9 +33,14 @@ export function createCompactPreparationDetailRegions(
       resolution: id === "haven_pond" ? 128 : gameplayResolution,
     };
   });
-  if (profile.algorithm !== "compact-island-sculpt-v2") return preparation;
+  if (
+    profile.algorithm !== "compact-island-sculpt-v2" &&
+    profile.algorithm !== "compact-island-sculpt-v3"
+  )
+    return preparation;
   const shape = profile.landform;
-  if (!shape) throw new Error("Sculpt-v2 detail requires admitted landform");
+  if (!shape)
+    throw new Error("Authored sculpt detail requires admitted landform");
   const { centerX, centerZ, radius, maxCoastVariation } = profile.island;
   const scale = radius / 165;
   const c = Math.cos(shape.inletBearing),

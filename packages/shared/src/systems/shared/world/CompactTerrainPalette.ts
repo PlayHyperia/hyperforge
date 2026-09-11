@@ -108,14 +108,19 @@ export function createCompactTerrainColorOperations() {
         return "legacy-biome-v1";
       if (
         value !== "compact-pbr-v1" ||
-        algorithm !== "compact-island-sculpt-v2"
+        (algorithm !== "compact-island-sculpt-v2" &&
+          algorithm !== "compact-island-sculpt-v3")
       ) {
         throw new Error("Invalid compact grass surface eligibility");
       }
       return "compact-pbr-v1";
     },
     macroField(profile: WorldTerrainProfile): CompactTerrainMacroField | null {
-      if (profile.algorithm !== "compact-island-sculpt-v2") return null;
+      if (
+        profile.algorithm !== "compact-island-sculpt-v2" &&
+        profile.algorithm !== "compact-island-sculpt-v3"
+      )
+        return null;
       const ridge = profile.landform;
       if (!ridge) throw new Error("Macro surface requires admitted ridge");
       const field = {

@@ -284,6 +284,52 @@ export class ClientNetwork extends SystemBase {
   private lastWsUrl: string | null = null;
   private lastInitOptions: Record<string, unknown> | null = null;
   private intentionalDisconnect: boolean = false;
+  private resourceAuthorityToken: object | null = null;
+  private resourceAuthorityOwner: ResourceSystem | null = null;
+
+  private beginResourceAuthority(): void {
+    this.closeResourceAuthority();
+    this.resourceAuthorityToken = {};
+    this.getResourceAuthorityOwner();
+  }
+
+  private getResourceAuthorityOwner(): ResourceSystem | null {
+    const token = this.resourceAuthorityToken;
+    if (!token) return null;
+    const owner = this.world.getSystem<ResourceSystem>("resource") ?? null;
+    if (owner !== this.resourceAuthorityOwner) {
+      this.resourceAuthorityOwner?.closeClientResourceAuthority(token);
+      this.resourceAuthorityOwner = owner;
+      owner?.beginClientResourceAuthority(token);
+    }
+    return owner;
+  }
+
+  private closeResourceAuthority(): void {
+    if (this.resourceAuthorityToken)
+      this.resourceAuthorityOwner?.closeClientResourceAuthority(
+        this.resourceAuthorityToken,
+      );
+    this.resourceAuthorityToken = null;
+    this.resourceAuthorityOwner = null;
+    // These are old-transport deltas, not current authoritative tree state.
+    for (const [id, pending] of this.pendingModifications) {
+      if (!id.startsWith("tree_")) continue;
+      this.totalPendingModificationCount -= pending.length;
+      this.pendingModifications.delete(id);
+      this.pendingModificationTimestamps.delete(id);
+      this.pendingModificationLimitReached.delete(id);
+    }
+  }
+
+  private rememberResourceState(id: string, depleted: boolean): boolean {
+    const token = this.resourceAuthorityToken;
+    const owner =
+      token && id.startsWith("tree_") ? this.getResourceAuthorityOwner() : null;
+    if (!token || !owner) return false;
+    owner.applyClientResourceState(token, id, depleted);
+    return true;
+  }
 
   // Application-level keepalive to prevent Cloudflare/proxy WebSocket idle timeout
   // WS protocol-level ping/pong may not be counted as "activity" by reverse proxies
@@ -607,6 +653,7 @@ export class ClientNetwork extends SystemBase {
     }
 
     this.worldAdmission.beginConnection();
+    this.beginResourceAuthority();
     this.connected = false;
     this.intentionalDisconnect = false;
     // Packets from a previous transport cannot be replayed into this admission.
@@ -1611,6 +1658,7 @@ export class ClientNetwork extends SystemBase {
       this.worldAdmission.failure ??
       "World snapshot arrived outside an active connection.";
     this.worldAdmission.reject(reason);
+    this.closeResourceAuthority();
     this.connected = false;
     this.intentionalDisconnect = true;
     this.cancelReconnect();
@@ -1789,6 +1837,7 @@ export class ClientNetwork extends SystemBase {
       },
     });
     if (typeof data.depleted === "boolean") {
+      this.rememberResourceState(entity.id, data.depleted);
       entity.updateFromNetwork({ depleted: data.depleted });
       entity.data.depleted = data.depleted;
     }
@@ -1805,9 +1854,26 @@ export class ClientNetwork extends SystemBase {
   ) => {
     const { id } = data;
     if (this.streamingFilteredEntityIds.has(id)) return;
+    const changes =
+      data.changes ??
+      Object.fromEntries(
+        Object.entries(data).filter(([k]) => k !== "id" && k !== "changes"),
+      );
+    // Retain actual resource state even before a distant local actor exists.
+    // Generic pending modifications expire; resource authority must not.
+    const retainedResourceState =
+      typeof changes.depleted === "boolean" &&
+      this.rememberResourceState(id, changes.depleted);
 
     const entity = this.world.entities.get(id);
     if (!entity) {
+      if (retainedResourceState) {
+        // Do not replay an older boolean after a newer dedicated respawn/deplete
+        // packet. Other modifications retain their existing queue semantics.
+        const { depleted: _depleted, ...remaining } = changes;
+        if (Object.keys(remaining).length === 0) return;
+        data = { id, changes: remaining };
+      }
       // Limit queued modifications per entity to avoid unbounded growth
       const list = this.pendingModifications.get(id) || [];
       const now = performance.now();
@@ -1872,12 +1938,6 @@ export class ClientNetwork extends SystemBase {
       return;
     }
     // Accept both normalized { changes: {...} } and flat payloads { id, ...changes }
-    const changes =
-      data.changes ??
-      Object.fromEntries(
-        Object.entries(data).filter(([k]) => k !== "id" && k !== "changes"),
-      );
-
     // Resources relocate atomically; they are not characters walking a path.
     // In particular, a fishing spot's authoritative Y is its water surface.
     // A routine p/q update must not create combat-facing state whose next
@@ -2555,6 +2615,12 @@ export class ClientNetwork extends SystemBase {
       respawnAt?: number;
     }>;
   }) => {
+    const token = this.resourceAuthorityToken;
+    if (token)
+      this.getResourceAuthorityOwner()?.applyClientResourceSnapshot(
+        token,
+        data.resources,
+      );
     for (const r of data.resources) {
       this.world.emit(EventType.RESOURCE_SPAWNED, {
         id: r.id,
@@ -2583,6 +2649,7 @@ export class ClientNetwork extends SystemBase {
     position?: { x: number; y: number; z: number };
     depleted?: boolean;
   }) => {
+    this.rememberResourceState(data.resourceId, true);
     // Update the ResourceEntity visual
     interface EntityWithNetworkUpdate {
       updateFromNetwork?: (data: Record<string, unknown>) => void;
@@ -2603,6 +2670,7 @@ export class ClientNetwork extends SystemBase {
     position?: { x: number; y: number; z: number };
     depleted?: boolean;
   }) => {
+    this.rememberResourceState(data.resourceId, false);
     // Update the ResourceEntity visual
     const entity = this.world.entities.get(data.resourceId);
     interface EntityWithNetworkUpdate {
@@ -6142,6 +6210,7 @@ export class ClientNetwork extends SystemBase {
   onClose = (code: CloseEvent) => {
     if (code.currentTarget && code.currentTarget !== this.ws) return;
     this.worldAdmission.close();
+    this.closeResourceAuthority();
     console.error("[ClientNetwork] 🔌 WebSocket CLOSED:", {
       code: code.code,
       reason: code.reason,
@@ -6327,6 +6396,7 @@ export class ClientNetwork extends SystemBase {
 
   destroy = () => {
     this.worldAdmission.close();
+    this.closeResourceAuthority();
     // Mark as intentional disconnect to prevent reconnection
     this.intentionalDisconnect = true;
     this.cancelReconnect();

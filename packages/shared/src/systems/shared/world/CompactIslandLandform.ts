@@ -39,11 +39,18 @@ export function createCompactIslandLandform() {
       const z = worldZ - island.centerZ;
       const angle = Math.atan2(z, x);
       const authored =
-        profile.algorithm === "compact-island-sculpt-v2"
+        profile.algorithm === "compact-island-sculpt-v2" ||
+        profile.algorithm === "compact-island-sculpt-v3"
           ? profile.landform
           : undefined;
-      if (profile.algorithm === "compact-island-sculpt-v2" && !authored)
-        throw new Error("Sculpt-v2 requires admitted landform parameters");
+      if (
+        (profile.algorithm === "compact-island-sculpt-v2" ||
+          profile.algorithm === "compact-island-sculpt-v3") &&
+        !authored
+      )
+        throw new Error(
+          "Authored sculpt requires admitted landform parameters",
+        );
       const headland = authored
         ? authored.westHeadlandStrength *
           helpers.smooth(
@@ -81,6 +88,33 @@ export function createCompactIslandLandform() {
       const c = Math.cos(authored.inletBearing),
         s = Math.sin(authored.inletBearing);
       const along = (x * c + z * s) * scale;
+      if (profile.algorithm === "compact-island-sculpt-v3") {
+        const bay = profile.bay;
+        if (!bay) throw new Error("Sculpt-v3 requires admitted bay parameters");
+        // A half-ellipse closes the inner tip. Squared longitudinal distance
+        // gives its banks zero longitudinal slope at the widening-channel join.
+        // A smooth centerline bend and width share the same progress, keeping
+        // |centerline| + halfWidth <= the existing +/- inletHalfWidth envelope.
+        const capEnd = authored.inletTipDistance + authored.inletTipTransition;
+        const mouth = 165 * (1 + island.maxCoastVariation);
+        const progress = helpers.smooth((along - capEnd) / (mouth - capEnd));
+        const centerline = bay.centerlineBend * (1 - progress);
+        const halfWidth =
+          bay.innerHalfWidth +
+          (authored.inletHalfWidth - bay.innerHalfWidth) * progress;
+        const cross = ((-x * s + z * c) * scale - centerline) / halfWidth;
+        const cap = Math.max(0, (capEnd - along) / authored.inletTipTransition);
+        const distance = Math.hypot(cap, cross);
+        // Continuous side blending avoids a seam through the rounded head when
+        // unequal bank softness is applied; no hard left/right branch in height.
+        const bankScale =
+          bay.leftBankScale +
+          (bay.rightBankScale - bay.leftBankScale) *
+            helpers.smooth((cross + 1) / 2);
+        const bank = (authored.inletBankTransition * bankScale) / halfWidth;
+        const bite = helpers.smooth((1 - distance) / bank);
+        return coastMask * (1 - bite);
+      }
       const across = Math.abs((-x * s + z * c) * scale);
       const bite =
         helpers.smooth(
@@ -108,10 +142,15 @@ export function createCompactIslandLandform() {
       // campus. Its explicit functional grades remain authoritative overlays.
       const legacyRidge = helpers.hill(x, z, -0.59, 0.02, 0.31, 0.69);
       let ridgeHeight = profile.height.terrainScale * legacyRidge;
-      if (profile.algorithm === "compact-island-sculpt-v2") {
+      if (
+        profile.algorithm === "compact-island-sculpt-v2" ||
+        profile.algorithm === "compact-island-sculpt-v3"
+      ) {
         const authored = profile.landform;
         if (!authored)
-          throw new Error("Sculpt-v2 requires admitted landform parameters");
+          throw new Error(
+            "Authored sculpt requires admitted landform parameters",
+          );
         const ax = x * 165,
           az = z * 165;
         const progress = Math.max(
@@ -146,7 +185,8 @@ export function createCompactIslandLandform() {
         0.18 *
           noise.simplex2D(dx * 0.065 * detailScale, dz * 0.065 * detailScale);
       const interior =
-        profile.algorithm === "compact-island-sculpt-v2"
+        profile.algorithm === "compact-island-sculpt-v2" ||
+        profile.algorithm === "compact-island-sculpt-v3"
           ? profile.height.baseOffset +
             ridgeHeight +
             profile.height.terrainScale *

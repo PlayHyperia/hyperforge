@@ -2,6 +2,7 @@ import { BIOME_CONFIG } from "../../systems/shared/world/TerrainHeightParams";
 import {
   COMPACT_WORLD_TERRAIN_PROFILE,
   COMPACT_LANDFORM_PARAMETERS,
+  COMPACT_BAY_PARAMETERS,
   resolveWorldTerrainProfile,
   worldTerrainProfileIdentity,
   type WorldTerrainProfile,
@@ -85,8 +86,9 @@ function assertTerrainWorkerInput(input) {
     if (actual.length !== expected.length || actual.some(k => !expected.includes(k))) fail();
   }
   var sculpt2 = p && p.algorithm === "compact-island-sculpt-v2";
-  keys(p, ${JSON.stringify(Object.keys(shape))}.concat(sculpt2 ? ["landform"] : []));
-  if (sculpt2) {
+  var sculpt3 = p && p.algorithm === "compact-island-sculpt-v3";
+  keys(p, ${JSON.stringify(Object.keys(shape))}.concat(sculpt2 || sculpt3 ? ["landform"] : []).concat(sculpt3 ? ["bay"] : []));
+  if (sculpt2 || sculpt3) {
     keys(p.landform, ${JSON.stringify(Object.keys(COMPACT_LANDFORM_PARAMETERS))});
     if (!Object.values(p.landform).every(Number.isFinite)) fail();
     var l = p.landform;
@@ -112,11 +114,25 @@ function assertTerrainWorkerInput(input) {
   if (!Object.values(p.${group}).every(Number.isFinite)) fail();`,
     )
     .join("\n")}
-  if (p.schemaVersion !== 1 || (p.algorithm !== "terrain-height-params-v1" && p.algorithm !== "compact-island-sculpt-v1" && !sculpt2) ||
+  if (sculpt3) {
+    keys(p.bay, ${JSON.stringify(Object.keys(COMPACT_BAY_PARAMETERS))});
+    if (!Object.values(p.bay).every(Number.isFinite)) fail();
+    var bay = p.bay;
+    if (bay.innerHalfWidth < 16 || bay.innerHalfWidth > l.inletHalfWidth ||
+        Math.abs(bay.centerlineBend) > l.inletHalfWidth-bay.innerHalfWidth ||
+        bay.leftBankScale < 0.5 || bay.leftBankScale > 1.5 ||
+        bay.rightBankScale < 0.5 || bay.rightBankScale > 1.5 ||
+        Math.max(bay.leftBankScale,bay.rightBankScale)*l.inletBankTransition >= bay.innerHalfWidth ||
+        l.inletTipDistance+l.inletTipTransition >= 165*(1+p.island.maxCoastVariation)) fail();
+  }
+  if (p.schemaVersion !== 1 || (p.algorithm !== "terrain-height-params-v1" && p.algorithm !== "compact-island-sculpt-v1" && !sculpt2 && !sculpt3) ||
       p.boundsMeaning !== "nominal-generation-envelope" || typeof p.id !== "string" ||
       !/^[a-z][a-z0-9-]{0,63}$/.test(p.id) ||
       p.kind !== "compact-candidate" || p.id === "large-world-v1" ||
       !Number.isInteger(p.seed) || p.seed < 0 || p.seed > 0xffffffff || input.seed !== p.seed) fail();
+  if ((p.id === "compact-duel-island-v2" && p.algorithm !== "compact-island-sculpt-v1") ||
+      (p.id === "compact-duel-island-v3" && !sculpt2) ||
+      (p.id === "compact-duel-island-v4" && !sculpt3)) fail();
   var b = p.bounds, i = p.island, h = p.height, w = p.water, s = p.shoreline;
   if (!Number.isFinite(p.terrainTileSize) || p.terrainTileSize <= 0 ||
       b.minX >= b.maxX || b.minZ >= b.maxZ ||

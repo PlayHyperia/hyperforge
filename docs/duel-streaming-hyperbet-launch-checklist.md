@@ -1,5 +1,40 @@
 # Duel Arena, Streaming, and Hyperbet Launch Checklist
 
+## Active natural-coast and meadow refinement — 2026-09-11
+
+- [x] Push vegetation checkpoint `2bc7c5a89`; exact remote HEAD, committed
+  source pins and GitHub author/committer `dreaminglucid` verified.
+- [x] Implement isolated `compact-meadow-v1` appearance in the explicit island
+  candidate: shorter/wider/curvier blades, restrained tip gain and shaded roots.
+  Three actual-construction CPU tests pass; all LOD topology/buffer bytes, blade
+  root centers, density, range and upload budget stay unchanged. Scoped lint passes.
+- [x] Freeze the bay, meadow and authority source slice: 449 integrated tests /
+  37 files, all three normal builds/typechecks and scoped lint pass. CPU grass
+  census rises naturally to 2,281 / 82,116 nominal triangles as the bay restores
+  dry land; old v3's 2,130 census is retained as a separate regression.
+- [x] Review the rounded, bent, asymmetric bay in actual probe48 engine images.
+  Spatial/island/presentation studies pass; the broader coast remains below the
+  art target. Existing refinement envelope, landmarks and resource IDs survive.
+- [x] Repair/test authoritative resource snapshot/session ordering, depletion,
+  respawn, delayed local creation, tile reload/reconnect and omitted snapshot rows.
+  Fifteen real-class cases and actual binary WebSocket delivery pass; borrowed
+  actors and the 110m relevance policy stay unchanged. Live lifecycle still open.
+- [ ] Review the isolated CC0 coastal-cliff LOD package and identical-lighting
+  renders. Validate geometry, UVs, normals, AO, texture residency and provenance
+  before any canonical installation; the live unsaved avatar scene stays untouched.
+- [x] Complete actual Metal/WebGPU probe48: 39 original PNGs, 454 source pins,
+  385 archives, exact 13 authoritative tree states and 2,281 installed grass clumps.
+  Zero GPU/page errors and clean owned shutdown; whole run FAILS the same 19
+  cow/dagger errors. Root reviewed wide/bank images; this is not art/FPS approval.
+- [ ] Repair ModelCache cold/persistent material fidelity before installing cliffs:
+  preserve shared maps, mip/sampler/UV state and source-byte identity; qualify real
+  IndexedDB cold/warm renders. Physical/metalness policy is a separate visible pass.
+- [ ] Qualify motion/shimmer, complete GPU-pass timing, frame tails and thermal/
+  minimum-client performance. Keep native timing unavailable until coverage is
+  proved; see game `docs/gpu-timing-qualification-20260911.md`.
+
+Details: game `docs/compact-coast-meadow-20260911.md`.
+
 ## Active island vegetation and readability pass — 2026-09-11
 
 - [x] Push verified material checkpoint `f5687e535`; remote and GitHub author/

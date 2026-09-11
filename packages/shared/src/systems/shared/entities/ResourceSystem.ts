@@ -318,6 +318,14 @@ export class ResourceSystem extends SystemBase {
     ResourceID,
     { lease: TerrainResourceLease; registration: TerrainResourceRegistration }
   >();
+  /** Transport authority survives local tile residency, never a respawn clock.
+   * Null is the standalone/offline path; a closed network session stays gated. */
+  private clientResourceAuthority: {
+    token: object;
+    open: boolean;
+    states: Map<string, boolean>;
+  } | null = null;
+  private readonly maxClientResourceStates = 65536;
   // Terrain system reference for height lookups
   private terrainSystem: TerrainSystem | null = null;
 
@@ -1449,8 +1457,15 @@ export class ResourceSystem extends SystemBase {
     try {
       await completion;
     } finally {
-      if (this.terrainResourceTails.get(key) === completion)
+      if (this.terrainResourceTails.get(key) === completion) {
         this.terrainResourceTails.delete(key);
+        const authority = this.clientResourceAuthority;
+        if (authority?.open && this.isTerrainResourceLeaseCurrent(lease))
+          this.resumeClientResourcePublications(
+            authority.token,
+            registrations.keys(),
+          );
+      }
     }
   }
 
@@ -1460,6 +1475,153 @@ export class ResourceSystem extends SystemBase {
       lease.active &&
       this.terrainResourceLeases.get(lease.key) === lease
     );
+  }
+
+  /** Begin before opening a client transport, not from a terrain/camera request. */
+  beginClientResourceAuthority(token: object): void {
+    if (this.world.isServer || this.isDestroying) return;
+    this.retireClientResourcePublications();
+    this.clientResourceAuthority = { token, open: true, states: new Map() };
+  }
+
+  closeClientResourceAuthority(token: object): void {
+    const authority = this.clientResourceAuthority;
+    if (!authority || authority.token !== token) return;
+    authority.open = false;
+    authority.states.clear();
+    this.retireClientResourcePublications();
+  }
+
+  /** A reconnect must cancel owned, still-loading visuals, not borrowed actors. */
+  private retireClientResourcePublications(): void {
+    for (const [id, { registration }] of this.terrainResourceRegistrations) {
+      if (registration.resource.type !== "tree") continue;
+      const owned = registration.entity;
+      registration.entity = null;
+      if (owned) this.destroyOwnedTerrainEntity(owned);
+      this.resources.delete(id);
+    }
+  }
+
+  applyClientResourceSnapshot(
+    token: object,
+    rows: readonly { id: string; type: string; isAvailable: boolean }[],
+  ): void {
+    const authority = this.clientResourceAuthority;
+    if (!authority?.open || authority.token !== token || this.isDestroying)
+      return;
+    if (!Array.isArray(rows) || rows.length > this.maxClientResourceStates)
+      throw new Error("Invalid authoritative resource snapshot size");
+    // Validate/detach the whole snapshot before publishing any state or actor.
+    const next = new Map<string, boolean>();
+    for (const row of rows) {
+      if (
+        !row ||
+        typeof row.id !== "string" ||
+        row.id.length > 128 ||
+        typeof row.type !== "string" ||
+        typeof row.isAvailable !== "boolean"
+      )
+        throw new Error("Invalid authoritative resource snapshot row");
+      if (row.type !== "tree") continue;
+      if (next.has(row.id))
+        throw new Error("Duplicate authoritative resource ID");
+      next.set(row.id, !row.isAvailable);
+    }
+    authority.states = next;
+    // A replacement snapshot can remove authority as well as change it. Retire
+    // only our local publication; network-owned actors keep their own lifetime.
+    // Keep the registration so a later authoritative boolean can resume it.
+    for (const [id, { registration }] of this.terrainResourceRegistrations) {
+      if (
+        registration.resource.type !== "tree" ||
+        next.has(id) ||
+        !registration.entity
+      )
+        continue;
+      const owned = registration.entity;
+      registration.entity = null;
+      this.destroyOwnedTerrainEntity(owned);
+      this.resources.delete(id);
+    }
+    for (const [id, depleted] of next)
+      this.applyClientResourceAvailability(id, depleted);
+    this.resumeClientResourcePublications(token, next.keys());
+  }
+
+  /** Ordered server booleans only. Missing actors do not discard authority. */
+  applyClientResourceState(token: object, id: string, depleted: boolean): void {
+    const authority = this.clientResourceAuthority;
+    if (!authority?.open || authority.token !== token || this.isDestroying)
+      return;
+    if (
+      typeof id !== "string" ||
+      id.length > 128 ||
+      typeof depleted !== "boolean"
+    )
+      throw new Error("Invalid authoritative resource state");
+    // This repair owns functional trees, not fishing movement or other resources.
+    if (!id.startsWith("tree_")) return;
+    if (
+      !authority.states.has(id) &&
+      authority.states.size >= this.maxClientResourceStates
+    )
+      throw new Error("Authoritative resource state capacity exceeded");
+    authority.states.set(id, depleted);
+    this.applyClientResourceAvailability(id, depleted);
+    this.resumeClientResourcePublications(token, [id]);
+  }
+
+  private applyClientResourceAvailability(id: string, depleted: boolean): void {
+    const entity = this.world.entities.get(id);
+    if (
+      entity instanceof ResourceEntity &&
+      entity.config.resourceType === "tree"
+    ) {
+      entity.updateFromNetwork({ depleted });
+      entity.data.depleted = depleted;
+    }
+    const resource = this.resources.get(createResourceID(id));
+    if (resource?.type === "tree") resource.isAvailable = !depleted;
+    const registration = this.terrainResourceRegistrations.get(
+      createResourceID(id),
+    );
+    if (registration?.registration.resource.type === "tree")
+      registration.registration.resource.isAvailable = !depleted;
+  }
+
+  private resumeClientResourcePublications(
+    token: object,
+    ids: Iterable<string>,
+  ): void {
+    const leases = new Set<TerrainResourceLease>();
+    for (const id of ids) {
+      const owner = this.terrainResourceRegistrations.get(createResourceID(id));
+      if (owner) leases.add(owner.lease);
+    }
+    for (const lease of leases) {
+      // Registration can be queued behind an earlier unload/init await. Do not
+      // bypass that lease's ordering; the normal path reads current state later.
+      if (this.terrainResourceTails.has(lease.key)) continue;
+      if (
+        this.clientResourceAuthority?.token !== token ||
+        !this.clientResourceAuthority.open ||
+        !this.isTerrainResourceLeaseCurrent(lease)
+      )
+        continue;
+      // The client branch publishes synchronously. Never wait for server state
+      // inside World.start or the ordered network packet handler.
+      void this.spawnTerrainResourceLease(lease).catch((error: unknown) => {
+        if (
+          this.clientResourceAuthority?.token === token &&
+          this.isTerrainResourceLeaseCurrent(lease)
+        )
+          console.error(
+            "[ResourceSystem] Authoritative client publication failed:",
+            error,
+          );
+      });
+    }
   }
 
   /** An actual authoritative add can reuse a client-created terrain instance. */
@@ -1536,6 +1698,16 @@ export class ResourceSystem extends SystemBase {
       for (const registration of preparedResources) {
         if (!this.isTerrainResourceLeaseCurrent(lease)) return;
         const { spawnPoint, resource } = registration;
+        const authority = this.clientResourceAuthority;
+        const knownDepleted = authority?.open
+          ? authority.states.get(resource.id)
+          : undefined;
+        if (
+          resource.type === "tree" &&
+          authority &&
+          knownDepleted === undefined
+        )
+          continue; // Explicit pending authority: no available actor or local timer.
         const existingEntity = this.world.entities.get(resource.id);
         if (
           existingEntity &&
@@ -1555,6 +1727,8 @@ export class ResourceSystem extends SystemBase {
             z: existingEntity.position.z,
           };
         }
+        if (resource.type === "tree" && knownDepleted !== undefined)
+          resource.isAvailable = !knownDepleted;
 
         const rid = createResourceID(resource.id);
         this.resources.set(rid, resource);
@@ -1618,7 +1792,7 @@ export class ResourceSystem extends SystemBase {
             chance: drop.chance,
           })),
           respawnTime: resource.respawnTime,
-          depleted: false,
+          depleted: resource.type === "tree" ? !resource.isAvailable : false,
           depletedModelPath: this.getDepletedModelPathForResource(
             resource.type,
             spawnPoint.subType,
@@ -1648,6 +1822,17 @@ export class ResourceSystem extends SystemBase {
           throw new Error(
             `[ResourceSystem] Unexpected resource entity: ${resource.id}`,
           );
+        if (
+          !this.isTerrainResourceLeaseCurrent(lease) ||
+          (resource.type === "tree" &&
+            authority &&
+            (this.clientResourceAuthority !== authority || !authority.open))
+        ) {
+          if (!existingEntity) this.destroyOwnedTerrainEntity(entity);
+          return;
+        }
+        if (resource.type === "tree")
+          entity.data.depleted = !resource.isAvailable;
         // A snapshot may have installed this entity before its terrain tile.
         // Borrow it; unloading local terrain must not dispose network ownership.
         if (!existingEntity) registration.entity = entity;
@@ -4746,6 +4931,10 @@ export class ResourceSystem extends SystemBase {
    */
   destroy(): void {
     this.isDestroying = true;
+    if (this.clientResourceAuthority) {
+      this.clientResourceAuthority.open = false;
+      this.clientResourceAuthority.states.clear();
+    }
     for (const lease of this.terrainResourceLeases.values()) {
       this.retireTerrainResourceLease(lease);
     }

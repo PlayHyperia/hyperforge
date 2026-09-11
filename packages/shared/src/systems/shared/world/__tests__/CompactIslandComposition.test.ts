@@ -161,11 +161,11 @@ const PREVIOUS_CENSUS = [
   ],
 ];
 
-describe("compact v3 asymmetric coastline and continuous ridge", () => {
+describe("compact v4 asymmetric coastline and continuous ridge", () => {
   it("admits explicit finite authored shape data with a distinct profile/content identity", () => {
     expect(DataManager.getWorldTerrainProfile()).toEqual(candidate);
-    expect(candidate.id).toBe("compact-duel-island-v3");
-    expect(candidate.algorithm).toBe("compact-island-sculpt-v2");
+    expect(candidate.id).toBe("compact-duel-island-v4");
+    expect(candidate.algorithm).toBe("compact-island-sculpt-v3");
     expect(worldTerrainProfileIdentity(candidate)).not.toBe(
       worldTerrainProfileIdentity(previous),
     );
@@ -422,9 +422,9 @@ describe("compact v3 asymmetric coastline and continuous ridge", () => {
       `Compact macro geometry approximation (actual aligned leaves, CPU only; not contact/frame-time acceptance): ${JSON.stringify(measurements)}\n`,
     );
     expect(refined.samples).toBe(102010);
-    // Complete ten-leaf coverage includes the bay's western bank: measured
-    // peak .284563m, versus .241957m in the original eight-leaf subset. This
-    // bounds the chosen visual approximation, not exact analytic contact.
+    // Preserve the admitted full ten-leaf v3 budget for the new v4 bay; measured
+    // v4 peak .265756m and near-water .135885m. This is a visual approximation
+    // bound, not exact analytic contact or GPU acceptance.
     expect(refined.maxError).toBeLessThan(0.3);
     expect(refined.nearWaterError).toBeLessThan(0.18);
     expect(refined.rmsError).toBeLessThan(middle.rmsError * 0.3);

@@ -28,6 +28,8 @@ import { createCompactTerrainColorOperations } from "../CompactTerrainPalette";
 import {
   SCULPTED_COMPACT_WORLD_TERRAIN_PROFILE,
   SCULPTED_COMPACT_V1_PROFILE_FIXTURE,
+  SCULPTED_COMPACT_V2_PROFILE_FIXTURE,
+  type WorldTerrainProfile,
 } from "../WorldTerrainProfile";
 import { createTerrainWorkerConfig } from "../../../../utils/workers/TerrainWorkerShared";
 
@@ -73,11 +75,17 @@ function workerSession() {
   };
 }
 
-async function fixture() {
+async function fixture(
+  profile: WorldTerrainProfile = SCULPTED_COMPACT_WORLD_TERRAIN_PROFILE,
+) {
   await DataManager.getInstance().initialize();
   const world = new World();
   const terrain = world.register("terrain", TerrainSystem) as TerrainSystem;
   const roads = world.register("roads", RoadNetworkSystem) as RoadNetworkSystem;
+  terrain.getWorldTerrainProfile();
+  // Isolated historical sampler selection before real init. Non-shape config is
+  // identical; do not mutate DataManager or replace any generator/material method.
+  terrain["activeTerrainProfile"] = profile;
   await terrain.init();
   terrain["loadWaterBodiesFromManifest"]();
   terrain["loadFlatZonesFromManifest"]();
@@ -229,85 +237,117 @@ describe("opt-in compact grass, actual terrain and native worker (not GPU proof)
     ).toThrow();
   });
 
-  it("reproduces 12 legacy clumps and independently resolves the zero-campus mask with production biome thresholds", async () => {
-    const f = await fixture();
-    try {
-      const fixed = f.manager(STREAMING_GRASS_VISUAL_PROFILE).owner;
-      const candidate = f.manager(COMPACT_ISLAND_GRASS_VISUAL_PROFILE).owner;
-      const variants = [
-        { owner: fixed, lod: 2, total: 12, campus: 0 },
-        { owner: fixed, lod: 1, total: 337, campus: 0 },
-        { owner: candidate, lod: 1, total: 2130, campus: 143 },
-      ];
-      for (const variant of variants) {
-        let total = 0,
-          campus = 0;
-        for (const node of f.nodes) {
-          const input = variant.owner["createWorkerInput"](
-            node,
-            `grass_${node.id}`,
-            variant.lod,
-          );
-          expect(input.grassConfigs.forest.minGrassWeight).toBe(0.6);
-          const output = await f.worker.run(input);
-          expect(output.grassEligibility).toBe(input.grassEligibility);
-          total += output.count;
-          for (let i = 0; i < output.count; i++) {
-            const x = node.centerX + output.offsets[i * 3],
-              z = node.centerZ + output.offsets[i * 3 + 2],
-              y = output.offsets[i * 3 + 1];
-            if (x >= 314 && x < 386 && z >= 284 && z < 356) campus++;
-            expect(f.terrain.isGrassExcludedAt(x, z)).toBe(false);
-            expect(y).toBeGreaterThanOrEqual(
-              f.terrain.getWaterBodyRegistry().getWaterSurfaceAt(x, z) +
-                0.1 -
-                1e-4,
+  it.each([
+    {
+      profile: SCULPTED_COMPACT_V2_PROFILE_FIXTURE,
+      total: 2130,
+      leaves: [271, 503, 139, 510, 364, 343],
+    },
+    {
+      profile: SCULPTED_COMPACT_WORLD_TERRAIN_PROFILE,
+      total: 2281,
+      leaves: [271, 503, 139, 532, 493, 343],
+    },
+  ])(
+    "preserves legacy density and measures actual native-worker census for $profile.id",
+    async ({ profile, total: candidateTotal, leaves }) => {
+      const f = await fixture(profile);
+      try {
+        const fixed = f.manager(STREAMING_GRASS_VISUAL_PROFILE).owner;
+        const candidate = f.manager(COMPACT_ISLAND_GRASS_VISUAL_PROFILE).owner;
+        const variants = [
+          { owner: fixed, lod: 2, total: 12, campus: 0 },
+          { owner: fixed, lod: 1, total: 337, campus: 0 },
+          { owner: candidate, lod: 1, total: candidateTotal, campus: 143 },
+        ];
+        for (const variant of variants) {
+          const leafCounts = [];
+          let total = 0,
+            campus = 0;
+          for (const node of f.nodes) {
+            const input = variant.owner["createWorkerInput"](
+              node,
+              `grass_${node.id}`,
+              variant.lod,
             );
-            expect(
-              f.terrain["calculateRoadInfluenceAtVertex"](x, z, 0, 0),
-            ).toBeLessThanOrEqual(0.8);
+            expect(input.grassConfigs.forest.minGrassWeight).toBe(0.6);
+            const output = await f.worker.run(input);
+            expect(output.grassEligibility).toBe(input.grassEligibility);
+            total += output.count;
+            leafCounts.push([node.centerX, node.centerZ, output.count]);
+            for (let i = 0; i < output.count; i++) {
+              const x = node.centerX + output.offsets[i * 3],
+                z = node.centerZ + output.offsets[i * 3 + 2],
+                y = output.offsets[i * 3 + 1];
+              if (x >= 314 && x < 386 && z >= 284 && z < 356) campus++;
+              expect(f.terrain.isGrassExcludedAt(x, z)).toBe(false);
+              expect(y).toBeGreaterThanOrEqual(
+                f.terrain.getWaterBodyRegistry().getWaterSurfaceAt(x, z) +
+                  0.1 -
+                  1e-4,
+              );
+              expect(
+                f.terrain["calculateRoadInfluenceAtVertex"](x, z, 0, 0),
+              ).toBeLessThanOrEqual(0.8);
+            }
+            if (variant.owner === candidate) {
+              const sync = candidate["generateInstanceData"](node, 1);
+              expect(sync?.count ?? 0).toBe(output.count);
+              if (sync)
+                for (const name of [
+                  "offsets",
+                  "rotScaleHash",
+                  "groundColors",
+                  "grassTints",
+                  "groundNormals",
+                ] as const) {
+                  expect(sync[name].length).toBe(output[name].length);
+                  for (let i = 0; i < sync[name].length; i++)
+                    expect(sync[name][i]).toBeCloseTo(output[name][i], 4);
+                }
+            }
           }
+          expect({ total, campus }).toEqual({
+            total: variant.total,
+            campus: variant.campus,
+          });
           if (variant.owner === candidate) {
-            const sync = candidate["generateInstanceData"](node, 1);
-            expect(sync?.count ?? 0).toBe(output.count);
-            if (sync)
-              for (const name of [
-                "offsets",
-                "rotScaleHash",
-                "groundColors",
-                "grassTints",
-                "groundNormals",
-              ] as const) {
-                expect(sync[name].length).toBe(output[name].length);
-                for (let i = 0; i < sync[name].length; i++)
-                  expect(sync[name][i]).toBeCloseTo(output[name][i], 4);
-              }
+            expect(leafCounts).toEqual(
+              f.nodes.map((node, index) => [
+                node.centerX,
+                node.centerZ,
+                leaves[index],
+              ]),
+            );
+            // Tapering the bay restores land only in two leaves: +22/+129 clumps,
+            // +5,436 nominal LOD1 triangles, without changing density or eligibility.
+            // Preserve the historical actual-worker census, not a relabeled fixture.
+            process.stdout.write(
+              `Compact grass CPU census (actual native worker, unchanged density; not GPU cost): ${JSON.stringify({ profile: profile.id, leafCounts, total, campus, nominalTriangles: total * 36 })}\n`,
+            );
           }
         }
-        expect({ total, campus }).toEqual({
-          total: variant.total,
-          campus: variant.campus,
+        expect(candidate["lodGeometries"][1].index!.count / 3).toBe(36);
+        expect(candidate.getProfileReceipt()).toMatchObject({
+          profileId: "compact-island-v1",
+          eligibility: "compact-pbr-v1",
+          minimumLodLevel: 1,
+          clumpSpacing: 2.8,
+          maxRenderDistance: 140,
+          maxChunksPerFrame: 1,
+          castShadow: false,
         });
+        expect(fixed.getProfileReceipt()).toMatchObject({
+          profileId: "fixed-arena-v1",
+          eligibility: "legacy-biome-v1",
+          minimumLodLevel: 2,
+        });
+      } finally {
+        await f.close();
       }
-      expect(candidate["lodGeometries"][1].index!.count / 3).toBe(36);
-      expect(candidate.getProfileReceipt()).toMatchObject({
-        profileId: "compact-island-v1",
-        eligibility: "compact-pbr-v1",
-        minimumLodLevel: 1,
-        clumpSpacing: 2.8,
-        maxRenderDistance: 140,
-        maxChunksPerFrame: 1,
-        castShadow: false,
-      });
-      expect(fixed.getProfileReceipt()).toMatchObject({
-        profileId: "fixed-arena-v1",
-        eligibility: "legacy-biome-v1",
-        minimumLodLevel: 2,
-      });
-    } finally {
-      await f.close();
-    }
-  }, 20000);
+    },
+    20000,
+  );
 
   it("tags actual results and rejects tainted modes before generation or pool availability", async () => {
     const f = await fixture();

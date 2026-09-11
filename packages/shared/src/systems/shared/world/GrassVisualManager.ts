@@ -131,6 +131,28 @@ export const GRASS_CONFIG = {
   SEED: 73856093,
 };
 
+/** Art candidate for the explicit island capture profile, not a global default.
+ * Wider, shorter blades retain readable coverage at the existing 12-blade LOD.
+ * Placement, blade count, topology and vertex-buffer layout remain unchanged.
+ */
+export const COMPACT_MEADOW_APPEARANCE = Object.freeze({
+  id: "compact-meadow-v1",
+  BLADE_HEIGHT_MIN: 0.25,
+  BLADE_HEIGHT_MAX: 0.65,
+  BLADE_WIDTH_RATIO: 0.1,
+  BLADE_ARC_RATIO: 0.32,
+  ROOT_BRIGHTNESS: 0.72,
+  TIP_BRIGHTNESS: 1.02,
+} as const);
+
+type GrassBladeShape = Pick<
+  typeof GRASS_CONFIG,
+  | "BLADE_HEIGHT_MIN"
+  | "BLADE_HEIGHT_MAX"
+  | "BLADE_WIDTH_RATIO"
+  | "BLADE_ARC_RATIO"
+>;
+
 // ---------------------------------------------------------------------------
 // Interleave groundColor (vec3) + grassTint (vec4) into a single vertex buffer
 // to stay within WebGPU's 8-buffer limit.
@@ -189,18 +211,17 @@ function mulberry32(seed: number): () => number {
 function createClumpGeometry(
   bladesPerClump = GRASS_CONFIG.BLADES_PER_CLUMP,
   bladeSegments = GRASS_CONFIG.BLADE_SEGMENTS,
+  shape: GrassBladeShape = GRASS_CONFIG,
 ): THREE.BufferGeometry {
   const N = bladesPerClump;
   const segs = bladeSegments;
+  const { CLUMP_RADIUS, CLUMP_INNER_RATIO, BLADE_TAPER: taper } = GRASS_CONFIG;
   const {
-    CLUMP_RADIUS,
-    CLUMP_INNER_RATIO,
     BLADE_WIDTH_RATIO,
     BLADE_HEIGHT_MIN: hMin,
     BLADE_HEIGHT_MAX: hMax,
     BLADE_ARC_RATIO,
-    BLADE_TAPER: taper,
-  } = GRASS_CONFIG;
+  } = shape;
 
   const vertsPerBlade = segs * 2 + 1;
   const trisPerBlade = (segs - 1) * 2 + 1;
@@ -565,7 +586,13 @@ export class GrassVisualManager implements QuadTreeListener {
     );
 
     this.lodGeometries = GRASS_CONFIG.LOD_TIERS.map((tier) =>
-      createClumpGeometry(tier.bladesPerClump, tier.bladeSegments),
+      createClumpGeometry(
+        tier.bladesPerClump,
+        tier.bladeSegments,
+        this.profileId === "compact-island-v1"
+          ? COMPACT_MEADOW_APPEARANCE
+          : GRASS_CONFIG,
+      ),
     );
     this.material = this.createMaterial();
 
@@ -1107,6 +1134,10 @@ export class GrassVisualManager implements QuadTreeListener {
       walkable: false,
       clickable: false,
       grassGrounding: grounding,
+      grassAppearance:
+        this.profileId === "compact-island-v1"
+          ? COMPACT_MEADOW_APPEARANCE.id
+          : "legacy-blades-v1",
     };
 
     const identity = new THREE.Matrix4();
@@ -1533,7 +1564,11 @@ export class GrassVisualManager implements QuadTreeListener {
   // -- TSL Material ---------------------------------------------------------
 
   private createMaterial(): MeshStandardNodeMaterial {
+    const compactMeadow = this.profileId === "compact-island-v1";
     const mat = new MeshStandardNodeMaterial();
+    mat.name = compactMeadow
+      ? COMPACT_MEADOW_APPEARANCE.id
+      : "legacy-blades-v1";
     mat.side = THREE.DoubleSide;
     mat.transparent = false;
     mat.depthWrite = true;
@@ -1543,7 +1578,11 @@ export class GrassVisualManager implements QuadTreeListener {
 
     const uWindSpeed = uniform(GRASS_CONFIG.WIND_SPEED);
     const uWindStrength = uniform(GRASS_CONFIG.WIND_STRENGTH);
-    const uBladeHeight = uniform(GRASS_CONFIG.BLADE_HEIGHT_MAX);
+    const uBladeHeight = uniform(
+      compactMeadow
+        ? COMPACT_MEADOW_APPEARANCE.BLADE_HEIGHT_MAX
+        : GRASS_CONFIG.BLADE_HEIGHT_MAX,
+    );
     this.sunDirUniform = uniform(
       new THREE.Vector3(...SUN_LIGHT.DEFAULT_DIRECTION),
     );
@@ -1673,6 +1712,22 @@ export class GrassVisualManager implements QuadTreeListener {
       const tintStr = tint.w;
       const t = uv().y;
       const tintedCol = mix(groundCol, tintCol, tintStr);
+      if (compactMeadow) {
+        // Root shading suggests tuft occlusion without an extra texture/pass.
+        // Retain the terrain palette: the previous 1.4 tip gain made distant
+        // blades look like bright wires. This is albedo, not emissive light.
+        const bladeCol = mix(
+          groundCol.mul(COMPACT_MEADOW_APPEARANCE.ROOT_BRIGHTNESS),
+          tintedCol.mul(COMPACT_MEADOW_APPEARANCE.TIP_BRIGHTNESS),
+          smoothstep(float(0.0), float(1.0), t),
+        );
+        return applyAnimeShade(
+          bladeCol,
+          terrainNormal,
+          uSunDir,
+          this.shadeUniforms,
+        );
+      }
       const tipCol = mix(
         groundCol,
         tintedCol,

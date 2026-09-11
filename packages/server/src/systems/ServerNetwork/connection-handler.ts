@@ -1345,7 +1345,9 @@ export class ConnectionHandler {
         })),
       };
 
-      this.broadcast.sendToSocket(socket.id, "resourceSnapshot", payload);
+      // Initial snapshots precede registration in the broadcast socket map.
+      // Send through this exact authenticated/authorized connection, as fires do.
+      socket.send("resourceSnapshot", payload);
     } catch {
       // Resource system not available or error, skip
     }

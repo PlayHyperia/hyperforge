@@ -46,12 +46,21 @@ export const COMPACT_LANDFORM_PARAMETERS = Object.freeze({
   ridgeEndFade: 35,
 });
 
+/** Sculpt-v3 bay shape, inside the unchanged sculpt-v2 refinement envelope. */
+export const COMPACT_BAY_PARAMETERS = Object.freeze({
+  innerHalfWidth: 24,
+  centerlineBend: 8,
+  leftBankScale: 0.95,
+  rightBankScale: 1.1,
+});
+
 export type WorldTerrainProfile = Readonly<{
   schemaVersion: 1;
   algorithm:
     | "terrain-height-params-v1"
     | "compact-island-sculpt-v1"
-    | "compact-island-sculpt-v2";
+    | "compact-island-sculpt-v2"
+    | "compact-island-sculpt-v3";
   id: string;
   kind: "large-world" | "compact-candidate";
   seed: number;
@@ -78,8 +87,10 @@ export type WorldTerrainProfile = Readonly<{
   }>;
   water: Readonly<{ threshold: number; oceanFloorHeight: number }>;
   shoreline: NumericFields<typeof SHORELINE_CONFIG>;
-  /** Required only by sculpt-v2; included in CPU/worker/content identity. */
+  /** Required by sculpt-v2/v3; included in CPU/worker/content identity. */
   landform?: NumericFields<typeof COMPACT_LANDFORM_PARAMETERS>;
+  /** Required only by sculpt-v3; earlier algorithms cannot carry this group. */
+  bay?: NumericFields<typeof COMPACT_BAY_PARAMETERS>;
 }>;
 
 /** Historical numeric regression fixture only, never a runtime selection.
@@ -156,8 +167,8 @@ export const SCULPTED_COMPACT_V1_PROFILE_FIXTURE: WorldTerrainProfile =
     },
   });
 
-/** Sole active sculpt candidate; prior shapes above are regression fixtures. */
-export const SCULPTED_COMPACT_WORLD_TERRAIN_PROFILE: WorldTerrainProfile =
+/** Previous rectangular-bay shape, retained only as a regression fixture. */
+export const SCULPTED_COMPACT_V2_PROFILE_FIXTURE: WorldTerrainProfile =
   validateWorldTerrainProfile({
     ...SCULPTED_COMPACT_V1_PROFILE_FIXTURE,
     algorithm: "compact-island-sculpt-v2",
@@ -165,11 +176,21 @@ export const SCULPTED_COMPACT_WORLD_TERRAIN_PROFILE: WorldTerrainProfile =
     landform: COMPACT_LANDFORM_PARAMETERS,
   });
 
+/** Sole active sculpt candidate: tapered, rounded and gently bent coastal bay. */
+export const SCULPTED_COMPACT_WORLD_TERRAIN_PROFILE: WorldTerrainProfile =
+  validateWorldTerrainProfile({
+    ...SCULPTED_COMPACT_V2_PROFILE_FIXTURE,
+    algorithm: "compact-island-sculpt-v3",
+    id: "compact-duel-island-v4",
+    bay: COMPACT_BAY_PARAMETERS,
+  });
+
 /** Styling/ecology family, not a substitute for strict profile admission. */
 export function isCompactSculptProfile(profile: WorldTerrainProfile): boolean {
   return (
     profile.algorithm === "compact-island-sculpt-v1" ||
-    profile.algorithm === "compact-island-sculpt-v2"
+    profile.algorithm === "compact-island-sculpt-v2" ||
+    profile.algorithm === "compact-island-sculpt-v3"
   );
 }
 
@@ -234,16 +255,26 @@ export function validateWorldTerrainProfile(
     typeof input === "object" &&
     Object.getOwnPropertyDescriptor(input, "algorithm")?.value ===
       "compact-island-sculpt-v2";
+  const v3 =
+    input !== null &&
+    typeof input === "object" &&
+    Object.getOwnPropertyDescriptor(input, "algorithm")?.value ===
+      "compact-island-sculpt-v3";
   const data = record(
     input,
-    v2 ? [...Object.keys(base), "landform"] : Object.keys(base),
+    v3
+      ? [...Object.keys(base), "landform", "bay"]
+      : v2
+        ? [...Object.keys(base), "landform"]
+        : Object.keys(base),
     "profile",
   );
   if (
     data.schemaVersion !== 1 ||
     (data.algorithm !== "terrain-height-params-v1" &&
       data.algorithm !== "compact-island-sculpt-v1" &&
-      data.algorithm !== "compact-island-sculpt-v2") ||
+      data.algorithm !== "compact-island-sculpt-v2" &&
+      data.algorithm !== "compact-island-sculpt-v3") ||
     data.boundsMeaning !== base.boundsMeaning
   )
     fail("version/algorithm/boundsMeaning");
@@ -261,9 +292,31 @@ export function validateWorldTerrainProfile(
   const height = numericGroup(data.height, base.height, "height");
   const water = numericGroup(data.water, base.water, "water");
   const shoreline = numericGroup(data.shoreline, base.shoreline, "shoreline");
-  const landform = v2
-    ? numericGroup(data.landform, COMPACT_LANDFORM_PARAMETERS, "landform")
+  const landform =
+    v2 || v3
+      ? numericGroup(data.landform, COMPACT_LANDFORM_PARAMETERS, "landform")
+      : undefined;
+  const bay = v3
+    ? numericGroup(data.bay, COMPACT_BAY_PARAMETERS, "bay")
     : undefined;
+  if (
+    bay &&
+    (!landform ||
+      bay.innerHalfWidth < 16 ||
+      bay.innerHalfWidth > landform.inletHalfWidth ||
+      Math.abs(bay.centerlineBend) >
+        landform.inletHalfWidth - bay.innerHalfWidth ||
+      bay.leftBankScale < 0.5 ||
+      bay.leftBankScale > 1.5 ||
+      bay.rightBankScale < 0.5 ||
+      bay.rightBankScale > 1.5 ||
+      Math.max(bay.leftBankScale, bay.rightBankScale) *
+        landform.inletBankTransition >=
+        bay.innerHalfWidth ||
+      landform.inletTipDistance + landform.inletTipTransition >=
+        165 * (1 + island.maxCoastVariation))
+  )
+    fail("bay ranges/envelope");
   if (
     landform &&
     (Math.abs(landform.westHeadlandBearing) > Math.PI ||
@@ -363,7 +416,20 @@ export function validateWorldTerrainProfile(
     water,
     shoreline,
     ...(landform ? { landform } : {}),
+    ...(bay ? { bay } : {}),
   });
+  const reservedSculptAlgorithm = {
+    "compact-duel-island-v2": "compact-island-sculpt-v1",
+    "compact-duel-island-v3": "compact-island-sculpt-v2",
+    "compact-duel-island-v4": "compact-island-sculpt-v3",
+  } as const;
+  if (
+    Object.prototype.hasOwnProperty.call(reservedSculptAlgorithm, profile.id) &&
+    reservedSculptAlgorithm[
+      profile.id as keyof typeof reservedSculptAlgorithm
+    ] !== profile.algorithm
+  )
+    fail("reserved sculpt identity/algorithm differs");
   // Reserved legacy ID/kind cannot silently be reused for changed parameters.
   if (
     (profile.kind === "large-world" || profile.id === base.id) &&

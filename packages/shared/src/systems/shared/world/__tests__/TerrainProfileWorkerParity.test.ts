@@ -35,6 +35,7 @@ import {
   COMPACT_WORLD_TERRAIN_PROFILE as compact,
   SCULPTED_COMPACT_WORLD_TERRAIN_PROFILE as sculpted,
   SCULPTED_COMPACT_V1_PROFILE_FIXTURE as previousSculpt,
+  SCULPTED_COMPACT_V2_PROFILE_FIXTURE as rectangularSculpt,
   LEGACY_TERRAIN_PROFILE_FIXTURE as legacy,
   validateWorldTerrainProfile,
   worldTerrainProfileIdentity,
@@ -169,6 +170,7 @@ describe("actual compact terrain height pipeline", () => {
     const profiles = [
       legacy,
       previousSculpt,
+      rectangularSculpt,
       ...[0, 41, 0xffffffff].map((seed) =>
         validateWorldTerrainProfile({ ...sculpted, seed }),
       ),
@@ -210,6 +212,7 @@ describe("actual compact terrain height pipeline", () => {
     try {
       const profiles = [
         previousSculpt,
+        rectangularSculpt,
         ...[0, 41, 0xffffffff].map((seed) =>
           validateWorldTerrainProfile({ ...sculpted, seed }),
         ),
@@ -504,6 +507,16 @@ describe("actual compact terrain height pipeline", () => {
               landform: { ...sculpted.landform, westHeadlandHalfWidth: 1e-12 },
             },
             { ...sculpted, landform: { ...sculpted.landform, unexpected: 1 } },
+            { ...sculpted, bay: undefined },
+            { ...sculpted, island: null },
+            { ...sculpted, bay: { ...sculpted.bay, innerHalfWidth: NaN } },
+            { ...sculpted, bay: { ...sculpted.bay, unexpected: 1 } },
+            { ...sculpted, bay: { ...sculpted.bay, innerHalfWidth: 0 } },
+            { ...sculpted, bay: { ...sculpted.bay, centerlineBend: 30 } },
+            { ...sculpted, bay: { ...sculpted.bay, leftBankScale: 0 } },
+            { ...sculpted, bay: { ...sculpted.bay, rightBankScale: 2 } },
+            { ...sculpted, id: rectangularSculpt.id },
+            { ...rectangularSculpt, id: sculpted.id },
           ].map((profile) => ({
             config: {
               ...createTerrainWorkerConfig(sculpted, 16),
