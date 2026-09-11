@@ -75,7 +75,7 @@ dependency/type inclusion rather than an accidental transitive global.
   existing zero fallback. Invalid untyped extras fall back to one before entering
   a uniform; the actual material conversion has an independent regression.
 
-Final runtime patch SHA-256:
+Original migration runtime patch SHA-256 (superseded by the viewport fix below):
 `582cc05d6f80e2f6b221ce05028ac8eb037907c4d98b6b59f32f19db6b60ad71`.
 
 ## Verification so far
@@ -228,6 +228,117 @@ issue is not proof of probe20's cause. Instrument native texture creation,
 destruction, attachment/view identity and submission with timestamps before
 changing engine lifetime behavior.
 
+## Probe21: native texture cause narrowed, pond shader fix verified
+
+The actual Chrome/Metal run completed 2026-09-11T01:22:25.479Z through
+01:24:41.288Z. All 245 source pins remained unchanged, all 11 spatial views
+completed, and the eight TSL errors are now absent. The 90 GPU errors remain;
+19 other console errors are the retained cow-loading and dagger-content failures.
+Report SHA-256:
+`61279968ab7d3a1acf8b21e7070858a752d15bf44c6dfaec9582095954e4f58f`.
+
+The native trace finds 90 destroyed-resource submissions across 58 native texture
+generations belonging to two `FramebufferTexture` UUIDs (640x360 and 1280x720).
+These are bound texture views, not stale render-target attachments. Every retained
+first failure has matching UUID/version and ordered upload-flag, destruction and
+submission evidence. `ViewportTextureNode.updateBefore` bumps the version;
+`Textures.updateTexture` destroys the previous allocation during a framebuffer
+copy. All observed failures occur in the spatial study, before cleanup, with
+`preCompiling=false`. The earlier same-size render-target issue is not this
+demonstrated cause.
+
+Actual pre-edit r186 classes reproduce shared mutable source/image metadata
+between the distinct viewport-reference textures. Alternating reference dimensions
+overwrites the other copy's dimensions. Preserved r183 classes reproduce the same
+aliasing, so this is not claimed to be a newly introduced r186 source defect.
+Ordinary asset textures intentionally share their sources; the fix is restricted
+to copied viewport-reference dimension ownership.
+
+The durable Three patch now gives each viewport-reference clone a fresh
+`TextureSource` with copied image metadata. Existing texture settings, cache reuse,
+ordinary asset sharing and the previous renderer lifecycle fixes are retained.
+Patch SHA-256:
+`1f1cea27b53a11cc4f195c5e10772b0855f711506b0845395392b4e5792d3df6`.
+Root's pre-edit ownership assertion failed as expected; 15 new actual-class
+regressions across source and both bundles pass after the fix. Combined identity,
+declaration, patch and ownership tests: 33 passed. Shared/server/client builds and
+scoped test lint/format pass. Frozen installation also exposed Bun's prepared root
+copy as a duplicate renderer; preserving it outside the workspace and restoring
+normal package links resolved that check. No unrelated source or lock changes
+were needed. Fresh actual-world post-fix qualification remains required.
+
+The trace is diagnostic, not a performance result or comprehensive GPU lifetime
+proof: 10,748 unknown descriptors and 18,586 render-bundle sampling calls remain
+explicitly untracked alongside compute/external sampling. No tracking-cap overflow,
+reference drops, metadata errors or restoration errors occurred. All native
+wrappers and the actual Node stack-capture flag were restored.
+
+Overall cleanup still FAILED: the launcher reported a game-client process-group
+inspection `EPERM` during shutdown. Later OS metadata showed its owned leader as
+a zombie before the exit event. Closed browser, exited PostgreSQL and empty four
+owned ports do not waive that failure. The retained launcher log preserves the
+bounded diagnostics; this separate lifecycle gate remains open.
+
+## Post-fix probe24 — reproduced GPU failures cleared, integration still failed
+
+Preserve post-fix probes22/23: both stopped before rendering when the application's
+native adapter request timed out after 30 seconds. They allocated no traced native
+textures, so neither qualifies the viewport patch. Independent actual headful
+Chrome/Metal checks with sequential and concurrent native adapter requests passed.
+No source-proven startup cause or driver defect was established.
+
+Probe24 adds bounded, first-in-document native adapter-call timing without changing
+arguments, receiver, returned Promise, application timeouts, GPU flags or render
+settings. It ran 2026-09-11T01:45:58.559Z through 01:48:16.772Z. One document
+navigation and three successful native requests were observed: diagnostic default
+133.2 ms, application high-performance 130.7 ms, backend high-performance 4.4 ms.
+All were visible/focused; no pending calls, dropped events or restoration errors.
+This success does not resolve the earlier intermittent startup failures.
+
+The actual Apple Metal-3 world completed the unchanged 11-view/22-PNG spatial
+route and six baseline PNGs at 1280x720/DPR 1. All 258 pins remained unchanged;
+six terrain textures and five dressing GLBs returned exact matching HTTP 200
+bytes. Report SHA-256:
+`280b3d606d06afd0516d0fc24d7dfa39222a244fec1028c37cb04a8ee4a43dbf`.
+
+- Zero TSL construction errors, GPU validation errors or page exceptions.
+- Zero traced destroyed-reference submissions, compared with 90 in probe21.
+  Before cleanup: 17,250 native submits, 349 texture creations, two destructions
+  and 21 target upload flags. The bounded trace still excludes render-bundle,
+  compute and external-texture sampling; it is not comprehensive GPU proof.
+- All owned camera, equipment, Node and native descriptor cleanup passed.
+  Browser closed, launcher exited zero, owned database exited and all four owned
+  listening ports were empty. Probe21's separate shutdown failure stays recorded.
+- Overall integration **FAIL**: five cow-loading errors (missing cow VRM) and
+  14 canonical bronze-dagger fit-metadata errors remain. Source hashes and
+  successful diagnostic equipment injection do not certify production delivery.
+
+This qualifies the narrow viewport-reference fix against the reproduced actual
+world failure. It is not art, performance, sustained startup, stream, merge or
+launch approval. Night-lit skin remains cyan against neutral-lit metal; trees
+remain oversized/saturated and the island repetitive with six visible arena pads.
+The loading overlay also covers the baseline kit views; separately labeled
+under-overlay captures are diagnostic, not normal spectator output approval.
+
+## Additional lifecycle findings — not probe20 causal conclusions
+
+Read-only comparison of actual r186 against the preserved r183 package found
+no same-size `RenderTarget.setSize()` disposal regression. Reflector camera and
+target caching remain effectively unchanged. The five application precompile
+producers are avatars, equipment, representative terrain and grass meshes, and
+countdown sprites; none explicitly compiles water or the full scene.
+
+Two separate follow-up risks must remain in the launch checklist:
+
+- `ClientGraphics.ts:445–462` races a compile against a timeout without cancelling
+  or awaiting the underlying work afterward. Its serialized queue can advance
+  while the timed-out compile is still active. Probe20 has no retained precompile
+  timeout error, so this is not its demonstrated cause.
+- `WaterSystem.ts:1770–1773` checks `reflection.renderTarget`, whereas the actual
+  Three node owns its targets through `reflection.reflector.renderTargets`.
+  Correct disposal must follow the actual node ownership and be tested for
+  restart/reconnect; this is a teardown leak, not proof of active-render failure.
+
 ## Required next gates
 
 Post-probe20 narrow shader correction: the maintained declaration labels
@@ -237,9 +348,9 @@ the exported `ConvertNode<"vec4">` with the same variable-intent wrapper as the
 historical single-argument conversion. Five new real-material/node/WGSL
 conversion tests and nine existing pond tests passed; shared typecheck/build
 and scoped lint/format passed again. This preserves mapped alpha and promotes
-mapless RGB with alpha one. It is CPU graph qualification, not proof that a new
-world run is free of errors. Probe20 describes the prior bytes; the 90 GPU errors
-remain separately unresolved.
+mapless RGB with alpha one. Probes21/24 additionally verify no TSL errors in the
+actual world. Probe24 clears the reproduced 90 GPU failures with the viewport
+ownership patch; broader integration and startup reliability remain open.
 
 - [x] Finish precise shader/type migration and shared/server/client typechecks and
       fresh builds. Existing unchecked legacy shader files are not certified by
@@ -251,9 +362,11 @@ remain separately unresolved.
       acceptance remains open.
 - [x] Run immutable probe20 on real Chrome/Metal and inspect the matched views.
       Its integration result failed; completing the capture is not passing it.
-- [ ] Resolve the eight TSL construction errors and 90 destroyed-texture GPU
-      errors with a reproduced cause, regression tests and fresh actual-world
-      evidence. Preserve probe20 and its executed source bytes.
+- [x] Resolve the eight TSL construction errors and reproduced 90 destroyed-texture
+      GPU errors with regression tests and actual-world probe24 evidence.
+      Preserve probes20–24 and all executed source bytes.
+- [ ] Resolve intermittent application adapter admission timeouts and remaining
+      cow/dagger production-content errors; qualify ordinary spectator loading.
 - [ ] Exercise enabled post-processing, HDR/IBL, animation, resource harvesting,
       actual stream encoding and representative performance/reconnect/teardown.
 - [ ] Resolve or bound the recorded direct-canvas copy limitation explicitly.

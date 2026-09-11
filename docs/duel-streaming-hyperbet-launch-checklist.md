@@ -61,12 +61,27 @@ renderer qualification recorded below.
   64x64 correctness test, not a game frame-time or art acceptance measurement.
 - [x] Complete matched actual-world probe20: 11 views/22 PNGs and 234 unchanged
   pins. Probes18/19 and their diagnostic-helper failures remain preserved.
-- [x] Correct the pond RGB/RGBA conversion identified after probe20; five new
-  real-material/node tests plus nine existing pond tests pass. Fresh shared
-  typecheck/build passed. Actual-world GPU requalification is still required.
-- [ ] Resolve probe20's FAILED integration: eight TSL construction errors and
-  90 destroyed-texture GPU errors. Spatial observations passed, but the whole
-  renderer did not. No merge, deployment, art or performance approval.
+- [x] Correct the pond RGB/RGBA conversion: five new real-material/node tests
+  plus nine pond tests pass, and actual-world probe21 has zero TSL errors.
+- [x] Trace probe21's 90 GPU errors to shared mutable viewport-copy dimensions;
+  reproduce the alias with actual unpatched r186 and preserved r183 classes.
+  Patch only viewport-reference source ownership; 15 actual-class regressions
+  and all 33 combined identity/type/patch checks pass. Fresh builds pass.
+- [x] Qualify the narrow viewport patch against the reproduced actual-world
+  failure: probe24 completes 11 views/22 PNGs with zero GPU, TSL and page errors,
+  zero traced destroyed-reference submissions, 258 unchanged pins and clean
+  owned browser/service teardown. No render settings or error gates reduced.
+- [ ] Resolve intermittent startup: probes22/23 stopped before rendering on
+  adapter admission timeout. Probe24's native requests pass with exact invocation
+  semantics retained; cause of the earlier failures remains unproven.
+- [ ] Pass whole-world integration. Probe24 still FAILS on 19 cow/dagger content
+  errors; baseline kit views retain a loading overlay. Preserve probe21's separate
+  shutdown inspection failure. No merge, deployment, art or performance approval.
+- [ ] Execute the research-backed high-end graphics order: shared lighting and
+  material calibration; authored compact terrain and real resource groves;
+  fitted shadows/contact; compression-qualified texture detail; motion-qualified
+  AA; only then cost-proven atmosphere/indirect-lighting experiments. The updated
+  graphics research brief records primary sources and hardware/evidence limits.
 - [ ] Verify integrated effects, real gameplay/resource lifecycle and actual stream
   output. Retain the direct-canvas/no-intermediate framebuffer-copy failure as
   an explicit unresolved scenario, not a waived gate.
@@ -75,6 +90,12 @@ renderer qualification recorded below.
   author/committer `dreaminglucid` verified. Its failed integration is explicit.
 - [ ] Fix the GPU/shader blockers before promotion, then continue one-arena
   authority and real resource-tree distribution.
+- [ ] Preserve shader-precompile serialization through timeout: the current
+  timeout rejects the wait without stopping the underlying compilation. Verify
+  a timed-out job cannot overlap its successor or falsely report an idle queue.
+- [ ] Release the actual water reflector's owned render targets at teardown and
+  verify restart/reconnect resource counts. The existing lookup checks the wrong
+  property; neither finding is yet proven to cause probe20's GPU errors.
 
 Current evidence and exact scope: the implementation's
 `docs/renderer-upgrade-qualification-20260911.md`. Historical probe17 and its

@@ -66,6 +66,83 @@ and measured costs where relevant. Preserve the same resolution, DPR and quality
 between comparisons. Proposed triangle, texture, frame and population budgets
 in the reports are experiments to qualify, not certified hardware limits.
 
+## r186 high-end graphics research addendum
+
+The goal is the best achievable cohesive image **and** smooth, scalable operation
+on the compact island with one arena. Its canopy remains functional resource
+trees, including harvesting, depletion and regrowth. The capabilities below are
+available in Three.js r186; their presence does not mean they are integrated,
+performant in this game, visually approved or evidence of AAA quality. This
+addendum changes no runtime settings or approved quality targets.
+
+1. **Calibrate lighting and materials together.** Establish a coherent sun,
+   visible sky, environment illumination, exposure and water-reflection condition
+   before adding effects. Review skin, metal, stone, ground and foliage under
+   that same condition. The
+   [official r186 ocean example](https://raw.githubusercontent.com/mrdoob/three.js/r186/examples/webgpu_ocean.html)
+   combines WebGPU SkyMesh, WaterMesh, PMREM and RenderPipeline. These are usable
+   building blocks, not a reason to replace working game systems or regenerate
+   environment lighting every frame.
+2. **Author the landscape at three scales.** Prioritize island and grove
+   silhouettes, readable preparation routes and ground regions, then close-up
+   normals, roughness and restrained understory. Preserve authoritative terrain
+   and rendered grounding rather than introducing visual-only displacement.
+   Reuse existing resource-tree and grass instancing/LOD paths. Instancing reduces
+   draw calls; it does not eliminate triangle, foliage-overdraw or shadow costs.
+   [Three.js InstancedMesh](https://threejs.org/docs/pages/InstancedMesh.html)
+   also requires bounds to remain correct when instances change.
+3. **Improve shadow and contact quality where activity occurs.** Compare the
+   existing bounded shadows with a small, tightly fitted cascade configuration
+   only where moving cameras benefit. Each cascade has its own shadow-casting
+   light and associated work; do not increase coverage or resolution blindly.
+   [CSMShadowNode](https://threejs.org/docs/pages/CSMShadowNode.html) is the
+   WebGPU-specific implementation. Trial restrained
+   [GTAO](https://threejs.org/docs/pages/GTAONode.html) for contact, initially
+   evaluating its documented half-resolution option against full resolution.
+   Reject dark halos, foliage artifacts and loss of combat readability.
+4. **Deliver texture detail within measured residency budgets.** Evaluate
+   [KTX2/Basis loading](https://threejs.org/docs/pages/KTX2Loader.html) on the actual
+   renderer, which selects supported GPU compression. Compare alpha silhouettes,
+   normals and roughness before promotion. Record GPU allocation and mipmaps,
+   not merely download size; a small compressed image file is not proof of a
+   small resident texture. Preserve material color-space and ownership contracts.
+5. **Qualify antialiasing in motion.** Compare the existing AA path with
+   [r186 TRAA](https://raw.githubusercontent.com/mrdoob/three.js/r186/examples/webgpu_postprocessing_traa.html),
+   whose example uses color, depth and velocity buffers. Test actual skinned
+   avatars, weapons, wind deformation, camera cuts and LOD changes for shimmer
+   and trails. GTAO temporal filtering likewise depends on TRAA and can introduce
+   ghosting. A still image cannot approve either temporal effect.
+6. **Add expensive atmosphere and indirect lighting selectively.** Keep calm
+   pond optics distinct from the ocean and count planar reflection as additional
+   rendering work. Trial localized atmosphere only after the base image works:
+   the [r186 volumetric-lighting example](https://raw.githubusercontent.com/mrdoob/three.js/r186/examples/webgpu_volume_lighting.html)
+   uses 12 raymarch steps at quarter width/height plus blur. This is a cost-aware
+   example, not a free full-world atmosphere solution.
+   [SSGI](https://raw.githubusercontent.com/mrdoob/three.js/r186/examples/jsm/tsl/display/SSGINode.js)
+   is available with explicit sample-count and temporal-artifact tradeoffs;
+   screen-space illumination is not complete world-space GI. Both remain
+   optional experiments until visual improvement and sustained cost are proven.
+
+### Qualification and hardware boundary
+
+The current development machine is an Apple M5 with 10 GPU cores; deployment
+hardware and minimum supported client hardware remain unqualified. Freeze an
+explicit resolution, DPR, frame-rate target, quality profile, launch population,
+camera route and encoding workload for each comparison. Do not silently lower
+quality, population or resolution to obtain a passing result, and do not promote
+a development-machine result to a deployment guarantee.
+
+Require clean actual WebGPU execution, preserved gameplay/grounding contracts,
+reviewed stills **and motion**, decoded-stream inspection, cold/warm loading,
+CPU/GPU frame-time distributions, stalls, memory residency and sustained thermal
+behavior. Recheck camera changes, resource turnover and teardown. Optional GPU
+formats and timestamps require checks against the actual device's
+[WebGPU features](https://gpuweb.github.io/gpuweb/); API availability does not
+establish a performance budget. Chrome's
+[developer-only timing features](https://developer.chrome.com/docs/web-platform/webgpu/developer-features)
+must not become production requirements. Retain failed evidence and separate
+instrumented correctness captures from representative performance runs.
+
 ## Current checkpoint and evidence limits
 
 The latest pond runtime checkpoint is game

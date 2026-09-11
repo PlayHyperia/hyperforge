@@ -18,9 +18,11 @@ const expected = {
   "src/renderers/webgpu/WebGPUBackend.js":
     "f572de154dbce29e906209aa103399d38653b7601c3605b0fce20b0c8d80efb9",
   "build/three.webgpu.js":
-    "f6c5958fc049620df3e19ddfbdfafe5c2e666685573edddc3bb442f7b4500b7c",
+    "98c33b189c329cd4829a8c14121deb70372b875d72396c47c2231f0e2506e0ed",
   "build/three.webgpu.nodes.js":
-    "dbd101bf81bf53727955ad4a83d80e88d5d140171a50c1e6e6447d74fb6fe55c",
+    "3f9353b449c3b7c822fb5eefa45fd42c469a5c1ab76e9075a24f562f288b0c8c",
+  "src/nodes/display/ViewportTextureNode.js":
+    "af363e3ff1ac9d7103e6e93769bacc7a3547efe1481bcc1a58f12672af14f099",
 };
 
 test("the exact Three version has a durable Bun lifecycle patch", () => {
@@ -36,7 +38,7 @@ test("the exact Three version has a durable Bun lifecycle patch", () => {
   );
   assert.equal(
     hash(new URL("patches/three@0.186.0.patch", root)),
-    "582cc05d6f80e2f6b221ce05028ac8eb037907c4d98b6b59f32f19db6b60ad71",
+    "1f1cea27b53a11cc4f195c5e10772b0855f711506b0845395392b4e5792d3df6",
   );
 });
 
