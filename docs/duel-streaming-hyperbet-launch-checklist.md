@@ -2,6 +2,9 @@
 
 ## Active functional woodland and surface fidelity — 2026-09-11
 
+- [x] Push coast checkpoint `55bed186c`; exact remote head, GitHub author/
+  committer `dreaminglucid` and all five native52-tested source blobs verified.
+  No merge, deployment or runtime-error waiver.
 - [x] Push verified woodland/lighting game checkpoint `b6b3af00e` with paired
   asset manifest `5c2cfda`. Exact remote heads and GitHub author/committer
   `dreaminglucid` verified; all 15 committed game source/test blobs and the
@@ -14,9 +17,15 @@
 - [ ] Finish coastal geometry/material art, fuller meadow coverage and village
   composition. Probe52's darker coast is a modest improvement, not the target;
   smooth uniform ramps and broad repetitive lawns remain. No GPU-cost approval.
-- [ ] Correct buried exterior building steps before installing the preparation
-  lodge. Actual generated lower steps currently override higher terrain support;
-  preserve interior stairs/basements and shared client/server surface behavior.
+- [x] Implement shared exposed exterior-step support for players: root independently
+  passes 225 movement/collision tests, including real client walking and arrival;
+  combined terrain/resource/light/support regression passes 651 tests / 47 files.
+  Buried ramps no longer override higher terrain/platforms; interior precedence,
+  raw collision and non-player interpolation remain unchanged. Native contact open.
+- [x] Add opt-in bounded gabled roof geometry with no automatic furniture:
+  55 generator/style tests pass, including six independently reviewed gable
+  cases for closure/normals/UVs/seams/merging/defaults. All four package builds
+  and typechecks pass. No lodge is installed; geometry tests are not art approval.
 - [ ] Qualify one bounded gabled lodge with exact shared layout, visual/collision
   ownership and service approaches. Reject the first stock-bank candidate's
   tree overlap and unblocked counter geometry; no global town/NPC activation.

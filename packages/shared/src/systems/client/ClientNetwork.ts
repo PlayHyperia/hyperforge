@@ -100,6 +100,7 @@ import { DataManager } from "../../data/DataManager";
 import type { TerrainSystem } from "../shared/world/TerrainSystem";
 import {
   PLAYER_ROOT_CLEARANCE,
+  resolveExteriorStepSupportHeight,
   resolvePlayerRootHeight,
 } from "../../utils/movement/PlayerSupport";
 import type { TerrainResourceSpawnBatch } from "../../types/world/terrain";
@@ -4450,11 +4451,14 @@ export class ClientNetwork extends SystemBase {
       // Pass step height function for smooth entrance stair walking
       collisionService
         ? (x: number, z: number, entityId: string) => {
-            const stepY = collisionService.getStepHeightAtWorld(x, z);
+            const isPlayer =
+              this.world.entities.get(entityId)?.type === "player";
+            const rawStepY = collisionService.getStepHeightAtWorld(x, z);
+            const stepY = isPlayer
+              ? resolveExteriorStepSupportHeight(x, z, rawStepY, terrain)
+              : rawStepY;
             if (stepY === null || !Number.isFinite(stepY)) return null;
-            return this.world.entities.get(entityId)?.type === "player"
-              ? stepY + PLAYER_ROOT_CLEARANCE
-              : stepY;
+            return isPlayer ? stepY + PLAYER_ROOT_CLEARANCE : stepY;
           }
         : undefined,
       this.world.frameBudget

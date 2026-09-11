@@ -24,6 +24,28 @@ export interface PlayerBuildingSupport {
 }
 
 /**
+ * Exposed exterior support, not the raw decorative entrance ramp. Buried steps
+ * cannot replace solid terrain/bridge/platform beneath an outdoor player. A
+ * negative local step is still valid when it stands above lower surrounding
+ * ground. Call only after any selected interior floor/stair has taken priority.
+ * Unknown outdoor support fails closed; never manufacture a zero-height plane.
+ */
+export function resolveExteriorStepSupportHeight(
+  x: number,
+  z: number,
+  step: number | null,
+  terrain: PlayerTerrainSupport | null | undefined,
+): number | null {
+  if (!Number.isFinite(x) || !Number.isFinite(z)) return null;
+  if (step === null || !Number.isFinite(step)) return null;
+  const platform = getDuelArenaSolidSurfaceHeight(x, z);
+  const ground = platform ?? terrain?.getHeightAt(x, z);
+  if (ground === null || ground === undefined || !Number.isFinite(ground))
+    return null;
+  return Math.max(step, ground);
+}
+
+/**
  * Actual support surface, without changing terrain grading, physics or assets.
  * Building queries use integer tiles and the requested floor only: a missing
  * upper floor never promotes an unrelated ground floor or whole bounding box.
@@ -56,7 +78,8 @@ export function resolvePlayerSupportHeight(
     // Entrance steps are a ground-level surface, not an upper-floor fallback.
     if (floorIndex === 0) {
       const step = buildings.getStepHeightAtWorld(x, z);
-      if (step !== null) return Number.isFinite(step) ? step : null;
+      if (step !== null)
+        return resolveExteriorStepSupportHeight(x, z, step, terrain);
     }
   }
   const platform = getDuelArenaSolidSurfaceHeight(x, z);

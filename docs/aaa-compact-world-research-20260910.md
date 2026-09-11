@@ -266,6 +266,15 @@ AO cannot repair physically floating feet or missing directional casters.
 
 ### Next performance measurement boundary
 
+Follow-up source check on 2026-09-11: the official GTAO example applies its
+result through the scene's ambient-occlusion context after a normal/depth
+prepass, rather than multiplying the final lit image. That is the appropriate
+candidate integration to test for this PBR scene; a dark overlay would also
+darken direct light and emission. The installed postprocessing pipeline does
+not yet implement that path. Depth/normal ownership, transparent water,
+denoising, motion and disposal need a separate measured trial, not a global
+enablement of existing blur effects. [Three GTAO integration](https://threejs.org/docs/pages/GTAONode.html).
+
 The current lightweight captures distinguish RAF callbacks, actual render-call
 progress and device/profile identity; none is GPU execution time or presented /
 decoded FPS. The installed r186 backend supports optional timestamp queries,
