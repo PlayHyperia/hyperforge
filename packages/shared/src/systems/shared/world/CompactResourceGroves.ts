@@ -61,7 +61,9 @@ export function validateCompactResourceGroves(
       (profile.id === "compact-duel-island-v4" &&
         profile.algorithm === "compact-island-sculpt-v3") ||
       (profile.id === "compact-duel-island-v5" &&
-        profile.algorithm === "compact-island-sculpt-v4")
+        profile.algorithm === "compact-island-sculpt-v4") ||
+      (profile.id === "compact-duel-island-v6" &&
+        profile.algorithm === "compact-island-sculpt-v5")
     ) ||
     profile.terrainTileSize !== 100
   )
@@ -80,7 +82,8 @@ export function validateCompactResourceGroves(
   const grouped =
     layout.schemaVersion === 2 &&
     layout.layoutId === "compact-functional-groves-v2" &&
-    profile.id === "compact-duel-island-v5";
+    (profile.id === "compact-duel-island-v5" ||
+      profile.id === "compact-duel-island-v6");
   if ((!legacy && !grouped) || layout.terrainProfileId !== profile.id)
     fail("layout identity");
   const cap = grouped

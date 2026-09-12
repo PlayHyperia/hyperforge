@@ -26,6 +26,7 @@ import {
   SCULPTED_COMPACT_V1_PROFILE_FIXTURE,
   SCULPTED_COMPACT_V2_PROFILE_FIXTURE,
   SCULPTED_COMPACT_V3_PROFILE_FIXTURE,
+  SCULPTED_COMPACT_V4_PROFILE_FIXTURE,
   type WorldTerrainProfile,
 } from "../WorldTerrainProfile";
 import { createTerrainWorkerConfig } from "../../../../utils/workers/TerrainWorkerShared";
@@ -574,10 +575,16 @@ describe("opt-in compact grass, actual terrain and native worker (not GPU proof)
       leaves: [271, 503, 139, 532, 493, 343],
     },
     {
-      profile: SCULPTED_COMPACT_WORLD_TERRAIN_PROFILE,
+      profile: SCULPTED_COMPACT_V4_PROFILE_FIXTURE,
       total: 2298,
       fixedLod1: 334,
       leaves: [271, 520, 139, 532, 493, 343],
+    },
+    {
+      profile: SCULPTED_COMPACT_WORLD_TERRAIN_PROFILE,
+      total: 2273,
+      fixedLod1: 334,
+      leaves: [271, 495, 139, 532, 493, 343],
     },
   ])(
     "preserves legacy density and measures actual native-worker census for $profile.id",
@@ -686,7 +693,7 @@ describe("opt-in compact grass, actual terrain and native worker (not GPU proof)
     const results = [];
     for (const profile of [
       SCULPTED_COMPACT_V3_PROFILE_FIXTURE,
-      SCULPTED_COMPACT_WORLD_TERRAIN_PROFILE,
+      SCULPTED_COMPACT_V4_PROFILE_FIXTURE,
     ]) {
       const f = await fixture(profile);
       try {

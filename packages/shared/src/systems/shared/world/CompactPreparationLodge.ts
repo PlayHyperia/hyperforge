@@ -26,7 +26,7 @@ export const COMPACT_PREPARATION_LODGE: CompactPreparationLodgeManifest =
   Object.freeze({
     schemaVersion: 1,
     layoutId: COMPACT_PREPARATION_LODGE_BUILDING_ID,
-    terrainProfileId: "compact-duel-island-v5",
+    terrainProfileId: "compact-duel-island-v6",
     position: Object.freeze({ x: 398, z: 370 }),
     rotation: 0,
     layoutSeed: "compact-bank-lodge01:360,318:8x8:south",
@@ -38,6 +38,12 @@ export const COMPACT_PREPARATION_LODGE_V4_FIXTURE: CompactPreparationLodgeManife
   Object.freeze({
     ...COMPACT_PREPARATION_LODGE,
     terrainProfileId: "compact-duel-island-v4",
+  });
+
+export const COMPACT_PREPARATION_LODGE_V5_FIXTURE: CompactPreparationLodgeManifest =
+  Object.freeze({
+    ...COMPACT_PREPARATION_LODGE,
+    terrainProfileId: "compact-duel-island-v5",
   });
 
 // Exact report01.proposedLayoutRecipe used by report04. Do not inherit mutable
@@ -93,7 +99,9 @@ export function validateCompactPreparationLodge(
       (profile.id === "compact-duel-island-v4" &&
         profile.algorithm === "compact-island-sculpt-v3") ||
       (profile.id === "compact-duel-island-v5" &&
-        profile.algorithm === "compact-island-sculpt-v4")
+        profile.algorithm === "compact-island-sculpt-v4") ||
+      (profile.id === "compact-duel-island-v6" &&
+        profile.algorithm === "compact-island-sculpt-v5")
     ) ||
     profile.terrainTileSize !== 100
   )
@@ -107,7 +115,9 @@ export function validateCompactPreparationLodge(
       canonicalWorldJson(
         profile.id === "compact-duel-island-v4"
           ? COMPACT_PREPARATION_LODGE_V4_FIXTURE
-          : COMPACT_PREPARATION_LODGE,
+          : profile.id === "compact-duel-island-v5"
+            ? COMPACT_PREPARATION_LODGE_V5_FIXTURE
+            : COMPACT_PREPARATION_LODGE,
       )
   )
     fail("unsupported descriptor, pose or recipe");

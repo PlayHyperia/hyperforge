@@ -41,13 +41,15 @@ export function createCompactIslandLandform() {
       const authored =
         profile.algorithm === "compact-island-sculpt-v2" ||
         profile.algorithm === "compact-island-sculpt-v3" ||
-        profile.algorithm === "compact-island-sculpt-v4"
+        profile.algorithm === "compact-island-sculpt-v4" ||
+        profile.algorithm === "compact-island-sculpt-v5"
           ? profile.landform
           : undefined;
       if (
         (profile.algorithm === "compact-island-sculpt-v2" ||
           profile.algorithm === "compact-island-sculpt-v3" ||
-          profile.algorithm === "compact-island-sculpt-v4") &&
+          profile.algorithm === "compact-island-sculpt-v4" ||
+          profile.algorithm === "compact-island-sculpt-v5") &&
         !authored
       )
         throw new Error(
@@ -92,7 +94,8 @@ export function createCompactIslandLandform() {
       const along = (x * c + z * s) * scale;
       if (
         profile.algorithm === "compact-island-sculpt-v3" ||
-        profile.algorithm === "compact-island-sculpt-v4"
+        profile.algorithm === "compact-island-sculpt-v4" ||
+        profile.algorithm === "compact-island-sculpt-v5"
       ) {
         const bay = profile.bay;
         if (!bay) throw new Error("Sculpt-v3 requires admitted bay parameters");
@@ -151,7 +154,8 @@ export function createCompactIslandLandform() {
       if (
         profile.algorithm === "compact-island-sculpt-v2" ||
         profile.algorithm === "compact-island-sculpt-v3" ||
-        profile.algorithm === "compact-island-sculpt-v4"
+        profile.algorithm === "compact-island-sculpt-v4" ||
+        profile.algorithm === "compact-island-sculpt-v5"
       ) {
         const authored = profile.landform;
         if (!authored)
@@ -181,7 +185,10 @@ export function createCompactIslandLandform() {
           authored.ridgeHeight *
           helpers.smooth(1 - Math.abs(cross) / width) *
           ends;
-        if (profile.algorithm === "compact-island-sculpt-v4") {
+        if (
+          profile.algorithm === "compact-island-sculpt-v4" ||
+          profile.algorithm === "compact-island-sculpt-v5"
+        ) {
           const terrace = profile.terrace;
           if (!terrace)
             throw new Error("Sculpt-v4 requires admitted terrace parameters");
@@ -193,27 +200,81 @@ export function createCompactIslandLandform() {
           ) {
             const scarpEnd = terrace.crestEnd + terrace.scarpRun;
             const shelfEnd = scarpEnd + terrace.shelfWidth;
+            let sculptedCross = cross;
+            let ridgeScale = 1;
+            const breakup =
+              profile.algorithm === "compact-island-sculpt-v5"
+                ? profile.ridgeBreakup
+                : undefined;
+            if (profile.algorithm === "compact-island-sculpt-v5" && !breakup)
+              throw new Error("Sculpt-v5 requires admitted ridge breakup");
+            if (breakup) {
+              // Two compact, non-overlapping saddles split the long face into
+              // distinct outcrops. Smooth endpoints retain the shared heightfield.
+              const north =
+                1 -
+                helpers.smooth(
+                  Math.abs(az - breakup.northGapZ) / breakup.northGapHalfWidth,
+                );
+              const south =
+                1 -
+                helpers.smooth(
+                  Math.abs(az - breakup.southGapZ) / breakup.southGapHalfWidth,
+                );
+              ridgeScale =
+                (1 - breakup.northGapDepth * north) *
+                (1 - breakup.southGapDepth * south);
+              const phase = az * ((Math.PI * 2) / breakup.warpWavelength);
+              const warp =
+                breakup.lateralWarp *
+                (0.65 * Math.sin(phase) + 0.35 * Math.sin(phase * 0.61 + 1.3));
+              // Warp fades at the original foot/apron. It cannot introduce a
+              // height jump at the old domain boundary or move the coast mask.
+              sculptedCross -=
+                warp *
+                helpers.smooth((cross - terrace.westFoot) / 8) *
+                (1 - helpers.smooth((cross - shelfEnd) / terrace.apronWidth));
+            }
             let terracedHeight: number;
-            if (cross < terrace.crestStart) {
+            if (sculptedCross < terrace.crestStart) {
               terracedHeight =
                 terrace.crestHeight *
                 helpers.smooth(
-                  (cross - terrace.westFoot) /
+                  (sculptedCross - terrace.westFoot) /
                     (terrace.crestStart - terrace.westFoot),
                 );
-            } else if (cross <= terrace.crestEnd) {
+            } else if (sculptedCross <= terrace.crestEnd) {
               terracedHeight = terrace.crestHeight;
-            } else if (cross < scarpEnd) {
+            } else if (sculptedCross < scarpEnd) {
               terracedHeight =
                 terrace.crestHeight +
                 (terrace.shelfHeight - terrace.crestHeight) *
-                  helpers.smooth((cross - terrace.crestEnd) / terrace.scarpRun);
-            } else if (cross <= shelfEnd) {
+                  helpers.smooth(
+                    (sculptedCross - terrace.crestEnd) / terrace.scarpRun,
+                  );
+            } else if (sculptedCross <= shelfEnd) {
               terracedHeight = terrace.shelfHeight;
             } else {
               terracedHeight =
                 terrace.shelfHeight *
-                (1 - helpers.smooth((cross - shelfEnd) / terrace.apronWidth));
+                (1 -
+                  helpers.smooth(
+                    (sculptedCross - shelfEnd) / terrace.apronWidth,
+                  ));
+            }
+            if (breakup) {
+              const face =
+                helpers.smooth((sculptedCross - terrace.crestEnd) / 2.5) *
+                (1 - helpers.smooth((sculptedCross - scarpEnd) / 3));
+              terracedHeight =
+                terracedHeight * ridgeScale +
+                breakup.facetRelief *
+                  face *
+                  (0.45 + 0.55 * ridgeScale) *
+                  noise.simplex2D(
+                    ax * breakup.facetScale,
+                    az * breakup.facetScale * 0.75,
+                  );
             }
             const originalCross =
               authored.ridgeHeight *
@@ -244,7 +305,8 @@ export function createCompactIslandLandform() {
       const interior =
         profile.algorithm === "compact-island-sculpt-v2" ||
         profile.algorithm === "compact-island-sculpt-v3" ||
-        profile.algorithm === "compact-island-sculpt-v4"
+        profile.algorithm === "compact-island-sculpt-v4" ||
+        profile.algorithm === "compact-island-sculpt-v5"
           ? profile.height.baseOffset +
             ridgeHeight +
             profile.height.terrainScale *

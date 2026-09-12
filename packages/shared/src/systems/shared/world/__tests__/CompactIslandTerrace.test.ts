@@ -13,7 +13,8 @@ import { createCompactIslandLandform } from "../CompactIslandLandform";
 import { validateCompactResourceGroves } from "../CompactResourceGroves";
 import { validateCompactPreparationLodge } from "../CompactPreparationLodge";
 import {
-  SCULPTED_COMPACT_WORLD_TERRAIN_PROFILE as current,
+  SCULPTED_COMPACT_V4_PROFILE_FIXTURE as current,
+  SCULPTED_COMPACT_WORLD_TERRAIN_PROFILE as active,
   SCULPTED_COMPACT_V3_PROFILE_FIXTURE as previous,
   validateWorldTerrainProfile,
   worldTerrainProfileIdentity,
@@ -53,7 +54,7 @@ function expectedDelta(x: number, z: number): number {
 
 describe("explicit western rocky terrace successor", () => {
   it("binds all 13 numeric terrace fields to v5 while keeping the complete v4 fixture", () => {
-    expect(DataManager.getWorldTerrainProfile()).toEqual(current);
+    expect(DataManager.getWorldTerrainProfile()).toEqual(active);
     expect([current.id, current.algorithm]).toEqual([
       "compact-duel-island-v5",
       "compact-island-sculpt-v4",
@@ -185,7 +186,12 @@ describe("explicit western rocky terrace successor", () => {
   });
 
   it("pairs old/new grove and lodge bindings, and rejects old content on a current session", async () => {
-    const config = DataManager.getWorldConfig()!;
+    // Keep this historical v4→v5 migration oracle independent of the new
+    // active v6 profile. No source anchors, rewards, layout or pose changes.
+    const config = structuredClone(DataManager.getWorldConfig()!);
+    config.terrainProfile = current;
+    config.compactResourceGroves!.terrainProfileId = current.id;
+    config.compactPreparationLodge!.terrainProfileId = current.id;
     const oldConfig = structuredClone(config);
     oldConfig.terrainProfile = previous;
     // Historical terrain uses its actual v1 tree layout, not the new v2
@@ -268,7 +274,10 @@ describe("explicit western rocky terrace successor", () => {
     }
     const before = await identity(oldConfig, previous),
       after = await identity(config, current);
-    expect(after).toBe(DataManager.getWorldContentIdentity());
+    expect(after).toBe(
+      "198859e9e703e4a1cfd8d09b341d1fb70177a73e894dfcf149c2a529c9cba87f",
+    );
+    expect(after).not.toBe(DataManager.getWorldContentIdentity());
     expect(after).not.toBe(before);
     const admission = new WorldContentAdmission(() => after);
     admission.beginConnection();

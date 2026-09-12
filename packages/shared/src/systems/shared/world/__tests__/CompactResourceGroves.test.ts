@@ -14,6 +14,7 @@ import type {
 import {
   COMPACT_WORLD_TERRAIN_PROFILE,
   SCULPTED_COMPACT_V3_PROFILE_FIXTURE,
+  SCULPTED_COMPACT_V4_PROFILE_FIXTURE,
 } from "../WorldTerrainProfile";
 import { validateCompactResourceGroves } from "../CompactResourceGroves";
 import layouts from "./fixtures/CompactResourceGroves.layouts.json";
@@ -21,7 +22,10 @@ import layouts from "./fixtures/CompactResourceGroves.layouts.json";
 type Mutable<T> = { -readonly [K in keyof T]: Mutable<T[K]> };
 type Layout = Mutable<CompactResourceGrovesManifest>;
 function copy(): Layout {
-  return structuredClone(layouts.previous) as Layout;
+  return {
+    ...structuredClone(layouts.previous),
+    terrainProfileId: profile().id,
+  } as Layout;
 }
 const profile = () => DataManager.getWorldTerrainProfile();
 
@@ -63,8 +67,12 @@ describe("strict compact resource grove admission", () => {
     ).toThrow("version/profile");
   });
 
-  it("preserves historical v1 cap/scale admission on both original v4 and current v5", () => {
-    for (const terrain of [profile(), SCULPTED_COMPACT_V3_PROFILE_FIXTURE]) {
+  it("preserves historical v1 cap/scale admission on v4, v5 and current v6", () => {
+    for (const terrain of [
+      profile(),
+      SCULPTED_COMPACT_V3_PROFILE_FIXTURE,
+      SCULPTED_COMPACT_V4_PROFILE_FIXTURE,
+    ]) {
       const old = copy();
       Object.assign(old, { terrainProfileId: terrain.id });
       expect(validateCompactResourceGroves(old, terrain, 2)).toEqual(old);

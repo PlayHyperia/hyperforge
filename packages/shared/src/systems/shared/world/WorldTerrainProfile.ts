@@ -71,6 +71,20 @@ export const COMPACT_TERRACE_PARAMETERS = Object.freeze({
   eastPreservationEnd: -70,
 });
 
+/** Sculpt-v5 outcrops and saddles, within the existing refined western ridge. */
+export const COMPACT_RIDGE_BREAKUP_PARAMETERS = Object.freeze({
+  northGapZ: -15,
+  northGapHalfWidth: 20,
+  northGapDepth: 0.72,
+  southGapZ: 26,
+  southGapHalfWidth: 20,
+  southGapDepth: 0.58,
+  lateralWarp: 4,
+  warpWavelength: 96,
+  facetRelief: 0.6,
+  facetScale: 0.06,
+});
+
 export type WorldTerrainProfile = Readonly<{
   schemaVersion: 1;
   algorithm:
@@ -78,7 +92,8 @@ export type WorldTerrainProfile = Readonly<{
     | "compact-island-sculpt-v1"
     | "compact-island-sculpt-v2"
     | "compact-island-sculpt-v3"
-    | "compact-island-sculpt-v4";
+    | "compact-island-sculpt-v4"
+    | "compact-island-sculpt-v5";
   id: string;
   kind: "large-world" | "compact-candidate";
   seed: number;
@@ -109,8 +124,10 @@ export type WorldTerrainProfile = Readonly<{
   landform?: NumericFields<typeof COMPACT_LANDFORM_PARAMETERS>;
   /** Required by sculpt-v3 and later; earlier algorithms cannot carry this group. */
   bay?: NumericFields<typeof COMPACT_BAY_PARAMETERS>;
-  /** Required only by sculpt-v4; does not alter coastline or navigation policy. */
+  /** Required by sculpt-v4 and later; does not alter navigation policy. */
   terrace?: NumericFields<typeof COMPACT_TERRACE_PARAMETERS>;
+  /** Required by sculpt-v5; shared by height, navigation and native workers. */
+  ridgeBreakup?: NumericFields<typeof COMPACT_RIDGE_BREAKUP_PARAMETERS>;
 }>;
 
 /** Historical numeric regression fixture only, never a runtime selection.
@@ -205,13 +222,22 @@ export const SCULPTED_COMPACT_V3_PROFILE_FIXTURE: WorldTerrainProfile =
     bay: COMPACT_BAY_PARAMETERS,
   });
 
-/** Sole active sculpt candidate: the same coast with a traversable rocky terrace. */
-export const SCULPTED_COMPACT_WORLD_TERRAIN_PROFILE: WorldTerrainProfile =
+/** Previous continuous terrace, retained only for numeric regression. */
+export const SCULPTED_COMPACT_V4_PROFILE_FIXTURE: WorldTerrainProfile =
   validateWorldTerrainProfile({
     ...SCULPTED_COMPACT_V3_PROFILE_FIXTURE,
     algorithm: "compact-island-sculpt-v4",
     id: "compact-duel-island-v5",
     terrace: COMPACT_TERRACE_PARAMETERS,
+  });
+
+/** Sole active sculpt candidate: asymmetric outcrops separated by saddles. */
+export const SCULPTED_COMPACT_WORLD_TERRAIN_PROFILE: WorldTerrainProfile =
+  validateWorldTerrainProfile({
+    ...SCULPTED_COMPACT_V4_PROFILE_FIXTURE,
+    algorithm: "compact-island-sculpt-v5",
+    id: "compact-duel-island-v6",
+    ridgeBreakup: COMPACT_RIDGE_BREAKUP_PARAMETERS,
   });
 
 /** Styling/ecology family, not a substitute for strict profile admission. */
@@ -220,7 +246,8 @@ export function isCompactSculptProfile(profile: WorldTerrainProfile): boolean {
     profile.algorithm === "compact-island-sculpt-v1" ||
     profile.algorithm === "compact-island-sculpt-v2" ||
     profile.algorithm === "compact-island-sculpt-v3" ||
-    profile.algorithm === "compact-island-sculpt-v4"
+    profile.algorithm === "compact-island-sculpt-v4" ||
+    profile.algorithm === "compact-island-sculpt-v5"
   );
 }
 
@@ -295,15 +322,22 @@ export function validateWorldTerrainProfile(
     typeof input === "object" &&
     Object.getOwnPropertyDescriptor(input, "algorithm")?.value ===
       "compact-island-sculpt-v4";
+  const v5 =
+    input !== null &&
+    typeof input === "object" &&
+    Object.getOwnPropertyDescriptor(input, "algorithm")?.value ===
+      "compact-island-sculpt-v5";
   const data = record(
     input,
-    v4
-      ? [...Object.keys(base), "landform", "bay", "terrace"]
-      : v3
-        ? [...Object.keys(base), "landform", "bay"]
-        : v2
-          ? [...Object.keys(base), "landform"]
-          : Object.keys(base),
+    v5
+      ? [...Object.keys(base), "landform", "bay", "terrace", "ridgeBreakup"]
+      : v4
+        ? [...Object.keys(base), "landform", "bay", "terrace"]
+        : v3
+          ? [...Object.keys(base), "landform", "bay"]
+          : v2
+            ? [...Object.keys(base), "landform"]
+            : Object.keys(base),
     "profile",
   );
   if (
@@ -312,7 +346,8 @@ export function validateWorldTerrainProfile(
       data.algorithm !== "compact-island-sculpt-v1" &&
       data.algorithm !== "compact-island-sculpt-v2" &&
       data.algorithm !== "compact-island-sculpt-v3" &&
-      data.algorithm !== "compact-island-sculpt-v4") ||
+      data.algorithm !== "compact-island-sculpt-v4" &&
+      data.algorithm !== "compact-island-sculpt-v5") ||
     data.boundsMeaning !== base.boundsMeaning
   )
     fail("version/algorithm/boundsMeaning");
@@ -331,16 +366,48 @@ export function validateWorldTerrainProfile(
   const water = numericGroup(data.water, base.water, "water");
   const shoreline = numericGroup(data.shoreline, base.shoreline, "shoreline");
   const landform =
-    v2 || v3 || v4
+    v2 || v3 || v4 || v5
       ? numericGroup(data.landform, COMPACT_LANDFORM_PARAMETERS, "landform")
       : undefined;
   const bay =
-    v3 || v4
+    v3 || v4 || v5
       ? numericGroup(data.bay, COMPACT_BAY_PARAMETERS, "bay")
       : undefined;
-  const terrace = v4
-    ? numericGroup(data.terrace, COMPACT_TERRACE_PARAMETERS, "terrace")
+  const terrace =
+    v4 || v5
+      ? numericGroup(data.terrace, COMPACT_TERRACE_PARAMETERS, "terrace")
+      : undefined;
+  const ridgeBreakup = v5
+    ? numericGroup(
+        data.ridgeBreakup,
+        COMPACT_RIDGE_BREAKUP_PARAMETERS,
+        "ridgeBreakup",
+      )
     : undefined;
+  if (ridgeBreakup) {
+    const r = ridgeBreakup;
+    if (
+      !terrace ||
+      r.northGapHalfWidth < 16 ||
+      r.southGapHalfWidth < 16 ||
+      r.northGapZ - r.northGapHalfWidth < terrace.startZ + 6 ||
+      r.southGapZ + r.southGapHalfWidth > terrace.endZ - 6 ||
+      r.northGapZ + r.northGapHalfWidth >= r.southGapZ - r.southGapHalfWidth ||
+      r.northGapDepth < 0 ||
+      r.northGapDepth > 0.8 ||
+      r.southGapDepth < 0 ||
+      r.southGapDepth > 0.8 ||
+      r.lateralWarp < 0 ||
+      r.lateralWarp > 4 ||
+      r.warpWavelength < 32 ||
+      r.warpWavelength > 120 ||
+      r.facetRelief < 0 ||
+      r.facetRelief > 1.5 ||
+      r.facetScale < 0.05 ||
+      r.facetScale > 0.14
+    )
+      fail("ridge breakup ranges/refined support");
+  }
   if (
     terrace &&
     (!landform ||
@@ -490,12 +557,14 @@ export function validateWorldTerrainProfile(
     ...(landform ? { landform } : {}),
     ...(bay ? { bay } : {}),
     ...(terrace ? { terrace } : {}),
+    ...(ridgeBreakup ? { ridgeBreakup } : {}),
   });
   const reservedSculptAlgorithm = {
     "compact-duel-island-v2": "compact-island-sculpt-v1",
     "compact-duel-island-v3": "compact-island-sculpt-v2",
     "compact-duel-island-v4": "compact-island-sculpt-v3",
     "compact-duel-island-v5": "compact-island-sculpt-v4",
+    "compact-duel-island-v6": "compact-island-sculpt-v5",
   } as const;
   if (
     Object.prototype.hasOwnProperty.call(reservedSculptAlgorithm, profile.id) &&

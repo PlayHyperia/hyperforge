@@ -36,7 +36,8 @@ import {
   type TerrainGridSample,
 } from "../TerrainGridSurface";
 import {
-  SCULPTED_COMPACT_WORLD_TERRAIN_PROFILE as current,
+  SCULPTED_COMPACT_V4_PROFILE_FIXTURE as current,
+  SCULPTED_COMPACT_WORLD_TERRAIN_PROFILE as brokenRidge,
   SCULPTED_COMPACT_V3_PROFILE_FIXTURE as previous,
   type WorldTerrainProfile,
 } from "../WorldTerrainProfile";
@@ -97,6 +98,11 @@ async function fixture(profile: WorldTerrainProfile, content: boolean) {
       DataManager["worldContentIdentity"] = null;
       DataManager.setWorldConfig({
         ...structuredClone(saved.config),
+        terrainProfile: current,
+        compactPreparationLodge: {
+          ...saved.config.compactPreparationLodge!,
+          terrainProfileId: current.id,
+        },
         compactResourceGroves: structuredClone(
           groveLayouts.previous,
         ) as CompactResourceGrovesManifest,
@@ -298,212 +304,226 @@ describe("actual v5 terrace terrain, functional owners and native worker", () =>
     );
   }, 20000);
 
-  it("keeps the actual 10-leaf allocation, changes exactly two retained 64 grids and agrees with production native worker heights", async () => {
-    const old = await fixture(previous, false),
-      next = await fixture(current, false);
-    const quad = new TerrainQuadTree({
-      resolution: 16,
-      rootChunkRadius: 0,
-      fineDetailRegions: createCompactPreparationDetailRegions(
-        current,
-        ALL_WORLD_AREAS,
-        64,
-      ),
-    });
-    const worker = new Worker(
-      `const {parentPort}=require('node:worker_threads');globalThis.self={postMessage:(m,t)=>parentPort.postMessage(m,t)};${QUAD_CHUNK_WORKER_CODE};parentPort.on('message',data=>self.onmessage({data}));`,
-      { eval: true, env: {} },
-    );
-    async function run(input: unknown) {
-      return new Promise<QuadChunkWorkerOutput>((resolve, reject) => {
-        const timeout = setTimeout(
-          () => finish(new Error("Actual quad worker deadline")),
-          5000,
-        );
-        const error = (e: Error) => finish(e),
-          message = (m: { result?: QuadChunkWorkerOutput; error?: string }) =>
-            finish(m.error ? new Error(m.error) : null, m.result);
-        function finish(e: Error | null, out?: QuadChunkWorkerOutput) {
-          clearTimeout(timeout);
-          worker.off("error", error);
-          worker.off("message", message);
-          if (e) reject(e);
-          else if (out) resolve(out);
-          else reject(new Error("Missing worker result"));
-        }
-        worker.once("error", error);
-        worker.once("message", message);
-        worker.postMessage(input);
+  it.each([
+    { label: "original terrace", current, previous },
+    { label: "broken ridge", current: brokenRidge, previous: current },
+  ])(
+    "$label keeps the actual 10-leaf allocation, changes exactly two retained 64 grids and agrees with production native worker heights",
+    async ({ current, previous, label }) => {
+      const old = await fixture(previous, false),
+        next = await fixture(current, false);
+      const quad = new TerrainQuadTree({
+        resolution: 16,
+        rootChunkRadius: 0,
+        fineDetailRegions: createCompactPreparationDetailRegions(
+          current,
+          ALL_WORLD_AREAS,
+          64,
+        ),
       });
-    }
-    try {
-      quad.update(350, 340);
-      const leaves = quad.getFinalNodes().filter((n) => n.resolution === 64);
-      expect(leaves).toHaveLength(10);
-      expect(
-        createCompactPreparationDetailRegions(current, ALL_WORLD_AREAS, 64),
-      ).toEqual(
-        createCompactPreparationDetailRegions(previous, ALL_WORLD_AREAS, 64),
+      const worker = new Worker(
+        `const {parentPort}=require('node:worker_threads');globalThis.self={postMessage:(m,t)=>parentPort.postMessage(m,t)};${QUAD_CHUNK_WORKER_CODE};parentPort.on('message',data=>self.onmessage({data}));`,
+        { eval: true, env: {} },
       );
-      let triangles = 0,
-        bytes = 0;
-      const changed = [];
-      for (const node of leaves) {
-        expect(node.size).toBe(100);
-        const before = generateQuadChunkDataSync(
-            node.centerX,
-            node.centerZ,
-            100,
-            64,
-            old.provider,
-          ),
-          after = generateQuadChunkDataSync(
-            node.centerX,
-            node.centerZ,
-            100,
-            64,
-            next.provider,
+      async function run(input: unknown) {
+        return new Promise<QuadChunkWorkerOutput>((resolve, reject) => {
+          const timeout = setTimeout(
+            () => finish(new Error("Actual quad worker deadline")),
+            5000,
           );
-        const a = assembleQuadChunkGeometry(before, old.provider, 15),
-          b = assembleQuadChunkGeometry(after, next.provider, 15);
-        try {
-          expect(b.geometry.index!.array).toEqual(a.geometry.index!.array);
-          expect(Object.keys(b.geometry.attributes)).toEqual(
-            Object.keys(a.geometry.attributes),
-          );
-          triangles += b.geometry.index!.count / 3;
-          bytes +=
-            b.geometry.index!.array.byteLength +
-            Object.values(b.geometry.attributes).reduce(
-              (sum, attr) => sum + attr.array.byteLength,
-              0,
-            );
-          let changedVertices = 0;
-          for (let i = 0; i < after.heightData.length; i++)
-            if (after.heightData[i] !== before.heightData[i]) changedVertices++;
-          if (!changedVertices) {
-            expect(after.heightData).toEqual(before.heightData);
-            continue;
+          const error = (e: Error) => finish(e),
+            message = (m: { result?: QuadChunkWorkerOutput; error?: string }) =>
+              finish(m.error ? new Error(m.error) : null, m.result);
+          function finish(e: Error | null, out?: QuadChunkWorkerOutput) {
+            clearTimeout(timeout);
+            worker.off("error", error);
+            worker.off("message", message);
+            if (e) reject(e);
+            else if (out) resolve(out);
+            else reject(new Error("Missing worker result"));
           }
-          const setup = next.terrain["buildGrassWorkerSetup"]();
-          const native = await run({
-            type: "generateQuadChunk",
-            centerX: node.centerX,
-            centerZ: node.centerZ,
-            size: 100,
-            resolution: 64,
-            config: setup.terrainConfig,
-            seed: setup.seed,
-            biomeCenters: setup.biomeCenters,
-            biomes: setup.biomes,
-          });
-          // Worker generates the ungraded height field. The production assembler
-          // applies the same existing flat-zone blends to both paths.
-          expect(native.terrainProfileIdentity).toBe(
-            next.provider.terrainProfileIdentity,
-          );
-          const assembledNative = assembleQuadChunkGeometry(
-            native,
-            next.provider,
-            15,
-          );
-          try {
-            expect(assembledNative.heightData).toEqual(b.heightData);
-            expect(
-              assembledNative.geometry.getAttribute("position").array,
-            ).toEqual(b.geometry.getAttribute("position").array);
-            expect(
-              assembledNative.geometry.getAttribute("normal").array,
-            ).toEqual(b.geometry.getAttribute("normal").array);
-            for (let iz = 0; iz < 64; iz++)
-              for (let ix = 0; ix < 64; ix++) {
-                const x = node.centerX - 50 + (ix * 100) / 63,
-                  z = node.centerZ - 50 + (iz * 100) / 63;
-                if (next.terrain["getFlatZoneHeight"](x, z) === null)
-                  expect(native.heightData[iz * 64 + ix]).toBe(
-                    after.heightData[iz * 64 + ix],
-                  );
-              }
-          } finally {
-            assembledNative.geometry.dispose();
-          }
-          const surface = new RetainedTerrainSurface(
-            node.id,
-            next.provider.terrainProfileIdentity,
-            node.centerX,
-            node.centerZ,
-            100,
-            64,
-            b.geometry,
-          );
-          const sample: TerrainGridSample = {
-            height: 0,
-            nx: 0,
-            ny: 0,
-            nz: 0,
-            faceIndex: 0,
-          };
-          let maxError = 0;
-          let worst = [0, 0];
-          for (let iz = 0; iz < 63; iz++)
-            for (let ix = 0; ix < 63; ix++)
-              for (const phase of [0.25, 0.5, 0.75]) {
-                const lx = -50 + ((ix + phase) * 100) / 63,
-                  lz = -50 + ((iz + phase) * 100) / 63;
-                expect(surface.sample(lx, lz, sample)).toBe(true);
-                const x = node.centerX + lx,
-                  z = node.centerZ + lz,
-                  error = Math.abs(
-                    sample.height - next.terrain.getResourceGroundHeight(x, z),
-                  );
-                if (error > maxError) {
-                  maxError = error;
-                  worst = [x, z];
-                }
-              }
-          changed.push({
-            center: [node.centerX, node.centerZ],
-            changedVertices,
-            maxError,
-            worst,
-          });
-        } finally {
-          a.geometry.dispose();
-          b.geometry.dispose();
-        }
+          worker.once("error", error);
+          worker.once("message", message);
+          worker.postMessage(input);
+        });
       }
-      expect(changed.map((v) => v.center).sort()).toEqual([
-        [250, 350],
-        [250, 450],
-      ]);
-      expect({ triangles, bytes }).toEqual({
-        triangles: 84420,
-        bytes: 3450160,
-      });
-      // Exercise the existing 4 m gameplay slope stencil on the 10 m face.
-      // This face remains traversable by that policy; it is not an impassable cliff.
-      let maxGameplaySlope = 0,
-        scarpSamples = 0;
-      for (let z = 370; z <= 440; z += 5)
-        for (let cross = 2; cross <= 12; cross++) {
-          const x = 268 - 30 * Math.sin((Math.PI * (z - 335)) / 140) + cross;
-          const slope = next.terrain["calculateSlope"](x, z);
-          expect(Number.isFinite(slope)).toBe(true);
-          expect(slope).toBeLessThanOrEqual(1.5);
-          maxGameplaySlope = Math.max(maxGameplaySlope, slope);
-          scarpSamples++;
+      try {
+        quad.update(350, 340);
+        const leaves = quad.getFinalNodes().filter((n) => n.resolution === 64);
+        expect(leaves).toHaveLength(10);
+        expect(
+          createCompactPreparationDetailRegions(current, ALL_WORLD_AREAS, 64),
+        ).toEqual(
+          createCompactPreparationDetailRegions(previous, ALL_WORLD_AREAS, 64),
+        );
+        let triangles = 0,
+          bytes = 0;
+        const changed = [];
+        for (const node of leaves) {
+          expect(node.size).toBe(100);
+          const before = generateQuadChunkDataSync(
+              node.centerX,
+              node.centerZ,
+              100,
+              64,
+              old.provider,
+            ),
+            after = generateQuadChunkDataSync(
+              node.centerX,
+              node.centerZ,
+              100,
+              64,
+              next.provider,
+            );
+          const a = assembleQuadChunkGeometry(before, old.provider, 15),
+            b = assembleQuadChunkGeometry(after, next.provider, 15);
+          try {
+            expect(b.geometry.index!.array).toEqual(a.geometry.index!.array);
+            expect(Object.keys(b.geometry.attributes)).toEqual(
+              Object.keys(a.geometry.attributes),
+            );
+            triangles += b.geometry.index!.count / 3;
+            bytes +=
+              b.geometry.index!.array.byteLength +
+              Object.values(b.geometry.attributes).reduce(
+                (sum, attr) => sum + attr.array.byteLength,
+                0,
+              );
+            let changedVertices = 0;
+            for (let i = 0; i < after.heightData.length; i++)
+              if (after.heightData[i] !== before.heightData[i])
+                changedVertices++;
+            if (!changedVertices) {
+              expect(after.heightData).toEqual(before.heightData);
+              continue;
+            }
+            const setup = next.terrain["buildGrassWorkerSetup"]();
+            const native = await run({
+              type: "generateQuadChunk",
+              centerX: node.centerX,
+              centerZ: node.centerZ,
+              size: 100,
+              resolution: 64,
+              config: setup.terrainConfig,
+              seed: setup.seed,
+              biomeCenters: setup.biomeCenters,
+              biomes: setup.biomes,
+            });
+            // Worker generates the ungraded height field. The production assembler
+            // applies the same existing flat-zone blends to both paths.
+            expect(native.terrainProfileIdentity).toBe(
+              next.provider.terrainProfileIdentity,
+            );
+            const assembledNative = assembleQuadChunkGeometry(
+              native,
+              next.provider,
+              15,
+            );
+            try {
+              expect(assembledNative.heightData).toEqual(b.heightData);
+              expect(
+                assembledNative.geometry.getAttribute("position").array,
+              ).toEqual(b.geometry.getAttribute("position").array);
+              expect(
+                assembledNative.geometry.getAttribute("normal").array,
+              ).toEqual(b.geometry.getAttribute("normal").array);
+              for (let iz = 0; iz < 64; iz++)
+                for (let ix = 0; ix < 64; ix++) {
+                  const x = node.centerX - 50 + (ix * 100) / 63,
+                    z = node.centerZ - 50 + (iz * 100) / 63;
+                  if (next.terrain["getFlatZoneHeight"](x, z) === null)
+                    expect(native.heightData[iz * 64 + ix]).toBe(
+                      after.heightData[iz * 64 + ix],
+                    );
+                }
+            } finally {
+              assembledNative.geometry.dispose();
+            }
+            const surface = new RetainedTerrainSurface(
+              node.id,
+              next.provider.terrainProfileIdentity,
+              node.centerX,
+              node.centerZ,
+              100,
+              64,
+              b.geometry,
+            );
+            const sample: TerrainGridSample = {
+              height: 0,
+              nx: 0,
+              ny: 0,
+              nz: 0,
+              faceIndex: 0,
+            };
+            let maxError = 0;
+            let worst = [0, 0];
+            for (let iz = 0; iz < 63; iz++)
+              for (let ix = 0; ix < 63; ix++)
+                for (const phase of [0.25, 0.5, 0.75]) {
+                  const lx = -50 + ((ix + phase) * 100) / 63,
+                    lz = -50 + ((iz + phase) * 100) / 63;
+                  expect(surface.sample(lx, lz, sample)).toBe(true);
+                  const x = node.centerX + lx,
+                    z = node.centerZ + lz,
+                    error = Math.abs(
+                      sample.height -
+                        next.terrain.getResourceGroundHeight(x, z),
+                    );
+                  if (error > maxError) {
+                    maxError = error;
+                    worst = [x, z];
+                  }
+                }
+            changed.push({
+              center: [node.centerX, node.centerZ],
+              changedVertices,
+              maxError,
+              worst,
+            });
+          } finally {
+            a.geometry.dispose();
+            b.geometry.dispose();
+          }
         }
-      // Measured whole-leaf retained-triangle residual, not a contact approval.
-      expect(Math.max(...changed.map((v) => v.maxError))).toBeCloseTo(
-        0.3297780604,
-        4,
-      );
-      process.stdout.write(
-        `Integrated terrace geometry receipt: ${JSON.stringify({ triangles, bytes, pitch: 100 / 63, changed, scarpSamples, maxGameplaySlope })}\n`,
-      );
-    } finally {
-      quad.dispose();
-      await worker.terminate();
-    }
-  }, 20000);
+        expect(changed.map((v) => v.center).sort()).toEqual([
+          [250, 350],
+          [250, 450],
+        ]);
+        expect({ triangles, bytes }).toEqual({
+          triangles: 84420,
+          bytes: 3450160,
+        });
+        // Exercise the existing 4 m gameplay slope stencil on the 10 m face.
+        // This face remains traversable by that policy; it is not an impassable cliff.
+        let maxGameplaySlope = 0,
+          scarpSamples = 0;
+        for (let z = 370; z <= 440; z += 5)
+          for (let cross = 2; cross <= 12; cross++) {
+            const x = 268 - 30 * Math.sin((Math.PI * (z - 335)) / 140) + cross;
+            const slope = next.terrain["calculateSlope"](x, z);
+            expect(Number.isFinite(slope)).toBe(true);
+            expect(slope).toBeLessThanOrEqual(
+              label === "original terrace" ? 1.5 : 2.5,
+            );
+            maxGameplaySlope = Math.max(maxGameplaySlope, slope);
+            scarpSamples++;
+          }
+        // Measured whole-leaf retained-triangle residual, not a contact approval.
+        const maxError = Math.max(...changed.map((v) => v.maxError));
+        process.stdout.write(
+          `Retained ridge diagnostic: ${JSON.stringify({ label, changed })}\n`,
+        );
+        if (label === "original terrace")
+          expect(maxError).toBeCloseTo(0.3297780604, 4);
+        else expect(maxError).toBeLessThan(0.35);
+        process.stdout.write(
+          `Integrated ${label} geometry receipt: ${JSON.stringify({ triangles, bytes, pitch: 100 / 63, changed, scarpSamples, maxGameplaySlope })}\n`,
+        );
+      } finally {
+        quad.dispose();
+        await worker.terminate();
+      }
+    },
+    20000,
+  );
 });

@@ -4,6 +4,7 @@ import {
   COMPACT_LANDFORM_PARAMETERS,
   COMPACT_BAY_PARAMETERS,
   COMPACT_TERRACE_PARAMETERS,
+  COMPACT_RIDGE_BREAKUP_PARAMETERS,
   resolveWorldTerrainProfile,
   worldTerrainProfileIdentity,
   type WorldTerrainProfile,
@@ -89,8 +90,9 @@ function assertTerrainWorkerInput(input) {
   var sculpt2 = p && p.algorithm === "compact-island-sculpt-v2";
   var sculpt3 = p && p.algorithm === "compact-island-sculpt-v3";
   var sculpt4 = p && p.algorithm === "compact-island-sculpt-v4";
-  keys(p, ${JSON.stringify(Object.keys(shape))}.concat(sculpt2 || sculpt3 || sculpt4 ? ["landform"] : []).concat(sculpt3 || sculpt4 ? ["bay"] : []).concat(sculpt4 ? ["terrace"] : []));
-  if (sculpt2 || sculpt3 || sculpt4) {
+  var sculpt5 = p && p.algorithm === "compact-island-sculpt-v5";
+  keys(p, ${JSON.stringify(Object.keys(shape))}.concat(sculpt2 || sculpt3 || sculpt4 || sculpt5 ? ["landform"] : []).concat(sculpt3 || sculpt4 || sculpt5 ? ["bay"] : []).concat(sculpt4 || sculpt5 ? ["terrace"] : []).concat(sculpt5 ? ["ridgeBreakup"] : []));
+  if (sculpt2 || sculpt3 || sculpt4 || sculpt5) {
     keys(p.landform, ${JSON.stringify(Object.keys(COMPACT_LANDFORM_PARAMETERS))});
     if (!Object.values(p.landform).every(Number.isFinite)) fail();
     var l = p.landform;
@@ -116,7 +118,7 @@ function assertTerrainWorkerInput(input) {
   if (!Object.values(p.${group}).every(Number.isFinite)) fail();`,
     )
     .join("\n")}
-  if (sculpt3 || sculpt4) {
+  if (sculpt3 || sculpt4 || sculpt5) {
     keys(p.bay, ${JSON.stringify(Object.keys(COMPACT_BAY_PARAMETERS))});
     if (!Object.values(p.bay).every(Number.isFinite)) fail();
     var bay = p.bay;
@@ -127,7 +129,7 @@ function assertTerrainWorkerInput(input) {
         Math.max(bay.leftBankScale,bay.rightBankScale)*l.inletBankTransition >= bay.innerHalfWidth ||
         l.inletTipDistance+l.inletTipTransition >= 165*(1+p.island.maxCoastVariation)) fail();
   }
-  if (sculpt4) {
+  if (sculpt4 || sculpt5) {
     keys(p.terrace, ${JSON.stringify(Object.keys(COMPACT_TERRACE_PARAMETERS))});
     if (!Object.values(p.terrace).every(Number.isFinite)) fail();
     var t = p.terrace;
@@ -144,7 +146,22 @@ function assertTerrainWorkerInput(input) {
         t.eastPreservationEnd-t.eastPreservationStart < 3 ||
         t.eastPreservationEnd > l.ridgeBaseX+l.ridgeEastWidth/2) fail();
   }
-  if (p.schemaVersion !== 1 || (p.algorithm !== "terrain-height-params-v1" && p.algorithm !== "compact-island-sculpt-v1" && !sculpt2 && !sculpt3 && !sculpt4) ||
+  if (sculpt5) {
+    keys(p.ridgeBreakup, ${JSON.stringify(Object.keys(COMPACT_RIDGE_BREAKUP_PARAMETERS))});
+    if (!Object.values(p.ridgeBreakup).every(Number.isFinite)) fail();
+    var r = p.ridgeBreakup;
+    if (r.northGapHalfWidth < 16 || r.southGapHalfWidth < 16 ||
+        r.northGapZ-r.northGapHalfWidth < t.startZ+6 ||
+        r.southGapZ+r.southGapHalfWidth > t.endZ-6 ||
+        r.northGapZ+r.northGapHalfWidth >= r.southGapZ-r.southGapHalfWidth ||
+        r.northGapDepth < 0 || r.northGapDepth > 0.8 ||
+        r.southGapDepth < 0 || r.southGapDepth > 0.8 ||
+        r.lateralWarp < 0 || r.lateralWarp > 4 ||
+        r.warpWavelength < 32 || r.warpWavelength > 120 ||
+        r.facetRelief < 0 || r.facetRelief > 1.5 ||
+        r.facetScale < 0.05 || r.facetScale > 0.14) fail();
+  }
+  if (p.schemaVersion !== 1 || (p.algorithm !== "terrain-height-params-v1" && p.algorithm !== "compact-island-sculpt-v1" && !sculpt2 && !sculpt3 && !sculpt4 && !sculpt5) ||
       p.boundsMeaning !== "nominal-generation-envelope" || typeof p.id !== "string" ||
       !/^[a-z][a-z0-9-]{0,63}$/.test(p.id) ||
       p.kind !== "compact-candidate" || p.id === "large-world-v1" ||
@@ -152,7 +169,8 @@ function assertTerrainWorkerInput(input) {
   if ((p.id === "compact-duel-island-v2" && p.algorithm !== "compact-island-sculpt-v1") ||
       (p.id === "compact-duel-island-v3" && !sculpt2) ||
       (p.id === "compact-duel-island-v4" && !sculpt3) ||
-      (p.id === "compact-duel-island-v5" && !sculpt4)) fail();
+      (p.id === "compact-duel-island-v5" && !sculpt4) ||
+      (p.id === "compact-duel-island-v6" && !sculpt5)) fail();
   var b = p.bounds, i = p.island, h = p.height, w = p.water, s = p.shoreline;
   if (!Number.isFinite(p.terrainTileSize) || p.terrainTileSize <= 0 ||
       b.minX >= b.maxX || b.minZ >= b.maxZ ||

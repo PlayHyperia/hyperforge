@@ -650,9 +650,9 @@ describe("five surface-only service clearings, actual CPU owners (not native vis
           input.roadSegments.length,
         ]);
       }
-      // Active v5 terrace changes western sampling; before/after clearing buffers
+      // Active v6 broken ridge changes western sampling; before/after clearing buffers
       // above remain exactly equal, independently of this landform successor.
-      expect(receipts.map((r) => r[3])).toEqual([271, 520, 139, 532, 493, 343]);
+      expect(receipts.map((r) => r[3])).toEqual([271, 495, 139, 532, 493, 343]);
       process.stdout.write(
         "Service clearing actual native-worker before/after (not GPU cost) " +
           JSON.stringify(receipts) +

@@ -1,5 +1,38 @@
 # Duel Arena, Streaming, and Hyperbet Launch Checklist
 
+## Broken western ridge and composition direction — 2026-09-12
+
+- [x] Establish a clearly labeled concept reference for a coherent compact island:
+      broken rocky knolls, one arena, a working smithy/lodge courtyard and layered
+      planting around real choppable trees. Reference is not a game capture or approval.
+- [x] Implement the shared v6 terrain identity / sculpt-v5 broken ridge, two
+      saddles and broader relief; forward the exact descriptor to CPU/native workers,
+      resource groves, lodge and content admission. Preserve the coastline, service
+      clearings, existing tree positions and prior numeric fixtures.
+- [x] Retain ten refined 64-grid leaves / 84,420 triangles / 3,450,160 geometry
+      bytes; only two western leaves change. Correct the initial 0.761 m sampled
+      ground mismatch to 0.318 m without increasing mesh resolution. These are CPU
+      geometry measurements, not ground-contact or GPU-cost approval.
+- [x] Pass 1,013 shared checks across 78 files, 33 focused capture-harness checks,
+      shared/client/server type checks and builds, and scoped lint/format checks.
+      Keep historic v5 grass counts; current v6 worker census is 2,273 clumps in the
+      six tested leaves, with unchanged density/spacing and CPU/worker parity.
+- [x] Complete and independently inspect native75: 24 PNGs, 624 source pins,
+      555 archived files, 18 direct native74 camera/daylight matches, both actual
+      48-tree censuses and compiled grass/HDR bindings. No page/GPU/cleanup errors;
+      owned Chrome/processes/ports close. Overall remains false for the existing
+      five cow-model and fourteen dagger-fit errors. Broken silhouette is visible;
+      smooth slopes, uniform ground and sparse service composition still miss the bar.
+      No presented FPS, GPU cost, motion/contact, AAA or launch approval.
+- [ ] Continue coherent architecture, rock assets, planting, material transitions
+      and arena/platform scale. Qualify presented frames, GPU cost, movement/contact,
+      agent population, stream load and long-duration stability on target hardware.
+
+Evidence/design: `asset-studio/compact-island-composition-v1/ART_DIRECTION.md`,
+`ridge-shared-tests07.json`, `ridge-focused-tests06.json`, and `before75-root.json`.
+The broad AAA-quality goal remains open; this is one landform slice. Detailed
+evidence and honest limits: `docs/compact-ridge-composition-20260912.md`.
+
 ## Scattering atmosphere and HDR horizon — 2026-09-12
 
 - [x] Implement one clear-sky scattering model for the visible sky, starless

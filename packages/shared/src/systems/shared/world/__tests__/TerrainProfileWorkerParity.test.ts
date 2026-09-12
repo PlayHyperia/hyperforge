@@ -37,6 +37,7 @@ import {
   SCULPTED_COMPACT_V1_PROFILE_FIXTURE as previousSculpt,
   SCULPTED_COMPACT_V2_PROFILE_FIXTURE as rectangularSculpt,
   SCULPTED_COMPACT_V3_PROFILE_FIXTURE as roundedSculpt,
+  SCULPTED_COMPACT_V4_PROFILE_FIXTURE as terracedSculpt,
   LEGACY_TERRAIN_PROFILE_FIXTURE as legacy,
   validateWorldTerrainProfile,
   worldTerrainProfileIdentity,
@@ -173,6 +174,7 @@ describe("actual compact terrain height pipeline", () => {
       previousSculpt,
       rectangularSculpt,
       roundedSculpt,
+      terracedSculpt,
       ...[0, 41, 0xffffffff].map((seed) =>
         validateWorldTerrainProfile({ ...sculpted, seed }),
       ),
@@ -216,6 +218,7 @@ describe("actual compact terrain height pipeline", () => {
         previousSculpt,
         rectangularSculpt,
         roundedSculpt,
+        terracedSculpt,
         ...[0, 41, 0xffffffff].map((seed) =>
           validateWorldTerrainProfile({ ...sculpted, seed }),
         ),
@@ -256,7 +259,12 @@ describe("actual compact terrain height pipeline", () => {
           const input = request(profile, biome);
           const reference = cpu(profile, { [biome]: 1 });
           const firstTileX = Math.floor(profile.island.centerX / 100);
-          for (const tileX of [firstTileX, firstTileX + 1, firstTileX + 2]) {
+          for (const tileX of [
+            firstTileX - 1,
+            firstTileX,
+            firstTileX + 1,
+            firstTileX + 2,
+          ]) {
             const tileResult = await tile.execute<TerrainWorkerOutput>({
               ...input,
               type: "generateHeightmap",

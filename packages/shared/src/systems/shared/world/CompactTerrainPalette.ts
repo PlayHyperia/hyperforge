@@ -133,7 +133,8 @@ export function createCompactTerrainColorOperations() {
         value !== "compact-pbr-v1" ||
         (algorithm !== "compact-island-sculpt-v2" &&
           algorithm !== "compact-island-sculpt-v3" &&
-          algorithm !== "compact-island-sculpt-v4")
+          algorithm !== "compact-island-sculpt-v4" &&
+          algorithm !== "compact-island-sculpt-v5")
       ) {
         throw new Error("Invalid compact grass surface eligibility");
       }
@@ -143,7 +144,8 @@ export function createCompactTerrainColorOperations() {
       if (
         profile.algorithm !== "compact-island-sculpt-v2" &&
         profile.algorithm !== "compact-island-sculpt-v3" &&
-        profile.algorithm !== "compact-island-sculpt-v4"
+        profile.algorithm !== "compact-island-sculpt-v4" &&
+        profile.algorithm !== "compact-island-sculpt-v5"
       )
         return null;
       const ridge = profile.landform;

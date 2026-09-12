@@ -36,7 +36,8 @@ export function createCompactPreparationDetailRegions(
   if (
     profile.algorithm !== "compact-island-sculpt-v2" &&
     profile.algorithm !== "compact-island-sculpt-v3" &&
-    profile.algorithm !== "compact-island-sculpt-v4"
+    profile.algorithm !== "compact-island-sculpt-v4" &&
+    profile.algorithm !== "compact-island-sculpt-v5"
   )
     return preparation;
   const shape = profile.landform;

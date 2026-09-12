@@ -1370,12 +1370,15 @@ export type CompactResourceGrovesManifest = CompactResourceGroveRegions &
         readonly schemaVersion: 1;
         readonly layoutId: "compact-functional-groves-v1";
         readonly terrainProfileId:
-          "compact-duel-island-v4" | "compact-duel-island-v5";
+          | "compact-duel-island-v4"
+          | "compact-duel-island-v5"
+          | "compact-duel-island-v6";
       }
     | {
         readonly schemaVersion: 2;
         readonly layoutId: "compact-functional-groves-v2";
-        readonly terrainProfileId: "compact-duel-island-v5";
+        readonly terrainProfileId:
+          "compact-duel-island-v5" | "compact-duel-island-v6";
       }
   );
 
@@ -1386,7 +1389,9 @@ export interface CompactPreparationLodgeManifest {
   readonly schemaVersion: 1;
   readonly layoutId: "compact-preparation-lodge-v1";
   readonly terrainProfileId:
-    "compact-duel-island-v4" | "compact-duel-island-v5";
+    | "compact-duel-island-v4"
+    | "compact-duel-island-v5"
+    | "compact-duel-island-v6";
   readonly position: Readonly<{ x: 398; z: 370 }>;
   readonly rotation: 0;
   readonly layoutSeed: "compact-bank-lodge01:360,318:8x8:south";
