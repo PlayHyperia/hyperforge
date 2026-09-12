@@ -11,6 +11,7 @@ import {
 import type { GrassTerrainSurfaceSnapshot } from "../../../../utils/workers/GrassTerrainSurfaceSnapshot";
 import {
   groundGrassBlades,
+  GrassBladeGroundingJob,
   GRASS_BLADE_GROUNDING_LIMITS,
   type GrassBladeGroundingRequest,
 } from "../GrassBladeGrounding";
@@ -193,6 +194,100 @@ function one(data: GrassAnchorData, index: number): GrassAnchorData {
 }
 
 describe("CPU per-blade grounding prototype (no renderer/GPU)", () => {
+  it.each([0, 1, 2] as const)(
+    "resumes the LOD%s production core at different slice boundaries without changing arrays",
+    (lod) => {
+      const f = analyticOwner();
+      try {
+        const surface = f.makeSurface(
+          1,
+          0,
+          0,
+          64,
+          (x, z) => 20 + 0.07 * x - 0.05 * z,
+        );
+        const request = f.request(
+          surface,
+          f.dataAt(surface, [
+            [0, 0],
+            [4, 3, 1.2],
+            [-3, 5, 4.7],
+          ]),
+          lod,
+        );
+        const expected = groundGrassBlades(request);
+        const before = structuredClone(request.data);
+        for (const size of [1, 7, 64, 1024, 8192]) {
+          const job = new GrassBladeGroundingJob(request, () =>
+            surface.matchesGeometry(f.geometries[0]),
+          );
+          while (job.state.status === "running") {
+            expect(job.advance(size)).toBe(job.state);
+            expect(job.lastSliceOperations).toBeLessThanOrEqual(size);
+          }
+          expect(job.state.status).toBe("ready");
+          if (job.state.status !== "ready")
+            throw Error(JSON.stringify(job.state));
+          const { elapsedMs: _expectedTime, ...expectedReceipt } =
+            expected.receipt;
+          const { elapsedMs: _actualTime, ...receipt } =
+            job.state.result.receipt;
+          expect({ ...job.state.result, receipt }).toEqual({
+            ...expected,
+            receipt: expectedReceipt,
+          });
+          expect(request.data).toEqual(before);
+          const terminal = job.state,
+            operations = job.operations;
+          expect(job.advance(1)).toBe(terminal);
+          expect(job.operations).toBe(operations);
+        }
+      } finally {
+        f.close();
+      }
+    },
+  );
+
+  it("cancels a real retained geometry replacement before more work and keeps missing support/budget failure terminal", () => {
+    const f = analyticOwner();
+    try {
+      const surface = f.makeSurface(),
+        geometry = f.geometries[0],
+        request = f.request(surface);
+      const job = new GrassBladeGroundingJob(request, () =>
+        surface.matchesGeometry(geometry),
+      );
+      expect(job.advance(4).status).toBe("running");
+      geometry.setAttribute(
+        "position",
+        geometry.getAttribute("position").clone(),
+      );
+      const before = job.operations;
+      expect(job.advance(4)).toEqual({
+        status: "cancelled",
+        reason: "invalidated",
+      });
+      expect(job.operations).toBe(before);
+      const fresh = f.makeSurface(2);
+      for (const [input, status] of [
+        [f.request(fresh, f.dataAt(fresh, [[49.8, 0]])), "waiting_support"],
+        [{ ...f.request(fresh), workBudget: 1 }, "failed_budget"],
+      ] as const) {
+        const next = new GrassBladeGroundingJob(input, () =>
+          fresh.matchesGeometry(f.geometries[1]),
+        );
+        while (next.state.status === "running") next.advance(7);
+        expect(next.state.status).toBe(status);
+        const terminal = next.state,
+          units = next.operations;
+        expect(next.advance()).toBe(terminal);
+        expect(next.operations).toBe(units);
+      }
+    } finally {
+      f.close();
+    }
+  });
+
   it.each([0, 1, 2] as const)(
     "uses original LOD%s geometry and keeps every base anchored through full/zero fade",
     (lod) => {

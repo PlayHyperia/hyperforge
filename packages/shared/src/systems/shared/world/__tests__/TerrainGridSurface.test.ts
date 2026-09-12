@@ -3,6 +3,8 @@ import THREE from "../../../../extras/three/three";
 import {
   RetainedTerrainSurface,
   type TerrainGridSample,
+  type TerrainGridTriangle,
+  type TerrainGridBounds,
 } from "../TerrainGridSurface";
 import {
   projectGrassAnchors,
@@ -19,6 +21,126 @@ const sample = (): TerrainGridSample => ({
 });
 
 describe("retained Float32 terrain triangle contact", () => {
+  it.each([
+    [2, 100],
+    [16, 100],
+    [64, 100],
+    [256, 0.03125],
+  ])(
+    "resumes allocation-free original triangle traversal at every Float32 boundary r=%s size=%s",
+    (resolution, size) => {
+      const geometry = gridGeometry(
+        size,
+        resolution,
+        (x, z) => 20 + Math.sin(x) + Math.cos(z),
+      );
+      const surface = new RetainedTerrainSurface(
+        1,
+        "cursor",
+        350,
+        250,
+        size,
+        resolution,
+        geometry,
+      );
+      const p = geometry.getAttribute("position"),
+        index = geometry.getIndex()!;
+      try {
+        const half = size / 2,
+          m = Math.floor(resolution / 2);
+        const x = p.getX(m),
+          z = p.getZ(m * resolution);
+        const boxes: TerrainGridBounds[] = [
+          { minX: -half, maxX: half, minZ: -half, maxZ: half },
+          { minX: x, maxX: x, minZ: z, maxZ: z },
+          {
+            minX: x - size * 1e-9,
+            maxX: x - size * 1e-9,
+            minZ: -half,
+            maxZ: half,
+          },
+          {
+            minX: x + size * 1e-9,
+            maxX: x + size * 1e-9,
+            minZ: -half,
+            maxZ: half,
+          },
+          { minX: -half, maxX: -half, minZ: -half, maxZ: -half },
+          { minX: half, maxX: half, minZ: half, maxZ: half },
+          { minX: -size, maxX: size, minZ: -size, maxZ: size },
+          { minX: -size, maxX: -half - size / 100, minZ: -half, maxZ: half },
+        ];
+        for (const bounds of boxes) {
+          const expected: TerrainGridTriangle[] = [];
+          const receipt = surface.visitTrianglesInBounds(
+            bounds,
+            (...triangle) => expected.push(triangle),
+            1_000_000,
+          );
+          expect(receipt.exhausted).toBe(false);
+          const cursor = surface.createTriangleCursor(bounds),
+            out: TerrainGridTriangle = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+          let count = 0;
+          while (cursor.next(out)) {
+            expect(out).toEqual(expected[count++]);
+            for (let corner = 0; corner < 3; corner++) {
+              const vertex = index.getX(out[9] * 3 + corner);
+              expect(out[corner * 3]).toBe(p.getX(vertex));
+              expect(out[corner * 3 + 1]).toBe(p.getY(vertex));
+              expect(out[corner * 3 + 2]).toBe(p.getZ(vertex));
+            }
+          }
+          expect(count).toBe(receipt.visited);
+          const last = [...out];
+          expect(cursor.next(out)).toBe(false);
+          expect(out).toEqual(last);
+        }
+        expect(surface.matchesGeometry(geometry)).toBe(true);
+      } finally {
+        geometry.dispose();
+      }
+    },
+  );
+
+  it("keeps independent paused cursors and rejects invalid bounds without modifying output/geometry", () => {
+    const geometry = gridGeometry(100, 16, () => 20);
+    const surface = new RetainedTerrainSurface(
+      1,
+      "cursor",
+      0,
+      0,
+      100,
+      16,
+      geometry,
+    );
+    try {
+      const bounds = { minX: -50, maxX: 50, minZ: -50, maxZ: 50 };
+      const a = surface.createTriangleCursor(bounds),
+        b = surface.createTriangleCursor(bounds);
+      const out: TerrainGridTriangle = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        before = geometry.getAttribute("position").array.slice();
+      for (let face = 0; face < 27; face++) {
+        expect(a.next(out)).toBe(true);
+        expect(out[9]).toBe(face);
+      }
+      expect(b.next(out)).toBe(true);
+      expect(out[9]).toBe(0);
+      expect(a.next(out)).toBe(true);
+      expect(out[9]).toBe(27);
+      expect(geometry.getAttribute("position").array).toEqual(before);
+      for (const invalid of [
+        { ...bounds, minX: NaN },
+        { ...bounds, minZ: Infinity },
+        { ...bounds, minX: 51 },
+      ])
+        expect(() => surface.createTriangleCursor(invalid)).toThrow(
+          "Invalid retained",
+        );
+    } finally {
+      geometry.dispose();
+    }
+  });
+
   it.each([4, 16, 64])(
     "matches real mesh ray hits across both triangle halves, vertices and boundaries at resolution %s",
     (resolution) => {

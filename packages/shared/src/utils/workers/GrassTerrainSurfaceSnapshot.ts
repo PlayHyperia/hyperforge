@@ -45,6 +45,10 @@ export type GrassTerrainSurfaceOperations = {
   }>;
   /** Validate once at each request boundary, not during per-blade sampling. */
   validateSnapshot(value: unknown): GrassTerrainSurfaceSnapshot;
+  /** Same validation algebra with explicit bounded continuation points. */
+  validateSnapshotSteps(
+    value: unknown,
+  ): Generator<string, GrassTerrainSurfaceSnapshot, void>;
   /** Validate and copy only wire fields; queued input never aliases its source. */
   cloneSnapshot(value: unknown): GrassTerrainSurfaceSnapshot;
   /** Snapshot must already be validated; validates index bounds before loops. */
@@ -135,7 +139,9 @@ export function createGrassTerrainSurfaceOperations(): GrassTerrainSurfaceOperat
       }
       return { x, z };
     },
-    validateMask(zone: Record<string, unknown>): number {
+    *validateMask(
+      zone: Record<string, unknown>,
+    ): Generator<string, number, void> {
       const mask = zone.tileMask;
       const tiles = zone.tileMaskTiles;
       if (mask !== undefined && !(mask instanceof Set)) {
@@ -154,6 +160,7 @@ export function createGrassTerrainSurfaceOperations(): GrassTerrainSurfaceOperat
       let maxZ = -Infinity;
       if (mask) {
         for (const key of mask) {
+          yield "snapshot_mask";
           const tile = helpers.tileKey(key);
           minX = Math.min(minX, tile.x);
           maxX = Math.max(maxX, tile.x);
@@ -167,6 +174,7 @@ export function createGrassTerrainSurfaceOperations(): GrassTerrainSurfaceOperat
         }
         const seen = new Set<string>();
         for (const value of tiles) {
+          yield "snapshot_mask";
           const tile = helpers.record(value, "mask tile");
           const x = helpers.tileCoordinate(tile.x, "tile X");
           const z = helpers.tileCoordinate(tile.z, "tile Z");
@@ -200,7 +208,10 @@ export function createGrassTerrainSurfaceOperations(): GrassTerrainSurfaceOperat
       }
       return count;
     },
-    validateZone(value: unknown): { id: string; maskTiles: number } {
+    *validateZone(
+      value: unknown,
+    ): Generator<string, { id: string; maskTiles: number }, void> {
+      yield "snapshot_zone";
       const zone = helpers.record(value, "zone");
       const id = helpers.identifier(zone.id, "zone ID");
       const x = helpers.finite(zone.centerX, "zone centerX");
@@ -266,13 +277,20 @@ export function createGrassTerrainSurfaceOperations(): GrassTerrainSurfaceOperat
           );
         }
       }
-      return { id, maskTiles: helpers.validateMask(zone) };
+      return { id, maskTiles: yield* helpers.validateMask(zone) };
     },
   };
 
   const operations: GrassTerrainSurfaceOperations = {
     limits,
     validateSnapshot(input) {
+      const steps = operations.validateSnapshotSteps(input);
+      let step = steps.next();
+      while (!step.done) step = steps.next();
+      return step.value;
+    },
+    *validateSnapshotSteps(input) {
+      yield "snapshot_header";
       const snapshot = helpers.record(input, "snapshot");
       if (snapshot.schemaVersion !== 1)
         return helpers.fail("schemaVersion must be 1");
@@ -285,7 +303,7 @@ export function createGrassTerrainSurfaceOperations(): GrassTerrainSurfaceOperat
       const zoneIds = new Set<string>();
       let maskTiles = 0;
       for (const value of snapshot.zones) {
-        const zone = helpers.validateZone(value);
+        const zone = yield* helpers.validateZone(value);
         if (zoneIds.has(zone.id)) return helpers.fail("duplicate zone ID");
         zoneIds.add(zone.id);
         maskTiles += zone.maskTiles;
@@ -300,6 +318,7 @@ export function createGrassTerrainSurfaceOperations(): GrassTerrainSurfaceOperat
       }
       const floorIds = new Set<string>();
       for (const value of snapshot.arenaFloorIds) {
+        yield "snapshot_floor";
         const id = helpers.identifier(value, "arena floor ID");
         if (floorIds.has(id) || !zoneIds.has(id)) {
           return helpers.fail("arena floor IDs must be unique zone subsets");
@@ -312,6 +331,7 @@ export function createGrassTerrainSurfaceOperations(): GrassTerrainSurfaceOperat
         return helpers.fail("arena floor IDs require a finite grade height");
       }
       for (const value of snapshot.zones) {
+        yield "snapshot_floor";
         const zone = helpers.record(value, "zone");
         if (
           floorIds.has(String(zone.id)) &&
@@ -328,6 +348,7 @@ export function createGrassTerrainSurfaceOperations(): GrassTerrainSurfaceOperat
       }
       const waterIds = new Set<string>();
       for (const value of snapshot.waterBodies) {
+        yield "snapshot_water";
         const water = helpers.record(value, "water body");
         const id = helpers.identifier(water.id, "water body ID");
         if (waterIds.has(id)) return helpers.fail("duplicate water body ID");

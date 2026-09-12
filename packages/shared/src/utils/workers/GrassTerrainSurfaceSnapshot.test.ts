@@ -121,6 +121,68 @@ function actualWorker(
 }
 
 describe("detached grass terrain surface requests", () => {
+  it("resumes the maximum admitted mask without skipping validation or mutating input", () => {
+    const tileMaskTiles = Array.from(
+      { length: operations.limits.maxMaskTiles },
+      (_, x) => ({ x, z: 0 }),
+    );
+    const input = snapshot([
+      zone({
+        tileMask: new Set(tileMaskTiles.map(({ x, z }) => `${x},${z}`)),
+        tileMaskTiles,
+        tileMaskBounds: {
+          minX: 0,
+          maxX: tileMaskTiles.length - 1,
+          minZ: 0,
+          maxZ: 0,
+        },
+      }),
+    ]);
+    const before = structuredClone(input);
+    const steps = operations.validateSnapshotSteps(input);
+    let masks = 0,
+      advances = 0;
+    let step = steps.next();
+    while (!step.done) {
+      advances++;
+      if (step.value === "snapshot_mask") masks++;
+      step = steps.next();
+    }
+    expect(step.value).toBe(input);
+    expect(masks).toBe(tileMaskTiles.length * 2);
+    expect(advances).toBe(tileMaskTiles.length * 2 + 3);
+    expect(operations.validateSnapshot(input)).toBe(input);
+    expect(input).toEqual(before);
+  });
+
+  it("does not publish a snapshot before validating a late invalid mask entry", () => {
+    const input = snapshot([masked()]);
+    input.zones[0].tileMaskTiles![2].x = 10;
+    const steps = operations.validateSnapshotSteps(input);
+    let masks = 0;
+    expect(() => {
+      for (const phase of steps) if (phase === "snapshot_mask") masks++;
+    }).toThrow(/exactly match unique mask keys/);
+    expect(masks).toBe(6);
+    expect(() => operations.validateSnapshot(input)).toThrow(
+      /exactly match unique mask keys/,
+    );
+    expect(steps.next()).toEqual({ done: true, value: undefined });
+  });
+
+  it("releases an interrupted snapshot traversal without changing the borrowed mask", () => {
+    const input = snapshot([masked()]);
+    const before = structuredClone(input);
+    const steps = operations.validateSnapshotSteps(input);
+    expect(steps.next().value).toBe("snapshot_header");
+    expect(steps.next().value).toBe("snapshot_zone");
+    expect(steps.next().value).toBe("snapshot_mask");
+    steps.return(undefined as never);
+    expect(steps.next()).toEqual({ done: true, value: undefined });
+    expect(input).toEqual(before);
+    expect(operations.validateSnapshot(input)).toBe(input);
+  });
+
   it("deep-clones wire fields and preserves radial, masked and false-exclusion geometry", () => {
     const radial = zone({
       id: "pond",

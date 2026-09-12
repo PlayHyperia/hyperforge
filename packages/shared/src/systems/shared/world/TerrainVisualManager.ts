@@ -28,7 +28,10 @@ import {
   type QuadChunkWorkerOutput,
 } from "../../../utils/workers/QuadChunkWorker";
 import { assertTerrainWorkerRequest } from "../../../utils/workers/TerrainWorkerShared";
-import { RetainedTerrainSurface } from "./TerrainGridSurface";
+import {
+  RetainedTerrainSurface,
+  type TerrainGridBounds,
+} from "./TerrainGridSurface";
 
 export type VisualManagerTerrainProvider = FullTerrainProvider;
 
@@ -48,6 +51,16 @@ export interface TerrainVisualReadiness {
   pendingChunks: number;
 }
 
+/** Borrowed rendered geometry only: neither complete coverage nor a lease on
+ * roads, exclusions or water. Consumers must retain those owners separately. */
+export interface RetainedTerrainRegion {
+  readonly bounds: Readonly<TerrainGridBounds>;
+  readonly surfaces: readonly RetainedTerrainSurface[];
+  /** Includes newly arriving neighbors, not just the surfaces present at capture.
+   * Once observed stale, this lease never becomes valid again. */
+  isCurrent(): boolean;
+}
+
 interface SettledWorkerResult {
   nodeId: number;
   node: TerrainQuadNode;
@@ -65,6 +78,7 @@ export class TerrainVisualManager implements QuadTreeListener {
   private container: THREE.Group;
   private material: THREE.Material;
   private chunks = new Map<string, TerrainVisualChunk>();
+  private disposed = false;
   private playerX = 0;
   private playerZ = 0;
   private debugWireframe: boolean;
@@ -175,6 +189,8 @@ export class TerrainVisualManager implements QuadTreeListener {
   }
 
   dispose(): void {
+    if (this.disposed) return;
+    this.disposed = true;
     this.quadTree.dispose();
     for (const chunk of this.chunks.values()) {
       this.removeMeshFromScene(chunk);
@@ -200,7 +216,15 @@ export class TerrainVisualManager implements QuadTreeListener {
   }
 
   getRetainedSurface(node: TerrainQuadNode): RetainedTerrainSurface | null {
-    if (!node.isFinal || node.visualChunkKey === null) return null;
+    // A transitioning parent keeps isFinal until its children are ready. It
+    // cannot certify contact while new child meshes may overlap it on screen.
+    if (
+      !node.isFinal ||
+      node.splitting ||
+      node.unsplitting ||
+      node.visualChunkKey === null
+    )
+      return null;
     const chunk = this.chunks.get(node.visualChunkKey);
     if (!chunk || chunk.node !== node || chunk.mesh.parent !== this.container)
       return null;
@@ -230,6 +254,67 @@ export class TerrainVisualManager implements QuadTreeListener {
       if (surface) return surface;
     }
     return null;
+  }
+
+  /** Capture every admitted final surface intersecting the closed world-space
+   * envelope. Never infer neighbors from a handful of height samples: their
+   * sizes can differ during streaming. A missing region is an empty lease, not
+   * ready grass. Exceeding capacity fails explicitly; no partial set is returned.
+   * Revalidation reads the actual installed owners without allocating arrays or
+   * serializing terrain. Cost is O(installed chunks × bounded region surfaces). */
+  captureRetainedSurfaceRegion(
+    bounds: TerrainGridBounds,
+    maxSurfaces = 16,
+  ): RetainedTerrainRegion {
+    if (this.disposed) throw new Error("Terrain visual manager is disposed");
+    if (
+      ![bounds.minX, bounds.maxX, bounds.minZ, bounds.maxZ].every(
+        Number.isFinite,
+      ) ||
+      bounds.minX > bounds.maxX ||
+      bounds.minZ > bounds.maxZ ||
+      !Number.isSafeInteger(maxSurfaces) ||
+      maxSurfaces < 1 ||
+      maxSurfaces > 256
+    )
+      throw new Error("Invalid retained terrain region");
+    const region = Object.freeze({ ...bounds });
+    const intersects = (node: TerrainQuadNode) => {
+      const half = node.size / 2;
+      return (
+        node.centerX + half >= region.minX &&
+        node.centerX - half <= region.maxX &&
+        node.centerZ + half >= region.minZ &&
+        node.centerZ - half <= region.maxZ
+      );
+    };
+    const captured: RetainedTerrainSurface[] = [];
+    for (const chunk of this.chunks.values()) {
+      if (!intersects(chunk.node)) continue;
+      const surface = this.getRetainedSurface(chunk.node);
+      if (!surface) continue;
+      if (captured.length === maxSurfaces)
+        throw new Error("Retained terrain region exceeds surface capacity");
+      captured.push(surface);
+    }
+    const surfaces = Object.freeze(captured);
+    let current = true;
+    return Object.freeze({
+      bounds: region,
+      surfaces,
+      isCurrent: () => {
+        if (!current || this.disposed) return (current = false);
+        let matches = 0;
+        for (const chunk of this.chunks.values()) {
+          if (!intersects(chunk.node)) continue;
+          const surface = this.getRetainedSurface(chunk.node);
+          if (!surface) continue;
+          if (!surfaces.includes(surface)) return (current = false);
+          matches++;
+        }
+        return (current = matches === surfaces.length);
+      },
+    });
   }
 
   /**

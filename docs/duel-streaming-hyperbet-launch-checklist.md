@@ -1,5 +1,30 @@
 # Duel Arena, Streaming, and Hyperbet Launch Checklist
 
+## Grounded grass continuation foundation — 2026-09-12
+
+- [x] Share the resumable numerical core, original-triangle cursor and mask
+  validation in game source. Add actual terrain-region leases, including newly
+  arriving neighbors, replacement/unload and transitional parent exclusion.
+  944 shared tests / 74 files and 15 independent-reference tests pass; all
+  retained arrays/corrections agree with the original six-leaf v5 algorithm.
+  Raw 2,298 / retained 2,240 is CPU evidence, not a new live meadow census.
+- [x] Verify shared/client/server/external typechecks, scoped lint and client/
+  shared then server builds. Capture checks pass 94/94 with stable build bytes;
+  the earlier concurrent-build source-drift failure was rejected, not bypassed.
+- [ ] Finish compact manager region/constraint ownership, scheduling/readiness,
+  provenance/swept bounds and GPU storage/precompile/disposal together. Current
+  gameplay still uses anchor-only grass; no denser meadow or native correction
+  has been enabled.
+- [x] Native67 scene regression: real nonfallback WebGPU, 24 PNGs / 18 matched
+  camera/daylight pairs, 592 source pins / 523 archives and both island censuses
+  verified. No page/GPU/cleanup errors; owned browser and ports closed. The same
+  19 cow/dagger content errors keep the overall run failed. All six scenic
+  images reviewed: flat lawns, continuous scarp and dominant platforms remain
+  below the requested art bar. This is not a visual improvement or FPS claim.
+- [ ] Qualify motion/contact/upload/GPU/presented-frame/loading costs before
+  increasing density. CPU slices overshoot the 2 ms target; recorded timings
+  do not establish a hard frame budget or whole-scene AAA quality.
+
 ## Graphics delivery priorities — current acceptance gates
 
 This is the current work order, not a claim that the scene is close to AAA.
@@ -26,6 +51,13 @@ Dated sections below retain evidence and superseded experiments.
    Keep the outstanding cow/dagger failures visible until genuinely fixed.
 
 ## Active functional woodland and surface fidelity — 2026-09-11
+
+- [x] Push the centered-leaf checkpoint `6d54dd767445aa75f049731ad43b673dabb00f23`:
+  four scoped files, normal hooks and staged secret scan pass. Both native66
+  runtime/test source pins match the committed blobs exactly after hooks; exact
+  remote head and GitHub author/committer `dreaminglucid` are verified. No
+  merge/deployment. Motion, GPU cost and whole-scene art approval remain open.
+
 
 - [x] Push the matched grove/roof checkpoint: game `88763df946` (18 exact scoped
   files) and assets `091b150dea` (only world-config). Normal hooks and staged

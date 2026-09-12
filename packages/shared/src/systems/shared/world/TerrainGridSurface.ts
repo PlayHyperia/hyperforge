@@ -28,6 +28,68 @@ export type TerrainTriangleVisitor = (
   faceIndex: number,
 ) => void;
 
+/** Caller-owned storage, overwritten by each successful cursor advance. */
+export type TerrainGridTriangle = [
+  number,
+  number,
+  number,
+  number,
+  number,
+  number,
+  number,
+  number,
+  number,
+  number,
+];
+
+/** One read-only retained-grid traversal, with no per-triangle allocations.
+ * The surface owner must remain current while the caller suspends work. */
+class RetainedTerrainTriangleCursor {
+  private x: number;
+  private z: number;
+  private second = false;
+
+  constructor(
+    private readonly positions: Float32Array,
+    private readonly resolution: number,
+    private readonly x0: number,
+    private readonly x1: number,
+    private readonly z1: number,
+    z0: number,
+  ) {
+    this.x = x0;
+    this.z = z0;
+  }
+
+  next(out: TerrainGridTriangle): boolean {
+    if (this.z > this.z1 || this.x0 > this.x1) return false;
+    const p = this.positions,
+      r = this.resolution;
+    const a = (this.z * r + this.x) * 3;
+    const b = a + 3,
+      c = a + r * 3,
+      d = c + 3;
+    const first = this.second ? b : a,
+      last = this.second ? d : b;
+    out[0] = p[first];
+    out[1] = p[first + 1];
+    out[2] = p[first + 2];
+    out[3] = p[c];
+    out[4] = p[c + 1];
+    out[5] = p[c + 2];
+    out[6] = p[last];
+    out[7] = p[last + 1];
+    out[8] = p[last + 2];
+    out[9] = (this.z * (r - 1) + this.x) * 2 + (this.second ? 1 : 0);
+    if (this.second && ++this.x > this.x1) {
+      this.x = this.x0;
+      this.z++;
+    }
+    this.second = !this.second;
+    return true;
+  }
+}
+
 /** One installed geometry revision, never a procedural or bilinear approximation. */
 export class RetainedTerrainSurface {
   readonly revision: string;
@@ -116,6 +178,56 @@ export class RetainedTerrainSurface {
       position.version === this.positionVersion &&
       geometry.index === this.index &&
       geometry.index?.version === this.indexVersion
+    );
+  }
+
+  /** Resume one original triangle at a time without repeating spatial queries
+   * or allocating vertex tuples. Includes both cells at exact Float32 edges,
+   * in the same row/cell/face order as visitTrianglesInBounds. */
+  createTriangleCursor(
+    bounds: TerrainGridBounds,
+  ): RetainedTerrainTriangleCursor {
+    if (
+      ![bounds.minX, bounds.maxX, bounds.minZ, bounds.maxZ].every(
+        Number.isFinite,
+      ) ||
+      bounds.minX > bounds.maxX ||
+      bounds.minZ > bounds.maxZ
+    )
+      throw new Error("Invalid retained triangle query");
+    const half = this.size / 2,
+      p = this.positions,
+      r = this.resolution;
+    if (
+      bounds.maxX < -half ||
+      bounds.minX > half ||
+      bounds.maxZ < -half ||
+      bounds.minZ > half
+    )
+      return new RetainedTerrainTriangleCursor(p, r, 0, -1, -1, 0);
+    const bound = (
+      value: number,
+      stride: number,
+      offset: number,
+      upper: boolean,
+    ) => {
+      let lo = 0,
+        hi = r;
+      while (lo < hi) {
+        const mid = (lo + hi) >>> 1,
+          coordinate = p[mid * stride + offset];
+        if (coordinate < value || (upper && coordinate === value)) lo = mid + 1;
+        else hi = mid;
+      }
+      return lo;
+    };
+    return new RetainedTerrainTriangleCursor(
+      p,
+      r,
+      Math.max(0, bound(bounds.minX, 3, 0, false) - 1),
+      Math.min(r - 2, bound(bounds.maxX, 3, 0, true) - 1),
+      Math.min(r - 2, bound(bounds.maxZ, r * 3, 2, true) - 1),
+      Math.max(0, bound(bounds.minZ, r * 3, 2, false) - 1),
     );
   }
 

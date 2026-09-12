@@ -21,6 +21,8 @@ import {
 import { TerrainQuadNode, TerrainQuadTree } from "../TerrainQuadTree";
 import { TERRAIN_SHADER_CONSTANTS } from "../TerrainShader";
 import { TerrainVisualManager } from "../TerrainVisualManager";
+import { GrassBladeGroundingJob } from "../GrassBladeGrounding";
+import { projectGrassAnchors } from "../GrassTerrainProjection";
 import {
   COMPACT_WORLD_TERRAIN_PROFILE as compact,
   validateWorldTerrainProfile,
@@ -563,6 +565,338 @@ describe("terrain visual profile admission with real geometry and workers", () =
         manager["generateChunkSync"](child);
       expect(parent.visualChunkKey).toBeNull();
       expect(manager.getRetainedSurface(children[0])).not.toBeNull();
+    } finally {
+      manager.dispose();
+      material.dispose();
+    }
+  });
+
+  it("captures exact closed region boundaries and is unaffected by unrelated terrain churn", () => {
+    const material = new THREE.MeshBasicMaterial();
+    const manager = terrainManager(
+      new ProfileTerrain(compact),
+      new THREE.Group(),
+      material,
+    );
+    const tree = manager.getQuadTree();
+    const own = tree.createNode(null, null, 16, 350, 400, 1);
+    const east = tree.createNode(null, null, 16, 366, 400, 1);
+    const distant = tree.createNode(null, null, 16, 500, 400, 1);
+    try {
+      for (const node of [own, east, distant])
+        manager["generateChunkSync"](node);
+      const bounds = { minX: 350, maxX: 358, minZ: 400, maxZ: 400 };
+      const region = manager.captureRetainedSurfaceRegion(bounds);
+      expect(region.surfaces).toEqual([
+        manager.getRetainedSurface(own),
+        manager.getRetainedSurface(east),
+      ]);
+      expect(Object.isFrozen(region)).toBe(true);
+      expect(Object.isFrozen(region.bounds)).toBe(true);
+      expect(Object.isFrozen(region.surfaces)).toBe(true);
+      bounds.maxX = 1000;
+      expect(region.bounds.maxX).toBe(358);
+      expect(region.isCurrent()).toBe(true);
+      manager.invalidateRegion(499, 399, 501, 401);
+      expect(region.isCurrent()).toBe(true);
+      manager["generateChunkSync"](distant);
+      expect(region.isCurrent()).toBe(true);
+      manager.invalidateRegion(365, 399, 367, 401);
+      expect(region.isCurrent()).toBe(false);
+      expect(manager.getRetainedSurface(own)).toBe(region.surfaces[0]);
+      manager["generateChunkSync"](east);
+      expect(region.isCurrent()).toBe(false);
+      expect(
+        manager.captureRetainedSurfaceRegion(region.bounds).isCurrent(),
+      ).toBe(true);
+    } finally {
+      manager.dispose();
+      material.dispose();
+    }
+  });
+
+  it("invalidates waiting region owners when a previously missing neighbor arrives", () => {
+    const material = new THREE.MeshBasicMaterial();
+    const manager = terrainManager(
+      new ProfileTerrain(compact),
+      new THREE.Group(),
+      material,
+    );
+    const tree = manager.getQuadTree();
+    const own = tree.createNode(null, null, 16, 350, 400, 1);
+    const east = tree.createNode(null, null, 16, 366, 400, 1);
+    const bounds = { minX: 342, maxX: 359, minZ: 392, maxZ: 408 };
+    try {
+      const empty = manager.captureRetainedSurfaceRegion(bounds);
+      expect(empty.surfaces).toEqual([]);
+      expect(empty.isCurrent()).toBe(true);
+      manager["generateChunkSync"](own);
+      expect(empty.isCurrent()).toBe(false);
+      const incomplete = manager.captureRetainedSurfaceRegion(bounds);
+      expect(incomplete.surfaces).toHaveLength(1);
+      const first = incomplete.surfaces[0];
+      expect(incomplete.isCurrent()).toBe(true);
+      manager["generateChunkSync"](east);
+      expect(incomplete.isCurrent()).toBe(false);
+      expect(manager.getRetainedSurface(own)).toBe(first);
+      const complete = manager.captureRetainedSurfaceRegion(bounds);
+      expect(complete.surfaces).toHaveLength(2);
+      expect(complete.isCurrent()).toBe(true);
+      manager.dispose();
+      expect(complete.isCurrent()).toBe(false);
+      expect(() => manager.captureRetainedSurfaceRegion(bounds)).toThrow(
+        /disposed/,
+      );
+    } finally {
+      manager.dispose();
+      material.dispose();
+    }
+  });
+
+  it.each([
+    "position replacement",
+    "position update",
+    "index replacement",
+    "index update",
+  ])(
+    "invalidates complete region ownership on real neighboring %s",
+    (change) => {
+      const material = new THREE.MeshBasicMaterial();
+      const manager = terrainManager(
+        new ProfileTerrain(compact),
+        new THREE.Group(),
+        material,
+      );
+      const tree = manager.getQuadTree();
+      const own = tree.createNode(null, null, 16, 350, 400, 1);
+      const east = tree.createNode(null, null, 16, 366, 400, 1);
+      try {
+        for (const node of [own, east]) manager["generateChunkSync"](node);
+        const region = manager.captureRetainedSurfaceRegion({
+          minX: 350,
+          maxX: 359,
+          minZ: 400,
+          maxZ: 400,
+        });
+        const geometry = manager.getChunks().get(east.visualChunkKey!)!.mesh
+          .geometry;
+        if (change === "position replacement")
+          geometry.setAttribute(
+            "position",
+            geometry.getAttribute("position").clone(),
+          );
+        else if (change === "position update")
+          geometry.getAttribute("position").needsUpdate = true;
+        else if (change === "index replacement")
+          geometry.setIndex(geometry.getIndex()!.clone());
+        else geometry.getIndex()!.needsUpdate = true;
+        expect(region.isCurrent()).toBe(false);
+        expect(manager.getRetainedSurface(own)).toBe(region.surfaces[0]);
+      } finally {
+        manager.dispose();
+        material.dispose();
+      }
+    },
+  );
+
+  it("leases coarse final neighbors but withholds split descendants until the retained parent is removed", () => {
+    const material = new THREE.MeshBasicMaterial();
+    const manager = terrainManager(
+      new ProfileTerrain(compact),
+      new THREE.Group(),
+      material,
+    );
+    const tree = manager.getQuadTree();
+    tree.setListener(manager);
+    const parent = tree.createNode(null, null, 32, 350, 400, 0);
+    const bounds = { minX: 334, maxX: 366, minZ: 384, maxZ: 416 };
+    try {
+      manager["generateChunkSync"](parent);
+      const coarse = manager.captureRetainedSurfaceRegion(bounds);
+      expect(coarse.surfaces).toEqual([manager.getRetainedSurface(parent)]);
+      parent.split();
+      expect(coarse.isCurrent()).toBe(false);
+      const transition = manager.captureRetainedSurfaceRegion(bounds);
+      expect(transition.surfaces).toEqual([]);
+      const children = [...parent.children.values()];
+      manager["generateChunkSync"](children[0]);
+      expect(transition.isCurrent()).toBe(true);
+      for (const child of children.slice(1))
+        manager["generateChunkSync"](child);
+      expect(parent.visualChunkKey).toBeNull();
+      expect(transition.isCurrent()).toBe(false);
+      const fine = manager.captureRetainedSurfaceRegion(bounds);
+      expect(fine.surfaces).toHaveLength(4);
+      expect(fine.surfaces.map((surface) => surface.size)).toEqual([
+        16, 16, 16, 16,
+      ]);
+      expect(fine.isCurrent()).toBe(true);
+    } finally {
+      manager.dispose();
+      material.dispose();
+    }
+  });
+
+  it("never revives a region after observing a detached mesh and does not own borrowed GPU resources", () => {
+    const material = new THREE.MeshBasicMaterial();
+    const container = new THREE.Group();
+    const manager = terrainManager(
+      new ProfileTerrain(compact),
+      container,
+      material,
+    );
+    const node = leaf(manager.getQuadTree());
+    let disposals = 0;
+    try {
+      manager["generateChunkSync"](node);
+      const mesh = manager.getChunks().get(node.visualChunkKey!)!.mesh;
+      mesh.geometry.addEventListener("dispose", () => disposals++);
+      const region = manager.captureRetainedSurfaceRegion({
+        minX: 350,
+        maxX: 350,
+        minZ: 400,
+        maxZ: 400,
+      });
+      expect(region.isCurrent()).toBe(true);
+      mesh.removeFromParent();
+      expect(region.isCurrent()).toBe(false);
+      container.add(mesh);
+      expect(region.isCurrent()).toBe(false);
+      expect(disposals).toBe(0);
+      manager.dispose();
+      expect(disposals).toBe(1);
+    } finally {
+      manager.dispose();
+      material.dispose();
+    }
+    expect(disposals).toBe(1);
+  });
+
+  it("gives a real grounding job a complete region owner across missing support, arrival and replacement", () => {
+    const material = new THREE.MeshBasicMaterial();
+    const manager = terrainManager(
+      new ProfileTerrain(compact),
+      new THREE.Group(),
+      material,
+    );
+    const grass = grassManager(new THREE.Group());
+    const tree = manager.getQuadTree();
+    const own = tree.createNode(null, null, 16, 350, 400, 1);
+    const east = tree.createNode(null, null, 16, 366, 400, 1);
+    const bounds = { minX: 349, maxX: 360, minZ: 398, maxZ: 402 };
+    try {
+      manager["generateChunkSync"](own);
+      const surface = manager.getRetainedSurface(own)!;
+      const data = projectGrassAnchors(
+        {
+          count: 1,
+          offsets: new Float32Array([7.99, 32, 0]),
+          rotScaleHash: new Float32Array([0, 1, 0.5]),
+          groundColors: new Float32Array([0.2, 0.4, 0.1]),
+          grassTints: new Float32Array([0, 0, 0, 0]),
+          groundNormals: new Float32Array([0, 1, 0]),
+        },
+        surface,
+        () => 16,
+        () => false,
+      );
+      const missing = manager.captureRetainedSurfaceRegion(bounds);
+      const request = {
+        data,
+        ownSurface: surface,
+        surfaces: missing.surfaces,
+        geometry: grass["lodGeometries"][1],
+        lod: 1 as const,
+        terrainSurface: grassSetup(compact).getTerrainSurfaceForRegion(
+          349,
+          398,
+          360,
+          402,
+        ),
+        roadSegments: [],
+        oceanLevel: 16,
+        wind: { x: 0.1, z: 0.055 },
+      };
+      const waiting = new GrassBladeGroundingJob(request, missing.isCurrent);
+      while (waiting.state.status === "running") waiting.advance(64);
+      expect(waiting.state.status).toBe("waiting_support");
+      const previousOperations = waiting.operations;
+      for (let frame = 0; frame < 10; frame++) waiting.advance(64);
+      expect(waiting.operations).toBe(previousOperations);
+      manager["generateChunkSync"](east);
+      expect(missing.isCurrent()).toBe(false);
+      const complete = manager.captureRetainedSurfaceRegion(bounds);
+      const fresh = new GrassBladeGroundingJob(
+        { ...request, surfaces: complete.surfaces },
+        complete.isCurrent,
+      );
+      while (fresh.state.status === "running") fresh.advance(64);
+      expect(fresh.state.status).toBe("ready");
+      if (fresh.state.status !== "ready")
+        throw new Error("Expected real neighbor coverage");
+      expect(fresh.state.result.data.count).toBe(1);
+      expect(
+        fresh.state.result.dependencies.map(
+          ({ surface: dependency }) => dependency,
+        ),
+      ).toContain(manager.getRetainedSurface(east));
+      expect(complete.isCurrent()).toBe(true);
+      const inProgress = new GrassBladeGroundingJob(
+        { ...request, surfaces: complete.surfaces },
+        complete.isCurrent,
+      );
+      inProgress.advance(4);
+      manager.invalidateRegion(365, 399, 367, 401);
+      expect(inProgress.advance(4)).toEqual({
+        status: "cancelled",
+        reason: "invalidated",
+      });
+      expect(complete.isCurrent()).toBe(false);
+      // A cached completed job does not grant permission to publish stale data.
+      expect(fresh.state.status).toBe("ready");
+      expect(manager.getRetainedSurface(own)).toBe(surface);
+    } finally {
+      grass.destroy();
+      manager.dispose();
+      material.dispose();
+    }
+  });
+
+  it("rejects invalid or over-capacity regions explicitly instead of silently omitting owners", () => {
+    const material = new THREE.MeshBasicMaterial();
+    const manager = terrainManager(
+      new ProfileTerrain(compact),
+      new THREE.Group(),
+      material,
+    );
+    const tree = manager.getQuadTree();
+    const bounds = { minX: 350, maxX: 359, minZ: 400, maxZ: 400 };
+    try {
+      for (const x of [350, 366])
+        manager["generateChunkSync"](
+          tree.createNode(null, null, 16, x, 400, 1),
+        );
+      expect(() => manager.captureRetainedSurfaceRegion(bounds, 1)).toThrow(
+        /capacity/,
+      );
+      expect(
+        manager.captureRetainedSurfaceRegion(bounds, 2).surfaces,
+      ).toHaveLength(2);
+      for (const capacity of [0, -1, 1.5, 257, NaN, Infinity])
+        expect(() =>
+          manager.captureRetainedSurfaceRegion(bounds, capacity),
+        ).toThrow(/Invalid/);
+      for (const key of ["minX", "maxX", "minZ", "maxZ"])
+        expect(() =>
+          manager.captureRetainedSurfaceRegion({ ...bounds, [key]: NaN }),
+        ).toThrow(/Invalid/);
+      expect(() =>
+        manager.captureRetainedSurfaceRegion({ ...bounds, minX: 360 }),
+      ).toThrow(/Invalid/);
+      expect(() =>
+        manager.captureRetainedSurfaceRegion({ ...bounds, minZ: 401 }),
+      ).toThrow(/Invalid/);
+      expect(manager.getChunks().size).toBe(2);
     } finally {
       manager.dispose();
       material.dispose();

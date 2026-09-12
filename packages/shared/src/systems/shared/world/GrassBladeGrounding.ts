@@ -8,6 +8,7 @@ import {
   RetainedTerrainSurface,
   type TerrainGridBounds,
   type TerrainGridSample,
+  type TerrainGridTriangle,
 } from "./TerrainGridSurface";
 
 export const GRASS_BLADE_GROUNDING_LIMITS = Object.freeze({
@@ -178,7 +179,7 @@ function segmentBoxDistance(
   return distance;
 }
 
-function validateGeometry(geometry: THREE.BufferGeometry, lod: 0 | 1 | 2) {
+function* validateGeometry(geometry: THREE.BufferGeometry, lod: 0 | 1 | 2) {
   const tier = LODS[lod];
   if (!tier) throw new Error("Invalid grass grounding LOD");
   const { blades, segments } = tier,
@@ -199,10 +200,14 @@ function validateGeometry(geometry: THREE.BufferGeometry, lod: 0 | 1 | 2) {
       !(attribute.array instanceof Float32Array) ||
       attribute.itemSize !== size ||
       attribute.count !== vertices ||
-      attribute.normalized ||
-      !Array.from(attribute.array).every(Number.isFinite)
+      attribute.normalized
     )
       throw new Error("Invalid grass grounding vertex attributes");
+    for (const value of attribute.array) {
+      yield "geometry_value";
+      if (!Number.isFinite(value))
+        throw new Error("Invalid grass grounding vertex attributes");
+    }
   }
   if (
     !index ||
@@ -222,6 +227,7 @@ function validateGeometry(geometry: THREE.BufferGeometry, lod: 0 | 1 | 2) {
       throw new Error("Invalid grass grounding triangle order");
   };
   for (let blade = 0; blade < blades; blade++) {
+    yield "geometry_blade";
     const first = blade * verticesPerBlade;
     for (let row = 0; row < segments; row++) {
       for (let side = 0; side < 2; side++) {
@@ -252,6 +258,7 @@ function validateGeometry(geometry: THREE.BufferGeometry, lod: 0 | 1 | 2) {
     for (const value of [tip - 2, tip - 1, tip]) expectIndex(value);
   }
   for (let v = 0; v < vertices; v++) {
+    yield "geometry_vertex";
     if (
       position.getY(v) < 0 ||
       Math.hypot(position.getX(v), position.getY(v), position.getZ(v)) > 16
@@ -266,13 +273,14 @@ function validateGeometry(geometry: THREE.BufferGeometry, lod: 0 | 1 | 2) {
  * RNG, geometry or input attributes. Callers must revalidate every returned
  * surface identity against its live owner before publication and on replacement.
  *
- * `work_budget` is NOT a resumable result: retrying identical input/budget cannot
- * make progress. Integration must either establish admitted work fits the budget
- * or add an explicit bounded continuation; never requeue this result forever.
+ * Suspension points retain the exact math cursor. The old total-work limit
+ * still terminates the input epoch; a deferred result is never restarted here.
+ * Outer GrassBladeGroundingJob additionally charges validation, sorting and copies.
  */
-export function groundGrassBlades(
+export function* groundGrassBladeSteps(
   request: GrassBladeGroundingRequest,
-): GrassBladeGroundingResult {
+): Generator<string, GrassBladeGroundingResult, void> {
+  yield "request_bounds";
   const started = performance.now();
   const { data, ownSurface, geometry, lod, wind } = request;
   const workBudget =
@@ -305,11 +313,14 @@ export function groundGrassBlades(
       values.length !== data.count * stride
     )
       throw new Error("Invalid grass grounding instance buffers");
-    for (const value of values)
+    for (const value of values) {
+      yield "instance_value";
       if (!Number.isFinite(value))
         throw new Error("Nonfinite grass grounding instance value");
+    }
   }
   for (let i = 0; i < data.count; i++) {
+    yield "instance_transform";
     const k = i * 3;
     if (
       data.rotScaleHash[k] < 0 ||
@@ -341,15 +352,17 @@ export function groundGrassBlades(
     )
   )
     throw new Error("Invalid grass grounding surface identities");
-  const snapshot = createGrassTerrainSurfaceOperations().validateSnapshot(
-    request.terrainSurface,
-  );
+  const snapshot =
+    yield* createGrassTerrainSurfaceOperations().validateSnapshotSteps(
+      request.terrainSurface,
+    );
   if (
     !Array.isArray(request.roadSegments) ||
     request.roadSegments.length > GRASS_BLADE_GROUNDING_LIMITS.maxRoadSegments
   )
     throw new Error("Invalid grass grounding road count");
   for (const road of request.roadSegments) {
+    yield "road_validation";
     const dx = road.endX - road.startX,
       dz = road.endZ - road.startZ;
     if (
@@ -362,7 +375,7 @@ export function groundGrassBlades(
     )
       throw new Error("Invalid grass grounding road segment");
   }
-  const { blades, verticesPerBlade, position, uv } = validateGeometry(
+  const { blades, verticesPerBlade, position, uv } = yield* validateGeometry(
     geometry,
     lod,
   );
@@ -418,11 +431,12 @@ export function groundGrassBlades(
     nz: 0,
     faceIndex: 0,
   };
-  const sampleEndpoint = (point: Point) => {
+  const sampleEndpoint = function* (point: Point) {
     receipt.endpointQueries++;
     // Half-open ownership matches TerrainVisualManager; allow a sole outer edge.
     let selected: SurfaceEntry | undefined;
     for (const entry of entries) {
+      yield "grounding_operation";
       take();
       const b = entry.box;
       if (
@@ -455,16 +469,18 @@ export function groundGrassBlades(
     markSurface(selected.surface, "endpoint");
     return sample.height;
   };
-  const ensureCoverage = (box: TerrainGridBounds) => {
+  const ensureCoverage = function* (box: TerrainGridBounds) {
     let covered = 0;
     for (let i = 0; i < entries.length; i++) {
       const a = entries[i];
+      yield "grounding_operation";
       take();
       const area = overlapArea(box, a.box);
       if (!area) continue;
       markSurface(a.surface, "envelope");
       covered += area;
       for (let j = i + 1; j < entries.length; j++) {
+        yield "grounding_operation";
         take();
         const b = entries[j];
         const intersection = {
@@ -487,7 +503,7 @@ export function groundGrassBlades(
     if (Math.abs(covered - expected) > Math.max(1e-7, expected * 1e-7))
       throw new DeferredGrounding("missing_surface");
   };
-  const edgeError = (a: Point, b: Point) => {
+  const edgeError = function* (a: Point, b: Point) {
     const dx = b.x - a.x,
       dz = b.z - a.z,
       intervals: [number, number][] = [];
@@ -499,61 +515,66 @@ export function groundGrassBlades(
       maxZ: Math.max(a.z, b.z),
     };
     for (const entry of entries) {
+      yield "grounding_operation";
       take();
       if (!overlaps(box, entry.box)) continue;
       const surface = entry.surface,
         ox = surface.centerX,
         oz = surface.centerZ;
-      const result = surface.visitTrianglesInBounds(
-        {
-          minX: box.minX - ox,
-          maxX: box.maxX - ox,
-          minZ: box.minZ - oz,
-          maxZ: box.maxZ - oz,
-        },
-        (ax, ay, az, bx, by, bz, cx, cy, cz) => {
-          take();
-          receipt.triangleVisits++;
-          const det = (bx - ax) * (cz - az) - (bz - az) * (cx - ax);
-          const u0 =
-            ((a.x - ox - ax) * (cz - az) - (a.z - oz - az) * (cx - ax)) / det;
-          const v0 =
-            ((bx - ax) * (a.z - oz - az) - (bz - az) * (a.x - ox - ax)) / det;
-          const du = (dx * (cz - az) - dz * (cx - ax)) / det;
-          const dv = ((bx - ax) * dz - (bz - az) * dx) / det;
-          let lo = 0,
-            hi = 1;
-          for (const [start, change] of [
-            [u0, du],
-            [v0, dv],
-            [1 - u0 - v0, -du - dv],
-          ]) {
-            if (Math.abs(change) < 1e-14) {
-              if (start < -1e-10) return;
-            } else if (change > 0) lo = Math.max(lo, -start / change);
-            else hi = Math.min(hi, -start / change);
-          }
-          if (lo > hi + 1e-10 || hi < 0 || lo > 1) return;
-          lo = Math.max(0, lo);
-          hi = Math.min(1, hi);
-          markSurface(surface, "edge");
-          intervals.push([lo, hi]);
-          for (const t of [lo, hi]) {
-            const terrainY =
-              ay + (u0 + du * t) * (by - ay) + (v0 + dv * t) * (cy - ay);
-            maxError = Math.max(
-              maxError,
-              Math.abs(a.y + (b.y - a.y) * t - terrainY),
-            );
-          }
-        },
-        workBudget - receipt.workUnits,
-      );
-      if (result.exhausted) throw new DeferredGrounding("work_budget");
+      const cursor = surface.createTriangleCursor({
+        minX: box.minX - ox,
+        maxX: box.maxX - ox,
+        minZ: box.minZ - oz,
+        maxZ: box.maxZ - oz,
+      });
+      const triangle: TerrainGridTriangle = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+      while (cursor.next(triangle)) {
+        yield "grounding_operation";
+        take();
+        receipt.triangleVisits++;
+        const [ax, ay, az, bx, by, bz, cx, cy, cz] = triangle;
+        const det = (bx - ax) * (cz - az) - (bz - az) * (cx - ax);
+        const u0 =
+          ((a.x - ox - ax) * (cz - az) - (a.z - oz - az) * (cx - ax)) / det;
+        const v0 =
+          ((bx - ax) * (a.z - oz - az) - (bz - az) * (a.x - ox - ax)) / det;
+        const du = (dx * (cz - az) - dz * (cx - ax)) / det;
+        const dv = ((bx - ax) * dz - (bz - az) * dx) / det;
+        let lo = 0,
+          hi = 1;
+        for (const [start, change] of [
+          [u0, du],
+          [v0, dv],
+          [1 - u0 - v0, -du - dv],
+        ]) {
+          if (Math.abs(change) < 1e-14) {
+            if (start < -1e-10) {
+              lo = 1;
+              hi = 0;
+              break;
+            }
+          } else if (change > 0) lo = Math.max(lo, -start / change);
+          else hi = Math.min(hi, -start / change);
+        }
+        if (lo > hi + 1e-10 || hi < 0 || lo > 1) continue;
+        lo = Math.max(0, lo);
+        hi = Math.min(1, hi);
+        markSurface(surface, "edge");
+        intervals.push([lo, hi]);
+        for (const t of [lo, hi]) {
+          const terrainY =
+            ay + (u0 + du * t) * (by - ay) + (v0 + dv * t) * (cy - ay);
+          maxError = Math.max(
+            maxError,
+            Math.abs(a.y + (b.y - a.y) * t - terrainY),
+          );
+        }
+      }
     }
-    intervals.sort((a, b) => a[0] - b[0]);
+    yield* sortedIntervals(intervals);
     let until = 0;
     for (const [lo, hi] of intervals) {
+      yield "edge_interval";
       if (lo > until + 1e-7) throw new DeferredGrounding("missing_surface");
       until = Math.max(until, hi);
     }
@@ -569,8 +590,9 @@ export function groundGrassBlades(
     else high = m;
   }
   const roadFeather = 0.5 * (1 - (low + high) / 2);
-  const padOverlap = (box: TerrainGridBounds) => {
+  const padOverlap = function* (box: TerrainGridBounds) {
     for (const zone of snapshot.zones) {
+      yield "grounding_operation";
       take();
       if (zone.excludeGrass === false) continue;
       if (zone.radialPond) {
@@ -581,6 +603,7 @@ export function groundGrassBlades(
           return true;
       } else if (zone.tileMask) {
         for (const key of zone.tileMask) {
+          yield "grounding_operation";
           take();
           const [x, z] = key.split(",").map(Number);
           if (overlaps(box, { minX: x, maxX: x + 1, minZ: z, maxZ: z + 1 }))
@@ -588,6 +611,7 @@ export function groundGrassBlades(
         }
         if (zone.blendRadius > 0)
           for (const tile of zone.tileMaskTiles ?? []) {
+            yield "grounding_operation";
             take();
             const distance = Math.hypot(
               Math.max(box.minX - tile.x - 1, 0, tile.x - box.maxX),
@@ -607,6 +631,7 @@ export function groundGrassBlades(
     }
     return false;
   };
+  yield "bounded_staging_allocation";
   const deltas = new Float32Array(data.count * blades * 2),
     retained: number[] = [];
   try {
@@ -615,6 +640,7 @@ export function groundGrassBlades(
         x = ownSurface.centerX + data.offsets[k],
         y = data.offsets[k + 1],
         z = ownSurface.centerZ + data.offsets[k + 2];
+      yield "grounding_operation";
       take();
       if (
         !ownSurface.sample(data.offsets[k], data.offsets[k + 2], sample) ||
@@ -650,8 +676,8 @@ export function groundGrassBlades(
       for (let blade = 0; blade < blades; blade++) {
         const left = transform(blade * verticesPerBlade, 1),
           right = transform(blade * verticesPerBlade + 1, 1);
-        const deltaLeft = Math.fround(sampleEndpoint(left) - left.y),
-          deltaRight = Math.fround(sampleEndpoint(right) - right.y);
+        const deltaLeft = Math.fround((yield* sampleEndpoint(left)) - left.y),
+          deltaRight = Math.fround((yield* sampleEndpoint(right)) - right.y);
         if (![deltaLeft, deltaRight].every(Number.isFinite))
           throw new Error("Nonfinite grass grounding correction");
         const d = (i * blades + blade) * 2;
@@ -664,7 +690,7 @@ export function groundGrassBlades(
         );
         left.y += deltaLeft;
         right.y += deltaRight;
-        baseError = Math.max(baseError, edgeError(left, right));
+        baseError = Math.max(baseError, yield* edgeError(left, right));
       }
       receipt.maxCorrectedBaseError = Math.max(
         receipt.maxCorrectedBaseError,
@@ -684,6 +710,7 @@ export function groundGrassBlades(
           deltas[d] * (1 - uv.getX(v)) + deltas[d + 1] * uv.getX(v);
         const windFactor = uv.getY(v) ** 1.8;
         for (const fade of [0, 1]) {
+          yield "grounding_operation";
           take();
           const point = transform(v, fade);
           box.minX = Math.min(
@@ -709,12 +736,13 @@ export function groundGrassBlades(
         ![box.minX, box.maxX, box.minZ, box.maxZ, minY].every(Number.isFinite)
       )
         throw new Error("Nonfinite corrected grass envelope");
-      ensureCoverage(box);
+      yield* ensureCoverage(box);
       let rejection: RejectionReason | null =
         baseError > maximumBaseError ? "terrain_edge" : null;
-      if (!rejection && padOverlap(box)) rejection = "pad";
+      if (!rejection && (yield* padOverlap(box))) rejection = "pad";
       if (!rejection)
         for (const road of request.roadSegments) {
+          yield "grounding_operation";
           take();
           if (segmentBoxDistance(road, box) <= road.width / 2 + roadFeather) {
             rejection = "road";
@@ -725,6 +753,7 @@ export function groundGrassBlades(
         let highest = -Infinity,
           coveredByBody = false;
         for (const body of snapshot.waterBodies) {
+          yield "grounding_operation";
           take();
           if (pointBoxDistance(body.centerX, body.centerZ, box) > body.radius)
             continue;
@@ -767,6 +796,7 @@ export function groundGrassBlades(
       };
     throw error;
   }
+  yield "bounded_output_allocation";
   const count = retained.length;
   const output: GrassAnchorData = {
     count,
@@ -777,7 +807,11 @@ export function groundGrassBlades(
     groundNormals: new Float32Array(count * 3),
   };
   const rootDeltas = new Float32Array(count * blades * 2);
-  retained.forEach((source, dst) => {
+  const sourceIndices = new Uint32Array(count);
+  for (let dst = 0; dst < count; dst++) {
+    yield "output_clump";
+    const source = retained[dst];
+    sourceIndices[dst] = source;
     for (const [key, stride] of [
       ["offsets", 3],
       ["rotScaleHash", 3],
@@ -793,15 +827,202 @@ export function groundGrassBlades(
       deltas.subarray(source * blades * 2, (source + 1) * blades * 2),
       dst * blades * 2,
     );
-  });
+  }
   receipt.retainedClumps = count;
   receipt.correctionBytes = rootDeltas.byteLength;
   return {
     status: "ready",
     data: output,
     rootDeltas,
-    sourceIndices: Uint32Array.from(retained),
+    sourceIndices,
     dependencies: dependencies(),
     receipt: finish(),
   };
+}
+
+export const GRASS_BLADE_GROUNDING_JOB_LIMITS = Object.freeze({
+  maximumSliceOperations: 8192,
+  targetSliceMs: 2,
+  clockInterval: 64,
+  maximumOperations: 1_000_000,
+  maximumActiveMs: 250,
+});
+
+export type GrassBladeGroundingJobState =
+  | { status: "running" }
+  | {
+      status: "ready";
+      result: Extract<GrassBladeGroundingResult, { status: "ready" }>;
+    }
+  | {
+      status: "waiting_support";
+      result: Extract<GrassBladeGroundingResult, { status: "defer" }>;
+    }
+  | {
+      status: "failed_budget";
+      reason: "operations" | "active_cpu" | "grounding_work";
+    }
+  | { status: "failed_input"; error: unknown }
+  | { status: "cancelled"; reason: "caller" | "invalidated" };
+
+export class GrassBladeGroundingJob {
+  private iterator: ReturnType<typeof groundGrassBladeSteps> | null;
+  private current: GrassBladeGroundingJobState = { status: "running" };
+  operations = 0;
+  activeMs = 0;
+  lastSliceOperations = 0;
+  lastSliceMs = 0;
+  maximumSliceMs = 0;
+  lastPhase: string | null = null;
+
+  /** isCurrent must check the complete borrowed input/region epoch, including
+   * missing neighbors and constraints. This class does not invent that owner. */
+  constructor(
+    request: GrassBladeGroundingRequest,
+    private readonly isCurrent: () => boolean,
+  ) {
+    this.iterator = groundGrassBladeSteps(request);
+  }
+
+  get state(): GrassBladeGroundingJobState {
+    return this.current;
+  }
+
+  private close(
+    state: GrassBladeGroundingJobState,
+  ): GrassBladeGroundingJobState {
+    const iterator = this.iterator;
+    this.iterator = null;
+    this.current = state;
+    // Generator has no publication or other external side effects. return
+    // releases suspended locals; an unfinished result is never exposed.
+    iterator?.return(undefined as never);
+    return state;
+  }
+
+  cancel(): GrassBladeGroundingJobState {
+    if (this.current.status !== "running") return this.current;
+    return this.close({ status: "cancelled", reason: "caller" });
+  }
+
+  private recordSlice(started: number): void {
+    this.lastSliceMs = performance.now() - started;
+    this.activeMs += this.lastSliceMs;
+    this.maximumSliceMs = Math.max(this.maximumSliceMs, this.lastSliceMs);
+    // Core wall time includes suspension; scheduling accounts active CPU only.
+    if (
+      this.current.status === "ready" ||
+      this.current.status === "waiting_support"
+    )
+      this.current.result.receipt.elapsedMs = this.activeMs;
+    if (
+      this.activeMs >= GRASS_BLADE_GROUNDING_JOB_LIMITS.maximumActiveMs &&
+      (this.current.status === "running" || this.current.status === "ready")
+    )
+      this.close({ status: "failed_budget", reason: "active_cpu" });
+  }
+
+  advance(
+    maxOperations: number = GRASS_BLADE_GROUNDING_JOB_LIMITS.maximumSliceOperations,
+  ): GrassBladeGroundingJobState {
+    if (
+      !Number.isSafeInteger(maxOperations) ||
+      maxOperations < 1 ||
+      maxOperations > GRASS_BLADE_GROUNDING_JOB_LIMITS.maximumSliceOperations
+    )
+      throw new Error("Invalid grounding slice operation bound");
+    if (this.current.status !== "running") return this.current;
+    const started = performance.now();
+    this.lastSliceOperations = 0;
+    let result: GrassBladeGroundingResult | undefined;
+    try {
+      if (!this.isCurrent())
+        return this.close({ status: "cancelled", reason: "invalidated" });
+      while (this.iterator && this.lastSliceOperations < maxOperations) {
+        if (
+          this.operations >= GRASS_BLADE_GROUNDING_JOB_LIMITS.maximumOperations
+        )
+          return this.close({ status: "failed_budget", reason: "operations" });
+        // This caps synchronous work between checks, not one JS operation's
+        // duration. Native allocations/GC cannot be preempted; retain overshoot.
+        if (
+          this.lastSliceOperations %
+            GRASS_BLADE_GROUNDING_JOB_LIMITS.clockInterval ===
+          0
+        ) {
+          const elapsed = performance.now() - started;
+          if (
+            this.activeMs + elapsed >=
+            GRASS_BLADE_GROUNDING_JOB_LIMITS.maximumActiveMs
+          )
+            return this.close({
+              status: "failed_budget",
+              reason: "active_cpu",
+            });
+          if (elapsed >= GRASS_BLADE_GROUNDING_JOB_LIMITS.targetSliceMs) break;
+        }
+        const step = this.iterator.next();
+        this.operations++;
+        this.lastSliceOperations++;
+        if (step.done) {
+          result = step.value;
+          break;
+        }
+        this.lastPhase = step.value;
+      }
+      if (!this.isCurrent())
+        return this.close({ status: "cancelled", reason: "invalidated" });
+      if (result) {
+        if (result.status === "ready") this.close({ status: "ready", result });
+        else if (result.reason === "work_budget")
+          this.close({ status: "failed_budget", reason: "grounding_work" });
+        else this.close({ status: "waiting_support", result });
+      }
+    } catch (error) {
+      this.close({ status: "failed_input", error });
+    } finally {
+      this.recordSlice(started);
+    }
+    return this.current;
+  }
+}
+/** Stable, in-place, resumable bottom-up merge sort. Every comparison/copy
+ * yields; a single bounded scratch allocation is explicit, not preemptible.
+ * Only finite clipped edge intervals from the grounding core are admitted. */
+function* sortedIntervals(
+  values: [number, number][],
+): Generator<string, void, void> {
+  if (values.length < 2) return;
+  yield "interval_scratch_allocation";
+  const scratch = new Array<[number, number]>(values.length);
+  for (let width = 1; width < values.length; width *= 2) {
+    for (let first = 0; first < values.length; first += width * 2) {
+      const middle = Math.min(first + width, values.length);
+      const end = Math.min(first + width * 2, values.length);
+      let left = first,
+        right = middle;
+      for (let dst = first; dst < end; dst++) {
+        yield "interval_merge";
+        scratch[dst] =
+          right >= end || (left < middle && values[left][0] <= values[right][0])
+            ? values[left++]
+            : values[right++];
+      }
+    }
+    for (let i = 0; i < values.length; i++) {
+      yield "interval_copy";
+      values[i] = scratch[i];
+    }
+  }
+}
+
+/** Synchronous offline/test API. Shares every validation and numerical step
+ * with the resumable job; never call this drain from a live frame install. */
+export function groundGrassBlades(
+  request: GrassBladeGroundingRequest,
+): GrassBladeGroundingResult {
+  const steps = groundGrassBladeSteps(request);
+  let step = steps.next();
+  while (!step.done) step = steps.next();
+  return step.value;
 }
