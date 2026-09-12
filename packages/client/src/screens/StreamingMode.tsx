@@ -219,7 +219,8 @@ export function collectStreamingRenderProfileApplication(
   const sun = environment?.sunLight;
   const water = terrain?.["waterSystem"];
   return evaluateStreamingRenderProfileApplication(profile, requested, {
-    ...(profile.grassProfile === "compact-island-v1"
+    ...(profile.grassProfile === "compact-island-v1" ||
+    profile.grassProfile === "compact-meadow-v2"
       ? { grass: terrain?.getGrassProfileReceipt() ?? null }
       : {}),
     preferences: {

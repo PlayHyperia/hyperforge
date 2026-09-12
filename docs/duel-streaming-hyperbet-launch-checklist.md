@@ -1,5 +1,35 @@
 # Duel Arena, Streaming, and Hyperbet Launch Checklist
 
+## Denser meadow comparison — 2026-09-12
+
+Status: **G04 remains OPEN. Verified comparison profile; not finished art or
+production performance approval.**
+
+- [x] Added explicit `island-meadow-720p60-v1` / `compact-meadow-v2` at 1.75m
+  spacing. Original island and broadcast selections remain unchanged. No
+  resolution, antialiasing, shadow, blade-detail or draw-distance reduction.
+- [x] Batched bounded input/envelope generator work without changing numerical
+  results, geometric work charges, cancellation/lease checks or hard limits.
+  Original-reference tests pass at both densities and all three detail levels.
+- [x] Native Chrome/Metal installed 5,798 clumps / 556,608 correction bytes
+  across six current terrain owners, with no failed fitting jobs, excluded
+  roots, page/GPU errors or cleanup errors. All owned tabs/processes stopped.
+- [x] Verified 1,230 shared tests / 90 files, 19 external original-reference
+  checks, 22 capture preflight checks, builds/typechecks and scoped lint.
+  Native source/image evidence is retained; old 19 cow/dagger errors remain.
+- [ ] Refine distribution and blade shading/shape: pond-side coverage is
+  fuller, but the preparation foreground remains sparse and blades read flat.
+  Higher counts alone did not meet the visual target.
+- [ ] Resolve loading overshoot and full-scene GPU/frame budgets. Dense fitting
+  recorded 811.6ms total active slices / 4.7ms maximum versus a 2ms slice target.
+  This is not FPS, a guaranteed speedup, or stable full-population acceptance.
+- [ ] Continue terrain/geology, lighting, sky/water, buildings, material contact,
+  animation and soundscape polish. One arena and functional resource trees
+  remain the intended world; no large playable island was restored.
+
+Evidence: `docs/dense-meadow-study-20260912.md` and
+`asset-studio/compact-grass-grounding-integration01/batching01/native-evidence.json`.
+
 ## Headland geometry study — 2026-09-12
 
 Status: **G04 remains OPEN. No cliff draft promoted or installed.**

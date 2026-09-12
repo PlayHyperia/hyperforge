@@ -379,7 +379,7 @@ interface SettledGrassWorkerResult {
 }
 
 export interface GrassVisualProfile {
-  id?: "fixed-arena-v1" | "compact-island-v1";
+  id?: "fixed-arena-v1" | "compact-island-v1" | "compact-meadow-v2";
   eligibility?: GrassSurfaceEligibility;
   /** Multiplies the global spacing without changing deterministic placement. */
   clumpSpacingMultiplier?: number;
@@ -411,6 +411,15 @@ export const COMPACT_ISLAND_GRASS_VISUAL_PROFILE = Object.freeze({
   minimumLodLevel: 1,
   maxRenderDistance: 140,
   maxChunksPerFrame: 1,
+} as const satisfies GrassVisualProfile);
+
+/** Independent visual trial; preserves the original profile for comparisons.
+ * Same blades, range, shadows and bounded grounding pipeline; more placements.
+ */
+export const DENSE_MEADOW_GRASS_VISUAL_PROFILE = Object.freeze({
+  ...COMPACT_ISLAND_GRASS_VISUAL_PROFILE,
+  id: "compact-meadow-v2",
+  clumpSpacingMultiplier: 2.5,
 } as const satisfies GrassVisualProfile);
 
 export interface GrassVisualReadiness {
@@ -508,6 +517,7 @@ export class GrassVisualManager implements QuadTreeListener {
   private minimumLodLevel: number;
   private maxRenderDistance: number;
   private readonly profileId: StreamingGrassProfileReceipt["profileId"];
+  private readonly compactMeadow: boolean;
   private readonly grassEligibility: GrassSurfaceEligibility;
 
   private workerSetup: GrassWorkerSetup | null = null;
@@ -582,17 +592,19 @@ export class GrassVisualManager implements QuadTreeListener {
       }
     }
     this.profileId = profile.id ?? "ordinary-v1";
+    this.compactMeadow =
+      this.profileId === "compact-island-v1" ||
+      this.profileId === "compact-meadow-v2";
     this.grassEligibility =
       createCompactTerrainColorOperations().grassEligibility(
         profile.eligibility,
         workerSetup?.terrainConfig.TERRAIN_PROFILE.algorithm ?? "",
       );
-    if (
-      this.profileId === "compact-island-v1" ||
-      this.grassEligibility === "compact-pbr-v1"
-    ) {
+    if (this.compactMeadow || this.grassEligibility === "compact-pbr-v1") {
       for (const [key, value] of Object.entries(
-        COMPACT_ISLAND_GRASS_VISUAL_PROFILE,
+        this.profileId === "compact-meadow-v2"
+          ? DENSE_MEADOW_GRASS_VISUAL_PROFILE
+          : COMPACT_ISLAND_GRASS_VISUAL_PROFILE,
       )) {
         if (profile[key] !== value)
           throw new Error(`Compact grass profile mismatch: ${key}`);
@@ -634,13 +646,11 @@ export class GrassVisualManager implements QuadTreeListener {
       createClumpGeometry(
         tier.bladesPerClump,
         tier.bladeSegments,
-        this.profileId === "compact-island-v1"
-          ? COMPACT_MEADOW_APPEARANCE
-          : GRASS_CONFIG,
+        this.compactMeadow ? COMPACT_MEADOW_APPEARANCE : GRASS_CONFIG,
       ),
     );
     this.material = this.createMaterial();
-    if (this.profileId === "compact-island-v1") {
+    if (this.compactMeadow) {
       const positions = this.lodGeometries[1].getAttribute("position");
       let radius = 0;
       for (let i = 0; i < positions.count; i++)
@@ -719,7 +729,7 @@ export class GrassVisualManager implements QuadTreeListener {
       settledChunks: this.settledWorkerResults.length,
       installedChunks: this.chunks.size,
       installedClumps,
-      ...(this.profileId === "compact-island-v1"
+      ...(this.compactMeadow
         ? {
             grounding: {
               schemaVersion: 1 as const,
@@ -773,8 +783,7 @@ export class GrassVisualManager implements QuadTreeListener {
       if (
         this.completedNodes.has(key) &&
         this.completedSurfaces.get(key) === this.getRenderedSurface(node) &&
-        (this.profileId !== "compact-island-v1" ||
-          this.isCompletedGroundingCurrent(key))
+        (!this.compactMeadow || this.isCompletedGroundingCurrent(key))
       )
         readyChunks++;
     }
@@ -812,16 +821,15 @@ export class GrassVisualManager implements QuadTreeListener {
       new THREE.InstancedBufferAttribute(new Float32Array([0, 1, 0]), 3),
     );
 
-    const material =
-      this.profileId === "compact-island-v1"
-        ? createGroundedGrassMaterial(
-            this.material,
-            geo,
-            new Float32Array(24),
-            1,
-            1,
-          )
-        : this.material;
+    const material = this.compactMeadow
+      ? createGroundedGrassMaterial(
+          this.material,
+          geo,
+          new Float32Array(24),
+          1,
+          1,
+        )
+      : this.material;
     const mesh = new THREE.InstancedMesh(geo, material, 1);
     mesh.name = "GrassQT_PrecompileSample";
     mesh.frustumCulled = false;
@@ -850,8 +858,7 @@ export class GrassVisualManager implements QuadTreeListener {
     // bounded here so several workers settling together cannot upload multiple
     // dense chunks in one render frame.
     let built = this.processSettledWorkerResults();
-    if (this.profileId === "compact-island-v1")
-      built += this.advanceGroundingJob();
+    if (this.compactMeadow) built += this.advanceGroundingJob();
 
     // Drain pending queue — dispatch to worker or build sync (fallback only)
     const pool = getGrassWorkerPool();
@@ -1288,7 +1295,7 @@ export class GrassVisualManager implements QuadTreeListener {
     )
       throw new Error("Grass requires the current retained terrain surface");
     let grounding: GrassWorkerTicket["grounding"];
-    if (this.profileId === "compact-island-v1") {
+    if (this.compactMeadow) {
       const half = node.halfSize + this.groundingHalo;
       const bounds = Object.freeze({
         minX: node.centerX - half,
@@ -1411,7 +1418,7 @@ export class GrassVisualManager implements QuadTreeListener {
     if (this.chunks.has(key)) return;
     if (data.count === 0) return;
     if (
-      this.profileId === "compact-island-v1" &&
+      this.compactMeadow &&
       (!blades ||
         !blades.grounding ||
         blades.data.count !== data.count ||
@@ -1476,10 +1483,9 @@ export class GrassVisualManager implements QuadTreeListener {
               },
             }
           : {}),
-        grassAppearance:
-          this.profileId === "compact-island-v1"
-            ? COMPACT_MEADOW_APPEARANCE.id
-            : "legacy-blades-v1",
+        grassAppearance: this.compactMeadow
+          ? COMPACT_MEADOW_APPEARANCE.id
+          : "legacy-blades-v1",
       };
 
       const identity = new THREE.Matrix4();
@@ -1564,7 +1570,7 @@ export class GrassVisualManager implements QuadTreeListener {
         continue;
       }
 
-      if (this.profileId === "compact-island-v1") {
+      if (this.compactMeadow) {
         this.workerInflight.delete(ticket.key);
         this.beginGroundingJob(ticket, result.data);
         queued++;
@@ -1782,7 +1788,7 @@ export class GrassVisualManager implements QuadTreeListener {
     const lod = lodLevel ?? this.getLodLevel(node);
     const tier = GRASS_CONFIG.LOD_TIERS[lod];
     const instanceData = this.generateInstanceData(node, tier.spacingMul);
-    if (this.profileId === "compact-island-v1") {
+    if (this.compactMeadow) {
       const ticket = this.createWorkerTicket(node, key, lod, replace);
       this.settleWorkerResult(ticket, {
         count: 0,
@@ -1935,7 +1941,7 @@ export class GrassVisualManager implements QuadTreeListener {
   // -- TSL Material ---------------------------------------------------------
 
   private createMaterial(): MeshStandardNodeMaterial {
-    const compactMeadow = this.profileId === "compact-island-v1";
+    const compactMeadow = this.compactMeadow;
     // The validated terrain owner selects lighting, independently of blade
     // shape/density. Callers without that owner retain their legacy graph.
     const terrainProfile = this.workerSetup?.terrainConfig.TERRAIN_PROFILE;

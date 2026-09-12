@@ -26,6 +26,9 @@ const LODS = [
   { blades: 4, segments: 1 },
 ] as const;
 const NUMERIC_GUARD = 0.00001;
+// Bound cheap validation work without allocating an iterator result per float.
+// This is not the geometric work budget, which still charges every take().
+const INSTANCE_VALUE_BATCH_SIZE = 32;
 
 export type GrassGroundingRoadSegment = {
   startX: number;
@@ -318,10 +321,17 @@ export function* groundGrassBladeSteps(
       values.length !== data.count * stride
     )
       throw new Error("Invalid grass grounding instance buffers");
-    for (const value of values) {
+    for (
+      let start = 0;
+      start < values.length;
+      start += INSTANCE_VALUE_BATCH_SIZE
+    ) {
       yield "instance_value";
-      if (!Number.isFinite(value))
-        throw new Error("Nonfinite grass grounding instance value");
+      const end = Math.min(start + INSTANCE_VALUE_BATCH_SIZE, values.length);
+      for (let index = start; index < end; index++) {
+        if (!Number.isFinite(values[index]))
+          throw new Error("Nonfinite grass grounding instance value");
+      }
     }
   }
   for (let i = 0; i < data.count; i++) {
@@ -714,13 +724,16 @@ export function* groundGrassBladeSteps(
       let minY = Infinity,
         maxY = -Infinity;
       for (let v = 0; v < position.count; v++) {
+        // One blade is a bounded batch: at most seven vertices / fourteen
+        // transforms at LOD0. Keep every original work charge and arithmetic
+        // operation in order; only generator suspension points are coalesced.
+        if (v % verticesPerBlade === 0) yield "grounding_operation";
         const blade = Math.floor(v / verticesPerBlade),
           d = (i * blades + blade) * 2;
         const correction =
           deltas[d] * (1 - uv.getX(v)) + deltas[d + 1] * uv.getX(v);
         const windFactor = uv.getY(v) ** 1.8;
         for (let fade = 0; fade < 2; fade++) {
-          yield "grounding_operation";
           take();
           transform(v, fade, point);
           box.minX = Math.min(
@@ -891,6 +904,7 @@ export type GrassBladeGroundingJobState =
 export class GrassGroundingContinuation {
   private iterator: ReturnType<typeof groundGrassBladeSteps> | null;
   private current: GrassBladeGroundingJobState = { status: "running" };
+  /** Generator resumptions, not receipt.workUnits (geometric work charges). */
   operations = 0;
   activeMs = 0;
   lastSliceOperations = 0;

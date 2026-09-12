@@ -76,6 +76,24 @@ export const STREAMING_RENDER_PROFILES = Object.freeze({
     grassProfile: "compact-island-v1" as const,
     avatarLodPolicy: "distance-authoritative-v1" as const,
   }),
+  // Denser meadow qualification only; never selected by FPS/default routing.
+  "island-meadow-720p60-v1": Object.freeze({
+    id: "island-meadow-720p60-v1" as const,
+    targetFps: 60,
+    sourceFps: 60,
+    outputFps: 60,
+    viewportWidth: 1280,
+    viewportHeight: 720,
+    outputWidth: 1280,
+    outputHeight: 720,
+    renderPixelBudget: 1280 * 720,
+    maximumDpr: 1,
+    antialiasing: true,
+    shadows: "med" as const,
+    postprocessing: false,
+    grassProfile: "compact-meadow-v2" as const,
+    avatarLodPolicy: "distance-authoritative-v1" as const,
+  }),
 });
 
 export type StreamingRenderProfileId = keyof typeof STREAMING_RENDER_PROFILES;
@@ -90,7 +108,9 @@ export function resolveSkyAtmosphereMode(win?: Window): SkyAtmosphereMode {
   if (values.length !== 1 || values[0] !== "scattering-v1")
     throw new Error("Unknown or duplicate sky atmosphere candidate");
   if (
-    resolveExplicitStreamingRenderProfile(windowRef)?.id !== "island-720p60-v1"
+    !["island-720p60-v1", "island-meadow-720p60-v1"].includes(
+      resolveExplicitStreamingRenderProfile(windowRef)?.id ?? "",
+    )
   )
     throw new Error(
       "Scattering sky requires the explicit non-embedded island profile",
@@ -194,7 +214,11 @@ export type GrassSurfaceEligibility = "legacy-biome-v1" | "compact-pbr-v1";
 
 export type StreamingGrassProfileReceipt = {
   schemaVersion: 1;
-  profileId: "ordinary-v1" | "fixed-arena-v1" | "compact-island-v1";
+  profileId:
+    | "ordinary-v1"
+    | "fixed-arena-v1"
+    | "compact-island-v1"
+    | "compact-meadow-v2";
   eligibility: GrassSurfaceEligibility;
   terrainProfileIdentity: string;
   minimumLodLevel: number;
@@ -288,7 +312,11 @@ export function evaluateStreamingRenderProfileApplication(
     if (requested[key] !== expected[key]) return finish(`requested.${key}`);
   }
   if (!applied) return finish("renderer_unavailable");
-  if (profile.grassProfile === "compact-island-v1") {
+  if (
+    profile.grassProfile === "compact-island-v1" ||
+    profile.grassProfile === "compact-meadow-v2"
+  ) {
+    const denseMeadow = profile.grassProfile === "compact-meadow-v2";
     const grass = applied.grass;
     if (!grass) return finish("grass_unavailable");
     if (
@@ -299,8 +327,8 @@ export function evaluateStreamingRenderProfileApplication(
       grass.terrainProfileIdentity.trim().length === 0 ||
       grass.terrainProfileIdentity.length > 16384 ||
       grass.minimumLodLevel !== 1 ||
-      grass.clumpSpacingMultiplier !== 4 ||
-      grass.clumpSpacing !== 2.8 ||
+      grass.clumpSpacingMultiplier !== (denseMeadow ? 2.5 : 4) ||
+      grass.clumpSpacing !== (denseMeadow ? 1.75 : 2.8) ||
       grass.maxRenderDistance !== 140 ||
       grass.maxChunksPerFrame !== 1 ||
       grass.castShadow !== false ||

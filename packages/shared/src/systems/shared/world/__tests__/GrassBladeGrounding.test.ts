@@ -11,6 +11,7 @@ import {
 import type { GrassTerrainSurfaceSnapshot } from "../../../../utils/workers/GrassTerrainSurfaceSnapshot";
 import {
   groundGrassBlades,
+  groundGrassBladeSteps,
   GrassBladeGroundingJob,
   GRASS_BLADE_GROUNDING_LIMITS,
   type GrassBladeGroundingRequest,
@@ -399,6 +400,77 @@ describe("CPU per-blade grounding prototype (no renderer/GPU)", () => {
       }
     },
   );
+
+  it("validates every float in bounded batches, including partial tails", () => {
+    const f = analyticOwner();
+    try {
+      const surface = f.makeSurface();
+      const points = Array.from({ length: 11 }, (_, i): [number, number] => [
+        i - 5,
+        0,
+      ]);
+      const request = f.request(surface, f.dataAt(surface, points));
+      const before = structuredClone(request.data);
+      const steps = groundGrassBladeSteps(request);
+      let batches = 0;
+      for (const phase of steps) if (phase === "instance_value") batches++;
+      // Four 33-float arrays and one 44-float array: two batches each.
+      expect(batches).toBe(10);
+      expect(request.data).toEqual(before);
+      for (const key of [
+        "offsets",
+        "rotScaleHash",
+        "groundColors",
+        "grassTints",
+        "groundNormals",
+      ] as const) {
+        for (const index of [0, 31, 32, request.data[key].length - 1]) {
+          for (const value of [NaN, Infinity, -Infinity]) {
+            const invalid = { ...request, data: structuredClone(before) };
+            invalid.data[key][index] = value;
+            expect(() => groundGrassBlades(invalid)).toThrow(
+              "Nonfinite grass grounding instance value",
+            );
+          }
+        }
+      }
+    } finally {
+      f.close();
+    }
+  });
+
+  it("cancels between validation batches without examining unpublished input", () => {
+    const f = analyticOwner();
+    try {
+      const surface = f.makeSurface();
+      const request = f.request(
+        surface,
+        f.dataAt(
+          surface,
+          Array.from({ length: 11 }, (_, i): [number, number] => [i - 5, 0]),
+        ),
+      );
+      const geometry = f.geometries[0];
+      const job = new GrassBladeGroundingJob(request, () =>
+        surface.matchesGeometry(geometry),
+      );
+      expect(job.advance(3).status).toBe("running");
+      expect(job.lastPhase).toBe("instance_value");
+      request.data.offsets[32] = NaN;
+      geometry.setAttribute(
+        "position",
+        geometry.getAttribute("position").clone(),
+      );
+      const before = job.operations;
+      expect(job.advance(1)).toEqual({
+        status: "cancelled",
+        reason: "invalidated",
+      });
+      expect(job.operations).toBe(before);
+    } finally {
+      f.close();
+    }
+  });
 
   it("cancels a real retained geometry replacement before more work and keeps missing support/budget failure terminal", () => {
     const f = analyticOwner();

@@ -208,63 +208,111 @@ describe("opt-in shadows render contract (CPU validation, not GPU execution)", (
     ).toBeNull();
   });
 
-  it("requires actual island grass configuration, not an advertised ready bit or clump quota", () => {
-    const island = STREAMING_RENDER_PROFILES["island-720p60-v1"];
-    const state = observed();
-    expect(
-      evaluateStreamingRenderProfileApplication(island, requested, state)
-        .mismatchReason,
-    ).toBe("grass_unavailable");
-    const grass: StreamingGrassProfileReceipt = {
-      schemaVersion: 1,
-      profileId: "compact-island-v1",
-      eligibility: "compact-pbr-v1",
-      terrainProfileIdentity: "admitted-terrain",
-      minimumLodLevel: 1,
-      clumpSpacingMultiplier: 4,
-      clumpSpacing: 2.8,
-      maxRenderDistance: 140,
-      maxChunksPerFrame: 1,
-      castShadow: false,
-      destroyed: false,
-      liveNodes: 0,
-      pendingChunks: 0,
-      inflightChunks: 0,
-      settledChunks: 0,
-      installedChunks: 0,
-      installedClumps: 0,
-    };
-    state.grass = grass;
-    expect(
-      evaluateStreamingRenderProfileApplication(island, requested, state).ready,
-    ).toBe(true);
-    const invalid: Partial<StreamingGrassProfileReceipt>[] = [
-      { profileId: "fixed-arena-v1" },
-      { eligibility: "legacy-biome-v1" },
-      { minimumLodLevel: 2 },
-      { clumpSpacingMultiplier: 1 },
-      { clumpSpacing: 0.7 },
-      { maxRenderDistance: 500 },
-      { maxChunksPerFrame: 2 },
-      { castShadow: true },
-      { destroyed: true },
-      { terrainProfileIdentity: "" },
-      { installedClumps: NaN },
-      { pendingChunks: -1 },
-      { settledChunks: 0.5 },
-    ];
-    for (const change of invalid) {
-      state.grass = { ...grass, ...change };
+  it.each(["island-720p60-v1", "island-meadow-720p60-v1"] as const)(
+    "requires actual %s grass configuration, not an advertised ready bit or clump quota",
+    (id) => {
+      const island = STREAMING_RENDER_PROFILES[id];
+      const dense = id === "island-meadow-720p60-v1";
+      const state = observed();
+      expect(
+        evaluateStreamingRenderProfileApplication(island, requested, state)
+          .mismatchReason,
+      ).toBe("grass_unavailable");
+      const grass: StreamingGrassProfileReceipt = {
+        schemaVersion: 1,
+        profileId: dense ? "compact-meadow-v2" : "compact-island-v1",
+        eligibility: "compact-pbr-v1",
+        terrainProfileIdentity: "admitted-terrain",
+        minimumLodLevel: 1,
+        clumpSpacingMultiplier: dense ? 2.5 : 4,
+        clumpSpacing: dense ? 1.75 : 2.8,
+        maxRenderDistance: 140,
+        maxChunksPerFrame: 1,
+        castShadow: false,
+        destroyed: false,
+        liveNodes: 0,
+        pendingChunks: 0,
+        inflightChunks: 0,
+        settledChunks: 0,
+        installedChunks: 0,
+        installedClumps: 0,
+      };
+      state.grass = grass;
       expect(
         evaluateStreamingRenderProfileApplication(island, requested, state)
           .ready,
-      ).toBe(false);
-    }
-    state.grass = null;
+      ).toBe(true);
+      const invalid: Partial<StreamingGrassProfileReceipt>[] = [
+        { profileId: "fixed-arena-v1" },
+        { profileId: dense ? "compact-island-v1" : "compact-meadow-v2" },
+        { clumpSpacingMultiplier: dense ? 4 : 2.5 },
+        { clumpSpacing: dense ? 2.8 : 1.75 },
+        { eligibility: "legacy-biome-v1" },
+        { minimumLodLevel: 2 },
+        { clumpSpacingMultiplier: 1 },
+        { clumpSpacing: 0.7 },
+        { maxRenderDistance: 500 },
+        { maxChunksPerFrame: 2 },
+        { castShadow: true },
+        { destroyed: true },
+        { terrainProfileIdentity: "" },
+        { installedClumps: NaN },
+        { pendingChunks: -1 },
+        { settledChunks: 0.5 },
+      ];
+      for (const change of invalid) {
+        state.grass = { ...grass, ...change };
+        expect(
+          evaluateStreamingRenderProfileApplication(island, requested, state)
+            .ready,
+        ).toBe(false);
+      }
+      state.grass = null;
+      expect(
+        evaluateStreamingRenderProfileApplication(profile, requested, state)
+          .ready,
+      ).toBe(true);
+    },
+  );
+
+  it("keeps dense meadow opt-in without reducing any existing rendering quality", () => {
+    const original = STREAMING_RENDER_PROFILES["island-720p60-v1"];
+    const dense = STREAMING_RENDER_PROFILES["island-meadow-720p60-v1"];
+    expect({
+      ...dense,
+      id: original.id,
+      grassProfile: original.grassProfile,
+    }).toEqual(original);
     expect(
-      evaluateStreamingRenderProfileApplication(profile, requested, state)
-        .ready,
-    ).toBe(true);
+      resolveExplicitStreamingRenderProfile(makeWindow("/stream.html")),
+    ).toBeNull();
+    expect(
+      resolveExplicitStreamingRenderProfile(
+        makeWindow(
+          "/stream.html",
+          "?streamRenderProfile=island-meadow-720p60-v1",
+        ),
+      ),
+    ).toBe(dense);
+    for (const query of [
+      "&embedded=true",
+      "&streamFps=30",
+      "&streamRenderProfile=island-720p60-v1",
+    ]) {
+      expect(() =>
+        resolveExplicitStreamingRenderProfile(
+          makeWindow(
+            "/stream.html",
+            "?streamRenderProfile=island-meadow-720p60-v1" + query,
+          ),
+        ),
+      ).toThrow();
+    }
+    expect(() =>
+      resolveExplicitStreamingRenderProfile(
+        makeWindow("/play", "?streamRenderProfile=island-meadow-720p60-v1"),
+      ),
+    ).toThrow();
   });
 
   it.each([

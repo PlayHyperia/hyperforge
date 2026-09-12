@@ -162,6 +162,7 @@ import { WaterVisualManager } from "./WaterVisualManager";
 import {
   GrassVisualManager,
   COMPACT_ISLAND_GRASS_VISUAL_PROFILE,
+  DENSE_MEADOW_GRASS_VISUAL_PROFILE,
   STREAMING_GRASS_VISUAL_PROFILE,
   type GrassWorkerSetup,
 } from "./GrassVisualManager";
@@ -2305,11 +2306,14 @@ export class TerrainSystem extends System {
           this.getTerrainColorAt(wx, wz, true, eligibility),
         grassWorkerSetup,
         resolveExplicitStreamingRenderProfile()?.grassProfile ===
-          "compact-island-v1"
-          ? COMPACT_ISLAND_GRASS_VISUAL_PROFILE
-          : isStreamingViewport
-            ? STREAMING_GRASS_VISUAL_PROFILE
-            : undefined,
+          "compact-meadow-v2"
+          ? DENSE_MEADOW_GRASS_VISUAL_PROFILE
+          : resolveExplicitStreamingRenderProfile()?.grassProfile ===
+              "compact-island-v1"
+            ? COMPACT_ISLAND_GRASS_VISUAL_PROFILE
+            : isStreamingViewport
+              ? STREAMING_GRASS_VISUAL_PROFILE
+              : undefined,
         terrainShade,
         (wx: number, wz: number) =>
           this.waterBodyRegistry.getWaterSurfaceAt(wx, wz),

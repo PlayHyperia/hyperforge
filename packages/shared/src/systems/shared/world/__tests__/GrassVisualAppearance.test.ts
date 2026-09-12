@@ -8,6 +8,7 @@ import type { Node } from "three/webgpu";
 import { createTerrainWorkerConfig } from "../../../../utils/workers/TerrainWorkerShared";
 import {
   COMPACT_ISLAND_GRASS_VISUAL_PROFILE,
+  DENSE_MEADOW_GRASS_VISUAL_PROFILE,
   COMPACT_MEADOW_APPEARANCE,
   GRASS_CONFIG,
   GrassVisualManager,
@@ -247,31 +248,43 @@ describe("compact meadow appearance candidate (CPU only)", () => {
     }
   });
 
-  it("uses one opaque PBR material without adding texture inputs", () => {
-    const owner = manager(COMPACT_ISLAND_GRASS_VISUAL_PROFILE);
-    try {
-      const material = owner["material"];
-      expect(material.name).toBe(COMPACT_MEADOW_APPEARANCE.id);
-      expect(material.transparent).toBe(false);
-      expect(material.depthWrite).toBe(true);
-      expect(material.side).toBe(THREE.DoubleSide);
-      expect(material.roughness).toBe(1);
-      expect(material.metalness).toBe(0);
-      expect(material.fog).toBe(false);
-      expect(material.map).toBeNull();
-      expect(material.normalMap).toBeNull();
-      expect(material.alphaMap).toBeNull();
-      expect(material.emissive.getHex()).toBe(0);
-      expect(material.positionNode).toBeTruthy();
-      expect(material.colorNode).toBeTruthy();
-      expect(owner["maxRenderDistance"]).toBe(140);
-      expect(owner["minimumLodLevel"]).toBe(1);
-      expect(owner["clumpSpacing"]).toBe(2.8);
-      expect(owner["maxChunksPerFrame"]).toBe(1);
-    } finally {
-      owner.destroy();
-    }
-  });
+  it.each([
+    COMPACT_ISLAND_GRASS_VISUAL_PROFILE,
+    DENSE_MEADOW_GRASS_VISUAL_PROFILE,
+  ])(
+    "uses one opaque PBR material without adding texture inputs for $id",
+    (profile) => {
+      const owner = manager(profile);
+      try {
+        const material = owner["material"];
+        expect(material.name).toBe(COMPACT_MEADOW_APPEARANCE.id);
+        expect(material.transparent).toBe(false);
+        expect(material.depthWrite).toBe(true);
+        expect(material.side).toBe(THREE.DoubleSide);
+        expect(material.roughness).toBe(1);
+        expect(material.metalness).toBe(0);
+        expect(material.fog).toBe(false);
+        expect(material.map).toBeNull();
+        expect(material.normalMap).toBeNull();
+        expect(material.alphaMap).toBeNull();
+        expect(material.emissive.getHex()).toBe(0);
+        expect(material.positionNode).toBeTruthy();
+        expect(material.colorNode).toBeTruthy();
+        expect(owner["maxRenderDistance"]).toBe(140);
+        expect(owner["minimumLodLevel"]).toBe(1);
+        expect(owner["clumpSpacing"]).toBe(
+          profile.id === "compact-meadow-v2" ? 1.75 : 2.8,
+        );
+        expect(owner["maxChunksPerFrame"]).toBe(1);
+        expect(owner.getProfileReceipt()).toMatchObject({
+          profileId: profile.id,
+          grounding: { mode: "blade-roots-v1", failedChunks: 0 },
+        });
+      } finally {
+        owner.destroy();
+      }
+    },
+  );
 
   it.each([
     ["ordinary", {}],
