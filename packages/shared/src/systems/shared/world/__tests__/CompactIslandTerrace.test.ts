@@ -189,6 +189,7 @@ describe("explicit western rocky terrace successor", () => {
     // Keep this historical v4→v5 migration oracle independent of the new
     // active v6 profile. No source anchors, rewards, layout or pose changes.
     const config = structuredClone(DataManager.getWorldConfig()!);
+    delete config.compactServiceCourt;
     config.terrainProfile = current;
     config.compactResourceGroves!.terrainProfileId = current.id;
     config.compactPreparationLodge!.terrainProfileId = current.id;

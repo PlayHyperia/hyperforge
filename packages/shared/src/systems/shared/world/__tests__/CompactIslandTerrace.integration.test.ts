@@ -96,8 +96,10 @@ async function fixture(profile: WorldTerrainProfile, content: boolean) {
       // 29-resource census. The independently frozen v1 grove is intentional;
       // current grouped-grove installation is covered by its own integration.
       DataManager["worldContentIdentity"] = null;
+      const historical = structuredClone(saved.config);
+      delete historical.compactServiceCourt;
       DataManager.setWorldConfig({
-        ...structuredClone(saved.config),
+        ...historical,
         terrainProfile: current,
         compactPreparationLodge: {
           ...saved.config.compactPreparationLodge!,

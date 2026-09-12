@@ -1398,6 +1398,16 @@ export interface CompactPreparationLodgeManifest {
   readonly recipeId: "compact-bank-lodge01-v1";
 }
 
+/** Optional open architecture with terrain support, never an indoor/floor owner. */
+export type CompactServiceCourtManifest = Readonly<{
+  schemaVersion: 1;
+  layoutId: "compact-service-court-v1";
+  terrainProfileId: "compact-duel-island-v6";
+  position: Readonly<{ x: 336.5; z: 337.5 }>;
+  rotation: 0;
+  recipeId: "open-timber-smithy-v1";
+}>;
+
 /** Complete configuration loaded from assets/manifests/world-config.json. */
 export interface WorldConfigManifest {
   /** Manifest version for compatibility checking */
@@ -1418,6 +1428,7 @@ export interface WorldConfigManifest {
   compactResourceGroves?: CompactResourceGrovesManifest;
   /** Optional, explicitly admitted preparation architecture; no town/NPC generation. */
   compactPreparationLodge?: CompactPreparationLodgeManifest;
+  compactServiceCourt?: CompactServiceCourtManifest;
 }
 
 // ============== BUILDINGS MANIFEST TYPES ==============

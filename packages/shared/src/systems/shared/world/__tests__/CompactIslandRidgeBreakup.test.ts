@@ -46,6 +46,8 @@ describe("shared broken-ridge sculpt", () => {
   it("hashes the actual complete v6 content and rejects the previously shipped v5 content before packets", async () => {
     const config = structuredClone(DataManager.getWorldConfig()!);
     const old = structuredClone(config);
+    // This architecture did not exist in the retained v5 world content.
+    delete old.compactServiceCourt;
     old.terrainProfile = previous;
     old.compactResourceGroves = {
       ...old.compactResourceGroves!,

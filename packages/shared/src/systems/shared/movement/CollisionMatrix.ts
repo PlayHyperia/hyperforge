@@ -57,10 +57,21 @@ export const ZONE_SIZE = 8;
 /** Number of tiles per zone */
 const TILES_PER_ZONE = ZONE_SIZE * ZONE_SIZE; // 64
 
+/** Releasing this lease cannot clear terrain, network or another object's flags. */
+export type StaticCollisionLease = Readonly<{
+  tileCount: number;
+  release(): boolean;
+}>;
+
 /**
  * Interface for collision matrix operations
  */
 export interface ICollisionMatrix {
+  /** Own a reference-counted static obstacle without overwriting other flags. */
+  acquireStaticFootprint(
+    tiles: readonly Readonly<{ x: number; z: number }>[],
+  ): StaticCollisionLease;
+
   /** Get flags for a tile */
   getFlags(tileX: number, tileZ: number): number;
 
@@ -121,6 +132,13 @@ export class CollisionMatrix implements ICollisionMatrix {
   /** Zone storage: Map<bigint, Int32Array[64]> - uses packed coordinate key */
   private zones: Map<bigint, Int32Array>;
 
+  // Separate from base flags: depletion, terrain refresh and network replacement
+  // cannot erase scenery ownership. Reads reuse the existing zone-key cache.
+  private staticFootprints = new Map<bigint, Uint16Array>();
+  private staticLeases = new Set<symbol>();
+  private staticPlaceholderZones = new Set<bigint>();
+  private cachedStaticFootprint: Uint16Array | undefined;
+
   // Pre-allocated for getFlags/setFlags hot path
   private _cachedZoneKey: bigint = 0n;
   private _cachedZoneX: number = NaN;
@@ -152,6 +170,7 @@ export class CollisionMatrix implements ICollisionMatrix {
     this._cachedZoneX = zoneX;
     this._cachedZoneZ = zoneZ;
     this._cachedZoneKey = (BigInt(zoneX) << 32n) | BigInt(zoneZ >>> 0);
+    this.cachedStaticFootprint = this.staticFootprints.get(this._cachedZoneKey);
     return this._cachedZoneKey;
   }
 
@@ -200,7 +219,94 @@ export class CollisionMatrix implements ICollisionMatrix {
     const zone = this.getZone(tileX, tileZ);
     if (!zone) return 0;
     const index = this.getTileIndex(tileX, tileZ);
-    return zone[index];
+    return (
+      zone[index] |
+      (this.cachedStaticFootprint?.[index] ? CollisionFlag.BLOCKED : 0)
+    );
+  }
+
+  /**
+   * Acquire a bounded, immutable ground-level footprint. Tiles are integer
+   * movement cells, not world-space box coordinates. Full validation precedes
+   * installation, overlaps are reference-counted and stale releases are inert.
+   * The lease does not imply a floor, deck, indoor zone or visual/PhysX owner.
+   */
+  acquireStaticFootprint(
+    tiles: readonly Readonly<{ x: number; z: number }>[],
+  ): StaticCollisionLease {
+    if (
+      !Array.isArray(tiles) ||
+      tiles.length < 1 ||
+      tiles.length > 4096 ||
+      this.staticLeases.size >= 1024
+    )
+      throw new Error(
+        "Static footprint requires 1..4096 tiles and an available owner slot",
+      );
+    const groups = new Map<bigint, Set<number>>();
+    for (const tile of tiles) {
+      if (
+        !tile ||
+        !Number.isInteger(tile.x) ||
+        !Number.isInteger(tile.z) ||
+        tile.x < -2147483648 ||
+        tile.x > 2147483647 ||
+        tile.z < -2147483648 ||
+        tile.z > 2147483647
+      )
+        throw new Error(
+          "Static footprint requires signed 32-bit integer tiles",
+        );
+      const key =
+        (BigInt(Math.floor(tile.x / ZONE_SIZE)) << 32n) |
+        BigInt(Math.floor(tile.z / ZONE_SIZE) >>> 0);
+      let indices = groups.get(key);
+      if (!indices) groups.set(key, (indices = new Set()));
+      const index = this.getTileIndex(tile.x, tile.z);
+      if (indices.has(index))
+        throw new Error("Static footprint contains a duplicate tile");
+      indices.add(index);
+    }
+    const token = Symbol("static-footprint");
+    for (const [key, indices] of groups) {
+      let counts = this.staticFootprints.get(key);
+      if (!counts)
+        this.staticFootprints.set(
+          key,
+          (counts = new Uint16Array(TILES_PER_ZONE)),
+        );
+      if (!this.zones.has(key)) {
+        this.zones.set(key, new Int32Array(TILES_PER_ZONE));
+        this.staticPlaceholderZones.add(key);
+      }
+      for (const index of indices) counts[index]++;
+    }
+    this.staticLeases.add(token);
+    this._cachedZoneX = NaN;
+    this._cachedZoneZ = NaN;
+    this.cachedStaticFootprint = undefined;
+    return Object.freeze({
+      tileCount: tiles.length,
+      release: () => {
+        if (!this.staticLeases.delete(token)) return false;
+        for (const [key, indices] of groups) {
+          const counts = this.staticFootprints.get(key)!;
+          for (const index of indices) counts[index]--;
+          if (!counts.some((count) => count !== 0)) {
+            this.staticFootprints.delete(key);
+            if (
+              this.staticPlaceholderZones.delete(key) &&
+              !this.zones.get(key)!.some((flags) => flags !== 0)
+            )
+              this.zones.delete(key);
+          }
+        }
+        this._cachedZoneX = NaN;
+        this._cachedZoneZ = NaN;
+        this.cachedStaticFootprint = undefined;
+        return true;
+      },
+    });
   }
 
   /**
@@ -362,7 +468,12 @@ export class CollisionMatrix implements ICollisionMatrix {
     const zone = this.getZone(tileX, tileZ);
     if (!zone) return false;
     const index = this.getTileIndex(tileX, tileZ);
-    return (zone[index] & flags) !== 0;
+    return (
+      ((zone[index] |
+        (this.cachedStaticFootprint?.[index] ? CollisionFlag.BLOCKED : 0)) &
+        flags) !==
+      0
+    );
   }
 
   /**
@@ -481,6 +592,10 @@ export class CollisionMatrix implements ICollisionMatrix {
    */
   clear(): void {
     this.zones.clear();
+    this.staticFootprints.clear();
+    this.staticLeases.clear();
+    this.staticPlaceholderZones.clear();
+    this.cachedStaticFootprint = undefined;
     this._cachedZoneX = NaN;
     this._cachedZoneZ = NaN;
   }
@@ -492,7 +607,16 @@ export class CollisionMatrix implements ICollisionMatrix {
   getZoneData(zoneX: number, zoneZ: number): Int32Array | null {
     // Direct BigInt key computation (no caching needed for zone-coord API)
     const key = (BigInt(zoneX) << 32n) | BigInt(zoneZ >>> 0);
-    return this.zones.get(key) ?? null;
+    const data = this.zones.get(key);
+    if (!data) return null;
+    const counts = this.staticFootprints.get(key);
+    if (!counts) return data;
+    // Export the combined authoritative state without exposing the base array
+    // to edits through a synthesized ownership view.
+    const combined = new Int32Array(data);
+    for (let i = 0; i < TILES_PER_ZONE; i++)
+      if (counts[i]) combined[i] |= CollisionFlag.BLOCKED;
+    return combined;
   }
 
   /**

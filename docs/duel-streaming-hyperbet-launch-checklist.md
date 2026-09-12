@@ -1,5 +1,47 @@
 # Duel Arena, Streaming, and Hyperbet Launch Checklist
 
+## Grounded smithy and camera cutaway — 2026-09-12
+
+- [x] Add a manifest-admitted 10×6 m open smithy around the existing forge/anvil:
+      independently grounded feet, three private mesh/material batches, 824 triangles,
+      136,968 geometry bytes. No new floor, service, resource or texture allocation.
+- [x] Add reference-counted static navigation footprints with idempotent release,
+      preserving independent network/base collision flags. Verify native triangle
+      collision/render agreement across three lifetimes and all 48 tree approaches
+      from all three authoritative duel return marks.
+- [x] Reject the original 8 m placement when it blocks the path apron/tanner.
+      The 10 m layout clears sampled service/NPC/model bounds and all tested paths.
+- [x] Reject native76 visually: its roof hides preparation. Implement a bounded
+      main-camera roof cutaway, preserved shadows/colliders and hidden-roof pointer
+      filtering. Correct timber UV direction and reduce the roof's shingle scale.
+- [x] Pass 1,135 shared tests / 83 files, 27 capture controls, strict affected-test
+      and shared/client/server type checks, builds, and scoped lint/formatting.
+- [x] Independently verify native78: 24 images, 648 source pins / 579 archives,
+      18 matched pairs against both native64 and the actual pre-fix native76,
+      36 cutaway boundaries and actual compiled main-view mask shaders. The forge
+      and nearby agents are revealed; the wider view restores the roof.
+      Both 48-tree censuses pass. No page/GPU/cleanup errors; owned Chrome/ports close.
+- [x] Preserve native77's diagnostic failure (TSL boolean wrapper read incorrectly)
+      and native78's failed supplemental native75 bay-lighting comparison:
+      0.010688 phase difference exceeds 0.01; never relabel either as a pass.
+- [ ] Finish smithy art: diagnose the visible timber/gable speckling with a
+      controlled shadow/material comparison, improve wood response and review
+      lower-beam occlusion in animated preparation shots. Cutaway endpoint stills
+      and CPU interpolation checks do not qualify transition motion.
+- [ ] Redesign the service/arena composition coherently: the 40×25 m lobby and
+      28×23 m recovery slabs, isolated bank chest, empty lawn, ground transitions,
+      shoreline and smooth rock knolls still fall well below the target.
+      Keep one arena, functional choppable trees and reliable short travel routes.
+- [ ] Qualify actual GPU cost/presented frames, multiple-agent motion, streaming
+      and long-duration stability. Resolve the existing cow-model and dagger-fit
+      failures. Native78 overall remains false for 19 known content errors.
+      No AAA, material-final, performance, default-promotion or launch approval.
+
+Evidence: `docs/compact-smithy-cutaway-20260912.md`,
+`asset-studio/compact-smithy-court01/shared-tests07.json`,
+`after78-root-verification.json` and immutable native76/77/78 captures.
+The 24-shrub planting proposal is not implemented.
+
 ## Broken western ridge and composition direction — 2026-09-12
 
 - [x] Establish a clearly labeled concept reference for a coherent compact island:
