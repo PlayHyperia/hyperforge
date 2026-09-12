@@ -1,5 +1,59 @@
 # Denser meadow: verified trial, unfinished visual result
 
+## Curved blades and soft lighting checkpoint
+
+The explicit dense comparison profile now uses shorter quadratic blades,
+smooth derivative normals and two-sided terrain-aligned soft lighting.
+It retains the same topology, geometry-buffer bytes, instance attributes,
+placement density, LOD, range, shadows and resolution. No texture is added.
+Original compact and ordinary/fixed-arena geometry remain byte-stable.
+Normal yaw/tilt happens per vertex; face correction and the soft blend happen
+per fragment. This is a deliberate approximation, not complete plant
+transmission or exact normals under all wind/fade/root-correction deformation.
+
+Native Chrome152 / Metal / AppleM5, nonfallback WebGPU at 1280×720, DPR1,
+MSAA4 and existing 4096px sun shadows installed **11,652 clumps** and
+**1,118,592 correction bytes** across six complete owners. All eight world
+views were directly reviewed. The shorter curved silhouette is an incremental
+improvement, but the sparse/wiry blades, airbrushed ground, synthetic ridges
+and inconsistent foliage/building materials still fail the requested quality.
+This comparison profile is not promoted to the default experience.
+
+Same camera and rendering quality; live actors/lighting time are not frozen:
+
+Before curved appearance:
+![Previous meadow blades](evidence/campus-meadow-20260912-after.png)
+
+After curved appearance:
+![Curved meadow blades](evidence/curved-meadow-20260912-after.png)
+
+1,236 shared tests / 90 files, 24 checks against the untouched original
+grounding algorithm, 22 native preflights, all three builds/typechecks and
+scoped lint pass. Curve geometry, roots, buffer layout, tangent/unit normals
+and actual TSL arithmetic are checked; an independent quaternion oracle covers
+three slopes, four rotations, three views, both faces and three blade normals.
+
+Native study passes, **overall report remains failed** on nineteen existing
+cow/dagger errors. No new page/GPU/cleanup errors; owned browser, launcher and
+ports closed. All679 current source pins,600 archives and16 PNGs are verified.
+The baseline opening frames retain loading overlays and are not visual approval.
+Report SHA-256:
+`ee40a20a2889ad9293935e351bcbecc832213df5efeba640b0b5cfe43992095b`.
+Evidence and verifier:
+`asset-studio/compact-grass-grounding-integration01/curves01/`.
+
+Active fitting totaled614.7ms with a5.9ms maximum slice, still overshooting
+the2ms target. Ten-second campus/meadow p95 CPU ticks were10.8/9.4ms and GPU-pass
+sums13.83/15.20ms. These are not presented FPS, full GPU wall time, a controlled
+speedup benchmark or stable full-population60FPS qualification.
+
+[AMD's grass research](https://gpuopen.com/learn/mesh_shaders/mesh_shaders-procedural_grass_rendering/)
+informs curve/normal principles; [Three NodeMaterial](https://threejs.org/docs/pages/NodeMaterial.html)
+and installed r186 source supply the actual node semantics. Native mesh shaders
+are not claimed as a browser feature. Next: coherent ground-material coverage
+and vegetation integration, then moving-view/lighting/contact and cost checks.
+G04 and the overall AAA/reliability goal remain OPEN.
+
 ## Campus clearance and spatial-query correction
 
 The broad `duel_arena_campus_grade` blended across X292–444 / Z324.5–457 and

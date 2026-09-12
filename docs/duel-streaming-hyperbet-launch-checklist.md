@@ -1,5 +1,39 @@
 # Duel Arena, Streaming, and Hyperbet Launch Checklist
 
+## Curved meadow checkpoint — 2026-09-12
+
+Status: **G04 remains OPEN. Curved geometry/shading verified in native WebGPU;
+terrain, vegetation composition and full-world visual quality are unfinished.**
+
+- [x] Replaced dense-profile blades with shorter quadratic centerlines and
+  smooth derivative normals; added terrain-aligned, two-sided soft lighting.
+  No extra textures, attributes, triangles or geometry-buffer bytes. Existing
+  density, LOD, range, resolution, shadows and hard grounding limits remain.
+  Original compact and ordinary/fixed-arena geometry stay byte-stable.
+- [x] Passed 1,236 shared tests / 90 files, 24 untouched-original-reference
+  checks, 22 native preflights, all three builds/typechecks and scoped lint.
+  Actual TSL normal arithmetic matches an independent quaternion oracle.
+- [x] Native Chrome/Metal WebGPU installed 11,652 clumps / 1,118,592 correction
+  bytes in six complete owners. No page/GPU/cleanup errors; all owned test
+  browser/launcher/ports closed. Verified 679 current pins, 600 source archives
+  and all 16 PNGs. All eight world views directly reviewed.
+- [ ] Finish visual quality: blades remain sparse/wiry, ground looks airbrushed,
+  ridges/coast look synthetic and foliage/building materials lack cohesion.
+  Static soft normals are not physically exact animated plant transmission.
+  This explicit comparison profile is not a new approved default.
+- [ ] Resolve 19 retained cow/dagger content errors; overall native result is
+  still failed even though this focused render study passes.
+- [ ] Close performance gates: active fitting614.7ms / max slice5.9ms exceeds
+  the 2ms target. Ten-second p95 CPU ticks10.8/9.4ms and GPU-pass sums13.83/15.20ms
+  are not presented FPS, controlled speedup or stable full-population60FPS.
+- [ ] Next: improve coherent ground-material coverage and vegetation integration,
+  then moving-view/lighting/contact and actual cost review. Continue deliberate
+  geology, architecture, sky/water, animation and soundscape work. Preserve one
+  arena and functional resource trees; do not restore the large playable world.
+
+Evidence: `docs/dense-meadow-study-20260912.md` and
+`asset-studio/compact-grass-grounding-integration01/curves01/native-evidence.json`.
+
 ## Campus meadow restored — 2026-09-12
 
 Status: **G04 remains OPEN. Clearance/scalability fix verified; blade appearance

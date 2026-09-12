@@ -10,6 +10,7 @@ import {
   COMPACT_ISLAND_GRASS_VISUAL_PROFILE,
   DENSE_MEADOW_GRASS_VISUAL_PROFILE,
   COMPACT_MEADOW_APPEARANCE,
+  CURVED_MEADOW_APPEARANCE,
   GRASS_CONFIG,
   GrassVisualManager,
   STREAMING_GRASS_VISUAL_PROFILE,
@@ -88,7 +89,7 @@ function graph(root: Node): Set<Node> {
   return nodes;
 }
 
-// Concrete color arithmetic only. Unknown operations fail; no GPU is simulated.
+// Concrete node arithmetic only. Unknown operations fail; no GPU is simulated.
 function colorValue(
   node: Node,
   attributes: Record<string, number[]>,
@@ -96,9 +97,14 @@ function colorValue(
   const read = (key: string): unknown => Reflect.get(node, key);
   const child = (key: string): number[] => {
     const value = read(key);
-    if (!(value instanceof THREE.Node)) throw new Error(`Missing ${key}`);
+    if (!(value instanceof THREE.Node))
+      throw new Error(
+        `Missing ${key} on ${node.type}: ${Object.keys(node).join(",")}`,
+      );
     return colorValue(value, attributes);
   };
+  if (node === cameraViewMatrix) return attributes._cameraViewMatrix;
+  if (node.type === "FrontFacingNode") return attributes._frontFacing;
   if (node.type === "AttributeNode") {
     const value = attributes[String(read("_attributeName"))];
     if (!value) throw new Error("Unexpected albedo attribute");
@@ -106,19 +112,56 @@ function colorValue(
   }
   const value = read("value");
   if (typeof value === "number") return [value];
-  if (node.type === "ConvertNode" || node.type === "VarNode")
+  if (
+    node.type === "ConvertNode" ||
+    node.type === "VarNode" ||
+    node.type === "VaryingNode" ||
+    node.type === "SubBuild"
+  )
     return child("node");
+  if (node.type === "JoinNode") {
+    const nodes = read("nodes");
+    if (!Array.isArray(nodes) || nodes.some((n) => !(n instanceof THREE.Node)))
+      throw new Error("Invalid join inputs");
+    return nodes.flatMap((n) => colorValue(n, attributes));
+  }
   if (node.type === "SplitNode")
     return [...String(read("components"))].map(
       (component) => child("node")["xyzw".indexOf(component)],
     );
-  const operands = [child("aNode"), child("bNode")];
+  const aValues = child("aNode");
+  if (read("method") === "normalize") {
+    const length = Math.hypot(...aValues);
+    return aValues.map((x) => x / length);
+  }
+  if (read("method") === "sin") return aValues.map(Math.sin);
+  if (read("method") === "cos") return aValues.map(Math.cos);
+  if (read("method") === "negate") return aValues.map((x) => -x);
+  const operands = [aValues, child("bNode")];
+  if (read("op") === "*" && aValues.length === 16 && operands[1].length === 4) {
+    const matrix = new THREE.Matrix4().fromArray(aValues);
+    return new THREE.Vector4(
+      ...(operands[1] as [number, number, number, number]),
+    )
+      .applyMatrix4(matrix)
+      .toArray();
+  }
+  if (read("method") === "transformDirection") {
+    expect(aValues.length).toBe(16);
+    expect(operands[1].length).toBe(3);
+    return new THREE.Vector3(...(operands[1] as [number, number, number]))
+      .transformDirection(new THREE.Matrix4().fromArray(aValues))
+      .toArray();
+  }
   if (read("cNode") instanceof THREE.Node) operands.push(child("cNode"));
   return Array.from(
     { length: Math.max(...operands.map((v) => v.length)) },
     (_, i) => {
       const [a, b, c] = operands.map((v) => v[v.length === 1 ? 0 : i]);
       if (read("op") === "*") return a * b;
+      if (read("op") === "+") return a + b;
+      if (read("op") === "-") return a - b;
+      if (read("op") === "/") return a / b;
       if (read("method") === "mix") return a + (b - a) * c;
       if (read("method") === "smoothstep") {
         const t = Math.max(0, Math.min(1, (c - a) / (b - a)));
@@ -257,7 +300,11 @@ describe("compact meadow appearance candidate (CPU only)", () => {
       const owner = manager(profile);
       try {
         const material = owner["material"];
-        expect(material.name).toBe(COMPACT_MEADOW_APPEARANCE.id);
+        expect(material.name).toBe(
+          profile.id === "compact-meadow-v2"
+            ? CURVED_MEADOW_APPEARANCE.id
+            : COMPACT_MEADOW_APPEARANCE.id,
+        );
         expect(material.transparent).toBe(false);
         expect(material.depthWrite).toBe(true);
         expect(material.side).toBe(THREE.DoubleSide);
@@ -286,10 +333,123 @@ describe("compact meadow appearance candidate (CPU only)", () => {
     },
   );
 
+  it("builds the dense blade curve and its smooth unit normals without extra geometry or buffers", () => {
+    const baseline = manager(COMPACT_ISLAND_GRASS_VISUAL_PROFILE);
+    const curved = manager(DENSE_MEADOW_GRASS_VISUAL_PROFILE);
+    const repeat = manager(DENSE_MEADOW_GRASS_VISUAL_PROFILE);
+    try {
+      const style = CURVED_MEADOW_APPEARANCE;
+      for (const [lod, tier] of GRASS_CONFIG.LOD_TIERS.entries()) {
+        const geometry = curved["lodGeometries"][lod];
+        const previous = baseline["lodGeometries"][lod];
+        const position = geometry.attributes.position,
+          normal = geometry.attributes.normal;
+        expect(geometryBytes(geometry)).toBe(geometryBytes(previous));
+        expect(geometry.index!.array).toEqual(previous.index!.array);
+        expect(geometry.attributes.uv.array).toEqual(
+          previous.attributes.uv.array,
+        );
+        expect(Object.keys(geometry.attributes)).toEqual(
+          Object.keys(previous.attributes),
+        );
+        expect(position.array).toEqual(
+          repeat["lodGeometries"][lod].attributes.position.array,
+        );
+        expect(normal.array).toEqual(
+          repeat["lodGeometries"][lod].attributes.normal.array,
+        );
+        const vertices = tier.bladeSegments * 2 + 1;
+        for (let blade = 0; blade < tier.bladesPerClump; blade++) {
+          const root = blade * vertices,
+            tip = root + vertices - 1;
+          const left = new THREE.Vector3().fromBufferAttribute(position, root);
+          const right = new THREE.Vector3().fromBufferAttribute(
+            position,
+            root + 1,
+          );
+          const center = left.clone().add(right).multiplyScalar(0.5);
+          const widthAxis = right.clone().sub(left).normalize();
+          const end = new THREE.Vector3().fromBufferAttribute(position, tip);
+          const h = end.y / style.BLADE_TIP_HEIGHT;
+          const control = new THREE.Vector3(
+            center.x,
+            h * style.BLADE_CONTROL_HEIGHT,
+            center.z,
+          );
+          expect(left.y).toBe(0);
+          expect(right.y).toBe(0);
+          expect(end.y).toBeGreaterThan(0.15);
+          expect(end.y).toBeLessThan(0.45);
+          expect(end.y).toBeLessThan(previous.attributes.position.getY(tip));
+          expect(left.distanceTo(right) / h).toBeCloseTo(
+            style.BLADE_WIDTH_RATIO,
+            5,
+          );
+          for (const axis of ["x", "z"] as const) {
+            const read = axis === "x" ? "getX" : "getZ";
+            expect(center[axis]).toBeCloseTo(
+              (previous.attributes.position[read](root) +
+                previous.attributes.position[read](root + 1)) /
+                2,
+              6,
+            );
+          }
+          for (let v = 0; v < vertices; v++) {
+            const index = root + v,
+              t = geometry.attributes.uv.getY(index);
+            const expectedCenter = center
+              .clone()
+              .multiplyScalar((1 - t) ** 2)
+              .addScaledVector(control, 2 * (1 - t) * t)
+              .addScaledVector(end, t * t);
+            expect(position.getY(index)).toBeCloseTo(expectedCenter.y, 6);
+            const tangent = control
+              .clone()
+              .sub(center)
+              .multiplyScalar(2 * (1 - t))
+              .addScaledVector(end.clone().sub(control), 2 * t);
+            const expectedNormal = widthAxis.clone().cross(tangent).normalize();
+            const n = new THREE.Vector3().fromBufferAttribute(normal, index);
+            expect(n.length()).toBeCloseTo(1, 6);
+            expect(n.dot(tangent.clone().normalize())).toBeCloseTo(0, 5);
+            expect(n.distanceTo(expectedNormal)).toBeLessThan(4e-5);
+          }
+          if (tier.bladeSegments > 1)
+            expect(position.getY(root + 2)).toBeGreaterThan(
+              end.y / tier.bladeSegments,
+            );
+          expect(Math.abs(normal.getY(tip))).toBeGreaterThan(0.01);
+        }
+      }
+      const nodes = graph(curved["material"].normalNode!);
+      for (const name of [
+        "normal",
+        "instanceGroundNormal",
+        "instanceRotScaleHash",
+      ])
+        expect(
+          [...nodes].some((n) => Reflect.get(n, "_attributeName") === name),
+        ).toBe(true);
+      expect([...nodes].some((n) => n.type === "FrontFacingNode")).toBe(true);
+      expect(
+        [...nodes].some(
+          (n) =>
+            n.type === "VaryingNode" &&
+            Reflect.get(n, "name") === "v_curvedGrassNormal",
+        ),
+      ).toBe(true);
+    } finally {
+      baseline.destroy();
+      curved.destroy();
+      repeat.destroy();
+    }
+  });
+
   it.each([
     ["ordinary", {}],
     ["fixed-arena", STREAMING_GRASS_VISUAL_PROFILE],
     ["compact-meadow", COMPACT_ISLAND_GRASS_VISUAL_PROFILE],
+    ["curved-meadow", DENSE_MEADOW_GRASS_VISUAL_PROFILE],
   ] as const)(
     "keeps %s compact albedo independent of sun/view shading",
     (_, profile) => {
@@ -355,6 +515,70 @@ describe("compact meadow appearance candidate (CPU only)", () => {
       }
     },
   );
+
+  it("matches actual curved-normal node arithmetic to independent quaternion yaw/tilt and camera transforms", () => {
+    const owner = manager(DENSE_MEADOW_GRASS_VISUAL_PROFILE);
+    try {
+      const normalNode = owner["material"].normalNode!;
+      const normals = owner["lodGeometries"][1].attributes.normal;
+      const up = new THREE.Vector3(0, 1, 0);
+      for (const ground of [
+        up,
+        new THREE.Vector3(0.3, 0.8, -0.2).normalize(),
+        new THREE.Vector3(-0.6, 0.7, 0.4).normalize(),
+      ])
+        for (const rotation of [0, 0.7, 2.8, 5.4])
+          for (const view of [
+            [0, 60, 5],
+            [30, 2, -60],
+            [-50, 14, 20],
+          ] as const)
+            for (const front of [false, true])
+              for (const index of [0, 2, 4]) {
+                const camera = new THREE.PerspectiveCamera(
+                  52,
+                  16 / 9,
+                  0.2,
+                  1000,
+                );
+                camera.position.set(...view);
+                camera.lookAt(0, 0, 0);
+                camera.updateMatrixWorld(true);
+                const normal = new THREE.Vector3().fromBufferAttribute(
+                  normals,
+                  index,
+                );
+                const turned = normal
+                  .clone()
+                  .applyQuaternion(
+                    new THREE.Quaternion().setFromAxisAngle(up, -rotation),
+                  )
+                  .applyQuaternion(
+                    new THREE.Quaternion().setFromUnitVectors(up, ground),
+                  );
+                const expected = ground
+                  .clone()
+                  .lerp(
+                    turned.normalize().multiplyScalar(front ? 1 : -1),
+                    CURVED_MEADOW_APPEARANCE.BLADE_NORMAL_WEIGHT,
+                  )
+                  .normalize()
+                  .transformDirection(camera.matrixWorldInverse);
+                const actual = new THREE.Vector3(
+                  ...(colorValue(normalNode, {
+                    normal: normal.toArray(),
+                    instanceRotScaleHash: [rotation, 1, 0.3],
+                    instanceGroundNormal: ground.toArray(),
+                    _cameraViewMatrix: camera.matrixWorldInverse.toArray(),
+                    _frontFacing: [front ? 1 : 0],
+                  }) as [number, number, number]),
+                );
+                expect(actual.distanceTo(expected)).toBeLessThan(1e-12);
+              }
+    } finally {
+      owner.destroy();
+    }
+  });
 
   it("preserves actual compact root/middle/tip albedo arithmetic", () => {
     const owner = manager(COMPACT_ISLAND_GRASS_VISUAL_PROFILE);

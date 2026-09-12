@@ -45,6 +45,7 @@ import {
   TerrainShadeUniforms,
 } from "./TerrainShader";
 import { MeshStandardNodeMaterial } from "three/webgpu";
+import { faceDirection } from "three/tsl";
 import type { TerrainQuadNode, QuadTreeListener } from "./TerrainQuadTree";
 import type {
   RetainedTerrainSurface,
@@ -163,13 +164,28 @@ export const COMPACT_MEADOW_APPEARANCE = Object.freeze({
   TIP_BRIGHTNESS: 1.02,
 } as const);
 
+/** Dense-profile art candidate. Quadratic centerlines and smoothly varying
+ * normals reuse the existing vertex/index and per-blade correction layouts. */
+export const CURVED_MEADOW_APPEARANCE = Object.freeze({
+  id: "compact-meadow-v2",
+  BLADE_HEIGHT_MIN: 0.18,
+  BLADE_HEIGHT_MAX: 0.48,
+  BLADE_WIDTH_RATIO: 0.08,
+  BLADE_ARC_RATIO: 0.65,
+  BLADE_CONTROL_HEIGHT: 0.8,
+  BLADE_TIP_HEIGHT: 0.84,
+  BLADE_NORMAL_WEIGHT: 0.28,
+  ROOT_BRIGHTNESS: 0.58,
+  TIP_BRIGHTNESS: 1.04,
+} as const);
+
 type GrassBladeShape = Pick<
   typeof GRASS_CONFIG,
   | "BLADE_HEIGHT_MIN"
   | "BLADE_HEIGHT_MAX"
   | "BLADE_WIDTH_RATIO"
   | "BLADE_ARC_RATIO"
->;
+> & { BLADE_CONTROL_HEIGHT?: number; BLADE_TIP_HEIGHT?: number };
 
 // ---------------------------------------------------------------------------
 // Interleave groundColor (vec3) + grassTint (vec4) into a single vertex buffer
@@ -240,6 +256,9 @@ function createClumpGeometry(
     BLADE_HEIGHT_MAX: hMax,
     BLADE_ARC_RATIO,
   } = shape;
+  const curved = shape.BLADE_CONTROL_HEIGHT !== undefined;
+  const controlHeight = shape.BLADE_CONTROL_HEIGHT ?? 0.5;
+  const tipHeight = shape.BLADE_TIP_HEIGHT ?? 1;
 
   const vertsPerBlade = segs * 2 + 1;
   const trisPerBlade = (segs - 1) * 2 + 1;
@@ -280,10 +299,22 @@ function createClumpGeometry(
 
     rng(); // consume one RNG value to keep deterministic sequence stable
     const baseVert = vi;
+    const bladeNormal = (t: number) => {
+      const dy =
+        2 * ((1 - t) * controlHeight + t * (tipHeight - controlHeight)) * h;
+      const nx = -sr * dy;
+      const ny = sr * 2 * curveDirX * t - cr * 2 * curveDirZ * t;
+      const nz = cr * dy;
+      const length = Math.hypot(nx, ny, nz);
+      return [nx / length, ny / length, nz / length];
+    };
 
     for (let i = 0; i < segs; i++) {
       const t = i / segs;
-      const y = t * h;
+      const y = curved
+        ? (2 * (1 - t) * t * controlHeight + t * t * tipHeight) * h
+        : t * h;
+      const normal = curved ? bladeNormal(t) : [-sr, 0, cr];
       const hw = w * 0.5 * (1.0 - t * taper);
       const arc = t * t;
       const arcX = curveDirX * arc;
@@ -294,9 +325,9 @@ function createClumpGeometry(
         positions[vi * 3] = lx * cr + arcX + ox;
         positions[vi * 3 + 1] = y;
         positions[vi * 3 + 2] = lx * sr + arcZ + oz;
-        normals[vi * 3] = -sr;
-        normals[vi * 3 + 1] = 0;
-        normals[vi * 3 + 2] = cr;
+        normals[vi * 3] = normal[0];
+        normals[vi * 3 + 1] = normal[1];
+        normals[vi * 3 + 2] = normal[2];
         uvs[vi * 2] = side;
         uvs[vi * 2 + 1] = t;
         vi++;
@@ -304,11 +335,12 @@ function createClumpGeometry(
     }
 
     positions[vi * 3] = curveDirX + ox;
-    positions[vi * 3 + 1] = h;
+    positions[vi * 3 + 1] = curved ? h * tipHeight : h;
     positions[vi * 3 + 2] = curveDirZ + oz;
-    normals[vi * 3] = -sr;
-    normals[vi * 3 + 1] = 0;
-    normals[vi * 3 + 2] = cr;
+    const tipNormal = curved ? bladeNormal(1) : [-sr, 0, cr];
+    normals[vi * 3] = tipNormal[0];
+    normals[vi * 3 + 1] = tipNormal[1];
+    normals[vi * 3 + 2] = tipNormal[2];
     uvs[vi * 2] = 0.5;
     uvs[vi * 2 + 1] = 1.0;
     vi++;
@@ -518,6 +550,8 @@ export class GrassVisualManager implements QuadTreeListener {
   private maxRenderDistance: number;
   private readonly profileId: StreamingGrassProfileReceipt["profileId"];
   private readonly compactMeadow: boolean;
+  private readonly meadowAppearance:
+    typeof COMPACT_MEADOW_APPEARANCE | typeof CURVED_MEADOW_APPEARANCE | null;
   private readonly grassEligibility: GrassSurfaceEligibility;
 
   private workerSetup: GrassWorkerSetup | null = null;
@@ -595,6 +629,12 @@ export class GrassVisualManager implements QuadTreeListener {
     this.compactMeadow =
       this.profileId === "compact-island-v1" ||
       this.profileId === "compact-meadow-v2";
+    this.meadowAppearance =
+      this.profileId === "compact-meadow-v2"
+        ? CURVED_MEADOW_APPEARANCE
+        : this.compactMeadow
+          ? COMPACT_MEADOW_APPEARANCE
+          : null;
     this.grassEligibility =
       createCompactTerrainColorOperations().grassEligibility(
         profile.eligibility,
@@ -646,7 +686,7 @@ export class GrassVisualManager implements QuadTreeListener {
       createClumpGeometry(
         tier.bladesPerClump,
         tier.bladeSegments,
-        this.compactMeadow ? COMPACT_MEADOW_APPEARANCE : GRASS_CONFIG,
+        this.meadowAppearance ?? GRASS_CONFIG,
       ),
     );
     this.material = this.createMaterial();
@@ -663,8 +703,7 @@ export class GrassVisualManager implements QuadTreeListener {
       this.groundingHalo = Math.max(
         GRASS_SURFACE_NORMAL_SAMPLE_DISTANCE,
         radius * GRASS_BLADE_GROUNDING_LIMITS.maxScale * 1.01 +
-          GRASS_CONFIG.WIND_STRENGTH *
-            COMPACT_MEADOW_APPEARANCE.BLADE_HEIGHT_MAX +
+          GRASS_CONFIG.WIND_STRENGTH * this.meadowAppearance.BLADE_HEIGHT_MAX +
           0.01,
       );
     }
@@ -1033,10 +1072,10 @@ export class GrassVisualManager implements QuadTreeListener {
           wind: {
             x:
               GRASS_CONFIG.WIND_STRENGTH *
-              COMPACT_MEADOW_APPEARANCE.BLADE_HEIGHT_MAX,
+              manager.meadowAppearance.BLADE_HEIGHT_MAX,
             z:
               GRASS_CONFIG.WIND_STRENGTH *
-              COMPACT_MEADOW_APPEARANCE.BLADE_HEIGHT_MAX *
+              manager.meadowAppearance.BLADE_HEIGHT_MAX *
               0.55,
           },
         },
@@ -1483,9 +1522,7 @@ export class GrassVisualManager implements QuadTreeListener {
               },
             }
           : {}),
-        grassAppearance: this.compactMeadow
-          ? COMPACT_MEADOW_APPEARANCE.id
-          : "legacy-blades-v1",
+        grassAppearance: this.meadowAppearance?.id ?? "legacy-blades-v1",
       };
 
       const identity = new THREE.Matrix4();
@@ -1942,6 +1979,7 @@ export class GrassVisualManager implements QuadTreeListener {
 
   private createMaterial(): MeshStandardNodeMaterial {
     const compactMeadow = this.compactMeadow;
+    const appearance = this.meadowAppearance;
     // The validated terrain owner selects lighting, independently of blade
     // shape/density. Callers without that owner retain their legacy graph.
     const terrainProfile = this.workerSetup?.terrainConfig.TERRAIN_PROFILE;
@@ -1949,9 +1987,7 @@ export class GrassVisualManager implements QuadTreeListener {
       terrainProfile?.kind === "compact-candidate" &&
       isCompactSculptProfile(terrainProfile);
     const mat = new MeshStandardNodeMaterial();
-    mat.name = compactMeadow
-      ? COMPACT_MEADOW_APPEARANCE.id
-      : "legacy-blades-v1";
+    mat.name = appearance?.id ?? "legacy-blades-v1";
     mat.side = THREE.DoubleSide;
     mat.transparent = false;
     mat.depthWrite = true;
@@ -1962,9 +1998,7 @@ export class GrassVisualManager implements QuadTreeListener {
     const uWindSpeed = uniform(GRASS_CONFIG.WIND_SPEED);
     const uWindStrength = uniform(GRASS_CONFIG.WIND_STRENGTH);
     const uBladeHeight = uniform(
-      compactMeadow
-        ? COMPACT_MEADOW_APPEARANCE.BLADE_HEIGHT_MAX
-        : GRASS_CONFIG.BLADE_HEIGHT_MAX,
+      appearance?.BLADE_HEIGHT_MAX ?? GRASS_CONFIG.BLADE_HEIGHT_MAX,
     );
     this.sunDirUniform = uniform(
       new THREE.Vector3(...SUN_LIGHT.DEFAULT_DIRECTION),
@@ -2087,6 +2121,45 @@ export class GrassVisualManager implements QuadTreeListener {
     // = correct world→view.  With normalNode set, PBR's faceDirection flip is
     // bypassed so both sides of a blade get the same terrain N·L.
     mat.normalNode = cameraViewMatrix.transformDirection(terrainNormal);
+    if (appearance?.id === CURVED_MEADOW_APPEARANCE.id) {
+      const normal = attribute("normal", "vec3");
+      const rotation = attribute("instanceRotScaleHash", "vec3").x;
+      const c = cos(rotation),
+        s = sin(rotation);
+      const rotated = vec3(
+        normal.x.mul(c).sub(normal.z.mul(s)),
+        normal.y,
+        normal.x.mul(s).add(normal.z.mul(c)),
+      );
+      const nx = terrainNormal.x,
+        ny = terrainNormal.y,
+        nz = terrainNormal.z;
+      const q = float(1).div(ny.add(1));
+      const cross = nx.mul(nz).mul(q).negate();
+      // Vertex-stage yaw/tilt matches the position path. Only the face correction
+      // and soft-normal blend run per fragment. No extra attribute or texture.
+      const bladeNormal = vec3(
+        rotated.x
+          .mul(ny.add(nz.mul(nz).mul(q)))
+          .add(rotated.y.mul(nx))
+          .add(rotated.z.mul(cross)),
+        rotated.x
+          .mul(nx.negate())
+          .add(rotated.y.mul(ny))
+          .sub(rotated.z.mul(nz)),
+        rotated.x
+          .mul(cross)
+          .add(rotated.y.mul(nz))
+          .add(rotated.z.mul(ny.add(nx.mul(nx).mul(q)))),
+      ).toVarying("v_curvedGrassNormal");
+      mat.normalNode = cameraViewMatrix.transformDirection(
+        mix(
+          terrainNormal,
+          bladeNormal.normalize().mul(faceDirection),
+          float(appearance.BLADE_NORMAL_WEIGHT),
+        ).normalize(),
+      );
+    }
 
     mat.colorNode = Fn(() => {
       const groundCol = attribute("instanceGroundColor", "vec3");
@@ -2100,8 +2173,8 @@ export class GrassVisualManager implements QuadTreeListener {
         // Retain the terrain palette: the previous 1.4 tip gain made distant
         // blades look like bright wires. This is albedo, not emissive light.
         const bladeCol = mix(
-          groundCol.mul(COMPACT_MEADOW_APPEARANCE.ROOT_BRIGHTNESS),
-          tintedCol.mul(COMPACT_MEADOW_APPEARANCE.TIP_BRIGHTNESS),
+          groundCol.mul(appearance.ROOT_BRIGHTNESS),
+          tintedCol.mul(appearance.TIP_BRIGHTNESS),
           smoothstep(float(0.0), float(1.0), t),
         );
         return compactPhysical
