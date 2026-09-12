@@ -46,6 +46,7 @@ import THREE, {
   cameraFar,
 } from "../../../extras/three/three";
 import type { Node, UniformNode } from "three/webgpu";
+import { NodeUpdateType } from "three/tsl";
 import type { World } from "../../../types";
 import type { TerrainTile } from "../../../types/world/terrain";
 import type { Wind } from "./Wind";
@@ -266,7 +267,8 @@ export class WaterSystem {
   setReflectionsEnabled(enabled: boolean): void {
     this._reflectionsEnabled = enabled;
 
-    // Update reflection intensity uniform - this actually disables reflections in the shader
+    // Keep the visual blend and the reflector's runtime update gate in sync.
+    // Zero intensity alone still submits a complete reflected scene in Three.
     if (this.uniforms) {
       this.uniforms.reflectionIntensity.value = enabled
         ? WATER.REFLECTION_INTENSITY
@@ -497,13 +499,25 @@ export class WaterSystem {
         : this.createFlowFallback(256);
     this.foamTex = await this.createFoamTexture(128);
 
-    // TSL reflector: handles render target, camera mirroring, oblique clipping
-    this.reflection = reflector({ resolutionScale: 0.5 });
-    this.reflection.target.rotateX(-Math.PI / 2);
-    this.reflection.target.position.y = this.waterLevel;
-
+    this.reflection = this.createReflection();
     this.lakeMaterial = this.createLakeMaterial();
     this.oceanMaterial = this.createOceanMaterial();
+  }
+
+  private createReflection(): ReturnType<typeof reflector> {
+    // TSL reflector: handles render target, camera mirroring, oblique clipping.
+    const node = reflector({ resolutionScale: 0.5 });
+    // Retain updateBeforeType so Three registers this node even when the initial
+    // preference is disabled. NodeFrame queries this method each render, allowing
+    // live re-enabling without rebuilding the shader or replacing the reflector.
+    const reflection = node.reflector;
+    reflection.getUpdateBeforeType = () =>
+      this._reflectionsEnabled
+        ? reflection.updateBeforeType
+        : NodeUpdateType.NONE;
+    node.target.rotateX(-Math.PI / 2);
+    node.target.position.y = this.waterLevel;
+    return node;
   }
 
   /**

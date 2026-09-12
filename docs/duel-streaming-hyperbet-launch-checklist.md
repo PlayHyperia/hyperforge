@@ -1,5 +1,30 @@
 # Duel Arena, Streaming, and Hyperbet Launch Checklist
 
+## Water reflection scheduling verified — 2026-09-12
+
+- [x] Stop drawing an invisible water reflection when the existing stream profile
+      has reflections disabled. Native overview now renders four passes instead
+      of six; no resolution, shadow, geometry, material-blend or density downgrade.
+- [x] Verify live off/on/off through the real renderer: the same node re-enables
+      its reflection, then restores the original zero blend and four-pass state.
+      No native draw override, shader replacement or readiness bypass.
+- [x] Pass 1,160 tests/84 files, three types/builds, lint/format and 13 preflights.
+      Native probe09 independently verifies 675 pins/596 archives, 14 PNGs,
+      actual CPU/GPU ledgers, all eight views and complete owned cleanup.
+- [x] Match unchanged cameras/settings, placements and grass populations against
+      control probe04. Overview median draws 1,273→643 and CPU tick 19.8→10.9ms.
+      These are instrumented runs, not presented-FPS or full-load approval.
+- [ ] Resolve remaining spikes (including an 80.4ms meadow tick), heavy armor,
+      enabled-reflection shadow reuse, camera/animation/full-load performance
+      and substantial terrain/coast/foliage/lighting art gaps. No AAA acceptance.
+- [ ] Keep the 19 cow/dagger errors and observed late shutdown database write
+      open. The graphics study passes; the full diagnostic remains failed.
+
+Evidence: `docs/water-reflection-scheduling-20260912.md` and its evidence JSON;
+local `asset-studio/game-test-integration/gpu-frame-probe09/`, report SHA-256
+`90755e6d1f42c5f044bb9f5504cb271044c65ef402e57294d7e972558c941303`.
+Failed probe05–08 and the unqualified single-shadow patch remain preserved.
+
 ## Native CPU/GPU frame baseline — 2026-09-12
 
 - [x] Measure the actual r186 world tick and every queried render/compute pass
