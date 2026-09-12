@@ -111,6 +111,17 @@ export function createCompactIslandPaths(
     anvil = station("anvil"),
     range = station("range"),
     altar = station("altar");
+  const npc = (id: string): Point => {
+    const rows = haven?.npcs?.filter((row) => row.id === id);
+    if (rows?.length !== 1)
+      throw new Error(
+        "Compact clearing requires one admitted Haven NPC: " + id,
+      );
+    return rows[0].position;
+  };
+  const clerk = npc("bank_clerk"),
+    shopkeeper = npc("shopkeeper"),
+    supplier = npc("crafting_supplier");
   const floors = createDuelArenaFloorZones(
     arena,
     getDuelArenaGradeHeight(areas),
@@ -170,6 +181,7 @@ export function createCompactIslandPaths(
     toId: string;
     width: number;
     points: Point[];
+    clearing?: boolean;
   }> = [
     {
       id: "pond-bank",
@@ -235,10 +247,72 @@ export function createCompactIslandPaths(
         arenaApproach,
       ],
     },
+    // Surface-only forecourts. These IDs describe paint provenance, not route
+    // edges or service ownership. Original six circulation paths stay unchanged.
+    // Wider masks can change grass sampling within affected leaves: the existing
+    // acceptance-dependent rotation RNG is retained, not silently re-phased here.
+    {
+      id: "bank-apron",
+      clearing: true,
+      fromId: "bank-forecourt",
+      toId: "bank-forecourt",
+      width: 4,
+      points: [
+        { x: bank.x - 2, z: bank.z + 2 },
+        { x: bank.x + 2, z: bank.z + 2.5 },
+      ],
+    },
+    {
+      id: "bank-clerk-approach",
+      clearing: true,
+      fromId: "bank-forecourt",
+      toId: "bank_clerk",
+      width: 3,
+      points: [
+        { x: bank.x + 2, z: bank.z + 2.5 },
+        // End 2m west of the clerk: the nearest resource's all-LOD crown is
+        // wider than LOD0, and the baked mask adds a bilinear support halo.
+        { x: clerk.x - 2, z: clerk.z },
+      ],
+    },
+    {
+      id: "bank-shopkeeper-approach",
+      clearing: true,
+      fromId: "bank-forecourt",
+      toId: "shopkeeper",
+      width: 2.5,
+      points: [
+        { x: bank.x - 2, z: bank.z + 2 },
+        { x: shopkeeper.x, z: shopkeeper.z - 1 },
+      ],
+    },
+    {
+      id: "workshop-apron",
+      clearing: true,
+      fromId: "workshop-forecourt",
+      toId: "workshop-forecourt",
+      width: 3.5,
+      points: [
+        { x: furnace.x - 0.25, z: furnace.z - 1.25 },
+        { x: anvil.x + 1, z: anvil.z - 1.75 },
+      ],
+    },
+    {
+      id: "workshop-supplier-approach",
+      clearing: true,
+      fromId: "workshop-forecourt",
+      toId: "crafting_supplier",
+      width: 2.5,
+      points: [workshop, { x: supplier.x - 0.5, z: supplier.z + 0.5 }],
+    },
   ];
   return Object.freeze(
     definitions.map((definition) => {
       let points = definition.points;
+      if (points.some((p) => !Number.isFinite(p.x) || !Number.isFinite(p.z)))
+        throw new Error(
+          "Compact path requires finite anchors: " + definition.id,
+        );
       for (let pass = 0; pass < 2; pass++) {
         const smooth: Point[] = [points[0]];
         for (let i = 1; i < points.length; i++) {
@@ -309,7 +383,9 @@ export function createCompactIslandPaths(
         return Object.freeze({ ...point, y });
       });
       return Object.freeze({
-        id: "compact-path-" + definition.id,
+        id:
+          (definition.clearing ? "compact-clearing-" : "compact-path-") +
+          definition.id,
         fromId: definition.fromId,
         toId: definition.toId,
         width: definition.width,

@@ -285,20 +285,20 @@ describe("actual compact preparation paths and centered road mask", () => {
         getDuelArenaConfig(),
         (x, z) => terrain.getHeightAt(x, z),
       );
-      expect(paths).toHaveLength(6);
-      expect(roads.getRoads()).toHaveLength(6);
+      expect(paths).toHaveLength(11);
+      expect(roads.getRoads()).toHaveLength(11);
       expect(roads.getRoadNetwork()?.towns).toEqual([]);
-      expect(roads.getRoadNetwork()?.roads).toHaveLength(6);
+      expect(roads.getRoadNetwork()?.roads).toHaveLength(11);
       expect(roads.getDependencies().required).toEqual(["terrain"]);
       expect(JSON.stringify(areas)).toBe(before);
       expect(Object.isFrozen(paths)).toBe(true);
       for (const path of paths) {
         expect(Object.isFrozen(path)).toBe(true);
         expect(Object.isFrozen(path.path)).toBe(true);
-        expect(path.path.length).toBeGreaterThan(8);
+        expect(path.path.length).toBeGreaterThan(7);
         expect(path.path.length).toBeLessThanOrEqual(256);
         expect(path.width).toBeGreaterThanOrEqual(1.5);
-        expect(path.width).toBeLessThanOrEqual(2.2);
+        expect(path.width).toBeLessThanOrEqual(4);
         expect(path.length).toBeLessThan(80);
         for (let i = 0; i < path.path.length; i++) {
           const p = path.path[i];
@@ -310,6 +310,20 @@ describe("actual compact preparation paths and centered road mask", () => {
             ).toBeLessThanOrEqual(1.000001);
         }
       }
+      // Preserve the exact original six-path bounds, independent of the wider
+      // additive surface-only forecourts.
+      for (const path of paths.slice(0, 6)) {
+        expect(path.id).toMatch(/^compact-path-/);
+        expect(path.path.length).toBeGreaterThan(8);
+        expect(path.width).toBeLessThanOrEqual(2.2);
+      }
+      expect(paths.slice(6).map((path) => path.id)).toEqual([
+        "compact-clearing-bank-apron",
+        "compact-clearing-bank-clerk-approach",
+        "compact-clearing-bank-shopkeeper-approach",
+        "compact-clearing-workshop-apron",
+        "compact-clearing-workshop-supplier-approach",
+      ]);
       const main = paths.find((p) => p.id === "compact-path-bank-lobby")!;
       expect(
         main.path.some(
@@ -326,7 +340,7 @@ describe("actual compact preparation paths and centered road mask", () => {
     });
   });
 
-  it("keeps every entire width-plus-blend segment outside water, lobby, hospital and all six combat floors", async () => {
+  it("keeps every entire width-plus-blend segment outside water, lobby, hospital and the combat floor", async () => {
     await withRoads((roads) => {
       const areas = DataManager.getInstance().getAllWorldAreas();
       const floors = createDuelArenaFloorZones(

@@ -279,7 +279,17 @@ describe("compact v4 asymmetric coastline and continuous ridge", () => {
       getDuelArenaConfig(),
       terrain.getResourceGroundHeight.bind(terrain),
     );
-    expect(paths).toHaveLength(6);
+    expect(paths).toHaveLength(11);
+    expect(
+      paths.filter((path) => path.id.startsWith("compact-path-")),
+    ).toHaveLength(6);
+    expect(paths.slice(6).map((path) => path.id)).toEqual([
+      "compact-clearing-bank-apron",
+      "compact-clearing-bank-clerk-approach",
+      "compact-clearing-bank-shopkeeper-approach",
+      "compact-clearing-workshop-apron",
+      "compact-clearing-workshop-supplier-approach",
+    ]);
     for (const path of paths)
       for (const point of path.path) {
         expect(point.y).toBeGreaterThan(candidate.water.threshold + 1);

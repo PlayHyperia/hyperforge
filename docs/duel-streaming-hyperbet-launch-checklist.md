@@ -2,6 +2,31 @@
 
 ## Active functional woodland and surface fidelity — 2026-09-11
 
+- [x] Implement five bank/workshop surface clearings using the existing road mask.
+  Root passes 780 shared tests / 58 files, three builds/typechecks, scoped lint
+  and 133 applicable harness cases. Preserve all 29 trees and all five grass
+  arrays in six leaves; disclose the 1.3m mask-origin shift and edge rephasing.
+- [x] Review native56: 27 actual Metal/WebGPU images, 522 pins / 453 archives
+  independently verified, zero page/GPU errors and full owned cleanup. The
+  overall run still fails 19 cow/dagger errors. Forecourts read more clearly;
+  rounded cobble-like paths, repetitive turf and unfinished lodge art remain.
+- [ ] Repair the lodge's broken window/door trim topology: the shared merger
+  drops indexed box topology. Require exact expanded-face/attribute parity,
+  correct ownership/teardown, real collision checks and repeat native close-ups.
+  Native56's count/bounds/readiness pass is explicitly not visual acceptance.
+- [ ] Compare an isolated CC0 ambientCG Grass004 green substrate with the current
+  illustrated turf; verify original bytes, physical scale, channel packing and
+  CPU/GPU palette agreement before any live substitution. Keep lighting fixed.
+- [x] Push integrated lodge/physics/grounding checkpoint `c83bc7bb5` and paired
+  asset manifest `7d6fc16`; exact remote heads and GitHub author/committer
+  `dreaminglucid` verified. All twenty game source blobs match tested inputs;
+  no merge, deployment, runtime-error waiver or grass-prototype activation.
+- [ ] Evaluate the prepared CC0 Leafy Grass surface against the illustrated turf
+  before any replacement. Same 1024px pair, but larger transfers and different
+  physical scale/palette; not installed. Evidence: compact-meadow-material01.
+- [ ] Isolate fern albedo alpha-gutter loss in the Canvas cache conversion with
+  an exact-PNG-byte native comparison. Broad dark fronds also occur in the
+  original-material control; do not attribute all darkness to that conversion.
 - [ ] Qualify native PBR contact shading in a separately admitted AO experiment:
   actual normal/depth prepass, direct/neutral/raw/denoised comparisons, unchanged
   beauty resolution/MSAA/exposure, animated cutouts and explicit GPU/lifetime
