@@ -17,7 +17,7 @@ export const COMPACT_SERVICE_COURT: CompactServiceCourtManifest = Object.freeze(
     terrainProfileId: "compact-duel-island-v6",
     position: Object.freeze({ x: 336.5, z: 337.5 }),
     rotation: 0,
-    recipeId: "open-timber-smithy-v1",
+    recipeId: "open-timber-smithy-v2",
   },
 );
 

@@ -144,17 +144,39 @@ export function createOpenWorkshop(
       frame.push(member([x, 3.06, -3.1], [x, 3.06, 3.15], 0.24, 0.28));
     for (const z of [-2, 3])
       frame.push(member([-5.15, 3.06, z], [5.15, 3.06, z], 0.24, 0.28));
-    const gable = createGabledRoof(10, 6, 3.2, "wood");
+    // Open king-post framing replaces the solid triangular gable. The lower
+    // pitch reduces the top-heavy silhouette without changing ground access.
+    const pitchDegrees = 24;
+    const slope = Math.tan((pitchDegrees * Math.PI) / 180);
+    const gable = createGabledRoof(10, 6, 3.2, "wood", {
+      pitchDegrees,
+      openEnds: true,
+    });
     for (const geometry of [...gable.roofs, ...gable.walls]) take(geometry);
     frame.push(...gable.walls);
-    // Visible ridge support and two interior rafter pairs articulate the open underside.
-    const peak = 3.2 + 5 * Math.tan((32 * Math.PI) / 180);
+    // Three explicit trusses carry the ridge and longitudinal purlins. Their
+    // lower tie/strut ends stay in the existing upper-cutaway/clearance band.
+    const peak = 3.2 + 5 * slope;
     frame.push(member([0, peak - 0.13, -3.2], [0, peak - 0.13, 3.2], 0.18));
-    for (const z of [-1, 1.4])
+    for (const x of [-2.55, 2.55]) {
+      const y = peak - Math.abs(x) * slope - 0.16;
+      frame.push(member([x, y, -3.2], [x, y, 3.2], 0.16, 0.2));
+    }
+    for (const z of [-2, 0.5, 3]) {
+      if (z === 0.5)
+        frame.push(member([-5, 3.06, z], [5, 3.06, z], 0.24, 0.28));
+      frame.push(member([0, 3.16, z], [0, peak - 0.16, z], 0.22));
       for (const sign of [-1, 1])
         frame.push(
-          member([0, peak - 0.16, z], [sign * 5, 3.04, z], 0.13, 0.18),
+          member([0, peak - 0.16, z], [sign * 5, 3.04, z], 0.18, 0.22),
+          member(
+            [sign * 0.12, 3.22, z],
+            [sign * 2.55, peak - 2.55 * slope - 0.2, z],
+            0.14,
+            0.18,
+          ),
         );
+    }
     const roofMask = new Float32Array(
       frame.reduce(
         (sum, part) =>
@@ -184,7 +206,9 @@ export function createOpenWorkshop(
         (geometry.index?.count ?? geometry.getAttribute("position").count) / 3,
       0,
     );
-    if (triangles > 1000)
+    // Three existing material/collision batches; bounded additional framing,
+    // not a new prop population or per-frame geometry path.
+    if (triangles > 1500)
       throw new Error("Open workshop geometry exceeded its recipe budget");
     return Object.freeze({ timber, roof, footings, dispose });
   } catch (error) {

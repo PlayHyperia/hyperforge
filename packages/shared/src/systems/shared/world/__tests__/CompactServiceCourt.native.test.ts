@@ -79,12 +79,14 @@ describe("compact service court actual geometry and native PhysX (not rendered a
     const profile = saved.profile!;
     expect(validateCompactServiceCourt(undefined, profile)).toBeUndefined();
     const input = structuredClone(COMPACT_SERVICE_COURT);
+    expect(input.recipeId).toBe("open-timber-smithy-v2");
     const descriptor = validateCompactServiceCourt(input, profile)!;
     expect(descriptor).toEqual(input);
     expect(descriptor).not.toBe(input);
     expect(Object.isFrozen(descriptor.position)).toBe(true);
     for (const bad of [
       { ...input, extra: true },
+      { ...input, recipeId: "open-timber-smithy-v1" },
       { ...input, position: { x: 337, z: 337.5 } },
       {
         ...input,
@@ -137,7 +139,7 @@ describe("compact service court actual geometry and native PhysX (not rendered a
           ).toBeGreaterThan(1e-12);
         }
       }
-      expect(triangles).toBe(824);
+      expect(triangles).toBe(1184);
     } finally {
       a.dispose();
       a.dispose();
@@ -175,7 +177,7 @@ describe("compact service court actual geometry and native PhysX (not rendered a
         expect(visual.getDiagnostics()).toMatchObject({
           meshes: 3,
           materials: 3,
-          triangles: 824,
+          triangles: 1184,
         });
         expect(world.physics.scene!.getNbActors(types)).toBe(before + 1);
         for (let i = 0; i < 4; i++) {
@@ -212,6 +214,31 @@ describe("compact service court actual geometry and native PhysX (not rendered a
           );
         }
         // Front, rear and side routes at human torso height; no synthetic ground slab.
+        // Both gables are genuinely open in native collision as well as render
+        // geometry. A ray below the rafters and above the braces passes through.
+        for (const x of [-2, 2])
+          expect(
+            world.physics.raycast(
+              new Vector3(
+                record.position.x + x,
+                record.position.y + 4.1,
+                record.position.z - 4,
+              ),
+              new Vector3(0, 0, 1),
+              8,
+            ),
+          ).toBeNull();
+        const kingPost = world.physics.raycast(
+          new Vector3(
+            record.position.x,
+            record.position.y + 4.2,
+            record.position.z - 4,
+          ),
+          new Vector3(0, 0, 1),
+          8,
+        );
+        expect(kingPost).not.toBeNull();
+        expect(kingPost!.point.z).toBeCloseTo(record.position.z - 2.11, 4);
         for (const x of [334, 336.5, 339])
           expect(
             world.physics.raycast(
@@ -280,7 +307,7 @@ describe("compact service court actual geometry and native PhysX (not rendered a
             checked++;
           }
         }
-        expect(checked).toBe(824);
+        expect(checked).toBe(1184);
         visual.destroy();
         visual.destroy();
         owner.destroy();

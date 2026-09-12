@@ -1,5 +1,46 @@
 # Duel Arena, Streaming, and Hyperbet Launch Checklist
 
+## Open-truss smithy checkpoint — 2026-09-12
+
+Status: **G04 remains OPEN. Local architecture improvement verified; the full
+environment, motion, streaming and launch quality gates are not complete.**
+
+- [x] Replaced the solid, top-heavy gable with a lower 24-degree roof, three
+  open king-post trusses and longitudinal purlins. Original posts, short braces,
+  four grounded feet and navigation footprint are preserved; the general
+  enclosed 32-degree roof remains byte-identical for the lodge.
+- [x] Explicit `open-timber-smithy-v2` manifest/validator contract. Renderer and
+  native PhysX use the same 1,184 triangles / 197,448 geometry bytes in three
+  batches: +360 triangles / 60,480 bytes, no new materials, textures or lights.
+  The new recipe cap is 1,500 triangles, an explicit cost choice—not FPS approval.
+- [x] Passed 1,236 shared tests / 90 files (including 18 court/cutaway tests),
+  eight procgen roof tests, all affected builds/typechecks and scoped lint/format.
+  Current capture preflight passes 13/13. Nine other harness tests pass; one
+  older session50 source-capacity test fails its obsolete 648-input assumption
+  and is retained unchanged, not counted as passing.
+- [x] Two native Chrome/Metal WebGPU captures with identical 679 source pins,
+  600 archives and 16 PNGs each. All eight world views reviewed in each run.
+  Cameras match the prior curved-meadow baseline; maximum daylight differences
+  are 0.000524 / 0.001403 under the unchanged 0.01 bound. Both focused studies
+  pass at 1280×720, DPR1, MSAA4 and 4096px sun shadows. Anvil cutaway remains clear.
+- [ ] Both overall runs still fail the 19 cow/dagger content errors. First run
+  also retains the existing macOS process-group inspection EPERM during client
+  shutdown; the identical-source retry closes cleanly. All owned ports/browser
+  are closed. A successful retry does not fix the intermittent shutdown defect.
+- [ ] Ten-second p95 CPU ticks were 11.3/9.5ms then 11.7/10.1ms; GPU-pass sums
+  were 13.96/15.07ms then 14.29/16.12ms (campus/meadow). No speedup, presented FPS,
+  sustained60 or encoded-stream acceptance is claimed. Grass fitting still
+  overshoots the 2ms target (maximum slices 2.2ms and 4.4ms).
+- [ ] Finish the integrated scene: worn ground and natural pond/rock boundaries,
+  grounded understory, cohesive stone/timber finish and foliage lighting. Keep
+  functional choppable trees, one arena and clear preparation circulation.
+  Evaluate contact occlusion/temporal lighting separately with motion, cutaway,
+  transparency, GPU cost and resource-lifetime checks; do not blanket-enable effects.
+
+Evidence: `docs/compact-smithy-cutaway-20260912.md`,
+`asset-studio/compact-smithy-court01/truss01/verify.mjs` and
+`game-test-integration/truss-smithy-native01` / `truss-smithy-native02`.
+
 ## Terrain-noise comparison rejected — 2026-09-12
 
 Status: **G04 remains OPEN. Technical success did not meet the visual bar;

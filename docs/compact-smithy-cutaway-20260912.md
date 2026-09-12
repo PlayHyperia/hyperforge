@@ -2,10 +2,78 @@
 
 Date: 2026-09-12. Branch: `codex/sol-duel-stream-launch`.
 This is not AAA, performance, competitive, streaming or launch approval.
-Companion assets manifest checkpoint: `1cc1550` on
+Earlier v1 assets manifest checkpoint: `1cc1550` on
 `codex/duel-arena-launch-assets` (only the eight-line court descriptor).
 
-## Follow-up: timber color aliasing corrected, art still unfinished
+## Open-truss v2: lighter silhouette, not finished scene art
+
+Paired assets commit: `d9d0c66bfa95e1c72db70c1b8c236e737f52b039` on
+`codex/duel-arena-launch-assets`; use this v2 manifest with the current game code.
+
+The current `open-timber-smithy-v2` recipe replaces the large solid gable with
+a 24-degree pitched roof, three exposed king-post trusses and two longitudinal
+purlins. Posts, short braces, feet and the four blocked navigation cells are
+unchanged; hashes captured before editing protect their geometry. The general
+roof generator still produces identical default enclosed 32-degree geometry,
+including the lodge. Rendering and native PhysX consume the same new geometry.
+
+Cost is now 1,184 triangles / 197,448 geometry bytes: timber 1,052, roof 20,
+footings 112. This adds 360 triangles / 60,480 bytes, retaining three materials
+and batches, no new textures/lights, and the existing upper cutaway. The explicit
+v2 hard recipe cap is 1,500 triangles; raising this cap is a documented art-cost
+decision, not proof of performance. The manifest and strict validator advance
+together; stale v1 recipe input is rejected, not silently interpreted as v2.
+
+All eight current world views were reviewed in both `truss-smithy-native01` and
+`truss-smithy-native02`. Open framing improves the front silhouette and lowers
+the side mass. The anvil camera still reveals all upper framing correctly;
+ground-level views retain the complete roof. The surrounding painted-looking
+turf, sparse planar grass, dark foliage, synthetic coastline/ridges and simple
+building finish remain visibly below the target. This is local art acceptance,
+not an AAA claim or acceptance of avatar animation/fitting visible in the scene.
+
+Checks: 1,236 shared tests / 90 files, including the 18 focused court/cutaway
+tests; eight separate roof-generator tests; procgen/shared/client/server builds,
+affected typechecks and scoped lint/format. Current native preflight passes
+13/13. A separate historical session50 test still exceeds its old 648-input
+source-count cap; nine other tests in that command pass. That historical
+failure is preserved and no admission threshold was relaxed.
+
+Both native reports pin the same 679 actual source inputs and archive 600.
+Each retains 16 PNGs; the eight art-view cameras match the previous curved-meadow
+baseline with maximum daylight differences 0.000524 / 0.001403, under the
+unchanged 0.01 limit. Rendering remains native nonfallback Chrome152/Metal WebGPU,
+1280×720, DPR1, MSAA4, 4096px sun shadows and no postprocessing. Both focused
+studies pass. Both overall reports fail the same 19 cow/dagger content errors.
+
+The first run additionally retains a launcher shutdown EPERM while the owned
+client group was observed in zombie state; its groups/ports were subsequently
+empty and its browser closed. The identical-source repeat shuts down cleanly.
+This confirms intermittency, not resolution. No page/GPU errors in either run.
+Ten-second campus/meadow p95 CPU ticks are 11.3/9.5ms then 11.7/10.1ms, with GPU
+pass sums 13.96/15.07ms then 14.29/16.12ms. These are not presented FPS, full GPU
+wall time, a controlled speedup or sustained full-agent/encoded-stream acceptance.
+All 11,652 grass clumps remain; maximum fitting slices 2.2ms / 4.4ms still exceed
+the 2ms target.
+
+External evidence: `compact-smithy-court01/truss01/verify.mjs`,
+`native-evidence.json`, `gable01.json`, `court01.json`, `regression01.json` and
+`build-static01.log`. Report SHA-256:
+
+- First: `cb5437fbe4091e1db26c1e8559d0a9936ef3b6446baa9ca8f98a0b3272017c38`
+- Repeat: `3f98e8fb0c03ac29b008b4b8ea8c37a9a915765d81ebb64fdf1fdf7d87e960b3`
+
+Research follow-through: current Three r186 [GTAO](https://threejs.org/docs/pages/GTAONode.html)
+supports contact occlusion, but sample count costs GPU work and temporal filtering
+requires TRAA with possible ghosting. [SSGI](https://threejs.org/docs/pages/SSGINode.html)
+can add indirect diffuse light, with per-pixel sample cost and temporal/denoise
+requirements. These are separate candidates, not enabled here. First qualify
+contact on the actual foliage, ground and equipment, then moving-camera history,
+cutaway/transparent-water behavior, correct color composition and disposal.
+The installed postprocessing path currently supplies grading/blur/outline, not
+these effects; their presence in Three examples is not proof of game integration.
+
+## Earlier follow-up: timber color aliasing corrected, art still unfinished
 
 Native79 isolated the defect with six one-variable A/B/A triples at the exact
 native78 meadow camera. Disabling timber shadow reception, disabling roof casting,

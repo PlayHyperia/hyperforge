@@ -75,6 +75,73 @@ function inspect(root: THREE.Object3D) {
 }
 
 describe("opt-in compact gabled building geometry", () => {
+  it("keeps the original enclosed 32-degree roof bytes unchanged", () => {
+    for (const options of [undefined, { pitchDegrees: 32, openEnds: false }]) {
+      const result = createGabledRoof(8, 8, 3.8, "stone", options);
+      const digest = createHash("sha256");
+      for (const geometry of [...result.roofs, ...result.walls]) {
+        geometries.add(geometry);
+        for (const name of Object.keys(geometry.attributes).sort()) {
+          const a = geometry.getAttribute(name).array;
+          digest.update(name);
+          digest.update(Buffer.from(a.buffer, a.byteOffset, a.byteLength));
+        }
+        if (geometry.index) {
+          const a = geometry.index.array;
+          digest.update(Buffer.from(a.buffer, a.byteOffset, a.byteLength));
+        }
+      }
+      // Recorded before adding open-end/pitch options, not a self-comparison.
+      expect(digest.digest("hex")).toBe(
+        "61b9f02f6785f241e23b855ef7b85152dd43e4f6eff8a7abcc8a4dd6ef9a700e",
+      );
+    }
+  });
+
+  it("opens the workshop gables while retaining a closed lower pitched roof and trim", () => {
+    const result = createGabledRoof(10, 6, 3.2, "wood", {
+      pitchDegrees: 24,
+      openEnds: true,
+    });
+    const material = new THREE.MeshBasicMaterial();
+    materials.add(material);
+    const group = new THREE.Group();
+    for (const g of [...result.roofs, ...result.walls]) {
+      geometries.add(g);
+      group.add(new THREE.Mesh(g, material));
+    }
+    group.updateMatrixWorld(true);
+    expect(result.walls).toHaveLength(6);
+    const box = new THREE.Box3().setFromObject(group);
+    expect(box.max.y).toBeCloseTo(
+      3.2 + 5 * Math.tan((24 * Math.PI) / 180) + 0.18,
+      5,
+    );
+    for (const x of [-2, 2]) {
+      const open = new THREE.Raycaster(
+        new THREE.Vector3(x, 4.1, -4),
+        new THREE.Vector3(0, 0, 1),
+        0,
+        8,
+      );
+      expect(open.intersectObject(group, true)).toHaveLength(0);
+      const roof = new THREE.Raycaster(
+        new THREE.Vector3(x, 1, 0),
+        new THREE.Vector3(0, 1, 0),
+        0,
+        8,
+      );
+      expect(roof.intersectObject(group, true)[0].point.y).toBeCloseTo(
+        3.2 + (5 - Math.abs(x)) * Math.tan((24 * Math.PI) / 180),
+        5,
+      );
+    }
+    for (const pitchDegrees of [NaN, Infinity, 0, 17.9, 45.1, 90])
+      expect(() =>
+        createGabledRoof(10, 6, 3.2, "wood", { pitchDegrees }),
+      ).toThrow();
+  });
+
   it("creates closed outward-facing solids with bounded cost and complete attributes", () => {
     const result = createGabledRoof(8, 8, 3.8, "stone");
     let triangles = 0;

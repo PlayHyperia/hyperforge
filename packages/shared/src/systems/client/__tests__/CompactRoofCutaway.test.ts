@@ -161,22 +161,26 @@ describe("compact smithy cutaway policy (CPU geometry, not visual/GPU acceptance
     expect(sideCorners).toBe(48);
   });
 
-  it("labels all four foreground ring beams as upper structure without changing any physical geometry bytes", () => {
+  it("preserves the lower frame and footings while labelling all ring beams and new trusses as upper structure", () => {
     const { geometry } = fixture();
     const expected = {
       timber:
-        "0bd9dab417769bd2671df3ae1bfd9c4f40a51fc6c7f878878b0453b30d86b46d",
-      roof: "4654d75e7b15e4c03e67f922c0e282c4174e57f3567aa7157d1c6f6bcd104b2c",
+        "45eda5936d00cb00cbeacae51f730450452b9adb676e5ac218c971dd41f9e744",
       footings:
         "974da6055e0790c65a4a2bb25eeed4baeb7260fb19afaa013033491f9ecda284",
     };
-    // Recorded from the built pre-change recipe; exclude only its visibility label.
-    for (const role of ["timber", "roof", "footings"] as const) {
+    // Recorded from the original recipe before replacing the upper structure.
+    // Preserve every lower-frame/footing attribute, not the deliberately changed roof.
+    for (const role of ["timber", "footings"] as const) {
       const g = geometry[role],
         hash = createHash("sha256");
       for (const name of Object.keys(g.attributes).sort()) {
         if (name === "courtRoof") continue;
-        const a = g.getAttribute(name).array;
+        const attribute = g.getAttribute(name);
+        const a =
+          role === "timber"
+            ? attribute.array.subarray(0, 12 * 84 * attribute.itemSize)
+            : attribute.array;
         hash.update(name);
         hash.update(Buffer.from(a.buffer, a.byteOffset, a.byteLength));
       }
@@ -189,7 +193,7 @@ describe("compact smithy cutaway policy (CPU geometry, not visual/GPU acceptance
     const mask = geometry.timber.getAttribute("courtRoof");
     // Twelve 84-corner posts/braces, followed by four 84-corner ring beams.
     for (let i = 0; i < 12 * 84; i++) expect(mask.getX(i)).toBe(0);
-    for (let i = 12 * 84; i < 16 * 84; i++) expect(mask.getX(i)).toBe(1);
+    for (let i = 12 * 84; i < mask.count; i++) expect(mask.getX(i)).toBe(1);
   });
 
   it("isolates other camera passes and restores the main fade within the same renderer frame", () => {

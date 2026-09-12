@@ -4,7 +4,7 @@ import { applyGeometryAttributes, applyRoofAttributes } from "./geometry";
 import { WALL_MATERIAL_IDS, type WallMaterialType } from "./types";
 import { UV_SCALE_PRESETS } from "./uvUtils";
 
-/** One closed, pitched shell with solid end walls and timber verge/eave trim.
+/** One closed, pitched shell with optional end walls and timber verge/eave trim.
  * Geometry only: no materials, textures, collision, caches or scene ownership.
  * Caller owns every returned geometry. Ridge runs along local Z.
  */
@@ -13,7 +13,9 @@ export function createGabledRoof(
   depth: number,
   wallTop: number,
   wallMaterial: WallMaterialType,
+  options: { pitchDegrees?: number; openEnds?: boolean } = {},
 ): { roofs: THREE.BufferGeometry[]; walls: THREE.BufferGeometry[] } {
+  const pitchDegrees = options.pitchDegrees ?? 32;
   if (
     ![width, depth, wallTop].every(Number.isFinite) ||
     width < 4 ||
@@ -22,13 +24,17 @@ export function createGabledRoof(
     depth > 32 ||
     wallTop <= 0 ||
     wallTop > 256 ||
-    !Object.hasOwn(WALL_MATERIAL_IDS, wallMaterial)
+    !Object.hasOwn(WALL_MATERIAL_IDS, wallMaterial) ||
+    !Number.isFinite(pitchDegrees) ||
+    pitchDegrees < 18 ||
+    pitchDegrees > 45 ||
+    (options.openEnds !== undefined && typeof options.openEnds !== "boolean")
   )
     throw new Error(
       "Gabled roof requires finite 4–32m rectangular dimensions and a known wall material",
     );
 
-  const pitch = (Math.PI * 32) / 180;
+  const pitch = (Math.PI * pitchDegrees) / 180;
   const slope = Math.tan(pitch);
   const half = width / 2;
   const overhang = 0.45;
@@ -112,19 +118,20 @@ export function createGabledRoof(
   };
   for (const side of [-1, 1]) {
     const z = (side * depth) / 2 - WALL_THICKNESS / 2;
-    style(
-      extrude(
-        [
-          [-half, wallTop - 0.02],
-          [half, wallTop - 0.02],
-          [half, wallTop],
-          [0, peak],
-          [-half, wallTop],
-        ],
-        WALL_THICKNESS,
-        z,
-      ),
-    );
+    if (!options.openEnds)
+      style(
+        extrude(
+          [
+            [-half, wallTop - 0.02],
+            [half, wallTop - 0.02],
+            [half, wallTop],
+            [0, peak],
+            [-half, wallTop],
+          ],
+          WALL_THICKNESS,
+          z,
+        ),
+      );
     const front = side * (roofDepth / 2 - 0.06);
     for (const sign of [-1, 1]) {
       const start = new THREE.Vector3(0, peak - 0.09, front);

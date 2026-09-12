@@ -1405,7 +1405,7 @@ export type CompactServiceCourtManifest = Readonly<{
   terrainProfileId: "compact-duel-island-v6";
   position: Readonly<{ x: 336.5; z: 337.5 }>;
   rotation: 0;
-  recipeId: "open-timber-smithy-v1";
+  recipeId: "open-timber-smithy-v2";
 }>;
 
 /** Low, non-colliding planting; tree/resource ownership is never changed. */
