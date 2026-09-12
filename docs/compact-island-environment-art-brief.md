@@ -1,5 +1,34 @@
 # Compact island environment art: next delivery slice
 
+## Current priority after native review — 2026-09-12
+
+Curved instanced grass is pushed as an explicit comparison-profile checkpoint,
+not finished environmental art. The subsequent two-scale ground-colour candidate
+passed technical checks but was rejected after eight native views: adding fine
+mottling did not materially improve the scene. Its source changes are removed
+and evidence retained in `compact-grass-grounding-integration01/field01/` under
+the local asset studio. Do not repeat that generic colour-noise route.
+
+Deliver the existing preparation-scene target as an integrated art slice:
+
+1. Deliberately compose grounded rock and understory groups around pond banks,
+   grove edges and the workshop approach. Use the existing scanned outcrop LOD
+   library where suitable, but provide physical obstruction/navigation where
+   visible rocks occupy playable space; the temporary six-rock diagnostic is
+   not permanent world placement. Keep trees as actual choppable resources.
+2. Replace the scattered-stations-on-a-lawn impression with worn interaction
+   ground and a cohesive stone/timber architectural kit: bases, framing,
+   eaves/ridge/end treatment and credible workshop detail. Preserve roof-cutaway
+   camera behavior, fixed interaction access, authoritative collision and costs.
+3. Review the pond → bank/workshop → arena route in motion, alongside close and
+   broad stills. Require coherent silhouettes, scale, surface contact, foliage
+   color and useful gameplay sightlines. Follow with sustained target-hardware
+   and encoded-stream checks; existing short instrumented windows are not those
+   acceptance gates. Large geology must use deliberate closed construction,
+   not the rejected automatic open-facade closure approach.
+
+The concept below remains a target, not a claim that the game looks like it.
+
 User review, 2026-09-10: the current terrain is still lackluster and low quality.
 This is accurate. Removing biome wedges and correcting sampled grass contact
 did not turn the bare grass/dirt blockout into a finished game environment.

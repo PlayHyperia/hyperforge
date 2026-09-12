@@ -1,5 +1,36 @@
 # Duel Arena, Streaming, and Hyperbet Launch Checklist
 
+## Terrain-noise comparison rejected — 2026-09-12
+
+Status: **G04 remains OPEN. Technical success did not meet the visual bar;
+the extra colour-noise candidate is removed, not promoted.**
+
+- [x] Tested a bounded two-scale fresh/dry meadow field using the already sampled
+  detail noise. CPU/worker colours and TSL agreed; no new textures, samples,
+  geometry, lights, render passes or relaxed performance/grounding limits.
+- [x] Candidate checks passed: 1,237 shared tests / 90 files, 24 original-reference
+  grounding checks, builds/typechecks and scoped lint. Native study passed with
+  11,652 clumps, no page/GPU/cleanup errors and all owned services/tabs stopped.
+  The same 19 cow/dagger errors still fail the overall launch result.
+- [x] Directly reviewed all eight world views and rejected the result: finer
+  mottling does not resolve the painted ground, weak scene composition or
+  synthetic ridges/coast. Preserved the exact patch, native report, 600 source
+  archives and 16 PNGs; verified 679 candidate pins before restoring the prior
+  source. The pushed curved-grass checkpoint remains the selected runtime.
+- [ ] Finish one coherent pond–workshop–arena scene: deliberately grounded rock
+  groups and understory, worn interaction areas and an articulated stone/timber
+  architectural kit. Do not repeat generic whole-island noise/palette tweaks.
+- [ ] Qualify real height-bearing material transitions separately; current
+  packed albedo/roughness and normal/AO maps contain no independent height.
+  Preserve physical terrain, functional tree authority, agent access and costs.
+- [ ] Native candidate p95 CPU ticks 10.8/10.0ms and GPU-pass sums 13.70/15.01ms
+  are diagnostic only, not presented FPS or sustained full-population approval.
+  Its 5.0ms maximum fitting slice still exceeds the 2ms target.
+
+Evidence: `docs/dense-meadow-study-20260912.md`,
+`docs/compact-island-environment-art-brief.md` and
+`asset-studio/compact-grass-grounding-integration01/field01/`.
+
 ## Curved meadow checkpoint — 2026-09-12
 
 Status: **G04 remains OPEN. Curved geometry/shading verified in native WebGPU;

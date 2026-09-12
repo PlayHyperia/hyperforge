@@ -1,5 +1,35 @@
 # Denser meadow: verified trial, unfinished visual result
 
+## Subsequent terrain-noise candidate: rejected
+
+A two-scale fresh/dry colour experiment reused the existing fine noise sample
+to break up the broad meadow field, with matching CPU/worker and TSL arithmetic.
+It added no textures, samples, geometry, lights or passes. All 1,237 candidate
+shared tests, 24 grounding-reference checks and builds/typechecks passed.
+Nevertheless, direct review of all eight native world views **rejects the
+candidate**: fine mottling does not resolve painted-looking ground or the weak
+landform, vegetation and architectural composition. Its four source/test changes
+were removed; the pushed curved-grass checkpoint remains selected.
+
+The exact rejected patch, reports and archives are retained in
+`asset-studio/compact-grass-grounding-integration01/field01/`. Before restoration,
+679 candidate source pins, 600 source archives and 16 PNGs were verified. Native
+Chrome/Metal/nonfallback WebGPU retained the same rendering quality and 11,652
+clumps. Focused study passes; the overall run still fails the same 19 cow/dagger
+errors. No page/GPU/cleanup errors; owned test browser/launcher/ports closed.
+Report SHA-256:
+`3849ccf107d64e1d29ca36ca1df4020d04cf934d7a13c0848e1ad9cf639d9e2b`.
+Its p95 CPU ticks 10.8/10.0ms and GPU-pass sums 13.70/15.01ms are not presented
+FPS, full GPU wall time or sustained full-population qualification.
+
+Return to the [finished-scene brief](compact-island-environment-art-brief.md):
+pond–workshop–arena composition, grounded rock/understory groups, worn interaction
+areas and articulated architecture. Avoid another generic whole-island tint pass.
+[Height-based material blending](https://dev.epicgames.com/documentation/unreal-engine/landscape-material-expressions-in-unreal-engine)
+needs actual material-height inputs and nonzero contributions; the current
+albedo/roughness and normal/AO packing does not contain an independent height
+channel. This rejected colour experiment is not that technique.
+
 ## Curved blades and soft lighting checkpoint
 
 The explicit dense comparison profile now uses shorter quadratic blades,
