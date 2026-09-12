@@ -19,6 +19,7 @@ export { World } from "./core/World";
 // Explicit construction only. No default profile or render-loop integration;
 // native contact-lighting qualification uses the normal compiled client module.
 export { CompactContactAO } from "./utils/rendering/CompactContactAO";
+export { CompactRockOutcropVisuals } from "./systems/shared/world/CompactRockOutcropVisuals";
 export {
   PLAYER_ROOT_CLEARANCE,
   resolvePlayerSupportHeight,

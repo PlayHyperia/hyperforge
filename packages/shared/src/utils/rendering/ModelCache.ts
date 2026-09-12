@@ -505,6 +505,10 @@ export class ModelCache {
    * Also converts non-PBR materials to MeshStandardMaterial for proper lighting
    */
   private setupMaterials(scene: THREE.Object3D, world?: World): void {
+    // A glTF material may be used by many meshes/LODs. Convert each effective
+    // variant once per scene: repeating conversion also repeats color-image
+    // readback and allocates a separate DataTexture for every mesh.
+    const converted = new Map<string, THREE.Material>();
     scene.traverse((node) => {
       if (node instanceof THREE.Mesh || node instanceof THREE.SkinnedMesh) {
         const mesh = node;
@@ -524,6 +528,9 @@ export class ModelCache {
         // Convert ALL materials to MeshStandardNodeMaterial for WebGPU-native TSL dissolve support
         // This is required for DistanceFade dissolve effects to work on loaded models
         const convertMaterial = (mat: THREE.Material): THREE.Material => {
+          const key = `${mat.uuid}:${hasVertexColors || Boolean((mat as THREE.MeshStandardMaterial).vertexColors)}`;
+          const existing = converted.get(key);
+          if (existing) return existing;
           // If already a MeshStandardNodeMaterial, just set it up
           if (mat instanceof MeshStandardNodeMaterial) {
             if (hasVertexColors && !mat.vertexColors) {
@@ -531,11 +538,13 @@ export class ModelCache {
               mat.needsUpdate = true;
             }
             this.setupSingleMaterial(mat, world);
+            converted.set(key, mat);
             return mat;
           }
           // Convert ALL other materials (including MeshStandardMaterial) to MeshStandardNodeMaterial
           const newMat = this.convertToStandardMaterial(mat, hasVertexColors);
           this.setupSingleMaterial(newMat, world);
+          converted.set(key, newMat);
           return newMat;
         };
 

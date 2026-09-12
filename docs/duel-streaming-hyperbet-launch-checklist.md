@@ -1,5 +1,42 @@
 # Duel Arena, Streaming, and Hyperbet Launch Checklist
 
+## Scanned outcrop renderer verified — 2026-09-12
+
+**G04 remains open. This is a temporary art-test integration, not a default-world
+placement, finished island, performance certification or production approval.**
+
+- [x] Reused three closed CC0 scanned rocks with three LODs each. The 2.99MB
+  library preserves geometry/maps/materials and shares one material; no new
+  cliff search, texture downsampling, terrain edits or decorative trees.
+- [x] Implemented bounded instancing, exclusive per-rock LOD selection,
+  hysteresis, culling bounds, unchanged-upload avoidance and owned cleanup.
+  Cold model-cache conversion now preserves effective source-material sharing.
+- [x] Passed 1,225 tests in 90 files; three builds/typechecks and scoped lint.
+  Native Chrome/Metal WebGPU retained 1280×720/DPR1/MSAA4 and existing shadows.
+- [x] Verified actual six-rock main draws: near 3 draws/47,856 triangles;
+  far 3/3,000; return 4/41,928 with legitimate medium-LOD hysteresis.
+  These are draw records, not frame-rate or complete GPU-memory measurements.
+- [x] Reviewed all eight world views and the matched before/after rock pair.
+  Final native03 has 679 verified source pins, 600 archived inputs and 16 PNGs;
+  zero page/GPU/cleanup errors. All owned browser/launcher ports closed.
+- [ ] Install permanent outcrops only after complete terrain contact,
+  authoritative collision/navigation and resource/service approach tests.
+  The six temporary plaza positions are NOT the final layout.
+- [ ] Replace the synthetic ridge/coast forms with a convincing larger-scale
+  landform/closed or capped cliff solution; do not repeat full-facade pose loops.
+  Join rock, soil and bounded understory in one composition pass.
+- [ ] Complete warm-cache, moving-camera/LOD, actual population and incremental
+  CPU/GPU/memory testing; coordinate foliage, sky/light, water and shadows.
+- [ ] Existing missing-cow and canonical dagger fit-metadata failures still
+  produce 19 console errors: the overall launch diagnostic remains FAILED.
+
+Evidence: game docs/compact-rock-outcrops-20260912.md and
+docs/evidence/compact-rock-outcrops-20260912.json; native report
+asset-studio/game-test-integration/rock-outcrops-native03/report.json SHA256
+7a12ef233707d288965ae8fdb7af95d3d4538f4701e29efc1c9114ac2ecb91d0.
+Assets checkpoint: 6726595374adfed59e44dac49d75a4f4c0d82437
+(codex/duel-arena-launch-assets). All earlier failed studies remain preserved.
+
 ## Water reflection scheduling verified — 2026-09-12
 
 - [x] Stop drawing an invisible water reflection when the existing stream profile
