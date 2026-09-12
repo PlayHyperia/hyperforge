@@ -58,9 +58,9 @@ export function createCompactTerrainColorOperations() {
     meadowDryHigh: 0.65,
     // Linear-reflectance multipliers, not sRGB values or baked illumination.
     // The pinned grass diffuse remains below 1 in every channel after tint.
-    meadowDryRed: 3.4,
-    meadowDryGreen: 0.92,
-    meadowDryBlue: 1.25,
+    meadowDryRed: 1.12,
+    meadowDryGreen: 0.96,
+    meadowDryBlue: 1.1,
     macroShoulderStart: 0.25,
     macroShoulderEnd: 1.85,
     macroBoundaryNoise: 0.2,
@@ -71,9 +71,9 @@ export function createCompactTerrainColorOperations() {
     macroSoilStrength: 0.22,
     // Warm muted straw in LINEAR reflectance; no light or exposure multiplier.
     // This affects only grass within the admitted ridge shoulder, not soil.
-    macroDryRed: 5.2,
-    macroDryGreen: 1.05,
-    macroDryBlue: 2.6,
+    macroDryRed: 1.25,
+    macroDryGreen: 0.95,
+    macroDryBlue: 1.25,
     // Fractions of the admitted sea-to-interior rise, not absolute world Y.
     coastFadeStartLow: 0.5,
     coastFadeStartHigh: 0.65,
@@ -109,7 +109,7 @@ export function createCompactTerrainColorOperations() {
     pondWetRoughness: 0.62,
   };
   const palette = {
-    grass: [0.033681753576253116, 0.14414087466070133, 0.013722332612374167],
+    grass: [0.12687350988906373, 0.16117143469264922, 0.03425721790414253],
     dirt: [0.13570346695867627, 0.10530763563352, 0.06788700038018664],
     rock: [0.23471111495321656, 0.21598528801526068, 0.17766932960947915],
   };

@@ -40,6 +40,10 @@ const attributes = {
   groundNormals: 3,
 } as const;
 
+// Existing main/native-worker tolerance for Float32 local-coordinate rounding;
+// not a minimum visible colour difference or an art-quality threshold.
+const colorParityTolerance = 0.0002;
+
 type TransferReceipt = {
   before: number[];
   after: number[];
@@ -257,7 +261,10 @@ describe("actual authored-surface grass worker", () => {
       internals.loadWaterBodiesFromManifest();
       internals.loadFlatZonesFromManifest();
       const ops = createCompactTerrainColorOperations();
-      let recolored = 0;
+      const macroField = ops.macroField(terrain.getWorldTerrainProfile());
+      expect(macroField).not.toBeNull();
+      let activeMacroSamples = 0;
+      let omittedFieldError = 0;
       for (const [x, z] of [
         [225, 410],
         [260, 410],
@@ -282,12 +289,31 @@ describe("actual authored-surface grass worker", () => {
             point.z,
             TERRAIN_SHADER_CONSTANTS.DISTORT_NOISE_SCALE,
           );
-          const beforeField = ops.sample({
+          const paletteInput = {
             noiseValue,
             distortNoise,
             slope: 1 - main.ny,
             roadInfluence: 0,
+            surface: {
+              x: point.x,
+              z: point.z,
+              height: internals.getHeightAtComputed(point.x, point.z),
+              pond:
+                input.terrainSurface.waterBodies.find(
+                  (body) => body.id === "haven_pond_water",
+                ) ?? null,
+              macroField,
+            },
+          };
+          const expected = ops.sample(paletteInput);
+          const withoutMacro = ops.sample({
+            ...paletteInput,
+            surface: { ...paletteInput.surface, macroField: null },
           });
+          if (
+            ops.macroWeights(point.x, point.z, noiseValue, macroField).dry > 0
+          )
+            activeMacroSamples++;
           const ecology = computeTerrainColorCPU(
             point.x,
             point.z,
@@ -299,16 +325,24 @@ describe("actual authored-surface grass worker", () => {
           // Compact forest classification is unchanged. Visible RGB is not
           // allowed to feed back into the legacy ecology/acceptance weight.
           expect(main.grassWeight).toBeCloseTo(ecology.grassWeight, 4);
-          for (const [axis, channel] of (["r", "g", "b"] as const).entries())
+          for (const [axis, channel] of (["r", "g", "b"] as const).entries()) {
+            expect(main[channel]).toBeCloseTo(expected[channel], 12);
             expect(
               Math.abs(
-                result.groundColors[point.index * 3 + axis] - main[channel],
+                result.groundColors[point.index * 3 + axis] - expected[channel],
               ),
-            ).toBeLessThan(0.0002);
-          if (Math.abs(main.r - beforeField.r) > 0.02) recolored++;
+            ).toBeLessThan(colorParityTolerance);
+            omittedFieldError = Math.max(
+              omittedFieldError,
+              Math.abs(expected[channel] - withoutMacro[channel]),
+            );
+          }
         }
       }
-      expect(recolored).toBeGreaterThan(100);
+      expect(activeMacroSamples).toBeGreaterThan(100);
+      // Omitting the field must fail the unchanged numerical parity check,
+      // without demanding the old palette's exaggerated red amplitude.
+      expect(omittedFieldError).toBeGreaterThan(2 * colorParityTolerance);
     });
   });
 
@@ -378,9 +412,40 @@ describe("actual authored-surface grass worker", () => {
       };
       const result = await worker.run(input);
       expect(result.count).toBeGreaterThan(50);
-      let differsFromOldPalette = 0;
+      const ops = createCompactTerrainColorOperations();
+      const macroField = ops.macroField(terrain.getWorldTerrainProfile());
+      expect(macroField).not.toBeNull();
+      let legacyPaletteError = 0;
       for (const point of points(input, result)) {
         const main = terrain.getTerrainColorAt(point.x, point.z, true);
+        // CompactTerrainMaterial.test independently reconstructs these palette
+        // means from the actual packed diffuse texels. Here qualify the actual
+        // main/worker integration against that current palette, not a minimum
+        // distance from an unrelated legacy green channel.
+        const expected = ops.sample({
+          noiseValue: sampleNoiseCPU(
+            point.x,
+            point.z,
+            TERRAIN_SHADER_CONSTANTS.NOISE_SCALE,
+          ),
+          distortNoise: sampleNoiseCPU(
+            point.x,
+            point.z,
+            TERRAIN_SHADER_CONSTANTS.DISTORT_NOISE_SCALE,
+          ),
+          slope: 1 - main.ny,
+          roadInfluence: 0,
+          surface: {
+            x: point.x,
+            z: point.z,
+            height: internals.getHeightAtComputed(point.x, point.z),
+            pond:
+              input.terrainSurface.waterBodies.find(
+                (body) => body.id === "haven_pond_water",
+              ) ?? null,
+            macroField,
+          },
+        });
         const legacy = computeTerrainColorCPU(
           point.x,
           point.z,
@@ -391,15 +456,20 @@ describe("actual authored-surface grass worker", () => {
         );
         expect(main.grassWeight).toBeCloseTo(legacy.grassWeight, 4);
         for (const [axis, channel] of (["r", "g", "b"] as const).entries()) {
+          expect(main[channel]).toBeCloseTo(expected[channel], 12);
           expect(
             Math.abs(
-              result.groundColors[point.index * 3 + axis] - main[channel],
+              result.groundColors[point.index * 3 + axis] - expected[channel],
             ),
-          ).toBeLessThan(0.0002);
+          ).toBeLessThan(colorParityTolerance);
+          legacyPaletteError = Math.max(
+            legacyPaletteError,
+            Math.abs(expected[channel] - legacy[channel]),
+          );
         }
-        if (Math.abs(main.g - legacy.g) > 0.03) differsFromOldPalette++;
       }
-      expect(differsFromOldPalette).toBeGreaterThan(50);
+      // A fallback to legacy RGB cannot pass the same Float32 parity tolerance.
+      expect(legacyPaletteError).toBeGreaterThan(2 * colorParityTolerance);
     });
   });
 

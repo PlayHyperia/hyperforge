@@ -248,10 +248,26 @@ describe("compact terrain actual texture ownership and CPU material graph", () =
         expect(packed.width).toBe(1024);
         expect(packed.height).toBe(1024);
         if (kind === "normalAo" && layer === "grass") {
+          const source = manifest.layers.grass.sources[3];
+          expect(source.path).toBe(
+            "terrain/textures/ambientcg-grass004/Grass004_1K-PNG_AmbientOcclusion.png",
+          );
+          const bytes = await readFile(
+            new URL(source.path, new URL("../../../", assetDirectory)),
+          );
+          expect(createHash("sha256").update(bytes).digest("hex")).toBe(
+            source.sha256,
+          );
+          const ao = PNG.sync.read(bytes);
+          expect([ao.width, ao.height]).toEqual([1024, 1024]);
           let mismatches = 0;
-          for (let p = 3; p < packed.data.length; p += 4)
-            if (packed.data[p] !== 255) mismatches++;
+          let nonWhite = 0;
+          for (let p = 0; p < packed.data.length; p += 4) {
+            if (packed.data[p + 3] !== ao.data[p]) mismatches++;
+            if (packed.data[p + 3] !== 255) nonWhite++;
+          }
           expect(mismatches).toBe(0);
+          expect(nonWhite).toBeGreaterThan(0);
         }
         if (kind === "albedoRoughness") {
           const mean = [0, 0, 0];
@@ -645,8 +661,8 @@ describe("compact terrain actual texture ownership and CPU material graph", () =
         const dx = vectorValue(p.dx),
           dy = vectorValue(p.dy);
         const magnitude = Math.hypot(...dx);
-        expect(magnitude).toBeGreaterThan(0.85 * 0.81);
-        expect(magnitude).toBeLessThan(0.85 * 1.19);
+        expect(magnitude).toBeGreaterThan((1 / 1.4) * 0.81);
+        expect(magnitude).toBeLessThan((1 / 1.4) * 1.19);
         expect(dx[0] * dy[0] + dx[1] * dy[1]).toBeCloseTo(0, 12);
         const normal = createCompactCotangentNormal(
           vec3(0.75, 0.5, 1),
@@ -1177,9 +1193,9 @@ describe("compact grass base palette without changing ecology", () => {
     ]) {
       // Independent intended formula, in linear units, not sRGB multiplication.
       const expected = [
-        1 + (3.4 - 1) * dryness,
-        1 + (0.92 - 1) * dryness,
-        1 + (1.25 - 1) * dryness,
+        1 + (1.12 - 1) * dryness,
+        1 + (0.96 - 1) * dryness,
+        1 + (1.1 - 1) * dryness,
       ];
       const actual = applyCompactMeadowTint(grass, float(noise));
       const rgb = vectorValue(actual.albedo);
@@ -1212,7 +1228,14 @@ describe("compact grass base palette without changing ecology", () => {
           maximum[channel],
           image.data[offset + channel],
         );
-    const strongest = ops.meadowTint(1, 1);
+    // Each channel has its own maximum: green peaks in the greener meadow,
+    // not on the dry shoulder. Check every endpoint of both linear blends.
+    const tintCorners = [0, 1].flatMap((noise) =>
+      [0, 1].map((macro) => ops.meadowTint(noise, macro)),
+    );
+    const strongest = [0, 1, 2].map((channel) =>
+      Math.max(...tintCorners.map((tint) => tint[channel])),
+    );
     for (let channel = 0; channel < 3; channel++) {
       const srgb = maximum[channel] / 255;
       const linear =
@@ -1259,13 +1282,19 @@ describe("compact grass base palette without changing ecology", () => {
         b: palette.dirt[2],
       });
     }
-    // Both retained broad-noise samplers remain deterministic, and the actual
-    // admitted island covers more than a constant meadow tint.
-    const dryRed = [];
+    // Coverage stays broad even though the new source needs much gentler tint.
+    // Compare the physical dryness mask, not the obsolete red gain's amplitude.
+    const dryness: number[] = [];
     for (let x = 150; x <= 550; x += 20)
-      for (let z = 200; z <= 600; z += 20)
-        dryRed.push(ops.meadowTint(sampleNoiseCPU(x, z, 0.0008))[0]);
-    expect(Math.max(...dryRed) - Math.min(...dryRed)).toBeGreaterThan(0.25);
+      for (let z = 200; z <= 600; z += 20) {
+        const noise = sampleNoiseCPU(x, z, 0.0008);
+        const t = Math.max(0, Math.min(1, (noise - 0.28) / (0.72 - 0.28)));
+        const expected = 0.15 + 0.5 * t * t * (3 - 2 * t);
+        const actual = (ops.meadowTint(noise)[0] - 1) / (1.12 - 1);
+        expect(actual).toBeCloseTo(expected, 12);
+        dryness.push(actual);
+      }
+    expect(Math.max(...dryness) - Math.min(...dryness)).toBeGreaterThan(0.25);
   });
 
   it("matches real TSL wet-soil/bed layers and CPU colour without affecting remote terrain", () => {
@@ -1387,7 +1416,7 @@ describe("compact grass base palette without changing ecology", () => {
       b: palette.dirt[2],
     });
     const grass = sample(0, 0, 0.1);
-    expect(grass.r).toBeCloseTo(palette.grass[0] * 1.36 * 0.984, 14);
+    expect(grass.r).toBeCloseTo(palette.grass[0] * 1.018 * 0.984, 14);
     for (const slope of [0, 0.2, 0.45, 0.8, 1])
       for (const roadInfluence of [0, 0.25, 0.75, 1])
         for (const noiseValue of [0, 0.5, 1]) {
@@ -1455,6 +1484,8 @@ describe("compact grass base palette without changing ecology", () => {
     expect(COMPACT_TERRAIN_MATERIAL.dirtNormalStrength).toBe(0.25);
     expect(COMPACT_TERRAIN_MATERIAL.rockNormalStrength).toBe(0.4);
     expect(COMPACT_TERRAIN_MATERIAL.repeatsPerMeter).toBe(0.3);
+    expect(COMPACT_TERRAIN_MATERIAL.grassRepeatsPerMeter).toBe(1 / 1.4);
+    expect(COMPACT_TERRAIN_MATERIAL.dirtRepeatsPerMeter).toBe(0.95);
     expect(COMPACT_TERRAIN_MATERIAL.textureCount).toBe(6);
     expect(COMPACT_TERRAIN_MATERIAL.surfaceSampleCount).toBe(14);
   });

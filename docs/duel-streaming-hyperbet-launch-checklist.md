@@ -1,7 +1,48 @@
 # Duel Arena, Streaming, and Hyperbet Launch Checklist
 
+## Graphics delivery priorities — current acceptance gates
+
+This is the current work order, not a claim that the scene is close to AAA.
+Dated sections below retain evidence and superseded experiments.
+
+1. [ ] **Ground materials:** finish the Grass004 comparison; choose by actual
+   close/mid/distant views, then qualify transfer, mips and compressed textures.
+2. [ ] **Grounded lighting:** separate direct/neutral/contact-AO comparisons;
+   preserve skin color, sunlight, cutout foliage and water without halos.
+3. [ ] **A composed compact island:** improve landform, worn paths, shoreline,
+   lodge/workshop/bank setting, props and furnished interiors. One arena only.
+4. [ ] **Fuller living vegetation:** actual choppable resource trees throughout
+   the island; coherent species/scale, correct grass contact, denser meadow and
+   shrubs where appropriate. No decorative tree replacement of game resources.
+5. [ ] **Characters and equipment:** finish in-scene materials, animation,
+   clipping/fit and all item bindings; final directional/grip review stays open.
+6. [ ] **Atmosphere and motion:** polish sky, water, shadows, wind, camera cuts,
+   combat/gathering movement, soundscape and SFX as a coherent experience.
+7. [ ] **Measured quality at scale:** agreed hardware/scene budgets, actual GPU
+   and presented-frame evidence, cold loading, multi-agent motion and thermal
+   soak. Fixed-resolution screenshots and passing CPU tests are not this gate.
+8. [ ] **Integrated launch:** agent preparation/combat/resource lifetimes,
+   streaming/video/audio, reconnect/recovery and SOL-only real-money safety.
+   Keep the outstanding cow/dagger failures visible until genuinely fixed.
+
 ## Active functional woodland and surface fidelity — 2026-09-11
 
+- [x] Push verified trim checkpoint `e5c68e452`; exact remote head and GitHub
+  author/committer `dreaminglucid` verified. No merge or deployment.
+- [ ] Repair the visible finite ocean boundary: native bay view projects the
+  `(800,16,800)` water-root corner to the exact visible horizon apex. Add only
+  bounded ocean continuation with continuous waves and owned teardown; no
+  extra terrain roots, expanded island, or stronger fog to conceal the defect.
+- [x] Select Grass004 as the finer, less directionally repetitive ground
+  substrate after paired native58/59 Metal/WebGPU captures. Root verifies all
+  24 images, 535 pins / 466 archives, 18 matched camera/daylight pairs, portable
+  originals/packing and 24 unchanged non-color worker arrays (2,281 clumps).
+  781 shared tests, 55 active capture tests, five packer tests and three checker
+  tests pass; builds/typechecks pass. Keep all 19 cow/dagger errors visible.
+- [ ] Finish ground motion/contact and performance qualification: candidate
+  grass adds 4,587,221 transfer bytes. Uniform empty lawn, sparse oversized
+  blades, rounded ridge/cobble cliffs, animated mips and actual GPU/frame cost
+  remain open. Native59 is not whole-world art or production acceptance.
 - [x] Verify corrected trim in native57: complete straight window frames visible
   in all four lodge close-ups; 27 Metal/WebGPU images, 529 pins / 460 archives
   independently verified, zero page/GPU errors and full owned cleanup. Keep

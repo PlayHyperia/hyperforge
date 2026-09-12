@@ -25,7 +25,8 @@ export const COMPACT_TERRAIN_MATERIAL = {
   repeatsPerMeter: 0.3,
   textureCount: 6,
   surfaceSampleCount: 14,
-  grassRepeatsPerMeter: 0.85,
+  // Grass004 source covers approximately 1.4m; projection variation stays ±18%.
+  grassRepeatsPerMeter: 1 / 1.4,
   dirtRepeatsPerMeter: 0.95,
   groundPatternBands: 32,
   groundPatternBlendStart: 0.18,
@@ -82,7 +83,7 @@ export class CompactTerrainTextureSet {
           channel === "normal-ao"
             ? [128, 128, 255, 255]
             : layer === "grass"
-              ? [50, 105, 29, 235]
+              ? [100, 112, 52, 235]
               : [110, 95, 74, 230];
         const image = new THREE.DataTexture(
           new Uint8Array(fallback),
