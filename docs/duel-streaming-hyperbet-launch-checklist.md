@@ -1,5 +1,30 @@
 # Duel Arena, Streaming, and Hyperbet Launch Checklist
 
+## Grass culling follows the rendered camera — 2026-09-12
+
+- [x] Reproduce stale-camera culling against actual generated/grounded preparation
+      grass: an earlier update set `visible=false` and blocked later camera draws.
+- [x] Move render visibility to r186's per-pass frustum hook using the accepted
+      complete wind-swept bounds. Retain culling, density, blades, grounding,
+      horizon/LOD budgets, geometry and shader materials. No forced-visible grass.
+- [x] Cover sequential cameras, real multiview frusta and prepared parent movement;
+      pass 1,156/1,156 tests across 84 files, types/builds and scoped lint/format.
+- [x] Native grass-camera-probe01: real current-camera draw lists match independent
+      frustum/accepted-bound tests at all 16 image boundaries. Same six chunks,
+      2,212 clumps, 48 functional trees and 52 dressing placements; 14 PNG hashes,
+      675 current pins and 596 archives verified. All eight art views inspected.
+      No page/GPU/cleanup errors; overall fails the unchanged 19 cow/dagger errors.
+- [ ] Finish genuine ground/understory composition. Near preparation lawn remains
+      bare despite correct draw submission; investigate the broad Central Haven
+      grass exclusion and preserve explicit station/building/path clearances.
+- [ ] Moving-camera/streaming quality, whole-frame CPU/GPU and memory remain open.
+      Earlier uploaded/ready grass receipts did not prove correct-camera coverage.
+      No AAA, FPS, full-loop or launch acceptance.
+
+Evidence: `docs/grass-render-camera-culling-20260912.md`,
+`asset-studio/compact-smithy-court01/grass-camera-*` and
+`asset-studio/game-test-integration/grass-camera-probe01/`.
+
 ## Preparation-view roof cutaways — 2026-09-12
 
 - [x] Include all four high smithy ring beams in the existing upper cutaway.

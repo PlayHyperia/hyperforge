@@ -218,6 +218,78 @@ describe("opt-in compact grass, actual terrain and native worker (not GPU proof)
     return uploads;
   }
 
+  it("keeps grounded grass available to each actual render camera after an earlier update camera rejects it", async () => {
+    const f = await fixture();
+    try {
+      const { owner, container } = f.manager(
+        COMPACT_ISLAND_GRASS_VISUAL_PROFILE,
+      );
+      const node = f.nodes[2]; // Actual preparation leaf centered at (350,350).
+      f.installSupport(node);
+      const { key } = await queueGrounding(f, owner, node);
+      expect(finishGrounding(owner, key)).toBe(1);
+      const chunk = owner["chunks"].get(key)!,
+        mesh = chunk.mesh;
+      container.updateMatrixWorld(true);
+      const camera = new THREE.PerspectiveCamera(52, 16 / 9, 0.2, 10000);
+      camera.coordinateSystem = THREE.WebGPUCoordinateSystem;
+      camera.updateProjectionMatrix();
+      camera.position.set(390, 34, 370);
+      camera.lookAt(500, 34, 370); // Earlier director/update view looks away.
+      camera.updateMatrixWorld(true);
+      owner.update(385, 374, camera);
+      const frustum = () =>
+        new THREE.Frustum().setFromProjectionMatrix(
+          new THREE.Matrix4().multiplyMatrices(
+            camera.projectionMatrix,
+            camera.matrixWorldInverse,
+          ),
+          camera.coordinateSystem,
+          camera.reversedDepth,
+        );
+      expect(frustum().intersectsBox(chunk.box)).toBe(false);
+      // The renderer must decide each pass; an update must not remove the mesh
+      // from every later camera's traversal by writing Object3D.visible=false.
+      expect(mesh.visible).toBe(true);
+      expect(mesh.frustumCulled).toBe(true);
+      expect(mesh.intersectsFrustum(frustum())).toBe(false);
+      const before = mesh.matrixWorld.toArray();
+      camera.position.set(322, 30.019301523097685, 321);
+      camera.lookAt(337, 29.219301523097688, 336);
+      camera.updateMatrixWorld(true);
+      expect(frustum().intersectsBox(chunk.box)).toBe(true);
+      expect(mesh.intersectsFrustum(frustum())).toBe(true);
+      expect(mesh.matrixWorld.toArray()).toEqual(before);
+      const near = camera.clone();
+      near.updateMatrixWorld(true);
+      // A following pass with another camera must not inherit that decision.
+      camera.position.set(390, 34, 370);
+      camera.lookAt(500, 34, 370);
+      camera.updateMatrixWorld(true);
+      expect(mesh.intersectsFrustum(frustum())).toBe(false);
+      expect(mesh.visible).toBe(true);
+      const array = new THREE.ArrayCamera([camera, near]);
+      const multiview = new THREE.FrustumArray().setFromArrayCamera(array);
+      expect(mesh.intersectsFrustum(multiview)).toBe(true);
+      // The local bound also follows prepared transforms, not a stale world box.
+      expect(
+        mesh
+          .boundingBox!.clone()
+          .applyMatrix4(mesh.matrixWorld)
+          .equals(chunk.box),
+      ).toBe(true);
+      container.position.x = -1000;
+      container.updateMatrixWorld(true);
+      expect(mesh.intersectsFrustum(multiview)).toBe(false);
+      near.position.x -= 1000;
+      near.updateMatrixWorld(true);
+      multiview.setFromArrayCamera(array);
+      expect(mesh.intersectsFrustum(multiview)).toBe(true);
+    } finally {
+      await f.close();
+    }
+  });
+
   it("installs only complete fitted chunks, keeps independent correction storage, and disposes owned resources exactly once", async () => {
     const f = await fixture();
     try {

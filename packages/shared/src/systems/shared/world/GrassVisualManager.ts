@@ -887,7 +887,11 @@ export class GrassVisualManager implements QuadTreeListener {
       camera.projectionMatrix,
       camera.matrixWorldInverse,
     );
-    this.frustum.setFromProjectionMatrix(this.projScreenMatrix);
+    this.frustum.setFromProjectionMatrix(
+      this.projScreenMatrix,
+      camera.coordinateSystem,
+      camera.reversedDepth,
+    );
 
     const tiers = GRASS_CONFIG.LOD_TIERS;
     const hysteresis = GRASS_CONFIG.LOD_HYSTERESIS;
@@ -897,8 +901,14 @@ export class GrassVisualManager implements QuadTreeListener {
       const dz = chunk.node.centerZ - playerZ;
       const distSq = dx * dx + dz * dz;
 
-      chunk.mesh.visible = this.frustum.intersectsBox(chunk.box);
-      if (!chunk.mesh.visible || built >= this.maxChunksPerFrame) continue;
+      // This earlier camera only prioritizes LOD work. Never publish its cull
+      // result into Object3D.visible: a later camera/director or secondary pass
+      // must test its own frustum against the actual shader-displaced bounds.
+      if (
+        !this.frustum.intersectsBox(chunk.box) ||
+        built >= this.maxChunksPerFrame
+      )
+        continue;
 
       const dist = Math.sqrt(distSq);
       const desiredLod = this.getLodLevel(chunk.node);
@@ -1445,7 +1455,7 @@ export class GrassVisualManager implements QuadTreeListener {
       mesh = new THREE.InstancedMesh(geo, material, data.count);
       mesh.position.set(node.centerX, 0, node.centerZ);
       mesh.name = `GrassQT_${key}`;
-      mesh.frustumCulled = false;
+      mesh.frustumCulled = true;
       mesh.receiveShadow = true;
       mesh.castShadow = false;
       mesh.userData = {
@@ -1485,6 +1495,20 @@ export class GrassVisualManager implements QuadTreeListener {
             new THREE.Vector3(node.centerX - half, -50, node.centerZ - half),
             new THREE.Vector3(node.centerX + half, 200, node.centerZ + half),
           );
+
+      // Instance matrices are intentionally identity; the vertex shader places
+      // clumps and grounded roots. Default geometry/instance bounds therefore
+      // cannot describe this chunk. Use the full accepted wind-swept envelope
+      // in r186's per-render-pass culling hook, including any prepared parent
+      // transform, without allocating or updating matrices during rendering.
+      const localBounds = box.clone().translate(mesh.position.clone().negate());
+      const renderedBounds = new THREE.Box3();
+      mesh.boundingBox = localBounds;
+      mesh.boundingSphere = localBounds.getBoundingSphere(new THREE.Sphere());
+      mesh.intersectsFrustum = (frustum) =>
+        frustum.intersectsBox(
+          renderedBounds.copy(localBounds).applyMatrix4(mesh.matrixWorld),
+        );
 
       this.container.add(mesh);
       this.chunks.set(key, { nodeId: node.id, mesh, box, lodLevel, node });
