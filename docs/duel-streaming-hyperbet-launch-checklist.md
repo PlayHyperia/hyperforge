@@ -2,6 +2,10 @@
 
 ## Compact bank and proportionate service courts — 2026-09-12
 
+Implementation checkpoint: [game d67ea1ded](https://github.com/PlayHyperia/hyperforge/commit/d67ea1ded10194ec0c2950cb31be511d38c29773)
+and [assets 71b1285](https://github.com/PlayHyperia/assets/commit/71b12853aca0c3e9e21fe05cf4c972ef4449dc92).
+Both authored and committed as dreaminglucid; these branches must be used together.
+
 - [x] Reduce arrival/recovery hardscape from 1,644 to 432 m²; preserve the single
       combat ring, authoritative return marks and active safe-zone/terrain grade.
       Replace the oversized recovery sign with a small mineral-teal floor inlay.

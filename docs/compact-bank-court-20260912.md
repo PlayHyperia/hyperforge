@@ -17,6 +17,11 @@ some preparation views. Actual animated bank/preparation coverage remains a requ
 
 ## Implemented
 
+Implementation checkpoint: [game d67ea1ded](https://github.com/PlayHyperia/hyperforge/commit/d67ea1ded10194ec0c2950cb31be511d38c29773)
+and [assets 71b1285](https://github.com/PlayHyperia/assets/commit/71b12853aca0c3e9e21fe05cf4c972ef4449dc92).
+Both authored and committed as dreaminglucid; these branches must be used together.
+
+
 - Arrival court: 40×25 m → 18×16 m. Recovery court: 28×23 m → 12×12 m.
   Combined hardscape area: 1,644 → 432 m² (73.7% less). This is geometry area,
   **not a measured GPU saving**. One 20×24 m combat ring and existing return marks remain.
@@ -125,4 +130,3 @@ budget, AO/GI effect or fallback was silently changed.
 - [ ] Investigate the retained grass grounding test failure under controlled CPU contention.
 - [ ] Pass visual, temporal, GPU/frame-time, memory/lifecycle and long-duration gates before
       calling any candidate production-ready. Overall AAA-quality approval remains open.
-
