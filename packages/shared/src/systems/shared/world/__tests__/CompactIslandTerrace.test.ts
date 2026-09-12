@@ -11,7 +11,11 @@ import { NoiseGenerator } from "../../../../utils/NoiseGenerator";
 import type { WorldConfigManifest } from "../../../../types/world/world-types";
 import { createCompactIslandLandform } from "../CompactIslandLandform";
 import { validateCompactResourceGroves } from "../CompactResourceGroves";
-import { validateCompactPreparationLodge } from "../CompactPreparationLodge";
+import {
+  validateCompactPreparationLodge,
+  COMPACT_PREPARATION_LODGE_V4_FIXTURE,
+  COMPACT_PREPARATION_LODGE_V5_FIXTURE,
+} from "../CompactPreparationLodge";
 import {
   SCULPTED_COMPACT_V4_PROFILE_FIXTURE as current,
   SCULPTED_COMPACT_WORLD_TERRAIN_PROFILE as active,
@@ -192,7 +196,9 @@ describe("explicit western rocky terrace successor", () => {
     delete config.compactServiceCourt;
     config.terrainProfile = current;
     config.compactResourceGroves!.terrainProfileId = current.id;
-    config.compactPreparationLodge!.terrainProfileId = current.id;
+    config.compactPreparationLodge = structuredClone(
+      COMPACT_PREPARATION_LODGE_V5_FIXTURE,
+    );
     const oldConfig = structuredClone(config);
     oldConfig.terrainProfile = previous;
     // Historical terrain uses its actual v1 tree layout, not the new v2
@@ -201,10 +207,9 @@ describe("explicit western rocky terrace successor", () => {
       ...structuredClone(groveLayouts.previous),
       terrainProfileId: "compact-duel-island-v4",
     } as WorldConfigManifest["compactResourceGroves"];
-    oldConfig.compactPreparationLodge = {
-      ...oldConfig.compactPreparationLodge!,
-      terrainProfileId: "compact-duel-island-v4",
-    };
+    oldConfig.compactPreparationLodge = structuredClone(
+      COMPACT_PREPARATION_LODGE_V4_FIXTURE,
+    );
     expect(
       validateCompactResourceGroves(config.compactResourceGroves, current, 2),
     ).toBeDefined();
@@ -256,9 +261,8 @@ describe("explicit western rocky terrace successor", () => {
       profile: WorldTerrainProfile,
     ) {
       const builder = new WorldManifestIdentityBuilder();
-      for (const name of WORLD_IDENTITY_MANIFESTS)
-        builder.record(
-          name,
+      for (const name of WORLD_IDENTITY_MANIFESTS) {
+        const manifest =
           name === "world-config.json"
             ? value
             : JSON.parse(
@@ -269,8 +273,14 @@ describe("explicit western rocky terrace successor", () => {
                   ),
                   "utf8",
                 ),
-              ),
-        );
+              );
+        // Both sides are historical compact worlds with the original floors.
+        if (name === "duel-arenas.json") {
+          manifest.lobby.size = { width: 40, depth: 25 };
+          manifest.hospital.size = { width: 28, depth: 23 };
+        }
+        builder.record(name, manifest);
+      }
       return builder.build(profile);
     }
     const before = await identity(oldConfig, previous),

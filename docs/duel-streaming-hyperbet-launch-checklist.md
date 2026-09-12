@@ -1,5 +1,40 @@
 # Duel Arena, Streaming, and Hyperbet Launch Checklist
 
+## Compact bank and proportionate service courts — 2026-09-12
+
+- [x] Reduce arrival/recovery hardscape from 1,644 to 432 m²; preserve the single
+      combat ring, authoritative return marks and active safe-zone/terrain grade.
+      Replace the oversized recovery sign with a small mineral-teal floor inlay.
+- [x] Move the same seeded lodge to the real bank/workshop cluster at (350,328),
+      facing north. Validate full rotated roof/steps support, actual native collision
+      openings, path width/mask support, service footprints and all-LOD resource crowns.
+      Match the two independent asset manifests; no station/NPC/resource is moved.
+- [x] Pass the final uncontended 1,137-test shared suite (83 files), scoped lint/format,
+      shared/client/server type checks and builds, and 18 capture preflight tests.
+      Retain intermediate geometry failures and the run10 grass-grounding test failure
+      under concurrent builds; its cause remains unproven despite the clean run11.
+- [x] Complete native82: 24 real WebGPU images, 18 matched daylight/camera pairs against
+      both native64 and native80. Root-verify 659 pins, 590 source archives, 52 frozen
+      files, all PNG hashes, both 48-tree censuses and existing grass/shader/cutaway gates.
+      Page/GPU/cleanup errors zero; owned Chrome/launcher/ports closed.
+- [x] Retain native81's stale capture-startup pose failure and immutable sources.
+      Correct the harness using actual startup receipt regression coverage.
+- [ ] Resolve the new lodge-roof intrusion in the unchanged diagnostic bank view;
+      qualify actual moving preparation cameras and smithy lower-beam visibility.
+      Do not treat a passed scene contract as approved bank composition or motion.
+- [ ] NEXT: contact lighting with neutral-control/color parity and real GPU timings;
+      richer clustered ground cover, natural worn ground, recovery access/perimeters,
+      shoreline/rock/sky composition and temporal stability. Three.js r186 already
+      exposes GTAO/SSGI/batching; the contact-AO prototype remains unintegrated.
+- [ ] Overall native82 remains FAIL: five cow-model and fourteen dagger-fit errors.
+      Resolve content errors and the grass contention finding; qualify full multi-agent
+      gameplay/betting/streaming, sustained frame time and memory. No AAA/launch approval.
+
+Evidence: `docs/compact-bank-court-20260912.md` (research and acceptance gates),
+`asset-studio/compact-smithy-court01/bank-hub-shared-tests11.json`,
+`after82-root-verification.json`; immutable native81/native82 reports and images.
+This section supersedes earlier oversized-court TODOs only; visual quality remains open.
+
 ## Timber aliasing correction — 2026-09-12
 
 - [x] Isolate the visible gable speckles with six real WebGPU one-variable A/B/A

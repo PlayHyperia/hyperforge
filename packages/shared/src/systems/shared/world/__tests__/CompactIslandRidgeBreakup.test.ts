@@ -13,6 +13,7 @@ import {
   buildTerrainWorkerProfileGuardJS,
 } from "../../../../utils/workers/TerrainWorkerShared";
 import { createCompactIslandLandform } from "../CompactIslandLandform";
+import { COMPACT_PREPARATION_LODGE_V5_FIXTURE } from "../CompactPreparationLodge";
 import {
   SCULPTED_COMPACT_WORLD_TERRAIN_PROFILE as current,
   SCULPTED_COMPACT_V4_PROFILE_FIXTURE as previous,
@@ -53,15 +54,13 @@ describe("shared broken-ridge sculpt", () => {
       ...old.compactResourceGroves!,
       terrainProfileId: previous.id,
     };
-    old.compactPreparationLodge = {
-      ...old.compactPreparationLodge!,
-      terrainProfileId: previous.id,
-    };
+    old.compactPreparationLodge = structuredClone(
+      COMPACT_PREPARATION_LODGE_V5_FIXTURE,
+    );
     const identity = async (replacement: typeof config) => {
       const builder = new WorldManifestIdentityBuilder();
-      for (const name of WORLD_IDENTITY_MANIFESTS)
-        builder.record(
-          name,
+      for (const name of WORLD_IDENTITY_MANIFESTS) {
+        const manifest =
           name === "world-config.json"
             ? replacement
             : JSON.parse(
@@ -72,8 +71,15 @@ describe("shared broken-ridge sculpt", () => {
                   ),
                   "utf8",
                 ),
-              ),
-        );
+              );
+        // Reconstruct the actual historical floors, not current courts
+        // relabelled as the previously shipped v5 content.
+        if (replacement === old && name === "duel-arenas.json") {
+          manifest.lobby.size = { width: 40, depth: 25 };
+          manifest.hospital.size = { width: 28, depth: 23 };
+        }
+        builder.record(name, manifest);
+      }
       return builder.build(replacement.terrainProfile!);
     };
     const before = await identity(old),

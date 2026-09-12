@@ -22,20 +22,20 @@ export const ARENA_SPAWN_OFFSET = 8;
 export const ARENA_FORFEIT_PILLAR_INSET = 2;
 
 // ---------------------------------------------------------------------------
-// Lobby (south of arenas, right side)
+// Arrival court (north-east of the combat ring)
 // ---------------------------------------------------------------------------
 export const LOBBY_CENTER_X = 385;
 export const LOBBY_CENTER_Z = 376;
-export const LOBBY_WIDTH = 40;
-export const LOBBY_LENGTH = 25;
+export const LOBBY_WIDTH = 18;
+export const LOBBY_LENGTH = 16;
 
 // ---------------------------------------------------------------------------
-// Hospital (south of arenas, left side)
+// Recovery court (north-west of the combat ring)
 // ---------------------------------------------------------------------------
 export const HOSPITAL_CENTER_X = 345;
 export const HOSPITAL_CENTER_Z = 376;
-export const HOSPITAL_WIDTH = 28;
-export const HOSPITAL_LENGTH = 23;
+export const HOSPITAL_WIDTH = 12;
+export const HOSPITAL_LENGTH = 12;
 
 // ---------------------------------------------------------------------------
 // Lobby Spawn Point (where players appear in the lobby)

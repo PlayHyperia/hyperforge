@@ -4,7 +4,10 @@ import { World } from "../../../core/World";
 import { DataManager } from "../../../data/DataManager";
 import { TerrainSystem } from "../../shared/world/TerrainSystem";
 import { TownSystem } from "../../shared/world/TownSystem";
-import { COMPACT_PREPARATION_LODGE } from "../../shared/world/CompactPreparationLodge";
+import {
+  COMPACT_PREPARATION_LODGE,
+  getCompactPreparationLodgeFootprint,
+} from "../../shared/world/CompactPreparationLodge";
 import {
   COMPACT_LODGE_VISUAL_SYSTEM,
   CompactPreparationLodgeVisualsSystem,
@@ -157,22 +160,27 @@ describe("compact lodge actual geometry / scene ownership (CPU, not rendered acc
     leases.push(visual);
     expect(record.layout).toEqual(beforeLayout);
     const box = new THREE.Box3().setFromObject(visual.root);
-    expect(box.min.x).toBeCloseTo(393.502307415, 5);
-    expect(box.max.x).toBeCloseTo(402.497692585, 5);
-    expect(box.min.z).toBeCloseTo(365.55000019, 5);
-    expect(box.max.z).toBeCloseTo(376.55000019, 5);
-    expect(box.max.y).toBeCloseTo(35.3187789286, 5);
+    expect(box.min.x).toBeCloseTo(345.502307415, 5);
+    expect(box.max.x).toBeCloseTo(354.497692585, 5);
+    expect(box.min.z).toBeCloseTo(321.44999981, 5);
+    expect(box.max.z).toBeCloseTo(332.44999981, 5);
+    expect(box.max.y).toBeCloseTo(34.8987789286, 5);
+    const support = getCompactPreparationLodgeFootprint(record.descriptor);
+    expect(box.min.x).toBeGreaterThanOrEqual(support.minX);
+    expect(box.max.x).toBeLessThanOrEqual(support.maxX);
+    expect(box.min.z).toBeGreaterThanOrEqual(support.minZ);
+    expect(box.max.z).toBeLessThanOrEqual(support.maxZ);
     const ray = new THREE.Raycaster(
-      new THREE.Vector3(396, 30.3, 377),
-      new THREE.Vector3(0, 0, -1),
+      new THREE.Vector3(352, record.position.y + 1.46, 321),
+      new THREE.Vector3(0, 0, 1),
       0,
       4,
     );
     ray.layers.enableAll();
     expect(ray.intersectObject(visual.root, true)).toHaveLength(0);
-    ray.ray.origin.x = 399;
+    ray.ray.origin.x = 349;
     expect(ray.intersectObject(visual.root, true).length).toBeGreaterThan(0);
-    ray.ray.set(new THREE.Vector3(398, 40, 370), new THREE.Vector3(0, -1, 0));
+    ray.ray.set(new THREE.Vector3(350, 40, 328), new THREE.Vector3(0, -1, 0));
     ray.far = 20;
     ray.layers.set(2);
     const hit = ray.intersectObject(visual.root, true)[0];

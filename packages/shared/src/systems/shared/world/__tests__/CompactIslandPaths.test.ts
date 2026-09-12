@@ -16,6 +16,10 @@ import {
 } from "../CompactIslandPaths";
 import { COMPACT_WORLD_TERRAIN_PROFILE } from "../WorldTerrainProfile";
 import type { RoadTileSegment } from "../../../../types/world/world-types";
+import {
+  COMPACT_PREPARATION_LODGE,
+  getCompactPreparationLodgeFootprint,
+} from "../CompactPreparationLodge";
 
 type TerrainInternals = {
   loadWaterBodiesFromManifest(): void;
@@ -111,6 +115,10 @@ describe("actual compact preparation paths and centered road mask", () => {
         getDuelArenaConfig(),
         getDuelArenaGradeHeight(areas),
       );
+      const lodge = getCompactPreparationLodgeFootprint(
+        COMPACT_PREPARATION_LODGE,
+        false,
+      );
       for (let iz = 0; iz < 256; iz++)
         for (let ix = 0; ix < 256; ix++) {
           if (mask.data[iz * 256 + ix] === 0) continue;
@@ -132,6 +140,13 @@ describe("actual compact preparation paths and centered road mask", () => {
               support.minZ < floor.centerZ + floor.depth / 2;
             expect(overlap, floor.id).toBe(false);
           }
+          expect(
+            support.maxX > lodge.minX &&
+              support.minX < lodge.maxX &&
+              support.maxZ > lodge.minZ &&
+              support.minZ < lodge.maxZ,
+            `lodge mask footprint at ${ix},${iz}`,
+          ).toBe(false);
           for (const water of Object.values(areas).flatMap(
             (area) => area.waterBodies ?? [],
           )) {

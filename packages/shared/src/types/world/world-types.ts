@@ -1392,8 +1392,8 @@ export interface CompactPreparationLodgeManifest {
     | "compact-duel-island-v4"
     | "compact-duel-island-v5"
     | "compact-duel-island-v6";
-  readonly position: Readonly<{ x: 398; z: 370 }>;
-  readonly rotation: 0;
+  readonly position: Readonly<{ x: number; z: number }>;
+  readonly rotation: number;
   readonly layoutSeed: "compact-bank-lodge01:360,318:8x8:south";
   readonly recipeId: "compact-bank-lodge01-v1";
 }

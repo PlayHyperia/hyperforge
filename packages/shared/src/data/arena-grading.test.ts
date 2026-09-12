@@ -84,16 +84,16 @@ describe("authored shared duel arena grade", () => {
     expect(zones.find((zone) => zone.id === "duel_lobby_floor")).toMatchObject({
       centerX: 385,
       centerZ: 376,
-      width: 40,
-      depth: 25,
+      width: 18,
+      depth: 16,
     });
     expect(
       zones.find((zone) => zone.id === "duel_hospital_floor"),
     ).toMatchObject({
       centerX: 345,
       centerZ: 376,
-      width: 28,
-      depth: 23,
+      width: 12,
+      depth: 12,
     });
     expect(() =>
       createDuelArenaFloorZones({ ...cfg, arenaCount: 100000 }, 0),

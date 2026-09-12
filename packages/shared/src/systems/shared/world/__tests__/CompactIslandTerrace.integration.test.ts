@@ -25,6 +25,7 @@ import { TerrainSystem } from "../TerrainSystem";
 import { RoadNetworkSystem } from "../RoadNetworkSystem";
 import { generateCenteredTrees } from "../BiomeResourceGenerator";
 import { createCompactIslandPaths } from "../CompactIslandPaths";
+import { COMPACT_PREPARATION_LODGE_V5_FIXTURE } from "../CompactPreparationLodge";
 import { createCompactPreparationDetailRegions } from "../CompactIslandDetail";
 import { TerrainQuadTree } from "../TerrainQuadTree";
 import {
@@ -101,10 +102,9 @@ async function fixture(profile: WorldTerrainProfile, content: boolean) {
       DataManager.setWorldConfig({
         ...historical,
         terrainProfile: current,
-        compactPreparationLodge: {
-          ...saved.config.compactPreparationLodge!,
-          terrainProfileId: current.id,
-        },
+        compactPreparationLodge: structuredClone(
+          COMPACT_PREPARATION_LODGE_V5_FIXTURE,
+        ),
         compactResourceGroves: structuredClone(
           groveLayouts.previous,
         ) as CompactResourceGrovesManifest,

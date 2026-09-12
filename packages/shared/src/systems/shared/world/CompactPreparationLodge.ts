@@ -4,13 +4,11 @@ import type {
   BuildingRecipe,
 } from "@hyperforge/procgen/building";
 import { canonicalWorldJson } from "../../../data/WorldContentIdentity";
-import { getDuelArenaSolidSurfaceHeight } from "../../../data/arena-grading";
 import {
-  LOBBY_CENTER_X,
-  LOBBY_CENTER_Z,
-  LOBBY_WIDTH,
-  LOBBY_LENGTH,
-} from "../../../data/arena-layout";
+  DUEL_ARENA_FLOOR_SOLID_OFFSET,
+  getDuelArenaGradeHeight,
+} from "../../../data/arena-grading";
+import { ALL_WORLD_AREAS, type WorldArea } from "../../../data/world-areas";
 import type { CompactPreparationLodgeManifest } from "../../../types/world/world-types";
 import type { WorldTerrainProfile } from "./WorldTerrainProfile";
 
@@ -19,16 +17,16 @@ export type { CompactPreparationLodgeManifest } from "../../../types/world/world
 export const COMPACT_PREPARATION_LODGE_BUILDING_ID =
   "compact-preparation-lodge-v1";
 
-/** Immutable first placement; the legacy coordinate text in the seed is intentional.
- * report04 retained report01's exact recipe and RNG seed when moving to this site.
+/** The same seeded architecture now faces the real bank forecourt.
+ * Pose is part of the full world-content identity; layout/recipe identity is unchanged.
  */
 export const COMPACT_PREPARATION_LODGE: CompactPreparationLodgeManifest =
   Object.freeze({
     schemaVersion: 1,
     layoutId: COMPACT_PREPARATION_LODGE_BUILDING_ID,
     terrainProfileId: "compact-duel-island-v6",
-    position: Object.freeze({ x: 398, z: 370 }),
-    rotation: 0,
+    position: Object.freeze({ x: 350, z: 328 }),
+    rotation: Math.PI,
     layoutSeed: "compact-bank-lodge01:360,318:8x8:south",
     recipeId: "compact-bank-lodge01-v1",
   });
@@ -38,11 +36,13 @@ export const COMPACT_PREPARATION_LODGE_V4_FIXTURE: CompactPreparationLodgeManife
   Object.freeze({
     ...COMPACT_PREPARATION_LODGE,
     terrainProfileId: "compact-duel-island-v4",
+    position: Object.freeze({ x: 398, z: 370 }),
+    rotation: 0,
   });
 
 export const COMPACT_PREPARATION_LODGE_V5_FIXTURE: CompactPreparationLodgeManifest =
   Object.freeze({
-    ...COMPACT_PREPARATION_LODGE,
+    ...COMPACT_PREPARATION_LODGE_V4_FIXTURE,
     terrainProfileId: "compact-duel-island-v5",
   });
 
@@ -88,6 +88,30 @@ function fail(field: string): never {
   throw new Error(`Invalid compactPreparationLodge: ${field}`);
 }
 
+/** Conservative rotated envelope of the roof and all six foundation steps.
+ * Support qualification uses this whole envelope, not only the wall footprint.
+ */
+export function getCompactPreparationLodgeFootprint(
+  descriptor: CompactPreparationLodgeManifest,
+  includeSteps = true,
+): Readonly<{ minX: number; maxX: number; minZ: number; maxZ: number }> {
+  const c = Math.cos(descriptor.rotation),
+    s = Math.sin(descriptor.rotation);
+  // Gable trim reaches 4.4977m laterally; retain outward float32 padding.
+  const corners = [-4.5, 4.5].flatMap((x) =>
+    [-4.5, includeSteps ? 6.56 : 4.5].map((z) => ({
+      x: descriptor.position.x + x * c + z * s,
+      z: descriptor.position.z - x * s + z * c,
+    })),
+  );
+  return Object.freeze({
+    minX: Math.min(...corners.map((p) => p.x)),
+    maxX: Math.max(...corners.map((p) => p.x)),
+    minZ: Math.min(...corners.map((p) => p.z)),
+    maxZ: Math.max(...corners.map((p) => p.z)),
+  });
+}
+
 /** Pure admission: no procgen runtime import, scene, renderer or generated mesh. */
 export function validateCompactPreparationLodge(
   value: unknown,
@@ -122,17 +146,12 @@ export function validateCompactPreparationLodge(
   )
     fail("unsupported descriptor, pose or recipe");
   const copy = JSON.parse(canonical) as CompactPreparationLodgeManifest;
-  const { x, z } = copy.position;
-  // Include roof overhang and the complete six-step envelope, not just 8x8 walls.
+  const bounds = getCompactPreparationLodgeFootprint(copy);
   if (
-    x - 4.45 < LOBBY_CENTER_X - LOBBY_WIDTH / 2 ||
-    x + 4.45 > LOBBY_CENTER_X + LOBBY_WIDTH / 2 ||
-    z - 4.45 < LOBBY_CENTER_Z - LOBBY_LENGTH / 2 ||
-    z + 6.55 > LOBBY_CENTER_Z + LOBBY_LENGTH / 2 ||
-    x - 4.45 < profile.bounds.minX ||
-    x + 4.45 > profile.bounds.maxX ||
-    z - 4.45 < profile.bounds.minZ ||
-    z + 6.55 > profile.bounds.maxZ
+    bounds.minX < profile.bounds.minX ||
+    bounds.maxX > profile.bounds.maxX ||
+    bounds.minZ < profile.bounds.minZ ||
+    bounds.maxZ > profile.bounds.maxZ
   )
     fail("footprint containment");
   Object.freeze(copy.position);
@@ -149,11 +168,43 @@ export type CompactPreparationLodgePlacement = Readonly<{
 /** Called at startup after world areas are loaded; never substitute raw terrain. */
 export function getCompactPreparationLodgePlacement(
   descriptor: CompactPreparationLodgeManifest,
+  areas: Readonly<Record<string, WorldArea>> = ALL_WORLD_AREAS,
 ): CompactPreparationLodgePlacement {
   const { x, z } = descriptor.position;
-  const y = getDuelArenaSolidSurfaceHeight(x, z);
-  if (y === null || !Number.isFinite(y))
-    fail("solid lobby platform is unavailable");
+  // Historical compact-profile fixtures retain their original platform datum.
+  // The active lodge is grounded at the services, never on an invented platform.
+  if (descriptor.terrainProfileId !== "compact-duel-island-v6")
+    return Object.freeze({
+      x,
+      z,
+      rotation: descriptor.rotation,
+      y: getDuelArenaGradeHeight(areas) + DUEL_ARENA_FLOOR_SOLID_OFFSET,
+    });
+  const grades = areas.central_haven?.flatZones?.filter(
+    (zone) => zone.id === "central_haven_plaza",
+  );
+  if (grades?.length !== 1) fail("bank plaza support is unavailable");
+  const grade = grades[0];
+  const bounds = getCompactPreparationLodgeFootprint(descriptor);
+  if (
+    ![
+      grade.height,
+      grade.centerX,
+      grade.centerZ,
+      grade.width,
+      grade.depth,
+    ].every((value) => typeof value === "number" && Number.isFinite(value)) ||
+    grade.width <= 0 ||
+    grade.depth <= 0 ||
+    grade.heightOffset !== undefined ||
+    grade.radialPond !== undefined ||
+    bounds.minX < grade.centerX - grade.width / 2 ||
+    bounds.maxX > grade.centerX + grade.width / 2 ||
+    bounds.minZ < grade.centerZ - grade.depth / 2 ||
+    bounds.maxZ > grade.centerZ + grade.depth / 2
+  )
+    fail("bank plaza must support the complete lodge footprint");
+  const y = grade.height!;
   return Object.freeze({ x, y, z, rotation: descriptor.rotation });
 }
 

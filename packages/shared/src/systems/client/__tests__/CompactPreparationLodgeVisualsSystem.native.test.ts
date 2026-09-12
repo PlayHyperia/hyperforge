@@ -66,22 +66,22 @@ describe("compact lodge actual native PhysX integration (CPU, not foot-contact a
           actorsBefore + 1,
         );
         const door = world.physics.raycast(
-          new Vector3(396, 30.3, 377),
-          new Vector3(0, 0, -1),
+          new Vector3(352, record.position.y + 1.46, 321),
+          new Vector3(0, 0, 1),
           4,
         );
         expect(door).toBeNull();
         const wall = world.physics.raycast(
-          new Vector3(399, 30.3, 377),
-          new Vector3(0, 0, -1),
+          new Vector3(349, record.position.y + 1.46, 321),
+          new Vector3(0, 0, 1),
           4,
         );
         expect(wall).not.toBeNull();
-        expect(wall!.point.z).toBeCloseTo(374, 1);
-        for (let x = 394; x < 402; x++) {
-          for (let z = 366; z < 374; z++) {
+        expect(wall!.point.z).toBeCloseTo(324, 1);
+        for (let x = 346; x < 354; x++) {
+          for (let z = 324; z < 332; z++) {
             const floor = world.physics.raycast(
-              new Vector3(x + 0.5, 31, z + 0.5),
+              new Vector3(x + 0.5, record.position.y + 2, z + 0.5),
               new Vector3(0, -1, 0),
               3,
             );
@@ -90,13 +90,13 @@ describe("compact lodge actual native PhysX integration (CPU, not foot-contact a
           }
         }
         const roof = world.physics.raycast(
-          new Vector3(398, 40, 370),
+          new Vector3(350, 40, 328),
           new Vector3(0, -1, 0),
           10,
         );
         expect(roof).not.toBeNull();
-        expect(roof!.point.y).toBeCloseTo(35.3187789286, 4);
-        expect(towns.getCollisionService().isWalkableAtFloor(398, 370, 1)).toBe(
+        expect(roof!.point.y).toBeCloseTo(34.8987789286, 4);
+        expect(towns.getCollisionService().isWalkableAtFloor(350, 328, 1)).toBe(
           false,
         );
         const root = world.stage.scene.getObjectByName(
@@ -154,8 +154,8 @@ describe("compact lodge actual native PhysX integration (CPU, not foot-contact a
         expect(visual.getDiagnostics()).toBeNull();
         expect(
           world.physics.raycast(
-            new Vector3(399, 30.3, 377),
-            new Vector3(0, 0, -1),
+            new Vector3(349, record.position.y + 1.46, 321),
+            new Vector3(0, 0, 1),
             4,
           ),
         ).toBeNull();

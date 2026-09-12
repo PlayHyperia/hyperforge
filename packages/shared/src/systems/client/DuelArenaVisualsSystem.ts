@@ -8,7 +8,7 @@
  * - Continuous stone fences (fully enclosed, TSL procedural sandstone material)
  * - Colored banners mounted on east/west arena fences
  * - Lobby with stone floor and corner braziers (TSL glow)
- * - Hospital with 3D cross and healing particle glow
+ * - Recovery court with an inset compass emblem and healing particle glow
  * - Decorative border pillars at lobby/hospital corners
  *
  * Repeated architecture uses InstancedMesh. Braziers use GPU-animated emissive
@@ -1324,7 +1324,7 @@ export class DuelArenaVisualsSystem extends System {
   }
 
   // ============================================================================
-  // Hospital Floor & Cross
+  // Recovery Floor & Emblem
   // ============================================================================
 
   private createHospitalFloor(): void {
@@ -1352,7 +1352,7 @@ export class DuelArenaVisualsSystem extends System {
         `[DuelArenaVisualsSystem] Created hospital floor at (${HOSPITAL_CENTER_X}, ${floorY.toFixed(1)}, ${HOSPITAL_CENTER_Z}) - terrain=${terrainY.toFixed(1)}`,
       );
 
-      this.createHospitalCross(HOSPITAL_CENTER_X, HOSPITAL_CENTER_Z, floorY);
+      this.createRecoveryEmblem(HOSPITAL_CENTER_X, HOSPITAL_CENTER_Z, floorY);
 
       this.geometries.push(geometry);
       this.arenaGroup!.add(floor);
@@ -1368,26 +1368,30 @@ export class DuelArenaVisualsSystem extends System {
     );
   }
 
-  private createHospitalCross(x: number, z: number, floorY: number): void {
-    const crossHeight = 0.08;
-    const crossTopY = floorY + FLOOR_THICKNESS / 2 + crossHeight / 2 + 0.01;
-
-    const crossMaterial = new MeshStandardNodeMaterial({
-      color: 0xff0000,
+  private createRecoveryEmblem(x: number, z: number, floorY: number): void {
+    const topY = floorY + FLOOR_THICKNESS / 2 + 0.006;
+    const material = new MeshStandardNodeMaterial({
+      color: 0x688b86,
+      roughness: 0.86,
+      metalness: 0,
     });
-    this.materials.push(crossMaterial);
-
-    const vertGeom = new THREE.BoxGeometry(2, crossHeight, 8);
-    const vertBar = new THREE.Mesh(vertGeom, crossMaterial);
-    vertBar.position.set(x, crossTopY, z);
-    this.geometries.push(vertGeom);
-    this.arenaGroup!.add(vertBar);
-
-    const horizGeom = new THREE.BoxGeometry(8, crossHeight, 2);
-    const horizBar = new THREE.Mesh(horizGeom, crossMaterial);
-    horizBar.position.set(x, crossTopY, z);
-    this.geometries.push(horizGeom);
-    this.arenaGroup!.add(horizBar);
+    this.materials.push(material);
+    // A small mineral-coloured inlay, not an eight-metre emissive-looking sign.
+    // Both pieces are flat, non-colliding and use the existing floor support.
+    const ringGeometry = new THREE.RingGeometry(1.35, 1.48, 48);
+    const ring = new THREE.Mesh(ringGeometry, material);
+    ring.rotation.x = -Math.PI / 2;
+    ring.position.set(x, topY, z);
+    ring.name = "RecoveryInlayRing";
+    ring.receiveShadow = true;
+    const diamondGeometry = new THREE.CircleGeometry(0.9, 4);
+    const diamond = new THREE.Mesh(diamondGeometry, material);
+    diamond.rotation.x = -Math.PI / 2;
+    diamond.position.set(x, topY, z);
+    diamond.name = "RecoveryInlayDiamond";
+    diamond.receiveShadow = true;
+    this.geometries.push(ringGeometry, diamondGeometry);
+    this.arenaGroup!.add(ring, diamond);
 
     const particleSystem = this.world.getSystem("particle") as
       ParticleSystem | undefined;
@@ -1396,7 +1400,7 @@ export class DuelArenaVisualsSystem extends System {
       particleSystem.register(emitterId, {
         type: "glow",
         preset: "altar",
-        position: { x, y: crossTopY + 0.1, z },
+        position: { x, y: topY + 0.1, z },
         color: { core: 0xffffff, mid: 0x88ccff, outer: 0x44aaff },
       });
       this.particleEmitterIds.push(emitterId);

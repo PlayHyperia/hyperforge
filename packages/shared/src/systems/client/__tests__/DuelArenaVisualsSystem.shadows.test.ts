@@ -151,4 +151,37 @@ describe("Duel arena floor shadow receivers", () => {
     expect(materialDisposals).toBe(1);
     expect(world.stage.scene.children).toEqual([unrelated]);
   });
+
+  it("fits a restrained two-piece mineral inlay inside the compact recovery floor", () => {
+    const { build } = construct();
+    build.createHospitalFloor();
+    const floor = build.arenaGroup.getObjectByName(
+      "HospitalFloor",
+    ) as THREE.Mesh;
+    expect((floor.geometry as THREE.BoxGeometry).parameters).toMatchObject({
+      width: 12,
+      depth: 12,
+    });
+    const ring = build.arenaGroup.getObjectByName(
+      "RecoveryInlayRing",
+    ) as THREE.Mesh;
+    const diamond = build.arenaGroup.getObjectByName(
+      "RecoveryInlayDiamond",
+    ) as THREE.Mesh;
+    expect(ring.material).toBe(diamond.material);
+    expect((ring.material as MeshStandardNodeMaterial).roughness).toBe(0.86);
+    expect((ring.material as MeshStandardNodeMaterial).emissive.getHex()).toBe(
+      0,
+    );
+    build.arenaGroup.updateMatrixWorld(true);
+    for (const mesh of [ring, diamond]) {
+      const bounds = new THREE.Box3().setFromObject(mesh);
+      expect(bounds.max.x - bounds.min.x).toBeLessThan(3);
+      expect(bounds.max.z - bounds.min.z).toBeLessThan(3);
+      expect(bounds.min.y - (floor.position.y + 0.15)).toBeCloseTo(0.006, 7);
+      expect(mesh.castShadow).toBe(false);
+      expect(mesh.receiveShadow).toBe(true);
+      expect(mesh.userData.walkable).toBeUndefined();
+    }
+  });
 });

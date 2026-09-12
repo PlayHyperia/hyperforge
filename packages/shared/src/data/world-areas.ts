@@ -47,7 +47,7 @@ export type {
  * external-value play can be enabled.
  */
 export const ALL_WORLD_AREAS: Record<string, WorldArea> = {
-  // Duel Arena - PvP dueling area with 6 arena platforms, lobby, and hospital
+  // One combat ring with arrival and recovery courts.
   // NOTE: Flat zones are registered programmatically by DuelArenaVisualsSystem.registerArenaFlatZones()
   // at startup. This ensures terrain height queries return floor-level values so players stand
   // on the floors and terrain mesh is carved to prevent grass growing through floor surfaces.

@@ -11,6 +11,10 @@ import {
   createDuelArenaFloorZones,
   getDuelArenaGradeHeight,
 } from "../../../data/arena-grading";
+import {
+  COMPACT_PREPARATION_LODGE,
+  getCompactPreparationLodgeFootprint,
+} from "./CompactPreparationLodge";
 
 /** Surface-mask paths only: no meshes, colliders, height grading or agent routing. */
 export type CompactIslandPath = Readonly<{
@@ -134,6 +138,13 @@ export function createCompactIslandPaths(
     minZ: floor.centerZ - floor.depth / 2,
     maxZ: floor.centerZ + floor.depth / 2,
   }));
+  const bankCourt = profile.id === "compact-duel-island-v6";
+  // The steps meet the forecourt; dirt must not pass through the enclosed
+  // building. Include the roof overhang as a conservative wall/floor keep-out.
+  if (bankCourt)
+    exclusions.push(
+      getCompactPreparationLodgeFootprint(COMPACT_PREPARATION_LODGE, false),
+    );
   const waters = Object.values(areas).flatMap((area) => area.waterBodies ?? []);
   const front: Point = { x: bank.x, z: bank.z + 3 };
   const workshop: Point = {
@@ -197,8 +208,15 @@ export function createCompactIslandPaths(
       width: 1.8,
       points: [
         front,
-        { x: front.x, z: front.z + 5 },
-        { x: workshop.x + 4, z: workshop.z - 1 },
+        ...(bankCourt
+          ? [
+              { x: front.x - 7, z: front.z },
+              { x: front.x - 7, z: workshop.z - 3 },
+            ]
+          : [
+              { x: front.x, z: front.z + 5 },
+              { x: workshop.x + 4, z: workshop.z - 1 },
+            ]),
         workshop,
       ],
     },
@@ -231,8 +249,24 @@ export function createCompactIslandPaths(
       width: 2.2,
       points: [
         front,
-        { x: front.x + 8, z: front.z + 8 },
-        { x: (front.x + northLobby.x) / 2 + 3, z: northLobby.z - 13 },
+        ...(bankCourt
+          ? [
+              // Share the western forecourt, then wrap south of the lodge.
+              // The eastern gap is occupied by the real general tree's crown.
+              { x: front.x - 7, z: front.z },
+              { x: front.x - 7, z: front.z + 6 },
+              { x: front.x - 5.5, z: front.z + 10.5 },
+              { x: front.x - 4.6, z: front.z + 12.5 },
+              { x: front.x - 3.5, z: front.z + 14.2 },
+              { x: front.x + 1, z: front.z + 15 },
+              { x: front.x + 9, z: front.z + 15 },
+              { x: front.x + 19, z: front.z + 16 },
+              { x: front.x + 26, z: northLobby.z - 13 },
+            ]
+          : [{ x: front.x + 8, z: front.z + 8 }]),
+        ...(!bankCourt
+          ? [{ x: (front.x + northLobby.x) / 2 + 3, z: northLobby.z - 13 }]
+          : []),
         northLobby,
       ],
     },
@@ -248,7 +282,7 @@ export function createCompactIslandPaths(
       ],
     },
     // Surface-only forecourts. These IDs describe paint provenance, not route
-    // edges or service ownership. Original six circulation paths stay unchanged.
+    // edges or service ownership. They never grant remote banking or navigation.
     // Wider masks can change grass sampling within affected leaves: the existing
     // acceptance-dependent rotation RNG is retained, not silently re-phased here.
     {
@@ -258,8 +292,8 @@ export function createCompactIslandPaths(
       toId: "bank-forecourt",
       width: 4,
       points: [
-        { x: bank.x - 2, z: bank.z + 2 },
-        { x: bank.x + 2, z: bank.z + 2.5 },
+        { x: bank.x - 2, z: bank.z + (bankCourt ? 1 : 2) },
+        { x: bank.x + 2, z: bank.z + (bankCourt ? 1.5 : 2.5) },
       ],
     },
     {
@@ -269,10 +303,11 @@ export function createCompactIslandPaths(
       toId: "bank_clerk",
       width: 3,
       points: [
-        { x: bank.x + 2, z: bank.z + 2.5 },
-        // End 2m west of the clerk: the nearest resource's all-LOD crown is
-        // wider than LOD0, and the baked mask adds a bilinear support halo.
-        { x: clerk.x - 2, z: clerk.z },
+        { x: bank.x + 2, z: bank.z + (bankCourt ? 1.5 : 2.5) },
+        // Stay west of the real tree's all-LOD crown, including the mask halo.
+        bankCourt
+          ? { x: clerk.x - 2, z: clerk.z - 3 }
+          : { x: clerk.x - 2, z: clerk.z },
       ],
     },
     {
@@ -282,8 +317,11 @@ export function createCompactIslandPaths(
       toId: "shopkeeper",
       width: 2.5,
       points: [
-        { x: bank.x - 2, z: bank.z + 2 },
-        { x: shopkeeper.x, z: shopkeeper.z - 1 },
+        { x: bank.x - 2, z: bank.z + (bankCourt ? 1 : 2) },
+        {
+          x: shopkeeper.x - (bankCourt ? 1.5 : 0),
+          z: shopkeeper.z - (bankCourt ? 2 : 1),
+        },
       ],
     },
     {

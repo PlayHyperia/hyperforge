@@ -8,7 +8,6 @@ import {
 import { World } from "../../../../core/World";
 import { DataManager } from "../../../../data/DataManager";
 import { ALL_WORLD_AREAS } from "../../../../data/world-areas";
-import { getDuelArenaSolidSurfaceHeight } from "../../../../data/arena-grading";
 import {
   canonicalWorldJson,
   WORLD_IDENTITY_MANIFESTS,
@@ -22,6 +21,7 @@ import {
   COMPACT_PREPARATION_LODGE_BUILDING_ID,
   createCompactPreparationLodgeLayout,
   getCompactPreparationLodgePlacement,
+  getCompactPreparationLodgeFootprint,
   validateCompactPreparationLodge,
 } from "../CompactPreparationLodge";
 
@@ -64,6 +64,7 @@ const saved = {
   profile: DataManager["worldTerrainProfile"],
   identity: DataManager["worldContentIdentity"],
   area: ALL_WORLD_AREAS.duel_arena,
+  haven: ALL_WORLD_AREAS.central_haven,
 };
 const worlds: World[] = [];
 beforeEach(() => {
@@ -80,6 +81,7 @@ afterEach(() => {
   DataManager["worldTerrainProfile"] = saved.profile;
   DataManager["worldContentIdentity"] = saved.identity;
   ALL_WORLD_AREAS.duel_arena = saved.area;
+  ALL_WORLD_AREAS.central_haven = saved.haven;
 });
 const profile = () => DataManager.getWorldTerrainProfile();
 const copy = () => structuredClone(COMPACT_PREPARATION_LODGE);
@@ -138,7 +140,7 @@ describe("compact preparation lodge admission and actual shared collision owners
     expect(() =>
       validateCompactPreparationLodge(input, {
         ...profile(),
-        bounds: { ...profile().bounds, maxX: 400 },
+        bounds: { ...profile().bounds, maxX: 354 },
       }),
     ).toThrow("containment");
   });
@@ -228,7 +230,7 @@ describe("compact preparation lodge admission and actual shared collision owners
     expect(() => DataManager.setWorldConfig(absent)).toThrow("fresh startup");
   });
 
-  it("retains the exact qualified recipe/legacy RNG seed and solid platform Y", async () => {
+  it("retains the qualified recipe/seed and grounds its complete rotated footprint at the real bank plaza", async () => {
     const expected = defaultGenerator.generateLayout(
       QUALIFIED_RECIPE,
       createRng("compact-bank-lodge01:360,318:8x8:south"),
@@ -249,12 +251,19 @@ describe("compact preparation lodge admission and actual shared collision owners
       COMPACT_PREPARATION_LODGE,
     );
     expect(placement).toEqual({
-      x: 398,
-      y: getDuelArenaSolidSurfaceHeight(398, 370),
-      z: 370,
-      rotation: 0,
+      x: 350,
+      y: 28.419301523097687,
+      z: 328,
+      rotation: Math.PI,
     });
-    expect(placement.y).toBeCloseTo(28.83930152309769, 10);
+    expect(
+      getCompactPreparationLodgeFootprint(COMPACT_PREPARATION_LODGE),
+    ).toEqual({
+      minX: 345.5,
+      maxX: 354.5,
+      minZ: 321.44,
+      maxZ: 332.5,
+    });
     expect(Object.isFrozen(placement)).toBe(true);
   });
 
@@ -300,6 +309,33 @@ describe("compact preparation lodge admission and actual shared collision owners
     },
   );
 
+  it("keeps the real bank, service NPCs and workstations outside the lodge and all stairs on the authored ground", async () => {
+    const { terrain, towns } = await fixture();
+    terrain["loadFlatZonesFromManifest"]();
+    await towns.start();
+    const service = towns.getCollisionService();
+    const owner = towns.getCompactPreparationLodge()!;
+    const haven = ALL_WORLD_AREAS.central_haven;
+    for (const subject of [...haven.npcs, ...(haven.stations ?? [])]) {
+      const p = subject.position;
+      expect(
+        service.isTileInBuildingAnyFloor(Math.floor(p.x), Math.floor(p.z)),
+        subject.id,
+      ).toBeNull();
+    }
+    const support = getCompactPreparationLodgeFootprint(owner.descriptor);
+    let checked = 0;
+    for (let x = support.minX; x <= support.maxX; x += 0.5)
+      for (let z = support.minZ; z <= support.maxZ; z += 0.5) {
+        expect(terrain.getHeightAt(x, z)).toBeCloseTo(owner.position.y, 10);
+        checked++;
+      }
+    expect(checked).toBeGreaterThan(400);
+    // Cardinal wall tests use the shared collision service, not a mesh proxy.
+    expect(service.isWallBlocked(352, 323, 352, 324, 0)).toBe(false);
+    expect(service.isWallBlocked(349, 323, 349, 324, 0)).toBe(true);
+  });
+
   it("does not publish or register a layout after destroy during its real async creation", async () => {
     const { towns } = await fixture();
     const service = towns.getCollisionService();
@@ -314,14 +350,35 @@ describe("compact preparation lodge admission and actual shared collision owners
     expect(service.getBuildingCount()).toBe(1);
   });
 
-  it("fails closed without a real solid platform and creates no terrain fallback collision", async () => {
+  it("fails closed without the real bank grade and creates no fallback collision", async () => {
     const { towns } = await fixture();
-    delete ALL_WORLD_AREAS.duel_arena;
+    delete ALL_WORLD_AREAS.central_haven;
     await expect(towns.start()).rejects.toThrow(
-      "solid lobby platform is unavailable",
+      "bank plaza support is unavailable",
     );
     expect(towns.getCompactPreparationLodge()).toBeNull();
     expect(towns.getCollisionService().getBuildingCount()).toBe(0);
+  });
+
+  it("rejects missing, ambiguous, non-flat and partially supported bank grades", () => {
+    const original = structuredClone(saved.haven);
+    const grade = original.flatZones!.find(
+      (zone) => zone.id === "central_haven_plaza",
+    )!;
+    for (const flatZones of [
+      [],
+      [grade, structuredClone(grade)],
+      [{ ...grade, height: NaN }],
+      [{ ...grade, heightOffset: 0 }],
+      [{ ...grade, width: 4 }],
+      [{ ...grade, depth: 12 }],
+    ]) {
+      expect(() =>
+        getCompactPreparationLodgePlacement(COMPACT_PREPARATION_LODGE, {
+          central_haven: { ...original, flatZones },
+        }),
+      ).toThrow();
+    }
   });
 
   it("never replaces a foreign existing ID or unregisters its collision on failed start/destroy", async () => {

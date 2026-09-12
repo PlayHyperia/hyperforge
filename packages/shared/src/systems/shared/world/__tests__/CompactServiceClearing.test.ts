@@ -30,9 +30,9 @@ import {
 } from "../CompactIslandPaths";
 
 const CAPSULES = [
-  ["bank-apron", 346, 320, 350, 320.5, 4],
-  ["bank-clerk-approach", 350, 320.5, 354, 324, 3],
-  ["bank-shopkeeper-approach", 346, 320, 344, 323, 2.5],
+  ["bank-apron", 346, 319, 350, 319.5, 4],
+  ["bank-clerk-approach", 350, 319.5, 354, 321, 3],
+  ["bank-shopkeeper-approach", 346, 319, 342.5, 322, 2.5],
   ["workshop-apron", 334.75, 334.75, 339, 334.25, 3.5],
   ["workshop-supplier-approach", 336.5, 333, 337.5, 331.5, 2.5],
 ] as const;
@@ -148,7 +148,7 @@ function modelRadius(asset: string): number {
 }
 
 describe("five surface-only service clearings, actual CPU owners (not native visual proof)", () => {
-  it("retains the original six path values and exact authored capsule endpoints/widths", async () => {
+  it("retains deterministic circulation and exact bank-court capsule endpoints/widths", async () => {
     const f = await fixture();
     try {
       const paths = createCompactIslandPaths(
@@ -157,13 +157,23 @@ describe("five surface-only service clearings, actual CPU owners (not native vis
         getDuelArenaConfig(),
         f.terrain.getHeightAt.bind(f.terrain),
       );
-      // Independently executed immutable probe55 factory against this actual
-      // admitted terrain before retaining this digest (all values deep-equal).
-      // Archived source SHA256:e3ec507c8d053d52e43878dd1e03146db68e07dd2c7f66d4a1a7670401927670.
-      // No archived workspace path, dynamic compilation or Git needed by this test.
-      expect(digest(paths.slice(0, 6))).toBe(
+      // The old hash remains a negative migration oracle: the new route must
+      // go around the bank lodge, not silently reuse the obstructed old route.
+      expect(digest(paths.slice(0, 6))).not.toBe(
         "5586fa7d23825c111fa469282ffbbfcb45934c8375cf17de655ff33d955fb6d4",
       );
+      expect(
+        createCompactIslandPaths(
+          DataManager.getWorldTerrainProfile(),
+          DataManager.getInstance().getAllWorldAreas(),
+          getDuelArenaConfig(),
+          f.terrain.getHeightAt.bind(f.terrain),
+        ),
+      ).toEqual(paths);
+      const main = paths.find((p) => p.id === "compact-path-bank-lobby")!;
+      expect(main.path[0]).toMatchObject({ x: 348, z: 321 });
+      expect(main.path.at(-1)).toMatchObject({ x: 385, z: 365.65 });
+      expect(main.path.some((p) => p.x < 342 && p.z > 325)).toBe(true);
       expect(
         paths
           .slice(6)
