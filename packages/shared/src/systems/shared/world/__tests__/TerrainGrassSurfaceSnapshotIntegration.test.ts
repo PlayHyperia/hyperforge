@@ -276,6 +276,7 @@ describe("actual TerrainSystem regional grass snapshots", () => {
     await withTerrain((terrain, internals) => {
       const expectedAllowedIds = [
         "central_haven_plaza",
+        "duel_arena_campus_grade",
         "haven_pond_floor",
         "preparation_campus_grade",
       ];
@@ -295,9 +296,21 @@ describe("actual TerrainSystem regional grass snapshots", () => {
           .map((zone) => zone.id)
           .sort(),
       ).toEqual(expectedAllowedIds);
-      // Southern preparation ground overlaps the deliberately bare arena-grade
-      // blend. Use the northwest natural patch outside that exclusion instead.
-      expect(internals.isGrassExcludedAt(320, 310)).toBe(false);
+      // Broad grades shape the land; only actual structures and station pads
+      // clear vegetation. The arena grade must not erase the preparation meadow.
+      for (const [x, z] of [
+        [320, 310],
+        [326, 325],
+        [330, 328],
+        [320, 340],
+        [380, 330],
+      ]) {
+        expect(internals.isGrassExcludedAt(x, z)).toBe(false);
+        const index = snapshotOperations.createZoneIndex(snapshot, 100);
+        expect(
+          surfaceOperations.isGrassExcluded(index.getZonesAt(x, z), x, z),
+        ).toBe(false);
+      }
       expect(internals.isGrassExcludedAt(350, 320)).toBe(true);
       const station = snapshot.zones.find((zone) =>
         zone.id.startsWith("station_"),

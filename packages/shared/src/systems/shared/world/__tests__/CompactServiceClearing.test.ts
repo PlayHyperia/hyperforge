@@ -440,6 +440,8 @@ describe("five surface-only service clearings, actual CPU owners (not native vis
     f.terrain.unregisterFlatZone("central_haven_lodge_grass_clearance");
     const plaza = f.terrain["flatZones"].get("central_haven_plaza")!;
     f.terrain.registerFlatZone({ ...plaza, excludeGrass: undefined });
+    const grade = f.terrain["flatZones"].get("duel_arena_campus_grade")!;
+    f.terrain.registerFlatZone({ ...grade, excludeGrass: undefined });
     const tree = new TerrainQuadTree({
       minSize: 100,
       maxDepth: 4,

@@ -29,6 +29,8 @@ const NUMERIC_GUARD = 0.00001;
 // Bound cheap validation work without allocating an iterator result per float.
 // This is not the geometric work budget, which still charges every take().
 const INSTANCE_VALUE_BATCH_SIZE = 32;
+// Fixed storage, independent of authored road lengths or world coordinates.
+const ROAD_GRID_AXIS = 8;
 
 export type GrassGroundingRoadSegment = {
   startX: number;
@@ -403,6 +405,7 @@ export function* groundGrassBladeSteps(
       maxZ: surface.centerZ + surface.size / 2,
     },
   }));
+  let baseEntries = entries;
   const used = new Map<RetainedTerrainSurface, Set<SurfaceUse>>();
   const receipt: GrassBladeGroundingReceipt = {
     elapsedMs: 0,
@@ -450,7 +453,7 @@ export function* groundGrassBladeSteps(
     receipt.endpointQueries++;
     // Half-open ownership matches TerrainVisualManager; allow a sole outer edge.
     let selected: SurfaceEntry | undefined;
-    for (const entry of entries) {
+    for (const entry of baseEntries) {
       yield "grounding_operation";
       take();
       const b = entry.box;
@@ -532,7 +535,7 @@ export function* groundGrassBladeSteps(
       minZ: Math.min(a.z, b.z),
       maxZ: Math.max(a.z, b.z),
     };
-    for (const entry of entries) {
+    for (const entry of baseEntries) {
       yield "grounding_operation";
       take();
       if (!overlaps(box, entry.box)) continue;
@@ -606,6 +609,48 @@ export function* groundGrassBladeSteps(
     else high = m;
   }
   const roadFeather = 0.5 * (1 - (low + high) / 2);
+  const roadCells: number[][] = Array.from(
+    { length: ROAD_GRID_AXIS * ROAD_GRID_AXIS },
+    () => [],
+  );
+  const roadCell = (value: number, center: number) =>
+    Math.max(
+      0,
+      Math.min(
+        ROAD_GRID_AXIS - 1,
+        Math.floor(
+          ((value - center + ownSurface.size / 2) / ownSurface.size) *
+            ROAD_GRID_AXIS,
+        ),
+      ),
+    );
+  const roadsNear = function* (box: TerrainGridBounds) {
+    const seen = new Set<number>();
+    for (
+      let gx = roadCell(box.minX, ownSurface.centerX);
+      gx <= roadCell(box.maxX, ownSurface.centerX);
+      gx++
+    ) {
+      for (
+        let gz = roadCell(box.minZ, ownSurface.centerZ);
+        gz <= roadCell(box.maxZ, ownSurface.centerZ);
+        gz++
+      ) {
+        yield "grounding_operation";
+        take();
+        for (const index of roadCells[gx * ROAD_GRID_AXIS + gz]) {
+          yield "grounding_operation";
+          take();
+          if (seen.has(index)) continue;
+          seen.add(index);
+          const road = request.roadSegments[index];
+          if (segmentBoxDistance(road, box) <= road.width / 2 + roadFeather)
+            return true;
+        }
+      }
+    }
+    return false;
+  };
   const padOverlap = function* (box: TerrainGridBounds) {
     for (const zone of snapshot.zones) {
       yield "grounding_operation";
@@ -656,6 +701,38 @@ export function* groundGrassBladeSteps(
     right: Point = { x: 0, y: 0, z: 0 },
     point: Point = { x: 0, y: 0, z: 0 };
   try {
+    for (let index = 0; index < request.roadSegments.length; index++) {
+      const road = request.roadSegments[index];
+      const margin = road.width / 2 + roadFeather + NUMERIC_GUARD;
+      // Clamp both road and query bounds to the same edge cells. This retains
+      // roads and swept blades outside the owner; it never discards border work.
+      for (
+        let gx = roadCell(
+          Math.min(road.startX, road.endX) - margin,
+          ownSurface.centerX,
+        );
+        gx <=
+        roadCell(Math.max(road.startX, road.endX) + margin, ownSurface.centerX);
+        gx++
+      ) {
+        for (
+          let gz = roadCell(
+            Math.min(road.startZ, road.endZ) - margin,
+            ownSurface.centerZ,
+          );
+          gz <=
+          roadCell(
+            Math.max(road.startZ, road.endZ) + margin,
+            ownSurface.centerZ,
+          );
+          gz++
+        ) {
+          yield "grounding_operation";
+          take();
+          roadCells[gx * ROAD_GRID_AXIS + gz].push(index);
+        }
+      }
+    }
     for (let i = 0; i < data.count; i++) {
       const k = i * 3,
         x = ownSurface.centerX + data.offsets[k],
@@ -691,6 +768,32 @@ export function* groundGrassBladeSteps(
         target.y = y - rx * nx + ry * ny - rz * nz;
         target.z = z + rx * cross + ry * nz + rz * (ny + nx * nx * q);
       };
+      const baseBounds = {
+        minX: Infinity,
+        maxX: -Infinity,
+        minZ: Infinity,
+        maxZ: -Infinity,
+      };
+      for (let blade = 0; blade < blades; blade++) {
+        yield "grounding_operation";
+        for (let side = 0; side < 2; side++) {
+          take();
+          transform(blade * verticesPerBlade + side, 1, point);
+          baseBounds.minX = Math.min(baseBounds.minX, point.x);
+          baseBounds.maxX = Math.max(baseBounds.maxX, point.x);
+          baseBounds.minZ = Math.min(baseBounds.minZ, point.z);
+          baseBounds.maxZ = Math.max(baseBounds.maxZ, point.z);
+        }
+      }
+      baseEntries = [];
+      for (const entry of entries) {
+        yield "grounding_operation";
+        take();
+        if (overlaps(baseBounds, entry.box)) baseEntries.push(entry);
+      }
+      // Filtering is inclusive and order-preserving: shared-edge ownership and
+      // every crossed base triangle stay identical. Full wind/fade coverage
+      // still checks all retained surfaces, including overlap rejection.
       let baseError = 0;
       for (let blade = 0; blade < blades; blade++) {
         transform(blade * verticesPerBlade, 1, left);
@@ -766,15 +869,7 @@ export function* groundGrassBladeSteps(
       let rejection: RejectionReason | null =
         baseError > maximumBaseError ? "terrain_edge" : null;
       if (!rejection && (yield* padOverlap(box))) rejection = "pad";
-      if (!rejection)
-        for (const road of request.roadSegments) {
-          yield "grounding_operation";
-          take();
-          if (segmentBoxDistance(road, box) <= road.width / 2 + roadFeather) {
-            rejection = "road";
-            break;
-          }
-        }
+      if (!rejection && (yield* roadsNear(box))) rejection = "road";
       if (!rejection) {
         let highest = -Infinity,
           coveredByBody = false;

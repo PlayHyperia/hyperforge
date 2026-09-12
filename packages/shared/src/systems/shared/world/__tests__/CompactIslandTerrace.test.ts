@@ -282,6 +282,9 @@ describe("explicit western rocky terrace successor", () => {
         }
         // Neither historical world contained the later natural-plaza layout.
         if (name === "world-areas.json") {
+          delete manifest.specialAreas.duel_arena.flatZones.find(
+            (zone: { id: string }) => zone.id === "duel_arena_campus_grade",
+          ).excludeGrass;
           const haven = manifest.starterTowns.central_haven;
           delete haven.flatZones[0].excludeGrass;
           haven.flatZones = haven.flatZones.filter(

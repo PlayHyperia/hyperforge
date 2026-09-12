@@ -1,5 +1,64 @@
 # Denser meadow: verified trial, unfinished visual result
 
+## Campus clearance and spatial-query correction
+
+The broad `duel_arena_campus_grade` blended across X292–444 / Z324.5–457 and
+implicitly excluded grass, including the southern preparation meadow. Its
+grass exclusion is now explicitly false. Real arena, lobby, hospital, lodge
+and station clearances remain; the grading height, roads and resource layout
+do not change. This one-line manifest change belongs to the separate assets
+repository and must accompany the game-side grounding optimization.
+
+Restoring coverage initially exceeded the dense profile's existing work cap.
+Grounding now conservatively filters base-query terrain surfaces and indexes
+road capsules into a bounded 8×8 grid. Shared-edge ordering, exact triangle and
+capsule predicates, complete swept coverage, cancellation and all hard limits
+remain. The original arithmetic outputs match; the work counter now records
+fewer irrelevant tests. No density, detail or quality reduction was made.
+
+The new native run installed **11,657 clumps** / **1,119,072 correction bytes**
+over six complete owners. Loading fitting took 630.5ms in active slices with
+a 5.3ms maximum slice, still above the 2ms target. Actual ten-second p95 CPU
+ticks were 13.1ms/10.6ms and GPU-pass sums 18.35ms/16.45ms for campus/meadow.
+These are not presented FPS, full GPU wall time, a controlled before/after
+speedup benchmark or stable full-population 60FPS qualification.
+
+Native Chrome/Metal/nonfallback WebGPU retained 1280×720, DPR1, MSAA4, existing
+shadows and 1.75m spacing. Study passed; overall failed on the same 19 cow/dagger
+errors. No new page/GPU/cleanup errors. All owned test browser/launcher/ports
+closed. All eight world views were reviewed; missing coverage is visibly
+fixed, but flat/spiky blades, synthetic terrain and basic lighting/building
+materials still fail the requested visual standard. Opening baseline images
+retain their loading overlays and are not used as world-view approval.
+
+Same meadow camera before the clearance correction:
+![Before campus grass clearance](evidence/campus-meadow-20260912-before.png)
+
+After the clearance correction:
+![After campus grass clearance](evidence/campus-meadow-20260912-after.png)
+
+1,233 shared tests / 90 files, 24 external tests against the untouched original
+core, 22 native preflights, all three builds/typechecks and scoped lint pass.
+Large leaves are independently reconstructed from bounded original-reference
+partitions; production remains one bounded job, without increasing its caps.
+Historical fixture inputs are reconstructed explicitly and old census oracles
+retained. New tests cover road/grid/terrain boundaries, exterior wind sweeps,
+exact current worker counts and unchanged sampled heights/protected pads.
+
+Native report SHA-256:
+`94838871037d870f42ceb2eeabcb3aee141bbe47934575e99fa24f1e078b7017`.
+`asset-studio/compact-grass-grounding-integration01/campus01/verify.mjs --check-only`
+checks 679 current source pins, 600 saved source archives and all 16 PNG
+artifacts, plus the previous dense baseline's immutable report/archives.
+Initial work-limit/test-fixture failures are retained with their explanations.
+
+Next visible pass: curved blade shape and coherent soft normals, then native
+moving-view, shading/contact and cost checks. The [AMD grass research](https://gpuopen.com/learn/mesh_shaders/mesh_shaders-procedural_grass_rendering/)
+provides useful curve/normal/LOD principles; its native mesh-shader code is not
+a browser feature claim. G04 and the AAA goal remain OPEN.
+
+## Earlier density-only checkpoint
+
 The opt-in `island-meadow-720p60-v1` render profile selects `compact-meadow-v2`
 grass. It increases placement density from 2.8m to 1.75m spacing without
 changing the existing island/default broadcast selections, blade geometry,

@@ -80,6 +80,9 @@ describe("shared broken-ridge sculpt", () => {
           manifest.hospital.size = { width: 28, depth: 23 };
         }
         if (replacement === old && name === "world-areas.json") {
+          delete manifest.specialAreas.duel_arena.flatZones.find(
+            (zone: { id: string }) => zone.id === "duel_arena_campus_grade",
+          ).excludeGrass;
           const haven = manifest.starterTowns.central_haven;
           delete haven.flatZones[0].excludeGrass;
           haven.flatZones = haven.flatZones.filter(

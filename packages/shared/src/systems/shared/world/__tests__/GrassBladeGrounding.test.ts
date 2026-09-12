@@ -195,6 +195,55 @@ function one(data: GrassAnchorData, index: number): GrassAnchorData {
 }
 
 describe("CPU per-blade grounding prototype (no renderer/GPU)", () => {
+  it.each([0, 1, 2] as const)(
+    "retains exact road clearance at all spatial-cell boundaries at LOD%s",
+    (lod) => {
+      const f = analyticOwner();
+      try {
+        const surface = f.makeSurface();
+        for (const x of [-37.5, -25, -12.5, 0, 12.5, 25, 37.5]) {
+          const data = f.dataAt(surface, [
+            [x, x - 0.00001, 0.71],
+            [x, x + 0.00001, 1.37],
+          ]);
+          const request = {
+            ...f.request(surface, data, lod),
+            wind: { x: 0.3, z: 0.2 },
+          };
+          const road = {
+            startX: x,
+            endX: x,
+            startZ: -120,
+            endZ: 120,
+            width: 0.001,
+          };
+          const crossing = groundGrassBlades({
+            ...request,
+            roadSegments: [road],
+          });
+          expect(crossing.status).toBe("ready");
+          expect(crossing.receipt.rejected.road).toBe(2);
+          const distant = groundGrassBlades({
+            ...request,
+            roadSegments: [{ ...road, startX: 1e6, endX: 1e6 }],
+          });
+          expect(distant.status).toBe("ready");
+          expect(distant.receipt.retainedClumps).toBe(2);
+          // Multiple cells and duplicate references must still produce one result
+          // per clump; the final capsule predicate, not an AABB, rejects grass.
+          const duplicate = groundGrassBlades({
+            ...request,
+            roadSegments: [road, road, { ...road, width: 1024 }],
+          });
+          expect(duplicate.status).toBe("ready");
+          expect(duplicate.receipt.rejected.road).toBe(2);
+        }
+      } finally {
+        f.close();
+      }
+    },
+  );
+
   it("keeps reusable point/triangle scratch private across suspended LOD jobs", () => {
     const f = analyticOwner();
     try {
@@ -984,6 +1033,8 @@ describe("actual v4 production-worker contact regressions and per-install CPU re
     terrain.unregisterFlatZone("central_haven_lodge_grass_clearance");
     const plaza = terrain["flatZones"].get("central_haven_plaza")!;
     terrain.registerFlatZone({ ...plaza, excludeGrass: undefined });
+    const grade = terrain["flatZones"].get("duel_arena_campus_grade")!;
+    terrain.registerFlatZone({ ...grade, excludeGrass: undefined });
     terrain["subscribeRoadNetworkEvents"]();
     await roads.init();
     await roads.start();

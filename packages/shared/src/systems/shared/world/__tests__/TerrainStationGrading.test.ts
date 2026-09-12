@@ -93,8 +93,14 @@ function stationArea(id: string, x: number, z: number): ManifestArea {
 
 describe("TerrainSystem deterministic manifest station grading", () => {
   it("releases natural plaza ground without changing heights or removing station and lodge protection", () => {
-    const current = terrainFor(actualAreas);
-    const previousAreas = structuredClone(actualAreas);
+    // Keep this earlier plaza-only comparison historical. The campus release
+    // below independently checks the current manifest against its predecessor.
+    const plazaAreas = structuredClone(actualAreas);
+    delete plazaAreas.duel_arena.flatZones!.find(
+      (zone) => zone.id === "duel_arena_campus_grade",
+    )!.excludeGrass;
+    const current = terrainFor(plazaAreas);
+    const previousAreas = structuredClone(plazaAreas);
     const previousHaven = previousAreas.central_haven;
     previousHaven.flatZones = previousHaven.flatZones!.filter(
       (zone) => zone.id !== "central_haven_lodge_grass_clearance",
@@ -180,6 +186,64 @@ describe("TerrainSystem deterministic manifest station grading", () => {
     for (let x = footprint.minX; x <= footprint.maxX; x += 0.25)
       for (let z = footprint.minZ; z <= footprint.maxZ; z += 0.25)
         expect(current.terrain["isGrassExcludedAt"](x, z)).toBe(true);
+  });
+
+  it("releases the broad arena grade without changing terrain or any protected footprint", () => {
+    const current = terrainFor(actualAreas);
+    const previousAreas = structuredClone(actualAreas);
+    delete previousAreas.duel_arena.flatZones!.find(
+      (zone) => zone.id === "duel_arena_campus_grade",
+    )!.excludeGrass;
+    const previous = terrainFor(previousAreas);
+    const grade = current.internals.flatZones.get("duel_arena_campus_grade")!;
+    expect(grade.excludeGrass).toBe(false);
+    let releasedSamples = 0;
+    // Cover the entire grade plus its transition and one metre of exterior.
+    for (let x = 291; x <= 445; x += 1) {
+      for (let z = 323.5; z <= 458; z += 0.5) {
+        expect(current.terrain.getHeightAt(x, z)).toBe(
+          previous.terrain.getHeightAt(x, z),
+        );
+        const wasExcluded = previous.terrain["isGrassExcludedAt"](x, z);
+        const excluded = current.terrain["isGrassExcludedAt"](x, z);
+        if (wasExcluded && !excluded) {
+          releasedSamples++;
+          expect(Math.abs(x - grade.centerX)).toBeLessThanOrEqual(
+            grade.width / 2 + grade.blendRadius,
+          );
+          expect(Math.abs(z - grade.centerZ)).toBeLessThanOrEqual(
+            grade.depth / 2 + grade.blendRadius,
+          );
+        }
+        if (!wasExcluded) expect(excluded).toBe(false);
+      }
+    }
+    expect(releasedSamples).toBeGreaterThan(30000);
+    expect(padHeights(current.internals)).toEqual(
+      padHeights(previous.internals),
+    );
+    for (const [id, zone] of current.internals.flatZones) {
+      if (id === grade.id) continue;
+      expect(zone).toEqual(previous.internals.flatZones.get(id));
+      if (zone.excludeGrass === false) continue;
+      // Core and blending ring remain protected, not just each pad's centre.
+      for (const dx of [
+        -zone.width / 2 - zone.blendRadius,
+        0,
+        zone.width / 2 + zone.blendRadius,
+      ])
+        for (const dz of [
+          -zone.depth / 2 - zone.blendRadius,
+          0,
+          zone.depth / 2 + zone.blendRadius,
+        ])
+          expect(
+            current.terrain["isGrassExcludedAt"](
+              zone.centerX + dx,
+              zone.centerZ + dz,
+            ),
+          ).toBe(true);
+    }
   });
 
   beforeEach(() => {

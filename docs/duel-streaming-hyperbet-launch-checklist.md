@@ -1,5 +1,40 @@
 # Duel Arena, Streaming, and Hyperbet Launch Checklist
 
+## Campus meadow restored — 2026-09-12
+
+Status: **G04 remains OPEN. Clearance/scalability fix verified; blade appearance
+and overall world quality are not approved.**
+
+- [x] Corrected the broad arena-grade grass exclusion that erased southern
+  preparation vegetation. Terrain heights, actual arena/lobby/hospital floors,
+  lodge/station clearances, roads and functional resource placements remain.
+- [x] Restored dense coverage without raising any generation, work, time or
+  upload cap. Bounded road/surface spatial queries remove repeated irrelevant
+  tests while preserving exact triangle contact, full wind/fade envelopes,
+  exclusion predicates, cancellation and invalidation.
+- [x] Passed 1,233 shared tests / 90 files, 24 untouched-original-reference
+  checks, 22 native preflights, all three builds/typechecks and scoped lint.
+  Historical input/census oracles and the initial dense work-limit failure
+  remain retained. Only measured work/time differ in original receipt comparison.
+- [x] Native Chrome/Metal WebGPU installed 11,657 clumps / 1,119,072 correction
+  bytes across six complete owners; no failed fitting or page/GPU/cleanup
+  errors. Same dense 1.75m spacing, 720p/DPR1/MSAA4 and existing shadows.
+  All owned test browser/launcher/ports stopped. Overall remains failed19 on
+  missing cow and dagger fit-metadata; those errors were not suppressed.
+- [ ] Replace the now-visible flat/spiky blade appearance with coherent curved
+  geometry, soft lighting normals and natural coverage transitions. This is
+  the next visible priority; more density alone is not the answer.
+- [ ] Close loading overshoot and full-scene performance gates: total active
+  fitting 630.5ms / maximum slice5.3ms still exceeds the 2ms target. p95 CPU
+  ticks13.1/10.6ms and GPU-pass sums18.35/16.45ms are not presented FPS,
+  a controlled speedup claim or stable-60FPS/full-population acceptance.
+- [ ] Continue deliberate terrain/geology, coherent foliage/material color,
+  buildings/contact, lighting/sky/water, animation and soundscape work.
+  One arena and functional resource trees remain; no large world restored.
+
+Evidence: `docs/dense-meadow-study-20260912.md` and
+`asset-studio/compact-grass-grounding-integration01/campus01/native-evidence.json`.
+
 ## Denser meadow comparison — 2026-09-12
 
 Status: **G04 remains OPEN. Verified comparison profile; not finished art or

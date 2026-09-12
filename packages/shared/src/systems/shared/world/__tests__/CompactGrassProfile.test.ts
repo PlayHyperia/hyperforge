@@ -76,6 +76,7 @@ function workerSession() {
 async function fixture(
   profile: WorldTerrainProfile = SCULPTED_COMPACT_WORLD_TERRAIN_PROFILE,
   previousPlaza = false,
+  previousCampus = previousPlaza,
 ) {
   await DataManager.getInstance().initialize();
   const world = new World();
@@ -88,6 +89,10 @@ async function fixture(
   await terrain.init();
   terrain["loadWaterBodiesFromManifest"]();
   terrain["loadFlatZonesFromManifest"]();
+  if (previousCampus) {
+    const grade = terrain["flatZones"].get("duel_arena_campus_grade")!;
+    terrain.registerFlatZone({ ...grade, excludeGrass: undefined });
+  }
   if (previousPlaza) {
     // Explicit historical surface fixture. Preserve old census oracles when
     // comparing terrain algorithms; the current manifest is tested separately.
@@ -242,7 +247,7 @@ describe("opt-in compact grass, actual terrain and native worker (not GPU proof)
       const camera = new THREE.PerspectiveCamera(52, 16 / 9, 0.2, 10000);
       camera.coordinateSystem = THREE.WebGPUCoordinateSystem;
       camera.updateProjectionMatrix();
-      camera.position.set(390, 34, 370);
+      camera.position.set(410, 34, 370);
       camera.lookAt(500, 34, 370); // Earlier director/update view looks away.
       camera.updateMatrixWorld(true);
       owner.update(385, 374, camera);
@@ -271,7 +276,7 @@ describe("opt-in compact grass, actual terrain and native worker (not GPU proof)
       const near = camera.clone();
       near.updateMatrixWorld(true);
       // A following pass with another camera must not inherit that decision.
-      camera.position.set(390, 34, 370);
+      camera.position.set(410, 34, 370);
       camera.lookAt(500, 34, 370);
       camera.updateMatrixWorld(true);
       expect(mesh.intersectsFrustum(frustum())).toBe(false);
@@ -669,12 +674,9 @@ describe("opt-in compact grass, actual terrain and native worker (not GPU proof)
       process.stdout.write(
         `Current plaza worker census: ${JSON.stringify(counts)}\n`,
       );
-      expect(counts).toEqual([271, 495, 212, 532, 493, 349]);
-      // Unaffected leaves retain the published pre-plaza geometry census.
-      expect([counts[0], counts[1], counts[3], counts[4]]).toEqual([
-        271, 495, 532, 493,
-      ]);
-      expect(counts[2]).toBeGreaterThan(139);
+      expect(counts).toEqual([715, 552, 1010, 1199, 820, 349]);
+      // The northern leaf lies outside the campus clearance change.
+      expect(counts[5]).toBe(349);
       const node = f.nodes[2];
       f.installSupport(node);
       const { key, entry, data } = await queueGrounding(f, owner, node);
@@ -695,8 +697,8 @@ describe("opt-in compact grass, actual terrain and native worker (not GPU proof)
         ).toBeLessThanOrEqual(0.8);
         if (x >= 326 && x <= 374 && z >= 296 && z <= 344) naturalPlazaClumps++;
       }
-      expect(result.data.count).toBe(186);
-      expect(naturalPlazaClumps).toBe(42);
+      expect(result.data.count).toBe(936);
+      expect(naturalPlazaClumps).toBe(110);
       expect(result.receipt.rejected.pad).toBeGreaterThan(0);
       expect(result.receipt.maxAcceptedBaseError).toBeLessThanOrEqual(0.05);
       expect(result.rootDeltas.byteLength).toBe(result.data.count * 96);
@@ -843,7 +845,7 @@ describe("opt-in compact grass, actual terrain and native worker (not GPU proof)
       SCULPTED_COMPACT_V3_PROFILE_FIXTURE,
       SCULPTED_COMPACT_V4_PROFILE_FIXTURE,
     ]) {
-      const f = await fixture(profile);
+      const f = await fixture(profile, false, true);
       try {
         const owner = f.manager(COMPACT_ISLAND_GRASS_VISUAL_PROFILE).owner;
         const counts = [];
