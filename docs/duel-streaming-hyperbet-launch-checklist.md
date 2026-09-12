@@ -2,6 +2,27 @@
 
 ## Active functional woodland and surface fidelity — 2026-09-11
 
+- [x] Verify corrected trim in native57: complete straight window frames visible
+  in all four lodge close-ups; 27 Metal/WebGPU images, 529 pins / 460 archives
+  independently verified, zero page/GPU errors and full owned cleanup. Keep
+  all 19 cow/dagger errors and unqualified final art/performance status visible.
+- [ ] Finish lodge material/fit/composition: recessed doorway trim, aliasing in
+  floor/roof patterns, flat plaster, empty interior and bare platform remain.
+- [x] Repair indexed architectural trim merging and window source ownership.
+  Root reproduces original winding failure, then passes 128 procgen tests,
+  781 shared tests, four package typechecks/builds and scoped lint/format.
+  Corrected lodge is 1,332 triangles / 168,376 CPU geometry bytes; same layout,
+  bounds, five meshes and four materials. Native57 confirms the narrow repair.
+- [x] Compare actual rendered/cooked trim surfaces at 2,124 face-seeded native
+  PhysX/Three ray samples over three lifecycle cycles, retaining all floor,
+  doorway/roof and actor cleanup checks. Not exact-face or animated-foot proof.
+- [x] Push forecourt checkpoint `d0bca2bf3`; exact remote head, all four tested
+  source blobs and GitHub author/committer `dreaminglucid` verified. Native56
+  defect evidence retained; no merge, deployment or lodge-art approval.
+- [x] Prepare and independently verify isolated Grass004 material02: official
+  archive digest/size, four original PNGs, exact decoded-channel packing and
+  six archive-admission tests. Packed transfer is 6.44MB versus current 1.86MB;
+  16-bit source normal quantization disclosed. No live replacement or GPU claim.
 - [x] Implement five bank/workshop surface clearings using the existing road mask.
   Root passes 780 shared tests / 58 files, three builds/typechecks, scoped lint
   and 133 applicable harness cases. Preserve all 29 trees and all five grass
@@ -10,7 +31,7 @@
   independently verified, zero page/GPU errors and full owned cleanup. The
   overall run still fails 19 cow/dagger errors. Forecourts read more clearly;
   rounded cobble-like paths, repetitive turf and unfinished lodge art remain.
-- [ ] Repair the lodge's broken window/door trim topology: the shared merger
+- [x] Repair the lodge's broken window/door trim topology: the shared merger
   drops indexed box topology. Require exact expanded-face/attribute parity,
   correct ownership/teardown, real collision checks and repeat native close-ups.
   Native56's count/bounds/readiness pass is explicitly not visual acceptance.

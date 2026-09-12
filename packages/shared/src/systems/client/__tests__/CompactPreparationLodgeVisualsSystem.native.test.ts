@@ -1,7 +1,7 @@
 import { beforeAll, describe, expect, it } from "vitest";
 import { World } from "../../../core/World";
 import { DataManager } from "../../../data/DataManager";
-import { Vector3 } from "../../../extras/three/three";
+import { Group, Mesh, Raycaster, Vector3 } from "../../../extras/three/three";
 import { getPhysX, loadPhysX } from "../../../physics/PhysXManager";
 import { TerrainSystem } from "../../shared/world/TerrainSystem";
 import { TownSystem } from "../../shared/world/TownSystem";
@@ -60,7 +60,7 @@ describe("compact lodge actual native PhysX integration (CPU, not foot-contact a
         expect(visual.getDiagnostics()).toMatchObject({
           physicsActor: true,
           physicsShapes: 5,
-          triangles: 1116,
+          triangles: 1332,
         });
         expect(world.physics.scene!.getNbActors(actorTypes)).toBe(
           actorsBefore + 1,
@@ -99,6 +99,54 @@ describe("compact lodge actual native PhysX integration (CPU, not foot-contact a
         expect(towns.getCollisionService().isWalkableAtFloor(398, 370, 1)).toBe(
           false,
         );
+        const root = world.stage.scene.getObjectByName(
+          COMPACT_PREPARATION_LODGE.layoutId,
+        );
+        expect(root).toBeInstanceOf(Group);
+        if (!(root instanceof Group))
+          throw new Error("Actual lodge root missing");
+        const ray = new Raycaster();
+        ray.layers.enableAll();
+        ray.far = 0.01;
+        let checkedTrimFaces = 0;
+        for (const mesh of root.children) {
+          if (
+            !(mesh instanceof Mesh) ||
+            !["windowFrames", "doorFrames"].includes(mesh.name)
+          )
+            continue;
+          const positions = mesh.geometry.getAttribute("position");
+          const normals = mesh.geometry.getAttribute("normal");
+          const index = mesh.geometry.index;
+          const count = index?.count ?? positions.count;
+          for (let i = 0; i < count; i += 3) {
+            const ids = [0, 1, 2].map((n) => index?.getX(i + n) ?? i + n);
+            const center = new Vector3();
+            for (const id of ids)
+              center.add(new Vector3().fromBufferAttribute(positions, id));
+            center.multiplyScalar(1 / 3).applyMatrix4(mesh.matrixWorld);
+            const outward = new Vector3()
+              .fromBufferAttribute(normals, ids[0])
+              .transformDirection(mesh.matrixWorld);
+            ray.ray.origin.copy(center).addScaledVector(outward, 0.005);
+            ray.ray.direction.copy(outward).negate();
+            const renderedSurface = ray.intersectObject(root, true)[0];
+            const nativeSurface = world.physics.raycast(
+              ray.ray.origin,
+              ray.ray.direction,
+              ray.far,
+            );
+            const label = `${mesh.name} cycle ${cycle} face ${i / 3}`;
+            expect(renderedSurface, label).toBeDefined();
+            expect(nativeSurface, label).not.toBeNull();
+            expect(
+              nativeSurface!.point.distanceTo(renderedSurface.point),
+              label,
+            ).toBeLessThan(0.0001);
+            checkedTrimFaces++;
+          }
+        }
+        expect(checkedTrimFaces).toBe(708);
         visual.destroy();
         visual.destroy();
         expect(world.physics.scene!.getNbActors(actorTypes)).toBe(actorsBefore);

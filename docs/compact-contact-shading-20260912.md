@@ -58,6 +58,33 @@ Therefore apply the native PBR context, not a dark multiplier after tone mapping
   transparent water; reflection-enabled views require their own camera-context
   qualification because reflection rendering retains a rendering context.
 
+### Installed-source implementation findings
+
+Use the original materials with normal/depth MRT, emitting
+`vec4(normalView, diffuseColor.a)` so alpha-to-coverage is retained. Use the
+attachment's `NoBlending` rather than changing source materials. A scoped
+render-object filter must inspect each actual group material: transparent
+water currently writes depth, so filtering only `depthWrite === false` would
+incorrectly admit it. Retain explicitly admitted alpha-tested/dithered cutouts;
+exclude blended/transmissive effects, sky and non-depth writers. Diagnose
+custom fragment/MRT overrides instead of silently treating their beauty output
+as normals. The initial experiment requires native WebGPU compatibility mode
+off, ordinary perspective depth and reflections off.
+
+Keep the new owner separate from the legacy composer. Own the two scene
+passes, AO, optional denoise/RTT, output pipeline and their private textures;
+do not dispose the scene, renderer, shared maps or shared fullscreen geometry.
+Construction needs rollback before publication, resize uses actual drawing-
+buffer dimensions, and normal destruction/reinitialization must be tested.
+
+Important failure boundary: installed PassNode, RenderPipeline, GTAO and RTT
+draw paths do not comprehensively restore state with `finally`. An outer guard
+can restore public renderer/context/camera state, but a native draw exception
+can strand private render-scene state as well. Preserve the error and stop the
+failed session; do not advertise a safe same-frame direct-render fallback or
+reuse that has not been demonstrated. Native failure tests should exercise a
+real throwing draw callback, check owned cleanup, then close that session.
+
 ## First comparison, not production defaults
 
 Compare direct rendering, the identical pipeline with neutral AO, raw GTAO and

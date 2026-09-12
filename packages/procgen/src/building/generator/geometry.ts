@@ -1759,7 +1759,11 @@ export function createChamferedWallGeometry(
 }
 
 /**
- * Merge multiple buffer geometries into one, preserving vertex colors, UVs, and UV2.
+ * Merge complete triangle buffers, preserving normals and common color/UV/UV2
+ * attributes. Multi-input output is non-indexed; each indexed triangle corner
+ * is expanded in its original order. Groups/draw ranges are not material splits.
+ * Inputs are borrowed until a successful merge, then consumed if requested.
+ * The historical singleton identity/clone behavior is intentionally retained.
  * @param geometries - Array of geometries to merge
  * @param disposeSource - Whether to dispose source geometries after merge (default: true)
  */
@@ -1768,55 +1772,116 @@ export function mergeBufferGeometries(
   disposeSource: boolean = true,
 ): THREE.BufferGeometry {
   if (geometries.length === 0) return new THREE.BufferGeometry();
-  if (geometries.length === 1)
-    return disposeSource ? geometries[0] : geometries[0].clone();
-
+  // Architectural batches are small. Bound validation and allocation before
+  // touching inputs (3M expanded corners need at most 156 MB of output arrays).
+  const maximumCorners = 3_000_000;
+  if (geometries.length > 4096)
+    throw new Error("[mergeBufferGeometries] Too many source geometries");
   let totalVertices = 0;
+  let sourceVertices = 0;
   let hasColor = true;
   let hasUV = true;
   let hasUV2 = true;
-
   for (const geo of geometries) {
     const pos = geo.attributes.position;
-    if (pos) totalVertices += pos.count;
+    if (!pos) {
+      if (geo.index || Object.keys(geo.attributes).length > 0)
+        throw new Error("[mergeBufferGeometries] Missing position attribute");
+    } else {
+      const count = geo.index?.count ?? pos.count;
+      if (
+        !Number.isSafeInteger(pos.count) ||
+        pos.count < 0 ||
+        pos.count > maximumCorners - sourceVertices ||
+        !Number.isSafeInteger(count) ||
+        count < 0 ||
+        count % 3 !== 0 ||
+        count > maximumCorners - totalVertices
+      )
+        throw new Error("[mergeBufferGeometries] Invalid triangle count");
+      totalVertices += count;
+      sourceVertices += pos.count;
+      for (const [name, size] of [
+        ["position", 3],
+        ["normal", 3],
+        ["color", 3],
+        ["uv", 2],
+        ["uv2", 2],
+      ] as const) {
+        const attr = geo.attributes[name];
+        if (!attr) continue;
+        if (attr.itemSize !== size || attr.count !== pos.count)
+          throw new Error(`[mergeBufferGeometries] Invalid ${name} shape`);
+        for (let i = 0; i < attr.count; i++) {
+          for (let component = 0; component < size; component++) {
+            if (!Number.isFinite(Math.fround(attr.getComponent(i, component))))
+              throw new Error(`[mergeBufferGeometries] Invalid ${name} value`);
+          }
+        }
+      }
+      if (geo.index) {
+        if (geo.index.itemSize !== 1 || geo.index.normalized)
+          throw new Error("[mergeBufferGeometries] Invalid index shape");
+        for (let i = 0; i < geo.index.count; i++) {
+          const index = geo.index.getX(i);
+          if (!Number.isSafeInteger(index) || index < 0 || index >= pos.count)
+            throw new Error("[mergeBufferGeometries] Invalid triangle index");
+        }
+      }
+    }
     if (!geo.attributes.color) hasColor = false;
     if (!geo.attributes.uv) hasUV = false;
     if (!geo.attributes.uv2) hasUV2 = false;
   }
+  if (geometries.length === 1)
+    return disposeSource ? geometries[0] : geometries[0].clone();
 
   const positions = new Float32Array(totalVertices * 3);
   const normals = new Float32Array(totalVertices * 3);
   const colors = hasColor ? new Float32Array(totalVertices * 3) : null;
   const uvs = hasUV ? new Float32Array(totalVertices * 2) : null;
   const uv2s = hasUV2 ? new Float32Array(totalVertices * 2) : null;
+  const a = new THREE.Vector3();
+  const b = new THREE.Vector3();
+  const c = new THREE.Vector3();
 
   let offset = 0;
   for (const geo of geometries) {
     const pos = geo.attributes.position;
     if (!pos) continue;
 
-    const count = pos.count;
-    positions.set(pos.array as Float32Array, offset * 3);
-
-    let normalAttr = geo.attributes.normal;
-    if (!normalAttr) {
-      // Compute flat normals for architectural geometry (hard edges)
-      // Smooth normals would cause incorrect lighting on box geometry
-      computeFlatNormals(geo);
-      normalAttr = geo.attributes.normal;
+    const count = geo.index?.count ?? pos.count;
+    const attributes = [
+      [geo.attributes.position, positions, 3],
+      [geo.attributes.normal, normals, 3],
+      [geo.attributes.color, colors, 3],
+      [geo.attributes.uv, uvs, 2],
+      [geo.attributes.uv2, uv2s, 2],
+    ] as const;
+    for (let corner = 0; corner < count; corner++) {
+      const index = geo.index ? geo.index.getX(corner) : corner;
+      for (const [attr, destination, size] of attributes) {
+        if (!destination || !attr) continue;
+        for (let component = 0; component < size; component++) {
+          destination[(offset + corner) * size + component] = attr.getComponent(
+            index,
+            component,
+          );
+        }
+      }
     }
-    if (normalAttr) {
-      normals.set(normalAttr.array as Float32Array, offset * 3);
-    }
-
-    if (colors && geo.attributes.color) {
-      colors.set(geo.attributes.color.array as Float32Array, offset * 3);
-    }
-    if (uvs && geo.attributes.uv) {
-      uvs.set(geo.attributes.uv.array as Float32Array, offset * 2);
-    }
-    if (uv2s && geo.attributes.uv2) {
-      uv2s.set(geo.attributes.uv2.array as Float32Array, offset * 2);
+    if (!geo.attributes.normal) {
+      // Generate flat normals only for these owned, expanded corners. Do not
+      // mutate borrowed inputs, smooth across faces, or flip authored winding.
+      for (let corner = 0; corner < count; corner += 3) {
+        const start = (offset + corner) * 3;
+        a.fromArray(positions, start);
+        b.fromArray(positions, start + 3).sub(a);
+        c.fromArray(positions, start + 6).sub(a);
+        b.cross(c).normalize();
+        for (let vertex = 0; vertex < 3; vertex++)
+          b.toArray(normals, start + vertex * 3);
+      }
     }
 
     offset += count;
@@ -1831,7 +1896,8 @@ export function mergeBufferGeometries(
   if (uv2s) result.setAttribute("uv2", new THREE.BufferAttribute(uv2s, 2));
 
   if (disposeSource) {
-    for (const geo of geometries) geo.dispose();
+    // A repeated reference contributes geometry twice but has one owner.
+    for (const geo of new Set(geometries)) geo.dispose();
   }
 
   return result;

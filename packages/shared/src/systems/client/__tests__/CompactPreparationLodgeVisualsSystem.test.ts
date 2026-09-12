@@ -67,6 +67,48 @@ async function fixture(preexistingTown = false) {
 }
 
 describe("compact lodge actual geometry / scene ownership (CPU, not rendered acceptance)", () => {
+  it("retains complete outward-facing triangles on the actual box-based window and door trim", async () => {
+    const { towns } = await fixture();
+    const visual = createCompactPreparationLodgeVisual(
+      towns.getCompactPreparationLodge()!,
+    );
+    leases.push(visual);
+    const trim = visual.meshes.filter((mesh) =>
+      ["windowFrames", "doorFrames"].includes(mesh.name),
+    );
+    expect(trim).toHaveLength(2);
+    for (const mesh of trim) {
+      const position = mesh.geometry.getAttribute("position");
+      const normal = mesh.geometry.getAttribute("normal");
+      const index = mesh.geometry.index;
+      const count = index?.count ?? position.count;
+      expect(count % 3).toBe(0);
+      expect(count).toBeGreaterThan(0);
+      for (let i = 0; i < count; i += 3) {
+        const ids = [0, 1, 2].map(
+          (offset) => index?.getX(i + offset) ?? i + offset,
+        );
+        const points = ids.map((id) =>
+          new THREE.Vector3().fromBufferAttribute(position, id),
+        );
+        const face = points[1]
+          .clone()
+          .sub(points[0])
+          .cross(points[2].clone().sub(points[0]));
+        const label = `${mesh.name} triangle ${i / 3}`;
+        // Raw indexed box vertices interpreted as consecutive triangles can
+        // straddle different faces or collapse; a mesh count cannot detect it.
+        expect(face.lengthSq(), label).toBeGreaterThan(1e-12);
+        face.normalize();
+        for (const id of ids) {
+          const outward = new THREE.Vector3().fromBufferAttribute(normal, id);
+          expect(outward.length(), label).toBeCloseTo(1, 5);
+          expect(face.dot(outward), label).toBeGreaterThan(0.99999);
+        }
+      }
+    }
+  });
+
   it.each([false, true])(
     "registers only one shared owner and visual with preexistingTown=%s",
     async (preexistingTown) => {
@@ -83,8 +125,8 @@ describe("compact lodge actual geometry / scene ownership (CPU, not rendered acc
       expect(system.getDiagnostics()).toEqual({
         buildingId: COMPACT_PREPARATION_LODGE.layoutId,
         meshes: 5,
-        triangles: 1116,
-        geometryBytes: 134680,
+        triangles: 1332,
+        geometryBytes: 168376,
         materials: 4,
         physicsShapes: 0,
         physicsActor: false,
