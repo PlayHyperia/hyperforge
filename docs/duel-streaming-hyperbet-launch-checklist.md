@@ -1,5 +1,30 @@
 # Duel Arena, Streaming, and Hyperbet Launch Checklist
 
+## Full-detail smithy planting — 2026-09-12
+
+- [x] Add 20 manifest-authored shrubs in unequal west/east beds. Preserve every
+      functional tree, service, path, terrain grade and collision owner.
+- [x] Share the existing pond model/material/texture/instance owner: 52 instances,
+      still five batches and five palette materials. No new textures, render pass,
+      distance thinning or resolution reduction; unchanged 64-instance ceiling.
+- [x] Correct two full-crown path overlaps; test the actual bilinear road mask,
+      station/NPC workspaces, all tree approaches, native navigation and ownership.
+      Final 84-file run: 1,151/1,151. Types/builds and scoped lint/format pass.
+      Retain earlier placement failures and reconstruct historical fixtures without
+      changing their original hashes.
+- [x] Complete and inspect all eight native art views plus six baseline images.
+      Root verifies 675 current source pins, 596 archives, matrices and shared maps.
+      No page/GPU/cleanup errors; overall still fails on 19 existing cow/dagger
+      content errors. Planting is locally useful, not final island-art approval.
+- [ ] Improve smithy beam/bank-roof visibility, broad ground variation, shoreline,
+      rock silhouette and planting throughout the functional-tree landscape.
+- [ ] Measure whole-frame CPU/GPU cost, presented frames and memory on target
+      hardware; finish motion/agent/streaming/endurance gates. No AAA acceptance.
+
+Evidence: `docs/compact-smithy-planting-20260912.md`,
+`asset-studio/compact-smithy-court01/planting-*` and
+`asset-studio/game-test-integration/service-planting01/`.
+
 ## Stationary outdoor-lighting correction — 2026-09-12
 
 - [x] Reproduce the direct/neutral furnace mismatch at the exact same simulation

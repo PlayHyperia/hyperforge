@@ -194,6 +194,7 @@ describe("explicit western rocky terrace successor", () => {
     // active v6 profile. No source anchors, rewards, layout or pose changes.
     const config = structuredClone(DataManager.getWorldConfig()!);
     delete config.compactServiceCourt;
+    delete config.compactServicePlanting;
     config.terrainProfile = current;
     config.compactResourceGroves!.terrainProfileId = current.id;
     config.compactPreparationLodge = structuredClone(

@@ -1,5 +1,12 @@
 import { canonicalWorldJson } from "../../../data/WorldContentIdentity";
-import type { CompactServiceCourtManifest } from "../../../types/world/world-types";
+import type {
+  CompactServiceCourtManifest,
+  CompactServicePlantingManifest,
+} from "../../../types/world/world-types";
+import {
+  COMPACT_POND_MODELS,
+  type CompactPondPlacement,
+} from "./CompactPondDressing";
 import type { WorldTerrainProfile } from "./WorldTerrainProfile";
 import type { WorkshopFoot } from "@hyperforge/procgen/building";
 
@@ -32,6 +39,107 @@ export function validateCompactServiceCourt(
   ) as CompactServiceCourtManifest;
   Object.freeze(copy.position);
   return Object.freeze(copy);
+}
+
+/** Separate content admission; does not broaden the 64-instance renderer cap.
+ * Authored coordinates live in the world manifest and its content identity.
+ */
+export function validateCompactServicePlanting(
+  value: unknown,
+  profile: WorldTerrainProfile,
+  court: CompactServiceCourtManifest | undefined,
+): CompactServicePlantingManifest | undefined {
+  if (value === undefined) return undefined;
+  // Reject accessors/non-JSON values before reading any submitted property.
+  const copy = JSON.parse(
+    canonicalWorldJson(value),
+  ) as CompactServicePlantingManifest;
+  const exactKeys = (row: object, keys: readonly string[]) =>
+    Object.keys(row).sort().join(",") === [...keys].sort().join(",");
+  if (
+    !copy ||
+    typeof copy !== "object" ||
+    !exactKeys(copy, [
+      "schemaVersion",
+      "layoutId",
+      "terrainProfileId",
+      "beds",
+    ]) ||
+    copy.schemaVersion !== 1 ||
+    copy.layoutId !== "compact-smithy-planting-v1" ||
+    copy.terrainProfileId !== "compact-duel-island-v6" ||
+    !court ||
+    profile.id !== court.terrainProfileId ||
+    profile.algorithm !== "compact-island-sculpt-v5" ||
+    profile.terrainTileSize !== 100 ||
+    !Array.isArray(copy.beds) ||
+    copy.beds.length !== 2
+  )
+    throw new Error("Invalid compactServicePlanting profile or layout");
+  const ids = new Set<string>();
+  let count = 0;
+  for (const bed of copy.beds) {
+    if (
+      !bed ||
+      typeof bed !== "object" ||
+      !exactKeys(bed, ["id", "plants"]) ||
+      !["west", "east"].includes(bed.id) ||
+      ids.has(bed.id) ||
+      !Array.isArray(bed.plants) ||
+      !bed.plants.length ||
+      bed.plants.length > 16
+    )
+      throw new Error("Invalid compactServicePlanting bed");
+    ids.add(bed.id);
+    const minX = bed.id === "west" ? 327.5 : 342.2;
+    const maxX = bed.id === "west" ? 331 : 345.5;
+    for (const plant of bed.plants) {
+      if (
+        !plant ||
+        typeof plant !== "object" ||
+        !exactKeys(plant, ["x", "z", "scale", "yaw"]) ||
+        ![plant.x, plant.z, plant.scale, plant.yaw].every(Number.isFinite) ||
+        plant.scale < 0.65 ||
+        plant.scale > 1 ||
+        plant.yaw < 0 ||
+        plant.yaw >= Math.PI * 2
+      )
+        throw new Error("Invalid compactServicePlanting plant");
+      const radius = COMPACT_POND_MODELS.bush.radius * plant.scale;
+      if (
+        plant.x - radius < minX ||
+        plant.x + radius > maxX ||
+        plant.z - radius < 334 ||
+        plant.z + radius > 343.2
+      )
+        throw new Error("Compact service plant crown exceeds its admitted bed");
+      Object.freeze(plant);
+      count++;
+    }
+    Object.freeze(bed.plants);
+    Object.freeze(bed);
+  }
+  if (count > 24) throw new Error("Compact service planting exceeds 24 plants");
+  Object.freeze(copy.beds);
+  return Object.freeze(copy);
+}
+
+/** Reuse the pond's genuine bush geometry, palette and instance batch. */
+export function createCompactServicePlanting(
+  descriptor: CompactServicePlantingManifest | undefined,
+): readonly CompactPondPlacement[] {
+  return Object.freeze(
+    descriptor?.beds.flatMap((bed) =>
+      bed.plants.map((p, i) =>
+        Object.freeze({
+          ...p,
+          id: `smithy_${bed.id}_${i}`,
+          model: "bush" as const,
+          burial: 0.04,
+        }),
+      ),
+    ) ?? [],
+  );
 }
 
 export type OwnedCompactServiceCourt = Readonly<{

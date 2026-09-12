@@ -35,6 +35,7 @@ import type { ShorelineConfig, BiomeNoiseSet } from "./TerrainHeightParams";
 import { BiomeType, DEFAULT_BIOME, BIOME_LIST } from "./TerrainBiomeTypes";
 import { WaterBodyRegistry } from "./WaterBodyRegistry";
 import { createCompactPondDressing } from "./CompactPondDressing";
+import { createCompactServicePlanting } from "./CompactServiceCourt";
 import { CompactPondDressingVisuals } from "./CompactPondDressingVisuals";
 import { validateRadialPondTerrainProfile } from "./RadialPondTerrainProfile";
 import { createAuthoredTerrainSurfaceOperations } from "./AuthoredTerrainSurface";
@@ -2248,7 +2249,12 @@ export class TerrainSystem extends System {
     if (pondPlacements.length) {
       this.compactPondDressing = new CompactPondDressingVisuals(
         containerParent,
-        pondPlacements,
+        Object.freeze([
+          ...pondPlacements,
+          ...createCompactServicePlanting(
+            DataManager.getWorldConfig()?.compactServicePlanting,
+          ),
+        ]),
       );
       void this.compactPondDressing.load(this.world);
     }

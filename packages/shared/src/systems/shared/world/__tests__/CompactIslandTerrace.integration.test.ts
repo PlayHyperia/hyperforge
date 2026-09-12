@@ -99,6 +99,7 @@ async function fixture(profile: WorldTerrainProfile, content: boolean) {
       DataManager["worldContentIdentity"] = null;
       const historical = structuredClone(saved.config);
       delete historical.compactServiceCourt;
+      delete historical.compactServicePlanting;
       DataManager.setWorldConfig({
         ...historical,
         terrainProfile: current,

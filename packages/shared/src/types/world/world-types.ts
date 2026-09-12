@@ -1408,6 +1408,22 @@ export type CompactServiceCourtManifest = Readonly<{
   recipeId: "open-timber-smithy-v1";
 }>;
 
+/** Low, non-colliding planting; tree/resource ownership is never changed. */
+export type CompactServicePlantingManifest = Readonly<{
+  schemaVersion: 1;
+  layoutId: "compact-smithy-planting-v1";
+  terrainProfileId: "compact-duel-island-v6";
+  beds: readonly Readonly<{
+    id: "west" | "east";
+    plants: readonly Readonly<{
+      x: number;
+      z: number;
+      scale: number;
+      yaw: number;
+    }>[];
+  }>[];
+}>;
+
 /** Complete configuration loaded from assets/manifests/world-config.json. */
 export interface WorldConfigManifest {
   /** Manifest version for compatibility checking */
@@ -1429,6 +1445,7 @@ export interface WorldConfigManifest {
   /** Optional, explicitly admitted preparation architecture; no town/NPC generation. */
   compactPreparationLodge?: CompactPreparationLodgeManifest;
   compactServiceCourt?: CompactServiceCourtManifest;
+  compactServicePlanting?: CompactServicePlantingManifest;
 }
 
 // ============== BUILDINGS MANIFEST TYPES ==============

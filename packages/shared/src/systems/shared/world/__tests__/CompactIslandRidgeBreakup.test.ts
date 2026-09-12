@@ -49,6 +49,7 @@ describe("shared broken-ridge sculpt", () => {
     const old = structuredClone(config);
     // This architecture did not exist in the retained v5 world content.
     delete old.compactServiceCourt;
+    delete old.compactServicePlanting;
     old.terrainProfile = previous;
     old.compactResourceGroves = {
       ...old.compactResourceGroves!,

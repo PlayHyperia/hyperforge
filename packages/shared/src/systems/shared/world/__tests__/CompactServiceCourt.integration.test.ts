@@ -35,7 +35,10 @@ import { RoadNetworkSystem } from "../RoadNetworkSystem";
 import {
   COMPACT_SERVICE_COURT,
   groundCompactServiceCourt,
+  createCompactServicePlanting,
+  validateCompactServicePlanting,
 } from "../CompactServiceCourt";
+import { COMPACT_POND_MODELS } from "../CompactPondDressing";
 import {
   CompactServiceCourtSystem,
   COMPACT_SERVICE_COURT_SYSTEM,
@@ -119,6 +122,209 @@ async function fixture() {
 }
 
 describe("actual compact service court placement and preparation navigation", () => {
+  it("admits detached bounded planting only for its court and rejects malformed content", () => {
+    const input = structuredClone(saved.config!.compactServicePlanting!);
+    expect(input.beds.flatMap((b) => b.plants)).toHaveLength(20);
+    const profile = saved.profile!;
+    const admitted = validateCompactServicePlanting(
+      input,
+      profile,
+      COMPACT_SERVICE_COURT,
+    )!;
+    expect(admitted).toEqual(input);
+    expect(admitted).not.toBe(input);
+    expect(Object.isFrozen(admitted.beds[0].plants[0])).toBe(true);
+    expect(createCompactServicePlanting(undefined)).toEqual([]);
+    expect(
+      validateCompactServicePlanting(undefined, profile, undefined),
+    ).toBeUndefined();
+    const plant = input.beds[0].plants[0];
+    for (const bad of [
+      null,
+      {},
+      { ...input, extra: true },
+      { ...input, schemaVersion: 2 },
+      { ...input, beds: [input.beds[0], input.beds[0]] },
+      {
+        ...input,
+        get beds() {
+          throw new Error("getter must not run");
+        },
+      },
+      ...[
+        { ...plant, x: 336 },
+        { ...plant, scale: 2 },
+        { ...plant, yaw: NaN },
+        { ...plant, model: "tree" },
+      ].map((p) => ({
+        ...input,
+        beds: [{ id: "west", plants: [p] }, input.beds[1]],
+      })),
+      {
+        ...input,
+        beds: input.beds.map((b) => ({
+          ...b,
+          plants: Array.from({ length: 13 }, () => b.plants[0]),
+        })),
+      },
+    ])
+      expect(() =>
+        validateCompactServicePlanting(bad, profile, COMPACT_SERVICE_COURT),
+      ).toThrow();
+    expect(() =>
+      validateCompactServicePlanting(input, profile, undefined),
+    ).toThrow();
+    expect(() =>
+      validateCompactServicePlanting(
+        input,
+        { ...profile, id: "unqualified" },
+        COMPACT_SERVICE_COURT,
+      ),
+    ).toThrow();
+  });
+
+  it("keeps complete shrub crowns clear of paths, station workspaces, NPCs and every tree harvest approach", async () => {
+    const { terrain, roads, resources, manager } = await fixture();
+    const plants = createCompactServicePlanting(
+      DataManager.getWorldConfig()!.compactServicePlanting,
+    );
+    expect(plants).toHaveLength(20);
+    expect(new Set(plants.map((p) => p.id)).size).toBe(20);
+    const paths = createCompactIslandPaths(
+      terrain.getWorldTerrainProfile(),
+      ALL_WORLD_AREAS,
+      getDuelArenaConfig(),
+      terrain.getResourceGroundHeight.bind(terrain),
+    );
+    expect(paths).toHaveLength(11);
+    const maskBounds = (
+      roads as unknown as {
+        calculateRoadMaskBounds(
+          s: ReturnType<RoadNetworkSystem["getRoadSegmentsForGPU"]>,
+        ): { worldSize: number; centerX: number; centerZ: number };
+      }
+    ).calculateRoadMaskBounds(roads.getRoadSegmentsForGPU());
+    const mask = roads.generateRoadInfluenceTexture(
+      256,
+      maskBounds.worldSize,
+      0.5,
+      maskBounds.centerX,
+      maskBounds.centerZ,
+    )!;
+    const pixel = maskBounds.worldSize / 256;
+    const support: {
+      minX: number;
+      maxX: number;
+      minZ: number;
+      maxZ: number;
+    }[] = [];
+    for (let iz = 0; iz < 256; iz++)
+      for (let ix = 0; ix < 256; ix++) {
+        if (!mask.data[iz * 256 + ix]) continue;
+        const x = ix * pixel - maskBounds.worldSize / 2 + maskBounds.centerX;
+        const z = iz * pixel - maskBounds.worldSize / 2 + maskBounds.centerZ;
+        support.push({
+          minX: x - pixel / 2,
+          maxX: x + 1.5 * pixel,
+          minZ: z - pixel / 2,
+          maxZ: z + 1.5 * pixel,
+        });
+      }
+    const trees = resources.getAllResources().filter((r) => r.type === "tree");
+    expect(trees).toHaveLength(48);
+    const stations = Object.values(ALL_WORLD_AREAS).flatMap(
+      (a) => a.stations ?? [],
+    );
+    const npcs = Object.values(ALL_WORLD_AREAS).flatMap((a) => a.npcs ?? []);
+    for (const p of plants) {
+      const radius = COMPACT_POND_MODELS.bush.radius * p.scale;
+      const crown = {
+        minX: p.x - radius,
+        maxX: p.x + radius,
+        minZ: p.z - radius,
+        maxZ: p.z + radius,
+      };
+      for (const path of paths)
+        for (let i = 1; i < path.path.length; i++)
+          expect
+            .soft(
+              compactPathIntersectsBounds(
+                path.path[i - 1],
+                path.path[i],
+                crown,
+                path.width / 2 + COMPACT_PATH_BLEND_WIDTH,
+              ),
+              `${p.id} analytical ${path.id}`,
+            )
+            .toBe(false);
+      expect
+        .soft(
+          support.some(
+            (s) =>
+              s.maxX > crown.minX &&
+              s.minX < crown.maxX &&
+              s.maxZ > crown.minZ &&
+              s.minZ < crown.maxZ,
+          ),
+          `${p.id} actual bilinear road mask`,
+        )
+        .toBe(false);
+      for (const post of OPEN_WORKSHOP_POSTS)
+        expect(
+          Math.hypot(
+            p.x - COMPACT_SERVICE_COURT.position.x - post.x,
+            p.z - COMPACT_SERVICE_COURT.position.z - post.z,
+          ) - radius,
+          `${p.id} post`,
+        ).toBeGreaterThan(0.45);
+      for (const npc of npcs)
+        expect(
+          Math.hypot(p.x - npc.position.x, p.z - npc.position.z) - radius,
+          `${p.id} ${npc.id}`,
+        ).toBeGreaterThan(1.25);
+      for (const station of stations) {
+        const def = stationDataProvider.getStationData(station.type)!;
+        const bounds = modelBounds(def.model!, def.modelScale).box;
+        const dx = Math.max(
+          bounds.min.x + station.position.x - p.x,
+          0,
+          p.x - bounds.max.x - station.position.x,
+        );
+        const dz = Math.max(
+          bounds.min.z + station.position.z - p.z,
+          0,
+          p.z - bounds.max.z - station.position.z,
+        );
+        expect(
+          Math.hypot(dx, dz) - radius,
+          `${p.id} ${station.id} complete model and working space`,
+        ).toBeGreaterThan(1.25);
+      }
+      for (const tree of trees) {
+        expect(manager.getEntity(tree.id)).toBeInstanceOf(ResourceEntity);
+        for (const tile of getCardinalAdjacentTiles(
+          worldToTile(tree.position.x, tree.position.z),
+          1,
+          1,
+        ))
+          expect(
+            Math.hypot(p.x - tile.x - 0.5, p.z - tile.z - 0.5) - radius,
+            `${p.id} ${tree.id} harvest capsule`,
+          ).toBeGreaterThan(0.8);
+      }
+      const samples = [-radius, 0, radius].flatMap((dx) =>
+        [-radius, 0, radius].map((dz) =>
+          terrain.getHeightAtComputed(p.x + dx, p.z + dz),
+        ),
+      );
+      expect(samples.every(Number.isFinite)).toBe(true);
+      expect(
+        Math.max(...samples) - Math.min(...samples),
+        `${p.id} planted support slope`,
+      ).toBeLessThan(0.25);
+    }
+  }, 60000);
+
   it("preserves every currently free service/harvest approach from all three authoritative return marks", async () => {
     const { world, resources, owner } = await fixture();
     const trees = resources.getAllResources().filter((r) => r.type === "tree");

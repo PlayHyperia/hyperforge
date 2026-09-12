@@ -33,7 +33,10 @@ import { BIOMES } from "./world-structure";
 import { validateAuthoredResourceIdentities } from "./ResourceInstanceIdentity";
 import { validateCompactResourceGroves } from "../systems/shared/world/CompactResourceGroves";
 import { validateCompactPreparationLodge } from "../systems/shared/world/CompactPreparationLodge";
-import { validateCompactServiceCourt } from "../systems/shared/world/CompactServiceCourt";
+import {
+  validateCompactServiceCourt,
+  validateCompactServicePlanting,
+} from "../systems/shared/world/CompactServiceCourt";
 import {
   canonicalWorldJson,
   WorldManifestIdentityBuilder,
@@ -414,6 +417,11 @@ export class DataManager {
       copy.compactServiceCourt,
       profile,
     );
+    const compactServicePlanting = validateCompactServicePlanting(
+      copy.compactServicePlanting,
+      profile,
+      compactServiceCourt,
+    );
     config = copy;
     if (
       config.seed !== profile.seed ||
@@ -433,6 +441,7 @@ export class DataManager {
       ...(compactResourceGroves ? { compactResourceGroves } : {}),
       ...(compactPreparationLodge ? { compactPreparationLodge } : {}),
       ...(compactServiceCourt ? { compactServiceCourt } : {}),
+      ...(compactServicePlanting ? { compactServicePlanting } : {}),
     });
     if (DataManager.worldContentIdentity !== null) {
       if (

@@ -16,6 +16,7 @@ import {
   type CompactPondPlacement,
 } from "../CompactPondDressing";
 import { CompactPondDressingVisuals } from "../CompactPondDressingVisuals";
+import { createCompactServicePlanting } from "../CompactServiceCourt";
 import { RetainedTerrainSurface } from "../TerrainGridSurface";
 
 const models = Object.keys(COMPACT_POND_MODELS) as CompactPondModel[];
@@ -279,6 +280,72 @@ describe("bounded pond dressing", () => {
         (x, z) => terrain.getHeightAtComputed(x, z),
       );
       expect(result).toHaveLength(32);
+      // Genuine canonical geometry in one owner: court planting must not add
+      // model loads, material clones or draw batches beside the original pond.
+      const combined = [
+        ...result,
+        ...createCompactServicePlanting(
+          DataManager.getWorldConfig()!.compactServicePlanting,
+        ),
+      ];
+      expect(combined).toHaveLength(52);
+      const owner = new CompactPondDressingVisuals(new THREE.Group(), combined);
+      const geometries = models.map(canonicalGeometry);
+      const texture = new THREE.DataTexture(
+        new Uint8Array([110, 150, 80, 255]),
+        1,
+        1,
+      );
+      const material = new THREE.MeshStandardNodeMaterial({
+        map: texture,
+        alphaTest: 0.5,
+      });
+      const ground = grid(3, 0, 256, 1000);
+      let borrowedDisposals = 0;
+      for (const borrowed of [...geometries, material, texture])
+        borrowed.addEventListener("dispose", () => borrowedDisposals++);
+      try {
+        models.forEach((model, i) =>
+          owner.install(model, new THREE.Mesh(geometries[i], material)),
+        );
+        owner.update(0.25, () => ground.surface);
+        expect(owner.group.children).toHaveLength(5);
+        expect(owner.getReceipt()).toMatchObject({
+          ready: true,
+          instances: 52,
+          visible: 52,
+        });
+        const bush = owner.group.children[
+          models.indexOf("bush")
+        ] as THREE.InstancedMesh;
+        expect(bush.count).toBe(23);
+        expect(bush.geometry).toBe(geometries[models.indexOf("bush")]);
+        expect((bush.material as THREE.MeshStandardNodeMaterial).map).toBe(
+          texture,
+        );
+        expect(bush.instanceMatrix.array.byteLength).toBe(23 * 64);
+        const versions = owner.group.children.map(
+          (o) => (o as THREE.InstancedMesh).instanceMatrix.version,
+        );
+        for (let i = 0; i < 40; i++) owner.update(0.25, () => ground.surface);
+        expect(
+          owner.group.children.map(
+            (o) => (o as THREE.InstancedMesh).instanceMatrix.version,
+          ),
+        ).toEqual(versions);
+        expect(
+          owner.getReceipt().assets.every((a) => a.paletteMaterials === 1),
+        ).toBe(true);
+        owner.destroy();
+        owner.destroy();
+        expect(borrowedDisposals).toBe(0);
+      } finally {
+        owner.destroy();
+        for (const geometry of geometries) geometry.dispose();
+        ground.geometry.dispose();
+        material.dispose();
+        texture.dispose();
+      }
       expect(Object.isFrozen(result)).toBe(true);
       expect(result).toEqual(
         createCompactPondDressing(
