@@ -5,6 +5,8 @@ import THREE, {
   type Node,
 } from "../../../../extras/three/three";
 import { sampleSkyCycle, SkySystem } from "../SkySystem";
+import { ScatteringSky, COASTAL_SCATTERING_SKY } from "../ScatteringSky";
+import { fogRenderTarget } from "../FogConfig";
 
 // Actual CPU Three objects/TSL graph constructors only. These controls do not
 // initialize a renderer, compile a shader, capture PMREM, or approve artwork.
@@ -126,10 +128,22 @@ function skyGraphEvaluator(root: Node) {
         return pair((a, b) => a - b);
       case "*":
         return pair((a, b) => a * b);
+      case "/":
+        return pair((a, b) => a / b);
     }
     switch (get("method")) {
       case "abs":
         return input("aNode").map(Math.abs);
+      case "acos":
+        return input("aNode").map(Math.acos);
+      case "cos":
+        return input("aNode").map(Math.cos);
+      case "exp":
+        return input("aNode").map(Math.exp);
+      case "negate":
+        return input("aNode").map((value) => -value);
+      case "max":
+        return pair(Math.max);
       case "normalize": {
         const a = input("aNode"),
           length = Math.hypot(...a);
@@ -182,6 +196,30 @@ function originalCycle(phase: number) {
 }
 
 describe("isolated sky lighting capture", () => {
+  it("retains HDR horizon radiance in the shared linear fog target", () => {
+    const atmosphere = new ScatteringSky();
+    const color = new THREE.Color();
+    atmosphere.sampleRadiance(
+      new THREE.Vector3(1, 0, 0),
+      new THREE.Vector3(0, 1, 0),
+      color,
+    );
+    // A normalized-byte target would clip every channel for this actual
+    // coastal profile. CPU half-float round-trip checks storage precision,
+    // not native rendering or the visible water/sky seam.
+    expect(color.toArray().every((value) => value > 1)).toBe(true);
+    for (const value of color.toArray()) {
+      const stored = THREE.DataUtils.fromHalfFloat(
+        THREE.DataUtils.toHalfFloat(value),
+      );
+      expect(Math.abs(stored - value) / value).toBeLessThan(0.001);
+    }
+    expect(fogRenderTarget.texture.type).toBe(THREE.HalfFloatType);
+    expect(fogRenderTarget.texture.colorSpace).toBe(THREE.NoColorSpace);
+    expect(fogRenderTarget.texture.generateMipmaps).toBe(false);
+    expect(fogRenderTarget.samples).toBe(0);
+  });
+
   it("preserves actual cycle equations and the caller's direction identity", () => {
     const direction = new THREE.Vector3();
     const phases = [
@@ -362,82 +400,158 @@ describe("isolated sky lighting capture", () => {
     }
   });
 
-  it("matches snapshot CPU radiance to the actual shared TSL DAG across phases and directions", () => {
-    const world = new World(),
-      sky = new SkySystem(world);
-    const capture = sky.createLightingCapture();
-    try {
-      const evaluate = skyGraphEvaluator(
-        skyMesh(capture.scene).material.colorNode!,
-      );
-      const output = new THREE.Color();
-      const directions = [
-        new THREE.Vector3(0, 1, 0),
-        new THREE.Vector3(0, -1, 0),
-        new THREE.Vector3(1, 0, 0),
-        new THREE.Vector3(-1, 0, 0),
-        new THREE.Vector3(0, 0, 1),
-        new THREE.Vector3(0, 0, -1),
-        new THREE.Vector3(2, 0.15, -3),
-        new THREE.Vector3(-2, -0.3, 1),
-      ];
-      for (const phase of [
-        0,
-        0.125,
-        0.22,
-        0.25,
-        0.28 - 1e-10,
-        0.28,
-        0.32,
-        0.5,
-        0.68,
-        0.72 - 1e-10,
-        0.72,
-        0.75,
-        0.78,
-        0.875,
-        1,
-      ]) {
-        capture.setPhase(phase, 1, [0, 0, 0]);
-        for (const direction of directions) {
-          capture.sampleRadiance(phase, direction, output);
-          const actual = evaluate(direction);
-          expect(actual).toHaveLength(4);
-          expect(actual[3]).toBe(1);
-          output.toArray().forEach((value, i) => {
-            expect(value).toBeGreaterThanOrEqual(0);
-            expect(value).toBeCloseTo(actual[i], 12);
-          });
+  it.each(["gradient-v1", "scattering-v1"] as const)(
+    "matches %s snapshot CPU radiance to the actual shared TSL DAG across phases and directions",
+    (mode) => {
+      const world = new World(),
+        sky = new SkySystem(world, mode);
+      const capture = sky.createLightingCapture();
+      try {
+        const evaluate = skyGraphEvaluator(
+          skyMesh(capture.scene).material.colorNode!,
+        );
+        const output = new THREE.Color();
+        const directions = [
+          new THREE.Vector3(0, 1, 0),
+          new THREE.Vector3(0, -1, 0),
+          new THREE.Vector3(1, 0, 0),
+          new THREE.Vector3(-1, 0, 0),
+          new THREE.Vector3(0, 0, 1),
+          new THREE.Vector3(0, 0, -1),
+          new THREE.Vector3(2, 0.15, -3),
+          new THREE.Vector3(-2, -0.3, 1),
+        ];
+        for (const phase of [
+          0,
+          0.125,
+          0.22,
+          0.25,
+          0.28 - 1e-10,
+          0.28,
+          0.32,
+          0.5,
+          0.68,
+          0.72 - 1e-10,
+          0.72,
+          0.75,
+          0.78,
+          0.875,
+          1,
+        ]) {
+          capture.setPhase(phase, 1, [0, 0, 0]);
+          for (const direction of directions) {
+            capture.sampleRadiance(phase, direction, output);
+            const actual = evaluate(direction);
+            expect(actual).toHaveLength(4);
+            expect(actual[3]).toBe(1);
+            output.toArray().forEach((value, i) => {
+              expect(value).toBeGreaterThanOrEqual(0);
+              expect(value).toBeCloseTo(actual[i], 12);
+            });
+          }
         }
-      }
-      capture.sampleRadiance(0.25, directions[2], output);
-      const unscaled = output.toArray();
-      capture.setPhase(0.25, 4, [8, 7, 6]);
-      capture.sampleRadiance(0.25, directions[2], output);
-      expect(output.toArray()).toEqual(unscaled);
-      evaluate(directions[2])
-        .slice(0, 3)
-        .forEach((value, i) => {
-          expect(value).toBeCloseTo(unscaled[i] * 4, 12);
-        });
-      sky.skyPaletteUniforms.dayZenith.value.setRGB(8, 6, 4);
-      capture.sampleRadiance(0.25, directions[2], output);
-      expect(output.toArray()).toEqual(unscaled);
-      for (const badDirection of [
-        new THREE.Vector3(),
-        new THREE.Vector3(NaN, 0, 0),
-        new THREE.Vector3(Infinity, 0, 0),
-      ]) {
-        expect(() =>
-          capture.sampleRadiance(0.5, badDirection, output),
-        ).toThrow();
+        capture.sampleRadiance(0.25, directions[2], output);
+        const unscaled = output.toArray();
+        capture.setPhase(0.25, 4, [8, 7, 6]);
+        capture.sampleRadiance(0.25, directions[2], output);
         expect(output.toArray()).toEqual(unscaled);
+        evaluate(directions[2])
+          .slice(0, 3)
+          .forEach((value, i) => {
+            expect(value).toBeCloseTo(unscaled[i] * 4, 12);
+          });
+        sky.skyPaletteUniforms.dayZenith.value.setRGB(8, 6, 4);
+        capture.sampleRadiance(0.25, directions[2], output);
+        expect(output.toArray()).toEqual(unscaled);
+        for (const badDirection of [
+          new THREE.Vector3(),
+          new THREE.Vector3(NaN, 0, 0),
+          new THREE.Vector3(Infinity, 0, 0),
+        ]) {
+          expect(() =>
+            capture.sampleRadiance(0.5, badDirection, output),
+          ).toThrow();
+          expect(output.toArray()).toEqual(unscaled);
+        }
+      } finally {
+        capture.dispose();
+        sky.destroy();
+        world.destroy();
       }
+    },
+  );
+
+  it("keeps clear-sky captures independent and preserves the original fully-night atmosphere", () => {
+    const world = new World(),
+      old = new SkySystem(world),
+      sky = new SkySystem(world, "scattering-v1");
+    const a = sky.createLightingCapture(),
+      b = sky.createLightingCapture(),
+      baseline = old.createLightingCapture();
+    try {
+      const direction = new THREE.Vector3(1, 0.1, -0.7),
+        output = new THREE.Color(),
+        prior = new THREE.Color();
+      const evaluateA = skyGraphEvaluator(skyMesh(a.scene).material.colorNode!);
+      const evaluateB = skyGraphEvaluator(skyMesh(b.scene).material.colorNode!);
+      a.setPhase(0.5, 1, [0, 0, 0]);
+      b.setPhase(0.25, 1, [0, 0, 0]);
+      const aBefore = evaluateA(direction),
+        bBefore = evaluateB(direction);
+      for (const phase of [0, 0.125, 0.22, 0.78, 0.875, 1]) {
+        a.sampleRadiance(phase, direction, output);
+        baseline.sampleRadiance(phase, direction, prior);
+        expect(output.toArray()).toEqual(prior.toArray());
+      }
+      expect(evaluateA(direction)).toEqual(aBefore);
+      expect(evaluateB(direction)).toEqual(bBefore);
+      b.setPhase(0.68, 1, [0, 0, 0]);
+      expect(evaluateA(direction)).toEqual(aBefore);
+      expect(evaluateB(direction)).not.toEqual(bBefore);
+      a.sampleRadiance(0.5, direction, output);
+      baseline.sampleRadiance(0.5, direction, prior);
+      expect(output.toArray()).not.toEqual(prior.toArray());
     } finally {
-      capture.dispose();
+      a.dispose();
+      b.dispose();
+      baseline.dispose();
+      old.destroy();
       sky.destroy();
       world.destroy();
     }
+  });
+
+  it("keeps scattering parameters immutable and rejects invalid vectors before output writes", () => {
+    const parameters = { ...COASTAL_SCATTERING_SKY },
+      sky = new ScatteringSky(parameters);
+    const direction = new THREE.Vector3(0, 1, 0),
+      output = new THREE.Color();
+    sky.sampleRadiance(direction, direction, output);
+    const prior = output.toArray();
+    parameters.radianceScale = 0.9;
+    sky.sampleRadiance(direction, direction, output);
+    expect(output.toArray()).toEqual(prior);
+    expect(Object.isFrozen(sky.parameters)).toBe(true);
+    for (const bad of [
+      new THREE.Vector3(),
+      new THREE.Vector3(NaN, 1, 0),
+      new THREE.Vector3(0, Infinity, 0),
+    ]) {
+      expect(() => sky.sampleRadiance(bad, direction, output)).toThrow();
+      expect(() => sky.sampleRadiance(direction, bad, output)).toThrow();
+      expect(() => sky.setSun(bad)).toThrow();
+      expect(output.toArray()).toEqual(prior);
+    }
+    for (const override of [
+      { rayleigh: 0 },
+      { turbidity: Infinity },
+      { mieDirectionalG: 1 },
+      { mieCoefficient: -1 },
+      { radianceScale: NaN },
+    ])
+      expect(
+        () => new ScatteringSky({ ...COASTAL_SCATTERING_SKY, ...override }),
+      ).toThrow();
   });
 
   it("disposes each owned geometry/material exactly once without retiring another capture", () => {

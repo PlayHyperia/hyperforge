@@ -74,6 +74,10 @@ export const fogRenderTarget = new THREE.WebGLRenderTarget(
   FOG_RT_WIDTH,
   FOG_RENDER_HEIGHT,
   {
+    // Keep linear sky radiance above 1 until the main pass tone maps it.
+    // RGBA8 clips bright horizons and makes distant water a different color
+    // from the visible sky. RGBA16F adds 36 KiB at the 128x72 fog resolution.
+    type: THREE.HalfFloatType,
     generateMipmaps: false,
     minFilter: THREE.LinearFilter,
     magFilter: THREE.LinearFilter,

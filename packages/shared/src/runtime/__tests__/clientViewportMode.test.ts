@@ -6,6 +6,7 @@ import {
   resolveClientViewportRuntimeProfile,
   resolveExplicitStreamingRenderProfile,
   resolveExplicitStreamingWorldProfile,
+  resolveSkyAtmosphereMode,
   resolveStreamingRenderFrameRate,
   shouldAdmitNetworkEntityInViewport,
   shouldStreamVegetationBackgroundLods,
@@ -19,6 +20,39 @@ import {
 function makeWindow(pathname: string, search = ""): Window {
   return { location: { pathname, search } } as unknown as Window;
 }
+
+describe("explicit atmosphere candidate selection", () => {
+  it("leaves defaults unchanged and admits only an explicit full-island candidate", () => {
+    expect(resolveSkyAtmosphereMode()).toBe("gradient-v1");
+    expect(
+      resolveSkyAtmosphereMode(
+        makeWindow("/stream.html", "?streamRenderProfile=island-720p60-v1"),
+      ),
+    ).toBe("gradient-v1");
+    expect(
+      resolveSkyAtmosphereMode(
+        makeWindow(
+          "/stream.html",
+          "?streamRenderProfile=island-720p60-v1&skyAtmosphere=scattering-v1",
+        ),
+      ),
+    ).toBe("scattering-v1");
+  });
+  it.each([
+    "/play?streamRenderProfile=island-720p60-v1&skyAtmosphere=scattering-v1",
+    "/stream.html?skyAtmosphere=scattering-v1",
+    "/stream.html?streamRenderProfile=canonical-720p60-v1&skyAtmosphere=scattering-v1",
+    "/stream.html?streamRenderProfile=island-720p60-v1&skyAtmosphere=scattering-v1&embedded=true",
+    "/stream.html?streamRenderProfile=island-720p60-v1&skyAtmosphere=",
+    "/stream.html?streamRenderProfile=island-720p60-v1&skyAtmosphere=unknown",
+    "/stream.html?streamRenderProfile=island-720p60-v1&skyAtmosphere=scattering-v1&skyAtmosphere=scattering-v1",
+  ])("rejects an unqualified or ambiguous atmosphere selection: %s", (url) => {
+    const [pathname, query] = url.split("?");
+    expect(() =>
+      resolveSkyAtmosphereMode(makeWindow(pathname, "?" + query)),
+    ).toThrow();
+  });
+});
 
 describe("opt-in shadows render contract (CPU validation, not GPU execution)", () => {
   const profile = STREAMING_RENDER_PROFILES["shadows-720p60-v1"];

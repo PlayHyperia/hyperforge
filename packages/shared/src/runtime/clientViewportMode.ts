@@ -79,6 +79,25 @@ export const STREAMING_RENDER_PROFILES = Object.freeze({
 });
 
 export type StreamingRenderProfileId = keyof typeof STREAMING_RENDER_PROFILES;
+export type SkyAtmosphereMode = "gradient-v1" | "scattering-v1";
+
+/** Explicit full-island art candidate; never a silent broadcast/default change. */
+export function resolveSkyAtmosphereMode(win?: Window): SkyAtmosphereMode {
+  const windowRef = getWindowRef(win);
+  if (!windowRef) return "gradient-v1";
+  const values = getSearchParams(windowRef)?.getAll("skyAtmosphere") ?? [];
+  if (!values.length) return "gradient-v1";
+  if (values.length !== 1 || values[0] !== "scattering-v1")
+    throw new Error("Unknown or duplicate sky atmosphere candidate");
+  if (
+    resolveExplicitStreamingRenderProfile(windowRef)?.id !== "island-720p60-v1"
+  )
+    throw new Error(
+      "Scattering sky requires the explicit non-embedded island profile",
+    );
+  return "scattering-v1";
+}
+
 export type StreamingRenderProfile =
   (typeof STREAMING_RENDER_PROFILES)[StreamingRenderProfileId];
 

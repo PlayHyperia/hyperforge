@@ -44,9 +44,14 @@ import {
 } from "../../../extras/three/three";
 import type { Node, UniformNode } from "three/webgpu";
 import type { World, WorldOptions } from "../../../types";
-import { isStreamingLikeViewport } from "../../../runtime/clientViewportMode";
+import {
+  isStreamingLikeViewport,
+  resolveSkyAtmosphereMode,
+  type SkyAtmosphereMode,
+} from "../../../runtime/clientViewportMode";
 import { applyCloudFog, fogRenderTarget } from "./FogConfig";
 import { DAY_CYCLE, SUN_LIGHT } from "./LightingConfig";
+import { ScatteringSky } from "./ScatteringSky";
 
 const SKY_DOME_RADIUS = 5000;
 
@@ -545,6 +550,7 @@ function createStarlessSkyColorNode(
   uDayIntensity: Node<"float">,
   uSunPosition: Node<"vec3">,
   palette: SkyPaletteUniforms,
+  atmosphere: ScatteringSky | null = null,
 ): Node<"vec4"> {
   return Fn(() => {
     const localPos = normalize(direction);
@@ -556,7 +562,9 @@ function createStarlessSkyColorNode(
     const dayZenith = palette.dayZenith.rgb;
     const dayHorizon = palette.dayHorizon.rgb;
     const dayGradient = pow(sub(float(1.0), elevation), float(1.5));
-    const daySkyColor = mix(dayZenith, dayHorizon, dayGradient);
+    const daySkyColor = atmosphere
+      ? atmosphere.colorNode(localPos)
+      : mix(dayZenith, dayHorizon, dayGradient);
 
     const nightZenith = palette.nightZenith.rgb;
     const nightHorizon = palette.nightHorizon.rgb;
@@ -591,7 +599,7 @@ function createStarlessSkyColorNode(
     );
     const dawnOrDusk = smoothstep(float(0.2), float(0.3), uDayCycleProgress);
     const glowColor = mix(sunriseColor, sunsetPinkColor, dawnOrDusk);
-    skyColor = add(skyColor, mul(glowColor, glowIntensity));
+    if (!atmosphere) skyColor = add(skyColor, mul(glowColor, glowIntensity));
 
     const moonPos = mul(sunDir, float(-1.0));
     const angleToMoon = dot(localPos, moonPos);
@@ -610,7 +618,7 @@ function createStarlessSkyColorNode(
       hazeStrength,
       mul(float(0.3), mul(dayIntensity, float(0.9))),
     );
-    skyColor = mix(skyColor, hazeColor, hazeAmount);
+    if (!atmosphere) skyColor = mix(skyColor, hazeColor, hazeAmount);
 
     return vec4(skyColor, float(1.0));
   })();
@@ -717,9 +725,17 @@ export class SkySystem extends System {
   private _dayPhase = 0;
   private _dayIntensity = 1;
   private renderDecorativeSkyBillboards = true;
+  private readonly scatteringSky: ScatteringSky | null;
 
-  constructor(world: World) {
+  constructor(
+    world: World,
+    readonly atmosphereMode: SkyAtmosphereMode = resolveSkyAtmosphereMode(),
+  ) {
     super(world);
+    if (atmosphereMode !== "gradient-v1" && atmosphereMode !== "scattering-v1")
+      throw new Error("Invalid sky atmosphere mode");
+    this.scatteringSky =
+      atmosphereMode === "scattering-v1" ? new ScatteringSky() : null;
     this.skyUniforms = {
       time: { value: 0 },
       sunPosition: { value: new THREE.Vector3(0, 1, 0) },
@@ -1130,7 +1146,9 @@ export class SkySystem extends System {
       const dayZenith = this.skyPaletteUniforms.dayZenith.rgb; // Rich blue
       const dayHorizon = this.skyPaletteUniforms.dayHorizon.rgb; // Light blue/white
       const dayGradient = pow(sub(float(1.0), elevation), float(1.5));
-      const daySkyColor = mix(dayZenith, dayHorizon, dayGradient);
+      const daySkyColor = this.scatteringSky
+        ? this.scatteringSky.colorNode(localPos)
+        : mix(dayZenith, dayHorizon, dayGradient);
 
       // Night sky gradient: MUCH darker for proper night feel
       const nightZenith = this.skyPaletteUniforms.nightZenith.rgb; // Almost black with blue tint
@@ -1185,7 +1203,8 @@ export class SkySystem extends System {
       // Blend sunrise color with slight pink variation based on time
       const dawnOrDusk = smoothstep(float(0.2), float(0.3), uDayCycleProgress);
       const glowColor = mix(sunriseColor, sunsetPinkColor, dawnOrDusk);
-      skyColor = add(skyColor, mul(glowColor, glowIntensity));
+      if (!this.scatteringSky)
+        skyColor = add(skyColor, mul(glowColor, glowIntensity));
 
       // =====================
       // STARS (Night only) - Procedural starfield with stable noise
@@ -1306,7 +1325,7 @@ export class SkySystem extends System {
         hazeStrength,
         mul(float(0.3), mul(dayIntensity, float(0.9))), // Much less haze at night
       );
-      skyColor = mix(skyColor, hazeColor, hazeAmount);
+      if (!this.scatteringSky) skyColor = mix(skyColor, hazeColor, hazeAmount);
 
       return vec4(skyColor, float(1.0));
     })();
@@ -1368,6 +1387,7 @@ export class SkySystem extends System {
       uDayIntensity,
       uSunPosition,
       this.skyPaletteUniforms,
+      this.scatteringSky,
     );
 
     const fogSkyMat = new MeshBasicNodeMaterial();
@@ -1415,6 +1435,10 @@ export class SkySystem extends System {
     const phase = uniform(0);
     const sunDirection = uniform(new THREE.Vector3());
     const dayIntensity = uniform(sampleSkyCycle(0, sunDirection.value));
+    const scattering = this.scatteringSky
+      ? new ScatteringSky(this.scatteringSky.parameters)
+      : null;
+    scattering?.setSun(sunDirection.value);
     const skyScale = uniform(1);
     const groundColor = uniform(new THREE.Color(0, 0, 0));
     // Startup integration reuses these private values; sampling never changes
@@ -1438,6 +1462,7 @@ export class SkySystem extends System {
       dayIntensity,
       sunDirection,
       palette,
+      scattering,
     );
     skyMaterial.colorNode = vec4(skyColor.rgb.mul(skyScale), float(1));
     const skyGeometry = new THREE.SphereGeometry(10, 64, 32);
@@ -1496,9 +1521,12 @@ export class SkySystem extends System {
         const elevation = Math.abs(y);
         const dayGradient = Math.pow(1 - elevation, 1.5);
         const nightGradient = Math.pow(1 - elevation, 2);
-        sampleDay
-          .copy(palette.dayZenith.value)
-          .lerp(palette.dayHorizon.value, dayGradient);
+        if (scattering)
+          scattering.sampleRadiance(direction, sampleSun, sampleDay);
+        else
+          sampleDay
+            .copy(palette.dayZenith.value)
+            .lerp(palette.dayHorizon.value, dayGradient);
         target
           .copy(palette.nightZenith.value)
           .lerp(palette.nightHorizon.value, nightGradient)
@@ -1521,7 +1549,7 @@ export class SkySystem extends System {
             skyCycleSmoothstep(0.2, 0.3, samplePhase),
           )
           .multiplyScalar(glowIntensity);
-        target.add(sampleGlow);
+        if (!scattering) target.add(sampleGlow);
         const moonGlowAngle = Math.pow(
           Math.max(0, Math.min(1, -angleToSun)),
           6,
@@ -1532,7 +1560,7 @@ export class SkySystem extends System {
         target.b += palette.moonGlow.value.b * moonGlowIntensity;
         const hazeAmount =
           skyCycleSmoothstep(0.15, 0, elevation) * (0.3 * (intensity * 0.9));
-        target.lerp(palette.haze.value, hazeAmount);
+        if (!scattering) target.lerp(palette.haze.value, hazeAmount);
       },
       setPhase(nextPhase, skyRadianceScale, groundRadiance) {
         if (disposed) throw new Error("Lighting capture is disposed");
@@ -1549,6 +1577,7 @@ export class SkySystem extends System {
           throw new Error("Invalid lighting capture phase or linear radiance");
         }
         dayIntensity.value = sampleSkyCycle(nextPhase, sunDirection.value);
+        scattering?.setSun(sunDirection.value);
         phase.value = nextPhase;
         skyScale.value = skyRadianceScale;
         groundColor.value.setRGB(
@@ -1765,6 +1794,7 @@ export class SkySystem extends System {
 
     const dayIntensity = sampleSkyCycle(dayPhase, this._sunDir);
     this._dayIntensity = dayIntensity;
+    this.scatteringSky?.setSun(this._sunDir);
 
     // Update uniforms
     this.skyUniforms.time.value = this.elapsed;

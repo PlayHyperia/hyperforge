@@ -1,7 +1,46 @@
 # Duel Arena, Streaming, and Hyperbet Launch Checklist
 
+## Scattering atmosphere and HDR horizon — 2026-09-12
+
+- [x] Implement one clear-sky scattering model for the visible sky, starless
+  fog/environment shaders and CPU irradiance sampler. Keep independent capture
+  uniforms, existing night/stars/moon, exposure and cached environment budget.
+  Three r186 already supplies the reference equations; no dependency upgrade.
+- [x] Keep `scattering-v1` explicitly opt-in to the non-embedded
+  `island-720p60-v1` route. Unknown/duplicate/wrong-route selections reject.
+  The default remains `gradient-v1`; no graphics-quality promotion is claimed.
+- [x] Fix the HDR integration defect found by visual review: RGBA8 fog clipped
+  the new bright horizon, creating a gray ocean/sky band. Use RGBA16F linear
+  fog storage at the same resolution: +36 KiB at 128x72, no additional pass.
+- [x] 1,004 shared tests / 77 files, typechecks, scoped lint/formatting and
+  shared/client then server builds pass. The final 56 capture/format checks
+  pass with all previous camera, timing, source, image and error gates retained.
+- [x] Native74: 24 PNGs, 18 matched camera/daylight pairs, 617 source pins /
+  548 archives and 42 game freeze hashes verified. Before/after observations
+  confirm the same allocated native `rgba16float` fog texture and sky owners.
+  Both scene censuses pass; no page/GPU/cleanup errors; owned processes close.
+- [x] Review all six scenic views and both equipped-character views. The hard
+  horizon band is absent; meadow sky has a clearer blue-to-horizon transition.
+  Night kit views remain dark and cool and do not qualify daylight skin/metal.
+  No avatar shape, equipment fit, density, geometry, exposure or resolution edit.
+- [x] Preserve failed native73: 16 scenic images before the final daylight
+  window miss. Its visible HDR clipping regression informed the fix; it is not
+  relabeled a pass. Native74 still has 19 known cow/dagger content errors.
+- [ ] Keep atmosphere art/default promotion open: clouds/sky composition,
+  sunrise/sunset/night motion, dedicated daylight character/material views,
+  valid GPU cost and presented-frame measurements are still required.
+- [ ] Next major visual work: break up continuous cliffs, enrich ground cover
+  using functional trees and coherent planting, and design the smithy/bank/
+  single-arena spaces as places. Native74 still falls well below the art bar.
+  Grass pacing remains open (512.6 ms cumulative / 5.5 ms max fitting slice in
+  this run, not a FPS or speedup result). No AAA or launch approval.
+
 ## Grass fitting allocation follow-up — 2026-09-12
 
+- [x] Checkpoint `1bac22c1ef971cd2b853bc578efa24d9ba99bb6d` pushed normally:
+  four scoped game files, normal hooks/secret scan pass; exact remote head and
+  GitHub author/committer `dreaminglucid` verified. All 37 native freeze hashes
+  and both committed runtime/test blobs remain exact. No merge/deployment.
 - [x] Profile the actual owned Chrome/WebGPU renderer during fitting. Native70
   CPU sampling captured all six grounded chunks (2,240 clumps / 215,040 bytes).
   Its 4.6 ms maximum slice does not reproduce or explain native69's 15.9 ms
