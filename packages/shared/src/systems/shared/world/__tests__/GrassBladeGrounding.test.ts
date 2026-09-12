@@ -194,6 +194,54 @@ function one(data: GrassAnchorData, index: number): GrassAnchorData {
 }
 
 describe("CPU per-blade grounding prototype (no renderer/GPU)", () => {
+  it("keeps reusable point/triangle scratch private across suspended LOD jobs", () => {
+    const f = analyticOwner();
+    try {
+      const surface = f.makeSurface(
+        1,
+        0,
+        0,
+        64,
+        (x, z) => 20 + 0.1 * x - 0.08 * z + 0.003 * x * z,
+      );
+      const requests = ([0, 1, 2] as const).map((lod) => {
+        const data = f.dataAt(surface, [
+          [-4, 3, lod * 0.7],
+          [1, -2, 1.8],
+          [5, 6, 3.2],
+        ]);
+        data.rotScaleHash[1] = 0.7 + lod * 0.4;
+        return { ...f.request(surface, data, lod), wind: { x: 0.06, z: 0.03 } };
+      });
+      const expected = requests.map(groundGrassBlades);
+      const jobs = requests.map(
+        (request) => new GrassBladeGroundingJob(request, () => true),
+      );
+      let rounds = 0;
+      while (jobs.some((job) => job.state.status === "running")) {
+        for (const job of jobs) job.advance(7);
+        if (++rounds > 10000)
+          throw new Error("Suspended jobs failed to complete");
+      }
+      jobs.forEach((job, index) => {
+        const state = job.state;
+        expect(state.status).toBe("ready");
+        if (state.status !== "ready")
+          throw new Error("Missing grounded result");
+        const { elapsedMs: _actualElapsed, ...actualReceipt } =
+          state.result.receipt;
+        const { elapsedMs: _expectedElapsed, ...expectedReceipt } =
+          expected[index].receipt;
+        expect({ ...state.result, receipt: actualReceipt }).toEqual({
+          ...expected[index],
+          receipt: expectedReceipt,
+        });
+      });
+    } finally {
+      f.close();
+    }
+  });
+
   it.each([0, 1, 2] as const)(
     "bounds every corrected LOD%s vertex through fade and wind using independent Three transforms",
     (lod) => {

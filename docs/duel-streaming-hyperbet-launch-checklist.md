@@ -1,7 +1,43 @@
 # Duel Arena, Streaming, and Hyperbet Launch Checklist
 
+## Grass fitting allocation follow-up — 2026-09-12
+
+- [x] Profile the actual owned Chrome/WebGPU renderer during fitting. Native70
+  CPU sampling captured all six grounded chunks (2,240 clumps / 215,040 bytes).
+  Its 4.6 ms maximum slice does not reproduce or explain native69's 15.9 ms
+  spike; sampling overhead prevents performance acceptance. Native70 later
+  missed the original daylight window and remains a failed visual run.
+- [x] Remove per-vertex Point and fade-array construction and per-road/triangle
+  tuple churn; reuse job-local point/triangle scratch. Preserve arithmetic
+  order, yields, charged work, seeds, density, all exclusions and GPU layout.
+- [x] 969 shared tests / 76 files and 18 immutable-reference tests pass,
+  including interleaved jobs, all LODs, road directions, tiny/zero-length
+  segments and exact production-worker output parity. Typechecks, scoped
+  lint/formatting, client/shared then server builds and 100 capture checks pass.
+- [x] Native72 full scene/binding regression verified: 24 PNGs, 18 matched
+  camera/daylight pairs, 608 source pins / 539 archives and 37 frozen game
+  files; both censuses pass, all six correction buffers remain allocated.
+  No page/GPU/cleanup errors; unchanged 19 cow/dagger errors keep overall
+  false. Owned browser/launcher/ports closed. All six scenic stills reviewed:
+  no apparent regression, no visual-quality improvement claimed.
+- [x] Preserve failed native71: 12 scenic images completed before a missed
+  later phase window. Its 514.8 ms cumulative / 15.1 ms maximum fitting slice
+  means the loading spike is not fixed. Native72 measured 479 ms / 4 ms;
+  variation between runs is not a reliable speedup or frame-budget result.
+- [ ] Fitting-pacing acceptance remains open: repeat cold/warm loading and
+  explain residual long slices; no GPU cost, presented-frame or hard 2 ms claim.
+- [ ] Next visible art pass: coherent atmosphere across visible sky, fog, water
+  and environment lighting, then stronger terrain/service composition. Native
+  resource retirement, blade contact/culling in motion, denser vegetation and
+  whole-scene performance/AAA acceptance remain required.
+
 ## Live per-blade grass integration — 2026-09-12
 
+- [x] Checkpoint `d3444efc92142bc6de71c62d5eeb577c41d08a95` pushed normally to
+  `codex/sol-duel-stream-launch`: 16 scoped files, normal hooks and secret scan
+  pass; GitHub author/committer `dreaminglucid` verified. Nine runtime files are
+  byte-identical to native69; one test-only second-pass formatting change is
+  compiler-AST-identical and its 13 tests pass again. Unrelated edits preserved.
 - [x] Connect compact grass to resumable fitting, retained-neighbor and water
   ownership, single-manager compute scheduling, strict readiness, remapped
   provenance and accepted wind/fade bounds. Chunk-owned read-only vec2 roots

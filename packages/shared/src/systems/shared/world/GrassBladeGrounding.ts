@@ -135,10 +135,13 @@ function segmentBoxDistance(
 ): number {
   let lo = 0,
     hi = 1;
-  for (const [start, end, min, max] of [
-    [s.startX, s.endX, b.minX, b.maxX],
-    [s.startZ, s.endZ, b.minZ, b.maxZ],
-  ]) {
+  // Keep the exact axis/corner order without short-lived tuple arrays in the
+  // per-clump road loop. These temporaries scale with clumps × road segments.
+  for (let axis = 0; axis < 2; axis++) {
+    const start = axis === 0 ? s.startX : s.startZ,
+      end = axis === 0 ? s.endX : s.endZ,
+      min = axis === 0 ? b.minX : b.minZ,
+      max = axis === 0 ? b.maxX : b.maxZ;
     const d = end - start;
     if (!d) {
       if (start < min || start > max) {
@@ -161,12 +164,9 @@ function segmentBoxDistance(
     pointBoxDistance(s.startX, s.startZ, b),
     pointBoxDistance(s.endX, s.endZ, b),
   );
-  for (const [x, z] of [
-    [b.minX, b.minZ],
-    [b.minX, b.maxZ],
-    [b.maxX, b.minZ],
-    [b.maxX, b.maxZ],
-  ]) {
+  for (let corner = 0; corner < 4; corner++) {
+    const x = corner < 2 ? b.minX : b.maxX,
+      z = corner % 2 === 0 ? b.minZ : b.maxZ;
     const numerator = (x - s.startX) * dx + (z - s.startZ) * dz;
     if (!Number.isFinite(numerator))
       throw new Error("Grass grounding road projection overflow");
@@ -508,6 +508,9 @@ export function* groundGrassBladeSteps(
     if (Math.abs(covered - expected) > Math.max(1e-7, expected * 1e-7))
       throw new DeferredGrounding("missing_surface");
   };
+  // Job-local scratch never escapes into output or dependencies. An edge query
+  // is fully drained before the next blade, including across suspended slices.
+  const triangle: TerrainGridTriangle = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
   const edgeError = function* (a: Point, b: Point) {
     const dx = b.x - a.x,
       dz = b.z - a.z,
@@ -532,7 +535,6 @@ export function* groundGrassBladeSteps(
         minZ: box.minZ - oz,
         maxZ: box.maxZ - oz,
       });
-      const triangle: TerrainGridTriangle = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
       while (cursor.next(triangle)) {
         yield "grounding_operation";
         take();
@@ -547,11 +549,9 @@ export function* groundGrassBladeSteps(
         const dv = ((bx - ax) * dz - (bz - az) * dx) / det;
         let lo = 0,
           hi = 1;
-        for (const [start, change] of [
-          [u0, du],
-          [v0, dv],
-          [1 - u0 - v0, -du - dv],
-        ]) {
+        for (let edge = 0; edge < 3; edge++) {
+          const start = edge === 0 ? u0 : edge === 1 ? v0 : 1 - u0 - v0,
+            change = edge === 0 ? du : edge === 1 ? dv : -du - dv;
           if (Math.abs(change) < 1e-14) {
             if (start < -1e-10) {
               lo = 1;
@@ -566,7 +566,8 @@ export function* groundGrassBladeSteps(
         hi = Math.min(1, hi);
         markSurface(surface, "edge");
         intervals.push([lo, hi]);
-        for (const t of [lo, hi]) {
+        for (let endpoint = 0; endpoint < 2; endpoint++) {
+          const t = endpoint === 0 ? lo : hi;
           const terrainY =
             ay + (u0 + du * t) * (by - ay) + (v0 + dv * t) * (cy - ay);
           maxError = Math.max(
@@ -641,6 +642,9 @@ export function* groundGrassBladeSteps(
     retained: number[] = [];
   let sweptBounds: (TerrainGridBounds & { minY: number; maxY: number }) | null =
     null;
+  const left: Point = { x: 0, y: 0, z: 0 },
+    right: Point = { x: 0, y: 0, z: 0 },
+    point: Point = { x: 0, y: 0, z: 0 };
   try {
     for (let i = 0; i < data.count; i++) {
       const k = i * 3,
@@ -669,23 +673,21 @@ export function* groundGrassBladeSteps(
         nz = data.groundNormals[k + 2],
         q = 1 / (1 + ny),
         cross = -nx * nz * q;
-      const transform = (v: number, fade: number): Point => {
+      const transform = (v: number, fade: number, target: Point): void => {
         const rx = (position.getX(v) * cos - position.getZ(v) * sin) * scale,
           rz = (position.getX(v) * sin + position.getZ(v) * cos) * scale,
           ry = position.getY(v) * scale * fade;
-        return {
-          x: x + rx * (ny + nz * nz * q) + ry * nx + rz * cross,
-          y: y - rx * nx + ry * ny - rz * nz,
-          z: z + rx * cross + ry * nz + rz * (ny + nx * nx * q),
-        };
+        target.x = x + rx * (ny + nz * nz * q) + ry * nx + rz * cross;
+        target.y = y - rx * nx + ry * ny - rz * nz;
+        target.z = z + rx * cross + ry * nz + rz * (ny + nx * nx * q);
       };
       let baseError = 0;
       for (let blade = 0; blade < blades; blade++) {
-        const left = transform(blade * verticesPerBlade, 1),
-          right = transform(blade * verticesPerBlade + 1, 1);
+        transform(blade * verticesPerBlade, 1, left);
+        transform(blade * verticesPerBlade + 1, 1, right);
         const deltaLeft = Math.fround((yield* sampleEndpoint(left)) - left.y),
           deltaRight = Math.fround((yield* sampleEndpoint(right)) - right.y);
-        if (![deltaLeft, deltaRight].every(Number.isFinite))
+        if (!Number.isFinite(deltaLeft) || !Number.isFinite(deltaRight))
           throw new Error("Nonfinite grass grounding correction");
         const d = (i * blades + blade) * 2;
         deltas[d] = deltaLeft;
@@ -717,10 +719,10 @@ export function* groundGrassBladeSteps(
         const correction =
           deltas[d] * (1 - uv.getX(v)) + deltas[d + 1] * uv.getX(v);
         const windFactor = uv.getY(v) ** 1.8;
-        for (const fade of [0, 1]) {
+        for (let fade = 0; fade < 2; fade++) {
           yield "grounding_operation";
           take();
-          const point = transform(v, fade);
+          transform(v, fade, point);
           box.minX = Math.min(
             box.minX,
             point.x - wind.x * windFactor - NUMERIC_GUARD,

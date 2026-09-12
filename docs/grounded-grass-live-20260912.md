@@ -1,7 +1,9 @@
 # Compact grass: live per-blade integration
 
-Status: implemented; CPU/build tests and native69 scene/binding regression pass.
+Status: implemented; CPU/build tests and native72 scene/binding regression pass.
 Native68 remains rejected for an obsolete observer material-identity assumption.
+Native70/71 remain failed matched-daylight captures; the later allocation
+follow-up and its unresolved loading spike are documented below.
 This is not visual, GPU-budget, motion, or production-launch acceptance.
 
 ## What changes
@@ -116,3 +118,61 @@ found no tests; that invocation is not evidence. The pinned project Vitest
   slice timing can overshoot; it is not a hard frame-time guarantee.
 - Denser coherent vegetation and the remaining island/atmosphere/character
   art work, plus the documented cow/dagger errors and integrated launch gates.
+## Allocation follow-up — 2026-09-12
+
+An owned native Chrome CPU sample (`compact-world-probe70/grounding.cpuprofile`)
+now isolates actual loading/fitting work. All six jobs completed with unchanged
+2,240 clumps / 215,040 correction bytes. Approximate samples under
+`advanceGroundingJob` total 490.688 ms: 208.081 ms self-attributed to the fitting
+generator, 73.930 ms to its pipeline wrapper, 40.823 ms to triangle-edge checks
+and 34.605 ms to road distance checks. These are sampled function attributions,
+not exact durations or proof that a particular allocation caused a pause.
+The profile's own job receipt measured 515.1 ms cumulative active slices and
+4.6 ms maximum: native69's 15.9 ms spike was **not** reproduced or explained.
+
+The observer uses [Chrome's CPU sampling protocol](https://chromedevtools.github.io/devtools-protocol/tot/Profiler/),
+not precise coverage, and verifies that the debugger listener belongs to its
+new runner's descendant. It detaches after all six jobs complete. Raw profile
+SHA256: `8f13e1f88d54d8629bcbc67ebe2dc821df17dd9583884efa55e19ad890132b37`.
+Sampling adds overhead; no performance qualification is inferred. The later
+native70 visual study missed the original daylight window, and missing success
+images also failed fog-observer cleanup qualification. That failed run is retained
+unchanged; its owned browser/launcher/ports closed. No gate was relaxed.
+
+The follow-up removes temporary per-vertex Points and fade arrays, per-road and
+per-triangle tuples, and repeated triangle scratch construction. Scratch belongs
+to one job, not a manager/global pool, and never appears in output. Arithmetic,
+branch/axis/corner order, yield points, charged operations, exclusions and GPU
+buffers are unchanged. Interleaved suspended jobs test scratch independence;
+the immutable original core verifies all arrays, dependencies and non-time
+receipts across production leaves, three LODs and eight road configurations.
+An initial new fixture used out-of-range angles and correctly failed original
+validation; the fixture was corrected, not the validation.
+
+969 shared tests / 76 files, 18 external reference tests, shared/client/server/
+external typechecks, scoped ESLint/Prettier, client/shared then server builds,
+and 100 capture checks pass.
+
+Native71 is preserved as a failed visual run: it completed 12 scenic images,
+then missed the west-ridge phase threshold by about 68 ms. It reported no
+page/GPU errors, unchanged 19 cow/dagger errors and complete owned cleanup
+(apart from the expected missing-success-image qualification). Its grounding
+receipt measured 514.8 ms cumulative active slices and 15.1 ms maximum, so
+the loading spike is not fixed by the allocation change.
+
+The fresh native72 run passes full scene/binding regression: 24 PNGs, all 18
+matched camera/daylight pairs, 48 fog brackets, both scene censuses, all six
+actual correction buffers and unchanged 2,240 clumps / 215,040 bytes. Root
+verification checked 608 source pins, 539 archives and 37 frozen game sources;
+report SHA256 `6ca1f067f1ee8f7dd4d9d6da50bf766e3ae4fc3a973756e97e4e7bcba5625df9`.
+No page/GPU/cleanup errors; the same 19 cow/dagger errors keep overall false.
+Its measured 479 ms cumulative / 4 ms maximum is one observed run, not a
+reliable speedup or frame deadline. All six scenic stills were visually reviewed:
+no apparent new regression, but sparse lawns, plain platforms, isolated services,
+continuous cliff bands and pale sky remain far below the art target.
+
+Proof: `asset-studio/compact-grass-grounding-integration01/verify72-root.mjs`
+and `after72-root-verification.json`; native71/72 both closed their owned
+browser, launcher and ports. No new browser tabs remain from these tests.
+No density, geometry, shader, lighting, exposure or resolution change is made.
+This is allocation housekeeping, not visual improvement or pacing acceptance.
