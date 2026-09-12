@@ -32,6 +32,7 @@ import {
 import { BIOMES } from "./world-structure";
 import { validateAuthoredResourceIdentities } from "./ResourceInstanceIdentity";
 import { validateCompactResourceGroves } from "../systems/shared/world/CompactResourceGroves";
+import { validateCompactPreparationLodge } from "../systems/shared/world/CompactPreparationLodge";
 import {
   canonicalWorldJson,
   WorldManifestIdentityBuilder,
@@ -404,6 +405,10 @@ export class DataManager {
       profile,
       copy.version,
     );
+    const compactPreparationLodge = validateCompactPreparationLodge(
+      copy.compactPreparationLodge,
+      profile,
+    );
     config = copy;
     if (
       config.seed !== profile.seed ||
@@ -421,6 +426,7 @@ export class DataManager {
       ...config,
       terrainProfile: profile,
       ...(compactResourceGroves ? { compactResourceGroves } : {}),
+      ...(compactPreparationLodge ? { compactPreparationLodge } : {}),
     });
     if (DataManager.worldContentIdentity !== null) {
       if (

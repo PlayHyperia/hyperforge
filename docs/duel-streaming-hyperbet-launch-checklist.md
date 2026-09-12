@@ -2,9 +2,48 @@
 
 ## Active functional woodland and surface fidelity — 2026-09-11
 
+- [ ] Qualify native PBR contact shading in a separately admitted AO experiment:
+  actual normal/depth prepass, direct/neutral/raw/denoised comparisons, unchanged
+  beauty resolution/MSAA/exposure, animated cutouts and explicit GPU/lifetime
+  cost. Research plan: compact-contact-shading-20260912.md; not enabled yet.
+- [x] Implement the admitted preparation lodge at (398,370) through one shared
+  layout/collision owner and five native-PBR meshes in normal/broadcast clients.
+  No generic towns/NPCs or moved services/trees. Native55 observed; close-up art open.
+- [x] Verify this integration candidate: root passes 776 shared tests / 57 files,
+  56 procgen tests / four files, all four package builds/typechecks and scoped
+  lint/format checks. Native harness35 passes 125 applicable cases; explicitly
+  exclude only the retired eight-floor test and retain its single-arena replacement.
+- [x] Verify actual lodge PhysX: three start/destroy/reinit cycles, 192 interior
+  floor rays, open doorway, blocking walls/roof, native actor return to baseline.
+  Fix nonindexed frame cooking in the dedicated caller and owned native-value
+  teardown; preserve shared geometry caches and cooked-mesh references.
+- [x] Observe the lodge in actual native55 Metal/WebGPU: 39 captures, 515 pins/
+  446 archives independently verified, study/lodge/presentation checks pass,
+  zero page/GPU errors and complete owned cleanup. Real publication followed
+  avatar readiness by 3.810s. Whole run still fails 19 cow/dagger errors.
+- [ ] Finish lodge close-up composition, animated doorway/step contact, interior
+  visibility and measured rendering cost. Wide visibility is not art acceptance.
+- [x] Preserve failed native53: outdated broadcast `towns:false` gate stopped
+  before planned captures. 498 pins/441 archives unchanged; no page/GPU errors,
+  cow failures retained, owned browser/stack/database cleanup verified. Fix only
+  exact lodge-owner admission in a new harness; no rendered-approval claim.
+- [x] Preserve failed native54: exact ownership sampled before lodge publication;
+  registered systems are not readiness. 500 pins/443 archives unchanged, no
+  planned captures, cow errors retained and owned cleanup passed. Require a
+  finite genuine owner/visual readiness boundary before the same exact gate.
+- [ ] Compose a coherent bank/workshop forecourt using the existing shared road
+  mask and dirt/grass layers. Preserve service/resource positions and geometry;
+  verify pond/floor clearance, changed baked-mask alignment and affected-leaf
+  grass resampling. Judge matched images, not path-count or texture-count claims.
+- [x] Prototype per-blade terrain grounding with complete corrected base edges,
+  exact neighboring surfaces and swept exclusions. Known 0.187m gap corrected;
+  true mixed-LOD discontinuity rejected. CPU-only, not in live grass rendering.
+- [ ] Move that correction into bounded/off-thread installation before increasing
+  grass density: measured CPU leaf calls remain about 23–40ms, too expensive for
+  a single smooth frame. Qualify actual storage-buffer lifecycle and GPU cost.
 - [x] Push groundwork checkpoint `a1d4eef9e`; exact remote ref, all eight tested/
   reviewed source blobs and GitHub author/committer `dreaminglucid` verified.
-  No lodge/denser meadow installed, merge or deployment.
+  That checkpoint installed no lodge/denser meadow; no merge or deployment.
 - [x] Push coast checkpoint `55bed186c`; exact remote head, GitHub author/
   committer `dreaminglucid` and all five native52-tested source blobs verified.
   No merge, deployment or runtime-error waiver.
@@ -34,16 +73,16 @@
 - [x] Add opt-in bounded gabled roof geometry with no automatic furniture:
   55 generator/style tests pass, including six independently reviewed gable
   cases for closure/normals/UVs/seams/merging/defaults. All four package builds
-  and typechecks pass. No lodge is installed; geometry tests are not art approval.
+  and typechecks pass. That geometry checkpoint installed no lodge; not art approval.
 - [ ] Qualify one bounded gabled lodge with exact shared layout, visual/collision
   ownership and service approaches. Reject the first stock-bank candidate's
   tree overlap and unblocked counter geometry; no global town/NPC activation.
 - [x] Measure the preparation-pad lodge at (398,370), using the actual solid
   platform top. Complete footprint clears all current tree/service/path/combat
   bounds; nine routes pass and return supports remain unchanged. CPU only.
-- [ ] Integrate that exact descriptor/layout through compact-only collision and
-  visual owners, disable the phantom flat roof, preserve actual door openings,
-  qualify native PBR/shadows/contact/camera composition and measured cost.
+- [x] Integrate that exact descriptor/layout through compact-only collision and
+  visual owners, disable the phantom flat roof and preserve actual door openings.
+  Native PBR/shadows/contact/camera composition and measured cost remain open.
 - [x] Commit and push static-cache checkpoint `ed99ac7cf`; exact remote head,
   committed native-tested source pins and GitHub author/committer
   `dreaminglucid` verified. No merge or deployment.

@@ -201,6 +201,14 @@ export class BuildingCollisionService {
       );
     }
     if (
+      layout.roofWalkable !== undefined &&
+      typeof layout.roofWalkable !== "boolean"
+    ) {
+      throw new Error(
+        `[BuildingCollision] Building ${buildingId} has invalid roofWalkable: expected boolean`,
+      );
+    }
+    if (
       !worldPosition ||
       typeof worldPosition.x !== "number" ||
       typeof worldPosition.z !== "number"
@@ -450,6 +458,9 @@ export class BuildingCollisionService {
       cellWidth: layout.width,
       cellDepth: layout.depth,
       floors,
+      ...(layout.roofWalkable === false
+        ? { nonWalkableRoofFloor: layout.floors }
+        : {}),
       stepTiles,
       groundCoverageTiles,
       boundingBox: {
@@ -885,6 +896,10 @@ export class BuildingCollisionService {
     worldPosition: { x: number; y: number; z: number },
     rotation: number,
   ): FloorCollisionData | null {
+    // Pitched/non-accessible roofs must not publish an artificial flat floor,
+    // perimeter walls, or walkable tiles. Existing layouts retain their roof.
+    if (layout.roofWalkable === false) return null;
+
     // Get the top floor footprint
     const topFloorPlan = layout.floorPlans[layout.floors - 1];
     if (!topFloorPlan) return null;
@@ -1352,6 +1367,7 @@ export class BuildingCollisionService {
     floorIndex: number,
   ): BuildingCollisionResult {
     const key = tileKey(tileX, tileZ);
+    let nonWalkableRoofBuildingId: string | null = null;
 
     // FIRST: Check spatial index for buildings at this tile (walkable tiles)
     const buildingIds = this.tileToBuildings.get(key);
@@ -1363,7 +1379,12 @@ export class BuildingCollisionService {
 
         // Find the floor
         const floor = building.floors.find((f) => f.floorIndex === floorIndex);
-        if (!floor) continue;
+        if (!floor) {
+          if (building.nonWalkableRoofFloor === floorIndex) {
+            nonWalkableRoofBuildingId ??= buildingId;
+          }
+          continue;
+        }
 
         // Check if tile is walkable on this floor
         const isWalkable = floor.walkableTiles.has(key);
@@ -1412,7 +1433,12 @@ export class BuildingCollisionService {
         const building = this.buildings.get(buildingId);
         if (!building) continue;
         const floor = building.floors.find((f) => f.floorIndex === floorIndex);
-        if (!floor) continue;
+        if (!floor) {
+          if (building.nonWalkableRoofFloor === floorIndex) {
+            nonWalkableRoofBuildingId ??= buildingId;
+          }
+          continue;
+        }
 
         // Get wall blocking for this tile (even though tile isn't walkable)
         // PERF: use pre-indexed wallsByTile for O(1) lookup
@@ -1443,6 +1469,22 @@ export class BuildingCollisionService {
           stairTile: null,
         };
       }
+    }
+
+    // An explicitly non-walkable roof is not outdoor terrain. Keep its
+    // navigation rejection separate from surface/wall data, and allow any
+    // overlapping real floor above to take precedence. Other absent floors
+    // retain their existing fallback behavior.
+    if (nonWalkableRoofBuildingId !== null) {
+      return {
+        isInsideBuilding: true,
+        buildingId: nonWalkableRoofBuildingId,
+        isWalkable: false,
+        floorIndex,
+        elevation: null,
+        wallBlocking: { north: false, south: false, east: false, west: false },
+        stairTile: null,
+      };
     }
 
     // No matching building found

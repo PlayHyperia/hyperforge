@@ -159,6 +159,8 @@ export interface BuildingCollisionData {
   cellDepth: number;
   /** Per-floor collision data */
   floors: FloorCollisionData[];
+  /** Explicitly omitted roof level; blocks navigation without inventing a surface. */
+  nonWalkableRoofFloor?: number;
   /** Entrance step tiles (outside building, only walkable from front) */
   stepTiles: StepTile[];
   /**
@@ -243,6 +245,8 @@ export interface BuildingLayoutInput {
   depth: number;
   /** Number of floors */
   floors: number;
+  /** Generate a walkable flat roof above the top floor. Defaults to true. */
+  roofWalkable?: boolean;
   /** Per-floor data */
   floorPlans: Array<{
     /** Which cells exist on this floor (2D boolean grid) */

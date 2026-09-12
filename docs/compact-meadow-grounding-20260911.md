@@ -3,6 +3,48 @@
 Status: CPU experiments only. Neither the denser placement nor larger blades
 have been installed. Runtime grass remains the native52 configuration.
 
+## Per-blade correction prototype (not installed)
+
+`GrassBladeGrounding` now computes two exact world-Y endpoint corrections per
+blade, then checks the complete corrected base edge against actual retained
+terrain triangles. It preserves accepted input order, all five attribute arrays
+and worker RNG. It returns each exact neighboring surface used by endpoint,
+edge or full fade/wind-envelope checks; no live ownership tracking is implied.
+Missing/overlapping support and exhausted work cannot publish partial arrays.
+
+Two dense production-worker leaves were measured after actual retained-surface
+projection, without changing the existing blade geometry:
+
+| Leaf center | Input → retained clumps | Rejections                    | Triangle visits | Extra correction bytes |
+| ----------- | ----------------------: | ----------------------------- | --------------: | ---------------------: |
+| 450,350     |               478 → 458 | 20 swept-pad                  |          11,574 |                 43,968 |
+| 350,250     |               600 → 588 | 11 swept-pad, 1 discontinuity |          15,454 |                 56,448 |
+
+Maximum accepted base error is 5.876mm / 5.731mm in those leaves. The known
+0.187375m extended-plane gap is corrected. The 0.567480m mixed-LOD example
+still crosses an actual discontinuity after endpoint correction (about 0.316m
+full-edge error), so the clump is rejected rather than falsely certified.
+This establishes base-edge support, not tip/terrain clearance or GPU execution.
+
+Exact Float32-axis bounds reduce triangle visits from 93,410 / 131,544, but
+measured complete CPU calls still take approximately 23–40ms per leaf across
+the observed runs. Fewer visits are not a demonstrated frame-time improvement.
+Do not call this synchronously in a 60Hz installation frame. Next integration
+must provide bounded continuation or off-thread work, preserve all neighbor
+revisions through publication, and qualify actual shader buffer ownership/cost.
+`work_budget` is explicitly not resumable: retrying identical input cannot make
+progress. No density, shader, render-pass or live grass-manager change is enabled.
+
+Tests cover actual synchronous/worker prefix equality, LOD0/1/2 and fade values,
+mixed-resolution neighbors, malformed inputs/topology, exact triangle-boundary
+coverage and conservative road/pad/water envelopes. These are CPU correctness
+gates, not visual or sustained-performance acceptance.
+Peer review also found finite-but-overflowing road coordinates could create
+NaN distances and bypass exclusion. Admission and derived projection/distance
+checks now fail closed, with three overflow cases and an ordinary intersecting
+road regression. The focused prototype/unchanged terrain suite passes 20/20;
+the final combined shared regression passes 776/776 in 57 files.
+
 ## What the actual worker experiments found
 
 The first proposal reduced spacing from 2.8m to 2.1m and enlarged the existing
@@ -21,13 +63,13 @@ surfaces matching native52's archived topology; the worst new LOD-edge gap
 reaches 0.567m. The earlier six-surface experiment explicitly had unmeasured
 outer roots and is not complete contact evidence.
 
-| Six resident leaves | Current | Denser, original geometry | Denser + conservative filter |
-| --- | ---: | ---: | ---: |
-| Clumps | 2,281 | 4,019 | 2,437 |
-| Nominal triangles | 82,116 | 144,684 | 87,732 |
-| Installed attribute bytes | 291,968 | 514,432 | 311,936 |
-| Campus clumps | 143 | 280 | 248 |
-| Maximum chunk draws | 6 | 6 | 6 |
+| Six resident leaves       | Current | Denser, original geometry | Denser + conservative filter |
+| ------------------------- | ------: | ------------------------: | ---------------------------: |
+| Clumps                    |   2,281 |                     4,019 |                        2,437 |
+| Nominal triangles         |  82,116 |                   144,684 |                       87,732 |
+| Installed attribute bytes | 291,968 |                   514,432 |                      311,936 |
+| Campus clumps             |     143 |                       280 |                          248 |
+| Maximum chunk draws       |       6 |                         6 |                            6 |
 
 The external removal-only filter encloses the full fade/wind shape against
 authored pads, road capsules and water bounds. It clips the complete root

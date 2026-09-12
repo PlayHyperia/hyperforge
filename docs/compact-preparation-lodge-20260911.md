@@ -1,8 +1,147 @@
-# Compact preparation lodge: geometry and movement groundwork
+# Compact preparation lodge: geometry, ownership and integration
 
-Status: opt-in geometry prototype and shared exterior-support fix implemented.
-No lodge is installed in the world. Placement, native materials, collision
-ownership and art acceptance are still required.
+Status: integrated candidate now observed in native WebGPU probe55. Shared
+admission/layout/navigation, native materials, exact triangle physics and
+teardown are implemented. Focused exterior/interior art review, gameplay foot
+contact and sustained performance remain open; this is not production acceptance.
+
+## Current integration candidate
+
+One exact optional manifest descriptor admits the qualified (398,370) pose,
+original recipe/seed and solid platform height. The descriptor changes full
+world content identity; it cannot be added/removed after startup admission.
+The current world-config SHA256 is
+`2ea04f60a016da3681e2340be6c406d4a923b30b1e6c2c61494ea6df1d8604d9`.
+No tree, road, terrain, bank, other service or duel return mark was moved.
+
+TownSystem publishes its cached layout only after exact collision registration,
+without generic towns, generated NPCs or new grading zones. The explicit
+non-walkable-roof policy omits the synthetic flat roof and rejects navigation
+at that absent floor, while leaving ordinary building behavior unchanged.
+Lifecycle guards cover duplicate startup, cancellation, reinitialization and
+borrowed collision IDs.
+
+Normal and broadcast clients register the same small visual owner after
+manifest admission. It generates five meshes / 1,116 triangles / 134,680 rendered
+geometry bytes, four native WebGPU PBR material roles and no private lights,
+image textures or frame update loop. Warm plaster, timber, stone plinth/floor
+and muted shingles use the existing procedural material factory. Prebaked
+interior vertex lighting is disabled; scene illumination/fog is authoritative.
+Only the floor uses the movement-picking layer; the roof/walls cannot be clicked
+as terrain. The private generator now retains the global primitive cache on
+teardown, while the existing default whole-cache disposal remains unchanged.
+
+Interactive clients cook five actual triangle meshes; broadcast clients create
+no physics nodes. Frame meshes are nonindexed, so the caller supplies private
+sequential-index collision views of their exact position arrays, without
+rewriting rendered geometry. Generic closed-door boxes and the stock renderer's
+flat-roof collider are never used.
+
+Real installed-package PhysX tests pass three lodge start/destroy/reinit cycles,
+doorway misses and wall/roof hits, all 64 interior floor rays each cycle,
+and native scene actor counts returning to baseline. CPU scene tests verify
+the full measured envelope, picking layers and one-time geometry/material
+disposal. These tests discovered the nonindexed-frame cooking defect before
+runtime promotion. Separate actual-native node tests exposed and repair owned
+transform/shape-flag/filter/mesh-scale temporaries surviving teardown; shared
+cooked-mesh references and other live shapes are preserved. Borrowed PhysX
+member-wrapper caches and arbitrary malformed mesh cooking are not claimed
+fixed.
+
+Root verification of this candidate: 776/776 shared tests in 57 files,
+56/56 generator/style/lifecycle tests in four files, all four normal package
+builds and all four package typechecks, scoped ESLint/Prettier and diff checks.
+The shared run includes the previous 651-test terrain/resource/light/support
+set plus the new lodge, native physics, grass-prototype and adjacent town cases.
+
+Native harness35/study25 has 125 applicable passing tests. The command explicitly
+excludes the frozen historical test named `v6 preserves exact v5 live subjects,
+bounds, identity and camera-floor contract` (study06.test.mjs:32), which requires
+eight floor objects from the obsolete multi-arena layout. Its retained
+study14.test.mjs replacement checks the same subjects/configuration and the
+three correct floor objects for the single arena. This is not an unfiltered
+historical-suite pass. The actual prelaunch closure is 503 pins / 446 archives,
+30,364,016 archived bytes, with twelve observed equipment-file additions reserved
+inside the explicit 515-file cap. Successor closure04 increases the former cap
+by exactly three to retain the new runner/test/closure sources, with no historical
+source exclusions or deleted evidence. This is an evidence-file limit, not a
+production rendering budget.
+
+Focused in-game material/composition review, animated door/floor/step contact,
+interior visibility and measured GPU/thermal cost remain required. The sections
+below preserve both the current native evidence and the earlier groundwork with
+their original scopes.
+
+## Native integration evidence: probe55
+
+Runner35's genuine readiness wait observed the initialized town owner without
+a published lodge, then actual shared collision/layout and the attached visual
+3.810 seconds later. No startup method was invoked by the diagnostic. This
+confirms the earlier avatar-ready snapshots were premature in this execution.
+
+The actual Apple Metal-3 non-fallback WebGPU device rendered at 1280×720/DPR1.
+All 39 PNGs have the expected dimensions, including eleven no-2D-stream-HUD
+views (the provisional observer badge remains). The root reviewed the baseline
+world/kit, bank, anvil and campus-link images: the building is plainly visible
+on the lobby platform. Broad repetitive turf, sparse service composition and
+large exposed pads remain visible deficits. Distant building visibility is not
+close-up material or interior acceptance.
+
+Study, lodge ownership and presentation checks pass, with exact camera/HUD
+restoration. The two lodge receipts retain one owner and the same five meshes,
+four materials and matching collision data. Root independently verifies all
+515 source pins and 446 archived bodies / 30,364,016 bytes. No page/GPU/device
+errors occurred. All owned processes, browser and database shut down cleanly;
+all four ports are free, and unrelated Docker services remain unchanged.
+
+The whole run remains **failed**: fourteen canonical dagger-fit metadata errors,
+five cow-load errors and the cow asset 404 remain unchanged launch blockers.
+This does not establish native character traversal, sustained FPS, GPU cost,
+thermal stability, close-up roof quality or usable interiors.
+
+Immutable external evidence in `asset-studio/game-test-integration/compact-world-probe55`:
+
+- `report.json`: `5bdc7bf7297f8aaec4a13e145f3c1bc83efa2fa06e4432421a3d08c2c808c197`.
+- `compact-lodge.json`: `18d5c3393bc05ce109cddc26ef74c6f2b064c7e87702505eaf88df08ca3877f9`.
+- `spatial-study.json`: `410e6f77dbd95675416a1ff1970a751e2fcf5e6832fd1e9f3cfe611c54c18422`.
+- `compact-presentation.json`: `a44da113fe352d9774b67e5020b335e7b3e9071bb94bc14c9f0a166db858ba82`.
+
+## Preserved first native attempt
+
+Probe53 stopped before planned captures because runner33 still asserted
+`towns:false` for preparation broadcasts. That older absence policy conflicts
+with the intentionally admitted compact-only TownSystem owner. This is a
+harness admission omission, not evidence that the lodge rendered correctly.
+The successor must verify the exact single lodge owner and reject generic
+towns/NPCs/POIs, not merely permit any town system.
+
+The failed report SHA256 is
+`94516194747af2d5eb380e7c6d54c52e7afcc9872b707d4e2ccfb8ed84e4ee8e`.
+Its 498 source pins / 441 archived bodies are verified unchanged. Actual Apple
+Metal-3 non-fallback WebGPU initialized at 1280×720/DPR1, with zero page/GPU
+errors, but the only screenshot is a loading-overlay failure capture; there
+are no planned images, HUD leases or lodge qualification receipts. Five cow
+load errors and the cow asset 404 remain; the dagger observer stage was never
+reached, so this is not another 19-error full-cycle report. The owned browser,
+launcher and database shut down cleanly, all four ports are free, and existing
+unrelated Docker services were preserved. Probe53 and its executed sources stay
+immutable.
+
+Probe54 also stopped before captures, this time at runner34's exact ownership
+gate: `towns` and the dedicated visual system were registered, but both the
+shared lodge record and collision record were still null. Report SHA256:
+`a895e375ab93ba9518981e6acc9b91b1c6204ab65bdeeaa677174c25e6742cd0`.
+Its 500 pins / 443 archives are unchanged and owned cleanup passed. No page/GPU
+errors occurred; five cow errors and its 404 remain. No equipment or study stage
+was reached. This report is not proof of a permanently stuck lodge owner.
+
+Source ordering explains why the old avatar-readiness boundary is insufficient:
+ClientNetwork connects during `init`, while World later awaits sequential system
+starts; TerrainSystem can await representative shader precompilation before the
+late compact town/visual owners start. Neither loaded avatars nor loader progress
+means the lodge is published. The successor must wait finitely for genuine
+shared and visual readiness, preserve exact admission assertions, and record
+the actual state on timeout. It must not invoke startup itself or waive errors.
 
 ## Why this slice exists
 

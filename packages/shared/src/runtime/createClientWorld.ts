@@ -123,6 +123,7 @@ import type { StageSystem } from "../types/systems/system-interfaces";
 import { LODs } from "../systems/shared";
 import { HealthBars } from "../systems/client/HealthBars";
 import { EquipmentVisualSystem } from "../systems/client/EquipmentVisualSystem";
+import { registerCompactPreparationLodgeVisuals } from "../systems/client/CompactPreparationLodgeVisualsSystem";
 import { ZoneVisualsSystem } from "../systems/client/ZoneVisualsSystem";
 import { WaterfallVisualsSystem } from "../systems/client/WaterfallVisualsSystem";
 import { BridgeSystem } from "../systems/shared/world/BridgeSystem";
@@ -450,6 +451,7 @@ export function createClientWorld() {
       if (isCompactSculptProfile(DataManager.getWorldTerrainProfile())) {
         world.register("roads", RoadNetworkSystem);
       }
+      registerCompactPreparationLodgeVisuals(world);
       if (traceInit) {
         console.log("[createClientWorld] <- registerSystems");
       }

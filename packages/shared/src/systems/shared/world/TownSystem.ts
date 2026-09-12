@@ -46,6 +46,7 @@ import {
 } from "@hyperforge/procgen/building/town";
 import {
   BuildingGenerator,
+  defaultGenerator,
   type BuildingLayout,
   type PropPlacements,
   CELL_SIZE,
@@ -71,6 +72,13 @@ import {
 import { BFSPathfinder } from "../movement/BFSPathfinder";
 import { TERRAIN_CONSTANTS } from "../../../constants/GameConstants";
 import { DEFAULT_BIOME } from "./TerrainBiomeTypes";
+import {
+  COMPACT_PREPARATION_LODGE_BUILDING_ID,
+  createCompactPreparationLodgeLayout,
+  getCompactPreparationLodgePlacement,
+  type CompactPreparationLodgeManifest,
+  type OwnedCompactPreparationLodge,
+} from "./CompactPreparationLodge";
 
 // Default configuration values
 // IMPORTANT: waterThreshold must match TERRAIN_CONSTANTS.WATER_THRESHOLD (9.0)
@@ -272,6 +280,14 @@ export class TownSystem extends System {
 
   /** NPC spawn positions by building ID (for spawning NPCs inside buildings) */
   private buildingNPCSpawns: Map<string, BuildingNPCSpawn> = new Map();
+  private compactLodgeDescriptor: CompactPreparationLodgeManifest | undefined;
+  private compactLodge: OwnedCompactPreparationLodge | null = null;
+  private compactLodgeStart: Promise<void> | null = null;
+  private compactLodgeCollision: ReturnType<
+    BuildingCollisionService["getBuilding"]
+  >;
+  private compactCollisionOwner = false;
+  private lifetimeGeneration = 0;
 
   constructor(world: World) {
     super(world);
@@ -282,7 +298,10 @@ export class TownSystem extends System {
   }
 
   async init(): Promise<void> {
+    if (this.initialized) return;
+    const generation = ++this.lifetimeGeneration;
     await DataManager.getInstance().initialize();
+    if (generation !== this.lifetimeGeneration) return;
     this.seed = DataManager.getWorldTerrainProfile().seed;
     this.config = loadTownConfig();
     this.terrainSystem = this.world.getSystem("terrain") as
@@ -292,7 +311,19 @@ export class TownSystem extends System {
         }
       | undefined;
 
+    this.compactLodgeDescriptor =
+      DataManager.getWorldConfig()?.compactPreparationLodge;
+    if (this.compactLodgeDescriptor) {
+      // The compact owner retains the existing collision lookup contract without
+      // creating towns, procedural NPC spawns, generators or terrain flat zones.
+      this.collisionService ??= new BuildingCollisionService(this.world);
+      this.compactCollisionOwner = true;
+      this.initialized = true;
+      return;
+    }
+
     // Initialize the procedural town generator with terrain integration
+    this.compactCollisionOwner = false;
     this.initializeTownGenerator();
 
     // Initialize building generator for layout generation
@@ -375,6 +406,33 @@ export class TownSystem extends System {
   }
 
   async start(): Promise<void> {
+    if (!this.initialized)
+      throw new Error("TownSystem requires initialization before start");
+    if (this.compactLodgeDescriptor) {
+      if (this.compactLodge) {
+        if (
+          this.collisionService.getBuilding(this.compactLodge.buildingId) !==
+          this.compactLodgeCollision
+        ) {
+          throw new Error(
+            "Compact preparation lodge collision ownership was replaced",
+          );
+        }
+        return;
+      }
+      if (this.compactLodgeStart) return this.compactLodgeStart;
+      const pending = this.startCompactLodge(
+        this.compactLodgeDescriptor,
+        this.lifetimeGeneration,
+      );
+      this.compactLodgeStart = pending;
+      try {
+        await pending;
+      } finally {
+        if (this.compactLodgeStart === pending) this.compactLodgeStart = null;
+      }
+      return;
+    }
     if (!this.terrainSystem) {
       throw new Error("TownSystem requires TerrainSystem");
     }
@@ -429,6 +487,67 @@ export class TownSystem extends System {
       "TownSystem",
       `Total towns: ${this.towns.length} (${manifestTownCount} manifest + ${proceduralTownCount} procedural)`,
     );
+  }
+
+  private async startCompactLodge(
+    descriptor: CompactPreparationLodgeManifest,
+    generation: number,
+  ): Promise<void> {
+    if (!this.initialized || !this.terrainSystem)
+      throw new Error(
+        "Compact preparation lodge requires initialized terrain and town ownership",
+      );
+    // generateLayout does not use or mutate the shared generator's mesh/material
+    // state. Do not dispose its globally owned material or geometry cache here.
+    const layout = await createCompactPreparationLodgeLayout(
+      descriptor,
+      defaultGenerator,
+    );
+    if (
+      !this.initialized ||
+      generation !== this.lifetimeGeneration ||
+      descriptor !== this.compactLodgeDescriptor
+    )
+      return;
+    const placement = getCompactPreparationLodgePlacement(descriptor);
+    const position = Object.freeze({
+      x: placement.x,
+      y: placement.y,
+      z: placement.z,
+    });
+    const id = COMPACT_PREPARATION_LODGE_BUILDING_ID;
+    if (this.collisionService.getBuilding(id))
+      throw new Error(
+        "Compact preparation lodge collision ID is already owned",
+      );
+    try {
+      this.collisionService.registerBuilding(
+        id,
+        id,
+        { ...this.convertLayoutToInput(layout), roofWalkable: false },
+        position,
+        placement.rotation,
+      );
+    } catch (error) {
+      // Registration is synchronous and the ID was absent: retire only this
+      // attempt, including validation failures after collision insertion.
+      this.collisionService.unregisterBuilding(id);
+      throw error;
+    }
+    this.buildingLayouts.set(id, layout);
+    this.compactLodgeCollision = this.collisionService.getBuilding(id);
+    this.compactLodge = Object.freeze({
+      buildingId: id,
+      descriptor,
+      layout,
+      position,
+      rotation: placement.rotation,
+    });
+    this.started = true;
+  }
+
+  getCompactPreparationLodge(): OwnedCompactPreparationLodge | null {
+    return this.compactLodge;
   }
 
   /**
@@ -2951,13 +3070,27 @@ export class TownSystem extends System {
   }
 
   destroy(): void {
+    ++this.lifetimeGeneration;
+    this.compactLodgeDescriptor = undefined;
+    this.compactLodge = null;
+    this.compactLodgeStart = null;
     // Clear collision service
-    if (this.collisionService) {
+    if (this.collisionService && this.compactCollisionOwner) {
+      const id = COMPACT_PREPARATION_LODGE_BUILDING_ID;
+      if (
+        this.compactLodgeCollision &&
+        this.collisionService.getBuilding(id) === this.compactLodgeCollision
+      ) {
+        this.collisionService.unregisterBuilding(id);
+      }
+      this.compactLodgeCollision = undefined;
+    } else if (this.collisionService) {
       this.collisionService.clear();
     }
 
     // Clear cached layouts
     this.buildingLayouts.clear();
+    this.buildingNPCSpawns.clear();
 
     this.towns = [];
     super.destroy();

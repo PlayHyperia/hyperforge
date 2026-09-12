@@ -177,119 +177,138 @@ export class Collider extends Node {
       return;
     }
 
-    let geometry;
-    let pmesh;
-    if (this._type === "box") {
-      geometry = new physx.PxBoxGeometry(
-        this._width! / 2,
-        this._height! / 2,
-        this._depth! / 2,
-      );
-    } else if (this._type === "sphere") {
-      geometry = new physx.PxSphereGeometry(this._radius!);
-    } else if (this._type === "geometry") {
-      // note: triggers MUST be convex according to PhysX/Unity
-      const isConvex = this._trigger || this._convex || false;
-      if (this._geometry) {
-        pmesh = geometryToPxMesh(this.ctx!, this._geometry, isConvex);
+    if (this.shape) return;
+    // Native constructors here produce owned values. Geometry/shape setters
+    // copy them; borrowed pose.p/pose.q member views are deliberately excluded.
+    const temporaries: unknown[] = [];
+    const own = <T>(value: T): T => {
+      temporaries.push(value);
+      return value;
+    };
+    try {
+      let geometry;
+      let pmesh;
+      if (this._type === "box") {
+        geometry = own(
+          new physx.PxBoxGeometry(
+            this._width! / 2,
+            this._height! / 2,
+            this._depth! / 2,
+          ),
+        );
+      } else if (this._type === "sphere") {
+        geometry = own(new physx.PxSphereGeometry(this._radius!));
+      } else if (this._type === "geometry") {
+        // note: triggers MUST be convex according to PhysX/Unity
+        const isConvex = this._trigger || this._convex || false;
+        if (this._geometry) {
+          pmesh = geometryToPxMesh(this.ctx!, this._geometry, isConvex);
+        }
+        if (!pmesh) return console.error("failed to generate collider pmesh");
+        this.pmesh = pmesh;
+        const tempPos = _v1;
+        const tempQuat = _q1;
+        const tempScale = _v2;
+        const plainMatrix = m1.copy(this.matrixWorld);
+        safeMatrixDecompose(plainMatrix, tempPos, tempQuat, tempScale);
+        _v1.multiplyScalar(0.02); // for visible selection
+        const scale = own(
+          new physx.PxMeshScale(
+            own(new physx.PxVec3(_v2.x, _v2.y, _v2.z)),
+            own(new physx.PxQuat(0, 0, 0, 1)),
+          ),
+        );
+        if (isConvex) {
+          geometry = own(new physx.PxConvexMeshGeometry(pmesh.value, scale));
+        } else {
+          // const flags = new PHYSX.PxMeshGeometryFlags()
+          // flags.raise(PHYSX.PxMeshGeometryFlagEnum.eDOUBLE_SIDED)
+          geometry = own(new physx.PxTriangleMeshGeometry(pmesh.value, scale));
+        }
       }
-      if (!pmesh) return console.error("failed to generate collider pmesh");
-      const tempPos = _v1;
-      const tempQuat = _q1;
-      const tempScale = _v2;
-      const plainMatrix = m1.copy(this.matrixWorld);
-      safeMatrixDecompose(plainMatrix, tempPos, tempQuat, tempScale);
-      _v1.multiplyScalar(0.02); // for visible selection
-      const scale = new physx.PxMeshScale(
-        new physx.PxVec3(_v2.x, _v2.y, _v2.z),
-        new physx.PxQuat(0, 0, 0, 1),
+      const worldPhysics = this.ctx!.physics;
+      const physics = worldPhysics;
+      const material = physics.getMaterial!(
+        this._staticFriction!,
+        this._dynamicFriction!,
+        this._restitution!,
       );
-      if (isConvex) {
-        geometry = new physx.PxConvexMeshGeometry(pmesh.value, scale);
+      const flags = own(new physx.PxShapeFlags());
+      if (this._trigger) {
+        flags.raise(physx.PxShapeFlagEnum.eTRIGGER_SHAPE);
       } else {
-        // const flags = new PHYSX.PxMeshGeometryFlags()
-        // flags.raise(PHYSX.PxMeshGeometryFlagEnum.eDOUBLE_SIDED)
-        geometry = new physx.PxTriangleMeshGeometry(pmesh.value, scale);
+        flags.raise(
+          (physx.PxShapeFlagEnum.eSCENE_QUERY_SHAPE as number) |
+            (physx.PxShapeFlagEnum.eSIMULATION_SHAPE as number),
+        );
       }
-      physx.destroy(scale);
-    }
-    const worldPhysics = this.ctx!.physics;
-    const physics = worldPhysics;
-    const material = physics.getMaterial!(
-      this._staticFriction!,
-      this._dynamicFriction!,
-      this._restitution!,
-    );
-    const flags = new physx.PxShapeFlags();
-    if (this._trigger) {
-      flags.raise(physx.PxShapeFlagEnum.eTRIGGER_SHAPE);
-    } else {
-      flags.raise(
-        (physx.PxShapeFlagEnum.eSCENE_QUERY_SHAPE as number) |
-          (physx.PxShapeFlagEnum.eSIMULATION_SHAPE as number),
+      const layer = Layers[this._layer!];
+      if (!layer) {
+        throw new Error(`[collider] layer not found: ${this._layer}`);
+      }
+      let pairFlags =
+        (physx.PxPairFlagEnum.eNOTIFY_TOUCH_FOUND as number) |
+        (physx.PxPairFlagEnum.eNOTIFY_TOUCH_LOST as number);
+      if (!this._trigger) {
+        pairFlags |= physx.PxPairFlagEnum.eNOTIFY_CONTACT_POINTS as number;
+      }
+      const filterData = own(
+        new physx.PxFilterData(layer.group, layer.mask, pairFlags, 0),
       );
-    }
-    const layer = Layers[this._layer!];
-    if (!layer) {
-      throw new Error(`[collider] layer not found: ${this._layer}`);
-    }
-    let pairFlags =
-      (physx.PxPairFlagEnum.eNOTIFY_TOUCH_FOUND as number) |
-      (physx.PxPairFlagEnum.eNOTIFY_TOUCH_LOST as number);
-    if (!this._trigger) {
-      pairFlags |= physx.PxPairFlagEnum.eNOTIFY_CONTACT_POINTS as number;
-    }
-    this.pmesh = pmesh;
-    const filterData = new physx.PxFilterData(
-      layer.group,
-      layer.mask,
-      pairFlags,
-      0,
-    );
-    const shape = physics.physics.createShape(
-      geometry!,
-      material!,
-      true,
-      flags,
-    );
-    this.shape = shape;
-    if (this.shape) {
-      this.shape.setQueryFilterData(filterData);
-      this.shape.setSimulationFilterData(filterData);
-    }
-    const plainPosition = _v1.copy(this.position);
-    const plainScale = this.parent?.scale
-      ? _v2.copy(this.parent.scale)
-      : _v2.set(1, 1, 1);
-    const position: THREE.Vector3 = _v1
-      .copy(plainPosition)
-      .multiply(plainScale);
-    const pose = new physx.PxTransform();
+      const shape = physics.physics.createShape(
+        geometry!,
+        material!,
+        true,
+        flags,
+      );
+      this.shape = shape;
+      if (this.shape) {
+        this.shape.setQueryFilterData(filterData);
+        this.shape.setSimulationFilterData(filterData);
+      }
+      const plainPosition = _v1.copy(this.position);
+      const plainScale = this.parent?.scale
+        ? _v2.copy(this.parent.scale)
+        : _v2.set(1, 1, 1);
+      const position: THREE.Vector3 = _v1
+        .copy(plainPosition)
+        .multiply(plainScale);
+      const pose = own(new physx.PxTransform());
 
-    // Set position directly on pose (PxTransform has p: PxVec3)
-    const poseP = (pose as { p: { x: number; y: number; z: number } }).p;
-    poseP.x = position.x;
-    poseP.y = position.y;
-    poseP.z = position.z;
+      // Set position directly on pose (PxTransform has p: PxVec3)
+      const poseP = (pose as { p: { x: number; y: number; z: number } }).p;
+      poseP.x = position.x;
+      poseP.y = position.y;
+      poseP.z = position.z;
 
-    // Set quaternion directly on pose (PxTransform has q: PxQuat)
-    const poseQ = (
-      pose as { q: { x: number; y: number; z: number; w: number } }
-    ).q;
-    poseQ.x = this.quaternion.x;
-    poseQ.y = this.quaternion.y;
-    poseQ.z = this.quaternion.z;
-    poseQ.w = this.quaternion.w;
+      // Set quaternion directly on pose (PxTransform has q: PxQuat)
+      const poseQ = (
+        pose as { q: { x: number; y: number; z: number; w: number } }
+      ).q;
+      poseQ.x = this.quaternion.x;
+      poseQ.y = this.quaternion.y;
+      poseQ.z = this.quaternion.z;
+      poseQ.w = this.quaternion.w;
 
-    if (this.shape) {
-      this.shape.setLocalPose(pose);
-      const parentWithShape = this.parent as NodeWithShape;
-      if (parentWithShape?.addShape) {
-        parentWithShape.addShape(this.shape);
+      if (this.shape) {
+        this.shape.setLocalPose(pose);
+        const parentWithShape = this.parent as NodeWithShape;
+        if (parentWithShape?.addShape) {
+          parentWithShape.addShape(this.shape);
+        }
+      }
+    } catch (error) {
+      try {
+        this.unmount();
+      } catch {
+        // Preserve the original construction failure after best-effort release.
+      }
+      throw error;
+    } finally {
+      for (let i = temporaries.length - 1; i >= 0; i--) {
+        physx.destroy(temporaries[i]);
       }
     }
-    // this._geometry = geometry
-    physx.destroy(geometry);
   }
 
   commit(didMove: boolean) {
@@ -304,20 +323,24 @@ export class Collider extends Node {
   }
 
   unmount() {
-    // if (this.type === 'geometry' && pxMeshes[this.geometry.uuid]) {
-    //   pxMeshes[this.geometry.uuid].release()
-    //   delete pxMeshes[this.geometry.uuid]
-    // }
-    if (this.shape) {
-      const parentWithShape = this.parent as NodeWithShape;
-      if (parentWithShape?.removeShape) {
-        parentWithShape.removeShape(this.shape);
+    const shape = this.shape;
+    const pmesh = this.pmesh;
+    this.shape = undefined;
+    this.pmesh = undefined;
+    try {
+      if (shape) {
+        const parentWithShape = this.parent as NodeWithShape;
+        if (parentWithShape?.removeShape) {
+          parentWithShape.removeShape(shape);
+        }
+      }
+    } finally {
+      try {
+        shape?.release();
+      } finally {
+        pmesh?.release();
       }
     }
-    this.shape?.release();
-    this.shape = undefined;
-    this.pmesh?.release();
-    this.pmesh = undefined;
   }
 
   copy(source: Collider, recursive: boolean) {

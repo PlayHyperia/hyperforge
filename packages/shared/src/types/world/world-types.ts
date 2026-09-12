@@ -1367,9 +1367,19 @@ export interface CompactResourceGrovesManifest {
 }
 
 /**
- * Complete world configuration manifest.
- * Loaded from assets/manifests/world-config.json.
+ * Exact, optional preparation lodge placement and immutable layout recipe.
  */
+export interface CompactPreparationLodgeManifest {
+  readonly schemaVersion: 1;
+  readonly layoutId: "compact-preparation-lodge-v1";
+  readonly terrainProfileId: "compact-duel-island-v4";
+  readonly position: Readonly<{ x: 398; z: 370 }>;
+  readonly rotation: 0;
+  readonly layoutSeed: "compact-bank-lodge01:360,318:8x8:south";
+  readonly recipeId: "compact-bank-lodge01-v1";
+}
+
+/** Complete configuration loaded from assets/manifests/world-config.json. */
 export interface WorldConfigManifest {
   /** Manifest version for compatibility checking */
   version: number;
@@ -1387,6 +1397,8 @@ export interface WorldConfigManifest {
   seed: number;
   /** Version-2 compact-only frozen functional trees, using normal tile ownership. */
   compactResourceGroves?: CompactResourceGrovesManifest;
+  /** Optional, explicitly admitted preparation architecture; no town/NPC generation. */
+  compactPreparationLodge?: CompactPreparationLodgeManifest;
 }
 
 // ============== BUILDINGS MANIFEST TYPES ==============

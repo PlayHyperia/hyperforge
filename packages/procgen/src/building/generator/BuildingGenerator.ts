@@ -1374,11 +1374,12 @@ export class BuildingGenerator {
   }
 
   /**
-   * Dispose of resources
+   * Dispose instance material. Whole-world teardown may also clear the shared
+   * primitive cache (legacy default); individual building leases must retain it.
    */
-  dispose(): void {
+  dispose(options: { clearGeometryCache?: boolean } = {}): void {
     this.uberMaterial.dispose();
-    geometryCache.clear();
+    if (options.clearGeometryCache !== false) geometryCache.clear();
   }
 
   /**

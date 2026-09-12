@@ -8,6 +8,26 @@ export type TerrainGridSample = {
   faceIndex: number;
 };
 
+export type TerrainGridBounds = {
+  minX: number;
+  maxX: number;
+  minZ: number;
+  maxZ: number;
+};
+
+export type TerrainTriangleVisitor = (
+  ax: number,
+  ay: number,
+  az: number,
+  bx: number,
+  by: number,
+  bz: number,
+  cx: number,
+  cy: number,
+  cz: number,
+  faceIndex: number,
+) => void;
+
 /** One installed geometry revision, never a procedural or bilinear approximation. */
 export class RetainedTerrainSurface {
   readonly revision: string;
@@ -97,6 +117,103 @@ export class RetainedTerrainSurface {
       geometry.index === this.index &&
       geometry.index?.version === this.indexVersion
     );
+  }
+
+  /**
+   * Bounded read-only access to original main-grid triangles (never skirts).
+   * Bounds and vertices are chunk-local. The caller clips candidate triangles
+   * to its exact footprint; this method deliberately includes boundary cells.
+   */
+  visitTrianglesInBounds(
+    bounds: TerrainGridBounds,
+    visit: TerrainTriangleVisitor,
+    triangleBudget: number,
+  ): { visited: number; exhausted: boolean } {
+    if (
+      ![bounds.minX, bounds.maxX, bounds.minZ, bounds.maxZ].every(
+        Number.isFinite,
+      ) ||
+      bounds.minX > bounds.maxX ||
+      bounds.minZ > bounds.maxZ ||
+      !Number.isSafeInteger(triangleBudget) ||
+      triangleBudget < 0 ||
+      triangleBudget > 1_000_000
+    )
+      throw new Error("Invalid retained triangle query");
+    const half = this.size / 2;
+    if (
+      bounds.maxX < -half ||
+      bounds.minX > half ||
+      bounds.maxZ < -half ||
+      bounds.minZ > half
+    )
+      return { visited: 0, exhausted: false };
+    const p = this.positions;
+    const r = this.resolution;
+    // Search the actual Float32 axes, not an idealized division. At equality,
+    // include both cells touching a boundary; otherwise visit only its owner.
+    const axisBound = (
+      value: number,
+      stride: number,
+      offset: number,
+      upper: boolean,
+    ) => {
+      let low = 0,
+        high = r;
+      while (low < high) {
+        const middle = (low + high) >>> 1;
+        if (
+          p[middle * stride + offset] < value ||
+          (upper && p[middle * stride + offset] === value)
+        )
+          low = middle + 1;
+        else high = middle;
+      }
+      return low;
+    };
+    const x0 = Math.max(0, axisBound(bounds.minX, 3, 0, false) - 1);
+    const x1 = Math.min(r - 2, axisBound(bounds.maxX, 3, 0, true) - 1);
+    const z0 = Math.max(0, axisBound(bounds.minZ, r * 3, 2, false) - 1);
+    const z1 = Math.min(r - 2, axisBound(bounds.maxZ, r * 3, 2, true) - 1);
+    let visited = 0;
+    for (let z = z0; z <= z1; z++) {
+      for (let x = x0; x <= x1; x++) {
+        const a = (z * r + x) * 3;
+        const b = a + 3;
+        const c = a + r * 3;
+        const d = c + 3;
+        const face = (z * (r - 1) + x) * 2;
+        if (visited === triangleBudget) return { visited, exhausted: true };
+        visit(
+          p[a],
+          p[a + 1],
+          p[a + 2],
+          p[c],
+          p[c + 1],
+          p[c + 2],
+          p[b],
+          p[b + 1],
+          p[b + 2],
+          face,
+        );
+        visited++;
+        if (visited === triangleBudget) return { visited, exhausted: true };
+        visit(
+          p[b],
+          p[b + 1],
+          p[b + 2],
+          p[c],
+          p[c + 1],
+          p[c + 2],
+          p[d],
+          p[d + 1],
+          p[d + 2],
+          face + 1,
+        );
+        visited++;
+      }
+    }
+    return { visited, exhausted: false };
   }
 
   /** Local X/Z are the exact Float32 instance offsets used by the grass shader. */

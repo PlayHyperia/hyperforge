@@ -29,6 +29,7 @@ type RuntimePhysX = {
   PxVec3: new (x: number, y: number, z: number) => PxVec3;
   PxQuat: new (x: number, y: number, z: number, w: number) => PxQuat;
   PxIDENTITYEnum: { PxIdentity: unknown };
+  destroy: (obj: unknown) => void;
   PxRigidBodyExt?: {
     setMassAndUpdateInertia: (actor: unknown, mass: number) => void;
     addForceAtPos: (
@@ -127,6 +128,7 @@ export class RigidBody extends Node {
   _mass: number = defaults.mass;
   _linearDamping: number = defaults.linearDamping;
   _angularDamping: number = defaults.angularDamping;
+  private nativePhysX: RuntimePhysX | null = null;
 
   constructor(data: RigidBodyData = {}) {
     super(data);
@@ -169,122 +171,145 @@ export class RigidBody extends Node {
       return;
     }
 
-    // Initialize PhysX objects now that PHYSX is available
-    if (!this._tm) {
-      this._tm = new physx.PxTransform(
-        physx.PxIDENTITYEnum.PxIdentity,
-      ) as PxTransform;
-    }
-
-    // Force decompose using temporary plain vectors
-    const plainPos = new THREE.Vector3();
-    const plainQuat = new THREE.Quaternion();
-    const plainScale = new THREE.Vector3();
-    const plainMatrix = new THREE.Matrix4().copy(this.matrixWorld);
-    plainMatrix.decompose(plainPos, plainQuat, plainScale);
-    _v1.copy(plainPos);
-    _q1.copy(plainQuat);
-    _v2.copy(plainScale);
-
-    // Create transform and set position/rotation
-    this.transform = new physx.PxTransform(
-      physx.PxIDENTITYEnum.PxIdentity,
-    ) as PxTransform;
-    // Set position
-    if (this.transform.p) {
-      this.transform.p.x = _v1.x;
-      this.transform.p.y = _v1.y;
-      this.transform.p.z = _v1.z;
-    }
-    // Set rotation
-    if (this.transform.q) {
-      this.transform.q.x = _q1.x;
-      this.transform.q.y = _q1.y;
-      this.transform.q.z = _q1.z;
-      this.transform.q.w = _q1.w;
-    }
-
-    if (this._type === "static") {
-      this.actor = this.ctx!.physics.physics.createRigidStatic(
-        this.transform,
-      ) as PxRigidStatic;
-    } else if (this._type === "kinematic") {
-      const dynamicActor = this.ctx!.physics.physics.createRigidDynamic(
-        this.transform,
-      ) as PxRigidDynamic;
-      this.actor = dynamicActor;
-      if (dynamicActor.setRigidBodyFlag) {
-        dynamicActor.setRigidBodyFlag(1, true); // PxRigidBodyFlag.eKINEMATIC
-      }
-      if (physx.PxRigidBodyExt?.setMassAndUpdateInertia) {
-        physx.PxRigidBodyExt.setMassAndUpdateInertia(dynamicActor, this._mass);
-      }
-    } else if (this._type === "dynamic") {
-      const dynamicActor = this.ctx!.physics.physics.createRigidDynamic(
-        this.transform,
-      ) as PxRigidDynamic;
-      this.actor = dynamicActor;
-      if (physx.PxRigidBodyExt?.setMassAndUpdateInertia) {
-        physx.PxRigidBodyExt.setMassAndUpdateInertia(dynamicActor, this._mass);
-      }
-      if (this._centerOfMass) {
-        const pose = new physx.PxTransform(
+    if (this.actor) return;
+    this.nativePhysX = physx;
+    try {
+      // Initialize PhysX objects now that PHYSX is available
+      if (!this._tm) {
+        this._tm = new physx.PxTransform(
           physx.PxIDENTITYEnum.PxIdentity,
         ) as PxTransform;
-        // Set center of mass position
-        if (pose.p) {
-          pose.p.x = this._centerOfMass.x;
-          pose.p.y = this._centerOfMass.y;
-          pose.p.z = this._centerOfMass.z;
+      }
+
+      // Force decompose using temporary plain vectors
+      const plainPos = new THREE.Vector3();
+      const plainQuat = new THREE.Quaternion();
+      const plainScale = new THREE.Vector3();
+      const plainMatrix = new THREE.Matrix4().copy(this.matrixWorld);
+      plainMatrix.decompose(plainPos, plainQuat, plainScale);
+      _v1.copy(plainPos);
+      _q1.copy(plainQuat);
+      _v2.copy(plainScale);
+
+      // Create transform and set position/rotation
+      this.transform = new physx.PxTransform(
+        physx.PxIDENTITYEnum.PxIdentity,
+      ) as PxTransform;
+      // Set position
+      if (this.transform.p) {
+        this.transform.p.x = _v1.x;
+        this.transform.p.y = _v1.y;
+        this.transform.p.z = _v1.z;
+      }
+      // Set rotation
+      if (this.transform.q) {
+        this.transform.q.x = _q1.x;
+        this.transform.q.y = _q1.y;
+        this.transform.q.z = _q1.z;
+        this.transform.q.w = _q1.w;
+      }
+
+      if (this._type === "static") {
+        this.actor = this.ctx!.physics.physics.createRigidStatic(
+          this.transform,
+        ) as PxRigidStatic;
+      } else if (this._type === "kinematic") {
+        const dynamicActor = this.ctx!.physics.physics.createRigidDynamic(
+          this.transform,
+        ) as PxRigidDynamic;
+        this.actor = dynamicActor;
+        if (dynamicActor.setRigidBodyFlag) {
+          dynamicActor.setRigidBodyFlag(1, true); // PxRigidBodyFlag.eKINEMATIC
         }
-        // PhysXActor interface includes setCMassLocalPose
-        if (dynamicActor && "setCMassLocalPose" in dynamicActor) {
-          (dynamicActor as PhysXActor).setCMassLocalPose?.(pose);
+        if (physx.PxRigidBodyExt?.setMassAndUpdateInertia) {
+          physx.PxRigidBodyExt.setMassAndUpdateInertia(
+            dynamicActor,
+            this._mass,
+          );
+        }
+      } else if (this._type === "dynamic") {
+        const dynamicActor = this.ctx!.physics.physics.createRigidDynamic(
+          this.transform,
+        ) as PxRigidDynamic;
+        this.actor = dynamicActor;
+        if (physx.PxRigidBodyExt?.setMassAndUpdateInertia) {
+          physx.PxRigidBodyExt.setMassAndUpdateInertia(
+            dynamicActor,
+            this._mass,
+          );
+        }
+        if (this._centerOfMass) {
+          const pose = new physx.PxTransform(
+            physx.PxIDENTITYEnum.PxIdentity,
+          ) as PxTransform;
+          try {
+            // Set center of mass position
+            if (pose.p) {
+              pose.p.x = this._centerOfMass.x;
+              pose.p.y = this._centerOfMass.y;
+              pose.p.z = this._centerOfMass.z;
+            }
+            // PhysXActor interface includes setCMassLocalPose
+            if (dynamicActor && "setCMassLocalPose" in dynamicActor) {
+              (dynamicActor as PhysXActor).setCMassLocalPose?.(pose);
+            }
+          } finally {
+            physx.destroy(pose);
+          }
+        }
+        dynamicActor.setLinearDamping?.(this._linearDamping);
+        dynamicActor.setAngularDamping?.(this._angularDamping);
+      }
+
+      // Convert Set to Array for compatibility with older TypeScript targets
+      const shapesArray = Array.from(this.shapes);
+      for (const shape of shapesArray) {
+        if (this.actor && "attachShape" in this.actor) {
+          // PhysXActor interface includes attachShape
+          (this.actor as PhysXActor).attachShape?.(shape as PxShape);
         }
       }
-      dynamicActor.setLinearDamping?.(this._linearDamping);
-      dynamicActor.setAngularDamping?.(this._angularDamping);
-    }
 
-    // Convert Set to Array for compatibility with older TypeScript targets
-    const shapesArray = Array.from(this.shapes);
-    for (const shape of shapesArray) {
-      if (this.actor && "attachShape" in this.actor) {
-        // PhysXActor interface includes attachShape
-        (this.actor as PhysXActor).attachShape?.(shape as PxShape);
+      const entity = this.ctx!.entity as
+        { isPlayer?: boolean; data?: EntityData } | undefined;
+      // Strong type assumption - entity.data is always EntityData if entity exists
+      const playerId = entity?.isPlayer && entity.data ? entity.data.id : null;
+      const handleOptions = {
+        onInterpolate:
+          this._type === "kinematic" || this._type === "dynamic"
+            ? this.onInterpolate
+            : null,
+        node: this,
+        tag: this._tag,
+        playerId: playerId,
+        onContactStart: this._onContactStart,
+        onContactEnd: this._onContactEnd,
+        onTriggerEnter: this._onTriggerEnter,
+        onTriggerLeave: this._onTriggerLeave,
+        contactedHandles: new Set(),
+        triggeredHandles: new Set(),
+        controller: false,
+      } as PhysicsHandle;
+      // Physics.addActor is properly typed now
+      if (!this.actor) {
+        this.unmount();
+        return;
       }
+      const handle = this.ctx!.physics.addActor(
+        this.actor as PxActor,
+        handleOptions,
+      );
+      this.actorHandle = handle ?? null;
+    } catch (error) {
+      // Retire partially constructed native ownership without replacing the
+      // original mount failure if teardown also encounters an error.
+      try {
+        this.unmount();
+      } catch {
+        // The original failure remains authoritative.
+      }
+      throw error;
     }
-
-    const entity = this.ctx!.entity as
-      { isPlayer?: boolean; data?: EntityData } | undefined;
-    // Strong type assumption - entity.data is always EntityData if entity exists
-    const playerId = entity?.isPlayer && entity.data ? entity.data.id : null;
-    const handleOptions = {
-      onInterpolate:
-        this._type === "kinematic" || this._type === "dynamic"
-          ? this.onInterpolate
-          : null,
-      node: this,
-      tag: this._tag,
-      playerId: playerId,
-      onContactStart: this._onContactStart,
-      onContactEnd: this._onContactEnd,
-      onTriggerEnter: this._onTriggerEnter,
-      onTriggerLeave: this._onTriggerLeave,
-      contactedHandles: new Set(),
-      triggeredHandles: new Set(),
-      controller: false,
-    } as PhysicsHandle;
-    // Physics.addActor is properly typed now
-    if (!this.actor) {
-      this.actorHandle = null;
-      return;
-    }
-    const handle = this.ctx!.physics.addActor(
-      this.actor as PxActor,
-      handleOptions,
-    );
-    this.actorHandle = handle ?? null;
   }
 
   commit(didMove: boolean) {
@@ -326,15 +351,30 @@ export class RigidBody extends Node {
   };
 
   unmount() {
-    if (this.actor) {
-      // this.untrack()
-      // this.untrack = null
-      if (this.actorHandle) {
-        this.actorHandle.destroy();
+    const actor = this.actor;
+    const handle = this.actorHandle;
+    const transform = this.transform;
+    const target = this._tm;
+    const physx = this.nativePhysX;
+    this.actor = null;
+    this.actorHandle = null;
+    this.transform = null;
+    this._tm = null;
+    this.nativePhysX = null;
+    try {
+      handle?.destroy();
+    } finally {
+      try {
+        actor?.release();
+      } finally {
+        // These are standalone constructors owned by this node. Their p/q
+        // fields are borrowed native member views and must not be destroyed.
+        try {
+          if (transform) physx?.destroy(transform);
+        } finally {
+          if (target) physx?.destroy(target);
+        }
       }
-      this.actorHandle = null;
-      this.actor.release();
-      this.actor = null;
     }
   }
 
@@ -654,8 +694,8 @@ export class RigidBody extends Node {
   }
 
   setKinematicTarget(position: THREE.Vector3, quaternion: THREE.Quaternion) {
-    const physx = getRuntimePhysX();
-    if (this._type !== "kinematic" || !physx) {
+    const physx = this.nativePhysX;
+    if (this._type !== "kinematic" || !this.actor || !physx) {
       return; // Early return for non-kinematic bodies
     }
     if (!this._tm) {
