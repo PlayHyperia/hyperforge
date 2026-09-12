@@ -138,14 +138,17 @@ describe("actual compact TerrainSystem biome/shore/worker integration", () => {
     expect(internals.flatZonesByTile.size).toBe(0);
   });
 
-  it("repeatedly loads the actual 23-zone manifest without duplicates or losing any of the eight arena overlays", () => {
+  it("repeatedly loads the actual 19-zone manifest without duplicates or losing any of the three arena overlays", () => {
     const terrain = new TerrainSystem(new World());
     const internals = terrain as unknown as TerrainInternals;
     internals.initializeTerrainGenerator();
     let indexedReferenceCount: number | null = null;
     for (let pass = 0; pass < 3; pass++) {
       internals.loadFlatZonesFromManifest();
-      expect(internals.flatZones.size).toBe(18);
+      expect(internals.flatZones.size).toBe(19);
+      expect(
+        internals.flatZones.get("central_haven_lodge_grass_clearance"),
+      ).toMatchObject({ excludeGrass: true, width: 10, depth: 12.06 });
       expect(internals.arenaFloorZoneIds.size).toBe(3);
       let references = 0;
       for (const zones of internals.flatZonesByTile.values()) {

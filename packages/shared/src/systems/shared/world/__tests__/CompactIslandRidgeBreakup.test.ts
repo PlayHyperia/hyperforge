@@ -79,6 +79,14 @@ describe("shared broken-ridge sculpt", () => {
           manifest.lobby.size = { width: 40, depth: 25 };
           manifest.hospital.size = { width: 28, depth: 23 };
         }
+        if (replacement === old && name === "world-areas.json") {
+          const haven = manifest.starterTowns.central_haven;
+          delete haven.flatZones[0].excludeGrass;
+          haven.flatZones = haven.flatZones.filter(
+            (zone: { id: string }) =>
+              zone.id !== "central_haven_lodge_grass_clearance",
+          );
+        }
         builder.record(name, manifest);
       }
       return builder.build(replacement.terrainProfile!);

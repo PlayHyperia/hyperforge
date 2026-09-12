@@ -141,7 +141,12 @@ describe("actual TerrainSystem regional grass snapshots", () => {
         bounds.maxX,
         bounds.maxZ,
       );
-      expect(complete.zones).toHaveLength(18);
+      expect(complete.zones).toHaveLength(19);
+      expect(
+        complete.zones.find(
+          (zone) => zone.id === "central_haven_lodge_grass_clearance",
+        ),
+      ).toMatchObject({ excludeGrass: true, width: 10, depth: 12.06 });
       expect(complete.arenaFloorIds).toHaveLength(3);
       expect(complete.waterBodies).toHaveLength(1);
     });
@@ -262,7 +267,7 @@ describe("actual TerrainSystem regional grass snapshots", () => {
       expect(snapshot.zones.map((zone) => zone.id)).toEqual([
         ...internals.flatZones.keys(),
       ]);
-      expect(snapshot.zones).toHaveLength(18);
+      expect(snapshot.zones).toHaveLength(19);
       expect(snapshot.waterBodies).toHaveLength(1);
     });
   });
@@ -270,6 +275,7 @@ describe("actual TerrainSystem regional grass snapshots", () => {
   it("loads only the intended natural grade/pond grass opt-ins while default pads stay excluded", async () => {
     await withTerrain((terrain, internals) => {
       const expectedAllowedIds = [
+        "central_haven_plaza",
         "haven_pond_floor",
         "preparation_campus_grade",
       ];

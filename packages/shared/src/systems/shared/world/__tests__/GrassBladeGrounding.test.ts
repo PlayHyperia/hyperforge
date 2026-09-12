@@ -907,6 +907,11 @@ describe("actual v4 production-worker contact regressions and per-install CPU re
     await terrain.init();
     terrain["loadWaterBodiesFromManifest"]();
     terrain["loadFlatZonesFromManifest"]();
+    // Recorded blade IDs and gap magnitudes belong to the previous plaza.
+    // Preserve the original regression input, not newly re-phased blade IDs.
+    terrain.unregisterFlatZone("central_haven_lodge_grass_clearance");
+    const plaza = terrain["flatZones"].get("central_haven_plaza")!;
+    terrain.registerFlatZone({ ...plaza, excludeGrass: undefined });
     terrain["subscribeRoadNetworkEvents"]();
     await roads.init();
     await roads.start();

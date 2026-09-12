@@ -280,6 +280,15 @@ describe("explicit western rocky terrace successor", () => {
           manifest.lobby.size = { width: 40, depth: 25 };
           manifest.hospital.size = { width: 28, depth: 23 };
         }
+        // Neither historical world contained the later natural-plaza layout.
+        if (name === "world-areas.json") {
+          const haven = manifest.starterTowns.central_haven;
+          delete haven.flatZones[0].excludeGrass;
+          haven.flatZones = haven.flatZones.filter(
+            (zone: { id: string }) =>
+              zone.id !== "central_haven_lodge_grass_clearance",
+          );
+        }
         builder.record(name, manifest);
       }
       return builder.build(profile);

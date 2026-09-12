@@ -9,6 +9,10 @@ import type {
   RadialPondTerrainProfile,
 } from "../../../../types/world/terrain";
 import { TerrainSystem } from "../TerrainSystem";
+import {
+  COMPACT_PREPARATION_LODGE,
+  getCompactPreparationLodgeFootprint,
+} from "../CompactPreparationLodge";
 
 type ManifestArea = WorldArea & {
   flatZones?: Array<{
@@ -20,6 +24,7 @@ type ManifestArea = WorldArea & {
     height?: number;
     heightOffset?: number;
     blendRadius: number;
+    excludeGrass?: boolean;
     radialPond?: RadialPondTerrainProfile;
   }>;
 };
@@ -87,6 +92,96 @@ function stationArea(id: string, x: number, z: number): ManifestArea {
 }
 
 describe("TerrainSystem deterministic manifest station grading", () => {
+  it("releases natural plaza ground without changing heights or removing station and lodge protection", () => {
+    const current = terrainFor(actualAreas);
+    const previousAreas = structuredClone(actualAreas);
+    const previousHaven = previousAreas.central_haven;
+    previousHaven.flatZones = previousHaven.flatZones!.filter(
+      (zone) => zone.id !== "central_haven_lodge_grass_clearance",
+    );
+    delete previousHaven.flatZones![0].excludeGrass;
+    const previous = terrainFor(previousAreas);
+    const plaza = current.internals.flatZones.get("central_haven_plaza")!;
+    const lodge = current.internals.flatZones.get(
+      "central_haven_lodge_grass_clearance",
+    )!;
+    expect(plaza.excludeGrass).toBe(false);
+    expect(lodge).toMatchObject({
+      excludeGrass: true,
+      centerX: 350,
+      centerZ: 326.97,
+      width: 10,
+      depth: 12.06,
+      height: plaza.height,
+      blendRadius: 0,
+    });
+    // The only extra shaping zone is inside the already constant campus grade.
+    // Compare the real resolver, including pond and automatic station pads.
+    let released = 0;
+    for (let x = 300; x <= 400; x += 0.5)
+      for (let z = 275; z <= 390; z += 0.5) {
+        expect(current.terrain.getHeightAt(x, z)).toBe(
+          previous.terrain.getHeightAt(x, z),
+        );
+        const wasExcluded = previous.terrain["isGrassExcludedAt"](x, z);
+        const excluded = current.terrain["isGrassExcludedAt"](x, z);
+        if (wasExcluded && !excluded) {
+          released += 0.25;
+          expect(Math.abs(x - plaza.centerX)).toBeLessThanOrEqual(24);
+          expect(Math.abs(z - plaza.centerZ)).toBeLessThanOrEqual(24);
+        }
+        // The lodge is wholly inside the old exclusion, not new distant clearing.
+        if (!wasExcluded) expect(excluded).toBe(false);
+      }
+    // Measured half-meter-grid area; this is not a continuous area integral.
+    expect(released).toBe(797.25);
+    process.stdout.write(
+      `Plaza released sampled area: ${released} square meters\n`,
+    );
+    expect(padHeights(current.internals)).toEqual(
+      padHeights(previous.internals),
+    );
+    for (const [id, pad] of current.internals.flatZones) {
+      if (!id.startsWith("station_")) continue;
+      expect(pad).toEqual(previous.internals.flatZones.get(id));
+      // Existing full pad/core/blend remains excluded on both roles.
+      for (
+        let x = pad.centerX - pad.width / 2;
+        x <= pad.centerX + pad.width / 2;
+        x += 0.5
+      )
+        for (
+          let z = pad.centerZ - pad.depth / 2;
+          z <= pad.centerZ + pad.depth / 2;
+          z += 0.5
+        )
+          expect(current.terrain["isGrassExcludedAt"](x, z)).toBe(true);
+    }
+    const footprint = getCompactPreparationLodgeFootprint(
+      COMPACT_PREPARATION_LODGE,
+    );
+    // Shared footprint includes actual roof trim and every foundation step.
+    expect(lodge.centerX - lodge.width / 2).toBeCloseTo(
+      footprint.minX - 0.5,
+      6,
+    );
+    expect(lodge.centerX + lodge.width / 2).toBeCloseTo(
+      footprint.maxX + 0.5,
+      6,
+    );
+    expect(lodge.centerZ - lodge.depth / 2).toBeCloseTo(
+      footprint.minZ - 0.5,
+      6,
+    );
+    expect(lodge.centerZ + lodge.depth / 2).toBeCloseTo(
+      footprint.maxZ + 0.5,
+      6,
+    );
+    for (let x = footprint.minX; x <= footprint.maxX; x += 0.25)
+      for (let z = footprint.minZ; z <= footprint.maxZ; z += 0.25)
+        expect(current.terrain["isGrassExcludedAt"](x, z)).toBe(true);
+  });
+
   beforeEach(() => {
     // Global test setup loads the real station/model-bounds manifests. Fail
     // instead of silently exercising fallback dimensions when assets are absent.

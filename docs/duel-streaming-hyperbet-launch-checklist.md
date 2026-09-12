@@ -1,5 +1,29 @@
 # Duel Arena, Streaming, and Hyperbet Launch Checklist
 
+## Natural preparation ground — 2026-09-12
+
+- [x] Separate the Central Haven plaza's level grade from grass suppression.
+      Preserve all existing station pads, routes, NPCs and functional trees.
+      Add only a 0.5m-outset lodge/steps clearance using the same grade.
+- [x] Compare 46,431 real resolver height samples against the previous layout:
+      all identical. Released half-meter-grid area: 797.25 square meters.
+      Retain every automatic station pad and the complete building envelope.
+- [x] Current six-leaf worker census: 2,352 clumps at unchanged density.
+      Actual preparation grounding installs 186 clumps including 42 inside the
+      formerly excluded plaza; worker/CPU arrays agree. Preserve historical
+      census oracles with an explicitly historical surface fixture.
+- [x] Pass 1,157 tests/84 files, three typechecks and seven native preflights.
+      Inspect all eight native views: 2,275 installed clumps,55 in the former plaza,
+      same six chunks, correct per-camera draws and zero excluded roots.
+      Verify675 pins/596 archives/14 PNGs, camera restoration and owned cleanup.
+      No page/GPU/cleanup errors; overall still fails19 cow/dagger content errors.
+- [ ] Continue soil/grass/understory art composition and natural terrain forms.
+      This bounded layout change is not AAA, motion, GPU/FPS or launch acceptance.
+
+Evidence: `docs/natural-preparation-ground-20260912.md`,
+`asset-studio/compact-smithy-court01/plaza-*` and
+`asset-studio/game-test-integration/plaza-ground-probe01/`.
+
 ## Grass culling follows the rendered camera — 2026-09-12
 
 - [x] Reproduce stale-camera culling against actual generated/grounded preparation

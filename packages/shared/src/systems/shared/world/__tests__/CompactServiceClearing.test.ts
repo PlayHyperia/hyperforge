@@ -432,8 +432,14 @@ describe("five surface-only service clearings, actual CPU owners (not native vis
     }
   });
 
-  it("records actual mask rephase and preserves the complete six-leaf native-worker census without changing RNG", async () => {
+  it("records the previous plaza's mask rephase and complete six-leaf native-worker census without changing RNG", async () => {
     const f = await fixture();
+    // Historical clearings were qualified while the broad plaza excluded grass.
+    // Retain that exact oracle; current plaza grounding/worker parity is covered
+    // independently in CompactGrassProfile, without rewriting these census hashes.
+    f.terrain.unregisterFlatZone("central_haven_lodge_grass_clearance");
+    const plaza = f.terrain["flatZones"].get("central_haven_plaza")!;
+    f.terrain.registerFlatZone({ ...plaza, excludeGrass: undefined });
     const tree = new TerrainQuadTree({
       minSize: 100,
       maxDepth: 4,

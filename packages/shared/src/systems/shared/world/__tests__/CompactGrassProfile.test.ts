@@ -75,6 +75,7 @@ function workerSession() {
 
 async function fixture(
   profile: WorldTerrainProfile = SCULPTED_COMPACT_WORLD_TERRAIN_PROFILE,
+  previousPlaza = false,
 ) {
   await DataManager.getInstance().initialize();
   const world = new World();
@@ -87,6 +88,13 @@ async function fixture(
   await terrain.init();
   terrain["loadWaterBodiesFromManifest"]();
   terrain["loadFlatZonesFromManifest"]();
+  if (previousPlaza) {
+    // Explicit historical surface fixture. Preserve old census oracles when
+    // comparing terrain algorithms; the current manifest is tested separately.
+    terrain.unregisterFlatZone("central_haven_lodge_grass_clearance");
+    const plaza = terrain["flatZones"].get("central_haven_plaza")!;
+    terrain.registerFlatZone({ ...plaza, excludeGrass: undefined });
+  }
   terrain["subscribeRoadNetworkEvents"]();
   await roads.init();
   await roads.start();
@@ -542,7 +550,7 @@ describe("opt-in compact grass, actual terrain and native worker (not GPU proof)
         "c7c9709722f56bbefdd377ae17a1733a253ac9ec847749a397440e0d2c9fe90b",
       ],
     ];
-    const f = await fixture(SCULPTED_COMPACT_V3_PROFILE_FIXTURE);
+    const f = await fixture(SCULPTED_COMPACT_V3_PROFILE_FIXTURE, true);
     try {
       const owner = f.manager(COMPACT_ISLAND_GRASS_VISUAL_PROFILE).owner;
       const receipts = [];
@@ -633,6 +641,74 @@ describe("opt-in compact grass, actual terrain and native worker (not GPU proof)
     ).toThrow();
   });
 
+  it("grounds the current natural plaza with unchanged density, actual worker/CPU parity and retained service exclusions", async () => {
+    const f = await fixture();
+    try {
+      const { owner } = f.manager(COMPACT_ISLAND_GRASS_VISUAL_PROFILE);
+      const counts: number[] = [];
+      for (const node of f.nodes) {
+        const input = owner["createWorkerInput"](
+          node,
+          owner["chunkKey"](node),
+          1,
+        );
+        const output = await f.worker.run(input);
+        const sync = owner["generateInstanceData"](node, 1)!;
+        expect(sync.count).toBe(output.count);
+        for (const key of [
+          "offsets",
+          "rotScaleHash",
+          "groundColors",
+          "grassTints",
+          "groundNormals",
+        ] as const)
+          for (let i = 0; i < sync[key].length; i++)
+            expect(sync[key][i]).toBeCloseTo(output[key][i], 4);
+        counts.push(output.count);
+      }
+      process.stdout.write(
+        `Current plaza worker census: ${JSON.stringify(counts)}\n`,
+      );
+      expect(counts).toEqual([271, 495, 212, 532, 493, 349]);
+      // Unaffected leaves retain the published pre-plaza geometry census.
+      expect([counts[0], counts[1], counts[3], counts[4]]).toEqual([
+        271, 495, 532, 493,
+      ]);
+      expect(counts[2]).toBeGreaterThan(139);
+      const node = f.nodes[2];
+      f.installSupport(node);
+      const { key, entry, data } = await queueGrounding(f, owner, node);
+      expect(data.count).toBe(counts[2]);
+      expect(finishGrounding(owner, key)).toBe(1);
+      const state = entry.job.state;
+      expect(state.status).toBe("ready");
+      if (state.status !== "ready")
+        throw new Error("Current plaza failed actual grounding");
+      const result = state.result;
+      let naturalPlazaClumps = 0;
+      for (let i = 0; i < result.data.count; i++) {
+        const x = node.centerX + result.data.offsets[i * 3];
+        const z = node.centerZ + result.data.offsets[i * 3 + 2];
+        expect(f.terrain["isGrassExcludedAt"](x, z)).toBe(false);
+        expect(
+          f.terrain["calculateRoadInfluenceAtVertex"](x, z, 0, 0),
+        ).toBeLessThanOrEqual(0.8);
+        if (x >= 326 && x <= 374 && z >= 296 && z <= 344) naturalPlazaClumps++;
+      }
+      expect(result.data.count).toBe(186);
+      expect(naturalPlazaClumps).toBe(42);
+      expect(result.receipt.rejected.pad).toBeGreaterThan(0);
+      expect(result.receipt.maxAcceptedBaseError).toBeLessThanOrEqual(0.05);
+      expect(result.rootDeltas.byteLength).toBe(result.data.count * 96);
+      expect(owner["chunks"].get(key)!.mesh.count).toBe(result.data.count);
+      process.stdout.write(
+        `Current plaza grounded census: ${JSON.stringify({ accepted: result.data.count, naturalPlazaClumps, receipt: result.receipt })}\n`,
+      );
+    } finally {
+      await f.close();
+    }
+  });
+
   it.each([
     {
       profile: SCULPTED_COMPACT_V2_PROFILE_FIXTURE,
@@ -659,9 +735,9 @@ describe("opt-in compact grass, actual terrain and native worker (not GPU proof)
       leaves: [271, 495, 139, 532, 493, 343],
     },
   ])(
-    "preserves legacy density and measures actual native-worker census for $profile.id",
+    "preserves the previous plaza's native-worker census for $profile.id",
     async ({ profile, total: candidateTotal, fixedLod1, leaves }) => {
-      const f = await fixture(profile);
+      const f = await fixture(profile, true);
       try {
         const fixed = f.manager(STREAMING_GRASS_VISUAL_PROFILE).owner;
         const candidate = f.manager(COMPACT_ISLAND_GRASS_VISUAL_PROFILE).owner;
