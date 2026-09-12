@@ -27,6 +27,12 @@ Dated sections below retain evidence and superseded experiments.
 
 ## Active functional woodland and surface fidelity — 2026-09-11
 
+- [x] Push selected rocky-terrain checkpoint `6043406d0f` and paired assets
+  `bec5498a2a`: all 27 game blobs and 10 asset raw/LFS identities match tested
+  pins; exact remote heads and GitHub author/committer `dreaminglucid` verified.
+  Six LFS objects (21 MB) uploaded. No merge/deployment or unrelated staging.
+  Native62 remains an improved working base, not whole-scene AAA approval.
+
 - [x] Push water/fog checkpoint `0ff98bf094`; all nine tested game-file blobs
   match the commit, exact remote head and GitHub author/committer
   `dreaminglucid` verified. No merge/deployment. Native61 evidence remains the
@@ -64,10 +70,66 @@ Dated sections below retain evidence and superseded experiments.
   and completed bounded routes in an offline overlay. Actual GLB yaw/scale/
   all-LOD bounds recorded; candidate entities were not published. Southern
   shortfall remains explicit; source art and gameplay balance are not approved.
+- [x] Integrate exactly 19 additional functional trees through explicit grove
+  schema/layout v2: 48 total, including the unchanged original 29. Historical
+  v1 cap/scale admission remains strict. Actual CPU routes, owner reload,
+  depleted scale-0.8 reconnect and real socket serialization pass; snapshot
+  includes all 59 resources (48 trees, unchanged 10 ore and one fish).
+  Native visual/scale/cost, live harvest and persisted restart remain open.
+- [x] Implement the compact-lodge-only analytic shingle footprint candidate,
+  preserving its geometry, colors, scale, roughness and legacy material branch.
+  Root verification passes 903 shared tests/73 files, 139 procgen tests/eight
+  files, 68 capture tests, seven packer tests, four package typechecks, scoped
+  lint/format and client/shared then server builds. These are not GPU-cost proof.
+- [ ] Repeat the matched grove/roof comparison after native63 failed: all 24
+  requested PNGs rendered on nonfallback WebGPU, but one campus BEFORE phase
+  differs by -0.0107118319, exceeding the unchanged 0.01 pairing limit. All 18
+  cameras match exactly; no page/GPU errors, but the comparison is NOT approved.
+  The failure screenshot is a 25th observed image; the success-only fog gate
+  consequently reports a cleanup error despite actual descriptor restoration.
+  All 572 source pins/503 archives and 25 images verify; 48 current trees/scales
+  qualify before the study, but its final census was not reached. All 19 old
+  cow/dagger errors remain. Test browser/services/ports are closed. Retain failed
+  report SHA `ee3358aebfbb58fa7c2ee778e4a3c4be7223f7cb570f0ee5c5bb0eea6380bb88`.
+  Pace captures against natural baseline phases; do not loosen the tolerance.
+- [x] Repeat the grove/roof comparison on unchanged game/asset/build sources:
+  native64 passes all 18 exact-camera/daylight pairs against native62 (maximum
+  phase delta 0.0048018764, exposure delta 0.0000349109). Read-only forward
+  pacing waits 2.603 seconds total across 18 complete rows; no clock/light/camera
+  changes or tolerance relaxation. All 83 capture tests pass before launch.
+  Root verifies 582 current pins, 513 archives (55,511,848 bytes), all 24 PNGs
+  and 48 fog brackets. Both before/after island censuses and lodge/presentation
+  gates pass; no page/GPU/cleanup errors. Native64 report SHA
+  `21daec64e813aa350edd43d4d4aac28fa4184a0c7c784c7d475fc9867db9bdd0`.
+  All 19 cow/dagger errors remain and the overall run is FAILED. Owned browser,
+  launcher and ports are closed. Native63 remains a retained failed run.
+- [x] Select the verified grove/roof slice after independent image and source
+  review. Root and independent audit agree; roof dashes are visibly resolved and western crowns fuller;
+  empty lawn, uniform scarp, oversized hard platforms, foliage lighting and
+  character/content blockers remain. No whole-scene AAA, motion, sustained FPS,
+  GPU cost, live harvest or launch approval from this diagnostic.
+- [ ] Qualify compact alpha-bearing leaf coverage using the existing four-sample
+  WebGPU path. External draft only: raw filtered alpha plus original dissolve,
+  preserved opaque bark/legacy material and hard shadow behavior. No game code,
+  assets or compression candidates installed yet; proposed tests are unexecuted.
+- [x] Execute the isolated q3 base-level compression study: all eight exact
+  references retain RGBA and the required one Y flip; eight candidates pass
+  actual r186 WASM RGBA/ASTC/BC7 transcodes. Six-map delivery falls from
+  16,267,403 to 5,537,543 bytes, but grass-normal mean/P99 angular errors are
+  9.364/29.236 degrees. This set is NOT approved or installed; original game
+  PNGs remain unchanged. Full mips, native appearance, upload and costs are open.
+- [x] Reject the isolated q4 grass-normal/AO compression candidate: mean/P99
+  angular error stays 9.332/29.025 degrees, AO mean error slightly worsens, and
+  the candidate grows to 1,028,755 bytes. The lossless Zstd alternative decodes
+  every original XYZ/AO byte correctly through actual r186 raw decoding, but is
+  3,903,205 bytes versus the 3,366,439-byte PNG. Original game maps stay unchanged.
+  Root reproduces 34 CPU tests and verifies the frozen report/pins/metrics;
+  public GPU upload, complete mips and native appearance remain unqualified.
+  Report SHA `498747cba763f95e5d5e0ff3939178621a454133076145be31c2cb040f7bc4c3`.
 - [x] Acquire verified official KTX-Software 4.4.2 arm64 tools in an isolated
   external folder: exact publisher SHA, trusted signature/notarization and
-  actual version/help checked. No system installation, runtime changes or
-  encodes. Packed-channel/Y-flip/mip/transcode quality study remains pending.
+  actual version/help checked. No system installation or runtime changes.
+  Subsequent base-level study is recorded above; full mip/native quality remains open.
 - [x] Inspect an isolated official animated-cow candidate without game promotion:
   genuine 400-vertex/796-triangle skinned mesh and six actions; actual source
   scale, excess influences and FBX alpha-import defect need correction and

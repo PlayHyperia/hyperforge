@@ -11,25 +11,36 @@ import type {
   CompactResourceGrovesManifest,
   WorldConfigManifest,
 } from "../../../../types/world/world-types";
-import { COMPACT_WORLD_TERRAIN_PROFILE } from "../WorldTerrainProfile";
+import {
+  COMPACT_WORLD_TERRAIN_PROFILE,
+  SCULPTED_COMPACT_V3_PROFILE_FIXTURE,
+} from "../WorldTerrainProfile";
 import { validateCompactResourceGroves } from "../CompactResourceGroves";
+import layouts from "./fixtures/CompactResourceGroves.layouts.json";
 
 type Mutable<T> = { -readonly [K in keyof T]: Mutable<T[K]> };
 type Layout = Mutable<CompactResourceGrovesManifest>;
 function copy(): Layout {
-  return JSON.parse(
-    canonicalWorldJson(DataManager.getWorldConfig()!.compactResourceGroves),
-  ) as Layout;
+  return structuredClone(layouts.previous) as Layout;
 }
 const profile = () => DataManager.getWorldTerrainProfile();
 
 describe("strict compact resource grove admission", () => {
-  it("admits the detached 16-tree v4 layout without mutating its deeply frozen source", () => {
+  it("admits the detached 35-tree v2 layout without mutating its deeply frozen source", () => {
     const original = DataManager.getWorldConfig()!.compactResourceGroves!;
     const result = validateCompactResourceGroves(original, profile(), 2)!;
     expect(result).toEqual(original);
     expect(result).not.toBe(original);
-    expect(result.regions.flatMap((r) => r.anchors)).toHaveLength(16);
+    expect(result.regions.flatMap((r) => r.anchors)).toHaveLength(35);
+    expect(result.schemaVersion).toBe(2);
+    expect(result.layoutId).toBe("compact-functional-groves-v2");
+    for (const old of layouts.previous.regions)
+      expect(result.regions.find((r) => r.id === old.id)!.anchors).toEqual([
+        ...old.anchors,
+        ...layouts.additions
+          .filter((a) => a.region === old.id)
+          .map(({ region: _region, ...anchor }) => anchor),
+      ]);
     expect(Object.isFrozen(original.regions[0].anchors[0].position)).toBe(true);
     expect(() =>
       Object.assign(original.regions[0].anchors[0].position, { x: 0 }),
@@ -50,6 +61,71 @@ describe("strict compact resource grove admission", () => {
     expect(() =>
       validateCompactResourceGroves(original, COMPACT_WORLD_TERRAIN_PROFILE, 2),
     ).toThrow("version/profile");
+  });
+
+  it("preserves historical v1 cap/scale admission on both original v4 and current v5", () => {
+    for (const terrain of [profile(), SCULPTED_COMPACT_V3_PROFILE_FIXTURE]) {
+      const old = copy();
+      Object.assign(old, { terrainProfileId: terrain.id });
+      expect(validateCompactResourceGroves(old, terrain, 2)).toEqual(old);
+      old.regions[0].anchors[0].scale = 0.8;
+      expect(() => validateCompactResourceGroves(old, terrain, 2)).toThrow(
+        "scale",
+      );
+    }
+    const mixed = structuredClone(
+      DataManager.getWorldConfig()!.compactResourceGroves!,
+    );
+    Object.assign(mixed, {
+      terrainProfileId: SCULPTED_COMPACT_V3_PROFILE_FIXTURE.id,
+    });
+    expect(() =>
+      validateCompactResourceGroves(
+        mixed,
+        SCULPTED_COMPACT_V3_PROFILE_FIXTURE,
+        2,
+      ),
+    ).toThrow("layout identity");
+  });
+
+  it("bounds v2 to 40 anchors and the two exact scales without weakening historical rules", () => {
+    const value = structuredClone(
+      DataManager.getWorldConfig()!.compactResourceGroves!,
+    ) as Layout;
+    const region = value.regions[0];
+    for (let index = 0; index < 5; index++) {
+      const anchor = structuredClone(region.anchors[0]);
+      anchor.position.x = 284.5 + index;
+      anchor.position.z = 382.5;
+      anchor.id = `tree_${anchor.position.x.toFixed(0)}_383`;
+      region.anchors.push(anchor);
+    }
+    expect(
+      validateCompactResourceGroves(value, profile(), 2)!.regions.flatMap(
+        (r) => r.anchors,
+      ),
+    ).toHaveLength(40);
+    const extra = structuredClone(region.anchors.at(-1)!);
+    extra.position.x = 289.5;
+    extra.id = "tree_290_383";
+    region.anchors.push(extra);
+    expect(() => validateCompactResourceGroves(value, profile(), 2)).toThrow(
+      "anchor cap",
+    );
+    region.anchors.pop();
+    for (const scale of [
+      0,
+      0.799999999999,
+      0.9,
+      1.000000000001,
+      Infinity,
+      NaN,
+    ]) {
+      region.anchors[0].scale = scale;
+      expect(() =>
+        validateCompactResourceGroves(value, profile(), 2),
+      ).toThrow();
+    }
   });
 
   it.each([
@@ -237,6 +313,15 @@ describe("strict compact resource grove admission", () => {
     };
     const current = await build(config);
     expect(current).toBe(DataManager.getWorldContentIdentity());
+    const predecessor = structuredClone(config);
+    predecessor.compactResourceGroves = copy();
+    const predecessorIdentity = await build(predecessor);
+    expect(predecessorIdentity).not.toBe(current);
+    expect(predecessor.terrainProfile).toEqual(config.terrainProfile);
+    const predecessorAdmission = new WorldContentAdmission(() => current);
+    predecessorAdmission.beginConnection();
+    expect(predecessorAdmission.admitSnapshot(predecessorIdentity)).toBeNull();
+    expect(predecessorAdmission.allowsPacket("resourceSnapshot")).toBe(false);
     const old = structuredClone(config);
     delete old.compactResourceGroves;
     old.version = 1;

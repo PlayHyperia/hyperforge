@@ -38,7 +38,7 @@ afterEach(async () => {
   for (const world of worlds.splice(0)) world.destroy();
   for (let i = 0; i < 12; i++) await Promise.resolve();
 });
-function fixture() {
+function fixture(groupedTree = false) {
   const world = new World();
   worlds.push(world);
   const network = world.register("network", ClientNetwork) as ClientNetwork;
@@ -52,19 +52,30 @@ function fixture() {
     n.beginResourceAuthority();
     return n.resourceAuthorityToken!;
   };
-  const point = {
-    id: "2_4_tree_0",
-    type: "tree" as const,
-    subType: "banana" as const,
-    position: { x: 288.5, y: 30.5, z: 507.5 },
-    scale: 1.15,
-    rotation: 0.37,
-  };
+  const point = groupedTree
+    ? {
+        id: "tree_337_488",
+        type: "tree" as const,
+        subType: "general" as const,
+        position: { x: 336.5, y: 30.58181478284286, z: 487.5 },
+        scale: 0.8,
+        rotation: DataManager.getWorldConfig()!
+          .compactResourceGroves!.regions.flatMap((r) => r.anchors)
+          .find((a) => a.id === "tree_337_488")!.rotation,
+      }
+    : {
+        id: "2_4_tree_0",
+        type: "tree" as const,
+        subType: "banana" as const,
+        position: { x: 288.5, y: 30.5, z: 507.5 },
+        scale: 1.15,
+        rotation: 0.37,
+      };
   const batch: TerrainResourceSpawnBatch = {
     owner: { tileX: 3, tileZ: 5 },
     spawnPoints: [point],
   };
-  const id = "tree_289_508";
+  const id = groupedTree ? "tree_337_488" : "tree_289_508";
   const snapshot = (isAvailable: boolean, respawnAt = 1) =>
     network.onResourceSnapshot({
       resources: [
@@ -107,6 +118,60 @@ function fixture() {
 }
 
 describe("client resource authority across late join and local residency", () => {
+  for (const snapshotFirst of [true, false]) {
+    it(`keeps the admitted distant scale-0.8 grove depleted across publication, reload and reconnect (snapshot first: ${snapshotFirst})`, async () => {
+      const f = fixture(true);
+      const p = f.batch.spawnPoints[0];
+      const admitted = DataManager.getWorldConfig()!
+        .compactResourceGroves!.regions.flatMap((r) => r.anchors)
+        .find((a) => a.id === f.id)!;
+      expect(admitted.position).toEqual(p.position);
+      expect(admitted.scale).toBe(0.8);
+      expect(
+        Math.hypot(p.position.x - 384.5, p.position.z - 374.5),
+      ).toBeGreaterThan(110);
+      if (snapshotFirst) f.snapshot(false);
+      await f.r.registerTerrainResources(f.batch);
+      if (!snapshotFirst) {
+        expect(f.world.entities.get(f.id)).toBeNull();
+        f.snapshot(false);
+      }
+      await f.settle();
+      const first = f.entity();
+      expect(first.config.modelScale).toBe(0.8);
+      expect(first.config.depletedModelScale).toBe(0.1 * 0.8);
+      expect(first.config.depleted).toBe(true);
+      expect(f.r.resources.get(f.id)?.isAvailable).toBe(false);
+      await f.r.registerTerrainResources(f.batch);
+      expect(f.entity()).toBe(first);
+      expect(first.config.depleted).toBe(true);
+      f.unload();
+      expect(first.destroyed).toBe(true);
+      expect(first.node.parent).toBeNull();
+      expect(f.world.entities.hot.has(first)).toBe(false);
+      await f.r.registerTerrainResources(f.batch);
+      const second = f.entity();
+      expect(second).not.toBe(first);
+      expect(second.config.depleted).toBe(true);
+      const staleToken = f.n.resourceAuthorityToken!;
+      f.begin();
+      expect(second.destroyed).toBe(true);
+      f.system.applyClientResourceState(staleToken, f.id, false);
+      await f.r.registerTerrainResources(f.batch);
+      expect(f.world.entities.get(f.id)).toBeNull();
+      f.snapshot(false, 1); // An expired wall-clock deadline never grants local respawn.
+      await f.settle();
+      expect(f.entity().config.depleted).toBe(true);
+      expect(f.entity().config.modelScale).toBe(0.8);
+      expect(f.r.respawnAtTick.size).toBe(0);
+      first.destroy();
+      second.destroy();
+      expect(f.entity().destroyed).toBe(false);
+      f.network.onResourceRespawned({ resourceId: f.id });
+      expect(f.entity().config.depleted).toBe(false);
+      expect(f.r.resources.get(f.id)?.isAvailable).toBe(true);
+    });
+  }
   for (const snapshotFirst of [true, false]) {
     it(`seeds distant depleted state before local publication (snapshot first: ${snapshotFirst})`, async () => {
       const f = fixture();

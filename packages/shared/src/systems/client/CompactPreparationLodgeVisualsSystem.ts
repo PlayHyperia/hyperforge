@@ -103,6 +103,7 @@ export function createCompactPreparationLodgeVisual(
     });
     const roof = make({
       type: "shingle",
+      shingleFiltering: "footprint-v1",
       baseColor: "#686e6b",
       secondaryColor: "#485759",
       accentColor: "#333e3e",

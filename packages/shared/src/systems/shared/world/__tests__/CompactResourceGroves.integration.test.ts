@@ -16,6 +16,14 @@ import { createCompactResourceGroveNodes } from "../CompactResourceGroves";
 import type { TreeGenerationSource } from "../BiomeResourceGenerator";
 import { isPositionInsideDuelArenaZone } from "../../../../data/duel-manifest";
 import { CollisionFlag } from "../../movement/CollisionFlags";
+import layouts from "./fixtures/CompactResourceGroves.layouts.json";
+import { BFSPathfinder } from "../../movement/BFSPathfinder";
+import {
+  getCardinalAdjacentTiles,
+  worldToTile,
+  type TileCoord,
+} from "../../movement/TileSystem";
+import type { Resource } from "../../../../types/core/core";
 
 // Exact pre-grove candidate03 baseline, not recomputed expectations.
 // Existing authored server quaternion randomness is outside this stable census.
@@ -160,6 +168,9 @@ type TerrainInternals = {
 type ResourceInternals = {
   initializeWorldAreaResources(): Promise<void>;
   terrainResourceTails: Map<string, Promise<void>>;
+  registerTerrainResources(batch: TerrainResourceSpawnBatch): Promise<void>;
+  resources: Map<string, Resource>;
+  respawnAtTick: Map<string, number>;
 };
 const worlds: World[] = [];
 afterEach(() => {
@@ -197,7 +208,7 @@ async function fixture() {
   return { world, manager, terrain, resources, t, r, settle, batches };
 }
 describe("actual compact functional grove tile pipeline", () => {
-  it("publishes 29 actual resources from 9 content owners, retains all 13 prior transforms/species/scales and never duplicates on stationary updates", async () => {
+  it("publishes 48 actual resources from 9 content owners, retains all 29 prior transforms/species/scales and never duplicates on stationary updates", async () => {
     const f = await fixture();
     await f.terrain.start();
     await f.settle();
@@ -209,9 +220,13 @@ describe("actual compact functional grove tile pipeline", () => {
         .filter((r) => r.type === "tree")
         .sort((a, b) => a.id.localeCompare(b.id));
     expect(rows().map((r) => r.id)).toEqual(
-      [...EXISTING.map((r) => r.id), ...ADDED_IDS].sort(),
+      [
+        ...EXISTING.map((r) => r.id),
+        ...ADDED_IDS,
+        ...layouts.additions.map((a) => a.id),
+      ].sort(),
     );
-    expect(rows()).toHaveLength(29);
+    expect(rows()).toHaveLength(48);
     expect(
       [...f.terrain.getTiles().values()].filter((t) => t.contentGenerated),
     ).toHaveLength(9);
@@ -229,6 +244,27 @@ describe("actual compact functional grove tile pipeline", () => {
       expect(e.config.resourceId).toBe(`tree_${expected.subType}`);
       expect(e.config.modelScale).toBe(expected.scale);
     }
+    const previous = layouts.previous.regions.flatMap((r) => r.anchors);
+    expect(previous.map((a) => a.id).sort()).toEqual(ADDED_IDS);
+    // Independent frozen predecessor fixture, not expectations regenerated from config.
+    for (const a of [...previous, ...layouts.additions]) {
+      const e = f.manager.getEntity(a.id);
+      expect(e).toBeInstanceOf(ResourceEntity);
+      if (!(e instanceof ResourceEntity))
+        throw new Error("Missing frozen grove actor");
+      expect(e.position.toArray()).toEqual([
+        a.position.x,
+        a.position.y,
+        a.position.z,
+      ]);
+      expect(e.config.modelScale).toBe(a.scale);
+      expect(e.config.resourceId).toBe(`tree_${a.subType}`);
+      const live = DataManager.getWorldConfig()!
+        .compactResourceGroves!.regions.flatMap((r) => r.anchors)
+        .find((n) => n.id === a.id)!;
+      const { region: _region, ...expected } = { region: "", ...a };
+      expect(live).toEqual(expected);
+    }
     for (const region of DataManager.getWorldConfig()!.compactResourceGroves!
       .regions)
       for (const a of region.anchors) {
@@ -243,7 +279,8 @@ describe("actual compact functional grove tile pipeline", () => {
           f.terrain.getResourceGroundHeight(a.position.x, a.position.z),
         );
         expect(e.config.resourceId).toBe(`tree_${a.subType}`);
-        expect(e.config.modelScale).toBe(1);
+        expect(e.config.modelScale).toBe(a.scale);
+        expect(e.config.depletedModelScale).toBe(0.1 * a.scale);
         expect(e.config.respawnTime).toBe(48000); // Existing 80 ticks × 600 ms; unchanged manifest.
         expect(e.config.harvestYield).toEqual([
           {
@@ -286,6 +323,99 @@ describe("actual compact functional grove tile pipeline", () => {
     expect(f.batches).toHaveLength(batchCount);
   });
 
+  it("retains completed bank-front collision routes to all 48 trees and four free cardinal approaches at every new tree", async () => {
+    const f = await fixture();
+    await f.terrain.start();
+    await f.settle();
+    await f.r.initializeWorldAreaResources();
+    await f.settle();
+    const rows = f.resources.getAllResources().filter((r) => r.type === "tree");
+    expect(rows).toHaveLength(48);
+    const additions = new Set(layouts.additions.map((a) => a.id));
+    // Actual authoritative collision flags/edge checks, with bounded arena exclusion.
+    // Moving actors and station-model envelopes are separate offline/native gates.
+    const walkable = (p: TileCoord, from?: TileCoord) =>
+      p.x >= 250 &&
+      p.x < 550 &&
+      p.z >= 250 &&
+      p.z < 550 &&
+      !isPositionInsideDuelArenaZone(p.x + 0.5, p.z + 0.5) &&
+      f.world.collision.isWalkable(p.x, p.z) &&
+      (!from || !f.world.collision.isBlocked(from.x, from.z, p.x, p.z));
+    for (const row of rows) {
+      const adjacent = getCardinalAdjacentTiles(
+        worldToTile(row.position.x, row.position.z),
+        1,
+        1,
+      ).filter((p) => walkable(p));
+      if (additions.has(row.id)) expect(adjacent, row.id).toHaveLength(4);
+      expect(adjacent.length, row.id).toBeGreaterThan(0);
+      const target = adjacent.sort(
+        (a, b) =>
+          Math.abs(a.x - 348) +
+          Math.abs(a.z - 322) -
+          Math.abs(b.x - 348) -
+          Math.abs(b.z - 322),
+      )[0];
+      let cursor = { x: 348, z: 322 };
+      const bfs = new BFSPathfinder(),
+        seen = new Set<string>();
+      for (
+        let search = 0;
+        search < 12 && (cursor.x !== target.x || cursor.z !== target.z);
+        search++
+      ) {
+        const segment = bfs.findPath(cursor, target, walkable);
+        expect(segment.length, row.id).toBeGreaterThan(0);
+        for (const p of segment) {
+          expect(walkable(p, cursor), row.id).toBe(true);
+          expect(
+            Math.max(Math.abs(p.x - cursor.x), Math.abs(p.z - cursor.z)),
+          ).toBeLessThanOrEqual(1);
+          cursor = p;
+        }
+        const key = `${cursor.x},${cursor.z}`;
+        expect(seen.has(key), row.id).toBe(false);
+        seen.add(key);
+      }
+      expect(cursor, row.id).toEqual(target);
+    }
+  });
+
+  it("does not reset existing or scale-0.8 depletion/deadlines when an admitted owner is replayed", async () => {
+    const f = await fixture();
+    await f.terrain.start();
+    await f.settle();
+    const ids = ["tree_288_387", "tree_288_441"];
+    const refs = ids.map((id) => {
+      const entity = f.manager.getEntity(id) as ResourceEntity;
+      const resource = f.r.resources.get(id)!;
+      resource.isAvailable = false;
+      resource.lastDepleted = 123456;
+      f.r.respawnAtTick.set(id, 4321);
+      entity.deplete();
+      return { entity, resource };
+    });
+    const batch = f.batches.find(
+      (b) => b.owner?.tileX === 3 && b.owner.tileZ === 4,
+    )!;
+    await Promise.all([
+      f.r.registerTerrainResources(batch),
+      f.r.registerTerrainResources(batch),
+    ]);
+    f.t.updatePlayerBasedTerrain();
+    f.t.processTileGenerationQueue();
+    await f.settle();
+    ids.forEach((id, index) => {
+      expect(f.manager.getEntity(id)).toBe(refs[index].entity);
+      expect(f.r.resources.get(id)).toBe(refs[index].resource);
+      expect(refs[index].resource.isAvailable).toBe(false);
+      expect(refs[index].resource.lastDepleted).toBe(123456);
+      expect(refs[index].entity.config.depleted).toBe(true);
+      expect(f.r.respawnAtTick.get(id)).toBe(4321);
+    });
+  });
+
   it("retires one centered owner and reloads the exact same grove IDs/positions without destroying neighboring or authored trees", async () => {
     const f = await fixture();
     await f.terrain.start();
@@ -300,7 +430,26 @@ describe("actual compact functional grove tile pipeline", () => {
         (r) =>
           `tree_${(300 + r.position.x).toFixed(0)}_${(400 + r.position.z).toFixed(0)}`,
       );
-    expect(ids.some((id) => ADDED_IDS.includes(id))).toBe(true);
+    expect(ids.sort()).toEqual(
+      [
+        "tree_288_387",
+        "tree_290_432",
+        "tree_294_422",
+        "tree_297_449",
+        "tree_305_410",
+        "tree_298_401",
+        "tree_297_439",
+        "tree_287_400",
+        "tree_308_438",
+        "tree_288_441",
+        "tree_292_410",
+        "tree_309_450",
+        "tree_302_387",
+      ].sort(),
+    );
+    expect(
+      (f.manager.getEntity("tree_288_441") as ResourceEntity).config.modelScale,
+    ).toBe(0.8);
     const old = ids.map((id) => f.manager.getEntity(id));
     const other = f.manager.getEntity("tree_461_396"),
       authored = f.manager.getEntity("tree_373_313");
@@ -314,10 +463,13 @@ describe("actual compact functional grove tile pipeline", () => {
     ids.forEach((id, i) => {
       expect(f.manager.getEntity(id)).toBeInstanceOf(ResourceEntity);
       expect(f.manager.getEntity(id)).not.toBe(old[i]);
+      expect(old[i]!.destroyed).toBe(true);
+      expect(old[i]!.node.parent).toBeNull();
+      expect(f.world.entities.hot.has(old[i]!)).toBe(false);
     });
     expect(
       f.resources.getAllResources().filter((r) => r.type === "tree"),
-    ).toHaveLength(29);
+    ).toHaveLength(48);
   });
 
   it("uses real computed terrain for runtime rejection and publishes no partial owner result", async () => {

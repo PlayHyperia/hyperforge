@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
+import groveLayouts from "./fixtures/CompactResourceGroves.layouts.json";
 import { DataManager } from "../../../../data/DataManager";
 import {
   WORLD_IDENTITY_MANIFESTS,
@@ -187,10 +188,12 @@ describe("explicit western rocky terrace successor", () => {
     const config = DataManager.getWorldConfig()!;
     const oldConfig = structuredClone(config);
     oldConfig.terrainProfile = previous;
+    // Historical terrain uses its actual v1 tree layout, not the new v2
+    // population relabeled as old content. The v2/v4 combination must reject.
     oldConfig.compactResourceGroves = {
-      ...oldConfig.compactResourceGroves!,
+      ...structuredClone(groveLayouts.previous),
       terrainProfileId: "compact-duel-island-v4",
-    };
+    } as WorldConfigManifest["compactResourceGroves"];
     oldConfig.compactPreparationLodge = {
       ...oldConfig.compactPreparationLodge!,
       terrainProfileId: "compact-duel-island-v4",
@@ -198,6 +201,22 @@ describe("explicit western rocky terrace successor", () => {
     expect(
       validateCompactResourceGroves(config.compactResourceGroves, current, 2),
     ).toBeDefined();
+    expect(
+      config.compactResourceGroves!.regions.flatMap((r) => r.anchors),
+    ).toHaveLength(35);
+    expect(
+      oldConfig.compactResourceGroves!.regions.flatMap((r) => r.anchors),
+    ).toHaveLength(16);
+    expect(() =>
+      validateCompactResourceGroves(
+        {
+          ...config.compactResourceGroves!,
+          terrainProfileId: previous.id,
+        },
+        previous,
+        2,
+      ),
+    ).toThrow(/layout identity/);
     expect(
       validateCompactResourceGroves(
         oldConfig.compactResourceGroves,

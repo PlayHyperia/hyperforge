@@ -1,6 +1,9 @@
 import { Worker } from "node:worker_threads";
 import { afterEach, describe, expect, it } from "vitest";
 import { World } from "../../../../core/World";
+import { DataManager } from "../../../../data/DataManager";
+import type { CompactResourceGrovesManifest } from "../../../../types/world/world-types";
+import groveLayouts from "./fixtures/CompactResourceGroves.layouts.json";
 import { ALL_WORLD_AREAS } from "../../../../data/world-areas";
 import {
   getDuelArenaConfig,
@@ -79,41 +82,71 @@ afterEach(() => {
   for (const world of worlds.splice(0)) world.destroy();
 });
 async function fixture(profile: WorldTerrainProfile, content: boolean) {
-  const world = new CpuWorld();
-  worlds.push(world);
-  const manager = world.register(
-    "entity-manager",
-    EntityManager,
-  ) as EntityManager;
-  const terrain = world.register("terrain", TerrainSystem) as TerrainSystem;
-  const roads = world.register("roads", RoadNetworkSystem) as RoadNetworkSystem;
-  const resources = world.register(
-    "resource",
-    ResourceSystem,
-  ) as ResourceSystem;
-  terrain.getWorldTerrainProfile();
-  // Historical sampler isolation only. DataManager/current network admission is
-  // never changed; old/new descriptor pairing is tested separately.
-  terrain["activeTerrainProfile"] = profile;
-  await terrain.init();
-  terrain["loadWaterBodiesFromManifest"]();
-  terrain["loadFlatZonesFromManifest"]();
-  await roads.init();
-  await roads.start();
-  if (content) {
-    await resources.init();
-    await terrain.start();
-    await Promise.all([...resources["terrainResourceTails"].values()]);
-    await resources["initializeWorldAreaResources"]();
-    await Promise.all([...resources["terrainResourceTails"].values()]);
-  }
-  return {
-    world,
-    terrain,
-    manager,
-    resources,
-    provider: terrain["buildChunkTerrainProvider"](),
+  const saved = {
+    config: DataManager["worldConfig"],
+    profile: DataManager["worldTerrainProfile"],
+    identity: DataManager["worldContentIdentity"],
   };
+  try {
+    if (content) {
+      if (!saved.config)
+        throw new Error("Missing initialized world configuration");
+      // This is the original terrace-before/after regression, with its exact
+      // 29-resource census. The independently frozen v1 grove is intentional;
+      // current grouped-grove installation is covered by its own integration.
+      DataManager["worldContentIdentity"] = null;
+      DataManager.setWorldConfig({
+        ...structuredClone(saved.config),
+        compactResourceGroves: structuredClone(
+          groveLayouts.previous,
+        ) as CompactResourceGrovesManifest,
+      });
+    }
+    const world = new CpuWorld();
+    worlds.push(world);
+    const manager = world.register(
+      "entity-manager",
+      EntityManager,
+    ) as EntityManager;
+    const terrain = world.register("terrain", TerrainSystem) as TerrainSystem;
+    const roads = world.register(
+      "roads",
+      RoadNetworkSystem,
+    ) as RoadNetworkSystem;
+    const resources = world.register(
+      "resource",
+      ResourceSystem,
+    ) as ResourceSystem;
+    terrain.getWorldTerrainProfile();
+    // Historical sampler isolation only. DataManager/current network admission is
+    // never changed; old/new descriptor pairing is tested separately.
+    terrain["activeTerrainProfile"] = profile;
+    await terrain.init();
+    terrain["loadWaterBodiesFromManifest"]();
+    terrain["loadFlatZonesFromManifest"]();
+    await roads.init();
+    await roads.start();
+    if (content) {
+      await resources.init();
+      await terrain.start();
+      await Promise.all([...resources["terrainResourceTails"].values()]);
+      await resources["initializeWorldAreaResources"]();
+      await Promise.all([...resources["terrainResourceTails"].values()]);
+    }
+    return {
+      world,
+      terrain,
+      manager,
+      resources,
+      provider: terrain["buildChunkTerrainProvider"](),
+    };
+  } finally {
+    if (content) {
+      DataManager["worldConfig"] = saved.config;
+      DataManager["worldTerrainProfile"] = saved.profile;
+      DataManager["worldContentIdentity"] = saved.identity;
+    }
+  }
 }
 
 describe("actual v5 terrace terrain, functional owners and native worker", () => {

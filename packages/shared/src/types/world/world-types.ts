@@ -1350,11 +1350,7 @@ export interface CompactResourceGroveAnchor {
   readonly rotation: number;
 }
 
-export interface CompactResourceGrovesManifest {
-  readonly schemaVersion: 1;
-  readonly layoutId: "compact-functional-groves-v1";
-  readonly terrainProfileId:
-    "compact-duel-island-v4" | "compact-duel-island-v5";
+interface CompactResourceGroveRegions {
   readonly regions: readonly {
     readonly id: "west-ridge-foot" | "southern-meadow" | "eastern-shoulder";
     readonly bounds: Readonly<{
@@ -1366,6 +1362,22 @@ export interface CompactResourceGrovesManifest {
     readonly anchors: readonly CompactResourceGroveAnchor[];
   }[];
 }
+
+/** Historical full-size layout and explicitly versioned grouped successor. */
+export type CompactResourceGrovesManifest = CompactResourceGroveRegions &
+  (
+    | {
+        readonly schemaVersion: 1;
+        readonly layoutId: "compact-functional-groves-v1";
+        readonly terrainProfileId:
+          "compact-duel-island-v4" | "compact-duel-island-v5";
+      }
+    | {
+        readonly schemaVersion: 2;
+        readonly layoutId: "compact-functional-groves-v2";
+        readonly terrainProfileId: "compact-duel-island-v5";
+      }
+  );
 
 /**
  * Exact, optional preparation lodge placement and immutable layout recipe.

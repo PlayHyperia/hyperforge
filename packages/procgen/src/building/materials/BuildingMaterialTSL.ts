@@ -14,6 +14,7 @@
 
 import * as THREE from "three";
 import { MeshStandardNodeMaterial, type Node } from "three/webgpu";
+import { createFilteredShingleColorNode } from "./FilteredShingleTSL";
 import {
   Fn,
   uv,
@@ -74,6 +75,8 @@ export interface BuildingMaterialConfig {
   variation: number;
   /** Whether to use vertex colors for tinting */
   useVertexColors: boolean;
+  /** Explicit compact-lodge candidate only; omission preserves the legacy graph. */
+  shingleFiltering?: "footprint-v1";
 }
 
 /**
@@ -425,6 +428,14 @@ export type TSLBuildingMaterial = MeshStandardNodeMaterial & {
 export function createBuildingMaterial(
   config: Partial<BuildingMaterialConfig> & { type: BuildingMaterialType },
 ): TSLBuildingMaterial {
+  if (
+    config.shingleFiltering !== undefined &&
+    (config.shingleFiltering !== "footprint-v1" || config.type !== "shingle")
+  ) {
+    throw new Error(
+      "Shingle filtering requires the explicit shingle footprint-v1 opt-in",
+    );
+  }
   const defaults = DEFAULT_MATERIAL_CONFIGS[config.type];
   const fullConfig: BuildingMaterialConfig = {
     ...defaults,
@@ -530,20 +541,31 @@ export function createBuildingMaterial(
         mix(uBaseColor, uSecondaryColor, variationValue.mul(uVariation)),
       );
     } else if (patternType === 6) {
-      // Shingle
-      patternResult.assign(shinglePattern(scaledUV));
-      const isShingle = patternResult.x;
-      const shingleId = patternResult.yz;
-      const thickness = patternResult.w;
+      if (fullConfig.shingleFiltering === "footprint-v1") {
+        surfaceColor.assign(
+          createFilteredShingleColorNode(
+            scaledUV,
+            uBaseColor.rgb,
+            uSecondaryColor.rgb,
+            uVariation,
+          ),
+        );
+      } else {
+        // Shingle
+        patternResult.assign(shinglePattern(scaledUV));
+        const isShingle = patternResult.x;
+        const shingleId = patternResult.yz;
+        const thickness = patternResult.w;
 
-      const shingleNoise = tslHash(shingleId);
-      const shingleColor = mix(
-        uBaseColor,
-        uSecondaryColor,
-        shingleNoise.mul(uVariation),
-      );
-      const shadedColor = shingleColor.mul(thickness);
-      surfaceColor.assign(mix(uBaseColor.mul(0.3), shadedColor, isShingle));
+        const shingleNoise = tslHash(shingleId);
+        const shingleColor = mix(
+          uBaseColor,
+          uSecondaryColor,
+          shingleNoise.mul(uVariation),
+        );
+        const shadedColor = shingleColor.mul(thickness);
+        surfaceColor.assign(mix(uBaseColor.mul(0.3), shadedColor, isShingle));
+      }
     } else {
       surfaceColor.assign(uBaseColor);
     }

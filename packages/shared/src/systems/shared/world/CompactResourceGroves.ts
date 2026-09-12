@@ -14,6 +14,7 @@ import {
 import type { WorldTerrainProfile } from "./WorldTerrainProfile";
 
 export const COMPACT_RESOURCE_GROVE_CAP = 16;
+export const COMPACT_RESOURCE_GROVE_V2_CAP = 40;
 const REGION_IDS = [
   "west-ridge-foot",
   "southern-meadow",
@@ -73,12 +74,18 @@ export function validateCompactResourceGroves(
     ["schemaVersion", "layoutId", "terrainProfileId", "regions"],
     "layout",
   );
-  if (
-    layout.schemaVersion !== 1 ||
-    layout.layoutId !== "compact-functional-groves-v1" ||
-    layout.terrainProfileId !== profile.id
-  )
+  const legacy =
+    layout.schemaVersion === 1 &&
+    layout.layoutId === "compact-functional-groves-v1";
+  const grouped =
+    layout.schemaVersion === 2 &&
+    layout.layoutId === "compact-functional-groves-v2" &&
+    profile.id === "compact-duel-island-v5";
+  if ((!legacy && !grouped) || layout.terrainProfileId !== profile.id)
     fail("layout identity");
+  const cap = grouped
+    ? COMPACT_RESOURCE_GROVE_V2_CAP
+    : COMPACT_RESOURCE_GROVE_CAP;
   if (
     !Array.isArray(layout.regions) ||
     layout.regions.length !== REGION_IDS.length
@@ -117,11 +124,11 @@ export function validateCompactResourceGroves(
     if (
       !Array.isArray(region.anchors) ||
       region.anchors.length === 0 ||
-      region.anchors.length > COMPACT_RESOURCE_GROVE_CAP
+      region.anchors.length > cap
     )
       fail("region anchors");
     for (const inputAnchor of region.anchors) {
-      if (++count > COMPACT_RESOURCE_GROVE_CAP) fail("anchor cap");
+      if (++count > cap) fail("anchor cap");
       const anchor = record(
         inputAnchor,
         ["id", "subType", "position", "scale", "rotation"],
@@ -151,8 +158,9 @@ export function validateCompactResourceGroves(
       ids.add(anchor.id);
       if (anchor.subType !== "general" && anchor.subType !== "oak")
         fail("species");
-      // This first authored layout is qualified only at the exact original size.
-      if (anchor.scale !== 1) fail("scale");
+      // No continuous/random scale range; historical v1 remains full-size only.
+      if (anchor.scale !== 1 && !(grouped && anchor.scale === 0.8))
+        fail("scale");
       const rotation = finite(anchor.rotation, "rotation");
       if (rotation < 0 || rotation >= Math.PI * 2) fail("rotation range");
     }

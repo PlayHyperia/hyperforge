@@ -229,7 +229,7 @@ describe("five surface-only service clearings, actual CPU owners (not native vis
     }
   });
 
-  it("keeps the complete padded footprints dry and clears the pond bank, floors, lodge and all 29 actual resource models", async () => {
+  it("keeps the complete padded footprints dry and clears the pond bank, floors, lodge and all 48 actual resource models", async () => {
     const f = await fixture();
     try {
       await f.resources.init();
@@ -239,7 +239,11 @@ describe("five surface-only service clearings, actual CPU owners (not native vis
       const trees = f.resources
         .getAllResources()
         .filter((r) => r.type === "tree");
-      expect(trees).toHaveLength(29);
+      expect(trees).toHaveLength(48);
+      expect(new Set(trees.map((tree) => tree.id)).size).toBe(48);
+      expect(
+        DataManager.getWorldConfig()?.compactResourceGroves?.layoutId,
+      ).toBe("compact-functional-groves-v2");
       const areas = DataManager.getInstance().getAllWorldAreas();
       const floors = arenaGrading.createDuelArenaFloorZones(
         getDuelArenaConfig(),

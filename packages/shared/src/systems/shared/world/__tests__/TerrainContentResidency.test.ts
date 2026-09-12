@@ -148,8 +148,8 @@ const authoredIds = [
   "tree_379_304",
   "tree_375_299",
 ].sort();
-// Frozen v2 collection: explicit expected centered owners, not read from config.
-const groveIdsByOwner = {
+// Historical layout v1: explicit centered owners, not read from live config.
+const previousGroveIdsByOwner = {
   "3_4": [
     "tree_288_387",
     "tree_290_432",
@@ -169,6 +169,34 @@ const groveIdsByOwner = {
   ],
   "4_4": ["tree_443_383"],
   "5_4": ["tree_459_383", "tree_461_396"],
+};
+// Exact offline-qualified layout v2 additions. The world-config envelope remains v2.
+const newGroveIdsByOwner = {
+  "3_4": [
+    "tree_298_401",
+    "tree_297_439",
+    "tree_287_400",
+    "tree_308_438",
+    "tree_288_441",
+    "tree_292_410",
+    "tree_309_450",
+    "tree_302_387",
+  ],
+  "3_5": [
+    "tree_334_475",
+    "tree_309_499",
+    "tree_337_488",
+    "tree_319_481",
+    "tree_310_482",
+  ],
+  "4_4": ["tree_449_369", "tree_449_410"],
+  "5_4": ["tree_474_394", "tree_471_406", "tree_460_365", "tree_458_411"],
+};
+const groveIdsByOwner = {
+  "3_4": [...previousGroveIdsByOwner["3_4"], ...newGroveIdsByOwner["3_4"]],
+  "3_5": [...previousGroveIdsByOwner["3_5"], ...newGroveIdsByOwner["3_5"]],
+  "4_4": [...previousGroveIdsByOwner["4_4"], ...newGroveIdsByOwner["4_4"]],
+  "5_4": [...previousGroveIdsByOwner["5_4"], ...newGroveIdsByOwner["5_4"]],
 };
 const groveIds = Object.values(groveIdsByOwner).flat().sort();
 
@@ -206,7 +234,7 @@ function workerJob(setup: GrassWorkerSetup, tileX: number, tileZ: number) {
 }
 
 describe("actual terrain content residency", () => {
-  it("starts the real lobby core with all 29 admitted trees, retaining terrain-only preload and no repeated spawn", async () => {
+  it("starts the real lobby core with all 48 admitted trees, retaining the old 29, terrain-only preload and no repeated spawn", async () => {
     const f = await fixture();
     await f.terrain.start();
     await f.settle();
@@ -235,6 +263,17 @@ describe("actual terrain content residency", () => {
     expect(trees().filter((id) => !groveIds.includes(id))).toEqual(
       [...proceduralIds, ...authoredIds].sort(),
     );
+    expect(
+      trees().filter(
+        (id) => !Object.values(newGroveIdsByOwner).flat().includes(id),
+      ),
+    ).toEqual(
+      [
+        ...proceduralIds,
+        ...authoredIds,
+        ...Object.values(previousGroveIdsByOwner).flat(),
+      ].sort(),
+    );
     for (const [owner, expected] of Object.entries(groveIdsByOwner)) {
       expect(
         f.terrain
@@ -256,11 +295,13 @@ describe("actual terrain content residency", () => {
     expect(f.internal.pendingContentPromotions.size).toBe(0);
     expect(trees().map((id) => f.manager.getEntity(id))).toEqual(entities);
     // Before the residency correction, core 2..4 produced only 3 procedural
-    // plus 5 authored trees. The new collection separately changes 13 → 29;
+    // plus 5 authored trees. Grove layouts separately change 13 → 29 → 48;
     // neither population increase is free rendering.
     expect(proceduralIds).toHaveLength(8);
     expect(authoredIds).toHaveLength(5);
-    expect(groveIds).toHaveLength(16);
+    expect(Object.values(previousGroveIdsByOwner).flat()).toHaveLength(16);
+    expect(Object.values(newGroveIdsByOwner).flat()).toHaveLength(19);
+    expect(groveIds).toHaveLength(35);
   });
 
   it("uses centered half-open ownership in actual movement demand at positive and negative seams", async () => {
