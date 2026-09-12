@@ -459,7 +459,8 @@ export function computeBaseHeight(
   if (
     profile.algorithm === "compact-island-sculpt-v1" ||
     profile.algorithm === "compact-island-sculpt-v2" ||
-    profile.algorithm === "compact-island-sculpt-v3"
+    profile.algorithm === "compact-island-sculpt-v3" ||
+    profile.algorithm === "compact-island-sculpt-v4"
   ) {
     return compactIslandLandform.height(worldX, worldZ, sharedNoise, profile);
   }
@@ -492,7 +493,8 @@ export function computeIslandMask(
   if (
     profile.algorithm === "compact-island-sculpt-v1" ||
     profile.algorithm === "compact-island-sculpt-v2" ||
-    profile.algorithm === "compact-island-sculpt-v3"
+    profile.algorithm === "compact-island-sculpt-v3" ||
+    profile.algorithm === "compact-island-sculpt-v4"
   ) {
     return compactIslandLandform.mask(worldX, worldZ, sharedNoise, profile);
   }
@@ -735,7 +737,7 @@ export function buildGetBaseHeightAtJS(): string {
   }
 
   function getBaseHeightAt(worldX, worldZ, biomeWeights) {
-    if (config.TERRAIN_PROFILE.algorithm === "compact-island-sculpt-v1" || (config.TERRAIN_PROFILE.algorithm === "compact-island-sculpt-v2" || config.TERRAIN_PROFILE.algorithm === "compact-island-sculpt-v3")) {
+    if (config.TERRAIN_PROFILE.algorithm === "compact-island-sculpt-v1" || (config.TERRAIN_PROFILE.algorithm === "compact-island-sculpt-v2" || config.TERRAIN_PROFILE.algorithm === "compact-island-sculpt-v3" || config.TERRAIN_PROFILE.algorithm === "compact-island-sculpt-v4")) {
       return compactIslandLandform.height(worldX, worldZ, noise, config.TERRAIN_PROFILE);
     }
     var bw = biomeWeights || computeBiomeWeightsByPosition(worldX, worldZ);
@@ -760,7 +762,7 @@ export function buildGetBaseHeightAtJS(): string {
   }
 
   function getIslandMask(worldX, worldZ) {
-    if (config.TERRAIN_PROFILE.algorithm === "compact-island-sculpt-v1" || (config.TERRAIN_PROFILE.algorithm === "compact-island-sculpt-v2" || config.TERRAIN_PROFILE.algorithm === "compact-island-sculpt-v3")) {
+    if (config.TERRAIN_PROFILE.algorithm === "compact-island-sculpt-v1" || (config.TERRAIN_PROFILE.algorithm === "compact-island-sculpt-v2" || config.TERRAIN_PROFILE.algorithm === "compact-island-sculpt-v3" || config.TERRAIN_PROFILE.algorithm === "compact-island-sculpt-v4")) {
       return compactIslandLandform.mask(worldX, worldZ, noise, config.TERRAIN_PROFILE);
     }
     var island = config.TERRAIN_PROFILE.island;

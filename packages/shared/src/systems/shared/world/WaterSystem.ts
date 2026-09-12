@@ -1898,11 +1898,9 @@ export class WaterSystem {
       if (this.reflection.target) {
         this.reflection.target.removeFromParent();
       }
-      // Dispose the reflector's internal WebGPU render target (GPU framebuffer)
-      const reflectorNode = this.reflection as unknown as {
-        renderTarget?: { dispose(): void };
-      };
-      reflectorNode.renderTarget?.dispose();
+      // r186 ReflectorNode owns a per-camera target map through its base node.
+      // Its public disposal path retires those targets, not the global fog RTT.
+      this.reflection.dispose();
     }
     this.reflection = undefined;
 

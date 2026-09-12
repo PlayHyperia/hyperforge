@@ -742,7 +742,9 @@ describe("compact terrain actual texture ownership and CPU material graph", () =
       };
       let baselineDifference = 0,
         revisedDifference = 0;
-      const oldPeriod = 1 / COMPACT_TERRAIN_MATERIAL.repeatsPerMeter;
+      // Historical grass/dirt baseline used 0.3 repeats/m. The current rock
+      // projection scale must not redefine that retained comparison fixture.
+      const oldPeriod = 1 / 0.3;
       for (let ix = 0; ix < 8; ix++)
         for (let iz = 0; iz < 8; iz++) {
           const x = 260 + ix * 11.7,
@@ -1483,7 +1485,7 @@ describe("compact grass base palette without changing ecology", () => {
         }
     expect(COMPACT_TERRAIN_MATERIAL.dirtNormalStrength).toBe(0.25);
     expect(COMPACT_TERRAIN_MATERIAL.rockNormalStrength).toBe(0.4);
-    expect(COMPACT_TERRAIN_MATERIAL.repeatsPerMeter).toBe(0.3);
+    expect(COMPACT_TERRAIN_MATERIAL.repeatsPerMeter).toBe(1 / 2.7);
     expect(COMPACT_TERRAIN_MATERIAL.grassRepeatsPerMeter).toBe(1 / 1.4);
     expect(COMPACT_TERRAIN_MATERIAL.dirtRepeatsPerMeter).toBe(0.95);
     expect(COMPACT_TERRAIN_MATERIAL.textureCount).toBe(6);

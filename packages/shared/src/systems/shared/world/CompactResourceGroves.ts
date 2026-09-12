@@ -56,8 +56,12 @@ export function validateCompactResourceGroves(
   }
   if (
     worldConfigVersion !== 2 ||
-    profile.id !== "compact-duel-island-v4" ||
-    profile.algorithm !== "compact-island-sculpt-v3" ||
+    !(
+      (profile.id === "compact-duel-island-v4" &&
+        profile.algorithm === "compact-island-sculpt-v3") ||
+      (profile.id === "compact-duel-island-v5" &&
+        profile.algorithm === "compact-island-sculpt-v4")
+    ) ||
     profile.terrainTileSize !== 100
   )
     fail("version/profile");

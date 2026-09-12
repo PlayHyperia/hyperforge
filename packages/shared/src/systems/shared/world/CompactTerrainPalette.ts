@@ -111,7 +111,7 @@ export function createCompactTerrainColorOperations() {
   const palette = {
     grass: [0.12687350988906373, 0.16117143469264922, 0.03425721790414253],
     dirt: [0.13570346695867627, 0.10530763563352, 0.06788700038018664],
-    rock: [0.23471111495321656, 0.21598528801526068, 0.17766932960947915],
+    rock: [0.2327181410040423, 0.14549203474325217, 0.08365218395286236],
   };
   const math = {
     smooth(a: number, b: number, value: number) {
@@ -132,7 +132,8 @@ export function createCompactTerrainColorOperations() {
       if (
         value !== "compact-pbr-v1" ||
         (algorithm !== "compact-island-sculpt-v2" &&
-          algorithm !== "compact-island-sculpt-v3")
+          algorithm !== "compact-island-sculpt-v3" &&
+          algorithm !== "compact-island-sculpt-v4")
       ) {
         throw new Error("Invalid compact grass surface eligibility");
       }
@@ -141,7 +142,8 @@ export function createCompactTerrainColorOperations() {
     macroField(profile: WorldTerrainProfile): CompactTerrainMacroField | null {
       if (
         profile.algorithm !== "compact-island-sculpt-v2" &&
-        profile.algorithm !== "compact-island-sculpt-v3"
+        profile.algorithm !== "compact-island-sculpt-v3" &&
+        profile.algorithm !== "compact-island-sculpt-v4"
       )
         return null;
       const ridge = profile.landform;

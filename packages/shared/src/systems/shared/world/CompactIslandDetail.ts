@@ -35,7 +35,8 @@ export function createCompactPreparationDetailRegions(
   });
   if (
     profile.algorithm !== "compact-island-sculpt-v2" &&
-    profile.algorithm !== "compact-island-sculpt-v3"
+    profile.algorithm !== "compact-island-sculpt-v3" &&
+    profile.algorithm !== "compact-island-sculpt-v4"
   )
     return preparation;
   const shape = profile.landform;

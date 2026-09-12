@@ -30,6 +30,7 @@ import {
   SCULPTED_COMPACT_WORLD_TERRAIN_PROFILE,
   SCULPTED_COMPACT_V1_PROFILE_FIXTURE,
   SCULPTED_COMPACT_V2_PROFILE_FIXTURE,
+  SCULPTED_COMPACT_V3_PROFILE_FIXTURE,
   type WorldTerrainProfile,
 } from "../WorldTerrainProfile";
 import { createTerrainWorkerConfig } from "../../../../utils/workers/TerrainWorkerShared";
@@ -241,7 +242,7 @@ describe("opt-in compact grass, actual terrain and native worker (not GPU proof)
         "c7c9709722f56bbefdd377ae17a1733a253ac9ec847749a397440e0d2c9fe90b",
       ],
     ];
-    const f = await fixture();
+    const f = await fixture(SCULPTED_COMPACT_V3_PROFILE_FIXTURE);
     try {
       const owner = f.manager(COMPACT_ISLAND_GRASS_VISUAL_PROFILE).owner;
       const receipts = [];
@@ -336,23 +337,31 @@ describe("opt-in compact grass, actual terrain and native worker (not GPU proof)
     {
       profile: SCULPTED_COMPACT_V2_PROFILE_FIXTURE,
       total: 2130,
+      fixedLod1: 337,
       leaves: [271, 503, 139, 510, 364, 343],
     },
     {
-      profile: SCULPTED_COMPACT_WORLD_TERRAIN_PROFILE,
+      profile: SCULPTED_COMPACT_V3_PROFILE_FIXTURE,
       total: 2281,
+      fixedLod1: 337,
       leaves: [271, 503, 139, 532, 493, 343],
+    },
+    {
+      profile: SCULPTED_COMPACT_WORLD_TERRAIN_PROFILE,
+      total: 2298,
+      fixedLod1: 334,
+      leaves: [271, 520, 139, 532, 493, 343],
     },
   ])(
     "preserves legacy density and measures actual native-worker census for $profile.id",
-    async ({ profile, total: candidateTotal, leaves }) => {
+    async ({ profile, total: candidateTotal, fixedLod1, leaves }) => {
       const f = await fixture(profile);
       try {
         const fixed = f.manager(STREAMING_GRASS_VISUAL_PROFILE).owner;
         const candidate = f.manager(COMPACT_ISLAND_GRASS_VISUAL_PROFILE).owner;
         const variants = [
           { owner: fixed, lod: 2, total: 12, campus: 0 },
-          { owner: fixed, lod: 1, total: 337, campus: 0 },
+          { owner: fixed, lod: 1, total: fixedLod1, campus: 0 },
           { owner: candidate, lod: 1, total: candidateTotal, campus: 143 },
         ];
         for (const variant of variants) {
@@ -402,6 +411,9 @@ describe("opt-in compact grass, actual terrain and native worker (not GPU proof)
                 }
             }
           }
+          process.stdout.write(
+            `Actual grass profile census: ${JSON.stringify({ profile: profile.id, eligibility: variant.owner.getProfileReceipt().eligibility, lod: variant.lod, leafCounts, total, campus })}\n`,
+          );
           expect({ total, campus }).toEqual({
             total: variant.total,
             campus: variant.campus,
@@ -414,9 +426,8 @@ describe("opt-in compact grass, actual terrain and native worker (not GPU proof)
                 leaves[index],
               ]),
             );
-            // Tapering the bay restores land only in two leaves: +22/+129 clumps,
-            // +5,436 nominal LOD1 triangles, without changing density or eligibility.
-            // Preserve the historical actual-worker census, not a relabeled fixture.
+            // Preserve each historical actual-worker census. The v5 terrace
+            // changes sampling in the western leaf (+17 clumps), not density.
             process.stdout.write(
               `Compact grass CPU census (actual native worker, unchanged density; not GPU cost): ${JSON.stringify({ profile: profile.id, leafCounts, total, campus, nominalTriangles: total * 36 })}\n`,
             );
@@ -443,6 +454,49 @@ describe("opt-in compact grass, actual terrain and native worker (not GPU proof)
     },
     20000,
   );
+
+  it("measures both changed terrace leaves including the western leaf outside the fixed camera census", async () => {
+    const results = [];
+    for (const profile of [
+      SCULPTED_COMPACT_V3_PROFILE_FIXTURE,
+      SCULPTED_COMPACT_WORLD_TERRAIN_PROFILE,
+    ]) {
+      const f = await fixture(profile);
+      try {
+        const owner = f.manager(COMPACT_ISLAND_GRASS_VISUAL_PROFILE).owner;
+        const counts = [];
+        for (const z of [350, 450]) {
+          const node = f.tree.createNode(null, null, 100, 250, z, 4);
+          const output = await f.worker.run(
+            owner["createWorkerInput"](node, owner["chunkKey"](node), 1),
+          );
+          const sync = owner["generateInstanceData"](node, 1);
+          expect(sync?.count ?? 0).toBe(output.count);
+          if (sync)
+            for (const name of [
+              "offsets",
+              "rotScaleHash",
+              "groundNormals",
+            ] as const) {
+              expect(sync[name].length).toBe(output[name].length);
+              for (let i = 0; i < sync[name].length; i++)
+                expect(sync[name][i]).toBeCloseTo(output[name][i], 4);
+            }
+          counts.push(output.count);
+        }
+        results.push({ profile: profile.id, counts });
+      } finally {
+        await f.close();
+      }
+    }
+    process.stdout.write(
+      `Both terrace leaf grass census: ${JSON.stringify(results)}\n`,
+    );
+    expect(results).toEqual([
+      { profile: "compact-duel-island-v4", counts: [503, 632] },
+      { profile: "compact-duel-island-v5", counts: [520, 657] },
+    ]);
+  });
 
   it("tags actual results and rejects tainted modes before generation or pool availability", async () => {
     const f = await fixture();

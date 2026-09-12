@@ -22,7 +22,8 @@ import compactTerrainTextureDigests from "../../../data/compact-terrain-textures
 export const COMPACT_TERRAIN_MATERIAL = {
   id: "compact-pbr-v1",
   textureSize: 1024,
-  repeatsPerMeter: 0.3,
+  // Rock Face 03's published physical width; grass/dirt have separate scales.
+  repeatsPerMeter: 1 / 2.7,
   textureCount: 6,
   surfaceSampleCount: 14,
   // Grass004 source covers approximately 1.4m; projection variation stays ±18%.

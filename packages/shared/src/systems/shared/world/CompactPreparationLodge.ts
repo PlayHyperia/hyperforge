@@ -26,11 +26,18 @@ export const COMPACT_PREPARATION_LODGE: CompactPreparationLodgeManifest =
   Object.freeze({
     schemaVersion: 1,
     layoutId: COMPACT_PREPARATION_LODGE_BUILDING_ID,
-    terrainProfileId: "compact-duel-island-v4",
+    terrainProfileId: "compact-duel-island-v5",
     position: Object.freeze({ x: 398, z: 370 }),
     rotation: 0,
     layoutSeed: "compact-bank-lodge01:360,318:8x8:south",
     recipeId: "compact-bank-lodge01-v1",
+  });
+
+/** Exact previous placement identity, supported only with its historical profile. */
+export const COMPACT_PREPARATION_LODGE_V4_FIXTURE: CompactPreparationLodgeManifest =
+  Object.freeze({
+    ...COMPACT_PREPARATION_LODGE,
+    terrainProfileId: "compact-duel-island-v4",
   });
 
 // Exact report01.proposedLayoutRecipe used by report04. Do not inherit mutable
@@ -82,8 +89,12 @@ export function validateCompactPreparationLodge(
 ): CompactPreparationLodgeManifest | undefined {
   if (value === undefined) return undefined;
   if (
-    profile.id !== "compact-duel-island-v4" ||
-    profile.algorithm !== "compact-island-sculpt-v3" ||
+    !(
+      (profile.id === "compact-duel-island-v4" &&
+        profile.algorithm === "compact-island-sculpt-v3") ||
+      (profile.id === "compact-duel-island-v5" &&
+        profile.algorithm === "compact-island-sculpt-v4")
+    ) ||
     profile.terrainTileSize !== 100
   )
     fail("profile");
@@ -92,7 +103,12 @@ export function validateCompactPreparationLodge(
   const canonical = canonicalWorldJson(value);
   if (
     canonical.length > 1024 ||
-    canonical !== canonicalWorldJson(COMPACT_PREPARATION_LODGE)
+    canonical !==
+      canonicalWorldJson(
+        profile.id === "compact-duel-island-v4"
+          ? COMPACT_PREPARATION_LODGE_V4_FIXTURE
+          : COMPACT_PREPARATION_LODGE,
+      )
   )
     fail("unsupported descriptor, pose or recipe");
   const copy = JSON.parse(canonical) as CompactPreparationLodgeManifest;

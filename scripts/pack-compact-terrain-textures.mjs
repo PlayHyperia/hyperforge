@@ -94,6 +94,101 @@ const grass004OutputHashes = {
     "689bba1fa129397f928b51dc79ac283898af82a376b34eeeb09d1e01d1a234ad",
   normalAo: "c87450fc7ecdccf4095ff81aeeb5f81af28710b4976a1cd9bfc3a6c8e884a793",
 };
+const rockFace03Directory = "terrain/textures/polyhaven-rock-face-03";
+export const ROCK_FACE_03_PROVENANCE = Object.freeze({
+  schemaVersion: 1,
+  assetId: "rock_face_03",
+  provider: "Poly Haven",
+  sourcePage: "https://polyhaven.com/a/rock_face_03",
+  license: "CC0-1.0",
+  licensePage: "https://polyhaven.com/license",
+  technique: "photographed-surface",
+  authors: { "Dario Barresi": "Photography", "Rico Cilliers": "Processing" },
+  dimensionsMeters: [2.7, 2.7],
+  infoApi: "https://api.polyhaven.com/info/rock_face_03",
+  filesApi: "https://api.polyhaven.com/files/rock_face_03",
+  sourceObservationSha256:
+    "9002936c2d60bb3c9f0993491a9854c753da9f12fdbcaa81c1a6186242be22e2",
+  digestProvenance:
+    "Byte sizes and MD5 matched the official files API. SHA256 was computed locally; it is not an independent publisher signature.",
+  sources: [
+    {
+      name: "rock_face_03_diff_1k.png",
+      officialUrl:
+        "https://dl.polyhaven.org/file/ph-assets/Textures/png/1k/rock_face_03/rock_face_03_diff_1k.png",
+      bytes: 5693797,
+      publisherMd5: "9c0e0f8a40d9bde94b4e92fa5574648a",
+      sha256:
+        "6f3be181a09c1489e9a355f86810bcfe5e43e4de9f9e21648cef51fa68220f91",
+      pngBitDepth: 16,
+      pngColorType: 2,
+    },
+    {
+      name: "rock_face_03_rough_1k.png",
+      officialUrl:
+        "https://dl.polyhaven.org/file/ph-assets/Textures/png/1k/rock_face_03/rock_face_03_rough_1k.png",
+      bytes: 1861487,
+      publisherMd5: "f0882d41a7a4158c95efb93ce353b0b1",
+      sha256:
+        "2c16f7644044eddb090113f7ac549e8ac8ab44b5b963437ae702075f617ad3dd",
+      pngBitDepth: 16,
+      pngColorType: 0,
+    },
+    {
+      name: "rock_face_03_nor_gl_1k.png",
+      officialUrl:
+        "https://dl.polyhaven.org/file/ph-assets/Textures/png/1k/rock_face_03/rock_face_03_nor_gl_1k.png",
+      bytes: 5841646,
+      publisherMd5: "17a4feb957478ce571e1146c1e278e31",
+      sha256:
+        "69cb133b4c6e7d046820bf5d1642dde3bbbaa56e5d4c889992ba251db8cf5218",
+      pngBitDepth: 16,
+      pngColorType: 2,
+    },
+    {
+      name: "rock_face_03_ao_1k.png",
+      officialUrl:
+        "https://dl.polyhaven.org/file/ph-assets/Textures/png/1k/rock_face_03/rock_face_03_ao_1k.png",
+      bytes: 1878514,
+      publisherMd5: "991616fef343261657cc8bdc16c08222",
+      sha256:
+        "761351f720b452fd3c89171014fe36696379dde62c29f67990ccc48bd077420b",
+      pngBitDepth: 16,
+      pngColorType: 0,
+    },
+  ],
+  precision:
+    "Original unsigned 16-bit PNG bytes retained. pngjs rounds each sample to RGBA8 before exact channel packing; this quantization is lossy. No ICC/gamma transform, normal normalization, resampling, premultiplication or orientation change. Diffuse RGB remains encoded sRGB; normal RGB, roughness and AO remain linear non-color data despite original profile tags. Derivative PNGs contain no color-profile chunks.",
+  qualification:
+    "Exact source and decoded-channel packing qualification only; native appearance, repeats, mips, normal response, motion and GPU performance require separate evidence.",
+});
+const rockFace03OutputHashes = {
+  albedoRoughness:
+    "97f2d36833a7ce119d021cfa9728c42d292044297b172772c02f07f34403311a",
+  normalAo: "056c1754f2e2315a22480025ffe798497d6674fc76b05d8c7f42b3c928268aa4",
+};
+
+export function validateRockFace03Source(bytes, index) {
+  const source = ROCK_FACE_03_PROVENANCE.sources[index];
+  assert(source, "Unknown Rock Face 03 source role");
+  assert.equal(bytes.length, source.bytes, source.name);
+  assert.equal(sha256(bytes), source.sha256, source.name);
+  assert.equal(
+    createHash("md5").update(bytes).digest("hex"),
+    source.publisherMd5,
+    source.name,
+  );
+  assert.equal(bytes[24], source.pngBitDepth, source.name);
+  assert.equal(bytes[25], source.pngColorType, source.name);
+}
+
+export function validateRockFace03Provenance(value) {
+  assert.deepEqual(
+    value,
+    ROCK_FACE_03_PROVENANCE,
+    "Rock Face 03 provenance mismatch",
+  );
+}
 
 export function validateGrass004Source(bytes, index) {
   const source = GRASS004_PROVENANCE.sources[index];
@@ -110,6 +205,7 @@ export function validateGrass004Provenance(value) {
 export function parsePackingOptions(args, installedManifest) {
   let check = false;
   let grassSource;
+  let rockSource;
   for (const arg of args) {
     if (arg === "--check") {
       assert(!check, "Duplicate --check");
@@ -120,6 +216,13 @@ export function parsePackingOptions(args, installedManifest) {
       assert(
         ["legacy", "grass004"].includes(grassSource),
         "Unknown grass source",
+      );
+    } else if (arg.startsWith("--rock-source=")) {
+      assert(!rockSource, "Duplicate rock source");
+      rockSource = arg.slice("--rock-source=".length);
+      assert(
+        ["legacy", "rock-face-03"].includes(rockSource),
+        "Unknown rock source",
       );
     } else {
       assert.fail(`Unknown option: ${arg}`);
@@ -133,7 +236,15 @@ export function parsePackingOptions(args, installedManifest) {
     );
     grassSource = id === "Grass004" ? "grass004" : "legacy";
   }
-  return { check, grassSource };
+  if (!rockSource) {
+    const id = installedManifest?.layers?.rock?.provenance?.assetId;
+    assert(
+      id === undefined || id === "rock_face_03",
+      "Unknown installed rock source",
+    );
+    rockSource = id === "rock_face_03" ? "rock-face-03" : "legacy";
+  }
+  return { check, grassSource, rockSource };
 }
 
 // Some original files have exporter data after PNG IEND. Hash the full source,
@@ -184,10 +295,16 @@ export function packSurfaceMaps(diffuse, roughness, normal, ao = null) {
 }
 
 // Read-only generation: all sources and outputs validate before main writes.
-// Legacy output/manifest bytes remain reproducible with --grass-source=legacy.
-export async function buildPackedTerrain(grassSource) {
+// Legacy bytes remain reproducible with both sources explicitly set to legacy.
+// The function's default rock source preserves its historical one-argument API.
+export async function buildPackedTerrain(grassSource, rockSource = "legacy") {
   assert(["legacy", "grass004"].includes(grassSource), "Unknown grass source");
+  assert(
+    ["legacy", "rock-face-03"].includes(rockSource),
+    "Unknown rock source",
+  );
   const candidate = grassSource === "grass004";
+  const rockCandidate = rockSource === "rock-face-03";
   const manifest = {
     schemaVersion: 1,
     operation: "Lossless RGBA channel packing; originals retained unchanged.",
@@ -217,6 +334,20 @@ export async function buildPackedTerrain(grassSource) {
     manifest.provenance =
       "Grass: ambientCG Grass004 CC0-1.0, procedural, approximately 1.4m square; see portable per-layer provenance. Dirt/rock: unchanged existing repository terrain materials, without a new license or scan-quality assertion.";
   }
+  if (rockCandidate) {
+    validateRockFace03Provenance(
+      JSON.parse(
+        await readFile(
+          path.join(assets, rockFace03Directory, "provenance.json"),
+          "utf8",
+        ),
+      ),
+    );
+    manifest.schemaVersion = 3;
+    manifest.operation =
+      "RGBA8 channel packing; original PNG bytes retained unchanged. Rock Face 03 maps and any Grass004 NormalGL are quantized from 16-bit to 8-bit before exact decoded-channel packing.";
+    manifest.provenance = `Rock: Poly Haven Rock Face 03 CC0-1.0, photographed surface, approximately 2.7m square; see portable per-layer provenance. ${candidate ? "Grass: ambientCG Grass004 CC0-1.0, procedural, approximately 1.4m square; see portable per-layer provenance." : "Grass: unchanged existing repository terrain material, without a new license or scan-quality assertion."} Dirt: unchanged existing repository terrain material, without a new license or scan-quality assertion.`;
+  }
   const files = new Map();
   for (const [layer, names] of Object.entries(inputs)) {
     const selected =
@@ -224,13 +355,19 @@ export async function buildPackedTerrain(grassSource) {
         ? GRASS004_PROVENANCE.sources.map(
             (source) => `${grass004Directory}/${source.name}`,
           )
-        : names.map((name) => (name ? `terrain/textures/${name}` : null));
+        : rockCandidate && layer === "rock"
+          ? ROCK_FACE_03_PROVENANCE.sources.map(
+              (source) => `${rockFace03Directory}/${source.name}`,
+            )
+          : names.map((name) => (name ? `terrain/textures/${name}` : null));
     const sources = await Promise.all(
       selected.map(async (name, index) => {
         if (!name) return null;
         const bytes = await readFile(path.join(assets, name));
         if (candidate && layer === "grass")
           validateGrass004Source(bytes, index);
+        if (rockCandidate && layer === "rock")
+          validateRockFace03Source(bytes, index);
         return {
           path: name,
           sha256: sha256(bytes),
@@ -267,6 +404,12 @@ export async function buildPackedTerrain(grassSource) {
           grass004OutputHashes[kind],
           `Prepared ${name} mismatch`,
         );
+      if (rockCandidate && layer === "rock")
+        assert.equal(
+          sha256(bytes),
+          rockFace03OutputHashes[kind],
+          `Prepared ${name} mismatch`,
+        );
       files.set(name, bytes);
       outputs[kind] = {
         path: `terrain/textures/compact-pbr/${name}`,
@@ -292,6 +435,17 @@ export async function buildPackedTerrain(grassSource) {
         sourcePathBase: "assets-root",
       };
     }
+    if (rockCandidate && layer === "rock") {
+      manifest.layers.rock.sources.forEach((source, index) => {
+        source.bytes = ROCK_FACE_03_PROVENANCE.sources[index].bytes;
+        source.pngBitDepth = ROCK_FACE_03_PROVENANCE.sources[index].pngBitDepth;
+      });
+      manifest.layers.rock.provenance = {
+        ...ROCK_FACE_03_PROVENANCE,
+        path: `${rockFace03Directory}/provenance.json`,
+        sourcePathBase: "assets-root",
+      };
+    }
   }
   const receipt = `${JSON.stringify(manifest, null, 2)}\n`;
   files.set("packing-manifest.json", Buffer.from(receipt));
@@ -311,17 +465,24 @@ async function main() {
   const installed = await readOptional(
     path.join(output, "packing-manifest.json"),
   );
-  const { check, grassSource } = parsePackingOptions(
+  const installedManifest = installed ? JSON.parse(installed) : null;
+  const installedSources = parsePackingOptions([], installedManifest);
+  const { check, grassSource, rockSource } = parsePackingOptions(
     process.argv.slice(2),
-    installed ? JSON.parse(installed) : null,
+    installedManifest,
   );
-  const { files } = await buildPackedTerrain(grassSource);
+  const { files } = await buildPackedTerrain(grassSource, rockSource);
   const previous = new Map();
   for (const [name, bytes] of files) {
     const existing = await readOptional(path.join(output, name));
     previous.set(name, existing);
-    // This candidate must not rebuild/mutate the unrelated dirt/rock layers.
-    if (check || (grassSource === "grass004" && /^(dirt|rock)-/.test(name)))
+    // Unselected layers must remain byte-identical, never silently regenerated.
+    const unchangedLayer =
+      name.startsWith("dirt-") ||
+      (name.startsWith("grass-") &&
+        grassSource === installedSources.grassSource) ||
+      (name.startsWith("rock-") && rockSource === installedSources.rockSource);
+    if (check || (installed && unchangedLayer))
       assert.deepEqual(
         existing,
         bytes,
@@ -336,7 +497,7 @@ async function main() {
     }
   }
   console.log(
-    `Compact terrain packing ${check ? "verified" : "generated"}: 6 RGBA8 maps, grass=${grassSource}, original source hashes retained.`,
+    `Compact terrain packing ${check ? "verified" : "generated"}: 6 RGBA8 maps, grass=${grassSource}, rock=${rockSource}, original source hashes retained.`,
   );
 }
 

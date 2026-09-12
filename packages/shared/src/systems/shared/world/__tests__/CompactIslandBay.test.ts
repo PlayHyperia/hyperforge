@@ -10,7 +10,7 @@ import { createCompactPreparationDetailRegions } from "../CompactIslandDetail";
 import { createCompactIslandPaths } from "../CompactIslandPaths";
 import { TerrainSystem } from "../TerrainSystem";
 import {
-  SCULPTED_COMPACT_WORLD_TERRAIN_PROFILE as candidate,
+  SCULPTED_COMPACT_V3_PROFILE_FIXTURE as candidate,
   SCULPTED_COMPACT_V2_PROFILE_FIXTURE as previous,
   SCULPTED_COMPACT_V1_PROFILE_FIXTURE as noBay,
   validateWorldTerrainProfile,
@@ -62,7 +62,8 @@ async function fixture(profile: WorldTerrainProfile) {
 
 describe("versioned tapered coastal bay", () => {
   it("binds exactly four finite bay fields to the new identity and retains the old algorithm", () => {
-    expect(DataManager.getWorldTerrainProfile()).toEqual(candidate);
+    // The live successor retains this exact historical bay, not its old ridge.
+    expect(DataManager.getWorldTerrainProfile().bay).toEqual(candidate.bay);
     expect(candidate.id).toBe("compact-duel-island-v4");
     expect(candidate.algorithm).toBe("compact-island-sculpt-v3");
     expect(previous.id).toBe("compact-duel-island-v3");
@@ -193,6 +194,7 @@ describe("versioned tapered coastal bay", () => {
   });
 
   it("preserves real authored grades, all five authored trees, and every path point", async () => {
+    const admitted = DataManager.getWorldTerrainProfile();
     const current = await fixture(candidate),
       old = await fixture(previous);
     const sameHeight = (x: number, z: number) =>
@@ -242,7 +244,7 @@ describe("versioned tapered coastal bay", () => {
     expect(
       current.terrain.getWaterBodyRegistry().getWaterSurfaceAt(343, 302),
     ).toBe(old.terrain.getWaterBodyRegistry().getWaterSurfaceAt(343, 302));
-    expect(DataManager.getWorldTerrainProfile()).toEqual(candidate);
+    expect(DataManager.getWorldTerrainProfile()).toBe(admitted);
   });
 
   it("uses the actual changed surface for ocean classification and baked movement-water flags", async () => {

@@ -12,7 +12,8 @@ import {
 import { NoiseGenerator } from "../../../../utils/NoiseGenerator";
 import { createCompactIslandLandform } from "../CompactIslandLandform";
 import {
-  SCULPTED_COMPACT_WORLD_TERRAIN_PROFILE as candidate,
+  SCULPTED_COMPACT_V3_PROFILE_FIXTURE as candidate,
+  SCULPTED_COMPACT_WORLD_TERRAIN_PROFILE as active,
   SCULPTED_COMPACT_V1_PROFILE_FIXTURE as previous,
   validateWorldTerrainProfile,
   worldTerrainProfileIdentity,
@@ -37,6 +38,7 @@ import {
 } from "../TerrainGridSurface";
 
 type Internals = {
+  activeTerrainProfile: typeof candidate | null;
   loadWaterBodiesFromManifest(): void;
   loadFlatZonesFromManifest(): void;
   createTreeGenerationSource(x: number, z: number): TreeGenerationSource;
@@ -52,6 +54,9 @@ async function fixture() {
   const terrain = world.register("terrain", TerrainSystem) as TerrainSystem;
   const roads = world.register("roads", RoadNetworkSystem) as RoadNetworkSystem;
   const internal = terrain as unknown as Internals;
+  terrain.getWorldTerrainProfile();
+  // Preserve this historical v4 geometry/shape regression after the v5 terrace.
+  internal.activeTerrainProfile = candidate;
   await terrain.init();
   internal.loadWaterBodiesFromManifest();
   internal.loadFlatZonesFromManifest();
@@ -163,7 +168,7 @@ const PREVIOUS_CENSUS = [
 
 describe("compact v4 asymmetric coastline and continuous ridge", () => {
   it("admits explicit finite authored shape data with a distinct profile/content identity", () => {
-    expect(DataManager.getWorldTerrainProfile()).toEqual(candidate);
+    expect(DataManager.getWorldTerrainProfile()).toEqual(active);
     expect(candidate.id).toBe("compact-duel-island-v4");
     expect(candidate.algorithm).toBe("compact-island-sculpt-v3");
     expect(worldTerrainProfileIdentity(candidate)).not.toBe(

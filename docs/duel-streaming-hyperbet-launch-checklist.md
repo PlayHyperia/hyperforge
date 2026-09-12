@@ -27,6 +27,54 @@ Dated sections below retain evidence and superseded experiments.
 
 ## Active functional woodland and surface fidelity — 2026-09-11
 
+- [x] Push water/fog checkpoint `0ff98bf094`; all nine tested game-file blobs
+  match the commit, exact remote head and GitHub author/committer
+  `dreaminglucid` verified. No merge/deployment. Native61 evidence remains the
+  narrow two-band repair described below, not whole-scene acceptance.
+- [ ] Qualify the integrated rocky terrace and Rock Face 03 material together:
+  new v5/sculpt-v4 content identity, 10m traversable face, same coastline/campus
+  and authoritative resource anchors; physical 2.7m rock scale, exact packed
+  maps and palette mean. Seven packer tests pass, including unchanged grass/
+  dirt bytes, retained historical outputs and every original16-to8/packed
+  channel. Do not infer unchanged grass placement or GPU cost from mesh budget.
+  Next native comparison must retain native61's actual world-space ridge camera,
+  because terrain-relative camera heights otherwise move with the new landform.
+  Integrated root verification: 870 unique tests / 71 files, four package
+  typechecks, scoped lint/format, client/shared build then server build pass.
+  All 35 changed runtime/test/asset freeze pins remain exact afterward.
+  Actual fixed-six-leaf grass 2,281→2,298; both changed leaves gain 42 clumps
+  total (one is outside those six views). Rock PNG transfer grows 2,227,445
+  bytes; six-map payload is 16,267,403 bytes. Texture compression and actual
+  GPU/frame/loading qualification remain open.
+- [x] Select the v5 rocky terrace/Rock Face 03 combination as the improved
+  working base after matched native61/62 Metal/WebGPU images. Root verifies
+  561 current pins / 492 archives (54,513,418 bytes), all 24 images and 48 fog
+  brackets; all 18 actual-camera/daylight pairs pass. Independent audit agrees.
+  Native62 report SHA `ec8dd8fdc8d66604680ab497c1a438f2320ed8d3abaa55cdfe64e1fe0c437ee8`.
+  No page/GPU/cleanup errors; all 19 genuine cow/dagger errors remain, so the
+  overall run is still failed. All owned ports/browser/services were retired.
+- [ ] Finish rock/island art and performance beyond that base: the long smooth
+  cliff lip reads as an overly uniform cut; broad empty lawn, isolated crowns,
+  oversized sparse grass and hard paved-platform composition remain. Roof
+  striping is visible in both native61/62 campus views (not a new rock regression).
+  No motion/contact/mip/thermal/presented-frame approval from these stills.
+- [x] Prepare an isolated grouped functional-tree candidate: 19 validated
+  additions (48 total), not the initial 24 target. Old 29 identities/rewards and
+  completed routes remain exact; all 19 additions have four free cardinal tiles
+  and completed bounded routes in an offline overlay. Actual GLB yaw/scale/
+  all-LOD bounds recorded; candidate entities were not published. Southern
+  shortfall remains explicit; source art and gameplay balance are not approved.
+- [x] Acquire verified official KTX-Software 4.4.2 arm64 tools in an isolated
+  external folder: exact publisher SHA, trusted signature/notarization and
+  actual version/help checked. No system installation, runtime changes or
+  encodes. Packed-channel/Y-flip/mip/transcode quality study remains pending.
+- [x] Inspect an isolated official animated-cow candidate without game promotion:
+  genuine 400-vertex/796-triangle skinned mesh and six actions; actual source
+  scale, excess influences and FBX alpha-import defect need correction and
+  verification. The free archive contains no bundled license; legacy CC0-page
+  versus current site policy remains unresolved for public redistribution.
+  Existing missing-cow errors remain open; no placeholder or waiver.
+
 - [x] Push matched grass checkpoint `cf9a326dd` and paired assets `cb788e0`.
   All 11 game files and eight asset files/LFS content identities match verified
   inputs; both exact GitHub heads and author/committer `dreaminglucid` checked.
@@ -51,11 +99,13 @@ Dated sections below retain evidence and superseded experiments.
   white sparkles/dotted lines remain; verify 360-degree/LOD/recenter continuity,
   shallow contact, actual draw/pixel/GPU cost and sustained frames at scale.
   Unchanged mesh-object count does not prove unchanged rendering cost.
-- [ ] Repair the pre-existing terrain-to-water teardown gap: TerrainSystem owns
-  WaterSystem but does not call its destroy method. Verify actual owner teardown
-  releases water materials/textures/reflector after unregistering meshes; current
-  water tests destroy the private owner explicitly and do not prove this path.
-  Source finding only, not an observed native leak or a new continuation defect.
+- [x] Implement the pre-existing terrain-to-water teardown repair: actual parent
+  ownership tests retire visual geometry before both water materials, three
+  owned textures and real per-camera reflector targets. Concurrent/pending init,
+  publication reentrancy and failure identity are covered; borrowed fog RTT is
+  untouched. Eight new lifecycle cases pass within the root regression. Native
+  restart and actual driver-memory qualification remain pending; synchronous teardown
+  cannot cancel pending native texture work and retires that owner after it settles.
 - [x] Select Grass004 as the finer, less directionally repetitive ground
   substrate after paired native58/59 Metal/WebGPU captures. Root verifies all
   24 images, 535 pins / 466 archives, 18 matched camera/daylight pairs, portable

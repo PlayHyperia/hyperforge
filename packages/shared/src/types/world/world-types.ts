@@ -1353,7 +1353,8 @@ export interface CompactResourceGroveAnchor {
 export interface CompactResourceGrovesManifest {
   readonly schemaVersion: 1;
   readonly layoutId: "compact-functional-groves-v1";
-  readonly terrainProfileId: "compact-duel-island-v4";
+  readonly terrainProfileId:
+    "compact-duel-island-v4" | "compact-duel-island-v5";
   readonly regions: readonly {
     readonly id: "west-ridge-foot" | "southern-meadow" | "eastern-shoulder";
     readonly bounds: Readonly<{
@@ -1372,7 +1373,8 @@ export interface CompactResourceGrovesManifest {
 export interface CompactPreparationLodgeManifest {
   readonly schemaVersion: 1;
   readonly layoutId: "compact-preparation-lodge-v1";
-  readonly terrainProfileId: "compact-duel-island-v4";
+  readonly terrainProfileId:
+    "compact-duel-island-v4" | "compact-duel-island-v5";
   readonly position: Readonly<{ x: 398; z: 370 }>;
   readonly rotation: 0;
   readonly layoutSeed: "compact-bank-lodge01:360,318:8x8:south";

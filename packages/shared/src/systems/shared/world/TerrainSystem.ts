@@ -330,6 +330,8 @@ export class TerrainSystem extends System {
   private lamppostLightIndices: number[] = [];
   private lamppostLightDistances: number[] = [];
   private waterSystem?: WaterSystem;
+  private initializingWater: WaterSystem | null = null;
+  private initialization: Promise<void> | null = null;
   private waterBodyRegistry!: WaterBodyRegistry;
   private roadNetworkSystem?: RoadNetworkSystem;
   private roadEventsSubscribed = false;
@@ -1725,7 +1727,15 @@ export class TerrainSystem extends System {
     super(world);
   }
 
-  async init(): Promise<void> {
+  init(): Promise<void> {
+    if (this.destroyed)
+      return Promise.reject(new Error("Terrain is destroyed"));
+    // Start synchronously through the existing first await; concurrent callers
+    // share one owner rather than replacing a still-initializing WaterSystem.
+    return (this.initialization ??= this.initialize());
+  }
+
+  private async initialize(): Promise<void> {
     // Manifest loading is also used by other init waves; its in-flight promise
     // is shared. Do not generate terrain or create GPU work from fallback data.
     const dataManager = DataManager.getInstance();
@@ -1733,6 +1743,8 @@ export class TerrainSystem extends System {
     // that already-ready path before synchronous terrain sampling is installed:
     // other systems in the same init wave can request terrain immediately.
     if (!dataManager.isReady()) await dataManager.initialize();
+    if (this.destroyed)
+      throw new Error("Terrain destroyed during manifest admission");
     this.getCompactPondMaterial();
     console.log(
       "[TerrainSystem] Initializing admitted compact terrain profile",
@@ -1775,7 +1787,10 @@ export class TerrainSystem extends System {
           if (this.destroyed)
             throw new Error("Terrain destroyed during material admission");
         } catch (error) {
-          material.dispose();
+          if (this.terrainMaterial === material) {
+            this.terrainMaterial = undefined;
+            material.dispose();
+          }
           throw error;
         }
       }
@@ -1820,19 +1835,41 @@ export class TerrainSystem extends System {
     }
 
     // Initialize water system
-    this.waterSystem = new WaterSystem(this.world);
-    await this.waterSystem.init();
-
-    // Add water system to scene (required for reflector and debug view)
-    if (this.world.stage?.scene) {
-      this.waterSystem.addToScene(this.world.stage.scene);
+    const water = new WaterSystem(this.world);
+    this.waterSystem = water;
+    this.initializingWater = water;
+    try {
+      await water.init();
+      if (this.destroyed || this.waterSystem !== water) {
+        throw new Error("Terrain destroyed during water initialization");
+      }
+      // Keep the owner lease during Three's synchronous childadded events too:
+      // parent retirement must not dispose resources while addToScene uses them.
+      if (this.world.stage?.scene) water.addToScene(this.world.stage.scene);
+      if (this.destroyed || this.waterSystem !== water) {
+        throw new Error("Terrain destroyed during water publication");
+      }
+    } catch (error) {
+      if (this.waterSystem === water) this.waterSystem = undefined;
+      // destroy() cannot cancel texture loading/procedural work. Retire this
+      // exact owner after initialization/publication has settled, including errors.
+      try {
+        water.destroy();
+      } catch (cleanupError) {
+        throw new AggregateError(
+          [error, cleanupError],
+          "Water initialization and retirement failed",
+        );
+      }
+      throw error;
+    } finally {
+      if (this.initializingWater === water) this.initializingWater = null;
     }
-
     // Sync water reflections setting from prefs (client-side only)
     if (typeof window !== "undefined" && this.world.prefs) {
       // Set initial value from prefs
       const waterReflectionsEnabled = this.world.prefs.waterReflections ?? true;
-      this.waterSystem.setReflectionsEnabled(waterReflectionsEnabled);
+      water.setReflectionsEnabled(waterReflectionsEnabled);
 
       // Listen for prefs changes
       this.world.prefs.on("change", this.onPrefsChange);
@@ -1867,7 +1904,7 @@ export class TerrainSystem extends System {
   }
 
   async start(): Promise<void> {
-    this.destroyed = false;
+    if (this.destroyed) throw new Error("Terrain is destroyed");
     this.ensureNoiseInitialized();
 
     // CRITICAL: Wait for DataManager to initialize BIOMES data before generating terrain
@@ -1883,6 +1920,7 @@ export class TerrainSystem extends System {
       Date.now() - startTime < maxWait
     ) {
       await new Promise((resolve) => setTimeout(resolve, 100));
+      if (this.destroyed) throw new Error("Terrain destroyed during startup");
     }
 
     // Final check - verify BIOMES data is actually loaded
@@ -1958,10 +1996,14 @@ export class TerrainSystem extends System {
           center.z,
           precompileObject,
         );
+        if (this.destroyed)
+          throw new Error("Terrain destroyed during precompilation");
         if (this.grassVisualManager) {
           await this.grassVisualManager.precompileRepresentativeChunk(
             precompileObject,
           );
+          if (this.destroyed)
+            throw new Error("Terrain destroyed during precompilation");
         }
       }
     }
@@ -7565,7 +7607,9 @@ export class TerrainSystem extends System {
   }
 
   destroy(): void {
+    if (this.destroyed) return;
     this.destroyed = true;
+    this._terrainInitialized = false;
     this.workerBatchLease = null;
     this.roadInfluenceRefreshGeneration++;
     this.world.off(EventType.ROADS_GENERATED, this.onRoadsGenerated);
@@ -7581,9 +7625,16 @@ export class TerrainSystem extends System {
     }
 
     if (this.waterVisualManager) {
-      this.waterVisualManager.destroy();
+      const visuals = this.waterVisualManager;
       this.waterVisualManager = null;
+      visuals.destroy();
     }
+
+    const water = this.waterSystem;
+    this.waterSystem = undefined;
+    // Visual meshes borrow these materials. Unregister and retire their
+    // geometry first; an initializing owner is retired by initialize() later.
+    if (water && water !== this.initializingWater) water.destroy();
 
     if (this.grassVisualManager) {
       this.grassVisualManager.destroy();

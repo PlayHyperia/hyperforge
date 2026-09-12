@@ -40,12 +40,14 @@ export function createCompactIslandLandform() {
       const angle = Math.atan2(z, x);
       const authored =
         profile.algorithm === "compact-island-sculpt-v2" ||
-        profile.algorithm === "compact-island-sculpt-v3"
+        profile.algorithm === "compact-island-sculpt-v3" ||
+        profile.algorithm === "compact-island-sculpt-v4"
           ? profile.landform
           : undefined;
       if (
         (profile.algorithm === "compact-island-sculpt-v2" ||
-          profile.algorithm === "compact-island-sculpt-v3") &&
+          profile.algorithm === "compact-island-sculpt-v3" ||
+          profile.algorithm === "compact-island-sculpt-v4") &&
         !authored
       )
         throw new Error(
@@ -88,7 +90,10 @@ export function createCompactIslandLandform() {
       const c = Math.cos(authored.inletBearing),
         s = Math.sin(authored.inletBearing);
       const along = (x * c + z * s) * scale;
-      if (profile.algorithm === "compact-island-sculpt-v3") {
+      if (
+        profile.algorithm === "compact-island-sculpt-v3" ||
+        profile.algorithm === "compact-island-sculpt-v4"
+      ) {
         const bay = profile.bay;
         if (!bay) throw new Error("Sculpt-v3 requires admitted bay parameters");
         // A half-ellipse closes the inner tip. Squared longitudinal distance
@@ -142,9 +147,11 @@ export function createCompactIslandLandform() {
       // campus. Its explicit functional grades remain authoritative overlays.
       const legacyRidge = helpers.hill(x, z, -0.59, 0.02, 0.31, 0.69);
       let ridgeHeight = profile.height.terrainScale * legacyRidge;
+      let terraceDelta = 0;
       if (
         profile.algorithm === "compact-island-sculpt-v2" ||
-        profile.algorithm === "compact-island-sculpt-v3"
+        profile.algorithm === "compact-island-sculpt-v3" ||
+        profile.algorithm === "compact-island-sculpt-v4"
       ) {
         const authored = profile.landform;
         if (!authored)
@@ -174,6 +181,56 @@ export function createCompactIslandLandform() {
           authored.ridgeHeight *
           helpers.smooth(1 - Math.abs(cross) / width) *
           ends;
+        if (profile.algorithm === "compact-island-sculpt-v4") {
+          const terrace = profile.terrace;
+          if (!terrace)
+            throw new Error("Sculpt-v4 requires admitted terrace parameters");
+          if (
+            az > terrace.startZ &&
+            az < terrace.endZ &&
+            ax < terrace.eastPreservationEnd &&
+            cross > terrace.westFoot
+          ) {
+            const scarpEnd = terrace.crestEnd + terrace.scarpRun;
+            const shelfEnd = scarpEnd + terrace.shelfWidth;
+            let terracedHeight: number;
+            if (cross < terrace.crestStart) {
+              terracedHeight =
+                terrace.crestHeight *
+                helpers.smooth(
+                  (cross - terrace.westFoot) /
+                    (terrace.crestStart - terrace.westFoot),
+                );
+            } else if (cross <= terrace.crestEnd) {
+              terracedHeight = terrace.crestHeight;
+            } else if (cross < scarpEnd) {
+              terracedHeight =
+                terrace.crestHeight +
+                (terrace.shelfHeight - terrace.crestHeight) *
+                  helpers.smooth((cross - terrace.crestEnd) / terrace.scarpRun);
+            } else if (cross <= shelfEnd) {
+              terracedHeight = terrace.shelfHeight;
+            } else {
+              terracedHeight =
+                terrace.shelfHeight *
+                (1 - helpers.smooth((cross - shelfEnd) / terrace.apronWidth));
+            }
+            const originalCross =
+              authored.ridgeHeight *
+              helpers.smooth(1 - Math.abs(cross) / width);
+            terraceDelta =
+              (terracedHeight - originalCross) *
+              ends *
+              helpers.smooth((az - terrace.startZ) / terrace.endFade) *
+              helpers.smooth((terrace.endZ - az) / terrace.endFade) *
+              (1 -
+                helpers.smooth(
+                  (ax - terrace.eastPreservationStart) /
+                    (terrace.eastPreservationEnd -
+                      terrace.eastPreservationStart),
+                ));
+          }
+        }
       }
       const northernKnoll = helpers.hill(x, z, 0.3, -0.66, 0.3, 0.27);
       const easternGrove = helpers.hill(x, z, 0.56, -0.13, 0.24, 0.38);
@@ -186,7 +243,8 @@ export function createCompactIslandLandform() {
           noise.simplex2D(dx * 0.065 * detailScale, dz * 0.065 * detailScale);
       const interior =
         profile.algorithm === "compact-island-sculpt-v2" ||
-        profile.algorithm === "compact-island-sculpt-v3"
+        profile.algorithm === "compact-island-sculpt-v3" ||
+        profile.algorithm === "compact-island-sculpt-v4"
           ? profile.height.baseOffset +
             ridgeHeight +
             profile.height.terrainScale *
@@ -203,10 +261,12 @@ export function createCompactIslandLandform() {
             detail;
       // Unlike multiplication around zero, interpolation reaches the seabed
       // continuously, with zero coast-end slope and no height discontinuity.
-      return (
+      const height =
         profile.water.oceanFloorHeight +
-        (interior - profile.water.oceanFloorHeight) * mask
-      );
+        (interior - profile.water.oceanFloorHeight) * mask;
+      // Preserve the original evaluation exactly outside the compact delta.
+      // This is a traversable heightfield, not an impassable cliff/collider.
+      return terraceDelta === 0 ? height : height + terraceDelta * mask;
     },
   };
 }
