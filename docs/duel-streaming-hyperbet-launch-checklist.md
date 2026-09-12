@@ -1,5 +1,32 @@
 # Duel Arena, Streaming, and Hyperbet Launch Checklist
 
+## Native CPU/GPU frame baseline — 2026-09-12
+
+- [x] Measure the actual r186 world tick and every queried render/compute pass
+      in two headful Chrome/Metal windows at unchanged 1280x720, DPR1, MSAA4.
+      Preserve native loops, daylight, shadows, tree/grass populations and cameras.
+- [x] Independently verify 5,744 raw pass durations and 1,068 measured frames;
+      no lost/off-tick/duplicate queries. Restore all hooks, cached descriptors
+      and null pool slots; dispose query sets/readback buffers. Twelve harness
+      preflights and five durable diagnostic tests pass. Retain failed probes01/02.
+- [x] Review all eight world views; verify 675 current source pins, 596 archives,
+      14 PNGs and complete owned shutdown. No page/GPU/cleanup errors. Overall
+      still fails the 19 existing cow/dagger errors; no launch acceptance.
+- [ ] Optimize the now-measured multi-pass cost before vegetation/effect expansion:
+      overview CPU p50/p95 20.4/25.8ms; GPU pass-sum 18.42/23.86ms; 1,285 median
+      draws. Identify actual passes/casters and CPU stacks, then verify improvements
+      without reducing resolution, shadow quality or approved scene content.
+- [ ] Qualify presented frames, complete native memory, moving cameras, full agent/
+      stream load and target devices; 10-second instrumented windows are not a
+      smoothness/scalability verdict. CPU and GPU times overlap; do not add them.
+- [ ] Continue substantial meadow/understory, fractured ridge/coast, lighting/sky/
+      water/contact work. Current images remain far below the intended art target.
+
+Evidence: `docs/native-gpu-frame-baseline-20260912.md`,
+`docs/evidence/native-gpu-frame-baseline-20260912.json`,
+`scripts/diagnostics/native-gpu-frame-probe.mjs` and
+`asset-studio/game-test-integration/gpu-frame-probe03/`.
+
 ## Meadow material and art target — 2026-09-12
 
 - [x] Generate an explicitly labeled, non-game art target from the actual island
