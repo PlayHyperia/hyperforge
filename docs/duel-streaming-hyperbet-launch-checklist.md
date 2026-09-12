@@ -1,5 +1,34 @@
 # Duel Arena, Streaming, and Hyperbet Launch Checklist
 
+## Headland geometry study — 2026-09-12
+
+Status: **G04 remains OPEN. No cliff draft promoted or installed.**
+
+- [x] Saved/pushed the verified scanned-outcrop renderer and source library:
+  game `7209f4838`, assets `6726595`; GitHub author and committer both
+  `dreaminglucid`. Existing 1,225-test/native-WebGPU evidence remains the
+  rendering checkpoint, not whole-world visual/performance approval.
+- [x] Built two 14m closed-cliff geometry drafts in isolated Blender CLI sessions
+  and directly reviewed front/rear/side renders. Rejected planar/extruded closure
+  in candidate03 and folded crown/end fins in candidate05. Closed-edge/Euler
+  counts did not qualify visual quality or a sound collision solid.
+- [x] Stopped the volume-cleanup route when it would require discarding a
+  1.325m² / 1.825m-diagonal fragment. Did not widen the removal allowance,
+  bake defects, export a game asset or install provisional world geometry.
+- [x] Screened official Rock Face 01/02 glTF geometry before downloading
+  textures: both have open boundaries spanning their extents and therefore are
+  not ready-made closed replacements. No new texture files were downloaded.
+- [ ] Produce deliberate large geology from a sound closed foundation, with
+  natural ends/crown, coherent texel scale, qualified LODs and ground blending.
+  Stop repeating the rejected open-facade/automatic dual-skin closure route.
+- [ ] Prove placement, navigation/resource access, native moving-camera/agent
+  appearance, shadow/contact and GPU/frame budgets before permanent placement.
+  Terrain composition, understory, lighting/sky/water and full-scene polish
+  remain substantial unfinished work; one arena and functional trees remain.
+
+Evidence: `asset-studio/closed-headland01/README.md`, frozen drafts/failures,
+and `source-screen01/report01.json`. No launch gate was marked complete.
+
 ## Scanned outcrop renderer verified — 2026-09-12
 
 **G04 remains open. This is a temporary art-test integration, not a default-world
