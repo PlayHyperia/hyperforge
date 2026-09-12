@@ -50,6 +50,52 @@ import { DAY_CYCLE, SUN_LIGHT } from "./LightingConfig";
 
 const SKY_DOME_RADIUS = 5000;
 
+type PerspectiveView = NonNullable<THREE.PerspectiveCamera["view"]>;
+
+function copyFogProjection(
+  target: THREE.PerspectiveCamera,
+  source: THREE.PerspectiveCamera,
+  view: PerspectiveView,
+): void {
+  // Deliberately not Object3D/Camera.copy(): those serialize userData and copy
+  // unrelated animations/children. Only projection state belongs to this pass.
+  target.fov = source.fov;
+  target.aspect = source.aspect;
+  target.near = source.near;
+  target.far = source.far;
+  target.zoom = source.zoom;
+  target.focus = source.focus;
+  target.filmGauge = source.filmGauge;
+  target.filmOffset = source.filmOffset;
+  target.coordinateSystem = source.coordinateSystem;
+  target.projectionMatrix.copy(source.projectionMatrix);
+  target.projectionMatrixInverse.copy(source.projectionMatrixInverse);
+  if (source.view) {
+    view.enabled = source.view.enabled;
+    view.fullWidth = source.view.fullWidth;
+    view.fullHeight = source.view.fullHeight;
+    view.offsetX = source.view.offsetX;
+    view.offsetY = source.view.offsetY;
+    view.width = source.view.width;
+    view.height = source.view.height;
+    target.view = view;
+  } else {
+    target.view = null;
+  }
+}
+
+function createFogView(): PerspectiveView {
+  return {
+    enabled: false,
+    fullWidth: 1,
+    fullHeight: 1,
+    offsetX: 0,
+    offsetY: 0,
+    width: 1,
+    height: 1,
+  };
+}
+
 /**
  * Decorative sky billboards are intentionally omitted from broadcast views.
  * Their large transparent TSL planes are expensive and can render as opaque
@@ -637,6 +683,20 @@ export class SkySystem extends System {
   private fogCamera: THREE.PerspectiveCamera | null = null;
   private fogSkyMesh: THREE.Mesh | null = null;
   private fogSkyUniforms: SkyMaterialUniforms | null = null;
+  private fogPreparationCount = 0;
+  private fogPreparationSucceeded = false;
+  private fogPreparationFailed = false;
+  private fogSelectedCameraUuid: string | null = null;
+  private readonly fogSelectedCamera = new THREE.PerspectiveCamera();
+  private fogSelectedReversedDepth = false;
+  private readonly fogWorldPosition = new THREE.Vector3();
+  private readonly fogWorldQuaternion = new THREE.Quaternion();
+  private readonly fogView = createFogView();
+  private readonly fogSelectedView = createFogView();
+  private fogRendererFrameBefore = 0;
+  private fogRendererFrameAfter = 0;
+  private fogRendererCallsBefore = 0;
+  private fogRendererCallsAfter = 0;
 
   // Legacy uniforms (for compatibility)
   private skyUniforms: SkyUniforms;
@@ -1287,7 +1347,7 @@ export class SkySystem extends System {
     if (!this.skyTSLUniforms) return;
 
     this.fogScene = new THREE.Scene();
-    this.fogCamera = this.world.camera.clone() as THREE.PerspectiveCamera;
+    this.fogCamera = new THREE.PerspectiveCamera();
 
     const fogSkyGeom = new THREE.SphereGeometry(SKY_DOME_RADIUS, 64, 32);
 
@@ -1319,6 +1379,7 @@ export class SkySystem extends System {
 
     this.fogSkyMesh = new THREE.Mesh(fogSkyGeom, fogSkyMat);
     this.fogSkyMesh.frustumCulled = false;
+    this.fogSkyMesh.matrixAutoUpdate = false;
     this.fogScene.add(this.fogSkyMesh);
 
     console.log(
@@ -1799,46 +1860,60 @@ export class SkySystem extends System {
     // noise UV distortion and alpha oscillation.
   }
 
-  override lateUpdate(_delta: number): void {
-    if (!this.group) return;
+  /**
+   * Render-dependent work belongs here, after the final camera selection and
+   * immediately before the main render. Day/time/weather remain in update().
+   */
+  prepareForRender(
+    renderer: THREE.WebGPURenderer,
+    camera: THREE.PerspectiveCamera,
+  ): void {
+    if (!this.group || !this.fogScene || !this.fogCamera) return;
+    if (this.fogPreparationFailed) {
+      throw new Error("Sky fog preparation failed; renderer session must stop");
+    }
+    this.fogPreparationSucceeded = false;
+    this.fogPreparationCount++;
 
-    // Keep sky centered on camera for infinite effect - follow all 3 axes
-    // This ensures sky never clips against draw distance regardless of camera position
-    // Use camera position directly (most reliable) with rig fallback
-    if (this.world.camera) {
-      this.group.position.copy(this.world.camera.position);
-    } else if (this.world.rig) {
-      this.group.position.copy(this.world.rig.position);
+    // Resolve the actual world pose, including a transformed camera parent.
+    camera.updateWorldMatrix(true, false);
+    camera.getWorldPosition(this.fogWorldPosition);
+    camera.getWorldQuaternion(this.fogWorldQuaternion);
+    this.group.position.copy(this.fogWorldPosition);
+    if (this.group.parent) this.group.parent.worldToLocal(this.group.position);
+    this.group.updateMatrixWorld(true);
+
+    // Preserve the existing visible sky's rotation/scale, even under a
+    // transformed parent. Only its camera-centered translation is removed.
+    if (this.fogSkyMesh) {
+      this.fogSkyMesh.matrix.copy(this.group.matrixWorld).setPosition(0, 0, 0);
+      this.fogSkyMesh.updateMatrixWorld(true);
     }
 
-    // Render fog sky to offscreen render target
-    this.renderFogSky();
-  }
+    // Retain view/film offsets and FOV/zoom so a native first projection update
+    // stays coherent. Three owns reversed-depth activation for both cameras.
+    copyFogProjection(this.fogCamera, camera, this.fogView);
+    this.fogCamera.position.set(0, 0, 0);
+    this.fogCamera.quaternion.copy(this.fogWorldQuaternion);
+    this.fogCamera.scale.set(1, 1, 1);
+    this.fogCamera.matrixAutoUpdate = true;
+    this.fogCamera.matrixWorldAutoUpdate = true;
+    this.fogCamera.updateMatrixWorld(true);
 
-  /** Render the fog sky dome (no stars) to the shared offscreen render target. */
-  private renderFogSky(): void {
-    if (!this.fogScene || !this.fogCamera) return;
-    const renderer = (
-      this.world.graphics as { renderer?: THREE.WebGPURenderer } | undefined
-    )?.renderer;
-    if (!renderer) return;
+    // A detached snapshot keeps diagnostic reads from observing a later director
+    // update. Diagnostic matrix arrays are allocated only by the read-only getter.
+    copyFogProjection(this.fogSelectedCamera, camera, this.fogSelectedView);
+    this.fogSelectedCamera.matrixWorld.copy(camera.matrixWorld);
+    this.fogSelectedCamera.matrixWorldInverse.copy(camera.matrixWorldInverse);
+    this.fogSelectedCameraUuid = camera.uuid;
+    this.fogSelectedReversedDepth = camera.reversedDepth;
 
-    // Sync fog camera orientation with main camera (direction only)
-    const cam = this.world.camera;
-    if (cam) {
-      this.fogCamera.position.set(0, 0, 0);
-      this.fogCamera.quaternion.copy(cam.quaternion);
-      this.fogCamera.projectionMatrix.copy(cam.projectionMatrix);
-      this.fogCamera.projectionMatrixInverse.copy(cam.projectionMatrixInverse);
-
-      // Resize fog render target when aspect ratio changes
-      const desiredW = Math.max(
-        1,
-        Math.round(cam.aspect * fogRenderTarget.height),
-      );
-      if (fogRenderTarget.width !== desiredW) {
-        fogRenderTarget.setSize(desiredW, fogRenderTarget.height);
-      }
+    const desiredW = Math.max(
+      1,
+      Math.round(camera.aspect * fogRenderTarget.height),
+    );
+    if (fogRenderTarget.width !== desiredW) {
+      fogRenderTarget.setSize(desiredW, fogRenderTarget.height);
     }
 
     // Sync fog sky uniforms with main sky values
@@ -1857,14 +1932,104 @@ export class SkySystem extends System {
     // Disable tone mapping so the fog texture stores linear values.
     // Object shaders apply tone mapping once on final output — prevents double mapping.
     const savedToneMapping = renderer.toneMapping;
-    renderer.toneMapping = THREE.NoToneMapping;
-
     const currentTarget = renderer.getRenderTarget();
-    renderer.setRenderTarget(fogRenderTarget);
-    renderer.render(this.fogScene, this.fogCamera);
-    renderer.setRenderTarget(currentTarget);
+    const cubeFace = renderer.getActiveCubeFace();
+    const mipLevel = renderer.getActiveMipmapLevel();
+    this.fogRendererFrameBefore = renderer.info.frame;
+    this.fogRendererCallsBefore = renderer.info.calls;
+    try {
+      let renderFailed = false;
+      let renderError: unknown;
+      let restoreFailed = false;
+      let restoreError: unknown;
+      try {
+        renderer.toneMapping = THREE.NoToneMapping;
+        renderer.setRenderTarget(fogRenderTarget);
+        renderer.render(this.fogScene, this.fogCamera);
+      } catch (error) {
+        renderFailed = true;
+        renderError = error;
+      } finally {
+        try {
+          renderer.setRenderTarget(currentTarget, cubeFace, mipLevel);
+        } catch (error) {
+          restoreFailed = true;
+          restoreError = error;
+        } finally {
+          renderer.toneMapping = savedToneMapping;
+        }
+      }
+      if (restoreFailed) {
+        if (renderFailed) {
+          throw new AggregateError(
+            [renderError, restoreError],
+            "Sky fog render and target restoration failed",
+          );
+        }
+        throw restoreError;
+      }
+      if (renderFailed) throw renderError;
+      this.fogRendererFrameAfter = renderer.info.frame;
+      this.fogRendererCallsAfter = renderer.info.calls;
+      this.fogPreparationSucceeded = true;
+    } catch (error) {
+      // Restoring public state does not make private native renderer state safe
+      // after an exception. Do not draw the main scene or retry this session.
+      this.fogPreparationFailed = true;
+      throw error;
+    }
+  }
 
-    renderer.toneMapping = savedToneMapping;
+  /** Bounded read-only CPU receipt, not GPU completion or pixel-match proof. */
+  getFogSkyReceipt() {
+    const cameraReceipt = (camera: THREE.PerspectiveCamera) => ({
+      uuid: camera.uuid,
+      matrixWorld: camera.matrixWorld.toArray(),
+      matrixWorldInverse: camera.matrixWorldInverse.toArray(),
+      projectionMatrix: camera.projectionMatrix.toArray(),
+      projectionMatrixInverse: camera.projectionMatrixInverse.toArray(),
+      coordinateSystem: camera.coordinateSystem,
+      reversedDepth: camera.reversedDepth,
+      near: camera.near,
+      far: camera.far,
+      aspect: camera.aspect,
+      fov: camera.fov,
+      zoom: camera.zoom,
+    });
+    return {
+      schemaVersion: 1,
+      scope: "last-main-render-fog-preparation",
+      preparationCount: this.fogPreparationCount,
+      ready: this.fogPreparationSucceeded,
+      failed: this.fogPreparationFailed,
+      initialized: this.fogScene !== null && this.fogCamera !== null,
+      renderer: {
+        frameBefore: this.fogRendererFrameBefore,
+        frameAfter: this.fogRendererFrameAfter,
+        callsBefore: this.fogRendererCallsBefore,
+        callsAfter: this.fogRendererCallsAfter,
+      },
+      selectedCamera: this.fogSelectedCameraUuid
+        ? {
+            ...cameraReceipt(this.fogSelectedCamera),
+            uuid: this.fogSelectedCameraUuid,
+            reversedDepth: this.fogSelectedReversedDepth,
+          }
+        : null,
+      fogCamera: this.fogCamera ? cameraReceipt(this.fogCamera) : null,
+      skyCenter: this.fogSelectedCameraUuid
+        ? this.fogWorldPosition.toArray()
+        : null,
+      renderTarget: {
+        width: fogRenderTarget.width,
+        height: fogRenderTarget.height,
+        textureUuid: fogRenderTarget.texture.uuid,
+        textureVersion: fogRenderTarget.texture.version,
+        type: fogRenderTarget.texture.type,
+        colorSpace: fogRenderTarget.texture.colorSpace,
+        samples: fogRenderTarget.samples,
+      },
+    };
   }
 
   override destroy(): void {
@@ -1924,6 +2089,8 @@ export class SkySystem extends System {
     this.fogScene = null;
     this.fogCamera = null;
     this.fogSkyUniforms = null;
+    this.fogPreparationSucceeded = false;
+    this.fogSelectedCameraUuid = null;
   }
 }
 

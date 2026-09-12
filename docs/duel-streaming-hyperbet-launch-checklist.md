@@ -5,8 +5,8 @@
 This is the current work order, not a claim that the scene is close to AAA.
 Dated sections below retain evidence and superseded experiments.
 
-1. [ ] **Ground materials:** finish the Grass004 comparison; choose by actual
-   close/mid/distant views, then qualify transfer, mips and compressed textures.
+1. [ ] **Ground materials:** Grass004 is selected by matched native views;
+   finish cliff material/landform, motion, transfer, mips and compression.
 2. [ ] **Grounded lighting:** separate direct/neutral/contact-AO comparisons;
    preserve skin color, sunlight, cutout foliage and water without halos.
 3. [ ] **A composed compact island:** improve landform, worn paths, shoreline,
@@ -27,12 +27,35 @@ Dated sections below retain evidence and superseded experiments.
 
 ## Active functional woodland and surface fidelity — 2026-09-11
 
+- [x] Push matched grass checkpoint `cf9a326dd` and paired assets `cb788e0`.
+  All 11 game files and eight asset files/LFS content identities match verified
+  inputs; both exact GitHub heads and author/committer `dreaminglucid` checked.
+  No merge or deployment; source art selection is not launch approval.
+
 - [x] Push verified trim checkpoint `e5c68e452`; exact remote head and GitHub
   author/committer `dreaminglucid` verified. No merge or deployment.
-- [ ] Repair the visible finite ocean boundary: native bay view projects the
-  `(800,16,800)` water-root corner to the exact visible horizon apex. Add only
-  bounded ocean continuation with continuous waves and owned teardown; no
+- [x] Repair the visible finite ocean boundary in the matched static views:
+  native61 removes the peaked/V band and hard sky strip after ocean continuation,
+  deep opacity and render-aligned fog fixes. Native bay view originally projects the
+  `(800,16,800)` water-root corner to the exact visible horizon apex. Added
+  bounded continuation with shared wave inputs and per-leaf ownership; no
   extra terrain roots, expanded island, or stronger fog to conceal the defect.
+- [x] Resolve native60's two targeted water defects in native61:
+  deep water reveals the finite seabed as a V-shaped color band; fog preparation
+  ran before the final selected camera. Deep opacity and render-boundary sky
+  preparation fix both visible bands. Root verifies all 24 images, 543 pins /
+  474 archives and 48 successful fog-camera brackets; 18 paired views qualify.
+  Final 831 tests / 66 files, four typechecks and builds pass. All 19 cow/dagger
+  failures remain. Native61 is narrow static repair evidence, not final art.
+- [ ] Complete water motion, shoreline and cost qualification: faint distant
+  white sparkles/dotted lines remain; verify 360-degree/LOD/recenter continuity,
+  shallow contact, actual draw/pixel/GPU cost and sustained frames at scale.
+  Unchanged mesh-object count does not prove unchanged rendering cost.
+- [ ] Repair the pre-existing terrain-to-water teardown gap: TerrainSystem owns
+  WaterSystem but does not call its destroy method. Verify actual owner teardown
+  releases water materials/textures/reflector after unregistering meshes; current
+  water tests destroy the private owner explicitly and do not prove this path.
+  Source finding only, not an observed native leak or a new continuation defect.
 - [x] Select Grass004 as the finer, less directionally repetitive ground
   substrate after paired native58/59 Metal/WebGPU captures. Root verifies all
   24 images, 535 pins / 466 archives, 18 matched camera/daylight pairs, portable
@@ -43,6 +66,14 @@ Dated sections below retain evidence and superseded experiments.
   grass adds 4,587,221 transfer bytes. Uniform empty lawn, sparse oversized
   blades, rounded ridge/cobble cliffs, animated mips and actual GPU/frame cost
   remain open. Native59 is not whole-world art or production acceptance.
+- [x] Prepare isolated Rock Face 03 CC0 cliff maps and exercise the actual
+  terrain packer without installing them. Verify all four original identities
+  and every decoded/packed channel; retain originals and disclose 16-bit to
+  8-bit quantization. Candidate pair is 5,486,790 transfer bytes, 2.7m source
+  width; no gamma transform on normal/roughness/AO. Evidence: external
+  `compact-cliff-material01/packed/qualification.json`. Native appearance,
+  physical UV scale, palette, mips, cost and terraced ridge integration remain
+  unchecked; a new texture alone cannot fix the current smooth silhouette.
 - [x] Verify corrected trim in native57: complete straight window frames visible
   in all four lodge close-ups; 27 Metal/WebGPU images, 529 pins / 460 archives
   independently verified, zero page/GPU errors and full owned cleanup. Keep

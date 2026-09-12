@@ -162,6 +162,29 @@ const WAVES: WaveParams[] = [
 // TYPES
 // ============================================================================
 
+// Component-wise bounds of the unchanged ocean positionNode. X/Z do not
+// depend on wind; Y uses the actual ocean uniform rather than a default cap.
+const OCEAN_WAVE_EXTENT = Object.freeze(
+  WAVES.reduce(
+    (extent, wave) => {
+      extent.x += Math.abs(wave.QADx * 1.3);
+      extent.y += Math.abs(wave.A * 1.3);
+      extent.z += Math.abs(wave.QADz * 1.3);
+      return extent;
+    },
+    { x: 0, y: 0, z: 0 },
+  ),
+);
+
+interface OceanDisplacementBounds {
+  mesh: THREE.Mesh;
+  geometry: THREE.BufferGeometry;
+  base: THREE.Box3;
+  box: THREE.Box3;
+  sphere: THREE.Sphere;
+  wind: number;
+}
+
 type UniformFloat = UniformNode<"float", number>;
 type UniformVec3 = UniformNode<"vec3", THREE.Vector3>;
 type UniformColor = UniformNode<"color", THREE.Color>;
@@ -212,6 +235,8 @@ export class WaterSystem {
   private reflection?: ReturnType<typeof reflector>;
   private waterLevel: number = TERRAIN_CONSTANTS.WATER_THRESHOLD;
   private waterMeshes: THREE.Mesh[] = [];
+  // Optional bound records do not own or dispose geometry/materials.
+  private oceanDisplacementBounds: OceanDisplacementBounds[] = [];
 
   private reflectionActive = false;
 
@@ -312,7 +337,45 @@ export class WaterSystem {
   /**
    * Register an externally-created water mesh for reflection visibility tracking.
    */
-  registerWaterMesh(mesh: THREE.Mesh): void {
+  registerWaterMesh(mesh: THREE.Mesh, trackOceanDisplacement = false): void {
+    if (trackOceanDisplacement) {
+      if (mesh.material !== this.oceanMaterial || !this.oceanUniforms)
+        throw new Error(
+          "Ocean displacement bounds require the live ocean material",
+        );
+      if (this.oceanDisplacementBounds.some((entry) => entry.mesh === mesh))
+        return;
+      const geometry = mesh.geometry;
+      geometry.computeBoundingBox();
+      const box = geometry.boundingBox!;
+      if (
+        box.isEmpty() ||
+        ![
+          box.min.x,
+          box.min.y,
+          box.min.z,
+          box.max.x,
+          box.max.y,
+          box.max.z,
+        ].every(Number.isFinite)
+      )
+        throw new Error("Ocean displacement bounds require finite geometry");
+      const sphere = geometry.boundingSphere ?? new THREE.Sphere();
+      const entry: OceanDisplacementBounds = {
+        mesh,
+        geometry,
+        base: box.clone(),
+        box,
+        sphere,
+        wind: NaN,
+      };
+      geometry.boundingSphere = sphere;
+      this.refreshOceanDisplacementBounds(
+        entry,
+        this.oceanUniforms.windStrength.value,
+      );
+      this.oceanDisplacementBounds.push(entry);
+    }
     this.waterMeshes.push(mesh);
   }
 
@@ -322,6 +385,59 @@ export class WaterSystem {
   unregisterWaterMesh(mesh: THREE.Mesh): void {
     const idx = this.waterMeshes.indexOf(mesh);
     if (idx !== -1) this.waterMeshes.splice(idx, 1);
+    const boundsIndex = this.oceanDisplacementBounds.findIndex(
+      (entry) => entry.mesh === mesh,
+    );
+    if (boundsIndex !== -1) this.oceanDisplacementBounds.splice(boundsIndex, 1);
+  }
+
+  /** Refresh the same native bound objects without allocating per-frame data. */
+  private refreshOceanDisplacementBounds(
+    entry: OceanDisplacementBounds,
+    wind: number,
+  ): void {
+    if (
+      entry.mesh.material !== this.oceanMaterial ||
+      entry.mesh.geometry !== entry.geometry ||
+      entry.geometry.boundingBox !== entry.box ||
+      entry.geometry.boundingSphere !== entry.sphere
+    )
+      throw new Error("Tracked ocean geometry bounds changed ownership");
+    if (!Number.isFinite(wind) || !Number.isFinite(Math.fround(wind)))
+      throw new Error(
+        "Cannot bound a non-finite or non-Float32 ocean wind uniform",
+      );
+    if (entry.wind === wind) return;
+    // Absolute and relative allowance for Float32 shader arithmetic, in
+    // addition to the analytic sum of all five wave component amplitudes.
+    const dx = OCEAN_WAVE_EXTENT.x * 1.00001 + 0.001;
+    const dy = OCEAN_WAVE_EXTENT.y * Math.abs(wind) * 1.00001 + 0.001;
+    const dz = OCEAN_WAVE_EXTENT.z * 1.00001 + 0.001;
+    const base = entry.base;
+    const radius = Math.hypot(
+      (base.max.x - base.min.x) / 2 + dx,
+      (base.max.y - base.min.y) / 2 + dy,
+      (base.max.z - base.min.z) / 2 + dz,
+    );
+    if (
+      !Number.isFinite(radius) ||
+      !Number.isFinite(base.min.x - dx) ||
+      !Number.isFinite(base.min.y - dy) ||
+      !Number.isFinite(base.min.z - dz) ||
+      !Number.isFinite(base.max.x + dx) ||
+      !Number.isFinite(base.max.y + dy) ||
+      !Number.isFinite(base.max.z + dz)
+    )
+      throw new Error("Ocean displacement bounds overflow");
+    entry.box.min.set(base.min.x - dx, base.min.y - dy, base.min.z - dz);
+    entry.box.max.set(base.max.x + dx, base.max.y + dy, base.max.z + dz);
+    entry.sphere.center.set(
+      base.min.x / 2 + base.max.x / 2,
+      base.min.y / 2 + base.max.y / 2,
+      base.min.z / 2 + base.max.z / 2,
+    );
+    entry.sphere.radius = radius;
+    entry.wind = wind;
   }
 
   /**
@@ -1163,7 +1279,12 @@ export class WaterSystem {
         float(1.0),
         pow(sub(float(1), NdotV0), float(3)),
       );
-      return mul(mul(edgeFade, depthOpacity), fresnelOpacity);
+      const shallowOpacity = mul(mul(edgeFade, depthOpacity), fresnelOpacity);
+      // Offshore water must not expose the finite terrain seabed/sky boundary.
+      // Retain the existing shallow expression, then fade to exact opacity 1
+      // at shoreDistance >= 8 for every view angle. Quad-tree ocean currently
+      // supplies 50 everywhere; this is not a measured optical water depth.
+      return mix(shallowOpacity, float(1), depthFade);
     })();
 
     // OUTPUT: Same pattern as tree shader — pbrOut = output, replace RGB, keep pbrOut.a
@@ -1724,6 +1845,16 @@ export class WaterSystem {
     if (this.uniforms) updateUniforms(this.uniforms, 1.0);
     if (this.oceanUniforms) updateUniforms(this.oceanUniforms, 1.2);
 
+    if (this.oceanUniforms) {
+      const wind = this.oceanUniforms.windStrength.value;
+      for (let i = 0; i < this.oceanDisplacementBounds.length; i++) {
+        this.refreshOceanDisplacementBounds(
+          this.oceanDisplacementBounds[i],
+          wind,
+        );
+      }
+    }
+
     this.updateReflectionVisibility();
   }
 
@@ -1745,6 +1876,7 @@ export class WaterSystem {
       mesh.geometry.dispose();
     }
     this.waterMeshes = [];
+    this.oceanDisplacementBounds.length = 0;
 
     // Dispose materials
     this.lakeMaterial?.dispose();

@@ -28,6 +28,13 @@ const WATER_RESOLUTION_BY_DEPTH: Record<number, number> = {
 
 const SHORE_SAMPLE_GRID = 5;
 
+// One broadcast root is 1,600 m wide. Its ocean continues to a 3,600 m
+// square, leaving at least 1,000 m to the edge for an eye inside the root
+// (the unchanged fog is complete at 800 m). No additional terrain is made.
+const OCEAN_CONTINUATION_BANDS = 8;
+const OCEAN_CONTINUATION_ROOT_HALF_SIZE = 800;
+const OCEAN_CONTINUATION_OUTER_HALF_SIZE = 1800;
+
 interface WaterChunk {
   nodeId: number;
   mesh: THREE.Mesh;
@@ -41,7 +48,9 @@ export class WaterVisualManager implements QuadTreeListener {
   private waterThreshold: number;
   private readonly compactOceanOwnership: boolean;
   private chunks = new Map<string, WaterChunk>();
+  private retiringKeys = new Set<string>();
   private elevatedWaterMeshes: THREE.Mesh[] = [];
+  private destroyed = false;
 
   constructor(
     container: THREE.Group,
@@ -71,10 +80,16 @@ export class WaterVisualManager implements QuadTreeListener {
   // -- QuadTreeListener -------------------------------------------------
 
   onNodeNeedsGeometry(node: TerrainQuadNode): void {
+    if (this.destroyed) return;
     const key = this.chunkKey(node);
     if (this.chunks.has(key)) return;
 
     if (!this.hasUnderwaterArea(node)) return;
+
+    // Do not allocate an owned geometry before its borrowed material exists.
+    const waterType = this.determineWaterType(node);
+    const material = this.waterSystem.getMaterial(waterType);
+    if (!material) return;
 
     const resolution =
       WATER_RESOLUTION_BY_DEPTH[node.depth] ??
@@ -98,9 +113,13 @@ export class WaterVisualManager implements QuadTreeListener {
     }
     geom.setAttribute("normal", new THREE.BufferAttribute(normals, 3));
 
-    const waterType = this.determineWaterType(node);
-    const material = this.waterSystem.getMaterial(waterType);
-    if (!material) return;
+    let continuation: boolean;
+    try {
+      continuation = this.appendOceanContinuation(geom, node, resolution);
+    } catch (error) {
+      geom.dispose();
+      throw error;
+    }
 
     const mesh = new THREE.Mesh(geom, material);
     mesh.position.set(node.centerX, this.waterThreshold, node.centerZ);
@@ -114,23 +133,192 @@ export class WaterVisualManager implements QuadTreeListener {
     };
     mesh.layers.set(1);
 
-    this.container.add(mesh);
-    this.waterSystem.registerWaterMesh(mesh);
-    this.chunks.set(key, { nodeId: node.id, mesh });
+    let published = false;
+    try {
+      this.waterSystem.registerWaterMesh(mesh, continuation);
+      this.chunks.set(key, { nodeId: node.id, mesh });
+      published = true;
+      // Publish ownership before Three's synchronous added/childadded events.
+      // A listener can retire this exact node or the whole manager here.
+      this.container.add(mesh);
+    } catch (error) {
+      if (this.chunks.get(key)?.mesh === mesh) {
+        this.onNodeDestroyGeometry(node);
+      } else if (!published) {
+        this.waterSystem.unregisterWaterMesh(mesh);
+        mesh.removeFromParent();
+        geom.dispose();
+      }
+      throw error;
+    }
   }
 
   onNodeDestroyGeometry(node: TerrainQuadNode): void {
     const key = this.chunkKey(node);
+    if (this.retiringKeys.has(key)) return;
     const chunk = this.chunks.get(key);
     if (!chunk) return;
-
-    this.waterSystem.unregisterWaterMesh(chunk.mesh);
-    if (chunk.mesh.parent) chunk.mesh.parent.remove(chunk.mesh);
-    chunk.mesh.geometry.dispose();
-    this.chunks.delete(key);
+    this.retireChunk(key, chunk);
   }
 
   // -- Helpers ----------------------------------------------------------
+
+  private retireChunk(key: string, chunk: WaterChunk): void {
+    if (this.chunks.get(key) !== chunk) return;
+    // Detach ownership before synchronous childremoved/dispose listeners. A
+    // listener may publish a replacement with the same node key; an old
+    // retirement callback must neither recurse nor delete that replacement.
+    this.chunks.delete(key);
+    const alreadyRetiring = this.retiringKeys.has(key);
+    this.retiringKeys.add(key);
+    try {
+      this.waterSystem.unregisterWaterMesh(chunk.mesh);
+      try {
+        chunk.mesh.removeFromParent();
+      } finally {
+        chunk.mesh.geometry.dispose();
+      }
+    } finally {
+      if (!alreadyRetiring) this.retiringKeys.delete(key);
+    }
+  }
+
+  /**
+   * Extend the exact exposed edges of this leaf, in the same mesh. In
+   * particular, do not subdivide a coarse leaf's inner edge: its displaced
+   * polyline, not an independently sampled wave, is the seam authority.
+   * Parent/child geometry retains the quad-tree's existing transition lifetime.
+   */
+  private appendOceanContinuation(
+    geometry: THREE.PlaneGeometry,
+    node: TerrainQuadNode,
+    resolution: number,
+  ): boolean {
+    if (
+      !this.compactOceanOwnership ||
+      node.tree.config.rootChunkRadius !== 0 ||
+      node.tree.config.minSize !== 100 ||
+      node.tree.config.maxDepth !== 4
+    )
+      return false;
+    let root = node;
+    while (root.parent) root = root.parent;
+    if (
+      root.depth !== 0 ||
+      root.size !== node.tree.maxSize ||
+      root.halfSize !== OCEAN_CONTINUATION_ROOT_HALF_SIZE
+    )
+      return false;
+
+    const stride = resolution + 1;
+    const edges: number[][] = [];
+    // Clockwise in XZ; each edge and its outward row then have +Y winding.
+    if (node.boundingBox.zMin === root.boundingBox.zMin)
+      edges.push(Array.from({ length: stride }, (_, i) => i));
+    if (node.boundingBox.xMax === root.boundingBox.xMax)
+      edges.push(
+        Array.from({ length: stride }, (_, i) => i * stride + resolution),
+      );
+    if (node.boundingBox.zMax === root.boundingBox.zMax)
+      edges.push(
+        Array.from({ length: stride }, (_, i) => stride * stride - 1 - i),
+      );
+    if (node.boundingBox.xMin === root.boundingBox.xMin)
+      edges.push(
+        Array.from({ length: stride }, (_, i) => (resolution - i) * stride),
+      );
+    if (edges.length === 0) return false;
+
+    const position = geometry.getAttribute("position");
+    const normal = geometry.getAttribute("normal");
+    const uv = geometry.getAttribute("uv");
+    const shore = geometry.getAttribute("shoreDistance");
+    const originalIndex = geometry.getIndex()!;
+    const addedVertices = edges.length * stride * OCEAN_CONTINUATION_BANDS;
+    const addedIndices =
+      edges.length * resolution * OCEAN_CONTINUATION_BANDS * 6;
+    const vertexCount = position.count + addedVertices;
+    if (vertexCount > 65535)
+      throw new Error("Ocean continuation exceeds its index budget");
+
+    const positions = new Float32Array(vertexCount * 3);
+    const normals = new Float32Array(vertexCount * 3);
+    const uvs = new Float32Array(vertexCount * 2);
+    const shores = new Float32Array(vertexCount);
+    const indices = new Uint16Array(originalIndex.count + addedIndices);
+    positions.set(position.array);
+    normals.set(normal.array);
+    uvs.set(uv.array);
+    shores.set(shore.array);
+    indices.set(originalIndex.array);
+    let nextVertex = position.count;
+    let nextIndex = originalIndex.count;
+    for (const edge of edges) {
+      let previous = edge;
+      for (let band = 1; band <= OCEAN_CONTINUATION_BANDS; band++) {
+        const row: number[] = [];
+        // 1 + 5*band/32 is binary-exact. Neighboring leaves of different
+        // pitches share these endpoint chains, including root-corner diagonals.
+        const scale =
+          1 +
+          ((OCEAN_CONTINUATION_OUTER_HALF_SIZE / root.halfSize - 1) * band) /
+            OCEAN_CONTINUATION_BANDS;
+        for (const source of edge) {
+          const vertex = nextVertex++;
+          row.push(vertex);
+          const x =
+            root.centerX +
+            (position.getX(source) + node.centerX - root.centerX) * scale -
+            node.centerX;
+          const z =
+            root.centerZ +
+            (position.getZ(source) + node.centerZ - root.centerZ) * scale -
+            node.centerZ;
+          if (!Number.isFinite(x) || !Number.isFinite(z))
+            throw new Error("Non-finite ocean continuation position");
+          positions[vertex * 3] = x;
+          positions[vertex * 3 + 2] = z;
+          normals[vertex * 3 + 1] = 1;
+          uvs[vertex * 2] = x / node.size + 0.5;
+          uvs[vertex * 2 + 1] = 0.5 - z / node.size;
+          shores[vertex] = 50;
+        }
+        for (let i = 0; i < resolution; i++) {
+          indices[nextIndex++] = previous[i];
+          indices[nextIndex++] = previous[i + 1];
+          indices[nextIndex++] = row[i];
+          indices[nextIndex++] = previous[i + 1];
+          indices[nextIndex++] = row[i + 1];
+          indices[nextIndex++] = row[i];
+        }
+        previous = row;
+      }
+    }
+    geometry.setAttribute("position", new THREE.BufferAttribute(positions, 3));
+    geometry.setAttribute("normal", new THREE.BufferAttribute(normals, 3));
+    geometry.setAttribute("uv", new THREE.BufferAttribute(uvs, 2));
+    geometry.setAttribute(
+      "shoreDistance",
+      new THREE.BufferAttribute(shores, 1),
+    );
+    geometry.setIndex(new THREE.BufferAttribute(indices, 1));
+    // PlaneGeometry.parameters continues to describe the unchanged inner leaf;
+    // the additional geometry is explicit rather than masquerading as that grid.
+    geometry.userData.oceanContinuation = {
+      version: 1,
+      rootCenterX: root.centerX,
+      rootCenterZ: root.centerZ,
+      rootHalfSize: root.halfSize,
+      outerHalfSize: OCEAN_CONTINUATION_OUTER_HALF_SIZE,
+      bands: OCEAN_CONTINUATION_BANDS,
+      edgeCount: edges.length,
+      baseVertexCount: position.count,
+      baseIndexCount: originalIndex.count,
+      addedVertices,
+      addedIndices,
+    };
+    return true;
+  }
 
   private chunkKey(node: TerrainQuadNode): string {
     return `wq_${node.id}_d${node.depth}_${node.centerX}_${node.centerZ}`;
@@ -216,12 +404,9 @@ export class WaterVisualManager implements QuadTreeListener {
   }
 
   destroy(): void {
-    for (const [, chunk] of this.chunks) {
-      this.waterSystem.unregisterWaterMesh(chunk.mesh);
-      if (chunk.mesh.parent) chunk.mesh.parent.remove(chunk.mesh);
-      chunk.mesh.geometry.dispose();
-    }
-    this.chunks.clear();
+    if (this.destroyed) return;
+    this.destroyed = true;
+    for (const [key, chunk] of this.chunks) this.retireChunk(key, chunk);
     for (const mesh of this.elevatedWaterMeshes) {
       this.waterSystem.unregisterWaterMesh(mesh);
       if (mesh.parent) mesh.parent.remove(mesh);

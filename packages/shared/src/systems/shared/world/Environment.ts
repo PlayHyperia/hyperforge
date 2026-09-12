@@ -162,6 +162,19 @@ export class Environment extends System {
     return this.skySystem?.skyFogTexture ?? null;
   }
 
+  /** Read-only snapshot of the last render-boundary fog preparation. */
+  getFogSkyReceipt() {
+    return this.skySystem?.getFogSkyReceipt() ?? null;
+  }
+
+  /** Called only after the main camera has been selected for this render. */
+  prepareForRender(
+    renderer: THREE.WebGPURenderer,
+    camera: THREE.PerspectiveCamera,
+  ): void {
+    this.skySystem?.prepareForRender(renderer, camera);
+  }
+
   // Main directional light (sun/moon) with CSM shadow support
   public sunLight: THREE.DirectionalLight | null = null;
   public lightDirection: THREE.Vector3 = new THREE.Vector3(0, -1, 0);
@@ -929,9 +942,6 @@ export class Environment extends System {
 
   override lateUpdate(_delta: number) {
     if (!this.isClientWithGraphics) return;
-    if (this.skySystem) {
-      this.skySystem.lateUpdate(_delta);
-    }
     if (!this.sky) return;
 
     this.sky.position.x = this.world.rig.position.x;

@@ -95,6 +95,7 @@ import {
   type GPUComputeManager,
 } from "../../utils/compute";
 import { RendererPreparationQueue } from "../../utils/rendering/RendererPreparationQueue";
+import type { Environment } from "../shared/world/Environment";
 
 let renderer: WebGPURenderer | undefined;
 
@@ -361,6 +362,11 @@ export class ClientGraphics extends System {
   }
 
   render() {
+    // Camera owners (including diagnostic leases) select their pose before this
+    // method. Screen-space fog must use that same pose, not the earlier update.
+    this.world
+      .getSystem<Environment>("environment")
+      ?.prepareForRender(this.renderer, this.world.camera);
     if (!this.usePostprocessing || !this.composer) {
       this.renderer.render(this.world.stage.scene, this.world.camera);
     } else {
