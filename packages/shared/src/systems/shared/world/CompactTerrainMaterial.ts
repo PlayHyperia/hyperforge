@@ -351,7 +351,7 @@ export function applyCompactMeadowTint(
     albedo: grass.albedo.mul(
       mix(
         mix(
-          vec3(1),
+          vec3(c.meadowFreshRed, c.meadowFreshGreen, c.meadowFreshBlue),
           vec3(c.meadowDryRed, c.meadowDryGreen, c.meadowDryBlue),
           dryness,
         ),

@@ -67,6 +67,7 @@ import {
 import type { WorldTerrainProfile } from "./WorldTerrainProfile";
 import {
   createCompactTerrainColorOperations,
+  COMPACT_TERRAIN_COMPOSITION,
   type CompactTerrainPond,
 } from "./CompactTerrainPalette";
 
@@ -1264,9 +1265,18 @@ export function createTerrainMaterial(
     ? createCompactTerrainLayers(compactTextures, distSq, noiseValue)
     : null;
   if (compactLayers) {
+    // One extra sample of the existing noise texture; no new texture allocation.
+    // Dry grass keeps the same physical support, normals and placement field.
+    const meadowNoise = texture(
+      noiseTex,
+      mul(
+        vec2(worldPos.x, worldPos.z),
+        float(COMPACT_TERRAIN_COMPOSITION.meadowNoiseScale),
+      ),
+    ).r;
     compactLayers.grass = applyCompactMeadowTint(
       compactLayers.grass,
-      noiseValue,
+      meadowNoise,
       macroSurface.dry,
     );
   }

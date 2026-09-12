@@ -18,6 +18,7 @@ import {
   createTerrainMaterial,
   TerrainShadeUniforms,
   sampleNoiseCPU,
+  getNoiseTexture,
 } from "../TerrainShader";
 import {
   COMPACT_TERRAIN_BITMAP_OPTIONS,
@@ -430,6 +431,23 @@ describe("compact terrain actual texture ownership and CPU material graph", () =
       expect(material.terrainUniforms.shade).toBe(shade);
       const compactAlbedo = graph(material.colorNode!);
       const legacyAlbedo = graph(legacy.colorNode!);
+      const noiseSamples = [...compactAlbedo].filter(
+        (node) =>
+          Reflect.get(node, "value") === getNoiseTexture() &&
+          Reflect.get(node, "uvNode"),
+      );
+      // Original classification/distortion plus one meadow sample. All reuse
+      // the same allocated texture; only the meadow UV uses the new scale.
+      expect(noiseSamples).toHaveLength(3);
+      const meadowSamples = noiseSamples.filter((node) =>
+        [...graph(Reflect.get(node, "uvNode") as Node)].some(
+          (uv) => Reflect.get(uv, "value") === 0.006,
+        ),
+      );
+      expect(meadowSamples).toHaveLength(1);
+      expect(
+        [...legacyAlbedo].some((node) => Reflect.get(node, "value") === 0.006),
+      ).toBe(false);
       for (const node of [
         shade.tint,
         shade.strength,
@@ -834,6 +852,7 @@ describe("compact grass base palette without changing ecology", () => {
         expect(color.grassWeight).toBeLessThan(0.05);
         const expected = ops.sample({
           noiseValue,
+          meadowNoise: sampleNoiseCPU(x, z, 0.006),
           distortNoise,
           slope: 1 - color.ny,
           roadInfluence: 0,
@@ -1177,7 +1196,7 @@ describe("compact grass base palette without changing ecology", () => {
     }
   });
 
-  it("warms only grass linear albedo with bounded, matching CPU and real TSL arithmetic", async () => {
+  it("composes fresh and dry grass linear albedo with bounded, matching CPU and real TSL arithmetic", async () => {
     const ops = createCompactTerrainColorOperations();
     const palette = ops.getPalette();
     const grass: CompactTerrainLayer = {
@@ -1187,17 +1206,17 @@ describe("compact grass base palette without changing ecology", () => {
       worldNormal: vec3(0, 1, 0),
     };
     for (const [noise, dryness] of [
-      [-1, 0.15],
-      [0.28, 0.15],
-      [0.5, 0.4],
-      [0.72, 0.65],
-      [2, 0.65],
+      [-1, 0],
+      [0.43, 0],
+      [0.515, 0.5],
+      [0.6, 1],
+      [2, 1],
     ]) {
       // Independent intended formula, in linear units, not sRGB multiplication.
       const expected = [
-        1 + (1.12 - 1) * dryness,
-        1 + (0.96 - 1) * dryness,
-        1 + (1.1 - 1) * dryness,
+        0.8 + (1.85 - 0.8) * dryness,
+        1.25,
+        0.65 + (1.2 - 0.65) * dryness,
       ];
       const actual = applyCompactMeadowTint(grass, float(noise));
       const rgb = vectorValue(actual.albedo);
@@ -1246,6 +1265,45 @@ describe("compact grass base palette without changing ecology", () => {
     }
   });
 
+  it("keeps dry meadow grass support and protected soil independent of its color field", () => {
+    const ops = createCompactTerrainColorOperations();
+    const layer: CompactTerrainLayer = {
+      albedo: vec3(...(ops.getPalette().grass as [number, number, number])),
+      roughness: float(0.85),
+      ao: float(0.8),
+      worldNormal: vec3(0, 1, 0),
+    };
+    const base = {
+      noiseValue: 0.52,
+      distortNoise: 0.47,
+      slope: 0,
+      roadInfluence: 0,
+      surface: { x: 350, z: 320, height: 28.4, pond: null },
+    };
+    const support = ops.grassSupport(base),
+      colors = [];
+    for (const meadowNoise of [0, 0.43, 0.515, 0.6, 1]) {
+      const input = { ...base, meadowNoise };
+      expect(ops.grassSupport(input)).toBe(support);
+      expect(ops.weights(input)).toEqual(ops.weights(base));
+      const actual = applyCompactMeadowTint(layer, float(meadowNoise));
+      const weights = ops.weights(base),
+        palette = ops.getPalette();
+      const expected = vectorValue(actual.albedo).map(
+        (v, i) =>
+          (v + (palette.dirt[i] - v) * weights.dirt) * weights.variation,
+      );
+      const color = ops.sample(input);
+      colors.push(color.r);
+      for (const [i, key] of ["r", "g", "b"].entries())
+        expect(color[key as "r" | "g" | "b"]).toBeCloseTo(expected[i], 13);
+      expect(ops.sample({ ...input, roadInfluence: 1 })).toEqual(
+        ops.sample({ ...base, roadInfluence: 1 }),
+      );
+    }
+    expect(Math.max(...colors) - Math.min(...colors)).toBeGreaterThan(0.12);
+  });
+
   it("exposes real geometric ridge slopes while preserving flat turf, soil paths and pond beds", () => {
     const ops = createCompactTerrainColorOperations();
     const palette = ops.getPalette();
@@ -1284,15 +1342,14 @@ describe("compact grass base palette without changing ecology", () => {
         b: palette.dirt[2],
       });
     }
-    // Coverage stays broad even though the new source needs much gentler tint.
-    // Compare the physical dryness mask, not the obsolete red gain's amplitude.
+    // Test the authored range against the real cached world-noise field.
     const dryness: number[] = [];
     for (let x = 150; x <= 550; x += 20)
       for (let z = 200; z <= 600; z += 20) {
-        const noise = sampleNoiseCPU(x, z, 0.0008);
-        const t = Math.max(0, Math.min(1, (noise - 0.28) / (0.72 - 0.28)));
-        const expected = 0.15 + 0.5 * t * t * (3 - 2 * t);
-        const actual = (ops.meadowTint(noise)[0] - 1) / (1.12 - 1);
+        const noise = sampleNoiseCPU(x, z, 0.006);
+        const t = Math.max(0, Math.min(1, (noise - 0.43) / (0.6 - 0.43)));
+        const expected = t * t * (3 - 2 * t);
+        const actual = (ops.meadowTint(noise)[0] - 0.8) / (1.85 - 0.8);
         expect(actual).toBeCloseTo(expected, 12);
         dryness.push(actual);
       }
@@ -1418,7 +1475,7 @@ describe("compact grass base palette without changing ecology", () => {
       b: palette.dirt[2],
     });
     const grass = sample(0, 0, 0.1);
-    expect(grass.r).toBeCloseTo(palette.grass[0] * 1.018 * 0.984, 14);
+    expect(grass.r).toBeCloseTo(palette.grass[0] * 0.8 * 0.984, 14);
     for (const slope of [0, 0.2, 0.45, 0.8, 1])
       for (const roadInfluence of [0, 0.25, 0.75, 1])
         for (const noiseValue of [0, 0.5, 1]) {
@@ -1432,7 +1489,7 @@ describe("compact grass base palette without changing ecology", () => {
         }
   });
 
-  it("matches actual compact TSL weights and RGB while retaining full dirt paths over the restrained meadow", () => {
+  it("matches actual compact TSL weights and RGB while retaining full dirt paths over the meadow", () => {
     const ops = createCompactTerrainColorOperations();
     const palette = ops.getPalette();
     const layer = (color: number[]): CompactTerrainLayer => ({

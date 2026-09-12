@@ -1,5 +1,28 @@
 # Duel Arena, Streaming, and Hyperbet Launch Checklist
 
+## Meadow material and art target — 2026-09-12
+
+- [x] Generate an explicitly labeled, non-game art target from the actual island
+      overview; preserve one arena, service layout and functional-tree intent.
+- [x] Add independent fresh/dry meadow color to actual terrain and grass shading.
+      Reject the earlier soil/classification experiments that removed grass.
+      Keep original placement hashes, physical masks, normals, routes and density.
+- [x] Pass 1,158 tests/84 files, three builds/typechecks and seven native preflights.
+      Review eight actual WebGPU views; verify 675 source pins/596 archives/14 PNGs.
+      Retain 2,275 clumps, 48 functional trees and 52 dressing instances, exact camera
+      restoration and owned cleanup. Zero page/GPU/cleanup errors; overall still
+      fails the 19 existing cow/dagger content errors, which remain launch gaps.
+- [ ] Measure actual full-frame CPU, render/compute GPU queries, presented frames
+      and memory before vegetation/effects expansion. One extra existing-texture
+      noise sample is added; no zero-cost or smoothness claim from stills/tests.
+- [ ] Finish layered understory, natural fractured ridge/coast forms and integrated
+      lighting/sky/water/shadows/motion. The visible meadow patches still need
+      natural context; this is a tested foundation, not AAA or launch acceptance.
+
+Evidence: `docs/meadow-material-art-direction-20260912.md`,
+`asset-studio/island-art-direction01/` and
+`asset-studio/game-test-integration/plaza-ground-probe03/`.
+
 ## Natural preparation ground — 2026-09-12
 
 - [x] Separate the Central Haven plaza's level grade from grass suppression.

@@ -380,6 +380,7 @@ ${buildSampleNoiseJS()}
 ${buildComputeTerrainColorJS()}
 var roadInfluenceOperations = (${createRoadInfluenceOperations.toString()})();
 var compactTerrainColorOperations = (${createCompactTerrainColorOperations.toString()})();
+var compactMeadowNoiseScale = compactTerrainColorOperations.getComposition().meadowNoiseScale;
 
 function mulberry32(seed) {
   var s = seed | 0;
@@ -509,6 +510,7 @@ function generateGrassInstances(input) {
     if (input.config.TERRAIN_PROFILE.algorithm === "compact-island-sculpt-v1" || (input.config.TERRAIN_PROFILE.algorithm === "compact-island-sculpt-v2" || input.config.TERRAIN_PROFILE.algorithm === "compact-island-sculpt-v3" || (input.config.TERRAIN_PROFILE.algorithm === "compact-island-sculpt-v4" || input.config.TERRAIN_PROFILE.algorithm === "compact-island-sculpt-v5"))) {
       var compactInput = {
         noiseValue: sampleNoiseCPU(wx, wz, sc.NOISE_SCALE),
+        meadowNoise: sampleNoiseCPU(wx, wz, compactMeadowNoiseScale),
         distortNoise: sampleNoiseCPU(wx, wz, sc.DISTORT_NOISE_SCALE),
         slope: slope, roadInfluence: roadInf,
         surface: {x:wx,z:wz,height:ty,pond:compactPondMaterial,macroField:compactMacroField}

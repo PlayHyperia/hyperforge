@@ -38,6 +38,9 @@ export type CompactTerrainMacroField = Readonly<{
 
 export function createCompactTerrainColorOperations() {
   const composition = {
+    // Fresh/dry grass is a reflectance variation, not bare soil. Give it a
+    // meadow-scale field without reseeding physical soil/grass eligibility.
+    meadowNoiseScale: 0.006,
     patchStart: 0.5,
     patchEnd: 0.72,
     patchStrength: 0.12,
@@ -52,15 +55,18 @@ export function createCompactTerrainColorOperations() {
     // 46–63 degree range that left the compact ridges covered in turf.
     cliffStart: 0.07,
     cliffEnd: 0.23,
-    meadowDryStart: 0.28,
-    meadowDryEnd: 0.72,
-    meadowDryLow: 0.15,
-    meadowDryHigh: 0.65,
+    meadowDryStart: 0.43,
+    meadowDryEnd: 0.6,
+    meadowDryLow: 0,
+    meadowDryHigh: 1,
     // Linear-reflectance multipliers, not sRGB values or baked illumination.
     // The pinned grass diffuse remains below 1 in every channel after tint.
-    meadowDryRed: 1.12,
-    meadowDryGreen: 0.96,
-    meadowDryBlue: 1.1,
+    meadowFreshRed: 0.8,
+    meadowFreshGreen: 1.25,
+    meadowFreshBlue: 0.65,
+    meadowDryRed: 1.85,
+    meadowDryGreen: 1.25,
+    meadowDryBlue: 1.2,
     macroShoulderStart: 0.25,
     macroShoulderEnd: 1.85,
     macroBoundaryNoise: 0.2,
@@ -361,14 +367,18 @@ export function createCompactTerrainColorOperations() {
         math.smooth(c.meadowDryStart, c.meadowDryEnd, noiseValue),
       );
       return [
-        math.mix(math.mix(1, c.meadowDryRed, dryness), c.macroDryRed, macroDry),
         math.mix(
-          math.mix(1, c.meadowDryGreen, dryness),
+          math.mix(c.meadowFreshRed, c.meadowDryRed, dryness),
+          c.macroDryRed,
+          macroDry,
+        ),
+        math.mix(
+          math.mix(c.meadowFreshGreen, c.meadowDryGreen, dryness),
           c.macroDryGreen,
           macroDry,
         ),
         math.mix(
-          math.mix(1, c.meadowDryBlue, dryness),
+          math.mix(c.meadowFreshBlue, c.meadowDryBlue, dryness),
           c.macroDryBlue,
           macroDry,
         ),
@@ -382,7 +392,7 @@ export function createCompactTerrainColorOperations() {
       pondSurface?: { soil: number; wetness: number };
       macroSurface?: { dry: number; westRock: number };
     }) {
-      // Meadow dirt is restrained; steep rock follows actual geometric slope,
+      // Meadow earth follows the shared patch field; rock uses geometric slope,
       // never the legacy high-frequency distorted normal classification.
       const slope = Math.max(0, Math.min(1, input.slope));
       const patch =
@@ -491,6 +501,7 @@ export function createCompactTerrainColorOperations() {
      */
     sample(input: {
       noiseValue: number;
+      meadowNoise?: number;
       distortNoise: number;
       slope: number;
       roadInfluence: number;
@@ -540,7 +551,7 @@ export function createCompactTerrainColorOperations() {
       // Tint only the grass diffuse before physical-layer blending. Full
       // paths and pond beds remain the original soil, not yellowed dirt.
       const meadowTint = operations.meadowTint(
-        input.noiseValue,
+        input.meadowNoise ?? input.noiseValue,
         macroSurface.dry,
       );
       const result = palette.grass.map(

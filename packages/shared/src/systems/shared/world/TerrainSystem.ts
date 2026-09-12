@@ -5339,6 +5339,11 @@ export class TerrainSystem extends System {
           wz,
           TERRAIN_SHADER_CONSTANTS.NOISE_SCALE,
         ),
+        meadowNoise: sampleNoiseCPU(
+          wx,
+          wz,
+          COMPACT_TERRAIN_COMPOSITION.meadowNoiseScale,
+        ),
         distortNoise: sampleNoiseCPU(
           wx,
           wz,

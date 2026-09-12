@@ -291,6 +291,7 @@ describe("actual authored-surface grass worker", () => {
           );
           const paletteInput = {
             noiseValue,
+            meadowNoise: sampleNoiseCPU(point.x, point.z, 0.006),
             distortNoise,
             slope: 1 - main.ny,
             roadInfluence: 0,
@@ -423,6 +424,7 @@ describe("actual authored-surface grass worker", () => {
         // main/worker integration against that current palette, not a minimum
         // distance from an unrelated legacy green channel.
         const expected = ops.sample({
+          meadowNoise: sampleNoiseCPU(point.x, point.z, 0.006),
           noiseValue: sampleNoiseCPU(
             point.x,
             point.z,
