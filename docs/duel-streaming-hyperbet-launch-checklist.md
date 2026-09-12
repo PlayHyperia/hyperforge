@@ -27,6 +27,12 @@ Dated sections below retain evidence and superseded experiments.
 
 ## Active functional woodland and surface fidelity — 2026-09-11
 
+- [x] Push the matched grove/roof checkpoint: game `88763df946` (18 exact scoped
+  files) and assets `091b150dea` (only world-config). Normal hooks and staged
+  secret scans pass; all 17 tested game/asset pins match committed blobs after
+  hooks. Exact remote heads and GitHub author/committer `dreaminglucid` verified.
+  No merge/deployment; unrelated edits and asset deletions remain untouched.
+
 - [x] Push selected rocky-terrain checkpoint `6043406d0f` and paired assets
   `bec5498a2a`: all 27 game blobs and 10 asset raw/LFS identities match tested
   pins; exact remote heads and GitHub author/committer `dreaminglucid` verified.
@@ -108,10 +114,47 @@ Dated sections below retain evidence and superseded experiments.
   empty lawn, uniform scarp, oversized hard platforms, foliage lighting and
   character/content blockers remain. No whole-scene AAA, motion, sustained FPS,
   GPU cost, live harvest or launch approval from this diagnostic.
-- [ ] Qualify compact alpha-bearing leaf coverage using the existing four-sample
-  WebGPU path. External draft only: raw filtered alpha plus original dissolve,
-  preserved opaque bark/legacy material and hard shadow behavior. No game code,
-  assets or compression candidates installed yet; proposed tests are unexecuted.
+- [x] Reject the first leaf-coverage candidate after native65 image review.
+  All 18 cameras/daylight pairs pass against native64, with 592 pins/523
+  archives and 24 verified PNGs. No page/GPU/cleanup errors; the same 19
+  cow/dagger failures remain. The crowns nevertheless look thinner and porous.
+  Structural success is not art acceptance. Report SHA
+  `cbeabd004cd7d7cfb1062e3dbe1c0e2f3ae111a9cce051bdb7b7c99a8ea9df39`.
+  Native64 remains the selected foliage baseline. Owned browser/services closed.
+- [ ] Qualify centered compact leaf coverage in native66, not the rejected
+  unshifted threshold. Native r186 smooths from T to T+fwidth(alpha); offsetting
+  T by half that width keeps the transition centered on the authored .5.
+  Original Bayer dissolve, RGB/AO/wind/fog, bark/legacy paths, source maps and
+  hard shadow behavior remain unchanged. Fourteen graph tests, all 911 shared
+  tests/73 files, 94 capture checks and three affected package typechecks pass.
+  Widths above one and the pre-existing hard-shadow/depletion limitation remain
+  explicit. Passive native65 observations find existing four-sample context/
+  attachment/pipeline handles, not the hardware alpha-coverage descriptor or
+  visible-pixel proof. No AAA, motion, GPU-cost or sustained-FPS approval.
+- [x] Verify native66 centered coverage against the actual native64 reference:
+  all 18 exact-camera/daylight pairs pass (maximum phase delta 0.0079708108).
+  Root verifies 592 pins/523 archives (56,020,161 bytes), 24 PNGs and 48 fog
+  brackets, both island censuses and 36 passive alpha-pipeline observations.
+  No page/GPU/cleanup errors; all 19 existing cow/dagger failures remain.
+  Report SHA `e197e28a0598a9e2cc29b06221eb3c46057e0f3881d017f1c7e41bdfa34f07b8`.
+  Root-reviewed stills recover crown fullness versus rejected native65; retain
+  centered coverage as a candidate pending movement/cost qualification. No
+  whole-scene AAA or production approval. Owned browser/launcher/ports closed.
+- [ ] Integrate per-blade grass grounding through a resumable, surface-owned
+  work path before increasing coverage. Existing offline prototype calls of
+  23–40ms/leaf and nonresumable budget failures cannot run in the frame loop.
+  Neighbor replacement, storage-buffer disposal and deferred-readiness need
+  explicit ownership. External continuation now passes 15 CPU tests plus its
+  typecheck, including exact original-core results for all six current worker
+  leaves: 2,298 raw, 2,240 safely retained. One measured run uses 30.247–104.586
+  ms active CPU per leaf over 16–54 slices, longest slice 2.454 ms. Overshoot,
+  total cost, complete region/constraint epochs and GPU lifetime remain open.
+  Not installed in the game; no density/distribution change or 60Hz claim.
+- [ ] Compose an open smithy court around the unchanged furnace/anvil, using
+  the existing roof/material system and bounded low planted flanks. External
+  plan only: post collision ownership, full tree/path/service envelopes, terrain
+  grounding and actual native passage tests must precede installation. No new
+  slab, resource moves, decorative tree substitution or unverified clearances.
 - [x] Execute the isolated q3 base-level compression study: all eight exact
   references retain RGBA and the required one Y flip; eight candidates pass
   actual r186 WASM RGBA/ASTC/BC7 transcodes. Six-map delivery falls from

@@ -1040,6 +1040,10 @@ export type TreeDissolveMaterial = DissolveMaterial & {
     sourceMaterialName: string;
     species: string | null;
     compactPaletteApplied: boolean;
+    /** Original mapped alpha flags, recorded before dissolve conversion. */
+    sourceAlphaBearing: boolean;
+    /** Selected coverage graph; actual multisampling still requires the renderer. */
+    compactLeafCoverage: boolean;
   }>;
   treeUniforms: {
     illumination: WorldIlluminationUniforms;
@@ -1075,6 +1079,14 @@ export function createTreeDissolveMaterial(
   const compact =
     palette?.terrainProfile.kind === "compact-candidate" &&
     isCompactSculptProfile(palette.terrainProfile);
+  // Inspect the original source before configureDissolveMaterial replaces its
+  // transparency. Names alone miss General "Leaves" and unnamed Oak leaves.
+  const sourceMap = (source as THREE.Material & { map?: THREE.Texture | null })
+    .map;
+  const sourceAlphaBearing =
+    sourceMap?.isTexture === true &&
+    (source.alphaTest > 0 || source.transparent === true);
+  const compactLeafCoverage = compact && sourceAlphaBearing;
   const compactMaterial = compact ? new CompactTreePBRMaterial() : null;
   const baseDm = configureDissolveMaterial(
     source,
@@ -1177,8 +1189,30 @@ export function createTreeDissolveMaterial(
     const leafCutoutMap = material.map;
     material.opacityNode = Fn(() => {
       const uv = attribute<"vec2">("uv", "vec2");
-      return step(float(0.5), texture(leafCutoutMap, uv).a);
+      const alpha = texture(leafCutoutMap, uv).a;
+      return compactLeafCoverage ? alpha : step(float(0.5), alpha);
     })();
+    if (compactLeafCoverage) {
+      // configureDissolveMaterial constructs a scalar 0-or-2 threshold. Three's
+      // public material slot erases that known node type.
+      const dissolveThreshold = material.alphaTestNode as Node<"float"> | null;
+      if (dissolveThreshold === null) {
+        throw new Error(
+          "Compact leaf coverage requires its dissolve threshold",
+        );
+      }
+      // Native r186 smooths from T to T+fwidth(alpha). Center that interval on
+      // the authored .5 cutoff: an unshifted T=.5 erodes minified crowns. D is
+      // the unchanged 0-or-2 Bayer threshold; max with D also prevents a
+      // negative cutoff and transparent-texel leakage at very wide gradients.
+      // Widths above one still need separate mip/coverage qualification.
+      const alpha = material.opacityNode as Node<"float">;
+      const centeredCutoff = float(0.5).sub(alpha.fwidth().mul(0.5));
+      material.alphaTestNode = max(centeredCutoff, dissolveThreshold);
+      material.alphaToCoverage = true;
+      // Numeric alphaTest stays .5 for the existing single-sample shadow pass.
+      // Its pre-existing omission of custom dissolve nodes is not changed here.
+    }
   }
 
   // --- Sky-color fog (same as terrain/vegetation) ---
@@ -1398,6 +1432,8 @@ export function createTreeDissolveMaterial(
       sourceMaterialName: source.name,
       species: palette?.species ?? null,
       compactPaletteApplied,
+      sourceAlphaBearing,
+      compactLeafCoverage,
     }),
     enumerable: true,
   });
