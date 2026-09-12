@@ -3,8 +3,11 @@ import {
   createBuildingMaterial,
 } from "@hyperforge/procgen/building";
 import * as THREE from "../../extras/three/three";
-import { attribute, bool, screenCoordinate, uniform } from "three/tsl";
-import { CompactRoofCutaway } from "./CompactRoofCutaway";
+import { attribute, bool } from "three/tsl";
+import {
+  CompactRoofCutaway,
+  createCompactRoofFade,
+} from "./CompactRoofCutaway";
 import type { World } from "../../core/World";
 import { DataManager } from "../../data/DataManager";
 import { System } from "../shared/infrastructure/System";
@@ -103,21 +106,7 @@ export function createCompactServiceCourtVisual(
     const roofMesh = root.children[1] as THREE.Mesh;
     const timberMesh = root.children[0] as THREE.Mesh;
     const cutaway = new CompactRoofCutaway(root, roofMesh, timberMesh);
-    const fade = uniform(0).setName("compactSmithyRoofFade");
-    // Fixed screen-space 4x4 Bayer coverage only during the 220ms transition.
-    // Both steady endpoints are solid decisions, with no transparent sorting.
-    const low = screenCoordinate.floor().mod(2);
-    const high = screenCoordinate.div(2).floor().mod(2);
-    const bayer = low.x
-      .add(low.y)
-      .mod(2)
-      .mul(2)
-      .add(low.y)
-      .mul(4)
-      .add(high.x.add(high.y).mod(2).mul(2).add(high.y))
-      .add(0.5)
-      .div(16);
-    const visible = bayer.greaterThanEqual(fade);
+    const { fade, visible } = createCompactRoofFade("compactSmithyRoofFade");
     roof.maskNode = visible;
     timber.maskNode = attribute("courtRoof", "float").lessThan(0.5).or(visible);
     // r186 explicitly selects this mask for shadow passes, independently of
@@ -126,20 +115,19 @@ export function createCompactServiceCourtVisual(
     timber.maskShadowNode = bool(true);
     cutaway.installPointerFilter(roofMesh);
     cutaway.installPointerFilter(timberMesh);
-    let lastFrame = -1;
     for (const mesh of [roofMesh, timberMesh])
       mesh.onBeforeRender = (renderer, _scene, camera) => {
-        if (disposed || !mainCamera || camera !== mainCamera()) return;
+        if (disposed || !mainCamera) return;
         // Three's mesh callback type names its older renderer, but this runtime
         // is WebGPU-only and uses the current shared Renderer.info.frame owner.
         const frame = (renderer as unknown as { info: { frame: number } }).info
           .frame;
-        if (!Number.isFinite(frame))
-          throw new Error("Roof cutaway requires the WebGPU frame owner");
-        if (frame === lastFrame) return;
-        lastFrame = frame;
-        cutaway.update(camera, performance.now());
-        fade.value = cutaway.value;
+        fade.value = cutaway.valueForPass(
+          camera,
+          mainCamera(),
+          frame,
+          performance.now(),
+        );
       };
     return {
       root,

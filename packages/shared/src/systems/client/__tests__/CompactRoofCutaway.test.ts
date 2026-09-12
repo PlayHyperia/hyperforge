@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
+import { createHash } from "node:crypto";
 import { createOpenWorkshop } from "@hyperforge/procgen/building";
 import * as THREE from "../../../extras/three/three";
 import { CompactRoofCutaway } from "../CompactRoofCutaway";
@@ -158,6 +159,62 @@ describe("compact smithy cutaway policy (CPU geometry, not visual/GPU acceptance
         sideCorners++;
       }
     expect(sideCorners).toBe(48);
+  });
+
+  it("labels all four foreground ring beams as upper structure without changing any physical geometry bytes", () => {
+    const { geometry } = fixture();
+    const expected = {
+      timber:
+        "0bd9dab417769bd2671df3ae1bfd9c4f40a51fc6c7f878878b0453b30d86b46d",
+      roof: "4654d75e7b15e4c03e67f922c0e282c4174e57f3567aa7157d1c6f6bcd104b2c",
+      footings:
+        "974da6055e0790c65a4a2bb25eeed4baeb7260fb19afaa013033491f9ecda284",
+    };
+    // Recorded from the built pre-change recipe; exclude only its visibility label.
+    for (const role of ["timber", "roof", "footings"] as const) {
+      const g = geometry[role],
+        hash = createHash("sha256");
+      for (const name of Object.keys(g.attributes).sort()) {
+        if (name === "courtRoof") continue;
+        const a = g.getAttribute(name).array;
+        hash.update(name);
+        hash.update(Buffer.from(a.buffer, a.byteOffset, a.byteLength));
+      }
+      if (g.index) {
+        const a = g.index.array;
+        hash.update(Buffer.from(a.buffer, a.byteOffset, a.byteLength));
+      }
+      expect(hash.digest("hex"), role).toBe(expected[role]);
+    }
+    const mask = geometry.timber.getAttribute("courtRoof");
+    // Twelve 84-corner posts/braces, followed by four 84-corner ring beams.
+    for (let i = 0; i < 12 * 84; i++) expect(mask.getX(i)).toBe(0);
+    for (let i = 12 * 84; i < 16 * 84; i++) expect(mask.getX(i)).toBe(1);
+  });
+
+  it("isolates other camera passes and restores the main fade within the same renderer frame", () => {
+    const { camera, cutaway } = fixture();
+    const other = new THREE.PerspectiveCamera();
+    for (let frame = 0; frame <= 15; frame++)
+      cutaway.valueForPass(camera, camera, frame, frame * 20);
+    expect(cutaway.value).toBe(1);
+    expect(cutaway.valueForPass(other, camera, 15, 310)).toBe(0);
+    expect(cutaway.valueForPass(camera, camera, 15, 320)).toBe(1);
+    expect(cutaway.decisionCount).toBe(1);
+    expect(() => cutaway.valueForPass(camera, camera, NaN, 320)).toThrow(
+      /frame owner/,
+    );
+    expect(() => cutaway.valueForPass(camera, camera, -1, 320)).toThrow(
+      /frame owner/,
+    );
+    expect(() => cutaway.valueForPass(camera, camera, 1.5, 320)).toThrow(
+      /frame owner/,
+    );
+    // A new main camera at the same frame gets its own decision, without sharing visibility.
+    other.updateMatrixWorld(true);
+    expect(cutaway.valueForPass(other, other, 15, 320)).toBeLessThan(1);
+    expect(cutaway.desired).toBe(false);
+    expect(cutaway.decisionCount).toBe(2);
   });
 
   it("rejects invalid clocks and keeps endpoints bounded for backward time", () => {

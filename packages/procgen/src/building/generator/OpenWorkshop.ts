@@ -136,6 +136,10 @@ export function createOpenWorkshop(
         member([x, 2.45, z], [x, 3.07, z + (z < 0 ? 0.72 : -0.72)], 0.14),
       );
     }
+    // Posts and their short braces remain visible; the high ring beams belong
+    // to the upper cutaway, otherwise they cross agents after the roof fades.
+    // Only the visibility label changes: all physical vertices stay identical.
+    const permanentFrameEnd = frame.length;
     for (const x of [-5, 5])
       frame.push(member([x, 3.06, -3.1], [x, 3.06, 3.15], 0.24, 0.28));
     for (const z of [-2, 3])
@@ -143,7 +147,6 @@ export function createOpenWorkshop(
     const gable = createGabledRoof(10, 6, 3.2, "wood");
     for (const geometry of [...gable.roofs, ...gable.walls]) take(geometry);
     frame.push(...gable.walls);
-    const permanentFrameEnd = frame.length - gable.walls.length;
     // Visible ridge support and two interior rafter pairs articulate the open underside.
     const peak = 3.2 + 5 * Math.tan((32 * Math.PI) / 180);
     frame.push(member([0, peak - 0.13, -3.2], [0, peak - 0.13, 3.2], 0.18));

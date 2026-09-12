@@ -3,7 +3,11 @@ import {
   createBuildingMaterial,
 } from "@hyperforge/procgen/building";
 import * as THREE from "../../extras/three/three";
-import { attribute, positionLocal, select } from "three/tsl";
+import { attribute, bool, positionLocal, select } from "three/tsl";
+import {
+  CompactRoofCutaway,
+  createCompactRoofFade,
+} from "./CompactRoofCutaway";
 import type { Node } from "three/webgpu";
 import type { World } from "../../core/World";
 import { DataManager } from "../../data/DataManager";
@@ -19,6 +23,7 @@ export const COMPACT_LODGE_VISUAL_SYSTEM = "compact-preparation-lodge-visuals";
 /** Private mesh/material lease. The authoritative layout remains TownSystem's. */
 export function createCompactPreparationLodgeVisual(
   record: OwnedCompactPreparationLodge,
+  mainCamera?: () => THREE.Camera,
 ) {
   const generator = new BuildingGenerator();
   const geometries = new Set<THREE.BufferGeometry>();
@@ -164,12 +169,35 @@ export function createCompactPreparationLodgeVisual(
     root.position.set(record.position.x, record.position.y, record.position.z);
     root.rotation.y = record.rotation;
     root.updateMatrixWorld(true);
+    const roofMesh = meshes.find((mesh) => mesh.name === "roof")!;
+    const wallMesh = meshes.find((mesh) => mesh.name === "walls")!;
+    const cutaway = new CompactRoofCutaway(root, roofMesh, wallMesh, "lodge");
+    const { fade, visible } = createCompactRoofFade("compactLodgeRoofFade");
+    roof.maskNode = visible;
+    walls.maskNode = positionLocal.y.lessThan(cutaway.upperWallY!).or(visible);
+    roof.maskShadowNode = bool(true);
+    walls.maskShadowNode = bool(true);
+    for (const mesh of [roofMesh, wallMesh]) {
+      cutaway.installPointerFilter(mesh);
+      mesh.onBeforeRender = (renderer, _scene, camera) => {
+        if (disposed || !mainCamera) return;
+        const frame = (renderer as unknown as { info: { frame: number } }).info
+          .frame;
+        fade.value = cutaway.valueForPass(
+          camera,
+          mainCamera(),
+          frame,
+          performance.now(),
+        );
+      };
+    }
     return {
       root,
       meshes: Object.freeze(meshes),
       triangles,
       geometryBytes,
       materialCount: materials.size,
+      cutaway,
       dispose,
     };
   } catch (error) {
@@ -211,7 +239,10 @@ export class CompactPreparationLodgeVisualsSystem extends System {
       throw new Error(
         "Compact lodge visual requires its authoritative collision owner",
       );
-    const visual = createCompactPreparationLodgeVisual(record);
+    const visual = createCompactPreparationLodgeVisual(
+      record,
+      () => this.world.camera,
+    );
     try {
       if (this.world.physics) {
         // Actual triangle openings, not the generic closed perimeter boxes or

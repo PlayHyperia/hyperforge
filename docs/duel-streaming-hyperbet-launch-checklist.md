@@ -1,5 +1,32 @@
 # Duel Arena, Streaming, and Hyperbet Launch Checklist
 
+## Preparation-view roof cutaways — 2026-09-12
+
+- [x] Include all four high smithy ring beams in the existing upper cutaway.
+      Preserve posts/braces and every non-mask geometry byte; no physical change.
+- [x] Add lodge cutaway from the actual rotated roof envelope for the unchanged
+      bank camera. Preserve lower walls/openings, collider ownership and full
+      shadow masks. Isolate other camera passes and restore main-camera fade.
+- [x] Pass 18 focused and 1,155 total tests across 84 files; procgen rebuild,
+      shared/client/server types/builds, scoped lint/format/diff checks pass.
+      Retain the pre-change ring-beam regression failure.
+- [x] Root-review all eight native art views; exact bank/anvil obstructions removed,
+      complete exterior/overview structures retained. Probe02: 14 PNGs, 675 pins,
+      596 verified archives; zero page/GPU/cleanup errors and owned shutdown.
+      Overall remains failed on 19 existing cow/dagger content errors.
+- [x] Retain probe01's canvas-cursor restoration failure. Initialize the real
+      mouse-leave state before probe02; no CSS patch or weakened restoration gate.
+- [ ] Qualify moving-camera fade/edge/shadow behavior and whole-frame CPU/GPU,
+      presented-frame and memory costs. Static views do not prove smoothness.
+- [ ] NEXT environment-art pass: break up the broad uniform lawn with coherent
+      soil/grass/low-plant layers around functional trees and services; improve
+      shore/rock silhouettes, transitions, lighting and water. Keep gathering,
+      navigation and target-hardware budgets intact. No AAA/launch acceptance.
+
+Evidence: `docs/compact-preparation-cutaways-20260912.md`,
+`asset-studio/compact-smithy-court01/roof-*` and
+`asset-studio/game-test-integration/roof-cutaway-probe02/`.
+
 ## Full-detail smithy planting — 2026-09-12
 
 - [x] Add 20 manifest-authored shrubs in unequal west/east beds. Preserve every

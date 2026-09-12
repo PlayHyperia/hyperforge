@@ -237,6 +237,93 @@ describe("compact lodge actual geometry / scene ownership (CPU, not rendered acc
     expect([...materialDisposals.values()]).toEqual([1, 1, 1, 1]);
   });
 
+  it("reveals the native bank camera's foreground roof, retaining lower walls, physical hits and full shadow masks", async () => {
+    const { towns } = await fixture();
+    const record = towns.getCompactPreparationLodge()!;
+    const visual = createCompactPreparationLodgeVisual(record);
+    leases.push(visual);
+    const camera = new THREE.PerspectiveCamera(52, 16 / 9, 0.1, 1000);
+    camera.position.set(354, 33.51930152309769, 324);
+    camera.lookAt(348, record.position.y + 1.2, 318);
+    camera.updateMatrixWorld(true);
+    const before = visual.root.matrixWorld.toArray();
+    const settle = (start: number) => {
+      for (let t = start; t <= start + 300; t += 20)
+        visual.cutaway.update(camera, t);
+    };
+    settle(0);
+    expect(visual.cutaway.value).toBe(1);
+    expect(visual.cutaway.decisionCount).toBe(1);
+    expect(visual.root.matrixWorld.toArray()).toEqual(before);
+    const roof = visual.meshes.find((mesh) => mesh.name === "roof")!;
+    const walls = visual.meshes.find((mesh) => mesh.name === "walls")!;
+    expect(visual.cutaway.upperWallY).toBeCloseTo(
+      roof.geometry.boundingBox!.min.y - 0.2,
+      8,
+    );
+    for (const mesh of [roof, walls]) {
+      const material = mesh.material as THREE.MeshStandardNodeMaterial;
+      expect(material.maskNode).toBeTruthy();
+      expect(material.maskShadowNode).toBeTruthy();
+    }
+    const ray = new THREE.Raycaster(
+      new THREE.Vector3(350, 40, 328),
+      new THREE.Vector3(0, -1, 0),
+      0,
+      20,
+    );
+    ray.layers.enableAll();
+    expect(ray.intersectObject(roof)).toHaveLength(0);
+    const physical: THREE.Intersection[] = [];
+    THREE.Mesh.prototype.raycast.call(roof, ray, physical);
+    expect(physical.length).toBeGreaterThan(0);
+    ray.ray.set(
+      new THREE.Vector3(349, record.position.y + 1.46, 321),
+      new THREE.Vector3(0, 0, 1),
+    );
+    expect(ray.intersectObject(walls).length).toBeGreaterThan(0);
+    const parent = new THREE.Group();
+    parent.position.set(10, 4, -7);
+    camera.position.sub(parent.position);
+    parent.add(camera);
+    parent.updateMatrixWorld(true);
+    settle(320);
+    expect(visual.cutaway.value).toBe(1);
+    parent.remove(camera);
+    camera.position.set(427.5, 101.41930152309769, 407);
+    camera.updateMatrixWorld(true);
+    settle(640);
+    expect(visual.cutaway.value).toBe(0);
+    ray.ray.set(new THREE.Vector3(350, 40, 328), new THREE.Vector3(0, -1, 0));
+    expect(ray.intersectObject(roof).length).toBeGreaterThan(0);
+  });
+
+  it("uses the rotated physical roof envelope with hysteresis, leaving distant, high and below-floor views intact", async () => {
+    const { towns } = await fixture();
+    const visual = createCompactPreparationLodgeVisual(
+      towns.getCompactPreparationLodge()!,
+    );
+    leases.push(visual);
+    const box = visual.meshes.find((mesh) => mesh.name === "roof")!.geometry
+      .boundingBox!;
+    const camera = new THREE.PerspectiveCamera();
+    let time = 0;
+    const at = (x: number, y: number, z: number) => {
+      camera.position.set(x, y, z).applyMatrix4(visual.root.matrixWorld);
+      camera.updateMatrixWorld(true);
+      for (let n = 0; n < 16; n++) visual.cutaway.update(camera, (time += 20));
+      return visual.cutaway.value;
+    };
+    expect(at(box.max.x + 0.1, 2, 0)).toBe(0);
+    expect(at(box.max.x - 0.1, 2, 0)).toBe(1);
+    expect(at(box.max.x + 0.1, 2, 0)).toBe(1);
+    expect(at(box.max.x + 0.4, 2, 0)).toBe(0);
+    expect(at(0, box.max.y + 1, 0)).toBe(0);
+    expect(at(0, 0.3, 0)).toBe(0);
+    expect(at(0, 1.8, 0)).toBe(1);
+    expect(at(0, 1.8, box.max.z + 2)).toBe(0);
+  });
+
   it("does not publish scenery when the authoritative owner has not started", () => {
     const world = worldWithoutPhysics();
     registerCompactPreparationLodgeVisuals(world);
