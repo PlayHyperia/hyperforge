@@ -1,7 +1,42 @@
 # Duel Arena, Streaming, and Hyperbet Launch Checklist
 
+## Live per-blade grass integration — 2026-09-12
+
+- [x] Connect compact grass to resumable fitting, retained-neighbor and water
+  ownership, single-manager compute scheduling, strict readiness, remapped
+  provenance and accepted wind/fade bounds. Chunk-owned read-only vec2 roots
+  use 96 bytes/clump; base shading nodes/maps remain borrowed. No density,
+  seed, blade-shape, lighting, resolution or ordinary/fixed-profile change.
+- [x] 968 shared tests / 76 files, 15 independent-reference tests,
+  shared/client/server/external typechecks, scoped lint, client/shared then
+  server builds and 100 capture checks pass.
+- [x] Native69 scene/binding regression verified: real nonfallback WebGPU,
+  2,240 fitted clumps, all six native correction buffers / 215,040 bytes,
+  exact uint-index/UV shader, 24 PNGs / 18 matched camera-daylight pairs,
+  both island censuses, 608 source pins / 539 archives and 37 frozen game files.
+  No page/GPU/cleanup errors; owned browser, launcher and ports closed.
+  The same 19 cow/dagger errors keep overall success false.
+- [x] Preserve failed native68. Its obsolete shared-material observer rejected
+  valid cloned chunk materials; the successor checks the exact base-node/
+  storage/uint-index/UV graph. No camera, contact, parity or error gate removed.
+- [ ] Resolve fitting/load pacing before increasing density: native69 recorded
+  570.5 ms cumulative active work and **15.9 ms maximum slice**, not the 2 ms
+  target. Initial raw-worker preparation is still synchronous. No GPU-time,
+  presented-frame or sustained-performance acceptance.
+- [ ] Verify native buffer retirement, every-blade contact in motion and culling/
+  fade transitions. CPU disposal events and static compiled WGSL are not these.
+- [ ] Art remains open. All six scenic images reviewed: sparse ground cover,
+  flat lawns, continuous ridge walls, dominant platforms, loose services and
+  pale sky are below the requested bar. Improve composition and atmosphere,
+  then complete avatar/equipment and agent/stream/SOL launch gates.
+
 ## Grounded grass continuation foundation — 2026-09-12
 
+- [x] Checkpoint pushed: `39ee3b3e9023a2a87e908df2826d621480accd1b` on
+  `codex/sol-duel-stream-launch`, 10 scoped files. Normal hooks and secret scan
+  pass; all eight tested runtime/test blobs match the committed pins after
+  hooks. Exact remote head and GitHub author/committer `dreaminglucid` verified.
+  No merge/deployment; unrelated edits are preserved.
 - [x] Share the resumable numerical core, original-triangle cursor and mask
   validation in game source. Add actual terrain-region leases, including newly
   arriving neighbors, replacement/unload and transitional parent exclusion.

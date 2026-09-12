@@ -153,6 +153,23 @@ describe("detached grass terrain surface requests", () => {
     expect(advances).toBe(tileMaskTiles.length * 2 + 3);
     expect(operations.validateSnapshot(input)).toBe(input);
     expect(input).toEqual(before);
+    const copying = operations.cloneSnapshotSteps(input);
+    let copiedMasks = 0,
+      copiedTiles = 0;
+    let copy = copying.next();
+    while (!copy.done) {
+      if (copy.value === "snapshot_clone_mask") copiedMasks++;
+      if (copy.value === "snapshot_clone_tile") copiedTiles++;
+      copy = copying.next();
+    }
+    expect(copiedMasks).toBe(tileMaskTiles.length);
+    expect(copiedTiles).toBe(tileMaskTiles.length);
+    expect(copy.value).toEqual(input);
+    expect(copy.value.zones[0].tileMask).not.toBe(input.zones[0].tileMask);
+    expect(copy.value.zones[0].tileMaskTiles![0]).not.toBe(
+      input.zones[0].tileMaskTiles![0],
+    );
+    expect(input).toEqual(before);
   });
 
   it("does not publish a snapshot before validating a late invalid mask entry", () => {

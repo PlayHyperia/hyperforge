@@ -3,7 +3,7 @@ import {
   createGrassTerrainSurfaceOperations,
   type GrassTerrainSurfaceSnapshot,
 } from "../../../utils/workers/GrassTerrainSurfaceSnapshot";
-import type { GrassAnchorData } from "./GrassTerrainProjection";
+import type { GrassAnchorData, GrassGrounding } from "./GrassTerrainProjection";
 import {
   RetainedTerrainSurface,
   type TerrainGridBounds,
@@ -85,6 +85,11 @@ export type GrassBladeGroundingResult =
       /** Two world-Y deltas per blade: left/right. Apply after tilt, never fade. */
       rootDeltas: Float32Array;
       sourceIndices: Uint32Array;
+      /** Accepted world-space vertices through the complete fade/wind envelope.
+       * Null means validated empty output, never missing or deferred support. */
+      sweptBounds: (TerrainGridBounds & { minY: number; maxY: number }) | null;
+      /** Present only after the installation pipeline remaps source evidence. */
+      grounding?: GrassGrounding;
       dependencies: readonly GrassBladeGroundingDependency[];
       receipt: GrassBladeGroundingReceipt;
     }
@@ -634,6 +639,8 @@ export function* groundGrassBladeSteps(
   yield "bounded_staging_allocation";
   const deltas = new Float32Array(data.count * blades * 2),
     retained: number[] = [];
+  let sweptBounds: (TerrainGridBounds & { minY: number; maxY: number }) | null =
+    null;
   try {
     for (let i = 0; i < data.count; i++) {
       const k = i * 3,
@@ -702,7 +709,8 @@ export function* groundGrassBladeSteps(
         minZ: Infinity,
         maxZ: -Infinity,
       };
-      let minY = Infinity;
+      let minY = Infinity,
+        maxY = -Infinity;
       for (let v = 0; v < position.count; v++) {
         const blade = Math.floor(v / verticesPerBlade),
           d = (i * blades + blade) * 2;
@@ -730,10 +738,13 @@ export function* groundGrassBladeSteps(
             point.z + wind.z * windFactor + NUMERIC_GUARD,
           );
           minY = Math.min(minY, point.y + correction - NUMERIC_GUARD);
+          maxY = Math.max(maxY, point.y + correction + NUMERIC_GUARD);
         }
       }
       if (
-        ![box.minX, box.maxX, box.minZ, box.maxZ, minY].every(Number.isFinite)
+        ![box.minX, box.maxX, box.minZ, box.maxZ, minY, maxY].every(
+          Number.isFinite,
+        )
       )
         throw new Error("Nonfinite corrected grass envelope");
       yield* ensureCoverage(box);
@@ -780,6 +791,15 @@ export function* groundGrassBladeSteps(
       if (rejection) receipt.rejected[rejection]++;
       else {
         retained.push(i);
+        if (!sweptBounds) sweptBounds = { ...box, minY, maxY };
+        else {
+          sweptBounds.minX = Math.min(sweptBounds.minX, box.minX);
+          sweptBounds.maxX = Math.max(sweptBounds.maxX, box.maxX);
+          sweptBounds.minZ = Math.min(sweptBounds.minZ, box.minZ);
+          sweptBounds.maxZ = Math.max(sweptBounds.maxZ, box.maxZ);
+          sweptBounds.minY = Math.min(sweptBounds.minY, minY);
+          sweptBounds.maxY = Math.max(sweptBounds.maxY, maxY);
+        }
         receipt.maxAcceptedBaseError = Math.max(
           receipt.maxAcceptedBaseError,
           baseError,
@@ -835,6 +855,7 @@ export function* groundGrassBladeSteps(
     data: output,
     rootDeltas,
     sourceIndices,
+    sweptBounds,
     dependencies: dependencies(),
     receipt: finish(),
   };
@@ -865,7 +886,7 @@ export type GrassBladeGroundingJobState =
   | { status: "failed_input"; error: unknown }
   | { status: "cancelled"; reason: "caller" | "invalidated" };
 
-export class GrassBladeGroundingJob {
+export class GrassGroundingContinuation {
   private iterator: ReturnType<typeof groundGrassBladeSteps> | null;
   private current: GrassBladeGroundingJobState = { status: "running" };
   operations = 0;
@@ -878,10 +899,10 @@ export class GrassBladeGroundingJob {
   /** isCurrent must check the complete borrowed input/region epoch, including
    * missing neighbors and constraints. This class does not invent that owner. */
   constructor(
-    request: GrassBladeGroundingRequest,
+    steps: Generator<string, GrassBladeGroundingResult, void>,
     private readonly isCurrent: () => boolean,
   ) {
-    this.iterator = groundGrassBladeSteps(request);
+    this.iterator = steps;
   }
 
   get state(): GrassBladeGroundingJobState {
@@ -905,11 +926,17 @@ export class GrassBladeGroundingJob {
     return this.close({ status: "cancelled", reason: "caller" });
   }
 
+  rejectPublication(error: unknown): GrassBladeGroundingJobState {
+    if (this.current.status !== "ready")
+      throw new Error("Only completed grounding can fail publication");
+    return this.close({ status: "failed_input", error });
+  }
+
   private recordSlice(started: number): void {
     this.lastSliceMs = performance.now() - started;
     this.activeMs += this.lastSliceMs;
     this.maximumSliceMs = Math.max(this.maximumSliceMs, this.lastSliceMs);
-    // Core wall time includes suspension; scheduling accounts active CPU only.
+    // Core wall time includes suspension; record only active-slice elapsed time.
     if (
       this.current.status === "ready" ||
       this.current.status === "waiting_support"
@@ -984,6 +1011,14 @@ export class GrassBladeGroundingJob {
       this.recordSlice(started);
     }
     return this.current;
+  }
+}
+
+/** Numerical-only entry point; installation composes projection and provenance
+ * into GrassGroundingContinuation so those phases share the same slice budget. */
+export class GrassBladeGroundingJob extends GrassGroundingContinuation {
+  constructor(request: GrassBladeGroundingRequest, isCurrent: () => boolean) {
+    super(groundGrassBladeSteps(request), isCurrent);
   }
 }
 /** Stable, in-place, resumable bottom-up merge sort. Every comparison/copy

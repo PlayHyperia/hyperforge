@@ -19,12 +19,7 @@ import {
   COMPACT_ISLAND_GRASS_VISUAL_PROFILE,
   type GrassVisualProfile,
 } from "../GrassVisualManager";
-import { TerrainQuadTree } from "../TerrainQuadTree";
-import { RetainedTerrainSurface } from "../TerrainGridSurface";
-import {
-  assembleQuadChunkGeometry,
-  generateQuadChunkDataSync,
-} from "../TerrainQuadChunkGenerator";
+import { TerrainVisualManager } from "../TerrainVisualManager";
 import { createCompactTerrainColorOperations } from "../CompactTerrainPalette";
 import {
   SCULPTED_COMPACT_WORLD_TERRAIN_PROFILE,
@@ -95,11 +90,18 @@ async function fixture(
   await roads.init();
   await roads.start();
   const setup = terrain["buildGrassWorkerSetup"]();
-  const tree = new TerrainQuadTree({
-    minSize: 100,
-    maxDepth: 4,
-    resolution: 16,
-  });
+  const material = new THREE.MeshBasicMaterial();
+  const visual = new TerrainVisualManager(
+    { minSize: 100, maxDepth: 4, resolution: 16, rootChunkRadius: 0 },
+    terrain["buildChunkTerrainProvider"](),
+    new THREE.Group(),
+    material,
+    setup.terrainConfig,
+    setup.seed,
+    setup.biomeCenters,
+    setup.biomes,
+  );
+  const tree = visual.getQuadTree();
   const nodes = [
     [450, 350],
     [250, 350],
@@ -108,44 +110,35 @@ async function fixture(
     [450, 450],
     [350, 250],
   ].map(([x, z]) => tree.createNode(null, null, 100, x, z, 4));
-  const surfaces = new Map<number, RetainedTerrainSurface>();
-  const geometries: THREE.BufferGeometry[] = [];
+  const allNodes = new Map(
+    nodes.map((node) => [`${node.centerX},${node.centerZ}`, node]),
+  );
+  function ensureSurface(node: (typeof nodes)[number]) {
+    if (!visual.getRetainedSurface(node)) visual["generateChunkSync"](node);
+    return visual.getRetainedSurface(node);
+  }
+  function installSupport(node: (typeof nodes)[number]) {
+    for (const dx of [-100, 0, 100])
+      for (const dz of [-100, 0, 100]) {
+        const x = node.centerX + dx,
+          z = node.centerZ + dz,
+          key = `${x},${z}`;
+        let adjacent = allNodes.get(key);
+        if (!adjacent) {
+          adjacent = tree.createNode(null, null, 100, x, z, 4);
+          allNodes.set(key, adjacent);
+        }
+        ensureSurface(adjacent);
+      }
+  }
   const managers: GrassVisualManager[] = [];
   const worker = workerSession();
-  function manager(profile: GrassVisualProfile) {
+  function manager(profile: GrassVisualProfile, regionOwner = true) {
     const container = new THREE.Group();
     const owner = new GrassVisualManager(
       setup.terrainConfig.TERRAIN_PROFILE_IDENTITY,
       container,
-      (node) => {
-        let surface = surfaces.get(node.id);
-        if (!surface) {
-          const provider = terrain["buildChunkTerrainProvider"]();
-          const { geometry } = assembleQuadChunkGeometry(
-            generateQuadChunkDataSync(
-              node.centerX,
-              node.centerZ,
-              node.size,
-              node.resolution,
-              provider,
-            ),
-            provider,
-            terrain["CONFIG"].QUADTREE_SKIRT_DROP,
-          );
-          geometries.push(geometry);
-          surface = new RetainedTerrainSurface(
-            node.id,
-            provider.terrainProfileIdentity,
-            node.centerX,
-            node.centerZ,
-            node.size,
-            node.resolution,
-            geometry,
-          );
-          surfaces.set(node.id, surface);
-        }
-        return surface;
-      },
+      ensureSurface,
       (x, z) => terrain["getHeightAtComputed"](x, z),
       setup.terrainConfig.WATER_THRESHOLD,
       (x, z) => terrain["calculateRoadInfluenceAtVertex"](x, z, 0, 0),
@@ -155,6 +148,9 @@ async function fixture(
       profile,
       undefined,
       (x, z) => terrain.getWaterBodyRegistry().getWaterSurfaceAt(x, z),
+      regionOwner
+        ? (bounds) => visual.captureRetainedSurfaceRegion(bounds)
+        : undefined,
     );
     owner.setPlayerPosition(385, 374);
     managers.push(owner);
@@ -168,17 +164,248 @@ async function fixture(
     nodes,
     worker,
     manager,
+    visual,
+    installSupport,
     async close() {
       await worker.close();
       for (const owner of managers) owner.destroy();
-      tree.dispose();
-      for (const geometry of geometries) geometry.dispose();
+      visual.dispose();
+      material.dispose();
       world.destroy();
     },
   };
 }
 
 describe("opt-in compact grass, actual terrain and native worker (not GPU proof)", () => {
+  async function queueGrounding(
+    f: Awaited<ReturnType<typeof fixture>>,
+    owner: GrassVisualManager,
+    node = f.nodes[0],
+    empty = false,
+  ) {
+    owner.onNodeNeedsGeometry(node);
+    const key = owner["chunkKey"](node),
+      ticket = owner["createWorkerTicket"](node, key, 1, false);
+    const data = await f.worker.run(owner["createWorkerInput"](node, key, 1));
+    // Explicit valid empty input exercises completion, not a simulated worker.
+    const output = empty
+      ? {
+          ...data,
+          count: 0,
+          offsets: new Float32Array(),
+          rotScaleHash: new Float32Array(),
+          groundColors: new Float32Array(),
+          grassTints: new Float32Array(),
+          groundNormals: new Float32Array(),
+        }
+      : data;
+    owner["settleWorkerResult"](ticket, output);
+    expect(owner["processSettledWorkerResults"]()).toBe(0);
+    const entry = owner["groundingJobs"].get(key)!;
+    expect(entry).toBeDefined();
+    return { key, entry, data };
+  }
+  function finishGrounding(owner: GrassVisualManager, key: string) {
+    let frames = 0,
+      uploads = 0;
+    while (
+      owner["groundingJobs"].get(key)?.job.state.status === "running" &&
+      frames++ < 1000
+    )
+      uploads += owner["advanceGroundingJob"]();
+    expect(frames).toBeLessThan(1000);
+    return uploads;
+  }
+
+  it("installs only complete fitted chunks, keeps independent correction storage, and disposes owned resources exactly once", async () => {
+    const f = await fixture();
+    try {
+      const { owner, container } = f.manager(
+        COMPACT_ISLAND_GRASS_VISUAL_PROFILE,
+      );
+      for (const node of f.nodes.slice(0, 2)) f.installSupport(node);
+      const base = owner["material"],
+        disposal = { base: 0, mesh: 0, geometry: 0, material: 0 };
+      base.addEventListener("dispose", () => disposal.base++);
+      const buffers: ArrayBufferLike[] = [];
+      for (const node of f.nodes.slice(0, 2)) {
+        const { key, entry } = await queueGrounding(f, owner, node);
+        expect(owner.getStreamingReadiness([node], 140).ready).toBe(false);
+        expect(entry.job.advance(1).status).toBe("running");
+        expect(owner["chunks"].has(key)).toBe(false);
+        expect(finishGrounding(owner, key)).toBe(1);
+        expect(owner.getStreamingReadiness([node], 140).ready).toBe(true);
+        const mesh = owner["chunks"].get(key)!.mesh;
+        expect(mesh.material).not.toBe(base);
+        expect(mesh.quaternion.toArray()).toEqual([0, 0, 0, 1]);
+        expect(mesh.scale.toArray()).toEqual([1, 1, 1]);
+        expect(mesh.position.toArray()).toEqual([
+          node.centerX,
+          0,
+          node.centerZ,
+        ]);
+        const matrix = new THREE.Matrix4();
+        mesh.getMatrixAt(mesh.count - 1, matrix);
+        expect(matrix.equals(new THREE.Matrix4())).toBe(true);
+        const roots = mesh.geometry.getAttribute("grassRootDeltas");
+        expect(roots.array.byteLength).toBe(mesh.count * 96);
+        expect(mesh.userData.grassGrounding.computedHeights.length).toBe(
+          mesh.count,
+        );
+        expect(mesh.userData.grassBladeGrounding.sourceIndices.length).toBe(
+          mesh.count,
+        );
+        buffers.push(roots.array.buffer);
+        mesh.addEventListener("dispose", () => disposal.mesh++);
+        mesh.geometry.addEventListener("dispose", () => disposal.geometry++);
+        mesh.material.addEventListener("dispose", () => disposal.material++);
+      }
+      expect(buffers[0]).not.toBe(buffers[1]);
+      const receipt = owner.getProfileReceipt();
+      expect(receipt.grounding!.correctionBytes).toBe(
+        receipt.installedClumps * 96,
+      );
+      expect(receipt.grounding).toMatchObject({
+        runningChunks: 0,
+        failedChunks: 0,
+        completedChunks: 2,
+      });
+      owner.rebuildAllChunks();
+      expect(container.children).toHaveLength(0);
+      expect(disposal).toEqual({ base: 0, mesh: 2, geometry: 2, material: 2 });
+      owner.destroy();
+      owner.destroy();
+      expect(disposal).toEqual({ base: 1, mesh: 2, geometry: 2, material: 2 });
+    } finally {
+      await f.close();
+    }
+  });
+
+  it("keeps missing support asleep, then retires it when a real neighboring terrain mesh arrives", async () => {
+    const f = await fixture();
+    try {
+      const { owner, container } = f.manager(
+          COMPACT_ISLAND_GRASS_VISUAL_PROFILE,
+        ),
+        node = f.nodes[0];
+      const waiting = await queueGrounding(f, owner);
+      expect(finishGrounding(owner, waiting.key)).toBe(0);
+      expect(waiting.entry.job.state.status).toBe("waiting_support");
+      const operations = waiting.entry.job.operations;
+      for (let frame = 0; frame < 30; frame++) owner.update(385, 374);
+      expect(waiting.entry.job.operations).toBe(operations);
+      expect(owner["groundingJobs"].get(waiting.key)).toBe(waiting.entry);
+      expect(container.children).toHaveLength(0);
+      expect(owner.getStreamingReadiness([node], 140).ready).toBe(false);
+      f.installSupport(node);
+      owner["reconcileGrassHorizon"]();
+      expect(owner["groundingJobs"].has(waiting.key)).toBe(false);
+      const fresh = await queueGrounding(f, owner);
+      expect(finishGrounding(owner, fresh.key)).toBe(1);
+      const own = f.visual.getRetainedSurface(node);
+      f.visual.invalidateRegion(501, 349, 502, 351);
+      expect(f.visual.getRetainedSurface(node)).toBe(own);
+      expect(owner.getStreamingReadiness([node], 140).ready).toBe(false);
+      owner["reconcileGrassHorizon"]();
+      expect(container.children).toHaveLength(0);
+    } finally {
+      await f.close();
+    }
+  });
+
+  it("cancels suspended inputs on water arrival or constraint invalidation beyond the old normal-only halo", async () => {
+    const f = await fixture();
+    try {
+      const { owner } = f.manager(COMPACT_ISLAND_GRASS_VISUAL_PROFILE),
+        node = f.nodes[0];
+      f.installSupport(node);
+      const first = await queueGrounding(f, owner);
+      first.entry.job.advance(8);
+      f.terrain.getWaterBodyRegistry().register({
+        id: "lease-arrival",
+        centerX: 490,
+        centerZ: 350,
+        radius: 2,
+        radiusSq: 4,
+        surfaceY: 20,
+        sourceType: "explicit",
+      });
+      owner["reconcileGrassHorizon"]();
+      expect(first.entry.job.state.status).toBe("cancelled");
+      const next = await queueGrounding(f, owner);
+      next.entry.job.advance(8);
+      expect(owner["groundingHalo"]).toBeGreaterThan(1);
+      owner.invalidateRegion(500.8, 349, 501, 351);
+      expect(next.entry.job.state.status).toBe("cancelled");
+      expect(owner["groundingJobs"].size).toBe(0);
+      expect(owner.getProfileReceipt().installedClumps).toBe(0);
+    } finally {
+      await f.close();
+    }
+  });
+
+  it("records a missing owner as terminal failure without retrying or declaring ready, and admits valid empty work", async () => {
+    const f = await fixture();
+    try {
+      const failed = f.manager(
+        COMPACT_ISLAND_GRASS_VISUAL_PROFILE,
+        false,
+      ).owner;
+      const first = await queueGrounding(f, failed);
+      expect(finishGrounding(failed, first.key)).toBe(0);
+      expect(first.entry.job.state.status).toBe("failed_input");
+      for (let frame = 0; frame < 30; frame++) failed.update(385, 374);
+      expect(failed["groundingJobs"].get(first.key)).toBe(first.entry);
+      expect(failed.getProfileReceipt().grounding!.failedChunks).toBe(1);
+      const { owner, container } = f.manager(
+        COMPACT_ISLAND_GRASS_VISUAL_PROFILE,
+      );
+      f.installSupport(f.nodes[0]);
+      const empty = await queueGrounding(f, owner, f.nodes[0], true);
+      expect(finishGrounding(owner, empty.key)).toBe(0);
+      expect(container.children).toHaveLength(0);
+      expect(owner.getStreamingReadiness([f.nodes[0]], 140).ready).toBe(true);
+      expect(owner.getProfileReceipt().grounding).toMatchObject({
+        completedChunks: 1,
+        readyEmptyChunks: 1,
+        correctionBytes: 0,
+      });
+    } finally {
+      await f.close();
+    }
+  });
+
+  it("precompiles the real correction layout and releases the sample on either callback success or failure", async () => {
+    const f = await fixture();
+    try {
+      const { owner } = f.manager(COMPACT_ISLAND_GRASS_VISUAL_PROFILE),
+        disposal = { geometry: 0, material: 0, mesh: 0, base: 0 };
+      owner["material"].addEventListener("dispose", () => disposal.base++);
+      for (const fail of [false, true]) {
+        const work = owner.precompileRepresentativeChunk(async (object) => {
+          expect(object).toBeInstanceOf(THREE.InstancedMesh);
+          const mesh = object as THREE.InstancedMesh<
+            THREE.BufferGeometry,
+            THREE.Material
+          >;
+          expect(
+            mesh.geometry.getAttribute("grassRootDeltas").array.byteLength,
+          ).toBe(96);
+          expect(mesh.material).not.toBe(owner["material"]);
+          mesh.geometry.addEventListener("dispose", () => disposal.geometry++);
+          mesh.material.addEventListener("dispose", () => disposal.material++);
+          mesh.addEventListener("dispose", () => disposal.mesh++);
+          if (fail) throw new Error("Deliberate precompile callback rejection");
+        });
+        if (fail) await expect(work).rejects.toThrow(/Deliberate/);
+        else await work;
+      }
+      expect(disposal).toEqual({ geometry: 2, material: 2, mesh: 2, base: 0 });
+    } finally {
+      await f.close();
+    }
+  });
+
   it("retains coast-baseline non-color buffers in all six actual v4 leaves", async () => {
     // Measured 2026-09-11 against published b6b3af00e factory in a real worker.
     // Palette SHA256:15cf7643c8dec05ac6f480c0b03ca20aab10bc5f74207ec0f9340b5b9812f910.
@@ -572,6 +799,7 @@ describe("opt-in compact grass, actual terrain and native worker (not GPU proof)
         installedClumps: 0,
       });
       for (const n of f.nodes.slice(0, 3)) {
+        f.installSupport(n);
         next.owner.onNodeNeedsGeometry(n);
         const k = next.owner["chunkKey"](n),
           t = next.owner["createWorkerTicket"](n, k, 1, false);
@@ -580,7 +808,17 @@ describe("opt-in compact grass, actual terrain and native worker (not GPU proof)
           await f.worker.run(next.owner["createWorkerInput"](n, k, 1)),
         );
       }
-      expect(next.owner["processSettledWorkerResults"]()).toBe(1);
+      expect(next.owner["processSettledWorkerResults"]()).toBe(0);
+      expect(next.container.children).toHaveLength(0);
+      expect(next.owner.getProfileReceipt().settledChunks).toBe(2);
+      expect(next.owner.getProfileReceipt().grounding).toMatchObject({
+        runningChunks: 1,
+        completedChunks: 0,
+      });
+      let uploaded = 0;
+      for (let frame = 0; frame < 1000 && !uploaded; frame++)
+        uploaded += next.owner["advanceGroundingJob"]();
+      expect(uploaded).toBe(1);
       expect(next.container.children).toHaveLength(1);
       expect(next.owner.getProfileReceipt().settledChunks).toBe(2);
       next.owner.update(1000, 1000);

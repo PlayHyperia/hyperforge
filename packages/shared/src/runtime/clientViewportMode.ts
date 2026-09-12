@@ -191,6 +191,19 @@ export type StreamingGrassProfileReceipt = {
   settledChunks: number;
   installedChunks: number;
   installedClumps: number;
+  grounding?: {
+    schemaVersion: 1;
+    mode: "blade-roots-v1";
+    runningChunks: number;
+    waitingSupportChunks: number;
+    failedChunks: number;
+    cancelledChunks: number;
+    completedChunks: number;
+    readyEmptyChunks: number;
+    correctionBytes: number;
+    activeSliceMs: number;
+    maximumSliceMs: number;
+  };
 };
 
 export type StreamingRenderAppliedState = {

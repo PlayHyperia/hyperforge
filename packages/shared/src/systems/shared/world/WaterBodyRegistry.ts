@@ -8,6 +8,8 @@
  * Spatial grid: O(1) hash + O(K) body check where K ≈ 0-2 per cell.
  */
 
+import type { TerrainGridBounds } from "./TerrainGridSurface";
+
 export type WaterBodySourceType = "explicit" | "landscape_pond";
 
 export class ElevatedWaterBody {
@@ -170,6 +172,73 @@ export class WaterBodyRegistry {
 
   getAllBodies(): ReadonlyArray<ElevatedWaterBody> {
     return this.bodies;
+  }
+
+  /** Closed-region, read-only ownership for suspended vegetation work. Newly
+   * registered or moved-in bodies invalidate it; unrelated bodies do not. */
+  captureRegion(
+    bounds: TerrainGridBounds,
+    padding = 0,
+  ): { isCurrent(): boolean } {
+    if (
+      ![bounds.minX, bounds.maxX, bounds.minZ, bounds.maxZ, padding].every(
+        Number.isFinite,
+      ) ||
+      bounds.minX > bounds.maxX ||
+      bounds.minZ > bounds.maxZ ||
+      padding < 0 ||
+      padding > 32 ||
+      this.bodies.length > 128
+    )
+      throw new Error("Invalid water-region lease");
+    const region = Object.freeze({ ...bounds });
+    const valid = (body: ElevatedWaterBody) =>
+      Number.isFinite(body.centerX) &&
+      Number.isFinite(body.centerZ) &&
+      Number.isFinite(body.radius) &&
+      Number.isFinite(body.radiusSq) &&
+      Number.isFinite(body.surfaceY) &&
+      body.radius > 0 &&
+      body.radiusSq === body.radius * body.radius;
+    const overlaps = (body: ElevatedWaterBody) => {
+      const dx =
+        body.centerX -
+        Math.max(region.minX, Math.min(region.maxX, body.centerX));
+      const dz =
+        body.centerZ -
+        Math.max(region.minZ, Math.min(region.maxZ, body.centerZ));
+      return dx * dx + dz * dz <= (body.radius + padding) ** 2;
+    };
+    const captured = new Map<ElevatedWaterBody, Readonly<ElevatedWaterBody>>();
+    for (const body of this.bodies) {
+      if (!valid(body)) throw new Error("Invalid water-region body");
+      if (overlaps(body)) captured.set(body, Object.freeze({ ...body }));
+    }
+    let current = true;
+    return Object.freeze({
+      isCurrent: () => {
+        if (!current || this.bodies.length > 128) return (current = false);
+        let matches = 0;
+        for (const body of this.bodies) {
+          if (!valid(body)) return (current = false);
+          if (!overlaps(body)) continue;
+          const old = captured.get(body);
+          if (
+            !old ||
+            old.id !== body.id ||
+            old.centerX !== body.centerX ||
+            old.centerZ !== body.centerZ ||
+            old.radius !== body.radius ||
+            old.radiusSq !== body.radiusSq ||
+            old.surfaceY !== body.surfaceY ||
+            old.sourceType !== body.sourceType
+          )
+            return (current = false);
+          matches++;
+        }
+        return (current = matches === captured.size);
+      },
+    });
   }
 
   getOceanLevel(): number {

@@ -39,10 +39,16 @@ import { CompactPondDressingVisuals } from "./CompactPondDressingVisuals";
 import { validateRadialPondTerrainProfile } from "./RadialPondTerrainProfile";
 import { createAuthoredTerrainSurfaceOperations } from "./AuthoredTerrainSurface";
 import {
-  createGrassTerrainSurfaceSnapshot,
+  createGrassTerrainSurfaceOperations,
   GRASS_SURFACE_NORMAL_SAMPLE_DISTANCE,
   type GrassTerrainSurfaceSnapshot,
 } from "../../../utils/workers/GrassTerrainSurfaceSnapshot";
+import type { TerrainGridBounds } from "./TerrainGridSurface";
+import type { GrassGroundingInputLease } from "./GrassGroundingPipeline";
+import {
+  GRASS_BLADE_GROUNDING_LIMITS,
+  type GrassGroundingRoadSegment,
+} from "./GrassBladeGrounding";
 import type { BridgeSystem } from "./BridgeSystem";
 // Import terrain generator from procgen package
 import { BiomeSystem, type BiomeDefinition } from "@hyperforge/procgen/terrain";
@@ -2301,6 +2307,11 @@ export class TerrainSystem extends System {
         terrainShade,
         (wx: number, wz: number) =>
           this.waterBodyRegistry.getWaterSurfaceAt(wx, wz),
+        (bounds: TerrainGridBounds) =>
+          this.quadTreeVisualManager!.captureRetainedSurfaceRegion(
+            bounds,
+            GRASS_BLADE_GROUNDING_LIMITS.maxSurfaces,
+          ),
       );
 
       // Wire terrain, water, grass managers to the same quad-tree via composite
@@ -2447,6 +2458,18 @@ export class TerrainSystem extends System {
         maxX: number,
         maxZ: number,
       ) => this.getTerrainSurfaceForRegion(minX, minZ, maxX, maxZ),
+      prepareGroundingInputs: (
+        bounds: TerrainGridBounds,
+      ): GrassGroundingInputLease => {
+        const water = this.waterBodyRegistry.captureRegion(
+          bounds,
+          COMPACT_TERRAIN_COMPOSITION.pondBankReach,
+        );
+        return {
+          isCurrent: () => !this.destroyed && water.isCurrent(),
+          steps: this.grassGroundingInputSteps(bounds),
+        };
+      },
     };
   }
 
@@ -2466,6 +2489,20 @@ export class TerrainSystem extends System {
     endZ: number;
     width: number;
   }> {
+    const steps = this.worldSpaceRoadSegmentSteps(minX, minZ, maxX, maxZ);
+    let step = steps.next();
+    while (!step.done) step = steps.next();
+    return step.value;
+  }
+
+  private *worldSpaceRoadSegmentSteps(
+    minX: number,
+    minZ: number,
+    maxX: number,
+    maxZ: number,
+    maximumSegments = Infinity,
+  ): Generator<string, GrassGroundingRoadSegment[], void> {
+    yield "road_region_header";
     this.roadNetworkSystem ??= this.world.getSystem("roads") as
       RoadNetworkSystem | undefined;
     if (!this.roadNetworkSystem) return [];
@@ -2490,6 +2527,9 @@ export class TerrainSystem extends System {
         const originX = tx * ts;
         const originZ = tz * ts;
         for (const seg of segs) {
+          yield "road_region_segment";
+          if (result.length >= maximumSegments)
+            throw new Error("Grass road-region capacity exceeded");
           result.push({
             startX: originX + seg.start.x,
             startZ: originZ + seg.start.z,
@@ -2515,6 +2555,19 @@ export class TerrainSystem extends System {
     maxX: number,
     maxZ: number,
   ): GrassTerrainSurfaceSnapshot {
+    const steps = this.terrainSurfaceRegionSteps(minX, minZ, maxX, maxZ);
+    let step = steps.next();
+    while (!step.done) step = steps.next();
+    return step.value;
+  }
+
+  private *terrainSurfaceRegionSteps(
+    minX: number,
+    minZ: number,
+    maxX: number,
+    maxZ: number,
+  ): Generator<string, GrassTerrainSurfaceSnapshot, void> {
+    yield "terrain_region_header";
     if (
       ![minX, minZ, maxX, maxZ].every(Number.isFinite) ||
       minX > maxX ||
@@ -2534,7 +2587,10 @@ export class TerrainSystem extends System {
     // Bound work by registered zones, never by an arbitrarily large query AABB.
     // Match registerFlatZone's conservative square indexing, including neighbors
     // that may change first-candidate tie ordering at a tile boundary.
-    const zones = [...this.flatZones.values()].filter((zone) => {
+    const operations = createGrassTerrainSurfaceOperations();
+    const zones: FlatZone[] = [];
+    for (const zone of this.flatZones.values()) {
+      yield "terrain_region_zone";
       const radius = Math.max(zone.width, zone.depth) / 2 + zone.blendRadius;
       const zoneMinTX = Math.floor(
         (zone.centerX - radius + halfTile) / tileSize,
@@ -2548,15 +2604,21 @@ export class TerrainSystem extends System {
       const zoneMaxTZ = Math.floor(
         (zone.centerZ + radius + halfTile) / tileSize,
       );
-      return (
+      if (
         zoneMinTX <= maxTX &&
         zoneMaxTX >= minTX &&
         zoneMinTZ <= maxTZ &&
         zoneMaxTZ >= minTZ
-      );
-    });
+      ) {
+        if (zones.length >= operations.limits.maxZones)
+          throw new Error("Grass zone-region capacity exceeded");
+        zones.push(zone);
+      }
+    }
     const seen = new Set(zones.map((zone) => zone.id));
-    const waterBodies = this.waterBodyRegistry.getAllBodies().filter((body) => {
+    const waterBodies: GrassTerrainSurfaceSnapshot["waterBodies"] = [];
+    for (const body of this.waterBodyRegistry.getAllBodies()) {
+      yield "terrain_region_water";
       const dx = body.centerX - Math.max(minX, Math.min(maxX, body.centerX));
       const dz = body.centerZ - Math.max(minZ, Math.min(maxZ, body.centerZ));
       const radius =
@@ -2564,14 +2626,38 @@ export class TerrainSystem extends System {
         (body.id === this.compactPondMaterial?.id
           ? COMPACT_TERRAIN_COMPOSITION.pondBankReach
           : 0);
-      return dx * dx + dz * dz <= radius * radius;
-    });
-    return createGrassTerrainSurfaceSnapshot({
+      if (dx * dx + dz * dz <= radius * radius) {
+        if (waterBodies.length >= operations.limits.maxWaterBodies)
+          throw new Error("Grass water-region capacity exceeded");
+        waterBodies.push(body);
+      }
+    }
+    return yield* operations.cloneSnapshotSteps({
+      schemaVersion: 1,
       zones,
       arenaFloorIds: [...this.arenaFloorZoneIds].filter((id) => seen.has(id)),
       arenaGradeHeight: this.arenaGradeHeight,
       waterBodies,
     });
+  }
+
+  private *grassGroundingInputSteps(
+    bounds: TerrainGridBounds,
+  ): GrassGroundingInputLease["steps"] {
+    const terrainSurface = yield* this.terrainSurfaceRegionSteps(
+      bounds.minX,
+      bounds.minZ,
+      bounds.maxX,
+      bounds.maxZ,
+    );
+    const roadSegments = yield* this.worldSpaceRoadSegmentSteps(
+      bounds.minX,
+      bounds.minZ,
+      bounds.maxX,
+      bounds.maxZ,
+      GRASS_BLADE_GROUNDING_LIMITS.maxRoadSegments,
+    );
+    return { terrainSurface, roadSegments };
   }
 
   private registerInstancedMeshes(): void {

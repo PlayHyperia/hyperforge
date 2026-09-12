@@ -21,12 +21,13 @@ export type GrassGrounding = {
 };
 
 /** Projects once per bounded install. Never mutates a worker result or raycasts. */
-export function projectGrassAnchors<T extends GrassAnchorData>(
+export function* projectGrassAnchorSteps<T extends GrassAnchorData>(
   data: T,
   surface: RetainedTerrainSurface,
   getWaterSurfaceAt: (x: number, z: number) => number,
   isGrassExcludedAt: (x: number, z: number) => boolean,
-): T & { grounding: GrassGrounding } {
+): Generator<string, T & { grounding: GrassGrounding }, void> {
+  yield "anchor_validation";
   const { count } = data;
   if (
     !Number.isInteger(count) ||
@@ -54,6 +55,7 @@ export function projectGrassAnchors<T extends GrassAnchorData>(
   };
   let retained = 0;
   for (let i = 0; i < count; i++) {
+    yield "anchor_projection";
     const src = i * 3;
     const localX = data.offsets[src];
     const localZ = data.offsets[src + 2];
@@ -109,5 +111,67 @@ export function projectGrassAnchors<T extends GrassAnchorData>(
       computedHeights: computedHeights.subarray(0, retained),
       ecologicalNormals: ecologicalNormals.subarray(0, retained * 3),
     },
+  };
+}
+
+/** Existing synchronous API for ordinary profiles and offline checks. */
+export function projectGrassAnchors<T extends GrassAnchorData>(
+  data: T,
+  surface: RetainedTerrainSurface,
+  getWaterSurfaceAt: (x: number, z: number) => number,
+  isGrassExcludedAt: (x: number, z: number) => boolean,
+): T & { grounding: GrassGrounding } {
+  const steps = projectGrassAnchorSteps(
+    data,
+    surface,
+    getWaterSurfaceAt,
+    isGrassExcludedAt,
+  );
+  let step = steps.next();
+  while (!step.done) step = steps.next();
+  return step.value;
+}
+
+/** Retain ecological evidence in the same order as blade-admitted GPU data. */
+export function* remapGrassGroundingSteps(
+  source: GrassGrounding,
+  indices: Uint32Array,
+): Generator<string, GrassGrounding, void> {
+  yield "provenance_validation";
+  if (
+    source.schemaVersion !== 1 ||
+    !source.surfaceRevision ||
+    !(source.computedHeights instanceof Float32Array) ||
+    !(source.ecologicalNormals instanceof Float32Array) ||
+    source.ecologicalNormals.length !== source.computedHeights.length * 3 ||
+    !(indices instanceof Uint32Array) ||
+    indices.length > source.computedHeights.length
+  )
+    throw new Error("Invalid grass grounding provenance");
+  const computedHeights = new Float32Array(indices.length);
+  const ecologicalNormals = new Float32Array(indices.length * 3);
+  let previous = -1;
+  for (let dst = 0; dst < indices.length; dst++) {
+    yield "provenance_remap";
+    const index = indices[dst];
+    if (index <= previous || index >= source.computedHeights.length)
+      throw new Error("Grass grounding provenance order mismatch");
+    previous = index;
+    const y = source.computedHeights[index];
+    if (!Number.isFinite(y))
+      throw new Error("Nonfinite grass computed-height provenance");
+    computedHeights[dst] = y;
+    for (let c = 0; c < 3; c++) {
+      const value = source.ecologicalNormals[index * 3 + c];
+      if (!Number.isFinite(value))
+        throw new Error("Nonfinite grass ecological-normal provenance");
+      ecologicalNormals[dst * 3 + c] = value;
+    }
+  }
+  return {
+    schemaVersion: 1,
+    surfaceRevision: source.surfaceRevision,
+    computedHeights,
+    ecologicalNormals,
   };
 }

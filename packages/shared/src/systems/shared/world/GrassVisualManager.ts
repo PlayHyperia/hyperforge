@@ -46,7 +46,24 @@ import {
 } from "./TerrainShader";
 import { MeshStandardNodeMaterial } from "three/webgpu";
 import type { TerrainQuadNode, QuadTreeListener } from "./TerrainQuadTree";
-import type { RetainedTerrainSurface } from "./TerrainGridSurface";
+import type {
+  RetainedTerrainSurface,
+  TerrainGridBounds,
+} from "./TerrainGridSurface";
+import type { RetainedTerrainRegion } from "./TerrainVisualManager";
+import {
+  GRASS_BLADE_GROUNDING_LIMITS,
+  GrassGroundingContinuation,
+  type GrassBladeGroundingResult,
+} from "./GrassBladeGrounding";
+import {
+  prepareGroundedGrassSteps,
+  type GrassGroundingInputLease,
+} from "./GrassGroundingPipeline";
+import {
+  createGroundedGrassMaterial,
+  groundedGrassWorldBox,
+} from "./GrassGroundingGpu";
 import {
   projectGrassAnchors,
   type GrassGrounding,
@@ -338,6 +355,22 @@ interface GrassWorkerTicket {
   readonly lodLevel: number;
   readonly isLodSwap: boolean;
   readonly surface: RetainedTerrainSurface;
+  readonly grounding?: {
+    bounds: TerrainGridBounds;
+    inputs: GrassGroundingInputLease | null;
+    error: unknown;
+  };
+}
+
+interface GrassGroundingEntry {
+  ticket: GrassWorkerTicket;
+  region: RetainedTerrainRegion | null;
+  job: GrassGroundingContinuation;
+}
+
+interface CompletedGrassGrounding {
+  region: RetainedTerrainRegion;
+  inputs: GrassGroundingInputLease;
 }
 
 interface SettledGrassWorkerResult {
@@ -426,6 +459,9 @@ export interface GrassWorkerSetup {
     maxX: number,
     maxZ: number,
   ) => GrassTerrainSurfaceSnapshot;
+  prepareGroundingInputs?: (
+    bounds: TerrainGridBounds,
+  ) => GrassGroundingInputLease;
 }
 
 export class GrassVisualManager implements QuadTreeListener {
@@ -481,6 +517,11 @@ export class GrassVisualManager implements QuadTreeListener {
   /** Includes successful empty chunks so flat arena ground can become ready. */
   private completedNodes = new Map<string, TerrainQuadNode>();
   private completedSurfaces = new Map<string, RetainedTerrainSurface>();
+  private groundingJobs = new Map<string, GrassGroundingEntry>();
+  private completedGrounding = new Map<string, CompletedGrassGrounding>();
+  private groundingHalo = 0;
+  private maximumGroundingSliceMs = 0;
+  private groundingActiveMs = 0;
   private pendingLodSwap = new Map<
     string,
     { node: TerrainQuadNode; desiredLod: number }
@@ -514,6 +555,9 @@ export class GrassVisualManager implements QuadTreeListener {
     readonly shadeUniforms: TerrainShadeUniforms = new TerrainShadeUniforms(),
     private readonly getWaterSurfaceAt: (x: number, z: number) => number = () =>
       waterThreshold,
+    private readonly captureRenderedRegion?: (
+      bounds: TerrainGridBounds,
+    ) => RetainedTerrainRegion,
   ) {
     if (typeof terrainProfileIdentity !== "string" || !terrainProfileIdentity) {
       throw new Error("Grass visual terrain profile identity is required");
@@ -596,6 +640,24 @@ export class GrassVisualManager implements QuadTreeListener {
       ),
     );
     this.material = this.createMaterial();
+    if (this.profileId === "compact-island-v1") {
+      const positions = this.lodGeometries[1].getAttribute("position");
+      let radius = 0;
+      for (let i = 0; i < positions.count; i++)
+        radius = Math.max(
+          radius,
+          Math.hypot(positions.getX(i), positions.getY(i), positions.getZ(i)),
+        );
+      // Rotation/tilt preserve radius, fade never increases it. Leave numerical
+      // margin and full wind sweep; the old normal-only 0.5m halo is insufficient.
+      this.groundingHalo = Math.max(
+        GRASS_SURFACE_NORMAL_SAMPLE_DISTANCE,
+        radius * GRASS_BLADE_GROUNDING_LIMITS.maxScale * 1.01 +
+          GRASS_CONFIG.WIND_STRENGTH *
+            COMPACT_MEADOW_APPEARANCE.BLADE_HEIGHT_MAX +
+          0.01,
+      );
+    }
 
     const pool = getGrassWorkerPool();
     const workerStatus = pool ? "workers available" : "sync fallback";
@@ -622,9 +684,22 @@ export class GrassVisualManager implements QuadTreeListener {
   getProfileReceipt(): StreamingGrassProfileReceipt {
     let installedClumps = 0;
     let castShadow = false;
+    let correctionBytes = 0;
     for (const { mesh } of this.chunks.values()) {
       installedClumps += mesh.count;
       castShadow ||= mesh.castShadow;
+      correctionBytes +=
+        mesh.geometry.getAttribute("grassRootDeltas")?.array.byteLength ?? 0;
+    }
+    let runningChunks = 0,
+      waitingSupportChunks = 0,
+      failedChunks = 0,
+      cancelledChunks = 0;
+    for (const { job } of this.groundingJobs.values()) {
+      if (job.state.status === "running") runningChunks++;
+      else if (job.state.status === "waiting_support") waitingSupportChunks++;
+      else if (job.state.status === "cancelled") cancelledChunks++;
+      else if (job.state.status !== "ready") failedChunks++;
     }
     return {
       schemaVersion: 1,
@@ -644,6 +719,23 @@ export class GrassVisualManager implements QuadTreeListener {
       settledChunks: this.settledWorkerResults.length,
       installedChunks: this.chunks.size,
       installedClumps,
+      ...(this.profileId === "compact-island-v1"
+        ? {
+            grounding: {
+              schemaVersion: 1 as const,
+              mode: "blade-roots-v1" as const,
+              runningChunks,
+              waitingSupportChunks,
+              failedChunks,
+              cancelledChunks,
+              completedChunks: this.completedGrounding.size,
+              readyEmptyChunks: this.completedGrounding.size - this.chunks.size,
+              correctionBytes,
+              activeSliceMs: this.groundingActiveMs,
+              maximumSliceMs: this.maximumGroundingSliceMs,
+            },
+          }
+        : {}),
     };
   }
 
@@ -680,7 +772,9 @@ export class GrassVisualManager implements QuadTreeListener {
       const key = this.chunkKey(node);
       if (
         this.completedNodes.has(key) &&
-        this.completedSurfaces.get(key) === this.getRenderedSurface(node)
+        this.completedSurfaces.get(key) === this.getRenderedSurface(node) &&
+        (this.profileId !== "compact-island-v1" ||
+          this.isCompletedGroundingCurrent(key))
       )
         readyChunks++;
     }
@@ -718,7 +812,17 @@ export class GrassVisualManager implements QuadTreeListener {
       new THREE.InstancedBufferAttribute(new Float32Array([0, 1, 0]), 3),
     );
 
-    const mesh = new THREE.InstancedMesh(geo, this.material, 1);
+    const material =
+      this.profileId === "compact-island-v1"
+        ? createGroundedGrassMaterial(
+            this.material,
+            geo,
+            new Float32Array(24),
+            1,
+            1,
+          )
+        : this.material;
+    const mesh = new THREE.InstancedMesh(geo, material, 1);
     mesh.name = "GrassQT_PrecompileSample";
     mesh.frustumCulled = false;
     mesh.receiveShadow = true;
@@ -730,6 +834,8 @@ export class GrassVisualManager implements QuadTreeListener {
       await precompileObject(mesh);
     } finally {
       geo.dispose();
+      if (material !== this.material) material.dispose();
+      mesh.dispose();
     }
   }
 
@@ -744,6 +850,8 @@ export class GrassVisualManager implements QuadTreeListener {
     // bounded here so several workers settling together cannot upload multiple
     // dense chunks in one render frame.
     let built = this.processSettledWorkerResults();
+    if (this.profileId === "compact-island-v1")
+      built += this.advanceGroundingJob();
 
     // Drain pending queue — dispatch to worker or build sync (fallback only)
     const pool = getGrassWorkerPool();
@@ -760,7 +868,8 @@ export class GrassVisualManager implements QuadTreeListener {
       if (
         this.chunks.has(key) ||
         this.completedNodes.has(key) ||
-        this.workerInflight.has(key)
+        this.workerInflight.has(key) ||
+        this.groundingJobs.has(key)
       )
         continue;
       if (pool && this.workerSetup) {
@@ -851,12 +960,155 @@ export class GrassVisualManager implements QuadTreeListener {
     this.pendingLodSwap.delete(key);
     this.completedNodes.delete(key);
     this.completedSurfaces.delete(key);
+    this.groundingJobs.get(key)?.job.cancel();
+    this.groundingJobs.delete(key);
+    this.completedGrounding.delete(key);
+    this.retireGrassChunk(key);
+  }
+
+  private retireGrassChunk(key: string): void {
     const chunk = this.chunks.get(key);
     if (chunk) {
       if (chunk.mesh.parent) chunk.mesh.parent.remove(chunk.mesh);
       chunk.mesh.geometry.dispose();
+      if (chunk.mesh.material !== this.material) chunk.mesh.material.dispose();
+      chunk.mesh.dispose();
       this.chunks.delete(key);
     }
+  }
+
+  private isCompletedGroundingCurrent(key: string): boolean {
+    const owner = this.completedGrounding.get(key);
+    return !!owner && owner.region.isCurrent() && owner.inputs.isCurrent();
+  }
+
+  private beginGroundingJob(
+    ticket: GrassWorkerTicket,
+    data: GrassWorkerOutput,
+  ): void {
+    let region: RetainedTerrainRegion | null = null;
+    let error = ticket.grounding?.error;
+    const inputs = ticket.grounding?.inputs;
+    try {
+      if (!this.captureRenderedRegion || !ticket.grounding)
+        throw new Error("Missing compact retained terrain-region owner");
+      region = this.captureRenderedRegion(ticket.grounding.bounds);
+    } catch (reason) {
+      error = reason;
+    }
+    const manager = this;
+    const steps = function* (): Generator<
+      string,
+      GrassBladeGroundingResult,
+      void
+    > {
+      if (error) throw error;
+      if (!region || !inputs || ticket.lodLevel !== 1)
+        throw new Error("Incomplete compact grass grounding inputs");
+      return yield* prepareGroundedGrassSteps(
+        {
+          data,
+          ownSurface: ticket.surface,
+          surfaces: region.surfaces,
+          geometry: manager.lodGeometries[1],
+          lod: 1,
+          oceanLevel: manager.waterThreshold,
+          wind: {
+            x:
+              GRASS_CONFIG.WIND_STRENGTH *
+              COMPACT_MEADOW_APPEARANCE.BLADE_HEIGHT_MAX,
+            z:
+              GRASS_CONFIG.WIND_STRENGTH *
+              COMPACT_MEADOW_APPEARANCE.BLADE_HEIGHT_MAX *
+              0.55,
+          },
+        },
+        inputs,
+        manager.getWaterSurfaceAt,
+        manager.isInFlatZone,
+      );
+    };
+    const entry: GrassGroundingEntry = {
+      ticket,
+      region,
+      job: new GrassGroundingContinuation(
+        steps(),
+        () =>
+          this.groundingJobs.get(ticket.key) === entry &&
+          this.isNodeInGrassHorizon(ticket.node) &&
+          this.getRenderedSurface(ticket.node) === ticket.surface &&
+          (!region || region.isCurrent()) &&
+          (!inputs || inputs.isCurrent()),
+      ),
+    };
+    this.groundingJobs.get(ticket.key)?.job.cancel();
+    this.groundingJobs.set(ticket.key, entry);
+  }
+
+  /** One shared compute slice and at most one upload for the entire manager,
+   * not one allowance per resident chunk. Stable waits/failures do no work. */
+  private advanceGroundingJob(): number {
+    for (const entry of this.groundingJobs.values()) {
+      if (entry.job.state.status !== "running") continue;
+      const before = entry.job.activeMs;
+      const state = entry.job.advance();
+      this.groundingActiveMs += entry.job.activeMs - before;
+      this.maximumGroundingSliceMs = Math.max(
+        this.maximumGroundingSliceMs,
+        entry.job.maximumSliceMs,
+      );
+      if (state.status === "failed_input" || state.status === "failed_budget")
+        console.error("[GrassVisualManager] Grounding failed:", state);
+      if (state.status !== "ready") return 0;
+      const { ticket, region } = entry;
+      const inputs = ticket.grounding?.inputs;
+      if (
+        !region ||
+        !inputs ||
+        !region.isCurrent() ||
+        !inputs.isCurrent() ||
+        !this.isNodeInGrassHorizon(ticket.node) ||
+        this.getRenderedSurface(ticket.node) !== ticket.surface
+      )
+        return 0;
+      try {
+        const result = state.result;
+        if (!result.grounding)
+          throw new Error("Missing blade-grounding provenance");
+        this.retireGrassChunk(ticket.key);
+        if (result.data.count) {
+          this.createChunkMeshFromWorkerData(
+            ticket.node,
+            {
+              ...result.data,
+              type: "grassInstanceResult",
+              chunkKey: ticket.key,
+              terrainProfileIdentity: this.terrainProfileIdentity,
+              grassEligibility: this.grassEligibility,
+            },
+            ticket.lodLevel,
+            result.grounding,
+            result,
+          );
+          if (!this.chunks.has(ticket.key))
+            throw new Error("Grounded grass was not installed");
+        }
+        this.completedNodes.set(ticket.key, ticket.node);
+        this.completedSurfaces.set(ticket.key, ticket.surface);
+        this.completedGrounding.set(ticket.key, { region, inputs });
+        this.pendingLodSwap.delete(ticket.key);
+        this.groundingJobs.delete(ticket.key);
+        return result.data.count ? 1 : 0;
+      } catch (error) {
+        entry.job.rejectPublication(error);
+        console.error(
+          "[GrassVisualManager] Grounded grass publication failed:",
+          error,
+        );
+        return 0;
+      }
+    }
+    return 0;
   }
 
   private reconcileGrassHorizon(): void {
@@ -876,6 +1128,7 @@ export class GrassVisualManager implements QuadTreeListener {
           this.chunks.has(key) ||
           this.completedNodes.has(key) ||
           this.workerInflight.has(key) ||
+          this.groundingJobs.has(key) ||
           pendingKeys.has(key)
         ) {
           retired.add(key);
@@ -886,8 +1139,19 @@ export class GrassVisualManager implements QuadTreeListener {
       const surface = this.getRenderedSurface(node);
       const previous =
         this.completedSurfaces.get(key) ??
-        this.workerInflight.get(key)?.surface;
-      if (previous && previous !== surface) {
+        this.workerInflight.get(key)?.surface ??
+        this.groundingJobs.get(key)?.ticket.surface;
+      const groundJob = this.groundingJobs.get(key);
+      const constraints =
+        this.workerInflight.get(key)?.grounding?.inputs ??
+        groundJob?.ticket.grounding?.inputs;
+      if (
+        (previous && previous !== surface) ||
+        (constraints && !constraints.isCurrent()) ||
+        (groundJob?.region && !groundJob.region.isCurrent()) ||
+        (this.completedGrounding.has(key) &&
+          !this.isCompletedGroundingCurrent(key))
+      ) {
         this.retireGrassWork(key);
         this.settledWorkerResults = this.settledWorkerResults.filter(
           (entry) => entry.ticket.key !== key,
@@ -898,6 +1162,7 @@ export class GrassVisualManager implements QuadTreeListener {
         !this.chunks.has(key) &&
         !this.completedNodes.has(key) &&
         !this.workerInflight.has(key) &&
+        !this.groundingJobs.has(key) &&
         !pendingKeys.has(key)
       ) {
         this.pendingNodes.push({ node });
@@ -925,7 +1190,8 @@ export class GrassVisualManager implements QuadTreeListener {
     if (
       this.chunks.has(key) ||
       this.completedNodes.has(key) ||
-      this.workerInflight.has(key)
+      this.workerInflight.has(key) ||
+      this.groundingJobs.has(key)
     )
       return;
     if (!this.pendingNodes.some((entry) => entry.node === node)) {
@@ -1011,7 +1277,34 @@ export class GrassVisualManager implements QuadTreeListener {
       surface.terrainProfileIdentity !== this.terrainProfileIdentity
     )
       throw new Error("Grass requires the current retained terrain surface");
-    const ticket = Object.freeze({ node, key, lodLevel, isLodSwap, surface });
+    let grounding: GrassWorkerTicket["grounding"];
+    if (this.profileId === "compact-island-v1") {
+      const half = node.halfSize + this.groundingHalo;
+      const bounds = Object.freeze({
+        minX: node.centerX - half,
+        maxX: node.centerX + half,
+        minZ: node.centerZ - half,
+        maxZ: node.centerZ + half,
+      });
+      let inputs: GrassGroundingInputLease | null = null,
+        error: unknown = null;
+      try {
+        if (!this.workerSetup?.prepareGroundingInputs)
+          throw new Error("Missing compact grass constraint owner");
+        inputs = this.workerSetup.prepareGroundingInputs(bounds);
+      } catch (reason) {
+        error = reason;
+      }
+      grounding = { bounds, inputs, error };
+    }
+    const ticket = Object.freeze({
+      node,
+      key,
+      lodLevel,
+      isLodSwap,
+      surface,
+      ...(grounding ? { grounding } : {}),
+    });
     this.workerInflight.set(key, ticket);
     return ticket;
   }
@@ -1025,7 +1318,10 @@ export class GrassVisualManager implements QuadTreeListener {
     output: GrassWorkerOutput,
   ): void {
     if (!this.isCurrentWorkerTicket(ticket)) return;
-    if (this.getRenderedSurface(ticket.node) !== ticket.surface) {
+    if (
+      this.getRenderedSurface(ticket.node) !== ticket.surface ||
+      (ticket.grounding?.inputs && !ticket.grounding.inputs.isCurrent())
+    ) {
       this.workerInflight.delete(ticket.key);
       this.pendingLodSwap.delete(ticket.key);
       return;
@@ -1097,78 +1393,127 @@ export class GrassVisualManager implements QuadTreeListener {
     data: GrassWorkerOutput,
     lodLevel: number,
     grounding: GrassGrounding,
+    blades?: Extract<GrassBladeGroundingResult, { status: "ready" }>,
   ): void {
     this.assertWorkerProfileIdentity(data);
     if (!this.isNodeInGrassHorizon(node)) return;
     const key = data.chunkKey;
     if (this.chunks.has(key)) return;
     if (data.count === 0) return;
+    if (
+      this.profileId === "compact-island-v1" &&
+      (!blades ||
+        !blades.grounding ||
+        blades.data.count !== data.count ||
+        grounding !== blades.grounding)
+    )
+      throw new Error(
+        "Compact grass requires complete blade grounding and provenance",
+      );
 
     const geo = this.lodGeometries[lodLevel].clone();
-    geo.setAttribute(
-      "instanceOffset",
-      new THREE.InstancedBufferAttribute(data.offsets, 3),
-    );
-    geo.setAttribute(
-      "instanceRotScaleHash",
-      new THREE.InstancedBufferAttribute(data.rotScaleHash, 3),
-    );
-    setColorTintInterleaved(
-      geo,
-      data.groundColors,
-      data.grassTints,
-      data.count,
-    );
-    geo.setAttribute(
-      "instanceGroundNormal",
-      new THREE.InstancedBufferAttribute(data.groundNormals, 3),
-    );
+    let material = this.material;
+    let mesh: THREE.InstancedMesh | null = null;
+    try {
+      geo.setAttribute(
+        "instanceOffset",
+        new THREE.InstancedBufferAttribute(data.offsets, 3),
+      );
+      geo.setAttribute(
+        "instanceRotScaleHash",
+        new THREE.InstancedBufferAttribute(data.rotScaleHash, 3),
+      );
+      setColorTintInterleaved(
+        geo,
+        data.groundColors,
+        data.grassTints,
+        data.count,
+      );
+      geo.setAttribute(
+        "instanceGroundNormal",
+        new THREE.InstancedBufferAttribute(data.groundNormals, 3),
+      );
 
-    const mesh = new THREE.InstancedMesh(geo, this.material, data.count);
-    mesh.position.set(node.centerX, 0, node.centerZ);
-    mesh.name = `GrassQT_${key}`;
-    mesh.frustumCulled = false;
-    mesh.receiveShadow = true;
-    mesh.castShadow = false;
-    mesh.userData = {
-      type: "grass",
-      walkable: false,
-      clickable: false,
-      grassGrounding: grounding,
-      grassAppearance:
-        this.profileId === "compact-island-v1"
-          ? COMPACT_MEADOW_APPEARANCE.id
-          : "legacy-blades-v1",
-    };
+      if (blades)
+        material = createGroundedGrassMaterial(
+          this.material,
+          geo,
+          blades.rootDeltas,
+          data.count,
+          lodLevel,
+        );
+      mesh = new THREE.InstancedMesh(geo, material, data.count);
+      mesh.position.set(node.centerX, 0, node.centerZ);
+      mesh.name = `GrassQT_${key}`;
+      mesh.frustumCulled = false;
+      mesh.receiveShadow = true;
+      mesh.castShadow = false;
+      mesh.userData = {
+        type: "grass",
+        walkable: false,
+        clickable: false,
+        grassGrounding: grounding,
+        ...(blades
+          ? {
+              grassBladeGrounding: {
+                schemaVersion: 1,
+                ...blades.receipt,
+                sweptBounds: blades.sweptBounds,
+                sourceIndices: blades.sourceIndices,
+                surfaceRevisions: blades.dependencies.map(
+                  ({ surface }) => surface.revision,
+                ),
+              },
+            }
+          : {}),
+        grassAppearance:
+          this.profileId === "compact-island-v1"
+            ? COMPACT_MEADOW_APPEARANCE.id
+            : "legacy-blades-v1",
+      };
 
-    const identity = new THREE.Matrix4();
-    for (let i = 0; i < data.count; i++) {
-      mesh.setMatrixAt(i, identity);
+      const identity = new THREE.Matrix4();
+      for (let i = 0; i < data.count; i++) {
+        mesh.setMatrixAt(i, identity);
+      }
+      mesh.instanceMatrix.needsUpdate = true;
+
+      const half = node.halfSize;
+      const box = blades
+        ? groundedGrassWorldBox(blades)
+        : new THREE.Box3(
+            new THREE.Vector3(node.centerX - half, -50, node.centerZ - half),
+            new THREE.Vector3(node.centerX + half, 200, node.centerZ + half),
+          );
+
+      this.container.add(mesh);
+      this.chunks.set(key, { nodeId: node.id, mesh, box, lodLevel, node });
+    } catch (error) {
+      mesh?.removeFromParent();
+      geo.dispose();
+      if (material !== this.material) material.dispose();
+      mesh?.dispose();
+      throw error;
     }
-    mesh.instanceMatrix.needsUpdate = true;
-
-    const half = node.halfSize;
-    const box = new THREE.Box3(
-      new THREE.Vector3(node.centerX - half, -50, node.centerZ - half),
-      new THREE.Vector3(node.centerX + half, 200, node.centerZ + half),
-    );
-
-    this.container.add(mesh);
-    this.chunks.set(key, { nodeId: node.id, mesh, box, lodLevel, node });
   }
 
   private processSettledWorkerResults(): number {
     let built = 0;
+    let queued = 0;
     while (
       this.settledWorkerResults.length > 0 &&
-      built < this.maxChunksPerFrame
+      built < this.maxChunksPerFrame &&
+      queued < this.maxChunksPerFrame
     ) {
       const result = this.settledWorkerResults.shift()!;
       const ticket = result.ticket;
       // Identity precedes every mutation: an obsolete result must never clear
       // a newer request at the same spatial key, even when the old result is empty.
       if (!this.isCurrentWorkerTicket(ticket)) continue;
-      if (this.getRenderedSurface(ticket.node) !== ticket.surface) {
+      if (
+        this.getRenderedSurface(ticket.node) !== ticket.surface ||
+        (ticket.grounding?.inputs && !ticket.grounding.inputs.isCurrent())
+      ) {
         this.workerInflight.delete(ticket.key);
         this.pendingLodSwap.delete(ticket.key);
         continue;
@@ -1195,6 +1540,12 @@ export class GrassVisualManager implements QuadTreeListener {
         continue;
       }
 
+      if (this.profileId === "compact-island-v1") {
+        this.workerInflight.delete(ticket.key);
+        this.beginGroundingJob(ticket, result.data);
+        queued++;
+        continue;
+      }
       this.workerInflight.delete(ticket.key);
       const latest = this.pendingLodSwap.get(ticket.key);
       const currentLod = ticket.isLodSwap
@@ -1238,12 +1589,7 @@ export class GrassVisualManager implements QuadTreeListener {
       // Nonempty projections consume the install budget even if every anchor
       // was rejected by water/exclusion. Otherwise failed coverage is unbounded.
       if (ticket.isLodSwap) {
-        const oldChunk = this.chunks.get(ticket.key);
-        if (oldChunk) {
-          if (oldChunk.mesh.parent) oldChunk.mesh.parent.remove(oldChunk.mesh);
-          oldChunk.mesh.geometry.dispose();
-          this.chunks.delete(ticket.key);
-        }
+        this.retireGrassChunk(ticket.key);
       } else if (this.chunks.has(ticket.key)) {
         this.completedNodes.set(ticket.key, ticket.node);
         continue;
@@ -1269,16 +1615,7 @@ export class GrassVisualManager implements QuadTreeListener {
   onNodeDestroyGeometry(node: TerrainQuadNode): void {
     const key = this.chunkKey(node);
     this.liveNodes.delete(key);
-    const chunk = this.chunks.get(key);
-    if (chunk) {
-      if (chunk.mesh.parent) chunk.mesh.parent.remove(chunk.mesh);
-      chunk.mesh.geometry.dispose();
-      this.chunks.delete(key);
-    }
-    this.workerInflight.delete(key);
-    this.completedNodes.delete(key);
-    this.completedSurfaces.delete(key);
-    this.pendingLodSwap.delete(key);
+    this.retireGrassWork(key);
     this.settledWorkerResults = this.settledWorkerResults.filter(
       (entry) => entry.ticket.key !== key,
     );
@@ -1296,13 +1633,12 @@ export class GrassVisualManager implements QuadTreeListener {
     this.liveNodes.clear();
     this.completedNodes.clear();
     this.completedSurfaces.clear();
+    for (const entry of this.groundingJobs.values()) entry.job.cancel();
+    this.groundingJobs.clear();
+    this.completedGrounding.clear();
     this.pendingLodSwap.clear();
     terminateGrassWorkerPool();
-    for (const [, chunk] of this.chunks) {
-      if (chunk.mesh.parent) chunk.mesh.parent.remove(chunk.mesh);
-      chunk.mesh.geometry.dispose();
-    }
-    this.chunks.clear();
+    for (const key of this.chunks.keys()) this.retireGrassChunk(key);
     this.lodGeometries.forEach((g) => g.dispose());
     if (this.material) this.material.dispose();
     if (this.container.parent) this.container.parent.remove(this.container);
@@ -1314,16 +1650,19 @@ export class GrassVisualManager implements QuadTreeListener {
   rebuildAllChunks(): void {
     if (this.destroyed) return;
     const nodes = new Map(this.completedNodes);
+    for (const [key, entry] of this.groundingJobs)
+      nodes.set(key, entry.ticket.node);
     for (const [key, ticket] of this.workerInflight)
       nodes.set(key, ticket.node);
     for (const entry of this.pendingNodes)
       nodes.set(this.chunkKey(entry.node), entry.node);
     for (const [key, chunk] of this.chunks) {
       nodes.set(key, chunk.node);
-      if (chunk.mesh.parent) chunk.mesh.parent.remove(chunk.mesh);
-      chunk.mesh.geometry.dispose();
+      this.retireGrassChunk(key);
     }
-    this.chunks.clear();
+    for (const entry of this.groundingJobs.values()) entry.job.cancel();
+    this.groundingJobs.clear();
+    this.completedGrounding.clear();
     this.completedNodes.clear();
     this.completedSurfaces.clear();
     this.workerInflight.clear();
@@ -1350,6 +1689,8 @@ export class GrassVisualManager implements QuadTreeListener {
   ): void {
     if (this.destroyed) return;
     const candidates = new Map(this.completedNodes);
+    for (const [key, entry] of this.groundingJobs)
+      candidates.set(key, entry.ticket.node);
     for (const [key, chunk] of this.chunks) candidates.set(key, chunk.node);
     // Pending work may have no mesh/completed record yet. It still sampled the
     // old surface and must lose ownership before replacement work can begin.
@@ -1361,7 +1702,9 @@ export class GrassVisualManager implements QuadTreeListener {
     const affectedKeys = new Set<string>();
     const toRebuild: TerrainQuadNode[] = [];
     for (const [key, node] of candidates) {
-      const half = node.halfSize + GRASS_SURFACE_NORMAL_SAMPLE_DISTANCE;
+      const half =
+        node.halfSize +
+        Math.max(GRASS_SURFACE_NORMAL_SAMPLE_DISTANCE, this.groundingHalo);
       if (
         node.centerX + half < minX ||
         node.centerX - half > maxX ||
@@ -1370,16 +1713,7 @@ export class GrassVisualManager implements QuadTreeListener {
       )
         continue;
       affectedKeys.add(key);
-      this.workerInflight.delete(key);
-      this.completedNodes.delete(key);
-      this.completedSurfaces.delete(key);
-      this.pendingLodSwap.delete(key);
-      const chunk = this.chunks.get(key);
-      if (chunk) {
-        if (chunk.mesh.parent) chunk.mesh.parent.remove(chunk.mesh);
-        chunk.mesh.geometry.dispose();
-        this.chunks.delete(key);
-      }
+      this.retireGrassWork(key);
       if (this.isNodeInGrassHorizon(node)) toRebuild.push(node);
     }
     this.settledWorkerResults = this.settledWorkerResults.filter(
@@ -1424,6 +1758,23 @@ export class GrassVisualManager implements QuadTreeListener {
     const lod = lodLevel ?? this.getLodLevel(node);
     const tier = GRASS_CONFIG.LOD_TIERS[lod];
     const instanceData = this.generateInstanceData(node, tier.spacingMul);
+    if (this.profileId === "compact-island-v1") {
+      const ticket = this.createWorkerTicket(node, key, lod, replace);
+      this.settleWorkerResult(ticket, {
+        count: 0,
+        offsets: new Float32Array(0),
+        rotScaleHash: new Float32Array(0),
+        groundColors: new Float32Array(0),
+        grassTints: new Float32Array(0),
+        groundNormals: new Float32Array(0),
+        ...instanceData,
+        type: "grassInstanceResult",
+        chunkKey: key,
+        terrainProfileIdentity: this.terrainProfileIdentity,
+        grassEligibility: this.grassEligibility,
+      });
+      return;
+    }
     let projected;
     if (instanceData) {
       projected = projectGrassAnchors(
@@ -1440,12 +1791,7 @@ export class GrassVisualManager implements QuadTreeListener {
       );
     }
     if (replace) {
-      const previous = this.chunks.get(key);
-      if (previous) {
-        previous.mesh.removeFromParent();
-        previous.mesh.geometry.dispose();
-        this.chunks.delete(key);
-      }
+      this.retireGrassChunk(key);
     }
     if (projected?.count)
       this.createChunkMeshFromWorkerData(

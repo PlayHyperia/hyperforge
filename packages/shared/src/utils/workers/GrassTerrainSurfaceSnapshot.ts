@@ -51,6 +51,9 @@ export type GrassTerrainSurfaceOperations = {
   ): Generator<string, GrassTerrainSurfaceSnapshot, void>;
   /** Validate and copy only wire fields; queued input never aliases its source. */
   cloneSnapshot(value: unknown): GrassTerrainSurfaceSnapshot;
+  cloneSnapshotSteps(
+    value: unknown,
+  ): Generator<string, GrassTerrainSurfaceSnapshot, void>;
   /** Snapshot must already be validated; validates index bounds before loops. */
   createZoneIndex(
     snapshot: GrassTerrainSurfaceSnapshot,
@@ -364,8 +367,16 @@ export function createGrassTerrainSurfaceOperations(): GrassTerrainSurfaceOperat
       return input as GrassTerrainSurfaceSnapshot;
     },
     cloneSnapshot(input) {
-      const snapshot = operations.validateSnapshot(input);
-      const zones = snapshot.zones.map((zone) => {
+      const steps = operations.cloneSnapshotSteps(input);
+      let step = steps.next();
+      while (!step.done) step = steps.next();
+      return step.value;
+    },
+    *cloneSnapshotSteps(input) {
+      const snapshot = yield* operations.validateSnapshotSteps(input);
+      const zones: GrassTerrainSurfaceZone[] = [];
+      for (const zone of snapshot.zones) {
+        yield "snapshot_clone_zone";
         const clone: GrassTerrainSurfaceZone = {
           id: zone.id,
           centerX: zone.centerX,
@@ -388,13 +399,20 @@ export function createGrassTerrainSurfaceOperations(): GrassTerrainSurfaceOperat
               ? { shorelineAmplitude: zone.radialPond.shorelineAmplitude }
               : {}),
           };
-        if (zone.tileMask !== undefined)
-          clone.tileMask = new Set(zone.tileMask);
-        if (zone.tileMaskTiles !== undefined)
-          clone.tileMaskTiles = zone.tileMaskTiles.map((tile) => ({
-            x: tile.x,
-            z: tile.z,
-          }));
+        if (zone.tileMask !== undefined) {
+          clone.tileMask = new Set();
+          for (const key of zone.tileMask) {
+            yield "snapshot_clone_mask";
+            clone.tileMask.add(key);
+          }
+        }
+        if (zone.tileMaskTiles !== undefined) {
+          clone.tileMaskTiles = [];
+          for (const tile of zone.tileMaskTiles) {
+            yield "snapshot_clone_tile";
+            clone.tileMaskTiles.push({ x: tile.x, z: tile.z });
+          }
+        }
         if (zone.tileMaskBounds !== undefined)
           clone.tileMaskBounds = {
             minX: zone.tileMaskBounds.minX,
@@ -402,20 +420,25 @@ export function createGrassTerrainSurfaceOperations(): GrassTerrainSurfaceOperat
             minZ: zone.tileMaskBounds.minZ,
             maxZ: zone.tileMaskBounds.maxZ,
           };
-        return clone;
-      });
-      return {
-        schemaVersion: 1,
-        zones,
-        arenaFloorIds: [...snapshot.arenaFloorIds],
-        arenaGradeHeight: snapshot.arenaGradeHeight,
-        waterBodies: snapshot.waterBodies.map((body) => ({
+        zones.push(clone);
+      }
+      const waterBodies: GrassTerrainWaterBody[] = [];
+      for (const body of snapshot.waterBodies) {
+        yield "snapshot_clone_water";
+        waterBodies.push({
           id: body.id,
           centerX: body.centerX,
           centerZ: body.centerZ,
           radius: body.radius,
           surfaceY: body.surfaceY,
-        })),
+        });
+      }
+      return {
+        schemaVersion: 1,
+        zones,
+        arenaFloorIds: [...snapshot.arenaFloorIds],
+        arenaGradeHeight: snapshot.arenaGradeHeight,
+        waterBodies,
       };
     },
     createZoneIndex(snapshot, tileSize) {

@@ -195,6 +195,110 @@ function one(data: GrassAnchorData, index: number): GrassAnchorData {
 
 describe("CPU per-blade grounding prototype (no renderer/GPU)", () => {
   it.each([0, 1, 2] as const)(
+    "bounds every corrected LOD%s vertex through fade and wind using independent Three transforms",
+    (lod) => {
+      const f = analyticOwner();
+      try {
+        const surface = f.makeSurface(
+          1,
+          0,
+          0,
+          64,
+          (x, z) => 20 + 0.2 * x - 0.13 * z,
+        );
+        const data = f.dataAt(surface, [
+          [0, 0, 0.8],
+          [5, -4, 2.4],
+          [-3, 3, 5.1],
+        ]);
+        data.rotScaleHash[1] = 0.2;
+        data.rotScaleHash[4] = 4;
+        const request = {
+          ...f.request(surface, data, lod),
+          wind: { x: 0.3, z: 0.165 },
+        };
+        const result = groundGrassBlades(request);
+        if (result.status !== "ready" || !result.sweptBounds)
+          throw new Error("Expected admitted bounds");
+        expect(result.data.count).toBe(3);
+        const b = result.sweptBounds,
+          uv = request.geometry.getAttribute("uv");
+        const tier = GRASS_CONFIG.LOD_TIERS[lod],
+          vpb = tier.bladeSegments * 2 + 1;
+        for (let i = 0; i < result.data.count; i++)
+          for (let v = 0; v < uv.count; v++) {
+            const d = (i * tier.bladesPerClump + Math.floor(v / vpb)) * 2;
+            for (const fade of [0, 0.5, 1])
+              for (const sx of [-1, 1])
+                for (const sz of [-1, 1]) {
+                  const p = transformedVertex(
+                    result.data,
+                    surface,
+                    request.geometry,
+                    i,
+                    v,
+                    fade,
+                  );
+                  p.y +=
+                    result.rootDeltas[d] * (1 - uv.getX(v)) +
+                    result.rootDeltas[d + 1] * uv.getX(v);
+                  p.x += sx * request.wind.x * uv.getY(v) ** 1.8;
+                  p.z += sz * request.wind.z * uv.getY(v) ** 1.8;
+                  expect(
+                    p.x >= b.minX &&
+                      p.x <= b.maxX &&
+                      p.y >= b.minY &&
+                      p.y <= b.maxY &&
+                      p.z >= b.minZ &&
+                      p.z <= b.maxZ,
+                  ).toBe(true);
+                }
+          }
+      } finally {
+        f.close();
+      }
+    },
+  );
+
+  it("does not include rejected clumps in culling bounds and gives empty output no box", () => {
+    const f = analyticOwner();
+    try {
+      const surface = f.makeSurface(),
+        data = f.dataAt(surface, [
+          [0, 0],
+          [20, 20],
+        ]);
+      const request = f.request(surface, data);
+      request.terrainSurface.zones.push({
+        id: "excluded",
+        centerX: 20,
+        centerZ: 20,
+        width: 5,
+        depth: 5,
+        height: 20,
+        blendRadius: 0,
+        excludeGrass: true,
+      });
+      const result = groundGrassBlades(request);
+      if (result.status !== "ready")
+        throw new Error("Expected complete support");
+      expect(result.sourceIndices).toEqual(new Uint32Array([0]));
+      expect(result.sweptBounds!.maxX).toBeLessThan(5);
+      expect(result.sweptBounds!.maxZ).toBeLessThan(5);
+      request.terrainSurface.zones[0].width = 100;
+      request.terrainSurface.zones[0].depth = 100;
+      const empty = groundGrassBlades(request);
+      expect(empty).toMatchObject({
+        status: "ready",
+        data: { count: 0 },
+        sweptBounds: null,
+      });
+    } finally {
+      f.close();
+    }
+  });
+
+  it.each([0, 1, 2] as const)(
     "resumes the LOD%s production core at different slice boundaries without changing arrays",
     (lod) => {
       const f = analyticOwner();
