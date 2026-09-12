@@ -1,5 +1,30 @@
 # Duel Arena, Streaming, and Hyperbet Launch Checklist
 
+## Stationary outdoor-lighting correction — 2026-09-12
+
+- [x] Reproduce the direct/neutral furnace mismatch at the exact same simulation
+      phase and camera. Preserve probe06 and its compiled texture-binding evidence.
+- [x] Correct r186's inherited dynamic-IBL refresh for stationary lit PBR objects,
+      in the durable source/distributed-build patch. Keep explicit static env maps
+      and unlit/static-texture fast paths; no recolor, exposure or AO-default change.
+- [x] Native probe07: the visible furnace binds the current two sky endpoints in
+      direct and neutral draws. Both reviewed furnace rectangles are pixel-identical
+      in direct/neutral and direct bookends; no page/GPU/cleanup errors.
+      Root verifies 33 PNGs, 675 pins, 596 archives, camera restoration and shutdown.
+- [x] Fail-before/pass-after real-Three regression; 35 renderer/dependency checks,
+      clean and frozen Bun installs, one physical renderer across consumers.
+      Full 84-file suite passes 1,149 tests with two workers; shared/client/server
+      type checks and builds pass. Retain the earlier 1,148/1,149 run and isolated
+      grass pass; do not erase the intermittent publication failure.
+- [ ] Investigate grass grounding/publication under contention and sustained load.
+- [ ] AO remains unintegrated: qualify whole-scene color/edges/motion, all-day IBL,
+      actual complete-frame CPU/GPU cost, memory and target-hardware load.
+- [ ] Continue substantial island art and clear the 19 cow/dagger content errors.
+      Same-task static rectangles are not whole-scene, streaming or AAA approval.
+
+Evidence: `docs/compact-contact-lighting-20260912.md`, immutable probes06/07 and
+`asset-studio/game-test-integration/contact-ao01/`.
+
 ## Contact-lighting native experiment — 2026-09-12
 
 - [x] Add an explicitly constructed r186 GTAO/denoise experiment through the normal
@@ -13,10 +38,10 @@
       18 study plus six baseline
       images, zero page/GPU/cleanup errors, exact camera restoration and owned shutdown.
       Root-verify 673 pins, 596 archives and all 24 PNGs.
-- [ ] BLOCK DEFAULT PROMOTION: furnace visibly changes between direct and neutral.
-      Six AO pairs meet daylight tolerance, but all six direct-control pairs miss it.
-      Obtain correctly paced controls and isolate material/lighting/color paths;
-      do not recolor assets to hide a render-path mismatch.
+- [x] Diagnose the historical probe05 furnace mismatch with correctly controlled
+      captures and correct inherited lighting updates (probes06/07 above).
+      Default promotion is STILL BLOCKED by scene-wide motion/performance gates;
+      no asset recoloring was used to hide a render-path mismatch.
 - [ ] Qualify cutout/skin/armor/water motion and whole-game-frame GPU cost, presented
       frames and memory. Neither current frame counters nor screenshots prove speed.
 - [ ] Continue substantial island art: layered planting around real choppable trees,

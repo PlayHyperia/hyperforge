@@ -4,6 +4,8 @@ import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, resolve } from "node:path";
 import test from "node:test";
+import * as GPU from "three/webgpu";
+import { mix, pmremTexture, uniform } from "three/tsl";
 
 // Installation/provenance tests, not a substitute for actual WebGPU rendering.
 const require = createRequire(import.meta.url);
@@ -18,9 +20,11 @@ const expected = {
   "src/renderers/webgpu/WebGPUBackend.js":
     "f572de154dbce29e906209aa103399d38653b7601c3605b0fce20b0c8d80efb9",
   "build/three.webgpu.js":
-    "98c33b189c329cd4829a8c14121deb70372b875d72396c47c2231f0e2506e0ed",
+    "0c0fb04913a2e0f882eb5380bd71fa73c4cb8cc5df97880cc5f89486f69ebbe7",
   "build/three.webgpu.nodes.js":
-    "3f9353b449c3b7c822fb5eefa45fd42c469a5c1ab76e9075a24f562f288b0c8c",
+    "eebda68b6c53b58260a615853cf0c67817ff5c9005f2c0e1697f07fe5596971e",
+  "src/materials/nodes/manager/NodeMaterialObserver.js":
+    "fb841e636c424c196a82a727dd1cd57f6f3964fedd548a4bf510d9e38bd86f83",
   "src/nodes/display/ViewportTextureNode.js":
     "af363e3ff1ac9d7103e6e93769bacc7a3547efe1481bcc1a58f12672af14f099",
 };
@@ -38,7 +42,20 @@ test("the exact Three version has a durable Bun lifecycle patch", () => {
   );
   assert.equal(
     hash(new URL("patches/three@0.186.0.patch", root)),
-    "1f1cea27b53a11cc4f195c5e10772b0855f711506b0845395392b4e5792d3df6",
+    "ff83278324a9dc5c0ebf5b8bb9c1ce5f0db45a2b2ed152c022ec81035582f706",
+  );
+  const patch = readFileSync(
+    new URL("patches/three@0.186.0.patch", root),
+    "utf8",
+  );
+  assert.deepEqual(
+    [...patch.matchAll(/^diff --git a\/(.+) b\/(.+)$/gm)]
+      .map((match) => {
+        assert.equal(match[1], match[2]);
+        return match[1];
+      })
+      .sort(),
+    Object.keys(expected).sort(),
   );
 });
 
@@ -58,6 +75,56 @@ for (const [file, sha256] of Object.entries(expected)) {
     assert.equal(hash(resolve(packageRoot, file)), sha256);
   });
 }
+
+// Real CPU-side Three graphs/observers, not renderer or GPU substitutes. A
+// stationary PBR draw must refresh inherited dynamic IBL just like an envNode
+// assigned directly to its material. Native paired renders verify the result.
+test("inherited scene lighting nodes keep stationary PBR bindings live", () => {
+  const scene = new GPU.Scene();
+  const a = new GPU.RenderTarget(384, 512);
+  const b = new GPU.RenderTarget(384, 512);
+  const material = new GPU.MeshStandardNodeMaterial();
+  const geometry = new GPU.BoxGeometry();
+  const mesh = new GPU.Mesh(geometry, material);
+  const builder = new GPU.NodeBuilder(mesh, null, null);
+  builder.scene = scene;
+  builder.environmentNode = scene.environmentNode = mix(
+    pmremTexture(a.texture),
+    pmremTexture(b.texture),
+    uniform(0),
+  );
+  try {
+    assert.equal(material.setupObserver(builder).hasNode, true);
+    const physical = new GPU.MeshPhysicalNodeMaterial();
+    builder.material = physical;
+    assert.equal(physical.setupObserver(builder).hasNode, true);
+    physical.dispose();
+    builder.material = material;
+    material.lights = false;
+    assert.equal(material.setupObserver(builder).hasNode, false);
+    material.lights = true;
+    // An explicit static material environment takes precedence over scene IBL.
+    material.envMap = a.texture;
+    assert.equal(material.setupObserver(builder).hasNode, false);
+    material.envMap = null;
+    // Lighting-disabled passes do not inherit the scene environment.
+    builder.environmentNode = null;
+    assert.equal(material.setupObserver(builder).hasNode, false);
+    // Ordinary static scene texture lighting retains the existing fast path.
+    scene.environmentNode = null;
+    scene.environment = a.texture;
+    builder.environmentNode = GPU.TSL.texture(a.texture);
+    assert.equal(material.setupObserver(builder).hasNode, false);
+    // Directly assigned dynamic nodes already require full updates.
+    material.envNode = pmremTexture(a.texture);
+    assert.equal(material.setupObserver(builder).hasNode, true);
+  } finally {
+    material.dispose();
+    geometry.dispose();
+    a.dispose();
+    b.dispose();
+  }
+});
 
 test("installed disposal clears an existing animation callback without restarting initialization", () => {
   const file = "src/renderers/common/Renderer.js";
