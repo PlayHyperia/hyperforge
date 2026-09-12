@@ -47,6 +47,7 @@ export function createCompactServiceCourtVisual(
     };
     const timber = make({
       type: "wood-plank",
+      woodFiltering: "footprint-v1",
       baseColor: "#756149",
       secondaryColor: "#514639",
       accentColor: "#433d33",

@@ -30,7 +30,7 @@ function builder() {
     null,
     null,
     null,
-  ]) as THREE.NodeBuilder;
+  ]) as THREE.NodeBuilder & { addStack(): void; removeStack(): void };
 }
 function inStack<T>(create: () => T): T {
   const native = builder();

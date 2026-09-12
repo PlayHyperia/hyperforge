@@ -1,5 +1,37 @@
 # Duel Arena, Streaming, and Hyperbet Launch Checklist
 
+## Timber aliasing correction — 2026-09-12
+
+- [x] Isolate the visible gable speckles with six real WebGPU one-variable A/B/A
+      comparisons (native79): only replacing the procedural timber color removes
+      the dots; all five shadow variants retain them. Restore every borrowed setting.
+- [x] Add explicit smithy-only pixel-footprint timber filtering. Integrate both
+      narrow plank seams and neighboring tint; fade unresolved grain. Preserve
+      existing albedo colors, roughness, geometry, global shadows and legacy materials.
+- [x] Pass 1,135 shared regression tests, 12 material tests, affected-test and
+      shared/client/server type checks, procgen/shared/client/server builds and lint.
+      Incorrect initial command-context failures remain recorded, not counted as passes.
+- [x] Complete native80: 24 actual 1280×720/DPR1 WebGPU captures; all 18 camera/daylight
+      pairs match native64 and the direct unfiltered native78. Root-verify 654 source
+      pins, 585 archives, 41 frozen files, all image hashes, six actual filtered timber
+      pipelines, 36 cutaway boundaries and both 48-tree scene censuses. Owned browser,
+      launcher and ports close; page/GPU/cleanup errors are zero.
+- [ ] Finish timber close-range art and motion: the dotted defect is corrected in
+      these stills, but beam finish, low-angle visibility, dither-transition stability
+      and actual GPU/presented-frame cost remain unapproved. No AAA/launch claim.
+- [ ] NEXT: replace the oversized lobby/recovery slabs with proportionate connected
+      spaces; integrate the real bank/services, worn ground and planting around
+      functional choppable trees. Update authoritative geometry/returns/navigation
+      together; preserve one arena and the compact-island-only direction.
+- [ ] Retain known launch blockers: five cow-model errors and fourteen dagger-fit
+      errors keep native80 overall FAIL. Motion, multiple-agent gameplay/streaming,
+      sustained performance, lifecycle and long-duration qualification remain open.
+
+Evidence: `asset-studio/compact-smithy-court01/verify79-root.mjs`,
+`verify80-root.mjs`, `after80-root-verification.json`; immutable reports in
+`asset-studio/game-test-integration/compact-world-probe79/` and `compact-world-probe80/`.
+Full rationale: `docs/compact-smithy-cutaway-20260912.md`.
+
 ## Grounded smithy and camera cutaway — 2026-09-12
 
 - [x] Add a manifest-admitted 10×6 m open smithy around the existing forge/anvil:

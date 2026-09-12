@@ -15,6 +15,7 @@
 import * as THREE from "three";
 import { MeshStandardNodeMaterial, type Node } from "three/webgpu";
 import { createFilteredShingleColorNode } from "./FilteredShingleTSL";
+import { createFilteredWoodColorNode } from "./FilteredWoodTSL";
 import {
   Fn,
   uv,
@@ -77,6 +78,8 @@ export interface BuildingMaterialConfig {
   useVertexColors: boolean;
   /** Explicit compact-lodge candidate only; omission preserves the legacy graph. */
   shingleFiltering?: "footprint-v1";
+  /** Pixel-footprint integration for explicit compact timber materials. */
+  woodFiltering?: "footprint-v1";
 }
 
 /**
@@ -429,6 +432,14 @@ export function createBuildingMaterial(
   config: Partial<BuildingMaterialConfig> & { type: BuildingMaterialType },
 ): TSLBuildingMaterial {
   if (
+    config.woodFiltering !== undefined &&
+    (config.woodFiltering !== "footprint-v1" || config.type !== "wood-plank")
+  ) {
+    throw new Error(
+      "Wood filtering requires the explicit wood-plank footprint-v1 opt-in",
+    );
+  }
+  if (
     config.shingleFiltering !== undefined &&
     (config.shingleFiltering !== "footprint-v1" || config.type !== "shingle")
   ) {
@@ -514,25 +525,37 @@ export function createBuildingMaterial(
       surfaceColor.assign(mix(uAccentColor, stoneColor, isStone));
     } else if (patternType === 3) {
       // Wood Plank
-      patternResult.assign(woodPlankPattern(scaledUV));
-      const isPlank = patternResult.x;
-      const plankId = patternResult.y;
-      const grainOffset = patternResult.z;
+      if (fullConfig.woodFiltering === "footprint-v1") {
+        surfaceColor.assign(
+          createFilteredWoodColorNode(
+            scaledUV,
+            uBaseColor.rgb,
+            uSecondaryColor.rgb,
+            uAccentColor.rgb,
+            uVariation,
+          ),
+        );
+      } else {
+        patternResult.assign(woodPlankPattern(scaledUV));
+        const isPlank = patternResult.x;
+        const plankId = patternResult.y;
+        const grainOffset = patternResult.z;
 
-      const plankNoise = tslHash(vec2(plankId, 0.0));
-      const baseWood = mix(
-        uBaseColor,
-        uSecondaryColor,
-        plankNoise.mul(uVariation),
-      );
+        const plankNoise = tslHash(vec2(plankId, 0.0));
+        const baseWood = mix(
+          uBaseColor,
+          uSecondaryColor,
+          plankNoise.mul(uVariation),
+        );
 
-      const grainNoise = tslNoise2D(vec2(grainOffset.mul(20.0), plankId));
-      const grainedColor = mix(
-        baseWood,
-        baseWood.mul(0.85),
-        grainNoise.mul(0.3),
-      );
-      surfaceColor.assign(mix(uAccentColor, grainedColor, isPlank));
+        const grainNoise = tslNoise2D(vec2(grainOffset.mul(20.0), plankId));
+        const grainedColor = mix(
+          baseWood,
+          baseWood.mul(0.85),
+          grainNoise.mul(0.3),
+        );
+        surfaceColor.assign(mix(uAccentColor, grainedColor, isPlank));
+      }
     } else if (patternType === 4 || patternType === 5) {
       // Timber Frame or Plaster
       patternResult.assign(plasterPattern(scaledUV));

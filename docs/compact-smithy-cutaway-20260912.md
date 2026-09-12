@@ -5,7 +5,70 @@ This is not AAA, performance, competitive, streaming or launch approval.
 Companion assets manifest checkpoint: `1cc1550` on
 `codex/duel-arena-launch-assets` (only the eight-line court descriptor).
 
-## Implemented
+## Follow-up: timber color aliasing corrected, art still unfinished
+
+Native79 isolated the defect with six one-variable A/B/A triples at the exact
+native78 meadow camera. Disabling timber shadow reception, disabling roof casting,
+zero/negative depth bias and increased normal bias all retained the regular dots.
+Only replacing the procedural timber color removed them; restoring its graph
+restored the dots. All six natural-daylight brackets passed (maximum phase spread
+0.0080208333, exposure spread 0.000037696). The 24 PNGs, 652 pins, 583 archives,
+37 frozen game files and exact appearance/camera/owned-process cleanup were verified.
+This was one-camera diagnosis, not another full scene or performance qualification.
+
+The explicit `woodFiltering: "footprint-v1"` opt-in is used only by the smithy.
+It integrates both seam edges and neighboring plank tint over a bounded two-row
+footprint, fades unresolved longitudinal grain, and approaches a statistical mean
+for large footprints. It is a box approximation, not exact anisotropic filtering.
+It changes no original albedo colors, roughness, global shadow setting, geometry,
+texture inventory, resource or physics/nav owner. Other wood materials keep their
+old graph. Five new material tests exercise the actual Three expression graph,
+dense sampling, float32 limits, resolved detail and opt-in admission. CPU graph
+evaluation is not WGSL execution or GPU timing.
+
+Native80 then repeated the full six-view study: 24 PNGs, all 18 natural-daylight/
+camera pairs matched native64 and direct unfiltered native78 (maximum direct phase
+delta 0.0059614420, unchanged 0.01 bound). Six actual main-camera timber pipelines
+contain the footprint derivative and unresolved-color limit. Root verification
+covers 654 source pins, 585 archives, 41 independent freeze hashes, image hashes,
+36 cutaway boundaries, both 48-tree censuses, existing grounded grass and HDR fog.
+All six views were visually reviewed. The gable now shows continuous plank lines
+instead of regular dark dots. This is local defect acceptance, NOT final art:
+timber still needs closer finish/motion review, while oversized platforms, isolated
+bank props, empty lawn, simple ridge/shore silhouettes and water/sky composition
+remain well below the intended quality.
+
+Verification: 1,135 shared regression tests plus 12 material tests pass;
+14 focused native/cutaway tests are a subset of the shared suite. Strict affected
+test and shared/client/server type checks, procgen/shared/client/server builds,
+lint and formatting pass. The first combined test command used the wrong working
+directory and failed six manifest-dependent cases; rerunning from the actual shared
+package passes all 14, without changing assertions. The shared package's stale
+`build:client` entry has no index.html; the real client package production build
+passes. Both command-context failures are retained rather than counted as passes.
+The old shingle test's actual NodeBuilder stack API is now explicitly typed.
+
+Both native79 and native80 have zero page/GPU/cleanup errors and fully closed owned
+Chrome/launcher/ports. Both remain overall false for the same five cow-model and
+fourteen dagger-fit errors. GPU cost, presented-frame pacing, motion/ghosting,
+live preparation/combat/streaming and long-duration stability remain open.
+
+Evidence: external `compact-smithy-court01/verify79-root.mjs`,
+`verify80-root.mjs`, `after80-root-verification.json`,
+`wood-material-tests02.json`, `wood-native-tests02.json`,
+`wood-shared-tests03.json`. Reports:
+
+- Native79 SHA-256: `275d834a2908fd0f583d1ac5df970fffcb01a097a7fe733aa0ece626c00ca744`
+- Native80 SHA-256: `b8030f5a5ad7dce20873b4136c0837c82d55edccf58d8d29819c43a82e8ef075`
+
+Research: [WGSL screen derivatives](https://gpuweb.github.io/gpuweb/wgsl/#derivative-builtin-functions)
+support estimating a fragment footprint; [Three shadow parameters](https://threejs.org/docs/pages/LightShadow.html)
+have distortion/cost tradeoffs and were not changed by this fix.
+[GTAO](https://threejs.org/docs/pages/GTAONode.html) and
+[temporal antialiasing](https://threejs.org/docs/pages/TRAANode.html) remain candidates
+requiring actual motion, lifecycle and GPU-budget tests, not default quality claims.
+
+## Earlier grounded/cutaway checkpoint
 
 The optional strict `compactServiceCourt` manifest descriptor owns one 10×6 m
 open smithy at (336.5, 337.5). The terrain owner samples 37 actual heights after
