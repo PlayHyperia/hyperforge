@@ -1,5 +1,32 @@
 # Duel Arena, Streaming, and Hyperbet Launch Checklist
 
+## Contact-lighting native experiment — 2026-09-12
+
+- [x] Add an explicitly constructed r186 GTAO/denoise experiment through the normal
+      client build. Keep full-resolution single-sample geometry buffers and
+      four-sample final-image antialiasing; no default graphics/profile change.
+- [x] Correct actual material-library admission, mixed public/deep-source Node
+      identities and unsupported MSAA-depth gathering. Preserve failed probes01–04.
+      Distinguish admitted/excluded skin coverage and stop a failed native loop.
+- [x] Pass 12 focused checks and 1,149 shared regressions across 84 files, scoped
+      lint/format and shared/client/server type checks/builds. Complete probe05's
+      18 study plus six baseline
+      images, zero page/GPU/cleanup errors, exact camera restoration and owned shutdown.
+      Root-verify 673 pins, 596 archives and all 24 PNGs.
+- [ ] BLOCK DEFAULT PROMOTION: furnace visibly changes between direct and neutral.
+      Six AO pairs meet daylight tolerance, but all six direct-control pairs miss it.
+      Obtain correctly paced controls and isolate material/lighting/color paths;
+      do not recolor assets to hide a render-path mismatch.
+- [ ] Qualify cutout/skin/armor/water motion and whole-game-frame GPU cost, presented
+      frames and memory. Neither current frame counters nor screenshots prove speed.
+- [ ] Continue substantial island art: layered planting around real choppable trees,
+      worn ground, roof/beam visibility, recovery connections, shore/rock composition.
+      Resolve 19 existing cow/dagger errors and full gameplay/streaming/endurance gates.
+      No AAA, performance or launch approval; AO remains unintegrated.
+
+Evidence: `docs/compact-contact-lighting-20260912.md`,
+`asset-studio/game-test-integration/contact-ao01/` and immutable `contact-ao-probe05/`.
+
 ## Compact bank and proportionate service courts — 2026-09-12
 
 Implementation checkpoint: [game d67ea1ded](https://github.com/PlayHyperia/hyperforge/commit/d67ea1ded10194ec0c2950cb31be511d38c29773)
