@@ -1,5 +1,51 @@
 # Compact island environment art: next delivery slice
 
+## Current graphics gate and next visible pass — 2026-09-13
+
+The packed-static import correction and same-owner mushroom LOD pass native05's
+local study, not an AAA sign-off. The second native run exposed stale-camera
+vegetation culling. The production correction now reconciles the final camera's
+world transform, projection and depth convention without forced visibility or
+changed draw distance. Final regression: 400/400 across 12 files, including 12
+new actual quadtree/camera integration cases and 360 real sun rotations; three
+package typechecks/builds and 30 native preflight checks pass. Native05 has five
+close/transition captures and an identical-camera hero/LOD pair at 8.1m; both
+reviewers accept local shape/color consistency. Independent checks verify all
+710 pins/632 archives, actual main/sun draws and 25 rejected corruptions. Game
+source `2f6f576ce05da4c2d1723ee1b40d349456446b1d` and assets
+`a19894750710f2d8a7facdd98685011bf4c0ade5` are pushed under `dreaminglucid`.
+Continuous temporal/contact quality and sustained performance remain open.
+
+Do not infer a controlled speedup from previous mushroom totals: native02 and
+the earlier Haven run submitted different instance/owner sets despite identical
+recorded main camera poses. The earlier frozen view did not consistently govern
+vegetation culling. Retain the failed receipts and establish a new final-camera
+baseline. The 70.078% reduction describes one admitted model's triangle count,
+not scene-wide frame time.
+
+The next substantial visual change is **ground-cover cohesion**, not a denser
+population or another broad exposure adjustment. Current `compact-meadow-v2`
+already has curved geometry; its visible tier uses 12 blades/36 triangles per
+clump, a 0.7m footprint radius and 1.75m center spacing. Reauthor that same budget
+into tighter natural tufts with broader, shorter silhouettes and better root,
+ground and blade-normal continuity. Keep existing instance counts, opaque
+material, shadows, functional resource trees and the full rooting envelope.
+Test changes as an explicit profile before accepting a new default.
+
+Then address world-continuous wind: the current shader's phase uses chunk-local
+offsets despite its world-space description. Equivalent world positions encoded
+under different chunk origins must have identical phase. Preserve swept bounds,
+anchored roots and displacement amplitude; verify changing normals and motion
+in actual clips. Follow with shared mid-scale turf/blade reflectance variation,
+restrained shrub color and deliberate coast/rock planting composition.
+
+Acceptance requires low-angle, front/backlit and close moving-camera views,
+complete grounding/worker/TSL parity checks, stable source and instance owners,
+and actual workload/timing measurements. Static screenshots cannot establish
+wind continuity, temporal stability or sustained frame rate. The current wide
+views still look artificial; functional magic-tree colors are partly authored
+and do not justify globally recoloring all trees or lighting.
+
 ## Ground refinement and useful frame headroom — 2026-09-13
 
 The first Haven ground trial removes the arbitrary lawn color islands and

@@ -1,5 +1,24 @@
 # Duel Arena, Streaming, and Hyperbet Launch Checklist
 
+## Packed foliage fidelity and bounded LOD checkpoint — 2026-09-13
+
+Status: verified local rendering checkpoint, pushed to the launch branches. No AAA, sustained-performance or production approval.
+
+- [x] Fix quantized static-model import: the old normalized-Int16 transform wrapped 41 mushroom vertices by up to 2.000076 model units. Decode transformed positions/normals/tangents to Float32 without changing original source bytes or packed UV/color/index storage. Retire stale processed-model policy; retain schema 7 and verified-source admission.
+- [x] Preserve the 5,013-triangle close-up model and qualify the 1,500-triangle derivative on the same original mesh/material/instance owner. Use a conservative 0.024 model-unit error bound, every actual instance, physical pixels, projected extent and hysteresis; retain hero detail for unknown/deformed/reflection/XR/custom-shadow cases. This is 70.078% less geometry for an admitted model, not a scene-wide speedup.
+- [x] Reconcile vegetation against the final camera's world transform, authored projection and depth convention; cover parent movement, FOV/view offsets and newly finalized chunks. Unchanged views avoid a second full culling pass. Correct positive constant homogeneous-W projection algebra for actual rotating shadow cameras without accepting genuinely projective transforms.
+- [x] Pass 400/400 focused regressions across 12 files, three package typechecks/builds, scoped lint/format, and 30 native preflight checks. Regression receipt: `asset-studio/mushroom-lod01/regression04.json`, SHA256 `94d2836a7c9dd87f5b9997710a105b017183ed04b01b3dcd2c4dbe04fb0f8fc8`. Coverage includes 360 real sun rotations, original LOD lifecycle checks and 12 final-camera/quadtree integration cases.
+- [x] Complete native05's local WebGPU study: nine world views, five close/transition PNGs, 28 out/back/history samples and an identical 8.1m camera with opposite production-selected levels. Actual target submissions are 5,013 versus 1,500 triangles in each main/sun pass. Both reviewers accept local silhouette/color consistency at the intended screen size; the source's faceted cap and weak contact remain visible art limitations.
+- [x] Independently verify all 710 current source pins, 632 archives, 14 image hashes and 42 fog brackets; actual loader/material/spawn/placement identities and draw receipts; 25 rejected motion-evidence corruptions. Retain precise one-way Uint16-to-Uint32 upload admission with unchanged decoded indices and explicit raw-storage reporting; native05 itself needed no between-receipt promotion.
+- [x] Clean up all owned cameras, browser, launcher and ports. Page/GPU/cleanup errors are zero. The overall report remains false for the existing 19 dagger-fit/cow content errors; a locally passed study is not a clean launch.
+- [x] Push game source `2f6f576ce05da4c2d1723ee1b40d349456446b1d` and asset `a19894750710f2d8a7facdd98685011bf4c0ade5`. GitHub author AND committer are `dreaminglucid`; post-hook source hashes still match native05. Preserve unrelated work.
+- [ ] Qualify continuous camera/wind/shadow motion and sustained target-device/streaming performance. Native05's instrumented p95 CPU is 17.2/20.1ms and summed GPU passes are 18.416/20.382ms in the two windows—not presented FPS or sustained 60. Final-camera culling changed historical submitted owner sets, so older totals are not a controlled speedup comparison.
+- [ ] Next substantial art pass: natural same-budget meadow tufts, ground/blade continuity and world-continuous wind, followed by shrub composition, coast/water/sky, architecture, contact/shadows and high-cost equipment LOD. Retain all functional resource trees; finish avatar/equipment motion, live physics/contact and all launch gates. No hidden population, resolution or shadow-budget cuts.
+
+Evidence: `asset-studio/game-test-integration/mushroom-lod-native05/report.json` (SHA256 `5b7e296b4a1ebe34846f2956a314ae63c2b42155bddf092a97e30c0a3fd58894`); `asset-studio/mushroom-lod01/mushroom-lod-native05-motion-verification01.json` (`32d47eb93b0e5afac7d4f5bed8c1099d5c7e6abadaea90ad872cb7efff186575`); `native05-loader-draw-verification01.json` (`63968063ed9903b2fe9b5642ada284490e8a2a002bc6f9bfbc2e2f35055a2456`).
+
+Failed native01–04 receipts remain untouched: incorrect legacy-LOD diagnostic assumption; stale-camera culling; exact-W shadow rejection; then a legitimate renderer index-storage promotion. Each failure stays failed, including incomplete-image evidence. Preflight06's concurrent-build checksum failure is retained; stable serial preflight07 and the final 30-check run pass. Compressed mushroom source remains outside persistent-cache source admission: real HTTP cold/join/memory and separate CPU codec checks do not prove IndexedDB behavior.
+
 ## Haven ground composition checkpoint — 2026-09-13
 
 Status: **G04 OPEN. Refined meadow/workshop ground is a verified local visual
