@@ -101,7 +101,10 @@ describe("explicit grass appearance candidate selection", () => {
       expect(
         resolveGrassAppearanceCandidate(makeWindow(pathname)),
       ).toBeUndefined();
-      for (const id of Object.keys(STREAMING_RENDER_PROFILES)) {
+      for (const id of Object.keys(STREAMING_RENDER_PROFILES).filter(
+        // Fine meadow is a new paired selection, covered separately below.
+        (value) => value !== "island-fine-meadow-720p60-v1",
+      )) {
         expect(
           resolveGrassAppearanceCandidate(
             makeWindow(pathname, `?streamRenderProfile=${id}`),
@@ -461,6 +464,143 @@ describe("opt-in shadows render contract (CPU validation, not GPU execution)", (
       ).toBe(true);
     },
   );
+
+  it("admits the fine meadow only as an explicit matching appearance/profile pair", () => {
+    const original = STREAMING_RENDER_PROFILES["island-meadow-720p60-v1"];
+    const fine = STREAMING_RENDER_PROFILES["island-fine-meadow-720p60-v1"];
+    expect({
+      ...fine,
+      id: original.id,
+      grassProfile: original.grassProfile,
+    }).toEqual(original);
+    const query =
+      "streamRenderProfile=island-fine-meadow-720p60-v1&grassAppearance=fine-meadow-v1";
+    for (const [path, prefix] of [
+      ["/stream.html", ""],
+      ["/", "page=stream&"],
+    ]) {
+      const windowRef = makeWindow(path, "?" + prefix + query);
+      expect(resolveExplicitStreamingRenderProfile(windowRef)).toBe(fine);
+      expect(resolveGrassAppearanceCandidate(windowRef)).toBe("fine-meadow-v1");
+      expect(
+        resolveHabitatCompositionCandidate(
+          makeWindow(
+            path,
+            "?" + prefix + query + "&habitatComposition=haven-understory-v1",
+          ),
+        ),
+      ).toBe("haven-understory-v1");
+    }
+    for (const [path, search] of [
+      ["/play", query],
+      ["/stream.html", query + "&embedded=true"],
+      ["/stream.html", query + "&streamFps=30"],
+      ["/stream.html", query + "&grassAppearance=fine-meadow-v1"],
+      ["/stream.html", query + "&grassAppearance=natural-tuft-v1"],
+      ["/stream.html", query + "&streamRenderProfile=island-meadow-720p60-v1"],
+      ["/stream.html", "streamRenderProfile=island-fine-meadow-720p60-v1"],
+      [
+        "/stream.html",
+        "streamRenderProfile=island-fine-meadow-720p60-v1&grassAppearance=natural-tuft-v1",
+      ],
+      [
+        "/stream.html",
+        "streamRenderProfile=island-meadow-720p60-v1&grassAppearance=fine-meadow-v1",
+      ],
+      ["/stream.html", "grassAppearance=fine-meadow-v1"],
+    ]) {
+      expect(() =>
+        resolveGrassAppearanceCandidate(makeWindow(path, "?" + search)),
+      ).toThrow();
+    }
+    expect(
+      resolveExplicitStreamingRenderProfile(makeWindow("/stream.html")),
+    ).toBeNull();
+    expect(
+      resolveGrassAppearanceCandidate(makeWindow("/play")),
+    ).toBeUndefined();
+  });
+
+  it("requires an actual fine cell profile receipt and preserves renderer-quality gates", () => {
+    const fine = STREAMING_RENDER_PROFILES["island-fine-meadow-720p60-v1"];
+    const grass: StreamingGrassProfileReceipt = {
+      schemaVersion: 1,
+      profileId: "fine-meadow-v1",
+      eligibility: "compact-pbr-v1",
+      terrainProfileIdentity: "admitted-terrain",
+      minimumLodLevel: 0,
+      clumpSpacingMultiplier: 1,
+      clumpSpacing: 0.7,
+      maxRenderDistance: 140,
+      maxChunksPerFrame: 1,
+      castShadow: false,
+      destroyed: false,
+      liveNodes: 6,
+      pendingChunks: 0,
+      inflightChunks: 0,
+      settledChunks: 0,
+      installedChunks: 96,
+      installedClumps: 120000,
+      placement: {
+        schemaVersion: 1,
+        mode: "world-cells-v1",
+        cellSize: 25,
+        nearLodDistance: 40,
+        liveCells: 96,
+      },
+    };
+    const state = observed();
+    state.grass = grass;
+    expect(
+      evaluateStreamingRenderProfileApplication(fine, requested, state).ready,
+    ).toBe(true);
+    // This validates observed configuration, not population completion or cost.
+    for (const change of [
+      { profileId: "compact-meadow-v2" as const },
+      { minimumLodLevel: 1 },
+      { clumpSpacingMultiplier: 2.5 },
+      { clumpSpacing: 1.75 },
+      { placement: undefined },
+      { maxRenderDistance: 80 },
+      { maxChunksPerFrame: 16 },
+    ]) {
+      expect(
+        evaluateStreamingRenderProfileApplication(fine, requested, {
+          ...state,
+          grass: { ...grass, ...change },
+        }).ready,
+      ).toBe(false);
+    }
+    for (const change of [
+      { cellSize: 50 },
+      { nearLodDistance: 80 },
+      { liveCells: -1 },
+      { liveCells: NaN },
+      { liveCells: 0.5 },
+    ]) {
+      const invalid = {
+        ...grass,
+        placement: { ...grass.placement!, ...change },
+      } as StreamingGrassProfileReceipt;
+      expect(
+        evaluateStreamingRenderProfileApplication(fine, requested, {
+          ...state,
+          grass: invalid,
+        }).mismatchReason,
+      ).toBe("grass_placement");
+    }
+    state.renderer.samples = 1;
+    expect(
+      evaluateStreamingRenderProfileApplication(fine, requested, state)
+        .mismatchReason,
+    ).toBe("antialiasing_samples");
+    state.renderer.samples = 4;
+    state.renderer.dpr = 0.5;
+    expect(
+      evaluateStreamingRenderProfileApplication(fine, requested, state)
+        .mismatchReason,
+    ).toBe("render_dimensions");
+  });
 
   it("keeps dense meadow opt-in without reducing any existing rendering quality", () => {
     const original = STREAMING_RENDER_PROFILES["island-720p60-v1"];

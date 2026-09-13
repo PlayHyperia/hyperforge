@@ -74,6 +74,8 @@ import {
 } from "./GrassTerrainProjection";
 import {
   getGrassWorkerPool,
+  prepareGrassWorkerRequest,
+  admitGrassWorkerPlacementResult,
   terminateGrassWorkerPool,
   type GrassWorkerInput,
   type GrassWorkerOutput,
@@ -81,6 +83,11 @@ import {
 import type { TerrainWorkerConfig } from "../../../utils/workers/TerrainWorker";
 import type { CompactTerrainPlantingLobe } from "./CompactTerrainPalette";
 import type { BiomeGrassConfigWorker } from "../../../utils/workers/GrassWorker";
+import {
+  createGrassPlacementCellOperations,
+  getGrassPlacementCellBounds,
+  type GrassPlacementCell,
+} from "../../../utils/workers/GrassPlacementCell";
 import { assertTerrainWorkerRequest } from "../../../utils/workers/TerrainWorkerShared";
 import {
   GRASS_SURFACE_NORMAL_SAMPLE_DISTANCE,
@@ -204,6 +211,24 @@ export const NATURAL_TUFT_APPEARANCE = Object.freeze({
   TUFT_ARC_FACTORS: Object.freeze([0.35, 1.15, 0.65, 1.35] as const),
 } as const);
 
+/** Explicit fine-meadow candidate: independent slender stems instead of rooted
+ * quartets. Progressive roots preserve the same blades across geometry tiers;
+ * Moderate leaf area restores overlap without adding blades or broad rooted fans.
+ */
+export const FINE_MEADOW_APPEARANCE = Object.freeze({
+  id: "fine-meadow-v1",
+  BLADE_HEIGHT_MIN: 0.38,
+  BLADE_HEIGHT_MAX: 0.86,
+  BLADE_WIDTH_RATIO: 0.045,
+  BLADE_ARC_RATIO: 0.3,
+  BLADE_CONTROL_HEIGHT: 0.76,
+  BLADE_TIP_HEIGHT: 0.95,
+  BLADE_NORMAL_WEIGHT: 0.2,
+  ROOT_BRIGHTNESS: 0.9,
+  TIP_BRIGHTNESS: 1.2,
+  PROGRESSIVE_ROOTS: true,
+} as const);
+
 type GrassBladeShape = Pick<
   typeof GRASS_CONFIG,
   | "BLADE_HEIGHT_MIN"
@@ -211,6 +236,7 @@ type GrassBladeShape = Pick<
   | "BLADE_WIDTH_RATIO"
   | "BLADE_ARC_RATIO"
 > & {
+  PROGRESSIVE_ROOTS?: boolean;
   BLADE_CONTROL_HEIGHT?: number;
   BLADE_TIP_HEIGHT?: number;
   TUFT_BLADES?: number;
@@ -311,7 +337,21 @@ function createClumpGeometry(
   let tuftHeight = 0;
 
   for (let b = 0; b < N; b++) {
-    const t01 = b / N;
+    // Base-two radical inverse distributes each prefix across the whole disk.
+    // Its inputs and the per-blade RNG sequence are independent of N/segments:
+    // the first twelve fine blades retain roots, widths, height and tips when
+    // changing from the twenty-four-blade near geometry.
+    let progressiveRadius = 0;
+    if (shape.PROGRESSIVE_ROOTS) {
+      let value = b + 1;
+      let place = 0.5;
+      while (value > 0) {
+        progressiveRadius += (value % 2) * place;
+        value = Math.floor(value / 2);
+        place *= 0.5;
+      }
+    }
+    const t01 = shape.PROGRESSIVE_ROOTS ? progressiveRadius : b / N;
     const tuft = shape.TUFT_BLADES ? Math.floor(b / shape.TUFT_BLADES) : null;
     const fanIndex = shape.TUFT_BLADES ? b % shape.TUFT_BLADES : 0;
     const tuftAngle = (tuft ?? 0) * GOLDEN_ANGLE;
@@ -339,7 +379,10 @@ function createClumpGeometry(
     const cr = Math.cos(facingAngle);
     const sr = Math.sin(facingAngle);
 
-    const heightFraction = 0.3 + 0.7 * t01 + (rng() - 0.5) * 0.4;
+    const rawHeightFraction = 0.3 + 0.7 * t01 + (rng() - 0.5) * 0.4;
+    const heightFraction = shape.PROGRESSIVE_ROOTS
+      ? THREE.MathUtils.clamp(rawHeightFraction, 0, 1)
+      : rawHeightFraction;
     const variedHeight =
       hMin +
       (hMax - hMin) *
@@ -443,16 +486,29 @@ function createClumpGeometry(
 // Types
 // ---------------------------------------------------------------------------
 
+/** A grass scheduling/sampling domain borrowing one REAL retained terrain leaf.
+ * Cell coordinates never impersonate terrain geometry or its grid origin. */
+interface GrassWorkUnit {
+  readonly node: TerrainQuadNode;
+  readonly key: string;
+  readonly bounds: Readonly<TerrainGridBounds>;
+  readonly placementCell?: GrassPlacementCell;
+}
+
+type GrassWorkSource = TerrainQuadNode | GrassWorkUnit;
+
 interface GrassChunk {
   nodeId: number;
   mesh: THREE.InstancedMesh;
   box: THREE.Box3;
   lodLevel: number;
   node: TerrainQuadNode;
+  work: GrassWorkUnit;
 }
 
 interface GrassWorkerTicket {
   readonly node: TerrainQuadNode;
+  readonly work: GrassWorkUnit;
   readonly key: string;
   readonly lodLevel: number;
   readonly isLodSwap: boolean;
@@ -481,7 +537,11 @@ interface SettledGrassWorkerResult {
 }
 
 export interface GrassVisualProfile {
-  id?: "fixed-arena-v1" | "compact-island-v1" | "compact-meadow-v2";
+  id?:
+    | "fixed-arena-v1"
+    | "compact-island-v1"
+    | "compact-meadow-v2"
+    | "fine-meadow-v1";
   eligibility?: GrassSurfaceEligibility;
   /** Multiplies the global spacing without changing deterministic placement. */
   clumpSpacingMultiplier?: number;
@@ -489,6 +549,8 @@ export interface GrassVisualProfile {
   minimumLodLevel?: number;
   maxRenderDistance?: number;
   maxChunksPerFrame?: number;
+  placementCellSize?: 25;
+  nearLodDistance?: 40;
 }
 
 /**
@@ -522,6 +584,18 @@ export const DENSE_MEADOW_GRASS_VISUAL_PROFILE = Object.freeze({
   ...COMPACT_ISLAND_GRASS_VISUAL_PROFILE,
   id: "compact-meadow-v2",
   clumpSpacingMultiplier: 2.5,
+} as const satisfies GrassVisualProfile);
+
+/** Explicit quality candidate, not a silent change to retained grass profiles. */
+export const FINE_MEADOW_GRASS_VISUAL_PROFILE = Object.freeze({
+  id: "fine-meadow-v1",
+  eligibility: "compact-pbr-v1",
+  clumpSpacingMultiplier: 1,
+  minimumLodLevel: 0,
+  maxRenderDistance: 140,
+  maxChunksPerFrame: 1,
+  placementCellSize: 25,
+  nearLodDistance: 40,
 } as const satisfies GrassVisualProfile);
 
 export interface GrassVisualReadiness {
@@ -616,7 +690,11 @@ export class GrassVisualManager implements QuadTreeListener {
   private playerX = 0;
   private playerZ = 0;
 
-  private pendingNodes: { node: TerrainQuadNode; lod?: number }[] = [];
+  private pendingNodes: {
+    node: TerrainQuadNode;
+    work?: GrassWorkUnit;
+    lod?: number;
+  }[] = [];
   private settledWorkerResults: SettledGrassWorkerResult[] = [];
   private maxChunksPerFrame: number;
   private clumpSpacing: number;
@@ -624,10 +702,26 @@ export class GrassVisualManager implements QuadTreeListener {
   private maxRenderDistance: number;
   private readonly profileId: StreamingGrassProfileReceipt["profileId"];
   private readonly compactMeadow: boolean;
+  private readonly fineMeadow: boolean;
+  private readonly placementOperations = createGrassPlacementCellOperations();
+  private readonly nodeWorkUnits = new Map<
+    TerrainQuadNode,
+    readonly GrassWorkUnit[]
+  >();
+  private readonly liveWorkUnits = new Map<string, GrassWorkUnit>();
+  private lodFocusX = 0;
+  private lodFocusZ = 0;
+  private hasPrimaryView = false;
+  private primaryViewValid = false;
+  private primaryViewX = 0;
+  private primaryViewZ = 0;
+  private readonly primaryViewProjection = new THREE.Matrix4();
+  private readonly primaryViewFrustum = new THREE.Frustum();
   private readonly meadowAppearance:
     | typeof COMPACT_MEADOW_APPEARANCE
     | typeof CURVED_MEADOW_APPEARANCE
     | typeof NATURAL_TUFT_APPEARANCE
+    | typeof FINE_MEADOW_APPEARANCE
     | null;
   private readonly grassEligibility: GrassSurfaceEligibility;
 
@@ -638,6 +732,7 @@ export class GrassVisualManager implements QuadTreeListener {
   /** Includes successful empty chunks so flat arena ground can become ready. */
   private completedNodes = new Map<string, TerrainQuadNode>();
   private completedSurfaces = new Map<string, RetainedTerrainSurface>();
+  private completedLods = new Map<string, number>();
   private groundingJobs = new Map<string, GrassGroundingEntry>();
   private completedGrounding = new Map<string, CompletedGrassGrounding>();
   private groundingHalo = 0;
@@ -645,7 +740,7 @@ export class GrassVisualManager implements QuadTreeListener {
   private groundingActiveMs = 0;
   private pendingLodSwap = new Map<
     string,
-    { node: TerrainQuadNode; desiredLod: number }
+    { node: TerrainQuadNode; work: GrassWorkUnit; desiredLod: number }
   >();
   private destroyed = false;
 
@@ -705,24 +800,44 @@ export class GrassVisualManager implements QuadTreeListener {
       }
     }
     this.profileId = profile.id ?? "ordinary-v1";
-    if (habitatComposition && appearanceCandidate !== "natural-tuft-v1")
+    this.fineMeadow = this.profileId === FINE_MEADOW_GRASS_VISUAL_PROFILE.id;
+    if (
+      habitatComposition &&
+      appearanceCandidate !== "natural-tuft-v1" &&
+      appearanceCandidate !== "fine-meadow-v1"
+    )
       throw new Error(
         "Habitat grass requires the explicit natural tuft appearance",
       );
     if (
       appearanceCandidate !== undefined &&
-      (appearanceCandidate !== NATURAL_TUFT_APPEARANCE.id ||
-        this.profileId !== DENSE_MEADOW_GRASS_VISUAL_PROFILE.id)
+      !(
+        (appearanceCandidate === NATURAL_TUFT_APPEARANCE.id &&
+          this.profileId === DENSE_MEADOW_GRASS_VISUAL_PROFILE.id) ||
+        (appearanceCandidate === FINE_MEADOW_APPEARANCE.id && this.fineMeadow)
+      )
     ) {
       throw new Error(
         "Natural tuft appearance requires the exact dense meadow profile",
       );
     }
+    if (this.fineMeadow && appearanceCandidate !== FINE_MEADOW_APPEARANCE.id)
+      throw new Error("Fine meadow requires its explicit appearance");
+    if (
+      !this.fineMeadow &&
+      (profile.placementCellSize !== undefined ||
+        profile.nearLodDistance !== undefined)
+    )
+      throw new Error(
+        "Grass placement cells require the explicit fine meadow profile",
+      );
     this.compactMeadow =
       this.profileId === "compact-island-v1" ||
-      this.profileId === "compact-meadow-v2";
-    this.meadowAppearance =
-      this.profileId === "compact-meadow-v2"
+      this.profileId === "compact-meadow-v2" ||
+      this.fineMeadow;
+    this.meadowAppearance = this.fineMeadow
+      ? FINE_MEADOW_APPEARANCE
+      : this.profileId === "compact-meadow-v2"
         ? appearanceCandidate === NATURAL_TUFT_APPEARANCE.id
           ? NATURAL_TUFT_APPEARANCE
           : CURVED_MEADOW_APPEARANCE
@@ -736,9 +851,11 @@ export class GrassVisualManager implements QuadTreeListener {
       );
     if (this.compactMeadow || this.grassEligibility === "compact-pbr-v1") {
       for (const [key, value] of Object.entries(
-        this.profileId === "compact-meadow-v2"
-          ? DENSE_MEADOW_GRASS_VISUAL_PROFILE
-          : COMPACT_ISLAND_GRASS_VISUAL_PROFILE,
+        this.fineMeadow
+          ? FINE_MEADOW_GRASS_VISUAL_PROFILE
+          : this.profileId === "compact-meadow-v2"
+            ? DENSE_MEADOW_GRASS_VISUAL_PROFILE
+            : COMPACT_ISLAND_GRASS_VISUAL_PROFILE,
       )) {
         if (profile[key] !== value)
           throw new Error(`Compact grass profile mismatch: ${key}`);
@@ -785,13 +902,15 @@ export class GrassVisualManager implements QuadTreeListener {
     );
     this.material = this.createMaterial();
     if (this.compactMeadow) {
-      const positions = this.lodGeometries[1].getAttribute("position");
       let radius = 0;
-      for (let i = 0; i < positions.count; i++)
-        radius = Math.max(
-          radius,
-          Math.hypot(positions.getX(i), positions.getY(i), positions.getZ(i)),
-        );
+      for (let tier = this.minimumLodLevel; tier <= 1; tier++) {
+        const positions = this.lodGeometries[tier].getAttribute("position");
+        for (let i = 0; i < positions.count; i++)
+          radius = Math.max(
+            radius,
+            Math.hypot(positions.getX(i), positions.getY(i), positions.getZ(i)),
+          );
+      }
       // Rotation/tilt preserve radius, fade never increases it. Leave numerical
       // margin and full wind sweep; the old normal-only 0.5m halo is insufficient.
       this.groundingHalo = Math.max(
@@ -807,16 +926,24 @@ export class GrassVisualManager implements QuadTreeListener {
 
     const tierDescs = GRASS_CONFIG.LOD_TIERS.map((t, i) => {
       const g = this.lodGeometries[i];
+      const range = this.fineMeadow
+        ? i === 0
+          ? "<40m"
+          : i === 1
+            ? "40–140m"
+            : "inactive"
+        : `<${t.maxDistance === Infinity ? "inf" : t.maxDistance}m`;
       return (
         `LOD${i}(${t.bladesPerClump}b/${t.bladeSegments}s, ` +
         `${g.attributes.position.count}v, ${g.index!.count / 3}t, ` +
-        `<${t.maxDistance === Infinity ? "inf" : t.maxDistance}m, ` +
+        `${range}, ` +
         `×${t.spacingMul})`
       );
     });
     console.log(
       `[GrassVisualManager] ${tierDescs.length} LOD tiers | ` +
         `spacing ${this.clumpSpacing}m | min LOD${this.minimumLodLevel} | ` +
+        (this.fineMeadow ? "cells25m | near40m (36/44m hysteresis) | " : "") +
         `range ${this.maxRenderDistance}m | ${workerStatus} | ${tierDescs.join(" | ")}`,
     );
   }
@@ -857,6 +984,17 @@ export class GrassVisualManager implements QuadTreeListener {
       castShadow,
       destroyed: this.destroyed,
       liveNodes: this.liveNodes.size,
+      ...(this.fineMeadow
+        ? {
+            placement: {
+              schemaVersion: 1 as const,
+              mode: "world-cells-v1" as const,
+              cellSize: 25 as const,
+              nearLodDistance: 40 as const,
+              liveCells: this.liveWorkUnits.size,
+            },
+          }
+        : {}),
       pendingChunks: this.pendingNodes.length,
       inflightChunks: this.workerInflight.size,
       settledChunks: this.settledWorkerResults.length,
@@ -904,17 +1042,20 @@ export class GrassVisualManager implements QuadTreeListener {
       Math.max(1, criticalRadius),
     );
     const radiusSquared = safeRadius * safeRadius;
-    const requiredNodes = nodes.filter((node) => {
-      if (!node.isFinal || !node.isMaxDepth) return false;
-      const dx = node.centerX - this.playerX;
-      const dz = node.centerZ - this.playerZ;
-      return dx * dx + dz * dz <= radiusSquared;
-    });
+    const requiredNodes = nodes
+      .filter((node) => node.isFinal && node.isMaxDepth)
+      .flatMap((node) => this.workUnitsFor(node))
+      .filter(
+        (work) =>
+          this.workDistanceSquared(work, this.playerX, this.playerZ) <=
+          radiusSquared,
+      );
     let readyChunks = 0;
-    for (const node of requiredNodes) {
-      const key = this.chunkKey(node);
+    for (const work of requiredNodes) {
+      const { node, key } = work;
       if (
-        this.completedNodes.has(key) &&
+        this.liveWorkUnits.get(key) === work &&
+        this.completedNodes.get(key) === node &&
         this.completedSurfaces.get(key) === this.getRenderedSurface(node) &&
         (!this.compactMeadow || this.isCompletedGroundingCurrent(key))
       )
@@ -958,9 +1099,11 @@ export class GrassVisualManager implements QuadTreeListener {
       ? createGroundedGrassMaterial(
           this.material,
           geo,
-          new Float32Array(24),
+          new Float32Array(
+            GRASS_CONFIG.LOD_TIERS[this.minimumLodLevel].bladesPerClump * 2,
+          ),
           1,
-          1,
+          this.minimumLodLevel,
         )
       : this.material;
     const mesh = new THREE.InstancedMesh(geo, material, 1);
@@ -980,12 +1123,82 @@ export class GrassVisualManager implements QuadTreeListener {
     }
   }
 
+  /** Snapshot only at the primary ClientGraphics render boundary. Never perform
+   * placement, grounding, uploads or LOD publication inside a render pass.
+   * The next update consumes this last actually rendered view: camera cuts have
+   * one update of scheduling latency, then the normal bounded LOD convergence.
+   * Shadow/reflection camera traversals must not call this primary-view hook. */
+  capturePrimaryView(camera: THREE.Camera): void {
+    if (this.destroyed || !this.fineMeadow) return;
+    camera.updateWorldMatrix(true, false);
+    this.hasPrimaryView = true;
+    this.primaryViewX = camera.matrixWorld.elements[12];
+    this.primaryViewZ = camera.matrixWorld.elements[14];
+    this.primaryViewProjection.multiplyMatrices(
+      camera.projectionMatrix,
+      camera.matrixWorldInverse,
+    );
+    this.primaryViewValid = false;
+    for (let i = 0; i < 16; i++) {
+      if (
+        !Number.isFinite(camera.matrixWorld.elements[i]) ||
+        !Number.isFinite(this.primaryViewProjection.elements[i])
+      )
+        return;
+    }
+    if (
+      camera.coordinateSystem !== THREE.WebGPUCoordinateSystem &&
+      camera.coordinateSystem !== THREE.WebGLCoordinateSystem
+    )
+      return;
+    this.primaryViewFrustum.setFromProjectionMatrix(
+      this.primaryViewProjection,
+      camera.coordinateSystem,
+      camera.reversedDepth,
+    );
+    for (let i = 0; i < this.primaryViewFrustum.planes.length; i++) {
+      const plane = this.primaryViewFrustum.planes[i];
+      if (
+        !Number.isFinite(plane.constant) ||
+        !Number.isFinite(plane.normal.x) ||
+        !Number.isFinite(plane.normal.y) ||
+        !Number.isFinite(plane.normal.z) ||
+        plane.normal.lengthSq() === 0
+      )
+        return;
+    }
+    this.primaryViewValid = true;
+  }
+
   update(playerX: number, playerZ: number, camera?: THREE.Camera): void {
     if (this.destroyed) return;
     this.playerX = playerX;
     this.playerZ = playerZ;
+    const usePrimaryView = this.fineMeadow && this.hasPrimaryView;
+    this.lodFocusX = usePrimaryView
+      ? this.primaryViewX
+      : (camera?.matrixWorld.elements[12] ?? playerX);
+    this.lodFocusZ = usePrimaryView
+      ? this.primaryViewZ
+      : (camera?.matrixWorld.elements[14] ?? playerZ);
+    if (this.fineMeadow) this.container.updateWorldMatrix(true, false);
     this.playerPosUniform.value.set(playerX, 0, playerZ);
     this.reconcileGrassHorizon();
+    this.cancelObsoleteLodWork();
+    if (this.fineMeadow)
+      this.pendingNodes.sort(
+        (a, b) =>
+          this.workDistanceSquared(
+            a.work ?? this.resolveWorkUnit(a.node),
+            this.lodFocusX,
+            this.lodFocusZ,
+          ) -
+          this.workDistanceSquared(
+            b.work ?? this.resolveWorkUnit(b.node),
+            this.lodFocusX,
+            this.lodFocusZ,
+          ),
+      );
 
     // Worker callbacks only enqueue results. GPU-facing geometry creation is
     // bounded here so several workers settling together cannot upload multiple
@@ -1001,10 +1214,12 @@ export class GrassVisualManager implements QuadTreeListener {
       built < this.maxChunksPerFrame &&
       dispatched < this.maxChunksPerFrame
     ) {
-      const { node, lod } = this.pendingNodes.shift()!;
-      if (!this.isNodeInGrassHorizon(node)) continue;
+      const pending = this.pendingNodes.shift()!;
+      const { node, lod } = pending;
+      const work = pending.work ?? this.resolveWorkUnit(node);
+      if (!this.isNodeInGrassHorizon(work)) continue;
       if (!this.getRenderedSurface(node)) continue;
-      const key = this.chunkKey(node);
+      const key = work.key;
       if (
         this.chunks.has(key) ||
         this.completedNodes.has(key) ||
@@ -1013,83 +1228,74 @@ export class GrassVisualManager implements QuadTreeListener {
       )
         continue;
       if (pool && this.workerSetup) {
-        this.dispatchToWorker(node, key);
+        this.dispatchToWorker(work, key);
         dispatched++;
       } else {
-        this.createChunkMesh(node, lod);
+        this.createChunkMesh(work, lod);
         built++;
       }
     }
 
-    if (!camera || this.chunks.size === 0) return;
+    if ((!camera && !usePrimaryView) || this.chunks.size === 0) return;
 
-    this.projScreenMatrix.multiplyMatrices(
-      camera.projectionMatrix,
-      camera.matrixWorldInverse,
-    );
-    this.frustum.setFromProjectionMatrix(
-      this.projScreenMatrix,
-      camera.coordinateSystem,
-      camera.reversedDepth,
-    );
-
-    const tiers = GRASS_CONFIG.LOD_TIERS;
-    const hysteresis = GRASS_CONFIG.LOD_HYSTERESIS;
+    if (usePrimaryView) {
+      if (this.primaryViewValid) this.frustum.copy(this.primaryViewFrustum);
+    } else if (camera) {
+      this.projScreenMatrix.multiplyMatrices(
+        camera.projectionMatrix,
+        camera.matrixWorldInverse,
+      );
+      this.frustum.setFromProjectionMatrix(
+        this.projScreenMatrix,
+        camera.coordinateSystem,
+        camera.reversedDepth,
+      );
+    }
 
     for (const [key, chunk] of this.chunks) {
-      const dx = chunk.node.centerX - playerX;
-      const dz = chunk.node.centerZ - playerZ;
-      const distSq = dx * dx + dz * dz;
-
-      // This earlier camera only prioritizes LOD work. Never publish its cull
+      // This cached primary (or legacy update) view only prioritizes LOD work. Never publish its cull
       // result into Object3D.visible: a later camera/director or secondary pass
       // must test its own frustum against the actual shader-displaced bounds.
       if (
-        !this.frustum.intersectsBox(chunk.box) ||
+        ((!usePrimaryView || this.primaryViewValid) &&
+          !this.frustum.intersectsBox(chunk.box)) ||
         built >= this.maxChunksPerFrame
       )
         continue;
 
-      const dist = Math.sqrt(distSq);
-      const desiredLod = this.getLodLevel(chunk.node);
+      const desiredLod = this.desiredLod(chunk.work);
 
       if (desiredLod !== chunk.lodLevel) {
-        const currentTier = tiers[chunk.lodLevel];
-        const boundary =
-          desiredLod < chunk.lodLevel
-            ? currentTier.maxDistance
-            : (tiers[desiredLod - 1]?.maxDistance ?? 0);
-        const threshold =
-          boundary *
-          (1 + (desiredLod < chunk.lodLevel ? -hysteresis : hysteresis));
-        const shouldSwitch =
-          desiredLod < chunk.lodLevel ? dist < threshold : dist > threshold;
-
-        if (shouldSwitch) {
-          const nodeKey = this.chunkKey(chunk.node);
-          const workerPool = getGrassWorkerPool();
-          if (workerPool && this.workerSetup) {
-            this.pendingLodSwap.set(nodeKey, {
-              node: chunk.node,
-              desiredLod,
-            });
-            if (
-              !this.workerInflight.has(nodeKey) &&
-              dispatched < this.maxChunksPerFrame
-            ) {
-              this.dispatchLodSwap(chunk.node, nodeKey, desiredLod);
-              dispatched++;
-            }
-          } else {
-            this.createChunkMesh(chunk.node, desiredLod, true);
-            built++;
+        const nodeKey = key;
+        const workerPool = getGrassWorkerPool();
+        this.pendingLodSwap.set(nodeKey, {
+          node: chunk.node,
+          work: chunk.work,
+          desiredLod,
+        });
+        if (workerPool && this.workerSetup) {
+          if (
+            !this.workerInflight.has(nodeKey) &&
+            !this.groundingJobs.has(nodeKey) &&
+            dispatched < this.maxChunksPerFrame
+          ) {
+            this.dispatchLodSwap(chunk.work, nodeKey, desiredLod);
+            dispatched++;
           }
+        } else if (
+          !this.workerInflight.has(key) &&
+          !this.groundingJobs.has(key)
+        ) {
+          this.createChunkMesh(chunk.work, desiredLod, true);
+          built++;
         }
       } else if (this.pendingLodSwap.has(key)) {
         // The camera returned to the displayed tier before the swap completed.
         // Cancel its ticket; a late result must not replace the correct mesh.
         this.pendingLodSwap.delete(key);
         this.workerInflight.delete(key);
+        this.groundingJobs.get(key)?.job.cancel();
+        this.groundingJobs.delete(key);
         this.settledWorkerResults = this.settledWorkerResults.filter(
           (entry) => entry.ticket.key !== key,
         );
@@ -1097,12 +1303,19 @@ export class GrassVisualManager implements QuadTreeListener {
     }
   }
 
-  private isNodeInGrassHorizon(node: TerrainQuadNode): boolean {
+  private isNodeInGrassHorizon(source: GrassWorkSource): boolean {
+    const work = this.resolveWorkUnit(source);
+    const { node } = work;
     if (this.destroyed || !node.isFinal || !node.isMaxDepth) return false;
-    if (this.liveNodes.get(this.chunkKey(node)) !== node) return false;
-    const dx = node.centerX - this.playerX;
-    const dz = node.centerZ - this.playerZ;
-    return dx * dx + dz * dz <= this.maxRenderDistance * this.maxRenderDistance;
+    if (
+      this.liveWorkUnits.get(work.key) !== work ||
+      this.liveNodes.get(this.chunkKey(node)) !== node
+    )
+      return false;
+    return (
+      this.workDistanceSquared(work, this.playerX, this.playerZ) <=
+      this.maxRenderDistance * this.maxRenderDistance
+    );
   }
 
   private retireGrassWork(key: string): void {
@@ -1110,6 +1323,7 @@ export class GrassVisualManager implements QuadTreeListener {
     this.pendingLodSwap.delete(key);
     this.completedNodes.delete(key);
     this.completedSurfaces.delete(key);
+    this.completedLods.delete(key);
     this.groundingJobs.get(key)?.job.cancel();
     this.groundingJobs.delete(key);
     this.completedGrounding.delete(key);
@@ -1153,15 +1367,20 @@ export class GrassVisualManager implements QuadTreeListener {
       void
     > {
       if (error) throw error;
-      if (!region || !inputs || ticket.lodLevel !== 1)
+      if (
+        !region ||
+        !inputs ||
+        (ticket.lodLevel !== 1 &&
+          !(manager.fineMeadow && ticket.lodLevel === 0))
+      )
         throw new Error("Incomplete compact grass grounding inputs");
       return yield* prepareGroundedGrassSteps(
         {
           data,
           ownSurface: ticket.surface,
           surfaces: region.surfaces,
-          geometry: manager.lodGeometries[1],
-          lod: 1,
+          geometry: manager.lodGeometries[ticket.lodLevel],
+          lod: ticket.lodLevel,
           oceanLevel: manager.waterThreshold,
           wind: {
             x:
@@ -1185,7 +1404,8 @@ export class GrassVisualManager implements QuadTreeListener {
         steps(),
         () =>
           this.groundingJobs.get(ticket.key) === entry &&
-          this.isNodeInGrassHorizon(ticket.node) &&
+          this.isNodeInGrassHorizon(ticket.work) &&
+          this.isTicketLodCurrent(ticket) &&
           this.getRenderedSurface(ticket.node) === ticket.surface &&
           (!region || region.isCurrent()) &&
           (!inputs || inputs.isCurrent()),
@@ -1198,8 +1418,26 @@ export class GrassVisualManager implements QuadTreeListener {
   /** One shared compute slice and at most one upload for the entire manager,
    * not one allowance per resident chunk. Stable waits/failures do no work. */
   private advanceGroundingJob(): number {
+    let selected: GrassGroundingEntry | undefined;
+    let selectedDistance = Infinity;
     for (const entry of this.groundingJobs.values()) {
       if (entry.job.state.status !== "running") continue;
+      if (!this.fineMeadow) {
+        selected = entry;
+        break;
+      }
+      const distance = this.workDistanceSquared(
+        entry.ticket.work,
+        this.lodFocusX,
+        this.lodFocusZ,
+      );
+      if (!selected || distance < selectedDistance) {
+        selected = entry;
+        selectedDistance = distance;
+      }
+    }
+    if (selected) {
+      const entry = selected;
       const before = entry.job.activeMs;
       const state = entry.job.advance();
       this.groundingActiveMs += entry.job.activeMs - before;
@@ -1209,6 +1447,8 @@ export class GrassVisualManager implements QuadTreeListener {
       );
       if (state.status === "failed_input" || state.status === "failed_budget")
         console.error("[GrassVisualManager] Grounding failed:", state);
+      if (state.status === "cancelled")
+        this.groundingJobs.delete(entry.ticket.key);
       if (state.status !== "ready") return 0;
       const { ticket, region } = entry;
       const inputs = ticket.grounding?.inputs;
@@ -1217,10 +1457,14 @@ export class GrassVisualManager implements QuadTreeListener {
         !inputs ||
         !region.isCurrent() ||
         !inputs.isCurrent() ||
-        !this.isNodeInGrassHorizon(ticket.node) ||
+        !this.isNodeInGrassHorizon(ticket.work) ||
+        !this.isTicketLodCurrent(ticket) ||
         this.getRenderedSurface(ticket.node) !== ticket.surface
-      )
+      ) {
+        entry.job.cancel();
+        this.groundingJobs.delete(ticket.key);
         return 0;
+      }
       try {
         const result = state.result;
         if (!result.grounding)
@@ -1228,13 +1472,16 @@ export class GrassVisualManager implements QuadTreeListener {
         this.retireGrassChunk(ticket.key);
         if (result.data.count) {
           this.createChunkMeshFromWorkerData(
-            ticket.node,
+            ticket.work,
             {
               ...result.data,
               type: "grassInstanceResult",
               chunkKey: ticket.key,
               terrainProfileIdentity: this.terrainProfileIdentity,
               grassEligibility: this.grassEligibility,
+              ...(ticket.work.placementCell
+                ? { placementCell: ticket.work.placementCell }
+                : {}),
             },
             ticket.lodLevel,
             result.grounding,
@@ -1245,6 +1492,7 @@ export class GrassVisualManager implements QuadTreeListener {
         }
         this.completedNodes.set(ticket.key, ticket.node);
         this.completedSurfaces.set(ticket.key, ticket.surface);
+        this.completedLods.set(ticket.key, ticket.lodLevel);
         this.completedGrounding.set(ticket.key, { region, inputs });
         this.pendingLodSwap.delete(ticket.key);
         this.groundingJobs.delete(ticket.key);
@@ -1263,65 +1511,74 @@ export class GrassVisualManager implements QuadTreeListener {
 
   private reconcileGrassHorizon(): void {
     const pendingKeys = new Set(
-      this.pendingNodes.map((entry) => this.chunkKey(entry.node)),
+      this.pendingNodes.map(
+        (entry) => (entry.work ?? this.resolveWorkUnit(entry.node)).key,
+      ),
     );
     const retired = new Set<string>();
-    for (const [key, node] of this.liveNodes) {
+    for (const node of this.liveNodes.values()) {
       if (!node.isFinal || !node.isMaxDepth) {
-        this.liveNodes.delete(key);
-        retired.add(key);
-        this.retireGrassWork(key);
+        this.onNodeDestroyGeometry(node);
         continue;
       }
-      if (!this.isNodeInGrassHorizon(node)) {
-        if (
-          this.chunks.has(key) ||
-          this.completedNodes.has(key) ||
-          this.workerInflight.has(key) ||
-          this.groundingJobs.has(key) ||
-          pendingKeys.has(key)
-        ) {
-          retired.add(key);
-          this.retireGrassWork(key);
+      for (const work of this.workUnitsFor(node)) {
+        const key = work.key;
+        if (this.liveWorkUnits.get(key) !== work) continue;
+        if (!this.isNodeInGrassHorizon(work)) {
+          if (
+            this.chunks.has(key) ||
+            this.completedNodes.has(key) ||
+            this.workerInflight.has(key) ||
+            this.groundingJobs.has(key) ||
+            pendingKeys.has(key)
+          ) {
+            retired.add(key);
+            this.retireGrassWork(key);
+          }
+          continue;
         }
-        continue;
-      }
-      const surface = this.getRenderedSurface(node);
-      const previous =
-        this.completedSurfaces.get(key) ??
-        this.workerInflight.get(key)?.surface ??
-        this.groundingJobs.get(key)?.ticket.surface;
-      const groundJob = this.groundingJobs.get(key);
-      const constraints =
-        this.workerInflight.get(key)?.grounding?.inputs ??
-        groundJob?.ticket.grounding?.inputs;
-      if (
-        (previous && previous !== surface) ||
-        (constraints && !constraints.isCurrent()) ||
-        (groundJob?.region && !groundJob.region.isCurrent()) ||
-        (this.completedGrounding.has(key) &&
-          !this.isCompletedGroundingCurrent(key))
-      ) {
-        this.retireGrassWork(key);
-        this.settledWorkerResults = this.settledWorkerResults.filter(
-          (entry) => entry.ticket.key !== key,
-        );
-      }
-      if (!surface) continue;
-      if (
-        !this.chunks.has(key) &&
-        !this.completedNodes.has(key) &&
-        !this.workerInflight.has(key) &&
-        !this.groundingJobs.has(key) &&
-        !pendingKeys.has(key)
-      ) {
-        this.pendingNodes.push({ node });
-        pendingKeys.add(key);
+        const surface = this.getRenderedSurface(node);
+        const previous =
+          this.completedSurfaces.get(key) ??
+          this.workerInflight.get(key)?.surface ??
+          this.groundingJobs.get(key)?.ticket.surface;
+        const groundJob = this.groundingJobs.get(key);
+        const constraints =
+          this.workerInflight.get(key)?.grounding?.inputs ??
+          groundJob?.ticket.grounding?.inputs;
+        if (
+          (previous && previous !== surface) ||
+          (constraints && !constraints.isCurrent()) ||
+          (groundJob?.region && !groundJob.region.isCurrent()) ||
+          (this.completedGrounding.has(key) &&
+            !this.isCompletedGroundingCurrent(key)) ||
+          (this.fineMeadow &&
+            this.completedNodes.has(key) &&
+            !this.chunks.has(key) &&
+            this.completedLods.get(key) !== this.getLodLevel(work))
+        ) {
+          this.retireGrassWork(key);
+          this.settledWorkerResults = this.settledWorkerResults.filter(
+            (entry) => entry.ticket.key !== key,
+          );
+        }
+        if (!surface) continue;
+        if (
+          !this.chunks.has(key) &&
+          !this.completedNodes.has(key) &&
+          !this.workerInflight.has(key) &&
+          !this.groundingJobs.has(key) &&
+          !pendingKeys.has(key)
+        ) {
+          this.pendingNodes.push({ node, work });
+          pendingKeys.add(key);
+        }
       }
     }
     if (retired.size) {
       this.pendingNodes = this.pendingNodes.filter(
-        (entry) => !retired.has(this.chunkKey(entry.node)),
+        (entry) =>
+          !retired.has((entry.work ?? this.resolveWorkUnit(entry.node)).key),
       );
       this.settledWorkerResults = this.settledWorkerResults.filter(
         (entry) => !retired.has(entry.ticket.key),
@@ -1335,41 +1592,58 @@ export class GrassVisualManager implements QuadTreeListener {
     if (this.destroyed || !node.isFinal) return;
     if (!node.isMaxDepth) return;
     const key = this.chunkKey(node);
+    const previous = this.liveNodes.get(key);
+    if (previous && previous !== node) this.onNodeDestroyGeometry(previous);
+    const works = this.workUnitsFor(node);
+    const replacedParents = new Set<TerrainQuadNode>();
+    for (const work of works) {
+      const previousWork = this.liveWorkUnits.get(work.key);
+      if (previousWork && previousWork.node !== node)
+        replacedParents.add(previousWork.node);
+    }
+    for (const replaced of replacedParents)
+      this.onNodeDestroyGeometry(replaced);
     this.liveNodes.set(key, node);
-    if (!this.isNodeInGrassHorizon(node)) return;
-    if (
-      this.chunks.has(key) ||
-      this.completedNodes.has(key) ||
-      this.workerInflight.has(key) ||
-      this.groundingJobs.has(key)
-    )
-      return;
-    if (!this.pendingNodes.some((entry) => entry.node === node)) {
-      this.pendingNodes.push({ node });
+    for (const work of works) {
+      const previousWork = this.liveWorkUnits.get(work.key);
+      if (previousWork && previousWork !== work) this.retireGrassWork(work.key);
+      this.liveWorkUnits.set(work.key, work);
+      if (!this.isNodeInGrassHorizon(work)) continue;
+      if (
+        this.chunks.has(work.key) ||
+        this.completedNodes.has(work.key) ||
+        this.workerInflight.has(work.key) ||
+        this.groundingJobs.has(work.key)
+      )
+        continue;
+      if (!this.pendingNodes.some((entry) => entry.work === work)) {
+        this.pendingNodes.push({ node, work });
+      }
     }
   }
 
   private dispatchLodSwap(
-    node: TerrainQuadNode,
+    node: GrassWorkSource,
     key: string,
     desiredLod: number,
   ): void {
     this.dispatchWorkerRequest(node, key, desiredLod, true);
   }
 
-  private dispatchToWorker(node: TerrainQuadNode, key: string): void {
+  private dispatchToWorker(node: GrassWorkSource, key: string): void {
     this.dispatchWorkerRequest(node, key, this.getLodLevel(node), false);
   }
 
   private createWorkerInput(
-    node: TerrainQuadNode,
+    source: GrassWorkSource,
     key: string,
     lodLevel: number,
   ): GrassWorkerInput {
     const ws = this.workerSetup!;
-    const half = node.halfSize;
+    const work = this.resolveWorkUnit(source);
+    const { node, bounds } = work;
     const normalHalo = GRASS_SURFACE_NORMAL_SAMPLE_DISTANCE;
-    return {
+    return prepareGrassWorkerRequest({
       grassEligibility: this.grassEligibility,
       type: "generateGrassInstances",
       compactPlantingLobes: ws.compactPlantingLobes,
@@ -1377,6 +1651,7 @@ export class GrassVisualManager implements QuadTreeListener {
       centerX: node.centerX,
       centerZ: node.centerZ,
       size: node.size,
+      ...(work.placementCell ? { placementCell: work.placementCell } : {}),
       spacingMul: GRASS_CONFIG.LOD_TIERS[lodLevel].spacingMul,
       config: ws.terrainConfig,
       seed: ws.seed,
@@ -1399,28 +1674,31 @@ export class GrassVisualManager implements QuadTreeListener {
         SATURATION_BOOST: TERRAIN_SHADER_CONSTANTS.SATURATION_BOOST,
       },
       roadSegments: ws.getRoadSegmentsForRegion(
-        node.centerX - half,
-        node.centerZ - half,
-        node.centerX + half,
-        node.centerZ + half,
+        bounds.minX,
+        bounds.minZ,
+        bounds.maxX,
+        bounds.maxZ,
       ),
       roadBlendWidth: 0.5,
       tileSize: ws.tileSize,
       terrainSurface: ws.getTerrainSurfaceForRegion(
-        node.centerX - half - normalHalo,
-        node.centerZ - half - normalHalo,
-        node.centerX + half + normalHalo,
-        node.centerZ + half + normalHalo,
+        bounds.minX - normalHalo,
+        bounds.minZ - normalHalo,
+        bounds.maxX + normalHalo,
+        bounds.maxZ + normalHalo,
       ),
-    };
+    });
   }
 
   private createWorkerTicket(
-    node: TerrainQuadNode,
+    source: GrassWorkSource,
     key: string,
     lodLevel: number,
     isLodSwap: boolean,
   ): GrassWorkerTicket {
+    const work = this.resolveWorkUnit(source);
+    const { node } = work;
+    if (key !== work.key) throw new Error("Grass work unit key mismatch");
     const surface = this.getRenderedSurface(node);
     if (
       !surface ||
@@ -1430,12 +1708,11 @@ export class GrassVisualManager implements QuadTreeListener {
       throw new Error("Grass requires the current retained terrain surface");
     let grounding: GrassWorkerTicket["grounding"];
     if (this.compactMeadow) {
-      const half = node.halfSize + this.groundingHalo;
       const bounds = Object.freeze({
-        minX: node.centerX - half,
-        maxX: node.centerX + half,
-        minZ: node.centerZ - half,
-        maxZ: node.centerZ + half,
+        minX: work.bounds.minX - this.groundingHalo,
+        maxX: work.bounds.maxX + this.groundingHalo,
+        minZ: work.bounds.minZ - this.groundingHalo,
+        maxZ: work.bounds.maxZ + this.groundingHalo,
       });
       let inputs: GrassGroundingInputLease | null = null,
         error: unknown = null;
@@ -1450,6 +1727,7 @@ export class GrassVisualManager implements QuadTreeListener {
     }
     const ticket = Object.freeze({
       node,
+      work,
       key,
       lodLevel,
       isLodSwap,
@@ -1461,7 +1739,11 @@ export class GrassVisualManager implements QuadTreeListener {
   }
 
   private isCurrentWorkerTicket(ticket: GrassWorkerTicket): boolean {
-    return !this.destroyed && this.workerInflight.get(ticket.key) === ticket;
+    return (
+      !this.destroyed &&
+      this.workerInflight.get(ticket.key) === ticket &&
+      this.liveWorkUnits.get(ticket.key) === ticket.work
+    );
   }
 
   private settleWorkerResult(
@@ -1477,12 +1759,13 @@ export class GrassVisualManager implements QuadTreeListener {
       this.pendingLodSwap.delete(ticket.key);
       return;
     }
-    if (!this.isNodeInGrassHorizon(ticket.node)) {
+    if (!this.isNodeInGrassHorizon(ticket.work)) {
       this.workerInflight.delete(ticket.key);
       this.pendingLodSwap.delete(ticket.key);
       return;
     }
     this.assertWorkerProfileIdentity(output);
+    this.assertPlacementCell(output, ticket.work);
     if (output.chunkKey !== ticket.key) {
       throw new Error("Grass visual result chunk key mismatch");
     }
@@ -1499,31 +1782,36 @@ export class GrassVisualManager implements QuadTreeListener {
     );
     if (
       !ticket.isLodSwap &&
-      this.isNodeInGrassHorizon(ticket.node) &&
+      this.isNodeInGrassHorizon(ticket.work) &&
       !this.chunks.has(ticket.key) &&
-      !this.pendingNodes.some((entry) => entry.node === ticket.node)
+      !this.pendingNodes.some((entry) => entry.work === ticket.work)
     ) {
-      this.pendingNodes.push({ node: ticket.node });
+      this.pendingNodes.push({ node: ticket.node, work: ticket.work });
     }
   }
 
   private dispatchWorkerRequest(
-    node: TerrainQuadNode,
+    source: GrassWorkSource,
     key: string,
     lodLevel: number,
     isLodSwap: boolean,
   ): void {
-    if (!this.isNodeInGrassHorizon(node) || this.workerInflight.has(key))
+    const work = this.resolveWorkUnit(source);
+    const { node } = work;
+    if (!this.isNodeInGrassHorizon(work) || this.workerInflight.has(key))
       return;
     if (!this.getRenderedSurface(node)) return;
     const pool = getGrassWorkerPool()!;
-    const input = this.createWorkerInput(node, key, lodLevel);
-    const ticket = this.createWorkerTicket(node, key, lodLevel, isLodSwap);
+    const input = this.createWorkerInput(work, key, lodLevel);
+    const ticket = this.createWorkerTicket(work, key, lodLevel, isLodSwap);
     try {
       pool
         .execute(input)
         .then((output: GrassWorkerOutput) =>
-          this.settleWorkerResult(ticket, output),
+          this.settleWorkerResult(
+            ticket,
+            admitGrassWorkerPlacementResult(output, input),
+          ),
         )
         .catch((error: unknown) => this.rejectWorkerResult(ticket, error));
     } catch (error) {
@@ -1540,15 +1828,19 @@ export class GrassVisualManager implements QuadTreeListener {
   }
 
   private createChunkMeshFromWorkerData(
-    node: TerrainQuadNode,
+    source: GrassWorkSource,
     data: GrassWorkerOutput,
     lodLevel: number,
     grounding: GrassGrounding,
     blades?: Extract<GrassBladeGroundingResult, { status: "ready" }>,
   ): void {
+    const work = this.resolveWorkUnit(source);
+    const { node } = work;
     this.assertWorkerProfileIdentity(data);
-    if (!this.isNodeInGrassHorizon(node)) return;
+    this.assertPlacementCell(data, work);
+    if (!this.isNodeInGrassHorizon(work)) return;
     const key = data.chunkKey;
+    if (key !== work.key) throw new Error("Grass work unit key mismatch");
     if (this.chunks.has(key)) return;
     if (data.count === 0) return;
     if (
@@ -1627,6 +1919,9 @@ export class GrassVisualManager implements QuadTreeListener {
             }
           : {}),
         grassAppearance: this.meadowAppearance?.id ?? "legacy-blades-v1",
+        ...(work.placementCell
+          ? { grassPlacementCell: work.placementCell }
+          : {}),
       };
 
       const identity = new THREE.Matrix4();
@@ -1658,7 +1953,14 @@ export class GrassVisualManager implements QuadTreeListener {
         );
 
       this.container.add(mesh);
-      this.chunks.set(key, { nodeId: node.id, mesh, box, lodLevel, node });
+      this.chunks.set(key, {
+        nodeId: node.id,
+        mesh,
+        box,
+        lodLevel,
+        node,
+        work,
+      });
     } catch (error) {
       mesh?.removeFromParent();
       geo.dispose();
@@ -1689,7 +1991,7 @@ export class GrassVisualManager implements QuadTreeListener {
         this.pendingLodSwap.delete(ticket.key);
         continue;
       }
-      if (!this.isNodeInGrassHorizon(ticket.node)) {
+      if (!this.isNodeInGrassHorizon(ticket.work)) {
         this.workerInflight.delete(ticket.key);
         this.pendingLodSwap.delete(ticket.key);
         this.completedNodes.delete(ticket.key);
@@ -1699,6 +2001,7 @@ export class GrassVisualManager implements QuadTreeListener {
 
       try {
         this.assertWorkerProfileIdentity(result.data);
+        this.assertPlacementCell(result.data, ticket.work);
         if (result.data.chunkKey !== ticket.key) {
           throw new Error("Grass visual result chunk key mismatch");
         }
@@ -1711,6 +2014,11 @@ export class GrassVisualManager implements QuadTreeListener {
         continue;
       }
 
+      if (this.compactMeadow && !this.isTicketLodCurrent(ticket)) {
+        this.workerInflight.delete(ticket.key);
+        this.pendingLodSwap.delete(ticket.key);
+        continue;
+      }
       if (this.compactMeadow) {
         this.workerInflight.delete(ticket.key);
         this.beginGroundingJob(ticket, result.data);
@@ -1720,7 +2028,7 @@ export class GrassVisualManager implements QuadTreeListener {
       this.workerInflight.delete(ticket.key);
       const latest = this.pendingLodSwap.get(ticket.key);
       const currentLod = ticket.isLodSwap
-        ? this.getLodLevel(ticket.node)
+        ? this.getLodLevel(ticket.work)
         : ticket.lodLevel;
       if (
         ticket.isLodSwap &&
@@ -1735,6 +2043,7 @@ export class GrassVisualManager implements QuadTreeListener {
         } else {
           this.pendingLodSwap.set(ticket.key, {
             node: ticket.node,
+            work: ticket.work,
             desiredLod: currentLod,
           });
         }
@@ -1772,7 +2081,7 @@ export class GrassVisualManager implements QuadTreeListener {
         continue;
       }
       this.createChunkMeshFromWorkerData(
-        ticket.node,
+        ticket.work,
         projected,
         ticket.lodLevel,
         projected.grounding,
@@ -1785,10 +2094,15 @@ export class GrassVisualManager implements QuadTreeListener {
 
   onNodeDestroyGeometry(node: TerrainQuadNode): void {
     const key = this.chunkKey(node);
-    this.liveNodes.delete(key);
-    this.retireGrassWork(key);
+    if (this.liveNodes.get(key) === node) this.liveNodes.delete(key);
+    for (const work of this.nodeWorkUnits.get(node) ?? []) {
+      if (this.liveWorkUnits.get(work.key) !== work) continue;
+      this.liveWorkUnits.delete(work.key);
+      this.retireGrassWork(work.key);
+    }
+    this.nodeWorkUnits.delete(node);
     this.settledWorkerResults = this.settledWorkerResults.filter(
-      (entry) => entry.ticket.key !== key,
+      (entry) => entry.ticket.node !== node,
     );
     this.pendingNodes = this.pendingNodes.filter(
       (entry) => entry.node !== node,
@@ -1802,8 +2116,11 @@ export class GrassVisualManager implements QuadTreeListener {
     this.settledWorkerResults.length = 0;
     this.workerInflight.clear();
     this.liveNodes.clear();
+    this.liveWorkUnits.clear();
+    this.nodeWorkUnits.clear();
     this.completedNodes.clear();
     this.completedSurfaces.clear();
+    this.completedLods.clear();
     for (const entry of this.groundingJobs.values()) entry.job.cancel();
     this.groundingJobs.clear();
     this.completedGrounding.clear();
@@ -1820,15 +2137,7 @@ export class GrassVisualManager implements QuadTreeListener {
    */
   rebuildAllChunks(): void {
     if (this.destroyed) return;
-    const nodes = new Map(this.completedNodes);
-    for (const [key, entry] of this.groundingJobs)
-      nodes.set(key, entry.ticket.node);
-    for (const [key, ticket] of this.workerInflight)
-      nodes.set(key, ticket.node);
-    for (const entry of this.pendingNodes)
-      nodes.set(this.chunkKey(entry.node), entry.node);
-    for (const [key, chunk] of this.chunks) {
-      nodes.set(key, chunk.node);
+    for (const key of this.chunks.keys()) {
       this.retireGrassChunk(key);
     }
     for (const entry of this.groundingJobs.values()) entry.job.cancel();
@@ -1836,13 +2145,14 @@ export class GrassVisualManager implements QuadTreeListener {
     this.completedGrounding.clear();
     this.completedNodes.clear();
     this.completedSurfaces.clear();
+    this.completedLods.clear();
     this.workerInflight.clear();
     this.pendingLodSwap.clear();
     this.settledWorkerResults.length = 0;
     this.pendingNodes.length = 0;
-    for (const node of nodes.values()) {
-      if (this.isNodeInGrassHorizon(node)) {
-        this.pendingNodes.push({ node });
+    for (const work of this.liveWorkUnits.values()) {
+      if (this.isNodeInGrassHorizon(work)) {
+        this.pendingNodes.push({ node: work.node, work });
       }
     }
   }
@@ -1859,46 +2169,50 @@ export class GrassVisualManager implements QuadTreeListener {
     maxZ: number,
   ): void {
     if (this.destroyed) return;
-    const candidates = new Map(this.completedNodes);
-    for (const [key, entry] of this.groundingJobs)
-      candidates.set(key, entry.ticket.node);
-    for (const [key, chunk] of this.chunks) candidates.set(key, chunk.node);
-    // Pending work may have no mesh/completed record yet. It still sampled the
-    // old surface and must lose ownership before replacement work can begin.
-    for (const [key, ticket] of this.workerInflight)
-      candidates.set(key, ticket.node);
-    for (const entry of this.pendingNodes)
-      candidates.set(this.chunkKey(entry.node), entry.node);
-
     const affectedKeys = new Set<string>();
-    const toRebuild: TerrainQuadNode[] = [];
-    for (const [key, node] of candidates) {
-      const half =
-        node.halfSize +
-        Math.max(GRASS_SURFACE_NORMAL_SAMPLE_DISTANCE, this.groundingHalo);
+    const toRebuild: GrassWorkUnit[] = [];
+    for (const [key, work] of this.liveWorkUnits) {
+      const halo = Math.max(
+        GRASS_SURFACE_NORMAL_SAMPLE_DISTANCE,
+        this.groundingHalo,
+      );
       if (
-        node.centerX + half < minX ||
-        node.centerX - half > maxX ||
-        node.centerZ + half < minZ ||
-        node.centerZ - half > maxZ
+        work.bounds.maxX + halo < minX ||
+        work.bounds.minX - halo > maxX ||
+        work.bounds.maxZ + halo < minZ ||
+        work.bounds.minZ - halo > maxZ
       )
         continue;
       affectedKeys.add(key);
       this.retireGrassWork(key);
-      if (this.isNodeInGrassHorizon(node)) toRebuild.push(node);
+      if (this.isNodeInGrassHorizon(work)) toRebuild.push(work);
     }
     this.settledWorkerResults = this.settledWorkerResults.filter(
       (entry) => !affectedKeys.has(entry.ticket.key),
     );
     this.pendingNodes = this.pendingNodes.filter(
-      (entry) => !affectedKeys.has(this.chunkKey(entry.node)),
+      (entry) =>
+        !affectedKeys.has((entry.work ?? this.resolveWorkUnit(entry.node)).key),
     );
-    for (const node of toRebuild) this.pendingNodes.push({ node });
+    for (const work of toRebuild)
+      this.pendingNodes.push({ node: work.node, work });
   }
 
   // -- LOD helpers -----------------------------------------------------------
 
-  private getLodLevel(node: TerrainQuadNode): number {
+  private getLodLevel(source: GrassWorkSource): number {
+    const work = this.resolveWorkUnit(source);
+    if (this.fineMeadow) {
+      // Cell coordinates are authored in the terrain frame. Unsupported parent
+      // transforms must not accidentally choose coarser geometry; actual bounds
+      // still use the transformed per-pass frustum hook below.
+      if (this.fineLodRequiresHero()) return 0;
+      return this.workDistanceSquared(work, this.lodFocusX, this.lodFocusZ) <
+        40 * 40
+        ? 0
+        : 1;
+    }
+    const { node } = work;
     const dx = node.centerX - this.playerX;
     const dz = node.centerZ - this.playerZ;
     const dist = Math.sqrt(dx * dx + dz * dz);
@@ -1912,12 +2226,14 @@ export class GrassVisualManager implements QuadTreeListener {
   // -- Chunk mesh creation --------------------------------------------------
 
   private createChunkMesh(
-    node: TerrainQuadNode,
+    source: GrassWorkSource,
     lodLevel?: number,
     replace = false,
   ): void {
-    if (!this.isNodeInGrassHorizon(node)) return;
-    const key = this.chunkKey(node);
+    const work = this.resolveWorkUnit(source);
+    const { node } = work;
+    if (!this.isNodeInGrassHorizon(work)) return;
+    const key = work.key;
     if (this.chunks.has(key) && !replace) return;
     const surface = this.getRenderedSurface(node);
     if (!surface) return;
@@ -1926,11 +2242,11 @@ export class GrassVisualManager implements QuadTreeListener {
       surface.terrainProfileIdentity !== this.terrainProfileIdentity
     )
       throw new Error("Grass requires the current retained terrain surface");
-    const lod = lodLevel ?? this.getLodLevel(node);
+    const lod = lodLevel ?? this.getLodLevel(work);
     const tier = GRASS_CONFIG.LOD_TIERS[lod];
-    const instanceData = this.generateInstanceData(node, tier.spacingMul);
+    const instanceData = this.generateInstanceData(work, tier.spacingMul);
     if (this.compactMeadow) {
-      const ticket = this.createWorkerTicket(node, key, lod, replace);
+      const ticket = this.createWorkerTicket(work, key, lod, replace);
       this.settleWorkerResult(ticket, {
         count: 0,
         offsets: new Float32Array(0),
@@ -1943,6 +2259,7 @@ export class GrassVisualManager implements QuadTreeListener {
         chunkKey: key,
         terrainProfileIdentity: this.terrainProfileIdentity,
         grassEligibility: this.grassEligibility,
+        ...(work.placementCell ? { placementCell: work.placementCell } : {}),
       });
       return;
     }
@@ -1966,7 +2283,7 @@ export class GrassVisualManager implements QuadTreeListener {
     }
     if (projected?.count)
       this.createChunkMeshFromWorkerData(
-        node,
+        work,
         projected,
         lod,
         projected.grounding,
@@ -1978,7 +2295,7 @@ export class GrassVisualManager implements QuadTreeListener {
   // -- Instance data generation ---------------------------------------------
 
   private generateInstanceData(
-    node: TerrainQuadNode,
+    source: GrassWorkSource,
     spacingMul = 1,
   ): {
     offsets: Float32Array;
@@ -1988,11 +2305,20 @@ export class GrassVisualManager implements QuadTreeListener {
     groundNormals: Float32Array;
     count: number;
   } | null {
-    const spacing = this.clumpSpacing * spacingMul;
-    const maxCount = Math.ceil((node.size * node.size) / (spacing * spacing));
+    const work = this.resolveWorkUnit(source);
+    const { node } = work;
+    const domain = this.placementOperations.resolveDomain({
+      centerX: node.centerX,
+      centerZ: node.centerZ,
+      size: node.size,
+      clumpSpacing: this.clumpSpacing,
+      spacingMul,
+      ...(work.placementCell ? { placementCell: work.placementCell } : {}),
+    });
+    const maxCount = domain.maxCount;
     const rng = mulberry32(
       GRASS_CONFIG.SEED ^
-        ((node.centerX * 374761393 + node.centerZ * 668265263) | 0),
+        ((domain.centerX * 374761393 + domain.centerZ * 668265263) | 0),
     );
 
     const offsets = new Float32Array(maxCount * 3);
@@ -2004,12 +2330,14 @@ export class GrassVisualManager implements QuadTreeListener {
     let count = 0;
 
     for (let i = 0; i < maxCount; i++) {
-      const lx = (rng() - 0.5) * node.size;
-      const lz = (rng() - 0.5) * node.size;
+      const sx = (rng() - 0.5) * domain.size;
+      const sz = (rng() - 0.5) * domain.size;
       const clumpRng = rng();
 
-      const wx = node.centerX + lx;
-      const wz = node.centerZ + lz;
+      const wx = domain.centerX + sx;
+      const wz = domain.centerZ + sz;
+      const lx = work.placementCell ? wx - node.centerX : sx;
+      const lz = work.placementCell ? wz - node.centerZ : sz;
       const ty = this.getHeightAt(wx, wz);
 
       if (ty < this.getWaterSurfaceAt(wx, wz) + 0.1) continue;
@@ -2274,7 +2602,10 @@ export class GrassVisualManager implements QuadTreeListener {
     }
 
     let habitatSoil = null;
-    if (appearance?.id === "natural-tuft-v1") {
+    if (
+      appearance?.id === "natural-tuft-v1" ||
+      appearance?.id === "fine-meadow-v1"
+    ) {
       // This opt-in graph shares its fade and wind between vertex position and
       // smooth normals. Existing appearance graphs above remain unchanged.
       const rawPosition = attribute("position", "vec3");
@@ -2477,6 +2808,184 @@ export class GrassVisualManager implements QuadTreeListener {
   }
 
   // -- Helpers --------------------------------------------------------------
+
+  private workUnitsFor(node: TerrainQuadNode): readonly GrassWorkUnit[] {
+    const previous = this.nodeWorkUnits.get(node);
+    if (previous) return previous;
+    const bounds = Object.freeze({
+      minX: node.centerX - node.halfSize,
+      maxX: node.centerX + node.halfSize,
+      minZ: node.centerZ - node.halfSize,
+      maxZ: node.centerZ + node.halfSize,
+    });
+    const works: GrassWorkUnit[] = [];
+    if (!this.fineMeadow)
+      works.push(Object.freeze({ node, key: this.chunkKey(node), bounds }));
+    else {
+      // Fine cells partition real final leaves exactly. Partial or fabricated
+      // terrain domains would change both deterministic ownership and support.
+      const coordinates = [bounds.minX, bounds.maxX, bounds.minZ, bounds.maxZ];
+      if (
+        node.size < 25 ||
+        node.size > 100 ||
+        coordinates.some((value) => !Number.isSafeInteger(value / 25))
+      )
+        throw new Error(
+          "Fine meadow requires aligned 25m cells in real leaves up to 100m",
+        );
+      for (let indexZ = bounds.minZ / 25; indexZ < bounds.maxZ / 25; indexZ++) {
+        for (
+          let indexX = bounds.minX / 25;
+          indexX < bounds.maxX / 25;
+          indexX++
+        ) {
+          const placementCell = this.placementOperations.validateCell({
+            schemaVersion: 1,
+            size: 25,
+            indexX,
+            indexZ,
+          });
+          this.placementOperations.resolveDomain({
+            centerX: node.centerX,
+            centerZ: node.centerZ,
+            size: node.size,
+            clumpSpacing: this.clumpSpacing,
+            spacingMul: 1,
+            placementCell,
+          });
+          works.push(
+            Object.freeze({
+              node,
+              placementCell,
+              bounds: getGrassPlacementCellBounds(placementCell),
+              key: `gcell_v1_${indexX}_${indexZ}`,
+            }),
+          );
+        }
+      }
+    }
+    const result = Object.freeze(works);
+    this.nodeWorkUnits.set(node, result);
+    return result;
+  }
+
+  private resolveWorkUnit(source: GrassWorkSource): GrassWorkUnit {
+    if ("node" in source) return source;
+    const works = this.workUnitsFor(source);
+    if (works.length !== 1)
+      throw new Error(
+        "Fine meadow requests require an explicit placement cell",
+      );
+    return works[0];
+  }
+
+  private workDistanceSquared(
+    work: GrassWorkUnit,
+    x: number,
+    z: number,
+  ): number {
+    const dx = this.fineMeadow
+      ? Math.max(work.bounds.minX - x, 0, x - work.bounds.maxX)
+      : work.node.centerX - x;
+    const dz = this.fineMeadow
+      ? Math.max(work.bounds.minZ - z, 0, z - work.bounds.maxZ)
+      : work.node.centerZ - z;
+    return dx * dx + dz * dz;
+  }
+
+  private desiredLod(work: GrassWorkUnit): number {
+    if (this.fineMeadow && this.fineLodRequiresHero()) return 0;
+    const raw = this.getLodLevel(work);
+    const chunk = this.chunks.get(work.key);
+    if (!chunk || raw === chunk.lodLevel) return raw;
+    const distance = Math.sqrt(
+      this.workDistanceSquared(
+        work,
+        this.fineMeadow ? this.lodFocusX : this.playerX,
+        this.fineMeadow ? this.lodFocusZ : this.playerZ,
+      ),
+    );
+    const tiers = GRASS_CONFIG.LOD_TIERS;
+    const boundary = this.fineMeadow
+      ? 40
+      : raw < chunk.lodLevel
+        ? tiers[chunk.lodLevel].maxDistance
+        : tiers[raw - 1].maxDistance;
+    const threshold =
+      boundary *
+      (1 +
+        (raw < chunk.lodLevel
+          ? -GRASS_CONFIG.LOD_HYSTERESIS
+          : GRASS_CONFIG.LOD_HYSTERESIS));
+    return (raw < chunk.lodLevel ? distance < threshold : distance > threshold)
+      ? raw
+      : chunk.lodLevel;
+  }
+
+  private isTicketLodCurrent(ticket: GrassWorkerTicket): boolean {
+    if (!this.fineMeadow && !ticket.isLodSwap) return true;
+    return (
+      this.desiredLod(ticket.work) === ticket.lodLevel &&
+      (!ticket.isLodSwap ||
+        this.chunks.get(ticket.key)?.lodLevel !== ticket.lodLevel)
+    );
+  }
+
+  private fineLodRequiresHero(): boolean {
+    return (
+      (this.hasPrimaryView && !this.primaryViewValid) ||
+      !Number.isFinite(this.lodFocusX) ||
+      !Number.isFinite(this.lodFocusZ) ||
+      this.container.matrixWorld.elements.some(
+        (value, index) => value !== (index % 5 === 0 ? 1 : 0),
+      )
+    );
+  }
+
+  private cancelObsoleteLodWork(): void {
+    for (const ticket of this.workerInflight.values()) {
+      if (!this.compactMeadow) continue;
+      if (this.isTicketLodCurrent(ticket)) continue;
+      this.workerInflight.delete(ticket.key);
+      this.pendingLodSwap.delete(ticket.key);
+    }
+    for (const [key, entry] of this.groundingJobs) {
+      if (this.isTicketLodCurrent(entry.ticket)) continue;
+      entry.job.cancel();
+      this.groundingJobs.delete(key);
+      this.pendingLodSwap.delete(key);
+    }
+    if (this.fineMeadow) {
+      // An intent may have lost its dispatch slot, then left the final view.
+      // The visible-chunk loop deliberately skips that view, so only actual
+      // ticket/job ownership may keep a fine LOD intent alive. Visible demand
+      // is re-derived below each update; legacy retry intents stay unchanged.
+      for (const key of this.pendingLodSwap.keys()) {
+        if (!this.workerInflight.has(key) && !this.groundingJobs.has(key))
+          this.pendingLodSwap.delete(key);
+      }
+    }
+    this.settledWorkerResults = this.settledWorkerResults.filter(({ ticket }) =>
+      this.isCurrentWorkerTicket(ticket),
+    );
+  }
+
+  private assertPlacementCell(
+    data: GrassWorkerOutput,
+    work: GrassWorkUnit,
+  ): void {
+    if (!work.placementCell) {
+      if (data.placementCell !== undefined)
+        throw new Error("Unexpected grass placement cell");
+      return;
+    }
+    const cell = this.placementOperations.validateCell(data.placementCell);
+    if (
+      cell.indexX !== work.placementCell.indexX ||
+      cell.indexZ !== work.placementCell.indexZ
+    )
+      throw new Error("Grass visual result placement cell mismatch");
+  }
 
   private chunkKey(node: TerrainQuadNode): string {
     return `gq_${node.id}_d${node.depth}_${node.centerX}_${node.centerZ}`;

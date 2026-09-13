@@ -15,6 +15,8 @@ import {
   COMPACT_MEADOW_APPEARANCE,
   CURVED_MEADOW_APPEARANCE,
   NATURAL_TUFT_APPEARANCE,
+  FINE_MEADOW_APPEARANCE,
+  FINE_MEADOW_GRASS_VISUAL_PROFILE,
   GRASS_CONFIG,
   GrassVisualManager,
   STREAMING_GRASS_VISUAL_PROFILE,
@@ -849,6 +851,209 @@ describe("compact meadow appearance candidate (CPU only)", () => {
       }
     } finally {
       owner.destroy();
+    }
+  });
+});
+
+describe("fine continuous meadow geometry candidate", () => {
+  const fine = () =>
+    manager(
+      FINE_MEADOW_GRASS_VISUAL_PROFILE,
+      SCULPTED_COMPACT_WORLD_TERRAIN_PROFILE,
+      true,
+      FINE_MEADOW_APPEARANCE.id,
+    );
+
+  it("keeps the revised slender leaf and non-emissive albedo contract explicit", () => {
+    expect(FINE_MEADOW_APPEARANCE).toEqual({
+      id: "fine-meadow-v1",
+      BLADE_HEIGHT_MIN: 0.38,
+      BLADE_HEIGHT_MAX: 0.86,
+      BLADE_WIDTH_RATIO: 0.045,
+      BLADE_ARC_RATIO: 0.3,
+      BLADE_CONTROL_HEIGHT: 0.76,
+      BLADE_TIP_HEIGHT: 0.95,
+      BLADE_NORMAL_WEIGHT: 0.2,
+      ROOT_BRIGHTNESS: 0.9,
+      TIP_BRIGHTNESS: 1.2,
+      PROGRESSIVE_ROOTS: true,
+    });
+    const owner = fine();
+    try {
+      const albedo = expand(owner["material"].colorNode!);
+      for (const [height, expected] of [
+        [0, [0.18, 0.36, 0.09]],
+        [0.5, [0.228, 0.429, 0.123]],
+        [1, [0.276, 0.498, 0.156]],
+      ] as const) {
+        const actual = colorValue(albedo, {
+          instanceGroundColor: [0.2, 0.4, 0.1],
+          instanceGrassTint: [0.3, 0.45, 0.2, 0.3],
+          uv: [0.5, height],
+        });
+        actual.forEach((value, i) =>
+          expect(value).toBeCloseTo(expected[i], 12),
+        );
+      }
+      expect(owner["material"].emissive.getHex()).toBe(0);
+    } finally {
+      owner.destroy();
+    }
+  });
+
+  it("uses independent slender roots with deterministic prefix-stable detail tiers", () => {
+    const owner = fine();
+    const repeated = fine();
+    try {
+      const geometries = owner["lodGeometries"];
+      for (let lod = 0; lod < 3; lod++) {
+        const geometry = geometries[lod];
+        const tier = GRASS_CONFIG.LOD_TIERS[lod];
+        const stride = tier.bladeSegments * 2 + 1;
+        const positions = geometry.getAttribute("position");
+        const normals = geometry.getAttribute("normal");
+        expect(positions.count).toBe(tier.bladesPerClump * stride);
+        expect(geometry.index!.count / 3).toBe(
+          tier.bladesPerClump * (tier.bladeSegments * 2 - 1),
+        );
+        expect(Object.keys(geometry.attributes).sort()).toEqual([
+          "normal",
+          "position",
+          "uv",
+        ]);
+        for (const attribute of ["position", "normal", "uv"]) {
+          expect(geometry.attributes[attribute].array).toEqual(
+            repeated["lodGeometries"][lod].attributes[attribute].array,
+          );
+        }
+        const roots: THREE.Vector3[] = [];
+        for (let blade = 0; blade < tier.bladesPerClump; blade++) {
+          const base = blade * stride;
+          const left = new THREE.Vector3().fromBufferAttribute(positions, base);
+          const right = new THREE.Vector3().fromBufferAttribute(
+            positions,
+            base + 1,
+          );
+          const tip = new THREE.Vector3().fromBufferAttribute(
+            positions,
+            base + stride - 1,
+          );
+          const root = left.clone().add(right).multiplyScalar(0.5);
+          roots.push(root);
+          expect(root.y).toBe(0);
+          expect(tip.y).toBeGreaterThanOrEqual(
+            FINE_MEADOW_APPEARANCE.BLADE_HEIGHT_MIN *
+              FINE_MEADOW_APPEARANCE.BLADE_TIP_HEIGHT -
+              1e-7,
+          );
+          expect(tip.y).toBeLessThanOrEqual(
+            FINE_MEADOW_APPEARANCE.BLADE_HEIGHT_MAX *
+              FINE_MEADOW_APPEARANCE.BLADE_TIP_HEIGHT +
+              1e-7,
+          );
+          expect(
+            left.distanceTo(right) /
+              (tip.y / FINE_MEADOW_APPEARANCE.BLADE_TIP_HEIGHT),
+          ).toBeCloseTo(FINE_MEADOW_APPEARANCE.BLADE_WIDTH_RATIO, 6);
+          for (let vertex = base; vertex < base + stride; vertex++) {
+            const normal = new THREE.Vector3().fromBufferAttribute(
+              normals,
+              vertex,
+            );
+            expect(normal.toArray().every(Number.isFinite)).toBe(true);
+            expect(normal.length()).toBeCloseTo(1, 6);
+          }
+          if (lod > 0) {
+            const near = geometries[0];
+            const nearBase = blade * 7;
+            for (const [currentVertex, nearVertex] of [
+              [base, nearBase],
+              [base + 1, nearBase + 1],
+              [base + stride - 1, nearBase + 6],
+            ]) {
+              for (const attribute of ["position", "normal"]) {
+                expect(
+                  new THREE.Vector3()
+                    .fromBufferAttribute(
+                      geometry.attributes[attribute],
+                      currentVertex,
+                    )
+                    .toArray(),
+                ).toEqual(
+                  new THREE.Vector3()
+                    .fromBufferAttribute(near.attributes[attribute], nearVertex)
+                    .toArray(),
+                );
+              }
+            }
+          }
+        }
+        // Each tier covers the clump disk, rather than retaining only short
+        // stems clustered at its center when detail is reduced.
+        expect(Math.max(...roots.map((root) => root.length()))).toBeGreaterThan(
+          0.58,
+        );
+        expect(roots.some((root) => root.x > 0.2)).toBe(true);
+        expect(roots.some((root) => root.x < -0.2)).toBe(true);
+        expect(
+          new Set(roots.map((root) => root.toArray().join(","))).size,
+        ).toBe(roots.length);
+      }
+    } finally {
+      owner.destroy();
+      repeated.destroy();
+    }
+  });
+
+  it("keeps the candidate explicit, opaque and within existing material layout", () => {
+    const owner = fine();
+    const legacyBefore = manager(DENSE_MEADOW_GRASS_VISUAL_PROFILE);
+    const legacyAfter = manager(DENSE_MEADOW_GRASS_VISUAL_PROFILE);
+    try {
+      expect(owner.getProfileReceipt()).toMatchObject({
+        profileId: "fine-meadow-v1",
+        eligibility: "compact-pbr-v1",
+        minimumLodLevel: 0,
+        clumpSpacing: 0.7,
+        maxRenderDistance: 140,
+        maxChunksPerFrame: 1,
+        castShadow: false,
+        placement: {
+          mode: "world-cells-v1",
+          cellSize: 25,
+          nearLodDistance: 40,
+        },
+      });
+      const material = owner["material"];
+      expect(material.name).toBe("fine-meadow-v1");
+      expect(material.transparent).toBe(false);
+      expect(material.depthWrite).toBe(true);
+      expect(material.side).toBe(THREE.DoubleSide);
+      expect(material.map).toBeNull();
+      expect(material.normalMap).toBeNull();
+      expect(material.emissive.getHex()).toBe(0);
+      for (const root of [
+        material.positionNode!,
+        material.normalNode!,
+        material.colorNode!,
+      ])
+        expect(
+          [...graph(root)].some(
+            (n) => Reflect.get(n, "isTextureNode") === true,
+          ),
+        ).toBe(false);
+      for (let lod = 0; lod < 3; lod++) {
+        for (const attribute of ["position", "normal", "uv"])
+          expect(
+            legacyAfter["lodGeometries"][lod].attributes[attribute].array,
+          ).toEqual(
+            legacyBefore["lodGeometries"][lod].attributes[attribute].array,
+          );
+      }
+    } finally {
+      owner.destroy();
+      legacyBefore.destroy();
+      legacyAfter.destroy();
     }
   });
 });

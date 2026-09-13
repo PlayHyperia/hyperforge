@@ -4,9 +4,15 @@ import { World } from "../../../../core/World";
 import { ALL_WORLD_AREAS } from "../../../../data/world-areas";
 import {
   GRASS_WORKER_CODE,
+  admitGrassWorkerPlacementResult,
+  prepareGrassWorkerRequest,
   type GrassWorkerInput,
   type GrassWorkerOutput,
 } from "../../../../utils/workers/GrassWorker";
+import {
+  getGrassPlacementCellBounds,
+  type GrassPlacementCell,
+} from "../../../../utils/workers/GrassPlacementCell";
 import {
   createGrassTerrainSurfaceSnapshot,
   type GrassTerrainSurfaceZone,
@@ -51,7 +57,7 @@ type TransferReceipt = {
 };
 
 /** Production worker code; only browser message transport is adapted to Node. */
-function actualWorker() {
+function actualWorker(source = GRASS_WORKER_CODE) {
   const worker = new Worker(
     `
     const { parentPort } = require("node:worker_threads");
@@ -63,7 +69,7 @@ function actualWorker() {
         before, unique, after: transfers.map(buffer => buffer.byteLength)
       } });
     } };
-    ${GRASS_WORKER_CODE}
+    ${source}
     parentPort.on("message", data => self.onmessage({ data }));
   `,
     { eval: true, env: {} },
@@ -73,6 +79,7 @@ function actualWorker() {
       return new Promise((resolve, reject) => {
         let result: GrassWorkerOutput | undefined;
         let receipt: TransferReceipt | undefined;
+        let reportedError: Error | undefined;
         const timeout = setTimeout(
           () => finish(new Error("Actual grass worker timed out")),
           10000,
@@ -83,9 +90,12 @@ function actualWorker() {
           error?: string;
           receipt?: TransferReceipt;
         }) => {
-          if (message.error) return finish(new Error(message.error));
+          if (message.error) reportedError = new Error(message.error);
           if (message.result) result = message.result;
           if (message.receipt) receipt = message.receipt;
+          // Error messages also have a real transport receipt. Drain that
+          // message before reusing this worker for the next independent job.
+          if (reportedError && receipt) return finish(reportedError);
           if (!result || !receipt) return;
           try {
             expect(receipt.unique).toBe(result.count ? 5 : 0);
@@ -121,6 +131,56 @@ function actualWorker() {
     },
     close: () => worker.terminate(),
   };
+}
+
+/** Retain the changed generation statements from pre-cell commit a1b40b288
+ * (GrassWorker.ts SHA256 71dae8d208c6fa8087aa0b91a5238830b25bb9c001df6ab28b448277bef74b2e).
+ * Both real workers use the same current terrain/color functions; this control
+ * proves omission preserves the old sampling/RNG/output behavior, not that all
+ * historical terrain dependencies or native GPU results are unchanged. */
+function preCellSamplingWorker() {
+  let source = GRASS_WORKER_CODE;
+  const replacements = [
+    [
+      "  var placementDomain = placementCellOperations.resolveDomain(input);\n",
+      "",
+    ],
+    [
+      "  var maxCount = placementDomain.maxCount;",
+      "  var maxCount = Math.ceil((size * size) / (spacing * spacing));",
+    ],
+    [
+      "((placementDomain.centerX * 374761393 + placementDomain.centerZ * 668265263) | 0)",
+      "((centerX * 374761393 + centerZ * 668265263) | 0)",
+    ],
+    [
+      "var lx = (rng() - 0.5) * placementDomain.size;",
+      "var lx = (rng() - 0.5) * size;",
+    ],
+    [
+      "var lz = (rng() - 0.5) * placementDomain.size;",
+      "var lz = (rng() - 0.5) * size;",
+    ],
+    [
+      `    if (placementDomain.placementCell) {
+      wx = placementDomain.centerX + lx;
+      wz = placementDomain.centerZ + lz;
+      // Grounding and GPU placement retain the real terrain leaf's local frame.
+      lx = wx - centerX;
+      lz = wz - centerZ;
+    }\n`,
+      "",
+    ],
+  ];
+  for (const [current, previous] of replacements) {
+    expect(source.split(current)).toHaveLength(2);
+    source = source.replace(current, previous);
+  }
+  const echo =
+    "...(placementDomain.placementCell ? { placementCell: placementCellOperations.validateCell(placementDomain.placementCell) } : {}),";
+  expect(source.split(echo)).toHaveLength(3);
+  source = source.replaceAll(echo, "");
+  return actualWorker(source);
 }
 
 async function withTerrain(
@@ -256,6 +316,191 @@ function broadGrade(): GrassTerrainSurfaceZone {
 }
 
 describe("actual authored-surface grass worker", () => {
+  it("keeps all five legacy arrays byte-exact against the real pre-cell sampling statements", async () => {
+    await withTerrain(async (terrain, internals, worker) => {
+      internals.loadWaterBodiesFromManifest();
+      internals.loadFlatZonesFromManifest();
+      const previous = preCellSamplingWorker();
+      try {
+        for (const [x, z] of [
+          [350, 350],
+          [280, 340],
+          [350, 450],
+        ]) {
+          const input = {
+            ...request(terrain, internals, x, z, 8),
+            clumpSpacing: 0.7,
+          };
+          const before = await previous.run(input);
+          const after = await worker.run(input);
+          expect(after.count).toBe(before.count);
+          expect(Object.keys(after)).toEqual(Object.keys(before));
+          for (const key of Object.keys(
+            attributes,
+          ) as (keyof typeof attributes)[])
+            expect(
+              new Uint8Array(
+                after[key].buffer,
+                after[key].byteOffset,
+                after[key].byteLength,
+              ),
+            ).toEqual(
+              new Uint8Array(
+                before[key].buffer,
+                before[key].byteOffset,
+                before[key].byteLength,
+              ),
+            );
+        }
+      } finally {
+        await previous.close();
+      }
+    });
+  });
+
+  it("samples all sixteen grass cells in the real terrain leaf frame, with identical LOD0/1 placement and actual terrain parity", async () => {
+    await withTerrain(async (terrain, internals, worker) => {
+      internals.loadWaterBodiesFromManifest();
+      internals.loadFlatZonesFromManifest();
+      const setup = internals.buildGrassWorkerSetup();
+      const base = request(terrain, internals, 350, 350, 100);
+      const seen = new Set<string>();
+      let total = 0;
+      for (let x = 12; x < 16; x++)
+        for (let z = 12; z < 16; z++) {
+          const cell: GrassPlacementCell = {
+            schemaVersion: 1,
+            size: 25,
+            indexX: x,
+            indexZ: z,
+          };
+          const bounds = getGrassPlacementCellBounds(cell);
+          const input: GrassWorkerInput = {
+            ...base,
+            placementCell: cell,
+            chunkKey: `cell_${x}_${z}_lod0`,
+            clumpSpacing: 0.7,
+            grassEligibility: "compact-pbr-v1",
+            compactPlantingLobes: setup.compactPlantingLobes,
+            grassConfigs: setup.grassConfigs,
+            roadBlendWidth: 0.5,
+            roadSegments: setup.getRoadSegmentsForRegion(
+              bounds.minX,
+              bounds.minZ,
+              bounds.maxX,
+              bounds.maxZ,
+            ),
+            terrainSurface: setup.getTerrainSurfaceForRegion(
+              bounds.minX - 0.5,
+              bounds.minZ - 0.5,
+              bounds.maxX + 0.5,
+              bounds.maxZ + 0.5,
+            ),
+          };
+          const near = await worker.run(input);
+          const middle = await worker.run({
+            ...input,
+            chunkKey: `cell_${x}_${z}_lod1`,
+            spacingMul: 1,
+          });
+          expect(near.placementCell).toEqual(cell);
+          expect(near.placementCell).not.toBe(cell);
+          expect(near.count).toBeLessThanOrEqual(1276);
+          expect(near.count).toBe(middle.count);
+          for (const key of Object.keys(
+            attributes,
+          ) as (keyof typeof attributes)[])
+            expect(near[key]).toEqual(middle[key]);
+          assertSurfaceParity(input, near, internals);
+          for (const point of points(input, near)) {
+            expect(point.x).toBeGreaterThanOrEqual(bounds.minX);
+            expect(point.x).toBeLessThanOrEqual(bounds.maxX);
+            expect(point.z).toBeGreaterThanOrEqual(bounds.minZ);
+            expect(point.z).toBeLessThanOrEqual(bounds.maxZ);
+            const key = `${point.x},${point.z}`;
+            expect(seen.has(key)).toBe(false);
+            seen.add(key);
+          }
+          total += near.count;
+        }
+      expect(total).toBeGreaterThan(1000);
+      expect(seen.size).toBe(total);
+    });
+  }, 30000);
+
+  it("detaches actual queue and result cells and rejects corrupted emitted requests or echoed domains", async () => {
+    await withTerrain(async (terrain, internals, worker) => {
+      internals.loadWaterBodiesFromManifest();
+      internals.loadFlatZonesFromManifest();
+      const mutable = {
+        schemaVersion: 1 as const,
+        size: 25 as const,
+        indexX: 14,
+        indexZ: 14,
+      };
+      const input = {
+        ...request(terrain, internals, 350, 350, 100),
+        clumpSpacing: 0.7,
+        placementCell: mutable,
+      };
+      const queued = prepareGrassWorkerRequest(input);
+      expect(queued.placementCell).not.toBe(mutable);
+      expect(Object.isFrozen(queued.placementCell)).toBe(true);
+      expect(queued.terrainSurface).not.toBe(input.terrainSurface);
+      expect(queued.terrainSurface.zones[0]).not.toBe(
+        input.terrainSurface.zones[0],
+      );
+      mutable.indexX = 15;
+      expect(queued.placementCell?.indexX).toBe(14);
+      const result = await worker.run(queued);
+      const admitted = admitGrassWorkerPlacementResult(result, queued);
+      expect(admitted.placementCell).toEqual(queued.placementCell);
+      expect(admitted.placementCell).not.toBe(result.placementCell);
+      expect(admitted.placementCell).not.toBe(queued.placementCell);
+      expect(Object.isFrozen(admitted.placementCell)).toBe(true);
+      for (const bad of [
+        { ...queued, placementCell: { ...queued.placementCell!, indexX: 16 } },
+        {
+          ...queued,
+          placementCell: { ...queued.placementCell!, indexX: Infinity },
+        },
+        { ...queued, placementCell: { ...queued.placementCell!, extra: true } },
+        { ...queued, clumpSpacing: 0.1 },
+      ]) {
+        expect(() => prepareGrassWorkerRequest(bad)).toThrow(
+          "Invalid grass placement cell",
+        );
+        await expect(worker.run(bad)).rejects.toThrow(
+          "Invalid grass placement cell",
+        );
+      }
+      expect(() =>
+        admitGrassWorkerPlacementResult(
+          {
+            ...result,
+            placementCell: { ...queued.placementCell!, indexX: 15 },
+          },
+          queued,
+        ),
+      ).toThrow("placement cell mismatch");
+      const { placementCell: _cell, ...missing } = result;
+      expect(() => admitGrassWorkerPlacementResult(missing, queued)).toThrow(
+        "Invalid grass placement cell",
+      );
+      expect(() =>
+        admitGrassWorkerPlacementResult(result, {
+          ...queued,
+          placementCell: undefined,
+        }),
+      ).toThrow("Unexpected grass worker placement cell");
+      const legacy = await worker.run({
+        ...request(terrain, internals, 350, 350, 4),
+        clumpSpacing: 0.7,
+      });
+      expect(Object.hasOwn(legacy, "placementCell")).toBe(false);
+    });
+  });
+
   it("matches ridge macro colours in actual main/worker grass without changing height, normal or ecology", async () => {
     await withTerrain(async (terrain, internals, worker) => {
       internals.loadWaterBodiesFromManifest();

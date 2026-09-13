@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { MeshStandardNodeMaterial, StorageBufferAttribute } from "three/webgpu";
-import { uniform, vec3 } from "three/tsl";
+import { instanceIndex, uniform, vec3, vertexIndex } from "three/tsl";
 import type Node from "three/src/nodes/core/Node.js";
 import type StorageBufferNode from "three/src/nodes/accessors/StorageBufferNode.js";
 import THREE from "../../../../extras/three/three";
@@ -17,6 +17,38 @@ function drain<T>(steps: Generator<string, T, void>): T {
   let step = steps.next();
   while (!step.done) step = steps.next();
   return step.value;
+}
+
+/** Inspect the actual constructed TSL address. Integer division mirrors the
+ * uint operands here; this deliberately does not claim native GPU execution. */
+function storageAddress(node: Node, instance: number, vertex: number): number {
+  if (node === instanceIndex) return instance;
+  if (node === vertexIndex) return vertex;
+  const value: unknown = Reflect.get(node, "value");
+  if (node.type === "ConstNode" && Number.isSafeInteger(value))
+    return value as number;
+  const child = (name: string): number => {
+    const next: unknown = Reflect.get(node, name);
+    if (!(next instanceof THREE.Node))
+      throw new Error(`Unexpected ${name} on ${node.type}`);
+    return storageAddress(next, instance, vertex);
+  };
+  if (node.type === "ConvertNode" || node.type === "VarNode")
+    return child("node");
+  if (node.type !== "OperatorNode")
+    throw new Error(`Unexpected grass address node ${node.type}`);
+  const a = child("aNode"),
+    b = child("bNode");
+  switch (Reflect.get(node, "op")) {
+    case "+":
+      return a + b;
+    case "*":
+      return a * b;
+    case "/":
+      return Math.floor(a / b);
+    default:
+      throw new Error("Unexpected grass address operation");
+  }
 }
 
 describe("real Three grounding bindings and provenance (not a GPU test)", () => {
@@ -143,6 +175,99 @@ describe("real Three grounding bindings and provenance (not a GPU test)", () => 
       base.dispose();
     }
   });
+
+  it.each([
+    { lod: 0, blades: 24, vertices: 7, count: 1276 },
+    { lod: 1, blades: 12, vertices: 5, count: 1276 },
+    { lod: 0, blades: 24, vertices: 7, count: 4096 },
+    { lod: 1, blades: 12, vertices: 5, count: 4096 },
+  ])(
+    "keeps LOD$lod count$count correction capacity and every boundary address exact",
+    ({ lod, blades, vertices, count }) => {
+      // 1,276 is the complete proposed 25 m/.7 m candidate quota, not an
+      // accepted-population claim. The existing 4,096 hard cap stays unchanged.
+      expect(Math.ceil(25 ** 2 / 0.7 ** 2)).toBe(1276);
+      const base = new MeshStandardNodeMaterial(),
+        geometry = new THREE.BufferGeometry();
+      base.positionNode = vec3(1, 2, 3);
+      geometry.setAttribute(
+        "position",
+        new THREE.BufferAttribute(new Float32Array(blades * vertices * 3), 3),
+      );
+      let material: MeshStandardNodeMaterial | undefined;
+      try {
+        // Reject cross-tier correction layouts before publishing any binding.
+        const otherBlades = lod === 0 ? 12 : 24;
+        expect(() =>
+          createGroundedGrassMaterial(
+            base,
+            geometry,
+            new Float32Array(count * otherBlades * 2),
+            count,
+            lod,
+          ),
+        ).toThrow("Invalid grounded grass binding");
+        expect(geometry.hasAttribute(GRASS_ROOT_STORAGE_ATTRIBUTE)).toBe(false);
+        expect(() =>
+          createGroundedGrassMaterial(
+            base,
+            geometry,
+            new Float32Array(4097 * blades * 2),
+            4097,
+            lod,
+          ),
+        ).toThrow("Invalid grounded grass binding");
+        expect(geometry.hasAttribute(GRASS_ROOT_STORAGE_ATTRIBUTE)).toBe(false);
+
+        const deltas = Float32Array.from(
+          { length: count * blades * 2 },
+          (_, i) => (i % 1024) / 1024,
+        );
+        material = createGroundedGrassMaterial(
+          base,
+          geometry,
+          deltas,
+          count,
+          lod,
+        );
+        const binding = geometry.getAttribute(GRASS_ROOT_STORAGE_ATTRIBUTE);
+        expect(binding).toBeInstanceOf(StorageBufferAttribute);
+        expect(binding.itemSize).toBe(2);
+        expect(binding.count).toBe(count * blades);
+        expect(binding.array).toBe(deltas);
+        expect(binding.array.byteLength).toBe(count * blades * 8);
+        const accesses = new Set<Node>();
+        material.positionNode!.traverse((node) => {
+          if (
+            Reflect.get(node, "isArrayElementNode") === true &&
+            Reflect.get(Reflect.get(node, "node"), "value") === binding
+          )
+            accesses.add(node);
+        });
+        expect(accesses.size).toBe(1);
+        const address: unknown = Reflect.get([...accesses][0], "indexNode");
+        if (!(address instanceof THREE.Node))
+          throw new Error("Missing actual root storage address");
+        for (const instance of [0, 1, count - 1])
+          for (let vertex = 0; vertex < blades * vertices; vertex++) {
+            const actual = storageAddress(address, instance, vertex);
+            expect(actual).toBe(
+              instance * blades + Math.floor(vertex / vertices),
+            );
+            expect(actual).toBeGreaterThanOrEqual(0);
+            expect(actual).toBeLessThan(binding.count);
+          }
+        expect(storageAddress(address, count - 1, blades * vertices - 1)).toBe(
+          binding.count - 1,
+        );
+        expect(base.positionNode).not.toBe(material.positionNode);
+      } finally {
+        material?.dispose();
+        geometry.dispose();
+        base.dispose();
+      }
+    },
+  );
 
   it("compacts ecological provenance in admitted order without retaining or changing borrowed arrays", () => {
     const source: GrassGrounding = {

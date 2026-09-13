@@ -1,6 +1,24 @@
 # Duel Arena, Streaming, and Hyperbet Launch Checklist
 
 
+## Fine meadow recovery — native verification in progress, 2026-09-13
+
+- [x] Preserve the user's earlier-game grass reference. Reject sparse dark tufts as the meadow target; recover fine overlapping volume at a shorter height.
+- [x] Implement explicit `island-fine-meadow-720p60-v1` / `grassAppearance=fine-meadow-v1`: .38–.86m slender, gently curved blades, .7m spacing, 25m grass-owned cells borrowing actual terrain, and a 40m near-detail trial with 36/44m hysteresis. Preserve resolution, AA, sun, range, exclusions and existing work limits. Defaults are not promoted.
+- [x] Verify real parent-frame worker parity, detached requests, complete retained-surface grounding, progressive blade geometry, cancellation and existing profiles. Final source passes 361/361 tests across 24 files, three package typechecks/builds, scoped lint and formatting.
+- [x] Fix two actual native integration defects: detail selection must follow the final primary camera, and unstarted LOD intents must retire after camera cuts. Native03 passes these gates; original failed captures remain preserved.
+- [x] Verify actual compiled layouts in native04: all 94 owners, seven-buffer uniform-matrix and eight-buffer attribute-matrix routes, real device capacity, exact shader bindings, unchanged retained terrain and all 48 tree IDs/positions. Earlier failures remain preserved.
+- [x] Capture all eleven native05 views after the appearance refinement, using natural daylight re-admission without forcing time/lights or widening assertions. Overlap/curvature/green improve, but the reference-quality visual gate stays open.
+- [x] Qualify fresh native06 main and known water-reflection pipelines with exact current owner/root identities. Earlier failed/unknown archived fields remain preserved.
+- [ ] Finish motion verification. Native06 then hits the 16MiB habitat checkpoint serialization cap before either video. Preserve the full failed report and repair lossless evidence transport, not the graphics or acceptance limits. Wind and moving LOD video remain unverified.
+- [ ] Reduce measured rendering cost before promotion: native05 GPU-pass-sum p95 is 28.64/28.25ms and CPU p95 21.3/19.5ms (campus/meadow), worse observed tails than the sparse historical capture, not an isolated causal comparison or presented FPS. Preserve quality/population. Investigate removable identity-instance-matrix overhead, then measure; this does not remove triangle/raster cost.
+- [ ] Improve grass/ground/functional-tree shading cohesion at fixed topology/population. Flat olive ribbons, granular exposed turf, uniform distant lawn and cyan-black foliage remain; do not keep adding height or a blanket green gain.
+- [ ] Accept actual close/mid-distance imagery against the reference: continuous eligible coverage, fine silhouettes, cohesive green, flush roots, clear paths and all 48 functional trees.
+- [ ] Verify wind and moving-camera LOD transitions, loading, per-pass draws/geometry, GPU/CPU cost and sustained hardware budgets. Increased density is not free; no visual, AAA or frame-rate approval yet.
+- [ ] Commit/push the scoped verified checkpoint and keep unrelated work untouched.
+- [ ] Harden interrupted-capture recovery with an early durable owned PID/PGID/start-time ledger and explicit process/group absence. The prior interrupted grass run left a CPU-consuming server after SIGTERM; exact ownership was verified, that one process was stopped, and recovery notes corrected. Native03's own processes/groups and ports are independently clear.
+
+Evidence, retained failures and running results: `asset-studio/fine-meadow01/QUALIFICATION.md`. Physical queued-worker backlog remains unobserved; cancelled manager tickets do not prove worker computation stopped.
 ## Grass visual recovery — user reference, 2026-09-13
 
 **Visual acceptance reopened.** The supplied earlier-game image is now the grass art reference. Current `natural-tuft-v1` meadow captures are visibly too sparse and spiky; previous local technical passes do not establish an acceptable meadow. Reference: `asset-studio/haven-architecture01/user-grass-reference01.png`, SHA256 `8dbf756b1c208dde39f72754a348782989830ba8e3a68191e57ee89e4ca22dd0`. Its exact source revision, settings, motion and performance are unknown.

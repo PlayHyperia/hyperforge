@@ -42,6 +42,11 @@ import {
   GRASS_SURFACE_NORMAL_SAMPLE_DISTANCE,
   type GrassTerrainSurfaceSnapshot,
 } from "./GrassTerrainSurfaceSnapshot";
+import {
+  createGrassPlacementCellOperations,
+  type GrassPlacementCell,
+} from "./GrassPlacementCell";
+export type { GrassPlacementCell } from "./GrassPlacementCell";
 
 // ============================================================================
 // TYPES
@@ -71,6 +76,8 @@ export interface BiomeGrassConfigWorker {
 }
 
 export interface GrassWorkerInput {
+  /** Optional sampling domain; offsets remain relative to the real leaf frame. */
+  placementCell?: GrassPlacementCell;
   /** Colour-only authored soil; never participates in placement eligibility. */
   compactPlantingLobes?: readonly CompactTerrainPlantingLobe[];
   /** Absent retains historical biome eligibility. Never inferred from terrain. */
@@ -121,6 +128,8 @@ export interface GrassWorkerInput {
 }
 
 export interface GrassWorkerOutput {
+  /** Echoed only for an explicit cell request, never inferred from chunkKey. */
+  placementCell?: GrassPlacementCell;
   grassEligibility?: GrassSurfaceEligibility;
   terrainProfileIdentity: string;
   type: "grassInstanceResult";
@@ -373,6 +382,7 @@ export const GRASS_WORKER_CODE = `
 ${buildTerrainWorkerProfileGuardJS()}
 var authoredSurface = (${createAuthoredTerrainSurfaceOperations.toString()})();
 var terrainSurfaceOperations = (${createGrassTerrainSurfaceOperations.toString()})();
+var placementCellOperations = (${createGrassPlacementCellOperations.toString()})();
 ${buildNoiseGeneratorJS()}
 ${buildBiomeConstantsJS()}
 
@@ -409,6 +419,7 @@ function calculateRoadInfluence(wx, wz, roadSegments, roadBlendWidth) {
 
 function generateGrassInstances(input) {
   assertTerrainWorkerInput(input);
+  var placementDomain = placementCellOperations.resolveDomain(input);
   var grassEligibility = compactTerrainColorOperations.grassEligibility(input.grassEligibility, input.config.TERRAIN_PROFILE.algorithm);
   var compactMacroField = compactTerrainColorOperations.macroField(input.config.TERRAIN_PROFILE);
   var compactPlantingLobes = compactTerrainColorOperations.validatePlantingLobes(input.compactPlantingLobes);
@@ -459,8 +470,8 @@ function generateGrassInstances(input) {
   }
 
   var spacing = input.clumpSpacing * spacingMul;
-  var maxCount = Math.ceil((size * size) / (spacing * spacing));
-  var rng = mulberry32(input.grassSeed ^ ((centerX * 374761393 + centerZ * 668265263) | 0));
+  var maxCount = placementDomain.maxCount;
+  var rng = mulberry32(input.grassSeed ^ ((placementDomain.centerX * 374761393 + placementDomain.centerZ * 668265263) | 0));
 
   var offsets = new Float32Array(maxCount * 3);
   var rotScaleHash = new Float32Array(maxCount * 3);
@@ -474,12 +485,19 @@ function generateGrassInstances(input) {
   var cCfg = grassConfigs[BT_CANYON] || grassConfigs["canyon"];
 
   for (var i = 0; i < maxCount; i++) {
-    var lx = (rng() - 0.5) * size;
-    var lz = (rng() - 0.5) * size;
+    var lx = (rng() - 0.5) * placementDomain.size;
+    var lz = (rng() - 0.5) * placementDomain.size;
     var clumpRng = rng();
 
     var wx = centerX + lx;
     var wz = centerZ + lz;
+    if (placementDomain.placementCell) {
+      wx = placementDomain.centerX + lx;
+      wz = placementDomain.centerZ + lz;
+      // Grounding and GPU placement retain the real terrain leaf's local frame.
+      lx = wx - centerX;
+      lz = wz - centerZ;
+    }
     var ty = getAuthoredHeight(wx, wz);
 
     var waterSurface = terrainSurfaceOperations.getWaterSurfaceAt(surface, WATER_THRESHOLD, wx, wz);
@@ -587,6 +605,7 @@ function generateGrassInstances(input) {
 
   if (count === 0) {
     return {
+      ...(placementDomain.placementCell ? { placementCell: placementCellOperations.validateCell(placementDomain.placementCell) } : {}),
       type: "grassInstanceResult",
       grassEligibility: grassEligibility,
       terrainProfileIdentity: config.TERRAIN_PROFILE_IDENTITY,
@@ -601,6 +620,7 @@ function generateGrassInstances(input) {
   }
 
   return {
+    ...(placementDomain.placementCell ? { placementCell: placementCellOperations.validateCell(placementDomain.placementCell) } : {}),
     type: "grassInstanceResult",
     grassEligibility: grassEligibility,
     terrainProfileIdentity: config.TERRAIN_PROFILE_IDENTITY,
@@ -647,6 +667,41 @@ let workersChecked = false;
 let workersAvailable = false;
 const surfaceOperations = createGrassTerrainSurfaceOperations();
 const colorOperations = createCompactTerrainColorOperations();
+const placementCellOperations = createGrassPlacementCellOperations();
+
+/** Capture the wire-owned cell and authored surface before a pool may queue it. */
+export function prepareGrassWorkerRequest(
+  input: GrassWorkerInput,
+): GrassWorkerInput {
+  assertTerrainWorkerRequest(input.config, input.seed);
+  colorOperations.grassEligibility(
+    input.grassEligibility,
+    input.config.TERRAIN_PROFILE.algorithm,
+  );
+  const domain = placementCellOperations.resolveDomain(input);
+  return {
+    ...input,
+    ...(domain.placementCell ? { placementCell: domain.placementCell } : {}),
+    terrainSurface: surfaceOperations.cloneSnapshot(input.terrainSurface),
+  };
+}
+
+/** Admit the echoed cell separately from the terrain identity and chunk key. */
+export function admitGrassWorkerPlacementResult(
+  result: GrassWorkerOutput,
+  request: GrassWorkerInput,
+): GrassWorkerOutput {
+  const expected = placementCellOperations.resolveDomain(request).placementCell;
+  if (!expected) {
+    if (Object.prototype.hasOwnProperty.call(result, "placementCell"))
+      throw new Error("Unexpected grass worker placement cell");
+    return result;
+  }
+  const cell = placementCellOperations.validateCell(result.placementCell);
+  if (cell.indexX !== expected.indexX || cell.indexZ !== expected.indexZ)
+    throw new Error("Grass worker placement cell mismatch");
+  return { ...result, placementCell: cell };
+}
 
 export function isGrassWorkerAvailable(): boolean {
   if (!workersChecked) {
@@ -691,15 +746,11 @@ export function getGrassWorkerPool(
 export async function generateGrassPlacementsAsync(
   input: GrassWorkerInput,
 ): Promise<GrassWorkerOutput | null> {
-  assertTerrainWorkerRequest(input.config, input.seed);
+  const request = prepareGrassWorkerRequest(input);
   const eligibility = colorOperations.grassEligibility(
     input.grassEligibility,
     input.config.TERRAIN_PROFILE.algorithm,
   );
-  const request = {
-    ...input,
-    terrainSurface: surfaceOperations.cloneSnapshot(input.terrainSurface),
-  };
   const pool = getGrassWorkerPool();
   if (!pool) {
     return null;
@@ -708,7 +759,7 @@ export async function generateGrassPlacementsAsync(
   assertTerrainWorkerResult(result, input.config);
   if ((result.grassEligibility ?? "legacy-biome-v1") !== eligibility)
     throw new Error("Grass worker eligibility mismatch");
-  return result;
+  return admitGrassWorkerPlacementResult(result, request);
 }
 
 export async function generateGrassChunksBatch(
@@ -716,17 +767,7 @@ export async function generateGrassChunksBatch(
 ): Promise<GrassBatchResult> {
   // Validate and detach the entire batch before dispatch: a malformed later
   // snapshot must not leave an earlier subset running after this call rejects.
-  const requests = inputs.map((input) => {
-    assertTerrainWorkerRequest(input.config, input.seed);
-    colorOperations.grassEligibility(
-      input.grassEligibility,
-      input.config.TERRAIN_PROFILE.algorithm,
-    );
-    return {
-      ...input,
-      terrainSurface: surfaceOperations.cloneSnapshot(input.terrainSurface),
-    };
-  });
+  const requests = inputs.map(prepareGrassWorkerRequest);
   const pool = getGrassWorkerPool();
   if (!pool) {
     return { results: [], workersAvailable: false, failedCount: inputs.length };
@@ -745,7 +786,7 @@ export async function generateGrassChunksBatch(
           (input.grassEligibility ?? "legacy-biome-v1")
         )
           throw new Error("Grass worker eligibility mismatch");
-        results.push(result);
+        results.push(admitGrassWorkerPlacementResult(result, input));
       })
       .catch(() => {
         failedCount++;

@@ -220,7 +220,8 @@ export function collectStreamingRenderProfileApplication(
   const water = terrain?.["waterSystem"];
   return evaluateStreamingRenderProfileApplication(profile, requested, {
     ...(profile.grassProfile === "compact-island-v1" ||
-    profile.grassProfile === "compact-meadow-v2"
+    profile.grassProfile === "compact-meadow-v2" ||
+    profile.grassProfile === "fine-meadow-v1"
       ? { grass: terrain?.getGrassProfileReceipt() ?? null }
       : {}),
     preferences: {

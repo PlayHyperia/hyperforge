@@ -2,6 +2,42 @@
 
 ## Grass reference correction — next art priority, 2026-09-13
 
+Implementation has begun for an explicit fine-meadow profile: 25m grass-owned
+cells borrowing real terrain, .7m spacing, slender .38–.86m independent stems,
+and a 40m near-detail trial. Preserve the original native reference and all
+authoritative exclusions. Corresponding blade roots/tips are progressive across
+tiers, but full moving transitions, coverage and rendering cost are unqualified.
+See `asset-studio/fine-meadow01/QUALIFICATION.md` for tests and remaining gates.
+
+The first native fine capture exposed a camera-order bug before matched imagery:
+grass detail followed the earlier gameplay camera rather than the final primary
+render camera. The correction now uses the existing render-preparation boundary,
+with cached pose/frustum and one bounded update; native03 verifies this and the
+subsequent stale-LOD-intent correction. Final source passes 361/361 tests across
+24 files plus shared/server/client types and builds. Native03 next stops at an
+incorrect capture expectation for Three's small-cell uniform-matrix layout;
+native04 verifies the corrected exact device/shader contract. Eight actual images
+still show too much gray exposed turf, so increase individual leaf overlap and
+soften root/normal shading without adding blades or changing global lighting.
+Native04 also exceeds the natural daylight window on its eighth camera; re-admit
+natural daylight per camera without widening the capture phase assertions.
+Acceptance requires continuous eligible meadow volume, slender tapered blades,
+no visible cell grid/detail ring, flush roots at slopes/rocks/trunks, and cohesive
+green without a dark cyan blanket or fluorescent tips. Wind, temporal shimmer,
+LOD transitions and sustained performance require motion evidence.
+
+Native05 captures all eleven views: revised leaf area and shading improve local
+overlap/curvature/green, but root and independent review still reject full visual
+acceptance. Next target is coherent foliage/ground light response at fixed
+population, not another height/density increase. Measured GPU-pass-sum p95 is
+28.64/28.25ms (campus/meadow), worse than the sparse historical observation;
+performance is not accepted and no presented-FPS claim follows. The run stops
+before motion on a cached reflection-pipeline observer assumption. Native06
+qualifies exact main/reflection bindings, then hits the habitat checkpoint's
+16MiB serialization cap. Repair lossless evidence transport before wind/LOD
+verification; no graphics or acceptance limit is waived. The code checkpoint is
+an explicit opt-in development candidate, not default or production promotion.
+
 The user's earlier-game grass image supersedes provisional acceptance of the
 current sparse tuft appearance. Saved reference and diagnosis:
 `asset-studio/haven-architecture01/GRASS_RECOVERY.md`. Exact image provenance

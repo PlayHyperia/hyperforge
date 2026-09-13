@@ -94,11 +94,30 @@ export const STREAMING_RENDER_PROFILES = Object.freeze({
     grassProfile: "compact-meadow-v2" as const,
     avatarLodPolicy: "distance-authoritative-v1" as const,
   }),
+  // Fine continuous meadow trial with bounded grass-owned cells. A new profile
+  // records changed population explicitly; all render-quality settings match.
+  "island-fine-meadow-720p60-v1": Object.freeze({
+    id: "island-fine-meadow-720p60-v1" as const,
+    targetFps: 60,
+    sourceFps: 60,
+    outputFps: 60,
+    viewportWidth: 1280,
+    viewportHeight: 720,
+    outputWidth: 1280,
+    outputHeight: 720,
+    renderPixelBudget: 1280 * 720,
+    maximumDpr: 1,
+    antialiasing: true,
+    shadows: "med" as const,
+    postprocessing: false,
+    grassProfile: "fine-meadow-v1" as const,
+    avatarLodPolicy: "distance-authoritative-v1" as const,
+  }),
 });
 
 export type StreamingRenderProfileId = keyof typeof STREAMING_RENDER_PROFILES;
 export type SkyAtmosphereMode = "gradient-v1" | "scattering-v1";
-export type GrassAppearanceCandidate = "natural-tuft-v1";
+export type GrassAppearanceCandidate = "natural-tuft-v1" | "fine-meadow-v1";
 
 /** Explicit shared ground/grass art trial; never a population or quality switch. */
 export function resolveHabitatCompositionCandidate(
@@ -110,12 +129,16 @@ export function resolveHabitatCompositionCandidate(
   if (!values.length) return undefined;
   if (values.length !== 1 || values[0] !== "haven-understory-v1")
     throw new Error("Unknown or duplicate habitat composition candidate");
-  if (resolveGrassAppearanceCandidate(windowRef) !== "natural-tuft-v1")
+  if (
+    !["natural-tuft-v1", "fine-meadow-v1"].includes(
+      resolveGrassAppearanceCandidate(windowRef) ?? "",
+    )
+  )
     throw new Error("Habitat composition requires the explicit natural meadow");
   return "haven-understory-v1";
 }
 
-/** Appearance-only qualification; dense meadow population settings stay unchanged. */
+/** Explicit appearance/profile pair; no unrequested population or default change. */
 export function resolveGrassAppearanceCandidate(
   win?: Window,
 ): GrassAppearanceCandidate | undefined {
@@ -123,8 +146,21 @@ export function resolveGrassAppearanceCandidate(
   if (!windowRef) return undefined;
   const params = getSearchParams(windowRef);
   const values = params?.getAll("grassAppearance") ?? [];
-  if (!values.length) return undefined;
-  if (values.length !== 1 || values[0] !== "natural-tuft-v1") {
+  if (!values.length) {
+    if (
+      (params?.getAll("streamRenderProfile") ?? []).includes(
+        "island-fine-meadow-720p60-v1",
+      )
+    ) {
+      resolveExplicitStreamingRenderProfile(windowRef);
+      throw new Error("Fine meadow requires its explicit grass appearance");
+    }
+    return undefined;
+  }
+  if (
+    values.length !== 1 ||
+    !["natural-tuft-v1", "fine-meadow-v1"].includes(values[0])
+  ) {
     throw new Error("Unknown or duplicate grass appearance candidate");
   }
   if (
@@ -133,15 +169,18 @@ export function resolveGrassAppearanceCandidate(
   ) {
     throw new Error("Grass appearance requires an unambiguous viewport route");
   }
+  const fine = values[0] === "fine-meadow-v1";
   if (
     resolveExplicitStreamingRenderProfile(windowRef)?.id !==
-    "island-meadow-720p60-v1"
+    (fine ? "island-fine-meadow-720p60-v1" : "island-meadow-720p60-v1")
   ) {
     throw new Error(
-      "Natural grass requires the explicit non-embedded dense meadow profile",
+      fine
+        ? "Fine grass requires the explicit non-embedded fine meadow profile"
+        : "Natural grass requires the explicit non-embedded dense meadow profile",
     );
   }
-  return "natural-tuft-v1";
+  return fine ? "fine-meadow-v1" : "natural-tuft-v1";
 }
 
 /** Explicit full-island art candidate; never a silent broadcast/default change. */
@@ -153,9 +192,11 @@ export function resolveSkyAtmosphereMode(win?: Window): SkyAtmosphereMode {
   if (values.length !== 1 || values[0] !== "scattering-v1")
     throw new Error("Unknown or duplicate sky atmosphere candidate");
   if (
-    !["island-720p60-v1", "island-meadow-720p60-v1"].includes(
-      resolveExplicitStreamingRenderProfile(windowRef)?.id ?? "",
-    )
+    ![
+      "island-720p60-v1",
+      "island-meadow-720p60-v1",
+      "island-fine-meadow-720p60-v1",
+    ].includes(resolveExplicitStreamingRenderProfile(windowRef)?.id ?? "")
   )
     throw new Error(
       "Scattering sky requires the explicit non-embedded island profile",
@@ -263,7 +304,8 @@ export type StreamingGrassProfileReceipt = {
     | "ordinary-v1"
     | "fixed-arena-v1"
     | "compact-island-v1"
-    | "compact-meadow-v2";
+    | "compact-meadow-v2"
+    | "fine-meadow-v1";
   eligibility: GrassSurfaceEligibility;
   terrainProfileIdentity: string;
   minimumLodLevel: number;
@@ -279,6 +321,14 @@ export type StreamingGrassProfileReceipt = {
   settledChunks: number;
   installedChunks: number;
   installedClumps: number;
+  /** Grass-owned cells reference real terrain leaves; they are not terrain nodes. */
+  placement?: {
+    schemaVersion: 1;
+    mode: "world-cells-v1";
+    cellSize: 25;
+    nearLodDistance: 40;
+    liveCells: number;
+  };
   grounding?: {
     schemaVersion: 1;
     mode: "blade-roots-v1";
@@ -359,9 +409,11 @@ export function evaluateStreamingRenderProfileApplication(
   if (!applied) return finish("renderer_unavailable");
   if (
     profile.grassProfile === "compact-island-v1" ||
-    profile.grassProfile === "compact-meadow-v2"
+    profile.grassProfile === "compact-meadow-v2" ||
+    profile.grassProfile === "fine-meadow-v1"
   ) {
     const denseMeadow = profile.grassProfile === "compact-meadow-v2";
+    const fineMeadow = profile.grassProfile === "fine-meadow-v1";
     const grass = applied.grass;
     if (!grass) return finish("grass_unavailable");
     if (
@@ -371,15 +423,30 @@ export function evaluateStreamingRenderProfileApplication(
       typeof grass.terrainProfileIdentity !== "string" ||
       grass.terrainProfileIdentity.trim().length === 0 ||
       grass.terrainProfileIdentity.length > 16384 ||
-      grass.minimumLodLevel !== 1 ||
-      grass.clumpSpacingMultiplier !== (denseMeadow ? 2.5 : 4) ||
-      grass.clumpSpacing !== (denseMeadow ? 1.75 : 2.8) ||
+      grass.minimumLodLevel !== (fineMeadow ? 0 : 1) ||
+      grass.clumpSpacingMultiplier !==
+        (fineMeadow ? 1 : denseMeadow ? 2.5 : 4) ||
+      grass.clumpSpacing !== (fineMeadow ? 0.7 : denseMeadow ? 1.75 : 2.8) ||
       grass.maxRenderDistance !== 140 ||
       grass.maxChunksPerFrame !== 1 ||
       grass.castShadow !== false ||
       grass.destroyed !== false
     )
       return finish("grass_profile");
+    if (fineMeadow) {
+      const placement = grass.placement;
+      if (
+        placement?.schemaVersion !== 1 ||
+        placement.mode !== "world-cells-v1" ||
+        placement.cellSize !== 25 ||
+        placement.nearLodDistance !== 40 ||
+        !Number.isSafeInteger(placement.liveCells) ||
+        placement.liveCells < 0
+      )
+        return finish("grass_placement");
+    } else if (grass.placement !== undefined) {
+      return finish("grass_placement");
+    }
     for (const value of [
       grass.liveNodes,
       grass.pendingChunks,

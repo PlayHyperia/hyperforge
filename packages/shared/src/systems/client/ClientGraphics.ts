@@ -71,6 +71,7 @@
 import * as THREE from "../../extras/three/three";
 import type { World } from "../../core/World";
 import type { CompactLandscapeRocksVisualsSystem } from "./CompactLandscapeRocksVisualsSystem";
+import type { TerrainSystem } from "../shared/world/TerrainSystem";
 import type { WorldOptions } from "../../types";
 import { EventType } from "../../types/events";
 import { System } from "../shared/infrastructure/System";
@@ -364,6 +365,9 @@ export class ClientGraphics extends System {
   }
 
   render() {
+    this.world
+      .getSystem<TerrainSystem>("terrain")
+      ?.prepareGrassForRender(this.world.camera);
     this.world
       .getSystem<CompactLandscapeRocksVisualsSystem>(
         "compact-landscape-rocks-visuals",
