@@ -17,6 +17,8 @@ import {
   GRASS_CONFIG,
   STREAMING_GRASS_VISUAL_PROFILE,
   COMPACT_ISLAND_GRASS_VISUAL_PROFILE,
+  DENSE_MEADOW_GRASS_VISUAL_PROFILE,
+  NATURAL_TUFT_APPEARANCE,
   type GrassVisualProfile,
 } from "../GrassVisualManager";
 import { TerrainVisualManager } from "../TerrainVisualManager";
@@ -148,7 +150,11 @@ async function fixture(
   }
   const managers: GrassVisualManager[] = [];
   const worker = workerSession();
-  function manager(profile: GrassVisualProfile, regionOwner = true) {
+  function manager(
+    profile: GrassVisualProfile,
+    regionOwner = true,
+    appearance?: "natural-tuft-v1",
+  ) {
     const container = new THREE.Group();
     const owner = new GrassVisualManager(
       setup.terrainConfig.TERRAIN_PROFILE_IDENTITY,
@@ -166,6 +172,7 @@ async function fixture(
       regionOwner
         ? (bounds) => visual.captureRetainedSurfaceRegion(bounds)
         : undefined,
+      appearance,
     );
     owner.setPlayerPosition(385, 374);
     managers.push(owner);
@@ -231,6 +238,114 @@ describe("opt-in compact grass, actual terrain and native worker (not GPU proof)
     expect(frames).toBeLessThan(1000);
     return uploads;
   }
+
+  it("grounds the natural tuft candidate against all six real leaves without reseeding or bypassing rejection", async () => {
+    const f = await fixture();
+    try {
+      const baseline = f.manager(DENSE_MEADOW_GRASS_VISUAL_PROFILE).owner;
+      const candidate = f.manager(
+        DENSE_MEADOW_GRASS_VISUAL_PROFILE,
+        true,
+        NATURAL_TUFT_APPEARANCE.id,
+      ).owner;
+      const census: {
+        leaf: number[];
+        input: number;
+        baseline: number;
+        candidate: number;
+        common: number;
+      }[] = [];
+      for (const node of f.nodes) {
+        f.installSupport(node);
+        const before = await queueGrounding(f, baseline, node);
+        const after = await queueGrounding(f, candidate, node);
+        expect(after.data.count).toBe(before.data.count);
+        for (const key of [
+          "offsets",
+          "rotScaleHash",
+          "groundColors",
+          "grassTints",
+          "groundNormals",
+        ] as const)
+          expect(after.data[key]).toEqual(before.data[key]);
+        expect(finishGrounding(baseline, before.key)).toBe(1);
+        expect(finishGrounding(candidate, after.key)).toBe(1);
+        const oldMesh = baseline["chunks"].get(before.key)!.mesh;
+        const mesh = candidate["chunks"].get(after.key)!.mesh;
+        const oldSources = oldMesh.userData.grassBladeGrounding
+          .sourceIndices as Uint32Array;
+        const sources = mesh.userData.grassBladeGrounding
+          .sourceIndices as Uint32Array;
+        const oldIndices = new Map(
+          [...oldSources].map((source, i) => [source, i]),
+        );
+        const evidence = mesh.userData.grassBladeGrounding;
+        expect(mesh.userData.grassAppearance).toBe(NATURAL_TUFT_APPEARANCE.id);
+        expect(evidence.retainedClumps).toBe(mesh.count);
+        expect(evidence.maxAcceptedBaseError).toBeLessThanOrEqual(0.02);
+        expect(evidence.processedClumps).toBe(evidence.inputClumps);
+        expect(mesh.count).toBeLessThanOrEqual(after.data.count);
+        expect(new Set(sources).size).toBe(mesh.count);
+        expect(mesh.geometry.index!.count / 3).toBe(36);
+        const roots = mesh.geometry.getAttribute("grassRootDeltas");
+        expect(roots.array.byteLength).toBe(mesh.count * 96);
+        for (const value of roots.array)
+          expect(Number.isFinite(value)).toBe(true);
+        let common = 0;
+        for (let i = 0; i < sources.length; i++) {
+          if (i) expect(sources[i]).toBeGreaterThan(sources[i - 1]);
+          const old = oldIndices.get(sources[i]);
+          if (old === undefined) continue;
+          common++;
+          // Full-root rejection may change the population; shared survivors
+          // must retain all actual placement, normal and color components.
+          for (const key of [
+            "instanceOffset",
+            "instanceRotScaleHash",
+            "instanceGroundColor",
+            "instanceGrassTint",
+            "instanceGroundNormal",
+          ]) {
+            const a = mesh.geometry.getAttribute(key),
+              b = oldMesh.geometry.getAttribute(key);
+            for (const get of [
+              "getX",
+              "getY",
+              "getZ",
+              ...(a.itemSize === 4 ? ["getW" as const] : []),
+            ] as const)
+              expect(a[get](i)).toBe(b[get](old));
+          }
+        }
+        expect(common).toBeGreaterThan(0);
+        expect(candidate.getProfileReceipt().grounding!.failedChunks).toBe(0);
+        census.push({
+          leaf: [node.centerX, node.centerZ],
+          input: after.data.count,
+          baseline: oldMesh.count,
+          candidate: mesh.count,
+          common,
+        });
+      }
+      // This is an actual terrain/worker/grounding census, not GPU timing or
+      // an assertion that a shape change leaves accepted populations equal.
+      console.info(
+        "Natural tuft post-grounding census",
+        JSON.stringify(census),
+      );
+      expect(candidate.getProfileReceipt()).toMatchObject({
+        profileId: "compact-meadow-v2",
+        minimumLodLevel: 1,
+        clumpSpacing: 1.75,
+        maxRenderDistance: 140,
+        maxChunksPerFrame: 1,
+        installedChunks: 6,
+        grounding: { runningChunks: 0, failedChunks: 0, completedChunks: 6 },
+      });
+    } finally {
+      await f.close();
+    }
+  }, 120_000);
 
   it("keeps grounded grass available to each actual render camera after an earlier update camera rejects it", async () => {
     const f = await fixture();

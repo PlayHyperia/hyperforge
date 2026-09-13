@@ -181,6 +181,7 @@ import {
   isStreamingLikeViewport,
   resolveExplicitStreamingWorldProfile,
   resolveExplicitStreamingRenderProfile,
+  resolveGrassAppearanceCandidate,
   type GrassSurfaceEligibility,
 } from "../../../runtime/clientViewportMode";
 import {
@@ -2349,6 +2350,7 @@ export class TerrainSystem extends System {
             bounds,
             GRASS_BLADE_GROUNDING_LIMITS.maxSurfaces,
           ),
+        resolveGrassAppearanceCandidate(),
       );
 
       // Wire terrain, water, grass managers to the same quad-tree via composite

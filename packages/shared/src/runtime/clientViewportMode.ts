@@ -98,6 +98,36 @@ export const STREAMING_RENDER_PROFILES = Object.freeze({
 
 export type StreamingRenderProfileId = keyof typeof STREAMING_RENDER_PROFILES;
 export type SkyAtmosphereMode = "gradient-v1" | "scattering-v1";
+export type GrassAppearanceCandidate = "natural-tuft-v1";
+
+/** Appearance-only qualification; dense meadow population settings stay unchanged. */
+export function resolveGrassAppearanceCandidate(
+  win?: Window,
+): GrassAppearanceCandidate | undefined {
+  const windowRef = getWindowRef(win);
+  if (!windowRef) return undefined;
+  const params = getSearchParams(windowRef);
+  const values = params?.getAll("grassAppearance") ?? [];
+  if (!values.length) return undefined;
+  if (values.length !== 1 || values[0] !== "natural-tuft-v1") {
+    throw new Error("Unknown or duplicate grass appearance candidate");
+  }
+  if (
+    (params?.getAll("page").length ?? 0) > 1 ||
+    (params?.getAll("embedded").length ?? 0) > 1
+  ) {
+    throw new Error("Grass appearance requires an unambiguous viewport route");
+  }
+  if (
+    resolveExplicitStreamingRenderProfile(windowRef)?.id !==
+    "island-meadow-720p60-v1"
+  ) {
+    throw new Error(
+      "Natural grass requires the explicit non-embedded dense meadow profile",
+    );
+  }
+  return "natural-tuft-v1";
+}
 
 /** Explicit full-island art candidate; never a silent broadcast/default change. */
 export function resolveSkyAtmosphereMode(win?: Window): SkyAtmosphereMode {

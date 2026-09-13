@@ -6,6 +6,7 @@ import {
   resolveClientViewportRuntimeProfile,
   resolveExplicitStreamingRenderProfile,
   resolveExplicitStreamingWorldProfile,
+  resolveGrassAppearanceCandidate,
   resolveSkyAtmosphereMode,
   resolveStreamingRenderFrameRate,
   shouldAdmitNetworkEntityInViewport,
@@ -20,6 +21,123 @@ import {
 function makeWindow(pathname: string, search = ""): Window {
   return { location: { pathname, search } } as unknown as Window;
 }
+
+describe("explicit grass appearance candidate selection", () => {
+  const selection =
+    "streamRenderProfile=island-meadow-720p60-v1&grassAppearance=natural-tuft-v1";
+
+  it("leaves absent appearance selections and existing profiles unchanged", () => {
+    expect(resolveGrassAppearanceCandidate()).toBeUndefined();
+    for (const pathname of ["/play", "/stream.html"]) {
+      expect(
+        resolveGrassAppearanceCandidate(makeWindow(pathname)),
+      ).toBeUndefined();
+      for (const id of Object.keys(STREAMING_RENDER_PROFILES)) {
+        expect(
+          resolveGrassAppearanceCandidate(
+            makeWindow(pathname, `?streamRenderProfile=${id}`),
+          ),
+        ).toBeUndefined();
+      }
+    }
+  });
+
+  it.each([
+    ["/stream.html", `?${selection}`],
+    ["/stream.html", `?${selection}&streamFps=60&embedded=false`],
+    ["/", `?page=stream&${selection}`],
+  ])("admits an explicit non-embedded dense meadow at %s%s", (path, search) => {
+    expect(resolveGrassAppearanceCandidate(makeWindow(path, search))).toBe(
+      "natural-tuft-v1",
+    );
+  });
+
+  it.each([
+    "",
+    "unknown",
+    "NATURAL-TUFT-V1",
+    "%20natural-tuft-v1",
+    "natural-tuft-v1%20",
+    "natural-tuft-v1&grassAppearance=natural-tuft-v1",
+    "natural-tuft-v1&grassAppearance=unknown",
+  ])("rejects malformed or duplicate appearance values: %s", (value) => {
+    expect(() =>
+      resolveGrassAppearanceCandidate(
+        makeWindow(
+          "/stream.html",
+          `?streamRenderProfile=island-meadow-720p60-v1&grassAppearance=${value}`,
+        ),
+      ),
+    ).toThrow("Unknown or duplicate grass appearance candidate");
+  });
+
+  it.each([
+    "/play?" + selection,
+    "/stream.html?grassAppearance=natural-tuft-v1",
+    "/stream.html?streamRenderProfile=canonical-720p60-v1&grassAppearance=natural-tuft-v1",
+    "/stream.html?streamRenderProfile=fallback-720p30-v1&grassAppearance=natural-tuft-v1",
+    "/stream.html?streamRenderProfile=shadows-720p60-v1&grassAppearance=natural-tuft-v1",
+    "/stream.html?streamRenderProfile=island-720p60-v1&grassAppearance=natural-tuft-v1",
+    "/stream.html?streamRenderProfile=unknown&grassAppearance=natural-tuft-v1",
+    "/stream.html?" + selection + "&embedded=true",
+    "/stream.html?" + selection + "&embedded=1",
+    "/stream.html?" + selection + "&embedded=false&embedded=true",
+    "/?page=stream&page=play&" + selection,
+    "/stream.html?" + selection + "&streamFps=30",
+    "/stream.html?" + selection + "&streamFps=60.0",
+    "/stream.html?" + selection + "&streamFps=60&streamFps=60",
+    "/stream.html?" +
+      selection +
+      "&streamRenderProfile=island-meadow-720p60-v1",
+  ])("rejects an ineligible or ambiguous route: %s", (url) => {
+    const [pathname, query] = url.split("?");
+    expect(() =>
+      resolveGrassAppearanceCandidate(makeWindow(pathname, "?" + query)),
+    ).toThrow();
+  });
+
+  it("rejects an embedded application even without an embedded URL flag", () => {
+    const win = makeWindow("/stream.html", "?" + selection) as Window & {
+      __HYPERIA_EMBEDDED__?: boolean;
+    };
+    win.__HYPERIA_EMBEDDED__ = true;
+    expect(() => resolveGrassAppearanceCandidate(win)).toThrow("non-embedded");
+  });
+
+  it("does not change render budgets or viewport population/admission policy", () => {
+    const baseline = makeWindow(
+      "/stream.html",
+      "?streamRenderProfile=island-meadow-720p60-v1&streamWorld=preparation-v1",
+    );
+    const candidate = makeWindow(
+      "/stream.html",
+      baseline.location.search + "&grassAppearance=natural-tuft-v1",
+    );
+    expect(resolveGrassAppearanceCandidate(candidate)).toBe("natural-tuft-v1");
+    expect(resolveExplicitStreamingRenderProfile(candidate)).toBe(
+      STREAMING_RENDER_PROFILES["island-meadow-720p60-v1"],
+    );
+    expect(resolveExplicitStreamingRenderProfile(candidate)).toBe(
+      resolveExplicitStreamingRenderProfile(baseline),
+    );
+    expect(resolveClientViewportRuntimeProfile(candidate)).toEqual(
+      resolveClientViewportRuntimeProfile(baseline),
+    );
+    expect(
+      resolveStreamingRenderPreferences(
+        1280,
+        720,
+        resolveExplicitStreamingRenderProfile(candidate),
+      ),
+    ).toEqual(
+      resolveStreamingRenderPreferences(
+        1280,
+        720,
+        resolveExplicitStreamingRenderProfile(baseline),
+      ),
+    );
+  });
+});
 
 describe("explicit atmosphere candidate selection", () => {
   it("leaves defaults unchanged and admits only an explicit full-island candidate", () => {

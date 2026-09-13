@@ -36,6 +36,7 @@ import { SUN_LIGHT } from "./LightingConfig";
 import { isCompactSculptProfile } from "./WorldTerrainProfile";
 import { createCompactTerrainColorOperations } from "./CompactTerrainPalette";
 import type {
+  GrassAppearanceCandidate,
   GrassSurfaceEligibility,
   StreamingGrassProfileReceipt,
 } from "../../../runtime/clientViewportMode";
@@ -180,13 +181,42 @@ export const CURVED_MEADOW_APPEARANCE = Object.freeze({
   TIP_BRIGHTNESS: 1.04,
 } as const);
 
+/** Appearance-only meadow study: four rooted blades form each small fan.
+ * Keeps the existing blade topology, instancing and full grounding pipeline.
+ * Never selected implicitly by a render-quality or population setting. */
+export const NATURAL_TUFT_APPEARANCE = Object.freeze({
+  id: "natural-tuft-v1",
+  BLADE_HEIGHT_MIN: 0.2,
+  BLADE_HEIGHT_MAX: 0.55,
+  BLADE_WIDTH_RATIO: 0.095,
+  BLADE_ARC_RATIO: 0.48,
+  BLADE_CONTROL_HEIGHT: 0.78,
+  BLADE_TIP_HEIGHT: 0.92,
+  BLADE_NORMAL_WEIGHT: 0.38,
+  ROOT_BRIGHTNESS: 0.64,
+  TIP_BRIGHTNESS: 1.0,
+  TUFT_BLADES: 4,
+  TUFT_CENTER_RADIUS: 0.52,
+  TUFT_ROOT_RADIUS: 0.065,
+  TUFT_HEIGHT_FACTORS: Object.freeze([1, 0.62, 0.82, 0.54] as const),
+  TUFT_ARC_FACTORS: Object.freeze([0.35, 1.15, 0.65, 1.35] as const),
+} as const);
+
 type GrassBladeShape = Pick<
   typeof GRASS_CONFIG,
   | "BLADE_HEIGHT_MIN"
   | "BLADE_HEIGHT_MAX"
   | "BLADE_WIDTH_RATIO"
   | "BLADE_ARC_RATIO"
-> & { BLADE_CONTROL_HEIGHT?: number; BLADE_TIP_HEIGHT?: number };
+> & {
+  BLADE_CONTROL_HEIGHT?: number;
+  BLADE_TIP_HEIGHT?: number;
+  TUFT_BLADES?: number;
+  TUFT_CENTER_RADIUS?: number;
+  TUFT_ROOT_RADIUS?: number;
+  TUFT_HEIGHT_FACTORS?: readonly number[];
+  TUFT_ARC_FACTORS?: readonly number[];
+};
 
 // ---------------------------------------------------------------------------
 // Interleave groundColor (vec3) + grassTint (vec4) into a single vertex buffer
@@ -276,25 +306,62 @@ function createClumpGeometry(
 
   let vi = 0;
   let ii = 0;
+  let tuftHeight = 0;
 
   for (let b = 0; b < N; b++) {
     const t01 = b / N;
-    const angle = b * GOLDEN_ANGLE;
+    const tuft = shape.TUFT_BLADES ? Math.floor(b / shape.TUFT_BLADES) : null;
+    const fanIndex = shape.TUFT_BLADES ? b % shape.TUFT_BLADES : 0;
+    const tuftAngle = (tuft ?? 0) * GOLDEN_ANGLE;
+    const fanAngle =
+      tuftAngle + (fanIndex / (shape.TUFT_BLADES ?? 1)) * Math.PI * 2;
+    const angle = tuft === null ? b * GOLDEN_ANGLE : fanAngle;
     const rNorm = CLUMP_INNER_RATIO + (1 - CLUMP_INNER_RATIO) * Math.sqrt(t01);
     const r = rNorm * CLUMP_RADIUS;
     const jitter = (rng() - 0.5) * 0.15 * CLUMP_RADIUS;
-    const ox = Math.cos(angle) * r + Math.cos(angle + 1.3) * jitter;
-    const oz = Math.sin(angle) * r + Math.sin(angle + 1.3) * jitter;
+    const tuftRadius =
+      (shape.TUFT_CENTER_RADIUS ?? 0) *
+      Math.sqrt(((tuft ?? 0) + 0.5) / Math.ceil(N / (shape.TUFT_BLADES ?? 1)));
+    const rootRadius =
+      (shape.TUFT_ROOT_RADIUS ?? 0) * (0.8 + (0.2 * fanIndex) / 3);
+    const ox =
+      tuft === null
+        ? Math.cos(angle) * r + Math.cos(angle + 1.3) * jitter
+        : Math.cos(tuftAngle) * tuftRadius + Math.cos(fanAngle) * rootRadius;
+    const oz =
+      tuft === null
+        ? Math.sin(angle) * r + Math.sin(angle + 1.3) * jitter
+        : Math.sin(tuftAngle) * tuftRadius + Math.sin(fanAngle) * rootRadius;
 
     const facingAngle = angle + Math.PI * 0.5 + (rng() - 0.5) * Math.PI;
     const cr = Math.cos(facingAngle);
     const sr = Math.sin(facingAngle);
 
-    const h = hMin + (hMax - hMin) * (0.3 + 0.7 * t01 + (rng() - 0.5) * 0.4);
+    const heightFraction = 0.3 + 0.7 * t01 + (rng() - 0.5) * 0.4;
+    const variedHeight =
+      hMin +
+      (hMax - hMin) *
+        (tuft === null
+          ? heightFraction
+          : THREE.MathUtils.clamp(
+              heightFraction + (fanIndex % 2 ? 0.12 : -0.12),
+              0,
+              1,
+            ));
+    // One height hierarchy per rooted tuft, rather than four independently
+    // prominent leaves. Still consume each original per-blade random sample.
+    if (tuft !== null && fanIndex === 0) tuftHeight = variedHeight;
+    const h =
+      (tuft === null ? variedHeight : tuftHeight) *
+      (shape.TUFT_HEIGHT_FACTORS?.[fanIndex] ?? 1);
     const w = h * BLADE_WIDTH_RATIO;
 
     const curveAngle = angle + (rng() - 0.5) * Math.PI * 0.6;
-    const arcDist = h * BLADE_ARC_RATIO * (0.8 + rng() * 0.4);
+    const arcDist =
+      h *
+      BLADE_ARC_RATIO *
+      (0.8 + rng() * 0.4) *
+      (shape.TUFT_ARC_FACTORS?.[fanIndex] ?? 1);
     const curveDirX = Math.cos(curveAngle) * arcDist;
     const curveDirZ = Math.sin(curveAngle) * arcDist;
 
@@ -556,7 +623,10 @@ export class GrassVisualManager implements QuadTreeListener {
   private readonly profileId: StreamingGrassProfileReceipt["profileId"];
   private readonly compactMeadow: boolean;
   private readonly meadowAppearance:
-    typeof COMPACT_MEADOW_APPEARANCE | typeof CURVED_MEADOW_APPEARANCE | null;
+    | typeof COMPACT_MEADOW_APPEARANCE
+    | typeof CURVED_MEADOW_APPEARANCE
+    | typeof NATURAL_TUFT_APPEARANCE
+    | null;
   private readonly grassEligibility: GrassSurfaceEligibility;
 
   private workerSetup: GrassWorkerSetup | null = null;
@@ -607,6 +677,7 @@ export class GrassVisualManager implements QuadTreeListener {
     private readonly captureRenderedRegion?: (
       bounds: TerrainGridBounds,
     ) => RetainedTerrainRegion,
+    appearanceCandidate?: GrassAppearanceCandidate,
   ) {
     if (typeof terrainProfileIdentity !== "string" || !terrainProfileIdentity) {
       throw new Error("Grass visual terrain profile identity is required");
@@ -631,12 +702,23 @@ export class GrassVisualManager implements QuadTreeListener {
       }
     }
     this.profileId = profile.id ?? "ordinary-v1";
+    if (
+      appearanceCandidate !== undefined &&
+      (appearanceCandidate !== NATURAL_TUFT_APPEARANCE.id ||
+        this.profileId !== DENSE_MEADOW_GRASS_VISUAL_PROFILE.id)
+    ) {
+      throw new Error(
+        "Natural tuft appearance requires the exact dense meadow profile",
+      );
+    }
     this.compactMeadow =
       this.profileId === "compact-island-v1" ||
       this.profileId === "compact-meadow-v2";
     this.meadowAppearance =
       this.profileId === "compact-meadow-v2"
-        ? CURVED_MEADOW_APPEARANCE
+        ? appearanceCandidate === NATURAL_TUFT_APPEARANCE.id
+          ? NATURAL_TUFT_APPEARANCE
+          : CURVED_MEADOW_APPEARANCE
         : this.compactMeadow
           ? COMPACT_MEADOW_APPEARANCE
           : null;
@@ -2166,6 +2248,146 @@ export class GrassVisualManager implements QuadTreeListener {
           float(appearance.BLADE_NORMAL_WEIGHT),
         ).normalize(),
       );
+    }
+
+    if (appearance?.id === "natural-tuft-v1") {
+      // This opt-in graph shares its fade and wind between vertex position and
+      // smooth normals. Existing appearance graphs above remain unchanged.
+      const rawPosition = attribute("position", "vec3");
+      const offset = attribute("instanceOffset", "vec3");
+      const rsh = attribute("instanceRotScaleHash", "vec3");
+      const t = uv().y;
+      const scale = rsh.y;
+      const worldBase = modelWorldMatrix
+        .mul(vec4(offset.x, float(0), offset.z, float(1)))
+        .toVar("naturalGrassWorldBase");
+      const toPlayer = sub(
+        vec3(worldBase.x, float(0), worldBase.z),
+        vec3(uPlayerPos.x, float(0), uPlayerPos.z),
+      );
+      const fade = clamp(
+        sub(
+          float(1),
+          smoothstep(uFadeStart, uFadeEnd, pow(dot(toPlayer, toPlayer), 0.5)),
+        ),
+        float(0),
+        float(1),
+      ).toVar("naturalGrassFade");
+      const wt = time.mul(uWindSpeed);
+      const bend = pow(t, float(1.8));
+      // Chunk-local offsets repeat at each chunk boundary. Key both waves to
+      // the actual world-space clump base, not to an animated blade vertex.
+      const displacement = vec3(
+        sin(wt.add(worldBase.x.mul(0.35)).add(worldBase.z.mul(0.12)))
+          .mul(uWindStrength)
+          .mul(bend)
+          .mul(uBladeHeight),
+        float(0),
+        sin(
+          wt
+            .mul(0.67)
+            .add(worldBase.x.mul(0.18))
+            .add(worldBase.z.mul(0.28))
+            .add(2),
+        )
+          .mul(uWindStrength)
+          .mul(0.55)
+          .mul(bend)
+          .mul(uBladeHeight),
+      ).toVar("naturalGrassDisplacement");
+      const cosR = cos(rsh.x);
+      const sinR = sin(rsh.x);
+      const nx = terrainNormal.x;
+      const ny = terrainNormal.y;
+      const nz = terrainNormal.z;
+      const invOnePlusNy = float(1).div(ny.add(1));
+      const cross = nx.mul(nz).mul(invOnePlusNy).negate();
+      const turnToGround = (v: ReturnType<typeof vec3>) => {
+        const x = v.x.mul(cosR).sub(v.z.mul(sinR));
+        const z = v.x.mul(sinR).add(v.z.mul(cosR));
+        return vec3(
+          x
+            .mul(ny.add(nz.mul(nz).mul(invOnePlusNy)))
+            .add(v.y.mul(nx))
+            .add(z.mul(cross)),
+          x.mul(nx.negate()).add(v.y.mul(ny)).sub(z.mul(nz)),
+          x
+            .mul(cross)
+            .add(v.y.mul(nz))
+            .add(z.mul(ny.add(nx.mul(nx).mul(invOnePlusNy)))),
+        );
+      };
+      mat.positionNode = turnToGround(
+        vec3(rawPosition.x, rawPosition.y.mul(fade), rawPosition.z).mul(scale),
+      )
+        .add(displacement)
+        .add(offset);
+
+      // Cofactor of the smooth ribbon deformation, without division by fade:
+      // f*H + n.y*N + k*(H*dot(d,N) - N*dot(d,H)). Here H is the
+      // yaw/tilt-rotated horizontal source normal; d is actual tip displacement.
+      // Recover h from raw source y=h*B(t), never the already-deformed position.
+      // No additional normal/height attribute, varying, texture, or render pass.
+      const sourceNormal = attribute("normal", "vec3");
+      const horizontalNormal = turnToGround(
+        vec3(sourceNormal.x, float(0), sourceNormal.z),
+      ).toVar("naturalGrassHorizontalNormal");
+      const c = appearance.BLADE_CONTROL_HEIGHT;
+      const q = appearance.BLADE_TIP_HEIGHT;
+      const curve = t.mul(2 * c).add(t.mul(t).mul(q - 2 * c));
+      const curveDerivative = float(2 * c).add(t.mul(2 * (q - 2 * c)));
+      // Both guarded denominators are exact on retained non-root vertices.
+      // Roots have t=B(t)=d=0, so their wind correction remains exactly zero.
+      const k = curve
+        .mul(1.8)
+        .div(
+          t
+            .max(1e-5)
+            .mul(scale)
+            .mul(rawPosition.y.max(1e-5))
+            .mul(curveDerivative),
+        );
+      const deformedNormal = horizontalNormal
+        .mul(fade)
+        .add(terrainNormal.mul(sourceNormal.y))
+        .add(
+          horizontalNormal
+            .mul(dot(displacement, terrainNormal))
+            .sub(terrainNormal.mul(dot(displacement, horizontalNormal)))
+            .mul(k),
+        )
+        .toVar("naturalGrassDeformedNormal");
+      const normalLengthSq = dot(deformedNormal, deformedNormal);
+      // A fully distance-collapsed root has no unique ribbon normal. Use its
+      // finite terrain normal, including when both branches are evaluated.
+      const bladeNormal = normalLengthSq
+        .greaterThan(1e-12)
+        .select(
+          deformedNormal.div(pow(normalLengthSq.max(1e-12), 0.5)),
+          terrainNormal,
+        )
+        .toVarying("v_curvedGrassNormal");
+      // Opposite valid vertex normals can cancel during raster interpolation,
+      // especially at full distance fade. Guard the fragment value as well as
+      // the vertices, keeping both select operands finite even at exact zero.
+      const interpolatedLengthSq = dot(bladeNormal, bladeNormal).toVar(
+        "naturalGrassInterpolatedLengthSq",
+      );
+      const fragmentBladeNormal = interpolatedLengthSq
+        .greaterThan(1e-12)
+        .select(
+          bladeNormal.div(pow(interpolatedLengthSq.max(1e-12), 0.5)),
+          terrainNormal,
+        );
+      mat.normalNode = cameraViewMatrix.transformDirection(
+        mix(
+          terrainNormal,
+          fragmentBladeNormal.mul(faceDirection),
+          float(appearance.BLADE_NORMAL_WEIGHT),
+        ).normalize(),
+      );
+      // The existing per-edge root-height correction is applied afterwards by
+      // GrassGroundingGpu. Its small cross-blade warp is not in this smooth N.
     }
 
     mat.colorNode = Fn(() => {

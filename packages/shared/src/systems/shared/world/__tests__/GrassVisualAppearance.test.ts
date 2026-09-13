@@ -11,6 +11,7 @@ import {
   DENSE_MEADOW_GRASS_VISUAL_PROFILE,
   COMPACT_MEADOW_APPEARANCE,
   CURVED_MEADOW_APPEARANCE,
+  NATURAL_TUFT_APPEARANCE,
   GRASS_CONFIG,
   GrassVisualManager,
   STREAMING_GRASS_VISUAL_PROFILE,
@@ -27,6 +28,7 @@ function manager(
   profile: GrassVisualProfile = {},
   terrain = SCULPTED_COMPACT_WORLD_TERRAIN_PROFILE,
   withWorkerSetup = true,
+  appearanceCandidate?: ConstructorParameters<typeof GrassVisualManager>[13],
 ) {
   const config = createTerrainWorkerConfig(terrain, 16);
   const setup: GrassWorkerSetup = {
@@ -59,6 +61,10 @@ function manager(
     }),
     withWorkerSetup ? setup : undefined,
     profile,
+    undefined,
+    undefined,
+    undefined,
+    appearanceCandidate,
   );
 }
 
@@ -590,6 +596,363 @@ describe("compact meadow appearance candidate (CPU only)", () => {
         [1, [0.2346, 0.4233, 0.1326]],
       ] as const) {
         const actual = colorValue(albedo, {
+          instanceGroundColor: [0.2, 0.4, 0.1],
+          instanceGrassTint: [0.3, 0.45, 0.2, 0.3],
+          uv: [0.5, height],
+        });
+        actual.forEach((value, i) =>
+          expect(value).toBeCloseTo(expected[i], 12),
+        );
+      }
+    } finally {
+      owner.destroy();
+    }
+  });
+});
+
+describe("explicit natural-tuft appearance geometry and material (CPU only)", () => {
+  const tuft = () =>
+    manager(
+      DENSE_MEADOW_GRASS_VISUAL_PROFILE,
+      SCULPTED_COMPACT_WORLD_TERRAIN_PROFILE,
+      true,
+      NATURAL_TUFT_APPEARANCE.id,
+    );
+
+  it("preserves all LOD topology, UVs, buffer layouts and bytes while deterministically changing the authored shape", () => {
+    const baseline = manager(DENSE_MEADOW_GRASS_VISUAL_PROFILE);
+    const candidate = tuft(),
+      repeat = tuft();
+    try {
+      for (let lod = 0; lod < 3; lod++) {
+        const original = baseline["lodGeometries"][lod];
+        const geometry = candidate["lodGeometries"][lod];
+        expect(Object.keys(geometry.attributes).sort()).toEqual([
+          "normal",
+          "position",
+          "uv",
+        ]);
+        expect(geometry.attributes.position.count).toBe([168, 60, 12][lod]);
+        expect(geometry.index!.count / 3).toBe([120, 36, 4][lod]);
+        expect(geometry.index!.array).toBeInstanceOf(Uint16Array);
+        expect(geometry.index!.array).toEqual(original.index!.array);
+        expect(geometry.attributes.uv.array).toEqual(
+          original.attributes.uv.array,
+        );
+        expect(geometryBytes(geometry)).toBe(geometryBytes(original));
+        expect(geometry.groups).toEqual([]);
+        expect(geometry.morphAttributes).toEqual({});
+        expect(geometry.drawRange).toEqual({ start: 0, count: Infinity });
+        for (const key of ["position", "normal", "uv"]) {
+          const attribute = geometry.attributes[key];
+          expect(attribute.array).toBeInstanceOf(Float32Array);
+          expect(attribute.normalized).toBe(false);
+          expect(attribute.array).toEqual(
+            repeat["lodGeometries"][lod].attributes[key].array,
+          );
+          for (const value of attribute.array)
+            expect(Number.isFinite(value)).toBe(true);
+        }
+        expect(geometry.attributes.position.array).not.toEqual(
+          original.attributes.position.array,
+        );
+        const a = new THREE.Vector3(),
+          b = new THREE.Vector3(),
+          c = new THREE.Vector3();
+        for (let i = 0; i < geometry.index!.count; i += 3) {
+          a.fromBufferAttribute(
+            geometry.attributes.position,
+            geometry.index!.getX(i),
+          );
+          b.fromBufferAttribute(
+            geometry.attributes.position,
+            geometry.index!.getX(i + 1),
+          );
+          c.fromBufferAttribute(
+            geometry.attributes.position,
+            geometry.index!.getX(i + 2),
+          );
+          expect(b.sub(a).cross(c.sub(a)).length()).toBeGreaterThan(1e-7);
+        }
+      }
+      expect(geometryBytes(candidate["lodGeometries"][1])).toBe(2136);
+    } finally {
+      baseline.destroy();
+      candidate.destroy();
+      repeat.destroy();
+    }
+  });
+
+  it("builds separate four-blade rooted tufts with a shared height hierarchy, narrow widths and independently reconstructed quadratic curves", () => {
+    const owner = tuft();
+    try {
+      const style = NATURAL_TUFT_APPEARANCE;
+      expect(style.TUFT_BLADES).toBe(4);
+      expect(Object.isFrozen(style)).toBe(true);
+      expect(Object.isFrozen(style.TUFT_HEIGHT_FACTORS)).toBe(true);
+      expect(Object.isFrozen(style.TUFT_ARC_FACTORS)).toBe(true);
+      const heightFactors = [1, 0.62, 0.82, 0.54];
+      const arcFactors = [0.35, 1.15, 0.65, 1.35];
+      // Independently pinned first-member base heights retain the original
+      // deterministic per-blade draw sequence, without importing its generator.
+      const expectedBaseHeights = [
+        [
+          0.2, 0.3013473059, 0.3030034141, 0.3269077651, 0.4036382952,
+          0.455648587,
+        ],
+        [0.2, 0.3421806393, 0.3846700808],
+        [0.2],
+      ];
+      for (const [lod, tier] of GRASS_CONFIG.LOD_TIERS.entries()) {
+        const geometry = owner["lodGeometries"][lod];
+        const position = geometry.attributes.position,
+          normal = geometry.attributes.normal,
+          uv = geometry.attributes.uv;
+        const vertices = tier.bladeSegments * 2 + 1;
+        const groups = tier.bladesPerClump / 4;
+        const centers: THREE.Vector3[] = [];
+        for (let group = 0; group < groups; group++) {
+          const azimuth = group * Math.PI * (3 - Math.sqrt(5));
+          const radius = 0.52 * Math.sqrt((group + 0.5) / groups);
+          const center = new THREE.Vector3(
+            Math.cos(azimuth) * radius,
+            0,
+            Math.sin(azimuth) * radius,
+          );
+          centers.push(center);
+          const roots: THREE.Vector3[] = [];
+          const heights: number[] = [],
+            arcs: number[] = [];
+          for (let member = 0; member < 4; member++) {
+            const root = (group * 4 + member) * vertices;
+            const left = new THREE.Vector3().fromBufferAttribute(
+              position,
+              root,
+            );
+            const right = new THREE.Vector3().fromBufferAttribute(
+              position,
+              root + 1,
+            );
+            const base = left.clone().add(right).multiplyScalar(0.5);
+            roots.push(base);
+            expect(left.y).toBe(0);
+            expect(right.y).toBe(0);
+            expect(base.distanceTo(center)).toBeGreaterThanOrEqual(
+              0.052 - 1e-7,
+            );
+            expect(base.distanceTo(center)).toBeLessThanOrEqual(0.065 + 1e-7);
+            const tip = new THREE.Vector3().fromBufferAttribute(
+              position,
+              root + vertices - 1,
+            );
+            const h = tip.y / 0.92;
+            heights.push(h);
+            expect(h).toBeGreaterThanOrEqual(
+              0.2 * heightFactors[member] - 1e-7,
+            );
+            expect(h).toBeLessThanOrEqual(0.55 * heightFactors[member] + 1e-7);
+            expect(h).toBeCloseTo(
+              expectedBaseHeights[lod][group] * heightFactors[member],
+              6,
+            );
+            expect(left.distanceTo(right) / h).toBeCloseTo(0.095, 6);
+            const horizontalArc =
+              Math.hypot(tip.x - base.x, tip.z - base.z) / h;
+            arcs.push(horizontalArc);
+            expect(horizontalArc).toBeGreaterThanOrEqual(
+              0.48 * 0.8 * arcFactors[member] - 1e-6,
+            );
+            expect(horizontalArc).toBeLessThanOrEqual(
+              0.48 * 1.2 * arcFactors[member] + 1e-6,
+            );
+            const control = new THREE.Vector3(base.x, h * 0.78, base.z);
+            const widthAxis = right.clone().sub(left).normalize();
+            for (let v = 0; v < vertices; v++) {
+              const index = root + v,
+                t = uv.getY(index);
+              const expected = base
+                .clone()
+                .multiplyScalar((1 - t) ** 2)
+                .addScaledVector(control, 2 * (1 - t) * t)
+                .addScaledVector(tip, t * t)
+                .addScaledVector(
+                  widthAxis,
+                  (2 * uv.getX(index) - 1) *
+                    h *
+                    0.095 *
+                    0.5 *
+                    (1 - t * GRASS_CONFIG.BLADE_TAPER),
+                );
+              const actual = new THREE.Vector3().fromBufferAttribute(
+                position,
+                index,
+              );
+              expect(actual.distanceTo(expected)).toBeLessThan(1e-7);
+              const tangent = control
+                .clone()
+                .sub(base)
+                .multiplyScalar(2 * (1 - t))
+                .addScaledVector(tip.clone().sub(control), 2 * t);
+              const expectedNormal = widthAxis
+                .clone()
+                .cross(tangent)
+                .normalize();
+              const actualNormal = new THREE.Vector3().fromBufferAttribute(
+                normal,
+                index,
+              );
+              expect(actualNormal.length()).toBeCloseTo(1, 6);
+              expect(actualNormal.distanceTo(expectedNormal)).toBeLessThan(
+                4e-5,
+              );
+              expect(actualNormal.dot(tangent.clone().normalize())).toBeCloseTo(
+                0,
+                5,
+              );
+            }
+          }
+          for (const a of roots)
+            for (const b of roots)
+              expect(a.distanceTo(b)).toBeLessThanOrEqual(0.13 + 1e-7);
+          for (let member = 0; member < 4; member++)
+            expect(heights[member] / heights[0]).toBeCloseTo(
+              heightFactors[member],
+              6,
+            );
+          expect(heights[0]).toBeGreaterThan(heights[2]);
+          expect(heights[2]).toBeGreaterThan(heights[1]);
+          expect(heights[1]).toBeGreaterThan(heights[3]);
+          expect(arcs[0]).toBeLessThan(arcs[2]);
+          expect(arcs[2]).toBeLessThan(arcs[1]);
+          expect(arcs[1]).toBeLessThan(arcs[3]);
+        }
+        for (let i = 0; i < centers.length; i++)
+          for (let j = i + 1; j < centers.length; j++)
+            expect(centers[i].distanceTo(centers[j])).toBeGreaterThan(0.2);
+      }
+    } finally {
+      owner.destroy();
+    }
+  });
+
+  it("is explicit, leaves every omitted-option profile unchanged, and rejects non-dense or invalid opt-ins", () => {
+    for (const profile of [
+      {},
+      STREAMING_GRASS_VISUAL_PROFILE,
+      COMPACT_ISLAND_GRASS_VISUAL_PROFILE,
+      DENSE_MEADOW_GRASS_VISUAL_PROFILE,
+    ]) {
+      const before = manager(profile),
+        candidate = tuft(),
+        after = manager(profile);
+      try {
+        expect(after["material"].name).toBe(before["material"].name);
+        expect(after["material"].name).not.toBe(NATURAL_TUFT_APPEARANCE.id);
+        for (let lod = 0; lod < 3; lod++) {
+          expect(after["lodGeometries"][lod].index!.array).toEqual(
+            before["lodGeometries"][lod].index!.array,
+          );
+          for (const key of ["position", "normal", "uv"])
+            expect(after["lodGeometries"][lod].attributes[key].array).toEqual(
+              before["lodGeometries"][lod].attributes[key].array,
+            );
+        }
+      } finally {
+        before.destroy();
+        candidate.destroy();
+        after.destroy();
+      }
+      if (profile !== DENSE_MEADOW_GRASS_VISUAL_PROFILE)
+        expect(() =>
+          manager(
+            profile,
+            SCULPTED_COMPACT_WORLD_TERRAIN_PROFILE,
+            true,
+            NATURAL_TUFT_APPEARANCE.id,
+          ),
+        ).toThrow("exact dense meadow profile");
+    }
+    expect(() =>
+      manager(
+        { ...DENSE_MEADOW_GRASS_VISUAL_PROFILE, clumpSpacingMultiplier: 1 },
+        SCULPTED_COMPACT_WORLD_TERRAIN_PROFILE,
+        true,
+        NATURAL_TUFT_APPEARANCE.id,
+      ),
+    ).toThrow("Compact grass profile mismatch");
+    expect(() =>
+      manager(
+        DENSE_MEADOW_GRASS_VISUAL_PROFILE,
+        SCULPTED_COMPACT_WORLD_TERRAIN_PROFILE,
+        true,
+        "unknown-tuft" as NonNullable<
+          ConstructorParameters<typeof GrassVisualManager>[13]
+        >,
+      ),
+    ).toThrow("exact dense meadow profile");
+  });
+
+  it("retains the dense render budget and one opaque texture-free PBR material with sun-independent albedo", () => {
+    const owner = tuft();
+    try {
+      const material = owner["material"];
+      expect(material.name).toBe("natural-tuft-v1");
+      expect(owner.getProfileReceipt()).toMatchObject({
+        profileId: "compact-meadow-v2",
+        eligibility: "compact-pbr-v1",
+        minimumLodLevel: 1,
+        clumpSpacing: 1.75,
+        maxRenderDistance: 140,
+        maxChunksPerFrame: 1,
+        castShadow: false,
+      });
+      expect(material.transparent).toBe(false);
+      expect(material.depthWrite).toBe(true);
+      expect(material.side).toBe(THREE.DoubleSide);
+      expect(material.roughness).toBe(1);
+      expect(material.metalness).toBe(0);
+      expect(material.emissive.getHex()).toBe(0);
+      expect(material.lights).toBe(true);
+      expect(material.map).toBeNull();
+      expect(material.normalMap).toBeNull();
+      expect(material.alphaMap).toBeNull();
+      const albedo = graph(material.colorNode!);
+      expect(albedo.has(owner.shadeUniforms.tint)).toBe(false);
+      expect(albedo.has(owner.shadeUniforms.strength)).toBe(false);
+      expect(albedo.has(owner["sunDirUniform"]!)).toBe(false);
+      expect(
+        [...albedo]
+          .filter((n) => n.type === "AttributeNode")
+          .map((n) => Reflect.get(n, "_attributeName"))
+          .sort(),
+      ).toEqual(["instanceGrassTint", "instanceGroundColor", "uv"]);
+      const normals = graph(material.normalNode!);
+      for (const name of [
+        "normal",
+        "instanceGroundNormal",
+        "instanceRotScaleHash",
+      ])
+        expect(
+          [...normals].some((n) => Reflect.get(n, "_attributeName") === name),
+        ).toBe(true);
+      expect(normals.has(cameraViewMatrix)).toBe(true);
+      expect([...normals].some((n) => n.type === "FrontFacingNode")).toBe(true);
+      for (const root of [
+        material.positionNode!,
+        material.normalNode!,
+        material.colorNode!,
+      ])
+        expect(
+          [...graph(root)].some(
+            (n) => Reflect.get(n, "isTextureNode") === true,
+          ),
+        ).toBe(false);
+      for (const [height, expected] of [
+        [0, [0.128, 0.256, 0.064]],
+        [0.5, [0.179, 0.3355, 0.097]],
+        [1, [0.23, 0.415, 0.13]],
+      ] as const) {
+        const actual = colorValue(expand(material.colorNode!), {
           instanceGroundColor: [0.2, 0.4, 0.1],
           instanceGrassTint: [0.3, 0.45, 0.2, 0.3],
           uv: [0.5, height],

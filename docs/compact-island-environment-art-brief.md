@@ -1,6 +1,143 @@
 # Compact island environment art: next delivery slice
 
-## Current graphics gate and next visible pass — 2026-09-13
+## Natural tuft trial and rendering research — 2026-09-13
+
+The explicit `grassAppearance=natural-tuft-v1` trial uses the existing dense
+meadow profile and 12-blade/36-triangle visible clump. Native01's broad paper-fan
+silhouette was rejected. The revised three four-blade tufts use narrower
+quadratic ribbons and an asymmetric shared height/lean hierarchy. Ordinary,
+fixed-arena and previous meadow appearances remain unchanged.
+Candidate wind uses world-space clump positions; smooth normals follow wind and
+distance flattening without a new attribute, texture or pass. This is not exact
+normal reconstruction of the later left/right root-height warp.
+
+The native03 source passes 230 tests across 12 files, three package
+typechecks/builds and 25 native preflight checks. The actual six-leaf
+terrain/worker/grounding test preserves input arrays and all five installed
+attributes for common survivors. A changed blade footprint can change accepted
+populations without changing density settings; the first broad trial's CPU
+census is not the final native census.
+
+Native03 retains 11,419 clumps / 411,084 installed grass triangles across four
+exact snapshots and six actual shader/grounding-buffer owners. That is 94 more
+clumps than historical native05's 11,325 (+0.830%), not unchanged total work.
+All 712 source pins, 634 archives and 18 incremental checkpoint hashes verify.
+The eight-second 1280x720 VP8 recording completes, decodes 234 frames, and stops
+its owned track/recorder. Root and independent review provisionally accept the
+revised tuft silhouette, not whole-landscape or continuous-motion quality.
+
+The full native03 study remains FAILED: an existing mushroom placement guard
+rejects upload-counter advances after the grass/video gates. All 64 placement
+buffers across 16 owners have identical full-buffer hashes/layouts with version
++1; production finalization unconditionally marks populated chunks for upload,
+which is a plausible source-backed explanation, not a recorded call trace.
+One separately qualified hero index widening also occurs. Do not ignore these
+counters, claim JS-buffer identity across snapshots, or call the full run clean.
+Downstream mushroom/outcrop images are missing; screenshot completeness fails.
+Owned browser/launcher/services close and four ports clear. Zero page/WebGPU
+errors coexist with 19 existing content errors. Native01 (exit137, cause unknown)
+and native02 (now-fixed capture metadata collision) also remain failed records.
+
+Native03's raw instrumented timings independently recompute: campus CPU
+p50/p95/p99 = 15.2/32.3/44.7 ms (519 measured frames; max104.3 ms), meadow =
+12.8/18.4/23.7 ms (592 frames). GPU render-pass sums are respectively
+16.32/19.53/21.04 and 16.25/20.97/23.59 ms. These are not presented FPS or causal
+grass costs. Campus CPU tails remain a real qualification concern. Actual
+WebGPU 1280x720, 4x MSAA, existing shadows and no post-processing were retained;
+no sustained-performance or default-promotion approval is implied.
+
+Evidence: `asset-studio/game-test-integration/grass-natural-tuft-native03/`.
+Report SHA-256: `131fa33934f55424caa7236b7e71cf1fc3832bf822f0120d25109d5ad9503e15`.
+Video SHA-256: `f93b4c092dd9097343b78c78e4b50a383a4f49ff6ac44b9464ebe51c9eb9c1e6`.
+
+Final review subsequently catches a fragment-stage edge case: opposing valid
+vertex normals can interpolate to zero at full distance fade. Guarding that
+interpolated normal and testing actual fragment inputs brings the final suite
+to **231/231 across 12 files**; three package typechecks/builds and 25 native
+preflight checks pass. Native04's local study and complete screenshot/cleanup
+checks pass, with six native grass pipelines, four stable 11,419-clump snapshots,
+nine world views and the completed wind clip. Overall remains failed on the
+same 19 content errors, not on shader or cleanup failures. All 712 source pins
+stay unchanged; owned browser/launcher/services close and four ports clear.
+
+Native04 CPU p50/p95/p99 is 15.7/22.6/34.5ms campus (558 frames) and
+14.2/19.6/24.0ms meadow (584); GPU render-pass sums are 16.25/19.92/21.50 and
+16.25/19.99/21.10ms. This does not establish a causal improvement over native03
+or sustained 60fps. The final 8,015.9ms clip is VP8 1280x720, 6,156,061 bytes,
+228 decoded frames, with recorder/tracks stopped. Final report SHA-256:
+`8dbf8e588772641bbd5c2bfd954cb870d6b2aef94cf28716702311dd95e2eabd`;
+video `40e1c92306860efc38e993af5857277a523c1f064f83846d840975d186684a51`.
+See `asset-studio/natural-tuft01/QUALIFICATION.md` for final versus historical
+test hashes, the explicit counter-admission correction and retained failures.
+
+The saved native03 CPU profile also identifies a no-quality-reduction
+optimization hypothesis: `createVRMFactory` recursively updates descendants for
+each skeleton bone, and movement forces another full hierarchy update. Qualify
+one correctly ordered propagation from minimal roots against exact bone/skinned
+position/normal/attachment behavior, animation and camera modes, with measured
+traversal counts. The external CPU8 torso fixture separately allocates matrix
+clones and transient per-vertex arrays during real deformation; pool these only
+with identical arithmetic and safety guards. It is not a Chrome probe wrapper
+or evidence of shipped-equipment performance. The profile has an initial1.193s
+gap and late10-80ms sample gaps, so neither aggregate sampled weights nor GC
+samples prove a cause for individual slow frames. Keep actual native measurement
+and provenance, rather than declaring a speedup from source inspection.
+
+### Next visible slice: connected habitat, not another blade adjustment
+
+The terrain still reads as uniform turf with separate rocks and scattered
+plants. Connect the admitted Haven foot-slope, western preparation trees at
+(318.5,312.5)/(318.5,344.5), and workshop rocks into one coherent ecological
+transition, first bounded to approximately x300-332/z303-365. Use asymmetric,
+soft-edged pockets rather than circular tree rings or another talus stripe.
+The existing grass/dirt/rock layers support mineral-soil transitions, not an
+invented leaf-litter material. Share the composition across whole-PBR terrain
+and vegetation, preserve functional tree positions and harvest/service access,
+and measure any new cost. Historical resource IDs are not coordinates.
+
+Current `havenGroundWeights` is color-only and `grassSupport` ignores Haven
+wear/talus/planting, while the worker adds unrelated patch noise. That is the
+implementation disconnect to address. Inline probability changes would also
+re-phase the legacy RNG: genuine fixed-budget redistribution requires an
+explicit bounded alternative pool, baseline quota and quota admission AFTER
+full root grounding. Fail an unfillable candidate instead of silently thinning.
+Require CPU/worker/TSL parity, actual installed counts/contact/routes, matched
+close and aerial views, a moving path and measured native costs before approval.
+
+The first implementation slice can avoid redistribution entirely: evaluate two
+bounded habitat pockets in the terrain whole-PBR blend and at each existing
+grass clump's world-space base. Blend the blade root toward the matching soil
+mean while retaining its tip colour; optionally author local vertical growth
+in [0.85,1]. Multiply the current distance fade by that factor in BOTH position
+and smooth-normal graphs, never change uniform instance scale or post-grounded
+world Y. The existing full-root validator sweeps fade 0 and 1, so intermediate
+vertical factors remain inside its admitted envelope. Prove all five instance
+arrays, source IDs, roots, counts and bounds unchanged. This creates coherent
+substrate/shorter growth, not increased density or genuine leaf litter.
+
+[AMD's procedural grass research](https://gpuopen.com/learn/mesh_shaders/mesh_shaders-procedural_grass_rendering/)
+supports using curved ribbons and their derivatives to form readable grass
+patches. We use those geometric principles within the existing instanced WebGPU
+vertex path, not the article's different mesh-shader backend.
+[NVIDIA's deformation chapter](https://developer.nvidia.com/gpugems/gpugems/part-vi-beyond-triangles/chapter-42-deformers)
+informs the normal correction; independent tangent calculations must verify the
+actual shader graph rather than merely testing a second copy of its formula.
+
+Three r186 already exposes local occlusion, screen-space indirect light and
+temporal antialiasing. Those are subsequent controlled candidates, not free
+quality switches: [SSGI](https://threejs.org/docs/pages/SSGINode.html) has explicit
+per-pixel sampling and denoising costs; its temporal path warns about ghosting.
+[TRAA](https://threejs.org/docs/pages/TRAANode.html) needs depth/velocity and
+disables MSAA. Any experiment must declare that pipeline change, retain the
+current native-resolution/MSAA comparison and test animated foliage, avatars,
+camera cuts, contact and actual frame cost. Do not equate feature availability
+with target-hardware performance or compensate through hidden quality cuts.
+
+## Previous checkpoint: packed imports and mushroom LOD — 2026-09-13
+
+The following plan is retained as history. The natural-tuft trial above now
+implements the tuft and world-space wind work; the previous appearance remains
+available unchanged, and broader landscape/performance gates remain open.
 
 The packed-static import correction and same-owner mushroom LOD pass native05's
 local study, not an AAA sign-off. The second native run exposed stale-camera
