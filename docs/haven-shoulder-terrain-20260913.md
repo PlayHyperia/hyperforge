@@ -6,6 +6,89 @@ duel/betting rules. The compact island and single arena remain the active world.
 
 ## Implemented surface
 
+### Ground composition follow-through
+
+The first ground-material trial (`haven-ground-native01`) removes the arbitrary
+fresh/dry meadow tint and adds a connected workshop wear apron using the existing
+six packed maps. Its native images improve those two aspects. Its broad talus
+ribbon, however, reads as a paved gray road at the hill foot and is **rejected
+visually**. A technically passing study does not make that treatment acceptable.
+The retained failed-art capture is not a production reference.
+
+The material field is detached/frozen and shared with the real emitted grass
+worker; all four PBR channels use the same weights. It changes no heights,
+terrain allocation, road mask, grass support/placement/RNG, tree population,
+render resolution, lights or shadow settings. Removing the old meadow tint also
+removes its extra noise lookup. Additional field arithmetic still has a real
+shader cost; no frame-time saving is claimed.
+
+For this first trial, 46 focused tests and the 95-file regression (1,330/1,330)
+pass under Node 22.23.2. Shared/client/server typechecks and builds pass. The
+current `service-planting01/study01.test.mjs` invocation is **19/19**, not 23;
+older 23-test summaries do not describe this single-file invocation. Independent
+native verification passes 701 current pins, 623 archives, nine exact cameras,
+37 clean fog brackets and eight rejected corruption controls. Actual terrain
+position/index digests, world identity and 48 authoritative tree owners remain
+unchanged. New grass buffer digests prove current-run stability, not unavailable
+historical byte equality.
+
+Report: `haven-ground-native01/report.json`, SHA256
+`0292434e80a1aef12838cde4dde392942f407c0f67f9ffe2db312a9010cd05c5`.
+Verifier result: `native-verification-haven-ground-native01.json`, SHA256
+`4ab8b402f4c26b7e412bf783852f38757a80ab662138f98cadfa78e249354832`.
+Page/GPU/cleanup errors are zero; the owned browser and stack are closed. The
+overall run remains false with 19 existing dagger-fit/cow404 content errors.
+Short p95 CPU14.8/13.3ms and GPU-pass sums18.15/19.46ms (campus/meadow) are not
+presented FPS, sustained60, full-load streaming or an isolated cost comparison.
+
+The bounded refinement is now retained: core/outer radius .6/3.5m, strength .65,
+rock fraction .85 and smoothstep(.008,.05) on geometric slope. Both reviewers
+inspected all nine native02 images. The artificial band is gone, the meadow and
+work apron remain, and no obvious new static material regression was found.
+This closes the local refinement, not the overall environment-art gate.
+The GPU uses the retained mesh geometric normal; the existing CPU grass palette
+uses authored-height finite differences. Same-input gate algebra is tested,
+but these slope sources need not coincide at every root. Inspect root-color
+cohesion at the toe; do not equate arithmetic parity with pixel equality.
+
+The final 46 focused tests, 95-file regression (1,330/1,330), all three package
+typechecks/builds, lint/format and 20/20 capture preflight tests pass. Native02
+independent verification passes all701 current source pins /623 archives,
+nine matching cameras,37 clean fog brackets,13 corruption controls, unchanged
+terrain geometry and grass offset/root hashes against native01,48 resource trees
+and full world identity. Page/GPU/cleanup errors zero; browser, launcher and owned
+ports closed. The overall run remains false with the same19 content errors.
+
+Native02 report SHA256:
+`c2045903b8fb01502a6633520ce64788b2334296f92e5718c5554ef8d3def600`.
+`native-verification-haven-ground-native02.json` SHA256:
+`f069fadcdabc8e9398c02fa3958c0573b135102bf6dac64ff1dc619c2a581eb8`.
+`haven-ground-regression02.json` SHA256:
+`82ae6b0419988562f5025f624bfd77917c717eabc4810a2df24e689e3ecccf60`.
+`haven-ground-build02.log` SHA256:
+`963d8947b1cbcbd290d1e6799c452e5eb4d8e4f7750fe1cd0f061bdad3ccd5fa`.
+
+Final short instrumented p95 CPU16.5/13.8ms and GPU-pass sums18.284544/19.398656ms
+(599 frames per campus/meadow window) remain unapproved performance evidence.
+Different actor poses/workloads prevent isolated attribution. No sustained60,
+presented-FPS or encoded-stream acceptance is implied.
+
+Stop iterating this toe treatment. Remaining art gaps include carpet-like turf,
+sparse isolated grass blades, overly dark/cyan tree presentation, saturated
+shrubs, weak prop contact, conical grass-capped distant ridges and broad rounded
+service/path patches. The exposed coast still needs substantial authored work.
+The source-pinned `tree-lighting-mushroom-lod-audit01.md` distinguishes authored
+magic-tree color from a normals defect and identifies a concrete next efficiency
+task: admit visually qualified mushroom LODs into the existing instanced owner,
+preserving close hero geometry, population and shadow continuity.
+
+The preceding terrain/landscape checkpoint is committed and pushed to the game
+branch as `0b75b5ab184d5b5efd142eeb8619687729411dc7` and assets branch as
+`37e88245a411fc97118ff818453b3291b411f6ba`; GitHub author and committer were both
+verified as `dreaminglucid`. This subsequent ground trial is separate work.
+
+### Shared height field
+
 `WorldTerrainProfile.havenShoulder` explicitly admits bounded world-space data
 for an asymmetric crest, rock faces, meadow shelf, toe and oblique drainage in
 X272–314/Z303–367. The base sculpt-v5 fixture remains numerically unchanged when

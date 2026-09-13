@@ -1,5 +1,63 @@
 # Duel Arena, Streaming, and Hyperbet Launch Checklist
 
+## Haven ground composition checkpoint — 2026-09-13
+
+Status: **G04 OPEN. Refined meadow/workshop ground is a verified local visual
+improvement. No AAA, sustained-performance or launch approval.**
+
+- [x] Replaced arbitrary fresh/dry meadow color islands with the source turf
+  appearance and connected the workshop wear apron. Reuses six packed maps and
+  complete albedo/normal/roughness/AO blending; no changed terrain geometry,
+  road mask, tree population, grass placement/support/RNG, lights or resolution.
+- [x] Both material trials pass 46 focused tests and 1,330/1,330 broad tests
+  across 95 files; shared/client/server typechecks/builds and changed-file
+  lint/format pass on pinned Node22.23.2/Bun1.3.14. Final preflight is 20/20
+  (the first trial's single-file invocation was 19/19).
+  Wrong-runtime attempts and the corrected test's initial failure are retained.
+- [x] Independent native01 verification: 701 source pins / 623 archives,
+  nine exact cameras, 37 fog brackets, unchanged actual terrain buffer hashes,
+  48 authoritative choppable trees, stable same-run grass owners/buffers and
+  eight rejected corruption controls. Page/GPU/cleanup errors zero; owned
+  browser, launcher and ports closed.
+- [x] Rejected native01's paved-looking talus band. Native02 uses .6/3.5m
+  core/outer radii, .65 strength, .85 rock fraction and a geometric-slope gate.
+  Both reviewers inspected all nine images: the artificial road-like band is
+  gone, meadow/work apron retained, no obvious new static material regression.
+  Stop iterating this local transition; the larger art deficits remain open.
+- [x] Native02 independent verifier passes all701 current pins /623 archives,
+  nine matching cameras,37 clean fog brackets, unchanged terrain AND grass
+  offset/root hashes against native01,48 trees and13 corruption controls.
+  The old broad-band receipt is rejected by the new observer. Cleanup is clean.
+- [ ] Static images show no obvious new root-color stripe, but CPU authored-
+  height slope and GPU retained-normal slope need not agree per root. Moving
+  closeups, wind/LOD transitions and broader material cohesion remain open.
+- [ ] Sustained smoothness and content blockers remain open. Native02 short
+  p95 CPU16.5/13.8ms and GPU-pass sums18.28/19.40ms are not presented FPS,
+  sustained60, isolated material cost or full streaming load. Overall false
+  retains all19 known dagger-fit/cow404 errors.
+- [ ] Deliver coherent resource-tree/understory, architecture and coastline
+  treatment. Blue magic-tree color is partly authored, not proof of a general
+  shading bug. Actual trees remain the choppable resource population.
+- [ ] Establish visually qualified projected-size LODs for high-cost equipment
+  and small vegetation; retain close-up hero quality, shadows and population.
+  Start with mushrooms: 5,013 triangles each, no supplied LODs and an explicit
+  category exclusion keep the highest-detail geometry active until fade.
+  Current complete torso/leg kits alone submit about1.145M triangles across
+  main/sun for two actors; mushrooms contribute about270–391k in the sampled
+  views. These are repeated submissions, not unique scene geometry or proven
+  savings. Keep the real avatar motion/contact and query-filter tasks open.
+- [x] Previous verified terrain/landscape checkpoint pushed to game
+  `0b75b5ab184d5b5efd142eeb8619687729411dc7` and assets
+  `37e88245a411fc97118ff818453b3291b411f6ba`; GitHub author AND committer
+  confirmed as `dreaminglucid`. Subsequent ground work is a separate checkpoint.
+
+Evidence: `docs/haven-shoulder-terrain-20260913.md`,
+`asset-studio/service-planting-soil01/native-verification-haven-ground-native02.json`,
+`native-performance-audit02.md`, `tree-lighting-mushroom-lod-audit01.md`, and
+`asset-studio/game-test-integration/haven-ground-native02/report.json`.
+Report SHA256: `c2045903b8fb01502a6633520ce64788b2334296f92e5718c5554ef8d3def600`.
+Native01 is retained as the rejected broad-band art comparison.
+
 ## Haven terrain implementation checkpoint — 2026-09-13
 
 Status: **G04 OPEN. Shared terrain and native installation are verified;

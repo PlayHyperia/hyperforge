@@ -24,6 +24,21 @@ export type CompactTerrainPlantingLobe = Readonly<{
   radiusZ: number;
 }>;
 
+/** World-space surface authoring, never a terrain-height or vegetation mask. */
+export type CompactTerrainGroundRibbon = Readonly<{
+  startX: number;
+  startZ: number;
+  endX: number;
+  endZ: number;
+  coreRadius: number;
+  outerRadius: number;
+  strength: number;
+}>;
+export type CompactTerrainHavenGround = Readonly<{
+  talus: readonly CompactTerrainGroundRibbon[];
+  wear: readonly CompactTerrainGroundRibbon[];
+}>;
+
 /** Detached colour-only view of the already admitted landform, not new terrain. */
 export type CompactTerrainMacroField = Readonly<{
   centerX: number;
@@ -42,6 +57,7 @@ export type CompactTerrainMacroField = Readonly<{
   headlandDirectionZ: number;
   headlandOuterCos: number;
   headlandInnerCos: number;
+  havenGround?: CompactTerrainHavenGround;
 }>;
 
 export function createCompactTerrainColorOperations() {
@@ -124,6 +140,12 @@ export function createCompactTerrainColorOperations() {
     plantingSoilStrength: 0.9,
     plantingEdgeWidth: 0.45,
     plantingEdgeNoiseWidth: 0.1,
+    havenTalusCoreRadius: 0.6,
+    havenTalusOuterRadius: 3.5,
+    havenTalusStrength: 0.65,
+    havenTalusRockFraction: 0.85,
+    havenTalusSlopeStart: 0.008,
+    havenTalusSlopeEnd: 0.05,
   };
   const palette = {
     grass: [0.12687350988906373, 0.16117143469264922, 0.03425721790414253],
@@ -137,6 +159,27 @@ export function createCompactTerrainColorOperations() {
     },
     mix(a: number, b: number, weight: number) {
       return a + (b - a) * weight;
+    },
+    ribbon(x: number, z: number, ribbon: CompactTerrainGroundRibbon) {
+      const dx = ribbon.endX - ribbon.startX;
+      const dz = ribbon.endZ - ribbon.startZ;
+      const px = x - ribbon.startX;
+      const pz = z - ribbon.startZ;
+      const t = Math.max(
+        0,
+        Math.min(1, (px * dx + pz * dz) / (dx * dx + dz * dz)),
+      );
+      const crossX = px - t * dx;
+      const crossZ = pz - t * dz;
+      return (
+        ribbon.strength *
+        (1 -
+          math.smooth(
+            ribbon.coreRadius * ribbon.coreRadius,
+            ribbon.outerRadius * ribbon.outerRadius,
+            crossX * crossX + crossZ * crossZ,
+          ))
+      );
     },
   };
   const operations = {
@@ -274,7 +317,92 @@ export function createCompactTerrainColorOperations() {
         field.headlandInnerCos <= field.headlandOuterCos
       )
         throw new Error("Invalid admitted macro surface field");
-      return Object.freeze(field);
+      if (!profile.havenShoulder) return Object.freeze(field);
+      // The profile boundary already admitted this curve. Detach its XZ knots
+      // once; no height resampling, second landform, or per-candidate allocation.
+      const points = profile.havenShoulder.toe;
+      if (points.length < 2 || points.length > 16)
+        throw new Error("Invalid admitted Haven ground curve");
+      const talus: CompactTerrainGroundRibbon[] = [];
+      for (let i = 1; i < points.length; i++) {
+        const [startX, startZ] = points[i - 1];
+        const [endX, endZ] = points[i];
+        if (
+          ![startX, startZ, endX, endZ].every(Number.isFinite) ||
+          (startX === endX && startZ === endZ)
+        )
+          throw new Error("Invalid admitted Haven ground segment");
+        talus.push(
+          Object.freeze({
+            startX,
+            startZ,
+            endX,
+            endZ,
+            coreRadius: composition.havenTalusCoreRadius,
+            outerRadius: composition.havenTalusOuterRadius,
+            strength: composition.havenTalusStrength,
+          }),
+        );
+      }
+      // Connected working-yard footprints in the existing authored court.
+      // These are not paths, collision envelopes, or camera-relative regions.
+      const wear = Object.freeze([
+        Object.freeze({
+          startX: 334,
+          startZ: 332,
+          endX: 337,
+          endZ: 344,
+          coreRadius: 2.7,
+          outerRadius: 4.2,
+          strength: 0.88,
+        }),
+        Object.freeze({
+          startX: 337,
+          startZ: 344,
+          endX: 343,
+          endZ: 348,
+          coreRadius: 1.7,
+          outerRadius: 3.2,
+          strength: 0.65,
+        }),
+      ]);
+      return Object.freeze({
+        ...field,
+        havenGround: Object.freeze({
+          talus: Object.freeze(talus),
+          wear,
+        }),
+      });
+    },
+    havenGroundWeights(
+      x: number,
+      z: number,
+      field?: CompactTerrainHavenGround | null,
+      geometricSlope = 0,
+    ) {
+      let talus = 0;
+      let wear = 0;
+      if (field) {
+        // MAX of continuous bounded segment kernels avoids nearest-segment
+        // selection discontinuities and overlapping additive dark rings.
+        for (const ribbon of field.talus)
+          talus = Math.max(talus, math.ribbon(x, z, ribbon));
+        for (const ribbon of field.wear)
+          wear = Math.max(wear, math.ribbon(x, z, ribbon));
+      }
+      // A mineral transition at the hillside foot, not a paved stripe across
+      // level lawn. Geometric slope alone controls this colour/PBR gate;
+      // the vegetation support function remains completely independent.
+      return {
+        talus:
+          talus *
+          math.smooth(
+            composition.havenTalusSlopeStart,
+            composition.havenTalusSlopeEnd,
+            Math.max(0, Math.min(1, geometricSlope)),
+          ),
+        wear,
+      };
     },
     macroWeights(
       x: number,
@@ -654,28 +782,43 @@ export function createCompactTerrainColorOperations() {
         input.meadowNoise ?? input.noiseValue,
         macroSurface.dry,
       );
-      const result = palette.grass.map(
-        (grass, channel) =>
-          math.mix(
-            math.mix(
-              math.mix(
-                grass * meadowTint[channel],
-                palette.dirt[channel],
-                dirt,
-              ),
-              math.mix(
-                palette.rock[channel],
-                palette.dirt[channel],
-                coast.soil,
-              ) * math.mix(1, composition.coastWetAlbedo, coast.wetness),
-              cliff,
-            ),
-            palette.dirt[channel],
-            road,
-          ) *
-          variation *
-          wetAlbedo,
+      const havenGround = input.surface?.macroField?.havenGround;
+      const authored = operations.havenGroundWeights(
+        input.surface?.x ?? 0,
+        input.surface?.z ?? 0,
+        havenGround,
+        input.slope,
       );
+      // The existing authored pond bed remains soil even if future admitted
+      // ground ribbons overlap it. This changes neither pond geometry nor water.
+      const talus = authored.talus * (1 - pondSurface.soil);
+      const result = palette.grass.map((grass, channel) => {
+        const rock =
+          math.mix(palette.rock[channel], palette.dirt[channel], coast.soil) *
+          math.mix(1, composition.coastWetAlbedo, coast.wetness);
+        let ground = math.mix(
+          grass * (havenGround ? 1 : meadowTint[channel]),
+          palette.dirt[channel],
+          dirt,
+        );
+        if (havenGround) {
+          ground = math.mix(
+            ground,
+            math.mix(
+              palette.dirt[channel],
+              rock,
+              composition.havenTalusRockFraction,
+            ),
+            talus,
+          );
+          ground = math.mix(ground, palette.dirt[channel], authored.wear);
+        }
+        return (
+          math.mix(math.mix(ground, rock, cliff), palette.dirt[channel], road) *
+          variation *
+          wetAlbedo
+        );
+      });
       return { r: result[0], g: result[1], b: result[2] };
     },
   };

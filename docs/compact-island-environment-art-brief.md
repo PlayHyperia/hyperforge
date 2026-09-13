@@ -1,5 +1,34 @@
 # Compact island environment art: next delivery slice
 
+## Ground refinement and useful frame headroom — 2026-09-13
+
+The first Haven ground trial removes the arbitrary lawn color islands and
+connects the workshop apron. Its broad gray talus band is visually rejected;
+native02 retains a narrower slope-gated rock transition after two independent
+nine-image reviews confirm the artificial band is gone. All1,330 regressions,
+three package builds/typechecks and20 preflight tests pass;701 current source
+pins/623 archives, unchanged terrain/grass hashes and48 resource trees are
+independently verified. The19 existing content errors and sustained-performance
+gate remain open. Do not present this local improvement as the finished landscape.
+
+The latest source/receipt audit identifies a concrete scalability defect: small
+mushrooms have 5,013 triangles each, no supplied LOD models, and category-level
+LOD/impostor exclusions. They submit 270–391k triangles across main and sun in
+the two recorded views. Complete torso/leg kits contribute about1.145M across
+both passes for two actors. Trees are not the dominant geometry cost, and the
+most visibly blue tree has intentionally teal/blue authored source maps.
+
+Next performance work should retain close-up assets and actual populations,
+but qualify geometry by projected visual error. Meshoptimizer documents
+[attribute-aware simplification and screen-space error](https://github.com/zeux/meshoptimizer#simplification)
+for preserving texture/normal quality and selecting suitable detail levels.
+[Three LOD](https://threejs.org/docs/pages/LOD.html) provides distance switching
+and hysteresis; our existing instanced vegetation owner should retain batching
+and gain an explicitly admitted LOD path, not a separate per-instance object tree.
+These mechanisms do not establish visual equivalence or savings by themselves.
+Require close silhouettes, UV/normal response, threshold motion, zoom/camera
+cuts, shadow continuity, loading/lifetime checks and actual pass/frame evidence.
+
 ## Shared Haven candidate implemented — 2026-09-13
 
 The prototype below is now implemented in the shared profile/worker path and

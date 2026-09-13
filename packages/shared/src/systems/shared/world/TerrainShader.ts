@@ -58,6 +58,7 @@ import {
   blendCompactTerrainLayers,
   createCompactTerrainLayerWeights,
   createCompactPlantingSoil,
+  createCompactHavenGroundWeights,
   createCompactPondSurfaceWeights,
   applyCompactPondWetness,
   applyCompactMeadowTint,
@@ -71,7 +72,23 @@ import {
   COMPACT_TERRAIN_COMPOSITION,
   type CompactTerrainPond,
   type CompactTerrainPlantingLobe,
+  type CompactTerrainHavenGround,
 } from "./CompactTerrainPalette";
+
+/** Configured material graph attribution, not rendered-pixel or timing proof. */
+export type CompactHavenGroundMaterialReceipt = Readonly<{
+  schemaVersion: 1;
+  mode: "authored-haven-ground-v2";
+  descriptor: CompactTerrainHavenGround;
+  sourceGrass: true;
+  wholePbrBlend: true;
+  talusSegments: number;
+  wearSegments: number;
+  talusRockFraction: number;
+  talusSlopeStart: number;
+  talusSlopeEnd: number;
+  grassEligibilityChanged: false;
+}>;
 
 export const TERRAIN_SHADER_CONSTANTS = {
   TRIPLANAR_SCALE: 0.5,
@@ -1187,6 +1204,7 @@ export function createTerrainMaterial(
   terrainUniforms: TerrainUniforms;
   compactTerrainSurface?: CompactTerrainTextureSet;
   compactPlantingMaterial?: readonly CompactTerrainPlantingLobe[];
+  compactHavenGroundMaterial?: CompactHavenGroundMaterialReceipt;
   compactPondMaterial?: {
     profile: CompactTerrainPond;
     parameters: UniformNode<"vec4", THREE.Vector4>;
@@ -1273,7 +1291,7 @@ export function createTerrainMaterial(
   const compactLayers = compactTextures
     ? createCompactTerrainLayers(compactTextures, distSq, noiseValue)
     : null;
-  if (compactLayers) {
+  if (compactLayers && !macroField?.havenGround) {
     // One extra sample of the existing noise texture; no new texture allocation.
     // Dry grass keeps the same physical support, normals and placement field.
     const meadowNoise = texture(
@@ -1670,6 +1688,14 @@ export function createTerrainMaterial(
           compactWeights.dirt,
           compactWeights.cliff,
           compactWeights.road,
+          macroField?.havenGround
+            ? createCompactHavenGroundWeights(
+                vec2(worldPos.x, worldPos.z),
+                macroField.havenGround,
+                pondSurface.soil,
+                slope,
+              )
+            : undefined,
         )
       : null;
   const compactSurface = compactBaseSurface
@@ -1869,6 +1895,7 @@ export function createTerrainMaterial(
     terrainUniforms: TerrainUniforms;
     compactTerrainSurface?: CompactTerrainTextureSet;
     compactPlantingMaterial?: readonly CompactTerrainPlantingLobe[];
+    compactHavenGroundMaterial?: CompactHavenGroundMaterialReceipt;
     compactPondMaterial?: {
       profile: CompactTerrainPond;
       parameters: UniformNode<"vec4", THREE.Vector4>;
@@ -1876,6 +1903,23 @@ export function createTerrainMaterial(
   };
   result.terrainUniforms = terrainUniforms;
   if (plantingLobes.length) result.compactPlantingMaterial = plantingLobes;
+  if (macroField?.havenGround)
+    Object.defineProperty(result, "compactHavenGroundMaterial", {
+      enumerable: true,
+      value: Object.freeze({
+        schemaVersion: 1,
+        mode: "authored-haven-ground-v2",
+        descriptor: macroField.havenGround,
+        sourceGrass: true,
+        wholePbrBlend: true,
+        talusSegments: macroField.havenGround.talus.length,
+        wearSegments: macroField.havenGround.wear.length,
+        talusRockFraction: COMPACT_TERRAIN_COMPOSITION.havenTalusRockFraction,
+        talusSlopeStart: COMPACT_TERRAIN_COMPOSITION.havenTalusSlopeStart,
+        talusSlopeEnd: COMPACT_TERRAIN_COMPOSITION.havenTalusSlopeEnd,
+        grassEligibilityChanged: false,
+      } satisfies CompactHavenGroundMaterialReceipt),
+    });
   if (compactPond && pondParameters)
     result.compactPondMaterial = {
       profile: compactPond,

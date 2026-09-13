@@ -17,6 +17,8 @@ import {
   COMPACT_TERRAIN_COMPOSITION,
   type CompactTerrainMacroField,
   type CompactTerrainPlantingLobe,
+  type CompactTerrainGroundRibbon,
+  type CompactTerrainHavenGround,
 } from "./CompactTerrainPalette";
 import compactTerrainTextureDigests from "../../../data/compact-terrain-textures.json";
 
@@ -450,6 +452,57 @@ export function createCompactPlantingSoil(
   return soil;
 }
 
+/** Same bounded world-space kernels as the serializable CPU palette factory. */
+export function createCompactHavenGroundWeights(
+  worldXZ: Node<"vec2">,
+  field?: CompactTerrainHavenGround | null,
+  pondSoil: Node<"float"> = float(0),
+  geometricSlope: Node<"float"> = float(0),
+) {
+  let talus: Node<"float"> = float(0);
+  let wear: Node<"float"> = float(0);
+  if (!field) return { talus, wear };
+  const ribbonWeight = (ribbon: CompactTerrainGroundRibbon): Node<"float"> => {
+    const dx = ribbon.endX - ribbon.startX;
+    const dz = ribbon.endZ - ribbon.startZ;
+    const px = worldXZ.x.sub(ribbon.startX);
+    const pz = worldXZ.y.sub(ribbon.startZ);
+    const t = px
+      .mul(dx)
+      .add(pz.mul(dz))
+      .div(dx * dx + dz * dz)
+      .clamp(0, 1);
+    const crossX = px.sub(t.mul(dx));
+    const crossZ = pz.sub(t.mul(dz));
+    return float(1)
+      .sub(
+        smoothstep(
+          float(ribbon.coreRadius * ribbon.coreRadius),
+          float(ribbon.outerRadius * ribbon.outerRadius),
+          crossX.mul(crossX).add(crossZ.mul(crossZ)),
+        ),
+      )
+      .mul(ribbon.strength);
+  };
+  for (const ribbon of field.talus) talus = max(talus, ribbonWeight(ribbon));
+  for (const ribbon of field.wear) wear = max(wear, ribbonWeight(ribbon));
+  // Shared by albedo, roughness, AO and the normal frame. Explicit temporaries
+  // keep the seven spatial kernels out of each channel's separate expression.
+  return {
+    talus: talus
+      .mul(
+        smoothstep(
+          float(COMPACT_TERRAIN_COMPOSITION.havenTalusSlopeStart),
+          float(COMPACT_TERRAIN_COMPOSITION.havenTalusSlopeEnd),
+          geometricSlope.clamp(0, 1),
+        ),
+      )
+      .mul(float(1).sub(pondSoil))
+      .toVar("compactHavenTalusWeight"),
+    wear: wear.toVar("compactHavenWearWeight"),
+  };
+}
+
 /** Same constants/arithmetic as the serializable CPU grass palette factory. */
 export function createCompactTerrainLayerWeights(
   noise: Node<"float">,
@@ -866,19 +919,48 @@ export function blendCompactTerrainLayers(
   dirt: Node<"float">,
   cliff: Node<"float">,
   road: Node<"float">,
+  havenGround?: { talus: Node<"float">; wear: Node<"float"> },
 ) {
   const blendVector = (
     grass: Node<"vec3">,
     ground: Node<"vec3">,
     rock: Node<"vec3">,
-  ): Node<"vec3"> =>
-    mix(mix(mix(grass, ground, dirt), rock, cliff), ground, road);
+  ): Node<"vec3"> => {
+    let meadow = mix(grass, ground, dirt);
+    if (havenGround) {
+      meadow = mix(
+        meadow,
+        mix(
+          ground,
+          rock,
+          float(COMPACT_TERRAIN_COMPOSITION.havenTalusRockFraction),
+        ),
+        havenGround.talus,
+      );
+      meadow = mix(meadow, ground, havenGround.wear);
+    }
+    return mix(mix(meadow, rock, cliff), ground, road);
+  };
   const blendScalar = (
     grass: Node<"float">,
     ground: Node<"float">,
     rock: Node<"float">,
-  ): Node<"float"> =>
-    mix(mix(mix(grass, ground, dirt), rock, cliff), ground, road);
+  ): Node<"float"> => {
+    let meadow = mix(grass, ground, dirt);
+    if (havenGround) {
+      meadow = mix(
+        meadow,
+        mix(
+          ground,
+          rock,
+          float(COMPACT_TERRAIN_COMPOSITION.havenTalusRockFraction),
+        ),
+        havenGround.talus,
+      );
+      meadow = mix(meadow, ground, havenGround.wear);
+    }
+    return mix(mix(meadow, rock, cliff), ground, road);
+  };
   return {
     albedo: blendVector(
       layers.grass.albedo,

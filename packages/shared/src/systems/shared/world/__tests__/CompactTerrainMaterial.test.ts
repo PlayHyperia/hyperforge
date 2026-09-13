@@ -38,11 +38,13 @@ import {
   createCompactCoastWeights,
   applyCompactCoastRock,
   createCompactPlantingSoil,
+  createCompactHavenGroundWeights,
   type CompactTerrainLayer,
 } from "../CompactTerrainMaterial";
 import {
   createCompactTerrainColorOperations,
   type CompactTerrainPlantingLobe,
+  type CompactTerrainGroundRibbon,
 } from "../CompactTerrainPalette";
 import { ALL_WORLD_AREAS } from "../../../../data/world-areas";
 import { DataManager } from "../../../../data/DataManager";
@@ -51,6 +53,7 @@ import { TerrainSystem } from "../TerrainSystem";
 import { createCompactServiceSoil } from "../CompactServiceCourt";
 import {
   SCULPTED_COMPACT_WORLD_TERRAIN_PROFILE,
+  HAVEN_SHOULDER_COMPACT_WORLD_TERRAIN_PROFILE,
   SCULPTED_COMPACT_V1_PROFILE_FIXTURE,
   validateWorldTerrainProfile,
 } from "../WorldTerrainProfile";
@@ -543,6 +546,540 @@ async function decodedTexture(name: string) {
     THREE.RGBAFormat,
   );
 }
+
+describe("authored Haven ground composition, independent of terrain and grass population", () => {
+  const ops = createCompactTerrainColorOperations();
+  const profile = HAVEN_SHOULDER_COMPACT_WORLD_TERRAIN_PROFILE;
+  const field = ops.macroField(profile)!;
+  const ground = field.havenGround!;
+
+  it("detaches the admitted toe and the two connected service-yard ribbons without changing historical fields", () => {
+    const before = JSON.stringify(profile);
+    expect(ground.talus).toEqual(
+      profile.havenShoulder!.toe.slice(1).map((point, i) => ({
+        startX: profile.havenShoulder!.toe[i][0],
+        startZ: profile.havenShoulder!.toe[i][1],
+        endX: point[0],
+        endZ: point[1],
+        coreRadius: 0.6,
+        outerRadius: 3.5,
+        strength: 0.65,
+      })),
+    );
+    expect(ground.wear).toEqual([
+      {
+        startX: 334,
+        startZ: 332,
+        endX: 337,
+        endZ: 344,
+        coreRadius: 2.7,
+        outerRadius: 4.2,
+        strength: 0.88,
+      },
+      {
+        startX: 337,
+        startZ: 344,
+        endX: 343,
+        endZ: 348,
+        coreRadius: 1.7,
+        outerRadius: 3.2,
+        strength: 0.65,
+      },
+    ]);
+    expect(ground.talus).toHaveLength(5);
+    for (const value of [
+      field,
+      ground,
+      ground.talus,
+      ground.wear,
+      ...ground.talus,
+      ...ground.wear,
+    ])
+      expect(Object.isFrozen(value)).toBe(true);
+    expect(ground.talus).not.toBe(profile.havenShoulder!.toe);
+    expect(
+      ops.macroField(SCULPTED_COMPACT_WORLD_TERRAIN_PROFILE)!.havenGround,
+    ).toBeUndefined();
+    expect(ops.havenGroundWeights(310, 328)).toEqual({ talus: 0, wear: 0 });
+    expect(JSON.stringify(profile)).toBe(before);
+  });
+
+  it("matches real Three segment projections and actual TSL arithmetic with bounded MAX overlap and smooth outer joins", () => {
+    const expectedRibbon = (
+      x: number,
+      z: number,
+      ribbon: CompactTerrainGroundRibbon,
+    ) => {
+      const point = new THREE.Vector3(x, 0, z);
+      const line = new THREE.Line3(
+        new THREE.Vector3(ribbon.startX, 0, ribbon.startZ),
+        new THREE.Vector3(ribbon.endX, 0, ribbon.endZ),
+      );
+      const squaredDistance = point.distanceToSquared(
+        line.closestPointToPoint(point, true, new THREE.Vector3()),
+      );
+      const t = THREE.MathUtils.clamp(
+        (squaredDistance - ribbon.coreRadius ** 2) /
+          (ribbon.outerRadius ** 2 - ribbon.coreRadius ** 2),
+        0,
+        1,
+      );
+      return ribbon.strength * (1 - t * t * (3 - 2 * t));
+    };
+    let cases = 0;
+    for (let x = 297; x <= 350; x += 3.7)
+      for (let z = 299; z <= 370; z += 4.1) {
+        const cpu = ops.havenGroundWeights(x, z, ground, 1);
+        const tsl = createCompactHavenGroundWeights(
+          vec2(x, z),
+          ground,
+          float(0),
+          float(1),
+        );
+        for (const key of ["talus", "wear"] as const) {
+          const expected = Math.max(
+            ...ground[key].map((ribbon) => expectedRibbon(x, z, ribbon)),
+          );
+          expect(cpu[key]).toBeCloseTo(expected, 12);
+          expect(vectorValue(tsl[key])[0]).toBeCloseTo(expected, 12);
+          expect(cpu[key]).toBeGreaterThanOrEqual(0);
+          expect(cpu[key]).toBeLessThanOrEqual(key === "wear" ? 0.88 : 0.65);
+          expect(
+            [...graph(tsl[key])].some((node) =>
+              Reflect.get(node, "isTextureNode"),
+            ),
+          ).toBe(false);
+        }
+        cases++;
+      }
+    expect(cases).toBeGreaterThan(250);
+    for (const ribbon of [...ground.talus, ...ground.wear]) {
+      const one = { talus: [ribbon], wear: [] };
+      const midpointX = (ribbon.startX + ribbon.endX) / 2;
+      const midpointZ = (ribbon.startZ + ribbon.endZ) / 2;
+      const tangent = new THREE.Vector2(
+        ribbon.endX - ribbon.startX,
+        ribbon.endZ - ribbon.startZ,
+      ).normalize();
+      const sample = (radius: number) =>
+        ops.havenGroundWeights(
+          midpointX - tangent.y * radius,
+          midpointZ + tangent.x * radius,
+          one,
+          1,
+        ).talus;
+      expect(sample(0)).toBe(ribbon.strength);
+      expect(sample(ribbon.coreRadius)).toBeCloseTo(ribbon.strength, 13);
+      expect(sample(ribbon.outerRadius)).toBeCloseTo(0, 13);
+      expect(sample(ribbon.outerRadius + 1e-5)).toBe(0);
+      expect(sample(ribbon.outerRadius - 1e-5) / 1e-5).toBeLessThan(0.0001);
+    }
+    for (const [x, z] of [
+      [303.5, 359],
+      [315.5, 337],
+      [308, 306.5],
+      [307, 362.5],
+      [330, 360],
+      [343, 302],
+      [350, 400],
+    ])
+      expect(ops.havenGroundWeights(x, z, ground, 1)).toEqual({
+        talus: 0,
+        wear: 0,
+      });
+    for (const slope of [-1, 0, 0.008, 0.015, 0.029, 0.049, 0.05, 0.2, 1, 2])
+      for (const [x, z] of [
+        [311, 328],
+        [313, 337],
+        [335, 336],
+      ]) {
+        const t = THREE.MathUtils.clamp((slope - 0.008) / (0.05 - 0.008), 0, 1);
+        const expected =
+          Math.max(
+            ...ground.talus.map((ribbon) => expectedRibbon(x, z, ribbon)),
+          ) *
+          t *
+          t *
+          (3 - 2 * t);
+        const cpu = ops.havenGroundWeights(x, z, ground, slope);
+        const tsl = createCompactHavenGroundWeights(
+          vec2(x, z),
+          ground,
+          float(0),
+          float(slope),
+        );
+        expect(cpu.talus).toBeCloseTo(expected, 13);
+        expect(vectorValue(tsl.talus)[0]).toBeCloseTo(expected, 13);
+        expect(cpu.wear).toBe(ops.havenGroundWeights(x, z, ground, 0).wear);
+        expect(vectorValue(tsl.wear)[0]).toBeCloseTo(cpu.wear, 13);
+        if (slope <= 0.008) expect(cpu.talus).toBe(0);
+      }
+    expect(ops.havenGroundWeights(311, 328, ground).talus).toBe(0);
+    expect(ops.havenGroundWeights(311, 328, ground, 0.029).talus).toBeCloseTo(
+      0.325,
+      13,
+    );
+    expect(ops.havenGroundWeights(311, 328, ground, 0.05).talus).toBe(0.65);
+    const absent = createCompactHavenGroundWeights(vec2(310, 328));
+    expect(vectorValue(absent.talus)).toEqual([0]);
+    expect(vectorValue(absent.wear)).toEqual([0]);
+  });
+
+  it("blends the whole existing PBR surface and preserves full cliff, road and pond priority", () => {
+    const layers = {
+      grass: {
+        albedo: vec3(0.1, 0.2, 0.3),
+        roughness: float(0.4),
+        ao: float(0.2),
+        worldNormal: vec3(0, 1, 0),
+      },
+      dirt: {
+        albedo: vec3(0.3, 0.2, 0.1),
+        roughness: float(0.7),
+        ao: float(0.6),
+        worldNormal: vec3(0.6, 0.8, 0),
+      },
+      rock: {
+        albedo: vec3(0.6, 0.5, 0.4),
+        roughness: float(0.9),
+        ao: float(0.8),
+        worldNormal: vec3(0, 0.8, 0.6),
+      },
+    };
+    const before = Object.values(layers).flatMap((layer) =>
+      Object.values(layer).map((node) => node.uuid),
+    );
+    for (const [x, z] of [
+      [311, 328],
+      [315, 328],
+      [335, 336],
+      [343, 348],
+      [350, 360],
+    ])
+      for (const dirt of [0, 0.37, 1])
+        for (const cliff of [0, 0.41, 1])
+          for (const road of [0, 0.52, 1]) {
+            const authored = ops.havenGroundWeights(x, z, ground, 1);
+            const authoredNodes = createCompactHavenGroundWeights(
+              vec2(x, z),
+              ground,
+              float(0),
+              float(1),
+            );
+            const surface = blendCompactTerrainLayers(
+              layers,
+              float(dirt),
+              float(cliff),
+              float(road),
+              authoredNodes,
+            );
+            const mix = THREE.MathUtils.lerp;
+            const expected = (grass: number, soil: number, rock: number) =>
+              mix(
+                mix(
+                  mix(
+                    mix(
+                      mix(grass, soil, dirt),
+                      mix(soil, rock, 0.85),
+                      authored.talus,
+                    ),
+                    soil,
+                    authored.wear,
+                  ),
+                  rock,
+                  cliff,
+                ),
+                soil,
+                road,
+              );
+            for (const key of ["albedo", "roughness", "ao"] as const) {
+              const actual = vectorValue(surface[key]);
+              const a = vectorValue(layers.grass[key]),
+                b = vectorValue(layers.dirt[key]),
+                c = vectorValue(layers.rock[key]);
+              actual.forEach((value, channel) =>
+                expect(value).toBeCloseTo(
+                  expected(a[channel], b[channel], c[channel]),
+                  13,
+                ),
+              );
+            }
+            for (const layer of Object.values(layers))
+              expect(graph(surface.normal).has(layer.worldNormal)).toBe(true);
+            const expectedNormal = new THREE.Vector3(
+              ...[0, 1, 2].map((channel) =>
+                expected(
+                  vectorValue(layers.grass.worldNormal)[channel],
+                  vectorValue(layers.dirt.worldNormal)[channel],
+                  vectorValue(layers.rock.worldNormal)[channel],
+                ),
+              ),
+            ).normalize();
+            // Evaluate the actual pre-camera world-normal subgraph. The real
+            // camera node is renderer-bound, not an invented test uniform;
+            // separate projection tests qualify the world-to-view operation.
+            const worldNormals = [...graph(surface.normal)].filter(
+              (node) =>
+                Reflect.get(node, "method") === "normalize" &&
+                !graph(node).has(cameraViewMatrix) &&
+                Object.values(layers).every((layer) =>
+                  graph(node).has(layer.worldNormal),
+                ),
+            );
+            expect(worldNormals).toHaveLength(1);
+            vectorValue(worldNormals[0]).forEach((value, channel) =>
+              expect(value).toBeCloseTo(expectedNormal.toArray()[channel], 13),
+            );
+            for (const node of [authoredNodes.talus, authoredNodes.wear]) {
+              expect(node.type).toBe("VarNode");
+              for (const channel of [
+                surface.albedo,
+                surface.roughness,
+                surface.ao,
+                surface.normal,
+              ])
+                expect(graph(channel).has(node)).toBe(true);
+            }
+          }
+    const bed = blendCompactTerrainLayers(
+      layers,
+      float(1),
+      float(0),
+      float(0),
+      createCompactHavenGroundWeights(
+        vec2(311, 328),
+        ground,
+        float(1),
+        float(1),
+      ),
+    );
+    expect(vectorValue(bed.albedo)).toEqual(vectorValue(layers.dirt.albedo));
+    expect(vectorValue(bed.roughness)).toEqual([0.7]);
+    expect(vectorValue(bed.ao)).toEqual([0.6]);
+    expect(
+      Object.values(layers).flatMap((layer) =>
+        Object.values(layer).map((node) => node.uuid),
+      ),
+    ).toEqual(before);
+  });
+
+  it("keeps CPU grass-base colors equal to TSL composition while all physical eligibility stays identical", () => {
+    const palette = ops.getPalette();
+    const { havenGround: _ground, ...withoutGround } = field;
+    const layers = {
+      grass: {
+        albedo: vec3(...palette.grass),
+        roughness: float(0.8),
+        ao: float(1),
+        worldNormal: vec3(0, 1, 0),
+      },
+      dirt: {
+        albedo: vec3(...palette.dirt),
+        roughness: float(0.9),
+        ao: float(1),
+        worldNormal: vec3(0, 1, 0),
+      },
+      rock: {
+        albedo: vec3(...palette.rock),
+        roughness: float(0.7),
+        ao: float(1),
+        worldNormal: vec3(0, 1, 0),
+      },
+    };
+    let changedColors = 0;
+    for (const [x, z] of [
+      [307, 310],
+      [311, 328],
+      [315, 328],
+      [335, 336],
+      [343, 348],
+      [350, 360],
+      [400, 400],
+    ])
+      for (const noiseValue of [0.2, 0.51, 0.8])
+        for (const slope of [0, 0.008, 0.015, 0.029, 0.05, 0.1, 0.3])
+          for (const roadInfluence of [0, 0.5, 1]) {
+            const input = {
+              noiseValue,
+              meadowNoise: 0,
+              distortNoise: 0.4,
+              slope,
+              roadInfluence,
+              surface: {
+                x,
+                z,
+                height: field.baseElevation,
+                pond: null,
+                macroField: field,
+              },
+            };
+            const historical = {
+              ...input,
+              surface: { ...input.surface, macroField: withoutGround },
+            };
+            expect(ops.grassSupport(input)).toBe(ops.grassSupport(historical));
+            const cpu = ops.sample(input);
+            expect(cpu).toEqual(ops.sample({ ...input, meadowNoise: 1 }));
+            const macro = ops.macroWeights(x, z, noiseValue, field);
+            const weights = ops.weights({ ...input, macroSurface: macro });
+            const surface = blendCompactTerrainLayers(
+              layers,
+              float(weights.dirt),
+              float(weights.cliff),
+              float(weights.road),
+              createCompactHavenGroundWeights(
+                vec2(x, z),
+                ground,
+                float(0),
+                float(slope),
+              ),
+            );
+            const actual = vectorValue(surface.albedo.mul(weights.variation));
+            [cpu.r, cpu.g, cpu.b].forEach((value, channel) =>
+              expect(actual[channel]).toBeCloseTo(value, 13),
+            );
+            if (roadInfluence === 1)
+              expect(cpu).toEqual(ops.sample(historical));
+            else if (
+              JSON.stringify(cpu) !== JSON.stringify(ops.sample(historical))
+            )
+              changedColors++;
+          }
+    expect(changedColors).toBeGreaterThan(75);
+    expect(_ground).toBe(ground);
+  });
+
+  it("attributes the actual material graph to immutable used controls with the same six-map and 14-sample ceiling", () => {
+    const material = createTerrainMaterial(undefined, {
+      compactPbr: true,
+      compactProfile: profile,
+    });
+    const baseline = createTerrainMaterial(undefined, {
+      compactPbr: true,
+      compactProfile: SCULPTED_COMPACT_WORLD_TERRAIN_PROFILE,
+    });
+    try {
+      const receipt = material.compactHavenGroundMaterial!;
+      expect(receipt).toEqual({
+        schemaVersion: 1,
+        mode: "authored-haven-ground-v2",
+        descriptor: ground,
+        sourceGrass: true,
+        wholePbrBlend: true,
+        talusSegments: 5,
+        wearSegments: 2,
+        talusRockFraction: 0.85,
+        talusSlopeStart: 0.008,
+        talusSlopeEnd: 0.05,
+        grassEligibilityChanged: false,
+      });
+      for (const object of [
+        receipt,
+        receipt.descriptor,
+        receipt.descriptor.talus,
+        receipt.descriptor.wear,
+        ...receipt.descriptor.talus,
+        ...receipt.descriptor.wear,
+      ])
+        expect(Object.isFrozen(object)).toBe(true);
+      expect(
+        Object.getOwnPropertyDescriptor(material, "compactHavenGroundMaterial")
+          ?.writable,
+      ).toBe(false);
+      expect(
+        material.compactTerrainSurface!.getReceipt().textures,
+      ).toHaveLength(6);
+      expect(
+        material.compactTerrainSurface!.getReceipt().surfaceSampleCount,
+      ).toBe(14);
+      expect(baseline.compactHavenGroundMaterial).toBeUndefined();
+      const pbr = material as THREE.MeshStandardNodeMaterial;
+      for (const node of [
+        pbr.colorNode,
+        pbr.normalNode,
+        pbr.roughnessNode,
+        pbr.aoNode,
+      ])
+        expect(node).toBeInstanceOf(THREE.Node);
+    } finally {
+      material.dispose();
+      baseline.dispose();
+    }
+  });
+
+  it("runs the freshly bundled palette and admitted descriptor in a real isolated worker with exact CPU parity", async () => {
+    const bundle = await build({
+      entryPoints: [
+        new URL("../CompactTerrainPalette.ts", import.meta.url).pathname,
+      ],
+      bundle: true,
+      minify: true,
+      keepNames: true,
+      platform: "node",
+      format: "esm",
+      write: false,
+    });
+    const loaded = await import(
+      `data:text/javascript;base64,${Buffer.from(bundle.outputFiles[0].text).toString("base64")}`
+    );
+    const inputs = [
+      [307, 310],
+      [311, 328],
+      [317, 337],
+      [335, 336],
+      [343, 348],
+      [350, 360],
+    ].flatMap(([x, z]) =>
+      [0, 0.5, 1].flatMap((roadInfluence) =>
+        [0, 0.008, 0.029, 0.05, 0.1].map((slope) => ({
+          noiseValue: 0.57,
+          meadowNoise: 0.9,
+          distortNoise: 0.31,
+          slope,
+          roadInfluence,
+          surface: {
+            x,
+            z,
+            height: field.baseElevation,
+            pond: null,
+            macroField: field,
+          },
+        })),
+      ),
+    );
+    const worker = new Worker(
+      `const {parentPort}=require('node:worker_threads');
+      const ops=(${loaded.createCompactTerrainColorOperations.toString()})();
+      const field=ops.macroField(${JSON.stringify(profile)});
+      const inputs=${JSON.stringify(inputs)};
+      parentPort.postMessage({field,frozen:Object.isFrozen(field.havenGround)&&field.havenGround.talus.every(Object.isFrozen),
+        results:inputs.map(input=>({color:ops.sample(input),support:ops.grassSupport(input),weights:ops.havenGroundWeights(input.surface.x,input.surface.z,field.havenGround,input.slope)}))});`,
+      { eval: true, env: {} },
+    );
+    try {
+      const actual = await new Promise((resolve, reject) => {
+        worker.once("message", resolve);
+        worker.once("error", reject);
+      });
+      expect(actual).toEqual({
+        field,
+        frozen: true,
+        results: inputs.map((input) => ({
+          color: ops.sample(input),
+          support: ops.grassSupport(input),
+          weights: ops.havenGroundWeights(
+            input.surface.x,
+            input.surface.z,
+            ground,
+            input.slope,
+          ),
+        })),
+      });
+    } finally {
+      await worker.terminate();
+    }
+  });
+});
 
 describe("compact terrain actual texture ownership and CPU material graph", () => {
   it("packs real RGB unchanged with scalar roughness/AO and reproducible linear palette", async () => {
