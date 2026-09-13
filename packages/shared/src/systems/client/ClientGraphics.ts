@@ -97,6 +97,7 @@ import {
 } from "../../utils/compute";
 import { RendererPreparationQueue } from "../../utils/rendering/RendererPreparationQueue";
 import type { Environment } from "../shared/world/Environment";
+import type { VegetationSystem } from "../shared/world/VegetationSystem";
 
 let renderer: WebGPURenderer | undefined;
 
@@ -373,6 +374,13 @@ export class ClientGraphics extends System {
     this.world
       .getSystem<Environment>("environment")
       ?.prepareForRender(this.renderer, this.world.camera);
+    this.world
+      .getSystem<VegetationSystem>("vegetation")
+      ?.prepareForRender(
+        this.world.camera,
+        this.renderer.domElement.width,
+        this.renderer.domElement.height,
+      );
     if (!this.usePostprocessing || !this.composer) {
       this.renderer.render(this.world.stage.scene, this.world.camera);
     } else {

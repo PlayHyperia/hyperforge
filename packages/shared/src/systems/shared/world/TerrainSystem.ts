@@ -4405,6 +4405,11 @@ export class TerrainSystem extends System {
     return this.waterBodyRegistry;
   }
 
+  /** Unknown/loading reflection owners require full-detail geometry. */
+  areWaterReflectionsEnabled(): boolean {
+    return this.waterSystem?.reflectionsEnabled ?? true;
+  }
+
   // ============================================================================
   // FLAT ZONE SYSTEM (Terrain Flattening for Stations)
   // ============================================================================

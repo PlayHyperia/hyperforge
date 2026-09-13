@@ -152,6 +152,16 @@ export interface VegetationAsset {
    * If not provided, vegetation transitions from LOD1 (or LOD0) to imposter.
    */
   lod2Model?: string;
+  /** Explicit static LOD1 qualification in post-import model units and physical
+   * pixels. Uses the original instance batch/material, not legacy distance LOD.
+   */
+  screenSpaceLod?: Readonly<{
+    maxSurfaceError: number;
+    enterErrorPixels: number;
+    exitErrorPixels: number;
+    enterExtentPixels: number;
+    exitExtentPixels: number;
+  }>;
   /** Category of vegetation this asset belongs to */
   category: VegetationCategory;
   /** Base scale of the model (1.0 = original size) */

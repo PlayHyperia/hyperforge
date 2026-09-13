@@ -39,6 +39,7 @@ import type {
 import { EventType } from "../../../types/events";
 import { LoadPriority } from "../../../types";
 import { modelCache } from "../../../utils/rendering/ModelCache";
+import { ProjectedGeometryError } from "../../../utils/rendering/ProjectedGeometryError";
 import { NoiseGenerator } from "../../../utils/NoiseGenerator";
 import { FrustumQuadtree } from "../../../utils/spatial/FrustumQuadtree";
 import {
@@ -56,7 +57,8 @@ import {
   applyLODSettings,
   type LODDistancesWithSq,
 } from "./LODConfig";
-import { csmLevels } from "./Environment";
+import { csmLevels, type Environment } from "./Environment";
+import type { TerrainSystem } from "./TerrainSystem";
 import type { RoadNetworkSystem } from "./RoadNetworkSystem";
 import { updateTreeInstances } from "./ProcgenTreeCache";
 import {
@@ -198,6 +200,16 @@ interface AssetData {
   /** Whether LOD2 model is available for this asset */
   hasLOD2: boolean;
 }
+
+type ScreenSpaceChunk = {
+  asset: AssetData;
+  heroGeometry: THREE.BufferGeometry;
+  lodGeometry: THREE.BufferGeometry | null;
+  level: 0 | 1;
+  errorPixels: number;
+  extentPixels: number;
+  shadowErrorPixels: number;
+};
 
 /**
  * Tile vegetation data - tracks all instances for a terrain tile
@@ -397,6 +409,24 @@ export class VegetationSystem extends System {
   private chunkedMeshes = new Map<string, ChunkedInstancedMesh>();
   // Loaded asset data (geometry/material) shared across chunks
   private assetData = new Map<string, AssetData>();
+  private readonly screenSpaceChunks = new Map<
+    ChunkedInstancedMesh,
+    ScreenSpaceChunk
+  >();
+  private readonly disposedPrimaryChunks = new WeakSet<ChunkedInstancedMesh>();
+  private readonly projectedGeometryError = new ProjectedGeometryError();
+  private readonly lodInstanceMatrix = new THREE.Matrix4();
+  private readonly lodModelMatrix = new THREE.Matrix4();
+  private lodSunLight: THREE.DirectionalLight | null = null;
+  private hasUnknownLodShadowLight = false;
+  private readonly checkLodShadowLight = (node: THREE.Object3D): void => {
+    if (
+      node instanceof THREE.Light &&
+      node.castShadow &&
+      node !== this.lodSunLight
+    )
+      this.hasUnknownLodShadowLight = true;
+  };
 
   // Imposter (billboard) management - one ImposterData per asset type
   // Uses OctahedralImpostor for high-quality multi-angle rendering
@@ -476,9 +506,11 @@ export class VegetationSystem extends System {
   // Frustum culling - view-dependent culling using camera frustum
   private _frustum = new THREE.Frustum();
   private _projScreenMatrix = new THREE.Matrix4();
-  // Camera position cache - avoid recalculating frustum when camera hasn't moved
-  private _lastCameraPos = new THREE.Vector3();
-  private _lastCameraQuat = new THREE.Quaternion();
+  // Cache the actual culled view, including camera parents and projection.
+  private _culledCameraWorld = new THREE.Matrix4();
+  private _culledCameraProjection = new THREE.Matrix4();
+  private _culledCoordinateSystem: THREE.CoordinateSystem | null = null;
+  private _culledReversedDepth = false;
   private _frustumDirty = true;
   // Spatial acceleration - quadtree for O(log N) frustum queries instead of O(N)
   private chunkQuadtree: FrustumQuadtree | null = null;
@@ -690,6 +722,30 @@ export class VegetationSystem extends System {
 
       for (const asset of manifest.assets) {
         if (whitelist === null || whitelist.includes(asset.id)) {
+          if (asset.screenSpaceLod) {
+            const lod = asset.screenSpaceLod;
+            if (
+              !asset.lod1Model ||
+              asset.lod2Model ||
+              !Object.values(lod).every(
+                (value) => Number.isFinite(value) && value > 0,
+              ) ||
+              !(lod.enterErrorPixels < lod.exitErrorPixels) ||
+              !(lod.enterExtentPixels < lod.exitExtentPixels)
+            ) {
+              console.warn(
+                `[VegetationSystem] Invalid screen-space LOD for ${asset.id}; retaining hero geometry`,
+              );
+              this.assetDefinitions.set(asset.id, {
+                ...asset,
+                screenSpaceLod: undefined,
+                lod1Model: undefined,
+                lod2Model: undefined,
+              });
+              loadedCount++;
+              continue;
+            }
+          }
           this.assetDefinitions.set(asset.id, asset);
           loadedCount++;
         } else {
@@ -1178,7 +1234,7 @@ export class VegetationSystem extends System {
       const chunked = this.chunkedMeshes.get(chunkKey);
       if (chunked && this.vegetationGroup) {
         this.vegetationGroup.remove(chunked.mesh);
-        chunked.mesh.geometry.dispose();
+        this.disposePrimaryChunk(chunked);
         this.chunkedMeshes.delete(chunkKey);
       }
 
@@ -2069,7 +2125,7 @@ export class VegetationSystem extends System {
           if (this.vegetationGroup) {
             this.vegetationGroup.remove(chunked.mesh);
           }
-          chunked.mesh.geometry.dispose();
+          this.disposePrimaryChunk(chunked);
           // Material is shared, don't dispose
           this.chunkedMeshes.delete(chunkKey);
         }
@@ -2198,7 +2254,192 @@ export class VegetationSystem extends System {
     };
 
     this.chunkedMeshes.set(chunkKey, chunked);
+    if (assetDataRef.asset.screenSpaceLod) {
+      const state: ScreenSpaceChunk = {
+        asset: assetDataRef,
+        heroGeometry: geometry,
+        lodGeometry: null,
+        level: 0,
+        errorPixels: Infinity,
+        extentPixels: Infinity,
+        shadowErrorPixels: Infinity,
+      };
+      this.screenSpaceChunks.set(chunked, state);
+      this.installScreenSpaceChunkLod(chunked, state);
+    }
     return chunked;
+  }
+
+  /** Allocate once while a chunk/asset loads. Both geometries borrow the same
+   * instance attributes; no second mesh, matrix upload or material is created.
+   */
+  private installScreenSpaceChunkLod(
+    chunk: ChunkedInstancedMesh,
+    state: ScreenSpaceChunk,
+  ): void {
+    if (state.lodGeometry || !state.asset.lod1Geometry || this.isDestroyed)
+      return;
+    const geometry = state.asset.lod1Geometry.clone();
+    geometry.setAttribute("instancePosition", chunk.positionAttr);
+    geometry.setAttribute("instanceScale", chunk.scaleAttr);
+    geometry.setAttribute("instanceRotationY", chunk.rotationAttr);
+    state.lodGeometry = geometry;
+  }
+
+  private disposePrimaryChunk(chunk: ChunkedInstancedMesh): void {
+    if (this.disposedPrimaryChunks.has(chunk)) return;
+    this.disposedPrimaryChunks.add(chunk);
+    const state = this.screenSpaceChunks.get(chunk);
+    this.screenSpaceChunks.delete(chunk);
+    if (state) {
+      state.heroGeometry.dispose();
+      state.lodGeometry?.dispose();
+    } else chunk.mesh.geometry.dispose();
+    chunk.mesh.dispose();
+  }
+
+  /** Select after the final camera owner, before render/shadow lists are built.
+   * Every actual instance must qualify; a nearby member keeps the whole batch
+   * at hero detail. Reflections/custom shadows retain hero until separately
+   * qualified. These decisions never change populations, fade or shadow flags.
+   */
+  prepareForRender(
+    camera: THREE.PerspectiveCamera,
+    width: number,
+    height: number,
+  ): void {
+    if (this.isDestroyed) return;
+    camera.updateWorldMatrix(true, false);
+    // Late camera owners may change the pose after update(). Reconcile only
+    // that changed view; ordinary frames retain their existing culling pass.
+    // This also applies to assets without a screen-space LOD descriptor.
+    if (!this.matchesCulledView(camera)) {
+      const position = camera.getWorldPosition(this._tempPosition);
+      this.updateGPUUniforms(position.x, position.y, position.z);
+      this.updateChunkVisibility(position.x, position.z, camera);
+    }
+    this.selectScreenSpaceLodForRender(camera, width, height);
+  }
+
+  private matchesCulledView(camera: THREE.PerspectiveCamera): boolean {
+    return (
+      !this._frustumDirty &&
+      camera.matrixWorld.equals(this._culledCameraWorld) &&
+      camera.projectionMatrix.equals(this._culledCameraProjection) &&
+      camera.coordinateSystem === this._culledCoordinateSystem &&
+      camera.reversedDepth === this._culledReversedDepth
+    );
+  }
+
+  private selectScreenSpaceLodForRender(
+    camera: THREE.PerspectiveCamera,
+    width: number,
+    height: number,
+  ): void {
+    if (this.isDestroyed || !this.screenSpaceChunks.size) return;
+    const terrain = this.world.getSystem<TerrainSystem>("terrain");
+    const environment = this.world.getSystem<Environment>("environment");
+    const sun = environment?.sunLight ?? null;
+    this.lodSunLight = sun;
+    this.hasUnknownLodShadowLight = false;
+    this.world.stage.scene.traverseVisible(this.checkLodShadowLight);
+    let knownViews =
+      terrain?.areWaterReflectionsEnabled() === false &&
+      !!sun &&
+      !this.hasUnknownLodShadowLight &&
+      !this.world.graphics?.renderer.xr?.isPresenting;
+    let shadowCamera: THREE.OrthographicCamera | null = null;
+    if (knownViews && sun?.castShadow) {
+      if (
+        sun.shadow.shadowNode !== undefined ||
+        !sun.shadow.autoUpdate ||
+        !(sun.shadow.camera instanceof THREE.OrthographicCamera) ||
+        !sun.shadow.map
+      )
+        knownViews = false;
+      else {
+        sun.updateWorldMatrix(true, false);
+        sun.target.updateWorldMatrix(true, false);
+        sun.shadow.updateMatrices(sun);
+        shadowCamera = sun.shadow.camera;
+      }
+    }
+    camera.updateWorldMatrix(true, false);
+    for (const [chunk, state] of this.screenSpaceChunks) {
+      const lod = state.asset.asset.screenSpaceLod!;
+      const bounds = state.asset.geometry.boundingBox;
+      let error = 0,
+        extent = 0,
+        shadowError = 0;
+      const material = state.asset.gpuMaterial;
+      if (
+        !knownViews ||
+        !state.lodGeometry ||
+        !bounds ||
+        !chunk.count ||
+        chunk.mesh.material !== material ||
+        !(material instanceof MeshStandardNodeMaterial) ||
+        material.positionNode ||
+        material.vertexNode ||
+        material.displacementMap ||
+        material.castShadowPositionNode ||
+        material.depthNode
+      ) {
+        error = extent = shadowError = Infinity;
+      } else if (chunk.mesh.visible) {
+        chunk.mesh.updateWorldMatrix(true, false);
+        for (let i = 0; i < chunk.count; i++) {
+          chunk.mesh.getMatrixAt(i, this.lodInstanceMatrix);
+          this.lodModelMatrix.multiplyMatrices(
+            chunk.mesh.matrixWorld,
+            this.lodInstanceMatrix,
+          );
+          const projected = this.projectedGeometryError.measure(
+            camera,
+            this.lodModelMatrix,
+            bounds,
+            lod.maxSurfaceError,
+            width,
+            height,
+          );
+          error = Math.max(error, projected.errorPixels);
+          extent = Math.max(extent, projected.extentPixels);
+          if (shadowCamera && sun) {
+            const projectedShadow = this.projectedGeometryError.measure(
+              shadowCamera,
+              this.lodModelMatrix,
+              bounds,
+              lod.maxSurfaceError,
+              Math.max(sun.shadow.map!.width, sun.shadow.mapSize.width),
+              Math.max(sun.shadow.map!.height, sun.shadow.mapSize.height),
+            );
+            shadowError = Math.max(shadowError, projectedShadow.errorPixels);
+          }
+        }
+      } else continue;
+      state.errorPixels = error;
+      state.extentPixels = extent;
+      state.shadowErrorPixels = shadowError;
+      const combinedError = Math.max(error, shadowError);
+      const level =
+        state.level === 0
+          ? combinedError < lod.enterErrorPixels &&
+            extent < lod.enterExtentPixels
+            ? 1
+            : 0
+          : combinedError > lod.exitErrorPixels || extent > lod.exitExtentPixels
+            ? 0
+            : 1;
+      state.level = level;
+      // The original culling owner uses a WORLD-space aggregate sphere. Keep
+      // that same bound on either geometry; the source-local box above differs.
+      if (state.lodGeometry)
+        state.lodGeometry.boundingSphere = state.heroGeometry.boundingSphere;
+      chunk.mesh.geometry =
+        level === 1 && state.lodGeometry
+          ? state.lodGeometry
+          : state.heroGeometry;
+    }
   }
 
   /**
@@ -2560,6 +2801,9 @@ export class VegetationSystem extends System {
   private finalizeChunk(chunkKey: string): void {
     const chunked = this.chunkedMeshes.get(chunkKey);
     if (!chunked || chunked.count === 0) return;
+    // A streamed/repopulated owner must enter the final view even if no camera
+    // movement or world update occurs before the next render (for example resize).
+    this._frustumDirty = true;
 
     // Update mesh count
     chunked.mesh.count = chunked.count;
@@ -2618,6 +2862,12 @@ export class VegetationSystem extends System {
     }
     geometry.boundingSphere.center.set(centerX, centerY, centerZ);
     geometry.boundingSphere.radius = radius;
+    const screenSpaceState = this.screenSpaceChunks.get(chunked);
+    if (screenSpaceState) {
+      screenSpaceState.heroGeometry.boundingSphere = geometry.boundingSphere;
+      if (screenSpaceState.lodGeometry)
+        screenSpaceState.lodGeometry.boundingSphere = geometry.boundingSphere;
+    }
 
     // Insert into spatial quadtree for O(log N) frustum queries
     if (this.chunkQuadtree) {
@@ -2719,6 +2969,7 @@ export class VegetationSystem extends System {
 
       // Use modelCache which has proper meshopt decoder setup
       const { scene } = await modelCache.loadModel(modelPath, this.world);
+      if (this.isDestroyed) return null;
 
       // Extract geometry and material from loaded scene (LOD0 - full detail)
       let geometry: THREE.BufferGeometry | null = null;
@@ -2787,7 +3038,8 @@ export class VegetationSystem extends System {
       );
 
       // Queue LOD1 and LOD2 for streaming load only when explicitly configured.
-      const skipLOD = SKIP_LOD1_CATEGORIES.has(asset.category);
+      const skipLOD =
+        SKIP_LOD1_CATEGORIES.has(asset.category) && !asset.screenSpaceLod;
       const hasLOD1Model =
         typeof asset.lod1Model === "string" && asset.lod1Model.length > 0;
       const hasLOD2Model =
@@ -3240,6 +3492,12 @@ export class VegetationSystem extends System {
           priority,
         },
       );
+      if (
+        this.isDestroyed ||
+        this.assetData.get(assetId) !== assetData ||
+        this.assetDefinitions.get(assetId) !== asset
+      )
+        return;
 
       // Extract first mesh geometry
       let foundGeometry: THREE.BufferGeometry | null = null;
@@ -3254,6 +3512,38 @@ export class VegetationSystem extends System {
       if (foundGeometry) {
         const geometry = foundGeometry as THREE.BufferGeometry;
         geometry.computeBoundingBox();
+        if (asset.screenSpaceLod && lodLevel === 1) {
+          const hero = assetData.geometry;
+          const position = geometry.getAttribute("position");
+          const normal = geometry.getAttribute("normal");
+          const color = geometry.getAttribute("color");
+          // This path currently admits rigid, opaque vertex-colour geometry
+          // with an identical pivot/footprint and a strictly smaller index set.
+          // Shading/wind remain owned by the original shared GPU material.
+          if (
+            !position ||
+            !normal ||
+            !color ||
+            !geometry.index ||
+            !hero.index ||
+            geometry.index.count >= hero.index.count ||
+            normal.count !== position.count ||
+            color.count !== position.count ||
+            Object.keys(geometry.morphAttributes).length ||
+            !geometry.boundingBox ||
+            !hero.boundingBox ||
+            !geometry.boundingBox.equals(hero.boundingBox) ||
+            !(assetData.gpuMaterial instanceof MeshStandardNodeMaterial) ||
+            assetData.gpuMaterial.positionNode ||
+            assetData.gpuMaterial.vertexNode
+          )
+            return;
+          assetData.lod1Geometry = geometry;
+          for (const [chunk, state] of this.screenSpaceChunks)
+            if (state.asset === assetData)
+              this.installScreenSpaceChunkLod(chunk, state);
+          return;
+        }
         const baseOffset = geometry.boundingBox
           ? -geometry.boundingBox.min.y
           : assetData.modelBaseOffset;
@@ -3648,35 +3938,30 @@ export class VegetationSystem extends System {
    * @param cameraX - Camera X position (used for distance culling)
    * @param cameraZ - Camera Z position (used for distance culling)
    */
-  private updateChunkVisibility(cameraX: number, cameraZ: number): void {
-    const camera = this.world.camera;
+  private updateChunkVisibility(
+    cameraX: number,
+    cameraZ: number,
+    camera = this.world.camera,
+  ): void {
     if (!camera) return;
 
-    // OPTIMIZATION: Only rebuild frustum when camera has actually moved
-    // Check if camera position or rotation changed significantly
-    const posDelta =
-      Math.abs(camera.position.x - this._lastCameraPos.x) +
-      Math.abs(camera.position.y - this._lastCameraPos.y) +
-      Math.abs(camera.position.z - this._lastCameraPos.z);
-    const rotDelta = 1 - Math.abs(camera.quaternion.dot(this._lastCameraQuat));
-
-    // Threshold: 0.01m movement or 0.0001 rotation change (lowered for more responsive culling)
-    if (posDelta > 0.01 || rotDelta > 0.0001) {
-      this._frustumDirty = true;
-      this._lastCameraPos.copy(camera.position);
-      this._lastCameraQuat.copy(camera.quaternion);
-    }
-
-    // Only rebuild frustum when dirty
-    if (this._frustumDirty) {
-      camera.updateProjectionMatrix();
-      camera.updateWorldMatrix(true, false);
-      camera.matrixWorldInverse.copy(camera.matrixWorld).invert();
+    camera.updateWorldMatrix(true, false);
+    // Use the owner's final projection, including view offsets, WebGPU depth,
+    // and parent transforms. Do not overwrite an authored projection here.
+    if (!this.matchesCulledView(camera)) {
       this._projScreenMatrix.multiplyMatrices(
         camera.projectionMatrix,
         camera.matrixWorldInverse,
       );
-      this._frustum.setFromProjectionMatrix(this._projScreenMatrix);
+      this._frustum.setFromProjectionMatrix(
+        this._projScreenMatrix,
+        camera.coordinateSystem,
+        camera.reversedDepth,
+      );
+      this._culledCameraWorld.copy(camera.matrixWorld);
+      this._culledCameraProjection.copy(camera.projectionMatrix);
+      this._culledCoordinateSystem = camera.coordinateSystem;
+      this._culledReversedDepth = camera.reversedDepth;
       this._frustumDirty = false;
 
       // Update GPU compute frustum when available
@@ -4336,7 +4621,7 @@ export class VegetationSystem extends System {
 
     // Dispose chunked meshes
     for (const chunked of this.chunkedMeshes.values()) {
-      chunked.mesh.geometry.dispose();
+      this.disposePrimaryChunk(chunked);
       // Material is shared (sharedVegetationMaterial), disposed below
     }
     this.chunkedMeshes.clear();

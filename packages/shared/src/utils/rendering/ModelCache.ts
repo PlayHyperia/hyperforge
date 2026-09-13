@@ -465,6 +465,42 @@ export class ModelCache {
         // Clone geometry to avoid modifying shared geometry
         child.geometry = child.geometry.clone();
 
+        // glTF quantization is a storage format, not a transform workspace.
+        // BufferAttribute setters write back into that integer storage: even
+        // a small translated normalized Int16 coordinate can wrap by two units.
+        // Expand only transformed attributes, through their decoded getters
+        // (also handles interleaving and Float16). Keep UVs/colors/indices packed.
+        for (const name of ["position", "normal", "tangent"]) {
+          const attribute = child.geometry.getAttribute(name);
+          if (
+            !attribute ||
+            attribute.array instanceof Float32Array ||
+            attribute.array instanceof Float64Array
+          )
+            continue;
+          const values = new Float32Array(attribute.count * attribute.itemSize);
+          for (let i = 0; i < attribute.count; i++) {
+            const offset = i * attribute.itemSize;
+            // Float16 overrides getXYZW, but not getComponent in Three r186.
+            values[offset] = attribute.getX(i);
+            values[offset + 1] = attribute.getY(i);
+            values[offset + 2] = attribute.getZ(i);
+            if (attribute.itemSize === 4)
+              values[offset + 3] = attribute.getW(i);
+          }
+          const expanded = new THREE.BufferAttribute(
+            values,
+            attribute.itemSize,
+          );
+          expanded.name = attribute.name;
+          expanded.setUsage(
+            attribute instanceof THREE.InterleavedBufferAttribute
+              ? attribute.data.usage
+              : attribute.usage,
+          );
+          child.geometry.setAttribute(name, expanded);
+        }
+
         // Apply world matrix to geometry (Three.js built-in method)
         // This handles positions, normals, and other attributes correctly
         child.geometry.applyMatrix4(child.matrixWorld);

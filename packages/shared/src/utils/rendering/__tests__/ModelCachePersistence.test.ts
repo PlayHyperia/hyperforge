@@ -1,7 +1,10 @@
 import { createServer, type ServerResponse } from "node:http";
 import { once } from "node:events";
+import { readFileSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
+import { MeshoptDecoder } from "three/examples/jsm/libs/meshopt_decoder.module.js";
 import THREE, { MeshStandardNodeMaterial } from "../../../extras/three/three";
 import { World } from "../../../core/World";
 import { ClientLoader } from "../../../systems/client/ClientLoader";
@@ -19,17 +22,27 @@ function makeGLB(
   corrupt = false,
   pbr: AuthoredPbr = DEFAULT_PBR,
   bufferUri?: string,
+  quantized = false,
 ): ArrayBuffer {
-  const positions = new Float32Array([0, 0, 0, 2, 0, 0, 0, 3, 0]);
+  const positions = quantized
+    ? new Int16Array([0, 0, 0, 32767, 0, 0, 0, 32767, 0, 0, 0, 0])
+    : new Float32Array([0, 0, 0, 2, 0, 0, 0, 3, 0]);
   const json = new TextEncoder().encode(
     JSON.stringify({
       asset: { version: "2.0" },
+      ...(quantized
+        ? {
+            extensionsUsed: ["KHR_mesh_quantization"],
+            extensionsRequired: ["KHR_mesh_quantization"],
+          }
+        : {}),
       scene: 0,
       scenes: [{ nodes: [0, 1, 2] }],
       nodes: [0, 1, 2].map((i) => ({
         name: `LOD${i}`,
         mesh: 0,
         translation: [i * 3, 0, 0],
+        ...(quantized ? { scale: [2, 3, 1] } : {}),
         extras: { level: i },
       })),
       meshes: [{ primitives: [{ attributes: { POSITION: 0 }, material: 0 }] }],
@@ -56,11 +69,12 @@ function makeGLB(
       accessors: [
         {
           bufferView: 0,
-          componentType: 5126,
+          componentType: quantized ? 5122 : 5126,
+          ...(quantized ? { normalized: true } : {}),
           count: corrupt ? 900 : 3,
           type: "VEC3",
           min: [0, 0, 0],
-          max: [2, 3, 0],
+          max: quantized ? [32767, 32767, 0] : [2, 3, 0],
         },
       ],
     }),
@@ -108,8 +122,9 @@ async function realLoad(
   ) => Promise<void>,
   pbr: AuthoredPbr = DEFAULT_PBR,
   concurrency: "in-flight" | "same-turn" = "in-flight",
+  sourceBytes?: ArrayBuffer,
 ) {
-  const bytes = makeGLB(false, pbr);
+  const bytes = sourceBytes ?? makeGLB(false, pbr);
   let requests = 0;
   const responses: ServerResponse[] = [];
   let signalRequest!: () => void;
@@ -489,6 +504,239 @@ describe("ModelCache cold-load ownership with real HTTP and World lifetimes", ()
 });
 
 describe("ModelCache v7 real GLB/World/ClientLoader integration (CPU, no IndexedDB claim)", () => {
+  it("automatically attributes the repaired admitted single-buffer quantized GLB before rejecting its prior cache policy", async () => {
+    const bytes = makeGLB(false, DEFAULT_PBR, undefined, true);
+    const source = await identifyProcessedModelSource(bytes);
+    expect(source).not.toBeNull();
+    await realLoad(
+      false,
+      async (loaded, world, url, _bytes, saves) => {
+        expect(saves).toEqual([source]);
+        const cold = meshes(loaded.scene);
+        expect(cold).toHaveLength(3);
+        for (const [i, mesh] of cold.entries()) {
+          const position = mesh.geometry.getAttribute("position");
+          expect(position.array).toBeInstanceOf(Float32Array);
+          expect(position.normalized).toBe(false);
+          expect(position.array).toEqual(
+            new Float32Array([i * 3, 0, 0, i * 3 + 2, 0, 0, i * 3, 3, 0]),
+          );
+        }
+        const memory = await modelCache.loadModel(url, world);
+        expect(memory.fromCache).toBe(true);
+        expect(meshes(memory.scene)[0].geometry).toBe(cold[0].geometry);
+        expect(saves).toEqual([source]);
+        const record = encodeProcessedModel(url, source!, loaded.scene, []);
+        expect(record).not.toBeNull();
+        const stale = structuredClone(record!);
+        stale.policy = "static-r186-rgba8-authored-pbr-v2";
+        let staleSetups = 0;
+        expect(
+          decodeProcessedModel(stale, url, source!, () => staleSetups++),
+        ).toBeNull();
+        expect(staleSetups).toBe(0);
+        const restored = decodeProcessedModel(
+          structuredClone(record),
+          url,
+          source!,
+        );
+        try {
+          expect(restored).not.toBeNull();
+          expect(
+            encodeProcessedModel(url, source!, restored!.scene, []),
+          ).toEqual(record);
+        } finally {
+          if (restored) {
+            for (const mesh of meshes(restored.scene)) mesh.geometry.dispose();
+            disposeMaterials(restored.scene);
+          }
+        }
+      },
+      DEFAULT_PBR,
+      "same-turn",
+      bytes,
+    );
+  });
+
+  it("preserves the actual quantized mushroom source as corrected Float32 geometry through HTTP, memory and codec ownership", async () => {
+    const file = readFileSync(
+      new URL(
+        "../../../../../server/world/assets/trees/mushroom.glb",
+        import.meta.url,
+      ),
+    );
+    const sha256 =
+      "5da74176d6295c8f20a761ac96014160567e4175ec2a809c9b8325090a176778";
+    expect(createHash("sha256").update(file).digest("hex")).toBe(sha256);
+    const bytes = new Uint8Array(file).buffer;
+    // This source uses an EXT_meshopt_compression fallback buffer. The current
+    // production provenance gate deliberately admits only single-buffer GLBs,
+    // so it must not claim a processed-cache save for this otherwise valid GLB.
+    expect(await identifyProcessedModelSource(bytes)).toBeNull();
+    // Explicit CPU codec input from independently verified complete file bytes;
+    // this is not production persistence admission or an IndexedDB transaction.
+    const source = { byteLength: bytes.byteLength, sha256 };
+    await MeshoptDecoder.ready;
+    // Independent real decoder: expected coordinates come from the authored
+    // normalized attribute and node world matrix, never ModelCache's bake.
+    const authored = await new GLTFLoader()
+      .setMeshoptDecoder(MeshoptDecoder)
+      .parseAsync(bytes, "");
+    const originals = meshes(authored.scene);
+    expect(originals).toHaveLength(1);
+    const original = originals[0].geometry;
+    const position = original.getAttribute("position");
+    const color = original.getAttribute("color");
+    expect(position.array).toBeInstanceOf(Int16Array);
+    expect(position.normalized).toBe(true);
+    expect(position.count).toBe(3161);
+    expect(original.index!.count).toBe(15039);
+    authored.scene.updateMatrixWorld(true);
+    const expected = new Float32Array(position.count * 3);
+    const vertex = new THREE.Vector3();
+    for (let i = 0; i < position.count; i++) {
+      vertex
+        .fromBufferAttribute(position, i)
+        .applyMatrix4(originals[0].matrixWorld)
+        .toArray(expected, i * 3);
+    }
+    const originalData = new Uint8Array(position.array.buffer).slice();
+    try {
+      await realLoad(
+        false,
+        async (loaded, world, url, fetched, saves) => {
+          expect(fetched).toBe(bytes);
+          expect(saves).toEqual([]);
+          expect(loaded.fromCache).toBe(false);
+          const cold = meshes(loaded.scene);
+          expect(cold).toHaveLength(1);
+          const geometry = cold[0].geometry;
+          const actual = geometry.getAttribute("position");
+          expect(actual.array).toBeInstanceOf(Float32Array);
+          expect(actual.normalized).toBe(false);
+          expect(actual.count).toBe(position.count);
+          let maxError = 0;
+          for (let i = 0; i < position.count; i++) {
+            for (let component = 0; component < 3; component++)
+              maxError = Math.max(
+                maxError,
+                Math.abs(
+                  actual.getComponent(i, component) -
+                    expected[i * 3 + component],
+                ),
+              );
+          }
+          expect(maxError).toBeLessThan(2e-7);
+          geometry.computeBoundingBox();
+          // The old signed-normalized buffer wrapped below -1 to the top;
+          // source-correct geometry must retain the actual lower boundary.
+          expect(geometry.boundingBox!.min.y).toBeLessThan(-1.0055);
+          const generated = new THREE.BufferGeometry();
+          generated.setAttribute("position", actual.clone());
+          generated.setIndex(original.index!.clone());
+          generated.computeVertexNormals();
+          try {
+            expect(geometry.getAttribute("normal").array).toEqual(
+              generated.getAttribute("normal").array,
+            );
+          } finally {
+            generated.dispose();
+          }
+          expect(geometry.getAttribute("normal").array).toBeInstanceOf(
+            Float32Array,
+          );
+          expect(geometry.index!.array).toEqual(original.index!.array);
+          expect(geometry.getAttribute("color").array).toEqual(color.array);
+          expect(geometry.getAttribute("color").normalized).toBe(
+            color.normalized,
+          );
+          expect(cold[0].matrixWorld.elements).toEqual(
+            new THREE.Matrix4().elements,
+          );
+          const memory = await modelCache.loadModel(url, world);
+          expect(memory.fromCache).toBe(true);
+          expect(meshes(memory.scene)[0].geometry).toBe(geometry);
+          expect(meshes(memory.scene)[0].material).toBe(cold[0].material);
+          expect(saves).toEqual([]);
+          const record = encodeProcessedModel(
+            url,
+            source!,
+            loaded.scene,
+            loaded.animations,
+            loaded.collision,
+          );
+          expect(record).not.toBeNull();
+          expect(record!.policy).toBe("static-r186-rgba8-float-transform-v3");
+          expect(record!.source).toEqual(source);
+          expect(record!.geometries[0].attributes.position).toMatchObject({
+            type: "Float32Array",
+            normalized: false,
+            itemSize: 3,
+          });
+          const stale = structuredClone(record!);
+          stale.policy = "static-r186-rgba8-authored-pbr-v2";
+          let staleSetups = 0;
+          expect(
+            decodeProcessedModel(stale, url, source!, () => staleSetups++),
+          ).toBeNull();
+          expect(staleSetups).toBe(0);
+          expect(
+            decodeProcessedModel(record, url, {
+              ...source!,
+              sha256: "0".repeat(64),
+            }),
+          ).toBeNull();
+          const restored = decodeProcessedModel(
+            structuredClone(record),
+            url,
+            source!,
+            (material) => world.setupMaterial(material),
+          );
+          try {
+            expect(restored).not.toBeNull();
+            const warm = meshes(restored!.scene)[0];
+            expect(warm.geometry).not.toBe(geometry);
+            expect(warm.material).not.toBe(cold[0].material);
+            expect(warm.geometry.getAttribute("position").array).toEqual(
+              actual.array,
+            );
+            expect(warm.geometry.getAttribute("position").array).toBeInstanceOf(
+              Float32Array,
+            );
+            expect(warm.geometry.getAttribute("normal").array).toEqual(
+              geometry.getAttribute("normal").array,
+            );
+            expect(
+              encodeProcessedModel(
+                url,
+                source!,
+                restored!.scene,
+                [],
+                restored!.collision,
+              ),
+            ).toEqual(record);
+          } finally {
+            if (restored) {
+              for (const mesh of meshes(restored.scene))
+                mesh.geometry.dispose();
+              disposeMaterials(restored.scene);
+            }
+          }
+        },
+        DEFAULT_PBR,
+        "same-turn",
+        bytes,
+      );
+      expect(new Uint8Array(position.array.buffer)).toEqual(originalData);
+      expect(
+        createHash("sha256").update(new Uint8Array(bytes)).digest("hex"),
+      ).toBe(sha256);
+    } finally {
+      original.dispose();
+      disposeMaterials(authored.scene);
+    }
+  });
+
   it("shares one cold representation for calls issued in the same JS turn", async () => {
     await realLoad(
       false,
