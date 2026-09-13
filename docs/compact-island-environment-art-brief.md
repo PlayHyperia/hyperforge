@@ -2,13 +2,40 @@
 
 ## Grass reference correction — next art priority, 2026-09-13
 
-Current prerequisite: grade-native02 exposed a real sampling inconsistency,
-not an accepted color result. Once the actual terrain noise texture is created,
-CPU grass sampling switches from analytic noise to quantized bilinear texels;
-the emitted worker does not. The reproduced off-center cell is 218/218 clumps
-before initialization but CPU223/worker218 afterward. The correction must share
-one deterministic sampler, preserve existing GPU texture bytes, and explicitly
-requalify changed worker placement. Do not replace the observer with a matching
+Current checkpoint: grade-native03 passes the focused native study after the
+shared sampler fix. Exact source closure, installed color/projection parity,
+terrain/main and observed reflection ownership, all three daylight stills,
+fixed wind, revisited LOD/root/bounds and the bounded final publication fence
+qualify locally. The overall run still fails the missing cow model/content
+gate; fourteen dagger fit errors also remain production blockers. This is not
+art, performance, default-promotion or launch approval.
+
+Root and independent review provisionally retain the greener grade, but reject
+the current canopy against the reference: thin upright separated ribbons still
+expose too much granular turf. The elevated view confirms the gap. Keep fine
+blade count, height, width and render quality fixed initially. Exact geometry
+review shows arc .30→.45 moves a representative blade's rows only 1.1/4.3/9.8 cm,
+with the largest shift at the zero-width tip; it does not create a drooping leaf.
+Plan a stronger visible upper-leaf shape/shading comparison before another long
+native qualification. No new shape is implemented. Actual sweep/support/service
+access and both LODs must be requalified, with any extra rejected clumps disclosed.
+
+Native03 CPU p95 is 15.1/15.8 ms and queried GPU-pass-sum p95 is 18.68/17.63 ms
+(campus/meadow), not presented or sustained FPS. The meadow cost probe occurs
+later in the daylight cycle than the strict photo/motion band: no matched-light
+speedup claim. Both videos decode cleanly at 1280×720 (239/354 frames), but sampled
+frame review does not approve subtle shimmer or invisible LOD transitions.
+Evidence: `asset-studio/fine-meadow01/QUALIFICATION.md` and the unchanged
+`fine-grass-grade-native03` native capture. Source checkpoint `6f822cab493087d9fbbb1f81df63bdc98816d466`
+is pushed under `dreaminglucid`; the candidate remains opt-in.
+
+Prerequisite history: grade-native02 exposed a real sampling inconsistency,
+not an accepted color result. Once the actual terrain noise texture was created,
+CPU grass sampling switched from analytic noise to quantized bilinear texels;
+the emitted worker did not. The reproduced off-center cell was 218/218 clumps
+before initialization but CPU223/worker218 afterward. The correction now shares
+one deterministic sampler, preserves existing GPU texture bytes, and explicitly
+requalifies changed worker placement. Do not replace the observer with a matching
 approximation or waive actual color/placement parity. The saved failing run and
 new regression are evidence of the defect, not a visual upgrade.
 
@@ -21,9 +48,9 @@ limit. Native load/performance is not approved by the serial source pass.
 
 Reference comparison against native07's restored .20 material still identifies
 upright, separated ribbons and exposed granular turf as the principal shape
-gap. After sampling/color qualification, trial upper-leaf arc .30 to .45 at
-unchanged height, width and blade count, then judge actual overlap, access and
-swept grounding. This is a proposed experiment, not implemented or approved.
+gap. The earlier arc .30 to .45 suggestion is now downgraded to a modest possible
+silhouette experiment after source review; it is not a likely fullness remedy.
+Neither that change nor a replacement upper-leaf shape is implemented or approved.
 
 The .12→.36 height-dependent normal trial is **rejected as a visual upgrade**.
 Native02 captures matched meadow/anvil views and both naturally daylit clips;
