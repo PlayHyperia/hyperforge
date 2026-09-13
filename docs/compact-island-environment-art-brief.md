@@ -1,5 +1,104 @@
 # Compact island environment art: next delivery slice
 
+## Shared habitat and avatar propagation qualification — 2026-09-13
+
+Native03 now passes the local study after 325 tests across 20 files, three package
+typechecks/builds and 30 capture preflight tests. Nine main views show only a
+subtle local substrate transition, not a major art-quality improvement. The
+whole setting still needs the high-impact work below. No appearance default,
+AAA or sustained-performance approval is implied. Actual compiled shared-field
+and grass ownership checks pass; 11,419 clumps / 411,084 installed grass triangles and
+historical placement/grounding data remain exact. No extra textures or passes.
+
+Failed native01/02 remain preserved: order-sensitive geometric work charges
+must be reported separately across runs, and a redundant live own undefined
+placeholder disappears in JSON. Narrow, tested observer corrections retain all
+geometry/source-ID/output and same-run assertions. Native03 has zero page/GPU/
+cleanup errors and closes owned browser/services; 19 existing content errors
+still fail the overall report. CPU p95 is 17.9/14.8ms and GPU-pass-sum p95 is
+18.81/19.07ms in the two short windows—not isolated savings or sustained 60fps.
+The VP8 1280x720 wind clip decodes 232 frames and stops its recorder/tracks.
+Report SHA256: `a842436948e9585ec865e7dfb190f6a7be710c567441062f0cc5b1be130038d0`.
+See `asset-studio/habitat-propagation01/` for qualification evidence.
+
+Independent final review matches all 717 source pins, 639 archives and 22
+checkpoints. Root and a second reviewer accept a modest Haven substrate
+refinement across nine image pairs, with no visible new hard seam/paint stripe.
+Five avatar/shield pairs retain pose, color and placement; overlays prevent
+full head/grip inspection. Three decoded wind frames show varying bends and
+settled roots, not exhaustive motion acceptance. The opening encoded frame is
+softer than later samples. Keep larger art, live physics, sustained frame and
+streaming gates open. Verification JSON SHA256:
+`fa64212bfb204b9e9e0b1a5ebfd90b2ccc8aab3e24eb71ec4c7b52971cb9f4b0`.
+
+The current implementation adds an explicit `habitatComposition=haven-understory-v1`
+trial on the existing natural-meadow route. Two authored, bounded convex pockets
+connect the admitted foot-slope, functional tree bases and workshop rocks. The
+same immutable half-plane field feeds complete terrain albedo/normal/roughness/AO
+blending and the roots of existing grass. This is mineral-soil composition, not
+new leaf litter. Grass tips, positions, grounding, all worker arrays, source IDs,
+counts, bounds and shadow/resolution settings remain unchanged. It adds one
+float varying to grass and no texture, geometry attribute or render pass. The
+blade root uses the soil palette mean, not a claim of pixel-identical textured
+terrain matching. Optional growth shortening is deliberately not implemented.
+
+Real CPU/TSL and six-leaf worker regressions and native03's local study pass.
+The verified native checks include actual terrain plus
+six grass material owners, shared canonical field identity, compiled shader
+evidence, exact historical signed-zero placement comparison and matched images.
+No new appearance default is promoted by this local checkpoint.
+
+The production avatar factory now propagates disjoint skeleton roots once,
+preserving animation/recoil/humanoid order and existing movement behavior. The
+authored 52-bone rig measures 457 to 61 recursive hierarchy visits per pass;
+actual factory, seven animation clips and real VRM humanoid tests preserve bone
+matrices, palettes, sampled deformation and attachments. This is reduced work,
+not measured frame-rate gain. Native animated appearance/performance remains
+open, as do the external CPU8 adapter allocation and equipment-LOD tasks.
+
+Current upstream research reinforces measuring actual passes and bandwidth:
+[Three's WebGPU post-processing guide](https://threejs.org/manual/en/webgpu-postprocessing.html)
+documents combined passes and explicit MRT precision/packing, while
+[Chrome's timestamp-query documentation](https://developer.chrome.com/blog/new-in-webgpu-121)
+describes optional GPU pass timing and timer quantization. These capabilities
+support controlled contact/lighting/temporal candidates; they do not establish
+free performance or an AAA ceiling. Keep current native resolution, shadows,
+population and matched reference views explicit in every comparison.
+
+### Next high-impact delivery order
+
+1. Finish the Haven workshop/bank → shoulder → pond-bank setting as a whole:
+   stronger architectural bases/eaves, irregular stone boundaries, readable
+   mineral faces and grounded shoreline transitions. Reuse the actual rock
+   library and shared kit ownership, and improve silhouettes visible from the
+   existing campus/Haven/pond cameras. Soil pockets cannot substitute for this.
+   Preserve harvesting, stations, fishing and navigation; report every added
+   main/shadow submission and memory cost. [Instancing](https://threejs.org/docs/pages/InstancedMesh.html)
+   reduces submissions, not geometry/shadow cost.
+2. Establish deformation-safe equipment LOD and measured frame headroom before
+   accepting new fullscreen work. Current two-actor torso/leg kits alone submit
+   about 1.145M triangles across main and sun. Retain close-up hero geometry,
+   all required attachments and exact approved rest/weight ownership.
+3. Qualify source-aware thin-leaf transmission independently of bark. The
+   compact PBR branch currently bypasses the legacy backscatter term; a bounded
+   [MeshSSSNodeMaterial](https://threejs.org/docs/pages/MeshSSSNodeMaterial.html)
+   direct-light candidate may improve backlit leaf volume without adding ambient
+   fill or globally recoloring authored teal trees. Retain alpha masks, wind,
+   shadows and source identity. Reject glowing night crowns or washed-out bark.
+4. Trial native contact occlusion separately, through
+   [GTAO and builtinAOContext](https://threejs.org/docs/pages/GTAONode.html), not
+   a dark overlay or the existing generic preference (which includes depth
+   blur). Proposed initial comparison: 16 samples, 0.5/0.9m radii, unchanged
+   native pixels and 4x MSAA. The depth/normal prepass, AO and possible denoise
+   have real cost. Check animated/discarded vegetation, thin-surface halos,
+   water/sky edges and moving cameras. Existing calibrated day-cycled PMREM
+   already supplies environment lighting; do not double-fill it with ambient.
+
+SSGI/TRAA remain later, explicit pipeline experiments. TRAA replaces MSAA and
+requires correct velocity/history for animated foliage, avatars and camera cuts;
+it is not a free quality toggle. A small habitat improvement does not close any
+of these broader art or sustained-performance gates.
+
 ## Natural tuft trial and rendering research — 2026-09-13
 
 The explicit `grassAppearance=natural-tuft-v1` trial uses the existing dense

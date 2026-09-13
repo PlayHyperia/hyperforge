@@ -25,6 +25,7 @@ import { TerrainVisualManager } from "../TerrainVisualManager";
 import { createCompactTerrainColorOperations } from "../CompactTerrainPalette";
 import {
   SCULPTED_COMPACT_WORLD_TERRAIN_PROFILE,
+  HAVEN_SHOULDER_COMPACT_WORLD_TERRAIN_PROFILE,
   SCULPTED_COMPACT_V1_PROFILE_FIXTURE,
   SCULPTED_COMPACT_V2_PROFILE_FIXTURE,
   SCULPTED_COMPACT_V3_PROFILE_FIXTURE,
@@ -32,6 +33,7 @@ import {
   type WorldTerrainProfile,
 } from "../WorldTerrainProfile";
 import { createTerrainWorkerConfig } from "../../../../utils/workers/TerrainWorkerShared";
+import { sampleCompactHabitatSoil } from "../CompactHabitatComposition";
 
 /** Actual production source in a native worker; only message transport is adapted. */
 function workerSession() {
@@ -154,6 +156,7 @@ async function fixture(
     profile: GrassVisualProfile,
     regionOwner = true,
     appearance?: "natural-tuft-v1",
+    habitat?: ConstructorParameters<typeof GrassVisualManager>[14],
   ) {
     const container = new THREE.Group();
     const owner = new GrassVisualManager(
@@ -173,6 +176,7 @@ async function fixture(
         ? (bounds) => visual.captureRetainedSurfaceRegion(bounds)
         : undefined,
       appearance,
+      habitat,
     );
     owner.setPlayerPosition(385, 374);
     managers.push(owner);
@@ -238,6 +242,150 @@ describe("opt-in compact grass, actual terrain and native worker (not GPU proof)
     expect(frames).toBeLessThan(1000);
     return uploads;
   }
+
+  it("keeps all six real worker populations and full grounded buffers exact when only habitat root color is enabled", async () => {
+    const f = await fixture(HAVEN_SHOULDER_COMPACT_WORLD_TERRAIN_PROFILE);
+    try {
+      const field = f.terrain["getCompactHabitatMaterial"](
+        "haven-understory-v1",
+      );
+      expect(field).not.toBeNull();
+      const baseline = f.manager(
+        DENSE_MEADOW_GRASS_VISUAL_PROFILE,
+        true,
+        "natural-tuft-v1",
+      ).owner;
+      const candidate = f.manager(
+        DENSE_MEADOW_GRASS_VISUAL_PROFILE,
+        true,
+        "natural-tuft-v1",
+        field,
+      ).owner;
+      const attributes = [
+        "instanceOffset",
+        "instanceRotScaleHash",
+        "instanceGroundColor",
+        "instanceGrassTint",
+        "instanceGroundNormal",
+        "grassRootDeltas",
+        "position",
+        "normal",
+        "uv",
+      ];
+      let total = 0,
+        insideHabitat = 0;
+      for (const node of f.nodes) {
+        f.installSupport(node);
+        const before = await queueGrounding(f, baseline, node);
+        const after = await queueGrounding(f, candidate, node);
+        expect(after.data.count).toBe(before.data.count);
+        for (const key of [
+          "offsets",
+          "rotScaleHash",
+          "groundColors",
+          "grassTints",
+          "groundNormals",
+        ] as const)
+          expect(after.data[key]).toEqual(before.data[key]);
+        expect(finishGrounding(baseline, before.key)).toBe(1);
+        expect(finishGrounding(candidate, after.key)).toBe(1);
+        const a = candidate["chunks"].get(after.key)!,
+          b = baseline["chunks"].get(before.key)!;
+        for (const material of [candidate["material"], a.mesh.material]) {
+          expect(Array.isArray(material)).toBe(false);
+          if (Array.isArray(material))
+            throw new Error("One grass material required");
+          expect(material.userData.compactHabitatComposition).toBe(field);
+          expect(
+            Object.getOwnPropertyDescriptor(
+              material.userData,
+              "compactHabitatComposition",
+            ),
+          ).toEqual({
+            value: field,
+            enumerable: true,
+            writable: false,
+            configurable: false,
+          });
+        }
+        expect(a.mesh.material).not.toBe(candidate["material"]);
+        expect(Array.isArray(b.mesh.material)).toBe(false);
+        if (Array.isArray(b.mesh.material))
+          throw new Error("One grass material required");
+        expect(
+          b.mesh.material.userData.compactHabitatComposition,
+        ).toBeUndefined();
+        expect(a.mesh.count).toBe(b.mesh.count);
+        expect(a.mesh.userData.grassBladeGrounding.sourceIndices).toEqual(
+          b.mesh.userData.grassBladeGrounding.sourceIndices,
+        );
+        expect(a.mesh.userData.grassBladeGrounding.sweptBounds).toEqual(
+          b.mesh.userData.grassBladeGrounding.sweptBounds,
+        );
+        expect(a.mesh.userData.grassBladeGrounding.rejected).toEqual(
+          b.mesh.userData.grassBladeGrounding.rejected,
+        );
+        expect(a.box).toEqual(b.box);
+        expect(a.mesh.boundingBox).toEqual(b.mesh.boundingBox);
+        expect(a.mesh.boundingSphere).toEqual(b.mesh.boundingSphere);
+        expect(a.mesh.geometry.index!.array).toEqual(
+          b.mesh.geometry.index!.array,
+        );
+        expect(Object.keys(a.mesh.geometry.attributes).sort()).toEqual(
+          Object.keys(b.mesh.geometry.attributes).sort(),
+        );
+        for (const name of attributes) {
+          const aa = a.mesh.geometry.getAttribute(name),
+            ba = b.mesh.geometry.getAttribute(name);
+          expect(aa.itemSize).toBe(ba.itemSize);
+          expect(aa.count).toBe(ba.count);
+          expect(aa.normalized).toBe(ba.normalized);
+          expect(aa.array.constructor).toBe(ba.array.constructor);
+          expect(
+            new Uint8Array(
+              aa.array.buffer,
+              aa.array.byteOffset,
+              aa.array.byteLength,
+            ),
+          ).toEqual(
+            new Uint8Array(
+              ba.array.buffer,
+              ba.array.byteOffset,
+              ba.array.byteLength,
+            ),
+          );
+        }
+        for (const owner of [baseline, candidate]) {
+          const completed = owner["completedGrounding"].get(before.key)!;
+          expect(completed.region.isCurrent()).toBe(true);
+          expect(completed.inputs.isCurrent()).toBe(true);
+        }
+        const offsets = a.mesh.geometry.getAttribute("instanceOffset");
+        for (let i = 0; i < a.mesh.count; i++)
+          if (
+            sampleCompactHabitatSoil(
+              node.centerX + offsets.getX(i),
+              node.centerZ + offsets.getZ(i),
+              field,
+            ) > 0
+          )
+            insideHabitat++;
+        total += a.mesh.count;
+      }
+      expect(total).toBeGreaterThan(0);
+      expect(insideHabitat).toBeGreaterThan(0);
+      expect(candidate.getProfileReceipt().installedClumps).toBe(
+        baseline.getProfileReceipt().installedClumps,
+      );
+      for (const owner of [baseline, candidate])
+        expect(owner.getProfileReceipt()).toMatchObject({
+          installedChunks: 6,
+          grounding: { runningChunks: 0, failedChunks: 0, completedChunks: 6 },
+        });
+    } finally {
+      await f.close();
+    }
+  }, 120_000);
 
   it("grounds the natural tuft candidate against all six real leaves without reseeding or bypassing rejection", async () => {
     const f = await fixture();

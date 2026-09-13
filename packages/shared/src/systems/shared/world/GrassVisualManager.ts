@@ -35,6 +35,8 @@ import THREE, {
 import { SUN_LIGHT } from "./LightingConfig";
 import { isCompactSculptProfile } from "./WorldTerrainProfile";
 import { createCompactTerrainColorOperations } from "./CompactTerrainPalette";
+import type { CompactHabitatField } from "./CompactHabitatComposition";
+import { createCompactHabitatSoilNode } from "./CompactTerrainMaterial";
 import type {
   GrassAppearanceCandidate,
   GrassSurfaceEligibility,
@@ -678,6 +680,7 @@ export class GrassVisualManager implements QuadTreeListener {
       bounds: TerrainGridBounds,
     ) => RetainedTerrainRegion,
     appearanceCandidate?: GrassAppearanceCandidate,
+    private readonly habitatComposition?: CompactHabitatField | null,
   ) {
     if (typeof terrainProfileIdentity !== "string" || !terrainProfileIdentity) {
       throw new Error("Grass visual terrain profile identity is required");
@@ -702,6 +705,10 @@ export class GrassVisualManager implements QuadTreeListener {
       }
     }
     this.profileId = profile.id ?? "ordinary-v1";
+    if (habitatComposition && appearanceCandidate !== "natural-tuft-v1")
+      throw new Error(
+        "Habitat grass requires the explicit natural tuft appearance",
+      );
     if (
       appearanceCandidate !== undefined &&
       (appearanceCandidate !== NATURAL_TUFT_APPEARANCE.id ||
@@ -1586,6 +1593,15 @@ export class GrassVisualManager implements QuadTreeListener {
           data.count,
           lodLevel,
         );
+      // Three clones userData through JSON. Rebind the admitted terrain field
+      // so each grounded chunk retains the same immutable material owner.
+      if (this.habitatComposition && material !== this.material)
+        Object.defineProperty(material.userData, "compactHabitatComposition", {
+          enumerable: true,
+          writable: false,
+          configurable: false,
+          value: this.habitatComposition,
+        });
       mesh = new THREE.InstancedMesh(geo, material, data.count);
       mesh.position.set(node.centerX, 0, node.centerZ);
       mesh.name = `GrassQT_${key}`;
@@ -2077,6 +2093,13 @@ export class GrassVisualManager implements QuadTreeListener {
       isCompactSculptProfile(terrainProfile);
     const mat = new MeshStandardNodeMaterial();
     mat.name = appearance?.id ?? "legacy-blades-v1";
+    if (this.habitatComposition)
+      Object.defineProperty(mat.userData, "compactHabitatComposition", {
+        enumerable: true,
+        writable: false,
+        configurable: false,
+        value: this.habitatComposition,
+      });
     mat.side = THREE.DoubleSide;
     mat.transparent = false;
     mat.depthWrite = true;
@@ -2250,6 +2273,7 @@ export class GrassVisualManager implements QuadTreeListener {
       );
     }
 
+    let habitatSoil = null;
     if (appearance?.id === "natural-tuft-v1") {
       // This opt-in graph shares its fade and wind between vertex position and
       // smooth normals. Existing appearance graphs above remain unchanged.
@@ -2261,6 +2285,12 @@ export class GrassVisualManager implements QuadTreeListener {
       const worldBase = modelWorldMatrix
         .mul(vec4(offset.x, float(0), offset.z, float(1)))
         .toVar("naturalGrassWorldBase");
+      if (this.habitatComposition)
+        habitatSoil = createCompactHabitatSoilNode(
+          worldBase.x,
+          worldBase.z,
+          this.habitatComposition,
+        ).toVarying("v_naturalGrassHabitatSoil");
       const toPlayer = sub(
         vec3(worldBase.x, float(0), worldBase.z),
         vec3(uPlayerPos.x, float(0), uPlayerPos.z),
@@ -2397,12 +2427,21 @@ export class GrassVisualManager implements QuadTreeListener {
       const tintStr = tint.w;
       const t = uv().y;
       const tintedCol = mix(groundCol, tintCol, tintStr);
+      // Shared substrate at this actual clump base, not a changed worker tint
+      // or placement. The one extra float varying is explicit candidate cost.
+      const rootGround = habitatSoil
+        ? mix(
+            groundCol,
+            vec3(...createCompactTerrainColorOperations().getPalette().dirt),
+            habitatSoil,
+          )
+        : groundCol;
       if (compactMeadow) {
         // Root shading suggests tuft occlusion without an extra texture/pass.
         // Retain the terrain palette: the previous 1.4 tip gain made distant
         // blades look like bright wires. This is albedo, not emissive light.
         const bladeCol = mix(
-          groundCol.mul(appearance.ROOT_BRIGHTNESS),
+          rootGround.mul(appearance.ROOT_BRIGHTNESS),
           tintedCol.mul(appearance.TIP_BRIGHTNESS),
           smoothstep(float(0.0), float(1.0), t),
         );

@@ -100,6 +100,21 @@ export type StreamingRenderProfileId = keyof typeof STREAMING_RENDER_PROFILES;
 export type SkyAtmosphereMode = "gradient-v1" | "scattering-v1";
 export type GrassAppearanceCandidate = "natural-tuft-v1";
 
+/** Explicit shared ground/grass art trial; never a population or quality switch. */
+export function resolveHabitatCompositionCandidate(
+  win?: Window,
+): "haven-understory-v1" | undefined {
+  const windowRef = getWindowRef(win);
+  if (!windowRef) return undefined;
+  const values = getSearchParams(windowRef)?.getAll("habitatComposition") ?? [];
+  if (!values.length) return undefined;
+  if (values.length !== 1 || values[0] !== "haven-understory-v1")
+    throw new Error("Unknown or duplicate habitat composition candidate");
+  if (resolveGrassAppearanceCandidate(windowRef) !== "natural-tuft-v1")
+    throw new Error("Habitat composition requires the explicit natural meadow");
+  return "haven-understory-v1";
+}
+
 /** Appearance-only qualification; dense meadow population settings stay unchanged. */
 export function resolveGrassAppearanceCandidate(
   win?: Window,

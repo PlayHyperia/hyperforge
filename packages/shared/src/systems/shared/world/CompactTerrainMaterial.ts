@@ -21,6 +21,26 @@ import {
   type CompactTerrainHavenGround,
 } from "./CompactTerrainPalette";
 import compactTerrainTextureDigests from "../../../data/compact-terrain-textures.json";
+import {
+  evaluateCompactHabitatSoil,
+  type CompactHabitatField,
+} from "./CompactHabitatComposition";
+
+/** Same admitted half-plane field used by terrain and existing grass roots. */
+export function createCompactHabitatSoilNode(
+  x: Node<"float">,
+  z: Node<"float">,
+  field: CompactHabitatField,
+): Node<"float"> {
+  return evaluateCompactHabitatSoil(x, z, field, {
+    constant: (value) => float(value),
+    add: (a, b) => a.add(b),
+    mul: (a, b) => a.mul(b),
+    min: (a, b) => a.min(b),
+    max: (a, b) => a.max(b),
+    smoothstep: (a, b, value) => smoothstep(a, b, value),
+  });
+}
 
 export const COMPACT_TERRAIN_MATERIAL = {
   id: "compact-pbr-v1",
@@ -920,6 +940,7 @@ export function blendCompactTerrainLayers(
   cliff: Node<"float">,
   road: Node<"float">,
   havenGround?: { talus: Node<"float">; wear: Node<"float"> },
+  habitatSoil?: Node<"float">,
 ) {
   const blendVector = (
     grass: Node<"vec3">,
@@ -939,6 +960,7 @@ export function blendCompactTerrainLayers(
       );
       meadow = mix(meadow, ground, havenGround.wear);
     }
+    if (habitatSoil) meadow = mix(meadow, ground, habitatSoil);
     return mix(mix(meadow, rock, cliff), ground, road);
   };
   const blendScalar = (
@@ -959,6 +981,7 @@ export function blendCompactTerrainLayers(
       );
       meadow = mix(meadow, ground, havenGround.wear);
     }
+    if (habitatSoil) meadow = mix(meadow, ground, habitatSoil);
     return mix(mix(meadow, rock, cliff), ground, road);
   };
   return {

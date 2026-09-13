@@ -7,6 +7,7 @@ import {
   resolveExplicitStreamingRenderProfile,
   resolveExplicitStreamingWorldProfile,
   resolveGrassAppearanceCandidate,
+  resolveHabitatCompositionCandidate,
   resolveSkyAtmosphereMode,
   resolveStreamingRenderFrameRate,
   shouldAdmitNetworkEntityInViewport,
@@ -21,6 +22,74 @@ import {
 function makeWindow(pathname: string, search = ""): Window {
   return { location: { pathname, search } } as unknown as Window;
 }
+
+describe("explicit habitat composition selection", () => {
+  const meadow =
+    "streamRenderProfile=island-meadow-720p60-v1&grassAppearance=natural-tuft-v1";
+  it("retains absent/default selection and admits only the explicit matching meadow", () => {
+    expect(resolveHabitatCompositionCandidate()).toBeUndefined();
+    expect(
+      resolveHabitatCompositionCandidate(makeWindow("/play")),
+    ).toBeUndefined();
+    expect(
+      resolveHabitatCompositionCandidate(
+        makeWindow("/stream.html", "?" + meadow),
+      ),
+    ).toBeUndefined();
+    for (const [path, query] of [
+      ["/stream.html", meadow],
+      ["/", "page=stream&" + meadow],
+    ])
+      expect(
+        resolveHabitatCompositionCandidate(
+          makeWindow(
+            path,
+            "?" + query + "&habitatComposition=haven-understory-v1",
+          ),
+        ),
+      ).toBe("haven-understory-v1");
+  });
+  it.each([
+    "",
+    "unknown",
+    "HAVEN-UNDERSTORY-V1",
+    "%20haven-understory-v1",
+    "haven-understory-v1%20",
+    "haven-understory-v1&habitatComposition=haven-understory-v1",
+  ])("rejects invalid/duplicate habitat values: %s", (value) => {
+    expect(() =>
+      resolveHabitatCompositionCandidate(
+        makeWindow(
+          "/stream.html",
+          "?" + meadow + "&habitatComposition=" + value,
+        ),
+      ),
+    ).toThrow();
+  });
+  it.each([
+    ["/play", meadow],
+    ["/stream.html", ""],
+    ["/stream.html", "streamRenderProfile=island-meadow-720p60-v1"],
+    [
+      "/stream.html",
+      "streamRenderProfile=canonical-720p60-v1&grassAppearance=natural-tuft-v1",
+    ],
+    ["/stream.html", meadow + "&embedded=true"],
+    ["/stream.html", meadow + "&embedded=false&embedded=true"],
+    ["/stream.html", meadow + "&streamFps=30"],
+    ["/stream.html", meadow + "&grassAppearance=natural-tuft-v1"],
+    ["/", "page=stream&page=play&" + meadow],
+  ])("rejects incompatible routes %s%s", (path, query) => {
+    expect(() =>
+      resolveHabitatCompositionCandidate(
+        makeWindow(
+          path,
+          "?" + query + "&habitatComposition=haven-understory-v1",
+        ),
+      ),
+    ).toThrow();
+  });
+});
 
 describe("explicit grass appearance candidate selection", () => {
   const selection =

@@ -39,6 +39,7 @@ import {
   applyCompactCoastRock,
   createCompactPlantingSoil,
   createCompactHavenGroundWeights,
+  createCompactHabitatSoilNode,
   type CompactTerrainLayer,
 } from "../CompactTerrainMaterial";
 import {
@@ -51,12 +52,247 @@ import { DataManager } from "../../../../data/DataManager";
 import { World } from "../../../../core/World";
 import { TerrainSystem } from "../TerrainSystem";
 import { createCompactServiceSoil } from "../CompactServiceCourt";
+import habitatData from "../../../../data/compact-haven-habitat-v1.json";
+import { validateCompactHabitatComposition } from "../CompactHabitatComposition";
 import {
   SCULPTED_COMPACT_WORLD_TERRAIN_PROFILE,
   HAVEN_SHOULDER_COMPACT_WORLD_TERRAIN_PROFILE,
   SCULPTED_COMPACT_V1_PROFILE_FIXTURE,
   validateWorldTerrainProfile,
 } from "../WorldTerrainProfile";
+
+describe("opt-in Haven habitat material (actual TSL graph, not GPU proof)", () => {
+  const habitat = validateCompactHabitatComposition(
+    habitatData.composition,
+    habitatData.bounds,
+  );
+  // Independent signed polygon distances from authored vertices, not the
+  // production compiled half-planes or its CPU sampler.
+  const expectedSoil = (x: number, z: number) =>
+    Math.max(
+      0,
+      ...habitatData.composition.pockets.map((pocket) => {
+        const distance = Math.min(
+          ...pocket.vertices.map(([ax, az], i) => {
+            const [bx, bz] = pocket.vertices[(i + 1) % pocket.vertices.length];
+            return (
+              ((bx - ax) * (z - az) - (bz - az) * (x - ax)) /
+              Math.hypot(bx - ax, bz - az)
+            );
+          }),
+        );
+        const t = THREE.MathUtils.clamp(distance / pocket.edgeWidth, 0, 1);
+        return pocket.strength * t * t * (3 - 2 * t);
+      }),
+    );
+
+  it("uses the same authored soil weight across all four PBR channels with cliff and road priority", () => {
+    const layers = {
+      grass: {
+        albedo: vec3(0.1, 0.2, 0.3),
+        roughness: float(0.4),
+        ao: float(0.2),
+        worldNormal: vec3(0, 1, 0),
+      },
+      dirt: {
+        albedo: vec3(0.3, 0.2, 0.1),
+        roughness: float(0.7),
+        ao: float(0.6),
+        worldNormal: vec3(0.6, 0.8, 0),
+      },
+      rock: {
+        albedo: vec3(0.6, 0.5, 0.4),
+        roughness: float(0.9),
+        ao: float(0.8),
+        worldNormal: vec3(0, 0.8, 0.6),
+      },
+    };
+    for (const [x, z] of [
+      [299, 330],
+      [305, 305],
+      [306, 306],
+      [318.5, 312.5],
+      [316, 332],
+      [318.5, 344.5],
+      [326.8, 331.6],
+    ]) {
+      const soil = createCompactHabitatSoilNode(
+        float(x),
+        float(z),
+        habitat,
+      ).toVar("testedHabitatSoil");
+      const weight = expectedSoil(x, z);
+      expect(vectorValue(soil)[0]).toBeCloseTo(weight, 12);
+      for (const [dirt, talus, wear, cliff, road] of [
+        [0, 0, 0, 0, 0],
+        [0.23, 0.31, 0.17, 0.41, 0.29],
+        [1, 0, 0, 0, 0],
+        [0, 0.5, 0.3, 1, 0],
+        [0, 0.5, 0.3, 0.4, 1],
+      ]) {
+        const surface = blendCompactTerrainLayers(
+          layers,
+          float(dirt),
+          float(cliff),
+          float(road),
+          { talus: float(talus), wear: float(wear) },
+          soil,
+        );
+        const mix = THREE.MathUtils.lerp;
+        const expected = (g: number, d: number, r: number) =>
+          mix(
+            mix(
+              mix(
+                mix(mix(mix(g, d, dirt), mix(d, r, 0.85), talus), d, wear),
+                d,
+                weight,
+              ),
+              r,
+              cliff,
+            ),
+            d,
+            road,
+          );
+        for (const key of ["albedo", "roughness", "ao"] as const) {
+          expect(graph(surface[key]).has(soil)).toBe(true);
+          const a = vectorValue(layers.grass[key]),
+            b = vectorValue(layers.dirt[key]),
+            c = vectorValue(layers.rock[key]);
+          vectorValue(surface[key]).forEach((value, i) =>
+            expect(value).toBeCloseTo(expected(a[i], b[i], c[i]), 12),
+          );
+        }
+        expect(graph(surface.normal).has(soil)).toBe(true);
+        const worldNormals = [...graph(surface.normal)].filter(
+          (node) =>
+            Reflect.get(node, "method") === "normalize" &&
+            !graph(node).has(cameraViewMatrix) &&
+            Object.values(layers).every((layer) =>
+              graph(node).has(layer.worldNormal),
+            ),
+        );
+        expect(worldNormals).toHaveLength(1);
+        const normal = new THREE.Vector3(
+          ...[0, 1, 2].map((i) =>
+            expected(
+              vectorValue(layers.grass.worldNormal)[i],
+              vectorValue(layers.dirt.worldNormal)[i],
+              vectorValue(layers.rock.worldNormal)[i],
+            ),
+          ),
+        )
+          .normalize()
+          .toArray();
+        vectorValue(worldNormals[0]).forEach((value, i) =>
+          expect(value).toBeCloseTo(normal[i], 12),
+        );
+        if (weight === 0) {
+          const original = blendCompactTerrainLayers(
+            layers,
+            float(dirt),
+            float(cliff),
+            float(road),
+            { talus: float(talus), wear: float(wear) },
+          );
+          for (const key of ["albedo", "roughness", "ao"] as const)
+            expect(vectorValue(surface[key])).toEqual(
+              vectorValue(original[key]),
+            );
+        }
+      }
+    }
+    expect(expectedSoil(318.5, 312.5)).toBe(0.38);
+    expect(expectedSoil(318.5, 344.5)).toBe(0.46);
+    expect(expectedSoil(299, 330)).toBe(0);
+  });
+
+  it("shares one actual field and soil node without adding sampled maps or changing material geometry", () => {
+    const options = {
+      compactPbr: true,
+      compactProfile: HAVEN_SHOULDER_COMPACT_WORLD_TERRAIN_PROFILE,
+    };
+    const baseline = createTerrainMaterial(undefined, options);
+    const material = createTerrainMaterial(undefined, {
+      ...options,
+      compactHabitat: habitat,
+    });
+    try {
+      expect(material.compactHabitatMaterial).toBe(habitat);
+      expect(Object.isFrozen(material.compactHabitatMaterial)).toBe(true);
+      expect(
+        Object.getOwnPropertyDescriptor(material, "compactHabitatMaterial"),
+      ).toEqual({
+        value: habitat,
+        enumerable: true,
+        writable: false,
+        configurable: false,
+      });
+      expect(baseline.compactHabitatMaterial).toBeUndefined();
+      let shared: Node | undefined;
+      for (const owner of [baseline, material]) {
+        expect(owner.positionNode).toBeNull();
+        expect(owner.displacementMap).toBeNull();
+        expect(owner.transparent).toBe(false);
+        expect(owner.depthWrite).toBe(true);
+        const receipt = owner.compactTerrainSurface!.getReceipt();
+        expect(receipt.textures).toHaveLength(6);
+        expect(receipt.surfaceSampleCount).toBe(14);
+        const textureOwners = new Set(
+          receipt.textures.map((entry) => entry.textureUuid),
+        );
+        const samples = new Set<Node>();
+        const seen = new Set<string>();
+        for (const root of [
+          owner.colorNode!,
+          owner.normalNode!,
+          owner.roughnessNode!,
+          owner.aoNode!,
+        ]) {
+          const nodes = graph(root);
+          const weights = [...nodes].filter(
+            (node) => Reflect.get(node, "name") === "compactHabitatSoil",
+          );
+          expect(weights).toHaveLength(owner === material ? 1 : 0);
+          if (owner === material) {
+            shared ??= weights[0];
+            expect(weights[0]).toBe(shared);
+          }
+          for (const node of nodes) {
+            const value: unknown = Reflect.get(node, "value");
+            if (
+              value instanceof THREE.Texture &&
+              textureOwners.has(value.uuid)
+            ) {
+              seen.add(value.uuid);
+              if (Reflect.get(node, "uvNode")) samples.add(node);
+            }
+          }
+        }
+        expect(seen.size).toBe(6);
+        expect(samples.size).toBe(14);
+      }
+      for (const invalid of [
+        {
+          compactPbr: false,
+          compactProfile: HAVEN_SHOULDER_COMPACT_WORLD_TERRAIN_PROFILE,
+        },
+        {
+          compactPbr: true,
+          compactProfile: SCULPTED_COMPACT_WORLD_TERRAIN_PROFILE,
+        },
+      ])
+        expect(() =>
+          createTerrainMaterial(undefined, {
+            ...invalid,
+            compactHabitat: habitat,
+          }),
+        ).toThrow("Habitat composition requires the full Haven PBR material");
+    } finally {
+      material.dispose();
+      baseline.dispose();
+    }
+  });
+});
 
 beforeAll(async () => {
   await DataManager.getInstance().initialize();

@@ -97,6 +97,11 @@ import {
 } from "../../../data/arena-grading";
 import { DataManager } from "../../../data/DataManager";
 import { createCompactPreparationDetailRegions } from "./CompactIslandDetail";
+import habitatCompositionData from "../../../data/compact-haven-habitat-v1.json";
+import {
+  validateCompactHabitatComposition,
+  type CompactHabitatField,
+} from "./CompactHabitatComposition";
 import {
   createCompactTerrainColorOperations,
   COMPACT_TERRAIN_COMPOSITION,
@@ -182,6 +187,7 @@ import {
   resolveExplicitStreamingWorldProfile,
   resolveExplicitStreamingRenderProfile,
   resolveGrassAppearanceCandidate,
+  resolveHabitatCompositionCandidate,
   type GrassSurfaceEligibility,
 } from "../../../runtime/clientViewportMode";
 import {
@@ -370,6 +376,7 @@ export class TerrainSystem extends System {
   };
   private grassSurfaceOperations = createGrassTerrainSurfaceOperations();
   private compactMacroMaterial: CompactTerrainMacroField | null | undefined;
+  private compactHabitatMaterial: CompactHabitatField | null | undefined;
   private compactPlantingMaterial:
     readonly CompactTerrainPlantingLobe[] | undefined;
   private grassVisualManager: GrassVisualManager | null = null;
@@ -544,6 +551,7 @@ export class TerrainSystem extends System {
       compactPond: this.getCompactPondMaterial(),
       compactPlantingLobes: this.getCompactPlantingMaterial(),
       compactProfile: profile,
+      compactHabitat: this.getCompactHabitatMaterial(),
     });
     // The generator initializes before this client-only material exists. Apply
     // profile-owned options here so the actual published material is configured
@@ -583,6 +591,68 @@ export class TerrainSystem extends System {
         this.getWorldTerrainProfile(),
       );
     return this.compactMacroMaterial;
+  }
+
+  /** Restart-owned art descriptor; no resource, terrain or worker mutation. */
+  private getCompactHabitatMaterial(
+    selection = resolveHabitatCompositionCandidate(),
+  ): CompactHabitatField | null {
+    if (this.compactHabitatMaterial !== undefined)
+      return this.compactHabitatMaterial;
+    if (!selection) return (this.compactHabitatMaterial = null);
+    const profile = this.getWorldTerrainProfile();
+    if (
+      selection !== habitatCompositionData.id ||
+      profile.id !== habitatCompositionData.terrainProfileId ||
+      !profile.havenShoulder
+    )
+      throw new Error(
+        "Habitat composition requires its admitted Haven profile",
+      );
+    if (
+      profile.havenShoulder.toe.length !==
+        habitatCompositionData.toeAnchors.length ||
+      profile.havenShoulder.toe.some(
+        (point, i) =>
+          point[0] !== habitatCompositionData.toeAnchors[i][0] ||
+          point[1] !== habitatCompositionData.toeAnchors[i][1],
+      )
+    )
+      throw new Error("Habitat toe anchors differ from the admitted landform");
+    const resources = Object.values(ALL_WORLD_AREAS).flatMap(
+      (area) => area.resources ?? [],
+    );
+    for (const anchor of habitatCompositionData.treeAnchors) {
+      const matches = resources.filter(
+        (r) => r.instanceId === anchor.instanceId,
+      );
+      if (
+        matches.length !== 1 ||
+        matches[0].type !== "tree" ||
+        matches[0].position.x !== anchor.x ||
+        matches[0].position.z !== anchor.z
+      )
+        throw new Error(
+          "Habitat tree anchor differs from the authoritative resource",
+        );
+    }
+    const rocks =
+      DataManager.getWorldConfig()?.compactLandscapeRocks?.rocks ?? [];
+    for (const anchor of habitatCompositionData.rockAnchors) {
+      const matches = rocks.filter((r) => r.id === anchor.id);
+      if (
+        matches.length !== 1 ||
+        matches[0].x !== anchor.x ||
+        matches[0].z !== anchor.z
+      )
+        throw new Error(
+          "Habitat rock anchor differs from the admitted landscape",
+        );
+    }
+    return (this.compactHabitatMaterial = validateCompactHabitatComposition(
+      habitatCompositionData.composition,
+      habitatCompositionData.bounds,
+    ));
   }
 
   private getCompactPlantingMaterial(): readonly CompactTerrainPlantingLobe[] {
@@ -2351,6 +2421,7 @@ export class TerrainSystem extends System {
             GRASS_BLADE_GROUNDING_LIMITS.maxSurfaces,
           ),
         resolveGrassAppearanceCandidate(),
+        this.getCompactHabitatMaterial(),
       );
 
       // Wire terrain, water, grass managers to the same quad-tree via composite

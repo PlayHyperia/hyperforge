@@ -56,6 +56,7 @@ import {
   CompactTerrainTextureSet,
   createCompactTerrainLayers,
   blendCompactTerrainLayers,
+  createCompactHabitatSoilNode,
   createCompactTerrainLayerWeights,
   createCompactPlantingSoil,
   createCompactHavenGroundWeights,
@@ -74,6 +75,7 @@ import {
   type CompactTerrainPlantingLobe,
   type CompactTerrainHavenGround,
 } from "./CompactTerrainPalette";
+import type { CompactHabitatField } from "./CompactHabitatComposition";
 
 /** Configured material graph attribution, not rendered-pixel or timing proof. */
 export type CompactHavenGroundMaterialReceipt = Readonly<{
@@ -1199,12 +1201,14 @@ export function createTerrainMaterial(
     compactPond?: CompactTerrainPond | null;
     compactPlantingLobes?: readonly CompactTerrainPlantingLobe[];
     compactProfile?: WorldTerrainProfile;
+    compactHabitat?: CompactHabitatField | null;
   } = {},
 ): THREE.Material & {
   terrainUniforms: TerrainUniforms;
   compactTerrainSurface?: CompactTerrainTextureSet;
   compactPlantingMaterial?: readonly CompactTerrainPlantingLobe[];
   compactHavenGroundMaterial?: CompactHavenGroundMaterialReceipt;
+  compactHabitatMaterial?: CompactHabitatField;
   compactPondMaterial?: {
     profile: CompactTerrainPond;
     parameters: UniformNode<"vec4", THREE.Vector4>;
@@ -1219,6 +1223,11 @@ export function createTerrainMaterial(
     options.compactPbr && options.compactProfile
       ? createCompactTerrainColorOperations().macroField(options.compactProfile)
       : null;
+  if (
+    options.compactHabitat &&
+    (!options.compactPbr || !macroField?.havenGround)
+  )
+    throw new Error("Habitat composition requires the full Haven PBR material");
   const compactPond = options.compactPbr
     ? createCompactTerrainColorOperations().validatePond(
         options.compactPond ?? null,
@@ -1696,6 +1705,13 @@ export function createTerrainMaterial(
                 slope,
               )
             : undefined,
+          options.compactHabitat
+            ? createCompactHabitatSoilNode(
+                worldPos.x,
+                worldPos.z,
+                options.compactHabitat,
+              ).toVar("compactHabitatSoil")
+            : undefined,
         )
       : null;
   const compactSurface = compactBaseSurface
@@ -1896,12 +1912,21 @@ export function createTerrainMaterial(
     compactTerrainSurface?: CompactTerrainTextureSet;
     compactPlantingMaterial?: readonly CompactTerrainPlantingLobe[];
     compactHavenGroundMaterial?: CompactHavenGroundMaterialReceipt;
+    compactHabitatMaterial?: CompactHabitatField;
     compactPondMaterial?: {
       profile: CompactTerrainPond;
       parameters: UniformNode<"vec4", THREE.Vector4>;
     };
   };
   result.terrainUniforms = terrainUniforms;
+  if (options.compactHabitat) {
+    Object.defineProperty(result, "compactHabitatMaterial", {
+      enumerable: true,
+      writable: false,
+      configurable: false,
+      value: options.compactHabitat,
+    });
+  }
   if (plantingLobes.length) result.compactPlantingMaterial = plantingLobes;
   if (macroField?.havenGround)
     Object.defineProperty(result, "compactHavenGroundMaterial", {

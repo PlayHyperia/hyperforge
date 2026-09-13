@@ -143,6 +143,76 @@ export function copyAvatarBoneWorldTransform(
   return target.copy(boneWorld);
 }
 
+/**
+ * Propagate each skeleton subtree once, including non-bone intermediates and
+ * current attachments. Calling the recursive Three method on every bone repeats
+ * all descendant work. Bone order is not a hierarchy contract.
+ *
+ * Cache only topology, never transforms: ordinary/manual matrix flags retain
+ * Three's semantics. Shared ancestor edges are checked once per update so a
+ * reparent or a changed skeleton list cannot leave an obsolete root selection.
+ */
+export class AvatarSkeletonPropagation {
+  private readonly members = new Set<THREE.Bone>();
+  private readonly ancestors = new Set<THREE.Object3D>();
+  private readonly bones: THREE.Bone[] = [];
+  private readonly roots: THREE.Bone[] = [];
+  private readonly nodes: THREE.Object3D[] = [];
+  private readonly parents: Array<THREE.Object3D | null> = [];
+
+  constructor(private readonly skeleton: THREE.Skeleton) {
+    this.rebuild();
+  }
+
+  update(): void {
+    if (this.topologyChanged()) this.rebuild();
+    for (let i = 0; i < this.roots.length; i++) {
+      this.roots[i].updateMatrixWorld();
+    }
+  }
+
+  private topologyChanged(): boolean {
+    const bones = this.skeleton.bones;
+    if (bones.length !== this.bones.length) return true;
+    for (let i = 0; i < bones.length; i++) {
+      if (bones[i] !== this.bones[i]) return true;
+    }
+    for (let i = 0; i < this.nodes.length; i++) {
+      if (this.nodes[i].parent !== this.parents[i]) return true;
+    }
+    return false;
+  }
+
+  private rebuild(): void {
+    this.members.clear();
+    this.ancestors.clear();
+    this.bones.length = this.roots.length = 0;
+    this.nodes.length = this.parents.length = 0;
+    for (const bone of this.skeleton.bones) {
+      this.bones.push(bone);
+      this.members.add(bone);
+    }
+    for (const bone of this.members) {
+      let ancestor: THREE.Object3D | null = bone.parent;
+      while (ancestor && !this.members.has(ancestor as THREE.Bone)) {
+        ancestor = ancestor.parent;
+      }
+      if (!ancestor) this.roots.push(bone);
+
+      // Stop at a previously recorded edge: shared paths need no duplicate
+      // storage or per-frame ancestor walks. New descendants are handled by
+      // Three's recursive update, without rebuilding this selection.
+      let node: THREE.Object3D | null = bone;
+      while (node && !this.ancestors.has(node)) {
+        this.ancestors.add(node);
+        this.nodes.push(node);
+        this.parents.push(node.parent);
+        node = node.parent;
+      }
+    }
+  }
+}
+
 /** Use the same node-material conversion in the game and avatar review. */
 export function prepareVRMMaterialsForWebGPU(root: THREE.Object3D): void {
   const shadowCandidate = isCharacterShadowCandidateActive();
@@ -760,6 +830,7 @@ export function createVRMFactory(
     let _deathUpdateLogCount = 0;
 
     const hitReaction = new PlayerHitReactionController(clonedHumanoid);
+    const skeletonPropagation = new AvatarSkeletonPropagation(skeleton);
     const triggerHitReaction = (intensity = 1, side: HitReactionSide = 1) => {
       if (!_deathAnimationActive) hitReaction.trigger(intensity, side);
     };
@@ -821,12 +892,8 @@ export function createVRMFactory(
           );
         }
 
-        // Step 3: Update skeleton matrices for skinning
-        // Use for-loop instead of forEach to avoid callback allocation
-        const bones = skeleton.bones;
-        for (let i = 0; i < bones.length; i++) {
-          bones[i].updateMatrixWorld();
-        }
+        // Step 3: Propagate disjoint skeleton subtrees before skinning.
+        skeletonPropagation.update();
         skeleton.update();
 
         elapsed = 0;

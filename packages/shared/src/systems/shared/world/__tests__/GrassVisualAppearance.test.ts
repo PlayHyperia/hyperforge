@@ -2,9 +2,12 @@ import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import THREE, {
   cameraViewMatrix,
+  modelWorldMatrix,
   output,
 } from "../../../../extras/three/three";
 import type { Node } from "three/webgpu";
+import habitatData from "../../../../data/compact-haven-habitat-v1.json";
+import { validateCompactHabitatComposition } from "../CompactHabitatComposition";
 import { createTerrainWorkerConfig } from "../../../../utils/workers/TerrainWorkerShared";
 import {
   COMPACT_ISLAND_GRASS_VISUAL_PROFILE,
@@ -29,6 +32,7 @@ function manager(
   terrain = SCULPTED_COMPACT_WORLD_TERRAIN_PROFILE,
   withWorkerSetup = true,
   appearanceCandidate?: ConstructorParameters<typeof GrassVisualManager>[13],
+  habitat?: ConstructorParameters<typeof GrassVisualManager>[14],
 ) {
   const config = createTerrainWorkerConfig(terrain, 16);
   const setup: GrassWorkerSetup = {
@@ -65,6 +69,7 @@ function manager(
     undefined,
     undefined,
     appearanceCandidate,
+    habitat,
   );
 }
 
@@ -110,6 +115,7 @@ function colorValue(
     return colorValue(value, attributes);
   };
   if (node === cameraViewMatrix) return attributes._cameraViewMatrix;
+  if (node === modelWorldMatrix) return attributes._modelWorldMatrix;
   if (node.type === "FrontFacingNode") return attributes._frontFacing;
   if (node.type === "AttributeNode") {
     const value = attributes[String(read("_attributeName"))];
@@ -118,6 +124,13 @@ function colorValue(
   }
   const value = read("value");
   if (typeof value === "number") return [value];
+  if (
+    value instanceof THREE.Vector2 ||
+    value instanceof THREE.Vector3 ||
+    value instanceof THREE.Vector4 ||
+    value instanceof THREE.Matrix4
+  )
+    return value.toArray();
   if (
     node.type === "ConvertNode" ||
     node.type === "VarNode" ||
@@ -168,6 +181,8 @@ function colorValue(
       if (read("op") === "+") return a + b;
       if (read("op") === "-") return a - b;
       if (read("op") === "/") return a / b;
+      if (read("method") === "min") return Math.min(a, b);
+      if (read("method") === "max") return Math.max(a, b);
       if (read("method") === "mix") return a + (b - a) * c;
       if (read("method") === "smoothstep") {
         const t = Math.max(0, Math.min(1, (c - a) / (b - a)));
@@ -186,6 +201,234 @@ function geometryBytes(geometry: THREE.BufferGeometry) {
     ) + geometry.index!.array.byteLength
   );
 }
+
+describe("Haven habitat grass root integration (actual graph and geometry, CPU only)", () => {
+  const field = validateCompactHabitatComposition(
+    habitatData.composition,
+    habitatData.bounds,
+  );
+  const natural = (
+    habitat?: ConstructorParameters<typeof GrassVisualManager>[14],
+  ) =>
+    manager(
+      DENSE_MEADOW_GRASS_VISUAL_PROFILE,
+      SCULPTED_COMPACT_WORLD_TERRAIN_PROFILE,
+      true,
+      "natural-tuft-v1",
+      habitat,
+    );
+  const expectedSoil = (x: number, z: number) =>
+    Math.max(
+      0,
+      ...habitatData.composition.pockets.map((pocket) => {
+        const distance = Math.min(
+          ...pocket.vertices.map(([ax, az], i) => {
+            const [bx, bz] = pocket.vertices[(i + 1) % pocket.vertices.length];
+            return (
+              ((bx - ax) * (z - az) - (bz - az) * (x - ax)) /
+              Math.hypot(bx - ax, bz - az)
+            );
+          }),
+        );
+        const t = Math.max(0, Math.min(1, distance / pocket.edgeWidth));
+        return pocket.strength * t * t * (3 - 2 * t);
+      }),
+    );
+
+  it("blends roots toward the hash-locked dirt mean at actual world-space roots while leaving tips unchanged", () => {
+    const owner = natural(field),
+      baseline = natural();
+    try {
+      const material = owner["material"],
+        original = baseline["material"];
+      const dirt = [0.13570346695867627, 0.10530763563352, 0.06788700038018664];
+      const ground = [0.2, 0.4, 0.1],
+        tip = [0.23, 0.415, 0.13];
+      for (const [x, z] of [
+        [299, 330],
+        [306, 306],
+        [318.5, 312.5],
+        [316, 332],
+        [318.5, 344.5],
+        [326.8, 331.6],
+      ]) {
+        const weight = expectedSoil(x, z);
+        // Identical world root through a translated/rotated parent and local
+        // offset proves the graph does not classify only the chunk origin.
+        for (const matrix of [
+          new THREE.Matrix4(),
+          new THREE.Matrix4().makeRotationY(0.71).setPosition(280, 17, 295),
+        ]) {
+          const local = new THREE.Vector3(x, 17, z).applyMatrix4(
+            matrix.clone().invert(),
+          );
+          for (const height of [0, 0.25, 0.5, 1]) {
+            const attrs = {
+              instanceOffset: local.toArray(),
+              instanceGroundColor: ground,
+              instanceGrassTint: [0.3, 0.45, 0.2, 0.3],
+              uv: [0.5, height],
+              _modelWorldMatrix: matrix.toArray(),
+            };
+            const actual = colorValue(expand(material.colorNode!), attrs);
+            const old = colorValue(expand(original.colorNode!), attrs);
+            const t = height * height * (3 - 2 * height);
+            const expected = ground.map((value, i) => {
+              const root = (value + (dirt[i] - value) * weight) * 0.64;
+              return root + (tip[i] - root) * t;
+            });
+            actual.forEach((value, i) =>
+              expect(value).toBeCloseTo(expected[i], 12),
+            );
+            if (height === 1 || weight === 0)
+              actual.forEach((value, i) =>
+                expect(value).toBeCloseTo(old[i], 12),
+              );
+            if (height === 0 && weight > 0.1) expect(actual).not.toEqual(old);
+          }
+        }
+      }
+      const nodes = graph(material.colorNode!);
+      const varyings = [...nodes].filter((n) => n.type === "VaryingNode");
+      expect(varyings.map((n) => Reflect.get(n, "name"))).toEqual([
+        "v_naturalGrassHabitatSoil",
+      ]);
+      // Three's actual CPU type resolver; no renderer/device is fabricated.
+      const builder = new THREE.NodeBuilder(null, null);
+      expect(varyings[0].getNodeType(builder)).toBe("float");
+      expect(
+        [...graph(original.colorNode!)].filter((n) => n.type === "VaryingNode"),
+      ).toHaveLength(0);
+      expect(
+        [...nodes]
+          .filter((n) => n.type === "AttributeNode")
+          .map((n) => Reflect.get(n, "_attributeName"))
+          .sort(),
+      ).toEqual([
+        "instanceGrassTint",
+        "instanceGroundColor",
+        "instanceOffset",
+        "uv",
+      ]);
+      expect(
+        [...nodes].some((n) => Reflect.get(n, "isTextureNode") === true),
+      ).toBe(false);
+      expect(material.name).toBe(original.name);
+    } finally {
+      owner.destroy();
+      baseline.destroy();
+    }
+  });
+
+  it("keeps every geometry byte and the complete position/normal graph unchanged, and requires the natural appearance", () => {
+    // Canonical traversal preserves shared-node edges while omitting per-owner
+    // UUIDs/IDs. Constants, operations and uniform initial values remain exact.
+    const signature = (root: Node) => {
+      const nodes = [...graph(root)],
+        ids = new Map(nodes.map((node, i) => [node, i]));
+      return nodes.map((node) => {
+        const fields: Record<string, unknown> = { type: node.type };
+        for (const key of [
+          "nodeType",
+          "op",
+          "method",
+          "_attributeName",
+          "name",
+          "components",
+          "scope",
+        ])
+          fields[key] = Reflect.get(node, key);
+        const value: unknown = Reflect.get(node, "value");
+        if (
+          typeof value === "number" ||
+          typeof value === "string" ||
+          typeof value === "boolean" ||
+          value === null
+        )
+          fields.value = value;
+        else if (
+          value instanceof THREE.Vector2 ||
+          value instanceof THREE.Vector3 ||
+          value instanceof THREE.Vector4 ||
+          value instanceof THREE.Matrix3 ||
+          value instanceof THREE.Matrix4
+        )
+          fields.value = value.toArray();
+        fields.children = [...node.getChildren()].map((child) =>
+          ids.get(child),
+        );
+        return fields;
+      });
+    };
+    const baseline = natural(),
+      candidate = natural(field);
+    try {
+      for (let lod = 0; lod < 3; lod++) {
+        const a = baseline["lodGeometries"][lod],
+          b = candidate["lodGeometries"][lod];
+        expect(Object.keys(b.attributes)).toEqual(Object.keys(a.attributes));
+        expect(geometryBytes(b)).toBe(geometryBytes(a));
+        for (const [aa, ba] of [
+          [a.index!, b.index!],
+          ...Object.keys(a.attributes).map((key) => [
+            a.attributes[key],
+            b.attributes[key],
+          ]),
+        ]) {
+          expect(ba.itemSize).toBe(aa.itemSize);
+          expect(ba.normalized).toBe(aa.normalized);
+          expect(ba.array.constructor).toBe(aa.array.constructor);
+          expect(
+            new Uint8Array(
+              ba.array.buffer,
+              ba.array.byteOffset,
+              ba.array.byteLength,
+            ),
+          ).toEqual(
+            new Uint8Array(
+              aa.array.buffer,
+              aa.array.byteOffset,
+              aa.array.byteLength,
+            ),
+          );
+        }
+      }
+      for (const key of ["positionNode", "normalNode"] as const) {
+        expect(signature(candidate["material"][key]!)).toEqual(
+          signature(baseline["material"][key]!),
+        );
+        expect(
+          [...graph(candidate["material"][key]!)].some(
+            (n) => Reflect.get(n, "name") === "v_naturalGrassHabitatSoil",
+          ),
+        ).toBe(false);
+      }
+      expect(candidate.getProfileReceipt()).toEqual(
+        baseline.getProfileReceipt(),
+      );
+      for (const profile of [
+        {},
+        STREAMING_GRASS_VISUAL_PROFILE,
+        COMPACT_ISLAND_GRASS_VISUAL_PROFILE,
+        DENSE_MEADOW_GRASS_VISUAL_PROFILE,
+      ])
+        expect(() =>
+          manager(
+            profile,
+            SCULPTED_COMPACT_WORLD_TERRAIN_PROFILE,
+            true,
+            undefined,
+            field,
+          ),
+        ).toThrow(
+          "Habitat grass requires the explicit natural tuft appearance",
+        );
+    } finally {
+      candidate.destroy();
+      baseline.destroy();
+    }
+  });
+});
 
 // Generated from the actual constructor at pushed checkpoint 2bc7c5a898984090.
 // Position/normal/UV/index bytes in that order; no GPU or rendering assertion.
