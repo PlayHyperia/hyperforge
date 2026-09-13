@@ -772,10 +772,6 @@ export class ModelCache {
     /** LOD bundle with decimated meshes and impostor (if generateLODs was true) */
     lodBundle?: LODBundle;
   }> {
-    // Ensure MeshoptDecoder WASM is ready before loading
-    // This prevents "Invalid typed array length" errors from race conditions
-    await this.initMeshoptDecoder();
-
     const shareMaterials = options?.shareMaterials ?? true; // Default to sharing
     const generateLODs = options?.generateLODs ?? false;
     // Resolve asset:// URLs to actual URLs
@@ -859,6 +855,8 @@ export class ModelCache {
     const loadingPromise = this.loading.get(resolvedPath);
     if (loadingPromise) {
       const result = await loadingPromise;
+      if (this.cache.get(resolvedPath) !== result)
+        throw new Error(`Model load invalidated: ${resolvedPath}`);
       result.cloneCount++;
       const clonedScene = cloneSkeleton(result.scene);
 
@@ -895,98 +893,119 @@ export class ModelCache {
     // Load for the first time
     // First try IndexedDB processed cache (skip expensive GLTF parsing)
     // Then fall back to full GLTF load via ClientLoader
-    await this.initProcessedDB();
     // Only the exact bytes successfully parsed below may authorize a persisted row.
     let source: ProcessedModelSource | null = null;
-    const promise = (async () => {
-      let gltf: Awaited<ReturnType<typeof this.gltfLoader.parseAsync>>;
+    let unpublishedScene: THREE.Object3D | undefined;
+    const assertCurrent = (): void => {
+      if (this.loading.get(resolvedPath) !== promise)
+        throw new Error(`Model load invalidated: ${resolvedPath}`);
+    };
+    // Publish the promise before *any* initialization await. Same-turn calls
+    // must join one load, and remove/clear must be able to retire it immediately.
+    const promise = Promise.resolve()
+      .then(async () => {
+        await this.initMeshoptDecoder();
+        await this.initProcessedDB();
+        assertCurrent();
+        let gltf: Awaited<ReturnType<typeof this.gltfLoader.parseAsync>>;
 
-      // Try to use ClientLoader for caching benefits (IndexedDB, deduplication)
-      if (world?.loader) {
-        const loader = world.loader as {
-          loadFile: (url: string) => Promise<File | undefined>;
-          loadFileWithPriority?: (
-            url: string,
-            priority: number,
-            opts?: {
-              position?: THREE.Vector3;
-              tile?: { x: number; z: number };
-            },
-          ) => Promise<File | undefined>;
-          clearCachedFile?: (url: string) => Promise<void>;
-        };
+        // Try to use ClientLoader for caching benefits (IndexedDB, deduplication)
+        if (world?.loader) {
+          const loader = world.loader as {
+            loadFile: (url: string) => Promise<File | undefined>;
+            loadFileWithPriority?: (
+              url: string,
+              priority: number,
+              opts?: {
+                position?: THREE.Vector3;
+                tile?: { x: number; z: number };
+              },
+            ) => Promise<File | undefined>;
+            clearCachedFile?: (url: string) => Promise<void>;
+          };
 
-        let file: File | undefined;
+          let file: File | undefined;
 
-        // Use priority-based loading if priority is specified and loader supports it
-        if (options?.priority !== undefined && loader.loadFileWithPriority) {
-          file = await loader.loadFileWithPriority(
-            resolvedPath,
-            options.priority,
-            {
-              position: options.position,
-              tile: options.tile,
-            },
-          );
-        } else {
-          // Standard loading (immediate, high priority)
-          file = await loader.loadFile(resolvedPath);
-        }
-
-        if (file) {
-          const buffer = await file.arrayBuffer();
-          source = await identifyProcessedModelSource(buffer);
-          if (source) {
-            const processed = await this.loadProcessedModel(
+          // Use priority-based loading if priority is specified and loader supports it
+          if (options?.priority !== undefined && loader.loadFileWithPriority) {
+            file = await loader.loadFileWithPriority(
               resolvedPath,
-              source,
-              world,
+              options.priority,
+              {
+                position: options.position,
+                tile: options.tile,
+              },
             );
-            if (processed) return { processed };
+          } else {
+            // Standard loading (immediate, high priority)
+            file = await loader.loadFile(resolvedPath);
           }
-          // Pass resolvedPath as base URL for resolving relative/data URIs in GLTF
-          // Empty string "" causes issues with embedded base64 data URIs
-          try {
-            gltf = await this.gltfLoader.parseAsync(buffer, resolvedPath);
-          } catch (parseError) {
-            // Check for "Invalid typed array length" error - indicates corrupted file
-            const errorMsg =
-              parseError instanceof Error
-                ? parseError.message
-                : String(parseError);
-            if (
-              errorMsg.includes("Invalid typed array length") ||
-              errorMsg.includes("RangeError") ||
-              errorMsg.includes("Malformed buffer")
-            ) {
-              console.warn(
-                `[ModelCache] Corrupted file detected for ${resolvedPath}, clearing cache and retrying...`,
+          assertCurrent();
+
+          if (file) {
+            const buffer = await file.arrayBuffer();
+            source = await identifyProcessedModelSource(buffer);
+            assertCurrent();
+            if (source) {
+              const processed = await this.loadProcessedModel(
+                resolvedPath,
+                source,
+                world,
               );
-
-              // Clear corrupted file from IndexedDB cache
-              if (loader.clearCachedFile) {
-                await loader.clearCachedFile(resolvedPath);
-              }
-
-              // Retry with direct load (bypasses corrupted cache)
-              source = null; // Retry bytes are not the failed ClientLoader File.
-              gltf = await this.gltfLoader.loadAsync(resolvedPath);
-            } else {
-              throw parseError;
+              if (processed) return { processed };
             }
+            assertCurrent();
+            // Pass resolvedPath as base URL for resolving relative/data URIs in GLTF
+            // Empty string "" causes issues with embedded base64 data URIs
+            try {
+              gltf = await this.gltfLoader.parseAsync(buffer, resolvedPath);
+            } catch (parseError) {
+              // An invalidated parser failure cannot evict source files or
+              // start a retry on behalf of a retired cache operation.
+              assertCurrent();
+              // Check for "Invalid typed array length" error - indicates corrupted file
+              const errorMsg =
+                parseError instanceof Error
+                  ? parseError.message
+                  : String(parseError);
+              if (
+                errorMsg.includes("Invalid typed array length") ||
+                errorMsg.includes("RangeError") ||
+                errorMsg.includes("Malformed buffer")
+              ) {
+                console.warn(
+                  `[ModelCache] Corrupted file detected for ${resolvedPath}, clearing cache and retrying...`,
+                );
+
+                // Clear corrupted file from IndexedDB cache
+                if (loader.clearCachedFile) {
+                  await loader.clearCachedFile(resolvedPath);
+                }
+                assertCurrent();
+
+                // Retry with direct load (bypasses corrupted cache)
+                source = null; // Retry bytes are not the failed ClientLoader File.
+                gltf = await this.gltfLoader.loadAsync(resolvedPath);
+              } else {
+                throw parseError;
+              }
+            }
+          } else {
+            // Fallback to direct load if file fetch failed
+            gltf = await this.gltfLoader.loadAsync(resolvedPath);
           }
         } else {
-          // Fallback to direct load if file fetch failed
+          // No ClientLoader available, use direct load
           gltf = await this.gltfLoader.loadAsync(resolvedPath);
         }
-      } else {
-        // No ClientLoader available, use direct load
-        gltf = await this.gltfLoader.loadAsync(resolvedPath);
-      }
 
-      return { gltf };
-    })()
+        return { gltf };
+      })
       .then((loaded) => {
+        unpublishedScene = loaded.processed
+          ? loaded.processed.scene
+          : loaded.gltf.scene;
+        assertCurrent();
         if (loaded.processed) {
           const { scene, animations, collision } = loaded.processed;
           const cachedModel: CachedModel = {
@@ -999,6 +1018,7 @@ export class ModelCache {
           };
           this.cache.set(resolvedPath, cachedModel);
           this.loading.delete(resolvedPath);
+          unpublishedScene = undefined;
           return cachedModel;
         }
         const gltf = loaded.gltf;
@@ -1046,6 +1066,7 @@ export class ModelCache {
         // CRITICAL: Setup materials on the original scene for WebGPU/CSM
         // This ensures all clones will have properly configured materials
         this.setupMaterials(gltf.scene, world);
+        assertCurrent();
 
         // Extract materials for sharing across clones
         const sharedMaterials = this.extractSharedMaterials(gltf.scene);
@@ -1087,16 +1108,31 @@ export class ModelCache {
 
         this.cache.set(resolvedPath, cachedModel);
         this.loading.delete(resolvedPath);
+        unpublishedScene = undefined;
 
         return cachedModel;
       })
       .catch((error) => {
-        this.loading.delete(resolvedPath);
+        // A retired load must not erase a newer load registered at the same URL.
+        if (this.loading.get(resolvedPath) === promise)
+          this.loading.delete(resolvedPath);
+        if (unpublishedScene) {
+          try {
+            this.disposeUnpublishedScene(unpublishedScene);
+          } catch (cleanupError) {
+            throw new AggregateError(
+              [error, cleanupError],
+              "Model load and unpublished cleanup failed",
+            );
+          }
+        }
         throw error;
       });
 
     this.loading.set(resolvedPath, promise);
     const result = await promise;
+    if (this.cache.get(resolvedPath) !== result)
+      throw new Error(`Model load invalidated: ${resolvedPath}`);
     result.cloneCount++;
 
     const clonedScene = cloneSkeleton(result.scene);
@@ -1365,14 +1401,46 @@ export class ModelCache {
     });
   }
 
+  /** Nothing in an unpublished parse has been lent to a cache consumer. */
+  private disposeUnpublishedScene(scene: THREE.Object3D): void {
+    const resources = new Set<{ dispose(): void }>();
+    scene.traverse((node) => {
+      if (!(node instanceof THREE.Mesh)) return;
+      resources.add(node.geometry);
+      if (node instanceof THREE.SkinnedMesh) resources.add(node.skeleton);
+      for (const material of Array.isArray(node.material)
+        ? node.material
+        : [node.material]) {
+        resources.add(material);
+        for (const value of Object.values(material)) {
+          if (value instanceof THREE.Texture) resources.add(value);
+        }
+      }
+    });
+    const errors: unknown[] = [];
+    for (const resource of resources) {
+      try {
+        resource.dispose();
+      } catch (error) {
+        errors.push(error);
+      }
+    }
+    if (errors.length)
+      throw new AggregateError(errors, "Unpublished model cleanup failed");
+  }
+
   /**
    * Clear the cache (useful for hot reload)
    * Should be called when code is rebuilt to prevent stale HyperForge Nodes
    * IMPORTANT: Disposes geometries to prevent GPU memory leaks
    */
   clear(): void {
+    // Retire ownership before disposal callbacks can re-enter the cache.
+    const models = [...this.cache.values()];
+    this.cache.clear();
+    this.loading.clear();
     // Dispose all cached model geometries before clearing
-    for (const [, model] of this.cache) {
+    for (const model of models) {
       this.disposeSceneGeometries(model.scene);
       // Dispose LOD bundle geometries if present
       if (model.lodBundle) {
@@ -1381,8 +1449,6 @@ export class ModelCache {
         model.lodBundle.lod2?.dispose();
       }
     }
-    this.cache.clear();
-    this.loading.clear();
   }
 
   /**
@@ -1394,11 +1460,14 @@ export class ModelCache {
   }
 
   /**
-   * Remove a specific model from cache
+   * Remove a specific resolved URL from cache, including pending publication.
+   * A retired operation may finish shared file work but cannot publish a model.
    * IMPORTANT: Disposes geometries to prevent GPU memory leaks
    */
   remove(path: string): boolean {
     const model = this.cache.get(path);
+    const pending = this.loading.delete(path);
+    const cached = this.cache.delete(path);
     if (model) {
       this.disposeSceneGeometries(model.scene);
       // Dispose LOD bundle geometries if present
@@ -1408,7 +1477,7 @@ export class ModelCache {
         model.lodBundle.lod2?.dispose();
       }
     }
-    return this.cache.delete(path);
+    return cached || pending;
   }
 
   /**

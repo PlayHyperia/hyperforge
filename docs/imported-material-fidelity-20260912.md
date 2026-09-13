@@ -42,6 +42,37 @@ Short p95 CPU ticks 14.7/13.5ms and GPU-pass sums 17.63/20.25ms (campus/meadow)
 are not presented FPS, isolated cost, sustained60 or streaming approval.
 Planting/lighting/terrain art and production performance remain unfinished.
 
-The focused tests also exposed a separate same-JS-turn concurrent cold-load
-race before the model-cache loading registry is published. This correction
-does not resolve that race; it remains on the launch checklist.
+The original material correction also exposed a separate same-JS-turn
+concurrent cold-load race. Its follow-up is recorded below; the original
+material-fidelity commit did not resolve that race.
+
+## Cache-lifetime follow-up
+
+Cold work now enters the loading registry synchronously, before decoder or
+database initialization can yield. Same-turn callers join one parse. Removal
+and clearing retire ownership before disposal callbacks; retired completions
+cannot publish over, or delete, a replacement entry. Late unpublished scenes
+release their unique resources, and retired parse failures cannot evict files
+or start a retry.
+
+Actual concurrent calls reproduce the original failure in
+`../asset-studio/material-fidelity01/cache-same-turn-fail01.json`. The focused
+follow-up passes 54/54 tests across five files, including real GLTFLoader
+requests held in external-buffer HTTP responses, invalidation during parsing,
+late resource disposal and replacement races. Final report:
+`../asset-studio/material-fidelity01/cache-lifetime-final03.json`.
+
+The integrated working-tree follow-up passes 1,278/1,278 tests across 92 files,
+and shared/client/server typechecks and builds. Native WebGPU report
+`../asset-studio/game-test-integration/service-soil-native01/report.json`
+has SHA256 `513a1ac8134426c081c065d23673e7d57b597daa14a5e8b02e604cc2832bf21c`.
+All eight focused visual/ownership checks pass with unchanged pinned sources,
+while the same 19 content errors keep the overall run false. This capture also
+includes local planting/landscape art experiments; it is not a clean-commit
+image or performance approval. The optional GPU LOD/impostor path has not been
+newly qualified by the CPU concurrency tests.
+
+One build-contended broad run failed a grass grounding upload; the unaltered
+250ms budget remains in force, and the standalone rerun passes. That retained
+stress follow-up is not dismissed as a proven timing-only failure. Evidence:
+`../asset-studio/service-planting-soil01/README.md`.
