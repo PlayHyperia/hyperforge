@@ -1,6 +1,11 @@
 import { afterEach, describe, expect, it } from "vitest";
 import * as THREE from "three";
-import { applyVertexColors, mergeBufferGeometries } from "./geometry";
+import {
+  applyVertexColors,
+  computeFlatNormals,
+  mergeBufferGeometries,
+  removeInternalFaces,
+} from "./geometry";
 import { createWindowGeometry } from "./WindowGeometry";
 import { createDoorFrameGeometry } from "./DoorTrimGeometry";
 
@@ -51,14 +56,86 @@ function assertWinding(geometry: THREE.BufferGeometry) {
       .cross(points[2].clone().sub(points[0]));
     expect(face.lengthSq()).toBeGreaterThan(1e-14);
     face.normalize();
-    for (const i of indices)
-      expect(
-        face.dot(new THREE.Vector3().fromBufferAttribute(n, i)),
-      ).toBeGreaterThan(0.99999);
+    for (const i of indices) {
+      const normal = new THREE.Vector3().fromBufferAttribute(n, i);
+      expect(normal.toArray().every(Number.isFinite)).toBe(true);
+      expect(normal.length()).toBeCloseTo(1, 6);
+      expect(face.dot(normal)).toBeGreaterThan(0.99999);
+    }
   }
 }
 
 describe("architectural merge: actual indexed topology and ownership", () => {
+  it.each(["disjoint solids", "concave courtyard", "interior planes"])(
+    "derives flat normals from winding for %s, never a merged bounding-box center",
+    (kind) => {
+      const parts: THREE.BufferGeometry[] = [];
+      const addBox = (
+        size: [number, number, number],
+        position: [number, number, number],
+      ) => {
+        const geometry = keep(new THREE.BoxGeometry(...size));
+        geometry.translate(...position);
+        applyVertexColors(geometry, new THREE.Color(0x8a6141));
+        parts.push(geometry);
+      };
+      if (kind === "disjoint solids") {
+        addBox([2, 3, 4], [-8, 0, 0]);
+        addBox([2, 3, 4], [8, 0, 0]);
+      } else if (kind === "concave courtyard") {
+        // Open U: courtyard-facing surfaces point towards the batch's center
+        // but remain valid outward faces of their individually closed members.
+        addBox([1, 3, 7], [-3, 0, 0]);
+        addBox([1, 3, 7], [3, 0, 0]);
+        addBox([5, 3, 1], [0, 0, -3]);
+      } else {
+        // Legitimate inward-facing ceiling/wall planes cannot be oriented by
+        // an enclosing convex solid. Include both sides of a room explicitly.
+        for (const sign of [-1, 1]) {
+          const plane = keep(new THREE.PlaneGeometry(4, 4));
+          if (sign > 0) plane.rotateY(Math.PI);
+          plane.translate(0, 0, sign * 2);
+          applyVertexColors(plane, new THREE.Color(0x8a6141));
+          parts.push(plane);
+        }
+      }
+      const merged = keep(mergeBufferGeometries(parts, false));
+      const before = Object.fromEntries(
+        attributes.map((name) => [name, expanded(merged, name)]),
+      );
+      const expected = keep(merged.clone());
+      expected.computeVertexNormals(); // Actual Three nonindexed reference.
+      expect(computeFlatNormals(merged)).toBe(merged);
+      assertWinding(merged);
+      const actualNormals = merged.getAttribute("normal"),
+        expectedNormals = expected.getAttribute("normal");
+      for (let i = 0; i < actualNormals.count; i++)
+        expect(
+          new THREE.Vector3()
+            .fromBufferAttribute(actualNormals, i)
+            .distanceTo(
+              new THREE.Vector3().fromBufferAttribute(expectedNormals, i),
+            ),
+        ).toBeLessThan(1e-7);
+      for (const name of ["position", "uv", "uv2", "color"])
+        expect(expanded(merged, name)).toEqual(before[name]);
+      expect(merged.index).toBeNull();
+      // Exercise the production cleanup AND normal-sensitive weld path, not
+      // just the flat-normal helper in isolation.
+      const indexed = keep(merged.clone());
+      indexed.setIndex(
+        Array.from(
+          { length: merged.getAttribute("position").count },
+          (_, i) => i,
+        ),
+      );
+      const cleaned = keep(removeInternalFaces(indexed));
+      assertWinding(cleaned);
+      for (const name of ["position", "uv", "uv2", "color"])
+        expect(expanded(cleaned, name)).toEqual(before[name]);
+    },
+  );
+
   it("expands every real BoxGeometry face and all attributes, not raw vertex triples", () => {
     const first = box(),
       second = box(5);

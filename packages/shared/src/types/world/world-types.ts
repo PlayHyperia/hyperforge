@@ -1405,7 +1405,8 @@ export interface CompactPreparationLodgeManifest {
   readonly position: Readonly<{ x: number; z: number }>;
   readonly rotation: number;
   readonly layoutSeed: "compact-bank-lodge01:360,318:8x8:south";
-  readonly recipeId: "compact-bank-lodge01-v1";
+  readonly recipeId:
+    "compact-bank-lodge01-v1" | "compact-bank-lodge01-haven-v2";
 }
 
 /** Optional open architecture with terrain support, never an indoor/floor owner. */
@@ -1415,7 +1416,7 @@ export type CompactServiceCourtManifest = Readonly<{
   terrainProfileId: "compact-duel-island-v6";
   position: Readonly<{ x: 336.5; z: 337.5 }>;
   rotation: 0;
-  recipeId: "open-timber-smithy-v2";
+  recipeId: "open-timber-smithy-v2" | "open-timber-smithy-haven-v3";
 }>;
 
 /** Low, non-colliding planting; tree/resource ownership is never changed. */

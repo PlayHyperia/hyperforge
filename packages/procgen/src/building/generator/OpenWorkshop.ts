@@ -74,8 +74,11 @@ function timberMember(
  */
 export function createOpenWorkshop(
   feet: readonly WorkshopFoot[],
+  options: { architecturalFinish?: "haven-v1" } = {},
 ): OpenWorkshopGeometry {
   if (
+    (options.architecturalFinish !== undefined &&
+      options.architecturalFinish !== "haven-v1") ||
     feet.length !== 4 ||
     feet.some(
       (f) =>
@@ -151,6 +154,7 @@ export function createOpenWorkshop(
     const gable = createGabledRoof(10, 6, 3.2, "wood", {
       pitchDegrees,
       openEnds: true,
+      architecturalFinish: options.architecturalFinish,
     });
     for (const geometry of [...gable.roofs, ...gable.walls]) take(geometry);
     frame.push(...gable.walls);

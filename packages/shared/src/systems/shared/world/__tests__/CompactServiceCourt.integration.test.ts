@@ -484,7 +484,9 @@ describe("actual compact service court placement and preparation navigation", ()
       OPEN_WORKSHOP_POSTS,
       (x, z) => terrain.getHeightAt(x, z),
     );
-    const geometry = createOpenWorkshop(record.feet);
+    const geometry = createOpenWorkshop(record.feet, {
+      architecturalFinish: "haven-v1",
+    });
     try {
       const envelope = new Box3();
       for (const g of [geometry.timber, geometry.roof, geometry.footings])

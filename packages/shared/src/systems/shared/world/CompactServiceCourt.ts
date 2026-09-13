@@ -18,9 +18,16 @@ export const COMPACT_SERVICE_COURT: CompactServiceCourtManifest = Object.freeze(
     terrainProfileId: "compact-duel-island-v6",
     position: Object.freeze({ x: 336.5, z: 337.5 }),
     rotation: 0,
-    recipeId: "open-timber-smithy-v2",
+    recipeId: "open-timber-smithy-haven-v3",
   },
 );
+
+/** Exact pre-finish identity retained for comparison captures. */
+export const COMPACT_SERVICE_COURT_LEGACY_FIXTURE: CompactServiceCourtManifest =
+  Object.freeze({
+    ...COMPACT_SERVICE_COURT,
+    recipeId: "open-timber-smithy-v2",
+  });
 
 /** No runtime procgen dependency on the content-admission path. */
 export function validateCompactServiceCourt(
@@ -28,16 +35,17 @@ export function validateCompactServiceCourt(
   profile: WorldTerrainProfile,
 ): CompactServiceCourtManifest | undefined {
   if (value === undefined) return undefined;
+  const canonical = canonicalWorldJson(value);
   if (
     profile.id !== "compact-duel-island-v6" ||
     profile.algorithm !== "compact-island-sculpt-v5" ||
     profile.terrainTileSize !== 100 ||
-    canonicalWorldJson(value) !== canonicalWorldJson(COMPACT_SERVICE_COURT)
+    ![COMPACT_SERVICE_COURT, COMPACT_SERVICE_COURT_LEGACY_FIXTURE].some(
+      (descriptor) => canonical === canonicalWorldJson(descriptor),
+    )
   )
     throw new Error("Invalid compactServiceCourt profile, placement or recipe");
-  const copy = JSON.parse(
-    canonicalWorldJson(value),
-  ) as CompactServiceCourtManifest;
+  const copy = JSON.parse(canonical) as CompactServiceCourtManifest;
   Object.freeze(copy.position);
   return Object.freeze(copy);
 }

@@ -30,6 +30,8 @@ import { applyWorldSpaceUVs, applyWallUVs, applyFloorUVs } from "./uvUtils";
  *
  * IMPORTANT: Unlike computeVertexNormals() which may smooth normals at shared vertices,
  * this function guarantees each face has its own independent normal.
+ * Triangle winding is authoritative, including inward-facing walls and disjoint
+ * solids. A merged batch's bounding-box center cannot define its outside.
  *
  * @param geometry - Non-indexed BufferGeometry (must have position attribute)
  * @returns The same geometry with flat normal attribute added/replaced
@@ -69,15 +71,6 @@ export function computeFlatNormals(
   const edge2 = new THREE.Vector3();
   const faceNormal = new THREE.Vector3();
 
-  // Compute bounding box center to verify normal direction
-  geometry.computeBoundingBox();
-  const boundingBox = geometry.boundingBox;
-  const center = boundingBox
-    ? new THREE.Vector3()
-        .addVectors(boundingBox.min, boundingBox.max)
-        .multiplyScalar(0.5)
-    : new THREE.Vector3(0, 0, 0);
-
   // Process each triangle
   const triangleCount = vertexCount / 3;
   for (let t = 0; t < triangleCount; t++) {
@@ -103,20 +96,6 @@ export function computeFlatNormals(
     const lengthSq = faceNormal.lengthSq();
     if (lengthSq > 1e-12) {
       faceNormal.normalize();
-
-      // CRITICAL: Verify normal points outward by checking if it points away from center
-      // For a triangle on the surface of a solid, the normal should point away from the center
-      const triangleCenter = new THREE.Vector3()
-        .addVectors(p0, p1)
-        .add(p2)
-        .divideScalar(3);
-      const toCenter = new THREE.Vector3().subVectors(center, triangleCenter);
-
-      // If normal points toward center (negative dot product), flip it
-      // This handles cases where winding order might be reversed
-      if (faceNormal.dot(toCenter) > 0) {
-        faceNormal.negate();
-      }
     } else {
       // Degenerate triangle - use default up normal
       faceNormal.set(0, 1, 0);

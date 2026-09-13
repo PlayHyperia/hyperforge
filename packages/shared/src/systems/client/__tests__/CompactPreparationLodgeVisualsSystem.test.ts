@@ -6,6 +6,7 @@ import { TerrainSystem } from "../../shared/world/TerrainSystem";
 import { TownSystem } from "../../shared/world/TownSystem";
 import {
   COMPACT_PREPARATION_LODGE,
+  COMPACT_PREPARATION_LODGE_V6_LEGACY_FIXTURE,
   getCompactPreparationLodgeFootprint,
 } from "../../shared/world/CompactPreparationLodge";
 import {
@@ -70,6 +71,96 @@ async function fixture(preexistingTown = false) {
 }
 
 describe("compact lodge actual geometry / scene ownership (CPU, not rendered acceptance)", () => {
+  it("keeps every sampled historical doorway/window passage and exact floor/opening-frame buffers under the Haven finish", async () => {
+    const { towns } = await fixture();
+    const record = towns.getCompactPreparationLodge()!;
+    const after = createCompactPreparationLodgeVisual(record);
+    const before = createCompactPreparationLodgeVisual({
+      ...record,
+      descriptor: COMPACT_PREPARATION_LODGE_V6_LEGACY_FIXTURE,
+    });
+    leases.push(before, after);
+    expect(before.triangles).toBe(1332);
+    // Both recipes use corrected winding normals. Opposite-facing surfaces
+    // must retain separate vertices rather than inheriting the old bad weld.
+    expect(before.geometryBytes).toBe(172016);
+    expect(after.triangles).toBeGreaterThan(before.triangles);
+    expect(after.triangles).toBeLessThanOrEqual(2400);
+    expect(after.meshes.length).toBe(before.meshes.length);
+    expect(after.materialCount).toBe(before.materialCount);
+    for (const role of ["floors", "windowFrames", "doorFrames"]) {
+      const oldGeometry = before.meshes.find(
+        (mesh) => mesh.name === role,
+      )!.geometry;
+      const newGeometry = after.meshes.find(
+        (mesh) => mesh.name === role,
+      )!.geometry;
+      expect(Object.keys(newGeometry.attributes)).toEqual(
+        Object.keys(oldGeometry.attributes),
+      );
+      expect(newGeometry.index?.array).toEqual(oldGeometry.index?.array);
+      for (const name of Object.keys(oldGeometry.attributes)) {
+        const oldAttribute = oldGeometry.getAttribute(name);
+        const newAttribute = newGeometry.getAttribute(name);
+        expect(newAttribute.itemSize).toBe(oldAttribute.itemSize);
+        expect(newAttribute.array, `${role}/${name}`).toEqual(
+          oldAttribute.array,
+        );
+      }
+    }
+    for (const visual of [before, after]) {
+      for (const mesh of visual.meshes) {
+        const material = mesh.material as THREE.MeshStandardNodeMaterial;
+        for (const response of [
+          "normalNode",
+          "roughnessNode",
+          "aoNode",
+        ] as const) {
+          if (visual === after)
+            expect(
+              material[response],
+              `${mesh.name}/${response}`,
+            ).not.toBeNull();
+          else
+            expect(material[response], `${mesh.name}/${response}`).toBeNull();
+        }
+        expect(material.map).toBeNull();
+        expect(material.normalMap).toBeNull();
+        expect(material.roughnessMap).toBeNull();
+        expect(material.aoMap).toBeNull();
+      }
+    }
+    // Sweep all four actual facade planes, not just the nominal door center.
+    // This finite lattice complements unchanged opening buffers and native
+    // collision tests; it is not continuous capsule or live-agent proof.
+    const ray = new THREE.Raycaster();
+    ray.layers.enableAll();
+    ray.far = 1.2;
+    let openings = 0;
+    for (const axis of ["x", "z"] as const)
+      for (const sign of [-1, 1])
+        for (let column = 0; column < 80; column++)
+          for (let row = 0; row < 28; row++) {
+            const local = new THREE.Vector3();
+            local[axis] = sign * 4.6;
+            local[axis === "x" ? "z" : "x"] = -3.95 + column * 0.1;
+            local.y = 0.7 + row * 0.1;
+            const direction = new THREE.Vector3();
+            direction[axis] = -sign;
+            ray.ray.origin.copy(local).applyMatrix4(before.root.matrixWorld);
+            ray.ray.direction
+              .copy(direction)
+              .transformDirection(before.root.matrixWorld);
+            if (ray.intersectObject(before.root, true).length !== 0) continue;
+            openings++;
+            expect(
+              ray.intersectObject(after.root, true),
+              `${axis}/${sign}/${column}/${row}`,
+            ).toHaveLength(0);
+          }
+    expect(openings).toBeGreaterThan(100);
+  }, 60000);
+
   it("retains complete outward-facing triangles on the actual box-based window and door trim", async () => {
     const { towns } = await fixture();
     const visual = createCompactPreparationLodgeVisual(
@@ -128,8 +219,8 @@ describe("compact lodge actual geometry / scene ownership (CPU, not rendered acc
       expect(system.getDiagnostics()).toEqual({
         buildingId: COMPACT_PREPARATION_LODGE.layoutId,
         meshes: 5,
-        triangles: 1332,
-        geometryBytes: 168376,
+        triangles: 2232,
+        geometryBytes: 262064,
         materials: 4,
         physicsShapes: 0,
         physicsActor: false,

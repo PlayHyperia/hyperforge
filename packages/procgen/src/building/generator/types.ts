@@ -298,6 +298,8 @@ export interface BuildingGeneratorOptions {
   includeRoof?: boolean;
   /** Opt-in pitched roof; currently limited to one complete rectangular floor. */
   roofStyle?: "flat" | "gable";
+  /** Explicit compact architectural kit; omitted geometry is unchanged. */
+  architecturalFinish?: "haven-v1";
   /** Disable both reserved service counters and decorative furniture together. */
   includeProps?: boolean;
   seed?: string;

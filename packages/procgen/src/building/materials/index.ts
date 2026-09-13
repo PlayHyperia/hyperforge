@@ -17,6 +17,11 @@ export type {
   TSLBuildingMaterial,
 } from "./BuildingMaterialTSL";
 
+export {
+  HAVEN_ARCHITECTURAL_ROOF_CONFIG,
+  createHavenLocalMetricUV,
+} from "./HavenArchitecturalSurface";
+
 // Window Glass Material - Dithered transparency
 export {
   createWindowGlassMaterial,

@@ -3,6 +3,7 @@ import { WALL_THICKNESS, palette } from "./constants";
 import { applyGeometryAttributes, applyRoofAttributes } from "./geometry";
 import { WALL_MATERIAL_IDS, type WallMaterialType } from "./types";
 import { UV_SCALE_PRESETS } from "./uvUtils";
+import { createHavenMember } from "./HavenArchitecturalFinish";
 
 /** One closed, pitched shell with optional end walls and timber verge/eave trim.
  * Geometry only: no materials, textures, collision, caches or scene ownership.
@@ -13,7 +14,11 @@ export function createGabledRoof(
   depth: number,
   wallTop: number,
   wallMaterial: WallMaterialType,
-  options: { pitchDegrees?: number; openEnds?: boolean } = {},
+  options: {
+    pitchDegrees?: number;
+    openEnds?: boolean;
+    architecturalFinish?: "haven-v1";
+  } = {},
 ): { roofs: THREE.BufferGeometry[]; walls: THREE.BufferGeometry[] } {
   const pitchDegrees = options.pitchDegrees ?? 32;
   if (
@@ -28,6 +33,8 @@ export function createGabledRoof(
     !Number.isFinite(pitchDegrees) ||
     pitchDegrees < 18 ||
     pitchDegrees > 45 ||
+    (options.architecturalFinish !== undefined &&
+      options.architecturalFinish !== "haven-v1") ||
     (options.openEnds !== undefined && typeof options.openEnds !== "boolean")
   )
     throw new Error(
@@ -42,7 +49,8 @@ export function createGabledRoof(
   const roofDepth = depth + overhang * 2;
   const peak = wallTop + half * slope;
   const eave = wallTop - overhang * slope;
-  const thickness = 0.18;
+  const finish = options.architecturalFinish === "haven-v1";
+  const thickness = finish ? 0.14 : 0.18;
   const walls: THREE.BufferGeometry[] = [];
 
   const extrude = (points: number[][], length: number, z: number) => {
@@ -79,25 +87,47 @@ export function createGabledRoof(
     roofDepth,
     -roofDepth / 2,
   );
-  applyRoofAttributes(shell, palette.roof, UV_SCALE_PRESETS.shingle);
-  // Meters along the ridge and actual slope distance: no stretched horizontal projection.
-  const positions = shell.getAttribute("position"),
-    normals = shell.getAttribute("normal"),
-    uv = shell.getAttribute("uv");
-  for (let i = 0; i < positions.count; i++) {
-    const scale = UV_SCALE_PRESETS.shingle;
-    if (Math.abs(normals.getZ(i)) > 0.5) {
-      // Front/back caps have no Z extent; project their actual XY plane.
-      uv.setXY(i, positions.getX(i) * scale, positions.getY(i) * scale);
-    } else if (Math.abs(normals.getY(i)) < 0.1) {
-      // Vertical eave edges need thickness in V, not the constant X coordinate.
-      uv.setXY(i, positions.getZ(i) * scale, positions.getY(i) * scale);
-    } else {
-      uv.setXY(
-        i,
-        positions.getZ(i) * scale,
-        (Math.abs(positions.getX(i)) / Math.cos(pitch)) * scale,
-      );
+  const roofs = [shell];
+  if (finish) {
+    // The shallow ridge cap fits the original .18m roof envelope. The roof's
+    // underside, pitch, eaves, XY/Z footprint and cutaway minimum stay fixed.
+    const capExtent = 0.18;
+    roofs.push(
+      extrude(
+        [
+          [-capExtent, peak - capExtent * slope + 0.13],
+          [0, peak + 0.13],
+          [capExtent, peak - capExtent * slope + 0.13],
+          [capExtent, peak - capExtent * slope + 0.18],
+          [0, peak + 0.18],
+          [-capExtent, peak - capExtent * slope + 0.18],
+        ],
+        roofDepth,
+        -roofDepth / 2,
+      ),
+    );
+  }
+  for (const roof of roofs) {
+    applyRoofAttributes(roof, palette.roof, UV_SCALE_PRESETS.shingle);
+    // Meters along the ridge and actual slope distance: no stretched horizontal projection.
+    const positions = roof.getAttribute("position"),
+      normals = roof.getAttribute("normal"),
+      uv = roof.getAttribute("uv");
+    for (let i = 0; i < positions.count; i++) {
+      const scale = UV_SCALE_PRESETS.shingle;
+      if (Math.abs(normals.getZ(i)) > 0.5) {
+        // Front/back caps have no Z extent; project their actual XY plane.
+        uv.setXY(i, positions.getX(i) * scale, positions.getY(i) * scale);
+      } else if (Math.abs(normals.getY(i)) < 0.1) {
+        // Vertical eave edges need thickness in V, not the constant X coordinate.
+        uv.setXY(i, positions.getZ(i) * scale, positions.getY(i) * scale);
+      } else {
+        uv.setXY(
+          i,
+          positions.getZ(i) * scale,
+          (Math.abs(positions.getX(i)) / Math.cos(pitch)) * scale,
+        );
+      }
     }
   }
   const style = (g: THREE.BufferGeometry, trim = false) => {
@@ -137,6 +167,12 @@ export function createGabledRoof(
       const start = new THREE.Vector3(0, peak - 0.09, front);
       const end = new THREE.Vector3(sign * extent, eave - 0.09, front);
       const delta = end.clone().sub(start);
+      if (finish) {
+        walls.push(
+          createHavenMember(start, end, 0.18, 0.12, new THREE.Vector3(0, 0, 1)),
+        );
+        continue;
+      }
       const beam = new THREE.BoxGeometry(delta.length(), 0.18, 0.12);
       beam.applyQuaternion(
         new THREE.Quaternion().setFromUnitVectors(
@@ -147,9 +183,48 @@ export function createGabledRoof(
       beam.translate(...start.add(end).multiplyScalar(0.5).toArray());
       style(beam, true);
     }
+    if (finish) {
+      walls.push(
+        createHavenMember(
+          new THREE.Vector3(
+            side * (extent - 0.07),
+            eave - 0.09,
+            -roofDepth / 2,
+          ),
+          new THREE.Vector3(side * (extent - 0.07), eave - 0.09, roofDepth / 2),
+          0.14,
+          0.18,
+          new THREE.Vector3(0, 1, 0),
+        ),
+      );
+      if (!options.openEnds) {
+        const faceZ = side * (depth / 2 + WALL_THICKNESS / 2 + 0.018);
+        const top = new THREE.Vector3(0, peak - 0.22, faceZ);
+        walls.push(
+          createHavenMember(
+            new THREE.Vector3(0, wallTop, faceZ),
+            top,
+            0.18,
+            0.04,
+            new THREE.Vector3(0, 0, 1),
+          ),
+        );
+        for (const sign of [-1, 1])
+          walls.push(
+            createHavenMember(
+              new THREE.Vector3(sign * half * 0.6, wallTop + 0.14, faceZ),
+              top,
+              0.14,
+              0.04,
+              new THREE.Vector3(0, 0, 1),
+            ),
+          );
+      }
+      continue;
+    }
     const eaveBeam = new THREE.BoxGeometry(0.14, 0.18, roofDepth);
     eaveBeam.translate(side * (extent - 0.07), eave - 0.09, 0);
     style(eaveBeam, true);
   }
-  return { roofs: [shell], walls };
+  return { roofs, walls };
 }

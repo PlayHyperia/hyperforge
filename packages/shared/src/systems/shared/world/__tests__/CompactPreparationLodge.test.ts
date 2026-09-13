@@ -19,6 +19,7 @@ import { TownSystem } from "../TownSystem";
 import {
   COMPACT_PREPARATION_LODGE,
   COMPACT_PREPARATION_LODGE_BUILDING_ID,
+  COMPACT_PREPARATION_LODGE_V6_LEGACY_FIXTURE,
   createCompactPreparationLodgeLayout,
   getCompactPreparationLodgePlacement,
   getCompactPreparationLodgeFootprint,
@@ -116,6 +117,24 @@ async function fixture(server = true) {
 }
 
 describe("compact preparation lodge admission and actual shared collision ownership", () => {
+  it("distinguishes the Haven finish from its exact pre-finish comparison without changing layout or pose", () => {
+    const before = validateCompactPreparationLodge(
+      structuredClone(COMPACT_PREPARATION_LODGE_V6_LEGACY_FIXTURE),
+      profile(),
+    )!;
+    const after = validateCompactPreparationLodge(copy(), profile())!;
+    expect(after.recipeId).toBe("compact-bank-lodge01-haven-v2");
+    expect(before.recipeId).toBe("compact-bank-lodge01-v1");
+    expect({ ...after, recipeId: before.recipeId }).toEqual(before);
+    expect(canonicalWorldJson(after)).not.toBe(canonicalWorldJson(before));
+    expect(() =>
+      validateCompactPreparationLodge(
+        { ...after, recipeId: "compact-bank-lodge01-haven-v3" },
+        profile(),
+      ),
+    ).toThrow("recipe");
+  });
+
   it("leaves absent descriptors absent and admits only a detached deeply frozen exact placement", () => {
     expect(
       validateCompactPreparationLodge(undefined, COMPACT_WORLD_TERRAIN_PROFILE),

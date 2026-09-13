@@ -126,6 +126,7 @@ import {
 } from "./geometry";
 import { UV_SCALE_PRESETS } from "./uvUtils";
 import { createGabledRoof } from "./GabledRoof";
+import { createHavenLodgeFinish } from "./HavenArchitecturalFinish";
 import {
   createWindowGeometry,
   getWindowStyleForBuildingType,
@@ -816,7 +817,7 @@ export class BuildingGenerator {
     interiorLightIntensity: number = 1.0,
     geometryOptions: Pick<
       BuildingGeneratorOptions,
-      "roofStyle" | "includeProps"
+      "roofStyle" | "includeProps" | "architecturalFinish"
     > = {},
   ): {
     building: THREE.Mesh | THREE.Group;
@@ -826,6 +827,20 @@ export class BuildingGenerator {
   } {
     const gabled = geometryOptions.roofStyle === "gable";
     const includeProps = geometryOptions.includeProps !== false;
+    const havenFinish = geometryOptions.architecturalFinish === "haven-v1";
+    if (
+      geometryOptions.architecturalFinish !== undefined &&
+      (!havenFinish ||
+        !gabled ||
+        !includeRoof ||
+        includeProps ||
+        layout.width !== 2 ||
+        layout.depth !== 2 ||
+        layout.foundationSteps !== 2)
+    )
+      throw new Error(
+        "Haven finish requires an unpropped 8×8m gabled lodge with two foundation steps",
+      );
     if (
       gabled &&
       (layout.floors !== 1 ||
@@ -1094,6 +1109,7 @@ export class BuildingGenerator {
           layout.depth * CELL_SIZE,
           WALL_HEIGHT + this.currentFoundationHeight,
           wallMaterial,
+          { architecturalFinish: geometryOptions.architecturalFinish },
         );
         roofGeometries.push(...gable.roofs);
         wallGeometries.push(...gable.walls);
@@ -1102,6 +1118,7 @@ export class BuildingGenerator {
         this.addRoofPieces(roofGeometries, layout, stats);
       }
     }
+    if (havenFinish) wallGeometries.push(...createHavenLodgeFinish(layout));
     // Props are non-walkable (counters, forges)
     if (includeProps) {
       this.addBuildingProps(
@@ -1276,6 +1293,24 @@ export class BuildingGenerator {
         shutterMesh.name = "shutters";
         shutterMesh.userData = { walkable: false };
         buildingGroup.add(shutterMesh);
+      }
+    }
+
+    if (havenFinish) {
+      const owned = new Set<THREE.BufferGeometry>();
+      let triangles = 0;
+      buildingGroup.traverse((object) => {
+        if (!(object instanceof THREE.Mesh)) return;
+        owned.add(object.geometry);
+        triangles +=
+          (object.geometry.index?.count ??
+            object.geometry.getAttribute("position").count) / 3;
+      });
+      if (triangles > 2400) {
+        for (const geometry of owned) geometry.dispose();
+        throw new Error(
+          "Haven lodge finish exceeded its 2400-triangle recipe budget",
+        );
       }
     }
 

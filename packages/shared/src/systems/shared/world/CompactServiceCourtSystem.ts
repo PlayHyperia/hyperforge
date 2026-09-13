@@ -58,7 +58,12 @@ export class CompactServiceCourtSystem extends System {
     );
     try {
       if (this.world.physics) {
-        this.geometry = createOpenWorkshop(record.feet);
+        this.geometry = createOpenWorkshop(record.feet, {
+          architecturalFinish:
+            record.descriptor.recipeId === "open-timber-smithy-haven-v3"
+              ? "haven-v1"
+              : undefined,
+        });
         this.body = new RigidBody({
           type: "static",
           tag: descriptor.layoutId,

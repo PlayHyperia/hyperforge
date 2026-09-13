@@ -60,7 +60,7 @@ describe("compact lodge actual native PhysX integration (CPU, not foot-contact a
         expect(visual.getDiagnostics()).toMatchObject({
           physicsActor: true,
           physicsShapes: 5,
-          triangles: 1332,
+          triangles: 2232,
         });
         expect(world.physics.scene!.getNbActors(actorTypes)).toBe(
           actorsBefore + 1,
@@ -108,13 +108,10 @@ describe("compact lodge actual native PhysX integration (CPU, not foot-contact a
         const ray = new Raycaster();
         ray.layers.enableAll();
         ray.far = 0.01;
-        let checkedTrimFaces = 0;
+        let checkedFaces = 0;
         for (const mesh of root.children) {
-          if (
-            !(mesh instanceof Mesh) ||
-            !["windowFrames", "doorFrames"].includes(mesh.name)
-          )
-            continue;
+          if (!(mesh instanceof Mesh))
+            throw new Error("Unexpected lodge scene child");
           const positions = mesh.geometry.getAttribute("position");
           const normals = mesh.geometry.getAttribute("normal");
           const index = mesh.geometry.index;
@@ -143,10 +140,10 @@ describe("compact lodge actual native PhysX integration (CPU, not foot-contact a
               nativeSurface!.point.distanceTo(renderedSurface.point),
               label,
             ).toBeLessThan(0.0001);
-            checkedTrimFaces++;
+            checkedFaces++;
           }
         }
-        expect(checkedTrimFaces).toBe(708);
+        expect(checkedFaces).toBe(visual.getDiagnostics()!.triangles);
         visual.destroy();
         visual.destroy();
         expect(world.physics.scene!.getNbActors(actorTypes)).toBe(actorsBefore);

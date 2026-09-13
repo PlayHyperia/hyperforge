@@ -1,5 +1,64 @@
 # Compact island environment art: next delivery slice
 
+## Grass reference correction — next art priority, 2026-09-13
+
+The user's earlier-game grass image supersedes provisional acceptance of the
+current sparse tuft appearance. Saved reference and diagnosis:
+`asset-studio/haven-architecture01/GRASS_RECOVERY.md`. Exact image provenance
+is unknown. Root and independent review agree that fine overlapping blades and
+continuous meadow volume are visibly stronger than the current isolated dark
+rosettes. Retain those qualities at a lower height.
+
+The active island candidate uses 1.75m clump spacing and twelve blades, while
+ordinary near-grass uses .7m and twenty-four: 12.5× lower potential blade density
+before eligibility/grounding/quotas, not a measured ratio to the screenshot.
+Wider blades and three compact root patches cannot compensate for those gaps.
+After architecture qualification, prioritize an explicit independently rooted,
+slender, sufficiently overlapping meadow candidate before coastal work. Inspect
+actual quotas and near/far LOD, preserve full-root grounding, access, wind and
+quality settings, and measure added main/shadow/GPU/memory/loading work. No
+still-image reference or passing implementation test proves visual acceptance,
+motion quality or affordable density.
+
+## Haven architecture checkpoint — 2026-09-13, art/performance still open
+
+Native03 passes the local study after224 source/integration tests and37 capture
+preflight tests. Independent verification matches722 source pins,644 archives,
+24 checkpoints and44 fog brackets; all11 world PNGs and original9 cameras verify.
+Source/render/actual-PhysX agreement and ownership are qualified for this slice,
+not full traversal or production. Root and second visual review accept roof
+scale/base/framing as a bounded improvement; dark timber, gray-blue plaster,
+regular masonry and detached-looking lintels still need art work. Front detail
+clips the apex; three-quarter shows the full roof. Grass is rejected above.
+
+CPU p95 is18.0/18.8ms campus/meadow; summed GPU-pass p95 is19.398656/20.64384ms,
+worse observed tails than habitat-native03, without isolated causality. Same
+architecture draw counts, +1,016 triangles per main/sun pass; no free-cost or
+sustained-FPS claim. All owned services/browser close, page/GPU/cleanup errors0;
+19 existing cow/dagger errors still fail the overall capture. Report SHA256
+`7a303d211260a61d600ff6c35592a7b55cb919b589a413ded03593f5b5406073`;
+independent verification `asset-studio/haven-architecture01/native03-verification.json`
+SHA256 `1ed9cc7da5aed8b804da9325478c5e2204a3cf205568e268e3565902ad81d756`.
+
+The shared settlement kit is a completed local implementation slice. Reference image and full
+built-in generation prompt: `asset-studio/haven-architecture01/CONCEPT.md`.
+It establishes material/construction/landscape direction, not implemented pixels
+or performance. Do not adopt incidental props, lighthouse or changed footprints.
+Actual code inspection found color-only building surfaces and a 3.57× physical
+roof-course mismatch. Explicit Haven recipes add restrained facade and roof
+geometry plus bounded normal/roughness/occlusion response with common roof scale.
+Keep current doors/windows/steps, station access, mesh/material owners and roof
+cutaway/shadow semantics. Exact pre-finish identities remain comparison fixtures.
+
+Primary research: [Three material nodes](https://threejs.org/docs/pages/MeshStandardNodeMaterial.html)
+provide authored roughness response, and [surface-gradient bump mapping](https://jcgt.org/published/0009/03/04/paper.pdf)
+provides a principled way to transform small surface slopes without changing
+mesh geometry. These do not create silhouette, cast contact shadows or free
+shader work. Geometry and surface response must be checked together under the
+actual native WebGPU lighting, including oblique/moving views. Keep new normal
+detail filtered at subpixel scale, preserve all existing main/shadow population,
+and measure cost. Whole-landscape, lighting/contact and performance remain open.
+
 ## Shared habitat and avatar propagation qualification — 2026-09-13
 
 Native03 now passes the local study after 325 tests across 20 files, three package

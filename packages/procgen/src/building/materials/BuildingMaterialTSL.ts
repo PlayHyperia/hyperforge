@@ -17,6 +17,12 @@ import { MeshStandardNodeMaterial, type Node } from "three/webgpu";
 import { createFilteredShingleColorNode } from "./FilteredShingleTSL";
 import { createFilteredWoodColorNode } from "./FilteredWoodTSL";
 import {
+  createHavenSurfaceResponse,
+  havenReliefWorldNormal,
+  havenReliefViewNormal,
+  type HavenSurfaceType,
+} from "./HavenArchitecturalSurface";
+import {
   Fn,
   uv,
   uniform,
@@ -36,6 +42,11 @@ import {
   sqrt,
   select,
   attribute,
+  fwidth,
+  positionWorld,
+  normalWorldGeometry,
+  cameraViewMatrix,
+  negateOnBackSide,
 } from "three/tsl";
 
 // ============================================================================
@@ -80,6 +91,11 @@ export interface BuildingMaterialConfig {
   shingleFiltering?: "footprint-v1";
   /** Pixel-footprint integration for explicit compact timber materials. */
   woodFiltering?: "footprint-v1";
+  /** Authored compact architecture only; omission preserves historical graphs. */
+  architecturalFinish?: "haven-v1";
+  /** Optional continuous local-unit coordinates for the explicit Haven finish;
+   * consumed by both color and surface response, never geometry displacement. */
+  patternUV?: Node<"vec2">;
 }
 
 /**
@@ -432,6 +448,24 @@ export function createBuildingMaterial(
   config: Partial<BuildingMaterialConfig> & { type: BuildingMaterialType },
 ): TSLBuildingMaterial {
   if (
+    config.patternUV !== undefined &&
+    (config.architecturalFinish !== "haven-v1" ||
+      config.patternUV?.isNode !== true)
+  )
+    throw new Error(
+      "Pattern UV requires an actual node and the explicit Haven finish",
+    );
+  if (
+    config.architecturalFinish !== undefined &&
+    (config.architecturalFinish !== "haven-v1" ||
+      !["wood-plank", "shingle", "stone-ashlar", "plaster"].includes(
+        config.type,
+      ))
+  )
+    throw new Error(
+      "Haven finish requires an explicit supported architectural material",
+    );
+  if (
     config.woodFiltering !== undefined &&
     (config.woodFiltering !== "footprint-v1" || config.type !== "wood-plank")
   ) {
@@ -469,7 +503,7 @@ export function createBuildingMaterial(
   // Color node - procedural pattern generation
   const colorNode = Fn(() => {
     // Get UV from mesh UV attribute, scaled
-    const meshUV = uv();
+    const meshUV = fullConfig.patternUV ?? uv();
     const scaledUV = meshUV.div(uTextureScale);
 
     // Get vertex color for tinting (if available)
@@ -600,6 +634,50 @@ export function createBuildingMaterial(
   })();
 
   material.colorNode = colorNode;
+
+  if (fullConfig.architecturalFinish === "haven-v1") {
+    const scaledUV = (fullConfig.patternUV ?? uv()).div(uTextureScale);
+    const response = Fn(() => {
+      const surface = createHavenSurfaceResponse(
+        fullConfig.type as HavenSurfaceType,
+        scaledUV,
+        fwidth(scaledUV),
+        float(fullConfig.roughness),
+      );
+      return vec4(surface.gradient, surface.roughness, surface.ao);
+    })().toVar(
+      `havenArchitecturalResponse_${fullConfig.type.replaceAll("-", "_")}`,
+    );
+    const worldNormal = havenReliefWorldNormal(
+      response.xy,
+      scaledUV.dFdx(),
+      scaledUV.dFdy(),
+      positionWorld.dFdx(),
+      positionWorld.dFdy(),
+      normalWorldGeometry,
+    );
+    // r186 normalNode expects view space. Negate the completed perturbed normal
+    // for a back-facing material, not only its geometric component.
+    material.normalNode = negateOnBackSide(
+      havenReliefViewNormal(worldNormal, cameraViewMatrix),
+    );
+    material.roughnessNode = response.z;
+    material.aoNode = response.w;
+    Object.defineProperty(material.userData, "havenArchitecturalFinish", {
+      enumerable: true,
+      writable: false,
+      configurable: false,
+      value: Object.freeze({
+        schemaVersion: 1,
+        mode: "haven-v1",
+        surface: fullConfig.type,
+        relief: "bounded-analytic-c1-v1",
+        normalSpace: "view",
+        textureSamples: 0,
+        displaced: false,
+      }),
+    });
+  }
 
   // Store uniforms for runtime updates
   const tslMaterial = material as TSLBuildingMaterial;

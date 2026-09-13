@@ -17,8 +17,8 @@ export type { CompactPreparationLodgeManifest } from "../../../types/world/world
 export const COMPACT_PREPARATION_LODGE_BUILDING_ID =
   "compact-preparation-lodge-v1";
 
-/** The same seeded architecture now faces the real bank forecourt.
- * Pose is part of the full world-content identity; layout/recipe identity is unchanged.
+/** The same seeded layout faces the real bank forecourt.
+ * The Haven finish has its own content identity, without changing the layout.
  */
 export const COMPACT_PREPARATION_LODGE: CompactPreparationLodgeManifest =
   Object.freeze({
@@ -28,13 +28,20 @@ export const COMPACT_PREPARATION_LODGE: CompactPreparationLodgeManifest =
     position: Object.freeze({ x: 350, z: 328 }),
     rotation: Math.PI,
     layoutSeed: "compact-bank-lodge01:360,318:8x8:south",
+    recipeId: "compact-bank-lodge01-haven-v2",
+  });
+
+/** Exact pre-finish identity for matched comparisons, not another world. */
+export const COMPACT_PREPARATION_LODGE_V6_LEGACY_FIXTURE: CompactPreparationLodgeManifest =
+  Object.freeze({
+    ...COMPACT_PREPARATION_LODGE,
     recipeId: "compact-bank-lodge01-v1",
   });
 
 /** Exact previous placement identity, supported only with its historical profile. */
 export const COMPACT_PREPARATION_LODGE_V4_FIXTURE: CompactPreparationLodgeManifest =
   Object.freeze({
-    ...COMPACT_PREPARATION_LODGE,
+    ...COMPACT_PREPARATION_LODGE_V6_LEGACY_FIXTURE,
     terrainProfileId: "compact-duel-island-v4",
     position: Object.freeze({ x: 398, z: 370 }),
     rotation: 0,
@@ -133,16 +140,18 @@ export function validateCompactPreparationLodge(
   // The existing descriptor-aware JSON validator rejects getters, cycles,
   // non-finite numbers and oversized input before inspecting caller values.
   const canonical = canonicalWorldJson(value);
+  const admitted =
+    profile.id === "compact-duel-island-v4"
+      ? [COMPACT_PREPARATION_LODGE_V4_FIXTURE]
+      : profile.id === "compact-duel-island-v5"
+        ? [COMPACT_PREPARATION_LODGE_V5_FIXTURE]
+        : [
+            COMPACT_PREPARATION_LODGE,
+            COMPACT_PREPARATION_LODGE_V6_LEGACY_FIXTURE,
+          ];
   if (
     canonical.length > 1024 ||
-    canonical !==
-      canonicalWorldJson(
-        profile.id === "compact-duel-island-v4"
-          ? COMPACT_PREPARATION_LODGE_V4_FIXTURE
-          : profile.id === "compact-duel-island-v5"
-            ? COMPACT_PREPARATION_LODGE_V5_FIXTURE
-            : COMPACT_PREPARATION_LODGE,
-      )
+    !admitted.some((descriptor) => canonical === canonicalWorldJson(descriptor))
   )
     fail("unsupported descriptor, pose or recipe");
   const copy = JSON.parse(canonical) as CompactPreparationLodgeManifest;

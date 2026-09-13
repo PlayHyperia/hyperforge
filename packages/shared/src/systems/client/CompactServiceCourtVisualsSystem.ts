@@ -1,9 +1,11 @@
 import {
   createOpenWorkshop,
   createBuildingMaterial,
+  HAVEN_ARCHITECTURAL_ROOF_CONFIG,
+  createHavenLocalMetricUV,
 } from "@hyperforge/procgen/building";
 import * as THREE from "../../extras/three/three";
-import { attribute, bool } from "three/tsl";
+import { attribute, bool, positionLocal, normalGeometry } from "three/tsl";
 import {
   CompactRoofCutaway,
   createCompactRoofFade,
@@ -26,7 +28,12 @@ export function createCompactServiceCourtVisual(
   record: OwnedCompactServiceCourt,
   mainCamera?: () => THREE.Camera,
 ) {
-  const geometry = createOpenWorkshop(record.feet);
+  const geometry = createOpenWorkshop(record.feet, {
+    architecturalFinish:
+      record.descriptor.recipeId === "open-timber-smithy-haven-v3"
+        ? "haven-v1"
+        : undefined,
+  });
   const materials = new Set<THREE.Material>();
   const root = new THREE.Group();
   let disposed = false;
@@ -41,6 +48,10 @@ export function createCompactServiceCourtVisual(
     const make = (config: Parameters<typeof createBuildingMaterial>[0]) => {
       const material = createBuildingMaterial({
         ...config,
+        architecturalFinish:
+          record.descriptor.recipeId === "open-timber-smithy-haven-v3"
+            ? "haven-v1"
+            : undefined,
         useVertexColors: false,
       });
       materials.add(material);
@@ -67,13 +78,22 @@ export function createCompactServiceCourtVisual(
       scale: 0.35,
       roughness: 0.94,
       variation: 0.3,
+      ...(record.descriptor.recipeId === "open-timber-smithy-haven-v3"
+        ? HAVEN_ARCHITECTURAL_ROOF_CONFIG
+        : {}),
     });
     const stone = make({
       type: "stone-ashlar",
       baseColor: "#aaa18d",
       secondaryColor: "#797e72",
       accentColor: "#66695d",
-      scale: 1.4,
+      scale:
+        record.descriptor.recipeId === "open-timber-smithy-haven-v3"
+          ? 0.75
+          : 1.4,
+      ...(record.descriptor.recipeId === "open-timber-smithy-haven-v3"
+        ? { patternUV: createHavenLocalMetricUV(positionLocal, normalGeometry) }
+        : {}),
       roughness: 0.88,
       variation: 0.32,
     });

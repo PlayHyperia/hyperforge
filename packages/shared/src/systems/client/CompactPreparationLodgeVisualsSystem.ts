@@ -1,9 +1,17 @@
 import {
   BuildingGenerator,
   createBuildingMaterial,
+  HAVEN_ARCHITECTURAL_ROOF_CONFIG,
+  createHavenLocalMetricUV,
 } from "@hyperforge/procgen/building";
 import * as THREE from "../../extras/three/three";
-import { attribute, bool, positionLocal, select } from "three/tsl";
+import {
+  attribute,
+  bool,
+  positionLocal,
+  normalGeometry,
+  select,
+} from "three/tsl";
 import {
   CompactRoofCutaway,
   createCompactRoofFade,
@@ -40,10 +48,16 @@ export function createCompactPreparationLodgeVisual(
     generator.dispose({ clearGeometryCache: false });
   };
   try {
+    const havenFinish =
+      record.descriptor.recipeId === "compact-bank-lodge01-haven-v2";
     const result = generator.generate("bank", {
       seed: record.descriptor.layoutSeed,
       cachedLayout: record.layout,
       roofStyle: "gable",
+      architecturalFinish:
+        record.descriptor.recipeId === "compact-bank-lodge01-haven-v2"
+          ? "haven-v1"
+          : undefined,
       includeRoof: true,
       includeProps: false,
       generateLODs: false,
@@ -81,6 +95,7 @@ export function createCompactPreparationLodgeVisual(
     const make = (config: Parameters<typeof createBuildingMaterial>[0]) => {
       const material = createBuildingMaterial({
         ...config,
+        architecturalFinish: havenFinish ? "haven-v1" : undefined,
         useVertexColors: false,
       });
       material.name = `compact-lodge-${config.type}`;
@@ -93,16 +108,20 @@ export function createCompactPreparationLodgeVisual(
       baseColor: "#aaa18d",
       secondaryColor: "#797e72",
       accentColor: "#66695d",
-      scale: 1.4,
+      scale: havenFinish ? 0.75 : 1.4,
+      ...(havenFinish
+        ? { patternUV: createHavenLocalMetricUV(positionLocal, normalGeometry) }
+        : {}),
       roughness: 0.88,
       variation: 0.32,
     });
     const wood = make({
       type: "wood-plank",
+      ...(havenFinish ? { woodFiltering: "footprint-v1" as const } : {}),
       baseColor: "#756149",
       secondaryColor: "#514639",
       accentColor: "#433d33",
-      scale: 0.75,
+      scale: havenFinish ? 2 : 0.75,
       roughness: 0.82,
       variation: 0.28,
     });
@@ -115,6 +134,7 @@ export function createCompactPreparationLodgeVisual(
       scale: 1.25,
       roughness: 0.8,
       variation: 0.3,
+      ...(havenFinish ? HAVEN_ARCHITECTURAL_ROOF_CONFIG : {}),
     });
     const walls = make({
       type: "plaster",
@@ -128,15 +148,34 @@ export function createCompactPreparationLodgeVisual(
     const plasterColor = walls.colorNode as Node<"vec3">;
     // Gable trim already carries its material ID in uv2; no additional mesh,
     // texture, light or draw call is needed for wood trim / stone plinth.
+    const woodRole = attribute("uv2", "vec2").x.greaterThan(0.95);
+    const stoneRole = positionLocal.y.lessThan(havenFinish ? 0.75 : 0.61);
     walls.colorNode = select(
-      attribute("uv2", "vec2").x.greaterThan(0.95),
+      woodRole,
       wood.colorNode as Node<"vec3">,
-      select(
-        positionLocal.y.lessThan(0.61),
-        stone.colorNode as Node<"vec3">,
-        plasterColor,
-      ),
+      select(stoneRole, stone.colorNode as Node<"vec3">, plasterColor),
     );
+    if (havenFinish) {
+      walls.normalNode = select(
+        woodRole,
+        wood.normalNode as Node<"vec3">,
+        select(
+          stoneRole,
+          stone.normalNode as Node<"vec3">,
+          walls.normalNode as Node<"vec3">,
+        ),
+      );
+      for (const channel of ["roughnessNode", "aoNode"] as const)
+        walls[channel] = select(
+          woodRole,
+          wood[channel] as Node<"float">,
+          select(
+            stoneRole,
+            stone[channel] as Node<"float">,
+            walls[channel] as Node<"float">,
+          ),
+        );
+    }
     const roleMaterials = {
       floors: stone,
       walls,

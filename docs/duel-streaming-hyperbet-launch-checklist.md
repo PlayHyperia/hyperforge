@@ -1,5 +1,39 @@
 # Duel Arena, Streaming, and Hyperbet Launch Checklist
 
+
+## Grass visual recovery — user reference, 2026-09-13
+
+**Visual acceptance reopened.** The supplied earlier-game image is now the grass art reference. Current `natural-tuft-v1` meadow captures are visibly too sparse and spiky; previous local technical passes do not establish an acceptable meadow. Reference: `asset-studio/haven-architecture01/user-grass-reference01.png`, SHA256 `8dbf756b1c208dde39f72754a348782989830ba8e3a68191e57ee89e4ca22dd0`. Its exact source revision, settings, motion and performance are unknown.
+
+- [x] Compare the reference with actual `haven-habitat-native03` meadow/campus/Haven views. Recover continuous overlapping fine strands and coherent meadow volume, at a lower height; do not reproduce isolated dark rosettes or substitute greener ground paint.
+- [x] Identify the coverage deficit in actual source: the active compact meadow profile uses 1.75m clump spacing and minimum LOD1 (12 blades), versus ordinary near-grass 0.7m /24 blades. Potential blade density is 12.5× lower before eligibility, grounding and quotas—not a measured count ratio to the user's image. Grouping into three four-blade root patches and wider/shorter blades further exposes bare gaps.
+- [ ] Next art priority after the architecture checkpoint: an explicit fine-meadow candidate with independently distributed slender blades, sufficient nearby overlap and lower authored height. Inspect actual quota/grounding rejection and per-camera LOD; narrowing the existing sparse tufts alone cannot recover coverage.
+- [ ] Preserve authoritative surface/road/resource/station exclusions, full blade-root grounding, corrected world-continuous wind, functional trees, native resolution and shadows. Any density or topology change requires new exact count/source evidence; do not pretend historical buffers remain identical.
+- [ ] Accept only after close, midrange and campus native views plus moving camera/wind/LOD tests and actual main/sun GPU, memory, upload and loading measurements. Source-reuse and instancing are not proof of affordable increased density; pursue measured rendering headroom without sacrificing the reference's fullness.
+
+This takes priority over the planned coastal bedrock slice. Wider architecture/contact, terrain, water, foliage, equipment LOD, live-agent/streaming and launch gates remain open.
+
+## Haven architectural finish — native03 local checkpoint, 2026-09-13
+
+Status: native03 passes the local study; the overall capture remains failed on 19 existing cow/dagger content errors. Architecture is a bounded improvement, not finished art, AAA, sustained-performance or launch approval. Grass visual acceptance is explicitly reopened above.
+
+- [x] Add shared timber/plaster/slate/stone surface response and restrained corner/eave/gable/plinth geometry. Lodge and smithy now share physical roof-course scale. Explicit recipes `compact-bank-lodge01-haven-v2` / `open-timber-smithy-haven-v3` preserve exact historical comparison fixtures, poses and service layouts.
+- [x] Correct an inherited generator normal bug: use real triangle winding, not whole-batch-center flipping for disjoint geometry. Preserve authored topology; normal-sensitive welding retains 70 extra wall vertices /3,640 bytes. Failed initial integration evidence remains retained, not relabeled.
+- [x] **224/224 tests across 16 files**, including **10,596 actual Three/PhysX face comparisons** across three lifetimes of both buildings, 8,960 sampled facade gap rays, exact floor/window/door buffers, both cutaway recipes, World/resource/service checks. Procgen emit, shared/server/client typechecks/builds and scoped lint/format pass.
+- [x] Keep five lodge /three smithy mesh owners and existing shadow/cutaway semantics. Final lodge **2,232 triangles /262,064 bytes**, smithy **1,300 /216,576**; combined historical increase **1,016 triangles /112,816 bytes**. No new image textures, lights or passes. Bounded analytic normals/roughness/small-scale AO are not displacement or cast contact shadows.
+- [x] **37/37 final capture preflight tests**. Native03 supplies all eleven world views, actual compiled surface graphs and all 3,532 face-normal checks. Campus submits all eight architecture owners /3,532 triangles in each main and sun pass; meadow main seven /3,400 and sun eight /3,532. No implied free geometry/shader cost.
+- [x] Retain native01 checkpoint-label and native02 warmup-camera failures. Exact tested observer fixes admit the new labels and warm extra views before the original nine; screenshot order, real camera comparisons and same-run ownership remain strict. Native03 closes its browser, launcher, services, cameras and observers with no cleanup error; root confirms all four ports clear.
+- [x] Root and independent review compare eleven views against nine original references: roof scale, masonry base and framing improve; no obvious new missing face, footing, blocked opening or cutaway defect. The front detail camera clips the apex; only the three-quarter view shows the complete lodge roof. Generated concept and final prompt remain in `asset-studio/haven-architecture01/CONCEPT.md`, not engine proof.
+- [ ] Architecture art remains unfinished: timber is too dark/flat, plaster gray-blue, masonry overly regular and lintels appear detached above openings. Improve these deliberately; static roof detail does not qualify temporal shimmer or continuous cutaway motion.
+- [ ] Performance remains open: instrumented CPU p95 **18.0ms campus /18.8ms meadow**, summed GPU-pass p95 **19.398656 /20.64384ms**, versus historical **17.9 /14.8ms CPU** and **18.808832 /19.070976ms GPU**. Worse observed tails are not an isolated architecture cost or sustained/presented FPS. Native 720p, 4x MSAA, population and shadow settings are retained.
+- [ ] Next: recover the user's fine lush meadow with smaller bounded grass-owned cells and explicit density/LOD qualification. Then authored coastal bedrock/shoreline, foliage transmission/contact and measured equipment LOD/headroom. Preserve one compact island, one arena and all functional resource trees.
+- [ ] Equipment LOD remains a plan: 252,160 rigid single-joint triangles/actor are eligible for partition-preserving trials; preserve CPU8 shoulders, corrective trousers, morphs, attachments/rest ownership. No generated LOD or shipped equipment integration is implied.
+
+Evidence: `asset-studio/haven-architecture01/QUALIFICATION.md`; native03 report SHA256 `7a303d211260a61d600ff6c35592a7b55cb919b589a413ded03593f5b5406073`. Wind recording decodes **237 VP8 frames at1280×720**, 6,345,867 bytes (SHA256 `53f56ccd01cbebaeaf4061dedda1581532d42e91319b4a9d88e39fd8f3b3faae`); not locked recording/presented FPS or exhaustive motion approval. Broader avatar/grip, production bindings, live preparation, sustained hardware, SOL and streaming gates remain open.
+
+
+Independent final verification matches all 722 source pins, 644 archives, 24 checkpoints and 44 fog brackets; zero page/WebGPU errors, no new content-error class. Verification JSON SHA256 `1ed9cc7da5aed8b804da9325478c5e2204a3cf205568e268e3565902ad81d756`.
+
 ## Avatar propagation and shared habitat — 2026-09-13
 
 Status: **native03 local study passes; overall production capture remains failed on 19 existing content errors.** Subtle opt-in habitat composition, not the requested major visual leap. No default-promotion, AAA, sustained-performance or launch approval.

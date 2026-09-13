@@ -10,6 +10,7 @@ import { Vector3, Raycaster, Mesh } from "../../../../extras/three/three";
 import { TerrainSystem } from "../TerrainSystem";
 import {
   COMPACT_SERVICE_COURT,
+  COMPACT_SERVICE_COURT_LEGACY_FIXTURE,
   groundCompactServiceCourt,
   validateCompactServiceCourt,
 } from "../CompactServiceCourt";
@@ -79,11 +80,17 @@ describe("compact service court actual geometry and native PhysX (not rendered a
     const profile = saved.profile!;
     expect(validateCompactServiceCourt(undefined, profile)).toBeUndefined();
     const input = structuredClone(COMPACT_SERVICE_COURT);
-    expect(input.recipeId).toBe("open-timber-smithy-v2");
+    expect(input.recipeId).toBe("open-timber-smithy-haven-v3");
     const descriptor = validateCompactServiceCourt(input, profile)!;
     expect(descriptor).toEqual(input);
     expect(descriptor).not.toBe(input);
     expect(Object.isFrozen(descriptor.position)).toBe(true);
+    const legacy = validateCompactServiceCourt(
+      structuredClone(COMPACT_SERVICE_COURT_LEGACY_FIXTURE),
+      profile,
+    )!;
+    expect(legacy.recipeId).toBe("open-timber-smithy-v2");
+    expect({ ...descriptor, recipeId: legacy.recipeId }).toEqual(legacy);
     for (const bad of [
       { ...input, extra: true },
       { ...input, recipeId: "open-timber-smithy-v1" },
@@ -177,7 +184,7 @@ describe("compact service court actual geometry and native PhysX (not rendered a
         expect(visual.getDiagnostics()).toMatchObject({
           meshes: 3,
           materials: 3,
-          triangles: 1184,
+          triangles: 1300,
         });
         expect(world.physics.scene!.getNbActors(types)).toBe(before + 1);
         for (let i = 0; i < 4; i++) {
@@ -307,7 +314,7 @@ describe("compact service court actual geometry and native PhysX (not rendered a
             checked++;
           }
         }
-        expect(checked).toBe(1184);
+        expect(checked).toBe(1300);
         visual.destroy();
         visual.destroy();
         owner.destroy();
