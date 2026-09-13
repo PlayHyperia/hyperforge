@@ -1,5 +1,43 @@
 # Compact island environment art: next delivery slice
 
+## Latest verdict — shoulder canopy remains a comparison, 2026-09-13
+
+Actual shoulder-native02 close/elevated/anvil images show modest extra overlap
+but also broader, flatter leaves over conspicuous granular turf. Root and
+independent review do not accept it as the reference-quality grass finish.
+Keep the pushed candidate experimental; do not widen the blades again on the
+assumption that width alone solves canopy continuity. The original reference's
+exact camera, lighting and configuration are unknown, and the captures differ
+in actor/wind state; this is an art judgment, not a pixel-isolated experiment.
+
+The native scene-study routine captures all three views, daylit wind and the
+out/back LOD rail. Overall qualification still fails a post-study publication
+race: one grounding job finishes between fresh published/live reads, changing
+job count and correction bytes. Do not waive those structural fields; a future
+bounded quiet/stability retry must retain the existing deadline and invariants.
+Cow/dagger content failures remain. All owned processes/ports are gone and the
+exact database is retained stopped. Source tests/builds stay qualified, not art.
+
+Observed campus/meadow CPU p95 is 16.9/14.1ms and GPU-pass-sum p95 is
+19.92/17.89ms. Actual grass draw/triangle sets match grade-native03, but differing
+sun phase and moving scene content prevent an isolated causal cost comparison.
+No presented-FPS, sustained performance or hardware approval follows.
+
+Next use the same three native stills as an early art gate before another full
+motion run. First test grass-only normal relief 1→.25, keeping all texture bytes,
+filtering/resolution, albedo/CPU sampled color, roughness, geometry, density,
+lighting and soil/path/rock layers unchanged. This targets distracting grain,
+not geometric holes; reject it if the turf becomes painted-flat. A mean-preserving
+grass-albedo contrast treatment is a separate potential follow-up, not silently
+combined with the first comparison. Preserve actual layer-isolation checks.
+
+The primary [GPU Gems botany chapter](https://developer.nvidia.com/gpugems/gpugems2/part-i-geometric-complexity/chapter-1-toward-photorealism-virtual-botany)
+discusses coherent terrain/grass lighting and balancing apparent volume with
+rendering cost. It informs this visual relationship, not an adoption of its old
+billboard implementation or a claim about present WebGPU performance.
+Evidence: `asset-studio/fine-meadow01/QUALIFICATION.md` and the independent
+`shoulder-native02-art-review.md`. All historical notes below remain historical.
+
 ## Current grass candidate — shoulder taper and root depth, 2026-09-13
 
 The fine-only candidate now uses width(t) = maximumWidth × (1 − t²): fuller
