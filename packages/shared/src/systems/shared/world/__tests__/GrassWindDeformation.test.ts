@@ -17,6 +17,10 @@ import {
   type GrassWorkerSetup,
 } from "../GrassVisualManager";
 import { SCULPTED_COMPACT_WORLD_TERRAIN_PROFILE } from "../WorldTerrainProfile";
+import {
+  createGroundedGrassMaterial,
+  GRASS_ROOT_STORAGE_ATTRIBUTE,
+} from "../GrassGroundingGpu";
 
 function createOwner(candidate: boolean | "fine" = true) {
   const terrain = SCULPTED_COMPACT_WORLD_TERRAIN_PROFILE;
@@ -256,13 +260,162 @@ function rotation(inputs: Inputs) {
     );
 }
 
+describe("fine meadow root occlusion (actual CPU node arithmetic)", () => {
+  it("uses the existing UV height for a bounded smooth root-only indirect occlusion profile", () => {
+    const owner = createOwner("fine");
+    try {
+      const material = owner["material"];
+      expect(FINE_MEADOW_APPEARANCE.ROOT_OCCLUSION).toBe(0.55);
+      expect(FINE_MEADOW_APPEARANCE.ROOT_OCCLUSION_END).toBe(0.6);
+      expect(material.aoNode).toBeInstanceOf(THREE.Node);
+      const ao = material.aoNode!;
+      expect(ao.type).toBe("VarNode");
+      expect(Reflect.get(ao, "name")).toBe("fineGrassRootOcclusion");
+      const nodes = [...graph(ao)];
+      expect(
+        nodes
+          .filter((node) => node.type === "AttributeNode")
+          .map((node) => Reflect.get(node, "_attributeName")),
+      ).toEqual(["uv"]);
+      expect(
+        nodes.filter(
+          (node) =>
+            node.type === "VaryingNode" ||
+            Reflect.get(node, "isTextureNode") === true ||
+            Reflect.get(node, "isStorageBufferNode") === true,
+        ),
+      ).toEqual([]);
+      expect(graph(material.positionNode!).has(ao)).toBe(false);
+      expect(graph(material.normalNode!).has(ao)).toBe(false);
+      for (const front of [false, true])
+        for (const horizontal of [0, 0.5, 1])
+          for (const [height, expected] of [
+            [-1, 0.55],
+            [0, 0.55],
+            [0.3, 0.775],
+            [0.6, 1],
+            [1, 1],
+            [2, 1],
+          ]) {
+            const inputs = inputFor(owner["lodGeometries"][0], 0);
+            inputs.front = front;
+            inputs.attributes.uv = [horizontal, height];
+            expect(evaluate(ao, inputs)[0]).toBeCloseTo(expected, 14);
+          }
+      let previous = 0.55;
+      for (let step = 0; step <= 100; step++) {
+        const inputs = inputFor(owner["lodGeometries"][0], 0);
+        const height = step / 100;
+        inputs.attributes.uv = [0.5, height];
+        const actual = evaluate(ao, inputs)[0];
+        const t = Math.min(1, Math.max(0, height / 0.6));
+        const expected = 0.55 + 0.45 * t * t * (3 - 2 * t);
+        expect(actual).toBeCloseTo(expected, 14);
+        expect(actual).toBeGreaterThanOrEqual(previous);
+        expect(actual).toBeLessThanOrEqual(1);
+        previous = actual;
+      }
+      // This evaluates the real material's AO input only. Installed r186's
+      // PhysicalLightingModel applies that input to indirect lighting; native
+      // compilation and pixels remain separate acceptance, not a fake renderer.
+    } finally {
+      owner.destroy();
+    }
+  });
+
+  it("opts in only fine grass without adding material maps or a transparency pass", () => {
+    const fine = createOwner("fine");
+    const natural = createOwner(true);
+    const curved = createOwner(false);
+    try {
+      expect(natural["material"].aoNode).toBeNull();
+      expect(curved["material"].aoNode).toBeNull();
+      expect(fine["material"].aoNode).not.toBeNull();
+      for (const owner of [fine, natural, curved]) {
+        const material = owner["material"];
+        expect(material.side).toBe(THREE.DoubleSide);
+        expect(material.transparent).toBe(false);
+        expect(material.depthWrite).toBe(true);
+        expect(material.roughness).toBe(1);
+        expect(material.metalness).toBe(0);
+        expect(material.fog).toBe(false);
+        expect(material.map).toBeNull();
+        expect(material.aoMap).toBeNull();
+        expect(material.normalMap).toBeNull();
+        expect(material.alphaMap).toBeNull();
+        expect(material.emissiveMap).toBeNull();
+        expect(material.emissive.toArray()).toEqual([0, 0, 0]);
+        expect(material.fragmentNode).toBeNull();
+        expect(material.lights).toBe(true);
+        for (const [lod, geometry] of owner["lodGeometries"].entries()) {
+          expect(Object.keys(geometry.attributes).sort()).toEqual([
+            "normal",
+            "position",
+            "uv",
+          ]);
+          const tier = GRASS_CONFIG.LOD_TIERS[lod];
+          expect(geometry.attributes.position.count).toBe(
+            tier.bladesPerClump * (tier.bladeSegments * 2 + 1),
+          );
+        }
+      }
+    } finally {
+      fine.destroy();
+      natural.destroy();
+      curved.destroy();
+    }
+  });
+
+  it("retains the exact AO node through each actual grounded material clone", () => {
+    const owner = createOwner("fine");
+    try {
+      const base = owner["material"];
+      for (const [lod, source] of owner["lodGeometries"].entries()) {
+        const geometry = source.clone();
+        const count = 2;
+        const roots = new Float32Array(
+          count * GRASS_CONFIG.LOD_TIERS[lod].bladesPerClump * 2,
+        );
+        const material = createGroundedGrassMaterial(
+          base,
+          geometry,
+          roots,
+          count,
+          lod,
+        );
+        try {
+          expect(material).not.toBe(base);
+          expect(material.aoNode).toBe(base.aoNode);
+          expect(material.normalNode).toBe(base.normalNode);
+          expect(material.colorNode).toBe(base.colorNode);
+          expect(material.positionNode).not.toBe(base.positionNode);
+          expect(material.transparent).toBe(false);
+          expect(material.side).toBe(THREE.DoubleSide);
+          expect(material.aoMap).toBeNull();
+          expect(
+            geometry.getAttribute(GRASS_ROOT_STORAGE_ATTRIBUTE).array,
+          ).toBe(roots);
+          expect(source.hasAttribute(GRASS_ROOT_STORAGE_ATTRIBUTE)).toBe(false);
+          const inputs = inputFor(source, 0);
+          inputs.attributes.uv = [0.5, 0.3];
+          expect(evaluate(material.aoNode!, inputs)[0]).toBeCloseTo(0.775, 14);
+        } finally {
+          material.dispose();
+          geometry.dispose();
+        }
+      }
+    } finally {
+      owner.destroy();
+    }
+  });
+});
+
 describe("fine meadow constant normal blend (actual CPU node arithmetic)", () => {
   it("keeps the 0.20 blend finite on both faces across blade height without new vertex inputs", () => {
     const owner = createOwner("fine");
     try {
       const material = owner["material"];
       const normalGraph = graph(material.normalNode!);
-      expect(material.aoNode).toBeNull();
       expect(material.roughness).toBe(1);
       expect(
         [...normalGraph]
@@ -662,49 +815,54 @@ describe("natural tuft actual shader deformation (CPU node arithmetic only)", ()
     },
   );
 
-  it("keeps both roots anchored over time and all vertex wind inside existing swept bounds", () => {
-    const owner = createOwner();
-    try {
-      for (const [lod, geometry] of owner["lodGeometries"].entries()) {
-        const vertices = GRASS_CONFIG.LOD_TIERS[lod].bladeSegments * 2 + 1;
-        for (
-          let index = 0;
-          index < geometry.attributes.position.count;
-          index++
-        ) {
-          const inputs = inputFor(geometry, index);
-          inputs.attributes.instanceGroundNormal = new THREE.Vector3(
-            0.3,
-            0.8,
-            -0.4,
-          )
-            .normalize()
-            .toArray();
-          owner["playerPosUniform"]!.value.copy(worldBase(inputs));
-          const base = vector(inputs.attributes.position)
-            .multiplyScalar(inputs.attributes.instanceRotScaleHash[1])
-            .applyQuaternion(rotation(inputs))
-            .add(vector(inputs.attributes.instanceOffset));
-          const t = inputs.attributes.uv[1];
-          for (const seconds of [0, 1.1, 3.7, 20, 100]) {
-            inputs.time = seconds;
-            const delta = vector(
-              evaluate(owner["material"].positionNode!, inputs),
-            ).sub(base);
-            const cap =
-              GRASS_CONFIG.WIND_STRENGTH *
-              NATURAL_TUFT_APPEARANCE.BLADE_HEIGHT_MAX *
-              Math.pow(t, 1.8);
-            expect(Math.abs(delta.x)).toBeLessThanOrEqual(cap + 1e-13);
-            expect(Math.abs(delta.z)).toBeLessThanOrEqual(cap * 0.55 + 1e-13);
-            expect(Math.abs(delta.y)).toBeLessThan(1e-13);
-            if (index % vertices < 2)
-              expect(delta.length()).toBeLessThan(1e-13);
+  it.each(["natural", "fine"] as const)(
+    "keeps both %s roots anchored over time and all vertex wind inside existing swept bounds",
+    (variant) => {
+      const owner = createOwner(variant === "fine" ? "fine" : true);
+      const appearance =
+        variant === "fine" ? FINE_MEADOW_APPEARANCE : NATURAL_TUFT_APPEARANCE;
+      try {
+        for (const [lod, geometry] of owner["lodGeometries"].entries()) {
+          const vertices = GRASS_CONFIG.LOD_TIERS[lod].bladeSegments * 2 + 1;
+          for (
+            let index = 0;
+            index < geometry.attributes.position.count;
+            index++
+          ) {
+            const inputs = inputFor(geometry, index);
+            inputs.attributes.instanceGroundNormal = new THREE.Vector3(
+              0.3,
+              0.8,
+              -0.4,
+            )
+              .normalize()
+              .toArray();
+            owner["playerPosUniform"]!.value.copy(worldBase(inputs));
+            const base = vector(inputs.attributes.position)
+              .multiplyScalar(inputs.attributes.instanceRotScaleHash[1])
+              .applyQuaternion(rotation(inputs))
+              .add(vector(inputs.attributes.instanceOffset));
+            const t = inputs.attributes.uv[1];
+            for (const seconds of [0, 1.1, 3.7, 20, 100]) {
+              inputs.time = seconds;
+              const delta = vector(
+                evaluate(owner["material"].positionNode!, inputs),
+              ).sub(base);
+              const cap =
+                GRASS_CONFIG.WIND_STRENGTH *
+                appearance.BLADE_HEIGHT_MAX *
+                Math.pow(t, 1.8);
+              expect(Math.abs(delta.x)).toBeLessThanOrEqual(cap + 1e-13);
+              expect(Math.abs(delta.z)).toBeLessThanOrEqual(cap * 0.55 + 1e-13);
+              expect(Math.abs(delta.y)).toBeLessThan(1e-13);
+              if (index % vertices < 2)
+                expect(delta.length()).toBeLessThan(1e-13);
+            }
           }
         }
+      } finally {
+        owner.destroy();
       }
-    } finally {
-      owner.destroy();
-    }
-  });
+    },
+  );
 });

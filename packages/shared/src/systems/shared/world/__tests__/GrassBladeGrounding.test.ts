@@ -23,8 +23,12 @@ import {
   GrassVisualManager,
   COMPACT_ISLAND_GRASS_VISUAL_PROFILE,
   COMPACT_MEADOW_APPEARANCE,
+  FINE_MEADOW_GRASS_VISUAL_PROFILE,
+  FINE_MEADOW_APPEARANCE,
   GRASS_CONFIG,
 } from "../GrassVisualManager";
+import { createTerrainWorkerConfig } from "../../../../utils/workers/TerrainWorkerShared";
+import { SCULPTED_COMPACT_WORLD_TERRAIN_PROFILE } from "../WorldTerrainProfile";
 import {
   projectGrassAnchors,
   type GrassAnchorData,
@@ -60,13 +64,18 @@ const sample = (): TerrainGridSample => ({
   faceIndex: 0,
 });
 
-function analyticOwner() {
+function analyticOwner(appearance: "ordinary" | "fine" = "ordinary") {
+  const config =
+    appearance === "fine"
+      ? createTerrainWorkerConfig(SCULPTED_COMPACT_WORLD_TERRAIN_PROFILE, 16)
+      : null;
+  const identity = config?.TERRAIN_PROFILE_IDENTITY ?? "analytic";
   const manager = new GrassVisualManager(
-    "analytic",
+    identity,
     new THREE.Group(),
     () => null,
     () => 20,
-    0,
+    config?.WATER_THRESHOLD ?? 0,
     () => 0,
     () => false,
     () => ({
@@ -77,6 +86,23 @@ function analyticOwner() {
       grassPlacement: 1,
       grassHeightScale: 1,
     }),
+    config
+      ? {
+          terrainConfig: config,
+          seed: SCULPTED_COMPACT_WORLD_TERRAIN_PROFILE.seed,
+          biomeCenters: [],
+          biomes: {},
+          grassConfigs: {},
+          tileSize: config.TILE_SIZE,
+          getRoadSegmentsForRegion: () => [],
+          getTerrainSurfaceForRegion: emptySnapshot,
+        }
+      : undefined,
+    appearance === "fine" ? FINE_MEADOW_GRASS_VISUAL_PROFILE : {},
+    undefined,
+    undefined,
+    undefined,
+    appearance === "fine" ? FINE_MEADOW_APPEARANCE.id : undefined,
   );
   const geometries: THREE.BufferGeometry[] = [];
   const makeSurface = (
@@ -93,7 +119,7 @@ function analyticOwner() {
     geometries.push(geometry);
     return new RetainedTerrainSurface(
       id,
-      "analytic",
+      identity,
       centerX,
       centerZ,
       size,
@@ -200,10 +226,16 @@ function one(data: GrassAnchorData, index: number): GrassAnchorData {
 }
 
 describe("CPU per-blade grounding prototype (no renderer/GPU)", () => {
-  it.each([0, 1, 2] as const)(
-    "retains exact road clearance at all spatial-cell boundaries at LOD%s",
-    (lod) => {
-      const f = analyticOwner();
+  it.each([
+    ["ordinary", 0],
+    ["ordinary", 1],
+    ["ordinary", 2],
+    ["fine", 0],
+    ["fine", 1],
+  ] as const)(
+    "retains exact %s road clearance at all spatial-cell boundaries at LOD%s",
+    (appearance, lod) => {
+      const f = analyticOwner(appearance);
       try {
         const surface = f.makeSurface();
         for (const x of [-37.5, -25, -12.5, 0, 12.5, 25, 37.5]) {
@@ -712,111 +744,124 @@ describe("CPU per-blade grounding prototype (no renderer/GPU)", () => {
     }
   });
 
-  it("checks swept pads, road capsules and elevated-water circles outside the anchor", () => {
-    const f = analyticOwner();
-    try {
-      const surface = f.makeSurface(),
-        request = f.request(surface),
-        geometry = request.geometry;
-      let maxX = -Infinity;
-      for (let v = 0; v < geometry.getAttribute("position").count; v++)
-        maxX = Math.max(
-          maxX,
-          transformedVertex(request.data, surface, geometry, 0, v).x,
-        );
-      const x = maxX + 0.1;
-      const base = { ...request, wind: { x: 0.4, z: 0.1 } };
-      const pad = {
-        id: "swept",
-        centerX: x,
-        centerZ: 0,
-        width: 0.1,
-        depth: 10,
-        height: 20,
-        blendRadius: 0,
-      };
-      const polygon: GrassTerrainExclusionPolygon = {
-        id: "swept-rock",
-        minX: x - 0.05,
-        maxX: x + 0.05,
-        minZ: -5,
-        maxZ: 5,
-        vertices: [
-          { x: x - 0.05, z: -5 },
-          { x: x + 0.05, z: -5 },
-          { x: x + 0.05, z: 5 },
-          { x: x - 0.05, z: 5 },
-        ],
-      };
-      const cases = [
-        {
-          input: {
-            ...base,
-            terrainSurface: {
-              ...emptySnapshot(),
-              exclusionPolygons: [polygon],
+  it.each([
+    ["ordinary", 1],
+    ["fine", 0],
+    ["fine", 1],
+  ] as const)(
+    "checks %s LOD%s swept pads, road capsules and elevated-water circles outside the anchor",
+    (appearance, lod) => {
+      const f = analyticOwner(appearance);
+      try {
+        const surface = f.makeSurface(),
+          request = f.request(surface, undefined, lod),
+          geometry = request.geometry;
+        let maxX = -Infinity;
+        for (let v = 0; v < geometry.getAttribute("position").count; v++)
+          maxX = Math.max(
+            maxX,
+            transformedVertex(request.data, surface, geometry, 0, v).x,
+          );
+        const x = maxX + 0.1;
+        const base = { ...request, wind: { x: 0.4, z: 0.1 } };
+        const pad = {
+          id: "swept",
+          centerX: x,
+          centerZ: 0,
+          width: 0.1,
+          depth: 10,
+          height: 20,
+          blendRadius: 0,
+        };
+        const polygon: GrassTerrainExclusionPolygon = {
+          id: "swept-rock",
+          minX: x - 0.05,
+          maxX: x + 0.05,
+          minZ: -5,
+          maxZ: 5,
+          vertices: [
+            { x: x - 0.05, z: -5 },
+            { x: x + 0.05, z: -5 },
+            { x: x + 0.05, z: 5 },
+            { x: x - 0.05, z: 5 },
+          ],
+        };
+        const cases = [
+          {
+            input: {
+              ...base,
+              terrainSurface: {
+                ...emptySnapshot(),
+                exclusionPolygons: [polygon],
+              },
             },
+            reason: "pad",
           },
-          reason: "pad",
-        },
-        {
-          input: {
-            ...base,
-            terrainSurface: { ...emptySnapshot(), zones: [pad] },
+          {
+            input: {
+              ...base,
+              terrainSurface: { ...emptySnapshot(), zones: [pad] },
+            },
+            reason: "pad",
           },
-          reason: "pad",
-        },
-        {
-          input: {
-            ...base,
-            roadSegments: [
-              { startX: x, startZ: -5, endX: x, endZ: 5, width: 0.05 },
-            ],
-          },
-          reason: "road",
-        },
-        {
-          input: {
-            ...base,
-            terrainSurface: {
-              ...emptySnapshot(),
-              waterBodies: [
-                {
-                  id: "water",
-                  centerX: x,
-                  centerZ: 0,
-                  radius: 0.2,
-                  surfaceY: 19.95,
-                },
+          {
+            input: {
+              ...base,
+              roadSegments: [
+                { startX: x, startZ: -5, endX: x, endZ: 5, width: 0.05 },
               ],
             },
+            reason: "road",
           },
-          reason: "water",
-        },
-      ] as const;
-      for (const { input, reason } of cases) {
-        const result = groundGrassBlades(input);
-        expect(result.status).toBe("ready");
-        if (result.status !== "ready") throw Error(result.reason);
-        expect(result.data.count).toBe(0);
-        expect(result.receipt.rejected[reason]).toBe(1);
+          {
+            input: {
+              ...base,
+              terrainSurface: {
+                ...emptySnapshot(),
+                waterBodies: [
+                  {
+                    id: "water",
+                    centerX: x,
+                    centerZ: 0,
+                    radius: 0.2,
+                    surfaceY: 19.95,
+                  },
+                ],
+              },
+            },
+            reason: "water",
+          },
+        ] as const;
+        for (const { input, reason } of cases) {
+          const before = structuredClone(input.data);
+          const result = groundGrassBlades(input);
+          expect(result.status).toBe("ready");
+          if (result.status !== "ready") throw Error(result.reason);
+          expect(result.data.count).toBe(0);
+          expect(result.receipt.rejected[reason]).toBe(1);
+          expect(result.receipt.workUnits).toBeLessThanOrEqual(
+            GRASS_BLADE_GROUNDING_LIMITS.maximumWorkBudget,
+          );
+          expect(input.data).toEqual(before);
+        }
+        const belowOcean = groundGrassBlades({
+          ...request,
+          oceanLevel: 25,
+          terrainSurface: {
+            ...emptySnapshot(),
+            waterBodies: [
+              { id: "low", centerX: 0, centerZ: 0, radius: 20, surfaceY: 15 },
+            ],
+          },
+        });
+        expect(belowOcean.status).toBe("ready");
+        if (belowOcean.status === "ready")
+          expect(belowOcean.data.count).toBe(1);
+      } finally {
+        f.close();
       }
-      const belowOcean = groundGrassBlades({
-        ...request,
-        oceanLevel: 25,
-        terrainSurface: {
-          ...emptySnapshot(),
-          waterBodies: [
-            { id: "low", centerX: 0, centerZ: 0, radius: 20, surfaceY: 15 },
-          ],
-        },
-      });
-      expect(belowOcean.status).toBe("ready");
-      if (belowOcean.status === "ready") expect(belowOcean.data.count).toBe(1);
-    } finally {
-      f.close();
-    }
-  });
+    },
+  );
 
   it("compacts all attributes in original accepted order without input/RNG mutation", () => {
     const f = analyticOwner();

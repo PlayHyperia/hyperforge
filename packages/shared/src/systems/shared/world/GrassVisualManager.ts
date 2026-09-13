@@ -223,12 +223,16 @@ export const FINE_MEADOW_APPEARANCE = Object.freeze({
   BLADE_HEIGHT_MIN: 0.38,
   BLADE_HEIGHT_MAX: 0.86,
   BLADE_WIDTH_RATIO: 0.045,
+  BLADE_TAPER: 1,
+  BLADE_TAPER_POWER: 2,
   BLADE_ARC_RATIO: 0.3,
   BLADE_CONTROL_HEIGHT: 0.76,
   BLADE_TIP_HEIGHT: 0.95,
   BLADE_NORMAL_WEIGHT: 0.2,
   ROOT_BRIGHTNESS: 0.9,
   TIP_BRIGHTNESS: 1.2,
+  ROOT_OCCLUSION: 0.55,
+  ROOT_OCCLUSION_END: 0.6,
   PROGRESSIVE_ROOTS: true,
 } as const);
 
@@ -239,6 +243,8 @@ type GrassBladeShape = Pick<
   | "BLADE_WIDTH_RATIO"
   | "BLADE_ARC_RATIO"
 > & {
+  BLADE_TAPER?: number;
+  BLADE_TAPER_POWER?: number;
   PROGRESSIVE_ROOTS?: boolean;
   BLADE_CONTROL_HEIGHT?: number;
   BLADE_TIP_HEIGHT?: number;
@@ -311,7 +317,9 @@ function createClumpGeometry(
 ): THREE.BufferGeometry {
   const N = bladesPerClump;
   const segs = bladeSegments;
-  const { CLUMP_RADIUS, CLUMP_INNER_RATIO, BLADE_TAPER: taper } = GRASS_CONFIG;
+  const { CLUMP_RADIUS, CLUMP_INNER_RATIO } = GRASS_CONFIG;
+  const taper = shape.BLADE_TAPER ?? GRASS_CONFIG.BLADE_TAPER;
+  const taperPower = shape.BLADE_TAPER_POWER ?? 1;
   const {
     BLADE_WIDTH_RATIO,
     BLADE_HEIGHT_MIN: hMin,
@@ -431,7 +439,12 @@ function createClumpGeometry(
         ? (2 * (1 - t) * t * controlHeight + t * t * tipHeight) * h
         : t * h;
       const normal = curved ? bladeNormal(t) : [-sr, 0, cr];
-      const hw = w * 0.5 * (1.0 - t * taper);
+      // The fine shoulder keeps more upper leaf area at the same maximum width.
+      // Centerlines, roots and tips are unchanged. Width derivatives run along
+      // the constant side axis, so their cross product with that axis vanishes:
+      // the existing smooth centerline normal remains valid for this taper.
+      const taperedHeight = taperPower === 1 ? t : Math.pow(t, taperPower);
+      const hw = w * 0.5 * (1.0 - taperedHeight * taper);
       const arc = t * t;
       const arcX = curveDirX * arc;
       const arcZ = curveDirZ * arc;
@@ -2463,6 +2476,17 @@ export class GrassVisualManager implements QuadTreeListener {
     mat.roughness = 1.0;
     mat.metalness = 0.0;
     mat.fog = false;
+
+    if (appearance?.id === FINE_MEADOW_APPEARANCE.id) {
+      // Approximate occlusion of environmental fill inside the lower canopy.
+      // Three applies AO to indirect lighting, not albedo or direct sunlight.
+      // Reuse the blade UV: no texture, vertex input or extra rendering pass.
+      mat.aoNode = mix(
+        float(appearance.ROOT_OCCLUSION),
+        float(1),
+        smoothstep(float(0), float(appearance.ROOT_OCCLUSION_END), uv().y),
+      ).toVar("fineGrassRootOcclusion");
+    }
 
     const uWindSpeed = uniform(GRASS_CONFIG.WIND_SPEED);
     const uWindStrength = uniform(GRASS_CONFIG.WIND_STRENGTH);

@@ -855,7 +855,71 @@ describe("compact meadow appearance candidate (CPU only)", () => {
   });
 });
 
+// Actual native03 source templates; no external artifact or Git dependency at test time.
+// Report SHA256: 0bf76034f5c3a12bd044b9b8b4a8564774f617e1ff72f206e39edab4953a971c.
+// Archived generator SHA256: 3424ee573ac30799fe79cd4b4a3ded2876745a2bfbe4f07be8135c42aab0ecfe.
+const historicalFineTemplates = [
+  {
+    lod: 0,
+    positionBase64:
+      "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",
+    hashes: {
+      position:
+        "55443fb17c48988d4a0304508144b23e6b1c59728603f044eb1352a3b67b325f",
+      normal:
+        "b5716344a1c6bd41ac0f7950765de27a25744d5011d4644ce4c365c18253d8d5",
+      uv: "d5d2ad2bb12d03180c5bd3557b9efb12d240b66a706c3349d523f6f64a980fe8",
+      index: "1565b487db6e8caa6fe2c23707dfac0e7feb2b0b46ac9822d69a0c356c6c7f43",
+    },
+  },
+  {
+    lod: 1,
+    positionBase64:
+      "xUT/PgAAAACZ6XM8g/YFPwAAAAAJzdY8UAkKP3sRvz7gxbA74qwNP3sRvz5oKEM8DQcnP8H5Ej9ol928Md5gvgAAAABHhY8+JxF6vgAAAADerYc+sOqKvoykyz7IAok+VymSvoykyz6FgIQ+jfTVvvWlHD/Jc3A+0h3LPAAAAAApfRq/tplqPQAAAABv7Bu/PQnAPHyT5z5ZNii/boQsPXyT5z6ICSm/plQDPK4iMj9c4VC/Oh43PgAAAACtTjg+hq45PgAAAAAK91M+YyZQPmWTvj49kmE+wp9RPmWTvj5yeXE+liyNPsSYEj9l16k+XF4LvwAAAAD0OQq+2LMRvwAAAABJZSC+wNIWv8j75j76GCe+Gncav8j75j5L2DO+Zvg2v/ytMT+s83W+dXTAPgAAAABg0Fq+ZKXPPgAAAAA002q+MYbMPnah6z6phYm+VELVPnah6z4SII6+RGrrPiBBNT/GENu+84E9vgAAAACWsiA/hDJcvgAAAABQTSQ/Yx87vtOk6D6Rpi0/6sRMvtOk6D4juS8/6DkpvvH0Mj+OP1M/DuukvQAAAAAcC1G+XzmBvQAAAACnrES+YQuhvdr7lD6ISXe+NoWMvdr7lD7SLHC+jOqhvbI05T6HLLe+QWUBPwAAAABgJy0+Gpf+PgAAAABFL0o+vR4MP3Zbzz4bwDw+j+kKP3Zbzz5ycU0+YQctP2+BHz8iYWE+x6q9vgAAAAB3iyM+7VbIvgAAAAA2cw0+OHPXvtXH0j5S6yg+NJbdvtXH0j75Nhw+JYgQv5AjIj+QxkA+1y9gPgAAAAAedRe/FKN5PgAAAAAj/BG/7qWAPpdS5j6DXyG/EPeHPpdS5j7zOR6/y9utPtcrMT8LCUG/naTgPQAAAACoFpI+Jk7vPQAAAABocJ4+spXoPcXIsD4JK6k++gPxPcXIsD4LRbA+Mkf7Peb8Bz+RFeo+",
+    hashes: {
+      position:
+        "8787345a60666cad17e99748db6077d3790dfdf082927fd77f73b0b490572f0a",
+      normal:
+        "72dc1b6f260d22a141bb2b478f1a461f41d07618f700679dd36642cd7b5707d3",
+      uv: "3151b5917b93984ac88c1b99647ac2a751caaba476e95228a95a3717bd841b33",
+      index: "d7054c3ebc02228dec288e98823c302ac0c0491d75fa01a5a99805531c2e6851",
+    },
+  },
+] as const;
+
 describe("fine continuous meadow geometry candidate", () => {
+  const historicalHashes = [
+    "b173a82e99e75117f67e75712006fcdfb2a8a780307d4af24e53f9c3f824100f",
+    "36513b1d7085d52e23abab4ed2e2d73d823003cda9f095596ca8f5e3de097721",
+    "4d341787ea4e46a0bb4dbdfc30714dd8c352c4e23c86a892a6979c10cdc48f8d",
+  ];
+  const shoulderHashes = [
+    "0597f68ceb3d85c834bafe088078cc4856197fd2c36af9f97a51d11e02fe2c7c",
+    "dcc57e96393fa2bfee1775bd908f4bd1e96cee6e4da1dbe2eb2ff838a3e3fa85",
+    historicalHashes[2], // Single-segment inactive LOD has no interior width row.
+  ];
+  const digest = (values: ArrayBufferView) =>
+    createHash("sha256")
+      .update(
+        new Uint8Array(values.buffer, values.byteOffset, values.byteLength),
+      )
+      .digest("hex");
+  const geometryDigest = (
+    geometry: THREE.BufferGeometry,
+    position?: Float32Array,
+  ) => {
+    const hash = createHash("sha256");
+    for (const values of [
+      position ?? geometry.attributes.position.array,
+      geometry.attributes.normal.array,
+      geometry.attributes.uv.array,
+      geometry.index!.array,
+    ])
+      hash.update(
+        new Uint8Array(values.buffer, values.byteOffset, values.byteLength),
+      );
+    return hash.digest("hex");
+  };
   const fine = () =>
     manager(
       FINE_MEADOW_GRASS_VISUAL_PROFILE,
@@ -870,12 +934,16 @@ describe("fine continuous meadow geometry candidate", () => {
       BLADE_HEIGHT_MIN: 0.38,
       BLADE_HEIGHT_MAX: 0.86,
       BLADE_WIDTH_RATIO: 0.045,
+      BLADE_TAPER: 1,
+      BLADE_TAPER_POWER: 2,
       BLADE_ARC_RATIO: 0.3,
       BLADE_CONTROL_HEIGHT: 0.76,
       BLADE_TIP_HEIGHT: 0.95,
       BLADE_NORMAL_WEIGHT: 0.2,
       ROOT_BRIGHTNESS: 0.9,
       TIP_BRIGHTNESS: 1.2,
+      ROOT_OCCLUSION: 0.55,
+      ROOT_OCCLUSION_END: 0.6,
       PROGRESSIVE_ROOTS: true,
     });
     const owner = fine();
@@ -908,27 +976,7 @@ describe("fine continuous meadow geometry candidate", () => {
       const geometries = owner["lodGeometries"];
       for (let lod = 0; lod < 3; lod++) {
         const geometry = geometries[lod];
-        // Actual source geometry before the lighting-only change, checkpoint
-        // 5acb8c4e11ea98aeff54d452f20444a1f84766e9. Includes unused LOD2.
-        const hash = createHash("sha256");
-        for (const attribute of [
-          geometry.attributes.position,
-          geometry.attributes.normal,
-          geometry.attributes.uv,
-          geometry.index!,
-        ]) {
-          const values = attribute.array;
-          hash.update(
-            new Uint8Array(values.buffer, values.byteOffset, values.byteLength),
-          );
-        }
-        expect(hash.digest("hex")).toBe(
-          [
-            "b173a82e99e75117f67e75712006fcdfb2a8a780307d4af24e53f9c3f824100f",
-            "36513b1d7085d52e23abab4ed2e2d73d823003cda9f095596ca8f5e3de097721",
-            "4d341787ea4e46a0bb4dbdfc30714dd8c352c4e23c86a892a6979c10cdc48f8d",
-          ][lod],
-        );
+        expect(geometryDigest(geometry)).toBe(shoulderHashes[lod]);
         const tier = GRASS_CONFIG.LOD_TIERS[lod];
         const stride = tier.bladeSegments * 2 + 1;
         const positions = geometry.getAttribute("position");
@@ -1023,6 +1071,188 @@ describe("fine continuous meadow geometry candidate", () => {
     } finally {
       owner.destroy();
       repeated.destroy();
+    }
+  });
+
+  it("changes only interior widths against native source bytes and independently increases projected leaf area", () => {
+    const owner = fine();
+    try {
+      for (const saved of historicalFineTemplates) {
+        const lod = saved.lod;
+        const geometry = owner["lodGeometries"][lod];
+        const positions = geometry.getAttribute("position");
+        const oldValues = new Float32Array(
+          Uint8Array.from(Buffer.from(saved.positionBase64, "base64")).buffer,
+        );
+        const original = new THREE.BufferAttribute(oldValues, 3);
+        expect(digest(oldValues)).toBe(saved.hashes.position);
+        expect(geometryDigest(geometry, oldValues)).toBe(historicalHashes[lod]);
+        for (const attribute of ["normal", "uv"] as const)
+          expect(digest(geometry.getAttribute(attribute).array)).toBe(
+            saved.hashes[attribute],
+          );
+        expect(digest(geometry.index!.array)).toBe(saved.hashes.index);
+        expect(digest(positions.array)).not.toBe(saved.hashes.position);
+        const { bladesPerClump: blades, bladeSegments: segments } =
+          GRASS_CONFIG.LOD_TIERS[lod];
+        const stride = segments * 2 + 1;
+        let previousArea = 0;
+        let shoulderArea = 0;
+        for (let blade = 0; blade < blades; blade++) {
+          const base = blade * stride;
+          const rootLeft = new THREE.Vector3().fromBufferAttribute(
+            original,
+            base,
+          );
+          const rootRight = new THREE.Vector3().fromBufferAttribute(
+            original,
+            base + 1,
+          );
+          const maximumWidth = rootLeft.distanceTo(rootRight);
+          const side = rootRight.clone().sub(rootLeft).normalize();
+          const height = original.getY(base + stride - 1) / 0.95;
+          let previousWidth = maximumWidth;
+          let shoulderWidth = maximumWidth;
+          let previousY = 0;
+          for (let row = 0; row <= segments; row++) {
+            const tip = row === segments;
+            const offset = tip ? stride - 1 : row * 2;
+            const left = new THREE.Vector3().fromBufferAttribute(
+              positions,
+              base + offset,
+            );
+            const oldLeft = new THREE.Vector3().fromBufferAttribute(
+              original,
+              base + offset,
+            );
+            const right = tip
+              ? left.clone()
+              : new THREE.Vector3().fromBufferAttribute(
+                  positions,
+                  base + offset + 1,
+                );
+            const oldRight = tip
+              ? oldLeft.clone()
+              : new THREE.Vector3().fromBufferAttribute(
+                  original,
+                  base + offset + 1,
+                );
+            const center = left.clone().add(right).multiplyScalar(0.5);
+            const oldCenter = oldLeft.clone().add(oldRight).multiplyScalar(0.5);
+            // Every model coordinate has magnitude <2: one Float32 ulp is at
+            // most 2^-23. Independently rounded edges can move their averaged
+            // center by one ulp per coordinate; do not mistake that for a
+            // changed centerline. Vertical coordinates stay exact below.
+            expect(Math.abs(center.x - oldCenter.x)).toBeLessThan(1.3e-7);
+            expect(Math.abs(center.z - oldCenter.z)).toBeLessThan(1.3e-7);
+            expect(left.y).toBe(oldLeft.y);
+            expect(right.y).toBe(oldRight.y);
+            if (row === 0 || tip) {
+              expect(left.toArray()).toEqual(oldLeft.toArray());
+              expect(right.toArray()).toEqual(oldRight.toArray());
+            }
+            const t = row / segments;
+            const width = left.distanceTo(right);
+            const oldWidth = oldLeft.distanceTo(oldRight);
+            expect(width).toBeLessThanOrEqual(maximumWidth + 1.3e-7);
+            expect(width).toBeCloseTo(maximumWidth * (1 - t * t), 6);
+            expect(oldWidth).toBeCloseTo(
+              tip ? 0 : maximumWidth * (1 - 0.85 * t),
+              6,
+            );
+            expect(center.y).toBeCloseTo(height * (1.52 * t - 0.57 * t * t), 7);
+            if (row > 0 && !tip) {
+              const extension = maximumWidth * (0.85 * t - t * t) * 0.5;
+              expect(
+                left.distanceTo(
+                  oldLeft.clone().addScaledVector(side, -extension),
+                ),
+              ).toBeLessThan(2e-7);
+              expect(
+                right.distanceTo(
+                  oldRight.clone().addScaledVector(side, extension),
+                ),
+              ).toBeLessThan(2e-7);
+              expect(width).toBeGreaterThan(oldWidth);
+            }
+            if (row > 0) {
+              // Exact side-axis/vertical orthographic strip area, not total
+              // GPU coverage: arbitrary view yaw and occlusion can differ.
+              previousArea +=
+                (center.y - previousY) * (previousWidth + oldWidth) * 0.5;
+              shoulderArea +=
+                (center.y - previousY) * (shoulderWidth + width) * 0.5;
+            }
+            previousWidth = oldWidth;
+            shoulderWidth = width;
+            previousY = center.y;
+          }
+        }
+        // Independent piecewise trapezoid integrals at the actual vertex rows.
+        const expectedRatio = lod === 0 ? 3781 / 5400 / (21736 / 36000) : 8 / 7;
+        expect(shoulderArea / previousArea).toBeCloseTo(expectedRatio, 5);
+        expect(shoulderArea).toBeGreaterThan(previousArea);
+        console.info("Fine shoulder source geometry", {
+          lod,
+          previousArea,
+          shoulderArea,
+          ratio: shoulderArea / previousArea,
+          positionSHA256: digest(positions.array),
+        });
+      }
+    } finally {
+      owner.destroy();
+    }
+  });
+
+  it("retains every lower-profile geometry byte against the archived production generator", () => {
+    // Generated once from the actual source SHA above; neither Git nor an
+    // alternate geometry implementation is executed by this regression.
+    const ordinary = [
+      "30d43cae657ad1a55190ed6e23dda8cc7973ee4bb684a248e9d39ee851f5a109",
+      "06e6a222140aa84141061eb5775b6dc46a84a8a739b69d8ee00450de8b695b2d",
+      "b6d82f6b4b98e0d3a5a40813c6a5f8bac7ff94559df4e77f058a1aba4ae4a26c",
+    ];
+    const cases = [
+      { owner: manager(), hashes: ordinary },
+      { owner: manager(STREAMING_GRASS_VISUAL_PROFILE), hashes: ordinary },
+      {
+        owner: manager(COMPACT_ISLAND_GRASS_VISUAL_PROFILE),
+        hashes: [
+          "da0d68b971e4b8024f1c5ef659e419929d3f694ec6195a2c8d88717a8d6102f2",
+          "c45836f77f55cf0a993de40751b74577e4c8b2a612c7fd41e967e8d0ac6e0492",
+          "76fcfa38d594984ae7402875df6a57918abd18336b3601f8489e965996acd800",
+        ],
+      },
+      {
+        owner: manager(DENSE_MEADOW_GRASS_VISUAL_PROFILE),
+        hashes: [
+          "bc680313d0cece3938de8098fd1ecc9c39fa1ee773eb5453cb84a6ff133f55f8",
+          "ae63acb18b8b806ff384eba8ddd87ce5c9dcd1255ff866a0ac91932a7524bd96",
+          "dd8fae25ab7c2191d291ccfa2d02ed6a6f22ee0a1b6b537fae16d269a66d42a3",
+        ],
+      },
+      {
+        owner: manager(
+          DENSE_MEADOW_GRASS_VISUAL_PROFILE,
+          SCULPTED_COMPACT_WORLD_TERRAIN_PROFILE,
+          true,
+          "natural-tuft-v1",
+        ),
+        hashes: [
+          "f92c0ab9100f5019712d41caa70b04103298ed16ad475fe929f18ce2d74fcd7f",
+          "f950dd5dae60afd3be663921bb4dedf2dbb745b112609609cfccca9d1ba016ce",
+          "f0a98c9abf09d522dbb6f22fb92f4f2dabb9e8e1191705e5be6550bee8609df1",
+        ],
+      },
+    ];
+    try {
+      for (const { owner, hashes } of cases)
+        expect(
+          owner["lodGeometries"].map((geometry) => geometryDigest(geometry)),
+        ).toEqual(hashes);
+    } finally {
+      for (const { owner } of cases) owner.destroy();
     }
   });
 

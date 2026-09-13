@@ -1,5 +1,18 @@
 # Duel Arena, Streaming, and Hyperbet Launch Checklist
 
+## Fine meadow shoulder canopy — implementation under verification, 2026-09-13
+
+- [x] Implement an explicit fine-only shoulder taper: width(t) = maximumWidth × (1 − t²), with unchanged maximum/root width, centerlines, heights, tips, normals, UV/index topology and blade count. Analytical side-projected leaf area increases about 16% near /14% middle; this is not measured pixel coverage or a full-canopy claim. Wider intermediate edges require renewed sweep/exclusion qualification.
+- [x] Implement fine-only analytic root ambient occlusion .55→1 over UV height 0→.6. It reduces existing indirect fill, not albedo or direct sunlight; retain .20 normal blending and existing textures, roughness, wind, shadows and resolution. No extra geometry, vertex input, texture or pass, but scalar shader work is not free.
+- [x] Pass 12/12 actual material/wind checks: UV-only AO values, ordinary/natural routing unchanged, all grounded-clone ownership paths and fine all-vertex root/wind bounds. This is actual CPU node arithmetic/material construction, not native rendering approval.
+- [x] Pass 24/24 independent shape/material appearance regressions, including archived native03 geometry, unchanged roots/tips/normals/UVs/indices, the new width law and exact lower-profile hashes. Analytical strip-area ratios are 1.159674 near /1.142857 middle; final swept survivor counts are not assumed unchanged.
+- [x] Pass 34/34 actual retained-surface grounding checks, including road/pad/rock/water sweep clearance for both active fine LODs; pass 426/426 affected integration checks across 26 files serially (69.56s), with existing work limits unchanged. Shared/server/client typechecks and full builds, four-file ESLint and diff checks pass.
+- [x] Pass 64/64 external capture checks (14.04s), with independent source review. Preserve the first 63/64 run: its sole failure was the source-pin cap, corrected by exactly one pinned historical checkpoint (731 total pins /651 archives). Current source/worker/root/wind/LOD checks remain strict; historical common source IDs are compared and survivor changes recorded, not claimed identical.
+- [ ] Compare actual matched daylight close/elevated/service views, wind and revisited LOD against grade-native03 and the user's reference. Reject blackened roots, visible horizontal bands, coarse leaves or seams. Keep this opt-in until art, cost, loading/LOD and sustained hardware evidence satisfy acceptance.
+
+Evidence: `asset-studio/fine-meadow01/QUALIFICATION.md`. Previous grade-native03 remains a bounded technical pass with overall cow-content failure and unfinished art; it does not qualify this new candidate.
+
+
 ## Fine meadow shared color — native study qualified, art still open, 2026-09-13
 
 - [x] Implement the versioned `fine-meadow-green-v1` linear grass grade [.95,1.30,1.10] in the existing explicit fine appearance/profile only. Cache startup selection across asynchronous loading; share terrain grass albedo and CPU/emitted-worker blade colors before soil/path/rock blending. The grade itself changes no geometry, density, roots, wind or nonalbedo channel. No default promotion.

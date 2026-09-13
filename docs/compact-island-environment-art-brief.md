@@ -1,5 +1,26 @@
 # Compact island environment art: next delivery slice
 
+## Current grass candidate — shoulder taper and root depth, 2026-09-13
+
+The fine-only candidate now uses width(t) = maximumWidth × (1 − t²): fuller
+upper leaves at the same roots, maximum width, height, centerlines and tips.
+Analytical strip area rises 15.97% near /14.29% middle without adding blades,
+attributes or triangles. This is not measured pixel coverage; wider leaf edges
+can change swept-clearance survivors and raster cost. Fine-only root AO rises
+smoothly from .55 to 1 over UV height 0–.6, reducing indirect fill rather than
+albedo or direct sunlight. Existing .20 normal blending, grade, wind, textures,
+resolution, shadow quality, resources and service exclusions remain unchanged.
+
+The source passes 426/426 affected integration checks across 26 files serially,
+including 24 appearance, 12 material/wind and 34 actual grounding checks. All
+three package typechecks/builds, scoped lint/diff checks and 64/64 external
+capture checks pass. Archived old geometry and all lower profiles remain explicit;
+independent source review found no blocker. Native compiled AO, matched views, moving LOD and cost are
+still pending. Judge against the reference's soft overlapping meadow, rejecting
+black roots, bands, coarse leaves and seams. No visual approval or default
+promotion follows from these source checks. The following sections retain the
+earlier observations as history, not the current implementation state.
+
 ## Grass reference correction — next art priority, 2026-09-13
 
 Current checkpoint: grade-native03 passes the focused native study after the
