@@ -1354,14 +1354,13 @@ describe("authored Haven ground composition, independent of terrain and grass po
 });
 
 describe("compact terrain actual texture ownership and CPU material graph", () => {
-  it("changes only opted-in grass normal relief in actual owned layer graphs", () => {
+  it("keeps accepted grass color grading separate from physical channels in actual owned layer graphs", () => {
     const owner = new CompactTerrainTextureSet("https://assets.invalid");
     const before = owner.getReceipt();
     const layers = createCompactTerrainLayers(owner, float(0), float(0.137));
-    const candidate = createCompactTerrainLayers(
-      owner,
-      float(0),
-      float(0.137),
+    const candidate = createCompactTerrainLayers(owner, float(0), float(0.137));
+    candidate.grass = applyCompactGrassColorGrade(
+      candidate.grass,
       "fine-meadow-green-v1",
     );
     // Compare semantic graphs, not incidental UUIDs of separately constructed
@@ -1411,7 +1410,7 @@ describe("compact terrain actual texture ownership and CPU material graph", () =
           "ao",
           "worldNormal",
         ] as const) {
-          const changed = layer === "grass" && channel === "worldNormal";
+          const changed = layer === "grass" && channel === "albedo";
           expect(
             fingerprint(candidate[layer][channel]) ===
               fingerprint(layers[layer][channel]),
@@ -1421,13 +1420,11 @@ describe("compact terrain actual texture ownership and CPU material graph", () =
         (node) =>
           Reflect.get(node, "name") === "fineGrassSubstrateNormalStrength",
       );
-      expect(strength).toHaveLength(1);
-      expect(vectorValue(strength[0])).toEqual([0.25]);
+      expect(strength).toHaveLength(0);
       const grassNormalTexture = owner.getNode("grass", "normal-ao").value;
       const projectedNormals = [...graph(candidate.grass.worldNormal)].filter(
         (node) =>
           Reflect.get(node, "method") === "normalize" &&
-          graph(node).has(strength[0]) &&
           [...graph(node)].filter(
             (input) =>
               Reflect.get(input, "value") === grassNormalTexture &&
@@ -1435,26 +1432,11 @@ describe("compact terrain actual texture ownership and CPU material graph", () =
           ).length === 1,
       );
       expect(projectedNormals).toHaveLength(2);
-      for (const normal of projectedNormals)
-        expect(graph(normal).has(strength[0])).toBe(true);
-      for (const layer of ["grass", "dirt", "rock"] as const)
-        for (const channel of [
-          "albedo",
-          "roughness",
-          "ao",
-          "worldNormal",
-        ] as const)
-          if (layer !== "grass" || channel !== "worldNormal")
-            expect(graph(candidate[layer][channel]).has(strength[0])).toBe(
-              false,
-            );
       expect(owner.getReceipt()).toEqual(before);
       for (const invalid of [null, false, {}, "fine-meadow-green-v2"])
         expect(() =>
-          createCompactTerrainLayers(
-            owner,
-            float(0),
-            float(0.137),
+          applyCompactGrassColorGrade(
+            candidate.grass,
             invalid as CompactGrassColorGrade,
           ),
         ).toThrow(/grass color grade/);
@@ -1540,12 +1522,15 @@ describe("compact terrain actual texture ownership and CPU material graph", () =
             owner,
             float(distance ** 2),
             float(noise),
+          );
+          candidate.grass = applyCompactGrassColorGrade(
+            candidate.grass,
             "fine-meadow-green-v1",
           );
           const grass = evaluate(candidate.grass.worldNormal, encoded);
-          expect(
-            grass.distanceTo(expectedGround(encoded, 0.25 * fade)),
-          ).toBeLessThan(1e-10);
+          expect(grass.distanceTo(expectedGround(encoded, fade))).toBeLessThan(
+            1e-10,
+          );
           expect(
             evaluate(baseline.grass.worldNormal, encoded).distanceTo(
               expectedGround(encoded, fade),
@@ -1597,7 +1582,7 @@ describe("compact terrain actual texture ownership and CPU material graph", () =
     }
   });
 
-  it("routes the fine substrate normal only through actual compact material normals without new samples or geometry", () => {
+  it("retains original physical material and sampling without the rejected substrate-normal override", () => {
     const common = {
       compactPbr: true,
       compactProfile: HAVEN_SHOULDER_COMPACT_WORLD_TERRAIN_PROFILE,
@@ -1612,20 +1597,13 @@ describe("compact terrain actual texture ownership and CPU material graph", () =
         (node) =>
           Reflect.get(node, "name") === "fineGrassSubstrateNormalStrength",
       );
-      expect(strength).toHaveLength(1);
-      expect(vectorValue(strength[0])).toEqual([0.25]);
+      expect(strength).toHaveLength(0);
       expect(
         [...graph(ordinary.normalNode!)].some(
           (node) =>
             Reflect.get(node, "name") === "fineGrassSubstrateNormalStrength",
         ),
       ).toBe(false);
-      for (const node of [
-        candidate.colorNode!,
-        candidate.aoNode!,
-        candidate.roughnessNode!,
-      ])
-        expect(graph(node).has(strength[0])).toBe(false);
       for (const material of [ordinary, candidate]) {
         expect(material.positionNode).toBeNull();
         expect(material.displacementMap).toBeNull();

@@ -1,16 +1,19 @@
 # Duel Arena, Streaming, and Hyperbet Launch Checklist
 
-## Fine meadow substrate relief — art trial in progress, 2026-09-13
+## Fine meadow reference recovery — normal trial rejected, 2026-09-13
 
-- [x] Implement an explicit fine-only grass ground normal strength of .25 instead of 1, reusing the existing fine-meadow selection and both original derivative-aware texture projections. Ordinary grass stays at 1; dirt stays .25 and rock .4.
-- [x] Preserve all texture bytes, dimensions, filtering, sample count, albedo/CPU grass color, roughness/AO, layer masks, blade shape/count, worker placement, grounding, roads/resources, lighting and render quality. This is an announced art-strength adjustment, not reduced texture resolution or a performance acceptance shortcut.
-- [x] Pass 41/41 actual material checks and 436/436 integrated checks across 28 files serially (49.07s). Verify normal arithmetic at near/fade/far distances, graph routing, non-normal channel identity, other layer/profile invariants and the six-map/fourteen-sample budget. All shared/server/client typechecks/builds pass. Preserve initial test-helper failures; no timeout or assertion tolerance was relaxed.
-- [x] Pass scoped ESLint/diff checks and all 67 external capture preflight checks (13.93s). The short-art branch preserves the original full-study path, existing source closure, shield/scene admission and owned cleanup, while explicitly recording unperformed qualification gates.
-- [ ] Capture the same three real daylight views through an explicitly short art-only workflow. Review visual results before any long wind/LOD sequence; omitted performance/motion/scheduling gates remain unperformed, not passed.
-- [ ] Accept only a clear reduction of distracting ground relief without painted-flat turf, broken layer blends or less convincing canopy. No geometry coverage fix is claimed. Keep the trial opt-in and reject it if it does not help.
-- [ ] After an art candidate passes, complete the full unchanged motion/LOD/loading/performance gates and resolve the separate final snapshot race without loosening its owner/job/byte invariants.
+- [x] Capture and visually inspect all three actual daylight close/elevated/anvil images in `fine-grass-substrate-art01`. Root and independent review reject the normal-only 1→.25 trial: exposed granular turf and broad flat blades remain, without convincing improvement over shoulder02.
+- [x] Preserve the failed native report (SHA256 `23e02386e86f74fa31f71a7fa088ff2c917fc07b2adf1d3777704e1d5beae9f7`). Images were saved before the scalar observer failed. Installed r186 adds an unnamed intent VarNode between the named VarNode and ConstNode; the observer assumed one wrapper. Actual archived terrain WGSL contains the .25 assignment and both projection uses. This diagnosis does not relabel the run as passed.
+- [x] Verify no page/GPU errors, while retaining 14 dagger fit errors and five cow/404 errors as unresolved content defects. All 13 recorded owned PIDs and four ports are absent; the exact database is retained stopped. No personal browser or Docker daemon was stopped.
+- [x] Retain the initial 41/41 material, 436/436 integrated, three-package build/type and 67/67 harness results as source/preflight evidence, not visual acceptance. Cost, CPU parity, wind, LOD rail and final scheduling were explicitly unperformed in the short-art run.
+- [x] Restore grass substrate normal strength to the original 1 and remove the rejected scalar/routing. Both production files are byte-identical to pre-trial commit `7d1f46db2`; 41/41 retained material and 436/436 integrated checks across 28 files pass (49.21s serial), as do all three package typechecks/builds and scoped lint/format. The accepted greener grade remains unchanged.
+- [x] Correct the external observer with the actual installed/archived graph, preserving the failed receipt. All 68 capture preflight checks pass (14.41s); the short-art workflow accepts the restored original material and keeps the rejected scalar check offline-only. No native rerun is claimed.
+- [x] Trace a concrete older shading difference: commit `b6b3af00e` bypassed the shared grazing-angle highlight for compact PBR. Current grass retains its root-tip gradient. The supplied reference revision is unknown; this is a hypothesis, not proven attribution.
+- [ ] Next art comparison: test a restrained, fine-only, root-masked grazing highlight before unchanged PBR shading. Keep geometry, density, height, maps, resolution, lighting and shadows fixed. Do not blindly restore the old cool tint or widen blades. Inspect the same three native stills before another long qualification.
+- [ ] Separately address remaining ground-albedo grain and real canopy gaps if necessary. Shortening height currently also narrows blades; account for coverage explicitly. No albedo-contrast change is combined silently with the highlight trial.
+- [ ] Once an art candidate is convincing, run full motion/LOD/loading/performance gates and resolve the separate final publication race without weakening owner/job/byte invariants. Grass art, performance, defaults and launch remain unapproved.
 
-The previous goal turn made measurable progress but did not meet the reference: shoulder-native02 remains a failed overall qualification and an unaccepted art comparison. Evidence: `asset-studio/fine-meadow01/QUALIFICATION.md`.
+Evidence: `asset-studio/fine-meadow01/QUALIFICATION.md`, `substrate-art01-media-cleanup-verification.json` and `substrate-art01-review.md`. Source checkpoint `92d9d509e4` was pushed under verified `dreaminglucid`; the failed art trial is recorded, not promoted.
 
 
 ## Fine meadow shoulder canopy — measured, not visually accepted, 2026-09-13

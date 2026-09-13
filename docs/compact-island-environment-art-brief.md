@@ -1,6 +1,39 @@
 # Compact island environment art: next delivery slice
 
-## Current trial — fine grass substrate normal response, 2026-09-13
+## Current verdict — reject normal-only trial, 2026-09-13
+
+The three real substrate-art01 images do not show a convincing improvement over
+shoulder02. Root and independent review still see granular exposed ground and
+broad flat strips; the reference's soft continuous meadow remains unmet. The
+original grass normal strength 1 is restored and the experimental scalar/routing
+removed. Both production files match pre-trial 7d1f46db2 byte-for-byte; retained
+material tests pass 41/41 with scoped lint/format. Restored integration passes
+436/436 across 28 files; all three package typechecks/builds and 68 corrected
+capture-tool preflight checks pass. Keep the failed report and images as evidence,
+not an art pass; no post-restoration native run is claimed.
+
+The short native run saved all three PNGs, then failed its scalar observer:
+installed r186 has an extra intent VarNode before the ConstNode. Archived terrain
+WGSL confirms the .25 scalar was assigned and used by both grass projections.
+The observer defect does not explain away the weak art result or convert the
+failed run into a pass. GPU/page errors were absent; cow/dagger content failures
+remain. All owned processes/ports are clear and the database is retained stopped.
+Cost, wind, LOD and final scheduling were deliberately not qualified here.
+
+Source history provides a more relevant next experiment: commit b6b3af00e removed
+the old shared grazing-angle highlight from compact PBR grass. The current
+root-tip gradient remains. Test restrained fine-only, root-masked grazing fill
+before unchanged PBR, with geometry, density, height, maps, resolution, lighting
+and shadows fixed. Do not restore the old cool tint or emissive output. This is
+an explicitly stylized reflectance trial, not physical translucency or a proven
+explanation of the reference, whose exact revision/settings are unknown.
+
+Review the same three stills before another full qualification. Ground-albedo
+grain and canopy gaps remain separate concerns; do not silently combine more
+changes. Shortening current blades also narrows them, so height changes require
+explicit coverage review. No art/default/performance or production approval.
+
+## Historical trial — fine grass substrate normal response, 2026-09-13
 
 Implemented the planned isolated grass-normal strength 1→.25 in the existing
 opt-in fine-meadow presentation. Both derivative-aware grass projections share
