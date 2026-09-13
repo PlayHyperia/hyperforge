@@ -9,6 +9,8 @@ import { createTerrainWorkerConfig } from "../../../../utils/workers/TerrainWork
 import {
   CURVED_MEADOW_APPEARANCE,
   DENSE_MEADOW_GRASS_VISUAL_PROFILE,
+  FINE_MEADOW_APPEARANCE,
+  FINE_MEADOW_GRASS_VISUAL_PROFILE,
   GRASS_CONFIG,
   GrassVisualManager,
   NATURAL_TUFT_APPEARANCE,
@@ -16,7 +18,7 @@ import {
 } from "../GrassVisualManager";
 import { SCULPTED_COMPACT_WORLD_TERRAIN_PROFILE } from "../WorldTerrainProfile";
 
-function createOwner(candidate = true) {
+function createOwner(candidate: boolean | "fine" = true) {
   const terrain = SCULPTED_COMPACT_WORLD_TERRAIN_PROFILE;
   const config = createTerrainWorkerConfig(terrain, 16);
   const setup: GrassWorkerSetup = {
@@ -48,11 +50,17 @@ function createOwner(candidate = true) {
       grassHeightScale: 1,
     }),
     setup,
-    DENSE_MEADOW_GRASS_VISUAL_PROFILE,
+    candidate === "fine"
+      ? FINE_MEADOW_GRASS_VISUAL_PROFILE
+      : DENSE_MEADOW_GRASS_VISUAL_PROFILE,
     undefined,
     undefined,
     undefined,
-    candidate ? NATURAL_TUFT_APPEARANCE.id : undefined,
+    candidate === "fine"
+      ? FINE_MEADOW_APPEARANCE.id
+      : candidate
+        ? NATURAL_TUFT_APPEARANCE.id
+        : undefined,
   );
 }
 
@@ -222,11 +230,13 @@ function worldBase(inputs: Inputs) {
   return new THREE.Vector3(offset[0], 0, offset[2]).applyMatrix4(inputs.model);
 }
 
-function windAmplitude(inputs: Inputs) {
+function windAmplitude(
+  inputs: Inputs,
+  maximumHeight: number = NATURAL_TUFT_APPEARANCE.BLADE_HEIGHT_MAX,
+) {
   const base = worldBase(inputs);
   const wt = inputs.time * GRASS_CONFIG.WIND_SPEED;
-  const strength =
-    GRASS_CONFIG.WIND_STRENGTH * NATURAL_TUFT_APPEARANCE.BLADE_HEIGHT_MAX;
+  const strength = GRASS_CONFIG.WIND_STRENGTH * maximumHeight;
   return new THREE.Vector3(
     Math.sin(wt + base.x * 0.35 + base.z * 0.12) * strength,
     0,
@@ -245,6 +255,66 @@ function rotation(inputs: Inputs) {
       ),
     );
 }
+
+describe("fine meadow constant normal blend (actual CPU node arithmetic)", () => {
+  it("keeps the 0.20 blend finite on both faces across blade height without new vertex inputs", () => {
+    const owner = createOwner("fine");
+    try {
+      const material = owner["material"];
+      const normalGraph = graph(material.normalNode!);
+      expect(material.aoNode).toBeNull();
+      expect(material.roughness).toBe(1);
+      expect(
+        [...normalGraph]
+          .filter((n) => n.type === "VaryingNode")
+          .map((n) => Reflect.get(n, "name")),
+      ).toEqual(["v_curvedGrassNormal"]);
+      const camera = new THREE.PerspectiveCamera(52, 16 / 9, 0.2, 1000);
+      camera.position.set(25, 19, -31);
+      camera.lookAt(0, 0, 0);
+      camera.updateMatrixWorld(true);
+      for (const ground of [
+        new THREE.Vector3(0, 1, 0),
+        new THREE.Vector3(0.4, 0.8, -0.3).normalize(),
+      ])
+        for (const front of [false, true])
+          for (const height of [0, 0.15, 1 / 3, 0.45, 0.75, 1])
+            for (const interpolated of [
+              [0, 0, 0],
+              [1e-9, -1e-9, 0],
+              [0, 0.999e-6, 0],
+              [0, 1.001e-6, 0],
+              [0.3, -0.2, 0.4],
+              ground.clone().negate().toArray(),
+            ]) {
+              const inputs = inputFor(owner["lodGeometries"][0], 0);
+              inputs.attributes.instanceGroundNormal = ground.toArray();
+              inputs.attributes.uv = [0.5, height];
+              inputs.varyings = { v_curvedGrassNormal: interpolated };
+              inputs.front = front;
+              inputs.view.copy(camera.matrixWorldInverse);
+              // Independent constant-blend contract at every sampled UV height.
+              const weight = 0.2;
+              const blade = new THREE.Vector3().fromArray(interpolated);
+              if (blade.lengthSq() <= 1e-12) blade.copy(ground);
+              else blade.normalize();
+              const blended = ground
+                .clone()
+                .lerp(blade.multiplyScalar(front ? 1 : -1), weight);
+              // Every permitted unit-vector pair retains a nonzero denominator.
+              expect(blended.length()).toBeGreaterThanOrEqual(0.6 - 1e-12);
+              const expected = blended
+                .normalize()
+                .transformDirection(inputs.view);
+              const actual = vector(evaluate(material.normalNode!, inputs));
+              expect(actual.length()).toBeCloseTo(1, 12);
+              expect(actual.distanceTo(expected)).toBeLessThan(1e-12);
+            }
+    } finally {
+      owner.destroy();
+    }
+  });
+});
 
 describe("natural tuft actual shader deformation (CPU node arithmetic only)", () => {
   it("keeps actual fragment normals finite after zero or near-zero raster interpolation", () => {
@@ -447,139 +517,150 @@ describe("natural tuft actual shader deformation (CPU node arithmetic only)", ()
     }
   });
 
-  it("matches the actual deformed smooth normal to independent tangent crosses through wind, fade, yaw and slope", () => {
-    const owner = createOwner();
-    let cases = 0;
-    let maximumError = 0;
-    try {
-      const camera = new THREE.PerspectiveCamera(52, 16 / 9, 0.2, 1000);
-      camera.position.set(25, 19, -31);
-      camera.lookAt(0, 0, 0);
-      camera.updateMatrixWorld(true);
-      for (const [lod, geometry] of owner["lodGeometries"].entries()) {
-        const vertices = GRASS_CONFIG.LOD_TIERS[lod].bladeSegments * 2 + 1;
-        for (const blade of [
-          0,
-          GRASS_CONFIG.LOD_TIERS[lod].bladesPerClump - 1,
-        ]) {
-          const root = blade * vertices;
-          const left = new THREE.Vector3().fromBufferAttribute(
-            geometry.attributes.position,
-            root,
-          );
-          const right = new THREE.Vector3().fromBufferAttribute(
-            geometry.attributes.position,
-            root + 1,
-          );
-          const center = left.clone().add(right).multiplyScalar(0.5);
-          const width = right.clone().sub(left).normalize();
-          const tip = new THREE.Vector3().fromBufferAttribute(
-            geometry.attributes.position,
-            root + vertices - 1,
-          );
-          const height = tip.y / NATURAL_TUFT_APPEARANCE.BLADE_TIP_HEIGHT;
-          const curve = tip.clone().sub(center);
-          for (const index of [
-            root,
-            root + Math.min(2, vertices - 1),
-            root + vertices - 1,
-          ])
-            for (const ground of [
-              new THREE.Vector3(0, 1, 0),
-              new THREE.Vector3(0.4, 0.8, -0.3).normalize(),
-              new THREE.Vector3(-0.6, 0.7, 0.2).normalize(),
+  it.each(["natural", "fine"] as const)(
+    "matches %s deformed smooth normals to independent tangent crosses through wind, fade, yaw and slope",
+    (variant) => {
+      const owner = createOwner(variant === "fine" ? "fine" : true);
+      const appearance =
+        variant === "fine" ? FINE_MEADOW_APPEARANCE : NATURAL_TUFT_APPEARANCE;
+      let cases = 0;
+      let maximumError = 0;
+      try {
+        const camera = new THREE.PerspectiveCamera(52, 16 / 9, 0.2, 1000);
+        camera.position.set(25, 19, -31);
+        camera.lookAt(0, 0, 0);
+        camera.updateMatrixWorld(true);
+        for (const [lod, geometry] of owner["lodGeometries"].entries()) {
+          const vertices = GRASS_CONFIG.LOD_TIERS[lod].bladeSegments * 2 + 1;
+          for (const blade of [
+            0,
+            GRASS_CONFIG.LOD_TIERS[lod].bladesPerClump - 1,
+          ]) {
+            const root = blade * vertices;
+            const left = new THREE.Vector3().fromBufferAttribute(
+              geometry.attributes.position,
+              root,
+            );
+            const right = new THREE.Vector3().fromBufferAttribute(
+              geometry.attributes.position,
+              root + 1,
+            );
+            const center = left.clone().add(right).multiplyScalar(0.5);
+            const width = right.clone().sub(left).normalize();
+            const tip = new THREE.Vector3().fromBufferAttribute(
+              geometry.attributes.position,
+              root + vertices - 1,
+            );
+            const height = tip.y / appearance.BLADE_TIP_HEIGHT;
+            const curve = tip.clone().sub(center);
+            for (const index of [
+              root,
+              root + Math.min(2, vertices - 1),
+              root + vertices - 1,
             ])
-              for (const scale of [0.14, 1.1, 4])
-                for (const fadeDistance of [0, 126, 140])
-                  for (const seconds of [0, 3.7]) {
-                    const inputs = inputFor(geometry, index);
-                    inputs.attributes.instanceGroundNormal = ground.toArray();
-                    inputs.attributes.instanceRotScaleHash = [
-                      0.4 + lod + seconds,
-                      scale,
-                      0.3,
-                    ];
-                    inputs.time = seconds;
-                    inputs.view.copy(camera.matrixWorldInverse);
-                    inputs.front = cases % 2 === 0;
-                    owner["playerPosUniform"]!.value.copy(
-                      worldBase(inputs),
-                    ).add(new THREE.Vector3(fadeDistance, 0, 0));
-                    const fadeT = Math.min(
-                      1,
-                      Math.max(0, (fadeDistance - 112) / 28),
-                    );
-                    const fade = 1 - fadeT * fadeT * (3 - 2 * fadeT);
-                    const t = inputs.attributes.uv[1];
-                    const derivativeY =
-                      2 *
-                      height *
-                      (NATURAL_TUFT_APPEARANCE.BLADE_CONTROL_HEIGHT +
-                        t *
-                          (NATURAL_TUFT_APPEARANCE.BLADE_TIP_HEIGHT -
-                            2 * NATURAL_TUFT_APPEARANCE.BLADE_CONTROL_HEIGHT));
-                    const tangentWidth = width
-                      .clone()
-                      .multiplyScalar(scale)
-                      .applyQuaternion(rotation(inputs));
-                    const tangentHeight = new THREE.Vector3(
-                      2 * curve.x * t,
-                      derivativeY * fade,
-                      2 * curve.z * t,
-                    )
-                      .multiplyScalar(scale)
-                      .applyQuaternion(rotation(inputs))
-                      .add(
-                        windAmplitude(inputs).multiplyScalar(
-                          1.8 * Math.pow(t, 0.8),
-                        ),
+              for (const ground of [
+                new THREE.Vector3(0, 1, 0),
+                new THREE.Vector3(0.4, 0.8, -0.3).normalize(),
+                new THREE.Vector3(-0.6, 0.7, 0.2).normalize(),
+              ])
+                for (const scale of [0.14, 1.1, 4])
+                  for (const fadeDistance of [0, 126, 140])
+                    for (const seconds of [0, 3.7]) {
+                      const inputs = inputFor(geometry, index);
+                      inputs.attributes.instanceGroundNormal = ground.toArray();
+                      inputs.attributes.instanceRotScaleHash = [
+                        0.4 + lod + seconds,
+                        scale,
+                        0.3,
+                      ];
+                      inputs.time = seconds;
+                      inputs.view.copy(camera.matrixWorldInverse);
+                      inputs.front = cases % 2 === 0;
+                      owner["playerPosUniform"]!.value.copy(
+                        worldBase(inputs),
+                      ).add(new THREE.Vector3(fadeDistance, 0, 0));
+                      const fadeT = Math.min(
+                        1,
+                        Math.max(0, (fadeDistance - 112) / 28),
                       );
-                    const cross = tangentWidth.cross(tangentHeight);
-                    const smooth =
-                      cross.lengthSq() < 1e-20
-                        ? ground.clone()
-                        : cross.normalize();
-                    const expected = ground
-                      .clone()
-                      .lerp(
-                        smooth.multiplyScalar(inputs.front ? 1 : -1),
-                        NATURAL_TUFT_APPEARANCE.BLADE_NORMAL_WEIGHT,
+                      const fade = 1 - fadeT * fadeT * (3 - 2 * fadeT);
+                      const t = inputs.attributes.uv[1];
+                      const derivativeY =
+                        2 *
+                        height *
+                        (appearance.BLADE_CONTROL_HEIGHT +
+                          t *
+                            (appearance.BLADE_TIP_HEIGHT -
+                              2 * appearance.BLADE_CONTROL_HEIGHT));
+                      const tangentWidth = width
+                        .clone()
+                        .multiplyScalar(scale)
+                        .applyQuaternion(rotation(inputs));
+                      const tangentHeight = new THREE.Vector3(
+                        2 * curve.x * t,
+                        derivativeY * fade,
+                        2 * curve.z * t,
                       )
-                      .normalize()
-                      .transformDirection(inputs.view);
-                    const actual = vector(
-                      evaluate(owner["material"].normalNode!, inputs),
-                    );
-                    maximumError = Math.max(
-                      maximumError,
-                      actual.distanceTo(expected),
-                    );
-                    expect(actual.length()).toBeCloseTo(1, 12);
-                    expect(actual.distanceTo(expected)).toBeLessThan(2e-6); // source Float32 position/normal rounding
-                    const position = vector(inputs.attributes.position);
-                    position.y *= fade;
-                    position
-                      .multiplyScalar(scale)
-                      .applyQuaternion(rotation(inputs))
-                      .add(
-                        windAmplitude(inputs).multiplyScalar(Math.pow(t, 1.8)),
-                      )
-                      .add(vector(inputs.attributes.instanceOffset));
-                    expect(
-                      vector(
-                        evaluate(owner["material"].positionNode!, inputs),
-                      ).distanceTo(position),
-                    ).toBeLessThan(1e-12);
-                    cases++;
-                  }
+                        .multiplyScalar(scale)
+                        .applyQuaternion(rotation(inputs))
+                        .add(
+                          windAmplitude(
+                            inputs,
+                            appearance.BLADE_HEIGHT_MAX,
+                          ).multiplyScalar(1.8 * Math.pow(t, 0.8)),
+                        );
+                      const cross = tangentWidth.cross(tangentHeight);
+                      const smooth =
+                        cross.lengthSq() < 1e-20
+                          ? ground.clone()
+                          : cross.normalize();
+                      const expected = ground
+                        .clone()
+                        .lerp(
+                          smooth.multiplyScalar(inputs.front ? 1 : -1),
+                          variant === "fine"
+                            ? 0.2
+                            : NATURAL_TUFT_APPEARANCE.BLADE_NORMAL_WEIGHT,
+                        )
+                        .normalize()
+                        .transformDirection(inputs.view);
+                      const actual = vector(
+                        evaluate(owner["material"].normalNode!, inputs),
+                      );
+                      maximumError = Math.max(
+                        maximumError,
+                        actual.distanceTo(expected),
+                      );
+                      expect(actual.length()).toBeCloseTo(1, 12);
+                      expect(actual.distanceTo(expected)).toBeLessThan(2e-6); // source Float32 position/normal rounding
+                      const position = vector(inputs.attributes.position);
+                      position.y *= fade;
+                      position
+                        .multiplyScalar(scale)
+                        .applyQuaternion(rotation(inputs))
+                        .add(
+                          windAmplitude(
+                            inputs,
+                            appearance.BLADE_HEIGHT_MAX,
+                          ).multiplyScalar(Math.pow(t, 1.8)),
+                        )
+                        .add(vector(inputs.attributes.instanceOffset));
+                      expect(
+                        vector(
+                          evaluate(owner["material"].positionNode!, inputs),
+                        ).distanceTo(position),
+                      ).toBeLessThan(1e-12);
+                      cases++;
+                    }
+          }
         }
+        expect(cases).toBe(972);
+        expect(maximumError).toBeLessThan(2e-6);
+      } finally {
+        owner.destroy();
       }
-      expect(cases).toBe(972);
-      expect(maximumError).toBeLessThan(2e-6);
-    } finally {
-      owner.destroy();
-    }
-  });
+    },
+  );
 
   it("keeps both roots anchored over time and all vertex wind inside existing swept bounds", () => {
     const owner = createOwner();

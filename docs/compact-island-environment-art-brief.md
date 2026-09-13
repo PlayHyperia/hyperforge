@@ -2,6 +2,35 @@
 
 ## Grass reference correction — next art priority, 2026-09-13
 
+The .12→.36 height-dependent normal trial is **rejected as a visual upgrade**.
+Native02 captures matched meadow/anvil views and both naturally daylit clips;
+root and independent review still find flat olive ribbons over exposed granular
+turf, without a convincing gain in canopy depth. Restore the exact simpler .20
+material while retaining expanded normal/geometry tests. No geometry, density,
+palette, wind or global lighting change belongs to this rejected trial.
+
+The explicit focused study completes shader/root/binding, terrain/tree, cost,
+wind and full revisited-LOD checks. Overall native02 remains failed because a
+periodically published cumulative grounding timer trails its live read by 7.6ms;
+that reporting assertion needs a bounded correction, not another blind rerun.
+The two views and clips are not the omitted full equipment/architecture scope.
+All failed archives remain intact; no art/performance/default promotion follows.
+
+Next color trial: compare a grass-only linear grade shared by the actual terrain
+grass layer and CPU blade-color sampling before soil/path/rock blending. Current
+scan mean [.12687,.16117,.03426] is deliberately more olive than legacy forest
+[.12597,.23302,.04696]; current green is 30.8% lower. This is not a demonstrated
+gamma fault, and the old reference's exact configuration remains unknown.
+Preserve raw scan provenance; explicit artistic grading must test CPU/GPU parity,
+texel clipping, exclusions and actual views. Start with [.95,1.30,1.10] as an
+unimplemented candidate, not a proven fix. Keep root/tip shading fixed initially.
+Color cannot fill coverage gaps; continuous canopy and smooth LOD remain open.
+
+AMD's [procedural grass reference](https://gpuopen.com/learn/mesh_shaders/mesh_shaders-procedural_grass_rendering/)
+separately addresses root darkening, normal softening and coverage compensation
+through LOD. Those are useful design references, not native browser performance
+evidence or permission to replace our grounded terrain with its planar patch.
+
 Implementation has begun for an explicit fine-meadow profile: 25m grass-owned
 cells borrowing real terrain, .7m spacing, slender .38–.86m independent stems,
 and a 40m near-detail trial. Preserve the original native reference and all
@@ -40,16 +69,16 @@ invariance passes; the rail stops on a strict timestamp-uniqueness assumption.
 The retained samples show 18→75→18m travel, LOD0→1→0 and no missing monitored
 cell, but final revisited source/root/bounds collection was not reached. Both
 videos are nighttime, so they do not qualify daytime softness, shimmer or subtle
-LOD popping. Next motion evidence is a focused naturally daylit wind/rail test,
-not another complete eleven-view run. Keep native07's failure unchanged.
+LOD popping. Focused daylight native02 now supplies both clips and the missing
+revisited source/root/bounds/draw proof; its final reporting failure is separate.
+Keep native07's failure unchanged. Visual transition quality remains open.
 
-At fixed geometry and population, first trial height-dependent blade-normal
-weight rather than the current constant .20: preserve root/terrain matching
-while upper blades receive more directional light variation. Separately trial
-indirect-only root occlusion. These are artistic canopy approximations, not a
-newly proven normal bug, physical self-occlusion or a remedy for coverage holes.
-Keep positions, palette, draw passes, textures and wind bounds unchanged and
-verify actual TSL arithmetic plus matched sunlit/shadowed native imagery/cost.
+The fixed-geometry height-dependent normal experiment is now tested and rejected;
+keep the .20 constant, expanded regression coverage and captured comparison.
+Indirect-only root occlusion remains a separate possible experiment, not a
+proven normal bug, physical self-occlusion or a remedy for coverage holes.
+The next explicitly disclosed color trial must preserve positions, draw passes,
+textures, wind bounds and authoritative terrain/resource/service exclusions.
 
 Native07 CPU p95 is 14.9/15.1ms and queried GPU-pass-sum p95 20.58/19.92ms for
 campus/meadow; 55/58 actual main grass draws submit 2.10/2.65 million triangles.
@@ -66,7 +95,7 @@ is unknown. Root and independent review agree that fine overlapping blades and
 continuous meadow volume are visibly stronger than the current isolated dark
 rosettes. Retain those qualities at a lower height.
 
-The active island candidate uses 1.75m clump spacing and twelve blades, while
+The earlier sparse island candidate used 1.75m clump spacing and twelve blades, while
 ordinary near-grass uses .7m and twenty-four: 12.5× lower potential blade density
 before eligibility/grounding/quotas, not a measured ratio to the screenshot.
 Wider blades and three compact root patches cannot compensate for those gaps.

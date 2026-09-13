@@ -908,6 +908,27 @@ describe("fine continuous meadow geometry candidate", () => {
       const geometries = owner["lodGeometries"];
       for (let lod = 0; lod < 3; lod++) {
         const geometry = geometries[lod];
+        // Actual source geometry before the lighting-only change, checkpoint
+        // 5acb8c4e11ea98aeff54d452f20444a1f84766e9. Includes unused LOD2.
+        const hash = createHash("sha256");
+        for (const attribute of [
+          geometry.attributes.position,
+          geometry.attributes.normal,
+          geometry.attributes.uv,
+          geometry.index!,
+        ]) {
+          const values = attribute.array;
+          hash.update(
+            new Uint8Array(values.buffer, values.byteOffset, values.byteLength),
+          );
+        }
+        expect(hash.digest("hex")).toBe(
+          [
+            "b173a82e99e75117f67e75712006fcdfb2a8a780307d4af24e53f9c3f824100f",
+            "36513b1d7085d52e23abab4ed2e2d73d823003cda9f095596ca8f5e3de097721",
+            "4d341787ea4e46a0bb4dbdfc30714dd8c352c4e23c86a892a6979c10cdc48f8d",
+          ][lod],
+        );
         const tier = GRASS_CONFIG.LOD_TIERS[lod];
         const stride = tier.bladeSegments * 2 + 1;
         const positions = geometry.getAttribute("position");
