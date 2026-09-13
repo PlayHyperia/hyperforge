@@ -13,6 +13,13 @@ import { TerrainSystem } from "../TerrainSystem";
 import { RoadNetworkSystem } from "../RoadNetworkSystem";
 import { TerrainVisualManager } from "../TerrainVisualManager";
 import {
+  projectGrassAnchors,
+  type GrassAnchorData,
+} from "../GrassTerrainProjection";
+import { RetainedTerrainSurface } from "../TerrainGridSurface";
+import { groundGrassBlades } from "../GrassBladeGrounding";
+import { gridGeometry } from "./terrain-grid.fixture";
+import {
   createCompactTerrainColorOperations,
   COMPACT_TERRAIN_COMPOSITION,
   type CompactGrassColorGrade,
@@ -364,6 +371,12 @@ describe("fine meadow cells borrow actual terrain owners without replacing them"
     try {
       const expected = f.owner["generateInstanceData"](f.work, 1)!;
       expect(expected.count).toBeGreaterThan(0);
+      const projected = projectGrassAnchors(
+        expected,
+        f.visual.getRetainedSurface(f.work.node)!,
+        (x, z) => f.terrain.getWaterBodyRegistry().getWaterSurfaceAt(x, z),
+        (x, z) => f.terrain.isGrassExcludedAt(x, z),
+      );
       f.owner["createChunkMesh"](f.work, 0);
       expect(f.owner["settledWorkerResults"]).toHaveLength(1);
       expect(
@@ -378,15 +391,99 @@ describe("fine meadow cells borrow actual terrain owners without replacing them"
       expect(chunk.mesh.count).toBeGreaterThan(0);
       const sourceIds: Uint32Array =
         chunk.mesh.userData.grassBladeGrounding.sourceIndices;
+      expect(chunk.mesh.userData.grassBladeGrounding.inputClumps).toBe(
+        projected.count,
+      );
       const colors = chunk.mesh.geometry.getAttribute("instanceGroundColor");
       expect(colors.count).toBe(sourceIds.length);
       for (let i = 0; i < sourceIds.length; i++)
         expect([colors.getX(i), colors.getY(i), colors.getZ(i)]).toEqual([
-          expected.groundColors[sourceIds[i] * 3],
-          expected.groundColors[sourceIds[i] * 3 + 1],
-          expected.groundColors[sourceIds[i] * 3 + 2],
+          projected.groundColors[sourceIds[i] * 3],
+          projected.groundColors[sourceIds[i] * 3 + 1],
+          projected.groundColors[sourceIds[i] * 3 + 2],
         ]);
     } finally {
+      f.close();
+    }
+  });
+
+  it("maps early projection rejection before blade source indices in a real retained-grid grass color grade control", async () => {
+    const f = await fixture("fine-meadow-green-v1");
+    // Explicit numerical surface and input, not a claim that this flat patch is
+    // deployed terrain. Both projection and blade grounding are real functions.
+    const geometry = gridGeometry(20, 3, () => 20);
+    try {
+      const surface = new RetainedTerrainSurface(
+        1,
+        "numerical-projection-index-control",
+        0,
+        0,
+        20,
+        3,
+        geometry,
+      );
+      const data: GrassAnchorData = {
+        count: 4,
+        offsets: new Float32Array([-6, 20, 0, -2, 20, 0, 2, 20, 0, 6, 20, 0]),
+        rotScaleHash: new Float32Array([
+          0, 1, 0.1, 0, 1, 0.2, 0, 1, 0.3, 0, 1, 0.4,
+        ]),
+        groundColors: new Float32Array([
+          0.1, 0.2, 0.3, 0.2, 0.3, 0.4, 0.3, 0.4, 0.5, 0.4, 0.5, 0.6,
+        ]),
+        grassTints: new Float32Array([
+          1, 0, 0, 0.1, 0, 1, 0, 0.2, 0, 0, 1, 0.3, 1, 1, 0, 0.4,
+        ]),
+        groundNormals: new Float32Array([0, 1, 0, 0, 1, 0, 0, 1, 0, 0, 1, 0]),
+      };
+      const original = structuredClone(data);
+      // Drop original 0 at water admission and original 1 at exclusion. The
+      // remaining raw indices 2/3 become projected indices 0/1.
+      const projected = projectGrassAnchors(
+        data,
+        surface,
+        (x) => (x < -4 ? 20 : 0),
+        (x) => x < 0,
+      );
+      expect(data).toEqual(original);
+      expect(projected.count).toBe(2);
+      expect(projected.offsets).toEqual(data.offsets.slice(6));
+      expect(projected.groundColors).toEqual(data.groundColors.slice(6));
+      const result = groundGrassBlades({
+        data: projected,
+        lod: 0,
+        geometry: f.owner["lodGeometries"][0],
+        ownSurface: surface,
+        surfaces: [surface],
+        terrainSurface: {
+          schemaVersion: 1,
+          zones: [],
+          waterBodies: [],
+          arenaFloorIds: [],
+          arenaGradeHeight: null,
+        },
+        roadSegments: [],
+        oceanLevel: 0,
+        wind: { x: 0, z: 0 },
+      });
+      expect(result.status).toBe("ready");
+      if (result.status !== "ready")
+        throw new Error("Numerical blade control failed");
+      expect(result.sourceIndices).toEqual(new Uint32Array([0, 1]));
+      expect(result.data.count).toBe(2);
+      for (let i = 0; i < result.data.count; i++) {
+        const source = result.sourceIndices[i];
+        const actual = result.data.groundColors.slice(i * 3, i * 3 + 3);
+        expect(actual).toEqual(
+          projected.groundColors.slice(source * 3, source * 3 + 3),
+        );
+        // Negative control: the earlier direct-raw-index shortcut is wrong.
+        expect(actual).not.toEqual(
+          data.groundColors.slice(source * 3, source * 3 + 3),
+        );
+      }
+    } finally {
+      geometry.dispose();
       f.close();
     }
   });

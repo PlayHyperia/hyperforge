@@ -27,7 +27,8 @@ texel clipping, exclusions and actual views. The [.95,1.30,1.10] versioned
 fine-meadow pair, not a new query or default. Startup selection is cached across
 async loading; terrain, CPU fallback and emitted worker share it and reject stale
 result echoes. Material checks pass 38/38, focused propagation 7/7 and integrated
-checks 406/406 across 25 files. Shared/server/client typechecks/builds and scoped
+checks 407/407 across 25 files, including a corrected projected-anchor index
+proof and an early water/exclusion rejection control. Shared/server/client typechecks/builds and scoped
 lint/format pass. Fresh native visual/performance qualification remains pending.
 Keep root/tip shading fixed initially.
 Color cannot fill coverage gaps; continuous canopy and smooth LOD remain open.
