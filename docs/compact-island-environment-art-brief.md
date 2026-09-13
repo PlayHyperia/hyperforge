@@ -34,8 +34,29 @@ population, not another height/density increase. Measured GPU-pass-sum p95 is
 performance is not accepted and no presented-FPS claim follows. The run stops
 before motion on a cached reflection-pipeline observer assumption. Native06
 qualifies exact main/reflection bindings, then hits the habitat checkpoint's
-16MiB serialization cap. Repair lossless evidence transport before wind/LOD
-verification; no graphics or acceptance limit is waived. The code checkpoint is
+16MiB serialization cap. Native07 verifies bounded lossless checkpoint transport
+and saves both wind and moving-camera videos. Fixed-camera owner/source/root
+invariance passes; the rail stops on a strict timestamp-uniqueness assumption.
+The retained samples show 18→75→18m travel, LOD0→1→0 and no missing monitored
+cell, but final revisited source/root/bounds collection was not reached. Both
+videos are nighttime, so they do not qualify daytime softness, shimmer or subtle
+LOD popping. Next motion evidence is a focused naturally daylit wind/rail test,
+not another complete eleven-view run. Keep native07's failure unchanged.
+
+At fixed geometry and population, first trial height-dependent blade-normal
+weight rather than the current constant .20: preserve root/terrain matching
+while upper blades receive more directional light variation. Separately trial
+indirect-only root occlusion. These are artistic canopy approximations, not a
+newly proven normal bug, physical self-occlusion or a remedy for coverage holes.
+Keep positions, palette, draw passes, textures and wind bounds unchanged and
+verify actual TSL arithmetic plus matched sunlit/shadowed native imagery/cost.
+
+Native07 CPU p95 is 14.9/15.1ms and queried GPU-pass-sum p95 20.58/19.92ms for
+campus/meadow; 55/58 actual main grass draws submit 2.10/2.65 million triangles.
+Unchanged-source runs vary materially, so neither the faster observation nor
+recorded-frame counts prove causal speedup or sustained/presented FPS. Rendering
+headroom remains open without density or resolution cuts. The scoped source
+checkpoint is committed/pushed as `8531b4cbf` under `dreaminglucid`; it remains
 an explicit opt-in development candidate, not default or production promotion.
 
 The user's earlier-game grass image supersedes provisional acceptance of the
