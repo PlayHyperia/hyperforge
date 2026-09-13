@@ -3,7 +3,9 @@ import type { ModelCollisionData } from "./ModelCache";
 
 /** A processed representation, not a replacement for GLTFLoader or an authored-PBR policy. */
 export const PROCESSED_MODEL_VERSION = 7;
-const POLICY = "static-r186-rgba8-v1";
+// The record schema is unchanged. Reject earlier processed rows whose importer
+// flattened authored metalness to zero, then reparse their verified source bytes.
+const POLICY = "static-r186-rgba8-authored-pbr-v2";
 export const PROCESSED_MODEL_LIMITS = Object.freeze({
   sourceBytes: 256 * 1024 * 1024,
   payloadBytes: 256 * 1024 * 1024,

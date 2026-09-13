@@ -144,6 +144,24 @@ async function encoded(f = fixture()) {
 }
 
 describe("ProcessedModelCodec exact static CPU representation", () => {
+  it("rejects the exact prior flattened-metal policy without publishing materials", async () => {
+    const { f, source, record } = await encoded();
+    const stale = structuredClone(record);
+    stale.policy = "static-r186-rgba8-v1";
+    stale.materials[0].state.metalness = 0;
+    let setups = 0;
+    try {
+      expect(record.policy).toBe("static-r186-rgba8-authored-pbr-v2");
+      expect(
+        decodeProcessedModel(stale, "fixture.glb", source, () => setups++),
+      ).toBeNull();
+      expect(setups).toBe(0);
+      expect(record.materials[0].state.metalness).toBe(0.7);
+    } finally {
+      dispose(f.scene);
+    }
+  });
+
   it("preserves three LOD aliases, one ARM source and all supported scalar/UV/sampler/bounds state", async () => {
     const { f, source, record } = await encoded();
     let restored: ReturnType<typeof decodeProcessedModel> = null;

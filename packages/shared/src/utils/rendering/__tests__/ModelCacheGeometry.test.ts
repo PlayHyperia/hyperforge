@@ -7,6 +7,77 @@ type ModelCacheInternals = {
 };
 
 describe("ModelCache geometry setup", () => {
+  it.each([
+    THREE.MeshStandardMaterial,
+    THREE.MeshPhysicalMaterial,
+    MeshStandardNodeMaterial,
+    THREE.MeshPhysicalNodeMaterial,
+  ])(
+    "retains authored PBR factors and data maps from %s on repeated setup",
+    (MaterialClass) => {
+      for (const [metalness, roughness] of [
+        [0, 1],
+        [0.73, 0.28],
+        [1, 0],
+      ]) {
+        const geometry = new THREE.BoxGeometry();
+        const arm = new THREE.DataTexture(
+          new Uint8Array([51, 102, 204, 255]),
+          1,
+          1,
+        );
+        const normal = new THREE.DataTexture(
+          new Uint8Array([128, 128, 255, 255]),
+          1,
+          1,
+        );
+        const source = new MaterialClass();
+        source.metalness = metalness;
+        source.roughness = roughness;
+        source.envMapIntensity = 0;
+        source.roughnessMap = arm;
+        source.metalnessMap = arm;
+        source.aoMap = arm;
+        source.aoMapIntensity = 0.63;
+        source.normalMap = normal;
+        source.normalScale.set(0.6, -0.7);
+        source.alphaTest = 0.41;
+        const mesh = new THREE.Mesh(geometry, source);
+        const scene = new THREE.Group();
+        scene.add(mesh);
+        try {
+          const internals = modelCache as unknown as ModelCacheInternals;
+          internals.setupMaterials(scene);
+          const converted = mesh.material;
+          internals.setupMaterials(scene);
+          expect(mesh.material).toBe(converted);
+          expect(mesh.material).toBeInstanceOf(MeshStandardNodeMaterial);
+          expect(mesh.material).toMatchObject({
+            metalness,
+            roughness,
+            envMapIntensity: 0,
+            alphaTest: 0.41,
+            roughnessMap: arm,
+            metalnessMap: arm,
+            aoMap: arm,
+            aoMapIntensity: 0.63,
+            normalMap: normal,
+          });
+          expect(mesh.material.normalScale.toArray()).toEqual([0.6, -0.7]);
+          expect(arm.colorSpace).toBe(THREE.NoColorSpace);
+          expect(normal.colorSpace).toBe(THREE.NoColorSpace);
+          expect(arm.image.data).toEqual(new Uint8Array([51, 102, 204, 255]));
+        } finally {
+          geometry.dispose();
+          source.dispose();
+          if (mesh.material !== source) mesh.material.dispose();
+          arm.dispose();
+          normal.dispose();
+        }
+      }
+    },
+  );
+
   it("converts one source material once across static LOD meshes", () => {
     const geometry = new THREE.BoxGeometry();
     const map = new THREE.DataTexture(

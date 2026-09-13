@@ -1,4 +1,4 @@
-import { createServer } from "node:http";
+import { createServer, type ServerResponse } from "node:http";
 import { once } from "node:events";
 import { describe, expect, it } from "vitest";
 import THREE, { MeshStandardNodeMaterial } from "../../../extras/three/three";
@@ -12,7 +12,9 @@ import {
   type ProcessedModelSource,
 } from "../ProcessedModelCodec";
 
-function makeGLB(corrupt = false): ArrayBuffer {
+type AuthoredPbr = { metallicFactor?: number; roughnessFactor?: number };
+const DEFAULT_PBR = { metallicFactor: 0.75, roughnessFactor: 0.65 };
+function makeGLB(corrupt = false, pbr: AuthoredPbr = DEFAULT_PBR): ArrayBuffer {
   const positions = new Float32Array([0, 0, 0, 2, 0, 0, 0, 3, 0]);
   const json = new TextEncoder().encode(
     JSON.stringify({
@@ -33,8 +35,7 @@ function makeGLB(corrupt = false): ArrayBuffer {
           alphaCutoff: 0.35,
           pbrMetallicRoughness: {
             baseColorFactor: [0.123456789, 0.333333333, 0.99999999, 1],
-            metallicFactor: 0.75,
-            roughnessFactor: 0.65,
+            ...pbr,
           },
         },
       ],
@@ -95,13 +96,19 @@ async function realLoad(
     bytes: ArrayBuffer,
     saves: ProcessedModelSource[],
   ) => Promise<void>,
+  pbr: AuthoredPbr = DEFAULT_PBR,
 ) {
-  const bytes = makeGLB();
+  const bytes = makeGLB(false, pbr);
   let requests = 0;
+  const responses: ServerResponse[] = [];
+  let signalRequest!: () => void;
+  const firstRequest = new Promise<void>((resolve) => {
+    signalRequest = resolve;
+  });
   const server = createServer((_request, response) => {
     requests++;
-    response.writeHead(200, { "Content-Type": "model/gltf-binary" });
-    response.end(Buffer.from(bytes));
+    responses.push(response);
+    signalRequest();
   });
   const world = new World();
   world.register("loader", ClientLoader);
@@ -140,8 +147,24 @@ async function realLoad(
     if (!address || typeof address === "string")
       throw new Error("No native HTTP address");
     url = `http://127.0.0.1:${address.port}/model.glb`;
-    if (corrupt) loader.setFile(url, new File([makeGLB(true)], "model.glb"));
-    loaded = await modelCache.loadModel(url, world);
+    if (corrupt)
+      loader.setFile(url, new File([makeGLB(true, pbr)], "model.glb"));
+    const first = modelCache.loadModel(url, world);
+    // Hold an actual HTTP response until the second call joins the in-flight
+    // load. This tests the existing cache path without impersonating a loader.
+    await firstRequest;
+    const pending = modelCache.loadModel(url, world);
+    for (const response of responses) {
+      response.writeHead(200, { "Content-Type": "model/gltf-binary" });
+      response.end(Buffer.from(bytes));
+    }
+    const [cold, inFlight] = await Promise.all([first, pending]);
+    loaded = cold;
+    expect(inFlight.fromCache).toBe(true);
+    meshes(cold.scene).forEach((mesh, i) => {
+      expect(meshes(inFlight.scene)[i].material).toBe(mesh.material);
+      expect(meshes(inFlight.scene)[i].geometry).toBe(mesh.geometry);
+    });
     expect(requests).toBe(1);
     await verify(loaded, world, url, bytes, saves);
   } finally {
@@ -159,7 +182,34 @@ async function realLoad(
 }
 
 describe("ModelCache v7 real GLB/World/ClientLoader integration (CPU, no IndexedDB claim)", () => {
-  it("persists the actual cold representation without changing existing metallic or cutout policy", async () => {
+  it.each([
+    {
+      pbr: { metallicFactor: 0, roughnessFactor: 1 },
+      metalness: 0,
+      roughness: 1,
+    },
+    {
+      pbr: { metallicFactor: 1, roughnessFactor: 0 },
+      metalness: 1,
+      roughness: 0,
+    },
+    { pbr: {}, metalness: 1, roughness: 1 },
+  ])(
+    "retains zero, full-metal and omitted glTF factors: $pbr",
+    async ({ pbr, metalness, roughness }) => {
+      await realLoad(
+        false,
+        async (loaded) => {
+          for (const mesh of meshes(loaded.scene)) {
+            expect(mesh.material).toMatchObject({ metalness, roughness });
+          }
+        },
+        pbr,
+      );
+    },
+  );
+
+  it("preserves authored PBR and cutout state through cold loading, memory reuse and processed decoding", async () => {
     await realLoad(false, async (loaded, world, url, bytes, saves) => {
       const source = (await identifyProcessedModelSource(bytes))!;
       expect(saves).toEqual([source]);
@@ -169,7 +219,8 @@ describe("ModelCache v7 real GLB/World/ClientLoader integration (CPU, no Indexed
       for (const mesh of cold) {
         expect(mesh.material).toBeInstanceOf(MeshStandardNodeMaterial);
         const m = mesh.material as MeshStandardNodeMaterial;
-        expect(m.metalness).toBe(0);
+        expect(m.metalness).toBe(0.75);
+        expect(m.roughness).toBe(0.65);
         expect(m.alphaTest).toBe(0.35);
       }
       const record = encodeProcessedModel(
@@ -188,6 +239,13 @@ describe("ModelCache v7 real GLB/World/ClientLoader integration (CPU, no Indexed
       );
       try {
         expect(warm).not.toBeNull();
+        for (const mesh of meshes(warm!.scene)) {
+          expect(mesh.material).toMatchObject({
+            metalness: 0.75,
+            roughness: 0.65,
+            alphaTest: 0.35,
+          });
+        }
         expect(encodeProcessedModel(url, source, warm!.scene, [])).toEqual(
           record,
         );
@@ -201,6 +259,10 @@ describe("ModelCache v7 real GLB/World/ClientLoader integration (CPU, no Indexed
         cold.forEach((mesh, i) => {
           expect(cached[i].material).toBe(mesh.material);
           expect(cached[i].geometry).toBe(mesh.geometry);
+          expect(cached[i].material).toMatchObject({
+            metalness: 0.75,
+            roughness: 0.65,
+          });
         });
       } finally {
         if (warm) {

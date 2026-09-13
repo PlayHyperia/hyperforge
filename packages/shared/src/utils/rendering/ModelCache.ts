@@ -706,10 +706,9 @@ export class ModelCache {
           true,
         );
       }
-      // Force metalness to 0 — the game has no environment map, so metallic
-      // materials lose their diffuse component and appear black. Zeroing metalness
-      // ensures base colors render fully via diffuse lighting.
-      material.metalness = 0;
+      // Preserve authored PBR factors/maps regardless of when scene lighting
+      // becomes ready. OutdoorEnvironment owns illumination; changing metalness
+      // here would permanently flatten metals in both memory and processed caches.
       material.envMapIntensity = material.envMapIntensity ?? 1.0;
     } else if (
       material instanceof THREE.MeshBasicMaterial ||
