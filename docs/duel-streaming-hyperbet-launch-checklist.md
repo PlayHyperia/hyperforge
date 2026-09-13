@@ -1,5 +1,198 @@
 # Duel Arena, Streaming, and Hyperbet Launch Checklist
 
+## Shield batching and Haven landform checkpoint — 2026-09-12
+
+Status: **G04 and asset visual/fit gates OPEN. Lossless draw reduction verified;
+AAA art, smooth frame headroom and production launch are NOT accepted.**
+
+- [x] Added an opt-in non-default shield derivative, 23 → 5 opaque primitives
+  with all 4,664 vertices / 5,140 triangles, five materials, texture bytes,
+  original named anchors and authored fit retained. No production item binding,
+  avatar/body/rest/weights, shader, lighting or quality setting changed.
+- [x] Real r186 browser loader verifies decoded maps/PBR/IOR and exact geometry;
+  four private actual-helper fits verify actor material/texture ownership and
+  exact-once cleanup. Real network equip/unequip and 32 changing idle hand poses
+  per actor retain stable wrapper AND model-local/world fit and object identity.
+- [x] Actual shield-only census in BOTH campus and meadow: 46 → 10 submissions
+  in EACH main and sun-shadow pass, 10,280 triangles unchanged per pass.
+  72 fewer submissions total; this is not an inferred FPS/frame-time gain.
+- [x] Final native03: 695 pins / 617 archives unchanged, 36 screenshot fog
+  brackets, 23 focused preflight tests; page/GPU/cleanup errors zero and all
+  owned browser/launcher/ports closed. Native01/02 retain their failed screenshot
+  count/capacity evidence; explicit extra-view and capacity regressions fixed.
+- [ ] Visual review exposes existing SIDEWAYS KITE-SHIELD IDLE CARRY.
+  Preserving the original matrix is not approving its direction. Correct the
+  carry orientation and final grip; verify walk/run/block/combat/transitions,
+  partial-frustum pixels and long-duration/reload before production promotion.
+- [ ] Frame headroom remains unapproved: native03 p95 CPU14.5/16.9ms and GPU-pass
+  sums17.50/21.30ms (campus/meadow). Not presented FPS, sustained60, isolated global
+  speedup or full-load streaming. Existing cow404/dagger-fit errors still19;
+  overall run remains false. Native01 timing additionally had an external
+  read-only inspection and is excluded from timing acceptance.
+- [x] Prototyped a substantial Haven west rocky shoulder externally:
+  X272–314/Z303–367, unequal crest, faces, shelf, toe and drainage notch.
+  101,096 protected probes unchanged, all48 archived tree heights reproduced,
+  16 selected source pins, 11,837 fresh-VM factory comparisons. Existing64/128
+  terrain leaves suffice; no increased mesh-detail allocation proposed.
+- [ ] Integrate/qualify that composed landscape next. Prototype is NOT game,
+  worker, PhysX, navigation or art approval. Check steep faces/internal creases,
+  actual1.59/.79m mesh spacing, fresh48-tree/resource ownership, all functional
+  routes, grass/asset contact and matched moving/native world views. Keep the
+  single compact island, one arena and resource-linked tree population.
+
+Evidence: `docs/shield-material-batching-20260912.md`,
+`asset-studio/shield-material-batching01/` and
+`asset-studio/service-planting-soil01/terrain-next-slice.md`.
+
+## Service-ground and cache-lifetime checkpoint — 2026-09-12
+
+Status: **G04 OPEN. Native local material/placement correctness verified.
+Finished environment art, frame headroom and production acceptance are NOT met.**
+
+- [x] Added four bounded soil lobes and four existing fern instances around the
+  workshop. The soil uses the six existing packed PBR maps, with no new render
+  pass, texture, light, height edit or foliage batch. Total 56 instances / five
+  shared batches. V1 remains bush-only; V2 is explicit, bounded and immutable.
+- [x] Actual terrain/worker/CPU tests keep all placement/rotation/size/tint/normal
+  bytes, six grass counts and 933 grounded campus clumps (110 natural-plaza)
+  unchanged. All four material channels are connected to the real soil graph.
+  One fern was relocated after analytical/bilinear path-clearance failures;
+  no station, path, post or tree-harvest margin was relaxed.
+- [x] Standalone regression: 1,278/1,278 tests across 92 files; all shared/client/
+  server typechecks/builds pass. Native preflight 18/18. All eight native views
+  reviewed and exact-source verifier passes: 693 pins/614 archives, original
+  52 placements preserved, four added ferns, actual instance scale/yaw/XZ and
+  five source geometries/materials stable. Existing rock contact/LOD retained.
+- [x] Native Chrome/Metal WebGPU 1280×720, DPR 1, MSAA 4, sun shadow 4096; same cameras and
+  quality, maximum daylight-phase delta .000902. Page/GPU/cleanup errors zero,
+  owned browser/launcher/ports closed. Overall remains false with the same 19
+  cow 404/dagger-fit content errors; these remain launch blockers.
+- [ ] Art is NOT approved: gray gravel-like planting halos, dark ferns,
+  saturated rounded shrubs and disconnected landscape composition remain.
+  Next substantial visual slice: an authored Haven rocky-meadow backdrop,
+  broken ridge faces/shelf/toe and connected ridge-to-pond ground hierarchy.
+  Protect actual functional envelopes and choppable trees, not a broad empty
+  lawn. Do not substitute another global noise/tint or postprocessing toggle.
+- [ ] Performance is NOT approved: short p95 CPU 18.3/20ms and GPU-pass sums
+  28.38/33.88ms (campus/meadow). Actor/pass census differs from the prior capture;
+  this is neither isolated soil cost nor presented FPS/sustained60/stream-load.
+- [ ] Retain/reproduce the build-contended grounding failure: initial broad run
+  passed 1,277/1,278, standalone passed 1,278/1,278. Existing 250ms grounding budget
+  unchanged; added failure-state diagnostics. Contention is not a proven cause.
+- [x] Fixed same-JS-turn model-cache deduplication and remove/clear lifetime
+  races. Real concurrent/parser-in-flight fail-before and 54/54 pass-after tests;
+  retired work cannot overwrite/delete replacement entries or leak late scenes.
+  Pushed scoped 3-file commit `37bf5feba` on `codex/sol-duel-stream-launch`;
+  GitHub author AND committer verified as `dreaminglucid`.
+- [x] Prepared an OFFLINE lossless shield batching candidate: 23 → 5 primitives,
+  unchanged 4,664 vertices/5,140 triangles, five materials, 22 named anchors and
+  exact textures/fit metadata. Independent transformed triangle/attribute
+  equality, 15 negative controls, deterministic regeneration and Khronos zero
+  errors/warnings pass. Original/active shield unchanged.
+- [ ] Native-qualify shield appearance, animated fit, culling/material isolation,
+  equip/unequip/reload/disposal and actual draw/frame savings before promotion.
+  Then continue the larger composed-landscape slice above; current art remains
+  local, not promoted by the cache-only commit.
+
+Evidence: `asset-studio/service-planting-soil01/README.md` and
+`asset-studio/shield-material-batching01/README.md`.
+Native report SHA256:
+`513a1ac8134426c081c065d23673e7d57b597daa14a5e8b02e604cc2832bf21c`.
+
+## Material fidelity and foliage candidate — 2026-09-12
+
+Status: **G04 OPEN. Source/native material fidelity verified; finished planting
+art, sustained performance and production acceptance remain open.**
+
+- [x] Preserve imported authored metallic factors/maps; remove the old global
+  non-metal workaround. Invalidate the prior flattened-PBR processed-cache policy
+  without changing record schema. Preserve zero factors and glTF defaults.
+- [x] Restore original bush leaf chroma, keeping the existing .85 brightness.
+  The previous luminance mix increased the source blue/green ratio about 5.05x.
+  Actual 228,792-texel source and shader tests preserve alpha, maps and ownership.
+  No new lights, SSS, postprocessing, geometry, placement or resolution changes.
+- [x] Focused checks: 40 importer/cache tests and 15 pond tests, scoped lint/format.
+  Broad regression passes 1,258/1,258 tests across 92 files; shared/client/server
+  typechecks and builds pass. Native preflight 16/16 retains prior gates and adds
+  four exact service GLBs: 693 pins / 614 archives expected, no broad path admission.
+- [x] Reviewed all eight native views; exact-source verifier passes. Actual bound
+  bank/anvil/furnace/range meshes retain factor1 and their shared MR maps, with
+  HTTP body hashes matching the four source GLBs. Bush original chroma is active.
+  693 unchanged pins/614 archives, matched cameras/quality/placements, maximum
+  daylight-phase difference .000903. Rock contact/LOD and stable owners retained.
+  Browser/owned ports closed; page/device/cleanup errors zero. Overall false
+  retains the same 19 cow/dagger content errors, not discarded or excused.
+- [ ] Art review: cyan/slate bush cast corrected, but saturated emerald shrubs,
+  repetitive rounded clumps and mismatched tree/turf/rock materials still fail
+  the integrated target. Next: irregular earthy planting beds and fern/grass
+  transitions around current groups; keep navigation and resources unchanged.
+- [ ] Short native p95 CPU ticks 14.7/13.5ms, GPU-pass sums 17.63/20.25ms
+  (campus/meadow); 648/628 p95 counted draws across all passes and about 3.03/3.15M
+  counted triangles. Not presented FPS, isolated causal cost or sustained60.
+  Frame headroom remains unqualified; do not stack postprocessing onto it.
+- [ ] Fix separately discovered same-JS-turn concurrent cold-load race before
+  cache registry publication. Material fidelity tests do not close that race.
+- [ ] Thin-leaf lighting, contact/local indirect light, ground/shore transitions,
+  authored ridge/coast silhouettes, actual agent/stream motion and sustained
+  target-hardware budgets remain open. No AAA claim from these local fixes.
+
+Evidence: `asset-studio/material-fidelity01/README.md`.
+
+Scoped importer correction pushed as `e23eb19c1` on
+`codex/sol-duel-stream-launch`; GitHub author/committer both `dreaminglucid`.
+Only five importer/codec/test files and its focused evidence document are in that
+commit. Bush/landscape art candidates remain local and unapproved.
+
+## Pond and workshop landscape-rock candidate — 2026-09-12
+
+Status: **G04 OPEN. Native render/contact/LOD verified; art, sustained
+performance and production acceptance remain unapproved.**
+
+- [x] Implemented 17 authored pond/workshop rocks using three scanned CC0 variants,
+  nine shared LOD geometries, one existing PBR material and three 2048px maps.
+  Exact near-geometry collision uses three cached meshes and 17 static bodies.
+- [x] Tested 82 unique navigation tiles and all previously free service/harvest
+  approaches from three authoritative duel return marks. No tree, station,
+  terrain-height, route, avatar, light or quality-setting changes.
+- [x] Three native collision lifetimes / 4,131 rays: worst normal-to-rendered
+  surface difference 0.026695mm, worst vertical difference 0.385558mm on steep
+  faces. Source geometry bytes independently verified; all native/nav ownership
+  releases, including shared cooked meshes and asynchronous startup cancellation.
+- [x] Added bounded all-LOD convex grass exclusions and swept-blade/wind rejection.
+  Regression caught and corrected unintended random-sequence re-phasing; surviving
+  worker attributes now remain byte-identical. No flattening or rectangular rings.
+- [x] Shared/client/server typechecks and builds pass; scoped lint/format pass.
+  Current native preflight 14/14, with ten exact additive sources (689 total cap,
+  610 archives), unchanged content/renderer/camera/error/cleanup gates.
+- [x] Broad regression passes 1,244/1,244 tests across 91 files. Initial failed
+  reports are retained. Historical fixtures explicitly omit the later rocks;
+  their original hashes/counts are unchanged. Current worker/CPU parity holds,
+  with 933 accepted campus-leaf clumps and all 110 natural-plaza clumps retained.
+- [x] Native01: all eight views inspected; at least 6.54cm lower-band burial over
+  every complete all-LOD footprint against installed terrain. Sources unchanged,
+  page/GPU/cleanup errors zero and owned browser/ports closed; 19 known cow/dagger
+  errors keep the overall result false.
+- [x] Native01 is REJECTED for LOD/art acceptance despite its focused green flag:
+  all rocks stayed at LOD2 because selection used the earlier update-phase camera.
+  Moved selection before actual main rendering/shadows; 38 focused tests, rebuilds
+  and strengthened 14/14 preflight pass. Native02 verifies actual-camera error/
+  hysteresis bounds and fixed-view upload stability: four closest rocks use LOD0,
+  wide views use LOD2. All eight views reviewed; exact-source verifier passes.
+- [x] Native02 retains 689 pins/610 archives, matched cameras/quality and at least
+  6.54cm all-LOD lower-band burial; no page/device/cleanup errors, all owned ports
+  and browser closed. Overall false retains the same 19 cow/dagger content errors.
+  Permanent main-pass rocks use three draws: 8,500 wide / 31,928 close triangles.
+  Short p95 CPU ticks 12.7/11.9ms; GPU-pass sums 16.45/18.28ms (campus/meadow).
+  These are work measurements, not presented FPS or sustained-performance proof.
+- [ ] Dark scanned rock / bright flat ground integration remains visually weak.
+  Improve transition planting/materials and the broader foliage/terrain/lighting.
+  No presented-FPS or sustained-load approval from short instrumented probes.
+- [ ] Qualify composition before committing/pushing this candidate. Overall
+  terrain, coast, foliage, lighting, animation, equipment, stream and launch
+  reliability work remains open; previous cow/dagger/launcher failures not hidden.
+
+Evidence: `asset-studio/compact-landscape-rocks01/README.md`.
+
 ## Open-truss smithy checkpoint — 2026-09-12
 
 Status: **G04 remains OPEN. Local architecture improvement verified; the full

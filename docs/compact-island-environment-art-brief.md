@@ -1,5 +1,106 @@
 # Compact island environment art: next delivery slice
 
+## Ready external terrain prototype — 2026-09-12
+
+The bounded Haven west-shoulder prototype now uses one asymmetric ruled crest,
+rock face, shelf and toe with an oblique drainage notch, not additional ellipse
+hills or noise. Region X272–314/Z303–367; existing campus/arena grades retain
+authority. 101,096 protected probes have exact zero delta; all48 archived native
+tree heights reproduce, all11 paths/260 segments remain unchanged, and the same
+two64/128 terrain leaves cover the change. The game has not adopted it yet.
+
+Do not mistake this external analytical proof for a native surface. New slopes
+exceed40 degrees at6,118/43,433 fine samples, versus363 before. Floor clamp and
+nearest-polyline notch can make internal derivative creases; actual terrain mesh
+spacing is1.5873/.7874m, not the .25m evaluation grid. Next: integrate into the
+shared profile/worker path, retain protected surfaces, then check real triangle
+contact, fresh tree/nav ownership and moving eye-level/aerial appearance before
+acceptance. See `asset-studio/service-planting-soil01/terrain-next-slice.md` and
+`haven-shoulder-evaluation02.json` for exact curves, source pins and remaining gates.
+
+The preceding lossless shield pass confirms72 fewer actual submissions across
+main/sun without detail loss. It does not supply approved headroom: native03 p95
+CPU14.5/16.9ms and GPU-pass sums17.50/21.30ms remain outside smooth-performance
+acceptance. No new postprocessing or resolution/quality reduction is justified.
+Outer-face captures also expose existing sideways shield carry; keep that fit
+gate open independently of successful geometry/material preservation.
+
+## Next substantial slice: composed Haven landscape — 2026-09-12
+
+The service-soil native pass is technically verified but **not art or performance
+approved**. The reused dirt layer reads as gray gravel-like halos under the
+shrubs; fern silhouettes are dark and the clumps remain overly saturated and
+repetitive. Do not confuse this local contact improvement with a finished scene.
+All eight current views and the concept were reviewed together. The dominant
+remaining deficit is composition, enclosure and landform scale, not a missing
+bloom or ambient-occlusion switch.
+
+The concept establishes a low broken rocky backdrop behind the workshop and a
+connected shore/soil/path hierarchy. Current buildings and trees sit in a broad
+flat mottled lawn. `CompactIslandLandform.ts` fades the terrace delta out at world
+X274–280, leaving roughly 47m before the western service beds. Smooth ridge and
+saddle envelopes read as isolated capped hills. Increasing their noise amplitude
+or applying another global color field will not solve that structure.
+
+Author one connected Haven ridge-to-pond rocky-meadow slice: an unequal crest,
+two readable rock faces, a lower shelf and irregular foothill/toe approaching the
+workshop. Protect actual station, path, pond-fishing and tree-harvest envelopes,
+not a broad arbitrary empty strip. Material allocation must follow these forms:
+mineral faces, earthy hollows/toes, turf on the flatter shelves. Reuse the vetted
+rocks for human-scale edges, not mountain-sized props. Existing choppable trees
+must form the island's tree population; no disconnected decorative forest.
+
+Resolve the silhouette and layered depth in unchanged ground-level and aerial
+cameras before adding small details. Start within the existing local terrain
+detail allocation, six-map budget, LODs and renderer/shadow settings. Maintain
+server/worker/native agreement, supported assets and all functional approaches.
+The exposed bay coastline remains a subsequent distinct slice. The large
+playable island is not a preservation requirement; the user's compact-only
+direction supersedes earlier historical preservation notes.
+
+Frame headroom currently fails: short instrumented p95 CPU18.3/20ms and GPU-pass
+sums28.38/33.88ms for campus/meadow. These are not presented FPS or an isolated
+soil-cost experiment. Native-qualify the prepared lossless shield batching
+candidate (23→5 primitives; identical geometry/materials/fit) before spending
+more frame budget. Also retain the build-contended grounding failure as a stress
+follow-up; the unchanged-budget standalone suite passes1,278/1,278.
+
+Evidence: `../asset-studio/service-planting-soil01/README.md` and
+`../asset-studio/shield-material-batching01/README.md` from this repository root.
+
+## Material and lighting follow-through — 2026-09-12
+
+The native landscape-rock review confirms a render/contact/LOD checkpoint,
+not finished art. All eight views still show weak material integration, blue
+shadowed foliage, a flat lawn and artificial coastal/ridge shapes. Do not
+mistake more props or green software tests for closing this visual gap.
+
+The installed renderer is already Three r186. Current official references:
+
+- [Standard node materials](https://threejs.org/docs/pages/MeshStandardNodeMaterial.html)
+  use the scene environment for PBR lighting. The importer had unconditionally
+  erased authored metalness under an obsolete no-environment assumption.
+  The import and persisted-cache policy are now corrected; eight native daylight
+  views verify actual service-model factors/maps. Night, broad asset appearance
+  and integrated art/performance acceptance remain open.
+- [MeshSSSNodeMaterial](https://threejs.org/docs/pages/MeshSSSNodeMaterial.html)
+  provides an experimental direct-light scattering term. Its installed source
+  cites the author's [real-time translucency work](https://colinbarrebrisebois.com/2011/03/07/gdc-2011-approximating-translucency-for-a-fast-cheap-and-convincing-subsurface-scattering-look/).
+  Evaluate thin foliage only after inspecting source normals/materials. This
+  is not full volumetric scattering or permission for unshadowed emissive leaves.
+- [GTAO](https://threejs.org/docs/pages/GTAONode.html) can add contact occlusion;
+  [SSGI](https://threejs.org/docs/pages/SSGINode.html) can approximate local
+  indirect light. Both cost samples; temporal filtering adds motion-history
+  risks. SSGI's documented temporal path requires TRAA and warns about ghosting.
+  Qualify animated foliage, agents, camera cuts, water and cutaway roofs before
+  selecting either. Do not add them merely to darken an incoherent material mix.
+
+Working decision: fix imported material fidelity and qualify foliage light
+response first, with no changed exposure, resolution, terrain, trees, population,
+camera or shadow budget. Then revisit contact/local indirect lighting and the
+larger authored landforms. This is an implementation sequence, not a claim that
+these features alone deliver the requested quality.
+
 ## Current priority after native review — 2026-09-12
 
 Curved instanced grass is pushed as an explicit comparison-profile checkpoint,
