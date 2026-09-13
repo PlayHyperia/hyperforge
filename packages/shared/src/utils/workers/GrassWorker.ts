@@ -33,7 +33,10 @@ import {
 import type { TerrainWorkerConfig } from "./TerrainWorker";
 import { createAuthoredTerrainSurfaceOperations } from "../../systems/shared/world/AuthoredTerrainSurface";
 import { createRoadInfluenceOperations } from "../../systems/shared/world/RoadInfluence";
-import { createCompactTerrainColorOperations } from "../../systems/shared/world/CompactTerrainPalette";
+import {
+  createCompactTerrainColorOperations,
+  type CompactTerrainPlantingLobe,
+} from "../../systems/shared/world/CompactTerrainPalette";
 import {
   createGrassTerrainSurfaceOperations,
   GRASS_SURFACE_NORMAL_SAMPLE_DISTANCE,
@@ -68,6 +71,8 @@ export interface BiomeGrassConfigWorker {
 }
 
 export interface GrassWorkerInput {
+  /** Colour-only authored soil; never participates in placement eligibility. */
+  compactPlantingLobes?: readonly CompactTerrainPlantingLobe[];
   /** Absent retains historical biome eligibility. Never inferred from terrain. */
   grassEligibility?: GrassSurfaceEligibility;
   type: "generateGrassInstances";
@@ -406,6 +411,7 @@ function generateGrassInstances(input) {
   assertTerrainWorkerInput(input);
   var grassEligibility = compactTerrainColorOperations.grassEligibility(input.grassEligibility, input.config.TERRAIN_PROFILE.algorithm);
   var compactMacroField = compactTerrainColorOperations.macroField(input.config.TERRAIN_PROFILE);
+  var compactPlantingLobes = compactTerrainColorOperations.validatePlantingLobes(input.compactPlantingLobes);
   var surface = terrainSurfaceOperations.validateSnapshot(input.terrainSurface);
   var compactPondMaterial = (input.config.TERRAIN_PROFILE.algorithm === "compact-island-sculpt-v1" || (input.config.TERRAIN_PROFILE.algorithm === "compact-island-sculpt-v2" || input.config.TERRAIN_PROFILE.algorithm === "compact-island-sculpt-v3" || (input.config.TERRAIN_PROFILE.algorithm === "compact-island-sculpt-v4" || input.config.TERRAIN_PROFILE.algorithm === "compact-island-sculpt-v5")))
     ? compactTerrainColorOperations.validatePond(surface.waterBodies.find(function(body){return body.id === "haven_pond_water";}) || null) : null;
@@ -513,7 +519,7 @@ function generateGrassInstances(input) {
         meadowNoise: sampleNoiseCPU(wx, wz, compactMeadowNoiseScale),
         distortNoise: sampleNoiseCPU(wx, wz, sc.DISTORT_NOISE_SCALE),
         slope: slope, roadInfluence: roadInf,
-        surface: {x:wx,z:wz,height:ty,pond:compactPondMaterial,macroField:compactMacroField}
+        surface: {x:wx,z:wz,height:ty,pond:compactPondMaterial,macroField:compactMacroField,plantingLobes:compactPlantingLobes}
       };
       var compactRGB = compactTerrainColorOperations.sample(compactInput);
       color.r = compactRGB.r; color.g = compactRGB.g; color.b = compactRGB.b;
@@ -548,6 +554,9 @@ function generateGrassInstances(input) {
     offsets[count * 3 + 2] = lz;
 
     var rotation = rng() * Math.PI * 2;
+    // Consume the original accepted-clump rotation before filtering obstacles.
+    // A new rock removes intersecting clumps without re-phasing later samples.
+    if (terrainSurfaceOperations.isGrassExcluded(surface, wx, wz)) continue;
     var scale = (input.scaleMin + clumpRng * (input.scaleMax - input.scaleMin)) * grassHeightScale;
     rotScaleHash[count * 3] = rotation;
     rotScaleHash[count * 3 + 1] = scale;

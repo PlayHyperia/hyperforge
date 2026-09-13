@@ -1,12 +1,17 @@
 import type { WorldTerrainProfile } from "./WorldTerrainProfile";
+import { createCompactHavenShoulder } from "./CompactHavenShoulder";
 
 /**
  * Art-directed compact island, independent of biome noise height functions.
- * The factory is also embedded in actual workers: keep it self-contained.
+ * Worker emission supplies the shoulder factory explicitly, with no module
+ * closure or bundler helpers in the resulting worker source.
  * Broad navigable meadow, western ridge and low headlands share a continuous
  * seabed. This is authored shaping plus detail, not an erosion simulation.
  */
-export function createCompactIslandLandform() {
+export function createCompactIslandLandform(
+  shoulderFactory = createCompactHavenShoulder,
+) {
+  const shoulder = shoulderFactory();
   const helpers = {
     smooth(value: number): number {
       const t = Math.max(0, Math.min(1, value));
@@ -327,8 +332,23 @@ export function createCompactIslandLandform() {
         profile.water.oceanFloorHeight +
         (interior - profile.water.oceanFloorHeight) * mask;
       // Preserve the original evaluation exactly outside the compact delta.
-      // This is a traversable heightfield, not an impassable cliff/collider.
-      return terraceDelta === 0 ? height : height + terraceDelta * mask;
+      // A steep heightfield is not itself an impassable navigation collider.
+      const base = terraceDelta === 0 ? height : height + terraceDelta * mask;
+      if (!profile.havenShoulder) return base;
+      const shaped = shoulder.sample(
+        worldX,
+        worldZ,
+        base,
+        profile.havenShoulder,
+      );
+      // Keep any admitted modifier continuous at the coast, including edited
+      // profiles. At Haven's interior mask=1, this preserves authored arithmetic.
+      return mask === 1 ? shaped : base + (shaped - base) * mask;
     },
   };
+}
+
+/** Both factories must travel together into a fresh worker realm. */
+export function buildCompactIslandLandformJS(): string {
+  return `(${createCompactIslandLandform.toString()})(${createCompactHavenShoulder.toString()})`;
 }

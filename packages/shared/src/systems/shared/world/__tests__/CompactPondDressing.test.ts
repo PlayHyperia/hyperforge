@@ -288,7 +288,7 @@ describe("bounded pond dressing", () => {
           DataManager.getWorldConfig()!.compactServicePlanting,
         ),
       ];
-      expect(combined).toHaveLength(52);
+      expect(combined).toHaveLength(56);
       const owner = new CompactPondDressingVisuals(new THREE.Group(), combined);
       const geometries = models.map(canonicalGeometry);
       const texture = new THREE.DataTexture(
@@ -312,13 +312,17 @@ describe("bounded pond dressing", () => {
         expect(owner.group.children).toHaveLength(5);
         expect(owner.getReceipt()).toMatchObject({
           ready: true,
-          instances: 52,
-          visible: 52,
+          instances: 56,
+          visible: 56,
         });
         const bush = owner.group.children[
           models.indexOf("bush")
         ] as THREE.InstancedMesh;
         expect(bush.count).toBe(23);
+        expect(
+          (owner.group.children[models.indexOf("fern")] as THREE.InstancedMesh)
+            .count,
+        ).toBe(12);
         expect(bush.geometry).toBe(geometries[models.indexOf("bush")]);
         expect((bush.material as THREE.MeshStandardNodeMaterial).map).toBe(
           texture,

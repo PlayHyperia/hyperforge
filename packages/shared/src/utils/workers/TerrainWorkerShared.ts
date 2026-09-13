@@ -1,4 +1,5 @@
 import { BIOME_CONFIG } from "../../systems/shared/world/TerrainHeightParams";
+import { createCompactHavenShoulder } from "../../systems/shared/world/CompactHavenShoulder";
 import {
   COMPACT_WORLD_TERRAIN_PROFILE,
   COMPACT_LANDFORM_PARAMETERS,
@@ -91,7 +92,17 @@ function assertTerrainWorkerInput(input) {
   var sculpt3 = p && p.algorithm === "compact-island-sculpt-v3";
   var sculpt4 = p && p.algorithm === "compact-island-sculpt-v4";
   var sculpt5 = p && p.algorithm === "compact-island-sculpt-v5";
-  keys(p, ${JSON.stringify(Object.keys(shape))}.concat(sculpt2 || sculpt3 || sculpt4 || sculpt5 ? ["landform"] : []).concat(sculpt3 || sculpt4 || sculpt5 ? ["bay"] : []).concat(sculpt4 || sculpt5 ? ["terrace"] : []).concat(sculpt5 ? ["ridgeBreakup"] : []));
+  var hasHavenShoulder = p && Object.prototype.hasOwnProperty.call(p, "havenShoulder");
+  keys(p, ${JSON.stringify(Object.keys(shape))}.concat(sculpt2 || sculpt3 || sculpt4 || sculpt5 ? ["landform"] : []).concat(sculpt3 || sculpt4 || sculpt5 ? ["bay"] : []).concat(sculpt4 || sculpt5 ? ["terrace"] : []).concat(sculpt5 ? ["ridgeBreakup"] : []).concat(sculpt5 && hasHavenShoulder ? ["havenShoulder"] : []));
+  if (hasHavenShoulder) {
+    var shoulderDescriptor = Object.getOwnPropertyDescriptor(p, "havenShoulder");
+    if (!shoulderDescriptor || !("value" in shoulderDescriptor)) fail();
+    var hs = (${createCompactHavenShoulder.toString()})().validate(shoulderDescriptor.value);
+    if (hs.minX < p.bounds.minX || hs.maxX > p.bounds.maxX || hs.minZ < p.bounds.minZ || hs.maxZ > p.bounds.maxZ ||
+        hs.grade <= p.water.threshold || [...hs.crest, ...hs.shelf, ...hs.toe].some(point => point[2] > p.height.maxHeightParameter)) fail();
+    if (JSON.stringify(hs) !== JSON.stringify(shoulderDescriptor.value)) fail();
+    p.havenShoulder = hs;
+  }
   if (sculpt2 || sculpt3 || sculpt4 || sculpt5) {
     keys(p.landform, ${JSON.stringify(Object.keys(COMPACT_LANDFORM_PARAMETERS))});
     if (!Object.values(p.landform).every(Number.isFinite)) fail();

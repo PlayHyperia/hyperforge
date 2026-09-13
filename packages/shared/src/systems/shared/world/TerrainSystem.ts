@@ -35,7 +35,11 @@ import type { ShorelineConfig, BiomeNoiseSet } from "./TerrainHeightParams";
 import { BiomeType, DEFAULT_BIOME, BIOME_LIST } from "./TerrainBiomeTypes";
 import { WaterBodyRegistry } from "./WaterBodyRegistry";
 import { createCompactPondDressing } from "./CompactPondDressing";
-import { createCompactServicePlanting } from "./CompactServiceCourt";
+import {
+  createCompactServicePlanting,
+  createCompactServiceSoil,
+} from "./CompactServiceCourt";
+import { createCompactLandscapeRockFootprints } from "./CompactLandscapeRockFootprints";
 import { CompactPondDressingVisuals } from "./CompactPondDressingVisuals";
 import { validateRadialPondTerrainProfile } from "./RadialPondTerrainProfile";
 import { createAuthoredTerrainSurfaceOperations } from "./AuthoredTerrainSurface";
@@ -43,6 +47,7 @@ import {
   createGrassTerrainSurfaceOperations,
   GRASS_SURFACE_NORMAL_SAMPLE_DISTANCE,
   type GrassTerrainSurfaceSnapshot,
+  type GrassTerrainExclusionPolygon,
 } from "../../../utils/workers/GrassTerrainSurfaceSnapshot";
 import type { TerrainGridBounds } from "./TerrainGridSurface";
 import type { GrassGroundingInputLease } from "./GrassGroundingPipeline";
@@ -97,6 +102,7 @@ import {
   COMPACT_TERRAIN_COMPOSITION,
   type CompactTerrainPond,
   type CompactTerrainMacroField,
+  type CompactTerrainPlantingLobe,
 } from "./CompactTerrainPalette";
 // NOTE: Import directly to avoid circular dependency through barrel file
 import { WaterSystem } from "./WaterSystem";
@@ -358,7 +364,13 @@ export class TerrainSystem extends System {
   private waterVisualManager: WaterVisualManager | null = null;
   private compactPondDressing: CompactPondDressingVisuals | null = null;
   private compactPondMaterial: CompactTerrainPond | null = null;
+  private landscapeGrassSurface = {
+    exclusionPolygons: [] as GrassTerrainExclusionPolygon[],
+  };
+  private grassSurfaceOperations = createGrassTerrainSurfaceOperations();
   private compactMacroMaterial: CompactTerrainMacroField | null | undefined;
+  private compactPlantingMaterial:
+    readonly CompactTerrainPlantingLobe[] | undefined;
   private grassVisualManager: GrassVisualManager | null = null;
 
   // Unified terrain generator from @hyperforge/procgen
@@ -529,6 +541,7 @@ export class TerrainSystem extends System {
     const material = createTerrainMaterial(undefined, {
       compactPbr: isCompactSculptProfile(profile),
       compactPond: this.getCompactPondMaterial(),
+      compactPlantingLobes: this.getCompactPlantingMaterial(),
       compactProfile: profile,
     });
     // The generator initializes before this client-only material exists. Apply
@@ -569,6 +582,16 @@ export class TerrainSystem extends System {
         this.getWorldTerrainProfile(),
       );
     return this.compactMacroMaterial;
+  }
+
+  private getCompactPlantingMaterial(): readonly CompactTerrainPlantingLobe[] {
+    const descriptor = DataManager.getWorldConfig()?.compactServicePlanting;
+    this.compactPlantingMaterial ??= createCompactServiceSoil(
+      descriptor?.terrainProfileId === this.getWorldTerrainProfile().id
+        ? descriptor
+        : undefined,
+    );
+    return this.compactPlantingMaterial;
   }
 
   /**
@@ -1754,6 +1777,10 @@ export class TerrainSystem extends System {
     if (this.destroyed)
       throw new Error("Terrain destroyed during manifest admission");
     this.getCompactPondMaterial();
+    this.landscapeGrassSurface.exclusionPolygons =
+      createCompactLandscapeRockFootprints(
+        DataManager.getWorldConfig()?.compactLandscapeRocks,
+      );
     console.log(
       "[TerrainSystem] Initializing admitted compact terrain profile",
     );
@@ -2446,6 +2473,13 @@ export class TerrainSystem extends System {
 
     return {
       terrainConfig: workerConfig,
+      compactPlantingLobes: this.getCompactPlantingMaterial(),
+      isGrassObstacleAt: (x, z) =>
+        this.grassSurfaceOperations.isGrassExcluded(
+          this.landscapeGrassSurface,
+          x,
+          z,
+        ),
       seed: this.computeSeedFromWorldId(),
       biomeCenters: biomeCenters.map((c) => ({
         x: c.x,
@@ -2642,12 +2676,24 @@ export class TerrainSystem extends System {
         waterBodies.push(body);
       }
     }
+    const exclusionPolygons: GrassTerrainExclusionPolygon[] = [];
+    for (const polygon of this.landscapeGrassSurface.exclusionPolygons) {
+      yield "terrain_region_exclusion";
+      if (
+        polygon.minX <= maxX &&
+        polygon.maxX >= minX &&
+        polygon.minZ <= maxZ &&
+        polygon.maxZ >= minZ
+      )
+        exclusionPolygons.push(polygon);
+    }
     return yield* operations.cloneSnapshotSteps({
       schemaVersion: 1,
       zones,
       arenaFloorIds: [...this.arenaFloorZoneIds].filter((id) => seen.has(id)),
       arenaGradeHeight: this.arenaGradeHeight,
       waterBodies,
+      ...(exclusionPolygons.length ? { exclusionPolygons } : {}),
     });
   }
 
@@ -5361,6 +5407,7 @@ export class TerrainSystem extends System {
           height,
           pond: this.compactPondMaterial,
           macroField: this.getCompactMacroMaterial(),
+          plantingLobes: this.getCompactPlantingMaterial(),
         },
       };
       Object.assign(color, compactTerrainColorOperations.sample(paletteInput));

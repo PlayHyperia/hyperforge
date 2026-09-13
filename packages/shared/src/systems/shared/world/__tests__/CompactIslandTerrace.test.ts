@@ -18,7 +18,7 @@ import {
 } from "../CompactPreparationLodge";
 import {
   SCULPTED_COMPACT_V4_PROFILE_FIXTURE as current,
-  SCULPTED_COMPACT_WORLD_TERRAIN_PROFILE as active,
+  HAVEN_SHOULDER_COMPACT_WORLD_TERRAIN_PROFILE as active,
   SCULPTED_COMPACT_V3_PROFILE_FIXTURE as previous,
   validateWorldTerrainProfile,
   worldTerrainProfileIdentity,
@@ -195,6 +195,7 @@ describe("explicit western rocky terrace successor", () => {
     const config = structuredClone(DataManager.getWorldConfig()!);
     delete config.compactServiceCourt;
     delete config.compactServicePlanting;
+    delete config.compactLandscapeRocks;
     config.terrainProfile = current;
     config.compactResourceGroves!.terrainProfileId = current.id;
     config.compactPreparationLodge = structuredClone(

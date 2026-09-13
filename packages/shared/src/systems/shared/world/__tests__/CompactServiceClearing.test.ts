@@ -11,6 +11,10 @@ import { getDuelArenaConfig } from "../../../../data/duel-manifest";
 import { inferLOD1Path, inferLOD2Path } from "../LODConfig";
 import { TerrainSystem } from "../TerrainSystem";
 import { RoadNetworkSystem } from "../RoadNetworkSystem";
+import {
+  SCULPTED_COMPACT_WORLD_TERRAIN_PROFILE,
+  type WorldTerrainProfile,
+} from "../WorldTerrainProfile";
 import { EntityManager } from "../../entities/EntityManager";
 import { ResourceSystem } from "../../entities/ResourceSystem";
 import { ResourceEntity } from "../../../../entities/world/ResourceEntity";
@@ -41,7 +45,7 @@ class CpuServerWorld extends World {
     return true;
   }
 }
-async function fixture() {
+async function fixture(historicalProfile?: WorldTerrainProfile) {
   const world = new CpuServerWorld();
   const manager = world.register(
     "entity-manager",
@@ -53,6 +57,13 @@ async function fixture() {
     "resource",
     ResourceSystem,
   ) as ResourceSystem;
+  if (historicalProfile) {
+    // Capture normal admitted configuration first, then isolate this historical
+    // world's height sampler before grades/roads/worker inputs are initialized.
+    // DataManager and every ordinary fixture retain the actual current world.
+    terrain.getWorldTerrainProfile();
+    terrain["activeTerrainProfile"] = historicalProfile;
+  }
   await terrain.init();
   terrain["loadWaterBodiesFromManifest"]();
   terrain["loadFlatZonesFromManifest"]();
@@ -432,11 +443,13 @@ describe("five surface-only service clearings, actual CPU owners (not native vis
     }
   });
 
-  it("records the previous plaza's mask rephase and complete six-leaf native-worker census without changing RNG", async () => {
-    const f = await fixture();
+  it("records the pre-shoulder plaza's mask rephase and complete six-leaf native-worker census without changing RNG", async () => {
+    const f = await fixture(SCULPTED_COMPACT_WORLD_TERRAIN_PROFILE);
     // Historical clearings were qualified while the broad plaza excluded grass.
-    // Retain that exact oracle; current plaza grounding/worker parity is covered
-    // independently in CompactGrassProfile, without rewriting these census hashes.
+    // They also used the pre-Haven-shoulder broken ridge. Retain both parts of
+    // that oracle; current plaza grounding and the admitted shoulder have their
+    // own integration coverage, without rewriting this historical RNG census.
+    f.terrain["landscapeGrassSurface"].exclusionPolygons = [];
     f.terrain.unregisterFlatZone("central_haven_lodge_grass_clearance");
     const plaza = f.terrain["flatZones"].get("central_haven_plaza")!;
     f.terrain.registerFlatZone({ ...plaza, excludeGrass: undefined });
@@ -615,6 +628,10 @@ describe("five surface-only service clearings, actual CPU owners (not native vis
           "\n",
       );
       const setup = f.terrain["buildGrassWorkerSetup"]();
+      expect(setup.terrainConfig.TERRAIN_PROFILE).toEqual(
+        SCULPTED_COMPACT_WORLD_TERRAIN_PROFILE,
+      );
+      expect(setup.terrainConfig.TERRAIN_PROFILE.havenShoulder).toBeUndefined();
       // Input production requires no retained mesh; no ticket is dispatched here.
       owner = new GrassVisualManager(
         setup.terrainConfig.TERRAIN_PROFILE_IDENTITY,
@@ -668,8 +685,8 @@ describe("five surface-only service clearings, actual CPU owners (not native vis
           input.roadSegments.length,
         ]);
       }
-      // Active v6 broken ridge changes western sampling; before/after clearing buffers
-      // above remain exactly equal, independently of this landform successor.
+      // Exact pre-shoulder broken-ridge oracle. A newer admitted terrain must
+      // not silently change the height/slope inputs behind this retained count.
       expect(receipts.map((r) => r[3])).toEqual([271, 495, 139, 532, 493, 343]);
       process.stdout.write(
         "Service clearing actual native-worker before/after (not GPU cost) " +

@@ -36,7 +36,9 @@ const PALETTE = Object.freeze({
   stone: { tint: [1.04, 1.0, 0.9], blend: 0.75, gain: 0.53 },
   // The CC0 scanned fern already has the intended natural leaf palette.
   fern: { tint: [1.0, 1.0, 1.0], blend: 0.0, gain: 1.0 },
-  bush: { tint: [0.94, 1.1, 0.63], blend: 0.8, gain: 0.85 },
+  // Preserve the source leaf chroma. Luminance blending raised its blue/green
+  // ratio fivefold before lighting, making shade susceptible to cyan sky fill.
+  bush: { tint: [0.94, 1.1, 0.63], blend: 0.0, gain: 0.85 },
   reed: { tint: [1.0, 1.0, 1.0], blend: 0.0, gain: 1.0 },
 });
 

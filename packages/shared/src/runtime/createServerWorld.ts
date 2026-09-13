@@ -53,6 +53,10 @@ import {
   COMPACT_SERVICE_COURT_SYSTEM,
   CompactServiceCourtSystem,
 } from "../systems/shared/world/CompactServiceCourtSystem";
+import {
+  COMPACT_LANDSCAPE_ROCKS_SYSTEM,
+  CompactLandscapeRocksSystem,
+} from "../systems/shared/world/CompactLandscapeRocksSystem";
 
 // RPG systems are registered via SystemLoader to keep them modular
 import { registerSystems } from "../systems/shared";
@@ -96,6 +100,7 @@ export async function createServerWorld(): Promise<World> {
   world.register("bridges", BridgeSystem);
   world.register("docks", ProceduralDocks);
   world.register(COMPACT_SERVICE_COURT_SYSTEM, CompactServiceCourtSystem);
+  world.register(COMPACT_LANDSCAPE_ROCKS_SYSTEM, CompactLandscapeRocksSystem);
 
   // ============================================================================
   // TOWN AND ROAD SYSTEMS

@@ -156,10 +156,10 @@ describe("authored compact island landform", () => {
       minify: true,
     });
     const source = runInNewContext(
-      `${result.outputFiles[0].text}\nCompactLandformBundle.createCompactIslandLandform.toString()`,
+      `${result.outputFiles[0].text}\nCompactLandformBundle.buildCompactIslandLandformJS()`,
     ) as string;
     // Fresh realm: no bundler's function-name helper is made available.
-    const embedded = runInNewContext(`(${source})()`) as ReturnType<
+    const embedded = runInNewContext(source) as ReturnType<
       typeof createCompactIslandLandform
     >;
     for (let x = 150; x <= 550; x += 11) {

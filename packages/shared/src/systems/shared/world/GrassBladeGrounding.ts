@@ -369,10 +369,10 @@ export function* groundGrassBladeSteps(
     )
   )
     throw new Error("Invalid grass grounding surface identities");
-  const snapshot =
-    yield* createGrassTerrainSurfaceOperations().validateSnapshotSteps(
-      request.terrainSurface,
-    );
+  const surfaceOperations = createGrassTerrainSurfaceOperations();
+  const snapshot = yield* surfaceOperations.validateSnapshotSteps(
+    request.terrainSurface,
+  );
   if (
     !Array.isArray(request.roadSegments) ||
     request.roadSegments.length > GRASS_BLADE_GROUNDING_LIMITS.maxRoadSegments
@@ -652,6 +652,18 @@ export function* groundGrassBladeSteps(
     return false;
   };
   const padOverlap = function* (box: TerrainGridBounds) {
+    // Extend static grass rejection to all-LOD rock silhouettes. Test the full
+    // swept blade box, not only its root, so wind cannot enter adjacent rocks.
+    for (const polygon of snapshot.exclusionPolygons ?? []) {
+      const steps = surfaceOperations.intersectsExclusionSteps(polygon, box);
+      let step = steps.next();
+      while (!step.done) {
+        yield "grounding_operation";
+        take();
+        step = steps.next();
+      }
+      if (step.value) return true;
+    }
     for (const zone of snapshot.zones) {
       yield "grounding_operation";
       take();

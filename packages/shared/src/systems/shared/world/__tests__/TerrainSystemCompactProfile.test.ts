@@ -8,7 +8,7 @@ import type { FullTerrainProvider } from "../TerrainQuadChunkGenerator";
 import { loadTownConfig } from "../TownSystem";
 import { loadPOIConfig } from "../POISystem";
 import {
-  SCULPTED_COMPACT_WORLD_TERRAIN_PROFILE,
+  HAVEN_SHOULDER_COMPACT_WORLD_TERRAIN_PROFILE,
   worldTerrainProfileIdentity,
 } from "../WorldTerrainProfile";
 
@@ -60,7 +60,7 @@ describe("real manifest to compact TerrainSystem integration", () => {
     const { terrain } = createTerrain();
     expect(DataManager.getInstance().isReady()).toBe(true);
     expect(terrain.getWorldTerrainProfile()).toEqual(
-      SCULPTED_COMPACT_WORLD_TERRAIN_PROFILE,
+      HAVEN_SHOULDER_COMPACT_WORLD_TERRAIN_PROFILE,
     );
     const profile = terrain.getWorldTerrainProfile();
     expect(terrain.getWorldTerrainProfile()).toBe(profile);

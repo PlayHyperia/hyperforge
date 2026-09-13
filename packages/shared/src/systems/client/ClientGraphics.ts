@@ -70,6 +70,7 @@
 
 import * as THREE from "../../extras/three/three";
 import type { World } from "../../core/World";
+import type { CompactLandscapeRocksVisualsSystem } from "./CompactLandscapeRocksVisualsSystem";
 import type { WorldOptions } from "../../types";
 import { EventType } from "../../types/events";
 import { System } from "../shared/infrastructure/System";
@@ -362,6 +363,11 @@ export class ClientGraphics extends System {
   }
 
   render() {
+    this.world
+      .getSystem<CompactLandscapeRocksVisualsSystem>(
+        "compact-landscape-rocks-visuals",
+      )
+      ?.prepareForRender(this.world.camera, this.renderer.domElement.height);
     // Camera owners (including diagnostic leases) select their pose before this
     // method. Screen-space fog must use that same pose, not the earlier update.
     this.world

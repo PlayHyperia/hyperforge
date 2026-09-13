@@ -16,6 +16,7 @@ import { createCompactIslandLandform } from "../CompactIslandLandform";
 import { COMPACT_PREPARATION_LODGE_V5_FIXTURE } from "../CompactPreparationLodge";
 import {
   SCULPTED_COMPACT_WORLD_TERRAIN_PROFILE as current,
+  HAVEN_SHOULDER_COMPACT_WORLD_TERRAIN_PROFILE,
   SCULPTED_COMPACT_V4_PROFILE_FIXTURE as previous,
   COMPACT_RIDGE_BREAKUP_PARAMETERS,
   validateWorldTerrainProfile,
@@ -50,6 +51,7 @@ describe("shared broken-ridge sculpt", () => {
     // This architecture did not exist in the retained v5 world content.
     delete old.compactServiceCourt;
     delete old.compactServicePlanting;
+    delete old.compactLandscapeRocks;
     old.terrainProfile = previous;
     old.compactResourceGroves = {
       ...old.compactResourceGroves!,
@@ -116,7 +118,9 @@ describe("shared broken-ridge sculpt", () => {
     );
   });
   it("selects a complete v6 world without changing existing service or grove geometry", () => {
-    expect(DataManager.getWorldTerrainProfile()).toEqual(current);
+    expect(DataManager.getWorldTerrainProfile()).toEqual(
+      HAVEN_SHOULDER_COMPACT_WORLD_TERRAIN_PROFILE,
+    );
     expect([current.id, current.algorithm]).toEqual([
       "compact-duel-island-v6",
       "compact-island-sculpt-v5",

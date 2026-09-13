@@ -64,6 +64,7 @@ type WorkerReceipt = {
   water: number[];
   candidateIds: string[][];
   indexedZoneReferences: number;
+  excluded: boolean[];
 };
 
 /** Real Node worker and native structured clone; no game or transport mocks. */
@@ -80,6 +81,7 @@ function actualWorker(
         const index = operations.createZoneIndex(snapshot, input.tileSize ?? 100);
         const points = input.points ?? [];
         parentPort.postMessage({ snapshot, indexedZoneReferences: index.indexedZoneReferences,
+          excluded: points.map(p => operations.isGrassExcluded(snapshot, p[0], p[1])),
           water: points.map(p => operations.getWaterSurfaceAt(snapshot, input.oceanLevel ?? 16, p[0], p[1])),
           candidateIds: points.map(p => index.getZonesAt(p[0], p[1]).map(z => z.id)) });
       } catch (error) { parentPort.postMessage({ error: String(error.message) }); }
@@ -121,6 +123,138 @@ function actualWorker(
 }
 
 describe("detached grass terrain surface requests", () => {
+  it("clones bounded all-LOD exclusion polygons and matches real-worker point queries without shaping terrain", async () => {
+    const polygon = {
+      id: "rock",
+      minX: -2,
+      maxX: 2,
+      minZ: -2,
+      maxZ: 2,
+      vertices: [
+        { x: -2, z: 0 },
+        { x: 0, z: -2 },
+        { x: 2, z: 0 },
+        { x: 0, z: 2 },
+      ],
+    };
+    const input = { ...snapshot([]), exclusionPolygons: [polygon] };
+    const clone = operations.cloneSnapshot(input);
+    expect(clone).toEqual(input);
+    expect(clone.exclusionPolygons![0].vertices[0]).not.toBe(
+      polygon.vertices[0],
+    );
+    expect(operations.cloneSnapshot(snapshot([]))).not.toHaveProperty(
+      "exclusionPolygons",
+    );
+    const points = [
+      [0, 0],
+      [-2, 0],
+      [0, 2],
+      [1, 0.999],
+      [1, 1.001],
+      [1.9, 1.9],
+      [3, 0],
+    ];
+    const expected = [true, true, true, true, false, false, false];
+    expect(
+      points.map(([x, z]) => operations.isGrassExcluded(clone, x, z)),
+    ).toEqual(expected);
+    const worker = actualWorker();
+    try {
+      const receipt = await worker.execute({ snapshot: clone, points });
+      expect(receipt.error).toBeUndefined();
+      expect(receipt.excluded).toEqual(expected);
+      expect(receipt.snapshot.zones).toEqual([]);
+    } finally {
+      await worker.close();
+    }
+    for (const bad of [
+      { ...polygon, minX: -3 },
+      { ...polygon, vertices: [...polygon.vertices].reverse() },
+      {
+        ...polygon,
+        vertices: [
+          polygon.vertices[0],
+          polygon.vertices[0],
+          polygon.vertices[2],
+        ],
+      },
+      {
+        ...polygon,
+        vertices: polygon.vertices.map((p, i) =>
+          i === 1 ? { x: 0, z: 1 } : p,
+        ),
+      },
+      {
+        ...polygon,
+        vertices: polygon.vertices.map((p, i) =>
+          i === 1 ? { x: NaN, z: -2 } : p,
+        ),
+      },
+    ])
+      expect(() =>
+        operations.validateSnapshot({ ...input, exclusionPolygons: [bad] }),
+      ).toThrow();
+    expect(() =>
+      operations.validateSnapshot({
+        ...input,
+        exclusionPolygons: [polygon, polygon],
+      }),
+    ).toThrow();
+    expect(() =>
+      operations.validateSnapshot({
+        ...input,
+        exclusionPolygons: Array.from({ length: 25 }, (_, i) => ({
+          ...polygon,
+          id: String(i),
+        })),
+      }),
+    ).toThrow();
+  });
+
+  it("tests the complete swept blade box against convex silhouettes, not their over-wide bounding rectangles", () => {
+    const polygon = {
+      id: "rock",
+      minX: -2,
+      maxX: 2,
+      minZ: -2,
+      maxZ: 2,
+      vertices: [
+        { x: -2, z: 0 },
+        { x: 0, z: -2 },
+        { x: 2, z: 0 },
+        { x: 0, z: 2 },
+      ],
+    };
+    const overlap = (
+      minX: number,
+      maxX: number,
+      minZ: number,
+      maxZ: number,
+    ) => {
+      const steps = operations.intersectsExclusionSteps(polygon, {
+        minX,
+        maxX,
+        minZ,
+        maxZ,
+      });
+      let step = steps.next(),
+        work = 0;
+      while (!step.done) {
+        work++;
+        step = steps.next();
+      }
+      expect(work).toBeLessThanOrEqual(5);
+      return step.value;
+    };
+    expect(overlap(1.5, 1.9, 1.5, 1.9)).toBe(false);
+    expect(overlap(1.9, 2.1, -0.1, 0.1)).toBe(true);
+    expect(overlap(2, 3, 0, 1)).toBe(true);
+    expect(overlap(2.001, 3, 0, 1)).toBe(false);
+    expect(overlap(-3, 3, -0.1, 0.1)).toBe(true);
+    expect(overlap(-0.1, 0.1, -0.1, 0.1)).toBe(true);
+  });
+
   it("resumes the maximum admitted mask without skipping validation or mutating input", () => {
     const tileMaskTiles = Array.from(
       { length: operations.limits.maxMaskTiles },

@@ -9,7 +9,10 @@
 import { BiomeType, DEFAULT_BIOME } from "./TerrainBiomeTypes";
 import { TERRAIN_CONSTANTS } from "../../../constants/GameConstants";
 import type { WorldTerrainProfile } from "./WorldTerrainProfile";
-import { createCompactIslandLandform } from "./CompactIslandLandform";
+import {
+  createCompactIslandLandform,
+  buildCompactIslandLandformJS,
+} from "./CompactIslandLandform";
 import {
   smoothstep,
   mapRangeSmooth,
@@ -676,7 +679,7 @@ const BIOME_CONFIGS_JS = `
 export function buildGetBaseHeightAtJS(): string {
   return `
   ${BIOME_CONFIGS_JS}
-  var compactIslandLandform = (${createCompactIslandLandform.toString()})();
+  var compactIslandLandform = ${buildCompactIslandLandformJS()};
 
   var NOISE_COORD_SCALE = ${NOISE_COORD_SCALE};
   var TERRAIN_SCALE_VAL = config.TERRAIN_PROFILE.height.terrainScale;

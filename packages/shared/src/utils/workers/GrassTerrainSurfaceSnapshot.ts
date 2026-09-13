@@ -12,6 +12,16 @@ export type GrassTerrainWaterBody = {
   surfaceY: number;
 };
 
+/** Convex counter-clockwise XZ silhouette. Vegetation only: never a height edit. */
+export type GrassTerrainExclusionPolygon = {
+  id: string;
+  minX: number;
+  maxX: number;
+  minZ: number;
+  maxZ: number;
+  vertices: { x: number; z: number }[];
+};
+
 export type GrassTerrainSurfaceSnapshot = {
   schemaVersion: 1;
   /** Global registration order, filtered by the caller's complete query region. */
@@ -19,6 +29,7 @@ export type GrassTerrainSurfaceSnapshot = {
   arenaFloorIds: string[];
   arenaGradeHeight: number | null;
   waterBodies: GrassTerrainWaterBody[];
+  exclusionPolygons?: GrassTerrainExclusionPolygon[];
 };
 
 export type GrassTerrainSurfaceSnapshotInput = {
@@ -26,6 +37,7 @@ export type GrassTerrainSurfaceSnapshotInput = {
   arenaFloorIds: readonly string[];
   arenaGradeHeight: number | null;
   waterBodies: readonly GrassTerrainWaterBody[];
+  exclusionPolygons?: readonly GrassTerrainExclusionPolygon[];
 };
 
 export type GrassTerrainZoneIndex = {
@@ -42,6 +54,8 @@ export type GrassTerrainSurfaceOperations = {
     maxWaterBodies: number;
     maxIndexedZoneReferences: number;
     maxIdLength: number;
+    maxExclusionPolygons: number;
+    maxPolygonVertices: number;
   }>;
   /** Validate once at each request boundary, not during per-blade sampling. */
   validateSnapshot(value: unknown): GrassTerrainSurfaceSnapshot;
@@ -66,6 +80,17 @@ export type GrassTerrainSurfaceOperations = {
     x: number,
     z: number,
   ): number;
+  /** Already-validated snapshots, no terrain shaping or allocation per query. */
+  isGrassExcluded(
+    snapshot: Pick<GrassTerrainSurfaceSnapshot, "exclusionPolygons">,
+    x: number,
+    z: number,
+  ): boolean;
+  /** SAT against a full swept blade AABB, including boundary contact. */
+  intersectsExclusionSteps(
+    polygon: GrassTerrainExclusionPolygon,
+    bounds: { minX: number; maxX: number; minZ: number; maxZ: number },
+  ): Generator<string, boolean, void>;
 };
 
 /**
@@ -80,6 +105,8 @@ export function createGrassTerrainSurfaceOperations(): GrassTerrainSurfaceOperat
     maxWaterBodies: 128,
     maxIndexedZoneReferences: 65536,
     maxIdLength: 128,
+    maxExclusionPolygons: 24,
+    maxPolygonVertices: 64,
   });
   const helpers = {
     fail(label: string): never {
@@ -364,6 +391,63 @@ export function createGrassTerrainSurfaceOperations(): GrassTerrainSurfaceOperat
           helpers.finite(edge, "water extent");
         helpers.finite(water.surfaceY, "water surfaceY");
       }
+      if (snapshot.exclusionPolygons !== undefined) {
+        if (
+          !Array.isArray(snapshot.exclusionPolygons) ||
+          snapshot.exclusionPolygons.length > limits.maxExclusionPolygons
+        )
+          return helpers.fail("exclusion polygon count");
+        const ids = new Set<string>();
+        for (const value of snapshot.exclusionPolygons) {
+          yield "snapshot_polygon";
+          const polygon = helpers.record(value, "exclusion polygon");
+          const id = helpers.identifier(polygon.id, "exclusion polygon ID");
+          if (ids.has(id))
+            return helpers.fail("duplicate exclusion polygon ID");
+          ids.add(id);
+          if (
+            !Array.isArray(polygon.vertices) ||
+            polygon.vertices.length < 3 ||
+            polygon.vertices.length > limits.maxPolygonVertices
+          )
+            return helpers.fail("exclusion polygon vertex count");
+          const points: { x: number; z: number }[] = [];
+          for (const value of polygon.vertices) {
+            yield "snapshot_polygon_vertex";
+            const point = helpers.record(value, "exclusion vertex");
+            points.push({
+              x: helpers.finite(point.x, "exclusion X"),
+              z: helpers.finite(point.z, "exclusion Z"),
+            });
+          }
+          for (const axis of ["X", "Z"] as const) {
+            const values = points.map((p) => (axis === "X" ? p.x : p.z));
+            if (
+              polygon[`min${axis}`] !== Math.min(...values) ||
+              polygon[`max${axis}`] !== Math.max(...values)
+            )
+              return helpers.fail(
+                "exclusion polygon bounds must match vertices",
+              );
+          }
+          // Every vertex must lie strictly inside every nonincident edge.
+          // This rejects concavity, winding errors, duplicates and star polygons.
+          for (let i = 0; i < points.length; i++) {
+            const a = points[i],
+              b = points[(i + 1) % points.length];
+            for (let j = 0; j < points.length; j++) {
+              yield "snapshot_polygon_convexity";
+              if (j === i || j === (i + 1) % points.length) continue;
+              const p = points[j],
+                side = (b.x - a.x) * (p.z - a.z) - (b.z - a.z) * (p.x - a.x);
+              if (!Number.isFinite(side) || side <= 0)
+                return helpers.fail(
+                  "exclusion polygon must be strictly convex CCW",
+                );
+            }
+          }
+        }
+      }
       return input as GrassTerrainSurfaceSnapshot;
     },
     cloneSnapshot(input) {
@@ -433,12 +517,32 @@ export function createGrassTerrainSurfaceOperations(): GrassTerrainSurfaceOperat
           surfaceY: body.surfaceY,
         });
       }
+      const exclusionPolygons: GrassTerrainExclusionPolygon[] = [];
+      for (const polygon of snapshot.exclusionPolygons ?? []) {
+        yield "snapshot_clone_polygon";
+        const vertices: { x: number; z: number }[] = [];
+        for (const point of polygon.vertices) {
+          yield "snapshot_clone_polygon_vertex";
+          vertices.push({ x: point.x, z: point.z });
+        }
+        exclusionPolygons.push({
+          id: polygon.id,
+          minX: polygon.minX,
+          maxX: polygon.maxX,
+          minZ: polygon.minZ,
+          maxZ: polygon.maxZ,
+          vertices,
+        });
+      }
       return {
         schemaVersion: 1,
         zones,
         arenaFloorIds: [...snapshot.arenaFloorIds],
         arenaGradeHeight: snapshot.arenaGradeHeight,
         waterBodies,
+        ...(snapshot.exclusionPolygons !== undefined
+          ? { exclusionPolygons }
+          : {}),
       };
     },
     createZoneIndex(snapshot, tileSize) {
@@ -512,6 +616,43 @@ export function createGrassTerrainSurfaceOperations(): GrassTerrainSurfaceOperat
           return candidates;
         },
       };
+    },
+    isGrassExcluded(snapshot, x, z) {
+      for (const p of snapshot.exclusionPolygons ?? []) {
+        if (x < p.minX || x > p.maxX || z < p.minZ || z > p.maxZ) continue;
+        let inside = true;
+        for (let i = 0; i < p.vertices.length; i++) {
+          const a = p.vertices[i],
+            b = p.vertices[(i + 1) % p.vertices.length];
+          if ((b.x - a.x) * (z - a.z) - (b.z - a.z) * (x - a.x) < 0) {
+            inside = false;
+            break;
+          }
+        }
+        if (inside) return true;
+      }
+      return false;
+    },
+    *intersectsExclusionSteps(p, box) {
+      yield "polygon_bounds";
+      if (
+        box.maxX < p.minX ||
+        box.minX > p.maxX ||
+        box.maxZ < p.minZ ||
+        box.minZ > p.maxZ
+      )
+        return false;
+      for (let i = 0; i < p.vertices.length; i++) {
+        yield "polygon_edge";
+        const a = p.vertices[i],
+          b = p.vertices[(i + 1) % p.vertices.length];
+        const nx = -(b.z - a.z),
+          nz = b.x - a.x;
+        const x = nx >= 0 ? box.maxX : box.minX,
+          z = nz >= 0 ? box.maxZ : box.minZ;
+        if (nx * (x - a.x) + nz * (z - a.z) < 0) return false;
+      }
+      return true;
     },
     getWaterSurfaceAt(snapshot, oceanLevel, x, z) {
       let highest: number | null = null;

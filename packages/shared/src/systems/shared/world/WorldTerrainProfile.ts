@@ -11,6 +11,11 @@
  * navigation, resource manifests or the source-code closure of a whole world.
  */
 import { TERRAIN_CONSTANTS } from "../../../constants/GameConstants";
+import havenShoulderData from "../../../data/compact-haven-shoulder-v1.json";
+import {
+  createCompactHavenShoulder,
+  type CompactHavenShoulder,
+} from "./CompactHavenShoulder";
 import {
   BASE_OFFSET,
   BEACH_PROFILE_POWER,
@@ -25,6 +30,7 @@ import {
 } from "./TerrainHeightParams";
 
 type NumericFields<T> = { readonly [K in keyof T]: number };
+const havenShoulderAdmission = createCompactHavenShoulder();
 
 /** Metre offsets from the island centre at a 165 m authoring radius. */
 export const COMPACT_LANDFORM_PARAMETERS = Object.freeze({
@@ -128,6 +134,8 @@ export type WorldTerrainProfile = Readonly<{
   terrace?: NumericFields<typeof COMPACT_TERRACE_PARAMETERS>;
   /** Required by sculpt-v5; shared by height, navigation and native workers. */
   ridgeBreakup?: NumericFields<typeof COMPACT_RIDGE_BREAKUP_PARAMETERS>;
+  /** Explicit bounded authored modifier; omission preserves the v5 base exactly. */
+  havenShoulder?: CompactHavenShoulder;
 }>;
 
 /** Historical numeric regression fixture only, never a runtime selection.
@@ -231,13 +239,20 @@ export const SCULPTED_COMPACT_V4_PROFILE_FIXTURE: WorldTerrainProfile =
     terrace: COMPACT_TERRACE_PARAMETERS,
   });
 
-/** Sole active sculpt candidate: asymmetric outcrops separated by saddles. */
+/** Base sculpt fixture: asymmetric outcrops separated by saddles. */
 export const SCULPTED_COMPACT_WORLD_TERRAIN_PROFILE: WorldTerrainProfile =
   validateWorldTerrainProfile({
     ...SCULPTED_COMPACT_V4_PROFILE_FIXTURE,
     algorithm: "compact-island-sculpt-v5",
     id: "compact-duel-island-v6",
     ridgeBreakup: COMPACT_RIDGE_BREAKUP_PARAMETERS,
+  });
+
+/** Explicit Haven candidate; the full content identity includes its authored data. */
+export const HAVEN_SHOULDER_COMPACT_WORLD_TERRAIN_PROFILE: WorldTerrainProfile =
+  validateWorldTerrainProfile({
+    ...SCULPTED_COMPACT_WORLD_TERRAIN_PROFILE,
+    havenShoulder: havenShoulderData,
   });
 
 /** Styling/ecology family, not a substitute for strict profile admission. */
@@ -327,10 +342,21 @@ export function validateWorldTerrainProfile(
     typeof input === "object" &&
     Object.getOwnPropertyDescriptor(input, "algorithm")?.value ===
       "compact-island-sculpt-v5";
+  const hasHavenShoulder =
+    input !== null &&
+    typeof input === "object" &&
+    Object.prototype.hasOwnProperty.call(input, "havenShoulder");
   const data = record(
     input,
     v5
-      ? [...Object.keys(base), "landform", "bay", "terrace", "ridgeBreakup"]
+      ? [
+          ...Object.keys(base),
+          "landform",
+          "bay",
+          "terrace",
+          "ridgeBreakup",
+          ...(hasHavenShoulder ? ["havenShoulder"] : []),
+        ]
       : v4
         ? [...Object.keys(base), "landform", "bay", "terrace"]
         : v3
@@ -384,6 +410,23 @@ export function validateWorldTerrainProfile(
         "ridgeBreakup",
       )
     : undefined;
+  const havenShoulder = hasHavenShoulder
+    ? havenShoulderAdmission.validate(data.havenShoulder)
+    : undefined;
+  if (
+    havenShoulder &&
+    (havenShoulder.minX < bounds.minX ||
+      havenShoulder.maxX > bounds.maxX ||
+      havenShoulder.minZ < bounds.minZ ||
+      havenShoulder.maxZ > bounds.maxZ ||
+      havenShoulder.grade <= water.threshold ||
+      [
+        ...havenShoulder.crest,
+        ...havenShoulder.shelf,
+        ...havenShoulder.toe,
+      ].some((p) => p[2] > height.maxHeightParameter))
+  )
+    fail("Haven shoulder envelope/height");
   if (ridgeBreakup) {
     const r = ridgeBreakup;
     if (
@@ -558,6 +601,7 @@ export function validateWorldTerrainProfile(
     ...(bay ? { bay } : {}),
     ...(terrace ? { terrace } : {}),
     ...(ridgeBreakup ? { ridgeBreakup } : {}),
+    ...(havenShoulder ? { havenShoulder } : {}),
   });
   const reservedSculptAlgorithm = {
     "compact-duel-island-v2": "compact-island-sculpt-v1",

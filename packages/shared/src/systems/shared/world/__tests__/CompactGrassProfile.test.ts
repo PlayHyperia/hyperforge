@@ -97,6 +97,7 @@ async function fixture(
     // Explicit historical surface fixture. Preserve old census oracles when
     // comparing terrain algorithms; the current manifest is tested separately.
     terrain.unregisterFlatZone("central_haven_lodge_grass_clearance");
+    terrain["landscapeGrassSurface"].exclusionPolygons = [];
     const plaza = terrain["flatZones"].get("central_haven_plaza")!;
     terrain.registerFlatZone({ ...plaza, excludeGrass: undefined });
   }
@@ -646,6 +647,54 @@ describe("opt-in compact grass, actual terrain and native worker (not GPU proof)
     ).toThrow();
   });
 
+  it("changes only grass root colour inside admitted soil, preserving every worker placement byte", async () => {
+    const f = await fixture();
+    try {
+      const { owner } = f.manager(COMPACT_ISLAND_GRASS_VISUAL_PROFILE);
+      const ops = createCompactTerrainColorOperations();
+      let changedColours = 0;
+      for (const node of f.nodes) {
+        const input = owner["createWorkerInput"](
+          node,
+          owner["chunkKey"](node),
+          1,
+        );
+        expect(input.compactPlantingLobes).toHaveLength(4);
+        const [before, after] = [
+          await f.worker.run({ ...input, compactPlantingLobes: [] }),
+          await f.worker.run(input),
+        ];
+        expect(after.count).toBe(before.count);
+        for (const key of [
+          "offsets",
+          "rotScaleHash",
+          "grassTints",
+          "groundNormals",
+        ] as const)
+          expect(new Uint8Array(after[key].buffer)).toEqual(
+            new Uint8Array(before[key].buffer),
+          );
+        for (let i = 0; i < after.count; i++) {
+          const changed = [0, 1, 2].some(
+            (channel) =>
+              after.groundColors[i * 3 + channel] !==
+              before.groundColors[i * 3 + channel],
+          );
+          if (!changed) continue;
+          changedColours++;
+          const x = node.centerX + after.offsets[i * 3];
+          const z = node.centerZ + after.offsets[i * 3 + 2];
+          expect(
+            ops.plantingSoil(x, z, 0.5, input.compactPlantingLobes),
+          ).toBeGreaterThan(0);
+        }
+      }
+      expect(changedColours).toBeGreaterThan(0);
+    } finally {
+      await f.close();
+    }
+  });
+
   it("grounds the current natural plaza with unchanged density, actual worker/CPU parity and retained service exclusions", async () => {
     const f = await fixture();
     try {
@@ -674,14 +723,23 @@ describe("opt-in compact grass, actual terrain and native worker (not GPU proof)
       process.stdout.write(
         `Current plaza worker census: ${JSON.stringify(counts)}\n`,
       );
-      expect(counts).toEqual([715, 552, 1010, 1199, 820, 349]);
-      // The northern leaf lies outside the campus clearance change.
-      expect(counts[5]).toBe(349);
+      // Same sampling/density: two campus and eight northern clumps now fall
+      // inside the authored all-LOD rock silhouettes. Other leaves unchanged.
+      expect(counts).toEqual([715, 552, 1008, 1199, 820, 341]);
       const node = f.nodes[2];
       f.installSupport(node);
       const { key, entry, data } = await queueGrounding(f, owner, node);
       expect(data.count).toBe(counts[2]);
-      expect(finishGrounding(owner, key)).toBe(1);
+      const uploads = finishGrounding(owner, key);
+      expect(
+        uploads,
+        JSON.stringify({
+          status: entry.job.state.status,
+          activeMs: entry.job.activeMs,
+          operations: entry.job.operations,
+          maximumSliceMs: entry.job.maximumSliceMs,
+        }),
+      ).toBe(1);
       const state = entry.job.state;
       expect(state.status).toBe("ready");
       if (state.status !== "ready")
@@ -697,7 +755,11 @@ describe("opt-in compact grass, actual terrain and native worker (not GPU proof)
         ).toBeLessThanOrEqual(0.8);
         if (x >= 326 && x <= 374 && z >= 296 && z <= 344) naturalPlazaClumps++;
       }
-      expect(result.data.count).toBe(936);
+      process.stdout.write(
+        `Landscape plaza grounding census: ${JSON.stringify({ accepted: result.data.count, naturalPlazaClumps })}\n`,
+      );
+      // Two root exclusions plus one additional swept-blade exclusion.
+      expect(result.data.count).toBe(933);
       expect(naturalPlazaClumps).toBe(110);
       expect(result.receipt.rejected.pad).toBeGreaterThan(0);
       expect(result.receipt.maxAcceptedBaseError).toBeLessThanOrEqual(0.05);

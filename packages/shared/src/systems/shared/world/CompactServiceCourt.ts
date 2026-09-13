@@ -8,6 +8,7 @@ import {
   type CompactPondPlacement,
 } from "./CompactPondDressing";
 import type { WorldTerrainProfile } from "./WorldTerrainProfile";
+import type { CompactTerrainPlantingLobe } from "./CompactTerrainPalette";
 import type { WorkshopFoot } from "@hyperforge/procgen/building";
 
 export const COMPACT_SERVICE_COURT: CompactServiceCourtManifest = Object.freeze(
@@ -65,8 +66,12 @@ export function validateCompactServicePlanting(
       "terrainProfileId",
       "beds",
     ]) ||
-    copy.schemaVersion !== 1 ||
-    copy.layoutId !== "compact-smithy-planting-v1" ||
+    !(
+      (copy.schemaVersion === 1 &&
+        copy.layoutId === "compact-smithy-planting-v1") ||
+      (copy.schemaVersion === 2 &&
+        copy.layoutId === "compact-smithy-planting-v2")
+    ) ||
     copy.terrainProfileId !== "compact-duel-island-v6" ||
     !court ||
     profile.id !== court.terrainProfileId ||
@@ -82,7 +87,12 @@ export function validateCompactServicePlanting(
     if (
       !bed ||
       typeof bed !== "object" ||
-      !exactKeys(bed, ["id", "plants"]) ||
+      !exactKeys(
+        bed,
+        copy.schemaVersion === 2
+          ? ["id", "plants", "soilLobes"]
+          : ["id", "plants"],
+      ) ||
       !["west", "east"].includes(bed.id) ||
       ids.has(bed.id) ||
       !Array.isArray(bed.plants) ||
@@ -93,19 +103,55 @@ export function validateCompactServicePlanting(
     ids.add(bed.id);
     const minX = bed.id === "west" ? 327.5 : 342.2;
     const maxX = bed.id === "west" ? 331 : 345.5;
+    if (copy.schemaVersion === 2) {
+      if (!Array.isArray(bed.soilLobes) || bed.soilLobes.length !== 2)
+        throw new Error(
+          "Compact service planting requires two soil lobes per bed",
+        );
+      for (const lobe of bed.soilLobes) {
+        if (
+          !lobe ||
+          typeof lobe !== "object" ||
+          !exactKeys(lobe, ["centerX", "centerZ", "radiusX", "radiusZ"]) ||
+          ![lobe.centerX, lobe.centerZ, lobe.radiusX, lobe.radiusZ].every(
+            Number.isFinite,
+          ) ||
+          lobe.radiusX < 0.75 ||
+          lobe.radiusX > 3 ||
+          lobe.radiusZ < 0.75 ||
+          lobe.radiusZ > 3 ||
+          lobe.centerX - lobe.radiusX < minX ||
+          lobe.centerX + lobe.radiusX > maxX ||
+          lobe.centerZ - lobe.radiusZ < 334 ||
+          lobe.centerZ + lobe.radiusZ > 343.2
+        )
+          throw new Error("Compact service soil exceeds its admitted bed");
+        Object.freeze(lobe);
+      }
+      Object.freeze(bed.soilLobes);
+    }
     for (const plant of bed.plants) {
       if (
         !plant ||
         typeof plant !== "object" ||
-        !exactKeys(plant, ["x", "z", "scale", "yaw"]) ||
+        !exactKeys(
+          plant,
+          copy.schemaVersion === 2
+            ? ["model", "x", "z", "scale", "yaw"]
+            : ["x", "z", "scale", "yaw"],
+        ) ||
+        (copy.schemaVersion === 2 &&
+          plant.model !== "bush" &&
+          plant.model !== "fern") ||
         ![plant.x, plant.z, plant.scale, plant.yaw].every(Number.isFinite) ||
-        plant.scale < 0.65 ||
+        plant.scale < (plant.model === "fern" ? 0.5 : 0.65) ||
         plant.scale > 1 ||
         plant.yaw < 0 ||
         plant.yaw >= Math.PI * 2
       )
         throw new Error("Invalid compactServicePlanting plant");
-      const radius = COMPACT_POND_MODELS.bush.radius * plant.scale;
+      const model = plant.model === "fern" ? "fern" : "bush";
+      const radius = COMPACT_POND_MODELS[model].radius * plant.scale;
       if (
         plant.x - radius < minX ||
         plant.x + radius > maxX ||
@@ -124,7 +170,7 @@ export function validateCompactServicePlanting(
   return Object.freeze(copy);
 }
 
-/** Reuse the pond's genuine bush geometry, palette and instance batch. */
+/** Reuse the pond's genuine foliage geometry, palette and instance batches. */
 export function createCompactServicePlanting(
   descriptor: CompactServicePlantingManifest | undefined,
 ): readonly CompactPondPlacement[] {
@@ -134,11 +180,20 @@ export function createCompactServicePlanting(
         Object.freeze({
           ...p,
           id: `smithy_${bed.id}_${i}`,
-          model: "bush" as const,
+          model: p.model ?? ("bush" as const),
           burial: 0.04,
         }),
       ),
     ) ?? [],
+  );
+}
+
+/** Flatten already admitted content once per terrain lifetime, not per blade. */
+export function createCompactServiceSoil(
+  descriptor: CompactServicePlantingManifest | undefined,
+): readonly CompactTerrainPlantingLobe[] {
+  return Object.freeze(
+    descriptor?.beds.flatMap((bed) => bed.soilLobes ?? []) ?? [],
   );
 }
 

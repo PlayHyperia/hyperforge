@@ -37,13 +37,18 @@ import {
   createCompactTerrainMacroWeights,
   createCompactCoastWeights,
   applyCompactCoastRock,
+  createCompactPlantingSoil,
   type CompactTerrainLayer,
 } from "../CompactTerrainMaterial";
-import { createCompactTerrainColorOperations } from "../CompactTerrainPalette";
+import {
+  createCompactTerrainColorOperations,
+  type CompactTerrainPlantingLobe,
+} from "../CompactTerrainPalette";
 import { ALL_WORLD_AREAS } from "../../../../data/world-areas";
 import { DataManager } from "../../../../data/DataManager";
 import { World } from "../../../../core/World";
 import { TerrainSystem } from "../TerrainSystem";
+import { createCompactServiceSoil } from "../CompactServiceCourt";
 import {
   SCULPTED_COMPACT_WORLD_TERRAIN_PROFILE,
   SCULPTED_COMPACT_V1_PROFILE_FIXTURE,
@@ -58,6 +63,315 @@ const assetDirectory = new URL(
   "../../../../../../server/world/assets/terrain/textures/compact-pbr/",
   import.meta.url,
 );
+
+describe("bounded compact planting soil arithmetic", () => {
+  const ops = createCompactTerrainColorOperations();
+  const lobes: readonly CompactTerrainPlantingLobe[] = Object.freeze([
+    Object.freeze({
+      centerX: 329.2,
+      centerZ: 336.1,
+      radiusX: 1.35,
+      radiusZ: 2.1,
+    }),
+    Object.freeze({
+      centerX: 329.35,
+      centerZ: 340.9,
+      radiusX: 1.5,
+      radiusZ: 2.2,
+    }),
+    Object.freeze({
+      centerX: 343.7,
+      centerZ: 338.3,
+      radiusX: 1.38,
+      radiusZ: 1.7,
+    }),
+    Object.freeze({
+      centerX: 343.95,
+      centerZ: 340.65,
+      radiusX: 1.4,
+      radiusZ: 1.95,
+    }),
+  ]);
+
+  it("admits detached frozen bounded fields and rejects accessor/noncanonical data", () => {
+    for (const absent of [undefined, null, []]) {
+      const empty = ops.validatePlantingLobes(absent);
+      expect(empty).toEqual([]);
+      expect(Object.isFrozen(empty)).toBe(true);
+    }
+    const input = structuredClone(lobes);
+    const admitted = ops.validatePlantingLobes(input);
+    expect(admitted).toEqual(input);
+    expect(admitted).not.toBe(input);
+    expect(Object.isFrozen(admitted)).toBe(true);
+    for (let i = 0; i < admitted.length; i++) {
+      expect(admitted[i]).not.toBe(input[i]);
+      expect(Object.isFrozen(admitted[i])).toBe(true);
+    }
+    let getterReads = 0;
+    const accessor = { ...lobes[0] };
+    Object.defineProperty(accessor, "centerX", {
+      get() {
+        getterReads++;
+        return 329;
+      },
+    });
+    const listAccessor = [lobes[0]];
+    Object.defineProperty(listAccessor, "0", {
+      get() {
+        getterReads++;
+        return lobes[0];
+      },
+    });
+    for (const invalid of [
+      {},
+      "[]",
+      Array(1),
+      [...lobes, lobes[0]],
+      Object.assign([lobes[0]], { extra: 1 }),
+      listAccessor,
+      [null],
+      [accessor],
+      [{ ...lobes[0], extra: 1 }],
+      [{ ...lobes[0], [Symbol("extra")]: 1 }],
+      [{ centerX: 329, centerZ: 336, radiusX: 1 }],
+      [{ ...lobes[0], centerX: Infinity }],
+      [{ ...lobes[0], centerZ: NaN }],
+      [{ ...lobes[0], centerX: "329" }],
+      [{ ...lobes[0], centerZ: -10000.001 }],
+      [{ ...lobes[0], centerX: 10000.001 }],
+      [{ ...lobes[0], radiusX: 0.749 }],
+      [{ ...lobes[0], radiusZ: 3.001 }],
+    ])
+      expect(() => ops.validatePlantingLobes(invalid)).toThrow(/planting lobe/);
+    expect(getterReads).toBe(0);
+    expect(
+      ops.validatePlantingLobes([
+        { centerX: -10000, centerZ: 10000, radiusX: 0.75, radiusZ: 3 },
+      ]),
+    ).toHaveLength(1);
+  });
+
+  it("has exact compact support, bounded feather noise and max-only overlaps", () => {
+    const unit = { centerX: 0, centerZ: 0, radiusX: 1, radiusZ: 2 };
+    for (const noise of [-10, 0, 0.25, 0.5, 1, 10]) {
+      expect(ops.plantingSoil(0, 0, noise, [unit])).toBe(0.9);
+      for (const [x, z] of [
+        [1, 0],
+        [-1, 0],
+        [0, 2],
+        [0, -2],
+        [1, 2],
+      ])
+        expect(ops.plantingSoil(x, z, noise, [unit])).toBe(0);
+      for (let angle = 0; angle < 6.28; angle += 0.05) {
+        const x = Math.cos(angle) * 1.000001;
+        const z = Math.sin(angle) * 2.000002;
+        expect(ops.plantingSoil(x, z, noise, [unit])).toBe(0);
+      }
+    }
+    for (let x = -1.1; x < 1.11; x += 0.1) {
+      expect(ops.plantingSoil(x, 0, -10, [unit])).toBe(
+        ops.plantingSoil(x, 0, 0, [unit]),
+      );
+      expect(ops.plantingSoil(x, 0, 10, [unit])).toBe(
+        ops.plantingSoil(x, 0, 1, [unit]),
+      );
+    }
+    const prior = JSON.stringify(lobes);
+    for (let x = 327; x <= 346; x += 0.5)
+      for (let z = 333; z <= 344; z += 0.5) {
+        const expected = Math.max(
+          ...lobes.map((lobe) => ops.plantingSoil(x, z, 0.4, [lobe])),
+        );
+        expect(ops.plantingSoil(x, z, 0.4, lobes)).toBe(expected);
+        expect(ops.plantingSoil(x, z, 0.4, [...lobes, ...lobes])).toBe(
+          expected,
+        );
+        expect(expected).toBeGreaterThanOrEqual(0);
+        expect(expected).toBeLessThanOrEqual(0.9);
+      }
+    expect(JSON.stringify(lobes)).toBe(prior);
+    for (const point of [
+      [329.3, 338.45],
+      [336.5, 337.5],
+      [343, 302],
+      [350, 327],
+    ])
+      expect(ops.plantingSoil(point[0], point[1], 0.5, lobes)).toBe(0);
+    for (const absent of [undefined, null, []]) {
+      expect(ops.plantingSoil(329.2, 336.1, 0.5, absent)).toBe(0);
+      const emptyNode = createCompactPlantingSoil(
+        vec3(329.2, 28, 336.1),
+        float(0.5),
+        absent,
+      );
+      expect(vectorValue(emptyNode)).toEqual([0]);
+      expect([...graph(emptyNode)].map((node) => node.type)).toEqual(
+        [...graph(float(0))].map((node) => node.type),
+      );
+    }
+  });
+
+  it("matches actual TSL node algebra without texture, light, height or extra-pass nodes", () => {
+    for (const noise of [-1, 0, 0.35, 0.8, 1, 2])
+      for (const lobe of lobes)
+        for (const [dx, dz] of [
+          [0, 0],
+          [0.65, 0.2],
+          [-0.82, 0.2],
+          [0.92, 0],
+          [1.01, 0],
+          [0.2, 1.05],
+        ]) {
+          const x = lobe.centerX + dx * lobe.radiusX;
+          const z = lobe.centerZ + dz * lobe.radiusZ;
+          const node = createCompactPlantingSoil(
+            vec3(x, 28, z),
+            float(noise),
+            lobes,
+          );
+          expect(vectorValue(node)[0]).toBeCloseTo(
+            ops.plantingSoil(x, z, noise, lobes),
+            13,
+          );
+          const nodes = [...graph(node)];
+          // r186 wraps constants in VarNode intents; graph-node count is an
+          // allocation bound, not a GPU instruction count or timing estimate.
+          expect(nodes.length).toBeLessThanOrEqual(64 * lobes.length);
+          expect(
+            nodes.every((n) =>
+              [
+                "ConstNode",
+                "VarNode",
+                "SplitNode",
+                "OperatorNode",
+                "MathNode",
+              ].includes(n.type),
+            ),
+          ).toBe(true);
+        }
+  });
+
+  it("unions dirt alone and preserves road priority, absent behavior and physical grass eligibility", () => {
+    for (const slope of [0, 0.12, 0.4])
+      for (const road of [0, 0.3, 1]) {
+        const input = {
+          noiseValue: 0.57,
+          distortNoise: 0.31,
+          slope,
+          roadInfluence: road,
+          pondSurface: { soil: 0.2, wetness: 0.4 },
+          macroSurface: { dry: 0.3, westRock: 0.7 },
+        };
+        const baseline = ops.weights(input);
+        expect(ops.weights({ ...input, plantingSoil: 0 })).toEqual(baseline);
+        for (const soil of [0, 0.3, 0.9]) {
+          const actual = ops.weights({ ...input, plantingSoil: soil });
+          expect(actual.dirt).toBeCloseTo(
+            1 - (1 - baseline.dirt) * (1 - soil),
+            14,
+          );
+          expect({ ...actual, dirt: baseline.dirt }).toEqual(baseline);
+          const tsl = createCompactTerrainLayerWeights(
+            float(input.noiseValue),
+            float(slope),
+            float(road),
+            float(input.distortNoise),
+            { soil: float(0.2), wetness: float(0.4) },
+            { dry: float(0.3), westRock: float(0.7) },
+            float(soil),
+          );
+          for (const key of ["dirt", "cliff", "road", "variation"] as const)
+            expect(vectorValue(tsl[key])[0]).toBeCloseTo(actual[key], 13);
+        }
+        const sample = {
+          noiseValue: input.noiseValue,
+          distortNoise: input.distortNoise,
+          slope,
+          roadInfluence: road,
+          surface: { x: 329.2, z: 336.1, height: 28, pond: null },
+        };
+        const planted = {
+          ...sample,
+          surface: { ...sample.surface, plantingLobes: lobes },
+        };
+        expect(ops.grassSupport(planted)).toBe(ops.grassSupport(sample));
+        expect(
+          ops.sample({
+            ...sample,
+            surface: { ...sample.surface, plantingLobes: [] },
+          }),
+        ).toEqual(ops.sample(sample));
+        if (road === 1) expect(ops.sample(planted)).toEqual(ops.sample(sample));
+        if (road === 0 && slope === 0)
+          expect(ops.sample(planted)).not.toEqual(ops.sample(sample));
+        const far = {
+          ...planted,
+          surface: { ...planted.surface, x: 350, z: 327 },
+        };
+        expect(ops.sample(far)).toEqual(
+          ops.sample({
+            ...far,
+            surface: { ...far.surface, plantingLobes: [] },
+          }),
+        );
+      }
+  });
+
+  it("keeps validation and soil sampling self-contained in the minified real worker factory", async () => {
+    const result = await build({
+      entryPoints: [
+        new URL("../CompactTerrainPalette.ts", import.meta.url).pathname,
+      ],
+      bundle: true,
+      minify: true,
+      keepNames: true,
+      platform: "node",
+      format: "esm",
+      write: false,
+    });
+    const loaded = await import(
+      `data:text/javascript;base64,${Buffer.from(result.outputFiles[0].text).toString("base64")}`
+    );
+    const input = {
+      noiseValue: 0.6,
+      distortNoise: 0.4,
+      slope: 0.01,
+      roadInfluence: 0,
+      surface: {
+        x: 329.2,
+        z: 336.1,
+        height: 28,
+        pond: null,
+        plantingLobes: lobes,
+      },
+    };
+    const worker = new Worker(
+      `const {parentPort}=require('node:worker_threads'); const ops=(${loaded.createCompactTerrainColorOperations.toString()})(); const input=${JSON.stringify(input)}; const admitted=ops.validatePlantingLobes(input.surface.plantingLobes); parentPort.postMessage({soil:ops.plantingSoil(input.surface.x,input.surface.z,input.distortNoise,admitted),color:ops.sample(input),support:ops.grassSupport(input),frozen:Object.isFrozen(admitted)&&admitted.every(Object.isFrozen)});`,
+      { eval: true },
+    );
+    try {
+      const actual = await new Promise((resolve, reject) => {
+        worker.once("message", resolve);
+        worker.once("error", reject);
+      });
+      expect(actual).toEqual({
+        soil: ops.plantingSoil(
+          input.surface.x,
+          input.surface.z,
+          input.distortNoise,
+          lobes,
+        ),
+        color: ops.sample(input),
+        support: ops.grassSupport(input),
+        frozen: true,
+      });
+    } finally {
+      await worker.terminate();
+    }
+  });
+});
 type TextureEntry = {
   node: ReturnType<typeof texture>;
   key: string;
@@ -419,9 +733,13 @@ describe("compact terrain actual texture ownership and CPU material graph", () =
 
   it("uses only six surface textures, real derivative normal frames and unchanged geometry/shade ownership", () => {
     const shade = new TerrainShadeUniforms();
+    const plantingLobes = createCompactServiceSoil(
+      DataManager.getWorldConfig()!.compactServicePlanting,
+    );
     const material = createTerrainMaterial(shade, {
       compactPbr: true,
       compactPond: ALL_WORLD_AREAS.haven_pond.waterBodies![0],
+      compactPlantingLobes: plantingLobes,
       compactProfile: SCULPTED_COMPACT_WORLD_TERRAIN_PROFILE,
     }) as THREE.MeshStandardNodeMaterial &
       ReturnType<typeof createTerrainMaterial>;
@@ -429,6 +747,23 @@ describe("compact terrain actual texture ownership and CPU material graph", () =
       ReturnType<typeof createTerrainMaterial>;
     try {
       expect(material.terrainUniforms.shade).toBe(shade);
+      expect(material.compactPlantingMaterial).toEqual(plantingLobes);
+      expect(material.compactPlantingMaterial).not.toBe(plantingLobes);
+      // Inspect real connected PBR graphs, not just the published descriptor.
+      for (const root of [
+        material.colorNode!,
+        material.normalNode!,
+        material.roughnessNode!,
+        material.aoNode!,
+      ]) {
+        const constants = new Set(
+          [...graph(root)].map((node) => Reflect.get(node, "value")),
+        );
+        for (const lobe of plantingLobes) {
+          expect(constants.has(lobe.centerX)).toBe(true);
+          expect(constants.has(lobe.centerZ)).toBe(true);
+        }
+      }
       const compactAlbedo = graph(material.colorNode!);
       const legacyAlbedo = graph(legacy.colorNode!);
       const noiseSamples = [...compactAlbedo].filter(

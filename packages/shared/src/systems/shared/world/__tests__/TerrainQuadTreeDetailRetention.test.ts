@@ -3,6 +3,7 @@ import { World } from "../../../../core/World";
 import { DataManager } from "../../../../data/DataManager";
 import { createCompactPreparationDetailRegions } from "../CompactIslandDetail";
 import { TerrainSystem } from "../TerrainSystem";
+import { SCULPTED_COMPACT_WORLD_TERRAIN_PROFILE } from "../WorldTerrainProfile";
 import {
   assembleQuadChunkGeometry,
   generateQuadChunkDataSync,
@@ -112,9 +113,9 @@ describe("bounded authored minimum-size terrain retention", () => {
     expect(tree.totalNodeCount).toBe(0);
   });
 
-  it("retains the admitted ten64 coastal leaves at distant focus, respects pond128 precedence and measures actual geometry", async () => {
+  it("retains the historical pre-shoulder ten64 coastal leaves at distant focus, respects pond128 precedence and measures actual geometry", async () => {
     const regions = createCompactPreparationDetailRegions(
-      DataManager.getWorldTerrainProfile(),
+      SCULPTED_COMPACT_WORLD_TERRAIN_PROFILE,
       DataManager.getInstance().getAllWorldAreas(),
       64,
     );
@@ -133,6 +134,11 @@ describe("bounded authored minimum-size terrain retention", () => {
       buildChunkTerrainProvider(): FullTerrainProvider;
     };
     try {
+      // Match geometry's sampler to this historical allocation, not the latest
+      // manifest's optional shoulder. The current bounded 64→128 increment is
+      // checked independently by CompactHavenShoulder.integration.test.ts.
+      terrain.getWorldTerrainProfile();
+      terrain["activeTerrainProfile"] = SCULPTED_COMPACT_WORLD_TERRAIN_PROFILE;
       await terrain.init();
       internal.loadWaterBodiesFromManifest();
       internal.loadFlatZonesFromManifest();

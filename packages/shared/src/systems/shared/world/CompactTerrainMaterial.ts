@@ -16,6 +16,7 @@ import type { Node, TextureNode } from "three/webgpu";
 import {
   COMPACT_TERRAIN_COMPOSITION,
   type CompactTerrainMacroField,
+  type CompactTerrainPlantingLobe,
 } from "./CompactTerrainPalette";
 import compactTerrainTextureDigests from "../../../data/compact-terrain-textures.json";
 
@@ -418,6 +419,37 @@ export function createCompactTerrainMacroWeights(
   };
 }
 
+/** Bounded reflectance-only soil field, sharing CPU constants and arithmetic. */
+export function createCompactPlantingSoil(
+  world: Node<"vec3">,
+  distortNoise: Node<"float">,
+  lobes?: readonly CompactTerrainPlantingLobe[] | null,
+): Node<"float"> {
+  if (!lobes?.length) return float(0);
+  const c = COMPACT_TERRAIN_COMPOSITION;
+  const edgeWidth = distortNoise
+    .clamp(0, 1)
+    .mul(2)
+    .sub(1)
+    .mul(c.plantingEdgeNoiseWidth)
+    .add(c.plantingEdgeWidth);
+  let soil: Node<"float"> = float(0);
+  for (const lobe of lobes) {
+    const dx = world.x.sub(lobe.centerX).div(lobe.radiusX);
+    const dz = world.z.sub(lobe.centerZ).div(lobe.radiusZ);
+    const inner = float(1).sub(
+      edgeWidth.div(Math.min(lobe.radiusX, lobe.radiusZ)),
+    );
+    soil = max(
+      soil,
+      float(1)
+        .sub(smoothstep(inner.mul(inner), float(1), dx.mul(dx).add(dz.mul(dz))))
+        .mul(c.plantingSoilStrength),
+    );
+  }
+  return soil;
+}
+
 /** Same constants/arithmetic as the serializable CPU grass palette factory. */
 export function createCompactTerrainLayerWeights(
   noise: Node<"float">,
@@ -432,6 +464,7 @@ export function createCompactTerrainLayerWeights(
     dry: float(0),
     westRock: float(0),
   },
+  plantingSoil: Node<"float"> = float(0),
 ) {
   const c = COMPACT_TERRAIN_COMPOSITION;
   const slope = geometricSlope.clamp(0, 1);
@@ -456,7 +489,8 @@ export function createCompactTerrainLayerWeights(
         .sub(patch)
         .mul(float(1).sub(slopeDirt))
         .mul(float(1).sub(macroSurface.dry.mul(c.macroSoilStrength)))
-        .mul(float(1).sub(pondSurface.soil)),
+        .mul(float(1).sub(pondSurface.soil))
+        .mul(float(1).sub(plantingSoil)),
     ),
     cliff: max(
       smoothstep(float(c.cliffStart), float(c.cliffEnd), slope),

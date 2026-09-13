@@ -37,6 +37,7 @@ import {
   validateCompactServiceCourt,
   validateCompactServicePlanting,
 } from "../systems/shared/world/CompactServiceCourt";
+import { validateCompactLandscapeRocks } from "../systems/shared/world/CompactLandscapeRocks";
 import {
   canonicalWorldJson,
   WorldManifestIdentityBuilder,
@@ -422,6 +423,10 @@ export class DataManager {
       profile,
       compactServiceCourt,
     );
+    const compactLandscapeRocks = validateCompactLandscapeRocks(
+      copy.compactLandscapeRocks,
+      profile,
+    );
     config = copy;
     if (
       config.seed !== profile.seed ||
@@ -442,6 +447,7 @@ export class DataManager {
       ...(compactPreparationLodge ? { compactPreparationLodge } : {}),
       ...(compactServiceCourt ? { compactServiceCourt } : {}),
       ...(compactServicePlanting ? { compactServicePlanting } : {}),
+      ...(compactLandscapeRocks ? { compactLandscapeRocks } : {}),
     });
     if (DataManager.worldContentIdentity !== null) {
       if (

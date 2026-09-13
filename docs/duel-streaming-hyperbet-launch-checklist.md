@@ -1,5 +1,68 @@
 # Duel Arena, Streaming, and Hyperbet Launch Checklist
 
+## Haven terrain implementation checkpoint — 2026-09-13
+
+Status: **G04 OPEN. Shared terrain and native installation are verified;
+finished environment art, motion/contact and sustained performance are NOT approved.**
+
+- [x] Added a bounded, explicit Haven shoulder: asymmetric crest, rock faces,
+  meadow shelf, toe and drainage. Main thread and emitted workers use the same
+  immutable, identity-bound data and sampler. Omission preserves prior fixtures.
+  Continuous overlapping drainage fields replace a possible nearest-segment
+  discontinuity. Forty corruption/parity/cache/continuity tests pass.
+- [x] Tested actual retained terrain, not only the smooth prototype. Original
+  64-grid candidate FAILED with 0.736m height discrepancy and 0.141m seam.
+  Forty bounded comparisons retained the failures. Selected wider drainage and
+  one local 64→128 leaf refinement retain the silhouette, reduce sampled maximum
+  discrepancy to 0.07574/0.07210m and seam to numerical roundoff. Exact increment:
+  24,832 triangles / 1,000,448 geometry bytes; no new terrain nodes/draws.
+- [x] Four current integration tests pass: 69,551 protected samples unchanged,
+  actual 256 road mask unchanged, emitted worker/Float32 geometry parity, and
+  unchanged node ownership at six preparation/arena/grove viewpoints. Two
+  real PhysX/resource/navigation tests also pass on the final 128/128 candidate.
+  These include 2,364 actual PhysX ray comparisons through two lifecycles and
+  768 complete resource routes per profile. They cook test-owned colliders;
+  they do NOT certify live terrain collision or animated avatar contact.
+- [x] Final broad regression: 1,324/1,324 tests across 95 files. Shared/client/
+  server typechecks and builds, 44-file lint/format checks and 23 native preflight
+  tests pass. Initial 1,320/1,324 failure is retained; four historical fixtures
+  now select their exact baseline without relaxing their original expectations.
+- [x] Native01 and independent verifier: 700 unchanged pins / 622 archives,
+  nine world views including eye-height Haven, eight exact comparison cameras,
+  37 fog screenshot brackets, both actual Haven leaves at 128 with one shared
+  material, all 48 resource trees unchanged. Page/GPU/cleanup errors zero;
+  owned browser/launcher/ports closed. Fourteen verifier negative controls pass.
+- [ ] Visual review remains below the requested bar: arbitrary green/yellow lawn
+  patches, weak mineral/turf transitions, dark blue-green foliage, disconnected
+  prop/building styles and unfinished shoreline. Next: authored ground-cover,
+  wear and talus composition using the existing packed material layers.
+- [ ] Frame/launch gates remain open. Short p95 CPU14/13ms and GPU-pass sums
+  17.63/18.55ms (campus/meadow) are NOT presented FPS, sustained60 or an isolated
+  cost/speedup experiment. Existing dagger-fit/cow404 errors remain19; the
+  overall native run is false. Actual native road census is not recorded;
+  unchanged source/manifest pins and the separate CPU road proof are retained.
+- [ ] Correct query filtering in physics-enabled clients. A disposable actual
+  PhysX diagnostic proved terrain boxes admit unrelated layer masks via word1.
+  Native01 preparation broadcast explicitly has physics=false, so its screenshots
+  do NOT demonstrate box/camera obstruction. Preserve simulation filtering;
+  qualify ray/sweep/overlap and real enabled-camera inclusion/exclusion.
+- [ ] Implement and visually qualify a real rendered-support/foot-contact
+  contract. Character support currently uses gameplay height, not retained
+  triangles. The actual avatar factory does not implement the optional clamp
+  methods called by guarded clients; copied mock-bone tests are not proof.
+  Preserve authoritative movement and floor/stair/deck/arena precedence.
+- [ ] Continue material/foliage/shoreline/lighting composition, normal-camera
+  movement and long-run frame/load verification. This is not AAA or production
+  acceptance, and no extra postprocessing or reduced rendering quality is
+  justified by the local geometry proof.
+
+Evidence: `docs/haven-shoulder-terrain-20260913.md`,
+`asset-studio/service-planting-soil01/haven-regression02.json`,
+`native-verification-haven-shoulder-native01.json`, and
+`asset-studio/game-test-integration/haven-shoulder-native01/report.json`.
+Native report SHA256: `4615d9efb44c3e57252cf82b87dc184ea06ce6dd7d4baf47a849a95685f39ad8`.
+
+
 ## Shield batching and Haven landform checkpoint — 2026-09-12
 
 Status: **G04 and asset visual/fit gates OPEN. Lossless draw reduction verified;

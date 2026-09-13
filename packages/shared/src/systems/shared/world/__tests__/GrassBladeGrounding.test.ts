@@ -8,7 +8,10 @@ import {
   type GrassWorkerInput,
   type GrassWorkerOutput,
 } from "../../../../utils/workers/GrassWorker";
-import type { GrassTerrainSurfaceSnapshot } from "../../../../utils/workers/GrassTerrainSurfaceSnapshot";
+import type {
+  GrassTerrainSurfaceSnapshot,
+  GrassTerrainExclusionPolygon,
+} from "../../../../utils/workers/GrassTerrainSurfaceSnapshot";
 import {
   groundGrassBlades,
   groundGrassBladeSteps,
@@ -31,6 +34,8 @@ import {
   type TerrainGridSample,
 } from "../TerrainGridSurface";
 import { TerrainSystem } from "../TerrainSystem";
+import { createCompactLandscapeRockFootprints } from "../CompactLandscapeRockFootprints";
+import { createGrassTerrainSurfaceOperations } from "../../../../utils/workers/GrassTerrainSurfaceSnapshot";
 import { RoadNetworkSystem } from "../RoadNetworkSystem";
 import { TerrainQuadTree } from "../TerrainQuadTree";
 import { createCompactPreparationDetailRegions } from "../CompactIslandDetail";
@@ -730,7 +735,30 @@ describe("CPU per-blade grounding prototype (no renderer/GPU)", () => {
         height: 20,
         blendRadius: 0,
       };
+      const polygon: GrassTerrainExclusionPolygon = {
+        id: "swept-rock",
+        minX: x - 0.05,
+        maxX: x + 0.05,
+        minZ: -5,
+        maxZ: 5,
+        vertices: [
+          { x: x - 0.05, z: -5 },
+          { x: x + 0.05, z: -5 },
+          { x: x + 0.05, z: 5 },
+          { x: x - 0.05, z: 5 },
+        ],
+      };
       const cases = [
+        {
+          input: {
+            ...base,
+            terrainSurface: {
+              ...emptySnapshot(),
+              exclusionPolygons: [polygon],
+            },
+          },
+          reason: "pad",
+        },
         {
           input: {
             ...base,
@@ -1020,6 +1048,7 @@ describe("actual v4 production-worker contact regressions and per-install CPU re
   const geometries: THREE.BufferGeometry[] = [],
     surfaces = new Map<string, RetainedTerrainSurface>();
   let outputs: GrassWorkerOutput[] = [];
+  let runWorker: (input: GrassWorkerInput) => Promise<GrassWorkerOutput>;
   beforeAll(async () => {
     await DataManager.getInstance().initialize();
     world = new World();
@@ -1030,6 +1059,7 @@ describe("actual v4 production-worker contact regressions and per-install CPU re
     terrain["loadFlatZonesFromManifest"]();
     // Recorded blade IDs and gap magnitudes belong to the previous plaza.
     // Preserve the original regression input, not newly re-phased blade IDs.
+    terrain["landscapeGrassSurface"].exclusionPolygons = [];
     terrain.unregisterFlatZone("central_haven_lodge_grass_clearance");
     const plaza = terrain["flatZones"].get("central_haven_plaza")!;
     terrain.registerFlatZone({ ...plaza, excludeGrass: undefined });
@@ -1089,7 +1119,7 @@ describe("actual v4 production-worker contact regressions and per-install CPU re
       `const {parentPort}=require('node:worker_threads');globalThis.self={postMessage:(message,transfers)=>parentPort.postMessage(message,transfers)};${GRASS_WORKER_CODE};parentPort.on('message',data=>self.onmessage({data}));`,
       { eval: true, env: {} },
     );
-    const run = (input: GrassWorkerInput) =>
+    runWorker = (input: GrassWorkerInput) =>
       new Promise<GrassWorkerOutput>((resolve, reject) => {
         const error = (e: Error) => {
             worker.off("message", message);
@@ -1112,7 +1142,7 @@ describe("actual v4 production-worker contact regressions and per-install CPU re
     ]) {
       const node = tree.createNode(null, null, 100, x, z, 4),
         input = manager["createWorkerInput"](node, `blade_${x}_${z}`, 1);
-      outputs.push(await run({ ...input, clumpSpacing: 2.1 }));
+      outputs.push(await runWorker({ ...input, clumpSpacing: 2.1 }));
     }
   }, 30000);
   afterAll(async () => {
@@ -1163,6 +1193,61 @@ describe("actual v4 production-worker contact regressions and per-install CPU re
       },
     };
   }
+
+  it("excludes actual rock footprints in the production worker without resampling or changing any surviving grass attributes", async () => {
+    const node = tree.createNode(null, null, 100, 350, 250, 4);
+    const polygons = createCompactLandscapeRockFootprints(
+      DataManager.getWorldConfig()!.compactLandscapeRocks,
+    );
+    const previous = terrain["landscapeGrassSurface"].exclusionPolygons;
+    try {
+      terrain["landscapeGrassSurface"].exclusionPolygons = polygons;
+      const input = manager["createWorkerInput"](
+        node,
+        "rock-footprint-parity",
+        1,
+      );
+      const result = await runWorker({ ...input, clumpSpacing: 2.1 });
+      const before = outputs[1],
+        operations = createGrassTerrainSurfaceOperations();
+      const excluded = Array.from({ length: before.count }, (_, i) =>
+        operations.isGrassExcluded(
+          { exclusionPolygons: polygons },
+          before.offsets[i * 3] + 350,
+          before.offsets[i * 3 + 2] + 250,
+        ),
+      ).filter(Boolean).length;
+      expect(excluded).toBeGreaterThan(0);
+      expect(result.count).toBe(before.count - excluded);
+      const sourceByHash = new Map(
+        Array.from({ length: before.count }, (_, i) => [
+          before.rotScaleHash[i * 3 + 2],
+          i,
+        ]),
+      );
+      for (let i = 0; i < result.count; i++) {
+        const original = sourceByHash.get(result.rotScaleHash[i * 3 + 2]);
+        expect(original).toBeDefined();
+        for (const [key, stride] of [
+          ["offsets", 3],
+          ["rotScaleHash", 3],
+          ["groundColors", 3],
+          ["grassTints", 4],
+          ["groundNormals", 3],
+        ] as const)
+          expect(result[key].slice(i * stride, (i + 1) * stride)).toEqual(
+            before[key].slice(original! * stride, (original! + 1) * stride),
+          );
+        const x = result.offsets[i * 3] + 350,
+          z = result.offsets[i * 3 + 2] + 250;
+        expect(
+          operations.isGrassExcluded({ exclusionPolygons: polygons }, x, z),
+        ).toBe(false);
+      }
+    } finally {
+      terrain["landscapeGrassSurface"].exclusionPolygons = previous;
+    }
+  });
 
   it.each([
     [0, 70, 0.18737495046320163],

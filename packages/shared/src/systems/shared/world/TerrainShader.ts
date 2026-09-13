@@ -57,6 +57,7 @@ import {
   createCompactTerrainLayers,
   blendCompactTerrainLayers,
   createCompactTerrainLayerWeights,
+  createCompactPlantingSoil,
   createCompactPondSurfaceWeights,
   applyCompactPondWetness,
   applyCompactMeadowTint,
@@ -69,6 +70,7 @@ import {
   createCompactTerrainColorOperations,
   COMPACT_TERRAIN_COMPOSITION,
   type CompactTerrainPond,
+  type CompactTerrainPlantingLobe,
 } from "./CompactTerrainPalette";
 
 export const TERRAIN_SHADER_CONSTANTS = {
@@ -1178,16 +1180,23 @@ export function createTerrainMaterial(
   options: {
     compactPbr?: boolean;
     compactPond?: CompactTerrainPond | null;
+    compactPlantingLobes?: readonly CompactTerrainPlantingLobe[];
     compactProfile?: WorldTerrainProfile;
   } = {},
 ): THREE.Material & {
   terrainUniforms: TerrainUniforms;
   compactTerrainSurface?: CompactTerrainTextureSet;
+  compactPlantingMaterial?: readonly CompactTerrainPlantingLobe[];
   compactPondMaterial?: {
     profile: CompactTerrainPond;
     parameters: UniformNode<"vec4", THREE.Vector4>;
   };
 } {
+  const plantingLobes = options.compactPbr
+    ? createCompactTerrainColorOperations().validatePlantingLobes(
+        options.compactPlantingLobes,
+      )
+    : [];
   const macroField =
     options.compactPbr && options.compactProfile
       ? createCompactTerrainColorOperations().macroField(options.compactProfile)
@@ -1651,6 +1660,7 @@ export function createTerrainMaterial(
         distortNoise,
         pondSurface,
         macroSurface,
+        createCompactPlantingSoil(worldPos, distortNoise, plantingLobes),
       )
     : null;
   const compactBaseSurface =
@@ -1858,12 +1868,14 @@ export function createTerrainMaterial(
   const result = material as typeof material & {
     terrainUniforms: TerrainUniforms;
     compactTerrainSurface?: CompactTerrainTextureSet;
+    compactPlantingMaterial?: readonly CompactTerrainPlantingLobe[];
     compactPondMaterial?: {
       profile: CompactTerrainPond;
       parameters: UniformNode<"vec4", THREE.Vector4>;
     };
   };
   result.terrainUniforms = terrainUniforms;
+  if (plantingLobes.length) result.compactPlantingMaterial = plantingLobes;
   if (compactPond && pondParameters)
     result.compactPondMaterial = {
       profile: compactPond,

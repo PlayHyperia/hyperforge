@@ -13,7 +13,7 @@ import { NoiseGenerator } from "../../../../utils/NoiseGenerator";
 import { createCompactIslandLandform } from "../CompactIslandLandform";
 import {
   SCULPTED_COMPACT_V3_PROFILE_FIXTURE as candidate,
-  SCULPTED_COMPACT_WORLD_TERRAIN_PROFILE as active,
+  HAVEN_SHOULDER_COMPACT_WORLD_TERRAIN_PROFILE as active,
   SCULPTED_COMPACT_V1_PROFILE_FIXTURE as previous,
   validateWorldTerrainProfile,
   worldTerrainProfileIdentity,
@@ -464,9 +464,9 @@ describe("compact v4 asymmetric coastline and continuous ridge", () => {
       minify: true,
     });
     const source = runInNewContext(
-      `${result.outputFiles[0].text}\nLandform.createCompactIslandLandform.toString()`,
+      `${result.outputFiles[0].text}\nLandform.buildCompactIslandLandformJS()`,
     ) as string;
-    const embedded = runInNewContext(`(${source})()`) as ReturnType<
+    const embedded = runInNewContext(source) as ReturnType<
       typeof createCompactIslandLandform
     >;
     const translated = validateWorldTerrainProfile({

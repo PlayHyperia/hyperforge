@@ -16,6 +16,14 @@ export type CompactTerrainPond = Readonly<{
   surfaceY: number;
 }>;
 
+/** Colour-only planting footprint; admission owns placement and count limits. */
+export type CompactTerrainPlantingLobe = Readonly<{
+  centerX: number;
+  centerZ: number;
+  radiusX: number;
+  radiusZ: number;
+}>;
+
 /** Detached colour-only view of the already admitted landform, not new terrain. */
 export type CompactTerrainMacroField = Readonly<{
   centerX: number;
@@ -113,6 +121,9 @@ export function createCompactTerrainColorOperations() {
     pondWetEndHeight: 0.18,
     pondWetAlbedo: 0.72,
     pondWetRoughness: 0.62,
+    plantingSoilStrength: 0.9,
+    plantingEdgeWidth: 0.45,
+    plantingEdgeNoiseWidth: 0.1,
   };
   const palette = {
     grass: [0.12687350988906373, 0.16117143469264922, 0.03425721790414253],
@@ -129,6 +140,84 @@ export function createCompactTerrainColorOperations() {
     },
   };
   const operations = {
+    /** Once per worker boundary, never per grass candidate or terrain sample. */
+    validatePlantingLobes(
+      value: unknown,
+    ): readonly CompactTerrainPlantingLobe[] {
+      if (value === undefined || value === null) return Object.freeze([]);
+      if (
+        !Array.isArray(value) ||
+        value.length > 4 ||
+        Reflect.ownKeys(value).length !== value.length + 1
+      )
+        throw new Error("Invalid compact planting lobe list");
+      const entries = Object.getOwnPropertyDescriptors(value);
+      const result: CompactTerrainPlantingLobe[] = [];
+      const keys = ["centerX", "centerZ", "radiusX", "radiusZ"] as const;
+      for (let i = 0; i < value.length; i++) {
+        const entry = entries[String(i)];
+        if (!entry || !("value" in entry))
+          throw new Error("Invalid compact planting lobe entry");
+        const row: unknown = entry.value;
+        if (
+          !row ||
+          typeof row !== "object" ||
+          ![Object.prototype, null].includes(Object.getPrototypeOf(row)) ||
+          Reflect.ownKeys(row).length !== keys.length
+        )
+          throw new Error("Invalid compact planting lobe object");
+        const properties = Object.getOwnPropertyDescriptors(row);
+        const values = keys.map((key) => {
+          const property = properties[key];
+          if (
+            !property ||
+            !("value" in property) ||
+            typeof property.value !== "number" ||
+            !Number.isFinite(property.value)
+          )
+            throw new Error("Invalid compact planting lobe field");
+          return property.value as number;
+        });
+        const [centerX, centerZ, radiusX, radiusZ] = values;
+        if (
+          Math.abs(centerX) > 10_000 ||
+          Math.abs(centerZ) > 10_000 ||
+          radiusX < 0.75 ||
+          radiusX > 3 ||
+          radiusZ < 0.75 ||
+          radiusZ > 3
+        )
+          throw new Error("Compact planting lobe exceeds bounded domain");
+        result.push(Object.freeze({ centerX, centerZ, radiusX, radiusZ }));
+      }
+      return Object.freeze(result);
+    },
+    /** No height or eligibility change; maximum preserves overlapped soil. */
+    plantingSoil(
+      x: number,
+      z: number,
+      distortNoise: number,
+      lobes?: readonly CompactTerrainPlantingLobe[] | null,
+    ): number {
+      if (!lobes?.length) return 0;
+      const c = composition;
+      const edgeWidth =
+        c.plantingEdgeWidth +
+        c.plantingEdgeNoiseWidth *
+          (2 * Math.max(0, Math.min(1, distortNoise)) - 1);
+      let soil = 0;
+      for (const lobe of lobes) {
+        const dx = (x - lobe.centerX) / lobe.radiusX;
+        const dz = (z - lobe.centerZ) / lobe.radiusZ;
+        const inner = 1 - edgeWidth / Math.min(lobe.radiusX, lobe.radiusZ);
+        soil = Math.max(
+          soil,
+          c.plantingSoilStrength *
+            (1 - math.smooth(inner * inner, 1, dx * dx + dz * dz)),
+        );
+      }
+      return soil;
+    },
     grassEligibility(
       value: unknown,
       algorithm: string,
@@ -391,6 +480,7 @@ export function createCompactTerrainColorOperations() {
       distortNoise?: number;
       pondSurface?: { soil: number; wetness: number };
       macroSurface?: { dry: number; westRock: number };
+      plantingSoil?: number;
     }) {
       // Meadow earth follows the shared patch field; rock uses geometric slope,
       // never the legacy high-frequency distorted normal classification.
@@ -431,7 +521,8 @@ export function createCompactTerrainColorOperations() {
             (1 - slopeDirt) *
             (1 -
               (input.macroSurface?.dry ?? 0) * composition.macroSoilStrength) *
-            (1 - (input.pondSurface?.soil ?? 0)),
+            (1 - (input.pondSurface?.soil ?? 0)) *
+            (1 - (input.plantingSoil ?? 0)),
         cliff:
           Math.max(
             math.smooth(composition.cliffStart, composition.cliffEnd, slope),
@@ -511,6 +602,7 @@ export function createCompactTerrainColorOperations() {
         height: number;
         pond: CompactTerrainPond | null;
         macroField?: CompactTerrainMacroField | null;
+        plantingLobes?: readonly CompactTerrainPlantingLobe[] | null;
       };
     }) {
       // Distortion noise wears path and pond margins, not meadow or cliff
@@ -533,6 +625,14 @@ export function createCompactTerrainColorOperations() {
         ...input,
         pondSurface,
         macroSurface,
+        plantingSoil: input.surface
+          ? operations.plantingSoil(
+              input.surface.x,
+              input.surface.z,
+              input.distortNoise,
+              input.surface.plantingLobes,
+            )
+          : 0,
       });
       const coast = input.surface
         ? operations.coastWeights({

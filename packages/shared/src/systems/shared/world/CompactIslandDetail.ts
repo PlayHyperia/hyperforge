@@ -78,5 +78,23 @@ export function createCompactPreparationDetailRegions(
       resolution: 64,
       keepMinSize: true,
     },
+    // The authored shoulder contains a narrow notch and short rock faces that
+    // cannot be represented accurately at the existing western 64 grid. Refine
+    // only its admitted bounds; the adjacent Haven leaf is already 128. The
+    // current compact layout adds 24,832 triangles / 1,000,448 geometry bytes,
+    // with no new leaf/draw at the retained preparation viewpoints. This is a
+    // measured allocation delta, not a native frame-time qualification.
+    ...(profile.havenShoulder
+      ? [
+          {
+            minX: profile.havenShoulder.minX,
+            maxX: profile.havenShoulder.maxX,
+            minZ: profile.havenShoulder.minZ,
+            maxZ: profile.havenShoulder.maxZ,
+            resolution: 128,
+            keepMinSize: true,
+          },
+        ]
+      : []),
   ];
 }

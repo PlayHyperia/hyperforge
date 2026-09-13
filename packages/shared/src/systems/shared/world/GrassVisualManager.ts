@@ -76,6 +76,7 @@ import {
   type GrassWorkerOutput,
 } from "../../../utils/workers/GrassWorker";
 import type { TerrainWorkerConfig } from "../../../utils/workers/TerrainWorker";
+import type { CompactTerrainPlantingLobe } from "./CompactTerrainPalette";
 import type { BiomeGrassConfigWorker } from "../../../utils/workers/GrassWorker";
 import { assertTerrainWorkerRequest } from "../../../utils/workers/TerrainWorkerShared";
 import {
@@ -468,6 +469,10 @@ export interface GrassVisualReadiness {
 
 /** Config data for the grass worker, passed from TerrainSystem at construction. */
 export interface GrassWorkerSetup {
+  compactPlantingLobes?: readonly CompactTerrainPlantingLobe[];
+  /** Same vegetation-only silhouettes as the worker snapshot. Called after
+   * accepted-clump RNG consumption to preserve all unrelated placement. */
+  isGrassObstacleAt?: (x: number, z: number) => boolean;
   terrainConfig: TerrainWorkerConfig;
   seed: number;
   biomeCenters: Array<{
@@ -1278,6 +1283,7 @@ export class GrassVisualManager implements QuadTreeListener {
     return {
       grassEligibility: this.grassEligibility,
       type: "generateGrassInstances",
+      compactPlantingLobes: ws.compactPlantingLobes,
       chunkKey: key,
       centerX: node.centerX,
       centerZ: node.centerZ,
@@ -1939,6 +1945,7 @@ export class GrassVisualManager implements QuadTreeListener {
       offsets[count * 3 + 2] = lz;
 
       const rotation = rng() * Math.PI * 2;
+      if (this.workerSetup?.isGrassObstacleAt?.(wx, wz)) continue;
       const scale =
         (GRASS_CONFIG.SCALE_MIN +
           clumpRng * (GRASS_CONFIG.SCALE_MAX - GRASS_CONFIG.SCALE_MIN)) *

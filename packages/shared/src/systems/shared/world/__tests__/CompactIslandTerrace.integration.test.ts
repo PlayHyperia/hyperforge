@@ -100,6 +100,7 @@ async function fixture(profile: WorldTerrainProfile, content: boolean) {
       const historical = structuredClone(saved.config);
       delete historical.compactServiceCourt;
       delete historical.compactServicePlanting;
+      delete historical.compactLandscapeRocks;
       DataManager.setWorldConfig({
         ...historical,
         terrainProfile: current,

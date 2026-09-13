@@ -36,6 +36,7 @@ import {
   COMPACT_SERVICE_COURT,
   groundCompactServiceCourt,
   createCompactServicePlanting,
+  createCompactServiceSoil,
   validateCompactServicePlanting,
 } from "../CompactServiceCourt";
 import { COMPACT_POND_MODELS } from "../CompactPondDressing";
@@ -49,6 +50,10 @@ import {
   COMPACT_PATH_BLEND_WIDTH,
 } from "../CompactIslandPaths";
 import { modelBounds } from "./fixtures/StaticGlbBounds";
+import {
+  COMPACT_LANDSCAPE_ROCKS_SYSTEM,
+  CompactLandscapeRocksSystem,
+} from "../CompactLandscapeRocksSystem";
 
 class CpuServerWorld extends World {
   override get isServer() {
@@ -124,7 +129,7 @@ async function fixture() {
 describe("actual compact service court placement and preparation navigation", () => {
   it("admits detached bounded planting only for its court and rejects malformed content", () => {
     const input = structuredClone(saved.config!.compactServicePlanting!);
-    expect(input.beds.flatMap((b) => b.plants)).toHaveLength(20);
+    expect(input.beds.flatMap((b) => b.plants)).toHaveLength(24);
     const profile = saved.profile!;
     const admitted = validateCompactServicePlanting(
       input,
@@ -134,6 +139,10 @@ describe("actual compact service court placement and preparation navigation", ()
     expect(admitted).toEqual(input);
     expect(admitted).not.toBe(input);
     expect(Object.isFrozen(admitted.beds[0].plants[0])).toBe(true);
+    expect(Object.isFrozen(admitted.beds[0].soilLobes)).toBe(true);
+    expect(Object.isFrozen(admitted.beds[0].soilLobes![0])).toBe(true);
+    expect(createCompactServiceSoil(admitted)).toHaveLength(4);
+    expect(createCompactServiceSoil(undefined)).toEqual([]);
     expect(createCompactServicePlanting(undefined)).toEqual([]);
     expect(
       validateCompactServicePlanting(undefined, profile, undefined),
@@ -143,7 +152,8 @@ describe("actual compact service court placement and preparation navigation", ()
       null,
       {},
       { ...input, extra: true },
-      { ...input, schemaVersion: 2 },
+      { ...input, schemaVersion: 3 },
+      { ...input, schemaVersion: 1 },
       { ...input, beds: [input.beds[0], input.beds[0]] },
       {
         ...input,
@@ -158,7 +168,27 @@ describe("actual compact service court placement and preparation navigation", ()
         { ...plant, model: "tree" },
       ].map((p) => ({
         ...input,
-        beds: [{ id: "west", plants: [p] }, input.beds[1]],
+        beds: [{ ...input.beds[0], plants: [p] }, input.beds[1]],
+      })),
+      ...[
+        undefined,
+        [],
+        [input.beds[0].soilLobes![0]],
+        [
+          { ...input.beds[0].soilLobes![0], centerX: 336 },
+          input.beds[0].soilLobes![1],
+        ],
+        [
+          { ...input.beds[0].soilLobes![0], radiusX: 0 },
+          input.beds[0].soilLobes![1],
+        ],
+        [
+          { ...input.beds[0].soilLobes![0], extra: 1 },
+          input.beds[0].soilLobes![1],
+        ],
+      ].map((soilLobes) => ({
+        ...input,
+        beds: [{ ...input.beds[0], soilLobes }, input.beds[1]],
       })),
       {
         ...input,
@@ -174,6 +204,27 @@ describe("actual compact service court placement and preparation navigation", ()
     expect(() =>
       validateCompactServicePlanting(input, profile, undefined),
     ).toThrow();
+    // Historical v1 remains explicitly bush-only, with no implicit soil field.
+    const historical = {
+      ...input,
+      schemaVersion: 1,
+      layoutId: "compact-smithy-planting-v1",
+      beds: input.beds.map((bed) => ({
+        id: bed.id,
+        plants: bed.plants
+          .filter((p) => p.model === "bush")
+          .map(({ x, z, scale, yaw }) => ({ x, z, scale, yaw })),
+      })),
+    };
+    const old = validateCompactServicePlanting(
+      historical,
+      profile,
+      COMPACT_SERVICE_COURT,
+    )!;
+    expect(createCompactServiceSoil(old)).toEqual([]);
+    expect(createCompactServicePlanting(old)).toEqual(
+      createCompactServicePlanting(admitted).filter((p) => p.model === "bush"),
+    );
     expect(() =>
       validateCompactServicePlanting(
         input,
@@ -188,8 +239,9 @@ describe("actual compact service court placement and preparation navigation", ()
     const plants = createCompactServicePlanting(
       DataManager.getWorldConfig()!.compactServicePlanting,
     );
-    expect(plants).toHaveLength(20);
-    expect(new Set(plants.map((p) => p.id)).size).toBe(20);
+    expect(plants).toHaveLength(24);
+    expect(new Set(plants.map((p) => p.id)).size).toBe(24);
+    expect(plants.filter((p) => p.model === "fern")).toHaveLength(4);
     const paths = createCompactIslandPaths(
       terrain.getWorldTerrainProfile(),
       ALL_WORLD_AREAS,
@@ -237,7 +289,7 @@ describe("actual compact service court placement and preparation navigation", ()
     );
     const npcs = Object.values(ALL_WORLD_AREAS).flatMap((a) => a.npcs ?? []);
     for (const p of plants) {
-      const radius = COMPACT_POND_MODELS.bush.radius * p.scale;
+      const radius = COMPACT_POND_MODELS[p.model].radius * p.scale;
       const crown = {
         minX: p.x - radius,
         maxX: p.x + radius,
@@ -254,7 +306,7 @@ describe("actual compact service court placement and preparation navigation", ()
                 crown,
                 path.width / 2 + COMPACT_PATH_BLEND_WIDTH,
               ),
-              `${p.id} analytical ${path.id}`,
+              `${p.id} analytical ${path.id}: ${JSON.stringify({ crown, start: path.path[i - 1], end: path.path[i], clearance: path.width / 2 + COMPACT_PATH_BLEND_WIDTH })}`,
             )
             .toBe(false);
       expect
@@ -406,6 +458,13 @@ describe("actual compact service court placement and preparation navigation", ()
             `before ${row.id} ${start.x},${start.z} -> ${target.x},${target.z}`,
           );
     await owner.start();
+    const landscape = world.register(
+      COMPACT_LANDSCAPE_ROCKS_SYSTEM,
+      CompactLandscapeRocksSystem,
+    ) as CompactLandscapeRocksSystem;
+    await landscape.init();
+    await landscape.start();
+    expect(landscape.getRocks()?.placements).toHaveLength(17);
     for (const start of starts)
       for (const row of approaches)
         for (const target of row.tiles) {

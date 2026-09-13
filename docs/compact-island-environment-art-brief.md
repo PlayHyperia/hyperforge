@@ -1,5 +1,39 @@
 # Compact island environment art: next delivery slice
 
+## Shared Haven candidate implemented — 2026-09-13
+
+The prototype below is now implemented in the shared profile/worker path and
+selected in the local launch-branch manifest. Actual retained geometry rejected
+the original 64-grid shape: 0.736m height discrepancy and 0.141m edge mismatch.
+After forty bounded comparisons, the candidate uses wider drainage, an 8m face
+and one local 64→128 leaf refinement: +24,832 triangles / 1,000,448 bytes, no new
+terrain nodes/draws. Sampled discrepancy is 0.07574/0.07210m and the equal-grid
+edge agrees to numerical roundoff. This supersedes the prototype's claim that
+the unchanged mesh allocation suffices; native frame and visual gates remain.
+
+Forty unit, four actual worker/mesh/road integration and two native PhysX/resource
+tests pass. The latter cook test-owned colliders, not the live terrain owners.
+Final regression is 1,324/1,324; shared/client/server typechecks/builds and lint
+pass. Native01 includes a new eye-height Haven view plus eight exact comparison
+cameras: 700 unchanged pins/622 archives, 37 fog brackets, 48 resource trees,
+both actual 128-grid leaves and clean owned-session shutdown independently
+verified. Overall run remains false with 19 existing dagger-fit/cow404 errors.
+Short p95 CPU14/13ms and GPU-pass sums17.63/18.55ms are not presented FPS,
+sustained60 or a causal cost comparison.
+
+All nine images were visually reviewed. Local relief is improved, but arbitrary
+yellow/green lawn patches, weak mineral/turf transitions, dark blue-green foliage,
+inconsistent asset styles and the exposed coast still fail the art bar. The
+next visual slice replaces noise-authored lawn islands with composed Haven
+ground-cover, wear and talus using the current packed layers. No new full-screen
+pass, light, resolution reduction or global quality downgrade is justified.
+
+Source tracing additionally confirmed a terrain/camera PhysX query-mask bug and
+an absent optional avatar foot-clamp implementation. Both now have explicit
+launch tasks. See `haven-shoulder-terrain-20260913.md` and the mirrored checklist.
+The native preparation broadcast has physics=false; these captures do not prove
+averaged terrain boxes displaced the camera.
+
 ## Ready external terrain prototype — 2026-09-12
 
 The bounded Haven west-shoulder prototype now uses one asymmetric ruled crest,

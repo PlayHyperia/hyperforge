@@ -1410,17 +1410,42 @@ export type CompactServiceCourtManifest = Readonly<{
 
 /** Low, non-colliding planting; tree/resource ownership is never changed. */
 export type CompactServicePlantingManifest = Readonly<{
-  schemaVersion: 1;
-  layoutId: "compact-smithy-planting-v1";
+  schemaVersion: 1 | 2;
+  layoutId: "compact-smithy-planting-v1" | "compact-smithy-planting-v2";
   terrainProfileId: "compact-duel-island-v6";
   beds: readonly Readonly<{
     id: "west" | "east";
+    /** V2 colour-only soil support; does not change height, paths or ecology. */
+    soilLobes?: readonly Readonly<{
+      centerX: number;
+      centerZ: number;
+      radiusX: number;
+      radiusZ: number;
+    }>[];
     plants: readonly Readonly<{
+      /** V1 is bush-only. V2 requires an explicit admitted source model. */
+      model?: "bush" | "fern";
       x: number;
       z: number;
       scale: number;
       yaw: number;
     }>[];
+  }>[];
+}>;
+
+/** Bounded authored scenery with shared exact collision and navigation ownership. */
+export type CompactLandscapeRocksManifest = Readonly<{
+  schemaVersion: 1;
+  layoutId: "compact-preparation-rocks-v1";
+  terrainProfileId: "compact-duel-island-v6";
+  sourceSha256: string;
+  rocks: readonly Readonly<{
+    id: string;
+    variant: "rock10" | "rock11" | "rock13";
+    x: number;
+    z: number;
+    yaw: number;
+    scale: number;
   }>[];
 }>;
 
@@ -1446,6 +1471,7 @@ export interface WorldConfigManifest {
   compactPreparationLodge?: CompactPreparationLodgeManifest;
   compactServiceCourt?: CompactServiceCourtManifest;
   compactServicePlanting?: CompactServicePlantingManifest;
+  compactLandscapeRocks?: CompactLandscapeRocksManifest;
 }
 
 // ============== BUILDINGS MANIFEST TYPES ==============
