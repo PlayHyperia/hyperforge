@@ -63,6 +63,7 @@ export const COMPACT_TERRAIN_MATERIAL = {
   minimumRoughness: 0.65,
   aoStrength: 0.35,
   loadTimeoutMs: 20_000,
+  fineGrassNormalStrength: 0.25,
   dirtNormalStrength: 0.25,
   rockNormalStrength: 0.4,
 } as const;
@@ -832,8 +833,20 @@ export function createCompactTerrainLayers(
   textures: CompactTerrainTextureSet,
   distanceSquared: Node<"float">,
   patternNoise: Node<"float"> = float(0.5),
+  grassColorGrade?: CompactGrassColorGrade,
 ): Record<Layer, CompactTerrainLayer> {
   const controls = COMPACT_TERRAIN_MATERIAL;
+  // This existing opt-in selects the fine meadow presentation only. Preserve
+  // the original texture samples, albedo and all non-grass layer responses;
+  // softer normal relief is an art trial, not reduced texture resolution.
+  const fineMeadow =
+    createCompactTerrainColorOperations().grassColorGrade(grassColorGrade) !==
+    undefined;
+  const grassNormalStrength = fineMeadow
+    ? float(controls.fineGrassNormalStrength).toVar(
+        "fineGrassSubstrateNormalStrength",
+      )
+    : 1;
   const flatUV = vec2(positionWorld.x, positionWorld.z).mul(
     controls.repeatsPerMeter,
   );
@@ -853,7 +866,7 @@ export function createCompactTerrainLayers(
   const project = (
     layer: Layer,
     uv: Node<"vec2">,
-    normalStrength: number,
+    normalStrength: number | Node<"float">,
     gradients?: { dx: Node<"vec2">; dy: Node<"vec2"> },
   ): CompactTerrainLayer => {
     const sample = (channel: Channel) => {
@@ -882,7 +895,7 @@ export function createCompactTerrainLayers(
   const ground = (
     layer: "grass" | "dirt",
     repeats: number,
-    normalStrength: number,
+    normalStrength: number | Node<"float">,
   ): CompactTerrainLayer => {
     const p = createCompactGroundProjections(
       vec2(positionWorld.x, positionWorld.z),
@@ -926,7 +939,7 @@ export function createCompactTerrainLayers(
       .add(b.mul(normalizedWeights.y))
       .add(c.mul(normalizedWeights.z));
   return {
-    grass: ground("grass", controls.grassRepeatsPerMeter, 1),
+    grass: ground("grass", controls.grassRepeatsPerMeter, grassNormalStrength),
     dirt: ground(
       "dirt",
       controls.dirtRepeatsPerMeter,

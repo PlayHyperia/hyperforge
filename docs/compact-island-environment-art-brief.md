@@ -1,5 +1,29 @@
 # Compact island environment art: next delivery slice
 
+## Current trial — fine grass substrate normal response, 2026-09-13
+
+Implemented the planned isolated grass-normal strength 1→.25 in the existing
+opt-in fine-meadow presentation. Both derivative-aware grass projections share
+one named scalar; ordinary grass remains 1, dirt .25 and rock .4. Albedo/CPU
+color, source maps, texture dimensions/filtering/sample count, roughness/AO,
+blending masks, grass geometry/density, grounding and lighting stay unchanged.
+This is a disclosed art-strength change, not a texture-resolution reduction.
+
+Actual material arithmetic/routing tests pass 41/41, including near/fade/far
+distances and protected other-layer/non-normal channels. Integration passes
+436/436 across 28 files serially; all three package typechecks/builds pass.
+Scoped lint/diff and 67/67 short-capture preflight checks also pass.
+Initial test-helper traversal and repeated-DAG-evaluation failures are preserved
+and corrected without raising a timeout. Independent source review finds no
+scope or lifecycle blocker. Native pictures are still pending.
+
+The explicit three-still art capture must save the same naturally daylit
+close/elevated/anvil views and preserve native source/owner evidence and cleanup.
+It must report its omitted cost, wind, LOD and scheduling gates as unperformed;
+it is not a full-study pass. Inspect the pictures before another long run and
+reject a painted-flat substrate or no worthwhile improvement. Existing full
+qualification and its failed final snapshot remain separate. No default change.
+
 ## Latest verdict — shoulder canopy remains a comparison, 2026-09-13
 
 Actual shoulder-native02 close/elevated/anvil images show modest extra overlap

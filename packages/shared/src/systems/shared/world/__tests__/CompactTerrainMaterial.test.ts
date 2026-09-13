@@ -8,6 +8,8 @@ import THREE, {
   float,
   mat4,
   cameraViewMatrix,
+  normalWorldGeometry,
+  positionWorld,
   texture,
   vec2,
   vec3,
@@ -647,131 +649,153 @@ function graph(root: Node): Set<Node> {
 
 // Evaluate only the concrete numeric TSL operations used by the normal frame.
 // Unknown nodes fail: this is arithmetic evidence, never a mock GPU renderer.
-function vectorValue(node: Node): number[] {
-  const read = (key: string) => Reflect.get(node, key) as unknown;
-  const child = (key: string): number[] => {
-    const value = read(key);
-    if (!(value instanceof THREE.Node)) throw new Error(`Missing node ${key}`);
-    return vectorValue(value);
-  };
-  const value = read("value");
-  if (typeof value === "number") return [value];
-  if (
-    value instanceof THREE.Vector2 ||
-    value instanceof THREE.Vector3 ||
-    value instanceof THREE.Vector4
-  )
-    return value.toArray();
-  if (value instanceof THREE.Matrix4) return value.toArray();
-  if (node.type === "ConvertNode" || node.type === "VarNode")
-    return child("node");
-  if (node.type === "JoinNode")
-    return (read("nodes") as Node[]).flatMap(vectorValue);
-  if (node.type === "SplitNode")
-    return [...String(read("components"))].map(
-      (component) => child("node")["xyzw".indexOf(component)],
-    );
-  const pair = (apply: (a: number, b: number) => number) => {
-    const a = child("aNode");
-    const b = child("bNode");
-    return Array.from({ length: Math.max(a.length, b.length) }, (_, i) =>
-      apply(a[a.length === 1 ? 0 : i], b[b.length === 1 ? 0 : i]),
-    );
-  };
-  const triple = (apply: (a: number, b: number, c: number) => number) => {
-    const a = child("aNode"),
-      b = child("bNode"),
-      c = child("cNode");
-    return Array.from(
-      { length: Math.max(a.length, b.length, c.length) },
-      (_, i) =>
-        apply(
-          a[a.length === 1 ? 0 : i],
-          b[b.length === 1 ? 0 : i],
-          c[c.length === 1 ? 0 : i],
-        ),
-    );
-  };
-  switch (read("op")) {
-    case "/":
-      return pair((a, b) => a / b);
-    case "+":
-      return pair((a, b) => a + b);
-    case "-":
-      return pair((a, b) => a - b);
-    case "*": {
+function vectorValue(
+  node: Node,
+  inputs?: ReadonlyMap<Node, readonly number[]>,
+  cache = new Map<Node, number[]>(),
+): number[] {
+  const supplied = inputs?.get(node);
+  if (supplied) return [...supplied];
+  const cached = cache.get(node);
+  if (cached) return cached;
+  const calculate = (): number[] => {
+    const read = (key: string) => Reflect.get(node, key) as unknown;
+    const child = (key: string): number[] => {
+      const value = read(key);
+      if (!(value instanceof THREE.Node))
+        throw new Error(`Missing node ${key}`);
+      return vectorValue(value, inputs, cache);
+    };
+    const value = read("value");
+    if (typeof value === "number") return [value];
+    if (
+      value instanceof THREE.Vector2 ||
+      value instanceof THREE.Vector3 ||
+      value instanceof THREE.Vector4
+    )
+      return value.toArray();
+    if (value instanceof THREE.Matrix4) return value.toArray();
+    if (node.type === "ConvertNode" || node.type === "VarNode")
+      return child("node");
+    if (node.type === "JoinNode")
+      return (read("nodes") as Node[]).flatMap((value) =>
+        vectorValue(value, inputs, cache),
+      );
+    if (node.type === "SplitNode")
+      return [...String(read("components"))].map(
+        (component) => child("node")["xyzw".indexOf(component)],
+      );
+    const pair = (apply: (a: number, b: number) => number) => {
+      const a = child("aNode");
+      const b = child("bNode");
+      return Array.from({ length: Math.max(a.length, b.length) }, (_, i) =>
+        apply(a[a.length === 1 ? 0 : i], b[b.length === 1 ? 0 : i]),
+      );
+    };
+    const triple = (apply: (a: number, b: number, c: number) => number) => {
       const a = child("aNode"),
-        b = child("bNode");
-      if (a.length === 16 || b.length === 16) {
+        b = child("bNode"),
+        c = child("cNode");
+      return Array.from(
+        { length: Math.max(a.length, b.length, c.length) },
+        (_, i) =>
+          apply(
+            a[a.length === 1 ? 0 : i],
+            b[b.length === 1 ? 0 : i],
+            c[c.length === 1 ? 0 : i],
+          ),
+      );
+    };
+    switch (read("op")) {
+      case "/":
+        return pair((a, b) => a / b);
+      case "+":
+        return pair((a, b) => a + b);
+      case "-":
+        return pair((a, b) => a - b);
+      case "*": {
+        const a = child("aNode"),
+          b = child("bNode");
+        if (a.length === 16 || b.length === 16) {
+          const matrixFirst = a.length === 16;
+          const matrix = new THREE.Matrix4().fromArray(matrixFirst ? a : b);
+          if (!matrixFirst) matrix.transpose();
+          const direction = matrixFirst ? b : a;
+          return new THREE.Vector4(
+            ...(direction as [number, number, number, number]),
+          )
+            .applyMatrix4(matrix)
+            .toArray();
+        }
+        return pair((a, b) => a * b);
+      }
+    }
+    switch (read("method")) {
+      case "abs":
+        return child("aNode").map(Math.abs);
+      case "pow":
+        return pair(Math.pow);
+      case "length":
+        return [Math.hypot(...child("aNode"))];
+      case "min":
+        return pair(Math.min);
+      case "floor":
+        return child("aNode").map(Math.floor);
+      case "fract":
+        return child("aNode").map((value) => value - Math.floor(value));
+      case "sin":
+        return child("aNode").map(Math.sin);
+      case "cos":
+        return child("aNode").map(Math.cos);
+      case "max":
+        return pair(Math.max);
+      case "clamp":
+        return triple((value, minimum, maximum) =>
+          Math.max(minimum, Math.min(maximum, value)),
+        );
+      case "mix":
+        return triple((a, b, weight) => a + (b - a) * weight);
+      case "smoothstep":
+        return triple((a, b, value) => {
+          const t = Math.max(0, Math.min(1, (value - a) / (b - a)));
+          return t * t * (3 - 2 * t);
+        });
+      case "dot":
+        return [pair((a, b) => a * b).reduce((a, b) => a + b, 0)];
+      case "cross":
+        return new THREE.Vector3(
+          ...(child("aNode") as [number, number, number]),
+        )
+          .cross(
+            new THREE.Vector3(...(child("bNode") as [number, number, number])),
+          )
+          .toArray();
+      case "inversesqrt":
+        return child("aNode").map((value) => 1 / Math.sqrt(value));
+      case "normalize": {
+        const a = child("aNode");
+        const length = Math.hypot(...a);
+        return a.map((value) => value / length);
+      }
+      case "transformDirection": {
+        const a = child("aNode"),
+          b = child("bNode");
         const matrixFirst = a.length === 16;
         const matrix = new THREE.Matrix4().fromArray(matrixFirst ? a : b);
         if (!matrixFirst) matrix.transpose();
         const direction = matrixFirst ? b : a;
-        return new THREE.Vector4(
-          ...(direction as [number, number, number, number]),
-        )
-          .applyMatrix4(matrix)
+        return new THREE.Vector3(...(direction as [number, number, number]))
+          .transformDirection(matrix)
           .toArray();
       }
-      return pair((a, b) => a * b);
     }
-  }
-  switch (read("method")) {
-    case "length":
-      return [Math.hypot(...child("aNode"))];
-    case "min":
-      return pair(Math.min);
-    case "floor":
-      return child("aNode").map(Math.floor);
-    case "fract":
-      return child("aNode").map((value) => value - Math.floor(value));
-    case "sin":
-      return child("aNode").map(Math.sin);
-    case "cos":
-      return child("aNode").map(Math.cos);
-    case "max":
-      return pair(Math.max);
-    case "clamp":
-      return triple((value, minimum, maximum) =>
-        Math.max(minimum, Math.min(maximum, value)),
-      );
-    case "mix":
-      return triple((a, b, weight) => a + (b - a) * weight);
-    case "smoothstep":
-      return triple((a, b, value) => {
-        const t = Math.max(0, Math.min(1, (value - a) / (b - a)));
-        return t * t * (3 - 2 * t);
-      });
-    case "dot":
-      return [pair((a, b) => a * b).reduce((a, b) => a + b, 0)];
-    case "cross":
-      return new THREE.Vector3(...(child("aNode") as [number, number, number]))
-        .cross(
-          new THREE.Vector3(...(child("bNode") as [number, number, number])),
-        )
-        .toArray();
-    case "inversesqrt":
-      return child("aNode").map((value) => 1 / Math.sqrt(value));
-    case "normalize": {
-      const a = child("aNode");
-      const length = Math.hypot(...a);
-      return a.map((value) => value / length);
-    }
-    case "transformDirection": {
-      const a = child("aNode"),
-        b = child("bNode");
-      const matrixFirst = a.length === 16;
-      const matrix = new THREE.Matrix4().fromArray(matrixFirst ? a : b);
-      if (!matrixFirst) matrix.transpose();
-      const direction = matrixFirst ? b : a;
-      return new THREE.Vector3(...(direction as [number, number, number]))
-        .transformDirection(matrix)
-        .toArray();
-    }
-  }
-  throw new Error(
-    `Unsupported numeric node ${node.type}/${String(read("method"))}`,
-  );
+    throw new Error(
+      `Unsupported numeric node ${node.type}/${String(read("method"))}`,
+    );
+  };
+  const result = calculate();
+  cache.set(node, result);
+  return result;
 }
 async function decodedTexture(name: string) {
   const decoded = PNG.sync.read(
@@ -1330,6 +1354,316 @@ describe("authored Haven ground composition, independent of terrain and grass po
 });
 
 describe("compact terrain actual texture ownership and CPU material graph", () => {
+  it("changes only opted-in grass normal relief in actual owned layer graphs", () => {
+    const owner = new CompactTerrainTextureSet("https://assets.invalid");
+    const before = owner.getReceipt();
+    const layers = createCompactTerrainLayers(owner, float(0), float(0.137));
+    const candidate = createCompactTerrainLayers(
+      owner,
+      float(0),
+      float(0.137),
+      "fine-meadow-green-v1",
+    );
+    // Compare semantic graphs, not incidental UUIDs of separately constructed
+    // arithmetic nodes. Actual texture identities and all numeric inputs stay
+    // in the fingerprint, so changing a map or its projection is not ignored.
+    const fingerprint = (root: Node): string => {
+      const cache = new Map<Node, string>();
+      const visit = (node: Node): string => {
+        const found = cache.get(node);
+        if (found) return found;
+        const value: unknown = Reflect.get(node, "value");
+        const attributes = Object.fromEntries(
+          ["op", "method", "components", "scope", "nodeType", "name"].map(
+            (key) => [key, Reflect.get(node, key)],
+          ),
+        );
+        const result = createHash("sha256")
+          .update(
+            JSON.stringify({
+              type: node.type,
+              ...attributes,
+              value:
+                value instanceof THREE.Texture
+                  ? value.uuid
+                  : value instanceof THREE.Vector2 ||
+                      value instanceof THREE.Vector3 ||
+                      value instanceof THREE.Vector4 ||
+                      value instanceof THREE.Matrix4
+                    ? value.toArray()
+                    : typeof value === "number"
+                      ? value
+                      : undefined,
+              children: [...node.getChildren()].map(visit),
+            }),
+          )
+          .digest("hex");
+        cache.set(node, result);
+        return result;
+      };
+      return visit(root);
+    };
+    try {
+      for (const layer of ["grass", "dirt", "rock"] as const)
+        for (const channel of [
+          "albedo",
+          "roughness",
+          "ao",
+          "worldNormal",
+        ] as const) {
+          const changed = layer === "grass" && channel === "worldNormal";
+          expect(
+            fingerprint(candidate[layer][channel]) ===
+              fingerprint(layers[layer][channel]),
+          ).toBe(!changed);
+        }
+      const strength = [...graph(candidate.grass.worldNormal)].filter(
+        (node) =>
+          Reflect.get(node, "name") === "fineGrassSubstrateNormalStrength",
+      );
+      expect(strength).toHaveLength(1);
+      expect(vectorValue(strength[0])).toEqual([0.25]);
+      const grassNormalTexture = owner.getNode("grass", "normal-ao").value;
+      const projectedNormals = [...graph(candidate.grass.worldNormal)].filter(
+        (node) =>
+          Reflect.get(node, "method") === "normalize" &&
+          graph(node).has(strength[0]) &&
+          [...graph(node)].filter(
+            (input) =>
+              Reflect.get(input, "value") === grassNormalTexture &&
+              Reflect.get(input, "uvNode"),
+          ).length === 1,
+      );
+      expect(projectedNormals).toHaveLength(2);
+      for (const normal of projectedNormals)
+        expect(graph(normal).has(strength[0])).toBe(true);
+      for (const layer of ["grass", "dirt", "rock"] as const)
+        for (const channel of [
+          "albedo",
+          "roughness",
+          "ao",
+          "worldNormal",
+        ] as const)
+          if (layer !== "grass" || channel !== "worldNormal")
+            expect(graph(candidate[layer][channel]).has(strength[0])).toBe(
+              false,
+            );
+      expect(owner.getReceipt()).toEqual(before);
+      for (const invalid of [null, false, {}, "fine-meadow-green-v2"])
+        expect(() =>
+          createCompactTerrainLayers(
+            owner,
+            float(0),
+            float(0.137),
+            invalid as CompactGrassColorGrade,
+          ),
+        ).toThrow(/grass color grade/);
+    } finally {
+      owner.dispose();
+    }
+  });
+
+  it("evaluates actual sampled normal graphs against independent rotated frames and unchanged distance fade", () => {
+    const owner = new CompactTerrainTextureSet("https://assets.invalid");
+    const noise = 0.137;
+    const smooth = (a: number, b: number, value: number) => {
+      const t = THREE.MathUtils.clamp((value - a) / (b - a), 0, 1);
+      return t * t * (3 - 2 * t);
+    };
+    // Explicit fragment inputs for actual arithmetic nodes, not a renderer or
+    // texture-filter emulation. Projection derivatives are evaluated from the
+    // real linear UV graph under this known world differential basis.
+    const evaluate = (root: Node, encoded: readonly number[]) => {
+      const inputs = new Map<Node, readonly number[]>([
+        [positionWorld, [350, 28, 320]],
+        [normalWorldGeometry, [0, 1, 0]],
+        [cameraViewMatrix, new THREE.Matrix4().toArray()],
+      ]);
+      for (const node of graph(root)) {
+        const method: unknown = Reflect.get(node, "method");
+        if (method === "dFdx" || method === "dFdy") {
+          const operand: unknown = Reflect.get(node, "aNode");
+          if (!(operand instanceof THREE.Node))
+            throw new Error("Missing derivative operand");
+          const shifted = new Map(inputs);
+          shifted.set(
+            positionWorld,
+            method === "dFdx" ? [351, 28, 320] : [350, 28, 319],
+          );
+          const a = vectorValue(operand, inputs),
+            b = vectorValue(operand, shifted);
+          inputs.set(
+            node,
+            b.map((value, index) => value - a[index]),
+          );
+        }
+        if (
+          Reflect.get(node, "value") instanceof THREE.Texture &&
+          Reflect.get(node, "uvNode")
+        )
+          inputs.set(node, [...encoded, 1]);
+      }
+      return new THREE.Vector3(
+        ...(vectorValue(root, inputs) as [number, number, number]),
+      );
+    };
+    const expectedGround = (encoded: readonly number[], strength: number) => {
+      const index = Math.floor(noise * 32);
+      const sample = (id: number) => {
+        const angle = id * 2.399963229728653;
+        const x = (encoded[0] * 2 - 1) * strength;
+        const z = (encoded[1] * 2 - 1) * strength;
+        return new THREE.Vector3(
+          Math.cos(angle) * x + Math.sin(angle) * z,
+          Math.max(0.001, encoded[2] * 2 - 1),
+          -Math.sin(angle) * x + Math.cos(angle) * z,
+        ).normalize();
+      };
+      return sample(index)
+        .lerp(sample(index + 1), smooth(0.18, 0.82, noise * 32 - index))
+        .normalize();
+    };
+    try {
+      for (const distance of [0, 45, 80, 120, 145])
+        for (const encoded of [
+          [0.5, 0.5, 1],
+          [0.75, 0.625, 1],
+          [0.2, 0.8, 0.9],
+        ]) {
+          const fade = 1 - smooth(45 ** 2, 120 ** 2, distance ** 2);
+          const baseline = createCompactTerrainLayers(
+            owner,
+            float(distance ** 2),
+            float(noise),
+          );
+          const candidate = createCompactTerrainLayers(
+            owner,
+            float(distance ** 2),
+            float(noise),
+            "fine-meadow-green-v1",
+          );
+          const grass = evaluate(candidate.grass.worldNormal, encoded);
+          expect(
+            grass.distanceTo(expectedGround(encoded, 0.25 * fade)),
+          ).toBeLessThan(1e-10);
+          expect(
+            evaluate(baseline.grass.worldNormal, encoded).distanceTo(
+              expectedGround(encoded, fade),
+            ),
+          ).toBeLessThan(1e-10);
+          for (const layers of [baseline, candidate]) {
+            expect(
+              evaluate(layers.dirt.worldNormal, encoded).distanceTo(
+                expectedGround(encoded, 0.25 * fade),
+              ),
+            ).toBeLessThan(1e-10);
+            const rock = new THREE.Vector3(
+              (encoded[0] * 2 - 1) * 0.4 * fade,
+              Math.max(0.001, encoded[2] * 2 - 1),
+              (encoded[1] * 2 - 1) * 0.4 * fade,
+            ).normalize();
+            expect(
+              evaluate(layers.rock.worldNormal, encoded).distanceTo(rock),
+            ).toBeLessThan(1e-10);
+          }
+          expect(grass.length()).toBeCloseTo(1, 12);
+          expect(grass.toArray().every(Number.isFinite)).toBe(true);
+          for (const [dirt, cliff, road] of [
+            [1, 0, 0],
+            [0, 1, 0],
+            [0, 0, 1],
+          ]) {
+            const before = blendCompactTerrainLayers(
+              baseline,
+              float(dirt),
+              float(cliff),
+              float(road),
+            );
+            const after = blendCompactTerrainLayers(
+              candidate,
+              float(dirt),
+              float(cliff),
+              float(road),
+            );
+            expect(
+              evaluate(before.normal, encoded).distanceTo(
+                evaluate(after.normal, encoded),
+              ),
+            ).toBeLessThan(1e-12);
+          }
+        }
+    } finally {
+      owner.dispose();
+    }
+  });
+
+  it("routes the fine substrate normal only through actual compact material normals without new samples or geometry", () => {
+    const common = {
+      compactPbr: true,
+      compactProfile: HAVEN_SHOULDER_COMPACT_WORLD_TERRAIN_PROFILE,
+    };
+    const ordinary = createTerrainMaterial(undefined, common);
+    const candidate = createTerrainMaterial(undefined, {
+      ...common,
+      compactGrassColorGrade: "fine-meadow-green-v1",
+    });
+    try {
+      const strength = [...graph(candidate.normalNode!)].filter(
+        (node) =>
+          Reflect.get(node, "name") === "fineGrassSubstrateNormalStrength",
+      );
+      expect(strength).toHaveLength(1);
+      expect(vectorValue(strength[0])).toEqual([0.25]);
+      expect(
+        [...graph(ordinary.normalNode!)].some(
+          (node) =>
+            Reflect.get(node, "name") === "fineGrassSubstrateNormalStrength",
+        ),
+      ).toBe(false);
+      for (const node of [
+        candidate.colorNode!,
+        candidate.aoNode!,
+        candidate.roughnessNode!,
+      ])
+        expect(graph(node).has(strength[0])).toBe(false);
+      for (const material of [ordinary, candidate]) {
+        expect(material.positionNode).toBeNull();
+        expect(material.displacementMap).toBeNull();
+        expect(material.transparent).toBe(false);
+        expect(material.depthWrite).toBe(true);
+        const receipt = material.compactTerrainSurface!.getReceipt();
+        expect(receipt.surfaceSampleCount).toBe(14);
+        expect(receipt.textures).toHaveLength(6);
+        const owned = new Set(
+          receipt.textures.map((entry) => entry.textureUuid),
+        );
+        const samples = new Set<Node>();
+        for (const root of [
+          material.colorNode!,
+          material.normalNode!,
+          material.roughnessNode!,
+          material.aoNode!,
+        ])
+          for (const node of graph(root)) {
+            const value: unknown = Reflect.get(node, "value");
+            if (
+              value instanceof THREE.Texture &&
+              owned.has(value.uuid) &&
+              Reflect.get(node, "uvNode")
+            )
+              samples.add(node);
+          }
+        expect(samples.size).toBe(14);
+        expect(
+          [...samples].filter((node) => Reflect.get(node, "gradNode")),
+        ).toHaveLength(8);
+      }
+    } finally {
+      ordinary.dispose();
+      candidate.dispose();
+    }
+  });
+
   it("admits only the immutable opt-in grass grade without changing raw scan means", () => {
     const ops = createCompactTerrainColorOperations();
     const raw = ops.getPalette();

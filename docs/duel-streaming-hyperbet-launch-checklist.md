@@ -1,5 +1,18 @@
 # Duel Arena, Streaming, and Hyperbet Launch Checklist
 
+## Fine meadow substrate relief — art trial in progress, 2026-09-13
+
+- [x] Implement an explicit fine-only grass ground normal strength of .25 instead of 1, reusing the existing fine-meadow selection and both original derivative-aware texture projections. Ordinary grass stays at 1; dirt stays .25 and rock .4.
+- [x] Preserve all texture bytes, dimensions, filtering, sample count, albedo/CPU grass color, roughness/AO, layer masks, blade shape/count, worker placement, grounding, roads/resources, lighting and render quality. This is an announced art-strength adjustment, not reduced texture resolution or a performance acceptance shortcut.
+- [x] Pass 41/41 actual material checks and 436/436 integrated checks across 28 files serially (49.07s). Verify normal arithmetic at near/fade/far distances, graph routing, non-normal channel identity, other layer/profile invariants and the six-map/fourteen-sample budget. All shared/server/client typechecks/builds pass. Preserve initial test-helper failures; no timeout or assertion tolerance was relaxed.
+- [x] Pass scoped ESLint/diff checks and all 67 external capture preflight checks (13.93s). The short-art branch preserves the original full-study path, existing source closure, shield/scene admission and owned cleanup, while explicitly recording unperformed qualification gates.
+- [ ] Capture the same three real daylight views through an explicitly short art-only workflow. Review visual results before any long wind/LOD sequence; omitted performance/motion/scheduling gates remain unperformed, not passed.
+- [ ] Accept only a clear reduction of distracting ground relief without painted-flat turf, broken layer blends or less convincing canopy. No geometry coverage fix is claimed. Keep the trial opt-in and reject it if it does not help.
+- [ ] After an art candidate passes, complete the full unchanged motion/LOD/loading/performance gates and resolve the separate final snapshot race without loosening its owner/job/byte invariants.
+
+The previous goal turn made measurable progress but did not meet the reference: shoulder-native02 remains a failed overall qualification and an unaccepted art comparison. Evidence: `asset-studio/fine-meadow01/QUALIFICATION.md`.
+
+
 ## Fine meadow shoulder canopy — measured, not visually accepted, 2026-09-13
 
 - [x] Implement and checkpoint the explicit fine-only quadratic shoulder taper and indirect root AO. Same blade count, maximum width, roots, centerlines, heights, tips, normals, UV/index topology, textures, resolution, shadow quality and service/resource rules. Analytical leaf area rises 15.97% near /14.29% middle; raster cost is not assumed free.

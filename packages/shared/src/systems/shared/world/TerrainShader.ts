@@ -1268,7 +1268,12 @@ export function createTerrainMaterial(
     macroField,
   );
   const compactLayers = compactTextures
-    ? createCompactTerrainLayers(compactTextures, distSq, noiseValue)
+    ? createCompactTerrainLayers(
+        compactTextures,
+        distSq,
+        noiseValue,
+        grassColorGrade,
+      )
     : null;
   if (compactLayers && !macroField?.havenGround) {
     // One extra sample of the existing noise texture; no new texture allocation.
