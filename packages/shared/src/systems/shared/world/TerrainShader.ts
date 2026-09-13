@@ -63,6 +63,7 @@ import {
   createCompactPondSurfaceWeights,
   applyCompactPondWetness,
   applyCompactMeadowTint,
+  applyCompactGrassColorGrade,
   createCompactCoastWeights,
   applyCompactCoastRock,
   createCompactTerrainMacroWeights,
@@ -74,6 +75,8 @@ import {
   type CompactTerrainPond,
   type CompactTerrainPlantingLobe,
   type CompactTerrainHavenGround,
+  type CompactGrassColorGrade,
+  type CompactGrassColorGradeDescriptor,
 } from "./CompactTerrainPalette";
 import type { CompactHabitatField } from "./CompactHabitatComposition";
 
@@ -1198,6 +1201,7 @@ export function createTerrainMaterial(
   shade = new TerrainShadeUniforms(),
   options: {
     compactPbr?: boolean;
+    compactGrassColorGrade?: CompactGrassColorGrade;
     compactPond?: CompactTerrainPond | null;
     compactPlantingLobes?: readonly CompactTerrainPlantingLobe[];
     compactProfile?: WorldTerrainProfile;
@@ -1206,6 +1210,7 @@ export function createTerrainMaterial(
 ): THREE.Material & {
   terrainUniforms: TerrainUniforms;
   compactTerrainSurface?: CompactTerrainTextureSet;
+  compactGrassColorGrade?: CompactGrassColorGradeDescriptor;
   compactPlantingMaterial?: readonly CompactTerrainPlantingLobe[];
   compactHavenGroundMaterial?: CompactHavenGroundMaterialReceipt;
   compactHabitatMaterial?: CompactHabitatField;
@@ -1214,6 +1219,12 @@ export function createTerrainMaterial(
     parameters: UniformNode<"vec4", THREE.Vector4>;
   };
 } {
+  const grassColorOperations = createCompactTerrainColorOperations();
+  const grassColorGrade = grassColorOperations.grassColorGrade(
+    options.compactGrassColorGrade,
+  );
+  if (grassColorGrade && !options.compactPbr)
+    throw new Error("Grass color grade requires the compact PBR material");
   const plantingLobes = options.compactPbr
     ? createCompactTerrainColorOperations().validatePlantingLobes(
         options.compactPlantingLobes,
@@ -1316,6 +1327,11 @@ export function createTerrainMaterial(
       macroSurface.dry,
     );
   }
+  if (compactLayers)
+    compactLayers.grass = applyCompactGrassColorGrade(
+      compactLayers.grass,
+      grassColorGrade,
+    );
   const noiseValue2 = add(
     mul(sin(mul(noiseValue, float(6.28))), float(0.3)),
     float(0.5),
@@ -1910,6 +1926,7 @@ export function createTerrainMaterial(
   const result = material as typeof material & {
     terrainUniforms: TerrainUniforms;
     compactTerrainSurface?: CompactTerrainTextureSet;
+    compactGrassColorGrade?: CompactGrassColorGradeDescriptor;
     compactPlantingMaterial?: readonly CompactTerrainPlantingLobe[];
     compactHavenGroundMaterial?: CompactHavenGroundMaterialReceipt;
     compactHabitatMaterial?: CompactHabitatField;
@@ -1919,6 +1936,13 @@ export function createTerrainMaterial(
     };
   };
   result.terrainUniforms = terrainUniforms;
+  if (grassColorGrade)
+    Object.defineProperty(result, "compactGrassColorGrade", {
+      enumerable: true,
+      writable: false,
+      configurable: false,
+      value: grassColorOperations.getGrassColorGrade(),
+    });
   if (options.compactHabitat) {
     Object.defineProperty(result, "compactHabitatMaterial", {
       enumerable: true,

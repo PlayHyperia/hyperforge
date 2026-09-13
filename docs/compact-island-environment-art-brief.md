@@ -22,8 +22,14 @@ scan mean [.12687,.16117,.03426] is deliberately more olive than legacy forest
 [.12597,.23302,.04696]; current green is 30.8% lower. This is not a demonstrated
 gamma fault, and the old reference's exact configuration remains unknown.
 Preserve raw scan provenance; explicit artistic grading must test CPU/GPU parity,
-texel clipping, exclusions and actual views. Start with [.95,1.30,1.10] as an
-unimplemented candidate, not a proven fix. Keep root/tip shading fixed initially.
+texel clipping, exclusions and actual views. The [.95,1.30,1.10] versioned
+`fine-meadow-green-v1` candidate is now implemented in the existing explicit
+fine-meadow pair, not a new query or default. Startup selection is cached across
+async loading; terrain, CPU fallback and emitted worker share it and reject stale
+result echoes. Material checks pass 38/38, focused propagation 7/7 and integrated
+checks 406/406 across 25 files. Shared/server/client typechecks/builds and scoped
+lint/format pass. Fresh native visual/performance qualification remains pending.
+Keep root/tip shading fixed initially.
 Color cannot fill coverage gaps; continuous canopy and smooth LOD remain open.
 
 AMD's [procedural grass reference](https://gpuopen.com/learn/mesh_shaders/mesh_shaders-procedural_grass_rendering/)

@@ -108,6 +108,7 @@ import {
   type CompactTerrainPond,
   type CompactTerrainMacroField,
   type CompactTerrainPlantingLobe,
+  type CompactGrassColorGrade,
 } from "./CompactTerrainPalette";
 // NOTE: Import directly to avoid circular dependency through barrel file
 import { WaterSystem } from "./WaterSystem";
@@ -378,6 +379,14 @@ export class TerrainSystem extends System {
   private grassSurfaceOperations = createGrassTerrainSurfaceOperations();
   private compactMacroMaterial: CompactTerrainMacroField | null | undefined;
   private compactHabitatMaterial: CompactHabitatField | null | undefined;
+  /** Restart-owned visual selection; never part of authoritative terrain identity. */
+  private compactGrassColorGrade: CompactGrassColorGrade | null | undefined;
+  private grassVisualSelection:
+    | Readonly<{
+        profile: ReturnType<typeof resolveExplicitStreamingRenderProfile>;
+        appearance: ReturnType<typeof resolveGrassAppearanceCandidate>;
+      }>
+    | undefined;
   private compactPlantingMaterial:
     readonly CompactTerrainPlantingLobe[] | undefined;
   private grassVisualManager: GrassVisualManager | null = null;
@@ -553,6 +562,7 @@ export class TerrainSystem extends System {
       compactPlantingLobes: this.getCompactPlantingMaterial(),
       compactProfile: profile,
       compactHabitat: this.getCompactHabitatMaterial(),
+      compactGrassColorGrade: this.getCompactGrassColorGrade(),
     });
     // The generator initializes before this client-only material exists. Apply
     // profile-owned options here so the actual published material is configured
@@ -592,6 +602,26 @@ export class TerrainSystem extends System {
         this.getWorldTerrainProfile(),
       );
     return this.compactMacroMaterial;
+  }
+
+  private getCompactGrassColorGrade(): CompactGrassColorGrade | undefined {
+    if (this.compactGrassColorGrade === undefined) {
+      // Capture the already explicit appearance/profile pair once. A later URL
+      // mutation must not recolour CPU/worker grass under an older terrain graph.
+      const appearance = resolveGrassAppearanceCandidate();
+      const profile = resolveExplicitStreamingRenderProfile();
+      const fine = appearance === "fine-meadow-v1";
+      if (
+        fine !== (profile?.grassProfile === "fine-meadow-v1") ||
+        (fine && !isCompactSculptProfile(this.getWorldTerrainProfile()))
+      )
+        throw new Error("Grass color grade requires the compact fine meadow");
+      this.grassVisualSelection = Object.freeze({ appearance, profile });
+      this.compactGrassColorGrade = fine
+        ? compactTerrainColorOperations.getGrassColorGrade().id
+        : null;
+    }
+    return this.compactGrassColorGrade ?? undefined;
   }
 
   /** Restart-owned art descriptor; no resource, terrain or worker mutation. */
@@ -1861,6 +1891,7 @@ export class TerrainSystem extends System {
     const runtimeRole = this.resolveRuntimeRole();
     this.runtimeIsServer = runtimeRole.isServer;
     this.runtimeIsClient = runtimeRole.isClient;
+    this.getCompactGrassColorGrade();
 
     // Initialize deterministic noise from world id + per-biome noise sets
     this.ensureNoiseInitialized();
@@ -2385,6 +2416,7 @@ export class TerrainSystem extends System {
         this.terrainContainer.parent?.add(grassContainer);
       }
       const grassWorkerSetup = this.buildGrassWorkerSetup();
+      const grassSelection = this.grassVisualSelection!;
       const terrainShade =
         this.getTerrainMaterialWithUniforms()?.terrainUniforms.shade;
       if (!terrainShade) {
@@ -2404,14 +2436,11 @@ export class TerrainSystem extends System {
         (wx: number, wz: number, eligibility?: GrassSurfaceEligibility) =>
           this.getTerrainColorAt(wx, wz, true, eligibility),
         grassWorkerSetup,
-        resolveExplicitStreamingRenderProfile()?.grassProfile ===
-          "fine-meadow-v1"
+        grassSelection.profile?.grassProfile === "fine-meadow-v1"
           ? FINE_MEADOW_GRASS_VISUAL_PROFILE
-          : resolveExplicitStreamingRenderProfile()?.grassProfile ===
-              "compact-meadow-v2"
+          : grassSelection.profile?.grassProfile === "compact-meadow-v2"
             ? DENSE_MEADOW_GRASS_VISUAL_PROFILE
-            : resolveExplicitStreamingRenderProfile()?.grassProfile ===
-                "compact-island-v1"
+            : grassSelection.profile?.grassProfile === "compact-island-v1"
               ? COMPACT_ISLAND_GRASS_VISUAL_PROFILE
               : isStreamingViewport
                 ? STREAMING_GRASS_VISUAL_PROFILE
@@ -2424,7 +2453,7 @@ export class TerrainSystem extends System {
             bounds,
             GRASS_BLADE_GROUNDING_LIMITS.maxSurfaces,
           ),
-        resolveGrassAppearanceCandidate(),
+        grassSelection.appearance,
         this.getCompactHabitatMaterial(),
       );
 
@@ -2550,6 +2579,9 @@ export class TerrainSystem extends System {
 
     return {
       terrainConfig: workerConfig,
+      ...(this.getCompactGrassColorGrade()
+        ? { compactGrassColorGrade: this.getCompactGrassColorGrade() }
+        : {}),
       compactPlantingLobes: this.getCompactPlantingMaterial(),
       isGrassObstacleAt: (x, z) =>
         this.grassSurfaceOperations.isGrassExcluded(
@@ -5466,6 +5498,7 @@ export class TerrainSystem extends System {
       // Legacy ecology remains independent of colour. The explicit compact
       // candidate instead uses physical layer support, before road suppression.
       const paletteInput = {
+        grassColorGrade: this.getCompactGrassColorGrade(),
         noiseValue: sampleNoiseCPU(
           wx,
           wz,

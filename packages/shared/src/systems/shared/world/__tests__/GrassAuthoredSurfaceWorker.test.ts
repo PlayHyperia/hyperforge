@@ -316,6 +316,95 @@ function broadGrade(): GrassTerrainSurfaceZone {
 }
 
 describe("actual authored-surface grass worker", () => {
+  it("admits and echoes the grass color grade without changing actual placement or legacy wire fields", async () => {
+    await withTerrain(async (terrain, internals, worker) => {
+      internals.loadWaterBodiesFromManifest();
+      internals.loadFlatZonesFromManifest();
+      const input: GrassWorkerInput = {
+        ...request(terrain, internals, 350, 350, 100),
+        placementCell: {
+          schemaVersion: 1,
+          size: 25,
+          indexX: 15,
+          indexZ: 14,
+        },
+        grassEligibility: "compact-pbr-v1",
+        clumpSpacing: 0.7,
+      };
+      const ungraded = await worker.run(input);
+      expect(ungraded.count).toBeGreaterThan(0);
+      expect(Object.hasOwn(ungraded, "compactGrassColorGrade")).toBe(false);
+      const gradedInput: GrassWorkerInput = {
+        ...input,
+        compactGrassColorGrade: "fine-meadow-green-v1",
+      };
+      const queued = prepareGrassWorkerRequest(gradedInput);
+      Reflect.set(gradedInput, "compactGrassColorGrade", "invalid-after-queue");
+      const graded = await worker.run(queued);
+      expect(graded.compactGrassColorGrade).toBe("fine-meadow-green-v1");
+      expect(graded.count).toBe(ungraded.count);
+      for (const name of [
+        "offsets",
+        "rotScaleHash",
+        "grassTints",
+        "groundNormals",
+      ] as const)
+        expect(graded[name]).toEqual(ungraded[name]);
+      expect(graded.groundColors).not.toEqual(ungraded.groundColors);
+      expect(admitGrassWorkerPlacementResult(graded, queued)).toEqual(graded);
+      for (const value of [null, false, "unknown", "fine-meadow-green-v2"]) {
+        const malformed = { ...input, compactGrassColorGrade: value };
+        expect(() =>
+          prepareGrassWorkerRequest(malformed as GrassWorkerInput),
+        ).toThrow(/grass.*grade/i);
+        await expect(worker.run(malformed as GrassWorkerInput)).rejects.toThrow(
+          /grass.*grade/i,
+        );
+        expect(() =>
+          admitGrassWorkerPlacementResult(
+            { ...graded, compactGrassColorGrade: value } as GrassWorkerOutput,
+            queued,
+          ),
+        ).toThrow(/grass.*grade/i);
+      }
+      const missing = { ...graded };
+      delete missing.compactGrassColorGrade;
+      expect(() => admitGrassWorkerPlacementResult(missing, queued)).toThrow(
+        /grass.*grade/i,
+      );
+      expect(() => admitGrassWorkerPlacementResult(graded, input)).toThrow(
+        /grass.*grade/i,
+      );
+      expect(() =>
+        admitGrassWorkerPlacementResult(
+          { ...ungraded, compactGrassColorGrade: undefined },
+          input,
+        ),
+      ).toThrow(/grass.*grade/i);
+      for (const eligibility of [undefined, "legacy-biome-v1"] as const) {
+        const noncompact = { ...queued, grassEligibility: eligibility };
+        expect(() => prepareGrassWorkerRequest(noncompact)).toThrow(
+          /grade requires compact/i,
+        );
+        await expect(worker.run(noncompact)).rejects.toThrow(
+          /grade requires compact/i,
+        );
+      }
+      const empty = await worker.run({
+        ...queued,
+        grassConfigs: Object.fromEntries(
+          Object.entries(queued.grassConfigs).map(([key, config]) => [
+            key,
+            { ...config, density: 0 },
+          ]),
+        ),
+      });
+      expect(empty.count).toBe(0);
+      expect(empty.compactGrassColorGrade).toBe("fine-meadow-green-v1");
+      expect(admitGrassWorkerPlacementResult(empty, queued)).toEqual(empty);
+    });
+  });
+
   it("keeps all five legacy arrays byte-exact against the real pre-cell sampling statements", async () => {
     await withTerrain(async (terrain, internals, worker) => {
       internals.loadWaterBodiesFromManifest();

@@ -1,6 +1,13 @@
 import type { WorldTerrainProfile } from "./WorldTerrainProfile";
 import type { GrassSurfaceEligibility } from "../../../runtime/clientViewportMode";
 
+/** Restart-owned fine-meadow trial, never a change to raw scan calibration. */
+export type CompactGrassColorGrade = "fine-meadow-green-v1";
+export type CompactGrassColorGradeDescriptor = Readonly<{
+  id: CompactGrassColorGrade;
+  linearMultipliers: readonly [number, number, number];
+}>;
+
 /**
  * CPU grass-base approximation of compact PBR diffuse, not a lighting bake.
  * Linear means of the original 1024px RGB maps; the packing manifest and tests
@@ -61,6 +68,11 @@ export type CompactTerrainMacroField = Readonly<{
 }>;
 
 export function createCompactTerrainColorOperations() {
+  const grassColorGradeDescriptor: CompactGrassColorGradeDescriptor =
+    Object.freeze({
+      id: "fine-meadow-green-v1",
+      linearMultipliers: Object.freeze([0.95, 1.3, 1.1] as const),
+    });
   const composition = {
     // Fresh/dry grass is a reflectance variation, not bare soil. Give it a
     // meadow-scale field without reseeding physical soil/grass eligibility.
@@ -576,6 +588,14 @@ export function createCompactTerrainColorOperations() {
         rock: [...palette.rock],
       };
     },
+    grassColorGrade(value: unknown): CompactGrassColorGrade | undefined {
+      if (value === undefined || value === grassColorGradeDescriptor.id)
+        return value;
+      throw new Error("Invalid compact grass color grade");
+    },
+    getGrassColorGrade(): CompactGrassColorGradeDescriptor {
+      return grassColorGradeDescriptor;
+    },
     meadowTint(noiseValue: number, macroDry = 0) {
       const c = composition;
       const dryness = math.mix(
@@ -720,6 +740,7 @@ export function createCompactTerrainColorOperations() {
      */
     sample(input: {
       noiseValue: number;
+      grassColorGrade?: CompactGrassColorGrade;
       meadowNoise?: number;
       distortNoise: number;
       slope: number;
@@ -733,6 +754,7 @@ export function createCompactTerrainColorOperations() {
         plantingLobes?: readonly CompactTerrainPlantingLobe[] | null;
       };
     }) {
+      const grade = operations.grassColorGrade(input.grassColorGrade);
       // Distortion noise wears path and pond margins, not meadow or cliff
       // classification. The same mean applies to both PBR projections.
       const pondSurface = input.surface
@@ -797,7 +819,9 @@ export function createCompactTerrainColorOperations() {
           math.mix(palette.rock[channel], palette.dirt[channel], coast.soil) *
           math.mix(1, composition.coastWetAlbedo, coast.wetness);
         let ground = math.mix(
-          grass * (havenGround ? 1 : meadowTint[channel]),
+          grass *
+            (havenGround ? 1 : meadowTint[channel]) *
+            (grade ? grassColorGradeDescriptor.linearMultipliers[channel] : 1),
           palette.dirt[channel],
           dirt,
         );

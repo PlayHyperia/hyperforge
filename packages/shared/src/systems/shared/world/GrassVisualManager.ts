@@ -81,7 +81,10 @@ import {
   type GrassWorkerOutput,
 } from "../../../utils/workers/GrassWorker";
 import type { TerrainWorkerConfig } from "../../../utils/workers/TerrainWorker";
-import type { CompactTerrainPlantingLobe } from "./CompactTerrainPalette";
+import type {
+  CompactTerrainPlantingLobe,
+  CompactGrassColorGrade,
+} from "./CompactTerrainPalette";
 import type { BiomeGrassConfigWorker } from "../../../utils/workers/GrassWorker";
 import {
   createGrassPlacementCellOperations,
@@ -612,6 +615,7 @@ export interface GrassVisualReadiness {
 
 /** Config data for the grass worker, passed from TerrainSystem at construction. */
 export interface GrassWorkerSetup {
+  compactGrassColorGrade?: CompactGrassColorGrade;
   compactPlantingLobes?: readonly CompactTerrainPlantingLobe[];
   /** Same vegetation-only silhouettes as the worker snapshot. Called after
    * accepted-clump RNG consumption to preserve all unrelated placement. */
@@ -724,6 +728,7 @@ export class GrassVisualManager implements QuadTreeListener {
     | typeof FINE_MEADOW_APPEARANCE
     | null;
   private readonly grassEligibility: GrassSurfaceEligibility;
+  private readonly compactGrassColorGrade: CompactGrassColorGrade | undefined;
 
   private workerSetup: GrassWorkerSetup | null = null;
   private workerInflight = new Map<string, GrassWorkerTicket>();
@@ -823,6 +828,12 @@ export class GrassVisualManager implements QuadTreeListener {
     }
     if (this.fineMeadow && appearanceCandidate !== FINE_MEADOW_APPEARANCE.id)
       throw new Error("Fine meadow requires its explicit appearance");
+    this.compactGrassColorGrade =
+      createCompactTerrainColorOperations().grassColorGrade(
+        workerSetup?.compactGrassColorGrade,
+      );
+    if (this.compactGrassColorGrade && !this.fineMeadow)
+      throw new Error("Grass color grade requires the explicit fine meadow");
     if (
       !this.fineMeadow &&
       (profile.placementCellSize !== undefined ||
@@ -1479,6 +1490,9 @@ export class GrassVisualManager implements QuadTreeListener {
               chunkKey: ticket.key,
               terrainProfileIdentity: this.terrainProfileIdentity,
               grassEligibility: this.grassEligibility,
+              ...(this.compactGrassColorGrade
+                ? { compactGrassColorGrade: this.compactGrassColorGrade }
+                : {}),
               ...(ticket.work.placementCell
                 ? { placementCell: ticket.work.placementCell }
                 : {}),
@@ -1645,6 +1659,9 @@ export class GrassVisualManager implements QuadTreeListener {
     const normalHalo = GRASS_SURFACE_NORMAL_SAMPLE_DISTANCE;
     return prepareGrassWorkerRequest({
       grassEligibility: this.grassEligibility,
+      ...(this.compactGrassColorGrade
+        ? { compactGrassColorGrade: this.compactGrassColorGrade }
+        : {}),
       type: "generateGrassInstances",
       compactPlantingLobes: ws.compactPlantingLobes,
       chunkKey: key,
@@ -1825,6 +1842,12 @@ export class GrassVisualManager implements QuadTreeListener {
     }
     if ((data.grassEligibility ?? "legacy-biome-v1") !== this.grassEligibility)
       throw new Error("Grass visual result eligibility mismatch");
+    if (
+      data.compactGrassColorGrade !== this.compactGrassColorGrade ||
+      (!this.compactGrassColorGrade &&
+        Object.prototype.hasOwnProperty.call(data, "compactGrassColorGrade"))
+    )
+      throw new Error("Grass visual result grass color grade mismatch");
   }
 
   private createChunkMeshFromWorkerData(
@@ -2259,6 +2282,9 @@ export class GrassVisualManager implements QuadTreeListener {
         chunkKey: key,
         terrainProfileIdentity: this.terrainProfileIdentity,
         grassEligibility: this.grassEligibility,
+        ...(this.compactGrassColorGrade
+          ? { compactGrassColorGrade: this.compactGrassColorGrade }
+          : {}),
         ...(work.placementCell ? { placementCell: work.placementCell } : {}),
       });
       return;
@@ -2272,6 +2298,9 @@ export class GrassVisualManager implements QuadTreeListener {
           chunkKey: key,
           terrainProfileIdentity: this.terrainProfileIdentity,
           grassEligibility: this.grassEligibility,
+          ...(this.compactGrassColorGrade
+            ? { compactGrassColorGrade: this.compactGrassColorGrade }
+            : {}),
         },
         surface,
         this.getWaterSurfaceAt,

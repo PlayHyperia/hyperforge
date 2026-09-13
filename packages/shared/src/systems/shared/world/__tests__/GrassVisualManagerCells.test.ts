@@ -13,6 +13,12 @@ import { TerrainSystem } from "../TerrainSystem";
 import { RoadNetworkSystem } from "../RoadNetworkSystem";
 import { TerrainVisualManager } from "../TerrainVisualManager";
 import {
+  createCompactTerrainColorOperations,
+  COMPACT_TERRAIN_COMPOSITION,
+  type CompactGrassColorGrade,
+} from "../CompactTerrainPalette";
+import { sampleNoiseCPU, TERRAIN_SHADER_CONSTANTS } from "../TerrainShader";
+import {
   FINE_MEADOW_GRASS_VISUAL_PROFILE,
   GRASS_CONFIG,
   STREAMING_GRASS_VISUAL_PROFILE,
@@ -21,7 +27,7 @@ import {
 
 /** Actual World terrain, road constraints, retained geometry, placement and
  * grounding pipeline. Test orchestration does not replace manager methods. */
-async function fixture() {
+async function fixture(grade?: CompactGrassColorGrade) {
   const worker = new Worker(
     `const {parentPort}=require('node:worker_threads');
     globalThis.self={postMessage:(message,transfers)=>parentPort.postMessage(message,transfers)};
@@ -69,7 +75,11 @@ async function fixture() {
   terrain["subscribeRoadNetworkEvents"]();
   await roads.init();
   await roads.start();
-  const setup = terrain["buildGrassWorkerSetup"]();
+  const setup = {
+    ...terrain["buildGrassWorkerSetup"](),
+    ...(grade ? { compactGrassColorGrade: grade } : {}),
+  };
+  const colorOperations = createCompactTerrainColorOperations();
   const material = new THREE.MeshBasicMaterial();
   const visual = new TerrainVisualManager(
     { minSize: 100, maxDepth: 4, resolution: 16, rootChunkRadius: 0 },
@@ -98,7 +108,51 @@ async function fixture() {
     setup.terrainConfig.WATER_THRESHOLD,
     (x, z) => terrain["calculateRoadInfluenceAtVertex"](x, z, 0, 0),
     (x, z) => terrain.isGrassExcludedAt(x, z),
-    (x, z, eligibility) => terrain.getTerrainColorAt(x, z, true, eligibility),
+    (x, z, eligibility) => {
+      const base = terrain.getTerrainColorAt(x, z, true, eligibility);
+      if (!grade) return base;
+      // Explicit CPU provider and real shared palette, not a browser route or
+      // private TerrainSystem cache override. Native startup proves selection.
+      const height = terrain["getHeightAtComputed"](x, z);
+      const dx =
+        terrain["getHeightAtComputed"](x + 0.5, z) -
+        terrain["getHeightAtComputed"](x - 0.5, z);
+      const dz =
+        terrain["getHeightAtComputed"](x, z + 0.5) -
+        terrain["getHeightAtComputed"](x, z - 0.5);
+      const gradient = Math.sqrt(dx * dx + dz * dz);
+      return {
+        ...base,
+        ...colorOperations.sample({
+          grassColorGrade: grade,
+          noiseValue: sampleNoiseCPU(
+            x,
+            z,
+            TERRAIN_SHADER_CONSTANTS.NOISE_SCALE,
+          ),
+          meadowNoise: sampleNoiseCPU(
+            x,
+            z,
+            COMPACT_TERRAIN_COMPOSITION.meadowNoiseScale,
+          ),
+          distortNoise: sampleNoiseCPU(
+            x,
+            z,
+            TERRAIN_SHADER_CONSTANTS.DISTORT_NOISE_SCALE,
+          ),
+          slope: 1 - 1 / Math.sqrt(1 + gradient * gradient),
+          roadInfluence: terrain["calculateRoadInfluenceAtVertex"](x, z, 0, 0),
+          surface: {
+            x,
+            z,
+            height,
+            pond: terrain["getCompactPondMaterial"](),
+            macroField: terrain["getCompactMacroMaterial"](),
+            plantingLobes: setup.compactPlantingLobes,
+          },
+        }),
+      };
+    },
     setup,
     FINE_MEADOW_GRASS_VISUAL_PROFILE,
     undefined,
@@ -154,6 +208,189 @@ async function fixture() {
 }
 
 describe("fine meadow cells borrow actual terrain owners without replacing them", () => {
+  it("keeps grass color grade manager and emitted-worker arrays exact at both tiers without changing placement", async () => {
+    const f = await fixture("fine-meadow-green-v1");
+    try {
+      const captured = f.owner["createWorkerInput"](f.work, f.work.key, 0);
+      expect(captured.compactGrassColorGrade).toBe("fine-meadow-green-v1");
+      // Caller-owned setup cannot change the manager's captured primitive.
+      Reflect.set(
+        f.setup,
+        "compactGrassColorGrade",
+        "wrong-after-construction",
+      );
+      expect(
+        f.owner["createWorkerInput"](f.work, f.work.key, 0)
+          .compactGrassColorGrade,
+      ).toBe("fine-meadow-green-v1");
+      let changedColors = 0;
+      for (const work of f.owner["liveWorkUnits"].values())
+        for (const lod of [0, 1]) {
+          const input = f.owner["createWorkerInput"](work, work.key, lod);
+          const sync = f.owner["generateInstanceData"](
+            work,
+            GRASS_CONFIG.LOD_TIERS[lod].spacingMul,
+          );
+          const graded = await f.execute(input);
+          expect(graded.compactGrassColorGrade).toBe("fine-meadow-green-v1");
+          expect(graded.count).toBe(sync?.count ?? 0);
+          for (const name of [
+            "offsets",
+            "rotScaleHash",
+            "groundColors",
+            "grassTints",
+            "groundNormals",
+          ] as const)
+            expect(graded[name]).toEqual(sync?.[name] ?? new Float32Array());
+          const baselineInput = { ...input };
+          delete baselineInput.compactGrassColorGrade;
+          const baseline = await f.execute(baselineInput);
+          expect(baseline.count).toBe(graded.count);
+          expect(baseline.placementCell).toEqual(graded.placementCell);
+          for (const name of [
+            "offsets",
+            "rotScaleHash",
+            "grassTints",
+            "groundNormals",
+          ] as const)
+            expect(graded[name]).toEqual(baseline[name]);
+          for (let i = 0; i < graded.groundColors.length; i++)
+            if (!Object.is(graded.groundColors[i], baseline.groundColors[i]))
+              changedColors++;
+        }
+      expect(changedColors).toBeGreaterThan(0);
+    } finally {
+      f.close();
+    }
+  }, 30000);
+
+  it("rejects wrong or absent grass color grade before worker publication and keeps real grounded geometry identical", async () => {
+    const baseline = await fixture();
+    const graded = await fixture("fine-meadow-green-v1");
+    try {
+      for (const lod of [0, 1]) {
+        for (const f of [baseline, graded]) {
+          f.owner["lodFocusX"] = lod ? 450 : 385;
+          f.owner["lodFocusZ"] = 362.5;
+          const { ticket, output } = await f.queue(lod, lod === 1);
+          f.owner["settledWorkerResults"].length = 0;
+          for (const badGrade of [
+            undefined,
+            null,
+            "wrong",
+            "fine-meadow-green-v1",
+          ]) {
+            if (badGrade === output.compactGrassColorGrade) continue;
+            expect(() =>
+              f.owner["settleWorkerResult"](ticket, {
+                ...output,
+                compactGrassColorGrade: badGrade,
+              } as GrassWorkerOutput),
+            ).toThrow(/grass color grade mismatch/);
+            expect(f.owner["settledWorkerResults"]).toHaveLength(0);
+          }
+          if (output.compactGrassColorGrade) {
+            const missing = { ...output };
+            delete missing.compactGrassColorGrade;
+            expect(() =>
+              f.owner["settleWorkerResult"](ticket, missing),
+            ).toThrow(/grass color grade mismatch/);
+          }
+          f.owner["settleWorkerResult"](ticket, output);
+          f.owner["processSettledWorkerResults"]();
+          expect(f.finish()).toBe(1);
+        }
+        const a = baseline.owner["chunks"].get(baseline.work.key)!.mesh;
+        const b = graded.owner["chunks"].get(graded.work.key)!.mesh;
+        expect(a.count).toBe(b.count);
+        expect(a.count).toBeGreaterThan(0);
+        expect(a.boundingBox).toEqual(b.boundingBox);
+        expect(a.boundingSphere).toEqual(b.boundingSphere);
+        expect(a.geometry.index!.array).toEqual(b.geometry.index!.array);
+        for (const name of [
+          "position",
+          "normal",
+          "uv",
+          "instanceOffset",
+          "instanceRotScaleHash",
+          "instanceGroundNormal",
+          "grassRootDeltas",
+        ])
+          expect(a.geometry.getAttribute(name).array).toEqual(
+            b.geometry.getAttribute(name).array,
+          );
+        expect(a.instanceMatrix.array).toEqual(b.instanceMatrix.array);
+        expect(a.userData.grassBladeGrounding.sourceIndices).toEqual(
+          b.userData.grassBladeGrounding.sourceIndices,
+        );
+        expect(a.userData.grassBladeGrounding.sweptBounds).toEqual(
+          b.userData.grassBladeGrounding.sweptBounds,
+        );
+      }
+    } finally {
+      graded.close();
+      baseline.close();
+    }
+  });
+
+  it("rejects grass color grade on a nonfine manager before publishing any mesh", async () => {
+    const f = await fixture();
+    const container = new THREE.Group();
+    try {
+      expect(
+        () =>
+          new GrassVisualManager(
+            f.setup.terrainConfig.TERRAIN_PROFILE_IDENTITY,
+            container,
+            (node) => f.visual.getRetainedSurface(node),
+            (x, z) => f.terrain["getHeightAtComputed"](x, z),
+            f.setup.terrainConfig.WATER_THRESHOLD,
+            (x, z) => f.terrain["calculateRoadInfluenceAtVertex"](x, z, 0, 0),
+            (x, z) => f.terrain.isGrassExcludedAt(x, z),
+            (x, z, eligibility) =>
+              f.terrain.getTerrainColorAt(x, z, true, eligibility),
+            { ...f.setup, compactGrassColorGrade: "fine-meadow-green-v1" },
+            STREAMING_GRASS_VISUAL_PROFILE,
+          ),
+      ).toThrow(/grade requires the explicit fine meadow/);
+      expect(container.children).toHaveLength(0);
+    } finally {
+      f.close();
+    }
+  });
+
+  it("preserves the grass color grade through real synchronous fallback and grounded publication", async () => {
+    const f = await fixture("fine-meadow-green-v1");
+    try {
+      const expected = f.owner["generateInstanceData"](f.work, 1)!;
+      expect(expected.count).toBeGreaterThan(0);
+      f.owner["createChunkMesh"](f.work, 0);
+      expect(f.owner["settledWorkerResults"]).toHaveLength(1);
+      expect(
+        f.owner["settledWorkerResults"][0].data.compactGrassColorGrade,
+      ).toBe("fine-meadow-green-v1");
+      expect(f.owner["settledWorkerResults"][0].data.groundColors).toEqual(
+        expected.groundColors,
+      );
+      f.owner["processSettledWorkerResults"]();
+      expect(f.finish()).toBe(1);
+      const chunk = f.owner["chunks"].get(f.work.key)!;
+      expect(chunk.mesh.count).toBeGreaterThan(0);
+      const sourceIds: Uint32Array =
+        chunk.mesh.userData.grassBladeGrounding.sourceIndices;
+      const colors = chunk.mesh.geometry.getAttribute("instanceGroundColor");
+      expect(colors.count).toBe(sourceIds.length);
+      for (let i = 0; i < sourceIds.length; i++)
+        expect([colors.getX(i), colors.getY(i), colors.getZ(i)]).toEqual([
+          expected.groundColors[sourceIds[i] * 3],
+          expected.groundColors[sourceIds[i] * 3 + 1],
+          expected.groundColors[sourceIds[i] * 3 + 2],
+        ]);
+    } finally {
+      f.close();
+    }
+  });
+
   it("matches real synchronous manager and emitted-worker arrays in all sixteen cells at both active tiers", async () => {
     const f = await fixture();
     try {

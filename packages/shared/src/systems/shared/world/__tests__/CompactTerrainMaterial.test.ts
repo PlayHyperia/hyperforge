@@ -34,6 +34,7 @@ import {
   createCompactPondSurfaceWeights,
   applyCompactPondWetness,
   applyCompactMeadowTint,
+  applyCompactGrassColorGrade,
   createCompactTerrainMacroWeights,
   createCompactCoastWeights,
   applyCompactCoastRock,
@@ -46,6 +47,7 @@ import {
   createCompactTerrainColorOperations,
   type CompactTerrainPlantingLobe,
   type CompactTerrainGroundRibbon,
+  type CompactGrassColorGrade,
 } from "../CompactTerrainPalette";
 import { ALL_WORLD_AREAS } from "../../../../data/world-areas";
 import { DataManager } from "../../../../data/DataManager";
@@ -1123,64 +1125,74 @@ describe("authored Haven ground composition, independent of terrain and grass po
       },
     };
     let changedColors = 0;
-    for (const [x, z] of [
-      [307, 310],
-      [311, 328],
-      [315, 328],
-      [335, 336],
-      [343, 348],
-      [350, 360],
-      [400, 400],
-    ])
-      for (const noiseValue of [0.2, 0.51, 0.8])
-        for (const slope of [0, 0.008, 0.015, 0.029, 0.05, 0.1, 0.3])
-          for (const roadInfluence of [0, 0.5, 1]) {
-            const input = {
-              noiseValue,
-              meadowNoise: 0,
-              distortNoise: 0.4,
-              slope,
-              roadInfluence,
-              surface: {
-                x,
-                z,
-                height: field.baseElevation,
-                pond: null,
-                macroField: field,
-              },
-            };
-            const historical = {
-              ...input,
-              surface: { ...input.surface, macroField: withoutGround },
-            };
-            expect(ops.grassSupport(input)).toBe(ops.grassSupport(historical));
-            const cpu = ops.sample(input);
-            expect(cpu).toEqual(ops.sample({ ...input, meadowNoise: 1 }));
-            const macro = ops.macroWeights(x, z, noiseValue, field);
-            const weights = ops.weights({ ...input, macroSurface: macro });
-            const surface = blendCompactTerrainLayers(
-              layers,
-              float(weights.dirt),
-              float(weights.cliff),
-              float(weights.road),
-              createCompactHavenGroundWeights(
-                vec2(x, z),
-                ground,
-                float(0),
-                float(slope),
-              ),
-            );
-            const actual = vectorValue(surface.albedo.mul(weights.variation));
-            [cpu.r, cpu.g, cpu.b].forEach((value, channel) =>
-              expect(actual[channel]).toBeCloseTo(value, 13),
-            );
-            if (roadInfluence === 1)
-              expect(cpu).toEqual(ops.sample(historical));
-            else if (
-              JSON.stringify(cpu) !== JSON.stringify(ops.sample(historical))
-            )
-              changedColors++;
-          }
+    for (const grassColorGrade of [undefined, "fine-meadow-green-v1"] as const)
+      for (const [x, z] of [
+        [307, 310],
+        [311, 328],
+        [315, 328],
+        [335, 336],
+        [343, 348],
+        [350, 360],
+        [400, 400],
+      ])
+        for (const noiseValue of [0.2, 0.51, 0.8])
+          for (const slope of [0, 0.008, 0.015, 0.029, 0.05, 0.1, 0.3])
+            for (const roadInfluence of [0, 0.5, 1]) {
+              const input = {
+                noiseValue,
+                meadowNoise: 0,
+                grassColorGrade,
+                distortNoise: 0.4,
+                slope,
+                roadInfluence,
+                surface: {
+                  x,
+                  z,
+                  height: field.baseElevation,
+                  pond: null,
+                  macroField: field,
+                },
+              };
+              const historical = {
+                ...input,
+                surface: { ...input.surface, macroField: withoutGround },
+              };
+              expect(ops.grassSupport(input)).toBe(
+                ops.grassSupport(historical),
+              );
+              const cpu = ops.sample(input);
+              expect(cpu).toEqual(ops.sample({ ...input, meadowNoise: 1 }));
+              const macro = ops.macroWeights(x, z, noiseValue, field);
+              const weights = ops.weights({ ...input, macroSurface: macro });
+              const surface = blendCompactTerrainLayers(
+                {
+                  ...layers,
+                  grass: applyCompactGrassColorGrade(
+                    layers.grass,
+                    grassColorGrade,
+                  ),
+                },
+                float(weights.dirt),
+                float(weights.cliff),
+                float(weights.road),
+                createCompactHavenGroundWeights(
+                  vec2(x, z),
+                  ground,
+                  float(0),
+                  float(slope),
+                ),
+              );
+              const actual = vectorValue(surface.albedo.mul(weights.variation));
+              [cpu.r, cpu.g, cpu.b].forEach((value, channel) =>
+                expect(actual[channel]).toBeCloseTo(value, 13),
+              );
+              if (roadInfluence === 1)
+                expect(cpu).toEqual(ops.sample(historical));
+              else if (
+                JSON.stringify(cpu) !== JSON.stringify(ops.sample(historical))
+              )
+                changedColors++;
+            }
     expect(changedColors).toBeGreaterThan(75);
     expect(_ground).toBe(ground);
   });
@@ -1318,6 +1330,173 @@ describe("authored Haven ground composition, independent of terrain and grass po
 });
 
 describe("compact terrain actual texture ownership and CPU material graph", () => {
+  it("admits only the immutable opt-in grass grade without changing raw scan means", () => {
+    const ops = createCompactTerrainColorOperations();
+    const raw = ops.getPalette();
+    const descriptor = ops.getGrassColorGrade();
+    expect(descriptor).toEqual({
+      id: "fine-meadow-green-v1",
+      linearMultipliers: [0.95, 1.3, 1.1],
+    });
+    expect(Object.isFrozen(descriptor)).toBe(true);
+    expect(Object.isFrozen(descriptor.linearMultipliers)).toBe(true);
+    expect(ops.grassColorGrade(undefined)).toBeUndefined();
+    expect(ops.grassColorGrade(descriptor.id)).toBe(descriptor.id);
+    for (const invalid of [
+      null,
+      false,
+      "",
+      "fine-meadow-green-v2",
+      {},
+      [descriptor.id],
+    ]) {
+      expect(() => ops.grassColorGrade(invalid)).toThrow(/grass color grade/);
+      expect(() =>
+        ops.sample({
+          noiseValue: 0,
+          distortNoise: 0,
+          slope: 0,
+          roadInfluence: 0,
+          grassColorGrade: invalid as CompactGrassColorGrade,
+        }),
+      ).toThrow(/grass color grade/);
+    }
+    expect(ops.getPalette()).toEqual(raw);
+    expect(raw.grass).toEqual([
+      0.12687350988906373, 0.16117143469264922, 0.03425721790414253,
+    ]);
+    expect(() =>
+      createTerrainMaterial(undefined, {
+        compactGrassColorGrade: descriptor.id,
+      }),
+    ).toThrow(/compact PBR/);
+    const material = createTerrainMaterial(undefined, {
+      compactPbr: true,
+      compactGrassColorGrade: descriptor.id,
+      compactProfile: HAVEN_SHOULDER_COMPACT_WORLD_TERRAIN_PROFILE,
+    }) as ReturnType<typeof createTerrainMaterial> &
+      THREE.MeshStandardNodeMaterial;
+    const ungraded = createTerrainMaterial(undefined, { compactPbr: true });
+    try {
+      expect(material.compactGrassColorGrade).toEqual(descriptor);
+      expect(
+        Object.getOwnPropertyDescriptor(material, "compactGrassColorGrade"),
+      ).toMatchObject({
+        writable: false,
+        configurable: false,
+        enumerable: true,
+      });
+      const gradedNodes = [...graph(material.colorNode!)].filter(
+        (node) => Reflect.get(node, "name") === "compactGrassGradedAlbedo",
+      );
+      expect(gradedNodes).toHaveLength(1);
+      for (const root of [
+        material.normalNode!,
+        material.roughnessNode!,
+        material.aoNode!,
+      ])
+        expect(graph(root).has(gradedNodes[0])).toBe(false);
+      expect(Object.hasOwn(ungraded, "compactGrassColorGrade")).toBe(false);
+    } finally {
+      material.dispose();
+      ungraded.dispose();
+    }
+  });
+
+  it("grades grass before physical-layer mixing and preserves all nonalbedo owners", () => {
+    const ops = createCompactTerrainColorOperations();
+    const palette = ops.getPalette();
+    const layer = (rgb: number[]): CompactTerrainLayer => ({
+      albedo: vec3(...(rgb as [number, number, number])),
+      roughness: float(0.85),
+      ao: float(0.8),
+      worldNormal: vec3(0, 1, 0),
+    });
+    const grass = layer(palette.grass),
+      dirt = layer(palette.dirt),
+      rock = layer(palette.rock);
+    expect(applyCompactGrassColorGrade(grass, undefined)).toBe(grass);
+    const factors = [0.95, 1.3, 1.1];
+    for (const noiseValue of [0.1, 0.51, 0.9])
+      for (const meadowNoise of [0, 0.51, 1])
+        for (const slope of [0, 0.1, 1])
+          for (const roadInfluence of [0, 0.5, 1]) {
+            const input = {
+              noiseValue,
+              meadowNoise,
+              slope,
+              roadInfluence,
+              distortNoise: 0.35,
+              surface: { x: 350, z: 320, height: 28.4, pond: null },
+            };
+            const rawGrass = applyCompactMeadowTint(grass, float(meadowNoise));
+            const graded = applyCompactGrassColorGrade(
+              rawGrass,
+              "fine-meadow-green-v1",
+            );
+            for (const key of ["roughness", "ao", "worldNormal"] as const)
+              expect(graded[key]).toBe(rawGrass[key]);
+            const weights = createCompactTerrainLayerWeights(
+              float(noiseValue),
+              float(slope),
+              float(roadInfluence),
+              float(0.35),
+            );
+            const surface = blendCompactTerrainLayers(
+              { grass: graded, dirt, rock },
+              weights.dirt,
+              weights.cliff,
+              weights.road,
+            );
+            const rgb = vectorValue(surface.albedo.mul(weights.variation));
+            const cpu = ops.sample({
+              ...input,
+              grassColorGrade: "fine-meadow-green-v1",
+            });
+            for (const [i, key] of (["r", "g", "b"] as const).entries()) {
+              expect(vectorValue(graded.albedo)[i]).toBeCloseTo(
+                vectorValue(rawGrass.albedo)[i] * factors[i],
+                14,
+              );
+              expect(rgb[i]).toBeCloseTo(cpu[key], 13);
+            }
+            const gradedInput = {
+              ...input,
+              grassColorGrade: "fine-meadow-green-v1" as const,
+            };
+            expect(ops.grassSupport(gradedInput)).toBe(ops.grassSupport(input));
+            if (slope === 1 || roadInfluence === 1)
+              expect(cpu).toEqual(ops.sample(input));
+          }
+    expect(vectorValue(grass.albedo)).toEqual(palette.grass);
+  });
+
+  it("keeps every actual grass scan texel bounded with the grade and every meadow-tint endpoint", async () => {
+    const ops = createCompactTerrainColorOperations();
+    const image = PNG.sync.read(
+      await readFile(new URL("grass-albedo-roughness.png", assetDirectory)),
+    );
+    const tints = [
+      [1, 1, 1],
+      ...[0, 1].flatMap((noise) =>
+        [0, 1].map((macro) => ops.meadowTint(noise, macro)),
+      ),
+    ];
+    const maximum = [0, 0, 0];
+    for (let p = 0; p < image.data.length; p += 4)
+      for (let c = 0; c < 3; c++)
+        maximum[c] = Math.max(maximum[c], image.data[p + c]);
+    for (const tint of tints)
+      for (let c = 0; c < 3; c++) {
+        const srgb = maximum[c] / 255;
+        const linear =
+          srgb <= 0.04045 ? srgb / 12.92 : ((srgb + 0.055) / 1.055) ** 2.4;
+        expect(
+          linear * tint[c] * ops.getGrassColorGrade().linearMultipliers[c],
+        ).toBeLessThan(1);
+      }
+  });
+
   it("packs real RGB unchanged with scalar roughness/AO and reproducible linear palette", async () => {
     const manifest = JSON.parse(
       await readFile(new URL("packing-manifest.json", assetDirectory), "utf8"),
@@ -2731,7 +2910,9 @@ describe("compact grass base palette without changing ecology", () => {
         ),
       },
     };
-    const inputs = [input];
+    const inputs: Parameters<
+      ReturnType<typeof createCompactTerrainColorOperations>["sample"]
+    >[0][] = [input];
     for (const x of [190, 350, 510])
       for (const height of [15.8, 16, 16.2, 20, 25, 28.15])
         inputs.push({
@@ -2742,6 +2923,12 @@ describe("compact grass base palette without changing ecology", () => {
       for (const noiseValue of [0, 0.28, 0.5, 0.72, 1])
         for (const roadInfluence of [0, 0.5, 1])
           inputs.push({ ...input, slope, noiseValue, roadInfluence });
+    inputs.push(
+      ...inputs.map((value) => ({
+        ...value,
+        grassColorGrade: "fine-meadow-green-v1" as const,
+      })),
+    );
     const worker = new Worker(
       `const {parentPort}=require('node:worker_threads'); const operations=(${loaded.createCompactTerrainColorOperations.toString()})(); parentPort.postMessage(${JSON.stringify(inputs)}.map(input=>operations.sample(input)));`,
       { eval: true },

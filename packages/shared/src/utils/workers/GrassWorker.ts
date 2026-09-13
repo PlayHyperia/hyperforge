@@ -36,6 +36,7 @@ import { createRoadInfluenceOperations } from "../../systems/shared/world/RoadIn
 import {
   createCompactTerrainColorOperations,
   type CompactTerrainPlantingLobe,
+  type CompactGrassColorGrade,
 } from "../../systems/shared/world/CompactTerrainPalette";
 import {
   createGrassTerrainSurfaceOperations,
@@ -76,6 +77,8 @@ export interface BiomeGrassConfigWorker {
 }
 
 export interface GrassWorkerInput {
+  /** Explicit colour-only compact policy; the manager admits the fine profile. */
+  compactGrassColorGrade?: CompactGrassColorGrade;
   /** Optional sampling domain; offsets remain relative to the real leaf frame. */
   placementCell?: GrassPlacementCell;
   /** Colour-only authored soil; never participates in placement eligibility. */
@@ -128,6 +131,8 @@ export interface GrassWorkerInput {
 }
 
 export interface GrassWorkerOutput {
+  /** Echoed only when selected, independently of authoritative terrain identity. */
+  compactGrassColorGrade?: CompactGrassColorGrade;
   /** Echoed only for an explicit cell request, never inferred from chunkKey. */
   placementCell?: GrassPlacementCell;
   grassEligibility?: GrassSurfaceEligibility;
@@ -421,6 +426,9 @@ function generateGrassInstances(input) {
   assertTerrainWorkerInput(input);
   var placementDomain = placementCellOperations.resolveDomain(input);
   var grassEligibility = compactTerrainColorOperations.grassEligibility(input.grassEligibility, input.config.TERRAIN_PROFILE.algorithm);
+  var compactGrassColorGrade = compactTerrainColorOperations.grassColorGrade(input.compactGrassColorGrade);
+  if (compactGrassColorGrade && grassEligibility !== "compact-pbr-v1")
+    throw new Error("Grass color grade requires compact grass eligibility");
   var compactMacroField = compactTerrainColorOperations.macroField(input.config.TERRAIN_PROFILE);
   var compactPlantingLobes = compactTerrainColorOperations.validatePlantingLobes(input.compactPlantingLobes);
   var surface = terrainSurfaceOperations.validateSnapshot(input.terrainSurface);
@@ -533,6 +541,7 @@ function generateGrassInstances(input) {
     var color = computeTerrainColorCPU(wx, wz, ty, slope, forestW, canyonW, sc);
     if (input.config.TERRAIN_PROFILE.algorithm === "compact-island-sculpt-v1" || (input.config.TERRAIN_PROFILE.algorithm === "compact-island-sculpt-v2" || input.config.TERRAIN_PROFILE.algorithm === "compact-island-sculpt-v3" || (input.config.TERRAIN_PROFILE.algorithm === "compact-island-sculpt-v4" || input.config.TERRAIN_PROFILE.algorithm === "compact-island-sculpt-v5"))) {
       var compactInput = {
+        grassColorGrade: compactGrassColorGrade,
         noiseValue: sampleNoiseCPU(wx, wz, sc.NOISE_SCALE),
         meadowNoise: sampleNoiseCPU(wx, wz, compactMeadowNoiseScale),
         distortNoise: sampleNoiseCPU(wx, wz, sc.DISTORT_NOISE_SCALE),
@@ -605,6 +614,7 @@ function generateGrassInstances(input) {
 
   if (count === 0) {
     return {
+      ...(compactGrassColorGrade ? { compactGrassColorGrade: compactGrassColorGrade } : {}),
       ...(placementDomain.placementCell ? { placementCell: placementCellOperations.validateCell(placementDomain.placementCell) } : {}),
       type: "grassInstanceResult",
       grassEligibility: grassEligibility,
@@ -620,6 +630,7 @@ function generateGrassInstances(input) {
   }
 
   return {
+    ...(compactGrassColorGrade ? { compactGrassColorGrade: compactGrassColorGrade } : {}),
     ...(placementDomain.placementCell ? { placementCell: placementCellOperations.validateCell(placementDomain.placementCell) } : {}),
     type: "grassInstanceResult",
     grassEligibility: grassEligibility,
@@ -674,10 +685,13 @@ export function prepareGrassWorkerRequest(
   input: GrassWorkerInput,
 ): GrassWorkerInput {
   assertTerrainWorkerRequest(input.config, input.seed);
-  colorOperations.grassEligibility(
+  const eligibility = colorOperations.grassEligibility(
     input.grassEligibility,
     input.config.TERRAIN_PROFILE.algorithm,
   );
+  const grade = colorOperations.grassColorGrade(input.compactGrassColorGrade);
+  if (grade && eligibility !== "compact-pbr-v1")
+    throw new Error("Grass color grade requires compact grass eligibility");
   const domain = placementCellOperations.resolveDomain(input);
   return {
     ...input,
@@ -686,11 +700,23 @@ export function prepareGrassWorkerRequest(
   };
 }
 
-/** Admit the echoed cell separately from the terrain identity and chunk key. */
+/** Admit cell and visual grade separately from terrain identity and chunk key. */
 export function admitGrassWorkerPlacementResult(
   result: GrassWorkerOutput,
   request: GrassWorkerInput,
 ): GrassWorkerOutput {
+  const expectedGrade = colorOperations.grassColorGrade(
+    request.compactGrassColorGrade,
+  );
+  const receivedGrade = colorOperations.grassColorGrade(
+    result.compactGrassColorGrade,
+  );
+  if (
+    receivedGrade !== expectedGrade ||
+    (!expectedGrade &&
+      Object.prototype.hasOwnProperty.call(result, "compactGrassColorGrade"))
+  )
+    throw new Error("Grass worker grass color grade mismatch");
   const expected = placementCellOperations.resolveDomain(request).placementCell;
   if (!expected) {
     if (Object.prototype.hasOwnProperty.call(result, "placementCell"))

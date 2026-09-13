@@ -15,6 +15,8 @@ import THREE, {
 import type { Node, TextureNode } from "three/webgpu";
 import {
   COMPACT_TERRAIN_COMPOSITION,
+  createCompactTerrainColorOperations,
+  type CompactGrassColorGrade,
   type CompactTerrainMacroField,
   type CompactTerrainPlantingLobe,
   type CompactTerrainGroundRibbon,
@@ -352,6 +354,21 @@ export type CompactTerrainLayer = {
   ao: Node<"float">;
   worldNormal: Node<"vec3">;
 };
+
+/** Grade grass reflectance before soil/rock/path blending; no extra samples. */
+export function applyCompactGrassColorGrade(
+  grass: CompactTerrainLayer,
+  grade: CompactGrassColorGrade | undefined,
+): CompactTerrainLayer {
+  const operations = createCompactTerrainColorOperations();
+  if (operations.grassColorGrade(grade) === undefined) return grass;
+  return {
+    ...grass,
+    albedo: grass.albedo
+      .mul(vec3(...operations.getGrassColorGrade().linearMultipliers))
+      .toVar("compactGrassGradedAlbedo"),
+  };
+}
 
 /**
  * Broad dry-meadow reflectance variation using the already sampled world noise.

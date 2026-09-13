@@ -1,5 +1,16 @@
 # Duel Arena, Streaming, and Hyperbet Launch Checklist
 
+## Fine meadow shared color — candidate under verification, 2026-09-13
+
+- [x] Implement the versioned `fine-meadow-green-v1` linear grass grade [.95,1.30,1.10] in the existing explicit fine appearance/profile only. Cache the startup pair across asynchronous loading; share the exact grade with terrain grass albedo and CPU/emitted-worker blade colors before soil/path/rock blending. Raw scan maps/means, normals, roughness, AO, geometry, density, roots, wind and terrain identity stay unchanged.
+- [x] Reject stale/invalid/missing worker color-policy echoes, including CPU fallback and empty results. Focused propagation checks pass 7/7; actual emitted-worker arrays and both grounded LODs preserve every non-color component. Material checks pass 38/38, including real packed-map provenance/clipping, Haven/road/rock priority, actual TSL arithmetic and minified isolated-worker parity. Preserve failed test runs, not just the passing results.
+- [x] Implement a focused-only fresh-publication fence for the final cumulative grounding diagnostic. External preflight passes 54/54; all non-timer application fields remain exact, owner changes/failed jobs reject, and timer advance must fit the measured <=1s envelope. This does not retroactively pass native02 or establish atomic sampling.
+- [x] Complete integrated source qualification: 406/406 tests across 25 files, shared/server/client typechecks and builds, nine-file ESLint/format and diff checks pass. Independent review finds no source blocker; the supplied graded CPU fixture does not prove browser startup routing.
+- [ ] Complete a fresh, source-pinned native trial. Verify actual cached terrain/manager grade, graded terrain shader ownership, exact installed blade-color parity, matched daylight views, an additional elevated canopy still, fixed wind and out-and-back LOD. Direct native worker echoes are not retained and must not be claimed from reconstructed publication metadata. No grade visual/performance approval yet.
+- [ ] Restore convincing continuous fine canopy at useful gameplay height. Color cannot fill geometry gaps. Keep coverage/LOD responsiveness and measured rendering cost open; do not hide density, population or quality reductions.
+
+Evidence: `asset-studio/fine-meadow01/QUALIFICATION.md`, `grade-material-focused01.log` (fixture failure retained), `grade-material-focused02.log` (38/38) and `final-publication-preflight01.log`. This is an opt-in art experiment, not a default promotion or completed reference match.
+
 
 ## Fine meadow daylight — lighting trial rejected, 2026-09-13
 
