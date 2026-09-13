@@ -79,6 +79,7 @@ import {
   type CompactGrassColorGradeDescriptor,
 } from "./CompactTerrainPalette";
 import type { CompactHabitatField } from "./CompactHabitatComposition";
+import { createTerrainNoiseSampler } from "./TerrainNoiseSampler";
 
 /** Configured material graph attribution, not rendered-pixel or timing proof. */
 export type CompactHavenGroundMaterialReceipt = Readonly<{
@@ -468,7 +469,8 @@ export function computeTerrainBaseColor(
 
 // Cached noise texture - generated once, reused everywhere
 let cachedNoiseTexture: THREE.DataTexture | null = null;
-const NOISE_SIZE = 256; // Texture resolution
+let cachedNoiseTextureSeed: number | null = null;
+const terrainNoiseSampler = createTerrainNoiseSampler();
 
 // Simple Perlin-like noise implementation
 function fade(t: number): number {
@@ -606,35 +608,19 @@ function seamlessFbm(
  */
 export function generateNoiseTexture(seed: number = 12345): THREE.DataTexture {
   if (cachedNoiseTexture) return cachedNoiseTexture;
-
-  const perm = createPermutation(seed);
-  const data = new Uint8Array(NOISE_SIZE * NOISE_SIZE * 4);
-
-  for (let y = 0; y < NOISE_SIZE; y++) {
-    for (let x = 0; x < NOISE_SIZE; x++) {
-      // Normalize to 0-1 range
-      const nx = x / NOISE_SIZE;
-      const ny = y / NOISE_SIZE;
-
-      // Use seamless noise that tiles perfectly
-      const noise = seamlessFbm(nx, ny, perm, 4);
-
-      // Normalize from [-1, 1] to [0, 1]
-      const value = (noise + 1) * 0.5;
-      const byte = Math.floor(Math.max(0, Math.min(255, value * 255)));
-
-      const idx = (y * NOISE_SIZE + x) * 4;
-      data[idx] = byte; // R
-      data[idx + 1] = byte; // G
-      data[idx + 2] = byte; // B
-      data[idx + 3] = 255; // A
-    }
-  }
+  // Preserve the first-texture seed/cache contract, including custom-seed utility
+  // textures. Runtime terrain/grass use the default field in both CPU and worker;
+  // a custom utility texture must not change that field or imply worker parity.
+  const textureSampler =
+    seed === terrainNoiseSampler.seed
+      ? terrainNoiseSampler
+      : createTerrainNoiseSampler(seed);
+  const data = textureSampler.copyRGBA();
 
   const tex = new THREE.DataTexture(
     data,
-    NOISE_SIZE,
-    NOISE_SIZE,
+    terrainNoiseSampler.size,
+    terrainNoiseSampler.size,
     THREE.RGBAFormat,
   );
   tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
@@ -644,6 +630,7 @@ export function generateNoiseTexture(seed: number = 12345): THREE.DataTexture {
   tex.needsUpdate = true;
 
   cachedNoiseTexture = tex;
+  cachedNoiseTextureSeed = seed;
   console.log("[TerrainShader] Generated seamless Perlin noise texture");
   return tex;
 }
@@ -659,8 +646,9 @@ export function getNoiseTexture(): THREE.DataTexture | null {
 let cachedPerm: number[] | null = null;
 
 /**
- * Sample noise at world position (for CPU-side grass placement)
- * Returns 0-1 value matching EXACTLY what the shader samples from the texture
+ * Legacy analytic noise helper, retaining its first-call seed semantics.
+ * It does not model byte quantization, bilinear filtering, or GPU mip selection.
+ * Runtime terrain colour / grass placement use sampleNoiseCPU instead.
  */
 export function sampleNoiseAtPosition(
   worldX: number,
@@ -881,40 +869,9 @@ export function sampleNoiseCPU(
   worldZ: number,
   scale: number,
 ): number {
-  const tex = cachedNoiseTexture;
-  if (tex?.image?.data) {
-    const data = tex.image.data as Uint8Array;
-    const u = worldX * scale;
-    const v = worldZ * scale;
-    // Bilinear sample matching GPU's LinearFilter + RepeatWrapping
-    const px = (((u % 1) + 1) % 1) * NOISE_SIZE - 0.5;
-    const py = (((v % 1) + 1) % 1) * NOISE_SIZE - 0.5;
-    const x0 = Math.floor(px);
-    const y0 = Math.floor(py);
-    const fx = px - x0;
-    const fy = py - y0;
-    const ix0 = ((x0 % NOISE_SIZE) + NOISE_SIZE) % NOISE_SIZE;
-    const iy0 = ((y0 % NOISE_SIZE) + NOISE_SIZE) % NOISE_SIZE;
-    const ix1 = (ix0 + 1) % NOISE_SIZE;
-    const iy1 = (iy0 + 1) % NOISE_SIZE;
-    const v00 = data[(iy0 * NOISE_SIZE + ix0) * 4] / 255;
-    const v10 = data[(iy0 * NOISE_SIZE + ix1) * 4] / 255;
-    const v01 = data[(iy1 * NOISE_SIZE + ix0) * 4] / 255;
-    const v11 = data[(iy1 * NOISE_SIZE + ix1) * 4] / 255;
-    return (
-      v00 * (1 - fx) * (1 - fy) +
-      v10 * fx * (1 - fy) +
-      v01 * (1 - fx) * fy +
-      v11 * fx * fy
-    );
-  }
-  // Fallback: direct computation if texture not yet generated
-  if (!cachedPerm) cachedPerm = createPermutation(12345);
-  const u = worldX * scale;
-  const v = worldZ * scale;
-  const wu = u - Math.floor(u);
-  const wv = v - Math.floor(v);
-  return (seamlessFbm(wu, wv, cachedPerm, 4) + 1) * 0.5;
+  // Base-level bilinear sampling, independent of texture lifecycle. GPU terrain
+  // still uses its existing implicit mip selection at minified distances.
+  return terrainNoiseSampler.sample(worldX, worldZ, scale);
 }
 
 /**
@@ -1219,6 +1176,8 @@ export function createTerrainMaterial(
     parameters: UniformNode<"vec4", THREE.Vector4>;
   };
 } {
+  if (cachedNoiseTexture && cachedNoiseTextureSeed !== terrainNoiseSampler.seed)
+    throw new Error("Runtime terrain requires the default terrain noise seed");
   const grassColorOperations = createCompactTerrainColorOperations();
   const grassColorGrade = grassColorOperations.grassColorGrade(
     options.compactGrassColorGrade,

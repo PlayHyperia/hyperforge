@@ -24,7 +24,12 @@ import {
   COMPACT_TERRAIN_COMPOSITION,
   type CompactGrassColorGrade,
 } from "../CompactTerrainPalette";
-import { sampleNoiseCPU, TERRAIN_SHADER_CONSTANTS } from "../TerrainShader";
+import {
+  generateNoiseTexture,
+  getNoiseTexture,
+  sampleNoiseCPU,
+  TERRAIN_SHADER_CONSTANTS,
+} from "../TerrainShader";
 import {
   FINE_MEADOW_GRASS_VISUAL_PROFILE,
   GRASS_CONFIG,
@@ -215,6 +220,90 @@ async function fixture(grade?: CompactGrassColorGrade) {
 }
 
 describe("fine meadow cells borrow actual terrain owners without replacing them", () => {
+  it("keeps live grass sampling invariant across actual terrain noise texture initialization", async () => {
+    // Native grade capture exposed this off-center cell: the initialized
+    // main-thread texture branch must not select different clumps to workers.
+    expect(getNoiseTexture()).toBeNull();
+    const f = await fixture("fine-meadow-green-v1");
+    try {
+      const parent = f.nodes.find(
+        (node) => node.centerX === 250 && node.centerZ === 250,
+      )!;
+      f.owner.onNodeNeedsGeometry(parent);
+      const works = ["gcell_v1_10_11", f.work.key].map((key) =>
+        f.owner["liveWorkUnits"].get(key)!,
+      );
+      const attributes = [
+        "offsets",
+        "rotScaleHash",
+        "groundColors",
+        "grassTints",
+        "groundNormals",
+      ] as const;
+      const before: Array<{
+        work: (typeof works)[number];
+        lod: number;
+        input: GrassWorkerInput;
+        cpu: GrassAnchorData;
+        worker: GrassWorkerOutput;
+      }> = [];
+      for (const work of works) {
+        expect(work).toBeDefined();
+        for (const lod of [0, 1]) {
+          const input = f.owner["createWorkerInput"](work, work.key, lod);
+          const cpu = f.owner["generateInstanceData"](
+            work,
+            GRASS_CONFIG.LOD_TIERS[lod].spacingMul,
+          )!;
+          const worker = await f.execute(input);
+          expect(cpu.count).toBeGreaterThan(0);
+          expect(cpu.count).toBeLessThanOrEqual(1276);
+          expect(worker.count).toBe(cpu.count);
+          for (const attribute of attributes)
+            expect(worker[attribute]).toEqual(cpu[attribute]);
+          before.push({ work, lod, input, cpu, worker });
+        }
+      }
+      // Creates the exact production bytes and cached DataTexture, not a mock
+      // texture or a synthetic replacement for the manager's color callback.
+      const texture = generateNoiseTexture();
+      expect(getNoiseTexture()).toBe(texture);
+      expect(generateNoiseTexture()).toBe(texture);
+      for (const entry of before) {
+        const cpu = f.owner["generateInstanceData"](
+          entry.work,
+          GRASS_CONFIG.LOD_TIERS[entry.lod].spacingMul,
+        )!;
+        const worker = await f.execute(entry.input);
+        expect(cpu.count).toBe(entry.cpu.count);
+        expect(worker.count).toBe(cpu.count);
+        for (const attribute of attributes) {
+          expect(cpu[attribute]).toEqual(entry.cpu[attribute]);
+          expect(worker[attribute]).toEqual(cpu[attribute]);
+        }
+        const surface = f.visual.getRetainedSurface(entry.work.node)!;
+        const projectedCpu = projectGrassAnchors(
+          cpu,
+          surface,
+          f.owner["getWaterSurfaceAt"],
+          f.owner["isInFlatZone"],
+        );
+        const projectedWorker = projectGrassAnchors(
+          worker,
+          surface,
+          f.owner["getWaterSurfaceAt"],
+          f.owner["isInFlatZone"],
+        );
+        expect(projectedWorker.count).toBe(projectedCpu.count);
+        for (const attribute of attributes)
+          expect(projectedWorker[attribute]).toEqual(projectedCpu[attribute]);
+        expect(projectedWorker.grounding).toEqual(projectedCpu.grounding);
+      }
+    } finally {
+      f.close();
+    }
+  });
+
   it("keeps grass color grade manager and emitted-worker arrays exact at both tiers without changing placement", async () => {
     const f = await fixture("fine-meadow-green-v1");
     try {

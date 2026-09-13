@@ -33,6 +33,7 @@ import {
 import type { TerrainWorkerConfig } from "./TerrainWorker";
 import { createAuthoredTerrainSurfaceOperations } from "../../systems/shared/world/AuthoredTerrainSurface";
 import { createRoadInfluenceOperations } from "../../systems/shared/world/RoadInfluence";
+import { createTerrainNoiseSampler } from "../../systems/shared/world/TerrainNoiseSampler";
 import {
   createCompactTerrainColorOperations,
   type CompactTerrainPlantingLobe,
@@ -156,88 +157,6 @@ export interface GrassBatchResult {
 // ============================================================================
 // WORKER CODE
 // ============================================================================
-
-/**
- * Build a JS string for the sampleNoiseCPU pipeline — exact match of
- * TerrainShader.ts lines 422-549 + 827-861.
- * Worker has no texture, so we always use the seamlessFbm path.
- */
-function buildSampleNoiseJS(): string {
-  return `
-  function _fade(t) { return t * t * t * (t * (t * 6 - 15) + 10); }
-  function _lerp(a, b, t) { return a + t * (b - a); }
-  function _grad(hash, x, y) {
-    var h = hash & 3;
-    var u = h < 2 ? x : y;
-    var v = h < 2 ? y : x;
-    return ((h & 1) === 0 ? u : -u) + ((h & 2) === 0 ? v : -v);
-  }
-
-  function createPermutation(seed) {
-    var p = [];
-    for (var i = 0; i < 256; i++) p[i] = i;
-    var s = seed;
-    for (var i = 255; i > 0; i--) {
-      s = (s * 1103515245 + 12345) & 0x7fffffff;
-      var j = s % (i + 1);
-      var tmp = p[i]; p[i] = p[j]; p[j] = tmp;
-    }
-    return p.concat(p);
-  }
-
-  function perlin2DPerm(x, y, perm) {
-    var X = Math.floor(x) & 255;
-    var Y = Math.floor(y) & 255;
-    var xf = x - Math.floor(x);
-    var yf = y - Math.floor(y);
-    var u = _fade(xf);
-    var v = _fade(yf);
-    var aa = perm[perm[X] + Y];
-    var ab = perm[perm[X] + Y + 1];
-    var ba = perm[perm[X + 1] + Y];
-    var bb = perm[perm[X + 1] + Y + 1];
-    var x1 = _lerp(_grad(aa, xf, yf), _grad(ba, xf - 1, yf), u);
-    var x2 = _lerp(_grad(ab, xf, yf - 1), _grad(bb, xf - 1, yf - 1), u);
-    return _lerp(x1, x2, v);
-  }
-
-  function seamlessPerlin2D(x, y, perm) {
-    var TWO_PI = Math.PI * 2;
-    var angleX = x * TWO_PI;
-    var angleY = y * TWO_PI;
-    var nx = Math.cos(angleX);
-    var ny = Math.sin(angleX);
-    var nz = Math.cos(angleY);
-    var nw = Math.sin(angleY);
-    var n1 = perlin2DPerm(nx * 4 + 100, nz * 4 + 100, perm);
-    var n2 = perlin2DPerm(ny * 4 + 200, nw * 4 + 200, perm);
-    var n3 = perlin2DPerm(nx * 4 + ny * 4 + 300, nz * 4 + nw * 4 + 300, perm);
-    return (n1 + n2 + n3) / 3;
-  }
-
-  function seamlessFbm(x, y, perm, octaves) {
-    var value = 0, amplitude = 0.5, maxValue = 0;
-    for (var i = 0; i < octaves; i++) {
-      var ox = x + i * 17.3;
-      var oy = y + i * 31.7;
-      value += amplitude * seamlessPerlin2D(ox, oy, perm);
-      maxValue += amplitude;
-      amplitude *= 0.5;
-    }
-    return value / maxValue;
-  }
-
-  var _noisePerm = createPermutation(12345);
-
-  function sampleNoiseCPU(worldX, worldZ, scale) {
-    var u = worldX * scale;
-    var v = worldZ * scale;
-    var wu = u - Math.floor(u);
-    var wv = v - Math.floor(v);
-    return (seamlessFbm(wu, wv, _noisePerm, 4) + 1) * 0.5;
-  }
-`;
-}
 
 /**
  * Build a JS string for computeTerrainColorCPU — exact match of
@@ -396,7 +315,12 @@ BIOME_IDS[BT_TUNDRA] = 0;
 BIOME_IDS[BT_FOREST] = 1;
 BIOME_IDS[BT_CANYON] = 2;
 
-${buildSampleNoiseJS()}
+// One private quantized field per worker, shared with the main-thread sampler.
+// This preserves existing texture bytes, not the old analytic worker population.
+var terrainNoiseSampler = (${createTerrainNoiseSampler.toString()})();
+function sampleNoiseCPU(worldX, worldZ, scale) {
+  return terrainNoiseSampler.sample(worldX, worldZ, scale);
+}
 ${buildComputeTerrainColorJS()}
 var roadInfluenceOperations = (${createRoadInfluenceOperations.toString()})();
 var compactTerrainColorOperations = (${createCompactTerrainColorOperations.toString()})();

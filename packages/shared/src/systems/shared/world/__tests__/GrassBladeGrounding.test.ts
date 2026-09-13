@@ -1339,7 +1339,10 @@ describe("actual v4 production-worker contact regressions and per-install CPU re
       expect(request.data).toEqual(before);
       expect(request.data.count).toBe([478, 600][index]);
       expect(result.data.count).toBe([458, 588][index]);
-      expect(result.receipt.triangleVisits).toBe([11574, 15454][index]);
+      // The shared quantized field changes the second leaf's sampled locations
+      // without changing these raw/accepted counts. Its old analytic worker
+      // visited 15,454 triangles; pin the corrected field's exact census.
+      expect(result.receipt.triangleVisits).toBe([11574, 15462][index]);
       expect(result.receipt.workUnits).toBeLessThan(400_000);
       expect(result.receipt.maxAcceptedBaseError).toBeLessThanOrEqual(0.02);
       expect(result.rootDeltas.byteLength).toBe(result.data.count * 96);

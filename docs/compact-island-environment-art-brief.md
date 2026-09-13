@@ -2,6 +2,29 @@
 
 ## Grass reference correction — next art priority, 2026-09-13
 
+Current prerequisite: grade-native02 exposed a real sampling inconsistency,
+not an accepted color result. Once the actual terrain noise texture is created,
+CPU grass sampling switches from analytic noise to quantized bilinear texels;
+the emitted worker does not. The reproduced off-center cell is 218/218 clumps
+before initialization but CPU223/worker218 afterward. The correction must share
+one deterministic sampler, preserve existing GPU texture bytes, and explicitly
+requalify changed worker placement. Do not replace the observer with a matching
+approximation or waive actual color/placement parity. The saved failing run and
+new regression are evidence of the defect, not a visual upgrade.
+
+The shared sampler correction now passes 416/416 checks across 26 files in a
+serial run, all three package typechecks/builds and scoped lint/format. Old
+analytic worker counts/hashes remain as historical data beside strict corrected
+oracles and stronger byte-exact CPU/worker comparisons. A concurrent 415/416 run
+hit the existing 250ms grounding guard; preserve that failure and retain the
+limit. Native load/performance is not approved by the serial source pass.
+
+Reference comparison against native07's restored .20 material still identifies
+upright, separated ribbons and exposed granular turf as the principal shape
+gap. After sampling/color qualification, trial upper-leaf arc .30 to .45 at
+unchanged height, width and blade count, then judge actual overlap, access and
+swept grounding. This is a proposed experiment, not implemented or approved.
+
 The .12→.36 height-dependent normal trial is **rejected as a visual upgrade**.
 Native02 captures matched meadow/anvil views and both naturally daylit clips;
 root and independent review still find flat olive ribbons over exposed granular

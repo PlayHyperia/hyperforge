@@ -756,14 +756,16 @@ describe("opt-in compact grass, actual terrain and native worker (not GPU proof)
     }
   });
 
-  it("retains coast-baseline non-color buffers in all six actual v4 leaves", async () => {
+  it("pins quantized-worker buffers in all six coast-baseline v4 leaves", async () => {
     // Measured 2026-09-11 against published b6b3af00e factory in a real worker.
     // Palette SHA256:15cf7643c8dec05ac6f480c0b03ca20aab10bc5f74207ec0f9340b5b9812f910.
     // Worker source SHA256:8e4b4c4fe4f2a5a5639e8ae214f19b6c4e66ce753b30b9f34d99538675fffdb1,
-    // byte-identical before/after. One-off comparison used the original factory,
+    // byte-identical before/after that earlier coast change. These are HISTORICAL
+    // ANALYTIC-worker results, not the repaired texture-aligned sampler oracle.
+    // One-off comparison used the original factory,
     // not reimplemented algebra, and compared every element before hashing.
     // No Git CLI/history is required to run this retained regression.
-    const expected = [
+    const historicalAnalytic = [
       [
         450,
         350,
@@ -819,6 +821,50 @@ describe("opt-in compact grass, actual terrain and native worker (not GPU proof)
         "c7c9709722f56bbefdd377ae17a1733a253ac9ec847749a397440e0d2c9fe90b",
       ],
     ];
+    // Sampler-only correction: GPU texture bytes, geometry, profile and density
+    // settings are unmodified,
+    // but byte-filtered noise can change acceptance and subsequent RNG use even
+    // in leaves whose final counts stay equal. Keep the old complete hashes above.
+    const expected = [
+      historicalAnalytic[0],
+      [
+        250,
+        350,
+        503,
+        "ea35d20bea1bd705df0cd1985ff6531f9e1bf2ed04d7c3020c47b739eea300e0",
+        "3e084a2eb120406b53281dddf6ad1002db654311008472fa675a387cd09dedd8",
+        "7e6740c91f7c21b361fbb73984f22afef3896b669f9e2a87d31f6e18e9a48432",
+        "f0e7c2a55509d73359d4e5ef603687d2ce5995bab08a0e3467d0dbddcaf574e0",
+      ],
+      historicalAnalytic[2],
+      [
+        350,
+        450,
+        529,
+        "ba56cff67eafc509836bcd01df2185d49a571b9f8b088a9c61e71bfed48b0704",
+        "79c0d4dde33573eea75d76772e68c22d0a8b90f1aa431aff1c61538fbaa42951",
+        "983f405d430c0a3f827f49b5427bf797a0751b33d2f6eea438c7fe4e61937090",
+        "47c885dd1795e80ba0441dc384beeb646323d652f05f59a8029d5ee98261954f",
+      ],
+      [
+        450,
+        450,
+        493,
+        "1bc671970ae18bef258c077a60e2f4d696fa5cf127294ac66b5a0072373a8c6b",
+        "82a470c53a60e1fe6223dca920af1d1adce50487ae442fe7fcdb7d00b4a64934",
+        "e06df083901ad7705f627b9bd377a232b94303edbfbc89b41fa801708314f467",
+        "14aeb5181c010558e46cf3e921d5800db412ca9335421fbc4394d3ec55bad290",
+      ],
+      [
+        350,
+        250,
+        343,
+        "7bd0d542e247b2927f5ecd468420feea3ac79bfa515ab9fceb921c1d79009240",
+        "e7423c5f2cfa8d05b3675c2398d564c5b28438337dff113c43d371398ab57c21",
+        "1dfd030cba9544202ffa3b1402e496443211a1ffafc714ebe7acb33b5f67b859",
+        "1faf5fa9a300001d8306796fc58a67cf95a208564caeeea30563a67b21a1cdf6",
+      ],
+    ];
     const f = await fixture(SCULPTED_COMPACT_V3_PROFILE_FIXTURE, true);
     try {
       const owner = f.manager(COMPACT_ISLAND_GRASS_VISUAL_PROFILE).owner;
@@ -826,6 +872,29 @@ describe("opt-in compact grass, actual terrain and native worker (not GPU proof)
       for (const node of f.nodes) {
         const input = owner["createWorkerInput"](node, `coast_${node.id}`, 1);
         const after = await f.worker.run(input);
+        const sync = owner["generateInstanceData"](node, 1)!;
+        expect(sync.count).toBe(after.count);
+        for (const key of [
+          "offsets",
+          "rotScaleHash",
+          "groundColors",
+          "grassTints",
+          "groundNormals",
+        ] as const) {
+          expect(
+            Buffer.from(
+              sync[key].buffer,
+              sync[key].byteOffset,
+              sync[key].byteLength,
+            ),
+          ).toEqual(
+            Buffer.from(
+              after[key].buffer,
+              after[key].byteOffset,
+              after[key].byteLength,
+            ),
+          );
+        }
         const hashes: string[] = [];
         for (const key of [
           "offsets",
@@ -845,6 +914,7 @@ describe("opt-in compact grass, actual terrain and native worker (not GPU proof)
         receipts.push([node.centerX, node.centerZ, after.count, ...hashes]);
       }
       expect(receipts).toEqual(expected);
+      expect(receipts).not.toEqual(historicalAnalytic);
     } finally {
       await f.close();
     }
@@ -1039,40 +1109,98 @@ describe("opt-in compact grass, actual terrain and native worker (not GPU proof)
   it.each([
     {
       profile: SCULPTED_COMPACT_V2_PROFILE_FIXTURE,
-      total: 2130,
-      fixedLod1: 337,
-      leaves: [271, 503, 139, 510, 364, 343],
+      historicalAnalytic: {
+        fixedLod2: 12,
+        fixedLod1: 337,
+        total: 2130,
+        leaves: [271, 503, 139, 510, 364, 343],
+      },
+      total: 2129,
+      fixedLod1: 384,
+      fixedLeaves: [178, 72, 9, 0, 120, 5],
+      leaves: [271, 503, 139, 506, 367, 343],
     },
     {
       profile: SCULPTED_COMPACT_V3_PROFILE_FIXTURE,
-      total: 2281,
-      fixedLod1: 337,
-      leaves: [271, 503, 139, 532, 493, 343],
+      historicalAnalytic: {
+        fixedLod2: 12,
+        fixedLod1: 337,
+        total: 2281,
+        leaves: [271, 503, 139, 532, 493, 343],
+      },
+      total: 2278,
+      fixedLod1: 384,
+      fixedLeaves: [178, 72, 9, 0, 120, 5],
+      leaves: [271, 503, 139, 529, 493, 343],
     },
     {
       profile: SCULPTED_COMPACT_V4_PROFILE_FIXTURE,
-      total: 2298,
-      fixedLod1: 334,
-      leaves: [271, 520, 139, 532, 493, 343],
+      historicalAnalytic: {
+        fixedLod2: 12,
+        fixedLod1: 334,
+        total: 2298,
+        leaves: [271, 520, 139, 532, 493, 343],
+      },
+      total: 2295,
+      fixedLod1: 377,
+      fixedLeaves: [178, 65, 9, 0, 120, 5],
+      leaves: [271, 520, 139, 529, 493, 343],
     },
     {
       profile: SCULPTED_COMPACT_WORLD_TERRAIN_PROFILE,
-      total: 2273,
-      fixedLod1: 334,
-      leaves: [271, 495, 139, 532, 493, 343],
+      historicalAnalytic: {
+        fixedLod2: 12,
+        fixedLod1: 334,
+        total: 2273,
+        leaves: [271, 495, 139, 532, 493, 343],
+      },
+      total: 2270,
+      fixedLod1: 380,
+      fixedLeaves: [178, 68, 9, 0, 120, 5],
+      leaves: [271, 495, 139, 529, 493, 343],
     },
   ])(
-    "preserves the previous plaza's native-worker census for $profile.id",
-    async ({ profile, total: candidateTotal, fixedLod1, leaves }) => {
+    "pins quantized sampling on the previous plaza's native-worker census for $profile.id",
+    async ({
+      profile,
+      historicalAnalytic,
+      total: candidateTotal,
+      fixedLod1,
+      fixedLeaves,
+      leaves,
+    }) => {
       const f = await fixture(profile, true);
       try {
         const fixed = f.manager(STREAMING_GRASS_VISUAL_PROFILE).owner;
         const candidate = f.manager(COMPACT_ISLAND_GRASS_VISUAL_PROFILE).owner;
         const variants = [
-          { owner: fixed, lod: 2, total: 12, campus: 0 },
-          { owner: fixed, lod: 1, total: fixedLod1, campus: 0 },
-          { owner: candidate, lod: 1, total: candidateTotal, campus: 143 },
+          {
+            owner: fixed,
+            lod: 2,
+            total: 13,
+            campus: 0,
+            leaves: [9, 0, 0, 0, 4, 0],
+          },
+          {
+            owner: fixed,
+            lod: 1,
+            total: fixedLod1,
+            campus: 0,
+            leaves: fixedLeaves,
+          },
+          {
+            owner: candidate,
+            lod: 1,
+            total: candidateTotal,
+            campus: 143,
+            leaves,
+          },
         ];
+        // The unconditional sampler repair also changes ordinary fixed-arena
+        // eligibility, not only the compact opt-in. Retain all old oracles and
+        // pin the corrected counts per leaf, with exact CPU/worker buffer parity.
+        const census = [];
+        const expectedCensus = [];
         for (const variant of variants) {
           const leafCounts = [];
           let total = 0,
@@ -1103,8 +1231,11 @@ describe("opt-in compact grass, actual terrain and native worker (not GPU proof)
                 f.terrain["calculateRoadInfluenceAtVertex"](x, z, 0, 0),
               ).toBeLessThanOrEqual(0.8);
             }
-            if (variant.owner === candidate) {
-              const sync = candidate["generateInstanceData"](node, 1);
+            {
+              const sync = variant.owner["generateInstanceData"](
+                node,
+                GRASS_CONFIG.LOD_TIERS[variant.lod].spacingMul,
+              );
               expect(sync?.count ?? 0).toBe(output.count);
               if (sync)
                 for (const name of [
@@ -1115,33 +1246,49 @@ describe("opt-in compact grass, actual terrain and native worker (not GPU proof)
                   "groundNormals",
                 ] as const) {
                   expect(sync[name].length).toBe(output[name].length);
-                  for (let i = 0; i < sync[name].length; i++)
-                    expect(sync[name][i]).toBeCloseTo(output[name][i], 4);
+                  expect(
+                    Buffer.from(
+                      sync[name].buffer,
+                      sync[name].byteOffset,
+                      sync[name].byteLength,
+                    ),
+                  ).toEqual(
+                    Buffer.from(
+                      output[name].buffer,
+                      output[name].byteOffset,
+                      output[name].byteLength,
+                    ),
+                  );
                 }
             }
           }
           process.stdout.write(
             `Actual grass profile census: ${JSON.stringify({ profile: profile.id, eligibility: variant.owner.getProfileReceipt().eligibility, lod: variant.lod, leafCounts, total, campus })}\n`,
           );
-          expect({ total, campus }).toEqual({
+          census.push({
+            lod: variant.lod,
+            eligibility: variant.owner.getProfileReceipt().eligibility,
+            total,
+            campus,
+            leaves: leafCounts.map((row) => row[2]),
+          });
+          expectedCensus.push({
+            lod: variant.lod,
+            eligibility: variant.owner.getProfileReceipt().eligibility,
             total: variant.total,
             campus: variant.campus,
+            leaves: variant.leaves,
           });
           if (variant.owner === candidate) {
-            expect(leafCounts).toEqual(
-              f.nodes.map((node, index) => [
-                node.centerX,
-                node.centerZ,
-                leaves[index],
-              ]),
-            );
-            // Preserve each historical actual-worker census. The v5 terrace
-            // changes sampling in the western leaf (+17 clumps), not density.
             process.stdout.write(
-              `Compact grass CPU census (actual native worker, unchanged density; not GPU cost): ${JSON.stringify({ profile: profile.id, leafCounts, total, campus, nominalTriangles: total * 36 })}\n`,
+              `Quantized compact grass CPU census (actual native worker, unchanged density; not GPU cost): ${JSON.stringify({ profile: profile.id, leafCounts, total, campus, nominalTriangles: total * 36 })}\n`,
             );
           }
         }
+        process.stdout.write(
+          `Historical analytic versus corrected quantized census: ${JSON.stringify({ profile: profile.id, historicalAnalytic, quantized: census })}\n`,
+        );
+        expect(census).toEqual(expectedCensus);
         expect(candidate["lodGeometries"][1].index!.count / 3).toBe(36);
         expect(candidate.getProfileReceipt()).toMatchObject({
           profileId: "compact-island-v1",
@@ -1186,10 +1333,23 @@ describe("opt-in compact grass, actual terrain and native worker (not GPU proof)
               "offsets",
               "rotScaleHash",
               "groundNormals",
+              "groundColors",
+              "grassTints",
             ] as const) {
               expect(sync[name].length).toBe(output[name].length);
-              for (let i = 0; i < sync[name].length; i++)
-                expect(sync[name][i]).toBeCloseTo(output[name][i], 4);
+              expect(
+                Buffer.from(
+                  sync[name].buffer,
+                  sync[name].byteOffset,
+                  sync[name].byteLength,
+                ),
+              ).toEqual(
+                Buffer.from(
+                  output[name].buffer,
+                  output[name].byteOffset,
+                  output[name].byteLength,
+                ),
+              );
             }
           counts.push(output.count);
         }
@@ -1201,10 +1361,15 @@ describe("opt-in compact grass, actual terrain and native worker (not GPU proof)
     process.stdout.write(
       `Both terrace leaf grass census: ${JSON.stringify(results)}\n`,
     );
-    expect(results).toEqual([
+    const historicalAnalytic = [
       { profile: "compact-duel-island-v4", counts: [503, 632] },
       { profile: "compact-duel-island-v5", counts: [520, 657] },
+    ];
+    expect(results).toEqual([
+      historicalAnalytic[0],
+      { profile: "compact-duel-island-v5", counts: [520, 654] },
     ]);
+    expect(results).not.toEqual(historicalAnalytic);
   });
 
   it("tags actual results and rejects tainted modes before generation or pool availability", async () => {
