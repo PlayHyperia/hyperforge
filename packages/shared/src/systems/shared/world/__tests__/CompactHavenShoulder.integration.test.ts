@@ -35,6 +35,20 @@ import groveLayouts from "./fixtures/CompactResourceGroves.layouts.json";
 
 // Independent authoring envelope, not expectations copied from the new sampler.
 const SUPPORT = { minX: 272, maxX: 314, minZ: 303, maxZ: 367 };
+const LEGACY_CORE_WIDTHS = [1.8, 1.8, 1.5, 1.5, 2.2, 2.2, 4, 3, 2.5, 3.5, 2.5];
+const CURRENT_CORE_PROFILES = [
+  [1.1, 0.85],
+  [1.1, 0.85],
+  [0.9, 0.8],
+  [0.9, 0.8],
+  [1.4, 0.9],
+  [1.4, 0.9],
+  [1.8, 1.6],
+  [1.1, 1.45],
+  [0.9, 1.3],
+  [1.2, 1.65],
+  [0.9, 1.3],
+];
 const inside = (x: number, z: number) =>
   x > SUPPORT.minX && x < SUPPORT.maxX && z > SUPPORT.minZ && z < SUPPORT.maxZ;
 
@@ -121,17 +135,26 @@ function actualRoadMask(
   f: Fixture,
   includeWear = true,
   sampleBounds?: { worldSize: number; centerX: number; centerZ: number },
+  legacyCores = !includeWear,
 ) {
   const roads = f.roads.getRoads();
   const original = roads.slice();
-  // Reproduce the pre-wear receipt through the actual mask producer, removing
-  // only the three opt-in records. Restore synchronously before any owner query;
+  // Reproduce historical widths/fade through the actual mask producer. This
+  // retains the previous receipt, not the candidate's weaker cores. Restore
+  // synchronously before any owner query;
   // no historical production implementation or cached tile state is substituted.
-  if (!includeWear)
+  if (!includeWear || legacyCores)
     roads.splice(
       0,
       roads.length,
-      ...original.filter((road) => !road.id.startsWith("compact-wear-")),
+      ...original
+        .filter((road) => includeWear || !road.id.startsWith("compact-wear-"))
+        .map((road, index) => {
+          if (!legacyCores || index >= 11) return road;
+          const legacy = { ...road, width: LEGACY_CORE_WIDTHS[index] };
+          delete legacy.blendWidth;
+          return legacy;
+        }),
     );
   try {
     const bounds =
@@ -147,7 +170,7 @@ function actualRoadMask(
     if (!result) throw new Error("Actual compact roads did not produce a mask");
     return result;
   } finally {
-    if (!includeWear) roads.splice(0, roads.length, ...original);
+    if (!includeWear || legacyCores) roads.splice(0, roads.length, ...original);
   }
 }
 
@@ -276,9 +299,14 @@ describe("actual Haven shoulder terrain, emitted worker and retained geometry", 
       "compact-duel-island-v6",
     ]);
     expect(currentPaths).toHaveLength(14);
-    for (const road of currentPaths.slice(0, 11)) {
+    for (const [index, road] of currentPaths.slice(0, 11).entries()) {
       expect(road.id.startsWith("compact-wear-")).toBe(false);
-      expect(Object.hasOwn(road, "blendWidth")).toBe(false);
+      expect([road.width, road.blendWidth]).toEqual(
+        CURRENT_CORE_PROFILES[index],
+      );
+      expect(road.width / 2 + road.blendWidth!).toBe(
+        LEGACY_CORE_WIDTHS[index] / 2 + 0.5,
+      );
       expect(Object.hasOwn(road, "maxInfluence")).toBe(false);
     }
     expect(
@@ -321,6 +349,10 @@ describe("actual Haven shoulder terrain, emitted worker and retained geometry", 
     const beforeMask = actualRoadMask(previous),
       afterMask = actualRoadMask(next);
     expect(afterMask).toEqual(beforeMask);
+    expect([afterMask.worldSize, afterMask.centerX, afterMask.centerZ]).toEqual(
+      [85.5, 359.171875, 351.5],
+    );
+    const legacyFullMask = actualRoadMask(next, true, afterMask, true);
     const beforeLegacyMask = actualRoadMask(previous, false),
       afterLegacyMask = actualRoadMask(next, false);
     expect(afterLegacyMask).toEqual(beforeLegacyMask);
@@ -344,14 +376,15 @@ describe("actual Haven shoulder terrain, emitted worker and retained geometry", 
     ).filter((value) => value > 0).length;
     const pixel = afterMask.worldSize / afterMask.width;
     let supportTexels = 0,
-      addedWearTexels = 0;
+      addedWearTexels = 0,
+      reducedCoreTexels = 0;
     for (let iz = 0; iz < afterMask.height; iz++)
       for (let ix = 0; ix < afterMask.width; ix++) {
         const index = iz * afterMask.width + ix;
         const value = afterMask.data[index];
-        expect(value).toBeGreaterThanOrEqual(
-          afterAlignedLegacyMask.data[index],
-        );
+        expect(value > 0).toBe(legacyFullMask.data[index] > 0);
+        expect(value).toBeLessThanOrEqual(legacyFullMask.data[index]);
+        if (value < legacyFullMask.data[index]) reducedCoreTexels++;
         if (afterAlignedLegacyMask.data[index] === 0 && value > 0) {
           expect(value).toBeLessThanOrEqual(Math.fround(0.6));
           addedWearTexels++;
@@ -371,9 +404,11 @@ describe("actual Haven shoulder terrain, emitted worker and retained geometry", 
         supportTexels++;
       }
     expect(addedWearTexels).toBeGreaterThan(0);
+    expect(reducedCoreTexels).toBeGreaterThan(0);
+    expect(supportTexels).toBe(4872);
     expect(supportTexels).toBe(alignedLegacySupportTexels + addedWearTexels);
     process.stdout.write(
-      `Haven protected CPU terrain/roads: ${JSON.stringify({ knownTreeCoordinates: treePositions.length, checks, paths: 14, legacySupportTexels: 4684, alignedLegacySupportTexels, addedWearTexels, supportTexels, maskBounds: { worldSize: afterMask.worldSize, centerX: afterMask.centerX, centerZ: afterMask.centerZ }, freshCensusOrBfs: false })}\n`,
+      `Haven protected CPU terrain/roads: ${JSON.stringify({ knownTreeCoordinates: treePositions.length, checks, paths: 14, legacySupportTexels: 4684, alignedLegacySupportTexels, addedWearTexels, supportTexels, reducedCoreTexels, maskBounds: { worldSize: afterMask.worldSize, centerX: afterMask.centerX, centerZ: afterMask.centerZ }, freshCensusOrBfs: false })}\n`,
     );
   });
 

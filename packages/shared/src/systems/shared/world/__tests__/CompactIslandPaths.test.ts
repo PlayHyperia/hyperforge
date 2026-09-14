@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { World } from "../../../../core/World";
 import { DataManager } from "../../../../data/DataManager";
@@ -14,12 +15,44 @@ import {
   compactPathSegmentDistance,
   createCompactIslandPaths,
 } from "../CompactIslandPaths";
-import { COMPACT_WORLD_TERRAIN_PROFILE } from "../WorldTerrainProfile";
+import {
+  COMPACT_WORLD_TERRAIN_PROFILE,
+  SCULPTED_COMPACT_V2_PROFILE_FIXTURE,
+  SCULPTED_COMPACT_V3_PROFILE_FIXTURE,
+  SCULPTED_COMPACT_V4_PROFILE_FIXTURE,
+} from "../WorldTerrainProfile";
 import type { RoadTileSegment } from "../../../../types/world/world-types";
 import {
   COMPACT_PREPARATION_LODGE,
   getCompactPreparationLodgeFootprint,
 } from "../CompactPreparationLodge";
+
+// Independently declared surface recipe; centerlines and outer support remain
+// those of the previously captured fourteen-path world, not a wider network.
+const CORE_RECIPE = [
+  ["compact-path-pond-bank", 1.8, 1.1, 0.85],
+  ["compact-path-bank-workshop", 1.8, 1.1, 0.85],
+  ["compact-path-bank-range", 1.5, 0.9, 0.8],
+  ["compact-path-bank-altar", 1.5, 0.9, 0.8],
+  ["compact-path-bank-lobby", 2.2, 1.4, 0.9],
+  ["compact-path-lobby-arena", 2.2, 1.4, 0.9],
+  ["compact-clearing-bank-apron", 4, 1.8, 1.6],
+  ["compact-clearing-bank-clerk-approach", 3, 1.1, 1.45],
+  ["compact-clearing-bank-shopkeeper-approach", 2.5, 0.9, 1.3],
+  ["compact-clearing-workshop-apron", 3.5, 1.2, 1.65],
+  ["compact-clearing-workshop-supplier-approach", 2.5, 0.9, 1.3],
+] as const;
+
+function previousCoreRecipe(roads: ReturnType<RoadNetworkSystem["getRoads"]>) {
+  return roads.map((road, index) => {
+    if (index >= CORE_RECIPE.length) return road;
+    expect(road.id).toBe(CORE_RECIPE[index][0]);
+    const previous = { ...road, width: CORE_RECIPE[index][1] };
+    delete previous.blendWidth;
+    delete previous.maxInfluence;
+    return previous;
+  });
+}
 
 type TerrainInternals = {
   loadWaterBodiesFromManifest(): void;
@@ -235,7 +268,11 @@ describe("actual compact preparation paths and centered road mask", () => {
   it("retains real segment influence across positive and negative tile boundaries even when centerline stops short", async () => {
     await withRoads((roads, terrain) => {
       const stored = roads.getRoads(),
-        exemplar = stored[0];
+        exemplar = { ...stored[0] };
+      // These remain ordinary absent-profile boundary fixtures, irrespective
+      // of the new explicit fade selected by the current v6 exemplar.
+      delete exemplar.blendWidth;
+      delete exemplar.maxInfluence;
       stored.splice(
         0,
         stored.length,
@@ -338,11 +375,12 @@ describe("actual compact preparation paths and centered road mask", () => {
     });
   });
 
-  it("adds connected partial wear without expanding the grass-free core", async () => {
+  it("keeps connected partial wear while reducing the saturated workshop footprint inside unchanged support", async () => {
     await withRoads((roads) => {
       const all = roads.getRoads();
       const original = all.slice(0, 11);
       const wear = all.slice(11);
+      const previous = previousCoreRecipe(all);
       expect(
         wear.map((r) => [r.id, r.width, r.blendWidth, r.maxInfluence]),
       ).toEqual([
@@ -373,24 +411,47 @@ describe("actual compact preparation paths and centered road mask", () => {
           0,
         );
       for (const path of wear) {
-        expect(sample(original, path.path[0].x, path.path[0].z)).toBe(1);
+        expect(
+          sample(previous.slice(0, 11), path.path[0].x, path.path[0].z),
+        ).toBe(1);
+        expect(
+          sample(original, path.path[0].x, path.path[0].z),
+        ).toBeGreaterThan(0);
         const gpu = roads
           .getRoadSegmentsForGPU()
           .filter((s) => s.maxInfluence === path.maxInfluence);
         expect(gpu).toHaveLength(path.path.length - 1);
         expect(gpu.every((s) => s.blendWidth === path.blendWidth)).toBe(true);
       }
-      let addedSupport = 0;
+      let addedSupport = 0,
+        previousSaturated = 0,
+        currentSaturated = 0;
       for (let x = 330; x <= 342; x += 0.125)
         for (let z = 328; z <= 340; z += 0.125) {
           const core = sample(original, x, z);
           const skirt = sample(wear, x, z);
           const current = roads.getRoadInfluenceAt(x, z);
+          const before = sample(previous, x, z);
           expect(current).toBe(Math.max(core, skirt));
           expect(current > 0.8).toBe(core > 0.8);
+          expect(current).toBeLessThanOrEqual(before);
+          expect(current > 0).toBe(before > 0);
+          if (before > 0.8) previousSaturated++;
+          if (current > 0.8) currentSaturated++;
           if (core === 0 && current > 0) addedSupport++;
         }
       expect(addedSupport).toBeGreaterThan(100);
+      expect(currentSaturated).toBeGreaterThan(0);
+      expect(currentSaturated).toBeLessThan(previousSaturated);
+      process.stdout.write(
+        "Workshop analytical >.8 footprint at .125m spacing (not rendered canopy) " +
+          JSON.stringify({
+            previousSaturated,
+            currentSaturated,
+            addedSupport,
+          }) +
+          "\n",
+      );
     });
   });
 
@@ -407,6 +468,25 @@ describe("actual compact preparation paths and centered road mask", () => {
         (x, z) => terrain.getHeightAt(x, z),
       );
       expect(paths).toHaveLength(14);
+      // Actual compact-natural-paths-art01/natural-paths.json SHA256
+      // 60ca43d296e1f9c37436bebed78750646b2c09c3c366953dfcc9b09c898e5390.
+      // This pin uses only its pre-change IDs, XZ samples and lengths, never
+      // candidate widths or new output. Heights remain independently checked.
+      expect(
+        createHash("sha256")
+          .update(
+            JSON.stringify(
+              paths.map((path) => [
+                path.id,
+                path.path.map((point) => [point.x, point.z]),
+                path.length,
+              ]),
+            ),
+          )
+          .digest("hex"),
+      ).toBe(
+        "56baadca901dbbcfa744826dc996da4b792a104395cd5fb030589003f698564a",
+      );
       expect(roads.getRoads()).toHaveLength(14);
       expect(roads.getRoadNetwork()?.towns).toEqual([]);
       expect(roads.getRoadNetwork()?.roads).toHaveLength(14);
@@ -431,17 +511,24 @@ describe("actual compact preparation paths and centered road mask", () => {
             ).toBeLessThanOrEqual(1.000001);
         }
       }
-      // Preserve the exact original six-path bounds, independent of the wider
-      // additive surface-only forecourts.
+      // Preserve the original centerline roles and complete width-plus-blend
+      // support, while explicitly qualifying the narrower current paint cores.
       for (const path of paths.slice(0, 6)) {
         expect(path.id).toMatch(/^compact-path-/);
         expect(path.path.length).toBeGreaterThan(8);
         expect(path.width).toBeLessThanOrEqual(2.2);
       }
-      for (const path of paths.slice(0, 11)) {
+      for (const [index, path] of paths.slice(0, 11).entries()) {
         expect(path.path.length).toBeGreaterThan(7);
-        expect(path.width).toBeGreaterThanOrEqual(1.5);
-        expect(Object.hasOwn(path, "blendWidth")).toBe(false);
+        const [id, previousWidth, width, blend] = CORE_RECIPE[index];
+        expect([path.id, path.width, path.blendWidth]).toEqual([
+          id,
+          width,
+          blend,
+        ]);
+        expect(path.width).toBeLessThan(previousWidth);
+        expect(path.width / 2 + path.blendWidth!).toBe(previousWidth / 2 + 0.5);
+        expect(Object.hasOwn(path, "blendWidth")).toBe(true);
         expect(Object.hasOwn(path, "maxInfluence")).toBe(false);
       }
       expect(paths.slice(6, 11).map((path) => path.id)).toEqual([
@@ -525,6 +612,26 @@ describe("actual compact preparation paths and centered road mask", () => {
           (x, z) => terrain.getHeightAt(x, z),
         ),
       ).toEqual([]);
+      for (const profile of [
+        SCULPTED_COMPACT_V2_PROFILE_FIXTURE,
+        SCULPTED_COMPACT_V3_PROFILE_FIXTURE,
+        SCULPTED_COMPACT_V4_PROFILE_FIXTURE,
+      ]) {
+        const historical = createCompactIslandPaths(
+          profile,
+          areas,
+          getDuelArenaConfig(),
+          (x, z) => terrain.getHeightAt(x, z),
+        );
+        expect(historical).toHaveLength(11);
+        expect(historical.map((path) => [path.id, path.width])).toEqual(
+          CORE_RECIPE.map(([id, previousWidth]) => [id, previousWidth]),
+        );
+        for (const path of historical) {
+          expect(Object.hasOwn(path, "blendWidth")).toBe(false);
+          expect(Object.hasOwn(path, "maxInfluence")).toBe(false);
+        }
+      }
       const changed = structuredClone(areas);
       changed.central_haven.stations = [];
       expect(() =>
@@ -535,6 +642,63 @@ describe("actual compact preparation paths and centered road mask", () => {
           (x, z) => terrain.getHeightAt(x, z),
         ),
       ).toThrow(/station/);
+    });
+  });
+
+  it("retains exact actual256 support and mask bounds while lowering the former fourteen-path core field", async () => {
+    await withRoads((roads) => {
+      const internal = roads as unknown as RoadInternals;
+      const stored = roads.getRoads(),
+        current = stored.slice();
+      const previous = previousCoreRecipe(current);
+      const currentBounds = internal.calculateRoadMaskBounds(
+        roads.getRoadSegmentsForGPU(),
+      );
+      const currentMask = roads.generateRoadInfluenceTexture(
+        256,
+        currentBounds.worldSize,
+        0.5,
+        currentBounds.centerX,
+        currentBounds.centerZ,
+      )!;
+      let previousMask: typeof currentMask;
+      try {
+        stored.splice(0, stored.length, ...previous);
+        const previousBounds = internal.calculateRoadMaskBounds(
+          roads.getRoadSegmentsForGPU(),
+        );
+        expect(currentBounds).toEqual(previousBounds);
+        expect(
+          internal.calculateRoadMaskTextureSize(previousBounds.worldSize),
+        ).toBe(256);
+        previousMask = roads.generateRoadInfluenceTexture(
+          256,
+          previousBounds.worldSize,
+          0.5,
+          previousBounds.centerX,
+          previousBounds.centerZ,
+        )!;
+      } finally {
+        stored.splice(0, stored.length, ...current);
+      }
+      expect(currentMask.data.length).toBe(previousMask.data.length);
+      let lowered = 0,
+        recoveredFromSaturation = 0;
+      for (let i = 0; i < currentMask.data.length; i++) {
+        const before = previousMask.data[i],
+          after = currentMask.data[i];
+        expect(after, `texel ${i}`).toBeLessThanOrEqual(before);
+        expect(after > 0, `texel ${i} support`).toBe(before > 0);
+        if (after < before) lowered++;
+        if (before > 0.8 && after <= 0.8) recoveredFromSaturation++;
+      }
+      expect(lowered).toBeGreaterThan(0);
+      expect(recoveredFromSaturation).toBeGreaterThan(0);
+      process.stdout.write(
+        "Actual256 same-support core redistribution " +
+          JSON.stringify({ lowered, recoveredFromSaturation }) +
+          "\n",
+      );
     });
   });
 

@@ -204,14 +204,16 @@ export function createCompactIslandPaths(
       id: "pond-bank",
       fromId: pond.id,
       toId: "bank-forecourt",
-      width: 1.8,
+      width: bankCourt ? 1.1 : 1.8,
+      ...(bankCourt ? { blendWidth: 0.85 } : {}),
       points: [shore, { x: front.x - 1, z: (shore.z + front.z) / 2 }, front],
     },
     {
       id: "bank-workshop",
       fromId: "bank-forecourt",
       toId: "workshop-forecourt",
-      width: 1.8,
+      width: bankCourt ? 1.1 : 1.8,
+      ...(bankCourt ? { blendWidth: 0.85 } : {}),
       points: [
         front,
         ...(bankCourt
@@ -230,7 +232,8 @@ export function createCompactIslandPaths(
       id: "bank-range",
       fromId: "bank-forecourt",
       toId: "range-forecourt",
-      width: 1.5,
+      width: bankCourt ? 0.9 : 1.5,
+      ...(bankCourt ? { blendWidth: 0.8 } : {}),
       points: [
         front,
         { x: range.x + 5, z: front.z },
@@ -241,7 +244,8 @@ export function createCompactIslandPaths(
       id: "bank-altar",
       fromId: "bank-forecourt",
       toId: "altar-forecourt",
-      width: 1.5,
+      width: bankCourt ? 0.9 : 1.5,
+      ...(bankCourt ? { blendWidth: 0.8 } : {}),
       points: [
         front,
         { x: altar.x, z: front.z - 3 },
@@ -252,7 +256,8 @@ export function createCompactIslandPaths(
       id: "bank-lobby",
       fromId: "bank-forecourt",
       toId: "duel-lobby",
-      width: 2.2,
+      width: bankCourt ? 1.4 : 2.2,
+      ...(bankCourt ? { blendWidth: 0.9 } : {}),
       points: [
         front,
         ...(bankCourt
@@ -280,7 +285,8 @@ export function createCompactIslandPaths(
       id: "lobby-arena",
       fromId: "duel-lobby",
       toId: "arena-approach",
-      width: 2.2,
+      width: bankCourt ? 1.4 : 2.2,
+      ...(bankCourt ? { blendWidth: 0.9 } : {}),
       points: [
         southLobby,
         { x: (southLobby.x + arenaApproach.x) / 2, z: arenaApproach.z },
@@ -289,14 +295,17 @@ export function createCompactIslandPaths(
     },
     // Surface-only forecourts. These IDs describe paint provenance, not route
     // edges or service ownership. They never grant remote banking or navigation.
-    // Wider masks can change grass sampling within affected leaves: the existing
-    // acceptance-dependent rotation RNG is retained, not silently re-phased here.
+    // Current cores redistribute their previous radius into broader shoulders:
+    // width / 2 + blend stays exact, without expanding the authored footprint.
+    // Lower wear can admit grass in the shoulder, with acceptance-dependent
+    // rotation RNG retained; unchanged candidate budgets do not imply equal cost.
     {
       id: "bank-apron",
       clearing: true,
       fromId: "bank-forecourt",
       toId: "bank-forecourt",
-      width: 4,
+      width: bankCourt ? 1.8 : 4,
+      ...(bankCourt ? { blendWidth: 1.6 } : {}),
       points: [
         { x: bank.x - 2, z: bank.z + (bankCourt ? 1 : 2) },
         { x: bank.x + 2, z: bank.z + (bankCourt ? 1.5 : 2.5) },
@@ -307,7 +316,8 @@ export function createCompactIslandPaths(
       clearing: true,
       fromId: "bank-forecourt",
       toId: "bank_clerk",
-      width: 3,
+      width: bankCourt ? 1.1 : 3,
+      ...(bankCourt ? { blendWidth: 1.45 } : {}),
       points: [
         { x: bank.x + 2, z: bank.z + (bankCourt ? 1.5 : 2.5) },
         // Stay west of the real tree's all-LOD crown, including the mask halo.
@@ -321,7 +331,8 @@ export function createCompactIslandPaths(
       clearing: true,
       fromId: "bank-forecourt",
       toId: "shopkeeper",
-      width: 2.5,
+      width: bankCourt ? 0.9 : 2.5,
+      ...(bankCourt ? { blendWidth: 1.3 } : {}),
       points: [
         { x: bank.x - 2, z: bank.z + (bankCourt ? 1 : 2) },
         {
@@ -335,7 +346,8 @@ export function createCompactIslandPaths(
       clearing: true,
       fromId: "workshop-forecourt",
       toId: "workshop-forecourt",
-      width: 3.5,
+      width: bankCourt ? 1.2 : 3.5,
+      ...(bankCourt ? { blendWidth: 1.65 } : {}),
       points: [
         { x: furnace.x - 0.25, z: furnace.z - 1.25 },
         { x: anvil.x + 1, z: anvil.z - 1.75 },
@@ -346,7 +358,8 @@ export function createCompactIslandPaths(
       clearing: true,
       fromId: "workshop-forecourt",
       toId: "crafting_supplier",
-      width: 2.5,
+      width: bankCourt ? 0.9 : 2.5,
+      ...(bankCourt ? { blendWidth: 1.3 } : {}),
       points: [workshop, { x: supplier.x - 0.5, z: supplier.z + 0.5 }],
     },
   ];

@@ -2,6 +2,36 @@
 
 ## Current direction — natural, dry, full and freely explorable
 
+The current comparison redistributes the eleven original v6 path radii into narrower
+fully worn centers and broader grass/soil feathers, preserving every centerline,
+height and outer footprint. The workshop core becomes1.2m with1.65m feather
+instead of3.5m with0.5m feather; three connected asymmetric wear strokes remain.
+Historical profiles, ground material, geometry and navigation are unchanged.
+Exact support/mask domain and CPU/worker/GPU checks pass; three native views show
+a modest improvement in narrower junctions and softer edges. Provisionally retain,
+not finished paths or meadow quality. Final599/599,9packing, all three type checks,
+both builds and107external checks pass. Source receipt is
+`asset-studio/fine-meadow01/natural-paths-06-source-qualification01.json`.
+Native art01 holds752 pins/667 archives and completes all3 WebGPU1280×720 views.
+Direct GPU4,096mask/17vertex checks pass, maxerror0.0000305559/0. Same94 cells/LODs
+and source geometry;9 cells change instances,85 stay exact. Total81,098 clumps,
+3,780,528 triangles and8,769,408 root bytes: deltas+105/+8,484/+15,456.
+Recorded installed-owner grounding work rises23,124,970→23,141,955 units, not
+total run CPU work, timing or performance approval. Page/GPU/cleanup errors0;
+19 known cow/dagger errors keep overall failed. Browser/services closed; DB
+retained stopped. Replay:`asset-studio/fine-meadow01/compact-core-feather-art01-verification.json`.
+The initial598/599 source failure retained an old grounded-plaza count; actual
+projected1007/pad47/water5/edge0 remain, road22→14 explains retained933→941.
+Raw six-leaf sampling and all independent worker/root checks remain unchanged.
+
+The next visible limitation is broad bare-green padding: furnace/anvil station
+grass exclusion currently inherits terrain-flattening padding plus blend, roughly
+12×12m and9×9m. Separate an actual-footprint/work-access grass-clearance contract
+from grading without changing terrain height or physical collision. Verify actual
+model bounds, swept-blade clearance, regained grass/contact and native costs.
+The source mechanism does not identify every green pixel or every pad rejection.
+The previous groundwork checkpoint is pushed as`c6bc0832c`; it is not art approval.
+
 The bounded placement comparison is complete:104/104 focused,485/485 serial,
 all types/shared-server builds and91/91 external checks pass. Three native views
 retain740 pins and unchanged templates, with80,999 accepted clumps versus81,101

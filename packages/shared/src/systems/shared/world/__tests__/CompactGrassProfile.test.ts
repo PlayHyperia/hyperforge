@@ -1074,6 +1074,26 @@ describe("opt-in compact grass, actual terrain and native worker (not GPU proof)
   it("grounds the current natural plaza with unchanged density, actual worker/CPU parity and retained service exclusions", async () => {
     const f = await fixture();
     try {
+      const roads = f.world.getSystem("roads") as RoadNetworkSystem;
+      expect(roads.getRoads()).toHaveLength(14);
+      expect(
+        roads
+          .getRoads()
+          .slice(0, 11)
+          .map(({ width, blendWidth }) => [width, blendWidth]),
+      ).toEqual([
+        [1.1, 0.85],
+        [1.1, 0.85],
+        [0.9, 0.8],
+        [0.9, 0.8],
+        [1.4, 0.9],
+        [1.4, 0.9],
+        [1.8, 1.6],
+        [1.1, 1.45],
+        [0.9, 1.3],
+        [1.2, 1.65],
+        [0.9, 1.3],
+      ]);
       const { owner } = f.manager(COMPACT_ISLAND_GRASS_VISUAL_PROFILE);
       const counts: number[] = [];
       for (const node of f.nodes) {
@@ -1132,11 +1152,27 @@ describe("opt-in compact grass, actual terrain and native worker (not GPU proof)
         if (x >= 326 && x <= 374 && z >= 296 && z <= 344) naturalPlazaClumps++;
       }
       process.stdout.write(
-        `Landscape plaza grounding census: ${JSON.stringify({ accepted: result.data.count, naturalPlazaClumps })}\n`,
+        `Landscape plaza grounding census: ${JSON.stringify({ accepted: result.data.count, naturalPlazaClumps, receipt: result.receipt })}\n`,
       );
-      // Two root exclusions plus one additional swept-blade exclusion.
-      expect(result.data.count).toBe(933);
-      expect(naturalPlazaClumps).toBe(110);
+      // Recorded before core/feather redistribution: identical raw sampling,
+      // projected1007, retained933, plaza110, pad47/road22/water5/edge0.
+      // Admit the new census only with unchanged projection/pad/water counts
+      // and the complete retained delta accounted for by road rejection.
+      const previous = { projected: 1007, retained: 933, plaza: 110, road: 22 };
+      expect(result.receipt.inputClumps).toBe(previous.projected);
+      expect(result.receipt.processedClumps).toBe(previous.projected);
+      expect(result.receipt.rejected).toEqual({
+        terrain_edge: 0,
+        pad: 47,
+        road: 14,
+        water: 5,
+      });
+      expect(result.data.count - previous.retained).toBe(
+        previous.road - result.receipt.rejected.road,
+      );
+      expect(result.receipt.workBudget).toBe(1_000_000);
+      expect(result.data.count).toBe(941);
+      expect(naturalPlazaClumps).toBe(114);
       expect(result.receipt.rejected.pad).toBeGreaterThan(0);
       expect(result.receipt.maxAcceptedBaseError).toBeLessThanOrEqual(0.05);
       expect(result.rootDeltas.byteLength).toBe(result.data.count * 96);

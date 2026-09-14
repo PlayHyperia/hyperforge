@@ -130,9 +130,26 @@ function expectCurrentPathWear(
   paths: ReturnType<typeof createCompactIslandPaths>,
 ) {
   expect(paths).toHaveLength(14);
-  for (const path of paths.slice(0, 11)) {
+  const profiles = [
+    [1.1, 0.85],
+    [1.1, 0.85],
+    [0.9, 0.8],
+    [0.9, 0.8],
+    [1.4, 0.9],
+    [1.4, 0.9],
+    [1.8, 1.6],
+    [1.1, 1.45],
+    [0.9, 1.3],
+    [1.2, 1.65],
+    [0.9, 1.3],
+  ];
+  const previousWidths = [1.8, 1.8, 1.5, 1.5, 2.2, 2.2, 4, 3, 2.5, 3.5, 2.5];
+  for (const [index, path] of paths.slice(0, 11).entries()) {
     expect(path.id.startsWith("compact-wear-")).toBe(false);
-    expect(Object.hasOwn(path, "blendWidth")).toBe(false);
+    expect([path.width, path.blendWidth]).toEqual(profiles[index]);
+    expect(path.width / 2 + path.blendWidth!).toBe(
+      previousWidths[index] / 2 + 0.5,
+    );
     expect(Object.hasOwn(path, "maxInfluence")).toBe(false);
   }
   expect(

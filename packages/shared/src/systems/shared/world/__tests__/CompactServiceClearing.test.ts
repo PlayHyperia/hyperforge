@@ -45,6 +45,22 @@ const CAPSULES = [
   ["workshop-apron", 334.75, 334.75, 339, 334.25, 3.5],
   ["workshop-supplier-approach", 336.5, 333, 337.5, 331.5, 2.5],
 ] as const;
+const CURRENT_CLEARING_CORES = [
+  [1.8, 1.6],
+  [1.1, 1.45],
+  [0.9, 1.3],
+  [1.2, 1.65],
+  [0.9, 1.3],
+] as const;
+const HISTORICAL_CORE_WIDTHS = [
+  1.8,
+  1.8,
+  1.5,
+  1.5,
+  2.2,
+  2.2,
+  ...CAPSULES.map((capsule) => capsule[5]),
+];
 class CpuServerWorld extends World {
   override get isServer() {
     return true;
@@ -168,7 +184,7 @@ function modelRadius(asset: string): number {
 }
 
 describe("five surface-only service clearings, actual CPU owners (not native visual proof)", () => {
-  it("retains deterministic circulation and exact bank-court capsule endpoints/widths", async () => {
+  it("retains deterministic circulation and exact bank-court capsule endpoints/outer support with narrower current cores", async () => {
     const f = await fixture();
     try {
       const paths = createCompactIslandPaths(
@@ -209,9 +225,19 @@ describe("five surface-only service clearings, actual CPU owners (not native vis
           path.path[0].z,
           path.path.at(-1)!.x,
           path.path.at(-1)!.z,
-          path.width,
         ]),
-      ).toEqual(CAPSULES);
+      ).toEqual(CAPSULES.map((capsule) => capsule.slice(0, 5)));
+      expect(clearings.map((path) => [path.width, path.blendWidth])).toEqual(
+        CURRENT_CLEARING_CORES,
+      );
+      for (const [index, path] of clearings.entries()) {
+        // Retain the exact original outer capsules for all dry-floor/tree
+        // safety checks below; only their paint plateaus and feathers change.
+        expect(path.width / 2 + path.blendWidth!).toBe(
+          CAPSULES[index][5] / 2 + 0.5,
+        );
+        expect(Object.hasOwn(path, "maxInfluence")).toBe(false);
+      }
       process.stdout.write(
         "Clearing segments/points/length " +
           JSON.stringify(
@@ -570,17 +596,19 @@ describe("five surface-only service clearings, actual CPU owners (not native vis
     }
   });
 
-  it("records the v4-height/v6-pre-wear plaza's mask rephase and complete six-leaf native-worker census without changing RNG", async () => {
+  it("records the pre-shoulder sculpted plaza's mask rephase and complete six-leaf native-worker census without changing RNG", async () => {
     const f = await fixture(SCULPTED_COMPACT_WORLD_TERRAIN_PROFILE);
     // Historical clearings were qualified while the broad plaza excluded grass.
     // They also used the pre-Haven-shoulder broken ridge. Retain both parts of
     // that oracle; current plaza grounding and the admitted shoulder have their
     // own integration coverage, without rewriting this historical RNG census.
     // This was already a mixed fixture: RoadNetworkSystem.start reads the v6
-    // DataManager profile, while the isolated terrain samples v4 heights. The
-    // original eleven v6 definitions and their sampling arithmetic are unchanged
-    // by the appended wear paths; switching to v4 path routing would change the
-    // existing oracle rather than preserve it. Current all14 safety is separate.
+    // DataManager profile, while isolated terrain uses the declared pre-shoulder
+    // SCULPTED profile (v6 identity, compact-island-sculpt-v5 algorithm). The
+    // original eleven v6 centerlines and their sampling arithmetic are unchanged.
+    // Restore their explicit historical widths and absent optional fields below;
+    // switching to v4 path routing or retaining the new feathers would change
+    // this oracle rather than preserve it. Current all14 safety is separate.
     f.terrain["landscapeGrassSurface"].exclusionPolygons = [];
     f.terrain.unregisterFlatZone("central_haven_lodge_grass_clearance");
     const plaza = f.terrain["flatZones"].get("central_haven_plaza")!;
@@ -632,7 +660,12 @@ describe("five surface-only service clearings, actual CPU owners (not native vis
         "compact-wear-workshop-west",
         "compact-wear-supplier-north",
       ]);
-      const current = generated.slice(0, 11);
+      const current = generated.slice(0, 11).map((road, index) => {
+        const historical = { ...road, width: HISTORICAL_CORE_WIDTHS[index] };
+        delete historical.blendWidth;
+        delete historical.maxInfluence;
+        return historical;
+      });
       expect(current).toHaveLength(11);
       expect(current.map((road) => road.id)).toEqual([
         "compact-path-pond-bank",
@@ -650,6 +683,7 @@ describe("five surface-only service clearings, actual CPU owners (not native vis
         expect(Object.hasOwn(road, "blendWidth")).toBe(false);
         expect(Object.hasOwn(road, "maxInfluence")).toBe(false);
       }
+      expect(current.map((road) => road.width)).toEqual(HISTORICAL_CORE_WIDTHS);
       generated.splice(0, generated.length, ...current);
       // Real tile-cache consumers must see the same isolated eleven roads as
       // the direct GPU/mask export; stale partial wear must not leak into replay.
