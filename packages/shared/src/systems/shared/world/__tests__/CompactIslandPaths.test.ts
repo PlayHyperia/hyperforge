@@ -177,8 +177,8 @@ describe("actual compact preparation paths and centered road mask", () => {
           for (const offset of [
             0,
             road.width / 2,
-            road.width / 2 + 0.25,
-            road.width / 2 + 0.6,
+            road.width / 2 + (road.blendWidth ?? 0.5) / 2,
+            road.width / 2 + (road.blendWidth ?? 0.5) + 0.1,
           ]) {
             const x = (a.x + b.x) / 2 - ((b.z - a.z) / length) * offset;
             const z = (a.z + b.z) / 2 + ((b.x - a.x) / length) * offset;
@@ -220,7 +220,8 @@ describe("actual compact preparation paths and centered road mask", () => {
                     s.endX,
                     s.endZ,
                     s.width,
-                    0.5,
+                    s.blendWidth ?? 0.5,
+                    s.maxInfluence ?? 1,
                   ),
                 ),
               0,
@@ -288,6 +289,111 @@ describe("actual compact preparation paths and centered road mask", () => {
           }
     });
   });
+  it("retains explicit wide fades through ordinary halos and the bounded far-halo fallback", async () => {
+    await withRoads((roads, terrain) => {
+      const stored = roads.getRoads();
+      const exemplar = stored[0];
+      stored.splice(0, stored.length, {
+        ...exemplar,
+        id: "wide-partial-test",
+        width: 1,
+        blendWidth: 1000,
+        maxInfluence: 0.55,
+        path: [
+          { x: -1, z: -10, y: 28 },
+          { x: -1, z: 10, y: 28 },
+        ],
+      });
+      (roads as unknown as RoadInternals).buildTileCache();
+      const internal = terrain as unknown as TerrainInternals;
+      for (const x of [-900, -100, 100, 900]) {
+        const expected = roadSegmentInfluence(
+          x,
+          0,
+          -1,
+          -10,
+          -1,
+          10,
+          1,
+          1000,
+          0.55,
+        );
+        expect(expected).toBeGreaterThan(0);
+        expect(roads.getRoadInfluenceAt(x, 0)).toBe(expected);
+        expect(
+          internal.calculateRoadInfluenceAtVertex(x, 0, Math.floor(x / 100), 0),
+        ).toBeCloseTo(expected, 12);
+        const candidates = internal.getWorldSpaceRoadSegmentsForRegion(
+          x,
+          0,
+          x,
+          0,
+        );
+        expect(
+          candidates.some(
+            (s) => s.blendWidth === 1000 && s.maxInfluence === 0.55,
+          ),
+        ).toBe(true);
+      }
+    });
+  });
+
+  it("adds connected partial wear without expanding the grass-free core", async () => {
+    await withRoads((roads) => {
+      const all = roads.getRoads();
+      const original = all.slice(0, 11);
+      const wear = all.slice(11);
+      expect(
+        wear.map((r) => [r.id, r.width, r.blendWidth, r.maxInfluence]),
+      ).toEqual([
+        ["compact-wear-workshop-south", 0.65, 1.5, 0.6],
+        ["compact-wear-workshop-west", 0.7, 1.25, 0.55],
+        ["compact-wear-supplier-north", 0.45, 1.4, 0.5],
+      ]);
+      const sample = (list: typeof all, x: number, z: number) =>
+        list.reduce(
+          (peak, road) =>
+            road.path.slice(1).reduce((value, b, i) => {
+              const a = road.path[i];
+              return Math.max(
+                value,
+                roadSegmentInfluence(
+                  x,
+                  z,
+                  a.x,
+                  a.z,
+                  b.x,
+                  b.z,
+                  road.width,
+                  road.blendWidth ?? 0.5,
+                  road.maxInfluence ?? 1,
+                ),
+              );
+            }, peak),
+          0,
+        );
+      for (const path of wear) {
+        expect(sample(original, path.path[0].x, path.path[0].z)).toBe(1);
+        const gpu = roads
+          .getRoadSegmentsForGPU()
+          .filter((s) => s.maxInfluence === path.maxInfluence);
+        expect(gpu).toHaveLength(path.path.length - 1);
+        expect(gpu.every((s) => s.blendWidth === path.blendWidth)).toBe(true);
+      }
+      let addedSupport = 0;
+      for (let x = 330; x <= 342; x += 0.125)
+        for (let z = 328; z <= 340; z += 0.125) {
+          const core = sample(original, x, z);
+          const skirt = sample(wear, x, z);
+          const current = roads.getRoadInfluenceAt(x, z);
+          expect(current).toBe(Math.max(core, skirt));
+          expect(current > 0.8).toBe(core > 0.8);
+          if (core === 0 && current > 0) addedSupport++;
+        }
+      expect(addedSupport).toBeGreaterThan(100);
+    });
+  });
+
   it("generates a bounded curved immutable network from admitted subjects without towns or changing terrain", async () => {
     await withRoads((roads, terrain) => {
       expect(DataManager.getInstance().isReady()).toBe(true);
@@ -300,19 +406,19 @@ describe("actual compact preparation paths and centered road mask", () => {
         getDuelArenaConfig(),
         (x, z) => terrain.getHeightAt(x, z),
       );
-      expect(paths).toHaveLength(11);
-      expect(roads.getRoads()).toHaveLength(11);
+      expect(paths).toHaveLength(14);
+      expect(roads.getRoads()).toHaveLength(14);
       expect(roads.getRoadNetwork()?.towns).toEqual([]);
-      expect(roads.getRoadNetwork()?.roads).toHaveLength(11);
+      expect(roads.getRoadNetwork()?.roads).toHaveLength(14);
       expect(roads.getDependencies().required).toEqual(["terrain"]);
       expect(JSON.stringify(areas)).toBe(before);
       expect(Object.isFrozen(paths)).toBe(true);
       for (const path of paths) {
         expect(Object.isFrozen(path)).toBe(true);
         expect(Object.isFrozen(path.path)).toBe(true);
-        expect(path.path.length).toBeGreaterThan(7);
+        expect(path.path.length).toBeGreaterThan(1);
         expect(path.path.length).toBeLessThanOrEqual(256);
-        expect(path.width).toBeGreaterThanOrEqual(1.5);
+        expect(path.width).toBeGreaterThanOrEqual(0.45);
         expect(path.width).toBeLessThanOrEqual(4);
         expect(path.length).toBeLessThan(80);
         for (let i = 0; i < path.path.length; i++) {
@@ -332,7 +438,13 @@ describe("actual compact preparation paths and centered road mask", () => {
         expect(path.path.length).toBeGreaterThan(8);
         expect(path.width).toBeLessThanOrEqual(2.2);
       }
-      expect(paths.slice(6).map((path) => path.id)).toEqual([
+      for (const path of paths.slice(0, 11)) {
+        expect(path.path.length).toBeGreaterThan(7);
+        expect(path.width).toBeGreaterThanOrEqual(1.5);
+        expect(Object.hasOwn(path, "blendWidth")).toBe(false);
+        expect(Object.hasOwn(path, "maxInfluence")).toBe(false);
+      }
+      expect(paths.slice(6, 11).map((path) => path.id)).toEqual([
         "compact-clearing-bank-apron",
         "compact-clearing-bank-clerk-approach",
         "compact-clearing-bank-shopkeeper-approach",
@@ -367,7 +479,8 @@ describe("actual compact preparation paths and centered road mask", () => {
         for (let i = 1; i < road.path.length; i++) {
           const a = road.path[i - 1],
             b = road.path[i],
-            padding = road.width / 2 + COMPACT_PATH_BLEND_WIDTH;
+            padding =
+              road.width / 2 + (road.blendWidth ?? COMPACT_PATH_BLEND_WIDTH);
           for (const floor of floors)
             expect(
               compactPathIntersectsBounds(

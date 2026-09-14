@@ -684,13 +684,7 @@ export interface GrassWorkerSetup {
     minZ: number,
     maxX: number,
     maxZ: number,
-  ) => Array<{
-    startX: number;
-    startZ: number;
-    endX: number;
-    endZ: number;
-    width: number;
-  }>;
+  ) => GrassWorkerInput["roadSegments"];
   getTerrainSurfaceForRegion: (
     minX: number,
     minZ: number,

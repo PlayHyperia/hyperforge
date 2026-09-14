@@ -82,9 +82,10 @@ Do not simply widen paint while leaving grass on the old capsule contract.
 The next path slice needs explicit per-segment blend width and peak influence
 through road records, CPU/worker sampling and both compute kernels. Begin with
 connected asymmetric workshop/supplier shoulders while retaining genuine work
-cores, not disconnected decorative islands. Current blade grounding rejects
-all road capsules at full width; partial-strength shoulders must not inherit
-that full-clearance rule. Verify the actual >0.8 exclusion envelope, complete
+cores, not disconnected decorative islands. Previous blade grounding correctly
+inverted the >0.8 threshold but assumed a fixed0.5m fade and full-strength peak;
+partial-strength shoulders must not inherit that full-strength exclusion.
+Verify the actual >0.8 exclusion envelope, complete
 bilinear mask footprint and positive off-road routes, not just endpoint samples.
 
 Read-only navigation review finds no road-membership gate in authoritative
@@ -93,6 +94,46 @@ and object collision. Existing real-world BFS tests cover resource/service
 access but not an explicit whole-island off-road census; add that evidence and
 live traversal as the island fills out. Do not delete valid collision checks.
 All scene-wide visual, water-motion, workload and production gates remain open.
+
+The first path implementation now adds three connected fractional-wear strokes
+around the workshop/supplier, preserving all eleven earlier records. Explicit
+fade/peak reach CPU, emitted worker, grounding and both GPU kernels. Full
+support checks cover301 segments,45,700 ground samples, all48 tree-model
+envelopes and real off-road service routes. The full256 mask shifts its centerX
+359.55→359.171875; preserve the old4684-texel baseline on its own grid. On the
+new grid, the original eleven occupy4693 nonzero texels and wear adds179, for
+4872 total. This is a mask-domain rephase, not unchanged distant path pixels.
+
+Final source qualification passes598/598 across37 files, packing9/9, all three
+type checks and normal shared/server builds with80 held pins; external checks
+pass102/102. GPU vertex-count uniforms now store actualu32 counts, and pooled
+readback returns only requested bytes. Actual GPU/kernel checks now pass; the
+three-view review finds no decisive visual gain. Retain earlier failures and the independently proven stale
+grass census: HEAD216d12fd and current emitted workers match all twelve inputs
+and five buffers, including529 not the older532 in a cell with zero roads. The
+origin of that older recorded difference is unproven; do not blame the new wear.
+
+Native art01 holds752 pins/667 archives with three1280×720/DPR1 WebGPU stills.
+Direct production-class checks pass4,096 mask values (maximum error0.0000504592)
+and17 vertices (error0, exact68B readback). Only cell13,13 changes580→574 clumps;
+the other93 retain exact logical geometry, instance/root bytes and bounds.
+Eight unsigned-index storage-width variations are independently reconstructed,
+not mislabeled identical raw bytes. Templates remain exact; totals are80,993
+clumps,3,772,044 triangles and8,753,952 root bytes. Report SHA256
+`38fd8fe562711a3e1ff457f49dae182f0c94f433632acd5a3a28cde331ebf523`;
+offline replay `asset-studio/fine-meadow01/compact-natural-paths-art01-verification.json`.
+No page/GPU/cleanup errors;19 known cow/dagger errors keep overall failed.
+Owned browser/services closed, exact database retained stopped. No new motion,
+native cost or sustained-load qualification. Both reviewers find the additional
+skirts too subtle: broad brown cores and bare-green margins still dominate.
+The dry earth remains matte without an obvious new map/glare/seam defect.
+
+This is verified groundwork, not a demonstrated art gain or a solution for the
+broad original cores. Next redesign genuinely oversized service
+footprints as narrower trafficked cores plus asymmetric low-intensity shoulders
+within verified clearances. Do not simply append more painted area. Partial
+wear still changes acceptance/RNG within affected grass cells; no unchanged
+population, cost, lush coverage or production-quality claim follows from tests.
 
 ## Thin-leaf native comparison — no visual promotion
 

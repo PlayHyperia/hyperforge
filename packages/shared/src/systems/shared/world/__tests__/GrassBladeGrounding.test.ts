@@ -18,6 +18,7 @@ import {
   GrassBladeGroundingJob,
   GRASS_BLADE_GROUNDING_LIMITS,
   type GrassBladeGroundingRequest,
+  type GrassGroundingRoadSegment,
 } from "../GrassBladeGrounding";
 import {
   GrassVisualManager,
@@ -563,6 +564,294 @@ describe("CPU per-blade grounding prototype (no renderer/GPU)", () => {
       }
     },
   );
+
+  it.each([
+    ["ordinary", 0],
+    ["ordinary", 1],
+    ["ordinary", 2],
+    ["fine", 0],
+    ["fine", 1],
+    ["isolated-fine-near4", 0],
+  ] as const)(
+    "retains %s LOD%s swept grass through partial road shoulders without bypassing full cores, pads or water",
+    (appearance, lod) => {
+      const f = analyticOwner(appearance);
+      try {
+        const surface = f.makeSurface();
+        const request = {
+          ...f.request(surface, f.dataAt(surface, [[0, 0, 0.71]]), lod),
+          wind: { x: 0.4, z: 0.3 },
+        };
+        const baseline = groundGrassBlades(request);
+        expect(baseline.status).toBe("ready");
+        if (baseline.status !== "ready") throw Error(baseline.reason);
+        expect(baseline.data.count).toBe(1);
+        const before = structuredClone(request.data);
+        const core: GrassGroundingRoadSegment = {
+          startX: 0,
+          startZ: -10,
+          endX: 0,
+          endZ: 10,
+          width: 2,
+        };
+        const { elapsedMs: _baselineElapsed, ...baselineReceipt } =
+          baseline.receipt;
+        for (const maxInfluence of [0, 0.45, 0.65, 0.8]) {
+          const shoulder = { ...core, blendWidth: 4, maxInfluence };
+          const result = groundGrassBlades({
+            ...request,
+            // Repeated/overlapping partial masks combine by max, not sum.
+            roadSegments: [shoulder, shoulder, { ...shoulder, width: 1024 }],
+          });
+          const { elapsedMs: _elapsed, ...receipt } = result.receipt;
+          expect({ ...result, receipt }).toEqual({
+            ...baseline,
+            receipt: baselineReceipt,
+          });
+          expect(request.data).toEqual(before);
+        }
+        const shoulder = { ...core, blendWidth: 4, maxInfluence: 0.65 };
+        for (const roadSegments of [[core], [shoulder, core], [core, shoulder]])
+          expect(groundGrassBlades({ ...request, roadSegments })).toMatchObject(
+            {
+              status: "ready",
+              receipt: { retainedClumps: 0, rejected: { road: 1 } },
+            },
+          );
+        expect(
+          groundGrassBlades({
+            ...request,
+            roadSegments: [shoulder],
+            terrainSurface: {
+              ...emptySnapshot(),
+              zones: [
+                {
+                  id: "partial-shoulder-pad",
+                  centerX: 0,
+                  centerZ: 0,
+                  width: 2,
+                  depth: 2,
+                  height: 20,
+                  blendRadius: 0,
+                },
+              ],
+            },
+          }),
+        ).toMatchObject({
+          status: "ready",
+          receipt: { retainedClumps: 0, rejected: { pad: 1, road: 0 } },
+        });
+        expect(
+          groundGrassBlades({
+            ...request,
+            roadSegments: [shoulder],
+            terrainSurface: {
+              ...emptySnapshot(),
+              waterBodies: [
+                {
+                  id: "partial-shoulder-water",
+                  centerX: 0,
+                  centerZ: 0,
+                  radius: 10,
+                  surfaceY: 19.95,
+                },
+              ],
+            },
+          }),
+        ).toMatchObject({
+          status: "ready",
+          receipt: { retainedClumps: 0, rejected: { water: 1, road: 0 } },
+        });
+        expect(
+          groundGrassBlades({
+            ...request,
+            roadSegments: [shoulder],
+            workBudget: baseline.receipt.workUnits - 1,
+          }),
+        ).toMatchObject({ status: "defer", reason: "work_budget" });
+      } finally {
+        f.close();
+      }
+    },
+  );
+
+  it.each([
+    ["ordinary", 0],
+    ["ordinary", 1],
+    ["ordinary", 2],
+    ["fine", 0],
+    ["fine", 1],
+  ] as const)(
+    "keeps absent %s LOD%s road fields and explicit legacy defaults byte/work equivalent",
+    (appearance, lod) => {
+      const f = analyticOwner(appearance);
+      try {
+        const surface = f.makeSurface();
+        const road = {
+          startX: 0,
+          startZ: -10,
+          endX: 0,
+          endZ: 10,
+          width: 1,
+        };
+        const request = {
+          ...f.request(
+            surface,
+            f.dataAt(surface, [
+              [-4, 0, 0.3],
+              [0, 0, 1.2],
+              [4, 0, 2.1],
+            ]),
+            lod,
+          ),
+          wind: { x: 0.2, z: 0.1 },
+        };
+        const historical = groundGrassBlades({
+          ...request,
+          roadSegments: [road],
+        });
+        expect(historical.status).toBe("ready");
+        if (historical.status !== "ready") throw Error(historical.reason);
+        expect(Array.from(historical.sourceIndices)).toEqual([0, 2]);
+        const { elapsedMs: _historicalElapsed, ...historicalReceipt } =
+          historical.receipt;
+        for (const extension of [
+          { blendWidth: 0.5 },
+          { maxInfluence: 1 },
+          { blendWidth: 0.5, maxInfluence: 1 },
+        ]) {
+          const result = groundGrassBlades({
+            ...request,
+            roadSegments: [{ ...road, ...extension }],
+          });
+          const { elapsedMs: _elapsed, ...receipt } = result.receipt;
+          expect({ ...result, receipt }).toEqual({
+            ...historical,
+            receipt: historicalReceipt,
+          });
+        }
+        expect(Object.hasOwn(road, "blendWidth")).toBe(false);
+        expect(Object.hasOwn(road, "maxInfluence")).toBe(false);
+      } finally {
+        f.close();
+      }
+    },
+  );
+
+  it.each([
+    ["ordinary", 1],
+    ["fine", 0],
+    ["fine", 1],
+  ] as const)(
+    "uses the independently inverted >0.8 %s LOD%s shoulder boundary for the full swept envelope",
+    (appearance, lod) => {
+      const f = analyticOwner(appearance);
+      try {
+        const surface = f.makeSurface();
+        const request = {
+          ...f.request(surface, f.dataAt(surface, [[0, 0, 0.91]]), lod),
+          wind: { x: 0.35, z: 0.25 },
+        };
+        const baseline = groundGrassBlades(request);
+        expect(baseline.status).toBe("ready");
+        if (baseline.status !== "ready" || !baseline.sweptBounds)
+          throw Error("Expected actual swept grounding envelope");
+        for (const [blendWidth, maxInfluence] of [
+          [0.25, 0.81],
+          [4, 0.9],
+          [0, 1],
+          [2, 1],
+        ] as const) {
+          // Closed-form inverse is independent of the production bisection.
+          const inverse =
+            0.5 - Math.sin(Math.asin(1 - (2 * 0.8) / maxInfluence) / 3);
+          const radius = 0.1 + blendWidth * (1 - inverse);
+          for (const offset of [-1e-7, 1e-7]) {
+            const x = baseline.sweptBounds.maxX + radius + offset;
+            const result = groundGrassBlades({
+              ...request,
+              roadSegments: [
+                {
+                  startX: x,
+                  startZ: -10,
+                  endX: x,
+                  endZ: 10,
+                  width: 0.2,
+                  blendWidth,
+                  maxInfluence,
+                },
+              ],
+            });
+            expect(result.status).toBe("ready");
+            expect(result.receipt.rejected.road).toBe(Number(offset < 0));
+            expect(result.receipt.retainedClumps).toBe(Number(offset > 0));
+          }
+        }
+      } finally {
+        f.close();
+      }
+    },
+  );
+
+  it("rejects malformed optional road profiles even when their partial peak would skip exclusion", () => {
+    const f = analyticOwner();
+    try {
+      const surface = f.makeSurface();
+      const request = f.request(surface);
+      const original = structuredClone(request.data);
+      for (const [key, values] of [
+        ["blendWidth", [undefined, null, NaN, Infinity, -0.01, 1024.01, "2"]],
+        ["maxInfluence", [undefined, null, NaN, Infinity, -0.01, 1.01, "0.65"]],
+      ] as const) {
+        for (const value of values) {
+          const road: GrassGroundingRoadSegment = {
+            startX: 0,
+            startZ: -5,
+            endX: 0,
+            endZ: 5,
+            width: 2,
+            maxInfluence: 0.65,
+          };
+          Object.defineProperty(road, key, { value, enumerable: true });
+          expect(() =>
+            groundGrassBlades({ ...request, roadSegments: [road] }),
+          ).toThrow(/road influence profile/);
+          expect(request.data).toEqual(original);
+        }
+      }
+      const inherited: GrassGroundingRoadSegment = {
+        startX: 0,
+        startZ: -5,
+        endX: 0,
+        endZ: 5,
+        width: 2,
+      };
+      Object.setPrototypeOf(inherited, { maxInfluence: 0.65 });
+      expect(() =>
+        groundGrassBlades({ ...request, roadSegments: [inherited] }),
+      ).toThrow(/road influence profile/);
+      const accessor: GrassGroundingRoadSegment = {
+        startX: 0,
+        startZ: -5,
+        endX: 0,
+        endZ: 5,
+        width: 2,
+      };
+      let getterReads = 0;
+      Object.defineProperty(accessor, "blendWidth", {
+        get: () => {
+          getterReads++;
+          return 2;
+        },
+      });
+      expect(() =>
+        groundGrassBlades({ ...request, roadSegments: [accessor] }),
+      ).toThrow(/road influence profile/);
+      expect(getterReads).toBe(0);
+    } finally {
+      f.close();
+    }
+  });
 
   it("keeps reusable point/triangle scratch private across suspended LOD jobs", () => {
     const f = analyticOwner();

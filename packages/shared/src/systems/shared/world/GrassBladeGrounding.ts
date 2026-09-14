@@ -4,6 +4,7 @@ import {
   type GrassTerrainSurfaceSnapshot,
 } from "../../../utils/workers/GrassTerrainSurfaceSnapshot";
 import type { GrassAnchorData, GrassGrounding } from "./GrassTerrainProjection";
+import { roadInfluenceOperations } from "./RoadInfluence";
 import {
   getGrassBladeLayout,
   type FineGrassGeometryLayout,
@@ -37,6 +38,10 @@ export type GrassGroundingRoadSegment = {
   endX: number;
   endZ: number;
   width: number;
+  /** Missing retains the original 0.5m fade, including its exact inverse. */
+  blendWidth?: number;
+  /** Missing retains full road exclusion; partial shoulders may stay grassy. */
+  maxInfluence?: number;
 };
 
 export type GrassBladeGroundingRequest = {
@@ -398,6 +403,19 @@ export function* groundGrassBladeSteps(
       road.width > 1024
     )
       throw new Error("Invalid grass grounding road segment");
+    for (const key of ["blendWidth", "maxInfluence"] as const) {
+      if (!(key in road)) continue;
+      const property = Object.getOwnPropertyDescriptor(road, key);
+      if (
+        !property ||
+        !("value" in property) ||
+        typeof property.value !== "number" ||
+        !Number.isFinite(property.value) ||
+        property.value < 0 ||
+        property.value > (key === "blendWidth" ? 1024 : 1)
+      )
+        throw new Error("Invalid grass grounding road influence profile");
+    }
   }
   const { blades, verticesPerBlade, position, uv } = yield* validateGeometry(
     geometry,
@@ -618,6 +636,11 @@ export function* groundGrassBladeSteps(
     else high = m;
   }
   const roadFeather = 0.5 * (1 - (low + high) / 2);
+  // Only explicitly extended roads need cached profiles. Missing fields keep
+  // the original inverse and loop/work accounting above and below unchanged.
+  // Peak<=0.8 has no hard-exclusion capsule; all pad/water/terrain guards remain.
+  const explicitRoadFeathers = new Map<number, number | null>();
+  const profileFeathers = new Map<string, number | null>();
   const roadCells: number[][] = Array.from(
     { length: ROAD_GRID_AXIS * ROAD_GRID_AXIS },
     () => [],
@@ -653,7 +676,12 @@ export function* groundGrassBladeSteps(
           if (seen.has(index)) continue;
           seen.add(index);
           const road = request.roadSegments[index];
-          if (segmentBoxDistance(road, box) <= road.width / 2 + roadFeather)
+          const explicitFeather = explicitRoadFeathers.get(index);
+          if (
+            explicitFeather !== null &&
+            segmentBoxDistance(road, box) <=
+              road.width / 2 + (explicitFeather ?? roadFeather)
+          )
             return true;
         }
       }
@@ -734,7 +762,24 @@ export function* groundGrassBladeSteps(
   try {
     for (let index = 0; index < request.roadSegments.length; index++) {
       const road = request.roadSegments[index];
-      const margin = road.width / 2 + roadFeather + NUMERIC_GUARD;
+      let feather = roadFeather;
+      if (
+        Object.prototype.hasOwnProperty.call(road, "blendWidth") ||
+        Object.prototype.hasOwnProperty.call(road, "maxInfluence")
+      ) {
+        const blend = road.blendWidth ?? 0.5;
+        const peak = road.maxInfluence ?? 1;
+        const profile = `${blend}:${peak}`;
+        let cached = profileFeathers.get(profile);
+        if (cached === undefined) {
+          cached = roadInfluenceOperations.getExclusionFeather(blend, peak);
+          profileFeathers.set(profile, cached);
+        }
+        explicitRoadFeathers.set(index, cached);
+        if (cached === null) continue;
+        feather = cached;
+      }
+      const margin = road.width / 2 + feather + NUMERIC_GUARD;
       // Clamp both road and query bounds to the same edge cells. This retains
       // roads and swept blades outside the owner; it never discards border work.
       for (

@@ -131,6 +131,8 @@ export interface GrassWorkerInput {
     endX: number;
     endZ: number;
     width: number;
+    blendWidth?: number;
+    maxInfluence?: number;
   }>;
   roadBlendWidth: number;
   tileSize: number;
@@ -159,6 +161,31 @@ export interface GrassBatchResult {
   results: GrassWorkerOutput[];
   workersAvailable: boolean;
   failedCount: number;
+}
+
+/** One admission pass, shared verbatim with the emitted worker. Ordinary road
+ * records stay untouched; explicit overrides must be own numeric data fields. */
+function createGrassWorkerRoadProfileOperations() {
+  return {
+    validate(roads: GrassWorkerInput["roadSegments"]): void {
+      for (const road of roads) {
+        for (let field = 0; field < 2; field++) {
+          const key = field === 0 ? "blendWidth" : "maxInfluence";
+          if (!(key in road)) continue;
+          const property = Object.getOwnPropertyDescriptor(road, key);
+          if (
+            !property ||
+            !("value" in property) ||
+            typeof property.value !== "number" ||
+            !Number.isFinite(property.value) ||
+            property.value < 0 ||
+            property.value > (field === 0 ? 1024 : 1)
+          )
+            throw new Error("Invalid grass worker road influence profile");
+        }
+      }
+    },
+  };
 }
 
 // ============================================================================
@@ -330,6 +357,7 @@ function sampleNoiseCPU(worldX, worldZ, scale) {
 }
 ${buildComputeTerrainColorJS()}
 var roadInfluenceOperations = (${createRoadInfluenceOperations.toString()})();
+var roadProfileOperations = (${createGrassWorkerRoadProfileOperations.toString()})();
 var compactTerrainColorOperations = (${createCompactTerrainColorOperations.toString()})();
 var compactMeadowNoiseScale = compactTerrainColorOperations.getComposition().meadowNoiseScale;
 
@@ -347,7 +375,7 @@ function calculateRoadInfluence(wx, wz, roadSegments, roadBlendWidth) {
   var influence = 0;
   for (var i = 0; i < roadSegments.length; i++) {
     var seg = roadSegments[i];
-    influence = Math.max(influence, roadInfluenceOperations.sampleSegment(wx, wz, seg.startX, seg.startZ, seg.endX, seg.endZ, seg.width, roadBlendWidth));
+    influence = Math.max(influence, roadInfluenceOperations.sampleSegment(wx, wz, seg.startX, seg.startZ, seg.endX, seg.endZ, seg.width, seg.blendWidth ?? roadBlendWidth, seg.maxInfluence ?? 1));
     if (influence === 1) return 1;
   }
   return influence;
@@ -355,6 +383,7 @@ function calculateRoadInfluence(wx, wz, roadSegments, roadBlendWidth) {
 
 function generateGrassInstances(input) {
   assertTerrainWorkerInput(input);
+  roadProfileOperations.validate(input.roadSegments);
   var placementDomain = placementCellOperations.resolveDomain(input);
   var grassEligibility = compactTerrainColorOperations.grassEligibility(input.grassEligibility, input.config.TERRAIN_PROFILE.algorithm);
   var compactGrassColorGrade = compactTerrainColorOperations.grassColorGrade(input.compactGrassColorGrade);
@@ -623,12 +652,14 @@ let workersAvailable = false;
 const surfaceOperations = createGrassTerrainSurfaceOperations();
 const colorOperations = createCompactTerrainColorOperations();
 const placementCellOperations = createGrassPlacementCellOperations();
+const roadProfileOperations = createGrassWorkerRoadProfileOperations();
 
 /** Capture the wire-owned cell and authored surface before a pool may queue it. */
 export function prepareGrassWorkerRequest(
   input: GrassWorkerInput,
 ): GrassWorkerInput {
   assertTerrainWorkerRequest(input.config, input.seed);
+  roadProfileOperations.validate(input.roadSegments);
   const eligibility = colorOperations.grassEligibility(
     input.grassEligibility,
     input.config.TERRAIN_PROFILE.algorithm,

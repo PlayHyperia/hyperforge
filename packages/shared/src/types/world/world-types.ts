@@ -1140,6 +1140,10 @@ export interface ProceduralRoad {
   path: RoadPathPoint[];
   /** Road width in meters */
   width: number;
+  /** Optional edge fade in meters; omitted roads use the caller's ordinary fade. */
+  blendWidth?: number;
+  /** Optional peak mask influence in [0, 1]; omission retains a full-strength road. */
+  maxInfluence?: number;
   /** Road material for visual rendering */
   material: RoadMaterial;
   /** Total road length in meters */
@@ -1157,6 +1161,10 @@ export interface RoadTileSegment {
   end: { x: number; z: number };
   /** Road width */
   width: number;
+  /** Optional per-segment edge fade in meters, independent of the road width. */
+  blendWidth?: number;
+  /** Optional peak mask influence in [0, 1]; omission means 1. */
+  maxInfluence?: number;
   /** Parent road ID */
   roadId: string;
 }

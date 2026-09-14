@@ -117,19 +117,38 @@ function runEmittedWorker(input: QuadChunkWorkerInput): QuadChunkWorkerOutput {
   return response.result;
 }
 
-function actualRoadMask(f: Fixture) {
-  const bounds = f.roads["calculateRoadMaskBounds"](
-    f.roads.getRoadSegmentsForGPU(),
-  );
-  const result = f.roads.generateRoadInfluenceTexture(
-    256,
-    bounds.worldSize,
-    0.5,
-    bounds.centerX,
-    bounds.centerZ,
-  );
-  if (!result) throw new Error("Actual compact roads did not produce a mask");
-  return result;
+function actualRoadMask(
+  f: Fixture,
+  includeWear = true,
+  sampleBounds?: { worldSize: number; centerX: number; centerZ: number },
+) {
+  const roads = f.roads.getRoads();
+  const original = roads.slice();
+  // Reproduce the pre-wear receipt through the actual mask producer, removing
+  // only the three opt-in records. Restore synchronously before any owner query;
+  // no historical production implementation or cached tile state is substituted.
+  if (!includeWear)
+    roads.splice(
+      0,
+      roads.length,
+      ...original.filter((road) => !road.id.startsWith("compact-wear-")),
+    );
+  try {
+    const bounds =
+      sampleBounds ??
+      f.roads["calculateRoadMaskBounds"](f.roads.getRoadSegmentsForGPU());
+    const result = f.roads.generateRoadInfluenceTexture(
+      256,
+      bounds.worldSize,
+      0.5,
+      bounds.centerX,
+      bounds.centerZ,
+    );
+    if (!result) throw new Error("Actual compact roads did not produce a mask");
+    return result;
+  } finally {
+    if (!includeWear) roads.splice(0, roads.length, ...original);
+  }
 }
 
 function allocation(geometry: BufferGeometry) {
@@ -250,29 +269,94 @@ describe("actual Haven shoulder terrain, emitted worker and retained geometry", 
         getDuelArenaConfig(),
         f.terrain.getResourceGroundHeight.bind(f.terrain),
       );
-    expect(paths(next)).toEqual(paths(previous));
-    expect(paths(next)).toHaveLength(11);
-    for (const road of paths(next))
+    const currentPaths = paths(next);
+    expect(currentPaths).toEqual(paths(previous));
+    expect([baseline.id, candidate.id]).toEqual([
+      "compact-duel-island-v6",
+      "compact-duel-island-v6",
+    ]);
+    expect(currentPaths).toHaveLength(14);
+    for (const road of currentPaths.slice(0, 11)) {
+      expect(road.id.startsWith("compact-wear-")).toBe(false);
+      expect(Object.hasOwn(road, "blendWidth")).toBe(false);
+      expect(Object.hasOwn(road, "maxInfluence")).toBe(false);
+    }
+    expect(
+      currentPaths.slice(11).map(({ id, width, blendWidth, maxInfluence }) => ({
+        id,
+        width,
+        blendWidth,
+        maxInfluence,
+      })),
+    ).toEqual([
+      {
+        id: "compact-wear-workshop-south",
+        width: 0.65,
+        blendWidth: 1.5,
+        maxInfluence: 0.6,
+      },
+      {
+        id: "compact-wear-workshop-west",
+        width: 0.7,
+        blendWidth: 1.25,
+        maxInfluence: 0.55,
+      },
+      {
+        id: "compact-wear-supplier-north",
+        width: 0.45,
+        blendWidth: 1.4,
+        maxInfluence: 0.5,
+      },
+    ]);
+    for (const road of currentPaths)
       for (let i = 1; i < road.path.length; i++)
         expect(
           compactPathIntersectsBounds(
             road.path[i - 1],
             road.path[i],
             SUPPORT,
-            road.width / 2 + 0.5,
+            road.width / 2 + (road.blendWidth ?? 0.5),
           ),
         ).toBe(false);
     const beforeMask = actualRoadMask(previous),
       afterMask = actualRoadMask(next);
     expect(afterMask).toEqual(beforeMask);
-    expect([afterMask.worldSize, afterMask.centerX, afterMask.centerZ]).toEqual(
-      [85.5, 359.55, 351.5],
-    );
+    const beforeLegacyMask = actualRoadMask(previous, false),
+      afterLegacyMask = actualRoadMask(next, false);
+    expect(afterLegacyMask).toEqual(beforeLegacyMask);
+    expect(
+      Array.from(afterLegacyMask.data).filter((value) => value > 0),
+    ).toHaveLength(4684);
+    // Keep the historical first-eleven receipt on its own computed domain.
+    // Wider wear support can shift the full mask's bounds and texel phase.
+    expect([
+      afterLegacyMask.worldSize,
+      afterLegacyMask.centerX,
+      afterLegacyMask.centerZ,
+    ]).toEqual([85.5, 359.55, 351.5]);
+    // Compare max-union support only on the same world-coordinate sample grid,
+    // using the real producer for the first eleven roads in the full domain.
+    const beforeAlignedLegacyMask = actualRoadMask(previous, false, beforeMask),
+      afterAlignedLegacyMask = actualRoadMask(next, false, afterMask);
+    expect(afterAlignedLegacyMask).toEqual(beforeAlignedLegacyMask);
+    const alignedLegacySupportTexels = Array.from(
+      afterAlignedLegacyMask.data,
+    ).filter((value) => value > 0).length;
     const pixel = afterMask.worldSize / afterMask.width;
-    let supportTexels = 0;
+    let supportTexels = 0,
+      addedWearTexels = 0;
     for (let iz = 0; iz < afterMask.height; iz++)
       for (let ix = 0; ix < afterMask.width; ix++) {
-        if (afterMask.data[iz * afterMask.width + ix] === 0) continue;
+        const index = iz * afterMask.width + ix;
+        const value = afterMask.data[index];
+        expect(value).toBeGreaterThanOrEqual(
+          afterAlignedLegacyMask.data[index],
+        );
+        if (afterAlignedLegacyMask.data[index] === 0 && value > 0) {
+          expect(value).toBeLessThanOrEqual(Math.fround(0.6));
+          addedWearTexels++;
+        }
+        if (value === 0) continue;
         const x = ix * pixel - afterMask.worldSize / 2 + afterMask.centerX;
         const z = iz * pixel - afterMask.worldSize / 2 + afterMask.centerZ;
         expect(
@@ -286,9 +370,10 @@ describe("actual Haven shoulder terrain, emitted worker and retained geometry", 
             unchanged(x + dx * pixel, z + dz * pixel);
         supportTexels++;
       }
-    expect(supportTexels).toBe(4684);
+    expect(addedWearTexels).toBeGreaterThan(0);
+    expect(supportTexels).toBe(alignedLegacySupportTexels + addedWearTexels);
     process.stdout.write(
-      `Haven protected CPU terrain/roads: ${JSON.stringify({ knownTreeCoordinates: treePositions.length, checks, paths: 11, supportTexels, freshCensusOrBfs: false })}\n`,
+      `Haven protected CPU terrain/roads: ${JSON.stringify({ knownTreeCoordinates: treePositions.length, checks, paths: 14, legacySupportTexels: 4684, alignedLegacySupportTexels, addedWearTexels, supportTexels, maskBounds: { worldSize: afterMask.worldSize, centerX: afterMask.centerX, centerZ: afterMask.centerZ }, freshCensusOrBfs: false })}\n`,
     );
   });
 

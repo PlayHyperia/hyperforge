@@ -126,6 +126,44 @@ async function fixture() {
   return { world, manager, terrain, roads, resources, owner };
 }
 
+function expectCurrentPathWear(
+  paths: ReturnType<typeof createCompactIslandPaths>,
+) {
+  expect(paths).toHaveLength(14);
+  for (const path of paths.slice(0, 11)) {
+    expect(path.id.startsWith("compact-wear-")).toBe(false);
+    expect(Object.hasOwn(path, "blendWidth")).toBe(false);
+    expect(Object.hasOwn(path, "maxInfluence")).toBe(false);
+  }
+  expect(
+    paths.slice(11).map(({ id, width, blendWidth, maxInfluence }) => ({
+      id,
+      width,
+      blendWidth,
+      maxInfluence,
+    })),
+  ).toEqual([
+    {
+      id: "compact-wear-workshop-south",
+      width: 0.65,
+      blendWidth: 1.5,
+      maxInfluence: 0.6,
+    },
+    {
+      id: "compact-wear-workshop-west",
+      width: 0.7,
+      blendWidth: 1.25,
+      maxInfluence: 0.55,
+    },
+    {
+      id: "compact-wear-supplier-north",
+      width: 0.45,
+      blendWidth: 1.4,
+      maxInfluence: 0.5,
+    },
+  ]);
+}
+
 describe("actual compact service court placement and preparation navigation", () => {
   it("admits detached bounded planting only for its court and rejects malformed content", () => {
     const input = structuredClone(saved.config!.compactServicePlanting!);
@@ -248,7 +286,7 @@ describe("actual compact service court placement and preparation navigation", ()
       getDuelArenaConfig(),
       terrain.getResourceGroundHeight.bind(terrain),
     );
-    expect(paths).toHaveLength(11);
+    expectCurrentPathWear(paths);
     const maskBounds = (
       roads as unknown as {
         calculateRoadMaskBounds(
@@ -304,9 +342,9 @@ describe("actual compact service court placement and preparation navigation", ()
                 path.path[i - 1],
                 path.path[i],
                 crown,
-                path.width / 2 + COMPACT_PATH_BLEND_WIDTH,
+                path.width / 2 + (path.blendWidth ?? COMPACT_PATH_BLEND_WIDTH),
               ),
-              `${p.id} analytical ${path.id}: ${JSON.stringify({ crown, start: path.path[i - 1], end: path.path[i], clearance: path.width / 2 + COMPACT_PATH_BLEND_WIDTH })}`,
+              `${p.id} analytical ${path.id}: ${JSON.stringify({ crown, start: path.path[i - 1], end: path.path[i], clearance: path.width / 2 + (path.blendWidth ?? COMPACT_PATH_BLEND_WIDTH) })}`,
             )
             .toBe(false);
       expect
@@ -377,8 +415,8 @@ describe("actual compact service court placement and preparation navigation", ()
     }
   }, 60000);
 
-  it("preserves every currently free service/harvest approach from all three authoritative return marks", async () => {
-    const { world, resources, owner } = await fixture();
+  it("preserves every currently free service/harvest approach and traverses zero-road terrain from the authoritative return marks", async () => {
+    const { world, roads, resources, owner } = await fixture();
     const trees = resources.getAllResources().filter((r) => r.type === "tree");
     expect(trees).toHaveLength(48);
     const subjects = [
@@ -430,6 +468,10 @@ describe("actual compact service court placement and preparation navigation", ()
     const route = (start: TileCoord, target: TileCoord, label: string) => {
       let cursor = start;
       const seen = new Set<string>();
+      let previousOffRoad =
+        roads.getRoadInfluenceAt(start.x + 0.5, start.z + 0.5) === 0;
+      let offRoadRun = 0,
+        longestOffRoadRun = 0;
       for (
         let part = 0;
         part < 12 && (cursor.x !== target.x || cursor.z !== target.z);
@@ -439,6 +481,13 @@ describe("actual compact service court placement and preparation navigation", ()
         expect(segment.length, label).toBeGreaterThan(0);
         for (const tile of segment) {
           expect(walkable(tile, cursor), label).toBe(true);
+          if (tile.x !== cursor.x || tile.z !== cursor.z) {
+            const offRoad =
+              roads.getRoadInfluenceAt(tile.x + 0.5, tile.z + 0.5) === 0;
+            offRoadRun = previousOffRoad && offRoad ? offRoadRun + 1 : 0;
+            longestOffRoadRun = Math.max(longestOffRoadRun, offRoadRun);
+            previousOffRoad = offRoad;
+          }
           cursor = tile;
         }
         const key = `${cursor.x},${cursor.z}`;
@@ -446,17 +495,26 @@ describe("actual compact service court placement and preparation navigation", ()
         seen.add(key);
       }
       expect(cursor, label).toEqual(target);
+      return longestOffRoadRun;
     };
     // The baseline must actually complete; an unreachable preexisting approach
     // is not silently deleted to make the candidate pass.
+    let beforeOffRoadRun = 0;
     for (const start of starts)
       for (const row of approaches)
         for (const target of row.tiles)
-          route(
-            start,
-            target,
-            `before ${row.id} ${start.x},${start.z} -> ${target.x},${target.z}`,
+          beforeOffRoadRun = Math.max(
+            beforeOffRoadRun,
+            route(
+              start,
+              target,
+              `before ${row.id} ${start.x},${start.z} -> ${target.x},${target.z}`,
+            ),
           );
+    // Consecutive actual BFS edges whose BOTH endpoint centers have exactly zero
+    // road influence. Existing collision/directional checks still qualify every
+    // step; this is off-road navigation evidence, not an island-wide census.
+    expect(beforeOffRoadRun).toBeGreaterThanOrEqual(8);
     await owner.start();
     const landscape = world.register(
       COMPACT_LANDSCAPE_ROCKS_SYSTEM,
@@ -465,16 +523,21 @@ describe("actual compact service court placement and preparation navigation", ()
     await landscape.init();
     await landscape.start();
     expect(landscape.getRocks()?.placements).toHaveLength(17);
+    let afterOffRoadRun = 0;
     for (const start of starts)
       for (const row of approaches)
         for (const target of row.tiles) {
           expect(walkable(target), row.id).toBe(true);
-          route(
-            start,
-            target,
-            `after ${row.id} ${start.x},${start.z} -> ${target.x},${target.z}`,
+          afterOffRoadRun = Math.max(
+            afterOffRoadRun,
+            route(
+              start,
+              target,
+              `after ${row.id} ${start.x},${start.z} -> ${target.x},${target.z}`,
+            ),
           );
         }
+    expect(afterOffRoadRun).toBeGreaterThanOrEqual(8);
   }, 60000);
 
   it("clears actual tree/station envelopes and all analytical plus bilinear-mask path support", async () => {
@@ -535,7 +598,7 @@ describe("actual compact service court placement and preparation navigation", ()
         getDuelArenaConfig(),
         terrain.getResourceGroundHeight.bind(terrain),
       );
-      expect(paths).toHaveLength(11);
+      expectCurrentPathWear(paths);
       const posts = OPEN_WORKSHOP_POSTS.map((p) => ({
         minX: record.position.x + p.x - 0.15,
         maxX: record.position.x + p.x + 0.15,
@@ -585,7 +648,8 @@ describe("actual compact service court placement and preparation navigation", ()
                   path.path[i],
                   end,
                   post,
-                  path.width / 2 + COMPACT_PATH_BLEND_WIDTH,
+                  path.width / 2 +
+                    (path.blendWidth ?? COMPACT_PATH_BLEND_WIDTH),
                 ),
             ),
         ) &&

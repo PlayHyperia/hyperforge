@@ -10,12 +10,15 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import {
   TerrainComputeContext,
   isTerrainComputeAvailable,
+  packRoadSegments,
+  packRoadInfluenceUniforms,
   type GPURoadSegment,
   type GPUBiomeData,
   type GPUInstanceTRS,
 } from "../TerrainComputeContext";
 import {
   ROAD_INFLUENCE_SHADER,
+  ROAD_INFLUENCE_TEXTURE_SHADER,
   TERRAIN_VERTEX_COLOR_SHADER,
   INSTANCE_MATRIX_SHADER,
   BATCH_DISTANCE_SHADER,
@@ -23,6 +26,141 @@ import {
 } from "../shaders/terrain.wgsl";
 
 describe("TerrainComputeContext", () => {
+  describe("actual road upload packets (no GPU execution)", () => {
+    it("resolves ordinary defaults and independent shoulder fade/peak in the same eight-float record", () => {
+      const ordinary: GPURoadSegment = {
+        startX: -0,
+        startZ: -100,
+        endX: 25,
+        endZ: 0,
+        width: 6,
+      };
+      const shoulder: GPURoadSegment = {
+        startX: -200,
+        startZ: 10,
+        endX: -175,
+        endZ: 20,
+        width: 1.5,
+        blendWidth: 2.25,
+        maxInfluence: 0.625,
+      };
+      const before = structuredClone([ordinary, shoulder]);
+      const packed = packRoadSegments([ordinary, shoulder]);
+      expect(packed).toBeInstanceOf(Float32Array);
+      expect(packed.byteLength).toBe(2 * 32);
+      expect(Array.from(packed)).toEqual([
+        -0, -100, 25, 0, 6, 0.5, 1, 0, -200, 10, -175, 20, 1.5, 2.25, 0.625, 0,
+      ]);
+      expect(Object.is(packed[0], -0)).toBe(true);
+      expect([ordinary, shoulder]).toEqual(before);
+      expect(Object.hasOwn(ordinary, "blendWidth")).toBe(false);
+      expect(Object.hasOwn(ordinary, "maxInfluence")).toBe(false);
+      const otherDefault = packRoadSegments([ordinary, shoulder], 1.75);
+      expect(otherDefault[5]).toBe(1.75);
+      expect(otherDefault.slice(8)).toEqual(packed.slice(8));
+      expect(
+        packRoadSegments([
+          { ...shoulder, blendWidth: 0, maxInfluence: 0 },
+        ]).slice(5, 7),
+      ).toEqual(new Float32Array([0, 0]));
+      expect(packRoadSegments([]).byteLength).toBe(0);
+    });
+
+    it("rejects nonfinite, negative and out-of-range road fields before upload", () => {
+      const road: GPURoadSegment = {
+        startX: 0,
+        startZ: 0,
+        endX: 1,
+        endZ: 1,
+        width: 1,
+      };
+      for (const overrides of [
+        { startX: NaN },
+        { endZ: Infinity },
+        { startZ: Number.MAX_VALUE },
+        { width: -1 },
+        { width: Infinity },
+        { blendWidth: -0.1 },
+        { blendWidth: NaN },
+        { maxInfluence: -0.01 },
+        { maxInfluence: 1.01 },
+        { maxInfluence: Infinity },
+      ])
+        expect(() => packRoadSegments([{ ...road, ...overrides }])).toThrow();
+      for (const blend of [-1, NaN, Infinity])
+        expect(() => packRoadSegments([road], blend)).toThrow();
+    });
+
+    it("encodes real u32 vertex/road counts and f32 offsets in exactly sixteen uniform bytes", () => {
+      const packet = packRoadInfluenceUniforms(17, 3, { x: 125.5, z: -225.25 });
+      expect(packet.byteLength).toBe(16);
+      expect(packet).toBeInstanceOf(Uint32Array);
+      const view = new DataView(
+        packet.buffer,
+        packet.byteOffset,
+        packet.byteLength,
+      );
+      expect(view.getUint32(0, true)).toBe(17);
+      expect(view.getUint32(4, true)).toBe(3);
+      expect(view.getFloat32(8, true)).toBe(125.5);
+      expect(view.getFloat32(12, true)).toBe(-225.25);
+      // The old float upload reinterpreted 17.0 and 3.0 as enormous u32 counts.
+      const oldFloatPacket = new Uint32Array(
+        new Float32Array([17, 3, 125.5, -225.25]).buffer,
+      );
+      expect(oldFloatPacket[0]).not.toBe(packet[0]);
+      expect(oldFloatPacket[1]).not.toBe(packet[1]);
+      expect(oldFloatPacket.slice(2)).toEqual(packet.slice(2));
+      for (const count of [-1, 1.5, NaN, Infinity, 0x100000000]) {
+        expect(() =>
+          packRoadInfluenceUniforms(count, 1, { x: 0, z: 0 }),
+        ).toThrow();
+        expect(() =>
+          packRoadInfluenceUniforms(1, count, { x: 0, z: 0 }),
+        ).toThrow();
+      }
+      expect(() =>
+        packRoadInfluenceUniforms(1, 1, { x: Number.MAX_VALUE, z: 0 }),
+      ).toThrow();
+    });
+
+    it("declares matching 32-byte road layouts and per-record weighted max unions in both real WGSL sources", () => {
+      for (const shader of [
+        ROAD_INFLUENCE_SHADER,
+        ROAD_INFLUENCE_TEXTURE_SHADER,
+      ]) {
+        const fields = shader.match(/struct Road \{([\s\S]*?)\}/)?.[1];
+        expect(fields).toBeDefined();
+        expect(
+          [...fields!.matchAll(/(\w+):\s*f32/g)].map((match) => match[1]),
+        ).toEqual([
+          "startX",
+          "startZ",
+          "endX",
+          "endZ",
+          "width",
+          "blendWidth",
+          "maxInfluence",
+          "padding3",
+        ]);
+        expect(shader).toContain(
+          "let totalInfluenceWidth = halfWidth + road.blendWidth;",
+        );
+        expect(shader).toContain("if (dist >= totalInfluenceWidth)");
+        expect(shader).toContain("influence = road.maxInfluence;");
+        expect(shader).toContain(
+          "influence = t * t * (3.0 - 2.0 * t) * road.maxInfluence;",
+        );
+        expect(shader).toContain(
+          "maxInfluence = max(maxInfluence, influence);",
+        );
+        expect(shader).not.toContain("/ uniforms.blendWidth");
+      }
+      expect(ROAD_INFLUENCE_SHADER).toMatch(
+        /struct Uniforms \{\s*vertexCount: u32,\s*roadCount: u32,\s*tileOffsetX: f32,\s*tileOffsetZ: f32,/,
+      );
+    });
+  });
   describe("shader exports", () => {
     it("should export road influence shader", () => {
       expect(ROAD_INFLUENCE_SHADER).toBeDefined();

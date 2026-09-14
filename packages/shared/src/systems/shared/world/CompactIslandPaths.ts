@@ -22,6 +22,9 @@ export type CompactIslandPath = Readonly<{
   fromId: string;
   toId: string;
   width: number;
+  /** Explicit worn shoulders share one bounded field with terrain and grass. */
+  blendWidth?: number;
+  maxInfluence?: number;
   path: readonly Readonly<RoadPathPoint>[];
   length: number;
 }>;
@@ -191,8 +194,11 @@ export function createCompactIslandPaths(
     fromId: string;
     toId: string;
     width: number;
+    blendWidth?: number;
+    maxInfluence?: number;
     points: Point[];
     clearing?: boolean;
+    wear?: boolean;
   }> = [
     {
       id: "pond-bank",
@@ -344,6 +350,57 @@ export function createCompactIslandPaths(
       points: [workshop, { x: supplier.x - 0.5, z: supplier.z + 0.5 }],
     },
   ];
+  if (bankCourt) {
+    // Wear spreads unevenly around activity, rather than expanding the entire
+    // full-clear capsule. These connected skirts cannot cross the 0.8 grass
+    // exclusion gate, even where they overlap. Existing service cores stay put.
+    definitions.push(
+      {
+        id: "workshop-south",
+        wear: true,
+        fromId: "workshop-forecourt",
+        toId: "workshop-forecourt",
+        width: 0.65,
+        blendWidth: 1.5,
+        maxInfluence: 0.6,
+        points: [
+          { x: furnace.x - 0.8, z: furnace.z + 0.15 },
+          { x: furnace.x + 1.2, z: furnace.z + 1.05 },
+          { x: anvil.x + 0.6, z: anvil.z + 0.4 },
+          { x: anvil.x + 0.7, z: anvil.z - 0.65 },
+        ],
+      },
+      {
+        id: "workshop-west",
+        wear: true,
+        fromId: "workshop-forecourt",
+        toId: "workshop-forecourt",
+        width: 0.7,
+        blendWidth: 1.25,
+        maxInfluence: 0.55,
+        points: [
+          { x: furnace.x - 0.2, z: furnace.z - 0.75 },
+          { x: furnace.x - 1.5, z: furnace.z - 1.7 },
+          { x: furnace.x - 1.75, z: furnace.z - 2.9 },
+          { x: workshop.x - 0.35, z: workshop.z - 0.35 },
+        ],
+      },
+      {
+        id: "supplier-north",
+        wear: true,
+        fromId: "workshop-forecourt",
+        toId: "crafting_supplier",
+        width: 0.45,
+        blendWidth: 1.4,
+        maxInfluence: 0.5,
+        points: [
+          { x: workshop.x + 0.5, z: workshop.z - 0.5 },
+          { x: supplier.x + 0.4, z: supplier.z + 0.1 },
+          { x: supplier.x + 0.7, z: supplier.z - 1 },
+        ],
+      },
+    );
+  }
   return Object.freeze(
     definitions.map((definition) => {
       let points = definition.points;
@@ -378,7 +435,20 @@ export function createCompactIslandPaths(
           });
       }
       let length = 0;
-      const padding = definition.width / 2 + COMPACT_PATH_BLEND_WIDTH;
+      const blendWidth = definition.blendWidth ?? COMPACT_PATH_BLEND_WIDTH;
+      const maxInfluence = definition.maxInfluence ?? 1;
+      if (
+        !Number.isFinite(blendWidth) ||
+        blendWidth < 0 ||
+        blendWidth > 1024 ||
+        !Number.isFinite(maxInfluence) ||
+        maxInfluence < 0 ||
+        maxInfluence > 1
+      )
+        throw new Error(
+          "Invalid compact path surface profile: " + definition.id,
+        );
+      const padding = definition.width / 2 + blendWidth;
       for (let i = 1; i < sampled.length; i++) {
         const a = sampled[i - 1],
           b = sampled[i];
@@ -422,11 +492,20 @@ export function createCompactIslandPaths(
       });
       return Object.freeze({
         id:
-          (definition.clearing ? "compact-clearing-" : "compact-path-") +
-          definition.id,
+          (definition.wear
+            ? "compact-wear-"
+            : definition.clearing
+              ? "compact-clearing-"
+              : "compact-path-") + definition.id,
         fromId: definition.fromId,
         toId: definition.toId,
         width: definition.width,
+        ...(definition.blendWidth === undefined
+          ? {}
+          : { blendWidth: definition.blendWidth }),
+        ...(definition.maxInfluence === undefined
+          ? {}
+          : { maxInfluence: definition.maxInfluence }),
         path: Object.freeze(path),
         length,
       });

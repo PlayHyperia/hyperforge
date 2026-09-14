@@ -285,6 +285,13 @@ describe("compact v4 asymmetric coastline and continuous ridge", () => {
       terrain.getResourceGroundHeight.bind(terrain),
     );
     expect(paths).toHaveLength(11);
+    expect(candidate.id).toBe("compact-duel-island-v4");
+    // This historical shape/census is not the active v6 wear authoring.
+    for (const path of paths) {
+      expect(path.id.startsWith("compact-wear-")).toBe(false);
+      expect(Object.hasOwn(path, "blendWidth")).toBe(false);
+      expect(Object.hasOwn(path, "maxInfluence")).toBe(false);
+    }
     expect(
       paths.filter((path) => path.id.startsWith("compact-path-")),
     ).toHaveLength(6);

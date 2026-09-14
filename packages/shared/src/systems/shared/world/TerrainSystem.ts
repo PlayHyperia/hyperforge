@@ -2635,13 +2635,7 @@ export class TerrainSystem extends System {
     minZ: number,
     maxX: number,
     maxZ: number,
-  ): Array<{
-    startX: number;
-    startZ: number;
-    endX: number;
-    endZ: number;
-    width: number;
-  }> {
+  ): GrassGroundingRoadSegment[] {
     const steps = this.worldSpaceRoadSegmentSteps(minX, minZ, maxX, maxZ);
     let step = steps.next();
     while (!step.done) step = steps.next();
@@ -2666,13 +2660,7 @@ export class TerrainSystem extends System {
     const maxTX = Math.floor(maxX / ts);
     const maxTZ = Math.floor(maxZ / ts);
 
-    const result: Array<{
-      startX: number;
-      startZ: number;
-      endX: number;
-      endZ: number;
-      width: number;
-    }> = [];
+    const result: GrassGroundingRoadSegment[] = [];
 
     for (let tx = minTX; tx <= maxTX; tx++) {
       for (let tz = minTZ; tz <= maxTZ; tz++) {
@@ -2689,6 +2677,12 @@ export class TerrainSystem extends System {
             endX: originX + seg.end.x,
             endZ: originZ + seg.end.z,
             width: seg.width,
+            ...(seg.blendWidth !== undefined
+              ? { blendWidth: seg.blendWidth }
+              : {}),
+            ...(seg.maxInfluence !== undefined
+              ? { maxInfluence: seg.maxInfluence }
+              : {}),
           });
         }
       }
@@ -3755,7 +3749,8 @@ export class TerrainSystem extends System {
           segment.end.x,
           segment.end.z,
           segment.width,
-          ROAD_BLEND_WIDTH,
+          segment.blendWidth ?? ROAD_BLEND_WIDTH,
+          segment.maxInfluence ?? 1,
         ),
       );
       if (influence === 1) return 1;
@@ -3880,6 +3875,12 @@ export class TerrainSystem extends System {
           endX: seg.end.x,
           endZ: seg.end.z,
           width: seg.width,
+          ...(seg.blendWidth !== undefined
+            ? { blendWidth: seg.blendWidth }
+            : {}),
+          ...(seg.maxInfluence !== undefined
+            ? { maxInfluence: seg.maxInfluence }
+            : {}),
         }));
 
         const tileOffset = {
@@ -3920,6 +3921,8 @@ export class TerrainSystem extends System {
       start: { x: number; z: number };
       end: { x: number; z: number };
       width: number;
+      blendWidth?: number;
+      maxInfluence?: number;
     }>,
   ): Float32Array {
     const vertexCount = vertices.length / 2;
@@ -3941,7 +3944,8 @@ export class TerrainSystem extends System {
             segment.end.x,
             segment.end.z,
             segment.width,
-            ROAD_BLEND_WIDTH,
+            segment.blendWidth ?? ROAD_BLEND_WIDTH,
+            segment.maxInfluence ?? 1,
           ),
         );
         if (influence === 1) break;

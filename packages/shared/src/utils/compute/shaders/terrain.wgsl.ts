@@ -16,7 +16,7 @@
  *
  * Input:
  * - vertices: [localX, localZ, ...] per vertex (2D positions)
- * - roads: Road struct array with start, end, width
+ * - roads: Road struct array with start, end, width, resolved fade and peak
  * - uniforms: vertex count, road count, tile offset
  *
  * Output:
@@ -24,8 +24,6 @@
  */
 export const ROAD_INFLUENCE_SHADER = /* wgsl */ `
 const EPS: f32 = 0.001;
-// Road blend width for smooth transition at edges (matches CPU ROAD_BLEND_WIDTH)
-const ROAD_BLEND_WIDTH: f32 = 0.5;
 
 struct Road {
   startX: f32,
@@ -33,8 +31,8 @@ struct Road {
   endX: f32,
   endZ: f32,
   width: f32,
-  padding1: f32,
-  padding2: f32,
+  blendWidth: f32,
+  maxInfluence: f32,
   padding3: f32,
 }
 
@@ -111,7 +109,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     );
     
     let halfWidth = road.width * 0.5;
-    let totalInfluenceWidth = halfWidth + ROAD_BLEND_WIDTH;
+    let totalInfluenceWidth = halfWidth + road.blendWidth;
     
     // Skip if beyond influence range
     if (dist >= totalInfluenceWidth) {
@@ -121,12 +119,12 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     // Calculate influence with smoothstep blending (matches CPU behavior)
     var influence: f32;
     if (dist <= halfWidth) {
-      // Full influence at road center
-      influence = 1.0;
+      // Fractional shoulders retain their authored peak, not a new clear core.
+      influence = road.maxInfluence;
     } else {
       // Smoothstep blending at edges
-      let t = 1.0 - (dist - halfWidth) / ROAD_BLEND_WIDTH;
-      influence = t * t * (3.0 - 2.0 * t); // smoothstep
+      let t = 1.0 - (dist - halfWidth) / road.blendWidth;
+      influence = t * t * (3.0 - 2.0 * t) * road.maxInfluence;
     }
     
     maxInfluence = max(maxInfluence, influence);
@@ -159,8 +157,8 @@ struct Road {
   endX: f32,
   endZ: f32,
   width: f32,
-  padding1: f32,
-  padding2: f32,
+  blendWidth: f32,
+  maxInfluence: f32,
   padding3: f32,
 }
 
@@ -225,7 +223,6 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
   let worldZ = (f32(y) / f32(texSize)) * uniforms.worldSize - halfWorld + uniforms.centerZ;
   
   var maxInfluence = 0.0;
-  let blendWidth = uniforms.blendWidth;
   
   for (var ri = 0u; ri < roadCount; ri = ri + 1u) {
     let road = roads[ri];
@@ -237,7 +234,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     );
     
     let halfWidth = road.width * 0.5;
-    let totalInfluenceWidth = halfWidth + blendWidth;
+    let totalInfluenceWidth = halfWidth + road.blendWidth;
     
     if (dist >= totalInfluenceWidth) {
       continue;
@@ -245,10 +242,10 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     
     var influence: f32;
     if (dist <= halfWidth) {
-      influence = 1.0;
+      influence = road.maxInfluence;
     } else {
-      let t = 1.0 - (dist - halfWidth) / blendWidth;
-      influence = t * t * (3.0 - 2.0 * t);
+      let t = 1.0 - (dist - halfWidth) / road.blendWidth;
+      influence = t * t * (3.0 - 2.0 * t) * road.maxInfluence;
     }
     
     maxInfluence = max(maxInfluence, influence);

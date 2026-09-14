@@ -215,6 +215,16 @@ describe("actual v5 terrace terrain, functional owners and native worker", () =>
       );
     expect(paths(next)).toHaveLength(11);
     expect(paths(next)).toEqual(paths(old));
+    expect([
+      old.terrain.getWorldTerrainProfile().id,
+      next.terrain.getWorldTerrainProfile().id,
+    ]).toEqual(["compact-duel-island-v4", "compact-duel-island-v5"]);
+    // Retain both historical terrace paths exactly; wear belongs only to v6.
+    for (const path of [...paths(old), ...paths(next)]) {
+      expect(path.id.startsWith("compact-wear-")).toBe(false);
+      expect(Object.hasOwn(path, "blendWidth")).toBe(false);
+      expect(Object.hasOwn(path, "maxInfluence")).toBe(false);
+    }
     let checked = 0;
     const unchanged = (x: number, z: number) => {
       expect(next.terrain.getResourceGroundHeight(x, z)).toBe(

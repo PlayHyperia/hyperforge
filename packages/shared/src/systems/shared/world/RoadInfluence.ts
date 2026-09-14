@@ -5,7 +5,7 @@
  */
 export function createRoadInfluenceOperations() {
   return {
-    /** Matches the existing GPU texture kernel; callers union segments with max. */
+    /** Matches the GPU mask kernel; partial wear unions with max, never adds. */
     sampleSegment(
       x: number,
       z: number,
@@ -15,6 +15,7 @@ export function createRoadInfluenceOperations() {
       bz: number,
       width: number,
       blend: number,
+      maxInfluence = 1,
     ): number {
       const radius = width / 2 + blend;
       if (
@@ -36,9 +37,30 @@ export function createRoadInfluenceOperations() {
             );
       const distance = Math.hypot(x - ax - t * dx, z - az - t * dz);
       if (distance >= radius) return 0;
-      if (distance <= width / 2) return 1;
+      if (distance <= width / 2) return maxInfluence;
       const edge = 1 - (distance - width / 2) / blend;
-      return edge * edge * (3 - 2 * edge);
+      return edge * edge * (3 - 2 * edge) * maxInfluence;
+    },
+    /**
+     * The swept-blade clearance follows the same cubic's exclusion threshold.
+     * Partial wear at/below that threshold never becomes a grass-free road.
+     * Call once per validated profile, not per blade or terrain sample.
+     */
+    getExclusionFeather(
+      blendWidth: number,
+      maxInfluence: number,
+      threshold = 0.8,
+    ): number | null {
+      if (maxInfluence <= threshold) return null;
+      let low = 0,
+        high = 1;
+      const level = threshold / maxInfluence;
+      for (let i = 0; i < 48; i++) {
+        const midpoint = (low + high) / 2;
+        if (midpoint * midpoint * (3 - 2 * midpoint) < level) low = midpoint;
+        else high = midpoint;
+      }
+      return blendWidth * (1 - (low + high) / 2);
     },
   };
 }

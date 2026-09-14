@@ -152,6 +152,15 @@ const dist2D = (x1: number, z1: number, x2: number, z2: number): number =>
 
 export const roadSegmentInfluence = roadInfluenceOperations.sampleSegment;
 
+// Preserve absence for ordinary records; only authored shoulders carry overrides.
+const roadSurfaceFields = ({
+  blendWidth,
+  maxInfluence,
+}: Pick<ProceduralRoad, "blendWidth" | "maxInfluence">) => ({
+  ...(blendWidth === undefined ? {} : { blendWidth }),
+  ...(maxInfluence === undefined ? {} : { maxInfluence }),
+});
+
 /** Simple BFS path node */
 interface BFSNode {
   x: number;
@@ -194,6 +203,7 @@ export class RoadNetworkSystem extends System {
   };
   private tileRoadCache = new Map<string, RoadTileSegment[]>();
   private cachedMaxRoadHalfWidth = 0;
+  private cachedMaxExplicitRoadInfluenceRadius = 0;
   /** Cache for entry stub segments from adjacent tiles */
   private entryStubCache = new Map<string, RoadTileSegment[]>();
   /** Cache for merged [tile segments + entry stubs] to avoid per-vertex array allocations */
@@ -279,6 +289,7 @@ export class RoadNetworkSystem extends System {
         fromPOIId: path.fromId,
         toPOIId: path.toId,
         width: path.width,
+        ...roadSurfaceFields(path),
         material: "dirt",
         path: path.path.map((point) => ({ ...point })),
         length: path.length,
@@ -486,8 +497,9 @@ export class RoadNetworkSystem extends System {
    * Calculate road mask texture size to ensure roads are at least a few pixels wide.
    */
   private calculateRoadMaskTextureSize(worldSize: number): number {
-    const roadInfluenceWidth =
-      this.getNarrowestRoadWidth() / 2 + ROAD_MASK_BLEND_WIDTH;
+    const roadInfluenceWidth = this.getNarrowestRoadInfluenceRadius(
+      ROAD_MASK_BLEND_WIDTH,
+    );
     const metersPerPixelTarget =
       roadInfluenceWidth / ROAD_MASK_MIN_PIXELS_PER_INFLUENCE;
     const minResolution = Math.ceil(worldSize / metersPerPixelTarget);
@@ -513,7 +525,8 @@ export class RoadNetworkSystem extends System {
     let maxZ = -Infinity;
 
     for (const road of roadSegments) {
-      const halfWidth = road.width * 0.5 + ROAD_MASK_BLEND_WIDTH;
+      const halfWidth =
+        road.width * 0.5 + (road.blendWidth ?? ROAD_MASK_BLEND_WIDTH);
       const padding = halfWidth + 1.0;
       const segMinX = Math.min(road.startX, road.endX) - padding;
       const segMaxX = Math.max(road.startX, road.endX) + padding;
@@ -2119,13 +2132,32 @@ export class RoadNetworkSystem extends System {
     this.mergedTileSegmentCache.clear();
   }
 
+  private includeRoadInfluenceBounds(width: number, blendWidth?: number): void {
+    if (blendWidth === undefined)
+      this.cachedMaxRoadHalfWidth = Math.max(
+        this.cachedMaxRoadHalfWidth,
+        width / 2,
+      );
+    else
+      this.cachedMaxExplicitRoadInfluenceRadius = Math.max(
+        this.cachedMaxExplicitRoadInfluenceRadius,
+        width / 2 + blendWidth,
+      );
+  }
+
+  private resetRoadInfluenceBounds(): void {
+    this.cachedMaxRoadHalfWidth = 0;
+    this.cachedMaxExplicitRoadInfluenceRadius = 0;
+    for (const road of this.roads)
+      this.includeRoadInfluenceBounds(
+        road.width || this.config.roadWidth,
+        road.blendWidth,
+      );
+  }
+
   private buildTileCache(): void {
     this.tileRoadCache.clear();
-    this.cachedMaxRoadHalfWidth = this.roads.reduce(
-      (maximum, road) =>
-        Math.max(maximum, (road.width || this.config.roadWidth) / 2),
-      0,
-    );
+    this.resetRoadInfluenceBounds();
     this.invalidateTileSegmentCaches();
 
     for (const road of this.roads) {
@@ -2161,6 +2193,7 @@ export class RoadNetworkSystem extends System {
                 start: { x: clipped.x1 - tileMinX, z: clipped.z1 - tileMinZ },
                 end: { x: clipped.x2 - tileMinX, z: clipped.z2 - tileMinZ },
                 width: road.width,
+                ...roadSurfaceFields(road),
                 roadId: road.id,
               };
               if (!this.tileRoadCache.has(tileKey))
@@ -2183,11 +2216,7 @@ export class RoadNetworkSystem extends System {
    */
   private async buildTileCacheAsync(): Promise<void> {
     this.tileRoadCache.clear();
-    this.cachedMaxRoadHalfWidth = this.roads.reduce(
-      (maximum, road) =>
-        Math.max(maximum, (road.width || this.config.roadWidth) / 2),
-      0,
-    );
+    this.resetRoadInfluenceBounds();
     this.invalidateTileSegmentCaches();
     this.boundaryExits = []; // Clear existing boundary exits before rebuild
     const ROAD_BATCH_SIZE = 5; // Process 5 roads per batch
@@ -2237,6 +2266,7 @@ export class RoadNetworkSystem extends System {
                   start: { x: clipped.x1 - tileMinX, z: clipped.z1 - tileMinZ },
                   end: { x: clipped.x2 - tileMinX, z: clipped.z2 - tileMinZ },
                   width: road.width,
+                  ...roadSurfaceFields(road),
                   roadId: road.id,
                 };
                 if (!this.tileRoadCache.has(tileKey)) {
@@ -2580,9 +2610,12 @@ export class RoadNetworkSystem extends System {
     z2: number,
     width: number,
     roadId: string,
+    blendWidth?: number,
+    maxInfluence?: number,
   ): void {
     // Any new segment changes tile contents and potentially boundary entries.
     this.invalidateTileSegmentCaches();
+    this.includeRoadInfluenceBounds(width, blendWidth);
 
     const minTileX = Math.floor(Math.min(x1, x2) / TILE_SIZE);
     const maxTileX = Math.floor(Math.max(x1, x2) / TILE_SIZE);
@@ -2614,6 +2647,7 @@ export class RoadNetworkSystem extends System {
             end: { x: clipped.x2 - tileMinX, z: clipped.z2 - tileMinZ },
             width,
             roadId,
+            ...roadSurfaceFields({ blendWidth, maxInfluence }),
           };
 
           if (!this.tileRoadCache.has(tileKey)) {
@@ -2736,7 +2770,8 @@ export class RoadNetworkSystem extends System {
         z: segment.start.z + offsetZ,
       };
       const end = { x: segment.end.x + offsetX, z: segment.end.z + offsetZ };
-      const padding = segment.width / 2 + ROAD_MASK_BLEND_WIDTH;
+      const padding =
+        segment.width / 2 + (segment.blendWidth ?? ROAD_MASK_BLEND_WIDTH);
       if (
         Math.max(start.x, end.x) + padding < 0 ||
         Math.min(start.x, end.x) - padding > TILE_SIZE ||
@@ -2744,12 +2779,21 @@ export class RoadNetworkSystem extends System {
         Math.min(start.z, end.z) - padding > TILE_SIZE
       )
         return;
-      merged.push({ start, end, width: segment.width, roadId: segment.roadId });
+      merged.push({
+        start,
+        end,
+        width: segment.width,
+        roadId: segment.roadId,
+        ...roadSurfaceFields(segment),
+      });
     };
     const radius = Math.max(
       1,
       Math.ceil(
-        (this.cachedMaxRoadHalfWidth + ROAD_MASK_BLEND_WIDTH) / TILE_SIZE,
+        Math.max(
+          this.cachedMaxRoadHalfWidth + ROAD_MASK_BLEND_WIDTH,
+          this.cachedMaxExplicitRoadInfluenceRadius,
+        ) / TILE_SIZE,
       ),
     );
     if (radius <= 8) {
@@ -2772,6 +2816,7 @@ export class RoadNetworkSystem extends System {
               end: { x: b.x, z: b.z },
               width: road.width,
               roadId: road.id,
+              ...roadSurfaceFields(road),
             },
             -tileX * TILE_SIZE,
             -tileZ * TILE_SIZE,
@@ -2839,10 +2884,12 @@ export class RoadNetworkSystem extends System {
       const dx = endX - localX,
         dz = endZ - localZ;
       if (dx * dx + dz * dz > 1) {
+        const road = this.getRoadById(entry.roadId);
         segments.push({
           start: { x: localX, z: localZ },
           end: { x: endX, z: endZ },
-          width: this.getRoadById(entry.roadId)?.width || this.config.roadWidth,
+          width: road?.width || this.config.roadWidth,
+          ...(road ? roadSurfaceFields(road) : {}),
           roadId: entry.roadId,
         });
       }
@@ -2977,7 +3024,12 @@ export class RoadNetworkSystem extends System {
     let influence = 0;
     const radius = Math.max(
       1,
-      Math.ceil((this.cachedMaxRoadHalfWidth + extraBlendWidth) / TILE_SIZE),
+      Math.ceil(
+        Math.max(
+          this.cachedMaxRoadHalfWidth + extraBlendWidth,
+          this.cachedMaxExplicitRoadInfluenceRadius,
+        ) / TILE_SIZE,
+      ),
     );
     // Preserve the existing localized query cost. Maximum cached width controls
     // the search halo; exceptionally wide roads use the bounded road list.
@@ -3001,7 +3053,8 @@ export class RoadNetworkSystem extends System {
                 originX + segment.end.x,
                 originZ + segment.end.z,
                 segment.width,
-                extraBlendWidth,
+                segment.blendWidth ?? extraBlendWidth,
+                segment.maxInfluence ?? 1,
               ),
             );
             if (influence === 1) return influence;
@@ -3026,7 +3079,8 @@ export class RoadNetworkSystem extends System {
             b.x,
             b.z,
             width,
-            extraBlendWidth,
+            road.blendWidth ?? extraBlendWidth,
+            road.maxInfluence ?? 1,
           ),
         );
         if (influence === 1) return influence;
@@ -3039,6 +3093,18 @@ export class RoadNetworkSystem extends System {
     return this.roads.reduce(
       (width, road) => Math.min(width, road.width || this.config.roadWidth),
       this.config.roadWidth,
+    );
+  }
+
+  private getNarrowestRoadInfluenceRadius(defaultBlendWidth: number): number {
+    return this.roads.reduce(
+      (radius, road) =>
+        Math.min(
+          radius,
+          (road.width || this.config.roadWidth) / 2 +
+            (road.blendWidth ?? defaultBlendWidth),
+        ),
+      this.config.roadWidth / 2 + defaultBlendWidth,
     );
   }
 
@@ -3060,6 +3126,7 @@ export class RoadNetworkSystem extends System {
           endX: p2.x,
           endZ: p2.z,
           width,
+          ...roadSurfaceFields(road),
         });
       }
     }
@@ -3112,7 +3179,7 @@ export class RoadNetworkSystem extends System {
       // Target: road width should span at least 2 pixels
       // road influence extends halfWidth + extraBlendWidth, so use full influence width
       const roadInfluenceWidth =
-        this.getNarrowestRoadWidth() / 2 + extraBlendWidth;
+        this.getNarrowestRoadInfluenceRadius(extraBlendWidth);
       const minPixelsPerRoadInfluence = 2;
       const metersPerPixelTarget =
         roadInfluenceWidth / minPixelsPerRoadInfluence;
@@ -3169,7 +3236,8 @@ export class RoadNetworkSystem extends System {
     // maximum-of-per-width influences match the existing GPU mask kernel.
     const halfWorld = actualWorldSize / 2;
     for (const segment of this.getRoadSegmentsForGPU()) {
-      const padding = segment.width / 2 + extraBlendWidth;
+      const padding =
+        segment.width / 2 + (segment.blendWidth ?? extraBlendWidth);
       const pixel = (value: number, center: number) =>
         ((value - center + halfWorld) / actualWorldSize) * finalTextureSize;
       const minX = Math.max(
@@ -3210,7 +3278,8 @@ export class RoadNetworkSystem extends System {
             segment.endX,
             segment.endZ,
             segment.width,
-            extraBlendWidth,
+            segment.blendWidth ?? extraBlendWidth,
+            segment.maxInfluence ?? 1,
           );
           const index = y * finalTextureSize + x;
           data[index] = Math.max(data[index], influence);
@@ -3412,6 +3481,7 @@ export class RoadNetworkSystem extends System {
     this.invalidateTileSegmentCaches();
     this.boundaryExits = [];
     this.cachedMaxRoadHalfWidth = 0;
+    this.cachedMaxExplicitRoadInfluenceRadius = 0;
     this.roadInfluenceTextureData = null;
     super.destroy();
   }

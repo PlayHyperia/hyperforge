@@ -29,6 +29,80 @@ export interface GPURoadSegment {
   endX: number;
   endZ: number;
   width: number;
+  /** Edge fade in meters; omission uses the upload call's default. */
+  blendWidth?: number;
+  /** Peak mask influence; omission means a full-strength road. */
+  maxInfluence?: number;
+}
+
+/** Exact shared 32-byte road record for both compute kernels. */
+export function packRoadSegments(
+  roads: readonly GPURoadSegment[],
+  defaultBlendWidth = 0.5,
+): Float32Array {
+  if (!Number.isFinite(defaultBlendWidth) || defaultBlendWidth < 0)
+    throw new Error("Road blend width must be finite and nonnegative");
+  const data = new Float32Array(roads.length * 8);
+  for (let i = 0; i < roads.length; i++) {
+    const road = roads[i];
+    const blendWidth = road.blendWidth ?? defaultBlendWidth;
+    const maxInfluence = road.maxInfluence ?? 1;
+    if (
+      ![
+        road.startX,
+        road.startZ,
+        road.endX,
+        road.endZ,
+        road.width,
+        blendWidth,
+        maxInfluence,
+      ].every(Number.isFinite) ||
+      road.width < 0 ||
+      blendWidth < 0 ||
+      maxInfluence < 0 ||
+      maxInfluence > 1
+    )
+      throw new Error(
+        "Road GPU record requires finite coordinates, nonnegative width/fade and a peak in [0, 1]",
+      );
+    const base = i * 8;
+    data[base] = road.startX;
+    data[base + 1] = road.startZ;
+    data[base + 2] = road.endX;
+    data[base + 3] = road.endZ;
+    data[base + 4] = road.width;
+    data[base + 5] = blendWidth;
+    data[base + 6] = maxInfluence;
+    // The final float remains zero padding. No new GPU record or binding.
+    for (let lane = 0; lane < 7; lane++)
+      if (!Number.isFinite(data[base + lane]))
+        throw new Error("Road GPU record exceeds finite Float32 storage");
+  }
+  return data;
+}
+
+/** WGSL Uniforms begins with two u32 counts, followed by two f32 offsets. */
+export function packRoadInfluenceUniforms(
+  vertexCount: number,
+  roadCount: number,
+  tileOffset: { x: number; z: number },
+): Uint32Array {
+  if (
+    ![vertexCount, roadCount].every(
+      (value) =>
+        Number.isSafeInteger(value) && value >= 0 && value <= 0xffffffff,
+    )
+  )
+    throw new Error("Road compute counts must fit u32");
+  const data = new Uint32Array(4);
+  const floats = new Float32Array(data.buffer);
+  data[0] = vertexCount;
+  data[1] = roadCount;
+  floats[2] = tileOffset.x;
+  floats[3] = tileOffset.z;
+  if (!Number.isFinite(floats[2]) || !Number.isFinite(floats[3]))
+    throw new Error("Road tile offsets must fit finite Float32 storage");
+  return data;
 }
 
 /** Biome data for GPU color blending */
@@ -202,21 +276,12 @@ export class TerrainComputeContext {
     const vertexCount = vertices.length / 2;
     const roadCount = roads.length;
 
-    // Pack road data (8 floats per road for alignment)
-    const roadData = new Float32Array(roadCount * 8);
-    for (let i = 0; i < roadCount; i++) {
-      const r = roads[i];
-      const base = i * 8;
-      roadData[base + 0] = r.startX;
-      roadData[base + 1] = r.startZ;
-      roadData[base + 2] = r.endX;
-      roadData[base + 3] = r.endZ;
-      roadData[base + 4] = r.width;
-      // Padding
-      roadData[base + 5] = 0;
-      roadData[base + 6] = 0;
-      roadData[base + 7] = 0;
-    }
+    const roadData = packRoadSegments(roads);
+    const uniforms = packRoadInfluenceUniforms(
+      vertexCount,
+      roadCount,
+      tileOffset,
+    );
 
     // Create buffers
     const vertexBuffer = this.ctx.createStorageBuffer("ri_vertices", vertices);
@@ -225,10 +290,7 @@ export class TerrainComputeContext {
       "ri_output",
       vertexCount * 4,
     );
-    const uniformBuffer = this.ctx.createUniformBuffer(
-      "ri_uniforms",
-      new Float32Array([vertexCount, roadCount, tileOffset.x, tileOffset.z]),
-    );
+    const uniformBuffer = this.ctx.createUniformBuffer("ri_uniforms", uniforms);
 
     if (!vertexBuffer || !roadBuffer || !outputBuffer || !uniformBuffer) {
       throw new Error("Failed to create GPU buffers");
@@ -296,20 +358,7 @@ export class TerrainComputeContext {
       return new Float32Array(pixelCount);
     }
 
-    // Pack road data (8 floats per road for alignment)
-    const roadData = new Float32Array(roadCount * 8);
-    for (let i = 0; i < roadCount; i++) {
-      const r = roads[i];
-      const base = i * 8;
-      roadData[base + 0] = r.startX;
-      roadData[base + 1] = r.startZ;
-      roadData[base + 2] = r.endX;
-      roadData[base + 3] = r.endZ;
-      roadData[base + 4] = r.width;
-      roadData[base + 5] = 0;
-      roadData[base + 6] = 0;
-      roadData[base + 7] = 0;
-    }
+    const roadData = packRoadSegments(roads, blendWidth);
 
     // Create buffers
     const roadBuffer = this.ctx.createStorageBuffer("rtex_roads", roadData);
