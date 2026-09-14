@@ -7,7 +7,11 @@ import THREE, {
   modelWorldMatrix,
   output,
 } from "../../../../extras/three/three";
-import type { Node } from "three/webgpu";
+import {
+  MeshSSSNodeMaterial,
+  MeshStandardNodeMaterial,
+  type Node,
+} from "three/webgpu";
 import habitatData from "../../../../data/compact-haven-habitat-v1.json";
 import { validateCompactHabitatComposition } from "../CompactHabitatComposition";
 import { createTerrainWorkerConfig } from "../../../../utils/workers/TerrainWorkerShared";
@@ -18,6 +22,7 @@ import {
   CURVED_MEADOW_APPEARANCE,
   NATURAL_TUFT_APPEARANCE,
   FINE_MEADOW_APPEARANCE,
+  FINE_GRASS_THIN_LEAF_LIGHTING,
   FINE_MEADOW_GRASS_VISUAL_PROFILE,
   GRASS_CONFIG,
   GrassVisualManager,
@@ -27,6 +32,7 @@ import {
   type GrassWorkerSetup,
 } from "../GrassVisualManager";
 import { getGrassBladeLayout } from "../GrassBladeLayout";
+import { createGroundedGrassMaterial } from "../GrassGroundingGpu";
 import {
   COMPACT_WORLD_TERRAIN_PROFILE,
   SCULPTED_COMPACT_WORLD_TERRAIN_PROFILE,
@@ -130,6 +136,11 @@ function colorValue(
     if (!value) throw new Error("Unexpected albedo attribute");
     return value;
   }
+  // Resolve external accessor identities first: Three camera accessors require
+  // a real builder. Only the remaining construction-time albedo Fn is expanded
+  // when it is nested below the shared thickness tint.
+  const expanded = expand(node);
+  if (expanded !== node) return colorValue(expanded, attributes);
   const value = read("value");
   if (typeof value === "number") return [value];
   if (
@@ -1048,9 +1059,6 @@ describe("fine continuous meadow geometry candidate", () => {
       TIP_BRIGHTNESS: 1.2,
       ROOT_OCCLUSION: 0.55,
       ROOT_OCCLUSION_END: 0.6,
-      GRAZING_GAIN: 0.35,
-      GRAZING_GAIN_ROOT_START: 0.05,
-      GRAZING_GAIN_ROOT_END: 0.65,
       PROGRESSIVE_ROOTS: true,
     });
     const owner = fine();
@@ -1065,9 +1073,7 @@ describe("fine continuous meadow geometry candidate", () => {
           instanceGroundColor: [0.2, 0.4, 0.1],
           instanceGrassTint: [0.3, 0.45, 0.2, 0.3],
           instanceGroundNormal: [0, 1, 0],
-          // Overhead gain=0 preserves this historical base-albedo oracle.
-          _cameraPosition: [350, 40, 320],
-          _positionWorld: [350, 28, 320],
+          // No camera values: the actual albedo is now view independent.
           uv: [0.5, height],
         });
         actual.forEach((value, i) =>
@@ -1077,6 +1083,219 @@ describe("fine continuous meadow geometry candidate", () => {
       expect(owner["material"].emissive.getHex()).toBe(0);
     } finally {
       owner.destroy();
+    }
+  });
+
+  it("admits only the explicit fine physical material and freezes its exact thin-leaf recipe", () => {
+    const owner = fine();
+    try {
+      const material = owner["material"];
+      expect(material).toBeInstanceOf(MeshSSSNodeMaterial);
+      if (!(material instanceof MeshSSSNodeMaterial))
+        throw new Error("Fine physical grass requires the actual SSS material");
+      expect(FINE_GRASS_THIN_LEAF_LIGHTING).toEqual({
+        id: "fine-thin-leaf-v1",
+        attenuation: 0.2,
+        scale: 1,
+        power: 2,
+        distortion: 0.1,
+        ambient: 0,
+        rootStart: 0.05,
+        rootEnd: 0.65,
+      });
+      expect(Object.isFrozen(FINE_GRASS_THIN_LEAF_LIGHTING)).toBe(true);
+      expect(
+        Object.getOwnPropertyDescriptor(material.userData, "fineGrassLighting"),
+      ).toEqual({
+        enumerable: true,
+        configurable: false,
+        writable: false,
+        value: FINE_GRASS_THIN_LEAF_LIGHTING,
+      });
+      expect(material.userData.fineGrassLighting).toBe(
+        FINE_GRASS_THIN_LEAF_LIGHTING,
+      );
+      for (const [key, expected] of [
+        ["thicknessAttenuationNode", 0.2],
+        ["thicknessScaleNode", 1],
+        ["thicknessPowerNode", 2],
+        ["thicknessDistortionNode", 0.1],
+        ["thicknessAmbientNode", 0],
+      ] as const)
+        expect(colorValue(material[key], {})).toEqual([expected]);
+      const lighting = material.setupLightingModel();
+      expect(lighting.useSSS).toBe(true);
+      for (const key of [
+        "clearcoat",
+        "sheen",
+        "iridescence",
+        "anisotropy",
+        "transmission",
+        "dispersion",
+        "retroreflection",
+      ] as const)
+        expect(lighting[key]).toBe(false);
+      for (const key of [
+        "clearcoatNode",
+        "sheenNode",
+        "iridescenceNode",
+        "anisotropyNode",
+        "transmissionNode",
+        "dispersionNode",
+        "retroreflectivityNode",
+      ] as const)
+        expect(material[key]).toBeNull();
+      expect(material.ior).toBe(1.5);
+      expect(material.specularIntensity).toBe(1);
+      expect(material.specularColor.toArray()).toEqual([1, 1, 1]);
+      expect(material.roughness).toBe(1);
+      expect(material.metalness).toBe(0);
+      expect(material.emissive.toArray()).toEqual([0, 0, 0]);
+      expect(graph(material.aoNode!).size).toBeGreaterThan(0);
+    } finally {
+      owner.destroy();
+    }
+  });
+
+  it.each([0, 1, 2])(
+    "preserves all six real SSS node identities through the LOD%i grounded binding clone",
+    (lod) => {
+      const owner = fine();
+      const geometry = owner["lodGeometries"][lod].clone();
+      let clone: MeshStandardNodeMaterial | undefined;
+      try {
+        const base = owner["material"];
+        if (!(base instanceof MeshSSSNodeMaterial))
+          throw new Error("Expected real fine SSS material");
+        const layout = getGrassBladeLayout(
+          lod,
+          FINE_MEADOW_APPEARANCE.GEOMETRY_LAYOUT,
+        );
+        const count = 3;
+        const roots = Float32Array.from(
+          { length: count * layout.bladesPerClump * 2 },
+          (_, i) => (i % 7) * 0.0001,
+        );
+        clone = createGroundedGrassMaterial(
+          base,
+          geometry,
+          roots,
+          count,
+          lod,
+          FINE_MEADOW_APPEARANCE.GEOMETRY_LAYOUT,
+        );
+        expect(clone).not.toBe(base);
+        expect(clone).toBeInstanceOf(MeshSSSNodeMaterial);
+        if (!(clone instanceof MeshSSSNodeMaterial))
+          throw new Error("Grounding clone lost the SSS subclass");
+        for (const key of [
+          "thicknessColorNode",
+          "thicknessAttenuationNode",
+          "thicknessScaleNode",
+          "thicknessPowerNode",
+          "thicknessDistortionNode",
+          "thicknessAmbientNode",
+          "colorNode",
+          "normalNode",
+          "aoNode",
+        ] as const)
+          expect(clone[key]).toBe(base[key]);
+        expect(clone.positionNode).not.toBe(base.positionNode);
+        expect(clone.setupLightingModel().useSSS).toBe(true);
+        // Raw NodeMaterial.clone JSON-copies metadata, but keeps actual nodes.
+        // GVM publication below restores an immutable recipe on its owner.
+        expect(clone.userData.fineGrassLighting).toEqual(
+          FINE_GRASS_THIN_LEAF_LIGHTING,
+        );
+        expect(geometry.getAttribute("grassRootDeltas").array).toBe(roots);
+        expect(geometry.getAttribute("grassRootDeltas").itemSize).toBe(2);
+        expect(geometry.getAttribute("position").count).toBe(
+          layout.verticesPerClump,
+        );
+        for (const height of [0, 0.05, 0.35, 0.65, 1]) {
+          const inputs = {
+            instanceGroundColor: [0.2, 0.4, 0.1],
+            instanceGrassTint: [0.3, 0.45, 0.2, 0.3],
+            uv: [0.5, height],
+          };
+          expect(colorValue(clone.thicknessColorNode!, inputs)).toEqual(
+            colorValue(base.thicknessColorNode!, inputs),
+          );
+        }
+      } finally {
+        clone?.dispose();
+        geometry.dispose();
+        owner.destroy();
+      }
+    },
+  );
+
+  it("publishes the immutable recipe and borrowed SSS nodes on its real representative mesh without simulating compilation", async () => {
+    const owner = fine();
+    let observed = false;
+    try {
+      const base = owner["material"];
+      if (!(base instanceof MeshSSSNodeMaterial))
+        throw new Error("Expected real fine SSS material");
+      await owner.precompileRepresentativeChunk(async (object) => {
+        if (!(object instanceof THREE.InstancedMesh))
+          throw new Error("Expected actual representative InstancedMesh");
+        const material = object.material;
+        if (!(material instanceof MeshSSSNodeMaterial))
+          throw new Error("Representative owner lost SSS material");
+        observed = true;
+        expect(material.thicknessColorNode).toBe(base.thicknessColorNode);
+        expect(material.colorNode).toBe(base.colorNode);
+        expect(material.normalNode).toBe(base.normalNode);
+        expect(material.aoNode).toBe(base.aoNode);
+        expect(material.userData.fineGrassLighting).toBe(
+          FINE_GRASS_THIN_LEAF_LIGHTING,
+        );
+        expect(
+          Object.getOwnPropertyDescriptor(
+            material.userData,
+            "fineGrassLighting",
+          ),
+        ).toMatchObject({ writable: false, configurable: false });
+        expect(object.receiveShadow).toBe(true);
+        expect(object.castShadow).toBe(false);
+        expect(material.transmission).toBe(0);
+        expect(material.transparent).toBe(false);
+        expect(material.depthWrite).toBe(true);
+      });
+      expect(observed).toBe(true);
+    } finally {
+      owner.destroy();
+    }
+  });
+
+  it("does not promote ordinary, fixed, compact or natural materials to the SSS trial", () => {
+    const owners = [
+      manager(),
+      manager(STREAMING_GRASS_VISUAL_PROFILE),
+      manager(COMPACT_ISLAND_GRASS_VISUAL_PROFILE),
+      manager(DENSE_MEADOW_GRASS_VISUAL_PROFILE),
+      manager(
+        DENSE_MEADOW_GRASS_VISUAL_PROFILE,
+        SCULPTED_COMPACT_WORLD_TERRAIN_PROFILE,
+        true,
+        "natural-tuft-v1",
+      ),
+      manager({}, COMPACT_WORLD_TERRAIN_PROFILE),
+      manager({}, SCULPTED_COMPACT_WORLD_TERRAIN_PROFILE, false),
+    ];
+    try {
+      for (const owner of owners) {
+        const material = owner["material"];
+        expect(material).toBeInstanceOf(MeshStandardNodeMaterial);
+        expect(material).not.toBeInstanceOf(MeshSSSNodeMaterial);
+        expect(Object.hasOwn(material.userData, "fineGrassLighting")).toBe(
+          false,
+        );
+        expect(Reflect.has(material, "thicknessColorNode")).toBe(false);
+      }
+    } finally {
+      for (const owner of owners) owner.destroy();
     }
   });
 

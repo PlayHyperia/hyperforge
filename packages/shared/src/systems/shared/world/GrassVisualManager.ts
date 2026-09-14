@@ -30,8 +30,6 @@ import THREE, {
   mul,
   modelWorldMatrix,
   cameraViewMatrix,
-  cameraPosition,
-  positionWorld,
   output,
 } from "../../../extras/three/three";
 import { SUN_LIGHT } from "./LightingConfig";
@@ -49,7 +47,7 @@ import {
   TERRAIN_SHADER_CONSTANTS,
   TerrainShadeUniforms,
 } from "./TerrainShader";
-import { MeshStandardNodeMaterial } from "three/webgpu";
+import { MeshSSSNodeMaterial, MeshStandardNodeMaterial } from "three/webgpu";
 import { faceDirection } from "three/tsl";
 import type { TerrainQuadNode, QuadTreeListener } from "./TerrainQuadTree";
 import type {
@@ -96,6 +94,7 @@ import {
   createGrassPlacementCellOperations,
   getGrassPlacementCellBounds,
   type GrassPlacementCell,
+  type GrassPlacementDistribution,
 } from "../../../utils/workers/GrassPlacementCell";
 import { assertTerrainWorkerRequest } from "../../../utils/workers/TerrainWorkerShared";
 import {
@@ -243,11 +242,31 @@ export const FINE_MEADOW_APPEARANCE = Object.freeze({
   TIP_BRIGHTNESS: 1.2,
   ROOT_OCCLUSION: 0.55,
   ROOT_OCCLUSION_END: 0.6,
-  GRAZING_GAIN: 0.35,
-  GRAZING_GAIN_ROOT_START: 0.05,
-  GRAZING_GAIN_ROOT_END: 0.65,
   PROGRESSIVE_ROOTS: true,
 } as const);
+
+/** Fine-only direct-light scattering trial, not screen-space transmission.
+ * The leaf-colored term is multiplied by Three's actual shadowed light color.
+ * These are explicit artistic coefficients, not measured tissue properties. */
+export const FINE_GRASS_THIN_LEAF_LIGHTING = Object.freeze({
+  id: "fine-thin-leaf-v1",
+  attenuation: 0.2,
+  scale: 1,
+  power: 2,
+  distortion: 0.1,
+  ambient: 0,
+  rootStart: 0.05,
+  rootEnd: 0.65,
+} as const);
+
+function publishFineGrassLighting(material: MeshSSSNodeMaterial): void {
+  Object.defineProperty(material.userData, "fineGrassLighting", {
+    enumerable: true,
+    configurable: false,
+    writable: false,
+    value: FINE_GRASS_THIN_LEAF_LIGHTING,
+  });
+}
 
 type GrassBladeShape = Pick<
   typeof GRASS_CONFIG,
@@ -734,6 +753,8 @@ export class GrassVisualManager implements QuadTreeListener {
   private readonly geometryLayout: FineGrassGeometryLayout | undefined;
   private readonly compactMeadow: boolean;
   private readonly fineMeadow: boolean;
+  private readonly placementDistribution:
+    GrassPlacementDistribution | undefined;
   private readonly placementOperations = createGrassPlacementCellOperations();
   private readonly nodeWorkUnits = new Map<
     TerrainQuadNode,
@@ -833,6 +854,9 @@ export class GrassVisualManager implements QuadTreeListener {
     }
     this.profileId = profile.id ?? "ordinary-v1";
     this.fineMeadow = this.profileId === FINE_MEADOW_GRASS_VISUAL_PROFILE.id;
+    this.placementDistribution = this.fineMeadow
+      ? "fine-cell-stratified-v1"
+      : undefined;
     if (
       habitatComposition &&
       appearanceCandidate !== "natural-tuft-v1" &&
@@ -1038,6 +1062,9 @@ export class GrassVisualManager implements QuadTreeListener {
               cellSize: 25 as const,
               nearLodDistance: 40 as const,
               liveCells: this.liveWorkUnits.size,
+              ...(this.placementDistribution
+                ? { placementDistribution: this.placementDistribution }
+                : {}),
             },
           }
         : {}),
@@ -1155,6 +1182,10 @@ export class GrassVisualManager implements QuadTreeListener {
           this.geometryLayout,
         )
       : this.material;
+    // NodeMaterial clones userData through JSON; restore the immutable receipt
+    // on the actual representative owner without changing any shader nodes.
+    if (material instanceof MeshSSSNodeMaterial)
+      publishFineGrassLighting(material);
     const mesh = new THREE.InstancedMesh(geo, material, 1);
     mesh.name = "GrassQT_PrecompileSample";
     mesh.frustumCulled = false;
@@ -1537,6 +1568,9 @@ export class GrassVisualManager implements QuadTreeListener {
               ...(ticket.work.placementCell
                 ? { placementCell: ticket.work.placementCell }
                 : {}),
+              ...(this.placementDistribution
+                ? { placementDistribution: this.placementDistribution }
+                : {}),
             },
             ticket.lodLevel,
             result.grounding,
@@ -1710,6 +1744,9 @@ export class GrassVisualManager implements QuadTreeListener {
       centerZ: node.centerZ,
       size: node.size,
       ...(work.placementCell ? { placementCell: work.placementCell } : {}),
+      ...(this.placementDistribution
+        ? { placementDistribution: this.placementDistribution }
+        : {}),
       spacingMul: GRASS_CONFIG.LOD_TIERS[lodLevel].spacingMul,
       config: ws.terrainConfig,
       seed: ws.seed,
@@ -1889,6 +1926,12 @@ export class GrassVisualManager implements QuadTreeListener {
         Object.prototype.hasOwnProperty.call(data, "compactGrassColorGrade"))
     )
       throw new Error("Grass visual result grass color grade mismatch");
+    if (
+      data.placementDistribution !== this.placementDistribution ||
+      Object.prototype.hasOwnProperty.call(data, "placementDistribution") !==
+        (this.placementDistribution !== undefined)
+    )
+      throw new Error("Grass visual result placement distribution mismatch");
   }
 
   private createChunkMeshFromWorkerData(
@@ -1951,6 +1994,8 @@ export class GrassVisualManager implements QuadTreeListener {
           lodLevel,
           this.geometryLayout,
         );
+      if (material instanceof MeshSSSNodeMaterial)
+        publishFineGrassLighting(material);
       // Three clones userData through JSON. Rebind the admitted terrain field
       // so each grounded chunk retains the same immutable material owner.
       if (this.habitatComposition && material !== this.material)
@@ -2329,6 +2374,9 @@ export class GrassVisualManager implements QuadTreeListener {
           ? { compactGrassColorGrade: this.compactGrassColorGrade }
           : {}),
         ...(work.placementCell ? { placementCell: work.placementCell } : {}),
+        ...(this.placementDistribution
+          ? { placementDistribution: this.placementDistribution }
+          : {}),
       });
       return;
     }
@@ -2386,6 +2434,9 @@ export class GrassVisualManager implements QuadTreeListener {
       clumpSpacing: this.clumpSpacing,
       spacingMul,
       ...(work.placementCell ? { placementCell: work.placementCell } : {}),
+      ...(this.placementDistribution
+        ? { placementDistribution: this.placementDistribution }
+        : {}),
     });
     const maxCount = domain.maxCount;
     const rng = mulberry32(
@@ -2400,16 +2451,31 @@ export class GrassVisualManager implements QuadTreeListener {
     const groundNormals = new Float32Array(maxCount * 3);
 
     let count = 0;
+    const placementPosition = { x: 0, z: 0, leafX: 0, leafZ: 0 };
 
     for (let i = 0; i < maxCount; i++) {
-      const sx = (rng() - 0.5) * domain.size;
-      const sz = (rng() - 0.5) * domain.size;
+      let lx: number, lz: number, wx: number, wz: number;
+      if (domain.placementDistribution) {
+        this.placementOperations.samplePosition(
+          domain,
+          i,
+          rng(),
+          rng(),
+          placementPosition,
+        );
+        lx = placementPosition.leafX;
+        lz = placementPosition.leafZ;
+        wx = node.centerX + lx;
+        wz = node.centerZ + lz;
+      } else {
+        const sx = (rng() - 0.5) * domain.size;
+        const sz = (rng() - 0.5) * domain.size;
+        wx = domain.centerX + sx;
+        wz = domain.centerZ + sz;
+        lx = work.placementCell ? wx - node.centerX : sx;
+        lz = work.placementCell ? wz - node.centerZ : sz;
+      }
       const clumpRng = rng();
-
-      const wx = domain.centerX + sx;
-      const wz = domain.centerZ + sz;
-      const lx = work.placementCell ? wx - node.centerX : sx;
-      const lz = work.placementCell ? wz - node.centerZ : sz;
       const ty = this.getHeightAt(wx, wz);
 
       if (ty < this.getWaterSurfaceAt(wx, wz) + 0.1) continue;
@@ -2491,7 +2557,10 @@ export class GrassVisualManager implements QuadTreeListener {
     const compactPhysical =
       terrainProfile?.kind === "compact-candidate" &&
       isCompactSculptProfile(terrainProfile);
-    const mat = new MeshStandardNodeMaterial();
+    const mat =
+      compactPhysical && appearance?.id === FINE_MEADOW_APPEARANCE.id
+        ? new MeshSSSNodeMaterial()
+        : new MeshStandardNodeMaterial();
     mat.name = appearance?.id ?? "legacy-blades-v1";
     if (this.habitatComposition)
       Object.defineProperty(mat.userData, "compactHabitatComposition", {
@@ -2506,6 +2575,36 @@ export class GrassVisualManager implements QuadTreeListener {
     mat.roughness = 1.0;
     mat.metalness = 0.0;
     mat.fog = false;
+
+    if (mat instanceof MeshSSSNodeMaterial) {
+      // Only the built-in direct-light SSS term is admitted. Do not enable
+      // physical transmission (which samples a separate scene buffer), or any
+      // unrelated physical lobes. The default dielectric interface is retained.
+      mat.transmission = 0;
+      mat.transmissionNode = null;
+      mat.clearcoat = 0;
+      mat.clearcoatNode = null;
+      mat.sheen = 0;
+      mat.sheenNode = null;
+      mat.iridescence = 0;
+      mat.iridescenceNode = null;
+      mat.anisotropy = 0;
+      mat.anisotropyNode = null;
+      mat.dispersion = 0;
+      mat.dispersionNode = null;
+      mat.retroreflectivity = 0;
+      mat.retroreflectivityNode = null;
+      mat.thicknessAttenuationNode = float(
+        FINE_GRASS_THIN_LEAF_LIGHTING.attenuation,
+      );
+      mat.thicknessScaleNode = float(FINE_GRASS_THIN_LEAF_LIGHTING.scale);
+      mat.thicknessPowerNode = float(FINE_GRASS_THIN_LEAF_LIGHTING.power);
+      mat.thicknessDistortionNode = float(
+        FINE_GRASS_THIN_LEAF_LIGHTING.distortion,
+      );
+      mat.thicknessAmbientNode = float(FINE_GRASS_THIN_LEAF_LIGHTING.ambient);
+      publishFineGrassLighting(mat);
+    }
 
     if (appearance?.id === FINE_MEADOW_APPEARANCE.id) {
       // Approximate occlusion of environmental fill inside the lower canopy.
@@ -2859,35 +2958,6 @@ export class GrassVisualManager implements QuadTreeListener {
           tintedCol.mul(appearance.TIP_BRIGHTNESS),
           smoothstep(float(0.0), float(1.0), t),
         );
-        if (compactPhysical && appearance.id === FINE_MEADOW_APPEARANCE.id) {
-          // Chroma-preserving grazing gain, not emission/transmission. Equal
-          // white addition washed out dark greens in the earlier art trial.
-          // Terrain N keeps the response smooth across a canopy; the root mask
-          // retains the substrate join. PBR lighting and shadows still follow.
-          const viewDelta = cameraPosition
-            .sub(positionWorld)
-            .toVar("fineGrassGrazingViewDelta");
-          const viewDirection = viewDelta.div(
-            pow(dot(viewDelta, viewDelta).max(1e-12), 0.5),
-          );
-          const grazing = float(1)
-            .sub(dot(viewDirection, terrainNormal))
-            .clamp(0, 1)
-            .toVar("fineGrassGrazingAngle");
-          const gain = grazing
-            .mul(grazing)
-            .mul(grazing)
-            .mul(appearance.GRAZING_GAIN)
-            .mul(
-              smoothstep(
-                float(appearance.GRAZING_GAIN_ROOT_START),
-                float(appearance.GRAZING_GAIN_ROOT_END),
-                t,
-              ),
-            )
-            .toVar("fineGrassGrazingGain");
-          return bladeCol.mul(float(1).add(gain)).min(vec3(1));
-        }
         return compactPhysical
           ? bladeCol
           : applyAnimeShade(
@@ -2911,6 +2981,25 @@ export class GrassVisualManager implements QuadTreeListener {
         ? bladeCol
         : applyAnimeShade(bladeCol, terrainNormal, uSunDir, this.shadeUniforms);
     })();
+
+    if (mat instanceof MeshSSSNodeMaterial) {
+      // One shared non-grazing albedo owner feeds both ordinary reflection and
+      // the thin-leaf tint. Scattering itself remains in Three's direct-light
+      // model, so zero/shadowed light cannot become an albedo or emissive lift.
+      // Preserve the previous fine albedo's upper bound, without its view gain.
+      mat.colorNode = vec3(mat.colorNode)
+        .min(vec3(1))
+        .toVar("fineGrassBladeAlbedo");
+      mat.thicknessColorNode = mat.colorNode
+        .mul(
+          smoothstep(
+            float(FINE_GRASS_THIN_LEAF_LIGHTING.rootStart),
+            float(FINE_GRASS_THIN_LEAF_LIGHTING.rootEnd),
+            uv().y,
+          ),
+        )
+        .toVar("fineGrassThinLeafColor");
+    }
 
     mat.outputNode = Fn(() => {
       return vec4(output.rgb, output.a);
@@ -2964,6 +3053,9 @@ export class GrassVisualManager implements QuadTreeListener {
             clumpSpacing: this.clumpSpacing,
             spacingMul: 1,
             placementCell,
+            ...(this.placementDistribution
+              ? { placementDistribution: this.placementDistribution }
+              : {}),
           });
           works.push(
             Object.freeze({

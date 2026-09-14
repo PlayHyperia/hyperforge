@@ -327,6 +327,8 @@ export type StreamingGrassProfileReceipt = {
   placement?: {
     schemaVersion: 1;
     mode: "world-cells-v1";
+    /** Explicit fine-only sampling policy; absent in historical receipts. */
+    placementDistribution?: "fine-cell-stratified-v1";
     cellSize: 25;
     nearLodDistance: 40;
     liveCells: number;

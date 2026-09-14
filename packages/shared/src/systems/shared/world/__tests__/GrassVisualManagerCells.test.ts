@@ -589,8 +589,11 @@ describe("fine meadow cells borrow actual terrain owners without replacing them"
             work,
             GRASS_CONFIG.LOD_TIERS[lod].spacingMul,
           );
-          const output = await f.execute(
-            f.owner["createWorkerInput"](work, work.key, lod),
+          const input = f.owner["createWorkerInput"](work, work.key, lod);
+          const output = await f.execute(input);
+          expect(input.placementDistribution).toBe("fine-cell-stratified-v1");
+          expect(output.placementDistribution).toBe(
+            input.placementDistribution,
           );
           expect(output.count).toBe(sync?.count ?? 0);
           for (const name of [
@@ -607,6 +610,175 @@ describe("fine meadow cells borrow actual terrain owners without replacing them"
       f.close();
     }
   });
+  it("preserves real retained-surface CPU/worker parity across parent boundaries and negative cells with explicit stratified placement", async () => {
+    const f = await fixture();
+    try {
+      const cases = [
+        { centerX: 350, centerZ: 350, indexX: 15, indexZ: 14 },
+        { centerX: 450, centerZ: 350, indexX: 16, indexZ: 14 },
+        { centerX: -50, centerZ: 350, indexX: -1, indexZ: 14 },
+        { centerX: 50, centerZ: 350, indexX: 0, indexZ: 14 },
+        { centerX: -50, centerZ: -50, indexX: -1, indexZ: -1 },
+      ];
+      const attributes = [
+        "offsets",
+        "rotScaleHash",
+        "groundColors",
+        "grassTints",
+        "groundNormals",
+      ] as const;
+      let positiveClumps = 0;
+      for (const { centerX, centerZ, indexX, indexZ } of cases) {
+        let node = f.nodes.find(
+          (entry) => entry.centerX === centerX && entry.centerZ === centerZ,
+        );
+        if (!node) {
+          node = f.tree.createNode(null, null, 100, centerX, centerZ, 4);
+          f.visual["generateChunkSync"](node);
+        }
+        f.owner.onNodeNeedsGeometry(node);
+        const work = f.owner["liveWorkUnits"].get(
+          `gcell_v1_${indexX}_${indexZ}`,
+        )!;
+        expect(work).toBeDefined();
+        expect(work.node).toBe(node);
+        const surface = f.visual.getRetainedSurface(node)!;
+        expect(surface).not.toBeNull();
+        expect(surface.nodeId).toBe(node.id);
+        let near: GrassWorkerOutput | undefined;
+        for (const lod of [0, 1]) {
+          const input = f.owner["createWorkerInput"](work, work.key, lod);
+          expect(input.placementDistribution).toBe("fine-cell-stratified-v1");
+          expect(input.placementCell).toEqual({
+            schemaVersion: 1,
+            size: 25,
+            indexX,
+            indexZ,
+          });
+          expect([input.centerX, input.centerZ, input.size]).toEqual([
+            centerX,
+            centerZ,
+            100,
+          ]);
+          const cpu = f.owner["generateInstanceData"](
+            work,
+            GRASS_CONFIG.LOD_TIERS[lod].spacingMul,
+          );
+          const result = await f.execute(input);
+          expect(result.placementDistribution).toBe(
+            input.placementDistribution,
+          );
+          expect(result.placementCell).toEqual(input.placementCell);
+          expect(result.placementCell).not.toBe(input.placementCell);
+          expect(result.count).toBe(cpu?.count ?? 0);
+          expect(result.count).toBeLessThanOrEqual(1276);
+          for (const key of attributes)
+            expect(result[key]).toEqual(cpu?.[key] ?? new Float32Array(0));
+          if (near) {
+            expect(result.count).toBe(near.count);
+            for (const key of attributes)
+              expect(result[key]).toEqual(near[key]);
+          } else near = result;
+          // Negative cells use actual terrain and can genuinely be underwater.
+          // Empty parity is retained; no replacement terrain/density forces grass.
+          const cpuData: GrassAnchorData = cpu ?? {
+            count: 0,
+            offsets: new Float32Array(0),
+            rotScaleHash: new Float32Array(0),
+            groundColors: new Float32Array(0),
+            grassTints: new Float32Array(0),
+            groundNormals: new Float32Array(0),
+          };
+          const projectedCpu = projectGrassAnchors(
+            cpuData,
+            surface,
+            f.owner["getWaterSurfaceAt"],
+            f.owner["isInFlatZone"],
+          );
+          const projectedWorker = projectGrassAnchors(
+            result,
+            surface,
+            f.owner["getWaterSurfaceAt"],
+            f.owner["isInFlatZone"],
+          );
+          expect(projectedWorker.count).toBe(projectedCpu.count);
+          for (const key of attributes)
+            expect(projectedWorker[key]).toEqual(projectedCpu[key]);
+          expect(projectedWorker.grounding).toEqual(projectedCpu.grounding);
+          for (let i = 0; i < result.count; i++) {
+            const x = centerX + result.offsets[i * 3];
+            const z = centerZ + result.offsets[i * 3 + 2];
+            expect(x).toBeGreaterThanOrEqual(work.bounds.minX);
+            expect(x).toBeLessThan(work.bounds.maxX);
+            expect(z).toBeGreaterThanOrEqual(work.bounds.minZ);
+            expect(z).toBeLessThan(work.bounds.maxZ);
+          }
+          if (indexX >= 0 && indexZ >= 0) positiveClumps += result.count;
+        }
+      }
+      expect(positiveClumps).toBeGreaterThan(0);
+      expect(f.container.children).toHaveLength(0);
+      expect(f.owner["groundingJobs"].size).toBe(0);
+    } finally {
+      f.close();
+    }
+  }, 30000);
+
+  it("rejects absent or malformed active distribution before either nonempty or empty worker completion", async () => {
+    const f = await fixture();
+    try {
+      const input = f.owner["createWorkerInput"](f.work, f.work.key, 0);
+      const ticket = f.owner["createWorkerTicket"](
+        f.work,
+        f.work.key,
+        0,
+        false,
+      );
+      const populated = await f.execute(input);
+      expect(populated.count).toBeGreaterThan(0);
+      // A real empty worker response is a wire-admission control, not a change
+      // to production ecology or an accepted empty completion for this ticket.
+      const empty = await f.execute({
+        ...input,
+        grassConfigs: Object.fromEntries(
+          Object.entries(input.grassConfigs).map(([key, config]) => [
+            key,
+            { ...config, density: 0 },
+          ]),
+        ),
+      });
+      expect(empty.count).toBe(0);
+      for (const result of [populated, empty]) {
+        expect(result.placementDistribution).toBe("fine-cell-stratified-v1");
+        const missing = { ...result };
+        delete missing.placementDistribution;
+        for (const malformed of [
+          missing,
+          ...[undefined, null, false, "", "fine-cell-stratified-v2"].map(
+            (value) => ({ ...result, placementDistribution: value }),
+          ),
+        ]) {
+          expect(() =>
+            f.owner["settleWorkerResult"](
+              ticket,
+              malformed as GrassWorkerOutput,
+            ),
+          ).toThrow(/placement distribution/i);
+          expect(f.owner["settledWorkerResults"]).toHaveLength(0);
+          expect(f.owner["completedNodes"].has(f.work.key)).toBe(false);
+          expect(f.owner["groundingJobs"].size).toBe(0);
+          expect(f.container.children).toHaveLength(0);
+          expect(f.owner["workerInflight"].get(f.work.key)).toBe(ticket);
+        }
+      }
+      f.owner["settleWorkerResult"](ticket, populated);
+      expect(f.owner["settledWorkerResults"]).toHaveLength(1);
+      expect(f.owner.getStreamingReadiness([f.node]).readyChunks).toBe(0);
+    } finally {
+      f.close();
+    }
+  });
+
   it("partitions one real 100m leaf into sixteen immutable deterministic cells and counts readiness per cell", async () => {
     const f = await fixture();
     try {
@@ -638,6 +810,7 @@ describe("fine meadow cells borrow actual terrain owners without replacing them"
         schemaVersion: 1,
         mode: "world-cells-v1",
         cellSize: 25,
+        placementDistribution: "fine-cell-stratified-v1",
         nearLodDistance: 40,
         liveCells: 16,
       });
@@ -1162,7 +1335,7 @@ describe("fine meadow cells borrow actual terrain owners without replacing them"
     }
   });
 
-  it("leaves legacy camera selection and camera matrix ownership untouched", async () => {
+  it("leaves legacy camera ownership and CPU/worker placement untouched without a distribution marker", async () => {
     const f = await fixture();
     const legacy = new GrassVisualManager(
       f.setup.terrainConfig.TERRAIN_PROFILE_IDENTITY,
@@ -1186,6 +1359,46 @@ describe("fine meadow cells borrow actual terrain owners without replacing them"
       expect(legacy["hasPrimaryView"]).toBe(false);
       expect(camera.matrixWorld).toEqual(matrix);
       expect(legacy.getProfileReceipt()).toEqual(before);
+      expect(before.placement).toBeUndefined();
+      legacy.setPlayerPosition(385, 374);
+      legacy.onNodeNeedsGeometry(f.node);
+      const work = [...legacy["liveWorkUnits"].values()][0];
+      expect(work.node).toBe(f.node);
+      expect(work.placementCell).toBeUndefined();
+      for (const lod of [0, 1]) {
+        const input = legacy["createWorkerInput"](work, work.key, lod);
+        expect(Object.hasOwn(input, "placementDistribution")).toBe(false);
+        expect(Object.hasOwn(input, "placementCell")).toBe(false);
+        const cpu = legacy["generateInstanceData"](
+          work,
+          GRASS_CONFIG.LOD_TIERS[lod].spacingMul,
+        );
+        const output = await f.execute(input);
+        expect(Object.hasOwn(output, "placementDistribution")).toBe(false);
+        expect(Object.hasOwn(output, "placementCell")).toBe(false);
+        expect(output.count).toBe(cpu?.count ?? 0);
+        for (const key of [
+          "offsets",
+          "rotScaleHash",
+          "groundColors",
+          "grassTints",
+          "groundNormals",
+        ] as const)
+          expect(output[key]).toEqual(cpu?.[key] ?? new Float32Array(0));
+        const ticket = legacy["createWorkerTicket"](work, work.key, lod, false);
+        for (const value of [undefined, "fine-cell-stratified-v1", ""])
+          expect(() =>
+            legacy["settleWorkerResult"](ticket, {
+              ...output,
+              placementDistribution: value,
+            } as GrassWorkerOutput),
+          ).toThrow(/placement distribution/i);
+        expect(legacy["settledWorkerResults"]).toHaveLength(0);
+        expect(legacy["completedNodes"].size).toBe(0);
+        legacy["settleWorkerResult"](ticket, output);
+        expect(legacy["settledWorkerResults"]).toHaveLength(1);
+        legacy["settledWorkerResults"].length = 0;
+      }
     } finally {
       legacy.destroy();
       f.close();

@@ -146,6 +146,11 @@ function preCellSamplingWorker() {
       "",
     ],
     [
+      `  if (placementDomain.placementDistribution && grassEligibility !== "compact-pbr-v1")
+    throw new Error("Grass placement distribution requires compact grass eligibility");\n`,
+      "",
+    ],
+    [
       "  var maxCount = placementDomain.maxCount;",
       "  var maxCount = Math.ceil((size * size) / (spacing * spacing));",
     ],
@@ -153,33 +158,92 @@ function preCellSamplingWorker() {
       "((placementDomain.centerX * 374761393 + placementDomain.centerZ * 668265263) | 0)",
       "((centerX * 374761393 + centerZ * 668265263) | 0)",
     ],
+    ["  var placementPosition = { x: 0, z: 0, leafX: 0, leafZ: 0 };\n", ""],
     [
-      "var lx = (rng() - 0.5) * placementDomain.size;",
-      "var lx = (rng() - 0.5) * size;",
-    ],
-    [
-      "var lz = (rng() - 0.5) * placementDomain.size;",
-      "var lz = (rng() - 0.5) * size;",
-    ],
-    [
-      `    if (placementDomain.placementCell) {
-      wx = placementDomain.centerX + lx;
-      wz = placementDomain.centerZ + lz;
-      // Grounding and GPU placement retain the real terrain leaf's local frame.
-      lx = wx - centerX;
-      lz = wz - centerZ;
-    }\n`,
-      "",
+      `    var lx, lz, wx, wz;
+    if (placementDomain.placementDistribution) {
+      placementCellOperations.samplePosition(placementDomain, i, rng(), rng(), placementPosition);
+      lx = placementPosition.leafX;
+      lz = placementPosition.leafZ;
+      wx = centerX + lx;
+      wz = centerZ + lz;
+    } else {
+      lx = (rng() - 0.5) * placementDomain.size;
+      lz = (rng() - 0.5) * placementDomain.size;
+      wx = centerX + lx;
+      wz = centerZ + lz;
+      if (placementDomain.placementCell) {
+        wx = placementDomain.centerX + lx;
+        wz = placementDomain.centerZ + lz;
+        // Grounding and GPU placement retain the real terrain leaf's local frame.
+        lx = wx - centerX;
+        lz = wz - centerZ;
+      }
+    }
+    var clumpRng = rng();\n`,
+      `    var lx = (rng() - 0.5) * size;
+    var lz = (rng() - 0.5) * size;
+    var clumpRng = rng();
+
+    var wx = centerX + lx;
+    var wz = centerZ + lz;\n`,
     ],
   ];
   for (const [current, previous] of replacements) {
     expect(source.split(current)).toHaveLength(2);
     source = source.replace(current, previous);
   }
-  const echo =
-    "...(placementDomain.placementCell ? { placementCell: placementCellOperations.validateCell(placementDomain.placementCell) } : {}),";
-  expect(source.split(echo)).toHaveLength(3);
-  source = source.replaceAll(echo, "");
+  for (const echo of [
+    "...(placementDomain.placementCell ? { placementCell: placementCellOperations.validateCell(placementDomain.placementCell) } : {}),",
+    "...(placementDomain.placementDistribution ? { placementDistribution: placementDomain.placementDistribution } : {}),",
+  ]) {
+    expect(source.split(echo)).toHaveLength(3);
+    source = source.replaceAll(echo, "");
+  }
+  return actualWorker(source);
+}
+
+/** Reconstruct the cell-uniform position statements that preceded stratification.
+ * The retained terrain, ecology, RNG, and output transport stay real/current;
+ * only explicit opt-in positions differ from this independently kept control. */
+function preStratifiedCellSamplingWorker() {
+  let source = GRASS_WORKER_CODE;
+  const current = `    var lx, lz, wx, wz;
+    if (placementDomain.placementDistribution) {
+      placementCellOperations.samplePosition(placementDomain, i, rng(), rng(), placementPosition);
+      lx = placementPosition.leafX;
+      lz = placementPosition.leafZ;
+      wx = centerX + lx;
+      wz = centerZ + lz;
+    } else {
+      lx = (rng() - 0.5) * placementDomain.size;
+      lz = (rng() - 0.5) * placementDomain.size;
+      wx = centerX + lx;
+      wz = centerZ + lz;
+      if (placementDomain.placementCell) {
+        wx = placementDomain.centerX + lx;
+        wz = placementDomain.centerZ + lz;
+        // Grounding and GPU placement retain the real terrain leaf's local frame.
+        lx = wx - centerX;
+        lz = wz - centerZ;
+      }
+    }
+    var clumpRng = rng();\n`;
+  const previous = `    var lx = (rng() - 0.5) * placementDomain.size;
+    var lz = (rng() - 0.5) * placementDomain.size;
+    var clumpRng = rng();
+
+    var wx = centerX + lx;
+    var wz = centerZ + lz;
+    if (placementDomain.placementCell) {
+      wx = placementDomain.centerX + lx;
+      wz = placementDomain.centerZ + lz;
+      // Grounding and GPU placement retain the real terrain leaf's local frame.
+      lx = wx - centerX;
+      lz = wz - centerZ;
+    }\n`;
+  expect(source.split(current)).toHaveLength(2);
+  source = source.replace(current, previous);
   return actualWorker(source);
 }
 
@@ -316,6 +380,115 @@ function broadGrade(): GrassTerrainSurfaceZone {
 }
 
 describe("actual authored-surface grass worker", () => {
+  it("requires and echoes explicit stratified distribution at queue, emitted-worker, and result boundaries including empty outputs", async () => {
+    await withTerrain(async (terrain, internals, worker) => {
+      internals.loadWaterBodiesFromManifest();
+      internals.loadFlatZonesFromManifest();
+      const input: GrassWorkerInput = {
+        ...request(terrain, internals, 350, 350, 100),
+        placementCell: {
+          schemaVersion: 1,
+          size: 25,
+          indexX: 15,
+          indexZ: 14,
+        },
+        grassEligibility: "compact-pbr-v1",
+        clumpSpacing: 0.7,
+      };
+      const ordinary = await worker.run(input);
+      expect(ordinary.count).toBeGreaterThan(0);
+      expect(Object.hasOwn(input, "placementDistribution")).toBe(false);
+      expect(Object.hasOwn(ordinary, "placementDistribution")).toBe(false);
+      const selected: GrassWorkerInput = {
+        ...input,
+        placementDistribution: "fine-cell-stratified-v1",
+      };
+      const queued = prepareGrassWorkerRequest(selected);
+      expect(queued).not.toBe(selected);
+      expect(queued.placementCell).not.toBe(selected.placementCell);
+      expect(Object.isFrozen(queued.placementCell)).toBe(true);
+      Reflect.set(selected, "placementDistribution", "changed-after-queue");
+      expect(queued.placementDistribution).toBe("fine-cell-stratified-v1");
+      const active = await worker.run(queued);
+      expect(active.count).toBeGreaterThan(0);
+      expect(active.count).toBeLessThanOrEqual(1276);
+      expect(active.placementDistribution).toBe("fine-cell-stratified-v1");
+      expect(active.placementCell).toEqual(queued.placementCell);
+      expect(active.placementCell).not.toBe(queued.placementCell);
+      // Selection must reach real sampling, not merely label legacy positions.
+      // This inequality is not a quality, density, or improved-coverage oracle.
+      expect(active.offsets).not.toEqual(ordinary.offsets);
+      assertSurfaceParity(queued, active, internals);
+      const admitted = admitGrassWorkerPlacementResult(active, queued);
+      expect(admitted).toEqual(active);
+      expect(admitted.placementCell).not.toBe(active.placementCell);
+      expect(Object.isFrozen(admitted.placementCell)).toBe(true);
+      for (const value of [
+        undefined,
+        null,
+        false,
+        "",
+        "fine-cell-stratified-v2",
+      ]) {
+        const malformed = { ...input, placementDistribution: value };
+        expect(() =>
+          prepareGrassWorkerRequest(malformed as GrassWorkerInput),
+        ).toThrow(/placement distribution/i);
+        await expect(worker.run(malformed as GrassWorkerInput)).rejects.toThrow(
+          /placement distribution/i,
+        );
+        expect(() =>
+          admitGrassWorkerPlacementResult(
+            { ...active, placementDistribution: value } as GrassWorkerOutput,
+            queued,
+          ),
+        ).toThrow(/placement distribution/i);
+      }
+      const { placementCell: _cell, ...withoutCell } = queued;
+      for (const invalidScope of [
+        withoutCell,
+        { ...queued, grassEligibility: undefined },
+        { ...queued, grassEligibility: "legacy-biome-v1" as const },
+      ]) {
+        expect(() => prepareGrassWorkerRequest(invalidScope)).toThrow(
+          /placement distribution/i,
+        );
+        await expect(worker.run(invalidScope)).rejects.toThrow(
+          /placement distribution/i,
+        );
+      }
+      const emptyInput = {
+        ...queued,
+        grassConfigs: Object.fromEntries(
+          Object.entries(queued.grassConfigs).map(([key, config]) => [
+            key,
+            { ...config, density: 0 },
+          ]),
+        ),
+      };
+      const empty = await worker.run(emptyInput);
+      expect(empty.count).toBe(0);
+      expect(empty.placementDistribution).toBe("fine-cell-stratified-v1");
+      expect(admitGrassWorkerPlacementResult(empty, emptyInput)).toEqual(empty);
+      for (const result of [active, empty]) {
+        const missing = { ...result };
+        delete missing.placementDistribution;
+        expect(() => admitGrassWorkerPlacementResult(missing, queued)).toThrow(
+          /placement distribution/i,
+        );
+        expect(() => admitGrassWorkerPlacementResult(result, input)).toThrow(
+          /placement distribution/i,
+        );
+      }
+      expect(() =>
+        admitGrassWorkerPlacementResult(
+          { ...ordinary, placementDistribution: undefined },
+          input,
+        ),
+      ).toThrow(/placement distribution/i);
+    });
+  });
+
   it("admits and echoes the grass color grade without changing actual placement or legacy wire fields", async () => {
     await withTerrain(async (terrain, internals, worker) => {
       internals.loadWaterBodiesFromManifest();
@@ -423,6 +596,7 @@ describe("actual authored-surface grass worker", () => {
           const before = await previous.run(input);
           const after = await worker.run(input);
           expect(after.count).toBe(before.count);
+          expect(Object.hasOwn(after, "placementDistribution")).toBe(false);
           expect(Object.keys(after)).toEqual(Object.keys(before));
           for (const key of Object.keys(
             attributes,
@@ -455,65 +629,91 @@ describe("actual authored-surface grass worker", () => {
       const base = request(terrain, internals, 350, 350, 100);
       const seen = new Set<string>();
       let total = 0;
-      for (let x = 12; x < 16; x++)
-        for (let z = 12; z < 16; z++) {
-          const cell: GrassPlacementCell = {
-            schemaVersion: 1,
-            size: 25,
-            indexX: x,
-            indexZ: z,
-          };
-          const bounds = getGrassPlacementCellBounds(cell);
-          const input: GrassWorkerInput = {
-            ...base,
-            placementCell: cell,
-            chunkKey: `cell_${x}_${z}_lod0`,
-            clumpSpacing: 0.7,
-            grassEligibility: "compact-pbr-v1",
-            compactPlantingLobes: setup.compactPlantingLobes,
-            grassConfigs: setup.grassConfigs,
-            roadBlendWidth: 0.5,
-            roadSegments: setup.getRoadSegmentsForRegion(
-              bounds.minX,
-              bounds.minZ,
-              bounds.maxX,
-              bounds.maxZ,
-            ),
-            terrainSurface: setup.getTerrainSurfaceForRegion(
-              bounds.minX - 0.5,
-              bounds.minZ - 0.5,
-              bounds.maxX + 0.5,
-              bounds.maxZ + 0.5,
-            ),
-          };
-          const near = await worker.run(input);
-          const middle = await worker.run({
-            ...input,
-            chunkKey: `cell_${x}_${z}_lod1`,
-            spacingMul: 1,
-          });
-          expect(near.placementCell).toEqual(cell);
-          expect(near.placementCell).not.toBe(cell);
-          expect(near.count).toBeLessThanOrEqual(1276);
-          expect(near.count).toBe(middle.count);
-          for (const key of Object.keys(
-            attributes,
-          ) as (keyof typeof attributes)[])
-            expect(near[key]).toEqual(middle[key]);
-          assertSurfaceParity(input, near, internals);
-          for (const point of points(input, near)) {
-            expect(point.x).toBeGreaterThanOrEqual(bounds.minX);
-            expect(point.x).toBeLessThanOrEqual(bounds.maxX);
-            expect(point.z).toBeGreaterThanOrEqual(bounds.minZ);
-            expect(point.z).toBeLessThanOrEqual(bounds.maxZ);
-            const key = `${point.x},${point.z}`;
-            expect(seen.has(key)).toBe(false);
-            seen.add(key);
+      const previous = preStratifiedCellSamplingWorker();
+      try {
+        for (let x = 12; x < 16; x++)
+          for (let z = 12; z < 16; z++) {
+            const cell: GrassPlacementCell = {
+              schemaVersion: 1,
+              size: 25,
+              indexX: x,
+              indexZ: z,
+            };
+            const bounds = getGrassPlacementCellBounds(cell);
+            const input: GrassWorkerInput = {
+              ...base,
+              placementCell: cell,
+              chunkKey: `cell_${x}_${z}_lod0`,
+              clumpSpacing: 0.7,
+              grassEligibility: "compact-pbr-v1",
+              compactPlantingLobes: setup.compactPlantingLobes,
+              grassConfigs: setup.grassConfigs,
+              roadBlendWidth: 0.5,
+              roadSegments: setup.getRoadSegmentsForRegion(
+                bounds.minX,
+                bounds.minZ,
+                bounds.maxX,
+                bounds.maxZ,
+              ),
+              terrainSurface: setup.getTerrainSurfaceForRegion(
+                bounds.minX - 0.5,
+                bounds.minZ - 0.5,
+                bounds.maxX + 0.5,
+                bounds.maxZ + 0.5,
+              ),
+            };
+            const near = await worker.run(input);
+            const unchanged = await previous.run(input);
+            expect(near.count).toBe(unchanged.count);
+            expect(Object.keys(near)).toEqual(Object.keys(unchanged));
+            for (const key of Object.keys(
+              attributes,
+            ) as (keyof typeof attributes)[])
+              expect(
+                new Uint8Array(
+                  near[key].buffer,
+                  near[key].byteOffset,
+                  near[key].byteLength,
+                ),
+              ).toEqual(
+                new Uint8Array(
+                  unchanged[key].buffer,
+                  unchanged[key].byteOffset,
+                  unchanged[key].byteLength,
+                ),
+              );
+            const middle = await worker.run({
+              ...input,
+              chunkKey: `cell_${x}_${z}_lod1`,
+              spacingMul: 1,
+            });
+            expect(near.placementCell).toEqual(cell);
+            expect(near.placementCell).not.toBe(cell);
+            expect(Object.hasOwn(near, "placementDistribution")).toBe(false);
+            expect(Object.hasOwn(middle, "placementDistribution")).toBe(false);
+            expect(near.count).toBeLessThanOrEqual(1276);
+            expect(near.count).toBe(middle.count);
+            for (const key of Object.keys(
+              attributes,
+            ) as (keyof typeof attributes)[])
+              expect(near[key]).toEqual(middle[key]);
+            assertSurfaceParity(input, near, internals);
+            for (const point of points(input, near)) {
+              expect(point.x).toBeGreaterThanOrEqual(bounds.minX);
+              expect(point.x).toBeLessThanOrEqual(bounds.maxX);
+              expect(point.z).toBeGreaterThanOrEqual(bounds.minZ);
+              expect(point.z).toBeLessThanOrEqual(bounds.maxZ);
+              const key = `${point.x},${point.z}`;
+              expect(seen.has(key)).toBe(false);
+              seen.add(key);
+            }
+            total += near.count;
           }
-          total += near.count;
-        }
-      expect(total).toBeGreaterThan(1000);
-      expect(seen.size).toBe(total);
+        expect(total).toBeGreaterThan(1000);
+        expect(seen.size).toBe(total);
+      } finally {
+        await previous.close();
+      }
     });
   }, 30000);
 

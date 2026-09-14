@@ -1,5 +1,82 @@
 # Compact island environment art: next delivery slice
 
+## Current direction — natural, dry, full and freely explorable
+
+The bounded placement comparison is complete:104/104 focused,485/485 serial,
+all types/shared-server builds and91/91 external checks pass. Three native views
+retain740 pins and unchanged templates, with80,999 accepted clumps versus81,101
+before. Both reviewers see modest evenness improvement only, not a fine-canopy
+breakthrough. All page/GPU/cleanup errors0;19 known cow/dagger errors remain.
+The owned test browser/services are closed. No new cost/motion/full-load approval.
+
+The 2026-09-14 user review rejects the current world as the target presentation.
+Finish the bounded same-quota grass trial, then deliver a coordinated ground/path
+pass: dry grass and earth, credible compacted soil, natural worn transitions and
+less stencil-like service aprons. Small feathering tweaks alone cannot repair
+the current broad gray gravel patches. Follow with natural terrain/shoreline
+shape, the real resource-tree ecology and moving water, judged together in game.
+One compact island and one arena; paths must not become exploration corridors.
+
+Decoded packed grass alpha has median0.254902 and99.9801% below the current
+0.65 floor. Dirt median0.831373 and rock median0.819608 are materially different.
+The connected roughnessNode overrides scalar roughness1, as specified by the
+[Three.js node material contract](https://threejs.org/docs/pages/MeshStandardNodeMaterial.html).
+A dry-only monotone roughness remap can retain texel variation; keep localized
+coast0.58/pond0.62 wet endpoints. This diagnosis does not prove the cause of all
+glare, and artistic roughness ranges are not measured material properties.
+
+Qualify [Poly Haven Dirt](https://polyhaven.com/a/dirt), CC0 by Charlotte Baglioni,
+at its published2m width as a prospective compacted-earth replacement. Compare
+the actual decoded channels and appearance before runtime import; retain the
+existing1024px, six-texture/fourteen-sample architecture and test exact channel
+packing, provenance, CPU ground-color parity and native sampling. Higher source
+resolution alone is not better rendering or a free performance improvement.
+
+Staging now verifies all four original source sizes/publisher MD5s and every
+decoded packed channel. Candidate raw roughness mean0.94427 is already dry;
+do not apply a redundant dirt roughness remap. Fine soil and small pebbles are
+promising, but darker/warmer diffuse and higher fine-grain contrast need native
+review at2m scale. Two packed1024px maps total5,140,092B; no runtime import yet.
+Evidence lives in asset-studio/compact-dirt-material01. The separate exact
+current roughness histogram receipt has SHA256
+`e5696414fc7ed16065668cbd19d37fdf117bf37a098757617cf5107d1fd2c2f5`.
+
+The workshop apron is a full-strength3.5m-wide two-point capsule with only a
+0.5m transition. Corner cutting cannot make those collinear points irregular.
+Its visual bilinear mask/noisy edge and analytic grass-support field differ;
+this is a plausible bare-halo mechanism, not a diagnosis of every gap. Next
+author a bounded asymmetric worn apron with a genuine wider shoulder, sharing
+one descriptor across CPU, worker and GPU mask. Protect actual workspace and
+approach clearances, not old decorative outlines. Verify whole-mask texel phase,
+all48 resource-tree approaches, water/lodge/floor safety and off-road traversal.
+Do not simply widen paint while leaving grass on the old capsule contract.
+
+Read-only navigation review finds no road-membership gate in authoritative
+player walkability. Current gates are water, slope, building/bridge transitions
+and object collision. Existing real-world BFS tests cover resource/service
+access but not an explicit whole-island off-road census; add that evidence and
+live traversal as the island fills out. Do not delete valid collision checks.
+All scene-wide visual, water-motion, workload and production gates remain open.
+
+## Thin-leaf native comparison — no visual promotion
+
+The fine-only SSS candidate passes51/51 source checks, all three package type
+checks and normal shared/server builds. After retaining and correcting three
+failed capture attempts, external preflight passes89/89 and art04 completes
+three actual daylight PNGs,80 compiled shader pairs and94 material owners.
+All740 pins stay held;655 archived source copies and three images replay.
+Overall exit1 remains for19 cow/dagger content errors; page/GPU/cleanup errors0,
+owned browser/services closed and database retained stopped.
+
+Root and independent review find no decisive improvement over near3: angular
+flat strips, sparse bristles and exposed ground still lack the reference's lush
+overlap. All measured views are oblique, not backlit; the intended translucency
+benefit remains unproven. Do not promote this uncommitted opt-in experiment or
+infer runtime cost from the stills. Next evaluate same-quota stratified clump
+placement shared across CPU/worker, with real exclusion/grounding checks,
+seam/regularity review, coverage evidence and native cost. Keep the40m versus
+original80m dense-tier distance as a separate explicit cost/quality decision.
+
 ## Restored-three native follow-up — scoped pass, canopy/performance still open
 
 The unchanged restored-three source completes `fine-grass-near3-rail-target01`:
