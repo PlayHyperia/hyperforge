@@ -71,6 +71,10 @@ import {
   groundedGrassWorldBox,
 } from "./GrassGroundingGpu";
 import {
+  getGrassBladeLayout,
+  type FineGrassGeometryLayout,
+} from "./GrassBladeLayout";
+import {
   projectGrassAnchors,
   type GrassGrounding,
 } from "./GrassTerrainProjection";
@@ -223,6 +227,9 @@ export const NATURAL_TUFT_APPEARANCE = Object.freeze({
  */
 export const FINE_MEADOW_APPEARANCE = Object.freeze({
   id: "fine-meadow-v1",
+  // One source-controlled opt-in selects generation, CPU validation and GPU
+  // addressing together; the three-segment revision remains available.
+  GEOMETRY_LAYOUT: "fine-linear-sweep-3seg-v1" as FineGrassGeometryLayout,
   BLADE_HEIGHT_MIN: 0.38,
   BLADE_HEIGHT_MAX: 0.86,
   BLADE_WIDTH_RATIO: 0.045,
@@ -316,7 +323,7 @@ function mulberry32(seed: number): () => number {
 // arc curvature, per-blade rotation/height/width variation.
 // ---------------------------------------------------------------------------
 
-function createClumpGeometry(
+export function createClumpGeometry(
   bladesPerClump = GRASS_CONFIG.BLADES_PER_CLUMP,
   bladeSegments = GRASS_CONFIG.BLADE_SEGMENTS,
   shape: GrassBladeShape = GRASS_CONFIG,
@@ -724,6 +731,7 @@ export class GrassVisualManager implements QuadTreeListener {
   private minimumLodLevel: number;
   private maxRenderDistance: number;
   private readonly profileId: StreamingGrassProfileReceipt["profileId"];
+  private readonly geometryLayout: FineGrassGeometryLayout | undefined;
   private readonly compactMeadow: boolean;
   private readonly fineMeadow: boolean;
   private readonly placementOperations = createGrassPlacementCellOperations();
@@ -923,13 +931,17 @@ export class GrassVisualManager implements QuadTreeListener {
       ),
     );
 
-    this.lodGeometries = GRASS_CONFIG.LOD_TIERS.map((tier) =>
-      createClumpGeometry(
-        tier.bladesPerClump,
-        tier.bladeSegments,
+    this.geometryLayout = this.fineMeadow
+      ? FINE_MEADOW_APPEARANCE.GEOMETRY_LAYOUT
+      : undefined;
+    this.lodGeometries = GRASS_CONFIG.LOD_TIERS.map((_, lod) => {
+      const layout = getGrassBladeLayout(lod, this.geometryLayout);
+      return createClumpGeometry(
+        layout.bladesPerClump,
+        layout.bladeSegments,
         this.meadowAppearance ?? GRASS_CONFIG,
-      ),
-    );
+      );
+    });
     this.material = this.createMaterial();
     if (this.compactMeadow) {
       let radius = 0;
@@ -956,6 +968,7 @@ export class GrassVisualManager implements QuadTreeListener {
 
     const tierDescs = GRASS_CONFIG.LOD_TIERS.map((t, i) => {
       const g = this.lodGeometries[i];
+      const layout = getGrassBladeLayout(i, this.geometryLayout);
       const range = this.fineMeadow
         ? i === 0
           ? "<40m"
@@ -964,7 +977,7 @@ export class GrassVisualManager implements QuadTreeListener {
             : "inactive"
         : `<${t.maxDistance === Infinity ? "inf" : t.maxDistance}m`;
       return (
-        `LOD${i}(${t.bladesPerClump}b/${t.bladeSegments}s, ` +
+        `LOD${i}(${layout.bladesPerClump}b/${layout.bladeSegments}s, ` +
         `${g.attributes.position.count}v, ${g.index!.count / 3}t, ` +
         `${range}, ` +
         `×${t.spacingMul})`
@@ -1004,6 +1017,9 @@ export class GrassVisualManager implements QuadTreeListener {
     return {
       schemaVersion: 1,
       profileId: this.profileId,
+      ...(this.geometryLayout === undefined
+        ? {}
+        : { geometryLayout: this.geometryLayout }),
       eligibility: this.grassEligibility,
       terrainProfileIdentity: this.terrainProfileIdentity,
       minimumLodLevel: this.minimumLodLevel,
@@ -1125,15 +1141,18 @@ export class GrassVisualManager implements QuadTreeListener {
       new THREE.InstancedBufferAttribute(new Float32Array([0, 1, 0]), 3),
     );
 
+    const layout = getGrassBladeLayout(
+      this.minimumLodLevel,
+      this.geometryLayout,
+    );
     const material = this.compactMeadow
       ? createGroundedGrassMaterial(
           this.material,
           geo,
-          new Float32Array(
-            GRASS_CONFIG.LOD_TIERS[this.minimumLodLevel].bladesPerClump * 2,
-          ),
+          new Float32Array(layout.bladesPerClump * layout.rootComponents),
           1,
           this.minimumLodLevel,
+          this.geometryLayout,
         )
       : this.material;
     const mesh = new THREE.InstancedMesh(geo, material, 1);
@@ -1411,6 +1430,9 @@ export class GrassVisualManager implements QuadTreeListener {
           surfaces: region.surfaces,
           geometry: manager.lodGeometries[ticket.lodLevel],
           lod: ticket.lodLevel,
+          ...(manager.geometryLayout === undefined
+            ? {}
+            : { geometryLayout: manager.geometryLayout }),
           oceanLevel: manager.waterThreshold,
           wind: {
             x:
@@ -1890,6 +1912,7 @@ export class GrassVisualManager implements QuadTreeListener {
       (!blades ||
         !blades.grounding ||
         blades.data.count !== data.count ||
+        blades.receipt.geometryLayout !== this.geometryLayout ||
         grounding !== blades.grounding)
     )
       throw new Error(
@@ -1926,6 +1949,7 @@ export class GrassVisualManager implements QuadTreeListener {
           blades.rootDeltas,
           data.count,
           lodLevel,
+          this.geometryLayout,
         );
       // Three clones userData through JSON. Rebind the admitted terrain field
       // so each grounded chunk retains the same immutable material owner.

@@ -21,10 +21,12 @@ import {
   FINE_MEADOW_GRASS_VISUAL_PROFILE,
   GRASS_CONFIG,
   GrassVisualManager,
+  createClumpGeometry,
   STREAMING_GRASS_VISUAL_PROFILE,
   type GrassVisualProfile,
   type GrassWorkerSetup,
 } from "../GrassVisualManager";
+import { getGrassBladeLayout } from "../GrassBladeLayout";
 import {
   COMPACT_WORLD_TERRAIN_PROFILE,
   SCULPTED_COMPACT_WORLD_TERRAIN_PROFILE,
@@ -930,10 +932,109 @@ describe("fine continuous meadow geometry candidate", () => {
       true,
       FINE_MEADOW_APPEARANCE.id,
     );
+  const fineGeometryCase = (nearSegments: 3 | 4) => {
+    if (nearSegments === 3) {
+      const owner = fine();
+      return {
+        geometries: owner["lodGeometries"],
+        dispose: () => owner.destroy(),
+      };
+    }
+    // Retain the rejected candidate's analytic coverage without installing it
+    // in a manager or introducing a runtime appearance override.
+    const geometries = [0, 1, 2].map((lod) => {
+      const layout = getGrassBladeLayout(lod, "fine-linear-sweep-near4-v1");
+      return createClumpGeometry(
+        layout.bladesPerClump,
+        layout.bladeSegments,
+        FINE_MEADOW_APPEARANCE,
+      );
+    });
+    return {
+      geometries,
+      dispose: () => geometries.forEach((geometry) => geometry.dispose()),
+    };
+  };
+
+  it.each([3, 4] as const)(
+    "retains archived roots, tips and mid bytes with %i near segments",
+    (nearSegments) => {
+      // Actual live substrate-contrast-art01 source templates, before near4.
+      // Report SHA256: 54238d7cdf4e2e41da24faa155d0b955489dd61fb60b1a9a78d593bfda023657.
+      // Generator SHA256: 043fd4cd167f3ed411b3c7f05542a08c969f47d993ed89bf9adb2870a124e85d.
+      // Near position SHA256: 3664097a4df304b022923d9c300bc864e2dceb377aee062ee40d284a97156b03.
+      // Only each old blade's vertices 0, 1 and 6 are retained here, in order.
+      const rootsAndTips = new Float32Array(
+        Uint8Array.from(
+          Buffer.from(
+            "xUT/PgAAAACZ6XM8g/YFPwAAAAAJzdY8z8M8P8H5Ej9myWO9Md5gvgAAAABHhY8+JxF6vgAAAADerYc+SosHv/WlHD8sNFk+0h3LPAAAAAApfRq/tplqPQAAAABv7Bu/6UJBvK4iMj+xFXG/Oh43PgAAAACtTjg+hq45PgAAAAAK91M+Bo+qPsSYEj8sTtQ+XF4LvwAAAAD0OQq+2LMRvwAAAABJZSC+LjtPv/ytMT/a95e+dXTAPgAAAABg0Fq+ZKXPPgAAAAA002q+I1EAPyBBNT/AOg2/84E9vgAAAACWsiA/hDJcvgAAAABQTSQ/ttkTvvH0Mj9Rf3A/DuukvQAAAAAcC1G+XzmBvQAAAACnrES+vtKqvbI05T57OOi+QWUBPwAAAABgJy0+Gpf+PgAAAABFL0o+xNZHP2+BHz9sAXg+x6q9vgAAAAB3iyM+7VbIvgAAAAA2cw0++r8sv5AjIj9M8Vg+1y9gPgAAAAAedRe/FKN5PgAAAAAj/BG/ohnPPtcrMT+xn1u/naTgPQAAAACoFpI+Jk7vPQAAAABocJ4+JW4DPub8Bz+Ylg0/wfUIvwAAAABG3n2+7I4BvwAAAABAY3S+mfoav9sSJD8mwBe/qXr4PgAAAAAomKG9Wuz2PgAAAAACqEq9chBSP7HhHz/p4Ac9HEnWvgAAAADh0RA/HgvNvgAAAABvDgg/ea1kv+kmUT8UMBM/xs2FugAAAADsNiy+EMqaPAAAAABQUiK+tUWave5C7z5A8si+6FrWPgAAAAC+oZ0+iGPJPgAAAAAZEaY+Hk4cP0tHIz8Y3Bc/z3rFvgAAAAAvf1y8IgfSvgAAAAABd6a8MJokvwKMCT88wkq+Ohj2PgAAAACXdN2+O+H3PgAAAACLisy++kJSP+2HMz82xRG/3cVPvQAAAAB3Z5c+c9xwvQAAAAAu4KI+1D8vvum3AD+ORwc/QsbCvgAAAAAkROW+oSqyvgAAAAACzuK+lDQNv4Q4MT8/xii/X1TnPgAAAACypc88pifnPgAAAADTgFQ9+z4hP5doDz+FbHs+hiUFvwAAAADpZsQ+zNcNvwAAAACe5Ms+OrtVv/nkRz/PYkA/ZHSJPQAAAAAS0HW+lza8PQAAAADwtGm+exbWvYpnFD/LQ+m+",
+            "base64",
+          ),
+        ).buffer,
+      );
+      expect(digest(rootsAndTips)).toBe(
+        "6aefd820b073570a2fd82b5beeed70e86b05592a824da050d2ec21bdb3a697ba",
+      );
+      const owner = fineGeometryCase(nearSegments);
+      try {
+        const near = owner.geometries[0];
+        const stride = nearSegments * 2 + 1;
+        const actual = new Float32Array(
+          Array.from({ length: 24 }, (_, blade) =>
+            [0, 1, stride - 1].flatMap((vertex) =>
+              Array.from(near.attributes.position.array).slice(
+                (blade * stride + vertex) * 3,
+                (blade * stride + vertex + 1) * 3,
+              ),
+            ),
+          ).flat(),
+        );
+        expect(actual).toEqual(rootsAndTips);
+        if (nearSegments === 3) {
+          expect(digest(near.attributes.position.array)).toBe(
+            "3664097a4df304b022923d9c300bc864e2dceb377aee062ee40d284a97156b03",
+          );
+          expect(digest(near.attributes.normal.array)).toBe(
+            "5b24d50084f11bdd81c47e6fa579373dc3235b45ba4a3a538261e17ea420e2a2",
+          );
+          expect(digest(near.attributes.uv.array)).toBe(
+            historicalFineTemplates[0].hashes.uv,
+          );
+          expect(digest(near.index!.array)).toBe(
+            historicalFineTemplates[0].hashes.index,
+          );
+        }
+        const mid = owner.geometries[1];
+        expect(digest(mid.attributes.position.array)).toBe(
+          "cf3ea7b781509d5f090f4cad5686500ae684f9e86d522f06b898bae731fa4d20",
+        );
+        expect(digest(mid.attributes.normal.array)).toBe(
+          "dcea6f798b52defa2c29ba47f222be4f695f568b847dc4001e3f514889de63f7",
+        );
+        expect(digest(mid.attributes.uv.array)).toBe(
+          historicalFineTemplates[1].hashes.uv,
+        );
+        expect(digest(mid.index!.array)).toBe(
+          historicalFineTemplates[1].hashes.index,
+        );
+        // The standalone near4 template adds 48 vertices and 48 triangles. These
+        // byte checks do not claim density, instance/root or runtime cost changes.
+        expect(geometryBytes(near)).toBe(
+          nearSegments === 3
+            ? 168 * 8 * 4 + 120 * 3 * 2
+            : 216 * 8 * 4 + 168 * 3 * 2,
+        );
+        expect(geometryBytes(mid)).toBe(60 * 8 * 4 + 36 * 3 * 2);
+      } finally {
+        owner.dispose();
+      }
+    },
+  );
 
   it("keeps the revised slender leaf and non-emissive albedo contract explicit", () => {
     expect(FINE_MEADOW_APPEARANCE).toEqual({
       id: "fine-meadow-v1",
+      GEOMETRY_LAYOUT: "fine-linear-sweep-3seg-v1",
       BLADE_HEIGHT_MIN: 0.38,
       BLADE_HEIGHT_MAX: 0.86,
       BLADE_WIDTH_RATIO: 0.045,
@@ -979,283 +1080,394 @@ describe("fine continuous meadow geometry candidate", () => {
     }
   });
 
-  it("uses independent slender roots with deterministic prefix-stable detail tiers", () => {
-    const owner = fine();
-    const repeated = fine();
-    try {
-      const geometries = owner["lodGeometries"];
-      for (let lod = 0; lod < 3; lod++) {
-        const geometry = geometries[lod];
-        // The arc changes positions/normals at every tier. Keep historical
-        // hashes as provenance, not newly blessed output snapshots; the exact
-        // lateral change is independently checked against archived bytes below.
-        expect(geometryDigest(geometry)).not.toBe(historicalHashes[lod]);
-        expect(geometryDigest(geometry)).toBe(
-          geometryDigest(repeated["lodGeometries"][lod]),
-        );
-        const tier = GRASS_CONFIG.LOD_TIERS[lod];
-        const stride = tier.bladeSegments * 2 + 1;
-        const positions = geometry.getAttribute("position");
-        const normals = geometry.getAttribute("normal");
-        expect(positions.count).toBe(tier.bladesPerClump * stride);
-        expect(geometry.index!.count / 3).toBe(
-          tier.bladesPerClump * (tier.bladeSegments * 2 - 1),
-        );
-        expect(Object.keys(geometry.attributes).sort()).toEqual([
-          "normal",
-          "position",
-          "uv",
-        ]);
-        for (const attribute of ["position", "normal", "uv"]) {
-          expect(geometry.attributes[attribute].array).toEqual(
-            repeated["lodGeometries"][lod].attributes[attribute].array,
+  it.each([3, 4] as const)(
+    "keeps deterministic progressive roots with %i near segments",
+    (nearSegments) => {
+      const owner = fineGeometryCase(nearSegments);
+      const repeated = fineGeometryCase(nearSegments);
+      try {
+        const geometries = owner.geometries;
+        for (let lod = 0; lod < 3; lod++) {
+          const geometry = geometries[lod];
+          // The arc changes positions/normals at every tier. Keep historical
+          // hashes as provenance, not newly blessed output snapshots; the exact
+          // lateral change is independently checked against archived bytes below.
+          expect(geometryDigest(geometry)).not.toBe(historicalHashes[lod]);
+          expect(geometryDigest(geometry)).toBe(
+            geometryDigest(repeated.geometries[lod]),
           );
-        }
-        const roots: THREE.Vector3[] = [];
-        for (let blade = 0; blade < tier.bladesPerClump; blade++) {
-          const base = blade * stride;
-          const left = new THREE.Vector3().fromBufferAttribute(positions, base);
-          const right = new THREE.Vector3().fromBufferAttribute(
-            positions,
-            base + 1,
+          const tier = GRASS_CONFIG.LOD_TIERS[lod];
+          const segments = lod === 0 ? nearSegments : tier.bladeSegments;
+          const stride = segments * 2 + 1;
+          const positions = geometry.getAttribute("position");
+          const normals = geometry.getAttribute("normal");
+          expect(positions.count).toBe(tier.bladesPerClump * stride);
+          expect(geometry.index!.count / 3).toBe(
+            tier.bladesPerClump * (segments * 2 - 1),
           );
-          const tip = new THREE.Vector3().fromBufferAttribute(
-            positions,
-            base + stride - 1,
-          );
-          const root = left.clone().add(right).multiplyScalar(0.5);
-          roots.push(root);
-          expect(root.y).toBe(0);
-          expect(tip.y).toBeGreaterThanOrEqual(
-            FINE_MEADOW_APPEARANCE.BLADE_HEIGHT_MIN *
-              FINE_MEADOW_APPEARANCE.BLADE_TIP_HEIGHT -
-              1e-7,
-          );
-          expect(tip.y).toBeLessThanOrEqual(
-            FINE_MEADOW_APPEARANCE.BLADE_HEIGHT_MAX *
-              FINE_MEADOW_APPEARANCE.BLADE_TIP_HEIGHT +
-              1e-7,
-          );
-          expect(
-            left.distanceTo(right) /
-              (tip.y / FINE_MEADOW_APPEARANCE.BLADE_TIP_HEIGHT),
-          ).toBeCloseTo(FINE_MEADOW_APPEARANCE.BLADE_WIDTH_RATIO, 6);
-          for (let vertex = base; vertex < base + stride; vertex++) {
-            const normal = new THREE.Vector3().fromBufferAttribute(
-              normals,
-              vertex,
+          expect(Object.keys(geometry.attributes).sort()).toEqual([
+            "normal",
+            "position",
+            "uv",
+          ]);
+          for (const attribute of ["position", "normal", "uv"]) {
+            expect(geometry.attributes[attribute].array).toEqual(
+              repeated.geometries[lod].attributes[attribute].array,
             );
-            expect(normal.toArray().every(Number.isFinite)).toBe(true);
-            expect(normal.length()).toBeCloseTo(1, 6);
           }
-          if (lod > 0) {
-            const near = geometries[0];
-            const nearBase = blade * 7;
-            for (const [currentVertex, nearVertex] of [
-              [base, nearBase],
-              [base + 1, nearBase + 1],
-              [base + stride - 1, nearBase + 6],
-            ]) {
-              for (const attribute of ["position", "normal"]) {
-                expect(
-                  new THREE.Vector3()
-                    .fromBufferAttribute(
-                      geometry.attributes[attribute],
-                      currentVertex,
-                    )
-                    .toArray(),
-                ).toEqual(
-                  new THREE.Vector3()
-                    .fromBufferAttribute(near.attributes[attribute], nearVertex)
-                    .toArray(),
-                );
-              }
-            }
-          }
-        }
-        // Each tier covers the clump disk, rather than retaining only short
-        // stems clustered at its center when detail is reduced.
-        expect(Math.max(...roots.map((root) => root.length()))).toBeGreaterThan(
-          0.58,
-        );
-        expect(roots.some((root) => root.x > 0.2)).toBe(true);
-        expect(roots.some((root) => root.x < -0.2)).toBe(true);
-        expect(
-          new Set(roots.map((root) => root.toArray().join(","))).size,
-        ).toBe(roots.length);
-      }
-    } finally {
-      owner.destroy();
-      repeated.destroy();
-    }
-  });
-
-  it("changes only the archived linear centerline arc and analytic normals while retaining the explicit leaf-area cost", () => {
-    const owner = fine();
-    try {
-      for (const saved of historicalFineTemplates) {
-        const lod = saved.lod;
-        const geometry = owner["lodGeometries"][lod];
-        const positions = geometry.getAttribute("position");
-        const normals = geometry.getAttribute("normal");
-        const oldValues = new Float32Array(
-          Uint8Array.from(Buffer.from(saved.positionBase64, "base64")).buffer,
-        );
-        const original = new THREE.BufferAttribute(oldValues, 3);
-        expect(digest(oldValues)).toBe(saved.hashes.position);
-        expect(digest(normals.array)).not.toBe(saved.hashes.normal);
-        expect(digest(geometry.getAttribute("uv").array)).toBe(saved.hashes.uv);
-        expect(digest(geometry.index!.array)).toBe(saved.hashes.index);
-        expect(digest(positions.array)).not.toBe(saved.hashes.position);
-        const { bladesPerClump: blades, bladeSegments: segments } =
-          GRASS_CONFIG.LOD_TIERS[lod];
-        const stride = segments * 2 + 1;
-        let linearArea = 0;
-        let shoulderArea = 0;
-        for (let blade = 0; blade < blades; blade++) {
-          const base = blade * stride;
-          const rootLeft = new THREE.Vector3().fromBufferAttribute(
-            original,
-            base,
-          );
-          const rootRight = new THREE.Vector3().fromBufferAttribute(
-            original,
-            base + 1,
-          );
-          const maximumWidth = rootLeft.distanceTo(rootRight);
-          const rootCenter = rootLeft
-            .clone()
-            .add(rootRight)
-            .multiplyScalar(0.5);
-          const sideAxis = rootRight.clone().sub(rootLeft).normalize();
-          const oldTip = new THREE.Vector3().fromBufferAttribute(
-            original,
-            base + stride - 1,
-          );
-          const arcDelta = oldTip.clone().sub(rootCenter).setY(0);
-          const height = original.getY(base + stride - 1) / 0.95;
-          let linearWidth = maximumWidth;
-          let shoulderWidth = maximumWidth;
-          let previousY = 0;
-          for (let row = 0; row <= segments; row++) {
-            const tip = row === segments;
-            const offset = tip ? stride - 1 : row * 2;
+          const roots: THREE.Vector3[] = [];
+          for (let blade = 0; blade < tier.bladesPerClump; blade++) {
+            const base = blade * stride;
             const left = new THREE.Vector3().fromBufferAttribute(
               positions,
-              base + offset,
+              base,
             );
-            const oldLeft = new THREE.Vector3().fromBufferAttribute(
-              original,
-              base + offset,
+            const right = new THREE.Vector3().fromBufferAttribute(
+              positions,
+              base + 1,
             );
-            const right = tip
-              ? left.clone()
-              : new THREE.Vector3().fromBufferAttribute(
-                  positions,
-                  base + offset + 1,
-                );
-            const oldRight = tip
-              ? oldLeft.clone()
-              : new THREE.Vector3().fromBufferAttribute(
-                  original,
-                  base + offset + 1,
-                );
-            const center = left.clone().add(right).multiplyScalar(0.5);
-            const oldCenter = oldLeft.clone().add(oldRight).multiplyScalar(0.5);
-            const t = row / segments;
-            // Arc .48 / historical .30 = 1.6. The frozen native03 coordinates
-            // supply the root, side axis and displacement independently of the
-            // current generator. Every edge moves by the same lateral delta.
-            const lateralChange = oldCenter
-              .clone()
-              .sub(rootCenter)
-              .setY(0)
-              .multiplyScalar(0.6);
-            for (const [actual, old] of [
-              [left, oldLeft],
-              [right, oldRight],
-            ]) {
-              expect(actual.y).toBe(old.y);
-              const expected = old.clone().add(lateralChange);
-              // Source and expected coordinates have independent Float32 edge
-              // rounding; retain a two-ulp-scale absolute comparison.
-              expect(actual.distanceTo(expected)).toBeLessThan(2e-7);
-              if (row === 0) expect(actual.toArray()).toEqual(old.toArray());
-            }
+            const tip = new THREE.Vector3().fromBufferAttribute(
+              positions,
+              base + stride - 1,
+            );
+            const root = left.clone().add(right).multiplyScalar(0.5);
+            roots.push(root);
+            expect(root.y).toBe(0);
+            expect(tip.y).toBeGreaterThanOrEqual(
+              FINE_MEADOW_APPEARANCE.BLADE_HEIGHT_MIN *
+                FINE_MEADOW_APPEARANCE.BLADE_TIP_HEIGHT -
+                1e-7,
+            );
+            expect(tip.y).toBeLessThanOrEqual(
+              FINE_MEADOW_APPEARANCE.BLADE_HEIGHT_MAX *
+                FINE_MEADOW_APPEARANCE.BLADE_TIP_HEIGHT +
+                1e-7,
+            );
             expect(
-              center.distanceTo(
-                rootCenter
-                  .clone()
-                  .addScaledVector(arcDelta, 1.6 * t * t)
-                  .setY(height * (1.52 * t - 0.57 * t * t)),
-              ),
-            ).toBeLessThan(2e-7);
-            const tangent = arcDelta
-              .clone()
-              .multiplyScalar(3.2 * t)
-              .setY(height * (1.52 - 1.14 * t));
-            const expectedNormal = sideAxis.clone().cross(tangent).normalize();
-            for (const vertex of tip
-              ? [base + offset]
-              : [base + offset, base + offset + 1]) {
+              left.distanceTo(right) /
+                (tip.y / FINE_MEADOW_APPEARANCE.BLADE_TIP_HEIGHT),
+            ).toBeCloseTo(FINE_MEADOW_APPEARANCE.BLADE_WIDTH_RATIO, 6);
+            for (let vertex = base; vertex < base + stride; vertex++) {
               const normal = new THREE.Vector3().fromBufferAttribute(
                 normals,
                 vertex,
               );
               expect(normal.toArray().every(Number.isFinite)).toBe(true);
               expect(normal.length()).toBeCloseTo(1, 6);
-              // Root-edge differencing magnifies archived Float32 rounding;
-              // this independent cross-product oracle is not a shader mock.
-              expect(normal.distanceTo(expectedNormal)).toBeLessThan(5e-6);
             }
-            const width = left.distanceTo(right);
-            expect(Math.abs(width - oldLeft.distanceTo(oldRight))).toBeLessThan(
-              2e-7,
-            );
-            expect(width).toBeLessThanOrEqual(maximumWidth + 1.3e-7);
-            // Explicit formulas are independent of the generator's taper
-            // fields and helper. The last vertex remains a single point.
-            expect(width).toBeCloseTo(
-              tip ? 0 : maximumWidth * (1 - 0.85 * t),
-              6,
-            );
-            const oldShoulderWidth = maximumWidth * (1 - t * t);
-            expect(center.y).toBeCloseTo(height * (1.52 * t - 0.57 * t * t), 7);
-            if (row > 0 && !tip) expect(width).toBeLessThan(oldShoulderWidth);
-            if (row > 0) {
-              // Exact side-axis/vertical orthographic strip area, not total
-              // GPU coverage: arbitrary view yaw and occlusion can differ.
-              linearArea +=
-                (center.y - previousY) * (linearWidth + width) * 0.5;
-              shoulderArea +=
-                (center.y - previousY) *
-                (shoulderWidth + oldShoulderWidth) *
-                0.5;
+            if (lod > 0) {
+              const near = geometries[0];
+              const nearStride = nearSegments * 2 + 1;
+              const nearBase = blade * nearStride;
+              for (const [currentVertex, nearVertex] of [
+                [base, nearBase],
+                [base + 1, nearBase + 1],
+                ...(lod === 1 && nearSegments === 4
+                  ? [
+                      [base + 2, nearBase + 4],
+                      [base + 3, nearBase + 5],
+                    ]
+                  : []),
+                [base + stride - 1, nearBase + nearStride - 1],
+              ]) {
+                for (const attribute of ["position", "normal", "uv"]) {
+                  expect(
+                    Array.from(geometry.attributes[attribute].array).slice(
+                      currentVertex * geometry.attributes[attribute].itemSize,
+                      (currentVertex + 1) *
+                        geometry.attributes[attribute].itemSize,
+                    ),
+                  ).toEqual(
+                    Array.from(near.attributes[attribute].array).slice(
+                      nearVertex * near.attributes[attribute].itemSize,
+                      (nearVertex + 1) * near.attributes[attribute].itemSize,
+                    ),
+                  );
+                }
+              }
             }
-            linearWidth = width;
-            shoulderWidth = oldShoulderWidth;
-            previousY = center.y;
           }
+          // Each tier covers the clump disk, rather than retaining only short
+          // stems clustered at its center when detail is reduced.
+          expect(
+            Math.max(...roots.map((root) => root.length())),
+          ).toBeGreaterThan(0.58);
+          expect(roots.some((root) => root.x > 0.2)).toBe(true);
+          expect(roots.some((root) => root.x < -0.2)).toBe(true);
+          expect(
+            new Set(roots.map((root) => root.toArray().join(","))).size,
+          ).toBe(roots.length);
         }
-        // Independent piecewise trapezoid integrals at the actual vertex rows.
-        const expectedRatio = lod === 0 ? 21736 / 36000 / (3781 / 5400) : 7 / 8;
-        expect(linearArea / shoulderArea).toBeCloseTo(expectedRatio, 5);
-        expect(linearArea).toBeLessThan(shoulderArea);
-        // This loss is a geometric cost of the finer silhouette, not a claim
-        // of improved visible density: approximately 13.77% near / 12.5% mid.
-        console.info("Fine swept-arc linear taper source geometry", {
-          lod,
-          linearArea,
-          shoulderArea,
-          ratio: linearArea / shoulderArea,
-          reductionFraction: 1 - linearArea / shoulderArea,
-          positionSHA256: digest(positions.array),
-        });
+      } finally {
+        owner.dispose();
+        repeated.dispose();
       }
-    } finally {
-      owner.destroy();
-    }
-  });
+    },
+  );
+
+  it.each([3, 4] as const)(
+    "evaluates the archived analytic curve at true %i-segment near rows",
+    (nearSegments) => {
+      const owner = fineGeometryCase(nearSegments);
+      try {
+        for (const saved of historicalFineTemplates) {
+          const lod = saved.lod;
+          const geometry = owner.geometries[lod];
+          const positions = geometry.getAttribute("position");
+          const normals = geometry.getAttribute("normal");
+          const uvs = geometry.getAttribute("uv");
+          const oldValues = new Float32Array(
+            Uint8Array.from(Buffer.from(saved.positionBase64, "base64")).buffer,
+          );
+          const original = new THREE.BufferAttribute(oldValues, 3);
+          expect(digest(oldValues)).toBe(saved.hashes.position);
+          expect(digest(normals.array)).not.toBe(saved.hashes.normal);
+          if (lod === 1 || nearSegments === 3) {
+            expect(digest(uvs.array)).toBe(saved.hashes.uv);
+            expect(digest(geometry.index!.array)).toBe(saved.hashes.index);
+          } else {
+            expect(digest(uvs.array)).not.toBe(saved.hashes.uv);
+            expect(digest(geometry.index!.array)).not.toBe(saved.hashes.index);
+          }
+          expect(digest(positions.array)).not.toBe(saved.hashes.position);
+          const { bladesPerClump: blades, bladeSegments: oldSegments } =
+            GRASS_CONFIG.LOD_TIERS[lod];
+          const segments = lod === 0 ? nearSegments : oldSegments;
+          const stride = segments * 2 + 1;
+          const oldStride = oldSegments * 2 + 1;
+          expect(positions.count).toBe(
+            lod === 0 ? (nearSegments === 3 ? 168 : 216) : 60,
+          );
+          expect(geometry.index!.count / 3).toBe(
+            lod === 0 ? (nearSegments === 3 ? 120 : 168) : 36,
+          );
+          let linearArea = 0;
+          let shoulderArea = 0;
+          let historicalLinearArea = 0;
+          let historicalShoulderArea = 0;
+          for (let blade = 0; blade < blades; blade++) {
+            const base = blade * stride;
+            const oldBase = blade * oldStride;
+            const rootLeft = new THREE.Vector3().fromBufferAttribute(
+              original,
+              oldBase,
+            );
+            const rootRight = new THREE.Vector3().fromBufferAttribute(
+              original,
+              oldBase + 1,
+            );
+            const maximumWidth = rootLeft.distanceTo(rootRight);
+            const rootCenter = rootLeft
+              .clone()
+              .add(rootRight)
+              .multiplyScalar(0.5);
+            const sideAxis = rootRight.clone().sub(rootLeft).normalize();
+            const oldTip = new THREE.Vector3().fromBufferAttribute(
+              original,
+              oldBase + oldStride - 1,
+            );
+            const arcDelta = oldTip.clone().sub(rootCenter).setY(0);
+            const height = original.getY(oldBase + oldStride - 1) / 0.95;
+            let linearWidth = maximumWidth;
+            let shoulderWidth = maximumWidth;
+            let previousY = 0;
+            for (let row = 0; row <= segments; row++) {
+              const tip = row === segments;
+              const offset = tip ? stride - 1 : row * 2;
+              const left = new THREE.Vector3().fromBufferAttribute(
+                positions,
+                base + offset,
+              );
+              const right = tip
+                ? left.clone()
+                : new THREE.Vector3().fromBufferAttribute(
+                    positions,
+                    base + offset + 1,
+                  );
+              const center = left.clone().add(right).multiplyScalar(0.5);
+              const t = row / segments;
+              // Arc .48 / historical .30 = 1.6. The frozen native03 coordinates
+              // independently supply roots, width, height and displacement.
+              // Evaluate the quadratic itself, never interpolate old vertices:
+              // the new .25/.5/.75 rows are not the old third-step polyline.
+              const expectedCenter = rootCenter
+                .clone()
+                .addScaledVector(arcDelta, 1.6 * t * t)
+                .setY(height * (1.52 * t - 0.57 * t * t));
+              const expectedWidth = tip ? 0 : maximumWidth * (1 - 0.85 * t);
+              for (const [side, actual] of [left, right].entries()) {
+                const expected = expectedCenter
+                  .clone()
+                  .addScaledVector(sideAxis, (side - 0.5) * expectedWidth);
+                expect(actual.distanceTo(expected)).toBeLessThan(2e-7);
+                if (row === 0)
+                  expect(actual.toArray()).toEqual(
+                    [rootLeft, rootRight][side].toArray(),
+                  );
+              }
+              expect(center.distanceTo(expectedCenter)).toBeLessThan(2e-7);
+              const rowVertices = tip
+                ? [base + offset]
+                : [base + offset, base + offset + 1];
+              for (const [side, vertex] of rowVertices.entries()) {
+                expect(uvs.getX(vertex)).toBe(tip ? 0.5 : side);
+                expect(uvs.getY(vertex)).toBe(Math.fround(t));
+              }
+              // Preserve the original equality assertions wherever the source
+              // sampling really coincides: all mid rows, near roots and tip.
+              if (Number.isInteger(t * oldSegments)) {
+                const oldOffset = tip ? oldStride - 1 : t * oldSegments * 2;
+                for (const [side, actual] of [left, right].entries()) {
+                  const old = new THREE.Vector3().fromBufferAttribute(
+                    original,
+                    oldBase + oldOffset + (tip ? 0 : side),
+                  );
+                  expect(actual.y).toBe(old.y);
+                }
+              }
+              const tangent = arcDelta
+                .clone()
+                .multiplyScalar(3.2 * t)
+                .setY(height * (1.52 - 1.14 * t));
+              const expectedNormal = sideAxis
+                .clone()
+                .cross(tangent)
+                .normalize();
+              for (const vertex of rowVertices) {
+                const normal = new THREE.Vector3().fromBufferAttribute(
+                  normals,
+                  vertex,
+                );
+                expect(normal.toArray().every(Number.isFinite)).toBe(true);
+                expect(normal.length()).toBeCloseTo(1, 6);
+                // Root-edge differencing magnifies archived Float32 rounding;
+                // this independent cross-product oracle is not a shader mock.
+                expect(normal.distanceTo(expectedNormal)).toBeLessThan(5e-6);
+              }
+              const width = left.distanceTo(right);
+              expect(width).toBeLessThanOrEqual(maximumWidth + 1.3e-7);
+              // Explicit formulas are independent of the generator's taper
+              // fields and helper. The last vertex remains a single point.
+              expect(width).toBeCloseTo(expectedWidth, 6);
+              const oldShoulderWidth = maximumWidth * (1 - t * t);
+              expect(center.y).toBeCloseTo(
+                height * (1.52 * t - 0.57 * t * t),
+                7,
+              );
+              if (row > 0 && !tip) expect(width).toBeLessThan(oldShoulderWidth);
+              if (row > 0) {
+                // Exact side-axis/vertical orthographic strip area, not total
+                // GPU coverage: arbitrary view yaw and occlusion can differ.
+                linearArea +=
+                  (center.y - previousY) * (linearWidth + width) * 0.5;
+                shoulderArea +=
+                  (center.y - previousY) *
+                  (shoulderWidth + oldShoulderWidth) *
+                  0.5;
+              }
+              linearWidth = width;
+              shoulderWidth = oldShoulderWidth;
+              previousY = center.y;
+            }
+            const expectedIndices: number[] = [];
+            for (let row = 0; row < segments - 1; row++) {
+              const left = base + row * 2;
+              expectedIndices.push(
+                left,
+                left + 1,
+                left + 2,
+                left + 1,
+                left + 3,
+                left + 2,
+              );
+            }
+            expectedIndices.push(
+              base + stride - 3,
+              base + stride - 2,
+              base + stride - 1,
+            );
+            const indicesPerBlade = (segments * 2 - 1) * 3;
+            expect(
+              Array.from(geometry.index!.array).slice(
+                blade * indicesPerBlade,
+                (blade + 1) * indicesPerBlade,
+              ),
+            ).toEqual(expectedIndices);
+            // Keep the historical three-step leaf-area evidence rather than
+            // replacing its old ratio with a newly blessed candidate number.
+            let oldLinearWidth = maximumWidth;
+            let oldShoulderWidth = maximumWidth;
+            let oldY = 0;
+            for (let row = 1; row <= oldSegments; row++) {
+              const t = row / oldSegments;
+              const offset = row === oldSegments ? oldStride - 1 : row * 2;
+              const left = new THREE.Vector3().fromBufferAttribute(
+                original,
+                oldBase + offset,
+              );
+              const right =
+                row === oldSegments
+                  ? left
+                  : new THREE.Vector3().fromBufferAttribute(
+                      original,
+                      oldBase + offset + 1,
+                    );
+              const width = left.distanceTo(right);
+              const shoulderWidth = maximumWidth * (1 - t * t);
+              const deltaY = left.y - oldY;
+              historicalLinearArea += deltaY * (oldLinearWidth + width) * 0.5;
+              historicalShoulderArea +=
+                deltaY * (oldShoulderWidth + shoulderWidth) * 0.5;
+              oldLinearWidth = width;
+              oldShoulderWidth = shoulderWidth;
+              oldY = left.y;
+            }
+          }
+          const historicalRatio =
+            lod === 0 ? 21736 / 36000 / (3781 / 5400) : 7 / 8;
+          expect(historicalLinearArea / historicalShoulderArea).toBeCloseTo(
+            historicalRatio,
+            5,
+          );
+          // Independent normalized trapezoids at the candidate's explicit rows.
+          const rows =
+            lod === 0
+              ? nearSegments === 3
+                ? [0, 1 / 3, 2 / 3, 1]
+                : [0, 0.25, 0.5, 0.75, 1]
+              : [0, 0.5, 1];
+          const integral = (widthAt: (t: number) => number) =>
+            rows.slice(1).reduce((area, t, i) => {
+              const previousT = rows[i];
+              const y = (t: number) => 1.52 * t - 0.57 * t * t;
+              return (
+                area +
+                (y(t) - y(previousT)) * (widthAt(t) + widthAt(previousT)) * 0.5
+              );
+            }, 0);
+          const expectedRatio =
+            integral((t) => (t === 1 ? 0 : 1 - 0.85 * t)) /
+            integral((t) => 1 - t * t);
+          expect(linearArea / shoulderArea).toBeCloseTo(expectedRatio, 5);
+          expect(linearArea).toBeLessThan(shoulderArea);
+          // Source strip area is not visible density or performance approval.
+          console.info("Fine swept-arc linear taper source geometry", {
+            lod,
+            segments,
+            linearArea,
+            shoulderArea,
+            historicalLinearArea,
+            historicalRatio,
+            ratio: linearArea / shoulderArea,
+            reductionFraction: 1 - linearArea / shoulderArea,
+            positionSHA256: digest(positions.array),
+          });
+        }
+      } finally {
+        owner.dispose();
+      }
+    },
+  );
 
   it("retains every lower-profile geometry byte against the archived production generator", () => {
     // Generated once from the actual source SHA above; neither Git nor an

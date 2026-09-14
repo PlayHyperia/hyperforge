@@ -11,14 +11,12 @@ import {
 import { MeshStandardNodeMaterial, StorageBufferAttribute } from "three/webgpu";
 import type Node from "three/src/nodes/core/Node.js";
 import type { GrassBladeGroundingResult } from "./GrassBladeGrounding";
+import {
+  getGrassBladeLayout,
+  type FineGrassGeometryLayout,
+} from "./GrassBladeLayout";
 
 export const GRASS_ROOT_STORAGE_ATTRIBUTE = "grassRootDeltas";
-
-const TIERS = [
-  { blades: 24, vertices: 7 },
-  { blades: 12, vertices: 5 },
-  { blades: 4, vertices: 3 },
-] as const;
 
 /** One chunk's correction binding. Shared material nodes/uniforms/maps stay
  * borrowed. Geometry owns the storage buffer's native lifetime, not material. */
@@ -28,17 +26,17 @@ export function createGroundedGrassMaterial(
   rootDeltas: Float32Array,
   count: number,
   lod: number,
+  geometryLayout?: FineGrassGeometryLayout,
 ): MeshStandardNodeMaterial {
-  const tier = TIERS[lod];
+  const tier = getGrassBladeLayout(lod, geometryLayout);
   if (
-    !tier ||
     !base.positionNode ||
     !Number.isSafeInteger(count) ||
     count < 1 ||
     count > 4096 ||
     !(rootDeltas instanceof Float32Array) ||
-    rootDeltas.length !== count * tier.blades * 2 ||
-    geometry.getAttribute("position")?.count !== tier.blades * tier.vertices ||
+    rootDeltas.length !== count * tier.bladesPerClump * tier.rootComponents ||
+    geometry.getAttribute("position")?.count !== tier.verticesPerClump ||
     geometry.hasAttribute(GRASS_ROOT_STORAGE_ATTRIBUTE)
   )
     throw new Error("Invalid grounded grass binding");
@@ -47,10 +45,17 @@ export function createGroundedGrassMaterial(
   const buffer = new StorageBufferAttribute(rootDeltas, 2);
   const roots = storage(buffer, "vec2", 0).toReadOnly();
   const address = instanceIndex
-    .mul(uint(tier.blades))
-    .add(vertexIndex.div(uint(tier.vertices)));
+    .mul(uint(tier.bladesPerClump))
+    .add(vertexIndex.div(uint(tier.verticesPerBlade)));
   const delta = roots.element(address);
   const material = base.clone();
+  if (geometryLayout !== undefined)
+    Object.defineProperty(material.userData, "grassBladeLayout", {
+      enumerable: true,
+      configurable: false,
+      writable: false,
+      value: tier,
+    });
   // NodeMaterial's public declaration erases the position slot's vector type.
   const basePosition = base.positionNode as Node<"vec3">;
   material.positionNode = vec3(basePosition).add(

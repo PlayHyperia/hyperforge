@@ -3,6 +3,10 @@ import { MeshStandardNodeMaterial, StorageBufferAttribute } from "three/webgpu";
 import { instanceIndex, uniform, vec3, vertexIndex } from "three/tsl";
 import type Node from "three/src/nodes/core/Node.js";
 import type StorageBufferNode from "three/src/nodes/accessors/StorageBufferNode.js";
+import {
+  getGrassBladeLayout,
+  type FineGrassGeometryLayout,
+} from "../GrassBladeLayout";
 import THREE from "../../../../extras/three/three";
 import {
   createGroundedGrassMaterial,
@@ -52,6 +56,65 @@ function storageAddress(node: Node, instance: number, vertex: number): number {
 }
 
 describe("real Three grounding bindings and provenance (not a GPU test)", () => {
+  it("admits only explicit bounded layouts, not array-derived topology", () => {
+    expect(getGrassBladeLayout(0)).toMatchObject({
+      verticesPerBlade: 7,
+      verticesPerClump: 168,
+      trianglesPerClump: 120,
+    });
+    expect(getGrassBladeLayout(0, "fine-linear-sweep-near4-v1")).toMatchObject({
+      verticesPerBlade: 9,
+      verticesPerClump: 216,
+      trianglesPerClump: 168,
+      rootComponents: 2,
+    });
+    expect(getGrassBladeLayout(1, "fine-linear-sweep-near4-v1")).toMatchObject({
+      verticesPerBlade: 5,
+      verticesPerClump: 60,
+      trianglesPerClump: 36,
+    });
+    for (const lod of [-1, 3, 0.5, NaN, Infinity])
+      expect(() => getGrassBladeLayout(lod)).toThrow(/layout/);
+    for (const layout of [
+      null,
+      "",
+      "ordinary-v1",
+      {},
+      "fine-linear-sweep-near5-v1",
+    ])
+      expect(() =>
+        getGrassBladeLayout(0, layout as FineGrassGeometryLayout),
+      ).toThrow(/layout/);
+    const base = new MeshStandardNodeMaterial();
+    base.positionNode = vec3(0);
+    for (const [vertices, layout] of [
+      [216, undefined],
+      [216, "fine-linear-sweep-3seg-v1"],
+      [168, "fine-linear-sweep-near4-v1"],
+    ] as const) {
+      const geometry = new THREE.BufferGeometry();
+      geometry.setAttribute(
+        "position",
+        new THREE.BufferAttribute(new Float32Array(vertices * 3), 3),
+      );
+      try {
+        expect(() =>
+          createGroundedGrassMaterial(
+            base,
+            geometry,
+            new Float32Array(48),
+            1,
+            0,
+            layout,
+          ),
+        ).toThrow(/binding/);
+        expect(geometry.hasAttribute(GRASS_ROOT_STORAGE_ATTRIBUTE)).toBe(false);
+      } finally {
+        geometry.dispose();
+      }
+    }
+    base.dispose();
+  });
   it.each([0, 1, 2])(
     "owns one independent LOD%s storage binding per chunk while borrowing base nodes/maps",
     (lod) => {
@@ -177,13 +240,41 @@ describe("real Three grounding bindings and provenance (not a GPU test)", () => 
   });
 
   it.each([
-    { lod: 0, blades: 24, vertices: 7, count: 1276 },
-    { lod: 1, blades: 12, vertices: 5, count: 1276 },
-    { lod: 0, blades: 24, vertices: 7, count: 4096 },
-    { lod: 1, blades: 12, vertices: 5, count: 4096 },
+    { lod: 0, blades: 24, vertices: 7, count: 1276, geometryLayout: undefined },
+    { lod: 1, blades: 12, vertices: 5, count: 1276, geometryLayout: undefined },
+    { lod: 0, blades: 24, vertices: 7, count: 4096, geometryLayout: undefined },
+    { lod: 1, blades: 12, vertices: 5, count: 4096, geometryLayout: undefined },
+    {
+      lod: 0,
+      blades: 24,
+      vertices: 7,
+      count: 1276,
+      geometryLayout: "fine-linear-sweep-3seg-v1" as const,
+    },
+    {
+      lod: 0,
+      blades: 24,
+      vertices: 9,
+      count: 1276,
+      geometryLayout: "fine-linear-sweep-near4-v1" as const,
+    },
+    {
+      lod: 0,
+      blades: 24,
+      vertices: 9,
+      count: 4096,
+      geometryLayout: "fine-linear-sweep-near4-v1" as const,
+    },
+    {
+      lod: 1,
+      blades: 12,
+      vertices: 5,
+      count: 1276,
+      geometryLayout: "fine-linear-sweep-near4-v1" as const,
+    },
   ])(
     "keeps LOD$lod count$count correction capacity and every boundary address exact",
-    ({ lod, blades, vertices, count }) => {
+    ({ lod, blades, vertices, count, geometryLayout }) => {
       // 1,276 is the complete proposed 25 m/.7 m candidate quota, not an
       // accepted-population claim. The existing 4,096 hard cap stays unchanged.
       expect(Math.ceil(25 ** 2 / 0.7 ** 2)).toBe(1276);
@@ -205,6 +296,7 @@ describe("real Three grounding bindings and provenance (not a GPU test)", () => 
             new Float32Array(count * otherBlades * 2),
             count,
             lod,
+            geometryLayout,
           ),
         ).toThrow("Invalid grounded grass binding");
         expect(geometry.hasAttribute(GRASS_ROOT_STORAGE_ATTRIBUTE)).toBe(false);
@@ -215,6 +307,7 @@ describe("real Three grounding bindings and provenance (not a GPU test)", () => 
             new Float32Array(4097 * blades * 2),
             4097,
             lod,
+            geometryLayout,
           ),
         ).toThrow("Invalid grounded grass binding");
         expect(geometry.hasAttribute(GRASS_ROOT_STORAGE_ATTRIBUTE)).toBe(false);
@@ -229,7 +322,27 @@ describe("real Three grounding bindings and provenance (not a GPU test)", () => 
           deltas,
           count,
           lod,
+          geometryLayout,
         );
+        if (geometryLayout === undefined)
+          expect(Object.hasOwn(material.userData, "grassBladeLayout")).toBe(
+            false,
+          );
+        else {
+          const descriptor = getGrassBladeLayout(lod, geometryLayout);
+          expect(material.userData.grassBladeLayout).toBe(descriptor);
+          expect(Object.isFrozen(descriptor)).toBe(true);
+          expect(
+            Object.getOwnPropertyDescriptor(
+              material.userData,
+              "grassBladeLayout",
+            ),
+          ).toMatchObject({
+            writable: false,
+            configurable: false,
+            enumerable: true,
+          });
+        }
         const binding = geometry.getAttribute(GRASS_ROOT_STORAGE_ATTRIBUTE);
         expect(binding).toBeInstanceOf(StorageBufferAttribute);
         expect(binding.itemSize).toBe(2);

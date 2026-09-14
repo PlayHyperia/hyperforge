@@ -86,6 +86,11 @@ export type GrassTerrainSurfaceOperations = {
     x: number,
     z: number,
   ): boolean;
+  /** Validated polygon/finite swept bounds; boundary contact is not a miss. */
+  exclusionBoundsOverlap(
+    polygon: GrassTerrainExclusionPolygon,
+    bounds: { minX: number; maxX: number; minZ: number; maxZ: number },
+  ): boolean;
   /** SAT against a full swept blade AABB, including boundary contact. */
   intersectsExclusionSteps(
     polygon: GrassTerrainExclusionPolygon,
@@ -633,15 +638,17 @@ export function createGrassTerrainSurfaceOperations(): GrassTerrainSurfaceOperat
       }
       return false;
     },
-    *intersectsExclusionSteps(p, box) {
-      yield "polygon_bounds";
-      if (
+    exclusionBoundsOverlap(p, box) {
+      return !(
         box.maxX < p.minX ||
         box.minX > p.maxX ||
         box.maxZ < p.minZ ||
         box.minZ > p.maxZ
-      )
-        return false;
+      );
+    },
+    *intersectsExclusionSteps(p, box) {
+      yield "polygon_bounds";
+      if (!operations.exclusionBoundsOverlap(p, box)) return false;
       for (let i = 0; i < p.vertices.length; i++) {
         yield "polygon_edge";
         const a = p.vertices[i],

@@ -32,10 +32,12 @@ import {
 } from "../TerrainShader";
 import {
   FINE_MEADOW_GRASS_VISUAL_PROFILE,
+  FINE_MEADOW_APPEARANCE,
   GRASS_CONFIG,
   STREAMING_GRASS_VISUAL_PROFILE,
   GrassVisualManager,
 } from "../GrassVisualManager";
+import { getGrassBladeLayout } from "../GrassBladeLayout";
 
 /** Actual World terrain, road constraints, retained geometry, placement and
  * grounding pipeline. Test orchestration does not replace manager methods. */
@@ -541,6 +543,7 @@ describe("fine meadow cells borrow actual terrain owners without replacing them"
       const result = groundGrassBlades({
         data: projected,
         lod: 0,
+        geometryLayout: FINE_MEADOW_APPEARANCE.GEOMETRY_LAYOUT,
         geometry: f.owner["lodGeometries"][0],
         ownSurface: surface,
         surfaces: [surface],
@@ -710,7 +713,33 @@ describe("fine meadow cells borrow actual terrain owners without replacing them"
       expect(chunk.work).toBe(f.work);
       expect(chunk.lodLevel).toBe(0);
       expect(chunk.mesh.position.toArray()).toEqual([350, 0, 350]);
-      expect(chunk.mesh.geometry.getAttribute("position").count).toBe(168);
+      const layout = getGrassBladeLayout(
+        0,
+        FINE_MEADOW_APPEARANCE.GEOMETRY_LAYOUT,
+      );
+      expect(chunk.mesh.geometry.getAttribute("position").count).toBe(
+        layout.verticesPerClump,
+      );
+      expect(chunk.mesh.geometry.index!.count / 3).toBe(
+        layout.trianglesPerClump,
+      );
+      expect(f.owner.getProfileReceipt().geometryLayout).toBe(
+        FINE_MEADOW_APPEARANCE.GEOMETRY_LAYOUT,
+      );
+      expect(chunk.mesh.userData.grassBladeGrounding.geometryLayout).toBe(
+        FINE_MEADOW_APPEARANCE.GEOMETRY_LAYOUT,
+      );
+      expect(chunk.mesh.material.userData.grassBladeLayout).toBe(layout);
+      expect(
+        Object.getOwnPropertyDescriptor(
+          chunk.mesh.material.userData,
+          "grassBladeLayout",
+        ),
+      ).toMatchObject({
+        writable: false,
+        configurable: false,
+        enumerable: true,
+      });
       expect(chunk.mesh.geometry.getAttribute("grassRootDeltas").count).toBe(
         chunk.mesh.count * 24,
       );
@@ -891,7 +920,16 @@ describe("fine meadow cells borrow actual terrain owners without replacing them"
       await f.owner.precompileRepresentativeChunk(async (object) => {
         expect(object).toBeInstanceOf(THREE.InstancedMesh);
         const mesh = object as THREE.InstancedMesh;
-        expect(mesh.geometry.getAttribute("position").count).toBe(168);
+        const layout = getGrassBladeLayout(
+          0,
+          FINE_MEADOW_APPEARANCE.GEOMETRY_LAYOUT,
+        );
+        expect(mesh.geometry.getAttribute("position").count).toBe(
+          layout.verticesPerClump,
+        );
+        expect(
+          (mesh.material as THREE.Material).userData.grassBladeLayout,
+        ).toBe(layout);
         expect(mesh.geometry.getAttribute("grassRootDeltas").count).toBe(24);
         observed = true;
       });

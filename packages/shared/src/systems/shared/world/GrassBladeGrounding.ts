@@ -5,6 +5,10 @@ import {
 } from "../../../utils/workers/GrassTerrainSurfaceSnapshot";
 import type { GrassAnchorData, GrassGrounding } from "./GrassTerrainProjection";
 import {
+  getGrassBladeLayout,
+  type FineGrassGeometryLayout,
+} from "./GrassBladeLayout";
+import {
   RetainedTerrainSurface,
   type TerrainGridBounds,
   type TerrainGridSample,
@@ -20,11 +24,6 @@ export const GRASS_BLADE_GROUNDING_LIMITS = Object.freeze({
   maximumWorkBudget: 1_000_000,
 });
 
-const LODS = [
-  { blades: 24, segments: 3 },
-  { blades: 12, segments: 2 },
-  { blades: 4, segments: 1 },
-] as const;
 const NUMERIC_GUARD = 0.00001;
 // Bound cheap validation work without allocating an iterator result per float.
 // This is not the geometric work budget, which still charges every take().
@@ -45,6 +44,8 @@ export type GrassBladeGroundingRequest = {
   data: GrassAnchorData;
   geometry: THREE.BufferGeometry;
   lod: 0 | 1 | 2;
+  /** Omission is the ordinary layout, not automatic fine topology detection. */
+  geometryLayout?: FineGrassGeometryLayout;
   ownSurface: RetainedTerrainSurface;
   /** Exact currently drawn own/neighbour surfaces, with no parent overlap. */
   surfaces: readonly RetainedTerrainSurface[];
@@ -72,6 +73,7 @@ export type GrassBladeGroundingReceipt = {
   processedClumps: number;
   retainedClumps: number;
   bladesPerClump: number;
+  geometryLayout?: FineGrassGeometryLayout;
   endpointQueries: number;
   triangleVisits: number;
   workUnits: number;
@@ -189,11 +191,16 @@ function segmentBoxDistance(
   return distance;
 }
 
-function* validateGeometry(geometry: THREE.BufferGeometry, lod: 0 | 1 | 2) {
-  const tier = LODS[lod];
-  if (!tier) throw new Error("Invalid grass grounding LOD");
-  const { blades, segments } = tier,
-    verticesPerBlade = segments * 2 + 1;
+function* validateGeometry(
+  geometry: THREE.BufferGeometry,
+  lod: 0 | 1 | 2,
+  geometryLayout?: FineGrassGeometryLayout,
+) {
+  const {
+    bladesPerClump: blades,
+    bladeSegments: segments,
+    verticesPerBlade,
+  } = getGrassBladeLayout(lod, geometryLayout);
   const vertices = blades * verticesPerBlade;
   const position = geometry.getAttribute("position"),
     normal = geometry.getAttribute("normal"),
@@ -292,7 +299,7 @@ export function* groundGrassBladeSteps(
 ): Generator<string, GrassBladeGroundingResult, void> {
   yield "request_bounds";
   const started = performance.now();
-  const { data, ownSurface, geometry, lod, wind } = request;
+  const { data, ownSurface, geometry, lod, wind, geometryLayout } = request;
   const workBudget =
     request.workBudget ?? GRASS_BLADE_GROUNDING_LIMITS.defaultWorkBudget;
   const maximumBaseError = request.maximumBaseError ?? 0.02;
@@ -395,6 +402,7 @@ export function* groundGrassBladeSteps(
   const { blades, verticesPerBlade, position, uv } = yield* validateGeometry(
     geometry,
     lod,
+    geometryLayout,
   );
   const entries: SurfaceEntry[] = request.surfaces.map((surface) => ({
     surface,
@@ -413,6 +421,7 @@ export function* groundGrassBladeSteps(
     processedClumps: 0,
     retainedClumps: 0,
     bladesPerClump: blades,
+    ...(geometryLayout === undefined ? {} : { geometryLayout }),
     endpointQueries: 0,
     triangleVisits: 0,
     workUnits: 0,
@@ -655,8 +664,18 @@ export function* groundGrassBladeSteps(
     // Extend static grass rejection to all-LOD rock silhouettes. Test the full
     // swept blade box, not only its root, so wind cannot enter adjacent rocks.
     for (const polygon of snapshot.exclusionPolygons ?? []) {
+      // Preserve the original initial yield -> charge -> bounds check. Known
+      // misses need no SAT generator; possible hits retain the same edge work.
+      yield "grounding_operation";
+      take();
+      if (!surfaceOperations.exclusionBoundsOverlap(polygon, box)) continue;
       const steps = surfaceOperations.intersectsExclusionSteps(polygon, box);
       let step = steps.next();
+      if (step.done || step.value !== "polygon_bounds")
+        throw new Error("Invalid grass exclusion bounds continuation");
+      // The public iterator's initial bounds yield was already charged above.
+      // Resume synchronously: do not cache geometry/bounds across another yield.
+      step = steps.next();
       while (!step.done) {
         yield "grounding_operation";
         take();

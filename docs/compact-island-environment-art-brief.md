@@ -1,5 +1,39 @@
 # Compact island environment art: next delivery slice
 
+## Restored-three native follow-up — scoped pass, canopy/performance still open
+
+The unchanged restored-three source completes `fine-grass-near3-rail-target01`:
+three daylight views, native geometry/root checks, wind, actual LOD0→1→0,
+exact post-return source/root bytes and final scheduling. Target-only passive
+telemetry records both jobs finishing ready; it does not establish why the
+earlier near4 rail failed. External preflight passes81/81. Overall exit1 remains
+for missing cow assets, with dagger fit still blocked; cleanup is clean.
+CPU p95 campus/close19.80/18.50ms and GPU pass-sum p9529.10/28.70ms are
+diagnostic windows, not presented FPS or an isolated restoration speedup.
+Close and overview grass still lack the reference's fine overlapping canopy.
+Do not promote the art or hide its cost; investigate light response and real
+canopy coverage instead of another small taper or unproven scheduling rewrite.
+
+## Current near4 decision — reject added geometry; recover canopy, not just curves
+
+The extra close-range segment passes independent geometry/root-addressing/wind
+checks and reaches actual WebGPU screenshots and motion capture. Root and
+independent comparison find only a small bend improvement: broad lower strips,
+gaps and muted shading still miss the supplied soft, overlapping meadow. The
+extra 48 triangles per near clump do not earn promotion on this evidence.
+Restore the three-segment selection, retain the experiment, and focus on canopy
+coverage, ground-to-blade integration and coherent shading without a hidden
+density, resolution or quality reduction.
+
+The complete attempted native diagnostic `fine-grass-near4-daylight01` is failed,
+not approved: daylight wind completes, but the out/back rail observes LOD [0]
+instead of [0,1,0]. GPU render-pass p95 is 28.64/28.31 ms and CPU tick p95
+21.80/22.20 ms across campus/close windows; these are instrumented observations,
+not presented FPS or a measured near4 delta against a matched current baseline.
+Serial regression also exposes one existing dense-baseline active-budget failure
+(458/459). Preserve these launch gaps; do not treat 139/139 focused tests,
+79/79 harness checks and successful builds as visual/performance approval.
+
 ## Current substrate verdict — quieter ground retained; blade quality remains open
 
 Fine-only grass albedo now retains 35% of scanned RGB variation around the
@@ -56,8 +90,13 @@ The preceding lateral-sweep/grounding checkpoint is pushed as
 `bff5070a6f797c801aa5668ffe509e79ca61c4d3` under dreaminglucid, exactly seven
 files with normal hooks. This substrate checkpoint's commit/publication status
 is tracked separately in the external fine-meadow COMMIT_RECEIPT.json.
-Next: reduce exclusion-check allocation without changing budget/charge semantics,
-then qualify genuine close-view blade curvature and overlap improvements.
+Following this visual checkpoint, an uncommitted exclusion-check allocation
+candidate passes 59/59 focused and 452/452 serial, but concurrent load still fails
+449/452. All type checks/builds pass; no native run after that candidate or measured
+speedup is claimed. A real single-file V8/worker profile (19/19 tests) points toward
+continuation/geometry work for the next measured investigation. Full receipts and
+limits are in the external fine-meadow QUALIFICATION.md. Continue close-view blade
+curvature/overlap work separately; these remaining art and cost gates stay open.
 
 ## Previous sweep verdict — modest shape improvement; grass quality remains open
 

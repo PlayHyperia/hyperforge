@@ -300,6 +300,8 @@ export type GrassSurfaceEligibility = "legacy-biome-v1" | "compact-pbr-v1";
 
 export type StreamingGrassProfileReceipt = {
   schemaVersion: 1;
+  /** Explicit fine geometry/addressing revision; absent for ordinary owners. */
+  geometryLayout?: import("../systems/shared/world/GrassBladeLayout").FineGrassGeometryLayout;
   profileId:
     | "ordinary-v1"
     | "fixed-arena-v1"

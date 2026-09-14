@@ -14,6 +14,7 @@ import {
   type GrassTerrainSurfaceSnapshot,
   type GrassTerrainSurfaceZone,
   type GrassTerrainWaterBody,
+  type GrassTerrainExclusionPolygon,
 } from "./GrassTerrainSurfaceSnapshot";
 
 const operations = createGrassTerrainSurfaceOperations();
@@ -65,6 +66,7 @@ type WorkerReceipt = {
   candidateIds: string[][];
   indexedZoneReferences: number;
   excluded: boolean[];
+  boxes?: { boundsOverlap: boolean; phases: string[]; intersects: boolean }[];
 };
 
 /** Real Node worker and native structured clone; no game or transport mocks. */
@@ -80,7 +82,15 @@ function actualWorker(
         const snapshot = operations.validateSnapshot(input.snapshot);
         const index = operations.createZoneIndex(snapshot, input.tileSize ?? 100);
         const points = input.points ?? [];
+        const boxes = input.boxes?.map(box => {
+          const polygon = snapshot.exclusionPolygons[0];
+          const steps = operations.intersectsExclusionSteps(polygon, box);
+          const phases = []; let step = steps.next();
+          while (!step.done) { phases.push(step.value); step = steps.next(); }
+          return { boundsOverlap: operations.exclusionBoundsOverlap(polygon, box), phases, intersects: step.value };
+        });
         parentPort.postMessage({ snapshot, indexedZoneReferences: index.indexedZoneReferences,
+          ...(boxes ? { boxes } : {}),
           excluded: points.map(p => operations.isGrassExcluded(snapshot, p[0], p[1])),
           water: points.map(p => operations.getWaterSurfaceAt(snapshot, input.oceanLevel ?? 16, p[0], p[1])),
           candidateIds: points.map(p => index.getZonesAt(p[0], p[1]).map(z => z.id)) });
@@ -253,6 +263,63 @@ describe("detached grass terrain surface requests", () => {
     expect(overlap(2.001, 3, 0, 1)).toBe(false);
     expect(overlap(-3, 3, -0.1, 0.1)).toBe(true);
     expect(overlap(-0.1, 0.1, -0.1, 0.1)).toBe(true);
+  });
+
+  it("keeps shared AABB misses strict and reads bounds only after the public initial yield", () => {
+    const polygon: GrassTerrainExclusionPolygon = {
+      id: "bounds-order",
+      minX: -2,
+      maxX: 2,
+      minZ: -2,
+      maxZ: 2,
+      vertices: [
+        { x: -2, z: -2 },
+        { x: 2, z: -2 },
+        { x: 2, z: 2 },
+        { x: -2, z: 2 },
+      ],
+    };
+    operations.validateSnapshot({
+      ...snapshot([]),
+      exclusionPolygons: [polygon],
+    });
+    for (const [box, expected] of [
+      [{ minX: 2, maxX: 3, minZ: 0, maxZ: 1 }, true],
+      [{ minX: -3, maxX: -2, minZ: 0, maxZ: 1 }, true],
+      [{ minX: 0, maxX: 1, minZ: 2, maxZ: 3 }, true],
+      [{ minX: 0, maxX: 1, minZ: -3, maxZ: -2 }, true],
+      [{ minX: 2, maxX: 3, minZ: 2, maxZ: 3 }, true],
+      [{ minX: 2 + 1e-10, maxX: 3, minZ: 0, maxZ: 1 }, false],
+      [{ minX: -3, maxX: -2 - 1e-10, minZ: 0, maxZ: 1 }, false],
+      [{ minX: 0, maxX: 1, minZ: 2 + 1e-10, maxZ: 3 }, false],
+      [{ minX: 0, maxX: 1, minZ: -3, maxZ: -2 - 1e-10 }, false],
+    ] as const) {
+      expect(operations.exclusionBoundsOverlap(polygon, box)).toBe(expected);
+      const steps = operations.intersectsExclusionSteps(polygon, box);
+      const phases: string[] = [];
+      let step = steps.next();
+      while (!step.done) {
+        phases.push(step.value);
+        step = steps.next();
+      }
+      expect(step.value).toBe(expected);
+      expect(phases).toEqual(
+        expected
+          ? ["polygon_bounds", ...Array(4).fill("polygon_edge")]
+          : ["polygon_bounds"],
+      );
+    }
+    // Change an actual query between resumptions: the initial bounds yield may
+    // not eagerly decide the overlap before its caller has charged the work.
+    const box = { minX: 10, maxX: 11, minZ: 0, maxZ: 1 };
+    const steps = operations.intersectsExclusionSteps(polygon, box);
+    expect(steps.next()).toEqual({ done: false, value: "polygon_bounds" });
+    box.minX = 2;
+    box.maxX = 3;
+    expect(steps.next()).toEqual({ done: false, value: "polygon_edge" });
+    for (let i = 1; i < 4; i++)
+      expect(steps.next()).toEqual({ done: false, value: "polygon_edge" });
+    expect(steps.next()).toEqual({ done: true, value: true });
   });
 
   it("resumes the maximum admitted mask without skipping validation or mutating input", () => {
@@ -645,11 +712,40 @@ describe("detached grass terrain surface requests", () => {
     const worker = actualWorker(factorySource);
     try {
       const result = await worker.execute({
-        snapshot: snapshot([masked()]),
+        snapshot: {
+          ...snapshot([masked()]),
+          exclusionPolygons: [
+            {
+              id: "worker-bounds",
+              minX: -2,
+              maxX: 2,
+              minZ: -2,
+              maxZ: 2,
+              vertices: [
+                { x: -2, z: -2 },
+                { x: 2, z: -2 },
+                { x: 2, z: 2 },
+                { x: -2, z: 2 },
+              ],
+            },
+          ],
+        },
         points: [[0, 0]],
+        boxes: [
+          { minX: 2, maxX: 3, minZ: 0, maxZ: 1 },
+          { minX: 2.001, maxX: 3, minZ: 0, maxZ: 1 },
+        ],
       });
       expect(result.error).toBeUndefined();
       expect(result.candidateIds).toEqual([["L-footprint"]]);
+      expect(result.boxes).toEqual([
+        {
+          boundsOverlap: true,
+          phases: ["polygon_bounds", ...Array(4).fill("polygon_edge")],
+          intersects: true,
+        },
+        { boundsOverlap: false, phases: ["polygon_bounds"], intersects: false },
+      ]);
     } finally {
       await worker.close();
     }

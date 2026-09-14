@@ -17,6 +17,7 @@ import {
   FINE_MEADOW_GRASS_VISUAL_PROFILE,
   GRASS_CONFIG,
   GrassVisualManager,
+  createClumpGeometry,
   NATURAL_TUFT_APPEARANCE,
   type GrassWorkerSetup,
   type GrassVisualProfile,
@@ -26,6 +27,7 @@ import {
   createGroundedGrassMaterial,
   GRASS_ROOT_STORAGE_ATTRIBUTE,
 } from "../GrassGroundingGpu";
+import { getGrassBladeLayout } from "../GrassBladeLayout";
 
 function createOwner(
   candidate: boolean | "fine" = true,
@@ -76,6 +78,44 @@ function createOwner(
         ? NATURAL_TUFT_APPEARANCE.id
         : undefined,
   );
+}
+
+function deformationFixture(
+  variant: "natural" | "fine" | "isolated-fine-near4",
+) {
+  const isFine = variant !== "natural";
+  const owner = createOwner(isFine ? "fine" : true);
+  const appearance = isFine ? FINE_MEADOW_APPEARANCE : NATURAL_TUFT_APPEARANCE;
+  const geometryLayout = !isFine
+    ? undefined
+    : variant === "isolated-fine-near4"
+      ? "fine-linear-sweep-near4-v1"
+      : FINE_MEADOW_APPEARANCE.GEOMETRY_LAYOUT;
+  // The shader has no segment-dependent branch. These are independent real
+  // four-segment templates, not a claim that the current manager selects four.
+  const geometries =
+    variant === "isolated-fine-near4"
+      ? [0, 1, 2].map((lod) => {
+          const layout = getGrassBladeLayout(lod, geometryLayout);
+          return createClumpGeometry(
+            layout.bladesPerClump,
+            layout.bladeSegments,
+            appearance,
+          );
+        })
+      : owner["lodGeometries"];
+  return {
+    owner,
+    appearance,
+    geometryLayout,
+    geometries,
+    isFine,
+    close() {
+      if (variant === "isolated-fine-near4")
+        geometries.forEach((geometry) => geometry.dispose());
+      owner.destroy();
+    },
+  };
 }
 
 function graph(root: Node): Set<Node> {
@@ -524,6 +564,7 @@ describe("fine meadow proportional grazing albedo (actual CPU node arithmetic)",
           roots,
           2,
           lod,
+          FINE_MEADOW_APPEARANCE.GEOMETRY_LAYOUT,
         );
         try {
           expect(grounded.colorNode).toBe(base.colorNode);
@@ -648,7 +689,10 @@ describe("fine meadow root occlusion (actual CPU node arithmetic)", () => {
             "position",
             "uv",
           ]);
-          const tier = GRASS_CONFIG.LOD_TIERS[lod];
+          const tier = getGrassBladeLayout(
+            lod,
+            owner === fine ? FINE_MEADOW_APPEARANCE.GEOMETRY_LAYOUT : undefined,
+          );
           expect(geometry.attributes.position.count).toBe(
             tier.bladesPerClump * (tier.bladeSegments * 2 + 1),
           );
@@ -677,6 +721,7 @@ describe("fine meadow root occlusion (actual CPU node arithmetic)", () => {
           roots,
           count,
           lod,
+          FINE_MEADOW_APPEARANCE.GEOMETRY_LAYOUT,
         );
         try {
           expect(material).not.toBe(base);
@@ -965,12 +1010,11 @@ describe("natural tuft actual shader deformation (CPU node arithmetic only)", ()
     }
   });
 
-  it.each(["natural", "fine"] as const)(
+  it.each(["natural", "fine", "isolated-fine-near4"] as const)(
     "matches %s deformed smooth normals to independent tangent crosses through wind, fade, yaw and slope",
     (variant) => {
-      const owner = createOwner(variant === "fine" ? "fine" : true);
-      const appearance =
-        variant === "fine" ? FINE_MEADOW_APPEARANCE : NATURAL_TUFT_APPEARANCE;
+      const fixture = deformationFixture(variant);
+      const { owner, appearance, geometryLayout, geometries, isFine } = fixture;
       let cases = 0;
       let maximumError = 0;
       try {
@@ -978,8 +1022,11 @@ describe("natural tuft actual shader deformation (CPU node arithmetic only)", ()
         camera.position.set(25, 19, -31);
         camera.lookAt(0, 0, 0);
         camera.updateMatrixWorld(true);
-        for (const [lod, geometry] of owner["lodGeometries"].entries()) {
-          const vertices = GRASS_CONFIG.LOD_TIERS[lod].bladeSegments * 2 + 1;
+        for (const [lod, geometry] of geometries.entries()) {
+          const vertices = getGrassBladeLayout(
+            lod,
+            geometryLayout,
+          ).verticesPerBlade;
           for (const blade of [
             0,
             GRASS_CONFIG.LOD_TIERS[lod].bladesPerClump - 1,
@@ -1001,11 +1048,11 @@ describe("natural tuft actual shader deformation (CPU node arithmetic only)", ()
             );
             const height = tip.y / appearance.BLADE_TIP_HEIGHT;
             const curve = tip.clone().sub(center);
-            for (const index of [
-              root,
-              root + Math.min(2, vertices - 1),
-              root + vertices - 1,
-            ])
+            // All fine row/side samples, including the new near quarter rows;
+            // retain the original independent formula and natural coverage.
+            for (const index of isFine
+              ? Array.from({ length: vertices }, (_, offset) => root + offset)
+              : [root, root + Math.min(2, vertices - 1), root + vertices - 1])
               for (const ground of [
                 new THREE.Vector3(0, 1, 0),
                 new THREE.Vector3(0.4, 0.8, -0.3).normalize(),
@@ -1066,7 +1113,7 @@ describe("natural tuft actual shader deformation (CPU node arithmetic only)", ()
                         .clone()
                         .lerp(
                           smooth.multiplyScalar(inputs.front ? 1 : -1),
-                          variant === "fine"
+                          isFine
                             ? 0.2
                             : NATURAL_TUFT_APPEARANCE.BLADE_NORMAL_WEIGHT,
                         )
@@ -1102,23 +1149,27 @@ describe("natural tuft actual shader deformation (CPU node arithmetic only)", ()
                     }
           }
         }
-        expect(cases).toBe(972);
+        expect(cases).toBe(
+          variant === "isolated-fine-near4" ? 1836 : isFine ? 1620 : 972,
+        );
         expect(maximumError).toBeLessThan(2e-6);
       } finally {
-        owner.destroy();
+        fixture.close();
       }
     },
   );
 
-  it.each(["natural", "fine"] as const)(
+  it.each(["natural", "fine", "isolated-fine-near4"] as const)(
     "keeps both %s roots anchored over time and all vertex wind inside existing swept bounds",
     (variant) => {
-      const owner = createOwner(variant === "fine" ? "fine" : true);
-      const appearance =
-        variant === "fine" ? FINE_MEADOW_APPEARANCE : NATURAL_TUFT_APPEARANCE;
+      const fixture = deformationFixture(variant);
+      const { owner, appearance, geometryLayout, geometries } = fixture;
       try {
-        for (const [lod, geometry] of owner["lodGeometries"].entries()) {
-          const vertices = GRASS_CONFIG.LOD_TIERS[lod].bladeSegments * 2 + 1;
+        for (const [lod, geometry] of geometries.entries()) {
+          const vertices = getGrassBladeLayout(
+            lod,
+            geometryLayout,
+          ).verticesPerBlade;
           for (
             let index = 0;
             index < geometry.attributes.position.count;
@@ -1156,7 +1207,7 @@ describe("natural tuft actual shader deformation (CPU node arithmetic only)", ()
           }
         }
       } finally {
-        owner.destroy();
+        fixture.close();
       }
     },
   );

@@ -26,6 +26,7 @@ import {
   FINE_MEADOW_GRASS_VISUAL_PROFILE,
   FINE_MEADOW_APPEARANCE,
   GRASS_CONFIG,
+  createClumpGeometry,
 } from "../GrassVisualManager";
 import { createTerrainWorkerConfig } from "../../../../utils/workers/TerrainWorkerShared";
 import { SCULPTED_COMPACT_WORLD_TERRAIN_PROFILE } from "../WorldTerrainProfile";
@@ -48,6 +49,7 @@ import {
   generateQuadChunkDataSync,
 } from "../TerrainQuadChunkGenerator";
 import { gridGeometry } from "./terrain-grid.fixture";
+import { getGrassBladeLayout } from "../GrassBladeLayout";
 
 const emptySnapshot = (): GrassTerrainSurfaceSnapshot => ({
   schemaVersion: 1,
@@ -64,11 +66,18 @@ const sample = (): TerrainGridSample => ({
   faceIndex: 0,
 });
 
-function analyticOwner(appearance: "ordinary" | "fine" = "ordinary") {
-  const config =
-    appearance === "fine"
-      ? createTerrainWorkerConfig(SCULPTED_COMPACT_WORLD_TERRAIN_PROFILE, 16)
-      : null;
+function analyticOwner(
+  appearance: "ordinary" | "fine" | "isolated-fine-near4" = "ordinary",
+) {
+  const fine = appearance !== "ordinary";
+  const geometryLayout = !fine
+    ? undefined
+    : appearance === "isolated-fine-near4"
+      ? "fine-linear-sweep-near4-v1"
+      : FINE_MEADOW_APPEARANCE.GEOMETRY_LAYOUT;
+  const config = fine
+    ? createTerrainWorkerConfig(SCULPTED_COMPACT_WORLD_TERRAIN_PROFILE, 16)
+    : null;
   const identity = config?.TERRAIN_PROFILE_IDENTITY ?? "analytic";
   const manager = new GrassVisualManager(
     identity,
@@ -98,13 +107,28 @@ function analyticOwner(appearance: "ordinary" | "fine" = "ordinary") {
           getTerrainSurfaceForRegion: emptySnapshot,
         }
       : undefined,
-    appearance === "fine" ? FINE_MEADOW_GRASS_VISUAL_PROFILE : {},
+    fine ? FINE_MEADOW_GRASS_VISUAL_PROFILE : {},
     undefined,
     undefined,
     undefined,
-    appearance === "fine" ? FINE_MEADOW_APPEARANCE.id : undefined,
+    fine ? FINE_MEADOW_APPEARANCE.id : undefined,
   );
   const geometries: THREE.BufferGeometry[] = [];
+  // Explicit four-layout geometry exercises the real generator/grounding seam,
+  // not an active four-layout manager or a private-array replacement.
+  const bladeGeometries =
+    appearance === "isolated-fine-near4"
+      ? [0, 1, 2].map((lod) => {
+          const layout = getGrassBladeLayout(lod, geometryLayout);
+          const geometry = createClumpGeometry(
+            layout.bladesPerClump,
+            layout.bladeSegments,
+            FINE_MEADOW_APPEARANCE,
+          );
+          geometries.push(geometry);
+          return geometry;
+        })
+      : manager["lodGeometries"];
   const makeSurface = (
     id = 1,
     centerX = 0,
@@ -160,7 +184,8 @@ function analyticOwner(appearance: "ordinary" | "fine" = "ordinary") {
   ): GrassBladeGroundingRequest => ({
     data,
     lod,
-    geometry: manager["lodGeometries"][lod],
+    ...(geometryLayout === undefined ? {} : { geometryLayout }),
+    geometry: bladeGeometries[lod],
     ownSurface: surface,
     surfaces: [surface],
     terrainSurface: emptySnapshot(),
@@ -226,12 +251,270 @@ function one(data: GrassAnchorData, index: number): GrassAnchorData {
 }
 
 describe("CPU per-blade grounding prototype (no renderer/GPU)", () => {
+  it("requires an explicit near-four layout and retains two corrections per blade", () => {
+    const fine = analyticOwner("isolated-fine-near4"),
+      ordinary = analyticOwner();
+    try {
+      const surface = fine.makeSurface(),
+        request = fine.request(surface, undefined, 0);
+      expect(request.geometryLayout).toBe("fine-linear-sweep-near4-v1");
+      expect(request.geometry.getAttribute("position").count).toBe(216);
+      expect(request.geometry.index!.count).toBe(168 * 3);
+      const wrongProgress = request.geometry.clone();
+      fine.geometries.push(wrongProgress);
+      wrongProgress.getAttribute("uv").setY(2, Math.fround(1 / 3));
+      expect(() =>
+        groundGrassBlades({ ...request, geometry: wrongProgress }),
+      ).toThrow(/topology/);
+      const result = groundGrassBlades(request);
+      if (result.status !== "ready") throw new Error(result.reason);
+      expect(result.receipt.geometryLayout).toBe(request.geometryLayout);
+      expect(result.receipt.bladesPerClump).toBe(24);
+      expect(result.data.count).toBe(1);
+      expect(result.rootDeltas.length).toBe(48);
+      expect(result.receipt.correctionBytes).toBe(48 * 4);
+      for (const geometryLayout of [
+        undefined,
+        "fine-linear-sweep-3seg-v1",
+      ] as const)
+        expect(() => groundGrassBlades({ ...request, geometryLayout })).toThrow(
+          /vertex attributes/,
+        );
+      expect(() =>
+        groundGrassBlades({
+          ...request,
+          geometry: ordinary.manager["lodGeometries"][0],
+        }),
+      ).toThrow(/vertex attributes/);
+      expect(() =>
+        groundGrassBlades({
+          ...request,
+          geometryLayout: "" as typeof request.geometryLayout,
+        }),
+      ).toThrow(/layout/);
+
+      // An explicit fine three-segment contract is independently still admitted;
+      // this CPU topology test does not claim the ordinary shape is fine art.
+      const old = groundGrassBlades({
+        ...request,
+        geometry: ordinary.manager["lodGeometries"][0],
+        geometryLayout: "fine-linear-sweep-3seg-v1",
+      });
+      expect(old.receipt.geometryLayout).toBe("fine-linear-sweep-3seg-v1");
+      const legacy = groundGrassBlades(
+        ordinary.request(ordinary.makeSurface(), undefined, 0),
+      );
+      expect(Object.hasOwn(legacy.receipt, "geometryLayout")).toBe(false);
+      const exhausted = groundGrassBlades({
+        ...request,
+        workBudget: result.receipt.workUnits - 1,
+      });
+      expect(exhausted).toMatchObject({
+        status: "defer",
+        reason: "work_budget",
+      });
+      expect("rootDeltas" in exhausted).toBe(false);
+    } finally {
+      fine.close();
+      ordinary.close();
+    }
+  });
+
   it.each([
     ["ordinary", 0],
     ["ordinary", 1],
     ["ordinary", 2],
     ["fine", 0],
     ["fine", 1],
+    ["isolated-fine-near4", 0],
+  ] as const)(
+    "preserves exact %s LOD%s output and every distant-polygon work/yield charge",
+    (appearance, lod) => {
+      const f = analyticOwner(appearance);
+      try {
+        const surface = f.makeSurface(
+          1,
+          0,
+          0,
+          64,
+          (x, z) => 20 + 0.07 * x - 0.05 * z,
+        );
+        const request = f.request(
+          surface,
+          f.dataAt(surface, [
+            [0, 0, 0.7],
+            [4, 3, 1.8],
+            [-3, 5, 4.7],
+          ]),
+          lod,
+        );
+        const drain = (input: GrassBladeGroundingRequest) => {
+          const steps = groundGrassBladeSteps(input);
+          const phases: Record<string, number> = {};
+          let step = steps.next();
+          while (!step.done) {
+            phases[step.value] = (phases[step.value] ?? 0) + 1;
+            step = steps.next();
+          }
+          return { phases, result: step.value };
+        };
+        const baseline = drain(request);
+        expect(baseline.result.status).toBe("ready");
+        if (baseline.result.status !== "ready")
+          throw Error("Expected real retained support");
+        expect(baseline.result.data.count).toBe(3);
+        const original = structuredClone(request.data);
+        for (const [count, vertices] of [
+          [1, 3],
+          [24, 64],
+        ]) {
+          const polygons: GrassTerrainExclusionPolygon[] = Array.from(
+            { length: count },
+            (_, index) => {
+              const points = Array.from({ length: vertices }, (_, i) => ({
+                x:
+                  1000 +
+                  index * 10 +
+                  2 * Math.cos((i * 2 * Math.PI) / vertices),
+                z: 1000 + 2 * Math.sin((i * 2 * Math.PI) / vertices),
+              }));
+              return {
+                id: `distant-${index}`,
+                vertices: points,
+                minX: Math.min(...points.map((p) => p.x)),
+                maxX: Math.max(...points.map((p) => p.x)),
+                minZ: Math.min(...points.map((p) => p.z)),
+                maxZ: Math.max(...points.map((p) => p.z)),
+              };
+            },
+          );
+          const input = {
+            ...request,
+            terrainSurface: { ...emptySnapshot(), exclusionPolygons: polygons },
+          };
+          const before = structuredClone(input.terrainSurface);
+          const actual = drain(input);
+          expect(actual.result.status).toBe("ready");
+          if (actual.result.status !== "ready")
+            throw Error("Distant bounds changed admission");
+          const {
+            elapsedMs: _baselineElapsed,
+            workUnits: baselineWork,
+            ...baselineReceipt
+          } = baseline.result.receipt;
+          const {
+            elapsedMs: _actualElapsed,
+            workUnits: actualWork,
+            ...actualReceipt
+          } = actual.result.receipt;
+          // All five attributes, source indices, root deltas, accepted bounds,
+          // dependencies/leases and all other receipt values remain exact.
+          expect({ ...actual.result, receipt: actualReceipt }).toEqual({
+            ...baseline.result,
+            receipt: baselineReceipt,
+          });
+          expect(actualWork - baselineWork).toBe(count * request.data.count);
+          expect(actual.phases).toEqual({
+            ...baseline.phases,
+            snapshot_polygon: count,
+            snapshot_polygon_vertex: count * vertices,
+            snapshot_polygon_convexity: count * vertices * vertices,
+            grounding_operation:
+              baseline.phases.grounding_operation + count * request.data.count,
+          });
+          expect(request.data).toEqual(original);
+          expect(input.terrainSurface).toEqual(before);
+          const exhausted = groundGrassBlades({
+            ...input,
+            workBudget: actualWork - 1,
+          });
+          expect(exhausted).toMatchObject({
+            status: "defer",
+            reason: "work_budget",
+          });
+          expect(exhausted.receipt.workUnits).toBe(actualWork - 1);
+          expect("rootDeltas" in exhausted).toBe(false);
+        }
+      } finally {
+        f.close();
+      }
+    },
+  );
+
+  it("retains swept-boundary contact rejection and exact output immediately outside an exclusion", () => {
+    const f = analyticOwner("fine");
+    try {
+      const surface = f.makeSurface();
+      const request = {
+        ...f.request(surface, f.dataAt(surface, [[0, 0, 0.71]]), 0),
+        wind: { x: 0.3, z: 0.165 },
+      };
+      const baseline = groundGrassBlades(request);
+      if (baseline.status !== "ready" || !baseline.sweptBounds)
+        throw Error("Expected one grounded clump");
+      const box = baseline.sweptBounds;
+      const rectangle = (minimum: number): GrassTerrainExclusionPolygon => ({
+        id: "touching-rock",
+        minX: minimum,
+        maxX: minimum + 1,
+        minZ: box.minZ,
+        maxZ: box.maxZ,
+        vertices: [
+          { x: minimum, z: box.minZ },
+          { x: minimum + 1, z: box.minZ },
+          { x: minimum + 1, z: box.maxZ },
+          { x: minimum, z: box.maxZ },
+        ],
+      });
+      const touching = groundGrassBlades({
+        ...request,
+        terrainSurface: {
+          ...emptySnapshot(),
+          exclusionPolygons: [rectangle(box.maxX)],
+        },
+      });
+      expect(touching).toMatchObject({
+        status: "ready",
+        data: { count: 0 },
+        sweptBounds: null,
+        receipt: { rejected: { pad: 1 } },
+      });
+      const outside = groundGrassBlades({
+        ...request,
+        terrainSurface: {
+          ...emptySnapshot(),
+          exclusionPolygons: [rectangle(box.maxX + 1e-10)],
+        },
+      });
+      if (outside.status !== "ready")
+        throw Error("Separated exclusion deferred");
+      const {
+        elapsedMs: _baselineElapsed,
+        workUnits: baselineWork,
+        ...baselineReceipt
+      } = baseline.receipt;
+      const {
+        elapsedMs: _outsideElapsed,
+        workUnits: outsideWork,
+        ...outsideReceipt
+      } = outside.receipt;
+      expect({ ...outside, receipt: outsideReceipt }).toEqual({
+        ...baseline,
+        receipt: baselineReceipt,
+      });
+      expect(outsideWork).toBe(baselineWork + 1);
+    } finally {
+      f.close();
+    }
+  });
+
+  it.each([
+    ["ordinary", 0],
+    ["ordinary", 1],
+    ["ordinary", 2],
+    ["fine", 0],
+    ["fine", 1],
+    ["isolated-fine-near4", 0],
   ] as const)(
     "retains exact %s road clearance at all spatial-cell boundaries at LOD%s",
     (appearance, lod) => {
@@ -335,6 +618,7 @@ describe("CPU per-blade grounding prototype (no renderer/GPU)", () => {
     ["ordinary", 2],
     ["fine", 0],
     ["fine", 1],
+    ["isolated-fine-near4", 0],
   ] as const)(
     "bounds every corrected %s LOD%s vertex through fade and wind using independent Three transforms",
     (appearance, lod) => {
@@ -364,8 +648,8 @@ describe("CPU per-blade grounding prototype (no renderer/GPU)", () => {
         expect(result.data.count).toBe(3);
         const b = result.sweptBounds,
           uv = request.geometry.getAttribute("uv");
-        const tier = GRASS_CONFIG.LOD_TIERS[lod],
-          vpb = tier.bladeSegments * 2 + 1;
+        const tier = getGrassBladeLayout(lod, request.geometryLayout),
+          vpb = tier.verticesPerBlade;
         const expectedBounds = new THREE.Box3();
         for (let i = 0; i < result.data.count; i++)
           for (let v = 0; v < uv.count; v++) {
@@ -770,6 +1054,7 @@ describe("CPU per-blade grounding prototype (no renderer/GPU)", () => {
     ["ordinary", 1],
     ["fine", 0],
     ["fine", 1],
+    ["isolated-fine-near4", 0],
   ] as const)(
     "checks %s LOD%s swept pads, road capsules and elevated-water circles outside the anchor",
     (appearance, lod) => {
