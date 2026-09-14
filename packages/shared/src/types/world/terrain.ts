@@ -188,6 +188,14 @@ export interface RadialPondTerrainProfile {
   shorelineAmplitude?: number;
 }
 
+/** Inclusive continuous world-space grass boundary, independent of grading. */
+export type GrassExclusionBounds = {
+  minX: number;
+  maxX: number;
+  minZ: number;
+  maxZ: number;
+};
+
 /**
  * Defines an area where terrain should be flattened.
  * Used for stations, buildings, and other world objects that need level ground.
@@ -213,6 +221,8 @@ export interface FlatZone {
   blendRadius: number;
   /** Defaults to true. Explicit false allows grass on a broad authored grade. */
   excludeGrass?: boolean;
+  /** Optional rectangular clearance inside this grade's support. Grass only. */
+  grassExclusionBounds?: GrassExclusionBounds;
   /** Optional smooth radial pond basin instead of a rectangular flat zone. */
   radialPond?: RadialPondTerrainProfile;
   /**

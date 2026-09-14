@@ -276,6 +276,17 @@ export function createAuthoredTerrainSurfaceOperations(): AuthoredTerrainSurface
       for (const zone of zones) {
         // An allowed broad grade never overrides a separate station/floor pad.
         if (zone.excludeGrass === false) continue;
+        if (zone.grassExclusionBounds) {
+          const bounds = zone.grassExclusionBounds;
+          if (
+            x >= bounds.minX &&
+            x <= bounds.maxX &&
+            z >= bounds.minZ &&
+            z <= bounds.maxZ
+          )
+            return true;
+          continue;
+        }
         if (zone.radialPond) {
           if (
             Math.hypot(x - zone.centerX, z - zone.centerZ) <

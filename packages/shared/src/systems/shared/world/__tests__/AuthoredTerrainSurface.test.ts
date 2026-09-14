@@ -153,6 +153,15 @@ function workerFixture(): WorkerInput {
         tileMaskBounds: { minX: 365, maxX: 366, minZ: 320, maxZ: 321 },
       }),
       zone({ id: "floor", centerX: 370, height: 20.4, carveInset: 1 }),
+      zone({
+        id: "bounded-grass-only",
+        centerX: 348,
+        centerZ: 307,
+        width: 8,
+        depth: 4,
+        blendRadius: 1,
+        grassExclusionBounds: { minX: 347, maxX: 350, minZ: 308, maxZ: 309 },
+      }),
     ],
     arenaFloorIds: new Set(["floor"]),
     arenaGradeHeight: 20,
@@ -394,6 +403,75 @@ describe("authored terrain surface operations", () => {
     expect(
       operations.isGrassExcluded([pond({ excludeGrass: false })], 350, 320),
     ).toBe(false);
+  });
+
+  it("uses inclusive grass-only bounds without changing grading, normal stencils or overlapping pads", async () => {
+    const original = zone();
+    const bounded = zone({
+      grassExclusionBounds: { minX: 349, maxX: 352, minZ: 318, maxZ: 321 },
+    });
+    const queries = [
+      [349, 318],
+      [349, 321],
+      [352, 318],
+      [352, 321],
+      [349, 320],
+      [352, 320],
+      [350, 318],
+      [350, 321],
+      [350, 320],
+      [349 - 1e-8, 320],
+      [352 + 1e-8, 320],
+      [350, 318 - 1e-8],
+      [350, 321 + 1e-8],
+      [356, 326],
+      [357, 327],
+    ];
+    const expected = queries.map((_, index) => index < 9);
+    expect(
+      queries.map(([x, z]) => operations.isGrassExcluded([bounded], x, z)),
+    ).toEqual(expected);
+    expect(
+      queries.map(([x, z]) => operations.isGrassExcluded([original], x, z)),
+    ).toEqual(queries.map(() => true));
+    for (const dx of [-7.00001, -7, -6, -5, -1, 0, 2, 5, 6, 7, 7.00001])
+      for (const dz of [-7, -6, -5, 0, 5, 6, 7])
+        for (const [sx, sz] of [
+          [0, 0],
+          [-0.5, 0],
+          [0.5, 0],
+          [0, -0.5],
+          [0, 0.5],
+        ])
+          expect(height([bounded], dx + sx, dz + sz)).toBe(
+            height([original], dx + sx, dz + sz),
+          );
+    const pad = zone({
+      id: "independent-pad",
+      centerX: 356,
+      width: 1,
+      depth: 1,
+      blendRadius: 0,
+    });
+    for (const zones of [
+      [bounded, pad],
+      [pad, bounded],
+    ])
+      expect(operations.isGrassExcluded(zones, 356, 320)).toBe(true);
+    const input: WorkerInput = {
+      zones: [bounded],
+      arenaFloorIds: noFloors,
+      arenaGradeHeight: null,
+      queries: queries.map(([x, z]) => ({ x, z, proceduralHeight: 60 })),
+    };
+    const actual = await runWorker(
+      createAuthoredTerrainSurfaceOperations.toString(),
+      input,
+    );
+    expect(actual.map((value) => value.excluded)).toEqual(expected);
+    expect(actual.map((value) => value.height)).toEqual(
+      queries.map(([x, z]) => height([original], x - 350, z - 320)),
+    );
   });
 
   it("matches actual TerrainSystem authored candidates and normal stencils without a renderer", () => {

@@ -2,6 +2,36 @@
 
 ## Current direction — natural, dry, full and freely explorable
 
+Station-edge recovery is source/native verified and provisionally retained for
+localized visual improvement. Actual scaled furnace/anvil bounds plus a 1.25 m
+working margin replace their inherited grass-only grading halos; four 0.30 m
+footing polygons protect the open workshop. Terrain grading, collision, navigation
+and path materials remain. Final 673/673 across 41 files, packing 9/9, all three
+type checks and shared/server builds pass on 91 held pins; external 111/111 passes.
+Strict transport, swept-blade, ownership and native PhysX court tests pass.
+A bounded 64-change regional journal keeps ordinary remote edits from renewing
+unrelated grass work; overlapping or history-expired inputs retire safely.
+
+Art02 completes three actual WebGPU 1280×720/DPR1 views with 754 pins/669 archives.
+Both reviewers retain regained workshop-margin grass and a less isolated shelter.
+Deep-shadow spikes, straight boundaries and some overgrown strands remain; this
+is not finished grass, motion, navigation, performance or production approval.
+All 865 passive points and the two station/21 polygon contract verify. Same 94
+cells and source geometry; only cell 13,13 changes instances, 579→771 clumps.
+Total 81,290 clumps/3,803,568 triangles/8,806,272 root bytes (+192/+23,040/+36,864).
+Recorded installed-owner work rises 23,141,955→23,270,336, not total CPU/frame cost.
+Page/GPU/cleanup errors zero; 19 known cow/dagger errors keep overall failed.
+Owned browser/services closed; exact DB retained stopped. Art01's incorrect
+broadcast-physics observer failure is retained with zero photos, not relabeled.
+Replay: asset-studio/fine-meadow01/compact-station-clearance-art02-verification.json.
+
+Next substantive rendering slice: quad-tree ocean currently gives every vertex
+shoreDistance=50, so shoreline wave damping and color/opacity ignore the actual
+coast. Connect a bounded coastal field to the authoritative terrain, retaining
+opaque offshore continuation and shared-edge stability. No terrain/nav/resource
+relocation in that slice. Require moving shore/low-angle views, LOD joins and
+native cost/cleanup evidence; shader connectivity alone is not visual acceptance.
+
 The current comparison redistributes the eleven original v6 path radii into narrower
 fully worn centers and broader grass/soil feathers, preserving every centerline,
 height and outer footprint. The workshop core becomes1.2m with1.65m feather
@@ -24,12 +54,10 @@ The initial598/599 source failure retained an old grounded-plaza count; actual
 projected1007/pad47/water5/edge0 remain, road22→14 explains retained933→941.
 Raw six-leaf sampling and all independent worker/root checks remain unchanged.
 
-The next visible limitation is broad bare-green padding: furnace/anvil station
-grass exclusion currently inherits terrain-flattening padding plus blend, roughly
-12×12m and9×9m. Separate an actual-footprint/work-access grass-clearance contract
-from grading without changing terrain height or physical collision. Verify actual
-model bounds, swept-blade clearance, regained grass/contact and native costs.
-The source mechanism does not identify every green pixel or every pad rejection.
+The former broad bare-green station padding inherited terrain-flattening support,
+roughly 12×12 m and 9×9 m. The completed grass-clearance slice above separates it
+from grading. Actual service traversal, moving-blade appearance and native costs
+remain open; source eligibility does not identify every pixel or pad rejection.
 The previous groundwork checkpoint is pushed as`c6bc0832c`; it is not art approval.
 
 The bounded placement comparison is complete:104/104 focused,485/485 serial,

@@ -6,6 +6,7 @@
 import * as THREE from "../../extras/three/three";
 import type { Position3D } from "../core/base-types";
 import type { BiomeType } from "../../systems/shared/world/TerrainBiomeTypes";
+import type { GrassExclusionBounds } from "./terrain";
 
 // Temporary imports from core.ts - will be updated when those modules are created
 import type { MobData } from "../core/core";
@@ -549,6 +550,7 @@ export interface WorldArea {
     blendRadius: number;
     /** Defaults to true; terrain shaping and grass exclusion are independent. */
     excludeGrass?: boolean;
+    grassExclusionBounds?: GrassExclusionBounds;
     radialPond?: {
       bedRadius: number;
       bankInnerRadius: number;

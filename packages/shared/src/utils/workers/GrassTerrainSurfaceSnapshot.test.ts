@@ -133,6 +133,164 @@ function actualWorker(
 }
 
 describe("detached grass terrain surface requests", () => {
+  it("clones explicit grass bounds without changing grading indexes or synthesizing absent fields", async () => {
+    const original = zone();
+    const bounded = zone({
+      grassExclusionBounds: { minX: -2, maxX: 3, minZ: -1, maxZ: 4 },
+    });
+    const input = snapshot([bounded]);
+    const before = structuredClone(input);
+    const cloned = operations.cloneSnapshot(input);
+    expect(cloned).toEqual(before);
+    expect(cloned.zones[0].grassExclusionBounds).not.toBe(
+      bounded.grassExclusionBounds,
+    );
+    expect(
+      operations.cloneSnapshot(snapshot([original])).zones[0],
+    ).not.toHaveProperty("grassExclusionBounds");
+    const oldIndex = operations.createZoneIndex(snapshot([original]), 100);
+    const newIndex = operations.createZoneIndex(cloned, 100);
+    expect(newIndex.indexedZoneReferences).toBe(oldIndex.indexedZoneReferences);
+    expect(newIndex.bucketCount).toBe(oldIndex.bucketCount);
+    for (const [x, z] of [
+      [0, 0],
+      [14, 14],
+      [-50, -50],
+      [50, 50],
+      [200, 200],
+    ])
+      expect(newIndex.getZonesAt(x, z).map((value) => value.id)).toEqual(
+        oldIndex.getZonesAt(x, z).map((value) => value.id),
+      );
+    bounded.grassExclusionBounds!.minX = -3;
+    expect(cloned).toEqual(before);
+    const worker = actualWorker();
+    try {
+      const result = await worker.execute({ snapshot: cloned });
+      expect(result.error).toBeUndefined();
+      expect(result.snapshot).toEqual(before);
+      expect(result.indexedZoneReferences).toBe(oldIndex.indexedZoneReferences);
+    } finally {
+      await worker.close();
+    }
+  });
+
+  it("rejects malformed grass-only bounds on host and emitted worker without invoking bound accessors", async () => {
+    const good = { minX: -2, maxX: 3, minZ: -1, maxZ: 4 };
+    const invalid: unknown[] = [
+      undefined,
+      null,
+      false,
+      [],
+      {},
+      { ...good, minX: NaN },
+      { ...good, maxX: Infinity },
+      { ...good, minZ: "-1" },
+      { ...good, maxZ: undefined },
+      { ...good, minX: 3 },
+      { ...good, minZ: 5 },
+      { ...good, minX: -14.00001 },
+      { ...good, maxX: 14.00001 },
+      { ...good, minZ: -14.00001 },
+      { ...good, maxZ: 14.00001 },
+    ].map((grassExclusionBounds) => ({ ...zone(), grassExclusionBounds }));
+    for (const conflict of [
+      { excludeGrass: false },
+      { tileMask: new Set<string>() },
+      { tileMaskTiles: [] },
+      { tileMaskBounds: { minX: 0, maxX: 0, minZ: 0, maxZ: 0 } },
+      {
+        radialPond: {
+          bedRadius: 1,
+          bankInnerRadius: 2,
+          bankOuterRadius: 3,
+          bankHeight: 30,
+        },
+      },
+    ])
+      invalid.push({ ...zone(), grassExclusionBounds: good, ...conflict });
+    const worker = actualWorker();
+    try {
+      for (const candidate of invalid) {
+        const input = { ...snapshot(), zones: [candidate] };
+        expect(() => operations.validateSnapshot(input)).toThrow(
+          /grassExclusionBounds/,
+        );
+        expect(() => operations.cloneSnapshot(input)).toThrow(
+          /grassExclusionBounds/,
+        );
+        expect((await worker.execute({ snapshot: input })).error).toMatch(
+          /grassExclusionBounds/,
+        );
+      }
+    } finally {
+      await worker.close();
+    }
+    let reads = 0;
+    const accessor = {
+      get() {
+        reads++;
+        return good;
+      },
+      enumerable: true,
+    };
+    const inherited = Object.assign(
+      Object.create({ grassExclusionBounds: good }) as FlatZone,
+      zone(),
+    );
+    const getter = zone();
+    Object.defineProperty(getter, "grassExclusionBounds", accessor);
+    const inheritedGetter = Object.assign(
+      Object.create(
+        Object.defineProperty({}, "grassExclusionBounds", accessor),
+      ) as FlatZone,
+      zone(),
+    );
+    const inheritedComponent = Object.assign(
+      Object.create({ minX: -2 }) as object,
+      { maxX: 3, minZ: -1, maxZ: 4 },
+    );
+    const componentGetter = { ...good };
+    Object.defineProperty(componentGetter, "minX", {
+      get() {
+        reads++;
+        return -2;
+      },
+      enumerable: true,
+    });
+    for (const candidate of [
+      inherited,
+      getter,
+      inheritedGetter,
+      Object.assign(zone(), { grassExclusionBounds: inheritedComponent }),
+      zone({ grassExclusionBounds: componentGetter }),
+    ]) {
+      expect(() =>
+        operations.validateGrassExclusionBounds(candidate as FlatZone),
+      ).toThrow(/grassExclusionBounds/);
+      expect(() =>
+        operations.cloneSnapshot({ ...snapshot(), zones: [candidate] }),
+      ).toThrow(/grassExclusionBounds/);
+    }
+    expect(reads).toBe(0);
+    const equalSupport = zone({
+      grassExclusionBounds: { minX: -14, maxX: 14, minZ: -14, maxZ: 14 },
+    });
+    expect(() =>
+      operations.validateGrassExclusionBounds(equalSupport),
+    ).not.toThrow();
+    // Yielded cloning must not trust metadata that changed after validation.
+    const mutable = zone({ grassExclusionBounds: { ...good } });
+    const steps = operations.cloneSnapshotSteps(snapshot([mutable]));
+    let step = steps.next();
+    while (!step.done && step.value !== "snapshot_clone_zone")
+      step = steps.next();
+    expect(step.done).toBe(false);
+    Object.defineProperty(mutable, "grassExclusionBounds", accessor);
+    expect(() => steps.next()).toThrow(/grassExclusionBounds/);
+    expect(reads).toBe(0);
+  });
+
   it("clones bounded all-LOD exclusion polygons and matches real-worker point queries without shaping terrain", async () => {
     const polygon = {
       id: "rock",

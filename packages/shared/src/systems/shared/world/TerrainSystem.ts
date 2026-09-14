@@ -376,6 +376,16 @@ export class TerrainSystem extends System {
   private landscapeGrassSurface = {
     exclusionPolygons: [] as GrassTerrainExclusionPolygon[],
   };
+  private landscapeGrassExclusions: GrassTerrainExclusionPolygon[] = [];
+  private ownedGrassExclusions = new Map<
+    symbol,
+    GrassTerrainExclusionPolygon[]
+  >();
+  private grassSurfaceRevision = 0;
+  private grassSurfaceChanges: {
+    revision: number;
+    bounds: TerrainGridBounds | null;
+  }[] = [];
   private grassSurfaceOperations = createGrassTerrainSurfaceOperations();
   private compactMacroMaterial: CompactTerrainMacroField | null | undefined;
   private compactHabitatMaterial: CompactHabitatField | null | undefined;
@@ -1879,10 +1889,10 @@ export class TerrainSystem extends System {
     if (this.destroyed)
       throw new Error("Terrain destroyed during manifest admission");
     this.getCompactPondMaterial();
-    this.landscapeGrassSurface.exclusionPolygons =
-      createCompactLandscapeRockFootprints(
-        DataManager.getWorldConfig()?.compactLandscapeRocks,
-      );
+    this.landscapeGrassExclusions = createCompactLandscapeRockFootprints(
+      DataManager.getWorldConfig()?.compactLandscapeRocks,
+    );
+    this.refreshGrassExclusionPolygons();
     console.log(
       "[TerrainSystem] Initializing admitted compact terrain profile",
     );
@@ -2618,9 +2628,32 @@ export class TerrainSystem extends System {
           bounds,
           COMPACT_TERRAIN_COMPOSITION.pondBankReach,
         );
+        let revision = this.grassSurfaceRevision;
+        const region = { ...bounds };
         return {
-          isCurrent: () => !this.destroyed && water.isCurrent(),
-          steps: this.grassGroundingInputSteps(bounds),
+          isCurrent: () => {
+            if (this.destroyed || !water.isCurrent()) return false;
+            if (revision === this.grassSurfaceRevision) return true;
+            // A bounded journal keeps ordinary remote edits O(1) between
+            // changes. An input older than the retained history retires safely.
+            const oldest = this.grassSurfaceChanges[0];
+            if (!oldest || revision < oldest.revision - 1) return false;
+            for (const change of this.grassSurfaceChanges) {
+              if (change.revision <= revision) continue;
+              const changed = change.bounds;
+              if (
+                !changed ||
+                (changed.minX <= region.maxX &&
+                  changed.maxX >= region.minX &&
+                  changed.minZ <= region.maxZ &&
+                  changed.maxZ >= region.minZ)
+              )
+                return false;
+            }
+            revision = this.grassSurfaceRevision;
+            return true;
+          },
+          steps: this.grassGroundingInputSteps(region),
         };
       },
     };
@@ -4593,6 +4626,90 @@ export class TerrainSystem extends System {
     );
   }
 
+  /** Lifecycle-owned vegetation silhouettes, independent of terrain/collision. */
+  acquireGrassExclusionPolygons(
+    polygons: readonly GrassTerrainExclusionPolygon[],
+  ): { release(): void } {
+    if (this.destroyed) throw new Error("Terrain is destroyed");
+    if (
+      !Array.isArray(polygons) ||
+      polygons.length === 0 ||
+      polygons.length + this.landscapeGrassSurface.exclusionPolygons.length >
+        this.grassSurfaceOperations.limits.maxExclusionPolygons
+    )
+      throw new Error("Invalid grass exclusion contribution size");
+    // Validate the complete union before acquiring anything, including ID
+    // collisions with existing landscape silhouettes and other live owners.
+    const combined = this.cloneGrassExclusionPolygons([
+      ...this.landscapeGrassSurface.exclusionPolygons,
+      ...polygons,
+    ]);
+    const owned = combined.slice(combined.length - polygons.length);
+    const identity = Symbol("grass-exclusion-owner");
+    this.ownedGrassExclusions.set(identity, owned);
+    this.landscapeGrassSurface.exclusionPolygons = combined;
+    this.invalidateGrassExclusionPolygons(owned);
+    return {
+      release: () => {
+        if (!this.ownedGrassExclusions.delete(identity)) return;
+        this.refreshGrassExclusionPolygons(false);
+        this.invalidateGrassExclusionPolygons(owned);
+      },
+    };
+  }
+
+  private cloneGrassExclusionPolygons(
+    polygons: GrassTerrainExclusionPolygon[],
+  ): GrassTerrainExclusionPolygon[] {
+    return this.grassSurfaceOperations.cloneSnapshot({
+      schemaVersion: 1,
+      zones: [],
+      arenaFloorIds: [],
+      arenaGradeHeight: null,
+      waterBodies: [],
+      exclusionPolygons: polygons,
+    }).exclusionPolygons!;
+  }
+
+  private refreshGrassExclusionPolygons(invalidateAll = true): void {
+    this.landscapeGrassSurface.exclusionPolygons =
+      this.cloneGrassExclusionPolygons([
+        ...this.landscapeGrassExclusions,
+        ...[...this.ownedGrassExclusions.values()].flat(),
+      ]);
+    if (invalidateAll) this.recordGrassSurfaceChange(null);
+  }
+
+  private recordGrassSurfaceChange(bounds: TerrainGridBounds | null): void {
+    this.grassSurfaceChanges.push({
+      revision: ++this.grassSurfaceRevision,
+      bounds: bounds
+        ? {
+            minX: bounds.minX,
+            minZ: bounds.minZ,
+            maxX: bounds.maxX,
+            maxZ: bounds.maxZ,
+          }
+        : null,
+    });
+    // No retained input can grow history or register persistent subscriptions.
+    if (this.grassSurfaceChanges.length > 64) this.grassSurfaceChanges.shift();
+  }
+
+  private invalidateGrassExclusionPolygons(
+    polygons: readonly GrassTerrainExclusionPolygon[],
+  ): void {
+    for (const polygon of polygons) {
+      this.recordGrassSurfaceChange(polygon);
+      this.grassVisualManager?.invalidateRegion(
+        polygon.minX,
+        polygon.minZ,
+        polygon.maxX,
+        polygon.maxZ,
+      );
+    }
+  }
+
   /**
    * Register a flat zone and update spatial index.
    * Spatial index uses terrain tiles (100m each) for efficient lookup.
@@ -4634,6 +4751,7 @@ export class TerrainSystem extends System {
         `[TerrainSystem] registerFlatZone "${zone.id}": invalid blendRadius ${zone.blendRadius}`,
       );
     }
+    this.grassSurfaceOperations.validateGrassExclusionBounds(zone);
     if (
       zone.excludeGrass !== undefined &&
       typeof zone.excludeGrass !== "boolean"
@@ -4647,6 +4765,13 @@ export class TerrainSystem extends System {
       throw new Error(
         `[TerrainSystem] registerFlatZone "${zone.id}": ${radialProfileError}`,
       );
+    }
+    if (zone.grassExclusionBounds) {
+      // Own the new optional geometry. Caller mutation cannot bypass leases.
+      zone = Object.freeze({
+        ...zone,
+        grassExclusionBounds: Object.freeze({ ...zone.grassExclusionBounds }),
+      });
     }
 
     // A replacement must remove the previous bounds before indexing the new
@@ -4669,6 +4794,12 @@ export class TerrainSystem extends System {
     const zoneMaxX = zone.centerX + totalRadius;
     const zoneMinZ = zone.centerZ - totalRadius;
     const zoneMaxZ = zone.centerZ + totalRadius;
+    this.recordGrassSurfaceChange({
+      minX: zoneMinX,
+      maxX: zoneMaxX,
+      minZ: zoneMinZ,
+      maxZ: zoneMaxZ,
+    });
 
     const minTileX = Math.floor((zoneMinX + halfTile) / this.CONFIG.TILE_SIZE);
     const maxTileX = Math.floor((zoneMaxX + halfTile) / this.CONFIG.TILE_SIZE);
@@ -4890,6 +5021,7 @@ export class TerrainSystem extends System {
     const maxX = zone.centerX + totalRadius;
     const minZ = zone.centerZ - totalRadius;
     const maxZ = zone.centerZ + totalRadius;
+    this.recordGrassSurfaceChange({ minX, minZ, maxX, maxZ });
     if (this.quadTreeVisualManager) {
       this.quadTreeVisualManager.invalidateRegion(minX, minZ, maxX, maxZ);
     }
@@ -5010,6 +5142,7 @@ export class TerrainSystem extends System {
             heightOffset?: number;
             blendRadius: number;
             excludeGrass?: boolean;
+            grassExclusionBounds?: FlatZone["grassExclusionBounds"];
             radialPond?: RadialPondTerrainProfile;
           }>;
         },
@@ -5037,6 +5170,12 @@ export class TerrainSystem extends System {
           height: flatHeight,
           blendRadius: zoneConfig.blendRadius,
           excludeGrass: zoneConfig.excludeGrass,
+          ...(Object.prototype.hasOwnProperty.call(
+            zoneConfig,
+            "grassExclusionBounds",
+          )
+            ? { grassExclusionBounds: zoneConfig.grassExclusionBounds }
+            : {}),
           radialPond: zoneConfig.radialPond
             ? { ...zoneConfig.radialPond }
             : undefined,
@@ -5104,6 +5243,12 @@ export class TerrainSystem extends System {
             height: flatHeight,
             blendRadius,
           };
+          const grassBounds = stationDataProvider.getGrassExclusionBounds(
+            station.type,
+            station.position.x,
+            station.position.z,
+          );
+          if (grassBounds) zone.grassExclusionBounds = grassBounds;
 
           stationZones.push(zone);
         }
@@ -7876,6 +8021,11 @@ export class TerrainSystem extends System {
   destroy(): void {
     if (this.destroyed) return;
     this.destroyed = true;
+    this.grassSurfaceRevision++;
+    this.grassSurfaceChanges = [];
+    this.ownedGrassExclusions.clear();
+    this.landscapeGrassExclusions = [];
+    this.landscapeGrassSurface.exclusionPolygons = [];
     this._terrainInitialized = false;
     this.workerBatchLease = null;
     this.roadInfluenceRefreshGeneration++;

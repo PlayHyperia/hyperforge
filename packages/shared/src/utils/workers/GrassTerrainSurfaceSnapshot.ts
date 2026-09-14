@@ -59,6 +59,8 @@ export type GrassTerrainSurfaceOperations = {
   }>;
   /** Validate once at each request boundary, not during per-blade sampling. */
   validateSnapshot(value: unknown): GrassTerrainSurfaceSnapshot;
+  /** Grading geometry is already validated; this optional exclusion never shapes it. */
+  validateGrassExclusionBounds(zone: FlatZone): void;
   /** Same validation algebra with explicit bounded continuation points. */
   validateSnapshotSteps(
     value: unknown,
@@ -259,6 +261,7 @@ export function createGrassTerrainSurfaceOperations(): GrassTerrainSurfaceOperat
       for (const edge of [x - radius, x + radius, z - radius, z + radius]) {
         helpers.finite(edge, "zone indexing extent");
       }
+      operations.validateGrassExclusionBounds(value as FlatZone);
       if (
         zone.excludeGrass !== undefined &&
         typeof zone.excludeGrass !== "boolean"
@@ -318,6 +321,59 @@ export function createGrassTerrainSurfaceOperations(): GrassTerrainSurfaceOperat
 
   const operations: GrassTerrainSurfaceOperations = {
     limits,
+    validateGrassExclusionBounds(zone) {
+      if (!("grassExclusionBounds" in zone)) return;
+      const field = Object.getOwnPropertyDescriptor(
+        zone,
+        "grassExclusionBounds",
+      );
+      if (!field || !("value" in field))
+        return helpers.fail("grassExclusionBounds must be an own data field");
+      const bounds = helpers.record(field.value, "grassExclusionBounds");
+      const values: number[] = [];
+      for (const key of ["minX", "maxX", "minZ", "maxZ"] as const) {
+        const component = Object.getOwnPropertyDescriptor(bounds, key);
+        if (!component || !("value" in component))
+          return helpers.fail(
+            "grassExclusionBounds components must be own data fields",
+          );
+        values.push(
+          helpers.finite(component.value, "grassExclusionBounds " + key),
+        );
+      }
+      const [minX, maxX, minZ, maxZ] = values;
+      if (minX >= maxX || minZ >= maxZ)
+        return helpers.fail("grassExclusionBounds must have positive area");
+      if (
+        minX < zone.centerX - zone.width / 2 - zone.blendRadius ||
+        maxX > zone.centerX + zone.width / 2 + zone.blendRadius ||
+        minZ < zone.centerZ - zone.depth / 2 - zone.blendRadius ||
+        maxZ > zone.centerZ + zone.depth / 2 + zone.blendRadius
+      )
+        return helpers.fail(
+          "grassExclusionBounds must remain inside grading support",
+        );
+      for (const key of [
+        "excludeGrass",
+        "tileMask",
+        "tileMaskTiles",
+        "tileMaskBounds",
+        "radialPond",
+      ] as const) {
+        if (!(key in zone)) continue;
+        const conflict = Object.getOwnPropertyDescriptor(zone, key);
+        if (!conflict || !("value" in conflict))
+          return helpers.fail(
+            "grassExclusionBounds conflict fields must be own data fields",
+          );
+        if (
+          key === "excludeGrass"
+            ? conflict.value === false
+            : conflict.value !== undefined
+        )
+          return helpers.fail("grassExclusionBounds conflicts with " + key);
+      }
+    },
     validateSnapshot(input) {
       const steps = operations.validateSnapshotSteps(input);
       let step = steps.next();
@@ -466,6 +522,8 @@ export function createGrassTerrainSurfaceOperations(): GrassTerrainSurfaceOperat
       const zones: GrassTerrainSurfaceZone[] = [];
       for (const zone of snapshot.zones) {
         yield "snapshot_clone_zone";
+        // Recheck the borrowed optional field after the continuation boundary.
+        operations.validateGrassExclusionBounds(zone);
         const clone: GrassTerrainSurfaceZone = {
           id: zone.id,
           centerX: zone.centerX,
@@ -477,6 +535,13 @@ export function createGrassTerrainSurfaceOperations(): GrassTerrainSurfaceOperat
         };
         if (zone.excludeGrass !== undefined)
           clone.excludeGrass = zone.excludeGrass;
+        if (zone.grassExclusionBounds !== undefined)
+          clone.grassExclusionBounds = {
+            minX: zone.grassExclusionBounds.minX,
+            maxX: zone.grassExclusionBounds.maxX,
+            minZ: zone.grassExclusionBounds.minZ,
+            maxZ: zone.grassExclusionBounds.maxZ,
+          };
         if (zone.carveInset !== undefined) clone.carveInset = zone.carveInset;
         if (zone.radialPond !== undefined)
           clone.radialPond = {

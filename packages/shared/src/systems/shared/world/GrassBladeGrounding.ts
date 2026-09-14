@@ -715,7 +715,9 @@ export function* groundGrassBladeSteps(
       yield "grounding_operation";
       take();
       if (zone.excludeGrass === false) continue;
-      if (zone.radialPond) {
+      if (zone.grassExclusionBounds) {
+        if (overlaps(box, zone.grassExclusionBounds)) return true;
+      } else if (zone.radialPond) {
         if (
           pointBoxDistance(zone.centerX, zone.centerZ, box) <
           zone.radialPond.bankOuterRadius + zone.blendRadius

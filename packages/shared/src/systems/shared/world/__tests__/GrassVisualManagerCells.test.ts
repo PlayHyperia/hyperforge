@@ -222,6 +222,76 @@ async function fixture(grade?: CompactGrassColorGrade) {
 }
 
 describe("fine meadow cells borrow actual terrain owners without replacing them", () => {
+  it("cancels in-flight grounding when only a registered station grass boundary changes", async () => {
+    const f = await fixture();
+    // Wire the existing real manager to terrain's production invalidation path.
+    f.terrain["grassVisualManager"] = f.owner;
+    try {
+      const zone = {
+        id: "grass-clearance-live-replacement",
+        centerX: 387.5,
+        centerZ: 362.5,
+        width: 25,
+        depth: 25,
+        height: f.terrain.getHeightAt(387.5, 362.5),
+        blendRadius: 0,
+        grassExclusionBounds: { minX: 389, maxX: 390, minZ: 363, maxZ: 364 },
+      };
+      f.terrain.registerFlatZone(zone);
+      const old = f.setup.getTerrainSurfaceForRegion(375, 350, 400, 375);
+      await f.queue();
+      f.owner["processSettledWorkerResults"]();
+      const pending = f.owner["groundingJobs"].get(f.work.key)!;
+      expect(pending.job.state.status).toBe("running");
+      f.terrain.registerFlatZone({
+        id: "remote-grass-update",
+        centerX: 1000,
+        centerZ: 1000,
+        width: 2,
+        depth: 2,
+        height: 28,
+        blendRadius: 1,
+      });
+      f.owner["reconcileGrassHorizon"]();
+      expect(f.owner["groundingJobs"].get(f.work.key)).toBe(pending);
+      expect(pending.job.state.status).toBe("running");
+      const terrainSurface = f.visual.getRetainedSurface(f.node);
+      f.terrain.registerFlatZone({
+        ...zone,
+        grassExclusionBounds: {
+          minX: 389.25,
+          maxX: 389.75,
+          minZ: 363.25,
+          maxZ: 363.75,
+        },
+      });
+      expect(pending.job.state.status).toBe("cancelled");
+      expect(f.owner["groundingJobs"].has(f.work.key)).toBe(false);
+      expect(f.owner["advanceGroundingJob"]()).toBe(0);
+      expect(f.container.children).toHaveLength(0);
+      expect(f.visual.getRetainedSurface(f.node)).toBe(terrainSurface);
+      expect(
+        old.zones.find((entry) => entry.id === zone.id)!.grassExclusionBounds,
+      ).toEqual(zone.grassExclusionBounds);
+      const next = f.setup.getTerrainSurfaceForRegion(375, 350, 400, 375);
+      expect(
+        next.zones.find((entry) => entry.id === zone.id)!.grassExclusionBounds,
+      ).toEqual({
+        minX: 389.25,
+        maxX: 389.75,
+        minZ: 363.25,
+        maxZ: 363.75,
+      });
+      await f.queue();
+      f.owner["processSettledWorkerResults"]();
+      expect(f.finish()).toBe(1);
+      expect(f.owner.getProfileReceipt().grounding?.failedChunks).toBe(0);
+    } finally {
+      f.terrain["grassVisualManager"] = null;
+      f.close();
+    }
+  });
+
   it("keeps live grass sampling invariant across actual terrain noise texture initialization", async () => {
     // Native grade capture exposed this off-center cell: the initialized
     // main-thread texture branch must not select different clumps to workers.

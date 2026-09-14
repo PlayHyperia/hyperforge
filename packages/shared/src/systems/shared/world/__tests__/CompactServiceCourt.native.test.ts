@@ -11,6 +11,7 @@ import { TerrainSystem } from "../TerrainSystem";
 import {
   COMPACT_SERVICE_COURT,
   COMPACT_SERVICE_COURT_LEGACY_FIXTURE,
+  createCompactServiceCourtGrassExclusions,
   groundCompactServiceCourt,
   validateCompactServiceCourt,
 } from "../CompactServiceCourt";
@@ -24,6 +25,7 @@ import {
   registerCompactServiceCourtVisuals,
 } from "../../../client/CompactServiceCourtVisualsSystem";
 import { CollisionFlag } from "../../movement/CollisionFlags";
+import { createGrassTerrainSurfaceOperations } from "../../../../utils/workers/GrassTerrainSurfaceSnapshot";
 
 const saved = {
   config: DataManager["worldConfig"],
@@ -159,12 +161,156 @@ describe("compact service court actual geometry and native PhysX (not rendered a
     ).toThrow();
   });
 
+  it("derives four CCW grass-only rectangles aligned with both actual footing recipes", () => {
+    // Pure flat-height input to the real support and geometry generators, not
+    // a simulated World or a claim of newly rendered/native GPU evidence.
+    const record = groundCompactServiceCourt(
+      COMPACT_SERVICE_COURT,
+      OPEN_WORKSHOP_POSTS,
+      () => 28,
+    );
+    const polygons = createCompactServiceCourtGrassExclusions(
+      record,
+      OPEN_WORKSHOP_POSTS,
+    );
+    const operations = createGrassTerrainSurfaceOperations();
+    operations.validateSnapshot({
+      schemaVersion: 1,
+      zones: [],
+      arenaFloorIds: [],
+      arenaGradeHeight: null,
+      waterBodies: [],
+      exclusionPolygons: polygons,
+    });
+    expect(polygons).toHaveLength(4);
+    for (const [i, post] of OPEN_WORKSHOP_POSTS.entries()) {
+      const x = record.position.x + post.x,
+        z = record.position.z + post.z,
+        polygon = polygons[i];
+      expect(polygon).toEqual({
+        id: `compact-service-court-v1-footing-${i}`,
+        minX: x - 0.15,
+        maxX: x + 0.15,
+        minZ: z - 0.15,
+        maxZ: z + 0.15,
+        vertices: [
+          { x: x - 0.15, z: z - 0.15 },
+          { x: x + 0.15, z: z - 0.15 },
+          { x: x + 0.15, z: z + 0.15 },
+          { x: x - 0.15, z: z + 0.15 },
+        ],
+      });
+      expect(
+        operations.isGrassExcluded({ exclusionPolygons: polygons }, x, z),
+      ).toBe(true);
+      for (const vertex of polygon.vertices)
+        expect(
+          operations.isGrassExcluded(
+            { exclusionPolygons: polygons },
+            vertex.x,
+            vertex.z,
+          ),
+        ).toBe(true);
+      expect(
+        operations.isGrassExcluded(
+          { exclusionPolygons: polygons },
+          x + 0.15001,
+          z,
+        ),
+      ).toBe(false);
+    }
+    // The open roof/working area is not turned into an exclusion rectangle.
+    expect(
+      operations.isGrassExcluded(
+        { exclusionPolygons: polygons },
+        record.position.x,
+        record.position.z,
+      ),
+    ).toBe(false);
+    for (const architecturalFinish of [undefined, "haven-v1"] as const) {
+      const geometry = createOpenWorkshop(record.feet, { architecturalFinish });
+      try {
+        const position = geometry.footings.getAttribute("position");
+        const bounds = OPEN_WORKSHOP_POSTS.map(() => ({
+          minX: Infinity,
+          maxX: -Infinity,
+          minZ: Infinity,
+          maxZ: -Infinity,
+          count: 0,
+        }));
+        for (let i = 0; i < position.count; i++) {
+          const x = position.getX(i),
+            z = position.getZ(i);
+          const index = OPEN_WORKSHOP_POSTS.findIndex(
+            (post) => Math.abs(x - post.x) < 0.2 && Math.abs(z - post.z) < 0.2,
+          );
+          expect(index).toBeGreaterThanOrEqual(0);
+          const b = bounds[index];
+          b.minX = Math.min(b.minX, x);
+          b.maxX = Math.max(b.maxX, x);
+          b.minZ = Math.min(b.minZ, z);
+          b.maxZ = Math.max(b.maxZ, z);
+          b.count++;
+        }
+        for (const [i, b] of bounds.entries()) {
+          expect(b.count).toBeGreaterThan(0);
+          for (const key of ["minX", "maxX", "minZ", "maxZ"] as const) {
+            const origin = key.endsWith("X")
+              ? record.position.x
+              : record.position.z;
+            const exactLocal = polygons[i][key] - origin;
+            // A stored Float32 endpoint may differ by half an ulp. No broad
+            // geometry tolerance or new golden output is used for alignment.
+            const halfUlp =
+              2 ** (Math.floor(Math.log2(Math.abs(exactLocal))) - 24);
+            expect(Math.abs(b[key] - exactLocal)).toBeLessThanOrEqual(halfUlp);
+          }
+        }
+      } finally {
+        geometry.dispose();
+      }
+    }
+    const detached = createCompactServiceCourtGrassExclusions(
+      record,
+      OPEN_WORKSHOP_POSTS,
+    );
+    detached[0].vertices[0].x += 1;
+    expect(polygons[0].vertices[0].x).not.toBe(detached[0].vertices[0].x);
+    expect(() =>
+      createCompactServiceCourtGrassExclusions(record, []),
+    ).toThrow();
+    expect(() =>
+      createCompactServiceCourtGrassExclusions(
+        record,
+        OPEN_WORKSHOP_POSTS.map((p, i) => (i ? p : { x: NaN, z: p.z })),
+      ),
+    ).toThrow();
+    expect(() =>
+      createCompactServiceCourtGrassExclusions(
+        record,
+        OPEN_WORKSHOP_POSTS.map((p, i) => (i ? p : { x: p.x + 0.1, z: p.z })),
+      ),
+    ).toThrow();
+  });
+
   it("grounds all feet independently, preserves passage and exact native/render surfaces across three lifetimes", async () => {
     const { world, terrain, owner, visual } = await fixture();
     const px = getPhysX()!;
     const types = new px.PxActorTypeFlags(px.PxActorTypeFlagEnum.eRIGID_STATIC);
     const before = world.physics.scene!.getNbActors(types),
       children = world.stage.scene.children.length;
+    const surface = () =>
+      terrain["getTerrainSurfaceForRegion"](328, 333, 345, 343);
+    const beforeSurface = surface();
+    const sampleHeights = () =>
+      OPEN_WORKSHOP_POSTS.flatMap((post) =>
+        [-0.15, 0, 0.15].flatMap((dx) =>
+          [-0.15, 0, 0.15].map((dz) =>
+            terrain.getHeightAt(336.5 + post.x + dx, 337.5 + post.z + dz),
+          ),
+        ),
+      );
+    const beforeHeights = sampleHeights();
     const baseFlag = { x: 331, z: 335 };
     world.collision.addFlags(baseFlag.x, baseFlag.z, CollisionFlag.WATER);
     try {
@@ -177,6 +323,18 @@ describe("compact service court actual geometry and native PhysX (not rendered a
         visual.start();
         visual.start();
         const record = owner.getCourt()!;
+        const expectedPolygons = createCompactServiceCourtGrassExclusions(
+          record,
+          OPEN_WORKSHOP_POSTS,
+        );
+        expect(surface()).toEqual({
+          ...beforeSurface,
+          exclusionPolygons: [
+            ...(beforeSurface.exclusionPolygons ?? []),
+            ...expectedPolygons,
+          ],
+        });
+        expect(sampleHeights()).toEqual(beforeHeights);
         expect(owner.getDiagnostics()).toMatchObject({
           physicsActor: true,
           physicsShapes: 3,
@@ -325,6 +483,8 @@ describe("compact service court actual geometry and native PhysX (not rendered a
           CollisionFlag.WATER,
         );
         expect(owner.getCourt()).toBeNull();
+        expect(surface()).toEqual(beforeSurface);
+        expect(sampleHeights()).toEqual(beforeHeights);
       }
     } finally {
       px.destroy(types);
@@ -332,7 +492,10 @@ describe("compact service court actual geometry and native PhysX (not rendered a
   });
 
   it("retires pending initialization/start without publishing resources or clearing a newer owner", async () => {
-    const { world, owner } = await fixture();
+    const { world, terrain, owner } = await fixture();
+    const surface = () =>
+      terrain["getTerrainSurfaceForRegion"](328, 333, 345, 343);
+    const before = surface();
     const pending = owner.init();
     owner.destroy();
     await pending;
@@ -342,11 +505,60 @@ describe("compact service court actual geometry and native PhysX (not rendered a
     owner.destroy();
     await start;
     expect(owner.getCourt()).toBeNull();
+    expect(surface()).toEqual(before);
     expect(world.collision.getFlags(331, 335)).toBe(0);
     await owner.init();
     await owner.start();
     expect(owner.getCourt()).not.toBeNull();
     expect(world.collision.getFlags(331, 335)).toBe(CollisionFlag.BLOCKED);
+    expect(surface().exclusionPolygons).toEqual([
+      ...(before.exclusionPolygons ?? []),
+      ...createCompactServiceCourtGrassExclusions(
+        owner.getCourt()!,
+        OPEN_WORKSHOP_POSTS,
+      ),
+    ]);
+  });
+
+  it("unwinds native and collision admission if another real owner already holds the grass footprints", async () => {
+    const { world, terrain, owner } = await fixture();
+    const record = groundCompactServiceCourt(
+      COMPACT_SERVICE_COURT,
+      OPEN_WORKSHOP_POSTS,
+      (x, z) => terrain.getHeightAt(x, z),
+    );
+    const surface = () =>
+      terrain["getTerrainSurfaceForRegion"](328, 333, 345, 343);
+    const before = surface();
+    const blocker = terrain.acquireGrassExclusionPolygons(
+      createCompactServiceCourtGrassExclusions(record, OPEN_WORKSHOP_POSTS),
+    );
+    const blocked = surface();
+    const px = getPhysX()!;
+    const types = new px.PxActorTypeFlags(px.PxActorTypeFlagEnum.eRIGID_STATIC);
+    const beforeActors = world.physics.scene!.getNbActors(types);
+    world.collision.addFlags(331, 335, CollisionFlag.WATER);
+    try {
+      await owner.init();
+      await expect(owner.start()).rejects.toThrow();
+      expect(owner.getCourt()).toBeNull();
+      expect(world.physics.scene!.getNbActors(types)).toBe(beforeActors);
+      expect(world.collision.getFlags(331, 335)).toBe(CollisionFlag.WATER);
+      expect(surface()).toEqual(blocked);
+      blocker.release();
+      blocker.release();
+      expect(surface()).toEqual(before);
+      await owner.start();
+      expect(owner.getCourt()).not.toBeNull();
+      owner.destroy();
+      owner.destroy();
+      expect(surface()).toEqual(before);
+      expect(world.physics.scene!.getNbActors(types)).toBe(beforeActors);
+      expect(world.collision.getFlags(331, 335)).toBe(CollisionFlag.WATER);
+    } finally {
+      blocker.release();
+      px.destroy(types);
+    }
   });
 
   it("rejects nonfinite and unsupported ground before a scene or navigation allocation", async () => {

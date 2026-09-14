@@ -55,6 +55,166 @@ async function withTerrain(
 }
 
 describe("actual TerrainSystem regional grass snapshots", () => {
+  it("keeps distant inputs current through local edits with bounded revision history", async () => {
+    await withTerrain((terrain, internals) => {
+      const setup = internals.buildGrassWorkerSetup();
+      const region = { minX: 310, minZ: 310, maxX: 320, maxZ: 320 };
+      const untouched = setup.prepareGroundingInputs!(region);
+      const regularlyChecked = setup.prepareGroundingInputs!(region);
+      const remote = {
+        id: "remote-grass-lifecycle",
+        centerX: 450,
+        centerZ: 450,
+        width: 2,
+        depth: 2,
+        height: 28,
+        blendRadius: 1,
+      };
+      for (let i = 0; i < 34; i++) {
+        terrain.registerFlatZone(remote);
+        expect(regularlyChecked.isCurrent()).toBe(true);
+      }
+      expect(terrain["grassSurfaceChanges"]).toHaveLength(64);
+      expect(untouched.isCurrent()).toBe(false);
+      const local = setup.prepareGroundingInputs!({
+        minX: 448,
+        minZ: 448,
+        maxX: 448,
+        maxZ: 448,
+      });
+      terrain.unregisterFlatZone(remote.id);
+      expect(local.isCurrent()).toBe(false); // Inclusive grading-support contact.
+      expect(regularlyChecked.isCurrent()).toBe(true);
+    });
+  });
+
+  it("owns grass-only bounds and invalidates leases without changing grading on replacement", async () => {
+    await withTerrain((terrain, internals) => {
+      const zone: GrassTerrainSurfaceZone = {
+        id: "station-clearance-lifecycle",
+        centerX: 320,
+        centerZ: 320,
+        width: 8,
+        depth: 6,
+        blendRadius: 2,
+        height: 28,
+        grassExclusionBounds: { minX: 319, maxX: 321, minZ: 319, maxZ: 321 },
+      };
+      terrain.registerFlatZone(zone);
+      const setup = internals.buildGrassWorkerSetup();
+      const region = { minX: 312, minZ: 312, maxX: 328, maxZ: 328 };
+      const lease = setup.prepareGroundingInputs!(region);
+      const oldSnapshot = setup.getTerrainSurfaceForRegion(312, 312, 328, 328);
+      const oldBounds = structuredClone(zone.grassExclusionBounds);
+      const heights = [];
+      for (let x = 313; x <= 327; x += 0.5)
+        for (let z = 314; z <= 326; z += 0.5)
+          heights.push(internals.getHeightAtComputed(x, z));
+      zone.grassExclusionBounds!.minX = 0;
+      zone.height = 99;
+      expect(internals.flatZones.get(zone.id)!.grassExclusionBounds).toEqual(
+        oldBounds,
+      );
+      expect(internals.flatZones.get(zone.id)!.height).toBe(28);
+      expect(lease.isCurrent()).toBe(true);
+      const registered = internals.flatZones.get(zone.id)!;
+      expect(() =>
+        terrain.registerFlatZone({
+          ...registered,
+          grassExclusionBounds: { minX: 0, maxX: 321, minZ: 319, maxZ: 321 },
+        }),
+      ).toThrow();
+      expect(internals.flatZones.get(zone.id)).toBe(registered);
+      expect(lease.isCurrent()).toBe(true);
+      terrain.registerFlatZone({
+        ...registered,
+        grassExclusionBounds: {
+          minX: 319.5,
+          maxX: 320.5,
+          minZ: 319.5,
+          maxZ: 320.5,
+        },
+      });
+      expect(lease.isCurrent()).toBe(false);
+      expect(
+        oldSnapshot.zones.find((entry) => entry.id === zone.id)!
+          .grassExclusionBounds,
+      ).toEqual(oldBounds);
+      const after = [];
+      for (let x = 313; x <= 327; x += 0.5)
+        for (let z = 314; z <= 326; z += 0.5)
+          after.push(internals.getHeightAtComputed(x, z));
+      expect(after).toEqual(heights);
+      const next = setup.prepareGroundingInputs!(region);
+      expect(next.isCurrent()).toBe(true);
+      terrain.unregisterFlatZone(zone.id);
+      expect(next.isCurrent()).toBe(false);
+    });
+  });
+
+  it("owns bounded polygon contributions independently, preserves rocks and rejects collisions atomically", async () => {
+    await withTerrain((terrain, internals) => {
+      const setup = internals.buildGrassWorkerSetup();
+      const region = { minX: 200, minZ: 200, maxX: 500, maxZ: 500 };
+      const snapshot = () =>
+        setup.getTerrainSurfaceForRegion(200, 200, 500, 500);
+      const original = snapshot();
+      expect(original.exclusionPolygons!.length).toBe(17);
+      const polygon = {
+        id: "owned-grass-footing",
+        minX: 319.85,
+        maxX: 320.15,
+        minZ: 319.85,
+        maxZ: 320.15,
+        vertices: [
+          { x: 319.85, z: 319.85 },
+          { x: 320.15, z: 319.85 },
+          { x: 320.15, z: 320.15 },
+          { x: 319.85, z: 320.15 },
+        ],
+      };
+      const input = setup.prepareGroundingInputs!(region);
+      const owner = terrain.acquireGrassExclusionPolygons([polygon]);
+      expect(input.isCurrent()).toBe(false);
+      const added = snapshot();
+      expect(added.zones).toEqual(original.zones);
+      expect(added.exclusionPolygons!.slice(0, 17)).toEqual(
+        original.exclusionPolygons,
+      );
+      expect(snapshotOperations.isGrassExcluded(added, 320, 320)).toBe(true);
+      polygon.vertices[0].x = 100;
+      expect(snapshot()).toEqual(added);
+      const lease = setup.prepareGroundingInputs!(region);
+      expect(() =>
+        terrain.acquireGrassExclusionPolygons([added.exclusionPolygons![17]]),
+      ).toThrow();
+      expect(lease.isCurrent()).toBe(true);
+      expect(snapshot()).toEqual(added);
+      const second = terrain.acquireGrassExclusionPolygons([
+        { ...added.exclusionPolygons![17], id: "second-owner" },
+      ]);
+      expect(lease.isCurrent()).toBe(false);
+      expect(snapshot().exclusionPolygons).toHaveLength(19);
+      owner.release();
+      expect(
+        snapshot().exclusionPolygons!.map((entry) => entry.id),
+      ).not.toContain(polygon.id);
+      expect(snapshot().exclusionPolygons!.at(-1)!.id).toBe("second-owner");
+      const released = setup.prepareGroundingInputs!(region);
+      owner.release();
+      expect(released.isCurrent()).toBe(true);
+      second.release();
+      expect(snapshot()).toEqual(original);
+      expect(added.exclusionPolygons).toHaveLength(18);
+      const capacity = Array.from({ length: 8 }, (_, i) => ({
+        ...added.exclusionPolygons![17],
+        id: `overflow-${i}`,
+      }));
+      expect(() => terrain.acquireGrassExclusionPolygons(capacity)).toThrow();
+      expect(snapshot()).toEqual(original);
+    });
+  });
+
   it("retains global registration order, exact 3x3 candidate universe, floors and final-height stencil samples", async () => {
     await withTerrain((terrain, internals) => {
       const setup = internals.buildGrassWorkerSetup();

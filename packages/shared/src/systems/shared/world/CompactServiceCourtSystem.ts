@@ -6,6 +6,7 @@ import { RigidBody } from "../../../nodes/RigidBody";
 import { System } from "../infrastructure/System";
 import type { StaticCollisionLease } from "../movement/CollisionMatrix";
 import {
+  createCompactServiceCourtGrassExclusions,
   groundCompactServiceCourt,
   type OwnedCompactServiceCourt,
 } from "./CompactServiceCourt";
@@ -20,6 +21,7 @@ export class CompactServiceCourtSystem extends System {
   private generation = 0;
   private record: OwnedCompactServiceCourt | null = null;
   private lease: StaticCollisionLease | null = null;
+  private grassExclusionLease: { release(): void } | null = null;
   private geometry: OpenWorkshopGeometry | null = null;
   private body: RigidBody | null = null;
   private colliders: Collider[] = [];
@@ -104,6 +106,9 @@ export class CompactServiceCourtSystem extends System {
       this.lease = this.world.collision.acquireStaticFootprint(
         record.blockingTiles,
       );
+      this.grassExclusionLease = terrain.acquireGrassExclusionPolygons(
+        createCompactServiceCourtGrassExclusions(record, OPEN_WORKSHOP_POSTS),
+      );
       this.record = record;
       this.started = true;
     } catch (error) {
@@ -133,15 +138,21 @@ export class CompactServiceCourtSystem extends System {
     try {
       this.body?.deactivate();
     } finally {
-      this.body = null;
-      this.colliders = [];
-      for (const geometry of this.indexedViews) geometry.dispose();
-      this.indexedViews = [];
-      this.geometry?.dispose();
-      this.geometry = null;
-      this.lease?.release();
-      this.lease = null;
-      this.record = null;
+      const grassExclusionLease = this.grassExclusionLease;
+      this.grassExclusionLease = null;
+      try {
+        this.body = null;
+        this.colliders = [];
+        for (const geometry of this.indexedViews) geometry.dispose();
+        this.indexedViews = [];
+        this.geometry?.dispose();
+        this.geometry = null;
+        this.lease?.release();
+        this.lease = null;
+        this.record = null;
+      } finally {
+        grassExclusionLease?.release();
+      }
     }
   }
 

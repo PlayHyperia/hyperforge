@@ -10,6 +10,11 @@ import {
 import type { WorldTerrainProfile } from "./WorldTerrainProfile";
 import type { CompactTerrainPlantingLobe } from "./CompactTerrainPalette";
 import type { WorkshopFoot } from "@hyperforge/procgen/building";
+import type { GrassTerrainExclusionPolygon } from "../../../utils/workers/GrassTerrainSurfaceSnapshot";
+
+// Existing support stencil for the procgen recipe's 0.30m footing. Procgen does
+// not export this dimension; actual footing-vertex tests guard their alignment.
+const FOOTING_HALF_EXTENT = 0.15;
 
 export const COMPACT_SERVICE_COURT: CompactServiceCourtManifest = Object.freeze(
   {
@@ -212,6 +217,51 @@ export type OwnedCompactServiceCourt = Readonly<{
   blockingTiles: readonly Readonly<{ x: number; z: number }>[];
 }>;
 
+/** Grass-only footprints, never a roof/floor pad or a terrain-height edit.
+ * Use the same procgen post locations and support extent as ground sampling.
+ * The terrain owner admits and detaches these private, newly allocated records.
+ */
+export function createCompactServiceCourtGrassExclusions(
+  record: OwnedCompactServiceCourt,
+  posts: readonly Readonly<{ x: number; z: number }>[],
+): GrassTerrainExclusionPolygon[] {
+  if (
+    record.descriptor.rotation !== 0 ||
+    posts.length !== 4 ||
+    record.feet.length !== 4 ||
+    record.blockingTiles.length !== 4
+  )
+    throw new Error("Compact service court grass requires four admitted feet");
+  return posts.map((post, index) => {
+    const x = record.position.x + post.x,
+      z = record.position.z + post.z;
+    if (
+      !Number.isFinite(x) ||
+      !Number.isFinite(z) ||
+      x !== record.blockingTiles[index].x + 0.5 ||
+      z !== record.blockingTiles[index].z + 0.5
+    )
+      throw new Error("Compact service court grass footing owner mismatch");
+    const minX = x - FOOTING_HALF_EXTENT,
+      maxX = x + FOOTING_HALF_EXTENT,
+      minZ = z - FOOTING_HALF_EXTENT,
+      maxZ = z + FOOTING_HALF_EXTENT;
+    return {
+      id: `${record.descriptor.layoutId}-footing-${index}`,
+      minX,
+      maxX,
+      minZ,
+      maxZ,
+      vertices: [
+        { x: minX, z: minZ },
+        { x: maxX, z: minZ },
+        { x: maxX, z: maxZ },
+        { x: minX, z: maxZ },
+      ],
+    };
+  });
+}
+
 /** Once-per-startup ground support, sampled across every actual post footing.
  * The 0.08m embed allowance is explicit; steep/unsupported placements fail closed.
  */
@@ -229,8 +279,8 @@ export function groundCompactServiceCourt(
     const px = x + post.x,
       pz = z + post.z;
     const samples: number[] = [];
-    for (const dx of [-0.15, 0, 0.15])
-      for (const dz of [-0.15, 0, 0.15])
+    for (const dx of [-FOOTING_HALF_EXTENT, 0, FOOTING_HALF_EXTENT])
+      for (const dz of [-FOOTING_HALF_EXTENT, 0, FOOTING_HALF_EXTENT])
         samples.push(heightAt(px + dx, pz + dz));
     const min = Math.min(...samples),
       max = Math.max(...samples);

@@ -1345,6 +1345,129 @@ describe("CPU per-blade grounding prototype (no renderer/GPU)", () => {
     ["fine", 1],
     ["isolated-fine-near4", 0],
   ] as const)(
+    "keeps %s LOD%s grass-only pad sweeps inclusive while releasing the unchanged grading shoulder",
+    (appearance, lod) => {
+      const f = analyticOwner(appearance);
+      try {
+        const surface = f.makeSurface();
+        const request = {
+          ...f.request(surface, f.dataAt(surface, [[0, 0, 0.71]]), lod),
+          wind: { x: 0.4, z: 0.165 },
+        };
+        const before = structuredClone(request.data);
+        const baseline = groundGrassBlades(request);
+        if (baseline.status !== "ready" || !baseline.sweptBounds)
+          throw Error("Expected admitted unexcluded clump");
+        const box = baseline.sweptBounds;
+        const grade = {
+          id: "unchanged-grade",
+          centerX: 0,
+          centerZ: 0,
+          width: 30,
+          depth: 30,
+          height: 20,
+          blendRadius: 2,
+        };
+        const resultFor = (grassExclusionBounds?: {
+          minX: number;
+          maxX: number;
+          minZ: number;
+          maxZ: number;
+        }) =>
+          groundGrassBlades({
+            ...request,
+            terrainSurface: {
+              ...emptySnapshot(),
+              zones: [
+                {
+                  ...grade,
+                  ...(grassExclusionBounds ? { grassExclusionBounds } : {}),
+                },
+              ],
+            },
+          });
+        const old = resultFor();
+        expect(old).toMatchObject({
+          status: "ready",
+          data: { count: 0 },
+          receipt: { rejected: { pad: 1 } },
+        });
+        const full = resultFor({ minX: -17, maxX: 17, minZ: -17, maxZ: 17 });
+        if (old.status !== "ready" || full.status !== "ready")
+          throw Error("Legacy and explicit full exclusion must complete");
+        const { elapsedMs: _oldTime, ...oldReceipt } = old.receipt;
+        const { elapsedMs: _fullTime, ...fullReceipt } = full.receipt;
+        expect(fullReceipt).toEqual(oldReceipt);
+        expect(full.data).toEqual(old.data);
+        expect(full.rootDeltas).toEqual(old.rootDeltas);
+        const touchingBounds = {
+          minX: box.maxX,
+          maxX: box.maxX + 1,
+          minZ: box.minZ,
+          maxZ: box.maxZ,
+        };
+        expect(touchingBounds.minX).toBeGreaterThan(0);
+        let stillMaxX = -Infinity;
+        for (
+          let v = 0;
+          v < request.geometry.getAttribute("position").count;
+          v++
+        )
+          stillMaxX = Math.max(
+            stillMaxX,
+            transformedVertex(request.data, surface, request.geometry, 0, v).x,
+          );
+        expect(touchingBounds.minX).toBeGreaterThan(stillMaxX);
+        expect(resultFor(touchingBounds)).toMatchObject({
+          status: "ready",
+          data: { count: 0 },
+          sweptBounds: null,
+          receipt: { rejected: { pad: 1 } },
+        });
+        const outside = resultFor({
+          ...touchingBounds,
+          minX: box.maxX + 1e-10,
+        });
+        if (outside.status !== "ready")
+          throw Error("Released grading shoulder deferred");
+        expect(outside.data).toEqual(baseline.data);
+        expect(outside.rootDeltas).toEqual(baseline.rootDeltas);
+        expect(outside.sourceIndices).toEqual(baseline.sourceIndices);
+        expect(outside.sweptBounds).toEqual(baseline.sweptBounds);
+        expect(outside.receipt.rejected).toEqual(baseline.receipt.rejected);
+        // One existing per-zone pad charge: optional bounds add no operation or
+        // continuation and do not change the root-query or output algorithms.
+        expect(outside.receipt.workUnits).toBe(baseline.receipt.workUnits + 1);
+        expect(outside.receipt.workBudget).toBe(baseline.receipt.workBudget);
+        expect(outside.receipt.workUnits).toBeLessThanOrEqual(
+          GRASS_BLADE_GROUNDING_LIMITS.maximumWorkBudget,
+        );
+        expect(request.data).toEqual(before);
+        for (const grassExclusionBounds of [
+          undefined,
+          { ...touchingBounds, minX: NaN },
+          { ...touchingBounds, maxX: 18 },
+        ]) {
+          const malformed = { ...grade, grassExclusionBounds };
+          expect(() =>
+            groundGrassBlades({
+              ...request,
+              terrainSurface: { ...emptySnapshot(), zones: [malformed] },
+            }),
+          ).toThrow(/grassExclusionBounds/);
+        }
+      } finally {
+        f.close();
+      }
+    },
+  );
+
+  it.each([
+    ["ordinary", 1],
+    ["fine", 0],
+    ["fine", 1],
+    ["isolated-fine-near4", 0],
+  ] as const)(
     "checks %s LOD%s swept pads, road capsules and elevated-water circles outside the anchor",
     (appearance, lod) => {
       const f = analyticOwner(appearance);

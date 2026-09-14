@@ -1113,6 +1113,91 @@ describe("actual authored-surface grass worker", () => {
     });
   });
 
+  it("releases grass-only grading shoulders through the actual worker while preserving detached requests and surface parity", async () => {
+    await withTerrain(async (terrain, internals, worker) => {
+      const grade = { ...broadGrade(), excludeGrass: true };
+      terrain.registerFlatZone(grade);
+      const oldInput = request(terrain, internals, 350, 400, 12);
+      const oldResult = await worker.run(oldInput);
+      expect(oldResult.count).toBe(0);
+      const bounds = { minX: 348, maxX: 352, minZ: 398, maxZ: 402 };
+      const bounded = { ...grade, grassExclusionBounds: bounds };
+      terrain.registerFlatZone(bounded);
+      const input = request(terrain, internals, 350, 400, 12);
+      const queued = prepareGrassWorkerRequest(input);
+      const captured = queued.terrainSurface.zones.find(
+        (zone) => zone.id === grade.id,
+      )!;
+      expect(captured.grassExclusionBounds).toEqual(bounds);
+      expect(captured.grassExclusionBounds).not.toBe(bounds);
+      const before = structuredClone(queued);
+      input.terrainSurface.zones.find(
+        (zone) => zone.id === grade.id,
+      )!.grassExclusionBounds!.minX -= 0.5;
+      expect(queued).toEqual(before);
+      const result = await worker.run(queued);
+      expect(result.count).toBeGreaterThan(20);
+      for (const point of points(queued, result)) {
+        expect(
+          point.x < bounds.minX ||
+            point.x > bounds.maxX ||
+            point.z < bounds.minZ ||
+            point.z > bounds.maxZ,
+        ).toBe(true);
+        expect(Math.abs(point.x - grade.centerX)).toBeLessThan(grade.width / 2);
+        expect(Math.abs(point.z - grade.centerZ)).toBeLessThan(grade.depth / 2);
+      }
+      assertSurfaceParity(queued, result, internals);
+      const repeat = await worker.run(queued);
+      expect(repeat.count).toBe(result.count);
+      for (const key of Object.keys(attributes) as (keyof typeof attributes)[])
+        expect(repeat[key]).toEqual(result[key]);
+      // The old request remains old even after same-ID production registration.
+      expect(
+        oldInput.terrainSurface.zones.find((zone) => zone.id === grade.id),
+      ).not.toHaveProperty("grassExclusionBounds");
+      expect((await worker.run(oldInput)).count).toBe(0);
+      for (const invalid of [
+        undefined,
+        null,
+        { ...bounds, minX: NaN },
+        { ...bounds, maxX: 999 },
+      ]) {
+        const malformed = structuredClone(queued);
+        Object.defineProperty(
+          malformed.terrainSurface.zones.find((zone) => zone.id === grade.id)!,
+          "grassExclusionBounds",
+          { value: invalid, enumerable: true },
+        );
+        expect(() => prepareGrassWorkerRequest(malformed)).toThrow(
+          /grassExclusionBounds/,
+        );
+        await expect(worker.run(malformed)).rejects.toThrow(
+          /grassExclusionBounds/,
+        );
+      }
+      terrain.registerFlatZone({
+        id: "independent-shoulder-pad",
+        centerX: 345,
+        centerZ: 400,
+        width: 1,
+        depth: 4,
+        height: grade.height,
+        blendRadius: 0.5,
+      });
+      const paddedInput = request(terrain, internals, 350, 400, 12);
+      const padded = await worker.run(paddedInput);
+      expect(padded.count).toBeGreaterThan(0);
+      expect(
+        points(paddedInput, padded).filter(
+          (point) =>
+            Math.abs(point.x - 345) <= 1 && Math.abs(point.z - 400) <= 2.5,
+        ),
+      ).toEqual([]);
+      assertSurfaceParity(paddedInput, padded, internals);
+    });
+  });
+
   it("excludes sparse mask tiles and their radial blends without excluding the bounding rectangle's holes", async () => {
     await withTerrain(async (terrain, internals, worker) => {
       const broad = broadGrade();

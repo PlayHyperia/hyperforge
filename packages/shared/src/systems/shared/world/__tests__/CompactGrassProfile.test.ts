@@ -34,6 +34,10 @@ import {
 } from "../WorldTerrainProfile";
 import { createTerrainWorkerConfig } from "../../../../utils/workers/TerrainWorkerShared";
 import { sampleCompactHabitatSoil } from "../CompactHabitatComposition";
+import {
+  createCompactServiceCourtGrassExclusions,
+  groundCompactServiceCourt,
+} from "../CompactServiceCourt";
 
 /** Actual production source in a native worker; only message transport is adapted. */
 function workerSession() {
@@ -1073,7 +1077,21 @@ describe("opt-in compact grass, actual terrain and native worker (not GPU proof)
 
   it("grounds the current natural plaza with unchanged density, actual worker/CPU parity and retained service exclusions", async () => {
     const f = await fixture();
+    let grassLease: { release(): void } | undefined;
     try {
+      const descriptor = DataManager.getWorldConfig()?.compactServiceCourt;
+      if (!descriptor)
+        throw Error("Current plaza requires the actual service court");
+      const { OPEN_WORKSHOP_POSTS } =
+        await import("@hyperforge/procgen/building");
+      const footings = createCompactServiceCourtGrassExclusions(
+        groundCompactServiceCourt(descriptor, OPEN_WORKSHOP_POSTS, (x, z) =>
+          f.terrain.getHeightAt(x, z),
+        ),
+        OPEN_WORKSHOP_POSTS,
+      );
+      expect(footings).toHaveLength(4);
+      grassLease = f.terrain.acquireGrassExclusionPolygons(footings);
       const roads = f.world.getSystem("roads") as RoadNetworkSystem;
       expect(roads.getRoads()).toHaveLength(14);
       expect(
@@ -1102,6 +1120,12 @@ describe("opt-in compact grass, actual terrain and native worker (not GPU proof)
           owner["chunkKey"](node),
           1,
         );
+        if (node === f.nodes[2])
+          expect(
+            input.terrainSurface.exclusionPolygons?.filter((polygon) =>
+              footings.some((footing) => footing.id === polygon.id),
+            ),
+          ).toEqual(footings);
         const output = await f.worker.run(input);
         const sync = owner["generateInstanceData"](node, 1)!;
         expect(sync.count).toBe(output.count);
@@ -1119,9 +1143,6 @@ describe("opt-in compact grass, actual terrain and native worker (not GPU proof)
       process.stdout.write(
         `Current plaza worker census: ${JSON.stringify(counts)}\n`,
       );
-      // Same sampling/density: two campus and eight northern clumps now fall
-      // inside the authored all-LOD rock silhouettes. Other leaves unchanged.
-      expect(counts).toEqual([715, 552, 1008, 1199, 820, 341]);
       const node = f.nodes[2];
       f.installSupport(node);
       const { key, entry, data } = await queueGrounding(f, owner, node);
@@ -1146,6 +1167,7 @@ describe("opt-in compact grass, actual terrain and native worker (not GPU proof)
         const x = node.centerX + result.data.offsets[i * 3];
         const z = node.centerZ + result.data.offsets[i * 3 + 2];
         expect(f.terrain["isGrassExcludedAt"](x, z)).toBe(false);
+        expect(f.setup.isGrassObstacleAt!(x, z)).toBe(false);
         expect(
           f.terrain["calculateRoadInfluenceAtVertex"](x, z, 0, 0),
         ).toBeLessThanOrEqual(0.8);
@@ -1154,25 +1176,62 @@ describe("opt-in compact grass, actual terrain and native worker (not GPU proof)
       process.stdout.write(
         `Landscape plaza grounding census: ${JSON.stringify({ accepted: result.data.count, naturalPlazaClumps, receipt: result.receipt })}\n`,
       );
-      // Recorded before core/feather redistribution: identical raw sampling,
-      // projected1007, retained933, plaza110, pad47/road22/water5/edge0.
-      // Admit the new census only with unchanged projection/pad/water counts
-      // and the complete retained delta accounted for by road rejection.
-      const previous = { projected: 1007, retained: 933, plaza: 110, road: 22 };
-      expect(result.receipt.inputClumps).toBe(previous.projected);
-      expect(result.receipt.processedClumps).toBe(previous.projected);
+      expect(counts).toEqual([715, 552, 1024, 1199, 820, 341]);
+      // Historical receipts, not current placement oracles: before core/feather
+      // redistribution (natural-paths-03-serial01.log), then the accepted cores
+      // before grass-only station bounds (core-feather-plaza-focused01.log).
+      const beforeCoreFeather = {
+        raw: 1008,
+        projected: 1007,
+        retained: 933,
+        plaza: 110,
+        rejected: { terrain_edge: 0, pad: 47, road: 22, water: 5 },
+      };
+      const previous = {
+        raw: 1008,
+        projected: 1007,
+        retained: 941,
+        plaza: 114,
+        rejected: { terrain_edge: 0, pad: 47, road: 14, water: 5 },
+      };
+      process.stdout.write(
+        `Historical plaza receipts: ${JSON.stringify({ beforeCoreFeather, beforeGrassBounds: previous })}\n`,
+      );
+      // Measured with current station bounds and all four real footing owners:
+      // grass-clearance-plaza-focused01.log. Different acceptance changes RNG
+      // consumption, so this is full census accounting, not pointwise causation.
+      expect(result.receipt.inputClumps).toBe(1023);
+      expect(result.receipt.processedClumps).toBe(1023);
+      expect(counts[2] - result.receipt.inputClumps).toBe(
+        previous.raw - previous.projected,
+      );
       expect(result.receipt.rejected).toEqual({
         terrain_edge: 0,
-        pad: 47,
-        road: 14,
-        water: 5,
+        pad: 48,
+        road: 17,
+        water: 4,
       });
+      const rejected = Object.values(result.receipt.rejected).reduce(
+        (sum, value) => sum + value,
+        0,
+      );
+      const previouslyRejected = Object.values(previous.rejected).reduce(
+        (sum, value) => sum + value,
+        0,
+      );
+      expect(result.receipt.inputClumps - rejected).toBe(result.data.count);
       expect(result.data.count - previous.retained).toBe(
-        previous.road - result.receipt.rejected.road,
+        result.receipt.inputClumps -
+          previous.projected -
+          (rejected - previouslyRejected),
       );
       expect(result.receipt.workBudget).toBe(1_000_000);
-      expect(result.data.count).toBe(941);
-      expect(naturalPlazaClumps).toBe(114);
+      expect(result.receipt.workUnits).toBeLessThanOrEqual(
+        result.receipt.workBudget,
+      );
+      expect(result.data.count).toBe(954);
+      expect(result.receipt.retainedClumps).toBe(result.data.count);
+      expect(naturalPlazaClumps).toBe(121);
       expect(result.receipt.rejected.pad).toBeGreaterThan(0);
       expect(result.receipt.maxAcceptedBaseError).toBeLessThanOrEqual(0.05);
       expect(result.rootDeltas.byteLength).toBe(result.data.count * 96);
@@ -1181,7 +1240,11 @@ describe("opt-in compact grass, actual terrain and native worker (not GPU proof)
         `Current plaza grounded census: ${JSON.stringify({ accepted: result.data.count, naturalPlazaClumps, receipt: result.receipt })}\n`,
       );
     } finally {
-      await f.close();
+      try {
+        grassLease?.release();
+      } finally {
+        await f.close();
+      }
     }
   });
 
