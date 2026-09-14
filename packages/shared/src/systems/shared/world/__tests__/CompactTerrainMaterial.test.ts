@@ -36,6 +36,7 @@ import {
   createCompactPondSurfaceWeights,
   applyCompactPondWetness,
   applyCompactMeadowTint,
+  applyCompactFineGrassSubstrateContrast,
   applyCompactGrassColorGrade,
   createCompactTerrainMacroWeights,
   createCompactCoastWeights,
@@ -1354,11 +1355,232 @@ describe("authored Haven ground composition, independent of terrain and grass po
 });
 
 describe("compact terrain actual texture ownership and CPU material graph", () => {
+  it("compresses only admitted fine grass linear albedo around the unchanged source mean", () => {
+    const ops = createCompactTerrainColorOperations();
+    const palette = ops.getPalette();
+    const grass: CompactTerrainLayer = {
+      albedo: vec3(0.3, 0.08, 0.6),
+      roughness: float(0.91),
+      ao: float(0.83),
+      worldNormal: vec3(0.2, 0.9, 0.1),
+    };
+    expect(applyCompactFineGrassSubstrateContrast(grass, undefined)).toBe(
+      grass,
+    );
+    for (const invalid of [null, false, "", {}, "fine-meadow-green-v2"])
+      expect(() =>
+        applyCompactFineGrassSubstrateContrast(
+          grass,
+          invalid as CompactGrassColorGrade,
+        ),
+      ).toThrow(/grass color grade/);
+    const candidate = applyCompactFineGrassSubstrateContrast(
+      grass,
+      "fine-meadow-green-v1",
+    );
+    for (const key of ["roughness", "ao", "worldNormal"] as const)
+      expect(candidate[key]).toBe(grass[key]);
+    const contrastNodes = [...graph(candidate.albedo)].filter(
+      (node) => Reflect.get(node, "name") === "fineGrassSubstrateContrast",
+    );
+    expect(contrastNodes).toHaveLength(1);
+    // Actual r186 intent wrappers are traversed by the existing evaluator.
+    expect(vectorValue(contrastNodes[0])).toEqual([0.35]);
+    expect(Reflect.get(candidate.albedo, "name")).toBe(
+      "fineGrassSubstrateAlbedo",
+    );
+    expect(graph(candidate.albedo).has(grass.albedo)).toBe(true);
+    for (const rgb of [palette.grass, [0, 0, 0], [1, 1, 1], [0.3, 0.08, 0.6]]) {
+      const actual = vectorValue(
+        candidate.albedo,
+        new Map([[grass.albedo, rgb]]),
+      );
+      for (let channel = 0; channel < 3; channel++)
+        expect(actual[channel]).toBeCloseTo(
+          palette.grass[channel] +
+            0.35 * (rgb[channel] - palette.grass[channel]),
+          14,
+        );
+      if (rgb === palette.grass) expect(actual).toEqual(palette.grass);
+    }
+    expect(vectorValue(grass.albedo)).toEqual([0.3, 0.08, 0.6]);
+    expect(ops.getPalette()).toEqual(palette);
+  });
+
+  it("keeps all real grass texels bounded and preserves the raw linear mean with actual TSL contrast", async () => {
+    const ops = createCompactTerrainColorOperations();
+    const mean = ops.getPalette().grass;
+    const bytes = await readFile(
+      new URL("grass-albedo-roughness.png", assetDirectory),
+    );
+    expect(createHash("sha256").update(bytes).digest("hex")).toBe(
+      expectedDigest("grass-albedo-roughness"),
+    );
+    const image = PNG.sync.read(bytes);
+    const grass: CompactTerrainLayer = {
+      albedo: vec3(0),
+      roughness: float(1),
+      ao: float(1),
+      worldNormal: vec3(0, 1, 0),
+    };
+    const candidate = applyCompactFineGrassSubstrateContrast(
+      grass,
+      "fine-meadow-green-v1",
+    );
+    const graded = applyCompactGrassColorGrade(
+      candidate,
+      "fine-meadow-green-v1",
+    );
+    // Every decoded 8-bit channel value goes through the actual arithmetic
+    // graph once. The lookup covers every real RGB texel without fabricating a
+    // GPU sampler or allocating a graph for each of the million source pixels.
+    const linear: number[] = [];
+    const lookup: number[][] = [];
+    const gradedLookup: number[][] = [];
+    for (let value = 0; value < 256; value++) {
+      const srgb = value / 255;
+      const source =
+        srgb <= 0.04045 ? srgb / 12.92 : ((srgb + 0.055) / 1.055) ** 2.4;
+      linear.push(source);
+      const input = new Map<Node, readonly number[]>([
+        [grass.albedo, [source, source, source]],
+      ]);
+      lookup.push(vectorValue(candidate.albedo, input));
+      gradedLookup.push(vectorValue(graded.albedo, input));
+    }
+    const sums = [0, 0, 0],
+      sourceSums = [0, 0, 0];
+    let minimum = Infinity,
+      maximum = -Infinity,
+      maxError = 0;
+    for (let pixel = 0; pixel < image.data.length; pixel += 4)
+      for (let channel = 0; channel < 3; channel++) {
+        const encoded = image.data[pixel + channel];
+        const value = lookup[encoded][channel];
+        sums[channel] += value;
+        sourceSums[channel] += linear[encoded];
+        minimum = Math.min(minimum, value, gradedLookup[encoded][channel]);
+        maximum = Math.max(maximum, value, gradedLookup[encoded][channel]);
+        maxError = Math.max(
+          maxError,
+          Math.abs(
+            value - (mean[channel] + 0.35 * (linear[encoded] - mean[channel])),
+          ),
+        );
+      }
+    expect(maxError).toBeLessThan(1e-14);
+    expect(minimum).toBeGreaterThanOrEqual(0);
+    expect(maximum).toBeLessThan(1);
+    for (let channel = 0; channel < 3; channel++) {
+      expect(sourceSums[channel] / (image.width * image.height)).toBeCloseTo(
+        mean[channel],
+        12,
+      );
+      expect(sums[channel] / (image.width * image.height)).toBeCloseTo(
+        mean[channel],
+        11,
+      );
+    }
+    expect(ops.getPalette().grass).toEqual(mean);
+  });
+
+  it("applies substrate contrast before grade and every soil, habitat, cliff and road override", () => {
+    const mean = createCompactTerrainColorOperations().getPalette().grass;
+    const grass: CompactTerrainLayer = {
+      albedo: vec3(0.3, 0.08, 0.6),
+      roughness: float(0.91),
+      ao: float(0.83),
+      worldNormal: vec3(0, 1, 0),
+    };
+    const dirt: CompactTerrainLayer = {
+      albedo: vec3(0.17, 0.11, 0.06),
+      roughness: float(0.8),
+      ao: float(0.7),
+      worldNormal: vec3(0.2, 0.9, 0.1),
+    };
+    const rock: CompactTerrainLayer = {
+      albedo: vec3(0.23, 0.18, 0.14),
+      roughness: float(0.7),
+      ao: float(0.6),
+      worldNormal: vec3(-0.1, 0.9, 0.2),
+    };
+    const candidate = applyCompactGrassColorGrade(
+      applyCompactFineGrassSubstrateContrast(grass, "fine-meadow-green-v1"),
+      "fine-meadow-green-v1",
+    );
+    const grade = [0.95, 1.3, 1.1];
+    const compressed = [0.3, 0.08, 0.6].map(
+      (value, i) => (mean[i] + 0.35 * (value - mean[i])) * grade[i],
+    );
+    for (const [soil, talus, wear, habitat, cliff, road] of [
+      [0, 0, 0, 0, 0, 0],
+      [0.2, 0.3, 0.4, 0.46, 0.25, 0.35],
+      [1, 0, 0, 0, 0, 0],
+      [0, 0, 1, 0, 0, 0],
+      [0, 0, 0, 1, 0, 0],
+      [0, 0.3, 0.4, 0.46, 1, 0],
+      [0, 0.3, 0.4, 0.46, 0.25, 1],
+    ]) {
+      const blend = (g: CompactTerrainLayer) =>
+        blendCompactTerrainLayers(
+          { grass: g, dirt, rock },
+          float(soil),
+          float(cliff),
+          float(road),
+          { talus: float(talus), wear: float(wear) },
+          float(habitat),
+        );
+      const actual = blend(candidate),
+        baseline = blend(grass);
+      const mix = THREE.MathUtils.lerp;
+      const expected = compressed.map((g, i) => {
+        const d = vectorValue(dirt.albedo)[i],
+          r = vectorValue(rock.albedo)[i];
+        return mix(
+          mix(
+            mix(
+              mix(mix(mix(g, d, soil), mix(d, r, 0.85), talus), d, wear),
+              d,
+              habitat,
+            ),
+            r,
+            cliff,
+          ),
+          d,
+          road,
+        );
+      });
+      vectorValue(actual.albedo).forEach((value, i) =>
+        expect(value).toBeCloseTo(expected[i], 13),
+      );
+      for (const key of ["roughness", "ao"] as const)
+        expect(vectorValue(actual[key])).toEqual(vectorValue(baseline[key]));
+      for (const root of [actual.normal, actual.roughness, actual.ao])
+        expect(graph(root).has(candidate.albedo)).toBe(false);
+      if (
+        soil === 1 ||
+        wear === 1 ||
+        habitat === 1 ||
+        cliff === 1 ||
+        road === 1
+      )
+        // Numeric TSL mix uses a + (b-a)*t; t=1 can retain tiny
+        // cancellation differences for distinct incoming grass albedos.
+        vectorValue(actual.albedo).forEach((value, channel) =>
+          expect(value).toBeCloseTo(vectorValue(baseline.albedo)[channel], 14),
+        );
+    }
+  });
+
   it("keeps accepted grass color grading separate from physical channels in actual owned layer graphs", () => {
     const owner = new CompactTerrainTextureSet("https://assets.invalid");
     const before = owner.getReceipt();
     const layers = createCompactTerrainLayers(owner, float(0), float(0.137));
     const candidate = createCompactTerrainLayers(owner, float(0), float(0.137));
+    candidate.grass = applyCompactFineGrassSubstrateContrast(
+      candidate.grass,
+      "fine-meadow-green-v1",
+    );
     candidate.grass = applyCompactGrassColorGrade(
       candidate.grass,
       "fine-meadow-green-v1",
@@ -1642,6 +1864,77 @@ describe("compact terrain actual texture ownership and CPU material graph", () =
     }
   });
 
+  it("routes actual raw grass samples through contrast before optional meadow tint and grade", () => {
+    const ops = createCompactTerrainColorOperations();
+    const mean = ops.getPalette().grass;
+    const ordinary = createTerrainMaterial(undefined, { compactPbr: true });
+    const candidate = createTerrainMaterial(undefined, {
+      compactPbr: true,
+      compactGrassColorGrade: "fine-meadow-green-v1",
+    });
+    try {
+      const colorNodes = graph(candidate.colorNode!);
+      const named = (name: string): Node => {
+        const nodes = [...colorNodes].filter(
+          (node) => Reflect.get(node, "name") === name,
+        );
+        expect(nodes).toHaveLength(1);
+        return nodes[0];
+      };
+      const contrast = named("fineGrassSubstrateContrast");
+      const substrate = named("fineGrassSubstrateAlbedo");
+      const graded = named("compactGrassGradedAlbedo");
+      expect(vectorValue(contrast)).toEqual([0.35]);
+      expect(graph(graded).has(substrate)).toBe(true);
+      expect(graph(substrate).has(graded)).toBe(false);
+      for (const root of [
+        ordinary.colorNode!,
+        candidate.normalNode!,
+        candidate.roughnessNode!,
+        candidate.aoNode!,
+      ])
+        for (const node of graph(root))
+          expect([
+            "fineGrassSubstrateContrast",
+            "fineGrassSubstrateAlbedo",
+          ]).not.toContain(Reflect.get(node, "name"));
+      const textureSet = candidate.compactTerrainSurface!;
+      const source = textureSet.getNode("grass", "albedo-roughness").value;
+      const samples = [...graph(substrate)].filter(
+        (node) =>
+          Reflect.get(node, "value") === source && Reflect.get(node, "uvNode"),
+      );
+      expect(samples).toHaveLength(2);
+      for (const node of samples)
+        expect(Reflect.get(node, "gradNode")).toBeTruthy();
+      for (const noise of [0.1, 0.51, 0.9]) {
+        // Supply explicit sampled values to actual TSL nodes. This checks
+        // composition order, not GPU filtering or a synthetic renderer.
+        const inputs = new Map<Node, readonly number[]>();
+        for (const node of graph(graded)) {
+          if (!Reflect.get(node, "uvNode")) continue;
+          if (Reflect.get(node, "value") === source)
+            inputs.set(node, [...mean, 0.9]);
+          if (Reflect.get(node, "value") === getNoiseTexture())
+            inputs.set(node, [noise, 0, 0, 1]);
+        }
+        vectorValue(substrate, inputs).forEach((value, channel) =>
+          expect(value).toBeCloseTo(mean[channel], 14),
+        );
+        const tint = ops.meadowTint(noise, 0);
+        const expected = mean.map(
+          (value, channel) => value * tint[channel] * [0.95, 1.3, 1.1][channel],
+        );
+        vectorValue(graded, inputs).forEach((value, channel) =>
+          expect(value).toBeCloseTo(expected[channel], 14),
+        );
+      }
+    } finally {
+      ordinary.dispose();
+      candidate.dispose();
+    }
+  });
+
   it("admits only the immutable opt-in grass grade without changing raw scan means", () => {
     const ops = createCompactTerrainColorOperations();
     const raw = ops.getPalette();
@@ -1741,7 +2034,15 @@ describe("compact terrain actual texture ownership and CPU material graph", () =
               distortNoise: 0.35,
               surface: { x: 350, z: 320, height: 28.4, pond: null },
             };
-            const rawGrass = applyCompactMeadowTint(grass, float(meadowNoise));
+            const meanGrass = applyCompactFineGrassSubstrateContrast(
+              grass,
+              "fine-meadow-green-v1",
+            );
+            expect(vectorValue(meanGrass.albedo)).toEqual(palette.grass);
+            const rawGrass = applyCompactMeadowTint(
+              meanGrass,
+              float(meadowNoise),
+            );
             const graded = applyCompactGrassColorGrade(
               rawGrass,
               "fine-meadow-green-v1",

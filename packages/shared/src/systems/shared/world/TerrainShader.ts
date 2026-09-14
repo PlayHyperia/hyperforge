@@ -63,6 +63,7 @@ import {
   createCompactPondSurfaceWeights,
   applyCompactPondWetness,
   applyCompactMeadowTint,
+  applyCompactFineGrassSubstrateContrast,
   applyCompactGrassColorGrade,
   createCompactCoastWeights,
   applyCompactCoastRock,
@@ -1270,6 +1271,11 @@ export function createTerrainMaterial(
   const compactLayers = compactTextures
     ? createCompactTerrainLayers(compactTextures, distSq, noiseValue)
     : null;
+  if (compactLayers)
+    compactLayers.grass = applyCompactFineGrassSubstrateContrast(
+      compactLayers.grass,
+      grassColorGrade,
+    );
   if (compactLayers && !macroField?.havenGround) {
     // One extra sample of the existing noise texture; no new texture allocation.
     // Dry grass keeps the same physical support, normals and placement field.

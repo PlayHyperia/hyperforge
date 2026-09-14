@@ -355,6 +355,29 @@ export type CompactTerrainLayer = {
   worldNormal: Node<"vec3">;
 };
 
+/**
+ * Fine-meadow substrate art trial: compress sampled LINEAR grass reflectance
+ * around its unchanged source mean, before meadow tint and colour grading.
+ * The CPU palette mean is a fixed point; this does not change grass placement,
+ * texture resolution/filtering or any non-albedo material channel.
+ */
+export function applyCompactFineGrassSubstrateContrast(
+  grass: CompactTerrainLayer,
+  grade: CompactGrassColorGrade | undefined,
+): CompactTerrainLayer {
+  const operations = createCompactTerrainColorOperations();
+  if (operations.grassColorGrade(grade) === undefined) return grass;
+  const rawMean = operations.getPalette().grass;
+  const mean = vec3(rawMean[0], rawMean[1], rawMean[2]);
+  const contrast = float(0.35).toVar("fineGrassSubstrateContrast");
+  return {
+    ...grass,
+    albedo: mean
+      .add(grass.albedo.sub(mean).mul(contrast))
+      .toVar("fineGrassSubstrateAlbedo"),
+  };
+}
+
 /** Grade grass reflectance before soil/rock/path blending; no extra samples. */
 export function applyCompactGrassColorGrade(
   grass: CompactTerrainLayer,

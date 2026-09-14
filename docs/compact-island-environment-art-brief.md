@@ -1,6 +1,65 @@
 # Compact island environment art: next delivery slice
 
-## Current sweep verdict — modest shape improvement; grass quality remains open
+## Current substrate verdict — quieter ground retained; blade quality remains open
+
+Fine-only grass albedo now retains 35% of scanned RGB variation around the
+unchanged raw linear source mean, before optional meadow tint, grading and
+ground-layer blends. Root and independent seven-image review retain it as a
+narrow improvement: less distracting ground grain, especially close up and in
+the anvil shadow. Cleared patches risk looking painted flat; residual texture
+remains. Angular separated strips, visible stems/gaps and insufficient canopy
+overlap still miss the user's reference. No overall meadow/AAA approval.
+
+The source mean remains fixed; this is whole-albedo contrast, not spatial
+filtering. Texture resolution/physical scale/samples, normals/AO/roughness,
+non-grass blends, grass geometry, placement and quality settings remain held.
+The reference's camera/version/settings are unknown; live actors and wind vary,
+so no pixel-matched reference or quantitative coverage improvement is claimed.
+
+Focused tests pass 45/45. An initial 44/45 failed only the new exact arithmetic
+assertion (0.06 versus 0.05999999999999994); it now uses 1e-14 tolerance without
+changing prior gates. That focused failure remains in tool history, not a
+fabricated log artifact. Broad serial regression passes 445/445 over 28 files
+(`substrate-contrast-integration01.json`, SHA-256
+`500c0300651fb91e0ae768e0bb0af8df2d3240618aa9cf6922f6598dece192ad`).
+Shared/client/server noEmit, shared bundles/declarations and the normal server
+build pass; competitive manifest prefix `2cbc9468ff2a`. Native uses the Vite
+development client plus rebuilt shared library, not a new client-dist/root build.
+The prior concurrent 439/441 active-budget failures remain unresolved; this
+albedo-only pass did not repeat concurrent tests or claim to solve load cost.
+
+`fine-grass-substrate-contrast-art01` ran 2026-09-14 03:09:06–03:11:24 UTC.
+All three native 1280×720/DPR1 Apple Metal/WebGPU images completed, with 36 receipts
+and all 731 source pins held. Overall exit 1 / passed=false / studyPassed=false
+remains: five cow-model/404 errors and 14 retained dagger-fit errors. Page,
+GPU/device and cleanup errors are zero. Report SHA-256
+`54238d7cdf4e2e41da24faa155d0b955489dd61fb60b1a9a78d593bfda023657`.
+
+Root independently replayed 82 actual main-context grazing shader pairs. Removing
+only the two new declarations/two assignments and restoring the grade input makes
+the entire observed terrain fragment shader byte-identical to lateral-sweep-art01,
+without identifier or whitespace normalization. Vertex WGSL is unchanged.
+All 94 same-LOD owners, source indices, templates and ten attributes remain exact:
+81,101 clumps / 3,780,636 triangles / 8,769,696 root bytes; 14,230,352 attribute bytes
+including 3,490,040 instance/root scalars were compared. No population cut.
+Replay receipt `substrate-contrast-native-verification01.json`, SHA-256
+`3c9f323ace1c1450726471f782485a6580d9c8f07a251670a885b159f15b1ed7`.
+
+Owned browser/services close; PIDs 31829/31860/32022/32023 are absent and ports
+3333/5555/9236/57831 clear in independent checks. PostgreSQL is retained exited(0).
+No real wagers, streaming, cost probes, wind/LOD rail, sustained frame/memory/load
+or deep CPU parity were performed by this three-still diagnostic. Those gates
+remain open. Independent visual review `substrate-contrast-art01-review.md`,
+SHA-256 `2ad1d90217aea6719a4b0d468d65c9ec41268a0ed7e8f4c48b06e1abcb4d73ed`.
+
+The preceding lateral-sweep/grounding checkpoint is pushed as
+`bff5070a6f797c801aa5668ffe509e79ca61c4d3` under dreaminglucid, exactly seven
+files with normal hooks. This substrate checkpoint's commit/publication status
+is tracked separately in the external fine-meadow COMMIT_RECEIPT.json.
+Next: reduce exclusion-check allocation without changing budget/charge semantics,
+then qualify genuine close-view blade curvature and overlap improvements.
+
+## Previous sweep verdict — modest shape improvement; grass quality remains open
 
 The fine-only arc ratio is now 0.48 instead of 0.30. Blade heights, width,
 linear taper, configured density, LODs, wind, materials and lighting stay held.
