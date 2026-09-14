@@ -30,6 +30,8 @@ import THREE, {
   mul,
   modelWorldMatrix,
   cameraViewMatrix,
+  cameraPosition,
+  positionWorld,
   output,
 } from "../../../extras/three/three";
 import { SUN_LIGHT } from "./LightingConfig";
@@ -233,6 +235,9 @@ export const FINE_MEADOW_APPEARANCE = Object.freeze({
   TIP_BRIGHTNESS: 1.2,
   ROOT_OCCLUSION: 0.55,
   ROOT_OCCLUSION_END: 0.6,
+  GRAZING_GAIN: 0.35,
+  GRAZING_GAIN_ROOT_START: 0.05,
+  GRAZING_GAIN_ROOT_END: 0.65,
   PROGRESSIVE_ROOTS: true,
 } as const);
 
@@ -2829,6 +2834,35 @@ export class GrassVisualManager implements QuadTreeListener {
           tintedCol.mul(appearance.TIP_BRIGHTNESS),
           smoothstep(float(0.0), float(1.0), t),
         );
+        if (compactPhysical && appearance.id === FINE_MEADOW_APPEARANCE.id) {
+          // Chroma-preserving grazing gain, not emission/transmission. Equal
+          // white addition washed out dark greens in the earlier art trial.
+          // Terrain N keeps the response smooth across a canopy; the root mask
+          // retains the substrate join. PBR lighting and shadows still follow.
+          const viewDelta = cameraPosition
+            .sub(positionWorld)
+            .toVar("fineGrassGrazingViewDelta");
+          const viewDirection = viewDelta.div(
+            pow(dot(viewDelta, viewDelta).max(1e-12), 0.5),
+          );
+          const grazing = float(1)
+            .sub(dot(viewDirection, terrainNormal))
+            .clamp(0, 1)
+            .toVar("fineGrassGrazingAngle");
+          const gain = grazing
+            .mul(grazing)
+            .mul(grazing)
+            .mul(appearance.GRAZING_GAIN)
+            .mul(
+              smoothstep(
+                float(appearance.GRAZING_GAIN_ROOT_START),
+                float(appearance.GRAZING_GAIN_ROOT_END),
+                t,
+              ),
+            )
+            .toVar("fineGrassGrazingGain");
+          return bladeCol.mul(float(1).add(gain)).min(vec3(1));
+        }
         return compactPhysical
           ? bladeCol
           : applyAnimeShade(

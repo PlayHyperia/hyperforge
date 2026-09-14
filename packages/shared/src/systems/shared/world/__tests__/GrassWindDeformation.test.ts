@@ -2,12 +2,16 @@ import { describe, expect, it } from "vitest";
 import type { Node } from "three/webgpu";
 import THREE, {
   cameraViewMatrix,
+  cameraPosition,
+  positionWorld,
   modelWorldMatrix,
   time,
 } from "../../../../extras/three/three";
 import { createTerrainWorkerConfig } from "../../../../utils/workers/TerrainWorkerShared";
 import {
   CURVED_MEADOW_APPEARANCE,
+  COMPACT_ISLAND_GRASS_VISUAL_PROFILE,
+  STREAMING_GRASS_VISUAL_PROFILE,
   DENSE_MEADOW_GRASS_VISUAL_PROFILE,
   FINE_MEADOW_APPEARANCE,
   FINE_MEADOW_GRASS_VISUAL_PROFILE,
@@ -15,6 +19,7 @@ import {
   GrassVisualManager,
   NATURAL_TUFT_APPEARANCE,
   type GrassWorkerSetup,
+  type GrassVisualProfile,
 } from "../GrassVisualManager";
 import { SCULPTED_COMPACT_WORLD_TERRAIN_PROFILE } from "../WorldTerrainProfile";
 import {
@@ -22,7 +27,11 @@ import {
   GRASS_ROOT_STORAGE_ATTRIBUTE,
 } from "../GrassGroundingGpu";
 
-function createOwner(candidate: boolean | "fine" = true) {
+function createOwner(
+  candidate: boolean | "fine" = true,
+  withWorkerSetup = true,
+  profile?: GrassVisualProfile,
+) {
   const terrain = SCULPTED_COMPACT_WORLD_TERRAIN_PROFILE;
   const config = createTerrainWorkerConfig(terrain, 16);
   const setup: GrassWorkerSetup = {
@@ -53,10 +62,11 @@ function createOwner(candidate: boolean | "fine" = true) {
       grassPlacement: 1,
       grassHeightScale: 1,
     }),
-    setup,
-    candidate === "fine"
-      ? FINE_MEADOW_GRASS_VISUAL_PROFILE
-      : DENSE_MEADOW_GRASS_VISUAL_PROFILE,
+    withWorkerSetup ? setup : undefined,
+    profile ??
+      (candidate === "fine"
+        ? FINE_MEADOW_GRASS_VISUAL_PROFILE
+        : DENSE_MEADOW_GRASS_VISUAL_PROFILE),
     undefined,
     undefined,
     undefined,
@@ -80,6 +90,22 @@ function graph(root: Node): Set<Node> {
   return found;
 }
 
+/** Invoke only the real construction-time material Fn; no renderer is mocked. */
+function colorGraph(root: Node): Node {
+  let node = root;
+  while (Reflect.get(node, "isVarNode")) node = Reflect.get(node, "node");
+  const shader: unknown = Reflect.get(node, "shaderNode");
+  if (shader instanceof THREE.Node) {
+    const fn: unknown = Reflect.get(shader, "jsFunc");
+    if (typeof fn === "function") {
+      const result: unknown = fn();
+      if (!(result instanceof THREE.Node)) throw new Error("Invalid color Fn");
+      return result;
+    }
+  }
+  return root;
+}
+
 interface Inputs {
   attributes: Record<string, number[]>;
   varyings?: Record<string, number[]>;
@@ -87,6 +113,8 @@ interface Inputs {
   view: THREE.Matrix4;
   time: number;
   front: boolean;
+  cameraPosition?: number[];
+  worldPosition?: number[];
 }
 
 /** Evaluates the actual constructed TSL arithmetic, never a replacement shader
@@ -106,6 +134,14 @@ function evaluate(root: Node, inputs: Inputs): number[] {
     const calculate = (): number[] => {
       if (node === modelWorldMatrix) return inputs.model.toArray();
       if (node === cameraViewMatrix) return inputs.view.toArray();
+      if (node === cameraPosition) {
+        if (!inputs.cameraPosition) throw new Error("Missing camera position");
+        return inputs.cameraPosition;
+      }
+      if (node === positionWorld) {
+        if (!inputs.worldPosition) throw new Error("Missing world position");
+        return inputs.worldPosition;
+      }
       if (node === time) return [inputs.time];
       if (node.type === "FrontFacingNode") return [Number(inputs.front)];
       if (node.type === "AttributeNode") {
@@ -180,6 +216,7 @@ function evaluate(root: Node, inputs: Inputs): number[] {
           if (read("op") === ">") return Number(x > y);
           if (method === "pow") return Math.pow(x, y);
           if (method === "max") return Math.max(x, y);
+          if (method === "min") return Math.min(x, y);
           if (method === "mix") return x + (y - x) * z;
           if (method === "clamp") return Math.min(z, Math.max(y, x));
           if (method === "smoothstep") {
@@ -259,6 +296,264 @@ function rotation(inputs: Inputs) {
       ),
     );
 }
+
+describe("fine meadow proportional grazing albedo (actual CPU node arithmetic)", () => {
+  const smooth = (a: number, b: number, value: number) => {
+    const t = Math.min(1, Math.max(0, (value - a) / (b - a)));
+    return t * t * (3 - 2 * t);
+  };
+  const gainNode = (color: Node) => {
+    const matches = [...graph(color)].filter(
+      (node) => Reflect.get(node, "name") === "fineGrassGrazingGain",
+    );
+    expect(matches).toHaveLength(1);
+    return matches[0];
+  };
+
+  it("matches the bounded view-angle and root mask including the coincident-camera guard", () => {
+    const owner = createOwner("fine");
+    try {
+      const color = colorGraph(owner["material"].colorNode!);
+      const gain = gainNode(color);
+      const rotations = [
+        new THREE.Quaternion(),
+        new THREE.Quaternion().setFromAxisAngle(
+          new THREE.Vector3(1, 0, 1).normalize(),
+          0.71,
+        ),
+      ];
+      for (const rotation of rotations)
+        for (const direction of [
+          [0, 1, 0],
+          [1, 0, 0],
+          [0, -1, 0],
+          [1, 1, 0],
+        ])
+          for (const distance of [0, 0.5e-6, 1e-6, 2e-6, 10])
+            for (const height of [0, 0.05, 0.35, 0.65, 1])
+              for (const front of [false, true]) {
+                const inputs = inputFor(owner["lodGeometries"][0], 0);
+                const normal = new THREE.Vector3(0, 1, 0).applyQuaternion(
+                  rotation,
+                );
+                const delta = new THREE.Vector3(
+                  ...(direction as [number, number, number]),
+                )
+                  .normalize()
+                  .multiplyScalar(distance)
+                  .applyQuaternion(rotation);
+                inputs.worldPosition = [0, 0, 0];
+                inputs.cameraPosition = delta.toArray();
+                inputs.attributes.instanceGroundNormal = normal.toArray();
+                inputs.attributes.uv = [0.5, height];
+                inputs.front = front;
+                const denominator = Math.sqrt(
+                  Math.max(delta.lengthSq(), 1e-12),
+                );
+                const rim = Math.min(
+                  1,
+                  Math.max(0, 1 - delta.dot(normal) / denominator),
+                );
+                const expected = 0.35 * rim ** 3 * smooth(0.05, 0.65, height);
+                const actual = evaluate(gain, inputs)[0];
+                expect(actual).toBeCloseTo(expected, 13);
+                expect(actual).toBeGreaterThanOrEqual(0);
+                expect(actual).toBeLessThanOrEqual(0.35);
+                if (height <= 0.05) expect(actual).toBe(0);
+                if (
+                  distance >= 1e-6 &&
+                  direction[1] === 1 &&
+                  direction[0] === 0
+                )
+                  expect(actual).toBeCloseTo(0, 13);
+                if (height >= 0.65 && (distance === 0 || direction[1] <= 0))
+                  expect(actual).toBeCloseTo(0.35, 13);
+              }
+    } finally {
+      owner.destroy();
+    }
+  });
+
+  it("multiplies existing blade albedo while preserving unclamped RGB ratios, roots and overhead response", () => {
+    const owner = createOwner("fine");
+    try {
+      const material = owner["material"];
+      const color = colorGraph(material.colorNode!);
+      for (const height of [0, 0.05, 0.35, 0.65, 1])
+        for (const ground of [
+          [0.2, 0.4, 0.1],
+          [0, 0.3, 0.05],
+          [0, 0, 0],
+          [0.9, 0.95, 0.99],
+        ])
+          for (const tint of [
+            [0.3, 0.45, 0.2, 0.3],
+            [1, 1, 1, 1],
+          ])
+            for (const delta of [
+              [10, 0, 0],
+              [0, 10, 0],
+              [0, 0, 0],
+            ]) {
+              const inputs = inputFor(owner["lodGeometries"][0], 0);
+              inputs.attributes.instanceGroundColor = ground;
+              inputs.attributes.instanceGrassTint = tint;
+              inputs.attributes.uv = [0.5, height];
+              inputs.worldPosition = [350, 28, 320];
+              inputs.cameraPosition = inputs.worldPosition.map(
+                (value, index) => value + delta[index],
+              );
+              const factor =
+                1 + (delta[1] > 0 ? 0 : 0.35 * smooth(0.05, 0.65, height));
+              const transition = smooth(0, 1, height);
+              const baseline = ground.map((value, channel) => {
+                const root = value * 0.9;
+                const tip = (value + (tint[channel] - value) * tint[3]) * 1.2;
+                return root + (tip - root) * transition;
+              });
+              const expected = baseline.map((value) =>
+                Math.min(1, value * factor),
+              );
+              const actual = evaluate(color, inputs);
+              expect(actual).toHaveLength(3);
+              actual.forEach((value, channel) => {
+                expect(value).toBeCloseTo(expected[channel], 13);
+                expect(value).toBeGreaterThanOrEqual(0);
+                expect(value).toBeLessThanOrEqual(1);
+                // A white-add implementation would lift a zero channel.
+                if (baseline[channel] === 0) expect(value).toBe(0);
+              });
+              if (baseline.every((value) => value * factor < 1))
+                for (let channel = 0; channel < 3; channel++)
+                  for (let other = channel + 1; other < 3; other++) {
+                    // Cross-products also cover zero-valued channels without
+                    // division by zero; positive channels keep their ratios.
+                    expect(actual[channel] * baseline[other]).toBeCloseTo(
+                      actual[other] * baseline[channel],
+                      13,
+                    );
+                    if (baseline[channel] > 0 && baseline[other] > 0)
+                      expect(actual[channel] / actual[other]).toBeCloseTo(
+                        baseline[channel] / baseline[other],
+                        13,
+                      );
+                  }
+              if (delta[1] > 0)
+                expect(actual).toEqual(
+                  baseline.map((value) => Math.min(1, value)),
+                );
+              if (height === 0)
+                expect(actual).toEqual(ground.map((value) => value * 0.9));
+              if (height === 1 && tint[3] === 1)
+                expect(actual).toEqual([1, 1, 1]);
+            }
+      expect(material.emissive.toArray()).toEqual([0, 0, 0]);
+      expect(material.emissiveNode).toBeNull();
+      expect(material.lights).toBe(true);
+    } finally {
+      owner.destroy();
+    }
+  });
+
+  it("keeps the term fine/physical/color-only and retains it through actual grounded clones", () => {
+    const fine = createOwner("fine");
+    const other = [
+      createOwner(true),
+      createOwner(false),
+      createOwner(false, true, {}),
+      createOwner(false, true, COMPACT_ISLAND_GRASS_VISUAL_PROFILE),
+      createOwner(false, true, STREAMING_GRASS_VISUAL_PROFILE),
+      createOwner(false, false, {}),
+      createOwner(false, false, STREAMING_GRASS_VISUAL_PROFILE),
+    ];
+    try {
+      // Fine requires an admitted compact surface owner. Do not fabricate an
+      // impossible nonphysical-fine profile merely to reach a defensive branch.
+      expect(() => createOwner("fine", false)).toThrow(
+        "Invalid compact grass surface eligibility",
+      );
+      const base = fine["material"];
+      const color = colorGraph(base.colorNode!);
+      const gain = gainNode(color);
+      expect(graph(gain).has(cameraPosition)).toBe(true);
+      expect(graph(gain).has(positionWorld)).toBe(true);
+      expect(
+        [...graph(gain)]
+          .filter((node) => node.type === "AttributeNode")
+          .map((node) => Reflect.get(node, "_attributeName"))
+          .sort(),
+      ).toEqual(["instanceGroundNormal", "uv"]);
+      for (const root of [base.normalNode!, base.positionNode!, base.aoNode!])
+        expect(
+          [...graph(root)].some((node) =>
+            String(Reflect.get(node, "name")).startsWith("fineGrassGrazing"),
+          ),
+        ).toBe(false);
+      for (const owner of [fine, ...other]) {
+        const material = owner["material"];
+        const nodes = graph(colorGraph(material.colorNode!));
+        if (owner !== fine)
+          expect(
+            [...nodes].some((node) =>
+              String(Reflect.get(node, "name")).startsWith("fineGrassGrazing"),
+            ),
+          ).toBe(false);
+        expect(
+          [...nodes].some(
+            (node) =>
+              Reflect.get(node, "isTextureNode") ||
+              Reflect.get(node, "isStorageBufferNode"),
+          ),
+        ).toBe(false);
+        expect(material.transparent).toBe(false);
+        expect(material.depthWrite).toBe(true);
+        expect(material.roughness).toBe(1);
+        expect(material.metalness).toBe(0);
+        expect(material.map).toBeNull();
+        expect(material.normalMap).toBeNull();
+        expect(material.emissiveNode).toBeNull();
+      }
+      for (const [lod, source] of fine["lodGeometries"].entries()) {
+        const geometry = source.clone();
+        const roots = new Float32Array(
+          GRASS_CONFIG.LOD_TIERS[lod].bladesPerClump * 4,
+        );
+        const grounded = createGroundedGrassMaterial(
+          base,
+          geometry,
+          roots,
+          2,
+          lod,
+        );
+        try {
+          expect(grounded.colorNode).toBe(base.colorNode);
+          expect(grounded.normalNode).toBe(base.normalNode);
+          expect(grounded.aoNode).toBe(base.aoNode);
+          expect(grounded.positionNode).not.toBe(base.positionNode);
+          const inputs = inputFor(source, 0);
+          inputs.attributes.instanceGroundColor = [0.2, 0.4, 0.1];
+          inputs.attributes.instanceGrassTint = [0.3, 0.45, 0.2, 0.3];
+          inputs.attributes.uv = [0.5, 1];
+          inputs.worldPosition = [350, 28, 320];
+          inputs.cameraPosition = [360, 28, 320];
+          expect(evaluate(colorGraph(grounded.colorNode!), inputs)).toEqual(
+            evaluate(color, inputs),
+          );
+          expect(
+            geometry.getAttribute(GRASS_ROOT_STORAGE_ATTRIBUTE).array,
+          ).toBe(roots);
+          expect(source.hasAttribute(GRASS_ROOT_STORAGE_ATTRIBUTE)).toBe(false);
+        } finally {
+          grounded.dispose();
+          geometry.dispose();
+        }
+      }
+    } finally {
+      fine.destroy();
+      for (const owner of other) owner.destroy();
+    }
+  });
+});
 
 describe("fine meadow root occlusion (actual CPU node arithmetic)", () => {
   it("uses the existing UV height for a bounded smooth root-only indirect occlusion profile", () => {

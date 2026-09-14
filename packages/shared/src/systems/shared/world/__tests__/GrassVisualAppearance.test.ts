@@ -2,6 +2,8 @@ import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import THREE, {
   cameraViewMatrix,
+  cameraPosition,
+  positionWorld,
   modelWorldMatrix,
   output,
 } from "../../../../extras/three/three";
@@ -117,6 +119,8 @@ function colorValue(
     return colorValue(value, attributes);
   };
   if (node === cameraViewMatrix) return attributes._cameraViewMatrix;
+  if (node === cameraPosition) return attributes._cameraPosition;
+  if (node === positionWorld) return attributes._positionWorld;
   if (node === modelWorldMatrix) return attributes._modelWorldMatrix;
   if (node.type === "FrontFacingNode") return attributes._frontFacing;
   if (node.type === "AttributeNode") {
@@ -159,6 +163,8 @@ function colorValue(
   if (read("method") === "cos") return aValues.map(Math.cos);
   if (read("method") === "negate") return aValues.map((x) => -x);
   const operands = [aValues, child("bNode")];
+  if (read("method") === "dot")
+    return [aValues.reduce((sum, value, i) => sum + value * operands[1][i], 0)];
   if (read("op") === "*" && aValues.length === 16 && operands[1].length === 4) {
     const matrix = new THREE.Matrix4().fromArray(aValues);
     return new THREE.Vector4(
@@ -185,6 +191,8 @@ function colorValue(
       if (read("op") === "/") return a / b;
       if (read("method") === "min") return Math.min(a, b);
       if (read("method") === "max") return Math.max(a, b);
+      if (read("method") === "pow") return Math.pow(a, b);
+      if (read("method") === "clamp") return Math.min(c, Math.max(b, a));
       if (read("method") === "mix") return a + (b - a) * c;
       if (read("method") === "smoothstep") {
         const t = Math.max(0, Math.min(1, (c - a) / (b - a)));
@@ -944,6 +952,9 @@ describe("fine continuous meadow geometry candidate", () => {
       TIP_BRIGHTNESS: 1.2,
       ROOT_OCCLUSION: 0.55,
       ROOT_OCCLUSION_END: 0.6,
+      GRAZING_GAIN: 0.35,
+      GRAZING_GAIN_ROOT_START: 0.05,
+      GRAZING_GAIN_ROOT_END: 0.65,
       PROGRESSIVE_ROOTS: true,
     });
     const owner = fine();
@@ -957,6 +968,10 @@ describe("fine continuous meadow geometry candidate", () => {
         const actual = colorValue(albedo, {
           instanceGroundColor: [0.2, 0.4, 0.1],
           instanceGrassTint: [0.3, 0.45, 0.2, 0.3],
+          instanceGroundNormal: [0, 1, 0],
+          // Overhead gain=0 preserves this historical base-albedo oracle.
+          _cameraPosition: [350, 40, 320],
+          _positionWorld: [350, 28, 320],
           uv: [0.5, height],
         });
         actual.forEach((value, i) =>
