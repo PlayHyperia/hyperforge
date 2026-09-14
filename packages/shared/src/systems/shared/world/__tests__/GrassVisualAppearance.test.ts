@@ -264,7 +264,11 @@ describe("Haven habitat grass root integration (actual graph and geometry, CPU o
     try {
       const material = owner["material"],
         original = baseline["material"];
-      const dirt = [0.13570346695867627, 0.10530763563352, 0.06788700038018664];
+      // Independent decoded mean of the installed Poly Haven Dirt diffuse.
+      // CompactTerrainMaterial.test verifies all pixels against its source hash.
+      const dirt = [
+        0.1258525186051025, 0.08567628015146961, 0.0490416307568836,
+      ];
       const ground = [0.2, 0.4, 0.1],
         tip = [0.23, 0.415, 0.13];
       for (const [x, z] of [

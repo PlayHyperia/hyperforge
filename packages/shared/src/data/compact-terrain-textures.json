@@ -1,8 +1,8 @@
 {
   "grass-albedo-roughness": "689bba1fa129397f928b51dc79ac283898af82a376b34eeeb09d1e01d1a234ad",
   "grass-normal-ao": "c87450fc7ecdccf4095ff81aeeb5f81af28710b4976a1cd9bfc3a6c8e884a793",
-  "dirt-albedo-roughness": "fa96eddfdf4a089f34a48eb85feaea6082a360500348e28efd8c3ed4f2ec9dc6",
-  "dirt-normal-ao": "70ea434b6df2b7bc072f6099511400134d68f934a9e31d66c9c09b0528a69caa",
+  "dirt-albedo-roughness": "357b327ed327304b25193ce2a3924bf71b139764e93411a54b8c7469a296baef",
+  "dirt-normal-ao": "5e860d999d7d9545740fa12dbff729b2b9233b22179f46e46c6fd2f5facca7d3",
   "rock-albedo-roughness": "97f2d36833a7ce119d021cfa9728c42d292044297b172772c02f07f34403311a",
   "rock-normal-ao": "056c1754f2e2315a22480025ffe798497d6674fc76b05d8c7f42b3c928268aa4"
 }

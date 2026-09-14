@@ -10,7 +10,7 @@ breakthrough. All page/GPU/cleanup errors0;19 known cow/dagger errors remain.
 The owned test browser/services are closed. No new cost/motion/full-load approval.
 
 The 2026-09-14 user review rejects the current world as the target presentation.
-Finish the bounded same-quota grass trial, then deliver a coordinated ground/path
+The same-quota trial is complete; now deliver a coordinated ground/path
 pass: dry grass and earth, credible compacted soil, natural worn transitions and
 less stencil-like service aprons. Small feathering tweaks alone cannot repair
 the current broad gray gravel patches. Follow with natural terrain/shoreline
@@ -36,10 +36,38 @@ Staging now verifies all four original source sizes/publisher MD5s and every
 decoded packed channel. Candidate raw roughness mean0.94427 is already dry;
 do not apply a redundant dirt roughness remap. Fine soil and small pebbles are
 promising, but darker/warmer diffuse and higher fine-grain contrast need native
-review at2m scale. Two packed1024px maps total5,140,092B; no runtime import yet.
+review at2m scale. Two packed1024px maps total5,140,092B are now installed.
 Evidence lives in asset-studio/compact-dirt-material01. The separate exact
 current roughness histogram receipt has SHA256
 `e5696414fc7ed16065668cbd19d37fdf117bf37a098757617cf5107d1fd2c2f5`.
+
+Source implementation now passes487/487 serial regressions,9/9 packing checks,
+all three package type checks and normal shared/server builds on63 held pins.
+The initial486/487 run is retained: its only failure was a grass-root expectation
+using the old dirt mean; actual decoded-image parity establishes the new mean.
+Dry turf uses0.85–0.98 roughness with explicit A/B shader variables. No extra maps,
+samples, terrain vertices, grass density or world-lighting changes were added.
+Native art01 loaded the maps with745 pins held and zero page/GPU errors, but a
+new observer type assumption stopped the matched photos. The actual literal
+ConstNodes infer float from numeric values rather than storing nodeType='float'.
+Retain that failed run and correct the observer using its raw native receipt.
+Owned Chrome/services closed;19 known content errors and the missing-photo
+assertion remain recorded in art01, not relabeled as a pass.
+
+Art02 completes three actual1280×720/DPR1 WebGPU images. Both reviewers retain
+the finer dry-earth material provisionally: more believable small soil/pebble
+scale at the workshop, without obvious new glare, seams or missing textures.
+Close/overview change little; this does not solve grass or whole-world quality.
+All745 pins and660 archived copies verify. Exact94 cells,80,999 clumps,3,772,764
+triangles,8,755,104 root bytes and template/offset/rotation/normal/source-index
+bytes match the previous run. Intended ground RGB changes in85 cells. Packed
+map totals rise16,267,403→17,071,192B; equal resolution is not equal download cost.
+No page/GPU/cleanup errors;19 cow/dagger errors keep the overall run failed.
+Owned browser/services close and DB remains stopped. Report SHA256
+`60a458db24eb41a80e2a7d5feade3d86435d7969fa8c42cbcae23bf9ebde6fef`;
+replay `asset-studio/fine-meadow01/dry-earth-native-verification01.json`.
+Full shader connectivity, motion, grazing/backlit roughness response and native
+performance remain unqualified. Final external checks90/90 and shape5/5 pass.
 
 The workshop apron is a full-strength3.5m-wide two-point capsule with only a
 0.5m transition. Corner cutting cannot make those collinear points irregular.
@@ -50,6 +78,14 @@ one descriptor across CPU, worker and GPU mask. Protect actual workspace and
 approach clearances, not old decorative outlines. Verify whole-mask texel phase,
 all48 resource-tree approaches, water/lodge/floor safety and off-road traversal.
 Do not simply widen paint while leaving grass on the old capsule contract.
+
+The next path slice needs explicit per-segment blend width and peak influence
+through road records, CPU/worker sampling and both compute kernels. Begin with
+connected asymmetric workshop/supplier shoulders while retaining genuine work
+cores, not disconnected decorative islands. Current blade grounding rejects
+all road capsules at full width; partial-strength shoulders must not inherit
+that full-clearance rule. Verify the actual >0.8 exclusion envelope, complete
+bilinear mask footprint and positive off-road routes, not just endpoint samples.
 
 Read-only navigation review finds no road-membership gate in authoritative
 player walkability. Current gates are water, slope, building/bridge transitions

@@ -28,6 +28,7 @@ import {
   COMPACT_TERRAIN_TEXTURE_SHA256,
   CompactTerrainTextureSet,
   createCompactTerrainLayers,
+  createCompactDryGrassRoughness,
   createCompactCotangentNormal,
   createCompactTerrainLayerWeights,
   blendCompactTerrainLayers,
@@ -2172,6 +2173,129 @@ describe("compact terrain actual texture ownership and CPU material graph", () =
     }
   });
 
+  it("retains strictly monotone dry turf roughness from every encoded alpha instead of flattening low values", async () => {
+    const values: number[] = [];
+    for (let alpha = 0; alpha <= 255; alpha++) {
+      const value = vectorValue(
+        createCompactDryGrassRoughness(float(alpha / 255)),
+      )[0];
+      expect(value).toBeCloseTo(0.85 + ((0.98 - 0.85) * alpha) / 255, 14);
+      expect(value).toBeGreaterThanOrEqual(0.85);
+      expect(value).toBeLessThanOrEqual(0.98);
+      if (alpha > 0) expect(value).toBeGreaterThan(values[alpha - 1]);
+      values.push(value);
+    }
+    // Real original map, no guessed roughness, fabricated texture or renderer.
+    const bytes = await readFile(
+      new URL("grass-albedo-roughness.png", assetDirectory),
+    );
+    expect(createHash("sha256").update(bytes).digest("hex")).toBe(
+      expectedDigest("grass-albedo-roughness"),
+    );
+    const image = PNG.sync.read(bytes);
+    let oldClipped = 0;
+    const rawValues = new Set<number>();
+    const dryValues = new Set<number>();
+    for (let p = 3; p < image.data.length; p += 4) {
+      const alpha = image.data[p];
+      oldClipped += Number(alpha / 255 < 0.65);
+      rawValues.add(alpha);
+      dryValues.add(values[alpha]);
+    }
+    expect(oldClipped).toBe(1_048_367);
+    expect(rawValues.size).toBeGreaterThan(100);
+    expect(dryValues.size).toBe(rawValues.size);
+  });
+
+  it("connects dry turf to both actual grass projections only and preserves localized wet endpoints", () => {
+    const owner = new CompactTerrainTextureSet(
+      "https://assets.example.invalid",
+    );
+    try {
+      const layers = createCompactTerrainLayers(owner, float(0));
+      const dryNodes = [...graph(layers.grass.roughness)].filter((node) =>
+        /^compactDryGrassRoughness[AB]$/.test(
+          String(Reflect.get(node, "name")),
+        ),
+      );
+      expect(dryNodes).toHaveLength(2);
+      expect(dryNodes.map((node) => Reflect.get(node, "name")).sort()).toEqual([
+        "compactDryGrassRoughnessA",
+        "compactDryGrassRoughnessB",
+      ]);
+      const alphaTexture = owner.getNode("grass", "albedo-roughness").value;
+      for (const dry of dryNodes) {
+        const sampled = [...graph(dry)].filter(
+          (node) => Reflect.get(node, "value") instanceof THREE.Texture,
+        );
+        expect(sampled.length).toBeGreaterThan(0);
+        expect(
+          sampled.every((node) => Reflect.get(node, "value") === alphaTexture),
+        ).toBe(true);
+      }
+      for (const layer of ["dirt", "rock"] as const) {
+        expect(
+          [...graph(layers[layer].roughness)].some((node) =>
+            /^compactDryGrassRoughness[AB]$/.test(
+              String(Reflect.get(node, "name")),
+            ),
+          ),
+        ).toBe(false);
+        expect(
+          [...graph(layers[layer].roughness)].some(
+            (node) => Reflect.get(node, "method") === "max",
+          ),
+        ).toBe(true);
+      }
+      for (const key of ["albedo", "ao", "worldNormal"] as const)
+        for (const layer of Object.values(layers))
+          expect(
+            [...graph(layer[key])].some((node) =>
+              /^compactDryGrassRoughness[AB]$/.test(
+                String(Reflect.get(node, "name")),
+              ),
+            ),
+          ).toBe(false);
+
+      // Actual numeric TSL composition, not GPU or shoreline-footprint proof.
+      const layer = (roughness: Node<"float">): CompactTerrainLayer => ({
+        albedo: vec3(0.2, 0.3, 0.1),
+        roughness,
+        ao: float(0.9),
+        worldNormal: vec3(0, 1, 0),
+      });
+      for (const alpha of [0, 0.25, 0.5, 1]) {
+        const dry = layer(createCompactDryGrassRoughness(float(alpha)));
+        const expectedDry = 0.85 + (0.98 - 0.85) * alpha;
+        const surface = blendCompactTerrainLayers(
+          { grass: dry, dirt: layer(float(0.944)), rock: layer(float(0.82)) },
+          float(0),
+          float(0),
+          float(0),
+        );
+        for (const wetness of [0, 0.25, 0.5, 1]) {
+          const pond = applyCompactPondWetness(surface, float(wetness));
+          expect(vectorValue(pond.roughness)[0]).toBeCloseTo(
+            expectedDry + (0.62 - expectedDry) * wetness,
+            14,
+          );
+          expect(pond.normal).toBe(surface.normal);
+          expect(pond.ao).toBe(surface.ao);
+          const coast = applyCompactCoastRock(layer(float(0.82)), dry, {
+            soil: float(1),
+            wetness: float(wetness),
+          });
+          expect(vectorValue(coast.roughness)[0]).toBeCloseTo(
+            expectedDry + (0.58 - expectedDry) * wetness,
+            14,
+          );
+        }
+      }
+    } finally {
+      owner.dispose();
+    }
+  });
+
   it("distinguishes idle placeholders from six admitted real images and keeps sampled references live", async () => {
     const owner = new CompactTerrainTextureSet(
       "https://assets.example.invalid/game-assets",
@@ -3444,7 +3568,7 @@ describe("compact grass base palette without changing ecology", () => {
     expect(COMPACT_TERRAIN_MATERIAL.rockNormalStrength).toBe(0.4);
     expect(COMPACT_TERRAIN_MATERIAL.repeatsPerMeter).toBe(1 / 2.7);
     expect(COMPACT_TERRAIN_MATERIAL.grassRepeatsPerMeter).toBe(1 / 1.4);
-    expect(COMPACT_TERRAIN_MATERIAL.dirtRepeatsPerMeter).toBe(0.95);
+    expect(COMPACT_TERRAIN_MATERIAL.dirtRepeatsPerMeter).toBe(1 / 2);
     expect(COMPACT_TERRAIN_MATERIAL.textureCount).toBe(6);
     expect(COMPACT_TERRAIN_MATERIAL.surfaceSampleCount).toBe(14);
   });

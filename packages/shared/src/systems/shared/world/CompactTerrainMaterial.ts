@@ -53,7 +53,8 @@ export const COMPACT_TERRAIN_MATERIAL = {
   surfaceSampleCount: 14,
   // Grass004 source covers approximately 1.4m; projection variation stays ±18%.
   grassRepeatsPerMeter: 1 / 1.4,
-  dirtRepeatsPerMeter: 0.95,
+  // Poly Haven Dirt's published 2m width; preserve the existing UV variation.
+  dirtRepeatsPerMeter: 1 / 2,
   groundPatternBands: 32,
   groundPatternBlendStart: 0.18,
   groundPatternBlendEnd: 0.82,
@@ -61,6 +62,8 @@ export const COMPACT_TERRAIN_MATERIAL = {
   normalFadeNear: 45,
   normalFadeFar: 120,
   minimumRoughness: 0.65,
+  dryGrassRoughnessLow: 0.85,
+  dryGrassRoughnessHigh: 0.98,
   aoStrength: 0.35,
   loadTimeoutMs: 20_000,
   dirtNormalStrength: 0.25,
@@ -851,6 +854,23 @@ export function createCompactCotangentNormal(
   );
 }
 
+/**
+ * Dry turf art calibration from the original linear packed alpha. A monotone
+ * range preserves texture variation that the old .65 floor almost eliminated.
+ * These are art-directed perceptual roughness limits, not measured properties;
+ * localized shore/pond wetness still applies after dry-layer construction.
+ */
+export function createCompactDryGrassRoughness(
+  packedAlpha: Node<"float">,
+  projection: "A" | "B" = "A",
+): Node<"float"> {
+  const c = COMPACT_TERRAIN_MATERIAL;
+  return packedAlpha
+    .mul(c.dryGrassRoughnessHigh - c.dryGrassRoughnessLow)
+    .add(c.dryGrassRoughnessLow)
+    .toVar(`compactDryGrassRoughness${projection}`);
+}
+
 export function createCompactTerrainLayers(
   textures: CompactTerrainTextureSet,
   distanceSquared: Node<"float">,
@@ -878,6 +898,7 @@ export function createCompactTerrainLayers(
     uv: Node<"vec2">,
     normalStrength: number,
     gradients?: { dx: Node<"vec2">; dy: Node<"vec2"> },
+    projection: "A" | "B" = "A",
   ): CompactTerrainLayer => {
     const sample = (channel: Channel) => {
       const base = textures.getNode(layer, channel);
@@ -889,7 +910,10 @@ export function createCompactTerrainLayers(
     const na = sample("normal-ao");
     return {
       albedo: ar.rgb,
-      roughness: ar.a.max(controls.minimumRoughness),
+      roughness:
+        layer === "grass"
+          ? createCompactDryGrassRoughness(ar.a, projection)
+          : ar.a.max(controls.minimumRoughness),
       ao: mix(float(1), na.a, float(controls.aoStrength)),
       worldNormal: createCompactCotangentNormal(
         na.rgb,
@@ -912,8 +936,8 @@ export function createCompactTerrainLayers(
       patternNoise,
       repeats,
     );
-    const a = project(layer, p.a.uv, normalStrength, p.a);
-    const b = project(layer, p.b.uv, normalStrength, p.b);
+    const a = project(layer, p.a.uv, normalStrength, p.a, "A");
+    const b = project(layer, p.b.uv, normalStrength, p.b, "B");
     return {
       albedo: mix(a.albedo, b.albedo, p.weight),
       roughness: mix(a.roughness, b.roughness, p.weight),
