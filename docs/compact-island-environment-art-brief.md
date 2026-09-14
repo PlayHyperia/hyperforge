@@ -1,5 +1,251 @@
 # Compact island environment art: next delivery slice
 
+## Current sweep verdict — modest shape improvement; grass quality remains open
+
+The fine-only arc ratio is now 0.48 instead of 0.30. Blade heights, width,
+linear taper, configured density, LODs, wind, materials and lighting stay held.
+Root and independent review retain the broader sweep provisionally: more
+crossing, bent tips close up, but little overview improvement. Flat lower
+strips, segmented bends, exposed granular ground and the gap to the user's
+soft continuous meadow remain. Do not keep increasing arc by default.
+
+`fine-grass-lateral-sweep-art01` ran 2026-09-14 02:17:03–02:19:20 UTC.
+It completed three actual 1280×720 nonfallback Apple Metal/WebGPU images and
+37 receipts with all 731 source pins held. Root independently replayed all
+80 observed main-context grazing shader pairs. Page, GPU/device and cleanup
+errors are zero. Overall exit 1 / passed=false remains for five cow-model/404
+errors; 14 bronze-dagger fit errors remain separate production blockers.
+Report SHA-256: `135d49e8ecbadf09c4ca83300b02e3ee05b2f0bcf20f33260c3b89dababb671a`.
+
+The wider envelope removes 174 previously accepted clumps across 17 of the
+same 94 same-LOD owners: 126 additional pad rejections, 47 road and 1 water;
+terrain-edge rejections are unchanged. No new sources are added. Current
+81,101 clumps / 3,780,636 triangles / 8,769,696 root bytes compare with the
+linear baseline's 81,275 / 3,795,468 / 8,796,192. Root verified **3,490,040
+common-survivor instance/root scalars exactly**, not just population totals.
+This is legitimate wider-envelope exclusion, not a configured density cut
+or a speedup claim. Motion, wind/LOD rail, deep CPU parity, cost and sustained
+frame/memory/load qualification were not performed by this three-still run.
+
+Focused geometry/wind/grounding checks pass 75/75; the broad serial regression
+passes 441/441 across 28 files. Shared/client/server noEmit checks, shared
+bundles/declarations and the server build pass; the competitive manifest was
+regenerated normally (prefix `30e70fe9754e`). This uses the real Vite development
+client and rebuilt shared browser library, not a new client-dist/full-root build.
+
+The default-concurrent run still fails **439/441**. Two existing non-fine
+1,848-clump jobs retain valid leases but exceed the unchanged 250 ms active
+budget (250.004911 / 251.867921 ms; maximum slices 13.25475 / 17.232417 ms).
+They publish nothing. The prior transform-reuse checkpoint's concurrent and
+serial 441/441 passes do not establish a reliable fix; keep every failed run.
+Next cost hypothesis is avoiding polygon-generator allocation for distant
+AABB misses, preserving exact yield/charge ordering; it is not implemented
+or measured. Next art hypothesis is fine-only substrate color microcontrast,
+also separate and not implemented.
+
+Owned browser and services close; all four ports and recorded PIDs
+28703/28736/28900/28901 are absent. PostgreSQL is retained stopped.
+The source changes remain an explicit experimental candidate, not a default
+promotion, finished meadow, AAA or production-performance approval.
+Independent image review: `lateral-sweep-art01-review.md`, SHA-256
+`02e4547fcf39c2501554eaf0e90d51278786ac6da3320b73fc5c92fd387467ee`.
+
+## Current verdict — modest finer silhouette, full grass quality still open
+
+Linear-taper art02 shows a modest improvement over the wider gain baseline:
+finer upper ribbons, with no obvious large coverage collapse. Root and independent
+review retain that direction provisionally, not finished grass or a reference
+match. Stiff nearly straight sections, limited tip layering/overlap and grainy
+exposed ground remain. The reference's softer continuous canopy is still the goal.
+
+After Mac unlock, art01 failed before rendering on a stale competitive manifest;
+normal server rebuild resolved that prerequisite without bypass. Art02 completes
+three real PNGs/37 receipts with731 source pins held and zero page/GPU/cleanup
+errors, but overall exit1 remains for five cow/404 errors and14 dagger-fit blockers.
+Actual nonfallback Metal/WebGPU at1280×720/DPR1 keeps the same81,275 clumps,
+3,795,468 triangles and8,796,192 root bytes as gain-art02. Normal/UV/index bytes
+stay exact; positions restore the archived linear templates. Owned browser and
+services close; PostgreSQL is retained stopped. Structural parity is not cost,
+wind/rail, deep CPU, full art or performance approval.
+
+The linear candidate is still uncommitted/unpushed; f4df79 remains the last pushed
+color checkpoint. The next visual questions are centerline/tip bend and overlap,
+not further narrowing by default; ground grain remains a separate variable.
+The bounded failure-only grounding diagnostic passes19/19 focused tests. Its
+28-file parallel rerun fails438/439 and identifies active_cpu budget exhaustion
+at251.01175ms with valid terrain/input leases and no publication. Earlier
+uninstrumented failures are not retroactively explained. Actual work/cost must
+be reduced and checked under concurrent, serial and browser workloads, keeping
+original budgets, placement checks, population and output fidelity unchanged.
+All earlier failures remain retained and the goal remains ACTIVE.
+
+## Previous gain verdict — retain color only; finer silhouette next
+
+The three real gain-art02 daylight images are a provisional COLOR improvement
+over rejected white addition: richer greens and less mint/frost, with dark roots,
+tree shadows and service clearings still visible. Root and independent review
+do not approve the full grass appearance: broad angular ribbons, upright bristles
+and exposed granular ground still miss the reference's fine overlapping canopy.
+Different wind/agent poses and unknown reference settings preclude an exact A/B.
+
+The three-file source checkpoint `f4df79a72e1d2e4e756c5c38fa3251644cb84687` is
+pushed on `codex/sol-duel-stream-launch` under verified dreaminglucid identity,
+with normal hooks and all three tested hashes held. Gain-art02 completes its
+three-image art scope with37 receipts,731 unchanged source pins and83 observed
+compiled gain shader pairs, but exits1 for five cow/404 errors;14 dagger-fit
+errors remain production blockers. Page/GPU/cleanup errors are zero, owned
+browser/services close and PostgreSQL is retained stopped. None of this is a
+full-study or performance pass; cost, wind, rail and final scheduling were omitted.
+
+Next comparison implemented, uncommitted and not visually qualified: an isolated
+fine-only .85 linear taper with color, centerlines/heights, geometry counts,
+population, normals/AO, maps, lighting/shadows and functional exclusions fixed.
+Reduced strip area can worsen ground exposure, so judge close silhouette and
+overview coverage separately; final bend is a separate later variable if needed.
+The art-only harness now labels source-pinned shape policy explicitly; fresh
+preflight passes72/72 with all gates/limits retained, not a new native result.
+Keep the color direction
+provisionally, not the complete grass result. No default,
+full grass-art, motion/LOD, performance or production approval; goal remains ACTIVE.
+
+Current linear source gates: focused01/02 each pass24/24; scoped format/lint/diff
+and independent provisional-trial source review pass. The regression restores
+archived geometry bytes, not newly chosen golden hashes. Parallel integration01
+passes437/439; two non-fine grounding assertions fail with0 rather than1, exact
+job state/cause unknown. With unchanged code/assertions/timeouts, serial02 passes
+439/439 across28 files in51.446547s, matching the previous gain's serial mode.
+Preserve the parallel failure; this is not a proven concurrency diagnosis.
+Shared build01 now passes exit0, including all bundles/declarations; all owned
+offline sessions are closed. The linear native comparison awaits Mac unlock:
+automatic unlock is unavailable, user notified. This is the first current lock
+audit and the goal remains ACTIVE. Source/test/build/harness/docs are frozen;
+no new native run, commit/push or appearance/performance approval. The parallel
+failure remains unexplained, not harmless on the strength of serial success.
+
+## Previous recovery gate — resumed ACTIVE; launch validation passed
+
+The goal resumed ACTIVE at2026-09-14 00:05:10 UTC: fresh cloud-audit turn1 with
+meaningful recovery, not the prior three-turn blocked audit. All203 top-level
+scripts/scripts/lib `.mjs` files are resident at00:06:23.443. The7,628B bow receipt
+and16B pre-commit hook also became resident at00:09:41 after exactly one renewal
+of each inactive request; no unread content was replaced. The temporary unsigned
+iCloud Drive fallback tab is closed, with no Sign In click, authentication,
+account change, web download or other browser-data read. Physical disk has34GiB
+free; this is not a full-disk finding.
+
+Standalone launch-asset validation02 then failed its unchanged15s byte-read
+limit on `iron_arrow.iconPath`, `asset://icons/arrows-base.png`, not an established
+authored-asset defect. The arrow icon is now resident after a bounded20-file icon
+request; all17 current requested icons are resident at00:15:08. Validation03 then
+failed the unchanged limit on `emotes/emote-idle.glb`. Of the validator's44 exact
+essential assets, the6 requested emotes/638,100B also became resident, with no
+backup names in that batch. Unchanged launch validation04 passes exit0 at00:18:24:
+4 areas,28 resources,18 NPC definitions and6 station types. Keep01/02/03 failed.
+The normal three-source/test-file commit remains live with verified dreaminglucid
+identity. Pre-commit backup/format/apply/cleanup passed and all three source hashes
+remain held afterward; commit-msg now awaits a39B cloud-only hook wrapper.
+Seven other wrappers were requested once, without repeating its active request.
+No hook bypass/content replacement or commit/push success. Existing439/439 is
+prior-audit evidence; no new source/build/native change occurred. Docs freeze
+with the commit pending before gain-art02. Keep the reference's fine overlapping
+canopy as the art target; no visual/performance gate or standard is lowered.
+
+## Historical development — reject white addition; test chroma-preserving gain
+
+Three actual grazing-art01 views show stronger upper-canopy highlights, but
+the .12 white addition turns strips pale/frosted and loses rich greens. Root and
+independent review reject that exact treatment. Roots/tree shadows remain dark,
+yet exposed granular turf and broad blade silhouettes are still unresolved.
+
+Source now replaces white addition with a bounded proportional gain: multiply
+existing blade albedo by 1 + .35 × grazing³ × the same root mask, then cap RGB1.
+Below saturation this preserves channel ratios. Keep the same fine/compact-PBR
+guard and all geometry, population, normal/AO, textures, lighting and quality.
+This remains an unaccepted art candidate, not physical transmission or emission.
+
+The previous run's shader-string mismatch is understood and 85 actual native
+shader pairs replay correctly after correcting vec3 constructor spelling. The
+run still failed: its page navigated again during teardown, erasing observer
+state. The initiator is unknown and original equipment/device cleanup unproven.
+OS processes/ports are clear; database retained stopped. Bounded passive
+navigation evidence is implemented; external checks pass72/72. Live telemetry
+and current gain emission/art remain unverified. The focused test initially
+could not initialize because iCloud had offloaded a pinned build dependency;
+exact-file download recovered checksum-verified bytes without changing versions.
+Scoped format passes. Blade silhouette and coverage remain explicit concerns
+independent of this albedo experiment; current recovery results follow below.
+
+After exact dependency recovery and real manifest hydration, focused material03
+passes 39/39 checks in 1.45 seconds. Earlier failed/interrupted runs are retained.
+Earlier integration/lint/type/build attempts encountered cloud-offloaded files;
+interrupted runs and the initial failed reinstall dry run remain historical, not
+passes. Mac access and required files were subsequently recovered. The original
+dependency directory is retained recoverably at
+`asset-studio/dependency-recovery-20260913-1bTUqyg1/node_modules` after interrupted
+reinstall01; frozen, scripts-disabled reinstall02 passed6,755 packages in29.40s.
+Root lockfile, four manifests, Three patch and all six patched Three runtime
+files remain exact. No source, version, timeout, lint or quality gate was changed
+to bypass the issue, and no account/storage setting was changed.
+
+Post-repair integration04 passes439/439 across28 files in51.966864s. Scoped lint05,
+all three noEmit checks (shared04/server02/client02), and shared/server production
+builds02 pass. Client configured Vite build02 also passes exit0 after11,361 modules
+and14m32s including cloud hydration; it is not the full root Turbo wrapper.
+All six requested public assets are resident and all owned verification/hydration
+processes are closed. All three tested gain source hashes remain held. Fresh
+capture preflight03 passes72/72 in15.66088625s with unchanged harness hashes.
+Pinned native prebuilds and real local runtime smokes pass. Separately, the local
+macOS FFmpeg vendor binary reports6.0 with `--enable-nonfree`; production artifact
+and distribution qualification stay open, with no encoding/distribution done.
+This finding does not establish the production Linux stream's binary.
+
+The subsequent frozen gain-art01 attempt closed exit1 before server/browser
+startup: cloud-only launcher/preflight imports exhausted the unchanged185s bot
+wait. No gain images or live study receipts were produced. Sources stayed exact
+across720 pins; no Chrome/PostgreSQL was created, and owned PIDs/ports are clear.
+The null-launcher and missing-actual-art-delivery cleanup assertions remain in
+the failed report, not waived. Standalone launch-asset validation01 then failed
+its original15s byte-read limit on the cloud-only certified bow installation
+receipt, not a proven authored-data defect. No owned runtime process is active.
+Await that already-downloading file and validate02; the finite61-file scripts/lib
+batch is also requested, not yet proved complete. Verify launch readiness before
+the next three-view native comparison. The goal stays active; no current-gain
+GPU/art/performance approval, source edit, commit or push is claimed.
+
+Next silhouette hypothesis: current shoulder taper preserves88.9% root width
+at44.3% authored height, contributing to the broad-strip appearance. A fine-only
+legacy taper could slim the lower/middle blade without adding geometry or
+instances, but loses about13.77% near/12.5% mid strip area and may expose more
+ground. It is not implemented. Existing open-meadow residency is near its
+placement ceiling; retain road/workstation exclusions rather than filling them
+with decorative grass. Close-view beauty, overview coverage and motion remain
+distinct acceptance gates.
+
+## Historical trial — restrained additive fine-meadow grazing response
+
+The next isolated canopy hypothesis is implemented in the explicit fine appearance
+on compact PBR only. A guarded world-space view direction produces a cubic
+grazing response, multiplied by a .05→.65 UV-height root mask and capped at .12
+additive linear RGB. The resulting albedo is capped at 1 before unchanged PBR.
+This is stylized reflectance, not emission or physical transmission. Dark greens
+can wash out disproportionately; test the actual images rather than assuming
+the old rim's removal explains the supplied reference, whose revision is unknown.
+
+Keep the existing geometry, population, .20 normal blend, root AO, wind/grounding,
+textures, restored substrate response, light/shadows and render quality fixed.
+Use the active render-camera built-in for reflection correctness. No extra
+texture/pass or custom camera uniform is introduced; actual compiled interface
+and cost still require verification. Root joins, canopy depth, highlight bands
+and tree shadows are explicit visual gates. Ground-albedo contrast is separate.
+
+Actual material/appearance checks pass 39/39 and integrated checks 439/439 across
+28 files. All source builds and scoped lint/format pass; external capture
+preflight passes 69/69. New native shader connectivity and imagery remain pending.
+Save the same three native daylight views before any long run.
+Only a convincing art improvement warrants full motion/LOD/performance
+qualification. The final publication race and cow/dagger defects remain open.
+Source-backed history: `asset-studio/fine-meadow01/grass-grazing-highlight-history01.md`.
+
 ## Current verdict — reject normal-only trial, 2026-09-13
 
 The three real substrate-art01 images do not show a convincing improvement over

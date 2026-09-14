@@ -218,16 +218,17 @@ export const NATURAL_TUFT_APPEARANCE = Object.freeze({
 
 /** Explicit fine-meadow candidate: independent slender stems instead of rooted
  * quartets. Progressive roots preserve the same blades across geometry tiers;
- * Moderate leaf area restores overlap without adding blades or broad rooted fans.
+ * Linear taper narrows the upper leaf without changing topology or population.
+ * Its lower leaf area is not a claim of restored screen-space canopy coverage.
  */
 export const FINE_MEADOW_APPEARANCE = Object.freeze({
   id: "fine-meadow-v1",
   BLADE_HEIGHT_MIN: 0.38,
   BLADE_HEIGHT_MAX: 0.86,
   BLADE_WIDTH_RATIO: 0.045,
-  BLADE_TAPER: 1,
-  BLADE_TAPER_POWER: 2,
-  BLADE_ARC_RATIO: 0.3,
+  BLADE_TAPER: 0.85,
+  BLADE_TAPER_POWER: 1,
+  BLADE_ARC_RATIO: 0.48,
   BLADE_CONTROL_HEIGHT: 0.76,
   BLADE_TIP_HEIGHT: 0.95,
   BLADE_NORMAL_WEIGHT: 0.2,
@@ -444,9 +445,9 @@ function createClumpGeometry(
         ? (2 * (1 - t) * t * controlHeight + t * t * tipHeight) * h
         : t * h;
       const normal = curved ? bladeNormal(t) : [-sr, 0, cr];
-      // The fine shoulder keeps more upper leaf area at the same maximum width.
-      // Centerlines, roots and tips are unchanged. Width derivatives run along
-      // the constant side axis, so their cross product with that axis vanishes:
+      // Taper changes width only; centerlines, roots and tips stay unchanged.
+      // Width derivatives run along the constant side axis, so their cross
+      // product with that axis vanishes:
       // the existing smooth centerline normal remains valid for this taper.
       const taperedHeight = taperPower === 1 ? t : Math.pow(t, taperPower);
       const hw = w * 0.5 * (1.0 - taperedHeight * taper);

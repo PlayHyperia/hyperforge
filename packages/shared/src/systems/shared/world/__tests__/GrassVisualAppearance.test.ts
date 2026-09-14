@@ -901,11 +901,6 @@ describe("fine continuous meadow geometry candidate", () => {
     "36513b1d7085d52e23abab4ed2e2d73d823003cda9f095596ca8f5e3de097721",
     "4d341787ea4e46a0bb4dbdfc30714dd8c352c4e23c86a892a6979c10cdc48f8d",
   ];
-  const shoulderHashes = [
-    "0597f68ceb3d85c834bafe088078cc4856197fd2c36af9f97a51d11e02fe2c7c",
-    "dcc57e96393fa2bfee1775bd908f4bd1e96cee6e4da1dbe2eb2ff838a3e3fa85",
-    historicalHashes[2], // Single-segment inactive LOD has no interior width row.
-  ];
   const digest = (values: ArrayBufferView) =>
     createHash("sha256")
       .update(
@@ -942,9 +937,9 @@ describe("fine continuous meadow geometry candidate", () => {
       BLADE_HEIGHT_MIN: 0.38,
       BLADE_HEIGHT_MAX: 0.86,
       BLADE_WIDTH_RATIO: 0.045,
-      BLADE_TAPER: 1,
-      BLADE_TAPER_POWER: 2,
-      BLADE_ARC_RATIO: 0.3,
+      BLADE_TAPER: 0.85,
+      BLADE_TAPER_POWER: 1,
+      BLADE_ARC_RATIO: 0.48,
       BLADE_CONTROL_HEIGHT: 0.76,
       BLADE_TIP_HEIGHT: 0.95,
       BLADE_NORMAL_WEIGHT: 0.2,
@@ -991,7 +986,13 @@ describe("fine continuous meadow geometry candidate", () => {
       const geometries = owner["lodGeometries"];
       for (let lod = 0; lod < 3; lod++) {
         const geometry = geometries[lod];
-        expect(geometryDigest(geometry)).toBe(shoulderHashes[lod]);
+        // The arc changes positions/normals at every tier. Keep historical
+        // hashes as provenance, not newly blessed output snapshots; the exact
+        // lateral change is independently checked against archived bytes below.
+        expect(geometryDigest(geometry)).not.toBe(historicalHashes[lod]);
+        expect(geometryDigest(geometry)).toBe(
+          geometryDigest(repeated["lodGeometries"][lod]),
+        );
         const tier = GRASS_CONFIG.LOD_TIERS[lod];
         const stride = tier.bladeSegments * 2 + 1;
         const positions = geometry.getAttribute("position");
@@ -1089,29 +1090,27 @@ describe("fine continuous meadow geometry candidate", () => {
     }
   });
 
-  it("changes only interior widths against native source bytes and independently increases projected leaf area", () => {
+  it("changes only the archived linear centerline arc and analytic normals while retaining the explicit leaf-area cost", () => {
     const owner = fine();
     try {
       for (const saved of historicalFineTemplates) {
         const lod = saved.lod;
         const geometry = owner["lodGeometries"][lod];
         const positions = geometry.getAttribute("position");
+        const normals = geometry.getAttribute("normal");
         const oldValues = new Float32Array(
           Uint8Array.from(Buffer.from(saved.positionBase64, "base64")).buffer,
         );
         const original = new THREE.BufferAttribute(oldValues, 3);
         expect(digest(oldValues)).toBe(saved.hashes.position);
-        expect(geometryDigest(geometry, oldValues)).toBe(historicalHashes[lod]);
-        for (const attribute of ["normal", "uv"] as const)
-          expect(digest(geometry.getAttribute(attribute).array)).toBe(
-            saved.hashes[attribute],
-          );
+        expect(digest(normals.array)).not.toBe(saved.hashes.normal);
+        expect(digest(geometry.getAttribute("uv").array)).toBe(saved.hashes.uv);
         expect(digest(geometry.index!.array)).toBe(saved.hashes.index);
         expect(digest(positions.array)).not.toBe(saved.hashes.position);
         const { bladesPerClump: blades, bladeSegments: segments } =
           GRASS_CONFIG.LOD_TIERS[lod];
         const stride = segments * 2 + 1;
-        let previousArea = 0;
+        let linearArea = 0;
         let shoulderArea = 0;
         for (let blade = 0; blade < blades; blade++) {
           const base = blade * stride;
@@ -1124,9 +1123,18 @@ describe("fine continuous meadow geometry candidate", () => {
             base + 1,
           );
           const maximumWidth = rootLeft.distanceTo(rootRight);
-          const side = rootRight.clone().sub(rootLeft).normalize();
+          const rootCenter = rootLeft
+            .clone()
+            .add(rootRight)
+            .multiplyScalar(0.5);
+          const sideAxis = rootRight.clone().sub(rootLeft).normalize();
+          const oldTip = new THREE.Vector3().fromBufferAttribute(
+            original,
+            base + stride - 1,
+          );
+          const arcDelta = oldTip.clone().sub(rootCenter).setY(0);
           const height = original.getY(base + stride - 1) / 0.95;
-          let previousWidth = maximumWidth;
+          let linearWidth = maximumWidth;
           let shoulderWidth = maximumWidth;
           let previousY = 0;
           for (let row = 0; row <= segments; row++) {
@@ -1154,64 +1162,93 @@ describe("fine continuous meadow geometry candidate", () => {
                 );
             const center = left.clone().add(right).multiplyScalar(0.5);
             const oldCenter = oldLeft.clone().add(oldRight).multiplyScalar(0.5);
-            // Every model coordinate has magnitude <2: one Float32 ulp is at
-            // most 2^-23. Independently rounded edges can move their averaged
-            // center by one ulp per coordinate; do not mistake that for a
-            // changed centerline. Vertical coordinates stay exact below.
-            expect(Math.abs(center.x - oldCenter.x)).toBeLessThan(1.3e-7);
-            expect(Math.abs(center.z - oldCenter.z)).toBeLessThan(1.3e-7);
-            expect(left.y).toBe(oldLeft.y);
-            expect(right.y).toBe(oldRight.y);
-            if (row === 0 || tip) {
-              expect(left.toArray()).toEqual(oldLeft.toArray());
-              expect(right.toArray()).toEqual(oldRight.toArray());
-            }
             const t = row / segments;
+            // Arc .48 / historical .30 = 1.6. The frozen native03 coordinates
+            // supply the root, side axis and displacement independently of the
+            // current generator. Every edge moves by the same lateral delta.
+            const lateralChange = oldCenter
+              .clone()
+              .sub(rootCenter)
+              .setY(0)
+              .multiplyScalar(0.6);
+            for (const [actual, old] of [
+              [left, oldLeft],
+              [right, oldRight],
+            ]) {
+              expect(actual.y).toBe(old.y);
+              const expected = old.clone().add(lateralChange);
+              // Source and expected coordinates have independent Float32 edge
+              // rounding; retain a two-ulp-scale absolute comparison.
+              expect(actual.distanceTo(expected)).toBeLessThan(2e-7);
+              if (row === 0) expect(actual.toArray()).toEqual(old.toArray());
+            }
+            expect(
+              center.distanceTo(
+                rootCenter
+                  .clone()
+                  .addScaledVector(arcDelta, 1.6 * t * t)
+                  .setY(height * (1.52 * t - 0.57 * t * t)),
+              ),
+            ).toBeLessThan(2e-7);
+            const tangent = arcDelta
+              .clone()
+              .multiplyScalar(3.2 * t)
+              .setY(height * (1.52 - 1.14 * t));
+            const expectedNormal = sideAxis.clone().cross(tangent).normalize();
+            for (const vertex of tip
+              ? [base + offset]
+              : [base + offset, base + offset + 1]) {
+              const normal = new THREE.Vector3().fromBufferAttribute(
+                normals,
+                vertex,
+              );
+              expect(normal.toArray().every(Number.isFinite)).toBe(true);
+              expect(normal.length()).toBeCloseTo(1, 6);
+              // Root-edge differencing magnifies archived Float32 rounding;
+              // this independent cross-product oracle is not a shader mock.
+              expect(normal.distanceTo(expectedNormal)).toBeLessThan(5e-6);
+            }
             const width = left.distanceTo(right);
-            const oldWidth = oldLeft.distanceTo(oldRight);
+            expect(Math.abs(width - oldLeft.distanceTo(oldRight))).toBeLessThan(
+              2e-7,
+            );
             expect(width).toBeLessThanOrEqual(maximumWidth + 1.3e-7);
-            expect(width).toBeCloseTo(maximumWidth * (1 - t * t), 6);
-            expect(oldWidth).toBeCloseTo(
+            // Explicit formulas are independent of the generator's taper
+            // fields and helper. The last vertex remains a single point.
+            expect(width).toBeCloseTo(
               tip ? 0 : maximumWidth * (1 - 0.85 * t),
               6,
             );
+            const oldShoulderWidth = maximumWidth * (1 - t * t);
             expect(center.y).toBeCloseTo(height * (1.52 * t - 0.57 * t * t), 7);
-            if (row > 0 && !tip) {
-              const extension = maximumWidth * (0.85 * t - t * t) * 0.5;
-              expect(
-                left.distanceTo(
-                  oldLeft.clone().addScaledVector(side, -extension),
-                ),
-              ).toBeLessThan(2e-7);
-              expect(
-                right.distanceTo(
-                  oldRight.clone().addScaledVector(side, extension),
-                ),
-              ).toBeLessThan(2e-7);
-              expect(width).toBeGreaterThan(oldWidth);
-            }
+            if (row > 0 && !tip) expect(width).toBeLessThan(oldShoulderWidth);
             if (row > 0) {
               // Exact side-axis/vertical orthographic strip area, not total
               // GPU coverage: arbitrary view yaw and occlusion can differ.
-              previousArea +=
-                (center.y - previousY) * (previousWidth + oldWidth) * 0.5;
+              linearArea +=
+                (center.y - previousY) * (linearWidth + width) * 0.5;
               shoulderArea +=
-                (center.y - previousY) * (shoulderWidth + width) * 0.5;
+                (center.y - previousY) *
+                (shoulderWidth + oldShoulderWidth) *
+                0.5;
             }
-            previousWidth = oldWidth;
-            shoulderWidth = width;
+            linearWidth = width;
+            shoulderWidth = oldShoulderWidth;
             previousY = center.y;
           }
         }
         // Independent piecewise trapezoid integrals at the actual vertex rows.
-        const expectedRatio = lod === 0 ? 3781 / 5400 / (21736 / 36000) : 8 / 7;
-        expect(shoulderArea / previousArea).toBeCloseTo(expectedRatio, 5);
-        expect(shoulderArea).toBeGreaterThan(previousArea);
-        console.info("Fine shoulder source geometry", {
+        const expectedRatio = lod === 0 ? 21736 / 36000 / (3781 / 5400) : 7 / 8;
+        expect(linearArea / shoulderArea).toBeCloseTo(expectedRatio, 5);
+        expect(linearArea).toBeLessThan(shoulderArea);
+        // This loss is a geometric cost of the finer silhouette, not a claim
+        // of improved visible density: approximately 13.77% near / 12.5% mid.
+        console.info("Fine swept-arc linear taper source geometry", {
           lod,
-          previousArea,
+          linearArea,
           shoulderArea,
-          ratio: shoulderArea / previousArea,
+          ratio: linearArea / shoulderArea,
+          reductionFraction: 1 - linearArea / shoulderArea,
           positionSHA256: digest(positions.array),
         });
       }

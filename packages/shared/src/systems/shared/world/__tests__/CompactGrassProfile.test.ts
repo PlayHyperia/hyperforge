@@ -243,6 +243,49 @@ describe("opt-in compact grass, actual terrain and native worker (not GPU proof)
     return uploads;
   }
 
+  function expectGroundingUpload(
+    owner: GrassVisualManager,
+    queued: Awaited<ReturnType<typeof queueGrounding>>,
+  ) {
+    const uploads = finishGrounding(owner, queued.key);
+    // Retain the queued entry even when cancellation removes its map entry.
+    // Failure diagnostics contain scalars only; never serialize result buffers
+    // or advance the production continuation a second time for observation.
+    const { entry, key, data } = queued;
+    const { job, ticket } = entry;
+    const state = job.state;
+    const detail =
+      uploads === 1
+        ? undefined
+        : JSON.stringify({
+            key,
+            node: [ticket.node.centerX, ticket.node.centerZ],
+            status: state.status,
+            reason:
+              "reason" in state
+                ? state.reason
+                : state.status === "waiting_support"
+                  ? state.result.reason
+                  : undefined,
+            activeMs: job.activeMs,
+            maximumSliceMs: job.maximumSliceMs,
+            operations: job.operations,
+            lastPhase: job.lastPhase,
+            workerCount: data.count,
+            retainedCount:
+              state.status === "ready" ? state.result.data.count : undefined,
+            published: owner["completedNodes"].has(key),
+            installedClumps: owner["chunks"].get(key)?.mesh.count ?? 0,
+            regionCurrent: entry.region?.isCurrent() ?? null,
+            inputsCurrent: ticket.grounding?.inputs?.isCurrent() ?? null,
+            error:
+              state.status === "failed_input" && state.error instanceof Error
+                ? state.error.message.slice(0, 240)
+                : undefined,
+          });
+    expect(uploads, detail).toBe(1);
+  }
+
   it("keeps all six real worker populations and full grounded buffers exact when only habitat root color is enabled", async () => {
     const f = await fixture(HAVEN_SHOULDER_COMPACT_WORLD_TERRAIN_PROFILE);
     try {
@@ -287,8 +330,8 @@ describe("opt-in compact grass, actual terrain and native worker (not GPU proof)
           "groundNormals",
         ] as const)
           expect(after.data[key]).toEqual(before.data[key]);
-        expect(finishGrounding(baseline, before.key)).toBe(1);
-        expect(finishGrounding(candidate, after.key)).toBe(1);
+        expectGroundingUpload(baseline, before);
+        expectGroundingUpload(candidate, after);
         const a = candidate["chunks"].get(after.key)!,
           b = baseline["chunks"].get(before.key)!;
         for (const material of [candidate["material"], a.mesh.material]) {
@@ -416,8 +459,8 @@ describe("opt-in compact grass, actual terrain and native worker (not GPU proof)
           "groundNormals",
         ] as const)
           expect(after.data[key]).toEqual(before.data[key]);
-        expect(finishGrounding(baseline, before.key)).toBe(1);
-        expect(finishGrounding(candidate, after.key)).toBe(1);
+        expectGroundingUpload(baseline, before);
+        expectGroundingUpload(candidate, after);
         const oldMesh = baseline["chunks"].get(before.key)!.mesh;
         const mesh = candidate["chunks"].get(after.key)!.mesh;
         const oldSources = oldMesh.userData.grassBladeGrounding

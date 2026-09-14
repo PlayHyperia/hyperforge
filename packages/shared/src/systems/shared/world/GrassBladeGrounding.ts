@@ -771,14 +771,24 @@ export function* groundGrassBladeSteps(
         ny = data.groundNormals[k + 1],
         nz = data.groundNormals[k + 2],
         q = 1 / (1 + ny),
-        cross = -nx * nz * q;
+        cross = -nx * nz * q,
+        tiltX = ny + nz * nz * q,
+        tiltZ = ny + nx * nx * q;
+      const applyTransform = (
+        rx: number,
+        ry: number,
+        rz: number,
+        target: Point,
+      ): void => {
+        target.x = x + rx * tiltX + ry * nx + rz * cross;
+        target.y = y - rx * nx + ry * ny - rz * nz;
+        target.z = z + rx * cross + ry * nz + rz * tiltZ;
+      };
       const transform = (v: number, fade: number, target: Point): void => {
         const rx = (position.getX(v) * cos - position.getZ(v) * sin) * scale,
           rz = (position.getX(v) * sin + position.getZ(v) * cos) * scale,
           ry = position.getY(v) * scale * fade;
-        target.x = x + rx * (ny + nz * nz * q) + ry * nx + rz * cross;
-        target.y = y - rx * nx + ry * ny - rz * nz;
-        target.z = z + rx * cross + ry * nz + rz * (ny + nx * nx * q);
+        applyTransform(rx, ry, rz, target);
       };
       const baseBounds = {
         minX: Infinity,
@@ -840,17 +850,21 @@ export function* groundGrassBladeSteps(
         maxY = -Infinity;
       for (let v = 0; v < position.count; v++) {
         // One blade is a bounded batch: at most seven vertices / fourteen
-        // transforms at LOD0. Keep every original work charge and arithmetic
-        // operation in order; only generator suspension points are coalesced.
+        // transforms at LOD0. Keep every original work charge, suspension point
+        // and floating-point expression; reuse only the synchronous fade pair's
+        // identical rotation, never geometry values across a yielded slice.
         if (v % verticesPerBlade === 0) yield "grounding_operation";
         const blade = Math.floor(v / verticesPerBlade),
           d = (i * blades + blade) * 2;
         const correction =
           deltas[d] * (1 - uv.getX(v)) + deltas[d + 1] * uv.getX(v);
         const windFactor = uv.getY(v) ** 1.8;
+        const rx = (position.getX(v) * cos - position.getZ(v) * sin) * scale,
+          rz = (position.getX(v) * sin + position.getZ(v) * cos) * scale,
+          scaledY = position.getY(v) * scale;
         for (let fade = 0; fade < 2; fade++) {
           take();
-          transform(v, fade, point);
+          applyTransform(rx, scaledY * fade, rz, point);
           box.minX = Math.min(
             box.minX,
             point.x - wind.x * windFactor - NUMERIC_GUARD,

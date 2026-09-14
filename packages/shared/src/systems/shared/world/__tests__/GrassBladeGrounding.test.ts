@@ -329,10 +329,16 @@ describe("CPU per-blade grounding prototype (no renderer/GPU)", () => {
     }
   });
 
-  it.each([0, 1, 2] as const)(
-    "bounds every corrected LOD%s vertex through fade and wind using independent Three transforms",
-    (lod) => {
-      const f = analyticOwner();
+  it.each([
+    ["ordinary", 0],
+    ["ordinary", 1],
+    ["ordinary", 2],
+    ["fine", 0],
+    ["fine", 1],
+  ] as const)(
+    "bounds every corrected %s LOD%s vertex through fade and wind using independent Three transforms",
+    (appearance, lod) => {
+      const f = analyticOwner(appearance);
       try {
         const surface = f.makeSurface(
           1,
@@ -360,6 +366,7 @@ describe("CPU per-blade grounding prototype (no renderer/GPU)", () => {
           uv = request.geometry.getAttribute("uv");
         const tier = GRASS_CONFIG.LOD_TIERS[lod],
           vpb = tier.bladeSegments * 2 + 1;
+        const expectedBounds = new THREE.Box3();
         for (let i = 0; i < result.data.count; i++)
           for (let v = 0; v < uv.count; v++) {
             const d = (i * tier.bladesPerClump + Math.floor(v / vpb)) * 2;
@@ -379,6 +386,7 @@ describe("CPU per-blade grounding prototype (no renderer/GPU)", () => {
                     result.rootDeltas[d + 1] * uv.getX(v);
                   p.x += sx * request.wind.x * uv.getY(v) ** 1.8;
                   p.z += sz * request.wind.z * uv.getY(v) ** 1.8;
+                  expectedBounds.expandByPoint(p);
                   expect(
                     p.x >= b.minX &&
                       p.x <= b.maxX &&
@@ -389,6 +397,20 @@ describe("CPU per-blade grounding prototype (no renderer/GPU)", () => {
                   ).toBe(true);
                 }
           }
+        // Pin all six extrema, not merely containment by an oversized box.
+        // Independent quaternion math may differ by sub-micrometre rounding
+        // from the scalar transform on Float32 normals. The production guard
+        // is still exactly 1e-5; scale/rotation/fade/wind are all represented.
+        expectedBounds.expandByScalar(1e-5);
+        for (const [actual, expected] of [
+          [b.minX, expectedBounds.min.x],
+          [b.maxX, expectedBounds.max.x],
+          [b.minY, expectedBounds.min.y],
+          [b.maxY, expectedBounds.max.y],
+          [b.minZ, expectedBounds.min.z],
+          [b.maxZ, expectedBounds.max.z],
+        ])
+          expect(Math.abs(actual - expected)).toBeLessThan(1e-6);
       } finally {
         f.close();
       }
