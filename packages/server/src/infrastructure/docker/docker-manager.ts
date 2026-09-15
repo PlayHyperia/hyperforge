@@ -48,7 +48,7 @@
  * **Referenced by**: index.ts (server startup and shutdown)
  */
 
-import { spawn, execFile } from "child_process";
+import { spawn, execFile, type ChildProcess } from "child_process";
 import net from "node:net";
 import { promisify } from "util";
 import { resolveDockerBinary } from "./resolveDockerBinary.js";
@@ -61,7 +61,58 @@ export const DEFAULT_DEV_POSTGRES_PASSWORD = "hyperia_dev_password";
 async function execDocker(
   args: string[],
 ): Promise<{ stdout: string; stderr: string }> {
-  return execFileAsync(DOCKER_BIN, args);
+  const operation = execFileAsync(DOCKER_BIN, args);
+  if (args.length === 2 && args[0] === "stop") {
+    observePostgresStopChild(operation.child);
+  }
+  return operation;
+}
+
+/** Observe only our already-created stop child; never signal or await it here. */
+export function observePostgresStopChild(child: ChildProcess): void {
+  const started = performance.now();
+  let sequence = 0;
+  const record = (
+    phase: "created" | "spawn" | "exit" | "close" | "error",
+    code: number | null = null,
+    signal: NodeJS.Signals | null = null,
+    errorCode: string | null = null,
+  ) => {
+    if (sequence >= 5) return;
+    sequence++;
+    try {
+      process.stdout.write(
+        JSON.stringify({
+          event: "server-postgres-stop-child",
+          schemaVersion: 1,
+          pid: process.pid,
+          childPid: child.pid ?? null,
+          sequence,
+          phase,
+          code,
+          signal,
+          errorCode,
+          at: Date.now(),
+          elapsedMs: performance.now() - started,
+        }) + "\n",
+      );
+    } catch {
+      // Preserve the existing execFile promise and shutdown failure semantics.
+    }
+  };
+  record("created");
+  child.once("spawn", () => record("spawn"));
+  child.once("exit", (code, signal) => record("exit", code, signal));
+  child.once("close", (code, signal) => record("close", code, signal));
+  child.once("error", (error: NodeJS.ErrnoException) => {
+    const code = error.code;
+    record(
+      "error",
+      null,
+      null,
+      typeof code === "string" && /^[A-Z0-9_]{1,32}$/.test(code) ? code : null,
+    );
+  });
 }
 
 /**

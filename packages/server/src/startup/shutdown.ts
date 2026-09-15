@@ -44,6 +44,7 @@ import { stopMemoryMonitor } from "../infrastructure/memory-monitor.js";
 import { getDuelArenaOraclePublisher } from "../oracle/DuelArenaOraclePublisher.js";
 import { getStreamingDuelScheduler } from "../systems/StreamingDuelScheduler/index.js";
 import type { StreamingRoutesRuntime } from "../routes/streaming.js";
+import { createShutdownDiagnostics } from "./shutdown-diagnostics.js";
 import {
   resolveStreamingDuelShutdownAckConfig,
   waitForStreamingDuelShutdownAcknowledgement,
@@ -168,6 +169,7 @@ export function registerShutdownHandlers(
       return;
     }
     isShuttingDown = true;
+    const diagnostics = createShutdownDiagnostics();
     if (signal !== "SIGUSR2") {
       const details: Record<string, string> = {
         signal,
@@ -178,17 +180,21 @@ export function registerShutdownHandlers(
           details[key] = value;
         }
       }
-      await sendAlert("Hyperia server shutting down", details);
+      await diagnostics.run("alert", async () => {
+        await sendAlert("Hyperia server shutting down", details);
+      });
     }
 
     // Step 1: Close game WebSocket ingress. Keep Fastify and its authenticated
     // betting feed alive until the exact terminal cancellation is delivered.
-    try {
-      const { closeUwsServer } = await import("./uws-server.js");
-      closeUwsServer();
-    } catch {
-      // uWS may not have been started (UWS_ENABLED=false)
-    }
+    await diagnostics.run("websocket-ingress", async () => {
+      try {
+        const { closeUwsServer } = await import("./uws-server.js");
+        closeUwsServer();
+      } catch {
+        // uWS may not have been started (UWS_ENABLED=false)
+      }
+    });
 
     // Step 2: Stop the scheduler while the world, database, HTTP server, and
     // authenticated betting SSE clients are still alive. A nonterminal cycle
@@ -199,126 +205,156 @@ export function registerShutdownHandlers(
       cycleAtShutdown && cycleAtShutdown.phase !== "RESOLUTION",
     );
     let streamingShutdownExitCode = 0;
-    try {
-      await destroyStreamingDuelAuthority();
-      let terminalFrame: Awaited<
-        ReturnType<StreamingRoutesRuntime["waitForBettingTerminalFrame"]>
-      > | null = null;
-      let downstreamAcknowledged = false;
-      if (expectsCancellation && cycleAtShutdown?.duelId) {
-        if (!streamingRoutes) {
-          throw new Error(
-            "streaming route runtime is unavailable during active-duel shutdown",
-          );
-        }
-        terminalFrame = await streamingRoutes.waitForBettingTerminalFrame({
-          duelId: cycleAtShutdown.duelId,
-          cancellationReason: "scheduler_shutdown",
-          timeoutMs: 5_000,
-        });
-        downstreamAcknowledged =
-          await waitForStreamingDuelShutdownAcknowledgement({
-            config: streamingShutdownAckConfig,
-            duelId: terminalFrame.duelId,
+    await diagnostics.run("duel-terminal-barrier", async () => {
+      try {
+        await destroyStreamingDuelAuthority();
+        let terminalFrame: Awaited<
+          ReturnType<StreamingRoutesRuntime["waitForBettingTerminalFrame"]>
+        > | null = null;
+        let downstreamAcknowledged = false;
+        if (expectsCancellation && cycleAtShutdown?.duelId) {
+          if (!streamingRoutes) {
+            throw new Error(
+              "streaming route runtime is unavailable during active-duel shutdown",
+            );
+          }
+          terminalFrame = await streamingRoutes.waitForBettingTerminalFrame({
+            duelId: cycleAtShutdown.duelId,
+            cancellationReason: "scheduler_shutdown",
+            timeoutMs: 5_000,
           });
+          downstreamAcknowledged =
+            await waitForStreamingDuelShutdownAcknowledgement({
+              config: streamingShutdownAckConfig,
+              duelId: terminalFrame.duelId,
+            });
+        }
+        process.stdout.write(
+          `${JSON.stringify({
+            event: "shutdown-complete",
+            sourceEpoch: terminalFrame?.sourceEpoch ?? null,
+            terminalFrameSeq: terminalFrame?.terminalFrameSeq ?? null,
+            duelId: terminalFrame?.duelId ?? null,
+            duelKeyHex: terminalFrame?.duelKeyHex ?? null,
+            competitiveSnapshotDigest:
+              terminalFrame?.competitiveSnapshotDigest ?? null,
+            outcome: terminalFrame?.outcome ?? null,
+            cancellationReason: terminalFrame?.cancellationReason ?? null,
+            downstreamAcknowledged,
+          })}\n`,
+        );
+      } catch (err) {
+        streamingShutdownExitCode = 1;
+        console.error(
+          `${JSON.stringify({
+            event: "shutdown-failed",
+            signal,
+            reason: errMsg(err),
+          })}`,
+        );
       }
-      process.stdout.write(
-        `${JSON.stringify({
-          event: "shutdown-complete",
-          sourceEpoch: terminalFrame?.sourceEpoch ?? null,
-          terminalFrameSeq: terminalFrame?.terminalFrameSeq ?? null,
-          duelId: terminalFrame?.duelId ?? null,
-          duelKeyHex: terminalFrame?.duelKeyHex ?? null,
-          competitiveSnapshotDigest:
-            terminalFrame?.competitiveSnapshotDigest ?? null,
-          outcome: terminalFrame?.outcome ?? null,
-          cancellationReason: terminalFrame?.cancellationReason ?? null,
-          downstreamAcknowledged,
-        })}\n`,
-      );
-    } catch (err) {
-      streamingShutdownExitCode = 1;
-      console.error(
-        `${JSON.stringify({
-          event: "shutdown-failed",
-          signal,
-          reason: errMsg(err),
-        })}`,
-      );
-    }
+    });
 
     // Step 3: Stop stream capture only after the terminal market frame has been
     // acknowledged. This preserves visual/feed continuity through cancellation.
-    try {
-      const capture = getStreamCapture();
-      if (capture.isRunning()) {
-        await capture.stop();
+    await diagnostics.run("stream-capture", async () => {
+      try {
+        const capture = getStreamCapture();
+        if (capture.isRunning()) {
+          await capture.stop();
+        }
+      } catch {
+        // Stream capture may not have been initialized
       }
-    } catch {
-      // Stream capture may not have been initialized
-    }
+    });
 
     // Step 4: Close HTTP only after the terminal betting barrier is complete.
-    await closeHttpServer(context);
+    await diagnostics.run("http-close", async () => {
+      await closeHttpServer(context);
+    });
 
     // Step 5: Shutdown embedded agents after duel cleanup has settled.
-    await shutdownAgents();
+    await diagnostics.run("agents", async () => {
+      await shutdownAgents();
+    });
 
     // Step 5a: Flush agent thoughts to database
-    try {
-      const { flushAgentThoughtsToDb } =
-        await import("../eliza/dashboardInterop.js");
-      await flushAgentThoughtsToDb();
-    } catch {
-      // Thoughts module may not have been loaded
-    }
+    await diagnostics.run("agent-thoughts", async () => {
+      try {
+        const { flushAgentThoughtsToDb } =
+          await import("../eliza/dashboardInterop.js");
+        await flushAgentThoughtsToDb();
+      } catch {
+        // Thoughts module may not have been loaded
+      }
+    });
 
     // Step 5b: Shutdown Web3 chain writer (flush pending writes)
-    await shutdownWeb3(context);
+    await diagnostics.run("web3", async () => {
+      await shutdownWeb3(context);
+    });
 
     // Step 5c: Shutdown DuelArenaOraclePublisher
-    try {
-      const oraclePublisher = getDuelArenaOraclePublisher(context.world);
-      if (oraclePublisher) {
-        oraclePublisher.destroy();
+    await diagnostics.run("oracle", () => {
+      try {
+        const oraclePublisher = getDuelArenaOraclePublisher(context.world);
+        if (oraclePublisher) {
+          oraclePublisher.destroy();
+        }
+      } catch (err) {
+        console.error(
+          "[Shutdown] Failed to destroy DuelArenaOraclePublisher:",
+          err,
+        );
       }
-    } catch (err) {
-      console.error(
-        "[Shutdown] Failed to destroy DuelArenaOraclePublisher:",
-        err,
-      );
-    }
+    });
 
     // Step 5: Force-save all remaining player data (health, position,
     // inventory, equipment, coins)
     // Must happen BEFORE waitForDatabaseOperations() which sets isDestroying=true,
     // and BEFORE world.destroy() which calls system.destroy() fire-and-forget.
-    await forcePlayerDataSave(context);
+    await diagnostics.run("player-persistence", async () => {
+      await forcePlayerDataSave(context);
+    });
 
     // Step 6: Wait for pending database operations
-    await waitForDatabaseOperations(context);
+    await diagnostics.run("database-pending", async () => {
+      await waitForDatabaseOperations(context);
+    });
 
     // Step 6.5: Cleanup global singletons with timers (prevents memory leaks)
-    await cleanupGlobalServices();
+    await diagnostics.run("global-services", async () => {
+      await cleanupGlobalServices();
+    });
 
     // Step 7: Destroy world and systems
-    await destroyWorld(context);
+    await diagnostics.run("world", async () => {
+      await destroyWorld(context);
+    });
 
     // Step 8: Close database connections
-    await closeDatabaseConnections(context);
+    await diagnostics.run("database-close", async () => {
+      await closeDatabaseConnections(context);
+    });
 
     // Step 9: Stop Docker containers
-    await stopDocker(context);
+    await diagnostics.run("postgres-stop", async () => {
+      await stopDocker(context);
+    });
 
     // Step 10: Stop memory monitor
-    try {
-      stopMemoryMonitor();
-    } catch {
-      // Memory monitor may not have been started
-    }
+    await diagnostics.run("memory-monitor", () => {
+      try {
+        stopMemoryMonitor();
+      } catch {
+        // Memory monitor may not have been started
+      }
+    });
 
     // Step 11: Clear startup flag
-    clearStartupFlag();
+    await diagnostics.run("startup-flag", () => {
+      clearStartupFlag();
+    });
 
     // For hot reload (SIGUSR2), don't exit process
     if (signal === "SIGUSR2") {
@@ -327,7 +363,9 @@ export function registerShutdownHandlers(
     }
 
     // For termination signals, exit after short delay
+    diagnostics.record("exit-timer", "scheduled");
     setTimeout(() => {
+      diagnostics.record("exit-timer", "fired");
       process.exit(streamingShutdownExitCode);
     }, 100);
   };
