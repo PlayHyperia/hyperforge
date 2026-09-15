@@ -59,6 +59,7 @@ import {
 } from "./duel-full-topology-browser-performance-policy.mjs";
 import { waitForBoundedChildExit } from "./bounded-child-command.mjs";
 import {
+  isForwardedShutdownEvent,
   observeGameServerShutdown,
   resolveDuelStackShutdownPolicy,
   shutdownDuelStackChildren,
@@ -711,8 +712,6 @@ const CHILD_OUTPUT_ERROR_PATTERNS = [
 const CHILD_OUTPUT_WARN_PATTERN = /(^|[^A-Za-z0-9_-])warn(?:ing)?(?::|\s|$)/i;
 const EXPECTED_BUN_SHUTDOWN_PATTERN =
   /^error: script "[^"]+" (?:was terminated by signal SIGTERM|exited with code 143)\b/i;
-const STRUCTURED_SHUTDOWN_EVENT_PATTERN =
-  /^\{"event":"shutdown-(?:complete|failed)"[,}]/u;
 const duelStackShutdownPolicy = resolveDuelStackShutdownPolicy(process.env);
 const childStdoutMode = (
   options.verbose === true
@@ -758,7 +757,7 @@ function isErrorLikeChildLine(line) {
 }
 
 function shouldForwardChildLine(channel, line) {
-  if (STRUCTURED_SHUTDOWN_EVENT_PATTERN.test(line)) return true;
+  if (isForwardedShutdownEvent(line)) return true;
   if (shuttingDown && EXPECTED_BUN_SHUTDOWN_PATTERN.test(line)) {
     return false;
   }
@@ -784,7 +783,7 @@ function attachPrefixedOutput(stream, prefix, channel) {
     const trimmedLine = line.replace(/\r$/, "");
     if (!trimmedLine) return;
     if (!shouldForwardChildLine(channel, trimmedLine)) return;
-    if (STRUCTURED_SHUTDOWN_EVENT_PATTERN.test(trimmedLine)) {
+    if (isForwardedShutdownEvent(trimmedLine)) {
       const destination =
         channel === "stderr" ? process.stderr : process.stdout;
       destination.write(`${trimmedLine}\n`);

@@ -2,7 +2,9 @@ import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import test from "node:test";
+import { Script } from "node:vm";
 import {
+  isForwardedShutdownEvent,
   inspectOwnedProcessGroupMetadata,
   observeGameServerShutdown,
   parseGameServerShutdownCompletion,
@@ -42,6 +44,61 @@ const alive = (pid) => {
   }
 };
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/** Execute the deployed launcher declarations, without starting its stack. */
+function deployedOutputHandler({
+  stdoutMode = "errors-only",
+  stderrMode = "errors-only",
+  shuttingDown = false,
+  verbose = false,
+} = {}) {
+  const source = readFileSync(
+    new URL("./duel-stack.mjs", import.meta.url),
+    "utf8",
+  );
+  const section = (start, end) => {
+    const first = source.indexOf(start);
+    const last = source.indexOf(end, first + start.length);
+    assert(first >= 0 && last > first, `actual launcher section ${start}`);
+    assert.equal(source.indexOf(start, first + start.length), -1);
+    return source.slice(first, last);
+  };
+  const rows = [];
+  const record = (channel, format, line) =>
+    rows.push({ channel, format, line });
+  const attach = new Script(
+    [
+      section(
+        "const CHILD_OUTPUT_ERROR_PATTERNS =",
+        "const duelStackShutdownPolicy =",
+      ),
+      section("const childStdoutMode =", "function log(message)"),
+      section(
+        "function isErrorLikeChildLine(line)",
+        "function signalProcessTree(",
+      ),
+      "attachPrefixedOutput;",
+    ].join("\n"),
+    { filename: "actual-duel-stack-output-handler.mjs" },
+  ).runInNewContext({
+    isForwardedShutdownEvent,
+    options: { verbose },
+    shuttingDown,
+    process: {
+      env: {
+        DUEL_CHILD_STDOUT_MODE: stdoutMode,
+        DUEL_CHILD_STDERR_MODE: stderrMode,
+      },
+      stdout: { write: (line) => record("stdout", "raw", line) },
+      stderr: { write: (line) => record("stderr", "raw", line) },
+    },
+    console: {
+      log: (line) => record("stdout", "prefixed", line),
+      error: (line) => record("stderr", "prefixed", line),
+    },
+  });
+  return { attach, rows };
+}
 
 async function child(t, source, { game = false, requireAck = true } = {}) {
   const proc = spawn(process.execPath, ["--input-type=module", "-e", source], {
@@ -96,6 +153,191 @@ const gameSource = (onTerm, beforeReady = "") => `
 const emit = (record = complete, channel = "stdout") =>
   `process.${channel}.write(${JSON.stringify(JSON.stringify(record) + "\n")});`;
 const emitRaw = (raw) => `process.stdout.write(${JSON.stringify(raw)});`;
+
+test("forwarding admits only exact terminal and bounded lifecycle event names", () => {
+  for (const event of [
+    "shutdown-complete",
+    "shutdown-failed",
+    "server-shutdown-stage",
+    "server-postgres-stop-child",
+  ]) {
+    assert.equal(isForwardedShutdownEvent(JSON.stringify({ event })), true);
+    assert.equal(
+      isForwardedShutdownEvent(JSON.stringify({ event, sequence: 1 })),
+      true,
+    );
+  }
+  for (const event of [
+    "server-shutdown-stage-extra",
+    "server-postgres-stop-child-extra",
+    "server-shutdown",
+    "postgres-stop-child",
+    "shutdown-completed",
+    "ordinary-info",
+  ]) {
+    assert.equal(isForwardedShutdownEvent(JSON.stringify({ event })), false);
+  }
+  assert.equal(
+    isForwardedShutdownEvent('prefix {"event":"server-shutdown-stage"}'),
+    false,
+  );
+});
+
+test("real child diagnostics survive forwarding without completing the shutdown barrier", async (t) => {
+  const records = [
+    { event: "server-shutdown-stage", stage: "postgres-stop", phase: "enter" },
+    { event: "server-postgres-stop-child", phase: "close" },
+  ];
+  const owned = await child(
+    t,
+    gameSource(
+      `${records.map((record) => emit(record)).join("\n")}
+       process.stdout.write('ordinary informational output\\n');
+       process.once("message", message => {
+         if (message === "allow-terminal") { ${emit(noCycle)} process.exit(0); }
+       });`,
+    ),
+    { game: true, requireAck: false },
+  );
+  const output = deployedOutputHandler();
+  output.attach(owned.proc.stdout, "[actual-game]", "stdout");
+  const forwarded = () =>
+    output.rows.map(({ format, line }) => {
+      assert.equal(format, "raw", "structured events retain unprefixed JSON");
+      return JSON.parse(line);
+    });
+  const shutdown = shutdownDuelStackChildren({
+    entries: [{ name: "game-server", proc: owned.proc }],
+    gameServer: owned.monitor,
+    graceMs: 800,
+    residualGraceMs: 100,
+    killGraceMs: 1_000,
+  });
+  const deadline = Date.now() + 2_000;
+  while (output.rows.length < 2 && Date.now() < deadline) await delay(5);
+  assert.deepEqual(forwarded(), records);
+  assert.equal(owned.monitor.completion, null);
+  for (const record of records) {
+    assert.throws(
+      () => parseGameServerShutdownCompletion(JSON.stringify(record), false),
+      /malformed game-server shutdown completion/u,
+    );
+  }
+  owned.proc.send("allow-terminal");
+  const result = await shutdown;
+  assert.equal(result.ok, true);
+  assert.deepEqual(result.forcedGroups, []);
+  assert.deepEqual(result.remainingGroups, []);
+  assert.deepEqual(forwarded(), [...records, noCycle]);
+});
+
+test("deployed launcher handler preserves real chunked output and every logging mode", async (t) => {
+  const events = [
+    { event: "shutdown-complete" },
+    { event: "shutdown-failed" },
+    { event: "server-shutdown-stage", stage: "postgres-stop", phase: "enter" },
+    { event: "server-postgres-stop-child", phase: "close" },
+  ].map((record) => JSON.stringify(record));
+  const ordinary = [
+    "ordinary informational output",
+    'prefix {"event":"server-shutdown-stage"}',
+    '{"event":"server-shutdown-stage-extra"}',
+    '{"event":"server-postgres-stop-child-extra"}',
+    '{"event":"shutdown-completed"}',
+    '{"event":"shutdown-failed-extra"}',
+    "warning: child warning",
+    "Error: child error",
+    'error: script "start" was terminated by signal SIGTERM',
+  ];
+  const tail = "unterminated final line ü";
+  for (const policy of [
+    { stdoutMode: "errors-only", stderrMode: "errors-only" },
+    { stdoutMode: "off", stderrMode: "off" },
+    { stdoutMode: "all", stderrMode: "all", shuttingDown: true },
+    { stdoutMode: "warn-and-error", stderrMode: "warn-and-error" },
+    { stdoutMode: "unknown", stderrMode: "unknown" },
+    { stdoutMode: "off", stderrMode: "off", verbose: true },
+  ]) {
+    const owned = await child(
+      t,
+      `process.on("message", message => {
+        if (message === "exit") process.exit(0);
+        else process[message.channel].write(message.chunk);
+      });
+      setInterval(() => {}, 1000); process.send("ready");`,
+    );
+    const output = deployedOutputHandler(policy);
+    for (const channel of ["stdout", "stderr"]) {
+      output.attach(owned.proc[channel], "[actual-child]", channel);
+      let receivedCharacters = 0;
+      const onData = (chunk) => {
+        receivedCharacters += chunk.length;
+      };
+      owned.proc[channel].on("data", onData);
+      t.after(() => owned.proc[channel].off("data", onData));
+      let expectedCharacters = 0;
+      const write = async (chunk) => {
+        expectedCharacters += chunk.length;
+        owned.proc.send({ channel, chunk });
+        const deadline = Date.now() + 2_000;
+        while (receivedCharacters < expectedCharacters && Date.now() < deadline)
+          await delay(5);
+        assert.equal(
+          receivedCharacters,
+          expectedCharacters,
+          "real pipe delivered this chunk",
+        );
+      };
+      // Wait for the first partial event to actually arrive before writing its
+      // remainder: this cannot collapse into a single untested OS pipe chunk.
+      await write(events[0].slice(0, 12));
+      assert.equal(
+        output.rows.filter((row) => row.channel === channel).length,
+        0,
+      );
+      await write(events[0].slice(12) + "\r");
+      assert.equal(
+        output.rows.filter((row) => row.channel === channel).length,
+        0,
+      );
+      await write("\n" + events.slice(1).join("\n") + "\n\n");
+      await write(ordinary.join("\r\n") + "\r\n" + tail);
+    }
+    const closed = new Promise((resolve) =>
+      owned.proc.once("close", (code, signal) => resolve({ code, signal })),
+    );
+    owned.proc.send("exit");
+    assert.deepEqual(await closed, { code: 0, signal: null });
+    for (const channel of ["stdout", "stderr"]) {
+      const mode = policy.verbose ? "all" : policy[`${channel}Mode`];
+      const expectedOrdinary = [...ordinary, tail].filter((line) => {
+        if (policy.shuttingDown && line === ordinary[8]) return false;
+        if (mode === "all") return true;
+        if (mode === "off") return false;
+        if (mode === "errors-only")
+          return line === ordinary[7] || line === ordinary[8];
+        if (mode === "warn-and-error") return ordinary.slice(6).includes(line);
+        return channel === "stderr";
+      });
+      assert.deepEqual(
+        output.rows.filter((row) => row.channel === channel),
+        [
+          ...events.map((line) => ({
+            channel,
+            format: "raw",
+            line: `${line}\n`,
+          })),
+          ...expectedOrdinary.map((line) => ({
+            channel,
+            format: "prefixed",
+            line: `[actual-child] ${line}`,
+          })),
+        ],
+        JSON.stringify({ policy, channel }),
+      );
+    }
+  }
+});
 
 async function run(t, source, options = {}) {
   const dependency = await child(t, dependencySource);
@@ -753,6 +995,10 @@ test("launcher wires per-generation observation before filtered output and drain
   assert.match(
     source,
     /name === "game-server" \? \{ stdio: \["ignore", "pipe", "pipe"\] \}/u,
+  );
+  assert.match(
+    source,
+    /function shouldForwardChildLine\(channel, line\) \{\s*if \(isForwardedShutdownEvent\(line\)\) return true;/u,
   );
   const shutdown = source.slice(
     source.indexOf("async function shutdown("),

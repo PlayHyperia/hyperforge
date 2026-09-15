@@ -16,6 +16,14 @@ const TERMINAL_FIELDS = [
 ];
 const COMPLETE_FIELDS = ["event", ...TERMINAL_FIELDS, "downstreamAcknowledged"];
 const PROTOCOL_MARKER = /"event"\s*:\s*"shutdown-(?:complete|failed)/u;
+const FORWARDED_SHUTDOWN_EVENT_PATTERN =
+  /^\{"event":"(?:shutdown-(?:complete|failed)|server-shutdown-stage|server-postgres-stop-child)"[,}]/u;
+
+/** Preserve bounded lifecycle diagnostics without treating them as terminal ACKs. */
+export function isForwardedShutdownEvent(line) {
+  return FORWARDED_SHUTDOWN_EVENT_PATTERN.test(line);
+}
+
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const PROCESS_DIAGNOSTIC_BOUNDS = Object.freeze({
   errorReceipts: 8,
