@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { createHash } from "node:crypto";
 import THREE from "../../../../extras/three/three";
 import { World } from "../../../../core/World";
 import { DataManager } from "../../../../data/DataManager";
@@ -176,6 +177,99 @@ describe("world-anchored annular pond surface refinement", () => {
     }
     return (low + high) / 2;
   };
+
+  it("preserves captured fine pond seam buffers while rejecting unsupported full-pond coarse cells", () => {
+    const fingerprints = [250, 350].map((centerZ) => {
+      const terrain = provider();
+      const result = assembleQuadChunkGeometry(
+        generateQuadChunkDataSync(350, centerZ, 100, 128, terrain),
+        terrain,
+        3,
+      );
+      try {
+        const hash = createHash("sha256");
+        for (const [name, attribute] of Object.entries(
+          result.geometry.attributes,
+        )) {
+          hash.update(name);
+          hash.update(
+            new Uint8Array(
+              attribute.array.buffer,
+              attribute.array.byteOffset,
+              attribute.array.byteLength,
+            ),
+          );
+        }
+        const indices = result.geometry.index!.array;
+        hash.update(
+          new Uint8Array(
+            indices.buffer,
+            indices.byteOffset,
+            indices.byteLength,
+          ),
+        );
+        hash.update(
+          JSON.stringify(result.geometry.userData.terrainCellTopology),
+        );
+        expect(
+          retained(result, 128, 350, centerZ).matchesGeometry(result.geometry),
+        ).toBe(true);
+        return hash.digest("hex");
+      } finally {
+        result.geometry.dispose();
+      }
+    });
+    // Captured before the mirrored-halo correction; includes every attribute,
+    // main/skirt index and exact retained-cell topology on both sides of Z=300.
+    expect(fingerprints).toEqual([
+      "dc3d218a4cefb0cc02bebbfe64f9c935aa8dd35d62b02920cc91da756398f42e",
+      "ad5a5ae4c75ee2034bc71985ec48f195039957200034bb07bafeb424e5a23f41",
+    ]);
+    const coarse = provider();
+    const worker = generateQuadChunkDataSync(0, 0, 1600, 2, coarse);
+    const before = worker.heightData.slice();
+    expect(() => assembleQuadChunkGeometry(worker, coarse, 3)).toThrow(
+      /limit|budget/i,
+    );
+    expect(worker.heightData).toEqual(before);
+  });
+
+  it.each([
+    [-400, 400],
+    [400, -400],
+    [1200, 400],
+    [400, 1200],
+  ])(
+    "does not project a remote pond across an unsupported coarse neighbour onto ocean-only cell %i,%i",
+    (centerX, centerZ) => {
+      // The pond is hundreds of metres beyond each cell's nearest edge. The old mirrored halo
+      // extended a complete 800 m neighbouring cell and attempted a .125 m grid
+      // over this entire ocean cell even though no feature reaches its boundary.
+      const terrain = new AnalyticTerrain(plane, () => null, undefined, [ring]);
+      const worker = generateQuadChunkDataSync(
+        centerX,
+        centerZ,
+        800,
+        2,
+        terrain,
+      );
+      const original = worker.heightData.slice();
+      const result = assembleQuadChunkGeometry(worker, terrain, 3);
+      try {
+        expect(result.geometry.userData.terrainCellTopology).toBeUndefined();
+        expect(result.geometry.getAttribute("position").count).toBe(12);
+        expect(result.geometry.index!.count).toBe(30);
+        expect(
+          retained(result, 2, centerX, centerZ, 800).matchesGeometry(
+            result.geometry,
+          ),
+        ).toBe(true);
+        expect(worker.heightData).toEqual(original);
+      } finally {
+        result.geometry.dispose();
+      }
+    },
+  );
 
   it("retains the two-sector candidate bank within 2 cm using the original 7.9 m annulus at resolution 128", () => {
     // Isolate the actual authored candidate over constant surrounding 28.15 m

@@ -8,6 +8,7 @@ import THREE, {
 import type { Node } from "three/webgpu";
 import { TerrainSystem } from "./TerrainSystem";
 import { TerrainVisualManager } from "./TerrainVisualManager";
+import { createCompactPreparationDetailRegions } from "./CompactIslandDetail";
 import {
   CompositeQuadTreeListener,
   type TerrainQuadNode,
@@ -144,6 +145,15 @@ describe("live conforming water ownership (real CPU classes, no native/performan
         rootChunkRadius: 0,
         resolution: 2,
         splitRatio: 0,
+        // Keep the deliberately sparse ocean fixture, but bind the EXACT
+        // production local-detail policy. An authored pond must not be squeezed
+        // into one resolution2 parent: its retained cell cap intentionally
+        // rejects that unsupported geometry instead of discarding bank detail.
+        fineDetailRegions: createCompactPreparationDetailRegions(
+          terrain.getWorldTerrainProfile(),
+          DataManager.getInstance().getAllWorldAreas(),
+          terrain["CONFIG"].QUADTREE_RESOLUTION,
+        ),
       },
       terrain["buildChunkTerrainProvider"](),
       terrainContainer,
@@ -169,7 +179,8 @@ describe("live conforming water ownership (real CPU classes, no native/performan
     listener.add(manager);
     tree.setListener(listener);
     tree.update(rootX, 0);
-    const root = tree.getFinalNodes()[0];
+    let root = tree.getFinalNodes()[0];
+    while (root.parent) root = root.parent;
     const result = {
       tree,
       root,
@@ -406,7 +417,7 @@ describe("live conforming water ownership (real CPU classes, no native/performan
     // meadow leaf350,350; no fake terrain or fabricated ready flags.
     let target = owner.root;
     for (const key of ["se", "nw", "se", "se"] as const) {
-      target.split();
+      if (target.children.size === 0) target.split();
       target = target.children.get(key)!;
     }
     const all = leaves(owner.root);
@@ -522,7 +533,34 @@ describe("live conforming water ownership (real CPU classes, no native/performan
     terrain["quadTreeVisualManager"] = owner.visual;
     terrain["waterVisualManager"] = owner.manager;
     try {
-      publish(owner, owner.root);
+      for (const node of leaves(owner.root)) publish(owner, node);
+      const partition = leaves(owner.root);
+      const installed = owner.terrainContainer.children.filter(
+        (child): child is THREE.Mesh => child instanceof THREE.Mesh,
+      );
+      expect(installed).toHaveLength(partition.length);
+      console.info(
+        "production-detail-water-fixture",
+        JSON.stringify({
+          leaves: partition.length,
+          resolutions: [...new Set(partition.map((node) => node.resolution))]
+            .sort((a, b) => a - b)
+            .map((resolution) => ({
+              resolution,
+              leaves: partition.filter((node) => node.resolution === resolution)
+                .length,
+            })),
+          verticesIncludingSkirts: installed.reduce(
+            (sum, mesh) => sum + mesh.geometry.getAttribute("position").count,
+            0,
+          ),
+          trianglesIncludingSkirts: installed.reduce(
+            (sum, mesh) => sum + mesh.geometry.index!.count / 3,
+            0,
+          ),
+          nativeOrPerformanceApproval: false,
+        }),
+      );
       const pending = terrain.getStreamingVisualReadiness();
       expect(pending.terrain?.ready).toBe(true);
       expect(pending.waterTopology).toEqual(
@@ -542,22 +580,28 @@ describe("live conforming water ownership (real CPU classes, no native/performan
 
   it("retains the old complete world-space ocean while a translated root is unavailable", () => {
     const owner = fixture();
-    publish(owner, owner.root);
+    for (const node of leaves(owner.root)) publish(owner, node);
     settle(owner);
-    const old = meshes(owner)[0];
-    const oldPositions = old.geometry.getAttribute("position").array.slice();
+    const old = meshes(owner);
+    const oldPositions = old.map((mesh) =>
+      mesh.geometry.getAttribute("position").array.slice(),
+    );
     let disposed = 0;
-    old.geometry.addEventListener("dispose", () => disposed++);
+    for (const mesh of old)
+      mesh.geometry.addEventListener("dispose", () => disposed++);
     owner.tree.update(3200, 0);
     owner.manager.update();
-    expect(meshes(owner)).toEqual([old]);
-    expect(old.geometry.getAttribute("position").array).toEqual(oldPositions);
+    expect(meshes(owner)).toEqual(old);
+    for (const [index, mesh] of old.entries())
+      expect(mesh.geometry.getAttribute("position").array).toEqual(
+        oldPositions[index],
+      );
     expect(owner.manager.getConformingReadiness().ready).toBe(false);
     const next = owner.tree.getFinalNodes()[0];
     expect(next.centerX).toBe(3200);
     publish(owner, next);
     settle(owner);
-    expect(disposed).toBe(1);
+    expect(disposed).toBe(old.length);
     const current = meshes(owner)[0];
     expect(current.position.toArray()).toEqual([
       0,

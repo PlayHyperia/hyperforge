@@ -1464,6 +1464,24 @@ export type CompactServiceCourtsManifest = Readonly<{
   courts: readonly CompactServiceCourtPlacement[];
 }>;
 
+/** Explicit shoreline anchor; cardinal geometry and navigation share this datum. */
+export type CompactPondDockPlacement = Readonly<{
+  id: string;
+  x: number;
+  z: number;
+  rotation: 0 | 90 | 180 | 270;
+  recipeId: "haven-fishing-landing-v1" | "haven-reed-jetty-v1";
+}>;
+
+/** Two independently owned fishing docks bound to one explicit inland basin. */
+export type CompactPondDocksManifest = Readonly<{
+  schemaVersion: 1;
+  layoutId: "compact-pond-docks-v1";
+  terrainProfileId: "compact-duel-island-v6";
+  waterBodyId: string;
+  docks: readonly CompactPondDockPlacement[];
+}>;
+
 /** Low, non-colliding planting; tree/resource ownership is never changed. */
 export type CompactServicePlantingManifest = Readonly<{
   schemaVersion: 1 | 2;
@@ -1529,6 +1547,7 @@ export interface WorldConfigManifest {
   compactServiceCourt?: CompactServiceCourtManifest;
   compactBankPavilion?: CompactBankPavilionManifest;
   compactServiceCourts?: CompactServiceCourtsManifest;
+  compactPondDocks?: CompactPondDocksManifest;
   compactServicePlanting?: CompactServicePlantingManifest;
   compactLandscapeRocks?: CompactLandscapeRocksManifest;
 }

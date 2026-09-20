@@ -44,9 +44,15 @@ terrain measurements, not approved fishing capacity or in-game visual evidence.
 Compact elevated water now follows sampled canonical ground with a fixed 0.5m
 mesh and real shore-distance data. Its 17 actual-class tests and 102 stock
 water/terrain regressions pass; native appearance, indexed/PhysX agreement,
-frame cost and the full relocated habitat remain unqualified. Three coarse
-terrain-assembly cases fail when the separate art03 overlay is applied to that
-stock regression fixture; this combination remains an explicit open gate.
+frame cost and the full relocated habitat remain unqualified. The three
+art03 coarse-assembly failures are now resolved: tests use the production local
+detail regions, and impossible mirrored-only remote annular refinement is
+rejected without weakening direct-intersection geometry caps. Art03 passes
+150/150 terrain/water cases; stock passes 149 with one candidate-only skip.
+The opt-in dock foundation now shares fitted approach/deck triangles, sampled
+support feet and authored rail openings across drawing and movement/physics.
+Two CPU-tested placements fit the candidate basin; native integrated art,
+fishing capacity, complete routes and frame cost remain open acceptance gates.
 No pond, fishing spot, dock or supplier has been relocated in the live manifest.
 
 ## Island layout requirements — 2026-09-20, all open

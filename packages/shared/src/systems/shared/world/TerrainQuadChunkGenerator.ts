@@ -962,6 +962,27 @@ function* refineSurfaceFeaturesSteps(
     }
     return Math.min(lo, resolution - 2);
   };
+  const canMirrorAnnularCell = (
+    zone: Extract<LocalSurfaceRefinement, { kind: "annulus" }>,
+    x0: number,
+    x1: number,
+    z0: number,
+    z1: number,
+  ) => {
+    const step = zone.bearing === undefined ? ANNULAR_STEP : SHOULDER_STEP;
+    const partitions = (lo: number, hi: number, origin: number) =>
+      Math.ceil((origin + hi) / step) - Math.floor((origin + lo) / step);
+    // Mirror only a neighbouring partition that can pass the SAME coarse
+    // lattice preflight below. An unsupported coarse neighbour cannot publish
+    // shared-edge subdivisions; projecting its entire cell across the edge
+    // would manufacture remote refinement, sometimes hundreds of metres from
+    // the feature. Direct intersections still fail closed under every existing
+    // cap. This does not substitute lower-detail geometry for an admitted bank.
+    return (
+      partitions(x0, x1, centerX) * partitions(z0, z1, centerZ) * 2 <=
+      MAX_CELL_FACES
+    );
+  };
   const activeCells = new Map<number, LocalSurfaceRefinement[]>();
   for (const zone of zones) {
     const ix0 = locate(zone.minX - zone.blendRadius, 3, 0);
@@ -979,16 +1000,23 @@ function* refineSurfaceFeaturesSteps(
         // incident cell intersects the ring. The one-cell mirrored halo also
         // handles features lying wholly across a chunk boundary. Interior
         // cells retain the exact annulus classification.
+        const directIntersection = intersectsCollar(zone, x0, x1, z0, z1);
         const mirrorIntersects =
+          !directIntersection &&
           zone.kind === "annulus" &&
-          ((ix === 0 && intersectsCollar(zone, x0 - (x1 - x0), x0, z0, z1)) ||
+          ((ix === 0 &&
+            canMirrorAnnularCell(zone, x0 - (x1 - x0), x0, z0, z1) &&
+            intersectsCollar(zone, x0 - (x1 - x0), x0, z0, z1)) ||
             (ix === cellsPerAxis - 1 &&
+              canMirrorAnnularCell(zone, x1, x1 + (x1 - x0), z0, z1) &&
               intersectsCollar(zone, x1, x1 + (x1 - x0), z0, z1)) ||
-            (iz === 0 && intersectsCollar(zone, x0, x1, z0 - (z1 - z0), z0)) ||
+            (iz === 0 &&
+              canMirrorAnnularCell(zone, x0, x1, z0 - (z1 - z0), z0) &&
+              intersectsCollar(zone, x0, x1, z0 - (z1 - z0), z0)) ||
             (iz === cellsPerAxis - 1 &&
+              canMirrorAnnularCell(zone, x0, x1, z1, z1 + (z1 - z0)) &&
               intersectsCollar(zone, x0, x1, z1, z1 + (z1 - z0))));
-        if (!intersectsCollar(zone, x0, x1, z0, z1) && !mirrorIntersects)
-          continue;
+        if (!directIntersection && !mirrorIntersects) continue;
         const cell = iz * cellsPerAxis + ix;
         if (!activeCells.has(cell)) activeCells.set(cell, []);
         activeCells.get(cell)!.push(zone);

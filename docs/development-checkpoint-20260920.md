@@ -1,5 +1,89 @@
 # World graphics development checkpoint — 2026-09-20
 
+## Fitted pond docks and terrain refinement — source-only checkpoint
+
+The two-dock foundation is implemented and verified with actual World, terrain,
+Three and native PhysX objects. The test placements remain (390,424.5), eastward,
+and (433,415.5), westward, within the checked-in inland basin study. No canonical
+manifest or running localhost scene has been changed. All LAYOUT-01–08 gates
+remain open, especially complete fishing capacity and integrated visual quality.
+
+### Completed in this checkpoint
+
+- Strict immutable opt-in manifest admission binds exactly two distinct dock
+  recipes to one actual explicit pond, including its live radius-squared datum.
+  Exact cardinal 3×6m cores and 2m landward approaches own 24 movement tiles each.
+- One retained half-metre triangle surface supplies deck/apron drawing, native
+  collision and movement heights. Posts sample the actual bed; first/last feet
+  are set back half a metre to keep caps off the sloping approach. Rails have
+  matching visible segments and dual-tile movement walls, with open entrances
+  and deliberate casting gaps.
+- Refcounted walkable-deck leases preserve underlying terrain, occupancy and
+  other owners. Compact dock terrain rebakes sample canonical ground instead
+  of the active deck. Atomic failure unwinds both docks, physics actors, meshes,
+  grass exclusions and leases. Reentrant scene disposal cannot resurrect a dock.
+  Client registration no longer treats walkable decks as optional scenery.
+- The earlier three art03 coarse-assembly failures are resolved. The ownership
+  fixture now uses production local-detail regions; mirrored-only refinement
+  no longer projects an impossible coarse neighbour into distant terrain.
+  Direct ring intersections still reject oversized detail, existing limits are
+  unchanged, and fine seam geometry hashes remain identical to their goldens.
+
+### Retained verification
+
+- `dock-admission-tests01`: 52 manifest/DataManager tests, including mandatory
+  water binding even when optional data validation is skipped.
+- `dock-collision-tests02`: 172 actual collision/footprint/BFS cases.
+- `dock-layout-setback-stock01` and `dock-layout-setback-art03-01`: 5/5 each.
+  Two actual terrain placements, 3,250 Three rays with exact retained-height
+  agreement, +Y triangles, 48 deck tiles, real support depths and all 64 support
+  cap corners inside the flat platforms (minimum 0.13m margin).
+- `dock-owner-native-tests02` and `dock-owner-native-tests03`: 11/11 each on
+  stock and art03 assets. 86 merged-mesh/native ray checks, including front-cap
+  approach probes; maximum native Y error 0.000001430511474609375m under the
+  unchanged eight-Float32-ULP gate. Actual BFS, two rollback/retry failure modes,
+  missing owners, registry mismatch, rebake/removal and scene disposal pass.
+- Landing geometry: 967 vertices/792 triangles; jetty: 1,159/936. Two native
+  actors/shapes, two merged meshes and one shared material. These are source
+  geometry counts, not measured WebGPU draw/frame budgets or material approval.
+- `refinement-art03-final01`: 150/150; `refinement-stock-final01`: 149 pass,
+  one existing candidate-only skip. The art03 assembly fixture totals 153,050
+  vertices/301,008 triangles including skirts, compared with stock 90,084/175,990.
+  This added detail is explicitly **not** a production performance acceptance.
+- `dock-owner-types-final01`: 718 roots including every new test, zero
+  diagnostics and stable input hashes. `dock-infrastructure-regressions01`
+  executed three real suites/13 cases; two nonexistent requested filters matched
+  nothing and are not counted as coverage.
+- `dock-protected01`: all 145 protected compiled artifacts and recovered
+  lockfile unchanged. Localhost3333 returned HTTP200; the human client/server
+  and database VM remained running. No installs, build replacement, database
+  mutation or additional browser tabs were involved.
+
+Earlier unsuccessful fixture probes remain in the local evidence history.
+A negative test originally relied on which outer-grade guard fired first; it
+now uses a real small terrain mutation to establish the intended clipping or
+overdeep-post failure, independently of stock/art03 surroundings.
+
+### Art, integration and performance still required
+
+The current dock deck is a top surface, with inherited procedural wood bands,
+not finished plank thickness, grain detail or approved dock art. Side structural
+members extend beyond the walkable deck rectangle; it is not a full collider
+bounding box. Full-world resource/station spawners can run after dock startup,
+so the initial overlap check is not proof against later spawned obstructions.
+Server startup still creates bounded mesh/material objects; no server GPU work
+was measured or inferred. These limitations remain explicit before activation.
+
+Next: integrate the relocated basin, habitat/contact data, all seven fishing
+families/12 fish, tool/bait/feather supplier and bank routes into one isolated,
+matched candidate. Then finish both dock silhouettes/materials and verify actual
+gathering concurrency, walking, rendered/indexed/PhysX contact, day/stream views,
+startup, frame time and memory. Source tests alone do not satisfy these gates.
+Indexed geometry and explicit ownership follow the official
+[Three.js BufferGeometry guidance](https://threejs.org/docs/pages/BufferGeometry.html);
+that reference does not establish AAA visual quality.
+
+
 ## Inland pond/fishing source checkpoint — not layout promotion
 
 The full-progression requirement is now part of LAYOUT-07 in all eight mirrored

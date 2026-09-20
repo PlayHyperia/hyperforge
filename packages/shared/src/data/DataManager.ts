@@ -43,6 +43,10 @@ import {
 } from "../systems/shared/world/CompactServiceCourt";
 import { validateCompactLandscapeRocks } from "../systems/shared/world/CompactLandscapeRocks";
 import {
+  validateCompactPondDockBindings,
+  validateCompactPondDocks,
+} from "../systems/shared/world/DockDefinition";
+import {
   canonicalWorldJson,
   WorldManifestIdentityBuilder,
 } from "./WorldContentIdentity";
@@ -459,6 +463,10 @@ export class DataManager {
       copy.compactLandscapeRocks,
       profile,
     );
+    const compactPondDocks = validateCompactPondDocks(
+      copy.compactPondDocks,
+      profile,
+    );
     config = copy;
     if (
       config.seed !== profile.seed ||
@@ -482,6 +490,7 @@ export class DataManager {
       ...(compactServiceCourts ? { compactServiceCourts } : {}),
       ...(compactServicePlanting ? { compactServicePlanting } : {}),
       ...(compactLandscapeRocks ? { compactLandscapeRocks } : {}),
+      ...(compactPondDocks ? { compactPondDocks } : {}),
     });
     if (DataManager.worldContentIdentity !== null) {
       if (
@@ -2245,6 +2254,10 @@ export class DataManager {
       // optional validation escape hatch. Bind placements before any readiness.
       validateCompactServiceCourtBindings(
         DataManager.worldConfig?.compactServiceCourts,
+        ALL_WORLD_AREAS,
+      );
+      validateCompactPondDockBindings(
+        DataManager.worldConfig?.compactPondDocks,
         ALL_WORLD_AREAS,
       );
 

@@ -7798,6 +7798,17 @@ export class TerrainSystem extends System {
     const terrainFlagsMask = CollisionFlag.WATER | CollisionFlag.STEEP_SLOPE;
     const terrainFlags = new Int32Array(tilesPerSide * tilesPerSide);
 
+    // A deck lease overlays terrain flags; its removal must reveal the actual
+    // bank/water underneath, even after a rebake while the deck is active.
+    // Movement heights intentionally include decks, so they cannot be this
+    // opt-in world's terrain baseline. Authored building/arena grades remain
+    // part of canonical ground. Preserve the legacy bridge/bake path otherwise.
+    const canonicalDockGround =
+      DataManager.getWorldConfig()?.compactPondDocks !== undefined;
+    const sampleTerrainHeight = canonicalDockGround
+      ? (x: number, z: number) => this.getResourceGroundHeight(x, z)
+      : (x: number, z: number) => this.getHeightAt(x, z);
+
     // ---- PASS 1: Water flags (aligned with visual water mesh) ----
     //
     // The water mesh samples at 64 quads per terrain tile = 1.5625m cell size.
@@ -7822,7 +7833,7 @@ export class TerrainSystem extends System {
       const iStride = i * gridPoints;
       for (let j = 0; j < gridPoints; j++) {
         const wz = gridStartZ + j * cellSize;
-        heights[iStride + j] = this.getHeightAt(wx, wz);
+        heights[iStride + j] = sampleTerrainHeight(wx, wz);
       }
     }
 
@@ -7956,7 +7967,7 @@ export class TerrainSystem extends System {
         const rowOffset = gx * slopeGridSide;
         for (let gz = 0; gz < slopeGridSide; gz++) {
           const worldZ = originZ + gz - integerSlopeDistance + 0.5;
-          slopeHeights[rowOffset + gz] = this.getHeightAt(worldX, worldZ);
+          slopeHeights[rowOffset + gz] = sampleTerrainHeight(worldX, worldZ);
         }
       }
     }
@@ -8046,6 +8057,28 @@ export class TerrainSystem extends System {
             southEast,
             southWest,
           );
+        } else if (canonicalDockGround) {
+          // The uncommon non-integer stencil must use the same terrain-only
+          // datum as the cached grid, not calculateSlope's movement heights.
+          const center = sampleTerrainHeight(worldX, worldZ);
+          slope = 0;
+          for (let dx = -1; dx <= 1; dx++)
+            for (let dz = -1; dz <= 1; dz++) {
+              if (dx === 0 && dz === 0) continue;
+              const delta = Math.abs(
+                sampleTerrainHeight(
+                  worldX + dx * slopeDistance,
+                  worldZ + dz * slopeDistance,
+                ) - center,
+              );
+              slope = Math.max(
+                slope,
+                delta *
+                  (dx !== 0 && dz !== 0
+                    ? inverseDiagonalDistance
+                    : inverseSlopeDistance),
+              );
+            }
         } else {
           slope = this.calculateSlope(worldX, worldZ);
         }

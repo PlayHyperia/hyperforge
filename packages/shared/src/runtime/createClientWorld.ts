@@ -391,9 +391,9 @@ export function createClientWorld() {
   // ============================================================================
   // DOCK SYSTEM
   // ============================================================================
-  if (viewportProfile.enableExplorationScenery) {
-    world.register("docks", ProceduralDocks);
-  }
+  // A walkable deck is movement infrastructure, including in lean viewports.
+  // With no admitted dock manifest this system allocates no dock geometry.
+  world.register("docks", ProceduralDocks);
 
   // ============================================================================
   // THREE.JS SETUP
