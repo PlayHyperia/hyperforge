@@ -876,6 +876,8 @@ export {
   areRulesCompatible,
   getCombatArenaBoundsContainingPositions,
   getDuelArenaConfig,
+  getDuelArenaProtectionBounds,
+  isPositionInsideDuelArenaLobby,
   isPositionInsideDuelArenaZone,
   isPositionInsideCombatArena,
   type DuelRuleDefinition,

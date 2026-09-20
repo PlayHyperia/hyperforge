@@ -237,7 +237,7 @@ export function areRulesCompatible(
 // Arena Configuration (Manifest-Driven)
 // ============================================================================
 
-import { ALL_WORLD_AREAS } from "./world-areas";
+import { ALL_WORLD_AREAS, type WorldArea } from "./world-areas";
 import {
   ARENA_BASE_X,
   ARENA_BASE_Z,
@@ -256,6 +256,11 @@ import {
   LOBBY_CENTER_Z,
   LOBBY_WIDTH,
   LOBBY_LENGTH,
+  HOSPITAL_CENTER_X,
+  HOSPITAL_CENTER_Z,
+  HOSPITAL_WIDTH,
+  HOSPITAL_LENGTH,
+  DUEL_FLOOR_APRON,
 } from "./arena-layout";
 
 /**
@@ -438,22 +443,115 @@ export function getDuelArenaConfig(): DuelArenaConfig {
   return config;
 }
 
-/**
- * Check if a position is inside the overall duel arena zone bounds.
- * Includes lobby, hospital, and combat arenas.
- *
- * @param x - World X coordinate
- * @param z - World Z coordinate
- * @returns true if position is inside duel arena bounds
- */
-export function isPositionInsideDuelArenaZone(x: number, z: number): boolean {
-  const duelArena = ALL_WORLD_AREAS["duel_arena"];
-  if (!duelArena?.bounds) {
-    return false;
-  }
+// Manifest objects are replaced on admission; identified worlds cannot hot-reload
+// geometry. Share one immutable compiled footprint across all authority owners.
+const protectionBounds = new WeakMap<
+  WorldArea,
+  readonly Readonly<DuelCombatArenaBounds>[]
+>();
+const NO_PROTECTION_BOUNDS: readonly Readonly<DuelCombatArenaBounds>[] =
+  Object.freeze([]);
 
-  const { minX, maxX, minZ, maxZ } = duelArena.bounds;
-  return x >= minX && x <= maxX && z >= minZ && z <= maxZ;
+/** Physical ring/courts plus their existing terrain apron, never their convex
+ * bounding box. Only explicitly admitted worlds opt in; old manifests retain
+ * their broad-zone contract. This is not generic safe-area or PvP policy. */
+export function getDuelArenaProtectionBounds(): readonly Readonly<DuelCombatArenaBounds>[] {
+  const area = ALL_WORLD_AREAS.duel_arena;
+  if (!area) return NO_PROTECTION_BOUNDS;
+  if ("duelProtection" in area && area.duelProtection !== "facility-floors-v1")
+    throw new Error("Invalid duel protection footprint mode");
+  const cached = protectionBounds.get(area);
+  if (cached) return cached;
+  if (!area.bounds) {
+    if (area.duelProtection !== undefined)
+      throw new Error("Duel protection footprint requires area bounds");
+    return NO_PROTECTION_BOUNDS;
+  }
+  if (area.duelProtection === undefined) {
+    const legacy = Object.freeze([Object.freeze({ ...area.bounds })]);
+    protectionBounds.set(area, legacy);
+    return legacy;
+  }
+  if (area.id !== "duel_arena")
+    throw new Error(
+      "Duel protection footprint requires canonical area identity",
+    );
+  const config = getDuelArenaConfig();
+  const rectangle = (
+    minX: number,
+    maxX: number,
+    minZ: number,
+    maxZ: number,
+  ): Readonly<DuelCombatArenaBounds> =>
+    Object.freeze({
+      minX: minX - DUEL_FLOOR_APRON,
+      maxX: maxX + DUEL_FLOOR_APRON,
+      minZ: minZ - DUEL_FLOOR_APRON,
+      maxZ: maxZ + DUEL_FLOOR_APRON,
+    });
+  const bounds = [
+    rectangle(
+      config.baseX,
+      config.baseX + config.arenaWidth,
+      config.baseZ,
+      config.baseZ + config.arenaLength,
+    ),
+    rectangle(
+      LOBBY_CENTER_X - LOBBY_WIDTH / 2,
+      LOBBY_CENTER_X + LOBBY_WIDTH / 2,
+      LOBBY_CENTER_Z - LOBBY_LENGTH / 2,
+      LOBBY_CENTER_Z + LOBBY_LENGTH / 2,
+    ),
+    rectangle(
+      HOSPITAL_CENTER_X - HOSPITAL_WIDTH / 2,
+      HOSPITAL_CENTER_X + HOSPITAL_WIDTH / 2,
+      HOSPITAL_CENTER_Z - HOSPITAL_LENGTH / 2,
+      HOSPITAL_CENTER_Z + HOSPITAL_LENGTH / 2,
+    ),
+  ];
+  const envelope = area.bounds;
+  if (
+    ![envelope.minX, envelope.maxX, envelope.minZ, envelope.maxZ].every(
+      Number.isFinite,
+    ) ||
+    envelope.minX >= envelope.maxX ||
+    envelope.minZ >= envelope.maxZ ||
+    bounds.some(
+      (b) =>
+        !Object.values(b).every(Number.isFinite) ||
+        b.minX >= b.maxX ||
+        b.minZ >= b.maxZ ||
+        b.minX < envelope.minX ||
+        b.maxX > envelope.maxX ||
+        b.minZ < envelope.minZ ||
+        b.maxZ > envelope.maxZ,
+    )
+  )
+    throw new Error("Duel protection facilities escape their admitted area");
+  const compiled = Object.freeze(bounds);
+  protectionBounds.set(area, compiled);
+  return compiled;
+}
+
+/** One shared no-loss/drop/ammunition/evacuation protection predicate. */
+export function isPositionInsideDuelArenaZone(x: number, z: number): boolean {
+  if (!Number.isFinite(x) || !Number.isFinite(z)) return false;
+  return getDuelArenaProtectionBounds().some(
+    (b) => x >= b.minX && x <= b.maxX && z >= b.minZ && z <= b.maxZ,
+  );
+}
+
+/** Challenges belong to the arrival court, not recovery, apron or open ground.
+ * Historical manifests keep their prior zone-minus-ring eligibility. */
+export function isPositionInsideDuelArenaLobby(x: number, z: number): boolean {
+  if (!isPositionInsideDuelArenaZone(x, z)) return false;
+  if (ALL_WORLD_AREAS.duel_arena.duelProtection === "facility-floors-v1")
+    return (
+      Math.abs(x - LOBBY_CENTER_X) <= LOBBY_WIDTH / 2 &&
+      Math.abs(z - LOBBY_CENTER_Z) <= LOBBY_LENGTH / 2 &&
+      !isPositionInsideCombatArena(x, z)
+    );
+  return !isPositionInsideCombatArena(x, z);
 }
 
 /**

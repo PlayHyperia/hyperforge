@@ -202,7 +202,15 @@ export function handleDuelChallenge(
       return;
     }
 
-    // Re-validate lobby status (target may have left lobby while challenger walked over)
+    // Either actor may have crossed the lobby edge during queued movement.
+    if (!isInDuelArenaLobby(world, playerId)) {
+      sendDuelError(
+        socket,
+        "Return to the duel lobby before challenging a player.",
+        "NOT_IN_LOBBY",
+      );
+      return;
+    }
     if (!isInDuelArenaLobby(world, targetPlayerId)) {
       sendDuelError(
         socket,

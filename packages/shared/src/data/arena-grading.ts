@@ -4,6 +4,7 @@ import { createAuthoredTerrainSurfaceOperations } from "../systems/shared/world/
 import { ALL_WORLD_AREAS, type WorldArea } from "./world-areas";
 import { getDuelArenaConfig, type DuelArenaConfig } from "./duel-manifest";
 import {
+  DUEL_FLOOR_APRON,
   HOSPITAL_CENTER_X,
   HOSPITAL_CENTER_Z,
   HOSPITAL_WIDTH,
@@ -254,7 +255,7 @@ export function createDuelArenaFloorZones(
     width,
     depth,
     height: baseHeight + DUEL_ARENA_FLOOR_GROUND_OFFSET,
-    blendRadius: 1,
+    blendRadius: DUEL_FLOOR_APRON,
     carveInset: 1,
   });
   const zones: FlatZone[] = [];

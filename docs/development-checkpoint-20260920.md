@@ -1,5 +1,60 @@
 # World graphics development checkpoint — 2026-09-20
 
+## Facility protection and all-tier fishing capacity checkpoint
+
+Implemented an opt-in `facility-floors-v1` protection contract: actual ring,
+lobby and hospital floors plus their existing one-metre apron, not the broad
+rectangle around them. Shared death/drop/ammunition/resource consumers use
+this predicate. Client/server lobby challenges share actual lobby-floor
+eligibility; queued callbacks recheck both participants. Zone membership,
+overlap priority and cache edges now follow the three component rectangles.
+
+Malformed metadata fails manifest admission before readiness, even with
+SKIP_VALIDATION. Unmarked manifests retain their historical behavior. Only
+detached assets-v4 opts in, with explicit ordinary safe grounds between the
+facilities and lower-edge shoulders preserving historical boundary tile
+centers. No live/default manifest, compiled human output or lighting default
+was promoted. Assets-v3 remains the rejected exclusive-minimum-edge study.
+
+The new actual-owner capacity test covers fourteen fishing resources, seven
+families and twelve fish. All fourteen anglers plus seven additional arrivals
+were admitted on distinct dry in-range shores. Real cancellation, entity
+removal/re-entry and resource relocation end with 21 active sessions and no
+pending gathers, reservations or movement intents. This proves observed CPU
+admission/lifecycle, not durable rewards, socket reconnects, full collision,
+bank journeys, native crowd quality or every randomized arrangement.
+
+Final verification: 152/152 shared regressions; 68 server regressions with one
+intentional candidate-only skip; candidate-v4 19/19 with zero skips. Shared
+source typing covers 731 roots; server typing covers 3,953 transitive sources;
+both have zero diagnostics and stable pins. Scoped lint/formatting pass.
+The new cases use actual systems/filesystem loaders; existing mocked custody
+suites are regression coverage, not real death/database transaction acceptance.
+Early fixture/type/expected-zone failures remain recorded and corrected.
+No timeout, pathfinding, render-quality or resource budget was increased.
+
+Build13 emits eight isolated bundles from 973 stable inputs, preserving 145
+protected compiled artifacts. Native29 verifies eight actual client zone/
+protection/lobby samples, including both overlap and lower-edge cases. The
+original 90-second startup gate passes, camera/grass settling is 11.008s within
+30 seconds, and five HUD leases complete. Root inspected the captures: the
+fine dock grid still appears at production shadow bias and disappears under
+the temporary zero-bias control. Defaults, materials, camera and clock are
+restored. Scheduler-disabled streaming-state 503s and the known cow-model 404
+remain recorded; no full-runtime, streaming, performance or final-art approval.
+
+Runtime15 and the owned browser are closed, its ephemeral database is removed,
+and cleanup has no errors. Playable localhost:3333, its server/database and
+compiled bundles remain unchanged. Independent source review found no
+remaining checkpoint blocker. Keep LAYOUT-01–08 open; next qualify actual
+custody/queued-challenge transactions and full-width bank routes, followed by
+whole-scene shadow behavior and stronger bank/planting/dock art.
+
+Evidence: service-layout-network01-UNQUALIFIED/arena-footprint-regression03,
+arena-footprint-types02, arena-footprint-server-types01 and
+fishing-capacity-candidate-v4-01; inland-pond-integration01-UNQUALIFIED/assets-v4,
+isolated-build13-report, native29 and runtime15. Do not promote this candidate.
+
 ## Fishing approach, fitted dock supports and shadow attribution checkpoint
 
 The seven-family / twelve-fish pond contract remains: fourteen simultaneous

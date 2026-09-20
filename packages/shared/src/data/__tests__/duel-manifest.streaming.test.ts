@@ -2,12 +2,201 @@ import { describe, expect, it } from "vitest";
 import {
   getCombatArenaBoundsContainingPositions,
   getDuelArenaConfig,
+  getDuelArenaProtectionBounds,
+  isPositionInsideDuelArenaLobby,
   isPositionInsideCombatArena,
   isPositionInsideDuelArenaZone,
 } from "../duel-manifest";
 import { ALL_WORLD_AREAS, type WorldArea } from "../world-areas";
 import { resolveWorldSpawnPosition } from "../../runtime/WorldSpawnAdmission";
 import { DataManager } from "../DataManager";
+import { World } from "../../core/World";
+import { ZoneDetectionSystem } from "../../systems/shared/death/ZoneDetectionSystem";
+
+async function withFacilityAreas(
+  run: () => void | Promise<void>,
+): Promise<void> {
+  const original = { ...ALL_WORLD_AREAS };
+  const arena = original.duel_arena;
+  ALL_WORLD_AREAS.duel_arena = {
+    ...arena,
+    duelProtection: "facility-floors-v1",
+  };
+  ALL_WORLD_AREAS.arena_grounds = {
+    ...arena,
+    id: "arena_grounds",
+    name: "Arena Grounds",
+    bounds: {
+      ...arena.bounds,
+      minX: arena.bounds.minX - 0.5,
+      minZ: arena.bounds.minZ - 0.5,
+    },
+  };
+  delete ALL_WORLD_AREAS.arena_grounds.duelProtection;
+  ALL_WORLD_AREAS.haven_pond = {
+    ...arena,
+    id: "haven_pond",
+    name: "Inland Pond",
+    bounds: { minX: 377, maxX: 443, minZ: 382, maxZ: 448 },
+  };
+  delete ALL_WORLD_AREAS.haven_pond.duelProtection;
+  try {
+    await run();
+  } finally {
+    for (const key of Object.keys(ALL_WORLD_AREAS)) delete ALL_WORLD_AREAS[key];
+    Object.assign(ALL_WORLD_AREAS, original);
+  }
+}
+
+describe("admitted facility protection and actual zone-cache ownership", () => {
+  it("keeps an immutable union of the real floors and one-metre aprons, not its bounding rectangle", async () => {
+    await withFacilityAreas(() => {
+      const bounds = getDuelArenaProtectionBounds();
+      expect(bounds).toEqual([
+        { minX: 339, maxX: 361, minZ: 393, maxZ: 419 },
+        { minX: 375, maxX: 395, minZ: 367, maxZ: 385 },
+        { minX: 338, maxX: 352, minZ: 369, maxZ: 383 },
+      ]);
+      expect(getDuelArenaProtectionBounds()).toBe(bounds);
+      expect(Object.isFrozen(bounds)).toBe(true);
+      for (const b of bounds) {
+        expect(Object.isFrozen(b)).toBe(true);
+        const midX = (b.minX + b.maxX) / 2,
+          midZ = (b.minZ + b.maxZ) / 2;
+        for (const x of [b.minX, b.maxX]) {
+          expect(isPositionInsideDuelArenaZone(x, midZ)).toBe(true);
+          expect(
+            isPositionInsideDuelArenaZone(
+              x + (x === b.minX ? -0.001 : 0.001),
+              midZ,
+            ),
+          ).toBe(false);
+        }
+        for (const z of [b.minZ, b.maxZ]) {
+          expect(isPositionInsideDuelArenaZone(midX, z)).toBe(true);
+          expect(
+            isPositionInsideDuelArenaZone(
+              midX,
+              z + (z === b.minZ ? -0.001 : 0.001),
+            ),
+          ).toBe(false);
+        }
+      }
+      for (const [x, z] of [
+        [365, 390],
+        [387, 419],
+        [390, 424.5],
+        [410, 415],
+      ])
+        expect(isPositionInsideDuelArenaZone(x, z)).toBe(false);
+      expect(isPositionInsideDuelArenaZone(NaN, 376)).toBe(false);
+      expect(isPositionInsideDuelArenaZone(385, Infinity)).toBe(false);
+    });
+  });
+
+  it("admits challenges only on the actual lobby floor, excluding its apron, hospital and ring", async () => {
+    await withFacilityAreas(() => {
+      for (const x of [376, 385, 394])
+        for (const z of [368, 376, 384])
+          expect(isPositionInsideDuelArenaLobby(x, z)).toBe(true);
+      for (const [x, z] of [
+        [375.5, 376],
+        [394.5, 376],
+        [385, 367.5],
+        [385, 384.5],
+        [345, 376],
+        [350, 406],
+        [365, 390],
+        [390, 424.5],
+      ])
+        expect(isPositionInsideDuelArenaLobby(x, z)).toBe(false);
+    });
+  });
+
+  it("uses physical facility precedence over overlapping pond and never leaks through the same two-metre cache cell", async () => {
+    await withFacilityAreas(async () => {
+      const world = new World();
+      const zone = world.register(
+        "zone-detection",
+        ZoneDetectionSystem,
+      ) as ZoneDetectionSystem;
+      try {
+        await zone.init();
+        for (let repeat = 0; repeat < 3; repeat++) {
+          for (const [x, expected] of [
+            [374.9, "arena_grounds"],
+            [375.1, "duel_arena"],
+            [394.9, "duel_arena"],
+            [395.1, "arena_grounds"],
+          ] as const)
+            expect(zone.getZoneProperties({ x, z: 376 }).id).toBe(expected);
+        }
+        expect(zone.getZoneProperties({ x: 385, z: 383.5 }).id).toBe(
+          "duel_arena",
+        );
+        expect(zone.getZoneProperties({ x: 390, z: 424.5 }).id).toBe(
+          "haven_pond",
+        );
+        for (const [x, z, id] of [
+          [365, 390, "arena_grounds"],
+          [400, 348.5, "arena_grounds"],
+          [316, 390, "arena_grounds"],
+          [420, 400, "haven_pond"],
+          [350, 433, "arena_grounds"],
+        ] as const) {
+          const props = zone.getZoneProperties({ x, z });
+          expect(props.id).toBe(id);
+          expect(props.isSafe).toBe(true);
+          expect(props.isPvPEnabled).toBe(false);
+          expect(isPositionInsideDuelArenaZone(x, z)).toBe(false);
+        }
+      } finally {
+        world.destroy();
+      }
+    });
+  });
+
+  it.each([null, undefined, false, "broad", {}, { version: 1 }])(
+    "rejects present malformed protection metadata %j",
+    async (mode) => {
+      await withFacilityAreas(() => {
+        ALL_WORLD_AREAS.duel_arena = {
+          ...ALL_WORLD_AREAS.duel_arena,
+          duelProtection: mode,
+        } as WorldArea;
+        expect(() => getDuelArenaProtectionBounds()).toThrow("footprint mode");
+      });
+    },
+  );
+
+  it("rejects incomplete envelopes, reversed bounds, escaped facilities and mismatched identity", async () => {
+    await withFacilityAreas(() => {
+      const valid = ALL_WORLD_AREAS.duel_arena;
+      const envelopes: Partial<WorldArea["bounds"]>[] = [
+        {},
+        { ...valid.bounds, minX: 350 },
+        { ...valid.bounds, maxZ: 350 },
+      ];
+      for (const key of ["minX", "maxX", "minZ", "maxZ"] as const) {
+        const missing: Partial<WorldArea["bounds"]> = { ...valid.bounds };
+        delete missing[key];
+        envelopes.push(missing);
+      }
+      for (const bounds of envelopes) {
+        ALL_WORLD_AREAS.duel_arena = {
+          ...valid,
+          bounds,
+          subZones: undefined,
+        } as WorldArea;
+        expect(() => getDuelArenaProtectionBounds()).toThrow();
+      }
+      ALL_WORLD_AREAS.duel_arena = { ...valid, id: "other" };
+      expect(() => getDuelArenaProtectionBounds()).toThrow(
+        "canonical area identity",
+      );
+    });
+  });
+});
 
 function withSubZones(subZones: unknown, run: () => void): void {
   const original = ALL_WORLD_AREAS.duel_arena;

@@ -20,6 +20,8 @@ export const ARENA_ROWS = 1;
 export const ARENA_COUNT = 1;
 export const ARENA_SPAWN_OFFSET = 8;
 export const ARENA_FORFEIT_PILLAR_INSET = 2;
+/** The authored floor's terrain transition and its protected approach apron. */
+export const DUEL_FLOOR_APRON = 1;
 
 // ---------------------------------------------------------------------------
 // Arrival court (north-east of the combat ring)

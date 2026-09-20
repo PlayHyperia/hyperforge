@@ -546,6 +546,9 @@ export interface WorldArea {
    * a present value must pass arena-grading's strict metadata validation.
    */
   arenaFloorDatum?: Readonly<{ height: number }>;
+  /** Narrow duel-only custody to physical facilities and their one-metre apron.
+   * Omission retains historical broad-zone behavior; unknown modes fail closed. */
+  duelProtection?: "facility-floors-v1";
   /** Flat zones for terrain flattening (e.g., arena floors) */
   flatZones?: Array<{
     id: string;

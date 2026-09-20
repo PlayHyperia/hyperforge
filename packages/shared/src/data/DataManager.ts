@@ -30,6 +30,7 @@ import {
   getNPCsInArea,
 } from "./world-areas";
 import { BIOMES } from "./world-structure";
+import { getDuelArenaProtectionBounds } from "./duel-manifest";
 import { validateAuthoredResourceIdentities } from "./ResourceInstanceIdentity";
 import { validateCompactResourceGroves } from "../systems/shared/world/CompactResourceGroves";
 import { validateCompactPreparationLodge } from "../systems/shared/world/CompactPreparationLodge";
@@ -2260,6 +2261,17 @@ export class DataManager {
         DataManager.worldConfig?.compactPondDocks,
         ALL_WORLD_AREAS,
       );
+      // Economic protection cannot silently fall back to a broad rectangle or
+      // disappear through SKIP_VALIDATION. Admit it before content readiness.
+      for (const [id, area] of Object.entries(ALL_WORLD_AREAS))
+        if (
+          ("duelProtection" in area && id !== "duel_arena") ||
+          (ALL_WORLD_AREAS.duel_arena?.duelProtection !== undefined &&
+            area.id === "duel_arena" &&
+            id !== "duel_arena")
+        )
+          throw new Error("Duel protection metadata belongs to duel_arena");
+      getDuelArenaProtectionBounds();
 
       this.validationResult = await this.validateAllData();
 

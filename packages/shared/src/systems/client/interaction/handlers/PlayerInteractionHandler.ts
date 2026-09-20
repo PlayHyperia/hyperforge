@@ -22,6 +22,7 @@ import { INTERACTION_RANGE, MESSAGE_TYPES } from "../constants";
 import { getCombatLevelColor } from "../utils/combatLevelColor";
 import { calculateCombatLevel } from "../../../../utils/game/CombatLevelCalculator";
 import type { ZoneDetectionSystem } from "../../../shared/death/ZoneDetectionSystem";
+import { isPositionInsideDuelArenaLobby } from "../../../../data/duel-manifest";
 
 export class PlayerInteractionHandler extends BaseInteractionHandler {
   /**
@@ -74,7 +75,7 @@ export class PlayerInteractionHandler extends BaseInteractionHandler {
     }
 
     // 2. Challenge (Duel Arena only) - Priority 1
-    const inDuelArena = this.isInDuelArenaZone();
+    const inDuelArena = this.isInDuelArenaLobby();
     if (inDuelArena) {
       actions.push({
         id: "challenge",
@@ -171,27 +172,16 @@ export class PlayerInteractionHandler extends BaseInteractionHandler {
   }
 
   /**
-   * Check if the LOCAL player is currently in the Duel Arena zone.
+   * Shared lobby eligibility, not the broader facility protection region.
    */
-  private isInDuelArenaZone(): boolean {
+  private isInDuelArenaLobby(): boolean {
     const player = this.getPlayer();
     if (!player) return false;
 
     const position = player.position;
     if (!position) return false;
 
-    // Use ZoneDetectionSystem
-    const zoneSystem = this.world.getSystem("zone-detection");
-    if (!zoneSystem) {
-      return false;
-    }
-
-    const zoneProperties = zoneSystem.getZoneProperties({
-      x: position.x,
-      z: position.z,
-    });
-
-    return zoneProperties.id === "duel_arena";
+    return isPositionInsideDuelArenaLobby(position.x, position.z);
   }
 
   /**
@@ -261,8 +251,7 @@ export class PlayerInteractionHandler extends BaseInteractionHandler {
 
     // 3. Calculate from skills (if available)
     const skills = entity.skills as
-      | Record<string, { level: number }>
-      | undefined;
+      Record<string, { level: number }> | undefined;
     if (skills) {
       return calculateCombatLevel({
         attack: skills.attack?.level || 1,
@@ -314,8 +303,7 @@ export class PlayerInteractionHandler extends BaseInteractionHandler {
     // 3. Calculate from skills (PlayerLocal has synced skills via SKILLS_UPDATED)
     // This is the most reliable method for the local player
     const skills = entity.skills as
-      | Record<string, { level: number }>
-      | undefined;
+      Record<string, { level: number }> | undefined;
     if (skills) {
       return calculateCombatLevel({
         attack: skills.attack?.level || 1,
@@ -362,7 +350,7 @@ export class PlayerInteractionHandler extends BaseInteractionHandler {
    * Only available in the Duel Arena zone.
    */
   private challengePlayer(target: RaycastTarget): void {
-    if (!this.isInDuelArenaZone()) {
+    if (!this.isInDuelArenaLobby()) {
       this.showExamineMessage(
         "You can only challenge players in the Duel Arena.",
       );

@@ -269,24 +269,22 @@ the supplier and arrival landing. Seven targets' entire four-metre interaction
 disks lie inside that rectangle. A pond safe-zone flag cannot override the
 earlier arena no-loss shortcut, ground-item restrictions or lobby challenge test.
 
-- [ ] Define and test one explicit compact duel-protection footprint around the
-      actual facilities, preserving ordinary safe-area custody outside it. Apply
-      it consistently to death, drops/gravestones, ammunition recovery, opt-out
-      evacuation and matching client affordances. Challenges need actual lobby
-      eligibility. Missing or malformed candidate metadata must not broaden
-      privileges. Do not relax global economic rules to accommodate the pond.
+- [ ] Finish integrated custody qualification of the explicit facility footprint.
+      The shared predicate, manifest admission, zone cache and lobby affordances
+      are implemented below, but actual death/drop/grave, final tile-centered
+      item admission, ammunition, opt-out evacuation and queued challenge
+      transactions still need real-system evidence. Preserve ordinary safe-area
+      custody outside facilities; never relax economic rules to fit the pond.
 - [ ] Validate the full walking width of the pond-to-bank corridor against that
       footprint, not just the painted path centerline or physical floor bounds.
-- [ ] Prove fourteen real concurrent anglers plus additional arrivals using the
-      actual basin, reservations and movement occupancy. Fourteen spawned targets
-      are not fourteen proven usable actor positions. Every reserved approach
-      must satisfy authoritative fishing reach as well as dry walkability; test
-      congestion, retry, moving spots, disconnects and cancellation.
-      The approach/rejected-admission defects identified at the earlier checkpoint
-      are corrected in the scoped owner tests below. Verify fourteen simultaneous
-      anglers and overflow, and that relocation preserves useful capacity across
-      all families, not only different resource tiles. Four-actor CPU admission
-      and three-resource relocation soaks do not close this real-basin gate.
+- [ ] Complete native/persisted all-tier fishing capacity qualification.
+      Actual CPU owners now admit fourteen anglers plus seven extra arrivals
+      on distinct legal shores and cover cancellation, entity re-entry and
+      relocation. Extend that observed arrangement to catch/consumable durability,
+      authenticated socket reconnect, full world/dock collision, supplier/bank
+      journeys, rendered crowd quality and long-run repeated spawn arrangements.
+      Fourteen targets alone are not capacity evidence; CPU admission alone
+      does not close this integrated gate.
 
 ### Pond headland and timber checkpoint — partial native inspection, unqualified
 
@@ -461,6 +459,70 @@ uniform planting and simple dock silhouette still need art work.
 Receipts: service-layout fishing-approach-regression06, baseline05, candidate05,
 types06, dock-support-* and pond-dock-cap-types01; inland pond native28 and
 isolated-build12-report. No promotion of the unqualified pond manifests.
+
+### Facility separation and all-tier capacity — candidate source checkpoint
+
+Explicit `duelProtection: "facility-floors-v1"` compiles immutable ring, lobby
+and hospital rectangles with the same one-metre apron as the authored floors.
+It is a union, not their bounding box. All existing no-loss death, grave/drop,
+ground-item persistence, ammunition, opt-out and resource exclusions consume
+that shared protection predicate. Ring-only combat authority is unchanged.
+Zone detection uses actual components for membership, precedence and cache
+edges; a pond overlap cannot replace the actual lobby with pond classification.
+Client/server challenge affordances share the lobby-floor predicate, excluding
+hospital, ring and apron; the queued callback rechecks both participants.
+
+Mandatory manifest admission rejects malformed modes, missing/non-finite/
+reversed/escaping envelopes and inconsistent or duplicate arena identity before
+readiness, even with SKIP_VALIDATION. Unmarked historical manifests keep their
+broad-zone behavior. Only detached assets-v4 opts in: world-config and stores
+remain byte-identical to assets-v2, while world-areas adds the facility policy
+and explicit safe arena_grounds. The grounds preserve ordinary safe-area rules
+between facilities; a half-tile outward shoulder on lower edges includes the
+formerly protected boundary tile centers without changing generic zone rules.
+Assets-v3 is retained as the rejected exclusive-minimum-edge study. No live
+manifest, protected compiled output or human service is promoted.
+
+The new opt-in actual-owner fishing case spawns fourteen body-bound resources
+(two of each family, all twelve fish), equips real players with manifest tools/
+consumables and skill levels, and runs actual movement/admission. The observed
+v4 arrangement admits all fourteen plus seven extra arrivals on twenty-one
+distinct supported in-range shores. Real click cancellation, entity removal/
+re-entry and resource relocation finish with active sessions and no pending
+gathers, shore reservations or movement intents. This is not reward execution,
+DB/socket reconnect, full town/dock collision, a bank journey or proof of every
+randomized spawn arrangement.
+
+Verification: final regression03 passes 152 shared cases, including actual
+World/ZoneDetection cache edges and real-filesystem admission; 68 server
+regressions pass with one intentional opt-in skip; candidate-v4 runs the full
+19 with zero skips. Shared source typing covers 731 roots and server typing
+3,953 transitive sources, both zero diagnostics/stable pins; scoped lint and
+formatting pass. Existing mocked death/custody suites are regression coverage,
+not real transaction acceptance. Early fixture/typing failures remain recorded;
+no timeout or budget increased. Build13 emits eight isolated bundles from 973
+inputs with 145 protected outputs intact.
+
+Native29 checks the actual admitted client predicates and zone owner at eight
+ring/lobby/hospital/grounds/pond points; all match, including the legacy lower
+boundary and pond/lobby overlap. Its original 90-second startup gate passes;
+camera/grass settling is 11.008s within the unchanged 30-second gate, and all
+five HUD leases complete. Root inspected the dock captures: the grid remains
+at production bias and disappears in the temporary zero-bias control. Original
+materials, shadow bias, camera and clock are restored. This diagnostic is not
+gameplay transaction, final-art, streaming or sustained performance acceptance.
+The isolated scheduler is disabled (31 known streaming-state 503s); one known
+cow-model 404 remains. No error-free-runtime claim is made.
+
+Native29's browser is closed; runtime15 is STOPPED with no cleanup errors and
+its ephemeral database removed. Protected artifacts remain unchanged. The
+playable localhost session and its database are untouched.
+
+All LAYOUT-01–08 stay open. Next: real custody/queued-challenge transactions and
+full-width bank routes, then whole-scene shadow qualification and stronger
+bank/planting/dock composition. The current shader bias and all quality settings
+remain unchanged. Evidence: service-layout arena-footprint-* and
+fishing-capacity-candidate-v4-01; inland pond assets-v4 and build13 report.
 
 ### Inland fishing integration — candidate only
 

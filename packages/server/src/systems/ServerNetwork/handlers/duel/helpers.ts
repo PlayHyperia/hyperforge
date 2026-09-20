@@ -8,7 +8,8 @@
 
 import {
   type World,
-  ALL_WORLD_AREAS,
+  isPositionInsideDuelArenaZone,
+  isPositionInsideDuelArenaLobby,
   isPositionInsideCombatArena,
 } from "@hyperforge/shared";
 import type { ServerSocket } from "../../../../shared/types";
@@ -167,12 +168,7 @@ export const DUEL_PACKETS = {
 
 /** Valid duel session states */
 type DuelSessionState =
-  | "RULES"
-  | "STAKES"
-  | "CONFIRMING"
-  | "COUNTDOWN"
-  | "FIGHTING"
-  | "FINISHED";
+  "RULES" | "STAKES" | "CONFIRMING" | "COUNTDOWN" | "FIGHTING" | "FINISHED";
 
 /**
  * Validate that a duel session exists, the player is a participant,
@@ -223,7 +219,7 @@ export { sendToSocket, getPlayerId } from "../common";
 
 /**
  * Check if player is in Duel Arena zone
- * Uses ALL_WORLD_AREAS directly since zone detection system may not be available on server
+ * Uses shared admitted protection, independent of optional zone-detection.
  */
 export function isInDuelArenaZone(world: World, playerId: string): boolean {
   const player = world.entities.players?.get(playerId);
@@ -234,20 +230,11 @@ export function isInDuelArenaZone(world: World, playerId: string): boolean {
 
   const { x, z } = player.position;
 
-  // Get duel_arena bounds from ALL_WORLD_AREAS
-  const duelArena = ALL_WORLD_AREAS["duel_arena"];
-  if (!duelArena?.bounds) {
-    Logger.warn("DuelZone", "duel_arena not found in ALL_WORLD_AREAS");
-    return false;
-  }
-
-  const { minX, maxX, minZ, maxZ } = duelArena.bounds;
-  const inBounds = x >= minX && x <= maxX && z >= minZ && z <= maxZ;
+  const inBounds = isPositionInsideDuelArenaZone(x, z);
 
   Logger.debug("DuelZone", "Zone check result", {
     playerId,
     position: { x, z },
-    bounds: { minX, maxX, minZ, maxZ },
     inBounds,
   });
 
@@ -267,11 +254,13 @@ export function isInsideCombatArena(world: World, playerId: string): boolean {
 
 /**
  * Check if player is in the Duel Arena lobby (can challenge)
- * Must be in duel arena zone but NOT inside a combat arena
+ * Uses the actual arrival court in explicitly admitted facility layouts.
  */
 export function isInDuelArenaLobby(world: World, playerId: string): boolean {
+  const player = world.entities.players?.get(playerId);
   return (
-    isInDuelArenaZone(world, playerId) && !isInsideCombatArena(world, playerId)
+    !!player?.position &&
+    isPositionInsideDuelArenaLobby(player.position.x, player.position.z)
   );
 }
 

@@ -8,7 +8,8 @@ import {
   type ExternalResourceData,
   type WoodcuttingManifest,
 } from "../DataManager";
-import { ALL_WORLD_AREAS } from "../world-areas";
+import { ALL_WORLD_AREAS, type WorldArea } from "../world-areas";
+import { isPositionInsideDuelArenaZone } from "../duel-manifest";
 import { ALL_NPCS } from "../npcs";
 import { BIOMES } from "../world-structure";
 import { stationDataProvider } from "../StationDataProvider";
@@ -29,9 +30,13 @@ const originalEnv = {
 };
 const freshManager = (): DataManager =>
   Reflect.construct(DataManager, []) as DataManager;
-const resources = (): Map<string, ExternalResourceData> =>
-  (globalThis as { EXTERNAL_RESOURCES: Map<string, ExternalResourceData> })
-    .EXTERNAL_RESOURCES;
+const resources = (): Map<string, ExternalResourceData> => {
+  const value = (
+    globalThis as { EXTERNAL_RESOURCES?: Map<string, ExternalResourceData> }
+  ).EXTERNAL_RESOURCES;
+  if (!value) throw new Error("External resources are not initialized");
+  return value;
+};
 
 describe("DataManager real filesystem world identity", () => {
   let temporaryRoot: string;
@@ -82,6 +87,56 @@ describe("DataManager real filesystem world identity", () => {
     );
     expect(await manager.initialize()).toBe(a);
   });
+
+  it("admits explicit facility protection through the real manifest loader and identity gate", async () => {
+    const file = path.join(manifests, "world-areas.json");
+    const content = JSON.parse(await readFile(file, "utf8")) as {
+      specialAreas: Record<string, WorldArea>;
+    };
+    content.specialAreas.duel_arena.duelProtection = "facility-floors-v1";
+    await writeFile(file, JSON.stringify(content));
+    await manager.initialize();
+    expect(manager.isReady()).toBe(true);
+    expect(DataManager.getWorldContentIdentity()).toBeTruthy();
+    expect(isPositionInsideDuelArenaZone(385, 376)).toBe(true);
+    expect(isPositionInsideDuelArenaZone(390, 424.5)).toBe(false);
+  });
+
+  it.each([
+    "unknown_mode",
+    "missing_bound",
+    "wrong_identity",
+    "misplaced_mode",
+    "duplicate_identity",
+  ])(
+    "rejects invalid facility admission %s even with SKIP_VALIDATION",
+    async (failure) => {
+      const file = path.join(manifests, "world-areas.json");
+      const content = JSON.parse(await readFile(file, "utf8")) as {
+        specialAreas: Record<string, WorldArea>;
+      };
+      const area = content.specialAreas.duel_arena;
+      area.duelProtection = "facility-floors-v1";
+      if (failure === "unknown_mode")
+        Reflect.set(area, "duelProtection", "unknown");
+      if (failure === "missing_bound")
+        Reflect.deleteProperty(area.bounds, "minX");
+      if (failure === "wrong_identity") area.id = "other";
+      if (failure === "misplaced_mode")
+        content.specialAreas.other = { ...area, id: "other" };
+      if (failure === "duplicate_identity") {
+        content.specialAreas.other = { ...area };
+        delete content.specialAreas.other.duelProtection;
+      }
+      await writeFile(file, JSON.stringify(content));
+      await expect(manager.initialize()).rejects.toThrow();
+      expect(manager.isReady()).toBe(false);
+      expect(() => DataManager.getWorldContentIdentity()).toThrow(
+        "not initialized",
+      );
+      expect(Object.keys(ALL_WORLD_AREAS)).toHaveLength(0);
+    },
+  );
 
   it("clears stale world, biome, NPC and gathering registries before loading", async () => {
     const stale = "identity_fixture_stale";
