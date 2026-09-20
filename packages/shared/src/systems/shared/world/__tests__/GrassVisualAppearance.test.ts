@@ -6,6 +6,7 @@ import THREE, {
   positionWorld,
   modelWorldMatrix,
   output,
+  time,
 } from "../../../../extras/three/three";
 import {
   MeshSSSNodeMaterial,
@@ -23,6 +24,8 @@ import {
   NATURAL_TUFT_APPEARANCE,
   FINE_MEADOW_APPEARANCE,
   FINE_GRASS_THIN_LEAF_LIGHTING,
+  FINE_GRASS_CANOPY_NORMAL_LIGHTING,
+  FINE_GRASS_LEAF_VOLUME_LIGHTING,
   FINE_MEADOW_GRASS_VISUAL_PROFILE,
   GRASS_CONFIG,
   GrassVisualManager,
@@ -45,6 +48,8 @@ function manager(
   withWorkerSetup = true,
   appearanceCandidate?: ConstructorParameters<typeof GrassVisualManager>[13],
   habitat?: ConstructorParameters<typeof GrassVisualManager>[14],
+  lighting?: ConstructorParameters<typeof GrassVisualManager>[15],
+  grassColorGrade?: GrassWorkerSetup["compactGrassColorGrade"],
 ) {
   const config = createTerrainWorkerConfig(terrain, 16);
   const setup: GrassWorkerSetup = {
@@ -53,6 +58,7 @@ function manager(
     biomeCenters: [],
     biomes: {},
     grassConfigs: {},
+    ...(grassColorGrade ? { compactGrassColorGrade: grassColorGrade } : {}),
     tileSize: terrain.terrainTileSize,
     getRoadSegmentsForRegion: () => [],
     getTerrainSurfaceForRegion: () => {
@@ -82,11 +88,29 @@ function manager(
     undefined,
     appearanceCandidate,
     habitat,
+    lighting,
   );
 }
 
 // Expand the actual material's construction-time Fn, not a replacement shader.
-function expand(node: Node): Node {
+function requireNode(value: unknown): Node {
+  if (!(value instanceof THREE.Node))
+    throw new Error("Expected actual Three node");
+  return value;
+}
+
+function numericValue(value: unknown): number[] | null {
+  if (value instanceof THREE.Vector2) return [value.x, value.y];
+  if (value instanceof THREE.Vector3) return [value.x, value.y, value.z];
+  if (value instanceof THREE.Vector4)
+    return [value.x, value.y, value.z, value.w];
+  if (value instanceof THREE.Matrix3 || value instanceof THREE.Matrix4)
+    return Array.from(value.elements);
+  return null;
+}
+
+function expand(input: unknown): Node {
+  let node = requireNode(input);
   while (Reflect.get(node, "isVarNode")) node = Reflect.get(node, "node");
   const shaderNode: unknown = Reflect.get(node, "shaderNode");
   if (shaderNode instanceof THREE.Node) {
@@ -100,7 +124,7 @@ function expand(node: Node): Node {
   return node;
 }
 
-function graph(root: Node): Set<Node> {
+function graph(root: unknown): Set<Node> {
   const nodes = new Set<Node>();
   const visit = (node: Node) => {
     if (nodes.has(node)) return;
@@ -114,9 +138,30 @@ function graph(root: Node): Set<Node> {
 
 // Concrete node arithmetic only. Unknown operations fail; no GPU is simulated.
 function colorValue(
-  node: Node,
+  input: unknown,
   attributes: Record<string, number[]>,
 ): number[] {
+  // TSL is a DAG. Evaluate a shared node once per immutable input sample;
+  // recursively expanding it as a tree makes folded-normal tests exponential.
+  // No cache survives a call, so the next wind/UV/attribute sample is independent.
+  const values = new Map<Node, number[]>();
+  const evaluate = (value: unknown): number[] => {
+    const node = requireNode(value);
+    const cached = values.get(node);
+    if (cached) return cached;
+    const result = computeColorValue(node, attributes, evaluate);
+    values.set(node, result);
+    return result;
+  };
+  return evaluate(input);
+}
+
+function computeColorValue(
+  input: unknown,
+  attributes: Record<string, number[]>,
+  evaluate: (input: unknown) => number[],
+): number[] {
+  const node = requireNode(input);
   const read = (key: string): unknown => Reflect.get(node, key);
   const child = (key: string): number[] => {
     const value = read(key);
@@ -124,12 +169,13 @@ function colorValue(
       throw new Error(
         `Missing ${key} on ${node.type}: ${Object.keys(node).join(",")}`,
       );
-    return colorValue(value, attributes);
+    return evaluate(value);
   };
   if (node === cameraViewMatrix) return attributes._cameraViewMatrix;
   if (node === cameraPosition) return attributes._cameraPosition;
   if (node === positionWorld) return attributes._positionWorld;
   if (node === modelWorldMatrix) return attributes._modelWorldMatrix;
+  if (node === time && attributes._time) return attributes._time;
   if (node.type === "FrontFacingNode") return attributes._frontFacing;
   if (node.type === "AttributeNode") {
     const value = attributes[String(read("_attributeName"))];
@@ -140,16 +186,11 @@ function colorValue(
   // a real builder. Only the remaining construction-time albedo Fn is expanded
   // when it is nested below the shared thickness tint.
   const expanded = expand(node);
-  if (expanded !== node) return colorValue(expanded, attributes);
+  if (expanded !== node) return evaluate(expanded);
   const value = read("value");
   if (typeof value === "number") return [value];
-  if (
-    value instanceof THREE.Vector2 ||
-    value instanceof THREE.Vector3 ||
-    value instanceof THREE.Vector4 ||
-    value instanceof THREE.Matrix4
-  )
-    return value.toArray();
+  const numeric = numericValue(value);
+  if (numeric) return numeric;
   if (
     node.type === "ConvertNode" ||
     node.type === "VarNode" ||
@@ -161,12 +202,14 @@ function colorValue(
     const nodes = read("nodes");
     if (!Array.isArray(nodes) || nodes.some((n) => !(n instanceof THREE.Node)))
       throw new Error("Invalid join inputs");
-    return nodes.flatMap((n) => colorValue(n, attributes));
+    return nodes.flatMap((n) => evaluate(n));
   }
   if (node.type === "SplitNode")
     return [...String(read("components"))].map(
       (component) => child("node")["xyzw".indexOf(component)],
     );
+  if (node.type === "ConditionalNode")
+    return child("condNode")[0] ? child("ifNode") : child("elseNode");
   const aValues = child("aNode");
   if (read("method") === "normalize") {
     const length = Math.hypot(...aValues);
@@ -202,6 +245,7 @@ function colorValue(
       if (read("op") === "+") return a + b;
       if (read("op") === "-") return a - b;
       if (read("op") === "/") return a / b;
+      if (read("op") === ">") return Number(a > b);
       if (read("method") === "min") return Math.min(a, b);
       if (read("method") === "max") return Math.max(a, b);
       if (read("method") === "pow") return Math.pow(a, b);
@@ -224,6 +268,885 @@ function geometryBytes(geometry: THREE.BufferGeometry) {
     ) + geometry.index!.array.byteLength
   );
 }
+
+describe("opt-in fine canopy normals (actual graph and geometry, CPU only)", () => {
+  const fine = (
+    lighting?: ConstructorParameters<typeof GrassVisualManager>[15],
+  ) =>
+    manager(
+      FINE_MEADOW_GRASS_VISUAL_PROFILE,
+      SCULPTED_COMPACT_WORLD_TERRAIN_PROFILE,
+      true,
+      "fine-meadow-v1",
+      undefined,
+      lighting,
+    );
+
+  it("admits only the explicit sculpt/fine owner without changing profile metadata", () => {
+    const baseline = fine(),
+      candidate = fine("canopy-normal-v1");
+    try {
+      expect(candidate.getProfileReceipt()).toEqual(
+        baseline.getProfileReceipt(),
+      );
+      expect(FINE_GRASS_CANOPY_NORMAL_LIGHTING).toEqual({
+        id: "canopy-normal-v1",
+        rootWeight: 0.2,
+        upperWeight: 0.45,
+        rootEnd: 0.1,
+        upperStart: 0.65,
+      });
+      expect(Object.isFrozen(FINE_GRASS_CANOPY_NORMAL_LIGHTING)).toBe(true);
+      expect(
+        Object.prototype.hasOwnProperty.call(
+          baseline["material"].userData,
+          "fineGrassCanopyLighting",
+        ),
+      ).toBe(false);
+      expect(
+        Object.getOwnPropertyDescriptor(
+          candidate["material"].userData,
+          "fineGrassCanopyLighting",
+        ),
+      ).toEqual({
+        value: FINE_GRASS_CANOPY_NORMAL_LIGHTING,
+        enumerable: true,
+        writable: false,
+        configurable: false,
+      });
+      for (const value of [
+        null,
+        "",
+        "other",
+        " canopy-normal-v1",
+        {},
+        ["canopy-normal-v1"],
+      ])
+        expect(() =>
+          fine(value as ConstructorParameters<typeof GrassVisualManager>[15]),
+        ).toThrow("Grass lighting");
+      for (const profile of [
+        {},
+        STREAMING_GRASS_VISUAL_PROFILE,
+        COMPACT_ISLAND_GRASS_VISUAL_PROFILE,
+        DENSE_MEADOW_GRASS_VISUAL_PROFILE,
+      ])
+        expect(() =>
+          manager(
+            profile,
+            SCULPTED_COMPACT_WORLD_TERRAIN_PROFILE,
+            true,
+            undefined,
+            undefined,
+            "canopy-normal-v1",
+          ),
+        ).toThrow("Grass lighting");
+      expect(() =>
+        manager(
+          FINE_MEADOW_GRASS_VISUAL_PROFILE,
+          SCULPTED_COMPACT_WORLD_TERRAIN_PROFILE,
+          false,
+          "fine-meadow-v1",
+          undefined,
+          "canopy-normal-v1",
+        ),
+      ).toThrow("Grass lighting");
+      expect(() =>
+        manager(
+          FINE_MEADOW_GRASS_VISUAL_PROFILE,
+          COMPACT_WORLD_TERRAIN_PROFILE,
+          true,
+          "fine-meadow-v1",
+          undefined,
+          "canopy-normal-v1",
+        ),
+      ).toThrow("Grass lighting");
+    } finally {
+      baseline.destroy();
+      candidate.destroy();
+    }
+  });
+
+  it("changes only the final normal mixture, preserving geometry, position, albedo, AO and all SSS inputs exactly", () => {
+    const baseline = fine(),
+      candidate = fine("canopy-normal-v1");
+    try {
+      const a = baseline["material"],
+        b = candidate["material"];
+      if (
+        !(a instanceof MeshSSSNodeMaterial) ||
+        !(b instanceof MeshSSSNodeMaterial)
+      )
+        throw new Error("Expected actual fine physical materials");
+      for (const key of [
+        "side",
+        "transparent",
+        "depthWrite",
+        "roughness",
+        "metalness",
+        "fog",
+        "transmission",
+        "clearcoat",
+        "sheen",
+        "iridescence",
+        "anisotropy",
+        "dispersion",
+        "retroreflectivity",
+      ] as const)
+        expect(b[key]).toBe(a[key]);
+      expect(b.userData.fineGrassLighting).toBe(a.userData.fineGrassLighting);
+      const unchanged = [
+        "positionNode",
+        "colorNode",
+        "aoNode",
+        "thicknessColorNode",
+        "thicknessAttenuationNode",
+        "thicknessScaleNode",
+        "thicknessPowerNode",
+        "thicknessDistortionNode",
+        "thicknessAmbientNode",
+      ] as const;
+      for (const key of [...unchanged, "normalNode"] as const) {
+        const oldGraph = graph(a[key]!),
+          newGraph = graph(b[key]!);
+        expect([...newGraph].some((n) => Reflect.get(n, "isTextureNode"))).toBe(
+          false,
+        );
+        const attrs = (nodes: Set<Node>) =>
+          [...nodes]
+            .filter((n) => n.type === "AttributeNode")
+            .map((n) => Reflect.get(n, "_attributeName"))
+            .sort();
+        expect(attrs(newGraph)).toEqual(attrs(oldGraph));
+      }
+      const oldNodes = graph(a.normalNode!),
+        newNodes = graph(b.normalNode!);
+      expect(
+        [...oldNodes].some(
+          (n) => Reflect.get(n, "name") === "fineGrassCanopyNormalWeight",
+        ),
+      ).toBe(false);
+      const weight = [...newNodes].filter(
+        (n) => Reflect.get(n, "name") === "fineGrassCanopyNormalWeight",
+      );
+      expect(weight).toHaveLength(1);
+      const blade = [...newNodes].find(
+        (n) => Reflect.get(n, "name") === "v_curvedGrassNormal",
+      )!;
+      expect(blade).toBeDefined();
+      let changed = 0;
+      for (let lod = 0; lod < 3; lod++) {
+        const oldGeometry = baseline["lodGeometries"][lod],
+          geometry = candidate["lodGeometries"][lod];
+        expect(Object.keys(geometry.attributes)).toEqual(
+          Object.keys(oldGeometry.attributes),
+        );
+        for (const key of Object.keys(geometry.attributes))
+          expect(geometry.attributes[key].array).toEqual(
+            oldGeometry.attributes[key].array,
+          );
+        expect(geometry.index!.array).toEqual(oldGeometry.index!.array);
+        expect(geometryBytes(geometry)).toBe(geometryBytes(oldGeometry));
+        const position = geometry.getAttribute("position"),
+          normal = geometry.getAttribute("normal"),
+          uvs = geometry.getAttribute("uv");
+        const stride = getGrassBladeLayout(
+          lod,
+          FINE_MEADOW_APPEARANCE.GEOMETRY_LAYOUT,
+        ).verticesPerBlade;
+        for (const index of [0, 2, stride - 1])
+          for (const distance of [0, 125, 140])
+            for (const windTime of [0, 2.3])
+              for (const ground of [
+                new THREE.Vector3(0, 1, 0),
+                new THREE.Vector3(0.3, 0.9, -0.2).normalize(),
+              ])
+                for (const front of [false, true]) {
+                  const inputs = {
+                    position: new THREE.Vector3()
+                      .fromBufferAttribute(position, index)
+                      .toArray(),
+                    normal: new THREE.Vector3()
+                      .fromBufferAttribute(normal, index)
+                      .toArray(),
+                    uv: [uvs.getX(index), uvs.getY(index)],
+                    instanceGroundNormal: ground.toArray(),
+                    instanceOffset: [distance, 28, 0],
+                    instanceRotScaleHash: [0.7, 0.83, 0.4],
+                    instanceGroundColor: [0.2, 0.4, 0.1],
+                    instanceGrassTint: [0.3, 0.45, 0.2, 0.3],
+                    _time: [windTime],
+                    _frontFacing: [front ? 1 : 0],
+                    _cameraViewMatrix: new THREE.Matrix4()
+                      .makeRotationY(0.4)
+                      .toArray(),
+                    _modelWorldMatrix: new THREE.Matrix4().toArray(),
+                  };
+                  for (const key of unchanged)
+                    expect(colorValue(b[key]!, inputs)).toEqual(
+                      colorValue(a[key]!, inputs),
+                    );
+                  const t = Math.max(
+                    0,
+                    Math.min(1, (inputs.uv[1] - 0.1) / 0.55),
+                  );
+                  const expectedWeight = 0.2 + 0.25 * t * t * (3 - 2 * t);
+                  expect(colorValue(weight[0], inputs)[0]).toBeCloseTo(
+                    expectedWeight,
+                    14,
+                  );
+                  const leaf = new THREE.Vector3(
+                    ...(colorValue(blade, inputs) as [number, number, number]),
+                  );
+                  const expected = ground
+                    .clone()
+                    .lerp(
+                      leaf.normalize().multiplyScalar(front ? 1 : -1),
+                      expectedWeight,
+                    )
+                    .normalize()
+                    .transformDirection(
+                      new THREE.Matrix4().fromArray(inputs._cameraViewMatrix),
+                    );
+                  const actual = new THREE.Vector3(
+                    ...(colorValue(b.normalNode!, inputs) as [
+                      number,
+                      number,
+                      number,
+                    ]),
+                  );
+                  expect(actual.toArray().every(Number.isFinite)).toBe(true);
+                  expect(actual.length()).toBeCloseTo(1, 12);
+                  expect(actual.distanceTo(expected)).toBeLessThan(1e-12);
+                  const previous = colorValue(a.normalNode!, inputs);
+                  if (inputs.uv[1] <= 0.1)
+                    expect(actual.toArray()).toEqual(previous);
+                  else if (
+                    actual.distanceTo(
+                      new THREE.Vector3(
+                        ...(previous as [number, number, number]),
+                      ),
+                    ) > 1e-3
+                  )
+                    changed++;
+                }
+      }
+      expect(changed).toBeGreaterThan(0);
+      // Even opposite unit normals retain length >=1-2*.45 before normalize.
+      for (const front of [false, true]) {
+        const lowerBound = new THREE.Vector3(0, 1, 0)
+          .lerp(new THREE.Vector3(0, front ? -1 : 1, 0), 0.45)
+          .length();
+        expect(lowerBound).toBeGreaterThanOrEqual(0.09999999999999998);
+      }
+    } finally {
+      baseline.destroy();
+      candidate.destroy();
+    }
+  });
+
+  it("retains candidate normal identity through real grounding clones and immutable representative publication", async () => {
+    const owner = fine("canopy-normal-v1");
+    try {
+      for (let lod = 0; lod < 3; lod++) {
+        const geometry = owner["lodGeometries"][lod].clone();
+        const layout = getGrassBladeLayout(
+          lod,
+          FINE_MEADOW_APPEARANCE.GEOMETRY_LAYOUT,
+        );
+        const clone = createGroundedGrassMaterial(
+          owner["material"],
+          geometry,
+          new Float32Array(layout.bladesPerClump * layout.rootComponents),
+          1,
+          lod,
+          FINE_MEADOW_APPEARANCE.GEOMETRY_LAYOUT,
+        );
+        try {
+          expect(clone.normalNode).toBe(owner["material"].normalNode);
+          expect(clone.colorNode).toBe(owner["material"].colorNode);
+          expect(clone.aoNode).toBe(owner["material"].aoNode);
+          expect(clone.userData.fineGrassCanopyLighting).toEqual(
+            FINE_GRASS_CANOPY_NORMAL_LIGHTING,
+          );
+        } finally {
+          clone.dispose();
+          geometry.dispose();
+        }
+      }
+      let inspected = false;
+      await owner.precompileRepresentativeChunk(async (object) => {
+        // Inspect actual constructed owner only; no compilation/GPU is simulated.
+        if (
+          !(object instanceof THREE.InstancedMesh) ||
+          !(object.material instanceof MeshSSSNodeMaterial)
+        )
+          throw new Error("Expected real fine representative");
+        expect(object.material.normalNode).toBe(owner["material"].normalNode);
+        expect(
+          Object.getOwnPropertyDescriptor(
+            object.material.userData,
+            "fineGrassCanopyLighting",
+          ),
+        ).toEqual({
+          value: FINE_GRASS_CANOPY_NORMAL_LIGHTING,
+          enumerable: true,
+          writable: false,
+          configurable: false,
+        });
+        inspected = true;
+      });
+      expect(inspected).toBe(true);
+    } finally {
+      owner.destroy();
+    }
+  });
+});
+
+describe("opt-in fine leaf volume (actual graph/geometry, not native rendering)", () => {
+  const fine = (
+    lighting?: ConstructorParameters<typeof GrassVisualManager>[15],
+    grassColorGrade?: GrassWorkerSetup["compactGrassColorGrade"],
+  ) =>
+    manager(
+      FINE_MEADOW_GRASS_VISUAL_PROFILE,
+      SCULPTED_COMPACT_WORLD_TERRAIN_PROFILE,
+      true,
+      "fine-meadow-v1",
+      undefined,
+      lighting,
+      grassColorGrade,
+    );
+  const smooth = (low: number, high: number, value: number) => {
+    const x = Math.max(0, Math.min(1, (value - low) / (high - low)));
+    return x * x * (3 - 2 * x);
+  };
+  const named = (root: unknown, name: string) => {
+    const nodes = [...graph(root)].filter(
+      (n) => Reflect.get(n, "name") === name,
+    );
+    expect(nodes).toHaveLength(1);
+    return nodes[0];
+  };
+  const vector = (value: number[]) => {
+    expect(value).toHaveLength(3);
+    return new THREE.Vector3(value[0], value[1], value[2]);
+  };
+  const inputsAt = (
+    geometry: THREE.BufferGeometry,
+    index: number,
+  ): Record<string, number[]> => ({
+    position: new THREE.Vector3()
+      .fromBufferAttribute(geometry.getAttribute("position"), index)
+      .toArray(),
+    normal: new THREE.Vector3()
+      .fromBufferAttribute(geometry.getAttribute("normal"), index)
+      .toArray(),
+    uv: [
+      geometry.getAttribute("uv").getX(index),
+      geometry.getAttribute("uv").getY(index),
+    ],
+    instanceGroundNormal: [0, 1, 0],
+    instanceOffset: [0, 28, 0],
+    instanceRotScaleHash: [0.7, 0.83, 0.4],
+    instanceGroundColor: [0.2, 0.4, 0.1],
+    instanceGrassTint: [0.3, 0.45, 0.2, 0.3],
+    _time: [0],
+    _frontFacing: [1],
+    _cameraViewMatrix: new THREE.Matrix4().makeRotationY(0.4).toArray(),
+    _modelWorldMatrix: new THREE.Matrix4().toArray(),
+  });
+
+  it("admits a distinct immutable recipe only for the fine sculpt owner", () => {
+    const baseline = fine(),
+      canopy = fine("canopy-normal-v1"),
+      candidate = fine("leaf-volume-v1");
+    try {
+      expect(FINE_GRASS_LEAF_VOLUME_LIGHTING).toEqual({
+        id: "leaf-volume-v1",
+        rootWeight: 0.2,
+        upperWeight: 0.45,
+        rootEnd: 0.1,
+        upperStart: 0.65,
+        foldTangent: Math.tan((24 * Math.PI) / 180),
+        foldTipStart: 0.75,
+        rootBrightness: 0.78,
+        tipBrightness: 1.12,
+      });
+      expect(Object.isFrozen(FINE_GRASS_LEAF_VOLUME_LIGHTING)).toBe(true);
+      expect(
+        Object.getOwnPropertyDescriptor(
+          candidate["material"].userData,
+          "fineGrassCanopyLighting",
+        ),
+      ).toEqual({
+        value: FINE_GRASS_LEAF_VOLUME_LIGHTING,
+        enumerable: true,
+        writable: false,
+        configurable: false,
+      });
+      expect(canopy["material"].userData.fineGrassCanopyLighting).toBe(
+        FINE_GRASS_CANOPY_NORMAL_LIGHTING,
+      );
+      expect(
+        Object.prototype.hasOwnProperty.call(
+          baseline["material"].userData,
+          "fineGrassCanopyLighting",
+        ),
+      ).toBe(false);
+      expect(candidate.getProfileReceipt()).toEqual(
+        baseline.getProfileReceipt(),
+      );
+      for (const value of [
+        "LEAF-VOLUME-V1",
+        " leaf-volume-v1",
+        "leaf-volume-v1 ",
+        ["leaf-volume-v1"],
+        {},
+        null,
+      ])
+        expect(() =>
+          fine(value as ConstructorParameters<typeof GrassVisualManager>[15]),
+        ).toThrow("Grass lighting");
+      for (const profile of [
+        {},
+        STREAMING_GRASS_VISUAL_PROFILE,
+        COMPACT_ISLAND_GRASS_VISUAL_PROFILE,
+        DENSE_MEADOW_GRASS_VISUAL_PROFILE,
+      ])
+        expect(() =>
+          manager(
+            profile,
+            SCULPTED_COMPACT_WORLD_TERRAIN_PROFILE,
+            true,
+            undefined,
+            undefined,
+            "leaf-volume-v1",
+          ),
+        ).toThrow("Grass lighting");
+      expect(() =>
+        manager(
+          FINE_MEADOW_GRASS_VISUAL_PROFILE,
+          SCULPTED_COMPACT_WORLD_TERRAIN_PROFILE,
+          false,
+          "fine-meadow-v1",
+          undefined,
+          "leaf-volume-v1",
+        ),
+      ).toThrow("Grass lighting");
+      expect(() =>
+        manager(
+          FINE_MEADOW_GRASS_VISUAL_PROFILE,
+          COMPACT_WORLD_TERRAIN_PROFILE,
+          true,
+          "fine-meadow-v1",
+          undefined,
+          "leaf-volume-v1",
+        ),
+      ).toThrow("Grass lighting");
+    } finally {
+      baseline.destroy();
+      canopy.destroy();
+      candidate.destroy();
+    }
+  });
+
+  it("preserves every geometry byte and pass property while adding only the explicit width varying", () => {
+    const baseline = fine(),
+      canopy = fine("canopy-normal-v1"),
+      candidate = fine("leaf-volume-v1");
+    try {
+      const a = baseline["material"],
+        b = candidate["material"];
+      if (
+        !(a instanceof MeshSSSNodeMaterial) ||
+        !(b instanceof MeshSSSNodeMaterial)
+      )
+        throw new Error("Expected real fine SSS materials");
+      for (const key of [
+        "side",
+        "transparent",
+        "depthWrite",
+        "roughness",
+        "metalness",
+        "fog",
+        "transmission",
+        "clearcoat",
+        "sheen",
+        "iridescence",
+        "anisotropy",
+        "dispersion",
+        "retroreflectivity",
+      ] as const)
+        expect(b[key]).toBe(a[key]);
+      expect(b.emissive.toArray()).toEqual([0, 0, 0]);
+      expect(b.userData.fineGrassLighting).toBe(a.userData.fineGrassLighting);
+      for (const key of [
+        "normalNode",
+        "colorNode",
+        "aoNode",
+        "positionNode",
+        "thicknessColorNode",
+      ] as const) {
+        const oldGraph = graph(a[key]),
+          newGraph = graph(b[key]);
+        expect([...newGraph].some((n) => Reflect.get(n, "isTextureNode"))).toBe(
+          false,
+        );
+        const attributes = (nodes: Set<Node>) =>
+          [
+            ...new Set(
+              [...nodes]
+                .filter((n) => n.type === "AttributeNode")
+                .map((n) => Reflect.get(n, "_attributeName")),
+            ),
+          ].sort();
+        expect(attributes(newGraph)).toEqual(attributes(oldGraph));
+      }
+      const width = named(b.normalNode, "v_fineGrassWidthAxis");
+      expect(width.type).toBe("VaryingNode");
+      for (const owner of [baseline, canopy])
+        expect(
+          [...graph(owner["material"].normalNode)].some(
+            (n) => Reflect.get(n, "name") === "v_fineGrassWidthAxis",
+          ),
+        ).toBe(false);
+      for (let lod = 0; lod < 3; lod++) {
+        const geometry = candidate["lodGeometries"][lod];
+        for (const owner of [baseline, canopy]) {
+          const original = owner["lodGeometries"][lod];
+          expect(Object.keys(geometry.attributes)).toEqual(
+            Object.keys(original.attributes),
+          );
+          for (const key of Object.keys(original.attributes))
+            expect(geometry.attributes[key].array).toEqual(
+              original.attributes[key].array,
+            );
+          expect(geometry.index!.array).toEqual(original.index!.array);
+          expect(geometryBytes(geometry)).toBe(geometryBytes(original));
+        }
+        const inputs = inputsAt(geometry, 2);
+        for (const distance of [0, 125, 140])
+          for (const windTime of [0, 2.3]) {
+            inputs.instanceOffset[0] = distance;
+            inputs._time[0] = windTime;
+            for (const key of [
+              "positionNode",
+              "aoNode",
+              "thicknessAttenuationNode",
+              "thicknessScaleNode",
+              "thicknessPowerNode",
+              "thicknessDistortionNode",
+              "thicknessAmbientNode",
+            ] as const)
+              expect(colorValue(b[key], inputs)).toEqual(
+                colorValue(a[key], inputs),
+              );
+          }
+      }
+    } finally {
+      baseline.destroy();
+      canopy.destroy();
+      candidate.destroy();
+    }
+  });
+
+  it("evaluates the real folded graph with correct authored width, both faces, slope, wind and fade", () => {
+    const owner = fine("leaf-volume-v1");
+    try {
+      const material = owner["material"],
+        normalNode = material.normalNode;
+      const widthNode = named(normalNode, "v_fineGrassWidthAxis");
+      const bladeNode = named(normalNode, "v_curvedGrassNormal");
+      const foldNode = named(normalNode, "fineGrassTransverseFold");
+      const weightNode = named(normalNode, "fineGrassCanopyNormalWeight");
+      let oppositeSides = 0;
+      for (let lod = 0; lod < 3; lod++) {
+        const geometry = owner["lodGeometries"][lod];
+        const stride = getGrassBladeLayout(
+          lod,
+          FINE_MEADOW_APPEARANCE.GEOMETRY_LAYOUT,
+        ).verticesPerBlade;
+        for (const index of [0, 2, stride - 1])
+          for (const distance of [0, 125, 140])
+            for (const windTime of [0, 2.3])
+              for (const ground of [
+                new THREE.Vector3(0, 1, 0),
+                new THREE.Vector3(0.3, 0.9, -0.2).normalize(),
+              ]) {
+                const inputs = inputsAt(geometry, index);
+                inputs.instanceOffset[0] = distance;
+                inputs._time[0] = windTime;
+                inputs.instanceGroundNormal = ground.toArray();
+                const source = vector(inputs.normal);
+                const expectedWidth = new THREE.Vector3(source.z, 0, -source.x)
+                  // Instance yaw uses x'=cx-sz,z'=sx+cz: opposite Three's +Y angle.
+                  .normalize()
+                  .applyAxisAngle(
+                    new THREE.Vector3(0, 1, 0),
+                    -inputs.instanceRotScaleHash[0],
+                  )
+                  .applyQuaternion(
+                    new THREE.Quaternion().setFromUnitVectors(
+                      new THREE.Vector3(0, 1, 0),
+                      ground,
+                    ),
+                  );
+                const actualWidth = vector(colorValue(widthNode, inputs));
+                expect(actualWidth.length()).toBeCloseTo(1, 12);
+                expect(actualWidth.distanceTo(expectedWidth)).toBeLessThan(
+                  1e-12,
+                );
+                const leaf = vector(colorValue(bladeNode, inputs)).normalize();
+                const tangent = expectedWidth
+                  .clone()
+                  .addScaledVector(leaf, -expectedWidth.dot(leaf));
+                tangent.divideScalar(
+                  Math.sqrt(Math.max(tangent.lengthSq(), 1e-12)),
+                );
+                const t = inputs.uv[1],
+                  weight = 0.2 + 0.25 * smooth(0.1, 0.65, t);
+                expect(colorValue(weightNode, inputs)[0]).toBeCloseTo(
+                  weight,
+                  14,
+                );
+                const sideNormals: THREE.Vector3[] = [];
+                for (const u of [0, 0.5, 1])
+                  for (const front of [false, true]) {
+                    inputs.uv[0] = u;
+                    inputs._frontFacing[0] = front ? 1 : 0;
+                    const fold =
+                      (2 * u - 1) *
+                      Math.tan((24 * Math.PI) / 180) *
+                      (1 - smooth(0.75, 1, t));
+                    expect(colorValue(foldNode, inputs)[0]).toBeCloseTo(
+                      fold,
+                      14,
+                    );
+                    const folded = leaf
+                      .clone()
+                      .addScaledVector(tangent, fold)
+                      .normalize();
+                    const mixed = ground
+                      .clone()
+                      .lerp(folded.multiplyScalar(front ? 1 : -1), weight);
+                    const expected = (
+                      mixed.lengthSq() > 1e-12
+                        ? mixed.normalize()
+                        : ground.clone()
+                    ).transformDirection(
+                      new THREE.Matrix4().fromArray(inputs._cameraViewMatrix),
+                    );
+                    const actual = vector(colorValue(normalNode, inputs));
+                    expect(actual.toArray().every(Number.isFinite)).toBe(true);
+                    expect(actual.length()).toBeCloseTo(1, 12);
+                    expect(actual.distanceTo(expected)).toBeLessThan(1e-11);
+                    expect(
+                      actual
+                        .clone()
+                        .transformDirection(
+                          new THREE.Matrix4()
+                            .fromArray(inputs._cameraViewMatrix)
+                            .invert(),
+                        )
+                        .dot(ground),
+                    ).toBeGreaterThan(0);
+                    if (front && u !== 0.5) sideNormals.push(actual);
+                  }
+                if (t === 1)
+                  expect(
+                    sideNormals[0].distanceTo(sideNormals[1]),
+                  ).toBeLessThan(1e-12);
+                else if (
+                  distance === 0 &&
+                  sideNormals[0].distanceTo(sideNormals[1]) > 0.05
+                )
+                  oppositeSides++;
+              }
+      }
+      expect(oppositeSides).toBeGreaterThan(0);
+    } finally {
+      owner.destroy();
+    }
+  });
+
+  it("keeps zero-width and collapsed-normal results finite and the authored weight below hemisphere reversal", () => {
+    const owner = fine("leaf-volume-v1");
+    try {
+      const material = owner["material"],
+        inputs = inputsAt(owner["lodGeometries"][0], 2);
+      inputs.normal = [0, 1, 0]; // Valid unit input parallel to terrain: zero width frame.
+      inputs.instanceOffset = [140, 28, 0];
+      inputs._frontFacing = [0];
+      inputs.uv[0] = 0.5;
+      const weightNode = named(
+        material.normalNode,
+        "fineGrassCanopyNormalWeight",
+      );
+      for (const t of [0, 0.1, 0.375, 0.65 - 1e-5, 0.65, 0.65 + 1e-5, 1]) {
+        inputs.uv[1] = t;
+        for (const u of [0, 0.5, 1]) {
+          inputs.uv[0] = u;
+          const result = vector(colorValue(material.normalNode, inputs));
+          expect(result.toArray().every(Number.isFinite)).toBe(true);
+          expect(result.length()).toBeCloseTo(1, 12);
+          expect(colorValue(weightNode, inputs)[0]).toBeGreaterThanOrEqual(0.2);
+          expect(colorValue(weightNode, inputs)[0]).toBeLessThanOrEqual(0.45);
+          expect(result.distanceTo(new THREE.Vector3(0, 1, 0))).toBeLessThan(
+            1e-12,
+          );
+        }
+      }
+      // Exercise the earlier zero-normal fallback independently of valid source geometry.
+      inputs.normal = [0, 0, 0];
+      inputs.uv = [0.5, 0.65];
+      expect(vector(colorValue(material.normalNode, inputs)).toArray()).toEqual(
+        [0, 1, 0],
+      );
+      // The upper-tip mask is the real graph, not a replaced shading function.
+      inputs.normal = [1, 0, 0];
+      inputs.uv[0] = 1;
+      const foldNode = named(material.normalNode, "fineGrassTransverseFold");
+      for (const t of [0.75, 0.875, 1]) {
+        inputs.uv[1] = t;
+        expect(colorValue(foldNode, inputs)[0]).toBeCloseTo(
+          Math.tan((24 * Math.PI) / 180) * (1 - smooth(0.75, 1, t)),
+          14,
+        );
+      }
+    } finally {
+      owner.destroy();
+    }
+  });
+
+  it("darkens actual albedo roots, preserves relative bank tint and shares it with SSS without changing AO or scattering coefficients", () => {
+    for (const grade of [undefined, "fine-meadow-green-v1"] as const) {
+      const baseline = fine(undefined, grade),
+        candidate = fine("leaf-volume-v1", grade);
+      try {
+        const a = baseline["material"],
+          b = candidate["material"];
+        if (
+          !(a instanceof MeshSSSNodeMaterial) ||
+          !(b instanceof MeshSSSNodeMaterial)
+        )
+          throw new Error("Expected actual fine SSS materials");
+        const inputs = inputsAt(candidate["lodGeometries"][0], 2);
+        for (const position of [
+          [0, 28, 0],
+          [390, 25, 470],
+          [450, 28, 465],
+        ]) {
+          inputs.instanceOffset = position;
+          const bankNode = [...graph(b.colorNode)].find(
+            (n) => Reflect.get(n, "name") === "v_naturalGrassBankLocality",
+          );
+          const locality = bankNode ? colorValue(bankNode, inputs)[0] : 0;
+          for (const t of [0, 0.2, 0.5, 1]) {
+            inputs.uv[1] = t;
+            const before = colorValue(a.colorNode, inputs),
+              after = colorValue(b.colorNode, inputs);
+            const tint = inputs.instanceGroundColor.map(
+              (c, i) =>
+                c +
+                (inputs.instanceGrassTint[i] - c) * inputs.instanceGrassTint[3],
+            );
+            const tip = 1.12 + (1.08 * (1.12 / 1.2) - 1.12) * locality;
+            const expected = inputs.instanceGroundColor.map((c, i) =>
+              Math.min(
+                1,
+                c * 0.78 + (tint[i] * tip - c * 0.78) * smooth(0, 1, t),
+              ),
+            );
+            for (let i = 0; i < 3; i++)
+              expect(after[i]).toBeCloseTo(expected[i], 13);
+            if (t === 0)
+              for (let i = 0; i < 3; i++)
+                expect(after[i] / before[i]).toBeCloseTo(0.78 / 0.98, 13);
+            if (t === 1)
+              for (let i = 0; i < 3; i++)
+                expect(after[i] / before[i]).toBeCloseTo(1.12 / 1.2, 13);
+            expect(colorValue(b.thicknessColorNode, inputs)).toEqual(
+              after.map((c) => c * smooth(0.05, 0.65, t)),
+            );
+            for (const key of [
+              "aoNode",
+              "thicknessAttenuationNode",
+              "thicknessScaleNode",
+              "thicknessPowerNode",
+              "thicknessDistortionNode",
+              "thicknessAmbientNode",
+            ] as const)
+              expect(colorValue(b[key], inputs)).toEqual(
+                colorValue(a[key], inputs),
+              );
+          }
+        }
+      } finally {
+        baseline.destroy();
+        candidate.destroy();
+      }
+    }
+  });
+
+  it("retains the new nodes and immutable receipt through real grounded owners", async () => {
+    const owner = fine("leaf-volume-v1");
+    try {
+      for (let lod = 0; lod < 3; lod++) {
+        const geometry = owner["lodGeometries"][lod].clone();
+        const layout = getGrassBladeLayout(
+          lod,
+          FINE_MEADOW_APPEARANCE.GEOMETRY_LAYOUT,
+        );
+        const clone = createGroundedGrassMaterial(
+          owner["material"],
+          geometry,
+          new Float32Array(layout.bladesPerClump * layout.rootComponents),
+          1,
+          lod,
+          FINE_MEADOW_APPEARANCE.GEOMETRY_LAYOUT,
+        );
+        try {
+          for (const key of ["normalNode", "colorNode", "aoNode"] as const)
+            expect(clone[key]).toBe(owner["material"][key]);
+          expect(clone.userData.fineGrassCanopyLighting).toEqual(
+            FINE_GRASS_LEAF_VOLUME_LIGHTING,
+          );
+        } finally {
+          clone.dispose();
+          geometry.dispose();
+        }
+      }
+      let inspected = false;
+      await owner.precompileRepresentativeChunk(async (object) => {
+        if (
+          !(object instanceof THREE.InstancedMesh) ||
+          !(object.material instanceof MeshSSSNodeMaterial)
+        )
+          throw new Error("Expected real grounded fine owner");
+        expect(object.material.normalNode).toBe(owner["material"].normalNode);
+        expect(
+          Object.getOwnPropertyDescriptor(
+            object.material.userData,
+            "fineGrassCanopyLighting",
+          ),
+        ).toEqual({
+          value: FINE_GRASS_LEAF_VOLUME_LIGHTING,
+          enumerable: true,
+          writable: false,
+          configurable: false,
+        });
+        expect(
+          Object.isFrozen(object.material.userData.fineGrassCanopyLighting),
+        ).toBe(true);
+        inspected = true;
+      });
+      expect(inspected).toBe(true);
+    } finally {
+      owner.destroy();
+    }
+  });
+});
 
 describe("Haven habitat grass root integration (actual graph and geometry, CPU only)", () => {
   const field = validateCompactHabitatComposition(
@@ -321,7 +1244,16 @@ describe("Haven habitat grass root integration (actual graph and geometry, CPU o
         "v_naturalGrassHabitatSoil",
       ]);
       // Three's actual CPU type resolver; no renderer/device is fabricated.
-      const builder = new THREE.NodeBuilder(null, null);
+      // The installed JavaScript class is constructible for this CPU type
+      // query although its declarations mark the base builder abstract. Keep
+      // the exact historical constructor/arguments and verify the real owner;
+      // no renderer or backend is fabricated or compiled.
+      const builder: unknown = Reflect.construct(THREE.NodeBuilder, [
+        null,
+        null,
+      ]);
+      if (!(builder instanceof THREE.NodeBuilder))
+        throw new Error("Expected installed Three CPU node builder");
       expect(varyings[0].getNodeType(builder)).toBe("float");
       expect(
         [...graph(original.colorNode!)].filter((n) => n.type === "VaryingNode"),
@@ -350,7 +1282,7 @@ describe("Haven habitat grass root integration (actual graph and geometry, CPU o
   it("keeps every geometry byte and the complete position/normal graph unchanged, and requires the natural appearance", () => {
     // Canonical traversal preserves shared-node edges while omitting per-owner
     // UUIDs/IDs. Constants, operations and uniform initial values remain exact.
-    const signature = (root: Node) => {
+    const signature = (root: unknown) => {
       const nodes = [...graph(root)],
         ids = new Map(nodes.map((node, i) => [node, i]));
       return nodes.map((node) => {
@@ -373,14 +1305,7 @@ describe("Haven habitat grass root integration (actual graph and geometry, CPU o
           value === null
         )
           fields.value = value;
-        else if (
-          value instanceof THREE.Vector2 ||
-          value instanceof THREE.Vector3 ||
-          value instanceof THREE.Vector4 ||
-          value instanceof THREE.Matrix3 ||
-          value instanceof THREE.Matrix4
-        )
-          fields.value = value.toArray();
+        else if (numericValue(value)) fields.value = numericValue(value);
         fields.children = [...node.getChildren()].map((child) =>
           ids.get(child),
         );
@@ -817,7 +1742,7 @@ describe("compact meadow appearance candidate (CPU only)", () => {
                   0.2,
                   1000,
                 );
-                camera.position.set(...view);
+                camera.position.set(view[0], view[1], view[2]);
                 camera.lookAt(0, 0, 0);
                 camera.updateMatrixWorld(true);
                 const normal = new THREE.Vector3().fromBufferAttribute(
@@ -947,6 +1872,91 @@ describe("fine continuous meadow geometry candidate", () => {
       true,
       FINE_MEADOW_APPEARANCE.id,
     );
+  // Explicit pre-canopy geometry recipe. Never inherit new fine settings into
+  // archived byte/area assertions or regenerate their historical hashes.
+  const historicalSweptFineShape = Object.freeze({
+    BLADE_HEIGHT_MIN: 0.38,
+    BLADE_HEIGHT_MAX: 0.86,
+    BLADE_WIDTH_RATIO: 0.045,
+    BLADE_TAPER: 0.85,
+    BLADE_TAPER_POWER: 1,
+    BLADE_ARC_RATIO: 0.48,
+    BLADE_CONTROL_HEIGHT: 0.76,
+    BLADE_TIP_HEIGHT: 0.95,
+    PROGRESSIVE_ROOTS: true,
+  });
+  // Exact Review73 control: do not inherit the candidate taper into this shape.
+  const broadCanopyControlShape = Object.freeze({
+    ...historicalSweptFineShape,
+    BLADE_TAPER_POWER: 2,
+    BLADE_UPPER_WIDTH_GAIN: 0.35,
+  });
+  // Rejected Review74 control remains executable; do not regenerate its
+  // measured area loss from the new candidate's width or curvature values.
+  const pointedControlShape = Object.freeze({
+    ...historicalSweptFineShape,
+    BLADE_TAPER: 1,
+    BLADE_TAPER_POWER: 1,
+    BLADE_WIDTH_FALLOFF_POWER: 0.85,
+    BLADE_UPPER_WIDTH_GAIN: 0,
+  });
+  const pointedControlCase = (nearSegments: 3 | 4) => {
+    const geometries = [0, 1, 2].map((lod) => {
+      const layout = getGrassBladeLayout(
+        lod,
+        nearSegments === 3
+          ? "fine-linear-sweep-3seg-v1"
+          : "fine-linear-sweep-near4-v1",
+      );
+      return createClumpGeometry(
+        layout.bladesPerClump,
+        layout.bladeSegments,
+        pointedControlShape,
+      );
+    });
+    return {
+      geometries,
+      dispose: () => geometries.forEach((geometry) => geometry.dispose()),
+    };
+  };
+  const broadCanopyControlCase = (nearSegments: 3 | 4) => {
+    const geometries = [0, 1, 2].map((lod) => {
+      const layout = getGrassBladeLayout(
+        lod,
+        nearSegments === 3
+          ? "fine-linear-sweep-3seg-v1"
+          : "fine-linear-sweep-near4-v1",
+      );
+      return createClumpGeometry(
+        layout.bladesPerClump,
+        layout.bladeSegments,
+        broadCanopyControlShape,
+      );
+    });
+    return {
+      geometries,
+      dispose: () => geometries.forEach((geometry) => geometry.dispose()),
+    };
+  };
+  const historicalFineGeometryCase = (nearSegments: 3 | 4) => {
+    const geometries = [0, 1, 2].map((lod) => {
+      const layout = getGrassBladeLayout(
+        lod,
+        nearSegments === 3
+          ? "fine-linear-sweep-3seg-v1"
+          : "fine-linear-sweep-near4-v1",
+      );
+      return createClumpGeometry(
+        layout.bladesPerClump,
+        layout.bladeSegments,
+        historicalSweptFineShape,
+      );
+    });
+    return {
+      geometries,
+      dispose: () => geometries.forEach((geometry) => geometry.dispose()),
+    };
+  };
   const fineGeometryCase = (nearSegments: 3 | 4) => {
     if (nearSegments === 3) {
       const owner = fine();
@@ -972,7 +1982,7 @@ describe("fine continuous meadow geometry candidate", () => {
   };
 
   it.each([3, 4] as const)(
-    "retains archived roots, tips and mid bytes with %i near segments",
+    "retains historical linear-taper roots, tips and mid bytes with %i near segments",
     (nearSegments) => {
       // Actual live substrate-contrast-art01 source templates, before near4.
       // Report SHA256: 54238d7cdf4e2e41da24faa155d0b955489dd61fb60b1a9a78d593bfda023657.
@@ -990,7 +2000,7 @@ describe("fine continuous meadow geometry candidate", () => {
       expect(digest(rootsAndTips)).toBe(
         "6aefd820b073570a2fd82b5beeed70e86b05592a824da050d2ec21bdb3a697ba",
       );
-      const owner = fineGeometryCase(nearSegments);
+      const owner = historicalFineGeometryCase(nearSegments);
       try {
         const near = owner.geometries[0];
         const stride = nearSegments * 2 + 1;
@@ -1046,7 +2056,7 @@ describe("fine continuous meadow geometry candidate", () => {
     },
   );
 
-  it("keeps the revised slender leaf and non-emissive albedo contract explicit", () => {
+  it("keeps the upper-canopy leaf and non-emissive root albedo contract explicit", () => {
     expect(FINE_MEADOW_APPEARANCE).toEqual({
       id: "fine-meadow-v1",
       GEOMETRY_LAYOUT: "fine-linear-sweep-3seg-v1",
@@ -1054,23 +2064,26 @@ describe("fine continuous meadow geometry candidate", () => {
       BLADE_HEIGHT_MAX: 0.86,
       BLADE_WIDTH_RATIO: 0.045,
       BLADE_TAPER: 0.85,
-      BLADE_TAPER_POWER: 1,
+      BLADE_TAPER_POWER: 2,
+      BLADE_WIDTH_FALLOFF_POWER: 1,
+      BLADE_UPPER_WIDTH_GAIN: 0.35,
       BLADE_ARC_RATIO: 0.48,
       BLADE_CONTROL_HEIGHT: 0.76,
+      BLADE_CONTROL_ARC_RATIO: 0.35,
       BLADE_TIP_HEIGHT: 0.95,
       BLADE_NORMAL_WEIGHT: 0.2,
-      ROOT_BRIGHTNESS: 0.9,
+      ROOT_BRIGHTNESS: 0.98,
       TIP_BRIGHTNESS: 1.2,
-      ROOT_OCCLUSION: 0.55,
-      ROOT_OCCLUSION_END: 0.6,
+      ROOT_OCCLUSION: 0.78,
+      ROOT_OCCLUSION_END: 0.35,
       PROGRESSIVE_ROOTS: true,
     });
     const owner = fine();
     try {
       const albedo = expand(owner["material"].colorNode!);
       for (const [height, expected] of [
-        [0, [0.18, 0.36, 0.09]],
-        [0.5, [0.228, 0.429, 0.123]],
+        [0, [0.196, 0.392, 0.098]],
+        [0.5, [0.236, 0.445, 0.127]],
         [1, [0.276, 0.498, 0.156]],
       ] as const) {
         const actual = colorValue(albedo, {
@@ -1089,6 +2102,499 @@ describe("fine continuous meadow geometry candidate", () => {
       owner.destroy();
     }
   });
+
+  it.each([3, 4] as const)(
+    "retains the rejected pointed control's monotone widths with %i near segments and original curve normals",
+    (nearSegments) => {
+      const current = pointedControlCase(nearSegments);
+      const historical = broadCanopyControlCase(nearSegments);
+      // Independent artistic recipe, not a call to the generator's helpers.
+      const widthFactor = (t: number) => Math.pow(1 - t, 0.85);
+      const controlWidthFactor = (t: number) => {
+        const u = Math.min(1, Math.max(0, 2 * t));
+        return (1 - 0.85 * t * t) * (1 + 0.35 * u * u * (3 - 2 * u));
+      };
+      try {
+        for (let lod = 0; lod < 3; lod++) {
+          const geometry = current.geometries[lod];
+          const old = historical.geometries[lod];
+          const positions = geometry.getAttribute("position");
+          const original = old.getAttribute("position");
+          const normals = geometry.getAttribute("normal");
+          const segments =
+            lod === 0
+              ? nearSegments
+              : GRASS_CONFIG.LOD_TIERS[lod].bladeSegments;
+          const stride = segments * 2 + 1;
+          expect(positions.count).toBe(original.count);
+          expect(geometryBytes(geometry)).toBe(geometryBytes(old));
+          expect(Object.keys(geometry.attributes).sort()).toEqual([
+            "normal",
+            "position",
+            "uv",
+          ]);
+          for (const name of ["normal", "uv"])
+            expect(geometry.attributes[name].array).toEqual(
+              old.attributes[name].array,
+            );
+          expect(geometry.index!.array).toEqual(old.index!.array);
+          // The far tier has only a root edge and tip, so remains byte-exact.
+          if (lod === 2) expect(positions.array).toEqual(original.array);
+          else expect(positions.array).not.toEqual(original.array);
+          for (
+            let blade = 0;
+            blade < GRASS_CONFIG.LOD_TIERS[lod].bladesPerClump;
+            blade++
+          ) {
+            const base = blade * stride;
+            const leftRoot = new THREE.Vector3().fromBufferAttribute(
+              original,
+              base,
+            );
+            const rightRoot = new THREE.Vector3().fromBufferAttribute(
+              original,
+              base + 1,
+            );
+            const tip = new THREE.Vector3().fromBufferAttribute(
+              original,
+              base + stride - 1,
+            );
+            const rootCenter = leftRoot
+              .clone()
+              .add(rightRoot)
+              .multiplyScalar(0.5);
+            const rootWidth = leftRoot.distanceTo(rightRoot);
+            const sideAxis = rightRoot.clone().sub(leftRoot).normalize();
+            const arc = tip.clone().sub(rootCenter).setY(0);
+            const height = tip.y / 0.95;
+            let previousWidth = Infinity;
+            for (const offset of [0, 1, stride - 1])
+              for (let axis = 0; axis < 3; axis++)
+                expect(positions.array[(base + offset) * 3 + axis]).toBe(
+                  original.array[(base + offset) * 3 + axis],
+                );
+            // P(t,u) uses unchanged control centerline/root edges but the
+            // independently specified upper width. Test off-center normals so
+            // the nonzero width derivative must cancel in the cross product.
+            const pointAt = (t: number, u: number) =>
+              rootCenter
+                .clone()
+                .addScaledVector(arc, t * t)
+                .setY(height * (1.52 * t - 0.57 * t * t))
+                .addScaledVector(sideAxis, u * rootWidth * widthFactor(t));
+            for (let row = 0; row < segments; row++) {
+              const t = row / segments;
+              const vertex = base + row * 2;
+              const left = new THREE.Vector3().fromBufferAttribute(
+                positions,
+                vertex,
+              );
+              const right = new THREE.Vector3().fromBufferAttribute(
+                positions,
+                vertex + 1,
+              );
+              expect(left.y).toBe(original.getY(vertex));
+              expect(right.y).toBe(original.getY(vertex + 1));
+              expect(left.distanceTo(pointAt(t, -0.5))).toBeLessThan(2e-7);
+              expect(right.distanceTo(pointAt(t, 0.5))).toBeLessThan(2e-7);
+              const width = left.distanceTo(right);
+              expect(width).toBeCloseTo(rootWidth * widthFactor(t), 6);
+              expect(width).toBeLessThan(previousWidth);
+              previousWidth = width;
+              if (row === 0) continue;
+              const oldWidth = new THREE.Vector3()
+                .fromBufferAttribute(original, vertex)
+                .distanceTo(
+                  new THREE.Vector3().fromBufferAttribute(original, vertex + 1),
+                );
+              expect(width).toBeLessThan(oldWidth);
+              expect(width / oldWidth).toBeCloseTo(
+                widthFactor(t) / controlWidthFactor(t),
+                4,
+              );
+              const epsilon = 1e-5;
+              for (const u of [-0.37, 0.37]) {
+                const across = pointAt(t, u + epsilon).sub(
+                  pointAt(t, u - epsilon),
+                );
+                const along = pointAt(t + epsilon, u).sub(
+                  pointAt(t - epsilon, u),
+                );
+                const finiteNormal = across.cross(along).normalize();
+                for (const offset of [0, 1]) {
+                  const actual = new THREE.Vector3().fromBufferAttribute(
+                    normals,
+                    vertex + offset,
+                  );
+                  expect(actual.distanceTo(finiteNormal)).toBeLessThan(5e-6);
+                }
+              }
+            }
+          }
+        }
+        // These are strip widths, not a claim about native visible density.
+        expect(widthFactor(0)).toBe(1);
+        expect(widthFactor(1)).toBe(0);
+        expect(widthFactor(1 / 3)).toBeLessThan(0.71);
+        expect(widthFactor(2 / 3)).toBeLessThan(0.4);
+      } finally {
+        current.dispose();
+        historical.dispose();
+      }
+    },
+  );
+
+  it.each([3, 4] as const)(
+    "retains the rejected pointed control's measured area loss for %i near segments without changing topology",
+    (nearSegments) => {
+      const candidate = pointedControlCase(nearSegments);
+      const control = broadCanopyControlCase(nearSegments);
+      // Broadside projection into each blade's original width/Y plane, not
+      // camera pixels or canopy coverage. Mesh area uses the actual 3D faces.
+      const measure = (geometry: THREE.BufferGeometry, segments: number) => {
+        const positions = geometry.getAttribute("position");
+        const indices = geometry.getIndex();
+        if (!indices) throw new Error("Grass must retain indexed triangles");
+        const stride = segments * 2 + 1;
+        let meshArea = 0;
+        let projectedArea = 0;
+        for (let face = 0; face < indices.count; face += 3) {
+          const ia = indices.getX(face),
+            ib = indices.getX(face + 1),
+            ic = indices.getX(face + 2);
+          const blade = Math.floor(ia / stride);
+          expect(Math.floor(ib / stride)).toBe(blade);
+          expect(Math.floor(ic / stride)).toBe(blade);
+          const a = new THREE.Vector3().fromBufferAttribute(positions, ia);
+          const b = new THREE.Vector3().fromBufferAttribute(positions, ib);
+          const c = new THREE.Vector3().fromBufferAttribute(positions, ic);
+          const cross = b.sub(a).cross(c.sub(a));
+          const rootLeft = new THREE.Vector3().fromBufferAttribute(
+            positions,
+            blade * stride,
+          );
+          const width = new THREE.Vector3()
+            .fromBufferAttribute(positions, blade * stride + 1)
+            .sub(rootLeft)
+            .normalize();
+          const facing = width.cross(new THREE.Vector3(0, 1, 0));
+          const signedProjection = cross.dot(facing);
+          expect(cross.toArray().every(Number.isFinite)).toBe(true);
+          expect(cross.length()).toBeGreaterThan(1e-6);
+          // Every generated face keeps the original authored winding.
+          expect(signedProjection).toBeGreaterThan(1e-6);
+          meshArea += cross.length() * 0.5;
+          projectedArea += signedProjection * 0.5;
+        }
+        return { meshArea, projectedArea };
+      };
+      const analyticProjectedArea = (
+        segments: number,
+        candidateWidth: boolean,
+      ) => {
+        let area = 0;
+        for (let row = 0; row < segments; row++) {
+          const t0 = row / segments,
+            t1 = (row + 1) / segments;
+          const width = (t: number) => {
+            if (t === 1) return 0;
+            if (candidateWidth) return Math.pow(1 - t, 0.85);
+            const u = Math.min(1, 2 * t);
+            return (1 - 0.85 * t * t) * (1 + 0.35 * u * u * (3 - 2 * u));
+          };
+          const y = (t: number) => 1.52 * t - 0.57 * t * t;
+          area += (width(t0) + width(t1)) * (y(t1) - y(t0)) * 0.5;
+        }
+        return area;
+      };
+      try {
+        const measurements: {
+          lod: number;
+          segments: number;
+          vertices: number;
+          triangles: number;
+          controlArea: ReturnType<typeof measure>;
+          candidateArea: ReturnType<typeof measure>;
+          projectedReductionFraction: number;
+          meshReductionFraction: number;
+        }[] = [];
+        for (let lod = 0; lod < 3; lod++) {
+          const segments = lod === 0 ? nearSegments : lod === 1 ? 2 : 1;
+          const actual = candidate.geometries[lod],
+            original = control.geometries[lod];
+          expect(actual.getAttribute("position").count).toBe(
+            original.getAttribute("position").count,
+          );
+          expect(actual.index!.array).toEqual(original.index!.array);
+          expect(geometryBytes(actual)).toBe(geometryBytes(original));
+          const candidateArea = measure(actual, segments);
+          const controlArea = measure(original, segments);
+          const projectedRatio =
+            candidateArea.projectedArea / controlArea.projectedArea;
+          const meshRatio = candidateArea.meshArea / controlArea.meshArea;
+          expect(projectedRatio).toBeCloseTo(
+            analyticProjectedArea(segments, true) /
+              analyticProjectedArea(segments, false),
+            6,
+          );
+          if (lod === 2) {
+            expect(candidateArea).toEqual(controlArea);
+          } else {
+            expect(projectedRatio).toBeGreaterThan(0.6);
+            expect(projectedRatio).toBeLessThan(0.8);
+            expect(meshRatio).toBeGreaterThan(0.6);
+            expect(meshRatio).toBeLessThan(0.8);
+          }
+          measurements.push({
+            lod,
+            segments,
+            vertices: actual.getAttribute("position").count,
+            triangles: actual.index!.count / 3,
+            controlArea,
+            candidateArea,
+            projectedReductionFraction: 1 - projectedRatio,
+            meshReductionFraction: 1 - meshRatio,
+          });
+        }
+        console.info("pointedFineBladeArea", { nearSegments, measurements });
+      } finally {
+        candidate.dispose();
+        control.dispose();
+      }
+    },
+  );
+
+  it.each([3, 4] as const)(
+    "restores broad leaf area with genuine lower-curve lean and derivative normals at %i near segments",
+    (nearSegments) => {
+      const candidate = fineGeometryCase(nearSegments);
+      const broad = broadCanopyControlCase(nearSegments);
+      const pointed = pointedControlCase(nearSegments);
+      // Independent quadratic control points: root, root+.35*arc at .76h,
+      // and the unchanged tip at .95h. This is geometry, not a lighting gain.
+      const arcAt = (t: number) => 0.7 * t + 0.3 * t * t;
+      const heightAt = (t: number) => 1.52 * t - 0.57 * t * t;
+      const widthAt = (t: number) => {
+        const u = Math.min(1, Math.max(0, t * 2));
+        return (1 - 0.85 * t * t) * (1 + 0.35 * u * u * (3 - 2 * u));
+      };
+      const measure = (geometry: THREE.BufferGeometry, stride: number) => {
+        const position = geometry.getAttribute("position");
+        const index = geometry.getIndex();
+        if (!index) throw new Error("Actual indexed grass geometry required");
+        let meshArea = 0;
+        let projectedArea = 0;
+        for (let face = 0; face < index.count; face += 3) {
+          const ia = index.getX(face);
+          const ib = index.getX(face + 1);
+          const ic = index.getX(face + 2);
+          const blade = Math.floor(ia / stride);
+          expect(Math.floor(ib / stride)).toBe(blade);
+          expect(Math.floor(ic / stride)).toBe(blade);
+          const a = new THREE.Vector3().fromBufferAttribute(position, ia);
+          const b = new THREE.Vector3().fromBufferAttribute(position, ib);
+          const c = new THREE.Vector3().fromBufferAttribute(position, ic);
+          const cross = b.sub(a).cross(c.sub(a));
+          const root = new THREE.Vector3().fromBufferAttribute(
+            position,
+            blade * stride,
+          );
+          const facing = new THREE.Vector3()
+            .fromBufferAttribute(position, blade * stride + 1)
+            .sub(root)
+            .normalize()
+            .cross(new THREE.Vector3(0, 1, 0));
+          const projection = cross.dot(facing);
+          expect(cross.toArray().every(Number.isFinite)).toBe(true);
+          expect(cross.length()).toBeGreaterThan(1e-6);
+          expect(projection).toBeGreaterThan(1e-6);
+          meshArea += cross.length() * 0.5;
+          projectedArea += projection * 0.5;
+        }
+        return { meshArea, projectedArea };
+      };
+      const measurements: {
+        lod: number;
+        segments: number;
+        vertices: number;
+        triangles: number;
+        broad: ReturnType<typeof measure>;
+        pointed: ReturnType<typeof measure>;
+        candidate: ReturnType<typeof measure>;
+        meshRatioToBroad: number;
+        meshRatioToPointed: number;
+        projectedRatioToBroad: number;
+        projectedRatioToPointed: number;
+      }[] = [];
+      try {
+        for (let lod = 0; lod < 3; lod++) {
+          const segments = lod === 0 ? nearSegments : lod === 1 ? 2 : 1;
+          const stride = segments * 2 + 1;
+          const actual = candidate.geometries[lod];
+          const original = broad.geometries[lod];
+          const position = actual.getAttribute("position");
+          const controlPosition = original.getAttribute("position");
+          const normal = actual.getAttribute("normal");
+          expect(position.count).toBe(controlPosition.count);
+          expect(geometryBytes(actual)).toBe(geometryBytes(original));
+          expect(actual.index!.array).toEqual(original.index!.array);
+          expect(actual.attributes.uv.array).toEqual(
+            original.attributes.uv.array,
+          );
+          expect(normal.array).not.toEqual(original.attributes.normal.array);
+          for (let vertex = 0; vertex < position.count; vertex++)
+            expect(position.getY(vertex)).toBe(controlPosition.getY(vertex));
+          for (
+            let blade = 0;
+            blade < GRASS_CONFIG.LOD_TIERS[lod].bladesPerClump;
+            blade++
+          ) {
+            const base = blade * stride;
+            const left = new THREE.Vector3().fromBufferAttribute(
+              controlPosition,
+              base,
+            );
+            const right = new THREE.Vector3().fromBufferAttribute(
+              controlPosition,
+              base + 1,
+            );
+            const tip = new THREE.Vector3().fromBufferAttribute(
+              controlPosition,
+              base + stride - 1,
+            );
+            const root = left.clone().add(right).multiplyScalar(0.5);
+            const arc = tip.clone().sub(root).setY(0);
+            const side = right.clone().sub(left).normalize();
+            const rootWidth = left.distanceTo(right);
+            const height = tip.y / 0.95;
+            for (const offset of [0, 1, stride - 1])
+              for (let axis = 0; axis < 3; axis++)
+                expect(position.array[(base + offset) * 3 + axis]).toBe(
+                  controlPosition.array[(base + offset) * 3 + axis],
+                );
+            const centerAt = (t: number) =>
+              root
+                .clone()
+                .addScaledVector(arc, arcAt(t))
+                .setY(height * heightAt(t));
+            for (let row = 0; row <= segments; row++) {
+              const t = row / segments;
+              const vertex = base + Math.min(row * 2, stride - 1);
+              const expectedNormal = side
+                .clone()
+                .cross(
+                  new THREE.Vector3(
+                    arc.x * (0.7 + 0.6 * t),
+                    height * (1.52 - 1.14 * t),
+                    arc.z * (0.7 + 0.6 * t),
+                  ),
+                )
+                .normalize();
+              const epsilon = 1e-5;
+              const finiteNormal = side
+                .clone()
+                .cross(centerAt(t + epsilon).sub(centerAt(t - epsilon)))
+                .normalize();
+              expect(expectedNormal.distanceTo(finiteNormal)).toBeLessThan(
+                1e-9,
+              );
+              for (const offset of row === segments ? [0] : [0, 1]) {
+                const actualNormal = new THREE.Vector3().fromBufferAttribute(
+                  normal,
+                  vertex + offset,
+                );
+                expect(actualNormal.length()).toBeCloseTo(1, 6);
+                expect(actualNormal.distanceTo(expectedNormal)).toBeLessThan(
+                  5e-6,
+                );
+              }
+              if (row === segments) continue;
+              const actualLeft = new THREE.Vector3().fromBufferAttribute(
+                position,
+                vertex,
+              );
+              const actualRight = new THREE.Vector3().fromBufferAttribute(
+                position,
+                vertex + 1,
+              );
+              const center = actualLeft
+                .clone()
+                .add(actualRight)
+                .multiplyScalar(0.5);
+              expect(center.distanceTo(centerAt(t))).toBeLessThan(2e-7);
+              expect(actualLeft.distanceTo(actualRight)).toBeCloseTo(
+                rootWidth * widthAt(t),
+                6,
+              );
+              if (row > 0) {
+                const controlCenter = new THREE.Vector3()
+                  .fromBufferAttribute(controlPosition, vertex)
+                  .add(
+                    new THREE.Vector3().fromBufferAttribute(
+                      controlPosition,
+                      vertex + 1,
+                    ),
+                  )
+                  .multiplyScalar(0.5);
+                const ratio = arcAt(t) / (t * t);
+                // Compare in metres: division by a short Float32 arc magnifies
+                // coordinate rounding. Both reconstructed centers have the
+                // same 2e-7 m bound already tested above; scaling one by ratio
+                // propagates that bound without relaxing the position checks.
+                expect(
+                  Math.abs(
+                    center.clone().sub(root).setY(0).length() -
+                      controlCenter.clone().sub(root).setY(0).length() * ratio,
+                  ),
+                ).toBeLessThan(2e-7 * (1 + ratio));
+              }
+            }
+          }
+          const actualArea = measure(actual, stride);
+          const broadArea = measure(original, stride);
+          const pointedArea = measure(pointed.geometries[lod], stride);
+          expect(
+            actualArea.projectedArea / broadArea.projectedArea,
+          ).toBeCloseTo(1, 6);
+          if (lod === 2) {
+            expect(position.array).toEqual(controlPosition.array);
+            expect(actualArea).toEqual(broadArea);
+            expect(actualArea).toEqual(pointedArea);
+          } else {
+            expect(actualArea.meshArea / pointedArea.meshArea).toBeGreaterThan(
+              1.35,
+            );
+            expect(
+              actualArea.projectedArea / pointedArea.projectedArea,
+            ).toBeGreaterThan(1.35);
+          }
+          measurements.push({
+            lod,
+            segments,
+            vertices: position.count,
+            triangles: actual.index!.count / 3,
+            broad: broadArea,
+            pointed: pointedArea,
+            candidate: actualArea,
+            meshRatioToBroad: actualArea.meshArea / broadArea.meshArea,
+            meshRatioToPointed: actualArea.meshArea / pointedArea.meshArea,
+            projectedRatioToBroad:
+              actualArea.projectedArea / broadArea.projectedArea,
+            projectedRatioToPointed:
+              actualArea.projectedArea / pointedArea.projectedArea,
+          });
+        }
+        console.info(
+          "leaningFineBladeArea",
+          JSON.stringify({ nearSegments, measurements }),
+        );
+      } finally {
+        candidate.dispose();
+        broad.dispose();
+        pointed.dispose();
+      }
+    },
+  );
 
   it("admits only the explicit fine physical material and freezes its exact thin-leaf recipe", () => {
     const owner = fine();
@@ -1293,9 +2799,12 @@ describe("fine continuous meadow geometry candidate", () => {
         const material = owner["material"];
         expect(material).toBeInstanceOf(MeshStandardNodeMaterial);
         expect(material).not.toBeInstanceOf(MeshSSSNodeMaterial);
-        expect(Object.hasOwn(material.userData, "fineGrassLighting")).toBe(
-          false,
-        );
+        expect(
+          Object.prototype.hasOwnProperty.call(
+            material.userData,
+            "fineGrassLighting",
+          ),
+        ).toBe(false);
         expect(Reflect.has(material, "thicknessColorNode")).toBe(false);
       }
     } finally {
@@ -1429,9 +2938,9 @@ describe("fine continuous meadow geometry candidate", () => {
   );
 
   it.each([3, 4] as const)(
-    "evaluates the archived analytic curve at true %i-segment near rows",
+    "evaluates the historical linear-taper analytic curve at true %i-segment near rows",
     (nearSegments) => {
-      const owner = fineGeometryCase(nearSegments);
+      const owner = historicalFineGeometryCase(nearSegments);
       try {
         for (const saved of historicalFineTemplates) {
           const lod = saved.lod;

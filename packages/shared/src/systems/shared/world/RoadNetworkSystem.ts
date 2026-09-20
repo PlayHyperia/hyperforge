@@ -185,6 +185,10 @@ interface RoadInfluenceTextureData {
 
 export class RoadNetworkSystem extends System {
   private roads: ProceduralRoad[] = [];
+  private terrainPreparationRevision = 0;
+  private terrainPreparationBuildDepth = 0;
+  private terrainPreparationInitialized = false;
+  private terrainPreparationDestroyed = false;
   private townSystem?: TownSystem;
   private poiSystem?: POISystem;
   private noise!: NoiseGenerator;
@@ -232,6 +236,7 @@ export class RoadNetworkSystem extends System {
   }
 
   async init(): Promise<void> {
+    this.terrainPreparationRevision++;
     const worldConfig = (this.world as { config?: { terrainSeed?: number } })
       .config;
     this.seed = worldConfig?.terrainSeed ?? 0;
@@ -267,18 +272,35 @@ export class RoadNetworkSystem extends System {
         `Config: ${this.config.roadWidth}m roads, ${this.config.extraConnectionsRatio} extra connections`,
       );
     }
+    this.terrainPreparationInitialized = true;
   }
 
   async start(): Promise<void> {
+    this.terrainPreparationRevision++;
+    this.terrainPreparationBuildDepth++;
+    try {
+      await this.startRoadNetwork();
+    } finally {
+      this.terrainPreparationBuildDepth--;
+      this.terrainPreparationRevision++;
+    }
+  }
+
+  private async startRoadNetwork(): Promise<void> {
     if (!this.terrainSystem)
       throw new Error("RoadNetworkSystem requires TerrainSystem");
-    const profile = DataManager.getWorldConfig()?.terrainProfile;
+    const config = DataManager.getWorldConfig();
+    const profile = config?.terrainProfile;
     if (profile && isCompactSculptProfile(profile)) {
       const paths = createCompactIslandPaths(
         profile,
         DataManager.getInstance().getAllWorldAreas(),
         getDuelArenaConfig(),
         (x, z) => this.terrainSystem!.getHeightAt(x, z),
+        {
+          compactPreparationLodge: config?.compactPreparationLodge,
+          compactBankPavilion: config?.compactBankPavilion,
+        },
       );
       this.roads = paths.map((path) => ({
         id: path.id,
@@ -421,7 +443,9 @@ export class RoadNetworkSystem extends System {
       return;
     }
 
-    const bounds = this.calculateRoadMaskBounds(roadSegments);
+    const bounds =
+      this.calculateAuthoredRoadMaskBounds(roadSegments) ??
+      this.calculateRoadMaskBounds(roadSegments);
     const worldSize = bounds.worldSize;
     const centerX = bounds.centerX;
     const centerZ = bounds.centerZ;
@@ -508,6 +532,112 @@ export class RoadNetworkSystem extends System {
       Math.ceil(Math.log2(Math.max(ROAD_MASK_MIN_TEXTURE_SIZE, minResolution))),
     );
     return Math.min(ROAD_MASK_MAX_TEXTURE_SIZE, pow2);
+  }
+
+  /**
+   * Anchor the selected compact network to admitted layout areas, not path
+   * endpoints. Tight fitting rephases every texel when one service tip moves.
+   * This is a deliberate raster migration; other profiles keep tight fitting.
+   */
+  private calculateAuthoredRoadMaskBounds(roadSegments: GPURoadSegment[]): {
+    worldSize: number;
+    centerX: number;
+    centerZ: number;
+  } | null {
+    const profile = DataManager.getWorldConfig()?.terrainProfile;
+    if (
+      !profile ||
+      !isCompactSculptProfile(profile) ||
+      profile.id !== "compact-duel-island-v6" ||
+      profile.southernMeadow === undefined
+    )
+      return null;
+
+    const areas = DataManager.getInstance().getAllWorldAreas();
+    const layouts = [areas.central_haven, areas.haven_pond, areas.duel_arena];
+    let minX = Infinity,
+      maxX = -Infinity,
+      minZ = Infinity,
+      maxZ = -Infinity;
+    for (const area of layouts) {
+      const bounds = area?.bounds;
+      if (
+        !bounds ||
+        ![bounds.minX, bounds.maxX, bounds.minZ, bounds.maxZ].every(
+          Number.isFinite,
+        ) ||
+        bounds.minX >= bounds.maxX ||
+        bounds.minZ >= bounds.maxZ
+      )
+        throw new Error(
+          "Compact road mask requires valid admitted layout bounds",
+        );
+      minX = Math.min(minX, bounds.minX);
+      maxX = Math.max(maxX, bounds.maxX);
+      minZ = Math.min(minZ, bounds.minZ);
+      maxZ = Math.max(maxZ, bounds.maxZ);
+    }
+    const worldSize = Math.max(maxX - minX, maxZ - minZ);
+    const centerX = (minX + maxX) * 0.5;
+    const centerZ = (minZ + maxZ) * 0.5;
+    const halfSize = worldSize * 0.5;
+    minX = centerX - halfSize;
+    maxX = centerX + halfSize;
+    minZ = centerZ - halfSize;
+    maxZ = centerZ + halfSize;
+    if (
+      ![worldSize, centerX, centerZ, minX, maxX, minZ, maxZ].every(
+        Number.isFinite,
+      ) ||
+      minX <
+        Math.max(profile.bounds.minX, this.worldCenterX - this.worldHalfSize) ||
+      maxX >
+        Math.min(profile.bounds.maxX, this.worldCenterX + this.worldHalfSize) ||
+      minZ <
+        Math.max(profile.bounds.minZ, this.worldCenterZ - this.worldHalfSize) ||
+      maxZ >
+        Math.min(profile.bounds.maxZ, this.worldCenterZ + this.worldHalfSize)
+    )
+      throw new Error(
+        "Compact road mask layout square leaves admitted world bounds",
+      );
+
+    // Fail closed on layout overflow. Expanding or clamping to the new route
+    // would silently undo the stable-domain contract or truncate its shoulder.
+    // Preserve the old metre guard, or the bilinear footprint on coarser grids.
+    const edgePadding = Math.max(
+      1,
+      (1.5 * worldSize) / this.calculateRoadMaskTextureSize(worldSize),
+    );
+    for (const segment of roadSegments) {
+      const blend = segment.blendWidth ?? ROAD_MASK_BLEND_WIDTH;
+      if (
+        ![
+          segment.startX,
+          segment.startZ,
+          segment.endX,
+          segment.endZ,
+          segment.width,
+          blend,
+        ].every(Number.isFinite) ||
+        segment.width <= 0 ||
+        blend < 0
+      )
+        throw new Error(
+          "Compact road mask requires finite positive road support",
+        );
+      const padding = segment.width * 0.5 + blend + edgePadding;
+      if (
+        Math.min(segment.startX, segment.endX) - padding < minX ||
+        Math.max(segment.startX, segment.endX) + padding > maxX ||
+        Math.min(segment.startZ, segment.endZ) - padding < minZ ||
+        Math.max(segment.startZ, segment.endZ) + padding > maxZ
+      )
+        throw new Error(
+          "Compact road mask route support leaves admitted layout",
+        );
+    }
+    return { worldSize, centerX, centerZ };
   }
 
   /**
@@ -1575,6 +1705,7 @@ export class RoadNetworkSystem extends System {
     );
     if (isDuplicate) return;
 
+    this.invalidateTileSegmentCaches();
     this.boundaryExits.push({
       roadId,
       position: { x, z },
@@ -2128,6 +2259,7 @@ export class RoadNetworkSystem extends System {
    * @deprecated Use buildTileCacheAsync for non-blocking operation
    */
   private invalidateTileSegmentCaches(): void {
+    this.terrainPreparationRevision++;
     this.entryStubCache.clear();
     this.mergedTileSegmentCache.clear();
   }
@@ -2215,6 +2347,17 @@ export class RoadNetworkSystem extends System {
    * that cross tile boundaries, not just exploration roads.
    */
   private async buildTileCacheAsync(): Promise<void> {
+    this.terrainPreparationRevision++;
+    this.terrainPreparationBuildDepth++;
+    try {
+      await this.populateTileCacheAsync();
+    } finally {
+      this.terrainPreparationBuildDepth--;
+      this.terrainPreparationRevision++;
+    }
+  }
+
+  private async populateTileCacheAsync(): Promise<void> {
     this.tileRoadCache.clear();
     this.resetRoadInfluenceBounds();
     this.invalidateTileSegmentCaches();
@@ -2471,6 +2614,7 @@ export class RoadNetworkSystem extends System {
     );
     if (isDuplicate) return;
 
+    this.invalidateTileSegmentCaches();
     this.boundaryExits.push({
       roadId,
       position: { x, z },
@@ -2823,8 +2967,142 @@ export class RoadNetworkSystem extends System {
           );
         }
     }
-    this.mergedTileSegmentCache.set(key, merged);
-    return merged;
+    // Query consumers share this cached publication. Keep authoring storage
+    // mutable, but never let a returned query mutate another consumer's data.
+    const published = merged.map((segment) =>
+      Object.freeze({
+        ...segment,
+        start: Object.freeze({ ...segment.start }),
+        end: Object.freeze({ ...segment.end }),
+      }),
+    );
+    Object.freeze(published);
+    this.mergedTileSegmentCache.set(key, published);
+    return published;
+  }
+
+  /**
+   * Exact road inputs for cooperative terrain preparation. Authoring getters
+   * intentionally remain mutable, so revision/owner identity alone is not a
+   * lease: compare their scalar geometry too. Checks allocate no snapshots;
+   * work is linear in the existing road points and authoritative cached data.
+   */
+  captureTerrainPreparationLease(): Readonly<{ isCurrent(): boolean }> {
+    const revision = this.terrainPreparationRevision;
+    const roads = this.roads;
+    const config = this._config;
+    const roadWidth = config?.roadWidth;
+    const roadSnapshots = roads.map((road) => ({
+      owner: road,
+      id: road.id,
+      width: road.width,
+      blendWidth: road.blendWidth,
+      maxInfluence: road.maxInfluence,
+      path: road.path,
+      points: road.path.map((point) => ({ ...point })),
+    }));
+    const boundaries = this.boundaryExits;
+    const boundarySnapshots = boundaries.map((exit) => ({
+      ...exit,
+      position: { ...exit.position },
+    }));
+    const cache = this.tileRoadCache;
+    const tileSnapshots = [...cache].map(([key, segments]) => ({
+      key,
+      owner: segments,
+      segments: segments.map((segment) => ({
+        ...segment,
+        start: { ...segment.start },
+        end: { ...segment.end },
+      })),
+    }));
+    const halfWidth = this.cachedMaxRoadHalfWidth;
+    const explicitRadius = this.cachedMaxExplicitRoadInfluenceRadius;
+    let current =
+      this.terrainPreparationInitialized &&
+      !this.terrainPreparationDestroyed &&
+      this.terrainPreparationBuildDepth === 0;
+    const matches = (): boolean => {
+      if (
+        this.terrainPreparationDestroyed ||
+        !this.terrainPreparationInitialized ||
+        this.terrainPreparationBuildDepth !== 0 ||
+        this.terrainPreparationRevision !== revision ||
+        this.roads !== roads ||
+        roads.length !== roadSnapshots.length ||
+        this._config !== config ||
+        config?.roadWidth !== roadWidth ||
+        this.boundaryExits !== boundaries ||
+        boundaries.length !== boundarySnapshots.length ||
+        this.tileRoadCache !== cache ||
+        cache.size !== tileSnapshots.length ||
+        this.cachedMaxRoadHalfWidth !== halfWidth ||
+        this.cachedMaxExplicitRoadInfluenceRadius !== explicitRadius
+      )
+        return false;
+      for (let i = 0; i < roads.length; i++) {
+        const road = roads[i],
+          snapshot = roadSnapshots[i];
+        if (
+          road !== snapshot.owner ||
+          road.id !== snapshot.id ||
+          road.width !== snapshot.width ||
+          road.blendWidth !== snapshot.blendWidth ||
+          road.maxInfluence !== snapshot.maxInfluence ||
+          road.path !== snapshot.path ||
+          road.path.length !== snapshot.points.length
+        )
+          return false;
+        for (let j = 0; j < road.path.length; j++) {
+          const point = road.path[j],
+            before = snapshot.points[j];
+          if (
+            point.x !== before.x ||
+            point.y !== before.y ||
+            point.z !== before.z
+          )
+            return false;
+        }
+      }
+      for (let i = 0; i < boundaries.length; i++) {
+        const exit = boundaries[i],
+          before = boundarySnapshots[i];
+        if (
+          exit.roadId !== before.roadId ||
+          exit.tileX !== before.tileX ||
+          exit.tileZ !== before.tileZ ||
+          exit.edge !== before.edge ||
+          exit.direction !== before.direction ||
+          exit.position.x !== before.position.x ||
+          exit.position.z !== before.position.z
+        )
+          return false;
+      }
+      for (const tile of tileSnapshots) {
+        const segments = cache.get(tile.key);
+        if (segments !== tile.owner || segments.length !== tile.segments.length)
+          return false;
+        for (let i = 0; i < segments.length; i++) {
+          const segment = segments[i],
+            before = tile.segments[i];
+          if (
+            segment.roadId !== before.roadId ||
+            segment.width !== before.width ||
+            segment.blendWidth !== before.blendWidth ||
+            segment.maxInfluence !== before.maxInfluence ||
+            segment.start.x !== before.start.x ||
+            segment.start.z !== before.start.z ||
+            segment.end.x !== before.end.x ||
+            segment.end.z !== before.end.z
+          )
+            return false;
+        }
+      }
+      return true;
+    };
+    return Object.freeze({
+      isCurrent: () => (current &&= matches()),
+    });
   }
 
   /**
@@ -3475,6 +3753,8 @@ export class RoadNetworkSystem extends System {
   }
 
   destroy(): void {
+    this.terrainPreparationDestroyed = true;
+    this.terrainPreparationInitialized = false;
     this.removeDebugVisualization();
     this.roads = [];
     this.tileRoadCache.clear();

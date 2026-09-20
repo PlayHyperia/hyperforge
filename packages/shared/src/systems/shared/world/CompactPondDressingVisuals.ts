@@ -40,6 +40,7 @@ const PALETTE = Object.freeze({
   // ratio fivefold before lighting, making shade susceptible to cyan sky fill.
   bush: { tint: [0.94, 1.1, 0.63], blend: 0.0, gain: 0.85 },
   reed: { tint: [1.0, 1.0, 1.0], blend: 0.0, gain: 1.0 },
+  sorrel: { tint: [1.0, 1.0, 1.0], blend: 0.0, gain: 1.0 },
 });
 
 type Point = { x: number; z: number };
@@ -66,7 +67,7 @@ function clip(
   return result;
 }
 
-/** Cache owns geometry/maps; this owner owns instances and five palette clones. */
+/** Cache owns geometry/maps; this owner owns instances and admitted palette clones. */
 export class CompactPondDressingVisuals {
   readonly group = new THREE.Group();
   private readonly assets = new Map<CompactPondModel, Asset>();
@@ -93,10 +94,14 @@ export class CompactPondDressingVisuals {
     for (const model of Object.keys(
       COMPACT_POND_MODELS,
     ) as CompactPondModel[]) {
+      const selected = placements.filter((p) => p.model === model);
+      // The additive habitat asset must not issue a request, clone materials,
+      // or allocate a batch for historical layouts that do not use it.
+      if (model === "sorrel" && selected.length === 0) continue;
       this.assets.set(model, {
         status: "loading",
         error: null,
-        placements: placements.filter((p) => p.model === model),
+        placements: selected,
         batches: [],
         signature: "",
         visible: 0,
@@ -145,7 +150,8 @@ export class CompactPondDressingVisuals {
   /** Adopt every static mesh/material group, including its complete hierarchy transform. */
   install(model: CompactPondModel, scene: THREE.Object3D): void {
     if (this.destroyed) return;
-    const asset = this.assets.get(model)!;
+    const asset = this.assets.get(model);
+    if (!asset) throw new Error("Pond asset has no admitted placements");
     if (asset.status !== "loading")
       throw new Error("Pond asset already settled");
     scene.updateMatrixWorld(true);

@@ -170,6 +170,46 @@ export interface FlatZoneTileBounds {
   maxZ: number;
 }
 
+/** One smoothly blended shelf or shoulder in an authored pond bank. */
+export interface RadialPondBankSector {
+  /** Direction from the pond centre, in radians in [-PI, PI]. */
+  bearing: number;
+  /** Smooth angular support on either side of the bearing, at most PI / 2. */
+  halfWidth: number;
+  /** Intermediate radial knot between the bed and the outer bank. */
+  innerRadius: number;
+  /** Knot elevation between the bed and the dry outer bank. */
+  innerHeight: number;
+  /** Optional paired outer knot before rejoining the actual underlying grade. */
+  outerRadius?: number;
+  /** Requires outerRadius; omission retains the historical level outer bank. */
+  outerHeight?: number;
+}
+
+/** Authored surface role; geometry remains owned by the referenced bank sector. */
+export type RadialPondBankSurface =
+  "sedge-shelf" | "cutbank" | "dry-turf" | "mineral-shore";
+
+/** Authored emergence above the bound water plane; never changes water/height. */
+export interface RadialPondBankGroundCover {
+  readonly emergenceHeight: number;
+  /** At least 0.01 m above emergence, and at most 0.6 m above water. */
+  readonly fullHeight: number;
+}
+
+export interface RadialPondBankCompositionSector {
+  readonly sectorIndex: number;
+  readonly surface: RadialPondBankSurface;
+  /** Omission preserves the historical material and establishment recipe. */
+  readonly groundCover?: RadialPondBankGroundCover;
+}
+
+/** Optional restart-owned surface mapping. An absent entry keeps legacy rules. */
+export interface RadialPondBankComposition {
+  readonly schemaVersion: 1;
+  readonly sectors: readonly RadialPondBankCompositionSector[];
+}
+
 /**
  * Smooth radial basin profile for an authored pond.
  * `FlatZone.height` is the bed height and `FlatZone.blendRadius` controls the
@@ -186,6 +226,10 @@ export interface RadialPondTerrainProfile {
   bankHeight: number;
   /** Metres of bounded angular shoreline variation; zero/absent is circular. */
   shorelineAmplitude?: number;
+  /** Up to four authored shelf/shoulder sections; absent preserves the legacy bank. */
+  bankSectors?: RadialPondBankSector[];
+  /** Appearance/grass data only; never changes the canonical height equations. */
+  bankComposition?: RadialPondBankComposition;
 }
 
 /** Inclusive continuous world-space grass boundary, independent of grading. */
@@ -219,6 +263,14 @@ export interface FlatZone {
   height: number;
   /** Blend radius for smooth transition to procedural terrain (meters) */
   blendRadius: number;
+  /** Optional Euclidean rectangle falloff; omission retains square corner ramps. */
+  blendShape?: "rounded";
+  /**
+   * Explicit same-height union for rounded backing zones. Multiplies their
+   * outside weights with the original winning unmarked same-height weight;
+   * unmarked zones and points outside the union retain their existing algebra.
+   */
+  blendComposition?: "smooth-union";
   /** Defaults to true. Explicit false allows grass on a broad authored grade. */
   excludeGrass?: boolean;
   /** Optional rectangular clearance inside this grade's support. Grass only. */

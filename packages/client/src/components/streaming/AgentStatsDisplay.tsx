@@ -907,7 +907,7 @@ function renderEquipmentAndInventoryGrid(
           display: "flex",
           alignItems: "center",
           justifyContent: "center",
-          transition: "all 0.2s",
+          transition: "border-color 0.2s",
         }}
       >
         {itemId ? (
@@ -942,7 +942,7 @@ function renderEquipmentAndInventoryGrid(
           border: hasItem
             ? "1px solid rgba(242,208,138,0.5)"
             : "1px solid rgba(255,255,255,0.08)",
-          transition: "all 0.2s",
+          transition: "border-color 0.2s",
           overflow: "hidden",
           borderRadius: 2,
         }}

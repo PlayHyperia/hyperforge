@@ -14,7 +14,23 @@ export const OUTDOOR_ENVIRONMENT_FACE_SIZE = 128;
 const ATLAS_WIDTH = 384;
 const ATLAS_HEIGHT = 512;
 type RGB = readonly [number, number, number];
+export type OutdoorCalibration = "luminance-v1" | "rgb-irradiance-v1";
 type State = "idle" | "preparing" | "ready" | "failed" | "disposed";
+
+/** Explicit visual candidate; ordinary startup retains the existing lighting. */
+export function resolveOutdoorCalibration(
+  search = typeof window === "undefined" ? "" : window.location.search,
+): OutdoorCalibration {
+  const values = new URLSearchParams(search).getAll("outdoorCalibration");
+  if (values.length === 0) return "luminance-v1";
+  if (
+    values.length !== 1 ||
+    (values[0] !== "luminance-v1" && values[0] !== "rgb-irradiance-v1")
+  ) {
+    throw new Error("Invalid outdoor lighting calibration");
+  }
+  return values[0];
+}
 
 /** Cleanup must attempt every owned resource even if one listener throws. */
 function attemptAll(operations: Array<() => void>): void {
@@ -86,24 +102,37 @@ export function sampleOutdoorFill(
 export function calibrateOutdoorCapture(
   capture: SkyLightingCapture,
   phase: number,
-): { skyScale: number; groundRadiance: RGB; upwardIrradiance: RGB } {
+  calibration: OutdoorCalibration = "luminance-v1",
+): {
+  skyScale: number;
+  skyColor: RGB;
+  groundRadiance: RGB;
+  upwardIrradiance: RGB;
+} {
+  if (calibration !== "luminance-v1" && calibration !== "rgb-irradiance-v1") {
+    throw new Error("Invalid outdoor lighting calibration");
+  }
   const direction = new THREE.Vector3();
   const up = new THREE.Color();
   const down = new THREE.Color();
   sampleOutdoorFill(sampleSkyCycle(phase, direction), up, down);
   const sample = new THREE.Color();
   const mean = new THREE.Color(0, 0, 0);
-  for (let row = 0; row < 16; row++) {
-    const y = Math.sqrt((row + 0.5) / 16);
+  // Resolve individual scattering channels accurately near the horizon. This
+  // is twelve startup integrations, not work in the render/update loop.
+  const rows = calibration === "rgb-irradiance-v1" ? 64 : 16;
+  const columns = rows * 2;
+  for (let row = 0; row < rows; row++) {
+    const y = Math.sqrt((row + 0.5) / rows);
     const radius = Math.sqrt(1 - y * y);
-    for (let column = 0; column < 32; column++) {
-      const angle = ((column + 0.5) / 32) * Math.PI * 2;
+    for (let column = 0; column < columns; column++) {
+      const angle = ((column + 0.5) / columns) * Math.PI * 2;
       direction.set(radius * Math.cos(angle), y, radius * Math.sin(angle));
       capture.sampleRadiance(phase, direction, sample);
       mean.add(sample);
     }
   }
-  mean.multiplyScalar(1 / 512);
+  mean.multiplyScalar(1 / (rows * columns));
   const luminance = (c: THREE.Color) =>
     0.2126 * c.r + 0.7152 * c.g + 0.0722 * c.b;
   const skyY = luminance(mean);
@@ -111,9 +140,33 @@ export function calibrateOutdoorCapture(
     throw new Error("Outdoor sky capture has no finite positive radiance");
   }
   const skyScale = luminance(up) / (Math.PI * skyY);
+  let skyColor: RGB = [1, 1, 1];
+  if (calibration === "rgb-irradiance-v1") {
+    const channels = [mean.r, mean.g, mean.b];
+    if (!channels.every((value) => Number.isFinite(value) && value > 0)) {
+      throw new Error(
+        "Outdoor RGB calibration requires positive radiance in every channel",
+      );
+    }
+    // Match the existing linear RGB irradiance budget, not only luminance.
+    // This preserves directional sky detail and does not brighten the budget,
+    // alter visible sky/exposure, or add actor-specific lighting. Startup only.
+    const denominator = Math.PI * skyScale;
+    skyColor = [
+      up.r / (mean.r * denominator),
+      up.g / (mean.g * denominator),
+      up.b / (mean.b * denominator),
+    ];
+    if (!skyColor.every((value) => Number.isFinite(value) && value >= 0)) {
+      throw new Error(
+        "Outdoor RGB calibration produced invalid radiance gains",
+      );
+    }
+  }
   down.multiplyScalar(1 / Math.PI);
   return {
     skyScale,
+    skyColor,
     groundRadiance: [down.r, down.g, down.b],
     upwardIrradiance: [up.r, up.g, up.b],
   };
@@ -161,7 +214,14 @@ export class OutdoorEnvironment {
   private preparationMs = 0;
   private capturesCompleted = 0;
 
-  constructor(private readonly scene: THREE.Scene) {}
+  constructor(
+    private readonly scene: THREE.Scene,
+    private readonly calibration: OutdoorCalibration = "luminance-v1",
+  ) {
+    if (calibration !== "luminance-v1" && calibration !== "rgb-irradiance-v1") {
+      throw new Error("Invalid outdoor lighting calibration");
+    }
+  }
 
   get ready(): boolean {
     return this.state === "ready" && !this.closed;
@@ -170,6 +230,7 @@ export class OutdoorEnvironment {
   getStatus() {
     return {
       state: this.state,
+      calibration: this.calibration,
       phaseCount: OUTDOOR_ENVIRONMENT_PHASES.length,
       faceSize: OUTDOOR_ENVIRONMENT_FACE_SIZE,
       baseColorBytes: this.targets.length * ATLAS_WIDTH * ATLAS_HEIGHT * 8,
@@ -213,11 +274,16 @@ export class OutdoorEnvironment {
           submittedDevice = device;
           for (const samplePhase of OUTDOOR_ENVIRONMENT_PHASES) {
             if (this.closed) throw new Error("Outdoor preparation cancelled");
-            const calibration = calibrateOutdoorCapture(capture, samplePhase);
+            const calibration = calibrateOutdoorCapture(
+              capture,
+              samplePhase,
+              this.calibration,
+            );
             capture.setPhase(
               samplePhase,
               calibration.skyScale,
               calibration.groundRadiance,
+              calibration.skyColor,
             );
             const target = new THREE.RenderTarget(ATLAS_WIDTH, ATLAS_HEIGHT, {
               minFilter: THREE.LinearFilter,

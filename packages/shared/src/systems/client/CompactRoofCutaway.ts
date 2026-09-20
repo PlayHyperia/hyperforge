@@ -36,6 +36,7 @@ export class CompactRoofCutaway {
   private readonly localPoint = new THREE.Vector3();
   private readonly inverseRoot = new THREE.Matrix4();
   private readonly lodgeBounds: THREE.Box3 | null;
+  private readonly bankBounds: THREE.Box3 | null;
   readonly upperWallY: number | null;
   private lastFrame = -1;
   private lastFrameCamera: THREE.Camera | null = null;
@@ -44,11 +45,34 @@ export class CompactRoofCutaway {
     private readonly root: THREE.Group,
     private readonly roof: THREE.Mesh,
     private readonly timber: THREE.Mesh,
-    mode: "court" | "lodge" = "court",
+    mode: "court" | "lodge" | "bank" = "court",
   ) {
     this.ray.layers.enableAll();
     this.lodgeBounds =
       mode === "lodge" ? (roof.geometry.boundingBox?.clone() ?? null) : null;
+    this.bankBounds =
+      mode === "bank" ? (roof.geometry.boundingBox?.clone() ?? null) : null;
+    if (mode === "bank") {
+      const mask = timber.geometry.getAttribute("courtRoof");
+      if (
+        !this.bankBounds ||
+        this.bankBounds.isEmpty() ||
+        ![
+          ...this.bankBounds.min.toArray(),
+          ...this.bankBounds.max.toArray(),
+        ].every(Number.isFinite) ||
+        roof.parent !== root ||
+        timber.parent !== root ||
+        !roof.matrix.equals(new THREE.Matrix4()) ||
+        !timber.matrix.equals(new THREE.Matrix4()) ||
+        !mask ||
+        mask.itemSize !== 1 ||
+        mask.count !== timber.geometry.getAttribute("position").count
+      )
+        throw new Error(
+          "Bank cutaway requires its actual local roof/frame geometry",
+        );
+    }
     if (
       mode === "lodge" &&
       (!this.lodgeBounds ||
@@ -136,6 +160,45 @@ export class CompactRoofCutaway {
   private interceptsFocus(camera: THREE.Camera): boolean {
     if (!(camera instanceof THREE.PerspectiveCamera)) return false;
     this.origin.setFromMatrixPosition(camera.matrixWorld);
+    if (this.bankBounds) {
+      // The open pavilion has a wider/deeper footprint than the smithy. Its
+      // actual roof bounds own both the inside-lens test and the oblique focus
+      // region; an outward-facing camera underneath still needs a clear view.
+      this.inverseRoot.copy(this.root.matrixWorld).invert();
+      this.localPoint.copy(this.origin).applyMatrix4(this.inverseRoot);
+      const p = this.localPoint,
+        box = this.bankBounds,
+        margin = this.desired ? 0.35 : -0.05;
+      if (!p.toArray().every(Number.isFinite)) return false;
+      if (
+        p.x >= box.min.x - margin &&
+        p.x <= box.max.x + margin &&
+        p.z >= box.min.z - margin &&
+        p.z <= box.max.z + margin &&
+        p.y >= 0.4 &&
+        p.y <= box.max.y + 0.5 + margin
+      )
+        return true;
+      this.direction.set(0, 0, -1).transformDirection(camera.matrixWorld);
+      this.focus
+        .copy(this.origin)
+        .add(this.direction)
+        .applyMatrix4(this.inverseRoot)
+        .sub(p);
+      if (this.focus.y >= -0.01 || Math.hypot(p.x, p.z) > 40) return false;
+      const distance = (1.2 - p.y) / this.focus.y;
+      if (distance <= 0 || distance > 80) return false;
+      this.focus.copy(this.origin).addScaledVector(this.direction, distance);
+      this.localPoint.copy(this.focus).applyMatrix4(this.inverseRoot);
+      if (
+        this.localPoint.x < box.min.x - margin ||
+        this.localPoint.x > box.max.x + margin ||
+        this.localPoint.z < box.min.z - margin ||
+        this.localPoint.z > box.max.z + margin
+      )
+        return false;
+      return this.rayInterceptsUpper(distance);
+    }
     if (this.lodgeBounds) {
       // The bank camera looks OUT toward its service chest while its lens is
       // inside the lodge eaves. A center-target ray cannot detect that large
@@ -172,6 +235,10 @@ export class CompactRoofCutaway {
       Math.abs(this.focus.z - base.z) > 3 + margin
     )
       return false;
+    return this.rayInterceptsUpper(distance);
+  }
+
+  private rayInterceptsUpper(distance: number): boolean {
     this.ray.ray.set(this.origin, this.direction);
     this.ray.near = 0.01;
     this.ray.far = distance - 0.05;

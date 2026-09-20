@@ -1,3 +1,12 @@
+import {
+  createGrassPlacementCellOperations,
+  type GrassPlacementCoverageTrial,
+} from "../utils/workers/GrassPlacementCell";
+import type {
+  CompactCoastBlend,
+  CompactPondBlend,
+} from "../systems/shared/world/CompactTerrainMaterial";
+
 interface HyperiaViewportWindow extends Window {
   __HYPERIA_EMBEDDED__?: boolean;
   __HYPERIA_CONFIG__?: {
@@ -118,6 +127,189 @@ export const STREAMING_RENDER_PROFILES = Object.freeze({
 export type StreamingRenderProfileId = keyof typeof STREAMING_RENDER_PROFILES;
 export type SkyAtmosphereMode = "gradient-v1" | "scattering-v1";
 export type GrassAppearanceCandidate = "natural-tuft-v1" | "fine-meadow-v1";
+export type GrassLightingCandidate = "canopy-normal-v1" | "leaf-volume-v1";
+
+/** Fine-only shading trial, captured once by the terrain owner; no density change. */
+export function resolveGrassLightingCandidate(
+  win?: Window,
+): GrassLightingCandidate | undefined {
+  const windowRef = getWindowRef(win);
+  if (!windowRef) return undefined;
+  const params = getSearchParams(windowRef);
+  const values = params?.getAll("grassLighting") ?? [];
+  if (!values.length) return undefined;
+  if (
+    values.length !== 1 ||
+    (values[0] !== "canopy-normal-v1" && values[0] !== "leaf-volume-v1")
+  )
+    throw new Error("Unknown or duplicate grass lighting candidate");
+  if (
+    resolveGrassAppearanceCandidate(windowRef) !== "fine-meadow-v1" ||
+    params?.get("streamRenderProfile") !== "island-fine-meadow-720p60-v1"
+  )
+    throw new Error("Grass lighting requires the explicit fine meadow pair");
+  return values[0];
+}
+
+/** Explicit dirt-material preview; its terrain owner also admits the sculpt profile. */
+export function resolveCompactDirtProjectionCandidate(
+  win?: Window,
+): "stochastic-v1" | undefined {
+  const windowRef = getWindowRef(win);
+  if (!windowRef) return undefined;
+  const params = getSearchParams(windowRef);
+  const values = params?.getAll("dirtProjection") ?? [];
+  if (!values.length) return undefined;
+  if (values.length !== 1 || values[0] !== "stochastic-v1")
+    throw new Error("Unknown or duplicate dirt projection candidate");
+  if (
+    resolveGrassAppearanceCandidate(windowRef) !== "fine-meadow-v1" ||
+    params?.get("streamRenderProfile") !== "island-fine-meadow-720p60-v1"
+  )
+    throw new Error("Dirt projection requires the explicit fine meadow pair");
+  return "stochastic-v1";
+}
+
+/** Explicit rock-material preview, independent of dirt and surface blending. */
+export function resolveCompactRockProjectionCandidate(
+  win?: Window,
+): "stochastic-v1" | undefined {
+  const windowRef = getWindowRef(win);
+  if (!windowRef) return undefined;
+  const params = getSearchParams(windowRef);
+  const values = params?.getAll("rockProjection") ?? [];
+  if (!values.length) return undefined;
+  if (values.length !== 1 || values[0] !== "stochastic-v1")
+    throw new Error("Unknown or duplicate rock projection candidate");
+  if (
+    resolveGrassAppearanceCandidate(windowRef) !== "fine-meadow-v1" ||
+    params?.get("streamRenderProfile") !== "island-fine-meadow-720p60-v1"
+  )
+    throw new Error("Rock projection requires the explicit fine meadow pair");
+  return "stochastic-v1";
+}
+
+/** Explicit surface-blend preview; the terrain owner separately admits sculpt terrain. */
+export function resolveCompactSurfaceBlendCandidate(
+  win?: Window,
+): "height-v1" | undefined {
+  const windowRef = getWindowRef(win);
+  if (!windowRef) return undefined;
+  const params = getSearchParams(windowRef);
+  const values = params?.getAll("terrainBlend") ?? [];
+  if (!values.length) return undefined;
+  if (values.length !== 1 || values[0] !== "height-v1")
+    throw new Error("Unknown or duplicate terrain blend candidate");
+  if (
+    resolveGrassAppearanceCandidate(windowRef) !== "fine-meadow-v1" ||
+    params?.get("streamRenderProfile") !== "island-fine-meadow-720p60-v1"
+  )
+    throw new Error("Terrain blend requires the explicit fine meadow pair");
+  return "height-v1";
+}
+
+/** Pond-only preview; never selected by a rendering/default profile. */
+export function resolveCompactPondBlendCandidate(
+  win?: Window,
+): CompactPondBlend | undefined {
+  const windowRef = getWindowRef(win);
+  if (!windowRef) return undefined;
+  const params = getSearchParams(windowRef);
+  const values = params?.getAll("pondBlend") ?? [];
+  if (!values.length) return undefined;
+  if (
+    values.length !== 1 ||
+    (values[0] !== "relief-v1" &&
+      values[0] !== "relief-contact-v1" &&
+      values[0] !== "shore-contact-v1" &&
+      values[0] !== "composition-v1")
+  )
+    throw new Error("Unknown or duplicate pond blend candidate");
+  if (
+    resolveGrassAppearanceCandidate(windowRef) !== "fine-meadow-v1" ||
+    params?.get("streamRenderProfile") !== "island-fine-meadow-720p60-v1"
+  )
+    throw new Error("Pond blend requires the explicit fine meadow pair");
+  if (resolveCompactSurfaceBlendCandidate(windowRef) !== "height-v1")
+    throw new Error("Pond blend requires terrainBlend=height-v1");
+  return values[0];
+}
+
+/** Restart-owned coastal preview; absence preserves existing profiles. */
+export function resolveCompactCoastBlend(
+  win?: Window,
+): CompactCoastBlend | undefined {
+  const windowRef = getWindowRef(win);
+  if (!windowRef) return undefined;
+  const params = getSearchParams(windowRef);
+  const values = params?.getAll("coastBlend") ?? [];
+  if (!values.length) return undefined;
+  if (
+    values.length !== 1 ||
+    (values[0] !== "detail-v1" &&
+      values[0] !== "distribution-v1" &&
+      values[0] !== "cavity-v1")
+  )
+    throw new Error("Unknown or duplicate coast blend candidate");
+  if (
+    resolveGrassAppearanceCandidate(windowRef) !== "fine-meadow-v1" ||
+    params?.get("streamRenderProfile") !== "island-fine-meadow-720p60-v1"
+  )
+    throw new Error("Coast blend requires the explicit fine meadow pair");
+  if (resolveCompactSurfaceBlendCandidate(windowRef) !== "height-v1")
+    throw new Error("Coast blend requires terrainBlend=height-v1");
+  return values[0];
+}
+
+/** Explicit fine-grass road clearance, captured by its owner until restart. */
+export function resolveGrassRoadClearance(
+  win?: Window,
+): "per-blade-v1" | undefined {
+  const windowRef = getWindowRef(win);
+  if (!windowRef) return undefined;
+  const params = getSearchParams(windowRef);
+  const values = params?.getAll("grassRoadClearance") ?? [];
+  if (!values.length) return undefined;
+  if (values.length !== 1 || values[0] !== "per-blade-v1")
+    throw new Error("Unknown or duplicate grass road-clearance selector");
+  if (
+    resolveGrassAppearanceCandidate(windowRef) !== "fine-meadow-v1" ||
+    params?.get("streamRenderProfile") !== "island-fine-meadow-720p60-v1"
+  )
+    throw new Error(
+      "Grass road clearance requires the explicit fine meadow pair",
+    );
+  return "per-blade-v1";
+}
+
+/** Explicit single-cell density trial, captured by its owner until restart. */
+export function resolveGrassCoverageTrial(
+  win?: Window,
+): GrassPlacementCoverageTrial | undefined {
+  const windowRef = getWindowRef(win);
+  if (!windowRef) return undefined;
+  const params = getSearchParams(windowRef);
+  const selectors = params?.getAll("grassCoverage") ?? [];
+  const cells = params?.getAll("grassCoverageCell") ?? [];
+  if (!selectors.length && !cells.length) return undefined;
+  if (selectors.length !== 1 || cells.length !== 1)
+    throw new Error("Grass coverage requires one selector and one cell");
+  // Canonical decimal indices only: no coercion of whitespace, fractions,
+  // exponents, alternate bases or signed zero into a different selected cell.
+  if (!/^(0|-?[1-9]\d*),(0|-?[1-9]\d*)$/u.test(cells[0]))
+    throw new Error(
+      "Grass coverage requires two canonical integer cell indices",
+    );
+  if (resolveGrassAppearanceCandidate(windowRef) !== "fine-meadow-v1")
+    throw new Error("Grass coverage requires the explicit fine meadow pair");
+  const [indexX, indexZ] = cells[0].split(",").map(Number);
+  // The shared worker-domain validator owns the bounded grid and selector;
+  // it also returns detached, frozen trial and cell records.
+  return createGrassPlacementCellOperations().validateCoverageTrial({
+    id: selectors[0],
+    cell: { schemaVersion: 1, size: 25, indexX, indexZ },
+  });
+}
 
 /** Explicit shared ground/grass art trial; never a population or quality switch. */
 export function resolveHabitatCompositionCandidate(
@@ -329,6 +521,8 @@ export type StreamingGrassProfileReceipt = {
     mode: "world-cells-v1";
     /** Explicit fine-only sampling policy; absent in historical receipts. */
     placementDistribution?: "fine-cell-stratified-v1";
+    /** Restart-owned single-cell experiment; absent for unchanged coverage. */
+    readonly coverageTrial?: GrassPlacementCoverageTrial;
     cellSize: 25;
     nearLodDistance: 40;
     liveCells: number;
@@ -343,6 +537,11 @@ export type StreamingGrassProfileReceipt = {
     completedChunks: number;
     readyEmptyChunks: number;
     correctionBytes: number;
+    /** Explicit fine-only mode and live mask bytes, not a GPU allocation claim. */
+    roadClearance?: {
+      mode: "per-blade-v1";
+      visibilityBytes: number;
+    };
     activeSliceMs: number;
     maximumSliceMs: number;
   };

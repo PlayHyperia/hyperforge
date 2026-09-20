@@ -398,27 +398,31 @@ export function createClientWorld() {
   // ============================================================================
   // THREE.JS SETUP
   // ============================================================================
-  // Expose THREE.js to the stage system after a short delay
-  // This ensures stage.scene is ready before we try to access it
+  // Stage constructs its scene synchronously during registration. Bind the
+  // resource pools before world.init can receive entities: a warm connection
+  // can otherwise reach addInstance before a delayed setup and silently leave
+  // those resources without either a rendered instance or interaction proxy.
 
   const setupStageWithTHREE = () => {
     const stageSystem = world.stage as unknown as StageSystem;
-    if (stageSystem && stageSystem.scene) {
-      stageSystem.THREE = THREE as unknown as StageSystem["THREE"];
-      initGLBTreeInstancer(stageSystem.scene as unknown as THREE.Scene, world);
-      initGLBTreeBatchedInstancer(
-        stageSystem.scene as unknown as THREE.Scene,
-        world,
+    if (!stageSystem?.scene)
+      throw new Error(
+        "Client stage must exist before resource pool initialization",
       );
-      initPlaceholderInstancer(stageSystem.scene as unknown as THREE.Scene);
-      initGLBResourceInstancer(
-        stageSystem.scene as unknown as THREE.Scene,
-        world,
-      );
-    }
+    stageSystem.THREE = THREE as unknown as StageSystem["THREE"];
+    initGLBTreeInstancer(stageSystem.scene as unknown as THREE.Scene, world);
+    initGLBTreeBatchedInstancer(
+      stageSystem.scene as unknown as THREE.Scene,
+      world,
+    );
+    initPlaceholderInstancer(stageSystem.scene as unknown as THREE.Scene);
+    initGLBResourceInstancer(
+      stageSystem.scene as unknown as THREE.Scene,
+      world,
+    );
   };
 
-  setTimeout(setupStageWithTHREE, 200);
+  setupStageWithTHREE();
 
   // ============================================================================
   // RPG GAME SYSTEMS (ASYNC)

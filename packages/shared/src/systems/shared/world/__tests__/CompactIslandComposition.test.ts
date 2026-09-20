@@ -10,6 +10,7 @@ import {
   isPositionInsideDuelArenaZone,
 } from "../../../../data/duel-manifest";
 import { NoiseGenerator } from "../../../../utils/NoiseGenerator";
+import type { ResourceNode } from "../../../../types/world/terrain";
 import { createCompactIslandLandform } from "../CompactIslandLandform";
 import {
   SCULPTED_COMPACT_V3_PROFILE_FIXTURE as candidate,
@@ -168,7 +169,52 @@ const PREVIOUS_CENSUS = [
 
 describe("compact v4 asymmetric coastline and continuous ridge", () => {
   it("admits explicit finite authored shape data with a distinct profile/content identity", () => {
-    expect(DataManager.getWorldTerrainProfile()).toEqual(active);
+    // Current admission includes the bounded cove; historical v4 shape tests
+    // below still use the unchanged candidate fixture, not the live manifest.
+    expect(DataManager.getWorldTerrainProfile()).toEqual({
+      ...active,
+      coastalApron: {
+        schemaVersion: 1,
+        minX: 445,
+        maxX: 503,
+        minZ: 436,
+        maxZ: 539,
+        featherX: 6,
+        featherZ: 20,
+        halo: 1,
+        westernShoulder: {
+          maxWidth: 24,
+          startZ: 460,
+          endZ: 539,
+          featherZ: 24,
+        },
+        lowland: {
+          minZ: 436,
+          maxZ: 540,
+          startX: 462,
+          endX: 422,
+          descentLength: 57,
+          halfWidth: 12,
+          westHoldX: 445,
+          westMinX: 377,
+          westReleaseZ: 458,
+          westReleaseLength: 64,
+          eastMaxX: 503,
+          startBlend: 12,
+          endBlend: 22,
+          endHeight: 18.3,
+        },
+        floorHeight: 2.5,
+        referencePlateau: 28.15,
+        knots: [
+          [-26, 2.5, 0],
+          [-9, 16, 0.12],
+          [3, 17.5, 0.14],
+          [15, 19.25, 0.18],
+          [60, 28.15, 0],
+        ],
+      },
+    });
     expect(candidate.id).toBe("compact-duel-island-v4");
     expect(candidate.algorithm).toBe("compact-island-sculpt-v3");
     expect(worldTerrainProfileIdentity(candidate)).not.toBe(
@@ -238,7 +284,15 @@ describe("compact v4 asymmetric coastline and continuous ridge", () => {
 
   it("preserves exact eight procedural identities and grounded transforms, plus all authored path surfaces", async () => {
     const { terrain, internal } = await fixture();
-    const rows = [];
+    const rows: [
+      ResourceNode["id"],
+      ResourceNode["subType"],
+      number,
+      number,
+      number,
+      ResourceNode["scale"],
+      ResourceNode["rotation"],
+    ][] = [];
     for (let x = 2; x <= 5; x++)
       for (let z = 2; z <= 6; z++) {
         const batch = generateCenteredTrees(
@@ -289,8 +343,12 @@ describe("compact v4 asymmetric coastline and continuous ridge", () => {
     // This historical shape/census is not the active v6 wear authoring.
     for (const path of paths) {
       expect(path.id.startsWith("compact-wear-")).toBe(false);
-      expect(Object.hasOwn(path, "blendWidth")).toBe(false);
-      expect(Object.hasOwn(path, "maxInfluence")).toBe(false);
+      expect(Object.prototype.hasOwnProperty.call(path, "blendWidth")).toBe(
+        false,
+      );
+      expect(Object.prototype.hasOwnProperty.call(path, "maxInfluence")).toBe(
+        false,
+      );
     }
     expect(
       paths.filter((path) => path.id.startsWith("compact-path-")),
@@ -360,7 +418,17 @@ describe("compact v4 asymmetric coastline and continuous ridge", () => {
       nz: 0,
       faceIndex: 0,
     };
-    const measurements = [];
+    const measurements: {
+      resolution: number;
+      samples: number;
+      maxError: number;
+      nearWaterError: number;
+      rmsError: number;
+      triangles: number;
+      geometryBytes: number;
+      worst: { x: number; z: number } | null;
+      worstNearWater: { x: number; z: number } | null;
+    }[] = [];
     for (const resolution of [16, 32, 64]) {
       let samples = 0,
         squared = 0,

@@ -105,27 +105,40 @@ const MANIFEST_FILES = [
  */
 async function getMissingRequiredManifests(
   manifestsDir: string,
+  explicitSource = false,
 ): Promise<string[]> {
   const requiredRootFiles = [
     "npcs.json",
     "world-areas.json",
     "biomes.json",
     "stores.json",
+    // DataManager reads these unconditionally. Keep legacy CDN admission
+    // unchanged, but never admit an incomplete explicitly selected source.
+    ...(explicitSource ? ["world-config.json", "duel-arenas.json"] : []),
   ] as const;
 
   const missing: string[] = [];
+  const isPresent = async (file: string): Promise<boolean> => {
+    const filename = path.join(manifestsDir, file);
+    if (!explicitSource) return fs.pathExists(filename);
+    try {
+      if (!(await fs.stat(filename)).isFile()) return false;
+      await fs.access(filename, fs.constants.R_OK);
+      return true;
+    } catch {
+      return false;
+    }
+  };
 
   for (const file of requiredRootFiles) {
-    const exists = await fs.pathExists(path.join(manifestsDir, file));
+    const exists = await isPresent(file);
     if (!exists) {
       missing.push(file);
     }
   }
 
   // Items manifest: either legacy single file OR the full category directory set
-  const hasItemsJson = await fs.pathExists(
-    path.join(manifestsDir, "items.json"),
-  );
+  const hasItemsJson = await isPresent("items.json");
 
   const requiredItemCategoryFiles = [
     "weapons",
@@ -137,9 +150,7 @@ async function getMissingRequiredManifests(
 
   let hasAllItemCategoryFiles = true;
   for (const file of requiredItemCategoryFiles) {
-    const exists = await fs.pathExists(
-      path.join(manifestsDir, "items", `${file}.json`),
-    );
+    const exists = await isPresent(path.join("items", `${file}.json`));
     if (!exists) {
       hasAllItemCategoryFiles = false;
     }
@@ -152,6 +163,32 @@ async function getMissingRequiredManifests(
   }
 
   return missing;
+}
+
+/** Explicit manifest sources are read-only inputs, never a CDN cache. */
+async function validateExplicitManifestSource(
+  assetsDir: string,
+  manifestsDir: string,
+): Promise<void> {
+  for (const directory of [assetsDir, manifestsDir]) {
+    try {
+      if (!(await fs.stat(directory)).isDirectory()) {
+        throw new Error("Not a directory");
+      }
+      await fs.access(directory, fs.constants.R_OK | fs.constants.X_OK);
+    } catch (cause) {
+      throw new Error(
+        `Explicit ASSETS_DIR requires an existing readable directory: ${directory}`,
+        { cause },
+      );
+    }
+  }
+  const missing = await getMissingRequiredManifests(manifestsDir, true);
+  if (missing.length > 0) {
+    throw new Error(
+      `Explicit ASSETS_DIR has missing or unreadable required manifests in ${manifestsDir}: ${missing.join(", ")}. No CDN fetch or fallback is permitted.`,
+    );
+  }
 }
 
 function isLocalhostUrl(url: string): boolean {
@@ -185,7 +222,7 @@ export interface ServerConfig {
   /** Assets directory path (models, music, textures) */
   assetsDir: string;
 
-  /** Manifests directory path (fetched from CDN) */
+  /** Explicit read-only manifests directory, or the default CDN cache */
   manifestsDir: string;
 
   /** Icons directory path (generated sprite PNGs) */
@@ -445,8 +482,19 @@ export async function loadConfig(): Promise<ServerConfig> {
     ? WORLD
     : path.join(hyperiaRoot, WORLD);
 
-  // Manifests directory - local cache for CDN-fetched manifests
-  const manifestsDir = path.join(hyperiaRoot, "world/assets/manifests");
+  // Match DataManager: a nonempty ASSETS_DIR is relative to process.cwd(),
+  // not WORLD or this module. Do not resolve symlinks differently from it.
+  const explicitAssetsDir = process.env.ASSETS_DIR;
+  const manifestsDir = explicitAssetsDir
+    ? path.resolve(explicitAssetsDir, "manifests")
+    : path.join(hyperiaRoot, "world/assets/manifests");
+  if (explicitAssetsDir) {
+    // Validate before any directory creation, including the mutable world.
+    await validateExplicitManifestSource(
+      path.resolve(explicitAssetsDir),
+      manifestsDir,
+    );
+  }
 
   // Icons directory - generated sprite PNGs for item icons
   const iconsDir = path.join(hyperiaRoot, "world/assets/icons");
@@ -457,16 +505,18 @@ export async function loadConfig(): Promise<ServerConfig> {
   const assetsDir = path.join(workspaceRoot, "assets");
   const builtInAssetsDir = path.join(hyperiaRoot, "src/world/assets");
 
-  // Create world and manifests folders if needed
+  // Runtime world storage remains independent of the selected manifest input.
   await fs.ensureDir(worldDir);
-  await fs.ensureDir(manifestsDir);
+  if (!explicitAssetsDir) await fs.ensureDir(manifestsDir);
 
   // Construct assets URL with trailing slash
   const assetsUrl = CDN_URL.endsWith("/") ? CDN_URL : `${CDN_URL}/`;
 
   // Fetch manifests from CDN at startup (production and CI)
   // Skip in development if manifests already exist locally
-  await fetchManifestsFromCDN(CDN_URL, manifestsDir, NODE_ENV);
+  if (!explicitAssetsDir) {
+    await fetchManifestsFromCDN(CDN_URL, manifestsDir, NODE_ENV);
+  }
 
   return {
     port: PORT,

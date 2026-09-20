@@ -49,6 +49,7 @@ export class WaterBodyRegistry {
   private gridCellSize: number;
   private grid: Map<number, number[]> = new Map();
   private oceanLevel: number;
+  private sealed = false;
 
   constructor(oceanLevel: number, gridCellSize = 50) {
     this.oceanLevel = oceanLevel;
@@ -64,6 +65,8 @@ export class WaterBodyRegistry {
     surfaceY: number;
     sourceType: WaterBodySourceType;
   }): void {
+    if (this.sealed)
+      throw new Error("Bound pond composition water changes require restart");
     if (this.bodies.some((b) => b.id === data.id)) {
       console.warn(
         `[WaterBodyRegistry] Duplicate water body ID "${data.id}" — skipping`,
@@ -172,6 +175,14 @@ export class WaterBodyRegistry {
 
   getAllBodies(): ReadonlyArray<ElevatedWaterBody> {
     return this.bodies;
+  }
+
+  /** Opt-in restart-owned material bindings cannot follow live water edits.
+   * Freeze exposed bodies too, so callers cannot bypass registry admission. */
+  seal(): void {
+    for (const body of this.bodies) Object.freeze(body);
+    Object.freeze(this.bodies);
+    this.sealed = true;
   }
 
   /** Closed-region, read-only ownership for suspended vegetation work. Newly

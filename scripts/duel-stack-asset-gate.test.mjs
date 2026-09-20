@@ -42,6 +42,10 @@ test("every stack launch gates game reuse and startup on byte-complete assets", 
     '"game-server"',
     startComponentsIndex,
   );
+  const clientStartIndex = duelStackSource.indexOf(
+    '"game-client"',
+    startComponentsIndex,
+  );
 
   assert.ok(initialReadinessIndex >= 0, "initial readiness check not found");
   assert.ok(assetGateIndex > initialReadinessIndex, "asset gate not found");
@@ -52,6 +56,7 @@ test("every stack launch gates game reuse and startup on byte-complete assets", 
   );
   assert.ok(sharedBuildIndex > assetGateIndex, "assets must gate shared build");
   assert.ok(serverStartIndex > assetGateIndex, "assets must gate server start");
+  assert.ok(clientStartIndex > assetGateIndex, "assets must gate client start");
 
   const gateBlock = duelStackSource.slice(initialReadinessIndex, reuseIndex);
   assert.match(gateBlock, /process\.execPath/u);

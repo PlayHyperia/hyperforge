@@ -57,6 +57,34 @@ class ProfileTerrain implements FullTerrainProvider {
     this.SHORELINE_THRESHOLD = config.SHORELINE_THRESHOLD;
     this.SHORELINE_STRENGTH = config.SHORELINE_STRENGTH;
   }
+  capturePreparationLease() {
+    // This analytic fixture has no mutable world/biome/road source. Its only
+    // mutable output inputs are the scalars deliberately altered by negatives.
+    const snapshot = [
+      this.terrainProfileIdentity,
+      this.TILE_SIZE,
+      this.MAX_HEIGHT,
+      this.WATER_LEVEL_NORMALIZED,
+      this.SHORELINE_THRESHOLD,
+      this.SHORELINE_STRENGTH,
+    ];
+    let current = true;
+    return {
+      isCurrent: () =>
+        (current &&= snapshot.every(
+          (value, index) =>
+            value ===
+            [
+              this.terrainProfileIdentity,
+              this.TILE_SIZE,
+              this.MAX_HEIGHT,
+              this.WATER_LEVEL_NORMALIZED,
+              this.SHORELINE_THRESHOLD,
+              this.SHORELINE_STRENGTH,
+            ][index],
+        )),
+    };
+  }
   getHeightAtComputed(x: number, z: number): number {
     this.heightSamples++;
     return 22 + x * 0.01 + z * 0.02;

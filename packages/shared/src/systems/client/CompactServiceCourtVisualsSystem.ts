@@ -28,11 +28,13 @@ export function createCompactServiceCourtVisual(
   record: OwnedCompactServiceCourt,
   mainCamera?: () => THREE.Camera,
 ) {
+  const bank = record.descriptor.recipeId === "open-timber-bank-haven-v1";
+  const haven =
+    bank || record.descriptor.recipeId === "open-timber-smithy-haven-v3";
+  const prefix = bank ? "compact-bank" : "compact-smithy";
   const geometry = createOpenWorkshop(record.feet, {
-    architecturalFinish:
-      record.descriptor.recipeId === "open-timber-smithy-haven-v3"
-        ? "haven-v1"
-        : undefined,
+    ...(bank ? ({ recipe: "bank-pavilion-v1" } as const) : {}),
+    architecturalFinish: haven ? "haven-v1" : undefined,
   });
   const materials = new Set<THREE.Material>();
   const root = new THREE.Group();
@@ -48,14 +50,11 @@ export function createCompactServiceCourtVisual(
     const make = (config: Parameters<typeof createBuildingMaterial>[0]) => {
       const material = createBuildingMaterial({
         ...config,
-        architecturalFinish:
-          record.descriptor.recipeId === "open-timber-smithy-haven-v3"
-            ? "haven-v1"
-            : undefined,
+        architecturalFinish: haven ? "haven-v1" : undefined,
         useVertexColors: false,
       });
       materials.add(material);
-      material.name = `compact-smithy-${config.type}`;
+      material.name = `${prefix}-${config.type}`;
       applySkyFog(material);
       return material;
     };
@@ -78,20 +77,15 @@ export function createCompactServiceCourtVisual(
       scale: 0.35,
       roughness: 0.94,
       variation: 0.3,
-      ...(record.descriptor.recipeId === "open-timber-smithy-haven-v3"
-        ? HAVEN_ARCHITECTURAL_ROOF_CONFIG
-        : {}),
+      ...(haven ? HAVEN_ARCHITECTURAL_ROOF_CONFIG : {}),
     });
     const stone = make({
       type: "stone-ashlar",
       baseColor: "#aaa18d",
       secondaryColor: "#797e72",
       accentColor: "#66695d",
-      scale:
-        record.descriptor.recipeId === "open-timber-smithy-haven-v3"
-          ? 0.75
-          : 1.4,
-      ...(record.descriptor.recipeId === "open-timber-smithy-haven-v3"
+      scale: haven ? 0.75 : 1.4,
+      ...(haven
         ? { patternUV: createHavenLocalMetricUV(positionLocal, normalGeometry) }
         : {}),
       roughness: 0.88,
@@ -105,7 +99,7 @@ export function createCompactServiceCourtVisual(
       ["footings", stone],
     ] as const) {
       const mesh = new THREE.Mesh(geometry[name], material);
-      mesh.name = `compact-smithy-${name}`;
+      mesh.name = `${prefix}-${name}`;
       mesh.castShadow = true;
       mesh.receiveShadow = true;
       mesh.layers.set(1);
@@ -125,8 +119,15 @@ export function createCompactServiceCourtVisual(
     root.updateMatrixWorld(true);
     const roofMesh = root.children[1] as THREE.Mesh;
     const timberMesh = root.children[0] as THREE.Mesh;
-    const cutaway = new CompactRoofCutaway(root, roofMesh, timberMesh);
-    const { fade, visible } = createCompactRoofFade("compactSmithyRoofFade");
+    const cutaway = new CompactRoofCutaway(
+      root,
+      roofMesh,
+      timberMesh,
+      bank ? "bank" : "court",
+    );
+    const { fade, visible } = createCompactRoofFade(
+      bank ? "compactBankRoofFade" : "compactSmithyRoofFade",
+    );
     roof.maskNode = visible;
     timber.maskNode = attribute("courtRoof", "float").lessThan(0.5).or(visible);
     // r186 explicitly selects this mask for shadow passes, independently of
@@ -164,55 +165,83 @@ export function createCompactServiceCourtVisual(
 }
 
 export class CompactServiceCourtVisualsSystem extends System {
-  private visual: ReturnType<typeof createCompactServiceCourtVisual> | null =
-    null;
+  private visuals: ReturnType<typeof createCompactServiceCourtVisual>[] = [];
   override getDependencies() {
     return { required: [COMPACT_SERVICE_COURT_SYSTEM, "stage"] };
   }
   override start(): void {
-    if (
-      !this.initialized ||
-      this.visual ||
-      !DataManager.getWorldConfig()?.compactServiceCourt
-    )
-      return;
-    const record = this.world
+    if (!this.initialized || this.started) return;
+    const config = DataManager.getWorldConfig();
+    const descriptors = [
+      config?.compactServiceCourt,
+      config?.compactBankPavilion,
+    ].filter((descriptor) => descriptor !== undefined);
+    if (!descriptors.length) return;
+    const records = this.world
       .getSystem<CompactServiceCourtSystem>(COMPACT_SERVICE_COURT_SYSTEM)
-      ?.getCourt();
-    if (!record)
-      throw new Error("Compact smithy requires its admitted collision owner");
-    this.visual = createCompactServiceCourtVisual(
-      record,
-      () => this.world.camera,
-    );
-    this.world.stage.scene.add(this.visual.root);
-    this.started = true;
+      ?.getCourts();
+    if (
+      !records ||
+      records.length !== descriptors.length ||
+      descriptors.some(
+        (descriptor) =>
+          records.filter(
+            (record) => record.descriptor.layoutId === descriptor.layoutId,
+          ).length !== 1,
+      )
+    )
+      throw new Error(
+        "Compact service visuals require every admitted collision owner",
+      );
+    const pending: ReturnType<typeof createCompactServiceCourtVisual>[] = [];
+    try {
+      for (const record of records)
+        pending.push(
+          createCompactServiceCourtVisual(record, () => this.world.camera),
+        );
+      for (const visual of pending) this.world.stage.scene.add(visual.root);
+      this.visuals = pending;
+      this.started = true;
+    } catch (error) {
+      for (const visual of pending) visual.dispose();
+      throw error;
+    }
   }
   getDiagnostics() {
-    return this.visual
-      ? Object.freeze({
-          layoutId: this.visual.root.name,
-          meshes: this.visual.root.children.length,
-          triangles: this.visual.triangles,
-          geometryBytes: this.visual.geometryBytes,
-          materials: this.visual.materialCount,
+    return (
+      this.getAllDiagnostics().find(
+        (record) => record.layoutId === "compact-service-court-v1",
+      ) ?? null
+    );
+  }
+  getAllDiagnostics() {
+    return Object.freeze(
+      this.visuals.map((visual) =>
+        Object.freeze({
+          layoutId: visual.root.name,
+          meshes: visual.root.children.length,
+          triangles: visual.triangles,
+          geometryBytes: visual.geometryBytes,
+          materials: visual.materialCount,
           cutaway: {
-            value: this.visual.cutaway.value,
-            desired: this.visual.cutaway.desired,
-            decisions: this.visual.cutaway.decisionCount,
+            value: visual.cutaway.value,
+            desired: visual.cutaway.desired,
+            decisions: visual.cutaway.decisionCount,
           },
-        })
-      : null;
+        }),
+      ),
+    );
   }
   override destroy(): void {
-    this.visual?.dispose();
-    this.visual = null;
+    for (const visual of this.visuals) visual.dispose();
+    this.visuals = [];
     super.destroy();
   }
 }
 
 export function registerCompactServiceCourtVisuals(world: World): void {
-  if (!DataManager.getWorldConfig()?.compactServiceCourt) return;
+  const config = DataManager.getWorldConfig();
+  if (!config?.compactServiceCourt && !config?.compactBankPavilion) return;
   if (!world.getSystem(COMPACT_SERVICE_COURT_SYSTEM))
     world.register(COMPACT_SERVICE_COURT_SYSTEM, CompactServiceCourtSystem);
   if (!world.getSystem(COMPACT_SERVICE_COURT_VISUAL_SYSTEM))

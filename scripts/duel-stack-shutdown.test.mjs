@@ -1,6 +1,14 @@
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
+import { spawn, spawnSync } from "node:child_process";
+import {
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import test from "node:test";
 import { Script } from "node:vm";
 import {
@@ -650,7 +658,25 @@ test("real hung game is bounded and cannot pass on protocol alone", async (t) =>
 test("real inherited stdout descendant prevents premature game close acceptance", async (t) => {
   const source = `
     import { spawn } from "node:child_process";
-    const descendant = spawn(process.execPath, ["-e", "process.on('SIGTERM',()=>{});setInterval(()=>{},1000)"], { stdio:["ignore",1,2] });
+    const descendant = spawn(process.execPath, ["-e", "process.on('SIGTERM',()=>{});process.send('ready');setInterval(()=>{},1000)"], { stdio:["ignore",1,2,"ipc"] });
+    await new Promise((resolve, reject) => {
+      const timeout = setTimeout(
+        () => reject(Error("descendant handler readiness timed out")),
+        2000,
+      );
+      descendant.once("error", reject);
+      descendant.once("exit", (code, signal) =>
+        reject(Error("descendant exited before readiness: " + code + "/" + signal)),
+      );
+      descendant.once("message", message => {
+        if (message !== "ready") {
+          reject(Error("unexpected descendant readiness: " + message));
+          return;
+        }
+        clearTimeout(timeout);
+        resolve();
+      });
+    });
     ${gameSource(`${emit()} process.exit(0);`)}
   `;
   const { result } = await run(t, source, { graceMs: 100 });
@@ -669,6 +695,241 @@ test("real detached-group descendant is removed after clean root even without in
   const { result } = await run(t, source);
   assert.equal(result.ok, true);
   assert.deepEqual(result.remainingGroups, []);
+});
+
+test("real cooperative leaders are awaited before routine group inspections", async (t) => {
+  for (let iteration = 0; iteration < 3; iteration++) {
+    const owned = await child(
+      t,
+      `
+      process.on("SIGTERM", () => {
+        process.send("stopping");
+        setTimeout(() => process.exit(0), 120);
+      });
+      setInterval(() => {}, 1000); process.send("ready");
+    `,
+    );
+    const result = await shutdownDuelStackChildren({
+      entries: [{ name: "cooperative-leader", proc: owned.proc }],
+    });
+    assert.equal(result.ok, true, JSON.stringify(result));
+    assert.deepEqual(result.failures, []);
+    assert.deepEqual(result.forcedGroups, []);
+    assert.deepEqual(result.remainingGroups, []);
+    assert.equal(result.processGroupDiagnostics.inspectionErrorCount, 0);
+    assert.equal(result.processGroupDiagnostics.metadataSamples, 0);
+    assert(
+      result.processGroupDiagnostics.leaderWaitDeferrals["sigterm-wait"] > 0,
+    );
+    assert.equal(
+      result.processGroupDiagnostics.leaderWaitDeferrals["sigkill-wait"],
+      0,
+    );
+    const leader = result.processGroupDiagnostics.ownedProcesses[0];
+    assert.equal(leader.exitObservedSinceShutdownEntry.code, 0);
+    assert.equal(leader.closeObservedSinceShutdownEntry.code, 0);
+    assert(owned.messages.includes("stopping"));
+    assert.equal(owned.proc.listenerCount("exit"), 0);
+    assert.equal(owned.proc.listenerCount("close"), 0);
+    assert.equal(alive(-owned.proc.pid), false);
+  }
+});
+
+test("real pending TERM-ignoring leader still reaches the strict kill deadline", async (t) => {
+  const owned = await child(
+    t,
+    `
+    process.on("SIGTERM", () => process.send("term-ignored"));
+    setInterval(() => {}, 1000); process.send("ready");
+  `,
+  );
+  const result = await shutdownDuelStackChildren({
+    entries: [{ name: "term-ignoring-leader", proc: owned.proc }],
+    residualGraceMs: 100,
+    killGraceMs: 1_000,
+  });
+  assert.equal(result.ok, false);
+  assert.equal(result.exitCode, 1);
+  assert.deepEqual(result.forcedGroups, ["term-ignoring-leader"]);
+  assert.match(result.failures.join("; "), /required SIGKILL/u);
+  assert(
+    result.processGroupDiagnostics.leaderWaitDeferrals["sigterm-wait"] > 0,
+  );
+  assert.equal(owned.proc.signalCode, "SIGKILL");
+  assert.deepEqual(result.remainingGroups, []);
+  assert(result.elapsedMs < 2_000);
+});
+
+test("already-reaped real leader cannot hide a TERM-ignoring descendant without inherited pipes", async (t) => {
+  const workerSource = `
+    process.on("SIGTERM", () => {});
+    setTimeout(() => process.exit(0), 6000);
+    process.send("worker-ready");
+  `;
+  const owned = await child(
+    t,
+    `
+    import { spawn } from "node:child_process";
+    const worker = spawn(process.execPath, ["-e", ${JSON.stringify(workerSource)}], {
+      stdio: ["ignore", "ignore", "ignore", "ipc"],
+    });
+    worker.once("message", () => {
+      process.send({ event: "worker", pid: worker.pid });
+      worker.disconnect(); worker.unref(); process.send("ready");
+    });
+    process.on("message", message => { if (message === "exit") process.exit(0); });
+  `,
+  );
+  const worker = owned.messages.find((message) => message?.event === "worker");
+  assert(Number.isSafeInteger(worker?.pid) && worker.pid > 1);
+  const closed = new Promise((resolve) => owned.proc.once("close", resolve));
+  owned.proc.send("exit");
+  await closed;
+  assert.equal(owned.proc.exitCode, 0);
+  assert.equal(alive(worker.pid), true);
+  assert.equal(alive(-owned.proc.pid), true);
+  const result = await shutdownDuelStackChildren({
+    entries: [{ name: "orphan-group", proc: owned.proc }],
+    residualGraceMs: 100,
+    killGraceMs: 1_000,
+  });
+  assert.equal(result.ok, false);
+  assert.deepEqual(result.forcedGroups, ["orphan-group"]);
+  assert.match(result.failures.join("; "), /required SIGKILL/u);
+  assert.deepEqual(result.processGroupDiagnostics.leaderWaitDeferrals, {
+    "sigterm-wait": 0,
+    "sigkill-wait": 0,
+  });
+  assert.deepEqual(result.remainingGroups, []);
+  assert.equal(alive(worker.pid), false);
+  assert.equal(alive(-owned.proc.pid), false);
+  assert(result.elapsedMs < 2_000);
+});
+
+test("real Darwin zombie-only group yields EPERM until its owned child is reaped", (t) => {
+  if (process.platform !== "darwin") {
+    t.skip("Darwin's retained-zombie process-group semantics");
+    return;
+  }
+  assert(
+    existsSync("/usr/bin/cc"),
+    "A real C compiler is required, not a mocked syscall",
+  );
+  const directory = mkdtempSync(
+    path.join(tmpdir(), "hyperia-shutdown-zombie-"),
+  );
+  const source = path.join(directory, "owned-zombie.c");
+  const binary = path.join(directory, "owned-zombie");
+  t.after(() => rmSync(directory, { recursive: true }));
+  writeFileSync(
+    source,
+    String.raw`
+#define _DARWIN_C_SOURCE
+#include <errno.h>
+#include <signal.h>
+#include <stdio.h>
+#include <string.h>
+#include <sys/wait.h>
+#include <unistd.h>
+static int reap(pid_t pid, int *status) {
+  pid_t found;
+  do { found = waitpid(pid, status, 0); } while (found == -1 && errno == EINTR);
+  return found == pid ? 0 : -1;
+}
+static int probe(const char *phase, pid_t pid, int expectedPid, int expectedGroup) {
+  errno = 0; int p = kill(pid, 0), pe = p == 0 ? 0 : errno;
+  errno = 0; int g = kill(-pid, 0), ge = g == 0 ? 0 : errno;
+  printf("{\"phase\":\"%s\",\"pid\":%d,\"pidErrno\":%d,\"groupErrno\":%d}\n", phase, pid, pe, ge);
+  return pe != expectedPid || ge != expectedGroup;
+}
+int main(void) {
+  setvbuf(stdout, NULL, _IONBF, 0);
+  int ready[2], release[2], status = 0, failed = 0;
+  if (pipe(ready) || pipe(release)) return 2;
+  pid_t child = fork();
+  if (child == -1) return 2;
+  if (child == 0) {
+    close(ready[0]); close(release[1]); alarm(3);
+    if (setpgid(0, 0)) _exit(71);
+    char byte = 'R'; if (write(ready[1], &byte, 1) != 1) _exit(72);
+    close(ready[1]);
+    ssize_t received;
+    do { received = read(release[0], &byte, 1); } while (received == -1 && errno == EINTR);
+    close(release[0]); _exit(received == 0 ? 23 : 73);
+  }
+  close(ready[1]); close(release[0]);
+  char byte = 0; ssize_t received;
+  do { received = read(ready[0], &byte, 1); } while (received == -1 && errno == EINTR);
+  close(ready[0]);
+  if (received != 1 || byte != 'R' || getpgid(child) != child) {
+    close(release[1]); reap(child, &status); return 3;
+  }
+  failed |= probe("live", child, 0, 0);
+  close(release[1]);
+  siginfo_t info; memset(&info, 0, sizeof(info));
+  int waited;
+  do { waited = waitid(P_PID, (id_t)child, &info, WEXITED | WNOWAIT); } while (waited == -1 && errno == EINTR);
+  if (waited || info.si_pid != child || info.si_code != CLD_EXITED || info.si_status != 23) {
+    reap(child, &status); return 4;
+  }
+  failed |= probe("zombie", child, 0, EPERM);
+  if (reap(child, &status) || !WIFEXITED(status) || WEXITSTATUS(status) != 23) return 5;
+  failed |= probe("reaped", child, ESRCH, ESRCH);
+  return failed;
+}
+`,
+    { flag: "wx" },
+  );
+  const compile = spawnSync(
+    "/usr/bin/cc",
+    ["-Wall", "-Wextra", "-Werror", source, "-o", binary],
+    {
+      encoding: "utf8",
+      timeout: 15_000,
+      maxBuffer: 16_384,
+    },
+  );
+  assert.equal(compile.error, undefined);
+  assert.equal(compile.status, 0, compile.stderr);
+  const run = spawnSync(binary, [], {
+    encoding: "utf8",
+    timeout: 5_000,
+    maxBuffer: 16_384,
+  });
+  assert.equal(run.error, undefined);
+  assert.equal(run.status, 0, run.stderr);
+  assert.equal(run.stderr, "");
+  const rows = run.stdout
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line));
+  assert.deepEqual(
+    rows.map(({ phase }) => phase),
+    ["live", "zombie", "reaped"],
+  );
+  assert(
+    rows.every(
+      ({ pid }) => pid === rows[0].pid && Number.isSafeInteger(pid) && pid > 1,
+    ),
+  );
+  assert.deepEqual(
+    rows.map(({ pidErrno, groupErrno }) => [pidErrno, groupErrno]),
+    [
+      [0, 0],
+      [0, 1],
+      [3, 3],
+    ],
+  );
+  assert.equal(alive(rows[0].pid), false);
+  assert.equal(alive(-rows[0].pid), false);
+  t.diagnostic(
+    JSON.stringify({
+      fixturePid: run.pid,
+      rows,
+      exitCode: run.status,
+      nonzeroSignalsSent: 0,
+    }),
+  );
 });
 
 test("startup failure and no owned server keep their existing exit intent", async (t) => {

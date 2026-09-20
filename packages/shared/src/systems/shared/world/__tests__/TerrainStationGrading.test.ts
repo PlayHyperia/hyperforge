@@ -6,6 +6,7 @@ import { ALL_WORLD_AREAS, type WorldArea } from "../../../../data/world-areas";
 import {
   stationDataProvider,
   type ModelBoundsManifest,
+  type StationsManifest,
 } from "../../../../data/StationDataProvider";
 import type {
   FlatZone,
@@ -64,6 +65,15 @@ const modelBounds = JSON.parse(
     "utf8",
   ),
 ) as ModelBoundsManifest;
+const stationManifest = JSON.parse(
+  readFileSync(
+    new URL(
+      "../../../../../../server/world/assets/manifests/stations.json",
+      import.meta.url,
+    ),
+    "utf8",
+  ),
+) as StationsManifest;
 const authoredSurface = createAuthoredTerrainSurfaceOperations();
 
 function installAreas(areas: Record<string, ManifestArea>): void {
@@ -310,14 +320,20 @@ describe("TerrainSystem deterministic manifest station grading", () => {
       // because it uses a different or reconstructed historical station pad.
       const { grassExclusionBounds, ...oldHalo } = zone;
       expect(grassExclusionBounds).toBeDefined();
-      expect(authoredSurface.isGrassExcluded([oldHalo], ...oldCorner)).toBe(
-        true,
-      );
-      expect(authoredSurface.isGrassExcluded([zone], ...oldCorner)).toBe(false);
-      expect(current.terrain["isGrassExcludedAt"](...oldCorner)).toBe(false);
-      expect(previous.terrain["isGrassExcludedAt"](...oldCorner)).toBe(true);
-      expect(current.terrain.getHeightAt(...oldCorner)).toBe(
-        previous.terrain.getHeightAt(...oldCorner),
+      expect(
+        authoredSurface.isGrassExcluded([oldHalo], oldCorner[0], oldCorner[1]),
+      ).toBe(true);
+      expect(
+        authoredSurface.isGrassExcluded([zone], oldCorner[0], oldCorner[1]),
+      ).toBe(false);
+      expect(
+        current.terrain["isGrassExcludedAt"](oldCorner[0], oldCorner[1]),
+      ).toBe(false);
+      expect(
+        previous.terrain["isGrassExcludedAt"](oldCorner[0], oldCorner[1]),
+      ).toBe(true);
+      expect(current.terrain.getHeightAt(oldCorner[0], oldCorner[1])).toBe(
+        previous.terrain.getHeightAt(oldCorner[0], oldCorner[1]),
       );
     }
   });
@@ -335,6 +351,114 @@ describe("TerrainSystem deterministic manifest station grading", () => {
   afterEach(() => {
     for (const key of Object.keys(ALL_WORLD_AREAS)) delete ALL_WORLD_AREAS[key];
     Object.assign(ALL_WORLD_AREAS, Object.fromEntries(originalAreas));
+  });
+
+  it("releases only the three candidate station grass halos while preserving exact terrain, collision and lodge protection", () => {
+    const candidate = structuredClone(stationManifest);
+    const selectedTypes = new Set(["bank", "range", "altar"]);
+    const selectedZones = new Set(
+      haven
+        .stations!.filter((station) => selectedTypes.has(station.type))
+        .map((station) => `station_${station.id}`),
+    );
+    expect(selectedZones.size).toBe(3);
+    const originalFootprints = new Map(
+      stationManifest.stations.map((station) => [
+        station.type,
+        structuredClone(stationDataProvider.getFootprint(station.type)),
+      ]),
+    );
+    const previous = terrainFor(actualAreas);
+    try {
+      for (const station of candidate.stations)
+        if (selectedTypes.has(station.type)) {
+          expect(station.grassClearanceMargin).toBeUndefined();
+          station.grassClearanceMargin = 1.25;
+        }
+      stationDataProvider.loadStations(candidate);
+      const current = terrainFor(actualAreas);
+      expect(padHeights(current.internals)).toEqual(
+        padHeights(previous.internals),
+      );
+      expect(current.internals.flatZones.size).toBe(
+        previous.internals.flatZones.size,
+      );
+      const previousHalos: FlatZone[] = [];
+      for (const [id, zone] of current.internals.flatZones) {
+        const before = previous.internals.flatZones.get(id)!;
+        if (!selectedZones.has(id)) {
+          expect(zone).toEqual(before);
+          continue;
+        }
+        expect(before.grassExclusionBounds).toBeUndefined();
+        const { grassExclusionBounds, ...grading } = zone;
+        expect(grassExclusionBounds).toBeDefined();
+        expect(grading).toEqual(before);
+        previousHalos.push(before);
+        const bounds = grassExclusionBounds!;
+        for (const x of [
+          bounds.minX,
+          (bounds.minX + bounds.maxX) / 2,
+          bounds.maxX,
+        ])
+          for (const z of [
+            bounds.minZ,
+            (bounds.minZ + bounds.maxZ) / 2,
+            bounds.maxZ,
+          ]) {
+            expect(authoredSurface.isGrassExcluded([zone], x, z)).toBe(true);
+            expect(current.terrain["isGrassExcludedAt"](x, z)).toBe(true);
+          }
+      }
+      for (const station of stationManifest.stations)
+        expect(stationDataProvider.getFootprint(station.type)).toEqual(
+          originalFootprints.get(station.type),
+        );
+
+      let released = 0;
+      // Cover the whole preparation campus and exterior, not just the changed
+      // three rectangles. Compare actual height bytes and every exclusion bit.
+      const beforeHeights: number[] = [];
+      const afterHeights: number[] = [];
+      for (let x = 290; x <= 445; x += 0.5)
+        for (let z = 275; z <= 460; z += 0.5) {
+          beforeHeights.push(previous.terrain.getHeightAt(x, z));
+          afterHeights.push(current.terrain.getHeightAt(x, z));
+          const wasExcluded = previous.terrain["isGrassExcludedAt"](x, z);
+          const excluded = current.terrain["isGrassExcludedAt"](x, z);
+          if (wasExcluded === excluded) continue;
+          expect(wasExcluded).toBe(true);
+          expect(excluded).toBe(false);
+          expect(authoredSurface.isGrassExcluded(previousHalos, x, z)).toBe(
+            true,
+          );
+          released++;
+        }
+      expect(released).toBeGreaterThan(0);
+      expect(Buffer.from(new Float64Array(afterHeights).buffer)).toEqual(
+        Buffer.from(new Float64Array(beforeHeights).buffer),
+      );
+      for (const [x, z] of [
+        [345, 315],
+        [350, 315],
+        [340, 315],
+        [352, 310],
+      ]) {
+        expect(previous.terrain["isGrassExcludedAt"](x, z)).toBe(true);
+        expect(current.terrain["isGrassExcludedAt"](x, z)).toBe(false);
+      }
+      const lodge = getCompactPreparationLodgeFootprint(
+        COMPACT_PREPARATION_LODGE,
+      );
+      for (let x = lodge.minX; x <= lodge.maxX; x += 0.25)
+        for (let z = lodge.minZ; z <= lodge.maxZ; z += 0.25)
+          expect(current.terrain["isGrassExcludedAt"](x, z)).toBe(true);
+      process.stdout.write(
+        `Three-station input-only candidate: ${released} half-metre samples released; ${beforeHeights.length} exact height samples; no native coverage claim\n`,
+      );
+    } finally {
+      stationDataProvider.loadStations(structuredClone(stationManifest));
+    }
   });
 
   it("uses the actual plaza grade for every hub pad despite different procedural heights", () => {

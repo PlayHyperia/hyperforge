@@ -6,6 +6,11 @@ import {
 import type { GrassAnchorData, GrassGrounding } from "./GrassTerrainProjection";
 import { roadInfluenceOperations } from "./RoadInfluence";
 import {
+  createCompactTerrainColorOperations,
+  type CompactTerrainBankVerge,
+  type CompactTerrainGroundRibbon,
+} from "./CompactTerrainPalette";
+import {
   getGrassBladeLayout,
   type FineGrassGeometryLayout,
 } from "./GrassBladeLayout";
@@ -31,6 +36,7 @@ const NUMERIC_GUARD = 0.00001;
 const INSTANCE_VALUE_BATCH_SIZE = 32;
 // Fixed storage, independent of authored road lengths or world coordinates.
 const ROAD_GRID_AXIS = 8;
+const compactTerrainColorOperations = createCompactTerrainColorOperations();
 
 export type GrassGroundingRoadSegment = {
   startX: number;
@@ -51,6 +57,10 @@ export type GrassBladeGroundingRequest = {
   lod: 0 | 1 | 2;
   /** Omission is the ordinary layout, not automatic fine topology detection. */
   geometryLayout?: FineGrassGeometryLayout;
+  /** Explicit candidate: retain only blades whose full sweep clears roads. */
+  roadClearance?: "per-blade-v1";
+  /** Explicit fine-meadow vertical deformation; never changes root sampling. */
+  bankVerge?: CompactTerrainBankVerge;
   ownSurface: RetainedTerrainSurface;
   /** Exact currently drawn own/neighbour surfaces, with no parent overlap. */
   surfaces: readonly RetainedTerrainSurface[];
@@ -62,6 +72,164 @@ export type GrassBladeGroundingRequest = {
   maximumBaseError?: number;
   workBudget?: number;
 };
+
+/** Snapshot the optional art descriptor before a resumable job borrows it.
+ * Reject inherited/accessor fields instead of executing mutable input code. */
+export function captureGrassBankVerge(
+  request: Pick<GrassBladeGroundingRequest, "bankVerge" | "geometryLayout">,
+): CompactTerrainBankVerge | undefined {
+  const property = Object.getOwnPropertyDescriptor(request, "bankVerge");
+  const fail = (): never => {
+    throw new Error("Invalid grass bank-verge descriptor");
+  };
+  if ("bankVerge" in request && (!property || !("value" in property))) fail();
+  const value = property?.value;
+  if (value === undefined) return undefined;
+  if (
+    (request.geometryLayout !== "fine-linear-sweep-3seg-v1" &&
+      request.geometryLayout !== "fine-linear-sweep-near4-v1") ||
+    !value ||
+    typeof value !== "object" ||
+    (Object.getPrototypeOf(value) !== Object.prototype &&
+      Object.getPrototypeOf(value) !== null)
+  )
+    fail();
+  const scalarKeys = [
+    "minX",
+    "maxX",
+    "minZ",
+    "maxZ",
+    "feather",
+    "wearStart",
+    "wearEnd",
+    "minimumScale",
+    "heightScale",
+    "wornHeightScale",
+    "tipBrightness",
+  ] as const;
+  const keys = Reflect.ownKeys(value);
+  if (
+    keys.length !== scalarKeys.length + 2 ||
+    keys.some(
+      (key) =>
+        key !== "grassTint" &&
+        key !== "wear" &&
+        !scalarKeys.includes(key as never),
+    )
+  )
+    fail();
+  const copy = {} as Record<(typeof scalarKeys)[number], number>;
+  for (const key of scalarKeys) {
+    const field = Object.getOwnPropertyDescriptor(value, key);
+    if (!field || !("value" in field) || !Number.isFinite(field.value)) fail();
+    copy[key] = field!.value;
+  }
+  const tintField = Object.getOwnPropertyDescriptor(value, "grassTint");
+  if (!tintField || !("value" in tintField)) fail();
+  const tint = tintField!.value;
+  if (
+    !Array.isArray(tint) ||
+    tint.length !== 3 ||
+    Reflect.ownKeys(tint).length !== 4
+  )
+    fail();
+  const tintCopy = [0, 0, 0] as [number, number, number];
+  for (let i = 0; i < 3; i++) {
+    const field = Object.getOwnPropertyDescriptor(tint, String(i));
+    if (
+      !field ||
+      !("value" in field) ||
+      !Number.isFinite(field.value) ||
+      field.value < 0 ||
+      field.value > 2
+    )
+      fail();
+    tintCopy[i] = field!.value;
+  }
+  const wearField = Object.getOwnPropertyDescriptor(value, "wear");
+  if (!wearField || !("value" in wearField)) fail();
+  const wear = wearField!.value;
+  if (
+    !Array.isArray(wear) ||
+    wear.length > 3 ||
+    Reflect.ownKeys(wear).length !== wear.length + 1
+  )
+    fail();
+  const ribbonKeys = [
+    "startX",
+    "startZ",
+    "endX",
+    "endZ",
+    "coreRadius",
+    "outerRadius",
+    "strength",
+  ] as const;
+  const wearCopy: CompactTerrainGroundRibbon[] = [];
+  for (let i = 0; i < wear.length; i++) {
+    const item = Object.getOwnPropertyDescriptor(wear, String(i));
+    if (!item || !("value" in item)) fail();
+    const ribbon = item!.value;
+    if (
+      !ribbon ||
+      typeof ribbon !== "object" ||
+      (Object.getPrototypeOf(ribbon) !== Object.prototype &&
+        Object.getPrototypeOf(ribbon) !== null) ||
+      Reflect.ownKeys(ribbon).length !== ribbonKeys.length ||
+      Reflect.ownKeys(ribbon).some((key) => !ribbonKeys.includes(key as never))
+    )
+      fail();
+    const captured = {} as Record<(typeof ribbonKeys)[number], number>;
+    for (const key of ribbonKeys) {
+      const field = Object.getOwnPropertyDescriptor(ribbon, key);
+      if (!field || !("value" in field) || !Number.isFinite(field.value))
+        fail();
+      captured[key] = field!.value;
+    }
+    const dx = captured.endX - captured.startX;
+    const dz = captured.endZ - captured.startZ;
+    if (
+      ![captured.startX, captured.startZ, captured.endX, captured.endZ].every(
+        (n) => Math.abs(n) <= 1e6,
+      ) ||
+      dx * dx + dz * dz <= 0 ||
+      captured.coreRadius < 0 ||
+      captured.outerRadius <= captured.coreRadius ||
+      captured.outerRadius * captured.outerRadius <=
+        captured.coreRadius * captured.coreRadius ||
+      captured.outerRadius > 1e6 ||
+      captured.strength < 0 ||
+      captured.strength > 1
+    )
+      fail();
+    wearCopy.push(Object.freeze(captured));
+  }
+  if (
+    ![copy.minX, copy.maxX, copy.minZ, copy.maxZ].every(
+      (n) => Math.abs(n) <= 1e6,
+    ) ||
+    copy.minX >= copy.maxX ||
+    copy.minZ >= copy.maxZ ||
+    copy.feather <= 0 ||
+    copy.feather * 2 > Math.min(copy.maxX - copy.minX, copy.maxZ - copy.minZ) ||
+    copy.wearStart < 0 ||
+    copy.wearStart >= copy.wearEnd ||
+    copy.wearEnd > 1 ||
+    copy.minimumScale <= 0 ||
+    copy.minimumScale > 1 ||
+    copy.heightScale <= 0 ||
+    copy.heightScale > 1 ||
+    copy.wornHeightScale <= 0 ||
+    copy.wornHeightScale > copy.heightScale ||
+    copy.tipBrightness <= 0 ||
+    copy.tipBrightness > 2
+  )
+    fail();
+  return Object.freeze({
+    ...copy,
+    grassTint: Object.freeze(tintCopy),
+    wear: Object.freeze(wearCopy),
+  });
+}
 
 type DeferredReason = "missing_surface" | "overlapping_surface" | "work_budget";
 type SurfaceUse = "endpoint" | "edge" | "envelope";
@@ -81,9 +249,18 @@ export type GrassBladeGroundingReceipt = {
   geometryLayout?: FineGrassGeometryLayout;
   endpointQueries: number;
   triangleVisits: number;
+  /** Base edges proved strictly inside their one retained sampled face. */
+  sameFaceEdges: number;
   workUnits: number;
   workBudget: number;
   correctionBytes: number;
+  roadClearance?: {
+    mode: "per-blade-v1";
+    retainedBlades: number;
+    partialClumps: number;
+    maskedRetainedBlades: number;
+    visibilityBytes: number;
+  };
   maxEndpointCorrection: number;
   maxCorrectedBaseError: number;
   maxAcceptedBaseError: number;
@@ -96,6 +273,8 @@ export type GrassBladeGroundingResult =
       data: GrassAnchorData;
       /** Two world-Y deltas per blade: left/right. Apply after tilt, never fade. */
       rootDeltas: Float32Array;
+      /** Optional bit per blade, compacted with data/sourceIndices. */
+      bladeVisibility?: Uint32Array;
       sourceIndices: Uint32Array;
       /** Accepted world-space vertices through the complete fade/wind envelope.
        * Null means validated empty output, never missing or deferred support. */
@@ -120,6 +299,10 @@ class DeferredGrounding extends Error {
 
 type Point = { x: number; y: number; z: number };
 type SurfaceEntry = { surface: RetainedTerrainSurface; box: TerrainGridBounds };
+type EndpointFace = {
+  surface: RetainedTerrainSurface | null;
+  faceIndex: number;
+};
 
 function overlaps(a: TerrainGridBounds, b: TerrainGridBounds): boolean {
   return (
@@ -305,6 +488,23 @@ export function* groundGrassBladeSteps(
   yield "request_bounds";
   const started = performance.now();
   const { data, ownSurface, geometry, lod, wind, geometryLayout } = request;
+  const bankVerge = captureGrassBankVerge(request);
+  const bankField = bankVerge
+    ? { coastalMeadow: true as const, bankVerge }
+    : null;
+  const clearanceProperty = Object.getOwnPropertyDescriptor(
+    request,
+    "roadClearance",
+  );
+  if (
+    "roadClearance" in request &&
+    (!clearanceProperty ||
+      !("value" in clearanceProperty) ||
+      (clearanceProperty.value !== undefined &&
+        clearanceProperty.value !== "per-blade-v1"))
+  )
+    throw new Error("Invalid grass road-clearance mode");
+  const perBladeRoads = clearanceProperty?.value === "per-blade-v1";
   const workBudget =
     request.workBudget ?? GRASS_BLADE_GROUNDING_LIMITS.defaultWorkBudget;
   const maximumBaseError = request.maximumBaseError ?? 0.02;
@@ -442,9 +642,21 @@ export function* groundGrassBladeSteps(
     ...(geometryLayout === undefined ? {} : { geometryLayout }),
     endpointQueries: 0,
     triangleVisits: 0,
+    sameFaceEdges: 0,
     workUnits: 0,
     workBudget,
     correctionBytes: 0,
+    ...(perBladeRoads
+      ? {
+          roadClearance: {
+            mode: "per-blade-v1" as const,
+            retainedBlades: 0,
+            partialClumps: 0,
+            maskedRetainedBlades: 0,
+            visibilityBytes: 0,
+          },
+        }
+      : {}),
     maxEndpointCorrection: 0,
     maxCorrectedBaseError: 0,
     maxAcceptedBaseError: 0,
@@ -476,7 +688,9 @@ export function* groundGrassBladeSteps(
     nz: 0,
     faceIndex: 0,
   };
-  const sampleEndpoint = function* (point: Point) {
+  const leftFace: EndpointFace = { surface: null, faceIndex: -1 },
+    rightFace: EndpointFace = { surface: null, faceIndex: -1 };
+  const sampleEndpoint = function* (point: Point, face: EndpointFace) {
     receipt.endpointQueries++;
     // Half-open ownership matches TerrainVisualManager; allow a sole outer edge.
     let selected: SurfaceEntry | undefined;
@@ -512,6 +726,8 @@ export function* groundGrassBladeSteps(
     )
       throw new DeferredGrounding("missing_surface");
     markSurface(selected.surface, "endpoint");
+    face.surface = selected.surface;
+    face.faceIndex = sample.faceIndex;
     return sample.height;
   };
   const ensureCoverage = function* (box: TerrainGridBounds) {
@@ -551,7 +767,108 @@ export function* groundGrassBladeSteps(
   // Job-local scratch never escapes into output or dependencies. An edge query
   // is fully drained before the next blade, including across suspended slices.
   const triangle: TerrainGridTriangle = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+  const canonicalBounds: TerrainGridBounds = {
+    minX: 0,
+    maxX: 0,
+    minZ: 0,
+    maxZ: 0,
+  };
   const edgeError = function* (a: Point, b: Point) {
+    // A convex face contains the entire segment when both endpoints are safely
+    // interior. Keep the original clipper for boundaries, noncanonical cells,
+    // multiple owners and poorly conditioned arithmetic. Thin refined faces
+    // can intersect a neighbour's clipping tolerance despite this margin.
+    // An indexed owner may contain untouched canonical cells. Admit one only
+    // when this exact query's bounds prove the old cursor visits that cell
+    // alone, so a refined neighbour cannot contribute through its tolerance.
+    // The continuation's full region/input lease still guards every slice and
+    // publication; no face cache survives it.
+    const owner = leftFace.surface;
+    if (
+      baseEntries.length === 1 &&
+      owner !== null &&
+      owner === baseEntries[0].surface &&
+      owner === rightFace.surface &&
+      leftFace.faceIndex === rightFace.faceIndex
+    ) {
+      if (!owner.isRegularGrid) {
+        // Preserve createTriangleCursor's original local-AABB expressions.
+        canonicalBounds.minX = Math.min(a.x, b.x) - owner.centerX;
+        canonicalBounds.maxX = Math.max(a.x, b.x) - owner.centerX;
+        canonicalBounds.minZ = Math.min(a.z, b.z) - owner.centerZ;
+        canonicalBounds.maxZ = Math.max(a.z, b.z) - owner.centerZ;
+      }
+      if (
+        owner.isRegularGrid
+          ? owner.readTriangle(leftFace.faceIndex, triangle)
+          : owner.readCanonicalTriangleInBounds(
+              leftFace.faceIndex,
+              canonicalBounds,
+              triangle,
+            )
+      ) {
+        const [ax, ay, az, bx, by, bz, cx, cy, cz] = triangle;
+        const dx = b.x - a.x,
+          dz = b.z - a.z,
+          ox = owner.centerX,
+          oz = owner.centerZ;
+        const det = (bx - ax) * (cz - az) - (bz - az) * (cx - ax);
+        const determinantScale =
+          Math.abs((bx - ax) * (cz - az)) + Math.abs((bz - az) * (cx - ax));
+        // Both canonical face orders span the full rectangular cell on these
+        // edges. Extremely disproportionate Float32 cells keep the full path.
+        const spanX = Math.abs(cx - bx),
+          spanZ = Math.abs(bz - az);
+        if (
+          spanX > 0 &&
+          spanZ > 0 &&
+          spanX <= 2 * spanZ &&
+          spanZ <= 2 * spanX &&
+          Number.isFinite(det) &&
+          Math.abs(det) > determinantScale * Number.EPSILON * 64
+        ) {
+          const u0 =
+            ((a.x - ox - ax) * (cz - az) - (a.z - oz - az) * (cx - ax)) / det;
+          const v0 =
+            ((bx - ax) * (a.z - oz - az) - (bz - az) * (a.x - ox - ax)) / det;
+          const du = (dx * (cz - az) - dz * (cx - ax)) / det;
+          const dv = ((bx - ax) * dz - (bz - az) * dx) / det;
+          const u1 = u0 + du,
+            v1 = v0 + dv,
+            w0 = 1 - u0 - v0,
+            w1 = w0 + (-du - dv);
+          // This is deliberately much stricter than the clipper's 1e-10 edge
+          // allowance. NaN/infinite coordinates cannot satisfy all six bounds.
+          const interior = 1e-7;
+          if (
+            u0 > interior &&
+            v0 > interior &&
+            w0 > interior &&
+            u1 > interior &&
+            v1 > interior &&
+            w1 > interior
+          ) {
+            take();
+            receipt.triangleVisits++;
+            receipt.sameFaceEdges++;
+            markSurface(owner, "edge");
+            let maxError = 0;
+            // Preserve the clipper's exact expression/order at lo=0 and hi=1,
+            // including corrected endpoint heights and floating-point rounding.
+            for (let endpoint = 0; endpoint < 2; endpoint++) {
+              const t = endpoint === 0 ? 0 : 1;
+              const terrainY =
+                ay + (u0 + du * t) * (by - ay) + (v0 + dv * t) * (cy - ay);
+              maxError = Math.max(
+                maxError,
+                Math.abs(a.y + (b.y - a.y) * t - terrainY),
+              );
+            }
+            return maxError;
+          }
+        }
+      }
+    }
     const dx = b.x - a.x,
       dz = b.z - a.z,
       intervals: [number, number][] = [];
@@ -569,15 +886,27 @@ export function* groundGrassBladeSteps(
       const surface = entry.surface,
         ox = surface.centerX,
         oz = surface.centerZ;
-      const cursor = surface.createTriangleCursor({
-        minX: box.minX - ox,
-        maxX: box.maxX - ox,
-        minZ: box.minZ - oz,
-        maxZ: box.maxZ - oz,
-      });
-      while (cursor.next(triangle)) {
+      const edgeCursor = surface.createGroundingEdgeCursor(a.x, a.z, b.x, b.z);
+      const cursor = edgeCursor
+        ? null
+        : surface.createTriangleCursor({
+            minX: box.minX - ox,
+            maxX: box.maxX - ox,
+            minZ: box.minZ - oz,
+            maxZ: box.maxZ - oz,
+          });
+      while (true) {
+        const step = edgeCursor
+          ? edgeCursor.step(triangle)
+          : cursor!.next(triangle)
+            ? "triangle"
+            : null;
+        if (step === null) break;
         yield "grounding_operation";
+        // Broadphase rejection is real work, not an uncharged scan hidden in
+        // next(). Retained triangles keep their original order and clipper.
         take();
+        if (step === "block") continue;
         receipt.triangleVisits++;
         const [ax, ay, az, bx, by, bz, cx, cy, cz] = triangle;
         const det = (bx - ax) * (cz - az) - (bz - az) * (cx - ax);
@@ -756,6 +1085,102 @@ export function* groundGrassBladeSteps(
   yield "bounded_staging_allocation";
   const deltas = new Float32Array(data.count * blades * 2),
     retained: number[] = [];
+  const visibility = perBladeRoads ? new Uint32Array(data.count) : undefined;
+  // One bounded scratch allocation per job, reused across clumps and roads.
+  // Bounds are constructed only after a whole-clump road hit, not in meadows.
+  const bladeBounds = perBladeRoads ? new Float64Array(blades * 4) : undefined;
+  const allBlades = (1 << blades) - 1;
+  const bladeBox: TerrainGridBounds = { minX: 0, maxX: 0, minZ: 0, maxZ: 0 };
+  const roadBladeVisibility = function* (
+    box: TerrainGridBounds,
+    transform: (v: number, fade: number, target: Point) => void,
+    bankHeightScale: number,
+  ): Generator<string, number, void> {
+    if (!bladeBounds) throw new Error("Missing grass blade bounds scratch");
+    let mask = allBlades,
+      built = false;
+    const seen = new Set<number>();
+    for (
+      let gx = roadCell(box.minX, ownSurface.centerX);
+      gx <= roadCell(box.maxX, ownSurface.centerX);
+      gx++
+    ) {
+      for (
+        let gz = roadCell(box.minZ, ownSurface.centerZ);
+        gz <= roadCell(box.maxZ, ownSurface.centerZ);
+        gz++
+      ) {
+        yield "grounding_operation";
+        take();
+        for (const index of roadCells[gx * ROAD_GRID_AXIS + gz]) {
+          yield "grounding_operation";
+          take();
+          if (seen.has(index)) continue;
+          seen.add(index);
+          const road = request.roadSegments[index];
+          const explicitFeather = explicitRoadFeathers.get(index);
+          if (explicitFeather === null) continue;
+          const margin = road.width / 2 + (explicitFeather ?? roadFeather);
+          if (segmentBoxDistance(road, box) > margin) continue;
+          if (!built) {
+            for (let blade = 0; blade < blades; blade++) {
+              yield "road_blade_bounds";
+              const b = blade * 4;
+              bladeBounds[b] = bladeBounds[b + 2] = Infinity;
+              bladeBounds[b + 1] = bladeBounds[b + 3] = -Infinity;
+              const end = (blade + 1) * verticesPerBlade;
+              for (let v = blade * verticesPerBlade; v < end; v++) {
+                const windFactor = uv.getY(v) ** 1.8;
+                for (let fade = 0; fade < 2; fade++) {
+                  take();
+                  transform(v, fade, point);
+                  bladeBounds[b] = Math.min(
+                    bladeBounds[b],
+                    point.x -
+                      wind.x * bankHeightScale * windFactor -
+                      NUMERIC_GUARD,
+                  );
+                  bladeBounds[b + 1] = Math.max(
+                    bladeBounds[b + 1],
+                    point.x +
+                      wind.x * bankHeightScale * windFactor +
+                      NUMERIC_GUARD,
+                  );
+                  bladeBounds[b + 2] = Math.min(
+                    bladeBounds[b + 2],
+                    point.z -
+                      wind.z * bankHeightScale * windFactor -
+                      NUMERIC_GUARD,
+                  );
+                  bladeBounds[b + 3] = Math.max(
+                    bladeBounds[b + 3],
+                    point.z +
+                      wind.z * bankHeightScale * windFactor +
+                      NUMERIC_GUARD,
+                  );
+                }
+              }
+            }
+            built = true;
+          }
+          for (let blade = 0; blade < blades; blade++) {
+            if (!(mask & (1 << blade))) continue;
+            yield "road_blade";
+            take();
+            const b = blade * 4;
+            bladeBox.minX = bladeBounds[b];
+            bladeBox.maxX = bladeBounds[b + 1];
+            bladeBox.minZ = bladeBounds[b + 2];
+            bladeBox.maxZ = bladeBounds[b + 3];
+            if (segmentBoxDistance(road, bladeBox) <= margin)
+              mask &= ~(1 << blade);
+          }
+          if (!mask) return 0;
+        }
+      }
+    }
+    return mask;
+  };
   let sweptBounds: (TerrainGridBounds & { minY: number; maxY: number }) | null =
     null;
   const left: Point = { x: 0, y: 0, z: 0 },
@@ -829,6 +1254,9 @@ export function* groundGrassBladeSteps(
           "Grass grounding requires projected anchor height/normal",
         );
       markSurface(ownSurface, "endpoint");
+      const bankHeightScale = bankField
+        ? compactTerrainColorOperations.bankVergeHeightScale(x, z, bankField)
+        : 1;
       const rotation = data.rotScaleHash[k],
         scale = data.rotScaleHash[k + 1],
         cos = Math.cos(rotation),
@@ -853,7 +1281,7 @@ export function* groundGrassBladeSteps(
       const transform = (v: number, fade: number, target: Point): void => {
         const rx = (position.getX(v) * cos - position.getZ(v) * sin) * scale,
           rz = (position.getX(v) * sin + position.getZ(v) * cos) * scale,
-          ry = position.getY(v) * scale * fade;
+          ry = position.getY(v) * bankHeightScale * scale * fade;
         applyTransform(rx, ry, rz, target);
       };
       const baseBounds = {
@@ -886,8 +1314,12 @@ export function* groundGrassBladeSteps(
       for (let blade = 0; blade < blades; blade++) {
         transform(blade * verticesPerBlade, 1, left);
         transform(blade * verticesPerBlade + 1, 1, right);
-        const deltaLeft = Math.fround((yield* sampleEndpoint(left)) - left.y),
-          deltaRight = Math.fround((yield* sampleEndpoint(right)) - right.y);
+        const deltaLeft = Math.fround(
+            (yield* sampleEndpoint(left, leftFace)) - left.y,
+          ),
+          deltaRight = Math.fround(
+            (yield* sampleEndpoint(right, rightFace)) - right.y,
+          );
         if (!Number.isFinite(deltaLeft) || !Number.isFinite(deltaRight))
           throw new Error("Nonfinite grass grounding correction");
         const d = (i * blades + blade) * 2;
@@ -916,9 +1348,11 @@ export function* groundGrassBladeSteps(
         maxY = -Infinity;
       for (let v = 0; v < position.count; v++) {
         // One blade is a bounded batch: at most seven vertices / fourteen
-        // transforms at LOD0. Keep every original work charge, suspension point
-        // and floating-point expression; reuse only the synchronous fade pair's
-        // identical rotation, never geometry values across a yielded slice.
+        // transforms at LOD0. Keep every suspension point and floating-point
+        // expression. A zero-height vertex has identical fade endpoints, so
+        // evaluate its one distinct point once rather than charging/computing
+        // duplicate transforms and idempotent extrema. This does not omit any
+        // actual swept vertex or cache geometry across a yielded slice.
         if (v % verticesPerBlade === 0) yield "grounding_operation";
         const blade = Math.floor(v / verticesPerBlade),
           d = (i * blades + blade) * 2;
@@ -927,25 +1361,25 @@ export function* groundGrassBladeSteps(
         const windFactor = uv.getY(v) ** 1.8;
         const rx = (position.getX(v) * cos - position.getZ(v) * sin) * scale,
           rz = (position.getX(v) * sin + position.getZ(v) * cos) * scale,
-          scaledY = position.getY(v) * scale;
-        for (let fade = 0; fade < 2; fade++) {
+          scaledY = position.getY(v) * bankHeightScale * scale;
+        for (let fade = 0; fade < (scaledY === 0 ? 1 : 2); fade++) {
           take();
           applyTransform(rx, scaledY * fade, rz, point);
           box.minX = Math.min(
             box.minX,
-            point.x - wind.x * windFactor - NUMERIC_GUARD,
+            point.x - wind.x * bankHeightScale * windFactor - NUMERIC_GUARD,
           );
           box.maxX = Math.max(
             box.maxX,
-            point.x + wind.x * windFactor + NUMERIC_GUARD,
+            point.x + wind.x * bankHeightScale * windFactor + NUMERIC_GUARD,
           );
           box.minZ = Math.min(
             box.minZ,
-            point.z - wind.z * windFactor - NUMERIC_GUARD,
+            point.z - wind.z * bankHeightScale * windFactor - NUMERIC_GUARD,
           );
           box.maxZ = Math.max(
             box.maxZ,
-            point.z + wind.z * windFactor + NUMERIC_GUARD,
+            point.z + wind.z * bankHeightScale * windFactor + NUMERIC_GUARD,
           );
           minY = Math.min(minY, point.y + correction - NUMERIC_GUARD);
           maxY = Math.max(maxY, point.y + correction + NUMERIC_GUARD);
@@ -961,7 +1395,17 @@ export function* groundGrassBladeSteps(
       let rejection: RejectionReason | null =
         baseError > maximumBaseError ? "terrain_edge" : null;
       if (!rejection && (yield* padOverlap(box))) rejection = "pad";
-      if (!rejection && (yield* roadsNear(box))) rejection = "road";
+      let visibleBlades = allBlades;
+      if (!rejection) {
+        if (perBladeRoads) {
+          visibleBlades = yield* roadBladeVisibility(
+            box,
+            transform,
+            bankHeightScale,
+          );
+          if (!visibleBlades) rejection = "road";
+        } else if (yield* roadsNear(box)) rejection = "road";
+      }
       if (!rejection) {
         let highest = -Infinity,
           coveredByBody = false;
@@ -992,6 +1436,31 @@ export function* groundGrassBladeSteps(
       receipt.processedClumps++;
       if (rejection) receipt.rejected[rejection]++;
       else {
+        if (visibility && receipt.roadClearance) {
+          yield "road_blade_receipt";
+          take();
+          visibility[i] = visibleBlades;
+          let remaining = visibleBlades,
+            visibleCount = 0;
+          while (remaining) {
+            remaining &= remaining - 1;
+            visibleCount++;
+          }
+          receipt.roadClearance.retainedBlades += visibleCount;
+          receipt.roadClearance.maskedRetainedBlades += blades - visibleCount;
+          if (visibleBlades !== allBlades) {
+            receipt.roadClearance.partialClumps++;
+            // Hidden triangles collapse to this anchor in the GPU binding.
+            // Extend output culling bounds only, after all unchanged admission
+            // checks: a valid blade layout need not surround its common anchor.
+            box.minX = Math.min(box.minX, x);
+            box.maxX = Math.max(box.maxX, x);
+            box.minZ = Math.min(box.minZ, z);
+            box.maxZ = Math.max(box.maxZ, z);
+            minY = Math.min(minY, y);
+            maxY = Math.max(maxY, y);
+          }
+        }
         retained.push(i);
         if (!sweptBounds) sweptBounds = { ...box, minY, maxY };
         else {
@@ -1030,10 +1499,13 @@ export function* groundGrassBladeSteps(
   };
   const rootDeltas = new Float32Array(count * blades * 2);
   const sourceIndices = new Uint32Array(count);
+  const bladeVisibility = perBladeRoads ? new Uint32Array(count) : undefined;
   for (let dst = 0; dst < count; dst++) {
     yield "output_clump";
     const source = retained[dst];
     sourceIndices[dst] = source;
+    if (bladeVisibility && visibility)
+      bladeVisibility[dst] = visibility[source];
     for (const [key, stride] of [
       ["offsets", 3],
       ["rotScaleHash", 3],
@@ -1052,10 +1524,13 @@ export function* groundGrassBladeSteps(
   }
   receipt.retainedClumps = count;
   receipt.correctionBytes = rootDeltas.byteLength;
+  if (receipt.roadClearance && bladeVisibility)
+    receipt.roadClearance.visibilityBytes = bladeVisibility.byteLength;
   return {
     status: "ready",
     data: output,
     rootDeltas,
+    ...(bladeVisibility === undefined ? {} : { bladeVisibility }),
     sourceIndices,
     sweptBounds,
     dependencies: dependencies(),
@@ -1215,6 +1690,28 @@ export class GrassGroundingContinuation {
     }
     return this.current;
   }
+}
+
+/** Bounded terminal snapshot for the owner's existing one-shot failure log.
+ * Active time is cumulative slice elapsed time, not measured CPU utilization.
+ * The owner supplies ticket/frame identity; no input arrays or error graph are
+ * retained, and observing never advances or changes the continuation. */
+export function captureGrassGroundingFailure(job: GrassGroundingContinuation) {
+  const state = job.state;
+  if (state.status !== "failed_budget" && state.status !== "failed_input")
+    return null;
+  return Object.freeze({
+    status: state.status,
+    reason: state.status === "failed_budget" ? state.reason : "input",
+    activeMs: job.activeMs,
+    operations: job.operations,
+    lastSliceOperations: job.lastSliceOperations,
+    lastSliceMs: job.lastSliceMs,
+    maximumSliceMs: job.maximumSliceMs,
+    lastPhase: job.lastPhase,
+    activeLimitMs: GRASS_BLADE_GROUNDING_JOB_LIMITS.maximumActiveMs,
+    targetSliceMs: GRASS_BLADE_GROUNDING_JOB_LIMITS.targetSliceMs,
+  });
 }
 
 /** Numerical-only entry point; installation composes projection and provenance

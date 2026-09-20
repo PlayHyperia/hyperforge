@@ -1,7 +1,8 @@
 /**
  * Tailwind CSS v4 Entry Point
  */
-@import "tailwindcss";
+/* Both game entries and their UI live here, independent of the launch directory. */
+@import "tailwindcss" source("./");
 
 /**
  * Tailwind v4 Theme Configuration
@@ -11,7 +12,7 @@
   /* Custom color palette */
   --color-dark-bg: rgba(11, 10, 21, 0.85);
   --color-dark-border: #2a2b39;
-  
+
   /* Backdrop blur */
   --backdrop-blur-xs: 2px;
 }
@@ -37,8 +38,13 @@
 
 /* Animation keyframes for HUD components */
 @keyframes progress-pulse {
-  0%, 100% { opacity: 1; }
-  50% { opacity: 0.7; }
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.7;
+  }
 }
 
 @keyframes context-menu-in {
@@ -150,35 +156,35 @@
 /* Protanopia (Red-Blind) Mode */
 [data-colorblind="protanopia"] {
   /* Replace red/green distinctions with blue/orange */
-  --color-health-full: #42A5F5;
-  --color-health-medium: #FFA726;
-  --color-health-low: #FF9800;
-  --color-health-critical: #FFA726;
-  --color-success: #2196F3;
-  --color-danger: #FF9800;
-  --color-error: #FF9800;
-  --color-hp: #42A5F5;
-  --color-energy: #2196F3;
+  --color-health-full: #42a5f5;
+  --color-health-medium: #ffa726;
+  --color-health-low: #ff9800;
+  --color-health-critical: #ffa726;
+  --color-success: #2196f3;
+  --color-danger: #ff9800;
+  --color-error: #ff9800;
+  --color-hp: #42a5f5;
+  --color-energy: #2196f3;
 }
 
 /* Deuteranopia (Green-Blind) Mode */
 [data-colorblind="deuteranopia"] {
   /* Replace green with yellow/blue */
-  --color-health-full: #42A5F5;
-  --color-health-medium: #FFD54F;
-  --color-success: #FFD54F;
-  --color-energy: #42A5F5;
-  --color-hp: #42A5F5;
+  --color-health-full: #42a5f5;
+  --color-health-medium: #ffd54f;
+  --color-success: #ffd54f;
+  --color-energy: #42a5f5;
+  --color-hp: #42a5f5;
 }
 
 /* Tritanopia (Blue-Blind) Mode */
 [data-colorblind="tritanopia"] {
   /* Replace blue with green/yellow */
-  --color-mana: #66BB6A;
-  --color-prayer: #66BB6A;
-  --color-info: #FFD54F;
-  --color-primary: #26A69A;
-  --color-link: #26A69A;
+  --color-mana: #66bb6a;
+  --color-prayer: #66bb6a;
+  --color-info: #ffd54f;
+  --color-primary: #26a69a;
+  --color-link: #26a69a;
 }
 
 /**
@@ -193,28 +199,28 @@
   --bg-secondary: #0a0a0a;
   --bg-tertiary: #141414;
   --bg-overlay: rgba(0, 0, 0, 0.95);
-  
+
   /* Maximum contrast text */
-  --text-primary: #FFFFFF;
-  --text-secondary: #E0E0E0;
-  --text-muted: #BDBDBD;
+  --text-primary: #ffffff;
+  --text-secondary: #e0e0e0;
+  --text-muted: #bdbdbd;
   --text-disabled: #757575;
-  
+
   /* High contrast borders */
-  --border-default: #FFFFFF;
-  --border-hover: #FFFFFF;
-  --border-active: #FFFFFF;
-  --border-focus: #FFFF00;
-  
+  --border-default: #ffffff;
+  --border-hover: #ffffff;
+  --border-active: #ffffff;
+  --border-focus: #ffff00;
+
   /* Enhanced focus indicators */
-  --focus-ring-color: #FFFF00;
+  --focus-ring-color: #ffff00;
   --focus-ring-width: 3px;
   --focus-ring-offset: 2px;
 }
 
 /* High contrast mode - enhanced focus rings */
 [data-contrast="high"] *:focus-visible {
-  outline: 3px solid #FFFF00 !important;
+  outline: 3px solid #ffff00 !important;
   outline-offset: 2px !important;
 }
 
@@ -242,7 +248,8 @@
  * Enhanced focus indicators for keyboard users.
  */
 [data-keyboard-nav="true"] *:focus-visible {
-  outline: 2px solid var(--focus-visible-outline, var(--color-accent-primary, #c9a54a)) !important;
+  outline: 2px solid
+    var(--focus-visible-outline, var(--color-accent-primary, #c9a54a)) !important;
   outline-offset: 2px !important;
 }
 
@@ -261,12 +268,24 @@
 }
 
 /* Base font sizes (can be overridden by accessibility store) */
-.text-xs { font-size: var(--font-size-xs, 10px); }
-.text-sm { font-size: var(--font-size-sm, 12px); }
-.text-base { font-size: var(--font-size-base, 14px); }
-.text-lg { font-size: var(--font-size-lg, 16px); }
-.text-xl { font-size: var(--font-size-xl, 20px); }
-.text-xxl { font-size: var(--font-size-xxl, 24px); }
+.text-xs {
+  font-size: var(--font-size-xs, 10px);
+}
+.text-sm {
+  font-size: var(--font-size-sm, 12px);
+}
+.text-base {
+  font-size: var(--font-size-base, 14px);
+}
+.text-lg {
+  font-size: var(--font-size-lg, 16px);
+}
+.text-xl {
+  font-size: var(--font-size-xl, 20px);
+}
+.text-xxl {
+  font-size: var(--font-size-xxl, 24px);
+}
 
 /* Privy Modal Styling - Golden Border and Glow */
 #privy-dialog-container iframe[id*="privy"],
@@ -280,12 +299,15 @@ div[id*="privy-modal"],
 div[class*="privy-modal"] {
   border: 2px solid #f2d08a !important;
   border-radius: 12px !important;
-  box-shadow: 0 0 15px rgba(242, 208, 138, 0.4),
-              0 0 30px rgba(242, 208, 138, 0.2),
-              0 8px 32px rgba(0, 0, 0, 0.8) !important;
-  background: linear-gradient(135deg,
+  box-shadow:
+    0 0 15px rgba(242, 208, 138, 0.4),
+    0 0 30px rgba(242, 208, 138, 0.2),
+    0 8px 32px rgba(0, 0, 0, 0.8) !important;
+  background: linear-gradient(
+    135deg,
     rgba(10, 10, 15, 0.98) 0%,
-    rgba(20, 20, 30, 0.98) 100%) !important;
+    rgba(20, 20, 30, 0.98) 100%
+  ) !important;
 }
 
 /* Target Privy iframe modal */
@@ -294,11 +316,11 @@ iframe[title*="Privy"],
 iframe[title*="privy"] {
   border: 2px solid #f2d08a !important;
   border-radius: 12px !important;
-  box-shadow: 0 0 15px rgba(242, 208, 138, 0.4),
-              0 0 30px rgba(242, 208, 138, 0.2),
-              0 8px 32px rgba(0, 0, 0, 0.8) !important;
+  box-shadow:
+    0 0 15px rgba(242, 208, 138, 0.4),
+    0 0 30px rgba(242, 208, 138, 0.2),
+    0 8px 32px rgba(0, 0, 0, 0.8) !important;
 }
-
 
 /* Target the modal backdrop overlay */
 div[id*="privy"][id*="backdrop"],

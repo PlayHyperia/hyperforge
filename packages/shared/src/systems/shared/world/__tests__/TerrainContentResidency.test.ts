@@ -44,6 +44,7 @@ type TerrainInternals = {
   unloadTile(tile: TerrainTile): void;
   promoteTileContent(tile: TerrainTile): boolean;
   enqueueTileForGeneration(x: number, z: number, content: boolean): void;
+  dispatchWorkerBatch(): void;
   processTileGenerationQueue(): void;
   updatePlayerBasedTerrain(): void;
   prunePendingTileQueue(
@@ -59,6 +60,8 @@ type TerrainInternals = {
   pendingTileGenerations: Map<string, object>;
   pendingTileContent: Map<string, boolean>;
   pendingTileKeys: string[];
+  pendingTileSet: Set<string>;
+  pendingWorkerTiles: Array<{ tileX: number; tileZ: number }>;
   pendingWorkerResults: Map<string, TerrainWorkerOutput>;
   pendingWorkerTileKeys: Set<string>;
   workerFallbackTileKeys: Set<string>;
@@ -509,6 +512,148 @@ describe("actual terrain content residency", () => {
       });
     }
   }
+
+  for (const dispatched of [false, true]) {
+    for (const content of [false, true]) {
+      it(`retires synchronous resident prefetch after dispatch=${dispatched}, preserving content=${content}`, async () => {
+        const f = await fixture();
+        const budgets = [
+          f.internal.maxTilesPerFrame,
+          f.internal.generationBudgetMsPerFrame,
+        ];
+        f.internal.runtimeIsClient = true;
+        f.internal.enqueueTileForGeneration(3, 5, content);
+        expect(f.internal.pendingWorkerTileKeys.has("3_5")).toBe(true);
+        f.internal.runtimeIsClient = false;
+        const tile = f.internal.generateTile(3, 5, false);
+        const geometry = tile.mesh.geometry;
+        f.internal.runtimeIsClient = true;
+        // The real dispatcher excludes this now-resident request without
+        // starting a worker. Also cover retirement before that exclusion.
+        if (dispatched) f.internal.dispatchWorkerBatch();
+        f.internal.processTileGenerationQueue();
+        expect(f.internal.pendingTileKeys).toEqual([]);
+        expect(f.internal.pendingTileSet.size).toBe(0);
+        expect(f.internal.pendingTileContent.size).toBe(0);
+        expect(f.internal.pendingTileGenerations.size).toBe(0);
+        expect(f.internal.pendingWorkerTiles).toEqual([]);
+        expect(f.internal.pendingWorkerTileKeys.size).toBe(0);
+        expect(f.internal.pendingWorkerResults.size).toBe(0);
+        expect(f.internal.workerFallbackTileKeys.size).toBe(0);
+        expect(f.internal.pendingContentPromotions.get("3_5")).toBe(
+          content ? tile : undefined,
+        );
+        expect(tile.contentGenerated).toBe(false);
+        expect(f.batches).toHaveLength(0);
+        f.internal.runtimeIsClient = false;
+        f.internal.processTileGenerationQueue();
+        await f.settle();
+        expect(tile.contentGenerated).toBe(content);
+        expect(f.batches).toHaveLength(content ? 1 : 0);
+        expect(f.terrain.getTiles().get("3_5")).toBe(tile);
+        expect(tile.mesh.geometry).toBe(geometry);
+        f.internal.processTileGenerationQueue();
+        expect(f.batches).toHaveLength(content ? 1 : 0);
+        expect([
+          f.internal.maxTilesPerFrame,
+          f.internal.generationBudgetMsPerFrame,
+        ]).toEqual(budgets);
+      });
+    }
+  }
+
+  it("rejects an actual in-flight worker's late result after a synchronous resident retires its request", async () => {
+    const f = await fixture();
+    f.internal.runtimeIsClient = true;
+    f.internal.enqueueTileForGeneration(3, 5, true);
+    const generation = f.internal.pendingTileGenerations.get("3_5");
+    const job = workerJob(f.internal.buildGrassWorkerSetup(), 3, 5);
+    try {
+      f.internal.runtimeIsClient = false;
+      const tile = f.internal.generateTile(3, 5, false);
+      const geometry = tile.mesh.geometry;
+      f.internal.runtimeIsClient = true;
+      f.internal.processTileGenerationQueue();
+      expect(f.internal.pendingTileGenerations.has("3_5")).toBe(false);
+      const output = await job.result;
+      expect(output.heightData).toBeInstanceOf(Float32Array);
+      f.internal.acceptTerrainWorkerResult(output, generation);
+      expect(f.internal.pendingWorkerResults.size).toBe(0);
+      expect(f.internal.pendingWorkerTileKeys.size).toBe(0);
+      f.internal.runtimeIsClient = false;
+      f.internal.processTileGenerationQueue();
+      await f.settle();
+      expect(tile.contentGenerated).toBe(true);
+      expect(f.terrain.getTiles().get("3_5")).toBe(tile);
+      expect(tile.mesh.geometry).toBe(geometry);
+      expect(f.batches).toHaveLength(1);
+      f.internal.acceptTerrainWorkerResult(output, generation);
+      expect(f.internal.pendingWorkerResults.size).toBe(0);
+      expect(f.batches).toHaveLength(1);
+    } finally {
+      await job.close();
+    }
+  });
+
+  it("charges resident retirement and later content promotion to the same tile-count budget", async () => {
+    const f = await fixture();
+    f.internal.maxTilesPerFrame = 1;
+    f.internal.runtimeIsClient = true;
+    f.internal.enqueueTileForGeneration(0, 0, true);
+    f.internal.enqueueTileForGeneration(0, 1, true);
+    f.internal.runtimeIsClient = false;
+    const first = f.internal.generateTile(0, 0, false);
+    const second = f.internal.generateTile(0, 1, false);
+    f.internal.runtimeIsClient = true;
+    f.internal.processTileGenerationQueue();
+    expect(f.internal.pendingTileKeys).toEqual(["0_1"]);
+    expect(f.internal.pendingWorkerTiles).toEqual([{ tileX: 0, tileZ: 1 }]);
+    expect(f.internal.pendingContentPromotions.get("0_0")).toBe(first);
+    f.internal.runtimeIsClient = false;
+    f.internal.processTileGenerationQueue();
+    expect(first.contentGenerated).toBe(true);
+    expect(second.contentGenerated).toBe(false);
+    expect(f.internal.pendingTileKeys).toEqual(["0_1"]);
+    f.internal.processTileGenerationQueue();
+    expect(second.contentGenerated).toBe(false);
+    expect(f.internal.pendingTileKeys).toEqual([]);
+    expect(f.internal.pendingWorkerTiles).toEqual([]);
+    f.internal.processTileGenerationQueue();
+    await f.settle();
+    expect(second.contentGenerated).toBe(true);
+    expect(f.batches).toHaveLength(2);
+    expect(f.internal.maxTilesPerFrame).toBe(1);
+  });
+
+  it("retains the elapsed-time budget when a real promotion listener consumes the slice", async () => {
+    const f = await fixture();
+    f.internal.maxTilesPerFrame = 2;
+    f.internal.generationBudgetMsPerFrame = 1;
+    const first = f.internal.generateTile(0, 0, false);
+    f.internal.enqueueTileForGeneration(0, 0, true);
+    f.internal.runtimeIsClient = true;
+    f.internal.enqueueTileForGeneration(0, 1, false);
+    f.internal.runtimeIsClient = false;
+    const second = f.internal.generateTile(0, 1, false);
+    // Real event delivery, not a mocked clock or replaced promotion. A bounded
+    // synchronous subscriber exhausts this test's unchanged 1 ms slice.
+    f.world.on(EventType.TERRAIN_TILE_GENERATED, () => {
+      const end = performance.now() + 2;
+      while (performance.now() < end) {
+        // Deliberate subscriber work only for this budget regression.
+      }
+    });
+    f.internal.processTileGenerationQueue();
+    await f.settle();
+    expect(first.contentGenerated).toBe(true);
+    expect(second.contentGenerated).toBe(false);
+    expect(f.internal.pendingTileKeys).toEqual(["0_1"]);
+    expect(f.internal.pendingTileGenerations.has("0_1")).toBe(true);
+    expect(f.internal.generationBudgetMsPerFrame).toBe(1);
+    f.internal.processTileGenerationQueue();
+    expect(f.internal.pendingTileKeys).toEqual([]);
+    expect(second.contentGenerated).toBe(false);
+  });
 
   it("upgrades an actual in-flight worker geometry job without duplicate work or losing final intent", async () => {
     const f = await fixture();

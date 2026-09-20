@@ -4,9 +4,45 @@ import path from "path";
 import { fileURLToPath } from "url";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const sharedBuild = path.resolve(
+  __dirname,
+  "../shared/build/framework.client.js",
+);
+const sharedSource = path.resolve(__dirname, "../shared/src");
+const sourceDiagnosticsConsumers = new Set([
+  path.resolve(__dirname, "src/lib/streamingSceneDiagnostics.ts"),
+  path.resolve(__dirname, "tests/unit/lib/streamingSceneDiagnostics.test.ts"),
+]);
 
 export default defineConfig({
-  plugins: [react() as never],
+  plugins: [
+    react() as never,
+    {
+      name: "streaming-diagnostics-test-source-identity",
+      enforce: "pre",
+      resolveId(source, importer) {
+        const owner = importer?.split("?")[0];
+        // Only this source collector/test graph needs the current admission
+        // API. Other client tests retain the installed compiled-package alias.
+        // The alias plugin resolves its replacement through this hook; never
+        // patch/rebuild a shared bundle that a playable session may be serving.
+        if (
+          (source === "@hyperforge/shared" || source === sharedBuild) &&
+          owner &&
+          sourceDiagnosticsConsumers.has(owner)
+        )
+          return path.join(sharedSource, "index.client.ts");
+        // Real source systems must share the matching procgen recipe, not old
+        // built declarations/geometry. No virtual modules or mocked systems.
+        if (
+          source === "@hyperforge/procgen/building" &&
+          owner?.startsWith(sharedSource + path.sep)
+        )
+          return path.resolve(__dirname, "../procgen/src/building/index.ts");
+        return null;
+      },
+    },
+  ],
   test: {
     globals: true,
     environment: "jsdom",

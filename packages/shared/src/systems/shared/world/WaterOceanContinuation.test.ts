@@ -12,6 +12,7 @@ import { WaterSystem } from "./WaterSystem";
 import { WaterVisualManager } from "./WaterVisualManager";
 import { Wind } from "./Wind";
 import { FOG_FAR } from "./FogConfig";
+import { CoastalBathymetryOwner } from "./CoastalBathymetryOwner";
 
 type Continuation = {
   bands: number;
@@ -27,7 +28,10 @@ type Continuation = {
 };
 
 /** Resolve this actual r186 zero-argument TSL factory without a renderer. */
-function opacityGraph(node: Node): Node {
+function opacityGraph(value: unknown): Node {
+  if (!(value instanceof THREE.Node))
+    throw new Error("Missing actual opacity Node");
+  let node = value;
   // r186 Fn.call returns a VarNode intent around its ShaderCallNodeInternal.
   if (node.type === "VarNode") {
     const child: unknown = Reflect.get(node, "node");
@@ -56,7 +60,36 @@ function opacityValue(
   root: Node,
   shoreDistance: number,
   cosView: number,
+  field: CoastalBathymetryOwner,
 ): number {
+  // This legacy/offshore test has never configured a field. Decode only the
+  // actual owner's disabled, one-texel R16F placeholder; arbitrary textures and
+  // enabled/coastal fields require the separate field/native parity tests.
+  const fieldTexture = field.getTexture();
+  const image = fieldTexture.image;
+  const pixels = image.data;
+  if (
+    field.enabled.value !== 0 ||
+    field.getReadiness().required ||
+    fieldTexture !== field.textureNode.value ||
+    fieldTexture.format !== THREE.RedFormat ||
+    fieldTexture.type !== THREE.HalfFloatType ||
+    fieldTexture.colorSpace !== THREE.NoColorSpace ||
+    fieldTexture.minFilter !== THREE.LinearFilter ||
+    fieldTexture.magFilter !== THREE.LinearFilter ||
+    fieldTexture.wrapS !== THREE.ClampToEdgeWrapping ||
+    fieldTexture.wrapT !== THREE.ClampToEdgeWrapping ||
+    fieldTexture.generateMipmaps ||
+    fieldTexture.flipY ||
+    image.width !== 1 ||
+    image.height !== 1 ||
+    !(pixels instanceof Uint16Array) ||
+    pixels.length !== 1 ||
+    THREE.DataUtils.fromHalfFloat(pixels[0]) !== 8
+  )
+    throw new Error(
+      "Opacity evaluator requires the actual disabled R16F field",
+    );
   const read = (node: Node): number[] => {
     if (node === cameraPosition)
       return [Math.sqrt(1 - cosView * cosView), cosView, 0];
@@ -78,6 +111,37 @@ function opacityValue(
     if (value instanceof THREE.Vector3) return value.toArray();
     if (node.type === "ConvertNode" || node.type === "VarNode")
       return child("node");
+    if (node.type === "SplitNode") {
+      const source = child("node"),
+        components = property("components");
+      if (typeof components !== "string" || !/^[xyzw]{1,4}$/.test(components))
+        throw new Error("Unsupported opacity component selection");
+      return [...components].map(
+        (component) => source["xyzw".indexOf(component)],
+      );
+    }
+    if (node.type === "TextureNode") {
+      let level = property("levelNode");
+      // Actual r186 .level(float(0)) carries a VarIntent wrapper. Admit only
+      // bounded VarNode wrappers around the constant, never dynamic levels.
+      for (
+        let i = 0;
+        i < 4 && level instanceof THREE.Node && level.type === "VarNode";
+        i++
+      )
+        level = Reflect.get(level, "node");
+      if (
+        value !== fieldTexture ||
+        property("referenceNode") !== field.textureNode ||
+        !(level instanceof THREE.Node) ||
+        level.type !== "ConstNode" ||
+        Reflect.get(level, "value") !== 0
+      )
+        throw new Error("Unsupported opacity texture lookup");
+      // A one-texel clamped texture is UV-invariant. This is CPU decoding of the
+      // actual current pixel, not execution of a GPU texture instruction.
+      return [THREE.DataUtils.fromHalfFloat(pixels[0]), 0, 0, 1];
+    }
     if (node.type === "JoinNode")
       return (property("nodes") as Node[]).flatMap(read);
     const pair = (fn: (a: number, b: number) => number) => {
@@ -150,8 +214,8 @@ describe("compact ocean continuation (actual CPU classes; no rendered-water clai
     wind = world.register("wind", Wind) as Wind;
     terrain = new TerrainSystem(world);
     await terrain.init();
-    terrain.loadWaterBodiesFromManifest();
-    terrain.loadFlatZonesFromManifest();
+    terrain["loadWaterBodiesFromManifest"]();
+    terrain["loadFlatZonesFromManifest"]();
     water = new WaterSystem(world);
     // Real TSL construction and the production CPU procedural-texture fallback.
     // No fake renderer, GPU, World, material or quad-tree callback is installed.
@@ -179,7 +243,7 @@ describe("compact ocean continuation (actual CPU classes; no rendered-water clai
     const manager = new WaterVisualManager(
       container,
       initializedWater,
-      (x, z) => terrain.getHeightAtComputed(x, z),
+      (x, z) => terrain["getHeightAtComputed"](x, z),
       (x, z) =>
         (
           terrain as unknown as { getIslandMask(x: number, z: number): number }
@@ -255,6 +319,9 @@ describe("compact ocean continuation (actual CPU classes; no rendered-water clai
   it("uses the actual ocean TSL graph to reach exact offshore alpha 1 at every sampled angle", () => {
     const material = water.getMaterial("ocean")!;
     const graph = opacityGraph(material.opacityNode!);
+    const field = water["coastalBathymetry"];
+    if (!(field instanceof CoastalBathymetryOwner))
+      throw new Error("Missing actual ocean field owner");
     const smooth = (lo: number, hi: number, value: number) => {
       const t = Math.max(0, Math.min(1, (value - lo) / (hi - lo)));
       return t * t * (3 - 2 * t);
@@ -262,7 +329,7 @@ describe("compact ocean continuation (actual CPU classes; no rendered-water clai
     for (const angle of [-1, 0, 0.01, 0.25, 0.5, 0.75, 1]) {
       let previous = 0;
       for (const distance of [0, 0.2, 0.4, 1, 4, 7.999, 8, 50, 500]) {
-        const actual = opacityValue(graph, distance, angle);
+        const actual = opacityValue(graph, distance, angle, field);
         const depthFade = smooth(0.4, 8, distance);
         const old =
           smooth(0, 0.4, distance) *
@@ -275,7 +342,7 @@ describe("compact ocean continuation (actual CPU classes; no rendered-water clai
         expect(actual).toBeLessThanOrEqual(1);
         previous = actual;
       }
-      expect(opacityValue(graph, 8 - 1e-5, angle)).toBeCloseTo(1, 10);
+      expect(opacityValue(graph, 8 - 1e-5, angle, field)).toBeCloseTo(1, 10);
     }
     expect(material.transparent).toBe(true);
     expect(material.depthWrite).toBe(true);
@@ -290,13 +357,16 @@ describe("compact ocean continuation (actual CPU classes; no rendered-water clai
     const lake = water.getMaterial("lake")!;
     const lakeOpacity = lake.opacityNode;
     const graph = opacityGraph(material.opacityNode!);
+    const field = water["coastalBathymetry"];
+    if (!(field instanceof CoastalBathymetryOwner))
+      throw new Error("Missing actual ocean field owner");
     for (const mesh of [interior, boundary]) {
       expect(mesh.material).toBe(material);
       const attribute = mesh.geometry.getAttribute("shoreDistance");
       for (let i = 0; i < attribute.count; i++)
         expect(attribute.getX(i)).toBe(50);
       for (const angle of [0, 0.5, 1])
-        expect(opacityValue(graph, attribute.getX(0), angle)).toBe(1);
+        expect(opacityValue(graph, attribute.getX(0), angle, field)).toBe(1);
     }
     expect(interior.geometry.userData.oceanContinuation).toBeUndefined();
     expect(boundary.geometry.userData.oceanContinuation).toBeDefined();
@@ -305,6 +375,38 @@ describe("compact ocean continuation (actual CPU classes; no rendered-water clai
     expect(lake.transparent).toBe(true);
     // Numerical graph/input proof only; pixel compositing and the separate
     // far sky/fog-camera disagreement still require the next native capture.
+  });
+
+  it("rejects enabled, changed-pixel and unrelated texture inputs in the bounded opacity evaluator", () => {
+    const field = water["coastalBathymetry"];
+    if (!(field instanceof CoastalBathymetryOwner))
+      throw new Error("Missing actual ocean field owner");
+    const graph = opacityGraph(water.getMaterial("ocean")!.opacityNode!);
+    const pixels = field.getTexture().image.data;
+    if (!(pixels instanceof Uint16Array))
+      throw new Error("Expected R16F pixels");
+    const original = pixels[0];
+    const unrelated = new CoastalBathymetryOwner();
+    try {
+      field.enabled.value = 1;
+      expect(() => opacityValue(graph, 50, 1, field)).toThrow(
+        "disabled R16F field",
+      );
+      field.enabled.value = 0;
+      pixels[0] = THREE.DataUtils.toHalfFloat(7);
+      expect(() => opacityValue(graph, 50, 1, field)).toThrow(
+        "disabled R16F field",
+      );
+      pixels[0] = original;
+      expect(() => opacityValue(unrelated.signedDepth, 50, 1, field)).toThrow(
+        "Unsupported opacity texture lookup",
+      );
+    } finally {
+      field.enabled.value = 0;
+      pixels[0] = original;
+      unrelated.destroy();
+    }
+    expect(opacityValue(graph, 50, 1, field)).toBe(1);
   });
 
   it("preserves every original attribute and index while extending only exposed root sides", () => {

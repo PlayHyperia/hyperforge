@@ -45,7 +45,7 @@ import THREE, {
   cameraNear,
   cameraFar,
 } from "../../../extras/three/three";
-import type { Node, UniformNode } from "three/webgpu";
+import type { Node, NodeFrame, UniformNode } from "three/webgpu";
 import { NodeUpdateType } from "three/tsl";
 import type { World } from "../../../types";
 import type { TerrainTile } from "../../../types/world/terrain";
@@ -54,6 +54,9 @@ import { FOG_NEAR_SQ, FOG_FAR_SQ, fogRenderTarget } from "./FogConfig";
 import { SUN_SHADE, NIGHT, applySunShade } from "./LightingConfig";
 import { WorldIlluminationUniforms } from "./WorldIlluminationUniforms";
 import { TERRAIN_CONSTANTS } from "../../../constants/GameConstants";
+import type { CanonicalGroundLease } from "./CoastalBathymetry";
+import { CoastalBathymetryOwner } from "./CoastalBathymetryOwner";
+import { createCoastalWaterOpticalDistanceNode } from "./CoastalWaterOptics";
 
 // ============================================================================
 // CONFIGURATION
@@ -186,6 +189,23 @@ interface OceanDisplacementBounds {
   wind: number;
 }
 
+type LakePlaneSource = {
+  geometry: THREE.BufferGeometry;
+  position: THREE.BufferAttribute | THREE.InterleavedBufferAttribute;
+  version: number;
+  localHeight: number;
+};
+
+type LakeReflectionOwner = {
+  frameId: number;
+  renderId: number;
+  camera: THREE.Camera;
+  scene: THREE.Scene | null;
+  mesh: THREE.Mesh;
+  plane: THREE.Plane;
+  captured: boolean;
+};
+
 type UniformFloat = UniformNode<"float", number>;
 type UniformVec3 = UniformNode<"vec3", THREE.Vector3>;
 type UniformColor = UniformNode<"color", THREE.Color>;
@@ -231,11 +251,25 @@ export class WaterSystem {
   private normalTex?: THREE.Texture;
   private foamTex?: THREE.Texture;
   private flowTex?: THREE.Texture;
+  private coastalBathymetry: CoastalBathymetryOwner | null = null;
 
   // TSL planar reflection (Three.js ReflectorNode handles camera, RT, clipping)
   private reflection?: ReturnType<typeof reflector>;
   private waterLevel: number = TERRAIN_CONSTANTS.WATER_THRESHOLD;
   private waterMeshes: THREE.Mesh[] = [];
+  private lakePlaneSources = new Map<THREE.Mesh, LakePlaneSource>();
+  private lakeReflectionOwners = new WeakMap<
+    NodeFrame,
+    WeakMap<THREE.Camera, LakeReflectionOwner>
+  >();
+  private lastLakeReflectionOwner: LakeReflectionOwner | null = null;
+  private lakeReflectionPlaneUniform: UniformFloat | null = null;
+  private readonly reflectionPlane = new THREE.Plane();
+  private readonly reflectionNormalMatrix = new THREE.Matrix3();
+  private readonly reflectionPoint = new THREE.Vector3();
+  private readonly reflectionRotation = new THREE.Quaternion();
+  private readonly reflectionAxis = new THREE.Vector3(0, 0, 1);
+  private readonly reflectionScale = new THREE.Vector3(1, 1, 1);
   // Optional bound records do not own or dispose geometry/materials.
   private oceanDisplacementBounds: OceanDisplacementBounds[] = [];
 
@@ -265,6 +299,10 @@ export class WaterSystem {
    * Ocean water never has reflections regardless of this setting
    */
   setReflectionsEnabled(enabled: boolean): void {
+    if (enabled !== this._reflectionsEnabled) {
+      this.lakeReflectionOwners = new WeakMap();
+      this.lastLakeReflectionOwner = null;
+    }
     this._reflectionsEnabled = enabled;
 
     // Keep the visual blend and the reflector's runtime update gate in sync.
@@ -330,10 +368,63 @@ export class WaterSystem {
    * Set the Y level used for the reflection mirror plane.
    */
   setWaterLevel(y: number): void {
+    if (!Number.isFinite(y)) throw new Error("Water level must be finite");
+    if (
+      this.coastalBathymetry?.getReadiness().required &&
+      y !== this.waterLevel
+    )
+      throw new Error(
+        "Configured coastal water level must match its immutable terrain profile",
+      );
     this.waterLevel = y;
     if (this.reflection?.target) {
       this.reflection.target.position.y = y;
     }
+  }
+
+  /** Initial compact field is requested only after authored grades are loaded. */
+  configureCoastalBathymetry(
+    sourceFactory: () => CanonicalGroundLease,
+  ): Promise<boolean> {
+    if (!this.coastalBathymetry)
+      return Promise.reject(
+        new Error("Coastal material must initialize before its field"),
+      );
+    return this.coastalBathymetry.configure(() => {
+      const source = sourceFactory();
+      if (source.profile.water.threshold !== this.waterLevel)
+        throw new Error(
+          "Coastal source sea level differs from its water owner",
+        );
+      return source;
+    });
+  }
+
+  invalidateCoastalBathymetry(): void {
+    this.coastalBathymetry?.invalidate();
+  }
+
+  getCoastalBathymetryReadiness() {
+    return (
+      this.coastalBathymetry?.getReadiness() ?? {
+        required: false,
+        ready: true,
+        status: "inactive",
+        sourceRevision: null,
+        pendingRevision: null,
+        progressSamples: 0,
+        domain: null,
+        statistics: null,
+        textureId: null,
+        error: null,
+        scope: "No compact coastal field configured",
+      }
+    );
+  }
+
+  /** Borrowed texture for bounded native binding/filtering verification. */
+  getCoastalBathymetryTexture(): THREE.DataTexture | null {
+    return this.coastalBathymetry?.getTexture() ?? null;
   }
 
   /**
@@ -378,13 +469,168 @@ export class WaterSystem {
       );
       this.oceanDisplacementBounds.push(entry);
     }
+    this.registerLakePlaneSource(mesh);
     this.waterMeshes.push(mesh);
+  }
+
+  /** Admit the actual undeformed local water plane once, not by body metadata. */
+  private registerLakePlaneSource(mesh: THREE.Mesh): void {
+    if (this.lakePlaneSources.has(mesh)) {
+      this.lakeReflectionOwners = new WeakMap();
+      this.lastLakeReflectionOwner = null;
+    }
+    this.lakePlaneSources.delete(mesh);
+    if (mesh.material !== this.lakeMaterial) return;
+    const position = mesh.geometry.getAttribute("position");
+    if (!position || position.count < 3) return;
+    let low = Infinity;
+    let high = -Infinity;
+    for (let index = 0; index < position.count; index++) {
+      const x = position.getX(index);
+      const y = position.getY(index);
+      const z = position.getZ(index);
+      if (![x, y, z].every(Number.isFinite)) return;
+      low = Math.min(low, y);
+      high = Math.max(high, y);
+    }
+    // Circle/PlaneGeometry rotateX leaves sub-picometre Y roundoff. Curved
+    // geometry is not an admitted planar reflector and must not borrow one.
+    if (high - low > 1e-6) return;
+    this.lakePlaneSources.set(mesh, {
+      geometry: mesh.geometry,
+      position,
+      version:
+        position instanceof THREE.InterleavedBufferAttribute
+          ? position.data.version
+          : position.version,
+      localHeight: low / 2 + high / 2,
+    });
+  }
+
+  private readLakeReflectionPlane(
+    mesh: THREE.Mesh,
+    plane: THREE.Plane,
+  ): boolean {
+    const source = this.lakePlaneSources.get(mesh);
+    if (
+      !source ||
+      mesh.material !== this.lakeMaterial ||
+      mesh.geometry !== source.geometry ||
+      mesh.geometry.getAttribute("position") !== source.position ||
+      (source.position instanceof THREE.InterleavedBufferAttribute
+        ? source.position.data.version
+        : source.position.version) !== source.version ||
+      !mesh.matrixWorld.elements.every(Number.isFinite) ||
+      mesh.matrixWorld.determinant() === 0
+    )
+      return false;
+    this.reflectionNormalMatrix.getNormalMatrix(mesh.matrixWorld);
+    plane.setComponents(0, 1, 0, -source.localHeight);
+    plane.applyMatrix4(mesh.matrixWorld, this.reflectionNormalMatrix);
+    return (
+      [plane.normal.x, plane.normal.y, plane.normal.z, plane.constant].every(
+        Number.isFinite,
+      ) && plane.normal.lengthSq() > 0.999999
+    );
+  }
+
+  /**
+   * One capture per native render, not one per water mesh. The first admitted
+   * lake in Three's actual draw order owns that capture. Other coplanar lakes
+   * share it; different planes use the existing reflection-disabled blend.
+   * Full simultaneous multi-height reflections would require extra captures.
+   */
+  private bindLakeReflectionPlane(
+    frame: NodeFrame,
+    target: THREE.Object3D,
+  ): LakeReflectionOwner | null {
+    const { object, camera } = frame;
+    if (
+      !this._reflectionsEnabled ||
+      !(object instanceof THREE.Mesh) ||
+      !camera ||
+      !this.readLakeReflectionPlane(object, this.reflectionPlane)
+    )
+      return null;
+    let owners = this.lakeReflectionOwners.get(frame);
+    if (!owners) {
+      owners = new WeakMap();
+      this.lakeReflectionOwners.set(frame, owners);
+    }
+    const previous = owners.get(camera);
+    if (
+      previous?.renderId === frame.renderId &&
+      previous.frameId === frame.frameId &&
+      previous.scene === frame.scene
+    )
+      return null;
+    const owner: LakeReflectionOwner = previous ?? {
+      frameId: frame.frameId,
+      renderId: frame.renderId,
+      camera,
+      scene: frame.scene,
+      mesh: object,
+      plane: new THREE.Plane(),
+      captured: false,
+    };
+    owner.frameId = frame.frameId;
+    owner.renderId = frame.renderId;
+    owner.scene = frame.scene;
+    owner.mesh = object;
+    owner.plane.copy(this.reflectionPlane);
+    owner.captured = false;
+    owners.set(camera, owner);
+    this.lastLakeReflectionOwner = owner;
+
+    // ReflectorNode reads matrixWorld directly before its nested render. Build
+    // an orthonormal frame from the inverse-transpose plane normal, including
+    // transformed parents/nonuniform scale, rather than copying a sheared frame.
+    owner.plane.coplanarPoint(this.reflectionPoint);
+    this.reflectionRotation.setFromUnitVectors(
+      this.reflectionAxis,
+      owner.plane.normal,
+    );
+    target.matrixWorld.compose(
+      this.reflectionPoint,
+      this.reflectionRotation,
+      this.reflectionScale,
+    );
+    return owner;
+  }
+
+  private matchesLakeReflectionPlane(frame: NodeFrame): boolean {
+    const { object, camera } = frame;
+    if (!this._reflectionsEnabled || !(object instanceof THREE.Mesh) || !camera)
+      return false;
+    const owner = this.lakeReflectionOwners.get(frame)?.get(camera);
+    if (
+      !owner ||
+      owner.frameId !== frame.frameId ||
+      owner.renderId !== frame.renderId ||
+      owner.scene !== frame.scene ||
+      !this.lakePlaneSources.has(owner.mesh) ||
+      !this.readLakeReflectionPlane(object, this.reflectionPlane)
+    )
+      return false;
+    const alignment = owner.plane.normal.dot(this.reflectionPlane.normal);
+    return (
+      Math.abs(alignment) >= 1 - 1e-10 &&
+      Math.abs(
+        this.reflectionPlane.constant -
+          (alignment < 0 ? -owner.plane.constant : owner.plane.constant),
+      ) <= 1e-5
+    );
   }
 
   /**
    * Unregister an externally-created water mesh from reflection tracking.
    */
   unregisterWaterMesh(mesh: THREE.Mesh): void {
+    if (this.lakePlaneSources.delete(mesh)) {
+      // Do not revive an old render's capture if this mesh is registered again.
+      this.lakeReflectionOwners = new WeakMap();
+      this.lastLakeReflectionOwner = null;
+    }
     const idx = this.waterMeshes.indexOf(mesh);
     if (idx !== -1) this.waterMeshes.splice(idx, 1);
     const boundsIndex = this.oceanDisplacementBounds.findIndex(
@@ -515,6 +761,24 @@ export class WaterSystem {
       this._reflectionsEnabled
         ? reflection.updateBeforeType
         : NodeUpdateType.NONE;
+    const nativeUpdate = reflection.updateBefore;
+    reflection.updateBefore = (frame) => {
+      const owner = this.bindLakeReflectionPlane(frame, node.target);
+      // Returning false leaves native NodeFrame admission open for a later
+      // valid lake, without issuing a capture for an unsupported surface.
+      if (!owner) return false;
+      const previousWorldAutoUpdate = node.target.matrixWorldAutoUpdate;
+      node.target.matrixWorldAutoUpdate = false;
+      try {
+        const result = nativeUpdate.call(reflection, frame);
+        owner.captured = result !== false && reflection.hasOutput;
+        return result;
+      } finally {
+        // The nested render must not rebuild this world-owned plane from the
+        // legacy ocean-level target transform. Restore its exact owner flag.
+        node.target.matrixWorldAutoUpdate = previousWorldAutoUpdate;
+      }
+    };
     node.target.rotateX(-Math.PI / 2);
     node.target.position.y = this.waterLevel;
     return node;
@@ -778,6 +1042,14 @@ export class WaterSystem {
     const uReflectionIntensity = uniform(
       this._reflectionsEnabled ? WATER.REFLECTION_INTENSITY : 0.0,
     );
+    const reflectionPlaneWeight = uniform(0).onObjectUpdate((frame) => {
+      if (!this.matchesLakeReflectionPlane(frame) || !frame.camera) return 0;
+      return this.lakeReflectionOwners.get(frame)?.get(frame.camera)?.captured
+        ? 1
+        : 0;
+    });
+    this.lakeReflectionPlaneUniform = reflectionPlaneWeight;
+    const reflectionIntensity = uReflectionIntensity.mul(reflectionPlaneWeight);
 
     this.uniforms = {
       illumination,
@@ -1107,7 +1379,7 @@ export class WaterSystem {
       );
       const albedo = mix(
         diffusePart,
-        mul(reflectPart, uReflectionIntensity),
+        mul(reflectPart, reflectionIntensity),
         reflectance,
       );
       let color: Node<"vec3"> = mix(albedo, waterColor, float(0.8));
@@ -1169,7 +1441,7 @@ export class WaterSystem {
             mul(worldDiffuse, float(0.3 * WATER.DIFFUSE_STRENGTH)),
             worldScatter,
           ),
-          mul(worldReflect, uReflectionIntensity),
+          mul(worldReflect, reflectionIntensity),
           reflectance,
         ),
         worldDiffuse,
@@ -1240,6 +1512,15 @@ export class WaterSystem {
     const nTex = this.normalTex!;
     const fTex = this.flowTex!;
     const foamTex = this.foamTex!;
+    const coast = (this.coastalBathymetry ??= new CoastalBathymetryOwner());
+    // Reuse one fragment sample and one optical parameter across both branches.
+    // Vertex displacement and crest normals retain their original attribute.
+    const opticalShoreDistance = createCoastalWaterOpticalDistanceNode(
+      attribute<"float">("shoreDistance", "float"),
+      coast.signedDepth,
+      positionWorld.y.sub(coast.seaLevel),
+      coast.enabled,
+    );
 
     const wavePhase = (
       wp: Node<"vec3">,
@@ -1282,7 +1563,7 @@ export class WaterSystem {
 
     // OPACITY (feeds into PBR → output.a)
     material.opacityNode = Fn(() => {
-      const shoreDist = attribute<"float">("shoreDistance", "float");
+      const shoreDist = opticalShoreDistance;
       const edgeFade = smoothstep(float(0), float(0.4), shoreDist);
       const depthFade = smoothstep(float(0.4), float(8.0), shoreDist);
       const depthOpacity = mix(float(0.3), float(0.85), depthFade);
@@ -1296,8 +1577,8 @@ export class WaterSystem {
       const shallowOpacity = mul(mul(edgeFade, depthOpacity), fresnelOpacity);
       // Offshore water must not expose the finite terrain seabed/sky boundary.
       // Retain the existing shallow expression, then fade to exact opacity 1
-      // at shoreDistance >= 8 for every view angle. Quad-tree ocean currently
-      // supplies 50 everywhere; this is not a measured optical water depth.
+      // at optical parameter >= 8 for every view angle. The shared field blends
+      // back to the exact legacy parameter offshore, independently of wave Y.
       return mix(shallowOpacity, float(1), depthFade);
     })();
 
@@ -1309,7 +1590,9 @@ export class WaterSystem {
       const shoreMask = smoothstep(float(0), float(6), shoreDist);
       const wUV = vec2(wp.x, wp.z);
 
-      // --- Cosine gradient — deeper bias for ocean ---
+      // Keep the established ocean tint. Local depth controls transmission;
+      // feeding its nearshore band into this much deeper color curve paints
+      // a bright strip along steep banks instead of revealing the substrate.
       const colorDepth = pow(
         saturate(sub(float(1), div(shoreDist, float(80)))),
         float(4),
@@ -1587,7 +1870,7 @@ export class WaterSystem {
         tileSize,
         waterType,
       );
-      this.waterMeshes.push(mesh);
+      this.registerWaterMesh(mesh);
       return mesh;
     }
 
@@ -1730,7 +2013,7 @@ export class WaterSystem {
     geom.setAttribute("normal", new THREE.Float32BufferAttribute(normals, 3));
 
     const mesh = this.createMesh(geom, tile, waterThreshold, waterType);
-    this.waterMeshes.push(mesh);
+    this.registerWaterMesh(mesh);
     return mesh;
   }
 
@@ -1818,6 +2101,7 @@ export class WaterSystem {
   // ==========================================================================
 
   update(deltaTime: number): void {
+    this.coastalBathymetry?.update();
     const dt =
       typeof deltaTime === "number" && isFinite(deltaTime) ? deltaTime : 1 / 60;
     this.waterTime += dt;
@@ -1890,6 +2174,10 @@ export class WaterSystem {
       mesh.geometry.dispose();
     }
     this.waterMeshes = [];
+    this.lakePlaneSources.clear();
+    this.lakeReflectionOwners = new WeakMap();
+    this.lastLakeReflectionOwner = null;
+    this.lakeReflectionPlaneUniform = null;
     this.oceanDisplacementBounds.length = 0;
 
     // Dispose materials
@@ -1898,6 +2186,8 @@ export class WaterSystem {
     this.quietPondUniform = null;
     this.oceanMaterial?.dispose();
     this.oceanMaterial = undefined;
+    this.coastalBathymetry?.destroy();
+    this.coastalBathymetry = null;
 
     // Dispose textures
     this.normalTex?.dispose();

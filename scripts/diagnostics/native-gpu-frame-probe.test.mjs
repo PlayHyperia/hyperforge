@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import * as study from "./native-gpu-frame-probe.mjs";
+import { readFile } from "node:fs/promises";
 const repo = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
   "../..",
@@ -207,3 +208,170 @@ test("timestamp admission matches the actual r186 backend constructor, not an as
       .includes("Object.defineProperty(pools,type,poolDescriptors[type])"),
   );
 });
+
+test("physical probe is serializable, uniquely owns native pairs, and never enables Three timestamps", () => {
+  const source = study.measureNativePhysicalGpuFrames.toString();
+  const serialized = new Function("return (" + source + ");")();
+  assert.equal(serialized.name, "measureNativePhysicalGpuFrames");
+  // Multiline calls acquire optional trailing commas under the repo formatter.
+  // Normalize that punctuation without changing the asserted argument list.
+  const compact = source.replace(/\s+/g, "").replace(/,\)/g, ")");
+  for (const forbidden of [
+    "trackTimestamp=true",
+    "allocateQueriesForContext(",
+    "setAnimationLoop(",
+    "requestAdapter(",
+    "requestDevice(",
+    "onSubmittedWorkDone(",
+    "setPixelRatio(",
+    "renderer.render(",
+  ])
+    assert(!compact.includes(forbidden), forbidden);
+  for (const required of [
+    "pool.allocations.length*2",
+    "Object.freeze({querySet:pool.querySet",
+    "Object.getOwnPropertyDescriptors(descriptor)",
+    "Reflect.apply(original,this,args)",
+    "encoder.resolveQuerySet(pool.querySet,0,batch.queryCount,pool.resolveBuffer,0)",
+    "newBigUint64Array(range)",
+    "beginRenderPass",
+    "beginComputePass",
+    "nativeUnchanged()",
+  ])
+    assert(compact.includes(required), required);
+});
+
+test("actual r186 invokes logical timestamp initialization before native render/compute begins even with tracking disabled", async () => {
+  const source = await readFile(
+    path.join(repo, "node_modules/three/src/renderers/webgpu/WebGPUBackend.js"),
+    "utf8",
+  );
+  assert(
+    source.includes(
+      "this.initTimestampQuery( TimestampQuery.RENDER, this.getTimestampUID( renderContext ), descriptor );",
+    ),
+  );
+  assert(
+    source.includes(
+      "this.initTimestampQuery( TimestampQuery.COMPUTE, this.getTimestampUID( computeGroup ), _computePassDescriptor );",
+    ),
+  );
+  const { WebGPUBackend } = await import(
+    pathToFileURL(path.join(repo, "node_modules/three/build/three.webgpu.js"))
+      .href
+  );
+  const backend = new WebGPUBackend(),
+    descriptor = {};
+  backend.initTimestampQuery("render", "r:1:0:f1", descriptor);
+  assert.deepEqual(descriptor, {});
+  assert.equal(backend.trackTimestamp, false);
+  assert.deepEqual(backend.timestampQueryPool, { render: null, compute: null });
+});
+
+const rejectedDirectory = process.env.HYPERIA_GPU_REJECTION_DIR;
+test(
+  "retains actual rejected schema1 evidence without promoting its contaminated GPU sums",
+  {
+    skip: rejectedDirectory
+      ? false
+      : "Set HYPERIA_GPU_REJECTION_DIR to an existing native review directory",
+  },
+  async () => {
+    for (const name of [
+      "control-gpu-spans.json",
+      "control-focused-gpu-spans.json",
+      "candidate-focused-gpu-spans.json",
+    ]) {
+      const bytes = await readFile(path.join(rejectedDirectory, name), "utf8");
+      const envelope = JSON.parse(bytes);
+      assert.equal(envelope.raw.schemaVersion, 1);
+      assert.throws(
+        () => study.summarizeNativePhysicalGpuFrames(envelope.raw),
+        /schema-2/,
+      );
+      if (name === "control-gpu-spans.json")
+        assert.throws(() => study.summarizeNativeGpuFrames(envelope.raw));
+      else {
+        assert.equal(
+          study.summarizeNativeGpuFrames(envelope.raw).performanceApproved,
+          false,
+        );
+        const uses = new Map();
+        for (const encoder of envelope.spans.encoders)
+          for (const op of encoder.operations)
+            if (op.kind === "pass" && op.pool !== null)
+              uses.set(op.uid, (uses.get(op.uid) ?? 0) + 1);
+        const duplicate = [...uses].filter(([, count]) => count > 1);
+        assert.equal(duplicate.length, envelope.raw.frames.length);
+        assert(
+          duplicate.every(
+            ([uid, count]) => /^r:3:6:f\d+$/.test(uid) && count === 3,
+          ),
+        );
+      }
+      assert.equal(
+        await readFile(path.join(rejectedDirectory, name), "utf8"),
+        bytes,
+      );
+    }
+  },
+);
+
+const physicalReceipt = process.env.HYPERIA_GPU_PHYSICAL_RECEIPT;
+test(
+  "admits a real schema2 capture and rejects corrupted physical slots, associations, maps and cleanup",
+  {
+    skip: physicalReceipt
+      ? false
+      : "Set HYPERIA_GPU_PHYSICAL_RECEIPT to a real schema2 native capture",
+  },
+  async () => {
+    const raw = JSON.parse(await readFile(physicalReceipt, "utf8"));
+    const before = JSON.stringify(raw),
+      summary = study.summarizeNativePhysicalGpuFrames(raw);
+    assert.equal(summary.performanceApproved, false);
+    assert(summary.physicalSegments > summary.logicalContexts);
+    assert.equal(JSON.stringify(raw), before);
+    for (const corrupt of [
+      (value) => {
+        value.segments[1].queryIndex = value.segments[0].queryIndex;
+      },
+      (value) => {
+        value.segments[0].logicalUid = "r:999:999:f0";
+      },
+      (value) => {
+        value.segments[0].immutableWrites = false;
+      },
+      (value) => {
+        value.segments[0].descriptorPreserved = false;
+      },
+      (value) => {
+        value.encoders[value.segments[0].encoder - 1].segments.push(
+          value.segments[0].id,
+        );
+      },
+      (value) => {
+        value.batches[0].values.pop();
+      },
+      (value) => {
+        value.batches[0].values[1] = "-1";
+      },
+      (value) => {
+        value.batches[0].generation++;
+      },
+      (value) => {
+        for (const batch of value.batches) batch.values.fill("0");
+      },
+      (value) => {
+        value.cleanup.nativeStateUnchanged = false;
+      },
+      (value) => {
+        value.frames[0].focused = false;
+      },
+    ]) {
+      const changed = structuredClone(raw);
+      corrupt(changed);
+      assert.throws(() => study.summarizeNativePhysicalGpuFrames(changed));
+    }
+  },
+);

@@ -1,4 +1,7 @@
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
+import { readFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { resolve } from "node:path";
 import {
   createOpenWorkshop,
   OPEN_WORKSHOP_POSTS,
@@ -6,6 +9,17 @@ import {
 import { World } from "../../../../core/World";
 import { DataManager } from "../../../../data/DataManager";
 import { ALL_WORLD_AREAS } from "../../../../data/world-areas";
+import type {
+  WorldArea,
+  WorldConfigManifest,
+} from "../../../../types/world/world-types";
+import { PlayerEntity } from "../../../../entities/player/PlayerEntity";
+import { NPCEntity } from "../../../../entities/npc/NPCEntity";
+import { BankEntity } from "../../../../entities/world/BankEntity";
+import { MobNPCSpawnerSystem } from "../../entities/MobNPCSpawnerSystem";
+import { TownSystem } from "../TownSystem";
+import { validatePhysicalBankAccess } from "../../../../../../server/src/shared/PhysicalBankAccess";
+import { ArenaPoolManager } from "../../../../../../server/src/systems/DuelSystem/ArenaPoolManager";
 import {
   getDuelArenaConfig,
   isPositionInsideCombatArena,
@@ -64,6 +78,7 @@ const saved = {
   config: DataManager["worldConfig"],
   profile: DataManager["worldTerrainProfile"],
   identity: DataManager["worldContentIdentity"],
+  areas: { ...ALL_WORLD_AREAS },
 };
 const worlds: World[] = [];
 beforeAll(async () => {
@@ -81,6 +96,8 @@ afterEach(() => {
   DataManager["worldConfig"] = saved.config;
   DataManager["worldTerrainProfile"] = saved.profile;
   DataManager["worldContentIdentity"] = saved.identity;
+  for (const key of Object.keys(ALL_WORLD_AREAS)) delete ALL_WORLD_AREAS[key];
+  Object.assign(ALL_WORLD_AREAS, saved.areas);
 });
 async function fixture() {
   DataManager["worldContentIdentity"] = null;
@@ -150,7 +167,9 @@ function expectCurrentPathWear(
     expect(path.width / 2 + path.blendWidth!).toBe(
       previousWidths[index] / 2 + 0.5,
     );
-    expect(Object.hasOwn(path, "maxInfluence")).toBe(false);
+    expect(Object.prototype.hasOwnProperty.call(path, "maxInfluence")).toBe(
+      false,
+    );
   }
   expect(
     paths.slice(11).map(({ id, width, blendWidth, maxInfluence }) => ({
@@ -421,7 +440,7 @@ describe("actual compact service court placement and preparation navigation", ()
       }
       const samples = [-radius, 0, radius].flatMap((dx) =>
         [-radius, 0, radius].map((dz) =>
-          terrain.getHeightAtComputed(p.x + dx, p.z + dz),
+          terrain["getHeightAtComputed"](p.x + dx, p.z + dz),
         ),
       );
       expect(samples.every(Number.isFinite)).toBe(true);
@@ -753,6 +772,327 @@ describe("actual compact service court placement and preparation navigation", ()
           ).toBeGreaterThan(0.9);
     } finally {
       geometry.dispose();
+    }
+  }, 60000);
+});
+
+// These cross-manifest source tests require an explicit isolated asset audition.
+// They must not silently activate in a later default-world promotion.
+describe.skipIf(
+  process.env.HYPERIA_BANK_PAVILION_CANDIDATE !== "integration01",
+)("explicit candidate bank pavilion real-world access", () => {
+  it("measures the removed lodge grade against the exact Review75 manifest", async () => {
+    expect(saved.config?.compactBankPavilion?.layoutId).toBe(
+      "compact-bank-pavilion-v1",
+    );
+    const baselineAssets = process.env.BANK_PAVILION_BASELINE_ASSETS;
+    if (!baselineAssets)
+      throw new Error(
+        "Candidate comparison requires BANK_PAVILION_BASELINE_ASSETS",
+      );
+    const configBytes = readFileSync(
+      resolve(baselineAssets, "manifests/world-config.json"),
+    );
+    const areaBytes = readFileSync(
+      resolve(baselineAssets, "manifests/world-areas.json"),
+    );
+    const sha = (bytes: Buffer) =>
+      createHash("sha256").update(bytes).digest("hex");
+    expect(sha(configBytes)).toBe(
+      "9b62db692eea9bbedaea5903c9db748469ca8905766e96eeef8472b131affe79",
+    );
+    expect(sha(areaBytes)).toBe(
+      "8478d1edca61d83380dd9d83d1ce6e8df07adf7a5864a2f999716a2a8ec9c69c",
+    );
+    const baselineConfig: WorldConfigManifest = JSON.parse(
+      configBytes.toString("utf8"),
+    );
+    const baselineGroups: Record<
+      string,
+      Record<string, WorldArea>
+    > = JSON.parse(areaBytes.toString("utf8"));
+    const baselineAreas = Object.assign(
+      {},
+      ...[
+        "starterTowns",
+        "level1Areas",
+        "level2Areas",
+        "level3Areas",
+        "specialAreas",
+      ].map((key) => baselineGroups[key] ?? {}),
+    ) as Record<string, WorldArea>;
+    const measurements = async (
+      config: WorldConfigManifest,
+      areas: Record<string, WorldArea>,
+    ) => {
+      for (const key of Object.keys(ALL_WORLD_AREAS))
+        delete ALL_WORLD_AREAS[key];
+      Object.assign(ALL_WORLD_AREAS, areas);
+      DataManager["worldContentIdentity"] = null;
+      DataManager.setWorldConfig(config);
+      const world = new CpuServerWorld();
+      worlds.push(world);
+      const terrain = world.register("terrain", TerrainSystem) as TerrainSystem;
+      await terrain.init();
+      const startup = terrain as unknown as {
+        loadWaterBodiesFromManifest(): void;
+        loadFlatZonesFromManifest(): void;
+      };
+      startup.loadWaterBodiesFromManifest();
+      startup.loadFlatZonesFromManifest();
+      const points = Array.from({ length: 21 }, (_, ix) =>
+        Array.from({ length: 25 }, (_, iz) => ({
+          x: 345 + ix * 0.5,
+          z: 320.94 + iz * 0.5025,
+        })),
+      ).flat();
+      points.push(
+        { x: 350, z: 326.97 },
+        { x: 350, z: 320 },
+        { x: 348, z: 318 },
+        { x: 344, z: 326.97 },
+        { x: 356, z: 326.97 },
+        { x: 350, z: 319.94 },
+        { x: 350, z: 334 },
+      );
+      return {
+        samples: points.map(({ x, z }) => ({
+          x,
+          z,
+          canonical: terrain.getResourceGroundHeight(x, z),
+          gameplay: terrain.getHeightAt(x, z),
+        })),
+        zones: terrain["getTerrainSurfaceForRegion"](340, 315, 360, 337).zones,
+      };
+    };
+    const baseline = await measurements(baselineConfig, baselineAreas);
+    const candidate = await measurements(saved.config!, saved.areas);
+    const zoneId = "central_haven_lodge_grass_clearance";
+    expect(baseline.zones.find((zone) => zone.id === zoneId)).toMatchObject({
+      excludeGrass: true,
+      centerX: 350,
+      centerZ: 326.97,
+      width: 10,
+      depth: 12.06,
+      height: 28.419301523097687,
+      blendRadius: 0,
+    });
+    expect(candidate.zones.some((zone) => zone.id === zoneId)).toBe(false);
+    expect(candidate.zones).toEqual(
+      baseline.zones.filter((zone) => zone.id !== zoneId),
+    );
+    const rows = candidate.samples.map((after, i) => {
+      const before = baseline.samples[i];
+      expect(
+        [
+          after.canonical,
+          after.gameplay,
+          before.canonical,
+          before.gameplay,
+        ].every(Number.isFinite),
+      ).toBe(true);
+      return {
+        x: after.x,
+        z: after.z,
+        baseline: before.canonical,
+        candidate: after.canonical,
+        delta: after.canonical - before.canonical,
+        gameplayDelta: after.gameplay - before.gameplay,
+      };
+    });
+    // The retained common Haven grade already owns this entire sampled region;
+    // removing the redundant lodge pad must not introduce a local ground step.
+    for (const row of rows) {
+      expect(row.delta, JSON.stringify(row)).toBe(0);
+      expect(row.gameplayDelta, JSON.stringify(row)).toBe(0);
+    }
+    console.info(
+      "BANK_PAVILION_GRADE_RECEIPT",
+      JSON.stringify({
+        scope:
+          "actual CPU canonical/gameplay height; not rendered triangle contact",
+        baselineConfigSha256: sha(configBytes),
+        baselineAreasSha256: sha(areaBytes),
+        samples: rows.length,
+        changed: rows.filter((row) => row.delta !== 0).length,
+        minDelta: Math.min(...rows.map((row) => row.delta)),
+        maxDelta: Math.max(...rows.map((row) => row.delta)),
+        maxAbsGameplayDelta: Math.max(
+          ...rows.map((row) => Math.abs(row.gameplayDelta)),
+        ),
+        selected: rows.slice(-7),
+        largest: [...rows]
+          .sort((a, b) => Math.abs(b.delta) - Math.abs(a.delta))
+          .slice(0, 6),
+      }),
+    );
+  });
+
+  it("reaches the actual chest and moved clerk through owned collisions and enforces the real two-tile bank boundary", async () => {
+    expect(saved.config?.compactBankPavilion?.layoutId).toBe(
+      "compact-bank-pavilion-v1",
+    );
+    const { world, manager, terrain, resources, owner } = await fixture();
+    await owner.start();
+    const landscape = world.register(
+      COMPACT_LANDSCAPE_ROCKS_SYSTEM,
+      CompactLandscapeRocksSystem,
+    ) as CompactLandscapeRocksSystem;
+    await landscape.init();
+    await landscape.start();
+    const towns = world.register("towns", TownSystem) as TownSystem;
+    await towns.init();
+    await towns.start();
+    expect(towns.getCompactPreparationLodge()).toBeNull();
+    expect(towns.getCollisionService().getBuildingCount()).toBe(0);
+    expect(owner.getCourts()).toHaveLength(2);
+    expect(landscape.getRocks()?.placements).toHaveLength(17);
+    expect(
+      resources.getAllResources().filter((r) => r.type === "tree"),
+    ).toHaveLength(48);
+    const npcs = world.register(
+      "mob-npc-spawner",
+      MobNPCSpawnerSystem,
+    ) as MobNPCSpawnerSystem;
+    await npcs.init();
+    // The real startup method, without unrelated default combat-mob spawning.
+    await (
+      npcs as unknown as { spawnAllNPCsFromManifest(): Promise<void> }
+    ).spawnAllNPCsFromManifest();
+    const clerk = [...manager.getAllEntities().values()].find((entity) =>
+      entity.id.startsWith("npc_bank_clerk_"),
+    );
+    expect(clerk).toBeInstanceOf(NPCEntity);
+    if (!(clerk instanceof NPCEntity))
+      throw new Error("Actual clerk failed to spawn");
+    expect([clerk.position.x, clerk.position.z]).toEqual([352, 322]);
+    const bank = world.entities.get("station_bank_spawn");
+    expect(bank).toBeInstanceOf(BankEntity);
+    if (!(bank instanceof BankEntity))
+      throw new Error("Actual bank failed to spawn");
+    expect([bank.position.x, bank.position.z]).toEqual([348, 318]);
+    const pool = new ArenaPoolManager();
+    expect(pool.totalArenas).toBe(1);
+    const arena = pool.getArenaBounds(1)!;
+    const config = getDuelArenaConfig();
+    expect([arena.min.x, arena.min.z, arena.max.x, arena.max.z]).toEqual([
+      config.baseX,
+      config.baseZ,
+      config.baseX + config.arenaWidth,
+      config.baseZ + config.arenaLength,
+    ]);
+    pool.registerArenaWallCollision(world.collision);
+    pool.assertArenaWallCollision(world.collision);
+    const player = new PlayerEntity(world, {
+      id: "bank-pavilion-range-proof",
+      name: "Physical bank range proof",
+      type: "player",
+      position: [350, terrain.getHeightAt(350, 320), 320],
+      quaternion: [0, 0, 0, 1],
+    });
+    world.entities.set(player.id, player);
+    try {
+      expect(validatePhysicalBankAccess(world, player.id, bank.id)).toBeNull();
+      for (const [x, z] of [
+        [350.001, 320],
+        [350, 320.001],
+        [345.999, 318],
+        [348, 315.999],
+      ]) {
+        player.position.set(x, terrain.getHeightAt(x, z), z);
+        expect(validatePhysicalBankAccess(world, player.id, bank.id)).toBe(
+          "bank_out_of_range",
+        );
+      }
+      const walkable = (p: TileCoord, from?: TileCoord) =>
+        p.x >= 250 &&
+        p.x < 550 &&
+        p.z >= 250 &&
+        p.z < 550 &&
+        world.collision.isWalkable(p.x, p.z) &&
+        (!from || !world.collision.isBlocked(from.x, from.z, p.x, p.z));
+      const starts = [
+        getDuelArenaLobbyReturnPosition(true),
+        getDuelArenaLobbyReturnPosition(false),
+        getDuelArenaEgressPosition(),
+      ].map((p) => worldToTile(p.x, p.z));
+      const targets = [
+        { id: "pavilion-center", tiles: [{ x: 350, z: 320 }] },
+        ...[bank, clerk].map((entity) => ({
+          id: entity.id,
+          tiles: getCardinalAdjacentTiles(
+            worldToTile(entity.position.x, entity.position.z),
+            1,
+            1,
+          ).filter((tile) => walkable(tile)),
+        })),
+      ];
+      for (const subject of targets)
+        expect(subject.tiles.length, subject.id).toBeGreaterThan(0);
+      const bfs = new BFSPathfinder();
+      const routes: Array<{
+        from: TileCoord;
+        to: TileCoord;
+        subject: string;
+        edges: number;
+      }> = [];
+      for (const start of starts)
+        for (const subject of targets)
+          for (const target of subject.tiles) {
+            expect(walkable(start)).toBe(true);
+            expect(walkable(target)).toBe(true);
+            let cursor = start,
+              edges = 0;
+            const visited = new Set<string>();
+            for (
+              let part = 0;
+              part < 12 && (cursor.x !== target.x || cursor.z !== target.z);
+              part++
+            ) {
+              const segment = bfs.findPath(cursor, target, walkable);
+              expect(segment.length).toBeGreaterThan(0);
+              for (const tile of segment) {
+                expect(walkable(tile, cursor)).toBe(true);
+                expect(
+                  isPositionInsideCombatArena(tile.x + 0.5, tile.z + 0.5),
+                ).toBe(false);
+                if (tile.x !== cursor.x || tile.z !== cursor.z) edges++;
+                cursor = tile;
+              }
+              const key = `${cursor.x},${cursor.z}`;
+              expect(visited.has(key)).toBe(false);
+              visited.add(key);
+            }
+            expect(cursor).toEqual(target);
+            routes.push({
+              from: start,
+              to: target,
+              subject: subject.id,
+              edges,
+            });
+          }
+      console.info(
+        "BANK_PAVILION_ACCESS_RECEIPT",
+        JSON.stringify({
+          scope:
+            "actual CPU World, PhysX-backed court/rock owners, resources/stations/NPCs/TownSystem, server arena perimeter and bank validator; no DB transaction/browser movement",
+          courts: owner.getAllDiagnostics(),
+          rockCount: landscape.getRocks()?.placements.length,
+          oldLodgeCollisionCount: towns
+            .getCollisionService()
+            .getBuildingCount(),
+          bank: { id: bank.id, x: bank.position.x, z: bank.position.z },
+          clerk: { id: clerk.id, x: clerk.position.x, z: clerk.position.z },
+          bankCenterChebyshevDistance: 2,
+          rejectedOutsidePositions: 4,
+          routes,
+          totalEdges: routes.reduce((sum, route) => sum + route.edges, 0),
+        }),
+      );
+    } finally {
+      world.entities.items.delete(player.id);
+      world.entities.players.delete(player.id);
+      player.destroy();
     }
   }, 60000);
 });

@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import { createRequire } from "node:module";
 import path from "node:path";
 
 import { assertHyperiaNodeVersion } from "./node-runtime-policy.mjs";
@@ -15,6 +16,43 @@ export const DUEL_MODEL_PROVIDER_KEY_NAMES = Object.freeze([
   "OPENAI_API_KEY",
   "GROQ_API_KEY",
 ]);
+
+/** Own Vite itself, rather than a package-script shell that can outlive it. */
+export function resolveDuelClientCommand({
+  workspaceRoot,
+  nodePath,
+  port,
+  production,
+  environment,
+}) {
+  if (!path.isAbsolute(workspaceRoot) || !path.isAbsolute(nodePath)) {
+    throw new Error("Duel client requires absolute workspace and Node paths");
+  }
+  if (!Number.isSafeInteger(port) || port < 1 || port > 65535) {
+    throw new Error("Duel client requires a valid TCP port");
+  }
+  if (typeof production !== "boolean") {
+    throw new Error("Duel client requires an explicit build mode");
+  }
+  const cwd = path.join(workspaceRoot, "packages/client");
+  const requireClient = createRequire(path.join(cwd, "package.json"));
+  const viteDirectory = path.dirname(
+    requireClient.resolve("vite/package.json"),
+  );
+  const viteEntry = fs.realpathSync(path.join(viteDirectory, "bin/vite.js"));
+  return {
+    command: nodePath,
+    args: [
+      viteEntry,
+      ...(production ? ["preview"] : []),
+      "--host",
+      "--port",
+      String(port),
+      ...(production ? [] : ["--strictPort"]),
+    ],
+    opts: { cwd, env: environment },
+  };
+}
 
 function normalizeConfiguredPath(workspaceRoot, configuredPath) {
   const value = String(configuredPath || "").trim();

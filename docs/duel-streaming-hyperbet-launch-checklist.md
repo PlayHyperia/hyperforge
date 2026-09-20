@@ -1,6 +1,2026 @@
 # Duel Arena, Streaming, and Hyperbet Launch Checklist
 
+## Required source checkpoints — 2026-09-20
+
+Commit and push each coherent, tested implementation slice to the existing
+feature branch, and checkpoint before a substantial new subsystem or ending an
+extended session. Verify the user's author/committer identity, exact remote SHA,
+secret scan and any paired asset revision; do not merge, deploy or promote
+unqualified defaults. See `development-checkpoint-20260920.md` for this backlog
+checkpoint's coverage and remaining gates. Saving source does not close any
+visual, performance or production-readiness task.
+
+## Texture-quality priority — shoreline repetition remains open
+
+## Current world-art scope — open acceptance contract
+
+**World first; avatar/armor later. One compact island and one arena remain the
+only launch world.** This direction supersedes older preservation language for
+enclosed procedural buildings; the Review75 shoreline gate below is separate.
+
+- [ ] Replace every procedural building/service shell in this experience with
+  an intentionally authored **open-sided pavilion**. Use the existing furnace
+  canopy as the simplicity and visibility baseline, not as a clone requirement.
+  There is no enclosed-building or furnished-interior preservation requirement.
+  Preserve authoritative bank/NPC/service/resource IDs and data, interaction and
+  custody semantics, banking/preparation behavior and restart-safe state—not the
+  enclosed wall topology or its old footprint. Regenerate actual collision,
+  grass exclusions, walkability/navigation and approach geometry for the new
+  posts/roof; remove old wall/door blockers and prove no invisible walls remain.
+- [ ] Give the pavilion family cohesive character through readable silhouettes,
+  rooflines, supports, materials, props and landmark hierarchy while maintaining
+  overhead/stream camera visibility, agent circulation and uncluttered approaches.
+- [ ] Rebuild the procedural duel arena and **all** associated arena assets,
+  entrances, boundaries, spectator furniture, landmarks, details and effects as
+  the island's single artistically excellent focal point. Integrate it with the
+  pavilion/world language while preserving authoritative combat bounds, spawns,
+  movement and results. Acceptance requires collision/navigation proof, clean
+  fight-camera and stream readability for every phase/style, effect stress and
+  measured rendering cost; this is an aspiration, not a claim of AAA completion.
+- [ ] Compose one deliberate island layout rather than disconnected set pieces:
+  distribute varied **real choppable resource trees** across groves and scattered
+  groups; create ore-specific mining/gathering areas for every launch ore; place
+  services, arena, bank/preparation and spectator spaces along short, readable,
+  traversable routes while retaining useful off-route exploration.
+- [ ] Keep visible trees/ores, selectable resources, collision, depletion,
+  regrowth, yields, agent targets and persisted identities synchronized. Decorative
+  stand-ins may not replace or duplicate live resources.
+- [ ] Inventory **every runtime particle effect** across world, gathering,
+  processing, movement, combat, arena, weather/water and UI/broadcast surfaces;
+  give each an explicit retain/redesign/remove decision and visual-quality plus
+  performance budgets for spawn rate, pooling, lifetime, overdraw, draw calls,
+  GPU/CPU frame cost, memory and cleanup. No screenshot-only particle approval.
+- [ ] Accept the finished world only after matched close/overview/stream views,
+  day/night and moving-camera review, multi-agent preparation/gathering/dueling,
+  full route/collision/resource-lifecycle tests, particle stress/fault cleanup,
+  and measured target-hardware frame/loading/memory evidence pass together.
+
+These are open launch tasks, not completed implementation. Existing shoreline
+texture accounting remains **3 checked / 8 open**.
+
+**Bank pavilion integration01 — candidate integration verified; art and launch acceptance remain open.**
+The isolated, non-promoted candidate places `compact-bank-pavilion-v1` at
+**(350, 320)**, moves the existing clerk to **(352, 322)**, preserves bank,
+service and resource identities, and removes the retired lodge collider. The
+generated post/roof collision, four-foot grass exclusion, camera cutaway and
+complete approach paths are integrated. Grass-exclusion capacity is explicitly
+32 for **25 actual polygons**; none was dropped. Candidate access passes **2/2**:
+**532** terrain samples have delta 0, all **27** required paths complete across
+**1,473** checked edges, the four bank and four clerk approaches plus exact
+pavilion center are reachable, and the true two-tile bank boundary accepts the
+exact center; the offset tile center and four just-outside probes are out of
+range. CPU checks pass **53**
+historical-path, **2** candidate-path, **40** geometry, **37** actual-worker,
+**11** native-owner plus **4** candidate-owner, and **32** initial-visual tests.
+Separate fail-closed readiness checks pass **1** actual aggregate, **11**
+real-system and **19** client-regression tests; scoped source typing, lint and
+format checks are clean.
+
+Private runtime03/runtime04 health and plugin-module identity pass. After the
+type-only client exports, build04's **eight runtime JS bundles are byte-exact to
+build03**; protected canonical runtime outputs stay unchanged, and no candidate
+manifest is promoted. Native02 retains three valid
+bank views with three submitted actual pipelines per view; its timed-out arena
+overlay is invalid evidence. Native03 supplies a valid arena-first current-arena
+wide baseline only, not a new arena implementation. Independent review still
+finds the pavilion's scale, banking identity/dressing and ground/grass
+relationship unfinished. These captures remain `ART_UNQUALIFIED`: they close
+no architecture, motion, target-hardware performance, full-stream or launch
+gate. Owned browsers, private servers and ephemeral databases are cleaned while
+the protected **3333/5555/5556** processes retain their original PIDs. Next is
+the bank pavilion identity/grounding art pass, then the single arena's
+perimeter/material slice. All **seven** world-art tasks remain open; shoreline
+accounting stays **3 checked / 8 open**.
+[Bank pavilion integration01 evidence](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/bank-pavilion-integration01-UNQUALIFIED/README.md)
+
+**Bank pavilion geometry01 — source geometry verified; all seven scope gates remain open.**
+The fixed `bank-pavilion-v1` OpenWorkshop recipe with the existing Haven
+architectural finish produces three batches at **1,300 triangles / 216,576
+attribute-index bytes**. Its roof is nominally 8 × 8 m; eaves and trim extend
+actual X/Z bounds to about **8.99 × 8.90 m**, so that is not an 8 × 8 collision
+footprint. Final geometry suites pass **40/40**; focused inclusive TypeScript
+covers **2 explicit roots / 688 files / 0 diagnostics**; scoped ESLint exits 0.
+Retained first runs document the corrected truss-aperture assertion and
+test-helper narrowing. Captured pre-edit default and Haven smithy buffer SHA-256
+identities remain exact. This is geometry only: it is not integrated or visually
+accepted, and no PBR/material, placement, physics, collision, cutaway, grass
+exclusion or navigation behavior changed. Next is versioned-manifest bank
+placement, generated post/roof collision and cutaway, removal of the retired
+lodge exclusions/blockers, then native banking/service access and art proof.
+All **seven** world-art scope tasks above remain open.
+[Bank pavilion geometry01 evidence](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/bank-pavilion-geometry01-UNQUALIFIED/README.md)
+
+**Review76 — grass lighting diagnosed; leaf-normal control rejected; acceptance remains open.**
+Native08 captures **6 PNGs** and native09 **16 PNGs** at two held sun phases;
+both exit 0 as `CAPTURED_UNQUALIFIED`. Actual direct and indirect grass-light
+outputs are present, so the broad angular appearance is not simply an
+unlit/output-bypass problem. The unit leaf-normal control makes the grass much
+darker while preserving broad plastic-ribbon forms and is visually rejected.
+Actual pipelines are restored: fragments are exact; vertices are exact or differ
+only by restricted bijective generated `NodeBuffer` identifiers with the same
+matrix and bindings. Both eight-pin sets remain stable, the protected playable
+client/server/database are unchanged, and only owned diagnostic browsers and
+leases are cleaned. The actual local server keeps duels disabled; stream
+readiness remains false at `waiting_for_duel_data`, and the retained 503
+endpoint is not stream admission. No production grass change or default is
+promoted, and no natural-motion, performance, full-stream or whole-world quality
+gate closes. All **seven** world-art scope tasks and shoreline **3 checked / 8
+open** gates remain unchanged.
+[Review76 evidence](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/terrain-grass-review76-UNQUALIFIED/README.md)
+
+**Review75 — bounded shoreline/grass evidence complete; visual acceptance remains open.**
+The explicit mineral-shore role reuses the existing stone PBR layer without
+changing geometry, grass support, wetness, water, collision or routes; fine
+grass restores the broader area envelope and bends its lower centerline. The
+correctly selected historical-fixture run passes **834/834**, focused grass
+passes **254/254**, test-inclusive typing covers **717 roots / 0 diagnostics**,
+and native physical evidence remains **4 passes / 1 historical skip**. Native
+Metal/WebGPU evidence includes four Review74-matched stills plus a new shore
+view and **11.943 s / 11.821 s** bank/coast clips. Exact original-timebase
+decode and every frame hash pass; the bank's 37 retained default-mux DTS
+warnings are separately reproduced as 37 default-30-fps timebase collisions,
+not exact-timebase decode failures. The explicit polling session shuts down
+cleanly and verifies **32 pins**, but it does not repair default macOS FSEvents.
+Grass is fuller and less needle-like, yet still reads as hard flat ribbons with
+weak canopy depth; the dark pond contour and smooth fringe remain. No visual,
+temporal, performance or default promotion is accepted. All **3 checked / 8
+open** texture gates remain.
+[Review75 evidence](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/terrain-pond-review75-UNQUALIFIED/README.md)
+
+**Review74 — bank/stone improvement verified visually; whole-scene acceptance still open.**
+The cutbank now meets the water without the prior detached mound; isolated
+Blender-authored stone normals/tangents and matching PBR maps reduce triangular
+silver highlights. Original rock geometry/UV/base color remain byte-exact,
+778 triangles and texture budgets unchanged. CLI, official MCP and visual review pass.
+Four matched native WebGPU stills and a 12-second rail show local improvement,
+but the continuous brown collar remains. Pointed grass loses about 32% projected
+near-leaf area and looks more pin-like, not fuller; its volume is NOT accepted.
+Coastal motifs/soft blends and original-angle/distance/shimmer gates remain open.
+Final **825/825 terrain tests**, **252/252 focused grass tests** (47 overlap),
+**717-root typing**, lint, builds and actual **4 physical passes / 1 historical skip**
+pass; 1,300 routes and 27 fishing tiles remain. Pond anchors change 322→320,
+not unchanged coverage. Video: 329 decoded frames/11.97s, 81ms maximum recorded
+gap, exact camera/anchor return, no decode warnings—not FPS or temporal approval.
+The native run exits **1 / FAILED_CLEANUP**: Vite needs owned-group SIGKILL;
+zero EPERM/remaining groups, browser/test database/volume/five ports cleared.
+Evidence-audit success does not waive this lifecycle failure. Source sampling
+review finds no new proven paired-map/normal-rotation bug; mip/contrast and
+source-motif risks remain. No default/performance promotion; Mac remains on battery.
+All **3 checked / 8 open** texture gates remain. Next: break the continuous collar,
+restore convincing grass volume, test original-angle moving-distance appearance,
+and diagnose the client shutdown hang separately.
+[Review74 evidence](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/terrain-pond-review74-UNQUALIFIED/README.md)
+
+**Review73 — coordinated bank trial implemented; native art result still rejected.**
+Shared CPU/TSL habitat groundcover, deterministic worker/sync establishment,
+two authored northern bank profiles and unequal reed groups are implemented.
+Water/root safety, RNG and attempt budgets remain strict. Final **823/823 tests**,
+**713-root typing**, scoped lint and normal shared/server builds pass.
+Actual physical checks pass **4 tests / 1 historical skip**, including 1,300 routes
+and 27 fishing tiles. Two rock repositionings fix retained burial failures;
+blocking tiles change 56→55, and pond anchors 327→322—not unchanged populations.
+Four native WebGPU views and an out-and-back clip prove the new rendered branch.
+Reed grouping improves, but a detached brown mound/green apron weakens the bank;
+the dark collar, flat grass and faceted shiny stones remain. This is not accepted AAA art.
+The clip decodes 318 frames over 11.942 s, with 59 render samples and exact camera/anchor return;
+a 170 ms maximum recorded gap and three mux warnings remain, not smoothness approval.
+Strict native shutdown exits 0 with no EPERM/forced kills; browser, owned test data
+and five ports are cleaned. Earlier lifecycle/HMR failures remain recorded.
+The generated concept is explicitly **not in-game**. No art default or performance
+claim is promoted; the Mac was on battery. All **3 checked / 8 open** texture gates remain.
+Next: connect the physical cutbank/rock footing to the water, remove the apron/mound,
+and qualify original-angle/distance/motion appearance and measured cost across materials.
+[Review73 evidence](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/terrain-pond-review73-UNQUALIFIED/README.md)
+
+**Review72 — wet cutbank transfer verified; visual improvement insufficient.**
+A bounded opt-in soil-to-rock transfer now reaches the authored wet cutbank toe,
+using shared CPU/TSL weights across PBR channels. Grass placement, geometry,
+wetness, maps and defaults are unchanged. All **742 tests**, shared typing,
+**711-root test-inclusive typing**, scoped lint and shared/server builds pass.
+Seven native WebGPU stills include three matched views with identical saved
+pond grass anchors, seven 1024²/11-mip/16× maps and unchanged compiled sampling.
+The visible difference is too subtle: the brown pond collar, soft material border
+and uniform grass edge remain. This is not an accepted AAA improvement.
+The baseline coast transition fails its 30s grass deadline; both strict shutdowns
+fail on retained EPERM. Owned resources/ports are cleared, but neither failure is waived.
+No motion or performance qualification was run. All **3 checked / 8 open** gates remain.
+Blend-chain review confirms no later weight overwrite; localized support limits the effect.
+Next: coherent cutbank/sedge/turf composition, original-angle/moving-distance
+comparison and measured cost—not more isolated scalar tuning.
+[Review72 evidence](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/terrain-pond-review72-UNQUALIFIED/README.md)
+
+**Review71 — real client ownership improved; lifecycle and HMR still unqualified.**
+The launcher directly owns Vite under its existing verified Node22 runtime.
+Actual client production build and native WebGPU startup/120 advancing frames pass;
+strict shutdown still fails on retained process-group EPERM (and one dev run needs SIGKILL).
+A real controlled Darwin zombie-only group reproduces EPERM in libc, Node and Bun;
+this explains a possible race, not permission to waive historical inspection failures.
+Native file notifications also fail below Vite in two local locations; HMR remains open.
+The existing regression batch is **58/59**, with one unchanged CI Node-pin failure.
+Exactly 25 ignored dataless public backups were moved intact out of the served folder;
+none were deleted or hydrated, and active originals retain their hashes.
+No art, motion, performance or launch gate is closed; all 3 checked/8 open texture gates remain.
+[Review71 evidence](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/terrain-pond-review71-UNQUALIFIED/README.md)
+
+**Review70 — leaf-volume shading refined; art, performance and lifecycle remain unqualified.**
+Implemented opt-in transverse leaf shading and root contrast without changing geometry,
+density, coverage masks, LODs, resolution or historical rendering modes.
+The first native recipe was rejected for dark, sharp strips; its evidence/source is retained.
+A softer refinement improves separation modestly, but close grass remains broad and flat.
+All **470 tests**, **706-root typechecking**, scoped lint and shared/server builds pass.
+Sixteen actual WebGPU images cover both iterations; compiled vertex/fragment controls,
+geometry and saved anchors are verified. No default is promoted.
+Refined 10-second samples: CPU p95 **8.9→15.2ms**, observed-pass union p95 **14.88→15.79ms**.
+Those worse tails remain open; short samples do not qualify FPS, motion or performance.
+Both refined runs fail strict client shutdown (SIGKILL/EPERM), correctly propagated by the
+wrapper. Browsers, cameras/clocks, owned databases/volumes and all five ports are cleaned.
+Next: better blade silhouettes and ground transitions with explicit coverage accounting;
+counterbalanced performance/motion checks; directly owned client shutdown diagnosis.
+Original shoreline repetition, whole-world presentation and all integrated launch gates remain open.
+[Review70 evidence](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/terrain-pond-review70-UNQUALIFIED/README.md)
+
+**Review69 — four-way native isolation captured; visual and lifecycle gates NOT passed.**
+Sixteen actual WebGPU images compare baseline, grass lighting, boulder-map and bank-geometry variants,
+with real submitted owners and pinned maps/geometry; no asset, selector or default is promoted.
+Verification passes: **455 lighting + 4 physical + 15 policy + 37 validator tests**,
+one historical physical skip, and **706-root typechecking with zero diagnostics**.
+Grass gains modest contrast, but remains unaccepted; the uneven northern lip still leaves
+a continuous brown outline and flat, uniform turf—not a meaningful whole-world art gain.
+The asset-only boulder correction removes local silver triangular highlights; faceted geometry/normals remain.
+Four 10-second observations report CPU p95 **7.2–8.7ms** and observed-pass-union p50 **11.21–11.40ms**,
+not presentation/FPS, full-GPU-frame or performance qualification.
+**Baseline03 and grass shutdown fail**: launcher exit 1 after game-client SIGKILL and one EPERM each;
+rock02/bank exit 0. All cameras/browsers, owned databases/volumes and five ports are cleaned.
+The wrapper now rejects returned cleanup failure, but that diagnostic fix is source-checked only—not native-rerun.
+Original repetition, mips, motion, day/night, live contacts and AAA quality remain open: **3 checked / 8 open**.
+
+- Pending: blade transverse volume and convincing root-to-ground contrast.
+- Pending: stone geometry/normal faceting and genuinely authored roughness.
+- Pending: coherent shoreline breakup, matched distance/motion coverage and strict shutdown verification.
+
+[Review69 evidence](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/terrain-pond-review69-UNQUALIFIED/README.md) · [Native/postflight audit](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/terrain-pond-review69-UNQUALIFIED/postflight.json) · [Isolated boulder near view](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/terrain-pond-review69-UNQUALIFIED/rock02/candidate-near.png)
+
+**Review68 — shared shoreline composition implemented opt-in; visual gate NOT passed.**
+The strict sector mapping, shared CPU/TSL surface weights, worker/sync grass support
+and restart-owned terrain/water binding are implemented. A masked-zone lock bypass
+found during review was fixed and covered with actual-owner regression tests.
+All nine complete suites pass **709/709**, with no skips; production plus nine tests
+type-check with zero diagnostics. Shared/client/declaration and matching server builds pass.
+Six matched **fixed-local-daylight** native WebGPU images confirm the real compiled
+candidate, seven actual 1024² maps/11 mips/16× filtering, and unchanged camera/render settings.
+Independent visual review finds only a subtle tone change—not a meaningful art gain.
+The continuous brown collar, flat turf and faceted wet stones remain below the target.
+An initial stale-build launch and a subsequent natural-clock phase rewind are retained;
+fixed-light art evidence does **not** qualify natural timing, motion or performance.
+Both successful capture sessions exit 0, restore clock/camera owners, close their browsers,
+and remove their own no-money test databases; all five ports are clear.
+Original repetition, near/grazing/distance motion, added ALU cost and full-world quality remain open.
+Next deliver visibly distinct, physically grounded northern bank/groundcover composition;
+do not substitute more source checks or another global roughness adjustment for visible progress.
+[Review68 evidence](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/terrain-pond-review68-UNQUALIFIED/README.md)
+
+**Review67 — roughness isolation complete; whole-shore quality remains UNQUALIFIED.**
+Six native shaded/roughness/restored images show a high authored roughness input
+on dry terrain and a lower bank input near water, not a global gloss-floor defect.
+This is visual diagnostic evidence, not numeric readback, final-specular or
+all-lighting acceptance. Separate rock props still look faceted/glassy despite
+metalness 0 and scalar roughness 1; the boulder's map still affects its result.
+Both views restore exact material roots/output/textures and actual submitted
+native fragments. All 15 selected pins remain stable; diagnostic process and
+launcher exit 0, browser closes and all five ports clear.
+The generated concept and whole-shore contract are **design, not implementation**.
+No production/default changes, builds or full regression suite are claimed.
+Original repetition, material composition, the 45–120m normal fade and full
+near/grazing/distance motion remain open; the shared gates stay **3 checked / 8 open**.
+Next implement one authoritative bank composition with matching groundcover and
+protected water/access, retaining seven maps/33 surface reads—not another cosmetic ring.
+[Review67 evidence](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/terrain-pond-review67-UNQUALIFIED/README.md) · [Binding composition contract](/Users/lucid/Documents/hyperia/hyperia-implementation/docs/compact-island-environment-art-brief.md#whole-shore-composition-contract-review67-not-implemented)
+
+**Review66 — modest northern-shoulder gain; whole-shore quality remains UNQUALIFIED.**
+Matched native views show a local improvement, but the whole pond still reads
+as a continuous brown oval beside bright, uniform turf. Retain this as an
+**unqualified data-only direction, not a fix or default promotion**. The initial
+28.14/28.10 inner-height proposal was rejected before geometry; both were
+corrected to **28.08**, without relaxing guards. Earlier failures remain recorded.
+
+**Four tests pass, with one historical skip.** Focused lint and the **704-root
+test-inclusive typecheck** pass with zero diagnostics; no rebuilds.
+Sampled canonical/indexed error
+is at most **1.262cm against the unchanged 2cm gate**. The access proof retains
+**27 protected tiles and 1,300 completed routes**; bounded partial-path replanning
+warnings remain, so this is not a navigation-latency claim.
+
+Baseline/candidate rails fully decode without null-decoder warnings:
+**324 / 319 frames**, spanning **11.967 / 11.966s**, with **58 / 59 advancing
+actual-render samples**. Recorder/HUD and exact camera return pass.
+Each run preserves its own **312 / 328 bank anchors** on return; these are
+undeformed anchors, not complete blade-contact or temporal-quality proof.
+Both launchers exit **0**, browsers close and five ports clear. All **22 pins
+within each run** remain stable; **21 common pins match**, excluding only
+the deliberately different world-areas manifest. Prior shutdown failures are
+not thereby fixed.
+
+Exploratory cost observes **191 draws each**, **1,555,461 → 1,557,675 triangles**
+and observed-pass-union p95 **14.614528 → 14.548992ms**. Background load and changed
+geometry prevent a causal performance win; this is not full-GPU-frame or
+60fps qualification.
+
+Next: one **whole-shore** composition using coherent authoritative bank geometry
+and matched groundcover while protecting access—not another isolated height
+threshold adjustment. No AAA, repetition, temporal or performance gate closes:
+the shared checklist remains **3 checked / 8 open**.
+[Review66 evidence](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/terrain-pond-review66-UNQUALIFIED/README.md) · [Actual northern bank](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/terrain-pond-review66-UNQUALIFIED/candidate/candidate-wide.png) · [Whole-pond overview](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/terrain-pond-review66-UNQUALIFIED/candidate/candidate-pond.png) · [Native rail](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/terrain-pond-review66-UNQUALIFIED/candidate/bank-motion.webm) · [Media receipt](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/terrain-pond-review66-UNQUALIFIED/media-verification.json)
+
+**Review65 — material isolation complete; visual and performance quality remain UNQUALIFIED.**
+Nineteen actual native material-output images separate coverage, diffuse input,
+shading normals and the existing compensated stochastic dirt layer. There is
+**no convincing periodic grid in the inspected isolated-dirt views**; this does
+not close the original repetition gate. The dominant uniform bank collar and
+groundcover transition remain unresolved. No production code, art or default
+was changed. These images do not justify adding an expensive histogram branch.
+
+All **seven native textures have 11 mip levels**, with actual **16x sampler-cache**
+evidence. This verifies installed sampling state, not image quality at every
+distance or measured performance. All **27 selected pins and two helpers** remain
+unchanged.
+
+Both 12-second rails fully decode without null-decoder warnings: the initial
+bank rail has **304 frames / 11.957s**, and corrected grazing rail **314 frames /
+11.935s**, with **59 advancing actual-render samples each**. Recorder/HUD cleanup
+and exact original-versus-return camera position, quaternion and FOV pass.
+The first near rail is **dry-turf-framing limited**. Three decoded grazing
+stills are useful coverage, **not full temporal, shimmer or mip acceptance**.
+
+Native launcher shutdown exits **1** after game-client SIGKILL and an `EPERM`
+observation. Browser/camera are restored and closed, all five ports are clear,
+and the exact owned disposable database/volume is removed. This is **not a
+clean lifecycle pass**; the failure and earlier evidence are retained.
+
+Next: one coherent bank-shape and matched groundcover trial with protected
+access, followed by the same near/grazing/distance evidence. All acceptance
+gates remain unchanged: **3 checked / 8 open**, including full-world quality.
+[Review65 evidence](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/terrain-texture-review65-UNQUALIFIED/README.md) · [Actual grazing bank](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/terrain-texture-review65-UNQUALIFIED/baseline/bank-grazing-original.png) · [Corrected native rail](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/terrain-texture-review65-UNQUALIFIED/baseline/grazing-distance-motion.webm) · [Media verification](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/terrain-texture-review65-UNQUALIFIED/baseline/media-verification.json)
+
+**Review64 — clearer reed leaves, but still UNQUALIFIED development art.**
+Six native stills and two rails show improved leaf readability, but stiff, flat,
+repeated spear tufts remain. This is **not preferred final art or a default**.
+The 15 reeds remain one batch: **964 vs 972 triangles**, exact material and
+18-color palette; whole dressing stays **64 instances / six batches**.
+Candidate/baseline **2,478 / 2,598 lowest-root probes** are below retained ground;
+this is not proof of every crown contact or GPU-deformed vertex.
+
+Both rails fully decode: baseline/candidate **352 / 356 frames**, with **61
+advancing render samples each**. PNG colorspace warnings remain recorded.
+Policy tests pass **7 Node + 7 Bun**; **34 distinct validator cases** have
+passing evidence across corrected runs, **not one fully green full-suite run**.
+The initial phase-.61 failure, first candidate hash rejection and test history
+are preserved. Within attempt02, all **27 + 23 + 8 selected pins** stay stable.
+
+Baseline/candidate cost windows observe **599 / 590 frames**, observed-pass
+union p95 **14.41792 / 14.09024ms**, client interval p95 **18.7 / 23.1ms**
+(max **26.7 / 105.9ms**) and **189 / 191 draws**. These are **not a controlled
+win, complete GPU-frame measurement or 60fps approval**.
+Baseline shutdown exits **1** after client SIGKILL and one `EPERM`; candidate
+exits **0**. Cameras/browser, owned disposable databases/volumes and five ports
+are cleaned up; the baseline failure remains explicit.
+
+Next: bounded source-versus-stochastic/mip texture isolation, not another
+broad parameter pass. Original grid recurrence is not proven by latest pond
+images; the continuous brown collar and water remain separate open gates.
+Exactly **3 checked / 8 open**; prior history and checklist lines are unchanged.
+[Review64 receipts](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/terrain-pond-review64-UNQUALIFIED/README.md) · [Actual near view](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/terrain-pond-review64-UNQUALIFIED/attempt02/candidate/candidate-near.png) · [Native rail](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/terrain-pond-review64-UNQUALIFIED/attempt02/candidate/reed-motion.webm) · [Next texture isolation](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/terrain-pond-review64-UNQUALIFIED/next-texture-isolation.md)
+
+**Review63 — northern-bank composition and reflection correctness improve; still UNQUALIFIED.**
+Three matched native views show a local planting improvement, not AAA or
+whole-shore acceptance. The actual census finds **64 instances / six batches**
+and **2,598 lowest-central-root probes** below retained terrain; this does not
+prove every leaf/crown contact. Thin lime reeds, dark foliage, uniform turf,
+the brown collar and repeated shore motifs remain. No default is promoted.
+
+**79 tests pass across nine focused files**, with one historical-profile skip.
+Ordinary shared types, normal shared/server builds and the **712-root /
+nine-test-file** inclusive typecheck pass with zero diagnostics. The initial
+nine test-typing failures and earlier packaging/fixture failures are preserved.
+The normal 27 pins remain stable; **20/21 extra pins** match because the root
+diagnostic's minimum-support calculation was corrected and its original retained.
+
+Actual reflection diagnostics verify pond plane **27.8**, camera **34 → 21.6**
+rather than baseline **−2**, with sea level still **16** and one **640×360**
+target. Disabled windows record zero callbacks; enabled/re-enabled windows have
+**35/26 distinct frame/render-camera keys**, at most one callback per observed
+frame. Reflection preference, instrumentation and strict readiness are restored.
+
+The 12-second candidate rail has **357 decoded frames**, increasing PTS
+**0–11.972s**, and **60 advancing render samples**; recorder/tracks/hooks,
+camera and HUD restore. This is not temporal/mip acceptance. Candidate-only
+exploratory cost records **592 frames**: observed-pass union p95 **14.7456ms**,
+client interval p95 **24.3ms** (max **102.1ms**), **191 draws / 1,555,461 triangles**.
+Background load and no review63 baseline cost prevent a controlled comparison,
+full-GPU-frame or 60fps qualification.
+
+**Both launchers exit 1:** baseline requires client SIGKILL; its post-reflection
+admission failure is consistent with insufficient profile-settling time, but no
+exact failed snapshot was saved. Candidate passes final admission; shutdown needs client
+SIGKILL and has one `EPERM` group-inspection error. No groups remain; camera/browser,
+exact disposable databases/volumes and all five ports are cleaned up. Neither
+whole run is green.
+
+Next finish a fuller reed/groundcover silhouette within the existing instance
+budget and integrate its substrate through shared material/grass ownership;
+not more density or ring-threshold tuning. Water subdivision/lighting-normal
+coherence, original repetition and all other quality gates remain open:
+exactly **3 checked / 8 open**. Review62's rejected art and all history remain.
+[Review63 verdict and receipts](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/terrain-pond-review63-UNQUALIFIED/README.md) · [Actual northern bank](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/terrain-pond-review63-UNQUALIFIED/candidate/candidate-wide.png) · [Whole pond](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/terrain-pond-review63-UNQUALIFIED/candidate/candidate-pond.png) · [Native rail](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/terrain-pond-review63-UNQUALIFIED/candidate/northern-habitat-motion.webm)
+
+**Review62 — variation improved, but the mown oval is rejected as preferred art.**
+Four actual native stills show more bank/turf variation, but shorter grass
+exposes an artificial mown oval. Reject these parameters as the preferred pond
+appearance. The shared CPU/TSL margin, root-color/support and pre-grounding
+clump-scale implementation remains within the existing `shore-contact-v1`
+**opt-in only**; defaults are unchanged. This is not AAA or whole-world approval.
+
+Verification passes **608 tests across five files**: 136 material, 12 palette,
+396 selector and 64 worker/manager tests. Ordinary shared types, the explicit
+**708-root test-inclusive** typecheck and normal shared/server builds pass.
+Seven maps / **33 surface texture reads**, **17 rocks / 56 blocked cells** and
+all **27 selected pins within each run** remain unchanged. No review62 motion
+or GPU-cost trial was taken: art rejection deliberately stopped that work.
+There is **no performance qualification** or claimed win from fewer/shorter clumps.
+
+Baseline launcher exited **0**. Candidate exited **1** because one game-client
+process-group inspection returned `EPERM` during shutdown; the later zombie
+snapshot does not establish its cause. Browser/camera, exact disposable
+databases/volumes and all five owned ports were cleaned up. Preserve that
+failure, earlier failures and the unresolved full-client-packaging failure.
+
+The generated pond paintover and its prompt are a **design target only**, not
+in-game evidence or approval. Next coordinate natural bank shape, grounded rock
+groups, vegetation and water. Source audit also identifies an incorrect pond
+reflection plane (**16 vs 27.8 when reflection is enabled**), a single-center-fan
+under-wave mesh and disconnected lighting normals; these are **not yet fixed**.
+Original repetition, motion/mips, water, path/grass and full-world quality gates
+remain exactly **3 checked / 8 open**; all earlier evidence stays intact.
+[Review62 verdict and receipts](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/terrain-pond-review62-UNQUALIFIED/README.md) · [Actual baseline](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/terrain-pond-review62-UNQUALIFIED/baseline/baseline-pond.png) · [Rejected actual candidate](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/terrain-pond-review62-UNQUALIFIED/candidate/candidate-pond.png) · [Concept only](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/terrain-pond-review62-UNQUALIFIED/pond-art-target-CONCEPT.png) · [Concept prompt](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/terrain-pond-review62-UNQUALIFIED/CONCEPT-PROMPT.md)
+
+**Review61 — pond transition slightly crisper; not a substantial or preferred art result.**
+The explicit `pondBlend=shore-contact-v1` trial narrows soil/turf coverage
+around its existing midpoint, with shared CPU/TSL coverage and retained legacy
+cliff suppression, wetness and relief/contact locality. Six actual native
+stills were independently compared: the edge is slightly crisper, but the
+continuous dark pond outline, painted transition and uniform turf remain.
+Keep the experiment **opt-in only**, not an accepted pond appearance; defaults
+are unchanged. No obvious square grid was visible; that does not close the
+original repetition issue or motion/mip acceptance.
+
+Verification passes **601 tests in five files**, shared types/builds, server
+build and the explicit **708-root test-inclusive** typecheck. Seven maps /
+**33 surface texture reads** remain unchanged; all **25 sampled terrain points**
+match baseline/candidate exactly, and **27 selected candidate pins** stayed
+stable. These bounded checks are not whole-world or visual acceptance.
+
+The requested 12-second native candidate rail was recorded; temporal quality
+remains open. Observed-pass union p95 is **18.67776ms across 518 baseline frames**
+versus **18.546688ms across 523 candidate frames**. Two grass cells retained
+different LODs/counts and camera histories differ, so this is **not a controlled
+performance win**, full GPU-frame measurement or 60fps qualification.
+
+Both launchers **exited 1** because their clients required SIGKILL; inspection
+errors were zero. Chrome closed, exact disposable test databases/volumes were
+removed and all five owned ports cleared, but the shutdown failures remain
+open. The previous full-client-packaging failure is also unresolved.
+Next address the whole-bank material/vegetation relationship and continuous
+dark outline, not more small endpoint tuning. Whole-pond, repetition, mip,
+motion, dry-ground, water, path/grass and full-world acceptance remain open:
+exactly **3 checked / 8 open**, with all earlier evidence preserved.
+[Review61 verdict and receipts](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/terrain-pond-review61-UNQUALIFIED/README.md) · [Close baseline](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/terrain-pond-review61-UNQUALIFIED/baseline/baseline-wide.png) · [Close candidate](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/terrain-pond-review61-UNQUALIFIED/candidate/candidate-wide.png) · [Grazing candidate](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/terrain-pond-review61-UNQUALIFIED/candidate/candidate-near.png) · [Whole-pond candidate](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/terrain-pond-review61-UNQUALIFIED/candidate/candidate-pond.png) · [Native rail](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/terrain-pond-review61-UNQUALIFIED/candidate/candidate-motion.webm)
+
+**Review60 — coastal boundary visibly improved; opt-in only, texture gates remain open.**
+The explicit `coastBlend=cavity-v1` candidate reuses source-aligned rock AO
+(cavity, not height) with conserved shared PBR weights and no added texture
+reads. All six matched native stills and actual bound shaders were inspected;
+the seven map hashes match and source graphs retain **33 texture-sample nodes**.
+The boundary is narrower and less airbrushed, with clearer rock detail, but
+bright green streaks/speckles still look painted, turf remains uniform and rock
+fractures repeat. Retain this directional improvement **opt-in only**: no
+default promotion or AAA acceptance. The excluded original pond looks unchanged;
+one close strip without an obvious square grid does not close that issue.
+
+Material tests pass **127/127**, selector tests **379/379**; ordinary and
+test-inclusive types and shared/server builds pass. Both runs retain the
+existing **17 rocks / 56 blocked cells** in all three strict view censuses.
+Twenty-five selected pins stayed unchanged within each run. Review57 full
+client packaging and earlier unrelated failures remain open.
+
+Single instrumented windows have equal captured terrain/grass descriptors and
+**465 draws / 3,958,245 triangles**: observed-pass union p95 is **29.16352ms baseline /
+29.4912ms candidate**. These are not complete GPU frame times, a causal
+shader-cost result or 60fps qualification. The candidate rail has **178 decoded
+frames**, strictly increasing PTS **0–5.848s** and three clean extractions;
+sampled frames do not qualify temporal/mip behavior.
+
+Candidate shutdown remains **exit 1**: the client exceeded SIGTERM grace and a
+group probe returned `EPERM`; the cause is unresolved. Browser, camera, test
+processes, exact disposable database/volume and all five owned ports were
+cleaned up, but this is not a wholly green native run. Next verify the original
+pond near/grazing/moving views, shared path/grass ownership, root-color contact
+and water wave/detail-normal coherence. Exactly **3 checked / 8 open** gates
+and all historical evidence remain intact.
+[Review60 verdict and receipts](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/terrain-coast-review60-UNQUALIFIED/README.md) · [Near baseline](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/terrain-coast-review60-UNQUALIFIED/baseline/baseline-near.png) · [Near candidate](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/terrain-coast-review60-UNQUALIFIED/candidate/candidate-near.png) · [Original pond candidate](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/terrain-coast-review60-UNQUALIFIED/candidate/candidate-pond.png) · [Moving-rail evidence](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/terrain-coast-review60-UNQUALIFIED/candidate/candidate-near-motion.webm) · [Paired observations](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/terrain-coast-review60-UNQUALIFIED/paired-native-summary.json)
+
+**Review59 — world-owned coastal integration passes; the rock arrangement is rejected as art.**
+The explicit opt-in `compact-preparation-coastal-rocks-v2` production/runtime
+path is implemented, with canonical grounding and the existing collision,
+navigation, grass-footprint and instanced-LOD owners. Six strict actual-game
+censuses pass: baseline **17 rocks / 56 blocked cells**, candidate **19 / 72**.
+The original 17 native transforms and sampled support values are exactly
+unchanged, including **zero Y delta**. This verifies reusable integration,
+not natural composition or full navigation/gameplay acceptance.
+
+Matched wide/near images still show small isolated, contrasting props on uniform
+green turf; they do not break up the patterned cliff face or its soft material
+edge. The original pond is visually unchanged. Reject this arrangement as the
+shoreline solution; no candidate manifest, asset or default is promoted.
+Next improve the actual material and edge transitions in matched coast and pond
+views, not further isolated placement guesses. All whole-world texture gates
+remain open: exactly **3 checked / 8 open**.
+
+The historical-default suites pass **30 tests with 1 explicit candidate skip**;
+the separate exact-review52 candidate run passes **2 tests, 5 filtered**.
+The broader exact-review52 run's **27 passed / 4 failed** remains preserved and
+open; no collision tolerance or historical oracle was weakened. Shared/server
+builds, ordinary and test-inclusive types pass. Review57 full client packaging
+remains open. These results do not qualify the current world as fully green.
+
+The candidate's moving-rail recording has **327 decoded frames**, but both full
+null-output decodes retain repeated-DTS muxer warnings. Sampled frames and render
+counts are not temporal or performance acceptance; **no GPU timing was taken**.
+All 19 selected pins stayed unchanged within each run. Both owned browsers,
+processes and disposable test databases were cleaned up, and all five test
+ports cleared. Earlier evidence and failures below remain intact.
+[Review59 verdict and receipts](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/terrain-coast-review59-UNQUALIFIED/README.md) · [Near baseline](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/terrain-coast-review59-UNQUALIFIED/baseline/baseline-near.png) · [Near candidate](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/terrain-coast-review59-UNQUALIFIED/candidate/candidate-near.png) · [Original pond candidate](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/terrain-coast-review59-UNQUALIFIED/candidate/candidate-pond.png) · [Moving-rail evidence](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/terrain-coast-review59-UNQUALIFIED/candidate/candidate-near-motion.webm)
+
+**Review58 — all three bounded cliff fits rejected; world textures still UNQUALIFIED.**
+The closed segment was not installed. Burying its unfinished shell/caps leaves
+too little useful facade; surviving fragments contact the declared CPU movement
+envelope. That is not actual PhysX/navigation proof or proof every redesigned
+asset/site fails. Stop further shell-burial guesses: the next geometry task
+needs finished natural return/cap surfaces or a deliberately redesigned,
+jointly qualified canonical backing landform.
+
+Actual current-game captures show the unchanged world in three control views
+and a recorded pond camera rail with a six-second requested recording window,
+not a cliff-candidate comparison. No obvious square dirt grid appears in the
+inspected pond frames, but the broad soft bank transition, uniform turf and
+recognizable coastal rock motifs remain. Sampled frames and advancing render
+counts do not qualify temporal stability, distance/mips or performance.
+
+Boot took **48.82 s**; grass readiness from the coast-wide, coast-near and pond
+camera cuts took **4.905 / 0.503 / 6.462 s**. These are diagnostic waits, not
+gameplay acceptance. Twelve selected pins stayed unchanged. Existing cow-404
+placeholder logs remain; no other client-console warning/error or page error
+was captured.
+Recording hooks were restored, owned browser/server/REPL were closed, all five
+owned ports cleared, and the sole disposable test database was cleaned up.
+
+No production code/asset/default was promoted and no new review58 suite total
+is claimed. Review57 full client packaging remains open. Original pond dirt and
+all whole-world texture gates remain open: exactly **3 checked / 8 open**,
+with all earlier evidence preserved.
+[Review58 native evidence](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/terrain-coast-review58-UNQUALIFIED/README.md) · [Corrected rejected placement study](/Users/lucid/Documents/hyperia/asset-studio/coastal-cliff-segment58-placement-UNQUALIFIED/README.md)
+
+**Review57 — physical-material loader fidelity repaired; cliff art still UNQUALIFIED.**
+The actual ModelCache path flattened authored Physical materials into Standard
+materials. It now uses the existing native PBR-copy helper. Final processed-cache
+schema **7 / policy v4** retains the existing database schema and rejects old
+flattened rows by exact policy. Physical materials deliberately bypass processed
+caching instead of silently losing their properties. The unnecessary schema-8
+upgrade was withdrawn because an old open tab could block it; pre-existing
+blocked-upgrade lifecycle limitations remain open. Final schema-7/policy-v4
+verification passes **98/98 tests across six files**, normal shared type checking
+and build, server build, ESLint and Prettier. Earlier native03/revision evidence
+remains preserved in the linked review.
+
+Isolated final native04 compares the original loader with actual ModelCache output
+for the frozen05 full-cliff source on non-fallback Apple Metal WebGPU:
+three views at **960x540, DPR1**, maximum reported linear pixel difference
+**0.0001220703125**, and zero page, console, request or GPU errors. Owned browser,
+server and diagnostic resources are closed; source/material/geometry pins remain
+unchanged. An actual second IndexedDB connection stayed open on schema 7 during
+loading with zero version-change events. This qualifies same-version loading,
+not future upgrades or persistent-warm behavior. Native04 matches native03's
+reported pixel deltas; neither is full-game art or performance approval.
+
+Full client packaging remains open: the standard asset-copy step failed with
+`EDEADLK` on the preserved dataless backup
+`public/textures/noise3.jpg.dataless-backup-20260914-client-batch01`.
+The file was not hydrated or deleted. Separate code-only compilation passes with
+public copying omitted; this is not a deployable-package or public-asset pass.
+Full public-asset packaging remains failed/open, without bypass acceptance.
+
+The separate, uninstalled **14 m cropped-front, closed cliff segment** has three LODs at
+**15,016 / 4,764 / 1,384 triangles** and passes structural checks. The front
+retains detail, but caps/rear remain visibly jagged and require fitting/burial.
+The **7,318 / 861 / 110 overlap candidates** are not triangle-intersection
+proof. Modular cliff reuse is a production-art direction, not automatic visual
+acceptance; the [original artist breakdown](https://gamesartist.co.uk/present-moment-farm/)
+describes reusable cliff forms with smaller supporting rocks.
+
+Full-game cold loading, persistent-cache behavior, terrain/grass contact,
+collision/navigation, moving-distance LODs and measured cost remain open.
+The original bare-pond dirt and every whole-world texture gate remain open.
+Exactly **3 checked / 8 open** gates and all review56/earlier evidence are retained;
+no asset/default is promoted and no commit or push follows.
+[Review57 material-fidelity evidence](/Users/lucid/Documents/hyperia/asset-studio/model-material-review57-UNQUALIFIED/README.md) · [Review57 uninstalled cliff-segment evidence](/Users/lucid/Documents/hyperia/asset-studio/coastal-cliff-segment57-UNQUALIFIED/README.md)
+
+**Review56 — Seaside Rock rejected as a full replacement; UNQUALIFIED.**
+Paired native coastal wide/near and original bare-pond views, plus both
+12-second coastal clips, complete the bounded source audition. Seaside Rock
+at its verified 2 m width reduces recognizable fracture motifs compared with
+Rock Face03 at 2.7 m, but reads as dark fine-grained earth with weak medium-scale
+rock form. The soft bright-green fringe persists. This does not prove a normal
+bug or that geometry alone is responsible. The original bare-pond still has no
+obvious square grid in these views; its full texture-quality gate remains open.
+`coastBlend` was omitted on both sides; no distribution experiment is promoted.
+
+The first candidate boot failed strict PBR hash admission: `ASSETS_DIR` selected
+manifests, while `/game-assets` preferred `WORLD/assets`. Correcting the isolated
+harness's `WORLD` selection admitted the intended assets; all seven actual HTTP
+and native texture hashes then matched. The failed boot is preserved, and no
+asset-admission check was weakened.
+
+All three temporary production calibration files were restored to their exact
+original SHAs. Normal shared type checking and shared/server builds exited 0;
+all eight rebuilt artifacts are byte-identical to baseline. Owned runtimes are
+cleaned up and all five owned ports are clear. Native GPU cost was deliberately
+not measured after art rejection, so no speedup or performance approval follows.
+Restored-source verification is complete: the guarded Node run passed all
+**521/521 tests across seven files**, packed-map tests passed **9/9**, and the
+installed packer CLI `--check` exited 0, confirming six RGBA8 maps with the
+original Grass004, Rock Face03 and Poly Haven Dirt sources. The incompatible
+initial direct-Bun Vitest run (**513 passed / 8 failed**) is retained separately;
+no code, test or acceptance criterion was weakened. These are source/packing
+checks, not visual or performance approval.
+No default is promoted, no quality gate is closed, and no commit or push follows.
+Exactly **3 checked / 8 open** gates and all prior evidence remain intact.
+
+[Review56 verdict and evidence](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/terrain-coast-review56-UNQUALIFIED/README.md) · [Near baseline](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/terrain-coast-review56-UNQUALIFIED/baseline-near.png) · [Near candidate](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/terrain-coast-review56-UNQUALIFIED/candidate-near.png) · [Original pond baseline](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/terrain-coast-review56-UNQUALIFIED/baseline-pond.png) · [Original pond candidate](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/terrain-coast-review56-UNQUALIFIED/candidate-pond.png)
+
+**Current verdict — review55 changes coastal classification, but is not art accepted; UNQUALIFIED.**
+Matched actual wide/near captures show a clear effect from the explicit
+`coastBlend=distribution-v1` candidate, unlike review54's negligible detail-mask
+payoff. Main and independent reviews still reject the result as finished:
+a dark continuous painted-looking soil collar, an overly bare lobe, bright
+green fringe and brown stems remain. Recognizable rock motifs are unchanged.
+The historical review54 rejection and all earlier failures below remain intact.
+
+The candidate shares one broad material-distribution expression across terrain
+PBR weights, analytical grass support and mean root color. It only reassigns
+available turf to soil/rock, retains the original seeded acceptance/rotation
+stream before thinning, and protects roads and the full admitted pond bank.
+Geometry, source textures, projection, wetness and default selection stay fixed;
+no additional texture reads or generic density reduction are used. This is an
+opt-in experiment, not an accepted world-material replacement.
+
+All **540 matched native sample points** retain exactly equal ground heights,
+indexed shading slopes and sampled terrain resolutions. **153 low-shore and
+8 western controls** retain exactly equal sampled native CPU root RGB and
+placement values. These witnesses do not prove pixel-level PBR/root-color
+parity, every blade's ecology, or unchanged output everywhere: analytical and
+indexed normals differ. Final combined verification is recorded separately;
+no unconfirmed final test total is asserted here.
+
+Original bare-pond dirt, coastal soil/rock, paths, grass, water, texture scale,
+near → gameplay → stream distance → return, and frame/loading/memory cost
+remain open. No performance or AAA approval, default promotion, commit or push
+follows. All historical failures and exactly **3 checked / 8 open** texture
+gates are retained. Next resolve the visible broad soil/turf/rock composition
+and root contact, then complete whole-world and moving-distance coverage;
+do not hide the remaining bank defect with foliage.
+
+[Review55 verdict and evidence](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/terrain-coast-review55-UNQUALIFIED/README.md) · [Wide control](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/terrain-coast-review55-UNQUALIFIED/control-coastal-wide.png) · [Wide candidate](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/terrain-coast-review55-UNQUALIFIED/candidate-coastal-wide.png) · [Near control](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/terrain-coast-review55-UNQUALIFIED/control-coastal-near.png) · [Near candidate](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/terrain-coast-review55-UNQUALIFIED/candidate-coastal-near.png)
+
+The user's quality bar applies to every world material, not just the dirt bank.
+Keep this ahead of further decorative placement. Source tests or attractive
+wide shots cannot close a close-up texture defect.
+
+- [ ] Remove recognizable dirt/shore repeat motifs and patch-grid artifacts
+  without blurring soil detail or hiding it behind vegetation.
+- [ ] Review grass, paths, coastal soil, cliffs/rocks and water for consistent
+  physical texture scale, visible repeats, seams and projection stretching.
+- [ ] Preserve albedo/roughness/normal/AO/height alignment, correct color-space
+  handling and coherent dry/wet response; dry ground must not read as polished.
+- [ ] Replace soft painted-looking material borders with convincing ground
+  transitions while preserving open traversal and shared grass support.
+- [ ] Validate close, overhead and grazing views in motion, including near →
+  gameplay → stream distance → return: no texture swimming, objectionable
+  shimmer, mip color shifts or abrupt detail transitions.
+- [ ] Compare actual GPU/frame/loading/memory cost at unchanged resolution and
+  population before retaining a quality change. No automatic default promotion.
+
+The earlier September19 texture capture observed all seven maps at16x, but
+**review47 disproved reliable inheritance**: a later boot had seven loaded maps
+at1x despite `ClientGraphics.maxAnisotropy === 16`. Texture construction can
+precede the global default update. The strict quality gate rejected that run;
+it was not timed or manually upgraded for comparison. Compact texture setup
+now explicitly requests the intended16x for placeholders and decoded maps.
+The earlier proposed4x downgrade remains withdrawn. Stochastic dirt sampling
+remains a partial improvement, not final acceptance.
+
+Review45 adds runtime filtering visibility and87 passing material tests, not
+a visual fix. The close coastal image also exposes repeated rock features and
+a soft green material border. No new sampler or shader was adopted.
+[Texture review45 evidence](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/terrain-texture-review45-UNQUALIFIED/README.md)
+
+Review46 adds an explicit opt-in `rockProjection=stochastic-v1` material branch;
+**297 focused tests passed**. The same seven 1024x1024 maps and native 16x
+filtering retain original physical scale and aligned PBR channels; terrain,
+navigation and absent/default mode remain unchanged. With dirt and height
+selected, static surface reads increase **27 -> 33**, plus ALU work. These
+structural counts are not measured GPU approval.
+
+**Native46 FAILED / UNQUALIFIED.** Intended matched `candidate-bank.png`
+shows **APPLICATION BOOT TIMEOUT**, not an approved terrain comparison. The
+candidate startup camera was installed before grass/sky owners were ready;
+correct harness admission before drawing causal conclusions. Scene readiness
+later became true, but global readiness remained false after the boot timeout.
+Do not weaken, hide or rewrite the readiness gate or its failed evidence.
+
+The control's 30s grass-cut check failed with 24 chunks still running. Candidate
+focused cadence was 49.0 ms versus control 20.3 ms, but submitted triangles differed
+(2,812,935 versus 2,630,259), preventing isolation of shader cost. **All GPU-cost
+results are rejected** because resumed render passes reused timestamp slots;
+no visual-improvement or performance acceptance follows.
+
+Original pond-dirt repetition and the rock-bank candidate remain **separate
+open gates**. Next bounded steps, without changing their acceptance criteria:
+
+- [x] Correct diagnostic boot/grass/sky admission before camera installation;
+  review47 now has actual naturally matched control/candidate bank captures.
+- [x] Correct physical-pass timestamp ownership; schema2 validates real native
+  captures and rejects corrupted or incomplete data. Review46 remains rejected.
+- [ ] Complete separate dirt-pond and rock-bank near/mid/grazing comparisons
+  plus repeatable motion, preserving detail, material alignment and budgets.
+- [x] Attribute the pond's pale rim using actual native main-camera layer/cause
+  shader outputs; review48 confirms a rock band where pond-soil coverage ends.
+- [ ] Refine the remaining pond rock/soil/turf transition and bank profile;
+  original dirt repetition, motion/mips and performance acceptance remain open.
+
+[Texture review46 failed evidence](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/terrain-rock-review46-UNQUALIFIED/README.md)
+
+**Review47: progress, still UNQUALIFIED.** Matched daylight bank images reduce
+aligned rock fissures without obvious stone-detail loss. The new bare-pond view
+shows no obvious square grid in that still, but reveals a continuous pale rim,
+dark substrate band and abrupt turf boundary. Neither original dirt nor overall
+world material quality is closed by these stills.
+
+298/298 focused tests, shared type check and development build pass. Candidate
+cotangent inputs are shared without changing all33 texture reads or the expanded
+normal expression; emitted derivative/cross pairs fall14->6. The filtering race
+fix also survives both rebuilt native boots with all7maps at16x. Defaults for
+rock/dirt/height selection, texture resolution and geometry remain unchanged.
+
+At matched camera/daylight/settings, rebuilt control/candidate observed GPU-pass
+union medians are16.515/22.938ms (p9518.416/24.773ms); client tick medians are
+18.1/24.7ms. Each submits374draws/2,605,659triangles per tick. Full-scene grass
+counts differ84,513/84,519 and visible-scene triangle totals differ, so this is
+not an isolated shader-cost or statistical performance approval. Do not infer an
+optimization factor from the earlier53ms candidate window at a different phase.
+
+Native query/camera/HUD owners restored and owned test resources were removed.
+The launcher nevertheless reported exit1 after client SIGKILL/EPERM inspection;
+retain that shutdown failure even though subsequent process/port checks are clear.
+No automatic default promotion, commit or push.
+[Texture review47 evidence and next gates](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/terrain-texture-review47-UNQUALIFIED/README.md)
+
+**Review48: attribution confirmed; bank refinement still UNQUALIFIED.** Actual
+native main-camera layer/cause outputs identify rock along the pale rim, with
+geometric cliff coverage where pond soil ends. The pond-only `height-v1`
+sediment candidate transfers existing rock weight to dry soil without changing
+shared wetness, grass support, geometry, navigation or default selection.
+
+Matched daylight baseline/candidate start phases are **0.5898986 / 0.5898721**,
+with equal camera and **1280x720, DPR1, MSAA4, seven 1024x1024 maps at 16x**.
+The terrain profile, 52 terrain leaves and 94 grass chunks / 84,498 clumps match.
+The candidate modestly reduces the upper pale edge, but a pronounced continuous tan
+ring remains; grazing stills retain a manufactured bowl-rim appearance. The
+candidate layer-weight image confirms remaining rock. These are spatial stills,
+not motion/shimmer evidence, and neither original dirt repetition nor AAA
+material quality is accepted.
+
+**304 focused tests**, shared types, development shared build and verified
+server build pass. Both emitted shaders retain **53 `textureSample*` call
+sites** (7 ordinary + 41 gradient + 5 comparison samples), with source size
+126,822 -> 127,694 bytes. This is not a surface-only budget or GPU-cost result.
+No performance qualification was attempted on battery. Baseline/candidate boot
+times are **106.533 s / 66.308 s**, and camera-cut settling **14.425 s / 8.629 s**:
+readiness completed, but this is explicitly not smoothness approval.
+Cumulative grass max slices are **10.8 ms / 5.4 ms**, both above the 2 ms target;
+no causal performance claim follows. Zero page exceptions do not mean a clean
+console: 11 errors include missing-cow 404s and one unattributed generic 503.
+
+The initial build-manifest rejection is retained; normal rebuilding preceded
+the substantive runs. Both substantive launchers exited 0, owned browsers closed,
+material/camera/HUD ownership restored, and the verified stopped disposable
+database/sole-use volume were removed; source, assets and evidence remain.
+No default promotion, commit or push.
+
+Next: inspect the actual bank height/slope transect alongside final material
+weights, then make one cohesive bank-profile/material pass. Do not substitute
+blind threshold nudges, more texture samples or decorative coverage for that
+decision. Keep separate original dirt, motion and performance gates open.
+[Texture review48 evidence and next gates](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/terrain-pond-review48-UNQUALIFIED/README.md)
+
+**Review49: localized bank-shape improvement; still UNQUALIFIED.** An actual
+25-point indexed-geometry/normal transect places the visible pale rim at pond
+radii **7.00–7.25 m**. The earlier target **0.331 m above water was lawn**, not
+the rim. A new explicit review49 overlay adds only a third shallow bank sector;
+preview44, defaults and all material/shader sources stay frozen.
+
+At matched bank poses, daylight starts at **0.58991354 / 0.58955883**, with
+**1280x720, DPR1, MSAA4, post-processing off**, and the same seven
+**1024x1024 / 16x** maps. Root and independent review see clear local pale-rim
+removal, not whole-pond acceptance. The close view retains a soft airbrushed
+soil/turf boundary, uniform lawn and a far-left pale edge. The new overview
+still shows a continuous dark perimeter and regularly spaced detached rock
+groups; original dirt repetition, motion/mips and full-world quality remain open.
+
+The first candidate run passes **30/30 tests across two files**, with a further
+**3/3 native-physics fixture tests** passing. The frozen preview44 regression
+passes **2 tests, 1 skipped**, retaining the same routes. Forty retained-mesh,
+Three.js and PhysX probes stay within the unchanged 2 cm canonical bound.
+Sampled terrain leaf triangles increase **74,034 -> 74,758 (+724)** across the
+same 52 leaves. These checks are not actual player-walking or GPU acceptance.
+Expanded test typechecking initially found three diagnostics; fixes now pass
+shared types and the explicit two-test program with zero diagnostics. Final
+post-fix native candidate **3/3** and historical preview44 **2 passed / 1 skipped**
+reruns pass with exactly equal navigation receipts. Native boot
+**101.109 / 52.858 s** and bank-cut settling **12.950 / 8.507 s** are observations,
+not a speedup claim;
+no performance qualification on battery.
+
+Baseline launcher exited 0; **candidate launcher exited 1** after game-client
+SIGKILL and process-group inspection EPERM. Preserve that failure even though
+owned groups/ports are now clear. Cameras restored, browsers closed, and the
+verified stopped owned database/sole-use volume were removed; assets and evidence
+remain. Ten cow-related 404 console errors and six warnings remain, with zero
+page errors/request failures. No default promotion, commit or push. Continue
+cohesive full-bank refinement, then the original dirt/rock near/mid/grazing and
+motion/budget gates.
+[Review49 evidence and remaining gates](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/terrain-pond-review49-UNQUALIFIED/README.md)
+
+**Review50: modest pond-transition refinement; still UNQUALIFIED.** The explicit
+`pondBlend=relief-v1` candidate requires the fine-meadow pair and
+`terrainBlend=height-v1`. It uses the existing aligned relief maps on the frozen
+review49 geometry; defaults, wetness, grass support and access remain unchanged.
+**105 material tests and 229 runtime/profile tests pass**, as do shared and
+explicit test-inclusive typechecks. The corrected test-only ES2021 failure and
+the broader run's two historical **expected-v4 versus actual-v6** fixture
+failures remain in the evidence; this is not a fully green repository run.
+
+The actual native close image is valid at the matched review49 camera and
+**1280x720, DPR1, MSAA4, post-processing off, seven 1024x1024 maps at 16x**.
+Daylight phases are **0.58955883 / 0.58959855**. Main and independent review
+agree on modest relief-breakup improvement only; the broad smooth shoreline
+collar and uniform lawn remain. Boot **58.924 s** and camera settling
+**9.755 s** are observations, not smoothness or performance approval.
+
+**Motion verification did not complete.** An unexpected document reload
+interrupted the motion wait and left the world absent. Immediate readmission
+then failed `scene_assets_not_ready` after another reload. Five source/build
+hashes stayed unchanged, but the reload cause is unproven. **No motion video or
+new overview was saved.** Do not infer native stability, mip/shimmer acceptance
+or a solved whole shoreline from the successful close still.
+
+The owned browser closed, but **the launcher exited 1** after game-client
+SIGKILL and process-group inspection EPERM. Retain that failure despite all five
+ports **3333 / 5555 / 5556 / 9236 / 57831** being clear. The verified stopped
+owned container
+`4931a07c32d9f446e5320a9104fac0d3a363f5422623b7fb1af803e522694a03`
+and sole-use volume `hyperia-terrain-pond-review50-data` were removed:
+disposable test state only; no source, assets or evidence were deleted.
+Power became AC only after cleanup, which does not retroactively qualify
+performance.
+
+Next prioritize **whole-pond composition, overview first**, using authoritative
+bank geometry, actual asset contacts and habitat layout, not another tiny shader
+gain. Original dirt repetition, broader material coherence, motion/mips and
+power-stable GPU/frame/loading/memory qualification remain open. No default
+promotion, commit or push.
+[Review50 evidence and remaining gates](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/terrain-pond-review50-UNQUALIFIED/README.md)
+
+**Review51: bounded native motion recovered; still UNQUALIFIED.** Production
+sources/builds remain unchanged from review50; all five recorded hashes match.
+Native Chrome/Metal retains **1280x720, DPR1, MSAA4, post-processing off, seven
+1024x1024 maps at 16x**. Boot takes **59.220 s**. Across **15 m 15.222 s** of
+observation there is one initial document request, no subsequent document reload
+or crash, and HMR remains connected. This does **not** explain or fix review50's
+unproven reload cause; its failed evidence remains intact.
+
+The first recording attempt failed because `info.frame` advances before the
+actual graphics render. A real **94-call probe** demonstrated that recorder
+assumption. The corrected artifact-only recorder requires cumulative
+`render.calls` to advance within the actual call and a distinct `info.frame`.
+Its **12 s native clip is 11,719,153 bytes**, with **350 decoded frames spanning
+0–11.855 s** and **60 distinct world/render/camera poses**, each with actual
+render-call advancement and unchanged settings. Recorder-hook, tracks, RAF and
+camera restoration are verified. This is recovered visual evidence, not a game
+FPS, GPU-cost or long-duration stability pass.
+
+The overview phase **0.58981292** matches review49's **0.58986587** closely.
+Independent review finds the overview near-identical: the broad flat collar and
+uniform lawn remain. Decoded frames **01 / 06 / 12** show no obvious seam,
+square grid or stretching, but do not establish shimmer/mip acceptance or close
+the original dirt-repeat gate.
+
+The owned browser closed and camera/16x settings were restored. The launcher
+exited **0**, with no forced process-group cleanup; ports
+**3333 / 5555 / 5556 / 9236 / 57831** are clear. The verified stopped exact owned
+container and sole-use volume `hyperia-terrain-pond-review51-data` were removed:
+disposable test state only, with source, assets and evidence preserved. There
+are **five cow-404 console errors, zero page exceptions and zero request
+failures**. AC power was present throughout, but no GPU/FPS acceptance ran.
+
+The next **whole-pond geometry/contact/layout pass remains a proposal, not an
+implementation**. Start overview-first, preserve authoritative terrain and
+worker/grass/contact agreement, unchanged water coverage and open fishing
+access; do not substitute another small shader adjustment. Original texture,
+motion/mip, loading/memory and representative performance gates remain open.
+No production-code change, default promotion, commit or push.
+[Review51 evidence and proposed next pass](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/terrain-pond-review51-UNQUALIFIED/README.md) · [Native motion clip](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/terrain-pond-review51-UNQUALIFIED/candidate-bank-motion.webm)
+
+**Review52 first native attempt: FAILED / UNQUALIFIED; retained history.**
+The shared paired western/northern bank profile, six explicit rock X/Z changes
+and existing reed-group relocation now have **137 related CPU tests**, passing
+builds and zero final test-inclusive typing diagnostics. The original native
+geometry/burial failures and wrong-manifest geometry-selection run remain
+retained. Corrected terrain adds **4,699 vertices / 9,346 triangles** across two
+tested leaves: 8,505 new-shoulder probes peak at **2.73066 mm**, while 361 broader
+probes including the unchanged southern control peak at **1.26170 cm**, below
+the unchanged 2 cm gate. Actual fixture owners retain **17 rock actors,
+32 dressing instances, 69 subjects, 293 approaches, 27 protected southern tiles,
+1,300 routes / 105,049 edges, 48 trees and 5 fishing resources**. These are
+bounded technical results, not rendered contact, live walking or art acceptance.
+
+Actual headful Chrome/Metal/WebGPU boot passed in **68.742677 s**, retaining
+**1280x720, DPR1, MSAA4, post-processing off, seven 1024x1024 maps at 16x**.
+The overview camera cut failed after **3.609 s**: grass cell
+`gcell_v1_13_11` / node43, an LOD0 swap at X325–350/Z275–300, exhausted the
+unchanged **1,000,000 grounding-work** budget. It recorded **114.8 ms active**
+against 250 ms and **670,766 resumptions** against 1,000,000. These distinct
+counters must not be conflated. This is a deterministic work failure, not a
+battery-speed timeout. No grass cap was raised; density, render quality,
+terrain detail and texture budgets were not reduced.
+
+**No qualified overview or motion was captured.** `failed-overview-grass.png`
+contains HUD and unmatched daylight and is failure evidence, not an art A/B.
+A later overly broad diagnostic attempted to return the full `ticket.work`
+object; `page.evaluate` reported Target crashed, with the page crash recorded
+at **13:51:37 UTC**. Causal attribution is unproven; do not repeat full-work-object
+serialization. There are **6 console errors (5 cow-related, 1 grass), zero page
+exceptions, one crash and one initial document request/no reload**. Source/build
+pins stayed unchanged during the run. CPU/build passes do not override this
+native failure or establish GPU/frame performance.
+
+The owned browser closed. The launcher exited **1** because residual game-client
+shutdown required SIGKILL; **inspectionErrorCount is 0, with no EPERM this run**.
+All five ports **3333 / 5555 / 5556 / 9236 / 57831** are clear. The verified stopped
+exact owned container
+`18a07de40aca7194838ae2bbb276b87dd4170904b292870dff7a414152c8a478`
+and sole-use volume `hyperia-terrain-pond-review52-data` were removed:
+disposable test database only, with source, assets and evidence preserved.
+
+The next step at that checkpoint was to fix **deterministic grass grounding work**
+under the unchanged caps and quality settings, then repeat the matched native
+overview/contact/motion review. Loading/memory, real traversal and stable-power
+GPU/frame acceptance remain open. The source goal remains active; no default
+promotion, commit or push.
+[Review52 failed native evidence and technical scope](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/terrain-pond-review52-UNQUALIFIED/README.md)
+
+**Review52 native retry: recovered evidence, still UNQUALIFIED.** The frozen
+grass correction preserves exact old-oracle outputs while completing all
+1,162 clumps / 1,089 retained at **728,531 work units**, below the unchanged
+1,000,000 cap. The old exhaustive accounting is 1,106,310 units, not a passing
+full job. No density, terrain/texture detail or quality reductions were used.
+After fresh builds, all **36 source/test/overlay pins remain stable** through the retry.
+
+Actual Chrome/Metal/WebGPU boot takes **53.604266 s** with unchanged
+**1280x720, DPR1, MSAA4, post-processing off, seven 1024x1024 maps at 16x**.
+The overview cut now settles in **4.590887 s** with no grounding failure, but
+cumulative maximum grass slice **5.5 ms** still exceeds the **2 ms target**.
+The initial bank cut settles in **6.715139 s**. Overview and close daylight
+phases are **0.58978357 / 0.58952574**. These
+matched captures do not establish seamless camera transition or smoothness.
+
+The actual **12 s VP8 canvas clip is 12,384,360 bytes**, with **60 advancing
+render/camera samples**. Render hook, recorder, tracks, RAF and camera ownership
+were restored. Recording completion is not motion/shimmer acceptance; no
+30/60 FPS claim follows from sampled poses or the recording's nominal rate.
+
+The overview's schema2 physical-pass probe validates **484 measured frames**;
+there are **3,198 physical segments across the full capture**, including warm-up,
+and **2,904 in the measured frames**. GPU-pass union p95 is **19.791872 ms**,
+client tick p95 **22.30 ms**, and instrumented CPU tick p95 **10.70 ms**, at
+**205 draws / 1,629,043 submitted triangles** per measured tick. This is a
+bounded overview sample, not matched old/new cost isolation or 60 FPS approval.
+Untimed work, copies, queue idle and presentation are outside the union; observer
+overhead is not subtracted. Probe ownership and resources restored successfully.
+
+Current native residency records **504,728 bytes** of edge-index metadata across
+**3 indexed surfaces / 52 installed chunks**. JS used heap is **2.266 GB at one
+point**, not a trend, leak test or whole GPU/CPU memory budget. The two-leaf CPU
+index cost and the initial geometry expansion remain recorded separately.
+
+Main and independent art review find only modest northern-shoulder improvement:
+the broad oval dark collar and uniform turf persist. Next use the existing
+elevation/slope/relief systems to inspect the pond wetness contour, which applies
+to the **whole blended material**, and make a source-informed bank/material
+composition pass. This is not another generic anti-tiling adjustment, nor a
+proven attribution that wetness alone causes the entire defect. Preserve
+shared physical terrain/grass support, resource access and open traversal.
+
+Retry events show **zero crashes, page exceptions or reloads**, one initial
+document request and five deferred cow-related console errors. The browser
+closed; launcher exit is **0**, with no forced groups or inspection errors.
+All five owned ports are clear. The verified stopped exact retry container
+`fd765629b7deb255358fc0600878527a40d6dc33296e434e3daf8701b2db3fc1`
+and sole-use `hyperia-terrain-pond-review52-data` volume were removed:
+disposable test database only. First-attempt grass failure, diagnostic crash
+and launcher exit1 remain intact. No default promotion, commit or push.
+
+[Review52 complete evidence](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/terrain-pond-review52-UNQUALIFIED/README.md) · [Fresh overview](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/terrain-pond-review52-UNQUALIFIED/candidate-overview.png) · [Fresh bank](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/terrain-pond-review52-UNQUALIFIED/candidate-bank.png) · [Native clip](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/terrain-pond-review52-UNQUALIFIED/candidate-bank-motion.webm) · [Motion proof](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/terrain-pond-review52-UNQUALIFIED/candidate-bank-motion.json) · [Physical-pass proof](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/terrain-pond-review52-UNQUALIFIED/overview-physical-gpu-summary.json)
+
+**Review53: bounded rock-contact detail, not whole-shore acceptance.** Actual
+native layer/cause outputs show soil dominates the dark inner bank despite strong
+raw cliff coverage; this does not justify exempting all grass from wetness.
+The explicit `pondBlend=relief-contact-v1` inherits relief, then transfers only
+final dry-soil weight to existing rock inside the two unequal authored contact
+ribbons, constrained by original pond soil, raw geometric cliff and road priority.
+Grass/coastal weights, wetness, geometry, navigation, fishing access, root colors
+and density stay unchanged. Positive grass-support/contact overlap remains a
+native color/contact gate; unchanged grass weight does not prove visual agreement.
+
+**354/354 focused tests**, ordinary shared and explicit three-test types, and
+fresh shared/server builds pass. All **39 source/test/overlay pins** stay stable
+through builds and native review, with all eight build pins stable afterward. The selected material retains seven
+1024x1024 maps at 16x and 33 surface samples; actual control/candidate normal
+shaders both contain 53 `textureSample*` sites and no `textureLoad` calls.
+No texture-read increase, quality reduction, default promotion, commit or push.
+
+Actual headful Chrome/Metal/WebGPU uses **1280x720, DPR1, MSAA4, post-processing
+off** on AC. Candidate boot is 63.201 s and overview cut settling 4.910 s, not smooth
+startup/camera approval; cumulative maximum grass slice 11.8 ms still exceeds the
+2 ms target. Matched overview/contact daylight images reveal small coarse bank
+detail beneath the reeds, but do not connect the land rocks convincingly through
+the green apron or remove the oval collar. The southern bare-bank image retains
+a soft turf feather. The fresh coastal view retains repeated-looking cracks,
+elongated mottling and a broad green fade; it is **not matched to an older A/B**.
+
+The actual 12 s moving contact clip has 61 advancing render/camera sample receipts
+and restored recorder/RAF/render-hook/camera owners. Decoded stills show no
+obvious hard-mask seam, but vegetation obscures roots; complete temporal shimmer,
+mips and motion acceptance remain false. **Near → gameplay → stream distance →
+return**, original bare-bank dirt, coastal rock/soil, path joins and grass-root
+agreement all remain unqualified.
+
+Separate nighttime physical-pass windows cover 490 control / 483 candidate frames.
+Observed GPU-union p95 is 19.791872 / 19.726336 ms and client-tick p95 is 22.5 / 23.1 ms,
+but submitted triangles differ 3,398,477–3,398,509 versus 3,490,365, with separate
+agent/wind state. These are not isolated material cost, a speedup or 60 FPS
+acceptance. Untimed work/presentation and observer overhead remain outside those
+claims. No general loading/memory or sustained performance gate is closed.
+
+The first control's server-not-ready initialization failure and later control
+launcher exit 1/SIGKILL cleanup remain preserved. Candidate events contain zero
+crashes, page exceptions or reloads, one initial document and five deferred
+cow-related errors, with zero request failures. Its browser is closed; camera
+and render hook are restored, with all seven filters still 16x. Candidate launcher
+exits 0 with no forced groups or inspection errors; all five owned ports are
+clear. The verified stopped exact candidate container and sole-use
+`hyperia-terrain-pond-review53-data` volume were removed: disposable test database
+only; source, assets and evidence remain. The control's failed cleanup is not
+overwritten by this clean candidate shutdown.
+
+Next: attribute the **coastal shoulder** with actual final-layer/raw-cliff/normal
+outputs, then cover path joins, accepted grass roots and moving texture distance
+before another pond-only refinement. Keep current settings and open traversal;
+do not enlarge this local mask or add foliage merely to hide remaining defects.
+[Review53 scope and evidence](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/terrain-pond-review53-UNQUALIFIED/README.md) · [Matched overview](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/terrain-pond-review53-UNQUALIFIED/candidate-overview-daylight.png) · [Close contact](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/terrain-pond-review53-UNQUALIFIED/candidate-contact-daylight.png) · [Bare bank](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/terrain-pond-review53-UNQUALIFIED/candidate-bank-daylight.png) · [Current coastal coverage](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/terrain-pond-review53-UNQUALIFIED/candidate-coastal-rock-bank-daylight.png) · [Native contact clip](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/terrain-pond-review53-UNQUALIFIED/candidate-contact-motion.webm) · [Observation ledger](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/terrain-pond-review53-UNQUALIFIED/observations.json)
+
+**Review54: valid technique, negligible visual payoff; rejected as a fix.**
+Actual native layer/cause outputs identify a rock-dominated coastal face with a
+mixed grass/rock shoulder and no inland pond contribution. The normals output
+is the final blended view-space material normal, not geometric normals alone.
+
+Explicit `coastBlend=detail-v1` reuses aligned, already sampled grass height as
+endpoint-preserving coverage detail, not physical rock height. All PBR channels
+share the final grass/rock-branch weights; full roads and the full pond radial
+region are excluded. Explicit soil weights stay fixed, but soil nested in the
+coastal rock branch can change. CPU grass placement, root colors, geometry,
+traversal and default selection remain unchanged. Unchanged grass ownership
+does not prove root-to-ground agreement. The experiment remains opt-in only.
+
+**388/388 focused tests**, ordinary shared and explicit test-inclusive types,
+and fresh shared/server builds pass. The same seven **1024x1024 maps at 16x**
+retain **33 surface reads**; both actual normal shaders contain **53
+`textureSample*` sites**. No texture repacking, additional texture reads,
+density/detail reduction or default promotion was used.
+
+Matched headful Chrome/Metal/WebGPU captures use **1280x720, DPR1, MSAA4,
+post-processing off** and unchanged camera/terrain. Wide daylight phases are
+**0.4998439 / 0.4998224**; exact near phases are
+**0.4995642024 / 0.4995562854** (control/candidate). Main and independent review
+find at most subtle grain breakup: the broad airbrushed border, brown elongated
+rock features and muddy grass transition remain. Approximate decoded motion
+frames are not exact A/B pairs or proof of temporal stability. Both native
+12-second clips restore their owned recording/camera hooks; successful
+recording does not close shimmer, mip, root-contact or distance-return gates.
+
+Physical-pass GPU-union p95 is **25.690112 / 27.19744 ms**. Submitted geometry
+matches, but separate dynamic scenes and bounded windows do not isolate shader
+cost or establish a regression/speedup. Neither result is 60 FPS approval; union
+timing excludes presentation/untimed work and does not subtract observer cost.
+Loading, memory, smooth camera cuts and sustained performance remain open.
+
+The initial control HUD/cursor-restoration rejection, backward-phase wait
+rejection and corrected test-fixture failures remain preserved. Owned native
+browsers/hooks are restored or closed; launchers exit 0, all five owned ports are
+clear, and verified stopped disposable database containers/sole-use volume are
+removed. Only disposable test data was removed; source, assets and evidence
+remain. Clean shutdown does not supersede historical failed runs.
+
+Next: use actual spatial material/root evidence to distinguish the broad
+shoulder's composition/scale problem from the rock source's interior appearance,
+then choose a materially different correction rather than another mask-gain
+loop. Cover paths, original bare-pond dirt, grass roots, water-edge response and
+near → gameplay → stream distance → return before accepting whole-world textures.
+No quality gate is newly checked; no default promotion, commit or push.
+[Review54 verdict and evidence](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/terrain-coast-review54-UNQUALIFIED/README.md) · [Wide control](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/terrain-coast-review54-UNQUALIFIED/control-coastal-daylight-recheck.png) · [Wide candidate](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/terrain-coast-review54-UNQUALIFIED/candidate-coastal-daylight.png) · [Near control](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/terrain-coast-review54-UNQUALIFIED/control-coastal-near-daylight-recheck.png) · [Near candidate](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/terrain-coast-review54-UNQUALIFIED/candidate-coastal-near-daylight.png) · [Control motion](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/terrain-coast-review54-UNQUALIFIED/control-coastal-motion.webm) · [Candidate motion](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/terrain-coast-review54-UNQUALIFIED/candidate-coastal-motion.webm) · [Observation ledger](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/terrain-coast-review54-UNQUALIFIED/observations.json)
+
+
+## Current work — preview44 connected pond habitat; UNQUALIFIED
+
+**World first; avatar/armor later. One arena, SOL only.** Root and independent native-image review retain preview44 over43: shoreline groups connect better and fishing cues read as water disturbances. This is a visible improvement, **not AAA or production acceptance**.
+
+- [x] Add two unequal dry-soil contact ribbons using existing PBR maps/noise; closer 32-instance pond planting preserves five models, underwater rock guards and southern access. Physical wetness, terrain and grass eligibility remain unchanged. The broader material gate (v6 + southernMeadow) and sector-dependent dressing gate are explicitly documented.
+- [x] Create an explicit unqualified overlay moving/rescaling 13 existing pond landscape rocks. Keep IDs/variants/yaw, all four workshop rocks and every other world setting unchanged. Three initially over-buried satellites were corrected explicitly; failed evidence remains. Frozen world20/defaults stay untouched.
+- [x] Replace candidate blue fishing coins with a soft desaturated cue: same clickable disk, interaction metadata, depletion/respawn and existing particle pools; no new texture/mesh. **123 focused material/dressing/fishing checks pass** (104 + 19); candidate fishing cases also pass under the overlay. Shared types and shared/server builds pass.
+- [x] Exact-overlay support/navigation checks: **17 actual PhysX actors/shapes, 65 occupied tiles, 1,299 support samples; 69 land resources/stations, 293 approaches, 27 preserved southern shoreline tiles; 1,300 routes / 105,049 valid edges** plus outer-pond circulation. The fixture invokes the real authoritative walkability bake; it is not server-startup or native walking proof.
+- [x] Native WebGPU preview: **48/48 tree owners/proxies, 56/56 pond/service instances, 17 rock placements**, both agents and five interactive soft fishing cues. Corresponding43/44 cameras/settings match; natural daylight is very close, not identical. Both HUD captures and final awaited camera/observer cleanup succeed. Owned browser/services/disposable databases retired; source/media preserved.
+- [ ] Resolve the retained native rock-ray discrepancy: **0.907 mm normal-to-surface error vs unchanged 0.244 mm bound** at a buried north-04 face. The broader exact-overlay ray suite is not green; no tolerance or placement was changed to evade it. Stream-client occupancy alone does not prove server physics.
+- [ ] Fix grass preparation/LOD latency: final94 chunks /84,515 clumps, zero failed/cancelled queues, but wide/return settling **12.891 s /5.716 s**, cumulative max slice **6.3 ms >2 ms target**. Passing the diagnostic30s cap is not smoothness or performance approval; prior grounding failures stay open.
+- [ ] Next art batch: natural path shoulders, continuous dark pond lip/bright lawn cuff, grass/terrain color and scale integration. Preserve open traversal and resource/fishing readability.
+- [ ] Qualify motion/shimmer, real walking/interaction, repeated LOD returns, loading/memory, target-hardware frame cost and sustained gameplay/streaming before launch.
+
+Five known cow/404 console errors remain; zero page/capture errors in44. No exhaustive GPU-cost trace, production/default promotion, commit or push. Initial failed placements, diagnostic fixtures and all older checkpoints remain visible.
+
+[Preview44 evidence](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/southern-meadow-preview44-UNQUALIFIED/README.md) · [Preview43 intermediate](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/southern-meadow-preview43-UNQUALIFIED/README.md) · [Current details](/Users/lucid/Documents/hyperia/asset-studio/fine-meadow01/world-paths-coverage01.md)
+
+## Prior checkpoint — preview42 physical pond contacts; UNQUALIFIED
+
+**World first; avatar/armor later. One arena, SOL only.** The saved references remain the target. Root and independent review retain the asymmetric pond shape as a **modest improvement, not cohesive AAA art or production approval**.
+
+- [x] Add two optional northern shelf/shoulder sectors to the existing shared physical surface. Preserve the southern fishing approach, bed, outer envelope and existing elevation-driven soil/wetness/grass owners. Frozen world20 and defaults remain unchanged; the candidate is an explicitly unqualified asset overlay.
+- [x] **126 unique tests pass across seven files** (108 + 18), plus the final retained-mesh case rerun **1/1, 37 skipped**. Shared types, development shared build and ordinary server build exit 0. No full source/world/native qualification was run.
+- [x] Final actual-game daylight pair shows loaded/rendered sectors, **48/48 tree owners/proxies**, **94 grass chunks / 84,389 clumps** and zero grounding queues. A warm bank→pond return settles in **482.828458 ms**; this is one preview observation, not a performance/reliability pass.
+- [x] Preserve the rejected expanded 9 m refinement and its **two terminal `grounding_work` failures**. Restore the existing 7.9 m annulus without changing budgets, base grid or grass density. The corrected session has no observed grounding failures, **not a causal fix for native39's separate `active_cpu` failures**.
+- [ ] Resolve the precision/performance tradeoff: restored annulus avoids **19,272 triangles**, with sampled outer-bank height error **1.2543 cm** but normal error **5.639° versus 2.207°** for the expanded annulus. Cumulative grounding slice **6.7 ms exceeds the 2 ms target**.
+- [ ] Improve shore substrate/contact dressing, the continuous rim and bright turf cuff, detached plants/rocks, natural path shoulders and meadow/ground scale/color integration. Preserve free traversal and resource/fishing access.
+- [ ] Qualify motion/shimmer, repeated LOD returns, walking, loading/memory, target-hardware frame cost and sustained gameplay/streaming before approval.
+
+Use the final `bank-asymmetric-day.png` / `pond-asymmetric-day.png` pair only for current art review; both restore HUD ownership. Earlier failed-grounding/HUD and mismatched-light images remain debug evidence. Five cow/404 console errors remain, zero page errors; no exhaustive GPU-warning or cost trace was collected. Owned sessions/observers retired and the verified disposable database/sole-use volume were removed. Startup-manifest rejection, earlier failures and all prior checkpoints remain preserved; no default promotion or qualification claim.
+
+[Preview42 evidence](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/southern-meadow-preview42-UNQUALIFIED/README.md) · [Current details](/Users/lucid/Documents/hyperia/asset-studio/fine-meadow01/world-paths-coverage01.md)
+
+## Prior checkpoint — preview41 canopy/startup improved; UNQUALIFIED
+
+**World first; avatar/armor later. One arena, SOL only.** Continue using the saved grass/bank images, supplied portfolios and primary Three.js examples. Root and independent review favor retaining the canopy candidate, **not AAA visual acceptance or production approval**.
+
+- [x] Implement explicit fine-meadow upper-leaf widening/quadratic taper and reduced root darkening. Preserve roots, tips, centerlines, normals, topology and instance settings; retained clumps and raster cost can change.
+- [x] Final focused runs: **36 Appearance + 31 Wind + 102 Grounding + 37 Generation + 183 runtime-policy = 389 passing tests**. Shared `tsc --noEmit` and development build exit 0. Archived geometry hashes remain exact; this is **not fresh full source/world/native qualification**.
+- [x] Fix a real tree-startup race: the deferred pool setup left **27 of 48 trees** without rendered owners/proxies despite no pending pool work. Initialize against Stage's existing Scene before asynchronous world/resource registration. **Two successive reloads show 48/48 actual owners and attached proxies**; this does not prove every reconnect scenario.
+- [x] Review two complete-scene native WebGPU images. Connected green volume improves and isolated dark stems reduce. Earlier night/stale-bundle/missing-tree images remain debugging evidence, **not valid complete-scene art A/B**.
+- [ ] Improve asymmetric physical pond contacts, soil/grass integration, bright lawn collars, smooth paths, uniform olive coloration and disconnected dressing. Preserve fishing access, free traversal, water coverage, collision/worker agreement and resource ownership.
+- [ ] Freeze a visually credible batch, then run complete source/world/native qualification plus motion/shimmer, LOD return, walking, loading/memory, representative frame cost and sustained gameplay/streaming.
+- [ ] Keep native39's two grounding-budget failures open; absence in this lightweight, nonmatched preview is not a causal fix or reliability proof.
+
+**Evidence scope:** preview41 used the existing isolated development launcher and world20 manifests. No new qualification receipt/world derivation or default promotion. Across six loaded documents it retained **30 console errors** (24 cow-specific + six generic 404s), with no observed page errors or grounding-failure messages; exhaustive GPU-warning and frame-cost evidence was not collected. No gear suite, motion, walking or endurance test ran. Camera/HUD/observer ownership was restored, browser/services retired and only the verified stopped disposable database/sole-use volume removed.
+
+Candidate39/world20/replay53/native40 remain historical evidence for their frozen source, not qualification of these later changes. All earlier errors, rejected images and native40/native39 history remain intact.
+
+[Preview41 evidence](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/southern-meadow-preview41-UNQUALIFIED/README.md) · [Current details](/Users/lucid/Documents/hyperia/asset-studio/fine-meadow01/world-paths-coverage01.md)
+
+## Prior checkpoint — native40 bank-first review complete; visual acceptance remained open
+
+**World first; avatar/armor later. One arena, SOL only.** The saved grass/bank images, portfolio projects and primary Three.js examples remain the targets. Native40 shows a modest local improvement, **not accepted art, AAA quality or production qualification**.
+
+- [x] Share three connected service-approach wear ribbons between soil composition and vertical grass/wind/grounding scale. Keep root eligibility, building clearances, navigation and defaults unchanged. Seven physical maps / **27 ground gradient reads**; no measured cost claim.
+- [x] Candidate39: **1,495/1,495 in 72 files**, zero semantic diagnostics and both builds; **181 current pins** verified. World20: derive/fresh verification **9/9 each**, **192 pins / 41 unchanged manifests / 15 direct original-asset links**. Replay53: **467/467**, all 31 pins verified. Earlier failed tests and runs remain.
+- [x] Native40: exactly **three 1280×720 bank/campus/pond views**, with completed focused coastal and bank-review admission. All **917 source pins / 821 executed archives / three PNG hashes** independently verified.
+- [x] Add bounded grounding-failure context without raising budgets. The required pond hold lasted **60,008.97575 ms**, including **5,871.584292 ms** settling. Natural daylight then added **167,335 ms**; actual pond-pose-to-photo exposure was **226,909.4 ms**, with no grounding errors. This is **not a fix claim** or matched-condition proof against native39’s ~239-second pond wait.
+- [x] Review all three images: the local apron improves modestly, but thin dark stems, a bright uniform lawn, smooth collars and regular pond contacts persist. **Visual acceptance remains open.**
+- [ ] Next: materially improve meadow-wide upper-blade silhouette, root shading and substrate integration, retaining shared wind/normal/grounding correctness and explicit performance budgets.
+- [ ] Then improve asymmetric pond contacts and surrounding composition without sacrificing free traversal, resource/service access or ownership.
+- [ ] Keep native39’s two grounding-budget failures open until diagnosed and tested with representative exposure; absence in this nonmatched run does not erase them.
+- [ ] Qualify motion/shimmer, LOD return, walking, loading/memory, balanced frame cost and sustained gameplay/streaming after the art direction is credible.
+
+**Faster iteration:** use the existing isolated launch helper, development client and shared-build reload for explicitly **UNQUALIFIED development previews**. Reuse existing cameras; do not bypass source-pin checks or label previews as receipts. Freeze a credible art batch before complete qualification and fresh native evidence.
+
+Native40 remains **overall/study=false, exit 1**, with **19 retained console errors** (14 dagger-fit, four cow-specific and one generic 404); GPU/page/cleanup errors are empty. No clips, motion, walking or cost probe ran. Browser/services retired; only the verified stopped disposable database and sole-use volume were removed. All media/source evidence remains. Native39’s failures, native38’s rejection and all older history remain intact. No default promotion or production approval.
+
+[Current details](/Users/lucid/Documents/hyperia/asset-studio/fine-meadow01/world-paths-coverage01.md)
+
+## Prior checkpoint — native dirt comparison improved; motion and cost remained open
+
+**Compact island/world first; avatar and armor later.** One arena, SOL only.
+The user's grass/bank images, portfolio references and primary Three.js examples
+remain the art direction. Source checks are not AAA visual acceptance.
+
+- [x] Wire explicit `dirtProjection=stochastic-v1` only into the admitted fine-meadow stream preview with compact sculpt terrain; capture selection once before material creation. Reject duplicate/incompatible options. Absence keeps the original 20-read material; the candidate uses 22 reads and the same six maps.
+- [x] Candidate35: **1,449/1,449 tests in 72 files**, ordinary semantic check **735 roots / 2,378 files / zero diagnostics**, shared/server builds. Independently verified all **179 source pins / 61,815,920 bytes**, before/after equality, qualifier, command logs and test JSON.
+- [x] World17: derivation and fresh verification **9/9** each; all **41 world16 manifests** remain byte-exact. Independently checked 190 source pins and inherited proofs. Fifteen verified directory links reuse original assets; no asset copies or default promotion.
+- [x] Research application: triangle-patch stochastic sampling, explicit gradients and mip/contrast risks informed by Heitz/Neyret, Unity's published implementation and primary Three.js WebGPU terrain/filtering examples. Our linear-albedo compensation is approximate, not full histogram preservation.
+- [x] Replay46 **406/406**; all 27 source pins unchanged and independently verified. Replay45's three stale test expectations were corrected; its failed receipt remains intact.
+- [x] Capture native32 control and native33 candidate on the same current source/world. Independently verify each run's **915 source pins, 819 executed archives and seven PNG hashes**. Actual compiled control/candidate shaders use **20/22 reads**, respectively, with paired dirt maps sampled twice/three times.
+- [x] Compare stills: the regular pale rows/dots are reduced; near-bank pebble detail and close rock definition remain. Independent review favors the candidate for further qualification, but calls the improvement modest. Broad mottling, soft green borders and artificial path shapes remain.
+- [x] All seven camera/settings pairs match. The first five views pass before/after natural-light matching; **bank and campus exceed the unchanged 0.003 phase tolerance** and are not matched-light color evidence.
+- [ ] Accept the dirt fix only after bank texture detail, color, seams, oblique filtering, motion/shimmer and representative frame cost are demonstrated.
+- [ ] Then continue grass LOD convergence/fullness, natural paths, landform/ground/water cohesion, resource-linked vegetation and freely traversable open ground.
+- [ ] Full traversal, loading, memory, frame-cost, long-duration gameplay/stream and overall visual acceptance remain open.
+
+Candidate35 receipt SHA256:
+`e0630269a7a55e9b3e4c21fcdbc6075a4ee3acc19a37bda10d2caa2f4cfd9eac`.
+World17 receipt SHA256:
+`5645a638d417b1af31ec173d9e8693e5f527ffaae4b2fd52919aa47e757b62cf`.
+Native33 capture completed with zero GPU/page/study/cleanup errors and launcher
+exit 0. Both runs retain the same 19 console errors (14 dagger, four cow-specific,
+one generic 404); overall approval remains false. Native32's overall run also
+failed client shutdown (SIGKILL required, then EPERM inspection), despite complete
+capture admission and eventual process/port cleanup. Neither failure is waived.
+No motion, traversal or GPU-cost measurement was performed. The two exact stopped
+disposable test databases were removed; all evidence and original assets remain.
+No production/default approval, commit or push.
+
+Native32 report SHA256:
+`da34e2d299f5f59464ffeb242e01652c2cbe458e3d075f3759e2176212d7fd15`.
+Native33 report SHA256:
+`9f04242a5e9f335650761ef603bf1809644216bb5fbf243c29fbad4c0f472e71`.
+
+[Current details](/Users/lucid/Documents/hyperia/asset-studio/fine-meadow01/world-paths-coverage01.md)
+
+## Prior checkpoint — dirt candidate source qualified; native art/performance acceptance remains open
+
+**Compact island/world first; avatar and armor later.** One arena, SOL only,
+no large-island preservation requirement. The user's fine-grass image, supplied
+portfolios, Rainy Worlds and primary Three.js examples remain the visual targets.
+Bruno's grass source guides shared ground/blade color and spatial variation,
+not camera-facing geometry or hidden performance compromises.
+
+- [x] Candidate34: **1,440/1,440 tests in 72 files**, ordinary shared semantic check **735 roots / 2,378 files / zero diagnostics**, shared/server builds. Independently verified all **179 source pins / 61,802,510 bytes**, before/after equality, qualifier source, four command logs and tests JSON.
+- [x] Historical candidate33/world16/v14 qualified the native31 checkpoint. Three material/test files have since changed; those old receipts do not admit current source or a new candidate preview.
+- [x] Implement explicit optional `compactDirtProjection: "stochastic-v1"`: dirt-only three-patch triangular projection, signed PCG hash, paired gradients and approximate linear-albedo variance compensation. It is **not wired into live TerrainSystem selection or enabled by default**. Source surface-read budget is **22 instead of 20**, not measured GPU cost.
+- [x] Native29: all seven world views and actual mask/root storage proof for 16 submitted pipelines within the eight-vertex-buffer limit. Native28's unsettled-queue/shutdown failure remains retained.
+- [x] Qualify the separate opt-in dirt diagnostic: Replay43 **392/392**, all 27 pins unchanged; original 15-second coastal daylight gate retained, separate bounded 30-second diagnostic gate verified.
+- [x] Native31: seven ordinary views followed by five same-camera, naturally daylit dirt trials on actual Apple Metal/WebGPU. All **917 then-current pins / 821 executed archives / 12 PNG hashes** independently verified; zero GPU/page/device errors. Diagnostic completed in **2.632 seconds**, with exact original graph, shader and native texture bindings restored before temporary-resource disposal.
+- [x] Review all five dirt images: reusing the existing **0.006 meadow selector is insufficient**. No trial is accepted as the finished material; preserve this negative visual result.
+- [ ] **Current user priority: remove the visible dirt-bank grid.** Source qualification is complete, but explicit isolated preview selection, fresh detached-world admission, native original/candidate bank comparison, motion and actual cost checks remain open. Preserve soil detail, paired normal gradients, world anchoring, geometry and free navigation. No stochastic-candidate native capture exists yet. Complete this before the grass-width trial.
+- [x] Correct the future exact opt-in fog-capture inventory: **87/87 focused + 5/5 targeted checks** passed. Native31 still retains its immutable **12 != 7** failure; qualifying the future inventory does not relabel that run.
+- [ ] Fix camera-driven grass LOD convergence. Native31 cut-to-settled times: **6.05 s bank / 7.66 s campus-link**. Its recorded **5.9 ms maximum slice is cumulative and already present at initial readiness**, not a newly measured cut-specific overshoot; the existing 2 ms preparation target remains open. Diagnostic waiting is not seamless-transition acceptance.
+- [ ] Fuller meadow: isolated width **0.045 → 0.060** trial, then coherent height/color patches and terrain/blade integration. Hold population, height, wind, lighting and cameras during the width test; inspect motion and actual cost.
+- [ ] Improve the larger composition: irregular natural path shoulders/arrivals, varied coastal landform and rock contacts, richer ground textures, pond/ocean integration, resource-linked vegetation and freely traversable open ground.
+- [ ] Complete motion, traversal, LOD-return, loading, memory, frame-cost and long-duration gameplay/stream acceptance. No default promotion or AAA/production approval.
+
+Native31's overall exit remains **1**, with `coastalCaptureCompleted=false`:
+its only cleanup assertion is **12 != 7** in fog-screenshot inventory. The
+observer itself restored, all 12 observations completed without errors, and the
+separate dirt diagnostic completed/restored successfully. Five cow-404-related
+console errors and 14 known dagger-fit errors also remain; full gameplay,
+movement, cost and native lifetime qualification were not performed. These
+deferred assets stay open, not silently accepted as production success.
+
+Replay44 remains **364/394, exit1**: all 30 failures stopped at the same strict
+stale candidate33/world16 source-pin gate. They are not assumed passes; the
+harness still needs fresh candidate/world admission. No gate was weakened.
+
+Candidate34 receipt: 107,285 bytes, SHA256
+`61bfca700a5b846ec27e6d23fb157badbae96cf358fed6290f97d34a2c420e66`.
+Native31 report SHA256:
+`f0769acedf72d8ff4d2c2fc6e469ccb62b5923f45e6100c646faef90603e5948`.
+The source verification describes that run's frozen checkpoint, not any later
+anti-tiling edits. All historical reports, source archives and images remain.
+Owned browser/services closed cleanly (launcher exit0); only the exact stopped
+native31 disposable database container and sole-use volume were removed after
+identity checks. No user database, original asset or source was deleted.
+No production material/default was adopted from these trials. No commit or push.
+
+[Current details](/Users/lucid/Documents/hyperia/asset-studio/fine-meadow01/world-paths-coverage01.md)
+
+## Prior checkpoint — worn-turf source and shader verified; full visual review pending
+
+World first; avatar/armor remains deferred. The current material pass follows the
+original fine-grass reference, Three.js terrain boundaries and the saved portfolio
+references. It shares irregular wear between terrain and grass-root color without
+changing map geometry, navigation, grass placement or density.
+
+[Detailed evidence and remaining work](/Users/lucid/Documents/hyperia/asset-studio/fine-meadow01/world-paths-coverage01.md)
+
+- [x] Candidate20: **1,288/1,288**, zero type diagnostics, both builds; 177 pins verified.
+- [x] World09: separate fresh startup, 188 pins, 41 unchanged manifests, 15 resource links.
+- [x] V7 harness plus bounded failure diagnostics: **276/276**, 21 unchanged pins.
+- [x] Real workers preserve default/placement behavior; no new material texture assets.
+- [x] Native18's saved compiled terrain shader retains the same 40 sampling sites and 14 texture owners.
+- [ ] Complete seven-view visual review; native18 produced only the shoreline-low image.
+- [ ] Resolve native17's unproven ownership/maintenance rejection; its failure remains retained.
+- [ ] Resume GPU testing only under stable, awake, adequately cooled host conditions.
+- [ ] Verify natural path/ground appearance, movement, shimmer, LOD return and free navigation.
+- [ ] Meet representative frame/loading/memory budgets and the full world art acceptance bar.
+- [ ] Apply the [reference-led cove-head shaping constraints](/Users/lucid/Documents/hyperia/hyperia-implementation/docs/graphics-reference-library.md#reference-decisions--2026-09-16-world-first-review); preserve the downstream approach. The broad `startX=430` trial is rejected, not installed.
+
+Native17 failed before world capture with 409 and two cleanup errors. Native18
+passed both bots' setup but exceeded its deadline after the first photo. macOS
+records 985 seconds of Thermal Emergency Sleep during that run; it is not a valid
+performance or full visual result. No power/sleep safety control was bypassed.
+GPU-heavy runs are paused while saved evidence/source review continues.
+
+The compiled shader observation proves a finite source-level sampling bound,
+not equal hardware cost. No path-quality, AAA, default or production approval.
+Native16 remains the latest completed seven-view baseline; failed17/18 are not
+retrospectively approved. Earlier density-comparison caveats remain.
+
+## Earlier checkpoint — native16 bank views captured; visual refinement still needed
+
+[Current implementation and evidence](/Users/lucid/Documents/hyperia/asset-studio/fine-meadow01/world-paths-coverage01.md)
+uses our saved portfolio/Three.js references and original fine-grass reference.
+World remains first; avatar/armor work stays deferred. Three hooked platform
+arrivals now use gradual curves. An explicit single-cell 0.60 m grass trial
+retains 0.70 m everywhere else; the failed 0.50 m attempt is preserved and its
+obsolete selector rejected. No safety budgets or blade shapes were relaxed.
+The new bank candidate narrows three shoulders and adds two bounded unequal
+wear patches. Native16 now captures this source through the exact v6/world08
+selector. Bank/campus views show a small shoulder change, but stamped-looking
+brown wear and uniform green turf remain; this is not full visual signoff.
+
+- [x] Fresh bank candidate19: **1,281/1,281 tests**, zero type diagnostics, shared/server builds.
+- [x] Independently verify all 177 source pins and command logs.
+- [x] Detached world08: 35 groves, 21 supports, 23 paths/577 segments; 188 pins verified.
+- [x] Verify 41 unchanged manifests and 15 original-asset directory links.
+- [x] Qualify v5/world07 and optional trial admission: **257/257 harness checks**.
+- [x] Capture and review seven world views and the first dedicated grass baseline.
+- [x] Complete a real native GPU window, target-buffer checks and exact camera restoration.
+- [x] Capture the 0.60 m cell candidate and return baseline under identical isolation.
+- [x] Requalify all three saved probes; detect off-camera LOD/residency drift in strict comparison.
+- [ ] Establish strict comparison acceptance; retain scene differences and native14 shutdown failure.
+- [x] Qualify localized bank-shoulder/wear source: 23 paths/577 segments; same 256 mask.
+- [x] Derive world08 and verify separate fresh startup; all 41 manifests match world07.
+- [x] Qualify v6/world08 through replay19: **267/267 harness checks**, 21 unchanged pins.
+- [x] Capture native16's seven world views and inspect its bank/campus approaches.
+- [ ] Refine shared wear/turf materials against the saved portfolio/Three.js references.
+- [ ] Verify motion/LOD return, free navigation, frame hitches and target-device performance.
+- [ ] Refine painted path shoulders, uniform ground coverage and artificial pond margins.
+
+**No art, full-performance, gameplay or AAA approval.**
+
+[Replay18](/Users/lucid/Documents/hyperia/asset-studio/fine-meadow01/equipped-lighting-replay18.json)
+remains a failed receipt: three current-path tests still selected stale v5/q18
+sources. Only those test references/admissions were corrected; runtime readiness
+gates were unchanged. [Replay19](/Users/lucid/Documents/hyperia/asset-studio/fine-meadow01/equipped-lighting-replay19.json)
+then passed all 267 checks with 21 unchanged pins.
+
+[Native16](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/southern-meadow-native16/report.json)
+is terminal **exit 1**, despite seven completed world photos and
+`coastalCaptureCompleted: true`. There was no new grass probe or density trial.
+The staged diagnostic remains incomplete. All five cow and fourteen dagger
+errors are retained; page, GPU and cleanup error arrays are empty. The browser
+closed, the launcher exited 0, and owned PIDs and ports were absent afterward.
+The primary and independent reviewers verified 912 current pins (410,354,741
+bytes) and 816 source archives (333,256,088 bytes). The original report remains
+58,230,324 bytes, SHA256
+`9ee4ec5c4a1e0442081991df54776d94930970fce18af6c9c8ac482830583707`.
+Seven PNGs, fourteen RGB/pond boundaries and seven fog/HUD records were also
+independently checked. Bank/campus camera poses match native15, but maximum
+phase deltas 0.004175/0.005496 exceed the existing 0.003 limit: this supports
+morphology review only, **not matched-light or color proof**. No cost, motion,
+free-navigation or target-device performance acceptance follows from these stills.
+
+[Native follow-up and evidence](/Users/lucid/Documents/hyperia/asset-studio/fine-meadow01/grass-native-isolation01.md):
+native13/14/15 each complete their separate grass probe and eight image purposes.
+Target counts are 1,269 / 1,722 / 1,269. Native14's later launcher EPERM remains
+a failed cleanup and its outer coastal-completion flag stays false; native15
+restores and closes cleanly. All full runs retain the missing-cow errors and
+separate dagger-fit blocker. Baseline13 has two extra non-grass meshes, so the
+raw timings are not a density performance win. Source identity was independently
+verified before the next bank-path edit. The saved comparison also rejects
+non-target grass/LOD and resident-buffer differences, including two off-camera
+cells in native14 versus15. Actual grass images remain too coarse
+and strongly shadowed relative to the references. No density default is promoted.
+Native11's reload and native12's incorrect expectation remain failed receipts.
+The detailed checkpoint supersedes current-status statements below; older
+receipts are preserved, not reclassified as proof of the new source.
+
+## Earlier checkpoint — path joins and pond detail
+
+World work comes first; avatar and armor work remain deferred. These are
+completed source checks, not new native art or performance acceptance.
+The earlier checkpoints below remain preserved as history.
+
+- Paths pass **18/18** focused checks. Three platform joins bring the selected
+  network to **515 segments**, ten more than before, with the same **262,144-byte
+  mask**. The measured lodge residue is **7.81564e-7**, bounded by **1e-6**;
+  it is not zero.
+- [Adaptive pond checks](/Users/lucid/Documents/hyperia/asset-studio/fine-meadow01/pond-annulus-adaptive-geometry03.log)
+  pass **37/37**, including 2,304 contours, 13,440 bank probes and all six
+  asymmetric seams. Maximum radial error is **0.010425 m**; maximum full-bank
+  vertical error is **0.006154 m**. Two leaves add **2,278,096 buffer bytes**.
+  This is a geometry cost, not GPU performance approval. The candidate requires
+  resolution 128; unsupported 64 and 32 cases fail closed.
+- [Pond detail retention](/Users/lucid/Documents/hyperia/asset-studio/fine-meadow01/pond-detail-retention-focused01.log)
+  passes **9/9**. The 20 current planner layouts add no base-LOD geometry;
+  the annular buffers above are a separate cost.
+- [Precompile checks](/Users/lucid/Documents/hyperia/asset-studio/fine-meadow01/pond-precompile-focused02.log)
+  pass **28/28**. Startup now selects the admitted detail resolution for its
+  sample rectangle instead of using streaming resolution 16 inside the pond.
+  Original caps, cancellation and cleanup checks remain.
+- [Integration04](/Users/lucid/Documents/hyperia/asset-studio/fine-meadow01/annular-pond-integration-focused04.log)
+  preserves the broad-travel checks across **7,082 cells**: maximum retained
+  gap **0.014625 m** and angle **7.74262°**. Its expected-hash failure remains
+  recorded; the golden was updated only after the full byte-level parity proof.
+
+[Candidate17](/Users/lucid/Documents/hyperia/asset-studio/fine-meadow01/southern-meadow-candidate17.json)
+**passes 1,202/1,202 tests across 71 files**. Shared types have zero diagnostics
+across 724 roots and 2,364 source files; shared and server builds exit 0.
+All 177 source pins and command logs were independently reverified.
+[Candidate16's failure](/Users/lucid/Documents/hyperia/asset-studio/fine-meadow01/southern-meadow-candidate16.json)
+is retained: all tests passed, but two typing errors stopped its builds.
+Those corrections did not change runtime behavior.
+
+[World06](/Users/lucid/Documents/hyperia/asset-studio/fine-meadow01/southern-meadow-world06/receipt.json)
+passes detached derivation and separate fresh-process verification.
+All 188 detached pins were independently checked; the world has 21 supports,
+18 paths and 35 materialized groves.
+[Asset delivery is complete](/Users/lucid/Documents/hyperia/asset-studio/fine-meadow01/southern-meadow-world06/ASSET_DELIVERY.md):
+15 resource links are verified and all 41 manifests are byte-identical to world05.
+
+[Replay13](/Users/lucid/Documents/hyperia/asset-studio/fine-meadow01/equipped-lighting-replay13.json)
+passed **228/228** in 32.027 seconds.
+The latest [replay14](/Users/lucid/Documents/hyperia/asset-studio/fine-meadow01/equipped-lighting-replay14.json)
+passes **232/232** in 31.643 seconds. Both exited 0 with eleven unchanged pins;
+the latest full log and pins were independently reverified. The v4 passive
+per-photo daylight alignment now has CPU, archival and source checks.
+It retains the original 15-second batch and all comparison limits.
+**Native10 has finished with all seven world photos saved, but overall exit 1.**
+
+- [x] Finish fresh source, type and build qualification.
+- [x] Derive the detached world and verify a separate fresh startup.
+- [x] Complete asset-link delivery checks.
+- [x] Qualify the v4 harness through replay14.
+- [x] Complete and inspect the seven-view native still capture.
+- [ ] Qualify natural path joins, pond shores and wider world art.
+- [ ] Verify camera motion, open-ground travel and measured performance.
+
+[Native09 is preserved as a partial, exit-1 capture](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/southern-meadow-native09/verification.md):
+four of seven photos were saved. The pond daylight delta was **−0.0031587**,
+outside the unchanged **±0.003** limit. Its 908 current source pins,
+812 archives (**333,071,882 bytes**), four PNGs and eight pond boundaries
+were independently checked. Browser and stack closure were verified and four
+ports were clear. The missing supplemental photos remain recorded by fog
+validation; this is not a complete capture or a cleanup-leak claim.
+The original report and study are intact; source and geometry remain qualified.
+
+[Native10 verification](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/southern-meadow-native10/verification.md)
+records all seven PNG hashes and dimensions, exact study/report equality,
+908 current pins and 812 archives (**333,083,799 bytes**) independently checked.
+All four passive daylight alignments completed and released within the original
+15-second batch. Page, GPU and cleanup error arrays are empty. The browser
+closed, launcher exited 0 and was absent, and no stack groups remained;
+owned processes were absent and four OS ports were clear.
+Five unexpected cow404 errors drive the overall exit 1. The 14 dagger-fit
+messages remain a separate, deferred blocker. Both ten-second RAF windows
+completed but remain unqualified; they are not a performance benchmark.
+
+[All seven native10 stills were reviewed](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/southern-meadow-native10/visual-review.md).
+Platform gaps are closed, but the new short, hooked joins still look artificial.
+The pond is smoother but retains a regular oval and uniform wet rim.
+Sparse ground cover, the broad lawn, cove and sky quality remain open.
+[Native08's earlier review](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/southern-meadow-native08/visual-review.md)
+and the failed native09 daylight comparison remain history.
+Cow-placeholder work stays deferred. **Completed still inspection is not art,
+camera-motion, traversal or performance approval. No default is promoted.**
+
+Next proposed ground-cover trial, **not implemented**: use 0.50 m instead of
+0.70 m clump spacing in just one admitted 25 m meadow cell, retaining slender
+blades. This can raise candidate population and associated work by about
+**1.96×** (1,276 to 2,500 attempts); budgets must remain unchanged.
+Compare a fixed-count width trial against the user's fine, overlapping grass
+reference. Wider blades may become coarse strips; denser blades can increase
+raster overdraw. Neither unchanged counts nor passing placement caps establish
+acceptable fragment cost or performance.
+
+The existing [Ameen and Jaime mapping](/Users/lucid/Documents/hyperia/hyperia-implementation/docs/graphics-reference-library.md#user-supplied-portfolios),
+[official Three.js terrain references](/Users/lucid/Documents/hyperia/hyperia-implementation/docs/graphics-reference-library.md#official-threejs-implementation-references)
+and [Bruno world reference](/Users/lucid/Documents/hyperia/hyperia-implementation/docs/graphics-reference-library.md#additional-independently-located-references)
+remain the design inputs. No external code or assets are imported by this work.
+
+## Current priority — WORLD FIRST, 2026-09-15
+
+The user's current direction is **world first; avatar and armor later**.
+This supersedes the earlier next-metal and shape-after-material queues below.
+The material audit is paused: only the isolated, unrun
+[audit script](/Users/lucid/Documents/hyperia/asset-studio/material-reflectance-work01/audit_uv_metal01.py)
+exists; no measured JSON, asset edits or armor-material changes were produced.
+
+The detached shape/tint candidate is retained as an **opt-in partial improvement**,
+not a default promotion or full-world/AAA acceptance.
+Existing controls broaden the cove-head descent and replace three equal ridge
+cones with a dominant shoulder and lower outcrop; the original defaults remain.
+Scoped proofs are **29/29 shape**, **60/60 terrain material**, **16/16 UI**.
+Shape contact checks retain all original limits; the first old-fingerprint
+failure is preserved.
+[Candidate13](/Users/lucid/Documents/hyperia/asset-studio/fine-meadow01/southern-meadow-candidate13.json) **passes 1,158/1,158 across 70 files**, types zero diagnostics, shared/server builds exit0; 175 source pins unchanged.
+[World04](/Users/lucid/Documents/hyperia/asset-studio/fine-meadow01/southern-meadow-world04/receipt.json) passes derivation and separate fresh verification: 186 source pins, 41 manifests (39 unchanged), 35 groves with 29 re-grounded Ys, 14 roads and 21 supports; maximum grove slope **0.3424295592**.
+Fifteen exact resource links and the delivery record are verified.
+[Replay11](/Users/lucid/Documents/hyperia/asset-studio/fine-meadow01/equipped-lighting-replay11.json) passes **200/200 in 27.3 s**, source pins unchanged. Replay10's **198/200** failure is retained; two stale-selector tests were corrected to require v2.
+[Native07](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/southern-meadow-native07/report.json) is terminal **EXIT1**: actual WebGPU, 1280×720, DPR1; all five coastal PNG/HUD captures pass and `coastalCaptureCompleted=true`.
+The cow404 failed-asset/unexpected-console error causes the nonzero exit.
+Fourteen known dagger-fit metadata errors remain a separate blocker, not that
+exit cause; cow-placeholder and armor work stay deferred under WORLD FIRST.
+Page/GPU and cleanup errors are empty; browser/stack cleanup and four empty
+ports are verified, sources unchanged.
+[Independent verification](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/southern-meadow-native07/verification.md) confirms all **811 archives / 302,738,630 bytes** match their hashes, plus the five PNGs, RGB owners, exact HUD restoration and fog checks.
+Scheduling is performed but unqualified: cameras change in both windows and
+population changes post-study, so this is not a controlled benchmark.
+Terrain-preparation completion remains false after the overall nonzero exit.
+[Five-pair visual review](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/southern-meadow-native07/visual-review.md): broader meadow color patches, gentler cove descent and a less repetitive skyline improve the scene.
+The excavated bowl, flat ridge crest, serrated pond, plain paths and sparse
+composition remain. No default, performance, navigation or full-run pass.
+
+Current paint-only follow-up: the selected pond-bank and bank-lobby cores are
+narrower with four asymmetric partial-wear pieces; original route points,
+endpoints, ground and service support remain unchanged.
+[Focused03](/Users/lucid/Documents/hyperia/asset-studio/fine-meadow01/natural-path-wear-focused03.log) passes **16/16**: exact 256-mask positive footprint, bilinear keepouts, connected cores and scalar/filtered asymmetry. Focused01's startup-fixture failure and Focused02's 512-mask rejection are retained.
+Mask storage remains **262,144 bytes**, but segments rise **301→505**; equal mask
+size is not equal CPU/worker or grass cost.
+[Candidate15](/Users/lucid/Documents/hyperia/asset-studio/fine-meadow01/southern-meadow-candidate15.json) passes **1,162/1,162 across 70 files**, zero shared type diagnostics, shared/server builds exit0 and 175 unchanged source pins.
+[Candidate14](/Users/lucid/Documents/hyperia/asset-studio/fine-meadow01/southern-meadow-candidate14.json) remains failed: all tests passed, but four old `Object.hasOwn` typing errors required equivalent test-only own-property calls.
+[World05](/Users/lucid/Documents/hyperia/asset-studio/fine-meadow01/southern-meadow-world05/receipt.json) passes derivation and separate fresh startup: 186 independently checked current pins; all 41 manifests exactly match world04; 35 groves, 18 surface paths, 21 supports and maximum grove slope **0.342429559198712**. Fifteen resource links and [asset delivery](/Users/lucid/Documents/hyperia/asset-studio/fine-meadow01/southern-meadow-world05/ASSET_DELIVERY.md) are verified.
+[Replay12](/Users/lucid/Documents/hyperia/asset-studio/fine-meadow01/equipped-lighting-replay12.json) passes **223/223 across eight harness files in 28.572 s**, exit0, no skips/failures/timeouts; eleven source pins are unchanged and independently rechecked.
+[Native08 verification](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/southern-meadow-native08/verification.md): power connected, v3/world05 terminal **EXIT1**, with all **seven** world PNG/HUD captures complete on actual WebGPU at 1280×720/DPR1.
+All 14 RGB boundaries and seven fog rows pass; roof waits are **45.245/1.354 ms**
+within 1,000 ms, HUD totals **≤4.1 ms** under the unchanged 450 ms limit.
+Study/report match exactly; **908 current pins and 812 archives / 332,963,653 bytes**
+are independently hash-checked. Cow404 causes five unexpected errors and EXIT1;
+14 known dagger-fit errors remain a separate blocker.
+Page/GPU/cleanup errors are empty; browser closed, launcher exited 0 and is absent,
+and four ports are independently clear. Both RAF windows completed but remain
+unqualified because cameras moved and population changed after study.
+[Visual review](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/southern-meadow-native08/visual-review.md): partial progress, **not art-approved**. Rounded/disconnected path ends, blurry shoulders, sparse lawn and regular shores persist. No default or performance acceptance; the **301→505 segment** cost remains unresolved.
+
+Next: continuous path-to-platform joins and meaningful wear, without preserving
+visible green gaps merely to retain an old footprint golden; protect actual
+navigation, collision and support. Pond refinement remains separate.
+The [CPU feasibility experiment](/Users/lucid/Documents/hyperia/asset-studio/fine-meadow01/pond-bank-feasibility.json) ([script](/Users/lucid/Documents/hyperia/asset-studio/fine-meadow01/pond-bank-feasibility.mjs)) reduces reconstructed upper-contour maximum error **0.55610→0.09498 m** at 256 directions on resolution-128 leaves.
+Across two leaves it adds **7,422 vertices, 14,712 triangles and 592,176 bytes**;
+same-level edge error is approximately floating-point epsilon.
+This uses the production assembler/retained sampler but synthetic surroundings,
+zero roads and a diagnostic square proxy—not runtime pond admission or a
+production solution. Coarse-resolution-32 face-cap/bracketing failures remain;
+proper annular refinement, LOD policy, contact, cost and native proof are unresolved.
+Natural paths,
+water/shore contours, terrain textures, varied vegetation, open-ground navigation,
+HUD reliability and measured performance remain open. Keep the existing
+reference library and functional/resource protections; no default promotion or
+full-world/AAA approval is claimed. Native06 evidence below remains historical
+proof of its own scope, not approval of the new world candidate.
+
+## Current verification — native06 RGB day/night evidence, 2026-09-15
+
+[Candidate12](/Users/lucid/Documents/hyperia/asset-studio/fine-meadow01/southern-meadow-candidate12.json): **1,152/1,152**, test-inclusive types zero diagnostics, shared/server builds exit0; **175 source pins unchanged**.
+[Replay09](/Users/lucid/Documents/hyperia/asset-studio/fine-meadow01/equipped-lighting-replay09.json): **198/198**, zero failures/skips/timeouts, exit0 in **28.012 s**, ten pins unchanged; Replay08 remains 197/197.
+Candidate11's typing failure is retained; typing was corrected and exactly two
+cloud files hydrated with byte/hash verification, without settings changes,
+deletions or relocation.
+
+[Native06](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/southern-meadow-native06/report.json) is **EXIT1**, not a complete or approved run.
+[Independent equipped verification](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/southern-meadow-native06/equipped-images-verification.json) confirms **12/12** PNGs, exact identities/fog/RGB owner, paired cameras/canvas, 25 unchanged model pins and phase cleanup; `capturesComplete=true`, `errors=[]`.
+All six day views show warmer, less-cyan skin and coherent bronze: **retain the
+opt-in RGB irradiance candidate; default not promoted**. All six night views
+still have crushed readability. Body, gear and asset material recipes are unchanged.
+
+All five coastal PNGs exist, but the lowland HUD gate legitimately fails
+**467.7 ms > 450 ms**, restoration `after=null`; saved imagery is not completed
+capture proof. Four earlier HUD pairs pass; the pinned negative check is
+**19/19** without weaker limits. Cleanup errors and page/GPU errors are empty;
+browser/stack cleanup passes, four ports are empty and sources unchanged.
+
+**Next:** measure actual UV-owned metal surfaces and trial a shared metal-only
+reflectance palette, preserving cloth/leather, ORM, alpha, geometry and rigs.
+Night/HUD reliability, canonical dagger fit, gear coverage, gameplay/performance
+and the full goal remain open. Uniform lawn, repeated ridge peaks, circular
+pond/hard shore and broad uniform brown cliffs still need substantive world art;
+RGB lighting does not resolve terrain, composition or water acceptance.
+
+## Historical verification — native05 equipped capture, 2026-09-15
+
+Candidate10/world03 source/asset readiness is unchanged; no default promotion.
+Equipped-first capture is implemented in four harness files: focused **44/44**;
+[Replay07](/Users/lucid/Documents/hyperia/asset-studio/fine-meadow01/equipped-lighting-replay07.json) **195/195**, no skips/timeouts, exit0 in **28.656 s**.
+[Native05](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/southern-meadow-native05/report.json) ends **exit1**, but saves **12/12 equipped photos** with the same actor, kit and material identities.
+Natural day phases **0.3518–0.3704**, night **0.1212–0.1382**; both camera/HUD
+cleanups and the minimum eight resumed director frames pass. Equipped
+`capturesComplete=true`, but overall `complete=false` after the coastal failure.
+
+Three coastal photos were saved, then shoreline-wide fails the unchanged
+daylight phase limit: **+0.005759419 > 0.003**. Pond and overview are absent;
+the fog missing-two-images failure remains. Browser/launcher/stack cleanup
+passes, all four ports are empty, page/GPU errors are zero and sources unchanged.
+
+The identified day kit is warm bronze; night is too dark and skin reads cool.
+The earlier pond “blue bronze” attribution is withdrawn: location and silhouette
+strongly support the separate Zamorin NPC; the recorded kit actors were behind
+that camera. This is an identity correction, **not a production color-bug fix**.
+[Environment pixel probe](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/southern-meadow-native05/environment-pixel-probe.json): 12 existing GPU texel reads in 200 ms during the natural between-photo gap; not submitted armor-binding or performance proof.
+Canonical dagger fit metadata, gear fit/coverage, all 260 items, gameplay,
+performance and final world/character art acceptance remain open.
+**Workspace relocation is not done.**
+
+## Historical verification — native04 partial capture, 2026-09-15
+
+Candidate10 freshly rehashes **163/163 source pins**; world03 source/asset
+readiness passes. The stray manifest `.DS_Store` is retained at
+`/Users/lucid/development/hyperia-recovery-20260915-DYoRrz/world03-manifest-finder-metadata01.DS_Store`.
+The coastal capture now selects the candidate-qualified `CompactTerrainMaterial`
+pin; the legacy path still rejects source drift.
+[Replay06](/Users/lucid/Documents/hyperia/asset-studio/fine-meadow01/equipped-lighting-replay06.json)
+passes **194/194**, zero skips/cancellations/timeouts, exit0 in **28.84 s**.
+
+[Native04](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/southern-meadow-native04/report.json)
+actually rendered WebGPU at **1280×720, DPR1** and saved four coastal images.
+It failed (exit1) at the pond daylight comparison: phase delta
+**+0.00387285087 > 0.003**; the other lighting limits passed. No supplemental
+overview or equipped day/night images were captured. The missing-image
+completeness assertion remains recorded; it is not successful full capture.
+Browser closure, launcher absence, stack shutdown and all four port checks
+(3333/5555/9236/57831) pass; page/GPU errors are empty and sources unchanged.
+
+Canonical bronze-dagger fit metadata remains a blocker. No AAA/world-art,
+full-kit, gameplay, performance or production approval is granted. Local free
+space is now over 400 GB; **workspace relocation is not done**. Capturing equipped
+views independently before the coastal scope is a proposal, not implemented.
+
+## Reference-driven graphics work — 2026-09-15
+
+- Current user direction: focus on graphics references and their application to
+  the world. A temporary visible placeholder is sufficient for the unmodelled
+  cow mob; custom cow modelling/export is deferred, not a prerequisite for this
+  graphics pass. Historical failed captures remain unchanged.
+- Historical pre-native04 source-availability blocker (superseded above):
+  82 of 163 candidate10 source/test files remain offloaded despite accepted
+  exact-file download requests. Live `three.ts` is now restored and hash-matched,
+  but core terrain/material/lighting files remain unreadable. No new visual or
+  runtime pass is claimed. See the latest
+  [recovery assessment](/Users/lucid/Documents/hyperia/asset-studio/fine-meadow01/QUALIFICATION.md).
+- [x] Record the user-supplied portfolios/Rainy Worlds, all listed Ameen projects,
+  the official Three.js catalogue and selected primary-source implementation
+  reviews in the [graphics reference library](/Users/lucid/Documents/hyperia/hyperia-implementation/docs/graphics-reference-library.md).
+- [ ] Convert the prioritized composition, ground/vegetation, water, lighting,
+  weather/audio and presentation findings into measured in-game improvements.
+  Catalogue/source review is not visual, performance or launch acceptance.
+- [ ] Verify revision, code/asset provenance and notices before any reuse;
+  preserve canonical terrain, choppable resources, navigation and bounded work.
+
+## Historical pre-native04 coastal-ground checkpoint — 2026-09-15
+
+The read-stall and native-not-launched statements in this checkpoint are
+historical, superseded by the current verification above; old evidence remains.
+
+- [x] The opt-in southern-meadow candidate now blends low coastal ground into
+  irregular mineral soil across albedo, roughness, occlusion and normal channels.
+  Existing cliff, road and pond priorities remain; no terrain height, resource
+  anchor, texture allocation or live/default manifest changed.
+- [x] Main-thread and emitted-worker grass placement now preserve the original
+  seeded proposal/rotation sequence before rejecting newly bare coastal ground.
+  Real initialized terrain/road/retained-grid tests cover candidate/default and
+  coastal/inland paths, including the actual synchronous fallback.
+- [x] [Candidate10 source qualification](/Users/lucid/Documents/hyperia/asset-studio/fine-meadow01/southern-meadow-candidate10.json)
+  passes 1,054/1,054 tests across 63 files, unchanged-config shared typing with
+  all 14 selected test roots, and ordinary shared/server builds. All four commands
+  exit0 without signals; 163 before/after/current source pins and log hashes
+  independently match. Receipt: 95,387 bytes, SHA256
+  `ef5dad4251c85c85dd1d0c2a51804f9a2171803297203e6f37042da4ddbed619`.
+- Candidate08 remains interrupted after the fallback mismatch was discovered.
+  Candidate09 retains its 1,054 passing tests and failed test-inclusive typing;
+  builds did not run. The corrected fixtures retain real work-unit ownership,
+  supported own-property checks and typed private-method access; compiler
+  configuration and runtime behavior were not weakened to pass typing.
+- [x] [World03](/Users/lucid/Documents/hyperia/asset-studio/fine-meadow01/southern-meadow-world03/receipt.json)
+  passes derivation and independent fresh DataManager/World/Terrain/Road checks.
+  All 174 source pins match; all 41 manifests are byte-identical to world02.
+  All 35 groves pass the unchanged slope limit (maximum 0.3424295592); the same
+  29 Y changes, six unchanged Ys and 21 supports remain. Receipt: 100,494 bytes,
+  SHA256 `ac6c0a30fe91dfded53d24fe4c66d392a88f9e6dc9aae90a183a835434c418d7`.
+  Fifteen exact shared-resource links and a separate delivery note preserve
+  original assets; actual launch-asset validation passes. Old receipts stay intact.
+- [x] The optional equipped-avatar day/night harness is implemented for the two
+  actual actors and 14 equipped parts, preserving the five coastal views, both
+  RAF windows and the natural 240 s clock. Focused04 passes 46 checks (43 + 3),
+  both commands exit0 without signals; the historical coastal-fog normalizer is
+  corrected without removing its assertions. This is not full archival replay.
+  [Focused04 log](/Users/lucid/Documents/hyperia/asset-studio/fine-meadow01/equipped-lighting-focused04.log).
+- [ ] Full current harness replay remains unverified. Combined session 85224
+  first reported the historical coastal-fog normalization failure, then children
+  57810/57811 stalled with fd12r open on current
+  `hyperia-implementation/packages/server/world/assets/manifests/items/weapons.json`
+  (47,218 bytes; `compressed,dataless`). The exact tree was stopped after eight
+  minutes; session exit1. The separate full01 attempt stalled on current
+  `hyperia-implementation/packages/shared/src/extras/three/three.ts`
+  (16,826 bytes; `compressed,dataless`) and was stopped after three minutes.
+  These are observed iCloud-offloaded read stalls, not missing/deleted files.
+  Local disk had about 23 GiB available at 98% usage; that is separate from cloud
+  capacity. No recovery, relocation, deletion or global-setting change was made.
+- [ ] No native04/GPU run launched and no new pixels, visual quality, performance
+  or gameplay approval is claimed. Native03's archived sources/images remain
+  historical evidence, not qualification of the new source or day/night harness.
+- [ ] Give the unmodelled cow mob a visible, bounded-cost temporary placeholder
+  through the normal mob lifecycle; verify spawn/teardown and remove the missing
+  asset request at its source. Do not spend this graphics pass on a custom cow.
+  Placeholder integration has not yet been implemented or verified.
+- [ ] The canonical bronze dagger lacks
+  `duelFit` and targets the old avatar; it needs truthful avatar-specific derived
+  fit/binding. The separately injected diagnostic dagger is not that integration.
+- [ ] All world-quality, full-kit, 260-item, gameplay/streaming, performance,
+  endurance and production acceptance gates remain open. Body/rig/weights,
+  original assets, larger-world content and the staged Vite pair are preserved.
+
+## Historical source-isolation checkpoint — 2026-09-15
+
+- [x] Explicit `ASSETS_DIR` now selects the same manifest directory for DataManager
+  and both HTTP prefixes. Missing, unreadable or incomplete explicit sources fail
+  closed without CDN repair or default fallback. Real filesystem/Bun/Fastify tests
+  pass 28/28; scoped format, lint and unchanged-server-config typing pass.
+  [Config/HTTP test log](/private/tmp/hyperia-config-owner-validation-LZyShK/focused04-final.log)
+  · [typecheck](/private/tmp/hyperia-config-owner-validation-LZyShK/typecheck01.log).
+- [x] Runner focused02 passes 137/137 across four files: baseline retention and the
+  new opt-in, real HTTP delivery, archive ownership and bounded source-capacity
+  checks. This is not a positive candidate-world test.
+  [Runner log](/Users/lucid/Documents/hyperia/asset-studio/fine-meadow01/southern-meadow-runner-focused02.log),
+  SHA c80e511655ece78d48a6addff7e5184afbb8fbe70976f850d7c2ff319b20d8c0.
+- [ ] Detached world01 remains FAILED: all 35 grove heights are canonically correct
+  (29 changed), but actual `tree_320_501` slope is 0.358071, above the unchanged
+  0.35 resource limit. A broader 28 m feather passes grove admission but
+  source qualification06 remains FAILED with 1,045/1,047 passing: an old geometry
+  digest mismatch and a first sampled meadow-grade failure of 0.06244649
+  exceeding the unchanged 0.06 limit.
+  [World01 receipt](/Users/lucid/Documents/hyperia/asset-studio/fine-meadow01/southern-meadow-world01/receipt.json)
+  · [qualification06](/Users/lucid/Documents/hyperia/asset-studio/fine-meadow01/southern-meadow-candidate06.json).
+- [ ] The 27 m joint check also FAILS: maximum meadow grade is 0.08249977,
+  above 0.06. The next selected recipe retains the original 24 m feather and
+  changes only southern height 25→25.3 within that meadow descriptor. Its 35
+  actual-source groves reach maximum slope 0.3424295592 (<0.35); six grove
+  heights stay exact and 29 are re-grounded. Pure-band maximum grades are
+  0.04249729 / 0.38596704 / 0.20675804 against unchanged 0.06 / 0.4 / 0.23
+  limits. All 27,913 pure-band samples and 35,496 canonical travel samples are
+  dry. These numeric checks do not qualify retained/native contact or appearance.
+  [Joint alternatives](/Users/lucid/Documents/hyperia/asset-studio/fine-meadow01/southern-meadow-world01/joint-alternatives.json)
+  · [qualification](/Users/lucid/Documents/hyperia/asset-studio/fine-meadow01/southern-meadow-world01/joint-alternatives-qualification.json)
+  · [log](/Users/lucid/Documents/hyperia/asset-studio/fine-meadow01/southern-meadow-world01/diagnostics-joint-alternatives.log).
+- [x] Selected 24 m / 25.3 source checks now pass: focused02 is 26/26 across
+  two files, and candidate07 is 1,047/1,047 across 63 files. Unchanged-config
+  test-inclusive typing has zero diagnostics (712 roots / 2,352 sources);
+  normal shared/server builds pass. All four qualification commands exit0
+  without signals, and all 163 source pins match before/after qualification.
+  These are source/CPU checks, not native contact or visual acceptance.
+  [Focused02 log](/Users/lucid/Documents/hyperia/asset-studio/fine-meadow01/southern-meadow-joint25p3-focused02.log)
+  · [candidate07 receipt](/Users/lucid/Documents/hyperia/asset-studio/fine-meadow01/southern-meadow-candidate07.json),
+  SHA a3fe644dba0e9bd912f429a0ad48e721dcff70db0212c261dc0c0e063aed6627.
+- [x] Detached world02 passes fresh-process DataManager, actual terrain/road
+  startup and all 35 grove admissions: maximum slope 0.342429559198712 (<0.35),
+  14 roads, 25 tiles, nine content owners and 21 canonical supports. Exactly
+  29 grove Y values change; all other grove fields and six Y values are retained.
+  Source-helper verification covers 174 pinned files and all 41 live/candidate
+  manifest files. Content identity is
+  `5a7474ff7364c21df7f31680c176d7c152ffda4c33af0946f1d0e70a098bc5cf`.
+  No services/native/GPU were started; owned CPU children exited and worlds were
+  destroyed. [World02 receipt](/Users/lucid/Documents/hyperia/asset-studio/fine-meadow01/southern-meadow-world02/receipt.json)
+  (100,494 bytes), SHA f97b7781e673bb927981219784fc3eb22a440dc6386bb111d5689c3ac3bdba7d.
+- [x] Prelaunch failures remain recorded, not relabelled: southern-meadow-native01
+  stopped before service launch at source admission; native02 stopped at launch
+  asset validation before game/database/browser startup. Exact four grass-PNG
+  pins and two fixed Vitest/Bun aliases now pass strict source admission.
+  Runner focused04 passes 169/169; subsequent delivery-focused01 passes 7/7.
+  Fifteen exact shared-resource directory links support the detached manifest
+  root without asset copies or manifest/qualification-receipt changes. Actual
+  launch validation passes four areas, 28 resources, 18 NPCs and six station types.
+  [Runner tests](/Users/lucid/Documents/hyperia/asset-studio/fine-meadow01/southern-meadow-runner-focused04.log)
+  · [delivery tests](/Users/lucid/Documents/hyperia/asset-studio/fine-meadow01/southern-meadow-delivery-focused01.log)
+  · [asset validation](/Users/lucid/Documents/hyperia/asset-studio/fine-meadow01/southern-meadow-asset-delivery01.log)
+  · [exact delivery links](/Users/lucid/Documents/hyperia/asset-studio/fine-meadow01/southern-meadow-world02/ASSET_DELIVERY.md).
+- [x] Southern-meadow-native03 completes five actual 1280×720 WebGPU stills;
+  all 41 HTTP manifest responses and first/last browser content identities match
+  world02. Original readiness completes in 19.833 s / 71 observations. Independent
+  verification matches all 902 current pins, 806 archives, five image hashes and
+  all 4,850 RAF rows/derived summaries. Launcher/server/browser cleanup succeeds,
+  all four ports are clear and the isolated database is retained stopped.
+  [Native03 report](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/southern-meadow-native03/report.json)
+  (55,791,440 bytes), SHA d5e5ace6e0b1a0a002f209b1a508ef8cfd0e5f55a77b9f7d27512ce71d2991ae.
+  These are verified capture/delivery facts, not a passing native run.
+- [ ] Native03 exits1: no thrown/page/GPU/cleanup errors, but five cow-404-related
+  console errors and 14 dagger `missing_fit_metadata` errors remain. The cow is
+  genuinely absent, not merely offloaded; the retained Blender/FBX candidate
+  still needs qualified export, quadruped animation/material/scale integration
+  and actual runtime proof. Renaming it or filtering the errors is not a fix.
+- [ ] Performance remains unaccepted. RAF interval spans are 10.000 / 10.0083 s;
+  post-equip p95/p99/max are 25.8/40.8/50.0 ms and post-study 24.9/25.9/108.4 ms.
+  Cold p95/p99/max are 66.4/207.8/300.1 ms. Observed maximum preparation
+  slice/step are 5.1/3.4 ms, exceeding the 2 ms scheduling target; sampling itself
+  peaks at 2.0 ms cold and 0.1 ms in the later windows. Cameras move in both
+  windows and post-study population changes. These are scheduling observations,
+  not same-frame CPU/GPU durations, a controlled speedup or smoothness approval.
+- [ ] The southern short-cliff descent improves, but art is NOT accepted:
+  uniform lawn, repeated rock, cone-capped skyline, dark foliage and artificial
+  pond remain. Native player/agent ground contact, unrestricted travel, motion,
+  water seams, sustained performance and full duel/stream/betting launch proof
+  remain open. No default activation, shape/art/MVP/production acceptance or new
+  commit/push is claimed; the staged Vite pair and historical gates are preserved.
+
+Prior candidate05/native02 checkpoint (2026-09-15): smooth backing overlaps, a wider
+meadow-to-coast transition, and local floor-edge refinement now pass the unchanged
+combined contact test: 35,496 samples, maximum gap 2.03 cm (limit 5 cm), maximum
+normal difference 7.74° (limit 10°). The original 6,756 protected support samples
+remain exact. This is CPU/source geometry evidence, not gameplay or art approval.
+The manifests and grove anchors remain unchanged; the candidate is NOT activated.
+Fresh candidate05 qualification passes 1,047/1,047 tests across 63 files,
+eleven-changed-test-inclusive typing (712 roots / 2,352 sources, zero diagnostics)
+and normal shared/server builds. All 163 source pins independently rehash.
+Assembly, fallback generation and strict retained admission now share resumable
+private preparation with a 2 ms CPU scheduling target, four worker-flight and
+16-request ceilings, and 16 MiB raw-data reservations retained until actual settlement.
+Complete terrain/road/worker-biome leases and real Three reentrancy tests protect
+publication, cancellation and exactly-once disposal. No resolution or contact
+gate was reduced; all three leaves' buffers and 35,496 contact samples remain exact.
+The mixed actual-system CPU case takes 57 slices for two critical leaves, with
+2.652 ms maximum slice and 1.568 ms maximum step; these are not native frame timings.
+Candidate04's test-only readonly-assignment typing failure remains recorded.
+Native staged-preparation02 completes original readiness in 18.398 s / 65 observations
+and both separate 10.008 s RAF windows. It exits1 with no thrown error: coastal
+capture and scheduling-performed are true, but overall pass, diagnostic completion
+and performance approval remain false. The missing cow produces five unexpected 404-related
+errors; fourteen known dagger-fit errors also remain. All five actual 1280×720
+views retain the unacceptable plateau/lawn/pond appearance. Native01's counter
+mismatch remains a failed receipt; focused03 passes 143/143. Three post-study
+freshness checks use the existing one-second policy, exempting only cumulative
+active work, not counts or other owner fields. RAF p95/p99/max are
+17.4/25.1/41.8 ms post-equip and 17.2/25.2/41.4 ms post-study; both cameras move
+and post-study grass instances change 82,710→82,716, so this is not a controlled benchmark or
+speedup. Observed maximum preparation slice/step are 2.7/1.9 ms: the 2 ms target
+is not a guarantee, and slice counters include idle passes. Owned processes and
+ports are clear and the database is retained stopped. Independent verification
+matched all 826 source pins at the time of verification, plus 730 archives, five
+images and 4,786 RAF rows. Those archived native bytes do not qualify the later
+source/harness changes.
+Motion, art, whole-world
+travel, reliability and performance gates remain open.
+[Native02 report](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/compact-cove-staged-preparation02/report.json).
+[Evidence and next action](/Users/lucid/Documents/hyperia/asset-studio/fine-meadow01/QUALIFICATION.md).
+
+## Current world-quality acceptance checklist
+
+Host safety: relocation is conditionally authorized but not performed. The
+2026-09-15 audit recorded about 33.9 GiB of cloud-only logical data and 24.4 GiB
+free; these are dated observations, not current free-space claims. Cleanup
+candidates are flagged only; no deletion or relocation occurred. Backup/residency
+and Git/path cutover checks remain incomplete. See the
+[relocation safety audit](/Users/lucid/Documents/hyperia/asset-studio/WORKSPACE_RELOCATION.md).
+
+These are acceptance gates, not a tally of source tests. All remain open.
+
+- [ ] Natural, connected terrain and coastline; no engineered-looking banks.
+- [ ] Dry detailed ground and worn, irregular paths/service clearings.
+- [ ] Soft overlapping grass, functional woodland groups and convincing understory.
+- [ ] Coherent foliage, lighting, sky, shadows and water.
+- [ ] Seam-free moving ocean/ponds and stable terrain/water detail transitions.
+- [ ] Real player and agent travel across open ground, shores and every service.
+- [ ] Avatar, equipment and resource rendering without the known content errors.
+- [ ] Matched WebGPU motion, frame-time, loading and endurance acceptance.
+- [ ] Graceful shutdown, restart and reconnect with no forced-cleanup pass.
+
 ## Natural compact world — scene-wide quality pass, 2026-09-14
+
+### Current execution order
+
+1. [x] Source-verify the rigid local-matrix candidate at five owned grass/terrain/water sites: 40/40 focused checks, test-inclusive types/lint/format and 961/961 shared checks across 60 files plus normal shared/server builds pass with 160 pins held. World-matrix propagation remains enabled; no native or measured performance benefit is established.
+2. [x] Obtain a fresh complete-world baseline before the terrace decision: init-trace06 passes the unchanged lodge/island readiness checks and produces five actual WebGPU views. The earlier failures remain recorded and their exact causes unproven; this closes the useful-view prerequisite, not repeatable startup reliability.
+3. [ ] Replace oversized campus-wide flattening with exact functional terraces and a connected rolling hinterland. Candidate05 remains unchanged and unactivated: the strict 35,496-point contact gate (2.03 cm maximum gap; 7.74° normal difference), 1,047 shared checks, types/builds and 163-pin preflight pass. Native02 now supplies live-profile readiness and two-window RAF evidence, not a controlled speedup or performance/visual pass. Next: qualify a detached candidate manifest with matching HTTP/server/client content identity and 29 re-grounded grove anchors, then capture the candidate and prove real open-ground travel before activation or visual acceptance.
+4. [ ] Review moving water, terrain transitions, grass/material stability and measured frame times before accepting visual quality or performance. Retain the known avatar/resource errors as launch blockers.
+5. [ ] Complete the separate asset-intake gates: export/integrate the missing cow's blend/FBX candidate with its real six-clip lifecycle, and qualify normal-avatar dagger attachment through duelFit. Neither the legacy nor authored dagger currently has that approval; changing paths, stamping metadata or removing spawns is not a verified fix.
+6. [ ] Establish repeatable startup/loading reliability; one successful traced run does not explain or close the earlier intermittent navigation/environment waits.
+
+The current source status follows. Older receipts below are retained history,
+not additional current tasks or evidence that an open visual gate is complete.
+
+- [x] **Rigid local-matrix candidate source verified, benefit unmeasured:** five owned static-transform sites are changed (grass1, terrain1, water3), with world auto-update preserved. This is distinct from the unsafe blanket scene-matrix reuse proposal; animated bow/descendant propagation is not disabled. Focused 40/40, test-inclusive noEmit, lint/format and the later 961/961 shared regression checks across 60 files plus normal shared/server builds pass. All 160 source pins hold; all three qualification commands exit0 without signals. No native acceptance or performance improvement follows from source tests. [Qualification](/Users/lucid/Documents/hyperia/asset-studio/fine-meadow01/rigid-local-matrix-qualification01.json), SHA 28058f0f7f004955186a74896db9b5868bb18896abeb2d6e746ebb2c900a2773.
+
+- [ ] **Late-visual01/02 FAILED before rendering; cause of navigation stall unproven:** launch asset validation fails before any game server/database/browser or images, with 808 pins held. The offloaded 81,240-byte bow-run animation is restored byte-exact; a subsequent 53,120-byte 2h-walk read times out, then that existing asset is also resident/byte-verified. The full validation retry now passes (four areas, 28 resources, 18 NPC definitions, six station types); late-visual02 subsequently exits1 at page.goto's 60-second DOMContentLoaded deadline, with 808 pins held and no renderer device/images. Its six cleanup errors remain recorded; the server closes0 with actual ACK, but the client group needs SIGKILL and the wrapper exits1. Owned processes are absent and the isolated database is retained stopped0/Pid0/not OOM. Current procgen originals are offloaded again; this does not establish the timeout's cause or a rendering/FPS failure. [Late02 report](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/compact-cove-late-visual02/report.json), SHA 3451a43deb1d11e668add0306056d3121ed54c3bdd33c0bef959776d9cf63268. Late-helper 10 focused plus 2 closure checks are diagnostic only: the 180-second observation allowance does not waive the original 30-second readiness failure. The failed report's launcher/missing-delivery cleanup assertions remain recorded, not rendering or texture-quality failures. [Retained report](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/compact-cove-late-visual01/report.json), SHA ea0e681f713e59c30370041552c875ebd6c75bcec03366f849481066309264f8.
+
+- [x] **Normal-player movement06 PASS — short real-input scope only:** one canvas click moves the same normal local test-mode player 3.5355339059 m, with six samples, two intermediate positions and zero arrival error (1/1, CLI0). The recorded strict readiness predicate succeeds with terrainTimedOut=false; those flags are not a separate serialized snapshot. Terrain initializes 121 tiles; before/after receipts confirm native non-fallback Apple Metal-3, connected player and registered physics. All eight source pins hold. Five known cow errors remain; duplicate-Three/no-mesh warnings are zero. Actual ACK/server0/client143/Chrome0, no forced stop, absent owned processes, clear ports and a retained stopped database establish this run's cleanup separately. Whole-island walking, art, performance and production approval remain open. [Independent verification](/Users/lucid/Documents/hyperia/asset-studio/fine-meadow01/normal-player-movement06-verification01.md), JSON SHA 2048973e693045c28549c00d1a33dbbc3543b34ce5aec9dc41e6d72a2170497c.
+
+- [ ] **Movement04/05 failures retained; delivery and host interruption distinguished:** the actual Vite/Three identity correction removes the earlier duplicate-Three/no-mesh warnings (movement03: 1/58; movement04: 0/0) and tree meshes appear, but movement04 still fails terrain readiness and needs client SIGKILL. Its captured four libuv workers are read-blocked, with 35 procgen original-source descriptors; Finder Download Now recovers 13 dataless originals and the 118-source closure is resident/hash-checked. Impostor embeds sourcesContent and needs no extra hydration. This is current I/O evidence, not proof of movement03's historical cause. Movement05 then delivers all nine sky images in 13.280–25.831 ms and all 118 procgen modules, but a verified 439-second host sleep interrupts the run; its renderer deadline after wake is not assigned a new terrain/renderer regression. Movement06 passes on the same sources with a bounded caffeinate guard, not changed power settings. [Residency receipt](/Users/lucid/Documents/hyperia/asset-studio/fine-meadow01/normal-player-movement04-source-map-residency01.json) · [sleep evidence](/Users/lucid/Documents/hyperia/asset-studio/fine-meadow01/normal-player-movement05-power-events.txt).
+
+- [x] **Loading diagnostic01 analyzed — no ready-world or performance approval:** all 817 pins/721 archives hold; 15/15 focused, corrected 2/2 closure checks and syntax pass. The run remains CLI1/readiness/art/study=false, with zero art captures and one loading-overlay PNG. The instrumented changing scene records 426 frames over 9.962 seconds: GPU median 25.952 ms/p95 36.176 ms, CPU-tick median 19.1 ms. Sampled rendering traversal/submission dominates; grass progresses with frame cadence (completed 17→61, running 106→62), with empty dispatch/result queues and stable job ownership, not a stalled iterator. Inclusive CPU groups overlap and do not establish material-specific cost or settled FPS. Blanket matrix reuse is held UNSAFE: a real bow render hook mutates a group without propagating its descendant transforms; no such optimization is implemented. Nineteen known content errors remain. Clean diagnostic/owned teardown does not change the readiness failure. [Bounded analysis](/Users/lucid/Documents/hyperia/asset-studio/fine-meadow01/loading-diagnostic01-analysis.md); report SHA f248989e6650679e311241050726badc5b471352d7cd2eb9faaf56559eb0c6fb.
+
+- [ ] **Native art04 FAILED before images with grass work unfinished:** readiness stops after 30.002 seconds/104 observations; running jobs decrease 112→67 and completed jobs increase 11→56. The last published/current active-slice totals differ (3004.5/3008.2 ms), but work is still unfinished; this is not assumed to be merely an observer bug or grounds to relax the gate. All 814 source pins/718 archives hold; zero images, 19 known content errors and zero page/GPU errors remain. Actual terminal acknowledgement and server0/client143/launcher0 closure have no forced/residual groups; clean cleanup does not turn the study into a pass. The explicit opt-in helper subsequently passes 15 focused tests and corrected 2/2 closure checks; diagnostic01 collects loading-only evidence but still fails readiness. It is not a performance or art pass. Investigate cold-load throughput before art05, then review terrain before terrace changes. Report SHA 060e764693efab9858705cb1676587eaf87af024f7d44766b47c6d980d66cf75.
+
+- [x] **Native movement test bootstrap source checked; movement06 is separate native proof:** the real-file entry uses the central exact Node22.23.2 policy. Three focused actual-worker/preflight tests, client noEmit, lint/syntax and discovery of one native/three default tests pass. Movement02 does not repeat the inherited --input-type worker restart failure; production AgentBehaviorBridge and agents remain unchanged. These source/discovery results do not qualify normal-player movement.
+
+- [ ] **Normal-player movement03 FAILED after actual player spawn:** the prior worker/require startup errors do not recur, but the later world-readiness gate at navigation.spec.ts:171 times out after 120 seconds (CLI1). The retained image shows normal HUD with a black world/tiny horizon props, not acceptable terrain or walking evidence. Server exit/close0 and its real acknowledgement plus Chrome0 are verified; the client requires Playwright SIGKILL after five seconds of SIGTERM, so teardown is not fully graceful. Exact owned processes/groups/ports are clear and the database is retained stopped. CoreUI's 20-second terrain timeout sets terrainTimedOut and terrainReady true and stops polling, so the HUD is not proof of terrain readiness. Environment startup waits for unresolved sky delivery before Terrain.start; a later same-config HTTP probe establishes the real import allowlist and serves all nine sky images plus procgen with matching hashes in 258–604 ms. This does not explain the earlier 93-second stall; the underlying cause remains unproven. Investigate it and client shutdown without weakening readiness. Console SHA 6e7b20a6efd519e168e9fb234c925894e17a7b7c2977d83b19060ff8b62eb986.
+
+- [ ] **Normal-player movement02 FAILED naturally during browser loading:** CLI1 follows the unchanged 120-second player wait. The browser reports require is not defined from buffer-shim's deep buffer/index.js import; Vite noDiscovery only optimizes the bare buffer entry. The one-line bare-buffer correction now passes its actual Vite-resolver regression, client noEmit and lint/syntax/format; fallback behavior is unchanged. Movement03 gets past real player spawn, then fails world readiness without walking proof. Original trace/blank failure PNG remain and no walking is proven. Owned browser/server close0 with real shutdown acknowledgement, client143, no forced cleanup and stopped retained database are separate cleanup evidence. Console SHA 1632c9a87cc433a9e15a3c41f5ec879b09d6c623a3a9be279911da822cb0a1b1.
+
+- [ ] **Normal-player movement01 FAILED before movement proof:** the test launch leaks --input-type=module into a real AgentBehaviorBridge worker, causing ERR_INPUT_TYPE_NOT_ALLOWED restart loops. Root interrupts at about 67 seconds (CLI130); the trace and blank failure PNG remain, not usable world or walking evidence. Owned teardown records real shutdown acknowledgement/server0/client143/Chrome0 with no residual processes. The real-file test bootstrap now passes actual worker-inheritance checks without changing AgentBehaviorBridge or disabling agents; movement02 does not repeat this worker error but fails a separate browser dependency path. Console evidence SHA 321fbc91ce8e8acdf6b32ef631d42d00eec6d24e8fe8a16dc7d9042781845d6f.
+
+- [ ] **Retained native art03 FAILED before any images; source repair now verified:** the actual deployed output handler throws ReferenceError for the stale STRUCTURED_SHUTDOWN_EVENT_PATTERN at scripts/duel-stack.mjs:786; the 60-second agent-VRM wait is a later failure, not terrain-art rejection. The report retains 803 source pins/718 archives unchanged, zero captures, launcher exit1 and no retained terminal completion/close. Browser closure and the subsequent owned-process/port/database cleanup are verified separately, not a graceful-run pass. The remaining reference is corrected and the actual-handler real-child regression passes 23/23, plus syntax/lint/format; full qualification12 now passes and art04 subsequently exits cleanly but fails grass readiness before images. The Mac is now unlocked. No new visuals, walking or performance acceptance. Art03 report SHA ee88b28cad7bc70f1b40eabb5ca52be098a7412f8f371537ac89b5beda897df4.
+
+- [x] **Previous broader qualification12 PASS; subsequent scopes recorded separately:** 958/958 shared tests across 60 files, shutdown 26/26, launcher 23/23, packing 9/9, three package typechecks, same-config fourteen-test typing and normal shared/server builds pass. All twelve commands exit0 without a signal; all 156 source pins independently rehash exactly. Its two movement configurations were discovery only. Later bootstrap, buffer and Three/Vite corrections have separate focused evidence; normal06 now passes the narrow actual-input movement test above. These later changes are not retroactively covered by qualification12. The failed art/earlier movement receipts remain intact; no new art, whole-island travel or settled-performance acceptance follows. Receipt: asset-studio/fine-meadow01/coastal-sculpt-12-source-qualification01.json, SHA e02847d28d404ae8b4c0cb0bf91ac88633af550f350d98c66d41fc6f5c81b2e7.
+
+- [x] **Previous combined source qualification11 PASS; native acceptance remains open:** 958/958 shared tests across 60 files (zero failed/pending), shutdown 26/26, launcher 22/22, packing 9/9, three package typechecks, same-config fourteen-test typing and normal shared/server builds pass. All 156 source pins independently rehash exactly. Both movement configurations are discovered only, not executed. The new arena-datum prerequisite is source verified; terrain and world-area manifests are unchanged. This proves its captured source only: resumed art03 exposed an uncovered deployed launcher branch, subsequently corrected and requalified in qualification12. The Mac/Git residency blockers are resolved, but no new commit, appearance, movement, performance or runtime PhysX approval is claimed. Receipt: asset-studio/fine-meadow01/coastal-sculpt-11-source-qualification01.json, SHA 565a8bfbd13c1b531f95617c431abc09338aada738bc4a7c02ef0ae77b3d006e.
+
+- [x] **Arena floor datum prerequisite complete; terrace authoring remains open:** strict optional arenaFloorDatum and pre-registration admission preserve legacy behavior when omitted. Focused03 passes 12/12, including unchanged floor/collar/solid/mesh/return contracts in actual test worlds and 340 nearby Float64 samples. Focused01's stale 18-zone expectation fails against the actual 19-zone lodge fixture and remains recorded; the corrected named-lodge assertion does not remove a zone. No live campus grade or terrain recipe is released. Native closure adds only the direct world-area loader: the focused closure test passes with 803 pins, 718 archives and the unchanged 11 dynamic pins (814 total). Historical captures and guards remain intact.
+
+- [x] **Previous combined source qualification10 PASS; native acceptance remains open:** 940/940 shared tests across 58 files (zero pending), shutdown 26/26, launcher 22/22, packing 9/9, three package typechecks, same-config twelve-test typing and normal shared/server builds pass. Both movement configurations are discovered only, not executed. All 147 source pins independently rehash exactly. The pipeline's 81 focused checks include 15 historical trace/byte/cancellation cases; numerical code and budgets stay unchanged. One matched diagnostic profile pair shows pipeline self samples 406.210→193.875 ms, but does not establish a causal/stable speedup or all-hardware performance. Qualification08/09 remain failed historical receipts, not the latest build status. Native art03/movement await the locked Mac; Git remains separately blocked. Receipt: asset-studio/fine-meadow01/coastal-sculpt-10-source-qualification01.json, SHA a7047b1e2acd0f64258c5b55789c99f357f80645a0018cd423fdc7a507f34da1.
+
+- [x] **Broad asymmetric lowland candidate, source scope only:** 82 focused checks pass, including actual canonical/emitted-worker agreement and historical recipes; test-inclusive types, lint and format pass. The 57 m descent has a 24 m full-width center, not a road-only restriction. Across 11,866 route/area probes, retained-mesh gap is at most 0.0392628212 m, face grade 30.83914602% and normal difference 4.288987° with dry corners. The sampled 1,061 m² terrain-only region is connected without diagonal corner cutting. The expanded 22,442-point bank grid reaches 0.2984605668 m, below 0.3 m only for that sampled grid/detail level; the older shoulder's 0.316533 m failure remains unchanged. Checked service/resource anchors are held. Actual populated travel, appearance and performance remain open. Evidence: asset-studio/fine-meadow01/compact-cove-lowland-focused02.json.
+
+- [x] **Qualification08 failure diagnosed; focused correction verified:** the full run remains FAILED at 924/925 across 58 files. Its sole failure assumed one of twelve radial first-shore crossings would intersect the new gentle lowland. Actual TerrainSystem sampling instead finds the manifest-driven centerline at X 442.9134491083, Z 489.0253528999, height 19.0375 m: slope measure 0.02825098 and soil weight 0.61051495. A named thirteenth transect now covers this coast while preserving all twelve original rays, material/ramp assertions and thresholds. Focused material checks pass 53/53; lint and format pass. Test SHA f90c581a5602aa9ca960f3ae7e7441b1cb5aec302a9c71b9211c014588cbf120. This scalar diagnosis is not visible-soil or native art approval.
+
+- [ ] **Historical qualification09 failure retained; native gates remain open:** that serial run remains 922/925, with two real grounding jobs reporting failed_budget/active_cpu at 250.111753 ms and 250.100298 ms (current inputs/regions, no publication). Its separate station-boundary lifecycle test also reports no expected upload; the historical cause is still unproven. Following the pipeline correction, fresh qualification10 passes without increased budgets or changed populations. This does not rewrite either failed receipt. Real walking, moving/mip behavior, shutdown reliability and CPU/GPU cost remain independent gates. Evidence: asset-studio/fine-meadow01/coastal-sculpt-09-serial01.json.
+
+- [x] **Rock antirepetition candidate implemented and source checked:** each rock plane now uses the existing continuous paired projections with matching packed-map gradients and correctly decoded normal frames. Albedo uses a bounded mean-centered contrast approximation, not exact histogram preservation. The pinned source mean and packed texture identity remain independently checked. Six maps remain, but surface reads increase explicitly from 14 to 20; native appearance, moving/mip behavior and GPU cost are NOT approved. Node22 focused checks pass53/53; scoped lint/format and shared-config test-inclusive noEmit pass. Retained failures are Bun's three data-URL import errors and two subsequently corrected test-only array types. Evidence: asset-studio/fine-meadow01/rock-antirepeat-focused02.log and rock-antirepeat-test-noemit02.log.
+
+- [x] **Retain bounded lifecycle output at the actual launcher filter, source checked:** the launcher now forwards exactly `server-shutdown-stage` and `server-postgres-stop-child` alongside the two existing terminal names. Other logging modes, process deadlines and terminal-ACK parsing remain unchanged. All 22 actual-child/lifecycle tests pass; a real child holds terminal completion until the test explicitly permits it, proving progress diagnostics cannot stand in for the completion record. Initial 21/22 failed on the test's mistaken null-versus-throw parser expectation; the strict parser was not weakened. Formatting, scoped lint and syntax checks pass. The next full native run must still establish that these rows survive into the saved launcher log; art02's original missing rows remain missing.
+
+- [x] **Earlier scoped checkpoints pushed; Three fix only STAGED:** normal-hook lifecycle/launcher commits 9bc6e850ca9684a1f041a8d250f6910aa4831bcb and 27fa7be9bcebed293e06d593234d26356879f099, plus the two-file buffer checkpoint ea43f5881c52d1961ff71d0edf91b6c8dbc25ea5, are verified on origin codex/sol-duel-stream-launch under dreaminglucid. The prior count-lines hydration preserves its exact HEAD blob and mode. The later Three/Vite checkpoint attempt terminates without a commit after cloud-residency reads; HEAD remains ea43f588 and only vite.config.ts plus its class-identity regression are staged, not committed or pushed. No hook-backup stash change or owned Git process/index lock remains. This workspace's iCloud residency is a host condition, not a game requirement; relocation is now conditionally authorized but held at the documented workspace safety gate; no move has been performed. Outstanding navigation/world work is not claimed committed.
+
+
+### Retained evidence history — not the current task queue
+
+- [x] **Fresh combined source qualification07:** 912/912 shared checks across 58 files, 26/26 shutdown checks, 20/20 real launcher checks, packing 9/9, all three package typechecks, explicit same-config ten-test shared typing and normal shared/server builds pass. All 142 pinned inputs independently rehash exactly. The stricter movement test is discovered/typechecked, not executed. Source receipt SHA e290a10013f1174b93bede6f50c993a11d56748aab53d10e66ae00cf3981677c. Four-view external checks pass 179/179 plus focused 10/10; native art02 now completes its scoped four-view capture, not overall or visual acceptance. Western shoulder is provisional: whole-bank mesh error improves 0.632388→0.316533 m but the desired 0.3 m target remains OPEN; strict walking-route limits remain unchanged and pass.
+
+- [x] **Western-shoulder art02 four-view evidence complete; overall failed and not visually accepted:** actual low/wide/bay/pond WebGPU 1280×720 stills pass current field/filter/shader, installed common-XZ water topology, six-texture terrain material, pond, approximate daylight and restoration gates. All 810 current source pins, 714 archives and four media hashes independently verify; service JSON matches the embedded report. Root and capture review provisionally retain a broader, less sheer shoulder only. Hard grass/rock shelf breaks, concave cliff walls, repetitive rock, uniform lawn and dark foliage remain; the pond's circular dark rim is still artificial, not a newly diagnosed regression. Completed grass-agent independent review agrees: low/pond views are unchanged, wide/bay improve, and retention stays provisional, not art approval. The report retains passed=false/studyPassed=false and all 19 cow/dagger errors; page/GPU/cleanup errors are zero. No motion, cost or normal-player walking was performed. Report SHA a1232e7c27889b9ea77bfcefc5338dae7530aae551b0fdc026a060de328a81e8; evidence: asset-studio/fine-meadow01/cove-surface-art02-independent-verification.json (SHA 12bf9c3b6cc20207d2b2c7bff6dc4950b3e5303f6fa708588cb33a1940ce13a5). Qualification07/art02 cover their captured bytes only; subsequent lowland work needs fresh qualification. The current Git checkpoint remains pending, not newly pushed.
+
+- [ ] **Close shutdown diagnosis and retention, not just one successful exit:** art02 actually closes server0/client143/launcher0 in 835 ms without forced or remaining groups; owned processes/four ports are clear and the exact isolated database remains stopped/exited0. This is a clean single run, not a fix for art01's intermittent hang. New server-stage and Docker-child rows are filtered by the launcher's errors-only/structured-event forwarding policy, so actual stage timing and the previous blocked call remain unknown. Preserve both runs and add narrow exact-event retention before claiming diagnostic coverage in native capture; do not widen deadlines or hide forced cleanup.
+
+
+- [x] **Normal-player terrain focus source correction:** admit single-root water only when the complete compact island and 20 m follow-camera margin fit one existing 1,600 m root. Large/straddled worlds retain their previous nine-root behavior; no camera clamp, road-only routing or terrain-resolution change. Prioritize the actual local player while retaining other content centers. Focused real-owner tests pass 19/19; same-config shared noEmit including the new test, lint and format pass. Native normal-player shore/off-road walking and water transition performance remain open.
+
+- [x] **Remove false-positive movement-test success:** the existing navigation test now requires an actual visible terrain click, more than 1.5 m displacement, destination arrival and intermediate position samples. Projection uses the current ground/camera/renderer and rejects hidden or off-screen targets. It no longer guesses movement APIs, uses a zero-height target or passes merely because controls/network exist. Client noEmit and Playwright discovery pass; scoped lint has zero errors and two pre-existing warnings outside the edited helper. Native execution is still outstanding. Evidence: asset-studio/fine-meadow01/actual-canvas-movement-source01.json.
+
+- [x] **Instrument the unresolved shutdown failure:** bounded fixed-stage entry/exit and owned Docker child lifecycle records preserve existing timeouts, signal handling, errors and final process-exit behavior. Final focused checks pass 26/26, real launcher shutdown checks 20/20, test-inclusive server noEmit and scoped lint/format pass. This is diagnostic coverage, not a fixed or gracefully closed native shutdown claim.
+
+
+- [x] **Combined four-view native study completed; art rejected and overall run failed:** compact-cove-surface-art01 captures actual low/wide/bay/pond WebGPU images. Root and independent review find clearer cliff detail and less artificial cyan edging, but reject the new long, straight terrace as an engineered-looking shape regression. Uniform lawn, repetitive cliffs and cone-like hills, dark tree bands and angular shore transitions remain. The unchanged pond shows no clear new defect. The study passes actual field (251 GPU points; max error 0.001220703125), current water ownership (52 leaves/50 chunks, ready revision 1) and six-loaded-map material checks. Overall passed=false: 19 known cow/dagger content errors remain and server shutdown requires SIGKILL. Four ports and all owned processes are closed; isolated database is stopped and retained. Report SHA 4310750c7ccb4dcba7335a8005df89252f07f06fa634cfd79f3da3b53bed31e6; original four media independently rehash exactly. Still images do not qualify motion, LOD transitions, walking, cost or stability.
+
+- [ ] **Remove the cove's engineered terrace:** trial one broad curved western shoulder, up to 24 m instead of the present 6 m blend, with the inner edge and tested northern approach held. Validate the expanded actual support and halo, worker parity, unchanged anchors and retained terrain triangles before another native comparison. This is a new source candidate, not a visually accepted sculpt.
+
+- [ ] **Normal-player coverage and shutdown closure:** qualify compact-only single-root admission against the entire island and camera margin, prioritize the real local player without dropping other residency centers, and verify actual off-path canvas-click walking. General/straddling profiles retain their multi-root behavior; no movement restrictions. Diagnose the failed server shutdown using actual lifecycle evidence, not a longer timeout or a hidden forced-stop pass.
+
+- [x] **Combined source qualification06 complete, native approval still open:** 897/897 tests across 57 files, packing 9/9, all three package noEmit checks, an explicit same-config program including all nine changed/new tests (709 roots, zero diagnostics), and normal shared/server builds pass. All 129 source pins hold in-run and independently rehash exactly afterward. Scoped lint/format pass. Earlier interrupted cloud reads, the 895/897 old-profile failures and test-typing diagnostics remain recorded; no assertions or compiler settings were weakened. Source receipt: asset-studio/fine-meadow01/coastal-sculpt-06-source-qualification01.json (SHA df8bd7c9a8b9ccac6c1bbe0f111895dceecf8dadcee557020e5a6b28894fceb6). The combined four-view native harness separately passes 179/179; its real capture is next, not yet visually approved.
+
+- [x] **Local client residency recovered, no behavior rewrite:** the exact 249-file tracked batch restores 14,675,222 committed bytes with every original cloud placeholder preserved. Earlier dependency recoveries and failed captures remain recorded. One unused generated duplicate is reversibly quarantined outside the client scan, not deleted. HTTP probe07 serves both normal/streaming pages and exits gracefully after SIGTERM (no SIGKILL, no blocked reads, 1.853 s total); its owned process/port are independently clear. Evidence: asset-studio/fine-meadow01/cloud-residency-recovery06.json and cloud-residency-recovery07.json.
+
+- [x] **Accessible east-bank cove implemented; source qualification only:** the validated profile, canonical terrain, actual emitted tile/quad/grass workers and live manifest now share the bounded five-knot apron. Final focused/historical checks pass 58/58, same-config test-inclusive noEmit, lint and formatting pass. The unchanged 3 m approach covers 3,768 samples; actual retained terrain has maximum height gap 4.50 cm, face grade 38.49% and normal difference 5.27°, with dry containing-triangle corners. Initial mesh grade 40.31% failed the unchanged 40% target; widening only the existing north/south feather from 18 to 20 m corrects it without changing bounds, route, resolution or limits. Nearby grading, paths and resource/grove anchors are preserved. Native walking and visual acceptance remain open.
+
+- [x] **Live matching water edges implemented for the streaming viewport:** dry-inclusive installed terrain ownership drives bounded water staging, reuse, complete publication and eight-ring ocean continuation. Current focused suites pass 31/31, test-inclusive shared noEmit, lint and formatting pass. Depth-three subdivisions change explicitly from 12 to 16 to share the 6.25 m lattice; no free-cost claim. Earlier failed tests remain recorded. This currently covers compact single-root streaming terrain only; normal-player multi-root coverage, displaced native seams, transition motion and measured cost remain unqualified.
+
+- [x] **Slope-aware coastal material passes current source regression:** CPU and TSL remove overhead-projected sediment from steep triplanar rock with the same smooth geometric ramp. The post-cove 47/48 failure is retained; the corrected test requires both real gentle and steep samples while preserving independent exact ramp/channel assertions. All 48 current material checks pass within combined regression03: 897/897 across 57 files. Two old live-profile equality tests now independently require the exact approved apron; historical terrain fixtures remain unchanged. Dry roughness, wetness, grass eligibility, geometry, six maps and fourteen texture samples are held. Actual appearance, normal-map shimmer and rock repetition remain open.
+
+- [ ] **Combined native cove/surface/water review:** standalone opacity-only art is deferred, not accepted. A separately named combined-art scope keeps the four saved camera poses but measures current terrain/clearance and the new actual water topology; old baseline/opacity contracts stay strict. First review actual low/wide/bay/pond images, then qualify real off-path walking, water-edge transitions, motion, CPU/GPU cost and sustained behavior. Four stills alone cannot close the latter gates.
+
+- [ ] **Keep the entire compact island freely explorable:** the cove is a tested local approach, not permission to funnel agents onto paths. Verify normal-player ocean ownership across the whole island, shore access, resource/service access and walking across open ground. Current stream-only seam integration does not close this task.
+
+- [x] **Five pre-browser opacity failures preserved and startup dependency recovery completed:** art01–05 produce no browser, image or GPU receipt. All retain their failed reports and independently verified source archives. Earlier HTTP probes02–06 still fail forced shutdown; later probe07 independently passes both HTTP delivery and graceful cleanup. These are local startup facts, not rendering or performance acceptance. Evidence: asset-studio/fine-meadow01/coastal-opacity-art-startup-recovery01.json, coastal-opacity-art-startup-recovery02.json and per-recovery receipts.
+
+- [x] **Coastal technical capture complete; appearance rejected:** candidate05 completes four native WebGPU 1280×720 stills, three decoded clips, two cost windows and exact 803² R16F upload/filter checks (1,289,618 bytes; 251 GPU samples, max error 0.001708984375). All 790 source pins/694 archives/seven original media verify; actual single fragment lookup and unchanged pond control pass. Both reviewers reject the conspicuous cyan cliff outline; uniform steep banks, repetitive cliff texture and green water-grid cracks persist. No visual milestone or performance acceptance. Low-view CPU p95 29.2 ms/max 111.1 ms and GPU p95 15.991 ms; low triangle count varies. Bay CPU p95 12.7 ms/max 23.8 ms; the old bay tail did not recur, but its cause remains unresolved. Zero page/GPU/cleanup errors; 19 cow/dagger errors still fail the overall run. Owned browser/services closed, four ports clear, exact DB stopped. Evidence: asset-studio/fine-meadow01/coastal-water-candidate05-verification.json; report SHA457891866ae1cb7ab3fe1098b613e47f893c1ab70fe05309963161385d743ad0.
+
+- [ ] **Remove the painted-looking water tint before retaining the field:** opacity-only candidate restores the exact legacy ocean-color argument while retaining depth-driven contact/transparency. Source qualification04 passes 760/760 across 48 files, packing 9/9, three package type checks and shared/server builds on 106 held source pins. Its standalone early-art capture is now deferred into the combined cove/surface/water review, not approved. Keep actual upload/filter, shader/pond/ownership and photo-lighting checks; label motion/cost unperformed in the early-art path. Do not repeat a full performance pass for an appearance already rejected. Then integrate natural cove shaping and live watertight water ownership.
+
+- [x] **Neighbor-edge source checkpoint pushed, not a live seam fix:** complete dry-inclusive partition planning and its 27-test suite are committed as f91173a3aa13561010f846c83bd9f547b7d544e7 under verified dreaminglucid identity. Lint/format, shared noEmit and explicit test typechecking pass. It rejects holes/overlapping transition parents and plans bounded matching edges. The utilities were unimported at that checkpoint. Current live single-root integration is recorded above; normal-player coverage and native displaced-seam/cost review are still required.
+
+
+- [ ] **Identify the actual stream-boot subgate:** candidate04 restores native device creation (1.7 ms), keeps all nine terrain queues empty, and completes terrain/grass/field readiness; field 1.0854 s elapsed, 980.1 ms synchronous, 1,266 slices/max 3.6 ms. The subsequent 30 s boot-null capture wait fails around 85 s after navigation, before the production 120 s boot deadline. The screenshot's 100% is asset progress, not proof of all streaming readiness. Existing receipt lacks boot/health/scene subgate values; retain bounded passive diagnostics before retry, not a guessed timer fix or hidden curtain. Report 89359ad49485e5dcc4092defab7e4f54f1b666c11f8d0b9555420c8b6dc172cc remains failed; no coastal media/GPU comparison. All 787 pins held during run, 691 archives and 106 production pins independently rehashed; zero page/GPU errors, 19 known content errors, one missing-media assertion. Owned browser/services closed, four ports clear, exact database retained stopped.
+
+- [x] **Small reviewed source checkpoint pushed:** conforming water-grid geometry and its 27-test suite only, commit 6e8a0def2ab1f820280dc197b274c94624de9a56 on codex/sol-duel-stream-launch. Author and committer verified as dreaminglucid (76927280+dreaminglucid@users.noreply.github.com). No runtime integration or visual acceptance; coastal runtime changes and unrelated work are excluded from this commit.
+
+
+- [ ] **Close intermittent native WebGPU startup before launch:** candidate03 fails the unchanged 60 s renderer-readiness gate before terrain or coastal study. Its actual requestDevice remains pending 59.314 s while 5,346 visible/focused RAF callbacks continue (p95 gap 18.3 ms, max 34.2 ms); cause is not established. Zero page/GPU errors, four cow-loading errors and two missing-study/delivery assertions; absent pond delivery is not a missing-file diagnosis. Report 5c4b315c6320744c5bb9ccc5559992da57fdae56fb6c256e33e84792b2e3f381 remains failed. Owned browser/services close, four ports clear, exact database retained stopped. A subsequent isolated actual-r186/Metal first-attempt smoke succeeds: device 0.8 ms, total init 8.2 ms, same 20 requested features and 2048 array-layer limit. This permits another bounded full-game comparison, not a startup-reliability waiver or root-cause claim.
+
+- [x] **Conforming-water geometry foundation, source only:** new unimported world-lattice geometry and 27/27 focused tests cover exact shared edge coordinates, refined corner fans, winding/area/overlap/edge incidence, malformed inputs and adaptive index width. Initial 21/27 result is retained: six normal assertions incorrectly distinguished negative zero, corrected without changing geometry. Scoped lint/format pass and all existing 106 coastal source pins remain unchanged. This utility is not integrated: live neighbor edge ownership, atomic topology transitions, continuation, displaced native seam review and cost gates remain open. Evidence: asset-studio/fine-meadow01/conforming-water-grid-focused02.json.
+
+
+
+- [ ] **Close the two real defects behind the 19 known capture errors:** (1) the cow manifest points to an absent cow.vrm, leaving three functional but invisible cows; the authored quadruped replacement needs GLB/embedded-animation integration and real idle/walk/combat/death/respawn/material/contact qualification, not removal to silence errors. (2) the normal bronze-dagger definition points to an old-avatar GLB without duelFit certification; the diagnostic's newer dagger is also explicitly unqualified and is not proof of normal equipment integration. Qualify intended-avatar attachment and certification through the actual resolver, then verify normal replicated equip/unequip/combat/avatar-change behavior without an observer substitute. Preserve unsupported-avatar fail-closed behavior. These are release blockers, not harmless console noise; do not fabricate fit metadata.
+
+- [x] **Native startup recovers; coastal visual comparison still incomplete:** candidate02 records all nine generation queues empty from first through last census and completes unchanged readiness in 17.072 s (grass convergence). The identical 644,809-sample field finishes in 815 ms elapsed / 776.8 ms synchronous across 1,260 slices, maximum 1.8 ms, actual scheduler.yield and 1,259 yields. This is one-run loading evidence, not steady-state/frame-budget acceptance or proof the native run replayed the earlier race. The coastal study then fails before media on an observer classification defect: r186 SampledTexture inherits isSampler, so the sampled texture was counted as a second sampler despite one actual sampler and one field lookup. Preserve failed report f7affb9770dd867f7b7942860ae0a9c9e66ab22034c8cbad0c3c4c5363ea46c9 and correct/replay the observer against its archived shader before retry. All 782 source pins held and archives independently verify; zero page/GPU errors/worker warnings, 19 known content errors, one missing-media assertion. Browser/services closed, four ports clear, database retained stopped.
+
+- [x] **Startup corrections, source verification only:** satisfied resident terrain requests now retire before worker-wait, invalidating late results and preserving separately budgeted content promotion. Seven added real-owner/worker cases pass within the 20/20 residency suite. Coastal construction feature-detects and binds scheduler.yield with a real timer fallback; the 512-sample cap, per-sample 2 ms target, sample order and startup await are unchanged. Actual timer-revocation and full-field checks pass 23/23. Independent source review finds no blocking defect. Qualification03 passes 760/760 across 48 files, packing 9/9, all three package types and normal shared/server builds; 106 pins independently rehash exactly. Receipt a216358d20f5b4bf85285094af8e18d0468f472a467635c08eb5fe2f5129c77e. Native loading/queue closure and visual/performance qualification remain required; the per-slice target is not an aggregate frame-time guarantee.
+
+- [ ] **Resolve coastal candidate startup failure before visual qualification:** native candidate01 stops before coastal media after five generation/worker-key entries remain pending for all 108 readiness observations across 30 seconds. Terrain/grass continue progressing and the field is current; this is not a global freeze. The field takes 18.434 s elapsed, 1.059 s synchronous work over 1,279 slices (maximum 6.6 ms); scheduling/loading cost is not accepted. Source inspection identifies a queued-to-synchronously-resident request-retirement defect consistent with the queue state, but the native event trace did not retain exact keys. Fix and regression-test retirement, content promotion and late-result rejection, improve bounded failure diagnostics, then rerun without loosening readiness. Candidate01 report SHA256 fa35b2955770506ec7ea4cc1944e3de5de0e369d7a6e7b5e05e982addbb58d81 remains failed; no coastal screenshots/GPU-field comparison completed. Zero page/GPU errors, 19 known content errors and one missing-media cleanup assertion; owned browser/services closed, four ports clear, exact database retained stopped.
 
 - [x] **Station-edge recovery, source and native comparison complete:** furnace/anvil grass boundaries use actual scaled model bounds plus a 1.25 m working margin; terrain grading and collision remain unchanged. Four lifecycle-owned 0.30 m footing polygons protect the open workshop. Strict worker/swept-blade/ownership tests and native PhysX court checks pass; final 673/673 across 41 files, packing 9/9, three package type checks and shared/server builds hold 91 source pins. External preflight 111/111 passes. A bounded 64-change regional journal retires overlapping stale inputs without discarding ordinary remote grass work. Initial source failures and the corrected broadcast-physics observer mistake remain recorded. Evidence: asset-studio/fine-meadow01/station-clearance-03-source-qualification01.json.
 
@@ -12,7 +2032,9 @@
 
 - [ ] **Finish station-edge presentation and gameplay/cost gates:** the former 12×12 m/9×9 m grass-only grading halos are replaced, not the terrain pads. Improve sparse dark strands and straight residual boundaries without closing working space. Still verify moving blades, actual service/off-road traversal, multi-agent load and native frame cost; sampled eligibility and three stills are not those approvals.
 
-- [ ] **Connect ocean appearance to the actual coast:** quad-tree water currently supplies shoreDistance=50 at every vertex, disabling coastline-dependent wave damping and color/opacity response. Derive a bounded coastal field from the existing terrain authority; keep the offshore continuation opaque, shared edges stable and terrain/navigation/resource placement unchanged. Review moving shoreline and low-angle views, LOD joins, native costs and ownership cleanup before retention.
+- [x] **Capture the unchanged coastal baseline:** baseline02 completes four native WebGPU 1280×720 stills, three motion clips and two 10-second CPU/GPU windows. All 763 source pins, 678 archives and seven media hashes independently verify. Owned browser/services close; exact database stays stopped. Zero page/GPU/cleanup errors; 19 known cow/dagger errors keep the overall run failed. The first failed observer attempt remains preserved. Stills reveal an abrupt water–rock join, a raised flat-looking island and uniform cliff lip; the depth-field change alone will not fix terrain shape. Bay CPU p95 33.2 ms/max 309.4 ms remains an unexplained performance issue, not dismissed as a harmless transient. Evidence: asset-studio/game-test-integration/compact-coastal-water-baseline02/report.json.
+
+- [ ] **Connect ocean appearance to the actual coast — local candidate implemented, not visually accepted:** one signed 803² R16F field samples actual canonical ground at 0.5 m spacing, with 1,289,618 nominal texel bytes. Construction yields between short slices, rejects stale work, swaps complete revisions and disposes with the water owner; startup/stream readiness waits for a current field. Fragment color/opacity share the depth sample while vertex waves, topology, bounds, crest foam and ponds remain unchanged. Final source qualification02 passes 739/739 across 47 files, packing 9/9, all three package type checks and normal shared/server builds on 105 independently rehashed pins. Failed01 (737/739) remains recorded; its two tests used obsolete no-op/private-mutation assumptions, now explicitly tested through the actual update contract. Complete-field checks cover all-around coastal rays and independent contact-line comparisons. Actual GPU upload/filtering/compiled-stage checks are pending. Compare saved baseline poses, moving water, offshore opacity and native costs before retention. No wave-damping, LOD-seam, coast-shaping, performance or production approval.
 
 - [x] **Natural-path implementation and source verification:** three connected partial-wear shoulders around the workshop/supplier share fade/peak fields through CPU sampling, actual emitted workers, grounding and both GPU kernels. Original eleven road records, terrain geometry, texture/sample count and valid navigation constraints remain. Final598/598 across37 files, packing9/9, shared/client/server types and shared/server builds pass on80 held pins; external preflight102/102 passes. Full support covers301 segments/45,700 ground samples and all48 resource models; off-road service-route checks pass. Fixed the GPU u32 count upload and oversized pooled readback; actual GPU diagnostics pass as recorded below. Retained failures include test-domain/fixture mistakes, the target-library hasOwn compatibility correction, and the proven pre-existing529-versus532 census. Evidence: asset-studio/fine-meadow01/natural-paths-04-source-qualification01.json and natural-paths-head-worker-replay01.json.
 
@@ -24,6 +2046,7 @@ The latest user review remains **not accepted for AAA presentation**: paths are 
 - [ ] **Natural terrain:** integrate irregular shoreline, slopes, ridges, shallow basins and playable clearings at coherent large/medium/small scales. Preserve water containment, stable grounded assets and agent-accessible service/resource approaches. Test actual terrain/worker/collision agreement after any shape change.
 - [ ] **Full, freely explorable ecology:** distribute the real choppable resource trees and complementary understory/rocks/grass across the island with intentional open spaces. Paths guide the eye, not a road-membership movement gate. Add explicit off-road route/reachable-land coverage and actual player/agent traversal; do not remove water, steep-slope or object collision checks.
 - [ ] **Water and shoreline:** compare moving ocean/pond views for scale, color/depth cues, normals, reflection, foam, shoreline joins and transition artifacts. No visual acceptance from shader-feature presence; verify CPU/GPU cost before adding effects.
+- [ ] **Watertight ocean detail-level joins:** baseline02 offshore green streaks align with the actual Z600 edge between 6.25 m and 16.67 m water grids. Archived-wave CPU reconstruction shows about 0.24 m separation, up to roughly six projected pixels; no observer overlay is drawn. The exact green contributor behind the opening remains unidentified. Fix conforming geometry/displacement and verify native moving views, topology transitions and bounded cost. The isolated depth-field candidate preserves these vertices and is not a crack fix.
 - [ ] **Cohesive visual acceptance:** matched close, service, overview and shoreline views plus movement, sun-angle and multiple-agent evidence. Judge avatar/equipment, terrain, foliage, water, lighting and shadows together. Keep the existing frame/loading/memory and lifecycle gates; no hidden density, resolution or quality reduction.
 - [x] **Dry-ground diagnosis:** before this pass, 99.9801% of decoded grass roughness was flattened at0.65; the connected node overrides scalar material.roughness=1. This was a concrete material defect, not proof of every shiny patch's cause. The new dry-only calibration preserves variation and keeps localized shoreline wetness.
 - [x] **Bounded grass placement implementation and three-view comparison:** explicit fine-only same-quota stratification passes104/104 focused,485/485 serial and91/91 external harness/shape checks; all three noEmit checks and normal shared/server builds pass. Native art01 completes three WebGPU1280×720/DPR1 views with740 held pins,655 verified archived sources,90 compiled pipelines and94 owners. Same-cell/same-LOD census changes81,101→80,999 clumps after filtering; templates are byte-identical. Root and independent review find modest evenness improvement, not reference-level canopy quality. Page/GPU/cleanup errors0;19 known cow/dagger errors keep overall run failed. Owned browser/services closed, test database retained stopped. Motion/seams, native cost and production acceptance remain open.
@@ -1332,15 +3355,19 @@ Dated sections below retain evidence and superseded experiments.
    finish cliff material/landform, motion, transfer, mips and compression.
 2. [ ] **Grounded lighting:** separate direct/neutral/contact-AO comparisons;
    preserve skin color, sunlight, cutout foliage and water without halos.
-3. [ ] **A composed compact island:** improve landform, worn paths, shoreline,
-   lodge/workshop/bank setting, props and furnished interiors. One arena only.
-4. [ ] **Fuller living vegetation:** actual choppable resource trees throughout
-   the island; coherent species/scale, correct grass contact, denser meadow and
-   shrubs where appropriate. No decorative tree replacement of game resources.
+3. [ ] **A composed compact island:** improve landform, worn paths and shoreline;
+   replace every procedural service shell with a distinctive open-sided pavilion;
+   make the single arena the pavilion-aligned landmark. No enclosed/interior
+   preservation requirement remains for this experience.
+4. [ ] **Gameplay-authentic ecology:** distribute varied actual choppable trees
+   across the island and compose ore-specific gathering areas with coherent
+   species/scale, grass contact, access and replenishment. No decorative resource
+   replacement or duplication.
 5. [ ] **Characters and equipment:** finish in-scene materials, animation,
    clipping/fit and all item bindings; final directional/grip review stays open.
-6. [ ] **Atmosphere and motion:** polish sky, water, shadows, wind, camera cuts,
-   combat/gathering movement, soundscape and SFX as a coherent experience.
+6. [ ] **Atmosphere, motion and effects:** polish sky, water, shadows, wind,
+   camera cuts, combat/gathering movement, soundscape and SFX; audit and qualify
+   every particle effect visually and under combined performance/cleanup load.
 7. [ ] **Measured quality at scale:** agreed hardware/scene budgets, actual GPU
    and presented-frame evidence, cold loading, multi-agent motion and thermal
    soak. Fixed-resolution screenshots and passing CPU tests are not this gate.
@@ -2420,8 +4447,14 @@ not AAA art, representative performance, full-loop, streaming or launch approval
   texture-scale/repetition control, authored rock/fern/bush/grass groups, coherent
   tree palettes, and a preparation setting with deliberate visual composition.
   Existing vegetation loading must preserve GLB transforms/maps/alpha cutouts.
-- [ ] Integrate the reviewed Blender workshop canopy candidate after flue/roof,
-  overhead-camera visibility, navigation/collision and performance qualification.
+- [ ] Use the reviewed workshop canopy as the first open-sided pavilion evidence,
+  then replace every procedural building shell with a cohesive, distinctive
+  pavilion after flue/roof, overhead-camera visibility, navigation/collision,
+  service-interaction semantics and performance qualification. Regenerate each
+  pavilion's collision, grass exclusion, walkability/navigation and approaches
+  from its posts/roof; remove retired wall/door blockers and prove no invisible
+  walls remain. Enclosed presentation and furnished interiors are not preservation
+  requirements.
 - [ ] Qualify stream grass density/contact across the preparation area and pond;
   probe13 still observes zero grass anchors in both regions, not a passed gate.
 - [ ] Resolve hospital-floor striping, cow-content and canonical dagger-fit errors;
@@ -2741,15 +4774,22 @@ safe persisted-position migration still matters, but maintaining two islands doe
   independent instances and unchanged source assets.
 - [ ] **Compact island layout:** use the existing terrain/world-manifest and
   preparation systems to create a distinct, short-travel agent island with an
-  arena, bank/loadout area, all required resource/workstation loops and clear
-  landmarks. Preserve canonical item/resource identities. Verify reachable
-  routes, diagonal movement, collision, spawn/respawn, replenishment and travel
-  times across repeated full preparation/duel cycles; no cosmetic-only map.
+  arena, pavilion services, bank/loadout area, varied real choppable-tree groups,
+  ore-specific mining/gathering areas and clear landmarks. Preserve canonical
+  item/resource identities. Verify reachable routes plus useful off-route travel,
+  diagonal movement, collision, spawn/respawn, replenishment and travel times
+  across repeated full preparation/duel cycles; no cosmetic-only map.
 - [ ] **Unified world art:** improve shoreline/terrain, paths, vegetation, rocks,
-  buildings/workstations and arena composition with a consistent scale,
-  palette and material response matching the new character and gear. Review
-  readable silhouettes and preparation/combat camera shots, not only still
-  beauty renders. Remove visible seams, floating props and abrupt transitions.
+  open-sided pavilions/workstations and arena composition with a consistent
+  scale, palette and material response. Review readable silhouettes and
+  preparation/combat camera shots, not only still beauty renders. Remove visible
+  seams, floating props, abrupt transitions and disconnected set-piece styling.
+- [ ] **Procedural arena landmark:** redesign the single duel arena plus every
+  entrance, boundary, spectator furnishing, prop, detail and associated effect as
+  an artistically excellent pavilion-aligned focal point. Preserve authoritative
+  combat geometry and prove collision, movement, every duel phase/style camera,
+  stream readability, effect stress/cleanup and measured rendering cost. This is
+  an open AAA-aspirational gate, not a claim that current art meets it.
 - [ ] **Lighting/color pass:** diagnose and tune sun/sky, ambient/environment
   light, exposure/tone mapping, shadows/contact, fog and water together.
   Review skin/metal/leather/cloth under matched daylight, dusk/night and stream

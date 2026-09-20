@@ -101,14 +101,66 @@ export function getDuelArenaEgressPosition(): {
   return lobbyDestination(0);
 }
 
-/** Explicit authored base shared by gameplay terrain and visual/collision floors. */
+/** A malformed explicit datum must never silently select the legacy grade. */
+function readExplicitArenaFloorDatum(area: WorldArea): number | undefined {
+  if (!("arenaFloorDatum" in area)) return undefined;
+  const entry = Object.getOwnPropertyDescriptor(area, "arenaFloorDatum");
+  if (!entry || !entry.enumerable || !("value" in entry)) {
+    throw new Error("Invalid explicit arena floor datum metadata");
+  }
+  const value: unknown = entry.value;
+  if (
+    value === null ||
+    typeof value !== "object" ||
+    (Object.getPrototypeOf(value) !== Object.prototype &&
+      Object.getPrototypeOf(value) !== null) ||
+    Reflect.ownKeys(value).length !== 1
+  ) {
+    throw new Error("Invalid explicit arena floor datum metadata");
+  }
+  const height = Object.getOwnPropertyDescriptor(value, "height");
+  if (
+    !height ||
+    !height.enumerable ||
+    !("value" in height) ||
+    typeof height.value !== "number" ||
+    !Number.isFinite(height.value)
+  ) {
+    throw new Error("Invalid explicit arena floor datum height");
+  }
+  return height.value;
+}
+
+/**
+ * One authored base shared by terrain, visuals, collision and return positions.
+ * Explicit metadata decouples this datum from broad grading coverage, not from
+ * floor-support requirements. Without it, legacy coverage admission is unchanged.
+ */
 export function getDuelArenaGradeHeight(
   areas: Readonly<Record<string, WorldArea>> = ALL_WORLD_AREAS,
 ): number {
   const area = areas.duel_arena;
+  const explicitHeight = area ? readExplicitArenaFloorDatum(area) : undefined;
+  if (explicitHeight !== undefined) {
+    const bounds = area.bounds;
+    if (
+      !bounds ||
+      ![bounds.minX, bounds.maxX, bounds.minZ, bounds.maxZ].every(
+        Number.isFinite,
+      ) ||
+      bounds.minX >= bounds.maxX ||
+      bounds.minZ >= bounds.maxZ ||
+      (area.flatZones !== undefined && !Array.isArray(area.flatZones))
+    ) {
+      throw new Error(
+        "Invalid explicit arena floor datum area bounds or grades",
+      );
+    }
+  }
   const zones = area?.flatZones?.filter(
     (zone) => zone.id === DUEL_ARENA_CAMPUS_GRADE_ID,
   );
+  if (explicitHeight !== undefined && !zones?.length) return explicitHeight;
   if (!area || zones?.length !== 1) {
     throw new Error("Duel arena requires exactly one authored campus grade");
   }
@@ -132,15 +184,29 @@ export function getDuelArenaGradeHeight(
     zone.blendRadius < 0 ||
     zone.radialPond !== undefined ||
     zone.heightOffset !== undefined ||
-    zone.centerX - zone.width / 2 > bounds.minX ||
-    zone.centerX + zone.width / 2 < bounds.maxX ||
-    zone.centerZ - zone.depth / 2 > bounds.minZ ||
-    zone.centerZ + zone.depth / 2 < bounds.maxZ
+    (explicitHeight !== undefined &&
+      ![
+        zone.centerX - zone.width / 2,
+        zone.centerX + zone.width / 2,
+        zone.centerZ - zone.depth / 2,
+        zone.centerZ + zone.depth / 2,
+      ].every(Number.isFinite)) ||
+    (explicitHeight === undefined &&
+      (zone.centerX - zone.width / 2 > bounds.minX ||
+        zone.centerX + zone.width / 2 < bounds.maxX ||
+        zone.centerZ - zone.depth / 2 > bounds.minZ ||
+        zone.centerZ + zone.depth / 2 < bounds.maxZ))
   ) {
     throw new Error(
-      "Duel arena authored campus grade must cover its complete area bounds at one explicit finite height",
+      explicitHeight === undefined
+        ? "Duel arena authored campus grade must cover its complete area bounds at one explicit finite height"
+        : "Explicit arena floor datum requires valid campus grade geometry and height",
     );
   }
+  if (explicitHeight !== undefined && !Object.is(zone.height, explicitHeight)) {
+    throw new Error("Conflicting explicit arena floor datum and campus grade");
+  }
+  if (explicitHeight !== undefined) return explicitHeight;
   return zone.height!;
 }
 

@@ -3,9 +3,12 @@ import type { ModelCollisionData } from "./ModelCache";
 
 /** A processed representation, not a replacement for GLTFLoader or an authored-PBR policy. */
 export const PROCESSED_MODEL_VERSION = 7;
-// Schema unchanged: reject earlier rows whose transform bake could wrap
-// quantized positions or requantize normals/tangents. Reparse verified source.
-const POLICY = "static-r186-rgba8-float-transform-v3";
+// This is policy-only invalidation: the row/schema has not changed. Retain the
+// database version to avoid an unnecessary schema upgrade and open-tab contention.
+// Reparse rows whose cold import could flatten Physical optics into Standard
+// or drop other authored PBR state. Unsupported Physical nodes bypass this
+// static codec; never serialize them as lossy Standard approximations.
+const POLICY = "static-r186-rgba8-authored-node-copy-v4";
 export const PROCESSED_MODEL_LIMITS = Object.freeze({
   sourceBytes: 256 * 1024 * 1024,
   payloadBytes: 256 * 1024 * 1024,

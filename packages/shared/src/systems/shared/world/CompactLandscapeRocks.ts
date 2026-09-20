@@ -48,7 +48,8 @@ export function validateCompactLandscapeRocks(
       "rocks",
     ]) ||
     value.schemaVersion !== 1 ||
-    value.layoutId !== "compact-preparation-rocks-v1" ||
+    (value.layoutId !== "compact-preparation-rocks-v1" &&
+      value.layoutId !== "compact-preparation-coastal-rocks-v2") ||
     value.terrainProfileId !== "compact-duel-island-v6" ||
     profile.id !== value.terrainProfileId ||
     profile.algorithm !== "compact-island-sculpt-v5" ||
@@ -59,6 +60,7 @@ export function validateCompactLandscapeRocks(
   )
     throw new Error("Invalid compact landscape rock manifest");
   const ids = new Set<string>();
+  let coastalCount = 0;
   for (const p of value.rocks) {
     if (
       !p ||
@@ -74,10 +76,17 @@ export function validateCompactLandscapeRocks(
       p.scale > 1.5 ||
       !(
         (p.x >= 330 && p.x <= 355 && p.z >= 290 && p.z <= 303) ||
-        (p.x >= 323 && p.x <= 330 && p.z >= 326 && p.z <= 333)
+        (p.x >= 323 && p.x <= 330 && p.z >= 326 && p.z <= 333) ||
+        (value.layoutId === "compact-preparation-coastal-rocks-v2" &&
+          p.x >= 399 &&
+          p.x <= 405 &&
+          p.z >= 468 &&
+          p.z <= 474)
       )
     )
       throw new Error("Invalid compact landscape rock placement");
+    if (p.x >= 399 && ++coastalCount > 3)
+      throw new Error("Compact coastal rock placement budget exceeded");
     ids.add(p.id);
     Object.freeze(p);
   }

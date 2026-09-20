@@ -37,6 +37,7 @@ import {
   resolveHyperbetSolanaDeployment,
   resolveHyperbetWorkspace,
   resolveDuelGameServiceTopology,
+  resolveDuelClientCommand,
   resolveDuelDatabaseConfiguration,
   resolvePrivateBettingFeedToken,
   resolveJwtRuntimeSecret,
@@ -2569,9 +2570,17 @@ process.on("unhandledRejection", (err) => {
 });
 
 async function main() {
-  const nodeVersion = execFileSync("node", ["--version"], {
-    encoding: "utf8",
-  }).trim();
+  const nodeRuntime = JSON.parse(
+    execFileSync(
+      "node",
+      [
+        "--print",
+        "JSON.stringify({path:process.execPath,version:process.version})",
+      ],
+      { encoding: "utf8", timeout: 5_000 },
+    ),
+  );
+  const nodeVersion = nodeRuntime.version;
   assertSupportedUwsNodeVersion(nodeVersion);
   if (options.verbose) log(`using pinned duel server ${nodeVersion}`);
 
@@ -3368,40 +3377,23 @@ async function main() {
           `wrote client runtime env to ${path.relative(ROOT, path.join(clientDistDir, "env.js"))}`,
         );
         log("starting game client in production mode (vite preview)...");
-        spawnManaged(
-          "game-client",
-          gameBunPath,
-          [
-            "run",
-            "--cwd",
-            "packages/client",
-            "preview",
-            "--",
-            "--host",
-            "--port",
-            String(clientPort),
-          ],
-          { env: gameEnv },
-        );
-      } else {
-        spawnManaged(
-          "game-client",
-          gameBunPath,
-          [
-            "run",
-            "--cwd",
-            "packages/client",
-            "dev",
-            "--",
-            "--host",
-            "--port",
-            String(clientPort),
-          ],
-          {
-            env: gameEnv,
-          },
-        );
       }
+      // `bun run ... vite` also runs Vite under Node. Keep that verified runtime
+      // and the package cwd/flags, but make Vite the detached managed leader so
+      // its actual close is observed without an intervening script-shell owner.
+      const clientCommand = resolveDuelClientCommand({
+        workspaceRoot: ROOT,
+        nodePath: nodeRuntime.path,
+        port: clientPort,
+        production: useProductionBuild,
+        environment: gameEnv,
+      });
+      spawnManaged(
+        "game-client",
+        clientCommand.command,
+        clientCommand.args,
+        clientCommand.opts,
+      );
     }
   }
 

@@ -2,6 +2,7 @@ import {
   AVATAR_AUTHORED_MOTION_ACTION_LIMIT,
   AVATAR_AUTHORED_MOTION_SCHEMA_VERSION,
   getCombatArenaBoundsContainingPositions,
+  getAdmittedCompactBankPavilion,
   isPositionInsideCombatArena,
   getAvatarByUrl,
   normalizeProcessingInteractionPresentationState,
@@ -212,6 +213,8 @@ export type StreamingSceneReadinessEvidence = {
   phase: string | null;
   contestantsMustBeVisible: boolean;
   arenaVisualsReady: boolean;
+  bankPavilionReady: boolean;
+  bankPavilion: StreamingBankPavilionReadiness;
   terrainVisualsReady: boolean;
   terrain: unknown | null;
   grass: unknown | null;
@@ -234,6 +237,62 @@ export type StreamingSceneReadinessEvidence = {
   coldRenderSettled?: boolean;
   coldRender?: StreamingColdRenderStability;
 };
+
+type CompactBankPavilionDescriptor = Readonly<{
+  schemaVersion: 1;
+  layoutId: "compact-bank-pavilion-v1";
+  terrainProfileId: "compact-duel-island-v6";
+  position: Readonly<{ x: number; z: number }>;
+  rotation: 0;
+  recipeId: "open-timber-bank-haven-v1";
+}>;
+
+type CompactBankPavilionOwnerDiagnostics = Readonly<{
+  layoutId: string;
+  blockingTiles: readonly Readonly<{ x: number; z: number }>[];
+  feet: readonly Readonly<{ bottom: number; top: number }>[];
+  position: Readonly<{ x: number; y: number; z: number }>;
+  physicsActor: boolean;
+  physicsShapes: number;
+}>;
+
+type CompactBankPavilionVisualDiagnostics = Readonly<{
+  layoutId: string;
+  meshes: number;
+  triangles: number;
+  geometryBytes: number;
+  materials: number;
+  cutaway: Readonly<{
+    value: number;
+    desired: boolean;
+    decisions: number;
+  }>;
+}>;
+
+export type StreamingBankPavilionReadiness = Readonly<{
+  configured: boolean;
+  ready: boolean;
+  physicsRequired: boolean;
+  descriptor: CompactBankPavilionDescriptor | null;
+  owner: CompactBankPavilionOwnerDiagnostics | null;
+  visual: CompactBankPavilionVisualDiagnostics | null;
+  reasons: readonly string[];
+}>;
+
+// This is the exact admitted recipe contract, not a generic pavilion budget.
+// A deliberate recipe revision must update its descriptor and measured output
+// together; otherwise stream capture stays fail-closed.
+const BANK_PAVILION_RUNTIME_CONTRACT = Object.freeze({
+  layoutId: "compact-bank-pavilion-v1",
+  terrainProfileId: "compact-duel-island-v6",
+  recipeId: "open-timber-bank-haven-v1",
+  postOffset: 3.5,
+  physicsShapes: 3,
+  meshes: 3,
+  materials: 3,
+  triangles: 1300,
+  geometryBytes: 216_576,
+});
 
 function finiteVector(value: unknown): value is Vector3Like {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
@@ -933,11 +992,296 @@ export function collectStreamingSceneDiagnostics(
   };
 }
 
+function diagnosticsRecord(value: unknown): Record<string, unknown> | null {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
+}
+
+function parseBankPavilionDescriptor(
+  value: unknown,
+): CompactBankPavilionDescriptor | null {
+  const descriptor = diagnosticsRecord(value);
+  const position = diagnosticsRecord(descriptor?.position);
+  if (
+    descriptor?.schemaVersion !== 1 ||
+    descriptor.layoutId !== BANK_PAVILION_RUNTIME_CONTRACT.layoutId ||
+    descriptor.terrainProfileId !==
+      BANK_PAVILION_RUNTIME_CONTRACT.terrainProfileId ||
+    descriptor.rotation !== 0 ||
+    descriptor.recipeId !== BANK_PAVILION_RUNTIME_CONTRACT.recipeId ||
+    typeof position?.x !== "number" ||
+    !Number.isFinite(position.x) ||
+    typeof position.z !== "number" ||
+    !Number.isFinite(position.z)
+  )
+    return null;
+  return Object.freeze({
+    schemaVersion: 1,
+    layoutId: BANK_PAVILION_RUNTIME_CONTRACT.layoutId,
+    terrainProfileId: BANK_PAVILION_RUNTIME_CONTRACT.terrainProfileId,
+    position: Object.freeze({ x: position.x, z: position.z }),
+    rotation: 0,
+    recipeId: BANK_PAVILION_RUNTIME_CONTRACT.recipeId,
+  });
+}
+
+function parseBankPavilionOwnerDiagnostics(
+  value: unknown,
+): CompactBankPavilionOwnerDiagnostics | null {
+  const row = diagnosticsRecord(value);
+  const position = diagnosticsRecord(row?.position);
+  const blockingTiles = Array.isArray(row?.blockingTiles)
+    ? row.blockingTiles.map(diagnosticsRecord)
+    : [];
+  const feet = Array.isArray(row?.feet) ? row.feet.map(diagnosticsRecord) : [];
+  if (
+    typeof row?.layoutId !== "string" ||
+    typeof position?.x !== "number" ||
+    !Number.isFinite(position.x) ||
+    typeof position.y !== "number" ||
+    !Number.isFinite(position.y) ||
+    typeof position.z !== "number" ||
+    !Number.isFinite(position.z) ||
+    blockingTiles.length !== 4 ||
+    blockingTiles.some(
+      (tile) =>
+        !tile ||
+        typeof tile.x !== "number" ||
+        !Number.isSafeInteger(tile.x) ||
+        typeof tile.z !== "number" ||
+        !Number.isSafeInteger(tile.z),
+    ) ||
+    feet.length !== 4 ||
+    feet.some(
+      (foot) =>
+        !foot ||
+        typeof foot.bottom !== "number" ||
+        !Number.isFinite(foot.bottom) ||
+        typeof foot.top !== "number" ||
+        !Number.isFinite(foot.top) ||
+        foot.top <= foot.bottom,
+    ) ||
+    typeof row.physicsActor !== "boolean" ||
+    typeof row.physicsShapes !== "number" ||
+    !Number.isSafeInteger(row.physicsShapes) ||
+    row.physicsShapes < 0
+  )
+    return null;
+  return Object.freeze({
+    layoutId: row.layoutId,
+    blockingTiles: Object.freeze(
+      blockingTiles.map((tile) =>
+        Object.freeze({ x: tile!.x as number, z: tile!.z as number }),
+      ),
+    ),
+    feet: Object.freeze(
+      feet.map((foot) =>
+        Object.freeze({
+          bottom: foot!.bottom as number,
+          top: foot!.top as number,
+        }),
+      ),
+    ),
+    position: Object.freeze({
+      x: position.x,
+      y: position.y,
+      z: position.z,
+    }),
+    physicsActor: row.physicsActor,
+    physicsShapes: row.physicsShapes,
+  });
+}
+
+function parseBankPavilionVisualDiagnostics(
+  value: unknown,
+): CompactBankPavilionVisualDiagnostics | null {
+  const row = diagnosticsRecord(value);
+  const cutaway = diagnosticsRecord(row?.cutaway);
+  if (
+    typeof row?.layoutId !== "string" ||
+    typeof row.meshes !== "number" ||
+    !Number.isSafeInteger(row.meshes) ||
+    typeof row.triangles !== "number" ||
+    !Number.isSafeInteger(row.triangles) ||
+    typeof row.geometryBytes !== "number" ||
+    !Number.isSafeInteger(row.geometryBytes) ||
+    typeof row.materials !== "number" ||
+    !Number.isSafeInteger(row.materials) ||
+    typeof cutaway?.value !== "number" ||
+    !Number.isFinite(cutaway.value) ||
+    cutaway.value < 0 ||
+    cutaway.value > 1 ||
+    typeof cutaway.desired !== "boolean" ||
+    typeof cutaway.decisions !== "number" ||
+    !Number.isSafeInteger(cutaway.decisions) ||
+    cutaway.decisions < 0
+  )
+    return null;
+  return Object.freeze({
+    layoutId: row.layoutId,
+    meshes: row.meshes,
+    triangles: row.triangles,
+    geometryBytes: row.geometryBytes,
+    materials: row.materials,
+    cutaway: Object.freeze({
+      value: cutaway.value,
+      desired: cutaway.desired,
+      decisions: cutaway.decisions,
+    }),
+  });
+}
+
+function readSystemDiagnostics(
+  world: StreamingDiagnosticsWorld,
+  name: string,
+): readonly unknown[] | null {
+  try {
+    const system = world.getSystem?.(name) as
+      { getAllDiagnostics?: () => unknown } | null | undefined;
+    if (typeof system?.getAllDiagnostics !== "function") return null;
+    const rows = system.getAllDiagnostics();
+    return Array.isArray(rows) ? rows : null;
+  } catch {
+    return null;
+  }
+}
+
+function exactTileSet(
+  actual: readonly Readonly<{ x: number; z: number }>[],
+  expected: readonly Readonly<{ x: number; z: number }>[],
+): boolean {
+  const key = (tile: Readonly<{ x: number; z: number }>) =>
+    `${tile.x},${tile.z}`;
+  return (
+    actual.length === expected.length &&
+    new Set(actual.map(key)).size === expected.length &&
+    [...actual].map(key).sort().join("|") ===
+      [...expected].map(key).sort().join("|")
+  );
+}
+
+/**
+ * Qualifies the real admitted pavilion owner and render lease. This is a scene
+ * readiness component only; it does not claim motion, performance, or stream
+ * transport acceptance.
+ */
+export function collectStreamingBankPavilionReadiness(
+  world: StreamingDiagnosticsWorld,
+  admittedDescriptor: unknown,
+): StreamingBankPavilionReadiness {
+  if (admittedDescriptor === undefined)
+    return Object.freeze({
+      configured: false,
+      ready: true,
+      physicsRequired: false,
+      descriptor: null,
+      owner: null,
+      visual: null,
+      reasons: Object.freeze([]),
+    });
+
+  const reasons: string[] = [];
+  const descriptor = parseBankPavilionDescriptor(admittedDescriptor);
+  let physicsRequired = false;
+  try {
+    physicsRequired = world.getSystem?.("physics") != null;
+  } catch {
+    reasons.push("physics_probe_failed");
+  }
+  if (!descriptor) reasons.push("descriptor_invalid");
+
+  const ownerRows = readSystemDiagnostics(world, "compact-service-court");
+  const ownerCandidates =
+    ownerRows?.filter(
+      (row) =>
+        diagnosticsRecord(row)?.layoutId ===
+        BANK_PAVILION_RUNTIME_CONTRACT.layoutId,
+    ) ?? [];
+  const owner =
+    ownerCandidates.length === 1
+      ? parseBankPavilionOwnerDiagnostics(ownerCandidates[0])
+      : null;
+  if (ownerCandidates.length !== 1) reasons.push("owner_count_mismatch");
+  else if (!owner) reasons.push("owner_diagnostics_invalid");
+
+  if (descriptor && owner) {
+    const offset = BANK_PAVILION_RUNTIME_CONTRACT.postOffset;
+    const expectedTiles = [
+      { x: descriptor.position.x - offset, z: descriptor.position.z - offset },
+      { x: descriptor.position.x + offset, z: descriptor.position.z - offset },
+      { x: descriptor.position.x - offset, z: descriptor.position.z + offset },
+      { x: descriptor.position.x + offset, z: descriptor.position.z + offset },
+    ].map(({ x, z }) => ({ x: Math.floor(x), z: Math.floor(z) }));
+    if (
+      owner.layoutId !== descriptor.layoutId ||
+      owner.position.x !== descriptor.position.x ||
+      owner.position.z !== descriptor.position.z ||
+      !exactTileSet(owner.blockingTiles, expectedTiles)
+    )
+      reasons.push("owner_pose_or_footprint_mismatch");
+    if (
+      physicsRequired &&
+      (!owner.physicsActor ||
+        owner.physicsShapes !== BANK_PAVILION_RUNTIME_CONTRACT.physicsShapes)
+    )
+      reasons.push("owner_physics_mismatch");
+  }
+
+  const visualRows = readSystemDiagnostics(
+    world,
+    "compact-service-court-visuals",
+  );
+  const visualCandidates =
+    visualRows?.filter(
+      (row) =>
+        diagnosticsRecord(row)?.layoutId ===
+        BANK_PAVILION_RUNTIME_CONTRACT.layoutId,
+    ) ?? [];
+  const visual =
+    visualCandidates.length === 1
+      ? parseBankPavilionVisualDiagnostics(visualCandidates[0])
+      : null;
+  if (visualCandidates.length !== 1) reasons.push("visual_count_mismatch");
+  else if (!visual) reasons.push("visual_diagnostics_invalid");
+  else if (
+    !descriptor ||
+    visual.layoutId !== descriptor.layoutId ||
+    visual.meshes !== BANK_PAVILION_RUNTIME_CONTRACT.meshes ||
+    visual.materials !== BANK_PAVILION_RUNTIME_CONTRACT.materials ||
+    visual.triangles !== BANK_PAVILION_RUNTIME_CONTRACT.triangles ||
+    visual.geometryBytes !== BANK_PAVILION_RUNTIME_CONTRACT.geometryBytes
+  )
+    reasons.push("visual_recipe_mismatch");
+
+  return Object.freeze({
+    configured: true,
+    ready: reasons.length === 0,
+    physicsRequired,
+    descriptor,
+    owner,
+    visual,
+    reasons: Object.freeze(reasons),
+  });
+}
+
 export function collectStreamingSceneReadinessEvidence(
   world: StreamingDiagnosticsWorld,
   state: DiagnosticsState,
 ): StreamingSceneReadinessEvidence {
   const diagnostics = collectStreamingSceneDiagnostics(world, state);
+  let admittedBankPavilion: unknown;
+  try {
+    admittedBankPavilion = getAdmittedCompactBankPavilion() ?? undefined;
+  } catch {
+    // Treat an unreadable admission source as configured-but-invalid. Capture
+    // must not continue merely because world configuration could not be read.
+    admittedBankPavilion = null;
+  }
+  const bankPavilion = collectStreamingBankPavilionReadiness(
+    world,
+    admittedBankPavilion,
+  );
   const terrain = world.getSystem?.("terrain") as
     | {
         getStreamingVisualReadiness?: () => {
@@ -1055,6 +1399,7 @@ export function collectStreamingSceneReadinessEvidence(
   return {
     ready: Boolean(
       diagnostics?.arenaVisualsReady &&
+      bankPavilion.ready &&
       terrainVisualsReady &&
       precompileIdle &&
       equipmentVisualsReady &&
@@ -1065,6 +1410,8 @@ export function collectStreamingSceneReadinessEvidence(
     phase,
     contestantsMustBeVisible,
     arenaVisualsReady: diagnostics?.arenaVisualsReady === true,
+    bankPavilionReady: bankPavilion.ready,
+    bankPavilion,
     terrainVisualsReady,
     terrain: terrainEvidence?.terrain ?? null,
     grass: terrainEvidence?.grass ?? null,

@@ -16,11 +16,13 @@ import { RoadNetworkSystem } from "../RoadNetworkSystem";
 import { TerrainSystem } from "../TerrainSystem";
 import { TERRAIN_SHADER_CONSTANTS } from "../TerrainShader";
 import { TerrainQuadNode } from "../TerrainQuadTree";
-import { TerrainVisualManager } from "../TerrainVisualManager";
+import {
+  TerrainVisualManager,
+  type VisualManagerTerrainProvider,
+} from "../TerrainVisualManager";
 import {
   assembleQuadChunkGeometry,
   generateQuadChunkDataSync,
-  type FullTerrainProvider,
 } from "../TerrainQuadChunkGenerator";
 import type { GrassWorkerSetup } from "../GrassVisualManager";
 
@@ -35,7 +37,7 @@ type TerrainInternals = {
   generateTile(x: number, z: number, content: boolean): TerrainTile;
   unloadTile(tile: TerrainTile): void;
   refreshRoadInfluence(): Promise<void>;
-  buildChunkTerrainProvider(): FullTerrainProvider;
+  buildChunkTerrainProvider(): VisualManagerTerrainProvider;
   buildGrassWorkerSetup(): GrassWorkerSetup;
   calculateRoadInfluenceAtVertex(
     x: number,
@@ -301,10 +303,18 @@ describe("real yielding terrain road refresh ownership", () => {
     try {
       const prepared = prepareGrassWorkerRequest(input);
       expect(prepared.roadSegments).toBe(input.roadSegments);
-      expect(Object.hasOwn(prepared.roadSegments[0], "blendWidth")).toBe(false);
-      expect(Object.hasOwn(prepared.roadSegments[0], "maxInfluence")).toBe(
-        false,
-      );
+      expect(
+        Object.prototype.hasOwnProperty.call(
+          prepared.roadSegments[0],
+          "blendWidth",
+        ),
+      ).toBe(false);
+      expect(
+        Object.prototype.hasOwnProperty.call(
+          prepared.roadSegments[0],
+          "maxInfluence",
+        ),
+      ).toBe(false);
       const ordinaryResult = await run(prepared);
       expect(ordinaryResult.error).toBeUndefined();
       expect(ordinaryResult.result).toBeDefined();
@@ -462,8 +472,12 @@ describe("real yielding terrain road refresh ownership", () => {
             for (const segment of region.filter(
               (s) => s.maxInfluence === undefined,
             )) {
-              expect(Object.hasOwn(segment, "blendWidth")).toBe(false);
-              expect(Object.hasOwn(segment, "maxInfluence")).toBe(false);
+              expect(
+                Object.prototype.hasOwnProperty.call(segment, "blendWidth"),
+              ).toBe(false);
+              expect(
+                Object.prototype.hasOwnProperty.call(segment, "maxInfluence"),
+              ).toBe(false);
             }
             // Repeat in the same road tile to exercise the cached lookup too.
             for (let repeat = 0; repeat < 2; repeat++)

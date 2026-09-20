@@ -137,6 +137,9 @@ describe("luminance-preserving lighting chromaticity candidate", () => {
     const first = createTerrainMaterial();
     const second = createTerrainMaterial();
     try {
+      if (!(first instanceof THREE.MeshStandardNodeMaterial)) {
+        throw new Error("Terrain must use the actual standard node material");
+      }
       expect(first.terrainUniforms.shade.tint.value.toArray()).toEqual([
         ...SUN_SHADE.TINT_COLOR,
       ]);

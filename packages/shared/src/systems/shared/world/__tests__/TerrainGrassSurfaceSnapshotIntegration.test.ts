@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { World } from "../../../../core/World";
+import { DataManager } from "../../../../data/DataManager";
 import { ALL_WORLD_AREAS } from "../../../../data/world-areas";
 import {
   createGrassTerrainSurfaceOperations,
@@ -9,8 +10,12 @@ import {
 } from "../../../../utils/workers/GrassTerrainSurfaceSnapshot";
 import { createAuthoredTerrainSurfaceOperations } from "../AuthoredTerrainSurface";
 import { TerrainSystem } from "../TerrainSystem";
+import { resolveWorldTerrainProfile } from "../WorldTerrainProfile";
 import type { GrassWorkerSetup } from "../GrassVisualManager";
-import { COMPACT_TERRAIN_COMPOSITION } from "../CompactTerrainPalette";
+import {
+  COMPACT_TERRAIN_COMPOSITION,
+  type CompactPondBankField,
+} from "../CompactTerrainPalette";
 
 type Internals = {
   flatZones: Map<string, GrassTerrainSurfaceZone>;
@@ -19,6 +24,7 @@ type Internals = {
   loadWaterBodiesFromManifest(): void;
   loadFlatZonesFromManifest(): void;
   buildGrassWorkerSetup(): GrassWorkerSetup;
+  bindCompactPondBankField(): CompactPondBankField;
   getAuthoredSurfaceCandidates(
     x: number,
     z: number,
@@ -40,10 +46,31 @@ const surfaceOperations = createAuthoredTerrainSurfaceOperations();
 /** Real initialized CPU world and manifest loaders; no rendering or server start. */
 async function withTerrain(
   run: (terrain: TerrainSystem, internals: Internals) => void,
+  compositionProfile = false,
 ) {
   const world = new World();
   const terrain = world.register("terrain", TerrainSystem) as TerrainSystem;
   try {
+    if (compositionProfile) {
+      await DataManager.getInstance().initialize();
+      terrain["activeTerrainProfile"] = resolveWorldTerrainProfile({
+        ...DataManager.getWorldTerrainProfile(),
+        southernMeadow: {
+          schemaVersion: 1,
+          minX: 304,
+          maxX: 500,
+          minZ: 345,
+          maxZ: 535,
+          featherX: 24,
+          featherZ: 24,
+          northHeight: 26.8,
+          southHeight: 25.3,
+          crossFall: 1,
+          rollAmplitude: 0.65,
+          rollWavelength: 100,
+        },
+      });
+    }
     await terrain.init();
     const internals = terrain as unknown as Internals;
     internals.loadWaterBodiesFromManifest();
@@ -54,7 +81,558 @@ async function withTerrain(
   }
 }
 
+async function withCompositionTerrain(
+  run: (terrain: TerrainSystem, internals: Internals) => void,
+) {
+  await withTerrain(run, true);
+}
+
+/** Copy the actual authored pond; only add valid, manifest-shaped composition. */
+function compositionZone(internals: Internals): GrassTerrainSurfaceZone {
+  const zone = structuredClone(internals.flatZones.get("haven_pond_floor")!);
+  const radial = zone.radialPond!;
+  const bankSectors = radial.bankSectors?.length
+    ? radial.bankSectors
+    : [-Math.PI / 2, Math.PI / 2].map((bearing) => ({
+        bearing,
+        halfWidth: Math.PI / 4,
+        innerRadius: (radial.bedRadius + radial.bankInnerRadius) / 2,
+        innerHeight: radial.bankHeight,
+      }));
+  return {
+    ...zone,
+    radialPond: {
+      ...radial,
+      bankSectors,
+      bankComposition: {
+        schemaVersion: 1,
+        sectors: [{ sectorIndex: 0, surface: "sedge-shelf" }],
+      },
+    },
+  };
+}
+
+describe("actual restart-owned pond composition", () => {
+  it("tracks groundCover addition, edits and omission in canonical identity and seals nested metadata at bind", async () => {
+    await withCompositionTerrain((terrain, internals) => {
+      const input = compositionZone(internals);
+      terrain.registerFlatZone(input);
+      const before = terrain.captureCanonicalGroundLease();
+      const changed = structuredClone(input);
+      Object.assign(changed.radialPond!.bankComposition!.sectors[0], {
+        groundCover: { emergenceHeight: 0.04, fullHeight: 0.12 },
+      });
+      terrain.registerFlatZone(changed);
+      expect(before.isCurrent()).toBe(false);
+      const stable = terrain.captureCanonicalGroundLease();
+      terrain.registerFlatZone(structuredClone(changed));
+      expect(stable.isCurrent()).toBe(true);
+      const edited = structuredClone(changed);
+      Reflect.set(
+        edited.radialPond!.bankComposition!.sectors[0].groundCover!,
+        "fullHeight",
+        0.16,
+      );
+      terrain.registerFlatZone(edited);
+      expect(stable.isCurrent()).toBe(false);
+      const current = terrain.captureCanonicalGroundLease();
+      const field = internals.bindCompactPondBankField();
+      expect(Object.isFrozen(field.sectors[0].groundCover)).toBe(true);
+      const owned = internals.flatZones.get(input.id)!.radialPond!
+        .bankComposition!.sectors[0].groundCover!;
+      expect(Object.isFrozen(owned)).toBe(true);
+      expect(Reflect.set(owned, "fullHeight", 0.2)).toBe(false);
+      expect(() => terrain.registerFlatZone(changed)).toThrow();
+      expect(() => terrain.registerFlatZone(input)).toThrow();
+      expect(current.isCurrent()).toBe(true);
+      const remote = internals.getTerrainSurfaceForRegion(800, 800, 801, 801);
+      const copy = remote.zones.find((zone) => zone.id === input.id)!
+        .radialPond!.bankComposition!.sectors[0].groundCover!;
+      expect(copy).toEqual({ emergenceHeight: 0.04, fullHeight: 0.16 });
+      expect(copy).not.toBe(owned);
+      expect(Object.isFrozen(copy)).toBe(true);
+    });
+  });
+  it("binds detached immutable owners and includes the exact terrain/water pair in distant snapshots", async () => {
+    await withCompositionTerrain((terrain, internals) => {
+      const input = compositionZone(internals);
+      terrain.registerFlatZone(input);
+      const field = internals.bindCompactPondBankField();
+      const owned = internals.flatZones.get(input.id)!;
+      const composition = owned.radialPond!.bankComposition!;
+      expect(field).toMatchObject({
+        id: "composition-v1",
+        zoneId: "haven_pond_floor",
+        centerX: input.centerX,
+        centerZ: input.centerZ,
+        pond: { id: "haven_pond_water" },
+      });
+      expect(field.sectors[0].surface).toBe("sedge-shelf");
+      expect(field.sectors[0]).not.toBe(input.radialPond!.bankSectors![0]);
+      expect(composition).not.toBe(input.radialPond!.bankComposition);
+      for (const value of [
+        field,
+        field.pond,
+        field.sectors,
+        ...field.sectors,
+        composition,
+        composition.sectors,
+        ...composition.sectors,
+      ])
+        expect(Object.isFrozen(value)).toBe(true);
+      expect(
+        Reflect.set(
+          input.radialPond!.bankComposition!.sectors[0],
+          "surface",
+          "cutbank",
+        ),
+      ).toBe(true);
+      expect(composition.sectors[0].surface).toBe("sedge-shelf");
+      expect(field.sectors[0].surface).toBe("sedge-shelf");
+      expect(internals.bindCompactPondBankField()).toBe(field);
+
+      for (const [x, z] of [
+        [-500, -500],
+        [900, 900],
+      ]) {
+        const snapshot = internals.getTerrainSurfaceForRegion(
+          x,
+          z,
+          x + 1,
+          z + 1,
+        );
+        expect(snapshot.zones.map((zone) => zone.id)).toEqual([input.id]);
+        expect(snapshot.waterBodies.map((body) => body.id)).toEqual([
+          field.pond.id,
+        ]);
+        expect(snapshot.zones[0].radialPond!.bankComposition).toEqual(
+          composition,
+        );
+        expect(snapshot.zones[0].radialPond!.bankComposition).not.toBe(
+          composition,
+        );
+        expect(snapshot.waterBodies[0]).toMatchObject(field.pond);
+        expect(snapshot.waterBodies[0]).not.toBe(field.pond);
+        expect(
+          Object.isFrozen(
+            snapshot.zones[0].radialPond!.bankComposition!.sectors[0],
+          ),
+        ).toBe(true);
+        expect(snapshotOperations.getWaterSurfaceAt(snapshot, 16, x, z)).toBe(
+          16,
+        );
+      }
+    });
+  });
+
+  it("includes composition in canonical equality before binding and preserves identical registration leases", async () => {
+    await withCompositionTerrain((terrain, internals) => {
+      const input = compositionZone(internals);
+      terrain.registerFlatZone(input);
+      const setup = internals.buildGrassWorkerSetup();
+      const region = {
+        minX: input.centerX - 1,
+        maxX: input.centerX + 1,
+        minZ: input.centerZ - 1,
+        maxZ: input.centerZ + 1,
+      };
+      const canonical = terrain.captureCanonicalGroundLease();
+      const grass = setup.prepareGroundingInputs!(region);
+      const revision = terrain["grassSurfaceRevision"];
+      terrain.registerFlatZone(structuredClone(input));
+      expect(canonical.isCurrent()).toBe(true);
+      expect(grass.isCurrent()).toBe(true);
+      expect(terrain["grassSurfaceRevision"]).toBe(revision);
+      const changed = structuredClone(input);
+      Reflect.set(
+        changed.radialPond!.bankComposition!.sectors[0],
+        "surface",
+        "cutbank",
+      );
+      terrain.registerFlatZone(changed);
+      expect(canonical.isCurrent()).toBe(false);
+      expect(grass.isCurrent()).toBe(false);
+      const next = terrain.captureCanonicalGroundLease();
+      const absent = structuredClone(changed);
+      delete absent.radialPond!.bankComposition;
+      terrain.registerFlatZone(absent);
+      expect(next.isCurrent()).toBe(false);
+      expect(internals.flatZones.get(input.id)!.radialPond).not.toHaveProperty(
+        "bankComposition",
+      );
+    });
+  });
+
+  it("rejects bound mutations, removals and overlapping registrations before changing leases or owned maps", async () => {
+    await withCompositionTerrain((terrain, internals) => {
+      const input = compositionZone(internals);
+      terrain.registerFlatZone(input);
+      const remote = {
+        id: "composition-remote-zone",
+        centerX: 800,
+        centerZ: 800,
+        width: 2,
+        depth: 2,
+        height: 28,
+        blendRadius: 1,
+      };
+      terrain.registerFlatZone(remote);
+      const field = internals.bindCompactPondBankField();
+      const setup = internals.buildGrassWorkerSetup();
+      const region = {
+        minX: input.centerX - 1,
+        maxX: input.centerX + 1,
+        minZ: input.centerZ - 1,
+        maxZ: input.centerZ + 1,
+      };
+      const canonical = terrain.captureCanonicalGroundLease();
+      const grass = setup.prepareGroundingInputs!(region);
+      const revision = terrain["grassSurfaceRevision"];
+      terrain.registerFlatZone(structuredClone(input));
+      expect(canonical.isCurrent()).toBe(true);
+      expect(grass.isCurrent()).toBe(true);
+      expect(terrain["grassSurfaceRevision"]).toBe(revision);
+      const owned = internals.flatZones.get(input.id);
+      const entries = [...internals.flatZones];
+      const changed = structuredClone(input);
+      Reflect.set(
+        changed.radialPond!.bankComposition!.sectors[0],
+        "surface",
+        "cutbank",
+      );
+      const absent = structuredClone(input);
+      delete absent.radialPond!.bankComposition;
+      const cases = [
+        () => terrain.registerFlatZone(changed),
+        () => terrain.registerFlatZone(absent),
+        () =>
+          terrain.registerFlatZone({ ...input, height: input.height + 0.01 }),
+        () =>
+          terrain.registerFlatZone({
+            ...input,
+            excludeGrass: !input.excludeGrass,
+          }),
+        () => terrain.unregisterFlatZone(input.id),
+        () =>
+          terrain.registerFlatZone({
+            ...remote,
+            id: "composition-overlap",
+            centerX: input.centerX,
+            centerZ: input.centerZ,
+          }),
+        () =>
+          terrain.registerFlatZone({
+            ...remote,
+            centerX: input.centerX,
+            centerZ: input.centerZ,
+          }),
+      ];
+      for (const edit of cases) {
+        expect(edit).toThrow(/require restart/);
+        expect([...internals.flatZones]).toEqual(entries);
+        expect(internals.flatZones.get(input.id)).toBe(owned);
+        expect(terrain["grassSurfaceRevision"]).toBe(revision);
+        expect(canonical.isCurrent()).toBe(true);
+        expect(grass.isCurrent()).toBe(true);
+        expect(internals.bindCompactPondBankField()).toBe(field);
+      }
+      terrain.registerFlatZone({ ...remote, height: 29 });
+      expect(canonical.isCurrent()).toBe(false);
+      expect(grass.isCurrent()).toBe(true);
+      expect(internals.bindCompactPondBankField()).toBe(field);
+      terrain.unregisterFlatZone(remote.id);
+      expect(internals.flatZones.has(remote.id)).toBe(false);
+      expect(grass.isCurrent()).toBe(true);
+    });
+  });
+
+  it("protects actual mask support outside rectangular metadata before accepting any bound edit", async () => {
+    await withCompositionTerrain((terrain, internals) => {
+      const input = compositionZone(internals);
+      terrain.registerFlatZone(input);
+      const tile = {
+        x: Math.floor(input.centerX),
+        z: Math.floor(input.centerZ),
+      };
+      const key = `${tile.x},${tile.z}`;
+      // The actual tile lies in the pond, while the small descriptive rectangle
+      // is 30 m away but remains in the real 3x3 authored candidate neighborhood.
+      const remoteRectangle = {
+        id: "bound-mask-prior-owner",
+        centerX: input.centerX + 30,
+        centerZ: input.centerZ,
+        width: 2,
+        depth: 2,
+        height: input.height,
+        blendRadius: 1,
+      };
+      const prior = { ...remoteRectangle, tileMask: new Set([key]) };
+      terrain.registerFlatZone(prior);
+      expect(internals.isGrassExcludedAt(tile.x + 0.25, tile.z + 0.25)).toBe(
+        true,
+      );
+      internals.bindCompactPondBankField();
+      const setup = internals.buildGrassWorkerSetup();
+      const bounds = {
+        minX: tile.x,
+        maxX: tile.x + 1,
+        minZ: tile.z,
+        maxZ: tile.z + 1,
+      };
+      const canonical = terrain.captureCanonicalGroundLease();
+      const grass = setup.prepareGroundingInputs!(bounds);
+      const revision = terrain["grassSurfaceRevision"];
+      const entries = [...internals.flatZones];
+      const candidates = [
+        { ...remoteRectangle, id: "bound-mask-set", tileMask: new Set([key]) },
+        // The admitted tile-list form contributes to canonical support bounds;
+        // guarding it is conservative even without a matching core Set.
+        {
+          ...remoteRectangle,
+          id: "bound-mask-tiles",
+          tileMaskTiles: [{ ...tile }],
+        },
+        {
+          ...remoteRectangle,
+          id: "bound-mask-both",
+          tileMask: new Set([key]),
+          tileMaskTiles: [{ ...tile }],
+          tileMaskBounds: {
+            minX: tile.x,
+            maxX: tile.x,
+            minZ: tile.z,
+            maxZ: tile.z,
+          },
+        },
+      ];
+      for (const candidate of candidates) {
+        expect(() => terrain.registerFlatZone(candidate)).toThrow(
+          /require restart/,
+        );
+        expect([...internals.flatZones]).toEqual(entries);
+        expect(terrain["grassSurfaceRevision"]).toBe(revision);
+        expect(canonical.isCurrent()).toBe(true);
+        expect(grass.isCurrent()).toBe(true);
+      }
+      expect(() => terrain.unregisterFlatZone(prior.id)).toThrow(
+        /require restart/,
+      );
+      expect(internals.flatZones.get(prior.id)).toBe(
+        entries.find(([id]) => id === prior.id)![1],
+      );
+      // Unlike tile masks, remote grass-only bounds are already invalid data.
+      expect(() =>
+        terrain.registerFlatZone({
+          ...remoteRectangle,
+          id: "bound-grass-bounds-invalid",
+          grassExclusionBounds: bounds,
+        }),
+      ).toThrow(/grassExclusionBounds must remain inside grading support/);
+      expect([...internals.flatZones]).toEqual(entries);
+      expect(terrain["grassSurfaceRevision"]).toBe(revision);
+      expect(canonical.isCurrent()).toBe(true);
+      expect(grass.isCurrent()).toBe(true);
+    });
+  });
+
+  it("seals previously exposed real water bodies and the array, not merely register()", async () => {
+    await withCompositionTerrain((terrain, internals) => {
+      terrain.registerFlatZone(compositionZone(internals));
+      const registry = terrain.getWaterBodyRegistry();
+      const bodies = registry.getAllBodies();
+      const body = bodies.find((entry) => entry.id === "haven_pond_water")!;
+      const expected = structuredClone(body);
+      const waterLease = registry.captureRegion({
+        minX: body.centerX,
+        maxX: body.centerX,
+        minZ: body.centerZ,
+        maxZ: body.centerZ,
+      });
+      internals.bindCompactPondBankField();
+      expect(Object.isFrozen(bodies)).toBe(true);
+      expect(Object.isFrozen(body)).toBe(true);
+      expect(registry.getBodyAt(body.centerX, body.centerZ)).toBe(body);
+      expect(() =>
+        registry.register({ ...body, id: "sealed-added-water" }),
+      ).toThrow(/require restart/);
+      expect(() => registry.register({ ...body })).toThrow(/require restart/);
+      expect(Reflect.set(body, "surfaceY", body.surfaceY + 1)).toBe(false);
+      expect(() =>
+        Object.defineProperty(body, "radius", { value: body.radius + 1 }),
+      ).toThrow(TypeError);
+      expect(() =>
+        Array.prototype.push.call(bodies, { ...body, id: "array-bypass" }),
+      ).toThrow(TypeError);
+      expect(Reflect.set(bodies, "0", { ...body, surfaceY: 0 })).toBe(false);
+      expect(Reflect.deleteProperty(bodies, "0")).toBe(false);
+      expect(registry.getAllBodies()).toBe(bodies);
+      expect(body).toEqual(expected);
+      expect(waterLease.isCurrent()).toBe(true);
+      expect(registry.getWaterSurfaceAt(body.centerX, body.centerZ)).toBe(
+        expected.surfaceY,
+      );
+    });
+  });
+
+  it("does not seal or bind when registered water disagrees with the material owner", async () => {
+    await withCompositionTerrain((terrain, internals) => {
+      terrain.registerFlatZone(compositionZone(internals));
+      const registry = terrain.getWaterBodyRegistry();
+      const body = registry
+        .getAllBodies()
+        .find((entry) => entry.id === "haven_pond_water")!;
+      const surfaceY = body.surfaceY;
+      body.surfaceY += 0.01;
+      expect(() => internals.bindCompactPondBankField()).toThrow(
+        /water differs from material/,
+      );
+      expect(Object.isFrozen(body)).toBe(false);
+      expect(Object.isFrozen(registry.getAllBodies())).toBe(false);
+      body.surfaceY = surfaceY;
+      expect(internals.bindCompactPondBankField().pond.surfaceY).toBe(surfaceY);
+    });
+  });
+
+  it("retains the unselected mutable terrain/water lifecycle and regional omissions", async () => {
+    await withTerrain((terrain, internals) => {
+      const zone = compositionZone(internals);
+      terrain.registerFlatZone(zone);
+      const registry = terrain.getWaterBodyRegistry();
+      const body = registry
+        .getAllBodies()
+        .find((entry) => entry.id === "haven_pond_water")!;
+      expect(Object.isFrozen(body)).toBe(false);
+      expect(Object.isFrozen(registry.getAllBodies())).toBe(false);
+      const snapshot = internals.getTerrainSurfaceForRegion(900, 900, 901, 901);
+      expect(snapshot.zones).toEqual([]);
+      expect(snapshot.waterBodies).toEqual([]);
+      const ground = terrain.captureCanonicalGroundLease();
+      terrain.registerFlatZone({ ...zone, height: zone.height + 0.01 });
+      expect(ground.isCurrent()).toBe(false);
+      const originalY = body.surfaceY;
+      body.surfaceY += 0.01;
+      expect(registry.getWaterSurfaceAt(body.centerX, body.centerZ)).toBe(
+        originalY + 0.01,
+      );
+      registry.register({
+        ...body,
+        id: "unselected-added-water",
+        centerX: 900,
+        centerZ: 900,
+      });
+      expect(registry.getBodyAt(900, 900)?.id).toBe("unselected-added-water");
+      terrain.unregisterFlatZone(zone.id);
+      expect(internals.flatZones.has(zone.id)).toBe(false);
+    });
+  });
+});
+
 describe("actual TerrainSystem regional grass snapshots", () => {
+  it("owns rounded blend geometry and invalidates canonical ground and grass when it changes", async () => {
+    await withTerrain((terrain, internals) => {
+      const zone: GrassTerrainSurfaceZone = {
+        id: "rounded-blend-lifecycle",
+        centerX: 300,
+        centerZ: 450,
+        width: 10,
+        depth: 10,
+        blendRadius: 5,
+        height: 40,
+        excludeGrass: false,
+      };
+      terrain.registerFlatZone(zone);
+      const setup = internals.buildGrassWorkerSetup();
+      const region = { minX: 290, minZ: 440, maxX: 310, maxZ: 460 };
+      const grass = setup.prepareGroundingInputs!(region);
+      const ground = terrain.captureCanonicalGroundLease();
+      const oldSnapshot = setup.getTerrainSurfaceForRegion(290, 440, 310, 460);
+      const oldHeight = internals.getFlatZoneHeight(309, 459);
+      const rounded = { ...zone, blendShape: "rounded" as const };
+      terrain.registerFlatZone(rounded);
+      expect(ground.isCurrent()).toBe(false);
+      expect(grass.isCurrent()).toBe(false);
+      expect(internals.flatZones.get(zone.id)!.blendShape).toBe("rounded");
+      expect(
+        oldSnapshot.zones.find((entry) => entry.id === zone.id),
+      ).not.toHaveProperty("blendShape");
+      expect(internals.getFlatZoneHeight(309, 459)).not.toBe(oldHeight);
+      const currentGround = terrain.captureCanonicalGroundLease();
+      const currentGrass = setup.prepareGroundingInputs!(region);
+      terrain.registerFlatZone(rounded);
+      expect(currentGround.isCurrent()).toBe(true);
+      expect(currentGrass.isCurrent()).toBe(true);
+      const owned = internals.flatZones.get(zone.id);
+      expect(() =>
+        terrain.registerFlatZone({ ...rounded, blendShape: undefined }),
+      ).toThrow(/blendShape/);
+      expect(internals.flatZones.get(zone.id)).toBe(owned);
+      expect(currentGround.isCurrent()).toBe(true);
+      expect(currentGrass.isCurrent()).toBe(true);
+      const regionSnapshot = setup.getTerrainSurfaceForRegion(
+        290,
+        440,
+        310,
+        460,
+      );
+      expect(
+        regionSnapshot.zones.find((entry) => entry.id === zone.id)!.blendShape,
+      ).toBe("rounded");
+      for (const [x, z] of [
+        [310, 455],
+        [308, 459],
+        [309, 459],
+      ]) {
+        const candidates = snapshotOperations
+          .createZoneIndex(regionSnapshot, 100)
+          .getZonesAt(x, z);
+        expect(
+          surfaceOperations.resolveHeight(
+            candidates,
+            x,
+            z,
+            () => terrain.getProceduralHeightAt(x, z),
+            new Set(regionSnapshot.arenaFloorIds),
+            regionSnapshot.arenaGradeHeight,
+          ),
+        ).toBe(internals.getFlatZoneHeight(x, z));
+      }
+      const composed = {
+        ...rounded,
+        blendComposition: "smooth-union" as const,
+      };
+      terrain.registerFlatZone(composed);
+      expect(currentGround.isCurrent()).toBe(false);
+      expect(currentGrass.isCurrent()).toBe(false);
+      expect(
+        regionSnapshot.zones.find((entry) => entry.id === zone.id),
+      ).not.toHaveProperty("blendComposition");
+      const unionGround = terrain.captureCanonicalGroundLease();
+      const unionGrass = setup.prepareGroundingInputs!(region);
+      const unionSnapshot = setup.getTerrainSurfaceForRegion(
+        290,
+        440,
+        310,
+        460,
+      );
+      expect(
+        unionSnapshot.zones.find((entry) => entry.id === zone.id)!
+          .blendComposition,
+      ).toBe("smooth-union");
+      terrain.registerFlatZone(composed);
+      expect(unionGround.isCurrent()).toBe(true);
+      expect(unionGrass.isCurrent()).toBe(true);
+      expect(() =>
+        terrain.registerFlatZone({ ...composed, blendComposition: undefined }),
+      ).toThrow(/blendComposition/);
+      expect(unionGround.isCurrent()).toBe(true);
+      expect(unionGrass.isCurrent()).toBe(true);
+      terrain.registerFlatZone(zone);
+      expect(unionGround.isCurrent()).toBe(false);
+      expect(unionGrass.isCurrent()).toBe(false);
+      expect(internals.getFlatZoneHeight(309, 459)).toBe(oldHeight);
+    });
+  });
+
   it("keeps distant inputs current through local edits with bounded revision history", async () => {
     await withTerrain((terrain, internals) => {
       const setup = internals.buildGrassWorkerSetup();
@@ -70,8 +648,14 @@ describe("actual TerrainSystem regional grass snapshots", () => {
         height: 28,
         blendRadius: 1,
       };
+      terrain.registerFlatZone(remote);
+      const revision = terrain["grassSurfaceRevision"];
+      terrain.registerFlatZone(remote);
+      expect(terrain["grassSurfaceRevision"]).toBe(revision);
       for (let i = 0; i < 34; i++) {
-        terrain.registerFlatZone(remote);
+        // Exhaust history with actual height changes; identical registrations
+        // deliberately do not invalidate canonical ground or grass anymore.
+        terrain.registerFlatZone({ ...remote, height: 29 + (i % 2) });
         expect(regularlyChecked.isCurrent()).toBe(true);
       }
       expect(terrain["grassSurfaceChanges"]).toHaveLength(64);
@@ -106,7 +690,7 @@ describe("actual TerrainSystem regional grass snapshots", () => {
       const lease = setup.prepareGroundingInputs!(region);
       const oldSnapshot = setup.getTerrainSurfaceForRegion(312, 312, 328, 328);
       const oldBounds = structuredClone(zone.grassExclusionBounds);
-      const heights = [];
+      const heights: number[] = [];
       for (let x = 313; x <= 327; x += 0.5)
         for (let z = 314; z <= 326; z += 0.5)
           heights.push(internals.getHeightAtComputed(x, z));
@@ -140,7 +724,7 @@ describe("actual TerrainSystem regional grass snapshots", () => {
         oldSnapshot.zones.find((entry) => entry.id === zone.id)!
           .grassExclusionBounds,
       ).toEqual(oldBounds);
-      const after = [];
+      const after: number[] = [];
       for (let x = 313; x <= 327; x += 0.5)
         for (let z = 314; z <= 326; z += 0.5)
           after.push(internals.getHeightAtComputed(x, z));
@@ -206,11 +790,30 @@ describe("actual TerrainSystem regional grass snapshots", () => {
       second.release();
       expect(snapshot()).toEqual(original);
       expect(added.exclusionPolygons).toHaveLength(18);
-      const capacity = Array.from({ length: 8 }, (_, i) => ({
-        ...added.exclusionPolygons![17],
-        id: `overflow-${i}`,
-      }));
+      const remainingCapacity =
+        snapshotOperations.limits.maxExclusionPolygons -
+        original.exclusionPolygons!.length;
+      const capacity = Array.from(
+        { length: remainingCapacity + 1 },
+        (_, i) => ({
+          ...added.exclusionPolygons![17],
+          id: `overflow-${i}`,
+        }),
+      );
       expect(() => terrain.acquireGrassExclusionPolygons(capacity)).toThrow();
+      expect(snapshot()).toEqual(original);
+      const atCapacity = terrain.acquireGrassExclusionPolygons(
+        capacity.slice(0, -1),
+      );
+      expect(snapshot().exclusionPolygons).toHaveLength(
+        snapshotOperations.limits.maxExclusionPolygons,
+      );
+      const full = snapshot();
+      expect(() =>
+        terrain.acquireGrassExclusionPolygons(capacity.slice(-1)),
+      ).toThrow();
+      expect(snapshot()).toEqual(full);
+      atCapacity.release();
       expect(snapshot()).toEqual(original);
     });
   });
@@ -339,7 +942,20 @@ describe("actual TerrainSystem regional grass snapshots", () => {
       masked.tileMaskTiles![0].x = 999;
       masked.tileMaskBounds!.minX = 999;
       const pond = internals.flatZones.get("haven_pond_floor")!;
-      pond.radialPond!.bankHeight += 10;
+      const bankHeight = pond.radialPond!.bankHeight;
+      expect(Object.isFrozen(pond.radialPond)).toBe(true);
+      expect(Reflect.set(pond.radialPond!, "bankHeight", bankHeight + 10)).toBe(
+        false,
+      );
+      // Real authored updates go through registration so staged consumers can
+      // retire; the previously queued snapshot must still stay detached.
+      terrain.registerFlatZone({
+        ...pond,
+        radialPond: { ...pond.radialPond!, bankHeight: bankHeight + 10 },
+      });
+      expect(internals.flatZones.get(pond.id)!.radialPond!.bankHeight).toBe(
+        bankHeight + 10,
+      );
       terrain.getWaterBodyRegistry().getAllBodies()[0].surfaceY += 10;
       internals.arenaFloorZoneIds.clear();
       expect(snapshot).toEqual(expected);

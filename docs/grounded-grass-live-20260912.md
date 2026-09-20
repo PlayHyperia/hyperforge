@@ -118,6 +118,7 @@ found no tests; that invocation is not evidence. The pinned project Vitest
   slice timing can overshoot; it is not a hard frame-time guarantee.
 - Denser coherent vegetation and the remaining island/atmosphere/character
   art work, plus the documented cow/dagger errors and integrated launch gates.
+
 ## Allocation follow-up — 2026-09-12
 
 An owned native Chrome CPU sample (`compact-world-probe70/grounding.cpuprofile`)

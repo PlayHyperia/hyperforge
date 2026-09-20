@@ -31,6 +31,12 @@ export function createCompactPreparationDetailRegions(
     return {
       ...area.bounds,
       resolution: id === "haven_pond" ? 128 : gameplayResolution,
+      // Candidate annular bank geometry belongs to these minimum-size leaves.
+      // A distant coarse parent must not replace it while this root is active.
+      // Reuse the existing 128 grid; no new region or global resolution change.
+      ...(id === "haven_pond" && profile.southernMeadow !== undefined
+        ? { keepMinSize: true }
+        : {}),
     };
   });
   if (
@@ -91,6 +97,22 @@ export function createCompactPreparationDetailRegions(
             maxX: profile.havenShoulder.maxX,
             minZ: profile.havenShoulder.minZ,
             maxZ: profile.havenShoulder.maxZ,
+            resolution: 128,
+            keepMinSize: true,
+          },
+        ]
+      : []),
+    // A selected dry cove-head notch needs sub-metre sampling too. Retain only
+    // the leaves intersecting its admitted support; omitted options preserve
+    // the existing planner exactly. This is local geometry detail, not a global
+    // density increase or a change to authoritative terrain/grass placement.
+    ...(profile.coastalApron?.headShoulder
+      ? [
+          {
+            minX: profile.coastalApron.headShoulder.minX,
+            maxX: profile.coastalApron.headShoulder.maxX,
+            minZ: profile.coastalApron.headShoulder.minZ,
+            maxZ: profile.coastalApron.headShoulder.maxZ,
             resolution: 128,
             keepMinSize: true,
           },

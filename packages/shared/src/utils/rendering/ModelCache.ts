@@ -24,6 +24,7 @@ import THREE, { MeshStandardNodeMaterial } from "../../extras/three/three";
 import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
 import { MeshoptDecoder } from "three/examples/jsm/libs/meshopt_decoder.module.js";
 import { clone as cloneSkeleton } from "three/examples/jsm/utils/SkeletonUtils.js";
+import { copyPbrToNodeMaterial } from "./ModelMaterialConversion";
 import type { World } from "../../core/World";
 import {
   PROCESSED_MODEL_VERSION,
@@ -359,6 +360,15 @@ export class ModelCache {
     mat: THREE.Material,
     hasVertexColors = false,
   ): MeshStandardNodeMaterial {
+    // Physical is a Standard subclass, but flattening it discards authored
+    // IOR/specular and other optical inputs. Preserve the native PBR type and
+    // state; ownership/disposal remains with this cache, not the copy helper.
+    const pbr = copyPbrToNodeMaterial(mat, hasVertexColors);
+    if (pbr) {
+      mat.dispose();
+      return pbr;
+    }
+
     // Extract textures and colors from original material (handles MeshStandardMaterial, MeshPhysicalMaterial, etc.)
     const originalMat = mat as THREE.Material & {
       map?: THREE.Texture | null;

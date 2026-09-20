@@ -181,6 +181,77 @@ describe("TerrainSystem radial pond underlying grading", () => {
     ).toBeNull();
   });
 
+  it("joins paired shoulders to actual indexed core, blend and union grades instead of raw noise", () => {
+    const candidate: FlatZone = {
+      ...actualPond,
+      radialPond: {
+        ...actualPond.radialPond!,
+        shorelineAmplitude: 0,
+        bankSectors: [
+          {
+            bearing: 0,
+            halfWidth: 1,
+            innerRadius: 6,
+            innerHeight: 27.98,
+            outerRadius: 8.2,
+            outerHeight: 28.55,
+          },
+        ],
+      },
+    };
+    const radius = 9.6;
+    const x = actualPond.centerX + radius;
+    const z = actualPond.centerZ;
+    const cases = [
+      [grade({ height: 0 })],
+      [grade({ height: 40 })],
+      [grade({ width: 10, height: 35 })],
+      [
+        grade({
+          id: "union-west",
+          width: 10,
+          height: 35,
+          blendShape: "rounded",
+          blendComposition: "smooth-union",
+        }),
+        grade({
+          id: "union-east",
+          width: 8,
+          centerX: actualPond.centerX + 1,
+          height: 35,
+          blendShape: "rounded",
+          blendComposition: "smooth-union",
+        }),
+      ],
+    ];
+    for (const zones of cases) {
+      for (const reverse of [false, true]) {
+        const { terrain } = terrainFor();
+        for (const zone of zones) terrain.registerFlatZone(zone);
+        const underlying = terrain.getHeightAt(x, z);
+        expect(
+          Math.abs(underlying - terrain.getProceduralHeightAt(x, z)),
+        ).toBeGreaterThan(0.1);
+        if (reverse) {
+          // Fresh real owner verifies registration order without overriding a method.
+          const reordered = terrainFor().terrain;
+          reordered.registerFlatZone(candidate);
+          for (const zone of zones) reordered.registerFlatZone(zone);
+          expect(reordered.getHeightAt(x, z)).toBeCloseTo(
+            (28.55 + underlying) / 2,
+            12,
+          );
+        } else {
+          terrain.registerFlatZone(candidate);
+          expect(terrain.getHeightAt(x, z)).toBeCloseTo(
+            (28.55 + underlying) / 2,
+            12,
+          );
+        }
+      }
+    }
+  });
+
   it("retains nearest-pond priority through overlapping indexed zones and repeated queries", () => {
     const second: FlatZone = {
       ...actualPond,

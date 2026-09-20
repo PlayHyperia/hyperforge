@@ -42,6 +42,149 @@ function settle(cutaway: CompactRoofCutaway, camera: THREE.Camera, start = 0) {
   for (let ms = start; ms <= start + 300; ms += 20) cutaway.update(camera, ms);
 }
 
+function bankFixture() {
+  const geometry = createOpenWorkshop(
+    Array.from({ length: 4 }, () => ({ bottom: -0.08, top: 0.22 })),
+    { recipe: "bank-pavilion-v1", architecturalFinish: "haven-v1" },
+  );
+  const material = new THREE.MeshBasicMaterial();
+  cleanup.push(() => {
+    geometry.dispose();
+    material.dispose();
+  });
+  const root = new THREE.Group();
+  root.position.set(350, 28, 320);
+  const roof = new THREE.Mesh(geometry.roof, material),
+    timber = new THREE.Mesh(geometry.timber, material);
+  root.add(timber, roof);
+  root.updateMatrixWorld(true);
+  const cutaway = new CompactRoofCutaway(root, roof, timber, "bank");
+  const camera = new THREE.PerspectiveCamera(52, 16 / 9, 0.1, 1000);
+  const pose = (eye: THREE.Vector3, target: THREE.Vector3) => {
+    camera.position.copy(root.localToWorld(eye));
+    camera.lookAt(root.localToWorld(target));
+    camera.updateMatrixWorld(true);
+  };
+  return { geometry, root, roof, timber, cutaway, camera, pose };
+}
+
+describe("bank pavilion cutaway with actual recipe bounds (not GPU acceptance)", () => {
+  it("reveals an outward-looking interior camera and preserves lower-frame labels", () => {
+    const { geometry, cutaway, camera, pose } = bankFixture();
+    pose(new THREE.Vector3(0, 1.7, 3.8), new THREE.Vector3(0, 1.7, 12));
+    const before = camera.matrixWorld.toArray();
+    settle(cutaway, camera);
+    expect(cutaway.desired).toBe(true);
+    expect(cutaway.value).toBe(1);
+    expect(camera.matrixWorld.toArray()).toEqual(before);
+    expect(cutaway.upperWallY).toBeNull();
+    const mask = geometry.timber.getAttribute("courtRoof");
+    for (let i = 0; i < mask.count; i += 3) {
+      expect(mask.getX(i)).toBe(mask.getX(i + 1));
+      expect(mask.getX(i)).toBe(mask.getX(i + 2));
+      // Each corner emits one post followed by two upper knee braces.
+      // The braces now follow the roof cutaway; only the four posts remain.
+      const isPermanentPost = i < 12 * 84 && Math.floor(i / 84) % 3 === 0;
+      expect(mask.getX(i)).toBe(isPermanentPost ? 0 : 1);
+    }
+  });
+
+  it("uses the larger actual bank footprint for an above-roof oblique ray", () => {
+    const { cutaway, camera, pose } = bankFixture();
+    pose(new THREE.Vector3(0, 9, 4.2), new THREE.Vector3(0, 1.2, 3.5));
+    settle(cutaway, camera);
+    expect(cutaway.value).toBe(1);
+    pose(new THREE.Vector3(0, 9, 4.2), new THREE.Vector3(0, 1.2, 12));
+    settle(cutaway, camera, 320);
+    expect(cutaway.value).toBe(0);
+    pose(new THREE.Vector3(0, 40, 60), new THREE.Vector3(0, 1.2, 0));
+    settle(cutaway, camera, 640);
+    expect(cutaway.value).toBe(0);
+  });
+
+  it("reads transformed bank and camera parents without updating their authority", () => {
+    const { root, cutaway, camera, pose } = bankFixture();
+    const parent = new THREE.Group();
+    parent.position.set(10, 3, -7);
+    parent.rotation.y = 0.4;
+    parent.add(root);
+    parent.updateMatrixWorld(true);
+    pose(new THREE.Vector3(0, 9, 4.2), new THREE.Vector3(0, 1.2, 3.5));
+    const cameraParent = new THREE.Group();
+    cameraParent.position.set(7, 2, 3);
+    camera.position.sub(cameraParent.position);
+    cameraParent.add(camera);
+    cameraParent.updateMatrixWorld(true);
+    const beforeRoot = root.matrixWorld.toArray(),
+      beforeCamera = camera.matrixWorld.toArray();
+    settle(cutaway, camera);
+    expect(cutaway.value).toBe(1);
+    expect(root.matrixWorld.toArray()).toEqual(beforeRoot);
+    expect(camera.matrixWorld.toArray()).toEqual(beforeCamera);
+  });
+
+  it("keeps outside access open and filters only fully faded upper geometry", () => {
+    const { root, roof, timber, cutaway, camera, pose } = bankFixture();
+    cutaway.installPointerFilter(roof);
+    cutaway.installPointerFilter(timber);
+    pose(new THREE.Vector3(0, 1.7, 0), new THREE.Vector3(0, 1.7, 10));
+    const ray = new THREE.Raycaster(
+      root.position.clone().add(new THREE.Vector3(0, 9, 0)),
+      new THREE.Vector3(0, -1, 0),
+      0,
+      12,
+    );
+    const original = ray.intersectObject(root);
+    expect(original.some((hit) => cutaway.isUpperHit(hit))).toBe(true);
+    cutaway.update(camera, 0);
+    cutaway.update(camera, 20);
+    expect(cutaway.value).toBeGreaterThan(0);
+    expect(cutaway.value).toBeLessThan(1);
+    expect(ray.intersectObject(root).length).toBe(original.length);
+    settle(cutaway, camera, 40);
+    expect(
+      ray.intersectObject(root).every((hit) => !cutaway.isUpperHit(hit)),
+    ).toBe(true);
+    const physical: THREE.Intersection[] = [];
+    THREE.Mesh.prototype.raycast.call(roof, ray, physical);
+    expect(physical.length).toBeGreaterThan(0);
+    ray.ray.origin.copy(root.position).add(new THREE.Vector3(-6, 1, -3.5));
+    ray.ray.direction.set(1, 0, 0);
+    ray.far = 3;
+    expect(ray.intersectObject(timber).length).toBeGreaterThan(0);
+    pose(new THREE.Vector3(7, 1.7, 0), new THREE.Vector3(10, 1.7, 0));
+    settle(cutaway, camera, 400);
+    expect(cutaway.value).toBe(0);
+  });
+
+  it("does not share fading with shadow/reflection cameras or advance twice in a frame", () => {
+    const { cutaway, camera, pose } = bankFixture();
+    pose(new THREE.Vector3(0, 1.7, 0), new THREE.Vector3(0, 1.7, 10));
+    for (let frame = 0; frame <= 15; frame++)
+      cutaway.valueForPass(camera, camera, frame, frame * 20);
+    const other = new THREE.PerspectiveCamera();
+    expect(cutaway.valueForPass(other, camera, 15, 320)).toBe(0);
+    expect(cutaway.valueForPass(camera, camera, 15, 340)).toBe(1);
+    expect(cutaway.decisionCount).toBe(1);
+  });
+
+  it("fails closed without actual bounded roof geometry or authored upper-frame labels", () => {
+    const { root, roof, timber } = bankFixture();
+    const bounds = roof.geometry.boundingBox;
+    roof.geometry.boundingBox = null;
+    expect(() => new CompactRoofCutaway(root, roof, timber, "bank")).toThrow(
+      /actual local roof/,
+    );
+    roof.geometry.boundingBox = bounds;
+    const mask = timber.geometry.getAttribute("courtRoof");
+    timber.geometry.deleteAttribute("courtRoof");
+    expect(() => new CompactRoofCutaway(root, roof, timber, "bank")).toThrow(
+      /actual local roof/,
+    );
+    timber.geometry.setAttribute("courtRoof", mask);
+  });
+});
+
 describe.each([undefined, "haven-v1"] as const)(
   "compact smithy %s cutaway policy (CPU geometry, not visual/GPU acceptance)",
   (architecturalFinish) => {

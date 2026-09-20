@@ -59,7 +59,8 @@
   "scripts": {
     "dev": "tsc --watch",
     "build": "rm -rf dist tsconfig.tsbuildinfo && tsc",
-    "test": "bun run --cwd ../impostors build && vitest run --passWithNoTests",
+    "test": "bun run test:sourcemaps && bun run --cwd ../impostors build && vitest run --passWithNoTests",
+    "test:sourcemaps": "node --test tests/integration/source-map-packaging.test.mjs",
     "test:watch": "vitest",
     "lint": "eslint src --max-warnings 50",
     "typecheck": "tsc --noEmit",

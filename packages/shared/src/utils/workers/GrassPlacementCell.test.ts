@@ -26,6 +26,210 @@ const input: GrassPlacementDomainInput = {
   placementCell: cell,
 };
 
+describe("authored establishment rotation fork", () => {
+  it("is deterministic, bounded and independent of the historical stream and leaf storage frame", () => {
+    const first = operations.resolveDomain({
+      ...input,
+      placementDistribution: "fine-cell-stratified-v1",
+    });
+    const other = operations.resolveDomain({
+      ...input,
+      centerX: 312.5,
+      centerZ: 312.5,
+      size: 25,
+      placementDistribution: "fine-cell-stratified-v1",
+    });
+    const historical = new SeededRandom(37),
+      untouched = new SeededRandom(37);
+    const angles = new Set<number>();
+    for (let index = 0; index < first.maxCount; index++) {
+      const angle = operations.establishmentRotation(first, 37, index);
+      expect(angle).toBeGreaterThanOrEqual(0);
+      expect(angle).toBeLessThan(2 * Math.PI);
+      expect(angle).toBe(operations.establishmentRotation(other, 37, index));
+      expect(angle).toBe(operations.establishmentRotation(first, 37, index));
+      angles.add(angle);
+      expect(historical.random()).toBe(untouched.random());
+    }
+    expect(angles.size).toBe(first.maxCount);
+    for (const index of [-1, 0.5, first.maxCount, Infinity])
+      expect(() =>
+        operations.establishmentRotation(first, 37, index),
+      ).toThrow();
+    expect(() =>
+      operations.establishmentRotation({ ...first }, 37, 0),
+    ).toThrow();
+    expect(() => operations.establishmentRotation(first, NaN, 0)).toThrow();
+  });
+});
+
+describe("explicit single-cell sixty-centimetre coverage", () => {
+  const selected: GrassPlacementDomainInput = {
+    ...input,
+    clumpSpacing: 0.6,
+    placementDistribution: "fine-cell-stratified-v1",
+    placementCoverage: "sixty-centimetre-cell-v1",
+  };
+
+  it("detaches and freezes the exact one-cell trial without reading accessors", () => {
+    const source = { id: "sixty-centimetre-cell-v1", cell: { ...cell } };
+    const trial = operations.validateCoverageTrial(source);
+    expect(trial).toEqual(source);
+    expect(Object.isFrozen(trial)).toBe(true);
+    expect(Object.isFrozen(trial.cell)).toBe(true);
+    expect(trial.cell).not.toBe(source.cell);
+    source.cell.indexX++;
+    source.id = "changed";
+    expect(trial).toEqual({ id: "sixty-centimetre-cell-v1", cell });
+    let reads = 0;
+    const accessor = Object.defineProperty({ cell }, "id", {
+      enumerable: true,
+      get() {
+        reads++;
+        return "sixty-centimetre-cell-v1";
+      },
+    });
+    for (const bad of [
+      undefined,
+      null,
+      [],
+      {},
+      { id: undefined, cell },
+      { id: "sixty-centimetre-cell-v2", cell },
+      { id: "half-metre-cell-v1", cell },
+      { id: "sixty-centimetre-cell-v1", cell: { ...cell, size: 50 } },
+      { id: "sixty-centimetre-cell-v1", cell, extra: true },
+      { id: "sixty-centimetre-cell-v1", cell, [Symbol("extra")]: true },
+      Object.assign(Object.create({ id: "sixty-centimetre-cell-v1" }), {
+        cell,
+      }),
+      Object.defineProperty({ cell }, "id", {
+        value: "sixty-centimetre-cell-v1",
+      }),
+      accessor,
+    ])
+      expect(() => operations.validateCoverageTrial(bad)).toThrow(
+        "Invalid grass placement cell",
+      );
+    expect(reads).toBe(0);
+  });
+
+  it("admits exactly 1737 candidates without changing existing domain or sampling arithmetic", () => {
+    expect(operations.validateCoverage(undefined)).toBeUndefined();
+    expect(() => operations.validateCoverage("half-metre-cell-v1")).toThrow();
+    expect(operations.validateCoverage("sixty-centimetre-cell-v1")).toBe(
+      "sixty-centimetre-cell-v1",
+    );
+    const { placementCoverage: _coverage, ...unmarked } = selected;
+    const before = operations.resolveDomain(unmarked);
+    const after = operations.resolveDomain(selected);
+    expect(after).toEqual({
+      ...before,
+      placementCoverage: "sixty-centimetre-cell-v1",
+    });
+    expect(after.maxCount).toBe(1737);
+    expect(Object.isFrozen(after)).toBe(true);
+    expect(
+      Object.prototype.hasOwnProperty.call(before, "placementCoverage"),
+    ).toBe(false);
+    for (let i = 0; i < 1737; i++) {
+      const a = { x: NaN, z: NaN },
+        b = { x: NaN, z: NaN };
+      operations.samplePosition(before, i, 0.125, 0.875, a);
+      operations.samplePosition(after, i, 0.125, 0.875, b);
+      expect(b).toEqual(a);
+    }
+    expect(operations.resolveDomain(input).maxCount).toBe(1276);
+    expect(
+      operations.resolveDomain({ ...input, placementCell: undefined }),
+    ).toEqual({
+      centerX: 350,
+      centerZ: 350,
+      size: 100,
+      maxCount: 20409,
+    });
+  });
+
+  it("rejects marker scope and non-data fields before sampling", () => {
+    for (const change of [
+      { placementCoverage: undefined },
+      { placementCoverage: null },
+      { placementCoverage: false },
+      { placementCoverage: "sixty-centimetre-cell-v2" },
+      { placementCoverage: "half-metre-cell-v1" },
+      { placementCell: undefined },
+      { placementDistribution: undefined },
+      { clumpSpacing: 0.7 },
+      { clumpSpacing: 0.5 },
+      { clumpSpacing: 0.3, spacingMul: 2 },
+      { spacingMul: 5 },
+    ])
+      expect(() =>
+        operations.resolveDomain({
+          ...selected,
+          ...change,
+        } as GrassPlacementDomainInput),
+      ).toThrow();
+    const { placementCoverage: _coverage, ...base } = selected;
+    let reads = 0;
+    const accessor = Object.defineProperty({ ...base }, "placementCoverage", {
+      enumerable: true,
+      get() {
+        reads++;
+        return "sixty-centimetre-cell-v1";
+      },
+    });
+    for (const bad of [
+      accessor,
+      Object.assign(
+        Object.create({ placementCoverage: "sixty-centimetre-cell-v1" }),
+        base,
+      ),
+      Object.defineProperty({ ...base }, "placementCoverage", {
+        value: "sixty-centimetre-cell-v1",
+      }),
+    ])
+      expect(() => operations.resolveDomain(bad)).toThrow(/coverage/i);
+    expect(reads).toBe(0);
+  });
+
+  it("keeps trial admission and all 1737 positions self-contained after real minification", () => {
+    const bundled = transformSync(
+      `globalThis.factory = ${createGrassPlacementCellOperations.toString()};`,
+      { minify: true, keepNames: true, target: "es2022" },
+    ).code;
+    const factory = runInNewContext(
+      `${bundled}; globalThis.factory`,
+    ) as typeof createGrassPlacementCellOperations;
+    for (const source of [
+      createGrassPlacementCellOperations.toString(),
+      factory.toString(),
+    ]) {
+      const actual = runInNewContext(`(${source})()`) as typeof operations;
+      expect(
+        actual.validateCoverageTrial({ id: "sixty-centimetre-cell-v1", cell }),
+      ).toEqual({ id: "sixty-centimetre-cell-v1", cell });
+      expect(() => actual.validateCoverage("half-metre-cell-v1")).toThrow();
+      expect(() =>
+        actual.resolveDomain({ ...selected, clumpSpacing: 0.5 }),
+      ).toThrow();
+      const domain = actual.resolveDomain(selected);
+      const reference = operations.resolveDomain(selected);
+      expect(domain).toEqual(reference);
+      for (let i = 0; i < 1737; i++) {
+        const a = { x: NaN, z: NaN },
+          b = { x: NaN, z: NaN };
+        actual.samplePosition(domain, i, 0.625, 0.375, a);
+        operations.samplePosition(reference, i, 0.625, 0.375, b);
+        expect(a).toEqual(b);
+      }
+      expect(() =>
+        actual.resolveDomain({ ...selected, spacingMul: 2 }),
+      ).toThrow();
+    }
+  });
+});
+
 describe("bounded grass-owned sampling cells", () => {
   it("detaches canonical cells and covers each real leaf exactly once", () => {
     const source = { ...cell };
@@ -131,7 +335,9 @@ describe("bounded grass-owned sampling cells", () => {
       size: 100,
       maxCount: 20409,
     });
-    expect(Object.hasOwn(legacy, "placementCell")).toBe(false);
+    expect(Object.prototype.hasOwnProperty.call(legacy, "placementCell")).toBe(
+      false,
+    );
   });
 
   it("runs the exact self-contained factory in fresh and minified keepNames contexts", () => {
@@ -206,7 +412,13 @@ describe("exact-quota fine cell jittered strata", () => {
   // candidate-index-to-row formula. Each row owns an integer candidate range.
   const rowsFor = (quota: number) => {
     const count = Math.round(Math.sqrt(quota));
-    const rows = [];
+    const rows: {
+      start: number;
+      end: number;
+      columns: number;
+      minZ: number;
+      maxZ: number;
+    }[] = [];
     let start = 0;
     for (let row = 0; row < count; row++) {
       const end = Math.floor(((row + 1) * quota) / count);
@@ -265,7 +477,7 @@ describe("exact-quota fine cell jittered strata", () => {
       ).toThrow();
       const legacy = operations.resolveDomain({ ...input, placementCell });
       for (const key of ["placementDistribution", "strataRows", "leafFrame"])
-        expect(Object.hasOwn(legacy, key)).toBe(false);
+        expect(Object.prototype.hasOwnProperty.call(legacy, key)).toBe(false);
       expect(legacy.maxCount).toBe(placementCell ? 1276 : 20409);
       for (const index of [0, legacy.maxCount - 1])
         for (const [u, v] of [
@@ -637,8 +849,8 @@ describe("exact-quota fine cell jittered strata", () => {
         1, 7, 42, 97, 0x51a7, 0x71eaf, 0x12345678, 0x6d2b79f5,
       ]) {
         const rng = new SeededRandom(seed);
-        const strata = [];
-        const iid = [];
+        const strata: { x: number; z: number }[] = [];
+        const iid: { x: number; z: number }[] = [];
         const strataBins = new Set<number>();
         const iidBins = new Set<number>();
         for (let index = 0; index < quota; index++) {

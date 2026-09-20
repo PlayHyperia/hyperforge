@@ -6,7 +6,7 @@
 import * as THREE from "../../extras/three/three";
 import type { Position3D } from "../core/base-types";
 import type { BiomeType } from "../../systems/shared/world/TerrainBiomeTypes";
-import type { GrassExclusionBounds } from "./terrain";
+import type { GrassExclusionBounds, RadialPondTerrainProfile } from "./terrain";
 
 // Temporary imports from core.ts - will be updated when those modules are created
 import type { MobData } from "../core/core";
@@ -538,6 +538,12 @@ export interface WorldArea {
   };
   /** Station placements for this area (furnaces, anvils, banks, altars, ranges) */
   stations?: StationLocation[];
+  /**
+   * Explicit absolute duel-floor base, independent of campus grading coverage.
+   * Only the duel arena consumes this datum. Omission retains legacy admission;
+   * a present value must pass arena-grading's strict metadata validation.
+   */
+  arenaFloorDatum?: Readonly<{ height: number }>;
   /** Flat zones for terrain flattening (e.g., arena floors) */
   flatZones?: Array<{
     id: string;
@@ -548,16 +554,14 @@ export interface WorldArea {
     height?: number;
     heightOffset?: number;
     blendRadius: number;
+    /** Rounded distance outside a rectangular core; existing zones are unchanged. */
+    blendShape?: "rounded";
+    /** Optional same-height rounded union; absent metadata preserves legacy grading. */
+    blendComposition?: "smooth-union";
     /** Defaults to true; terrain shaping and grass exclusion are independent. */
     excludeGrass?: boolean;
     grassExclusionBounds?: GrassExclusionBounds;
-    radialPond?: {
-      bedRadius: number;
-      bankInnerRadius: number;
-      bankOuterRadius: number;
-      bankHeight: number;
-      shorelineAmplitude?: number;
-    };
+    radialPond?: RadialPondTerrainProfile;
   }>;
   /** Explicit elevated water bodies used for compact ponds and lakes. */
   waterBodies?: Array<{
@@ -1429,6 +1433,16 @@ export type CompactServiceCourtManifest = Readonly<{
   recipeId: "open-timber-smithy-v2" | "open-timber-smithy-haven-v3";
 }>;
 
+/** Optional open bank canopy; the service court owns only its four supports. */
+export type CompactBankPavilionManifest = Readonly<{
+  schemaVersion: 1;
+  layoutId: "compact-bank-pavilion-v1";
+  terrainProfileId: "compact-duel-island-v6";
+  position: Readonly<{ x: 350; z: 320 }>;
+  rotation: 0;
+  recipeId: "open-timber-bank-haven-v1";
+}>;
+
 /** Low, non-colliding planting; tree/resource ownership is never changed. */
 export type CompactServicePlantingManifest = Readonly<{
   schemaVersion: 1 | 2;
@@ -1457,7 +1471,8 @@ export type CompactServicePlantingManifest = Readonly<{
 /** Bounded authored scenery with shared exact collision and navigation ownership. */
 export type CompactLandscapeRocksManifest = Readonly<{
   schemaVersion: 1;
-  layoutId: "compact-preparation-rocks-v1";
+  layoutId:
+    "compact-preparation-rocks-v1" | "compact-preparation-coastal-rocks-v2";
   terrainProfileId: "compact-duel-island-v6";
   sourceSha256: string;
   rocks: readonly Readonly<{
@@ -1491,6 +1506,7 @@ export interface WorldConfigManifest {
   /** Optional, explicitly admitted preparation architecture; no town/NPC generation. */
   compactPreparationLodge?: CompactPreparationLodgeManifest;
   compactServiceCourt?: CompactServiceCourtManifest;
+  compactBankPavilion?: CompactBankPavilionManifest;
   compactServicePlanting?: CompactServicePlantingManifest;
   compactLandscapeRocks?: CompactLandscapeRocksManifest;
 }

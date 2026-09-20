@@ -12,6 +12,7 @@ import {
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
@@ -100,7 +101,11 @@ test("accepts the exact active preparation manifest and rectangular campus grade
       ),
     );
     assert.equal(worldConfig.version, 2);
-    assert.equal(worldConfig.compactResourceGroves.schemaVersion, 1);
+    assert.equal(worldConfig.compactResourceGroves.schemaVersion, 2);
+    assert.equal(
+      worldConfig.compactResourceGroves.layoutId,
+      "compact-functional-groves-v2",
+    );
     const manifest = JSON.parse(
       readFileSync(path.join(assetsRoot, "manifests/world-areas.json"), "utf8"),
     );
@@ -488,6 +493,331 @@ for (const mode of ["missing", "stale"]) {
     }
   });
 }
+
+function installDiagnosticReedFixture(assetsRoot) {
+  detachAssetDirectory(assetsRoot, "vegetation");
+  const kit = detachAssetDirectory(assetsRoot, "vegetation/compact-pond-v1");
+  const reedPath = path.join(kit, "pond_reed_clump.glb");
+  const source = readFileSync(reedPath);
+  assert.equal(source.readUInt32LE(0), 0x46546c67);
+  assert.equal(source.readUInt32LE(4), 2);
+  const jsonLength = source.readUInt32LE(12);
+  const document = JSON.parse(source.subarray(20, 20 + jsonLength));
+  // Actual exported GLB geometry/material/attributes stay intact. Only its
+  // optional JSON metadata differs, supplying real different bytes for the gate.
+  document.extras = {
+    ...document.extras,
+    diagnosticReedIntegrityFixture: true,
+  };
+  const json = Buffer.from(JSON.stringify(document));
+  const paddedJson = Buffer.alloc(Math.ceil(json.length / 4) * 4, 0x20);
+  json.copy(paddedJson);
+  const otherChunks = source.subarray(20 + jsonLength);
+  const header = Buffer.from(source.subarray(0, 20));
+  header.writeUInt32LE(20 + paddedJson.length + otherChunks.length, 8);
+  header.writeUInt32LE(paddedJson.length, 12);
+  const candidate = Buffer.concat([header, paddedJson, otherChunks]);
+  rmSync(reedPath); // Isolated fixture symlink only; original remains unchanged.
+  writeFileSync(reedPath, candidate, { flag: "wx" });
+  return {
+    kit,
+    reedPath,
+    source,
+    sha256: createHash("sha256").update(candidate).digest("hex"),
+  };
+}
+
+function diagnosticReedEnvironment(sha256) {
+  return {
+    DUEL_DIAGNOSTIC_POND_REED_SHA256: sha256,
+    NODE_ENV: "production",
+    DUEL_LOCAL_SMOKE_MODE: "true",
+    LOAD_TEST_MODE: "true",
+    STREAMING_DUEL_DIAGNOSTIC_ASSET_TESTS: "true",
+    STREAMING_DUEL_MAINTENANCE_MODE: "true",
+    STREAMING_DUEL_SCHEDULER_ROLE: "authority",
+    DUEL_BETTING_ENABLED: "false",
+    DUEL_WITH_HYPERBET: "false",
+    PUBLIC_API_URL: "http://127.0.0.1:5555",
+    PUBLIC_WS_URL: "ws://127.0.0.1:5556/ws",
+    DUEL_LOCAL_BROWSER_ORIGIN: "http://localhost:3333",
+    PUBLIC_CDN_URL: "http://127.0.0.1:5555/game-assets",
+  };
+}
+
+test("diagnostic reed audition requires the exact approved bytes without changing canonical locks", () => {
+  const assetsRoot = createAssetsFixture();
+  const contractPath = path.join(
+    WORKSPACE_ROOT,
+    "packages/shared/src/data/compact-pond-models.json",
+  );
+  const originalContract = readFileSync(contractPath);
+  try {
+    const fixture = installDiagnosticReedFixture(assetsRoot);
+    const originalReedPath = path.join(
+      SOURCE_ASSETS_ROOT,
+      "vegetation/compact-pond-v1/pond_reed_clump.glb",
+    );
+    const unselected = runValidator(assetsRoot, {
+      DUEL_DIAGNOSTIC_POND_REED_SHA256: undefined,
+    });
+    assert.equal(unselected.status, 1, unselected.stderr);
+    assert.match(
+      unselected.stderr,
+      /compact pond pond_reed_clump\.glb drifted/u,
+    );
+    const selected = runValidator(
+      assetsRoot,
+      diagnosticReedEnvironment(fixture.sha256),
+    );
+    assert.equal(selected.status, 0, selected.stderr);
+    const receipt = selected.stdout
+      .split("\n")
+      .filter(Boolean)
+      .filter((line) => line.startsWith("{"))
+      .map((line) => JSON.parse(line))
+      .find((row) => row.event === "duel-diagnostic-pond-reed-validated");
+    assert.equal(receipt?.file, "pond_reed_clump.glb");
+    assert.equal(receipt?.candidateSha256, fixture.sha256);
+    assert.equal(
+      receipt?.canonicalSha256,
+      createHash("sha256").update(fixture.source).digest("hex"),
+    );
+    const wrong = runValidator(
+      assetsRoot,
+      diagnosticReedEnvironment("0".repeat(64)),
+    );
+    assert.equal(wrong.status, 1, wrong.stderr);
+    assert.match(wrong.stderr, /compact pond pond_reed_clump\.glb drifted/u);
+    assert.doesNotMatch(wrong.stdout, /duel-diagnostic-pond-reed-validated/u);
+    assert.deepEqual(readFileSync(contractPath), originalContract);
+    assert.deepEqual(readFileSync(originalReedPath), fixture.source);
+  } finally {
+    rmSync(assetsRoot, { recursive: true, force: true });
+  }
+});
+
+test("diagnostic reed audition cannot bypass another kit hash or a canonical symlink", () => {
+  const assetsRoot = createAssetsFixture();
+  try {
+    const fixture = installDiagnosticReedFixture(assetsRoot);
+    const fernPath = path.join(fixture.kit, "pond_fern.glb");
+    rmSync(fernPath); // Isolated fixture symlink, never the source asset.
+    writeFileSync(fernPath, Buffer.from("unapproved fern"), { flag: "wx" });
+    const otherAsset = runValidator(
+      assetsRoot,
+      diagnosticReedEnvironment(fixture.sha256),
+    );
+    assert.equal(otherAsset.status, 1, otherAsset.stderr);
+    assert.match(otherAsset.stderr, /compact pond pond_fern\.glb drifted/u);
+    assert.doesNotMatch(
+      otherAsset.stdout,
+      /duel-diagnostic-pond-reed-validated/u,
+    );
+    rmSync(fixture.reedPath); // Exact detached fixture file.
+    symlinkSync(
+      path.join(
+        SOURCE_ASSETS_ROOT,
+        "vegetation/compact-pond-v1/pond_reed_clump.glb",
+      ),
+      fixture.reedPath,
+    );
+    const symlinked = runValidator(
+      assetsRoot,
+      diagnosticReedEnvironment(fixture.sha256),
+    );
+    assert.equal(symlinked.status, 1, symlinked.stderr);
+    assert.match(
+      symlinked.stderr,
+      /audition rejected: the audition reed must be detached/u,
+    );
+    assert.doesNotMatch(
+      symlinked.stdout,
+      /Duel launch asset validation passed|duel-diagnostic-pond-reed-validated/u,
+    );
+  } finally {
+    rmSync(assetsRoot, { recursive: true, force: true });
+  }
+});
+
+function installDiagnosticBoulderFixture(assetsRoot) {
+  detachAssetDirectory(assetsRoot, "vegetation");
+  const kit = detachAssetDirectory(assetsRoot, "vegetation/compact-pond-v1");
+  const boulderPath = path.join(kit, "pond_boulder.glb");
+  const source = readFileSync(boulderPath);
+  assert.equal(source.readUInt32LE(0), 0x46546c67);
+  assert.equal(source.readUInt32LE(4), 2);
+  const jsonLength = source.readUInt32LE(12);
+  const document = JSON.parse(source.subarray(20, 20 + jsonLength));
+  const pbr = document.materials[0].pbrMetallicRoughness;
+  assert.ok(pbr.metallicRoughnessTexture);
+  assert.equal(pbr.metallicFactor, 0);
+  // Real asset-local correction: geometry, embedded images, and all other GLB
+  // chunks remain byte-identical. Admission still checks the whole new file.
+  delete pbr.metallicRoughnessTexture;
+  pbr.roughnessFactor = 1;
+  const json = Buffer.from(JSON.stringify(document));
+  const paddedJson = Buffer.alloc(Math.ceil(json.length / 4) * 4, 0x20);
+  json.copy(paddedJson);
+  const otherChunks = source.subarray(20 + jsonLength);
+  const header = Buffer.from(source.subarray(0, 20));
+  header.writeUInt32LE(20 + paddedJson.length + otherChunks.length, 8);
+  header.writeUInt32LE(paddedJson.length, 12);
+  const candidate = Buffer.concat([header, paddedJson, otherChunks]);
+  rmSync(boulderPath); // Exact isolated fixture link, never the source asset.
+  writeFileSync(boulderPath, candidate, { flag: "wx" });
+  assert.deepEqual(candidate.subarray(20 + paddedJson.length), otherChunks);
+  return {
+    kit,
+    boulderPath,
+    source,
+    sha256: createHash("sha256").update(candidate).digest("hex"),
+  };
+}
+
+function diagnosticBoulderEnvironment(sha256) {
+  return {
+    ...diagnosticReedEnvironment(undefined),
+    DUEL_DIAGNOSTIC_POND_BOULDER_SHA256: sha256,
+  };
+}
+
+test("diagnostic boulder audition validates exact corrected GLB bytes and preserves canonical locks", () => {
+  const assetsRoot = createAssetsFixture();
+  const contractPath = path.join(
+    WORKSPACE_ROOT,
+    "packages/shared/src/data/compact-pond-models.json",
+  );
+  const originalContract = readFileSync(contractPath);
+  try {
+    const fixture = installDiagnosticBoulderFixture(assetsRoot);
+    const originalBoulderPath = path.join(
+      SOURCE_ASSETS_ROOT,
+      "vegetation/compact-pond-v1/pond_boulder.glb",
+    );
+    const unselected = runValidator(assetsRoot, {
+      DUEL_DIAGNOSTIC_POND_REED_SHA256: undefined,
+      DUEL_DIAGNOSTIC_POND_BOULDER_SHA256: undefined,
+    });
+    assert.equal(unselected.status, 1, unselected.stderr);
+    assert.match(unselected.stderr, /compact pond pond_boulder\.glb drifted/u);
+    const selected = runValidator(
+      assetsRoot,
+      diagnosticBoulderEnvironment(fixture.sha256),
+    );
+    assert.equal(selected.status, 0, selected.stderr);
+    const receipt = selected.stdout
+      .split("\n")
+      .filter((line) => line.startsWith("{"))
+      .map((line) => JSON.parse(line))
+      .find((row) => row.event === "duel-diagnostic-pond-boulder-validated");
+    assert.equal(receipt?.file, "pond_boulder.glb");
+    assert.equal(receipt?.candidateSha256, fixture.sha256);
+    assert.equal(
+      receipt?.canonicalSha256,
+      createHash("sha256").update(fixture.source).digest("hex"),
+    );
+    assert.match(receipt?.scope, /^local-no-money-maintenance-only;/u);
+    assert.doesNotMatch(
+      selected.stdout,
+      /duel-diagnostic-pond-reed-validated/u,
+    );
+    const wrong = runValidator(
+      assetsRoot,
+      diagnosticBoulderEnvironment("0".repeat(64)),
+    );
+    assert.equal(wrong.status, 1, wrong.stderr);
+    assert.match(wrong.stderr, /compact pond pond_boulder\.glb drifted/u);
+    assert.doesNotMatch(
+      wrong.stdout,
+      /duel-diagnostic-pond-boulder-validated/u,
+    );
+    assert.deepEqual(readFileSync(contractPath), originalContract);
+    assert.deepEqual(readFileSync(originalBoulderPath), fixture.source);
+  } finally {
+    rmSync(assetsRoot, { recursive: true, force: true });
+  }
+});
+
+test("diagnostic boulder validator rejects unsafe policy and malformed selection before admission", () => {
+  const assetsRoot = createAssetsFixture();
+  try {
+    const fixture = installDiagnosticBoulderFixture(assetsRoot);
+    for (const override of [
+      { NODE_ENV: "development" },
+      { DUEL_BETTING_ENABLED: "true" },
+      { STREAMING_DUEL_MAINTENANCE_MODE: "false" },
+      { PUBLIC_CDN_URL: "https://assets.example.test/game-assets" },
+      { DUEL_DIAGNOSTIC_POND_BOULDER_SHA256: "" },
+    ]) {
+      const rejected = runValidator(assetsRoot, {
+        ...diagnosticBoulderEnvironment(fixture.sha256),
+        ...override,
+      });
+      assert.equal(rejected.status, 1, rejected.stderr);
+      assert.match(
+        rejected.stderr,
+        /Diagnostic pond boulder audition rejected:/u,
+      );
+      assert.doesNotMatch(
+        rejected.stdout,
+        /Duel launch asset validation passed|duel-diagnostic-pond-boulder-validated/u,
+      );
+    }
+  } finally {
+    rmSync(assetsRoot, { recursive: true, force: true });
+  }
+});
+
+test("diagnostic boulder audition cannot bypass sibling hashes or canonical realpath aliases", () => {
+  const assetsRoot = createAssetsFixture();
+  try {
+    const fixture = installDiagnosticBoulderFixture(assetsRoot);
+    const fernPath = path.join(fixture.kit, "pond_fern.glb");
+    rmSync(fernPath); // Exact fixture symlink only.
+    writeFileSync(fernPath, Buffer.from("unapproved fern"), { flag: "wx" });
+    const sibling = runValidator(
+      assetsRoot,
+      diagnosticBoulderEnvironment(fixture.sha256),
+    );
+    assert.equal(sibling.status, 1, sibling.stderr);
+    assert.match(sibling.stderr, /compact pond pond_fern\.glb drifted/u);
+    assert.doesNotMatch(
+      sibling.stdout,
+      /duel-diagnostic-pond-boulder-validated/u,
+    );
+    rmSync(fixture.boulderPath); // Exact detached fixture file.
+    symlinkSync(
+      path.join(
+        SOURCE_ASSETS_ROOT,
+        "vegetation/compact-pond-v1/pond_boulder.glb",
+      ),
+      fixture.boulderPath,
+    );
+    const symlinked = runValidator(
+      assetsRoot,
+      diagnosticBoulderEnvironment(fixture.sha256),
+    );
+    assert.equal(symlinked.status, 1, symlinked.stderr);
+    assert.match(
+      symlinked.stderr,
+      /audition rejected: the audition boulder must be detached/u,
+    );
+    const canonical = runValidator(
+      SOURCE_ASSETS_ROOT,
+      diagnosticBoulderEnvironment(fixture.sha256),
+    );
+    assert.equal(canonical.status, 1, canonical.stderr);
+    assert.match(canonical.stderr, /ASSETS_DIR must be isolated/u);
+    for (const rejected of [symlinked, canonical])
+      assert.doesNotMatch(
+        rejected.stdout,
+        /Duel launch asset validation passed|duel-diagnostic-pond-boulder-validated/u,
+      );
+  } finally {
+    rmSync(assetsRoot, { recursive: true, force: true });
+  }
+});
 
 test("rejects every missing packed compact terrain map", () => {
   const assetsRoot = createAssetsFixture();

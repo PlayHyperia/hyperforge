@@ -1,4 +1,11 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { World, getAdmittedCompactBankPavilion } from "@hyperforge/shared";
+import { World as SourceWorld } from "../../../../shared/src/core/World";
+import { DataManager } from "../../../../shared/src/data/DataManager";
+import { getAdmittedCompactBankPavilion as sourceAdmission } from "../../../../shared/src/index.client";
+import { COMPACT_BANK_PAVILION } from "../../../../shared/src/systems/shared/world/CompactServiceCourt";
+import type { WorldConfigManifest } from "../../../../shared/src/types/world/world-types";
+import canonicalWorldConfig from "../../../../server/world/assets/manifests/world-config.json";
 
 import {
   advanceStreamingColdRenderStability,
@@ -9,6 +16,26 @@ import {
   createStreamingColdRenderStability,
   type StreamingDiagnosticsWorld,
 } from "../../../src/lib/streamingSceneDiagnostics";
+
+const admittedBefore = {
+  config: DataManager["worldConfig"],
+  profile: DataManager["worldTerrainProfile"],
+  identity: DataManager["worldContentIdentity"],
+};
+beforeEach(() => {
+  // These historical readiness fixtures have no bank systems. Admit that exact
+  // absence through the real source DataManager, independent of a running or
+  // locally compiled candidate world. Do not stub the admission getter.
+  const config = structuredClone(canonicalWorldConfig) as WorldConfigManifest;
+  delete config.compactBankPavilion;
+  DataManager["worldContentIdentity"] = null;
+  DataManager.setWorldConfig(config);
+});
+afterEach(() => {
+  DataManager["worldConfig"] = admittedBefore.config;
+  DataManager["worldTerrainProfile"] = admittedBefore.profile;
+  DataManager["worldContentIdentity"] = admittedBefore.identity;
+});
 
 type TestVector = {
   x: number;
@@ -95,6 +122,55 @@ function readyEquipmentVisuals() {
 }
 
 describe("streaming scene diagnostics", () => {
+  it("binds the collector fixture to one actual source World and admission owner", () => {
+    expect(World).toBe(SourceWorld);
+    expect(getAdmittedCompactBankPavilion).toBe(sourceAdmission);
+    expect(getAdmittedCompactBankPavilion()).toBeNull();
+    const world = new World();
+    try {
+      expect(
+        collectStreamingSceneReadinessEvidence(
+          world as unknown as StreamingDiagnosticsWorld,
+          state(),
+        ),
+      ).toMatchObject({
+        ready: false,
+        bankPavilionReady: true,
+        bankPavilion: { configured: false, ready: true, reasons: [] },
+      });
+    } finally {
+      world.destroy();
+    }
+  });
+
+  it("fails closed for an actual admitted bank without its owner or visual systems", () => {
+    const config = structuredClone(DataManager.getWorldConfig()!);
+    delete config.compactPreparationLodge;
+    config.compactBankPavilion = structuredClone(COMPACT_BANK_PAVILION);
+    DataManager.setWorldConfig(config);
+    expect(getAdmittedCompactBankPavilion()).toEqual(COMPACT_BANK_PAVILION);
+    const world = new World();
+    try {
+      expect(
+        collectStreamingSceneReadinessEvidence(
+          world as unknown as StreamingDiagnosticsWorld,
+          state(),
+        ),
+      ).toMatchObject({
+        ready: false,
+        bankPavilionReady: false,
+        bankPavilion: {
+          configured: true,
+          ready: false,
+          descriptor: COMPACT_BANK_PAVILION,
+          reasons: ["owner_count_mismatch", "visual_count_mismatch"],
+        },
+      });
+    } finally {
+      world.destroy();
+    }
+  });
+
   it("collects allowlisted avatar, simulation, projection, and camera evidence", () => {
     const agentA = {
       id: "internal-a",
@@ -587,7 +663,17 @@ describe("streaming scene diagnostics", () => {
     worldVisualsReady = true;
     expect(areStreamingSceneAssetsReady(world, state())).toBe(false);
     precompileIdle = true;
-    expect(areStreamingSceneAssetsReady(world, state())).toBe(true);
+    expect(
+      collectStreamingSceneReadinessEvidence(world, state()),
+    ).toMatchObject({
+      ready: true,
+      bankPavilionReady: true,
+      bankPavilion: {
+        configured: false,
+        ready: true,
+        reasons: [],
+      },
+    });
   });
 
   it("fails closed while an exact frozen equipment visual is unresolved", () => {

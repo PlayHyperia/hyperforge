@@ -51,6 +51,7 @@ import {
 } from "../../../utils/workers/GrassTerrainSurfaceSnapshot";
 import type { TerrainGridBounds } from "./TerrainGridSurface";
 import type { GrassGroundingInputLease } from "./GrassGroundingPipeline";
+import type { CanonicalGroundLease } from "./CoastalBathymetry";
 import {
   GRASS_BLADE_GROUNDING_LIMITS,
   type GrassGroundingRoadSegment,
@@ -97,6 +98,10 @@ import {
 } from "../../../data/arena-grading";
 import { DataManager } from "../../../data/DataManager";
 import { createCompactPreparationDetailRegions } from "./CompactIslandDetail";
+import {
+  prioritizeLocalTerrainCenter,
+  resolveTerrainVisualRootRadius,
+} from "./TerrainVisualFocus";
 import habitatCompositionData from "../../../data/compact-haven-habitat-v1.json";
 import {
   validateCompactHabitatComposition,
@@ -106,6 +111,7 @@ import {
   createCompactTerrainColorOperations,
   COMPACT_TERRAIN_COMPOSITION,
   type CompactTerrainPond,
+  type CompactPondBankField,
   type CompactTerrainMacroField,
   type CompactTerrainPlantingLobe,
   type CompactGrassColorGrade,
@@ -188,7 +194,15 @@ import {
   isStreamingLikeViewport,
   resolveExplicitStreamingWorldProfile,
   resolveExplicitStreamingRenderProfile,
+  resolveCompactDirtProjectionCandidate,
+  resolveCompactRockProjectionCandidate,
+  resolveCompactSurfaceBlendCandidate,
+  resolveCompactPondBlendCandidate,
+  resolveCompactCoastBlend,
   resolveGrassAppearanceCandidate,
+  resolveGrassLightingCandidate,
+  resolveGrassCoverageTrial,
+  resolveGrassRoadClearance,
   resolveHabitatCompositionCandidate,
   type GrassSurfaceEligibility,
 } from "../../../runtime/clientViewportMode";
@@ -210,6 +224,24 @@ const compactTerrainColorOperations = createCompactTerrainColorOperations();
 const TERRAIN_ROAD_INFLUENCE_DEBUG =
   process.env.TERRAIN_ROAD_INFLUENCE_DEBUG === "true";
 const TERRAIN_TIMING_DEBUG = process.env.TERRAIN_TIMING_DEBUG === "true";
+// These constants are embedded into emitted worker source at module load.
+// Unsupported in-process edits cannot be admitted by merely creating a new
+// provider; a code/worker reload is required to keep the two implementations equal.
+const COMPILED_TERRAIN_BIOME_CONFIGS = Object.entries(BIOME_CONFIGS).map(
+  ([name, config]) => ({
+    name,
+    owner: config,
+    fields: Object.entries(config).map(([key, value]) => ({
+      key: key as keyof typeof config,
+      value,
+    })),
+  }),
+);
+const COMPILED_BIOME_PLACEMENT = {
+  gaussianCoeff: BIOME_CONFIG.gaussianCoeff,
+  boundaryNoiseScale: BIOME_CONFIG.boundaryNoiseScale,
+  boundaryNoiseAmount: BIOME_CONFIG.boundaryNoiseAmount,
+};
 /** Maximum entries retained in pendingSerializationData to prevent unbounded growth */
 const MAX_PENDING_SERIALIZATION_ENTRIES = 100;
 // The fixed broadcast camera never approaches terrain closely enough to reveal
@@ -267,6 +299,9 @@ export class TerrainSystem extends System {
   private _flatZoneChecked = new Set<string>(); // PERF: reusable dedup set for flat zone queries
   private readonly authoredSurface = createAuthoredTerrainSurfaceOperations();
   private readonly authoredSurfaceCandidates: FlatZone[] = [];
+  private authoredSurfaceCandidateTileX: number | undefined;
+  private authoredSurfaceCandidateTileZ: number | undefined;
+  private authoredSurfaceCandidateTileSize: number | undefined;
   private _pendingTileRegeneration = new Set<string>(); // Tracks tiles being regenerated to avoid duplicates
   private _queuedTileRegenerations = new Map<
     string,
@@ -277,6 +312,8 @@ export class TerrainSystem extends System {
   private _terrainInitialized = false;
   private _initialTilesReady = false; // Track when initial tiles are loaded
   private destroyed = false;
+  private canonicalGroundInitialized = false;
+  private canonicalHeightRevision = 0;
   private roadInfluenceRefreshGeneration = 0;
   private lastPlayerTile = { x: 0, z: 0 };
   private updateTimer = 0;
@@ -373,6 +410,8 @@ export class TerrainSystem extends System {
   private waterVisualManager: WaterVisualManager | null = null;
   private compactPondDressing: CompactPondDressingVisuals | null = null;
   private compactPondMaterial: CompactTerrainPond | null = null;
+  private compactPondBankField: CompactPondBankField | null = null;
+  private compositionManifestLoaded = false;
   private landscapeGrassSurface = {
     exclusionPolygons: [] as GrassTerrainExclusionPolygon[],
   };
@@ -391,10 +430,26 @@ export class TerrainSystem extends System {
   private compactHabitatMaterial: CompactHabitatField | null | undefined;
   /** Restart-owned visual selection; never part of authoritative terrain identity. */
   private compactGrassColorGrade: CompactGrassColorGrade | null | undefined;
+  private compactDirtProjection: ReturnType<
+    typeof resolveCompactDirtProjectionCandidate
+  > | null;
+  private compactRockProjection: ReturnType<
+    typeof resolveCompactRockProjectionCandidate
+  > | null;
+  private compactSurfaceBlend: ReturnType<
+    typeof resolveCompactSurfaceBlendCandidate
+  > | null;
+  private compactPondBlend: ReturnType<
+    typeof resolveCompactPondBlendCandidate
+  > | null;
+  private compactCoastBlend: ReturnType<typeof resolveCompactCoastBlend> | null;
   private grassVisualSelection:
     | Readonly<{
         profile: ReturnType<typeof resolveExplicitStreamingRenderProfile>;
         appearance: ReturnType<typeof resolveGrassAppearanceCandidate>;
+        coverageTrial: ReturnType<typeof resolveGrassCoverageTrial>;
+        roadClearance?: ReturnType<typeof resolveGrassRoadClearance>;
+        lighting?: ReturnType<typeof resolveGrassLightingCandidate>;
       }>
     | undefined;
   private compactPlantingMaterial:
@@ -568,7 +623,15 @@ export class TerrainSystem extends System {
     const profile = this.getWorldTerrainProfile();
     const material = createTerrainMaterial(undefined, {
       compactPbr: isCompactSculptProfile(profile),
+      compactDirtProjection: this.getCompactDirtProjection(),
+      compactRockProjection: this.getCompactRockProjection(),
+      compactSurfaceBlend: this.getCompactSurfaceBlend(),
+      compactPondBlend: this.getCompactPondBlend(),
+      compactCoastBlend: this.getCompactCoastBlend(),
       compactPond: this.getCompactPondMaterial(),
+      ...(this.getCompactPondBlend() === "composition-v1"
+        ? { compactPondBankField: this.bindCompactPondBankField() }
+        : {}),
       compactPlantingLobes: this.getCompactPlantingMaterial(),
       compactProfile: profile,
       compactHabitat: this.getCompactHabitatMaterial(),
@@ -605,28 +668,197 @@ export class TerrainSystem extends System {
     return this.compactPondMaterial;
   }
 
-  /** Restart-owned colour field; never changes terrain height or grass ecology. */
+  /** Restart-owned material/grass field; never changes authoritative height. */
   private getCompactMacroMaterial(): CompactTerrainMacroField | null {
     if (this.compactMacroMaterial === undefined)
       this.compactMacroMaterial = compactTerrainColorOperations.macroField(
         this.getWorldTerrainProfile(),
+        this.getCompactCoastBlend(),
+        this.getCompactPondBlend(),
+        this.getCompactPondBlend() === "composition-v1"
+          ? this.bindCompactPondBankField()
+          : undefined,
       );
     return this.compactMacroMaterial;
   }
 
+  /** Bind only registered, canonical geometry. Preview edits require restart:
+   * a fresh snapshot alone cannot refresh an already compiled shader graph. */
+  private bindCompactPondBankField(): CompactPondBankField {
+    if (this.compactPondBankField) return this.compactPondBankField;
+    const zone = this.flatZones.get("haven_pond_floor");
+    const ponds = this.waterBodyRegistry
+      ?.getAllBodies()
+      .filter((body) => body.id === "haven_pond_water");
+    if (!zone || ponds?.length !== 1)
+      throw new Error("Pond composition requires registered terrain and water");
+    const pond = compactTerrainColorOperations.validatePond(ponds[0]);
+    const expected = this.getCompactPondMaterial();
+    if (
+      !pond ||
+      !expected ||
+      (["id", "centerX", "centerZ", "radius", "surfaceY"] as const).some(
+        (key) => pond[key] !== expected[key],
+      )
+    )
+      throw new Error(
+        "Pond composition registered water differs from material",
+      );
+    const field = compactTerrainColorOperations.pondBankField(zone, pond);
+    if (!field) throw new Error("Pond composition requires a bound field");
+    compactTerrainColorOperations.macroField(
+      this.getWorldTerrainProfile(),
+      this.getCompactCoastBlend(),
+      "composition-v1",
+      field,
+    );
+    this.waterBodyRegistry.seal();
+    this.compactPondBankField = field;
+    return field;
+  }
+
+  private assertPondCompositionZoneEditable(zone: FlatZone): void {
+    const field = this.compactPondBankField;
+    if (!field) return;
+    const reach = field.pond.radius + COMPACT_TERRAIN_COMPOSITION.pondBankReach;
+    // Masked terrain cores can extend beyond their rectangular description.
+    // Use the same conservative support union as canonical ground leases.
+    const radius = zone.radialPond?.bankOuterRadius;
+    let minX = zone.centerX - (radius ?? zone.width / 2);
+    let maxX = zone.centerX + (radius ?? zone.width / 2);
+    let minZ = zone.centerZ - (radius ?? zone.depth / 2);
+    let maxZ = zone.centerZ + (radius ?? zone.depth / 2);
+    const includeTile = (x: number, z: number) => {
+      minX = Math.min(minX, x);
+      maxX = Math.max(maxX, x + 1);
+      minZ = Math.min(minZ, z);
+      maxZ = Math.max(maxZ, z + 1);
+    };
+    for (const key of zone.tileMask ?? []) {
+      const [x, z] = key.split(",").map(Number);
+      includeTile(x, z);
+    }
+    for (const tile of zone.tileMaskTiles ?? []) includeTile(tile.x, tile.z);
+    minX -= zone.blendRadius;
+    maxX += zone.blendRadius;
+    minZ -= zone.blendRadius;
+    maxZ += zone.blendRadius;
+    if (
+      minX <= field.centerX + reach &&
+      maxX >= field.centerX - reach &&
+      minZ <= field.centerZ + reach &&
+      maxZ >= field.centerZ - reach
+    )
+      throw new Error("Bound pond composition terrain changes require restart");
+  }
+
+  /** Capture absence as well as selection; later URL edits require a new owner. */
+  private getCompactDirtProjection(): ReturnType<
+    typeof resolveCompactDirtProjectionCandidate
+  > {
+    if (this.compactDirtProjection === undefined) {
+      const selection = resolveCompactDirtProjectionCandidate();
+      if (selection && !isCompactSculptProfile(this.getWorldTerrainProfile()))
+        throw new Error("Dirt projection requires compact sculpt terrain");
+      this.compactDirtProjection = selection ?? null;
+    }
+    return this.compactDirtProjection ?? undefined;
+  }
+
+  /** Independent restart-owned rock preview; no authoritative world identity. */
+  private getCompactRockProjection(): ReturnType<
+    typeof resolveCompactRockProjectionCandidate
+  > {
+    if (this.compactRockProjection === undefined) {
+      const selection = resolveCompactRockProjectionCandidate();
+      if (selection && !isCompactSculptProfile(this.getWorldTerrainProfile()))
+        throw new Error("Rock projection requires compact sculpt terrain");
+      this.compactRockProjection = selection ?? null;
+    }
+    return this.compactRockProjection ?? undefined;
+  }
+
+  /** Capture both absence and selection once, independently of dirt projection. */
+  private getCompactSurfaceBlend(): ReturnType<
+    typeof resolveCompactSurfaceBlendCandidate
+  > {
+    if (this.compactSurfaceBlend === undefined) {
+      const selection = resolveCompactSurfaceBlendCandidate();
+      if (selection && !isCompactSculptProfile(this.getWorldTerrainProfile()))
+        throw new Error("Terrain blend requires compact sculpt terrain");
+      this.compactSurfaceBlend = selection ?? null;
+    }
+    return this.compactSurfaceBlend ?? undefined;
+  }
+
+  /** Capture this pond-only visual choice without changing authored terrain. */
+  private getCompactPondBlend(): ReturnType<
+    typeof resolveCompactPondBlendCandidate
+  > {
+    if (this.compactPondBlend === undefined) {
+      const selection = resolveCompactPondBlendCandidate();
+      if (selection) {
+        if (!isCompactSculptProfile(this.getWorldTerrainProfile()))
+          throw new Error("Pond blend requires compact sculpt terrain");
+        if (this.getCompactSurfaceBlend() !== "height-v1")
+          throw new Error(
+            "Pond blend requires captured height-v1 terrain blend",
+          );
+        if (!this.getCompactPondMaterial())
+          throw new Error("Pond blend requires the actual admitted pond");
+      }
+      this.compactPondBlend = selection ?? null;
+    }
+    return this.compactPondBlend ?? undefined;
+  }
+
+  /** Capture coastal material/grass composition without changing terrain shape. */
+  private getCompactCoastBlend(): ReturnType<typeof resolveCompactCoastBlend> {
+    if (this.compactCoastBlend === undefined) {
+      const selection = resolveCompactCoastBlend();
+      if (selection) {
+        if (!isCompactSculptProfile(this.getWorldTerrainProfile()))
+          throw new Error("Coast blend requires compact sculpt terrain");
+        if (this.getCompactSurfaceBlend() !== "height-v1")
+          throw new Error(
+            "Coast blend requires captured height-v1 terrain blend",
+          );
+        // Validate raw profile admission without the mode-dependent cached
+        // field: that field calls this getter and must not recurse.
+        if (
+          !compactTerrainColorOperations.macroField(
+            this.getWorldTerrainProfile(),
+          )?.coastalMeadow
+        )
+          throw new Error("Coast blend requires the admitted coastal meadow");
+      }
+      this.compactCoastBlend = selection ?? null;
+    }
+    return this.compactCoastBlend ?? undefined;
+  }
+
   private getCompactGrassColorGrade(): CompactGrassColorGrade | undefined {
     if (this.compactGrassColorGrade === undefined) {
-      // Capture the already explicit appearance/profile pair once. A later URL
-      // mutation must not recolour CPU/worker grass under an older terrain graph.
+      // Capture the explicit visual selection once. A later URL mutation must
+      // not recolour, resample or change road clearance of an owned grass field.
       const appearance = resolveGrassAppearanceCandidate();
       const profile = resolveExplicitStreamingRenderProfile();
+      const coverageTrial = resolveGrassCoverageTrial();
+      const roadClearance = resolveGrassRoadClearance();
+      const lighting = resolveGrassLightingCandidate();
       const fine = appearance === "fine-meadow-v1";
       if (
         fine !== (profile?.grassProfile === "fine-meadow-v1") ||
         (fine && !isCompactSculptProfile(this.getWorldTerrainProfile()))
       )
         throw new Error("Grass color grade requires the compact fine meadow");
-      this.grassVisualSelection = Object.freeze({ appearance, profile });
+      this.grassVisualSelection = Object.freeze({
+        appearance,
+        profile,
+        coverageTrial,
+        ...(roadClearance ? { roadClearance } : {}),
+        ...(lighting ? { lighting } : {}),
+      });
       this.compactGrassColorGrade = fine
         ? compactTerrainColorOperations.getGrassColorGrade().id
         : null;
@@ -891,6 +1123,31 @@ export class TerrainSystem extends System {
       if (nowFn() - start > this.generationBudgetMsPerFrame) break;
       const key = this.pendingTileKeys.shift()!;
       inspected++;
+
+      const resident = this.terrainTiles.get(key);
+      if (resident) {
+        // Synchronous startup can satisfy a prefetch before its worker is
+        // dispatched. Retire that request before testing worker readiness;
+        // otherwise its skipped worker leaves this queue waiting forever.
+        const generateContent = this.pendingTileContent.get(key) ?? true;
+        this.pendingTileSet.delete(key);
+        this.pendingTileContent.delete(key);
+        this.pendingTileGenerations.delete(key);
+        this.pendingWorkerResults.delete(key);
+        this.pendingWorkerTileKeys.delete(key);
+        this.workerFallbackTileKeys.delete(key);
+        const queuedWorker = this.pendingWorkerTiles.findIndex(
+          (tile) => tile.tileX === resident.x && tile.tileZ === resident.z,
+        );
+        if (queuedWorker !== -1)
+          this.pendingWorkerTiles.splice(queuedWorker, 1);
+        if (generateContent && resident.contentGenerated === false)
+          this.pendingContentPromotions.set(key, resident);
+        // Retirement occupies an existing work slot. Content promotion stays
+        // in its normal budgeted queue, never rebuilding the resident mesh.
+        generated++;
+        continue;
+      }
 
       const workerData = this.pendingWorkerResults.get(key);
       const waitingForWorker =
@@ -1901,6 +2158,11 @@ export class TerrainSystem extends System {
     const runtimeRole = this.resolveRuntimeRole();
     this.runtimeIsServer = runtimeRole.isServer;
     this.runtimeIsClient = runtimeRole.isClient;
+    this.getCompactDirtProjection();
+    this.getCompactRockProjection();
+    this.getCompactSurfaceBlend();
+    this.getCompactPondBlend();
+    this.getCompactCoastBlend();
     this.getCompactGrassColorGrade();
 
     // Initialize deterministic noise from world id + per-biome noise sets
@@ -1911,6 +2173,15 @@ export class TerrainSystem extends System {
 
     // Water body registry — ocean level only (no manual rivers/ponds)
     this.waterBodyRegistry = new WaterBodyRegistry(this.CONFIG.WATER_THRESHOLD);
+
+    // This explicit preview needs registered terrain before material creation.
+    // Historical startup timing remains unchanged when it is not selected.
+    if (this.getCompactPondBlend() === "composition-v1") {
+      this.loadWaterBodiesFromManifest();
+      this.loadFlatZonesFromManifest();
+      this.bindCompactPondBankField();
+      this.compositionManifestLoaded = true;
+    }
 
     // Cache optional TownSystem for difficulty falloff and boss placement
     this.townSystem = this.world.getSystem<TownSystem>("towns") ?? null;
@@ -2049,6 +2320,7 @@ export class TerrainSystem extends System {
     } else {
       // Environment not yet determined
     }
+    this.canonicalGroundInitialized = true;
   }
 
   async start(): Promise<void> {
@@ -2086,10 +2358,11 @@ export class TerrainSystem extends System {
 
     // Load explicit ponds/lakes before terrain collision or visual tiles are
     // generated so water, shore discovery, and movement share one registry.
-    this.loadWaterBodiesFromManifest();
-
-    // Load flat zones from manifest (now that DataManager has loaded world-areas.json and stations.json)
-    this.loadFlatZonesFromManifest();
+    if (!this.compositionManifestLoaded) {
+      this.loadWaterBodiesFromManifest();
+      // Geometry precedes collision, visuals, and vegetation on both roles.
+      this.loadFlatZonesFromManifest();
+    }
 
     // Final environment detection. world.isClient can be transiently true during
     // server bootstrap, so prefer runtime detection to avoid loading client-only
@@ -2102,6 +2375,17 @@ export class TerrainSystem extends System {
       this.setupServerTerrain();
     } else if (isClient) {
       this.setupClientTerrain();
+      if (this.getWorldTerrainProfile().kind === "compact-candidate") {
+        const water = this.waterSystem;
+        if (!water) throw new Error("Compact terrain requires its water owner");
+        // All manifest grades are loaded, and setup has established sea level.
+        // Cooperative construction does not depend on the not-yet-started tick.
+        await water.configureCoastalBathymetry(() =>
+          this.captureCanonicalGroundLease(),
+        );
+        if (this.destroyed || this.waterSystem !== water)
+          throw new Error("Terrain retired during coastal field construction");
+      }
     } else {
       console.warn(
         "[TerrainSystem] Runtime role unresolved, defaulting to server terrain mode",
@@ -2212,12 +2496,137 @@ export class TerrainSystem extends System {
    * height/biome/road/flat-zone queries to the quad-tree chunk generator.
    */
   private buildChunkTerrainProvider(): VisualManagerTerrainProvider {
+    const terrain = this;
+    const providerProfile = this.getWorldTerrainProfile();
+    const providerTileSize = this.CONFIG.TILE_SIZE;
+    const configs = COMPILED_TERRAIN_BIOME_CONFIGS;
+    const noise = this.noise;
+    const noiseSets = this.biomeNoiseSets;
+    const noiseSnapshots = Object.entries(noiseSets).map(([name, set]) => ({
+      name,
+      owner: set,
+      main: set.main,
+      variation: set.variation,
+      erosion: set.erosion,
+    }));
     const biomeColorCache = new Map<
       string,
-      { r: number; g: number; b: number }
+      { source: number | undefined; color: { r: number; g: number; b: number } }
     >();
 
     return {
+      capturePreparationLease: (workerCenters, workerBiomes) => {
+        const ground = this.captureCanonicalGroundLease();
+        const roads = this.world.getSystem("roads") as
+          RoadNetworkSystem | undefined;
+        const roadLease = roads?.captureTerrainPreparationLease();
+        // A previous synchronous query may have retained an old publication,
+        // including an empty tile captured before this road owner was ready.
+        this.roadNetworkSystem = roads;
+        this._cachedRoadTileX = Number.NaN;
+        this._cachedRoadTileZ = Number.NaN;
+        this._cachedRoadSegments = [];
+        const biome = this.biomeSystem;
+        const centers = biome.getBiomeCenters();
+        const centerSnapshots = centers.map((center) => ({ ...center }));
+        const colors = Object.entries(BIOMES).map(([name, data]) => ({
+          name,
+          owner: data,
+          color: data.color,
+          linear: new THREE.Color(data.color),
+        }));
+        const matches = (): boolean => {
+          if (
+            !ground.isCurrent() ||
+            ground.profile !== providerProfile ||
+            this.CONFIG.TILE_SIZE !== providerTileSize ||
+            this.world.getSystem("terrain") !== this ||
+            this.world.getSystem("roads") !== roads ||
+            this.roadNetworkSystem !== roads ||
+            (roadLease && !roadLease.isCurrent()) ||
+            this.biomeSystem !== biome ||
+            biome.getBiomeCenters() !== centers ||
+            centers.length !== centerSnapshots.length ||
+            workerCenters.length !== centerSnapshots.length ||
+            this.noise !== noise ||
+            this.biomeNoiseSets !== noiseSets ||
+            BIOME_CONFIG.gaussianCoeff !==
+              COMPILED_BIOME_PLACEMENT.gaussianCoeff ||
+            BIOME_CONFIG.boundaryNoiseScale !==
+              COMPILED_BIOME_PLACEMENT.boundaryNoiseScale ||
+            BIOME_CONFIG.boundaryNoiseAmount !==
+              COMPILED_BIOME_PLACEMENT.boundaryNoiseAmount
+          )
+            return false;
+          for (let i = 0; i < centers.length; i++) {
+            const center = centers[i],
+              before = centerSnapshots[i],
+              worker = workerCenters[i];
+            if (
+              center.x !== before.x ||
+              center.z !== before.z ||
+              center.type !== before.type ||
+              center.influence !== before.influence ||
+              worker.x !== before.x ||
+              worker.z !== before.z ||
+              worker.type !== before.type ||
+              worker.influence !== before.influence
+            )
+              return false;
+          }
+          let colorCount = 0,
+            workerColorCount = 0,
+            configCount = 0,
+            noiseCount = 0;
+          for (const _name in BIOMES) colorCount++;
+          for (const _name in workerBiomes) workerColorCount++;
+          for (const _name in BIOME_CONFIGS) configCount++;
+          for (const _name in noiseSets) noiseCount++;
+          if (
+            colorCount !== colors.length ||
+            workerColorCount !== colors.length ||
+            configCount !== configs.length ||
+            noiseCount !== noiseSnapshots.length
+          )
+            return false;
+          for (const color of colors) {
+            const workerColor = workerBiomes[color.name]?.color;
+            if (
+              BIOMES[color.name] !== color.owner ||
+              color.owner.color !== color.color ||
+              workerColor?.r !== color.linear.r ||
+              workerColor?.g !== color.linear.g ||
+              workerColor?.b !== color.linear.b
+            )
+              return false;
+          }
+          for (const snapshot of configs) {
+            const config = BIOME_CONFIGS[snapshot.name];
+            if (config !== snapshot.owner) return false;
+            let count = 0;
+            for (const _key in config) count++;
+            if (count !== snapshot.fields.length) return false;
+            for (const field of snapshot.fields)
+              if (config[field.key] !== field.value) return false;
+          }
+          for (const snapshot of noiseSnapshots) {
+            const set = noiseSets[snapshot.name];
+            if (
+              set !== snapshot.owner ||
+              set.main !== snapshot.main ||
+              set.variation !== snapshot.variation ||
+              set.erosion !== snapshot.erosion
+            )
+              return false;
+          }
+          return true;
+        };
+        // Once observed stale, restoration of an old reference/value cannot
+        // revive work that may already contain samples from both versions.
+        let current = matches();
+        return Object.freeze({ isCurrent: () => (current &&= matches()) });
+      },
+
       getHeightAtComputed: (worldX: number, worldZ: number) =>
         this.getHeightAtComputed(worldX, worldZ),
 
@@ -2238,21 +2647,77 @@ export class TerrainSystem extends System {
 
       getBiomeColor: (biomeName: string) => {
         let cached = biomeColorCache.get(biomeName);
-        if (!cached) {
-          const biomeData = BIOMES[biomeName];
-          if (biomeData) {
-            const c = new THREE.Color(biomeData.color);
-            cached = { r: c.r, g: c.g, b: c.b };
-          } else {
-            cached = { r: 0.3, g: 0.55, b: 0.15 };
-          }
+        const source = BIOMES[biomeName]?.color;
+        if (!cached || cached.source !== source) {
+          const c = source === undefined ? null : new THREE.Color(source);
+          cached = {
+            source,
+            color: Object.freeze(
+              c ? { r: c.r, g: c.g, b: c.b } : { r: 0.3, g: 0.55, b: 0.15 },
+            ),
+          };
           biomeColorCache.set(biomeName, cached);
         }
-        return cached;
+        return cached.color;
       },
 
       getFlatZoneHeight: (worldX: number, worldZ: number) =>
         this.getFlatZoneHeight(worldX, worldZ),
+
+      // Candidate-only until the complete contact/native gates are qualified.
+      // Resolve current owned floors at assembly time: this adapter is created
+      // before manifest loading, and floor owners can later be replaced.
+      get surfaceRefinementZones() {
+        if (!terrain.getWorldTerrainProfile().southernMeadow) return undefined;
+        return [...terrain.arenaFloorZoneIds].map((id) => {
+          const zone = terrain.flatZones.get(id);
+          if (!zone) throw new Error("Missing owned terrain refinement floor");
+          return {
+            minX: zone.centerX - zone.width / 2,
+            maxX: zone.centerX + zone.width / 2,
+            minZ: zone.centerZ - zone.depth / 2,
+            maxZ: zone.centerZ + zone.depth / 2,
+            blendRadius: zone.blendRadius,
+          };
+        });
+      },
+
+      // The curved bank shares the final terrain owner and retained mesh. This
+      // envelope covers the steep radial ramp and its maximum shoreline warp.
+      // Explicit paired outer shoulders need additional angular support to the
+      // existing effect radius; keep the old full inner annulus unchanged.
+      // Refinement does not introduce a separate height or collision field.
+      get surfaceRefinementAnnuli() {
+        if (!terrain.getWorldTerrainProfile().southernMeadow) return undefined;
+        return [...terrain.flatZones.values()].flatMap((zone) => {
+          const pond = zone.radialPond;
+          if (!pond) return [];
+          const amplitude = pond.shorelineAmplitude ?? 0;
+          return [
+            {
+              centerX: zone.centerX,
+              centerZ: zone.centerZ,
+              innerRadius: Math.max(0, pond.bedRadius - amplitude),
+              outerRadius: pond.bankInnerRadius + amplitude,
+            },
+            ...(pond.bankSectors ?? []).flatMap((sector) =>
+              sector.outerRadius === undefined ||
+              sector.outerHeight === undefined
+                ? []
+                : [
+                    {
+                      centerX: zone.centerX,
+                      centerZ: zone.centerZ,
+                      innerRadius: pond.bankInnerRadius + amplitude,
+                      outerRadius: pond.bankOuterRadius + zone.blendRadius,
+                      bearing: sector.bearing,
+                      halfWidth: sector.halfWidth,
+                    },
+                  ],
+            ),
+          ];
+        });
+      },
 
       terrainProfileIdentity: worldTerrainProfileIdentity(
         this.getWorldTerrainProfile(),
@@ -2362,11 +2827,15 @@ export class TerrainSystem extends System {
           this.CONFIG.QUADTREE_RESOLUTION,
         ),
         skirtDrop: this.CONFIG.QUADTREE_SKIRT_DROP,
-        // The broadcast camera is pinned to the compact arena complex. One
-        // 1,600 m root covers the complete 250 m critical scene radius, so
-        // retaining the exploration viewport's surrounding eight roots only
-        // creates off-screen worker, geometry, and GPU residency churn.
-        rootChunkRadius: isStreamingViewport ? 0 : 1,
+        // A normal compact player also uses one root only when the complete
+        // authored island envelope plus camera clearance fits inside it.
+        // General/straddled profiles retain their exploration root ring.
+        rootChunkRadius: resolveTerrainVisualRootRadius(
+          this.getWorldTerrainProfile(),
+          this.CONFIG.QUADTREE_MIN_SIZE,
+          this.CONFIG.QUADTREE_MAX_DEPTH,
+          isStreamingViewport,
+        ),
       },
       provider,
       qtContainer,
@@ -2418,6 +2887,7 @@ export class TerrainSystem extends System {
         this.CONFIG.WATER_THRESHOLD,
         this.waterBodyRegistry.getAllBodies(),
         this.getWorldTerrainProfile(),
+        this.quadTreeVisualManager,
       );
 
       const grassContainer = new THREE.Group();
@@ -2447,7 +2917,17 @@ export class TerrainSystem extends System {
           this.getTerrainColorAt(wx, wz, true, eligibility),
         grassWorkerSetup,
         grassSelection.profile?.grassProfile === "fine-meadow-v1"
-          ? FINE_MEADOW_GRASS_VISUAL_PROFILE
+          ? grassSelection.coverageTrial || grassSelection.roadClearance
+            ? {
+                ...FINE_MEADOW_GRASS_VISUAL_PROFILE,
+                ...(grassSelection.coverageTrial
+                  ? { coverageTrial: grassSelection.coverageTrial }
+                  : {}),
+                ...(grassSelection.roadClearance
+                  ? { roadClearance: grassSelection.roadClearance }
+                  : {}),
+              }
+            : FINE_MEADOW_GRASS_VISUAL_PROFILE
           : grassSelection.profile?.grassProfile === "compact-meadow-v2"
             ? DENSE_MEADOW_GRASS_VISUAL_PROFILE
             : grassSelection.profile?.grassProfile === "compact-island-v1"
@@ -2465,6 +2945,7 @@ export class TerrainSystem extends System {
           ),
         grassSelection.appearance,
         this.getCompactHabitatMaterial(),
+        grassSelection.lighting,
       );
 
       // Wire terrain, water, grass managers to the same quad-tree via composite
@@ -2591,6 +3072,18 @@ export class TerrainSystem extends System {
       terrainConfig: workerConfig,
       ...(this.getCompactGrassColorGrade()
         ? { compactGrassColorGrade: this.getCompactGrassColorGrade() }
+        : {}),
+      ...(this.getCompactCoastBlend() === "distribution-v1"
+        ? { compactCoastBlend: "distribution-v1" as const }
+        : {}),
+      ...(this.getCompactPondBlend() === "shore-contact-v1"
+        ? { compactPondBlend: "shore-contact-v1" as const }
+        : {}),
+      ...(this.getCompactPondBlend() === "composition-v1"
+        ? {
+            compactPondBlend: "composition-v1" as const,
+            compactPondBankField: this.bindCompactPondBankField(),
+          }
         : {}),
       compactPlantingLobes: this.getCompactPlantingMaterial(),
       isGrassObstacleAt: (x, z) =>
@@ -2785,10 +3278,11 @@ export class TerrainSystem extends System {
         (zone.centerZ + radius + halfTile) / tileSize,
       );
       if (
-        zoneMinTX <= maxTX &&
-        zoneMaxTX >= minTX &&
-        zoneMinTZ <= maxTZ &&
-        zoneMaxTZ >= minTZ
+        zone.id === this.compactPondBankField?.zoneId ||
+        (zoneMinTX <= maxTX &&
+          zoneMaxTX >= minTX &&
+          zoneMinTZ <= maxTZ &&
+          zoneMaxTZ >= minTZ)
       ) {
         if (zones.length >= operations.limits.maxZones)
           throw new Error("Grass zone-region capacity exceeded");
@@ -2806,7 +3300,10 @@ export class TerrainSystem extends System {
         (body.id === this.compactPondMaterial?.id
           ? COMPACT_TERRAIN_COMPOSITION.pondBankReach
           : 0);
-      if (dx * dx + dz * dz <= radius * radius) {
+      if (
+        body.id === this.compactPondBankField?.pond.id ||
+        dx * dx + dz * dz <= radius * radius
+      ) {
         if (waterBodies.length >= operations.limits.maxWaterBodies)
           throw new Error("Grass water-region capacity exceeded");
         waterBodies.push(body);
@@ -3256,6 +3753,18 @@ export class TerrainSystem extends System {
         id: player.id || "player",
         position: player.node.position,
       });
+    }
+
+    // Map insertion order can place a remote player before the local owner.
+    // Visual terrain/water consume centers[0]; retain other centers for content.
+    if (this.runtimeIsClient) {
+      const local = this.world.getPlayer();
+      prioritizeLocalTerrainCenter(
+        centers,
+        local?.node?.position
+          ? { id: local.id || "player", position: local.node.position }
+          : null,
+      );
     }
 
     // If no players at all (spectator on server, or empty world), use arena lobby.
@@ -4474,6 +4983,73 @@ export class TerrainSystem extends System {
     return this.getHeightAtComputed(worldX, worldZ);
   }
 
+  /** A staged consumer must never combine samples from different authored grades. */
+  captureCanonicalGroundLease(): CanonicalGroundLease {
+    if (
+      this.destroyed ||
+      !this.canonicalGroundInitialized ||
+      !this.activeTerrainProfile
+    ) {
+      throw new Error("Canonical ground requires an initialized live terrain");
+    }
+    const profile = this.activeTerrainProfile;
+    const revision = this.canonicalHeightRevision;
+    const supportBounds = Object.freeze(
+      [...this.flatZones.values()].map((zone) => {
+        const radius = zone.radialPond?.bankOuterRadius;
+        let minX = zone.centerX - (radius ?? zone.width / 2);
+        let maxX = zone.centerX + (radius ?? zone.width / 2);
+        let minZ = zone.centerZ - (radius ?? zone.depth / 2);
+        let maxZ = zone.centerZ + (radius ?? zone.depth / 2);
+        // Masked cores/blends may reach beyond the rectangular description.
+        // Include actual tiles, not the grass-only exclusion rectangle.
+        const includeTile = (x: number, z: number) => {
+          minX = Math.min(minX, x);
+          maxX = Math.max(maxX, x + 1);
+          minZ = Math.min(minZ, z);
+          maxZ = Math.max(maxZ, z + 1);
+        };
+        for (const key of zone.tileMask ?? []) {
+          const [x, z] = key.split(",").map(Number);
+          includeTile(x, z);
+        }
+        for (const tile of zone.tileMaskTiles ?? [])
+          includeTile(tile.x, tile.z);
+        return Object.freeze({
+          minX: minX - zone.blendRadius,
+          maxX: maxX + zone.blendRadius,
+          minZ: minZ - zone.blendRadius,
+          maxZ: maxZ + zone.blendRadius,
+        });
+      }),
+    );
+    let current = true;
+    const isCurrent = () => {
+      current &&=
+        !this.destroyed &&
+        this.canonicalGroundInitialized &&
+        this.activeTerrainProfile === profile &&
+        this.CONFIG.WATER_THRESHOLD === profile.water.threshold &&
+        this.canonicalHeightRevision === revision;
+      return current;
+    };
+    return Object.freeze({
+      profile,
+      revision,
+      supportBounds,
+      isCurrent,
+      sampleHeight: (x: number, z: number) => {
+        if (!isCurrent()) throw new Error("Canonical ground lease is stale");
+        return this.getResourceGroundHeight(x, z);
+      },
+    });
+  }
+
+  private recordCanonicalHeightChange(): void {
+    this.canonicalHeightRevision++;
+    this.waterSystem?.invalidateCoastalBathymetry();
+  }
+
   /**
    * Compute height using noise (expensive). Skips flat zone check — caller must check first.
    * PERF: Avoids redundant getFlatZoneHeight() when called from getHeightAt().
@@ -4571,19 +5147,32 @@ export class TerrainSystem extends System {
   private readonly arenaFloorZoneIds = new Set<string>();
   private arenaGradeHeight: number | null = null;
 
-  /** Reused ordered candidates; consume synchronously without recursive lookup. */
+  /**
+   * One owned, reusable tile neighborhood, not an unbounded world cache.
+   * Repeated normal stencils share this exact ordered candidate set. Callers
+   * still consume synchronously: querying another tile reuses the same array.
+   */
   private getAuthoredSurfaceCandidates(
     worldX: number,
     worldZ: number,
   ): readonly FlatZone[] {
     const candidates = this.authoredSurfaceCandidates;
-    candidates.length = 0;
-    this._flatZoneChecked.clear();
-    if (this.flatZones.size === 0) return candidates;
     const tileSize = this.CONFIG.TILE_SIZE;
     const halfTile = tileSize / 2;
     const terrainTileX = Math.floor((worldX + halfTile) / tileSize);
     const terrainTileZ = Math.floor((worldZ + halfTile) / tileSize);
+    if (
+      terrainTileX === this.authoredSurfaceCandidateTileX &&
+      terrainTileZ === this.authoredSurfaceCandidateTileZ &&
+      tileSize === this.authoredSurfaceCandidateTileSize
+    )
+      return candidates;
+    candidates.length = 0;
+    this._flatZoneChecked.clear();
+    this.authoredSurfaceCandidateTileX = terrainTileX;
+    this.authoredSurfaceCandidateTileZ = terrainTileZ;
+    this.authoredSurfaceCandidateTileSize = tileSize;
+    if (this.flatZones.size === 0) return candidates;
     for (let dtx = -1; dtx <= 1; dtx++) {
       for (let dtz = -1; dtz <= 1; dtz++) {
         const key = `${terrainTileX + dtx}_${terrainTileZ + dtz}`;
@@ -4597,6 +5186,16 @@ export class TerrainSystem extends System {
       }
     }
     return candidates;
+  }
+
+  private invalidateAuthoredSurfaceCandidates(): void {
+    // Same-height/grass-only replacements change owned zone objects without
+    // advancing canonical height identity. Invalidate on index writes instead.
+    this.authoredSurfaceCandidateTileX = undefined;
+    this.authoredSurfaceCandidateTileZ = undefined;
+    this.authoredSurfaceCandidateTileSize = undefined;
+    this.authoredSurfaceCandidates.length = 0;
+    this._flatZoneChecked.clear();
   }
 
   private getFlatZoneHeight(worldX: number, worldZ: number): number | null {
@@ -4710,16 +5309,179 @@ export class TerrainSystem extends System {
     }
   }
 
-  /**
-   * Register a flat zone and update spatial index.
-   * Spatial index uses terrain tiles (100m each) for efficient lookup.
-   *
-   * IMPORTANT: Also regenerates affected terrain tile meshes so that
-   * the visual terrain reflects the flat zone heights. This is critical
-   * because terrain tiles may have been generated before flat zones
-   * were registered (e.g., building flat zones registered after terrain init).
-   */
+  /** Copy the validated wire fields; no caller-owned grading data is retained. */
+  private copyFlatZone(zone: FlatZone, freeze = false): FlatZone {
+    const copy = this.grassSurfaceOperations.cloneSnapshot({
+      schemaVersion: 1,
+      zones: [zone],
+      arenaFloorIds: [],
+      arenaGradeHeight: null,
+      waterBodies: [],
+    }).zones[0];
+    if (freeze) {
+      if (copy.radialPond) {
+        if (copy.radialPond.bankSectors) {
+          for (const sector of copy.radialPond.bankSectors)
+            Object.freeze(sector);
+          Object.freeze(copy.radialPond.bankSectors);
+        }
+        if (copy.radialPond.bankComposition) {
+          for (const row of copy.radialPond.bankComposition.sectors) {
+            if (row.groundCover) Object.freeze(row.groundCover);
+            Object.freeze(row);
+          }
+          Object.freeze(copy.radialPond.bankComposition.sectors);
+          Object.freeze(copy.radialPond.bankComposition);
+        }
+        Object.freeze(copy.radialPond);
+      }
+      if (copy.tileMaskBounds) Object.freeze(copy.tileMaskBounds);
+      if (copy.grassExclusionBounds) Object.freeze(copy.grassExclusionBounds);
+      if (copy.tileMaskTiles) {
+        for (const tile of copy.tileMaskTiles) Object.freeze(tile);
+        Object.freeze(copy.tileMaskTiles);
+      }
+      // A frozen Set still permits mutation. This detached Set stays private;
+      // public zone queries copy it again rather than exposing this reference.
+      Object.freeze(copy);
+    }
+    return copy;
+  }
+
+  private sameCanonicalFlatZone(a: FlatZone, b: FlatZone): boolean {
+    if (
+      (
+        [
+          "id",
+          "centerX",
+          "centerZ",
+          "width",
+          "depth",
+          "height",
+          "blendRadius",
+          "blendShape",
+          "blendComposition",
+        ] as const
+      ).some((key) => a[key] !== b[key])
+    )
+      return false;
+    if (Boolean(a.radialPond) !== Boolean(b.radialPond)) return false;
+    if (
+      a.radialPond &&
+      b.radialPond &&
+      (
+        [
+          "bedRadius",
+          "bankInnerRadius",
+          "bankOuterRadius",
+          "bankHeight",
+          "shorelineAmplitude",
+        ] as const
+      ).some((key) => a.radialPond![key] !== b.radialPond![key])
+    )
+      return false;
+    const sectorsA = a.radialPond?.bankSectors;
+    const sectorsB = b.radialPond?.bankSectors;
+    if (Boolean(sectorsA) !== Boolean(sectorsB)) return false;
+    if (
+      sectorsA &&
+      sectorsB &&
+      (sectorsA.length !== sectorsB.length ||
+        sectorsA.some((sector, index) =>
+          (
+            [
+              "bearing",
+              "halfWidth",
+              "innerRadius",
+              "innerHeight",
+              "outerRadius",
+              "outerHeight",
+            ] as const
+          ).some((key) => sector[key] !== sectorsB[index][key]),
+        ))
+    )
+      return false;
+    const compositionA = a.radialPond?.bankComposition;
+    const compositionB = b.radialPond?.bankComposition;
+    if (Boolean(compositionA) !== Boolean(compositionB)) return false;
+    if (
+      compositionA &&
+      compositionB &&
+      (compositionA.schemaVersion !== compositionB.schemaVersion ||
+        compositionA.sectors.length !== compositionB.sectors.length ||
+        compositionA.sectors.some(
+          (row, index) =>
+            row.sectorIndex !== compositionB.sectors[index].sectorIndex ||
+            row.surface !== compositionB.sectors[index].surface ||
+            row.groundCover?.emergenceHeight !==
+              compositionB.sectors[index].groundCover?.emergenceHeight ||
+            row.groundCover?.fullHeight !==
+              compositionB.sectors[index].groundCover?.fullHeight,
+        ))
+    )
+      return false;
+    if (Boolean(a.tileMask) !== Boolean(b.tileMask)) return false;
+    if (
+      a.tileMask &&
+      b.tileMask &&
+      (a.tileMask.size !== b.tileMask.size ||
+        [...a.tileMask].some((key) => !b.tileMask!.has(key)))
+    )
+      return false;
+    if (Boolean(a.tileMaskTiles) !== Boolean(b.tileMaskTiles)) return false;
+    if (
+      a.tileMaskTiles &&
+      b.tileMaskTiles &&
+      (a.tileMaskTiles.length !== b.tileMaskTiles.length ||
+        a.tileMaskTiles.some(
+          (tile, index) =>
+            tile.x !== b.tileMaskTiles![index].x ||
+            tile.z !== b.tileMaskTiles![index].z,
+        ))
+    )
+      return false;
+    if (Boolean(a.tileMaskBounds) !== Boolean(b.tileMaskBounds)) return false;
+    return (
+      !a.tileMaskBounds ||
+      !b.tileMaskBounds ||
+      (["minX", "maxX", "minZ", "maxZ"] as const).every(
+        (key) => a.tileMaskBounds![key] === b.tileMaskBounds![key],
+      )
+    );
+  }
+
+  private sameFlatZoneGrassExclusion(a: FlatZone, b: FlatZone): boolean {
+    if (a.excludeGrass !== b.excludeGrass) return false;
+    if (Boolean(a.grassExclusionBounds) !== Boolean(b.grassExclusionBounds))
+      return false;
+    return (
+      !a.grassExclusionBounds ||
+      !b.grassExclusionBounds ||
+      (["minX", "maxX", "minZ", "maxZ"] as const).every(
+        (key) => a.grassExclusionBounds![key] === b.grassExclusionBounds![key],
+      )
+    );
+  }
+
+  private setCanonicalArenaGrade(
+    ids: ReadonlySet<string>,
+    height: number | null,
+  ): void {
+    if (
+      height === this.arenaGradeHeight &&
+      ids.size === this.arenaFloorZoneIds.size &&
+      [...ids].every((id) => this.arenaFloorZoneIds.has(id))
+    )
+      return;
+    this.arenaFloorZoneIds.clear();
+    for (const id of ids) this.arenaFloorZoneIds.add(id);
+    this.arenaGradeHeight = height;
+    this.recordCanonicalHeightChange();
+  }
+
+  /** Register owned grading and regenerate only the consumers whose inputs changed. */
   registerFlatZone(zone: FlatZone): void {
+    if (this.destroyed) throw new Error("Terrain is destroyed");
     // Validate zone data
     if (!zone || !zone.id || typeof zone.id !== "string") {
       throw new Error(
@@ -4751,7 +5513,12 @@ export class TerrainSystem extends System {
         `[TerrainSystem] registerFlatZone "${zone.id}": invalid blendRadius ${zone.blendRadius}`,
       );
     }
+    this.grassSurfaceOperations.validateBlendShape(zone);
     this.grassSurfaceOperations.validateGrassExclusionBounds(zone);
+    if (zone.blendShape !== undefined && this.arenaFloorZoneIds.has(zone.id))
+      throw new Error(
+        "Owned arena floors require unmodified rectangular geometry",
+      );
     if (
       zone.excludeGrass !== undefined &&
       typeof zone.excludeGrass !== "boolean"
@@ -4766,17 +5533,26 @@ export class TerrainSystem extends System {
         `[TerrainSystem] registerFlatZone "${zone.id}": ${radialProfileError}`,
       );
     }
-    if (zone.grassExclusionBounds) {
-      // Own the new optional geometry. Caller mutation cannot bypass leases.
-      zone = Object.freeze({
-        ...zone,
-        grassExclusionBounds: Object.freeze({ ...zone.grassExclusionBounds }),
-      });
+    zone = this.copyFlatZone(zone, true);
+    const previous = this.flatZones.get(zone.id);
+    const heightChanged =
+      !previous || !this.sameCanonicalFlatZone(previous, zone);
+    const geometryChanged =
+      heightChanged || previous?.carveInset !== zone.carveInset;
+    const grassChanged =
+      heightChanged ||
+      !previous ||
+      !this.sameFlatZoneGrassExclusion(previous, zone);
+
+    if (geometryChanged || grassChanged) {
+      if (previous) this.assertPondCompositionZoneEditable(previous);
+      this.assertPondCompositionZoneEditable(zone);
     }
 
     // A replacement must remove the previous bounds before indexing the new
     // zone, including when an authored layout is rebuilt with the same IDs.
-    if (this.flatZones.has(zone.id)) this.unregisterFlatZone(zone.id);
+    if (previous && heightChanged) this.unregisterFlatZone(zone.id);
+    this.invalidateAuthoredSurfaceCandidates();
     this.flatZones.set(zone.id, zone);
 
     // Calculate affected terrain tiles
@@ -4794,12 +5570,14 @@ export class TerrainSystem extends System {
     const zoneMaxX = zone.centerX + totalRadius;
     const zoneMinZ = zone.centerZ - totalRadius;
     const zoneMaxZ = zone.centerZ + totalRadius;
-    this.recordGrassSurfaceChange({
-      minX: zoneMinX,
-      maxX: zoneMaxX,
-      minZ: zoneMinZ,
-      maxZ: zoneMaxZ,
-    });
+    if (grassChanged) {
+      this.recordGrassSurfaceChange({
+        minX: zoneMinX,
+        maxX: zoneMaxX,
+        minZ: zoneMinZ,
+        maxZ: zoneMaxZ,
+      });
+    }
 
     const minTileX = Math.floor((zoneMinX + halfTile) / this.CONFIG.TILE_SIZE);
     const maxTileX = Math.floor((zoneMaxX + halfTile) / this.CONFIG.TILE_SIZE);
@@ -4816,14 +5594,25 @@ export class TerrainSystem extends System {
           zones = [];
           this.flatZonesByTile.set(key, zones);
         }
-        zones.push(zone);
+        if (previous && !heightChanged) {
+          // Preserve strict-distance tie priority and arena-floor membership.
+          // Grass-only changes cannot reorder canonical height candidates.
+          const index = zones.indexOf(previous);
+          if (index < 0)
+            throw new Error("Owned flat-zone index is inconsistent");
+          zones[index] = zone;
+        } else {
+          zones.push(zone);
+        }
 
         // Track tiles that need regeneration (if they already exist)
-        if (this.terrainTiles.has(key)) {
+        if (geometryChanged && this.terrainTiles.has(key)) {
           tilesToRegenerate.push({ x: tx, z: tz });
         }
       }
     }
+
+    if (heightChanged) this.recordCanonicalHeightChange();
 
     // Regenerate any existing terrain tiles to apply flat zone heights
     // This ensures terrain meshes reflect the flat zone even if they were
@@ -4859,7 +5648,7 @@ export class TerrainSystem extends System {
     // Invalidate quad-tree visual chunks so they regenerate with flat zone heights.
     // Without this, chunks generated before the flat zone was registered would
     // show the procedural height instead of the flat zone height.
-    if (this.quadTreeVisualManager) {
+    if (geometryChanged && this.quadTreeVisualManager) {
       this.quadTreeVisualManager.invalidateRegion(
         zoneMinX,
         zoneMinZ,
@@ -4867,7 +5656,7 @@ export class TerrainSystem extends System {
         zoneMaxZ,
       );
     }
-    if (this.grassVisualManager) {
+    if (grassChanged && this.grassVisualManager) {
       this.grassVisualManager.invalidateRegion(
         zoneMinX,
         zoneMinZ,
@@ -4980,7 +5769,9 @@ export class TerrainSystem extends System {
   unregisterFlatZone(id: string): void {
     const zone = this.flatZones.get(id);
     if (!zone) return;
+    this.assertPondCompositionZoneEditable(zone);
 
+    this.invalidateAuthoredSurfaceCandidates();
     this.flatZones.delete(id);
     this.arenaFloorZoneIds.delete(id);
     if (this.arenaFloorZoneIds.size === 0) this.arenaGradeHeight = null;
@@ -5021,6 +5812,7 @@ export class TerrainSystem extends System {
     const maxX = zone.centerX + totalRadius;
     const minZ = zone.centerZ - totalRadius;
     const maxZ = zone.centerZ + totalRadius;
+    this.recordCanonicalHeightChange();
     this.recordGrassSurfaceChange({ minX, minZ, maxX, maxZ });
     if (this.quadTreeVisualManager) {
       this.quadTreeVisualManager.invalidateRegion(minX, minZ, maxX, maxZ);
@@ -5049,7 +5841,7 @@ export class TerrainSystem extends System {
       const halfDepth = zone.depth / 2 + zone.blendRadius;
 
       if (dx <= halfWidth && dz <= halfDepth) {
-        return zone;
+        return this.copyFlatZone(zone);
       }
     }
 
@@ -5114,6 +5906,11 @@ export class TerrainSystem extends System {
    * Terrain tiles are 100m each, used only for spatial indexing.
    */
   private loadFlatZonesFromManifest(): void {
+    // Admit the shared floor datum before installing authored grades. Invalid
+    // arena metadata must not leave partially registered terrain surfaces.
+    const admittedArenaGradeHeight = ALL_WORLD_AREAS.duel_arena
+      ? getDuelArenaGradeHeight()
+      : null;
     // Movement tile size (1m) - used for station footprints
     const MOVEMENT_TILE_SIZE = 1.0;
 
@@ -5141,6 +5938,8 @@ export class TerrainSystem extends System {
             height?: number;
             heightOffset?: number;
             blendRadius: number;
+            blendShape?: FlatZone["blendShape"];
+            blendComposition?: FlatZone["blendComposition"];
             excludeGrass?: boolean;
             grassExclusionBounds?: FlatZone["grassExclusionBounds"];
             radialPond?: RadialPondTerrainProfile;
@@ -5152,6 +5951,8 @@ export class TerrainSystem extends System {
     // A station may sit on a plaza or pond declared in a different, later area.
     for (const areaConfig of areaConfigs) {
       for (const zoneConfig of areaConfig.flatZones ?? []) {
+        // Reject malformed/inherited blend metadata before selective copying.
+        this.grassSurfaceOperations.validateBlendShape(zoneConfig as FlatZone);
         const proceduralHeight = this.getProceduralHeightAt(
           zoneConfig.centerX,
           zoneConfig.centerZ,
@@ -5169,6 +5970,15 @@ export class TerrainSystem extends System {
           depth: zoneConfig.depth,
           height: flatHeight,
           blendRadius: zoneConfig.blendRadius,
+          ...(Object.prototype.hasOwnProperty.call(zoneConfig, "blendShape")
+            ? { blendShape: zoneConfig.blendShape }
+            : {}),
+          ...(Object.prototype.hasOwnProperty.call(
+            zoneConfig,
+            "blendComposition",
+          )
+            ? { blendComposition: zoneConfig.blendComposition }
+            : {}),
           excludeGrass: zoneConfig.excludeGrass,
           ...(Object.prototype.hasOwnProperty.call(
             zoneConfig,
@@ -5186,20 +5996,21 @@ export class TerrainSystem extends System {
 
     // Terrain owns these surfaces on BOTH roles before meshes/navigation bake.
     // Rendering borrows the same base; it must not register client-only grades.
-    this.arenaFloorZoneIds.clear();
-    this.arenaGradeHeight = null;
-    if (ALL_WORLD_AREAS.duel_arena) {
-      const baseHeight = getDuelArenaGradeHeight();
+    const nextArenaFloorIds = new Set<string>();
+    let nextArenaGradeHeight: number | null = null;
+    if (admittedArenaGradeHeight !== null) {
+      const baseHeight = admittedArenaGradeHeight;
       for (const zone of createDuelArenaFloorZones(
         getDuelArenaConfig(),
         baseHeight,
       )) {
         this.registerFlatZone(zone);
-        this.arenaFloorZoneIds.add(zone.id);
+        nextArenaFloorIds.add(zone.id);
         loadedCount++;
       }
-      this.arenaGradeHeight = baseHeight;
+      nextArenaGradeHeight = baseHeight;
     }
+    this.setCanonicalArenaGrade(nextArenaFloorIds, nextArenaGradeHeight);
 
     // Collect every pad before registering any of them. Sampling and registering
     // sequentially would let an earlier station's pad change a later one's grade.
@@ -5588,6 +6399,8 @@ export class TerrainSystem extends System {
     b: number;
     grassWeight: number;
     grassPlacement: number;
+    grassPlacementBeforeCoast?: number;
+    grassEstablishment?: true;
     grassHeightScale: number;
     tintR: number;
     tintG: number;
@@ -5642,6 +6455,11 @@ export class TerrainSystem extends System {
       forestW,
       canyonW,
     );
+    let coastalGroundCover = 0;
+    let coastDistributionSupport: number | undefined;
+    let pondMarginScale = 1;
+    let grassEstablishment = false;
+    let grassEstablishmentWeight = 0;
     if (isCompactSculptProfile(this.getWorldTerrainProfile())) {
       // Match the compact diffuse palette, not the superseded biome colors.
       // Legacy ecology remains independent of colour. The explicit compact
@@ -5675,10 +6493,33 @@ export class TerrainSystem extends System {
         },
       };
       Object.assign(color, compactTerrainColorOperations.sample(paletteInput));
+      if (this.getCompactPondBlend() === "shore-contact-v1")
+        pondMarginScale =
+          compactTerrainColorOperations.pondMarginAt(paletteInput).clumpScale;
       if (eligibility === "compact-pbr-v1") {
         color.grassWeight =
-          compactTerrainColorOperations.grassSupport(paletteInput);
+          compactTerrainColorOperations.grassSupportBeforeCoast(paletteInput);
+        if (
+          this.getCompactCoastBlend() === "distribution-v1" ||
+          this.getCompactPondBlend() === "shore-contact-v1" ||
+          this.getCompactPondBlend() === "composition-v1"
+        )
+          coastDistributionSupport =
+            compactTerrainColorOperations.grassSupport(paletteInput);
+        if (this.getCompactPondBlend() === "composition-v1") {
+          grassEstablishmentWeight =
+            compactTerrainColorOperations.bankCompositionAt(
+              paletteInput,
+            ).groundCoverWeight;
+          grassEstablishment = grassEstablishmentWeight > 0;
+        }
       }
+      coastalGroundCover = compactTerrainColorOperations.coastalGroundCover({
+        height,
+        noiseValue: paletteInput.noiseValue,
+        distortNoise: paletteInput.distortNoise,
+        field: paletteInput.surface.macroField,
+      });
     }
 
     const tCfg = getGrassConfigForBiome(BiomeType.Tundra);
@@ -5722,8 +6563,40 @@ export class TerrainSystem extends System {
     const noiseVal = this.noise.simplex2D(wx * patchScale, wz * patchScale);
     const patchMask = noiseVal > patchThreshold ? 1.0 : 0.0;
 
-    const grassPlacement =
+    // Use the original biome acceptance threshold before the candidate-only
+    // coastal filter, matching the worker's unrephased seeded generation.
+    const grassPlacementBeforeCoast =
       color.grassWeight * density * slopeOk * weightOk * patchMask;
+    color.grassWeight =
+      coastDistributionSupport ?? color.grassWeight * (1 - coastalGroundCover);
+    let grassPlacement =
+      coastDistributionSupport === undefined
+        ? grassPlacementBeforeCoast * (1 - coastalGroundCover)
+        : coastDistributionSupport *
+          density *
+          slopeOk *
+          (grassEstablishment
+            ? coastDistributionSupport > 0
+              ? 1
+              : 0
+            : weightOk) *
+          patchMask;
+    if (grassEstablishment)
+      grassPlacement = compactTerrainColorOperations.bankEstablishmentPlacement(
+        grassPlacement,
+        grassPlacementBeforeCoast * (1 - coastalGroundCover),
+        grassEstablishmentWeight,
+      );
+    // Older modes retain their historical cap. Authored groundCover releases
+    // it smoothly only within that sector's normalized support, not globally.
+    if (
+      this.getCompactPondBlend() === "shore-contact-v1" ||
+      (this.getCompactPondBlend() === "composition-v1" && !grassEstablishment)
+    )
+      grassPlacement = Math.min(
+        grassPlacement,
+        grassPlacementBeforeCoast * (1 - coastalGroundCover),
+      );
 
     // Biome-blended grass tint (returned separately for tip-only application)
     const tintStrength =
@@ -5755,7 +6628,13 @@ export class TerrainSystem extends System {
     return {
       ...color,
       grassPlacement,
-      grassHeightScale,
+      ...(grassEstablishment ? { grassEstablishment: true as const } : {}),
+      ...(coastalGroundCover > 0 || coastDistributionSupport !== undefined
+        ? { grassPlacementBeforeCoast }
+        : {}),
+      // Consumed only after historical acceptance/rotation in the manager.
+      // The existing bank-verge factor remains a separate, single application.
+      grassHeightScale: grassHeightScale * pondMarginScale,
       tintR,
       tintG,
       tintB,
@@ -6318,6 +7197,9 @@ export class TerrainSystem extends System {
         }
 
         this.quadTreeVisualManager.update(pos.x, pos.z);
+        // Publish matching water edges only after the actual visible terrain
+        // frontier has advanced; split/merge callbacks merely request work.
+        this.waterVisualManager?.update();
         this.compactPondDressing?.update(
           _deltaTime,
           (x, z) =>
@@ -8021,6 +8903,8 @@ export class TerrainSystem extends System {
   destroy(): void {
     if (this.destroyed) return;
     this.destroyed = true;
+    this.canonicalGroundInitialized = false;
+    this.recordCanonicalHeightChange();
     this.grassSurfaceRevision++;
     this.grassSurfaceChanges = [];
     this.ownedGrassExclusions.clear();
@@ -8128,8 +9012,7 @@ export class TerrainSystem extends System {
     this.pendingTileGenerations.clear();
     this.flatZones.clear();
     this.flatZonesByTile.clear();
-    this._flatZoneChecked.clear();
-    this.authoredSurfaceCandidates.length = 0;
+    this.invalidateAuthoredSurfaceCandidates();
     this.arenaFloorZoneIds.clear();
     this.arenaGradeHeight = null;
 
@@ -8760,6 +9643,10 @@ export class TerrainSystem extends System {
     ready: boolean;
     terrain: ReturnType<TerrainVisualManager["getStreamingReadiness"]> | null;
     grass: ReturnType<GrassVisualManager["getStreamingReadiness"]> | null;
+    water: ReturnType<WaterSystem["getCoastalBathymetryReadiness"]> | null;
+    waterTopology: ReturnType<
+      WaterVisualManager["getConformingReadiness"]
+    > | null;
   } {
     const terrain =
       this.quadTreeVisualManager?.getStreamingReadiness(criticalRadius) ?? null;
@@ -8770,15 +9657,22 @@ export class TerrainSystem extends System {
             criticalRadius,
           )
         : null;
+    const water = this.waterSystem?.getCoastalBathymetryReadiness() ?? null;
+    const waterTopology =
+      this.waterVisualManager?.getConformingReadiness() ?? null;
     return {
       ready: Boolean(
         terrain?.ready &&
         (!this.grassVisualManager || grass?.ready) &&
+        (!water?.required || water.ready) &&
+        (!waterTopology?.required || waterTopology.ready) &&
         (!this.compactPondDressing ||
           this.compactPondDressing.getReceipt().ready),
       ),
       terrain,
       grass,
+      water,
+      waterTopology,
     };
   }
 

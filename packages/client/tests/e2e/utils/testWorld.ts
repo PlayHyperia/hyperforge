@@ -11,6 +11,7 @@
  */
 
 import type { Page } from "@playwright/test";
+import type { World, TerrainSystem } from "@hyperforge/shared";
 import { mkdir, writeFile } from "node:fs/promises";
 
 /**
@@ -715,61 +716,90 @@ export async function getPlayerSkills(
  * Simulate a click at a specific world position
  * Converts world coordinates to screen coordinates using the camera projection
  */
+export async function projectWorldPosition(
+  page: Page,
+  worldPos: { x: number; z: number; y?: number },
+): Promise<{ x: number; y: number }> {
+  return page.evaluate((target) => {
+    const world = (window as unknown as { world?: World }).world;
+    const canvas = world?.graphics?.renderer?.domElement;
+    const player = world?.getPlayer();
+    const terrain = world?.getSystem<TerrainSystem>("terrain");
+    if (!world?.camera || !canvas || !player || !terrain)
+      throw new Error(
+        "Actual game camera, renderer, player and terrain required",
+      );
+    if (world.graphics?.isWebGPU !== true)
+      throw new Error("World clicks require the actual WebGPU game");
+    const y = target.y ?? terrain.getResourceGroundHeight(target.x, target.z);
+    if (![target.x, y, target.z].every(Number.isFinite))
+      throw new Error("World click target must have finite ground coordinates");
+    // Clone only: never mutate the player's position or guess a camera/global.
+    const ndc = player.position
+      .clone()
+      .set(target.x, y, target.z)
+      .project(world.camera);
+    if (
+      ![ndc.x, ndc.y, ndc.z].every(Number.isFinite) ||
+      Math.abs(ndc.x) >= 0.98 ||
+      Math.abs(ndc.y) >= 0.98 ||
+      ndc.z < 0 ||
+      ndc.z > 1
+    )
+      throw new Error(
+        "World click target is outside the WebGPU camera frustum",
+      );
+    const box = canvas.getBoundingClientRect();
+    if (box.width <= 0 || box.height <= 0)
+      throw new Error("Actual game canvas is not visible");
+    const x = box.left + ((ndc.x + 1) / 2) * box.width;
+    const screenY = box.top + ((1 - ndc.y) / 2) * box.height;
+    if (document.elementFromPoint(x, screenY) !== canvas)
+      throw new Error("World click is covered by UI; refusing a guessed click");
+    // Match the real input router's entity-first targeting. DOM visibility
+    // alone cannot distinguish terrain from a tree, actor or building floor.
+    const interaction = world.getSystem("interaction") as
+      | {
+          getRaycastService?: () => {
+            getEntityAtPosition: (
+              x: number,
+              y: number,
+              canvas: HTMLCanvasElement,
+            ) => unknown;
+            getTerrainPosition: (
+              x: number,
+              y: number,
+              canvas: HTMLCanvasElement,
+            ) => { x: number; y: number; z: number } | null;
+          };
+        }
+      | undefined;
+    const raycast = interaction?.getRaycastService?.();
+    if (!raycast)
+      throw new Error("Actual interaction raycast service required");
+    if (raycast.getEntityAtPosition(x, screenY, canvas))
+      throw new Error("World click intersects an entity before terrain");
+    const hit = raycast.getTerrainPosition(x, screenY, canvas);
+    if (
+      !hit ||
+      Math.floor(hit.x) !== Math.floor(target.x) ||
+      Math.floor(hit.z) !== Math.floor(target.z) ||
+      Math.abs(hit.y - y) > 0.25
+    )
+      throw new Error(
+        "Actual raycast does not reach the requested ground tile",
+      );
+    return { x, y: screenY };
+  }, worldPos);
+}
+
+/** Real canvas input at current terrain height; missing state must fail. */
 export async function clickAtWorldPosition(
   page: Page,
-  worldPos: { x: number; z: number },
+  worldPos: { x: number; z: number; y?: number },
 ): Promise<void> {
-  const canvas = await page.$("canvas");
-  if (!canvas) return;
-
-  const box = await canvas.boundingBox();
-  if (!box) return;
-
-  // Convert world position to screen position using the game's camera
-  const screenPos = await page.evaluate(
-    ({ worldX, worldZ, canvasWidth, canvasHeight }) => {
-      const win = window as unknown as {
-        THREE?: {
-          Vector3: new (
-            x: number,
-            y: number,
-            z: number,
-          ) => {
-            project: (camera: unknown) => { x: number; y: number };
-          };
-        };
-        world?: {
-          camera?: unknown;
-        };
-      };
-
-      if (!win.THREE || !win.world?.camera) {
-        // Fallback to center if camera not available
-        return { x: canvasWidth / 2, y: canvasHeight / 2 };
-      }
-
-      // Create a vector at the world position (y=0 for ground level)
-      const worldVector = new win.THREE.Vector3(worldX, 0, worldZ);
-
-      // Project to normalized device coordinates (-1 to 1)
-      const ndc = worldVector.project(win.world.camera);
-
-      // Convert to screen coordinates
-      const screenX = ((ndc.x + 1) / 2) * canvasWidth;
-      const screenY = ((1 - ndc.y) / 2) * canvasHeight;
-
-      return { x: screenX, y: screenY };
-    },
-    {
-      worldX: worldPos.x,
-      worldZ: worldPos.z,
-      canvasWidth: box.width,
-      canvasHeight: box.height,
-    },
-  );
-
-  // Click at the calculated screen position
-  await page.mouse.click(box.x + screenPos.x, box.y + screenPos.y);
+  const position = await projectWorldPosition(page, worldPos);
+  await page.mouse.click(position.x, position.y);
 }
 
 /**
@@ -1023,7 +1053,7 @@ export async function getPerformanceMetrics(page: Page): Promise<{
     };
 
     const memory = (
-      performance as Performance & {
+      performance as globalThis.Performance & {
         memory?: { usedJSHeapSize: number };
       }
     ).memory;
@@ -1047,7 +1077,7 @@ export async function measurePageLoadTime(page: Page): Promise<{
   const timing = await page.evaluate(() => {
     const perf = performance.getEntriesByType(
       "navigation",
-    )[0] as PerformanceNavigationTiming;
+    )[0] as globalThis.PerformanceNavigationTiming;
     const paint = performance.getEntriesByType("paint");
     const firstPaint = paint.find((p) => p.name === "first-paint");
 

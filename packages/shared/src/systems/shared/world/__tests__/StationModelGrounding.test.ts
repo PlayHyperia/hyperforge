@@ -112,7 +112,7 @@ describe("authored station grass-only clearance", () => {
         stationDataProvider.getGrassExclusionBounds(station.type, 335, 336),
       ).toBeUndefined();
       expect(
-        Object.hasOwn(
+        Object.prototype.hasOwnProperty.call(
           stationDataProvider.getStationData(station.type)!,
           "grassClearanceMargin",
         ),
@@ -121,6 +121,86 @@ describe("authored station grass-only clearance", () => {
     expect(
       stationDataProvider.getGrassExclusionBounds("unknown", 335, 336),
     ).toBeUndefined();
+  });
+
+  it("qualifies an input-only bank/range/altar clearance candidate against their actual GLBs without changing defaults or collision", async () => {
+    const original = structuredClone(manifest);
+    const candidate = structuredClone(manifest);
+    const selected = new Set(["bank", "range", "altar"]);
+    const previous = new Map(
+      manifest.stations.map((station) => [
+        station.type,
+        structuredClone(stationDataProvider.getStationData(station.type)),
+      ]),
+    );
+    const footprints = new Map(
+      manifest.stations.map((station) => [
+        station.type,
+        structuredClone(stationDataProvider.getFootprint(station.type)),
+      ]),
+    );
+    for (const station of candidate.stations) {
+      if (!selected.has(station.type)) continue;
+      expect(station.grassClearanceMargin).toBeUndefined();
+      station.grassClearanceMargin = 1.25;
+    }
+    stationDataProvider.loadStations(candidate);
+    for (const station of candidate.stations) {
+      const runtime = structuredClone(
+        stationDataProvider.getStationData(station.type)!,
+      );
+      expect(stationDataProvider.getFootprint(station.type)).toEqual(
+        footprints.get(station.type),
+      );
+      if (!selected.has(station.type)) {
+        expect(runtime).toEqual(previous.get(station.type));
+        continue;
+      }
+      expect(runtime.grassClearanceMargin).toBe(1.25);
+      delete runtime.grassClearanceMargin;
+      expect(runtime).toEqual(previous.get(station.type));
+      const placement = actualStations.find(
+        (entry) => entry.type === station.type,
+      )!;
+      const { x, z } = placement.position;
+      const document = await new NodeIO().read(
+        fileURLToPath(new URL(station.model!.slice("asset://".length), assets)),
+      );
+      expect(document.getRoot().listSkins()).toHaveLength(0);
+      expect(document.getRoot().listAnimations()).toHaveLength(0);
+      const bounds = getBounds(document.getRoot().getDefaultScene()!);
+      const resolved = stationDataProvider.getGrassExclusionBounds(
+        station.type,
+        x,
+        z,
+      )!;
+      for (const [index, minKey, maxKey, pivot] of [
+        [0, "minX", "maxX", x],
+        [2, "minZ", "maxZ", z],
+      ] as const) {
+        expect(resolved[minKey]).toBe(
+          pivot + bounds.min[index] * station.modelScale - 1.25,
+        );
+        expect(resolved[maxKey]).toBe(
+          pivot + bounds.max[index] * station.modelScale + 1.25,
+        );
+        expect((resolved[minKey] + resolved[maxKey]) / 2).not.toBe(pivot);
+      }
+      expect(
+        Math.abs(
+          bounds.min[1] * station.modelScale +
+            station.modelYOffset +
+            STATION_GROUND_CLEARANCE,
+        ),
+      ).toBeLessThanOrEqual(0.000001);
+    }
+    // This is explicit input qualification, not a default manifest promotion.
+    expect(manifest).toEqual(original);
+    expect(
+      JSON.parse(
+        readFileSync(new URL("manifests/stations.json", assets), "utf8"),
+      ),
+    ).toEqual(original);
   });
 
   for (const station of manifest.stations.filter(

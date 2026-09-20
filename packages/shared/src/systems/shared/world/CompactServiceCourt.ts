@@ -1,5 +1,6 @@
 import { canonicalWorldJson } from "../../../data/WorldContentIdentity";
 import type {
+  CompactBankPavilionManifest,
   CompactServiceCourtManifest,
   CompactServicePlantingManifest,
 } from "../../../types/world/world-types";
@@ -26,6 +27,36 @@ export const COMPACT_SERVICE_COURT: CompactServiceCourtManifest = Object.freeze(
     recipeId: "open-timber-smithy-haven-v3",
   },
 );
+
+export const COMPACT_BANK_PAVILION: CompactBankPavilionManifest = Object.freeze(
+  {
+    schemaVersion: 1,
+    layoutId: "compact-bank-pavilion-v1",
+    terrainProfileId: "compact-duel-island-v6",
+    position: Object.freeze({ x: 350, z: 320 }),
+    rotation: 0,
+    recipeId: "open-timber-bank-haven-v1",
+  },
+);
+
+/** CPU-only, exact content admission; no renderer or procgen import is needed. */
+export function validateCompactBankPavilion(
+  value: unknown,
+  profile: WorldTerrainProfile,
+): CompactBankPavilionManifest | undefined {
+  if (value === undefined) return undefined;
+  const canonical = canonicalWorldJson(value);
+  if (
+    profile.id !== "compact-duel-island-v6" ||
+    profile.algorithm !== "compact-island-sculpt-v5" ||
+    profile.terrainTileSize !== 100 ||
+    canonical !== canonicalWorldJson(COMPACT_BANK_PAVILION)
+  )
+    throw new Error("Invalid compactBankPavilion profile, placement or recipe");
+  const copy = JSON.parse(canonical) as CompactBankPavilionManifest;
+  Object.freeze(copy.position);
+  return Object.freeze(copy);
+}
 
 /** Exact pre-finish identity retained for comparison captures. */
 export const COMPACT_SERVICE_COURT_LEGACY_FIXTURE: CompactServiceCourtManifest =
@@ -211,7 +242,7 @@ export function createCompactServiceSoil(
 }
 
 export type OwnedCompactServiceCourt = Readonly<{
-  descriptor: CompactServiceCourtManifest;
+  descriptor: CompactServiceCourtManifest | CompactBankPavilionManifest;
   position: Readonly<{ x: number; y: number; z: number }>;
   feet: readonly WorkshopFoot[];
   blockingTiles: readonly Readonly<{ x: number; z: number }>[];
@@ -266,7 +297,7 @@ export function createCompactServiceCourtGrassExclusions(
  * The 0.08m embed allowance is explicit; steep/unsupported placements fail closed.
  */
 export function groundCompactServiceCourt(
-  descriptor: CompactServiceCourtManifest,
+  descriptor: OwnedCompactServiceCourt["descriptor"],
   posts: readonly Readonly<{ x: number; z: number }>[],
   heightAt: (x: number, z: number) => number,
 ): OwnedCompactServiceCourt {

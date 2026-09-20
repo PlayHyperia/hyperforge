@@ -15,6 +15,13 @@ export type GrassPlacementCellBounds = Readonly<{
 
 export type GrassPlacementDistribution = "fine-cell-stratified-v1";
 
+export type GrassPlacementCoverage = "sixty-centimetre-cell-v1";
+
+export type GrassPlacementCoverageTrial = Readonly<{
+  id: GrassPlacementCoverage;
+  cell: GrassPlacementCell;
+}>;
+
 export type GrassPlacementDomainInput = {
   /** Real retained terrain leaf frame, including for cell-owned grass. */
   centerX: number;
@@ -24,6 +31,7 @@ export type GrassPlacementDomainInput = {
   spacingMul: number;
   placementCell?: GrassPlacementCell;
   placementDistribution?: GrassPlacementDistribution;
+  placementCoverage?: GrassPlacementCoverage;
 };
 
 export type GrassPlacementDomain = Readonly<{
@@ -34,6 +42,7 @@ export type GrassPlacementDomain = Readonly<{
   maxCount: number;
   placementCell?: GrassPlacementCell;
   placementDistribution?: GrassPlacementDistribution;
+  placementCoverage?: GrassPlacementCoverage;
   strataRows?: number;
   /** Present only for stratified sampling; actual storage uses the parent leaf. */
   leafFrame?: Readonly<{
@@ -76,6 +85,32 @@ export function createGrassPlacementCellOperations() {
       if (value === undefined || value === "fine-cell-stratified-v1")
         return value;
       return helpers.fail("unsupported placement distribution");
+    },
+    validateCoverage(value: unknown): GrassPlacementCoverage | undefined {
+      if (value === undefined || value === "sixty-centimetre-cell-v1")
+        return value;
+      return helpers.fail("unsupported placement coverage");
+    },
+    validateCoverageTrial(input: unknown): GrassPlacementCoverageTrial {
+      if (typeof input !== "object" || input === null || Array.isArray(input))
+        return helpers.fail("coverage trial requires a record");
+      const keys = Reflect.ownKeys(input);
+      const values = Object.getOwnPropertyDescriptors(input);
+      if (
+        keys.length !== 2 ||
+        keys.some((key) => key !== "id" && key !== "cell") ||
+        ["id", "cell"].some(
+          (key) => !values[key]?.enumerable || !("value" in values[key]),
+        )
+      )
+        return helpers.fail("coverage trial requires exact own data fields");
+      const id = helpers.validateCoverage(values.id.value);
+      if (id === undefined)
+        return helpers.fail("coverage trial id is required");
+      return Object.freeze({
+        id,
+        cell: helpers.validateCell(values.cell.value),
+      });
     },
     adjacentFloat32(value: number, direction: -1 | 1): number {
       floatView[0] = value;
@@ -133,6 +168,18 @@ export function createGrassPlacementCellOperations() {
       });
     },
     resolveDomain(input: GrassPlacementDomainInput): GrassPlacementDomain {
+      const coverageField = Object.getOwnPropertyDescriptor(
+        input,
+        "placementCoverage",
+      );
+      if (
+        "placementCoverage" in input &&
+        (!coverageField?.enumerable || !("value" in coverageField))
+      )
+        return helpers.fail("placement coverage must be own data");
+      const coverage = helpers.validateCoverage(coverageField?.value);
+      if (coverageField && coverage === undefined)
+        return helpers.fail("explicitly undefined placement coverage");
       const distribution = helpers.validateDistribution(
         input.placementDistribution,
       );
@@ -143,6 +190,16 @@ export function createGrassPlacementCellOperations() {
         return helpers.fail("explicitly undefined placement distribution");
       if (distribution && input.placementCell === undefined)
         return helpers.fail("placement distribution requires an explicit cell");
+      if (
+        coverage &&
+        (distribution !== "fine-cell-stratified-v1" ||
+          input.placementCell === undefined ||
+          input.clumpSpacing !== 0.6 ||
+          input.spacingMul !== 1)
+      )
+        return helpers.fail(
+          "placement coverage requires a fine sixty-centimetre cell",
+        );
       const spacing = input.clumpSpacing * input.spacingMul;
       // Keep historical domains and arithmetic unchanged. Only explicit cells
       // opt in to the new quota and containment admission.
@@ -231,6 +288,7 @@ export function createGrassPlacementCellOperations() {
         size: 25,
         maxCount,
         placementCell: cell,
+        ...(coverage ? { placementCoverage: coverage } : {}),
         ...(distribution
           ? {
               placementDistribution: distribution,
@@ -241,6 +299,31 @@ export function createGrassPlacementCellOperations() {
       });
       admittedDomains.add(domain);
       return domain;
+    },
+    /** Stateless fork for newly established roots. It must never advance the
+     * historical position/acceptance/rotation stream or change attempt count. */
+    establishmentRotation(
+      domain: GrassPlacementDomain,
+      seed: number,
+      index: number,
+    ): number {
+      if (
+        !admittedDomains.has(domain) ||
+        !Number.isSafeInteger(seed) ||
+        !Number.isSafeInteger(index) ||
+        index < 0 ||
+        index >= domain.maxCount
+      )
+        return helpers.fail("invalid establishment fork owner or index");
+      let value =
+        (seed ^
+          ((domain.centerX * 374761393 + domain.centerZ * 668265263) | 0) ^
+          Math.imul(index + 1, 0x9e3779b1) ^
+          0x706f6e64) |
+        0;
+      value = Math.imul(value ^ (value >>> 16), 0x21f0aaad);
+      value = Math.imul(value ^ (value >>> 15), 0x735a2d97);
+      return (((value ^ (value >>> 15)) >>> 0) / 4294967296) * Math.PI * 2;
     },
     samplePosition(
       domain: GrassPlacementDomain,

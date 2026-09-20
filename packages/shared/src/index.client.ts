@@ -7,6 +7,14 @@
 // IMPORTANT: DO NOT export createServerWorld or any server systems here
 // This entry point is specifically for browser/client builds
 
+import { DataManager } from "./data/DataManager";
+import type { CompactBankPavilionManifest } from "./types/world/world-types";
+
+/** Read only the manifest-admitted pavilion, even before its systems exist. */
+export function getAdmittedCompactBankPavilion(): CompactBankPavilionManifest | null {
+  return DataManager.getWorldConfig()?.compactBankPavilion ?? null;
+}
+
 export { createClientWorld } from "./runtime/createClientWorld";
 export { createViewerWorld } from "./runtime/createViewerWorld";
 export {
@@ -430,6 +438,8 @@ export type {
   StreamingDuelEquipmentVisualReadiness,
   StreamingDuelEquipmentVisualRequirement,
   StreamingDuelVisibleEquipmentSlot,
+  StreamingPreparationVisualDiagnostics,
+  StreamingPreparationVisualPlayerDiagnostics,
 } from "./systems/client/EquipmentVisualSystem";
 export type {
   StreamingArrowVisualCancellationEvent,

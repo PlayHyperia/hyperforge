@@ -146,6 +146,69 @@ describe("streaming item icon fallback", () => {
     }
   });
 
+  it.each(["left", "right"] as const)(
+    "limits %s equipment and inventory transitions to their changing border color",
+    (side) => {
+      const emptyAgent: AgentInfo = {
+        ...agent,
+        equipment: {},
+        inventory: [],
+        itemIconPaths: {},
+      };
+      const filledAgent: AgentInfo = {
+        ...emptyAgent,
+        equipment: {
+          weapon: "bronze_longsword",
+          shield: "wooden_shield",
+          body: "bronze_platebody",
+        },
+        inventory: Array.from({ length: 28 }, () => ({
+          itemId: "bronze_dagger",
+          quantity: 1,
+        })),
+      };
+      const { container, rerender } = render(
+        React.createElement(AgentStatsDisplay, { agent: emptyAgent, side }),
+      );
+
+      for (const currentAgent of [emptyAgent, filledAgent, emptyAgent]) {
+        rerender(
+          React.createElement(AgentStatsDisplay, { agent: currentAgent, side }),
+        );
+        const divs = Array.from(container.querySelectorAll("div"));
+        const cells = divs.filter((node) => node.style.aspectRatio === "1 / 1");
+        expect(cells).toHaveLength(34);
+        // This checks the actual rendered CSS contract, not native transition
+        // timing. Visibility must not be animated by these item-color effects.
+        for (const cell of cells) {
+          expect(cell.style.transition).toBe("border-color 0.2s");
+        }
+        const equipped = cells.filter((node) => node.style.display === "flex");
+        const inventory = cells.filter((node) => node.style.display !== "flex");
+        expect(equipped).toHaveLength(6);
+        expect(inventory).toHaveLength(28);
+        expect(
+          equipped.filter(
+            (node) => node.style.borderColor === "rgba(100, 200, 255, 0.6)",
+          ),
+        ).toHaveLength(currentAgent === filledAgent ? 3 : 0);
+        expect(
+          inventory.filter(
+            (node) => node.style.borderColor === "rgba(242, 208, 138, 0.5)",
+          ),
+        ).toHaveLength(currentAgent === filledAgent ? 28 : 0);
+        expect(
+          divs
+            .filter((node) => !cells.includes(node) && node.style.transition)
+            .map((node) => node.style.transition),
+        ).toEqual([
+          "background 0.15s, box-shadow 0.15s",
+          "width 0.15s ease-out, background 0.2s",
+        ]);
+      }
+    },
+  );
+
   it("discloses every exact frozen role loadout while the market is open", () => {
     const markup = renderToStaticMarkup(
       React.createElement(AgentStatsDisplay, {

@@ -59,6 +59,11 @@ function inspect(root: THREE.Object3D) {
     triangles +=
       (geometry.index?.count ?? geometry.getAttribute("position").count) / 3;
     for (const [name, a] of Object.entries(geometry.attributes)) {
+      if (
+        !(a instanceof THREE.BufferAttribute) &&
+        !(a instanceof THREE.InterleavedBufferAttribute)
+      )
+        throw new Error("Expected CPU-backed generated geometry attribute");
       expect(a.count, name).toBe(geometry.getAttribute("position").count);
       const array =
         a instanceof THREE.InterleavedBufferAttribute ? a.data.array : a.array;
@@ -162,9 +167,7 @@ describe("opt-in compact gabled building geometry", () => {
           new THREE.Vector3().fromBufferAttribute(p, j),
         );
         const uv = g.getAttribute("uv");
-        const u = ids.map((j) =>
-          new THREE.Vector2().fromBufferAttribute(uv, j),
-        );
+        const u = ids.map((j) => new THREE.Vector2(uv.getX(j), uv.getY(j)));
         expect(
           Math.abs(u[1].clone().sub(u[0]).cross(u[2].clone().sub(u[0]))),
         ).toBeGreaterThan(1e-8);

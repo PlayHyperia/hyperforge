@@ -29,7 +29,7 @@ export function createGabledRoof(
     depth > 32 ||
     wallTop <= 0 ||
     wallTop > 256 ||
-    !Object.hasOwn(WALL_MATERIAL_IDS, wallMaterial) ||
+    !Object.prototype.hasOwnProperty.call(WALL_MATERIAL_IDS, wallMaterial) ||
     !Number.isFinite(pitchDegrees) ||
     pitchDegrees < 18 ||
     pitchDegrees > 45 ||

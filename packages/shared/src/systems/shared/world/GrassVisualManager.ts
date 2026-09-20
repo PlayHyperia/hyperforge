@@ -36,9 +36,14 @@ import { SUN_LIGHT } from "./LightingConfig";
 import { isCompactSculptProfile } from "./WorldTerrainProfile";
 import { createCompactTerrainColorOperations } from "./CompactTerrainPalette";
 import type { CompactHabitatField } from "./CompactHabitatComposition";
-import { createCompactHabitatSoilNode } from "./CompactTerrainMaterial";
+import {
+  createCompactHabitatSoilNode,
+  createCompactBankVergeLocality,
+  createCompactBankVergeHeightScale,
+} from "./CompactTerrainMaterial";
 import type {
   GrassAppearanceCandidate,
+  GrassLightingCandidate,
   GrassSurfaceEligibility,
   StreamingGrassProfileReceipt,
 } from "../../../runtime/clientViewportMode";
@@ -58,6 +63,7 @@ import type { RetainedTerrainRegion } from "./TerrainVisualManager";
 import {
   GRASS_BLADE_GROUNDING_LIMITS,
   GrassGroundingContinuation,
+  captureGrassGroundingFailure,
   type GrassBladeGroundingResult,
 } from "./GrassBladeGrounding";
 import {
@@ -67,6 +73,7 @@ import {
 import {
   createGroundedGrassMaterial,
   groundedGrassWorldBox,
+  GRASS_BLADE_VISIBILITY_ATTRIBUTE,
 } from "./GrassGroundingGpu";
 import {
   getGrassBladeLayout,
@@ -80,6 +87,8 @@ import {
   getGrassWorkerPool,
   prepareGrassWorkerRequest,
   admitGrassWorkerPlacementResult,
+  createGrassCoastBlendOperations,
+  createGrassPondBlendOperations,
   terminateGrassWorkerPool,
   type GrassWorkerInput,
   type GrassWorkerOutput,
@@ -88,12 +97,16 @@ import type { TerrainWorkerConfig } from "../../../utils/workers/TerrainWorker";
 import type {
   CompactTerrainPlantingLobe,
   CompactGrassColorGrade,
+  CompactTerrainMacroField,
+  CompactPondBankField,
 } from "./CompactTerrainPalette";
 import type { BiomeGrassConfigWorker } from "../../../utils/workers/GrassWorker";
 import {
   createGrassPlacementCellOperations,
   getGrassPlacementCellBounds,
   type GrassPlacementCell,
+  type GrassPlacementCoverage,
+  type GrassPlacementCoverageTrial,
   type GrassPlacementDistribution,
 } from "../../../utils/workers/GrassPlacementCell";
 import { assertTerrainWorkerRequest } from "../../../utils/workers/TerrainWorkerShared";
@@ -219,10 +232,10 @@ export const NATURAL_TUFT_APPEARANCE = Object.freeze({
   TUFT_ARC_FACTORS: Object.freeze([0.35, 1.15, 0.65, 1.35] as const),
 } as const);
 
-/** Explicit fine-meadow candidate: independent slender stems instead of rooted
- * quartets. Progressive roots preserve the same blades across geometry tiers;
- * Linear taper narrows the upper leaf without changing topology or population.
- * Its lower leaf area is not a claim of restored screen-space canopy coverage.
+/** Explicit fine-meadow candidate: restored upper-leaf width and a leaning
+ * quadratic centerline retain progressive roots, tips and geometry tiers.
+ * Area and swept-footprint changes require fresh grounding and native review;
+ * unchanged topology is not equal retained population or raster coverage.
  */
 export const FINE_MEADOW_APPEARANCE = Object.freeze({
   id: "fine-meadow-v1",
@@ -233,15 +246,18 @@ export const FINE_MEADOW_APPEARANCE = Object.freeze({
   BLADE_HEIGHT_MAX: 0.86,
   BLADE_WIDTH_RATIO: 0.045,
   BLADE_TAPER: 0.85,
-  BLADE_TAPER_POWER: 1,
+  BLADE_TAPER_POWER: 2,
+  BLADE_WIDTH_FALLOFF_POWER: 1,
+  BLADE_UPPER_WIDTH_GAIN: 0.35,
   BLADE_ARC_RATIO: 0.48,
   BLADE_CONTROL_HEIGHT: 0.76,
+  BLADE_CONTROL_ARC_RATIO: 0.35,
   BLADE_TIP_HEIGHT: 0.95,
   BLADE_NORMAL_WEIGHT: 0.2,
-  ROOT_BRIGHTNESS: 0.9,
+  ROOT_BRIGHTNESS: 0.98,
   TIP_BRIGHTNESS: 1.2,
-  ROOT_OCCLUSION: 0.55,
-  ROOT_OCCLUSION_END: 0.6,
+  ROOT_OCCLUSION: 0.78,
+  ROOT_OCCLUSION_END: 0.35,
   PROGRESSIVE_ROOTS: true,
 } as const);
 
@@ -258,6 +274,43 @@ export const FINE_GRASS_THIN_LEAF_LIGHTING = Object.freeze({
   rootStart: 0.05,
   rootEnd: 0.65,
 } as const);
+
+/** Explicit normals-only art trial; the historical fine recipe stays unchanged. */
+export const FINE_GRASS_CANOPY_NORMAL_LIGHTING = Object.freeze({
+  id: "canopy-normal-v1",
+  rootWeight: 0.2,
+  upperWeight: 0.45,
+  rootEnd: 0.1,
+  upperStart: 0.65,
+} as const);
+
+/** Shading-only leaf volume; no folded geometry or physical self-shadow claim. */
+export const FINE_GRASS_LEAF_VOLUME_LIGHTING = Object.freeze({
+  id: "leaf-volume-v1",
+  rootWeight: 0.2,
+  upperWeight: 0.45,
+  rootEnd: 0.1,
+  upperStart: 0.65,
+  foldTangent: Math.tan((24 * Math.PI) / 180),
+  foldTipStart: 0.75,
+  rootBrightness: 0.78,
+  tipBrightness: 1.12,
+} as const);
+
+function publishFineGrassCanopyLighting(
+  material: MeshStandardNodeMaterial,
+  candidate: GrassLightingCandidate,
+): void {
+  Object.defineProperty(material.userData, "fineGrassCanopyLighting", {
+    enumerable: true,
+    configurable: false,
+    writable: false,
+    value:
+      candidate === FINE_GRASS_LEAF_VOLUME_LIGHTING.id
+        ? FINE_GRASS_LEAF_VOLUME_LIGHTING
+        : FINE_GRASS_CANOPY_NORMAL_LIGHTING,
+  });
+}
 
 function publishFineGrassLighting(material: MeshSSSNodeMaterial): void {
   Object.defineProperty(material.userData, "fineGrassLighting", {
@@ -277,8 +330,14 @@ type GrassBladeShape = Pick<
 > & {
   BLADE_TAPER?: number;
   BLADE_TAPER_POWER?: number;
+  /** Exponent of the remaining width; one preserves historical arithmetic. */
+  BLADE_WIDTH_FALLOFF_POWER?: number;
+  /** Additional upper-leaf width; zero at the root, full gain at half height. */
+  BLADE_UPPER_WIDTH_GAIN?: number;
   PROGRESSIVE_ROOTS?: boolean;
   BLADE_CONTROL_HEIGHT?: number;
+  /** Quadratic control-point XZ offset as a fraction of the unchanged tip arc. */
+  BLADE_CONTROL_ARC_RATIO?: number;
   BLADE_TIP_HEIGHT?: number;
   TUFT_BLADES?: number;
   TUFT_CENTER_RADIUS?: number;
@@ -352,6 +411,8 @@ export function createClumpGeometry(
   const { CLUMP_RADIUS, CLUMP_INNER_RATIO } = GRASS_CONFIG;
   const taper = shape.BLADE_TAPER ?? GRASS_CONFIG.BLADE_TAPER;
   const taperPower = shape.BLADE_TAPER_POWER ?? 1;
+  const widthFalloffPower = shape.BLADE_WIDTH_FALLOFF_POWER ?? 1;
+  const upperWidthGain = shape.BLADE_UPPER_WIDTH_GAIN ?? 0;
   const {
     BLADE_WIDTH_RATIO,
     BLADE_HEIGHT_MIN: hMin,
@@ -360,6 +421,7 @@ export function createClumpGeometry(
   } = shape;
   const curved = shape.BLADE_CONTROL_HEIGHT !== undefined;
   const controlHeight = shape.BLADE_CONTROL_HEIGHT ?? 0.5;
+  const controlArcRatio = shape.BLADE_CONTROL_ARC_RATIO ?? 0;
   const tipHeight = shape.BLADE_TIP_HEIGHT ?? 1;
 
   const vertsPerBlade = segs * 2 + 1;
@@ -459,7 +521,12 @@ export function createClumpGeometry(
       const dy =
         2 * ((1 - t) * controlHeight + t * (tipHeight - controlHeight)) * h;
       const nx = -sr * dy;
-      const ny = sr * 2 * curveDirX * t - cr * 2 * curveDirZ * t;
+      const arcDerivative =
+        2 * ((1 - t) * controlArcRatio + t * (1 - controlArcRatio));
+      const ny =
+        controlArcRatio === 0
+          ? sr * 2 * curveDirX * t - cr * 2 * curveDirZ * t
+          : sr * curveDirX * arcDerivative - cr * curveDirZ * arcDerivative;
       const nz = cr * dy;
       const length = Math.hypot(nx, ny, nz);
       return [nx / length, ny / length, nz / length];
@@ -471,13 +538,24 @@ export function createClumpGeometry(
         ? (2 * (1 - t) * t * controlHeight + t * t * tipHeight) * h
         : t * h;
       const normal = curved ? bladeNormal(t) : [-sr, 0, cr];
-      // Taper changes width only; centerlines, roots and tips stay unchanged.
-      // Width derivatives run along the constant side axis, so their cross
-      // product with that axis vanishes:
-      // the existing smooth centerline normal remains valid for this taper.
+      // Width-only factors leave centerlines, root edges and tips unchanged.
+      // For P(t,u)=C(t)+u*w(t)*S, P_u cross P_t is proportional
+      // to S cross C'(t): the w'(t)*S term cancels. The same smooth normal
+      // therefore remains valid, including the upper-leaf width envelope.
       const taperedHeight = taperPower === 1 ? t : Math.pow(t, taperPower);
-      const hw = w * 0.5 * (1.0 - taperedHeight * taper);
-      const arc = t * t;
+      let hw = w * 0.5 * (1.0 - taperedHeight * taper);
+      // Keep all unselected profiles on their original arithmetic path.
+      if (widthFalloffPower !== 1)
+        hw = w * 0.5 * Math.pow(1.0 - taperedHeight * taper, widthFalloffPower);
+      if (upperWidthGain !== 0)
+        hw *= 1 + upperWidthGain * THREE.MathUtils.smoothstep(t, 0, 0.5);
+      // Keep the historical arithmetic exact when no leaning control is
+      // selected. The fine candidate changes only the middle control point;
+      // root and tip remain byte-identical, with no extra random draws.
+      const arc =
+        controlArcRatio === 0
+          ? t * t
+          : 2 * (1 - t) * t * controlArcRatio + t * t;
       const arcX = curveDirX * arc;
       const arcZ = curveDirZ * arc;
 
@@ -599,6 +677,10 @@ export interface GrassVisualProfile {
   maxChunksPerFrame?: number;
   placementCellSize?: 25;
   nearLodDistance?: 40;
+  /** Restart-owned, opt-in coverage in exactly one world cell. */
+  coverageTrial?: GrassPlacementCoverageTrial;
+  /** Restart-owned fine-grass road clearance; ordinary profiles stay unchanged. */
+  roadClearance?: "per-blade-v1";
 }
 
 /**
@@ -660,6 +742,9 @@ export interface GrassVisualReadiness {
 
 /** Config data for the grass worker, passed from TerrainSystem at construction. */
 export interface GrassWorkerSetup {
+  compactPondBlend?: "shore-contact-v1" | "composition-v1";
+  compactPondBankField?: CompactPondBankField;
+  compactCoastBlend?: "distribution-v1";
   compactGrassColorGrade?: CompactGrassColorGrade;
   compactPlantingLobes?: readonly CompactTerrainPlantingLobe[];
   /** Same vegetation-only silhouettes as the worker snapshot. Called after
@@ -711,6 +796,8 @@ export class GrassVisualManager implements QuadTreeListener {
     b: number;
     grassWeight: number;
     grassPlacement: number;
+    grassPlacementBeforeCoast?: number;
+    grassEstablishment?: true;
     grassHeightScale: number;
     tintR: number;
     tintG: number;
@@ -749,6 +836,8 @@ export class GrassVisualManager implements QuadTreeListener {
   private readonly fineMeadow: boolean;
   private readonly placementDistribution:
     GrassPlacementDistribution | undefined;
+  private readonly coverageTrial: GrassPlacementCoverageTrial | undefined;
+  private readonly roadClearance: "per-blade-v1" | undefined;
   private readonly placementOperations = createGrassPlacementCellOperations();
   private readonly nodeWorkUnits = new Map<
     TerrainQuadNode,
@@ -771,6 +860,12 @@ export class GrassVisualManager implements QuadTreeListener {
     | null;
   private readonly grassEligibility: GrassSurfaceEligibility;
   private readonly compactGrassColorGrade: CompactGrassColorGrade | undefined;
+  private readonly compactCoastBlend: "distribution-v1" | undefined;
+  private readonly compactPondBlend:
+    "shore-contact-v1" | "composition-v1" | undefined;
+  private readonly compactTerrainColorOperations =
+    createCompactTerrainColorOperations();
+  private readonly compactMacroField: CompactTerrainMacroField | null;
 
   private workerSetup: GrassWorkerSetup | null = null;
   private workerInflight = new Map<string, GrassWorkerTicket>();
@@ -811,6 +906,8 @@ export class GrassVisualManager implements QuadTreeListener {
       b: number;
       grassWeight: number;
       grassPlacement: number;
+      grassPlacementBeforeCoast?: number;
+      grassEstablishment?: true;
       grassHeightScale: number;
     },
     workerSetup?: GrassWorkerSetup,
@@ -823,6 +920,7 @@ export class GrassVisualManager implements QuadTreeListener {
     ) => RetainedTerrainRegion,
     appearanceCandidate?: GrassAppearanceCandidate,
     private readonly habitatComposition?: CompactHabitatField | null,
+    private readonly lightingCandidate?: GrassLightingCandidate,
   ) {
     if (typeof terrainProfileIdentity !== "string" || !terrainProfileIdentity) {
       throw new Error("Grass visual terrain profile identity is required");
@@ -873,9 +971,64 @@ export class GrassVisualManager implements QuadTreeListener {
     }
     if (this.fineMeadow && appearanceCandidate !== FINE_MEADOW_APPEARANCE.id)
       throw new Error("Fine meadow requires its explicit appearance");
+    if (
+      lightingCandidate !== undefined &&
+      ((lightingCandidate !== FINE_GRASS_CANOPY_NORMAL_LIGHTING.id &&
+        lightingCandidate !== FINE_GRASS_LEAF_VOLUME_LIGHTING.id) ||
+        !this.fineMeadow ||
+        appearanceCandidate !== FINE_MEADOW_APPEARANCE.id ||
+        !workerSetup ||
+        !isCompactSculptProfile(workerSetup.terrainConfig.TERRAIN_PROFILE))
+    )
+      throw new Error(
+        "Grass lighting requires the admitted explicit fine meadow",
+      );
+    const coverageField = Object.getOwnPropertyDescriptor(
+      profile,
+      "coverageTrial",
+    );
+    if (
+      "coverageTrial" in profile &&
+      (!coverageField?.enumerable || !("value" in coverageField))
+    )
+      throw new Error("Grass coverage trial requires an own data field");
+    this.coverageTrial = coverageField
+      ? this.placementOperations.validateCoverageTrial(coverageField.value)
+      : undefined;
+    if (this.coverageTrial && !this.fineMeadow)
+      throw new Error("Grass coverage trial requires the explicit fine meadow");
+    const clearanceField = Object.getOwnPropertyDescriptor(
+      profile,
+      "roadClearance",
+    );
+    if (
+      "roadClearance" in profile &&
+      (!clearanceField ||
+        !("value" in clearanceField) ||
+        (clearanceField.value !== undefined &&
+          clearanceField.value !== "per-blade-v1"))
+    )
+      throw new Error("Invalid grass visual road-clearance mode");
+    this.roadClearance = clearanceField?.value;
+    if (this.roadClearance && !this.fineMeadow)
+      throw new Error("Grass road clearance requires the explicit fine meadow");
     this.compactGrassColorGrade =
       createCompactTerrainColorOperations().grassColorGrade(
         workerSetup?.compactGrassColorGrade,
+      );
+    this.compactCoastBlend = createGrassCoastBlendOperations().validate(
+      workerSetup ?? {},
+    );
+    this.compactPondBlend = createGrassPondBlendOperations().validate(
+      workerSetup ?? {},
+    );
+    if (this.compactPondBlend && !this.fineMeadow)
+      throw new Error(
+        "Grass pond distribution requires the explicit fine meadow",
+      );
+    if (this.compactCoastBlend && !this.fineMeadow)
+      throw new Error(
+        "Grass coastal distribution requires the explicit fine meadow",
       );
     if (this.compactGrassColorGrade && !this.fineMeadow)
       throw new Error("Grass color grade requires the explicit fine meadow");
@@ -929,6 +1082,37 @@ export class GrassVisualManager implements QuadTreeListener {
     this.isInFlatZone = isInFlatZone;
     this.getTerrainColorAt = getTerrainColorAt;
     this.workerSetup = workerSetup ?? null;
+    const bankField =
+      workerSetup &&
+      Object.getOwnPropertyDescriptor(workerSetup, "compactPondBankField");
+    if (
+      workerSetup &&
+      "compactPondBankField" in workerSetup &&
+      (!bankField?.enumerable ||
+        !("value" in bankField) ||
+        this.compactPondBlend !== "composition-v1")
+    )
+      throw new Error(
+        "Grass pond bank field requires an own composition binding",
+      );
+    this.compactMacroField = workerSetup
+      ? this.compactTerrainColorOperations.macroField(
+          workerSetup.terrainConfig.TERRAIN_PROFILE,
+          this.compactCoastBlend,
+          this.compactPondBlend,
+          bankField && "value" in bankField ? bankField.value : undefined,
+        )
+      : null;
+    createGrassCoastBlendOperations().assertScope(
+      this.compactCoastBlend,
+      this.grassEligibility,
+      this.compactMacroField,
+    );
+    createGrassPondBlendOperations().assertScope(
+      this.compactPondBlend,
+      this.grassEligibility,
+      this.compactMacroField,
+    );
     this.maxChunksPerFrame = Math.max(
       1,
       Math.floor(profile.maxChunksPerFrame ?? 2),
@@ -1016,11 +1200,16 @@ export class GrassVisualManager implements QuadTreeListener {
     let installedClumps = 0;
     let castShadow = false;
     let correctionBytes = 0;
+    let visibilityBytes = 0;
     for (const { mesh } of this.chunks.values()) {
       installedClumps += mesh.count;
       castShadow ||= mesh.castShadow;
       correctionBytes +=
         mesh.geometry.getAttribute("grassRootDeltas")?.array.byteLength ?? 0;
+      if (this.roadClearance)
+        visibilityBytes +=
+          mesh.geometry.getAttribute(GRASS_BLADE_VISIBILITY_ATTRIBUTE)?.array
+            .byteLength ?? 0;
     }
     let runningChunks = 0,
       waitingSupportChunks = 0,
@@ -1059,6 +1248,9 @@ export class GrassVisualManager implements QuadTreeListener {
               ...(this.placementDistribution
                 ? { placementDistribution: this.placementDistribution }
                 : {}),
+              ...(this.coverageTrial
+                ? { coverageTrial: this.coverageTrial }
+                : {}),
             },
           }
         : {}),
@@ -1079,6 +1271,14 @@ export class GrassVisualManager implements QuadTreeListener {
               completedChunks: this.completedGrounding.size,
               readyEmptyChunks: this.completedGrounding.size - this.chunks.size,
               correctionBytes,
+              ...(this.roadClearance
+                ? {
+                    roadClearance: {
+                      mode: this.roadClearance,
+                      visibilityBytes,
+                    },
+                  }
+                : {}),
               activeSliceMs: this.groundingActiveMs,
               maximumSliceMs: this.maximumGroundingSliceMs,
             },
@@ -1174,12 +1374,17 @@ export class GrassVisualManager implements QuadTreeListener {
           1,
           this.minimumLodLevel,
           this.geometryLayout,
+          this.roadClearance
+            ? new Uint32Array([2 ** layout.bladesPerClump - 1])
+            : undefined,
         )
       : this.material;
     // NodeMaterial clones userData through JSON; restore the immutable receipt
     // on the actual representative owner without changing any shader nodes.
     if (material instanceof MeshSSSNodeMaterial)
       publishFineGrassLighting(material);
+    if (this.lightingCandidate)
+      publishFineGrassCanopyLighting(material, this.lightingCandidate);
     const mesh = new THREE.InstancedMesh(geo, material, 1);
     mesh.name = "GrassQT_PrecompileSample";
     mesh.frustumCulled = false;
@@ -1458,6 +1663,15 @@ export class GrassVisualManager implements QuadTreeListener {
           ...(manager.geometryLayout === undefined
             ? {}
             : { geometryLayout: manager.geometryLayout }),
+          ...(manager.roadClearance
+            ? { roadClearance: manager.roadClearance }
+            : {}),
+          ...(manager.fineMeadow &&
+          manager.compactGrassColorGrade &&
+          manager.compactMacroField?.coastalMeadow &&
+          manager.compactMacroField.bankVerge
+            ? { bankVerge: manager.compactMacroField.bankVerge }
+            : {}),
           oceanLevel: manager.waterThreshold,
           wind: {
             x:
@@ -1522,8 +1736,18 @@ export class GrassVisualManager implements QuadTreeListener {
         this.maximumGroundingSliceMs,
         entry.job.maximumSliceMs,
       );
-      if (state.status === "failed_input" || state.status === "failed_budget")
-        console.error("[GrassVisualManager] Grounding failed:", state);
+      if (state.status === "failed_input" || state.status === "failed_budget") {
+        // A failed job is no longer selected above: retain one bounded record
+        // at its transition, even if later LOD/horizon retirement removes it.
+        console.error("[GrassVisualManager] Grounding failed:", state, {
+          ...captureGrassGroundingFailure(entry.job),
+          key: entry.ticket.key,
+          nodeId: entry.ticket.node.id,
+          ticketLod: entry.ticket.lodLevel,
+          isLodSwap: entry.ticket.isLodSwap,
+          observedAtMs: performance.now(),
+        });
+      }
       if (state.status === "cancelled")
         this.groundingJobs.delete(entry.ticket.key);
       if (state.status !== "ready") return 0;
@@ -1546,6 +1770,7 @@ export class GrassVisualManager implements QuadTreeListener {
         const result = state.result;
         if (!result.grounding)
           throw new Error("Missing blade-grounding provenance");
+        this.assertBladeRoadClearance(result);
         this.retireGrassChunk(ticket.key);
         if (result.data.count) {
           this.createChunkMeshFromWorkerData(
@@ -1556,6 +1781,12 @@ export class GrassVisualManager implements QuadTreeListener {
               chunkKey: ticket.key,
               terrainProfileIdentity: this.terrainProfileIdentity,
               grassEligibility: this.grassEligibility,
+              ...(this.compactCoastBlend
+                ? { compactCoastBlend: this.compactCoastBlend }
+                : {}),
+              ...(this.compactPondBlend
+                ? { compactPondBlend: this.compactPondBlend }
+                : {}),
               ...(this.compactGrassColorGrade
                 ? { compactGrassColorGrade: this.compactGrassColorGrade }
                 : {}),
@@ -1565,6 +1796,7 @@ export class GrassVisualManager implements QuadTreeListener {
               ...(this.placementDistribution
                 ? { placementDistribution: this.placementDistribution }
                 : {}),
+              ...this.coverageMarker(ticket.work.placementCell),
             },
             ticket.lodLevel,
             result.grounding,
@@ -1728,6 +1960,12 @@ export class GrassVisualManager implements QuadTreeListener {
     const normalHalo = GRASS_SURFACE_NORMAL_SAMPLE_DISTANCE;
     return prepareGrassWorkerRequest({
       grassEligibility: this.grassEligibility,
+      ...(this.compactCoastBlend
+        ? { compactCoastBlend: this.compactCoastBlend }
+        : {}),
+      ...(this.compactPondBlend
+        ? { compactPondBlend: this.compactPondBlend }
+        : {}),
       ...(this.compactGrassColorGrade
         ? { compactGrassColorGrade: this.compactGrassColorGrade }
         : {}),
@@ -1741,13 +1979,14 @@ export class GrassVisualManager implements QuadTreeListener {
       ...(this.placementDistribution
         ? { placementDistribution: this.placementDistribution }
         : {}),
+      ...this.coverageMarker(work.placementCell),
       spacingMul: GRASS_CONFIG.LOD_TIERS[lodLevel].spacingMul,
       config: ws.terrainConfig,
       seed: ws.seed,
       biomeCenters: ws.biomeCenters,
       biomes: ws.biomes,
       grassSeed: GRASS_CONFIG.SEED,
-      clumpSpacing: this.clumpSpacing,
+      clumpSpacing: this.placementSpacing(work.placementCell),
       scaleMin: GRASS_CONFIG.SCALE_MIN,
       scaleMax: GRASS_CONFIG.SCALE_MAX,
       waterThreshold: this.waterThreshold,
@@ -1909,6 +2148,15 @@ export class GrassVisualManager implements QuadTreeListener {
   }
 
   private assertWorkerProfileIdentity(data: GrassWorkerOutput): void {
+    if (
+      createGrassPondBlendOperations().validate(data) !== this.compactPondBlend
+    )
+      throw new Error("Grass visual result pond distribution mismatch");
+    if (
+      createGrassCoastBlendOperations().validate(data) !==
+      this.compactCoastBlend
+    )
+      throw new Error("Grass visual result coastal distribution mismatch");
     if (data.terrainProfileIdentity !== this.terrainProfileIdentity) {
       throw new Error("Grass visual result profile identity mismatch");
     }
@@ -1928,6 +2176,23 @@ export class GrassVisualManager implements QuadTreeListener {
       throw new Error("Grass visual result placement distribution mismatch");
   }
 
+  /** Includes ready-empty results: a mode mismatch must not become completed. */
+  private assertBladeRoadClearance(
+    blades: Extract<GrassBladeGroundingResult, { status: "ready" }>,
+  ): void {
+    const visibility = blades.bladeVisibility;
+    const receipt = blades.receipt.roadClearance;
+    if (
+      this.roadClearance
+        ? receipt?.mode !== this.roadClearance ||
+          !(visibility instanceof Uint32Array) ||
+          visibility.length !== blades.data.count ||
+          receipt.visibilityBytes !== visibility.byteLength
+        : visibility !== undefined || receipt !== undefined
+    )
+      throw new Error("Grass visual blade road-clearance identity mismatch");
+  }
+
   private createChunkMeshFromWorkerData(
     source: GrassWorkSource,
     data: GrassWorkerOutput,
@@ -1943,6 +2208,7 @@ export class GrassVisualManager implements QuadTreeListener {
     const key = data.chunkKey;
     if (key !== work.key) throw new Error("Grass work unit key mismatch");
     if (this.chunks.has(key)) return;
+    if (blades) this.assertBladeRoadClearance(blades);
     if (data.count === 0) return;
     if (
       this.compactMeadow &&
@@ -1987,9 +2253,12 @@ export class GrassVisualManager implements QuadTreeListener {
           data.count,
           lodLevel,
           this.geometryLayout,
+          blades.bladeVisibility,
         );
       if (material instanceof MeshSSSNodeMaterial)
         publishFineGrassLighting(material);
+      if (this.lightingCandidate)
+        publishFineGrassCanopyLighting(material, this.lightingCandidate);
       // Three clones userData through JSON. Rebind the admitted terrain field
       // so each grounded chunk retains the same immutable material owner.
       if (this.habitatComposition && material !== this.material)
@@ -2001,6 +2270,9 @@ export class GrassVisualManager implements QuadTreeListener {
         });
       mesh = new THREE.InstancedMesh(geo, material, data.count);
       mesh.position.set(node.centerX, 0, node.centerZ);
+      // Chunk-local placement is immutable; parent/world transforms stay live.
+      mesh.updateMatrix();
+      mesh.matrixAutoUpdate = false;
       mesh.name = `GrassQT_${key}`;
       mesh.frustumCulled = true;
       mesh.receiveShadow = true;
@@ -2026,6 +2298,9 @@ export class GrassVisualManager implements QuadTreeListener {
         grassAppearance: this.meadowAppearance?.id ?? "legacy-blades-v1",
         ...(work.placementCell
           ? { grassPlacementCell: work.placementCell }
+          : {}),
+        ...(data.placementCoverage
+          ? { grassPlacementCoverage: data.placementCoverage }
           : {}),
       };
 
@@ -2364,6 +2639,12 @@ export class GrassVisualManager implements QuadTreeListener {
         chunkKey: key,
         terrainProfileIdentity: this.terrainProfileIdentity,
         grassEligibility: this.grassEligibility,
+        ...(this.compactCoastBlend
+          ? { compactCoastBlend: this.compactCoastBlend }
+          : {}),
+        ...(this.compactPondBlend
+          ? { compactPondBlend: this.compactPondBlend }
+          : {}),
         ...(this.compactGrassColorGrade
           ? { compactGrassColorGrade: this.compactGrassColorGrade }
           : {}),
@@ -2371,6 +2652,7 @@ export class GrassVisualManager implements QuadTreeListener {
         ...(this.placementDistribution
           ? { placementDistribution: this.placementDistribution }
           : {}),
+        ...this.coverageMarker(work.placementCell),
       });
       return;
     }
@@ -2383,6 +2665,12 @@ export class GrassVisualManager implements QuadTreeListener {
           chunkKey: key,
           terrainProfileIdentity: this.terrainProfileIdentity,
           grassEligibility: this.grassEligibility,
+          ...(this.compactCoastBlend
+            ? { compactCoastBlend: this.compactCoastBlend }
+            : {}),
+          ...(this.compactPondBlend
+            ? { compactPondBlend: this.compactPondBlend }
+            : {}),
           ...(this.compactGrassColorGrade
             ? { compactGrassColorGrade: this.compactGrassColorGrade }
             : {}),
@@ -2425,12 +2713,13 @@ export class GrassVisualManager implements QuadTreeListener {
       centerX: node.centerX,
       centerZ: node.centerZ,
       size: node.size,
-      clumpSpacing: this.clumpSpacing,
+      clumpSpacing: this.placementSpacing(work.placementCell),
       spacingMul,
       ...(work.placementCell ? { placementCell: work.placementCell } : {}),
       ...(this.placementDistribution
         ? { placementDistribution: this.placementDistribution }
         : {}),
+      ...this.coverageMarker(work.placementCell),
     });
     const maxCount = domain.maxCount;
     const rng = mulberry32(
@@ -2484,6 +2773,8 @@ export class GrassVisualManager implements QuadTreeListener {
         g,
         b,
         grassPlacement: rawGP,
+        grassPlacementBeforeCoast,
+        grassEstablishment,
         grassHeightScale,
         tintR,
         tintG,
@@ -2494,20 +2785,53 @@ export class GrassVisualManager implements QuadTreeListener {
         nz,
       } = this.getTerrainColorAt(wx, wz, this.grassEligibility);
       const grassPlacement = Math.max(0, rawGP - roadInf);
+      const originalPlacement = Math.max(
+        0,
+        (grassPlacementBeforeCoast ?? rawGP) - roadInf,
+      );
 
-      if (grassPlacement <= 0) continue;
-      if (clumpRng > grassPlacement) continue;
+      const historicalAccepted =
+        originalPlacement > 0 && clumpRng <= originalPlacement;
+      if (
+        !historicalAccepted &&
+        (!grassEstablishment ||
+          grassPlacement <= 0 ||
+          clumpRng > grassPlacement)
+      )
+        continue;
 
       offsets[count * 3] = lx;
       offsets[count * 3 + 1] = ty;
       offsets[count * 3 + 2] = lz;
 
-      const rotation = rng() * Math.PI * 2;
+      const rotation = historicalAccepted
+        ? rng() * Math.PI * 2
+        : this.placementOperations.establishmentRotation(
+            domain,
+            GRASS_CONFIG.SEED,
+            i,
+          );
+      // Match the worker: preserve each originally accepted rotation draw before
+      // coastal rejection, so later roots retain their exact seeded pose.
+      if (
+        grassPlacementBeforeCoast !== undefined &&
+        (grassPlacement <= 0 || clumpRng > grassPlacement)
+      )
+        continue;
       if (this.workerSetup?.isGrassObstacleAt?.(wx, wz)) continue;
+      // TerrainSystem already includes the selected pond-margin factor in
+      // grassHeightScale. Store it before grounding; do not apply it again in
+      // the blade shader or confuse it with the independent bank-verge factor.
       const scale =
         (GRASS_CONFIG.SCALE_MIN +
           clumpRng * (GRASS_CONFIG.SCALE_MAX - GRASS_CONFIG.SCALE_MIN)) *
-        grassHeightScale;
+        grassHeightScale *
+        this.compactTerrainColorOperations.bankVergeClumpScale(
+          wx,
+          wz,
+          roadInf,
+          this.compactMacroField,
+        );
       rotScaleHash[count * 3] = rotation;
       rotScaleHash[count * 3 + 1] = scale;
       rotScaleHash[count * 3 + 2] = clumpRng;
@@ -2556,6 +2880,8 @@ export class GrassVisualManager implements QuadTreeListener {
         ? new MeshSSSNodeMaterial()
         : new MeshStandardNodeMaterial();
     mat.name = appearance?.id ?? "legacy-blades-v1";
+    if (this.lightingCandidate)
+      publishFineGrassCanopyLighting(mat, this.lightingCandidate);
     if (this.habitatComposition)
       Object.defineProperty(mat.userData, "compactHabitatComposition", {
         enumerable: true,
@@ -2778,6 +3104,13 @@ export class GrassVisualManager implements QuadTreeListener {
     }
 
     let habitatSoil = null;
+    const bankVerge =
+      this.fineMeadow &&
+      this.compactGrassColorGrade &&
+      this.compactMacroField?.coastalMeadow
+        ? this.compactMacroField.bankVerge
+        : undefined;
+    let bankLocality = null;
     if (
       appearance?.id === "natural-tuft-v1" ||
       appearance?.id === "fine-meadow-v1"
@@ -2792,6 +3125,18 @@ export class GrassVisualManager implements QuadTreeListener {
       const worldBase = modelWorldMatrix
         .mul(vec4(offset.x, float(0), offset.z, float(1)))
         .toVar("naturalGrassWorldBase");
+      const vergeLocality = bankVerge
+        ? createCompactBankVergeLocality(worldBase.xyz, this.compactMacroField)
+        : float(0);
+      const bankHeightScale = bankVerge
+        ? createCompactBankVergeHeightScale(
+            worldBase.xyz,
+            this.compactMacroField,
+            vergeLocality,
+          )
+        : float(1);
+      if (bankVerge)
+        bankLocality = vergeLocality.toVarying("v_naturalGrassBankLocality");
       if (this.habitatComposition)
         habitatSoil = createCompactHabitatSoilNode(
           worldBase.x,
@@ -2831,7 +3176,9 @@ export class GrassVisualManager implements QuadTreeListener {
           .mul(0.55)
           .mul(bend)
           .mul(uBladeHeight),
-      ).toVar("naturalGrassDisplacement");
+      )
+        .mul(bankHeightScale)
+        .toVar("naturalGrassDisplacement");
       const cosR = cos(rsh.x);
       const sinR = sin(rsh.x);
       const nx = terrainNormal.x;
@@ -2855,16 +3202,23 @@ export class GrassVisualManager implements QuadTreeListener {
         );
       };
       mat.positionNode = turnToGround(
-        vec3(rawPosition.x, rawPosition.y.mul(fade), rawPosition.z).mul(scale),
+        vec3(
+          rawPosition.x,
+          rawPosition.y.mul(fade).mul(bankHeightScale),
+          rawPosition.z,
+        ).mul(scale),
       )
         .add(displacement)
         .add(offset);
 
       // Cofactor of the smooth ribbon deformation, without division by fade:
-      // f*H + n.y*N + k*(H*dot(d,N) - N*dot(d,H)). Here H is the
+      // f*h*H + n.y*N + k*(H*dot(d,N) - N*dot(d,H)). Here H is the
       // yaw/tilt-rotated horizontal source normal; d is actual tip displacement.
-      // Recover h from raw source y=h*B(t), never the already-deformed position.
-      // No additional normal/height attribute, varying, texture, or render pass.
+      // The local vertical factor h also scales d; source XZ/root width stays
+      // unchanged. CPU grounding certifies this same height/wind envelope.
+      // Recover source blade height from raw y=height*B(t), not deformed y.
+      // The deformation adds no normal/height attribute, texture or pass.
+      // The selected bank color treatment shares one explicit locality varying.
       const sourceNormal = attribute("normal", "vec3");
       const horizontalNormal = turnToGround(
         vec3(sourceNormal.x, float(0), sourceNormal.z),
@@ -2886,6 +3240,7 @@ export class GrassVisualManager implements QuadTreeListener {
         );
       const deformedNormal = horizontalNormal
         .mul(fade)
+        .mul(bankHeightScale)
         .add(terrainNormal.mul(sourceNormal.y))
         .add(
           horizontalNormal
@@ -2916,12 +3271,72 @@ export class GrassVisualManager implements QuadTreeListener {
           bladeNormal.div(pow(interpolatedLengthSq.max(1e-12), 0.5)),
           terrainNormal,
         );
+      const leafVolume =
+        this.lightingCandidate === FINE_GRASS_LEAF_VOLUME_LIGHTING.id;
+      const lightingRecipe = leafVolume
+        ? FINE_GRASS_LEAF_VOLUME_LIGHTING
+        : FINE_GRASS_CANOPY_NORMAL_LIGHTING;
+      let shadingBladeNormal = fragmentBladeNormal;
+      if (leafVolume) {
+        // Positive UV width is (cr,0,sr), not a frame reconstructed from the
+        // wind-deformed normal: that cross product can reverse during fade.
+        // Wind is uniform across a row. Its true width axis therefore remains
+        // yaw/ground-tilted source width; only this candidate adds a vec3 varying.
+        const widthAxis = turnToGround(
+          vec3(sourceNormal.z, float(0), sourceNormal.x.negate()),
+        );
+        const widthVarying = widthAxis
+          .div(pow(dot(widthAxis, widthAxis).max(1e-12), 0.5))
+          .toVarying("v_fineGrassWidthAxis");
+        // Interpolation can lose orthogonality; project before bending. An
+        // exactly degenerate width yields zero bend, with no NaN operand.
+        const transverse = widthVarying.sub(
+          fragmentBladeNormal.mul(dot(widthVarying, fragmentBladeNormal)),
+        );
+        const transverseUnit = transverse.div(
+          pow(dot(transverse, transverse).max(1e-12), 0.5),
+        );
+        const fold = uv()
+          .x.mul(2)
+          .sub(1)
+          .mul(FINE_GRASS_LEAF_VOLUME_LIGHTING.foldTangent)
+          .mul(
+            float(1).sub(
+              smoothstep(FINE_GRASS_LEAF_VOLUME_LIGHTING.foldTipStart, 1, t),
+            ),
+          )
+          .toVar("fineGrassTransverseFold");
+        const curved = fragmentBladeNormal.add(transverseUnit.mul(fold));
+        shadingBladeNormal = curved.div(
+          pow(dot(curved, curved).max(1e-12), 0.5),
+        );
+      }
+      const mixedNormal = mix(
+        terrainNormal,
+        shadingBladeNormal.mul(faceDirection),
+        this.lightingCandidate
+          ? mix(
+              float(lightingRecipe.rootWeight),
+              float(lightingRecipe.upperWeight),
+              smoothstep(
+                float(lightingRecipe.rootEnd),
+                float(lightingRecipe.upperStart),
+                t,
+              ),
+            ).toVar("fineGrassCanopyNormalWeight")
+          : float(appearance.BLADE_NORMAL_WEIGHT),
+      );
+      // Guard the final shading mixture too; both select operands stay finite.
+      const mixedLengthSq = dot(mixedNormal, mixedNormal);
       mat.normalNode = cameraViewMatrix.transformDirection(
-        mix(
-          terrainNormal,
-          fragmentBladeNormal.mul(faceDirection),
-          float(appearance.BLADE_NORMAL_WEIGHT),
-        ).normalize(),
+        leafVolume
+          ? mixedLengthSq
+              .greaterThan(1e-12)
+              .select(
+                mixedNormal.div(pow(mixedLengthSq.max(1e-12), 0.5)),
+                terrainNormal,
+              )
+          : mixedNormal.normalize(),
       );
       // The existing per-edge root-height correction is applied afterwards by
       // GrassGroundingGpu. Its small cross-blade warp is not in this smooth N.
@@ -2947,9 +3362,30 @@ export class GrassVisualManager implements QuadTreeListener {
         // Root shading suggests tuft occlusion without an extra texture/pass.
         // Retain the terrain palette: the previous 1.4 tip gain made distant
         // blades look like bright wires. This is albedo, not emissive light.
+        const leafVolume =
+          this.lightingCandidate === FINE_GRASS_LEAF_VOLUME_LIGHTING.id;
+        const rootBrightness = leafVolume
+          ? FINE_GRASS_LEAF_VOLUME_LIGHTING.rootBrightness
+          : appearance.ROOT_BRIGHTNESS;
+        const tipBrightness = leafVolume
+          ? FINE_GRASS_LEAF_VOLUME_LIGHTING.tipBrightness
+          : appearance.TIP_BRIGHTNESS;
         const bladeCol = mix(
-          rootGround.mul(appearance.ROOT_BRIGHTNESS),
-          tintedCol.mul(appearance.TIP_BRIGHTNESS),
+          rootGround.mul(rootBrightness),
+          tintedCol.mul(
+            bankVerge && bankLocality
+              ? mix(
+                  float(tipBrightness),
+                  float(
+                    leafVolume
+                      ? bankVerge.tipBrightness *
+                          (tipBrightness / appearance.TIP_BRIGHTNESS)
+                      : bankVerge.tipBrightness,
+                  ),
+                  bankLocality,
+                )
+              : float(tipBrightness),
+          ),
           smoothstep(float(0.0), float(1.0), t),
         );
         return compactPhysical
@@ -3044,12 +3480,13 @@ export class GrassVisualManager implements QuadTreeListener {
             centerX: node.centerX,
             centerZ: node.centerZ,
             size: node.size,
-            clumpSpacing: this.clumpSpacing,
+            clumpSpacing: this.placementSpacing(placementCell),
             spacingMul: 1,
             placementCell,
             ...(this.placementDistribution
               ? { placementDistribution: this.placementDistribution }
               : {}),
+            ...this.coverageMarker(placementCell),
           });
           works.push(
             Object.freeze({
@@ -3168,10 +3605,50 @@ export class GrassVisualManager implements QuadTreeListener {
     );
   }
 
+  private selectedCoverage(
+    cell: GrassPlacementCell | undefined,
+  ): GrassPlacementCoverage | undefined {
+    const trial = this.coverageTrial;
+    return trial &&
+      cell &&
+      cell.indexX === trial.cell.indexX &&
+      cell.indexZ === trial.cell.indexZ
+      ? trial.id
+      : undefined;
+  }
+
+  private placementSpacing(cell: GrassPlacementCell | undefined): number {
+    return this.selectedCoverage(cell) ? 0.6 : this.clumpSpacing;
+  }
+
+  private coverageMarker(cell: GrassPlacementCell | undefined): {
+    placementCoverage?: GrassPlacementCoverage;
+  } {
+    const coverage = this.selectedCoverage(cell);
+    return coverage ? { placementCoverage: coverage } : {};
+  }
+
   private assertPlacementCell(
     data: GrassWorkerOutput,
     work: GrassWorkUnit,
   ): void {
+    const coverageField = Object.getOwnPropertyDescriptor(
+      data,
+      "placementCoverage",
+    );
+    if (
+      "placementCoverage" in data &&
+      (!coverageField?.enumerable || !("value" in coverageField))
+    )
+      throw new Error("Grass visual result coverage must be own data");
+    const coverage = this.placementOperations.validateCoverage(
+      coverageField?.value,
+    );
+    if (
+      (coverageField && coverage === undefined) ||
+      coverage !== this.selectedCoverage(work.placementCell)
+    )
+      throw new Error("Grass visual result placement coverage mismatch");
     if (!work.placementCell) {
       if (data.placementCell !== undefined)
         throw new Error("Unexpected grass placement cell");

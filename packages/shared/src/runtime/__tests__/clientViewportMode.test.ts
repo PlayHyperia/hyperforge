@@ -1,4 +1,14 @@
+import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
+import { World } from "../../core/World";
+import { DataManager } from "../../data/DataManager";
+import { ALL_WORLD_AREAS } from "../../data/world-areas";
+import { TerrainSystem } from "../../systems/shared/world/TerrainSystem";
+import { createCompactTerrainColorOperations } from "../../systems/shared/world/CompactTerrainPalette";
+import {
+  COMPACT_WORLD_TERRAIN_PROFILE,
+  validateWorldTerrainProfile,
+} from "../../systems/shared/world/WorldTerrainProfile";
 import {
   isEmbeddedSpectatorViewport,
   isStreamPageRoute,
@@ -6,7 +16,15 @@ import {
   resolveClientViewportRuntimeProfile,
   resolveExplicitStreamingRenderProfile,
   resolveExplicitStreamingWorldProfile,
+  resolveCompactDirtProjectionCandidate,
+  resolveCompactRockProjectionCandidate,
+  resolveCompactSurfaceBlendCandidate,
+  resolveCompactPondBlendCandidate,
+  resolveCompactCoastBlend,
   resolveGrassAppearanceCandidate,
+  resolveGrassLightingCandidate,
+  resolveGrassCoverageTrial,
+  resolveGrassRoadClearance,
   resolveHabitatCompositionCandidate,
   resolveSkyAtmosphereMode,
   resolveStreamingRenderFrameRate,
@@ -22,6 +40,1942 @@ import {
 function makeWindow(pathname: string, search = ""): Window {
   return { location: { pathname, search } } as unknown as Window;
 }
+
+describe("explicit fine canopy-normal lighting selection", () => {
+  const fine =
+    "streamRenderProfile=island-fine-meadow-720p60-v1&grassAppearance=fine-meadow-v1";
+  const selected = "grassLighting=canopy-normal-v1";
+
+  it("keeps absent/default selection and all render budgets unchanged", () => {
+    expect(resolveGrassLightingCandidate()).toBeUndefined();
+    for (const profile of ["", ...Object.keys(STREAMING_RENDER_PROFILES)])
+      expect(
+        resolveGrassLightingCandidate(
+          makeWindow("/stream.html", `?streamRenderProfile=${profile}`),
+        ),
+      ).toBeUndefined();
+    for (const [path, prefix] of [
+      ["/stream.html", ""],
+      ["/", "page=stream&"],
+    ]) {
+      const baseline = makeWindow(path, `?${prefix}${fine}`);
+      const candidate = makeWindow(
+        path,
+        `${baseline.location.search}&${selected}`,
+      );
+      expect(resolveGrassLightingCandidate(candidate)).toBe("canopy-normal-v1");
+      expect(resolveExplicitStreamingRenderProfile(candidate)).toBe(
+        resolveExplicitStreamingRenderProfile(baseline),
+      );
+      expect(resolveClientViewportRuntimeProfile(candidate)).toEqual(
+        resolveClientViewportRuntimeProfile(baseline),
+      );
+      expect(resolveGrassAppearanceCandidate(candidate)).toBe("fine-meadow-v1");
+      expect(
+        resolveStreamingRenderPreferences(
+          1280,
+          720,
+          resolveExplicitStreamingRenderProfile(candidate),
+        ),
+      ).toEqual(
+        resolveStreamingRenderPreferences(
+          1280,
+          720,
+          resolveExplicitStreamingRenderProfile(baseline),
+        ),
+      );
+    }
+  });
+
+  it.each([
+    "",
+    "unknown",
+    "CANOPY-NORMAL-V1",
+    " canopy-normal-v1",
+    "canopy-normal-v1 ",
+    "canopy-normal-v1\n",
+  ])("rejects noncanonical lighting %j", (value) => {
+    expect(() =>
+      resolveGrassLightingCandidate(
+        makeWindow(
+          "/stream.html",
+          `?${fine}&grassLighting=${encodeURIComponent(value)}`,
+        ),
+      ),
+    ).toThrow("grass lighting");
+  });
+
+  it("rejects duplicate selectors and every incompatible explicit fine route", () => {
+    for (const query of [
+      "",
+      "grassAppearance=fine-meadow-v1",
+      "streamRenderProfile=island-fine-meadow-720p60-v1",
+      "streamRenderProfile=island-meadow-720p60-v1&grassAppearance=natural-tuft-v1",
+      `${fine}&embedded=true`,
+      `${fine}&embedded=false&embedded=false`,
+      `${fine}&streamFps=30`,
+      `${fine}&grassAppearance=fine-meadow-v1`,
+      `${fine}&streamRenderProfile=island-fine-meadow-720p60-v1`,
+      `${fine}&${selected}`,
+    ])
+      expect(() =>
+        resolveGrassLightingCandidate(
+          makeWindow("/stream.html", `?${query}&${selected}`),
+        ),
+      ).toThrow();
+    expect(() =>
+      resolveGrassLightingCandidate(
+        makeWindow("/play", `?${fine}&${selected}`),
+      ),
+    ).toThrow();
+    const embedded = makeWindow("/stream.html", `?${fine}&${selected}`);
+    Object.assign(embedded, { __HYPERIA_EMBEDDED__: true });
+    expect(() => resolveGrassLightingCandidate(embedded)).toThrow();
+  });
+
+  it.each([false, true])(
+    "captures actual terrain lighting once (selected=%s)",
+    (selectedInitially) => {
+      const descriptor = Object.getOwnPropertyDescriptor(globalThis, "window");
+      const world = new World();
+      const terrain = world.register("terrain", TerrainSystem) as TerrainSystem;
+      const input = makeWindow(
+        "/stream.html",
+        `?${fine}${selectedInitially ? `&${selected}` : ""}`,
+      );
+      Object.defineProperty(globalThis, "window", {
+        configurable: true,
+        value: input,
+      });
+      try {
+        terrain["getCompactGrassColorGrade"]();
+        const captured = terrain["grassVisualSelection"]!;
+        expect(Object.isFrozen(captured)).toBe(true);
+        expect(captured.lighting).toBe(
+          selectedInitially ? "canopy-normal-v1" : undefined,
+        );
+        expect(Object.prototype.hasOwnProperty.call(captured, "lighting")).toBe(
+          selectedInitially,
+        );
+        input.location.search = "?grassLighting=invalid";
+        terrain["getCompactGrassColorGrade"]();
+        expect(terrain["grassVisualSelection"]).toBe(captured);
+        const source = readFileSync(
+          new URL(
+            "../../systems/shared/world/TerrainSystem.ts",
+            import.meta.url,
+          ),
+          "utf8",
+        );
+        expect(
+          source.match(/resolveGrassLightingCandidate\(\)/gu),
+        ).toHaveLength(1);
+        expect(source).toMatch(
+          /grassSelection\.appearance,\s*this\.getCompactHabitatMaterial\(\),\s*grassSelection\.lighting,/u,
+        );
+      } finally {
+        if (descriptor) Object.defineProperty(globalThis, "window", descriptor);
+        else Reflect.deleteProperty(globalThis, "window");
+        world.destroy();
+      }
+    },
+  );
+});
+
+describe("explicit fine leaf-volume lighting selection", () => {
+  const fine =
+    "streamRenderProfile=island-fine-meadow-720p60-v1&grassAppearance=fine-meadow-v1";
+  const selected = "grassLighting=leaf-volume-v1";
+
+  it("admits only the explicit fine pair without changing its render budgets", () => {
+    for (const [path, prefix] of [
+      ["/stream.html", ""],
+      ["/", "page=stream&"],
+    ]) {
+      const baseline = makeWindow(path, `?${prefix}${fine}`);
+      const candidate = makeWindow(
+        path,
+        `${baseline.location.search}&${selected}`,
+      );
+      expect(resolveGrassLightingCandidate(candidate)).toBe("leaf-volume-v1");
+      expect(resolveGrassLightingCandidate(baseline)).toBeUndefined();
+      expect(resolveExplicitStreamingRenderProfile(candidate)).toBe(
+        resolveExplicitStreamingRenderProfile(baseline),
+      );
+      expect(resolveClientViewportRuntimeProfile(candidate)).toEqual(
+        resolveClientViewportRuntimeProfile(baseline),
+      );
+      expect(
+        resolveStreamingRenderPreferences(
+          1280,
+          720,
+          resolveExplicitStreamingRenderProfile(candidate),
+        ),
+      ).toEqual(
+        resolveStreamingRenderPreferences(
+          1280,
+          720,
+          resolveExplicitStreamingRenderProfile(baseline),
+        ),
+      );
+    }
+  });
+
+  it.each([
+    "LEAF-VOLUME-V1",
+    " leaf-volume-v1",
+    "leaf-volume-v1 ",
+    "leaf-volume-v1\n",
+    "leaf-volume-v2",
+    "leaf-volume-v1,canopy-normal-v1",
+  ])("rejects noncanonical leaf-volume selection %j", (value) => {
+    expect(() =>
+      resolveGrassLightingCandidate(
+        makeWindow(
+          "/stream.html",
+          `?${fine}&grassLighting=${encodeURIComponent(value)}`,
+        ),
+      ),
+    ).toThrow("grass lighting");
+  });
+
+  it("rejects duplicate/mixed lighting modes and incompatible owners", () => {
+    for (const query of [
+      "",
+      "grassAppearance=fine-meadow-v1",
+      "streamRenderProfile=island-fine-meadow-720p60-v1",
+      "streamRenderProfile=island-meadow-720p60-v1&grassAppearance=natural-tuft-v1",
+      `${fine}&embedded=true`,
+      `${fine}&embedded=false&embedded=false`,
+      `${fine}&streamFps=30`,
+      `${fine}&grassAppearance=fine-meadow-v1`,
+      `${fine}&streamRenderProfile=island-fine-meadow-720p60-v1`,
+      `${fine}&${selected}`,
+      `${fine}&grassLighting=canopy-normal-v1`,
+    ])
+      expect(() =>
+        resolveGrassLightingCandidate(
+          makeWindow("/stream.html", `?${query}&${selected}`),
+        ),
+      ).toThrow();
+    expect(() =>
+      resolveGrassLightingCandidate(
+        makeWindow("/play", `?${fine}&${selected}`),
+      ),
+    ).toThrow();
+    const embedded = makeWindow("/stream.html", `?${fine}&${selected}`);
+    Object.assign(embedded, { __HYPERIA_EMBEDDED__: true });
+    expect(() => resolveGrassLightingCandidate(embedded)).toThrow();
+  });
+
+  it("captures leaf-volume once on the actual terrain owner", () => {
+    const previous = Object.getOwnPropertyDescriptor(globalThis, "window");
+    const world = new World();
+    const terrain = world.register("terrain", TerrainSystem) as TerrainSystem;
+    const input = makeWindow("/stream.html", `?${fine}&${selected}`);
+    Object.defineProperty(globalThis, "window", {
+      configurable: true,
+      value: input,
+    });
+    try {
+      terrain["getCompactGrassColorGrade"]();
+      const captured = terrain["grassVisualSelection"]!;
+      expect(Object.isFrozen(captured)).toBe(true);
+      expect(captured.lighting).toBe("leaf-volume-v1");
+      input.location.search = `?${fine}&grassLighting=canopy-normal-v1`;
+      terrain["getCompactGrassColorGrade"]();
+      expect(terrain["grassVisualSelection"]).toBe(captured);
+      expect(captured.lighting).toBe("leaf-volume-v1");
+    } finally {
+      if (previous) Object.defineProperty(globalThis, "window", previous);
+      else Reflect.deleteProperty(globalThis, "window");
+      world.destroy();
+    }
+  });
+});
+
+describe("client resource-pool startup ordering", () => {
+  it("binds the registered scene before asynchronous resource registration", () => {
+    // Structural guard only; actual warm-reload tree ownership is verified in
+    // the WebGPU client. Timers here can silently drop the first resource batch.
+    const source = readFileSync(
+      new URL("../createClientWorld.ts", import.meta.url),
+      "utf8",
+    );
+    const stageRegistration = source.indexOf(
+      'replaceSystem(world, "stage", Stage)',
+    );
+    const setupDefinition = source.indexOf("const setupStageWithTHREE =");
+    const setupCall = source.indexOf("\n  setupStageWithTHREE();");
+    const resourceRegistration = source.indexOf("await registerSystems(world");
+    expect(stageRegistration).toBeGreaterThan(-1);
+    expect(setupDefinition).toBeGreaterThan(stageRegistration);
+    expect(setupCall).toBeGreaterThan(setupDefinition);
+    expect(resourceRegistration).toBeGreaterThan(setupCall);
+    expect(source).not.toMatch(/setTimeout\(\s*setupStageWithTHREE/);
+    for (const owner of [
+      "initGLBTreeInstancer",
+      "initGLBTreeBatchedInstancer",
+      "initPlaceholderInstancer",
+      "initGLBResourceInstancer",
+    ])
+      expect(source.slice(setupDefinition, setupCall)).toContain(`${owner}(`);
+  });
+});
+
+describe("explicit height surface-blend preview URL policy", () => {
+  const fine =
+    "streamRenderProfile=island-fine-meadow-720p60-v1&grassAppearance=fine-meadow-v1";
+  const selected = "terrainBlend=height-v1";
+
+  it("leaves absent selection undefined across existing routes and profiles", () => {
+    expect(resolveCompactSurfaceBlendCandidate()).toBeUndefined();
+    for (const path of ["/play", "/stream.html"])
+      for (const profile of ["", ...Object.keys(STREAMING_RENDER_PROFILES)])
+        expect(
+          resolveCompactSurfaceBlendCandidate(
+            makeWindow(path, `?streamRenderProfile=${profile}`),
+          ),
+        ).toBeUndefined();
+    expect(
+      resolveCompactSurfaceBlendCandidate(
+        makeWindow("/stream.html", "?" + fine),
+      ),
+    ).toBeUndefined();
+  });
+
+  it("admits only the explicit fine pair without changing rendering or grass selection", () => {
+    for (const [path, prefix] of [
+      ["/stream.html", ""],
+      ["/", "page=stream&"],
+      ["/stream.html", "embedded=false&streamFps=60&"],
+    ]) {
+      const original = makeWindow(
+        path,
+        `?${prefix}${fine}&habitatComposition=haven-understory-v1&grassRoadClearance=per-blade-v1`,
+      );
+      const candidate = makeWindow(
+        path,
+        `${original.location.search}&${selected}`,
+      );
+      expect(resolveCompactSurfaceBlendCandidate(candidate)).toBe("height-v1");
+      expect(resolveExplicitStreamingRenderProfile(candidate)).toBe(
+        resolveExplicitStreamingRenderProfile(original),
+      );
+      expect(resolveClientViewportRuntimeProfile(candidate)).toEqual(
+        resolveClientViewportRuntimeProfile(original),
+      );
+      expect(
+        resolveStreamingRenderPreferences(
+          1280,
+          720,
+          resolveExplicitStreamingRenderProfile(candidate),
+        ),
+      ).toEqual(
+        resolveStreamingRenderPreferences(
+          1280,
+          720,
+          resolveExplicitStreamingRenderProfile(original),
+        ),
+      );
+      expect(resolveGrassAppearanceCandidate(candidate)).toBe("fine-meadow-v1");
+      expect(resolveHabitatCompositionCandidate(candidate)).toBe(
+        "haven-understory-v1",
+      );
+      expect(resolveGrassRoadClearance(candidate)).toBe("per-blade-v1");
+      expect(resolveGrassCoverageTrial(candidate)).toBeUndefined();
+    }
+  });
+
+  it("keeps terrain blending and dirt projection independently selectable", () => {
+    for (const blend of [false, true])
+      for (const projection of [false, true]) {
+        const query = [
+          fine,
+          ...(blend ? [selected] : []),
+          ...(projection ? ["dirtProjection=stochastic-v1"] : []),
+        ].join("&");
+        const win = makeWindow("/stream.html", "?" + query);
+        expect(resolveCompactSurfaceBlendCandidate(win)).toBe(
+          blend ? "height-v1" : undefined,
+        );
+        expect(resolveCompactDirtProjectionCandidate(win)).toBe(
+          projection ? "stochastic-v1" : undefined,
+        );
+      }
+  });
+
+  it("rejects empty, unknown, coerced and duplicate blend selectors", () => {
+    for (const value of [
+      "",
+      "unknown",
+      "linear-v1",
+      "HEIGHT-V1",
+      "%20height-v1",
+      "height-v1%20",
+      "height-v1%0A",
+      "height-v1&terrainBlend=height-v1",
+      "height-v1&terrainBlend=",
+    ])
+      expect(() =>
+        resolveCompactSurfaceBlendCandidate(
+          makeWindow("/stream.html", `?${fine}&terrainBlend=${value}`),
+        ),
+      ).toThrow("terrain blend candidate");
+  });
+
+  it("rejects missing, nonexact, embedded and ambiguous fine selections", () => {
+    for (const [path, query] of [
+      ["/play", fine],
+      ["/stream.html", ""],
+      ["/stream.html", "streamRenderProfile=island-fine-meadow-720p60-v1"],
+      ["/stream.html", "grassAppearance=fine-meadow-v1"],
+      [
+        "/stream.html",
+        "streamRenderProfile=island-meadow-720p60-v1&grassAppearance=natural-tuft-v1",
+      ],
+      [
+        "/stream.html",
+        "streamRenderProfile=%20island-fine-meadow-720p60-v1&grassAppearance=fine-meadow-v1",
+      ],
+      [
+        "/stream.html",
+        "streamRenderProfile=island-fine-meadow-720p60-v1%20&grassAppearance=fine-meadow-v1",
+      ],
+      ["/stream.html", fine + "&embedded=true"],
+      ["/stream.html", fine + "&embedded=false&embedded=false"],
+      ["/stream.html", fine + "&grassAppearance=fine-meadow-v1"],
+      [
+        "/stream.html",
+        fine + "&streamRenderProfile=island-fine-meadow-720p60-v1",
+      ],
+      ["/stream.html", fine + "&streamFps=30"],
+      ["/stream.html", fine + "&streamFps=60&streamFps=60"],
+      ["/", "page=stream&page=stream&" + fine],
+    ])
+      expect(() =>
+        resolveCompactSurfaceBlendCandidate(
+          makeWindow(path, `?${query}&${selected}`),
+        ),
+      ).toThrow();
+    const embedded = makeWindow("/stream.html", `?${fine}&${selected}`);
+    Object.assign(embedded, { __HYPERIA_EMBEDDED__: true });
+    expect(() => resolveCompactSurfaceBlendCandidate(embedded)).toThrow(
+      "non-embedded",
+    );
+  });
+
+  it("captures absence or selection once and admits sculpt terrain before material construction", () => {
+    const source = readFileSync(
+      new URL("../../systems/shared/world/TerrainSystem.ts", import.meta.url),
+      "utf8",
+    );
+    expect(
+      source.match(/resolveCompactSurfaceBlendCandidate\(\)/gu),
+    ).toHaveLength(1);
+    const capture = source.slice(
+      source.indexOf("  private getCompactSurfaceBlend()"),
+      source.indexOf("  private getCompactGrassColorGrade()"),
+    );
+    expect(capture).toContain("if (this.compactSurfaceBlend === undefined)");
+    expect(capture).toContain(
+      "selection && !isCompactSculptProfile(this.getWorldTerrainProfile())",
+    );
+    expect(capture).toContain("this.compactSurfaceBlend = selection ?? null;");
+    expect(capture).toContain("return this.compactSurfaceBlend ?? undefined;");
+    expect(source).toContain(
+      "compactSurfaceBlend: this.getCompactSurfaceBlend(),",
+    );
+    const initialize = source.slice(
+      source.indexOf("  private async initialize():"),
+      source.indexOf("  async start():"),
+    );
+    const captureIndex = initialize.indexOf("this.getCompactSurfaceBlend();");
+    expect(captureIndex).toBeGreaterThan(0);
+    expect(captureIndex).toBeLessThan(
+      initialize.indexOf("this.initTerrainMaterial();"),
+    );
+    expect(capture).not.toContain("compactDirtProjection");
+  });
+});
+
+describe("explicit pond relief preview URL policy", () => {
+  const fine =
+    "streamRenderProfile=island-fine-meadow-720p60-v1&grassAppearance=fine-meadow-v1";
+  const height = "terrainBlend=height-v1";
+  const candidates = [
+    "relief-v1",
+    "relief-contact-v1",
+    "shore-contact-v1",
+  ] as const;
+  const urlCandidates = [...candidates, "composition-v1"] as const;
+
+  it("keeps absent pond selection undefined for every existing route/profile", () => {
+    expect(resolveCompactPondBlendCandidate()).toBeUndefined();
+    for (const path of ["/play", "/stream.html"])
+      for (const profile of ["", ...Object.keys(STREAMING_RENDER_PROFILES)])
+        expect(
+          resolveCompactPondBlendCandidate(
+            makeWindow(path, `?streamRenderProfile=${profile}`),
+          ),
+        ).toBeUndefined();
+    expect(
+      resolveCompactPondBlendCandidate(
+        makeWindow("/stream.html", `?${fine}&${height}`),
+      ),
+    ).toBeUndefined();
+  });
+
+  it.each(urlCandidates)(
+    "admits %s only with the fine/height pair without changing profiles or budgets",
+    (selection) => {
+      const selected = `pondBlend=${selection}`;
+      for (const [path, prefix] of [
+        ["/stream.html", ""],
+        ["/", "page=stream&"],
+      ])
+        for (const dirt of ["", "&dirtProjection=stochastic-v1"])
+          for (const rock of ["", "&rockProjection=stochastic-v1"]) {
+            const baseline = makeWindow(
+              path,
+              `?${prefix}${fine}&${height}${dirt}${rock}`,
+            );
+            const candidate = makeWindow(
+              path,
+              `${baseline.location.search}&${selected}`,
+            );
+            expect(resolveCompactPondBlendCandidate(candidate)).toBe(selection);
+            expect(resolveCompactSurfaceBlendCandidate(candidate)).toBe(
+              "height-v1",
+            );
+            expect(resolveCompactDirtProjectionCandidate(candidate)).toBe(
+              resolveCompactDirtProjectionCandidate(baseline),
+            );
+            expect(resolveCompactRockProjectionCandidate(candidate)).toBe(
+              resolveCompactRockProjectionCandidate(baseline),
+            );
+            expect(resolveExplicitStreamingRenderProfile(candidate)).toBe(
+              resolveExplicitStreamingRenderProfile(baseline),
+            );
+            expect(resolveExplicitStreamingWorldProfile(candidate)).toBe(
+              resolveExplicitStreamingWorldProfile(baseline),
+            );
+            expect(resolveClientViewportRuntimeProfile(candidate)).toEqual(
+              resolveClientViewportRuntimeProfile(baseline),
+            );
+            expect(
+              resolveStreamingRenderPreferences(
+                1280,
+                720,
+                resolveExplicitStreamingRenderProfile(candidate),
+              ),
+            ).toEqual(
+              resolveStreamingRenderPreferences(
+                1280,
+                720,
+                resolveExplicitStreamingRenderProfile(baseline),
+              ),
+            );
+            expect(resolveGrassAppearanceCandidate(candidate)).toBe(
+              "fine-meadow-v1",
+            );
+            expect(resolveGrassCoverageTrial(candidate)).toBeUndefined();
+            expect(resolveGrassRoadClearance(candidate)).toBeUndefined();
+          }
+    },
+  );
+
+  it.each([
+    "",
+    "unknown",
+    "RELIEF-V1",
+    "%20relief-v1",
+    "relief-v1%20",
+    "relief-v1%0A",
+    "relief-v1&pondBlend=relief-v1",
+    "relief-v1&pondBlend=",
+    "RELIEF-CONTACT-V1",
+    "%20relief-contact-v1",
+    "relief-contact-v1%20",
+    "relief-contact-v1%0A",
+    "relief-contact-v1&pondBlend=relief-contact-v1",
+    "relief-contact-v1&pondBlend=",
+    "relief-v1&pondBlend=relief-contact-v1",
+    "relief-contact-v1&pondBlend=relief-v1",
+    "&pondBlend=relief-contact-v1",
+    "relief-contact-wet-v1",
+    "SHORE-CONTACT-V1",
+    "%20shore-contact-v1",
+    "shore-contact-v1%20",
+    "shore-contact-v1%0A",
+    "shore-contact-v1&pondBlend=shore-contact-v1",
+    "shore-contact-v1&pondBlend=",
+    "shore-contact-v1&pondBlend=relief-v1",
+    "relief-contact-v1&pondBlend=shore-contact-v1",
+    "COMPOSITION-V1",
+    "%20composition-v1",
+    "composition-v1%20",
+    "composition-v1%0A",
+    "composition-v1&pondBlend=composition-v1",
+    "composition-v1&pondBlend=",
+    "composition-v1&pondBlend=shore-contact-v1",
+    "relief-contact-v1&pondBlend=composition-v1",
+  ])("rejects invalid or duplicate pond selector %s", (value) => {
+    expect(() =>
+      resolveCompactPondBlendCandidate(
+        makeWindow("/stream.html", `?${fine}&${height}&pondBlend=${value}`),
+      ),
+    ).toThrow("pond blend candidate");
+  });
+
+  it.each([
+    "",
+    "terrainBlend=",
+    "terrainBlend=linear-v1",
+    "terrainBlend=HEIGHT-V1",
+    "terrainBlend=%20height-v1",
+    "terrainBlend=height-v1%20",
+    "terrainBlend=height-v1&terrainBlend=height-v1",
+    "terrainBlend=height-v1&terrainBlend=",
+  ])(
+    "rejects absent, invalid or ambiguous height dependency %s",
+    (dependency) => {
+      for (const selection of urlCandidates)
+        expect(() =>
+          resolveCompactPondBlendCandidate(
+            makeWindow(
+              "/stream.html",
+              `?${fine}&${dependency}&pondBlend=${selection}`,
+            ),
+          ),
+        ).toThrow();
+    },
+  );
+
+  it.each(urlCandidates)(
+    "rejects invalid fine pairs and embedded or ambiguous routes for %s",
+    (selection) => {
+      const selected = `pondBlend=${selection}`;
+      for (const [path, query] of [
+        ["/play", fine],
+        ["/stream.html", ""],
+        ["/stream.html", "streamRenderProfile=island-fine-meadow-720p60-v1"],
+        ["/stream.html", "grassAppearance=fine-meadow-v1"],
+        [
+          "/stream.html",
+          "streamRenderProfile=%20island-fine-meadow-720p60-v1&grassAppearance=fine-meadow-v1",
+        ],
+        [
+          "/stream.html",
+          "streamRenderProfile=island-meadow-720p60-v1&grassAppearance=natural-tuft-v1",
+        ],
+        ["/stream.html", fine + "&grassAppearance=fine-meadow-v1"],
+        [
+          "/stream.html",
+          fine + "&streamRenderProfile=island-fine-meadow-720p60-v1",
+        ],
+        ["/stream.html", fine + "&embedded=true"],
+        ["/stream.html", fine + "&embedded=false&embedded=false"],
+        ["/stream.html", fine + "&streamFps=30"],
+        ["/stream.html", fine + "&streamFps=60&streamFps=60"],
+        ["/", "page=stream&page=stream&" + fine],
+      ])
+        expect(() =>
+          resolveCompactPondBlendCandidate(
+            makeWindow(path, `?${query}&${height}&${selected}`),
+          ),
+        ).toThrow();
+      const embedded = makeWindow(
+        "/stream.html",
+        `?${fine}&${height}&${selected}`,
+      );
+      Object.assign(embedded, { __HYPERIA_EMBEDDED__: true });
+      expect(() => resolveCompactPondBlendCandidate(embedded)).toThrow(
+        "non-embedded",
+      );
+    },
+  );
+
+  function withTerrainUrl(
+    search: string,
+    check: (terrain: TerrainSystem, input: Window) => void,
+  ) {
+    const descriptor = Object.getOwnPropertyDescriptor(globalThis, "window");
+    const world = new World();
+    const terrain = world.register("terrain", TerrainSystem) as TerrainSystem;
+    const input = makeWindow("/stream.html", search);
+    const identity = DataManager.getWorldContentIdentity();
+    // URL data is the only input fixture; the TerrainSystem and admitted pond
+    // are real owners. This is not browser/rendering qualification.
+    Object.defineProperty(globalThis, "window", {
+      configurable: true,
+      value: input,
+    });
+    try {
+      check(terrain, input);
+      expect(DataManager.getWorldContentIdentity()).toBe(identity);
+    } finally {
+      if (descriptor) Object.defineProperty(globalThis, "window", descriptor);
+      else Reflect.deleteProperty(globalThis, "window");
+      world.destroy();
+    }
+  }
+
+  it.each(candidates)(
+    "captures %s and absent pond choices once on actual terrain owners",
+    (selection) => {
+      const selected = `pondBlend=${selection}`;
+      withTerrainUrl(`?${fine}&${height}&${selected}`, (terrain, input) => {
+        const profile = terrain.getWorldTerrainProfile();
+        expect(terrain["getCompactPondBlend"]()).toBe(selection);
+        expect(terrain["getCompactSurfaceBlend"]()).toBe("height-v1");
+        expect(terrain["getCompactPondMaterial"]()).toEqual(
+          ALL_WORLD_AREAS.haven_pond.waterBodies![0],
+        );
+        input.location.search = "?pondBlend=invalid";
+        expect(terrain["getCompactPondBlend"]()).toBe(selection);
+        const otherSelection =
+          selection === "relief-v1" ? "relief-contact-v1" : "relief-v1";
+        input.location.search = `?${fine}&${height}&pondBlend=${otherSelection}`;
+        expect(terrain["getCompactPondBlend"]()).toBe(selection);
+        expect(terrain.getWorldTerrainProfile()).toBe(profile);
+      });
+      withTerrainUrl(`?${fine}&${height}`, (terrain, input) => {
+        expect(terrain["getCompactPondBlend"]()).toBeUndefined();
+        expect(terrain["compactPondBlend"]).toBeNull();
+        input.location.search += `&${selected}`;
+        expect(terrain["getCompactPondBlend"]()).toBeUndefined();
+      });
+    },
+  );
+
+  it.each(candidates)(
+    "rejects incompatible terrain and a captured absent height choice for %s",
+    (selection) => {
+      const selected = `pondBlend=${selection}`;
+      withTerrainUrl(`?${fine}&${height}&${selected}`, (terrain) => {
+        terrain["activeTerrainProfile"] = COMPACT_WORLD_TERRAIN_PROFILE;
+        expect(() => terrain["getCompactPondBlend"]()).toThrow(
+          "compact sculpt terrain",
+        );
+        expect(terrain["compactPondBlend"]).toBeUndefined();
+      });
+      withTerrainUrl(`?${fine}`, (terrain, input) => {
+        expect(terrain["getCompactSurfaceBlend"]()).toBeUndefined();
+        input.location.search += `&${height}&${selected}`;
+        expect(() => terrain["getCompactPondBlend"]()).toThrow(
+          "captured height-v1",
+        );
+        expect(terrain["compactPondBlend"]).toBeUndefined();
+      });
+    },
+  );
+
+  it.each(candidates)(
+    "requires the actual single admitted pond before accepting %s",
+    (selection) => {
+      const selected = `pondBlend=${selection}`;
+      const area = ALL_WORLD_AREAS.haven_pond;
+      const original = area.waterBodies;
+      try {
+        area.waterBodies = [];
+        withTerrainUrl(`?${fine}&${height}&${selected}`, (terrain) => {
+          expect(() => terrain["getCompactPondBlend"]()).toThrow(
+            "single admitted Haven pond",
+          );
+          expect(terrain["compactPondBlend"]).toBeUndefined();
+        });
+      } finally {
+        area.waterBodies = original;
+      }
+    },
+  );
+
+  it("wires the captured pond selection before material construction", () => {
+    const source = readFileSync(
+      new URL("../../systems/shared/world/TerrainSystem.ts", import.meta.url),
+      "utf8",
+    );
+    expect(source.match(/resolveCompactPondBlendCandidate\(\)/gu)).toHaveLength(
+      1,
+    );
+    const capture = source.slice(
+      source.indexOf("  private getCompactPondBlend()"),
+      source.indexOf("  private getCompactGrassColorGrade()"),
+    );
+    expect(capture).toContain("this.compactPondBlend = selection ?? null;");
+    expect(capture).toContain("return this.compactPondBlend ?? undefined;");
+    expect(capture).toContain("this.getCompactPondMaterial()");
+    expect(source).toContain("compactPondBlend: this.getCompactPondBlend(),");
+    const initialize = source.slice(
+      source.indexOf("  private async initialize():"),
+      source.indexOf("  async start():"),
+    );
+    expect(initialize.indexOf("this.getCompactPondBlend();")).toBeGreaterThan(
+      initialize.indexOf("this.getCompactSurfaceBlend();"),
+    );
+    expect(initialize.indexOf("this.getCompactPondBlend();")).toBeLessThan(
+      initialize.indexOf("this.initTerrainMaterial();"),
+    );
+  });
+});
+
+describe("pond distribution selection ownership", () => {
+  it.each([
+    undefined,
+    "relief-v1",
+    "relief-contact-v1",
+    "shore-contact-v1",
+  ] as const)(
+    "forwards only the support-changing pond mode to real setup (%s)",
+    async (mode) => {
+      const world = new World();
+      const terrain = world.register("terrain", TerrainSystem) as TerrainSystem;
+      terrain["activeTerrainProfile"] = validateWorldTerrainProfile({
+        ...terrain.getWorldTerrainProfile(),
+        southernMeadow: {
+          schemaVersion: 1,
+          minX: 304,
+          maxX: 500,
+          minZ: 345,
+          maxZ: 535,
+          featherX: 24,
+          featherZ: 24,
+          northHeight: 26.8,
+          southHeight: 25.3,
+          crossFall: 1,
+          rollAmplitude: 0.65,
+          rollWavelength: 100,
+        },
+      });
+      terrain["compactPondBlend"] = mode ?? null;
+      terrain["compactSurfaceBlend"] = "height-v1";
+      try {
+        await terrain.init();
+        const setup = terrain["buildGrassWorkerSetup"]();
+        const field = terrain["getCompactMacroMaterial"]();
+        if (mode === "shore-contact-v1") {
+          expect(setup.compactPondBlend).toBe(mode);
+          expect(field?.pondDistribution).toEqual({
+            id: mode,
+            soilFullHeight: 0.055,
+            soilEndHeight: 0.165,
+          });
+          expect(Object.isFrozen(field?.pondDistribution)).toBe(true);
+        } else {
+          expect(setup).not.toHaveProperty("compactPondBlend");
+          expect(field).not.toHaveProperty("pondDistribution");
+        }
+        expect(setup).not.toHaveProperty("compactCoastBlend");
+        expect(setup.terrainConfig.TERRAIN_PROFILE).toEqual(
+          terrain.getWorldTerrainProfile(),
+        );
+      } finally {
+        world.destroy();
+      }
+    },
+  );
+});
+
+describe.each(["detail-v1", "distribution-v1", "cavity-v1"] as const)(
+  "explicit coastal %s preview URL policy",
+  (coastMode) => {
+    const fine =
+      "streamRenderProfile=island-fine-meadow-720p60-v1&grassAppearance=fine-meadow-v1";
+    const height = "terrainBlend=height-v1";
+    const selected = `coastBlend=${coastMode}`;
+
+    it("keeps absent coastal selection undefined for existing routes and profiles", () => {
+      expect(resolveCompactCoastBlend()).toBeUndefined();
+      for (const path of ["/play", "/stream.html"])
+        for (const profile of ["", ...Object.keys(STREAMING_RENDER_PROFILES)])
+          expect(
+            resolveCompactCoastBlend(
+              makeWindow(path, `?streamRenderProfile=${profile}`),
+            ),
+          ).toBeUndefined();
+      expect(
+        resolveCompactCoastBlend(
+          makeWindow("/stream.html", `?${fine}&${height}`),
+        ),
+      ).toBeUndefined();
+    });
+
+    it("admits only the explicit fine/height pair independently of projections and pond treatment", () => {
+      for (const [path, prefix] of [
+        ["/stream.html", ""],
+        ["/", "page=stream&"],
+      ])
+        for (const dirt of ["", "&dirtProjection=stochastic-v1"])
+          for (const rock of ["", "&rockProjection=stochastic-v1"])
+            for (const pond of [
+              "",
+              "&pondBlend=relief-v1",
+              "&pondBlend=relief-contact-v1",
+            ]) {
+              const baseline = makeWindow(
+                path,
+                `?${prefix}${fine}&${height}${dirt}${rock}${pond}`,
+              );
+              const candidate = makeWindow(
+                path,
+                `${baseline.location.search}&${selected}`,
+              );
+              expect(resolveCompactCoastBlend(candidate)).toBe(coastMode);
+              expect(resolveCompactSurfaceBlendCandidate(candidate)).toBe(
+                "height-v1",
+              );
+              expect(resolveCompactDirtProjectionCandidate(candidate)).toBe(
+                resolveCompactDirtProjectionCandidate(baseline),
+              );
+              expect(resolveCompactRockProjectionCandidate(candidate)).toBe(
+                resolveCompactRockProjectionCandidate(baseline),
+              );
+              expect(resolveCompactPondBlendCandidate(candidate)).toBe(
+                resolveCompactPondBlendCandidate(baseline),
+              );
+              expect(resolveExplicitStreamingRenderProfile(candidate)).toBe(
+                resolveExplicitStreamingRenderProfile(baseline),
+              );
+              expect(resolveExplicitStreamingWorldProfile(candidate)).toBe(
+                resolveExplicitStreamingWorldProfile(baseline),
+              );
+              expect(resolveClientViewportRuntimeProfile(candidate)).toEqual(
+                resolveClientViewportRuntimeProfile(baseline),
+              );
+              expect(
+                resolveStreamingRenderPreferences(
+                  1280,
+                  720,
+                  resolveExplicitStreamingRenderProfile(candidate),
+                ),
+              ).toEqual(
+                resolveStreamingRenderPreferences(
+                  1280,
+                  720,
+                  resolveExplicitStreamingRenderProfile(baseline),
+                ),
+              );
+              expect(resolveGrassAppearanceCandidate(candidate)).toBe(
+                "fine-meadow-v1",
+              );
+              expect(resolveGrassCoverageTrial(candidate)).toBeUndefined();
+              expect(resolveGrassRoadClearance(candidate)).toBeUndefined();
+            }
+    });
+
+    it.each([
+      "",
+      "unknown",
+      "DETAIL-V1",
+      "%20detail-v1",
+      "detail-v1%20",
+      "detail-v1%0A",
+      "detail-v1&coastBlend=detail-v1",
+      "detail-v1&coastBlend=",
+      "&coastBlend=detail-v1",
+      "detail-v1&coastBlend=unknown",
+      "unknown&coastBlend=detail-v1",
+      "distribution-v1&coastBlend=detail-v1",
+      "detail-v1&coastBlend=distribution-v1",
+      "distribution-v1&coastBlend=distribution-v1",
+      "distribution-v1&coastBlend=",
+      "DISTRIBUTION-V1",
+      "%20distribution-v1",
+      "distribution-v1%20",
+      "distribution-v1%0A",
+      "CAVITY-V1",
+      "%20cavity-v1",
+      "cavity-v1%20",
+      "cavity-v1%0A",
+      "cavity-v1&coastBlend=cavity-v1",
+      "cavity-v1&coastBlend=",
+      "&coastBlend=cavity-v1",
+      "cavity-v1&coastBlend=unknown",
+      "unknown&coastBlend=cavity-v1",
+      "cavity-v1&coastBlend=detail-v1",
+      "detail-v1&coastBlend=cavity-v1",
+      "cavity-v1&coastBlend=distribution-v1",
+      "distribution-v1&coastBlend=cavity-v1",
+      "relief-v1",
+      "relief-contact-v1",
+    ])("rejects malformed or duplicate coastal selection %s", (value) => {
+      expect(() =>
+        resolveCompactCoastBlend(
+          makeWindow("/stream.html", `?${fine}&${height}&coastBlend=${value}`),
+        ),
+      ).toThrow("coast blend candidate");
+    });
+
+    it.each([
+      "",
+      "terrainBlend=",
+      "terrainBlend=linear-v1",
+      "terrainBlend=HEIGHT-V1",
+      "terrainBlend=%20height-v1",
+      "terrainBlend=height-v1%20",
+      "terrainBlend=height-v1&terrainBlend=height-v1",
+      "terrainBlend=height-v1&terrainBlend=",
+    ])(
+      "rejects absent, invalid or ambiguous height dependency %s",
+      (dependency) => {
+        expect(() =>
+          resolveCompactCoastBlend(
+            makeWindow("/stream.html", `?${fine}&${dependency}&${selected}`),
+          ),
+        ).toThrow();
+      },
+    );
+
+    it("rejects incompatible fine pairs and embedded or ambiguous routes", () => {
+      for (const [path, query] of [
+        ["/play", fine],
+        ["/stream.html", ""],
+        ["/stream.html", "streamRenderProfile=island-fine-meadow-720p60-v1"],
+        ["/stream.html", "grassAppearance=fine-meadow-v1"],
+        [
+          "/stream.html",
+          "streamRenderProfile=%20island-fine-meadow-720p60-v1&grassAppearance=fine-meadow-v1",
+        ],
+        [
+          "/stream.html",
+          "streamRenderProfile=island-meadow-720p60-v1&grassAppearance=natural-tuft-v1",
+        ],
+        ["/stream.html", fine + "&grassAppearance=fine-meadow-v1"],
+        [
+          "/stream.html",
+          fine + "&streamRenderProfile=island-fine-meadow-720p60-v1",
+        ],
+        ["/stream.html", fine + "&embedded=true"],
+        ["/stream.html", fine + "&embedded=false&embedded=false"],
+        ["/stream.html", fine + "&streamFps=30"],
+        ["/stream.html", fine + "&streamFps=60&streamFps=60"],
+        ["/", "page=stream&page=stream&" + fine],
+      ])
+        expect(() =>
+          resolveCompactCoastBlend(
+            makeWindow(path, `?${query}&${height}&${selected}`),
+          ),
+        ).toThrow();
+      const embedded = makeWindow(
+        "/stream.html",
+        `?${fine}&${height}&${selected}`,
+      );
+      Object.assign(embedded, { __HYPERIA_EMBEDDED__: true });
+      expect(() => resolveCompactCoastBlend(embedded)).toThrow("non-embedded");
+    });
+
+    function withTerrainUrl(
+      search: string,
+      check: (terrain: TerrainSystem, input: Window) => void,
+    ) {
+      const descriptor = Object.getOwnPropertyDescriptor(globalThis, "window");
+      const world = new World();
+      const terrain = world.register("terrain", TerrainSystem) as TerrainSystem;
+      const input = makeWindow("/stream.html", search);
+      const identity = DataManager.getWorldContentIdentity();
+      // Only URL/admission data varies; exercise the real terrain/material owners.
+      Object.defineProperty(globalThis, "window", {
+        configurable: true,
+        value: input,
+      });
+      try {
+        check(terrain, input);
+        expect(DataManager.getWorldContentIdentity()).toBe(identity);
+      } finally {
+        if (descriptor) Object.defineProperty(globalThis, "window", descriptor);
+        else Reflect.deleteProperty(globalThis, "window");
+        world.destroy();
+      }
+    }
+
+    it.each([false, true])(
+      "captures coastal absence/selection once and forwards it to the real material (selected=%s)",
+      (selectedInitially) => {
+        withTerrainUrl(
+          `?${fine}&${height}${selectedInitially ? `&${selected}` : ""}`,
+          (terrain, input) => {
+            // The default manifest intentionally does not promote this preview.
+            // Admit the same authored meadow data used by the coastal material
+            // fixture, without altering DataManager or the production defaults.
+            const profile = validateWorldTerrainProfile({
+              ...terrain.getWorldTerrainProfile(),
+              southernMeadow: {
+                schemaVersion: 1,
+                minX: 304,
+                maxX: 500,
+                minZ: 345,
+                maxZ: 535,
+                featherX: 24,
+                featherZ: 24,
+                northHeight: 26.8,
+                southHeight: 25.3,
+                crossFall: 1,
+                rollAmplitude: 0.65,
+                rollWavelength: 100,
+              },
+            });
+            terrain["activeTerrainProfile"] = profile;
+            const choice = selectedInitially ? coastMode : undefined;
+            // Enter through the dependent field first: owner capture must not
+            // recurse between macro-field construction and coastal admission.
+            const initialMacroField = terrain["getCompactMacroMaterial"]();
+            if (coastMode === "cavity-v1") {
+              const operations = createCompactTerrainColorOperations();
+              expect(operations.coastBlend(choice)).toBe(choice);
+              expect(initialMacroField).toEqual(operations.macroField(profile));
+              expect(initialMacroField).not.toHaveProperty(
+                "coastalDistribution",
+              );
+            }
+            expect(initialMacroField?.coastalDistribution?.id).toBe(
+              choice === "distribution-v1" ? "distribution-v1" : undefined,
+            );
+            expect(terrain["getCompactCoastBlend"]()).toBe(choice);
+            expect(terrain["compactCoastBlend"]).toBe(
+              selectedInitially ? coastMode : null,
+            );
+            expect(terrain["getCompactSurfaceBlend"]()).toBe("height-v1");
+            expect(
+              terrain["getCompactMacroMaterial"]()?.coastalMeadow,
+            ).toBeDefined();
+            const macroField = terrain["getCompactMacroMaterial"]();
+            input.location.search = `?${fine}&${height}&coastBlend=${selectedInitially ? "invalid" : coastMode}`;
+            expect(terrain["getCompactCoastBlend"]()).toBe(choice);
+            expect(terrain["getCompactMacroMaterial"]()).toBe(macroField);
+            terrain["initTerrainMaterial"]();
+            const material = terrain.getTerrainMaterialWithUniforms();
+            expect(material).not.toBeNull();
+            expect(material?.compactCoastBlend).toBe(choice);
+            expect(
+              Object.prototype.hasOwnProperty.call(
+                material,
+                "compactCoastBlend",
+              ),
+            ).toBe(selectedInitially);
+            expect(terrain.getWorldTerrainProfile()).toBe(profile);
+            material?.dispose();
+          },
+        );
+      },
+    );
+
+    it("rejects incompatible terrain and a height choice absent at owner capture", () => {
+      withTerrainUrl(`?${fine}&${height}&${selected}`, (terrain) => {
+        terrain["activeTerrainProfile"] = COMPACT_WORLD_TERRAIN_PROFILE;
+        expect(() => terrain["getCompactCoastBlend"]()).toThrow(
+          "compact sculpt terrain",
+        );
+        expect(terrain["compactCoastBlend"]).toBeUndefined();
+      });
+      withTerrainUrl(`?${fine}`, (terrain, input) => {
+        expect(terrain["getCompactSurfaceBlend"]()).toBeUndefined();
+        input.location.search += `&${height}&${selected}`;
+        expect(() => terrain["getCompactCoastBlend"]()).toThrow(
+          "captured height-v1",
+        );
+        expect(terrain["compactCoastBlend"]).toBeUndefined();
+      });
+    });
+
+    it("requires the real admitted coastal macro domain before capturing selection", () => {
+      withTerrainUrl(`?${fine}&${height}&${selected}`, (terrain) => {
+        const { southernMeadow: _excluded, ...withoutMeadow } =
+          terrain.getWorldTerrainProfile();
+        terrain["activeTerrainProfile"] =
+          validateWorldTerrainProfile(withoutMeadow);
+        expect(() => terrain["getCompactCoastBlend"]()).toThrow(
+          "admitted coastal meadow",
+        );
+        expect(terrain["compactCoastBlend"]).toBeUndefined();
+      });
+    });
+
+    it("captures and forwards the coastal choice before material construction", () => {
+      const source = readFileSync(
+        new URL("../../systems/shared/world/TerrainSystem.ts", import.meta.url),
+        "utf8",
+      );
+      expect(source.match(/resolveCompactCoastBlend\(\)/gu)).toHaveLength(1);
+      const capture = source.slice(
+        source.indexOf("  private getCompactCoastBlend()"),
+        source.indexOf("  private getCompactGrassColorGrade()"),
+      );
+      expect(capture).toContain("this.compactCoastBlend = selection ?? null;");
+      expect(capture).toContain("return this.compactCoastBlend ?? undefined;");
+      expect(capture).toContain("compactTerrainColorOperations.macroField(");
+      expect(capture).not.toContain("this.getCompactMacroMaterial()");
+      expect(source).toContain(
+        "compactCoastBlend: this.getCompactCoastBlend(),",
+      );
+      expect(source).toContain(
+        'this.getCompactCoastBlend() === "distribution-v1"',
+      );
+      expect(source).toContain(
+        '{ compactCoastBlend: "distribution-v1" as const }',
+      );
+      const initialize = source.slice(
+        source.indexOf("  private async initialize():"),
+        source.indexOf("  async start():"),
+      );
+      expect(
+        initialize.indexOf("this.getCompactCoastBlend();"),
+      ).toBeGreaterThan(initialize.indexOf("this.getCompactSurfaceBlend();"));
+      expect(initialize.indexOf("this.getCompactCoastBlend();")).toBeLessThan(
+        initialize.indexOf("this.initTerrainMaterial();"),
+      );
+    });
+  },
+);
+
+describe("cavity-only coastal selection ownership", () => {
+  it("validates the literal without changing any existing macro-field defaults", () => {
+    const operations = createCompactTerrainColorOperations();
+    for (const value of [
+      undefined,
+      "detail-v1",
+      "distribution-v1",
+      "cavity-v1",
+    ] as const)
+      expect(operations.coastBlend(value)).toBe(value);
+    for (const value of [
+      null,
+      "",
+      "CAVITY-V1",
+      " cavity-v1",
+      "cavity-v1 ",
+      "cavity-v1\n",
+      {},
+      1,
+    ])
+      expect(() => operations.coastBlend(value)).toThrow(
+        "Invalid compact coast blend",
+      );
+    const profile = DataManager.getWorldTerrainProfile();
+    expect(operations.macroField(profile, "cavity-v1")).toEqual(
+      operations.macroField(profile),
+    );
+    expect(
+      operations.macroField(COMPACT_WORLD_TERRAIN_PROFILE, "cavity-v1"),
+    ).toBeNull();
+  });
+
+  it("does not forward an appearance-only cavity selection to the actual grass worker setup", async () => {
+    const world = new World();
+    const terrain = world.register("terrain", TerrainSystem) as TerrainSystem;
+    // The real URL/capture/material path is exercised above. Select this
+    // appearance mode before initializing the independent CPU terrain owner.
+    terrain["compactCoastBlend"] = "cavity-v1";
+    terrain["compactSurfaceBlend"] = "height-v1";
+    try {
+      await terrain.init();
+      const setup = terrain["buildGrassWorkerSetup"]();
+      expect(setup).not.toHaveProperty("compactCoastBlend");
+      expect(terrain["getCompactCoastBlend"]()).toBe("cavity-v1");
+      expect(terrain["getCompactMacroMaterial"]()).not.toHaveProperty(
+        "coastalDistribution",
+      );
+      expect(setup.terrainConfig.TERRAIN_PROFILE).toEqual(
+        terrain.getWorldTerrainProfile(),
+      );
+    } finally {
+      world.destroy();
+    }
+  });
+});
+
+describe("explicit stochastic dirt preview URL policy", () => {
+  const fine =
+    "streamRenderProfile=island-fine-meadow-720p60-v1&grassAppearance=fine-meadow-v1";
+  const selected = "dirtProjection=stochastic-v1";
+
+  it("leaves absent selection undefined for every existing route and profile", () => {
+    expect(resolveCompactDirtProjectionCandidate()).toBeUndefined();
+    for (const path of ["/play", "/stream.html"])
+      for (const profile of ["", ...Object.keys(STREAMING_RENDER_PROFILES)])
+        expect(
+          resolveCompactDirtProjectionCandidate(
+            makeWindow(path, `?streamRenderProfile=${profile}`),
+          ),
+        ).toBeUndefined();
+    expect(
+      resolveCompactDirtProjectionCandidate(
+        makeWindow("/stream.html", "?" + fine),
+      ),
+    ).toBeUndefined();
+  });
+
+  it("admits the exact non-embedded fine pair without changing existing rendering or grass selections", () => {
+    for (const [path, prefix] of [
+      ["/stream.html", ""],
+      ["/", "page=stream&"],
+      ["/stream.html", "embedded=false&streamFps=60&"],
+    ]) {
+      const original = makeWindow(
+        path,
+        `?${prefix}${fine}&habitatComposition=haven-understory-v1`,
+      );
+      const candidate = makeWindow(
+        path,
+        `${original.location.search}&${selected}`,
+      );
+      expect(resolveCompactDirtProjectionCandidate(candidate)).toBe(
+        "stochastic-v1",
+      );
+      expect(resolveExplicitStreamingRenderProfile(candidate)).toBe(
+        resolveExplicitStreamingRenderProfile(original),
+      );
+      expect(resolveClientViewportRuntimeProfile(candidate)).toEqual(
+        resolveClientViewportRuntimeProfile(original),
+      );
+      expect(
+        resolveStreamingRenderPreferences(
+          1280,
+          720,
+          resolveExplicitStreamingRenderProfile(candidate),
+        ),
+      ).toEqual(
+        resolveStreamingRenderPreferences(
+          1280,
+          720,
+          resolveExplicitStreamingRenderProfile(original),
+        ),
+      );
+      expect(resolveGrassAppearanceCandidate(candidate)).toBe("fine-meadow-v1");
+      expect(resolveHabitatCompositionCandidate(candidate)).toBe(
+        "haven-understory-v1",
+      );
+      expect(resolveGrassCoverageTrial(candidate)).toBeUndefined();
+      expect(resolveGrassRoadClearance(candidate)).toBeUndefined();
+    }
+  });
+
+  it("rejects empty, coerced, duplicate and unsupported projection selectors", () => {
+    for (const value of [
+      "",
+      "unknown",
+      "STOCHASTIC-V1",
+      "%20stochastic-v1",
+      "stochastic-v1%20",
+      "stochastic-v1%0A",
+      "stochastic-v1&dirtProjection=stochastic-v1",
+      "stochastic-v1&dirtProjection=",
+    ])
+      expect(() =>
+        resolveCompactDirtProjectionCandidate(
+          makeWindow("/stream.html", `?${fine}&dirtProjection=${value}`),
+        ),
+      ).toThrow("dirt projection candidate");
+  });
+
+  it("rejects missing, nonexact, embedded, mismatched and ambiguous fine selections", () => {
+    for (const [path, query] of [
+      ["/play", fine],
+      ["/stream.html", ""],
+      ["/stream.html", "streamRenderProfile=island-fine-meadow-720p60-v1"],
+      ["/stream.html", "grassAppearance=fine-meadow-v1"],
+      [
+        "/stream.html",
+        "streamRenderProfile=island-meadow-720p60-v1&grassAppearance=natural-tuft-v1",
+      ],
+      [
+        "/stream.html",
+        "streamRenderProfile=%20island-fine-meadow-720p60-v1&grassAppearance=fine-meadow-v1",
+      ],
+      [
+        "/stream.html",
+        "streamRenderProfile=island-fine-meadow-720p60-v1%20&grassAppearance=fine-meadow-v1",
+      ],
+      ["/stream.html", fine + "&embedded=true"],
+      ["/stream.html", fine + "&embedded=false&embedded=false"],
+      ["/stream.html", fine + "&grassAppearance=fine-meadow-v1"],
+      [
+        "/stream.html",
+        fine + "&streamRenderProfile=island-fine-meadow-720p60-v1",
+      ],
+      ["/stream.html", fine + "&streamFps=30"],
+      ["/stream.html", fine + "&streamFps=60&streamFps=60"],
+      ["/", "page=stream&page=stream&" + fine],
+    ])
+      expect(() =>
+        resolveCompactDirtProjectionCandidate(
+          makeWindow(path, `?${query}&${selected}`),
+        ),
+      ).toThrow();
+    const embedded = makeWindow("/stream.html", `?${fine}&${selected}`);
+    Object.assign(embedded, { __HYPERIA_EMBEDDED__: true });
+    expect(() => resolveCompactDirtProjectionCandidate(embedded)).toThrow(
+      "non-embedded",
+    );
+  });
+
+  it("captures the selection once and admits sculpt terrain before material construction", () => {
+    const source = readFileSync(
+      new URL("../../systems/shared/world/TerrainSystem.ts", import.meta.url),
+      "utf8",
+    );
+    expect(
+      source.match(/resolveCompactDirtProjectionCandidate\(\)/gu),
+    ).toHaveLength(1);
+    const capture = source.slice(
+      source.indexOf("  private getCompactDirtProjection()"),
+      source.indexOf("  private getCompactGrassColorGrade()"),
+    );
+    expect(capture).toContain("if (this.compactDirtProjection === undefined)");
+    expect(capture).toContain(
+      "selection && !isCompactSculptProfile(this.getWorldTerrainProfile())",
+    );
+    expect(capture).toContain(
+      "this.compactDirtProjection = selection ?? null;",
+    );
+    expect(source).toContain(
+      "compactDirtProjection: this.getCompactDirtProjection(),",
+    );
+    const initialize = source.slice(
+      source.indexOf("  private async initialize():"),
+      source.indexOf("  async start():"),
+    );
+    const captureIndex = initialize.indexOf("this.getCompactDirtProjection();");
+    expect(captureIndex).toBeGreaterThan(0);
+    expect(captureIndex).toBeLessThan(
+      initialize.indexOf("this.initTerrainMaterial();"),
+    );
+  });
+});
+
+describe("explicit stochastic rock preview URL policy", () => {
+  const fine =
+    "streamRenderProfile=island-fine-meadow-720p60-v1&grassAppearance=fine-meadow-v1";
+  const selected = "rockProjection=stochastic-v1";
+
+  it("keeps rock, dirt and height blending independently selectable", () => {
+    for (const rock of [false, true])
+      for (const dirt of [false, true])
+        for (const height of [false, true]) {
+          const selectors = [
+            fine,
+            ...(rock ? [selected] : []),
+            ...(dirt ? ["dirtProjection=stochastic-v1"] : []),
+            ...(height ? ["terrainBlend=height-v1"] : []),
+          ];
+          const win = makeWindow("/stream.html", `?${selectors.join("&")}`);
+          expect(resolveCompactRockProjectionCandidate(win)).toBe(
+            rock ? "stochastic-v1" : undefined,
+          );
+          expect(resolveCompactDirtProjectionCandidate(win)).toBe(
+            dirt ? "stochastic-v1" : undefined,
+          );
+          expect(resolveCompactSurfaceBlendCandidate(win)).toBe(
+            height ? "height-v1" : undefined,
+          );
+        }
+  });
+
+  it("leaves absent selection undefined for every existing route and profile", () => {
+    expect(resolveCompactRockProjectionCandidate()).toBeUndefined();
+    for (const path of ["/play", "/stream.html"])
+      for (const profile of ["", ...Object.keys(STREAMING_RENDER_PROFILES)])
+        expect(
+          resolveCompactRockProjectionCandidate(
+            makeWindow(path, `?streamRenderProfile=${profile}`),
+          ),
+        ).toBeUndefined();
+    expect(
+      resolveCompactRockProjectionCandidate(
+        makeWindow("/stream.html", "?" + fine),
+      ),
+    ).toBeUndefined();
+  });
+
+  it("admits the exact non-embedded fine pair without changing existing rendering or grass selections", () => {
+    for (const [path, prefix] of [
+      ["/stream.html", ""],
+      ["/", "page=stream&"],
+      ["/stream.html", "embedded=false&streamFps=60&"],
+    ]) {
+      const original = makeWindow(
+        path,
+        `?${prefix}${fine}&habitatComposition=haven-understory-v1`,
+      );
+      const candidate = makeWindow(
+        path,
+        `${original.location.search}&${selected}`,
+      );
+      expect(resolveCompactRockProjectionCandidate(candidate)).toBe(
+        "stochastic-v1",
+      );
+      expect(resolveExplicitStreamingRenderProfile(candidate)).toBe(
+        resolveExplicitStreamingRenderProfile(original),
+      );
+      expect(resolveClientViewportRuntimeProfile(candidate)).toEqual(
+        resolveClientViewportRuntimeProfile(original),
+      );
+      expect(
+        resolveStreamingRenderPreferences(
+          1280,
+          720,
+          resolveExplicitStreamingRenderProfile(candidate),
+        ),
+      ).toEqual(
+        resolveStreamingRenderPreferences(
+          1280,
+          720,
+          resolveExplicitStreamingRenderProfile(original),
+        ),
+      );
+      expect(resolveGrassAppearanceCandidate(candidate)).toBe("fine-meadow-v1");
+      expect(resolveHabitatCompositionCandidate(candidate)).toBe(
+        "haven-understory-v1",
+      );
+      expect(resolveGrassCoverageTrial(candidate)).toBeUndefined();
+      expect(resolveGrassRoadClearance(candidate)).toBeUndefined();
+    }
+  });
+
+  it("rejects empty, coerced, duplicate and unsupported projection selectors", () => {
+    for (const value of [
+      "",
+      "unknown",
+      "STOCHASTIC-V1",
+      "%20stochastic-v1",
+      "stochastic-v1%20",
+      "stochastic-v1%0A",
+      "stochastic-v1&rockProjection=stochastic-v1",
+      "stochastic-v1&rockProjection=",
+    ])
+      expect(() =>
+        resolveCompactRockProjectionCandidate(
+          makeWindow("/stream.html", `?${fine}&rockProjection=${value}`),
+        ),
+      ).toThrow("rock projection candidate");
+  });
+
+  it("rejects missing, nonexact, embedded, mismatched and ambiguous fine selections", () => {
+    for (const [path, query] of [
+      ["/play", fine],
+      ["/stream.html", ""],
+      ["/stream.html", "streamRenderProfile=island-fine-meadow-720p60-v1"],
+      ["/stream.html", "grassAppearance=fine-meadow-v1"],
+      [
+        "/stream.html",
+        "streamRenderProfile=island-meadow-720p60-v1&grassAppearance=natural-tuft-v1",
+      ],
+      [
+        "/stream.html",
+        "streamRenderProfile=%20island-fine-meadow-720p60-v1&grassAppearance=fine-meadow-v1",
+      ],
+      [
+        "/stream.html",
+        "streamRenderProfile=island-fine-meadow-720p60-v1%20&grassAppearance=fine-meadow-v1",
+      ],
+      ["/stream.html", fine + "&embedded=true"],
+      ["/stream.html", fine + "&embedded=false&embedded=false"],
+      ["/stream.html", fine + "&grassAppearance=fine-meadow-v1"],
+      [
+        "/stream.html",
+        fine + "&streamRenderProfile=island-fine-meadow-720p60-v1",
+      ],
+      ["/stream.html", fine + "&streamFps=30"],
+      ["/stream.html", fine + "&streamFps=60&streamFps=60"],
+      ["/", "page=stream&page=stream&" + fine],
+    ])
+      expect(() =>
+        resolveCompactRockProjectionCandidate(
+          makeWindow(path, `?${query}&${selected}`),
+        ),
+      ).toThrow();
+    const embedded = makeWindow("/stream.html", `?${fine}&${selected}`);
+    Object.assign(embedded, { __HYPERIA_EMBEDDED__: true });
+    expect(() => resolveCompactRockProjectionCandidate(embedded)).toThrow(
+      "non-embedded",
+    );
+  });
+
+  it("captures the selection once and admits sculpt terrain before material construction", () => {
+    const source = readFileSync(
+      new URL("../../systems/shared/world/TerrainSystem.ts", import.meta.url),
+      "utf8",
+    );
+    expect(
+      source.match(/resolveCompactRockProjectionCandidate\(\)/gu),
+    ).toHaveLength(1);
+    const capture = source.slice(
+      source.indexOf("  private getCompactRockProjection()"),
+      source.indexOf("  private getCompactGrassColorGrade()"),
+    );
+    expect(capture).toContain("if (this.compactRockProjection === undefined)");
+    expect(capture).toContain(
+      "selection && !isCompactSculptProfile(this.getWorldTerrainProfile())",
+    );
+    expect(capture).toContain(
+      "this.compactRockProjection = selection ?? null;",
+    );
+    expect(source).toContain(
+      "compactRockProjection: this.getCompactRockProjection(),",
+    );
+    const initialize = source.slice(
+      source.indexOf("  private async initialize():"),
+      source.indexOf("  async start():"),
+    );
+    const captureIndex = initialize.indexOf("this.getCompactRockProjection();");
+    expect(captureIndex).toBeGreaterThan(0);
+    expect(captureIndex).toBeLessThan(
+      initialize.indexOf("this.initTerrainMaterial();"),
+    );
+  });
+});
+
+describe("explicit per-blade grass road-clearance URL policy", () => {
+  const fine =
+    "streamRenderProfile=island-fine-meadow-720p60-v1&grassAppearance=fine-meadow-v1";
+  const selected = "grassRoadClearance=per-blade-v1";
+
+  it("leaves absence undefined without selecting or altering an existing profile", () => {
+    expect(resolveGrassRoadClearance()).toBeUndefined();
+    for (const path of ["/play", "/stream.html"])
+      for (const profile of ["", ...Object.keys(STREAMING_RENDER_PROFILES)]) {
+        const win = makeWindow(path, `?streamRenderProfile=${profile}`);
+        expect(resolveGrassRoadClearance(win)).toBeUndefined();
+      }
+    expect(
+      resolveGrassRoadClearance(makeWindow("/stream.html", "?" + fine)),
+    ).toBeUndefined();
+  });
+
+  it("admits one exact selector and fine pair, including independent coverage opt-in", () => {
+    for (const [path, prefix] of [
+      ["/stream.html", ""],
+      ["/", "page=stream&"],
+      ["/stream.html", "embedded=false&streamFps=60&"],
+    ]) {
+      const original = makeWindow(path, `?${prefix}${fine}`);
+      const candidate = makeWindow(
+        path,
+        `${original.location.search}&${selected}`,
+      );
+      expect(resolveGrassRoadClearance(candidate)).toBe("per-blade-v1");
+      expect(resolveExplicitStreamingRenderProfile(candidate)).toBe(
+        resolveExplicitStreamingRenderProfile(original),
+      );
+      expect(resolveClientViewportRuntimeProfile(candidate)).toEqual(
+        resolveClientViewportRuntimeProfile(original),
+      );
+      expect(resolveGrassCoverageTrial(candidate)).toBeUndefined();
+      candidate.location.search +=
+        "&grassCoverage=sixty-centimetre-cell-v1&grassCoverageCell=12,11";
+      expect(resolveGrassRoadClearance(candidate)).toBe("per-blade-v1");
+      expect(resolveGrassCoverageTrial(candidate)?.cell).toEqual({
+        schemaVersion: 1,
+        size: 25,
+        indexX: 12,
+        indexZ: 11,
+      });
+    }
+  });
+
+  it("rejects empty, duplicate, coerced and unsupported road-clearance selectors", () => {
+    for (const value of [
+      "",
+      "unknown",
+      "PER-BLADE-V1",
+      "%20per-blade-v1",
+      "per-blade-v1%20",
+      "per-blade-v1%0A",
+      "per-blade-v1&grassRoadClearance=per-blade-v1",
+      "per-blade-v1&grassRoadClearance=",
+    ])
+      expect(() =>
+        resolveGrassRoadClearance(
+          makeWindow("/stream.html", `?${fine}&grassRoadClearance=${value}`),
+        ),
+      ).toThrow("road-clearance selector");
+  });
+
+  it("rejects missing, nonexact, incompatible, embedded and ambiguous fine pairings", () => {
+    for (const [path, query] of [
+      ["/play", fine],
+      ["/stream.html", ""],
+      ["/stream.html", "streamRenderProfile=island-fine-meadow-720p60-v1"],
+      ["/stream.html", "grassAppearance=fine-meadow-v1"],
+      [
+        "/stream.html",
+        "streamRenderProfile=island-meadow-720p60-v1&grassAppearance=natural-tuft-v1",
+      ],
+      [
+        "/stream.html",
+        "streamRenderProfile=%20island-fine-meadow-720p60-v1&grassAppearance=fine-meadow-v1",
+      ],
+      [
+        "/stream.html",
+        "streamRenderProfile=island-fine-meadow-720p60-v1%20&grassAppearance=fine-meadow-v1",
+      ],
+      ["/stream.html", fine + "&embedded=true"],
+      ["/stream.html", fine + "&embedded=false&embedded=false"],
+      ["/stream.html", fine + "&grassAppearance=fine-meadow-v1"],
+      [
+        "/stream.html",
+        fine + "&streamRenderProfile=island-fine-meadow-720p60-v1",
+      ],
+      ["/stream.html", fine + "&streamFps=30"],
+      ["/stream.html", fine + "&streamFps=60&streamFps=60"],
+      ["/", "page=stream&page=stream&" + fine],
+    ])
+      expect(() =>
+        resolveGrassRoadClearance(makeWindow(path, `?${query}&${selected}`)),
+      ).toThrow();
+    const embedded = makeWindow("/stream.html", `?${fine}&${selected}`);
+    Object.assign(embedded, { __HYPERIA_EMBEDDED__: true });
+    expect(() => resolveGrassRoadClearance(embedded)).toThrow("non-embedded");
+  });
+});
+
+describe("explicit single-cell grass coverage URL policy (not native startup proof)", () => {
+  const fine =
+    "streamRenderProfile=island-fine-meadow-720p60-v1&grassAppearance=fine-meadow-v1";
+  const trial =
+    "grassCoverage=sixty-centimetre-cell-v1&grassCoverageCell=12,11";
+
+  it("leaves absent selections undefined without changing any existing profile", () => {
+    expect(resolveGrassCoverageTrial()).toBeUndefined();
+    for (const pathname of ["/play", "/stream.html"]) {
+      expect(resolveGrassCoverageTrial(makeWindow(pathname))).toBeUndefined();
+      for (const profile of Object.keys(STREAMING_RENDER_PROFILES))
+        expect(
+          resolveGrassCoverageTrial(
+            makeWindow(pathname, `?streamRenderProfile=${profile}`),
+          ),
+        ).toBeUndefined();
+    }
+    expect(
+      resolveGrassCoverageTrial(makeWindow("/stream.html", "?" + fine)),
+    ).toBeUndefined();
+  });
+
+  it.each([
+    ["/stream.html", ""],
+    ["/", "page=stream&"],
+    ["/stream.html", "embedded=false&streamFps=60&"],
+  ])("admits the explicit fine pair on %s with %s", (pathname, prefix) => {
+    expect(
+      resolveGrassCoverageTrial(
+        makeWindow(pathname, `?${prefix}${fine}&${trial}`),
+      ),
+    ).toEqual({
+      id: "sixty-centimetre-cell-v1",
+      cell: { schemaVersion: 1, size: 25, indexX: 12, indexZ: 11 },
+    });
+  });
+
+  it.each([
+    [0, 0],
+    [-1, 2],
+    [27, -31],
+    [-4096, 4095],
+    [4095, -4096],
+  ])("uses a generic bounded grid, including %s,%s", (indexX, indexZ) => {
+    expect(
+      resolveGrassCoverageTrial(
+        makeWindow(
+          "/stream.html",
+          `?${fine}&grassCoverage=sixty-centimetre-cell-v1&grassCoverageCell=${indexX},${indexZ}`,
+        ),
+      )?.cell,
+    ).toEqual({ schemaVersion: 1, size: 25, indexX, indexZ });
+  });
+
+  it.each([
+    "grassCoverage=sixty-centimetre-cell-v1",
+    "grassCoverageCell=12,11",
+    "grassCoverage=&grassCoverageCell=12,11",
+    "grassCoverage=unknown&grassCoverageCell=12,11",
+    "grassCoverage=SIXTY-CENTIMETRE-CELL-V1&grassCoverageCell=12,11",
+    "grassCoverage=%20sixty-centimetre-cell-v1&grassCoverageCell=12,11",
+    "grassCoverage=sixty-centimetre-cell-v1%20&grassCoverageCell=12,11",
+    trial + "&grassCoverage=sixty-centimetre-cell-v1",
+    trial + "&grassCoverage=unknown",
+    trial + "&grassCoverageCell=12,11",
+    trial + "&grassCoverageCell=13,11",
+    trial + "&grassCoverageCell=",
+  ])(
+    "rejects partial, duplicate or unsupported coverage selection: %s",
+    (query) => {
+      expect(() =>
+        resolveGrassCoverageTrial(
+          makeWindow("/stream.html", `?${fine}&${query}`),
+        ),
+      ).toThrow();
+    },
+  );
+
+  it.each([
+    "",
+    "12",
+    "12,",
+    ",11",
+    "12,11,0",
+    "12_11",
+    "12;11",
+    "12.0,11",
+    "12,11.5",
+    "1e1,11",
+    "0xc,11",
+    "+12,11",
+    "%2B12,11",
+    "012,11",
+    "-0,11",
+    "12,-0",
+    "%2012,11",
+    "12,%2011",
+    "12,11%20",
+    "12,11%0A",
+    "NaN,11",
+    "12,Infinity",
+    "4096,11",
+    "12,4096",
+    "-4097,11",
+    "12,-4097",
+    "9007199254740992,11",
+    "12,-9007199254740992",
+  ])("rejects noncanonical or out-of-bounds cells: %s", (cell) => {
+    expect(() =>
+      resolveGrassCoverageTrial(
+        makeWindow(
+          "/stream.html",
+          `?${fine}&grassCoverage=sixty-centimetre-cell-v1&grassCoverageCell=${cell}`,
+        ),
+      ),
+    ).toThrow();
+  });
+
+  it("rejects the obsolete half-metre trial instead of relabeling its density", () => {
+    expect(() =>
+      resolveGrassCoverageTrial(
+        makeWindow(
+          "/stream.html",
+          `?${fine}&grassCoverage=half-metre-cell-v1&grassCoverageCell=12,11`,
+        ),
+      ),
+    ).toThrow("unsupported placement coverage");
+  });
+
+  it.each([
+    ["/play", fine],
+    ["/stream.html", ""],
+    ["/stream.html", "streamRenderProfile=island-fine-meadow-720p60-v1"],
+    ["/stream.html", "grassAppearance=fine-meadow-v1"],
+    [
+      "/stream.html",
+      "streamRenderProfile=island-meadow-720p60-v1&grassAppearance=natural-tuft-v1",
+    ],
+    [
+      "/stream.html",
+      "streamRenderProfile=island-meadow-720p60-v1&grassAppearance=fine-meadow-v1",
+    ],
+    [
+      "/stream.html",
+      "streamRenderProfile=island-fine-meadow-720p60-v1&grassAppearance=natural-tuft-v1",
+    ],
+    ["/stream.html", fine + "&embedded=true"],
+    ["/stream.html", fine + "&embedded=false&embedded=false"],
+    ["/stream.html", fine + "&grassAppearance=fine-meadow-v1"],
+    [
+      "/stream.html",
+      fine + "&streamRenderProfile=island-fine-meadow-720p60-v1",
+    ],
+    ["/stream.html", fine + "&streamFps=30"],
+    ["/stream.html", fine + "&streamFps=60&streamFps=60"],
+    ["/", "page=stream&page=stream&" + fine],
+  ])("rejects incompatible or ambiguous fine routes: %s?%s", (path, query) => {
+    expect(() =>
+      resolveGrassCoverageTrial(makeWindow(path, `?${query}&${trial}`)),
+    ).toThrow();
+  });
+
+  it("returns a detached, deeply frozen selection instead of a live URL binding", () => {
+    const input = makeWindow("/stream.html", `?${fine}&${trial}`);
+    const selection = resolveGrassCoverageTrial(input)!;
+    const repeated = resolveGrassCoverageTrial(input)!;
+    expect(repeated).toEqual(selection);
+    expect(repeated).not.toBe(selection);
+    expect(repeated.cell).not.toBe(selection.cell);
+    expect(Object.isFrozen(selection)).toBe(true);
+    expect(Object.isFrozen(selection.cell)).toBe(true);
+    expect(Reflect.set(selection, "id", "unknown")).toBe(false);
+    expect(Reflect.set(selection.cell, "indexX", 13)).toBe(false);
+    input.location.search = `?${fine}&grassCoverage=sixty-centimetre-cell-v1&grassCoverageCell=13,11`;
+    expect(selection.cell.indexX).toBe(12);
+    expect(resolveGrassCoverageTrial(input)?.cell.indexX).toBe(13);
+  });
+
+  it("preserves render settings and non-grass viewport policies", () => {
+    const baseline = makeWindow(
+      "/stream.html",
+      `?${fine}&streamWorld=preparation-v1`,
+    );
+    const candidate = makeWindow(
+      "/stream.html",
+      `${baseline.location.search}&${trial}`,
+    );
+    expect(resolveGrassCoverageTrial(candidate)).toBeDefined();
+    expect(resolveGrassAppearanceCandidate(candidate)).toBe("fine-meadow-v1");
+    expect(resolveExplicitStreamingRenderProfile(candidate)).toBe(
+      resolveExplicitStreamingRenderProfile(baseline),
+    );
+    expect(resolveExplicitStreamingWorldProfile(candidate)).toEqual(
+      resolveExplicitStreamingWorldProfile(baseline),
+    );
+    expect(resolveClientViewportRuntimeProfile(candidate)).toEqual(
+      resolveClientViewportRuntimeProfile(baseline),
+    );
+    expect(
+      resolveStreamingRenderPreferences(
+        1280,
+        720,
+        resolveExplicitStreamingRenderProfile(candidate),
+      ),
+    ).toEqual(
+      resolveStreamingRenderPreferences(
+        1280,
+        720,
+        resolveExplicitStreamingRenderProfile(baseline),
+      ),
+    );
+  });
+
+  it("keeps the terrain startup source capture-once and forwards only an explicit fine trial", () => {
+    // Source ownership contract only. Real URL startup/manager selection still
+    // requires the separate native WebGPU run, not a fabricated browser world.
+    const source = readFileSync(
+      new URL("../../systems/shared/world/TerrainSystem.ts", import.meta.url),
+      "utf8",
+    );
+    const capture = source.slice(
+      source.indexOf("  private getCompactGrassColorGrade()"),
+      source.indexOf("  private getCompactHabitatMaterial("),
+    );
+    expect(source.match(/resolveGrassCoverageTrial\(\)/gu)).toHaveLength(1);
+    expect(capture).toMatch(
+      /if \(this\.compactGrassColorGrade === undefined\) \{[\s\S]*const coverageTrial = resolveGrassCoverageTrial\(\);/u,
+    );
+    expect(capture).toMatch(
+      /this\.grassVisualSelection = Object\.freeze\(\{\s*appearance,\s*profile,\s*coverageTrial,\s*\.\.\.\(roadClearance \? \{ roadClearance \} : \{\}\),\s*\.\.\.\(lighting \? \{ lighting \} : \{\}\),?\s*\}\)/u,
+    );
+    expect(source).toMatch(
+      /grassSelection\.profile\?\.grassProfile === "fine-meadow-v1"\s*\? grassSelection\.coverageTrial \|\| grassSelection\.roadClearance\s*\? \{\s*\.\.\.FINE_MEADOW_GRASS_VISUAL_PROFILE,\s*\.\.\.\(grassSelection\.coverageTrial\s*\? \{ coverageTrial: grassSelection\.coverageTrial \}\s*: \{\}\),\s*\.\.\.\(grassSelection\.roadClearance\s*\? \{ roadClearance: grassSelection\.roadClearance \}\s*: \{\}\),?\s*\}\s*: FINE_MEADOW_GRASS_VISUAL_PROFILE/u,
+    );
+    expect(source.match(/resolveGrassRoadClearance\(\)/gu)).toHaveLength(1);
+    expect(capture).toContain(
+      "const roadClearance = resolveGrassRoadClearance();",
+    );
+    const initialize = source.slice(
+      source.indexOf("  private async initialize():"),
+      source.indexOf("  async start():"),
+    );
+    expect(
+      initialize.indexOf("this.getCompactGrassColorGrade();"),
+    ).toBeLessThan(initialize.indexOf("this.initTerrainMaterial();"));
+  });
+});
 
 describe("explicit habitat composition selection", () => {
   const meadow =

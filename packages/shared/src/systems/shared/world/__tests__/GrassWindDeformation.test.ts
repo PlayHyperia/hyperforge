@@ -21,7 +21,10 @@ import {
   type GrassWorkerSetup,
   type GrassVisualProfile,
 } from "../GrassVisualManager";
-import { SCULPTED_COMPACT_WORLD_TERRAIN_PROFILE } from "../WorldTerrainProfile";
+import {
+  SCULPTED_COMPACT_WORLD_TERRAIN_PROFILE,
+  validateWorldTerrainProfile,
+} from "../WorldTerrainProfile";
 import {
   createGroundedGrassMaterial,
   GRASS_ROOT_STORAGE_ATTRIBUTE,
@@ -32,10 +35,32 @@ function createOwner(
   candidate: boolean | "fine" = true,
   withWorkerSetup = true,
   profile?: GrassVisualProfile,
+  gradedBank = false,
 ) {
-  const terrain = SCULPTED_COMPACT_WORLD_TERRAIN_PROFILE;
+  const terrain = gradedBank
+    ? validateWorldTerrainProfile({
+        ...SCULPTED_COMPACT_WORLD_TERRAIN_PROFILE,
+        southernMeadow: {
+          schemaVersion: 1,
+          minX: 304,
+          maxX: 500,
+          minZ: 345,
+          maxZ: 535,
+          featherX: 24,
+          featherZ: 24,
+          northHeight: 26.8,
+          southHeight: 25.3,
+          crossFall: 1,
+          rollAmplitude: 0.65,
+          rollWavelength: 100,
+        },
+      })
+    : SCULPTED_COMPACT_WORLD_TERRAIN_PROFILE;
   const config = createTerrainWorkerConfig(terrain, 16);
   const setup: GrassWorkerSetup = {
+    ...(gradedBank
+      ? { compactGrassColorGrade: "fine-meadow-green-v1" as const }
+      : {}),
     terrainConfig: config,
     seed: terrain.seed,
     biomeCenters: [],
@@ -80,10 +105,53 @@ function createOwner(
 }
 
 function deformationFixture(
-  variant: "natural" | "fine" | "isolated-fine-near4",
+  variant:
+    | "natural"
+    | "fine"
+    | "isolated-fine-near4"
+    | "bank-inside"
+    | "bank-feather"
+    | "bank-outside"
+    | "bank-wear-apron"
+    | "bank-wear-clerk"
+    | "bank-wear-shopkeeper"
+    | "bank-wear-feather",
 ) {
   const isFine = variant !== "natural";
-  const owner = createOwner(isFine ? "fine" : true);
+  // Independent authored expectations, not a call back into the CPU/GPU
+  // implementation. The last point lies beyond the shopkeeper endpoint:
+  // distance²=.75²+.5², x-locality=smooth(7/8), z-locality=smooth(3/4).
+  const smoothUnit = (t: number) => t * t * (3 - 2 * t);
+  const featherLocality = smoothUnit(7 / 8) * smoothUnit(3 / 4);
+  const featherWear =
+    0.55 * (1 - smoothUnit((0.8125 - 0.55 ** 2) / (1.2 ** 2 - 0.55 ** 2)));
+  const locations = {
+    // Keep the original constant-bank arithmetic at explicitly unworn points.
+    "bank-inside": [348, 314, 0.65],
+    "bank-feather": [341, 314, 0.825],
+    "bank-outside": [339, 314, 1],
+    // Apron/clerk overlap uses MAX(.8,.62), not additive wear.
+    "bank-wear-apron": [350, 319.5, 0.41],
+    "bank-wear-clerk": [352, 320.25, 0.464],
+    "bank-wear-shopkeeper": [344.25, 320.5, 0.485],
+    "bank-wear-feather": [
+      341.75,
+      322.5,
+      1 +
+        featherLocality * (0.65 - 1) +
+        featherLocality * featherWear * (0.35 - 0.65),
+    ],
+  } as const;
+  const bankLocation =
+    variant in locations
+      ? locations[variant as keyof typeof locations]
+      : undefined;
+  const owner = createOwner(
+    isFine ? "fine" : true,
+    true,
+    undefined,
+    !!bankLocation,
+  );
   const appearance = isFine ? FINE_MEADOW_APPEARANCE : NATURAL_TUFT_APPEARANCE;
   const geometryLayout = !isFine
     ? undefined
@@ -109,6 +177,7 @@ function deformationFixture(
     geometryLayout,
     geometries,
     isFine,
+    bankLocation,
     close() {
       if (variant === "isolated-fine-near4")
         geometries.forEach((geometry) => geometry.dispose());
@@ -117,7 +186,13 @@ function deformationFixture(
   };
 }
 
-function graph(root: Node): Set<Node> {
+function requireNode(value: unknown): Node {
+  if (!(value instanceof THREE.Node))
+    throw new Error("Expected an actual Three.js shader node");
+  return value;
+}
+
+function graph(root: unknown): Set<Node> {
   const found = new Set<Node>();
   const visit = (node: Node) => {
     if (found.has(node)) return;
@@ -125,7 +200,7 @@ function graph(root: Node): Set<Node> {
     found.add(node);
     for (const child of node.getChildren()) visit(child);
   };
-  visit(root);
+  visit(requireNode(root));
   return found;
 }
 
@@ -158,7 +233,7 @@ interface Inputs {
 
 /** Evaluates the actual constructed TSL arithmetic, never a replacement shader
  * or renderer. Unknown nodes fail closed; this is not native GPU evidence. */
-function evaluate(root: Node, inputs: Inputs): number[] {
+function evaluate(root: unknown, inputs: Inputs): number[] {
   const cache = new Map<Node, number[]>();
   const visit = (node: Node): number[] => {
     const cached = cache.get(node);
@@ -279,7 +354,7 @@ function evaluate(root: Node, inputs: Inputs): number[] {
     cache.set(node, result);
     return result;
   };
-  return visit(root);
+  return visit(requireNode(root));
 }
 
 function vector(values: number[]) {
@@ -397,9 +472,11 @@ describe("fine meadow thin-leaf lighting (actual CPU nodes and policy algebra)",
       expect(Reflect.get(material.thicknessColorNode!, "name")).toBe(
         "fineGrassThinLeafColor",
       );
-      expect(graph(material.thicknessColorNode!).has(material.colorNode!)).toBe(
-        true,
-      );
+      expect(
+        graph(material.thicknessColorNode!).has(
+          requireNode(material.colorNode),
+        ),
+      ).toBe(true);
       const inputs = inputFor(owner["lodGeometries"][0], 0);
       for (const [key, expected] of [
         ["thicknessAttenuationNode", 0.2],
@@ -454,7 +531,7 @@ describe("fine meadow thin-leaf lighting (actual CPU nodes and policy algebra)",
     }
   });
 
-  it("preserves non-grazing blade RGB and masks only thin-leaf color at roots, half-mask and tips", () => {
+  it("preserves the current canopy blade RGB and masks only thin-leaf color at roots, half-mask and tips", () => {
     const owner = createOwner("fine");
     try {
       const material = materialFor(owner);
@@ -486,7 +563,7 @@ describe("fine meadow thin-leaf lighting (actual CPU nodes and policy algebra)",
                 );
                 const transition = smooth(0, 1, height);
                 const expectedAlbedo = ground.map((value, channel) => {
-                  const root = value * 0.9;
+                  const root = value * 0.98;
                   const tip = (value + (tint[channel] - value) * tint[3]) * 1.2;
                   return Math.min(1, root + (tip - root) * transition);
                 });
@@ -531,7 +608,7 @@ describe("fine meadow thin-leaf lighting (actual CPU nodes and policy algebra)",
                       13,
                     );
                 if (height === 0)
-                  expect(albedo).toEqual(ground.map((value) => value * 0.9));
+                  expect(albedo).toEqual(ground.map((value) => value * 0.98));
                 // Retain the original fine upper clamp without a view gain.
                 if (height === 1 && tint[3] === 1)
                   expect(albedo).toEqual([1, 1, 1]);
@@ -625,8 +702,10 @@ describe("fine meadow root occlusion (actual CPU node arithmetic)", () => {
     const owner = createOwner("fine");
     try {
       const material = owner["material"];
-      expect(FINE_MEADOW_APPEARANCE.ROOT_OCCLUSION).toBe(0.55);
-      expect(FINE_MEADOW_APPEARANCE.ROOT_OCCLUSION_END).toBe(0.6);
+      // Current canopy recipe reduces only the lower leaf's indirect-light
+      // occlusion. This is a live graph assertion, not an archived render hash.
+      expect(FINE_MEADOW_APPEARANCE.ROOT_OCCLUSION).toBe(0.78);
+      expect(FINE_MEADOW_APPEARANCE.ROOT_OCCLUSION_END).toBe(0.35);
       expect(material.aoNode).toBeInstanceOf(THREE.Node);
       const ao = material.aoNode!;
       expect(ao.type).toBe("VarNode");
@@ -650,10 +729,10 @@ describe("fine meadow root occlusion (actual CPU node arithmetic)", () => {
       for (const front of [false, true])
         for (const horizontal of [0, 0.5, 1])
           for (const [height, expected] of [
-            [-1, 0.55],
-            [0, 0.55],
-            [0.3, 0.775],
-            [0.6, 1],
+            [-1, 0.78],
+            [0, 0.78],
+            [0.175, 0.89],
+            [0.35, 1],
             [1, 1],
             [2, 1],
           ]) {
@@ -662,14 +741,14 @@ describe("fine meadow root occlusion (actual CPU node arithmetic)", () => {
             inputs.attributes.uv = [horizontal, height];
             expect(evaluate(ao, inputs)[0]).toBeCloseTo(expected, 14);
           }
-      let previous = 0.55;
+      let previous = 0.78;
       for (let step = 0; step <= 100; step++) {
         const inputs = inputFor(owner["lodGeometries"][0], 0);
         const height = step / 100;
         inputs.attributes.uv = [0.5, height];
         const actual = evaluate(ao, inputs)[0];
-        const t = Math.min(1, Math.max(0, height / 0.6));
-        const expected = 0.55 + 0.45 * t * t * (3 - 2 * t);
+        const t = Math.min(1, Math.max(0, height / 0.35));
+        const expected = 0.78 + 0.22 * t * t * (3 - 2 * t);
         expect(actual).toBeCloseTo(expected, 14);
         expect(actual).toBeGreaterThanOrEqual(previous);
         expect(actual).toBeLessThanOrEqual(1);
@@ -761,8 +840,8 @@ describe("fine meadow root occlusion (actual CPU node arithmetic)", () => {
           ).toBe(roots);
           expect(source.hasAttribute(GRASS_ROOT_STORAGE_ATTRIBUTE)).toBe(false);
           const inputs = inputFor(source, 0);
-          inputs.attributes.uv = [0.5, 0.3];
-          expect(evaluate(material.aoNode!, inputs)[0]).toBeCloseTo(0.775, 14);
+          inputs.attributes.uv = [0.5, 0.175];
+          expect(evaluate(material.aoNode!, inputs)[0]).toBeCloseTo(0.89, 14);
         } finally {
           material.dispose();
           geometry.dispose();
@@ -1034,12 +1113,32 @@ describe("natural tuft actual shader deformation (CPU node arithmetic only)", ()
     }
   });
 
-  it.each(["natural", "fine", "isolated-fine-near4"] as const)(
+  it.each([
+    "natural",
+    "fine",
+    "isolated-fine-near4",
+    "bank-inside",
+    "bank-feather",
+    "bank-outside",
+    "bank-wear-apron",
+    "bank-wear-clerk",
+    "bank-wear-shopkeeper",
+    "bank-wear-feather",
+  ] as const)(
     "matches %s deformed smooth normals to independent tangent crosses through wind, fade, yaw and slope",
     (variant) => {
       const fixture = deformationFixture(variant);
-      const { owner, appearance, geometryLayout, geometries, isFine } = fixture;
+      const {
+        owner,
+        appearance,
+        geometryLayout,
+        geometries,
+        isFine,
+        bankLocation,
+      } = fixture;
+      const bankHeight = bankLocation?.[2] ?? 1;
       let cases = 0;
+      let finiteDifferenceCases = 0;
       let maximumError = 0;
       try {
         const camera = new THREE.PerspectiveCamera(52, 16 / 9, 0.2, 1000);
@@ -1086,6 +1185,14 @@ describe("natural tuft actual shader deformation (CPU node arithmetic only)", ()
                   for (const fadeDistance of [0, 126, 140])
                     for (const seconds of [0, 3.7]) {
                       const inputs = inputFor(geometry, index);
+                      if (bankLocation) {
+                        inputs.model.identity();
+                        inputs.attributes.instanceOffset = [
+                          bankLocation[0],
+                          28,
+                          bankLocation[1],
+                        ];
+                      }
                       inputs.attributes.instanceGroundNormal = ground.toArray();
                       inputs.attributes.instanceRotScaleHash = [
                         0.4 + lod + seconds,
@@ -1115,10 +1222,15 @@ describe("natural tuft actual shader deformation (CPU node arithmetic only)", ()
                         .clone()
                         .multiplyScalar(scale)
                         .applyQuaternion(rotation(inputs));
+                      // Independent selected middle-control offset; historical
+                      // natural grass keeps its exactly upright root tangent.
+                      const controlArc = isFine ? 0.35 : 0;
+                      const derivativeArc =
+                        2 * (controlArc + (1 - 2 * controlArc) * t);
                       const tangentHeight = new THREE.Vector3(
-                        2 * curve.x * t,
-                        derivativeY * fade,
-                        2 * curve.z * t,
+                        curve.x * derivativeArc,
+                        derivativeY * fade * bankHeight,
+                        curve.z * derivativeArc,
                       )
                         .multiplyScalar(scale)
                         .applyQuaternion(rotation(inputs))
@@ -1126,11 +1238,12 @@ describe("natural tuft actual shader deformation (CPU node arithmetic only)", ()
                           windAmplitude(
                             inputs,
                             appearance.BLADE_HEIGHT_MAX,
-                          ).multiplyScalar(1.8 * Math.pow(t, 0.8)),
+                          ).multiplyScalar(bankHeight * 1.8 * Math.pow(t, 0.8)),
                         );
                       const cross = tangentWidth.cross(tangentHeight);
+                      const tangentCrossLengthSq = cross.lengthSq();
                       const smooth =
-                        cross.lengthSq() < 1e-20
+                        tangentCrossLengthSq < 1e-20
                           ? ground.clone()
                           : cross.normalize();
                       const expected = ground
@@ -1152,8 +1265,74 @@ describe("natural tuft actual shader deformation (CPU node arithmetic only)", ()
                       );
                       expect(actual.length()).toBeCloseTo(1, 12);
                       expect(actual.distanceTo(expected)).toBeLessThan(2e-6); // source Float32 position/normal rounding
+                      if (
+                        bankLocation &&
+                        t > 0 &&
+                        tangentCrossLengthSq > 1e-10
+                      ) {
+                        // Numerically differentiate the actual position graph,
+                        // independent of the cofactor graph and analytic wind
+                        // derivative. Hold the clump-locality field constant:
+                        // it is a root-owned property, not a per-vertex field.
+                        const epsilon = 1e-5;
+                        const point = (parameter: number, across: number) => {
+                          const arc =
+                            2 * controlArc * parameter * (1 - parameter) +
+                            parameter * parameter;
+                          const source = center
+                            .clone()
+                            .add(
+                              new THREE.Vector3(
+                                curve.x * arc,
+                                height *
+                                  (2 *
+                                    appearance.BLADE_CONTROL_HEIGHT *
+                                    (1 - parameter) *
+                                    parameter +
+                                    appearance.BLADE_TIP_HEIGHT *
+                                      parameter *
+                                      parameter),
+                                curve.z * arc,
+                              ),
+                            )
+                            .addScaledVector(width, across);
+                          return vector(
+                            evaluate(owner["material"].positionNode!, {
+                              ...inputs,
+                              attributes: {
+                                ...inputs.attributes,
+                                position: source.toArray(),
+                                uv: [0.5, parameter],
+                              },
+                            }),
+                          );
+                        };
+                        const derivativeAlong = point(t + epsilon, 0)
+                          .sub(point(t - epsilon, 0))
+                          .multiplyScalar(0.5 / epsilon);
+                        const derivativeAcross = point(t, epsilon)
+                          .sub(point(t, -epsilon))
+                          .multiplyScalar(0.5 / epsilon);
+                        const numericalBlade = derivativeAcross
+                          .cross(derivativeAlong)
+                          .normalize();
+                        const numericalNormal = ground
+                          .clone()
+                          .lerp(
+                            numericalBlade.multiplyScalar(
+                              inputs.front ? 1 : -1,
+                            ),
+                            appearance.BLADE_NORMAL_WEIGHT,
+                          )
+                          .normalize()
+                          .transformDirection(inputs.view);
+                        expect(actual.distanceTo(numericalNormal)).toBeLessThan(
+                          3e-6,
+                        );
+                        finiteDifferenceCases++;
+                      }
                       const position = vector(inputs.attributes.position);
-                      position.y *= fade;
+                      position.y *= fade * bankHeight;
                       position
                         .multiplyScalar(scale)
                         .applyQuaternion(rotation(inputs))
@@ -1161,7 +1340,7 @@ describe("natural tuft actual shader deformation (CPU node arithmetic only)", ()
                           windAmplitude(
                             inputs,
                             appearance.BLADE_HEIGHT_MAX,
-                          ).multiplyScalar(Math.pow(t, 1.8)),
+                          ).multiplyScalar(bankHeight * Math.pow(t, 1.8)),
                         )
                         .add(vector(inputs.attributes.instanceOffset));
                       expect(
@@ -1177,17 +1356,31 @@ describe("natural tuft actual shader deformation (CPU node arithmetic only)", ()
           variant === "isolated-fine-near4" ? 1836 : isFine ? 1620 : 972,
         );
         expect(maximumError).toBeLessThan(2e-6);
+        if (bankLocation) expect(finiteDifferenceCases).toBeGreaterThan(500);
       } finally {
         fixture.close();
       }
     },
   );
 
-  it.each(["natural", "fine", "isolated-fine-near4"] as const)(
+  it.each([
+    "natural",
+    "fine",
+    "isolated-fine-near4",
+    "bank-inside",
+    "bank-feather",
+    "bank-outside",
+    "bank-wear-apron",
+    "bank-wear-clerk",
+    "bank-wear-shopkeeper",
+    "bank-wear-feather",
+  ] as const)(
     "keeps both %s roots anchored over time and all vertex wind inside existing swept bounds",
     (variant) => {
       const fixture = deformationFixture(variant);
-      const { owner, appearance, geometryLayout, geometries } = fixture;
+      const { owner, appearance, geometryLayout, geometries, bankLocation } =
+        fixture;
+      const bankHeight = bankLocation?.[2] ?? 1;
       try {
         for (const [lod, geometry] of geometries.entries()) {
           const vertices = getGrassBladeLayout(
@@ -1200,6 +1393,14 @@ describe("natural tuft actual shader deformation (CPU node arithmetic only)", ()
             index++
           ) {
             const inputs = inputFor(geometry, index);
+            if (bankLocation) {
+              inputs.model.identity();
+              inputs.attributes.instanceOffset = [
+                bankLocation[0],
+                28,
+                bankLocation[1],
+              ];
+            }
             inputs.attributes.instanceGroundNormal = new THREE.Vector3(
               0.3,
               0.8,
@@ -1208,7 +1409,9 @@ describe("natural tuft actual shader deformation (CPU node arithmetic only)", ()
               .normalize()
               .toArray();
             owner["playerPosUniform"]!.value.copy(worldBase(inputs));
-            const base = vector(inputs.attributes.position)
+            const base = vector(inputs.attributes.position);
+            base.y *= bankHeight;
+            base
               .multiplyScalar(inputs.attributes.instanceRotScaleHash[1])
               .applyQuaternion(rotation(inputs))
               .add(vector(inputs.attributes.instanceOffset));
@@ -1221,6 +1424,7 @@ describe("natural tuft actual shader deformation (CPU node arithmetic only)", ()
               const cap =
                 GRASS_CONFIG.WIND_STRENGTH *
                 appearance.BLADE_HEIGHT_MAX *
+                bankHeight *
                 Math.pow(t, 1.8);
               expect(Math.abs(delta.x)).toBeLessThanOrEqual(cap + 1e-13);
               expect(Math.abs(delta.z)).toBeLessThanOrEqual(cap * 0.55 + 1e-13);

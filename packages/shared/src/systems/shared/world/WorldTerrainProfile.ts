@@ -17,6 +17,14 @@ import {
   type CompactHavenShoulder,
 } from "./CompactHavenShoulder";
 import {
+  createCompactCoastalApron,
+  type CompactCoastalApron,
+} from "./CompactCoastalApron";
+import {
+  createCompactSouthernMeadow,
+  type CompactSouthernMeadow,
+} from "./CompactIslandLandform";
+import {
   BASE_OFFSET,
   BEACH_PROFILE_POWER,
   FEATURE_SCALE,
@@ -31,6 +39,8 @@ import {
 
 type NumericFields<T> = { readonly [K in keyof T]: number };
 const havenShoulderAdmission = createCompactHavenShoulder();
+const coastalApronAdmission = createCompactCoastalApron();
+const southernMeadowAdmission = createCompactSouthernMeadow();
 
 /** Metre offsets from the island centre at a 165 m authoring radius. */
 export const COMPACT_LANDFORM_PARAMETERS = Object.freeze({
@@ -136,7 +146,36 @@ export type WorldTerrainProfile = Readonly<{
   ridgeBreakup?: NumericFields<typeof COMPACT_RIDGE_BREAKUP_PARAMETERS>;
   /** Explicit bounded authored modifier; omission preserves the v5 base exactly. */
   havenShoulder?: CompactHavenShoulder;
+  /** Local shared bay-factor replacement; omitted profiles retain their exact coast. */
+  coastalApron?: CompactCoastalApron;
+  /** Broad inland low meadow; omission preserves previous numerical heights. */
+  southernMeadow?: CompactSouthernMeadow;
 }>;
+
+/** Existing rotated inlet refinement AABB, shared with emitted profile admission. */
+export function getCompactCoastalApronSupport(
+  island: WorldTerrainProfile["island"],
+  landform: NonNullable<WorldTerrainProfile["landform"]>,
+): WorldTerrainProfile["bounds"] {
+  const scale = island.radius / 165;
+  const c = Math.cos(landform.inletBearing),
+    s = Math.sin(landform.inletBearing);
+  const corners = [
+    landform.inletTipDistance,
+    165 * (1 + island.maxCoastVariation),
+  ].flatMap((along) =>
+    [-landform.inletHalfWidth, landform.inletHalfWidth].map((across) => ({
+      x: island.centerX + (along * c - across * s) * scale,
+      z: island.centerZ + (along * s + across * c) * scale,
+    })),
+  );
+  return {
+    minX: Math.min(...corners.map((p) => p.x)),
+    maxX: Math.max(...corners.map((p) => p.x)),
+    minZ: Math.min(...corners.map((p) => p.z)),
+    maxZ: Math.max(...corners.map((p) => p.z)),
+  };
+}
 
 /** Historical numeric regression fixture only, never a runtime selection.
  * TerrainSystem's nominal envelope is ±(100 tiles × 100 m)/2; centered chunks
@@ -346,6 +385,14 @@ export function validateWorldTerrainProfile(
     input !== null &&
     typeof input === "object" &&
     Object.prototype.hasOwnProperty.call(input, "havenShoulder");
+  const hasCoastalApron =
+    input !== null &&
+    typeof input === "object" &&
+    Object.prototype.hasOwnProperty.call(input, "coastalApron");
+  const hasSouthernMeadow =
+    input !== null &&
+    typeof input === "object" &&
+    Object.prototype.hasOwnProperty.call(input, "southernMeadow");
   const data = record(
     input,
     v5
@@ -356,6 +403,8 @@ export function validateWorldTerrainProfile(
           "terrace",
           "ridgeBreakup",
           ...(hasHavenShoulder ? ["havenShoulder"] : []),
+          ...(hasCoastalApron ? ["coastalApron"] : []),
+          ...(hasSouthernMeadow ? ["southernMeadow"] : []),
         ]
       : v4
         ? [...Object.keys(base), "landform", "bay", "terrace"]
@@ -584,6 +633,33 @@ export function validateWorldTerrainProfile(
     shoreline.UNDERWATER_DEPTH_MULTIPLIER <= 0
   )
     fail("shoreline ranges");
+  const coastalApron = hasCoastalApron
+    ? coastalApronAdmission.validate(data.coastalApron)
+    : undefined;
+  if (coastalApron) {
+    if (
+      !landform ||
+      coastalApron.floorHeight !== water.oceanFloorHeight ||
+      coastalApron.referencePlateau !== height.baseOffset ||
+      coastalApron.referencePlateau <= water.threshold
+    )
+      fail("coastal apron normalization");
+    if (
+      coastalApron.headShoulder &&
+      coastalApron.headShoulder.end[2] < water.threshold + shoreline.LAND_BAND
+    )
+      fail("coastal head dry floor");
+    coastalApronAdmission.validateSupport(
+      coastalApron,
+      bounds,
+      shoreline.SLOPE_SAMPLE_DISTANCE,
+    );
+    coastalApronAdmission.validateSupport(
+      coastalApron,
+      getCompactCoastalApronSupport(island, landform),
+      shoreline.SLOPE_SAMPLE_DISTANCE,
+    );
+  }
   const profile: WorldTerrainProfile = Object.freeze({
     schemaVersion: 1,
     algorithm: data.algorithm,
@@ -602,7 +678,15 @@ export function validateWorldTerrainProfile(
     ...(terrace ? { terrace } : {}),
     ...(ridgeBreakup ? { ridgeBreakup } : {}),
     ...(havenShoulder ? { havenShoulder } : {}),
+    ...(coastalApron ? { coastalApron } : {}),
+    ...(hasSouthernMeadow
+      ? {
+          southernMeadow: southernMeadowAdmission.validate(data.southernMeadow),
+        }
+      : {}),
   });
+  if (profile.southernMeadow)
+    southernMeadowAdmission.validateSupport(profile.southernMeadow, profile);
   const reservedSculptAlgorithm = {
     "compact-duel-island-v2": "compact-island-sculpt-v1",
     "compact-duel-island-v3": "compact-island-sculpt-v2",

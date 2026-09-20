@@ -130,7 +130,10 @@ describe("actual compact TerrainSystem biome/shore/worker integration", () => {
       blendRadius: 0,
     };
     terrain.registerFlatZone(zone);
-    expect(terrain.getFlatZoneAt(x, z)).toBe(zone);
+    // Registration and public queries now detach height-bearing records so
+    // caller mutation cannot silently bypass canonical-ground leases.
+    expect(terrain.getFlatZoneAt(x, z)).toEqual(zone);
+    expect(terrain.getFlatZoneAt(x, z)).not.toBe(zone);
     expect(terrain.getFlatZoneAt(x + 0.11, z)).toBeNull();
     expect(terrain.getFlatZoneAt(x, z + 0.11)).toBeNull();
     terrain.unregisterFlatZone(zone.id);

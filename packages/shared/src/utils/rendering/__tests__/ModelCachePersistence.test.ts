@@ -5,7 +5,10 @@ import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
 import { MeshoptDecoder } from "three/examples/jsm/libs/meshopt_decoder.module.js";
-import THREE, { MeshStandardNodeMaterial } from "../../../extras/three/three";
+import THREE, {
+  MeshPhysicalNodeMaterial,
+  MeshStandardNodeMaterial,
+} from "../../../extras/three/three";
 import { World } from "../../../core/World";
 import { ClientLoader } from "../../../systems/client/ClientLoader";
 import { modelCache } from "../ModelCache";
@@ -17,12 +20,18 @@ import {
 } from "../ProcessedModelCodec";
 
 type AuthoredPbr = { metallicFactor?: number; roughnessFactor?: number };
+type AuthoredPhysical = {
+  ior: number;
+  specularFactor: number;
+  specularColorFactor: [number, number, number];
+};
 const DEFAULT_PBR = { metallicFactor: 0.75, roughnessFactor: 0.65 };
 function makeGLB(
   corrupt = false,
   pbr: AuthoredPbr = DEFAULT_PBR,
   bufferUri?: string,
   quantized = false,
+  physical?: AuthoredPhysical,
 ): ArrayBuffer {
   const positions = quantized
     ? new Int16Array([0, 0, 0, 32767, 0, 0, 0, 32767, 0, 0, 0, 0])
@@ -30,10 +39,17 @@ function makeGLB(
   const json = new TextEncoder().encode(
     JSON.stringify({
       asset: { version: "2.0" },
-      ...(quantized
+      ...(quantized || physical
         ? {
-            extensionsUsed: ["KHR_mesh_quantization"],
-            extensionsRequired: ["KHR_mesh_quantization"],
+            extensionsUsed: [
+              ...(quantized ? ["KHR_mesh_quantization"] : []),
+              ...(physical
+                ? ["KHR_materials_ior", "KHR_materials_specular"]
+                : []),
+            ],
+            ...(quantized
+              ? { extensionsRequired: ["KHR_mesh_quantization"] }
+              : {}),
           }
         : {}),
       scene: 0,
@@ -51,6 +67,17 @@ function makeGLB(
           name: "same authored material",
           alphaMode: "MASK",
           alphaCutoff: 0.35,
+          ...(physical
+            ? {
+                extensions: {
+                  KHR_materials_ior: { ior: physical.ior },
+                  KHR_materials_specular: {
+                    specularFactor: physical.specularFactor,
+                    specularColorFactor: physical.specularColorFactor,
+                  },
+                },
+              }
+            : {}),
           pbrMetallicRoughness: {
             baseColorFactor: [0.123456789, 0.333333333, 0.99999999, 1],
             ...pbr,
@@ -223,6 +250,7 @@ async function withLoadLifecycle(
     parsed: {
       metalness: number;
       disposals: Map<THREE.EventDispatcher, number>;
+      sourceMaterials: THREE.Material[];
     }[];
   }) => Promise<void>,
 ) {
@@ -241,6 +269,7 @@ async function withLoadLifecycle(
   const parsed: {
     metalness: number;
     disposals: Map<THREE.EventDispatcher, number>;
+    sourceMaterials: THREE.Material[];
   }[] = [];
   const parser: unknown = Reflect.get(modelCache, "gltfLoader");
   if (!(parser instanceof GLTFLoader)) throw new Error("No real GLTFLoader");
@@ -268,6 +297,9 @@ async function withLoadLifecycle(
         metalness: (sources[0].material as THREE.MeshStandardMaterial)
           .metalness,
         disposals,
+        sourceMaterials: sources.flatMap((mesh) =>
+          Array.isArray(mesh.material) ? mesh.material : [mesh.material],
+        ),
       });
       return gltf;
     });
@@ -328,6 +360,84 @@ async function withLoadLifecycle(
 }
 
 describe("ModelCache cold-load ownership with real HTTP and World lifetimes", () => {
+  it("retains physical IOR/specular and source aliases through real HTTP cold, in-flight and memory clones", async () => {
+    const physical: AuthoredPhysical = {
+      ior: 1.45,
+      specularFactor: 0.67,
+      specularColorFactor: [0.73, 0.41, 0.19],
+    };
+    const pbr = { metallicFactor: 0, roughnessFactor: 0.81 };
+    const bytes = makeGLB(false, pbr, undefined, false, physical);
+    const originalBytes = new Uint8Array(bytes).slice();
+    const source = await identifyProcessedModelSource(bytes);
+    expect(source).not.toBeNull();
+    await withLoadLifecycle(
+      async ({ load, url, waitForRequests, respond, requests, parsed }) => {
+        const first = load();
+        await waitForRequests(1);
+        const pending = load();
+        respond(0, bytes);
+        const [cold, inFlight] = await Promise.all([first, pending]);
+        const memory = await load();
+        expect([cold.fromCache, inFlight.fromCache, memory.fromCache]).toEqual([
+          false,
+          true,
+          true,
+        ]);
+        expect(requests).toHaveLength(1);
+        expect(parsed).toHaveLength(1);
+        const originals = parsed[0].sourceMaterials;
+        expect(originals).toHaveLength(3);
+        expect(new Set(originals).size).toBe(1);
+        const authored = originals[0];
+        expect(authored).toBeInstanceOf(THREE.MeshPhysicalMaterial);
+        if (!(authored instanceof THREE.MeshPhysicalMaterial))
+          throw new Error("Expected actual GLTFLoader physical source");
+        expect(parsed[0].disposals.get(authored)).toBe(1);
+        const converted = meshes(cold.scene)[0].material;
+        expect(converted).toBeInstanceOf(MeshPhysicalNodeMaterial);
+        if (!(converted instanceof MeshPhysicalNodeMaterial))
+          throw new Error("Physical node material was flattened");
+        expect(converted).not.toBe(authored);
+        expect(converted.specularColor).not.toBe(authored.specularColor);
+        for (const material of [authored, converted]) {
+          expect(material.ior).toBe(physical.ior);
+          expect(material.specularIntensity).toBe(physical.specularFactor);
+          expect(material.specularColor.toArray()).toEqual(
+            physical.specularColorFactor,
+          );
+          expect(material.metalness).toBe(pbr.metallicFactor);
+          expect(material.roughness).toBe(pbr.roughnessFactor);
+          expect(material.alphaTest).toBe(0.35);
+        }
+        const coldMeshes = meshes(cold.scene);
+        for (const result of [cold, inFlight, memory]) {
+          const copies = meshes(result.scene);
+          expect(copies).toHaveLength(3);
+          for (const [i, mesh] of copies.entries()) {
+            expect(mesh.material).toBe(converted);
+            expect(mesh.geometry).toBe(coldMeshes[i].geometry);
+          }
+          // Physical optics are not yet representable in the exact persistent
+          // codec. Decline the row rather than producing a lossy warm Standard.
+          expect(
+            encodeProcessedModel(
+              url,
+              source!,
+              result.scene,
+              result.animations,
+              result.collision,
+            ),
+          ).toBeNull();
+        }
+        expect(inFlight.scene).not.toBe(cold.scene);
+        expect(memory.scene).not.toBe(cold.scene);
+        expect(memory.scene).not.toBe(inFlight.scene);
+        expect(new Uint8Array(bytes)).toEqual(originalBytes);
+      },
+    );
+  });
+
   it("shares one rejected parse and permits one clean concurrent retry", async () => {
     await withLoadLifecycle(
       async ({ load, world, url, waitForRequests, respond, requests }) => {
@@ -666,7 +776,9 @@ describe("ModelCache v7 real GLB/World/ClientLoader integration (CPU, no Indexed
             loaded.collision,
           );
           expect(record).not.toBeNull();
-          expect(record!.policy).toBe("static-r186-rgba8-float-transform-v3");
+          expect(record!.policy).toBe(
+            "static-r186-rgba8-authored-node-copy-v4",
+          );
           expect(record!.source).toEqual(source);
           expect(record!.geometries[0].attributes.position).toMatchObject({
             type: "Float32Array",

@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { existsSync, readFileSync, statSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import path from "path";
 import { fileURLToPath } from "url";
@@ -10,6 +10,14 @@ import {
   readLaunchAssetByteEvidence,
   resolveLaunchAssetReadTimeoutMs,
 } from "./lib/launch-asset-byte-evidence.mjs";
+import {
+  DIAGNOSTIC_POND_REED_FILE,
+  DIAGNOSTIC_POND_REED_SHA_ENV,
+  resolveDiagnosticPondReedSha256,
+  DIAGNOSTIC_POND_BOULDER_FILE,
+  DIAGNOSTIC_POND_BOULDER_SHA_ENV,
+  resolveDiagnosticPondBoulderSha256,
+} from "./lib/diagnostic-pond-reed-policy.mjs";
 
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 const workspaceRoot = path.resolve(scriptDir, "..");
@@ -18,6 +26,47 @@ const assetsRoot = path.resolve(
     path.join(workspaceRoot, "packages/server/world/assets"),
 );
 const manifestsRoot = path.join(assetsRoot, "manifests");
+// Resolve a requested audition before normal validation. Denied or malformed
+// requests throw rather than falling back to the canonical reed hash. Resolve
+// both directories AND reed targets to reject a symlink back into source assets.
+const canonicalAssetsRoot = path.join(
+  workspaceRoot,
+  "packages/server/world/assets",
+);
+const pondReedRelativePath = path.join(
+  "vegetation/compact-pond-v1",
+  DIAGNOSTIC_POND_REED_FILE,
+);
+const diagnosticPondReedSha256 =
+  process.env[DIAGNOSTIC_POND_REED_SHA_ENV] === undefined
+    ? null
+    : resolveDiagnosticPondReedSha256({
+        environment: process.env,
+        assetsRoot: realpathSync(assetsRoot),
+        canonicalAssetsRoot: realpathSync(canonicalAssetsRoot),
+        reedPath: realpathSync(path.join(assetsRoot, pondReedRelativePath)),
+        canonicalReedPath: realpathSync(
+          path.join(canonicalAssetsRoot, pondReedRelativePath),
+        ),
+      });
+const pondBoulderRelativePath = path.join(
+  "vegetation/compact-pond-v1",
+  DIAGNOSTIC_POND_BOULDER_FILE,
+);
+const diagnosticPondBoulderSha256 =
+  process.env[DIAGNOSTIC_POND_BOULDER_SHA_ENV] === undefined
+    ? null
+    : resolveDiagnosticPondBoulderSha256({
+        environment: process.env,
+        assetsRoot: realpathSync(assetsRoot),
+        canonicalAssetsRoot: realpathSync(canonicalAssetsRoot),
+        boulderPath: realpathSync(
+          path.join(assetsRoot, pondBoulderRelativePath),
+        ),
+        canonicalBoulderPath: realpathSync(
+          path.join(canonicalAssetsRoot, pondBoulderRelativePath),
+        ),
+      });
 const failures = [];
 const assetByteEvidence = new Map();
 const assetReadTimeoutMs = resolveLaunchAssetReadTimeoutMs(
@@ -271,11 +320,39 @@ if (
   fail("Compact pond model contract must contain exactly five models");
 } else {
   for (const file of compactPondFiles) {
+    const canonicalSha256 = compactPondModels[file];
+    const auditionSha256 =
+      file === DIAGNOSTIC_POND_REED_FILE
+        ? diagnosticPondReedSha256
+        : file === DIAGNOSTIC_POND_BOULDER_FILE
+          ? diagnosticPondBoulderSha256
+          : null;
+    const audition = auditionSha256 !== null;
+    // The original contract itself must remain valid even during an audition.
+    if (audition && !/^[a-f0-9]{64}$/u.test(canonicalSha256))
+      fail(`compact pond ${file} must declare a lowercase SHA-256 lock`);
     assertLockedAssetUrl(
       `compact pond ${file}`,
       `asset://vegetation/compact-pond-v1/${file}`,
-      compactPondModels[file],
+      audition ? auditionSha256 : canonicalSha256,
     );
+    if (file === DIAGNOSTIC_POND_BOULDER_FILE && audition) {
+      // A detached audition cannot conceal a damaged canonical source. Keep
+      // its existing hash contract and byte-complete reader active as well.
+      const canonicalPath = path.join(
+        canonicalAssetsRoot,
+        pondBoulderRelativePath,
+      );
+      const evidence = readAssetEvidence(
+        "canonical compact pond boulder",
+        canonicalPath,
+        canonicalPath,
+      );
+      if (evidence && evidence.sha256 !== canonicalSha256)
+        fail(
+          `canonical compact pond ${file} drifted from SHA-256 ${canonicalSha256}`,
+        );
+    }
   }
 }
 
@@ -1372,6 +1449,30 @@ if (failures.length > 0) {
   }
   process.exitCode = 1;
 } else {
+  if (diagnosticPondReedSha256 !== null)
+    console.log(
+      JSON.stringify({
+        event: "duel-diagnostic-pond-reed-validated",
+        file: DIAGNOSTIC_POND_REED_FILE,
+        canonicalSha256: compactPondModels[DIAGNOSTIC_POND_REED_FILE],
+        candidateSha256: diagnosticPondReedSha256,
+        assetsRoot: realpathSync(assetsRoot),
+        scope:
+          "local-no-money-maintenance-only; exported-geometry and native acceptance remain separate",
+      }),
+    );
+  if (diagnosticPondBoulderSha256 !== null)
+    console.log(
+      JSON.stringify({
+        event: "duel-diagnostic-pond-boulder-validated",
+        file: DIAGNOSTIC_POND_BOULDER_FILE,
+        canonicalSha256: compactPondModels[DIAGNOSTIC_POND_BOULDER_FILE],
+        candidateSha256: diagnosticPondBoulderSha256,
+        assetsRoot: realpathSync(assetsRoot),
+        scope:
+          "local-no-money-maintenance-only; exported-geometry and native acceptance remain separate",
+      }),
+    );
   console.log(
     `Duel launch asset validation passed: ${areas.length} areas, ${resourceIds.size} resources, ${npcIds.size} NPC definitions, ${stationTypes.size} station types.`,
   );

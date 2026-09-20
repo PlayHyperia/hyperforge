@@ -195,7 +195,11 @@ function createProcessGroupDiagnostics(entries) {
   let metadataSamples = 0;
   let inspectionErrorCount = 0;
   let omittedInspectionErrors = 0;
+  const leaderWaitDeferrals = { "sigterm-wait": 0, "sigkill-wait": 0 };
   return {
+    recordLeaderWaitDeferral(phase) {
+      leaderWaitDeferrals[phase]++;
+    },
     recordInspectionError(entry, error, phase) {
       inspectionErrorCount++;
       const observedAt = Date.now();
@@ -263,6 +267,8 @@ function createProcessGroupDiagnostics(entries) {
         "Every process-group inspection error remains a shutdown failure, including EPERM even if later observations find no remaining group. Diagnostic metadata never changes that verdict.",
       inspectionErrorCount,
       omittedInspectionErrors,
+      // Pending owned leaders, not successful process-group inspections.
+      leaderWaitDeferrals: { ...leaderWaitDeferrals },
       metadataSamples,
       errors: [...errors.values()],
       ownedProcesses: [...leaders.values()].map((leader) => leader.snapshot()),
@@ -569,8 +575,22 @@ export async function shutdownDuelStackChildren({
 
     // Keep original process handles even after leaders exit: detached descendants
     // can outlive a clean leader and may no longer hold its output pipes open.
-    const remaining = (phase) =>
+    const remaining = (phase, waitForOwnedLeader = false) =>
       entries.filter((entry) => {
+        // Let the runtime reap its own leader before routine group polling.
+        // Darwin can report EPERM for a zombie-only group; this is not an
+        // EPERM exception. Unobserved exit remains pending, and every initial,
+        // pre-signal and final census still performs the strict group check.
+        // Use exit, not close: descendants can keep inherited pipes open.
+        if (
+          waitForOwnedLeader &&
+          entry.proc?.pid &&
+          entry.proc.exitCode === null &&
+          entry.proc.signalCode === null
+        ) {
+          diagnostics.recordLeaderWaitDeferral(phase);
+          return true;
+        }
         try {
           return groupIsAlive(entry.proc);
         } catch (error) {
@@ -593,7 +613,7 @@ export async function shutdownDuelStackChildren({
       signal(entry, "SIGTERM");
     const residualDeadline = performance.now() + residualGraceMs;
     while (
-      remaining("sigterm-wait").length > 0 &&
+      remaining("sigterm-wait", true).length > 0 &&
       performance.now() < residualDeadline
     )
       await sleep(25);
@@ -603,7 +623,7 @@ export async function shutdownDuelStackChildren({
     }
     const killDeadline = performance.now() + killGraceMs;
     while (
-      remaining("sigkill-wait").length > 0 &&
+      remaining("sigkill-wait", true).length > 0 &&
       performance.now() < killDeadline
     )
       await sleep(25);

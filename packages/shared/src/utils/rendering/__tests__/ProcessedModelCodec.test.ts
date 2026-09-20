@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import THREE, {
+  MeshPhysicalNodeMaterial,
   MeshStandardNodeMaterial,
   float,
 } from "../../../extras/three/three";
@@ -144,7 +145,11 @@ async function encoded(f = fixture()) {
 }
 
 describe("ProcessedModelCodec exact static CPU representation", () => {
-  it.each(["static-r186-rgba8-v1", "static-r186-rgba8-authored-pbr-v2"])(
+  it.each([
+    "static-r186-rgba8-v1",
+    "static-r186-rgba8-authored-pbr-v2",
+    "static-r186-rgba8-float-transform-v3",
+  ])(
     "rejects the exact prior %s policy without publishing materials",
     async (policy) => {
       const { f, source, record } = await encoded();
@@ -154,7 +159,9 @@ describe("ProcessedModelCodec exact static CPU representation", () => {
         stale.materials[0].state.metalness = 0;
       let setups = 0;
       try {
-        expect(record.policy).toBe("static-r186-rgba8-float-transform-v3");
+        expect(record.version).toBe(7);
+        expect(stale.version).toBe(7);
+        expect(record.policy).toBe("static-r186-rgba8-authored-node-copy-v4");
         expect(
           decodeProcessedModel(stale, "fixture.glb", source, () => setups++),
         ).toBeNull();
@@ -165,6 +172,42 @@ describe("ProcessedModelCodec exact static CPU representation", () => {
       }
     },
   );
+
+  it("declines Physical nodes without flattening optics or touching borrowed scene resources", async () => {
+    const f = fixture();
+    const physical = new MeshPhysicalNodeMaterial();
+    physical.ior = 1.45;
+    physical.specularIntensity = 0.67;
+    physical.specularColor.setRGB(0.73, 0.41, 0.19);
+    physical.roughness = 0.81;
+    physical.metalness = 0;
+    physical.aoMap = f.arm;
+    physical.roughnessMap = f.arm;
+    for (const mesh of f.scene.children as THREE.Mesh[])
+      mesh.material = physical;
+    const source = (await identifyProcessedModelSource(glb()))!;
+    let disposals = 0;
+    for (const resource of [physical, f.material, f.geometry, f.arm])
+      resource.addEventListener("dispose", () => disposals++);
+    try {
+      expect(
+        encodeProcessedModel("physical.glb", source, f.scene, []),
+      ).toBeNull();
+      expect(disposals).toBe(0);
+      for (const mesh of f.scene.children as THREE.Mesh[]) {
+        expect(mesh.material).toBe(physical);
+        expect(mesh.geometry).toBe(f.geometry);
+      }
+      expect(physical.ior).toBe(1.45);
+      expect(physical.specularIntensity).toBe(0.67);
+      expect(physical.specularColor.toArray()).toEqual([0.73, 0.41, 0.19]);
+      expect(physical.aoMap).toBe(f.arm);
+      expect(physical.roughnessMap).toBe(f.arm);
+    } finally {
+      dispose(f.scene);
+      f.material.dispose();
+    }
+  });
 
   it("preserves three LOD aliases, one ARM source and all supported scalar/UV/sampler/bounds state", async () => {
     const { f, source, record } = await encoded();

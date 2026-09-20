@@ -14,18 +14,23 @@ import type { TerrainSystem } from "./TerrainSystem";
 
 export const COMPACT_SERVICE_COURT_SYSTEM = "compact-service-court";
 
+type CourtResources = {
+  record: OwnedCompactServiceCourt;
+  lease: StaticCollisionLease | null;
+  grassExclusionLease: { release(): void } | null;
+  geometry: OpenWorkshopGeometry | null;
+  body: RigidBody | null;
+  colliders: Collider[];
+  indexedViews: THREE.BufferGeometry[];
+};
+
 /** Shared authoritative post navigation and exact static triangle collision.
  * Does not register floors, interiors, services, resources, terrain edits or updates.
  */
 export class CompactServiceCourtSystem extends System {
   private generation = 0;
-  private record: OwnedCompactServiceCourt | null = null;
-  private lease: StaticCollisionLease | null = null;
-  private grassExclusionLease: { release(): void } | null = null;
-  private geometry: OpenWorkshopGeometry | null = null;
-  private body: RigidBody | null = null;
-  private colliders: Collider[] = [];
-  private indexedViews: THREE.BufferGeometry[] = [];
+  private records: readonly OwnedCompactServiceCourt[] = Object.freeze([]);
+  private resources: CourtResources[] = [];
 
   override getDependencies() {
     return { required: ["terrain"], optional: ["physics"] };
@@ -42,123 +47,174 @@ export class CompactServiceCourtSystem extends System {
   override async start(): Promise<void> {
     if (!this.initialized || this.started) return;
     const generation = ++this.generation;
-    const descriptor = DataManager.getWorldConfig()?.compactServiceCourt;
-    if (!descriptor) {
+    const config = DataManager.getWorldConfig();
+    const descriptors: OwnedCompactServiceCourt["descriptor"][] = [];
+    if (config?.compactServiceCourt)
+      descriptors.push(config.compactServiceCourt);
+    if (config?.compactBankPavilion)
+      descriptors.push(config.compactBankPavilion);
+    if (!descriptors.length) {
       this.started = true;
       return;
     }
-    const { OPEN_WORKSHOP_POSTS, createOpenWorkshop } =
+    const { OPEN_WORKSHOP_POSTS, BANK_PAVILION_POSTS, createOpenWorkshop } =
       await import("@hyperforge/procgen/building");
     if (generation !== this.generation) return;
     const terrain = this.world.getSystem<TerrainSystem>("terrain");
     if (!terrain)
       throw new Error("Compact service court requires authoritative terrain");
-    const record = groundCompactServiceCourt(
-      descriptor,
-      OPEN_WORKSHOP_POSTS,
-      (x, z) => terrain.getHeightAt(x, z),
-    );
     try {
-      if (this.world.physics) {
-        this.geometry = createOpenWorkshop(record.feet, {
-          architecturalFinish:
-            record.descriptor.recipeId === "open-timber-smithy-haven-v3"
-              ? "haven-v1"
-              : undefined,
-        });
-        this.body = new RigidBody({
-          type: "static",
-          tag: descriptor.layoutId,
-          position: [record.position.x, record.position.y, record.position.z],
-        });
-        for (const geometry of [
-          this.geometry.timber,
-          this.geometry.roof,
-          this.geometry.footings,
-        ]) {
-          const indexed = new THREE.BufferGeometry();
-          this.indexedViews.push(indexed);
-          const position = geometry.getAttribute("position");
-          indexed.setAttribute("position", position);
-          indexed.setIndex(
-            geometry.index ??
-              Array.from({ length: position.count }, (_, i) => i),
-          );
-          const collider = new Collider({
-            type: "geometry",
-            geometry: indexed,
-            convex: false,
-            layer: "environment",
+      for (const descriptor of descriptors) {
+        const isBank = descriptor.layoutId === "compact-bank-pavilion-v1";
+        const posts = isBank ? BANK_PAVILION_POSTS : OPEN_WORKSHOP_POSTS;
+        const record = groundCompactServiceCourt(descriptor, posts, (x, z) =>
+          terrain.getHeightAt(x, z),
+        );
+        const owned: CourtResources = {
+          record,
+          lease: null,
+          grassExclusionLease: null,
+          geometry: null,
+          body: null,
+          colliders: [],
+          indexedViews: [],
+        };
+        // Register partial ownership before allocating: any later failure must
+        // unwind this court and every previously admitted court together.
+        this.resources.push(owned);
+        if (this.world.physics) {
+          owned.geometry = createOpenWorkshop(record.feet, {
+            recipe: isBank ? "bank-pavilion-v1" : "smithy-v1",
+            architecturalFinish:
+              isBank ||
+              record.descriptor.recipeId === "open-timber-smithy-haven-v3"
+                ? "haven-v1"
+                : undefined,
           });
-          this.colliders.push(collider);
-          this.body.add(collider);
+          owned.body = new RigidBody({
+            type: "static",
+            tag: descriptor.layoutId,
+            position: [record.position.x, record.position.y, record.position.z],
+          });
+          for (const geometry of [
+            owned.geometry.timber,
+            owned.geometry.roof,
+            owned.geometry.footings,
+          ]) {
+            const indexed = new THREE.BufferGeometry();
+            owned.indexedViews.push(indexed);
+            const position = geometry.getAttribute("position");
+            indexed.setAttribute("position", position);
+            indexed.setIndex(
+              geometry.index ??
+                Array.from({ length: position.count }, (_, i) => i),
+            );
+            const collider = new Collider({
+              type: "geometry",
+              geometry: indexed,
+              convex: false,
+              layer: "environment",
+            });
+            owned.colliders.push(collider);
+            owned.body.add(collider);
+          }
+          owned.body.activate(this.world);
+          if (
+            !owned.body.actor ||
+            !owned.body.actorHandle ||
+            owned.colliders.some((c) => !c.shape || !c.pmesh)
+          )
+            throw new Error(
+              "Compact service court native triangle collision failed",
+            );
         }
-        this.body.activate(this.world);
-        if (
-          !this.body.actor ||
-          !this.body.actorHandle ||
-          this.colliders.some((c) => !c.shape || !c.pmesh)
-        )
-          throw new Error(
-            "Compact service court native triangle collision failed",
-          );
+        owned.lease = this.world.collision.acquireStaticFootprint(
+          record.blockingTiles,
+        );
+        owned.grassExclusionLease = terrain.acquireGrassExclusionPolygons(
+          createCompactServiceCourtGrassExclusions(record, posts),
+        );
       }
-      this.lease = this.world.collision.acquireStaticFootprint(
-        record.blockingTiles,
-      );
-      this.grassExclusionLease = terrain.acquireGrassExclusionPolygons(
-        createCompactServiceCourtGrassExclusions(record, OPEN_WORKSHOP_POSTS),
-      );
-      this.record = record;
+      this.records = Object.freeze(this.resources.map(({ record }) => record));
       this.started = true;
     } catch (error) {
-      this.release();
+      try {
+        this.release();
+      } catch (cleanupError) {
+        throw new AggregateError(
+          [error, cleanupError],
+          "Compact service courts failed startup and cleanup",
+        );
+      }
       throw error;
     }
   }
 
   getCourt(): OwnedCompactServiceCourt | null {
-    return this.record;
+    return (
+      this.records.find(
+        (record) => record.descriptor.layoutId === "compact-service-court-v1",
+      ) ?? null
+    );
+  }
+
+  getCourts(): readonly OwnedCompactServiceCourt[] {
+    return this.records;
   }
 
   getDiagnostics() {
-    return this.record
-      ? Object.freeze({
-          layoutId: this.record.descriptor.layoutId,
-          blockingTiles: this.record.blockingTiles,
-          feet: this.record.feet,
-          position: this.record.position,
-          physicsActor: Boolean(this.body?.actor),
-          physicsShapes: this.colliders.filter((c) => c.shape).length,
-        })
-      : null;
+    return (
+      this.getAllDiagnostics().find(
+        (record) => record.layoutId === "compact-service-court-v1",
+      ) ?? null
+    );
+  }
+
+  getAllDiagnostics() {
+    return Object.freeze(
+      this.records.map((record) => {
+        const owned = this.resources.find((entry) => entry.record === record)!;
+        return Object.freeze({
+          layoutId: record.descriptor.layoutId,
+          blockingTiles: record.blockingTiles,
+          feet: record.feet,
+          position: record.position,
+          physicsActor: Boolean(owned.body?.actor),
+          physicsShapes: owned.colliders.filter((c) => c.shape).length,
+        });
+      }),
+    );
   }
 
   private release(): void {
-    try {
-      this.body?.deactivate();
-    } finally {
-      const grassExclusionLease = this.grassExclusionLease;
-      this.grassExclusionLease = null;
+    this.records = Object.freeze([]);
+    const resources = this.resources.splice(0).reverse();
+    const errors: unknown[] = [];
+    const attempt = (action: () => void) => {
       try {
-        this.body = null;
-        this.colliders = [];
-        for (const geometry of this.indexedViews) geometry.dispose();
-        this.indexedViews = [];
-        this.geometry?.dispose();
-        this.geometry = null;
-        this.lease?.release();
-        this.lease = null;
-        this.record = null;
-      } finally {
-        grassExclusionLease?.release();
+        action();
+      } catch (error) {
+        errors.push(error);
       }
+    };
+    for (const owned of resources) {
+      attempt(() => owned.body?.deactivate());
+      for (const geometry of owned.indexedViews)
+        attempt(() => geometry.dispose());
+      attempt(() => owned.geometry?.dispose());
+      attempt(() => owned.lease?.release());
+      attempt(() => owned.grassExclusionLease?.release());
     }
+    if (errors.length)
+      throw new AggregateError(errors, "Compact service courts failed cleanup");
   }
 
   override destroy(): void {
     ++this.generation;
-    this.release();
-    super.destroy();
+    try {
+      this.release();
+    } finally {
+      super.destroy();
+    }
   }
 }

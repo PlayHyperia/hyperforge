@@ -1,11 +1,14 @@
 import { BIOME_CONFIG } from "../../systems/shared/world/TerrainHeightParams";
 import { createCompactHavenShoulder } from "../../systems/shared/world/CompactHavenShoulder";
+import { createCompactCoastalApron } from "../../systems/shared/world/CompactCoastalApron";
+import { createCompactSouthernMeadow } from "../../systems/shared/world/CompactIslandLandform";
 import {
   COMPACT_WORLD_TERRAIN_PROFILE,
   COMPACT_LANDFORM_PARAMETERS,
   COMPACT_BAY_PARAMETERS,
   COMPACT_TERRACE_PARAMETERS,
   COMPACT_RIDGE_BREAKUP_PARAMETERS,
+  getCompactCoastalApronSupport,
   resolveWorldTerrainProfile,
   worldTerrainProfileIdentity,
   type WorldTerrainProfile,
@@ -93,7 +96,9 @@ function assertTerrainWorkerInput(input) {
   var sculpt4 = p && p.algorithm === "compact-island-sculpt-v4";
   var sculpt5 = p && p.algorithm === "compact-island-sculpt-v5";
   var hasHavenShoulder = p && Object.prototype.hasOwnProperty.call(p, "havenShoulder");
-  keys(p, ${JSON.stringify(Object.keys(shape))}.concat(sculpt2 || sculpt3 || sculpt4 || sculpt5 ? ["landform"] : []).concat(sculpt3 || sculpt4 || sculpt5 ? ["bay"] : []).concat(sculpt4 || sculpt5 ? ["terrace"] : []).concat(sculpt5 ? ["ridgeBreakup"] : []).concat(sculpt5 && hasHavenShoulder ? ["havenShoulder"] : []));
+  var hasCoastalApron = p && Object.prototype.hasOwnProperty.call(p, "coastalApron");
+  var hasSouthernMeadow = p && Object.prototype.hasOwnProperty.call(p, "southernMeadow");
+  keys(p, ${JSON.stringify(Object.keys(shape))}.concat(sculpt2 || sculpt3 || sculpt4 || sculpt5 ? ["landform"] : []).concat(sculpt3 || sculpt4 || sculpt5 ? ["bay"] : []).concat(sculpt4 || sculpt5 ? ["terrace"] : []).concat(sculpt5 ? ["ridgeBreakup"] : []).concat(sculpt5 && hasHavenShoulder ? ["havenShoulder"] : []).concat(sculpt5 && hasCoastalApron ? ["coastalApron"] : []).concat(sculpt5 && hasSouthernMeadow ? ["southernMeadow"] : []));
   if (hasHavenShoulder) {
     var shoulderDescriptor = Object.getOwnPropertyDescriptor(p, "havenShoulder");
     if (!shoulderDescriptor || !("value" in shoulderDescriptor)) fail();
@@ -197,6 +202,29 @@ function assertTerrainWorkerInput(input) {
       s.THRESHOLD < 0 || s.THRESHOLD > 1 || s.STRENGTH < 0 || s.STRENGTH > 1 ||
       s.MIN_SLOPE < 0 || s.SLOPE_SAMPLE_DISTANCE <= 0 || s.LAND_BAND <= 0 ||
       s.LAND_MAX_MULTIPLIER <= 0 || s.UNDERWATER_BAND <= 0 || s.UNDERWATER_DEPTH_MULTIPLIER <= 0) fail();
+  if (hasCoastalApron) {
+    var apronDescriptor = Object.getOwnPropertyDescriptor(p, "coastalApron");
+    if (!apronDescriptor || !("value" in apronDescriptor)) fail();
+    var apronAdmission = (${createCompactCoastalApron.toString()})();
+    var ca = apronAdmission.validate(apronDescriptor.value);
+    if (ca.floorHeight !== w.oceanFloorHeight || ca.referencePlateau !== h.baseOffset || ca.referencePlateau <= w.threshold) fail();
+    if (ca.headShoulder && ca.headShoulder.end[2] < w.threshold+s.LAND_BAND) fail();
+    apronAdmission.validateSupport(ca, b, s.SLOPE_SAMPLE_DISTANCE);
+    apronAdmission.validateSupport(ca, (${getCompactCoastalApronSupport.toString()})(i,l), s.SLOPE_SAMPLE_DISTANCE);
+    if (JSON.stringify(ca) !== JSON.stringify(apronDescriptor.value)) fail();
+    // Structured cloning removes frozen descriptors. Sampling receives the
+    // validated immutable replacement, not the mutable transport object.
+    p.coastalApron = ca;
+  }
+  if (hasSouthernMeadow) {
+    var meadowDescriptor = Object.getOwnPropertyDescriptor(p, "southernMeadow");
+    if (!meadowDescriptor || !("value" in meadowDescriptor)) fail();
+    var meadowAdmission = (${createCompactSouthernMeadow.toString()})();
+    var sm = meadowAdmission.validate(meadowDescriptor.value);
+    meadowAdmission.validateSupport(sm, p);
+    if (JSON.stringify(sm) !== JSON.stringify(meadowDescriptor.value)) fail();
+    p.southernMeadow = sm;
+  }
   var identity = "hyperia-world-terrain-profile-v1\\n" + JSON.stringify(p);
   if (identity !== config.TERRAIN_PROFILE_IDENTITY) fail();
   if (!Number.isSafeInteger(config.TILE_RESOLUTION) || config.TILE_RESOLUTION < 2 || config.TILE_RESOLUTION > 1024) fail();

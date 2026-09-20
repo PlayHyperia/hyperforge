@@ -8,7 +8,9 @@ import type { FullTerrainProvider } from "../TerrainQuadChunkGenerator";
 import { loadTownConfig } from "../TownSystem";
 import { loadPOIConfig } from "../POISystem";
 import {
+  COMPACT_WORLD_TERRAIN_PROFILE,
   HAVEN_SHOULDER_COMPACT_WORLD_TERRAIN_PROFILE,
+  resolveWorldTerrainProfile,
   worldTerrainProfileIdentity,
 } from "../WorldTerrainProfile";
 
@@ -20,9 +22,13 @@ type Internals = {
 };
 
 const originalSeed = process.env.TERRAIN_SEED;
+const originalWindow = Object.getOwnPropertyDescriptor(globalThis, "window");
 afterEach(() => {
   if (originalSeed === undefined) delete process.env.TERRAIN_SEED;
   else process.env.TERRAIN_SEED = originalSeed;
+  if (originalWindow)
+    Object.defineProperty(globalThis, "window", originalWindow);
+  else Reflect.deleteProperty(globalThis, "window");
 });
 
 function createTerrain(seed?: number) {
@@ -36,6 +42,507 @@ function createTerrain(seed?: number) {
 }
 
 describe("real manifest to compact TerrainSystem integration", () => {
+  it("binds composition before material creation and publishes identical registered owners to grass", async () => {
+    await DataManager.getInstance().initialize();
+    const area = ALL_WORLD_AREAS.haven_pond;
+    const originalZones = area.flatZones;
+    const original = originalZones?.find(
+      (zone) => zone.id === "haven_pond_floor",
+    );
+    if (!original?.radialPond) throw new Error("Actual Haven profile required");
+    const selected = {
+      ...original,
+      radialPond: {
+        ...original.radialPond,
+        bankSectors: [
+          {
+            bearing: -1.5,
+            halfWidth: 0.7,
+            innerRadius: 6.8,
+            innerHeight: 28.08,
+            outerRadius: 8.7,
+            outerHeight: 28.24,
+          },
+        ],
+        bankComposition: {
+          schemaVersion: 1 as const,
+          sectors: [{ sectorIndex: 0, surface: "sedge-shelf" as const }],
+        },
+      },
+    };
+    area.flatZones = originalZones!.map((zone) =>
+      zone === original ? selected : zone,
+    );
+    const world = new World();
+    const terrain = world.register("terrain", TerrainSystem) as TerrainSystem;
+    terrain["activeTerrainProfile"] = resolveWorldTerrainProfile({
+      ...DataManager.getWorldTerrainProfile(),
+      southernMeadow: {
+        schemaVersion: 1,
+        minX: 304,
+        maxX: 500,
+        minZ: 345,
+        maxZ: 535,
+        featherX: 24,
+        featherZ: 24,
+        northHeight: 26.8,
+        southHeight: 25.3,
+        crossFall: 1,
+        rollAmplitude: 0.65,
+        rollWavelength: 100,
+      },
+    });
+    terrain["compactPondBlend"] = "composition-v1";
+    terrain["compactSurfaceBlend"] = "height-v1";
+    terrain["compactDirtProjection"] = "stochastic-v1";
+    terrain["compactRockProjection"] = "stochastic-v1";
+    try {
+      await terrain.init();
+      expect(terrain["compositionManifestLoaded"]).toBe(true);
+      const field = terrain["compactPondBankField"]!;
+      expect(field).toMatchObject({
+        id: "composition-v1",
+        zoneId: original.id,
+      });
+      const height = terrain.getHeightAt(343, 295);
+      const ground = terrain.captureCanonicalGroundLease();
+      terrain["initTerrainMaterial"]();
+      const material = terrain.getTerrainMaterialWithUniforms()!;
+      expect(material.compactPondBlend).toBe("composition-v1");
+      expect(material.compactPondBankField).toEqual(field);
+      expect(Object.isFrozen(material.compactPondBankField)).toBe(true);
+      expect(material.compactTerrainSurface!.getReceipt()).toMatchObject({
+        surfaceSampleCount: 33,
+        status: "idle",
+      });
+      expect(
+        material.compactTerrainSurface!.getReceipt().textures,
+      ).toHaveLength(7);
+      expect(material.getCompactTerrainDiagnosticOutputs()).not.toBeNull();
+      const setup = terrain["buildGrassWorkerSetup"]();
+      expect(setup.compactPondBlend).toBe("composition-v1");
+      expect(setup.compactPondBankField).toEqual(field);
+      const remote = setup.getTerrainSurfaceForRegion(490, 490, 495, 495);
+      expect(
+        remote.zones.find((zone) => zone.id === original.id)?.radialPond,
+      ).toEqual(selected.radialPond);
+      expect(
+        remote.waterBodies.find((pond) => pond.id === field.pond.id),
+      ).toMatchObject(field.pond);
+      expect(ground.isCurrent()).toBe(true);
+      expect(terrain.getHeightAt(343, 295)).toBe(height);
+    } finally {
+      area.flatZones = originalZones;
+      world.destroy();
+    }
+  });
+
+  it("fails closed before water or material publication when composition metadata is missing", async () => {
+    const world = new World();
+    const terrain = world.register("terrain", TerrainSystem) as TerrainSystem;
+    terrain["compactPondBlend"] = "composition-v1";
+    terrain["compactSurfaceBlend"] = "height-v1";
+    try {
+      await expect(terrain.init()).rejects.toThrow(/composition|bank.*field/i);
+      expect(terrain["compactPondBankField"]).toBeNull();
+      expect(terrain["waterSystem"]).toBeUndefined();
+      expect(terrain.getTerrainMaterialWithUniforms()).toBeNull();
+      expect(terrain["canonicalGroundInitialized"]).toBe(false);
+    } finally {
+      world.destroy();
+    }
+  });
+
+  it.each([false, true])(
+    "captures rock preview before actual material construction despite URL mutation (initially selected=%s)",
+    (selected) => {
+      const fine =
+        "streamRenderProfile=island-fine-meadow-720p60-v1&grassAppearance=fine-meadow-v1&dirtProjection=stochastic-v1&terrainBlend=height-v1";
+      const location = new URL(
+        `https://localhost/stream.html?${fine}${selected ? "&rockProjection=stochastic-v1" : ""}`,
+      );
+      Object.defineProperty(globalThis, "window", {
+        configurable: true,
+        value: { location },
+      });
+      const world = new World(),
+        terrain = new TerrainSystem(world);
+      const restartedWorld = new World(),
+        restarted = new TerrainSystem(restartedWorld);
+      const identity = DataManager.getWorldContentIdentity();
+      try {
+        terrain["initializeTerrainGenerator"]();
+        const height = terrain.getHeightAt(350, 320);
+        const profile = terrain.getWorldTerrainProfile();
+        const workers = terrain["buildGrassWorkerSetup"]();
+        expect(terrain["getCompactRockProjection"]()).toBe(
+          selected ? "stochastic-v1" : undefined,
+        );
+        expect(terrain.getTerrainMaterialWithUniforms()).toBeNull();
+        location.search = `?${fine}${selected ? "" : "&rockProjection=stochastic-v1"}`;
+        terrain["initTerrainMaterial"]();
+        const material = terrain.getTerrainMaterialWithUniforms()!;
+        expect(material.compactTerrainSurface!.getReceipt()).toMatchObject({
+          rockProjection: selected ? "stochastic-v1" : "dual-v1",
+          surfaceSampleCount: selected ? 33 : 27,
+          status: "idle",
+        });
+        expect(
+          material.compactTerrainSurface!.getReceipt().textures,
+        ).toHaveLength(7);
+        expect(material.terrainUniforms.surfaceDetailStrength.value).toBe(1);
+        expect(terrain.getWorldTerrainProfile()).toBe(profile);
+        expect(terrain.getHeightAt(350, 320)).toBe(height);
+        const after = terrain["buildGrassWorkerSetup"]();
+        expect(Object.keys(after).sort()).toEqual(Object.keys(workers).sort());
+        for (const key of [
+          "terrainConfig",
+          "compactGrassColorGrade",
+          "compactPlantingLobes",
+          "seed",
+          "biomeCenters",
+          "biomes",
+          "grassConfigs",
+          "tileSize",
+        ] as const)
+          expect(after[key]).toEqual(workers[key]);
+        expect("compactRockProjection" in after).toBe(false);
+        expect(after.isGrassObstacleAt?.(350, 320)).toBe(
+          workers.isGrassObstacleAt?.(350, 320),
+        );
+        restarted["initializeTerrainGenerator"]();
+        restarted["initTerrainMaterial"]();
+        expect(
+          restarted
+            .getTerrainMaterialWithUniforms()!
+            .compactTerrainSurface!.getReceipt(),
+        ).toMatchObject({
+          rockProjection: selected ? "dual-v1" : "stochastic-v1",
+          surfaceSampleCount: selected ? 27 : 33,
+        });
+        expect(restarted.getHeightAt(350, 320)).toBe(height);
+        location.search = `?${fine}&rockProjection=invalid`;
+        expect(terrain["getCompactRockProjection"]()).toBe(
+          selected ? "stochastic-v1" : undefined,
+        );
+        expect(restarted["getCompactRockProjection"]()).toBe(
+          selected ? undefined : "stochastic-v1",
+        );
+        expect(terrain.getTerrainMaterialWithUniforms()).toBe(material);
+        expect(DataManager.getWorldContentIdentity()).toBe(identity);
+      } finally {
+        restarted.destroy();
+        terrain.destroy();
+        restartedWorld.destroy();
+        world.destroy();
+      }
+    },
+  );
+
+  it("rejects malformed rock preview during actual init before material, water or grass owners exist", async () => {
+    const location = new URL(
+      "https://localhost/stream.html?streamRenderProfile=island-fine-meadow-720p60-v1&grassAppearance=fine-meadow-v1&rockProjection=invalid",
+    );
+    Object.defineProperty(globalThis, "window", {
+      configurable: true,
+      value: { location },
+    });
+    const world = new World(),
+      terrain = new TerrainSystem(world);
+    try {
+      await expect(terrain.init()).rejects.toThrow("rock projection candidate");
+      expect(terrain["compactRockProjection"]).toBeUndefined();
+      expect(terrain.getTerrainMaterialWithUniforms()).toBeNull();
+      expect(terrain["waterSystem"]).toBeUndefined();
+      expect(terrain["quadTreeVisualManager"]).toBeNull();
+      expect(terrain["grassVisualManager"]).toBeNull();
+      expect(terrain["canonicalGroundInitialized"]).toBe(false);
+    } finally {
+      terrain.destroy();
+      world.destroy();
+    }
+  });
+
+  it("rejects rock preview on the validated legacy compact profile without changing the admitted world", () => {
+    const location = new URL(
+      "https://localhost/stream.html?streamRenderProfile=island-fine-meadow-720p60-v1&grassAppearance=fine-meadow-v1&rockProjection=stochastic-v1",
+    );
+    Object.defineProperty(globalThis, "window", {
+      configurable: true,
+      value: { location },
+    });
+    const world = new World(),
+      terrain = new TerrainSystem(world);
+    const identity = DataManager.getWorldContentIdentity();
+    const admitted = DataManager.getWorldTerrainProfile();
+    try {
+      // Validated per-owner profile fixture, as in material-initialization tests;
+      // no renderer/network replacement or global manifest mutation.
+      terrain["activeTerrainProfile"] = resolveWorldTerrainProfile(
+        COMPACT_WORLD_TERRAIN_PROFILE,
+      );
+      expect(() => terrain["initTerrainMaterial"]()).toThrow(
+        "requires compact sculpt terrain",
+      );
+      expect(terrain["compactRockProjection"]).toBeUndefined();
+      expect(terrain.getTerrainMaterialWithUniforms()).toBeNull();
+      expect(DataManager.getWorldTerrainProfile()).toBe(admitted);
+      expect(DataManager.getWorldContentIdentity()).toBe(identity);
+    } finally {
+      terrain.destroy();
+      world.destroy();
+    }
+  });
+
+  it.each([false, true])(
+    "captures dirt preview before actual material construction despite URL mutation (initially selected=%s)",
+    (selected) => {
+      const fine =
+        "streamRenderProfile=island-fine-meadow-720p60-v1&grassAppearance=fine-meadow-v1";
+      const location = new URL(
+        `https://localhost/stream.html?${fine}${selected ? "&dirtProjection=stochastic-v1" : ""}`,
+      );
+      Object.defineProperty(globalThis, "window", {
+        configurable: true,
+        value: { location },
+      });
+      const world = new World(),
+        terrain = new TerrainSystem(world);
+      const restartedWorld = new World(),
+        restarted = new TerrainSystem(restartedWorld);
+      const identity = DataManager.getWorldContentIdentity();
+      try {
+        terrain["initializeTerrainGenerator"]();
+        const height = terrain.getHeightAt(350, 320);
+        const profile = terrain.getWorldTerrainProfile();
+        const workers = terrain["buildGrassWorkerSetup"]();
+        expect(terrain["getCompactDirtProjection"]()).toBe(
+          selected ? "stochastic-v1" : undefined,
+        );
+        expect(terrain.getTerrainMaterialWithUniforms()).toBeNull();
+        location.search = `?${fine}${selected ? "" : "&dirtProjection=stochastic-v1"}`;
+        terrain["initTerrainMaterial"]();
+        const material = terrain.getTerrainMaterialWithUniforms()!;
+        expect(material.compactTerrainSurface!.getReceipt()).toMatchObject({
+          dirtProjection: selected ? "stochastic-v1" : "dual-v1",
+          surfaceSampleCount: selected ? 22 : 20,
+          status: "idle",
+        });
+        expect(
+          material.compactTerrainSurface!.getReceipt().textures,
+        ).toHaveLength(6);
+        expect(material.terrainUniforms.surfaceDetailStrength.value).toBe(1);
+        expect(terrain.getWorldTerrainProfile()).toBe(profile);
+        expect(terrain.getHeightAt(350, 320)).toBe(height);
+        const after = terrain["buildGrassWorkerSetup"]();
+        expect(Object.keys(after).sort()).toEqual(Object.keys(workers).sort());
+        for (const key of [
+          "terrainConfig",
+          "compactGrassColorGrade",
+          "compactPlantingLobes",
+          "seed",
+          "biomeCenters",
+          "biomes",
+          "grassConfigs",
+          "tileSize",
+        ] as const)
+          expect(after[key]).toEqual(workers[key]);
+        expect("compactDirtProjection" in after).toBe(false);
+        expect(after.isGrassObstacleAt?.(350, 320)).toBe(
+          workers.isGrassObstacleAt?.(350, 320),
+        );
+        restarted["initializeTerrainGenerator"]();
+        restarted["initTerrainMaterial"]();
+        expect(
+          restarted
+            .getTerrainMaterialWithUniforms()!
+            .compactTerrainSurface!.getReceipt(),
+        ).toMatchObject({
+          dirtProjection: selected ? "dual-v1" : "stochastic-v1",
+          surfaceSampleCount: selected ? 20 : 22,
+        });
+        expect(restarted.getHeightAt(350, 320)).toBe(height);
+        location.search = `?${fine}&dirtProjection=invalid`;
+        expect(terrain["getCompactDirtProjection"]()).toBe(
+          selected ? "stochastic-v1" : undefined,
+        );
+        expect(restarted["getCompactDirtProjection"]()).toBe(
+          selected ? undefined : "stochastic-v1",
+        );
+        expect(terrain.getTerrainMaterialWithUniforms()).toBe(material);
+        expect(DataManager.getWorldContentIdentity()).toBe(identity);
+      } finally {
+        restarted.destroy();
+        terrain.destroy();
+        restartedWorld.destroy();
+        world.destroy();
+      }
+    },
+  );
+
+  it("rejects malformed dirt preview during actual init before material, water or grass owners exist", async () => {
+    const location = new URL(
+      "https://localhost/stream.html?streamRenderProfile=island-fine-meadow-720p60-v1&grassAppearance=fine-meadow-v1&dirtProjection=invalid",
+    );
+    Object.defineProperty(globalThis, "window", {
+      configurable: true,
+      value: { location },
+    });
+    const world = new World(),
+      terrain = new TerrainSystem(world);
+    try {
+      await expect(terrain.init()).rejects.toThrow("dirt projection candidate");
+      expect(terrain["compactDirtProjection"]).toBeUndefined();
+      expect(terrain.getTerrainMaterialWithUniforms()).toBeNull();
+      expect(terrain["waterSystem"]).toBeUndefined();
+      expect(terrain["quadTreeVisualManager"]).toBeNull();
+      expect(terrain["grassVisualManager"]).toBeNull();
+      expect(terrain["canonicalGroundInitialized"]).toBe(false);
+    } finally {
+      terrain.destroy();
+      world.destroy();
+    }
+  });
+
+  it("rejects dirt preview on the validated legacy compact profile without changing the admitted world", () => {
+    const location = new URL(
+      "https://localhost/stream.html?streamRenderProfile=island-fine-meadow-720p60-v1&grassAppearance=fine-meadow-v1&dirtProjection=stochastic-v1",
+    );
+    Object.defineProperty(globalThis, "window", {
+      configurable: true,
+      value: { location },
+    });
+    const world = new World(),
+      terrain = new TerrainSystem(world);
+    const identity = DataManager.getWorldContentIdentity();
+    const admitted = DataManager.getWorldTerrainProfile();
+    try {
+      // Validated per-owner profile fixture, as in material-initialization tests;
+      // no renderer/network replacement or global manifest mutation.
+      terrain["activeTerrainProfile"] = resolveWorldTerrainProfile(
+        COMPACT_WORLD_TERRAIN_PROFILE,
+      );
+      expect(() => terrain["initTerrainMaterial"]()).toThrow(
+        "requires compact sculpt terrain",
+      );
+      expect(terrain["compactDirtProjection"]).toBeUndefined();
+      expect(terrain.getTerrainMaterialWithUniforms()).toBeNull();
+      expect(DataManager.getWorldTerrainProfile()).toBe(admitted);
+      expect(DataManager.getWorldContentIdentity()).toBe(identity);
+    } finally {
+      terrain.destroy();
+      world.destroy();
+    }
+  });
+
+  it.each([false, true])(
+    "captures road clearance once on the real terrain owner across URL mutation (initially selected=%s)",
+    (selected) => {
+      // A real URL supplies only the viewport input. World, TerrainSystem,
+      // manifest admission and worker-setup methods are their actual owners;
+      // this CPU ownership check does not claim browser or GPU qualification.
+      const fine =
+        "streamRenderProfile=island-fine-meadow-720p60-v1&grassAppearance=fine-meadow-v1";
+      const location = new URL(
+        `https://localhost/stream.html?${fine}&grassCoverage=sixty-centimetre-cell-v1&grassCoverageCell=12,11${selected ? "&grassRoadClearance=per-blade-v1" : ""}`,
+      );
+      Object.defineProperty(globalThis, "window", {
+        configurable: true,
+        value: { location },
+      });
+      const world = new World();
+      const terrain = new TerrainSystem(world);
+      const restartedWorld = new World();
+      const restarted = new TerrainSystem(restartedWorld);
+      try {
+        terrain["initializeTerrainGenerator"]();
+        const identity = worldTerrainProfileIdentity(
+          terrain.getWorldTerrainProfile(),
+        );
+        const height = terrain.getHeightAt(350, 320);
+        const before = terrain["buildGrassWorkerSetup"]();
+        const captured = terrain["grassVisualSelection"]!;
+        expect(Object.isFrozen(captured)).toBe(true);
+        expect(Object.keys(captured).sort()).toEqual(
+          [
+            "appearance",
+            "profile",
+            "coverageTrial",
+            ...(selected ? ["roadClearance"] : []),
+          ].sort(),
+        );
+        expect(captured.roadClearance).toBe(
+          selected ? "per-blade-v1" : undefined,
+        );
+        expect(captured.coverageTrial?.cell.indexX).toBe(12);
+        expect(Object.isFrozen(captured.coverageTrial?.cell)).toBe(true);
+        expect(
+          Reflect.set(
+            captured,
+            "roadClearance",
+            selected ? undefined : "per-blade-v1",
+          ),
+        ).toBe(false);
+        location.search = `?${fine}&grassCoverage=sixty-centimetre-cell-v1&grassCoverageCell=13,11${selected ? "" : "&grassRoadClearance=per-blade-v1"}`;
+        const after = terrain["buildGrassWorkerSetup"]();
+        expect(terrain["grassVisualSelection"]).toBe(captured);
+        expect(captured.roadClearance).toBe(
+          selected ? "per-blade-v1" : undefined,
+        );
+        expect(captured.coverageTrial?.cell.indexX).toBe(12);
+        expect(after.compactGrassColorGrade).toBe(
+          before.compactGrassColorGrade,
+        );
+        expect(after.terrainConfig.TERRAIN_PROFILE_IDENTITY).toBe(identity);
+        expect(terrain.getHeightAt(350, 320)).toBe(height);
+        restarted["initializeTerrainGenerator"]();
+        restarted["buildGrassWorkerSetup"]();
+        expect(restarted["grassVisualSelection"]?.roadClearance).toBe(
+          selected ? undefined : "per-blade-v1",
+        );
+        expect(
+          restarted["grassVisualSelection"]?.coverageTrial?.cell.indexX,
+        ).toBe(13);
+        // Even a now-invalid URL must not reconfigure either established owner.
+        location.search = `?${fine}&grassRoadClearance=invalid`;
+        expect(() => terrain["buildGrassWorkerSetup"]()).not.toThrow();
+        expect(() => restarted["buildGrassWorkerSetup"]()).not.toThrow();
+        expect(terrain["grassVisualManager"]).toBeNull();
+        expect(terrain["terrainMaterial"]).toBeUndefined();
+      } finally {
+        restarted.destroy();
+        terrain.destroy();
+        restartedWorld.destroy();
+        world.destroy();
+      }
+    },
+  );
+
+  it("rejects invalid road clearance during real init before material, water or grass asset owners exist", async () => {
+    const location = new URL(
+      "https://localhost/stream.html?streamRenderProfile=island-fine-meadow-720p60-v1&grassAppearance=fine-meadow-v1&grassRoadClearance=invalid",
+    );
+    Object.defineProperty(globalThis, "window", {
+      configurable: true,
+      value: { location },
+    });
+    const world = new World();
+    const terrain = new TerrainSystem(world);
+    try {
+      expect(DataManager.getInstance().isReady()).toBe(true);
+      await expect(terrain.init()).rejects.toThrow("road-clearance selector");
+      expect(terrain["grassVisualSelection"]).toBeUndefined();
+      expect(terrain["terrainMaterial"]).toBeUndefined();
+      expect(terrain["waterSystem"]).toBeUndefined();
+      expect(terrain["quadTreeVisualManager"]).toBeNull();
+      expect(terrain["grassVisualManager"]).toBeNull();
+      expect(terrain["canonicalGroundInitialized"]).toBe(false);
+    } finally {
+      terrain.destroy();
+      world.destroy();
+    }
+  });
+
   it("installs admitted height and biome sampling before yielding an already-ready init wave", async () => {
     expect(DataManager.getInstance().isReady()).toBe(true);
     const terrain = new TerrainSystem(new World());
@@ -59,9 +566,50 @@ describe("real manifest to compact TerrainSystem integration", () => {
   it("selects the explicit actual profile and reports its translated envelope and content hash", () => {
     const { terrain } = createTerrain();
     expect(DataManager.getInstance().isReady()).toBe(true);
-    expect(terrain.getWorldTerrainProfile()).toEqual(
-      HAVEN_SHOULDER_COMPACT_WORLD_TERRAIN_PROFILE,
-    );
+    expect(terrain.getWorldTerrainProfile()).toEqual({
+      ...HAVEN_SHOULDER_COMPACT_WORLD_TERRAIN_PROFILE,
+      coastalApron: {
+        schemaVersion: 1,
+        minX: 445,
+        maxX: 503,
+        minZ: 436,
+        maxZ: 539,
+        featherX: 6,
+        featherZ: 20,
+        halo: 1,
+        westernShoulder: {
+          maxWidth: 24,
+          startZ: 460,
+          endZ: 539,
+          featherZ: 24,
+        },
+        lowland: {
+          minZ: 436,
+          maxZ: 540,
+          startX: 462,
+          endX: 422,
+          descentLength: 57,
+          halfWidth: 12,
+          westHoldX: 445,
+          westMinX: 377,
+          westReleaseZ: 458,
+          westReleaseLength: 64,
+          eastMaxX: 503,
+          startBlend: 12,
+          endBlend: 22,
+          endHeight: 18.3,
+        },
+        floorHeight: 2.5,
+        referencePlateau: 28.15,
+        knots: [
+          [-26, 2.5, 0],
+          [-9, 16, 0.12],
+          [3, 17.5, 0.14],
+          [15, 19.25, 0.18],
+          [60, 28.15, 0],
+        ],
+      },
+    });
     const profile = terrain.getWorldTerrainProfile();
     expect(terrain.getWorldTerrainProfile()).toBe(profile);
     expect(terrain.tileSize).toBe(profile.terrainTileSize);

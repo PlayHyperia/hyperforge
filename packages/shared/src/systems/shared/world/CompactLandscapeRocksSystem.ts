@@ -54,8 +54,16 @@ export class CompactLandscapeRocksSystem extends System {
       const terrain = this.world.getSystem<TerrainSystem>("terrain");
       if (!terrain)
         throw new Error("Landscape rocks require authoritative terrain");
-      const record = groundCompactLandscapeRocks(descriptor, geometry, (x, z) =>
-        terrain.getHeightAt(x, z),
+      // The explicit coastal layout uses one authored datum on both peers,
+      // independent of resident tile caches or bridge/dock deck overrides.
+      // Preserve the original layout's historical height path exactly.
+      const record = groundCompactLandscapeRocks(
+        descriptor,
+        geometry,
+        (x, z) =>
+          descriptor.layoutId === "compact-preparation-coastal-rocks-v2"
+            ? terrain.getResourceGroundHeight(x, z)
+            : terrain.getHeightAt(x, z),
       );
       if (this.world.physics)
         for (const p of record.placements) {

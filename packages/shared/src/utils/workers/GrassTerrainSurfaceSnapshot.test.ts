@@ -8,6 +8,10 @@ import { TerrainSystem } from "../../systems/shared/world/TerrainSystem";
 import { WaterBodyRegistry } from "../../systems/shared/world/WaterBodyRegistry";
 import { validateRadialPondTerrainProfile } from "../../systems/shared/world/RadialPondTerrainProfile";
 import {
+  SCULPTED_COMPACT_WORLD_TERRAIN_PROFILE,
+  validateWorldTerrainProfile,
+} from "../../systems/shared/world/WorldTerrainProfile";
+import {
   GRASS_SURFACE_NORMAL_SAMPLE_DISTANCE,
   createGrassTerrainSurfaceOperations,
   createGrassTerrainSurfaceSnapshot,
@@ -59,6 +63,61 @@ function snapshot(
   };
 }
 
+function sectorPond(): GrassTerrainSurfaceZone {
+  return zone({
+    id: "sector-pond",
+    width: 22,
+    depth: 22,
+    height: 26.6,
+    blendRadius: 2,
+    radialPond: {
+      bedRadius: 5,
+      bankInnerRadius: 7,
+      bankOuterRadius: 9,
+      bankHeight: 28.08,
+      shorelineAmplitude: 0.9,
+      bankSectors: [
+        {
+          bearing: (-133 * Math.PI) / 180,
+          halfWidth: (40 * Math.PI) / 180,
+          innerRadius: 6.25,
+          innerHeight: 27.84,
+        },
+        {
+          bearing: (-27 * Math.PI) / 180,
+          halfWidth: (24 * Math.PI) / 180,
+          innerRadius: 6.55,
+          innerHeight: 28.08,
+        },
+      ],
+    },
+  });
+}
+
+function pairedSectorPond(): GrassTerrainSurfaceZone {
+  const pond = sectorPond();
+  pond.id = "paired-sector-pond";
+  Object.assign(pond.radialPond!.bankSectors![0], {
+    innerRadius: 6,
+    innerHeight: 27.98,
+    outerRadius: 8.2,
+    outerHeight: 28.55,
+  });
+  return pond;
+}
+
+function compositionPond(): GrassTerrainSurfaceZone {
+  const pond = pairedSectorPond();
+  pond.radialPond!.bankComposition = {
+    schemaVersion: 1,
+    sectors: [
+      { sectorIndex: 0, surface: "sedge-shelf" },
+      { sectorIndex: 1, surface: "cutbank" },
+    ],
+  };
+  return pond;
+}
+
 type WorkerReceipt = {
   error?: string;
   snapshot: GrassTerrainSurfaceSnapshot;
@@ -67,6 +126,7 @@ type WorkerReceipt = {
   indexedZoneReferences: number;
   excluded: boolean[];
   boxes?: { boundsOverlap: boolean; phases: string[]; intersects: boolean }[];
+  compositionFrozen?: boolean;
 };
 
 /** Real Node worker and native structured clone; no game or transport mocks. */
@@ -79,7 +139,7 @@ function actualWorker(
     const operations = (${factorySource})();
     parentPort.on("message", input => {
       try {
-        const snapshot = operations.validateSnapshot(input.snapshot);
+        const snapshot = input.clone ? operations.cloneSnapshot(input.snapshot) : operations.validateSnapshot(input.snapshot);
         const index = operations.createZoneIndex(snapshot, input.tileSize ?? 100);
         const points = input.points ?? [];
         const boxes = input.boxes?.map(box => {
@@ -90,6 +150,7 @@ function actualWorker(
           return { boundsOverlap: operations.exclusionBoundsOverlap(polygon, box), phases, intersects: step.value };
         });
         parentPort.postMessage({ snapshot, indexedZoneReferences: index.indexedZoneReferences,
+          ...(input.clone ? { compositionFrozen: snapshot.zones.every(zone => !zone.radialPond?.bankComposition || (Object.isFrozen(zone.radialPond.bankComposition) && Object.isFrozen(zone.radialPond.bankComposition.sectors) && zone.radialPond.bankComposition.sectors.every(Object.isFrozen))) } : {}),
           ...(boxes ? { boxes } : {}),
           excluded: points.map(p => operations.isGrassExcluded(snapshot, p[0], p[1])),
           water: points.map(p => operations.getWaterSurfaceAt(snapshot, input.oceanLevel ?? 16, p[0], p[1])),
@@ -133,6 +194,957 @@ function actualWorker(
 }
 
 describe("detached grass terrain surface requests", () => {
+  it("round-trips mineral-shore through actual worker admission without vegetation metadata", async () => {
+    const source = compositionPond();
+    Object.assign(source.radialPond!.bankComposition!.sectors[0], {
+      surface: "mineral-shore",
+    });
+    const cloned = operations.cloneSnapshot(snapshot([source]));
+    expect(cloned.zones[0].radialPond!.bankComposition!.sectors[0]).toEqual({
+      sectorIndex: 0,
+      surface: "mineral-shore",
+    });
+    expect(
+      Object.isFrozen(cloned.zones[0].radialPond!.bankComposition!.sectors[0]),
+    ).toBe(true);
+    const worker = actualWorker();
+    try {
+      const result = await worker.execute({
+        snapshot: snapshot([source]),
+        clone: true,
+      });
+      expect(result.error).toBeUndefined();
+      expect(result.snapshot).toEqual(cloned);
+      expect(result.compositionFrozen).toBe(true);
+      Object.assign(source.radialPond!.bankComposition!.sectors[0], {
+        groundCover: { emergenceHeight: 0.11, fullHeight: 0.24 },
+      });
+      expect(validateRadialPondTerrainProfile(source)).toMatch(
+        /mineral-shore.*groundCover/,
+      );
+      expect(() => operations.cloneSnapshot(snapshot([source]))).toThrow(
+        /mineral-shore.*groundCover/,
+      );
+      expect(
+        (await worker.execute({ snapshot: snapshot([source]), clone: true }))
+          .error,
+      ).toMatch(/mineral-shore.*groundCover/);
+    } finally {
+      await worker.close();
+    }
+  });
+  it("strictly admits, detaches and freezes optional emergence metadata on host and the real worker", async () => {
+    const source = compositionPond();
+    Object.assign(source.radialPond!.bankComposition!.sectors[0], {
+      groundCover: { emergenceHeight: 0.04, fullHeight: 0.12 },
+    });
+    expect(validateRadialPondTerrainProfile(source)).toBeNull();
+    const clone = operations.cloneSnapshot(snapshot([source]));
+    const cover =
+      clone.zones[0].radialPond!.bankComposition!.sectors[0].groundCover!;
+    expect(cover).toEqual({ emergenceHeight: 0.04, fullHeight: 0.12 });
+    expect(cover).not.toBe(
+      source.radialPond!.bankComposition!.sectors[0].groundCover,
+    );
+    expect(Object.isFrozen(cover)).toBe(true);
+    expect(
+      clone.zones[0].radialPond!.bankComposition!.sectors[1],
+    ).not.toHaveProperty("groundCover");
+    const worker = actualWorker();
+    try {
+      const receipt = await worker.execute({
+        snapshot: snapshot([source]),
+        clone: true,
+      });
+      expect(receipt.error).toBeUndefined();
+      expect(receipt.snapshot).toEqual(clone);
+      for (const groundCover of [
+        undefined,
+        null,
+        [],
+        {},
+        { emergenceHeight: 0, fullHeight: 0.12 },
+        { emergenceHeight: -0.01, fullHeight: 0.12 },
+        { emergenceHeight: 0.12, fullHeight: 0.12 },
+        { emergenceHeight: 0.13, fullHeight: 0.12 },
+        { emergenceHeight: 0.1, fullHeight: 0.10000000001 },
+        { emergenceHeight: 0.04, fullHeight: 0.601 },
+        { emergenceHeight: NaN, fullHeight: 0.12 },
+        { emergenceHeight: 0.04, fullHeight: Infinity },
+        { emergenceHeight: 0.04, fullHeight: 0.12, extra: 1 },
+      ]) {
+        const invalid = compositionPond();
+        Object.assign(invalid.radialPond!.bankComposition!.sectors[0], {
+          groundCover,
+        });
+        expect(validateRadialPondTerrainProfile(invalid)).toMatch(
+          /groundCover/,
+        );
+        expect(() => operations.cloneSnapshot(snapshot([invalid]))).toThrow(
+          /groundCover/,
+        );
+        expect(
+          (await worker.execute({ snapshot: snapshot([invalid]) })).error,
+        ).toMatch(/groundCover/);
+      }
+      for (const cover of [
+        Object.create({ emergenceHeight: 0.04, fullHeight: 0.12 }),
+        Object.defineProperty({ fullHeight: 0.12 }, "emergenceHeight", {
+          enumerable: true,
+          get() {
+            throw new Error("must not execute");
+          },
+        }),
+        { emergenceHeight: 0.04, fullHeight: 0.12, [Symbol("hidden")]: true },
+      ]) {
+        const invalid = compositionPond();
+        Object.assign(invalid.radialPond!.bankComposition!.sectors[0], {
+          groundCover: cover,
+        });
+        expect(validateRadialPondTerrainProfile(invalid)).toMatch(
+          /groundCover/,
+        );
+        expect(() => operations.cloneSnapshot(snapshot([invalid]))).toThrow(
+          /groundCover/,
+        );
+      }
+    } finally {
+      await worker.close();
+    }
+  });
+  it("detaches and freezes optional bank composition while preserving absence and real worker admission", async () => {
+    const source = compositionPond();
+    expect(validateRadialPondTerrainProfile(source)).toBeNull();
+    const expected = structuredClone(snapshot([source]));
+    const clone = operations.cloneSnapshot(snapshot([source]));
+    const composition = clone.zones[0].radialPond!.bankComposition!;
+    expect(clone).toEqual(expected);
+    expect(composition).not.toBe(source.radialPond!.bankComposition);
+    expect(composition.sectors).not.toBe(
+      source.radialPond!.bankComposition!.sectors,
+    );
+    expect(composition.sectors[0]).not.toBe(
+      source.radialPond!.bankComposition!.sectors[0],
+    );
+    expect(Object.isFrozen(composition)).toBe(true);
+    expect(Object.isFrozen(composition.sectors)).toBe(true);
+    expect(composition.sectors.every(Object.isFrozen)).toBe(true);
+    Object.assign(source.radialPond!.bankComposition!.sectors[0], {
+      surface: "dry-turf",
+    });
+    expect(clone).toEqual(expected);
+    expect(
+      operations.cloneSnapshot(snapshot([pairedSectorPond()])).zones[0]
+        .radialPond,
+    ).not.toHaveProperty("bankComposition");
+    const empty = sectorPond();
+    delete empty.radialPond!.bankSectors;
+    empty.radialPond!.bankComposition = { schemaVersion: 1, sectors: [] };
+    expect(validateRadialPondTerrainProfile(empty)).toBeNull();
+    expect(operations.cloneSnapshot(snapshot([empty])).zones[0]).toEqual(empty);
+    const worker = actualWorker();
+    try {
+      expect((await worker.execute({ snapshot: clone })).snapshot).toEqual(
+        expected,
+      );
+      expect(
+        (await worker.execute({ snapshot: snapshot([empty]) })).snapshot,
+      ).toEqual(snapshot([empty]));
+      for (const surface of ["sedge-shelf", "cutbank", "dry-turf"] as const) {
+        const candidate = compositionPond();
+        candidate.radialPond!.bankSectors!.push(
+          ...structuredClone(candidate.radialPond!.bankSectors!),
+        );
+        candidate.radialPond!.bankComposition = {
+          schemaVersion: 1,
+          sectors: [0, 1, 2, 3].map((sectorIndex) => ({
+            sectorIndex,
+            surface,
+          })),
+        };
+        expect(validateRadialPondTerrainProfile(candidate)).toBeNull();
+        expect(
+          (await worker.execute({ snapshot: snapshot([candidate]) })).snapshot,
+        ).toEqual(snapshot([candidate]));
+      }
+    } finally {
+      await worker.close();
+    }
+  });
+
+  it("rejects malformed composition versions, rows and references equally on terrain, snapshot and a real worker", async () => {
+    const good = compositionPond().radialPond!.bankComposition!;
+    const invalid: unknown[] = [
+      undefined,
+      null,
+      {},
+      [],
+      { ...good, schemaVersion: 0 },
+      { ...good, schemaVersion: "1" },
+      { ...good, schemaVersion: NaN },
+      { ...good, extra: true },
+      { ...good, sectors: undefined },
+      { ...good, sectors: null },
+      { ...good, sectors: {} },
+      { ...good, sectors: Array(1) },
+      { ...good, sectors: Array.from({ length: 5 }, () => good.sectors[0]) },
+      { ...good, sectors: [good.sectors[0], good.sectors[0]] },
+      ...[-1, 2, 0.1, NaN, Infinity, "0", null, undefined].map(
+        (sectorIndex) => ({
+          ...good,
+          sectors: [{ sectorIndex, surface: "cutbank" }],
+        }),
+      ),
+      ...["", "grass", "CUTBANK", null, 1, undefined].map((surface) => ({
+        ...good,
+        sectors: [{ sectorIndex: 0, surface }],
+      })),
+      { ...good, sectors: [{ ...good.sectors[0], extra: true }] },
+    ];
+    const worker = actualWorker();
+    try {
+      for (const bankComposition of invalid) {
+        const candidate = pairedSectorPond();
+        Object.defineProperty(candidate.radialPond!, "bankComposition", {
+          value: bankComposition,
+          enumerable: true,
+        });
+        expect(validateRadialPondTerrainProfile(candidate)).toMatch(
+          /bankComposition/,
+        );
+        expect(() => operations.cloneSnapshot(snapshot([candidate]))).toThrow(
+          /bankComposition/,
+        );
+        expect(
+          (await worker.execute({ snapshot: snapshot([candidate]) })).error,
+        ).toMatch(/bankComposition/);
+      }
+      const missing = compositionPond();
+      delete missing.radialPond!.bankSectors;
+      expect(validateRadialPondTerrainProfile(missing)).toMatch(
+        /bankComposition/,
+      );
+      expect(
+        (await worker.execute({ snapshot: snapshot([missing]) })).error,
+      ).toMatch(/bankComposition/);
+    } finally {
+      await worker.close();
+    }
+  });
+
+  it("rejects hostile composition descriptors without getters and accepts null-prototype plain data", () => {
+    let reads = 0;
+    for (const target of [
+      "field",
+      "version",
+      "sectors",
+      "entry",
+      "index",
+      "surface",
+    ] as const) {
+      for (const kind of [
+        "accessor",
+        "hidden",
+        "inherited",
+        "extra",
+        "symbol",
+      ] as const) {
+        const candidate = compositionPond();
+        const composition = candidate.radialPond!.bankComposition!;
+        const owner =
+          target === "field"
+            ? candidate.radialPond!
+            : target === "version" || target === "sectors"
+              ? composition
+              : target === "entry"
+                ? composition.sectors
+                : composition.sectors[0];
+        const key =
+          target === "field"
+            ? "bankComposition"
+            : target === "version"
+              ? "schemaVersion"
+              : target === "sectors"
+                ? "sectors"
+                : target === "entry"
+                  ? "0"
+                  : target === "index"
+                    ? "sectorIndex"
+                    : "surface";
+        const value: unknown = Object.getOwnPropertyDescriptor(
+          owner,
+          key,
+        )!.value;
+        if (kind === "accessor")
+          Object.defineProperty(owner, key, {
+            get() {
+              reads++;
+              return value;
+            },
+            enumerable: true,
+          });
+        else if (kind === "hidden")
+          Object.defineProperty(owner, key, { value, enumerable: false });
+        else if (kind === "inherited") {
+          Reflect.deleteProperty(owner, key);
+          Object.setPrototypeOf(owner, { [key]: value });
+        } else if (target === "field") {
+          // Extras belong to the composition record, not the extensible radial profile.
+          Object.defineProperty(
+            composition,
+            kind === "symbol" ? Symbol("extra") : "extra",
+            { value: true },
+          );
+        } else
+          Object.defineProperty(
+            owner,
+            kind === "symbol" ? Symbol("extra") : "extra",
+            { value: true },
+          );
+        expect(validateRadialPondTerrainProfile(candidate)).toMatch(
+          /bankComposition/,
+        );
+        expect(() => operations.cloneSnapshot(snapshot([candidate]))).toThrow(
+          /bankComposition/,
+        );
+      }
+    }
+    expect(reads).toBe(0);
+    const candidate = compositionPond();
+    Object.setPrototypeOf(candidate.radialPond!.bankComposition!, null);
+    for (const row of candidate.radialPond!.bankComposition!.sectors)
+      Object.setPrototypeOf(row, null);
+    expect(validateRadialPondTerrainProfile(candidate)).toBeNull();
+    expect(operations.cloneSnapshot(snapshot([candidate])).zones[0]).toEqual(
+      candidate,
+    );
+  });
+
+  it("revalidates bank composition after a continuation and atomically copies the newest valid data", () => {
+    for (const change of [
+      "version",
+      "reference",
+      "duplicate",
+      "getter",
+    ] as const) {
+      const candidate = compositionPond();
+      const steps = operations.cloneSnapshotSteps(snapshot([candidate]));
+      let step = steps.next();
+      while (!step.done && step.value !== "snapshot_clone_zone")
+        step = steps.next();
+      expect(step.value).toBe("snapshot_clone_zone");
+      const c = candidate.radialPond!.bankComposition!;
+      if (change === "version") Object.assign(c, { schemaVersion: 2 });
+      else if (change === "reference")
+        Object.assign(c.sectors[0], { sectorIndex: 2 });
+      else if (change === "duplicate")
+        Object.assign(c.sectors[1], { sectorIndex: 0 });
+      else
+        Object.defineProperty(candidate.radialPond!, "bankComposition", {
+          get() {
+            throw new Error("Getter must never execute");
+          },
+          enumerable: true,
+        });
+      expect(() => steps.next()).toThrow(/bankComposition/);
+    }
+    const candidate = compositionPond();
+    const steps = operations.cloneSnapshotSteps(snapshot([candidate]));
+    let step = steps.next();
+    while (!step.done && step.value !== "snapshot_clone_zone")
+      step = steps.next();
+    Object.assign(candidate.radialPond!.bankComposition!.sectors[0], {
+      surface: "dry-turf",
+    });
+    while (!step.done) step = steps.next();
+    const detached = step.value.zones[0].radialPond!.bankComposition!;
+    expect(detached.sectors[0].surface).toBe("dry-turf");
+    expect(Object.isFrozen(detached.sectors[0])).toBe(true);
+    Object.assign(candidate.radialPond!.bankComposition!.sectors[0], {
+      surface: "cutbank",
+    });
+    expect(detached.sectors[0].surface).toBe("dry-turf");
+  });
+
+  it("preserves paired outer knots and absent legacy fields through detached copies and a real worker", async () => {
+    const source = pairedSectorPond();
+    expect(validateRadialPondTerrainProfile(source)).toBeNull();
+    const expected = structuredClone(snapshot([source]));
+    const clone = operations.cloneSnapshot(snapshot([source]));
+    const rows = clone.zones[0].radialPond!.bankSectors!;
+    expect(clone).toEqual(expected);
+    expect(rows[0]).not.toBe(source.radialPond!.bankSectors![0]);
+    expect(Reflect.ownKeys(rows[0])).toEqual([
+      "bearing",
+      "halfWidth",
+      "innerRadius",
+      "innerHeight",
+      "outerRadius",
+      "outerHeight",
+    ]);
+    expect(rows[1]).not.toHaveProperty("outerRadius");
+    expect(rows[1]).not.toHaveProperty("outerHeight");
+    source.radialPond!.bankSectors![0].outerRadius = 8.7;
+    source.radialPond!.bankSectors![0].outerHeight = 28.6;
+    expect(clone).toEqual(expected);
+    const worker = actualWorker();
+    try {
+      const result = await worker.execute({
+        snapshot: clone,
+        points: [[0, 0]],
+      });
+      expect(result.error).toBeUndefined();
+      expect(result.snapshot).toEqual(expected);
+      expect(result.candidateIds).toEqual([[source.id]]);
+      rows[0].outerHeight = 28.65;
+      expect(result.snapshot).toEqual(expected);
+    } finally {
+      await worker.close();
+    }
+  });
+
+  it("admits only complete finite bounded outer-knot pairs on terrain, snapshot and real worker", async () => {
+    const row = pairedSectorPond().radialPond!.bankSectors![0];
+    const legacy = sectorPond().radialPond!.bankSectors![0];
+    const invalid: unknown[] = [
+      { ...legacy, outerRadius: 8.2 },
+      { ...legacy, outerHeight: 28.55 },
+      ...[
+        { outerRadius: undefined },
+        { outerHeight: undefined },
+        { outerRadius: null },
+        { outerHeight: null },
+        { outerRadius: NaN },
+        { outerHeight: NaN },
+        { outerRadius: Infinity },
+        { outerHeight: -Infinity },
+        { outerRadius: "8.2" },
+        { outerHeight: "28.55" },
+        { outerRadius: row.innerRadius },
+        { outerRadius: 11 },
+        { outerRadius: 11.01 },
+        { outerHeight: row.innerHeight - 0.001 },
+        { outerHeight: 28.08 + 0.601 },
+        { extra: true },
+      ].map((change) => ({ ...row, ...change })),
+    ];
+    const worker = actualWorker();
+    try {
+      for (const value of invalid) {
+        const candidate = sectorPond();
+        Object.defineProperty(candidate.radialPond!, "bankSectors", {
+          value: [value],
+          enumerable: true,
+        });
+        expect(validateRadialPondTerrainProfile(candidate)).toMatch(
+          /bankSectors/,
+        );
+        const input = snapshot([candidate]);
+        expect(() => operations.cloneSnapshot(input)).toThrow(/bankSectors/);
+        expect((await worker.execute({ snapshot: input })).error).toMatch(
+          /bankSectors/,
+        );
+      }
+      const candidate = pairedSectorPond();
+      candidate.radialPond!.bankSectors = [
+        { ...row, outerHeight: row.innerHeight },
+        { ...row, outerHeight: candidate.radialPond!.bankHeight + 0.6 },
+        { ...row, outerRadius: 10.999 },
+        legacy,
+      ];
+      expect(validateRadialPondTerrainProfile(candidate)).toBeNull();
+      const clone = operations.cloneSnapshot(snapshot([candidate]));
+      expect(clone.zones[0]).toEqual(candidate);
+      expect((await worker.execute({ snapshot: clone })).snapshot).toEqual(
+        clone,
+      );
+    } finally {
+      await worker.close();
+    }
+  });
+
+  it("rejects hostile optional-knot descriptors without invoking getters while admitting null-prototype data rows", () => {
+    let reads = 0;
+    for (const key of ["outerRadius", "outerHeight"] as const) {
+      for (const kind of [
+        "accessor",
+        "inherited",
+        "hidden",
+        "symbol",
+        "extra",
+      ] as const) {
+        const candidate = pairedSectorPond();
+        const row = candidate.radialPond!.bankSectors![0];
+        const value = row[key];
+        if (kind === "accessor")
+          Object.defineProperty(row, key, {
+            get() {
+              reads++;
+              return value;
+            },
+            enumerable: true,
+          });
+        else if (kind === "inherited") {
+          delete row[key];
+          Object.setPrototypeOf(row, { [key]: value });
+        } else if (kind === "hidden")
+          Object.defineProperty(row, key, { value, enumerable: false });
+        else
+          Object.defineProperty(
+            row,
+            kind === "symbol" ? Symbol(key) : "extra",
+            {
+              value: true,
+              enumerable: true,
+            },
+          );
+        expect(validateRadialPondTerrainProfile(candidate)).toMatch(
+          /bankSectors/,
+        );
+        expect(() => operations.cloneSnapshot(snapshot([candidate]))).toThrow(
+          /bankSectors/,
+        );
+      }
+    }
+    expect(reads).toBe(0);
+    const candidate = pairedSectorPond();
+    Object.setPrototypeOf(candidate.radialPond!.bankSectors![0], null);
+    expect(validateRadialPondTerrainProfile(candidate)).toBeNull();
+    expect(operations.cloneSnapshot(snapshot([candidate])).zones[0]).toEqual(
+      candidate,
+    );
+  });
+
+  it("revalidates optional outer knots after the cloning continuation and copies the latest valid pair atomically", () => {
+    for (const kind of [
+      "radius",
+      "height",
+      "missing",
+      "added-half",
+      "blend",
+    ] as const) {
+      const candidate =
+        kind === "added-half" ? sectorPond() : pairedSectorPond();
+      const steps = operations.cloneSnapshotSteps(snapshot([candidate]));
+      let step = steps.next();
+      while (!step.done && step.value !== "snapshot_clone_zone")
+        step = steps.next();
+      expect(step.value).toBe("snapshot_clone_zone");
+      const row = candidate.radialPond!.bankSectors![0];
+      if (kind === "radius") row.outerRadius = 11;
+      else if (kind === "height") row.outerHeight = NaN;
+      else if (kind === "missing") delete row.outerHeight;
+      else if (kind === "added-half") row.outerRadius = 8.2;
+      else candidate.blendRadius = 0;
+      expect(() => steps.next()).toThrow(/bankSectors/);
+    }
+    const candidate = pairedSectorPond();
+    const steps = operations.cloneSnapshotSteps(snapshot([candidate]));
+    let step = steps.next();
+    while (!step.done && step.value !== "snapshot_clone_zone")
+      step = steps.next();
+    candidate.radialPond!.bankSectors![0].outerRadius = 8.7;
+    candidate.radialPond!.bankSectors![0].outerHeight = 28.6;
+    while (!step.done) step = steps.next();
+    expect(step.value.zones[0]).toEqual(candidate);
+    candidate.radialPond!.bankSectors![0].outerHeight = 28.65;
+    expect(step.value.zones[0].radialPond!.bankSectors![0].outerHeight).toBe(
+      28.6,
+    );
+  });
+
+  it("deep-copies bounded pond sectors and preserves them in a real worker without aliasing", async () => {
+    const source = sectorPond();
+    expect(validateRadialPondTerrainProfile(source)).toBeNull();
+    const input = snapshot([source]);
+    const before = structuredClone(input);
+    const clone = operations.cloneSnapshot(input);
+    expect(clone).toEqual(before);
+    expect(clone.zones[0].radialPond!.bankSectors).not.toBe(
+      source.radialPond!.bankSectors,
+    );
+    expect(clone.zones[0].radialPond!.bankSectors![0]).not.toBe(
+      source.radialPond!.bankSectors![0],
+    );
+    source.radialPond!.bankSectors![0].innerHeight = 28;
+    source.radialPond!.bankSectors!.pop();
+    expect(clone).toEqual(before);
+    const empty = sectorPond();
+    empty.radialPond!.bankSectors = [];
+    expect(validateRadialPondTerrainProfile(empty)).toBeNull();
+    expect(
+      operations.cloneSnapshot(snapshot([empty])).zones[0].radialPond!
+        .bankSectors,
+    ).toEqual([]);
+    delete empty.radialPond!.bankSectors;
+    expect(
+      operations.cloneSnapshot(snapshot([empty])).zones[0].radialPond,
+    ).not.toHaveProperty("bankSectors");
+    const worker = actualWorker();
+    try {
+      const result = await worker.execute({
+        snapshot: clone,
+        points: [[0, 0]],
+      });
+      expect(result.error).toBeUndefined();
+      expect(result.snapshot).toEqual(before);
+      expect(result.candidateIds).toEqual([[source.id]]);
+    } finally {
+      await worker.close();
+    }
+  });
+
+  it("rejects invalid pond sector cardinality and bounds identically on terrain, snapshot and real worker", async () => {
+    const row = sectorPond().radialPond!.bankSectors![0];
+    const invalid: unknown[] = [
+      undefined,
+      null,
+      {},
+      Array(1),
+      Array.from({ length: 5 }, () => ({ ...row })),
+      ...[
+        { bearing: NaN },
+        { bearing: -Math.PI - 0.01 },
+        { bearing: Math.PI + 0.01 },
+        { halfWidth: 0 },
+        { halfWidth: Math.PI / 2 + 0.01 },
+        { halfWidth: Infinity },
+        { innerRadius: 5 },
+        { innerRadius: 9 },
+        { innerHeight: 26.6 },
+        { innerHeight: 28.081 },
+      ].map((change) => [{ ...row, ...change }]),
+      [{ ...row, extra: true }],
+      [{ bearing: 0 }],
+    ];
+    const worker = actualWorker();
+    try {
+      for (const value of invalid) {
+        const candidate = sectorPond();
+        Object.defineProperty(candidate.radialPond!, "bankSectors", {
+          value,
+          enumerable: true,
+        });
+        expect(validateRadialPondTerrainProfile(candidate)).toMatch(
+          /bankSectors/,
+        );
+        const input = snapshot([candidate]);
+        expect(() => operations.cloneSnapshot(input)).toThrow(/bankSectors/);
+        expect((await worker.execute({ snapshot: input })).error).toMatch(
+          /bankSectors/,
+        );
+      }
+      const extremes = sectorPond();
+      extremes.radialPond!.bankSectors = [
+        { ...row, bearing: -Math.PI, halfWidth: Math.PI / 2 },
+        { ...row, bearing: Math.PI, innerHeight: 28.08 },
+      ];
+      expect(validateRadialPondTerrainProfile(extremes)).toBeNull();
+      expect(operations.cloneSnapshot(snapshot([extremes])).zones[0]).toEqual(
+        extremes,
+      );
+    } finally {
+      await worker.close();
+    }
+  });
+
+  it("rejects inherited or accessor pond sectors without invoking getters and rechecks resumed cloning", () => {
+    let reads = 0;
+    const value = sectorPond().radialPond!.bankSectors!;
+    const candidates = [sectorPond(), sectorPond(), sectorPond(), sectorPond()];
+    Object.defineProperty(candidates[0].radialPond!, "bankSectors", {
+      get() {
+        reads++;
+        return value;
+      },
+      enumerable: true,
+    });
+    delete candidates[1].radialPond!.bankSectors;
+    Object.setPrototypeOf(candidates[1].radialPond!, { bankSectors: value });
+    Object.defineProperty(candidates[2].radialPond!.bankSectors!, "0", {
+      get() {
+        reads++;
+        return value[0];
+      },
+      enumerable: true,
+    });
+    Object.defineProperty(
+      candidates[3].radialPond!.bankSectors![0],
+      "innerHeight",
+      {
+        get() {
+          reads++;
+          return 27.84;
+        },
+        enumerable: true,
+      },
+    );
+    for (const candidate of candidates) {
+      expect(validateRadialPondTerrainProfile(candidate)).toMatch(
+        /bankSectors/,
+      );
+      expect(() => operations.cloneSnapshot(snapshot([candidate]))).toThrow(
+        /bankSectors/,
+      );
+    }
+    expect(reads).toBe(0);
+    const mutable = sectorPond();
+    const steps = operations.cloneSnapshotSteps(snapshot([mutable]));
+    let step = steps.next();
+    while (!step.done && step.value !== "snapshot_clone_zone")
+      step = steps.next();
+    expect(step.value).toBe("snapshot_clone_zone");
+    mutable.radialPond!.bankSectors![0].innerHeight = Infinity;
+    expect(() => steps.next()).toThrow(/bankSectors/);
+  });
+
+  it("owns frozen pond sector rows and invalidates canonical terrain when any nested field changes", async () => {
+    const world = new World();
+    const terrain = world.register("terrain", TerrainSystem) as TerrainSystem;
+    terrain["activeTerrainProfile"] = validateWorldTerrainProfile({
+      ...SCULPTED_COMPACT_WORLD_TERRAIN_PROFILE,
+      southernMeadow: {
+        schemaVersion: 1,
+        minX: 304,
+        maxX: 500,
+        minZ: 345,
+        maxZ: 535,
+        featherX: 24,
+        featherZ: 24,
+        northHeight: 26.8,
+        southHeight: 25.3,
+        crossFall: 1,
+        rollAmplitude: 0.65,
+        rollWavelength: 100,
+      },
+    });
+    await terrain.init();
+    try {
+      const original = sectorPond();
+      terrain.registerFlatZone(original);
+      const provider = terrain["buildChunkTerrainProvider"]();
+      expect(provider.surfaceRefinementAnnuli).toEqual([
+        { centerX: 0, centerZ: 0, innerRadius: 4.1, outerRadius: 7.9 },
+      ]);
+      const owned = terrain["flatZones"].get(original.id)!;
+      expect(Object.isFrozen(owned.radialPond!.bankSectors)).toBe(true);
+      expect(owned.radialPond!.bankSectors!.every(Object.isFrozen)).toBe(true);
+      const lease = terrain.captureCanonicalGroundLease();
+      const sample = lease.sampleHeight(-4, -4);
+      original.radialPond!.bankSectors![0].innerHeight = 28;
+      terrain.getFlatZoneAt(0, 0)!.radialPond!.bankSectors![0].bearing = 0;
+      expect(lease.isCurrent()).toBe(true);
+      expect(lease.sampleHeight(-4, -4)).toBe(sample);
+      const identical = terrain.getFlatZoneAt(0, 0)!;
+      terrain.registerFlatZone(identical);
+      expect(lease.isCurrent()).toBe(true);
+      for (const [key, value] of [
+        ["bearing", -2],
+        ["halfWidth", 0.6],
+        ["innerRadius", 6.4],
+        ["innerHeight", 27.9],
+      ] as const) {
+        const current = terrain.captureCanonicalGroundLease();
+        const updated = terrain.getFlatZoneAt(0, 0)!;
+        updated.radialPond!.bankSectors![0][key] = value;
+        terrain.registerFlatZone(updated);
+        expect(current.isCurrent()).toBe(false);
+      }
+      const empty = terrain.getFlatZoneAt(0, 0)!;
+      empty.radialPond!.bankSectors = [];
+      terrain.registerFlatZone(empty);
+      expect(provider.surfaceRefinementAnnuli![0].outerRadius).toBe(7.9);
+      const absent = terrain.getFlatZoneAt(0, 0)!;
+      delete absent.radialPond!.bankSectors;
+      terrain.registerFlatZone(absent);
+      expect(provider.surfaceRefinementAnnuli![0].outerRadius).toBe(7.9);
+    } finally {
+      world.destroy();
+    }
+  });
+
+  it("retains rounded geometry through detached cloning and the real worker index", async () => {
+    const rounded = zone({
+      blendShape: "rounded",
+      blendComposition: "smooth-union",
+    });
+    const input = snapshot([rounded]);
+    const copy = operations.cloneSnapshot(input);
+    expect(copy).toEqual(input);
+    expect(copy.zones[0]).not.toBe(rounded);
+    expect(operations.cloneSnapshot(snapshot()).zones[0]).not.toHaveProperty(
+      "blendShape",
+    );
+    expect(operations.cloneSnapshot(snapshot()).zones[0]).not.toHaveProperty(
+      "blendComposition",
+    );
+    const index = operations.createZoneIndex(copy, 100);
+    const oldIndex = operations.createZoneIndex(snapshot(), 100);
+    expect(index.indexedZoneReferences).toBe(oldIndex.indexedZoneReferences);
+    expect(index.bucketCount).toBe(oldIndex.bucketCount);
+    const worker = actualWorker();
+    try {
+      const result = await worker.execute({
+        snapshot: copy,
+        points: [
+          [14, 10],
+          [12.4, 13.2],
+        ],
+      });
+      expect(result.error).toBeUndefined();
+      expect(result.snapshot.zones[0].blendShape).toBe("rounded");
+      expect(result.snapshot.zones[0].blendComposition).toBe("smooth-union");
+      expect(result.candidateIds).toEqual([[rounded.id], [rounded.id]]);
+    } finally {
+      await worker.close();
+    }
+  });
+
+  it("strictly admits only explicit own smooth-union composition paired with rounded geometry", async () => {
+    const invalid = [undefined, null, false, 1, {}, "min", "SMOOTH-UNION"].map(
+      (blendComposition) => ({
+        ...zone({ blendShape: "rounded" }),
+        blendComposition,
+      }),
+    );
+    invalid.push({ ...zone(), blendComposition: "smooth-union" });
+    const worker = actualWorker();
+    try {
+      for (const candidate of invalid) {
+        const input = { ...snapshot(), zones: [candidate] };
+        expect(() => operations.cloneSnapshot(input)).toThrow(
+          /blendComposition/,
+        );
+        expect((await worker.execute({ snapshot: input })).error).toMatch(
+          /blendComposition/,
+        );
+      }
+    } finally {
+      await worker.close();
+    }
+    let reads = 0;
+    const getter = {
+      enumerable: true,
+      get() {
+        reads++;
+        return "smooth-union";
+      },
+    };
+    const accessor = Object.defineProperty(
+      zone({ blendShape: "rounded" }),
+      "blendComposition",
+      getter,
+    );
+    const hidden = Object.defineProperty(
+      zone({ blendShape: "rounded" }),
+      "blendComposition",
+      { value: "smooth-union" },
+    );
+    const inherited = Object.assign(
+      Object.create({ blendComposition: "smooth-union" }) as FlatZone,
+      zone({ blendShape: "rounded" }),
+    );
+    for (const candidate of [accessor, hidden, inherited])
+      expect(() => operations.cloneSnapshot(snapshot([candidate]))).toThrow(
+        /blendComposition/,
+      );
+    expect(reads).toBe(0);
+    const mutable = zone({
+      blendShape: "rounded",
+      blendComposition: "smooth-union",
+    });
+    const steps = operations.cloneSnapshotSteps(snapshot([mutable]));
+    let step = steps.next();
+    while (!step.done && step.value !== "snapshot_clone_zone")
+      step = steps.next();
+    expect(step.done).toBe(false);
+    Object.defineProperty(mutable, "blendComposition", getter);
+    expect(() => steps.next()).toThrow(/blendComposition/);
+    expect(reads).toBe(0);
+  });
+
+  it("rejects malformed or ambiguous rounded metadata before copying, including worker requests", async () => {
+    const invalid = [undefined, null, false, 1, {}, "square", "ROUNDED"].map(
+      (blendShape) => ({ ...zone(), blendShape }),
+    );
+    const worker = actualWorker();
+    try {
+      for (const candidate of [
+        ...invalid,
+        { ...masked(), blendShape: "rounded" },
+        { ...zone({ blendShape: "rounded" }), tileMaskTiles: [] },
+        { ...zone({ blendShape: "rounded" }), radialPond: {} },
+      ]) {
+        const input = { ...snapshot(), zones: [candidate] };
+        expect(() => operations.cloneSnapshot(input)).toThrow(/blendShape/);
+        expect((await worker.execute({ snapshot: input })).error).toMatch(
+          /blendShape/,
+        );
+      }
+      const floor = {
+        ...snapshot([zone({ blendShape: "rounded" })]),
+        arenaFloorIds: ["grade"],
+        arenaGradeHeight: 24,
+      };
+      expect(() => operations.cloneSnapshot(floor)).toThrow(/arena floors/);
+      expect((await worker.execute({ snapshot: floor })).error).toMatch(
+        /arena floors/,
+      );
+    } finally {
+      await worker.close();
+    }
+    let reads = 0;
+    const getter = {
+      enumerable: true,
+      get() {
+        reads++;
+        return "rounded";
+      },
+    };
+    const accessor = Object.defineProperty(zone(), "blendShape", getter);
+    const nonEnumerable = Object.defineProperty(zone(), "blendShape", {
+      value: "rounded",
+    });
+    const inherited = Object.assign(
+      Object.create({ blendShape: "rounded" }) as FlatZone,
+      zone(),
+    );
+    for (const candidate of [accessor, nonEnumerable, inherited])
+      expect(() => operations.cloneSnapshot(snapshot([candidate]))).toThrow(
+        /blendShape/,
+      );
+    expect(reads).toBe(0);
+    const mutable = zone({ blendShape: "rounded" });
+    const steps = operations.cloneSnapshotSteps(snapshot([mutable]));
+    let step = steps.next();
+    while (!step.done && step.value !== "snapshot_clone_zone")
+      step = steps.next();
+    expect(step.done).toBe(false);
+    Object.defineProperty(mutable, "blendShape", getter);
+    expect(() => steps.next()).toThrow(/blendShape/);
+    expect(reads).toBe(0);
+    expect(() =>
+      operations.cloneSnapshot(
+        snapshot([
+          zone({
+            blendShape: "rounded",
+            grassExclusionBounds: { minX: -14, maxX: 14, minZ: -14, maxZ: 14 },
+          }),
+        ]),
+      ),
+    ).toThrow(/rounded grading support/);
+    expect(() =>
+      operations.cloneSnapshot(
+        snapshot([
+          zone({
+            blendShape: "rounded",
+            grassExclusionBounds: { minX: -10, maxX: 10, minZ: -14, maxZ: 14 },
+          }),
+        ]),
+      ),
+    ).not.toThrow();
+  });
+
   it("clones explicit grass bounds without changing grading indexes or synthesizing absent fields", async () => {
     const original = zone();
     const bounded = zone({
@@ -372,12 +1384,61 @@ describe("detached grass terrain surface requests", () => {
     expect(() =>
       operations.validateSnapshot({
         ...input,
-        exclusionPolygons: Array.from({ length: 25 }, (_, i) => ({
+        exclusionPolygons: Array.from({ length: 33 }, (_, i) => ({
           ...polygon,
           id: String(i),
         })),
       }),
     ).toThrow();
+  });
+
+  it("admits the bounded 24-rock plus eight-post capacity identically in real workers and rejects a 33rd owner", async () => {
+    expect(operations.limits.maxExclusionPolygons).toBe(32);
+    const polygons = Array.from({ length: 33 }, (_, i) => ({
+      id: `bounded-owner-${i}`,
+      minX: i * 4,
+      maxX: i * 4 + 0.3,
+      minZ: 0,
+      maxZ: 0.3,
+      vertices: [
+        { x: i * 4, z: 0 },
+        { x: i * 4 + 0.3, z: 0 },
+        { x: i * 4 + 0.3, z: 0.3 },
+        { x: i * 4, z: 0.3 },
+      ],
+    }));
+    const input = { ...snapshot([]), exclusionPolygons: polygons.slice(0, 32) };
+    const clone = operations.cloneSnapshot(input);
+    expect(clone.exclusionPolygons).toHaveLength(32);
+    expect(clone.exclusionPolygons![31].vertices).not.toBe(
+      polygons[31].vertices,
+    );
+    const points = polygons.slice(0, 32).flatMap((p) => [
+      [p.minX + 0.15, 0.15],
+      [p.maxX + 0.01, 0.15],
+    ]);
+    const expected = Array.from({ length: 32 }, () => [true, false]).flat();
+    expect(
+      points.map(([x, z]) => operations.isGrassExcluded(clone, x, z)),
+    ).toEqual(expected);
+    const worker = actualWorker();
+    try {
+      const admitted = await worker.execute({ snapshot: clone, points });
+      expect(admitted.error).toBeUndefined();
+      expect(admitted.excluded).toEqual(expected);
+      expect(admitted.snapshot.exclusionPolygons).toEqual(
+        input.exclusionPolygons,
+      );
+      const oversized = { ...input, exclusionPolygons: polygons };
+      expect(() => operations.validateSnapshot(oversized)).toThrow();
+      const rejected = await worker.execute({
+        snapshot: oversized,
+        points: [],
+      });
+      expect(rejected.error).toBeDefined();
+    } finally {
+      await worker.close();
+    }
   });
 
   it("tests the complete swept blade box against convex silhouettes, not their over-wide bounding rectangles", () => {
@@ -623,12 +1684,12 @@ describe("detached grass terrain surface requests", () => {
       const clone = createGrassTerrainSurfaceSnapshot(snapshot([source]))
         .zones[0];
       expect(clone).toEqual(source);
-      expect(Object.hasOwn(clone, "tileMaskTiles")).toBe(
-        Object.hasOwn(source, "tileMaskTiles"),
+      expect(Object.prototype.hasOwnProperty.call(clone, "tileMaskTiles")).toBe(
+        Object.prototype.hasOwnProperty.call(source, "tileMaskTiles"),
       );
-      expect(Object.hasOwn(clone, "tileMaskBounds")).toBe(
-        Object.hasOwn(source, "tileMaskBounds"),
-      );
+      expect(
+        Object.prototype.hasOwnProperty.call(clone, "tileMaskBounds"),
+      ).toBe(Object.prototype.hasOwnProperty.call(source, "tileMaskBounds"));
     }
   });
 
@@ -869,9 +1930,45 @@ describe("detached grass terrain surface requests", () => {
     }
     const worker = actualWorker(factorySource);
     try {
+      const composition = snapshot([compositionPond()]);
+      const compositionResult = await worker.execute({
+        snapshot: composition,
+        clone: true,
+      });
+      expect(compositionResult.error).toBeUndefined();
+      expect(compositionResult.snapshot).toEqual(composition);
+      expect(compositionResult.compositionFrozen).toBe(true);
+      const mineral = compositionPond();
+      Object.assign(mineral.radialPond!.bankComposition!.sectors[0], {
+        surface: "mineral-shore",
+      });
+      const mineralSnapshot = snapshot([mineral]);
+      const mineralResult = await worker.execute({
+        snapshot: mineralSnapshot,
+        clone: true,
+      });
+      expect(mineralResult.error).toBeUndefined();
+      expect(mineralResult.snapshot).toEqual(mineralSnapshot);
+      expect(mineralResult.compositionFrozen).toBe(true);
+      Object.assign(mineral.radialPond!.bankComposition!.sectors[0], {
+        groundCover: { emergenceHeight: 0.11, fullHeight: 0.24 },
+      });
+      expect(
+        (await worker.execute({ snapshot: snapshot([mineral]), clone: true }))
+          .error,
+      ).toMatch(/mineral-shore.*groundCover/);
       const result = await worker.execute({
         snapshot: {
-          ...snapshot([masked()]),
+          ...snapshot([
+            masked(),
+            zone({
+              id: "rounded",
+              blendShape: "rounded",
+              blendComposition: "smooth-union",
+            }),
+            sectorPond(),
+            pairedSectorPond(),
+          ]),
           exclusionPolygons: [
             {
               id: "worker-bounds",
@@ -895,7 +1992,17 @@ describe("detached grass terrain surface requests", () => {
         ],
       });
       expect(result.error).toBeUndefined();
-      expect(result.candidateIds).toEqual([["L-footprint"]]);
+      expect(result.candidateIds).toEqual([
+        ["L-footprint", "rounded", "sector-pond", "paired-sector-pond"],
+      ]);
+      expect(result.snapshot.zones[2].radialPond!.bankSectors).toEqual(
+        sectorPond().radialPond!.bankSectors,
+      );
+      expect(result.snapshot.zones[3].radialPond!.bankSectors).toEqual(
+        pairedSectorPond().radialPond!.bankSectors,
+      );
+      expect(result.snapshot.zones[1].blendShape).toBe("rounded");
+      expect(result.snapshot.zones[1].blendComposition).toBe("smooth-union");
       expect(result.boxes).toEqual([
         {
           boundsOverlap: true,

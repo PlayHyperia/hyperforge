@@ -1,19 +1,28 @@
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
 import {
   createOpenWorkshop,
+  BANK_PAVILION_POSTS,
   OPEN_WORKSHOP_POSTS,
 } from "@hyperforge/procgen/building";
 import { World } from "../../../../core/World";
 import { DataManager } from "../../../../data/DataManager";
+import type { WorldConfigManifest } from "../../../../types/world/world-types";
 import { getPhysX, loadPhysX } from "../../../../physics/PhysXManager";
-import { Vector3, Raycaster, Mesh } from "../../../../extras/three/three";
+import {
+  Vector3,
+  Raycaster,
+  Mesh,
+  MeshBasicMaterial,
+} from "../../../../extras/three/three";
 import { TerrainSystem } from "../TerrainSystem";
 import {
   COMPACT_SERVICE_COURT,
+  COMPACT_BANK_PAVILION,
   COMPACT_SERVICE_COURT_LEGACY_FIXTURE,
   createCompactServiceCourtGrassExclusions,
   groundCompactServiceCourt,
   validateCompactServiceCourt,
+  validateCompactBankPavilion,
 } from "../CompactServiceCourt";
 import {
   COMPACT_SERVICE_COURT_SYSTEM,
@@ -49,12 +58,22 @@ afterEach(() => {
   DataManager["worldTerrainProfile"] = saved.profile;
   DataManager["worldContentIdentity"] = saved.identity;
 });
-async function fixture() {
+async function fixture(bank = false, smithy = true) {
   DataManager["worldContentIdentity"] = null;
-  DataManager.setWorldConfig({
+  const config: WorldConfigManifest = {
     ...structuredClone(saved.config!),
     compactServiceCourt: structuredClone(COMPACT_SERVICE_COURT),
-  });
+  };
+  delete config.compactBankPavilion;
+  if (!smithy) {
+    delete config.compactServiceCourt;
+    delete config.compactServicePlanting;
+  }
+  if (bank) {
+    delete config.compactPreparationLodge;
+    config.compactBankPavilion = structuredClone(COMPACT_BANK_PAVILION);
+  }
+  DataManager.setWorldConfig(config);
   const world = new World();
   worlds.push(world);
   await world.physics.init();
@@ -68,9 +87,11 @@ async function fixture() {
   ground.loadWaterBodiesFromManifest();
   ground.loadFlatZonesFromManifest();
   registerCompactServiceCourtVisuals(world);
-  const owner = world.getSystem<CompactServiceCourtSystem>(
-    COMPACT_SERVICE_COURT_SYSTEM,
-  )!;
+  const owner =
+    world.getSystem<CompactServiceCourtSystem>(COMPACT_SERVICE_COURT_SYSTEM) ??
+    world.register(COMPACT_SERVICE_COURT_SYSTEM, CompactServiceCourtSystem);
+  if (!(owner instanceof CompactServiceCourtSystem))
+    throw new Error("Expected the actual compact service court owner");
   const visual = world.getSystem<CompactServiceCourtVisualsSystem>(
     COMPACT_SERVICE_COURT_VISUAL_SYSTEM,
   )!;
@@ -78,6 +99,307 @@ async function fixture() {
 }
 
 describe("compact service court actual geometry and native PhysX (not rendered acceptance)", () => {
+  it("admits only the exact detached bank manifest without broadening smithy admission", () => {
+    const profile = saved.profile!;
+    expect(validateCompactBankPavilion(undefined, profile)).toBeUndefined();
+    const input = structuredClone(COMPACT_BANK_PAVILION);
+    const admitted = validateCompactBankPavilion(input, profile)!;
+    expect(admitted).toEqual(COMPACT_BANK_PAVILION);
+    expect(admitted).not.toBe(input);
+    expect(admitted.position).not.toBe(input.position);
+    expect(Object.isFrozen(admitted)).toBe(true);
+    expect(Object.isFrozen(admitted.position)).toBe(true);
+    for (const bad of [
+      null,
+      {},
+      COMPACT_SERVICE_COURT,
+      { ...input, schemaVersion: 2 },
+      { ...input, layoutId: "compact-service-court-v1" },
+      { ...input, recipeId: "bank-pavilion-v1" },
+      { ...input, terrainProfileId: "compact-duel-island-v5" },
+      { ...input, position: { x: 350, z: 321 } },
+      { ...input, rotation: Math.PI },
+      { ...input, extra: true },
+      { ...input, position: { ...input.position, y: 28 } },
+      {
+        ...input,
+        get rotation() {
+          throw new Error("getter must not run");
+        },
+      },
+      { ...input, [Symbol("hidden")]: 1 },
+    ])
+      expect(() => validateCompactBankPavilion(bad, profile)).toThrow();
+    for (const badProfile of [
+      { ...profile, id: "unqualified" },
+      { ...profile, algorithm: "compact-island-sculpt-v4" as const },
+      { ...profile, terrainTileSize: 200 },
+    ])
+      expect(() => validateCompactBankPavilion(input, badProfile)).toThrow();
+    expect(() => validateCompactServiceCourt(input, profile)).toThrow();
+  });
+
+  it("owns both courts independently with eight exact supports and no bank floor or walls", async () => {
+    const { world, terrain, owner } = await fixture(true);
+    const px = getPhysX()!;
+    const types = new px.PxActorTypeFlags(px.PxActorTypeFlagEnum.eRIGID_STATIC);
+    const actorCount = () => world.physics.scene!.getNbActors(types);
+    const beforeActors = actorCount();
+    const surface = () =>
+      terrain["getTerrainSurfaceForRegion"](328, 313, 356, 343);
+    const beforeSurface = surface();
+    const heights = () =>
+      BANK_PAVILION_POSTS.flatMap((post) =>
+        [-0.15, 0, 0.15].flatMap((dx) =>
+          [-0.15, 0, 0.15].map((dz) =>
+            terrain.getHeightAt(350 + post.x + dx, 320 + post.z + dz),
+          ),
+        ),
+      );
+    const beforeHeights = heights();
+    const foreign = world.collision.acquireStaticFootprint([
+      { x: 346, z: 316 },
+    ]);
+    try {
+      for (let cycle = 0; cycle < 3; cycle++) {
+        await owner.init();
+        await owner.start();
+        await owner.start();
+        const records = owner.getCourts();
+        expect(Object.isFrozen(records)).toBe(true);
+        expect(records.map((r) => r.descriptor.layoutId)).toEqual([
+          COMPACT_SERVICE_COURT.layoutId,
+          COMPACT_BANK_PAVILION.layoutId,
+        ]);
+        expect(owner.getCourt()).toBe(records[0]);
+        expect(owner.getDiagnostics()).toEqual(owner.getAllDiagnostics()[0]);
+        expect(
+          owner
+            .getAllDiagnostics()
+            .map((r) => [r.physicsActor, r.physicsShapes]),
+        ).toEqual([
+          [true, 3],
+          [true, 3],
+        ]);
+        expect(actorCount()).toBe(beforeActors + 2);
+        const disposals = new Map<object, number>();
+        for (const owned of owner["resources"]) {
+          expect(owned.geometry).not.toBeNull();
+          for (const geometry of [
+            owned.geometry!.timber,
+            owned.geometry!.roof,
+            owned.geometry!.footings,
+            ...owned.indexedViews,
+          ]) {
+            expect(disposals.has(geometry)).toBe(false);
+            disposals.set(geometry, 0);
+            geometry.addEventListener("dispose", () =>
+              disposals.set(geometry, disposals.get(geometry)! + 1),
+            );
+          }
+        }
+        expect(disposals.size).toBe(12);
+        const bank = records[1];
+        if (cycle === 0) {
+          const geometry = owner["resources"][1].geometry!;
+          const meshes = [
+            geometry.timber,
+            geometry.roof,
+            geometry.footings,
+          ].map((batch) => {
+            const mesh = new Mesh(batch, new MeshBasicMaterial());
+            mesh.position.set(
+              bank.position.x,
+              bank.position.y,
+              bank.position.z,
+            );
+            mesh.updateMatrixWorld(true);
+            return mesh;
+          });
+          const ray = new Raycaster();
+          ray.far = 0.005;
+          let checked = 0;
+          try {
+            for (const mesh of meshes) {
+              const position = mesh.geometry.getAttribute("position");
+              const normal = mesh.geometry.getAttribute("normal");
+              const index = mesh.geometry.index;
+              const count = index?.count ?? position.count;
+              for (let i = 0; i < count; i += 3) {
+                const ids = [0, 1, 2].map((n) => index?.getX(i + n) ?? i + n);
+                const center = new Vector3();
+                for (const id of ids)
+                  center.add(new Vector3().fromBufferAttribute(position, id));
+                center.multiplyScalar(1 / 3).applyMatrix4(mesh.matrixWorld);
+                const outward = new Vector3()
+                  .fromBufferAttribute(normal, ids[0])
+                  .transformDirection(mesh.matrixWorld);
+                ray.ray.origin.copy(center).addScaledVector(outward, 0.002);
+                ray.ray.direction.copy(outward).negate();
+                const rendered = ray.intersectObjects(meshes, false)[0];
+                const native = world.physics.raycast(
+                  ray.ray.origin,
+                  ray.ray.direction,
+                  ray.far,
+                );
+                expect(rendered, `bank triangle ${checked}`).toBeDefined();
+                expect(native, `bank triangle ${checked}`).not.toBeNull();
+                expect(native!.point.distanceTo(rendered.point)).toBeLessThan(
+                  0.0001,
+                );
+                checked++;
+              }
+            }
+            expect(checked).toBe(1300);
+          } finally {
+            // Only these CPU raycaster materials are test-owned. The real
+            // owner retains and disposes all geometry (asserted below).
+            for (const mesh of meshes) mesh.material.dispose();
+          }
+        }
+        expect(bank.blockingTiles).toEqual([
+          { x: 346, z: 316 },
+          { x: 353, z: 316 },
+          { x: 346, z: 323 },
+          { x: 353, z: 323 },
+        ]);
+        const polygons = records.flatMap((r, i) =>
+          createCompactServiceCourtGrassExclusions(
+            r,
+            i === 0 ? OPEN_WORKSHOP_POSTS : BANK_PAVILION_POSTS,
+          ),
+        );
+        expect(polygons).toHaveLength(8);
+        expect(new Set(polygons.map((p) => p.id)).size).toBe(8);
+        expect(surface().exclusionPolygons).toEqual([
+          ...(beforeSurface.exclusionPolygons ?? []),
+          ...polygons,
+        ]);
+        expect(heights()).toEqual(beforeHeights);
+        for (const tile of records.flatMap((r) => r.blockingTiles))
+          expect(world.collision.isWalkable(tile.x, tile.z)).toBe(false);
+        for (let z = 317; z <= 322; z++)
+          for (let x = 347; x <= 352; x++)
+            expect(world.collision.isWalkable(x, z)).toBe(true);
+        for (const [i, post] of BANK_PAVILION_POSTS.entries()) {
+          const foot = bank.feet[i];
+          for (const dx of [-0.15, 0, 0.15])
+            for (const dz of [-0.15, 0, 0.15]) {
+              const h = terrain.getHeightAt(
+                350 + post.x + dx,
+                320 + post.z + dz,
+              );
+              expect(bank.position.y + foot.bottom).toBeLessThan(h);
+              expect(bank.position.y + foot.top).toBeGreaterThan(h);
+            }
+          const hit = world.physics.raycast(
+            new Vector3(350 + post.x - 1, bank.position.y + 1, 320 + post.z),
+            new Vector3(1, 0, 0),
+            2,
+          );
+          expect(hit).not.toBeNull();
+          expect(hit!.point.x).toBeCloseTo(350 + post.x - 0.12, 4);
+        }
+        for (const offset of [-2, 0, 2]) {
+          expect(
+            world.physics.raycast(
+              new Vector3(350 + offset, bank.position.y + 1.5, 315),
+              new Vector3(0, 0, 1),
+              10,
+            ),
+          ).toBeNull();
+          expect(
+            world.physics.raycast(
+              new Vector3(345, bank.position.y + 1.5, 320 + offset),
+              new Vector3(1, 0, 0),
+              10,
+            ),
+          ).toBeNull();
+        }
+        expect(
+          world.physics.raycast(
+            new Vector3(350, bank.position.y + 1, 320),
+            new Vector3(0, -1, 0),
+            2,
+          ),
+        ).toBeNull();
+        expect(
+          world.physics.raycast(
+            new Vector3(350, bank.position.y + 8, 320),
+            new Vector3(0, -1, 0),
+            5,
+          ),
+        ).not.toBeNull();
+        owner.destroy();
+        owner.destroy();
+        expect([...disposals.values()]).toEqual(Array(12).fill(1));
+        expect(actorCount()).toBe(beforeActors);
+        expect(owner.getCourts()).toEqual([]);
+        expect(owner.getAllDiagnostics()).toEqual([]);
+        expect(surface()).toEqual(beforeSurface);
+        expect(heights()).toEqual(beforeHeights);
+        expect(world.collision.isWalkable(346, 316)).toBe(false);
+        expect(world.collision.isWalkable(353, 316)).toBe(true);
+      }
+    } finally {
+      foreign.release();
+      px.destroy(types);
+    }
+  });
+
+  it("rolls back the first court and partial second court when bank grass admission fails", async () => {
+    const { world, terrain, owner } = await fixture(true);
+    const bank = groundCompactServiceCourt(
+      COMPACT_BANK_PAVILION,
+      BANK_PAVILION_POSTS,
+      (x, z) => terrain.getHeightAt(x, z),
+    );
+    const foreign = terrain.acquireGrassExclusionPolygons(
+      createCompactServiceCourtGrassExclusions(bank, BANK_PAVILION_POSTS),
+    );
+    const surface = () =>
+      terrain["getTerrainSurfaceForRegion"](328, 313, 356, 343);
+    const before = surface();
+    const px = getPhysX()!;
+    const types = new px.PxActorTypeFlags(px.PxActorTypeFlagEnum.eRIGID_STATIC);
+    const beforeActors = world.physics.scene!.getNbActors(types);
+    try {
+      await owner.init();
+      await expect(owner.start()).rejects.toThrow();
+      expect(owner.getCourts()).toEqual([]);
+      expect(owner.getAllDiagnostics()).toEqual([]);
+      expect(owner.getCourt()).toBeNull();
+      expect(world.physics.scene!.getNbActors(types)).toBe(beforeActors);
+      expect(surface()).toEqual(before);
+      for (const tile of [{ x: 331, z: 335 }, ...bank.blockingTiles])
+        expect(world.collision.isWalkable(tile.x, tile.z)).toBe(true);
+      foreign.release();
+      await owner.start();
+      expect(owner.getCourts()).toHaveLength(2);
+      owner.destroy();
+      expect(world.physics.scene!.getNbActors(types)).toBe(beforeActors);
+    } finally {
+      foreign.release();
+      px.destroy(types);
+    }
+  });
+
+  it("supports bank-only and absent configurations without aliasing legacy smithy accessors", async () => {
+    const { owner } = await fixture(true, false);
+    await owner.init();
+    await owner.start();
+    expect(owner.getCourts()).toHaveLength(1);
+    expect(owner.getCourts()[0].descriptor).toEqual(COMPACT_BANK_PAVILION);
+    expect(owner.getCourt()).toBeNull();
+    expect(owner.getDiagnostics()).toBeNull();
+    owner.destroy();
+    const empty = await fixture(false, false);
+    await empty.owner.init();
+    await empty.owner.start();
+    expect(empty.owner.getCourts()).toEqual([]);
+    expect(empty.owner.getAllDiagnostics()).toEqual([]);
+  });
+
   it("admits only a detached frozen descriptor and rejects extra fields, getters and wrong profiles", () => {
     const profile = saved.profile!;
     expect(validateCompactServiceCourt(undefined, profile)).toBeUndefined();

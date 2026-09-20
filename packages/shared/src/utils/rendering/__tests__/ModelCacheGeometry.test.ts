@@ -3,7 +3,10 @@ import { readFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
 import { MeshoptDecoder } from "three/examples/jsm/libs/meshopt_decoder.module.js";
-import THREE, { MeshStandardNodeMaterial } from "../../../extras/three/three";
+import THREE, {
+  MeshPhysicalNodeMaterial,
+  MeshStandardNodeMaterial,
+} from "../../../extras/three/three";
 import { modelCache } from "../ModelCache";
 
 type ModelCacheInternals = {
@@ -12,6 +15,52 @@ type ModelCacheInternals = {
 };
 
 describe("ModelCache geometry setup", () => {
+  it("preserves authored physical optics through actual scene setup and shares LOD materials", () => {
+    const cache = modelCache as unknown as ModelCacheInternals;
+    const source = new THREE.MeshPhysicalMaterial({
+      ior: 1.45,
+      specularColor: new THREE.Color(1.253919, 1.253919, 1.253919),
+      specularIntensity: 0.67,
+      roughness: 0.81,
+      metalness: 0,
+      clearcoat: 0.12,
+      clearcoatRoughness: 0.34,
+      alphaTest: 0.23,
+    });
+    source.normalScale.set(0.71, 0.82);
+    const scene = new THREE.Group();
+    const geometry = new THREE.BoxGeometry();
+    const first = new THREE.Mesh(geometry, source);
+    const second = new THREE.Mesh(geometry, source);
+    scene.add(first, second);
+    try {
+      cache.setupMaterials(scene);
+      expect(first.material).toBeInstanceOf(MeshPhysicalNodeMaterial);
+      expect(second.material).toBe(first.material);
+      const converted = first.material as unknown as MeshPhysicalNodeMaterial;
+      for (const key of [
+        "ior",
+        "specularIntensity",
+        "roughness",
+        "metalness",
+        "clearcoat",
+        "clearcoatRoughness",
+        "alphaTest",
+      ] as const)
+        expect(converted[key]).toBe(source[key]);
+      expect(converted.specularColor.toArray()).toEqual(
+        source.specularColor.toArray(),
+      );
+      expect(converted.normalScale.toArray()).toEqual(
+        source.normalScale.toArray(),
+      );
+    } finally {
+      geometry.dispose();
+      first.material.dispose();
+      source.dispose();
+    }
+  });
+
   it("bakes the actual quantized mushroom without integer wrap or source mutation", async () => {
     const bytes = readFileSync(
       new URL(

@@ -57,7 +57,7 @@ describe("Terrain-owned water retirement (CPU ownership, not GPU qualification)"
     const visuals = new WaterVisualManager(
       container,
       water,
-      (x, z) => terrain.getHeightAtComputed(x, z),
+      (x, z) => terrain["getHeightAtComputed"](x, z),
       (x, z) => terrain["getIslandMask"](x, z),
       profile.water.threshold,
       [],

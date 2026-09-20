@@ -1,4 +1,7 @@
 import { Worker } from "node:worker_threads";
+import { createHash } from "node:crypto";
+import { readFileSync, statSync } from "node:fs";
+import { transformSync } from "esbuild";
 import { describe, expect, it } from "vitest";
 import { World } from "../../../../core/World";
 import { ALL_WORLD_AREAS } from "../../../../data/world-areas";
@@ -18,15 +21,24 @@ import {
   type GrassTerrainSurfaceZone,
 } from "../../../../utils/workers/GrassTerrainSurfaceSnapshot";
 import { TerrainSystem } from "../TerrainSystem";
+import { RoadNetworkSystem } from "../RoadNetworkSystem";
+import { RetainedTerrainSurface } from "../TerrainGridSurface";
+import { projectGrassAnchors } from "../GrassTerrainProjection";
+import {
+  assembleQuadChunkGeometry,
+  generateQuadChunkDataSync,
+} from "../TerrainQuadChunkGenerator";
 import {
   TERRAIN_SHADER_CONSTANTS,
   computeTerrainColorCPU,
   sampleNoiseCPU,
 } from "../TerrainShader";
 import { createCompactTerrainColorOperations } from "../CompactTerrainPalette";
+import { createAuthoredTerrainSurfaceOperations } from "../AuthoredTerrainSurface";
 import { adjustShorelineHeight } from "../TerrainHeightParams";
 import { createTerrainWorkerConfig } from "../../../../utils/workers/TerrainWorkerShared";
-import type { GrassWorkerSetup } from "../GrassVisualManager";
+import { GRASS_CONFIG, type GrassWorkerSetup } from "../GrassVisualManager";
+import { validateWorldTerrainProfile } from "../WorldTerrainProfile";
 
 type Internals = {
   flatZones: Map<string, GrassTerrainSurfaceZone>;
@@ -196,6 +208,7 @@ function preCellSamplingWorker() {
   for (const echo of [
     "...(placementDomain.placementCell ? { placementCell: placementCellOperations.validateCell(placementDomain.placementCell) } : {}),",
     "...(placementDomain.placementDistribution ? { placementDistribution: placementDomain.placementDistribution } : {}),",
+    "...(placementDomain.placementCoverage ? { placementCoverage: placementDomain.placementCoverage } : {}),",
   ]) {
     expect(source.split(echo)).toHaveLength(3);
     source = source.replaceAll(echo, "");
@@ -247,23 +260,179 @@ function preStratifiedCellSamplingWorker() {
   return actualWorker(source);
 }
 
+/** Identical current geometry, noise, RGB and original accepted-clump RNG.
+ * Remove only the new coastal rejection, never its terrain/profile input. */
+function beforeCoastalFilteringWorker() {
+  const filter = `    if (!grassEstablishment && coastalGroundCover > 0) {
+      var coastalPlacement = Math.max(0, rawGP * (1 - coastalGroundCover) - roadInf);
+      if (coastalPlacement <= 0 || clumpRng > coastalPlacement) continue;
+    }`;
+  expect(GRASS_WORKER_CODE.split(filter)).toHaveLength(2);
+  return actualWorker(GRASS_WORKER_CODE.replace(filter, ""));
+}
+
+/** Exact executed native16 source, not a recreated palette or worker mock.
+ * Copied byte-for-byte from the southern-meadow-native16 executed source;
+ * its report.json pins the 31,462 bytes and SHA-256 asserted below. The .txt
+ * suffix keeps this frozen historical input outside production compilation.
+ * Keep the fixture unchanged, including its historical type-only imports.
+ * Transpile
+ * and extract the self-contained factory in a disposable real worker, just as
+ * the existing terrain-snapshot minification regression does. All other
+ * generation, ecology, RNG, terrain and message-transport code stays current. */
+async function native16PaletteWorker() {
+  const path = new URL(
+    "./fixtures/Native16CompactTerrainPalette.ts.txt",
+    import.meta.url,
+  );
+  const source = readFileSync(path);
+  expect(statSync(path).size).toBe(31462);
+  expect(source.byteLength).toBe(31462);
+  expect(createHash("sha256").update(source).digest("hex")).toBe(
+    "ee3eedaa0f7cda6712f376025e080327b6055b5666c3e90897b47ebb92233afe",
+  );
+  const compiled = transformSync(source.toString("utf8"), {
+    loader: "ts",
+    format: "cjs",
+    target: "es2022",
+    keepNames: true,
+    minify: true,
+  }).code;
+  const extractor = new Worker(
+    `const { parentPort } = require("node:worker_threads");
+     const module = { exports: {} }; const exports = module.exports;
+     ${compiled}
+     parentPort.postMessage(module.exports.createCompactTerrainColorOperations.toString());`,
+    { eval: true, env: {} },
+  );
+  let factory: string;
+  try {
+    factory = await new Promise<string>((resolve, reject) => {
+      const timeout = setTimeout(
+        () => reject(new Error("Archived palette extraction timed out")),
+        5000,
+      );
+      extractor.once("error", (error) => {
+        clearTimeout(timeout);
+        reject(error);
+      });
+      extractor.once("message", (value: unknown) => {
+        clearTimeout(timeout);
+        if (typeof value !== "string" || !value.startsWith("function"))
+          reject(new Error("Invalid archived palette factory"));
+        else resolve(value);
+      });
+    });
+  } finally {
+    await extractor.terminate();
+  }
+  const current = `var compactTerrainColorOperations = (${createCompactTerrainColorOperations.toString()})();`;
+  expect(GRASS_WORKER_CODE.split(current)).toHaveLength(2);
+  const archived = `var compactTerrainColorOperations = (${factory})();`;
+  const code = GRASS_WORKER_CODE.replace(current, archived);
+  expect(code.replace(archived, current)).toBe(GRASS_WORKER_CODE);
+  return actualWorker(code);
+}
+
 async function withTerrain(
   execute: (
     terrain: TerrainSystem,
     internals: Internals,
     worker: ReturnType<typeof actualWorker>,
   ) => Promise<void>,
+  pondContactFixture = false,
 ) {
   const world = new World();
   const terrain = world.register("terrain", TerrainSystem) as TerrainSystem;
   const worker = actualWorker();
   try {
+    if (pondContactFixture)
+      terrain["activeTerrainProfile"] = validateWorldTerrainProfile({
+        ...terrain.getWorldTerrainProfile(),
+        southernMeadow: {
+          schemaVersion: 1,
+          minX: 304,
+          maxX: 500,
+          minZ: 345,
+          maxZ: 535,
+          featherX: 24,
+          featherZ: 24,
+          northHeight: 26.8,
+          southHeight: 25.3,
+          crossFall: 1,
+          rollAmplitude: 0.65,
+          rollWavelength: 100,
+        },
+      });
     await terrain.init();
     await execute(terrain, terrain as unknown as Internals, worker);
   } finally {
     await worker.close();
     world.destroy();
   }
+}
+
+/** Explicit review52 bank fixture, installed through the actual zone owner.
+ * Historical/default tests keep their unchanged circular manifest. */
+function installPondContactBank(terrain: TerrainSystem, internals: Internals) {
+  const original = internals.flatZones.get("haven_pond_floor");
+  if (!original?.radialPond) throw new Error("Missing actual Haven pond zone");
+  terrain.registerFlatZone({
+    ...original,
+    radialPond: {
+      ...original.radialPond,
+      bankSectors: [
+        {
+          bearing: -2.321287905152458,
+          halfWidth: 0.6981317007977318,
+          innerRadius: 6,
+          innerHeight: 27.98,
+          outerRadius: 8.2,
+          outerHeight: 28.55,
+        },
+        {
+          bearing: -0.47123889803846897,
+          halfWidth: 0.41887902047863906,
+          innerRadius: 6.55,
+          innerHeight: 28.08,
+        },
+        { bearing: 0.7, halfWidth: 0.55, innerRadius: 6.4, innerHeight: 27.86 },
+        {
+          bearing: -1.5533430342749532,
+          halfWidth: 0.8726646259971648,
+          innerRadius: 7.1,
+          innerHeight: 27.86,
+          outerRadius: 8.7,
+          outerHeight: 27.99,
+        },
+      ],
+    },
+  });
+}
+
+/** Authored composition fixture on the same real registered geometry for both
+ * sides of each comparison. This is not the deployed Review68 art manifest. */
+function installPondCompositionBank(
+  terrain: TerrainSystem,
+  internals: Internals,
+) {
+  installPondContactBank(terrain, internals);
+  const original = internals.flatZones.get("haven_pond_floor");
+  if (!original?.radialPond) throw new Error("Missing actual Haven pond zone");
+  terrain.registerFlatZone({
+    ...original,
+    radialPond: {
+      ...original.radialPond,
+      bankComposition: {
+        schemaVersion: 1,
+        sectors: [
+          { sectorIndex: 0, surface: "sedge-shelf" },
+          { sectorIndex: 1, surface: "cutbank" },
+          { sectorIndex: 3, surface: "dry-turf" },
+        ],
+      },
+    },
+  });
 }
 
 function request(
@@ -379,7 +548,717 @@ function broadGrade(): GrassTerrainSurfaceZone {
   };
 }
 
+/** The current production setup, not the permissive historical colour fixture.
+ * Cell coordinates select a real sampling domain inside its original leaf. */
+function coverageRequest(
+  terrain: TerrainSystem,
+  internals: Internals,
+  indexX: number,
+  indexZ: number,
+): GrassWorkerInput {
+  const setup = internals.buildGrassWorkerSetup();
+  const cell: GrassPlacementCell = {
+    schemaVersion: 1,
+    size: 25,
+    indexX,
+    indexZ,
+  };
+  const bounds = getGrassPlacementCellBounds(cell);
+  return {
+    ...request(
+      terrain,
+      internals,
+      Math.floor(indexX / 4) * 100 + 50,
+      Math.floor(indexZ / 4) * 100 + 50,
+      100,
+    ),
+    chunkKey: `gcell_v1_${indexX}_${indexZ}`,
+    placementCell: cell,
+    placementDistribution: "fine-cell-stratified-v1",
+    grassEligibility: "compact-pbr-v1",
+    clumpSpacing: GRASS_CONFIG.CLUMP_SPACING,
+    grassSeed: GRASS_CONFIG.SEED,
+    scaleMin: GRASS_CONFIG.SCALE_MIN,
+    scaleMax: GRASS_CONFIG.SCALE_MAX,
+    grassConfigs: setup.grassConfigs,
+    ...(setup.compactGrassColorGrade
+      ? { compactGrassColorGrade: setup.compactGrassColorGrade }
+      : {}),
+    compactPlantingLobes: setup.compactPlantingLobes,
+    roadSegments: setup.getRoadSegmentsForRegion(
+      bounds.minX,
+      bounds.minZ,
+      bounds.maxX,
+      bounds.maxZ,
+    ),
+    roadBlendWidth: 0.5,
+    terrainSurface: setup.getTerrainSurfaceForRegion(
+      bounds.minX - 0.5,
+      bounds.minZ - 0.5,
+      bounds.maxX + 0.5,
+      bounds.maxZ + 0.5,
+    ),
+  };
+}
+
+function assertExactInstanceBytes(a: GrassWorkerOutput, b: GrassWorkerOutput) {
+  expect(a.count).toBe(b.count);
+  for (const key of Object.keys(attributes) as (keyof typeof attributes)[]) {
+    const left = a[key],
+      right = b[key];
+    expect(
+      Buffer.from(left.buffer, left.byteOffset, left.byteLength).equals(
+        Buffer.from(right.buffer, right.byteOffset, right.byteLength),
+      ),
+      key,
+    ).toBe(true);
+  }
+}
+
 describe("actual authored-surface grass worker", () => {
+  it("keeps native16 placement, seeded poses and retained grounding exact while candidate worn turf changes only RGB", async () => {
+    const previous = await native16PaletteWorker();
+    const current = actualWorker();
+    const receipts: Array<{
+      coastalMeadow: boolean;
+      cell: string;
+      lod: number;
+      count: number;
+      projected: number;
+      changedColors: number;
+    }> = [];
+    const equalNonColor = (a: GrassWorkerOutput, b: GrassWorkerOutput) => {
+      expect(a.count).toBe(b.count);
+      for (const name of [
+        "offsets",
+        "rotScaleHash",
+        "grassTints",
+        "groundNormals",
+      ] as const) {
+        const left = a[name],
+          right = b[name];
+        expect(
+          Buffer.from(left.buffer, left.byteOffset, left.byteLength).equals(
+            Buffer.from(right.buffer, right.byteOffset, right.byteLength),
+          ),
+          name,
+        ).toBe(true);
+      }
+      for (const name of [
+        "terrainProfileIdentity",
+        "grassEligibility",
+        "chunkKey",
+        "compactGrassColorGrade",
+        "placementCell",
+        "placementDistribution",
+        "placementCoverage",
+      ] as const)
+        expect(a[name]).toEqual(b[name]);
+    };
+    try {
+      for (const coastalMeadow of [false, true]) {
+        const world = new World();
+        const terrain = world.register(
+          "terrain",
+          TerrainSystem,
+        ) as TerrainSystem;
+        const roads = world.register(
+          "roads",
+          RoadNetworkSystem,
+        ) as RoadNetworkSystem;
+        const geometries: ReturnType<
+          typeof assembleQuadChunkGeometry
+        >["geometry"][] = [];
+        const surfaces = new Map<string, RetainedTerrainSurface>();
+        try {
+          const live = terrain.getWorldTerrainProfile();
+          expect(live.southernMeadow).toBeUndefined();
+          // Existing admitted candidate profile selection, before real init;
+          // no replacement height, color, ecology or road callbacks. This is
+          // CPU factory isolation, not replay of the native camera/population.
+          terrain["activeTerrainProfile"] = validateWorldTerrainProfile({
+            ...live,
+            ...(coastalMeadow
+              ? {
+                  southernMeadow: {
+                    schemaVersion: 1,
+                    minX: 304,
+                    maxX: 500,
+                    minZ: 345,
+                    maxZ: 535,
+                    featherX: 24,
+                    featherZ: 24,
+                    northHeight: 26.8,
+                    southHeight: 25.3,
+                    crossFall: 1,
+                    rollAmplitude: 0.65,
+                    rollWavelength: 100,
+                  },
+                }
+              : {}),
+          });
+          await terrain.init();
+          const internals = terrain as unknown as Internals;
+          internals.loadWaterBodiesFromManifest();
+          internals.loadFlatZonesFromManifest();
+          terrain["subscribeRoadNetworkEvents"]();
+          await roads.init();
+          await roads.start();
+          const provider = terrain["buildChunkTerrainProvider"]();
+          for (const [indexX, indexZ] of [
+            [12, 11],
+            [14, 13],
+            [16, 14],
+            [18, 18],
+          ]) {
+            const base = coverageRequest(terrain, internals, indexX, indexZ);
+            const key = `${base.centerX},${base.centerZ}`;
+            let surface = surfaces.get(key);
+            if (!surface) {
+              const { geometry } = assembleQuadChunkGeometry(
+                generateQuadChunkDataSync(
+                  base.centerX,
+                  base.centerZ,
+                  100,
+                  128,
+                  provider,
+                ),
+                provider,
+                terrain["CONFIG"].QUADTREE_SKIRT_DROP,
+              );
+              geometries.push(geometry);
+              surface = new RetainedTerrainSurface(
+                surfaces.size + 1,
+                provider.terrainProfileIdentity,
+                base.centerX,
+                base.centerZ,
+                100,
+                128,
+                geometry,
+              );
+              surfaces.set(key, surface);
+            }
+            for (const lod of [0, 1]) {
+              const queued = prepareGrassWorkerRequest({
+                ...base,
+                spacingMul: GRASS_CONFIG.LOD_TIERS[lod].spacingMul,
+              });
+              const requestBefore = structuredClone(queued);
+              const before = await previous.run(queued);
+              const after = await current.run(queued);
+              expect(queued).toEqual(requestBefore);
+              expect(before.count).toBeGreaterThan(0);
+              expect(admitGrassWorkerPlacementResult(before, queued)).toEqual(
+                before,
+              );
+              expect(admitGrassWorkerPlacementResult(after, queued)).toEqual(
+                after,
+              );
+              equalNonColor(before, after);
+              assertSurfaceParity(queued, after, internals);
+              let changedColors = 0;
+              for (let i = 0; i < after.groundColors.length; i++)
+                if (after.groundColors[i] !== before.groundColors[i])
+                  changedColors++;
+              if (!coastalMeadow) assertExactInstanceBytes(before, after);
+              const a = projectGrassAnchors(
+                before,
+                surface,
+                (x, z) =>
+                  terrain.getWaterBodyRegistry().getWaterSurfaceAt(x, z),
+                (x, z) => terrain["isGrassExcludedAt"](x, z),
+              );
+              const b = projectGrassAnchors(
+                after,
+                surface,
+                (x, z) =>
+                  terrain.getWaterBodyRegistry().getWaterSurfaceAt(x, z),
+                (x, z) => terrain["isGrassExcludedAt"](x, z),
+              );
+              equalNonColor(a, b);
+              expect(a.grounding).toEqual(b.grounding);
+              if (!coastalMeadow) assertExactInstanceBytes(a, b);
+              receipts.push({
+                coastalMeadow,
+                cell: `${indexX},${indexZ}`,
+                lod,
+                count: after.count,
+                projected: b.count,
+                changedColors,
+              });
+            }
+          }
+        } finally {
+          geometries.forEach((geometry) => geometry.dispose());
+          world.destroy();
+        }
+      }
+      expect(receipts).toHaveLength(16);
+      expect(
+        receipts
+          .filter((r) => !r.coastalMeadow)
+          .every((r) => r.changedColors === 0),
+      ).toBe(true);
+      for (const lod of [0, 1])
+        expect(
+          receipts
+            .filter((r) => r.coastalMeadow && r.lod === lod)
+            .reduce((sum, r) => sum + r.changedColors, 0),
+        ).toBeGreaterThan(0);
+      console.info("native16 palette-only worker comparison", {
+        scope:
+          "Real worker and retained-anchor CPU proof only; no native LOD lifecycle, blade/GPU or performance acceptance.",
+        receipts,
+      });
+    } finally {
+      await previous.close();
+      await current.close();
+    }
+  }, 30000);
+
+  it("runs the explicit sixty-centimetre cell through the real worker without changing the other fifteen cells", async () => {
+    await withTerrain(async (terrain, internals, worker) => {
+      internals.loadWaterBodiesFromManifest();
+      internals.loadFlatZonesFromManifest();
+      const baselines = new Map<
+        string,
+        { input: GrassWorkerInput; result: GrassWorkerOutput }
+      >();
+      for (let z = 8; z < 12; z++)
+        for (let x = 12; x < 16; x++) {
+          const input = coverageRequest(terrain, internals, x, z);
+          const result = await worker.run(input);
+          expect(
+            Object.prototype.hasOwnProperty.call(result, "placementCoverage"),
+          ).toBe(false);
+          baselines.set(input.chunkKey, { input, result });
+        }
+      const baseline = baselines.get("gcell_v1_12_11")!;
+      const source: GrassWorkerInput = {
+        ...baseline.input,
+        clumpSpacing: 0.6,
+        placementCoverage: "sixty-centimetre-cell-v1",
+      };
+      const queued = prepareGrassWorkerRequest(source);
+      Reflect.set(source, "placementCoverage", "changed-after-queue");
+      Reflect.set(source.placementCell!, "indexX", 13);
+      expect(queued.placementCoverage).toBe("sixty-centimetre-cell-v1");
+      expect(queued.placementCell?.indexX).toBe(12);
+      const selected = await worker.run(queued);
+      expect(selected.count).toBeGreaterThan(0);
+      expect(selected.count).toBeLessThanOrEqual(1737);
+      expect(selected.offsets).not.toEqual(baseline.result.offsets);
+      expect(selected.placementCoverage).toBe("sixty-centimetre-cell-v1");
+      expect(admitGrassWorkerPlacementResult(selected, queued)).toEqual(
+        selected,
+      );
+      assertSurfaceParity(queued, selected, internals);
+      // The marker is authority, not a second density formula: the same real
+      // .6m input without it has the exact same five numeric arrays.
+      const { placementCoverage: _coverage, ...unmarked } = queued;
+      assertExactInstanceBytes(selected, await worker.run(unmarked));
+      let unchangedCells = 0;
+      for (const [key, before] of baselines) {
+        if (key === queued.chunkKey) continue;
+        const after = await worker.run(before.input);
+        expect(Object.keys(after)).toEqual(Object.keys(before.result));
+        assertExactInstanceBytes(after, before.result);
+        unchangedCells++;
+      }
+      expect(unchangedCells).toBe(15);
+      process.stdout.write(
+        "SIXTY_CENTIMETRE_CELL_WORKER " +
+          JSON.stringify({
+            cell: queued.placementCell,
+            baselineCandidates: 1276,
+            trialCandidates: 1737,
+            baselineClumps: baseline.result.count,
+            trialClumps: selected.count,
+            unchangedCells,
+            scope:
+              "Actual emitted worker only; not retained grounding, native coverage or performance acceptance.",
+          }) +
+          "\n",
+      );
+    });
+  });
+
+  it("rejects malformed coverage at queue and emitted-worker boundaries and rejects missing or wrong echoes even when empty", async () => {
+    await withTerrain(async (terrain, internals, worker) => {
+      internals.loadWaterBodiesFromManifest();
+      internals.loadFlatZonesFromManifest();
+      const selected: GrassWorkerInput = {
+        ...coverageRequest(terrain, internals, 12, 11),
+        clumpSpacing: 0.6,
+        placementCoverage: "sixty-centimetre-cell-v1",
+      };
+      const queued = prepareGrassWorkerRequest(selected);
+      const active = await worker.run(queued);
+      expect(active.count).toBeGreaterThan(0);
+      // Actual offshore terrain produces an empty result with unchanged water
+      // and vegetation rules, rather than substituting an empty worker response.
+      const emptyInput: GrassWorkerInput = {
+        ...coverageRequest(terrain, internals, 18, 25),
+        clumpSpacing: 0.6,
+        placementCoverage: "sixty-centimetre-cell-v1",
+      };
+      const empty = await worker.run(emptyInput);
+      expect(empty.count).toBe(0);
+      expect(empty.placementCoverage).toBe("sixty-centimetre-cell-v1");
+      expect(admitGrassWorkerPlacementResult(empty, emptyInput)).toEqual(empty);
+      for (const change of [
+        { placementCoverage: undefined },
+        { placementCoverage: null },
+        { placementCoverage: false },
+        { placementCoverage: "sixty-centimetre-cell-v2" },
+        { placementCoverage: "half-metre-cell-v1" },
+        { placementCell: undefined },
+        { placementDistribution: undefined },
+        { clumpSpacing: 0.7 },
+        { clumpSpacing: 0.5 },
+        { clumpSpacing: 0.3, spacingMul: 2 },
+        { spacingMul: 5 },
+        { grassEligibility: "legacy-biome-v1" },
+      ]) {
+        const bad = { ...queued, ...change } as GrassWorkerInput;
+        expect(() => prepareGrassWorkerRequest(bad)).toThrow();
+        await expect(worker.run(bad)).rejects.toThrow();
+      }
+      let getterReads = 0;
+      for (const [result, input] of [
+        [active, queued],
+        [empty, emptyInput],
+      ] as const) {
+        const { placementCoverage: _coverage, ...missing } = result;
+        const { placementCoverage: _inputCoverage, ...unselected } = input;
+        expect(() => admitGrassWorkerPlacementResult(missing, input)).toThrow(
+          /coverage/i,
+        );
+        expect(() =>
+          admitGrassWorkerPlacementResult(result, unselected),
+        ).toThrow(/coverage/i);
+        for (const value of [
+          undefined,
+          null,
+          false,
+          "sixty-centimetre-cell-v2",
+          "half-metre-cell-v1",
+        ])
+          expect(() =>
+            admitGrassWorkerPlacementResult(
+              { ...result, placementCoverage: value } as GrassWorkerOutput,
+              input,
+            ),
+          ).toThrow(/coverage/i);
+        for (const bad of [
+          Object.assign(
+            Object.create({ placementCoverage: "sixty-centimetre-cell-v1" }),
+            missing,
+          ),
+          Object.defineProperty({ ...missing }, "placementCoverage", {
+            value: "sixty-centimetre-cell-v1",
+          }),
+          Object.defineProperty({ ...missing }, "placementCoverage", {
+            enumerable: true,
+            get() {
+              getterReads++;
+              return "sixty-centimetre-cell-v1";
+            },
+          }),
+        ])
+          expect(() => admitGrassWorkerPlacementResult(bad, input)).toThrow(
+            /coverage/i,
+          );
+      }
+      expect(getterReads).toBe(0);
+    });
+  });
+
+  it("filters candidate coastal grass without rephasing surviving roots in real uniform and stratified workers", async () => {
+    const world = new World();
+    const terrain = world.register("terrain", TerrainSystem) as TerrainSystem;
+    let worker: ReturnType<typeof actualWorker> | undefined;
+    let previous: ReturnType<typeof actualWorker> | undefined;
+    const ops = createCompactTerrainColorOperations();
+    try {
+      previous = beforeCoastalFilteringWorker();
+      worker = actualWorker();
+      const live = terrain.getWorldTerrainProfile();
+      const profile = validateWorldTerrainProfile({
+        ...live,
+        southernMeadow: {
+          schemaVersion: 1,
+          minX: 304,
+          maxX: 500,
+          minZ: 345,
+          maxZ: 535,
+          featherX: 24,
+          featherZ: 24,
+          northHeight: 26.8,
+          southHeight: 25.3,
+          crossFall: 1,
+          rollAmplitude: 0.65,
+          rollWavelength: 100,
+        },
+        coastalApron: {
+          ...live.coastalApron!,
+          lowland: { ...live.coastalApron!.lowland!, westHoldX: 440 },
+        },
+      });
+      // The real instance selects its admitted profile before init, as in the
+      // existing compact worker fixtures; no sampler or gameplay method is replaced.
+      terrain["activeTerrainProfile"] = profile;
+      await terrain.init();
+      const internals = terrain as unknown as Internals;
+      internals.loadWaterBodiesFromManifest();
+      internals.loadFlatZonesFromManifest();
+      const base = request(terrain, internals, 450, 450, 100);
+      const field = ops.macroField(profile)!;
+      expect(field.coastalMeadow).toBe(true);
+      expect(ops.macroField(live)).not.toHaveProperty("coastalMeadow");
+      const keyAt = (result: GrassWorkerOutput, index: number) =>
+        Array.from(result.offsets.subarray(index * 3, index * 3 + 3)).join(",");
+      const coverageAt = (point: { x: number; y: number; z: number }) =>
+        ops.coastalGroundCover({
+          height: internals.getHeightAtComputed(point.x, point.z),
+          noiseValue: sampleNoiseCPU(
+            point.x,
+            point.z,
+            TERRAIN_SHADER_CONSTANTS.NOISE_SCALE,
+          ),
+          distortNoise: sampleNoiseCPU(
+            point.x,
+            point.z,
+            TERRAIN_SHADER_CONSTANTS.DISTORT_NOISE_SCALE,
+          ),
+          field,
+        });
+      const receipts: Array<{
+        cell: string;
+        distribution: string;
+        grassEligibility: string;
+        grassSeed: number;
+        before: number;
+        after: number;
+        removed: number;
+        fullSoil: number;
+        transition: number;
+        outside: number;
+      }> = [];
+      let fullSoilFocus: { x: number; y: number; z: number } | undefined;
+      const cases: Array<{
+        grassSeed: number;
+        distribution: GrassWorkerInput["placementDistribution"];
+        grassEligibility: "compact-pbr-v1" | "legacy-biome-v1";
+        indexX: number;
+        indexZ: number;
+      }> = [];
+      for (const grassSeed of [37, 991]) {
+        for (const distribution of [
+          undefined,
+          "fine-cell-stratified-v1",
+        ] as const) {
+          for (const [indexX, indexZ] of [
+            [17, 18],
+            [18, 18],
+            [18, 19],
+          ]) {
+            cases.push({
+              grassSeed,
+              distribution,
+              grassEligibility: "compact-pbr-v1",
+              indexX,
+              indexZ,
+            });
+          }
+        }
+      }
+      cases.push({
+        grassSeed: 37,
+        distribution: undefined,
+        grassEligibility: "legacy-biome-v1",
+        indexX: 18,
+        indexZ: 19,
+      });
+      for (const {
+        grassSeed,
+        distribution,
+        grassEligibility,
+        indexX,
+        indexZ,
+      } of cases) {
+        const input: GrassWorkerInput = {
+          ...base,
+          grassSeed,
+          grassEligibility,
+          ...(grassEligibility === "compact-pbr-v1"
+            ? { compactGrassColorGrade: "fine-meadow-green-v1" as const }
+            : {}),
+          clumpSpacing: 0.7,
+          placementCell: { schemaVersion: 1, size: 25, indexX, indexZ },
+          ...(distribution ? { placementDistribution: distribution } : {}),
+        };
+        const queued = prepareGrassWorkerRequest(input);
+        const before = await previous.run(queued);
+        const after = await worker.run(queued);
+        expect(before.count).toBeGreaterThan(0);
+        expect(admitGrassWorkerPlacementResult(after, queued)).toEqual(after);
+        expect(after.count).toBeLessThanOrEqual(before.count);
+        const indices = new Map(
+          Array.from({ length: before.count }, (_, i) => [keyAt(before, i), i]),
+        );
+        expect(indices.size).toBe(before.count);
+        const retained = new Set<string>();
+        for (let i = 0; i < after.count; i++) {
+          const key = keyAt(after, i),
+            original = indices.get(key);
+          expect(original).toBeDefined();
+          if (original === undefined)
+            throw new Error("Coastal filter introduced a new root");
+          retained.add(key);
+          for (const [name, stride] of Object.entries(attributes)) {
+            const attribute = name as keyof typeof attributes;
+            expect(
+              after[attribute].subarray(i * stride, (i + 1) * stride),
+            ).toEqual(
+              before[attribute].subarray(
+                original * stride,
+                (original + 1) * stride,
+              ),
+            );
+          }
+        }
+        expect(retained.size).toBe(after.count);
+        let removed = 0,
+          fullSoil = 0,
+          transition = 0,
+          outside = 0;
+        for (const point of points(input, before)) {
+          const coverage = coverageAt(point),
+            kept = retained.has(keyAt(before, point.index));
+          expect(coverage).toBeGreaterThanOrEqual(0);
+          expect(coverage).toBeLessThanOrEqual(1);
+          if (!kept) {
+            removed++;
+            expect(coverage).toBeGreaterThan(0);
+          }
+          if (coverage === 0) {
+            outside++;
+            expect(kept).toBe(true);
+          } else if (coverage === 1) {
+            fullSoil++;
+            expect(kept).toBe(false);
+            if (
+              point.y > profile.water.threshold + 0.15 &&
+              point.y < profile.water.threshold + 0.45
+            )
+              fullSoilFocus ??= point;
+          } else transition++;
+        }
+        expect(removed).toBe(before.count - after.count);
+        if (grassEligibility === "legacy-biome-v1")
+          expect(removed).toBeGreaterThan(0);
+        assertSurfaceParity(input, after, internals);
+        for (const point of points(input, after)) {
+          expect(coverageAt(point)).toBeLessThan(1);
+          const main = terrain.getTerrainColorAt(point.x, point.z, true);
+          const expected = ops.sample({
+            grassColorGrade: input.compactGrassColorGrade,
+            noiseValue: sampleNoiseCPU(
+              point.x,
+              point.z,
+              TERRAIN_SHADER_CONSTANTS.NOISE_SCALE,
+            ),
+            meadowNoise: sampleNoiseCPU(
+              point.x,
+              point.z,
+              ops.getComposition().meadowNoiseScale,
+            ),
+            distortNoise: sampleNoiseCPU(
+              point.x,
+              point.z,
+              TERRAIN_SHADER_CONSTANTS.DISTORT_NOISE_SCALE,
+            ),
+            slope: 1 - main.ny,
+            roadInfluence: 0,
+            surface: {
+              x: point.x,
+              z: point.z,
+              height: internals.getHeightAtComputed(point.x, point.z),
+              pond:
+                input.terrainSurface.waterBodies.find(
+                  (body) => body.id === "haven_pond_water",
+                ) ?? null,
+              macroField: field,
+            },
+          });
+          for (const [axis, channel] of (["r", "g", "b"] as const).entries())
+            expect(
+              Math.abs(
+                after.groundColors[point.index * 3 + axis] - expected[channel],
+              ),
+            ).toBeLessThan(colorParityTolerance);
+        }
+        receipts.push({
+          cell: `${indexX},${indexZ}`,
+          distribution: distribution ?? "uniform",
+          grassEligibility,
+          grassSeed,
+          before: before.count,
+          after: after.count,
+          removed,
+          fullSoil,
+          transition,
+          outside,
+        });
+      }
+      for (const field of [
+        "removed",
+        "fullSoil",
+        "transition",
+        "outside",
+      ] as const)
+        expect(
+          receipts.reduce((sum, receipt) => sum + receipt[field], 0),
+        ).toBeGreaterThan(0);
+      expect(fullSoilFocus).toBeDefined();
+      if (!fullSoilFocus)
+        throw new Error("Actual coast did not expose the full mineral strip");
+      const bareInput: GrassWorkerInput = {
+        ...request(terrain, internals, fullSoilFocus.x, fullSoilFocus.z, 0.05),
+        clumpSpacing: 0.005,
+        grassEligibility: "compact-pbr-v1",
+      };
+      const bareBefore = await previous.run(bareInput);
+      expect(bareBefore.count).toBeGreaterThan(0);
+      for (const point of points(bareInput, bareBefore))
+        expect(coverageAt(point)).toBe(1);
+      const bareAfter = await worker.run(bareInput);
+      expect(bareAfter.count).toBe(0);
+      expect(admitGrassWorkerPlacementResult(bareAfter, bareInput)).toEqual(
+        bareAfter,
+      );
+      // Omitted marker remains exact under a separate identical-profile pair.
+      // No comparison ever attributes differences between terrain profiles to filtering.
+      const omitted: GrassWorkerInput = {
+        ...base,
+        config: createTerrainWorkerConfig(live, base.config.TILE_RESOLUTION),
+        grassEligibility: "compact-pbr-v1",
+        clumpSpacing: 0.7,
+        placementCell: { schemaVersion: 1, size: 25, indexX: 18, indexZ: 19 },
+      };
+      const omittedBefore = await previous.run(omitted),
+        omittedAfter = await worker.run(omitted);
+      expect(omittedAfter).toEqual(omittedBefore);
+      process.stdout.write(
+        `Coastal emitted-worker filtering (CPU, not native approval): ${JSON.stringify({ receipts, bareBefore: bareBefore.count, bareAfter: bareAfter.count, defaultCount: omittedAfter.count })}\n`,
+      );
+    } finally {
+      await Promise.all([worker?.close(), previous?.close()]);
+      world.destroy();
+    }
+  }, 30000);
+
   it("requires and echoes explicit stratified distribution at queue, emitted-worker, and result boundaries including empty outputs", async () => {
     await withTerrain(async (terrain, internals, worker) => {
       internals.loadWaterBodiesFromManifest();
@@ -397,8 +1276,12 @@ describe("actual authored-surface grass worker", () => {
       };
       const ordinary = await worker.run(input);
       expect(ordinary.count).toBeGreaterThan(0);
-      expect(Object.hasOwn(input, "placementDistribution")).toBe(false);
-      expect(Object.hasOwn(ordinary, "placementDistribution")).toBe(false);
+      expect(
+        Object.prototype.hasOwnProperty.call(input, "placementDistribution"),
+      ).toBe(false);
+      expect(
+        Object.prototype.hasOwnProperty.call(ordinary, "placementDistribution"),
+      ).toBe(false);
       const selected: GrassWorkerInput = {
         ...input,
         placementDistribution: "fine-cell-stratified-v1",
@@ -489,6 +1372,926 @@ describe("actual authored-surface grass worker", () => {
     });
   });
 
+  it("captures composition-v1 from complete snapshot owners and rejects stale modes across real worker transport", async () => {
+    await withTerrain(async (terrain, internals, worker) => {
+      internals.loadWaterBodiesFromManifest();
+      internals.loadFlatZonesFromManifest();
+      installPondCompositionBank(terrain, internals);
+      const input: GrassWorkerInput = {
+        ...request(terrain, internals, 350, 350, 100),
+        grassEligibility: "compact-pbr-v1",
+        placementCell: { schemaVersion: 1, size: 25, indexX: 13, indexZ: 12 },
+        placementDistribution: "fine-cell-stratified-v1",
+        clumpSpacing: 0.7,
+      };
+      const baseline = await worker.run(input);
+      const selected: GrassWorkerInput = {
+        ...input,
+        compactPondBlend: "composition-v1",
+      };
+      const queued = prepareGrassWorkerRequest(selected);
+      const sourceZone = selected.terrainSurface.zones.find(
+        (zone) => zone.id === "haven_pond_floor",
+      );
+      const capturedZone = queued.terrainSurface.zones.find(
+        (zone) => zone.id === "haven_pond_floor",
+      );
+      expect(capturedZone).not.toBe(sourceZone);
+      expect(capturedZone?.radialPond?.bankComposition).not.toBe(
+        sourceZone?.radialPond?.bankComposition,
+      );
+      expect(Object.isFrozen(capturedZone?.radialPond?.bankComposition)).toBe(
+        true,
+      );
+      expect(
+        Object.isFrozen(capturedZone?.radialPond?.bankComposition?.sectors),
+      ).toBe(true);
+      Reflect.set(selected, "compactPondBlend", "mutated-after-queue");
+      expect(queued.compactPondBlend).toBe("composition-v1");
+      const active = await worker.run(queued);
+      expect(active.count).toBeGreaterThan(0);
+      expect(active.compactPondBlend).toBe("composition-v1");
+      expect(admitGrassWorkerPlacementResult(active, queued)).toEqual(active);
+      const emptyInput: GrassWorkerInput = {
+        ...queued,
+        grassConfigs: Object.fromEntries(
+          Object.entries(queued.grassConfigs).map(([key, value]) => [
+            key,
+            { ...value, density: 0 },
+          ]),
+        ),
+      };
+      const empty = await worker.run(emptyInput);
+      expect(empty.count).toBe(0);
+      expect(empty.compactPondBlend).toBe("composition-v1");
+      expect(admitGrassWorkerPlacementResult(empty, emptyInput)).toEqual(empty);
+      for (const result of [active, empty]) {
+        const missing = { ...result };
+        delete missing.compactPondBlend;
+        expect(() => admitGrassWorkerPlacementResult(missing, queued)).toThrow(
+          /pond distribution/i,
+        );
+        expect(() => admitGrassWorkerPlacementResult(result, input)).toThrow(
+          /pond distribution/i,
+        );
+        expect(() =>
+          admitGrassWorkerPlacementResult(
+            { ...result, compactPondBlend: "shore-contact-v1" },
+            queued,
+          ),
+        ).toThrow(/pond distribution/i);
+      }
+      let getterCalls = 0;
+      for (const descriptor of [
+        {
+          enumerable: true,
+          get() {
+            getterCalls++;
+            return "composition-v1";
+          },
+        },
+        { enumerable: false, value: "composition-v1" },
+      ]) {
+        const badInput = { ...input };
+        Object.defineProperty(badInput, "compactPondBlend", descriptor);
+        expect(() => prepareGrassWorkerRequest(badInput)).toThrow(
+          /pond distribution/i,
+        );
+      }
+      const inherited = { ...input };
+      Object.setPrototypeOf(inherited, { compactPondBlend: "composition-v1" });
+      expect(() => prepareGrassWorkerRequest(inherited)).toThrow(
+        /pond distribution/i,
+      );
+      expect(getterCalls).toBe(0);
+      assertExactInstanceBytes(await worker.run(input), baseline);
+    }, true);
+  });
+
+  it("fails closed for incomplete or mismatched composition snapshots, even for distant requests", async () => {
+    await withTerrain(async (terrain, internals, worker) => {
+      internals.loadWaterBodiesFromManifest();
+      internals.loadFlatZonesFromManifest();
+      installPondCompositionBank(terrain, internals);
+      const input: GrassWorkerInput = {
+        ...request(terrain, internals, 450, 450, 100),
+        grassEligibility: "compact-pbr-v1",
+        compactPondBlend: "composition-v1",
+      };
+      const surface = input.terrainSurface;
+      const withoutZone = surface.zones.filter(
+        (zone) => zone.id !== "haven_pond_floor",
+      );
+      const withoutPond = surface.waterBodies.filter(
+        (body) => body.id !== "haven_pond_water",
+      );
+      const withoutComposition = surface.zones.map((zone) => {
+        if (zone.id !== "haven_pond_floor" || !zone.radialPond) return zone;
+        const { bankComposition: _composition, ...radialPond } =
+          zone.radialPond;
+        return { ...zone, radialPond };
+      });
+      for (const terrainSurface of [
+        { ...surface, zones: withoutZone },
+        { ...surface, waterBodies: withoutPond },
+        { ...surface, zones: withoutZone, waterBodies: withoutPond },
+        { ...surface, zones: withoutComposition },
+        {
+          ...surface,
+          waterBodies: surface.waterBodies.map((body) =>
+            body.id === "haven_pond_water"
+              ? { ...body, centerX: body.centerX + 1 }
+              : body,
+          ),
+        },
+      ]) {
+        const malformed = { ...input, terrainSurface };
+        expect(() => prepareGrassWorkerRequest(malformed)).toThrow(
+          /pond|composition/i,
+        );
+        await expect(worker.run(malformed)).rejects.toThrow(
+          /pond|composition/i,
+        );
+      }
+      // With complete actual owners retained, a genuinely distant mask is
+      // neutral. Ownership is not guessed from missing regional records.
+      const { compactPondBlend: _mode, ...ordinary } = input;
+      assertExactInstanceBytes(
+        await worker.run(prepareGrassWorkerRequest(input)),
+        await worker.run(ordinary),
+      );
+      const legacy = { ...input, grassEligibility: "legacy-biome-v1" as const };
+      expect(() => prepareGrassWorkerRequest(legacy)).toThrow(
+        /pond distribution/i,
+      );
+      await expect(worker.run(legacy)).rejects.toThrow(/pond distribution/i);
+    }, true);
+  });
+
+  it("authored emergence establishes deterministic new roots without rephasing existing roots or remote domains", async () => {
+    await withTerrain(async (terrain, internals, worker) => {
+      internals.loadWaterBodiesFromManifest();
+      internals.loadFlatZonesFromManifest();
+      installPondCompositionBank(terrain, internals);
+      let added = 0,
+        retained = 0;
+      const rows: {
+        cell: number[];
+        density: number;
+        before: number;
+        after: number;
+        added: number;
+      }[] = [];
+      for (const density of [0.37, 0.83])
+        for (const [indexX, indexZ] of [
+          [13, 11],
+          [13, 12],
+          [14, 11],
+          [17, 17],
+        ]) {
+          const base = request(
+            terrain,
+            internals,
+            Math.floor(indexX / 4) * 100 + 50,
+            Math.floor(indexZ / 4) * 100 + 50,
+            100,
+          );
+          const input: GrassWorkerInput = {
+            ...base,
+            compactPondBlend: "composition-v1",
+            grassEligibility: "compact-pbr-v1",
+            placementCell: { schemaVersion: 1, size: 25, indexX, indexZ },
+            placementDistribution: "fine-cell-stratified-v1",
+            clumpSpacing: 0.7,
+            grassConfigs: Object.fromEntries(
+              Object.entries(base.grassConfigs).map(([key, value]) => [
+                key,
+                { ...value, density },
+              ]),
+            ),
+          };
+          const candidate = structuredClone(input);
+          const zone = candidate.terrainSurface.zones.find(
+            (zone) => zone.id === "haven_pond_floor",
+          )!;
+          for (const row of zone.radialPond!.bankComposition!.sectors)
+            Object.assign(row, {
+              groundCover:
+                row.surface === "cutbank"
+                  ? { emergenceHeight: 0.15, fullHeight: 0.3 }
+                  : row.surface === "sedge-shelf"
+                    ? { emergenceHeight: 0.04, fullHeight: 0.12 }
+                    : { emergenceHeight: 0.06, fullHeight: 0.16 },
+            });
+          const before = await worker.run(prepareGrassWorkerRequest(input));
+          const after = await worker.run(prepareGrassWorkerRequest(candidate));
+          const repeat = await worker.run(prepareGrassWorkerRequest(candidate));
+          assertExactInstanceBytes(after, repeat);
+          const keyAt = (data: GrassWorkerOutput, i: number) =>
+            `${data.offsets[i * 3]},${data.offsets[i * 3 + 2]}`;
+          const original = new Map(
+            Array.from({ length: before.count }, (_, i) => [
+              keyAt(before, i),
+              i,
+            ]),
+          );
+          let newInCell = 0,
+            lastPrior = -1;
+          for (let i = 0; i < after.count; i++) {
+            const prior = original.get(keyAt(after, i));
+            if (prior === undefined) {
+              added++;
+              newInCell++;
+            } else {
+              expect(prior).toBeGreaterThan(lastPrior);
+              lastPrior = prior;
+              retained++;
+              for (const name of [
+                "offsets",
+                "rotScaleHash",
+                "grassTints",
+                "groundNormals",
+              ] as const) {
+                const stride = attributes[name];
+                expect(
+                  after[name].subarray(i * stride, (i + 1) * stride),
+                ).toEqual(
+                  before[name].subarray(prior * stride, (prior + 1) * stride),
+                );
+              }
+            }
+          }
+          assertSurfaceParity(candidate, after, internals);
+          if (indexX === 17) assertExactInstanceBytes(after, before);
+          rows.push({
+            cell: [indexX, indexZ],
+            density,
+            before: before.count,
+            after: after.count,
+            added: newInCell,
+          });
+        }
+      expect(added).toBeGreaterThan(0);
+      expect(retained).toBeGreaterThan(0);
+      console.info(
+        "Review73 actual worker new-root fork, fractional density, same geometry/attempts, unchanged water gate",
+        JSON.stringify(rows),
+      );
+    }, true);
+  });
+  it("composition-v1 only thins the same terrain's historical seeded roots at fractional densities", async () => {
+    await withTerrain(async (terrain, internals, worker) => {
+      internals.loadWaterBodiesFromManifest();
+      internals.loadFlatZonesFromManifest();
+      installPondCompositionBank(terrain, internals);
+      let retained = 0,
+        removed = 0,
+        changedColors = 0;
+      for (const density of [0.37, 0.83]) {
+        for (const [indexX, indexZ] of [
+          [13, 11],
+          [13, 12],
+          [14, 11],
+          [17, 17],
+        ]) {
+          const base = request(
+            terrain,
+            internals,
+            Math.floor(indexX / 4) * 100 + 50,
+            Math.floor(indexZ / 4) * 100 + 50,
+            100,
+          );
+          const input: GrassWorkerInput = {
+            ...base,
+            grassEligibility: "compact-pbr-v1",
+            placementCell: { schemaVersion: 1, size: 25, indexX, indexZ },
+            placementDistribution: "fine-cell-stratified-v1",
+            clumpSpacing: 0.7,
+            grassConfigs: Object.fromEntries(
+              Object.entries(base.grassConfigs).map(([key, value]) => [
+                key,
+                { ...value, density },
+              ]),
+            ),
+          };
+          const before = await worker.run(input);
+          const after = await worker.run(
+            prepareGrassWorkerRequest({
+              ...input,
+              compactPondBlend: "composition-v1",
+            }),
+          );
+          const keyAt = (data: GrassWorkerOutput, i: number) =>
+            `${data.offsets[i * 3]},${data.offsets[i * 3 + 2]}`;
+          const original = new Map(
+            Array.from({ length: before.count }, (_, i) => [
+              keyAt(before, i),
+              i,
+            ]),
+          );
+          let previous = -1;
+          for (let i = 0; i < after.count; i++) {
+            const prior = original.get(keyAt(after, i));
+            if (prior === undefined)
+              throw new Error("Composition added a grass root");
+            expect(prior).toBeGreaterThan(previous);
+            previous = prior;
+            for (const name of [
+              "offsets",
+              "rotScaleHash",
+              "grassTints",
+              "groundNormals",
+            ] as const) {
+              const stride = attributes[name];
+              expect(
+                after[name].subarray(i * stride, (i + 1) * stride),
+              ).toEqual(
+                before[name].subarray(prior * stride, (prior + 1) * stride),
+              );
+            }
+            if (
+              [0, 1, 2].some(
+                (channel) =>
+                  after.groundColors[i * 3 + channel] !==
+                  before.groundColors[prior * 3 + channel],
+              )
+            )
+              changedColors++;
+            retained++;
+          }
+          removed += before.count - after.count;
+          assertSurfaceParity(input, after, internals);
+          if (indexX === 17) assertExactInstanceBytes(after, before);
+        }
+      }
+      expect(retained).toBeGreaterThan(0);
+      expect(removed).toBeGreaterThan(0);
+      expect(changedColors).toBeGreaterThan(0);
+      console.info(
+        "Review68 same-terrain seeded composition subset",
+        JSON.stringify({ retained, removed, changedColors }),
+      );
+    }, true);
+  });
+
+  it("captures pond distribution across real worker transport and rejects stale or malformed identities", async () => {
+    await withTerrain(async (terrain, internals, worker) => {
+      internals.loadWaterBodiesFromManifest();
+      internals.loadFlatZonesFromManifest();
+      installPondContactBank(terrain, internals);
+      const input: GrassWorkerInput = {
+        ...request(terrain, internals, 350, 350, 100),
+        grassEligibility: "compact-pbr-v1",
+        placementCell: { schemaVersion: 1, size: 25, indexX: 13, indexZ: 12 },
+        placementDistribution: "fine-cell-stratified-v1",
+        clumpSpacing: 0.7,
+      };
+      const baseline = await worker.run(input);
+      expect(baseline.count).toBeGreaterThan(0);
+      expect(baseline).not.toHaveProperty("compactPondBlend");
+      const selected: GrassWorkerInput = {
+        ...input,
+        compactPondBlend: "shore-contact-v1",
+      };
+      const queued = prepareGrassWorkerRequest(selected);
+      Reflect.set(selected, "compactPondBlend", "mutated-after-queue");
+      expect(queued.compactPondBlend).toBe("shore-contact-v1");
+      const active = await worker.run(queued);
+      expect(active.compactPondBlend).toBe("shore-contact-v1");
+      expect(admitGrassWorkerPlacementResult(active, queued)).toEqual(active);
+      const emptyInput: GrassWorkerInput = {
+        ...queued,
+        grassConfigs: Object.fromEntries(
+          Object.entries(queued.grassConfigs).map(([key, value]) => [
+            key,
+            { ...value, density: 0 },
+          ]),
+        ),
+      };
+      const empty = await worker.run(emptyInput);
+      expect(empty.count).toBe(0);
+      expect(empty.compactPondBlend).toBe("shore-contact-v1");
+      expect(admitGrassWorkerPlacementResult(empty, emptyInput)).toEqual(empty);
+      for (const result of [active, empty]) {
+        const missing = { ...result };
+        delete missing.compactPondBlend;
+        expect(() => admitGrassWorkerPlacementResult(missing, queued)).toThrow(
+          /pond distribution/i,
+        );
+        expect(() => admitGrassWorkerPlacementResult(result, input)).toThrow(
+          /pond distribution/i,
+        );
+      }
+      for (const value of [
+        undefined,
+        null,
+        false,
+        "",
+        "relief-v1",
+        "relief-contact-v1",
+        "shore-contact-v2",
+      ]) {
+        const badInput = { ...input };
+        Reflect.set(badInput, "compactPondBlend", value);
+        expect(() => prepareGrassWorkerRequest(badInput)).toThrow(
+          /pond distribution/i,
+        );
+        await expect(worker.run(badInput)).rejects.toThrow(
+          /pond distribution/i,
+        );
+        const badResult = { ...active };
+        Reflect.set(badResult, "compactPondBlend", value);
+        expect(() =>
+          admitGrassWorkerPlacementResult(badResult, queued),
+        ).toThrow(/pond distribution/i);
+      }
+      let getterCalls = 0;
+      for (const descriptor of [
+        {
+          enumerable: true,
+          get() {
+            getterCalls++;
+            return "shore-contact-v1";
+          },
+        },
+        { enumerable: false, value: "shore-contact-v1" },
+      ]) {
+        const badInput = { ...input };
+        Object.defineProperty(badInput, "compactPondBlend", descriptor);
+        expect(() => prepareGrassWorkerRequest(badInput)).toThrow(
+          /pond distribution/i,
+        );
+        const badResult = { ...baseline };
+        Object.defineProperty(badResult, "compactPondBlend", descriptor);
+        expect(() => admitGrassWorkerPlacementResult(badResult, input)).toThrow(
+          /pond distribution/i,
+        );
+      }
+      const inherited = { ...input };
+      Object.setPrototypeOf(inherited, {
+        compactPondBlend: "shore-contact-v1",
+      });
+      expect(() => prepareGrassWorkerRequest(inherited)).toThrow(
+        /pond distribution/i,
+      );
+      const inheritedResult = { ...baseline };
+      Object.setPrototypeOf(inheritedResult, {
+        compactPondBlend: "shore-contact-v1",
+      });
+      expect(() =>
+        admitGrassWorkerPlacementResult(inheritedResult, input),
+      ).toThrow(/pond distribution/i);
+      expect(getterCalls).toBe(0);
+      const legacy: GrassWorkerInput = {
+        ...queued,
+        grassEligibility: "legacy-biome-v1",
+      };
+      delete legacy.placementDistribution;
+      expect(() => prepareGrassWorkerRequest(legacy)).toThrow(
+        /pond distribution/i,
+      );
+      await expect(worker.run(legacy)).rejects.toThrow(/pond distribution/i);
+      assertExactInstanceBytes(await worker.run(input), baseline);
+    }, true);
+  });
+
+  it("only thins original pond roots at fractional density and leaves remote regional requests byte-identical", async () => {
+    await withTerrain(async (terrain, internals, worker) => {
+      internals.loadWaterBodiesFromManifest();
+      internals.loadFlatZonesFromManifest();
+      installPondContactBank(terrain, internals);
+      const base = request(terrain, internals, 350, 350, 100);
+      let retained = 0,
+        removed = 0,
+        changedColors = 0,
+        changedScales = 0;
+      for (const density of [0.37, 0.83]) {
+        for (const [indexX, indexZ] of [
+          [13, 11],
+          [13, 12],
+          [14, 12],
+        ]) {
+          const input: GrassWorkerInput = {
+            ...request(terrain, internals, 350, indexZ < 12 ? 250 : 350, 100),
+            grassEligibility: "compact-pbr-v1",
+            placementCell: { schemaVersion: 1, size: 25, indexX, indexZ },
+            placementDistribution: "fine-cell-stratified-v1",
+            clumpSpacing: 0.7,
+            grassConfigs: Object.fromEntries(
+              Object.entries(base.grassConfigs).map(([key, value]) => [
+                key,
+                { ...value, density },
+              ]),
+            ),
+          };
+          const before = await worker.run(input);
+          const after = await worker.run({
+            ...input,
+            compactPondBlend: "shore-contact-v1",
+          });
+          const keyAt = (data: GrassWorkerOutput, i: number) =>
+            `${data.offsets[i * 3]},${data.offsets[i * 3 + 2]}`;
+          const original = new Map(
+            Array.from({ length: before.count }, (_, i) => [
+              keyAt(before, i),
+              i,
+            ]),
+          );
+          let previous = -1;
+          for (let i = 0; i < after.count; i++) {
+            const prior = original.get(keyAt(after, i));
+            if (prior === undefined)
+              throw new Error("Pond distribution added a root");
+            expect(prior).toBeGreaterThan(previous);
+            previous = prior;
+            for (const name of [
+              "offsets",
+              "grassTints",
+              "groundNormals",
+            ] as const) {
+              const stride = attributes[name];
+              expect(
+                after[name].subarray(i * stride, (i + 1) * stride),
+              ).toEqual(
+                before[name].subarray(prior * stride, (prior + 1) * stride),
+              );
+            }
+            // Rotation/hash retain exact seeded bits. Only the admitted
+            // post-acceptance scale may shrink; the Float32 ratio bound allows
+            // rounding of both stored operands, not a placement tolerance.
+            expect(after.rotScaleHash[i * 3]).toBe(
+              before.rotScaleHash[prior * 3],
+            );
+            expect(after.rotScaleHash[i * 3 + 2]).toBe(
+              before.rotScaleHash[prior * 3 + 2],
+            );
+            const scaleRatio =
+              after.rotScaleHash[i * 3 + 1] /
+              before.rotScaleHash[prior * 3 + 1];
+            expect(scaleRatio).toBeGreaterThanOrEqual(0.55 - 4 * 2 ** -23);
+            expect(scaleRatio).toBeLessThanOrEqual(1 + 4 * 2 ** -23);
+            if (
+              after.rotScaleHash[i * 3 + 1] !==
+              before.rotScaleHash[prior * 3 + 1]
+            )
+              changedScales++;
+            if (
+              [0, 1, 2].some(
+                (channel) =>
+                  after.groundColors[i * 3 + channel] !==
+                  before.groundColors[prior * 3 + channel],
+              )
+            )
+              changedColors++;
+            retained++;
+          }
+          removed += before.count - after.count;
+        }
+      }
+      // A remote regional snapshot intentionally has no Haven water body.
+      // Pond selection is global; admission must not invent a regional pond.
+      const remote: GrassWorkerInput = {
+        ...request(terrain, internals, 450, 450, 100),
+        grassEligibility: "compact-pbr-v1",
+        placementCell: { schemaVersion: 1, size: 25, indexX: 17, indexZ: 17 },
+        placementDistribution: "fine-cell-stratified-v1",
+        clumpSpacing: 0.7,
+      };
+      remote.terrainSurface = { ...remote.terrainSurface, waterBodies: [] };
+      const remoteSelected = prepareGrassWorkerRequest({
+        ...remote,
+        compactPondBlend: "shore-contact-v1",
+      });
+      assertExactInstanceBytes(
+        await worker.run(remoteSelected),
+        await worker.run(remote),
+      );
+      expect(retained).toBeGreaterThan(0);
+      expect(changedColors).toBeGreaterThan(0);
+      expect(changedScales).toBeGreaterThan(0);
+      console.info(
+        "Review62 actual-worker pond seeded subset and admitted scale",
+        JSON.stringify({ retained, removed, changedColors, changedScales }),
+      );
+    }, true);
+  });
+
+  it("executes pond-only thinning on an explicit low dry-bank owner fixture, not a deployed pond capture", async () => {
+    await withTerrain(async (terrain, internals, worker) => {
+      internals.loadWaterBodiesFromManifest();
+      const pond = terrain
+        .getWaterBodyRegistry()
+        .getAllBodies()
+        .find((body) => body.id === "haven_pond_water");
+      if (!pond) throw new Error("Missing actual pond water owner");
+      const x = pond.centerX + 9,
+        z = pond.centerZ;
+      const noise = sampleNoiseCPU(
+        x,
+        z,
+        TERRAIN_SHADER_CONSTANTS.DISTORT_NOISE_SCALE,
+      );
+      const noiseHeight =
+        (noise - 0.5) *
+        2 *
+        createCompactTerrainColorOperations().getComposition()
+          .pondBankNoiseHeight;
+      // A real registered dry depression outside the circular water footprint
+      // deliberately covers the lower transfer half that the live .1m water
+      // clearance mostly excludes. No replacement height/color/worker methods.
+      terrain.registerFlatZone({
+        id: "pond-support-lower-half-fixture",
+        centerX: x,
+        centerZ: z,
+        width: 4,
+        depth: 4,
+        height: pond.surfaceY + noiseHeight + 0.04,
+        blendRadius: 0,
+        excludeGrass: false,
+      });
+      const input: GrassWorkerInput = {
+        ...request(terrain, internals, x, z, 1),
+        grassEligibility: "compact-pbr-v1",
+        clumpSpacing: 0.08,
+      };
+      const before = await worker.run(input);
+      const after = await worker.run({
+        ...input,
+        compactPondBlend: "shore-contact-v1",
+      });
+      expect(before.count).toBeGreaterThan(0);
+      expect(after.count).toBe(0);
+      for (const point of points(input, before)) {
+        expect(
+          Math.hypot(point.x - pond.centerX, point.z - pond.centerZ),
+        ).toBeGreaterThan(pond.radius);
+        expect(point.y).toBeGreaterThan(
+          terrain.getWaterBodyRegistry().getWaterSurfaceAt(point.x, point.z) +
+            0.1,
+        );
+      }
+      console.info(
+        "Review61 explicit lower-half fixture removal, not live pond",
+        JSON.stringify({ before: before.count, after: after.count }),
+      );
+    }, true);
+  });
+
+  it("captures and strictly echoes coastal distribution across real worker transport, including empty results", async () => {
+    await withTerrain(async (terrain, internals, worker) => {
+      internals.loadWaterBodiesFromManifest();
+      internals.loadFlatZonesFromManifest();
+      const base = request(terrain, internals, 450, 450, 100);
+      const profile = validateWorldTerrainProfile({
+        ...base.config.TERRAIN_PROFILE,
+        southernMeadow: {
+          schemaVersion: 1,
+          minX: 304,
+          maxX: 500,
+          minZ: 345,
+          maxZ: 535,
+          featherX: 24,
+          featherZ: 24,
+          northHeight: 26.8,
+          southHeight: 25.3,
+          crossFall: 1,
+          rollAmplitude: 0.65,
+          rollWavelength: 100,
+        },
+      });
+      const input: GrassWorkerInput = {
+        ...base,
+        config: createTerrainWorkerConfig(profile, base.config.TILE_RESOLUTION),
+        grassEligibility: "compact-pbr-v1",
+        placementCell: { schemaVersion: 1, size: 25, indexX: 18, indexZ: 18 },
+        placementDistribution: "fine-cell-stratified-v1",
+        clumpSpacing: 0.7,
+      };
+      const ordinary = await worker.run(input);
+      expect(ordinary.count).toBeGreaterThan(0);
+      expect(ordinary).not.toHaveProperty("compactCoastBlend");
+      const selected: GrassWorkerInput = {
+        ...input,
+        compactCoastBlend: "distribution-v1",
+      };
+      const queued = prepareGrassWorkerRequest(selected);
+      Reflect.set(selected, "compactCoastBlend", "changed-after-queue");
+      expect(queued.compactCoastBlend).toBe("distribution-v1");
+      const active = await worker.run(queued);
+      expect(active.compactCoastBlend).toBe("distribution-v1");
+      expect(admitGrassWorkerPlacementResult(active, queued)).toEqual(active);
+      // Fractional biome density must not rephase later roots. Include both
+      // the affected coast and untouched inland in the actual seeded worker,
+      // rather than proving the subset only with the permissive density=1.
+      const ops = createCompactTerrainColorOperations();
+      const field = ops.macroField(profile, "distribution-v1");
+      let fractionalRetained = 0;
+      let fractionalOutside = 0;
+      for (const density of [0.37, 0.83]) {
+        for (const [indexX, indexZ] of [
+          [17, 19],
+          [17, 17],
+        ]) {
+          const fractional: GrassWorkerInput = {
+            ...input,
+            placementCell: { schemaVersion: 1, size: 25, indexX, indexZ },
+            grassConfigs: Object.fromEntries(
+              Object.entries(input.grassConfigs).map(([key, config]) => [
+                key,
+                { ...config, density },
+              ]),
+            ),
+          };
+          const before = await worker.run(fractional);
+          const after = await worker.run({
+            ...fractional,
+            compactCoastBlend: "distribution-v1",
+          });
+          const keyAt = (data: GrassWorkerOutput, i: number) =>
+            `${data.offsets[i * 3]},${data.offsets[i * 3 + 2]}`;
+          const original = new Map(
+            Array.from({ length: before.count }, (_, i) => [
+              keyAt(before, i),
+              i,
+            ]),
+          );
+          const remaining = new Map(
+            Array.from({ length: after.count }, (_, i) => [keyAt(after, i), i]),
+          );
+          let last = -1;
+          for (let i = 0; i < after.count; i++) {
+            const prior = original.get(keyAt(after, i));
+            if (prior === undefined)
+              throw new Error("Distribution added a fractional-density root");
+            expect(prior).toBeGreaterThan(last);
+            last = prior;
+            for (const name of [
+              "offsets",
+              "rotScaleHash",
+              "grassTints",
+              "groundNormals",
+            ] as const) {
+              const stride = attributes[name];
+              expect(
+                after[name].subarray(i * stride, (i + 1) * stride),
+              ).toEqual(
+                before[name].subarray(prior * stride, (prior + 1) * stride),
+              );
+            }
+            fractionalRetained++;
+          }
+          for (const point of points(fractional, before)) {
+            // The selected domain follows the broader sea-relative coastal
+            // coverage, not the narrow existing bare-shore grass exclusion.
+            // With zero cliff and ridge inputs its nonzero soil coefficient
+            // makes soil=0 an exact witness of zero coastal coverage.
+            const cover = ops.coastWeights({
+              x: point.x,
+              z: point.z,
+              height: point.y,
+              noiseValue: sampleNoiseCPU(
+                point.x,
+                point.z,
+                TERRAIN_SHADER_CONSTANTS.NOISE_SCALE,
+              ),
+              distortNoise: sampleNoiseCPU(
+                point.x,
+                point.z,
+                TERRAIN_SHADER_CONSTANTS.DISTORT_NOISE_SCALE,
+              ),
+              slope: 0,
+              westRock: 0,
+              field,
+            }).soil;
+            if (cover !== 0) continue;
+            const kept = remaining.get(keyAt(before, point.index));
+            expect(kept).toBeDefined();
+            if (kept === undefined)
+              throw new Error("Distribution removed an outside-domain root");
+            expect(after.groundColors.subarray(kept * 3, kept * 3 + 3)).toEqual(
+              before.groundColors.subarray(
+                point.index * 3,
+                point.index * 3 + 3,
+              ),
+            );
+            fractionalOutside++;
+          }
+        }
+      }
+      expect(fractionalRetained).toBeGreaterThan(0);
+      expect(fractionalOutside).toBeGreaterThan(0);
+      console.info(
+        "Review55 nonunit-density seeded witnesses",
+        JSON.stringify({ fractionalRetained, fractionalOutside }),
+      );
+      for (const value of [
+        undefined,
+        null,
+        false,
+        "",
+        "detail-v1",
+        "distribution-v2",
+      ]) {
+        const malformed = {
+          ...input,
+          compactCoastBlend: value,
+        } as GrassWorkerInput;
+        expect(() => prepareGrassWorkerRequest(malformed)).toThrow(
+          /coastal distribution/i,
+        );
+        await expect(worker.run(malformed)).rejects.toThrow(
+          /coastal distribution/i,
+        );
+        expect(() =>
+          admitGrassWorkerPlacementResult(
+            { ...active, compactCoastBlend: value } as GrassWorkerOutput,
+            queued,
+          ),
+        ).toThrow(/coastal distribution/i);
+      }
+      let getterCalls = 0;
+      for (const descriptor of [
+        {
+          enumerable: true,
+          get() {
+            getterCalls++;
+            return "distribution-v1";
+          },
+        },
+        { enumerable: false, value: "distribution-v1" },
+      ]) {
+        const malformed = { ...input };
+        Object.defineProperty(malformed, "compactCoastBlend", descriptor);
+        expect(() => prepareGrassWorkerRequest(malformed)).toThrow(
+          /coastal distribution/i,
+        );
+        const result = { ...ordinary };
+        Object.defineProperty(result, "compactCoastBlend", descriptor);
+        expect(() => admitGrassWorkerPlacementResult(result, input)).toThrow(
+          /coastal distribution/i,
+        );
+      }
+      const inherited = { ...input };
+      Object.setPrototypeOf(inherited, {
+        compactCoastBlend: "distribution-v1",
+      });
+      expect(() => prepareGrassWorkerRequest(inherited)).toThrow(
+        /coastal distribution/i,
+      );
+      expect(getterCalls).toBe(0);
+      const { southernMeadow: _meadow, ...noMeadowProfile } = profile;
+      for (const invalid of [
+        {
+          ...queued,
+          grassEligibility: "legacy-biome-v1" as const,
+          placementDistribution: undefined,
+        },
+        {
+          ...queued,
+          config: createTerrainWorkerConfig(
+            validateWorldTerrainProfile({
+              ...noMeadowProfile,
+            }),
+            base.config.TILE_RESOLUTION,
+          ),
+        },
+      ]) {
+        if (invalid.grassEligibility === "legacy-biome-v1")
+          delete invalid.placementDistribution;
+        expect(() => prepareGrassWorkerRequest(invalid)).toThrow(
+          /coast(?:al)? distribution/i,
+        );
+        await expect(worker.run(invalid)).rejects.toThrow(
+          /coast(?:al)? distribution/i,
+        );
+      }
+      const emptyInput: GrassWorkerInput = {
+        ...queued,
+        grassConfigs: Object.fromEntries(
+          Object.entries(queued.grassConfigs).map(([key, config]) => [
+            key,
+            { ...config, density: 0 },
+          ]),
+        ),
+      };
+      const empty = await worker.run(emptyInput);
+      expect(empty.count).toBe(0);
+      expect(empty.compactCoastBlend).toBe("distribution-v1");
+      expect(admitGrassWorkerPlacementResult(empty, emptyInput)).toEqual(empty);
+      for (const result of [active, empty]) {
+        const missing = { ...result };
+        delete missing.compactCoastBlend;
+        expect(() => admitGrassWorkerPlacementResult(missing, queued)).toThrow(
+          /coastal distribution/i,
+        );
+        expect(() => admitGrassWorkerPlacementResult(result, input)).toThrow(
+          /coastal distribution/i,
+        );
+      }
+      assertExactInstanceBytes(await worker.run(input), ordinary);
+    });
+  });
+
   it("admits and echoes the grass color grade without changing actual placement or legacy wire fields", async () => {
     await withTerrain(async (terrain, internals, worker) => {
       internals.loadWaterBodiesFromManifest();
@@ -506,7 +2309,12 @@ describe("actual authored-surface grass worker", () => {
       };
       const ungraded = await worker.run(input);
       expect(ungraded.count).toBeGreaterThan(0);
-      expect(Object.hasOwn(ungraded, "compactGrassColorGrade")).toBe(false);
+      expect(
+        Object.prototype.hasOwnProperty.call(
+          ungraded,
+          "compactGrassColorGrade",
+        ),
+      ).toBe(false);
       const gradedInput: GrassWorkerInput = {
         ...input,
         compactGrassColorGrade: "fine-meadow-green-v1",
@@ -596,7 +2404,12 @@ describe("actual authored-surface grass worker", () => {
           const before = await previous.run(input);
           const after = await worker.run(input);
           expect(after.count).toBe(before.count);
-          expect(Object.hasOwn(after, "placementDistribution")).toBe(false);
+          expect(
+            Object.prototype.hasOwnProperty.call(
+              after,
+              "placementDistribution",
+            ),
+          ).toBe(false);
           expect(Object.keys(after)).toEqual(Object.keys(before));
           for (const key of Object.keys(
             attributes,
@@ -689,8 +2502,18 @@ describe("actual authored-surface grass worker", () => {
             });
             expect(near.placementCell).toEqual(cell);
             expect(near.placementCell).not.toBe(cell);
-            expect(Object.hasOwn(near, "placementDistribution")).toBe(false);
-            expect(Object.hasOwn(middle, "placementDistribution")).toBe(false);
+            expect(
+              Object.prototype.hasOwnProperty.call(
+                near,
+                "placementDistribution",
+              ),
+            ).toBe(false);
+            expect(
+              Object.prototype.hasOwnProperty.call(
+                middle,
+                "placementDistribution",
+              ),
+            ).toBe(false);
             expect(near.count).toBeLessThanOrEqual(1276);
             expect(near.count).toBe(middle.count);
             for (const key of Object.keys(
@@ -786,7 +2609,9 @@ describe("actual authored-surface grass worker", () => {
         ...request(terrain, internals, 350, 350, 4),
         clumpSpacing: 0.7,
       });
-      expect(Object.hasOwn(legacy, "placementCell")).toBe(false);
+      expect(
+        Object.prototype.hasOwnProperty.call(legacy, "placementCell"),
+      ).toBe(false);
     });
   });
 
@@ -911,7 +2736,7 @@ describe("actual authored-surface grass worker", () => {
       let dryShoulderSamples = 0;
       for (const p of points(input, result)) {
         const main = terrain.getTerrainColorAt(p.x, p.z, true);
-        const height = terrain.getHeightAtComputed(p.x, p.z);
+        const height = terrain["getHeightAtComputed"](p.x, p.z);
         for (const [axis, channel] of (["r", "g", "b"] as const).entries())
           expect(
             Math.abs(result.groundColors[p.index * 3 + axis] - main[channel]),
@@ -1298,6 +3123,128 @@ describe("actual authored-surface grass worker", () => {
             point.y > registry.getWaterSurfaceAt(point.x, point.z),
         ).length,
       ).toBeGreaterThan(0);
+    });
+  });
+
+  it("keeps explicit asymmetric pond candidate worker heights, normals, colour and local water eligibility aligned", async () => {
+    await withTerrain(async (terrain, internals, worker) => {
+      internals.loadWaterBodiesFromManifest();
+      internals.loadFlatZonesFromManifest();
+      const area = ALL_WORLD_AREAS.haven_pond;
+      const manifestPond = area.flatZones?.find((zone) => zone.radialPond);
+      if (!manifestPond?.radialPond || manifestPond.height === undefined)
+        throw new Error("Missing actual loaded pond profile");
+      const original = internals.flatZones.get(manifestPond.id);
+      if (!original?.radialPond)
+        throw new Error("Missing registered original pond profile");
+      const bankSectors = [
+        {
+          bearing: (-133 * Math.PI) / 180,
+          halfWidth: (40 * Math.PI) / 180,
+          innerRadius: 6.25,
+          innerHeight: 27.84,
+        },
+        {
+          bearing: (-27 * Math.PI) / 180,
+          halfWidth: (24 * Math.PI) / 180,
+          innerRadius: 6.55,
+          innerHeight: 28.08,
+        },
+      ];
+      // Local candidate only: the loaded/frozen world manifest stays unchanged.
+      expect(manifestPond.radialPond.bankSectors).toBeUndefined();
+      const protectedQueries = [
+        [340.5, 307], // Actual southern fishing resource approach.
+        [original.centerX, original.centerZ],
+        [original.centerX - 10, original.centerZ],
+        [original.centerX + 10, original.centerZ],
+        [original.centerX, original.centerZ + 8],
+      ].flatMap(([x, z]) =>
+        [
+          [0, 0],
+          [-0.5, 0],
+          [0.5, 0],
+          [0, -0.5],
+          [0, 0.5],
+        ].map(([dx, dz]) => ({ x: x + dx, z: z + dz })),
+      );
+      const protectedHeights = protectedQueries.map(({ x, z }) =>
+        internals.getHeightAtComputed(x, z),
+      );
+      terrain.registerFlatZone({
+        ...original,
+        radialPond: { ...original.radialPond, bankSectors },
+      });
+      expect(
+        protectedQueries.map(({ x, z }) => internals.getHeightAtComputed(x, z)),
+      ).toEqual(protectedHeights);
+      const input: GrassWorkerInput = {
+        ...request(terrain, internals, original.centerX, original.centerZ, 22),
+        grassEligibility: "compact-pbr-v1",
+        clumpSpacing: 0.35,
+      };
+      expect(
+        input.terrainSurface.zones.find((zone) => zone.id === original.id)
+          ?.radialPond?.bankSectors,
+      ).toEqual(bankSectors);
+      const result = await worker.run(input);
+      expect(result.count).toBeGreaterThan(50);
+      const legacyZones = input.terrainSurface.zones.map((zone) =>
+        zone.id === original.id
+          ? {
+              ...zone,
+              radialPond: { ...zone.radialPond!, bankSectors: undefined },
+            }
+          : zone,
+      );
+      const surface = createAuthoredTerrainSurfaceOperations();
+      const registry = terrain.getWaterBodyRegistry();
+      const changedSectorSamples = [0, 0];
+      for (const point of points(input, result)) {
+        expect(point.y).toBeGreaterThanOrEqual(
+          registry.getWaterSurfaceAt(point.x, point.z) + 0.1 - 1e-4,
+        );
+        const main = terrain.getTerrainColorAt(
+          point.x,
+          point.z,
+          true,
+          "compact-pbr-v1",
+        );
+        expect(main.grassWeight).toBeGreaterThan(0);
+        for (const [axis, channel] of (["r", "g", "b"] as const).entries())
+          expect(
+            Math.abs(
+              result.groundColors[point.index * 3 + axis] - main[channel],
+            ),
+          ).toBeLessThan(colorParityTolerance);
+        const dx = point.x - original.centerX;
+        const dz = point.z - original.centerZ;
+        if (Math.hypot(dx, dz) >= 8.8) continue;
+        const oldHeight = surface.resolveHeight(
+          legacyZones,
+          point.x,
+          point.z,
+          () => terrain.getProceduralHeightAt(point.x, point.z),
+          internals.arenaFloorZoneIds,
+          internals.arenaGradeHeight,
+        );
+        if (oldHeight === null || Math.abs(point.y - oldHeight) < 0.002)
+          continue;
+        const angle = Math.atan2(dz, dx);
+        bankSectors.forEach((sector, index) => {
+          const delta = Math.atan2(
+            Math.sin(angle - sector.bearing),
+            Math.cos(angle - sector.bearing),
+          );
+          if (Math.abs(delta) < sector.halfWidth) changedSectorSamples[index]++;
+        });
+      }
+      expect(changedSectorSamples[0]).toBeGreaterThan(0);
+      expect(changedSectorSamples[1]).toBeGreaterThan(0);
+      expect(
+        assertSurfaceParity(input, result, internals).sloped,
+      ).toBeGreaterThan(10);
+      expect(manifestPond.radialPond.bankSectors).toBeUndefined();
     });
   });
 

@@ -8,6 +8,7 @@ import {
   OutdoorEnvironment,
   OUTDOOR_ENVIRONMENT_PHASES,
   calibrateOutdoorCapture,
+  resolveOutdoorCalibration,
   sampleOutdoorFill,
   sampleOutdoorInterval,
 } from "../OutdoorEnvironment";
@@ -94,6 +95,94 @@ function cpuOwnedGraph() {
 }
 
 describe("outdoor environment CPU contracts (not GPU radiometry or art approval)", () => {
+  it("requires one explicit RGB candidate selector and preserves ordinary startup", () => {
+    expect(resolveOutdoorCalibration("")).toBe("luminance-v1");
+    expect(resolveOutdoorCalibration("?skyAtmosphere=scattering-v1")).toBe(
+      "luminance-v1",
+    );
+    for (const mode of ["luminance-v1", "rgb-irradiance-v1"] as const) {
+      expect(resolveOutdoorCalibration("?outdoorCalibration=" + mode)).toBe(
+        mode,
+      );
+      const owner = new OutdoorEnvironment(new THREE.Scene(), mode);
+      expect(owner.getStatus().calibration).toBe(mode);
+      expect(owner.getStatus().baseColorBytes).toBe(0);
+      owner.dispose();
+    }
+    for (const search of [
+      "?outdoorCalibration=",
+      "?outdoorCalibration=rgb",
+      "?outdoorCalibration=rgb-irradiance-v1&outdoorCalibration=rgb-irradiance-v1",
+    ])
+      expect(() => resolveOutdoorCalibration(search)).toThrow("calibration");
+  });
+
+  it.each(["gradient-v1", "scattering-v1"] as const)(
+    "calibrates actual %s RGB irradiance at every cache phase with independent finer quadrature",
+    (mode) => {
+      const sky = new SkySystem(new World(), mode);
+      const before = Object.values(sky.skyPaletteUniforms).map((u) =>
+        u.value.toArray(),
+      );
+      const capture = sky.createLightingCapture();
+      try {
+        for (const phase of OUTDOOR_ENVIRONMENT_PHASES) {
+          const baseline = calibrateOutdoorCapture(capture, phase);
+          expect(baseline.skyColor).toEqual([1, 1, 1]);
+          const result = calibrateOutdoorCapture(
+            capture,
+            phase,
+            "rgb-irradiance-v1",
+          );
+          const expected = color(result.upwardIrradiance);
+          const gain = color(result.skyColor).multiplyScalar(result.skyScale);
+          expect(
+            result.skyColor.every((c) => Number.isFinite(c) && c > 0),
+          ).toBe(true);
+          expect(result.groundRadiance).toEqual(baseline.groundRadiance);
+          expect(result.upwardIrradiance).toEqual(baseline.upwardIrradiance);
+          expectColorClose(
+            integratedUp(capture, phase, 64, 128).multiply(gain),
+            expected,
+            10,
+          );
+          const refined = integratedUp(capture, phase, 128, 256).multiply(gain);
+          for (const channel of ["r", "g", "b"] as const) {
+            expect(
+              Math.abs(refined[channel] / expected[channel] - 1),
+            ).toBeLessThan(0.01);
+          }
+          capture.setPhase(
+            phase,
+            result.skyScale,
+            result.groundRadiance,
+            result.skyColor,
+          );
+        }
+        expect(
+          Object.values(sky.skyPaletteUniforms).map((u) => u.value.toArray()),
+        ).toEqual(before);
+      } finally {
+        capture.dispose();
+      }
+    },
+  );
+
+  it("rejects a real sky with a missing RGB channel instead of fabricating radiance", () => {
+    const sky = new SkySystem(new World(), "gradient-v1");
+    for (const palette of Object.values(sky.skyPaletteUniforms))
+      palette.value.r = 0;
+    const capture = sky.createLightingCapture();
+    try {
+      expect(() => calibrateOutdoorCapture(capture, 0.5)).not.toThrow();
+      expect(() =>
+        calibrateOutdoorCapture(capture, 0.5, "rgb-irradiance-v1"),
+      ).toThrow("every channel");
+    } finally {
+      capture.dispose();
+    }
+  });
+
   it("owns exact cache endpoints and wraps cyclic indices", () => {
     const out = { a: -1, b: -1, blend: -1 };
     expect(Object.isFrozen(OUTDOOR_ENVIRONMENT_PHASES)).toBe(true);
@@ -382,7 +471,7 @@ describe("outdoor environment CPU contracts (not GPU radiometry or art approval)
 
   it("does not overwrite a later scene owner during disposal", () => {
     const f = cpuOwnedGraph();
-    const foreign = uniform(new THREE.Color(0.3, 0.4, 0.5));
+    const foreign = uniform(new THREE.Color(0.3, 0.4, 0.5)).rgb;
     f.scene.environmentNode = foreign;
     f.scene.environmentIntensity = 7;
     f.owner.dispose();

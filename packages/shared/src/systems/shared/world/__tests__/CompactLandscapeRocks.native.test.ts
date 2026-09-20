@@ -8,6 +8,7 @@ import { World } from "../../../../core/World";
 import { DataManager } from "../../../../data/DataManager";
 import { loadPhysX, getPhysX } from "../../../../physics/PhysXManager";
 import { TerrainSystem } from "../TerrainSystem";
+import type { CompactLandscapeRocksManifest } from "../../../../types/world/world-types";
 import {
   createCompactRockCollisionGeometry,
   COMPACT_ROCK_SOURCE_SHA256,
@@ -26,6 +27,59 @@ const owned: { dispose(): void }[] = [];
 const config = DataManager.getWorldConfig()!,
   profile = DataManager.getWorldTerrainProfile();
 const descriptor = config.compactLandscapeRocks!;
+// These coastal poses were admitted against the exact review52 authored world,
+// not the different default terrain. Keep the historical suite independent.
+const coastalCandidate =
+  process.env.HYPERIA_COASTAL_ROCKS_CANDIDATE === "review59";
+const savedData = {
+  config: DataManager["worldConfig"],
+  profile: DataManager["worldTerrainProfile"],
+  identity: DataManager["worldContentIdentity"],
+};
+const coastalRows: CompactLandscapeRocksManifest["rocks"] = [
+  {
+    id: "coastal-review59-01",
+    variant: "rock11",
+    x: 400.7,
+    z: 470,
+    yaw: 0.7,
+    scale: 1.35,
+  },
+  {
+    id: "coastal-review59-02",
+    variant: "rock13",
+    x: 403.1,
+    z: 469,
+    yaw: 2.1,
+    scale: 1.1,
+  },
+  {
+    id: "coastal-review59-03",
+    variant: "rock10",
+    x: 400.4,
+    z: 472.2,
+    yaw: 1.2,
+    scale: 0.8,
+  },
+];
+function coastalDescriptor(): CompactLandscapeRocksManifest {
+  return {
+    ...descriptor,
+    layoutId: "compact-preparation-coastal-rocks-v2",
+    rocks: [...descriptor.rocks, ...coastalRows],
+  };
+}
+function admitDescriptor(value: CompactLandscapeRocksManifest) {
+  // Isolated real manifest admission, restored after each test; no live world
+  // identity is modified and no terrain/physics method is replaced.
+  DataManager["worldContentIdentity"] = null;
+  DataManager.setWorldConfig({ ...config, compactLandscapeRocks: value });
+}
+class CpuServerWorld extends World {
+  override get isServer() {
+    return true;
+  }
+}
 beforeAll(async () => {
   const previous = process.env.NODE_ENV;
   process.env.NODE_ENV = "production";
@@ -39,9 +93,12 @@ beforeAll(async () => {
 afterEach(() => {
   for (const world of worlds.splice(0)) world.destroy();
   for (const object of owned.splice(0)) object.dispose();
+  DataManager["worldConfig"] = savedData.config;
+  DataManager["worldTerrainProfile"] = savedData.profile;
+  DataManager["worldContentIdentity"] = savedData.identity;
 });
-async function fixture() {
-  const world = new World();
+async function fixture(server = false) {
+  const world = server ? new CpuServerWorld() : new World();
   worlds.push(world);
   await world.physics.init();
   const terrain = world.register("terrain", TerrainSystem) as TerrainSystem;
@@ -196,6 +253,76 @@ describe("authored landscape rocks: real geometry and native collision, not visu
     ).toThrow();
   });
 
+  it("admits only the explicit bounded coastal layout while preserving all historical v1 rows", () => {
+    const before = JSON.stringify(descriptor);
+    const candidate = coastalDescriptor();
+    const admitted = validateCompactLandscapeRocks(candidate, profile)!;
+    expect(admitted.layoutId).toBe("compact-preparation-coastal-rocks-v2");
+    expect(admitted.rocks).toHaveLength(20);
+    expect(admitted.rocks.slice(0, 17)).toEqual(descriptor.rocks);
+    expect(admitted.rocks.slice(17)).toEqual(coastalRows);
+    expect(admitted).not.toBe(candidate);
+    expect(Object.isFrozen(admitted)).toBe(true);
+    expect(Object.isFrozen(admitted.rocks)).toBe(true);
+    expect(admitted.rocks.every(Object.isFrozen)).toBe(true);
+    expect(validateCompactLandscapeRocks(descriptor, profile)).toEqual(
+      descriptor,
+    );
+    expect(descriptor.layoutId).toBe("compact-preparation-rocks-v1");
+    expect(JSON.stringify(descriptor)).toBe(before);
+    expect(() =>
+      validateCompactLandscapeRocks(
+        { ...candidate, layoutId: descriptor.layoutId },
+        profile,
+      ),
+    ).toThrow();
+    for (const [x, z] of [
+      [399, 468],
+      [399, 474],
+      [405, 468],
+      [405, 474],
+    ]) {
+      expect(
+        validateCompactLandscapeRocks(
+          { ...candidate, rocks: [{ ...coastalRows[0], x, z }] },
+          profile,
+        )?.rocks[0],
+      ).toMatchObject({ x, z });
+    }
+    for (const bad of [
+      { ...candidate, layoutId: "compact-preparation-coastal-rocks-v3" },
+      {
+        ...candidate,
+        rocks: [
+          ...candidate.rocks,
+          { ...coastalRows[0], id: "coastal-fourth" },
+        ],
+      },
+      {
+        ...candidate,
+        rocks: Array.from({ length: 25 }, (_, i) => ({
+          ...descriptor.rocks[0],
+          id: `budget-${i}`,
+        })),
+      },
+      ...[
+        { x: 398.999 },
+        { x: 405.001 },
+        { z: 467.999 },
+        { z: 474.001 },
+        { scale: 0.499 },
+        { scale: 1.501 },
+        { x: NaN },
+        { yaw: -0.1 },
+        { variant: "unknown" },
+      ].map((change) => ({
+        ...candidate,
+        rocks: [{ ...coastalRows[0], ...change }],
+      })),
+    ])
+      expect(() => validateCompactLandscapeRocks(bad, profile)).toThrow();
+  });
+
   it("grounds the authored groups on actual terrain and bounds their support work and occupancy", async () => {
     const { terrain } = await fixture(),
       geometry = await createCompactRockCollisionGeometry();
@@ -324,7 +451,87 @@ describe("authored landscape rocks: real geometry and native collision, not visu
                 Math.abs(origin.z),
               );
               const ulp = 2 ** (Math.floor(Math.log2(worldMagnitude)) - 23);
-              expect(surfaceError).toBeLessThanOrEqual(8 * ulp);
+              if (surfaceError > 8 * ulp) {
+                // Failure diagnostics only: retain the exact ray and bound.
+                // Find the nearest actual source face, not just its plane.
+                const mesh = visible.object as THREE.Mesh,
+                  positions = mesh.geometry.attributes.position,
+                  indices = mesh.geometry.index!,
+                  triangle = new THREE.Triangle(),
+                  closest = new THREE.Vector3(),
+                  faceNormal = new THREE.Vector3();
+                let nearestDistance = Infinity;
+                let nearest: object | undefined;
+                for (let face = 0; face < indices.count / 3; face++) {
+                  [triangle.a, triangle.b, triangle.c].forEach((v, corner) =>
+                    v
+                      .fromBufferAttribute(
+                        positions,
+                        indices.getX(face * 3 + corner),
+                      )
+                      .applyMatrix4(mesh.matrixWorld),
+                  );
+                  triangle.closestPointToPoint(actual!.point, closest);
+                  const distance = closest.distanceTo(actual!.point);
+                  if (distance < nearestDistance) {
+                    nearestDistance = distance;
+                    nearest = {
+                      face,
+                      distance,
+                      point: closest.toArray(),
+                      normal: triangle.getNormal(faceNormal).toArray(),
+                      vertices: [
+                        triangle.a.toArray(),
+                        triangle.b.toArray(),
+                        triangle.c.toArray(),
+                      ],
+                    };
+                  }
+                }
+                const result = world.physics.raycastResult!;
+                const native = Array.from(
+                  { length: result.getNbAnyHits() },
+                  (_, i) => {
+                    const hit = result.getAnyHit(i);
+                    return {
+                      faceIndex: hit.faceIndex,
+                      u: hit.u,
+                      v: hit.v,
+                      distance: hit.distance,
+                    };
+                  },
+                );
+                console.info(
+                  JSON.stringify({
+                    rockRayFailureDiagnostic: { nearest, native },
+                  }),
+                );
+              }
+              const actualHandle = actual!.handle;
+              expect(
+                surfaceError,
+                JSON.stringify({
+                  sampledBounds: row.id,
+                  visibleRock:
+                    record.placements[
+                      meshes.findIndex((mesh) => mesh === visible.object)
+                    ]?.id,
+                  origin: origin.toArray(),
+                  visiblePoint: visible.point.toArray(),
+                  actualPoint: actual!.point.toArray(),
+                  actualNormal: actual!.normal.toArray(),
+                  actualRock:
+                    typeof actualHandle === "object" &&
+                    actualHandle !== null &&
+                    "tag" in actualHandle &&
+                    typeof actualHandle.tag === "string"
+                      ? actualHandle.tag
+                      : undefined,
+                  visibleFaceIndex: visible.faceIndex,
+                  visibleNormal: normal.toArray(),
+                  surfaceError,
+                }),
+              ).toBeLessThanOrEqual(8 * ulp);
               maximumSurfaceError = Math.max(maximumSurfaceError, surfaceError);
               maximumVerticalError = Math.max(
                 maximumVerticalError,
@@ -366,6 +573,175 @@ describe("authored landscape rocks: real geometry and native collision, not visu
       physx.destroy(types);
     }
   }, 60000);
+
+  it.runIf(coastalCandidate)(
+    "uses canonical v2 grounding despite a real resident terrain cache and owns coastal native collision and grass footprints",
+    async () => {
+      expect(process.env.ASSETS_DIR).toContain(
+        "terrain-pond-review52-UNQUALIFIED/assets",
+      );
+      // The third preliminary pose fails the unchanged production burial gate.
+      // Retain that witness; only the two measured supported poses are installed.
+      const candidate: CompactLandscapeRocksManifest = {
+        ...coastalDescriptor(),
+        rocks: [...descriptor.rocks, ...coastalRows.slice(0, 2)],
+      };
+      admitDescriptor(candidate);
+      const { world, terrain, owner } = await fixture(true);
+      const geometry = await createCompactRockCollisionGeometry();
+      owned.push(...geometry.values());
+      expect(() =>
+        groundCompactLandscapeRocks(
+          { ...candidate, rocks: [coastalRows[2]] },
+          geometry,
+          (x, z) => terrain.getResourceGroundHeight(x, z),
+        ),
+      ).toThrow("excessively buried");
+      const expected = groundCompactLandscapeRocks(
+        candidate,
+        geometry,
+        (x, z) => terrain.getResourceGroundHeight(x, z),
+      );
+      const canonicalBefore = coastalRows.map((p) =>
+        terrain.getResourceGroundHeight(p.x, p.z),
+      );
+      const tile = terrain["generateTile"](4, 5, false);
+      expect(tile.heightData!.length).toBeGreaterThan(0);
+      // Populate the real cached query with its actual generated height data;
+      // no synthetic cache heights or replacements of terrain methods.
+      terrain.getHeightAt(200, 200);
+      const cached = coastalRows.map((p) => terrain.getHeightAt(p.x, p.z));
+      expect(
+        cached.some((h, i) => Math.abs(h - canonicalBefore[i]) > 1e-6),
+      ).toBe(true);
+      expect(
+        coastalRows.map((p) => terrain.getResourceGroundHeight(p.x, p.z)),
+      ).toEqual(canonicalBefore);
+      expect(
+        groundCompactLandscapeRocks(candidate, geometry, (x, z) =>
+          terrain.getResourceGroundHeight(x, z),
+        ),
+      ).toEqual(expected);
+      expect(
+        expected.placements.slice(0, 17).map(({ y: _y, ...p }) => p),
+      ).toEqual(descriptor.rocks);
+      expect(
+        expected.support.every(
+          (row) => row.samples <= 1024 && row.maximum - row.minimum <= 1.5,
+        ),
+      ).toBe(true);
+      expect(expected.blockingTiles.length).toBeLessThanOrEqual(256);
+      const worker = terrain["buildGrassWorkerSetup"]();
+      const grass = worker.getTerrainSurfaceForRegion(200, 200, 500, 500);
+      expect(grass.exclusionPolygons).toEqual(
+        createCompactLandscapeRockFootprints(candidate),
+      );
+      expect(grass.exclusionPolygons).toHaveLength(19);
+      const physx = getPhysX()!,
+        types = new physx.PxActorTypeFlags(
+          physx.PxActorTypeFlagEnum.eRIGID_STATIC,
+        );
+      const beforeActors = world.physics.scene!.getNbActors(types);
+      const beforeFlags = expected.blockingTiles.map((p) =>
+        world.collision.getFlags(p.x, p.z),
+      );
+      try {
+        await owner.start();
+        expect(owner.getRocks()).toEqual(expected);
+        expect(owner.getDiagnostics()).toMatchObject({
+          layoutId: candidate.layoutId,
+          physicsActors: 19,
+          physicsShapes: 19,
+          collisionGeometries: 3,
+        });
+        expect(world.physics.scene!.getNbActors(types)).toBe(beforeActors + 19);
+        for (const p of expected.blockingTiles)
+          expect(world.collision.isWalkable(p.x, p.z)).toBe(false);
+        const material = new THREE.MeshBasicMaterial();
+        owned.push(material);
+        const meshes = expected.placements.slice(17).map((p) => {
+          const mesh = new THREE.Mesh(geometry.get(p.variant)!, material);
+          mesh.position.set(p.x, p.y, p.z);
+          mesh.rotation.y = p.yaw;
+          mesh.scale.setScalar(p.scale);
+          mesh.updateMatrixWorld(true);
+          return mesh;
+        });
+        const direction = new THREE.Vector3(0, -1, 0),
+          ray = new THREE.Raycaster(),
+          origin = new THREE.Vector3(),
+          normal = new THREE.Vector3();
+        let hits = 0,
+          maximumSurfaceError = 0;
+        for (const support of expected.support.slice(17)) {
+          for (let iz = 0; iz <= 8; iz++)
+            for (let ix = 0; ix <= 8; ix++) {
+              origin.set(
+                Math.fround(
+                  support.bounds.minX +
+                    ((support.bounds.maxX - support.bounds.minX) * ix) / 8,
+                ),
+                50,
+                Math.fround(
+                  support.bounds.minZ +
+                    ((support.bounds.maxZ - support.bounds.minZ) * iz) / 8,
+                ),
+              );
+              ray.set(origin, direction);
+              ray.far = 50;
+              const visible = ray.intersectObjects(meshes, false)[0];
+              const actual = world.physics.raycast(origin, direction, 50);
+              if (!visible) {
+                expect(actual).toBeNull();
+                continue;
+              }
+              expect(actual).not.toBeNull();
+              normal
+                .copy(visible.face!.normal)
+                .transformDirection(visible.object.matrixWorld);
+              const error = Math.abs(
+                new THREE.Vector3()
+                  .copy(actual!.point)
+                  .sub(visible.point)
+                  .dot(normal),
+              );
+              const ulp =
+                2 **
+                (Math.floor(
+                  Math.log2(Math.max(...origin.toArray().map(Math.abs))),
+                ) -
+                  23);
+              expect(error).toBeLessThanOrEqual(8 * ulp);
+              maximumSurfaceError = Math.max(maximumSurfaceError, error);
+              hits++;
+            }
+        }
+        expect(hits).toBeGreaterThan(50);
+        console.log(
+          JSON.stringify({
+            coastalNative: {
+              hits,
+              maximumSurfaceError,
+              cachedCenterHeights: cached,
+              canonicalCenterHeights: canonicalBefore,
+              support: expected.support.slice(17),
+              blockedCells: expected.blockingTiles.length,
+            },
+          }),
+        );
+        owner.destroy();
+        owner.destroy();
+        expect(world.physics.scene!.getNbActors(types)).toBe(beforeActors);
+        expect(
+          expected.blockingTiles.map((p) => world.collision.getFlags(p.x, p.z)),
+        ).toEqual(beforeFlags);
+        expect(owner.getRocks()).toBeNull();
+      } finally {
+        physx.destroy(types);
+      }
+    },
+    60000,
+  );
 
   it("cancels async startup without publishing collision or navigation ownership", async () => {
     const { world, owner } = await fixture();

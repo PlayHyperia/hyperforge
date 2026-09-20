@@ -73,7 +73,7 @@ describe("WaterVisualManager explicit compact water ownership", () => {
     const manager = new WaterVisualManager(
       container,
       water,
-      (x, z) => terrain.getHeightAtComputed(x, z),
+      (x, z) => terrain["getHeightAtComputed"](x, z),
       (x, z) => internals.getIslandMask(x, z),
       profile.water.threshold,
       [],
@@ -101,7 +101,7 @@ describe("WaterVisualManager explicit compact water ownership", () => {
         internals.getIslandMask(coastal.centerX, coastal.centerZ),
       ).toBeGreaterThan(0.3);
       expect(
-        terrain.getHeightAtComputed(coastal.centerX, coastal.centerZ),
+        terrain["getHeightAtComputed"](coastal.centerX, coastal.centerZ),
       ).toBeGreaterThan(profile.water.threshold);
       expect(
         internals.getIslandMask(ocean.centerX, ocean.centerZ),
@@ -168,7 +168,7 @@ describe("WaterVisualManager explicit compact water ownership", () => {
           new WaterVisualManager(
             container,
             water,
-            (x, z) => terrain.getHeightAtComputed(x, z),
+            (x, z) => terrain["getHeightAtComputed"](x, z),
             (x, z) => internals.getIslandMask(x, z),
             terrain.getWorldTerrainProfile().water.threshold,
             [{ ...authored, radius }],
@@ -195,7 +195,7 @@ describe("WaterVisualManager explicit compact water ownership", () => {
       const manager = new WaterVisualManager(
         container,
         water,
-        (x, z) => terrain.getHeightAtComputed(x, z),
+        (x, z) => terrain["getHeightAtComputed"](x, z),
         (x, z) => internals.getIslandMask(x, z),
         terrain.getWorldTerrainProfile().water.threshold,
         [],
@@ -238,7 +238,7 @@ describe("WaterVisualManager explicit compact water ownership", () => {
     const manager = new WaterVisualManager(
       container,
       water,
-      (x, z) => terrain.getHeightAtComputed(x, z),
+      (x, z) => terrain["getHeightAtComputed"](x, z),
       (x, z) => internals.getIslandMask(x, z),
       profile.water.threshold,
       bodies,
@@ -325,7 +325,7 @@ describe("WaterVisualManager explicit compact water ownership", () => {
           new WaterVisualManager(
             container,
             water,
-            (x, z) => terrain.getHeightAtComputed(x, z),
+            (x, z) => terrain["getHeightAtComputed"](x, z),
             (x, z) => internals.getIslandMask(x, z),
             profile.water.threshold + 1,
             internals.waterBodyRegistry.getAllBodies(),

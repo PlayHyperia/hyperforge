@@ -6,7 +6,10 @@ import { System } from "../infrastructure/System";
 
 // NOTE: Import directly to avoid circular dependency through barrel file
 import { SkySystem } from "./SkySystem";
-import { OutdoorEnvironment } from "./OutdoorEnvironment";
+import {
+  OutdoorEnvironment,
+  resolveOutdoorCalibration,
+} from "./OutdoorEnvironment";
 import { DataManager } from "../../../data/DataManager";
 import { isCompactSculptProfile } from "./WorldTerrainProfile";
 import { setLamppostNightMix } from "./LamppostLightMask";
@@ -273,7 +276,10 @@ export class Environment extends System {
     // Prepare one shared sky IBL before world startup completes. Standard PBR
     // actors, equipment and terrain inherit it; planar water remains separate.
     if (this.world.stage?.scene && this.world.graphics) {
-      this.outdoorEnvironment = new OutdoorEnvironment(this.world.stage.scene);
+      this.outdoorEnvironment = new OutdoorEnvironment(
+        this.world.stage.scene,
+        resolveOutdoorCalibration(),
+      );
       await this.outdoorEnvironment.initialize(
         this.world.graphics,
         this.skySystem.createLightingCapture(),

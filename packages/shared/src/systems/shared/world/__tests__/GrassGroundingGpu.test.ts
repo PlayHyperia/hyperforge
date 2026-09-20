@@ -10,6 +10,7 @@ import {
 import THREE from "../../../../extras/three/three";
 import {
   createGroundedGrassMaterial,
+  GRASS_BLADE_VISIBILITY_ATTRIBUTE,
   GRASS_ROOT_STORAGE_ATTRIBUTE,
 } from "../GrassGroundingGpu";
 import {
@@ -25,7 +26,12 @@ function drain<T>(steps: Generator<string, T, void>): T {
 
 /** Inspect the actual constructed TSL address. Integer division mirrors the
  * uint operands here; this deliberately does not claim native GPU execution. */
-function storageAddress(node: Node, instance: number, vertex: number): number {
+function storageAddress(
+  node: Node,
+  instance: number,
+  vertex: number,
+  visibility?: number,
+): number {
   if (node === instanceIndex) return instance;
   if (node === vertexIndex) return vertex;
   const value: unknown = Reflect.get(node, "value");
@@ -35,10 +41,26 @@ function storageAddress(node: Node, instance: number, vertex: number): number {
     const next: unknown = Reflect.get(node, name);
     if (!(next instanceof THREE.Node))
       throw new Error(`Unexpected ${name} on ${node.type}`);
-    return storageAddress(next, instance, vertex);
+    return storageAddress(next, instance, vertex, visibility);
   };
   if (node.type === "ConvertNode" || node.type === "VarNode")
     return child("node");
+  if (node.type === "StorageArrayElementNode") {
+    const binding = childNode(node, "node"),
+      attribute: unknown = Reflect.get(binding, "value");
+    if (
+      binding.nodeType !== "uint" ||
+      !(attribute instanceof StorageBufferAttribute) ||
+      !(attribute.array instanceof Uint32Array)
+    )
+      throw new Error("Expected actual uint visibility storage");
+    const index = child("indexNode");
+    if (index !== instance || attribute.getX(index) !== visibility)
+      throw new Error(
+        "Visibility address/value differs from compacted instance",
+      );
+    return attribute.getX(index);
+  }
   if (node.type !== "OperatorNode")
     throw new Error(`Unexpected grass address node ${node.type}`);
   const a = child("aNode"),
@@ -50,9 +72,71 @@ function storageAddress(node: Node, instance: number, vertex: number): number {
       return a * b;
     case "/":
       return Math.floor(a / b);
+    case ">>":
+      return a >>> b;
+    case "&":
+      return a & b;
+    case "!=":
+      return Number(a !== b);
     default:
       throw new Error("Unexpected grass address operation");
   }
+}
+
+function childNode(node: Node, name: string): Node {
+  const child: unknown = Reflect.get(node, name);
+  if (!(child instanceof THREE.Node))
+    throw new Error(`Missing actual ${name} on ${node.type}`);
+  return child;
+}
+
+/** Actual graph topology and inputs, excluding allocation-specific UUIDs. */
+function graphShape(node: Node): unknown {
+  const value: unknown = Reflect.get(node, "value");
+  return {
+    type: node.type,
+    nodeType: node.nodeType,
+    op: Reflect.get(node, "op"),
+    method: Reflect.get(node, "method"),
+    components: Reflect.get(node, "components"),
+    convertTo: Reflect.get(node, "convertTo"),
+    attributeName: Reflect.get(node, "_attributeName"),
+    scope: Reflect.get(node, "scope"),
+    access: Reflect.get(node, "access"),
+    bufferCount: Reflect.get(node, "bufferCount"),
+    value:
+      value instanceof THREE.BufferAttribute
+        ? Array.from(value.array)
+        : typeof value === "number"
+          ? value
+          : undefined,
+    children: [...node.getChildren()].map(graphShape),
+  };
+}
+
+function bindingGeometry(
+  lod: number,
+  count: number,
+  geometryLayout?: FineGrassGeometryLayout,
+): THREE.BufferGeometry {
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute(
+    "position",
+    new THREE.BufferAttribute(
+      new Float32Array(
+        getGrassBladeLayout(lod, geometryLayout).verticesPerClump * 3,
+      ),
+      3,
+    ),
+  );
+  geometry.setAttribute(
+    "instanceOffset",
+    new THREE.InstancedBufferAttribute(
+      Float32Array.from({ length: count * 3 }, (_, index) => index * 1.25 - 7),
+      3,
+    ),
+  );
+  return geometry;
 }
 
 describe("real Three grounding bindings and provenance (not a GPU test)", () => {
@@ -325,9 +409,12 @@ describe("real Three grounding bindings and provenance (not a GPU test)", () => 
           geometryLayout,
         );
         if (geometryLayout === undefined)
-          expect(Object.hasOwn(material.userData, "grassBladeLayout")).toBe(
-            false,
-          );
+          expect(
+            Object.prototype.hasOwnProperty.call(
+              material.userData,
+              "grassBladeLayout",
+            ),
+          ).toBe(false);
         else {
           const descriptor = getGrassBladeLayout(lod, geometryLayout);
           expect(material.userData.grassBladeLayout).toBe(descriptor);
@@ -350,7 +437,10 @@ describe("real Three grounding bindings and provenance (not a GPU test)", () => 
         expect(binding.array).toBe(deltas);
         expect(binding.array.byteLength).toBe(count * blades * 8);
         const accesses = new Set<Node>();
-        material.positionNode!.traverse((node) => {
+        const positionNode = material.positionNode;
+        if (!(positionNode instanceof THREE.Node))
+          throw new Error("Missing actual corrected grass position node");
+        positionNode.traverse((node) => {
           if (
             Reflect.get(node, "isArrayElementNode") === true &&
             Reflect.get(Reflect.get(node, "node"), "value") === binding
@@ -381,6 +471,403 @@ describe("real Three grounding bindings and provenance (not a GPU test)", () => 
       }
     },
   );
+
+  it.each(
+    (
+      [
+        undefined,
+        "fine-linear-sweep-3seg-v1",
+        "fine-linear-sweep-near4-v1",
+      ] as const
+    ).flatMap((geometryLayout) =>
+      [0, 1, 2].map((lod) => ({ geometryLayout, lod })),
+    ),
+  )(
+    "selects exact per-instance visible blade bits and a common collapse anchor for $geometryLayout LOD$lod",
+    ({ geometryLayout, lod }) => {
+      const tier = getGrassBladeLayout(lod, geometryLayout),
+        count = 3,
+        allBits = 2 ** tier.bladesPerClump - 1,
+        masks = new Uint32Array([1, 2 ** (tier.bladesPerClump - 1), allBits]),
+        maskBefore = masks.slice(),
+        base = new MeshStandardNodeMaterial(),
+        time = uniform(0.37),
+        geometry = bindingGeometry(lod, count, geometryLayout),
+        unmaskedGeometry = bindingGeometry(lod, count, geometryLayout),
+        deltas = Float32Array.from(
+          { length: count * tier.bladesPerClump * 2 },
+          (_, index) => (index + 1) / 16,
+        );
+      base.positionNode = vec3(time, 9, -3);
+      const borrowedPosition = base.positionNode;
+      let material: MeshStandardNodeMaterial | undefined,
+        unmasked: MeshStandardNodeMaterial | undefined;
+      try {
+        material = createGroundedGrassMaterial(
+          base,
+          geometry,
+          deltas,
+          count,
+          lod,
+          geometryLayout,
+          masks,
+        );
+        unmasked = createGroundedGrassMaterial(
+          base,
+          unmaskedGeometry,
+          deltas,
+          count,
+          lod,
+          geometryLayout,
+        );
+        const binding = geometry.getAttribute(GRASS_BLADE_VISIBILITY_ATTRIBUTE);
+        expect(binding).toBeInstanceOf(StorageBufferAttribute);
+        if (!(binding instanceof StorageBufferAttribute))
+          throw new Error("Missing actual visibility binding");
+        expect(binding.array).toBe(masks);
+        expect(binding.array.byteLength).toBe(count * 4);
+        expect(binding.count).toBe(count);
+        expect(binding.itemSize).toBe(1);
+        expect(binding.isStorageBufferAttribute).toBe(true);
+        expect(binding).not.toBeInstanceOf(THREE.InstancedBufferAttribute);
+        expect(binding.normalized).toBe(false);
+        const selected = material.positionNode as Node;
+        expect(selected.type).toBe("ConditionalNode");
+        const condition = childNode(selected, "condNode"),
+          corrected = childNode(selected, "ifNode"),
+          collapsed = childNode(selected, "elseNode");
+        expect(graphShape(corrected)).toEqual(
+          graphShape(unmasked.positionNode as Node),
+        );
+        expect(collapsed.type).toBe("AttributeNode");
+        expect(collapsed.nodeType).toBe("vec3");
+        expect(Reflect.get(collapsed, "_attributeName")).toBe("instanceOffset");
+        expect([...collapsed.getChildren()]).toEqual([]);
+        const nodes: Node[] = [];
+        selected.traverse((node) => nodes.push(node));
+        const maskStorage = nodes.filter(
+          (node) =>
+            node.type === "StorageBufferNode" &&
+            Reflect.get(node, "value") === binding,
+        );
+        expect(new Set(maskStorage).size).toBe(1);
+        expect(maskStorage[0].nodeType).toBe("uint");
+        expect(Reflect.get(maskStorage[0], "bufferCount")).toBe(0);
+        expect(Reflect.get(maskStorage[0], "access")).toBe("readOnly");
+        expect(
+          nodes.some(
+            (node) =>
+              node.type === "AttributeNode" &&
+              Reflect.get(node, "_attributeName") ===
+                GRASS_BLADE_VISIBILITY_ATTRIBUTE,
+          ),
+        ).toBe(false);
+        expect(nodes).toContain(borrowedPosition);
+        expect(nodes).toContain(time);
+        expect(
+          nodes.filter((node) => node.type === "ConditionalNode"),
+        ).toHaveLength(1);
+        expect(nodes.some((node) => /Discard/.test(node.type))).toBe(false);
+        const offset = geometry.getAttribute("instanceOffset");
+        for (let instance = 0; instance < count; instance++) {
+          const anchor = [
+            offset.getX(instance),
+            offset.getY(instance),
+            offset.getZ(instance),
+          ];
+          for (let blade = 0; blade < tier.bladesPerClump; blade++) {
+            const visible = (masks[instance] & (1 << blade)) !== 0;
+            const hiddenPositions: number[][] = [];
+            for (let v = 0; v < tier.verticesPerBlade; v++) {
+              const vertex = blade * tier.verticesPerBlade + v;
+              expect(
+                storageAddress(
+                  condition,
+                  instance,
+                  vertex,
+                  binding.getX(instance),
+                ),
+              ).toBe(Number(visible));
+              if (!visible) {
+                // Interpret the actual selected attribute leaf, not an invented
+                // shader: no vertex-dependent node or correction follows it.
+                const actual = geometry.getAttribute(
+                  Reflect.get(collapsed, "_attributeName"),
+                );
+                hiddenPositions.push([
+                  actual.getX(instance),
+                  actual.getY(instance),
+                  actual.getZ(instance),
+                ]);
+              }
+            }
+            if (!visible) {
+              expect(hiddenPositions).toHaveLength(tier.verticesPerBlade);
+              for (const position of hiddenPositions)
+                expect(position).toEqual(anchor);
+              const a = new THREE.Vector3().fromArray(hiddenPositions[0]),
+                b = new THREE.Vector3().fromArray(hiddenPositions[1]),
+                c = new THREE.Vector3().fromArray(hiddenPositions[2]);
+              expect(b.sub(a).cross(c.sub(a)).lengthSq()).toBe(0);
+            }
+          }
+        }
+        expect(masks).toEqual(maskBefore);
+        expect(base.positionNode).toBe(borrowedPosition);
+        expect(
+          unmaskedGeometry.hasAttribute(GRASS_BLADE_VISIBILITY_ATTRIBUTE),
+        ).toBe(false);
+      } finally {
+        material?.dispose();
+        unmasked?.dispose();
+        geometry.dispose();
+        unmaskedGeometry.dispose();
+        base.dispose();
+      }
+    },
+  );
+
+  it("leaves omitted and explicit-undefined mask graphs and attributes identical", () => {
+    const base = new MeshStandardNodeMaterial(),
+      omittedGeometry = bindingGeometry(1, 1),
+      undefinedGeometry = bindingGeometry(1, 1),
+      deltas = new Float32Array(24);
+    base.positionNode = vec3(1, 2, 3);
+    // Legacy bindings never required instanceOffset, and still must not.
+    omittedGeometry.deleteAttribute("instanceOffset");
+    undefinedGeometry.deleteAttribute("instanceOffset");
+    const omitted = createGroundedGrassMaterial(
+        base,
+        omittedGeometry,
+        deltas,
+        1,
+        1,
+      ),
+      explicit = createGroundedGrassMaterial(
+        base,
+        undefinedGeometry,
+        deltas,
+        1,
+        1,
+        undefined,
+        undefined,
+      );
+    try {
+      expect(graphShape(omitted.positionNode as Node)).toEqual(
+        graphShape(explicit.positionNode as Node),
+      );
+      for (const geometry of [omittedGeometry, undefinedGeometry])
+        expect(Object.keys(geometry.attributes)).toEqual([
+          "position",
+          GRASS_ROOT_STORAGE_ATTRIBUTE,
+        ]);
+      for (const material of [omitted, explicit]) {
+        const positionNode = material.positionNode;
+        if (!(positionNode instanceof THREE.Node))
+          throw new Error("Missing actual unmasked grass position node");
+        expect(positionNode.type).toBe("VarNode");
+        const sum = childNode(positionNode, "node");
+        expect(sum.type).toBe("OperatorNode");
+        expect(Reflect.get(sum, "op")).toBe("+");
+        const nodes: Node[] = [];
+        positionNode.traverse((node) => nodes.push(node));
+        expect(nodes.some((node) => node.type === "ConditionalNode")).toBe(
+          false,
+        );
+        expect(
+          nodes.some(
+            (node) =>
+              Reflect.get(node, "_attributeName") ===
+              GRASS_BLADE_VISIBILITY_ATTRIBUTE,
+          ),
+        ).toBe(false);
+      }
+    } finally {
+      omitted.dispose();
+      explicit.dispose();
+      omittedGeometry.dispose();
+      undefinedGeometry.dispose();
+      base.dispose();
+    }
+  });
+
+  it.each([0, 1, 2])(
+    "rejects invalid LOD%s visibility masks before mutating geometry",
+    (lod) => {
+      const tier = getGrassBladeLayout(lod),
+        base = new MeshStandardNodeMaterial(),
+        geometry = bindingGeometry(lod, 2),
+        deltas = new Float32Array(4 * tier.bladesPerClump),
+        valid = 2 ** tier.bladesPerClump - 1;
+      base.positionNode = vec3(0);
+      try {
+        for (const invalid of [
+          null,
+          [1, 1],
+          new Float32Array([1, 1]),
+          new Int32Array([1, 1]),
+          new Uint32Array(),
+          new Uint32Array([1]),
+          new Uint32Array([1, 1, 1]),
+          new Uint32Array([0, 1]),
+          new Uint32Array([1, 0]),
+          new Uint32Array([valid, 2 ** tier.bladesPerClump]),
+          new Uint32Array([1, 0xffffffff]),
+        ]) {
+          expect(() =>
+            createGroundedGrassMaterial(
+              base,
+              geometry,
+              deltas,
+              2,
+              lod,
+              undefined,
+              invalid as Uint32Array,
+            ),
+          ).toThrow(/visibility/);
+          expect(Object.keys(geometry.attributes)).toEqual([
+            "position",
+            "instanceOffset",
+          ]);
+        }
+        const previous = new THREE.InstancedBufferAttribute(
+          new Uint32Array([1, 1]),
+          1,
+        );
+        geometry.setAttribute(GRASS_BLADE_VISIBILITY_ATTRIBUTE, previous);
+        expect(() =>
+          createGroundedGrassMaterial(
+            base,
+            geometry,
+            deltas,
+            2,
+            lod,
+            undefined,
+            new Uint32Array([1, 1]),
+          ),
+        ).toThrow(/visibility/);
+        expect(geometry.getAttribute(GRASS_BLADE_VISIBILITY_ATTRIBUTE)).toBe(
+          previous,
+        );
+        expect(geometry.hasAttribute(GRASS_ROOT_STORAGE_ATTRIBUTE)).toBe(false);
+      } finally {
+        geometry.dispose();
+        base.dispose();
+      }
+    },
+  );
+
+  it("requires a finite per-instance Float32 common anchor for masked bindings", () => {
+    const base = new MeshStandardNodeMaterial(),
+      geometry = bindingGeometry(1, 2);
+    base.positionNode = vec3(0);
+    const repeated = new THREE.InstancedBufferAttribute(
+      new Float32Array(6),
+      3,
+      false,
+      2,
+    );
+    const nan = new THREE.InstancedBufferAttribute(
+      new Float32Array([0, NaN, 0, 0, 0, 0]),
+      3,
+    );
+    try {
+      for (const offset of [
+        undefined,
+        new THREE.BufferAttribute(new Float32Array(6), 3),
+        new THREE.InstancedBufferAttribute(new Float32Array(4), 2),
+        new THREE.InstancedBufferAttribute(new Float32Array(3), 3),
+        new THREE.InstancedBufferAttribute(new Float32Array(9), 3),
+        new THREE.InstancedBufferAttribute(new Float32Array(6), 3, true),
+        new THREE.InstancedBufferAttribute(new Uint32Array(6), 3),
+        repeated,
+        nan,
+      ]) {
+        if (offset) geometry.setAttribute("instanceOffset", offset);
+        else geometry.deleteAttribute("instanceOffset");
+        expect(() =>
+          createGroundedGrassMaterial(
+            base,
+            geometry,
+            new Float32Array(48),
+            2,
+            1,
+            undefined,
+            new Uint32Array([1, 1]),
+          ),
+        ).toThrow(/visibility/);
+        expect(geometry.hasAttribute(GRASS_ROOT_STORAGE_ATTRIBUTE)).toBe(false);
+        expect(geometry.hasAttribute(GRASS_BLADE_VISIBILITY_ATTRIBUTE)).toBe(
+          false,
+        );
+      }
+    } finally {
+      geometry.dispose();
+      base.dispose();
+    }
+  });
+
+  it("gives each masked chunk independent geometry bindings without retiring borrowed resources", () => {
+    const base = new MeshStandardNodeMaterial(),
+      texture = new THREE.Texture(),
+      time = uniform(0);
+    base.positionNode = vec3(time, 0, 0);
+    base.map = texture;
+    let baseDisposals = 0,
+      textureDisposals = 0;
+    base.addEventListener("dispose", () => baseDisposals++);
+    texture.addEventListener("dispose", () => textureDisposals++);
+    const chunks = [1, 2].map((count) => {
+      const geometry = bindingGeometry(1, count),
+        masks = new Uint32Array(count).fill(1);
+      const material = createGroundedGrassMaterial(
+        base,
+        geometry,
+        new Float32Array(count * 24),
+        count,
+        1,
+        undefined,
+        masks,
+      );
+      return { geometry, material, masks };
+    });
+    try {
+      expect(
+        chunks[0].geometry.getAttribute(GRASS_BLADE_VISIBILITY_ATTRIBUTE),
+      ).not.toBe(
+        chunks[1].geometry.getAttribute(GRASS_BLADE_VISIBILITY_ATTRIBUTE),
+      );
+      expect(
+        chunks[0].geometry.getAttribute(GRASS_ROOT_STORAGE_ATTRIBUTE),
+      ).not.toBe(chunks[1].geometry.getAttribute(GRASS_ROOT_STORAGE_ATTRIBUTE));
+      for (const { geometry, material, masks } of chunks) {
+        let geometryDisposals = 0,
+          materialDisposals = 0;
+        geometry.addEventListener("dispose", () => {
+          geometryDisposals++;
+          expect(
+            geometry.getAttribute(GRASS_BLADE_VISIBILITY_ATTRIBUTE).array,
+          ).toBe(masks);
+          expect(
+            geometry.getAttribute(GRASS_ROOT_STORAGE_ATTRIBUTE),
+          ).toBeInstanceOf(StorageBufferAttribute);
+        });
+        material.addEventListener("dispose", () => materialDisposals++);
+        expect(material.map).toBe(texture);
+        material.dispose();
+        expect(geometryDisposals).toBe(0);
+        expect(materialDisposals).toBe(1);
+        geometry.dispose();
+        expect(geometryDisposals).toBe(1);
+      }
+      expect(baseDisposals).toBe(0);
+      expect(textureDisposals).toBe(0);
+      expect(time.value).toBe(0);
+    } finally {
+      base.dispose();
+      texture.dispose();
+    }
+  });
 
   it("compacts ecological provenance in admitted order without retaining or changing borrowed arrays", () => {
     const source: GrassGrounding = {

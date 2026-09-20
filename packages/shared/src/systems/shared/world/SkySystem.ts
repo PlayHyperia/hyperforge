@@ -636,6 +636,7 @@ export interface SkyLightingCapture {
     phase: number,
     skyRadianceScale: number,
     groundRadiance: readonly [number, number, number],
+    skyRadianceColor?: readonly [number, number, number],
   ): void;
   dispose(): void;
 }
@@ -1440,6 +1441,7 @@ export class SkySystem extends System {
       : null;
     scattering?.setSun(sunDirection.value);
     const skyScale = uniform(1);
+    const skyRadianceColor = uniform(new THREE.Color(1, 1, 1));
     const groundColor = uniform(new THREE.Color(0, 0, 0));
     // Startup integration reuses these private values; sampling never changes
     // the scene's phase, sun, intensity, scale or explicit ground radiance.
@@ -1464,7 +1466,10 @@ export class SkySystem extends System {
       palette,
       scattering,
     );
-    skyMaterial.colorNode = vec4(skyColor.rgb.mul(skyScale), float(1));
+    skyMaterial.colorNode = vec4(
+      skyColor.rgb.mul(skyScale).mul(skyRadianceColor),
+      float(1),
+    );
     const skyGeometry = new THREE.SphereGeometry(10, 64, 32);
     const skyMesh = new THREE.Mesh(skyGeometry, skyMaterial);
     skyMesh.name = "LightingCaptureSky";
@@ -1562,7 +1567,7 @@ export class SkySystem extends System {
           skyCycleSmoothstep(0.15, 0, elevation) * (0.3 * (intensity * 0.9));
         if (!scattering) target.lerp(palette.haze.value, hazeAmount);
       },
-      setPhase(nextPhase, skyRadianceScale, groundRadiance) {
+      setPhase(nextPhase, skyRadianceScale, groundRadiance, color = [1, 1, 1]) {
         if (disposed) throw new Error("Lighting capture is disposed");
         if (
           !Number.isFinite(nextPhase) ||
@@ -1572,7 +1577,14 @@ export class SkySystem extends System {
           skyRadianceScale < 0 ||
           !Array.isArray(groundRadiance) ||
           groundRadiance.length !== 3 ||
-          !groundRadiance.every((c) => Number.isFinite(c) && c >= 0)
+          ![groundRadiance[0], groundRadiance[1], groundRadiance[2]].every(
+            (c) => Number.isFinite(c) && c >= 0,
+          ) ||
+          !Array.isArray(color) ||
+          color.length !== 3 ||
+          ![color[0], color[1], color[2]].every(
+            (c) => Number.isFinite(c) && c >= 0,
+          )
         ) {
           throw new Error("Invalid lighting capture phase or linear radiance");
         }
@@ -1580,6 +1592,7 @@ export class SkySystem extends System {
         scattering?.setSun(sunDirection.value);
         phase.value = nextPhase;
         skyScale.value = skyRadianceScale;
+        skyRadianceColor.value.setRGB(color[0], color[1], color[2]);
         groundColor.value.setRGB(
           groundRadiance[0],
           groundRadiance[1],

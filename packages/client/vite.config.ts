@@ -474,6 +474,18 @@ export default defineConfig(({ mode }) => {
       open: false,
       host: true,
       hmr: disableSharedWatch ? false : undefined,
+      // Explicit local workaround for OS FSEvents stalls (including fs.watch).
+      // Keep historical defaults unless requested; polling has a CPU/latency cost.
+      ...(mode === "development" && process.env.HYPERIA_VITE_POLLING === "true"
+        ? {
+            watch: {
+              useFsEvents: false,
+              usePolling: true,
+              interval: 1000,
+              binaryInterval: 1000,
+            },
+          }
+        : {}),
       // Do not proxy /env.js: public/env.js provides loopback defaults when the game server
       // is down or restarting; proxying returned 502 and blocked bootstrap. Server still
       // serves GET /env.js at PUBLIC_API_URL for direct use if needed.

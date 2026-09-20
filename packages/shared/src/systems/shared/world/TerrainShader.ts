@@ -55,17 +55,38 @@ import { SUN_LIGHT, SUN_SHADE } from "./LightingConfig";
 import {
   CompactTerrainTextureSet,
   createCompactTerrainLayers,
+  type CompactDirtProjection,
+  type CompactRockProjection,
+  type CompactSurfaceBlend,
+  type CompactPondBlend,
+  type CompactCoastBlend,
+  type CompactTerrainDiagnosticOutputs,
   blendCompactTerrainLayers,
+  createCompactTerrainDiagnosticOutputs,
   createCompactHabitatSoilNode,
   createCompactTerrainLayerWeights,
+  createCompactWornTurfWeights,
   createCompactPlantingSoil,
   createCompactHavenGroundWeights,
   createCompactPondSurfaceWeights,
+  createCompactPondMargin,
+  applyCompactPondMarginGrass,
+  createCompactPondBankComposition,
+  applyCompactPondBankGrass,
+  createCompactPondBankSediment,
+  createCompactPondRockContact,
+  createCompactPondContactSoil,
   applyCompactPondWetness,
   applyCompactMeadowTint,
   applyCompactFineGrassSubstrateContrast,
   applyCompactGrassColorGrade,
+  applyCompactBankVergeGrassTint,
+  createCompactBankVergeLocality,
+  createCompactBankVergeWear,
   createCompactCoastWeights,
+  createCompactCoastCavityPondClearance,
+  createCompactCoastDistribution,
+  createCompactCoastalGroundCover,
   applyCompactCoastRock,
   createCompactTerrainMacroWeights,
 } from "./CompactTerrainMaterial";
@@ -74,6 +95,7 @@ import {
   createCompactTerrainColorOperations,
   COMPACT_TERRAIN_COMPOSITION,
   type CompactTerrainPond,
+  type CompactPondBankField,
   type CompactTerrainPlantingLobe,
   type CompactTerrainHavenGround,
   type CompactGrassColorGrade,
@@ -1160,7 +1182,13 @@ export function createTerrainMaterial(
   options: {
     compactPbr?: boolean;
     compactGrassColorGrade?: CompactGrassColorGrade;
+    compactDirtProjection?: CompactDirtProjection;
+    compactRockProjection?: CompactRockProjection;
+    compactSurfaceBlend?: CompactSurfaceBlend;
+    compactPondBlend?: CompactPondBlend;
+    compactCoastBlend?: CompactCoastBlend;
     compactPond?: CompactTerrainPond | null;
+    compactPondBankField?: CompactPondBankField;
     compactPlantingLobes?: readonly CompactTerrainPlantingLobe[];
     compactProfile?: WorldTerrainProfile;
     compactHabitat?: CompactHabitatField | null;
@@ -1168,6 +1196,10 @@ export function createTerrainMaterial(
 ): THREE.Material & {
   terrainUniforms: TerrainUniforms;
   compactTerrainSurface?: CompactTerrainTextureSet;
+  compactPondBlend?: CompactPondBlend;
+  compactCoastBlend?: CompactCoastBlend;
+  compactPondBankField?: CompactPondBankField;
+  getCompactTerrainDiagnosticOutputs(): CompactTerrainDiagnosticOutputs | null;
   compactGrassColorGrade?: CompactGrassColorGradeDescriptor;
   compactPlantingMaterial?: readonly CompactTerrainPlantingLobe[];
   compactHavenGroundMaterial?: CompactHavenGroundMaterialReceipt;
@@ -1185,6 +1217,32 @@ export function createTerrainMaterial(
   );
   if (grassColorGrade && !options.compactPbr)
     throw new Error("Grass color grade requires the compact PBR material");
+  if (options.compactDirtProjection !== undefined && !options.compactPbr)
+    throw new Error("Dirt projection requires the compact PBR material");
+  if (options.compactRockProjection !== undefined && !options.compactPbr)
+    throw new Error("Rock projection requires the compact PBR material");
+  if (options.compactSurfaceBlend !== undefined && !options.compactPbr)
+    throw new Error("Surface blending requires the compact PBR material");
+  if (options.compactPondBlend !== undefined) {
+    if (
+      options.compactPondBlend !== "relief-v1" &&
+      options.compactPondBlend !== "relief-contact-v1" &&
+      options.compactPondBlend !== "shore-contact-v1" &&
+      options.compactPondBlend !== "composition-v1"
+    )
+      throw new Error("Invalid compact pond blend");
+    if (!options.compactPbr)
+      throw new Error("Pond blending requires the compact PBR material");
+    if (options.compactSurfaceBlend !== "height-v1")
+      throw new Error("Pond blending requires height-v1 surface blending");
+  }
+  if (options.compactCoastBlend !== undefined) {
+    grassColorOperations.coastBlend(options.compactCoastBlend);
+    if (!options.compactPbr)
+      throw new Error("Coast blending requires the compact PBR material");
+    if (options.compactSurfaceBlend !== "height-v1")
+      throw new Error("Coast blending requires height-v1 surface blending");
+  }
   const plantingLobes = options.compactPbr
     ? createCompactTerrainColorOperations().validatePlantingLobes(
         options.compactPlantingLobes,
@@ -1192,8 +1250,15 @@ export function createTerrainMaterial(
     : [];
   const macroField =
     options.compactPbr && options.compactProfile
-      ? createCompactTerrainColorOperations().macroField(options.compactProfile)
+      ? createCompactTerrainColorOperations().macroField(
+          options.compactProfile,
+          options.compactCoastBlend,
+          options.compactPondBlend,
+          options.compactPondBankField,
+        )
       : null;
+  if (options.compactCoastBlend !== undefined && !macroField?.coastalMeadow)
+    throw new Error("Coast blending requires an admitted coastal macro domain");
   if (
     options.compactHabitat &&
     (!options.compactPbr || !macroField?.havenGround)
@@ -1204,6 +1269,28 @@ export function createTerrainMaterial(
         options.compactPond ?? null,
       )
     : null;
+  if (options.compactPondBlend !== undefined && !compactPond)
+    throw new Error("Pond blending requires an admitted compact pond");
+  if (options.compactPondBlend === "composition-v1") {
+    const field = macroField?.pondBankField;
+    if (
+      !field ||
+      !compactPond ||
+      (["id", "centerX", "centerZ", "radius", "surfaceY"] as const).some(
+        (key) => field.pond[key] !== compactPond[key],
+      )
+    )
+      throw new Error("Pond composition requires its matching bound water");
+  } else if (options.compactPondBankField !== undefined) {
+    throw new Error("Pond bank field requires composition-v1");
+  }
+  if (
+    options.compactPondBlend === "shore-contact-v1" &&
+    !macroField?.pondDistribution
+  )
+    throw new Error(
+      "Shore contact requires an admitted compact pond distribution",
+    );
   const pondParameters = compactPond
     ? uniform(
         new THREE.Vector4(
@@ -1257,7 +1344,12 @@ export function createTerrainMaterial(
   const toCamera = sub(worldPos, cameraPosition);
   const distSq = dot(toCamera, toCamera);
   const compactTextures = options.compactPbr
-    ? new CompactTerrainTextureSet(getCdnUrl())
+    ? new CompactTerrainTextureSet(
+        getCdnUrl(),
+        options.compactDirtProjection,
+        options.compactSurfaceBlend,
+        options.compactRockProjection,
+      )
     : null;
 
   // Sample Perlin noise
@@ -1271,31 +1363,51 @@ export function createTerrainMaterial(
   const compactLayers = compactTextures
     ? createCompactTerrainLayers(compactTextures, distSq, noiseValue)
     : null;
+  const bankVergeLocality = macroField?.bankVerge
+    ? createCompactBankVergeLocality(worldPos, macroField)
+    : undefined;
   if (compactLayers)
     compactLayers.grass = applyCompactFineGrassSubstrateContrast(
       compactLayers.grass,
       grassColorGrade,
+      options.compactSurfaceBlend,
     );
-  if (compactLayers && !macroField?.havenGround) {
+  let meadowNoise: Node<"float"> | undefined;
+  if (compactLayers && (!macroField?.havenGround || macroField.coastalMeadow)) {
     // One extra sample of the existing noise texture; no new texture allocation.
-    // Dry grass keeps the same physical support, normals and placement field.
-    const meadowNoise = texture(
+    // The candidate reuses this sample for tint and physical-layer wear;
+    // grass support and placement remain independent of both.
+    const meadowSample = texture(
       noiseTex,
       mul(
         vec2(worldPos.x, worldPos.z),
         float(COMPACT_TERRAIN_COMPOSITION.meadowNoiseScale),
       ),
     ).r;
+    meadowNoise = macroField?.coastalMeadow
+      ? meadowSample.toVar("compactMeadowNoise")
+      : meadowSample;
     compactLayers.grass = applyCompactMeadowTint(
       compactLayers.grass,
       meadowNoise,
       macroSurface.dry,
+      macroField?.coastalMeadow
+        ? COMPACT_TERRAIN_COMPOSITION.coastalMeadowTintStrength
+        : 1,
     );
   }
   if (compactLayers)
     compactLayers.grass = applyCompactGrassColorGrade(
       compactLayers.grass,
       grassColorGrade,
+    );
+  if (compactLayers)
+    compactLayers.grass = applyCompactBankVergeGrassTint(
+      compactLayers.grass,
+      grassColorGrade,
+      worldPos,
+      macroField,
+      bankVergeLocality,
     );
   const noiseValue2 = add(
     mul(sin(mul(noiseValue, float(6.28))), float(0.3)),
@@ -1644,20 +1756,92 @@ export function createTerrainMaterial(
   const roadCenterDarken = mul(roadInfluence, float(0.08));
   const compactedRoadColor = sub(roadDetailColor, vec3(roadCenterDarken));
 
+  const pondMargin =
+    macroField?.pondDistribution && pondParameters && meadowNoise
+      ? createCompactPondMargin({
+          x: worldPos.x,
+          z: worldPos.z,
+          height: worldPos.y,
+          slope,
+          meadowNoise,
+          distortNoise,
+          roadInfluence: roadInfluenceRaw,
+          pond: {
+            centerX: pondParameters.x,
+            centerZ: pondParameters.y,
+            radius: pondParameters.z,
+            surfaceY: pondParameters.w,
+          },
+          field: macroField,
+        })
+      : undefined;
+  if (compactLayers && pondMargin)
+    compactLayers.grass = applyCompactPondMarginGrass(
+      compactLayers.grass,
+      pondMargin,
+    );
+  const pondBankComposition = macroField?.pondBankField
+    ? createCompactPondBankComposition({
+        x: worldPos.x,
+        z: worldPos.z,
+        height: worldPos.y,
+        slope,
+        distortNoise,
+        roadInfluence: roadInfluenceRaw,
+        field: macroField.pondBankField,
+      })
+    : undefined;
+  if (compactLayers && pondBankComposition)
+    compactLayers.grass = applyCompactPondBankGrass(
+      compactLayers.grass,
+      pondBankComposition,
+    );
   const pondSurface = pondParameters
-    ? createCompactPondSurfaceWeights(worldPos, distortNoise, pondParameters)
-    : { soil: float(0), wetness: float(0) };
-  if (compactLayers && macroField) {
+    ? createCompactPondSurfaceWeights(
+        worldPos,
+        distortNoise,
+        pondParameters,
+        macroField?.pondDistribution,
+        pondMargin,
+      )
+    : { soil: float(0), wetness: float(0), domain: null, cliffSoil: undefined };
+  const legacyPondSoil = pondSurface.cliffSoil ?? pondSurface.soil;
+  const coastSurface =
+    compactLayers && macroField
+      ? createCompactCoastWeights(
+          worldPos,
+          noiseValue,
+          distortNoise,
+          macroSurface.westRock,
+          slope,
+          macroField,
+        )
+      : null;
+  const coastalGround =
+    compactLayers && macroField?.coastalMeadow && coastSurface
+      ? {
+          coverage: createCompactCoastalGroundCover(
+            worldPos.y,
+            noiseValue,
+            distortNoise,
+            macroField,
+          )
+            .mul(float(1).sub(legacyPondSoil))
+            .toVar("compactCoastalGroundCover"),
+          // Only this coastal soil contribution is wet. Full roads/ponds
+          // keep their own final material priority; no extra map sampling.
+          layer: applyCompactCoastRock(
+            compactLayers.dirt,
+            compactLayers.dirt,
+            coastSurface,
+          ),
+        }
+      : undefined;
+  if (compactLayers && coastSurface) {
     compactLayers.rock = applyCompactCoastRock(
       compactLayers.rock,
       compactLayers.dirt,
-      createCompactCoastWeights(
-        worldPos,
-        noiseValue,
-        distortNoise,
-        macroSurface.westRock,
-        macroField,
-      ),
+      coastSurface,
     );
   }
   const compactWeights = compactLayers
@@ -1671,18 +1855,40 @@ export function createTerrainMaterial(
         createCompactPlantingSoil(worldPos, distortNoise, plantingLobes),
       )
     : null;
+  const pondContactSoil =
+    options.compactPondBlend === "relief-contact-v1" ||
+    options.compactPondBlend === "shore-contact-v1" ||
+    options.compactPondBlend === "composition-v1"
+      ? createCompactPondContactSoil(worldPos, distortNoise, macroField)
+      : undefined;
+  const wornTurf =
+    compactWeights && macroField?.coastalMeadow && meadowNoise
+      ? createCompactWornTurfWeights({
+          bankVergeLocality,
+          worldPosition: worldPos,
+          meadowNoise,
+          distortNoise,
+          geometricSlope: slope,
+          rawRoadInfluence: roadInfluenceRaw,
+          road: compactWeights.road,
+          pondSoil: legacyPondSoil,
+          coastalCoverage: coastalGround?.coverage ?? float(0),
+          field: macroField,
+          pondContactSoil,
+        })
+      : undefined;
   const compactBaseSurface =
     compactLayers && compactWeights
       ? blendCompactTerrainLayers(
           compactLayers,
           compactWeights.dirt,
           compactWeights.cliff,
-          compactWeights.road,
+          wornTurf?.road ?? compactWeights.road,
           macroField?.havenGround
             ? createCompactHavenGroundWeights(
                 vec2(worldPos.x, worldPos.z),
                 macroField.havenGround,
-                pondSurface.soil,
+                legacyPondSoil,
                 slope,
               )
             : undefined,
@@ -1693,6 +1899,75 @@ export function createTerrainMaterial(
                 options.compactHabitat,
               ).toVar("compactHabitatSoil")
             : undefined,
+          coastalGround,
+          grassColorGrade && macroField?.coastalMeadow && macroField.bankVerge
+            ? mix(
+                wornTurf?.soil ?? float(0),
+                float(1),
+                createCompactBankVergeWear(
+                  worldPos,
+                  macroField,
+                  bankVergeLocality,
+                ),
+              ).toVar("compactTurfAndBankSoil")
+            : wornTurf?.soil,
+          options.compactSurfaceBlend === "height-v1" && pondSurface.domain
+            ? createCompactPondBankSediment(pondSurface.domain, slope)
+            : undefined,
+          options.compactPondBlend === "relief-v1" ||
+            options.compactPondBlend === "relief-contact-v1" ||
+            options.compactPondBlend === "shore-contact-v1" ||
+            options.compactPondBlend === "composition-v1"
+            ? legacyPondSoil
+            : undefined,
+          options.compactPondBlend === "relief-contact-v1" ||
+            options.compactPondBlend === "shore-contact-v1" ||
+            options.compactPondBlend === "composition-v1"
+            ? createCompactPondRockContact({
+                world: worldPos,
+                distortNoise,
+                field: macroField,
+                pondSoil: legacyPondSoil,
+                geometricCliff: compactWeights.geometricCliff,
+                road: wornTurf?.road ?? compactWeights.road,
+                pondContactSoil,
+              })
+            : undefined,
+          options.compactCoastBlend === "detail-v1" && coastSurface
+            ? {
+                coverage: coastSurface.coverage,
+                pondRegion: pondSurface.domain?.region ?? float(0),
+              }
+            : undefined,
+          options.compactCoastBlend === "distribution-v1"
+            ? createCompactCoastDistribution({
+                x: worldPos.x,
+                z: worldPos.z,
+                height: worldPos.y,
+                slope,
+                noiseValue,
+                meadowNoise: meadowNoise ?? noiseValue,
+                road: wornTurf?.road ?? compactWeights.road,
+                pond: pondParameters
+                  ? {
+                      centerX: pondParameters.x,
+                      centerZ: pondParameters.y,
+                      radius: pondParameters.z,
+                    }
+                  : null,
+                field: macroField,
+              })
+            : undefined,
+          options.compactCoastBlend === "cavity-v1" && coastSurface
+            ? {
+                coverage: coastSurface.coverage,
+                pondClearance: createCompactCoastCavityPondClearance(
+                  worldPos,
+                  pondParameters,
+                ),
+              }
+            : undefined,
+          pondBankComposition,
         )
       : null;
   const compactSurface = compactBaseSurface
@@ -1891,6 +2166,10 @@ export function createTerrainMaterial(
   const result = material as typeof material & {
     terrainUniforms: TerrainUniforms;
     compactTerrainSurface?: CompactTerrainTextureSet;
+    compactPondBlend?: CompactPondBlend;
+    compactCoastBlend?: CompactCoastBlend;
+    compactPondBankField?: CompactPondBankField;
+    getCompactTerrainDiagnosticOutputs(): CompactTerrainDiagnosticOutputs | null;
     compactGrassColorGrade?: CompactGrassColorGradeDescriptor;
     compactPlantingMaterial?: readonly CompactTerrainPlantingLobe[];
     compactHavenGroundMaterial?: CompactHavenGroundMaterialReceipt;
@@ -1901,6 +2180,46 @@ export function createTerrainMaterial(
     };
   };
   result.terrainUniforms = terrainUniforms;
+  if (macroField?.pondBankField)
+    Object.defineProperty(result, "compactPondBankField", {
+      enumerable: true,
+      writable: false,
+      configurable: false,
+      value: macroField.pondBankField,
+    });
+  if (options.compactPondBlend !== undefined)
+    Object.defineProperty(result, "compactPondBlend", {
+      enumerable: true,
+      writable: false,
+      configurable: false,
+      value: options.compactPondBlend,
+    });
+  if (options.compactCoastBlend !== undefined)
+    Object.defineProperty(result, "compactCoastBlend", {
+      enumerable: true,
+      writable: false,
+      configurable: false,
+      value: options.compactCoastBlend,
+    });
+  let diagnosticOutputs: CompactTerrainDiagnosticOutputs | null = null;
+  let diagnosticDisposed = false;
+  result.getCompactTerrainDiagnosticOutputs = () => {
+    if (diagnosticDisposed || !compactBaseSurface?.weights || !compactWeights)
+      return null;
+    diagnosticOutputs ??= createCompactTerrainDiagnosticOutputs({
+      weights: compactBaseSurface.weights,
+      pondSoil: pondSurface.soil,
+      pondWetness: pondSurface.wetness,
+      geometricCliff: compactWeights.geometricCliff,
+      effectiveCliff: compactWeights.cliff,
+      coastSoil: coastSurface?.soil ?? float(0),
+    });
+    return diagnosticOutputs;
+  };
+  material.addEventListener("dispose", () => {
+    diagnosticDisposed = true;
+    diagnosticOutputs = null;
+  });
   if (grassColorGrade)
     Object.defineProperty(result, "compactGrassColorGrade", {
       enumerable: true,

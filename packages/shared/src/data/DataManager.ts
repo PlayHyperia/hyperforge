@@ -34,6 +34,7 @@ import { validateAuthoredResourceIdentities } from "./ResourceInstanceIdentity";
 import { validateCompactResourceGroves } from "../systems/shared/world/CompactResourceGroves";
 import { validateCompactPreparationLodge } from "../systems/shared/world/CompactPreparationLodge";
 import {
+  validateCompactBankPavilion,
   validateCompactServiceCourt,
   validateCompactServicePlanting,
 } from "../systems/shared/world/CompactServiceCourt";
@@ -418,6 +419,14 @@ export class DataManager {
       copy.compactServiceCourt,
       profile,
     );
+    const compactBankPavilion = validateCompactBankPavilion(
+      copy.compactBankPavilion,
+      profile,
+    );
+    if (compactBankPavilion && compactPreparationLodge)
+      throw new Error(
+        "Bank pavilion replaces the preparation lodge; both cannot own the bank",
+      );
     const compactServicePlanting = validateCompactServicePlanting(
       copy.compactServicePlanting,
       profile,
@@ -446,6 +455,7 @@ export class DataManager {
       ...(compactResourceGroves ? { compactResourceGroves } : {}),
       ...(compactPreparationLodge ? { compactPreparationLodge } : {}),
       ...(compactServiceCourt ? { compactServiceCourt } : {}),
+      ...(compactBankPavilion ? { compactBankPavilion } : {}),
       ...(compactServicePlanting ? { compactServicePlanting } : {}),
       ...(compactLandscapeRocks ? { compactLandscapeRocks } : {}),
     });

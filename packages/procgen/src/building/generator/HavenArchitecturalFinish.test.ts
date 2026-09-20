@@ -7,7 +7,11 @@ import {
   createHavenLodgeFinish,
   createHavenMember,
 } from "./HavenArchitecturalFinish";
-import { createOpenWorkshop } from "./OpenWorkshop";
+import {
+  BANK_PAVILION_POSTS,
+  BANK_PAVILION_RECIPE,
+  createOpenWorkshop,
+} from "./OpenWorkshop";
 import { getRecipe } from "./recipes";
 import {
   CELL_SIZE,
@@ -63,11 +67,13 @@ function meshMetrics(root: THREE.Object3D) {
     triangles +=
       (object.geometry.index?.count ??
         object.geometry.getAttribute("position").count) / 3;
-    for (const attribute of Object.values(object.geometry.attributes))
-      bytes +=
-        attribute instanceof THREE.InterleavedBufferAttribute
-          ? attribute.data.array.byteLength
-          : attribute.array.byteLength;
+    for (const attribute of Object.values(object.geometry.attributes)) {
+      if (attribute instanceof THREE.InterleavedBufferAttribute)
+        bytes += attribute.data.array.byteLength;
+      else if (attribute instanceof THREE.BufferAttribute)
+        bytes += attribute.array.byteLength;
+      else throw new Error("Unexpected generated geometry attribute");
+    }
     bytes += object.geometry.index?.array.byteLength ?? 0;
   });
   return { triangles, bytes, roles };
@@ -163,9 +169,7 @@ function assertSolid(geometry: THREE.BufferGeometry) {
       expect(normal.length()).toBeCloseTo(1, 5);
       expect(face.clone().normalize().dot(normal)).toBeGreaterThan(0.9999);
     }
-    const tex = ids.map((id) =>
-      new THREE.Vector2().fromBufferAttribute(uv, id),
-    );
+    const tex = ids.map((id) => new THREE.Vector2(uv.getX(id), uv.getY(id)));
     expect(
       Math.abs(tex[1].sub(tex[0]).cross(tex[2].sub(tex[0]))),
     ).toBeGreaterThan(1e-9);
@@ -190,6 +194,431 @@ function assertSolid(geometry: THREE.BufferGeometry) {
 }
 
 describe("opt-in Haven architectural geometry", () => {
+  it("retains the recorded pre-pavilion smithy buffers and explicit-default identity", () => {
+    const feet = [
+      { bottom: -0.12, top: 0.25 },
+      { bottom: -0.08, top: 0.24 },
+      { bottom: -0.1, top: 0.22 },
+      { bottom: -0.07, top: 0.23 },
+    ];
+    // Captured before editing OpenWorkshop.ts (source SHA256
+    // dec7fdb1c09e04b931fd186509181cf8b6591d2622a18d8a68a56fb41d0c994a).
+    // This is a historical output oracle, not only two calls to new code.
+    const hashes = {
+      original: [
+        "5e6d33910f3f6f1166e8c58637bb75da590232ca3500e83f975f4ec51e105bc4",
+        "46f8aa4f1f19e9336f5e607548193e66fefb50fd6421c9d8b1a69040991c0f93",
+        "66115636f1e361d8f03c8154fe13d7d223ac5a7fbd071eb26ba5aa21cfcadd92",
+      ],
+      "haven-v1": [
+        "f2f736ffa714b04aca3c29adcbc0738fe18b353367e74e6be60e16fca1ce2cad",
+        "4c287519b3c1060e8ed404d659efe6f2c9ec182fbad64bb86e5ea3f0067b5489",
+        "66115636f1e361d8f03c8154fe13d7d223ac5a7fbd071eb26ba5aa21cfcadd92",
+      ],
+    };
+    for (const architecturalFinish of [undefined, "haven-v1"] as const) {
+      const geometry = createOpenWorkshop(feet, { architecturalFinish });
+      const explicit = createOpenWorkshop(feet, {
+        architecturalFinish,
+        recipe: "smithy-v1",
+      });
+      try {
+        for (const [index, role] of (
+          ["timber", "roof", "footings"] as const
+        ).entries()) {
+          expect(digest(geometry[role])).toBe(
+            hashes[architecturalFinish ?? "original"][index],
+          );
+          expect(digest(explicit[role])).toBe(digest(geometry[role]));
+          expect(explicit[role].boundingBox).toEqual(
+            geometry[role].boundingBox,
+          );
+          expect(explicit[role].boundingSphere).toEqual(
+            geometry[role].boundingSphere,
+          );
+          expect(explicit[role].index).toEqual(geometry[role].index);
+          for (const name of Object.keys(geometry[role].attributes)) {
+            expect(explicit[role].getAttribute(name).itemSize).toBe(
+              geometry[role].getAttribute(name).itemSize,
+            );
+            expect(explicit[role].getAttribute(name).array).toEqual(
+              geometry[role].getAttribute(name).array,
+            );
+          }
+        }
+        expect(geometry.timber.boundingBox!.min.toArray()).toEqual([
+          -5.486606597900391, 0.1850000023841858, -3.450000047683716,
+        ]);
+        expect(geometry.timber.boundingBox!.max.toArray()).toEqual([
+          5.486606597900391, 5.418362617492676, 3.450000047683716,
+        ]);
+        expect(geometry.roof.boundingBox!.min.toArray()).toEqual([
+          -5.449999809265137, 2.9996471405029297, -3.450000047683716,
+        ]);
+        expect(geometry.roof.boundingBox!.max.toArray()).toEqual([
+          5.449999809265137, 5.606143474578857, 3.450000047683716,
+        ]);
+      } finally {
+        geometry.dispose();
+        explicit.dispose();
+      }
+    }
+  });
+
+  it("creates the fixed bank pavilion with deterministic finite outward geometry, metric UVs and bounded three-batch cost", () => {
+    expect(BANK_PAVILION_RECIPE).toEqual({
+      id: "bank-pavilion-v1",
+      width: 8,
+      depth: 8,
+      eaveHeight: 3.2,
+      pitchDegrees: 30,
+      posts: [
+        { x: -3.5, z: -3.5 },
+        { x: 3.5, z: -3.5 },
+        { x: -3.5, z: 3.5 },
+        { x: 3.5, z: 3.5 },
+      ],
+    });
+    expect(Object.isFrozen(BANK_PAVILION_RECIPE)).toBe(true);
+    expect(Object.isFrozen(BANK_PAVILION_POSTS)).toBe(true);
+    expect(BANK_PAVILION_POSTS.every(Object.isFrozen)).toBe(true);
+    const feet = BANK_PAVILION_POSTS.map(() =>
+      Object.freeze({ bottom: -0.08, top: 0.22 }),
+    );
+    Object.freeze(feet);
+    const first = createOpenWorkshop(feet, {
+      recipe: "bank-pavilion-v1",
+      architecturalFinish: "haven-v1",
+    });
+    const repeated = createOpenWorkshop(feet, {
+      recipe: "bank-pavilion-v1",
+      architecturalFinish: "haven-v1",
+    });
+    try {
+      expect(Object.keys(first).sort()).toEqual([
+        "dispose",
+        "footings",
+        "roof",
+        "timber",
+      ]);
+      const bounds = new THREE.Box3();
+      let triangles = 0,
+        bytes = 0;
+      for (const role of ["timber", "roof", "footings"] as const) {
+        const geometry = first[role];
+        expect(geometry).not.toBe(repeated[role]);
+        expect(digest(geometry)).toBe(digest(repeated[role]));
+        bounds.union(geometry.boundingBox!);
+        const p = geometry.getAttribute("position"),
+          n = geometry.getAttribute("normal"),
+          uv = geometry.getAttribute("uv"),
+          index = geometry.index;
+        const count = index?.count ?? p.count;
+        triangles += count / 3;
+        for (const attribute of Object.values(geometry.attributes)) {
+          expect(attribute.count).toBe(p.count);
+          expect([...attribute.array].every(Number.isFinite)).toBe(true);
+          bytes += attribute.array.byteLength;
+        }
+        bytes += index?.array.byteLength ?? 0;
+        for (let corner = 0; corner < count; corner += 3) {
+          const ids = [0, 1, 2].map(
+            (offset) => index?.getX(corner + offset) ?? corner + offset,
+          );
+          const points = ids.map((id) =>
+            new THREE.Vector3().fromBufferAttribute(p, id),
+          );
+          const face = points[1]
+            .clone()
+            .sub(points[0])
+            .cross(points[2].clone().sub(points[0]));
+          expect(
+            face.lengthSq(),
+            `${role}/${corner} degenerate`,
+          ).toBeGreaterThan(1e-12);
+          face.normalize();
+          for (const id of ids) {
+            const normal = new THREE.Vector3().fromBufferAttribute(n, id);
+            expect(normal.length()).toBeCloseTo(1, 5);
+            expect(
+              normal.dot(face),
+              `${role}/${corner} winding`,
+            ).toBeGreaterThan(0.99999);
+          }
+          const tex = ids.map(
+            (id) => new THREE.Vector2(uv.getX(id), uv.getY(id)),
+          );
+          expect(
+            Math.abs(tex[1].sub(tex[0]).cross(tex[2].sub(tex[0]))),
+            `${role}/${corner} collapsed UV`,
+          ).toBeGreaterThan(1e-9);
+        }
+      }
+      expect(triangles).toBe(1300);
+      expect(triangles).toBeLessThanOrEqual(1500);
+      expect(bytes).toBeLessThanOrEqual(216576);
+      expect(bounds.min.x).toBeGreaterThanOrEqual(-4.5);
+      expect(bounds.max.x).toBeLessThanOrEqual(4.5);
+      expect(bounds.min.z).toBeCloseTo(-4.45, 5);
+      expect(bounds.max.z).toBeCloseTo(4.45, 5);
+      expect(bounds.min.y).toBeCloseTo(-0.08, 6);
+      expect(bounds.max.y).toBeCloseTo(
+        3.2 + 4 * Math.tan(Math.PI / 6) + 0.18,
+        5,
+      );
+      process.stdout.write(
+        `${JSON.stringify({ bankPavilion: { triangles, bytes, min: bounds.min.toArray(), max: bounds.max.toArray(), hashes: Object.fromEntries((["timber", "roof", "footings"] as const).map((role) => [role, digest(first[role])])) } })}\n`,
+      );
+    } finally {
+      first.dispose();
+      repeated.dispose();
+    }
+  });
+
+  it("changes only the eight bank brace labels against recorded pre-change physical buffers", () => {
+    // Captured from OpenWorkshop.ts SHA256
+    // ded191864a7917f95a59fd11cba6640aedb334f0392a3d0e762084eb99cf489a,
+    // before this label-only edit (bank-pavilion-art02/before-geometry.json).
+    const snapshots = [
+      {
+        finish: undefined,
+        physical:
+          "6a5375f93fafcbfb8dc371be8c95b534bd7544660664045b0838f512d9a3e4f3",
+        oldTimber:
+          "7305aa55bab22193d0caa527896d163ca27933db6701fbb6c2438c78a408cfb1",
+        roof: "0dfed6788a12d32c026b1ab503c71bad3f12b1edb77d99ab2fcee454999aeddc",
+        timberTriangles: 1052,
+        timberMaxY: 5.497343063354492,
+        timberRadius: 6.325747771019566,
+      },
+      {
+        finish: "haven-v1" as const,
+        physical:
+          "05776a639b18c1c24274b02acae39eabf6bb4e0fa3ba7167d4cb3a0b97360a25",
+        oldTimber:
+          "ac79b468995e0c45a3068d21395f6802a7fb4d688e30a26f5b4247f900f17619",
+        roof: "31fc880a9f697975c179c39d30938f1f9a3192f4943ce3abc6ce3d929bdf62b9",
+        timberTriangles: 1148,
+        timberMaxY: 5.49734354019165,
+        timberRadius: 6.317848284304528,
+      },
+    ];
+    // An eight-sided capped extrusion has 16 side + 12 end triangles.
+    const memberCorners = (16 + 12) * 3;
+    for (const snapshot of snapshots) {
+      const geometry = createOpenWorkshop(
+        BANK_PAVILION_POSTS.map(() => ({ bottom: -0.08, top: 0.22 })),
+        { recipe: "bank-pavilion-v1", architecturalFinish: snapshot.finish },
+      );
+      const physical = geometry.timber.clone();
+      const legacy = geometry.timber.clone();
+      try {
+        physical.deleteAttribute("courtRoof");
+        expect(digest(physical)).toBe(snapshot.physical);
+        expect(digest(geometry.roof)).toBe(snapshot.roof);
+        expect(digest(geometry.footings)).toBe(
+          "98b29909ee38e8ff51e06c662af1d3a7ecea9736a764a799c5bd4546ede3a4d4",
+        );
+        const p = geometry.timber.getAttribute("position");
+        const mask = geometry.timber.getAttribute("courtRoof");
+        expect(geometry.timber.index).toBeNull();
+        expect(p.count / 3).toBe(snapshot.timberTriangles);
+        const restoredLabels = new Float32Array(p.count).fill(1);
+        restoredLabels.fill(0, 0, 12 * memberCorners);
+        legacy.setAttribute(
+          "courtRoof",
+          new THREE.BufferAttribute(restoredLabels, 1),
+        );
+        // Restoring exactly the old member labels recovers the complete old
+        // digest, including positions, normals, UVs, colors and topology.
+        expect(digest(legacy)).toBe(snapshot.oldTimber);
+        let permanentTriangles = 0,
+          changedCorners = 0;
+        for (let corner = 0; corner < p.count; corner += 3) {
+          const member = Math.floor(corner / memberCorners);
+          const permanent = member < 12 && member % 3 === 0;
+          for (let j = 0; j < 3; j++) {
+            expect(mask.getX(corner + j)).toBe(permanent ? 0 : 1);
+            if (mask.getX(corner + j) !== restoredLabels[corner + j])
+              changedCorners++;
+          }
+          if (permanent) {
+            permanentTriangles++;
+            const post = BANK_PAVILION_POSTS[member / 3];
+            for (let j = 0; j < 3; j++) {
+              expect(Math.abs(p.getX(corner + j) - post.x)).toBeLessThanOrEqual(
+                0.120001,
+              );
+              expect(Math.abs(p.getZ(corner + j) - post.z)).toBeLessThanOrEqual(
+                0.120001,
+              );
+            }
+          }
+        }
+        expect(permanentTriangles).toBe(4 * 28);
+        expect(changedCorners).toBe(8 * memberCorners);
+        expect(geometry.timber.boundingBox!.min.toArray()).toEqual([
+          -4.494999885559082, 0.1850000023841858, -4.449999809265137,
+        ]);
+        expect(geometry.timber.boundingBox!.max.toArray()).toEqual([
+          4.494999885559082,
+          snapshot.timberMaxY,
+          4.449999809265137,
+        ]);
+        expect(geometry.timber.boundingSphere!.radius).toBe(
+          snapshot.timberRadius,
+        );
+      } finally {
+        physical.dispose();
+        legacy.dispose();
+        geometry.dispose();
+      }
+    }
+  });
+
+  it("leaves all bank sides and gable apertures open with no floor, labels only actual upper structure and keeps four exact footings", () => {
+    const feet = BANK_PAVILION_POSTS.map(() => ({ bottom: -0.08, top: 0.22 }));
+    const geometry = createOpenWorkshop(feet, {
+      recipe: "bank-pavilion-v1",
+      architecturalFinish: "haven-v1",
+    });
+    const material = new THREE.MeshBasicMaterial({ side: THREE.DoubleSide });
+    const group = new THREE.Group();
+    for (const role of ["timber", "roof", "footings"] as const)
+      group.add(new THREE.Mesh(geometry[role], material));
+    group.updateMatrixWorld(true);
+    const ray = new THREE.Raycaster();
+    try {
+      let clearRays = 0;
+      for (const axis of ["x", "z"] as const)
+        for (const sign of [-1, 1])
+          for (let along = -3; along <= 3; along += 0.25)
+            for (let y = 0.25; y <= 2.35; y += 0.3) {
+              const origin = new THREE.Vector3(),
+                direction = new THREE.Vector3();
+              origin[axis] = sign * 5;
+              origin[axis === "x" ? "z" : "x"] = along;
+              origin.y = y;
+              direction[axis] = -sign;
+              ray.set(origin, direction);
+              ray.far = 10;
+              expect(
+                ray.intersectObject(group, true),
+                `${axis}/${sign}/${along}/${y}`,
+              ).toHaveLength(0);
+              clearRays++;
+            }
+      expect(clearRays).toBe(800);
+      for (const x of [-1.5, 1.5]) {
+        // At |x|=1.5 the diagonal strut crosses y≈3.983 and the upper
+        // rafter crosses y≈4.483. Probe the real aperture between them,
+        // not the solid diagonal framing at the original y=4.05 probe.
+        ray.set(new THREE.Vector3(x, 4.25, -5), new THREE.Vector3(0, 0, 1));
+        ray.far = 10;
+        expect(ray.intersectObject(group, true)).toHaveLength(0);
+      }
+      ray.set(new THREE.Vector3(0, 1, 0), new THREE.Vector3(0, -1, 0));
+      ray.far = 2;
+      expect(ray.intersectObject(group, true)).toHaveLength(0);
+      for (const post of BANK_PAVILION_POSTS) {
+        ray.set(
+          new THREE.Vector3(post.x, 1, post.z),
+          new THREE.Vector3(0, -1, 0),
+        );
+        ray.far = 2;
+        const hit = ray.intersectObject(group.children[2])[0];
+        expect(hit.point.y).toBeCloseTo(0.22, 6);
+      }
+      const mask = geometry.timber.getAttribute("courtRoof"),
+        p = geometry.timber.getAttribute("position");
+      // The newly fading brace corners dip below the old 2.7m heuristic.
+      // A shortest-arc quaternion can project BOTH section axes onto Y, so
+      // evaluate the authored octagonal section, not a planar-radius estimate.
+      const half = 0.07,
+        bevel = 0.14 * 0.09;
+      const section = [
+        [-half + bevel, -half],
+        [half - bevel, -half],
+        [half, -half + bevel],
+        [half, half - bevel],
+        [half - bevel, half],
+        [-half + bevel, half],
+        [-half, half - bevel],
+        [-half, -half + bevel],
+      ];
+      const braceOffsets = [
+        [0.72, 0.62, 0],
+        [-0.72, 0.62, 0],
+        [0, 0.62, 0.72],
+        [0, 0.62, -0.72],
+      ].flatMap((axis) => {
+        const orientation = new THREE.Quaternion().setFromUnitVectors(
+          new THREE.Vector3(0, 0, 1),
+          new THREE.Vector3(...axis).normalize(),
+        );
+        return section.map(
+          ([x, y]) => new THREE.Vector3(x, y, 0).applyQuaternion(orientation).y,
+        );
+      });
+      const lowestBraceY =
+        3.2 + 0.5 * Math.tan(Math.PI / 6) - 0.75 + Math.min(...braceOffsets);
+      const values = new Set<number>();
+      for (let i = 0; i < p.count; i++) {
+        const value = mask.getX(i);
+        values.add(value);
+        if (value === 1)
+          expect(p.getY(i)).toBeGreaterThanOrEqual(lowestBraceY - 1e-6);
+        if (p.getY(i) < lowestBraceY - 1e-6) expect(value).toBe(0);
+      }
+      expect([...values].sort()).toEqual([0, 1]);
+    } finally {
+      geometry.dispose();
+      material.dispose();
+    }
+  });
+
+  it("owns each bank geometry independently, disposes once and rejects unknown recipes or unsupported feet", () => {
+    const feet = BANK_PAVILION_POSTS.map(() => ({ bottom: -0.08, top: 0.22 }));
+    const a = createOpenWorkshop(feet, { recipe: "bank-pavilion-v1" });
+    const b = createOpenWorkshop(feet, { recipe: "bank-pavilion-v1" });
+    const counts = new Map<THREE.BufferGeometry, number>();
+    for (const result of [a, b])
+      for (const role of ["timber", "roof", "footings"] as const) {
+        const g = result[role];
+        counts.set(g, 0);
+        g.addEventListener("dispose", () => counts.set(g, counts.get(g)! + 1));
+      }
+    try {
+      const hash = digest(b.timber);
+      a.timber.getAttribute("position").setX(0, 100);
+      expect(digest(b.timber)).toBe(hash);
+      a.dispose();
+      a.dispose();
+      expect([a.timber, a.roof, a.footings].map((g) => counts.get(g))).toEqual([
+        1, 1, 1,
+      ]);
+      expect([b.timber, b.roof, b.footings].map((g) => counts.get(g))).toEqual([
+        0, 0, 0,
+      ]);
+      // @ts-expect-error Runtime content can supply unsupported recipe IDs.
+      expect(() => createOpenWorkshop(feet, { recipe: "unknown" })).toThrow();
+      for (const invalid of [
+        feet.slice(1),
+        [...feet, feet[0]],
+        feet.map((f, i) => (i === 0 ? { bottom: NaN, top: f.top } : f)),
+        feet.map((f, i) => (i === 0 ? { bottom: -1.01, top: f.top } : f)),
+        feet.map((f, i) => (i === 0 ? { bottom: f.bottom, top: 1.01 } : f)),
+      ])
+        expect(() =>
+          createOpenWorkshop(invalid, { recipe: "bank-pavilion-v1" }),
+        ).toThrow();
+    } finally {
+      a.dispose();
+      b.dispose();
+    }
+    expect([...counts.values()]).toEqual([1, 1, 1, 1, 1, 1]);
+  });
+
   it("maps member grain along its actual metre length for vertical, horizontal and pitched members", () => {
     for (const [start, end, normal] of [
       [
@@ -547,14 +976,12 @@ describe("opt-in Haven architectural geometry", () => {
         } as BuildingGeneratorOptions),
       ).toThrow("Haven finish");
     expect(() =>
-      createGabledRoof(8, 8, 3.8, "stone", { architecturalFinish: "bad" } as {
-        architecturalFinish: "haven-v1";
-      }),
+      // @ts-expect-error Deliberately invalid external recipe content.
+      createGabledRoof(8, 8, 3.8, "stone", { architecturalFinish: "bad" }),
     ).toThrow();
     expect(() =>
-      createOpenWorkshop([], { architecturalFinish: "bad" } as {
-        architecturalFinish: "haven-v1";
-      }),
+      // @ts-expect-error Deliberately invalid external recipe content.
+      createOpenWorkshop([], { architecturalFinish: "bad" }),
     ).toThrow();
     for (const width of [NaN, Infinity, 0, -1])
       expect(() =>

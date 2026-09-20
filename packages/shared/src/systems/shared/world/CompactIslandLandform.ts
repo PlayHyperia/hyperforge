@@ -1,17 +1,168 @@
 import type { WorldTerrainProfile } from "./WorldTerrainProfile";
 import { createCompactHavenShoulder } from "./CompactHavenShoulder";
+import { createCompactCoastalApron } from "./CompactCoastalApron";
+
+/** A bounded inland height recipe in world metres; it never replaces the coast. */
+export type CompactSouthernMeadow = Readonly<{
+  schemaVersion: 1;
+  minX: number;
+  maxX: number;
+  minZ: number;
+  maxZ: number;
+  featherX: number;
+  featherZ: number;
+  northHeight: number;
+  southHeight: number;
+  crossFall: number;
+  rollAmplitude: number;
+  rollWavelength: number;
+}>;
+
+/** Self-contained admission and allocation-free sampling for worker emission. */
+export function createCompactSouthernMeadow() {
+  const operations = {
+    fail(field: string): never {
+      throw new Error(`Invalid compact southern meadow: ${field}`);
+    },
+    smooth(value: number): number {
+      const t = Math.max(0, Math.min(1, value));
+      return t * t * (3 - 2 * t);
+    },
+    validate(input: unknown): CompactSouthernMeadow {
+      const names = [
+        "minX",
+        "maxX",
+        "minZ",
+        "maxZ",
+        "featherX",
+        "featherZ",
+        "northHeight",
+        "southHeight",
+        "crossFall",
+        "rollAmplitude",
+        "rollWavelength",
+      ] as const;
+      if (!input || typeof input !== "object" || Array.isArray(input))
+        return operations.fail("record");
+      const prototype = Object.getPrototypeOf(input);
+      if (prototype !== Object.prototype && prototype !== null)
+        operations.fail("prototype");
+      const expected = ["schemaVersion", ...names];
+      const keys = Reflect.ownKeys(input);
+      if (
+        keys.length !== expected.length ||
+        keys.some((key) => typeof key !== "string" || !expected.includes(key))
+      )
+        operations.fail("keys");
+      const descriptors = Object.getOwnPropertyDescriptors(input);
+      if (expected.some((key) => !("value" in descriptors[key])))
+        operations.fail("own data fields");
+      if (descriptors.schemaVersion.value !== 1)
+        operations.fail("schemaVersion");
+      const numbers = Object.fromEntries(
+        names.map((key) => {
+          const value: unknown = descriptors[key].value;
+          if (typeof value !== "number" || !Number.isFinite(value))
+            return operations.fail("finite number");
+          return [key, value === 0 ? 0 : value];
+        }),
+      ) as Omit<CompactSouthernMeadow, "schemaVersion">;
+      const p: CompactSouthernMeadow = Object.freeze({
+        schemaVersion: 1,
+        ...numbers,
+      });
+      if (
+        p.maxX - p.minX < 80 ||
+        p.maxZ - p.minZ < 80 ||
+        p.featherX < 20 ||
+        p.featherZ < 20 ||
+        p.featherX > (p.maxX - p.minX) / 3 ||
+        p.featherZ > (p.maxZ - p.minZ) / 3 ||
+        Math.abs(p.northHeight - p.southHeight) > 8 ||
+        Math.abs(p.crossFall) > 3 ||
+        p.rollAmplitude < 0 ||
+        p.rollAmplitude > 1.5 ||
+        p.rollWavelength < 64 ||
+        p.rollWavelength > 240
+      )
+        operations.fail("broad support/height ranges");
+      return p;
+    },
+    validateSupport(
+      p: CompactSouthernMeadow,
+      profile: WorldTerrainProfile,
+    ): void {
+      const ridge = profile.terrace;
+      // Stay east of the authored ridge's preservation edge. No profile edit
+      // can turn this bounded meadow into a replacement for that landmark.
+      const ridgeEast = ridge
+        ? profile.island.centerX +
+          (ridge.eastPreservationEnd * profile.island.radius) / 165
+        : Infinity;
+      if (
+        p.minX < profile.bounds.minX ||
+        p.maxX > profile.bounds.maxX ||
+        p.minZ < profile.bounds.minZ ||
+        p.maxZ > profile.bounds.maxZ ||
+        p.minX < ridgeEast ||
+        Math.min(p.northHeight, p.southHeight) -
+          Math.abs(p.crossFall) -
+          p.rollAmplitude <=
+          profile.water.threshold ||
+        Math.max(p.northHeight, p.southHeight) +
+          Math.abs(p.crossFall) +
+          p.rollAmplitude >
+          profile.height.maxHeightParameter
+      )
+        operations.fail("support/height envelope");
+    },
+    sample(
+      x: number,
+      z: number,
+      base: number,
+      noise: { simplex2D(x: number, z: number): number },
+      p: CompactSouthernMeadow,
+    ): number {
+      if (x <= p.minX || x >= p.maxX || z <= p.minZ || z >= p.maxZ) return base;
+      const weight =
+        operations.smooth((x - p.minX) / p.featherX) *
+        operations.smooth((p.maxX - x) / p.featherX) *
+        operations.smooth((z - p.minZ) / p.featherZ) *
+        operations.smooth((p.maxZ - z) / p.featherZ);
+      const u = (x - p.minX) / (p.maxX - p.minX);
+      const v = (z - p.minZ) / (p.maxZ - p.minZ);
+      // A connected full-width low meadow, not a flattened path or an isolated
+      // mound. One long-wave seeded roll avoids repeated parallel embankments.
+      const target =
+        p.northHeight +
+        (p.southHeight - p.northHeight) * operations.smooth(v) -
+        p.crossFall * operations.smooth(u) +
+        p.rollAmplitude *
+          noise.simplex2D(
+            (x - p.minX) / p.rollWavelength,
+            (z - p.minZ) / p.rollWavelength,
+          );
+      return base + (target - base) * weight;
+    },
+  };
+  return operations;
+}
 
 /**
  * Art-directed compact island, independent of biome noise height functions.
- * Worker emission supplies the shoulder factory explicitly, with no module
+ * Worker emission supplies all authored modifier factories, with no module
  * closure or bundler helpers in the resulting worker source.
  * Broad navigable meadow, western ridge and low headlands share a continuous
  * seabed. This is authored shaping plus detail, not an erosion simulation.
  */
 export function createCompactIslandLandform(
   shoulderFactory = createCompactHavenShoulder,
+  coastalApronFactory = createCompactCoastalApron,
+  southernMeadowFactory = createCompactSouthernMeadow,
 ) {
   const shoulder = shoulderFactory();
+  const coastalApron = coastalApronFactory();
+  const southernMeadow = southernMeadowFactory();
   const helpers = {
     smooth(value: number): number {
       const t = Math.max(0, Math.min(1, value));
@@ -126,7 +277,21 @@ export function createCompactIslandLandform(
             helpers.smooth((cross + 1) / 2);
         const bank = (authored.inletBankTransition * bankScale) / halfWidth;
         const bite = helpers.smooth((1 - distance) / bank);
-        return coastMask * (1 - bite);
+        if (!profile.coastalApron) return coastMask * (1 - bite);
+        // Replace the shared bay factor BEFORE the height path's zero-mask
+        // return. A late height overlay would remain clipped by the old seabed.
+        // q is an authoring coordinate, not an exact Euclidean signed distance.
+        return (
+          coastMask *
+          coastalApron.blendBay(
+            worldX,
+            worldZ,
+            halfWidth * (distance - 1),
+            1 - bite,
+            profile.coastalApron,
+            coastMask,
+          )
+        );
       }
       const across = Math.abs((-x * s + z * c) * scale);
       const bite =
@@ -328,12 +493,39 @@ export function createCompactIslandLandform(
             detail;
       // Unlike multiplication around zero, interpolation reaches the seabed
       // continuously, with zero coast-end slope and no height discontinuity.
+      const meadowInterior = profile.southernMeadow
+        ? southernMeadow.sample(
+            worldX,
+            worldZ,
+            interior + terraceDelta,
+            noise,
+            profile.southernMeadow,
+          )
+        : undefined;
       const height =
         profile.water.oceanFloorHeight +
         (interior - profile.water.oceanFloorHeight) * mask;
       // Preserve the original evaluation exactly outside the compact delta.
       // A steep heightfield is not itself an impassable navigation collider.
-      const base = terraceDelta === 0 ? height : height + terraceDelta * mask;
+      const unshapedBase =
+        meadowInterior === undefined ||
+        meadowInterior === interior + terraceDelta
+          ? terraceDelta === 0
+            ? height
+            : height + terraceDelta * mask
+          : profile.water.oceanFloorHeight +
+            (meadowInterior - profile.water.oceanFloorHeight) * mask;
+      // The optional dry head notch belongs to the canonical heightfield, so
+      // terrain, grass and physics workers all receive the same surface. Its
+      // floor remains above the shoreline band; it does not reshape the mask.
+      const base = profile.coastalApron?.headShoulder
+        ? coastalApron.sampleHead(
+            worldX,
+            worldZ,
+            unshapedBase,
+            profile.coastalApron,
+          )
+        : unshapedBase;
       if (!profile.havenShoulder) return base;
       const shaped = shoulder.sample(
         worldX,
@@ -348,7 +540,7 @@ export function createCompactIslandLandform(
   };
 }
 
-/** Both factories must travel together into a fresh worker realm. */
+/** All factories travel together into a fresh worker realm. */
 export function buildCompactIslandLandformJS(): string {
-  return `(${createCompactIslandLandform.toString()})(${createCompactHavenShoulder.toString()})`;
+  return `(${createCompactIslandLandform.toString()})(${createCompactHavenShoulder.toString()},${createCompactCoastalApron.toString()},${createCompactSouthernMeadow.toString()})`;
 }

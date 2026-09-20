@@ -106,6 +106,15 @@ export function createAuthoredTerrainSurfaceOperations(): AuthoredTerrainSurface
       ) {
         return null;
       }
+      if (zone.blendShape === "rounded") {
+        const distance = Math.hypot(
+          Math.max(0, dx - halfWidth),
+          Math.max(0, dz - halfDepth),
+        );
+        return distance <= zone.blendRadius
+          ? distance / zone.blendRadius
+          : null;
+      }
       return Math.max(
         dx > halfWidth ? (dx - halfWidth) / zone.blendRadius : 0,
         dz > halfDepth ? (dz - halfDepth) / zone.blendRadius : 0,
@@ -120,12 +129,12 @@ export function createAuthoredTerrainSurfaceOperations(): AuthoredTerrainSurface
       const dx = x - zone.centerX,
         dz = z - zone.centerZ;
       let radius = Math.hypot(dx, dz);
+      const angle = Math.atan2(dz, dx);
       const amplitude = profile.shorelineAmplitude ?? 0;
       if (amplitude > 0 && radius < profile.bankOuterRadius) {
-        const angle = Math.atan2(dz, dx);
         // Fixed low-frequency lobes give the basin a deliberate silhouette.
-        // Fade to the unchanged circular outer bank so its indexing envelope,
-        // surrounding terrain blend and station/path grade stay identical.
+        // Keep the original radius warp and indexing envelope. Optional paired
+        // sector knots can reshape the bank without extending this warp.
         const innerFade = helpers.smoothstep(
           Math.min(1, radius / (profile.bedRadius * 0.5)),
         );
@@ -145,6 +154,171 @@ export function createAuthoredTerrainSurfaceOperations(): AuthoredTerrainSurface
         radius -= amplitude * lobe * innerFade * outerFade;
       }
       if (radius <= profile.bedRadius) return zone.height;
+      const effectRadius = profile.bankOuterRadius + zone.blendRadius;
+      let pairedSectorContributes = false;
+      if (profile.bankSectors?.length && radius < effectRadius) {
+        for (const sector of profile.bankSectors) {
+          if (sector.outerRadius === undefined) continue;
+          const difference = Math.abs(angle - sector.bearing);
+          const distance = Math.min(difference, 2 * Math.PI - difference);
+          if (
+            distance < sector.halfWidth &&
+            1 - helpers.smoothstep(distance / sector.halfWidth) > 0
+          ) {
+            pairedSectorContributes = true;
+            break;
+          }
+        }
+      }
+      if (pairedSectorContributes) {
+        // Cache the actual underlying owner only if a contributing span needs
+        // it. This may include authored core/floor/union grades, not just noise.
+        let underlyingHeight: number | undefined;
+        const heights = {
+          underlying(): number {
+            if (underlyingHeight === undefined)
+              underlyingHeight = getUnderlyingHeight();
+            return underlyingHeight;
+          },
+          legacy(): number {
+            if (radius <= profile.bankOuterRadius) {
+              const progress = Math.min(
+                1,
+                (radius - profile.bedRadius) /
+                  (profile.bankInnerRadius - profile.bedRadius),
+              );
+              return (
+                zone.height +
+                (profile.bankHeight - zone.height) *
+                  helpers.smoothstep(progress)
+              );
+            }
+            const progress =
+              (radius - profile.bankOuterRadius) / zone.blendRadius;
+            return (
+              profile.bankHeight +
+              (heights.underlying() - profile.bankHeight) *
+                helpers.smoothstep(progress)
+            );
+          },
+        };
+        let weightSum = 0;
+        let weightedHeight = 0;
+        for (const sector of profile.bankSectors!) {
+          const difference = Math.abs(angle - sector.bearing);
+          const distance = Math.min(difference, 2 * Math.PI - difference);
+          if (distance >= sector.halfWidth) continue;
+          const weight = 1 - helpers.smoothstep(distance / sector.halfWidth);
+          if (weight <= 0) continue;
+          let sectorHeight: number;
+          if (
+            sector.outerRadius !== undefined &&
+            sector.outerHeight !== undefined
+          ) {
+            if (radius > sector.outerRadius) {
+              const progress =
+                (radius - sector.outerRadius) /
+                (effectRadius - sector.outerRadius);
+              sectorHeight =
+                sector.outerHeight +
+                (heights.underlying() - sector.outerHeight) *
+                  helpers.smoothstep(progress);
+            } else {
+              const beforeKnot = radius < sector.innerRadius;
+              const startRadius = beforeKnot
+                ? profile.bedRadius
+                : sector.innerRadius;
+              const endRadius = beforeKnot
+                ? sector.innerRadius
+                : sector.outerRadius;
+              const startHeight = beforeKnot ? zone.height : sector.innerHeight;
+              const endHeight = beforeKnot
+                ? sector.innerHeight
+                : sector.outerHeight;
+              sectorHeight =
+                startHeight +
+                (endHeight - startHeight) *
+                  helpers.smoothstep(
+                    (radius - startRadius) / (endRadius - startRadius),
+                  );
+            }
+          } else if (radius < profile.bankOuterRadius) {
+            // A four-field sector keeps its existing arithmetic inside the
+            // bank and rejoins the existing outer blend, never a new plateau.
+            const beforeKnot = radius < sector.innerRadius;
+            const startRadius = beforeKnot
+              ? profile.bedRadius
+              : sector.innerRadius;
+            const endRadius = beforeKnot
+              ? sector.innerRadius
+              : profile.bankOuterRadius;
+            const startHeight = beforeKnot ? zone.height : sector.innerHeight;
+            const endHeight = beforeKnot
+              ? sector.innerHeight
+              : profile.bankHeight;
+            sectorHeight =
+              startHeight +
+              (endHeight - startHeight) *
+                helpers.smoothstep(
+                  (radius - startRadius) / (endRadius - startRadius),
+                );
+          } else sectorHeight = heights.legacy();
+          weightSum += weight;
+          weightedHeight += weight * sectorHeight;
+        }
+        // Angular weights remain a convex blend. A raised outer shoulder can
+        // roll down into the real grade; water crossings are validated against
+        // the selected pond, not inferred from global radial monotonicity.
+        return weightSum >= 1
+          ? weightedHeight / weightSum
+          : heights.legacy() * (1 - weightSum) + weightedHeight;
+      }
+      // Preserve the historical four-field branch and callback laziness exactly
+      // when no paired sector contributes at this point.
+      if (profile.bankSectors?.length && radius < profile.bankOuterRadius) {
+        const legacyProgress = Math.min(
+          1,
+          (radius - profile.bedRadius) /
+            (profile.bankInnerRadius - profile.bedRadius),
+        );
+        const legacyHeight =
+          zone.height +
+          (profile.bankHeight - zone.height) *
+            helpers.smoothstep(legacyProgress);
+        let weightSum = 0;
+        let weightedHeight = 0;
+        for (const sector of profile.bankSectors) {
+          const difference = Math.abs(angle - sector.bearing);
+          const distance = Math.min(difference, 2 * Math.PI - difference);
+          if (distance >= sector.halfWidth) continue;
+          const weight = 1 - helpers.smoothstep(distance / sector.halfWidth);
+          const beforeKnot = radius < sector.innerRadius;
+          const startRadius = beforeKnot
+            ? profile.bedRadius
+            : sector.innerRadius;
+          const endRadius = beforeKnot
+            ? sector.innerRadius
+            : profile.bankOuterRadius;
+          const startHeight = beforeKnot ? zone.height : sector.innerHeight;
+          const endHeight = beforeKnot
+            ? sector.innerHeight
+            : profile.bankHeight;
+          const sectorHeight =
+            startHeight +
+            (endHeight - startHeight) *
+              helpers.smoothstep(
+                (radius - startRadius) / (endRadius - startRadius),
+              );
+          weightSum += weight;
+          weightedHeight += weight * sectorHeight;
+        }
+        // Preserve exact historical arithmetic outside every authored sector.
+        if (weightSum > 0) {
+          return weightSum > 1
+            ? weightedHeight / weightSum
+            : legacyHeight * (1 - weightSum) + weightedHeight;
+        }
+      }
       if (radius < profile.bankInnerRadius) {
         const progress =
           (radius - profile.bedRadius) /
@@ -153,7 +327,6 @@ export function createAuthoredTerrainSurfaceOperations(): AuthoredTerrainSurface
         return zone.height + (profile.bankHeight - zone.height) * weight;
       }
       if (radius <= profile.bankOuterRadius) return profile.bankHeight;
-      const effectRadius = profile.bankOuterRadius + zone.blendRadius;
       if (radius >= effectRadius) return null;
       const progress = (radius - profile.bankOuterRadius) / zone.blendRadius;
       const weight = helpers.smoothstep(progress);
@@ -200,6 +373,7 @@ export function createAuthoredTerrainSurfaceOperations(): AuthoredTerrainSurface
       let coreDistance = Infinity;
       let blendZone: FlatZone | null = null;
       let blendFactor = Infinity;
+      let hasSmoothUnion = false;
       let arenaFloorHeight: number | null = null;
 
       for (const zone of zones) {
@@ -238,6 +412,8 @@ export function createAuthoredTerrainSurfaceOperations(): AuthoredTerrainSurface
           continue;
         }
         const factor = helpers.blendFactor(zone, x, z);
+        if (factor !== null && zone.blendComposition === "smooth-union")
+          hasSmoothUnion = true;
         if (factor !== null && factor < blendFactor) {
           blendZone = zone;
           blendFactor = factor;
@@ -250,6 +426,36 @@ export function createAuthoredTerrainSurfaceOperations(): AuthoredTerrainSurface
           if (coreZone) return coreZone.height;
           const proceduralHeight = getProceduralHeight();
           if (!blendZone) return proceduralHeight;
+          if (hasSmoothUnion) {
+            // Preserve original target-height selection and all core/floor/pond
+            // priorities. Only equal-datum opted-in influences multiply. The
+            // legacy cohort keeps its original minimum rather than being
+            // globally reinterpreted when a distant candidate is registered.
+            let legacyOutside = 1;
+            let unionOutside = 1;
+            for (const zone of zones) {
+              if (
+                zone.height !== blendZone.height ||
+                zone.radialPond ||
+                (arenaGradeHeight !== null && arenaFloorIds.has(zone.id))
+              )
+                continue;
+              const factor = helpers.blendFactor(zone, x, z);
+              if (factor === null) continue;
+              const outside = helpers.smoothstep(factor);
+              if (zone.blendComposition === "smooth-union")
+                unionOutside *= outside;
+              else legacyOutside = Math.min(legacyOutside, outside);
+            }
+            // An absent/noncontributing option uses the exact original path.
+            // At a union boundary its factor reaches one with zero derivative.
+            if (unionOutside !== 1)
+              return (
+                blendZone.height +
+                (proceduralHeight - blendZone.height) *
+                  (legacyOutside * unionOutside)
+              );
+          }
           return (
             blendZone.height +
             (proceduralHeight - blendZone.height) *

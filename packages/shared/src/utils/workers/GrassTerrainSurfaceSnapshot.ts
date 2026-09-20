@@ -1,4 +1,8 @@
-import type { FlatZone } from "../../types/world/terrain";
+import type {
+  FlatZone,
+  RadialPondBankComposition,
+  RadialPondBankSector,
+} from "../../types/world/terrain";
 
 export const GRASS_SURFACE_NORMAL_SAMPLE_DISTANCE = 0.5;
 
@@ -59,6 +63,8 @@ export type GrassTerrainSurfaceOperations = {
   }>;
   /** Validate once at each request boundary, not during per-blade sampling. */
   validateSnapshot(value: unknown): GrassTerrainSurfaceSnapshot;
+  /** Optional blend geometry/composition admitted before copying or sampling. */
+  validateBlendShape(zone: FlatZone): void;
   /** Grading geometry is already validated; this optional exclusion never shapes it. */
   validateGrassExclusionBounds(zone: FlatZone): void;
   /** Same validation algebra with explicit bounded continuation points. */
@@ -112,7 +118,9 @@ export function createGrassTerrainSurfaceOperations(): GrassTerrainSurfaceOperat
     maxWaterBodies: 128,
     maxIndexedZoneReferences: 65536,
     maxIdLength: 128,
-    maxExclusionPolygons: 24,
+    // Up to 24 authored rock silhouettes plus four exact feet for each of the
+    // smithy and bank pavilions. Keep query rejection bounded; no roof-wide pads.
+    maxExclusionPolygons: 32,
     maxPolygonVertices: 64,
   });
   const helpers = {
@@ -129,6 +137,235 @@ export function createGrassTerrainSurfaceOperations(): GrassTerrainSurfaceOperat
         return helpers.fail(label + " must be an object");
       }
       return value as Record<string, unknown>;
+    },
+    bankSectors(
+      radial: Record<string, unknown>,
+      bed: number,
+      outer: number,
+      bank: number,
+      bedHeight: number,
+      blendRadius: number,
+    ): RadialPondBankSector[] | undefined {
+      if (!("bankSectors" in radial)) return undefined;
+      const field = Object.getOwnPropertyDescriptor(radial, "bankSectors");
+      if (!field || !field.enumerable || !("value" in field))
+        return helpers.fail("pond bankSectors must be an own data field");
+      const sectors: unknown = field.value;
+      if (
+        !Array.isArray(sectors) ||
+        Object.getPrototypeOf(sectors) !== Array.prototype ||
+        sectors.length > 4 ||
+        Reflect.ownKeys(sectors).length !== sectors.length + 1
+      )
+        return helpers.fail(
+          "pond bankSectors must be a dense plain array of at most four sectors",
+        );
+      const keys = [
+        "bearing",
+        "halfWidth",
+        "innerRadius",
+        "innerHeight",
+      ] as const;
+      for (let index = 0; index < sectors.length; index++) {
+        const entry = Object.getOwnPropertyDescriptor(sectors, String(index));
+        if (!entry || !entry.enumerable || !("value" in entry))
+          return helpers.fail(
+            "pond bankSectors must contain own dense data rows",
+          );
+        const row: unknown = entry.value;
+        if (
+          !row ||
+          typeof row !== "object" ||
+          ![Object.prototype, null].includes(Object.getPrototypeOf(row))
+        )
+          return helpers.fail(
+            "pond bankSectors rows must contain plain data fields",
+          );
+        const paired = Object.prototype.hasOwnProperty.call(row, "outerRadius");
+        if (paired !== Object.prototype.hasOwnProperty.call(row, "outerHeight"))
+          return helpers.fail(
+            "pond bankSectors outerRadius and outerHeight must be paired",
+          );
+        const fields = paired ? [...keys, "outerRadius", "outerHeight"] : keys;
+        if (Reflect.ownKeys(row).length !== fields.length)
+          return helpers.fail(
+            "pond bankSectors rows must contain exactly four or six plain data fields",
+          );
+        const values: number[] = [];
+        for (const key of fields) {
+          const value = Object.getOwnPropertyDescriptor(row, key);
+          if (!value || !value.enumerable || !("value" in value))
+            return helpers.fail(
+              "pond bankSectors fields must be own data values",
+            );
+          values.push(helpers.finite(value.value, "pond bankSectors " + key));
+        }
+        const [
+          bearing,
+          halfWidth,
+          innerRadius,
+          innerHeight,
+          outerRadius,
+          outerHeight,
+        ] = values;
+        if (
+          ![bed, outer, bank, bedHeight].every(Number.isFinite) ||
+          bearing < -Math.PI ||
+          bearing > Math.PI ||
+          halfWidth <= 0 ||
+          halfWidth > Math.PI / 2 ||
+          innerRadius <= bed ||
+          innerRadius >= outer ||
+          innerHeight <= bedHeight ||
+          innerHeight > bank
+        )
+          return helpers.fail(
+            "pond bankSectors exceeds angular or monotonic bank-profile bounds",
+          );
+        if (
+          paired &&
+          (!Number.isFinite(blendRadius) ||
+            blendRadius <= 0 ||
+            outerRadius <= innerRadius ||
+            outerRadius >= outer + blendRadius ||
+            outerHeight < innerHeight ||
+            outerHeight > bank + 0.6)
+        )
+          return helpers.fail(
+            "pond bankSectors exceeds paired outer-knot bounds",
+          );
+      }
+      return sectors as RadialPondBankSector[];
+    },
+    bankComposition(
+      radial: Record<string, unknown>,
+      sectorCount: number,
+    ): RadialPondBankComposition | undefined {
+      if (!("bankComposition" in radial)) return undefined;
+      const field = Object.getOwnPropertyDescriptor(radial, "bankComposition");
+      if (!field?.enumerable || !("value" in field))
+        return helpers.fail("pond bankComposition must be an own data field");
+      const composition: unknown = field.value;
+      if (
+        !composition ||
+        typeof composition !== "object" ||
+        ![Object.prototype, null].includes(
+          Object.getPrototypeOf(composition),
+        ) ||
+        Reflect.ownKeys(composition).length !== 2
+      )
+        return helpers.fail(
+          "pond bankComposition must contain exactly two plain data fields",
+        );
+      const version = Object.getOwnPropertyDescriptor(
+        composition,
+        "schemaVersion",
+      );
+      const list = Object.getOwnPropertyDescriptor(composition, "sectors");
+      if (!version?.enumerable || !("value" in version) || version.value !== 1)
+        return helpers.fail(
+          "pond bankComposition requires schemaVersion 1 as own data",
+        );
+      if (!list?.enumerable || !("value" in list))
+        return helpers.fail(
+          "pond bankComposition sectors must be an own data field",
+        );
+      const rows: unknown = list.value;
+      if (
+        !Array.isArray(rows) ||
+        Object.getPrototypeOf(rows) !== Array.prototype ||
+        rows.length > 4 ||
+        Reflect.ownKeys(rows).length !== rows.length + 1
+      )
+        return helpers.fail(
+          "pond bankComposition sectors must be a dense plain array of at most four rows",
+        );
+      const seen = new Set<number>();
+      for (let index = 0; index < rows.length; index++) {
+        const entry = Object.getOwnPropertyDescriptor(rows, String(index));
+        if (!entry?.enumerable || !("value" in entry))
+          return helpers.fail(
+            "pond bankComposition sectors must contain own data rows",
+          );
+        const row: unknown = entry.value;
+        if (
+          !row ||
+          typeof row !== "object" ||
+          ![Object.prototype, null].includes(Object.getPrototypeOf(row)) ||
+          Reflect.ownKeys(row).length !== ("groundCover" in row ? 3 : 2)
+        )
+          return helpers.fail(
+            "pond bankComposition rows must contain two or three plain data fields",
+          );
+        const reference = Object.getOwnPropertyDescriptor(row, "sectorIndex");
+        const role = Object.getOwnPropertyDescriptor(row, "surface");
+        if (
+          !reference?.enumerable ||
+          !("value" in reference) ||
+          !Number.isInteger(reference.value) ||
+          reference.value < 0 ||
+          reference.value >= sectorCount ||
+          seen.has(reference.value)
+        )
+          return helpers.fail(
+            "pond bankComposition sectorIndex must uniquely reference an existing sector",
+          );
+        if (
+          !role?.enumerable ||
+          !("value" in role) ||
+          (role.value !== "sedge-shelf" &&
+            role.value !== "cutbank" &&
+            role.value !== "dry-turf" &&
+            role.value !== "mineral-shore")
+        )
+          return helpers.fail(
+            "pond bankComposition surface must be a supported own data value",
+          );
+        if ("groundCover" in row) {
+          if (role.value === "mineral-shore")
+            return helpers.fail(
+              "pond bankComposition mineral-shore cannot establish groundCover",
+            );
+          const property = Object.getOwnPropertyDescriptor(row, "groundCover");
+          if (!property?.enumerable || !("value" in property))
+            return helpers.fail(
+              "pond bankComposition groundCover must be an own data field",
+            );
+          const cover: unknown = property.value;
+          if (
+            !cover ||
+            typeof cover !== "object" ||
+            ![Object.prototype, null].includes(Object.getPrototypeOf(cover)) ||
+            Reflect.ownKeys(cover).length !== 2
+          )
+            return helpers.fail(
+              "pond bankComposition groundCover must contain exactly two plain data fields",
+            );
+          const emergence = Object.getOwnPropertyDescriptor(
+            cover,
+            "emergenceHeight",
+          );
+          const full = Object.getOwnPropertyDescriptor(cover, "fullHeight");
+          if (
+            !emergence?.enumerable ||
+            !("value" in emergence) ||
+            !full?.enumerable ||
+            !("value" in full) ||
+            typeof emergence.value !== "number" ||
+            !Number.isFinite(emergence.value) ||
+            typeof full.value !== "number" ||
+            !Number.isFinite(full.value) ||
+            emergence.value <= 0 ||
+            full.value < emergence.value + 0.01 ||
+            full.value > 0.6
+          )
+            return helpers.fail(
+              "pond bankComposition groundCover requires positive emergenceHeight, at least 0.01m transition width, and fullHeight <= 0.6",
+            );
+        }
+        seen.add(reference.value);
+      }
+      return composition as RadialPondBankComposition;
     },
     finite(value: unknown, label: string): number {
       if (typeof value !== "number" || !Number.isFinite(value)) {
@@ -261,6 +498,7 @@ export function createGrassTerrainSurfaceOperations(): GrassTerrainSurfaceOperat
       for (const edge of [x - radius, x + radius, z - radius, z + radius]) {
         helpers.finite(edge, "zone indexing extent");
       }
+      operations.validateBlendShape(value as FlatZone);
       operations.validateGrassExclusionBounds(value as FlatZone);
       if (
         zone.excludeGrass !== undefined &&
@@ -283,6 +521,15 @@ export function createGrassTerrainSurfaceOperations(): GrassTerrainSurfaceOperat
           "pond bankOuterRadius",
         );
         const bank = helpers.finite(radial.bankHeight, "pond bankHeight");
+        const sectors = helpers.bankSectors(
+          radial,
+          bed,
+          outer,
+          bank,
+          height,
+          blend,
+        );
+        helpers.bankComposition(radial, sectors?.length ?? 0);
         if (radial.shorelineAmplitude !== undefined) {
           const amplitude = helpers.nonnegative(
             radial.shorelineAmplitude,
@@ -321,6 +568,46 @@ export function createGrassTerrainSurfaceOperations(): GrassTerrainSurfaceOperat
 
   const operations: GrassTerrainSurfaceOperations = {
     limits,
+    validateBlendShape(zone) {
+      if ("blendComposition" in zone) {
+        const composition = Object.getOwnPropertyDescriptor(
+          zone,
+          "blendComposition",
+        );
+        if (
+          !composition ||
+          !composition.enumerable ||
+          !("value" in composition) ||
+          composition.value !== "smooth-union" ||
+          !("blendShape" in zone)
+        )
+          return helpers.fail(
+            "blendComposition must be an own smooth-union data field with rounded geometry",
+          );
+      }
+      if (!("blendShape" in zone)) return;
+      const field = Object.getOwnPropertyDescriptor(zone, "blendShape");
+      if (
+        !field ||
+        !field.enumerable ||
+        !("value" in field) ||
+        field.value !== "rounded"
+      )
+        return helpers.fail("blendShape must be an own rounded data field");
+      for (const key of [
+        "radialPond",
+        "tileMask",
+        "tileMaskTiles",
+        "tileMaskBounds",
+      ] as const) {
+        if (!(key in zone)) continue;
+        const conflict = Object.getOwnPropertyDescriptor(zone, key);
+        if (!conflict || !("value" in conflict) || conflict.value !== undefined)
+          return helpers.fail(
+            "rounded blendShape requires rectangular geometry",
+          );
+      }
+    },
     validateGrassExclusionBounds(zone) {
       if (!("grassExclusionBounds" in zone)) return;
       const field = Object.getOwnPropertyDescriptor(
@@ -353,6 +640,19 @@ export function createGrassTerrainSurfaceOperations(): GrassTerrainSurfaceOperat
         return helpers.fail(
           "grassExclusionBounds must remain inside grading support",
         );
+      if (zone.blendShape === "rounded") {
+        for (const x of [minX, maxX])
+          for (const z of [minZ, maxZ])
+            if (
+              Math.hypot(
+                Math.max(0, Math.abs(x - zone.centerX) - zone.width / 2),
+                Math.max(0, Math.abs(z - zone.centerZ) - zone.depth / 2),
+              ) > zone.blendRadius
+            )
+              return helpers.fail(
+                "grassExclusionBounds must remain inside rounded grading support",
+              );
+      }
       for (const key of [
         "excludeGrass",
         "tileMask",
@@ -426,9 +726,13 @@ export function createGrassTerrainSurfaceOperations(): GrassTerrainSurfaceOperat
         const zone = helpers.record(value, "zone");
         if (
           floorIds.has(String(zone.id)) &&
-          (zone.radialPond !== undefined || zone.tileMask !== undefined)
+          (zone.radialPond !== undefined ||
+            zone.tileMask !== undefined ||
+            zone.blendShape !== undefined)
         ) {
-          return helpers.fail("arena floors require rectangular geometry");
+          return helpers.fail(
+            "arena floors require unmodified rectangular geometry",
+          );
         }
       }
       if (
@@ -523,6 +827,7 @@ export function createGrassTerrainSurfaceOperations(): GrassTerrainSurfaceOperat
       for (const zone of snapshot.zones) {
         yield "snapshot_clone_zone";
         // Recheck the borrowed optional field after the continuation boundary.
+        operations.validateBlendShape(zone);
         operations.validateGrassExclusionBounds(zone);
         const clone: GrassTerrainSurfaceZone = {
           id: zone.id,
@@ -533,6 +838,9 @@ export function createGrassTerrainSurfaceOperations(): GrassTerrainSurfaceOperat
           height: zone.height,
           blendRadius: zone.blendRadius,
         };
+        if (zone.blendShape !== undefined) clone.blendShape = zone.blendShape;
+        if (zone.blendComposition !== undefined)
+          clone.blendComposition = zone.blendComposition;
         if (zone.excludeGrass !== undefined)
           clone.excludeGrass = zone.excludeGrass;
         if (zone.grassExclusionBounds !== undefined)
@@ -543,7 +851,22 @@ export function createGrassTerrainSurfaceOperations(): GrassTerrainSurfaceOperat
             maxZ: zone.grassExclusionBounds.maxZ,
           };
         if (zone.carveInset !== undefined) clone.carveInset = zone.carveInset;
-        if (zone.radialPond !== undefined)
+        if (zone.radialPond !== undefined) {
+          // Revalidate the borrowed nested recipe after the continuation, then
+          // synchronously copy the bounded fields and optional pair without
+          // another yield. Legacy rows keep the pair absent, not undefined.
+          const sectors = helpers.bankSectors(
+            helpers.record(zone.radialPond, "radial pond"),
+            zone.radialPond.bedRadius,
+            zone.radialPond.bankOuterRadius,
+            zone.radialPond.bankHeight,
+            zone.height,
+            zone.blendRadius,
+          );
+          const composition = helpers.bankComposition(
+            helpers.record(zone.radialPond, "radial pond"),
+            sectors?.length ?? 0,
+          );
           clone.radialPond = {
             bedRadius: zone.radialPond.bedRadius,
             bankInnerRadius: zone.radialPond.bankInnerRadius,
@@ -552,7 +875,48 @@ export function createGrassTerrainSurfaceOperations(): GrassTerrainSurfaceOperat
             ...(zone.radialPond.shorelineAmplitude !== undefined
               ? { shorelineAmplitude: zone.radialPond.shorelineAmplitude }
               : {}),
+            ...(sectors === undefined
+              ? {}
+              : {
+                  bankSectors: sectors.map((sector) => ({
+                    bearing: sector.bearing,
+                    halfWidth: sector.halfWidth,
+                    innerRadius: sector.innerRadius,
+                    innerHeight: sector.innerHeight,
+                    ...(sector.outerRadius === undefined
+                      ? {}
+                      : {
+                          outerRadius: sector.outerRadius,
+                          outerHeight: sector.outerHeight,
+                        }),
+                  })),
+                }),
+            ...(composition === undefined
+              ? {}
+              : {
+                  bankComposition: Object.freeze({
+                    schemaVersion: composition.schemaVersion,
+                    sectors: Object.freeze(
+                      composition.sectors.map((sector) =>
+                        Object.freeze({
+                          sectorIndex: sector.sectorIndex,
+                          surface: sector.surface,
+                          ...(sector.groundCover === undefined
+                            ? {}
+                            : {
+                                groundCover: Object.freeze({
+                                  emergenceHeight:
+                                    sector.groundCover.emergenceHeight,
+                                  fullHeight: sector.groundCover.fullHeight,
+                                }),
+                              }),
+                        }),
+                      ),
+                    ),
+                  }),
+                }),
           };
+        }
         if (zone.tileMask !== undefined) {
           clone.tileMask = new Set();
           for (const key of zone.tileMask) {

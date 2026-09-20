@@ -23,7 +23,9 @@ function skyMesh(
   return mesh;
 }
 
-function graphNodes(root: Node): Set<Node> {
+function graphNodes(root: unknown): Set<Node> {
+  if (!(root instanceof THREE.Node))
+    throw new Error("Missing actual TSL graph root");
   const seen = new Set<Node>();
   const visit = (node: Node) => {
     if (seen.has(node)) return;
@@ -56,7 +58,9 @@ function uniformValues(nodes: Set<Node>): unknown[] {
 // Bounded double-precision interpretation of this real TSL arithmetic DAG.
 // positionLocal is the explicit query input. Unknown nodes fail closed; this
 // checks CPU/formula parity, not WGSL float precision, texture filtering or GPU.
-function skyGraphEvaluator(root: Node) {
+function skyGraphEvaluator(root: unknown) {
+  if (!(root instanceof THREE.Node))
+    throw new Error("Missing actual TSL graph root");
   const expanded = new Map<Node, Node>();
   const evaluate = (node: Node, direction: THREE.Vector3): number[] => {
     if (node === positionLocal) return direction.toArray();
@@ -321,7 +325,8 @@ describe("isolated sky lighting capture", () => {
       const colors = values.filter(
         (value): value is THREE.Color => value instanceof THREE.Color,
       );
-      expect(colors).toHaveLength(8);
+      // Eight copied palette colors plus the private, neutral RGB gain.
+      expect(colors).toHaveLength(9);
       for (const live of palette) {
         expect(aNodes.has(live)).toBe(false);
         expect(colors).not.toContain(live.value);
@@ -399,6 +404,204 @@ describe("isolated sky lighting capture", () => {
       world.destroy();
     }
   });
+
+  it.each(["gradient-v1", "scattering-v1"] as const)(
+    "applies independent linear RGB gains to the actual %s TSL graph and restores scalar-only captures",
+    (mode) => {
+      const world = new World(),
+        sky = new SkySystem(world, mode);
+      const capture = sky.createLightingCapture(),
+        other = sky.createLightingCapture();
+      try {
+        const mesh = skyMesh(capture.scene),
+          otherMesh = skyMesh(other.scene),
+          ground = capture.scene.getObjectByName("LightingCaptureGround");
+        if (
+          !(ground instanceof THREE.Mesh) ||
+          !(ground.material instanceof THREE.MeshBasicNodeMaterial)
+        )
+          throw new Error("Missing actual capture ground material");
+        const evaluate = skyGraphEvaluator(mesh.material.colorNode!),
+          evaluateOther = skyGraphEvaluator(otherMesh.material.colorNode!),
+          evaluateGround = skyGraphEvaluator(ground.material.colorNode!);
+        const node = mesh.material.colorNode,
+          version = mesh.material.version,
+          groundNode = ground.material.colorNode,
+          groundVersion = ground.material.version;
+        const nodes = graphNodes(node!),
+          otherNodes = graphNodes(otherMesh.material.colorNode!);
+        const originalPalette = Object.values(sky.skyPaletteUniforms).map((u) =>
+          u.value.toArray(),
+        );
+        const livePhase = sky.dayPhase,
+          liveIntensity = sky.dayIntensity,
+          liveSun = sky.sunDirection.toArray();
+        const directions = [
+          new THREE.Vector3(0, 1, 0),
+          new THREE.Vector3(0, -1, 0),
+          new THREE.Vector3(1, 0, 0),
+          new THREE.Vector3(-1, 0, 0),
+          new THREE.Vector3(2, 0.15, -3),
+          new THREE.Vector3(-2, -0.3, 1),
+        ];
+        const otherBefore = directions.map(evaluateOther),
+          raw = new THREE.Color();
+        other.setPhase(0, 1, [0, 0, 0]);
+        for (const phase of [0, 0.125, 0.25, 0.5, 0.75, 0.875, 1]) {
+          for (const [scale, gain] of [
+            [4, [2, 0.5, 1.25]],
+            [1.5, [0, 3, 0.125]],
+            [0, [4, 2, 1]],
+          ] as const) {
+            const suppliedGain: [number, number, number] = [...gain];
+            capture.setPhase(phase, scale, [8, 7, 6], suppliedGain);
+            // setPhase copies values; it must not retain a mutable caller array.
+            suppliedGain[0] = 99;
+            for (const direction of directions) {
+              capture.sampleRadiance(phase, direction, raw);
+              const actual = evaluate(direction);
+              expect(actual).toHaveLength(4);
+              expect(actual[3]).toBe(1);
+              raw.toArray().forEach((value, i) => {
+                expect(actual[i]).toBeCloseTo(value * scale * gain[i], 12);
+              });
+              // The separate lower hemisphere is explicit radiance, not tinted
+              // or scaled by the sky's scalar or RGB gain.
+              expect(evaluateGround(direction)).toEqual([8, 7, 6]);
+            }
+          }
+          // Omitting the optional gain resets it to neutral after a colored
+          // capture; it must not leak the preceding phase's color calibration.
+          capture.setPhase(phase, 2, [0.1, 0.2, 0.3]);
+          for (const direction of directions) {
+            capture.sampleRadiance(phase, direction, raw);
+            const actual = evaluate(direction);
+            expect(actual[3]).toBe(1);
+            raw.toArray().forEach((value, i) => {
+              expect(actual[i]).toBeCloseTo(value * 2, 12);
+            });
+            expect(evaluateGround(direction)).toEqual([0.1, 0.2, 0.3]);
+          }
+        }
+        expect(directions.map(evaluateOther)).toEqual(otherBefore);
+        expect(
+          Object.values(sky.skyPaletteUniforms).map((u) => u.value.toArray()),
+        ).toEqual(originalPalette);
+        expect(sky.dayPhase).toBe(livePhase);
+        expect(sky.dayIntensity).toBe(liveIntensity);
+        expect(sky.sunDirection.toArray()).toEqual(liveSun);
+        expect(mesh.material.colorNode).toBe(node);
+        expect(mesh.material.version).toBe(version);
+        expect(ground.material.colorNode).toBe(groundNode);
+        expect(ground.material.version).toBe(groundVersion);
+        // Uniform identities remain disjoint across independent captures.
+        for (const value of uniformValues(nodes)) {
+          if (value instanceof THREE.Color || value instanceof THREE.Vector3)
+            expect(uniformValues(otherNodes)).not.toContain(value);
+        }
+      } finally {
+        capture.dispose();
+        other.dispose();
+        sky.destroy();
+        world.destroy();
+      }
+    },
+  );
+
+  it.each(["gradient-v1", "scattering-v1"] as const)(
+    "rejects every invalid %s RGB gain before any capture state is written",
+    (mode) => {
+      const world = new World(),
+        sky = new SkySystem(world, mode),
+        capture = sky.createLightingCapture();
+      try {
+        const mesh = skyMesh(capture.scene),
+          ground = capture.scene.getObjectByName("LightingCaptureGround");
+        if (
+          !(ground instanceof THREE.Mesh) ||
+          !(ground.material instanceof THREE.MeshBasicNodeMaterial)
+        )
+          throw new Error("Missing actual capture ground material");
+        const skyNodes = graphNodes(mesh.material.colorNode!),
+          groundNodes = graphNodes(ground.material.colorNode!),
+          evaluate = skyGraphEvaluator(mesh.material.colorNode!);
+        const directions = [
+          new THREE.Vector3(0, 1, 0),
+          new THREE.Vector3(1, 0.1, -0.7),
+        ];
+        const snapshot = () => ({
+          uniforms: [
+            ...uniformValues(skyNodes),
+            ...uniformValues(groundNodes),
+          ].map((v) =>
+            v instanceof THREE.Vector3 || v instanceof THREE.Color
+              ? v.toArray()
+              : v,
+          ),
+          radiance: directions.map(evaluate),
+          palette: Object.values(sky.skyPaletteUniforms).map((u) =>
+            u.value.toArray(),
+          ),
+        });
+        capture.setPhase(0.5, 2, [0.1, 0.2, 0.3], [0.5, 2, 3]);
+        const before = snapshot();
+        const invalidGains: unknown[] = [
+          null,
+          1,
+          "rgb",
+          {},
+          [],
+          [1, 1],
+          [1, 1, 1, 1],
+        ];
+        const sparseGain = new Array<number>(3);
+        sparseGain[0] = 1;
+        sparseGain[2] = 1;
+        invalidGains.push(sparseGain);
+        for (const channel of [0, 1, 2]) {
+          for (const invalid of [
+            -1,
+            NaN,
+            Infinity,
+            -Infinity,
+            undefined,
+            "1",
+          ]) {
+            const gain: unknown[] = [1, 1, 1];
+            gain[channel] = invalid;
+            invalidGains.push(gain);
+          }
+        }
+        for (const invalid of invalidGains) {
+          expect(() =>
+            capture.setPhase(
+              0.125,
+              9,
+              [6, 7, 8],
+              invalid as readonly [number, number, number],
+            ),
+          ).toThrow("Invalid lighting capture");
+          expect(snapshot()).toEqual(before);
+          expect(() =>
+            capture.setPhase(
+              0.125,
+              9,
+              invalid as readonly [number, number, number],
+              [6, 7, 8],
+            ),
+          ).toThrow("Invalid lighting capture");
+          expect(snapshot()).toEqual(before);
+        }
+        capture.setPhase(1, 3, [0.1, 0.2, 0.3], [0, 0, 0]);
+        for (const direction of directions)
+          expect(evaluate(direction)).toEqual([0, 0, 0, 1]);
+      } finally {
+        capture.dispose();
+        sky.destroy();
+        world.destroy();
+      }
+    },
+  );
 
   it.each(["gradient-v1", "scattering-v1"] as const)(
     "matches %s snapshot CPU radiance to the actual shared TSL DAG across phases and directions",
@@ -528,7 +731,9 @@ describe("isolated sky lighting capture", () => {
       output = new THREE.Color();
     sky.sampleRadiance(direction, direction, output);
     const prior = output.toArray();
-    parameters.radianceScale = 0.9;
+    // Deliberately mutate the caller's literal-valued configuration to verify
+    // that the already-created sky retained its own immutable snapshot.
+    expect(Reflect.set(parameters, "radianceScale", 0.9)).toBe(true);
     sky.sampleRadiance(direction, direction, output);
     expect(output.toArray()).toEqual(prior);
     expect(Object.isFrozen(sky.parameters)).toBe(true);
