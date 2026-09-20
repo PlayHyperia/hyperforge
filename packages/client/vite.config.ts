@@ -607,6 +607,10 @@ export default defineConfig(({ mode }) => {
           noDiscovery: true,
           include: [
             "three",
+            // Prebundle all runtime entrypoints together so GLTFLoader and
+            // WebGPU share core classes (including Mesh instanceof checks).
+            "three/webgpu",
+            "three/tsl",
             "react",
             "react-dom",
             "react-dom/client",
