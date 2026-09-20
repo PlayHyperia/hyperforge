@@ -212,6 +212,41 @@ Evidence: `inland-pond-integration01-UNQUALIFIED/avatar-texture-native04/`,
 `avatar-texture-types03.log`, `avatar-texture-lint03.log` and
 `avatar-texture-format03.log`.
 
+### Shared-budget grass handoff — native captures, not art acceptance
+
+Native17 observed 34 empty completions taking separate frames despite pending
+work. Their active slices totalled 11.8ms; the unused nominal allowance is an
+upper bound, not a promised speedup. The manager now hands validated empty
+completion to the next nearest job using the same absolute 2ms deadline and
+remaining 8,192-operation allowance. Nonempty publication still stops the call;
+failure, waiting and cancellation do not spin. No appearance or shader changed.
+
+The source passes 189 tests (one opt-in diagnostic skipped), 727-root typing,
+scoped lint and formatting. Fresh build10 leaves 145 protected artifacts intact.
+Native18 captures all three views within the unchanged 30-second gate:
+28.02s overview, 11.29s landing and 3.89s jetty. Its complete ledger records
+1,278 manager calls, 125 completed jobs and eight same-budget handoffs, with
+at most 8,192 aggregate operations and one nonempty publication per call.
+All eight handoff calls measured at most 2ms, but a single-continuation call
+reached 38.6ms. The deadline is cooperative, not a hard wall-time guarantee;
+sustained smoothness and allocation/scheduling pauses remain open.
+
+All three views contain 14 real fishing entities, two per family; this is not
+fourteen concurrent anglers. Root visual review rejects final art acceptance:
+the pond still reads too oval, banks too uniform and dock timber too repetitive.
+Natural coves, varied habitat, stronger dock character, dry routes, custody,
+actual concurrent fishing and the complete island composition still need work.
+All LAYOUT-01–08 gates remain open. No human localhost/default promotion.
+
+Evidence: `inland-pond-integration01-UNQUALIFIED/native16–18/`, including
+`native18/grass-budget-ledger.json` and all three PNGs; CPU receipts are
+`service-layout-network01-UNQUALIFIED/grass-empty-handoff-*`.
+Native18 observers restored, inputs remained pinned and the owned browser closed.
+The console retains 41 unattributed HTTP503 errors and five known missing-model
+404/load errors; a clean observer receipt is not an error-free-runtime claim.
+Private runtime10/11 and disposable databases are closed; human services,
+database and protected outputs are unchanged.
+
 ### Native texture census — diagnosis before implementation
 
 Native12 confirms that the pond's two depth captures surround an actual
@@ -244,17 +279,26 @@ cross-model sharing. ImageBitmap pixels were not read back or converted.
       dynamic metadata; keep per-instance materials and existing ownership.
       Prove exact rendered pixels, sibling lifetime and fewer native allocations
       without reducing resolution, mipmaps or quality.
-- [ ] Obtain valid isolated GPU-cost evidence. Native14's calibration correctly
-      rejects 50 queue writes outside the paused graphics render and restores
-      all leases; it supplies no isolated-frame timings or performance approval.
-      Do not suppress those writes or relax the isolation check without tracing
-      their real owner.
+- [x] Obtain valid isolated-frame diagnostic evidence, not exclusive pass cost.
+      Native16 traces the previously unowned writes to the update pipeline and
+      leases the complete world tick while preserving Three's animation loop.
+      Five queue-drained frames have identical draw receipts, no unowned queue
+      work or GPU errors, and exact hook/resource cleanup. Their median GPU
+      envelope is 65.405ms; median submit-to-idle wall is 74.3ms and includes
+      driver/IPC/scheduling. This freezes a partial transition, not a ready world.
+- [ ] Qualify settled, matched-population rendering and normal frame cadence.
+      Native16's transition still fails; its deadline starts after two initial
+      animation frames, so it is not exact cut-to-ready acceptance. Native17
+      restores the original cut timing and also fails. Preserve focus, LOD,
+      density, resolution, terrain and shadow settings; do not sum overlapping
+      timestamp intervals into exclusive pass costs or infer FPS from them.
 
 The seven-family/12-fish scope, 14-spot capacity target, two distinct docks and
 shore access remain required. Concurrent fishing, inland placement/custody,
 final art and sustained performance remain open. Evidence:
 `inland-pond-integration01-UNQUALIFIED/native12–14/`, including
-`native14/avatar-image-audit.json`. No production rendering or asset changes
+`native14/avatar-image-audit.json`, and follow-up `native16/process.json`
+and `native17/grass-budget-ledger.json`. No production rendering or asset changes
 were made in this diagnostic slice.
 
 ### Native pond follow-up — fishing delivered, transition still unqualified

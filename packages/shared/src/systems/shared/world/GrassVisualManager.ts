@@ -63,6 +63,7 @@ import type {
 import type { RetainedTerrainRegion } from "./TerrainVisualManager";
 import {
   GRASS_BLADE_GROUNDING_LIMITS,
+  GRASS_BLADE_GROUNDING_JOB_LIMITS,
   GrassGroundingContinuation,
   captureGrassGroundingFailure,
   type GrassBladeGroundingResult,
@@ -1710,117 +1711,135 @@ export class GrassVisualManager implements QuadTreeListener {
   /** One shared compute slice and at most one upload for the entire manager,
    * not one allowance per resident chunk. Stable waits/failures do no work. */
   private advanceGroundingJob(): number {
-    let selected: GrassGroundingEntry | undefined;
-    let selectedDistance = Infinity;
-    for (const entry of this.groundingJobs.values()) {
-      if (entry.job.state.status !== "running") continue;
-      if (!this.fineMeadow) {
-        selected = entry;
-        break;
-      }
-      const distance = this.workDistanceSquared(
-        entry.ticket.work,
-        this.lodFocusX,
-        this.lodFocusZ,
-      );
-      if (!selected || distance < selectedDistance) {
-        selected = entry;
-        selectedDistance = distance;
-      }
-    }
-    if (selected) {
-      const entry = selected;
-      const before = entry.job.activeMs;
-      const state = entry.job.advance();
-      this.groundingActiveMs += entry.job.activeMs - before;
-      this.maximumGroundingSliceMs = Math.max(
-        this.maximumGroundingSliceMs,
-        entry.job.maximumSliceMs,
-      );
-      if (state.status === "failed_input" || state.status === "failed_budget") {
-        // A failed job is no longer selected above: retain one bounded record
-        // at its transition, even if later LOD/horizon retirement removes it.
-        console.error("[GrassVisualManager] Grounding failed:", state, {
-          ...captureGrassGroundingFailure(entry.job),
-          key: entry.ticket.key,
-          nodeId: entry.ticket.node.id,
-          ticketLod: entry.ticket.lodLevel,
-          isLodSwap: entry.ticket.isLodSwap,
-          observedAtMs: performance.now(),
-        });
-      }
-      if (state.status === "cancelled")
-        this.groundingJobs.delete(entry.ticket.key);
-      if (state.status !== "ready") return 0;
-      const { ticket, region } = entry;
-      const inputs = ticket.grounding?.inputs;
-      if (
-        !region ||
-        !inputs ||
-        !region.isCurrent() ||
-        !inputs.isCurrent() ||
-        !this.isNodeInGrassHorizon(ticket.work) ||
-        !this.isTicketLodCurrent(ticket) ||
-        this.getRenderedSurface(ticket.node) !== ticket.surface
-      ) {
-        entry.job.cancel();
-        this.groundingJobs.delete(ticket.key);
-        return 0;
-      }
-      try {
-        const result = state.result;
-        if (!result.grounding)
-          throw new Error("Missing blade-grounding provenance");
-        this.assertBladeRoadClearance(result);
-        this.retireGrassChunk(ticket.key);
-        if (result.data.count) {
-          this.createChunkMeshFromWorkerData(
-            ticket.work,
-            {
-              ...result.data,
-              type: "grassInstanceResult",
-              chunkKey: ticket.key,
-              terrainProfileIdentity: this.terrainProfileIdentity,
-              grassEligibility: this.grassEligibility,
-              ...(this.compactCoastBlend
-                ? { compactCoastBlend: this.compactCoastBlend }
-                : {}),
-              ...(this.compactPondBlend
-                ? { compactPondBlend: this.compactPondBlend }
-                : {}),
-              ...(this.compactGrassColorGrade
-                ? { compactGrassColorGrade: this.compactGrassColorGrade }
-                : {}),
-              ...(ticket.work.placementCell
-                ? { placementCell: ticket.work.placementCell }
-                : {}),
-              ...(this.placementDistribution
-                ? { placementDistribution: this.placementDistribution }
-                : {}),
-              ...this.coverageMarker(ticket.work.placementCell),
-            },
-            ticket.lodLevel,
-            result.grounding,
-            result,
-          );
-          if (!this.chunks.has(ticket.key))
-            throw new Error("Grounded grass was not installed");
+    const deadline =
+      performance.now() + GRASS_BLADE_GROUNDING_JOB_LIMITS.targetSliceMs;
+    let remainingOperations =
+      GRASS_BLADE_GROUNDING_JOB_LIMITS.maximumSliceOperations;
+    while (remainingOperations > 0 && performance.now() < deadline) {
+      let selected: GrassGroundingEntry | undefined;
+      let selectedDistance = Infinity;
+      for (const entry of this.groundingJobs.values()) {
+        if (entry.job.state.status !== "running") continue;
+        if (!this.fineMeadow) {
+          selected = entry;
+          break;
         }
-        this.completedNodes.set(ticket.key, ticket.node);
-        this.completedSurfaces.set(ticket.key, ticket.surface);
-        this.completedLods.set(ticket.key, ticket.lodLevel);
-        this.completedGrounding.set(ticket.key, { region, inputs });
-        this.pendingLodSwap.delete(ticket.key);
-        this.groundingJobs.delete(ticket.key);
-        return result.data.count ? 1 : 0;
-      } catch (error) {
-        entry.job.rejectPublication(error);
-        console.error(
-          "[GrassVisualManager] Grounded grass publication failed:",
-          error,
+        const distance = this.workDistanceSquared(
+          entry.ticket.work,
+          this.lodFocusX,
+          this.lodFocusZ,
         );
-        return 0;
+        if (!selected || distance < selectedDistance) {
+          selected = entry;
+          selectedDistance = distance;
+        }
       }
+      if (selected) {
+        const entry = selected;
+        const before = entry.job.activeMs;
+        const beforeOperations = entry.job.operations;
+        const state = entry.job.advance(remainingOperations, deadline);
+        remainingOperations -= entry.job.operations - beforeOperations;
+        this.groundingActiveMs += entry.job.activeMs - before;
+        // Historical metric: maximum individual continuation slice, not the
+        // aggregate manager call when ready-empty work hands off. The shared
+        // deadline is cooperative; allocations/GC remain non-preemptible.
+        this.maximumGroundingSliceMs = Math.max(
+          this.maximumGroundingSliceMs,
+          entry.job.maximumSliceMs,
+        );
+        if (
+          state.status === "failed_input" ||
+          state.status === "failed_budget"
+        ) {
+          // A failed job is no longer selected above: retain one bounded record
+          // at its transition, even if later LOD/horizon retirement removes it.
+          console.error("[GrassVisualManager] Grounding failed:", state, {
+            ...captureGrassGroundingFailure(entry.job),
+            key: entry.ticket.key,
+            nodeId: entry.ticket.node.id,
+            ticketLod: entry.ticket.lodLevel,
+            isLodSwap: entry.ticket.isLodSwap,
+            observedAtMs: performance.now(),
+          });
+        }
+        if (state.status === "cancelled")
+          this.groundingJobs.delete(entry.ticket.key);
+        if (state.status !== "ready") return 0;
+        const { ticket, region } = entry;
+        const inputs = ticket.grounding?.inputs;
+        if (
+          !region ||
+          !inputs ||
+          !region.isCurrent() ||
+          !inputs.isCurrent() ||
+          !this.isNodeInGrassHorizon(ticket.work) ||
+          !this.isTicketLodCurrent(ticket) ||
+          this.getRenderedSurface(ticket.node) !== ticket.surface
+        ) {
+          entry.job.cancel();
+          this.groundingJobs.delete(ticket.key);
+          return 0;
+        }
+        try {
+          const result = state.result;
+          if (!result.grounding)
+            throw new Error("Missing blade-grounding provenance");
+          this.assertBladeRoadClearance(result);
+          this.retireGrassChunk(ticket.key);
+          if (result.data.count) {
+            this.createChunkMeshFromWorkerData(
+              ticket.work,
+              {
+                ...result.data,
+                type: "grassInstanceResult",
+                chunkKey: ticket.key,
+                terrainProfileIdentity: this.terrainProfileIdentity,
+                grassEligibility: this.grassEligibility,
+                ...(this.compactCoastBlend
+                  ? { compactCoastBlend: this.compactCoastBlend }
+                  : {}),
+                ...(this.compactPondBlend
+                  ? { compactPondBlend: this.compactPondBlend }
+                  : {}),
+                ...(this.compactGrassColorGrade
+                  ? { compactGrassColorGrade: this.compactGrassColorGrade }
+                  : {}),
+                ...(ticket.work.placementCell
+                  ? { placementCell: ticket.work.placementCell }
+                  : {}),
+                ...(this.placementDistribution
+                  ? { placementDistribution: this.placementDistribution }
+                  : {}),
+                ...this.coverageMarker(ticket.work.placementCell),
+              },
+              ticket.lodLevel,
+              result.grounding,
+              result,
+            );
+            if (!this.chunks.has(ticket.key))
+              throw new Error("Grounded grass was not installed");
+          }
+          this.completedNodes.set(ticket.key, ticket.node);
+          this.completedSurfaces.set(ticket.key, ticket.surface);
+          this.completedLods.set(ticket.key, ticket.lodLevel);
+          this.completedGrounding.set(ticket.key, { region, inputs });
+          this.pendingLodSwap.delete(ticket.key);
+          this.groundingJobs.delete(ticket.key);
+          if (result.data.count) return 1;
+          // Validated ready-empty publication needs no mesh upload. Re-select the
+          // nearest job using only this call's remaining time and operations.
+          continue;
+        } catch (error) {
+          entry.job.rejectPublication(error);
+          console.error(
+            "[GrassVisualManager] Grounded grass publication failed:",
+            error,
+          );
+          return 0;
+        }
+      }
+      return 0;
     }
     return 0;
   }

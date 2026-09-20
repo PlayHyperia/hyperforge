@@ -18,7 +18,10 @@ import {
   type GrassAnchorData,
 } from "../GrassTerrainProjection";
 import { RetainedTerrainSurface } from "../TerrainGridSurface";
-import { groundGrassBlades } from "../GrassBladeGrounding";
+import {
+  groundGrassBlades,
+  GRASS_BLADE_GROUNDING_JOB_LIMITS,
+} from "../GrassBladeGrounding";
 import { prepareGroundedGrassSteps } from "../GrassGroundingPipeline";
 import { gridGeometry } from "./terrain-grid.fixture";
 import {
@@ -1551,6 +1554,119 @@ describe("fine meadow cells borrow actual terrain owners without replacing them"
       expect(frames).toBeLessThan(1000);
       expect(f.owner.getProfileReceipt().grounding?.failedChunks).toBe(0);
       expect(f.owner["chunks"].size).toBe(2);
+    } finally {
+      f.close();
+    }
+  });
+
+  it("hands validated ready-empty work to the next nearest job within the same shared allowance", async () => {
+    const f = await fixture();
+    try {
+      const nextWork = f.owner["liveWorkUnits"].get("gcell_v1_15_15")!;
+      const farWork = f.owner["liveWorkUnits"].get("gcell_v1_14_14")!;
+      // Author a real grass-free service footprint, then regenerate the actual
+      // retained terrain before creating tickets. The production worker itself
+      // must return empty data; no generated arrays or counts are replaced.
+      f.terrain.registerFlatZone({
+        id: "empty-handoff-service-footprint",
+        centerX: 387.5,
+        centerZ: 362.5,
+        width: 25,
+        depth: 25,
+        height: f.terrain.getHeightAt(387.5, 362.5),
+        blendRadius: 0,
+        excludeGrass: true,
+      });
+      for (const node of f.nodes) f.visual["generateChunkSync"](node);
+      // Insertion order deliberately differs from distance order after the
+      // nearest empty cell. No continuation or manager method is replaced.
+      expect((await f.queue()).output.count).toBe(0);
+      await f.queue(0, false, farWork);
+      await f.queue(0, false, nextWork);
+      for (let i = 0; i < 3; i++) f.owner["processSettledWorkerResults"]();
+      const empty = f.owner["groundingJobs"].get(f.work.key)!;
+      const next = f.owner["groundingJobs"].get(nextWork.key)!;
+      const far = f.owner["groundingJobs"].get(farWork.key)!;
+      // Resume real empty preparation to its final allocation boundary, leaving
+      // completion/publication and the handoff to the actual manager call.
+      while (
+        empty.job.state.status === "running" &&
+        empty.job.lastPhase !== "bounded_output_allocation"
+      )
+        empty.job.advance(1);
+      expect(empty.job.state.status).toBe("running");
+      const before = [empty, next, far].map((entry) => entry.job.operations);
+      const started = performance.now();
+      const firstPublished = f.owner["advanceGroundingJob"]();
+      const elapsed = performance.now() - started;
+      expect(firstPublished).toBeLessThanOrEqual(1);
+      expect(empty.job.state.status).toBe("ready");
+      expect(f.owner["groundingJobs"].has(f.work.key)).toBe(false);
+      expect(f.owner["completedGrounding"].get(f.work.key)?.region).toBe(
+        empty.region,
+      );
+      expect(f.owner["chunks"].has(f.work.key)).toBe(false);
+      // Real clocks/GC may exhaust the cooperative deadline during even a tiny
+      // completion. Without that exhaustion, the next job must receive work.
+      if (next.job.operations === 0)
+        expect(elapsed).toBeGreaterThanOrEqual(
+          GRASS_BLADE_GROUNDING_JOB_LIMITS.targetSliceMs,
+        );
+      expect(far.job.operations).toBe(0);
+      expect(
+        [empty, next, far].reduce(
+          (sum, entry, i) => sum + entry.job.operations - before[i],
+          0,
+        ),
+      ).toBeLessThanOrEqual(
+        GRASS_BLADE_GROUNDING_JOB_LIMITS.maximumSliceOperations,
+      );
+      let calls = 0,
+        uploads = firstPublished;
+      while (f.owner["groundingJobs"].size && calls++ < 1000) {
+        const jobs = [next, far];
+        const previous = jobs.map((entry) => entry.job.operations);
+        const published = f.owner["advanceGroundingJob"]();
+        expect(published).toBeLessThanOrEqual(1);
+        uploads += published;
+        expect(
+          jobs.reduce(
+            (sum, entry, i) => sum + entry.job.operations - previous[i],
+            0,
+          ),
+        ).toBeLessThanOrEqual(
+          GRASS_BLADE_GROUNDING_JOB_LIMITS.maximumSliceOperations,
+        );
+        if (published && f.owner["chunks"].size === 1)
+          expect(far.job.operations).toBe(0);
+      }
+      expect(calls).toBeLessThan(1000);
+      expect(uploads).toBe(2);
+      expect(f.owner["chunks"].size).toBe(2);
+      expect(f.owner.getProfileReceipt().grounding?.readyEmptyChunks).toBe(1);
+    } finally {
+      f.close();
+    }
+  });
+
+  it("does not hand off after cancellation or failed retained ownership", async () => {
+    const f = await fixture();
+    try {
+      const secondWork = f.owner["liveWorkUnits"].get("gcell_v1_14_14")!;
+      await f.queue();
+      await f.queue(0, false, secondWork);
+      f.owner["processSettledWorkerResults"]();
+      f.owner["processSettledWorkerResults"]();
+      const first = f.owner["groundingJobs"].get(f.work.key)!;
+      const second = f.owner["groundingJobs"].get(secondWork.key)!;
+      // Replace the actual rendered surface without the manager reconciliation
+      // pass so the real continuation discovers invalidation on selection.
+      f.visual["generateChunkSync"](f.node);
+      expect(f.owner["advanceGroundingJob"]()).toBe(0);
+      expect(first.job.state.status).toBe("cancelled");
+      expect(second.job.operations).toBe(0);
+      expect(f.owner["completedGrounding"].has(f.work.key)).toBe(false);
+      expect(f.container.children).toHaveLength(0);
     } finally {
       f.close();
     }

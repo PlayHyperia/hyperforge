@@ -1,5 +1,68 @@
 # World graphics development checkpoint — 2026-09-20
 
+## Shared grounding budget checkpoint — three native pond views captured
+
+The small scheduler change is verified, not a full performance or art pass.
+A ready-empty result can now use the remainder of the manager's existing 2ms /
+8,192-operation allowance for the next nearest running job. The continuation
+accepts a finite absolute deadline capped by its own standalone limit. Every
+handoff retains input/region/surface/LOD ownership checks; at most one nonempty
+mesh is published. Failure, waiting and cancellation terminate that call.
+No density, shader, terrain, shadow, resolution or timeout setting changed.
+
+Four new real-owner regressions include an actual grass-free service footprint
+and real worker output, not substituted empty arrays or fake clocks. Both
+changed suites pass 139/139; generation/pacing suites add 50 passes. The opt-in
+pond cost diagnostic is skipped by its normal environment gate. Source typing
+passes 727 roots with zero diagnostics and stable pins; scoped ESLint/Prettier
+pass. Isolated build10 emits 8 bundles from 973 inputs without changing 145 protected
+outputs. All four production/test source hashes match the qualified inputs.
+
+Native16 first establishes queue-isolated render evidence by leasing the full
+world tick, keeping Three's animation loop and rejecting unrelated queue work.
+Its five forced samples have identical draw receipts: 6 passes, 427 reported calls,
+3,390,305 triangles. Median GPU envelope 65.405ms and submit-to-idle wall 74.3ms
+are diagnostic only: partial-transition population, overlapping pass intervals,
+driver/IPC/scheduling and one 140.05ms GPU-envelope outlier. Its failed transition
+was stamped after two initial animation frames; do not call it exact cut-to-ready
+acceptance. Native17 restores the original cut timestamp and still fails.
+
+Native17's complete observed ledger proves 34 empty completions each stopped a
+frame with work remaining, despite 11.8ms total slice time. Native18 verifies the
+new shared-budget handoff in real Chrome/Metal: 1,278 manager calls / 1,161 advances,
+125 ready retirements (71 empty / 54 published), zero remaining jobs, and eight
+multi-slice calls (maximum 13 continuations). Each grouped call retains one shared
+absolute deadline and correctly debits its actual operation count; no call
+exceeds 8,192 operations or one nonempty publication. No ledger overflows,
+observation errors or owner changes; every hook is restored.
+
+Native18 passes all three original 30-second transition gates: overview 28.02s,
+landing 11.29s and jetty 3.89s. This is one observed run, not a causal benchmark or
+sustained smoothness proof. All eight multi-slice calls measured at most 2ms;
+the largest 38.6ms manager call was one continuation, not a handoff. Cooperative
+checks cannot preempt allocations/GC or scheduling pauses; diagnose the actual
+stall owner before claiming its cause or a hard 2ms wall-time guarantee.
+
+All three native views have 14 actual fishing entities, two of each family, and
+restored HUD/camera/clock controls. Root inspected all three PNGs. The pond still
+reads too oval with uniform banks; timber reads repetitive/crosshatched; the
+surrounding service pads and sparse habitat do not meet final world composition.
+The retained console has 41 generic HTTP503 errors without request URLs and five
+known missing-model 404/load errors. No runtime-wide error-free claim; attribute
+the HTTP503 requests before accepting integrated health. Keep the existing
+temporary mob placeholder scope; do not divert this work into a new cow asset.
+No art, 14-concurrent-fishing, dock-route/custody, full-stream or sustained-FPS
+approval. Keep all LAYOUT-01–08 gates open and do not promote this candidate.
+
+Evidence: `inland-pond-integration01-UNQUALIFIED/native16–18/`,
+`isolated-build10-report.json`; CPU receipts in
+`service-layout-network01-UNQUALIFIED/grass-empty-handoff-*`.
+Owned browsers, runtime10, runtime11 and ephemeral databases are closed, with
+human client/server/DB identity and 145 protected hashes unchanged. Runtime09's
+failed startup never produced a valid baseline receipt; retain its recovery
+note and do not count it as a successful runtime. No dependency install,
+human bundle overwrite, merge, deployment or real-value action occurred.
+
 ## Static avatar texture checkpoint — exact pixels, lower native allocation
 
 The source now conservatively shares a source material's base/emissive texture

@@ -1629,6 +1629,7 @@ export class GrassGroundingContinuation {
 
   advance(
     maxOperations: number = GRASS_BLADE_GROUNDING_JOB_LIMITS.maximumSliceOperations,
+    sharedDeadlineMs?: number,
   ): GrassBladeGroundingJobState {
     if (
       !Number.isSafeInteger(maxOperations) ||
@@ -1636,8 +1637,19 @@ export class GrassGroundingContinuation {
       maxOperations > GRASS_BLADE_GROUNDING_JOB_LIMITS.maximumSliceOperations
     )
       throw new Error("Invalid grounding slice operation bound");
+    if (
+      sharedDeadlineMs !== undefined &&
+      (!Number.isFinite(sharedDeadlineMs) || sharedDeadlineMs < 0)
+    )
+      throw new Error("Invalid grounding shared deadline");
     if (this.current.status !== "running") return this.current;
     const started = performance.now();
+    // An owner may hand off only what remains of one shared slice. A later
+    // caller deadline can never extend this continuation's standalone limit.
+    const deadline = Math.min(
+      sharedDeadlineMs ?? Infinity,
+      started + GRASS_BLADE_GROUNDING_JOB_LIMITS.targetSliceMs,
+    );
     this.lastSliceOperations = 0;
     let result: GrassBladeGroundingResult | undefined;
     try {
@@ -1655,7 +1667,8 @@ export class GrassGroundingContinuation {
             GRASS_BLADE_GROUNDING_JOB_LIMITS.clockInterval ===
           0
         ) {
-          const elapsed = performance.now() - started;
+          const now = performance.now();
+          const elapsed = now - started;
           if (
             this.activeMs + elapsed >=
             GRASS_BLADE_GROUNDING_JOB_LIMITS.maximumActiveMs
@@ -1664,7 +1677,7 @@ export class GrassGroundingContinuation {
               status: "failed_budget",
               reason: "active_cpu",
             });
-          if (elapsed >= GRASS_BLADE_GROUNDING_JOB_LIMITS.targetSliceMs) break;
+          if (now >= deadline) break;
         }
         const step = this.iterator.next();
         this.operations++;

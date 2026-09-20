@@ -1495,6 +1495,81 @@ describe("CPU per-blade grounding prototype (no renderer/GPU)", () => {
     }
   });
 
+  it("shares an absolute grounding deadline without renewing time or operation allowances", () => {
+    const f = analyticOwner();
+    try {
+      const surface = f.makeSurface();
+      const first = new GrassBladeGroundingJob(f.request(surface), () => true);
+      const second = new GrassBladeGroundingJob(f.request(surface), () => true);
+      const expired = performance.now();
+      expect(first.advance(7, expired).status).toBe("running");
+      expect(first.operations).toBe(0);
+      expect(first.lastSliceOperations).toBe(0);
+      expect(second.advance(7, expired).status).toBe("running");
+      expect(second.operations).toBe(0);
+      for (const deadline of [NaN, Infinity, -Infinity, -1])
+        expect(() => first.advance(7, deadline)).toThrow(
+          "Invalid grounding shared deadline",
+        );
+      const deadline =
+        performance.now() + GRASS_BLADE_GROUNDING_JOB_LIMITS.targetSliceMs;
+      first.advance(3, deadline);
+      second.advance(7 - first.lastSliceOperations, deadline);
+      expect(first.operations + second.operations).toBeLessThanOrEqual(7);
+      const before = second.operations;
+      second.advance(7, expired);
+      expect(second.operations).toBe(before);
+      expect(second.lastSliceOperations).toBe(0);
+      while (first.state.status === "running") first.advance();
+      while (second.state.status === "running") second.advance();
+      expect(first.state.status).toBe("ready");
+      expect(second.state.status).toBe("ready");
+      if (first.state.status !== "ready" || second.state.status !== "ready")
+        throw new Error("Actual shared-deadline jobs must complete");
+      expect(second.state.result.data).toEqual(first.state.result.data);
+      expect(second.state.result.rootDeltas).toEqual(
+        first.state.result.rootDeltas,
+      );
+      const terminal = first.state;
+      expect(first.advance(7, expired)).toBe(terminal);
+    } finally {
+      f.close();
+    }
+  });
+
+  it("retains cancellation and malformed-input ownership checks with a shared deadline", () => {
+    const f = analyticOwner();
+    try {
+      const surface = f.makeSurface(),
+        geometry = f.geometries[0];
+      const request = f.request(surface);
+      const job = new GrassBladeGroundingJob(request, () =>
+        surface.matchesGeometry(geometry),
+      );
+      geometry.setAttribute(
+        "position",
+        geometry.getAttribute("position").clone(),
+      );
+      expect(job.advance(7, performance.now())).toEqual({
+        status: "cancelled",
+        reason: "invalidated",
+      });
+      expect(job.operations).toBe(0);
+      const fresh = f.makeSurface(2);
+      const malformed = f.request(fresh);
+      malformed.data.offsets[0] = NaN;
+      const invalid = new GrassBladeGroundingJob(malformed, () => true);
+      while (invalid.state.status === "running")
+        invalid.advance(
+          7,
+          performance.now() + GRASS_BLADE_GROUNDING_JOB_LIMITS.targetSliceMs,
+        );
+      expect(invalid.state.status).toBe("failed_input");
+    } finally {
+      f.close();
+    }
+  });
+
   it("cancels between validation batches without examining unpublished input", () => {
     const f = analyticOwner();
     try {
