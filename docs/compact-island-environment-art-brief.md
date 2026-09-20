@@ -170,6 +170,51 @@ and finished pond views are not approved. Receipts:
 `native09/`, `native10/`, `native11/`, and `isolated-build06-report.json`; CPU receipts
 are `service-layout-network01-UNQUALIFIED/grass-storage-*`.
 
+### Native texture census — exact duplication, optimization pending
+
+Native12 confirms that the pond's two depth captures surround an actual
+depth-writing back-face draw. Removing a capture is not established as
+pixel-equivalent. Native13 uses unique timestamp pairs for all actual passes:
+29 sampled frames, no GPU errors and 87/87 diagnostic resources destroyed.
+Overlapping vertex-to-fragment stage intervals still cannot be interpreted
+as exclusive pass costs. The unchanged pond transition deadline fails.
+
+The pre-boot native texture census observes 325 allocations and two explicit
+destroys. Known live texel payload is 2,146,732,526 bytes, plus six unknown
+depth-format footprints; this is not physical resident memory. Seventy-seven
+2048-square full-mip textures account for 1,722,460,740 bytes. Native allocation
+counters do not overflow, but bounded owner/node attribution does; do not
+claim a complete owner graph.
+
+Native14 proves 15 loaded NPC/mob base/emissive pairs share the same actual
+ImageBitmap, with matching captured sampler/UV/upload state, but retain
+30 separate native textures (about 640 MiB). An exact audit of all 17 present
+manifest-referenced VRMs independently confirms duplicate embedded images
+within each asset, with no cross-asset equality or declared animation/
+expression/UV-mutation bindings. This identifies about 320 MiB of potential
+savings, not a completed optimization or demonstrated frame-rate recovery.
+Sixteen large CPU DataTexture fingerprints are distinct; they do not justify
+cross-model sharing. ImageBitmap pixels were not read back or converted.
+
+- [ ] Implement conservative within-source-material base/emissive reuse only
+      after verifying immutable image identity, complete texture state and
+      absence of texture-mutation bindings. Fail closed for unavailable or
+      dynamic metadata; keep per-instance materials and existing ownership.
+      Prove exact rendered pixels, sibling lifetime and fewer native allocations
+      without reducing resolution, mipmaps or quality.
+- [ ] Obtain valid isolated GPU-cost evidence. Native14's calibration correctly
+      rejects 50 queue writes outside the paused graphics render and restores
+      all leases; it supplies no isolated-frame timings or performance approval.
+      Do not suppress those writes or relax the isolation check without tracing
+      their real owner.
+
+The seven-family/12-fish scope, 14-spot capacity target, two distinct docks and
+shore access remain required. Concurrent fishing, inland placement/custody,
+final art and sustained performance remain open. Evidence:
+`inland-pond-integration01-UNQUALIFIED/native12–14/`, including
+`native14/avatar-image-audit.json`. No production rendering or asset changes
+were made in this diagnostic slice.
+
 ### Native pond follow-up — fishing delivered, transition still unqualified
 
 Native03 verifies 14 actual client fishing entities, exactly two per family.

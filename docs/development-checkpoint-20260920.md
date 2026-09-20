@@ -1,5 +1,73 @@
 # World graphics development checkpoint — 2026-09-20
 
+## Native allocation checkpoint — measured duplication, no quality reduction
+
+This diagnostic-only slice changes no production code, assets, resolution,
+grass density, terrain accuracy, shadow quality or acceptance deadline.
+The seven fishing families, 12 fish, two positions per family, two distinct
+docks and non-dock access remain the pond's open acceptance contract.
+
+Native12 proves that two pond depth captures use different native destination
+textures with a depth-writing back-side draw between them. A shared capture
+cannot be assumed equivalent at grazing or underwater views.
+
+Native13 records 29 frames with independent query pairs for each actual
+initial/resumed render pass, zero GPU errors and 87 created/destroyed diagnostic
+resources. Its unchanged 30-second transition still fails. The roughly 93ms
+median timestamp envelope spans overlapping work, not exclusive pass costs
+or steady-state FPS. Dawn's Metal implementation samples vertex start and
+fragment end; these boundaries do not serialize intervening stages. See
+[Dawn's Metal source](https://raw.githubusercontent.com/google/dawn/main/src/dawn/native/metal/CommandBufferMTL.mm)
+and [Apple's counter profiler](https://developer.apple.com/documentation/xcode/analyzing-apple-gpu-performance-using-counter-statistics).
+Do not sum the captured intervals to assign shader costs.
+
+The census attaches before renderer texture creation and observes 325 native
+allocations, two explicit logical destroys, 323 remaining textures and no native
+counter overflow. Supported formats total 2,146,732,526 live texel/block bytes;
+six depth-format footprints are intentionally unknown. These are not physical
+resident bytes, allocator padding, canvas presentation or GC accounting.
+The 321-texture Three estimate remains 2,194,944,230 bytes. Owner/node traversal
+hits explicit bounds, so attribution is partial even though allocation capture
+has no observed omission and no untracked Three native references.
+
+Seventy-seven 2048-square RGBA8 full-mip allocations account for 1,722,460,740
+bytes. Native14 traces 30 of those to 15 NPC/mob map/emissive pairs. Each pair
+shares the exact ImageBitmap object and matching captured sampling, UV and
+upload state, yet holds separate Three/native textures. The narrow opportunity
+is approximately 320 MiB without changing pixels—not all 640 MiB occupied by
+those pairs. Sixteen hashed large DataTexture CPU views are distinct. No
+ImageBitmap canvas conversion or GPU pixel readback was used in this census.
+
+The independent file audit reads only candidate-manifest references: 18 VRMs,
+17 present, the already-known cow asset absent. All 17 present files contain
+equal embedded base/emissive PNG bytes, equal sampler settings and UV0 with no
+texture transform. There are 17 different hashes across assets. No declared
+expressions, UV-animation factors, texture-transform bindings or glTF animation
+channels appear in those files. The audit artifact SHA-256 is
+`8ad20b27205fd6273f12663873d86fca04b4d43f2e38fd84d5a893e10a0d7e18`.
+
+Next implementation: verify static-texture eligibility at the parsed GLB/VRM
+factory boundary, then reuse only a source material's exact matching immutable
+base/emissive texture. Default to no sharing for unknown/dynamic metadata or
+different full state; retain independent per-instance materials. Do not pool
+across assets, change color interpretation, dispose borrowed textures, or close
+the shared ImageBitmap. Require real parsed-file and clone/lifetime tests plus
+native same-pose pixels and allocation counts. This is not implemented yet.
+
+Native14's five-frame queue-drained calibration rejects 50 writes outside
+graphics.render before sampling any frame; no isolated GPU cost is claimed.
+Source inspection points to the per-world-tick grass frustum upload, but the
+capture has no buffer label and does not prove that owner. Future isolation
+must own the complete world-tick producer and retain queue guards, with no
+silently altered simulation clocks or resumed-gameplay claim.
+
+Evidence: local `inland-pond-integration01-UNQUALIFIED/native12–14/`, including
+the retained native14 runner/helper sources, texture census/fingerprints and
+`avatar-image-audit.json`. All browser hooks, camera/clock leases and owned
+browsers restore/close. Runtime06 is stopped through its owning parent and its
+disposable database is removed; human localhost and protected outputs remain
+unchanged. All layout/art/concurrent-fishing/performance gates remain open.
+
 ## Grass storage checkpoint — verified rendering, unresolved pond performance
 
 The production change is limited to the two GrassVisualManager constructors.
