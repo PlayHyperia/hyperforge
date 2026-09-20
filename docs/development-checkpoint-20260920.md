@@ -1,5 +1,84 @@
 # World graphics development checkpoint — 2026-09-20
 
+## Grass storage checkpoint — verified rendering, unresolved pond performance
+
+The production change is limited to the two GrassVisualManager constructors.
+It uses the existing versioned storage helper on each private cloned geometry;
+identity matrices, population, dirty versions, transforms, geometry, grounding,
+wind, culling and retirement logic are unchanged.
+
+Four complete real-class suites pass 112/112 tests: GrassVisualManagerCells,
+GrassVisualManagerGeneration, GrassVisualManagerPacing and GrassGroundingGpu.
+Scoped lint/format and source-only 725-root typing pass with stable inputs.
+Build06 produces eight isolated bundles from 973 source inputs and preserves
+all 145 protected compiled artifacts. Human localhost bundles are not promoted.
+
+The actual Chrome/Apple Metal grass-storage-native01 fixture passes both active
+fine-meadow LODs with nine clumps each at 1.25s and 3.75s wind phases. Ordinary
+and storage paths have exactly equal color/received-shadow pixels. Wind changes
+18,042 and 10,180 pixels; first-phase shadows affect 2,679 and 1,581 grass
+pixels. A translated/yawed parent is included. GPU matrix readback matches
+CPU identity bytes; unchanged/wind frames issue zero matrix uploads. Three
+vertex storage bindings and seven vertex backings fit the device's limits of
+eight each. Actual precompile and both LOD owners dispose root, visibility and
+matrix allocations exactly once. All fixture workers, browser, HTTP and
+renderer resources close. The inspected comparison sheet is a raw linear
+correctness preview, not approved meadow color/lighting/art.
+
+Native09 reaches 14 actual fishing resources and 65 observed grounded chunks
+with private storage matrices, but fails the same 30-second pond transition.
+Its instrumented trace still attributes 22.16s of 29.88s to native writeBuffer;
+25 jobs remain in the last observation. This does not establish a speedup or
+regression against earlier non-matched runs, nor prove transfer bandwidth is
+the bottleneck. Native10 also fails, with 14 jobs in its last observation.
+The emitted per-pass GPU times must not be summed or treated as exclusive
+costs before checking actual resumed-pass timestamp-slot ownership.
+
+Native11 proves that attribution defect: 2,580 allocated intervals correspond
+to 3,870 actual native passes and 1,290 framebuffer-copy resumes. Every resume
+uses mismatched descriptor indices, another encoder's UID and repeated slots
+within that same allocation generation. Both per-frame depth-copy resumes
+occur while drawing WaterQT_elevated_haven_pond_water; main context 0 reuses
+sun-shadow context 6's indices. All bounded counters are complete with zero
+overflow. This invalidates native10/11 per-pass cost attribution; it is not
+proof that timestamp tracking (normally disabled) causes production slowness.
+The diagnostic view still fails its scalar-read deadline. Query pools and all
+observer/camera/clock hooks restore, and the owned browser closes. Next use
+independently owned per-actual-pass queries, or a calibrated isolated fixture,
+before interpreting GPU intervals. Do not silently patch vendor defaults.
+
+Native10 additionally records 2,194,944,230 nominal texture bytes across 321
+textures. Three's accounting is not a measurement of resident GPU memory;
+pair actual texture owners with native allocations before changing assets.
+Do not make further vegetation/batching/texture changes solely from CPU
+write-call samples or these unqualified timing numbers.
+
+Read-only texture audit does not identify the dominant allocation. Known source
+sizes for seven 1024-square compact terrain maps are only about 37.3 MiB with
+mips; outdoor atlases add about 18 MiB. Large disabled impostor arrays must
+not be counted as live allocations without evidence. ModelCache deduplicates
+resolved model URLs, while separate GLB/LOD images and converted DataTextures
+can still duplicate content. Next, census real native texture creation and
+logical destruction from before world boot, then attribute those allocations
+to actual cached material and submitted-binding owners. Preserve resolution,
+mips, sampling and color spaces. Share only proven byte-identical images with
+identical rendering state and correct leases; do not guess from file names.
+
+The route audit also preserves a concrete unadopted candidate: pond center
+425,415; tighter campus x336..397/z365..421; public preparation connectors
+x344..406/z336..363 and x397..406/z350..382. Real server paths can shortcut
+across campus despite road paint. First test the actual destination planner;
+if necessary, enforce opted-out agent admission at the shared traversability
+seam, not through death/drop exceptions. Preserve diagnostic-only custody
+approval and exact boundary/overlap semantics. These are planning bounds, not
+approved physical access, rendered terrain or economic-zone qualification.
+
+Local evidence: inland-pond-integration01-UNQUALIFIED/build06,
+isolated-build06-report.json, native09–11 and grass-storage-native01;
+service-layout-network01-UNQUALIFIED/grass-storage-* contains CPU receipts.
+LAYOUT-01–08, final pond art, route/custody separation, simultaneous all-tier
+fishing and sustained frame/loading/memory acceptance remain open.
+
 ## Pond follow-up — all-tier client coverage and upload diagnosis
 
 Native03 reaches the real client with 14 fishing entities, exactly two for

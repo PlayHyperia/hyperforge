@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import { ScriptTarget, transpileModule } from "typescript";
 import { describe, expect, it } from "vitest";
 import { StorageBufferAttribute } from "three/webgpu";
+import { INSTANCE_MATRIX_STORAGE_ATTRIBUTE } from "../../../../utils/rendering/createStorageInstancedMesh";
 
 import THREE from "../../../../extras/three/three";
 import { World } from "../../../../core/World";
@@ -1146,29 +1147,51 @@ describe("GrassVisualManager request ownership with real workers and geometry", 
               expect(
                 mesh.geometry.hasAttribute(GRASS_ROOT_STORAGE_ATTRIBUTE),
               ).toBe(true);
+              expect(mesh.instanceMatrix).toBeInstanceOf(
+                THREE.StorageInstancedBufferAttribute,
+              );
+              expect(
+                mesh.geometry.getAttribute(INSTANCE_MATRIX_STORAGE_ATTRIBUTE),
+              ).toBe(mesh.instanceMatrix);
+              expect(mesh.instanceMatrix.usage).toBe(THREE.StaticDrawUsage);
+              expect(mesh.instanceMatrix.version).toBe(1);
+              expect(mesh.instanceMatrix.count).toBe(1);
+              expect(mesh.instanceMatrix.array).toEqual(
+                new Float32Array(new THREE.Matrix4().elements),
+              );
+              expect(
+                f.manager["lodGeometries"].some((geometry) =>
+                  geometry.hasAttribute(INSTANCE_MATRIX_STORAGE_ATTRIBUTE),
+                ),
+              ).toBe(false);
               // Actual production prewarm geometry: interleaved color/tint
-              // share one backing. Root/mask storage must not add vertex slots.
-              // Include the instanced matrix as the eighth native backing;
-              // this CPU census is not device/pipeline validation.
+              // share one backing. Root/mask/matrix storage are not vertex
+              // inputs. This CPU census is not device/pipeline validation.
               const vertexBackings = new Set<
                 THREE.BufferAttribute | THREE.InterleavedBuffer
               >();
               for (const attribute of Object.values(mesh.geometry.attributes)) {
-                if (attribute instanceof StorageBufferAttribute) continue;
+                if (
+                  attribute instanceof StorageBufferAttribute ||
+                  attribute instanceof THREE.StorageInstancedBufferAttribute
+                )
+                  continue;
                 vertexBackings.add(
                   attribute instanceof THREE.InterleavedBufferAttribute
                     ? attribute.data
                     : attribute,
                 );
               }
-              vertexBackings.add(mesh.instanceMatrix);
-              expect(vertexBackings.size).toBe(8);
+              expect(vertexBackings.size).toBe(7);
+              expect([...vertexBackings]).not.toContain(mesh.instanceMatrix);
               if (enabled)
                 expect([...vertexBackings]).not.toContain(visibility);
-              mesh.geometry.addEventListener(
-                "dispose",
-                () => geometryDisposals++,
-              );
+              mesh.geometry.addEventListener("dispose", () => {
+                expect(
+                  mesh.geometry.getAttribute(INSTANCE_MATRIX_STORAGE_ATTRIBUTE),
+                ).toBe(mesh.instanceMatrix);
+                geometryDisposals++;
+              });
               expect(Array.isArray(mesh.material)).toBe(false);
               if (Array.isArray(mesh.material))
                 throw new Error("One grounded material required");

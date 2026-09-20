@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { Worker } from "node:worker_threads";
+import { INSTANCE_MATRIX_STORAGE_ATTRIBUTE } from "../../../../utils/rendering/createStorageInstancedMesh";
 import THREE from "../../../../extras/three/three";
 import { World } from "../../../../core/World";
 import { ClientGraphics } from "../../../client/ClientGraphics";
@@ -1867,7 +1868,7 @@ describe("fine meadow cells borrow actual terrain owners without replacing them"
     }
   });
 
-  it("freezes only grounded chunk-local matrices across parent motion, reparenting and real LOD replacement", async () => {
+  it("preserves storage-backed grounded chunk identity matrices across parent motion, reparenting and real LOD replacement", async () => {
     const f = await fixture();
     const scene = new THREE.Scene(),
       firstParent = new THREE.Group(),
@@ -1879,6 +1880,28 @@ describe("fine meadow cells borrow actual terrain owners without replacing them"
         material = mesh.material,
         count = mesh.count,
         local = mesh.matrix.clone();
+      expect(mesh.instanceMatrix).toBeInstanceOf(
+        THREE.StorageInstancedBufferAttribute,
+      );
+      expect(geometry.getAttribute(INSTANCE_MATRIX_STORAGE_ATTRIBUTE)).toBe(
+        mesh.instanceMatrix,
+      );
+      expect(mesh.instanceMatrix.usage).toBe(THREE.StaticDrawUsage);
+      expect(mesh.instanceMatrix.version).toBe(1);
+      expect(mesh.instanceMatrix.count).toBe(count);
+      expect(mesh.instanceMatrix.array.byteLength).toBe(count * 16 * 4);
+      expect(geometry.getAttribute("instanceOffset").count).toBe(count);
+      const identities = new Float32Array(count * 16);
+      const identity = new THREE.Matrix4();
+      for (let index = 0; index < count; index++) {
+        identity.toArray(identities, index * 16);
+      }
+      expect(mesh.instanceMatrix.array).toEqual(identities);
+      expect(
+        f.owner["lodGeometries"].some((source) =>
+          source.hasAttribute(INSTANCE_MATRIX_STORAGE_ATTRIBUTE),
+        ),
+      ).toBe(false);
       const buffers = [
         ...Object.values(geometry.attributes),
         ...(geometry.index ? [geometry.index] : []),
@@ -1950,6 +1973,8 @@ describe("fine meadow cells borrow actual terrain owners without replacing them"
         expect(mesh.geometry).toBe(geometry);
         expect(mesh.material).toBe(material);
         expect(mesh.count).toBe(count);
+        expect(mesh.instanceMatrix.version).toBe(1);
+        expect(mesh.instanceMatrix.array).toEqual(identities);
         for (const { bytes, before } of buffers) expect(bytes).toEqual(before);
       } finally {
         reference.removeFromParent();
@@ -1964,7 +1989,12 @@ describe("fine meadow cells borrow actual terrain owners without replacing them"
       const original = f.owner["chunks"].get(f.work.key)!.mesh;
       check(original);
       let disposed = 0;
-      original.geometry.addEventListener("dispose", () => disposed++);
+      original.geometry.addEventListener("dispose", () => {
+        expect(
+          original.geometry.getAttribute(INSTANCE_MATRIX_STORAGE_ATTRIBUTE),
+        ).toBe(original.instanceMatrix);
+        disposed++;
+      });
       f.owner["lodFocusX"] = 450;
       f.owner["lodFocusZ"] = 362.5;
       f.owner["pendingLodSwap"].set(f.work.key, {
@@ -1981,6 +2011,24 @@ describe("fine meadow cells borrow actual terrain owners without replacing them"
       expect(original.parent).toBeNull();
       expect(disposed).toBe(1);
       check(replacement.mesh);
+      expect(replacement.mesh.instanceMatrix).not.toBe(original.instanceMatrix);
+      expect(replacement.mesh.instanceMatrix.array).not.toBe(
+        original.instanceMatrix.array,
+      );
+      let replacementDisposals = 0;
+      replacement.mesh.geometry.addEventListener("dispose", () => {
+        expect(
+          replacement.mesh.geometry.getAttribute(
+            INSTANCE_MATRIX_STORAGE_ATTRIBUTE,
+          ),
+        ).toBe(replacement.mesh.instanceMatrix);
+        replacementDisposals++;
+      });
+      f.owner["retireGrassWork"](f.work.key);
+      expect(replacementDisposals).toBe(1);
+      expect(replacement.mesh.parent).toBeNull();
+      expect(f.owner["chunks"].has(f.work.key)).toBe(false);
+      expect(disposed).toBe(1);
     } finally {
       f.container.removeFromParent();
       f.close();

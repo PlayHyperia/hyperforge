@@ -45,6 +45,38 @@ Two CPU-tested placements fit the candidate basin; native integrated art,
 fishing capacity, complete routes and frame cost remain open acceptance gates.
 No pond, fishing spot, dock or supplier has been relocated in the live manifest.
 
+### Grass matrix follow-up — correctness verified, performance still open
+
+Both actual grass constructors now use privately owned, versioned matrix
+storage. Placement, density, geometry, wind, grounding, shadows, culling,
+resolution and the 30-second transition gate are unchanged. Four real-class
+suites pass 112/112 tests; source-only 725-root typing, scoped lint and
+formatting pass. Build06 preserves all 145 protected compiled artifacts.
+
+The actual Apple Metal grass fixture passes exact ordinary/storage pixel
+comparisons at both active LODs and two wind phases, including received
+occluder shadows and a translated/rotated parent. It proves zero unchanged
+matrix uploads, native binding limits and destruction of root, visibility and
+matrix allocations. This is a correctness fixture, not approved meadow art.
+
+Native09 confirms all 65 observed grounded chunks own the expected storage
+matrix, but still fails the unchanged pond transition. Native10 also fails.
+No FPS improvement or sustained performance acceptance is claimed. Native11
+proves the timestamp attribution defect: all 1,290 observed framebuffer-copy
+resumes overwrite another pass's query slots. Its observation is complete,
+with no counter overflow; the view deadline still fails. Treat native10/11
+per-pass durations as invalid for cost attribution, not as exclusive costs.
+This diagnostic defect does not itself explain normal rendering performance.
+Renderer-accounted texture
+memory is about 2.04 GiB, requiring an actual owner/allocation census before
+choosing further optimizations. Keep vegetation changes separately scoped.
+
+LAYOUT-01–08 remain open. Candidate route/custody separation, concurrent fishing
+and finished pond views are not approved. Receipts:
+`inland-pond-integration01-UNQUALIFIED/grass-storage-native01/`,
+`native09/`, `native10/`, `native11/`, and `isolated-build06-report.json`; CPU receipts
+are `service-layout-network01-UNQUALIFIED/grass-storage-*`.
+
 ### Native pond follow-up — fishing delivered, transition still unqualified
 
 Native03 verifies 14 actual client fishing entities, exactly two per family.

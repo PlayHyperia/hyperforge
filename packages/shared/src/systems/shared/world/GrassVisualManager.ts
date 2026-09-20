@@ -36,6 +36,7 @@ import { SUN_LIGHT } from "./LightingConfig";
 import { isCompactSculptProfile } from "./WorldTerrainProfile";
 import { createCompactTerrainColorOperations } from "./CompactTerrainPalette";
 import type { CompactHabitatField } from "./CompactHabitatComposition";
+import { createStorageInstancedMesh } from "../../../utils/rendering/createStorageInstancedMesh";
 import {
   createCompactHabitatSoilNode,
   createCompactBankVergeLocality,
@@ -1385,7 +1386,7 @@ export class GrassVisualManager implements QuadTreeListener {
       publishFineGrassLighting(material);
     if (this.lightingCandidate)
       publishFineGrassCanopyLighting(material, this.lightingCandidate);
-    const mesh = new THREE.InstancedMesh(geo, material, 1);
+    const mesh = createStorageInstancedMesh(geo, material, 1);
     mesh.name = "GrassQT_PrecompileSample";
     mesh.frustumCulled = false;
     mesh.receiveShadow = true;
@@ -2268,7 +2269,7 @@ export class GrassVisualManager implements QuadTreeListener {
           configurable: false,
           value: this.habitatComposition,
         });
-      mesh = new THREE.InstancedMesh(geo, material, data.count);
+      mesh = createStorageInstancedMesh(geo, material, data.count);
       mesh.position.set(node.centerX, 0, node.centerZ);
       // Chunk-local placement is immutable; parent/world transforms stay live.
       mesh.updateMatrix();
