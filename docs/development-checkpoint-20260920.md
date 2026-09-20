@@ -1,5 +1,106 @@
 # World graphics development checkpoint — 2026-09-20
 
+## Inland pond/fishing source checkpoint — not layout promotion
+
+The full-progression requirement is now part of LAYOUT-07 in all eight mirrored
+planning documents: seven fishing families, 12 fish, tool/bait/feather supply,
+a target of two accessible positions per family, shore access for every tier,
+and two distinct, bounded procedural docks. Actual concurrent use and complete
+bank/supplier routes remain mandatory acceptance gates.
+
+### Implemented and measured
+
+- Compact elevated water uses one static indexed mesh per basin, clipped to the
+  sampled canonical terrain instead of a circular fan. True horizontal distance
+  to the emitted shoreline includes dry islands and disconnected components.
+  Ground sampling is separate from ocean staging and bypasses deck/cache
+  overrides; existing ocean sampling and noncompact circle behavior remain.
+- Fixed 0.5m pitch, radius at most 32m, at most 16,641 ground queries and 65,536
+  triangles per basin are admission caps, not accepted frame-time budgets.
+  No per-frame basin sampling was added. Constructor rollback disposes only
+  newly owned geometry and preserves borrowed materials/containers/children.
+- A checked-in **test-only design candidate**, not a runtime manifest, is
+  `packages/shared/src/systems/shared/world/__fixtures__/inland-pond-basin-candidate.json`.
+  Its SHA-256 is
+  `62bf40a5ce72aae3ff5105b2403c67351600b121b1e24f0a0cc19be28427556f`.
+  The preferred basin center is (410,415), with water Y24.6 and a conservative
+  27m water envelope. Four unequal bank sectors form a higher northwest bank,
+  eastern cove, southern shelf and southwest arrival bay. The grading envelope
+  is 33m; it was reduced from the first study's 35m to avoid the existing lobby
+  floor corner. Exact rendered floor/contact clearance is still unverified.
+- In the art03 authored CPU field, 720 radial shoreline samples span
+  X390.575–432.543/Z397.334–433.883, about 42 × 37m, with a 119.067m perimeter.
+  Minimum sampled dry height at the 27m envelope is 1.015m above pond water.
+  These do not establish navigation, actual indexed terrain or visual approval.
+- Final stock CPU setup observations: current 7.5m body 703 vertices/1,224
+  triangles/920 queries; 27m candidate 4,786/9,062/9,937; 32m capacity fixture
+  8,574/16,458/13,796. Candidate setup was about 22ms in one run, not a frame SLO
+  or benchmark. The art03 current pond has different authored banks and yielded
+  715 vertices/1,242 triangles; those measurements are kept separate.
+
+### Verification and retained failures
+
+- `water-basin-tests04`: **17/17**, stock assets with no candidate environment
+  override; the committed candidate is exercised by default, not skipped in CI.
+  Real World/TerrainSystem/WaterSystem/Three objects, independent boundary
+  distance oracle, exact-height contour cases, island/separate-pool coverage,
+  radius caps, ocean/basin sampler separation and atomic rollback are covered.
+- `inland-water-regressions02`: **102/102** across eight stock source suites
+  covering conforming ownership, ocean continuation/grid/edges, manifest water,
+  lifecycle, radial-profile admission and grading.
+- The same regression selection with the separate art03 overlay
+  (`inland-water-regressions01`) is **99/102**: three coarse resolution-2 terrain
+  assemblies reject annular refinement above the existing axis cap, before
+  water publication. No cap was relaxed. This profile/fixture combination and
+  integrated candidate coarse-LOD behavior remain open for qualification.
+- `inland-basin-source-types03`: 711 source roots including the edited tests,
+  zero diagnostics and stable hashes. Earlier types01 caught two missing
+  test-body sourceType fields; corrected, not suppressed.
+- Focused run02 retained one failing exact-contour ray assertion: its test ray
+  lay on the actual shoreline rather than inside the dry strip. The corrected
+  case separately checks the dry interior and zero-distance boundary; runtime
+  geometry/tolerances were not changed to hide that failure.
+- Source lint and scoped diff checks pass. All 145 protected compiled artifacts
+  still match the art03 report; original recovered lock hash is unchanged.
+  No dependency install, live build replacement, browser launch, database
+  mutation, runtime pond relocation or canonical-asset promotion occurred.
+  Native WebGPU appearance, PhysX/indexed agreement, gameplay and target-device
+  frame/loading/memory qualification remain open.
+
+Local receipts: `asset-studio/game-test-integration/service-layout-network01-UNQUALIFIED/`.
+The committed source/fixture and this narrative are durable; local measurement
+logs, sampling scripts and captures are not represented as GitHub artifacts.
+
+### Next integrated slice and dock audit
+
+1. Rebind old coordinate-specific terrain contacts and explicitly admit a larger
+   planted habitat; move terrain, water, fishing, supplier and approach data
+   together. Remove the old pond/spot placement only in that matched candidate.
+2. Replace dynamic-list-only fishing coverage with verified full-family targets,
+   supply availability, concurrent gathering reservations and short bank routes.
+3. Reuse the existing dock generator but first fix its elevated-water owner:
+   it currently assumes ocean water, a fixed 3m bed, reversed north/south bearing,
+   and rails whose collision exists without visible rail geometry. Admit exact
+   cardinal tile-aligned 3×6m candidates, sample actual post bottoms and author
+   entry/rail openings once for both drawing and collision.
+4. Give docks transactional shared deck/height/collision ownership, a real
+   destroy lifecycle and removal/rebake tests. Existing dispose is not called
+   by World.destroy, and client registration is scenery-gated. Ordinary terrain
+   rebakes preserve nonterrain flags; this is not a claim that every rebake loses
+   rails. Physics support, grass exclusion and restart readiness need real tests.
+5. Run a matched isolated native Chrome/Metal candidate: walking, all fishing
+   tiers, two docks, multi-agent approaches, close/overview/stream views and
+   measured rendering/setup costs. No proposed placement is approved by this
+   source checkpoint.
+
+Reference review continued with the official
+[Three.js WebGPU water source](https://raw.githubusercontent.com/mrdoob/three.js/dev/examples/webgpu_water.html)
+and [BufferGeometry documentation](https://threejs.org/docs/pages/BufferGeometry.html).
+Indexed static geometry and bounded shared materials inform this implementation;
+the water demo's full render pipeline and screen-resolution costs were not
+copied wholesale or treated as an island performance guarantee.
+
+
 This is a work-in-progress source backup on `codex/sol-duel-stream-launch`,
 not a release, merge recommendation, completed MVP or AAA-quality certification.
 World art remains the priority: one compact island, open service pavilions,

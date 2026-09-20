@@ -1,0 +1,140 @@
+{
+  "schemaVersion": 1,
+  "status": "DESIGN_CANDIDATE_UNQUALIFIED",
+  "basis": "East-meadow measured option in inland-pond-options.json; source-only, no runtime/manifests changed.",
+  "artIntent": "An inland fishing basin with a compressed higher northwest bank below the lobby, a long eastern reed cove, a warm southern fishing shelf and a broad southwest arrival bay. Reserve distinct shore access for every fishing tier. No uniformly spaced perimeter furniture.",
+  "waterBody": {
+    "id": "haven_pond_water",
+    "centerX": 410,
+    "centerZ": 415,
+    "radius": 27,
+    "surfaceY": 24.6
+  },
+  "flatZone": {
+    "id": "haven_pond_floor",
+    "excludeGrass": false,
+    "centerX": 410,
+    "centerZ": 415,
+    "width": 66,
+    "depth": 66,
+    "height": 22.2,
+    "blendRadius": 6,
+    "radialPond": {
+      "bedRadius": 10,
+      "bankInnerRadius": 23,
+      "bankOuterRadius": 27,
+      "bankHeight": 25.7,
+      "shorelineAmplitude": 0.55,
+      "bankSectors": [
+        {
+          "bearing": -2.35,
+          "halfWidth": 1.1,
+          "innerRadius": 14.5,
+          "innerHeight": 25.35,
+          "outerRadius": 20.5,
+          "outerHeight": 26.1
+        },
+        {
+          "bearing": 0,
+          "halfWidth": 1.15,
+          "innerRadius": 24.2,
+          "innerHeight": 24.72,
+          "outerRadius": 28,
+          "outerHeight": 25.8
+        },
+        {
+          "bearing": 1.4,
+          "halfWidth": 0.85,
+          "innerRadius": 21,
+          "innerHeight": 24.78,
+          "outerRadius": 27.4,
+          "outerHeight": 25.8
+        },
+        {
+          "bearing": 2.7,
+          "halfWidth": 0.85,
+          "innerRadius": 22.7,
+          "innerHeight": 24.85,
+          "outerRadius": 28.5,
+          "outerHeight": 25.85
+        }
+      ],
+      "bankComposition": {
+        "schemaVersion": 1,
+        "sectors": [
+          {
+            "sectorIndex": 0,
+            "surface": "cutbank"
+          },
+          {
+            "sectorIndex": 1,
+            "surface": "sedge-shelf",
+            "groundCover": {
+              "emergenceHeight": 0.11,
+              "fullHeight": 0.24
+            }
+          },
+          {
+            "sectorIndex": 2,
+            "surface": "mineral-shore"
+          },
+          {
+            "sectorIndex": 3,
+            "surface": "dry-turf",
+            "groundCover": {
+              "emergenceHeight": 0.06,
+              "fullHeight": 0.16
+            }
+          }
+        ]
+      }
+    }
+  },
+  "fishingCapacity": {
+    "status": "TARGET_NOT_SPAWNED_OR_NAVIGATED",
+    "minimumPositionsPerFamily": 2,
+    "families": [
+      "fishing_spot_net",
+      "fishing_spot_bait",
+      "fishing_spot_fly",
+      "fishing_spot_harpoon",
+      "fishing_spot_cage",
+      "fishing_spot_monkfish",
+      "fishing_spot_shark"
+    ],
+    "requiresEveryFamilyShoreAccess": true,
+    "supplyRequirements": [
+      "net",
+      "fishing rod",
+      "fly fishing rod",
+      "harpoon",
+      "lobster pot",
+      "fishing bait",
+      "feathers"
+    ]
+  },
+  "dockStudy": [
+    {
+      "role": "arrival-fishing-deck",
+      "bank": "southwest bay",
+      "approxWidth": 3,
+      "approxLength": 6,
+      "character": "Short broad timber landing with an open fishing end, stout weathered posts and restrained supply props outside the walking lane."
+    },
+    {
+      "role": "reed-cove-jetty",
+      "bank": "eastern cove",
+      "approxWidth": 3,
+      "approxLength": 6,
+      "character": "Offset quiet-water jetty with a small side fishing platform, low partial rails and reed-framed views."
+    }
+  ],
+  "unverified": [
+    "Actual shore dimensions, slopes and grading interactions after excavation",
+    "14 non-overlapping legal fishing/gathering reservations with concurrent pathfinding",
+    "Dock placement, coordinate convention, deck heights, collisions, lifecycle and rendering cost",
+    "Expanded explicit plant/rock habitat admission and relocated terrain contact textures",
+    "Indexed and PhysX ground agreement, WebGPU visuals, frame/memory budgets, streaming",
+    "Persistence migration and removal of old pond/spot coordinates"
+  ]
+}

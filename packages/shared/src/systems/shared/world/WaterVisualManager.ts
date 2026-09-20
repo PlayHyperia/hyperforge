@@ -40,6 +40,307 @@ const WATER_RESOLUTION_BY_DEPTH: Record<number, number> = {
 
 const SHORE_SAMPLE_GRID = 5;
 
+export const COMPACT_ELEVATED_WATER = Object.freeze({
+  id: "canonical-basin-water-v1",
+  spacing: 0.5,
+  maxRadius: 32,
+  maxHeightQueries: 16_641,
+  maxTriangles: 65_536,
+});
+
+type PondPoint = { x: number; z: number; height: number; key: string };
+type PondShore = { a: PondPoint; b: PondPoint };
+type ShoreTree = {
+  minX: number;
+  maxX: number;
+  minZ: number;
+  maxZ: number;
+  segments?: readonly PondShore[];
+  left?: ShoreTree;
+  right?: ShoreTree;
+};
+
+/** Nearest horizontal distance to the sampled, piecewise-linear shoreline,
+ * including every island/component. This is not terrain depth or a radial proxy. */
+function pondShoreTree(segments: readonly PondShore[]): ShoreTree {
+  const node: ShoreTree = {
+    minX: Infinity,
+    maxX: -Infinity,
+    minZ: Infinity,
+    maxZ: -Infinity,
+  };
+  for (const { a, b } of segments) {
+    node.minX = Math.min(node.minX, a.x, b.x);
+    node.maxX = Math.max(node.maxX, a.x, b.x);
+    node.minZ = Math.min(node.minZ, a.z, b.z);
+    node.maxZ = Math.max(node.maxZ, a.z, b.z);
+  }
+  if (segments.length <= 8) node.segments = segments;
+  else {
+    const x = node.maxX - node.minX >= node.maxZ - node.minZ;
+    const ordered = [...segments].sort((a, b) =>
+      x ? a.a.x + a.b.x - b.a.x - b.b.x : a.a.z + a.b.z - b.a.z - b.b.z,
+    );
+    const middle = Math.floor(ordered.length / 2);
+    node.left = pondShoreTree(ordered.slice(0, middle));
+    node.right = pondShoreTree(ordered.slice(middle));
+  }
+  return node;
+}
+
+function pondShoreDistance(x: number, z: number, root: ShoreTree): number {
+  const boxDistance = (node: ShoreTree) =>
+    Math.max(node.minX - x, 0, x - node.maxX) ** 2 +
+    Math.max(node.minZ - z, 0, z - node.maxZ) ** 2;
+  let best = Infinity;
+  const pending = [root];
+  while (pending.length) {
+    const node = pending.pop()!;
+    if (boxDistance(node) >= best) continue;
+    if (node.segments) {
+      for (const { a, b } of node.segments) {
+        const dx = b.x - a.x,
+          dz = b.z - a.z;
+        const length = dx * dx + dz * dz;
+        const t =
+          length > 0
+            ? Math.max(
+                0,
+                Math.min(1, ((x - a.x) * dx + (z - a.z) * dz) / length),
+              )
+            : 0;
+        best = Math.min(
+          best,
+          (x - a.x - t * dx) ** 2 + (z - a.z - t * dz) ** 2,
+        );
+      }
+    } else {
+      const a = node.left!,
+        b = node.right!;
+      // Visit the nearer child first, then prune against its actual distance.
+      if (boxDistance(a) < boxDistance(b)) pending.push(b, a);
+      else pending.push(a, b);
+    }
+  }
+  return Math.sqrt(best);
+}
+
+/** Static compact pond mesh: sample once, clip every grid triangle by water
+ * elevation, and retain dry islands. Resolution is fixed, not camera-dependent.
+ * The contour approximates canonical terrain at 0.5m; sub-grid features are not
+ * certified. A wet coverage-envelope edge is an authoring error, never a new
+ * circular shoreline or a reason to coarsen the mesh. */
+function createCanonicalPondGeometry(
+  body: ElevatedWaterBody,
+  getHeightAt: (x: number, z: number) => number,
+): THREE.BufferGeometry {
+  const started = performance.now();
+  const { spacing, maxRadius, maxHeightQueries, maxTriangles } =
+    COMPACT_ELEVATED_WATER;
+  if (
+    !body.id ||
+    ![body.centerX, body.centerZ, body.radius, body.surfaceY].every(
+      Number.isFinite,
+    ) ||
+    body.radius <= 0 ||
+    body.radius > maxRadius ||
+    body.radiusSq !== body.radius * body.radius
+  )
+    throw new Error(
+      "Compact pond water requires a finite radius in (0,32] and exact radiusSq",
+    );
+  let heightQueries = 0;
+  const sample = (x: number, z: number) => {
+    if (++heightQueries > maxHeightQueries)
+      throw new Error("Compact pond height-query budget exceeded");
+    const height = getHeightAt(body.centerX + x, body.centerZ + z);
+    if (!Number.isFinite(height))
+      throw new Error("Compact pond canonical height is nonfinite");
+    return height;
+  };
+  const perimeterSamples = Math.max(
+    8,
+    Math.ceil((2 * Math.PI * body.radius) / spacing),
+  );
+  for (let i = 0; i < perimeterSamples; i++) {
+    const angle = (2 * Math.PI * i) / perimeterSamples;
+    if (
+      sample(Math.cos(angle) * body.radius, Math.sin(angle) * body.radius) <
+      body.surfaceY
+    )
+      throw new Error("Compact pond basin touches its water coverage envelope");
+  }
+  const half = Math.ceil(body.radius / spacing),
+    size = half * 2,
+    stride = size + 1;
+  const points: PondPoint[] = [];
+  const guardRadiusSq = (body.radius + Math.SQRT2 * spacing) ** 2;
+  for (let iz = 0; iz <= size; iz++)
+    for (let ix = 0; ix <= size; ix++) {
+      const x = (ix - half) * spacing,
+        z = (iz - half) * spacing;
+      // The one-cell guard samples real ground outside the disk too. Irrelevant
+      // square corners cannot contribute a wet polygon or spend canonical work.
+      const height =
+        x * x + z * z <= guardRadiusSq ? sample(x, z) : body.surfaceY;
+      points.push({ x, z, height, key: `g${iz * stride + ix}` });
+    }
+  const gridSamples = heightQueries - perimeterSamples;
+  const crossings = new Map<string, PondPoint>();
+  const edge = (a: PondPoint, b: PondPoint): PondPoint => {
+    if (a.height === body.surfaceY) return a;
+    if (b.height === body.surfaceY) return b;
+    const key = a.key < b.key ? `${a.key}:${b.key}` : `${b.key}:${a.key}`;
+    let point = crossings.get(key);
+    if (!point) {
+      // Canonical edge orientation gives bit-identical shared intersections.
+      if (a.key > b.key) [a, b] = [b, a];
+      const t = (body.surfaceY - a.height) / (b.height - a.height);
+      point = {
+        x: a.x + (b.x - a.x) * t,
+        z: a.z + (b.z - a.z) * t,
+        height: body.surfaceY,
+        key,
+      };
+      crossings.set(key, point);
+    }
+    return point;
+  };
+  const vertices: PondPoint[] = [],
+    indices: number[] = [];
+  const vertexIds = new Map<string, number>();
+  const shores: PondShore[] = [];
+  const vertex = (point: PondPoint): number => {
+    let id = vertexIds.get(point.key);
+    if (id !== undefined) return id;
+    // Circle is convex: all accepted triangle interiors remain in the disk.
+    // Include Float32 storage in this check, not merely the double precursor.
+    const x = Math.fround(point.x),
+      z = Math.fround(point.z);
+    if (x * x + z * z > body.radiusSq)
+      throw new Error(
+        "Compact pond sampled wet geometry escapes its coverage envelope",
+      );
+    id = vertices.length;
+    vertices.push({ ...point, x, z });
+    vertexIds.set(point.key, id);
+    return id;
+  };
+  const triangle = (a: PondPoint, b: PondPoint, c: PondPoint) => {
+    const input = [a, b, c];
+    if (input.every((p) => p.height >= body.surfaceY)) return;
+    const polygon: PondPoint[] = [];
+    for (let i = 0; i < 3; i++) {
+      const previous = input[(i + 2) % 3],
+        current = input[i];
+      const beforeWet = previous.height < body.surfaceY,
+        currentWet = current.height < body.surfaceY;
+      if (beforeWet !== currentWet) polygon.push(edge(previous, current));
+      if (currentWet) polygon.push(current);
+    }
+    const unique = polygon.filter(
+      (p, i) => i === 0 || p.key !== polygon[i - 1].key,
+    );
+    if (unique.length > 1 && unique[0].key === unique[unique.length - 1].key)
+      unique.pop();
+    if (unique.length < 3) return;
+    for (let i = 1; i < unique.length - 1; i++) {
+      const p = unique[0],
+        q = unique[i],
+        r = unique[i + 1];
+      const px = Math.fround(p.x),
+        pz = Math.fround(p.z);
+      const qx = Math.fround(q.x),
+        qz = Math.fround(q.z);
+      const rx = Math.fround(r.x),
+        rz = Math.fround(r.z);
+      if ((qz - pz) * (rx - px) - (qx - px) * (rz - pz) <= 0) continue;
+      indices.push(vertex(p), vertex(q), vertex(r));
+      if (indices.length / 3 > maxTriangles)
+        throw new Error("Compact pond triangle budget exceeded");
+    }
+  };
+  for (let z = 0; z < size; z++)
+    for (let x = 0; x < size; x++) {
+      const a = points[z * stride + x],
+        b = points[z * stride + x + 1];
+      const c = points[(z + 1) * stride + x],
+        d = points[(z + 1) * stride + x + 1];
+      // +Y winding, with identical diagonals throughout the static lattice.
+      triangle(a, c, b);
+      triangle(b, c, d);
+    }
+  // Derive the boundary from the actual stored triangles, including every
+  // inner loop. This also detects a wet boundary cut off by the sampled grid.
+  const edges = new Map<string, { a: number; b: number; count: number }>();
+  for (let i = 0; i < indices.length; i += 3)
+    for (let j = 0; j < 3; j++) {
+      const a = indices[i + j],
+        b = indices[i + ((j + 1) % 3)];
+      const key = a < b ? `${a}:${b}` : `${b}:${a}`;
+      const existing = edges.get(key);
+      if (existing) {
+        if (++existing.count > 2)
+          throw new Error("Compact pond has a nonmanifold boundary");
+      } else edges.set(key, { a, b, count: 1 });
+    }
+  for (const { a, b, count } of edges.values())
+    if (count === 1) {
+      if (
+        vertices[a].height !== body.surfaceY ||
+        vertices[b].height !== body.surfaceY
+      )
+        throw new Error(
+          "Compact pond sampled wet boundary is not a terrain shoreline",
+        );
+      shores.push({ a: vertices[a], b: vertices[b] });
+    }
+  if (!indices.length || !shores.length)
+    throw new Error(
+      "Compact pond requires a sampled wet basin with a dry shoreline",
+    );
+  const tree = pondShoreTree(shores);
+  const positions = new Float32Array(vertices.length * 3);
+  const normals = new Float32Array(vertices.length * 3);
+  const uvs = new Float32Array(vertices.length * 2);
+  const distances = new Float32Array(vertices.length);
+  for (const [i, point] of vertices.entries()) {
+    positions[i * 3] = point.x;
+    positions[i * 3 + 2] = point.z;
+    normals[i * 3 + 1] = 1;
+    uvs[i * 2] = 0.5 + point.x / (2 * body.radius);
+    uvs[i * 2 + 1] = 0.5 - point.z / (2 * body.radius);
+    distances[i] =
+      point.height === body.surfaceY
+        ? 0
+        : pondShoreDistance(point.x, point.z, tree);
+  }
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute("position", new THREE.BufferAttribute(positions, 3));
+  geometry.setAttribute("normal", new THREE.BufferAttribute(normals, 3));
+  geometry.setAttribute("uv", new THREE.BufferAttribute(uvs, 2));
+  geometry.setAttribute(
+    "shoreDistance",
+    new THREE.BufferAttribute(distances, 1),
+  );
+  geometry.setIndex(indices);
+  geometry.computeBoundingBox();
+  geometry.computeBoundingSphere();
+  geometry.userData.elevatedWater = Object.freeze({
+    id: COMPACT_ELEVATED_WATER.id,
+    spacing,
+    radius: body.radius,
+    heightQueries,
+    gridSamples,
+    perimeterSamples,
+    shoreSegments: shores.length,
+    vertices: vertices.length,
+    triangles: indices.length / 3,
+    setupMs: performance.now() - started,
+  });
+  return geometry;
+}
+
 // One broadcast root is 1,600 m wide. Its ocean continues to a 3,600 m
 // square, leaving at least 1,000 m to the edge for an eye inside the root
 // (the unchanged fog is complete at 800 m). No additional terrain is made.
@@ -83,6 +384,7 @@ export class WaterVisualManager implements QuadTreeListener {
   private container: THREE.Group;
   private waterSystem: WaterSystem;
   private getHeightAt: (x: number, z: number) => number;
+  private readonly getElevatedGroundHeight: (x: number, z: number) => number;
   private getIslandMask: (x: number, z: number) => number;
   private waterThreshold: number;
   private readonly compactOceanOwnership: boolean;
@@ -110,6 +412,7 @@ export class WaterVisualManager implements QuadTreeListener {
     elevatedWaterBodies: readonly ElevatedWaterBody[] = [],
     terrainProfile?: WorldTerrainProfile,
     terrainVisual?: TerrainVisualManager,
+    getElevatedGroundHeight?: (x: number, z: number) => number,
   ) {
     const profile =
       terrainProfile === undefined
@@ -131,6 +434,7 @@ export class WaterVisualManager implements QuadTreeListener {
     this.container = container;
     this.waterSystem = waterSystem;
     this.getHeightAt = getHeightAt;
+    this.getElevatedGroundHeight = getElevatedGroundHeight ?? getHeightAt;
     this.getIslandMask = getIslandMask;
     this.waterThreshold = waterThreshold;
     this.createElevatedWaterMeshes(elevatedWaterBodies);
@@ -912,47 +1216,96 @@ export class WaterVisualManager implements QuadTreeListener {
     const material = this.waterSystem.getMaterial("lake");
     if (!material) return;
 
-    for (const body of bodies) {
-      const segments = Math.max(32, Math.min(96, Math.ceil(body.radius * 6)));
-      const geometry = new THREE.CircleGeometry(body.radius, segments);
-      geometry.rotateX(-Math.PI / 2);
+    try {
+      for (const body of bodies) {
+        let geometry: THREE.BufferGeometry;
+        if (this.compactOceanOwnership) {
+          geometry = createCanonicalPondGeometry(
+            body,
+            this.getElevatedGroundHeight,
+          );
+        } else {
+          const segments = Math.max(
+            32,
+            Math.min(96, Math.ceil(body.radius * 6)),
+          );
+          geometry = new THREE.CircleGeometry(body.radius, segments);
+          geometry.rotateX(-Math.PI / 2);
 
-      const positions = geometry.getAttribute("position");
-      const shoreDistances = new Float32Array(positions.count);
-      for (let index = 0; index < positions.count; index += 1) {
-        const distanceFromCenter = Math.hypot(
-          positions.getX(index),
-          positions.getZ(index),
-        );
-        shoreDistances[index] = Math.max(0, body.radius - distanceFromCenter);
+          const positions = geometry.getAttribute("position");
+          const shoreDistances = new Float32Array(positions.count);
+          for (let index = 0; index < positions.count; index += 1) {
+            const distanceFromCenter = Math.hypot(
+              positions.getX(index),
+              positions.getZ(index),
+            );
+            shoreDistances[index] = Math.max(
+              0,
+              body.radius - distanceFromCenter,
+            );
+          }
+          geometry.setAttribute(
+            "shoreDistance",
+            new THREE.BufferAttribute(shoreDistances, 1),
+          );
+        }
+
+        const mesh = new THREE.Mesh(geometry, material);
+        mesh.position.set(body.centerX, body.surfaceY, body.centerZ);
+        // The authored pond stays rigid while its parent/world transform is live.
+        mesh.updateMatrix();
+        mesh.matrixAutoUpdate = false;
+        mesh.name = `WaterQT_elevated_${body.id}`;
+        mesh.renderOrder = 101;
+        mesh.userData = {
+          type: "water",
+          waterType: "lake",
+          waterBodyId: body.id,
+          elevated: true,
+          compactQuietPond: this.compactOceanOwnership,
+          walkable: false,
+          clickable: false,
+        };
+        mesh.layers.set(1);
+
+        // Own the resource before synchronous scene callbacks can throw.
+        this.elevatedWaterMeshes.push(mesh);
+        this.container.add(mesh);
+        this.waterSystem.registerWaterMesh(mesh);
       }
-      geometry.setAttribute(
-        "shoreDistance",
-        new THREE.BufferAttribute(shoreDistances, 1),
-      );
-
-      const mesh = new THREE.Mesh(geometry, material);
-      mesh.position.set(body.centerX, body.surfaceY, body.centerZ);
-      // The authored pond stays rigid while its parent/world transform is live.
-      mesh.updateMatrix();
-      mesh.matrixAutoUpdate = false;
-      mesh.name = `WaterQT_elevated_${body.id}`;
-      mesh.renderOrder = 101;
-      mesh.userData = {
-        type: "water",
-        waterType: "lake",
-        waterBodyId: body.id,
-        elevated: true,
-        compactQuietPond: this.compactOceanOwnership && body.radius <= 12,
-        walkable: false,
-        clickable: false,
-      };
-      mesh.layers.set(1);
-
-      this.container.add(mesh);
-      this.waterSystem.registerWaterMesh(mesh);
-      this.elevatedWaterMeshes.push(mesh);
+    } catch (error) {
+      // The container and material are borrowed. In particular, a rejected
+      // second basin must not leak the first or remove pre-existing children.
+      try {
+        this.disposeElevatedWaterMeshes();
+      } catch (cleanupError) {
+        throw new AggregateError(
+          [error, cleanupError],
+          "Elevated water construction and rollback failed",
+        );
+      }
+      throw error;
     }
+  }
+
+  private disposeElevatedWaterMeshes(): void {
+    const meshes = this.elevatedWaterMeshes.splice(0);
+    const failures: unknown[] = [];
+    for (const mesh of meshes) {
+      for (const release of [
+        () => this.waterSystem.unregisterWaterMesh(mesh),
+        () => mesh.removeFromParent(),
+        () => mesh.geometry.dispose(),
+      ]) {
+        try {
+          release();
+        } catch (error) {
+          failures.push(error);
+        }
+      }
+    }
+    if (failures.length)
+      throw new AggregateError(failures, "Elevated water cleanup failed");
   }
 
   destroy(): void {
@@ -971,12 +1324,11 @@ export class WaterVisualManager implements QuadTreeListener {
       }
     }
     for (const [key, chunk] of this.chunks) this.retireChunk(key, chunk);
-    for (const mesh of this.elevatedWaterMeshes) {
-      this.waterSystem.unregisterWaterMesh(mesh);
-      if (mesh.parent) mesh.parent.remove(mesh);
-      mesh.geometry.dispose();
+    try {
+      this.disposeElevatedWaterMeshes();
+    } catch (error) {
+      failure ??= error;
     }
-    this.elevatedWaterMeshes = [];
     if (this.container.parent) this.container.parent.remove(this.container);
     if (failure !== undefined) throw failure;
   }

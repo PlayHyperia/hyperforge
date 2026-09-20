@@ -117,6 +117,21 @@ implemented or qualified. Bank-event identity coverage is not a live network
 deposit/withdrawal proof. See `development-checkpoint-20260920.md` and local
 `service-layout-network01-UNQUALIFIED/` evidence for scope and recovery limits.
 
+## Inland pond and fishing — source checkpoint, placement still open
+
+The pond must support all seven fishing families and all 12 fish, with two
+distinct dock designs and non-dock access for every tier (LAYOUT-07 below).
+The checked-in, non-runtime basin study at (410,415) samples approximately
+42 × 37 metres of water and 119 metres of irregular shoreline; these are CPU
+terrain measurements, not approved fishing capacity or in-game visual evidence.
+Compact elevated water now follows sampled canonical ground with a fixed 0.5m
+mesh and real shore-distance data. Its 17 actual-class tests and 102 stock
+water/terrain regressions pass; native appearance, indexed/PhysX agreement,
+frame cost and the full relocated habitat remain unqualified. Three coarse
+terrain-assembly cases fail when the separate art03 overlay is applied to that
+stock regression fixture; this combination remains an explicit open gate.
+No pond, fishing spot, dock or supplier has been relocated in the live manifest.
+
 ## Island layout requirements — 2026-09-20, all open
 
 These are required sub-gates of the world composition and verification tasks
@@ -165,6 +180,18 @@ historical pond receipts remain evidence for their old profile only.
       coordinate-specific approval. Re-ground fishing spots, plants, stones, nearby
       trees and paths; test indexed/rendered terrain against authoritative height,
       PhysX, water coverage, shoreline crossings and fishing/navigation access.
+      Size the water and banks for all seven current fishing families (net, bait,
+      fly, harpoon, cage, monkfish and shark), all 12 fish and their level/tool/
+      consumable requirements. Reserve two accessible positions per family as a
+      capacity target; prove actual spot availability and concurrent agent use,
+      not only a configured type list. Keep a usable shore option for every tier,
+      a fishing supplier with bait and feathers, and a clear bank route. Author
+      two distinct, restrained procedural docks with character, fitted landings,
+      support posts and deliberate rail openings. Docks must use the pond's
+      actual water level and shared deck/ground authority; verify entry, fishing
+      reach, blocked edges, collision rebakes, cleanup and restart. Measure their
+      draw/triangle/material and setup costs. Placement, capacity and dock count
+      remain design targets until integrated visual and gameplay acceptance.
 - [ ] **LAYOUT-08 — integrated acceptance.** Before promoting the layout, retain
       an annotated island plan, resource/service census and short journey budgets.
       Verify multi-agent gathering, deposit, crafting, questing and duel preparation,

@@ -2888,6 +2888,9 @@ export class TerrainSystem extends System {
         this.waterBodyRegistry.getAllBodies(),
         this.getWorldTerrainProfile(),
         this.quadTreeVisualManager,
+        // Elevated basins follow authored ground, never deck overrides or
+        // resident tile caches. Keep ocean staging's existing sampler unchanged.
+        (x: number, z: number) => this.getResourceGroundHeight(x, z),
       );
 
       const grassContainer = new THREE.Group();
