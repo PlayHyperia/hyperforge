@@ -55,6 +55,48 @@ Two CPU-tested placements fit the candidate basin; native integrated art,
 fishing capacity, complete routes and frame cost remain open acceptance gates.
 No pond, fishing spot, dock or supplier has been relocated in the live manifest.
 
+### Native pond follow-up — fishing delivered, transition still unqualified
+
+Native03 verifies 14 actual client fishing entities, exactly two per family.
+Its per-job observations distinguish slow completion from an observed restart
+loop: 57 distinct job identities for 57 keys, monotonic sampled progress, and
+stable pond focus after the initial update. The unchanged 30-second settling
+gate still fails; this does not approve fishing capacity, native art, gameplay,
+full streaming or sustained performance.
+
+The next diagnostic profiles the actual Chrome/Metal scene at 1280 × 720,
+pixel ratio 1. Native04 records about 20.96 seconds of sampled native buffer-write
+time during a 29.85-second trace; about 19.995 seconds of that occurs in shadow
+binding updates. Native05 counts 524 sun-shadow renders for 524 main-scene
+renders, not duplicate shadow passes. Driver/GPU backpressure can appear as
+buffer-write time: these observations do not establish redundant transfers.
+Grounding is real work, but its roughly one second of active slices is not the
+dominant sampled cost. No grass density, terrain accuracy, shadow quality,
+resolution, timeout or work-budget gate was reduced.
+
+Native07 subsequently identifies 16 raw instance-matrix uniform bindings by
+exact array identity, including eight empty resource pools. The scoped GLB
+tree/resource constructor fix preserves all transforms and existing dirty
+updates while selecting version-tracked storage. Twenty real-class/owner
+tests, 723-root source typing and scoped lint/format checks pass. An actual
+Apple Metal fixture proves exact initial/final color and shadow pixels,
+32,768-byte matrix agreement, zero unchanged uploads, one dirty upload and
+real GPU allocation disposal. This verifies the static helper, not wind art.
+
+Native08 removes those raw 512-slot bindings but still fails the unchanged
+30-second pond transition. Significant native buffer-write time remains,
+now including grass/vegetation matrices. No sustained FPS recovery is claimed.
+Grass's private per-chunk matrices are the next bounded candidate; vegetation
+needs separate alternate-geometry disposal and usage review. Keep all visual
+detail and gates unchanged. All owned browsers and private runtimes/databases
+are closed; human localhost and 145 protected artifacts stay unchanged.
+
+Candidate zone/custody separation, concurrent all-tier fishing, dock/shore
+approaches, bank routes and final visual review remain open. These diagnostic
+profiles are not uncontended performance acceptance. Evidence:
+`inland-pond-integration01-UNQUALIFIED/native03–08/` and
+`storage-native03/`; full details are in the development checkpoint.
+
 ### Inland fishing integration — candidate only
 
 The detached candidate now requests 14 real fishing entities, two for each of

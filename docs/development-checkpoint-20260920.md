@@ -1,5 +1,81 @@
 # World graphics development checkpoint — 2026-09-20
 
+## Pond follow-up — all-tier client coverage and upload diagnosis
+
+Native03 reaches the real client with 14 fishing entities, exactly two for
+each of the seven families. That verifies replication, not simultaneous
+fishing capacity, supply/bank routes or economic-zone admission. The pond
+remains an isolated candidate; LAYOUT-01–08 remain open.
+
+Per-job observations record 57 distinct keys/continuations, monotonic sampled
+work and stable camera/terrain focus after the initial update. The unchanged
+30-second grass transition still fails. This is observed serialized work,
+not an established invalidation loop. Native04 CPU sampling redirects the
+investigation: 20.96s of native buffer-write samples in a 29.85s trace, of which
+19.995s is inside shadow binding updates. Driver/GPU backpressure can appear
+at that call, so native timing alone is not proof of redundant transfers.
+Native05–07 count exactly one sun-shadow render per main-scene render.
+
+Native07 then proves a concrete redundant path by reference identity:
+16 actual 512-slot instance matrices become 32,768-byte raw uniform buffers,
+each updated 507 times during 507 shadow renders; eight observed owners are
+empty. The installed Three r186 raw NodeUniformBuffer does not track matrix
+attribute versions. The scoped source candidate changes only the GLB tree
+and resource pool constructors to storage-backed matrices. It retains the
+exact initialized array, capacity, static usage and existing dirty/LOD/slot
+protocol. The storage attribute is registered on each private pool geometry
+for renderer-owned disposal. Pool cloning is outside this helper's contract.
+
+- Actual World/ClientLoader/HTTP GLB owner-lifetime suites and real Three
+  matrix/bounds/raycast parity: 20/20 tests pass (including four added cases).
+- Source-only 723-root typing including both changed test files: zero
+  diagnostics and stable inputs. Scoped ESLint, formatter and diff checks pass.
+- Build05: eight isolated bundles, 973 source inputs and all 145 protected
+  compiled artifacts unchanged. No package installation or lockfile change.
+- Native08 removes the raw 512-matrix uniform bindings, but does NOT close
+  the performance gate: the pond cut still fails at 30s with 13 jobs in its last
+  per-job sample. About 20.7s of sampled buffer-write time remains; attribution
+  now includes raw grass/vegetation instance matrices in the main scene.
+  This is a scoped unnecessary-upload fix, not proven sustained FPS recovery.
+- All native03–08 test browsers close and diagnostic controls restore.
+  Runtime03 and runtime04 shut down cleanly and removed only their own private
+  client/server processes and disposable databases. Human localhost remains up.
+
+The actual Apple Metal `storage-native03` fixture now passes: exact initial
+and final 256 × 256 color and isolated-shadow pixels; all 32,768 matrix bytes
+agree across ordinary CPU/native upload and storage GPU readback; zero matrix
+uploads in three unchanged frames both before and after one dirty mutation.
+That mutation causes exactly one upload and changes 3,358 color/1,640 shadow
+pixels. Both passes bind the same read-only allocation within device limits.
+Disposal calls real GPUBuffer.destroy once, removes backend ownership and
+native validation rejects a subsequent use. No console/page/GPU errors escape;
+renderer, observers, Chrome and owned HTTP port 3345 clean up. Native01 of this
+fixture failed because manual same-frame renders reused Three's shadow map;
+the verifier now uses distinct real animation-loop frames, not forced shadow
+internals. Native02 passed; Native03 adds actual GPUDevice adapter identification.
+The root inspected the generated fixture contact sheet. This is static-helper
+correctness, not complete tree wind/dissolve or game-world visual acceptance.
+
+Qualify the relevant grass/vegetation owners separately before extending this
+optimization. Grass has private cloned chunk geometry and one-time identity
+matrices. Vegetation has dynamic usage and alternate screen-space LOD geometry
+ownership that require a separate disposal/update contract.
+Do not reduce density, shadows, resolution, terrain accuracy, timeouts or work
+budgets. Native final art, full streaming, route/custody separation and the
+pond's multi-agent gameplay acceptance are still open.
+
+Local receipts: `inland-pond-integration01-UNQUALIFIED/native03–08/`,
+`isolated-build05-report.json`; `service-layout-network01-UNQUALIFIED/`
+contains `instance-matrix-storage-tests01`, scoped lint and
+`instance-matrix-source-types01`.
+
+Primary implementation references checked against installed r186:
+[storage instance attributes](https://threejs.org/docs/pages/StorageInstancedBufferAttribute.html),
+[instance accessor source](https://github.com/mrdoob/three.js/blob/r186/src/nodes/accessors/Instance.js),
+[shadow-node contract](https://threejs.org/docs/pages/ShadowNode.html).
+The reference examples guide investigation; they are not performance evidence
+for this game.
+
 ## Bounded large-bank refinement — native startup recovered, transition still open
 
 The follow-up fixes the exact native01 terrain-cap failure. Broad full bank

@@ -10,6 +10,8 @@ import { EventType } from "../../../../types/events";
 import { modelCache } from "../../../../utils/rendering/ModelCache";
 import * as instanced from "../../../../systems/shared/world/GLBTreeInstancer";
 import * as batched from "../../../../systems/shared/world/GLBTreeBatchedInstancer";
+import * as resources from "../../../../systems/shared/world/GLBResourceInstancer";
+import { INSTANCE_MATRIX_STORAGE_ATTRIBUTE } from "../../../../utils/rendering/createStorageInstancedMesh";
 import { GPU_VEG_CONFIG } from "../../../../systems/shared/world/GPUMaterials";
 import { clearProxyGeometryCache } from "../TreeGLBVisualStrategy";
 
@@ -208,6 +210,124 @@ function initialDissolve(world: World, useBatch: boolean): number {
 }
 
 describe("real cold GLB resource visual lifetime", () => {
+  for (const kind of ["tree", "resource"] as const) {
+    it(`${kind}: real parsed GLB pools retain storage ownership through dirty flush, swap, LOD and retirement`, async () => {
+      await withColdTree(async ({ world, url, release, track }) => {
+        release();
+        if (kind === "resource")
+          resources.initGLBResourceInstancer(world.stage.scene, world);
+        const api = kind === "tree" ? instanced : resources;
+        const update = () => {
+          world.frame++;
+          if (kind === "tree") instanced.updateGLBTreeInstancer(1 / 60);
+          else resources.updateGLBResourceInstancer();
+        };
+        try {
+          world.camera.position.set(1, 4, 1);
+          for (let index = 0; index < 3; index++) {
+            expect(
+              await track(
+                api.addInstance(
+                  url,
+                  `storage_${index}`,
+                  new THREE.Vector3(1 + index * 3, 2 + index, 1),
+                  index * 0.37,
+                  0.75 + index * 0.2,
+                ),
+              ),
+            ).toBe(true);
+          }
+          const meshes = world.stage.scene.children.filter(
+            (node): node is THREE.InstancedMesh =>
+              node instanceof THREE.InstancedMesh,
+          );
+          expect(meshes).toHaveLength(3);
+          expect(
+            new Set(meshes.map((mesh) => mesh.instanceMatrix.array)).size,
+          ).toBe(3);
+          for (const mesh of meshes) {
+            expect(mesh.instanceMatrix).toBeInstanceOf(
+              THREE.StorageInstancedBufferAttribute,
+            );
+            expect(mesh.instanceMatrix.usage).toBe(THREE.StaticDrawUsage);
+            expect(mesh.instanceMatrix.count).toBe(512);
+            expect(mesh.instanceMatrix.array.byteLength).toBe(32768);
+            expect(mesh.instanceMatrix.version).toBe(0);
+            expect(
+              mesh.geometry.getAttribute(INSTANCE_MATRIX_STORAGE_ATTRIBUTE),
+            ).toBe(mesh.instanceMatrix);
+          }
+          const near = meshes.find((mesh) => mesh.count === 3);
+          if (!near) throw new Error("No populated actual near pool");
+          const tail = new THREE.Matrix4();
+          near.getMatrixAt(2, tail);
+          update();
+          expect(near.instanceMatrix.version).toBe(1);
+          const versions = meshes.map((mesh) => mesh.instanceMatrix.version);
+          update();
+          expect(meshes.map((mesh) => mesh.instanceMatrix.version)).toEqual(
+            versions,
+          );
+          api.setHighlight("storage_2", true);
+          update();
+          expect(meshes.map((mesh) => mesh.instanceMatrix.version)).toEqual(
+            versions,
+          );
+
+          api.removeInstance("storage_0");
+          expect(near.count).toBe(2);
+          const swapped = new THREE.Matrix4();
+          near.getMatrixAt(0, swapped);
+          expect(swapped.elements).toEqual(tail.elements);
+          update();
+          expect(near.instanceMatrix.version).toBe(2);
+          const beforeLod = [0, 1].map((index) => {
+            near.getMatrixAt(index, swapped);
+            return [...swapped.elements];
+          });
+          world.camera.position.set(5000, 20, 5000);
+          update();
+          expect(near.count).toBe(0);
+          const far = meshes.find((mesh) => mesh.count === 2);
+          if (!far || far === near)
+            throw new Error("No populated actual far pool");
+          expect(far.instanceMatrix.version).toBe(1);
+          const afterLod = [0, 1].map((index) => {
+            far.getMatrixAt(index, swapped);
+            return [...swapped.elements];
+          });
+          expect(afterLod).toEqual(expect.arrayContaining(beforeLod));
+          const settledVersions = meshes.map(
+            (mesh) => mesh.instanceMatrix.version,
+          );
+          update();
+          expect(meshes.map((mesh) => mesh.instanceMatrix.version)).toEqual(
+            settledVersions,
+          );
+          api.removeInstance("storage_1");
+          api.removeInstance("storage_2");
+          update();
+          expect(meshes.every((mesh) => mesh.count === 0)).toBe(true);
+          expect(far.instanceMatrix.version).toBe(2);
+          let disposals = 0;
+          for (const mesh of meshes)
+            mesh.geometry.addEventListener("dispose", () => {
+              expect(
+                mesh.geometry.getAttribute(INSTANCE_MATRIX_STORAGE_ATTRIBUTE),
+              ).toBe(mesh.instanceMatrix);
+              disposals++;
+            });
+          if (kind === "tree") instanced.destroyGLBTreeInstancer();
+          else resources.destroyGLBResourceInstancer();
+          expect(disposals).toBe(3);
+          expect(meshes.every((mesh) => mesh.parent === null)).toBe(true);
+        } finally {
+          if (kind === "resource") resources.destroyGLBResourceInstancer();
+        }
+      });
+    });
+  }
+
   for (const useBatch of [false, true]) {
     const label = useBatch ? "batched" : "instanced";
     const api = useBatch ? batched : instanced;

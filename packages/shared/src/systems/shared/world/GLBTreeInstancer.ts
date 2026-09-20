@@ -20,6 +20,7 @@
 import THREE from "../../../extras/three/three";
 import type { World } from "../../../core/World";
 import { modelCache } from "../../../utils/rendering/ModelCache";
+import { createStorageInstancedMesh } from "../../../utils/rendering/createStorageInstancedMesh";
 import {
   createTreeDissolveMaterial,
   GPU_VEG_CONFIG,
@@ -198,7 +199,7 @@ function createLODPool(
     dsAttr.setUsage(THREE.DynamicDrawUsage);
     geo.setAttribute("instanceDissolve", dsAttr);
 
-    const im = new THREE.InstancedMesh(geo, part.material, MAX_INSTANCES);
+    const im = createStorageInstancedMesh(geo, part.material, MAX_INSTANCES);
     im.count = 0;
     im.frustumCulled = false;
     im.castShadow = true;

@@ -17,6 +17,7 @@
 import THREE from "../../../extras/three/three";
 import type { World } from "../../../core/World";
 import { modelCache } from "../../../utils/rendering/ModelCache";
+import { createStorageInstancedMesh } from "../../../utils/rendering/createStorageInstancedMesh";
 import {
   createDissolveMaterial,
   GPU_VEG_CONFIG,
@@ -142,7 +143,7 @@ function createLODPool(
   hlAttr.setUsage(THREE.DynamicDrawUsage);
   geo.setAttribute("instanceHighlight", hlAttr);
 
-  const mesh = new THREE.InstancedMesh(geo, material, MAX_INSTANCES);
+  const mesh = createStorageInstancedMesh(geo, material, MAX_INSTANCES);
   mesh.count = 0;
   mesh.frustumCulled = false;
   mesh.castShadow = true;
