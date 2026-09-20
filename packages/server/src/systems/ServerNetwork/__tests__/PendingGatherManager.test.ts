@@ -8,6 +8,9 @@
  * - Timeout handling
  * - Error isolation
  * - Disconnect cleanup
+ *
+ * Fishing shore admission, single/multi-actor relocation, and actual movement
+ * receipts are covered with real owners in PlayerSupport.integration.test.ts.
  */
 
 import { describe, it, expect, beforeEach, vi } from "vitest";
@@ -172,44 +175,6 @@ describe("PendingGatherManager", () => {
         { x: 9.5, y: 0, z: 10.5 },
         false,
         0,
-      );
-      expect(accepted).toBe(true);
-    });
-
-    it("should path player to shore tile for fishing", () => {
-      // Setup
-      mockWorld.addPlayer({
-        id: "player1",
-        position: { x: 5, y: 0, z: 5 },
-        skills: { fishing: { level: 10, xp: 0 } },
-      });
-
-      mockWorld.addResource({
-        id: "fishing_spot_1",
-        position: { x: 15, y: 0, z: 15 }, // In water
-        isAvailable: true,
-        skillRequired: "fishing",
-        levelRequired: 1,
-        type: "fishing_spot",
-      });
-
-      // Act
-      const accepted = manager.queuePendingGather(
-        "player1",
-        "fishing_spot_1",
-        0,
-        false,
-      );
-
-      // Assert - should find shore tile and path there
-      expect(mockTileMovement.findClosestWalkableTile).toHaveBeenCalled();
-      expect(mockTileMovement.setArrivalEmote).toHaveBeenCalledWith(
-        "player1",
-        "fishing",
-      );
-      expect(mockWorld.playerHasRequiredToolForResource).toHaveBeenCalledWith(
-        "player1",
-        "fishing_spot_1",
       );
       expect(accepted).toBe(true);
     });
@@ -456,124 +421,6 @@ describe("PendingGatherManager", () => {
   // ===== PROCESS TICK TESTS =====
 
   describe("processTick", () => {
-    it("replans to the current shore when a fishing spot moves in transit", () => {
-      mockWorld.addPlayer({
-        id: "angler",
-        position: { x: 5.5, y: 0, z: 5.5 },
-        skills: { fishing: { level: 10, xp: 0 } },
-      });
-      const spot: MockResource = {
-        id: "moving-spot",
-        position: { x: 15.5, y: 8, z: 15.5 },
-        isAvailable: true,
-        skillRequired: "fishing",
-        levelRequired: 1,
-        type: "fishing_spot",
-      };
-      mockWorld.addResource(spot);
-      mockTileMovement.findClosestWalkableTile
-        .mockReturnValueOnce({ x: 10, z: 10 })
-        .mockReturnValueOnce({ x: 20, z: 20 });
-
-      expect(manager.queuePendingGather("angler", "moving-spot", 0, true)).toBe(
-        true,
-      );
-      mockWorld.players.get("angler")!.position = { x: 10.5, y: 0, z: 10.5 };
-      spot.position = { x: 25.5, y: 8, z: 25.5 };
-
-      manager.processTick(1);
-
-      expect(mockWorld.emittedEvents).not.toContainEqual(
-        expect.objectContaining({ type: EventType.RESOURCE_GATHER }),
-      );
-      expect(mockTileMovement.clearArrivalEmote).toHaveBeenCalledWith("angler");
-      expect(mockTileMovement.movePlayerToward).toHaveBeenLastCalledWith(
-        "angler",
-        { x: 20.5, y: 0, z: 20.5 },
-        true,
-        0,
-      );
-      const pending = (
-        manager as unknown as {
-          pendingGathers: Map<
-            string,
-            {
-              resourceAnchorTile: { x: number; z: number };
-              targetShoreTile: { x: number; z: number };
-              runMode: boolean;
-            }
-          >;
-        }
-      ).pendingGathers.get("angler");
-      expect(pending).toMatchObject({
-        resourceAnchorTile: { x: 25, z: 25 },
-        targetShoreTile: { x: 20, z: 20 },
-        runMode: true,
-      });
-    });
-
-    it("replans every admitted gatherer onto distinct shores after a spot moves", () => {
-      const spot: MockResource = {
-        id: "shared-moving-spot",
-        position: { x: 15.5, y: 8, z: 15.5 },
-        isAvailable: true,
-        skillRequired: "fishing",
-        levelRequired: 1,
-        type: "fishing_spot",
-      };
-      mockWorld.addResource(spot);
-      for (let index = 0; index < 25; index++) {
-        mockWorld.addPlayer({
-          id: `angler-${index}`,
-          position: { x: 0.5, y: 0, z: 0.5 },
-          skills: { fishing: { level: 10, xp: 0 } },
-        });
-      }
-
-      const admitted = Array.from({ length: 25 }, (_, index) =>
-        manager.queuePendingGather(
-          `angler-${index}`,
-          "shared-moving-spot",
-          0,
-          true,
-        ),
-      );
-      expect(admitted.filter(Boolean)).toHaveLength(4);
-      spot.position = { x: 25.5, y: 8, z: 25.5 };
-
-      manager.processTick(1);
-
-      const pending = (
-        manager as unknown as {
-          pendingGathers: Map<
-            string,
-            {
-              resourceAnchorTile: { x: number; z: number };
-              targetShoreTile: { x: number; z: number };
-            }
-          >;
-        }
-      ).pendingGathers;
-      expect(pending.size).toBe(4);
-      expect(
-        new Set(
-          [...pending.values()].map(
-            ({ targetShoreTile }) =>
-              `${targetShoreTile.x},${targetShoreTile.z}`,
-          ),
-        ).size,
-      ).toBe(4);
-      for (const value of pending.values()) {
-        expect(value.resourceAnchorTile).toEqual({ x: 25, z: 25 });
-        expect(value.targetShoreTile.x).toBeGreaterThanOrEqual(19);
-      }
-      expect(mockTileMovement.clearArrivalEmote).toHaveBeenCalledTimes(4);
-      expect(mockTileMovement.movePlayerToward).toHaveBeenCalledTimes(8);
-      expect(mockWorld.emittedEvents).not.toContainEqual(
-        expect.objectContaining({ type: EventType.RESOURCE_GATHER }),
-      );
-    });
-
     it("should detect arrival at cardinal tile and start gathering", () => {
       // Setup - player has arrived at cardinal tile
       mockWorld.addPlayer({

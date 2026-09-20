@@ -720,6 +720,7 @@ export class TileMovementManager {
     }
 
     const payload = validation.payload!;
+    this.failedExactRoutes.delete(playerId);
     this._pendingObstructionReplans.delete(playerId);
     this._pendingNonCombatMoves.delete(playerId);
     this._precomputedPathSegments.delete(playerId);
@@ -1031,6 +1032,10 @@ export class TileMovementManager {
       failedAttempts: number;
     }
   >();
+
+  /** Actual pathfinding failure for the latest exact destination. Explicit
+   * stops/new intents clear it; being idle alone never authorizes recovery. */
+  private failedExactRoutes = new Map<string, TileCoord>();
 
   /**
    * Short-lived destination reservations keep simultaneous embedded agents
@@ -1457,6 +1462,7 @@ export class TileMovementManager {
       if (!entity) {
         this.getEntityOccupancy()?.vacate(playerId as EntityID);
         this.playerStates.delete(playerId);
+        this.failedExactRoutes.delete(playerId);
         continue;
       }
 
@@ -1805,6 +1811,7 @@ export class TileMovementManager {
     if (!entity) {
       this.getEntityOccupancy()?.vacate(playerId as EntityID);
       this.playerStates.delete(playerId);
+      this.failedExactRoutes.delete(playerId);
       return;
     }
 
@@ -2072,6 +2079,7 @@ export class TileMovementManager {
     isRunning: boolean,
     interactionArrival: TileInteractionArrival | null = null,
   ): "started" | "deferred" | "failed" {
+    this.failedExactRoutes.delete(playerId);
     const state = this.playerStates.get(playerId);
     const entity = this.world.entities.get(playerId);
     if (!state || !entity) return "failed";
@@ -2143,7 +2151,11 @@ export class TileMovementManager {
     this._bfsIterationsThisTick += this.pathfinder.getLastIterationsUsed();
 
     // Empty path means destination is unreachable — stop here
-    if (path.length === 0) return "failed";
+    if (path.length === 0) {
+      if (!interactionArrival)
+        this.failedExactRoutes.set(playerId, { ...destination });
+      return "failed";
+    }
 
     state.path = path;
     state.pathIndex = 0;
@@ -2302,6 +2314,7 @@ export class TileMovementManager {
    * Cleanup state for a player
    */
   cleanup(playerId: string): void {
+    this.failedExactRoutes.delete(playerId);
     this.getEntityOccupancy()?.vacate(playerId as EntityID);
     this.playerStates.delete(playerId);
     this._pendingObstructionReplans.delete(playerId);
@@ -2367,6 +2380,7 @@ export class TileMovementManager {
     playerId: string,
     position: { x: number; y: number; z: number },
   ): { x: number; y: number; z: number } {
+    this.failedExactRoutes.delete(playerId);
     let newTile = worldToTile(position.x, position.z);
     const occupancy = this.getEntityOccupancy();
     const entityId = playerId as EntityID;
@@ -2617,6 +2631,7 @@ export class TileMovementManager {
    * Used when starting actions like firemaking that require the player to stand still.
    */
   stopPlayer(playerId: string): void {
+    this.failedExactRoutes.delete(playerId);
     this._pendingObstructionReplans.delete(playerId);
     this._pendingNonCombatMoves.delete(playerId);
     this._precomputedPathSegments.delete(playerId);
@@ -2705,6 +2720,32 @@ export class TileMovementManager {
     return state
       ? state.path.length > 0 && state.pathIndex < state.path.length
       : false;
+  }
+
+  /** A stopped path may still be waiting for the shared BFS budget or a
+   * bounded obstruction retry. Interaction owners must not replace that work.
+   */
+  hasMovementIntent(playerId: string): boolean {
+    const state = this.playerStates.get(playerId);
+    return (
+      this.isMoving(playerId) ||
+      state?.requestedDestination != null ||
+      this._pendingNonCombatMoves.has(playerId) ||
+      this._pendingObstructionReplans.has(playerId) ||
+      this._precomputedPathSegments.has(playerId)
+    );
+  }
+
+  /** Failure belongs to this exact route, after its movement-owned retries.
+   * Cancellation, action stops, frozen movement and ordinary arrival are not
+   * pathfinding failures and must not resurrect an interaction's movement. */
+  hasFailedMovementTo(playerId: string, destination: TileCoord): boolean {
+    const failed = this.failedExactRoutes.get(playerId);
+    return (
+      !!failed &&
+      tilesEqual(failed, destination) &&
+      !this.hasMovementIntent(playerId)
+    );
   }
 
   /**
@@ -2872,6 +2913,7 @@ export class TileMovementManager {
     attackType: AttackType = AttackType.MELEE,
     interactionArrival?: TileInteractionArrival | null,
   ): boolean {
+    this.failedExactRoutes.delete(playerId);
     const entity = this.world.entities.get(playerId);
     if (!entity) {
       return false;
@@ -3166,6 +3208,8 @@ export class TileMovementManager {
         );
         return true;
       }
+      if (attackRange === 0)
+        this.failedExactRoutes.set(playerId, { ...this._targetTile });
       return false; // No path found
     }
 

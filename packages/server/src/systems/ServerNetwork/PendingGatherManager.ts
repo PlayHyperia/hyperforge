@@ -35,6 +35,8 @@ import {
   GATHERING_CONSTANTS,
   canPlayerPerformPreparationAction,
   getGatheringRewardOperationIdForAttempt,
+  calculateDistance2D,
+  TILE_SIZE,
 } from "@hyperforge/shared";
 import type { TileMovementManager } from "./tile-movement";
 
@@ -59,6 +61,9 @@ interface PendingGather {
   resourcePosition: { x: number; y: number; z: number };
   /** Target shore tile for fishing (player must arrive at this exact tile) */
   targetShoreTile?: TileCoord;
+  /** Terminally unreachable shores for this attempt; bounded by its original
+   * timeout, and never retried while a movement-owned route is still pending. */
+  failedFishingApproaches?: Set<string>;
   /** Reserved non-overlapping approach tile for trees and rocks. */
   targetApproachTile?: TileCoord;
   /** Preserve the caller's movement mode when a moving fishing spot replans. */
@@ -147,6 +152,64 @@ export class PendingGatherManager {
       playerId,
       resourceId,
     });
+  }
+
+  private findFishingApproach(
+    playerId: string,
+    position: ResourceData["position"],
+    excluded?: ReadonlySet<string>,
+  ): TileCoord | null {
+    // Movement owns dry/solid support and actor occupancy, including docks.
+    return this.tileMovementManager.findClosestWalkableTile(
+      position,
+      Math.ceil(GATHERING_CONSTANTS.FISHING_INTERACTION_RANGE / TILE_SIZE),
+      (tile) =>
+        calculateDistance2D(tileToWorld(tile), position) <=
+          GATHERING_CONSTANTS.FISHING_INTERACTION_RANGE &&
+        !excluded?.has(this.tileKey(tile)) &&
+        this.approachIsAvailable(playerId, tile),
+    );
+  }
+
+  private moveToFishingApproach(
+    playerId: string,
+    resource: ResourceData,
+    shoreTile: TileCoord,
+    isRunning: boolean,
+  ): boolean {
+    const resourceSystem = this.world.getSystem("resource") as {
+      playerHasRequiredToolForResource?: (
+        playerId: string,
+        resourceId: string,
+      ) => boolean;
+    } | null;
+    if (
+      this.playerMeetsLevelRequirement(playerId, resource) &&
+      resourceSystem?.playerHasRequiredToolForResource?.(
+        playerId,
+        resource.id,
+      ) !== false
+    )
+      this.tileMovementManager.setArrivalEmote(playerId, "fishing");
+    else this.tileMovementManager.clearArrivalEmote(playerId);
+    const shoreWorld = tileToWorld(shoreTile);
+    let accepted = false;
+    try {
+      accepted =
+        this.tileMovementManager.movePlayerToward(
+          playerId,
+          { x: shoreWorld.x, y: 0, z: shoreWorld.z },
+          isRunning,
+          0,
+        ) === true;
+      return accepted;
+    } finally {
+      // A dry tile may still be unreachable; rejected movement owns no shore.
+      if (!accepted) {
+        this.releaseApproachReservation(playerId);
+        this.tileMovementManager.clearArrivalEmote(playerId);
+      }
+    }
   }
 
   private findCardinalApproach(
@@ -374,12 +437,7 @@ export class PendingGatherManager {
     // FISHING: Find shore tile FIRST, then check if player is already there
     // classic MMORPG behavior: Player ALWAYS walks to shore before fishing (not just "in range")
     if (isFishing) {
-      // Find the closest walkable shore tile to the fishing spot
-      const shoreTile = this.tileMovementManager.findClosestWalkableTile(
-        resource.position,
-        10, // Search up to 10 tiles away from fishing spot
-        (tile) => this.approachIsAvailable(playerId, tile),
-      );
+      const shoreTile = this.findFishingApproach(playerId, resource.position);
 
       if (!shoreTile) {
         console.warn(
@@ -423,29 +481,8 @@ export class PendingGatherManager {
       const isRunning =
         runMode ?? this.tileMovementManager.getIsRunning(playerId);
 
-      // CRITICAL: Only set arrival emote if player meets ALL requirements (level + tool)
-      // Without this, the fishing animation plays even when the player lacks the required tool
-      const meetsLevel = this.playerMeetsLevelRequirement(playerId, resource);
-      const hasTool =
-        resourceSystem?.playerHasRequiredToolForResource?.(
-          playerId,
-          resourceId,
-        ) !== false;
-      if (meetsLevel && hasTool) {
-        this.tileMovementManager.setArrivalEmote(playerId, "fishing");
-      } else {
-        console.log(
-          `[PendingGather]   🎣 Player ${playerId} doesn't meet requirements (level: ${meetsLevel}, tool: ${hasTool}) - no fishing emote`,
-        );
-      }
-
-      const shoreWorld = tileToWorld(shoreTile);
-      this.tileMovementManager.movePlayerToward(
-        playerId,
-        { x: shoreWorld.x, y: 0, z: shoreWorld.z },
-        isRunning,
-        0, // Non-combat movement - go directly to tile
-      );
+      if (!this.moveToFishingApproach(playerId, resource, shoreTile, isRunning))
+        return false;
 
       // Store pending gather WITH target shore tile
       this.pendingGathers.set(playerId, {
@@ -785,6 +822,48 @@ export class PendingGatherManager {
         console.log(
           `[PendingGather] Player ${playerId} arrived at cardinal tile - starting gather`,
         );
+      }
+    }
+
+    if (
+      !hasArrived &&
+      pending.isFishing &&
+      pending.targetShoreTile &&
+      this.tileMovementManager.hasFailedMovementTo(
+        playerId,
+        pending.targetShoreTile,
+      )
+    ) {
+      const failed = (pending.failedFishingApproaches ??= new Set<string>());
+      failed.add(this.tileKey(pending.targetShoreTile));
+      const alternative = canPlayerPerformPreparationAction(
+        this.world,
+        playerId,
+      )
+        ? this.findFishingApproach(playerId, resource.position, failed)
+        : null;
+      if (!alternative) {
+        this.pendingGathers.delete(playerId);
+        this.releaseApproachReservation(playerId);
+        this.tileMovementManager.clearArrivalEmote(playerId);
+        this.publishPendingGatherFailure(pending);
+        return;
+      }
+      // Keep the attempt and its original deadline. At most one different
+      // shore is tried per tick, only after movement exhausts its own route.
+      pending.targetShoreTile = alternative;
+      this.reserveApproach(playerId, pending.resourceId, alternative);
+      hasArrived =
+        this._playerTile.x === alternative.x &&
+        this._playerTile.z === alternative.z;
+      if (!hasArrived) {
+        this.moveToFishingApproach(
+          playerId,
+          resource,
+          alternative,
+          pending.runMode,
+        );
+        return;
       }
     }
 

@@ -8,12 +8,24 @@ import {
   resolvePlayerRootHeight,
   PLAYER_ROOT_CLEARANCE,
   getDuelArenaConfig,
+  GATHERING_CONSTANTS,
+  calculateDistance2D,
+  tileToWorld,
+  worldToTile,
+  createResourceID,
+  CollisionFlag,
+  CharacterInventorySystem as InventorySystem,
+  ResourceSystem,
+  getItem,
   type BuildingCollisionService,
   type EntityID,
 } from "@hyperforge/shared";
 import type { BuildingLayoutInput } from "../../../../../shared/src/types/world/building-collision-types";
+import type { TerrainResourceSpawnPoint } from "../../../../../shared/src/types/world/terrain";
 import { EmbeddedHyperiaService } from "../../../eliza/EmbeddedHyperiaService";
 import { TileMovementManager } from "../tile-movement";
+import { PendingGatherManager } from "../PendingGatherManager";
+import { EntityManager } from "../../../../../shared/src/systems/shared/entities/EntityManager";
 import { DuelOrchestrator } from "../../StreamingDuelScheduler/managers/DuelOrchestrator";
 
 class CpuServerWorld extends World {
@@ -105,6 +117,637 @@ function spawnHeight(
     }
   ).groundSpawnPosition(p);
 }
+
+// Real CPU admission owners and actual authored water/terrain. No transport,
+// database, reward ticks or renderer: these cases prove approach selection and
+// cleanup, not simultaneous catches, persistence or rendered fishing quality.
+async function fishingFixture(bakeForRelocation = false) {
+  const world = new CpuServerWorld();
+  worlds.push(world);
+  const terrain = world.register("terrain", TerrainSystem) as TerrainSystem;
+  await terrain.init();
+  terrain["loadWaterBodiesFromManifest"]();
+  terrain["loadFlatZonesFromManifest"]();
+  if (bakeForRelocation) {
+    const body = terrain
+      .getWaterBodyRegistry()
+      .getAllBodies()
+      .find((entry) => entry.id === "haven_pond_water");
+    if (!body) throw new Error("Missing authored fishing basin");
+    const size = terrain.getWorldTerrainProfile().terrainTileSize;
+    for (
+      let x = Math.floor((body.centerX - body.radius + size / 2) / size);
+      x <= Math.floor((body.centerX + body.radius + size / 2) / size);
+      x++
+    )
+      for (
+        let z = Math.floor((body.centerZ - body.radius + size / 2) / size);
+        z <= Math.floor((body.centerZ + body.radius + size / 2) / size);
+        z++
+      ) {
+        terrain["generateTile"](x, z, false);
+        terrain["bakeWalkabilityFlags"](x, z);
+      }
+  }
+  world.register("entity-manager", EntityManager);
+  const resources = world.register(
+    "resource",
+    ResourceSystem,
+  ) as ResourceSystem;
+  await resources.init();
+  const inventory = world.register(
+    "inventory",
+    InventorySystem,
+  ) as InventorySystem;
+  const packets: Array<{ name: string; data: unknown }> = [];
+  const send = (name: string, data: unknown) =>
+    packets.push({ name, data: structuredClone(data) });
+  const movement = new TileMovementManager(world, send);
+  const pending = new PendingGatherManager(world, movement, send);
+  const body = terrain
+    .getWaterBodyRegistry()
+    .getAllBodies()
+    .find((entry) => entry.id === "haven_pond_water");
+  if (!body) throw new Error("Missing authored fishing basin");
+  // The manifest-backed runtime accepts fishing families; the legacy terrain
+  // spawn subtype union currently lists only trees/ores. Do not fake a family.
+  const fishingSubtype = "net" as TerrainResourceSpawnPoint["subType"];
+  let position: { x: number; y: number; z: number } | undefined;
+  // Use the real east bank, outside protected floors/campus. Resource admission
+  // remains authoritative; no exemption or fake always-walkable terrain is used.
+  for (
+    let x = Math.floor(body.centerX + body.radius);
+    x >= Math.floor(body.centerX) && !position;
+    x--
+  ) {
+    for (
+      let z = Math.floor(body.centerZ - body.radius);
+      z <= Math.ceil(body.centerZ + body.radius);
+      z++
+    ) {
+      const candidate = { x: x + 0.5, y: body.surfaceY, z: z + 0.5 };
+      if (
+        terrain.getWaterBodyRegistry().getBodyAt(candidate.x, candidate.z)
+          ?.id !== body.id ||
+        terrain.getResourceGroundHeight(candidate.x, candidate.z) >=
+          body.surfaceY ||
+        !resources["createResourceFromSpawnPoint"](
+          { type: "fish", subType: fishingSubtype, position: candidate },
+          true,
+        )
+      )
+        continue;
+      const approach = movement.findClosestWalkableTile(
+        candidate,
+        4,
+        (tile) =>
+          calculateDistance2D(tileToWorld(tile), candidate) <=
+          GATHERING_CONSTANTS.FISHING_INTERACTION_RANGE,
+      );
+      if (approach) {
+        position = candidate;
+        break;
+      }
+    }
+  }
+  if (!position) throw new Error("No admitted real fishing shore");
+  await resources["registerTerrainResources"]({
+    isManifest: true,
+    spawnPoints: [{ type: "fish", subType: fishingSubtype, position }],
+  });
+  const resource = resources.getAllResources()[0];
+  expect(resource.position).toEqual(position);
+  const addAngler = (id: string, tile: { x: number; z: number }) => {
+    const p = tileToWorld(tile);
+    const player = addPlayer(world, id, [
+      p.x,
+      resolvePlayerRootHeight(p.x, p.z, terrain)!,
+      p.z,
+    ]);
+    movement.syncPlayerPosition(id, player.position);
+    // Seed a real inventory's initial fixture state; no DB or reward operation
+    // is simulated. Tool eligibility reads the actual manifest item/system.
+    inventory["initializeInventory"]({ id });
+    const tool = getItem(resource.toolRequired);
+    if (!tool) throw new Error("Missing manifest fishing tool");
+    inventory
+      .getInventory(id)!
+      .items.push({ slot: 0, itemId: tool.id, quantity: 1, item: tool });
+    return player;
+  };
+  const available = (outside = false) => {
+    const tile = movement.findClosestWalkableTile(
+      resource.position,
+      10,
+      (tile) => {
+        const distance = calculateDistance2D(
+          tileToWorld(tile),
+          resource.position,
+        );
+        return (
+          (outside
+            ? distance > GATHERING_CONSTANTS.FISHING_INTERACTION_RANGE
+            : distance <= GATHERING_CONSTANTS.FISHING_INTERACTION_RANGE) &&
+          movement.isTileAvailableForPlayer("unplaced-fishing-arrival", tile)
+        );
+      },
+    );
+    if (!tile) throw new Error("No available actual shore tile");
+    return tile;
+  };
+  return {
+    world,
+    terrain,
+    resources,
+    resource,
+    movement,
+    pending,
+    packets,
+    addAngler,
+    available,
+  };
+}
+
+describe("real fishing approach admission (CPU, not basin crowd/reward acceptance)", () => {
+  it("rejects farther dry shore when every in-range approach is occupied", async () => {
+    const f = await fishingFixture();
+    const legal: Array<{ x: number; z: number }> = [];
+    const anchorX = Math.floor(f.resource.position.x),
+      anchorZ = Math.floor(f.resource.position.z);
+    for (let dx = -4; dx <= 4; dx++)
+      for (let dz = -4; dz <= 4; dz++) {
+        const tile = { x: anchorX + dx, z: anchorZ + dz };
+        if (
+          calculateDistance2D(tileToWorld(tile), f.resource.position) <=
+            GATHERING_CONSTANTS.FISHING_INTERACTION_RANGE &&
+          f.movement.isTileAvailableForPlayer("arrival", tile)
+        )
+          legal.push(tile);
+      }
+    expect(legal.length).toBeGreaterThan(0);
+    for (const [index, tile] of legal.entries())
+      f.addAngler(`shore-occupant-${index}`, tile);
+    const arrival = f.addAngler("shore-overflow-arrival", f.available(true));
+    const before = f.packets.length;
+    expect(f.pending.queuePendingGather(arrival.id, f.resource.id, 0)).toBe(
+      false,
+    );
+    expect(f.pending["pendingGathers"].size).toBe(0);
+    expect(f.pending["approachReservations"].size).toBe(0);
+    expect(f.movement.isMoving(arrival.id)).toBe(false);
+    expect(f.packets.length).toBe(before);
+    expect(f.world.entityOccupancy.getStats().playerTileCount).toBe(
+      legal.length + 1,
+    );
+  });
+
+  it("admits the exact four-metre boundary using real dry support and gathering tools", async () => {
+    const f = await fishingFixture();
+    const anchor = {
+      x: Math.floor(f.resource.position.x),
+      z: Math.floor(f.resource.position.z),
+    };
+    const boundary = [
+      { x: anchor.x + 4, z: anchor.z },
+      { x: anchor.x - 4, z: anchor.z },
+      { x: anchor.x, z: anchor.z + 4 },
+      { x: anchor.x, z: anchor.z - 4 },
+    ].find((tile) =>
+      f.movement.isTileAvailableForPlayer("boundary-angler", tile),
+    );
+    expect(boundary).toBeDefined();
+    const player = f.addAngler("boundary-angler", boundary!);
+    for (let dx = -4; dx <= 4; dx++)
+      for (let dz = -4; dz <= 4; dz++) {
+        const tile = { x: anchor.x + dx, z: anchor.z + dz };
+        if (tile.x === boundary!.x && tile.z === boundary!.z) continue;
+        if (
+          calculateDistance2D(tileToWorld(tile), f.resource.position) <=
+            GATHERING_CONSTANTS.FISHING_INTERACTION_RANGE &&
+          f.movement.isTileAvailableForPlayer("boundary-blocker", tile)
+        )
+          f.addAngler(`boundary-blocker-${dx}-${dz}`, tile);
+      }
+    expect(calculateDistance2D(player.position, f.resource.position)).toBe(
+      GATHERING_CONSTANTS.FISHING_INTERACTION_RANGE,
+    );
+    expect(f.pending.queuePendingGather(player.id, f.resource.id, 0)).toBe(
+      true,
+    );
+    expect(
+      f.resources.isPlayerGatheringResource(player.id, f.resource.id),
+    ).toBe(true);
+    expect(f.pending["approachReservations"].size).toBe(0);
+    expect(f.pending["pendingGathers"].size).toBe(0);
+  });
+
+  it("releases the approach and arrival emote when actual pathfinding rejects an enclosed actor", async () => {
+    const f = await fishingFixture();
+    const tile = f.available(true);
+    const player = f.addAngler("enclosed-angler", tile);
+    for (let dx = -1; dx <= 1; dx++)
+      for (let dz = -1; dz <= 1; dz++) {
+        if (dx || dz)
+          f.world.collision.addFlags(
+            tile.x + dx,
+            tile.z + dz,
+            CollisionFlag.BLOCKED,
+          );
+      }
+    expect(f.pending.queuePendingGather(player.id, f.resource.id, 0)).toBe(
+      false,
+    );
+    expect(f.pending["approachReservations"].size).toBe(0);
+    expect(f.pending["pendingGathers"].size).toBe(0);
+    expect(f.movement["arrivalEmotes"].has(player.id)).toBe(false);
+    expect(f.movement["arrivalEmoteResolvers"].has(player.id)).toBe(false);
+    expect(f.movement.isMoving(player.id)).toBe(false);
+    expect(
+      f.resources.isPlayerGatheringResource(player.id, f.resource.id),
+    ).toBe(false);
+    expect(
+      f.packets.some((packet) => packet.name === "tileMovementStart"),
+    ).toBe(false);
+    const failed = f.movement["failedExactRoutes"].get(player.id)!;
+    expect(failed).toBeDefined();
+    expect(f.movement.hasFailedMovementTo(player.id, failed)).toBe(true);
+    expect(
+      f.movement.hasFailedMovementTo(player.id, {
+        x: failed.x + 1,
+        z: failed.z,
+      }),
+    ).toBe(false);
+    // Clear an actual failure receipt, not merely an already-empty map.
+    f.movement.stopPlayer(player.id);
+    expect(f.movement.hasFailedMovementTo(player.id, failed)).toBe(false);
+    expect(f.movement["failedExactRoutes"].has(player.id)).toBe(false);
+    expect(f.pending.queuePendingGather(player.id, f.resource.id, 1)).toBe(
+      false,
+    );
+    expect(f.movement.hasFailedMovementTo(player.id, failed)).toBe(true);
+    expect(
+      f.movement.movePlayerToward(player.id, player.position, false, 0),
+    ).toBe(true);
+    expect(f.movement.hasFailedMovementTo(player.id, failed)).toBe(false);
+    expect(f.movement["failedExactRoutes"].has(player.id)).toBe(false);
+  });
+
+  it("keeps valid reservations on rejected replacement, then releases them on cancellation and disconnect", async () => {
+    const f = await fishingFixture();
+    const first = f.addAngler("reservation-first", f.available(true));
+    expect(f.pending.queuePendingGather(first.id, f.resource.id, 0)).toBe(true);
+    const retained = f.pending["pendingGathers"].get(first.id);
+    const keys = [...f.pending["approachReservations"].keys()];
+    expect(
+      f.pending.queuePendingGather(first.id, "missing-fishing-resource", 1),
+    ).toBe(false);
+    expect(f.pending["pendingGathers"].get(first.id)).toBe(retained);
+    expect([...f.pending["approachReservations"].keys()]).toEqual(keys);
+    const second = f.addAngler("reservation-second", f.available(true));
+    expect(f.pending.queuePendingGather(second.id, f.resource.id, 1)).toBe(
+      true,
+    );
+    expect(f.pending["approachReservations"].size).toBe(2);
+    for (const request of f.pending["pendingGathers"].values()) {
+      expect(
+        calculateDistance2D(
+          tileToWorld(request.targetShoreTile!),
+          f.resource.position,
+        ),
+      ).toBeLessThanOrEqual(GATHERING_CONSTANTS.FISHING_INTERACTION_RANGE);
+      expect(
+        f.terrain.isPositionWalkableFast(
+          ...([
+            tileToWorld(request.targetShoreTile!).x,
+            tileToWorld(request.targetShoreTile!).z,
+          ] as [number, number]),
+        ),
+      ).toBe(true);
+    }
+    f.pending.cancelPendingGather(first.id);
+    expect(f.pending["pendingGathers"].has(first.id)).toBe(false);
+    expect(f.pending["approachReservations"].size).toBe(1);
+    f.pending.onPlayerDisconnect(second.id);
+    expect(f.pending["pendingGathers"].size).toBe(0);
+    expect(f.pending["approachReservations"].size).toBe(0);
+  });
+
+  it("replans a real relocated fishing entity through the same reach and occupancy checks", async () => {
+    const f = await fishingFixture(true);
+    const player = f.addAngler("relocating-shore-angler", f.available(true));
+    const attempt = "11111111-1111-4111-8111-111111111111";
+    expect(
+      f.pending.queuePendingGather(player.id, f.resource.id, 0, true, attempt),
+    ).toBe(true);
+    expect(
+      f.resources.playerHasRequiredToolForResource(player.id, f.resource.id),
+    ).toBe(true);
+    expect(f.movement["arrivalEmotes"].get(player.id)).toBe("fishing");
+    expect(f.movement.isMoving(player.id)).toBe(true);
+    expect(
+      f.resources.isPlayerGatheringResource(player.id, f.resource.id),
+    ).toBe(false);
+    const before = { ...f.resource.position };
+    f.resources["relocateFishingSpot"](createResourceID(f.resource.id), 1);
+    expect(
+      calculateDistance2D(before, f.resource.position),
+    ).toBeGreaterThanOrEqual(
+      GATHERING_CONSTANTS.FISHING_SPOT_MOVE.relocateMinDistance,
+    );
+    expect(
+      calculateDistance2D(before, f.resource.position),
+    ).toBeLessThanOrEqual(GATHERING_CONSTANTS.FISHING_SPOT_MOVE.relocateRadius);
+    expect(f.world.entities.get(f.resource.id)!.position.toArray()).toEqual([
+      f.resource.position.x,
+      f.resource.position.y,
+      f.resource.position.z,
+    ]);
+    f.pending.processTick(1);
+    const next = f.pending["pendingGathers"].get(player.id);
+    // A real random relocation may place its new legal shore under the actor;
+    // that is immediate admission, not a failed or missing replan.
+    if (next) {
+      expect(next.resourcePosition).toEqual(f.resource.position);
+      expect(next.completionAttemptId).toBe(attempt);
+      expect(next.runMode).toBe(true);
+      expect(next.resourceAnchorTile).toEqual({
+        x: Math.floor(f.resource.position.x),
+        z: Math.floor(f.resource.position.z),
+      });
+      expect(f.pending["approachReservations"].size).toBe(1);
+      expect(
+        calculateDistance2D(
+          tileToWorld(next.targetShoreTile!),
+          f.resource.position,
+        ),
+      ).toBeLessThanOrEqual(GATHERING_CONSTANTS.FISHING_INTERACTION_RANGE);
+    } else {
+      expect(
+        f.resources.isPlayerGatheringResource(player.id, f.resource.id),
+      ).toBe(true);
+    }
+    for (let tick = 2; tick <= 20 && f.pending["pendingGathers"].size; tick++) {
+      f.movement.onTick(tick);
+      f.pending.processTick(tick);
+    }
+    expect(f.pending["pendingGathers"].size).toBe(0);
+    expect(f.pending["approachReservations"].size).toBe(0);
+    expect(
+      f.resources.isPlayerGatheringResource(player.id, f.resource.id),
+    ).toBe(true);
+  });
+
+  it("waits for real obstruction retries, then changes an abandoned shore without resetting its attempt deadline", async () => {
+    const f = await fishingFixture();
+    const angler = f.addAngler("obstructed-shore-angler", f.available(true));
+    const attempt = "22222222-2222-4222-8222-222222222222";
+    expect(
+      f.pending.queuePendingGather(angler.id, f.resource.id, 0, true, attempt),
+    ).toBe(true);
+    const original = f.pending["pendingGathers"].get(angler.id)!;
+    const blocked = { ...original.targetShoreTile! };
+    f.addAngler("new-shore-occupant", blocked);
+    let sawDeferred = false,
+      sawTerminal = false;
+    for (
+      let tick = 1;
+      tick <= 20 && f.pending["pendingGathers"].has(angler.id);
+      tick++
+    ) {
+      f.movement.onTick(tick);
+      const retrying = f.movement["_pendingObstructionReplans"].has(angler.id);
+      const before = f.pending["pendingGathers"].get(angler.id)!;
+      if (retrying) {
+        sawDeferred = true;
+        expect(f.movement.isMoving(angler.id)).toBe(false);
+        expect(f.movement.hasMovementIntent(angler.id)).toBe(true);
+        expect(f.movement.hasFailedMovementTo(angler.id, blocked)).toBe(false);
+      }
+      const terminal = !f.movement.hasMovementIntent(angler.id);
+      if (terminal && !sawTerminal)
+        expect(f.movement.hasFailedMovementTo(angler.id, blocked)).toBe(true);
+      f.pending.processTick(tick);
+      const after = f.pending["pendingGathers"].get(angler.id);
+      if (retrying) {
+        expect(after).toBe(before);
+        expect(after!.targetShoreTile).toEqual(blocked);
+        expect(after!.failedFishingApproaches).toBeUndefined();
+      } else if (terminal && !sawTerminal) {
+        sawTerminal = true;
+        expect(before.failedFishingApproaches).toEqual(
+          new Set([`${blocked.x},${blocked.z}`]),
+        );
+        expect(before.targetShoreTile).not.toEqual(blocked);
+      }
+      if (after) {
+        expect(after.createdTick).toBe(0);
+        expect(after.completionAttemptId).toBe(attempt);
+      }
+    }
+    expect(sawDeferred).toBe(true);
+    expect(sawTerminal).toBe(true);
+    expect(f.pending["pendingGathers"].size).toBe(0);
+    expect(f.pending["approachReservations"].size).toBe(0);
+    expect(
+      f.resources.isPlayerGatheringResource(angler.id, f.resource.id),
+    ).toBe(true);
+    expect(worldToTile(angler.position.x, angler.position.z)).not.toEqual(
+      blocked,
+    );
+  });
+
+  it("retains a fishing shore while the actual shared BFS budget has deferred its route", async () => {
+    const f = await fishingFixture();
+    const driver = f.addAngler("budget-consuming-angler", f.available(true));
+    const island = f.terrain.getWorldTerrainProfile().island;
+    // Real long path requests consume the real pathfinder's global tick budget;
+    // no counter, queue, clock, terrain predicate or movement method is replaced.
+    for (
+      let index = 0;
+      index < 64 &&
+      f.movement["_bfsIterationsThisTick"] <
+        TileMovementManager["MAX_BFS_ITERATIONS_PER_TICK"];
+      index++
+    ) {
+      const destination = f.movement.findClosestWalkableTile(
+        {
+          x: island.centerX + (index % 16),
+          z: island.centerZ + Math.floor(index / 16),
+        },
+        10,
+      );
+      expect(destination).not.toBeNull();
+      f.movement.movePlayerToward(
+        driver.id,
+        tileToWorld(destination!),
+        true,
+        0,
+      );
+    }
+    expect(f.movement["_bfsIterationsThisTick"]).toBeGreaterThanOrEqual(
+      TileMovementManager["MAX_BFS_ITERATIONS_PER_TICK"],
+    );
+    const angler = f.addAngler("budget-deferred-angler", f.available(true));
+    expect(
+      f.pending.queuePendingGather(angler.id, f.resource.id, 0, true),
+    ).toBe(true);
+    expect(f.movement.isMoving(angler.id)).toBe(false);
+    expect(f.movement["_pendingNonCombatMoves"].has(angler.id)).toBe(true);
+    expect(f.movement.hasMovementIntent(angler.id)).toBe(true);
+    const request = f.pending["pendingGathers"].get(angler.id)!;
+    const shore = { ...request.targetShoreTile! };
+    f.pending.processTick(0);
+    expect(f.pending["pendingGathers"].get(angler.id)).toBe(request);
+    expect(request.targetShoreTile).toEqual(shore);
+    expect(request.failedFishingApproaches).toBeUndefined();
+    f.movement.stopPlayer(angler.id);
+    expect(f.movement.hasMovementIntent(angler.id)).toBe(false);
+    expect(f.movement.hasFailedMovementTo(angler.id, shore)).toBe(false);
+    const packetsAfterStop = f.packets.length;
+    for (let tick = 1; tick <= 21; tick++) f.pending.processTick(tick);
+    expect(f.movement.hasMovementIntent(angler.id)).toBe(false);
+    expect(f.packets.length).toBe(packetsAfterStop);
+    expect(
+      f.resources.isPlayerGatheringResource(angler.id, f.resource.id),
+    ).toBe(false);
+    expect(f.pending["pendingGathers"].size).toBe(0);
+    expect(f.pending["approachReservations"].size).toBe(0);
+  });
+
+  it("never restarts fishing after an explicit action stop of an active approach", async () => {
+    const f = await fishingFixture();
+    const angler = f.addAngler("action-stopped-angler", f.available(true));
+    expect(
+      f.pending.queuePendingGather(angler.id, f.resource.id, 0, true),
+    ).toBe(true);
+    expect(f.movement.isMoving(angler.id)).toBe(true);
+    const request = f.pending["pendingGathers"].get(angler.id)!;
+    const before = angler.position.toArray();
+    // Processing actions use this real movement-owner stop. An idle path is
+    // not a route failure and cannot authorize fishing to restart on its own.
+    f.movement.stopPlayer(angler.id);
+    expect(
+      f.movement.hasFailedMovementTo(angler.id, request.targetShoreTile!),
+    ).toBe(false);
+    const packetsAfterStop = f.packets.length;
+    for (let tick = 1; tick <= 21; tick++) {
+      f.movement.onTick(tick);
+      f.pending.processTick(tick);
+    }
+    expect(f.movement.hasMovementIntent(angler.id)).toBe(false);
+    expect(angler.position.toArray()).toEqual(before);
+    expect(f.packets.length).toBe(packetsAfterStop);
+    expect(request.failedFishingApproaches).toBeUndefined();
+    expect(
+      f.resources.isPlayerGatheringResource(angler.id, f.resource.id),
+    ).toBe(false);
+    expect(f.pending["pendingGathers"].size).toBe(0);
+    expect(f.pending["approachReservations"].size).toBe(0);
+  });
+
+  it("replans four real anglers onto distinct in-range shores after an actual spot relocation", async () => {
+    const f = await fishingFixture(true);
+    const anglers = Array.from({ length: 4 }, (_, index) =>
+      f.addAngler(`moving-group-${index}`, f.available(true)),
+    );
+    for (const player of anglers) {
+      expect(
+        f.pending.queuePendingGather(player.id, f.resource.id, 0, true),
+      ).toBe(true);
+      expect(f.movement["arrivalEmotes"].get(player.id)).toBe("fishing");
+      expect(
+        f.resources.isPlayerGatheringResource(player.id, f.resource.id),
+      ).toBe(false);
+    }
+    expect(f.pending["approachReservations"].size).toBe(4);
+    expect(f.pending["pendingGathers"].size).toBe(4);
+    const before = { ...f.resource.position };
+    f.resources["relocateFishingSpot"](createResourceID(f.resource.id), 1);
+    expect(
+      calculateDistance2D(before, f.resource.position),
+    ).toBeGreaterThanOrEqual(
+      GATHERING_CONSTANTS.FISHING_SPOT_MOVE.relocateMinDistance,
+    );
+    f.pending.processTick(1);
+    const ownedApproaches = new Set<string>();
+    for (const player of anglers) {
+      const next = f.pending["pendingGathers"].get(player.id);
+      const tile =
+        next?.targetShoreTile ??
+        worldToTile(player.position.x, player.position.z);
+      expect(tile).toBeDefined();
+      if (next) {
+        expect(next.resourcePosition).toEqual(f.resource.position);
+        expect(next.resourceAnchorTile).toEqual({
+          x: Math.floor(f.resource.position.x),
+          z: Math.floor(f.resource.position.z),
+        });
+        expect(next.runMode).toBe(true);
+        expect(
+          f.resources.isPlayerGatheringResource(player.id, f.resource.id),
+        ).toBe(false);
+        expect(f.movement["arrivalEmotes"].get(player.id)).toBe("fishing");
+      } else {
+        // Relocation can legitimately make an already occupied dry tile the
+        // immediate approach. It must be an actual session, not a dropped replan.
+        expect(
+          f.resources.isPlayerGatheringResource(player.id, f.resource.id),
+        ).toBe(true);
+      }
+      expect(
+        calculateDistance2D(tileToWorld(tile), f.resource.position),
+      ).toBeLessThanOrEqual(GATHERING_CONSTANTS.FISHING_INTERACTION_RANGE);
+      ownedApproaches.add(`${tile.x},${tile.z}`);
+    }
+    expect(ownedApproaches.size).toBe(4);
+    expect(f.pending["approachReservations"].size).toBe(
+      f.pending["pendingGathers"].size,
+    );
+    for (let tick = 2; tick <= 20 && f.pending["pendingGathers"].size; tick++) {
+      f.movement.onTick(tick);
+      f.pending.processTick(tick);
+    }
+    expect(
+      f.pending["pendingGathers"].size,
+      JSON.stringify({
+        before,
+        after: f.resource.position,
+        actors: anglers.map((player) => ({
+          id: player.id,
+          position: player.position.toArray(),
+          gathering: f.resources.isPlayerGatheringResource(
+            player.id,
+            f.resource.id,
+          ),
+        })),
+        remaining: [...f.pending["pendingGathers"].values()].map((request) => ({
+          playerId: request.playerId,
+          target: request.targetShoreTile,
+          movement: f.movement["playerStates"].get(request.playerId),
+          obstructionReplan: f.movement["_pendingObstructionReplans"].get(
+            request.playerId,
+          ),
+          deferredMove: f.movement["_pendingNonCombatMoves"].get(
+            request.playerId,
+          ),
+        })),
+      }),
+    ).toBe(0);
+    expect(f.pending["approachReservations"].size).toBe(0);
+    for (const player of anglers)
+      expect(
+        f.resources.isPlayerGatheringResource(player.id, f.resource.id),
+      ).toBe(true);
+    expect(
+      new Set(
+        anglers.map((player) => {
+          const tile = worldToTile(player.position.x, player.position.z);
+          return `${tile.x},${tile.z}`;
+        }),
+      ).size,
+    ).toBe(4);
+  });
+});
 
 describe("real server spawn and both tile-movement support paths", () => {
   it("retains solid-floor height when a second agent is relocated out of an occupied lobby spawn", async () => {

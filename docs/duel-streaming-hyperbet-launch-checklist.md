@@ -282,12 +282,11 @@ earlier arena no-loss shortcut, ground-item restrictions or lobby challenge test
       are not fourteen proven usable actor positions. Every reserved approach
       must satisfy authoritative fishing reach as well as dry walkability; test
       congestion, retry, moving spots, disconnects and cancellation.
-      Current fishing approach search reaches ten tiles without the four-metre
-      interaction constraint; its caller also ignores rejected movement admission
-      and can retain a useless reservation until timeout. Correct those paths
-      and verify that relocation preserves distinct useful approaches, not only
-      different resource tiles. Existing mocked-shore reservation tests and
-      three-resource relocation soaks do not close this real-basin capacity gate.
+      The approach/rejected-admission defects identified at the earlier checkpoint
+      are corrected in the scoped owner tests below. Verify fourteen simultaneous
+      anglers and overflow, and that relocation preserves useful capacity across
+      all families, not only different resource tiles. Four-actor CPU admission
+      and three-resource relocation soaks do not close this real-basin gate.
 
 ### Pond headland and timber checkpoint — partial native inspection, unqualified
 
@@ -358,6 +357,110 @@ The third PNG is not visual evidence of the jetty. Forty-one recorded 503s
 again belong to the intentionally disabled private streaming endpoint.
 Runtime12, its temporary database and all owned native browsers are closed;
 the human client/server/database and protected bundles remain unchanged.
+
+### Dock shadow attribution — controlled diagnostic, defaults unchanged
+
+Native24 isolates the actual submitted board-variation and derivative-filtered
+growth nodes, then renders constant PBR on the same geometry. Board variation
+is piecewise flat and growth is not the fine orthogonal grid; the grid remains
+under constant PBR. Do not implement the earlier fragment-seed hypothesis.
+Native26 removes the grid only when shadow reception is temporarily disabled;
+actual world-space deck normals are uniform. Native27 keeps casting/reception
+enabled and changes only sunlight shadow bias from +0.0002 to zero: both the
+constant and production timber controls lose the fine grid. This establishes
+a shadow contribution for this held landing view, not universal shadow quality.
+
+Every successful control run passes the original 90-second startup and
+30-second camera/grass gates; camera transitions take 10.971s, 12.254s and
+10.839s respectively for native24, native26 and native27. Each records five
+complete HUD leases, restores original material/shadow/camera/clock ownership,
+closes its owned browser and retains input hashes. Baseline/restored production
+fragment SHA256 is af1761d806e1077b1946cd0d07e1dab83b2b90ad47076885286ca7f334f4f0e4.
+No production lighting default, shadow map size, resolution or quality changes.
+Review contact shadows, low/high sun, terrain, pavilions, foliage and moving
+avatars before qualifying a bias change. The single-view controls are not
+sustained performance, streaming, full-scene lighting or final-art approval.
+
+Native22/23 failed diagnostic node selection because Three wraps expressions
+in unnamed intent variables; native25 failed framework discovery after the
+browser resource-timing buffer discarded its entry. These helper failures are
+retained, not erased or attributed to production rendering. The corrected
+probe unwraps only bounded unnamed intent nodes and observes the actual loaded
+framework response to preserve Three identity. No replacement shader formula.
+
+Native21's loading-overlay failure is now attributed separately: this private
+runtime intentionally disables the duel scheduler, so streaming state remains
+null and the independent UI's 120-second waiting-for-duel-data deadline replaces
+the loading root during the third HUD lease. Terrain was ready. This explains
+that capture failure but does not erase native19/20's real 90-second grass
+startup failures or demonstrate stream readiness.
+
+References: [Three LightShadow](https://threejs.org/docs/pages/LightShadow.html)
+defines normalized-depth bias and the distortion tradeoff of normal offsets;
+[WGSL interpolation](https://www.w3.org/TR/WGSL/#interpolation) informed the
+discarded varying hypothesis. Actual native controls, not those general
+references, establish the observed attribution. Receipts: inland pond
+native22–27, with original build11 and assets-v2; runtime13 and its temporary
+database are stopped, protected human services unchanged.
+
+### Fishing approach and dock support correction — scoped verification
+
+Fishing now admits only supported, available shore tile centers within the
+authoritative four-metre interaction radius. The search uses four tile rings
+rather than ten (at most 81 instead of 441 candidate checks). Rejected movement
+releases the shore reservation and arrival emote. After actual route exhaustion,
+a pending attempt can choose a different legal shore once per tick without
+resetting its deadline or completion identity. Recovery requires movement-owned
+failure evidence for that exact destination, not merely an idle actor; active,
+deferred and precomputed routes retain their ownership. Explicit stops,
+replacement intents, synchronization and cleanup clear stale failure evidence.
+No movement budget, obstruction retry count or gather deadline increased.
+
+The new cases exercise actual terrain, occupancy, resources, tools/inventory
+and movement owners. They cover occupied shores, the exact reach boundary,
+rejected pathfinding, reservations/cancellation/disconnect, actual resource
+relocation, four distinct arriving anglers, real obstruction retries, actual
+BFS deferral and intentional stops. The three old mocked fishing cases are
+superseded by these owner tests; unrelated legacy tests remain. The independent
+review found and resolved an intentional-stop restart regression before freeze.
+Final canonical regression06 passes 68/68; immutable baseline05 and candidate05
+each pass the 18-case real-owner file with stable manifest identities. Server
+source typing covers 3,954 transitive files with zero diagnostics and stable
+pins; scoped lint/formatting pass. Wrong-destination failure queries and clearing
+an already-present failure on stop/replacement also have actual-owner coverage.
+These are CPU approach/admission checks, not transport, catches, persistence,
+fourteen-concurrent-angler, overflow or economic/custody acceptance.
+
+Compact dock support caps now meet the actual 12cm plank underside; support
+shafts meet the cap underside rather than overlapping the deck's walkable top.
+All 16 supports / 32 members retain their count and canonical bottom placement.
+Landing remains 2,703 vertices / 1,432 triangles, jetty 3,063 / 1,576; deck
+position/index prefixes remain exact. Sixteen dock cases pass, including real
+Three top-surface rays, 86 retained native PhysX rays plus 16 support-site rays,
+and five exact whole-buffer historical geometry goldens. No shader, material,
+texture, seed, collision top or shadow setting changes. The broad type gate
+passes 729 roots with zero diagnostics and stable source pins.
+
+Build12 emits eight isolated bundles from 973 stable production inputs while
+preserving all 145 protected compiled artifacts. Native28 uses those exact pins
+and assets-v2 in real Chrome/Metal WebGPU. The original 90-second startup and
+30-second camera/grass gates pass (10.209s from the landing camera cut). All five
+HUD leases complete; material/shadow/camera/clock ownership and input hashes
+restore, and the owned browser closes. Root visual inspection confirms that the
+landing's overlapping support-cap patches are gone. The fine grid remains at
+the original bias and disappears in the temporary zero-bias control; final
+production shader hash is unchanged. This single pose does not qualify both
+docks, lighting across the world or final art. Native28 records 32 expected
+scheduler-disabled streaming HTTP503s and one known placeholder-mob model404,
+not an error-free stream claim.
+
+Runtime14 and its temporary database are stopped with protected human services
+unchanged. All LAYOUT-01–08 gates remain open, including arena/custody separation,
+fourteen-angler capacity and sustained performance. The pond bank collar,
+uniform planting and simple dock silhouette still need art work.
+Receipts: service-layout fishing-approach-regression06, baseline05, candidate05,
+types06, dock-support-* and pond-dock-cap-types01; inland pond native28 and
+isolated-build12-report. No promotion of the unqualified pond manifests.
 
 ### Inland fishing integration — candidate only
 

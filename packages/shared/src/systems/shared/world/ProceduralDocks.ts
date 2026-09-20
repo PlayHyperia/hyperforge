@@ -880,13 +880,39 @@ export class ProceduralDocks extends System {
           const postX = support.x,
             postZ = support.z,
             floorY = support.bottomY;
-          const postHeight = deckY - floorY;
-          if (postHeight < 0.2) continue;
+          const supportDeckY = grounded
+            ? grounded.heightAt(postX, postZ)
+            : deckY;
+          if (supportDeckY === null || !Number.isFinite(supportDeckY))
+            throw new Error("Dock support escapes its retained deck");
+          // Compact planks are solid: the cap meets their actual underside,
+          // and the shaft meets the cap, never the walkable top. Preserve the
+          // historical zero-thickness generated dock equations otherwise.
+          const capTopY = grounded
+            ? Math.fround(supportDeckY - POND_DOCK_SURFACE.boardThickness)
+            : deckY;
+          const postTopY = grounded
+            ? Math.fround(capTopY - DOCK_POST_CAP_HEIGHT)
+            : deckY;
+          const postHeight = postTopY - floorY;
+          if (grounded && postHeight <= 0)
+            throw new Error("Dock support cannot fit below its plank and cap");
+          if (!grounded && postHeight < 0.2) continue;
 
           // Post shaft
           const postGeo = new THREE.BoxGeometry(postSize, postHeight, postSize);
           postGeo.translate(postX, floorY + postHeight / 2, postZ);
-          if (grounded) postGeo.userData.dockVerticalTimber = true;
+          if (grounded) {
+            // Keep the fitted Float32 interfaces exact, avoiding cancellation
+            // in BoxGeometry's half-height followed by translation.
+            const p = postGeo.getAttribute("position");
+            for (let i = 0; i < p.count; i++)
+              p.setY(
+                i,
+                p.getY(i) > floorY + postHeight / 2 ? postTopY : floorY,
+              );
+            postGeo.userData.dockVerticalTimber = true;
+          }
           woodGeometries.push(postGeo);
 
           // Post cap (wider, just under deck)
@@ -896,7 +922,13 @@ export class ProceduralDocks extends System {
             DOCK_POST_CAP_HEIGHT,
             capSize,
           );
-          capGeo.translate(postX, deckY - DOCK_POST_CAP_HEIGHT / 2, postZ);
+          const capCenterY = capTopY - DOCK_POST_CAP_HEIGHT / 2;
+          capGeo.translate(postX, capCenterY, postZ);
+          if (grounded) {
+            const p = capGeo.getAttribute("position");
+            for (let i = 0; i < p.count; i++)
+              p.setY(i, p.getY(i) > capCenterY ? capTopY : postTopY);
+          }
           woodGeometries.push(capGeo);
         }
       };

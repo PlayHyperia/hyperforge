@@ -1,5 +1,62 @@
 # World graphics development checkpoint — 2026-09-20
 
+## Fishing approach, fitted dock supports and shadow attribution checkpoint
+
+The seven-family / twelve-fish pond contract remains: fourteen simultaneous
+anglers plus additional arrivals, every-tier shore access and two distinct,
+characterful procedural docks. None of the layout acceptance gates is closed.
+
+Fishing approach selection now enforces the authoritative four-metre radius
+and uses four tile rings instead of ten. Rejected movement releases reservation
+and arrival emote. An exhausted route may choose another valid shore without
+resetting the original deadline or completion ID. Recovery requires a
+movement-owned failure for that exact destination, with no active/deferred
+route. Explicit stops and replacement intents clear stale failure evidence.
+Independent review caught an intentional-stop restart regression and verified
+the correction. No retry, pathfinding or timeout budget increased.
+
+Final CPU gates: 68/68 canonical regressions, 18/18 real-owner tests against each
+immutable baseline and candidate manifest set, 16/16 dock tests, shared typing
+729 roots and server typing 3,954 transitive sources with zero diagnostics;
+scoped lint/formatting pass. Three old mock-only fishing cases were superseded
+by actual-owner coverage, including four-angler relocation, real obstruction
+and BFS deferral, active/deferred stops, exact failure identity and cleanup.
+These checks do not prove fourteen simultaneous catches, persistence,
+transport, economic custody or long-run capacity.
+
+Dock caps meet the actual plank underside and shafts meet the cap underside.
+Counts, deck position/index prefixes and five legacy whole-buffer goldens
+remain exact. Native PhysX retains 86 rays plus 16 support-site rays. The source
+does not change shaders/materials, textures, seeds or collision top surfaces.
+Build12 emits eight isolated bundles from 973 stable inputs and preserves all
+145 protected compiled outputs.
+
+Native24/26/27 isolated the fine dock grid to shadow reception/bias, not the
+actual board variation or filtered grain. Native28 repeats the comparison on
+the corrected geometry. Its original 90-second startup gate passes, landing
+camera/grass settling is 10.209s within the unchanged 30-second gate, and all
+five HUD leases complete. Root inspected the images: support-cap patches are
+gone; the fine grid persists at +0.0002 sunlight bias and disappears under the
+temporary zero-bias control. Shadow casting/reception remain enabled in that
+control; production defaults are restored and unchanged. Qualify both docks,
+contacts, terrain, vegetation, animated avatars, pavilion and arena surfaces at
+multiple actual light angles before promoting a bias change. This is not
+final-art, runtime-wide error-free, streaming or performance acceptance.
+
+Native22/23/25 helper-selection/discovery failures remain recorded.
+Native21's third HUD-root failure came from the intentionally scheduler-disabled
+runtime's independent 120-second waiting-for-duel-data UI timeout. This does not
+erase native19/20's actual 90-second grass-startup failures.
+
+Evidence: inland-pond-integration01-UNQUALIFIED/native22–28, build12 report and
+runtime13–14 cleanup; service-layout-network01-UNQUALIFIED/fishing-approach-
+regression06, baseline05, candidate05, types06, dock-support-* and
+pond-dock-cap-types01. Owned test browsers/runtime/database are closed;
+playable localhost, its database and compiled bundles remain unchanged.
+Keep all LAYOUT-01–08 gates open. Next: arena/custody footprint and all-tier
+crowd access, then whole-scene shadow qualification and stronger bank/dock art.
+Do not promote the unqualified pond manifests.
+
 ## Pond capacity, headland and timber checkpoint — candidate remains unqualified
 
 The launch contract covers all seven fishing families / twelve fish, fourteen

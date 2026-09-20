@@ -1,4 +1,5 @@
 import { readFileSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
 import type { Node } from "three/webgpu";
 import { normalWorld, positionWorld } from "three/tsl";
@@ -389,6 +390,29 @@ describe("actual procedural pond dock ownership and native collision (not render
     expect(mesh).not.toBeNull();
     try {
       const geometry = mesh!.geometry;
+      // Captured from the actual generated legacy control before the compact
+      // support correction. Includes every member, not only the deck prefix.
+      const hash = (array: ArrayBufferView) =>
+        createHash("sha256")
+          .update(
+            new Uint8Array(array.buffer, array.byteOffset, array.byteLength),
+          )
+          .digest("hex");
+      expect(geometry.getAttribute("position").count).toBe(516);
+      expect(geometry.getIndex()!.count / 3).toBe(384);
+      expect(hash(geometry.getAttribute("position").array)).toBe(
+        "bda88bb7f13e58698830c5759573690dd975774ed9d83b0b22c4bcd0cc55d50d",
+      );
+      expect(hash(geometry.getAttribute("normal").array)).toBe(
+        "8e26911841f5381e8185eccc8179dbd3e3f7cb43c19989f61b6139d281a7ce99",
+      );
+      expect(hash(geometry.getIndex()!.array)).toBe(
+        "27667ae701f0c9003473e36bd721824486bc987d75d95b4028465b58f77acbbb",
+      );
+      for (const name of ["dockTimberCoord", "dockTimberAxis"])
+        expect(hash(geometry.getAttribute(name).array)).toBe(
+          "365759dbea6f25e45ac46b3115a705974811f4cb2912df697390b9b8e3ce60ce",
+        );
       expect(
         Array.from(geometry.getAttribute("dockTimberCoord").array).every(
           (value) => value === 0,
@@ -418,6 +442,116 @@ describe("actual procedural pond dock ownership and native collision (not render
     } finally {
       mesh?.geometry.dispose();
     }
+  });
+
+  it("fits all compact support caps below the exact plank underside and shafts below caps without changing deck collision", async () => {
+    const { world, terrain, owner } = await fixture();
+    const entries = records(terrain!);
+    await owner.start();
+    let checkedSupports = 0;
+    for (const [recipeIndex, entry] of entries.entries()) {
+      const mesh = world.stage.scene.getObjectByName(
+        `PondDock_${entry.descriptor.id}`,
+      );
+      if (!(mesh instanceof THREE.Mesh)) throw new Error("Missing actual dock");
+      const position = mesh.geometry.getAttribute("position");
+      const axis = mesh.geometry.getAttribute("dockTimberAxis");
+      const index = mesh.geometry.getIndex()!;
+      expect(position.count).toBe([2703, 3063][recipeIndex]);
+      expect(index.count / 3).toBe([1432, 1576][recipeIndex]);
+      expect(
+        Array.from(position.array.slice(0, entry.positions.length)),
+      ).toEqual(Array.from(entry.positions));
+      expect(Array.from(index.array.slice(0, entry.indices.length))).toEqual(
+        Array.from(entry.indices),
+      );
+      expect(mesh.geometry.groups).toHaveLength(0);
+      const members = new Map<
+        number,
+        { box: THREE.Box3; vertices: number[] }
+      >();
+      for (let i = 0; i < position.count; i++) {
+        const seed = axis.getW(i);
+        const member = members.get(seed) ?? {
+          box: new THREE.Box3(),
+          vertices: [],
+        };
+        member.box.expandByPoint(
+          new THREE.Vector3().fromBufferAttribute(position, i),
+        );
+        member.vertices.push(i);
+        members.set(seed, member);
+      }
+      mesh.updateMatrixWorld(true);
+      for (const support of entry.posts) {
+        const coordinateUlp =
+          2 **
+          (Math.floor(
+            Math.log2(Math.max(Math.abs(support.x), Math.abs(support.z))),
+          ) -
+            23);
+        const fitted = [...members.values()].filter(({ box }) => {
+          const center = box.getCenter(new THREE.Vector3());
+          return (
+            Math.abs(center.x - support.x) <= coordinateUlp &&
+            Math.abs(center.z - support.z) <= coordinateUlp
+          );
+        });
+        expect(fitted).toHaveLength(2);
+        fitted.sort((a, b) => a.box.min.y - b.box.min.y);
+        const [shaft, cap] = fitted;
+        const underside = Math.fround(
+          entry.heightAt(support.x, support.z)! -
+            POND_DOCK_SURFACE.boardThickness,
+        );
+        expect(cap.box.max.y).toBe(underside);
+        expect(shaft.box.max.y).toBe(cap.box.min.y);
+        expect(shaft.box.min.y).toBe(Math.fround(support.bottomY));
+        expect(cap.box.max.y).toBeGreaterThan(cap.box.min.y);
+        expect(shaft.box.max.y).toBeGreaterThan(shaft.box.min.y);
+        for (const member of fitted) {
+          expect(member.vertices).toHaveLength(24);
+          for (const i of member.vertices) {
+            const localTop = entry.heightAt(position.getX(i), position.getZ(i));
+            expect(localTop).not.toBeNull();
+            expect(position.getY(i)).toBeLessThanOrEqual(
+              Math.fround(localTop! - POND_DOCK_SURFACE.boardThickness),
+            );
+          }
+        }
+        const topY = entry.heightAt(support.x, support.z)!;
+        const origin = new THREE.Vector3(support.x, topY + 0.25, support.z);
+        const down = new THREE.Vector3(0, -1, 0);
+        const hits = new THREE.Raycaster(origin, down).intersectObject(
+          mesh,
+          false,
+        );
+        expect(hits.length).toBeGreaterThan(0);
+        expect(hits[0].point.y).toBe(topY);
+        // No cap/shaft top may compete with the actual retained top triangles.
+        for (const hit of hits.filter((hit) => hit.point.y === topY))
+          expect(hit.faceIndex!).toBeLessThan(entry.indices.length / 3);
+        const physical = world.physics.raycast(origin, down, 1);
+        expect(physical).not.toBeNull();
+        expect(Math.abs(physical!.point.y - topY)).toBeLessThanOrEqual(
+          8 * 2 ** (Math.floor(Math.log2(Math.abs(topY))) - 23),
+        );
+        expect(owner.getDeckHeightAtSmooth(support.x, support.z)).toBe(topY);
+        checkedSupports++;
+      }
+    }
+    expect(checkedSupports).toBe(16);
+    console.info(
+      "actual-pond-dock-supports",
+      JSON.stringify({
+        recipes: 2,
+        supports: checkedSupports,
+        capAndShaftVertices: 768,
+        geometryCountDelta: 0,
+        retainedTop: "exact position/index prefix",
+        nativeVisualAcceptance: false,
+      }),
+    );
   });
 
   it("closes every fitted timber plank below the byte-exact retained top without changing its walking surface", async () => {
