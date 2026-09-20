@@ -340,7 +340,14 @@ describe("bounded pond dressing", () => {
         "composition-v1",
         bank,
       )!;
-      expect(macro.pondContactGround).toHaveLength(2);
+      // The inland study now deliberately covers the eastern sedge shelf and
+      // both southern turf banks; the higher northwest cutbank stays exposed.
+      expect(macro.pondContactGround).toHaveLength(3);
+      expect(
+        candidate.flatZone.radialPond!.bankComposition!.sectors.map(
+          (sector) => sector.surface,
+        ),
+      ).toEqual(["cutbank", "sedge-shelf", "dry-turf", "dry-turf"]);
       for (const contact of macro.pondContactGround!) {
         expect(
           Math.hypot(contact.startX - 410, contact.startZ - 415),

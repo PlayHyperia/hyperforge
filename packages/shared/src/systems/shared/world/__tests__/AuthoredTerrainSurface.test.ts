@@ -2,9 +2,11 @@ import { build } from "esbuild";
 import { fileURLToPath } from "node:url";
 import { runInNewContext } from "node:vm";
 import { Worker } from "node:worker_threads";
+import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
 import { World } from "../../../../core/World";
+import { DataManager } from "../../../../data/DataManager";
 import {
   createDuelArenaFloorZones,
   resolveDuelArenaFloorHeight,
@@ -21,10 +23,410 @@ import {
   validateRadialPondTerrainProfile,
 } from "../RadialPondTerrainProfile";
 import { TerrainSystem } from "../TerrainSystem";
+import THREE from "../../../../extras/three/three";
+import {
+  assembleQuadChunkGeometry,
+  generateQuadChunkDataSync,
+} from "../TerrainQuadChunkGenerator";
+import { RetainedTerrainSurface } from "../TerrainGridSurface";
 
 const operations = createAuthoredTerrainSurfaceOperations();
 const noFloors = new Set<string>();
 const rawHeight = () => 60;
+
+describe("source-only inland headland candidate, not layout or native acceptance", () => {
+  // This profile depends on the admitted inland layout's meadow and backing
+  // grades. Do not silently test a hybrid of canonical and detached terrain.
+  it.skipIf(!DataManager.getWorldConfig()?.compactPondDocks)(
+    "retains closed unequal coves and the actual indexed terrain bounds",
+    async () => {
+      await DataManager.getInstance().initialize();
+      const candidate = JSON.parse(
+        readFileSync(
+          new URL(
+            "../__fixtures__/inland-pond-basin-candidate.json",
+            import.meta.url,
+          ),
+          "utf8",
+        ),
+      ) as {
+        flatZone: FlatZone;
+        waterBody: {
+          centerX: number;
+          centerZ: number;
+          radius: number;
+          surfaceY: number;
+        };
+        fishingCapacity: {
+          minimumPositionsPerFamily: number;
+          families: string[];
+          requiresEveryFamilyShoreAccess: boolean;
+        };
+      };
+      expect(validateRadialPondTerrainProfile(candidate.flatZone)).toBeNull();
+      expect(candidate.waterBody).toMatchObject({
+        centerX: 410,
+        centerZ: 415,
+        radius: 27,
+        surfaceY: 24.6,
+      });
+      expect(candidate.flatZone).toMatchObject({
+        width: 66,
+        depth: 66,
+        height: 22.2,
+        blendRadius: 6,
+      });
+      expect(candidate.flatZone.radialPond!.bankSectors).toHaveLength(4);
+      expect(new Set(candidate.fishingCapacity.families).size).toBe(7);
+      expect(candidate.fishingCapacity.minimumPositionsPerFamily).toBe(2);
+      expect(candidate.fishingCapacity.requiresEveryFamilyShoreAccess).toBe(
+        true,
+      );
+      const world = new World();
+      const terrain = world.register("terrain", TerrainSystem) as TerrainSystem;
+      const geometries: THREE.BufferGeometry[] = [];
+      try {
+        await terrain.init();
+        expect(terrain.getWorldTerrainProfile().southernMeadow).toBeDefined();
+        const admittedInputWorldIdentity =
+          DataManager.getWorldContentIdentity();
+        terrain["loadFlatZonesFromManifest"]();
+        terrain.unregisterFlatZone("haven_pond_floor");
+        // Retain the previous source-study geometry as a measured control, not a
+        // runtime fallback. Composition does not affect canonical ground height.
+        const prior = structuredClone(candidate.flatZone);
+        prior.radialPond!.bankSectors![1].halfWidth = 1.15;
+        Object.assign(prior.radialPond!.bankSectors![2], {
+          halfWidth: 0.85,
+          innerRadius: 21,
+          innerHeight: 24.78,
+          outerRadius: 27.4,
+          outerHeight: 25.8,
+        });
+        terrain.registerFlatZone(prior);
+        const previousShore = Array.from({ length: 720 }, (_, degree) => {
+          const angle = (degree * Math.PI) / 360;
+          let low = 0,
+            high = candidate.waterBody.radius;
+          for (let i = 0; i < 18; i++) {
+            const mid = (low + high) / 2;
+            const height = terrain.getResourceGroundHeight(
+              candidate.waterBody.centerX + Math.cos(angle) * mid,
+              candidate.waterBody.centerZ + Math.sin(angle) * mid,
+            );
+            if (height < candidate.waterBody.surfaceY) low = mid;
+            else high = mid;
+          }
+          const radius = (low + high) / 2;
+          return {
+            x: candidate.waterBody.centerX + Math.cos(angle) * radius,
+            z: candidate.waterBody.centerZ + Math.sin(angle) * radius,
+            radius,
+          };
+        });
+        const outlineMetrics = (points: typeof previousShore) => {
+          let perimeter = 0,
+            area = 0;
+          for (let i = 0; i < points.length; i++) {
+            const a = points[i],
+              b = points[(i + 1) % points.length];
+            perimeter += Math.hypot(a.x - b.x, a.z - b.z);
+            area += (a.radius * a.radius * Math.PI) / points.length;
+          }
+          const minX = Math.min(...points.map((p) => p.x)),
+            maxX = Math.max(...points.map((p) => p.x));
+          const minZ = Math.min(...points.map((p) => p.z)),
+            maxZ = Math.max(...points.map((p) => p.z));
+          return {
+            perimeter,
+            area,
+            minX,
+            maxX,
+            minZ,
+            maxZ,
+            width: maxX - minX,
+            depth: maxZ - minZ,
+          };
+        };
+        const previousOutline = outlineMetrics(previousShore);
+        const previousProvider = terrain["buildChunkTerrainProvider"]();
+        const previousGeometry = assembleQuadChunkGeometry(
+          generateQuadChunkDataSync(450, 450, 100, 128, previousProvider),
+          previousProvider,
+          3,
+        ).geometry;
+        geometries.push(previousGeometry);
+        const previousExtraVertices =
+          previousGeometry.userData.terrainCellTopology.surfaceVertexCount -
+          128 * 128;
+        process.stdout.write(
+          `Inland previous shape control ${JSON.stringify({ previousOutline, previousExtraVertices })}\n`,
+        );
+        terrain.unregisterFlatZone(candidate.flatZone.id);
+        terrain.registerFlatZone(candidate.flatZone);
+        const provider = terrain["buildChunkTerrainProvider"]();
+        const {
+          centerX,
+          centerZ,
+          radius: envelope,
+          surfaceY,
+        } = candidate.waterBody;
+        const at = (angle: number, radius: number) =>
+          provider.getHeightAtComputed(
+            centerX + Math.cos(angle) * radius,
+            centerZ + Math.sin(angle) * radius,
+          );
+        const shore = (angle: number) => {
+          let low = 0,
+            high = envelope;
+          for (let i = 0; i < 18; i++) {
+            const mid = (low + high) / 2;
+            if (at(angle, mid) < surfaceY) low = mid;
+            else high = mid;
+          }
+          return (low + high) / 2;
+        };
+        let minimumEnvelopeClearance = Infinity,
+          perimeter = 0,
+          waterArea = 0;
+        const shores: { x: number; z: number; radius: number }[] = [];
+        for (let degree = 0; degree < 720; degree++) {
+          const angle = (degree * Math.PI) / 360;
+          let reachedDry = false;
+          for (let step = 0; step <= envelope * 4; step++) {
+            const height = at(angle, step / 4);
+            expect(Number.isFinite(height)).toBe(true);
+            if (reachedDry) expect(height).toBeGreaterThanOrEqual(surfaceY);
+            if (height >= surfaceY) reachedDry = true;
+          }
+          expect(reachedDry).toBe(true);
+          minimumEnvelopeClearance = Math.min(
+            minimumEnvelopeClearance,
+            at(angle, envelope) - surfaceY,
+          );
+          const radius = shore(angle);
+          shores.push({
+            x: centerX + Math.cos(angle) * radius,
+            z: centerZ + Math.sin(angle) * radius,
+            radius,
+          });
+          waterArea += (radius * radius * Math.PI) / 720;
+        }
+        for (let i = 0; i < shores.length; i++) {
+          const a = shores[i],
+            b = shores[(i + 1) % shores.length];
+          perimeter += Math.hypot(a.x - b.x, a.z - b.z);
+        }
+        expect(minimumEnvelopeClearance).toBeGreaterThan(0.05);
+        const radii = {
+          eastCove: shore(0),
+          southHeadland: shore(1.4),
+          southwestBay: shore(2.7),
+          northwestBank: shore(-2.35),
+        };
+        expect(radii.eastCove - radii.southHeadland).toBeGreaterThan(4);
+        expect(radii.southwestBay - radii.southHeadland).toBeGreaterThan(3);
+        const rows = [
+          [450, 450],
+          [350, 450],
+          [450, 350],
+          [350, 350],
+        ].map(([x, z], i) => {
+          const data = generateQuadChunkDataSync(x, z, 100, 128, provider);
+          const geometry = assembleQuadChunkGeometry(
+            data,
+            provider,
+            3,
+          ).geometry;
+          geometries.push(geometry);
+          const topology = geometry.userData.terrainCellTopology as {
+            surfaceVertexCount: number;
+            cellIndexOffsets: readonly number[];
+          };
+          const extraVertices = topology.surfaceVertexCount - 128 * 128;
+          expect(extraVertices).toBeLessThanOrEqual(65536);
+          const normals = geometry.getAttribute("normal");
+          expect(normals.count).toBe(geometry.getAttribute("position").count);
+          let maximumNormalUnitError = 0;
+          for (let vertex = 0; vertex < normals.count; vertex++) {
+            const length = Math.hypot(
+              normals.getX(vertex),
+              normals.getY(vertex),
+              normals.getZ(vertex),
+            );
+            if (!Number.isFinite(length))
+              throw new Error("Non-finite indexed terrain normal");
+            maximumNormalUnitError = Math.max(
+              maximumNormalUnitError,
+              Math.abs(length - 1),
+            );
+          }
+          expect(maximumNormalUnitError).toBeLessThanOrEqual(1e-6);
+          let maxCellFaces = 0;
+          for (let j = 1; j < topology.cellIndexOffsets.length; j++)
+            maxCellFaces = Math.max(
+              maxCellFaces,
+              (topology.cellIndexOffsets[j] -
+                topology.cellIndexOffsets[j - 1]) /
+                3,
+            );
+          expect(maxCellFaces).toBeLessThanOrEqual(512);
+          return {
+            x,
+            z,
+            geometry,
+            topology,
+            surface: new RetainedTerrainSurface(
+              i + 1,
+              provider.terrainProfileIdentity,
+              x,
+              z,
+              100,
+              128,
+              geometry,
+            ),
+            metrics: {
+              x,
+              z,
+              extraVertices,
+              maxCellFaces,
+              maximumNormalUnitError,
+              vertices: geometry.getAttribute("position").count,
+              triangles: geometry.index!.count / 3,
+            },
+          };
+        });
+        const out = { height: 0, nx: 0, ny: 1, nz: 0, faceIndex: 0 };
+        let probes = 0,
+          maximumError = 0,
+          maximumNormalAngle = 0;
+        let normalWitness: Record<string, number> = {};
+        for (let degree = 0; degree < 360; degree++) {
+          const angle = ((degree + 0.317) * Math.PI) / 180;
+          for (let radial = 0; radial <= 470; radial++) {
+            const radius = 9.45 + radial * 0.05;
+            const x = centerX + Math.cos(angle) * radius,
+              z = centerZ + Math.sin(angle) * radius;
+            const row = rows.find(
+              (entry) =>
+                Math.abs(x - entry.x) <= 50 && Math.abs(z - entry.z) <= 50,
+            )!;
+            expect(row.surface.sample(x - row.x, z - row.z, out)).toBe(true);
+            maximumError = Math.max(
+              maximumError,
+              Math.abs(out.height - provider.getHeightAtComputed(x, z)),
+            );
+            const h = 0.03125;
+            const nx =
+              -(
+                provider.getHeightAtComputed(x + h, z) -
+                provider.getHeightAtComputed(x - h, z)
+              ) /
+              (2 * h);
+            const nz =
+              -(
+                provider.getHeightAtComputed(x, z + h) -
+                provider.getHeightAtComputed(x, z - h)
+              ) /
+              (2 * h);
+            const angleError =
+              (Math.acos(
+                Math.max(
+                  -1,
+                  Math.min(
+                    1,
+                    (nx * out.nx + out.ny + nz * out.nz) /
+                      Math.hypot(nx, 1, nz),
+                  ),
+                ),
+              ) *
+                180) /
+              Math.PI;
+            if (angleError > maximumNormalAngle) {
+              maximumNormalAngle = angleError;
+              normalWitness = { x, z, radius, degree };
+            }
+            probes++;
+          }
+        }
+        const seamVertices: number[] = [];
+        for (const axis of ["x", "z"] as const) {
+          for (const tangent of [350, 450]) {
+            const neighbours = [350, 450].map((across) =>
+              rows.find(
+                (row) =>
+                  row[axis] === across &&
+                  row[axis === "x" ? "z" : "x"] === tangent,
+              )!,
+            );
+            const edges = neighbours.map((row) => {
+              const p = row.geometry.getAttribute("position"),
+                n = row.geometry.getAttribute("normal");
+              const edge = new Map<number, number[]>();
+              for (let i = 0; i < row.topology.surfaceVertexCount; i++) {
+                const across = axis === "x" ? p.getX(i) : p.getZ(i);
+                const along = axis === "x" ? p.getZ(i) : p.getX(i);
+                if (across + row[axis] === 400)
+                  edge.set(along, [p.getY(i), n.getX(i), n.getY(i), n.getZ(i)]);
+              }
+              for (let i = row.topology.surfaceVertexCount; i < p.count; i++) {
+                const across = axis === "x" ? p.getX(i) : p.getZ(i);
+                const along = axis === "x" ? p.getZ(i) : p.getX(i);
+                if (across + row[axis] !== 400) continue;
+                const top = edge.get(along)!;
+                expect(p.getY(i)).toBe(Math.fround(top[0] - 3));
+                expect([n.getX(i), n.getY(i), n.getZ(i)]).toEqual(top.slice(1));
+              }
+              return [...edge].sort((a, b) => a[0] - b[0]);
+            });
+            expect(edges[0]).toEqual(edges[1]);
+            seamVertices.push(edges[0].length);
+          }
+        }
+        const candidateOutline = outlineMetrics(shores);
+        process.stdout.write(
+          `Inland headland candidate ${JSON.stringify({
+            previousOutline,
+            candidateOutline,
+            admittedInputWorldIdentity,
+            admittedAssetsDirectory: process.env.ASSETS_DIR ?? null,
+            terrainProfileIdentity: provider.terrainProfileIdentity,
+            radii,
+            minimumEnvelopeClearance,
+            perimeter,
+            waterArea,
+            shorelineBounds: {
+              minX: Math.min(...shores.map((p) => p.x)),
+              maxX: Math.max(...shores.map((p) => p.x)),
+              minZ: Math.min(...shores.map((p) => p.z)),
+              maxZ: Math.max(...shores.map((p) => p.z)),
+            },
+            leaves: rows.map((row) => row.metrics),
+            probes,
+            maximumError,
+            maximumNormalAngle,
+            normalAngleMetric:
+              "indexed face versus canonical central difference",
+            normalWitness,
+            seamVertices,
+            nativeOrGameplayAcceptance: false,
+          })}\n`,
+        );
+        // A bounded shape regression, not proof of fourteen live reservations.
+        // Axis dimensions are reported above, not used as a concurrency proxy.
+        expect(candidateOutline.area / previousOutline.area).toBeGreaterThan(
+          0.85,
+        );
+        expect(maximumError).toBeLessThanOrEqual(0.02);
+        expect(maximumNormalAngle).toBeLessThanOrEqual(6);
+      } finally {
+        geometries.forEach((geometry) => geometry.dispose());
+        await world.destroy();
+      }
+    },
+    30000,
+  );
+});
 
 function zone(
   overrides: Partial<AuthoredTerrainZone> = {},

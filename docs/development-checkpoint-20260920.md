@@ -1,5 +1,82 @@
 # World graphics development checkpoint — 2026-09-20
 
+## Pond capacity, headland and timber checkpoint — candidate remains unqualified
+
+The launch contract covers all seven fishing families / twelve fish, fourteen
+simultaneous anglers (two per family) plus additional arrivals, every-tier shore
+access and two distinct procedural docks. These are acceptance requirements,
+not a claim that fourteen spawned resource entities prove usable capacity.
+
+Read-only gameplay review found two independent blockers. The broad arena
+rectangle contains ten of fourteen fishing targets, the supplier and landing;
+seven complete four-metre interaction disks lie inside it. An explicit compact
+facility protection footprint must be applied consistently to custody, drops,
+ammunition, evacuation and lobby challenges without widening privileges or
+removing ordinary safe-area custody. Validate full-width bank routes too.
+Fishing approach search also lacks the authoritative four-metre reach filter,
+ignores rejected movement admission, and does not prove fourteen distinct
+usable approaches or relocation spacing. Existing mocked-shore / three-resource
+soaks are not live basin capacity evidence. All remain unchecked launch work.
+
+The isolated art candidate adds a southern turf headland, unequal coves and a
+third ground-cover sector, retaining water center/datum/envelope and both dock
+positions. Measured water area is 1,034.91m² (96.84% of the previous 1,068.73m²),
+shoreline 117.72m, dimensions 41.97 × 34.47m. Actual admitted indexed terrain
+passes 169,560 probes with maximum 1.099cm height and 3.097° facet-normal error,
+finite/unit mesh normals and exact shared seams. Worst leaf uses 64,670/65,536
+extra vertices: only 866 spare, not scalability approval. No cap was increased.
+
+Compact timber uses stable dock/member/board identity and one shared local
+growth field for side/end color and roughness. No textures, micro-normal,
+material slots or geometry were added; physical top buffers remain exact.
+The historical zero-mask path remains, but pixel equivalence is unproven.
+Native review below does NOT approve the new timber appearance.
+
+CPU verification: 15/15 dock cases; 91 canonical terrain/path/habitat passes
+plus one intentional candidate-only skip; 7/7 actual-admission checks; 729-root
+source typing with zero diagnostics; scoped lint/formatting. Water/fishing
+records 26 passes and one failure: the historical test shrinks only the water
+envelope to 12m while keeping the 27m basin. Its immutable old-candidate control
+fails identically. Keep the containment guard and the failed receipts; do not
+describe that full run as passing. Earlier fixture/type failures are retained.
+
+Build11 emits eight isolated bundles from 973 production inputs; only the dock
+source differs from build10. Assets-v2 contains three exclusive manifests; old
+candidate assets remain unchanged. All 145 protected outputs retain hashes.
+Native19 and native20 FAIL the original 90-second startup gate with 4 and 30
+grass cells pending. Native20 records 30 running grounding jobs, no waiting/
+failed jobs or LOD swaps. Changed shore cover can affect local work; no causal
+regression is established. Timeouts, density, resolution and budgets are intact.
+
+Native21 is a separately labelled art diagnostic. Its original 90-second startup
+gate passes; the optional 60-second inspection allowance is unused. Camera/
+grass transitions pass their original 30-second gates at 29.06s / 11.69s / 4.37s,
+with fourteen actual fishing entities in every observation. Overall native21
+still FAILS: third-view HUD root identity changes, and its PNG contains the
+loading-timeout overlay, not usable jetty art. The first two HUD leases complete;
+camera/clock restore, browser closes and source pins remain stable. A recorded
+grounding slice reaches 42.1ms; this is not seamless/sustained performance proof.
+
+Root inspected all PNGs. The overview's headland improves the outline, but the
+bank collar, blank service pads and sparse habitat still look artificial. The
+landing timber remains grid-like/crosshatched. Do not mark final art complete.
+Actual submitted WGSL confirms the compact field is active; retained legacy
+terms have zero final compact weight. Half-metre joints can explain broad bands,
+not the finer second line family. Next isolate actual board variation, filtered
+growth and constant PBR under the same geometry/camera/light; fragment-hash
+precision amplification is only a hypothesis. The third PNG provides no jetty
+art evidence. Request diagnostics attribute all 41 native21 HTTP503s
+to /api/streaming/state, whose scheduler is intentionally disabled in this
+private runtime. The known missing mob model stays within placeholder scope.
+
+Evidence: inland-pond-integration01-UNQUALIFIED/native19–21, build11 report,
+candidate-manifest-assets-v2 report and pond-water-envelope-baseline01;
+service-layout-network01-UNQUALIFIED/pond-headland-*, dock-growth-* and
+pond-dock-art-types02. Runtime12, its temporary database and owned browsers
+are closed; human localhost/DB identity and bundles remain unchanged.
+No final art, live concurrent fishing, route/custody, stream, smoothness or
+launch approval. Keep every LAYOUT-01–08 gate open and do not promote assets-v2.
+
 ## Shared grounding budget checkpoint — three native pond views captured
 
 The small scheduler change is verified, not a full performance or art pass.

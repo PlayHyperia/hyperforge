@@ -1,5 +1,7 @@
 import { readFileSync } from "node:fs";
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
+import type { Node } from "three/webgpu";
+import { normalWorld, positionWorld } from "three/tsl";
 import { World } from "../../../../core/World";
 import { DataManager } from "../../../../data/DataManager";
 import { ALL_WORLD_AREAS } from "../../../../data/world-areas";
@@ -70,6 +72,27 @@ const worlds: World[] = [];
 const areas = new Map<string, WorldArea>();
 const nativeReleases: (() => void)[] = [];
 
+// Inspect the actual lazy material graph with Three's real builder. No shader
+// arithmetic/derivatives are substituted: rendered output is a native-only gate.
+function timberNodes(root: Node, builder: THREE.NodeBuilder): Set<Node> {
+  const result = new Set<Node>();
+  const visit = (node: Node) => {
+    if (result.has(node)) return;
+    result.add(node);
+    if (node === normalWorld || node === positionWorld) return;
+    const method: unknown = Reflect.get(node, "getOutputNode");
+    if (typeof method === "function") {
+      const output: unknown = Reflect.apply(method, node, [builder]);
+      if (!(output instanceof THREE.Node))
+        throw new Error("Missing TSL output");
+      visit(output);
+    } else {
+      for (const child of node.getChildren()) visit(child);
+    }
+  };
+  visit(root);
+  return result;
+}
 beforeAll(async () => {
   const previous = process.env.NODE_ENV;
   process.env.NODE_ENV = "production";
@@ -207,6 +230,137 @@ function captureMeshDisposals(world: World) {
 }
 
 describe("actual procedural pond dock ownership and native collision (not rendered acceptance)", () => {
+  it("keeps stable dock/member grain identity, exact top buffers and local axes without additional attributes or materials", async () => {
+    const { world, terrain, owner } = await fixture();
+    const entries = records(terrain!);
+    await owner.start();
+    const seeds: number[] = [];
+    for (const entry of entries) {
+      const mesh = world.stage.scene.getObjectByName(
+        `PondDock_${entry.descriptor.id}`,
+      );
+      if (!(mesh instanceof THREE.Mesh))
+        throw new Error("Missing installed dock");
+      const actual = mesh.geometry.getAttribute("dockTimberAxis");
+      seeds.push(actual.getW(0));
+      expect(actual.getW(0)).toBeGreaterThanOrEqual(0);
+      expect(actual.getW(0)).toBeLessThan(1);
+      const plank = owner["buildCompactDockPlanks"](entry);
+      const post = new THREE.BoxGeometry(0.25, 2, 0.25);
+      try {
+        const positions = Array.from(plank.getAttribute("position").array);
+        const normals = Array.from(plank.getAttribute("normal").array);
+        const indices = Array.from(plank.getIndex()!.array);
+        owner["addCompactTimberCoordinates"](plank, entry, 0);
+        expect(Array.from(plank.getAttribute("position").array)).toEqual(
+          positions,
+        );
+        expect(Array.from(plank.getAttribute("normal").array)).toEqual(normals);
+        expect(Array.from(plank.getIndex()!.array)).toEqual(indices);
+        for (const key of ["dockTimberCoord", "dockTimberAxis"]) {
+          const rebuilt = plank.getAttribute(key);
+          expect(
+            Array.from(
+              mesh.geometry
+                .getAttribute(key)
+                .array.slice(0, rebuilt.array.length),
+            ),
+          ).toEqual(Array.from(rebuilt.array));
+        }
+        const axis = plank.getAttribute("dockTimberAxis");
+        for (let i = 0; i < axis.count; i++)
+          expect(axis.getW(i)).toBe(actual.getW(0));
+
+        // A real member translated in the world retains local coordinates and
+        // seed; changing the authored dock or member changes only its identity.
+        owner["addCompactTimberCoordinates"](post, entry, 1);
+        const local = Array.from(post.getAttribute("dockTimberCoord").array);
+        const frame = Array.from(post.getAttribute("dockTimberAxis").array);
+        post.translate(16, 8, -32);
+        owner["addCompactTimberCoordinates"](post, entry, 1);
+        expect(Array.from(post.getAttribute("dockTimberCoord").array)).toEqual(
+          local,
+        );
+        expect(Array.from(post.getAttribute("dockTimberAxis").array)).toEqual(
+          frame,
+        );
+        expect(post.getAttribute("dockTimberAxis").getY(0)).toBe(1);
+        expect(frame[3]).not.toBe(actual.getW(0));
+        owner["addCompactTimberCoordinates"](post, entry, 2);
+        expect(post.getAttribute("dockTimberAxis").getW(0)).not.toBe(frame[3]);
+      } finally {
+        plank.dispose();
+        post.dispose();
+      }
+      expect(Object.keys(mesh.geometry.attributes).sort()).toEqual([
+        "dockTimberAxis",
+        "dockTimberCoord",
+        "normal",
+        "position",
+      ]);
+      expect(mesh.geometry.groups).toHaveLength(0);
+    }
+    expect(new Set(seeds).size).toBe(2);
+  });
+
+  it("shares one finite local growth graph across side/end response and PBR without texture or micro-normal nodes", async () => {
+    const { owner } = await fixture({ native: false });
+    const material = owner["getOrCreateDockMaterial"]();
+    // The installed JS base is concrete; its declaration is abstract because
+    // backend shader generation belongs to WGSLNodeBuilder. This inspection
+    // uses only its real Fn expansion/cache, never generation or a renderer.
+    const builder: unknown = Reflect.construct(THREE.NodeBuilder, [null, null]);
+    if (!(builder instanceof THREE.NodeBuilder))
+      throw new Error("Expected actual Three graph builder");
+    const color = material.colorNode;
+    const roughness = material.roughnessNode;
+    if (!(color instanceof THREE.Node) || !(roughness instanceof THREE.Node))
+      throw new Error("Expected actual dock color and roughness nodes");
+    const colorNodes = timberNodes(color, builder);
+    const roughNodes = timberNodes(roughness, builder);
+    const named = (name: string) => {
+      const matches = [...colorNodes].filter(
+        (n) => Reflect.get(n, "name") === name,
+      );
+      expect(matches).toHaveLength(1);
+      return matches[0];
+    };
+    expect(roughNodes.has(named("compactDockTimber"))).toBe(true);
+    const phase = named("compactDockGrowthPhase");
+    expect(roughNodes.has(phase)).toBe(true);
+    // Face normal may alter absorption/contrast, never select a different
+    // growth volume. Stable board variation uses only row/mask and member seed.
+    expect(timberNodes(phase, builder).has(normalWorld)).toBe(false);
+    const variation = timberNodes(named("compactDockBoardVariation"), builder);
+    expect(variation.has(normalWorld)).toBe(false);
+    expect(variation.has(positionWorld)).toBe(false);
+    for (const node of variation) {
+      if (node.type !== "SplitNode") continue;
+      const parent: unknown = Reflect.get(node, "node");
+      if (!(parent instanceof THREE.Node)) continue;
+      const attribute: unknown = Reflect.get(parent, "attributeName");
+      if (attribute === "dockTimberCoord")
+        expect(["y", "w"]).toContain(Reflect.get(node, "components"));
+      if (attribute === "dockTimberAxis")
+        expect(Reflect.get(node, "components")).toBe("w");
+    }
+    for (const node of new Set([...colorNodes, ...roughNodes])) {
+      expect(Reflect.get(node, "isTextureNode")).not.toBe(true);
+      const value: unknown = Reflect.get(node, "value");
+      if (typeof value === "number") expect(Number.isFinite(value)).toBe(true);
+      if (
+        value instanceof THREE.Vector2 ||
+        value instanceof THREE.Vector3 ||
+        value instanceof THREE.Vector4
+      )
+        expect(value.toArray().every(Number.isFinite)).toBe(true);
+    }
+    expect(material.normalNode).toBeNull();
+    expect(material.metalness).toBe(0);
+    expect(material.transparent).toBe(false);
+    expect(material.opacity).toBe(1);
+  });
+
   it("keeps non-compact generated geometry on the historical zero-mask wood path", async () => {
     const { owner } = await fixture({ configured: false });
     const recipe = {

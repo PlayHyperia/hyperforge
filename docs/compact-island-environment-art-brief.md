@@ -343,6 +343,105 @@ profiles are not uncontended performance acceptance. Evidence:
 `inland-pond-integration01-UNQUALIFIED/native03–08/` and
 `storage-native03/`; full details are in the development checkpoint.
 
+### Pond layout and fishing capacity — integration gates still open
+
+The next art candidate keeps the current inland center and both dock approaches;
+it does not establish final placement, ocean clearance or gameplay acceptance.
+Native18's broad arena rectangle contains ten of the fourteen fishing targets,
+the supplier and arrival landing. Seven targets' entire four-metre interaction
+disks lie inside that rectangle. A pond safe-zone flag cannot override the
+earlier arena no-loss shortcut, ground-item restrictions or lobby challenge test.
+
+- [ ] Define and test one explicit compact duel-protection footprint around the
+      actual facilities, preserving ordinary safe-area custody outside it. Apply
+      it consistently to death, drops/gravestones, ammunition recovery, opt-out
+      evacuation and matching client affordances. Challenges need actual lobby
+      eligibility. Missing or malformed candidate metadata must not broaden
+      privileges. Do not relax global economic rules to accommodate the pond.
+- [ ] Validate the full walking width of the pond-to-bank corridor against that
+      footprint, not just the painted path centerline or physical floor bounds.
+- [ ] Prove fourteen real concurrent anglers plus additional arrivals using the
+      actual basin, reservations and movement occupancy. Fourteen spawned targets
+      are not fourteen proven usable actor positions. Every reserved approach
+      must satisfy authoritative fishing reach as well as dry walkability; test
+      congestion, retry, moving spots, disconnects and cancellation.
+      Current fishing approach search reaches ten tiles without the four-metre
+      interaction constraint; its caller also ignores rejected movement admission
+      and can retain a useless reservation until timeout. Correct those paths
+      and verify that relocation preserves distinct useful approaches, not only
+      different resource tiles. Existing mocked-shore reservation tests and
+      three-resource relocation soaks do not close this real-basin capacity gate.
+
+### Pond headland and timber checkpoint — partial native inspection, unqualified
+
+The source study adds a southern turf headland between unequal coves and a third
+ground-cover sector. Water center, datum, envelope, four-sector limit and both
+dock positions remain unchanged. Measured water area is 1,034.91m² versus
+1,068.73m² (96.84% retained), shoreline 117.72m, dimensions 41.97 × 34.47m.
+These are shape metrics, not proof of fourteen simultaneous anglers.
+
+The actual admitted candidate's indexed mesh passes 169,560 probes: maximum
+height difference 1.099cm and facet-normal difference 3.097°, within the existing
+2cm/6° checks. Mesh normal buffers are finite/unit-length and shared seams agree.
+The worst leaf uses 64,670 of 65,536 permitted extra vertices, leaving only 866;
+the safety ceiling is not a scalability/performance budget. Full basin PhysX,
+native shading, access/custody and live fishing remain separate gates.
+
+Compact dock timber now uses stable dock/member/board identity and a shared
+local growth field for side and cut faces, with derivative-filtered grain.
+One material, zero texture assets, exact physical top buffers and the legacy
+zero-mask path are retained. Legacy pixel equivalence is not established.
+Structural material tests are not pixel or shimmer approval.
+Final CPU gates: 15 dock tests; 91 canonical terrain/path/habitat tests with one
+explicit candidate-only skip; seven actual-admission checks; 729-root source
+typing, scoped lint and formatting. Water/fishing has 26 passes plus one existing
+historical test incompatibility: that test imposes a 12m water envelope on the
+27m basin. It fails identically against the immutable old candidate. Do not
+report that full run as green or relax the production containment guard.
+
+Build11 emits eight isolated bundles from 973 source inputs, preserving 145
+protected compiled artifacts. Assets-v2 is an exclusive three-manifest overlay;
+the old assets/native18 inputs are unchanged. Native19 and native20 both FAIL
+the unchanged 90-second startup gate, with four and thirty grass cells pending.
+The latter snapshot has thirty queued/running grounding jobs, no failed/waiting
+jobs, and no LOD swaps. This is not a proven causal material/shape regression;
+the new shore cover can change local grounding workload. No timeout, density,
+resolution, shadow or operation limit is relaxed to claim success.
+
+Both failed browsers closed with stable input pins. Their HTTP diagnostics
+attribute the 503s to /api/streaming/state: this private art runtime deliberately
+disables the duel scheduler, and the endpoint confirms that state. The known
+missing-model 404 remains within placeholder scope, not this art task.
+No final pond/dock art, fourteen-angler gameplay, stream or smoothness approval;
+all LAYOUT-01–08 gates stay open. Receipts: native19–20, isolated-build11-report,
+candidate-manifest-assets-v2-report and service-layout pond-headland/dock-growth
+checks. A separate post-failure art inspection cannot erase these failed gates.
+
+Native21 is explicitly an art diagnostic, not acceptance. It passes the original
+90-second startup gate; its separate 60-second inspection allowance is unused.
+All three original 30-second camera/grass gates pass at 29.06s, 11.69s and 4.37s,
+with fourteen fishing entities (two per family). The overall run still FAILS:
+the third capture encounters a changing HUD root, and its PNG contains the
+loading-timeout overlay rather than usable jetty art. The first two captures
+restore their HUD leases; camera and clock restore, input pins remain stable,
+and the owned browser closes. Do not report three qualified captures or a
+loading/performance pass; a recorded grounding slice still reaches 42.1ms.
+
+Root visual inspection of the usable overview and landing rejects final art:
+the southern headland improves the outline, but the bank collar and service
+pads still read artificial, habitat is sparse, and timber remains visibly
+grid-like/crosshatched. The submitted compact dock shader is captured in
+native21/shaders. It confirms the compact field is active and retained legacy
+terms have zero final weight for compact geometry. The half-metre board joints
+can explain broad bands, not the finer second line family. Next isolate actual
+board variation, filtered growth and constant PBR under unchanged geometry,
+camera and light. Fragment-hash precision amplification remains a hypothesis,
+not an established cause. Do not tune from that assumption without evidence.
+The third PNG is not visual evidence of the jetty. Forty-one recorded 503s
+again belong to the intentionally disabled private streaming endpoint.
+Runtime12, its temporary database and all owned native browsers are closed;
+the human client/server/database and protected bundles remain unchanged.
+
 ### Inland fishing integration — candidate only
 
 The detached candidate now requests 14 real fishing entities, two for each of

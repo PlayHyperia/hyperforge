@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "status": "DESIGN_CANDIDATE_UNQUALIFIED",
   "basis": "East-meadow measured option in inland-pond-options.json; source-only, no runtime/manifests changed.",
-  "artIntent": "An inland fishing basin with a compressed higher northwest bank below the lobby, a long eastern reed cove, a warm southern fishing shelf and a broad southwest arrival bay. Reserve distinct shore access for every fishing tier. No uniformly spaced perimeter furniture.",
+  "artIntent": "An inland fishing basin with a compressed higher northwest cutbank below the lobby, a focused eastern reed cove, a southern turf headland separating that cove from a broad southwest arrival bay, and localized exposed soil. Reserve distinct shore access for every fishing tier. No uniformly spaced perimeter furniture or continuous mineral collar.",
   "waterBody": {
     "id": "haven_pond_water",
     "centerX": 410,
@@ -44,10 +44,10 @@
         },
         {
           "bearing": 1.4,
-          "halfWidth": 0.85,
-          "innerRadius": 21,
-          "innerHeight": 24.78,
-          "outerRadius": 27.4,
+          "halfWidth": 0.6,
+          "innerRadius": 18.5,
+          "innerHeight": 25.1,
+          "outerRadius": 26,
           "outerHeight": 25.8
         },
         {
@@ -70,13 +70,17 @@
             "sectorIndex": 1,
             "surface": "sedge-shelf",
             "groundCover": {
-              "emergenceHeight": 0.11,
-              "fullHeight": 0.24
+              "emergenceHeight": 0.08,
+              "fullHeight": 0.2
             }
           },
           {
             "sectorIndex": 2,
-            "surface": "mineral-shore"
+            "surface": "dry-turf",
+            "groundCover": {
+              "emergenceHeight": 0.04,
+              "fullHeight": 0.12
+            }
           },
           {
             "sectorIndex": 3,

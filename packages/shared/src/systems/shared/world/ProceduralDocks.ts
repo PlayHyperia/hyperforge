@@ -145,42 +145,48 @@ const dockWoodUV = Fn(() => {
   return mix(vertUV, deckUV, horiz);
 });
 
-/** Metre-scale, member-local timber; never a world-grid plank projection.
- * Attributes keep both docks on one material while grain follows each board,
- * beam and post. Screen derivatives suppress unresolved rings/fibres rather
- * than letting thin procedural lines shimmer at distance. No texture reads. */
+/** Compact-only solid timber: X follows the member, Y/Z cut its growth rings.
+ * The same warped cross-section is visible on side and end faces, rather than
+ * unrelated side stripes/end rings. Inspired by Three r186 WoodNodeMaterial's
+ * local growth volume, without its multi-octave/Voronoi work. One noise sample,
+ * one filtered growth wave, no textures or micro-normal. */
 const compactDockTimberField = Fn(() => {
   const coord = attribute("dockTimberCoord", "vec4");
   const frame = attribute("dockTimberAxis", "vec4");
   const plank = coord.w.lessThan(1.5).select(1, 0);
-  const board = tslFloor(coord.y.mul(2)).mul(plank);
+  // All sixteen top rows remain byte-exact/shared. Derive a constant board ID
+  // in each row's interior, never interpolate a random seed between vertices.
+  // The exposed terminal cut at 8m belongs to board15, not a seventeenth board.
+  const board = tslFloor(coord.y.mul(2))
+    .clamp(0, 15)
+    .mul(plank)
+    .toVar("compactDockBoardIndex");
   const seed = frame.w.add(board.mul(0.731));
-  const variation = tslHash(vec2(seed, seed.add(4.7)));
+  const variation = tslHash(vec2(seed, seed.add(4.7))).toVar(
+    "compactDockBoardVariation",
+  );
+  const sectionU = mix(coord.y, coord.y.sub(board.mul(0.5)).sub(0.25), plank);
   const broad = tslNoise2D(
-    vec2(coord.x.mul(0.38), coord.y.mul(3.1)).add(vec2(seed.mul(7.3), seed)),
+    vec2(coord.x.mul(0.32), sectionU.mul(2.4)).add(vec2(seed.mul(7.3), seed)),
   );
-  const wander = sin(coord.x.mul(0.75).add(seed.mul(3.1)))
-    .mul(0.55)
-    .add(broad.mul(1.8));
-  const fibrePhase = coord.y.mul(180).add(wander);
-  const growthPhase = coord.y.mul(53).add(wander.mul(0.7));
-  const filteredSine = (phase: Node<"float">) =>
-    sin(phase).mul(float(1).sub(smoothstep(0.65, 2.8, phase.fwidth())));
-  const fibre = filteredSine(fibrePhase);
-  const growth = filteredSine(growthPhase);
-  const sectionU = mix(
-    coord.y,
-    fract(coord.y.mul(2)).mul(0.5).sub(0.25),
-    plank,
+  // Different cuts through the same kind of growth volume, not a regularly
+  // tiled cross-grain pattern. The pith is below the plank; longitudinal warp
+  // changes slowly, so growth lines remain aligned with the actual timber.
+  const radius = vec2(
+    sectionU.add(variation.sub(0.5).mul(0.7)),
+    coord.z.add(fract(variation.mul(7.13)).mul(0.25).add(0.12)),
+  )
+    .length()
+    .add(broad.sub(0.5).mul(0.012));
+  const growthPhase = radius
+    .mul(mix(330, 570, fract(variation.mul(3.71))))
+    .add(seed.mul(Math.PI * 2))
+    .toVar("compactDockGrowthPhase");
+  const growth = sin(growthPhase).mul(
+    float(1).sub(smoothstep(0.65, 2.8, growthPhase.fwidth())),
   );
-  const radius = vec2(sectionU.mul(0.85), coord.z.add(0.06)).length();
-  const rings = filteredSine(radius.mul(145).add(broad.mul(1.6)));
   const end = smoothstep(0.72, 0.96, abs(normalWorld.dot(frame.xyz)));
-  const grain = mix(
-    growth.mul(0.055).add(fibre.mul(0.025)),
-    rings.mul(0.07),
-    end,
-  );
+  const grain = growth.mul(mix(0.025, 0.045, end));
   const rowLocal = fract(coord.y.mul(2));
   const jointDistance = tslMin(rowLocal, float(1).sub(rowLocal)).mul(0.5);
   const joint = float(1)
@@ -196,6 +202,7 @@ const compactDockTimberField = Fn(() => {
     .sub(joint.mul(0.1));
   const roughness = float(0.86)
     .add(broad.mul(0.07))
+    .sub(grain.mul(0.25))
     .add(end.mul(0.025))
     .add(joint.mul(0.025))
     .clamp(0.82, 0.98);
@@ -1353,6 +1360,15 @@ export class ProceduralDocks extends System {
       else across.set(0, 1, 0);
     }
     const depth = grain.clone().cross(across);
+    // Seed identity follows the authored dock/member, not its world position.
+    // Keep 24 bits in [0,1), exactly representable by the existing float attr.
+    // Thus moving a dock does not repaint it and the two recipes no longer
+    // share the same deck/rail pattern. Board identity is added in the shader.
+    let seed = 2166136261;
+    const memberId = `${record.descriptor.id}:${member}`;
+    for (let i = 0; i < memberId.length; i++)
+      seed = Math.imul(seed ^ memberId.charCodeAt(i), 16777619);
+    const memberSeed = (seed >>> 8) / 16777216;
     const p = new THREE.Vector3();
     for (let i = 0; i < position.count; i++) {
       p.fromBufferAttribute(position, i).sub(origin);
@@ -1364,7 +1380,7 @@ export class ProceduralDocks extends System {
             record.heightAt(position.getX(i), position.getZ(i))!
           : p.dot(depth);
       coord[i * 4 + 3] = member === 0 ? 1 : 2;
-      frames.set([grain.x, grain.y, grain.z, member * 0.61803398875], i * 4);
+      frames.set([grain.x, grain.y, grain.z, memberSeed], i * 4);
     }
     geometry.setAttribute(
       "dockTimberCoord",
@@ -1628,7 +1644,7 @@ export class ProceduralDocks extends System {
    */
   private createDockWoodMaterial(): MeshStandardNodeMaterial {
     const mat = new MeshStandardNodeMaterial();
-    const timber = compactDockTimberField();
+    const timber = compactDockTimberField().toVar("compactDockTimber");
     mat.metalness = 0;
 
     mat.colorNode = Fn(() => {
