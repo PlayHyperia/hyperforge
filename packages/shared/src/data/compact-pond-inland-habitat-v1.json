@@ -1,0 +1,56 @@
+{
+  "schemaVersion": 1,
+  "layoutId": "compact-pond-inland-habitat-v1",
+  "waterBodyId": "haven_pond_water",
+  "flatZoneId": "haven_pond_floor",
+  "radius": 27,
+  "dockClearance": 1.25,
+  "groups": [
+    {
+      "id": "northwest-cutbank",
+      "bearing": 225,
+      "placements": [
+        ["boulder", -1.4, -1.2, 1.05, 24],
+        ["stone", 0.2, -0.65, 0.62, 113],
+        ["stone", 1.3, -0.7, 0.48, 245],
+        ["fern", -1.7, 0.75, 0.9, 17],
+        ["fern", -0.55, 1.4, 0.7, 135],
+        ["fern", 0.8, 0.95, 0.8, 249],
+        ["bush", 0.1, 2.2, 0.9, 31],
+        ["reed", -0.9, 0.18, 0.76, 22],
+        ["reed", 0.65, 0.24, 0.87, 189],
+        ["sorrel", -1.0, 2.3, 0.62, 281]
+      ]
+    },
+    {
+      "id": "northern-quiet-pocket",
+      "bearing": 297,
+      "placements": [
+        ["boulder", 0.3, -1.05, 0.82, 267],
+        ["stone", -0.9, -0.65, 0.5, 27],
+        ["fern", -1.5, 0.9, 0.66, 104],
+        ["fern", 0.85, 1.25, 0.78, 254],
+        ["bush", -0.1, 2.0, 0.68, 215],
+        ["reed", -0.8, 0.18, 0.85, 304],
+        ["reed", 0.1, 0.25, 0.72, 61],
+        ["reed", 1.0, 0.15, 0.93, 219]
+      ]
+    },
+    {
+      "id": "southeast-sedge-pocket",
+      "bearing": 57,
+      "placements": [
+        ["stone", -1.25, -1.0, 0.56, 84],
+        ["stone", 0.45, -1.1, 0.46, 174],
+        ["fern", -1.7, 1.8, 0.7, 38],
+        ["fern", 1.5, 2.0, 0.6, 195],
+        ["bush", 0.1, 2.8, 0.74, 133],
+        ["reed", -1.25, 0.22, 0.82, 146],
+        ["reed", -0.35, 0.32, 1.0, 21],
+        ["reed", 0.6, 0.18, 0.71, 273],
+        ["reed", 1.6, 0.42, 0.87, 166],
+        ["sorrel", -0.6, 2.5, 0.65, 91]
+      ]
+    }
+  ]
+}

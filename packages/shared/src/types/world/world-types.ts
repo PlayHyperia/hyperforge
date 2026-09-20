@@ -535,6 +535,8 @@ export interface WorldArea {
     spotCount: number;
     /** Resource IDs to spawn (e.g., "fishing_spot_net", "fishing_spot_bait") */
     spotTypes: string[];
+    /** Optional explicit water owner. Requires complete, reachable family coverage. */
+    waterBodyId?: string;
   };
   /** Station placements for this area (furnaces, anvils, banks, altars, ranges) */
   stations?: StationLocation[];

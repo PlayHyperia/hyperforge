@@ -202,6 +202,7 @@ export class RoadNetworkSystem extends System {
   private directions!: Array<{ dx: number; dz: number }>;
   private terrainSystem?: {
     getHeightAt(x: number, z: number): number;
+    getResourceGroundHeight(x: number, z: number): number;
     getProceduralHeightAt?(x: number, z: number): number;
     getBiomeAtWorldPosition?(x: number, z: number): string;
   };
@@ -259,6 +260,7 @@ export class RoadNetworkSystem extends System {
     this.terrainSystem = this.world.getSystem("terrain") as
       | {
           getHeightAt(x: number, z: number): number;
+          getResourceGroundHeight(x: number, z: number): number;
           getProceduralHeightAt?(x: number, z: number): number;
           getBiomeAtWorldPosition?(x: number, z: number): string;
         }
@@ -296,11 +298,15 @@ export class RoadNetworkSystem extends System {
         profile,
         DataManager.getInstance().getAllWorldAreas(),
         getDuelArenaConfig(),
-        (x, z) => this.terrainSystem!.getHeightAt(x, z),
+        (x, z) =>
+          config?.compactPondDocks
+            ? this.terrainSystem!.getResourceGroundHeight(x, z)
+            : this.terrainSystem!.getHeightAt(x, z),
         {
           compactPreparationLodge: config?.compactPreparationLodge,
           compactBankPavilion: config?.compactBankPavilion,
           compactServiceCourts: config?.compactServiceCourts,
+          compactPondDocks: config?.compactPondDocks,
         },
       );
       this.roads = paths.map((path) => ({

@@ -55,6 +55,38 @@ Two CPU-tested placements fit the candidate basin; native integrated art,
 fishing capacity, complete routes and frame cost remain open acceptance gates.
 No pond, fishing spot, dock or supplier has been relocated in the live manifest.
 
+### Inland fishing integration — candidate only
+
+The detached candidate now requests 14 real fishing entities, two for each of
+seven families covering all 12 fish. The body-bound resource owner admits only
+wet targets with a dry approach within the existing interaction range, reserves
+pending positions, and keeps relocation inside the same water body. The focused
+28-test resource gate passes, including retries, concurrent reservations and
+actual dry-shore reachability. This is not a live multi-agent fishing proof.
+
+Both dock decks now have closed 12cm-thick planks and directionally aligned,
+filtered timber grain, sharing one opaque rough material. Stock and art03 each
+pass 18 layout/native-physics cases. Relocated habitat uses 28 instances in three
+unequal groups; 111 habitat/palette/worker cases pass. Native appearance, route
+integration and sustained cost still require separate evidence.
+
+**Do not promote this placement yet.** The candidate partly overlaps the old
+broad arena zone: ordinary fishing deaths, dropped items, opted-out agent
+retention and duel-challenge eligibility consequently need explicit separation
+and integration tests. Do not relax global economic/custody rules to hide this
+layout conflict. The old pond-to-bank paint also crosses the lobby after pond
+relocation; the candidate needs a verified dry route around physical floors.
+The revised candidate paint route now passes 77 path/configuration/worker
+cases around the lobby. The first real Chrome/Metal run nevertheless failed
+scene readiness: the enlarged bank exceeded the existing terrain refinement
+vertex cap in leaf `quad_68_d4_450_450`. Its loading-screen failure is retained;
+there is no native art or performance acceptance. The test browser and private
+runtime/database were closed; the human localhost session stayed unchanged.
+All LAYOUT-01–08 checkboxes remain open. Evidence is in the local
+`service-layout-network01-UNQUALIFIED/` and
+`inland-pond-integration01-UNQUALIFIED/` directories.
+
+
 ## Island layout requirements — 2026-09-20, all open
 
 These are required sub-gates of the world composition and verification tasks

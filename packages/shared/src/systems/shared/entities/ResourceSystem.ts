@@ -1,6 +1,7 @@
 import { SystemBase } from "../infrastructure/SystemBase";
 // NOTE: Import directly to avoid circular dependency through barrel file
 import { TerrainSystem } from "../world/TerrainSystem";
+import type { ElevatedWaterBody } from "../world/WaterBodyRegistry";
 import { uuid } from "../../../utils";
 import type { World } from "../../../types";
 import { ResourceEntity } from "../../../entities/world/ResourceEntity";
@@ -43,7 +44,14 @@ import {
 } from "../../../utils/ExternalAssetUtils";
 import type { GatheringToolData } from "../../../data/DataManager";
 import { ALL_WORLD_AREAS } from "../../../data/world-areas";
-import { isPositionInsideDuelArenaZone } from "../../../data/duel-manifest";
+import {
+  getDuelArenaConfig,
+  isPositionInsideDuelArenaZone,
+} from "../../../data/duel-manifest";
+import {
+  createDuelArenaFloorZones,
+  getDuelArenaGradeHeight,
+} from "../../../data/arena-grading";
 import { GATHERING_CONSTANTS } from "../../../constants/GatheringConstants";
 import { TERRAIN_CONSTANTS } from "../../../constants/GameConstants";
 import { findFishingSpotTiles, shuffleArray } from "../../../utils/ShoreUtils";
@@ -140,6 +148,11 @@ type TerrainResourceLease = {
   active: boolean;
   registrations: Map<ResourceID, TerrainResourceRegistration>;
   completion: Promise<void>;
+};
+
+type BoundFishingArea = {
+  body: Readonly<ElevatedWaterBody>;
+  bounds: Readonly<WorldArea["bounds"]>;
 };
 
 export interface ResourceEcologyStats {
@@ -406,6 +419,12 @@ export class ResourceSystem extends SystemBase {
   /** Areas where fishing spots couldn't spawn because collision WATER flags
    *  weren't baked yet. Retried each tick until flags are available. */
   private pendingFishingAreas = new Map<string, WorldArea>();
+  /** Opt-in body-bound areas reuse the real resource registration lease. */
+  private boundFishingSpawns = new Map<
+    string,
+    { signature: string; completion: Promise<void> }
+  >();
+  private boundFishingResources = new Map<ResourceID, BoundFishingArea>();
 
   // =============================================================================
   // TOOL DATA - Now loaded from tools.json manifest
@@ -1126,7 +1145,7 @@ export class ResourceSystem extends SystemBase {
 
       // Spawn dynamic fishing spots if configured for this area
       if (area.fishing?.enabled) {
-        this.spawnDynamicFishingSpots(areaId, area);
+        await this.spawnDynamicFishingSpots(areaId, area);
       }
     }
   }
@@ -1138,7 +1157,13 @@ export class ResourceSystem extends SystemBase {
    * @param areaId - Area identifier for logging
    * @param area - World area configuration with fishing config
    */
-  private spawnDynamicFishingSpots(areaId: string, area: WorldArea): void {
+  private spawnDynamicFishingSpots(
+    areaId: string,
+    area: WorldArea,
+  ): void | Promise<void> {
+    if (area.fishing?.waterBodyId !== undefined) {
+      return this.spawnBoundFishingSpots(areaId, area);
+    }
     if (DEBUG_GATHERING) {
       console.log(
         `[ResourceSystem] 🎣 spawnDynamicFishingSpots called for ${areaId} ` +
@@ -1297,6 +1322,245 @@ export class ResourceSystem extends SystemBase {
       }
       this.registerTerrainResources({ spawnPoints, isManifest: true });
     }
+  }
+
+  /** Reserve through the existing synchronous registration ledger, before any
+   * Entity.init await. Never publish an optimistic partial family allocation. */
+  private spawnBoundFishingSpots(
+    areaId: string,
+    area: WorldArea,
+  ): Promise<void> {
+    if (this.isDestroying) return Promise.resolve();
+    const terrain = this.terrainSystem;
+    const fishing = area.fishing!;
+    const { minX, minZ, maxX, maxZ } = area.bounds;
+    if (
+      !terrain ||
+      typeof fishing.waterBodyId !== "string" ||
+      !fishing.waterBodyId ||
+      !Number.isSafeInteger(fishing.spotCount) ||
+      fishing.spotCount < 1 ||
+      fishing.spotCount > 64 ||
+      !Array.isArray(fishing.spotTypes) ||
+      fishing.spotTypes.length < 1 ||
+      fishing.spotTypes.length > 16 ||
+      new Set(fishing.spotTypes).size !== fishing.spotTypes.length ||
+      fishing.spotCount % fishing.spotTypes.length !== 0 ||
+      !fishing.spotTypes.every(
+        (id) => getExternalResource(id)?.type === "fishing_spot",
+      ) ||
+      ![minX, minZ, maxX, maxZ].every(Number.isFinite) ||
+      minX >= maxX ||
+      minZ >= maxZ ||
+      (Math.ceil(maxX) - Math.floor(minX) + 1) *
+        (Math.ceil(maxZ) - Math.floor(minZ) + 1) >
+        65536
+    ) {
+      throw new Error("[ResourceSystem] Invalid bound fishing coverage");
+    }
+    const authored = Object.values(ALL_WORLD_AREAS)
+      .flatMap((entry) => entry.waterBodies ?? [])
+      .filter((body) => body.id === fishing.waterBodyId);
+    const bodies = terrain
+      .getWaterBodyRegistry()
+      .getAllBodies()
+      .filter((body) => body.id === fishing.waterBodyId);
+    const body = bodies[0];
+    const descriptor = authored[0];
+    if (
+      authored.length !== 1 ||
+      bodies.length !== 1 ||
+      !body ||
+      !descriptor ||
+      body.sourceType !== "explicit" ||
+      ![
+        body.centerX,
+        body.centerZ,
+        body.radius,
+        body.radiusSq,
+        body.surfaceY,
+      ].every(Number.isFinite) ||
+      body.radius <= 0 ||
+      body.radiusSq !== body.radius ** 2 ||
+      body.centerX !== descriptor.centerX ||
+      body.centerZ !== descriptor.centerZ ||
+      body.radius !== descriptor.radius ||
+      body.surfaceY !== descriptor.surfaceY
+    ) {
+      throw new Error(
+        "[ResourceSystem] Bound fishing requires its exact explicit water owner",
+      );
+    }
+    const binding: BoundFishingArea = {
+      body: Object.freeze({ ...body }),
+      bounds: Object.freeze({ ...area.bounds }),
+    };
+    const signature = JSON.stringify([
+      binding,
+      fishing.spotCount,
+      fishing.spotTypes,
+    ]);
+    const running = this.boundFishingSpawns.get(areaId);
+    if (running) {
+      if (running.signature !== signature)
+        throw new Error(
+          "[ResourceSystem] Bound fishing changes require restart",
+        );
+      return running.completion;
+    }
+    const occupied = this.getOccupiedFishingTiles();
+    for (const entry of Object.values(ALL_WORLD_AREAS))
+      for (const resource of entry.resources) {
+        if (getExternalResource(resource.resourceId)?.type !== "fishing_spot")
+          continue;
+        const tile = worldToTile(resource.position.x, resource.position.z);
+        occupied.add(`${tile.x},${tile.z}`);
+      }
+    const unique = new Set<string>();
+    const points = findFishingSpotTiles(
+      this.world.collision,
+      area.bounds,
+      terrain.getResourceGroundHeight.bind(terrain),
+      terrain
+        .getWaterBodyRegistry()
+        .getWaterSurfaceAt.bind(terrain.getWaterBodyRegistry()),
+      GATHERING_CONSTANTS.FISHING_SPOT_MOVE.shoreMinSpacing,
+    )
+      .map((point) => snapToTileCenter(point))
+      .filter((point) => {
+        const tile = worldToTile(point.x, point.z),
+          key = `${tile.x},${tile.z}`;
+        if (
+          occupied.has(key) ||
+          unique.has(key) ||
+          !this.isBoundFishingPoint(point, binding)
+        )
+          return false;
+        unique.add(key);
+        return true;
+      });
+    if (points.length < fishing.spotCount) {
+      this.pendingFishingAreas.set(areaId, area);
+      return Promise.resolve();
+    }
+    shuffleArray(points);
+    const spawnPoints = points
+      .slice(0, fishing.spotCount)
+      .map((position, i): TerrainResourceSpawnPoint => ({
+        type: "fish",
+        subType: fishing.spotTypes[i % fishing.spotTypes.length].replace(
+          "fishing_spot_",
+          "",
+        ) as TerrainResourceSpawnPoint["subType"],
+        position: { x: position.x, y: body.surfaceY, z: position.z },
+      }));
+    // Existing registrar's coordinate ID, on already snapped centers. Install
+    // the private authority before registration, never a caller bypass flag.
+    const ids = spawnPoints.map((point) =>
+      createResourceID(
+        `fish_${point.position.x.toFixed(0)}_${point.position.z.toFixed(0)}`,
+      ),
+    );
+    for (const id of ids) this.boundFishingResources.set(id, binding);
+    this.pendingFishingAreas.delete(areaId);
+    const completion = this.registerTerrainResources({
+      spawnPoints,
+      isManifest: true,
+    }).catch((error: unknown) => {
+      for (const id of ids) this.boundFishingResources.delete(id);
+      this.boundFishingSpawns.delete(areaId);
+      if (!this.isDestroying) this.pendingFishingAreas.set(areaId, area);
+      throw error;
+    });
+    this.boundFishingSpawns.set(areaId, { signature, completion });
+    return completion;
+  }
+
+  private getOccupiedFishingTiles(except?: ResourceID): Set<string> {
+    const occupied = new Set<string>();
+    const add = (id: ResourceID, resource: Resource) => {
+      if (id === except || resource.type !== "fishing_spot") return;
+      const tile = worldToTile(resource.position.x, resource.position.z);
+      occupied.add(`${tile.x},${tile.z}`);
+    };
+    for (const [id, resource] of this.resources) add(id, resource);
+    for (const [id, entry] of this.terrainResourceRegistrations) {
+      if (!this.resources.has(id)) add(id, entry.registration.resource);
+    }
+    return occupied;
+  }
+
+  private isBoundFishingPoint(
+    point: { x: number; z: number },
+    binding: BoundFishingArea,
+  ): boolean {
+    const terrain = this.terrainSystem!;
+    const { body, bounds } = binding;
+    const floors = createDuelArenaFloorZones(
+      getDuelArenaConfig(),
+      getDuelArenaGradeHeight(),
+    );
+    const insideFloor = (x: number, z: number) =>
+      floors.some(
+        (floor) =>
+          Math.abs(x - floor.centerX) <= floor.width / 2 + 1 &&
+          Math.abs(z - floor.centerZ) <= floor.depth / 2 + 1,
+      );
+    if (insideFloor(point.x, point.z)) return false;
+    if (
+      point.x < bounds.minX ||
+      point.x > bounds.maxX ||
+      point.z < bounds.minZ ||
+      point.z > bounds.maxZ
+    )
+      return false;
+    const live = terrain.getWaterBodyRegistry().getBodyAt(point.x, point.z);
+    if (
+      !live ||
+      live.id !== body.id ||
+      live.sourceType !== "explicit" ||
+      live.radiusSq !== body.radiusSq ||
+      live.centerX !== body.centerX ||
+      live.centerZ !== body.centerZ ||
+      live.radius !== body.radius ||
+      live.surfaceY !== body.surfaceY ||
+      !terrain.hasBakedWalkabilityAt(point.x, point.z) ||
+      !(terrain.getResourceGroundHeight(point.x, point.z) < body.surfaceY)
+    )
+      return false;
+    const tile = worldToTile(point.x, point.z);
+    if (
+      !this.world.collision.hasFlags(tile.x, tile.z, CollisionFlag.WATER) ||
+      this.world.collision.hasFlags(
+        tile.x,
+        tile.z,
+        CollisionFlag.DOCK | CollisionFlag.BRIDGE | CollisionFlag.BLOCKED,
+      )
+    )
+      return false;
+    const range = GATHERING_CONSTANTS.FISHING_INTERACTION_RANGE;
+    for (let x = tile.x - Math.ceil(range); x <= tile.x + Math.ceil(range); x++)
+      for (
+        let z = tile.z - Math.ceil(range);
+        z <= tile.z + Math.ceil(range);
+        z++
+      ) {
+        if (
+          Math.hypot(x + 0.5 - point.x, z + 0.5 - point.z) > range ||
+          !terrain.hasBakedWalkabilityAt(x + 0.5, z + 0.5) ||
+          !this.world.collision.isWalkable(x, z) ||
+          this.world.collision.hasFlags(
+            x,
+            z,
+            CollisionFlag.DOCK | CollisionFlag.BRIDGE,
+          ) ||
+          insideFloor(x + 0.5, z + 0.5)
+        )
+          continue;
+        if (terrain.getResourceGroundHeight(x + 0.5, z + 0.5) >= body.surfaceY)
+          return true;
+      }
+    return false;
   }
 
   /**
@@ -2348,16 +2612,33 @@ export class ResourceSystem extends SystemBase {
         throw new Error("[ResourceSystem] Non-finite authored resource ground");
     }
 
-    // Duel arena tiles should not contain harvestable resources or trees.
-    if (isPositionInsideDuelArenaZone(snappedPosition.x, snappedPosition.z)) {
+    const resourceId =
+      authoredId ??
+      `${type}_${snappedPosition.x.toFixed(0)}_${snappedPosition.z.toFixed(0)}`;
+    const boundFishing =
+      resourceType === "fishing_spot" && groundAuthoredLand
+        ? this.boundFishingResources.get(createResourceID(resourceId))
+        : undefined;
+    // Legacy resources retain the broad campus exclusion. Only an exact private
+    // body-bound fishing reservation can use wet basin outside physical floors.
+    // This does not alter global arena/custody/PVP area membership.
+    if (
+      boundFishing &&
+      (snappedPosition.y !== boundFishing.body.surfaceY ||
+        !this.isBoundFishingPoint(snappedPosition, boundFishing))
+    ) {
+      throw new Error("[ResourceSystem] Bound fishing target lost admission");
+    }
+    if (
+      !boundFishing &&
+      isPositionInsideDuelArenaZone(snappedPosition.x, snappedPosition.z)
+    ) {
       return undefined;
     }
 
     // All values come from manifest - no hardcoding
     const resource: Resource = {
-      id:
-        authoredId ??
-        `${type}_${snappedPosition.x.toFixed(0)}_${snappedPosition.z.toFixed(0)}`,
+      id: resourceId,
       type: resourceType,
       name: manifestData.name,
       position: {
@@ -3631,15 +3912,26 @@ export class ResourceSystem extends SystemBase {
     };
 
     const registry = this.terrainSystem.getWaterBodyRegistry();
-    const nearbyShorePoints = findFishingSpotTiles(
+    const binding = this.boundFishingResources.get(resourceId);
+    let nearbyShorePoints = findFishingSpotTiles(
       this.world.collision,
       searchBounds,
-      this.terrainSystem.getHeightAt.bind(this.terrainSystem),
+      binding
+        ? this.terrainSystem.getResourceGroundHeight.bind(this.terrainSystem)
+        : this.terrainSystem.getHeightAt.bind(this.terrainSystem),
       registry.getWaterSurfaceAt.bind(registry),
       GATHERING_CONSTANTS.FISHING_SPOT_MOVE.shoreMinSpacing,
     );
 
+    if (binding)
+      nearbyShorePoints = nearbyShorePoints
+        .map((point) => ({ ...point, ...snapToTileCenter(point) }))
+        .filter((point) => this.isBoundFishingPoint(point, binding));
+
     const occupiedFishingTiles = new Set<string>();
+    if (binding)
+      for (const key of this.getOccupiedFishingTiles(resourceId))
+        occupiedFishingTiles.add(key);
     for (const [otherId, otherResource] of this.resources) {
       if (
         otherId === resourceId ||
@@ -4099,7 +4391,13 @@ export class ResourceSystem extends SystemBase {
           }
         }
         if (fullyBaked) {
-          this.spawnDynamicFishingSpots(areaId, area);
+          const completion = this.spawnDynamicFishingSpots(areaId, area);
+          completion?.catch((error: unknown) =>
+            console.error(
+              `[ResourceSystem] Bound fishing retry failed for ${areaId}`,
+              error,
+            ),
+          );
         }
       }
     }
@@ -4966,6 +5264,8 @@ export class ResourceSystem extends SystemBase {
     this.manifestResourceIds.clear();
     this.playerSkills.clear();
     this.pendingFishingAreas.clear();
+    this.boundFishingSpawns.clear();
+    this.boundFishingResources.clear();
 
     // SECURITY: Clear rate limit tracking
     this.gatherRateLimits.clear();

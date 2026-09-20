@@ -2855,6 +2855,7 @@ export class TerrainSystem extends System {
       this.getWorldTerrainProfile(),
       DataManager.getInstance().getAllWorldAreas(),
       (x, z) => this.getHeightAtComputed(x, z),
+      DataManager.getWorldConfig()?.compactPondDocks,
     );
     if (pondPlacements.length) {
       this.compactPondDressing = new CompactPondDressingVisuals(

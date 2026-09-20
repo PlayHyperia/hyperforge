@@ -23,6 +23,7 @@ import type { StaticCollisionLease } from "../movement/CollisionMatrix";
 import type { TerrainSystem } from "./TerrainSystem";
 import {
   groundCompactPondDock,
+  POND_DOCK_SURFACE,
   type GroundedPondDock,
 } from "./CompactPondDockLayout";
 import { TERRAIN_CONSTANTS } from "../../../constants/GameConstants";
@@ -64,6 +65,7 @@ import {
   mix,
   smoothstep,
   min as tslMin,
+  attribute,
 } from "three/tsl";
 
 // Constants — single source of truth from GameConstants
@@ -141,6 +143,63 @@ const dockWoodUV = Fn(() => {
   const deckUV = vec2(wp.x, wp.z);
   const vertUV = vec2(wp.x.add(wp.z), wp.y);
   return mix(vertUV, deckUV, horiz);
+});
+
+/** Metre-scale, member-local timber; never a world-grid plank projection.
+ * Attributes keep both docks on one material while grain follows each board,
+ * beam and post. Screen derivatives suppress unresolved rings/fibres rather
+ * than letting thin procedural lines shimmer at distance. No texture reads. */
+const compactDockTimberField = Fn(() => {
+  const coord = attribute("dockTimberCoord", "vec4");
+  const frame = attribute("dockTimberAxis", "vec4");
+  const plank = coord.w.lessThan(1.5).select(1, 0);
+  const board = tslFloor(coord.y.mul(2)).mul(plank);
+  const seed = frame.w.add(board.mul(0.731));
+  const variation = tslHash(vec2(seed, seed.add(4.7)));
+  const broad = tslNoise2D(
+    vec2(coord.x.mul(0.38), coord.y.mul(3.1)).add(vec2(seed.mul(7.3), seed)),
+  );
+  const wander = sin(coord.x.mul(0.75).add(seed.mul(3.1)))
+    .mul(0.55)
+    .add(broad.mul(1.8));
+  const fibrePhase = coord.y.mul(180).add(wander);
+  const growthPhase = coord.y.mul(53).add(wander.mul(0.7));
+  const filteredSine = (phase: Node<"float">) =>
+    sin(phase).mul(float(1).sub(smoothstep(0.65, 2.8, phase.fwidth())));
+  const fibre = filteredSine(fibrePhase);
+  const growth = filteredSine(growthPhase);
+  const sectionU = mix(
+    coord.y,
+    fract(coord.y.mul(2)).mul(0.5).sub(0.25),
+    plank,
+  );
+  const radius = vec2(sectionU.mul(0.85), coord.z.add(0.06)).length();
+  const rings = filteredSine(radius.mul(145).add(broad.mul(1.6)));
+  const end = smoothstep(0.72, 0.96, abs(normalWorld.dot(frame.xyz)));
+  const grain = mix(
+    growth.mul(0.055).add(fibre.mul(0.025)),
+    rings.mul(0.07),
+    end,
+  );
+  const rowLocal = fract(coord.y.mul(2));
+  const jointDistance = tslMin(rowLocal, float(1).sub(rowLocal)).mul(0.5);
+  const joint = float(1)
+    .sub(
+      smoothstep(0.001, coord.y.fwidth().max(0.002).add(0.003), jointDistance),
+    )
+    .mul(plank);
+  const tone = float(0.89)
+    .add(variation.mul(0.16))
+    .add(broad.sub(0.5).mul(0.09))
+    .add(grain)
+    .sub(end.mul(0.065))
+    .sub(joint.mul(0.1));
+  const roughness = float(0.86)
+    .add(broad.mul(0.07))
+    .add(end.mul(0.025))
+    .add(joint.mul(0.025))
+    .clamp(0.82, 0.98);
+  return vec4(tone, roughness, variation, coord.w.clamp(0, 1));
 });
 
 /** Pre-allocated test points for isTerrainReady(). */
@@ -731,9 +790,10 @@ export class ProceduralDocks extends System {
       ) => {
         const hw = sectionWidth / 2;
 
-        // ── Deck surface (top face only, custom grid mesh) ──
+        // Compact planks retain the exact admitted top and close below it.
+        // Legacy generated docks keep their historical geometry.
         const deckGeo = grounded
-          ? new THREE.BufferGeometry()
+          ? this.buildCompactDockPlanks(grounded)
           : this.buildDockDeckGeometry(
               sx,
               sz,
@@ -745,14 +805,6 @@ export class ProceduralDocks extends System {
               sectionLen,
               sectionWidth,
             );
-        if (grounded && deckGeo) {
-          deckGeo.setAttribute(
-            "position",
-            new THREE.BufferAttribute(grounded.positions, 3),
-          );
-          deckGeo.setIndex(new THREE.BufferAttribute(grounded.indices, 1));
-          deckGeo.computeVertexNormals();
-        }
         if (deckGeo) woodGeometries.push(deckGeo);
 
         // ── Side stringers (structural beams under deck edges) ──
@@ -827,6 +879,7 @@ export class ProceduralDocks extends System {
           // Post shaft
           const postGeo = new THREE.BoxGeometry(postSize, postHeight, postSize);
           postGeo.translate(postX, floorY + postHeight / 2, postZ);
+          if (grounded) postGeo.userData.dockVerticalTimber = true;
           woodGeometries.push(postGeo);
 
           // Post cap (wider, just under deck)
@@ -984,6 +1037,21 @@ export class ProceduralDocks extends System {
       // ── Merge all wood geometry into single mesh ──
       if (woodGeometries.length === 0) return null;
 
+      if (grounded) {
+        for (let index = 0; index < woodGeometries.length; index++) {
+          let geometry = woodGeometries[index];
+          // The inherited rail box shares eight corners, producing rounded
+          // normals on square lumber. Separate only compact member faces.
+          if (index > 0 && geometry.getAttribute("position").count === 8) {
+            const faces = geometry.toNonIndexed();
+            faces.computeVertexNormals();
+            geometry.dispose();
+            woodGeometries[index] = geometry = faces;
+          }
+          this.addCompactTimberCoordinates(geometry, grounded, index);
+        }
+      }
+
       const merged = this.mergeGeometries(woodGeometries);
       if (!merged) return null;
 
@@ -1044,6 +1112,7 @@ export class ProceduralDocks extends System {
         DOCK_FENCE_POST_SIZE,
       );
       postGeo.translate(px, deckY + DOCK_FENCE_HEIGHT / 2, pz);
+      postGeo.userData.dockVerticalTimber = true;
       woodGeometries.push(postGeo);
 
       const capSize = DOCK_FENCE_POST_SIZE + DOCK_FENCE_CAP_OVERHANG * 2;
@@ -1144,6 +1213,167 @@ export class ProceduralDocks extends System {
     if (includeStartRailing) {
       // Shore end is typically open, skip for standard docks
     }
+  }
+
+  /**
+   * Sixteen fitted 0.5m transverse planks, 0.12m thick. The first position and
+   * index ranges are byte-identical to the retained walkable top. Bottoms and
+   * four sides close each plank; adjoining faces touch without raised seams or
+   * holes in the walking surface. This adds 640 triangles, never another draw.
+   */
+  private buildCompactDockPlanks(
+    record: GroundedPondDock,
+  ): THREE.BufferGeometry {
+    const columns = 7;
+    const rows = 17;
+    const thickness = POND_DOCK_SURFACE.boardThickness;
+    const positions = Array.from(record.positions);
+    const indices = Array.from(record.indices);
+    const top = new THREE.BufferGeometry();
+    top.setAttribute(
+      "position",
+      new THREE.BufferAttribute(record.positions, 3),
+    );
+    top.setIndex(new THREE.BufferAttribute(record.indices, 1));
+    top.computeVertexNormals();
+    const normals = Array.from(top.getAttribute("normal").array);
+    top.dispose();
+    const point = (index: number, lower = false) =>
+      new THREE.Vector3(
+        record.positions[index * 3],
+        lower
+          ? Math.fround(record.positions[index * 3 + 1] - thickness)
+          : record.positions[index * 3 + 1],
+        record.positions[index * 3 + 2],
+      );
+    const quad = (
+      a: THREE.Vector3,
+      b: THREE.Vector3,
+      c: THREE.Vector3,
+      d: THREE.Vector3,
+    ) => {
+      const normal = b.clone().sub(a).cross(c.clone().sub(a)).normalize();
+      const base = positions.length / 3;
+      for (const p of [a, b, c, d]) {
+        positions.push(p.x, p.y, p.z);
+        normals.push(normal.x, normal.y, normal.z);
+      }
+      indices.push(base, base + 1, base + 2, base + 1, base + 3, base + 2);
+    };
+    for (let row = 0; row < rows - 1; row++) {
+      const lowerStart = positions.length / 3;
+      for (let r = row; r <= row + 1; r++)
+        for (let column = 0; column < columns; column++) {
+          const sourceIndex = r * columns + column;
+          const p = point(sourceIndex, true);
+          positions.push(p.x, p.y, p.z);
+          normals.push(
+            -normals[sourceIndex * 3],
+            -normals[sourceIndex * 3 + 1],
+            -normals[sourceIndex * 3 + 2],
+          );
+        }
+      for (let column = 0; column < columns - 1; column++) {
+        const a = lowerStart + column,
+          b = a + 1,
+          c = a + columns,
+          d = c + 1;
+        indices.push(a, c, b, b, c, d);
+        const front = row * columns + column;
+        const back = front + columns;
+        quad(
+          point(front),
+          point(front, true),
+          point(front + 1),
+          point(front + 1, true),
+        );
+        quad(
+          point(back),
+          point(back + 1),
+          point(back, true),
+          point(back + 1, true),
+        );
+      }
+      const left = row * columns;
+      const right = left + columns - 1;
+      quad(
+        point(left),
+        point(left + columns),
+        point(left, true),
+        point(left + columns, true),
+      );
+      quad(
+        point(right),
+        point(right, true),
+        point(right + columns),
+        point(right + columns, true),
+      );
+    }
+    const result = new THREE.BufferGeometry();
+    result.setAttribute(
+      "position",
+      new THREE.Float32BufferAttribute(positions, 3),
+    );
+    result.setAttribute("normal", new THREE.Float32BufferAttribute(normals, 3));
+    result.setIndex(indices);
+    return result;
+  }
+
+  /** Member-local metre coordinates permit one PBR material for both docks.
+   * A zero mask on historical geometry retains its original material result. */
+  private addCompactTimberCoordinates(
+    geometry: THREE.BufferGeometry,
+    record: GroundedPondDock,
+    member: number,
+  ): void {
+    const position = geometry.getAttribute("position");
+    const coord = new Float32Array(position.count * 4);
+    const frames = new Float32Array(position.count * 4);
+    const direction = getCompactPondDockDirection(record.descriptor.rotation);
+    const grain = new THREE.Vector3(-direction.z, 0, direction.x);
+    const across = new THREE.Vector3(direction.x, 0, direction.z);
+    const origin = new THREE.Vector3(
+      record.descriptor.x,
+      record.deckY,
+      record.descriptor.z,
+    );
+    if (member !== 0) {
+      geometry.computeBoundingBox();
+      const box = geometry.boundingBox!;
+      const size = box.getSize(new THREE.Vector3());
+      box.getCenter(origin);
+      if (
+        geometry.userData.dockVerticalTimber === true ||
+        (size.y > size.x && size.y > size.z)
+      )
+        grain.set(0, 1, 0);
+      else if (size.x > size.z) grain.set(1, 0, 0);
+      else grain.set(0, 0, 1);
+      if (grain.y === 1) across.set(-direction.z, 0, direction.x);
+      else across.set(0, 1, 0);
+    }
+    const depth = grain.clone().cross(across);
+    const p = new THREE.Vector3();
+    for (let i = 0; i < position.count; i++) {
+      p.fromBufferAttribute(position, i).sub(origin);
+      coord[i * 4] = p.dot(grain);
+      coord[i * 4 + 1] = p.dot(across) + (member === 0 ? 2 : 0);
+      coord[i * 4 + 2] =
+        member === 0
+          ? position.getY(i) -
+            record.heightAt(position.getX(i), position.getZ(i))!
+          : p.dot(depth);
+      coord[i * 4 + 3] = member === 0 ? 1 : 2;
+      frames.set([grain.x, grain.y, grain.z, member * 0.61803398875], i * 4);
+    }
+    geometry.setAttribute(
+      "dockTimberCoord",
+      new THREE.BufferAttribute(coord, 4),
+    );
+    geometry.setAttribute(
+      "dockTimberAxis",
+      new THREE.BufferAttribute(frames, 4),
+    );
   }
 
   /**
@@ -1303,6 +1533,8 @@ export class ProceduralDocks extends System {
     const allVerts: number[] = [];
     const allNormals: number[] = [];
     const allIndices: number[] = [];
+    const allTimberCoordinates: number[] = [];
+    const allTimberAxes: number[] = [];
     let vertexOffset = 0;
 
     for (const geo of geometries) {
@@ -1323,6 +1555,22 @@ export class ProceduralDocks extends System {
       } else {
         for (let i = 0; i < posAttr.count; i++) {
           allNormals.push(0, 1, 0);
+        }
+      }
+      for (const [name, values] of [
+        ["dockTimberCoord", allTimberCoordinates],
+        ["dockTimberAxis", allTimberAxes],
+      ] as const) {
+        const timber = geo.getAttribute(name);
+        for (let i = 0; i < posAttr.count; i++) {
+          if (timber)
+            values.push(
+              timber.getX(i),
+              timber.getY(i),
+              timber.getZ(i),
+              timber.getW(i),
+            );
+          else values.push(0, 0, 0, 0);
         }
       }
 
@@ -1352,6 +1600,14 @@ export class ProceduralDocks extends System {
       new THREE.Float32BufferAttribute(allNormals, 3),
     );
     merged.setIndex(allIndices);
+    merged.setAttribute(
+      "dockTimberCoord",
+      new THREE.Float32BufferAttribute(allTimberCoordinates, 4),
+    );
+    merged.setAttribute(
+      "dockTimberAxis",
+      new THREE.Float32BufferAttribute(allTimberAxes, 4),
+    );
     return merged;
   }
 
@@ -1372,6 +1628,8 @@ export class ProceduralDocks extends System {
    */
   private createDockWoodMaterial(): MeshStandardNodeMaterial {
     const mat = new MeshStandardNodeMaterial();
+    const timber = compactDockTimberField();
+    mat.metalness = 0;
 
     mat.colorNode = Fn(() => {
       const uvCoord = dockWoodUV();
@@ -1396,7 +1654,13 @@ export class ProceduralDocks extends System {
 
       // Dark gap between planks
       const gapColor = vec3(0.06, 0.04, 0.02);
-      return vec4(mix(gapColor, woodColor.mul(edgeDark), isPlank), 1.0);
+      const historical = mix(gapColor, woodColor.mul(edgeDark), isPlank);
+      const compact = mix(
+        vec3(0.245, 0.187, 0.128),
+        vec3(0.28, 0.226, 0.163),
+        timber.z,
+      ).mul(timber.x);
+      return vec4(mix(historical, compact, timber.w), 1.0);
     })();
 
     mat.roughnessNode = Fn(() => {
@@ -1409,7 +1673,7 @@ export class ProceduralDocks extends System {
       const woodRough = float(0.82).add(
         tslHash(plankId.add(vec2(7.0, 3.0))).mul(0.1),
       );
-      return mix(float(0.95), woodRough, isPlank);
+      return mix(mix(float(0.95), woodRough, isPlank), timber.y, timber.w);
     })();
 
     return mat;

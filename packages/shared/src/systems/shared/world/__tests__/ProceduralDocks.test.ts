@@ -16,11 +16,16 @@ import { ProceduralDocks } from "../ProceduralDocks";
 import type { ElevatedWaterBody } from "../WaterBodyRegistry";
 import {
   groundCompactPondDock,
+  POND_DOCK_SURFACE,
   type GroundedPondDock,
 } from "../CompactPondDockLayout";
 import { getCompactPondDockDirection } from "../DockDefinition";
 import { CollisionFlag, CollisionMask } from "../../movement/CollisionFlags";
 import { BFSPathfinder } from "../../movement/BFSPathfinder";
+import {
+  DockGenerator,
+  DEFAULT_DOCK_PARAMS,
+} from "@hyperforge/procgen/items/dock";
 
 const candidate = JSON.parse(
   readFileSync(
@@ -202,6 +207,234 @@ function captureMeshDisposals(world: World) {
 }
 
 describe("actual procedural pond dock ownership and native collision (not rendered acceptance)", () => {
+  it("keeps non-compact generated geometry on the historical zero-mask wood path", async () => {
+    const { owner } = await fixture({ configured: false });
+    const recipe = {
+      ...DEFAULT_DOCK_PARAMS,
+      widthRange: [3, 3] as [number, number],
+      lengthRange: [6, 6] as [number, number],
+    };
+    const generated = new DockGenerator().generate(
+      recipe,
+      {
+        position: { x: 390, y: 25, z: 424.5 },
+        waterwardNormal: { x: 1, z: 0 },
+        landwardNormal: { x: -1, z: 0 },
+        height: 25,
+        slope: 0,
+        distanceFromCenter: 0,
+      },
+      { seed: "legacy-dock-timber-control", waterLevel: 24.6, skipMesh: true },
+    );
+    const mesh = owner["buildDockMeshWorldSpace"](
+      generated,
+      recipe,
+      24.6,
+      21.6,
+    );
+    expect(mesh).not.toBeNull();
+    try {
+      const geometry = mesh!.geometry;
+      expect(
+        Array.from(geometry.getAttribute("dockTimberCoord").array).every(
+          (value) => value === 0,
+        ),
+      ).toBe(true);
+      expect(
+        Array.from(geometry.getAttribute("dockTimberAxis").array).every(
+          (value) => value === 0,
+        ),
+      ).toBe(true);
+      const position = geometry.getAttribute("position");
+      const normal = geometry.getAttribute("normal");
+      for (let forward = 0; forward <= 12; forward++)
+        for (let across = 0; across <= 3; across++) {
+          const index = forward * 4 + across;
+          expect([
+            position.getX(index),
+            position.getY(index),
+            position.getZ(index),
+          ]).toEqual([390 + forward * 0.5, 25, 423 + across]);
+          expect([
+            normal.getX(index),
+            normal.getY(index),
+            normal.getZ(index),
+          ]).toEqual([0, 1, 0]);
+        }
+    } finally {
+      mesh?.geometry.dispose();
+    }
+  });
+
+  it("closes every fitted timber plank below the byte-exact retained top without changing its walking surface", async () => {
+    const { world, terrain, owner } = await fixture();
+    const entries = records(terrain!);
+    await owner.start();
+    const sharedMaterials = new Set<THREE.Material>();
+    let upwardRays = 0;
+    for (const entry of entries) {
+      const mesh = world.stage.scene.getObjectByName(
+        `PondDock_${entry.descriptor.id}`,
+      );
+      if (!(mesh instanceof THREE.Mesh) || Array.isArray(mesh.material))
+        throw new Error("Expected one actual merged dock mesh/material");
+      sharedMaterials.add(mesh.material);
+      const geometry = mesh.geometry;
+      const position = geometry.getAttribute("position");
+      const index = geometry.getIndex()!;
+      expect(
+        Array.from(position.array.slice(0, entry.positions.length)),
+      ).toEqual(Array.from(entry.positions));
+      expect(Array.from(index.array.slice(0, entry.indices.length))).toEqual(
+        Array.from(entry.indices),
+      );
+      expect(geometry.groups).toHaveLength(0);
+      expect(mesh.material.transparent).toBe(false);
+      expect(mesh.material.opacity).toBe(1);
+      const coord = geometry.getAttribute("dockTimberCoord");
+      const axis = geometry.getAttribute("dockTimberAxis");
+      expect(coord.count).toBe(position.count);
+      expect(axis.count).toBe(position.count);
+      expect(Array.from(coord.array).every(Number.isFinite)).toBe(true);
+      expect(Array.from(axis.array).every(Number.isFinite)).toBe(true);
+      const direction = getCompactPondDockDirection(entry.descriptor.rotation);
+      for (let i = 0; i < entry.positions.length / 3; i++) {
+        expect(coord.getW(i)).toBe(1);
+        expect(coord.getZ(i)).toBe(0);
+        expect([axis.getX(i), axis.getY(i), axis.getZ(i)]).toEqual([
+          -direction.z,
+          0,
+          direction.x,
+        ]);
+      }
+      let verticalMemberVertices = 0;
+      for (let i = 0; i < axis.count; i++) {
+        expect(Math.hypot(axis.getX(i), axis.getY(i), axis.getZ(i))).toBe(1);
+        if (coord.getW(i) === 2 && axis.getY(i) === 1) verticalMemberVertices++;
+      }
+      expect(verticalMemberVertices).toBeGreaterThan(0);
+
+      // Every source row has 12 original top triangles and40 added bottom/side
+      // triangles. Coordinate-welded edges must occur twice with opposite
+      // directions, proving closed oriented solids (not merely an opaque top).
+      const plankGeometry = owner["buildCompactDockPlanks"](entry);
+      try {
+        const pp = plankGeometry.getAttribute("position");
+        const pi = plankGeometry.getIndex()!;
+        expect(pp.count).toBe(1239);
+        expect(pi.count / 3).toBe(832);
+        for (let row = 0; row < 16; row++) {
+          const edges = new Map<
+            string,
+            { count: number; orientation: number }
+          >();
+          let volume = 0;
+          const reference = new THREE.Vector3().fromBufferAttribute(
+            pp,
+            row * 7,
+          );
+          for (const [start, count] of [
+            [row * 36, 36],
+            [entry.indices.length + row * 120, 120],
+          ]) {
+            for (let i = start; i < start + count; i += 3) {
+              const vertices = [0, 1, 2].map((corner) =>
+                new THREE.Vector3().fromBufferAttribute(
+                  pp,
+                  pi.getX(i + corner),
+                ),
+              );
+              const normal = vertices[1]
+                .clone()
+                .sub(vertices[0])
+                .cross(vertices[2].clone().sub(vertices[0]));
+              expect(normal.lengthSq()).toBeGreaterThan(0);
+              volume +=
+                vertices[0]
+                  .clone()
+                  .sub(reference)
+                  .dot(
+                    vertices[1]
+                      .clone()
+                      .sub(reference)
+                      .cross(vertices[2].clone().sub(reference)),
+                  ) / 6;
+              const keys = vertices.map((p) => `${p.x},${p.y},${p.z}`);
+              for (let edge = 0; edge < 3; edge++) {
+                const a = keys[edge],
+                  b = keys[(edge + 1) % 3];
+                const key = a < b ? `${a}|${b}` : `${b}|${a}`;
+                const value = edges.get(key) ?? { count: 0, orientation: 0 };
+                value.count++;
+                value.orientation += a < b ? 1 : -1;
+                edges.set(key, value);
+              }
+            }
+          }
+          expect(
+            [...edges.values()].every(
+              ({ count, orientation }) => count === 2 && orientation === 0,
+            ),
+          ).toBe(true);
+          // Float32 Y extrusion can differ by half an ULP per vertex.
+          const volumeErrorBound =
+            3 * 0.5 * 2 ** (Math.floor(Math.log2(entry.deckY)) - 24);
+          expect(
+            Math.abs(volume - 3 * 0.5 * POND_DOCK_SURFACE.boardThickness),
+          ).toBeLessThanOrEqual(volumeErrorBound);
+        }
+      } finally {
+        plankGeometry.dispose();
+      }
+
+      mesh.updateMatrixWorld(true);
+      const ray = new THREE.Raycaster(
+        new THREE.Vector3(),
+        new THREE.Vector3(0, 1, 0),
+      );
+      // Clear of the existing transverse beams and posts: test the actual
+      // merged mesh AND native actor from below, including the fitted apron.
+      for (const forward of [
+        -1.75, -1.25, -0.75, -0.25, 0.25, 1.25, 2.25, 3.75, 4.75, 5.75,
+      ]) {
+        const p = point(entry, forward, 0);
+        const expected =
+          entry.heightAt(p.x, p.z)! - POND_DOCK_SURFACE.boardThickness;
+        ray.ray.origin.set(p.x, expected - 0.25, p.z);
+        const visible = ray.intersectObject(mesh, false);
+        expect(visible.length).toBeGreaterThan(0);
+        const tolerance =
+          8 * 2 ** (Math.floor(Math.log2(Math.abs(expected))) - 23);
+        expect(Math.abs(visible[0].point.y - expected)).toBeLessThanOrEqual(
+          tolerance,
+        );
+        const physical = world.physics.raycast(
+          ray.ray.origin,
+          ray.ray.direction,
+          1,
+        );
+        expect(physical).not.toBeNull();
+        expect(Math.abs(physical!.point.y - expected)).toBeLessThanOrEqual(
+          tolerance,
+        );
+        upwardRays++;
+      }
+    }
+    expect(sharedMaterials.size).toBe(1);
+    console.info(
+      "actual-pond-dock-timber",
+      JSON.stringify({
+        planksPerDock: 16,
+        platformTriangles: 832,
+        addedTrianglesPerDock: 640,
+        upwardMergedAndNativeRays: upwardRays,
+        retainedTop: "byte-exact position/index prefix",
+        sharedMaterialCount: sharedMaterials.size,
+        nativeVisualAcceptance: false,
+      }),
+    );
+  });
+
   it("publishes two real native meshes once, agrees with fitted ramp/deck heights, and disposes only owned resources", async () => {
     const { world, terrain: maybeTerrain, owner } = await fixture();
     const terrain = maybeTerrain!;

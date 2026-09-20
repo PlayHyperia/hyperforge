@@ -17,6 +17,12 @@ import {
   getCompactPreparationLodgeFootprint,
 } from "./CompactPreparationLodge";
 import { validateCompactServiceCourtBindings } from "./CompactServiceCourt";
+import {
+  getCompactPondDockDirection,
+  getCompactPondDockSupportBounds,
+  validateCompactPondDockBindings,
+  validateCompactPondDocks,
+} from "./DockDefinition";
 
 /** Surface-mask paths only: no meshes, colliders, height grading or agent routing. */
 export type CompactIslandPath = Readonly<{
@@ -61,7 +67,10 @@ type Bounds = Readonly<{
 export type CompactPathArchitecture = Readonly<
   Pick<
     WorldConfigManifest,
-    "compactPreparationLodge" | "compactBankPavilion" | "compactServiceCourts"
+    | "compactPreparationLodge"
+    | "compactBankPavilion"
+    | "compactServiceCourts"
+    | "compactPondDocks"
   >
 >;
 
@@ -126,6 +135,11 @@ export function createCompactIslandPaths(
   architecture?: CompactPathArchitecture,
 ): readonly CompactIslandPath[] {
   if (!isCompactSculptProfile(profile)) return Object.freeze([]);
+  const pondDocks = validateCompactPondDocks(
+    architecture?.compactPondDocks,
+    profile,
+  );
+  const dockWater = validateCompactPondDockBindings(pondDocks, areas);
   const serviceCourts = architecture?.compactServiceCourts;
   validateCompactServiceCourtBindings(serviceCourts, areas);
   const primaryBank = serviceCourts?.courts.find(
@@ -214,6 +228,53 @@ export function createCompactIslandPaths(
   if (bankCourt && lodge)
     exclusions.push(getCompactPreparationLodgeFootprint(lodge, false));
   const waters = Object.values(areas).flatMap((area) => area.waterBodies ?? []);
+  const dockExclusions =
+    pondDocks?.docks.map(getCompactPondDockSupportBounds) ?? [];
+  // Only the explicitly bound irregular basin uses its actual dry shoreline.
+  // Check the complete paint capsule, including its rounded ends and a half-
+  // diagonal sample guard. Other water bodies retain the exact disk keep-out.
+  // Cache the fixed quarter-metre lattice for this one startup generation.
+  const dryPondSamples = new Map<string, boolean>();
+  const paintsWater = (a: Point, b: Point, padding: number): boolean =>
+    waters.some((body) => {
+      if (
+        compactPathSegmentDistance({ x: body.centerX, z: body.centerZ }, a, b) >
+        body.radius + padding
+      )
+        return false;
+      if (body.id !== dockWater?.id) return true;
+      const radius = padding + Math.SQRT2 / 8;
+      for (
+        let ix = Math.floor((Math.min(a.x, b.x) - radius) * 4);
+        ix <= Math.ceil((Math.max(a.x, b.x) + radius) * 4);
+        ix++
+      ) {
+        for (
+          let iz = Math.floor((Math.min(a.z, b.z) - radius) * 4);
+          iz <= Math.ceil((Math.max(a.z, b.z) + radius) * 4);
+          iz++
+        ) {
+          const x = ix / 4,
+            z = iz / 4;
+          if (
+            Math.hypot(x - body.centerX, z - body.centerZ) > body.radius ||
+            compactPathSegmentDistance({ x, z }, a, b) > radius
+          )
+            continue;
+          const key = `${ix},${iz}`;
+          let dry = dryPondSamples.get(key);
+          if (dry === undefined) {
+            if (dryPondSamples.size >= 16384)
+              throw new Error("Compact pond path sampling bound exceeded");
+            const height = getHeightAt(x, z);
+            dry = Number.isFinite(height) && height > body.surfaceY + 0.06;
+            dryPondSamples.set(key, dry);
+          }
+          if (!dry) return true;
+        }
+      }
+      return false;
+    });
   const front: Point = { x: bank.x, z: bank.z + 3 };
   const workshop: Point = {
     x: (furnace.x + anvil.x) / 2,
@@ -254,6 +315,47 @@ export function createCompactIslandPaths(
     x: arena.baseX + arena.arenaWidth / 2,
     z: arena.baseZ - 2.2 / 2 - COMPACT_PATH_BLEND_WIDTH - CLEARANCE,
   };
+  let inlandPondApproach: Point[] | undefined;
+  if (pondDocks) {
+    if (!bankPavilion || dockWater?.id !== pond.id)
+      throw new Error(
+        "Compact pond paths require the bound basin and open bank",
+      );
+    const landing = pondDocks.docks.find(
+      (dock) => dock.recipeId === "haven-fishing-landing-v1",
+    )!;
+    const direction = getCompactPondDockDirection(landing.rotation);
+    const pete = pondArea.npcs.filter((row) => row.id === "fisherman_pete");
+    const hospital = floors.find((floor) => floor.id === "duel_hospital_floor");
+    if (pete.length !== 1 || !hospital)
+      throw new Error(
+        "Compact pond paths require the actual fishing guide and hospital",
+      );
+    // Meet the landward apron, pass the guide's clear western side, then use
+    // the open corridor between the actual lobby and hospital. Rejoin the
+    // admitted south bank passage; no paint, mesh or navigation exemption.
+    const corridorX =
+      (lobby.centerX -
+        lobby.width / 2 +
+        hospital.centerX +
+        hospital.width / 2) /
+      2;
+    inlandPondApproach = [
+      { x: landing.x - direction.x * 3.5, z: landing.z - direction.z * 3.5 },
+      { x: pete[0].position.x - 2.5, z: pete[0].position.z + 3 },
+      { x: pete[0].position.x - 2.5, z: pete[0].position.z },
+      { x: pete[0].position.x - 8, z: pete[0].position.z - 7 },
+      { x: corridorX + 4, z: lobby.centerZ + lobby.depth / 2 + 14 },
+      { x: corridorX, z: lobby.centerZ + lobby.depth / 2 + 5 },
+      { x: corridorX, z: lobby.centerZ - lobby.depth / 2 - 8 },
+      { x: front.x + 19, z: front.z + 16 },
+      { x: front.x + 9, z: front.z + 15 },
+      { x: bankPavilion.position.x + 3, z: bankPavilion.position.z + 13 },
+      { x: bankPavilion.position.x, z: bankPavilion.position.z + 8 },
+      { x: bankPavilion.position.x, z: bankPavilion.position.z + 2 },
+      front,
+    ];
+  }
   const definitions: Array<{
     id: string;
     fromId: string;
@@ -271,14 +373,16 @@ export function createCompactIslandPaths(
       toId: "bank-forecourt",
       width: meadowPaths ? 0.65 : bankCourt ? 1.1 : 1.8,
       ...(bankCourt ? { blendWidth: meadowPaths ? 0.6 : 0.85 } : {}),
-      points: bankPavilion
-        ? [
-            shore,
-            { x: bankPavilion.position.x, z: bankPavilion.position.z - 6 },
-            { x: bankPavilion.position.x, z: bankPavilion.position.z - 1.5 },
-            front,
-          ]
-        : [shore, { x: front.x - 1, z: (shore.z + front.z) / 2 }, front],
+      points:
+        inlandPondApproach ??
+        (bankPavilion
+          ? [
+              shore,
+              { x: bankPavilion.position.x, z: bankPavilion.position.z - 6 },
+              { x: bankPavilion.position.x, z: bankPavilion.position.z - 1.5 },
+              front,
+            ]
+          : [shore, { x: front.x - 1, z: (shore.z + front.z) / 2 }, front]),
     },
     {
       id: "bank-workshop",
@@ -586,16 +690,12 @@ export function createCompactIslandPaths(
           "Compact path would paint an authored floor: " + definition.id,
         );
       if (
-        waters.some(
-          (body) =>
-            compactPathSegmentDistance(
-              { x: body.centerX, z: body.centerZ },
-              a,
-              b,
-            ) <=
-            body.radius + padding,
+        dockExclusions.some((bounds) =>
+          compactPathIntersectsBounds(a, b, bounds, padding),
         )
       )
+        throw new Error("Compact path would paint a dock: " + definition.id);
+      if (paintsWater(a, b, padding))
         throw new Error("Compact path would paint water: " + definition.id);
       length += Math.hypot(b.x - a.x, b.z - a.z);
     }

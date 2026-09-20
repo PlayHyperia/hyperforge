@@ -1,5 +1,87 @@
 # World graphics development checkpoint — 2026-09-20
 
+## Complete fishing candidate and timber docks — source checkpoint, native load failed
+
+This opt-in slice adds all-tier fishing coverage, relocated habitat, fitted
+timber art and a pond-to-bank paint route to the isolated inland basin. It does
+not relocate canonical assets or change the human localhost world. All
+LAYOUT-01–08 acceptance gates stay open.
+
+- The body-bound resource owner requests14 positions, two per seven families
+  covering12 fish. It uses real wet targets, canonical ground and dry approaches
+  within the existing interaction range. Existing registration leases reserve
+  pending targets, roll back failures and constrain relocation to the same
+  explicit water owner. Legacy resource admission remains unchanged.
+- The detached manifest keeps fisherman_pete's quest/store identity, moves him
+  beside the pond and adds feathers to existing fishing supplies. No item price,
+  reward, level, custody disposition or economic policy is changed.
+- Two merged dock meshes have closed12cm-thick plank sides and undersides,
+  member-local filtered timber grain and rough PBR shading on one shared opaque
+  material. Walking-top buffers stay byte-exact. Geometry totals are2703
+  vertices/1432 triangles and3063/1576; these are not measured draw/frame costs.
+-28 habitat instances form three unequal groups with protected dock/supplier
+  approaches and exposed plant roots. Contact substrate follows the admitted
+  new bank, avoiding stale paint at the old site.
+- Actual RoadNetworkSystem startup initially rejected the old pond-bank path
+  crossing the lobby. The opt-in replacement uses the lobby–hospital gap and
+  landing/Pete approach; canonical-ground checks keep its full painted width
+  dry without relaxing other water/floor exclusions. Paint is not proof of
+  actual end-to-end collision navigation.
+
+### Source verification
+
+Local evidence: `service-layout-network01-UNQUALIFIED/`.
+
+- `bound-fishing-tests07`:28/28 resource tests, including9 new real-system
+  fishing cases, one unchanged historical mocked test and18 existing real
+  registration cases. Actual typed spawn data fixed a test-only subtype error.
+- `dock-timber-final-stock01` and `dock-timber-final-art03-01`:18/18 each.
+  Closed-solid topology,20 additional upward native/mesh probes and86 existing
+  downward contact probes pass under unchanged tolerances.
+- `inland-habitat-tests02`:111/111 habitat, palette and actual emitted-worker
+  cases. `inland-path-regressions01`:77/77 path/configuration/worker cases.
+  `inland-candidate-admission-review01`:20/20 world-config cases.
+- `pond-integration-types-final02`:720 production plus explicit test roots,
+  zero diagnostics, stable hashes. Scoped final ESLint/Prettier/diff checks
+  pass. Two missing terrain-interface declarations were corrected type-only.
+  Suite counts overlap and are not summed as independent coverage.
+
+### Actual native failure and remaining launch gates
+
+`inland-pond-integration01-UNQUALIFIED/` contains three detached builds and
+the real private-runtime/native01 receipt. Eight bundles have972 pinned source
+inputs; build02 and the type-only corrected build03 are byte-identical. All145
+protected compiled artifacts are unchanged.
+
+The private server's database, manifest and world-identity admission passed.
+Native01 used headful Chrome, actual WebGPU, Apple M5 / ANGLE Metal,
+1280×720 atDPR1. It failed the unchanged90-second scene-readiness deadline:
+`quad_68_d4_450_450` repeatedly exceeded the terrain-collar vertex cap,
+leaving28/29 terrain chunks and conforming ocean topology pending. The retained
+screenshot is a loading screen. No completed pond/dock art views,14-entity
+client proof or performance acceptance was reached. Do not bypass readiness
+or raise geometry limits to classify this run as successful. Missing-cow
+placeholder and disabled-stream503 logs are retained, not claimed error-free.
+
+The owned browser closed; runtime01 stopped its own client/server and removed
+only its disposable database. Protected human service identities and bundle
+hashes matched before/after. Localhost3333 was not restarted or replaced.
+
+A separate gameplay blocker remains: the broad arena rectangle overlaps some
+new fishing shore. Current rules would preserve inventory on ordinary deaths,
+forbid ground drops, evacuate opted-out agents and permit lobby challenges
+there. Ordinary gathering keeps its tool/level/consumable/custody authority and
+no automatic PvP opening was found, but this placement must not be promoted
+until zone/placement policy and real integration tests resolve the mismatch.
+Full-bank journeys, simultaneous fishing, persistence/restart, all views,
+daylight/night, frame time and memory remain unqualified.
+
+Timber uses the existing [Three.js PBR node material](https://threejs.org/docs/pages/MeshStandardNodeMaterial.html)
+and bounded [indexed geometry](https://threejs.org/docs/pages/BufferGeometry.html);
+those primary references do not imply visual approval.
+
+
+
 ## Fitted pond docks and terrain refinement — source-only checkpoint
 
 The two-dock foundation is implemented and verified with actual World, terrain,

@@ -6,6 +6,9 @@ import THREE from "../../../../extras/three/three";
 import { World } from "../../../../core/World";
 import { DataManager } from "../../../../data/DataManager";
 import type { FlatZone } from "../../../../types/world/terrain";
+import type { CompactPondDocksManifest } from "../../../../types/world/world-types";
+import { getCompactPondDockSupportBounds } from "../DockDefinition";
+import { createCompactTerrainColorOperations } from "../CompactTerrainPalette";
 import { TerrainSystem } from "../TerrainSystem";
 import { resolveRadialPondTerrainHeight } from "../RadialPondTerrainProfile";
 import {
@@ -144,6 +147,237 @@ function placements(): readonly CompactPondPlacement[] {
 }
 
 describe("bounded pond dressing", () => {
+  it("admits only the explicit inland habitat, grounds canonical assets and preserves open dock/access arcs", async () => {
+    await DataManager.getInstance().initialize();
+    const candidate = JSON.parse(
+      readFileSync(
+        new URL(
+          "../__fixtures__/inland-pond-basin-candidate.json",
+          import.meta.url,
+        ),
+        "utf8",
+      ),
+    ) as {
+      flatZone: FlatZone;
+      waterBody: {
+        id: string;
+        centerX: number;
+        centerZ: number;
+        radius: number;
+        surfaceY: number;
+      };
+    };
+    const docks: CompactPondDocksManifest = {
+      schemaVersion: 1,
+      layoutId: "compact-pond-docks-v1",
+      terrainProfileId: "compact-duel-island-v6",
+      waterBodyId: candidate.waterBody.id,
+      docks: [
+        {
+          id: "haven-fishing-landing",
+          x: 390,
+          z: 424.5,
+          rotation: 90,
+          recipeId: "haven-fishing-landing-v1",
+        },
+        {
+          id: "haven-reed-jetty",
+          x: 433,
+          z: 415.5,
+          rotation: 270,
+          recipeId: "haven-reed-jetty-v1",
+        },
+      ],
+    };
+    const world = new World();
+    const terrain = world.register("terrain", TerrainSystem) as TerrainSystem;
+    await terrain.init();
+    terrain["loadFlatZonesFromManifest"]();
+    terrain.unregisterFlatZone("haven_pond_floor");
+    terrain.registerFlatZone(candidate.flatZone);
+    const original = DataManager.getInstance().getAllWorldAreas();
+    const areas = {
+      ...original,
+      haven_pond: {
+        ...original.haven_pond,
+        flatZones: [candidate.flatZone],
+        waterBodies: [candidate.waterBody],
+      },
+    };
+    const height = (x: number, z: number) =>
+      terrain.getResourceGroundHeight(x, z);
+    let owner: CompactPondDressingVisuals | undefined;
+    const geometries: THREE.BufferGeometry[] = [];
+    const material = new THREE.MeshStandardNodeMaterial();
+    try {
+      const profile = terrain.getWorldTerrainProfile();
+      expect(() => createCompactPondDressing(profile, areas, height)).toThrow(
+        "dimensions",
+      );
+      const rows = createCompactPondDressing(profile, areas, height, docks);
+      expect(rows).toHaveLength(28);
+      expect(rows.every(Object.isFrozen)).toBe(true);
+      expect(Object.isFrozen(rows)).toBe(true);
+      expect(rows).toEqual(
+        createCompactPondDressing(profile, areas, height, docks),
+      );
+      const bounds = docks.docks.map(getCompactPondDockSupportBounds);
+      const occupiedDegrees = new Set<number>();
+      for (const row of rows) {
+        const radius = COMPACT_POND_MODELS[row.model].radius * row.scale;
+        for (const box of bounds) {
+          const x = Math.max(box.minX, Math.min(box.maxX, row.x));
+          const z = Math.max(box.minZ, Math.min(box.maxZ, row.z));
+          expect(Math.hypot(row.x - x, row.z - z)).toBeGreaterThan(
+            radius + 1.25,
+          );
+        }
+        expect(Math.hypot(row.x - 387, row.z - 419)).toBeGreaterThan(
+          radius + 1.5,
+        );
+        if (row.model === "boulder" || row.model === "stone") {
+          for (let i = 0; i < 64; i++) {
+            const angle = (i * Math.PI) / 32;
+            expect(
+              height(
+                row.x + Math.cos(angle) * radius,
+                row.z + Math.sin(angle) * radius,
+              ),
+            ).toBeLessThan(candidate.waterBody.surfaceY - 0.04);
+          }
+        } else
+          expect(height(row.x, row.z)).toBeGreaterThan(
+            candidate.waterBody.surfaceY,
+          );
+        const bearing = Math.atan2(row.z - 415, row.x - 410);
+        const spread = Math.asin(radius / Math.hypot(row.x - 410, row.z - 415));
+        for (let degree = 0; degree < 360; degree++) {
+          const delta = Math.atan2(
+            Math.sin((degree * Math.PI) / 180 - bearing),
+            Math.cos((degree * Math.PI) / 180 - bearing),
+          );
+          if (Math.abs(delta) <= spread) occupiedDegrees.add(degree);
+        }
+      }
+      // Three deliberate pockets leave the majority of shoreline unplanted;
+      // this is not yet a claim of 14 live navigable fishing reservations.
+      expect(occupiedDegrees.size).toBeLessThan(70);
+      expect(
+        rows.length +
+          createCompactServicePlanting(
+            DataManager.getWorldConfig()!.compactServicePlanting,
+          ).length,
+      ).toBeLessThanOrEqual(64);
+      owner = new CompactPondDressingVisuals(new THREE.Group(), rows);
+      for (const model of Object.keys(
+        COMPACT_POND_MODELS,
+      ) as CompactPondModel[]) {
+        const geometry = canonicalGeometry(model);
+        geometries.push(geometry);
+        owner.install(model, new THREE.Mesh(geometry, material));
+      }
+      const ground = grid((x, z) => height(x, z + 415), 410, 141, 70);
+      geometries.push(ground.geometry);
+      const surface = new RetainedTerrainSurface(
+        1,
+        "inland-habitat-cpu",
+        410,
+        415,
+        70,
+        141,
+        ground.geometry,
+      );
+      owner.update(0.25, () => surface);
+      expect(owner.getReceipt()).toMatchObject({
+        ready: true,
+        visible: 28,
+        instances: 28,
+      });
+      const versions = owner.group.children.map(
+        (child) => (child as THREE.InstancedMesh).instanceMatrix.version,
+      );
+      owner.update(0.25, () => surface);
+      expect(
+        owner.group.children.map(
+          (child) => (child as THREE.InstancedMesh).instanceMatrix.version,
+        ),
+      ).toEqual(versions);
+      const obstructed = structuredClone(docks);
+      Object.assign(obstructed.docks[0], { x: 394, z: 401.5 });
+      expect(() =>
+        createCompactPondDressing(profile, areas, height, obstructed),
+      ).toThrow("clearance");
+      const missing = {
+        ...areas,
+        haven_pond: { ...areas.haven_pond, flatZones: [] },
+      };
+      expect(() =>
+        createCompactPondDressing(profile, missing, height, docks),
+      ).toThrow("shaped basin");
+
+      const ops = createCompactTerrainColorOperations();
+      const bank = ops.pondBankField(candidate.flatZone, candidate.waterBody)!;
+      const profileWithMeadow = validateWorldTerrainProfile({
+        ...profile,
+        southernMeadow: {
+          schemaVersion: 1,
+          minX: 304,
+          maxX: 500,
+          minZ: 345,
+          maxZ: 535,
+          featherX: 24,
+          featherZ: 24,
+          northHeight: 26.8,
+          southHeight: 25.3,
+          crossFall: 1,
+          rollAmplitude: 0.65,
+          rollWavelength: 100,
+        },
+      });
+      const macro = ops.macroField(
+        profileWithMeadow,
+        undefined,
+        "composition-v1",
+        bank,
+      )!;
+      expect(macro.pondContactGround).toHaveLength(2);
+      for (const contact of macro.pondContactGround!) {
+        expect(
+          Math.hypot(contact.startX - 410, contact.startZ - 415),
+        ).toBeLessThan(30);
+        expect(
+          Math.hypot(contact.startX - 343, contact.startZ - 302),
+        ).toBeGreaterThan(90);
+      }
+      expect(ops.pondContactSoil(338.9, 297.6, 0.5, macro)).toBe(0);
+      expect(
+        ops.macroField(profileWithMeadow, undefined, "composition-v1", null)!
+          .pondContactGround,
+      ).toEqual([]);
+      const old = ops.macroField(profileWithMeadow)!;
+      expect(old.pondContactGround![0].startX).toBe(338.9);
+      expect(ops.pondContactSoil(338.9, 297.6, 0.5, old)).toBeGreaterThan(0);
+      // Workers serialize the actual self-contained factory; new contact data
+      // must survive that boundary without external imported recipe closures.
+      const emitted = new Function(
+        `return (${createCompactTerrainColorOperations.toString()})()`,
+      )() as ReturnType<typeof createCompactTerrainColorOperations>;
+      expect(
+        emitted.macroField(
+          profileWithMeadow,
+          undefined,
+          "composition-v1",
+          bank,
+        ),
+      ).toEqual(macro);
+    } finally {
+      owner?.destroy();
+      geometries.forEach((geometry) => geometry.dispose());
+      material.dispose();
+      world.destroy();
+    }
+  });
+
   it("joins the candidate asymmetric bank with unequal contact groups while retaining exact historical admission and safe rock footprints", async () => {
     await DataManager.getInstance().initialize();
     const areas = DataManager.getInstance().getAllWorldAreas();

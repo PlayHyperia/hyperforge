@@ -1,5 +1,14 @@
-import type { WorldArea } from "../../../types/world/world-types";
+import type {
+  CompactPondDocksManifest,
+  WorldArea,
+} from "../../../types/world/world-types";
 import northernHabitat from "../../../data/compact-pond-northern-habitat-v1.json";
+import inlandHabitat from "../../../data/compact-pond-inland-habitat-v1.json";
+import {
+  getCompactPondDockSupportBounds,
+  validateCompactPondDockBindings,
+  validateCompactPondDocks,
+} from "./DockDefinition";
 import {
   isCompactSculptProfile,
   type WorldTerrainProfile,
@@ -124,7 +133,10 @@ export function createCompactPondDressing(
   profile: WorldTerrainProfile,
   areas: Readonly<Record<string, WorldArea>>,
   heightAt: (x: number, z: number) => number,
+  compactPondDocks?: CompactPondDocksManifest,
 ): readonly CompactPondPlacement[] {
+  if (compactPondDocks)
+    return createInlandPondDressing(profile, areas, heightAt, compactPondDocks);
   if (!isCompactSculptProfile(profile)) return [];
   const ponds = areas.haven_pond?.waterBodies;
   if (ponds?.length !== 1)
@@ -311,4 +323,157 @@ export function createCompactPondDressing(
       },
     ),
   );
+}
+
+/** Separate, explicitly selected habitat recipe. It follows the actual basin
+ * surface, not the historical pond's positions or a scaled decorative ring. */
+function createInlandPondDressing(
+  profile: WorldTerrainProfile,
+  areas: Readonly<Record<string, WorldArea>>,
+  heightAt: (x: number, z: number) => number,
+  value: CompactPondDocksManifest,
+): readonly CompactPondPlacement[] {
+  const layout = validateCompactPondDocks(value, profile)!;
+  const pond = validateCompactPondDockBindings(layout, areas)!;
+  const zones = Object.values(areas).flatMap((area) => area.flatZones ?? []);
+  const matches = zones.filter((zone) => zone.id === inlandHabitat.flatZoneId);
+  const zone = matches[0];
+  if (
+    inlandHabitat.schemaVersion !== 1 ||
+    inlandHabitat.layoutId !== "compact-pond-inland-habitat-v1" ||
+    inlandHabitat.groups.length !== 3 ||
+    inlandHabitat.dockClearance !== 1.25 ||
+    pond.id !== inlandHabitat.waterBodyId ||
+    pond.radius !== inlandHabitat.radius ||
+    matches.length !== 1 ||
+    !zone.radialPond ||
+    zone.centerX !== pond.centerX ||
+    zone.centerZ !== pond.centerZ ||
+    !Number.isFinite(zone.height) ||
+    zone.height! >= pond.surfaceY ||
+    zone.radialPond.bankHeight <= pond.surfaceY ||
+    zone.radialPond.bankComposition?.schemaVersion !== 1 ||
+    zone.radialPond.bankSectors?.length !== 4
+  )
+    throw new Error("Inland pond habitat requires its admitted shaped basin");
+
+  const dockBounds = layout.docks.map(getCompactPondDockSupportBounds);
+  const sample = (x: number, z: number) => {
+    const y = heightAt(x, z);
+    if (!Number.isFinite(y))
+      throw new Error("Inland habitat ground is nonfinite");
+    return y;
+  };
+  const shorelineAt = (angle: number): number => {
+    const at = (radius: number) =>
+      sample(
+        pond.centerX + Math.cos(angle) * radius,
+        pond.centerZ + Math.sin(angle) * radius,
+      );
+    let low = 0,
+      high = pond.radius;
+    if (at(low) >= pond.surfaceY || at(high) <= pond.surfaceY)
+      throw new Error(
+        "Inland habitat requires a closed underwater-to-dry bank",
+      );
+    for (let step = 0; step < 16; step++) {
+      const mid = (low + high) / 2;
+      if (at(mid) < pond.surfaceY) low = mid;
+      else high = mid;
+    }
+    return (low + high) / 2;
+  };
+  const result: CompactPondPlacement[] = [];
+  for (const group of inlandHabitat.groups) {
+    if (
+      !/^[a-z][a-z-]+$/.test(group.id) ||
+      !Number.isFinite(group.bearing) ||
+      group.bearing < 0 ||
+      group.bearing >= 360 ||
+      group.placements.length > 12
+    )
+      throw new Error("Invalid inland habitat group");
+    for (const [index, row] of group.placements.entries()) {
+      const [modelValue, tangent, bankOffset, scale, rotation] = row;
+      if (
+        row.length !== 5 ||
+        typeof modelValue !== "string" ||
+        !Object.prototype.hasOwnProperty.call(
+          COMPACT_POND_MODELS,
+          modelValue,
+        ) ||
+        ![tangent, bankOffset, scale, rotation].every(
+          (v) => typeof v === "number" && Number.isFinite(v),
+        ) ||
+        typeof tangent !== "number" ||
+        Math.abs(tangent) > 2 ||
+        typeof bankOffset !== "number" ||
+        bankOffset < -1.5 ||
+        bankOffset > 3 ||
+        typeof scale !== "number" ||
+        scale < 0.3 ||
+        scale > 1.25 ||
+        typeof rotation !== "number" ||
+        rotation < 0 ||
+        rotation >= 360
+      )
+        throw new Error("Invalid inland habitat placement");
+      const model = modelValue as CompactPondModel;
+      const baseAngle = (group.bearing * Math.PI) / 180;
+      const angle = baseAngle + Math.atan2(tangent, shorelineAt(baseAngle));
+      const radius = COMPACT_POND_MODELS[model].radius * scale;
+      const rock = model === "boulder" || model === "stone";
+      const distance = shorelineAt(angle) + bankOffset - (rock ? radius : 0);
+      const x = pond.centerX + Math.cos(angle) * distance;
+      const z = pond.centerZ + Math.sin(angle) * distance;
+      for (const bounds of dockBounds) {
+        const nearestX = Math.max(bounds.minX, Math.min(bounds.maxX, x));
+        const nearestZ = Math.max(bounds.minZ, Math.min(bounds.maxZ, z));
+        if (
+          Math.hypot(x - nearestX, z - nearestZ) <=
+          radius + inlandHabitat.dockClearance
+        )
+          throw new Error(
+            "Inland habitat intrudes into dock or shore access clearance",
+          );
+      }
+      if (rock) {
+        if (
+          Math.hypot(x - pond.centerX, z - pond.centerZ) + radius >=
+          pond.radius
+        )
+          throw new Error("Inland habitat rock escapes its water envelope");
+        const steps = Math.ceil((radius * 2) / 0.25);
+        for (let iz = 0; iz <= steps; iz++)
+          for (let ix = 0; ix <= steps; ix++) {
+            const sx = x - radius + (ix / steps) * radius * 2;
+            const sz = z - radius + (iz / steps) * radius * 2;
+            if (Math.hypot(sx - x, sz - z) > radius) continue;
+            if (sample(sx, sz) >= pond.surfaceY - 0.04)
+              throw new Error(
+                "Inland habitat rock footprint requires underwater ground",
+              );
+          }
+      } else if (sample(x, z) <= pond.surfaceY) {
+        throw new Error("Inland habitat plant roots require exposed ground");
+      }
+      result.push(
+        Object.freeze({
+          id: `inland_pond_${group.id}_${index}`,
+          model,
+          x,
+          z,
+          scale,
+          yaw: (rotation * Math.PI) / 180,
+          burial: rock ? 0.1 : 0.04,
+        }),
+      );
+    }
+  }
+  if (
+    result.length !== 28 ||
+    new Set(result.map((row) => row.id)).size !== result.length
+  )
+    throw new Error("Inland habitat exceeds its explicit instance budget");
+  return Object.freeze(result);
 }

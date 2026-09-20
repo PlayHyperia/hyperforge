@@ -1696,6 +1696,40 @@ export function createCompactTerrainColorOperations() {
         selectedPond === "composition-v1" && bankField
           ? operations.validatePondBankField(bankField)
           : null;
+      // Contact substrate belongs to the admitted bank, not a global old-site
+      // decal. Remote composition jobs without a pond cannot resurrect it.
+      const contactGround =
+        selectedPond === "composition-v1" && !admittedBankField
+          ? Object.freeze([])
+          : admittedBankField?.zoneId === "haven_pond_floor" &&
+              admittedBankField.pond.radius === 27
+            ? Object.freeze(
+                admittedBankField.sectors
+                  .filter(
+                    (sector) =>
+                      sector.surface === "cutbank" ||
+                      sector.surface === "dry-turf",
+                  )
+                  .map((sector) => {
+                    const inner = sector.innerRadius + 0.35;
+                    const outer = Math.min(
+                      sector.outerRadius ?? inner + 1.5,
+                      inner + 2,
+                    );
+                    const dx = Math.cos(sector.bearing),
+                      dz = Math.sin(sector.bearing);
+                    return Object.freeze({
+                      startX: admittedBankField.centerX + dx * inner,
+                      startZ: admittedBankField.centerZ + dz * inner,
+                      endX: admittedBankField.centerX + dx * outer,
+                      endZ: admittedBankField.centerZ + dz * outer,
+                      coreRadius: 0.4,
+                      outerRadius: 1.2,
+                      strength: 0.6,
+                    });
+                  }),
+              )
+            : pondContactGround;
       if (
         profile.algorithm !== "compact-island-sculpt-v2" &&
         profile.algorithm !== "compact-island-sculpt-v3" &&
@@ -1753,7 +1787,7 @@ export function createCompactTerrainColorOperations() {
               ? { pondBankField: admittedBankField }
               : {}),
             ...(profile.id === "compact-duel-island-v6"
-              ? { bankVerge, pondContactGround }
+              ? { bankVerge, pondContactGround: contactGround }
               : {}),
           }
         : {};
