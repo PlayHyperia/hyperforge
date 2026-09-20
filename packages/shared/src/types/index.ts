@@ -1231,8 +1231,12 @@ export type LoaderResult =
 export interface GLBData {
   scene: THREE.Scene | THREE.Group;
   animations?: THREE.AnimationClip[];
+  /** Parsed source provenance; absent for synthetic or already-cloned scenes. */
+  parser?: { json: unknown };
   userData?: {
+    vrmExpressionManager?: { readonly expressions: readonly unknown[] };
     vrm?: {
+      expressionManager?: { readonly expressions: readonly unknown[] };
       humanoid?: {
         getRawBoneNode?: (boneName: string) => THREE.Object3D | null;
         getNormalizedBoneNode?: (

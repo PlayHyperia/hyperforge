@@ -213,8 +213,215 @@ export class AvatarSkeletonPropagation {
   }
 }
 
+function textureMetadataRecord(value: unknown): Record<string, unknown> | null {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
+}
+
+/** Admit only parsed, static PBR avatars; unfamiliar assets render normally. */
+export function canShareVRMColorTextures(glb: GLBData): boolean {
+  try {
+    return hasStaticVRMColorTextures(glb);
+  } catch {
+    // Metadata from an unfamiliar loader must not make normal rendering fail.
+    return false;
+  }
+}
+
+function hasStaticVRMColorTextures(glb: GLBData): boolean {
+  const json = textureMetadataRecord(glb.parser?.json);
+  const asset = textureMetadataRecord(json?.asset);
+  const extensions = textureMetadataRecord(json?.extensions);
+  const vrm = textureMetadataRecord(extensions?.VRMC_vrm);
+  if (
+    !json ||
+    asset?.version !== "2.0" ||
+    vrm?.specVersion !== "1.0" ||
+    glb.userData?.vrm?.meta?.metaVersion !== "1" ||
+    Object.keys(vrm).some(
+      (key) => !["specVersion", "meta", "humanoid"].includes(key),
+    ) ||
+    (glb.animations !== undefined && glb.animations.length !== 0) ||
+    (json.animations !== undefined &&
+      (!Array.isArray(json.animations) || json.animations.length !== 0))
+  )
+    return false;
+
+  const allowedExtensions = new Set([
+    "VRMC_vrm",
+    "KHR_materials_ior",
+    "KHR_materials_specular",
+  ]);
+  for (const key of ["extensionsUsed", "extensionsRequired"]) {
+    const names = json[key];
+    if (
+      names !== undefined &&
+      (!Array.isArray(names) ||
+        names.some(
+          (name) =>
+            !allowedExtensions.has(name) &&
+            // The VRM loader injects this optional declaration even when no
+            // transform exists. Actual payloads remain rejected below.
+            !(key === "extensionsUsed" && name === "KHR_texture_transform"),
+        ))
+    )
+      return false;
+  }
+  const namedNodes = new WeakSet<object>();
+  if (Array.isArray(json.nodes)) {
+    if (json.nodes.length > 16384) return false;
+    for (const node of json.nodes) {
+      const definition = textureMetadataRecord(node);
+      if (definition) namedNodes.add(definition);
+    }
+  }
+  // Check actual nested extension dictionaries, not only declarations. Bound
+  // malformed/custom input; do not inspect or copy embedded image strings.
+  const pending: Array<[unknown, number]> = [[json, 0]];
+  const seen = new WeakSet<object>();
+  let visited = 0;
+  while (pending.length) {
+    const [value, depth] = pending.pop()!;
+    if (value === null || typeof value !== "object") continue;
+    if (++visited > 16384 || depth > 32 || seen.has(value)) return false;
+    seen.add(value);
+    if (Array.isArray(value)) {
+      if (value.length + pending.length + visited > 16384) return false;
+      for (const child of value) pending.push([child, depth + 1]);
+      continue;
+    }
+    const record = textureMetadataRecord(value)!;
+    for (const [key, child] of Object.entries(record)) {
+      if (key === "extensions") {
+        const dictionary = textureMetadataRecord(child);
+        if (
+          !dictionary ||
+          Object.keys(dictionary).some((name) => !allowedExtensions.has(name))
+        )
+          return false;
+      }
+      if (key === "extras") {
+        const extras = textureMetadataRecord(child);
+        if (
+          !extras ||
+          (Object.keys(extras).length !== 0 &&
+            (!namedNodes.has(record) ||
+              Object.keys(extras).length !== 1 ||
+              typeof extras.name !== "string"))
+        )
+          return false;
+      }
+      if (pending.length + visited >= 16384) return false;
+      pending.push([child, depth + 1]);
+    }
+  }
+
+  const sceneData = glb.scene.userData as Record<string, unknown>;
+  const sceneVRM = textureMetadataRecord(sceneData.vrm);
+  for (const manager of [
+    glb.userData?.vrm?.expressionManager,
+    glb.userData?.vrmExpressionManager,
+    sceneVRM?.expressionManager,
+    sceneData.vrmExpressionManager,
+  ]) {
+    if (manager === undefined || manager === null) continue;
+    const expressions = textureMetadataRecord(manager)?.expressions;
+    if (!Array.isArray(expressions) || expressions.length !== 0) return false;
+  }
+  let staticMaterials = true;
+  glb.scene.traverse((object) => {
+    if (object.type === "VRMExpression") staticMaterials = false;
+    if (!isMeshLike(object)) return;
+    for (const material of Array.isArray(object.material)
+      ? object.material
+      : [object.material]) {
+      if (
+        !(material instanceof THREE.MeshStandardMaterial) ||
+        material.onBeforeRender !== THREE.Material.prototype.onBeforeRender ||
+        material.onBeforeCompile !== THREE.Material.prototype.onBeforeCompile
+      )
+        staticMaterials = false;
+    }
+  });
+  return staticMaterials;
+}
+
+function shareStaticColorTexture(material: MeshStandardNodeMaterial): void {
+  const a = material.map;
+  const b = material.emissiveMap;
+  if (
+    material.onBeforeRender !== THREE.Material.prototype.onBeforeRender ||
+    material.onBeforeCompile !== THREE.Material.prototype.onBeforeCompile ||
+    !a ||
+    !b ||
+    a === b ||
+    typeof ImageBitmap === "undefined" ||
+    a.constructor !== THREE.Texture ||
+    b.constructor !== THREE.Texture ||
+    !(a.image instanceof ImageBitmap) ||
+    a.image !== b.image ||
+    a.image.width === 0 ||
+    a.image.height === 0
+  )
+    return;
+  for (const texture of [a, b]) {
+    if (
+      texture.mapping !== THREE.UVMapping ||
+      texture.format !== THREE.RGBAFormat ||
+      texture.type !== THREE.UnsignedByteType ||
+      texture.colorSpace !== THREE.SRGBColorSpace ||
+      texture.internalFormat !== null ||
+      texture.mipmaps.length !== 0 ||
+      texture.updateRanges.length !== 0 ||
+      texture.onUpdate !== null ||
+      texture.renderTarget !== null ||
+      texture.isRenderTargetTexture ||
+      texture.isArrayTexture ||
+      texture.source.dataReady !== true ||
+      Object.keys(texture.userData).some((key) => key !== "mimeType")
+    )
+      return;
+  }
+  const state = [
+    "channel",
+    "wrapS",
+    "wrapT",
+    "magFilter",
+    "minFilter",
+    "anisotropy",
+    "normalized",
+    "generateMipmaps",
+    "premultiplyAlpha",
+    "flipY",
+    "unpackAlignment",
+    "matrixAutoUpdate",
+    "rotation",
+    "version",
+    "pmremVersion",
+  ] as const;
+  if (
+    state.some((key) => a[key] !== b[key]) ||
+    a.source.version !== b.source.version ||
+    a.source.dataReady !== b.source.dataReady ||
+    a.userData.mimeType !== b.userData.mimeType ||
+    !a.offset.equals(b.offset) ||
+    !a.repeat.equals(b.repeat) ||
+    !a.center.equals(b.center) ||
+    !a.matrix.equals(b.matrix)
+  )
+    return;
+  // The image and every rendering input are identical and immutable in this
+  // admitted factory. Keep separate material state and existing texture owners;
+  // never dispose the unused view or close an ImageBitmap borrowed elsewhere.
+  material.emissiveMap = a;
+}
+
 /** Use the same node-material conversion in the game and avatar review. */
-export function prepareVRMMaterialsForWebGPU(root: THREE.Object3D): void {
+export function prepareVRMMaterialsForWebGPU(
+  root: THREE.Object3D,
+  shareStaticColorMaps = false,
+): void {
   const shadowCandidate = isCharacterShadowCandidateActive();
   const convertedMaterials = new Map<
     THREE.Material,
@@ -238,7 +445,10 @@ export function prepareVRMMaterialsForWebGPU(root: THREE.Object3D): void {
           isMeshStandardNodeMaterial?: boolean;
         };
         if (materialFlags.isMeshStandardNodeMaterial) {
-          return mat as MeshStandardNodeMaterial;
+          const converted = mat as MeshStandardNodeMaterial;
+          if (shareStaticColorMaps) shareStaticColorTexture(converted);
+          convertedMaterials.set(mat, converted);
+          return converted;
         }
 
         // glTF PBR assets already have authored surface parameters. Use Three's
@@ -253,6 +463,7 @@ export function prepareVRMMaterialsForWebGPU(root: THREE.Object3D): void {
             ? THREE.MeshPhysicalMaterial.prototype.copy
             : THREE.MeshStandardMaterial.prototype.copy;
           Reflect.apply(copy, converted, [mat]);
+          if (shareStaticColorMaps) shareStaticColorTexture(converted);
           convertedMaterials.set(mat, converted);
           mat.dispose();
           return converted;
@@ -311,6 +522,7 @@ export function prepareVRMMaterialsForWebGPU(root: THREE.Object3D): void {
         newMat.name = originalMat.name || "VRM_Standard";
 
         // Dispose old material
+        if (shareStaticColorMaps) shareStaticColorTexture(newMat);
         convertedMaterials.set(mat, newMat);
         originalMat.dispose();
 
@@ -341,6 +553,7 @@ export function createVRMFactory(
   setupMaterial?: (material: THREE.Material) => void,
   options: { sourceSHA256?: string } = {},
 ) {
+  const shareStaticColorMaps = canShareVRMColorTextures(glb);
   const restPoseProfile = glb.scene.userData.hyperiaRestPoseProfile;
   if (
     restPoseProfile !== undefined &&
@@ -433,6 +646,21 @@ export function createVRMFactory(
       }
     }
   });
+
+  // Complete every setup callback before comparing still-independent texture
+  // views: a shared material may be visited by more than one source mesh.
+  if (shareStaticColorMaps) {
+    glb.scene.traverse((node) => {
+      if (!isMeshLike(node)) return;
+      for (const material of Array.isArray(node.material)
+        ? node.material
+        : [node.material]) {
+        if (material instanceof THREE.MeshStandardNodeMaterial) {
+          shareStaticColorTexture(material);
+        }
+      }
+    });
+  }
 
   // Normalized bones compensate bone axes, not arbitrary anatomical A-rest.
   // Marked authored A-rest assets require the explicit calibrated clip adapter.

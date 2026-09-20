@@ -87,7 +87,49 @@ and finished pond views are not approved. Receipts:
 `native09/`, `native10/`, `native11/`, and `isolated-build06-report.json`; CPU receipts
 are `service-layout-network01-UNQUALIFIED/grass-storage-*`.
 
-### Native texture census — exact duplication, optimization pending
+### Static color-texture reuse — verified memory saving, performance still open
+
+Parsed static PBR VRMs now reuse an exact matching ImageBitmap color texture
+within each source material. Per-instance materials remain independent.
+Unknown/dynamic metadata, real texture-transform payloads, custom callbacks
+and unequal texture state retain separate views. All material setup callbacks
+finish before aliasing. The VRM loader's injected optional transform declaration
+is allowed only when no actual transform payload exists; required transforms
+still veto reuse. No texture is resized, no mip is removed, and no borrowed
+texture or ImageBitmap is disposed by this optimization.
+
+The final three-suite gate passes 53/53 tests; 726-root source typing, scoped
+lint and formatting pass. Build09 produces eight isolated bundles from 973
+inputs, preserving all 145 protected compiled artifacts. Actual Chrome/Metal
+fixture04 proves exactly equal day/night/shadow pixels, native color allocations
+2→1 at 2048² with 12 mips, independent sibling materials and safe sibling removal.
+Ten negative browser cases cover unsafe state, dynamic metadata and setup order.
+Initial fixture failures exposed the loader-injected declaration; those failed
+receipts remain retained rather than being counted as passes.
+
+Native15 records 310 creations/two destroys versus native14's 325/two, with
+known live payload 1,811,188,226 versus 2,146,732,526 bytes: 335,544,300 bytes
+(about 320 MiB) less. Six depth-format footprints remain unknown, and bounded
+owner/node attribution overflows; these are not physical-residency measurements.
+The matched 15 NPC/mob texture groups cover the same 35 character instances:
+each pair becomes one native allocation, retaining both material slots and all
+30 captured texture-state fields. Non-character live allocation descriptors
+also match exactly. Cross-run ImageBitmap object IDs are not pixel hashes.
+The unchanged 30-second pond transition still fails, with four grounding jobs
+and one LOD swap in its final settling observation. No FPS improvement, final
+pond art, full stream or concurrent-fishing acceptance is claimed.
+
+All owned browsers and runtime07/08 disposable databases are closed; human
+localhost and protected outputs remain unchanged. LAYOUT-01–08 remain open,
+including fourteen simultaneous anglers, two distinct docks and shore access.
+Evidence: `inland-pond-integration01-UNQUALIFIED/avatar-texture-native04/`,
+`native15/`, `avatar-texture-census-comparison.json` and
+`isolated-build09-report.json`. CPU receipts in
+`service-layout-network01-UNQUALIFIED/` are `avatar-texture-tests03.log`,
+`avatar-texture-types03.log`, `avatar-texture-lint03.log` and
+`avatar-texture-format03.log`.
+
+### Native texture census — diagnosis before implementation
 
 Native12 confirms that the pond's two depth captures surround an actual
 depth-writing back-face draw. Removing a capture is not established as
@@ -113,7 +155,7 @@ savings, not a completed optimization or demonstrated frame-rate recovery.
 Sixteen large CPU DataTexture fingerprints are distinct; they do not justify
 cross-model sharing. ImageBitmap pixels were not read back or converted.
 
-- [ ] Implement conservative within-source-material base/emissive reuse only
+- [x] Implement conservative within-source-material base/emissive reuse only
       after verifying immutable image identity, complete texture state and
       absence of texture-mutation bindings. Fail closed for unavailable or
       dynamic metadata; keep per-instance materials and existing ownership.
@@ -269,7 +311,11 @@ historical pond receipts remain evidence for their old profile only.
       fly, harpoon, cage, monkfish and shark), all 12 fish and their level/tool/
       consumable requirements. Reserve two accessible positions per family as a
       capacity target; prove actual spot availability and concurrent agent use,
-      not only a configured type list. Keep a usable shore option for every tier,
+      not only a configured type list. Capacity acceptance must exercise all
+      fourteen positions concurrently (two anglers per family), including dry
+      approaches, tool/consumable checks, rewards and spot relocation/retry.
+      Test additional arrivals without trapped agents or blocked through-routes.
+      Keep a usable shore option for every tier,
       a fishing supplier with bait and feathers, and a clear bank route. Author
       two distinct, restrained procedural docks with character, fitted landings,
       support posts and deliberate rail openings. Docks must use the pond's

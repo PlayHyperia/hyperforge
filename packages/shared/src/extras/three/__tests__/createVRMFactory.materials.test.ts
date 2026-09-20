@@ -1,9 +1,366 @@
 import { describe, expect, it } from "vitest";
+import {
+  MToonMaterial,
+  VRMExpression,
+  VRMExpressionManager,
+} from "@pixiv/three-vrm";
+import type { GLBData } from "../../../types";
 import * as THREE from "../three";
 import {
+  canShareVRMColorTextures,
   createVRMFactory,
   prepareVRMMaterialsForWebGPU,
 } from "../createVRMFactory";
+
+/** Actual scene/material classes; metadata records exercise the admission boundary. */
+function staticTextureAdmissionFixture() {
+  const scene = new THREE.Scene();
+  const geometry = new THREE.BoxGeometry();
+  const material = new THREE.MeshStandardMaterial();
+  const mesh = new THREE.Mesh<THREE.BufferGeometry, THREE.Material>(
+    geometry,
+    material,
+  );
+  scene.add(mesh);
+  const vrmMetadata: Record<string, unknown> = {
+    specVersion: "1.0",
+    meta: {},
+    humanoid: {},
+  };
+  const json: Record<string, unknown> = {
+    asset: { version: "2.0" },
+    extensionsUsed: ["VRMC_vrm"],
+    extensions: { VRMC_vrm: vrmMetadata },
+    animations: [],
+  };
+  const glb: GLBData = {
+    scene,
+    animations: [],
+    parser: { json },
+    userData: { vrm: { meta: { metaVersion: "1" } } },
+  };
+  const materials = new Set<THREE.Material>([material]);
+  return {
+    glb,
+    scene,
+    mesh,
+    json,
+    vrmMetadata,
+    replaceMaterial(next: THREE.Material) {
+      materials.add(next);
+      mesh.material = next;
+    },
+    dispose() {
+      for (const owned of materials) owned.dispose();
+      geometry.dispose();
+      scene.clear();
+    },
+  };
+}
+
+type StaticTextureAdmissionFixture = ReturnType<
+  typeof staticTextureAdmissionFixture
+>;
+
+describe("static VRM color-texture sharing admission", () => {
+  it("admits parsed VRM 1 PBR sources with no declared or runtime texture animation", () => {
+    const fixture = staticTextureAdmissionFixture();
+    try {
+      expect(canShareVRMColorTextures(fixture.glb)).toBe(true);
+      Object.assign(fixture.glb.userData!.vrm!, {
+        expressionManager: new VRMExpressionManager(),
+      });
+      expect(canShareVRMColorTextures(fixture.glb)).toBe(true);
+      fixture.replaceMaterial(new THREE.MeshPhysicalMaterial());
+      expect(canShareVRMColorTextures(fixture.glb)).toBe(true);
+    } finally {
+      fixture.dispose();
+    }
+  });
+
+  it("admits audited static PBR extensions and node-name extras even when extensionsUsed omits them", () => {
+    const fixture = staticTextureAdmissionFixture();
+    fixture.json.materials = [
+      {
+        extensions: {
+          KHR_materials_ior: { ior: 1.5 },
+          KHR_materials_specular: { specularFactor: 1 },
+        },
+      },
+    ];
+    fixture.json.nodes = [{ extras: { name: "static-bone-label" } }];
+    try {
+      expect(canShareVRMColorTextures(fixture.glb)).toBe(true);
+    } finally {
+      fixture.dispose();
+    }
+  });
+
+  it("admits the loader-injected texture-transform declaration without any payload", () => {
+    const fixture = staticTextureAdmissionFixture();
+    // The real VRM loader's legacy compatibility plugin declares support even
+    // for VRM 1 files that have no authored texture-transform extension.
+    fixture.json.extensionsUsed = ["VRMC_vrm", "KHR_texture_transform"];
+    try {
+      expect(canShareVRMColorTextures(fixture.glb)).toBe(true);
+    } finally {
+      fixture.dispose();
+    }
+  });
+
+  const denied: Array<{
+    name: string;
+    alter: (fixture: StaticTextureAdmissionFixture) => void;
+  }> = [
+    { name: "missing parser", alter: ({ glb }) => delete glb.parser },
+    {
+      name: "null parser",
+      alter: ({ glb }) => Object.assign(glb, { parser: null }),
+    },
+    {
+      name: "null parsed metadata",
+      alter: ({ glb }) => (glb.parser!.json = null),
+    },
+    {
+      name: "array parsed metadata",
+      alter: ({ glb }) => (glb.parser!.json = []),
+    },
+    {
+      name: "primitive parsed metadata",
+      alter: ({ glb }) => (glb.parser!.json = "unknown"),
+    },
+    {
+      name: "unsupported glTF version",
+      alter: ({ json }) => (json.asset = { version: "1.0" }),
+    },
+    { name: "missing runtime VRM", alter: ({ glb }) => delete glb.userData },
+    {
+      name: "legacy runtime VRM version",
+      alter: ({ glb }) => (glb.userData!.vrm!.meta!.metaVersion = "0"),
+    },
+    {
+      name: "unsupported VRM extension version",
+      alter: ({ vrmMetadata }) => (vrmMetadata.specVersion = "1.1"),
+    },
+    {
+      name: "unknown VRM extension field",
+      alter: ({ vrmMetadata }) => (vrmMetadata.textureAnimation = {}),
+    },
+    {
+      name: "declared expressions even when empty",
+      alter: ({ vrmMetadata }) => (vrmMetadata.expressions = {}),
+    },
+    {
+      name: "authored animation",
+      alter: ({ json }) => (json.animations = [{ channels: [], samplers: [] }]),
+    },
+    {
+      name: "parsed animation clip",
+      alter: ({ glb }) =>
+        (glb.animations = [new THREE.AnimationClip("authored", 1, [])]),
+    },
+    {
+      name: "unknown declared extension",
+      alter: ({ json }) =>
+        (json.extensionsUsed = ["VRMC_vrm", "EXT_unreviewed_texture_behavior"]),
+    },
+    {
+      name: "unknown required extension",
+      alter: ({ json }) =>
+        (json.extensionsRequired = ["EXT_unreviewed_texture_behavior"]),
+    },
+    {
+      name: "required texture-transform extension despite declaration-only allowance",
+      alter: ({ json }) => {
+        json.extensionsUsed = ["VRMC_vrm", "KHR_texture_transform"];
+        json.extensionsRequired = ["KHR_texture_transform"];
+      },
+    },
+    {
+      name: "unknown undeclared nested extension",
+      alter: ({ json }) =>
+        (json.materials = [
+          { extensions: { EXT_unreviewed_texture_behavior: {} } },
+        ]),
+    },
+    {
+      name: "legacy VRM metadata",
+      alter: ({ json, vrmMetadata }) =>
+        (json.extensions = { VRMC_vrm: vrmMetadata, VRM: {} }),
+    },
+    {
+      name: "MToon UV animation metadata",
+      alter: ({ json }) =>
+        (json.materials = [
+          {
+            extensions: {
+              VRMC_materials_mtoon: { uvAnimationScrollXSpeedFactor: 1 },
+            },
+          },
+        ]),
+    },
+    {
+      name: "authored texture-transform extension",
+      alter: ({ json }) => {
+        json.extensionsUsed = ["VRMC_vrm", "KHR_texture_transform"];
+        json.materials = [
+          {
+            pbrMetallicRoughness: {
+              baseColorTexture: {
+                index: 0,
+                extensions: { KHR_texture_transform: { offset: [0.1, 0] } },
+              },
+            },
+          },
+        ];
+      },
+    },
+    {
+      name: "property animation extension",
+      alter: ({ json }) => (json.extensions = { KHR_animation_pointer: {} }),
+    },
+    {
+      name: "nonempty root extras",
+      alter: ({ json }) => (json.extras = { textureAnimation: true }),
+    },
+    {
+      name: "name-only extras outside a node",
+      alter: ({ json }) =>
+        (json.materials = [{ extras: { name: "material-label" } }]),
+    },
+    {
+      name: "unknown node extras",
+      alter: ({ json }) =>
+        (json.nodes = [{ extras: { name: "bone", textureAnimation: true } }]),
+    },
+    {
+      name: "non-string node-name extras",
+      alter: ({ json }) => (json.nodes = [{ extras: { name: 1 } }]),
+    },
+    {
+      name: "non-PBR material",
+      alter: (fixture) =>
+        fixture.replaceMaterial(new THREE.MeshBasicMaterial()),
+    },
+    {
+      name: "runtime MToon material",
+      alter: (fixture) => fixture.replaceMaterial(new MToonMaterial()),
+    },
+    {
+      name: "initial custom material render callback",
+      alter: ({ mesh }) => {
+        mesh.material.onBeforeRender = function () {
+          this.userData.textureAnimation = true;
+        };
+      },
+    },
+    {
+      name: "initial custom material compile callback",
+      alter: ({ mesh }) => {
+        mesh.material.onBeforeCompile = function () {
+          this.userData.textureAnimation = true;
+        };
+      },
+    },
+    {
+      name: "opaque runtime expression manager",
+      alter: ({ glb }) =>
+        Object.assign(glb.userData!.vrm!, { expressionManager: {} }),
+    },
+    {
+      name: "malformed runtime expression collection",
+      alter: ({ glb }) =>
+        Object.assign(glb.userData!.vrm!, {
+          expressionManager: { expressions: null },
+        }),
+    },
+    {
+      name: "real runtime expression manager with a registered expression",
+      alter: ({ glb }) => {
+        const manager = new VRMExpressionManager();
+        manager.registerExpression(new VRMExpression("neutral"));
+        Object.assign(glb.userData!.vrm!, { expressionManager: manager });
+      },
+    },
+    {
+      name: "loader runtime expression manager outside the VRM wrapper",
+      alter: ({ glb }) => {
+        const manager = new VRMExpressionManager();
+        manager.registerExpression(new VRMExpression("neutral"));
+        Object.assign(glb.userData!, { vrmExpressionManager: manager });
+      },
+    },
+    {
+      name: "scene VRM runtime expression manager",
+      alter: ({ scene }) => {
+        const manager = new VRMExpressionManager();
+        manager.registerExpression(new VRMExpression("neutral"));
+        scene.userData.vrm = { expressionManager: manager };
+      },
+    },
+    {
+      name: "scene loader runtime expression manager",
+      alter: ({ scene }) => {
+        const manager = new VRMExpressionManager();
+        manager.registerExpression(new VRMExpression("neutral"));
+        scene.userData.vrmExpressionManager = manager;
+      },
+    },
+    {
+      name: "runtime expression node before factory removal",
+      alter: ({ scene }) => scene.add(new VRMExpression("neutral")),
+    },
+  ];
+
+  it.each(denied)(
+    "denies $name without changing the source scene",
+    ({ alter }) => {
+      const fixture = staticTextureAdmissionFixture();
+      alter(fixture);
+      const children = [...fixture.scene.children];
+      const material = fixture.mesh.material;
+      try {
+        expect(canShareVRMColorTextures(fixture.glb)).toBe(false);
+        expect(fixture.scene.children).toEqual(children);
+        expect(fixture.mesh.material).toBe(material);
+      } finally {
+        fixture.dispose();
+      }
+    },
+  );
+
+  it.each([undefined, false, true])(
+    "does not alias ordinary non-ImageBitmap textures with eligibility %s",
+    (eligible) => {
+      const map = new THREE.Texture();
+      const emissiveMap = map.clone();
+      const source = new THREE.MeshStandardMaterial({ map, emissiveMap });
+      const geometry = new THREE.BoxGeometry();
+      const mesh = new THREE.Mesh<THREE.BufferGeometry, THREE.Material>(
+        geometry,
+        source,
+      );
+      let textureDisposals = 0;
+      for (const texture of [map, emissiveMap]) {
+        texture.addEventListener("dispose", () => textureDisposals++);
+      }
+      try {
+        expect(map.source).toBe(emissiveMap.source);
+        prepareVRMMaterialsForWebGPU(mesh, eligible);
+        const material = mesh.material as THREE.MeshStandardNodeMaterial;
+        expect(material.map).toBe(map);
+        expect(material.emissiveMap).toBe(emissiveMap);
+        expect(material.map).not.toBe(material.emissiveMap);
+        expect(textureDisposals).toBe(0);
+      } finally {
+        mesh.material.dispose();
+        geometry.dispose();
+        map.dispose();
+        emissiveMap.dispose();
+      }
+    },
+  );
+});
 
 describe("production VRM material normalization", () => {
   it("preserves texture, alpha, color, and side inputs without changing the rig or geometry", () => {

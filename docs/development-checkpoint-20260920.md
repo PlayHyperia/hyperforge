@@ -1,5 +1,81 @@
 # World graphics development checkpoint — 2026-09-20
 
+## Static avatar texture checkpoint — exact pixels, lower native allocation
+
+The source now conservatively shares a source material's base/emissive texture
+only for parsed static PBR VRMs with the same actual ImageBitmap and complete
+matching texture state. Unknown metadata, animations/expressions, actual
+texture-transform payloads, custom material callbacks and unequal UV/upload/
+sampling state preserve the existing separate views. No cross-asset pool,
+texture resizing, mip reduction, quality-setting change or asset rewrite was
+introduced. Material instances remain independent; borrowed textures/images
+are not disposed by the sharing decision.
+
+Review caught a new coupling before acceptance: source setup callbacks can
+change only the emissive transform. Sharing now occurs after every callback,
+including repeat visits to a shared material, and checks new custom render/
+compile hooks. The actual browser regressions verify those cases. Initial
+native fixtures also correctly failed production eligibility: the installed
+VRM loader injects an optional KHR_texture_transform declaration even without
+a payload. Only that optional declaration is admitted; required declarations
+and every actual nested transform payload remain rejected. Failed fixture01–03
+receipts are retained. Their first preview sheets also had an evidence-only
+row flip, corrected for WebGPU readback in fixture03 onward.
+
+Final source gates: 53/53 real-class tests across material, bone-transform and
+loader recovery suites; 726-root source typing with zero diagnostics and
+stable inputs; scoped zero-warning ESLint and Prettier. Build09 emits eight
+isolated bundles from 973 source inputs; all 145 protected compiled artifacts
+retain their hashes. Intermediate build07/08 are retained but not the final
+qualified source revision. No project dependency installation was run.
+
+Chrome/Apple Metal fixture04 loads actual banker.vrm through the production
+loader/plugin with its real ImageBitmap cache policy. Day/night and shadow/
+unshadowed pixels are exactly equal before/after; 2,299 changed pixels witness
+real shadowing, 69,946 witness lighting response and 16,514 witness the avatar.
+The two 2048², twelve-mip sRGB native color allocations become one:
+44,739,240→22,369,620 payload bytes. The actual factory creates independent
+sibling materials; removal/material disposal of one sibling leaves the other's
+pixels and borrowed native texture intact. Ten browser rejection/order cases
+pass, with zero GPU validation errors and restored/disposed fixture resources.
+The root agent inspected the correctly oriented contact sheet. This is texture
+correctness, not approval of the temporary NPC art or character animation.
+
+Native15's integrated pond census uses the original profile, 1280×720/DPR1,
+camera poses and 30-second transition gate, with no calibration/timing hooks.
+It records 310 creations/two destroys versus native14's 325/two. Known live
+payload falls from 2,146,732,526 to 1,811,188,226 bytes: 335,544,300 bytes
+(about 320 MiB). Independent comparison matches all 15 NPC/mob texture groups
+and 35 character instances: both color slots remain, each old pair becomes
+one native allocation, and all 30 recorded texture-state fields match.
+Non-character live native allocation descriptor multisets match exactly.
+ImageBitmap IDs are run-local, not cross-run pixel hashes. Six native depth
+footprints remain unknown and bounded owner/node attribution still overflows;
+do not describe the payload as physical GPU residency or a complete heap census.
+
+The full native15 run still FAILS the unchanged grass camera-transition gate.
+Its final settling observation has four grounding jobs and one LOD swap.
+The retained failure screenshot shows the loading overlay, not an approved
+pond view. No FPS recovery, final pond art, public stream, fourteen-concurrent-
+angler gameplay, route/custody, or sustained-performance acceptance is claimed.
+All layout and world-art gates remain open.
+
+The mirrored pond contract now explicitly requires fourteen simultaneous
+anglers (two per family), actual tool/consumable/reward/relocation handling,
+and additional-arrival behavior without blocked through-routes. Two distinct
+procedural docks, every-tier shore access, inland placement and natural world
+composition remain required and unapproved.
+
+Evidence: local `inland-pond-integration01-UNQUALIFIED/avatar-texture-native04/`,
+`native15/`, `avatar-texture-census-comparison.json` and
+`isolated-build09-report.json`; final CPU receipts are
+`service-layout-network01-UNQUALIFIED/avatar-texture-{tests,types,lint,format}03`.
+All owned Chrome/HTTP sessions and runtime07/08 are closed; both disposable
+databases were removed. The human localhost client/server/database and all
+protected output hashes remain unchanged. No human bundle promotion, merge,
+deployment or real-value action was performed.
+
+
 ## Native allocation checkpoint — measured duplication, no quality reduction
 
 This diagnostic-only slice changes no production code, assets, resolution,
