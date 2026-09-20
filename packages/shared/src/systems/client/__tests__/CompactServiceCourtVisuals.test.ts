@@ -168,8 +168,8 @@ describe("compact service court client geometry and lifecycle (not rendered acce
           layoutId: COMPACT_BANK_PAVILION.layoutId,
           meshes: 3,
           materials: 3,
-          triangles: 1300,
-          geometryBytes: 216576,
+          triangles: 1492,
+          geometryBytes: 247200,
         },
       });
 

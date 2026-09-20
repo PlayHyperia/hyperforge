@@ -56,6 +56,33 @@ function digest(geometry: THREE.BufferGeometry): string {
   }
   return hash.digest("hex");
 }
+/** Preserve the historical primitive prefix oracle as additive badges grow a batch. */
+function cornersOf(
+  geometry: THREE.BufferGeometry,
+  start: number,
+  count: number,
+) {
+  expect(geometry.index).toBeNull();
+  const result = own(new THREE.BufferGeometry());
+  for (const [name, attribute] of Object.entries(geometry.attributes)) {
+    if (!(attribute instanceof THREE.BufferAttribute))
+      throw new Error("Expected ordinary generated geometry attributes");
+    result.setAttribute(
+      name,
+      new THREE.BufferAttribute(
+        attribute.array.slice(
+          start * attribute.itemSize,
+          (start + count) * attribute.itemSize,
+        ),
+        attribute.itemSize,
+        attribute.normalized,
+      ),
+    );
+  }
+  result.computeBoundingBox();
+  result.computeBoundingSphere();
+  return result;
+}
 function meshMetrics(root: THREE.Object3D) {
   let triangles = 0,
     bytes = 0;
@@ -354,9 +381,9 @@ describe("opt-in Haven architectural geometry", () => {
           ).toBeGreaterThan(1e-9);
         }
       }
-      expect(triangles).toBe(1300);
+      expect(triangles).toBe(1492);
       expect(triangles).toBeLessThanOrEqual(1500);
-      expect(bytes).toBeLessThanOrEqual(216576);
+      expect(bytes).toBe(247200);
       expect(bounds.min.x).toBeGreaterThanOrEqual(-4.5);
       expect(bounds.max.x).toBeLessThanOrEqual(4.5);
       expect(bounds.min.z).toBeCloseTo(-4.45, 5);
@@ -410,17 +437,23 @@ describe("opt-in Haven architectural geometry", () => {
         BANK_PAVILION_POSTS.map(() => ({ bottom: -0.08, top: 0.22 })),
         { recipe: "bank-pavilion-v1", architecturalFinish: snapshot.finish },
       );
-      const physical = geometry.timber.clone();
-      const legacy = geometry.timber.clone();
+      const originalTimber = cornersOf(
+        geometry.timber,
+        0,
+        snapshot.timberTriangles * 3,
+      );
+      const originalFootings = cornersOf(geometry.footings, 0, 112 * 3);
+      const physical = originalTimber.clone();
+      const legacy = originalTimber.clone();
       try {
         physical.deleteAttribute("courtRoof");
         expect(digest(physical)).toBe(snapshot.physical);
         expect(digest(geometry.roof)).toBe(snapshot.roof);
-        expect(digest(geometry.footings)).toBe(
+        expect(digest(originalFootings)).toBe(
           "98b29909ee38e8ff51e06c662af1d3a7ecea9736a764a799c5bd4546ede3a4d4",
         );
-        const p = geometry.timber.getAttribute("position");
-        const mask = geometry.timber.getAttribute("courtRoof");
+        const p = originalTimber.getAttribute("position");
+        const mask = originalTimber.getAttribute("courtRoof");
         expect(geometry.timber.index).toBeNull();
         expect(p.count / 3).toBe(snapshot.timberTriangles);
         const restoredLabels = new Float32Array(p.count).fill(1);
@@ -473,6 +506,127 @@ describe("opt-in Haven architectural geometry", () => {
         legacy.dispose();
         geometry.dispose();
       }
+    }
+  });
+
+  it("attaches two closed south-post key badges inside the existing blocked tiles and keeps them visible under cutaway", () => {
+    const geometry = createOpenWorkshop(
+      BANK_PAVILION_POSTS.map(() => ({ bottom: -0.08, top: 0.22 })),
+      { recipe: "bank-pavilion-v1", architecturalFinish: "haven-v1" },
+    );
+    const material = new THREE.MeshBasicMaterial({ side: THREE.DoubleSide });
+    materials.add(material);
+    const ray = new THREE.Raycaster();
+    const metrics: Record<
+      string,
+      { triangles: number; bytes: number; sha256: string }
+    > = {};
+    try {
+      // The old complete timber, including the brace visibility fix, is exact.
+      expect(digest(cornersOf(geometry.timber, 0, 1148 * 3))).toBe(
+        "af7df3be4367f748b17fcc2d64efd9c25acdd2ed08553cf1afa585fa66e36061",
+      );
+      for (const role of ["timber", "roof", "footings"] as const) {
+        const g = geometry[role];
+        metrics[role] = {
+          triangles: g.getAttribute("position").count / 3,
+          bytes: Object.values(g.attributes).reduce(
+            (sum, a) => sum + a.array.byteLength,
+            0,
+          ),
+          sha256: digest(g),
+        };
+      }
+      expect(metrics.timber.triangles).toBe(1148 + 56);
+      expect(metrics.roof.triangles).toBe(40);
+      expect(metrics.footings.triangles).toBe(112 + 136);
+      const bounds: {
+        post: { x: number; z: number };
+        min: number[];
+        max: number[];
+      }[] = [];
+      for (const [i, post] of BANK_PAVILION_POSTS.filter(
+        (p) => p.z > 0,
+      ).entries()) {
+        const plaque = cornersOf(geometry.timber, (1148 + i * 28) * 3, 28 * 3);
+        const bow = cornersOf(geometry.footings, (112 + i * 68) * 3, 48 * 3);
+        const shaft = cornersOf(
+          geometry.footings,
+          (112 + i * 68 + 48) * 3,
+          20 * 3,
+        );
+        const badgeBounds = new THREE.Box3();
+        for (const part of [plaque, bow, shaft]) {
+          assertSolid(part);
+          badgeBounds.union(part.boundingBox!);
+          const p = part.getAttribute("position");
+          for (let v = 0; v < p.count; v++) {
+            // Actual admitted placement is (350, 320), rotation zero. Every
+            // new collision vertex stays in its already occupied 1m post tile.
+            expect(Math.floor(350 + p.getX(v))).toBe(Math.floor(350 + post.x));
+            expect(Math.floor(320 + p.getZ(v))).toBe(Math.floor(320 + post.z));
+            expect(p.getY(v)).toBeGreaterThanOrEqual(1.4);
+            expect(p.getY(v)).toBeLessThanOrEqual(2.1);
+          }
+        }
+        expect([...plaque.getAttribute("courtRoof").array]).toEqual(
+          Array(28 * 3).fill(0),
+        );
+        expect(geometry.footings.getAttribute("courtRoof")).toBeUndefined();
+        expect(plaque.boundingBox!.min.z).toBeLessThan(post.z + 0.12);
+        expect(plaque.boundingBox!.max.z).toBeGreaterThan(post.z + 0.12);
+        expect(bow.boundingBox!.min.z).toBeLessThan(plaque.boundingBox!.max.z);
+        expect(shaft.boundingBox!.min.z).toBeLessThan(
+          plaque.boundingBox!.max.z,
+        );
+        expect(badgeBounds.getSize(new THREE.Vector3()).x).toBeCloseTo(0.52, 6);
+        expect(badgeBounds.getSize(new THREE.Vector3()).y).toBeCloseTo(0.66, 6);
+        const boardMesh = new THREE.Mesh(plaque, material);
+        const key = new THREE.Group();
+        key.add(new THREE.Mesh(bow, material), new THREE.Mesh(shaft, material));
+        key.updateMatrixWorld(true);
+        boardMesh.updateMatrixWorld(true);
+        for (const [x, y] of [
+          [post.x + 0.08, 1.9],
+          [post.x + 0.07, 1.625],
+        ]) {
+          ray.set(new THREE.Vector3(x, y, 5), new THREE.Vector3(0, 0, -1));
+          ray.far = 2;
+          const reliefHits = ray.intersectObject(key, true);
+          const boardHits = ray.intersectObject(boardMesh);
+          expect(reliefHits.length).toBeGreaterThan(0);
+          expect(boardHits.length).toBeGreaterThan(0);
+          expect(reliefHits[0].point.z).toBeCloseTo(post.z + 0.216, 6);
+          expect(reliefHits[0].distance).toBeLessThan(boardHits[0].distance);
+        }
+        // The bow's central hole is real geometry, with the wood visible behind.
+        ray.set(new THREE.Vector3(post.x, 1.9, 5), new THREE.Vector3(0, 0, -1));
+        expect(ray.intersectObject(key, true)).toHaveLength(0);
+        expect(ray.intersectObject(boardMesh).length).toBeGreaterThan(0);
+        bounds.push({
+          post,
+          min: badgeBounds.min.toArray(),
+          max: badgeBounds.max.toArray(),
+        });
+      }
+      const mask = geometry.timber.getAttribute("courtRoof");
+      expect([...mask.array].filter((v) => v === 0).length / 3).toBe(112 + 56);
+      process.stdout.write(
+        `${JSON.stringify({
+          bankPostBadges: {
+            metrics,
+            bounds,
+            addedTriangles: 192,
+            extraBatches: 0,
+            blockedTiles: [
+              [346, 323],
+              [353, 323],
+            ],
+          },
+        })}\n`,
+      );
+    } finally {
+      geometry.dispose();
     }
   });
 

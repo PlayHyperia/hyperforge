@@ -79,13 +79,15 @@ describe("bank pavilion cutaway with actual recipe bounds (not GPU acceptance)",
     expect(camera.matrixWorld.toArray()).toEqual(before);
     expect(cutaway.upperWallY).toBeNull();
     const mask = geometry.timber.getAttribute("courtRoof");
+    expect(mask.count).toBe(3612);
     for (let i = 0; i < mask.count; i += 3) {
       expect(mask.getX(i)).toBe(mask.getX(i + 1));
       expect(mask.getX(i)).toBe(mask.getX(i + 2));
       // Each corner emits one post followed by two upper knee braces.
-      // The braces now follow the roof cutaway; only the four posts remain.
+      // The braces follow the roof cutaway; posts and appended bank badges remain.
       const isPermanentPost = i < 12 * 84 && Math.floor(i / 84) % 3 === 0;
-      expect(mask.getX(i)).toBe(isPermanentPost ? 0 : 1);
+      const isPermanentBadge = i >= 3444;
+      expect(mask.getX(i)).toBe(isPermanentPost || isPermanentBadge ? 0 : 1);
     }
   });
 

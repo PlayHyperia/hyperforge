@@ -28,7 +28,7 @@ export function createCompactServiceCourtVisual(
   record: OwnedCompactServiceCourt,
   mainCamera?: () => THREE.Camera,
 ) {
-  const bank = record.descriptor.recipeId === "open-timber-bank-haven-v1";
+  const bank = record.descriptor.recipeId === "open-timber-bank-haven-v2";
   const haven =
     bank || record.descriptor.recipeId === "open-timber-smithy-haven-v3";
   const prefix = bank ? "compact-bank" : "compact-smithy";

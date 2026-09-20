@@ -12,6 +12,63 @@ visual, performance or production-readiness task.
 
 ## Texture-quality priority — shoreline repetition remains open
 
+## Island layout requirements — 2026-09-20, all open
+
+These are required sub-gates of the world composition and verification tasks
+below, not optional decoration or completed work. The island must feel like one
+natural, inhabited place with purposeful destinations and useful open ground.
+They supersede earlier single-bank assumptions and fixed pond placement/outline;
+historical pond receipts remain evidence for their old profile only.
+
+- [ ] **LAYOUT-01 — small pavilion town.** Compose the main banking, crafting
+      and preparation services into a compact, recognizable town of open-sided
+      pavilions, gathering spaces and clear landmarks. Avoid a service grid or a
+      collection of identical roofs. Preserve circulation, diagonal travel, off-path
+      exploration and overhead visibility; do not force all travel onto paths.
+- [ ] **LAYOUT-02 — distributed banks.** Provide multiple actual bank access
+      points across the island, including the town and useful outlying skill areas.
+      Choose their number and positions from measured gathering/deposit/preparation
+      journeys, not equal geometric spacing. Keep one player's authoritative bank
+      inventory consistent at every location; verify access range, concurrent
+      requests, restart persistence and agent discovery without duplicate balances.
+- [ ] **LAYOUT-03 — distinct mines.** Place multiple recognizable mining areas
+      with geologically coherent outcrops and different ore mixes, covering every
+      launch ore and its progression requirements. Author counts, scarcity and
+      respawn budgets explicitly; prove approach, depletion, regeneration and
+      gathering-to-bank routes using the live resource entities.
+- [ ] **LAYOUT-04 — tiered resource trees.** Spread real choppable tree species
+      and tiers throughout the island in mixed groves, solitary landmarks and
+      habitat-appropriate groups. Common tiers are abundant; higher tiers are
+      progressively rarer. Validate authored counts by tier, spacing, accessible
+      harvest faces, regrowth and agent targets. Inspect all LOD/crown bounds and
+      batching/culling costs; decorative copies do not satisfy resource coverage.
+- [ ] **LAYOUT-05 — local quest support.** Audit every launch quest NPC against
+      the skill area and quest stages it supports. Place each near a suitable
+      teaching/gathering/processing area, retain IDs and progress, and prove complete
+      quest routes and hand-ins after relocation.
+- [ ] **LAYOUT-06 — distributed rune altars.** Give the launch rune altars
+      separate, thematically coherent locations around the island instead of one
+      cluster. Preserve crafting eligibility, interaction ranges and identities;
+      verify each altar's discovery, supply/bank route, clear approach and use.
+- [ ] **LAYOUT-07 — natural inland pond.** Relocate the pond farther from the
+      ocean-facing island edge and author an irregular basin with unequal coves,
+      shelves, cutbanks and planted turf margins, not a circular ring or noise added
+      to the same collar. Select placement in whole-island plan and eye-level views;
+      record the minimum dry land separation from the ocean and retain a readable,
+      traversable inland buffer. Revise the versioned terrain/water profile and
+      coverage together; do not move only the visible water mesh or reuse old
+      coordinate-specific approval. Re-ground fishing spots, plants, stones, nearby
+      trees and paths; test indexed/rendered terrain against authoritative height,
+      PhysX, water coverage, shoreline crossings and fishing/navigation access.
+- [ ] **LAYOUT-08 — integrated acceptance.** Before promoting the layout, retain
+      an annotated island plan, resource/service census and short journey budgets.
+      Verify multi-agent gathering, deposit, crafting, questing and duel preparation,
+      migration of persisted positions, restart/reconnect and resource lifecycles.
+      Review close, overview, walking and stream views across daylight conditions,
+      and measure target-hardware frame, loading and memory budgets. A new layout
+      invalidates affected old route/grounding evidence; tests alone do not establish
+      the required artistic or AAA-quality acceptance.
+
 ## Current world-art scope — open acceptance contract
 
 **World first; avatar/armor later. One compact island and one arena remain the
@@ -57,6 +114,27 @@ enclosed procedural buildings; the Review75 shoreline gate below is separate.
 
 These are open launch tasks, not completed implementation. Existing shoreline
 texture accounting remains **3 checked / 8 open**.
+
+**Bank pavilion art03 — bounded improvement retained; full-bank art remains open.**
+The explicitly admitted `open-timber-bank-haven-v2` candidate adds two readable
+post-mounted key signs and curved, asymmetric service wear. Actual geometry is
+**1,492 triangles / 247,200 bytes**, still three meshes/materials and below the
+unchanged 1,500-triangle guard. Historical smithy geometry and unaffected paths
+remain exact; the old bank recipe is rejected instead of silently relabeled.
+Tests pass **13** geometry, **32** path, **35** visual/cutaway, **11** native-owner,
+**4** selected candidate-owner, **2** candidate-access and **37** client cases
+(overlapping suites; do not sum). Strict shared/client source types, scoped lint
+and isolated builds pass; all **145 protected compiled artifacts** are unchanged.
+Native01 timed out before any art views; that failed cold-start receipt remains.
+Native02 passes the unchanged startup gate and captures three actual Chrome/Metal
+views with all three bank pipelines, complete HUD leases and stable input pins.
+Independent review finds readable signs and resolved orphan braces, but chunky
+plaques, a generic shelter, broad dark ground and angular grass still need work.
+No motion, loading-time, full-stream, target-hardware performance or AAA approval.
+Only the owned diagnostic browser, servers and temporary test database were
+cleaned; playable **3333/5555/5556** and the human database are unchanged.
+The expanded **LAYOUT-01–08** requirements above remain entirely open.
+[Art03 evidence](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/bank-pavilion-art03-UNQUALIFIED/README.md)
 
 **Bank pavilion integration01 — candidate integration verified; art and launch acceptance remain open.**
 The isolated, non-promoted candidate places `compact-bank-pavilion-v1` at

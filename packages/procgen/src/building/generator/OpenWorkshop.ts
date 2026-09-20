@@ -32,6 +32,7 @@ export type WorkshopFoot = Readonly<{ bottom: number; top: number }>;
 export type OpenWorkshopGeometry = Readonly<{
   timber: THREE.BufferGeometry;
   roof: THREE.BufferGeometry;
+  /** Stone batch: four feet, plus the bank's post-mounted key reliefs. */
   footings: THREE.BufferGeometry;
   dispose(): void;
 }>;
@@ -150,6 +151,7 @@ export function createOpenWorkshop(
     const frame: THREE.BufferGeometry[] = [],
       bases: THREE.BufferGeometry[] = [];
     const cutawayBraces = new Set<THREE.BufferGeometry>();
+    const permanentBadges = new Set<THREE.BufferGeometry>();
     const member = (a: number[], b: number[], width: number, depth = width) =>
       take(
         timberMember(
@@ -280,6 +282,57 @@ export function createOpenWorkshop(
           ),
         );
     }
+    if (bank) {
+      // South (+Z) approach: small bevelled timber plaques fixed directly to
+      // the two posts. Append to preserve every pre-existing primitive byte.
+      // Both plaque and shallow stone key stay within the post's blocked tile;
+      // neither becomes a gable-height orphan when the roof is cut away.
+      for (const { x, z } of posts.filter((post) => post.z > 0)) {
+        const plaque = member(
+          [x, 1.75, z + 0.115],
+          [x, 1.75, z + 0.2],
+          0.52,
+          0.66,
+        );
+        frame.push(plaque);
+        permanentBadges.add(plaque);
+        const hexagon = (radius: number) =>
+          Array.from({ length: 6 }, (_, i) => {
+            const angle = (i * Math.PI) / 3;
+            return new THREE.Vector2(
+              Math.cos(angle) * radius,
+              Math.sin(angle) * radius,
+            );
+          });
+        const bow = new THREE.Shape(hexagon(0.105));
+        bow.holes.push(new THREE.Path(hexagon(0.055).reverse()));
+        const shaft = new THREE.Shape(
+          [
+            [-0.026, -0.3],
+            [0.1, -0.3],
+            [0.1, -0.245],
+            [0.026, -0.245],
+            [0.026, -0.075],
+            [-0.026, -0.075],
+          ].map(([px, py]) => new THREE.Vector2(px, py)),
+        );
+        for (const shape of [bow, shaft]) {
+          const relief = take(
+            new THREE.ExtrudeGeometry(shape, {
+              depth: 0.018,
+              steps: 1,
+              bevelEnabled: false,
+              curveSegments: 1,
+            }),
+          );
+          applyGeometryAttributes(relief, palette.trim, "generic", {
+            applyUVs: false,
+          });
+          relief.translate(x, 1.9, z + 0.198);
+          bases.push(relief);
+        }
+      }
+    }
     const roofMask = new Float32Array(
       frame.reduce(
         (sum, part) =>
@@ -291,7 +344,10 @@ export function createOpenWorkshop(
     for (let i = 0; i < frame.length; i++) {
       const corners =
         frame[i].index?.count ?? frame[i].getAttribute("position").count;
-      if (i >= permanentFrameEnd || cutawayBraces.has(frame[i]))
+      if (
+        !permanentBadges.has(frame[i]) &&
+        (i >= permanentFrameEnd || cutawayBraces.has(frame[i]))
+      )
         roofMask.fill(1, cornerOffset, cornerOffset + corners);
       cornerOffset += corners;
     }

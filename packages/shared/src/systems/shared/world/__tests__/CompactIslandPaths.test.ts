@@ -4,7 +4,10 @@ import { World } from "../../../../core/World";
 import { DataManager } from "../../../../data/DataManager";
 import { stationDataProvider } from "../../../../data/StationDataProvider";
 import { ALL_WORLD_AREAS } from "../../../../data/world-areas";
-import { getDuelArenaConfig } from "../../../../data/duel-manifest";
+import {
+  getDuelArenaConfig,
+  isPositionInsideDuelArenaZone,
+} from "../../../../data/duel-manifest";
 import {
   createDuelArenaFloorZones,
   getDuelArenaGradeHeight,
@@ -34,6 +37,9 @@ import THREE from "../../../../extras/three/three";
 import { DuelArenaVisualsSystem } from "../../../client/DuelArenaVisualsSystem";
 import { COMPACT_BANK_PAVILION } from "../CompactServiceCourt";
 import { TownSystem } from "../TownSystem";
+import { modelBounds } from "./fixtures/StaticGlbBounds";
+import { getExternalResource } from "../../../../utils/ExternalAssetUtils";
+import { generateCenteredTrees } from "../BiomeResourceGenerator";
 
 // Independently declared surface recipe; centerlines and outer support remain
 // those of the previously captured fourteen-path world, not a wider network.
@@ -223,6 +229,49 @@ const pathFixtures = [
   { name: "baseline", run: withRoads },
   { name: "southern-meadow", run: withMeadowRoads },
 ];
+
+async function withPavilionGroundRoads(
+  profileFixture: (
+    run: (
+      roads: RoadNetworkSystem,
+      terrain: TerrainSystem,
+    ) => void | Promise<void>,
+  ) => Promise<void>,
+  run: (
+    roads: RoadNetworkSystem,
+    terrain: TerrainSystem,
+  ) => void | Promise<void>,
+) {
+  await profileFixture(async () => {
+    const owners = Object.fromEntries(
+      ["worldConfig", "worldTerrainProfile", "worldContentIdentity"].map(
+        (key) => [key, Object.getOwnPropertyDescriptor(DataManager, key)!],
+      ),
+    );
+    const haven = ALL_WORLD_AREAS.central_haven;
+    try {
+      const config = structuredClone(DataManager.getWorldConfig()!);
+      delete config.compactPreparationLodge;
+      config.compactBankPavilion = structuredClone(COMPACT_BANK_PAVILION);
+      const selected = structuredClone(haven);
+      selected.flatZones = selected.flatZones!.filter(
+        (zone) => zone.id !== "central_haven_lodge_grass_clearance",
+      );
+      const clerk = selected.npcs!.find((row) => row.id === "bank_clerk")!;
+      clerk.position.x = 352;
+      clerk.position.z = 322;
+      ALL_WORLD_AREAS.central_haven = selected;
+      DataManager["worldContentIdentity"] = null;
+      DataManager.setWorldConfig(config);
+      // A separate genuine startup publishes the bank-pavilion mask. Never
+      // compare a mutated network with the earlier world's stale mask cache.
+      await withRoads(run);
+    } finally {
+      ALL_WORLD_AREAS.central_haven = haven;
+      Object.defineProperties(DataManager, owners);
+    }
+  });
+}
 
 type Paths = ReturnType<typeof createCompactIslandPaths>;
 
@@ -3101,6 +3150,432 @@ describe("actual compact preparation paths and centered road mask", () => {
 });
 
 describe("bank pavilion admitted architecture and real path owners", () => {
+  it.each(pathFixtures)(
+    "pins $name historical ground paint before pavilion ground art",
+    async ({ name, run }) => {
+      await run((_roads, terrain) => {
+        const profile = terrain.getWorldTerrainProfile();
+        const paths = createCompactIslandPaths(
+          profile,
+          ALL_WORLD_AREAS,
+          getDuelArenaConfig(),
+          (x, z) => terrain.getHeightAt(x, z),
+        );
+        const areas = structuredClone(ALL_WORLD_AREAS);
+        const clerk = areas.central_haven.npcs!.find(
+          (row) => row.id === "bank_clerk",
+        )!;
+        clerk.position.x = 352;
+        clerk.position.z = 322;
+        const pavilion = createCompactIslandPaths(
+          profile,
+          areas,
+          getDuelArenaConfig(),
+          (x, z) => terrain.getHeightAt(x, z),
+          { compactBankPavilion: COMPACT_BANK_PAVILION },
+        );
+        // Captured from the actual pre-ground03 source, not recomputed from an
+        // alternative candidate branch. Includes every point, Y, width and cap.
+        const historicalSha =
+          name === "baseline"
+            ? "9a50310b07c62c7e9caa3c33dc72a771657d867de59dbe85a10891b18f693ae3"
+            : "605b5731348601653cb47dd6e90b137c22395a779e607394d171d7330409c905";
+        expect(
+          createHash("sha256").update(JSON.stringify(paths)).digest("hex"),
+        ).toBe(historicalSha);
+        const unchanged = pavilion.filter(
+          (row) =>
+            ![
+              "compact-clearing-bank-apron",
+              "compact-clearing-bank-clerk-approach",
+              "compact-wear-bank-clerk-outer",
+              "compact-wear-bank-apron-inner",
+              "compact-wear-bank-service",
+              "compact-wear-bank-south-arrival",
+            ].includes(row.id),
+        );
+        expect(
+          createHash("sha256").update(JSON.stringify(unchanged)).digest("hex"),
+        ).toBe(
+          name === "baseline"
+            ? "e230f8b89ca2f22fc79a8082be5de1657dac25d87eeedd25c9afb634cd30a499"
+            : "59b442e408edac5fc7680ef3722f311e341dde6e9e5d169ee79d90d4483adc4d",
+        );
+        process.stdout.write(
+          "Bank ground paint baseline " +
+            JSON.stringify({
+              name,
+              historicalSha: createHash("sha256")
+                .update(JSON.stringify(paths))
+                .digest("hex"),
+              historicalSegments: paths.reduce(
+                (n, row) => n + row.path.length - 1,
+                0,
+              ),
+              pavilionSegments: pavilion.reduce(
+                (n, row) => n + row.path.length - 1,
+                0,
+              ),
+              unaffectedSha: createHash("sha256")
+                .update(
+                  JSON.stringify(
+                    pavilion.filter(
+                      (row) =>
+                        ![
+                          "compact-clearing-bank-apron",
+                          "compact-clearing-bank-clerk-approach",
+                          "compact-wear-bank-clerk-outer",
+                          "compact-wear-bank-apron-inner",
+                          "compact-wear-bank-service",
+                          "compact-wear-bank-south-arrival",
+                        ].includes(row.id),
+                    ),
+                  ),
+                )
+                .digest("hex"),
+            }) +
+            "\n",
+        );
+        expect(paths.length).toBeGreaterThan(0);
+      });
+    },
+  );
+  it.each(pathFixtures)(
+    "shares $name pavilion service wear with the actual bounded road mask and retains filtered keep-outs",
+    async ({ name, run }) => {
+      await withPavilionGroundRoads(run, (roads, terrain) => {
+        const areas = structuredClone(ALL_WORLD_AREAS);
+        const haven = areas.central_haven;
+        const clerk = haven.npcs!.find((row) => row.id === "bank_clerk")!;
+        clerk.position.x = 352;
+        clerk.position.z = 322;
+        const profile = terrain.getWorldTerrainProfile();
+        const originalAreas = JSON.stringify(areas);
+        const beforeHeights = Array.from({ length: 121 }, (_, i) =>
+          terrain.getHeightAt(345 + (i % 11), 316 + Math.floor(i / 11)),
+        );
+        const paths = createCompactIslandPaths(
+          profile,
+          areas,
+          getDuelArenaConfig(),
+          (x, z) => terrain.getHeightAt(x, z),
+          { compactBankPavilion: COMPACT_BANK_PAVILION },
+        );
+        const ids = [
+          "compact-clearing-bank-apron",
+          "compact-clearing-bank-clerk-approach",
+          "compact-wear-bank-service",
+          "compact-wear-bank-south-arrival",
+        ];
+        const local = paths.filter((row) => ids.includes(row.id));
+        expect(local.map((row) => row.id)).toEqual(ids);
+        expect(
+          local.map((row) => [
+            row.width,
+            row.blendWidth,
+            row.maxInfluence ?? 1,
+          ]),
+        ).toEqual([
+          [0.8, 0.95, 1],
+          [0.65, 0.85, 1],
+          [0.45, 1.1, 0.48],
+          [0.5, 1.15, 0.5],
+        ]);
+        expect(local[0].path.at(-1)).toEqual(local[1].path[0]);
+        expect(local[0].path.at(-1)).toMatchObject({ x: 350, z: 320 });
+        expect(local[1].path.at(-1)).toMatchObject({ x: 351, z: 322 });
+        const sample = (list: Paths, x: number, z: number) =>
+          list.reduce(
+            (peak, row) =>
+              row.path
+                .slice(1)
+                .reduce(
+                  (value, end, i) =>
+                    Math.max(
+                      value,
+                      roadSegmentInfluence(
+                        x,
+                        z,
+                        row.path[i].x,
+                        row.path[i].z,
+                        end.x,
+                        end.z,
+                        row.width,
+                        row.blendWidth ?? 0.5,
+                        row.maxInfluence ?? 1,
+                      ),
+                    ),
+                  peak,
+                ),
+            0,
+          );
+        expect(sample(local, 348, 318)).toBeGreaterThan(0);
+        expect(sample(local, 352, 322)).toBeGreaterThan(0);
+        expect(sample(local, 350, 320)).toBe(1);
+        for (let z = 320; z <= 326; z += 0.125)
+          expect(sample(paths, 350, z), `south arrival z=${z}`).toBeGreaterThan(
+            0,
+          );
+        for (const skirt of local.slice(2))
+          expect(
+            sample(paths, skirt.path[0].x, skirt.path[0].z),
+          ).toBeGreaterThan(0);
+        let partial = 0,
+          full = 0,
+          zero = 0;
+        for (let z = 315; z <= 328; z += 0.125)
+          for (let x = 343; x <= 357; x += 0.125) {
+            const value = sample(local, x, z);
+            expect(Number.isFinite(value)).toBe(true);
+            expect(value).toBeGreaterThanOrEqual(0);
+            expect(value).toBeLessThanOrEqual(1);
+            expect(sample(local.slice(2), x, z)).toBeLessThanOrEqual(0.5);
+            if (value === 0) zero++;
+            else if (value > 0.8) full++;
+            else partial++;
+          }
+        expect(partial).toBeGreaterThan(full);
+        expect(full).toBeGreaterThan(0);
+        expect(zero).toBeGreaterThan(partial);
+        const waters = Object.values(areas).flatMap(
+          (area) => area.waterBodies ?? [],
+        );
+        const floors = createDuelArenaFloorZones(
+          getDuelArenaConfig(),
+          getDuelArenaGradeHeight(areas),
+        );
+        // All frozen functional-tree anchors, not only the nearest visible LOD.
+        // Explicit manifest resources have no spawn scale variation; grove rows
+        // retain their admitted scale. A circular all-variant/all-LOD envelope
+        // conservatively covers every Y rotation without guessing a crown size.
+        const resources = Object.values(areas)
+          .flatMap((area) => area.resources ?? [])
+          .filter((row) => row.type === "tree")
+          .map((row) => ({
+            id: row.instanceId,
+            x: row.position.x,
+            z: row.position.z,
+            resourceId: row.resourceId,
+            scale: 1,
+          }));
+        for (const region of DataManager.getWorldConfig()!
+          .compactResourceGroves!.regions)
+          for (const row of region.anchors)
+            resources.push({
+              id: row.id,
+              x: row.position.x,
+              z: row.position.z,
+              resourceId: `tree_${row.subType}`,
+              scale: row.scale,
+            });
+        expect(resources).toHaveLength(40);
+        // Include the actual seeded owners adjacent to the complete changed
+        // footprint. Do not mistake the 40 authored anchors for the complete
+        // live resource population (the scene also has procedural trees).
+        let localGeneratedTrees = 0;
+        for (const tileX of [3, 4])
+          for (const tileZ of [3, 4]) {
+            const generated = generateCenteredTrees(
+              { tileX, tileZ },
+              100,
+              (x, z) => terrain["createTreeGenerationSource"](x, z),
+              isPositionInsideDuelArenaZone,
+            );
+            for (const row of generated.resources) {
+              resources.push({
+                id: row.id,
+                x: tileX * 100 + row.position.x,
+                z: tileZ * 100 + row.position.z,
+                resourceId: `tree_${row.subType}`,
+                scale: row.scale ?? 1,
+              });
+              localGeneratedTrees++;
+            }
+          }
+        const boundsCache = new Map<string, number>();
+        const crowns = resources.map((row) => {
+          const def = getExternalResource(row.resourceId);
+          if (!def) throw Error(`Missing actual resource ${row.resourceId}`);
+          const models = [
+            def.modelPath,
+            ...(def.modelVariants ?? []),
+            def.lod1ModelPath,
+            def.lod2ModelPath,
+          ].filter((model): model is string => typeof model === "string");
+          expect(models.length).toBeGreaterThan(0);
+          let radius = 0;
+          for (const model of new Set(models)) {
+            let base = boundsCache.get(model);
+            if (base === undefined) {
+              base = modelBounds(model, 1).radius;
+              boundsCache.set(model, base);
+            }
+            radius = Math.max(radius, base * def.scale * row.scale);
+          }
+          return { ...row, radius };
+        });
+        expect(crowns).toHaveLength(40 + localGeneratedTrees);
+        for (const row of local)
+          for (let i = 1; i < row.path.length; i++) {
+            const a = row.path[i - 1],
+              b = row.path[i],
+              pad = row.width / 2 + row.blendWidth!;
+            for (const water of waters)
+              expect(
+                compactPathSegmentDistance(
+                  { x: water.centerX, z: water.centerZ },
+                  a,
+                  b,
+                ) - pad,
+              ).toBeGreaterThan(water.radius);
+            for (const floor of floors)
+              expect(
+                compactPathIntersectsBounds(
+                  a,
+                  b,
+                  {
+                    minX: floor.centerX - floor.width / 2,
+                    maxX: floor.centerX + floor.width / 2,
+                    minZ: floor.centerZ - floor.depth / 2,
+                    maxZ: floor.centerZ + floor.depth / 2,
+                  },
+                  pad,
+                ),
+              ).toBe(false);
+            for (const crown of crowns)
+              expect(
+                compactPathSegmentDistance(crown, a, b) - pad,
+                `${row.id} ${crown.id}`,
+              ).toBeGreaterThan(crown.radius);
+          }
+        const stored = roads.getRoads(),
+          saved = stored.slice();
+        let receipt: Record<string, unknown> = {};
+        try {
+          stored.splice(
+            0,
+            stored.length,
+            ...paths.map((row) => ({
+              ...saved[0],
+              ...row,
+              path: row.path.map((point) => ({ ...point })),
+            })),
+          );
+          roads["buildTileCache"]();
+          const segments = roads.getRoadSegmentsForGPU();
+          expect(segments.length).toBeLessThanOrEqual(600);
+          const bounds =
+            roads["calculateAuthoredRoadMaskBounds"](segments) ??
+            roads["calculateRoadMaskBounds"](segments);
+          const resolution = roads["calculateRoadMaskTextureSize"](
+            bounds.worldSize,
+          );
+          expect(resolution).toBe(name === "baseline" ? 256 : 512);
+          const mask = roads.generateRoadInfluenceTexture(
+            resolution,
+            bounds.worldSize,
+            0.5,
+            bounds.centerX,
+            bounds.centerZ,
+          )!;
+          expect(mask).toEqual(roads.getRoadInfluenceTextureData());
+          expect(mask.data.byteLength).toBe(resolution * resolution * 4);
+          const pixel = bounds.worldSize / resolution;
+          let localSupportTexels = 0;
+          for (let iz = 0; iz < resolution; iz++)
+            for (let ix = 0; ix < resolution; ix++) {
+              const x = ix * pixel - bounds.worldSize / 2 + bounds.centerX,
+                z = iz * pixel - bounds.worldSize / 2 + bounds.centerZ;
+              const index = iz * resolution + ix;
+              // The real CPU texture is a Float32 sample of exactly the same
+              // MAX-unioned per-segment field used by road/grass owners.
+              expect(mask.data[index]).toBe(
+                Math.fround(roads.getRoadInfluenceAt(x, z)),
+              );
+              if (sample(local, x, z) === 0) continue;
+              localSupportTexels++;
+              const support = {
+                minX: x - 0.5 * pixel,
+                maxX: x + 1.5 * pixel,
+                minZ: z - 0.5 * pixel,
+                maxZ: z + 1.5 * pixel,
+              };
+              const distance = (cx: number, cz: number) =>
+                Math.hypot(
+                  Math.max(support.minX - cx, 0, cx - support.maxX),
+                  Math.max(support.minZ - cz, 0, cz - support.maxZ),
+                );
+              for (const water of waters)
+                expect(distance(water.centerX, water.centerZ)).toBeGreaterThan(
+                  water.radius,
+                );
+              for (const crown of crowns)
+                expect(
+                  distance(crown.x, crown.z),
+                  `${crown.id} filtered support`,
+                ).toBeGreaterThan(crown.radius);
+              for (const floor of floors)
+                expect(
+                  support.maxX > floor.centerX - floor.width / 2 &&
+                    support.minX < floor.centerX + floor.width / 2 &&
+                    support.maxZ > floor.centerZ - floor.depth / 2 &&
+                    support.minZ < floor.centerZ + floor.depth / 2,
+                ).toBe(false);
+            }
+          expect(localSupportTexels).toBeGreaterThan(0);
+          const fieldProbes = [
+            [348, 318],
+            [350, 320],
+            [352, 322],
+            [350, 324],
+            [350, 326],
+          ].map(([x, z]) => ({
+            x,
+            z,
+            analytical: roads.getRoadInfluenceAt(x, z),
+            filtered: sampleLinearMask(mask.data, bounds, x, z),
+          }));
+          expect(
+            fieldProbes.every((p) => p.analytical > 0 && p.filtered > 0),
+          ).toBe(true);
+          receipt = {
+            name,
+            previousSegments: name === "baseline" ? 292 : 568,
+            currentSegments: segments.length,
+            resolution,
+            bounds,
+            maskBytes: mask.data.byteLength,
+            localSupportTexels,
+            analyticalCounts: { partial, full, zero },
+            authoredTrees: 40,
+            adjacentSeededTrees: localGeneratedTrees,
+            boundedCrownCensus: crowns.length,
+            modelHeaders: boundsCache.size,
+            nearestTree: crowns.sort(
+              (a, b) =>
+                Math.hypot(a.x - 350, a.z - 320) -
+                Math.hypot(b.x - 350, b.z - 320),
+            )[0],
+            fieldProbes,
+          };
+        } finally {
+          stored.splice(0, stored.length, ...saved);
+          roads["buildTileCache"]();
+        }
+        expect(JSON.stringify(areas)).toBe(originalAreas);
+        expect(
+          Array.from({ length: 121 }, (_, i) =>
+            terrain.getHeightAt(345 + (i % 11), 316 + Math.floor(i / 11)),
+          ),
+        ).toEqual(beforeHeights);
+        process.stdout.write(
+          "Bank pavilion ground field (CPU/mask support, not grass density/native art acceptance) " +
+            JSON.stringify(receipt) +
+            "\n",
+        );
+      });
+    },
+  );
   it("rejects simultaneous enclosed and open bank ownership before changing admitted configuration", () => {
     const before = DataManager.getWorldConfig();
     const identity = DataManager["worldContentIdentity"];

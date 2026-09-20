@@ -35,7 +35,7 @@ export const COMPACT_BANK_PAVILION: CompactBankPavilionManifest = Object.freeze(
     terrainProfileId: "compact-duel-island-v6",
     position: Object.freeze({ x: 350, z: 320 }),
     rotation: 0,
-    recipeId: "open-timber-bank-haven-v1",
+    recipeId: "open-timber-bank-haven-v2",
   },
 );
 

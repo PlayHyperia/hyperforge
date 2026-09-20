@@ -116,6 +116,7 @@ describe("compact service court actual geometry and native PhysX (not rendered a
       { ...input, schemaVersion: 2 },
       { ...input, layoutId: "compact-service-court-v1" },
       { ...input, recipeId: "bank-pavilion-v1" },
+      { ...input, recipeId: "open-timber-bank-haven-v1" },
       { ...input, terrainProfileId: "compact-duel-island-v5" },
       { ...input, position: { x: 350, z: 321 } },
       { ...input, rotation: Math.PI },
@@ -250,7 +251,7 @@ describe("compact service court actual geometry and native PhysX (not rendered a
                 checked++;
               }
             }
-            expect(checked).toBe(1300);
+            expect(checked).toBe(1492);
           } finally {
             // Only these CPU raycaster materials are test-owned. The real
             // owner retains and disposes all geometry (asserted below).

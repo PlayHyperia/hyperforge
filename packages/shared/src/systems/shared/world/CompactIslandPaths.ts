@@ -367,29 +367,50 @@ export function createCompactIslandPaths(
       clearing: true,
       fromId: "bank-forecourt",
       toId: "bank-forecourt",
-      width: meadowPaths ? 1 : bankCourt ? 1.8 : 4,
-      ...(bankCourt ? { blendWidth: meadowPaths ? 0.6 : 1.6 } : {}),
-      points: [
-        { x: bank.x - 2, z: bank.z + (bankCourt ? 1 : 2) },
-        { x: bank.x + 2, z: bank.z + (bankCourt ? 1.5 : 2.5) },
-      ],
+      width: bankPavilion ? 0.8 : meadowPaths ? 1 : bankCourt ? 1.8 : 4,
+      ...(bankCourt
+        ? { blendWidth: bankPavilion ? 0.95 : meadowPaths ? 0.6 : 1.6 }
+        : {}),
+      points: bankPavilion
+        ? [
+            { x: bank.x - 0.25, z: bank.z + 0.65 },
+            { x: bank.x + 0.15, z: bank.z + 1.6 },
+            {
+              x: bankPavilion.position.x - 0.55,
+              z: bankPavilion.position.z + 0.35,
+            },
+            { x: bankPavilion.position.x, z: bankPavilion.position.z },
+          ]
+        : [
+            { x: bank.x - 2, z: bank.z + (bankCourt ? 1 : 2) },
+            { x: bank.x + 2, z: bank.z + (bankCourt ? 1.5 : 2.5) },
+          ],
     },
     {
       id: "bank-clerk-approach",
       clearing: true,
       fromId: "bank-forecourt",
       toId: "bank_clerk",
-      width: meadowPaths ? 0.7 : bankCourt ? 1.1 : 3,
-      ...(bankCourt ? { blendWidth: meadowPaths ? 0.45 : 1.45 } : {}),
-      points: [
-        { x: bank.x + 2, z: bank.z + (bankCourt ? 1.5 : 2.5) },
-        // Stay west of the real tree's all-LOD crown, including the mask halo.
-        bankPavilion
-          ? { x: clerk.x - 1, z: clerk.z }
-          : bankCourt
-            ? { x: clerk.x - 2, z: clerk.z - 3 }
-            : { x: clerk.x - 2, z: clerk.z },
-      ],
+      width: bankPavilion ? 0.65 : meadowPaths ? 0.7 : bankCourt ? 1.1 : 3,
+      ...(bankCourt
+        ? { blendWidth: bankPavilion ? 0.85 : meadowPaths ? 0.45 : 1.45 }
+        : {}),
+      points: bankPavilion
+        ? [
+            { x: bankPavilion.position.x, z: bankPavilion.position.z },
+            {
+              x: bankPavilion.position.x + 0.65,
+              z: bankPavilion.position.z + 0.55,
+            },
+            { x: clerk.x - 1, z: clerk.z },
+          ]
+        : [
+            { x: bank.x + 2, z: bank.z + (bankCourt ? 1.5 : 2.5) },
+            // Stay west of the real tree's all-LOD crown, including the mask halo.
+            bankCourt
+              ? { x: clerk.x - 2, z: clerk.z - 3 }
+              : { x: clerk.x - 2, z: clerk.z },
+          ],
     },
     {
       id: "bank-shopkeeper-approach",
@@ -880,7 +901,46 @@ export function createCompactIslandPaths(
       );
     }
   }
-  if (meadowPaths) {
+  if (bankPavilion) {
+    // The open bank has no opaque floor. Two unequal, joined wear patches
+    // follow service activity and the existing south arrival, not the roof's
+    // rectangle. MAX union never accumulates these partial skirts into a new
+    // full-clear core. Actual grass acceptance still depends on local ecology;
+    // a sub-threshold field is not a promise of surviving grass or lower cost.
+    const center = bankPavilion.position;
+    for (const wear of [
+      {
+        id: "bank-service",
+        width: 0.45,
+        blendWidth: 1.1,
+        maxInfluence: 0.48,
+        points: [
+          { x: center.x - 0.45, z: center.z + 0.6 },
+          { x: center.x - 1.2, z: center.z + 1.25 },
+          { x: center.x - 0.55, z: center.z + 1.65 },
+        ],
+      },
+      {
+        id: "bank-south-arrival",
+        width: 0.5,
+        blendWidth: 1.15,
+        maxInfluence: 0.5,
+        points: [
+          { x: center.x, z: center.z + 1 },
+          { x: center.x + 0.6, z: center.z + 2.4 },
+          { x: center.x + 0.2, z: center.z + 4 },
+        ],
+      },
+    ])
+      paths.push(
+        buildPath({
+          ...wear,
+          wear: true,
+          fromId: "bank-forecourt",
+          toId: "bank-forecourt",
+        }),
+      );
+  } else if (meadowPaths) {
     // Two unequal activity patches, not another continuous halo. Anchor them
     // to the admitted bank clearings, retain their cores and contain every wear
     // capsule inside its previous support. Five controls keep the network

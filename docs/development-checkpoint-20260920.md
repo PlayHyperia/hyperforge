@@ -118,3 +118,37 @@ All seven world-art acceptance tasks remain open. Shoreline accounting remains
 **3 checked / 8 open**. Bank service dressing/ground integration, arena artistry,
 whole-island composition, particle coverage, movement, streaming, transactional
 banking and measured multi-agent performance still require their stated gates.
+
+## Follow-up checkpoint — bank art03 and expanded island layout
+
+The verified source slice adds post-mounted bank key signs and asymmetric
+service wear. The admitted bank recipe is explicitly v2, with exact readiness
+metrics updated together: 1,492 triangles / 247,200 bytes / three batches.
+Historical smithy geometry and non-pavilion paths remain pinned. No runtime
+asset is added; the paired asset revision above is unchanged. Candidate
+`assets-v2` remains a local, non-promoted overlay, not a GitHub-backed manifest.
+
+Verification: 13 geometry, 32 path, 35 visual/cutaway, 11 native-owner,
+4 selected candidate-owner, 2 candidate-access and 37 client tests pass.
+Counts overlap and must not be summed. Strict source typing, scoped lint and
+eight isolated bundles pass; all 145 protected compiled artifacts stay exact.
+The first access invocation skipped all cases without candidate opt-in; the
+first client invocation matched no files. Correct invocations and failed
+receipts are retained, not silently counted as passes.
+
+Native01 timed out at startup before art evidence. Native02 passes the unchanged
+gate and produces three real Chrome/Metal views with stable pins and complete
+HUD leases. Signs/cutaway improve locally, but pavilion dressing, dark ground,
+angular grass, whole-world composition, motion and performance remain open.
+A 114.6 ms maximum grounding-slice receipt needs isolated pacing investigation;
+it is not a controlled comparison or a proven cause of the earlier timeout.
+Owned diagnostics and temporary database are cleaned; human localhost services
+and database remain unchanged. The evidence is local, not committed media:
+[art03 review](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/bank-pavilion-art03-UNQUALIFIED/README.md).
+
+The launch checklist and art brief now require LAYOUT-01–08: a small pavilion
+town, multiple functional banks, distinct mines, island-wide tiered resource
+trees with rarer high tiers, skill-local quest NPCs, scattered rune altars,
+a naturally shaped farther-inland pond, and integrated gameplay/art/performance
+acceptance. These are all open, with the singular schema/path dependencies
+recorded explicitly. No forbidden comparative brand is introduced.

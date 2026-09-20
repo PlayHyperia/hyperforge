@@ -244,7 +244,7 @@ type CompactBankPavilionDescriptor = Readonly<{
   terrainProfileId: "compact-duel-island-v6";
   position: Readonly<{ x: number; z: number }>;
   rotation: 0;
-  recipeId: "open-timber-bank-haven-v1";
+  recipeId: "open-timber-bank-haven-v2";
 }>;
 
 type CompactBankPavilionOwnerDiagnostics = Readonly<{
@@ -285,13 +285,13 @@ export type StreamingBankPavilionReadiness = Readonly<{
 const BANK_PAVILION_RUNTIME_CONTRACT = Object.freeze({
   layoutId: "compact-bank-pavilion-v1",
   terrainProfileId: "compact-duel-island-v6",
-  recipeId: "open-timber-bank-haven-v1",
+  recipeId: "open-timber-bank-haven-v2",
   postOffset: 3.5,
   physicsShapes: 3,
   meshes: 3,
   materials: 3,
-  triangles: 1300,
-  geometryBytes: 216_576,
+  triangles: 1492,
+  geometryBytes: 247_200,
 });
 
 function finiteVector(value: unknown): value is Vector3Like {
