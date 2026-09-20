@@ -178,6 +178,248 @@ describe("world-anchored annular pond surface refinement", () => {
     return (low + high) / 2;
   };
 
+  it.skipIf(!DataManager.getWorldConfig()?.compactPondDocks)(
+    "assembles the actual inland pond startup leaf within unchanged retained caps",
+    async () => {
+      await DataManager.getInstance().initialize();
+      const world = new World();
+      const terrain = world.register("terrain", TerrainSystem) as TerrainSystem;
+      const geometries: THREE.BufferGeometry[] = [];
+      try {
+        await terrain.init();
+        terrain["loadFlatZonesFromManifest"]();
+        const zone = terrain["flatZones"].get("haven_pond_floor")!;
+        expect([zone.centerX, zone.centerZ]).toEqual([410, 415]);
+        const actual = terrain["buildChunkTerrainProvider"]();
+        process.stdout.write(
+          `Inland startup refinement ${JSON.stringify({ annuli: actual.surfaceRefinementAnnuli, floors: actual.surfaceRefinementZones, center: [450, 450], size: 100, resolution: 128 })}\n`,
+        );
+        const rows = [
+          [450, 450],
+          [350, 450],
+          [450, 350],
+          [350, 350],
+        ].map(([x, z]) => {
+          const worker = generateQuadChunkDataSync(x, z, 100, 128, actual);
+          const before = worker.heightData.slice();
+          const result = assembleQuadChunkGeometry(worker, actual, 3);
+          geometries.push(result.geometry);
+          const surface = new RetainedTerrainSurface(
+            1,
+            actual.terrainProfileIdentity,
+            x,
+            z,
+            100,
+            128,
+            result.geometry,
+          );
+          expect(surface.matchesGeometry(result.geometry)).toBe(true);
+          expect(worker.heightData).toEqual(before);
+          const topology = result.geometry.userData
+            .terrainCellTopology as CellTopology;
+          expect(topology.surfaceVertexCount - 128 * 128).toBeLessThanOrEqual(
+            65536,
+          );
+          let maxCellFaces = 0;
+          for (let i = 1; i < topology.cellIndexOffsets.length; i++)
+            maxCellFaces = Math.max(
+              maxCellFaces,
+              (topology.cellIndexOffsets[i] -
+                topology.cellIndexOffsets[i - 1]) /
+                3,
+            );
+          expect(maxCellFaces).toBeLessThanOrEqual(512);
+          return {
+            x,
+            z,
+            surface,
+            geometry: result.geometry,
+            topology,
+            metrics: {
+              x,
+              z,
+              vertices: result.geometry.getAttribute("position").count,
+              surfaceVertices: topology.surfaceVertexCount,
+              triangles: result.geometry.index!.count / 3,
+              maxCellFaces,
+            },
+          };
+        });
+        const out = sample();
+        let probes = 0,
+          maximumError = 0,
+          maximumNormalAngle = 0;
+        let normalWitness: Record<string, number> = {};
+        for (let degree = 0; degree < 360; degree++) {
+          const angle = ((degree + 0.317) * Math.PI) / 180;
+          for (let radial = 0; radial <= 470; radial++) {
+            const radius = 9.45 + radial * 0.05;
+            const x = 410 + radius * Math.cos(angle),
+              z = 415 + radius * Math.sin(angle);
+            const row = rows.find(
+              (entry) =>
+                Math.abs(x - entry.x) <= 50 && Math.abs(z - entry.z) <= 50,
+            )!;
+            expect(row.surface.sample(x - row.x, z - row.z, out)).toBe(true);
+            maximumError = Math.max(
+              maximumError,
+              Math.abs(out.height - actual.getHeightAtComputed(x, z)),
+            );
+            const h = 0.03125;
+            const nx =
+              -(
+                actual.getHeightAtComputed(x + h, z) -
+                actual.getHeightAtComputed(x - h, z)
+              ) /
+              (2 * h);
+            const nz =
+              -(
+                actual.getHeightAtComputed(x, z + h) -
+                actual.getHeightAtComputed(x, z - h)
+              ) /
+              (2 * h);
+            const cosine =
+              (nx * out.nx + out.ny + nz * out.nz) / Math.hypot(nx, 1, nz);
+            const normalAngle =
+              (Math.acos(Math.max(-1, Math.min(1, cosine))) * 180) / Math.PI;
+            if (normalAngle > maximumNormalAngle) {
+              maximumNormalAngle = normalAngle;
+              normalWitness = {
+                x,
+                z,
+                radius,
+                degree,
+                faceIndex: out.faceIndex,
+                height: out.height,
+              };
+            }
+            probes++;
+          }
+        }
+        const seams: number[] = [];
+        for (const axis of ["x", "z"] as const)
+          for (const tangent of [350, 450]) {
+            const neighbours = [350, 450].map((across) =>
+              rows.find(
+                (entry) =>
+                  entry[axis] === across &&
+                  entry[axis === "x" ? "z" : "x"] === tangent,
+              )!,
+            );
+            const edges = neighbours.map((row) => {
+              const p = row.geometry.getAttribute("position"),
+                n = row.geometry.getAttribute("normal");
+              const edge = new Map<number, number[]>();
+              for (let i = 0; i < row.topology.surfaceVertexCount; i++) {
+                const across = axis === "x" ? p.getX(i) : p.getZ(i);
+                const along = axis === "x" ? p.getZ(i) : p.getX(i);
+                if (across + row[axis] === 400)
+                  edge.set(along, [p.getY(i), n.getX(i), n.getY(i), n.getZ(i)]);
+              }
+              for (let i = row.topology.surfaceVertexCount; i < p.count; i++) {
+                const across = axis === "x" ? p.getX(i) : p.getZ(i);
+                const along = axis === "x" ? p.getZ(i) : p.getX(i);
+                if (across + row[axis] !== 400) continue;
+                const top = edge.get(along)!;
+                expect(p.getY(i)).toBe(Math.fround(top[0] - 3));
+                expect([n.getX(i), n.getY(i), n.getZ(i)]).toEqual(top.slice(1));
+              }
+              return [...edge].sort((a, b) => a[0] - b[0]);
+            });
+            expect(edges[0]).toEqual(edges[1]);
+            seams.push(edges[0].length);
+          }
+        process.stdout.write(
+          `Inland startup assembled ${JSON.stringify({ leaves: rows.map((row) => row.metrics), probes, maximumError, maximumNormalAngle, normalWitness, seamVertices: seams, nativeOrPerformanceAcceptance: false })}\n`,
+        );
+        const shoulderOnly: FullTerrainProvider = {
+          ...actual,
+          surfaceRefinementAnnuli: actual.surfaceRefinementAnnuli!.filter(
+            (ring) => ring.bearing !== undefined,
+          ),
+        };
+        const witnessGeometry = assembleQuadChunkGeometry(
+          generateQuadChunkDataSync(450, 450, 100, 128, shoulderOnly),
+          shoulderOnly,
+          3,
+        ).geometry;
+        geometries.push(witnessGeometry);
+        const witnessSurface = new RetainedTerrainSurface(
+          2,
+          actual.terrainProfileIdentity,
+          450,
+          450,
+          100,
+          128,
+          witnessGeometry,
+        );
+        // Retain the exact rejected coarse-fan witness independently of the
+        // current maximum. Its old shoulder lattice is an actual source
+        // reference, not an alternate height or relaxed normal oracle.
+        const wx = 431.49967101907123,
+          wz = 435.27231230204654;
+        expect(witnessSurface.sample(wx - 450, wz - 450, out)).toBe(true);
+        const h = 0.03125;
+        const wnx =
+          -(
+            actual.getHeightAtComputed(wx + h, wz) -
+            actual.getHeightAtComputed(wx - h, wz)
+          ) /
+          (2 * h);
+        const wnz =
+          -(
+            actual.getHeightAtComputed(wx, wz + h) -
+            actual.getHeightAtComputed(wx, wz - h)
+          ) /
+          (2 * h);
+        const legacyAngle =
+          (Math.acos(
+            Math.max(
+              -1,
+              Math.min(
+                1,
+                (wnx * out.nx + out.ny + wnz * out.nz) /
+                  Math.hypot(wnx, 1, wnz),
+              ),
+            ),
+          ) *
+            180) /
+          Math.PI;
+        const index = witnessGeometry.index!,
+          p = witnessGeometry.getAttribute("position");
+        const legacyNormal = [out.nx, out.ny, out.nz];
+        const legacyTriangle = [0, 1, 2].map((corner) => {
+          const id = index.getX(out.faceIndex * 3 + corner);
+          return [p.getX(id) + 450, p.getY(id), p.getZ(id) + 450];
+        });
+        expect(rows[0].surface.sample(wx - 450, wz - 450, out)).toBe(true);
+        const repairedAngle =
+          (Math.acos(
+            Math.max(
+              -1,
+              Math.min(
+                1,
+                (wnx * out.nx + out.ny + wnz * out.nz) /
+                  Math.hypot(wnx, 1, wnz),
+              ),
+            ),
+          ) *
+            180) /
+          Math.PI;
+        expect(repairedAngle).toBeLessThan(6);
+        process.stdout.write(
+          `Inland legacy shoulder normal witness ${JSON.stringify({ point: [wx, wz], legacyAngle, repairedAngle, legacyNormal, legacyTriangle })}\n`,
+        );
+        expect(maximumError).toBeLessThanOrEqual(0.02);
+        expect(maximumNormalAngle).toBeLessThanOrEqual(6);
+      } finally {
+        geometries.forEach((geometry) => geometry.dispose());
+        await world.destroy();
+      }
+    },
+    30000,
+  );
+
   it("preserves captured fine pond seam buffers while rejecting unsupported full-pond coarse cells", () => {
     const fingerprints = [250, 350].map((centerZ) => {
       const terrain = provider();

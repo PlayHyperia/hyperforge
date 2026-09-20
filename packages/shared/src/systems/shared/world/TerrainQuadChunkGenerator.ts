@@ -47,6 +47,7 @@ type LocalSurfaceRefinement =
   | (TerrainSurfaceRefinementZone &
       TerrainSurfaceRefinementAnnulus & {
         kind: "annulus";
+        broadAdaptive?: boolean;
         angularPlanes?: readonly [number, number, number, number];
       });
 
@@ -493,14 +494,24 @@ export function* assembleQuadChunkGeometrySteps(
 
 /** Safety ceilings, not an accepted scene/performance budget. */
 const COLLAR_STEP = 0.125;
-// Curved banks use one bounded extra level only where canonical error warrants
-// it. This is not a frame budget; admitted pond leaves retain resolution 128.
+// Historical curved banks use one bounded extra level where canonical error
+// warrants it. Oversized annuli use the bounded hierarchy below, keeping this
+// same finest level. This is not a frame budget; pond leaves retain resolution128.
 const ANNULAR_STEP = 0.125;
 const ANNULAR_FINE_STEP = 0.0625;
 // Only explicit angular outer shoulders use this coarser bounded lattice.
-// Existing full-ring bank refinement and all acceptance thresholds stay fixed.
+// Historical full-ring refinement and all acceptance thresholds stay fixed.
 const SHOULDER_STEP = 0.25;
 const SHOULDER_FINE_STEP = 0.125;
+const BROAD_BANK_STEP = 0.5;
+const BROAD_BANK_STEPS = [
+  SHOULDER_STEP,
+  ANNULAR_STEP,
+  ANNULAR_FINE_STEP,
+] as const;
+const BROAD_SHOULDER_STEPS = [SHOULDER_STEP, SHOULDER_FINE_STEP] as const;
+const BANK_STEPS = [ANNULAR_FINE_STEP] as const;
+const SHOULDER_STEPS = [SHOULDER_FINE_STEP] as const;
 const MAX_REFINEMENT_ZONES = 16;
 const MAX_EXTRA_SURFACE_VERTICES = 65536;
 const MAX_SURFACE_VERTICES = 131072;
@@ -686,6 +697,20 @@ function* refineSurfaceFeaturesSteps(
       z = zone.centerZ - centerZ;
     zones.push({
       kind: "annulus",
+      // A broad smooth basin must not spend the entire extra-vertex allowance
+      // on an unconditional fine lattice before checking geometric error.
+      // This decision depends on the authored feature, not the current leaf,
+      // so adjacent chunks select identical shared-boundary detail.
+      broadAdaptive: annuli.some(
+        (ring) =>
+          ring.bearing === undefined &&
+          ring.centerX === zone.centerX &&
+          ring.centerZ === zone.centerZ &&
+          (ring === zone || ring.outerRadius === zone.innerRadius) &&
+          (Math.PI * (ring.outerRadius ** 2 - ring.innerRadius ** 2)) /
+            ANNULAR_STEP ** 2 >
+            MAX_EXTRA_SURFACE_VERTICES,
+      ),
       centerX: x,
       centerZ: z,
       innerRadius: zone.innerRadius,
@@ -748,7 +773,9 @@ function* refineSurfaceFeaturesSteps(
       id >= MAX_SURFACE_VERTICES ||
       id - baseCount >= MAX_EXTRA_SURFACE_VERTICES
     )
-      throw new Error("Terrain collar refinement vertex limit exceeded");
+      throw new Error(
+        `Terrain collar refinement vertex limit exceeded at ${centerX + x},${centerZ + z} (${id - baseCount} extra vertices)`,
+      );
     const height = Math.fround(
       provider.getHeightAtComputed(centerX + x, centerZ + z),
     );
@@ -820,7 +847,11 @@ function* refineSurfaceFeaturesSteps(
     for (const zone of active) {
       if (zone.kind === "annulus") {
         const origin = axis === "X" ? centerX : centerZ;
-        const step = zone.bearing === undefined ? ANNULAR_STEP : SHOULDER_STEP;
+        const step = zone.broadAdaptive
+          ? BROAD_BANK_STEP
+          : zone.bearing === undefined
+            ? ANNULAR_STEP
+            : SHOULDER_STEP;
         const start = Math.floor((origin + lo) / step) + 1;
         const end = Math.ceil((origin + hi) / step);
         // Reject coarse partitions before iterating or allocating their cuts.
@@ -846,7 +877,13 @@ function* refineSurfaceFeaturesSteps(
     }
     return [...values].sort((a, b) => a - b);
   };
-  const refineBankPatch = (polygon: number[], fineStep: number): number[][] => {
+  const refineBankPatch = (
+    polygon: number[],
+    steps: readonly number[],
+    stepIndex = 0,
+  ): number[][] => {
+    const fineStep = steps[stepIndex],
+      hasNext = stepIndex + 1 < steps.length;
     const [a, b, c, d] = polygon;
     const left = p[a * 3],
       right = p[c * 3];
@@ -915,13 +952,19 @@ function* refineSurfaceFeaturesSteps(
       zs = axis(top, bottom, centerZ);
     const parts: number[][] = [];
     for (let z = 0; z < zs.length - 1; z++)
-      for (let x = 0; x < xs.length - 1; x++)
-        parts.push([
+      for (let x = 0; x < xs.length - 1; x++) {
+        const part = [
           vertex(xs[x], zs[z]),
           vertex(xs[x], zs[z + 1]),
           vertex(xs[x + 1], zs[z + 1]),
           vertex(xs[x + 1], zs[z]),
-        ]);
+        ];
+        // Broad banks receive the same error decision again at the original
+        // .125 m scale, with the same .0625 m finest detail and forced seams.
+        parts.push(
+          ...(!hasNext ? [part] : refineBankPatch(part, steps, stepIndex + 1)),
+        );
+      }
     return parts;
   };
   const clip = (
@@ -969,7 +1012,11 @@ function* refineSurfaceFeaturesSteps(
     z0: number,
     z1: number,
   ) => {
-    const step = zone.bearing === undefined ? ANNULAR_STEP : SHOULDER_STEP;
+    const step = zone.broadAdaptive
+      ? BROAD_BANK_STEP
+      : zone.bearing === undefined
+        ? ANNULAR_STEP
+        : SHOULDER_STEP;
     const partitions = (lo: number, hi: number, origin: number) =>
       Math.ceil((origin + hi) / step) - Math.floor((origin + lo) / step);
     // Mirror only a neighbouring partition that can pass the SAME coarse
@@ -1059,15 +1106,31 @@ function* refineSurfaceFeaturesSteps(
             vertex(right, top),
           ],
         ];
-        if (active.some((zone) => zone.kind === "annulus"))
+        if (active.some((zone) => zone.kind === "annulus")) {
+          const fullRings = active.filter(
+            (zone) => zone.kind === "annulus" && zone.bearing === undefined,
+          );
+          const broadAdaptive =
+            fullRings.length > 0 &&
+            fullRings.every(
+              (zone) => zone.kind === "annulus" && zone.broadAdaptive,
+            );
+          const broadShoulder =
+            fullRings.length === 0 &&
+            active
+              .filter((zone) => zone.kind === "annulus")
+              .every((zone) => zone.kind === "annulus" && zone.broadAdaptive);
           parts = refineBankPatch(
             parts[0],
-            active.some(
-              (zone) => zone.kind === "annulus" && zone.bearing === undefined,
-            )
-              ? ANNULAR_FINE_STEP
-              : SHOULDER_FINE_STEP,
+            broadAdaptive
+              ? BROAD_BANK_STEPS
+              : broadShoulder
+                ? BROAD_SHOULDER_STEPS
+                : fullRings.length > 0
+                  ? BANK_STEPS
+                  : SHOULDER_STEPS,
           );
+        }
         for (const zone of active) {
           if (zone.kind === "annulus") continue;
           const west = right <= zone.minX,
@@ -1108,6 +1171,94 @@ function* refineSurfaceFeaturesSteps(
     yield "collar_cell_plan";
   }
   if (plans.size === 0) return;
+
+  // A base-grid line can lie millimetres from the world-anchored bank lattice.
+  // Unequal subdivisions of the two long edges of such a strip must not be
+  // joined through a centre fan: longitudinal curvature then becomes a false
+  // transverse slope. Match the already-required opposite-edge cuts instead.
+  // Only broad adaptive banks need this extra closure; historical plans retain
+  // their exact bytes. All added vertices still sample the canonical owner.
+  if (zones.some((zone) => zone.kind === "annulus" && zone.broadAdaptive)) {
+    const atX = new Map<number, Set<number>>(),
+      atZ = new Map<number, Set<number>>();
+    const retain = (x: number, z: number) => {
+      if (!atX.has(x)) atX.set(x, new Set());
+      if (!atZ.has(z)) atZ.set(z, new Set());
+      atX.get(x)!.add(z);
+      atZ.get(z)!.add(x);
+    };
+    for (let id = 0; id < p.length / 3; id++) retain(p[id * 3], p[id * 3 + 2]);
+    let changed = true;
+    while (changed) {
+      changed = false;
+      for (const cell of orderedCells) {
+        if (
+          !activeCells
+            .get(cell)!
+            .some((zone) => zone.kind === "annulus" && zone.broadAdaptive)
+        )
+          continue;
+        const balanced: number[][] = [];
+        for (const polygon of plans.get(cell)!) {
+          if (polygon.length !== 4) {
+            balanced.push(polygon);
+            continue;
+          }
+          const [a, b, c, d] = polygon;
+          const left = p[a * 3],
+            right = p[c * 3],
+            top = p[a * 3 + 2],
+            bottom = p[c * 3 + 2];
+          const width = right - left,
+            depth = bottom - top;
+          if (
+            p[b * 3] !== left ||
+            p[b * 3 + 2] !== bottom ||
+            p[d * 3] !== right ||
+            p[d * 3 + 2] !== top ||
+            Math.max(width, depth) <= 4 * Math.min(width, depth)
+          ) {
+            balanced.push(polygon);
+            continue;
+          }
+          const vertical = depth > width,
+            lo = vertical ? top : left,
+            hi = vertical ? bottom : right;
+          const map = vertical ? atX : atZ;
+          const lower = vertical ? left : top,
+            upper = vertical ? right : bottom;
+          const cuts = [
+            ...new Set([lo, hi, ...map.get(lower)!, ...map.get(upper)!]),
+          ]
+            .filter((value) => value >= lo && value <= hi)
+            .sort((a, b) => a - b);
+          if (cuts.length === 2) {
+            balanced.push(polygon);
+            continue;
+          }
+          for (let i = 0; i < cuts.length - 1; i++) {
+            const x0 = vertical ? left : cuts[i],
+              x1 = vertical ? right : cuts[i + 1];
+            const z0 = vertical ? cuts[i] : top,
+              z1 = vertical ? cuts[i + 1] : bottom;
+            balanced.push([
+              vertex(x0, z0),
+              vertex(x0, z1),
+              vertex(x1, z1),
+              vertex(x1, z0),
+            ]);
+            retain(x0, z0);
+            retain(x0, z1);
+            retain(x1, z1);
+            retain(x1, z0);
+          }
+          changed = true;
+        }
+        plans.set(cell, balanced);
+        yield "collar_sliver_balance";
+      }
+    }
+  }
 
   // Only a cell containing a feature partition or an added point on its edge
   // needs polygon work. All other cells retain their two original triangles.

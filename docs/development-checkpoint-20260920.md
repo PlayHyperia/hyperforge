@@ -1,5 +1,59 @@
 # World graphics development checkpoint — 2026-09-20
 
+## Bounded large-bank refinement — native startup recovered, transition still open
+
+The follow-up fixes the exact native01 terrain-cap failure. Broad full bank
+rings whose unconditional fine lattice would exhaust the existing vertex
+allowance now start coarser and refine under the same canonical error criteria,
+retaining the original finest step and forced seam detail. Associated outer
+shoulders use the same bounded hierarchy. No vertex, triangle, face-per-cell
+or geometric quality cap is raised, and no source landform is changed.
+
+Dense checks caught a new thin-strip shading regression: asymmetric hanging
+edge cuts produced a12.91-degree face-normal deviation when center-fanned.
+Propagating only required cuts across these broad-bank strips and sampling
+their added vertices canonically repairs the witness to0.0930968975degrees,
+matching historical fine geometry. Blanket skinny-cell refinement was rejected
+because it exceeded the unchanged cap. Intermediate failures remain retained.
+
+- Exact410,415 candidate: four real terrain leaves,169,560 indexed/canonical
+  probes, maximum height error10.988mm and face-normal error3.097degrees under
+  existing20mm/6-degree gates. Largest surface79,798 vertices,63,414 extra
+  vertices (2,122 headroom) and370 maximum faces per cell.
+- All four shared-edge vertex, normal and skirt comparisons match. Historical
+  small-pond buffer hashes remain exact. Other basin placements, including
+  the suggested425,415 layout, are not qualified by these receipts.
+- Focused inland gate2/2; art03 geometry/water59pass with one candidate-only
+  skip; stock58pass with two candidate-only skips across actual matched suites.
+  An initial mistyped water filter matched no suite and is not counted.
+-720-root explicit source/test typing, ESLint, formatting and whitespace
+  checks pass. Production SHA44a2ed286606f2b9e1d6fd0a4497883a4c3f7e278bc06f389c38a0ebf5d089c5.
+  Source receipts are `inland-refinement-*` in the existing local evidence.
+
+Build04 pins972 source inputs and leaves all145 protected artifacts unchanged.
+Native02 on actual Chrome/Metal passes the unchanged startup readiness check:
+29/29 terrain,122/122 initial-camera grass, and ready conforming water topology
+(55 partition leaves,53 water chunks). This resolves the observed startup-cap
+failure, not the whole visual/streaming requirement.
+
+The subsequent diagnostic pond-camera cut fails its unchanged30-second grass
+settling deadline: four grounding jobs and one LOD swap remain, with no failed
+or cancelled grass jobs reported. The controls restore and owned browser
+closes. No finished art screenshots,14-fish client assertion or sustained
+performance gate was reached; the captured image remains the stream loading
+screen, and no full-stream readiness is claimed. CPU regression jobs overlapped
+part of this run, so it is not a controlled performance benchmark. Diagnose
+actual work and verifier camera ownership rather than hiding the overlay,
+extending the deadline or reducing quality to obtain a passing image.
+
+Planning also identifies a potentially useful15m eastward pond translation
+plus a tighter, explicit arena safety envelope. That remains unadopted: the
+bank bypass must not trigger arena evacuation or introduce unclassified
+external-value custody space. Full route/zone admission and live economic
+boundary tests are required before any canonical placement promotion.
+
+
+
 ## Complete fishing candidate and timber docks — source checkpoint, native load failed
 
 This opt-in slice adds all-tier fishing coverage, relocated habitat, fitted

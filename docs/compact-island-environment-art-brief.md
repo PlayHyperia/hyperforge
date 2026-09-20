@@ -169,6 +169,17 @@ All LAYOUT-01–08 checkboxes remain open. Evidence is in the local
 `service-layout-network01-UNQUALIFIED/` and
 `inland-pond-integration01-UNQUALIFIED/` directories.
 
+Follow-up refinement source and native02 now resolve that specific terrain-load
+failure without raising caps. Adaptive broad-bank refinement and balanced thin
+strips retain old small-bank goldens;169,560 probes pass the existing20mm/6-degree
+gates with10.99mm/3.10-degree maxima. Native02 reached29/29 terrain chunks,
+122/122 grass chunks at its initial camera and ready water topology. Its later
+pond-camera cut still failed the unchanged30-second grass-settling deadline
+(four grounding jobs and one LOD swap pending). This is not a completed art
+capture,14-entity client proof or performance approval; diagnose the transition
+and verifier ownership before changing quality or deadlines.
+
+
 
 ## Island layout requirements — 2026-09-20, all open
 
