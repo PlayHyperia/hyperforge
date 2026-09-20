@@ -36,7 +36,10 @@ import { validateCompactPreparationLodge } from "../systems/shared/world/Compact
 import {
   validateCompactBankPavilion,
   validateCompactServiceCourt,
+  validateCompactServiceCourts,
+  validateCompactServiceCourtBindings,
   validateCompactServicePlanting,
+  COMPACT_SERVICE_COURT,
 } from "../systems/shared/world/CompactServiceCourt";
 import { validateCompactLandscapeRocks } from "../systems/shared/world/CompactLandscapeRocks";
 import {
@@ -423,6 +426,17 @@ export class DataManager {
       copy.compactBankPavilion,
       profile,
     );
+    const compactServiceCourts = validateCompactServiceCourts(
+      copy.compactServiceCourts,
+      profile,
+    );
+    if (
+      compactServiceCourts &&
+      (compactServiceCourt || compactBankPavilion || compactPreparationLodge)
+    )
+      throw new Error(
+        "Plural service courts replace all singular service architecture",
+      );
     if (compactBankPavilion && compactPreparationLodge)
       throw new Error(
         "Bank pavilion replaces the preparation lodge; both cannot own the bank",
@@ -430,7 +444,16 @@ export class DataManager {
     const compactServicePlanting = validateCompactServicePlanting(
       copy.compactServicePlanting,
       profile,
-      compactServiceCourt,
+      compactServiceCourt ??
+        (compactServiceCourts?.courts.some(
+          (court) =>
+            court.recipeId === COMPACT_SERVICE_COURT.recipeId &&
+            court.position.x === COMPACT_SERVICE_COURT.position.x &&
+            court.position.z === COMPACT_SERVICE_COURT.position.z &&
+            court.rotation === 0,
+        )
+          ? COMPACT_SERVICE_COURT
+          : undefined),
     );
     const compactLandscapeRocks = validateCompactLandscapeRocks(
       copy.compactLandscapeRocks,
@@ -456,6 +479,7 @@ export class DataManager {
       ...(compactPreparationLodge ? { compactPreparationLodge } : {}),
       ...(compactServiceCourt ? { compactServiceCourt } : {}),
       ...(compactBankPavilion ? { compactBankPavilion } : {}),
+      ...(compactServiceCourts ? { compactServiceCourts } : {}),
       ...(compactServicePlanting ? { compactServicePlanting } : {}),
       ...(compactLandscapeRocks ? { compactLandscapeRocks } : {}),
     });
@@ -2216,6 +2240,13 @@ export class DataManager {
     try {
       // Load externally generated assets (Forge) before validation
       await this.loadExternalAssetsFromWorld();
+
+      // A declared service may never lose its physical identity through the
+      // optional validation escape hatch. Bind placements before any readiness.
+      validateCompactServiceCourtBindings(
+        DataManager.worldConfig?.compactServiceCourts,
+        ALL_WORLD_AREAS,
+      );
 
       this.validationResult = await this.validateAllData();
 

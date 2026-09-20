@@ -2,7 +2,11 @@ import { canonicalWorldJson } from "../../../data/WorldContentIdentity";
 import type {
   CompactBankPavilionManifest,
   CompactServiceCourtManifest,
+  CompactServiceCourtPlacement,
+  CompactServiceCourtsManifest,
   CompactServicePlantingManifest,
+  WorldArea,
+  WorldConfigManifest,
 } from "../../../types/world/world-types";
 import {
   COMPACT_POND_MODELS,
@@ -16,6 +20,212 @@ import type { GrassTerrainExclusionPolygon } from "../../../utils/workers/GrassT
 // Existing support stencil for the procgen recipe's 0.30m footing. Procgen does
 // not export this dimension; actual footing-vertex tests guard their alignment.
 const FOOTING_HALF_EXTENT = 0.15;
+
+export const MAX_COMPACT_SERVICE_COURTS = 8;
+export type CompactCourtDescriptor =
+  | CompactServiceCourtManifest
+  | CompactBankPavilionManifest
+  | CompactServiceCourtPlacement;
+
+export function isCompactBankCourt(
+  descriptor: CompactCourtDescriptor,
+): boolean {
+  return descriptor.recipeId === "open-timber-bank-haven-v2";
+}
+
+/** Conservative roof/trim half-extents, guarded against actual recipe vertices. */
+export function getCompactServiceCourtHalfExtents(
+  descriptor: CompactCourtDescriptor,
+) {
+  return isCompactBankCourt(descriptor) ? { x: 5, z: 5 } : { x: 6, z: 4 };
+}
+
+/** One source for owner/visual/readiness enumeration; no implicit first-bank lookup. */
+export function getCompactServiceCourtDescriptors(
+  config:
+    | Pick<
+        WorldConfigManifest,
+        "compactServiceCourt" | "compactBankPavilion" | "compactServiceCourts"
+      >
+    | null
+    | undefined,
+): readonly CompactCourtDescriptor[] {
+  if (config?.compactServiceCourts) return config.compactServiceCourts.courts;
+  return Object.freeze(
+    [config?.compactServiceCourt, config?.compactBankPavilion].filter(
+      (row): row is CompactServiceCourtManifest | CompactBankPavilionManifest =>
+        row !== undefined,
+    ),
+  );
+}
+
+/** JSON-only bounded placement admission; station/NPC bindings are checked at startup. */
+export function validateCompactServiceCourts(
+  value: unknown,
+  profile: WorldTerrainProfile,
+): CompactServiceCourtsManifest | undefined {
+  if (value === undefined) return undefined;
+  const copy = JSON.parse(
+    canonicalWorldJson(value),
+  ) as CompactServiceCourtsManifest;
+  const exact = (row: object, keys: readonly string[]) =>
+    Object.keys(row).sort().join(",") === [...keys].sort().join(",");
+  const id = (v: unknown): v is string =>
+    typeof v === "string" && /^[a-z][a-z0-9_-]{0,63}$/.test(v);
+  if (
+    !copy ||
+    typeof copy !== "object" ||
+    Array.isArray(copy) ||
+    !exact(copy, [
+      "schemaVersion",
+      "layoutId",
+      "terrainProfileId",
+      "primaryBankId",
+      "courts",
+    ]) ||
+    copy.schemaVersion !== 1 ||
+    copy.layoutId !== "compact-service-courts-v1" ||
+    copy.terrainProfileId !== "compact-duel-island-v6" ||
+    profile.id !== copy.terrainProfileId ||
+    profile.algorithm !== "compact-island-sculpt-v5" ||
+    profile.terrainTileSize !== 100 ||
+    !id(copy.primaryBankId) ||
+    !Array.isArray(copy.courts) ||
+    copy.courts.length < 2 ||
+    copy.courts.length > MAX_COMPACT_SERVICE_COURTS
+  )
+    throw new Error("Invalid compactServiceCourts profile or layout");
+  const ids = new Set<string>(),
+    stations = new Set<string>(),
+    npcs = new Set<string>();
+  for (const court of copy.courts) {
+    if (
+      !court ||
+      typeof court !== "object" ||
+      Array.isArray(court) ||
+      !exact(court, [
+        "schemaVersion",
+        "layoutId",
+        "terrainProfileId",
+        "position",
+        "rotation",
+        "recipeId",
+        "stationIds",
+        "npcIds",
+      ]) ||
+      court.schemaVersion !== 2 ||
+      !id(court.layoutId) ||
+      ids.has(court.layoutId) ||
+      court.terrainProfileId !== profile.id ||
+      court.rotation !== 0 ||
+      !["open-timber-smithy-haven-v3", "open-timber-bank-haven-v2"].includes(
+        court.recipeId,
+      ) ||
+      !court.position ||
+      typeof court.position !== "object" ||
+      Array.isArray(court.position) ||
+      !exact(court.position, ["x", "z"]) ||
+      !Number.isFinite(court.position.x) ||
+      !Number.isFinite(court.position.z)
+    )
+      throw new Error("Invalid compact service court placement");
+    const bank = isCompactBankCourt(court);
+    // Both current recipes require axis-aligned, capsule-safe half-cell post
+    // centres. Rotation is deliberately explicit and not silently ignored.
+    const offset = bank ? 0 : 0.5;
+    const envelope = getCompactServiceCourtHalfExtents(court);
+    if (
+      !Number.isInteger(court.position.x - offset) ||
+      !Number.isInteger(court.position.z - offset) ||
+      court.position.x - envelope.x < profile.bounds.minX ||
+      court.position.x + envelope.x > profile.bounds.maxX ||
+      court.position.z - envelope.z < profile.bounds.minZ ||
+      court.position.z + envelope.z > profile.bounds.maxZ
+    )
+      throw new Error("Compact service court exceeds bounds or support grid");
+    if (
+      !Array.isArray(court.stationIds) ||
+      court.stationIds.length !== (bank ? 1 : 2) ||
+      !Array.isArray(court.npcIds) ||
+      court.npcIds.length > 4
+    )
+      throw new Error("Invalid compact service court bindings");
+    for (const [values, claimed] of [
+      [court.stationIds, stations],
+      [court.npcIds, npcs],
+    ] as const)
+      for (const value of values) {
+        if (!id(value) || claimed.has(value))
+          throw new Error("Duplicate or invalid compact service binding");
+        claimed.add(value);
+      }
+    for (const previous of copy.courts.slice(0, ids.size)) {
+      const other = getCompactServiceCourtHalfExtents(previous);
+      if (
+        Math.abs(previous.position.x - court.position.x) <
+          envelope.x + other.x &&
+        Math.abs(previous.position.z - court.position.z) < envelope.z + other.z
+      )
+        throw new Error("Compact service court roof envelopes overlap");
+    }
+    ids.add(court.layoutId);
+    Object.freeze(court.position);
+    Object.freeze(court.stationIds);
+    Object.freeze(court.npcIds);
+    Object.freeze(court);
+  }
+  const primary = copy.courts.find(
+    (court) => court.layoutId === copy.primaryBankId,
+  );
+  if (!primary || !isCompactBankCourt(primary) || primary.npcIds.length !== 1)
+    throw new Error(
+      "Compact service courts require an explicit primary bank and clerk",
+    );
+  Object.freeze(copy.courts);
+  return Object.freeze(copy);
+}
+
+/** Mandatory cross-manifest check, also used by real owners before allocation. */
+export function validateCompactServiceCourtBindings(
+  layout: CompactServiceCourtsManifest | undefined,
+  areas: Readonly<Record<string, WorldArea>>,
+): void {
+  if (!layout) return;
+  const stations = Object.values(areas).flatMap((area) => area.stations ?? []);
+  const npcs = Object.values(areas).flatMap((area) => area.npcs ?? []);
+  for (const court of layout.courts) {
+    const types: string[] = [];
+    const inCourt = (point: { x: number; z: number }) =>
+      Number.isFinite(point.x) &&
+      Number.isFinite(point.z) &&
+      Math.abs(point.x - court.position.x) <= 4 &&
+      Math.abs(point.z - court.position.z) <= 4;
+    for (const stationId of court.stationIds) {
+      const rows = stations.filter((station) => station.id === stationId);
+      if (rows.length !== 1 || !inCourt(rows[0].position))
+        throw new Error(
+          "Compact service court station binding is missing, ambiguous or outside its court",
+        );
+      types.push(rows[0].type);
+    }
+    if (
+      types.sort().join(",") !==
+      (isCompactBankCourt(court) ? "bank" : "anvil,furnace")
+    )
+      throw new Error(
+        "Compact service court station roles do not match its recipe",
+      );
+    for (const npcId of court.npcIds) {
+      const rows = npcs.filter((npc) => npc.id === npcId);
+      if (rows.length !== 1 || !inCourt(rows[0].position))
+        throw new Error(
+          "Compact service court NPC binding is missing, ambiguous or outside its court",
+        );
+      if (isCompactBankCourt(court) && rows[0].type !== "bank")
+        throw new Error("Compact bank court requires a bank-service NPC");
+    }
+  }
+}
 
 export const COMPACT_SERVICE_COURT: CompactServiceCourtManifest = Object.freeze(
   {
@@ -242,7 +452,7 @@ export function createCompactServiceSoil(
 }
 
 export type OwnedCompactServiceCourt = Readonly<{
-  descriptor: CompactServiceCourtManifest | CompactBankPavilionManifest;
+  descriptor: CompactCourtDescriptor;
   position: Readonly<{ x: number; y: number; z: number }>;
   feet: readonly WorkshopFoot[];
   blockingTiles: readonly Readonly<{ x: number; z: number }>[];

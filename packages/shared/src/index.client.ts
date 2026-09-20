@@ -9,6 +9,24 @@
 
 import { DataManager } from "./data/DataManager";
 import type { CompactBankPavilionManifest } from "./types/world/world-types";
+import {
+  getCompactServiceCourtDescriptors,
+  isCompactBankCourt,
+} from "./systems/shared/world/CompactServiceCourt";
+
+/** All admitted access sites, with the explicitly declared primary bank first. */
+export function getAdmittedCompactBankPavilions() {
+  const config = DataManager.getWorldConfig();
+  const primaryId = config?.compactServiceCourts?.primaryBankId;
+  const banks =
+    getCompactServiceCourtDescriptors(config).filter(isCompactBankCourt);
+  if (primaryId)
+    banks.sort(
+      (a, b) =>
+        Number(b.layoutId === primaryId) - Number(a.layoutId === primaryId),
+    );
+  return Object.freeze(banks);
+}
 
 /** Read only the manifest-admitted pavilion, even before its systems exist. */
 export function getAdmittedCompactBankPavilion(): CompactBankPavilionManifest | null {

@@ -118,9 +118,10 @@ export function createGrassTerrainSurfaceOperations(): GrassTerrainSurfaceOperat
     maxWaterBodies: 128,
     maxIndexedZoneReferences: 65536,
     maxIdLength: 128,
-    // Up to 24 authored rock silhouettes plus four exact feet for each of the
-    // smithy and bank pavilions. Keep query rejection bounded; no roof-wide pads.
-    maxExclusionPolygons: 32,
+    // Up to 24 authored rock silhouettes plus eight courts with four exact
+    // feet each (56 owners), within an explicit 64-polygon ceiling. Keep every
+    // footprint and the existing vertex ceiling; never substitute roof pads.
+    maxExclusionPolygons: 64,
     maxPolygonVertices: 64,
   });
   const helpers = {

@@ -300,6 +300,7 @@ export class RoadNetworkSystem extends System {
         {
           compactPreparationLodge: config?.compactPreparationLodge,
           compactBankPavilion: config?.compactBankPavilion,
+          compactServiceCourts: config?.compactServiceCourts,
         },
       );
       this.roads = paths.map((path) => ({

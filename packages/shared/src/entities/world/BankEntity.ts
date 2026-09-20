@@ -271,7 +271,7 @@ export class BankEntity extends InteractableEntity {
     // Emit event to open bank
     this.world.emit(EventType.BANK_OPEN, {
       playerId: data.playerId,
-      bankId: this.bankId,
+      bankId: this.id,
     });
 
     // Send network packet to open bank on client
@@ -280,7 +280,7 @@ export class BankEntity extends InteractableEntity {
         sendTo?: (playerId: string, packet: string, data: unknown) => void;
       };
       if (network.sendTo) {
-        network.sendTo(data.playerId, "bankOpen", { bankId: this.bankId });
+        network.sendTo(data.playerId, "bankOpen", { bankId: this.id });
       }
     }
   }

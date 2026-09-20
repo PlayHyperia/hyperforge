@@ -6,7 +6,12 @@ import {
 } from "@hyperforge/procgen/building";
 import { World } from "../../../../core/World";
 import { DataManager } from "../../../../data/DataManager";
-import type { WorldConfigManifest } from "../../../../types/world/world-types";
+import { ALL_WORLD_AREAS } from "../../../../data/world-areas";
+import type {
+  CompactServiceCourtsManifest,
+  WorldArea,
+  WorldConfigManifest,
+} from "../../../../types/world/world-types";
 import { getPhysX, loadPhysX } from "../../../../physics/PhysXManager";
 import {
   Vector3,
@@ -23,7 +28,12 @@ import {
   groundCompactServiceCourt,
   validateCompactServiceCourt,
   validateCompactBankPavilion,
+  validateCompactServiceCourts,
+  validateCompactServiceCourtBindings,
+  getCompactServiceCourtHalfExtents,
+  isCompactBankCourt,
 } from "../CompactServiceCourt";
+import { COMPACT_PREPARATION_LODGE } from "../CompactPreparationLodge";
 import {
   COMPACT_SERVICE_COURT_SYSTEM,
   CompactServiceCourtSystem,
@@ -54,17 +64,79 @@ beforeAll(async () => {
 });
 afterEach(() => {
   for (const world of worlds.splice(0)) world.destroy();
+  delete ALL_WORLD_AREAS.court_test_bindings;
   DataManager["worldConfig"] = saved.config;
   DataManager["worldTerrainProfile"] = saved.profile;
   DataManager["worldContentIdentity"] = saved.identity;
 });
-async function fixture(bank = false, smithy = true) {
+function pluralLayout(): CompactServiceCourtsManifest {
+  return {
+    schemaVersion: 1,
+    layoutId: "compact-service-courts-v1",
+    terrainProfileId: "compact-duel-island-v6",
+    primaryBankId: "test_bank_primary",
+    courts: [
+      ["test_bank_primary", 350, 320],
+      ["test_bank_east", 370, 320],
+      ["test_bank_south", 370, 340],
+      ["test_smithy", 336.5, 337.5],
+    ].map(([id, x, z], i) => ({
+      schemaVersion: 2,
+      layoutId: String(id),
+      terrainProfileId: "compact-duel-island-v6",
+      position: { x: Number(x), z: Number(z) },
+      rotation: 0,
+      recipeId:
+        i < 3 ? "open-timber-bank-haven-v2" : "open-timber-smithy-haven-v3",
+      stationIds: i < 3 ? [`${id}_station`] : [`${id}_anvil`, `${id}_furnace`],
+      npcIds: i === 0 ? ["test_primary_clerk"] : [],
+    })),
+  };
+}
+function installPluralBindings(layout: CompactServiceCourtsManifest) {
+  expect(ALL_WORLD_AREAS.court_test_bindings).toBeUndefined();
+  ALL_WORLD_AREAS.court_test_bindings = {
+    id: "court_test_bindings",
+    name: "Explicit court integration fixture",
+    description: "Real data bindings; no terrain modifiers or spawned proxies",
+    difficultyLevel: 0,
+    biomeType: "plains",
+    safeZone: true,
+    bounds: { minX: 325, maxX: 380, minZ: 310, maxZ: 350 },
+    resources: [],
+    mobSpawns: [],
+    npcs: layout.courts.flatMap((court) =>
+      court.npcIds.map((id) => ({
+        id,
+        type: "bank" as const,
+        position: { ...court.position, y: 0 },
+      })),
+    ),
+    stations: layout.courts.flatMap((court) =>
+      court.stationIds.map((id, i) => ({
+        id,
+        type: isCompactBankCourt(court)
+          ? ("bank" as const)
+          : i === 0
+            ? ("anvil" as const)
+            : ("furnace" as const),
+        position: { ...court.position, y: 0 },
+      })),
+    ),
+  };
+}
+async function fixture(
+  bank = false,
+  smithy = true,
+  layout?: CompactServiceCourtsManifest,
+) {
   DataManager["worldContentIdentity"] = null;
   const config: WorldConfigManifest = {
     ...structuredClone(saved.config!),
     compactServiceCourt: structuredClone(COMPACT_SERVICE_COURT),
   };
   delete config.compactBankPavilion;
+  delete config.compactServiceCourts;
   if (!smithy) {
     delete config.compactServiceCourt;
     delete config.compactServicePlanting;
@@ -72,6 +144,14 @@ async function fixture(bank = false, smithy = true) {
   if (bank) {
     delete config.compactPreparationLodge;
     config.compactBankPavilion = structuredClone(COMPACT_BANK_PAVILION);
+  }
+  if (layout) {
+    delete config.compactServiceCourt;
+    delete config.compactBankPavilion;
+    delete config.compactPreparationLodge;
+    delete config.compactServicePlanting;
+    installPluralBindings(layout);
+    config.compactServiceCourts = layout;
   }
   DataManager.setWorldConfig(config);
   const world = new World();
@@ -99,6 +179,439 @@ async function fixture(bank = false, smithy = true) {
 }
 
 describe("compact service court actual geometry and native PhysX (not rendered acceptance)", () => {
+  it("admits detached deeply frozen plural courts without freezing or retaining submitted records", () => {
+    const source = pluralLayout();
+    const first = {
+      ...source.courts[0],
+      position: { ...source.courts[0].position },
+      stationIds: [...source.courts[0].stationIds],
+      npcIds: [...source.courts[0].npcIds],
+    };
+    const input = { ...source, courts: [first, ...source.courts.slice(1)] };
+    const before = structuredClone(input);
+    const admitted = validateCompactServiceCourts(input, saved.profile!)!;
+    expect(
+      validateCompactServiceCourts(undefined, saved.profile!),
+    ).toBeUndefined();
+    expect(admitted).toEqual(before);
+    expect(admitted).not.toBe(input);
+    expect(admitted.courts).not.toBe(input.courts);
+    expect(Object.isFrozen(admitted)).toBe(true);
+    expect(Object.isFrozen(admitted.courts)).toBe(true);
+    for (const [index, court] of admitted.courts.entries()) {
+      expect(court).not.toBe(input.courts[index]);
+      for (const value of [
+        court,
+        court.position,
+        court.stationIds,
+        court.npcIds,
+      ])
+        expect(Object.isFrozen(value)).toBe(true);
+      expect(court.position).not.toBe(input.courts[index].position);
+      expect(court.stationIds).not.toBe(input.courts[index].stationIds);
+      expect(court.npcIds).not.toBe(input.courts[index].npcIds);
+    }
+    first.position.x += 20;
+    first.stationIds[0] = "changed_station";
+    first.npcIds[0] = "changed_clerk";
+    input.courts.reverse();
+    expect(admitted).toEqual(before);
+    expect(Object.isFrozen(first)).toBe(false);
+  });
+
+  it("rejects plural unknown keys, non-JSON ownership, sparse arrays and accessors without invoking getters", () => {
+    const input = pluralLayout();
+    const withCourt = (patch: Record<string, unknown>) => ({
+      ...input,
+      courts: [{ ...input.courts[0], ...patch }, ...input.courts.slice(1)],
+    });
+    const sparseCourts = [...input.courts];
+    delete sparseCourts[1];
+    const sparseBindings = ["bank_station", "spare"];
+    delete sparseBindings[0];
+    let getterReads = 0;
+    const accessor = Object.defineProperty({ ...input }, "primaryBankId", {
+      enumerable: true,
+      get() {
+        getterReads++;
+        return input.primaryBankId;
+      },
+    });
+    const positionAccessor = Object.defineProperty({ z: 320 }, "x", {
+      enumerable: true,
+      get() {
+        getterReads++;
+        return 350;
+      },
+    });
+    const courtAccessor = [...input.courts];
+    Object.defineProperty(courtAccessor, "0", {
+      enumerable: true,
+      get() {
+        getterReads++;
+        return input.courts[0];
+      },
+    });
+    for (const invalid of [
+      null,
+      {},
+      { ...input, unknown: true },
+      withCourt({ unknown: true }),
+      withCourt({ position: { x: 350, z: 320, y: 28 } }),
+      { ...input, courts: sparseCourts },
+      withCourt({ stationIds: sparseBindings }),
+      accessor,
+      withCourt({ position: positionAccessor }),
+      { ...input, courts: courtAccessor },
+      Object.defineProperty({ ...input }, "hidden", { value: 1 }),
+      { ...input, [Symbol("hidden")]: true },
+      Object.assign(Object.create({ inherited: true }), input),
+    ])
+      expect(() =>
+        validateCompactServiceCourts(invalid, saved.profile!),
+      ).toThrow();
+    expect(getterReads).toBe(0);
+  });
+
+  it("rejects invalid plural identity, recipes, support grid, bounds, overlaps and primary clerk admission", () => {
+    const input = pluralLayout();
+    const withCourt = (patch: Record<string, unknown>, index = 0) => ({
+      ...input,
+      courts: input.courts.map((court, i) =>
+        i === index ? { ...court, ...patch } : court,
+      ),
+    });
+    for (const invalid of [
+      { ...input, schemaVersion: 2 },
+      { ...input, layoutId: "unqualified" },
+      { ...input, terrainProfileId: "compact-duel-island-v5" },
+      { ...input, courts: [] },
+      { ...input, courts: [input.courts[0]] },
+      { ...input, courts: Array.from({ length: 9 }, () => input.courts[0]) },
+      withCourt({ schemaVersion: 1 }),
+      withCourt({ layoutId: input.courts[1].layoutId }),
+      withCourt({ layoutId: "Not a content id" }),
+      withCourt({ rotation: Math.PI / 2 }),
+      withCourt({ recipeId: "open-timber-bank-haven-v1" }),
+      withCourt({ terrainProfileId: "compact-duel-island-v5" }),
+      withCourt({ position: { x: 350.5, z: 320 } }),
+      withCourt({ position: { x: 336, z: 337 } }, 3),
+      withCourt({ position: { x: saved.profile!.bounds.minX, z: 320 } }),
+      withCourt({ position: { x: 350, z: saved.profile!.bounds.maxZ } }),
+      withCourt({ position: { x: Infinity, z: 320 } }),
+      withCourt({ position: input.courts[0].position }, 1),
+      withCourt({ stationIds: [] }),
+      withCourt({ stationIds: ["one", "two"] }),
+      withCourt({ stationIds: [input.courts[0].stationIds[0]] }, 1),
+      withCourt({ stationIds: ["same", "same"] }, 3),
+      withCourt({ npcIds: input.courts[0].npcIds }, 1),
+      withCourt({ npcIds: ["a", "b", "c", "d", "e"] }, 1),
+      withCourt({ npcIds: [] }),
+      withCourt({ npcIds: ["one_clerk", "two_clerks"] }),
+      { ...input, primaryBankId: "missing_bank" },
+      { ...input, primaryBankId: input.courts[3].layoutId },
+    ])
+      expect(() =>
+        validateCompactServiceCourts(invalid, saved.profile!),
+      ).toThrow();
+    for (const profile of [
+      { ...saved.profile!, id: "unqualified" },
+      { ...saved.profile!, algorithm: "compact-island-sculpt-v4" as const },
+      { ...saved.profile!, terrainTileSize: 200 },
+    ])
+      expect(() => validateCompactServiceCourts(input, profile)).toThrow();
+  });
+
+  it("requires unique in-court station and clerk records with the actual recipe roles", () => {
+    const admitted = validateCompactServiceCourts(
+      pluralLayout(),
+      saved.profile!,
+    )!;
+    installPluralBindings(admitted);
+    const actual = ALL_WORLD_AREAS.court_test_bindings;
+    const areas = { [actual.id]: actual };
+    expect(() =>
+      validateCompactServiceCourtBindings(admitted, areas),
+    ).not.toThrow();
+    const edits: Array<(area: WorldArea) => void> = [
+      (area) => {
+        area.stations!.shift();
+      },
+      (area) => {
+        area.stations!.push(structuredClone(area.stations![0]));
+      },
+      (area) => {
+        area.stations![0].position.x += 4.01;
+      },
+      (area) => {
+        area.stations![0].position.z = NaN;
+      },
+      (area) => {
+        area.stations![0].type = "anvil";
+      },
+      (area) => {
+        area.stations!.find((row) => row.type === "furnace")!.type = "anvil";
+      },
+      (area) => {
+        area.npcs!.length = 0;
+      },
+      (area) => {
+        area.npcs!.push(structuredClone(area.npcs![0]));
+      },
+      (area) => {
+        area.npcs![0].position.z += 4.01;
+      },
+      (area) => {
+        area.npcs![0].type = "general_store";
+      },
+    ];
+    for (const edit of edits) {
+      const invalid = structuredClone(actual);
+      edit(invalid);
+      expect(() =>
+        validateCompactServiceCourtBindings(admitted, {
+          [invalid.id]: invalid,
+        }),
+      ).toThrow();
+    }
+    const duplicateArea = {
+      ...structuredClone(actual),
+      id: "duplicate_bindings_area",
+    };
+    expect(() =>
+      validateCompactServiceCourtBindings(admitted, {
+        ...areas,
+        [duplicateArea.id]: duplicateArea,
+      }),
+    ).toThrow(/ambiguous/);
+    expect(() =>
+      validateCompactServiceCourtBindings(admitted, areas),
+    ).not.toThrow();
+  });
+
+  it("atomically rejects mixed singular and plural DataManager architecture", () => {
+    DataManager["worldContentIdentity"] = null;
+    const config = structuredClone(saved.config!);
+    delete config.compactPreparationLodge;
+    delete config.compactServiceCourt;
+    delete config.compactBankPavilion;
+    delete config.compactServicePlanting;
+    config.compactServiceCourts = pluralLayout();
+    DataManager.setWorldConfig(config);
+    const before = DataManager.getWorldConfig();
+    const profile = DataManager.getWorldTerrainProfile();
+    for (const extra of [
+      { compactServiceCourt: COMPACT_SERVICE_COURT },
+      { compactBankPavilion: COMPACT_BANK_PAVILION },
+      { compactPreparationLodge: COMPACT_PREPARATION_LODGE },
+    ]) {
+      expect(() => DataManager.setWorldConfig({ ...config, ...extra })).toThrow(
+        /replace all singular/,
+      );
+      expect(DataManager.getWorldConfig()).toBe(before);
+      expect(DataManager.getWorldTerrainProfile()).toBe(profile);
+      expect(DataManager["worldContentIdentity"]).toBeNull();
+    }
+  });
+
+  it("owns three separately supported banks and one smithy with twelve native shapes and sixteen unique leases", async () => {
+    const { world, terrain, owner } = await fixture(
+      false,
+      false,
+      pluralLayout(),
+    );
+    const px = getPhysX()!;
+    const types = new px.PxActorTypeFlags(px.PxActorTypeFlagEnum.eRIGID_STATIC);
+    const count = () => world.physics.scene!.getNbActors(types);
+    const beforeActors = count();
+    const surface = () =>
+      terrain["getTerrainSurfaceForRegion"](325, 310, 380, 350);
+    const before = surface();
+    try {
+      await owner.init();
+      await owner.start();
+      await owner.start();
+      const records = owner.getCourts();
+      expect(records.map((r) => r.descriptor.layoutId)).toEqual(
+        pluralLayout().courts.map((c) => c.layoutId),
+      );
+      expect(records).toHaveLength(4);
+      expect(owner.getCourt()).toBeNull();
+      expect(owner.getDiagnostics()).toBeNull();
+      expect(count()).toBe(beforeActors + 4);
+      expect(
+        owner.getAllDiagnostics().map((d) => [d.physicsActor, d.physicsShapes]),
+      ).toEqual(Array.from({ length: 4 }, () => [true, 3]));
+      const disposals = new Map<object, number>();
+      for (const resource of owner["resources"])
+        for (const geometry of [
+          resource.geometry!.timber,
+          resource.geometry!.roof,
+          resource.geometry!.footings,
+          ...resource.indexedViews,
+        ]) {
+          expect(disposals.has(geometry)).toBe(false);
+          disposals.set(geometry, 0);
+          geometry.addEventListener("dispose", () =>
+            disposals.set(geometry, disposals.get(geometry)! + 1),
+          );
+        }
+      expect(disposals.size).toBe(24);
+      for (const [i, record] of records.entries()) {
+        const envelope = getCompactServiceCourtHalfExtents(record.descriptor);
+        expect(envelope).toEqual(
+          isCompactBankCourt(record.descriptor)
+            ? { x: 5, z: 5 }
+            : { x: 6, z: 4 },
+        );
+        const geometry = owner["resources"][i].geometry!;
+        for (const batch of [
+          geometry.timber,
+          geometry.roof,
+          geometry.footings,
+        ]) {
+          const position = batch.getAttribute("position");
+          for (let vertex = 0; vertex < position.count; vertex++) {
+            expect(Math.abs(position.getX(vertex))).toBeLessThanOrEqual(
+              envelope.x,
+            );
+            expect(Math.abs(position.getZ(vertex))).toBeLessThanOrEqual(
+              envelope.z,
+            );
+          }
+        }
+      }
+      const polygons = records.flatMap((record) =>
+        createCompactServiceCourtGrassExclusions(
+          record,
+          isCompactBankCourt(record.descriptor)
+            ? BANK_PAVILION_POSTS
+            : OPEN_WORKSHOP_POSTS,
+        ),
+      );
+      expect(new Set(polygons.map((p) => p.id)).size).toBe(16);
+      expect(
+        new Set(
+          records.flatMap((r) => r.blockingTiles.map((t) => `${t.x},${t.z}`)),
+        ).size,
+      ).toBe(16);
+      expect(surface().exclusionPolygons).toEqual([
+        ...(before.exclusionPolygons ?? []),
+        ...polygons,
+      ]);
+      for (const record of records) {
+        const posts = isCompactBankCourt(record.descriptor)
+          ? BANK_PAVILION_POSTS
+          : OPEN_WORKSHOP_POSTS;
+        expect(record).toEqual(
+          groundCompactServiceCourt(record.descriptor, posts, (x, z) =>
+            terrain.getHeightAt(x, z),
+          ),
+        );
+        for (const [i, post] of posts.entries()) {
+          const x = record.position.x + post.x,
+            z = record.position.z + post.z;
+          for (const dx of [-0.15, 0, 0.15])
+            for (const dz of [-0.15, 0, 0.15]) {
+              const height = terrain.getHeightAt(x + dx, z + dz);
+              expect(record.position.y + record.feet[i].bottom).toBeLessThan(
+                height,
+              );
+              expect(record.position.y + record.feet[i].top).toBeGreaterThan(
+                height,
+              );
+            }
+          expect(world.collision.isWalkable(Math.floor(x), Math.floor(z))).toBe(
+            false,
+          );
+          const hit = world.physics.raycast(
+            new Vector3(x - 1, record.position.y + 1, z),
+            new Vector3(1, 0, 0),
+            2,
+          );
+          expect(hit).not.toBeNull();
+          expect(hit!.point.x).toBeCloseTo(x - 0.12, 4);
+        }
+        expect(
+          world.collision.isWalkable(
+            Math.floor(record.position.x),
+            Math.floor(record.position.z),
+          ),
+        ).toBe(true);
+      }
+      owner.destroy();
+      owner.destroy();
+      expect([...disposals.values()]).toEqual(Array(24).fill(1));
+      expect(count()).toBe(beforeActors);
+      expect(surface()).toEqual(before);
+      for (const record of records)
+        for (const tile of record.blockingTiles)
+          expect(world.collision.isWalkable(tile.x, tile.z)).toBe(true);
+    } finally {
+      px.destroy(types);
+    }
+  });
+
+  it("rejects missing plural bindings before native allocation and rolls back preceding courts on a later real lease conflict", async () => {
+    const { world, terrain, owner } = await fixture(
+      false,
+      false,
+      pluralLayout(),
+    );
+    const px = getPhysX()!;
+    const types = new px.PxActorTypeFlags(px.PxActorTypeFlagEnum.eRIGID_STATIC);
+    const beforeActors = world.physics.scene!.getNbActors(types);
+    const area = ALL_WORLD_AREAS.court_test_bindings;
+    const stations = area.stations!;
+    const surface = () =>
+      terrain["getTerrainSurfaceForRegion"](325, 310, 380, 350);
+    try {
+      await owner.init();
+      area.stations = stations.slice(1);
+      await expect(owner.start()).rejects.toThrow(/station binding/);
+      expect(owner["resources"]).toHaveLength(0);
+      expect(world.physics.scene!.getNbActors(types)).toBe(beforeActors);
+      area.stations = stations;
+      const fourth =
+        DataManager.getWorldConfig()!.compactServiceCourts!.courts[3];
+      const grounded = groundCompactServiceCourt(
+        fourth,
+        OPEN_WORKSHOP_POSTS,
+        (x, z) => terrain.getHeightAt(x, z),
+      );
+      const foreign = terrain.acquireGrassExclusionPolygons(
+        createCompactServiceCourtGrassExclusions(grounded, OPEN_WORKSHOP_POSTS),
+      );
+      const before = surface();
+      try {
+        await expect(owner.start()).rejects.toThrow();
+        expect(owner.getCourts()).toEqual([]);
+        expect(owner["resources"]).toHaveLength(0);
+        expect(world.physics.scene!.getNbActors(types)).toBe(beforeActors);
+        expect(surface()).toEqual(before);
+        for (const court of pluralLayout().courts) {
+          const posts = isCompactBankCourt(court)
+            ? BANK_PAVILION_POSTS
+            : OPEN_WORKSHOP_POSTS;
+          for (const post of posts)
+            expect(
+              world.collision.isWalkable(
+                Math.floor(court.position.x + post.x),
+                Math.floor(court.position.z + post.z),
+              ),
+            ).toBe(true);
+        }
+      } finally {
+        foreign.release();
+      }
+      await owner.start();
+      expect(owner.getCourts()).toHaveLength(4);
+    } finally {
+      area.stations = stations;
+      px.destroy(types);
+    }
+  });
+
   it("admits only the exact detached bank manifest without broadening smithy admission", () => {
     const profile = saved.profile!;
     expect(validateCompactBankPavilion(undefined, profile)).toBeUndefined();

@@ -12,8 +12,14 @@ import {
 } from "./CompactRoofCutaway";
 import type { World } from "../../core/World";
 import { DataManager } from "../../data/DataManager";
+import { canonicalWorldJson } from "../../data/WorldContentIdentity";
 import { System } from "../shared/infrastructure/System";
-import type { OwnedCompactServiceCourt } from "../shared/world/CompactServiceCourt";
+import {
+  getCompactServiceCourtDescriptors,
+  isCompactBankCourt,
+  validateCompactServiceCourtBindings,
+  type OwnedCompactServiceCourt,
+} from "../shared/world/CompactServiceCourt";
 import {
   COMPACT_SERVICE_COURT_SYSTEM,
   CompactServiceCourtSystem,
@@ -28,7 +34,7 @@ export function createCompactServiceCourtVisual(
   record: OwnedCompactServiceCourt,
   mainCamera?: () => THREE.Camera,
 ) {
-  const bank = record.descriptor.recipeId === "open-timber-bank-haven-v2";
+  const bank = isCompactBankCourt(record.descriptor);
   const haven =
     bank || record.descriptor.recipeId === "open-timber-smithy-haven-v3";
   const prefix = bank ? "compact-bank" : "compact-smithy";
@@ -172,11 +178,12 @@ export class CompactServiceCourtVisualsSystem extends System {
   override start(): void {
     if (!this.initialized || this.started) return;
     const config = DataManager.getWorldConfig();
-    const descriptors = [
-      config?.compactServiceCourt,
-      config?.compactBankPavilion,
-    ].filter((descriptor) => descriptor !== undefined);
+    const descriptors = getCompactServiceCourtDescriptors(config);
     if (!descriptors.length) return;
+    validateCompactServiceCourtBindings(
+      config?.compactServiceCourts,
+      DataManager.getInstance().getAllWorldAreas(),
+    );
     const records = this.world
       .getSystem<CompactServiceCourtSystem>(COMPACT_SERVICE_COURT_SYSTEM)
       ?.getCourts();
@@ -186,7 +193,10 @@ export class CompactServiceCourtVisualsSystem extends System {
       descriptors.some(
         (descriptor) =>
           records.filter(
-            (record) => record.descriptor.layoutId === descriptor.layoutId,
+            (record) =>
+              record.descriptor.layoutId === descriptor.layoutId &&
+              canonicalWorldJson(record.descriptor) ===
+                canonicalWorldJson(descriptor),
           ).length !== 1,
       )
     )
@@ -241,7 +251,7 @@ export class CompactServiceCourtVisualsSystem extends System {
 
 export function registerCompactServiceCourtVisuals(world: World): void {
   const config = DataManager.getWorldConfig();
-  if (!config?.compactServiceCourt && !config?.compactBankPavilion) return;
+  if (!getCompactServiceCourtDescriptors(config).length) return;
   if (!world.getSystem(COMPACT_SERVICE_COURT_SYSTEM))
     world.register(COMPACT_SERVICE_COURT_SYSTEM, CompactServiceCourtSystem);
   if (!world.getSystem(COMPACT_SERVICE_COURT_VISUAL_SYSTEM))

@@ -1443,6 +1443,27 @@ export type CompactBankPavilionManifest = Readonly<{
   recipeId: "open-timber-bank-haven-v2";
 }>;
 
+/** ID-addressed open service architecture; positions remain manifest-owned. */
+export type CompactServiceCourtPlacement = Readonly<{
+  schemaVersion: 2;
+  layoutId: string;
+  terrainProfileId: "compact-duel-island-v6";
+  position: Readonly<{ x: number; z: number }>;
+  rotation: 0;
+  recipeId: "open-timber-smithy-haven-v3" | "open-timber-bank-haven-v2";
+  stationIds: readonly string[];
+  npcIds: readonly string[];
+}>;
+
+/** Replaces singular service architecture atomically, never adds a second owner. */
+export type CompactServiceCourtsManifest = Readonly<{
+  schemaVersion: 1;
+  layoutId: "compact-service-courts-v1";
+  terrainProfileId: "compact-duel-island-v6";
+  primaryBankId: string;
+  courts: readonly CompactServiceCourtPlacement[];
+}>;
+
 /** Low, non-colliding planting; tree/resource ownership is never changed. */
 export type CompactServicePlantingManifest = Readonly<{
   schemaVersion: 1 | 2;
@@ -1507,6 +1528,7 @@ export interface WorldConfigManifest {
   compactPreparationLodge?: CompactPreparationLodgeManifest;
   compactServiceCourt?: CompactServiceCourtManifest;
   compactBankPavilion?: CompactBankPavilionManifest;
+  compactServiceCourts?: CompactServiceCourtsManifest;
   compactServicePlanting?: CompactServicePlantingManifest;
   compactLandscapeRocks?: CompactLandscapeRocksManifest;
 }

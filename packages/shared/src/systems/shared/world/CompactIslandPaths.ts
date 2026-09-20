@@ -16,6 +16,7 @@ import {
   COMPACT_PREPARATION_LODGE,
   getCompactPreparationLodgeFootprint,
 } from "./CompactPreparationLodge";
+import { validateCompactServiceCourtBindings } from "./CompactServiceCourt";
 
 /** Surface-mask paths only: no meshes, colliders, height grading or agent routing. */
 export type CompactIslandPath = Readonly<{
@@ -58,7 +59,10 @@ type Bounds = Readonly<{
  * retains the historical v6 enclosed-bank path fixture, not an implicit global.
  */
 export type CompactPathArchitecture = Readonly<
-  Pick<WorldConfigManifest, "compactPreparationLodge" | "compactBankPavilion">
+  Pick<
+    WorldConfigManifest,
+    "compactPreparationLodge" | "compactBankPavilion" | "compactServiceCourts"
+  >
 >;
 
 /** Exact segment distance, also used to qualify the entire path width at water. */
@@ -122,10 +126,32 @@ export function createCompactIslandPaths(
   architecture?: CompactPathArchitecture,
 ): readonly CompactIslandPath[] {
   if (!isCompactSculptProfile(profile)) return Object.freeze([]);
+  const serviceCourts = architecture?.compactServiceCourts;
+  validateCompactServiceCourtBindings(serviceCourts, areas);
+  const primaryBank = serviceCourts?.courts.find(
+    (court) => court.layoutId === serviceCourts.primaryBankId,
+  );
+  if (
+    serviceCourts &&
+    (!primaryBank ||
+      architecture?.compactBankPavilion ||
+      architecture?.compactPreparationLodge)
+  )
+    throw new Error(
+      "Compact paths require an explicit unambiguous primary bank owner",
+    );
   const haven = areas.central_haven,
     pondArea = areas.haven_pond;
   const station = (type: string): Point => {
-    const rows = haven?.stations?.filter((row) => row.type === type);
+    const rows =
+      primaryBank && type === "bank"
+        ? Object.values(areas)
+            .flatMap((area) => area.stations ?? [])
+            .filter(
+              (row) =>
+                row.id === primaryBank.stationIds[0] && row.type === type,
+            )
+        : haven?.stations?.filter((row) => row.type === type);
     if (rows?.length !== 1)
       throw new Error(
         "Compact path requires one admitted Haven station: " + type,
@@ -141,7 +167,12 @@ export function createCompactIslandPaths(
     range = station("range"),
     altar = station("altar");
   const npc = (id: string): Point => {
-    const rows = haven?.npcs?.filter((row) => row.id === id);
+    const rows =
+      primaryBank && id === "bank_clerk"
+        ? Object.values(areas)
+            .flatMap((area) => area.npcs ?? [])
+            .filter((row) => row.id === primaryBank.npcIds[0])
+        : haven?.npcs?.filter((row) => row.id === id);
     if (rows?.length !== 1)
       throw new Error(
         "Compact clearing requires one admitted Haven NPC: " + id,
@@ -164,7 +195,7 @@ export function createCompactIslandPaths(
     maxZ: floor.centerZ + floor.depth / 2,
   }));
   const bankCourt = profile.id === "compact-duel-island-v6";
-  const bankPavilion = architecture?.compactBankPavilion;
+  const bankPavilion = primaryBank ?? architecture?.compactBankPavilion;
   if (bankPavilion && architecture?.compactPreparationLodge)
     throw new Error("Compact paths require one bank architecture owner");
   if (bankPavilion && bankPavilion.terrainProfileId !== profile.id)

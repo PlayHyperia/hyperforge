@@ -1,6 +1,13 @@
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
-import { collectStreamingBankPavilionReadiness } from "../../../../../client/src/lib/streamingSceneDiagnostics";
-import { getAdmittedCompactBankPavilion } from "../../../index.client";
+import {
+  collectStreamingBankPavilionReadiness,
+  collectStreamingBankPavilionsReadiness,
+  collectStreamingSceneReadinessEvidence,
+} from "../../../../../client/src/lib/streamingSceneDiagnostics";
+import {
+  getAdmittedCompactBankPavilion,
+  getAdmittedCompactBankPavilions,
+} from "../../../index.client";
 import {
   BANK_PAVILION_POSTS,
   OPEN_WORKSHOP_POSTS,
@@ -9,6 +16,8 @@ import {
 import * as THREE from "../../../extras/three/three";
 import { World } from "../../../core/World";
 import { DataManager } from "../../../data/DataManager";
+import { ALL_WORLD_AREAS } from "../../../data/world-areas";
+import type { CompactServiceCourtsManifest } from "../../../types/world/world-types";
 import { loadPhysX } from "../../../physics/PhysXManager";
 import { TerrainSystem } from "../../shared/world/TerrainSystem";
 import {
@@ -16,6 +25,7 @@ import {
   COMPACT_SERVICE_COURT,
   COMPACT_SERVICE_COURT_LEGACY_FIXTURE,
   groundCompactServiceCourt,
+  isCompactBankCourt,
 } from "../../shared/world/CompactServiceCourt";
 import {
   COMPACT_SERVICE_COURT_SYSTEM,
@@ -48,6 +58,7 @@ beforeAll(async () => {
 afterEach(() => {
   for (const dispose of cleanup.splice(0)) dispose();
   for (const world of worlds.splice(0)) world.destroy();
+  delete ALL_WORLD_AREAS.court_visual_test_bindings;
   DataManager["worldConfig"] = saved.config;
   DataManager["worldTerrainProfile"] = saved.profile;
   DataManager["worldContentIdentity"] = saved.identity;
@@ -58,15 +69,76 @@ async function fixture(
   bank: boolean,
   startOwner = true,
   withPhysics = true,
+  plural = false,
 ) {
   const config = structuredClone(saved.config!);
   delete config.compactPreparationLodge;
   delete config.compactServiceCourt;
   delete config.compactServicePlanting;
   delete config.compactBankPavilion;
+  delete config.compactServiceCourts;
   if (smithy)
     config.compactServiceCourt = structuredClone(COMPACT_SERVICE_COURT);
   if (bank) config.compactBankPavilion = structuredClone(COMPACT_BANK_PAVILION);
+  if (plural) {
+    const layout: CompactServiceCourtsManifest = {
+      schemaVersion: 1,
+      layoutId: "compact-service-courts-v1",
+      terrainProfileId: "compact-duel-island-v6",
+      primaryBankId: "visual_bank_primary",
+      courts: [
+        ["visual_bank_primary", 350, 320],
+        ["visual_bank_east", 370, 320],
+        ["visual_bank_south", 370, 340],
+        ["visual_smithy", 336.5, 337.5],
+      ].map(([id, x, z], i) => ({
+        schemaVersion: 2,
+        layoutId: String(id),
+        terrainProfileId: "compact-duel-island-v6",
+        position: { x: Number(x), z: Number(z) },
+        rotation: 0,
+        recipeId:
+          i < 3 ? "open-timber-bank-haven-v2" : "open-timber-smithy-haven-v3",
+        stationIds:
+          i < 3 ? [`${id}_station`] : [`${id}_anvil`, `${id}_furnace`],
+        npcIds: i === 0 ? ["visual_primary_clerk"] : [],
+      })),
+    };
+    expect(ALL_WORLD_AREAS.court_visual_test_bindings).toBeUndefined();
+    ALL_WORLD_AREAS.court_visual_test_bindings = {
+      id: "court_visual_test_bindings",
+      name: "Explicit court visual fixture",
+      description:
+        "Real station/NPC records without additional terrain modifiers",
+      difficultyLevel: 0,
+      biomeType: "plains",
+      safeZone: true,
+      bounds: { minX: 325, maxX: 380, minZ: 310, maxZ: 350 },
+      resources: [],
+      mobSpawns: [],
+      npcs: layout.courts.flatMap((court) =>
+        court.npcIds.map((id) => ({
+          id,
+          type: "bank" as const,
+          position: { ...court.position, y: 0 },
+        })),
+      ),
+      stations: layout.courts.flatMap((court) =>
+        court.stationIds.map((id, i) => ({
+          id,
+          type: isCompactBankCourt(court)
+            ? ("bank" as const)
+            : i === 0
+              ? ("anvil" as const)
+              : ("furnace" as const),
+          position: { ...court.position, y: 0 },
+        })),
+      ),
+    };
+    delete config.compactServiceCourt;
+    delete config.compactBankPavilion;
+    config.compactServiceCourts = layout;
+  }
   DataManager["worldContentIdentity"] = null;
   DataManager.setWorldConfig(config);
   const world = new World();
@@ -104,6 +176,280 @@ async function fixture(
 }
 
 describe("compact service court client geometry and lifecycle (not rendered acceptance)", () => {
+  it("qualifies every actual bank with explicit primary ordering and rejects an outlier failure despite a ready primary", async () => {
+    const { world, owner, visual } = await fixture(
+      false,
+      false,
+      true,
+      true,
+      true,
+    );
+    visual.start();
+    // Manifest ordering deliberately differs from primary ordering. Every
+    // retained owner still has exactly the same descriptor/position/bindings.
+    const config = DataManager.getWorldConfig()!;
+    const layout = config.compactServiceCourts!;
+    DataManager["worldContentIdentity"] = null;
+    DataManager.setWorldConfig({
+      ...config,
+      compactServiceCourts: {
+        ...layout,
+        courts: [
+          layout.courts[2],
+          layout.courts[3],
+          layout.courts[0],
+          layout.courts[1],
+        ],
+      },
+    });
+    const admitted = getAdmittedCompactBankPavilions();
+    expect(Object.isFrozen(admitted)).toBe(true);
+    expect(admitted.every(Object.isFrozen)).toBe(true);
+    expect(admitted.map((d) => d.layoutId)).toEqual([
+      "visual_bank_primary",
+      "visual_bank_south",
+      "visual_bank_east",
+    ]);
+    const ready = collectStreamingBankPavilionsReadiness(world, admitted);
+    expect(ready.ready).toBe(true);
+    expect(ready.reasons).toEqual([]);
+    expect(ready.pavilions.map((r) => r.descriptor?.layoutId)).toEqual(
+      admitted.map((d) => d.layoutId),
+    );
+    expect(ready.pavilions.every((r) => r.ready && r.physicsRequired)).toBe(
+      true,
+    );
+    const aggregate = () => collectStreamingSceneReadinessEvidence(world, {});
+    const complete = aggregate();
+    expect(complete.bankPavilionReady).toBe(true);
+    expect(complete.bankPavilions).toEqual(ready);
+    expect(complete.bankPavilion.descriptor?.layoutId).toBe(
+      layout.primaryBankId,
+    );
+    // This CPU fixture has no rendered arena, stream contestants or graphics.
+    // Bank readiness does not manufacture full-stream acceptance.
+    expect(complete.ready).toBe(false);
+
+    const outlier = owner["resources"].find(
+      (r) => r.record.descriptor.layoutId === "visual_bank_east",
+    )!;
+    outlier.body!.deactivate();
+    expect(
+      collectStreamingBankPavilionReadiness(world, admitted[0]).ready,
+    ).toBe(true);
+    const missingPhysical = collectStreamingBankPavilionsReadiness(
+      world,
+      admitted,
+    );
+    expect(missingPhysical.ready).toBe(false);
+    expect(
+      missingPhysical.pavilions.find(
+        (r) => r.descriptor?.layoutId === "visual_bank_east",
+      )?.reasons,
+    ).toContain("owner_physics_mismatch");
+    expect(aggregate().bankPavilionReady).toBe(false);
+    outlier.body!.activate(world);
+    expect(collectStreamingBankPavilionsReadiness(world, admitted).ready).toBe(
+      true,
+    );
+
+    const outlierIndex = visual["visuals"].findIndex(
+      (r) => r.root.name === "visual_bank_south",
+    );
+    const removed = visual["visuals"].splice(outlierIndex, 1)[0];
+    removed.dispose();
+    expect(removed.root.parent).toBeNull();
+    expect(
+      collectStreamingBankPavilionReadiness(world, admitted[0]).ready,
+    ).toBe(true);
+    const missingVisual = collectStreamingBankPavilionsReadiness(
+      world,
+      admitted,
+    );
+    expect(missingVisual.ready).toBe(false);
+    expect(
+      missingVisual.pavilions.find(
+        (r) => r.descriptor?.layoutId === "visual_bank_south",
+      )?.reasons,
+    ).toEqual(["visual_count_mismatch"]);
+    const incomplete = aggregate();
+    expect(incomplete.bankPavilion.ready).toBe(true);
+    expect(incomplete.bankPavilionReady).toBe(false);
+    expect(incomplete.bankPavilions).toEqual(missingVisual);
+    expect(incomplete.ready).toBe(false);
+  });
+
+  it("rejects duplicate, sparse and oversized admission arrays without accepting the ready primary alone", async () => {
+    const { world, visual } = await fixture(false, false, true, true, true);
+    visual.start();
+    const admitted = getAdmittedCompactBankPavilions();
+    expect(collectStreamingBankPavilionsReadiness(world, admitted).ready).toBe(
+      true,
+    );
+    expect(
+      collectStreamingBankPavilionsReadiness(world, [...admitted, admitted[0]]),
+    ).toMatchObject({
+      ready: false,
+      reasons: ["duplicate_bank_identity"],
+    });
+    const sparse = [...admitted];
+    delete sparse[1];
+    for (const invalid of [
+      sparse,
+      Array.from({ length: 9 }, () => admitted[0]),
+      null,
+    ])
+      expect(collectStreamingBankPavilionsReadiness(world, invalid)).toEqual({
+        configured: true,
+        ready: false,
+        pavilions: [],
+        reasons: ["descriptors_invalid"],
+      });
+    expect(
+      collectStreamingBankPavilionReadiness(world, admitted[0]).ready,
+    ).toBe(true);
+  });
+
+  it("renders three banks and one smithy with independent real geometry, cutaway uniforms and disposal", async () => {
+    const { world, owner, visual } = await fixture(
+      false,
+      false,
+      true,
+      true,
+      true,
+    );
+    visual.start();
+    visual.start();
+    const records = owner.getCourts();
+    const leases = visual["visuals"];
+    expect(records).toHaveLength(4);
+    expect(visual.getAllDiagnostics().map((row) => row.layoutId)).toEqual(
+      records.map((r) => r.descriptor.layoutId),
+    );
+    expect(visual.getDiagnostics()).toBeNull();
+    const geometries = new Set<THREE.BufferGeometry>();
+    const materialOwners = new Set<THREE.Material>();
+    const disposalCounts: number[] = [];
+    for (const [i, record] of records.entries()) {
+      const lease = leases[i];
+      const bank = isCompactBankCourt(record.descriptor);
+      expect(lease.root.name).toBe(record.descriptor.layoutId);
+      expect(lease.root.position.toArray()).toEqual([
+        record.position.x,
+        record.position.y,
+        record.position.z,
+      ]);
+      expect(lease.root.parent).toBe(world.stage.scene);
+      expect(lease.root.children).toHaveLength(3);
+      expect(lease.triangles).toBe(bank ? 1492 : 1300);
+      expect(lease.geometryBytes).toBe(bank ? 247200 : 216576);
+      for (const child of lease.root.children) {
+        const mesh = child as THREE.Mesh<THREE.BufferGeometry, THREE.Material>;
+        expect(geometries.has(mesh.geometry)).toBe(false);
+        expect(materialOwners.has(mesh.material)).toBe(false);
+        geometries.add(mesh.geometry);
+        materialOwners.add(mesh.material);
+        const g = disposalCounts.push(0) - 1,
+          m = disposalCounts.push(0) - 1;
+        mesh.geometry.addEventListener("dispose", () => disposalCounts[g]++);
+        mesh.material.addEventListener("dispose", () => disposalCounts[m]++);
+        const bounds = mesh.geometry.boundingBox!;
+        expect(
+          Math.max(Math.abs(bounds.min.x), Math.abs(bounds.max.x)),
+        ).toBeLessThan(bank ? 5 : 6);
+        expect(
+          Math.max(Math.abs(bounds.min.z), Math.abs(bounds.max.z)),
+        ).toBeLessThan(bank ? 5 : 4);
+      }
+    }
+    expect(geometries.size).toBe(12);
+    expect(materialOwners.size).toBe(12);
+    const camera = new THREE.PerspectiveCamera(52, 16 / 9, 0.1, 1000);
+    const first = records[0].position;
+    camera.position.set(first.x, first.y + 1.7, first.z);
+    camera.lookAt(first.x, first.y + 1.7, first.z + 10);
+    camera.updateMatrixWorld(true);
+    for (let frame = 0; frame <= 40; frame++)
+      for (const lease of leases) lease.cutaway.update(camera, frame * 16);
+    expect(leases.map((lease) => lease.cutaway.desired)).toEqual([
+      true,
+      false,
+      false,
+      false,
+    ]);
+    expect(leases[0].cutaway.value).toBe(1);
+    expect(leases.slice(1).map((lease) => lease.cutaway.value)).toEqual([
+      0, 0, 0,
+    ]);
+    expect(
+      new Set(
+        leases.map(
+          (lease) =>
+            (
+              lease.root.children[1] as THREE.Mesh<
+                THREE.BufferGeometry,
+                THREE.MeshStandardNodeMaterial
+              >
+            ).material.maskNode,
+        ),
+      ).size,
+    ).toBe(4);
+    visual.destroy();
+    visual.destroy();
+    expect(disposalCounts).toEqual(Array(24).fill(1));
+    expect(leases.every((lease) => lease.root.parent === null)).toBe(true);
+    expect(owner.getAllDiagnostics().map((row) => row.physicsShapes)).toEqual([
+      3, 3, 3, 3,
+    ]);
+  });
+
+  it("rechecks real plural station ownership before rendering and rolls back a later scene attachment", async () => {
+    const { world, owner, visual } = await fixture(
+      false,
+      false,
+      true,
+      true,
+      true,
+    );
+    const area = ALL_WORLD_AREAS.court_visual_test_bindings;
+    const stations = area.stations!;
+    const before = world.stage.scene.children.slice();
+    area.stations = stations.slice(1);
+    try {
+      expect(() => visual.start()).toThrow(/station binding/);
+      expect(visual.getAllDiagnostics()).toEqual([]);
+      expect(world.stage.scene.children).toEqual(before);
+    } finally {
+      area.stations = stations;
+    }
+    const counts: number[] = [];
+    const rejectThird = (event: THREE.Object3DEventMap["childadded"]) => {
+      if (!event.child.name.startsWith("visual_")) return;
+      for (const child of event.child.children) {
+        const mesh = child as THREE.Mesh<THREE.BufferGeometry, THREE.Material>;
+        const g = counts.push(0) - 1,
+          m = counts.push(0) - 1;
+        mesh.geometry.addEventListener("dispose", () => counts[g]++);
+        mesh.material.addEventListener("dispose", () => counts[m]++);
+      }
+      if (event.child.name === "visual_bank_south")
+        throw new Error("Rejected third actual court attachment");
+    };
+    world.stage.scene.addEventListener("childadded", rejectThird);
+    try {
+      expect(() => visual.start()).toThrow(/third actual court/);
+    } finally {
+      world.stage.scene.removeEventListener("childadded", rejectThird);
+    }
+    expect(counts).toEqual(Array(18).fill(1));
+    expect(world.stage.scene.children).toEqual(before);
+    expect(visual.getAllDiagnostics()).toEqual([]);
+    expect(visual.isStarted()).toBe(false);
+    expect(owner.getCourts()).toHaveLength(4);
+    visual.start();
+    expect(visual.getAllDiagnostics()).toHaveLength(4);
+  });
+
   it("does not require pavilion systems for a historical manifest without the descriptor", () => {
     const world = new World();
     worlds.push(world);

@@ -2,7 +2,7 @@ import {
   AVATAR_AUTHORED_MOTION_ACTION_LIMIT,
   AVATAR_AUTHORED_MOTION_SCHEMA_VERSION,
   getCombatArenaBoundsContainingPositions,
-  getAdmittedCompactBankPavilion,
+  getAdmittedCompactBankPavilions,
   isPositionInsideCombatArena,
   getAvatarByUrl,
   normalizeProcessingInteractionPresentationState,
@@ -21,8 +21,8 @@ type Vector3Like = {
   x: number;
   y: number;
   z: number;
-  clone?: () => Vector3Like & {
-    project?: (camera: unknown) => Vector3Like;
+  clone?(): Vector3Like & {
+    project?(camera: unknown): Vector3Like;
   };
 };
 
@@ -215,6 +215,7 @@ export type StreamingSceneReadinessEvidence = {
   arenaVisualsReady: boolean;
   bankPavilionReady: boolean;
   bankPavilion: StreamingBankPavilionReadiness;
+  bankPavilions: StreamingBankPavilionsReadiness;
   terrainVisualsReady: boolean;
   terrain: unknown | null;
   grass: unknown | null;
@@ -239,8 +240,8 @@ export type StreamingSceneReadinessEvidence = {
 };
 
 type CompactBankPavilionDescriptor = Readonly<{
-  schemaVersion: 1;
-  layoutId: "compact-bank-pavilion-v1";
+  schemaVersion: 1 | 2;
+  layoutId: string;
   terrainProfileId: "compact-duel-island-v6";
   position: Readonly<{ x: number; z: number }>;
   rotation: 0;
@@ -276,6 +277,13 @@ export type StreamingBankPavilionReadiness = Readonly<{
   descriptor: CompactBankPavilionDescriptor | null;
   owner: CompactBankPavilionOwnerDiagnostics | null;
   visual: CompactBankPavilionVisualDiagnostics | null;
+  reasons: readonly string[];
+}>;
+
+export type StreamingBankPavilionsReadiness = Readonly<{
+  configured: boolean;
+  ready: boolean;
+  pavilions: readonly StreamingBankPavilionReadiness[];
   reasons: readonly string[];
 }>;
 
@@ -1004,8 +1012,14 @@ function parseBankPavilionDescriptor(
   const descriptor = diagnosticsRecord(value);
   const position = diagnosticsRecord(descriptor?.position);
   if (
-    descriptor?.schemaVersion !== 1 ||
-    descriptor.layoutId !== BANK_PAVILION_RUNTIME_CONTRACT.layoutId ||
+    !descriptor ||
+    !(
+      (descriptor.schemaVersion === 1 &&
+        descriptor.layoutId === BANK_PAVILION_RUNTIME_CONTRACT.layoutId) ||
+      (descriptor.schemaVersion === 2 &&
+        typeof descriptor.layoutId === "string" &&
+        /^[a-z][a-z0-9_-]{0,63}$/.test(descriptor.layoutId))
+    ) ||
     descriptor.terrainProfileId !==
       BANK_PAVILION_RUNTIME_CONTRACT.terrainProfileId ||
     descriptor.rotation !== 0 ||
@@ -1017,8 +1031,8 @@ function parseBankPavilionDescriptor(
   )
     return null;
   return Object.freeze({
-    schemaVersion: 1,
-    layoutId: BANK_PAVILION_RUNTIME_CONTRACT.layoutId,
+    schemaVersion: descriptor.schemaVersion as 1 | 2,
+    layoutId: descriptor.layoutId as string,
     terrainProfileId: BANK_PAVILION_RUNTIME_CONTRACT.terrainProfileId,
     position: Object.freeze({ x: position.x, z: position.z }),
     rotation: 0,
@@ -1196,7 +1210,7 @@ export function collectStreamingBankPavilionReadiness(
     ownerRows?.filter(
       (row) =>
         diagnosticsRecord(row)?.layoutId ===
-        BANK_PAVILION_RUNTIME_CONTRACT.layoutId,
+        (descriptor?.layoutId ?? BANK_PAVILION_RUNTIME_CONTRACT.layoutId),
     ) ?? [];
   const owner =
     ownerCandidates.length === 1
@@ -1236,7 +1250,7 @@ export function collectStreamingBankPavilionReadiness(
     visualRows?.filter(
       (row) =>
         diagnosticsRecord(row)?.layoutId ===
-        BANK_PAVILION_RUNTIME_CONTRACT.layoutId,
+        (descriptor?.layoutId ?? BANK_PAVILION_RUNTIME_CONTRACT.layoutId),
     ) ?? [];
   const visual =
     visualCandidates.length === 1
@@ -1265,23 +1279,69 @@ export function collectStreamingBankPavilionReadiness(
   });
 }
 
+/** Every admitted bank must own its exact visual/physical recipe, not only the primary. */
+export function collectStreamingBankPavilionsReadiness(
+  world: StreamingDiagnosticsWorld,
+  admitted: unknown,
+): StreamingBankPavilionsReadiness {
+  if (
+    !Array.isArray(admitted) ||
+    admitted.length > 8 ||
+    Object.getPrototypeOf(admitted) !== Array.prototype ||
+    Reflect.ownKeys(admitted).length !== admitted.length + 1 ||
+    Array.from({ length: admitted.length }, (_, i) =>
+      Object.getOwnPropertyDescriptor(admitted, String(i)),
+    ).some((entry) => !entry || !("value" in entry) || !entry.enumerable)
+  )
+    return Object.freeze({
+      configured: true,
+      ready: false,
+      pavilions: Object.freeze([]),
+      reasons: Object.freeze(["descriptors_invalid"]),
+    });
+  const pavilions = Object.freeze(
+    admitted.map((descriptor) =>
+      collectStreamingBankPavilionReadiness(world, descriptor),
+    ),
+  );
+  const ids = pavilions.map((pavilion) => pavilion.descriptor?.layoutId);
+  const reasons: string[] = [];
+  if (new Set(ids).size !== ids.length) reasons.push("duplicate_bank_identity");
+  if (pavilions.some((pavilion) => !pavilion.configured || !pavilion.ready))
+    reasons.push("bank_not_ready");
+  return Object.freeze({
+    configured: admitted.length > 0,
+    ready: reasons.length === 0,
+    pavilions,
+    reasons: Object.freeze(reasons),
+  });
+}
+
 export function collectStreamingSceneReadinessEvidence(
   world: StreamingDiagnosticsWorld,
   state: DiagnosticsState,
 ): StreamingSceneReadinessEvidence {
   const diagnostics = collectStreamingSceneDiagnostics(world, state);
-  let admittedBankPavilion: unknown;
+  let admittedBankPavilions: unknown;
   try {
-    admittedBankPavilion = getAdmittedCompactBankPavilion() ?? undefined;
+    admittedBankPavilions = getAdmittedCompactBankPavilions();
   } catch {
     // Treat an unreadable admission source as configured-but-invalid. Capture
     // must not continue merely because world configuration could not be read.
-    admittedBankPavilion = null;
+    admittedBankPavilions = null;
   }
-  const bankPavilion = collectStreamingBankPavilionReadiness(
+  const bankPavilions = collectStreamingBankPavilionsReadiness(
     world,
-    admittedBankPavilion,
+    admittedBankPavilions,
   );
+  // Preserve the primary diagnostic field for existing viewers. The aggregate
+  // readiness below always includes every admitted outlying bank as well.
+  const bankPavilion =
+    bankPavilions.pavilions[0] ??
+    collectStreamingBankPavilionReadiness(
+      world,
+      bankPavilions.ready ? undefined : null,
+    );
   const terrain = world.getSystem?.("terrain") as
     | {
         getStreamingVisualReadiness?: () => {
@@ -1399,7 +1459,7 @@ export function collectStreamingSceneReadinessEvidence(
   return {
     ready: Boolean(
       diagnostics?.arenaVisualsReady &&
-      bankPavilion.ready &&
+      bankPavilions.ready &&
       terrainVisualsReady &&
       precompileIdle &&
       equipmentVisualsReady &&
@@ -1410,8 +1470,9 @@ export function collectStreamingSceneReadinessEvidence(
     phase,
     contestantsMustBeVisible,
     arenaVisualsReady: diagnostics?.arenaVisualsReady === true,
-    bankPavilionReady: bankPavilion.ready,
+    bankPavilionReady: bankPavilions.ready,
     bankPavilion,
+    bankPavilions,
     terrainVisualsReady,
     terrain: terrainEvidence?.terrain ?? null,
     grass: terrainEvidence?.grass ?? null,

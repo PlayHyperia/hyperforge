@@ -1384,7 +1384,7 @@ describe("detached grass terrain surface requests", () => {
     expect(() =>
       operations.validateSnapshot({
         ...input,
-        exclusionPolygons: Array.from({ length: 33 }, (_, i) => ({
+        exclusionPolygons: Array.from({ length: 65 }, (_, i) => ({
           ...polygon,
           id: String(i),
         })),
@@ -1392,50 +1392,183 @@ describe("detached grass terrain surface requests", () => {
     ).toThrow();
   });
 
-  it("admits the bounded 24-rock plus eight-post capacity identically in real workers and rejects a 33rd owner", async () => {
-    expect(operations.limits.maxExclusionPolygons).toBe(32);
-    const polygons = Array.from({ length: 33 }, (_, i) => ({
-      id: `bounded-owner-${i}`,
-      minX: i * 4,
-      maxX: i * 4 + 0.3,
+  it.each([32, 56, 64])(
+    "preserves all %i exclusion owners through detached cloning and the actual worker",
+    async (count) => {
+      expect(operations.limits.maxExclusionPolygons).toBe(64);
+      expect(operations.limits.maxPolygonVertices).toBe(64);
+      const polygons = Array.from({ length: count }, (_, i) => ({
+        id: `bounded-owner-${i}`,
+        minX: i * 4,
+        maxX: i * 4 + 0.3,
+        minZ: 0,
+        maxZ: 0.3,
+        vertices: [
+          { x: i * 4, z: 0 },
+          { x: i * 4 + 0.3, z: 0 },
+          { x: i * 4 + 0.3, z: 0.3 },
+          { x: i * 4, z: 0.3 },
+        ],
+      }));
+      const input = { ...snapshot([]), exclusionPolygons: polygons };
+      const before = structuredClone(input);
+      const clone = operations.cloneSnapshot(input);
+      expect(clone).toEqual(input);
+      expect(clone.exclusionPolygons).toHaveLength(count);
+      for (let i = 0; i < count; i++) {
+        const copied = clone.exclusionPolygons![i];
+        expect(copied).not.toBe(polygons[i]);
+        expect(copied.vertices).not.toBe(polygons[i].vertices);
+        for (let j = 0; j < copied.vertices.length; j++)
+          expect(copied.vertices[j]).not.toBe(polygons[i].vertices[j]);
+      }
+      const points = polygons.flatMap((p) => [
+        [p.minX + 0.15, 0.15],
+        [p.maxX, p.maxZ],
+        [p.maxX + 0.01, 0.15],
+      ]);
+      const expected = Array.from({ length: count }, () => [
+        true,
+        true,
+        false,
+      ]).flat();
+      expect(
+        points.map(([x, z]) => operations.isGrassExcluded(clone, x, z)),
+      ).toEqual(expected);
+      const worker = actualWorker();
+      try {
+        const admitted = await worker.execute({
+          snapshot: clone,
+          points,
+          clone: true,
+        });
+        expect(admitted.error).toBeUndefined();
+        expect(admitted.excluded).toEqual(expected);
+        expect(admitted.snapshot.exclusionPolygons).toEqual(
+          input.exclusionPolygons,
+        );
+        expect(admitted.snapshot).toEqual(before);
+        expect(input).toEqual(before);
+        polygons[count - 1].vertices[0].x -= 1;
+        expect(clone).toEqual(before);
+        expect(admitted.snapshot).toEqual(before);
+      } finally {
+        await worker.close();
+      }
+    },
+  );
+
+  it("rejects the 65th exclusion atomically without publishing, dropping owners or changing the borrowed input", async () => {
+    const polygons = Array.from({ length: 65 }, (_, i) => ({
+      id: `overflow-owner-${i}`,
+      minX: i * 2,
+      maxX: i * 2 + 1,
       minZ: 0,
-      maxZ: 0.3,
+      maxZ: 1,
       vertices: [
-        { x: i * 4, z: 0 },
-        { x: i * 4 + 0.3, z: 0 },
-        { x: i * 4 + 0.3, z: 0.3 },
-        { x: i * 4, z: 0.3 },
+        { x: i * 2, z: 0 },
+        { x: i * 2 + 1, z: 0 },
+        { x: i * 2 + 1, z: 1 },
+        { x: i * 2, z: 1 },
       ],
     }));
-    const input = { ...snapshot([]), exclusionPolygons: polygons.slice(0, 32) };
-    const clone = operations.cloneSnapshot(input);
-    expect(clone.exclusionPolygons).toHaveLength(32);
-    expect(clone.exclusionPolygons![31].vertices).not.toBe(
-      polygons[31].vertices,
+    const input = { ...snapshot([]), exclusionPolygons: polygons };
+    const before = structuredClone(input);
+    expect(() => operations.validateSnapshot(input)).toThrow(
+      /exclusion polygon count/,
     );
-    const points = polygons.slice(0, 32).flatMap((p) => [
-      [p.minX + 0.15, 0.15],
-      [p.maxX + 0.01, 0.15],
-    ]);
-    const expected = Array.from({ length: 32 }, () => [true, false]).flat();
-    expect(
-      points.map(([x, z]) => operations.isGrassExcluded(clone, x, z)),
-    ).toEqual(expected);
+    expect(() => operations.cloneSnapshot(input)).toThrow(
+      /exclusion polygon count/,
+    );
+    const copying = operations.cloneSnapshotSteps(input);
+    const phases: string[] = [];
+    expect(() => {
+      for (const phase of copying) phases.push(phase);
+    }).toThrow(/exclusion polygon count/);
+    expect(phases.some((phase) => phase.startsWith("snapshot_clone_"))).toBe(
+      false,
+    );
+    expect(copying.next()).toEqual({ done: true, value: undefined });
+    expect(input).toEqual(before);
     const worker = actualWorker();
     try {
-      const admitted = await worker.execute({ snapshot: clone, points });
-      expect(admitted.error).toBeUndefined();
-      expect(admitted.excluded).toEqual(expected);
-      expect(admitted.snapshot.exclusionPolygons).toEqual(
-        input.exclusionPolygons,
-      );
-      const oversized = { ...input, exclusionPolygons: polygons };
-      expect(() => operations.validateSnapshot(oversized)).toThrow();
-      const rejected = await worker.execute({
-        snapshot: oversized,
-        points: [],
+      for (const clone of [false, true]) {
+        const rejected = await worker.execute({
+          snapshot: input,
+          points: [[0.5, 0.5]],
+          clone,
+        });
+        expect(rejected).toEqual({
+          error: "Invalid grass terrain surface: exclusion polygon count",
+        });
+      }
+      const recovered = await worker.execute({
+        snapshot: { ...input, exclusionPolygons: polygons.slice(0, 64) },
+        clone: true,
       });
-      expect(rejected.error).toBeDefined();
+      expect(recovered.error).toBeUndefined();
+      expect(recovered.snapshot.exclusionPolygons).toEqual(
+        polygons.slice(0, 64),
+      );
+      expect(input).toEqual(before);
+    } finally {
+      await worker.close();
+    }
+  });
+
+  it("retains the strict 64-vertex ceiling and validates the last saturated owner on host and worker", async () => {
+    const polygon = (count: number, id: string) => {
+      const vertices = Array.from({ length: count }, (_, i) => ({
+        x: Math.cos((i * 2 * Math.PI) / count),
+        z: Math.sin((i * 2 * Math.PI) / count),
+      }));
+      return {
+        id,
+        vertices,
+        minX: Math.min(...vertices.map((p) => p.x)),
+        maxX: Math.max(...vertices.map((p) => p.x)),
+        minZ: Math.min(...vertices.map((p) => p.z)),
+        maxZ: Math.max(...vertices.map((p) => p.z)),
+      };
+    };
+    const polygons = Array.from({ length: 64 }, (_, i) =>
+      polygon(64, `vertex-owner-${i}`),
+    );
+    const input = { ...snapshot([]), exclusionPolygons: polygons };
+    const worker = actualWorker();
+    try {
+      expect(operations.cloneSnapshot(input)).toEqual(input);
+      const admitted = await worker.execute({
+        snapshot: input,
+        clone: true,
+        points: [
+          [0, 0],
+          [2, 0],
+        ],
+      });
+      expect(admitted.error).toBeUndefined();
+      expect(admitted.snapshot).toEqual(input);
+      expect(admitted.excluded).toEqual([true, false]);
+      for (const bad of [
+        polygon(65, "vertex-overflow"),
+        { ...polygons[63], minX: -2 },
+        { ...polygons[63], id: polygons[0].id },
+        { ...polygons[63], vertices: [...polygons[63].vertices].reverse() },
+      ]) {
+        const invalid = {
+          ...input,
+          exclusionPolygons: [...polygons.slice(0, 63), bad],
+        };
+        expect(() => operations.cloneSnapshot(invalid)).toThrow(
+          /exclusion polygon/,
+        );
+        const rejected = await worker.execute({
+          snapshot: invalid,
+          clone: true,
+        });
+        expect(Object.keys(rejected)).toEqual(["error"]);
+        expect(rejected.error).toMatch(/exclusion polygon/);
+      }
     } finally {
       await worker.close();
     }

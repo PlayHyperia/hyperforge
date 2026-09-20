@@ -27,7 +27,10 @@ import {
   SCULPTED_COMPACT_V4_PROFILE_FIXTURE,
   validateWorldTerrainProfile,
 } from "../WorldTerrainProfile";
-import type { RoadTileSegment } from "../../../../types/world/world-types";
+import type {
+  CompactServiceCourtsManifest,
+  RoadTileSegment,
+} from "../../../../types/world/world-types";
 import {
   COMPACT_PREPARATION_LODGE,
   getCompactPreparationLodgeFootprint,
@@ -35,7 +38,11 @@ import {
 import { GRASS_WORKER_CODE } from "../../../../utils/workers/GrassWorker";
 import THREE from "../../../../extras/three/three";
 import { DuelArenaVisualsSystem } from "../../../client/DuelArenaVisualsSystem";
-import { COMPACT_BANK_PAVILION } from "../CompactServiceCourt";
+import {
+  COMPACT_BANK_PAVILION,
+  validateCompactServiceCourts,
+  validateCompactServiceCourtBindings,
+} from "../CompactServiceCourt";
 import { TownSystem } from "../TownSystem";
 import { modelBounds } from "./fixtures/StaticGlbBounds";
 import { getExternalResource } from "../../../../utils/ExternalAssetUtils";
@@ -3150,6 +3157,165 @@ describe("actual compact preparation paths and centered road mask", () => {
 });
 
 describe("bank pavilion admitted architecture and real path owners", () => {
+  it("keeps primary-bank paths exact with three actual bank bindings in non-primary manifest order", async () => {
+    await withRoads((_roads, terrain) => {
+      const profile = terrain.getWorldTerrainProfile();
+      const areas = structuredClone(ALL_WORLD_AREAS);
+      const haven = areas.central_haven;
+      // Preserve the admitted open-pavilion checkpoint coordinates, not the
+      // older enclosed lodge's clerk outside the new court footprint.
+      const clerk = haven.npcs!.find((row) => row.id === "bank_clerk")!;
+      clerk.position.x = 352;
+      clerk.position.z = 322;
+      const bank = haven.stations!.find((row) => row.type === "bank")!;
+      const reference = createCompactIslandPaths(
+        profile,
+        areas,
+        getDuelArenaConfig(),
+        (x, z) => terrain.getHeightAt(x, z),
+        { compactBankPavilion: COMPACT_BANK_PAVILION },
+      );
+      const coordinates = {
+        bank: { ...bank.position },
+        clerk: { ...clerk.position },
+      };
+      bank.id = "network_primary_station";
+      clerk.id = "network_primary_clerk";
+      haven.stations!.unshift(
+        {
+          ...structuredClone(bank),
+          id: "network_east_station",
+          position: { x: 370, y: 0, z: 320 },
+        },
+        {
+          ...structuredClone(bank),
+          id: "network_south_station",
+          position: { x: 370, y: 0, z: 340 },
+        },
+      );
+      const layout: CompactServiceCourtsManifest = {
+        schemaVersion: 1,
+        layoutId: "compact-service-courts-v1",
+        terrainProfileId: "compact-duel-island-v6",
+        primaryBankId: "network_primary",
+        courts: [
+          {
+            schemaVersion: 2,
+            layoutId: "network_east",
+            terrainProfileId: "compact-duel-island-v6",
+            position: { x: 370, z: 320 },
+            rotation: 0,
+            recipeId: "open-timber-bank-haven-v2",
+            stationIds: ["network_east_station"],
+            npcIds: [],
+          },
+          {
+            schemaVersion: 2,
+            layoutId: "network_south",
+            terrainProfileId: "compact-duel-island-v6",
+            position: { x: 370, z: 340 },
+            rotation: 0,
+            recipeId: "open-timber-bank-haven-v2",
+            stationIds: ["network_south_station"],
+            npcIds: [],
+          },
+          {
+            schemaVersion: 2,
+            layoutId: "network_primary",
+            terrainProfileId: "compact-duel-island-v6",
+            position: { x: 350, z: 320 },
+            rotation: 0,
+            recipeId: "open-timber-bank-haven-v2",
+            stationIds: [bank.id],
+            npcIds: [clerk.id],
+          },
+        ],
+      };
+      const admitted = validateCompactServiceCourts(layout, profile)!;
+      expect(() =>
+        validateCompactServiceCourtBindings(admitted, areas),
+      ).not.toThrow();
+      expect(haven.stations!.filter((row) => row.type === "bank")).toHaveLength(
+        3,
+      );
+      expect(admitted.courts[0].layoutId).not.toBe(admitted.primaryBankId);
+      const selected = createCompactIslandPaths(
+        profile,
+        areas,
+        getDuelArenaConfig(),
+        (x, z) => terrain.getHeightAt(x, z),
+        { compactServiceCourts: admitted },
+      );
+      expect(selected).toEqual(reference);
+      expect(JSON.stringify(selected)).toBe(JSON.stringify(reference));
+      expect({ bank: bank.position, clerk: clerk.position }).toEqual(
+        coordinates,
+      );
+      const reversed = validateCompactServiceCourts(
+        { ...layout, courts: [...layout.courts].reverse() },
+        profile,
+      )!;
+      expect(
+        createCompactIslandPaths(
+          profile,
+          areas,
+          getDuelArenaConfig(),
+          (x, z) => terrain.getHeightAt(x, z),
+          { compactServiceCourts: reversed },
+        ),
+      ).toEqual(reference);
+      // Without the explicit owner the same additional real bank records are
+      // ambiguous; do not fall back to whichever station happens to be first.
+      expect(() =>
+        createCompactIslandPaths(
+          profile,
+          areas,
+          getDuelArenaConfig(),
+          (x, z) => terrain.getHeightAt(x, z),
+          { compactBankPavilion: COMPACT_BANK_PAVILION },
+        ),
+      ).toThrow(/one admitted Haven station: bank/);
+      for (const architecture of [
+        {
+          compactServiceCourts: {
+            ...admitted,
+            primaryBankId: "absent_primary",
+          },
+        },
+        {
+          compactServiceCourts: admitted,
+          compactBankPavilion: COMPACT_BANK_PAVILION,
+        },
+        {
+          compactServiceCourts: admitted,
+          compactPreparationLodge: COMPACT_PREPARATION_LODGE,
+        },
+      ])
+        expect(() =>
+          createCompactIslandPaths(
+            profile,
+            areas,
+            getDuelArenaConfig(),
+            (x, z) => terrain.getHeightAt(x, z),
+            architecture,
+          ),
+        ).toThrow(/unambiguous primary bank owner/);
+      const missing = structuredClone(areas);
+      missing.central_haven.stations = missing.central_haven.stations!.filter(
+        (row) => row.id !== bank.id,
+      );
+      expect(() =>
+        createCompactIslandPaths(
+          profile,
+          missing,
+          getDuelArenaConfig(),
+          (x, z) => terrain.getHeightAt(x, z),
+          { compactServiceCourts: admitted },
+        ),
+      ).toThrow(/station binding/);
+    });
+  });
+
   it.each(pathFixtures)(
     "pins $name historical ground paint before pavilion ground art",
     async ({ name, run }) => {

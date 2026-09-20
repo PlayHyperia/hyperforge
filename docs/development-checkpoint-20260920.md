@@ -152,3 +152,85 @@ trees with rarer high tiers, skill-local quest NPCs, scattered rune altars,
 a naturally shaped farther-inland pond, and integrated gameplay/art/performance
 acceptance. These are all open, with the singular schema/path dependencies
 recorded explicitly. No forbidden comparative brand is introduced.
+
+## Follow-up checkpoint — bounded plural service ownership
+
+Source-only foundation: a versioned `compactServiceCourts` layout supports up
+to eight explicitly identified bank/smithy courts. Strict JSON admission rejects
+unknown fields, duplicate bindings, overlapping roof envelopes, unsupported
+rotations/grids and ambiguous primary banks. Every service binding is checked
+against the actual station/NPC manifests before owners allocate resources;
+startup cannot bypass this check through optional validation settings. The
+current axis-aligned recipes are intentional, not arbitrary-rotation support.
+
+Real test Worlds own three banks and a smithy: four native PhysX actors,
+12 shapes and 16 independently released footing exclusions. Visual ownership
+matches complete descriptors. Streaming bank readiness checks every admitted
+bank, not just the primary; broken outlier physics or visuals fail it. Existing
+primary paths stay byte-identical with additional stations and reordered court
+records. New outlying paths and a finished placement graph are NOT authored.
+
+The host/emitted-worker exclusion limit grows from 32 to 64 polygons, with
+64 vertices per polygon unchanged. Eight courts plus 24 landscape exclusions
+use at most 56 slots under the stated content budget. Full-cap cloning,
+point/boundary queries and atomic over-cap rejection are tested. This is a
+bounded admission limit, not measured GPU, loading or multi-agent performance.
+
+A BankEntity open event/packet now names the actual runtime bank entity, not
+its manifest alias. The new test uses a real World/BankEntity and checks event
+identity only; it does not claim live socket delivery or ledger safety. Before
+LAYOUT-02 can close, prove A-deposit/B-withdraw on the same authoritative ledger,
+exact bank-session target/range/type and close revocation, concurrent/replayed
+requests, restart/process-loss reconciliation, equipment transaction rollback
+and agent discovery at every real bank. Existing custody authorities are not
+rewritten or certified by this slice.
+
+Post-recovery verification:
+
+- 66 owner/visual/path cases across three suites.
+- 41 surface-snapshot, 28 actual emitted-worker and one real bank-event case.
+- 21 existing client readiness regressions.
+- Strict source typing: 710 explicit/production roots, zero diagnostics, stable
+  source hashes; separate client typing, scoped ESLint and Prettier also pass.
+- All 145 protected procgen/shared/server artifacts retain their prior hashes.
+  Localhost3333 responds HTTP200; its existing client/server/VM remain running.
+
+The initial explicit typing command named a nonexistent worker-test path and
+failed before checking; its corrected run exposed a structural method typing
+mismatch, subsequently corrected and rechecked. The first worker command ran
+only the 42 existing snapshot/event cases; a separate exact-path invocation
+ran all 28 actual worker cases. Failed receipts remain retained. No new native
+browser rendering, private build, whole-island route test, live banking round
+trip, duration test or frame/memory acceptance is claimed. All eight layout
+requirements and all seven world-art acceptance tasks remain OPEN.
+
+### Verification incident and repair
+
+A delegated test invocation improperly used unguarded `pnpm exec`. It
+materialized dependencies, failed the root Node-version preinstall check,
+replaced a preexisting untracked lockfile, and then mistakenly deleted that
+file. This was disclosed immediately; it was not authorized cleanup.
+
+The exact original 780,127-byte `pnpm-lock.yaml` was recovered from the earlier
+verified workspace backup. SHA-256
+`b5565add729a7d90dcf15c4a83f875b5cb76ebcff707eef74d78140b784122fc`
+matches the pre-incident recovery inventory, and a byte comparison passes.
+The lock remains untracked, as before; it was not regenerated or committed.
+
+All 62 known root package links and 21 binary links were restored to recorded
+Bun targets, including vendored r186 Three types. Replaced links/shims were
+moved intact to local recovery evidence, not deleted. All restored targets
+exist; scoped workspace links have no pnpm targets. Sixty-one backup package
+manifests match resident targets byte-for-byte; the backup Husky manifest is
+cloud-unavailable and was not hydrated. Its recorded link and resident target
+were verified, not its unavailable backup bytes. Relevant verification above
+was rerun after repair.
+
+Residual pnpm cache/store/metadata and extra links remain untouched; no pristine
+whole-dependency-tree restoration is claimed. The subtask also issued
+`git fsck --lost-found`; neither the resolved common Git directory nor the
+linked worktree Git directory contains a resulting lost-found directory.
+No VM/debugger attachment, service restart, database mutation or dependency
+install was used for repair. Local audit/mapping/repair receipts remain in
+`asset-studio/game-test-integration/service-layout-network01-UNQUALIFIED/`;
+they are not GitHub-backed runtime assets.

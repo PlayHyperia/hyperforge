@@ -7,7 +7,10 @@ import { System } from "../infrastructure/System";
 import type { StaticCollisionLease } from "../movement/CollisionMatrix";
 import {
   createCompactServiceCourtGrassExclusions,
+  getCompactServiceCourtDescriptors,
   groundCompactServiceCourt,
+  isCompactBankCourt,
+  validateCompactServiceCourtBindings,
   type OwnedCompactServiceCourt,
 } from "./CompactServiceCourt";
 import type { TerrainSystem } from "./TerrainSystem";
@@ -48,15 +51,15 @@ export class CompactServiceCourtSystem extends System {
     if (!this.initialized || this.started) return;
     const generation = ++this.generation;
     const config = DataManager.getWorldConfig();
-    const descriptors: OwnedCompactServiceCourt["descriptor"][] = [];
-    if (config?.compactServiceCourt)
-      descriptors.push(config.compactServiceCourt);
-    if (config?.compactBankPavilion)
-      descriptors.push(config.compactBankPavilion);
+    const descriptors = getCompactServiceCourtDescriptors(config);
     if (!descriptors.length) {
       this.started = true;
       return;
     }
+    validateCompactServiceCourtBindings(
+      config?.compactServiceCourts,
+      DataManager.getInstance().getAllWorldAreas(),
+    );
     const { OPEN_WORKSHOP_POSTS, BANK_PAVILION_POSTS, createOpenWorkshop } =
       await import("@hyperforge/procgen/building");
     if (generation !== this.generation) return;
@@ -65,7 +68,7 @@ export class CompactServiceCourtSystem extends System {
       throw new Error("Compact service court requires authoritative terrain");
     try {
       for (const descriptor of descriptors) {
-        const isBank = descriptor.layoutId === "compact-bank-pavilion-v1";
+        const isBank = isCompactBankCourt(descriptor);
         const posts = isBank ? BANK_PAVILION_POSTS : OPEN_WORKSHOP_POSTS;
         const record = groundCompactServiceCourt(descriptor, posts, (x, z) =>
           terrain.getHeightAt(x, z),

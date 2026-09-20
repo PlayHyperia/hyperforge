@@ -12,6 +12,28 @@ visual, performance or production-readiness task.
 
 ## Texture-quality priority — shoreline repetition remains open
 
+## Plural service foundation — source checkpoint, not layout acceptance
+
+The opt-in `compactServiceCourts` contract now admits a bounded, ID-addressed
+set of bank/smithy pavilions. Actual owners, physics, visual leases and streaming
+readiness enumerate the same descriptors; a missing outlying bank fails bank
+readiness even when the primary is healthy. Station/NPC bindings are mandatory,
+and explicit primary-bank path selection preserves historical ground paint.
+Grass exclusion capacity is bounded at 64 polygons; this is not a cost approval.
+
+Post-recovery verification passes 66 owner/visual/path, 41 surface-snapshot,
+28 actual emitted-worker, one bank-event identity and 21 client-regression
+tests. Strict test-inclusive source typing, client typing and scoped lint/
+formatting pass. No new native browser or multi-agent performance acceptance
+is claimed. All 145 protected compiled artifacts remain unchanged.
+
+**LAYOUT-01–08 remain open.** No new layout is promoted: outlying journey/path
+design, shared-bank custody/retry/restart verification, natural inland pond,
+mines, trees, quest NPCs, dispersed altars and whole-island art remain to be
+implemented or qualified. Bank-event identity coverage is not a live network
+deposit/withdrawal proof. See `development-checkpoint-20260920.md` and local
+`service-layout-network01-UNQUALIFIED/` evidence for scope and recovery limits.
+
 ## Island layout requirements — 2026-09-20, all open
 
 These are required sub-gates of the world composition and verification tasks
