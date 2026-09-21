@@ -1,5 +1,78 @@
 # World graphics development checkpoint — 2026-09-20
 
+## Secondary pond bank, bank discovery and retained-ground alignment
+
+The pond capacity requirement remains seven fishing families / twelve fish,
+fourteen simultaneous anglers plus overflow, non-dock shore access at every
+tier, and two visually distinct procedural docks. Keep LAYOUT-01–08 open.
+
+Fixed a reproduced nearest-bank discovery bug in agent deposit-all: a bank
+selected during the search no longer filters out later, nearer banks. Only an
+explicit requested ID filters discovery. The real World/player/BankEntity/
+inventory/PostgreSQL regression fails before and passes after; final 16/16
+custody cases pass. It proves shared player balance across two physical bank
+fixtures, withdrawal, exact-ID/range rejection and replay without a second debit.
+It is not final-layout transport, concurrency or restart acceptance. Existing
+agent-bank regressions pass 43/43. Legacy in-memory banking/event consumers
+remain a single-authority audit gap.
+
+The candidate fixture adds a second bank court at (384,438), chest (382,436),
+clerk (386,440), informed by fifteen actual-owner site probes. Detached assets-v6
+includes its registered clerk; v5's missing NPC catalogue entry is corrected
+and its failed evidence retained. No live/default manifest is promoted.
+
+The new station blend exposed a 27.541mm indexed-ground mismatch. Plural bank
+courts now reuse existing bounded collar refinement around loaded station pads;
+historical singular behavior, height rules, resolution and all caps stay intact.
+The witness drops to 0.000575mm; 6,561 bank-envelope probes stay within
+0.462349mm and 36 footing probes within 0.098293mm. The affected terrain leaf
+adds 1,144 vertices / 2,288 triangles / 91,520 geometry bytes. These are sampled
+geometry measurements, not sustained frame-performance approval.
+
+Real route evidence remains FAILED. V6-04 completes fourteen same-start bank
+comparisons: 457 total pond-bank ticks versus 1,473 town ticks. Two town returns
+fail and their pond comparisons are skipped. Final v6-05 records 28 journeys,
+24 complete and four failed town returns at the two known shore destinations;
+only twelve comparisons complete. A one-bank v4 control reproduces the bounded
+search failure too. Exact movement can stop after a 250-iteration partial search
+despite an available destination. All seven non-dock witnesses pass, but this
+is not complete 64-leg acceptance. A separate crowded relocation leaves an
+angler enclosed by water and occupied cardinal tiles. Do not increase budgets,
+allow illegal diagonal corner cuts, teleport or hide failures with later passes.
+
+Native30 fails the original 30-second overview grass-transition gate.
+Native31/32 capture the actual outpost at matched camera placement, unchanged
+1280×720 Chrome/Metal quality. Arrival settling takes 11.78s / 9.56s respectively,
+but native32 fails the original 90-second startup gate and is art-inspection
+only. Both views are rejected for final art: excessive grass in the court,
+missing worn arrival/connector and a repeated town-bank silhouette.
+No AAA, sustained performance or streaming acceptance is claimed.
+
+Final gates: canonical server 68 passed / two intentional candidate skips;
+stock shared geometry/profile/water 78 passed / three candidate skips;
+focused v6 retained surface 2/2; historical singular/shoulder/seam controls 3/3.
+Shared typing covers 732 roots and server typing 3,954 program sources, zero
+diagnostics and stable pins. Banking's focused type check also passes. Scoped
+lint/formatting and independent review pass. Earlier fixture/import/hash errors
+and incompatible whole-overlay attempts remain recorded, not counted as passes.
+
+Build15/16 each emit eight isolated bundles from 973 stable production inputs.
+All 145 protected artifacts remain intact. Private runtimes 16–19 and browsers
+30–32 are closed, with owned ephemeral databases removed; human localhost and
+its database remain untouched. No shader, density or quality-budget reduction.
+
+Next: retain/resume bounded detour search; preserve crowd escape space and
+coordinate yielding; compose the outpost arrival/planting/character; qualify
+bank authority/transport and whole-layout routes, then startup and native art/
+sustained performance. Do not promote the candidate before these gates pass.
+
+Evidence: service-layout two-bank-custody-before02/after01/regression01/types02;
+pond-outlying-bank-sites03; pond-secondary-bank-candidate-v6-04/05,
+regression02/types02/format04/lint03; bank-collar-before01,
+stock-regression02/v6-actual-final01/singular52-final01/types-final01/
+eslint-final01; inland pond assets-v5/v6, build15/16, runtime16–19, native30–32.
+
+
 ## Ground-item boundaries, PostgreSQL custody and pond-bank journeys
 
 Fixed a reproduced historical tile-snap boundary defect: a source requested

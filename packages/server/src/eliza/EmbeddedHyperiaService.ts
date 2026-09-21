@@ -3898,7 +3898,7 @@ export class EmbeddedHyperiaService implements IEmbeddedHyperiaService {
       ) {
         continue;
       }
-      if (bankId && id !== bankId) continue;
+      if (requestedExactBankId && id !== requestedExactBankId) continue;
       const pos = this.getEntityPosition(entity);
       if (!pos) continue;
       const dist = Math.max(

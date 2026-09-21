@@ -38,6 +38,7 @@ import { createCompactPondDressing } from "./CompactPondDressing";
 import {
   createCompactServicePlanting,
   createCompactServiceSoil,
+  isCompactBankCourt,
 } from "./CompactServiceCourt";
 import { createCompactLandscapeRockFootprints } from "./CompactLandscapeRockFootprints";
 import { CompactPondDressingVisuals } from "./CompactPondDressingVisuals";
@@ -2669,7 +2670,21 @@ export class TerrainSystem extends System {
       // before manifest loading, and floor owners can later be replaced.
       get surfaceRefinementZones() {
         if (!terrain.getWorldTerrainProfile().southernMeadow) return undefined;
-        return [...terrain.arenaFloorZoneIds].map((id) => {
+        const ids = [...terrain.arenaFloorZoneIds];
+        // Plural bank courts bind existing station pads, not a new height
+        // field. Their max-axis blend corners need the same explicit crease
+        // partitions as arena floors. Only publish loaded canonical owners;
+        // this adapter can exist before manifest loading. Historical singular
+        // courts keep the original arena-only geometry byte-for-byte.
+        for (const court of DataManager.getWorldConfig()?.compactServiceCourts
+          ?.courts ?? []) {
+          if (!isCompactBankCourt(court)) continue;
+          for (const stationId of court.stationIds) {
+            const id = `station_${stationId}`;
+            if (terrain.flatZones.has(id)) ids.push(id);
+          }
+        }
+        return ids.map((id) => {
           const zone = terrain.flatZones.get(id);
           if (!zone) throw new Error("Missing owned terrain refinement floor");
           return {

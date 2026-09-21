@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import THREE from "../../../../extras/three/three";
 import { World } from "../../../../core/World";
 import { DataManager } from "../../../../data/DataManager";
+import { BANK_PAVILION_POSTS } from "@hyperforge/procgen/building";
 import { TerrainSystem } from "../TerrainSystem";
 
 import { BiomeType } from "../TerrainBiomeTypes";
@@ -93,6 +94,259 @@ class AnalyticTerrain implements FullTerrainProvider {
 }
 
 const plane: HeightField = (x, z) => 22 + x * 0.75 - z * 0.25;
+
+describe("bound plural bank station collar refinement", () => {
+  it.skipIf(!!DataManager.getWorldConfig()?.compactServiceCourts)(
+    "preserves exact historical singular floor descriptors and assembled buffers",
+    async () => {
+      await DataManager.getInstance().initialize();
+      const world = new World();
+      const terrain = world.register("terrain", TerrainSystem) as TerrainSystem;
+      const geometries: THREE.BufferGeometry[] = [];
+      try {
+        await terrain.init();
+        terrain["loadFlatZonesFromManifest"]();
+        const actual = terrain["buildChunkTerrainProvider"]();
+        const floors = terrain.getWorldTerrainProfile().southernMeadow
+          ? [...terrain["arenaFloorZoneIds"]].map((id) => {
+              const zone = terrain["flatZones"].get(id)!;
+              return {
+                minX: zone.centerX - zone.width / 2,
+                maxX: zone.centerX + zone.width / 2,
+                minZ: zone.centerZ - zone.depth / 2,
+                maxZ: zone.centerZ + zone.depth / 2,
+                blendRadius: zone.blendRadius,
+              };
+            })
+          : undefined;
+        expect(actual.surfaceRefinementZones).toEqual(floors);
+        const legacy = { ...actual, surfaceRefinementZones: floors };
+        const results = [actual, legacy].map((provider) => {
+          const geometry = assembleQuadChunkGeometry(
+            generateQuadChunkDataSync(350, 350, 100, 128, provider),
+            provider,
+            3,
+          ).geometry;
+          geometries.push(geometry);
+          const hash = createHash("sha256");
+          for (const [name, attribute] of Object.entries(geometry.attributes)) {
+            hash.update(name);
+            hash.update(
+              new Uint8Array(
+                attribute.array.buffer,
+                attribute.array.byteOffset,
+                attribute.array.byteLength,
+              ),
+            );
+          }
+          const index = geometry.index!.array;
+          hash.update(
+            new Uint8Array(index.buffer, index.byteOffset, index.byteLength),
+          );
+          hash.update(
+            JSON.stringify(geometry.userData.terrainCellTopology ?? null),
+          );
+          return hash.digest("hex");
+        });
+        expect(results[0]).toBe(results[1]);
+        process.stdout.write(
+          `Historical singular collar buffers ${JSON.stringify({ sha256: results[0], floors })}\n`,
+        );
+      } finally {
+        geometries.forEach((geometry) => geometry.dispose());
+        await world.destroy();
+      }
+    },
+  );
+
+  it.skipIf(
+    !DataManager.getWorldConfig()?.compactServiceCourts?.courts.some(
+      (court) => court.layoutId === "haven-pond-bank-v1",
+    ),
+  )(
+    "conforms the actual outlying bank envelope and feet without changing its canonical grade",
+    async () => {
+      await DataManager.getInstance().initialize();
+      const world = new World();
+      const terrain = world.register("terrain", TerrainSystem) as TerrainSystem;
+      const geometries: THREE.BufferGeometry[] = [];
+      try {
+        await terrain.init();
+        terrain["loadFlatZonesFromManifest"]();
+        const court =
+          DataManager.getWorldConfig()!.compactServiceCourts!.courts.find(
+            (row) => row.layoutId === "haven-pond-bank-v1",
+          )!;
+        expect(court.position).toEqual({ x: 384, z: 438 });
+        const zone = terrain["flatZones"].get("station_bank_haven_pond")!;
+        expect(zone).toBeDefined();
+        const actual = terrain["buildChunkTerrainProvider"]();
+        const historical: FullTerrainProvider = {
+          ...actual,
+          surfaceRefinementZones: [...terrain["arenaFloorZoneIds"]].map(
+            (id) => {
+              const floor = terrain["flatZones"].get(id)!;
+              return {
+                minX: floor.centerX - floor.width / 2,
+                maxX: floor.centerX + floor.width / 2,
+                minZ: floor.centerZ - floor.depth / 2,
+                maxZ: floor.centerZ + floor.depth / 2,
+                blendRadius: floor.blendRadius,
+              };
+            },
+          ),
+        };
+        const assemble = (provider: FullTerrainProvider) => {
+          const worker = generateQuadChunkDataSync(
+            350,
+            450,
+            100,
+            128,
+            provider,
+          );
+          const originalHeights = worker.heightData.slice();
+          const geometry = assembleQuadChunkGeometry(
+            worker,
+            provider,
+            3,
+          ).geometry;
+          geometries.push(geometry);
+          expect(worker.heightData).toEqual(originalHeights);
+          const surface = new RetainedTerrainSurface(
+            1,
+            provider.terrainProfileIdentity,
+            350,
+            450,
+            100,
+            128,
+            geometry,
+          );
+          const topology = geometry.userData.terrainCellTopology as {
+            surfaceVertexCount: number;
+            cellIndexOffsets: readonly number[];
+          };
+          let maxCellFaces = 0;
+          for (let i = 1; i < topology.cellIndexOffsets.length; i++)
+            maxCellFaces = Math.max(
+              maxCellFaces,
+              (topology.cellIndexOffsets[i] -
+                topology.cellIndexOffsets[i - 1]) /
+                3,
+            );
+          expect(topology.surfaceVertexCount - 128 * 128).toBeLessThanOrEqual(
+            65536,
+          );
+          expect(topology.surfaceVertexCount).toBeLessThanOrEqual(131072);
+          expect(maxCellFaces).toBeLessThanOrEqual(512);
+          expect(
+            topology.cellIndexOffsets[topology.cellIndexOffsets.length - 1] / 3,
+          ).toBeLessThanOrEqual(1000000);
+          return {
+            geometry,
+            surface,
+            metrics: {
+              vertices: geometry.getAttribute("position").count,
+              triangles: geometry.index!.count / 3,
+              bytes: Object.values(geometry.attributes).reduce(
+                (total, attribute) => total + attribute.array.byteLength,
+                geometry.index!.array.byteLength,
+              ),
+              surfaceVertices: topology.surfaceVertexCount,
+              maxCellFaces,
+            },
+          };
+        };
+        const before = assemble(historical),
+          after = assemble(actual);
+        const out = { height: 0, nx: 0, ny: 1, nz: 0, faceIndex: 0 };
+        const indexed = (
+          surface: RetainedTerrainSurface,
+          x: number,
+          z: number,
+        ) => {
+          expect(surface.sample(x - 350, z - 450, out)).toBe(true);
+          expect(
+            [out.height, out.nx, out.ny, out.nz].every(Number.isFinite),
+          ).toBe(true);
+          return out.height;
+        };
+        const witness = { x: 385.5, z: 439.5 };
+        const canonical = terrain.getResourceGroundHeight(witness.x, witness.z);
+        const oldHeight = indexed(before.surface, witness.x, witness.z);
+        const newHeight = indexed(after.surface, witness.x, witness.z);
+        // Exact actual-assets witness retained as a negative control, not an
+        // analytic stand-in or a relaxed contact threshold.
+        expect(canonical).toBeCloseTo(25.7179368946, 8);
+        expect(oldHeight).toBeCloseTo(25.6903957105, 8);
+        expect(Math.abs(oldHeight - canonical)).toBeGreaterThan(0.02);
+        let probes = 0,
+          maximumError = 0,
+          maximumFootError = 0;
+        for (let ix = -40; ix <= 40; ix++)
+          for (let iz = -40; iz <= 40; iz++) {
+            const x = court.position.x + ix / 8,
+              z = court.position.z + iz / 8;
+            maximumError = Math.max(
+              maximumError,
+              Math.abs(
+                indexed(after.surface, x, z) -
+                  terrain.getResourceGroundHeight(x, z),
+              ),
+            );
+            probes++;
+          }
+        for (const { x: dx, z: dz } of BANK_PAVILION_POSTS)
+          for (const sx of [-0.15, 0, 0.15])
+            for (const sz of [-0.15, 0, 0.15]) {
+              const x = court.position.x + dx + sx,
+                z = court.position.z + dz + sz;
+              maximumFootError = Math.max(
+                maximumFootError,
+                Math.abs(
+                  indexed(after.surface, x, z) -
+                    terrain.getResourceGroundHeight(x, z),
+                ),
+              );
+            }
+        process.stdout.write(
+          `Bound bank collar ${JSON.stringify({
+            zone,
+            witness: {
+              ...witness,
+              canonical,
+              oldHeight,
+              newHeight,
+            },
+            probes,
+            maximumError,
+            maximumFootError,
+            before: before.metrics,
+            after: after.metrics,
+            triangleDelta: after.metrics.triangles - before.metrics.triangles,
+            byteDelta: after.metrics.bytes - before.metrics.bytes,
+            nativeOrPerformanceAcceptance: false,
+          })}\n`,
+        );
+        expect(Math.abs(newHeight - canonical)).toBeLessThanOrEqual(0.02);
+        expect(maximumError).toBeLessThanOrEqual(0.02);
+        expect(maximumFootError).toBeLessThanOrEqual(0.02);
+        expect(after.metrics.triangles).toBeGreaterThan(
+          before.metrics.triangles,
+        );
+        expect(actual.surfaceRefinementZones).toContainEqual({
+          minX: zone.centerX - zone.width / 2,
+          maxX: zone.centerX + zone.width / 2,
+          minZ: zone.centerZ - zone.depth / 2,
+          maxZ: zone.centerZ + zone.depth / 2,
+          blendRadius: zone.blendRadius,
+        });
+      } finally {
+        geometries.forEach((geometry) => geometry.dispose());
+        await world.destroy();
+      }
+    },
+  );
+});
 
 describe("world-anchored annular pond surface refinement", () => {
   // Real authored-height operations, real assembler and retained indexed-triangle

@@ -608,6 +608,100 @@ service-layout pond-bank-routes-candidate-v4-01–05 and
 pond-bank-routes-types01. Initial PhysX-loader/root and fixture occupancy/
 entity-removal failures are retained; they are not gameplay acceptance.
 
+### Secondary pond bank — candidate integration, not layout approval
+
+The checked-in basin study now places a second open banking court at (384,438),
+with chest (382,436) and clerk (386,440), on the southwest turf shoulder.
+Fifteen actual-owner site probes informed selection; the chosen pre-station
+10m roof envelope had 0.4132m sampled relief, supported feet and no observed
+water, protected-floor, dock, resource or static-collision conflict. It is not
+a new whole-court terrain pad. Detached assets-v6 replaces singular service
+architecture with three explicitly bound courts while preserving the primary
+bank and smithy coordinates. V5 is rejected: its clerk was absent from the NPC
+catalogue. V6 includes the real bank-clerk definition and actual server spawn.
+
+Nearest-bank discovery had a reproduced production bug: deposit-all selected
+the first bank and then treated that mutable selection as an explicit filter.
+Only an actual requested bank ID now filters discovery. The unchanged real
+World/player/inventory/BankEntity/PostgreSQL regression fails before and passes
+after the fix; all 16 PostgreSQL cases pass. The test deposits at a real second
+bank fixture, reads/withdraws the same player balance in town, preserves exact
+ID and range rejection, and proves replay without a second debit. This is not
+a final-layout socket/crowd/restart test. Existing agent-bank regressions pass
+43/43. Legacy in-memory BankingSystem/NPC event actions remain an independent
+single-authority audit gap; do not infer their retirement from this result.
+
+The outlying station's existing square blend exposed a retained-mesh mismatch:
+at (385.5,439.5), canonical and indexed heights differed by 27.541mm.
+Opt-in plural bank stations now reuse the bounded feature-aligned collar
+partitions. No height rule, global grid, resolution, geometry cap or quality
+setting changes. Focused actual-source proof reduces the witness to 0.000575mm;
+6,561 envelope probes stay within 0.462349mm and all 36 footing probes within
+0.098293mm. The actual affected 128-grid leaf adds 1,144 vertices, 2,288
+triangles and 91,520 geometry bytes; its maximum per-cell triangle count and
+all geometry caps are unchanged. This is sampled geometry, not frame approval.
+
+Native30 admits two real banks and three rendered courts, but fails the original
+30-second overview grass-transition gate. Native31 captures the outpost on
+Chrome/Metal with the unchanged 1280×720 profile and an 11.78-second arrival
+transition. The view is rejected for final art: tall grass crowds the interior,
+there is no composed worn connector/arrival, and the outpost repeats the town
+bank silhouette. No finished world, smoothness, stream or performance claim.
+Native32 repeats the same outpost camera with the refined build16; its arrival
+settles in 9.56 seconds, but the original 90-second startup gate fails. The
+existing post-failure art-only inspection retains that failure. Native31/32
+are matched placement views, not deterministic pixel comparisons (wind and
+world actors remain live). Both owned browsers and private runtimes are closed.
+
+The route expansion also exposes an unresolved real return failure:
+(418.5,432.5) to town succeeds, but returning can stop at (394.5,408.5).
+The final search reports 250 iterations, a partial result and an available
+destination, yet exact movement is abandoned. V6-04 records fourteen
+complete same-start comparisons: pond-bank round trips take 16–66 ticks versus
+78–134 for town, saving 29–102 ticks per pair. Two town returns fail; their
+secondary comparisons are skipped without teleporting. The one-bank v4 control
+also reproduces two 250-iteration partial-return failures, so this is not unique
+to the second bank. This is not 64-leg acceptance. All seven non-dock fishing
+witnesses pass. Final v6-05 reproduces both failing return destinations
+(418.5,432.5) and (422.5,430.5): 28 journeys are recorded, 24 complete and four
+town returns fail; their four secondary comparisons are not attempted. Twelve
+same-start comparisons complete. The different random resource assignment does
+not erase either failure or qualify the full route matrix.
+
+The crowded relocation failure is now attributable: a fisher at (391.5,425.5)
+is boxed in by water and two occupied cardinal tiles after the fish moves to
+(391.5,418.5). The only dry diagonal cannot legally pass those occupied corners;
+movement rejects after one search iteration. Capacity needs safe circulation
+and coordinated yielding, not extra pathfinding budget or illegal corner cuts.
+Both failures remain blocking even if subsequent randomized runs pass.
+
+- [ ] Preserve/resume bounded detour search correctly; distinguish unfinished
+      frontier from exhausted search without increasing per-search/tick budgets.
+- [ ] Preserve escape/circulation space and prove coordinated yielding plus
+      relocation recovery under crowd occupancy; retain repeat arrangements.
+- [ ] Compose an asymmetric worn arrival/connector, restrained planting and
+      distinct outpost character; retain free off-path access and fish habitat.
+- [ ] Close banking authority, authenticated transport, restart/concurrency and
+      whole-layout route gates, then matched native art and sustained performance.
+
+Final canonical verification: server regressions 68 passed / two intentional
+candidate skips; shared geometry/profile/water suites 78 passed / three
+candidate skips. Focused v6 retained-surface cases pass 2/2; historical singular,
+paired-shoulder and seam controls pass 3/3 with exact-buffer checks. Shared
+source-aware typing covers 732 roots and server typing 3,954 program sources,
+both with zero diagnostics and stable source pins; scoped lint/format pass.
+The attempted whole v6 overlay suite had incompatible historical fixtures;
+that failed receipt remains and is not presented as a full candidate pass.
+
+Keep LAYOUT-01–08 open. Evidence: service-layout pond-outlying-bank-sites03,
+two-bank-custody-before02/after01/types02/regression01,
+pond-secondary-bank-candidate-v5-01 and v6-01–05,
+pond-secondary-bank-regression02/types02/format04/lint03,
+bank-collar-before01/after01/stock-regression02/v6-actual-final01/
+singular52-final01/types-final01/eslint-final01;
+inland pond assets-v5/v6, build15/16, runtime16–19 and native30–32.
+Failed receipts are retained; the human localhost and its database are untouched.
+
 ### Inland fishing integration — candidate only
 
 The detached candidate now requests 14 real fishing entities, two for each of

@@ -46,6 +46,21 @@ import {
   getDuelArenaProtectionBounds,
   isPositionInsideDuelArenaZone,
 } from "../../../../../shared/src/data/duel-manifest";
+import { BANK_PAVILION_POSTS } from "../../../../../procgen/src/building/generator/OpenWorkshop";
+import { groundCompactServiceCourt } from "../../../../../shared/src/systems/shared/world/CompactServiceCourt";
+import {
+  createCompactPondDressing,
+  COMPACT_POND_MODELS,
+} from "../../../../../shared/src/systems/shared/world/CompactPondDressing";
+import { getCompactPondDockSupportBounds } from "../../../../../shared/src/systems/shared/world/DockDefinition";
+import { BankEntity } from "../../../../../shared/src/entities/world/BankEntity";
+import {
+  assembleQuadChunkGeometry,
+  generateQuadChunkDataSync,
+} from "../../../../../shared/src/systems/shared/world/TerrainQuadChunkGenerator";
+import { RetainedTerrainSurface } from "../../../../../shared/src/systems/shared/world/TerrainGridSurface";
+import { TerrainQuadTree } from "../../../../../shared/src/systems/shared/world/TerrainQuadTree";
+import { createCompactPreparationDetailRegions } from "../../../../../shared/src/systems/shared/world/CompactIslandDetail";
 
 class CpuServerWorld extends World {
   override get isServer(): boolean {
@@ -828,14 +843,56 @@ describe.runIf(process.env.HYPERIA_FISHING_CAPACITY === "1")(
             movedResource.id,
           ),
         ).toBe(false);
-        expect(
-          f.pending.queuePendingGather(
-            actor.player.id,
-            movedResource.id,
-            f.world.currentTick,
-            true,
-          ),
-        ).toBe(true);
+        const approach = f.pending["findFishingApproach"](
+          actor.player.id,
+          movedResource.position,
+        );
+        const accepted = f.pending.queuePendingGather(
+          actor.player.id,
+          movedResource.id,
+          f.world.currentTick,
+          true,
+        );
+        if (!accepted) {
+          const stencil = (center: { x: number; z: number }) =>
+            [-1, 0, 1].flatMap((dx) =>
+              [-1, 0, 1].map((dz) => {
+                const tile = { x: center.x + dx, z: center.z + dz };
+                return {
+                  ...tile,
+                  flags: f.world.collision.getFlags(tile.x, tile.z),
+                  available: f.movement.isTileAvailableForPlayer(
+                    actor.player.id,
+                    tile,
+                  ),
+                };
+              }),
+            );
+          console.log(
+            JSON.stringify({
+              phase: "pond-fishing-relocation-admission-failed",
+              oldPosition,
+              newPosition: { ...movedResource.position },
+              resourceId: movedResource.id,
+              playerId: actor.player.id,
+              playerPosition: actor.player.position.toArray(),
+              approach,
+              accepted,
+              pending: f.pending["pendingGathers"].get(actor.player.id) ?? null,
+              movement: f.movement.getPlayerMovementDebug(actor.player.id),
+              iterations: f.movement["pathfinder"].getLastIterationsUsed(),
+              partial: f.movement["pathfinder"].wasLastPathPartial(),
+              failedExact: approach
+                ? f.movement.hasFailedMovementTo(actor.player.id, approach)
+                : null,
+              startStencil: stencil(
+                worldToTile(actor.player.position.x, actor.player.position.z),
+              ),
+              approachStencil: approach ? stencil(approach) : null,
+            }),
+          );
+        }
+        expect(accepted, `Relocation requeue ${actor.player.id}`).toBe(true);
       }
       const relocationStart = f.world.currentTick;
       for (
@@ -908,23 +965,30 @@ describe.runIf(process.env.HYPERIA_POND_BANK_ROUTES === "1")(
         "facility-floors-v1",
       );
       expect(config.compactPondDocks?.docks).toHaveLength(2);
-      expect(f.bankStations).toHaveLength(1);
+      const outlyingCourt = config.compactServiceCourts?.courts.find(
+        (court) => court.layoutId === "haven-pond-bank-v1",
+      );
+      expect(f.bankStations).toHaveLength(outlyingCourt ? 2 : 1);
       expect(f.generatedRouteTiles).toHaveLength(4);
       expect(f.generatedRouteTiles.every((tile) => tile.contentGenerated)).toBe(
         true,
       );
-      const station = f.bankStations[0];
-      const bankId = `station_${station.id}`;
-      const bank = f.world.entities.get(bankId)!;
-      expect(bank?.data.type).toBe("bank");
-      expect(bank.position.x).toBe(station.position.x);
-      expect(bank.position.z).toBe(station.position.z);
+      const banks = f.bankStations.map((station) => {
+        const bankId = `station_${station.id}`,
+          bank = f.world.entities.get(bankId)!;
+        expect(bank).toBeInstanceOf(BankEntity);
+        expect(bank.position.x).toBe(station.position.x);
+        expect(bank.position.z).toBe(station.position.z);
+        return { bankId, bank };
+      });
       expect(owners.docks.getCompactDiagnostics()).toHaveLength(2);
       for (const dock of owners.docks.getCompactDiagnostics()) {
         expect(dock.tiles).toBe(24);
         expect(dock.physicsActor && dock.physicsShape).toBe(true);
       }
-      expect(owners.courts.getAllDiagnostics()).toHaveLength(2);
+      expect(owners.courts.getAllDiagnostics()).toHaveLength(
+        outlyingCourt ? 3 : 2,
+      );
       expect(
         owners.courts.getAllDiagnostics().every((court) => court.physicsActor),
       ).toBe(true);
@@ -947,6 +1011,207 @@ describe.runIf(process.env.HYPERIA_POND_BANK_ROUTES === "1")(
           .getAllResources()
           .some((resource) => resource.type === "tree"),
       ).toBe(true);
+
+      let outlyingSupport: Record<string, unknown> | null = null;
+      if (outlyingCourt) {
+        const { x, z } = outlyingCourt.position;
+        const record = owners.courts
+          .getCourts()
+          .find(
+            (court) => court.descriptor.layoutId === outlyingCourt.layoutId,
+          )!;
+        expect(record).toBeDefined();
+        const bank = f.world.entities.get(
+          `station_${outlyingCourt.stationIds[0]}`,
+        );
+        if (!(bank instanceof BankEntity))
+          throw new Error("Outlying court lost its actual bank owner");
+        const allowedBlocked = new Set(
+          [...record.blockingTiles, ...bank["collisionTiles"]].map(
+            (tile) => `${tile.x},${tile.z}`,
+          ),
+        );
+        const canonical = groundCompactServiceCourt(
+          outlyingCourt,
+          BANK_PAVILION_POSTS,
+          (a, b) => f.terrain.getResourceGroundHeight(a, b),
+        );
+        const provider = f.terrain["buildChunkTerrainProvider"]();
+        const terrainConfig = f.terrain["CONFIG"];
+        const tree = new TerrainQuadTree({
+          minSize: terrainConfig.QUADTREE_MIN_SIZE,
+          maxDepth: terrainConfig.QUADTREE_MAX_DEPTH,
+          splitRatio: terrainConfig.QUADTREE_SPLIT_RATIO,
+          unsplitMultiplier: terrainConfig.QUADTREE_UNSPLIT_MULTIPLIER,
+          resolution: terrainConfig.QUADTREE_RESOLUTION,
+          fineDetailRegions: createCompactPreparationDetailRegions(
+            f.terrain.getWorldTerrainProfile(),
+            ALL_WORLD_AREAS,
+            terrainConfig.QUADTREE_RESOLUTION,
+          ),
+          rootChunkRadius: 0,
+        });
+        let leaf: {
+          centerX: number;
+          centerZ: number;
+          size: number;
+          resolution: number;
+        };
+        try {
+          tree.update(x, z);
+          const node = tree
+            .getFinalNodes()
+            .find(
+              (candidate) =>
+                Math.abs(candidate.centerX - x) < candidate.size / 2 &&
+                Math.abs(candidate.centerZ - z) < candidate.size / 2,
+            );
+          if (!node)
+            throw new Error("Outlying bank has no actual terrain leaf");
+          leaf = {
+            centerX: node.centerX,
+            centerZ: node.centerZ,
+            size: node.size,
+            resolution: node.resolution,
+          };
+        } finally {
+          tree.dispose();
+        }
+        const { centerX, centerZ, size, resolution } = leaf;
+        const geometry = assembleQuadChunkGeometry(
+          generateQuadChunkDataSync(
+            centerX,
+            centerZ,
+            size,
+            resolution,
+            provider,
+          ),
+          provider,
+          terrainConfig.QUADTREE_SKIRT_DROP,
+        ).geometry;
+        try {
+          const retained = new RetainedTerrainSurface(
+            1,
+            provider.terrainProfileIdentity,
+            centerX,
+            centerZ,
+            size,
+            resolution,
+            geometry,
+          );
+          const out = { height: 0, nx: 0, ny: 1, nz: 0, faceIndex: 0 };
+          const sample = (a: number, b: number) => {
+            expect(retained.sample(a - centerX, b - centerZ, out)).toBe(true);
+            return out.height;
+          };
+          const rendered = groundCompactServiceCourt(
+            outlyingCourt,
+            BANK_PAVILION_POSTS,
+            sample,
+          );
+          let samples = 0,
+            maximumHeightError = 0,
+            wet = 0;
+          let maximumHeightWitness: Record<string, number> | null = null;
+          const unexpectedBlocked = new Set<string>();
+          for (let a = x - 5; a <= x + 5; a += 0.25)
+            for (let b = z - 5; b <= z + 5; b += 0.25) {
+              const height = f.terrain.getResourceGroundHeight(a, b);
+              const renderedHeight = sample(a, b);
+              const error = Math.abs(renderedHeight - height);
+              if (error > maximumHeightError) {
+                maximumHeightError = error;
+                maximumHeightWitness = {
+                  x: a,
+                  z: b,
+                  canonical: height,
+                  retained: renderedHeight,
+                  error,
+                };
+              }
+              const water = f.terrain.getWaterBodyRegistry().getBodyAt(a, b);
+              if (water && height <= water.surfaceY) wet++;
+              const tx = Math.floor(a),
+                tz = Math.floor(b),
+                key = `${tx},${tz}`;
+              if (
+                f.world.collision.hasFlags(
+                  tx,
+                  tz,
+                  CollisionFlag.BLOCKED |
+                    CollisionFlag.WATER |
+                    CollisionFlag.STEEP_SLOPE,
+                ) &&
+                !allowedBlocked.has(key)
+              )
+                unexpectedBlocked.add(key);
+              samples++;
+            }
+          expect
+            .soft(maximumHeightError, JSON.stringify(maximumHeightWitness))
+            .toBeLessThanOrEqual(0.02);
+          expect(wet).toBe(0);
+          expect([...unexpectedBlocked]).toEqual([]);
+          expect(
+            Math.abs(record.position.y - canonical.position.y),
+          ).toBeLessThanOrEqual(0.02);
+          expect(
+            Math.abs(rendered.position.y - canonical.position.y),
+          ).toBeLessThanOrEqual(0.02);
+          for (const bounds of [
+            ...getDuelArenaProtectionBounds(),
+            ...config.compactPondDocks!.docks.map(
+              getCompactPondDockSupportBounds,
+            ),
+          ])
+            expect(
+              compactPathIntersectsBounds({ x, z }, { x, z }, bounds, 5),
+            ).toBe(false);
+          const habitat = createCompactPondDressing(
+            f.terrain.getWorldTerrainProfile(),
+            ALL_WORLD_AREAS,
+            (a, b) => f.terrain.getResourceGroundHeight(a, b),
+            config.compactPondDocks,
+          );
+          for (const plant of habitat) {
+            const radius =
+              COMPACT_POND_MODELS[plant.model].radius * plant.scale;
+            expect(
+              Math.abs(plant.x - x) > 5 + radius ||
+                Math.abs(plant.z - z) > 5 + radius,
+            ).toBe(true);
+          }
+          const entries = [
+            { x: x - 5, z },
+            { x: x + 5, z },
+            { x, z: z - 5 },
+            { x, z: z + 5 },
+          ];
+          for (const entry of entries)
+            expect(
+              f.movement.isTileAvailableForPlayer(
+                "pond-bank-entry-probe",
+                worldToTile(entry.x, entry.z),
+              ),
+            ).toBe(true);
+          outlyingSupport = {
+            layoutId: outlyingCourt.layoutId,
+            leaf,
+            samples,
+            maximumHeightError,
+            maximumHeightWitness,
+            wet,
+            unexpectedBlocked: [...unexpectedBlocked],
+            entries,
+            canonicalFeet: canonical.feet,
+            retainedFeet: rendered.feet,
+            retainedVertices: geometry.getAttribute("position").count,
+            retainedTriangles: geometry.index!.count / 3,
+          };
+        } finally {
+          geometry.dispose();
+        }
+      }
 
       const protection = getDuelArenaProtectionBounds();
       const pondPaths = owners.roads
@@ -1007,6 +1272,7 @@ describe.runIf(process.env.HYPERIA_POND_BANK_ROUTES === "1")(
 
       const journeys: Array<{
         origin: string;
+        bankId: string;
         start: number[];
         bank: number[];
         end: number[];
@@ -1047,7 +1313,14 @@ describe.runIf(process.env.HYPERIA_POND_BANK_ROUTES === "1")(
           const tile = worldToTile(player.position.x, player.position.z);
           return tile.x === destination.x && tile.z === destination.z;
         };
+        let precedingPath: Record<string, unknown> | null = null;
         for (; ticks < 256 && !arrived(); ticks++) {
+          const state = f.movement["playerStates"].get(player.id);
+          precedingPath = {
+            ...f.movement.getPlayerMovementDebug(player.id),
+            lastPathPartial: state?.lastPathPartial ?? null,
+            pathEnd: state?.path.at(-1) ? { ...state.path.at(-1)! } : null,
+          };
           f.world.currentTick++;
           f.movement.onTick(f.world.currentTick);
           const tile = worldToTile(player.position.x, player.position.z);
@@ -1084,6 +1357,25 @@ describe.runIf(process.env.HYPERIA_POND_BANK_ROUTES === "1")(
           ticks,
           protectedTiles: [...protectedTiles],
           blockedTiles: [...blockedTiles],
+          failure: arrived()
+            ? null
+            : {
+                playerId: player.id,
+                position: player.position.toArray(),
+                destination,
+                movement: f.movement.getPlayerMovementDebug(player.id),
+                precedingPath,
+                iterations: f.movement["pathfinder"].getLastIterationsUsed(),
+                partial: f.movement["pathfinder"].wasLastPathPartial(),
+                failedExact: f.movement.hasFailedMovementTo(
+                  player.id,
+                  destination,
+                ),
+                destinationAvailable: f.movement.isTileAvailableForPlayer(
+                  player.id,
+                  destination,
+                ),
+              },
         };
         expect
           .soft(
@@ -1108,53 +1400,69 @@ describe.runIf(process.env.HYPERIA_POND_BANK_ROUTES === "1")(
           isPositionInsideDuelArenaZone(start[0], start[2]),
           `${origin} preparation origin`,
         ).toBe(false);
-        const target = f.movement.findClosestWalkableTile(
-          bank.position,
-          2,
-          (tile) => {
-            const point = tileToWorld(tile);
-            return (
-              f.movement.isTileAvailableForPlayer(player.id, tile) &&
-              Math.max(
-                Math.abs(point.x - bank.position.x),
-                Math.abs(point.z - bank.position.z),
-              ) <= 2
-            );
-          },
-        );
-        expect(
-          target,
-          `No actual bank interaction tile from ${origin}`,
-        ).not.toBeNull();
-        const outbound = walk(player, tileToWorld(target!), `${origin}:bank`);
-        const bankPosition = player.position.toArray();
-        expect
-          .soft(
-            isPositionInsideDuelArenaZone(bankPosition[0], bankPosition[2]),
-            `${origin} bank destination`,
+        for (const { bank, bankId } of banks) {
+          expect.soft(player.position.toArray()).toEqual(start);
+          // Preserve a real failed return. Never teleport or compare another
+          // bank from a different starting point just to complete the receipt.
+          if (
+            !player.position
+              .toArray()
+              .every((value, index) => value === start[index])
           )
-          .toBe(false);
-        const bankAccess = validatePhysicalBankAccess(
-          f.world,
-          player.id,
-          bankId,
-        );
-        expect
-          .soft(bankAccess, `${origin} cannot access real bank entity`)
-          .toBeNull();
-        const inbound = walk(
-          player,
-          { x: start[0], z: start[2] },
-          `${origin}:return`,
-        );
-        journeys.push({
-          origin,
-          start,
-          bank: bankPosition,
-          end: player.position.toArray(),
-          legs: [outbound, inbound],
-          bankAccess,
-        });
+            break;
+          const target = f.movement.findClosestWalkableTile(
+            bank.position,
+            2,
+            (tile) => {
+              const point = tileToWorld(tile);
+              return (
+                f.movement.isTileAvailableForPlayer(player.id, tile) &&
+                Math.max(
+                  Math.abs(point.x - bank.position.x),
+                  Math.abs(point.z - bank.position.z),
+                ) <= 2
+              );
+            },
+          );
+          expect(
+            target,
+            `No actual bank interaction tile from ${origin}`,
+          ).not.toBeNull();
+          const outbound = walk(
+            player,
+            tileToWorld(target!),
+            `${origin}:${bankId}:bank`,
+          );
+          const bankPosition = player.position.toArray();
+          expect
+            .soft(
+              isPositionInsideDuelArenaZone(bankPosition[0], bankPosition[2]),
+              `${origin} bank destination`,
+            )
+            .toBe(false);
+          const bankAccess = validatePhysicalBankAccess(
+            f.world,
+            player.id,
+            bankId,
+          );
+          expect
+            .soft(bankAccess, `${origin} cannot access real bank entity`)
+            .toBeNull();
+          const inbound = walk(
+            player,
+            { x: start[0], z: start[2] },
+            `${origin}:${bankId}:return`,
+          );
+          journeys.push({
+            origin,
+            bankId,
+            start,
+            bank: bankPosition,
+            end: player.position.toArray(),
+            legs: [outbound, inbound],
+            bankAccess,
+          });
+        }
       };
       const retire = (player: PlayerEntity) => {
         f.pending.onPlayerDisconnect(player.id);
@@ -1209,7 +1517,7 @@ describe.runIf(process.env.HYPERIA_POND_BANK_ROUTES === "1")(
         retire(player);
       }
       expect(testedFamilies.size).toBe(7);
-      expect(journeys).toHaveLength(9);
+      expect.soft(journeys).toHaveLength(9 * banks.length);
       const nonDockWitnesses = [];
       for (const family of testedFamilies) {
         const id = `bank-route-nondock-${family}`;
@@ -1291,7 +1599,49 @@ describe.runIf(process.env.HYPERIA_POND_BANK_ROUTES === "1")(
       expect
         .soft(nonDockWitnesses.filter((witness) => witness.selectedResourceId))
         .toHaveLength(7);
-      expect.soft(journeys).toHaveLength(16);
+      expect.soft(journeys).toHaveLength(16 * banks.length);
+      const comparisons = outlyingCourt
+        ? [...new Set(journeys.map((journey) => journey.origin))].map(
+            (origin) => {
+              const primary = journeys.find(
+                (journey) =>
+                  journey.origin === origin &&
+                  journey.bankId === "station_bank_spawn",
+              );
+              const secondary = journeys.find(
+                (journey) =>
+                  journey.origin === origin &&
+                  journey.bankId === `station_${outlyingCourt.stationIds[0]}`,
+              );
+              if (
+                !primary ||
+                !secondary ||
+                [primary, secondary].some(
+                  (journey) =>
+                    journey.legs.some((leg) => !leg.reached) ||
+                    journey.bankAccess !== null,
+                )
+              )
+                return {
+                  origin,
+                  complete: false,
+                  availableBanks: [primary?.bankId, secondary?.bankId].filter(
+                    Boolean,
+                  ),
+                };
+              expect(primary.start).toEqual(secondary.start);
+              const ticks = (journey: (typeof journeys)[number]) =>
+                journey.legs.reduce((sum, leg) => sum + leg.ticks, 0);
+              return {
+                origin,
+                complete: true,
+                primaryTicks: ticks(primary),
+                secondaryTicks: ticks(secondary),
+                savedTicks: ticks(primary) - ticks(secondary),
+              };
+            },
+          )
+        : [];
       console.log(
         JSON.stringify({
           phase: "pond-bank-cpu-routes",
@@ -1306,6 +1656,8 @@ describe.runIf(process.env.HYPERIA_POND_BANK_ROUTES === "1")(
           manifestNpcCount: manifestNpcs.length,
           journeys,
           nonDockWitnesses,
+          outlyingSupport,
+          comparisons,
           excluded: [
             "bank deposit/withdraw persistence",
             "crowd throughput",

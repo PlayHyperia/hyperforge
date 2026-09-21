@@ -6,8 +6,10 @@ import { migrate } from "drizzle-orm/node-postgres/migrator";
 import {
   ALL_WORLD_AREAS,
   DataManager,
+  CharacterInventorySystem,
   GroundItemSystem,
   ITEMS,
+  PlayerEntity,
   TerrainSystem,
   World,
   ammunitionShotIdentityFromRequest,
@@ -42,6 +44,11 @@ import type {
 import { DatabaseSystem } from "../index.js";
 import { ZoneDetectionSystem } from "../../../../../shared/src/systems/shared/death/ZoneDetectionSystem.js";
 import { EntityManager } from "../../../../../shared/src/systems/shared/entities/EntityManager.js";
+import { EmbeddedHyperiaService } from "../../../eliza/EmbeddedHyperiaService.js";
+import {
+  EntityType,
+  InteractionType,
+} from "../../../../../shared/src/types/entities/index.js";
 
 const baseDatabaseUrl =
   process.env.GROUND_ITEM_PICKUP_TEST_DATABASE_URL?.trim() ||
@@ -2193,6 +2200,190 @@ describeCandidateDatabase(
           { itemId: "air_rune", quantity: 2, ...dropSource.position },
           { itemId: "bronze_arrow", quantity: 1, ...shotSource.position },
         ]);
+      }
+    });
+
+    it("selects a nearer second bank, preserves exact bank requests and shares one durable player balance", async () => {
+      await seedCustody();
+      const bankDefinition = Object.values(ALL_WORLD_AREAS)
+        .flatMap((area) => area.stations ?? [])
+        .find((station) => station.type === "bank");
+      expect(bankDefinition).toBeDefined();
+      const manager = owner.world.getSystem<EntityManager>("entity-manager")!;
+      const spawnBank = (id: string, point: { x: number; z: number }) =>
+        manager.spawnEntity({
+          id,
+          name: "Two-bank custody fixture",
+          type: EntityType.BANK,
+          position: {
+            ...point,
+            y: owner.terrain.getHeightAt(point.x, point.z) + 0.1,
+          },
+          rotation: { x: 0, y: 0, z: 0, w: 1 },
+          scale: { x: 1, y: 1, z: 1 },
+          visible: true,
+          interactable: true,
+          interactionType: InteractionType.BANK,
+          interactionDistance: 3,
+          description: "Two-bank custody fixture",
+          model: null,
+          properties: {
+            movementComponent: null,
+            combatComponent: null,
+            healthComponent: null,
+            visualComponent: null,
+            health: { current: 1, max: 1 },
+            level: 1,
+          },
+        });
+      // The first bank uses the admitted station identity/position. The second
+      // is an explicit real-entity fixture on dry admitted ground, not evidence
+      // approving a future outlying station placement or its navigation route.
+      const town = await spawnBank(
+        `station_${bankDefinition!.id}`,
+        bankDefinition!.position,
+      );
+      const outlying = await spawnBank(
+        "station_two_bank_custody_fixture",
+        safePoints.find((entry) => entry.areaId === "haven_pond")!.position,
+      );
+      expect(town).not.toBeNull();
+      expect(outlying).not.toBeNull();
+      const player = new PlayerEntity(owner.world, {
+        id: playerId,
+        name: "Two-bank player",
+        type: "player",
+        position: [
+          outlying!.position.x + 1,
+          outlying!.position.y,
+          outlying!.position.z,
+        ],
+        quaternion: [0, 0, 0, 1],
+      });
+      owner.world.entities.set(playerId, player);
+      const inventory = owner.world.register(
+        "inventory",
+        CharacterInventorySystem,
+      ) as CharacterInventorySystem;
+      await inventory.init();
+      await inventory.reloadFromDatabase(playerId);
+      expect(inventory.isInventoryReady(playerId)).toBe(true);
+      const service = new EmbeddedHyperiaService(
+        owner.world,
+        playerId,
+        accountId,
+        "Two-bank player",
+      );
+      expect(service.attachExistingPlayer()).toBe(true);
+      const snapshot = async () =>
+        (
+          await owner.pool.query(
+            `SELECT
+        (SELECT COALESCE(sum(quantity),0)::int FROM inventory WHERE "playerId" = $1 AND "itemId" = 'air_rune') AS inventory,
+        (SELECT COALESCE(sum(quantity),0)::int FROM bank_storage WHERE "playerId" = $1 AND "itemId" = 'air_rune') AS bank,
+        (SELECT count(*)::int FROM agent_bank_operations WHERE "playerId" = $1) AS operations`,
+            [playerId],
+          )
+        ).rows[0];
+      try {
+        expect(await snapshot()).toEqual({
+          inventory: 5,
+          bank: 0,
+          operations: 0,
+        });
+        const implicit = await service.executeBankDepositAll(randomUUID());
+        expect(implicit).toMatchObject({
+          success: true,
+          bankId: outlying!.id,
+          committedQuantity: 5,
+          replayed: false,
+        });
+        expect(await snapshot()).toEqual({
+          inventory: 0,
+          bank: 5,
+          operations: 1,
+        });
+        await expect(service.executeBankOpen(town!.id)).resolves.toMatchObject({
+          success: false,
+          bankId: town!.id,
+          failureReason: "bank_out_of_range",
+        });
+        // Fixture relocation is not a movement or route qualification.
+        player.position.set(
+          town!.position.x + 1,
+          town!.position.y,
+          town!.position.z,
+        );
+        await expect(service.executeBankOpen(town!.id)).resolves.toMatchObject({
+          success: true,
+          bankId: town!.id,
+          bankItems: [{ itemId: "air_rune", quantity: 5 }],
+        });
+        await expect(
+          service.executeBankWithdraw("air_rune", 2, randomUUID()),
+        ).resolves.toMatchObject({
+          success: true,
+          bankId: town!.id,
+          committedQuantity: 2,
+        });
+        expect(await snapshot()).toEqual({
+          inventory: 2,
+          bank: 3,
+          operations: 2,
+        });
+        await expect(
+          service.executeBankDepositAll(randomUUID(), undefined, outlying!.id),
+        ).resolves.toMatchObject({
+          success: false,
+          bankId: outlying!.id,
+          failureReason: "bank_out_of_range",
+        });
+        expect(await snapshot()).toEqual({
+          inventory: 2,
+          bank: 3,
+          operations: 2,
+        });
+        const explicitId = randomUUID();
+        const retained = [{ itemId: "air_rune", quantity: 1 }];
+        await expect(
+          service.executeBankDepositAll(explicitId, retained, town!.id),
+        ).resolves.toMatchObject({
+          success: true,
+          bankId: town!.id,
+          committedQuantity: 1,
+          replayed: false,
+        });
+        await expect(
+          service.executeBankDepositAll(explicitId, retained, town!.id),
+        ).resolves.toMatchObject({
+          success: true,
+          bankId: town!.id,
+          committedQuantity: 1,
+          replayed: true,
+        });
+        expect(await snapshot()).toEqual({
+          inventory: 1,
+          bank: 4,
+          operations: 3,
+        });
+        player.position.set(
+          town!.position.x - 10,
+          town!.position.y,
+          town!.position.z,
+        );
+        await expect(
+          service.executeBankDepositAll(randomUUID()),
+        ).resolves.toMatchObject({
+          success: false,
+          failureReason: "bank_out_of_range",
+        });
+        expect(await snapshot()).toEqual({
+          inventory: 1,
+          bank: 4,
+          operations: 3,
+        });
+      } finally {
+        service.detachExistingPlayer();
       }
     });
   },
