@@ -116,6 +116,14 @@
       "outerHeight": 25.8
     }
   },
+  "easternShelfGroundCoverStudy": {
+    "status": "DESIGN_CANDIDATE_UNQUALIFIED",
+    "artIntent": "Extend the low eastern sedge shelf's dry groundcover toward the water. Preserve the exposed cutbank, southern turf headland, dock approaches and all physical terrain. This changes only material and grass establishment within the existing mapped shelf; underwater substrate and wider shoreline gaps still need separate art review.",
+    "flatZoneId": "haven_pond_floor",
+    "sectorIndex": 1,
+    "before": { "emergenceHeight": 0.08, "fullHeight": 0.2 },
+    "after": { "emergenceHeight": 0.04, "fullHeight": 0.12 }
+  },
   "fishingCapacity": {
     "status": "TARGET_NOT_SPAWNED_OR_NAVIGATED",
     "minimumPositionsPerFamily": 2,

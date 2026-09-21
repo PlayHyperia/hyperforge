@@ -92,6 +92,36 @@ const cases = [
     key: "gcell_v1_16_17",
     bounds: { minX: 400, maxX: 425, minZ: 425, maxZ: 450 },
   },
+  {
+    name: "eastern shelf groundcover southbank work budget",
+    test: "grounds the shelf study southbank without increasing its work cap",
+    enabled: process.env.ASSETS_DIR?.endsWith(
+      "/inland-pond-integration01-UNQUALIFIED/assets-v9",
+    ),
+    label: "SHELF_STUDY_SOUTHBANK",
+    nodes: [
+      [450, 450],
+      [350, 450],
+    ],
+    focus: [435, 452],
+    key: "gcell_v1_16_17",
+    bounds: { minX: 400, maxX: 425, minZ: 425, maxZ: 450 },
+  },
+  {
+    name: "eastern shelf groundcover near-water work budget",
+    test: "grounds the newly emerged eastern shelf against actual terrain within the original work cap",
+    enabled: process.env.ASSETS_DIR?.endsWith(
+      "/inland-pond-integration01-UNQUALIFIED/assets-v9",
+    ),
+    label: "SHELF_STUDY_EASTBANK",
+    nodes: [
+      [450, 450],
+      [450, 350],
+    ],
+    focus: [442, 420],
+    key: "gcell_v1_17_16",
+    bounds: { minX: 425, maxX: 450, minZ: 400, maxZ: 425 },
+  },
 ] as const;
 
 describe.each(cases)("$name", (scenario) => {

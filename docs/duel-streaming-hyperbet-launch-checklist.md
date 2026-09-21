@@ -1341,6 +1341,76 @@ dense-final01/types01–02/root-lint03/root-format03/study-source01; inland pond
 assets-v8/build25/runtime29–30/native48. Failed grass01, authority01 and the
 mixed-fixture catalog01 invocation are retained.
 
+### Eastern shelf groundcover trial and startup variability — 2026-09-21
+
+Assets-v9 changes only the mapped eastern shelf's groundCover emergence/full
+height from 0.08/0.20m to 0.04/0.12m. The southern headland, cutbank, physical
+terrain, water, docks, bank, routes, fishing and 28 habitat instances stay fixed.
+The tracked additive study is not a default override. Build25 is reused only
+after all 973 production source inputs and 145 protected artifacts reverify.
+
+Two real TerrainSystem/RoadNetworkSystem owners compare the actual v8/v9
+manifests with the native selectors (including omitted coastBlend). All 70,225
+height/normal/water samples and 26 roads/segments/raw road mask stay exact;
+69,382 samples outside the permitted material-change domain remain exact.
+767 samples gain material/CPU placement support, confined to sector 1 and the
+existing +0.03…0.21m emergence envelope. Positive-support locations remain
+53,830, so this is not 767 additional roots or proof of visible new blades.
+
+Actual near-LOD worker/retained-mesh/exhaustive-oracle grass checks pass for both
+affected cells. Southbank retains 966/1,009 clumps with the exact v8 output hash,
+935,622 work units and 157.722ms cumulative CPU active. Eastbank retains 943/991,
+796,087 units and 126.918ms. Original 1M-work/250ms-active limits remain unchanged.
+Selected v9 dock/native-PhysX/layout plus exact catalog/resource tests pass 24;
+202 existing composition/TSL/actual-worker regression cases pass. Counts overlap.
+Full shared plus three changed test roots: 708 roots/2,384 files, zero diagnostics
+and stable pins; scoped lint/format pass.
+
+Native49 remains FAILED: at the original 90s deadline terrain was 29/29 ready,
+grass 107/122, with fifteen unfinished jobs and zero observed failed jobs.
+Fourteen jobs had not started and were mainly distant LOD1 cells. No matched
+pond views were captured. The known cow errors also exposed a private harness
+cleanup ordering problem: evidence validation could skip React unmount.
+Cleanup now attempts evidence, unmount and bounded frame drain independently;
+failure cannot become approval. Browser closure still completed in native49.
+
+Native50 is explicitly ART_INSPECTION_ONLY_NO_ACCEPTANCE. It passed the original
+90s startup gate, did not use its separately labelled post-deadline allowance,
+and captured all four held views. Camera grass gates took 29.829/13.239/6.780/
+12.176 seconds, with empty final queues, no observed failed jobs and 5.4ms
+maximum observed individual slice. All fourteen fishing entities (two per
+family) remain present. Source/manifest pins and served framework match; only
+the exact user-deferred cow failures are admitted. Camera/clock restore, root
+unmount and browser closure complete. This does not erase native49's failure
+or prove seamless travel, GPU reclamation, full assets, streaming or performance.
+The machine changed from battery to AC during this work: these are not controlled
+performance comparisons. The material change is not established as the timeout cause.
+
+Four-view visual review finds a modest, localized grass-to-water improvement.
+The wider brown collar, submerged substrate, sparse habitat groups, plain timber
+and bank approach still fall short of the intended art bar. Do not call the
+shoreline solved or promote v9. The same 28 assets can next be composed into more
+legible unequal cove groups, retaining complete root/rock/dock/access checks.
+
+- [x] Bound the eastern shelf material/grass trial without changing terrain,
+      physical access, recipe budgets or quality settings.
+- [ ] Resolve startup/transition variability: install bounded grass-work
+      observations before admission, then compare matched v8/v9 startup runs
+      with unchanged deadlines, 2ms/8,192-resumption allowance and visual settings.
+      Measure operation-bound versus time-bound yields, rework and phase cost.
+- [ ] Continue natural bank habitats and characterful docks/pavilions; keep
+      fourteen live anglers plus seven overflow, all-tier catches and bank/
+      supplier routes as separate unpassed gameplay requirements.
+
+Runtime31 and both owned browsers are closed; its temporary database is removed
+and protected human localhost/artifacts are unchanged. All LAYOUT-01–08 remain
+OPEN. No canonical promotion, merge, deployment, AAA or production acceptance.
+
+Evidence: service-layout pond-shelf-groundcover01/grass01/selected-access01/
+composition-regression01/build25-reuse01/types01/lint01/format01; inland pond
+assets-v9/runtime31/native49–50. pond-shelf-docks-fishing01 is a stock-only dock
+regression despite its broad name, not selected v9 or fishing evidence.
+
 ### Inland fishing integration — candidate only
 
 The detached candidate now requests 14 real fishing entities, two for each of
