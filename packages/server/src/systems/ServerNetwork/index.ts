@@ -3493,6 +3493,7 @@ export class ServerNetwork extends System implements NetworkWithSocket {
     this.saveManager.destroy();
     this.interactionSessionManager.destroy();
     this.eventBridge.destroy();
+    this.pendingGatherManager?.destroy();
     this.tileMovementManager?.destroy();
     destroyAllRateLimiters();
     this.messageMetrics.clear();

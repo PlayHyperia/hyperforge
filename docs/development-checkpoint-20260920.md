@@ -1,5 +1,69 @@
 # World graphics development checkpoint — 2026-09-20
 
+## Fishing stance circulation — deterministic prevention, capacity sampled
+
+The recorded three-angler trap now has a failing-before/passing-after real-owner
+regression. New fishing stances must preserve canonical adjacent exits for the
+candidate, nearby real player occupants and pending approach reservations.
+Diagonal supports use the same movement rules. No collision mutation, route-only
+walking restriction, forced human movement or extra path search is introduced.
+Actual occupancy retains protection after gathering stops until departure.
+
+Arrival checks again and may choose another shore under the same attempt and
+deadline. ResourceSystem enforces final new-session admission using the actual
+server player tile, covering direct callers too. Its exclusive validator lease
+is identity-safe and remains required across retirement/rebind; network teardown
+releases pending gathering before movement. Existing sessions and non-fishing
+unbound event behavior are unchanged. This is local prevention, not global
+connectivity or recovery from arbitrary later human obstruction.
+
+Six deterministic actual-owner cases pass. Candidate02 passes 40 / one capacity
+skip; canonical regression02 passes 68 / 23 opt-in skips. The route matrix
+completes 32 roundtrips (64 legs), sixteen paired comparisons from ten distinct
+starts: 1,691 town ticks versus 508 pond-bank ticks in this arrangement. These
+are sequential CPU measurements, not throughput or FPS comparisons.
+
+One separately selected unchanged capacity case passes fourteen anglers plus
+seven accepted extras, twenty-one distinct supported positions, actual owner
+re-entry and recovery of two anglers after actual fish relocation. Every phase
+passes its unchanged twenty-tick bound; exact tick counts are not logged.
+The capacity fixture lacks the dock/court/rock physics owners present in the
+separate route fixture. It does not prove all twelve rewards, persistence,
+socket lifecycle, autonomous yielding, native crowd gameplay, exhaustive
+pockets/random arrangements or sustained performance.
+
+The initial canonical/candidate suites found the old exact-four-metre fixture
+used trapped players to isolate range. It now uses scoped real static collision
+leases, preserving exact range/support/session checks and proving an outward
+exit. Failed receipts remain. The capacity test body is unchanged from HEAD.
+
+Shared resource regressions pass 34/34; shared full-source typing covers 707
+roots / 2,382 sources and server test-inclusive typing 3,954 sources, all zero
+diagnostics with stable pins. Scoped lint/format and independent source/test
+review pass. Local admission work is bounded but not many-agent cost-qualified.
+
+Build19 emits eight isolated bundles from 973 stable inputs. Native34 boots
+actual Chrome/Metal WebGPU at unchanged 1280×720, passes the ninety-second
+startup gate, and settles the outpost still in 9.84s under the thirty-second
+gate. This is boot/art evidence, not rendered fishing interaction or performance.
+The outpost remains visually rejected: excessive grass, missing worn connector,
+repeated pavilion character. Isolated stream-state 503s and the known unmodeled
+mob 404 remain recorded.
+
+Owned browser34/runtime21 and its ephemeral database are closed. Protected
+localhost/game database, all 145 compiled artifacts and package/build inputs
+remain unchanged. No candidate default is promoted or quality budget reduced.
+
+Next: repeat/extend circulation and autonomous recovery qualification; compose
+the worn outpost arrival and distinct pavilion character, then native gameplay,
+rewards/banking authority, startup reliability and sustained whole-island cost.
+Keep LAYOUT-01–08 open.
+
+Evidence: service-layout pond-egress-admission-before01/after01/candidate01–02/
+regression01–02/types02/lint02/format03, pond-egress-capacity-v6-01,
+pond-egress-resource-regression01/shared-types01/root-eslint01 and
+fishing-stance-pending-eslint02; inland pond build19, runtime21 and native34.
+
 ## Bounded pond-route recovery — tested source checkpoint
 
 The valid pond return routes no longer fail merely because one 250-iteration

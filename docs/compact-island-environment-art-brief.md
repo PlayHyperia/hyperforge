@@ -876,14 +876,98 @@ No live/default candidate promotion, shader/density reduction or extra budget.
 - [ ] Qualify native movement/gathering, authenticated banking/restart, repeated
       startup, outpost/shore/dock art and whole-island sustained performance.
 
-The crowded relocation failure is separate and remains open: stationary
-anglers can close another fisher's last legal exit. Next preserve an egress
-option when admitting stationary fishing stances; any cooperative yield must
+The recorded crowded relocation failure is separate. The following checkpoint
+adds last-exit admission prevention, but broader circulation/recovery remains
+open. Any cooperative yield must
 be owned by eligible autonomous agents, honor duel/private-preparation/operator
 fences, and stop gathering through its real completion authority. Do not force
 human movement, introduce invisible corridors, cut occupied diagonal corners
 or increase the deadline. Preserve the fourteen-angler/all-tier/overflow
 requirement when proving the solution.
+
+### Fishing stance circulation — trap prevention, capacity sampled
+
+A deterministic reproduction now records three real equipped anglers arriving
+at (391,425), (391,426) and (390,425). The third stationary admission removes
+the first fisher's last legal exit; the remaining dry diagonal correctly fails
+corner clearance. After actual gathering cancellation, the old departure fails
+after one search iteration. This is an authored reproduction on actual basin
+terrain/resources/occupancy, not a synthetic relocation or randomized success.
+
+Fishing stance selection now protects nearby actual player occupants and
+pending approach reservations. Each candidate and protected neighboring stance
+must retain a canonical legal adjacent step, including both diagonal supports.
+The overlay is read-only: it does not place collision walls, restrict normal
+walking, move other players, change terrain or run another path search.
+Real occupancy continues protection after gathering stops until the actor
+actually leaves. No duplicate active-gatherer event mirror is introduced.
+
+Arrival rechecks the stance and may try another shore under the original
+attempt/deadline. The actual ResourceSystem validates new fishing admission
+against the server-owned player position, covering direct/legacy gather calls.
+An exclusive, identity-safe validator lease fails closed during owner retirement
+until a replacement binds. Network teardown retires pending gathering before
+movement; repeated disposal cannot remove a newer owner. Non-fishing unbound
+event dispatch and existing active-session behavior are unchanged.
+
+Six deterministic actual-owner cases pass: three-actor admission, pending
+reservations, stopped-but-present occupants, arrival race, direct resource
+rejection and owner retirement/rebind. Final candidate02 passes 40 cases with
+one capacity skip; canonical regression02 passes 68 with 23 opt-in skips.
+The full sequential route matrix remains 32/32 roundtrips (64 legs), sixteen
+paired comparisons from ten distinct starts. In this arrangement the town
+bank totals 1,691 logical ticks and the pond bank 508.
+
+One separately selected, unchanged full capacity case (v6-01) passes fourteen
+anglers plus seven accepted extras on twenty-one distinct supported positions,
+actual owner re-entry and actual fish relocation, ending with zero pending
+gathers or reservations. This is one random arrangement, not repeated
+reliability, all twelve rewards, real socket/agent-behavior concurrency, native
+physics stepping, full-route connectivity or sustained performance proof.
+The capacity fixture does not include the dock/court/rock physics owners used
+by the separate route fixture, and does not log exact phase tick counts; each
+phase passed its unchanged twenty-tick bound. The deterministic trap is prevented;
+arbitrary walking/stopping can still
+block circulation, and immediate free steps do not exclude larger closed pockets.
+
+The old four-metre boundary fixture used trapped player blockers to isolate
+range. Its two failed suite receipts remain. It now uses scoped real static
+collision leases and explicitly proves the outward exit; exact range, support
+and actual gathering assertions are retained. The capacity test body is
+byte-identical to the preceding checkpoint.
+
+Shared resource-owner/fishing-ecology/lifecycle regressions pass 34/34. Full
+shared source typing covers 707 roots / 2,382 sources; server test-inclusive
+typing covers 3,954 sources with ten roots, including ResourceSystem. Both
+report zero diagnostics and stable pins. Scoped lint/format and independent
+review pass. Work is local and bounded, but the additional admission-query
+cost remains unqualified under sustained many-agent load.
+
+Build19 emits eight isolated bundles from 973 stable production inputs.
+Native34 boots actual Chrome/Metal WebGPU at unchanged 1280×720 and passes
+the original ninety-second startup gate; outpost capture settling is 9.84s
+within the unchanged thirty-second gate. Camera/input state is restored and
+the owned browser/runtime21 are closed with the ephemeral database removed.
+Human localhost/database, all 145 compiled artifacts and build/lock inputs
+remain untouched. This diagnostic view is not native crowd gameplay or
+sustained performance. Art is still rejected for excessive court grass,
+missing worn arrival and repeated pavilion character. The isolated stream
+endpoint's 503s and known unmodeled-mob 404 remain recorded.
+
+- [x] Prevent the recorded last-exit closure through real pending/final
+      admission, retaining protection through actual departure.
+- [x] Pass one unchanged fourteen-plus-seven CPU capacity/re-entry/relocation
+      arrangement without expanding movement or pending-gather budgets.
+- [ ] Prove repeated arrangements, larger-pocket connectivity, autonomous
+      yielding/recovery and many-agent native movement/gathering/reward timing.
+- [ ] Qualify outpost/shore/dock art, startup reliability, authenticated bank
+      authority/restart and whole-island sustained performance.
+
+Keep LAYOUT-01–08 open. Evidence: service-layout pond-egress-admission-before01/
+after01/candidate01–02/regression01–02/types02/lint02/format03,
+pond-egress-capacity-v6-01, pond-egress-resource-regression01/shared-types01/
+root-eslint01 and fishing-stance-pending-eslint02; inland pond build19,
+runtime21 and native34. Failed receipts remain; no live/default promotion.
 
 ### Inland fishing integration — candidate only
 

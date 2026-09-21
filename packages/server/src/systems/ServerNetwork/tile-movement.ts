@@ -30,6 +30,7 @@ import {
   tilesWithinMeleeRange,
   tilesWithinRange,
   createTileMovementState,
+  TILE_DIRECTIONS,
   BFSPathfinder,
   // Combat pathfinding: LoS and valid tile generation
   hasLineOfSight,
@@ -586,6 +587,26 @@ export class TileMovementManager {
   /** Ground-floor availability for server-owned interaction positioning. */
   isTileAvailableForPlayer(playerId: string, tile: TileCoord): boolean {
     return this.isTileTraversableForPlayer(playerId, tile, 0);
+  }
+
+  /**
+   * Bounded, read-only stance query. Virtual reservations affect destinations
+   * and diagonal supports without changing collision or ordinary movement.
+   * An immediate legal exit is not proof of a route to a distant destination.
+   */
+  hasGroundFloorExit(
+    playerId: string,
+    from: TileCoord,
+    isUnavailable: (tile: TileCoord) => boolean,
+  ): boolean {
+    const available = (tile: TileCoord, fromTile?: TileCoord) =>
+      !isUnavailable(tile) &&
+      this.isTileTraversableForPlayer(playerId, tile, 0, fromTile);
+    for (const direction of TILE_DIRECTIONS) {
+      const to = { x: from.x + direction.x, z: from.z + direction.z };
+      if (this.pathfinder.canMoveTo(from, to, available)) return true;
+    }
+    return false;
   }
 
   /**

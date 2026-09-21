@@ -262,6 +262,11 @@ interface ResourceEntityMethods {
  */
 export class ResourceSystem extends SystemBase {
   private resources = new Map<ResourceID, Resource>();
+  /** Server movement owns stance admission; resource admission cannot bypass it. */
+  private fishingPositionValidator: {
+    validate: (playerId: string, tile: TileCoord) => boolean;
+  } | null = null;
+  private fishingPositionValidationRequired = false;
 
   // Tick-based gathering sessions (rules-accurate timing)
   // Session includes cached data to avoid per-tick allocations
@@ -2762,6 +2767,24 @@ export class ResourceSystem extends SystemBase {
     return this.startGathering(data);
   }
 
+  /** One movement-to-gather owner per world, with identity-safe retirement. */
+  registerFishingPositionValidator(
+    validate: (playerId: string, tile: TileCoord) => boolean,
+  ): () => void {
+    if (this.isDestroying || this.fishingPositionValidator) {
+      throw new Error(
+        "[ResourceSystem] Fishing position authority unavailable",
+      );
+    }
+    const owner = { validate };
+    this.fishingPositionValidationRequired = true;
+    this.fishingPositionValidator = owner;
+    return () => {
+      if (this.fishingPositionValidator === owner)
+        this.fishingPositionValidator = null;
+    };
+  }
+
   private startGathering(data: GatheringRequest): boolean {
     const completionOperationId =
       data.completionAttemptId === undefined
@@ -2943,6 +2966,32 @@ export class ResourceSystem extends SystemBase {
     const isFishing = resource.skillRequired === "fishing";
 
     if (isFishing) {
+      const authority = this.fishingPositionValidator;
+      // A retired server owner must not open a direct-gather bypass while its
+      // replacement is being installed. Standalone resource owners retain
+      // their historical behavior until movement admission is first bound.
+      if (this.fishingPositionValidationRequired && !authority) {
+        this.resetGatheringEmote(data.playerId);
+        return reject(resource.skillRequired, "fishing_authority_unavailable");
+      }
+      if (authority) {
+        const player = this.world.getPlayer?.(data.playerId);
+        if (
+          !player?.position ||
+          !authority.validate(
+            data.playerId,
+            worldToTile(player.position.x, player.position.z),
+          )
+        ) {
+          this.resetGatheringEmote(data.playerId);
+          this.emitTypedEvent(EventType.UI_MESSAGE, {
+            playerId: data.playerId,
+            message: "Find an open fishing position with room to leave.",
+            type: "info",
+          });
+          return reject(resource.skillRequired, "unsafe_fishing_position");
+        }
+      }
       // Fishing uses 2D (X/Z) world-distance check - player can be up to 4m away from the fishing spot
       // This is more forgiving since the player stands on shore and casts into water
       // IMPORTANT: Use 2D distance because fishing spots are in water (different Y than player on shore)
@@ -5229,6 +5278,7 @@ export class ResourceSystem extends SystemBase {
    */
   destroy(): void {
     this.isDestroying = true;
+    this.fishingPositionValidator = null;
     if (this.clientResourceAuthority) {
       this.clientResourceAuthority.open = false;
       this.clientResourceAuthority.states.clear();

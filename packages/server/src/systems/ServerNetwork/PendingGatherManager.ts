@@ -94,6 +94,8 @@ export class PendingGatherManager {
   private world: World;
   private tileMovementManager: TileMovementManager;
   private sendFn: (name: string, data: unknown) => void;
+  private destroyed = false;
+  private releaseFishingPositionValidator: (() => void) | null = null;
 
   /** Map of playerId → pending gather data */
   private pendingGathers: Map<string, PendingGather> = new Map();
@@ -142,6 +144,67 @@ export class PendingGatherManager {
     return movement.isTileAvailableForPlayer?.(playerId, tile) ?? true;
   }
 
+  /** Admit a stationary shore position without closing nearby players' last
+   * legal adjacent exit. This does not reserve traversal or prove a full route. */
+  isFishingStanceAvailable(playerId: string, tile: TileCoord): boolean {
+    if (
+      this.destroyed ||
+      !Number.isSafeInteger(tile.x) ||
+      !Number.isSafeInteger(tile.z) ||
+      !this.approachIsAvailable(playerId, tile)
+    ) {
+      return false;
+    }
+
+    const hasExit = (
+      ownerId: string,
+      from: TileCoord,
+      includeCandidate: boolean,
+    ): boolean =>
+      this.tileMovementManager.hasGroundFloorExit(ownerId, from, (step) => {
+        if (includeCandidate && step.x === tile.x && step.z === tile.z) {
+          return true;
+        }
+        const reservation = this.approachReservations.get(this.tileKey(step));
+        return (
+          reservation !== undefined &&
+          reservation.playerId !== playerId &&
+          reservation.playerId !== ownerId
+        );
+      });
+
+    if (!hasExit(playerId, tile, false)) return false;
+
+    // Adding one occupied tile can only affect steps rooted in its 3x3
+    // neighborhood, including the cardinal supports of diagonal steps.
+    for (let dx = -1; dx <= 1; dx++) {
+      for (let dz = -1; dz <= 1; dz++) {
+        const nearby = { x: tile.x + dx, z: tile.z + dz };
+        const occupant = this.world.entityOccupancy?.getOccupant(nearby);
+        const occupiedPlayerId =
+          occupant?.entityType === "player" ? occupant.entityId : null;
+        if (
+          occupiedPlayerId &&
+          occupiedPlayerId !== playerId &&
+          !hasExit(occupiedPlayerId, nearby, true)
+        ) {
+          return false;
+        }
+
+        const reservation = this.approachReservations.get(this.tileKey(nearby));
+        if (
+          reservation &&
+          reservation.playerId !== playerId &&
+          reservation.playerId !== occupiedPlayerId &&
+          !hasExit(reservation.playerId, nearby, true)
+        ) {
+          return false;
+        }
+      }
+    }
+    return true;
+  }
+
   private reserveApproach(
     playerId: string,
     resourceId: string,
@@ -167,7 +230,7 @@ export class PendingGatherManager {
         calculateDistance2D(tileToWorld(tile), position) <=
           GATHERING_CONSTANTS.FISHING_INTERACTION_RANGE &&
         !excluded?.has(this.tileKey(tile)) &&
-        this.approachIsAvailable(playerId, tile),
+        this.isFishingStanceAvailable(playerId, tile),
     );
   }
 
@@ -269,6 +332,15 @@ export class PendingGatherManager {
     this.world = world;
     this.tileMovementManager = tileMovementManager;
     this.sendFn = sendFn;
+    const resourceSystem = world.getSystem("resource") as {
+      registerFishingPositionValidator?: (
+        validator: (playerId: string, tile: TileCoord) => boolean,
+      ) => () => void;
+    } | null;
+    this.releaseFishingPositionValidator =
+      resourceSystem?.registerFishingPositionValidator?.((playerId, tile) =>
+        this.isFishingStanceAvailable(playerId, tile),
+      ) ?? null;
   }
 
   /**
@@ -344,6 +416,7 @@ export class PendingGatherManager {
     runMode?: boolean,
     completionAttemptId?: string,
   ): boolean {
+    if (this.destroyed) return false;
     if (
       completionAttemptId !== undefined &&
       !getGatheringRewardOperationIdForAttempt(completionAttemptId)
@@ -466,6 +539,7 @@ export class PendingGatherManager {
         const started = this.startGathering(
           playerId,
           resourceId,
+          true,
           completionAttemptId,
         );
         this.releaseApproachReservation(playerId);
@@ -539,6 +613,7 @@ export class PendingGatherManager {
         const started = this.startGathering(
           playerId,
           resourceId,
+          false,
           completionAttemptId,
         );
         this.releaseApproachReservation(playerId);
@@ -673,6 +748,34 @@ export class PendingGatherManager {
     }
   }
 
+  /** Release only this manager's admission policy and pending attempts. */
+  destroy(): void {
+    if (this.destroyed) return;
+    this.destroyed = true;
+    this.releaseFishingPositionValidator?.();
+    this.releaseFishingPositionValidator = null;
+
+    const pending = [...this.pendingGathers.values()];
+    const replans = [...this.fishingReplans];
+    const owners = new Set([
+      ...this.pendingGathers.keys(),
+      ...this.fishingReplans.keys(),
+      ...[...this.approachReservations.values()].map(
+        (reservation) => reservation.playerId,
+      ),
+    ]);
+    this.pendingGathers.clear();
+    this.fishingReplans.clear();
+    this.approachReservations.clear();
+    for (const playerId of owners) {
+      this.tileMovementManager.clearArrivalEmote(playerId);
+    }
+    for (const attempt of pending) this.publishPendingGatherFailure(attempt);
+    for (const [playerId, attempt] of replans) {
+      this.publishPendingGatherFailure({ playerId, ...attempt });
+    }
+  }
+
   /**
    * Process all pending gathers - called every tick
    * Checks if players have arrived at cardinal tiles and starts gathering
@@ -681,6 +784,7 @@ export class PendingGatherManager {
    * If one player's processing fails, others continue normally.
    */
   processTick(currentTick: number): void {
+    if (this.destroyed) return;
     for (const [playerId, pending] of this.pendingGathers) {
       try {
         this.processPlayerPendingGather(playerId, pending, currentTick);
@@ -803,7 +907,7 @@ export class PendingGatherManager {
 
       if (hasArrived) {
         console.log(
-          `[PendingGather] 🎣 Player ${playerId} arrived at shore tile (${pending.targetShoreTile.x}, ${pending.targetShoreTile.z}) - starting gather`,
+          `[PendingGather] 🎣 Player ${playerId} arrived at shore tile (${pending.targetShoreTile.x}, ${pending.targetShoreTile.z})`,
         );
       }
     } else {
@@ -826,13 +930,15 @@ export class PendingGatherManager {
     }
 
     if (
-      !hasArrived &&
       pending.isFishing &&
       pending.targetShoreTile &&
-      this.tileMovementManager.hasFailedMovementTo(
-        playerId,
-        pending.targetShoreTile,
-      )
+      ((hasArrived &&
+        !this.isFishingStanceAvailable(playerId, pending.targetShoreTile)) ||
+        (!hasArrived &&
+          this.tileMovementManager.hasFailedMovementTo(
+            playerId,
+            pending.targetShoreTile,
+          )))
     ) {
       const failed = (pending.failedFishingApproaches ??= new Set<string>());
       failed.add(this.tileKey(pending.targetShoreTile));
@@ -850,19 +956,24 @@ export class PendingGatherManager {
         return;
       }
       // Keep the attempt and its original deadline. At most one different
-      // shore is tried per tick, only after movement exhausts its own route.
+      // shore is tried per tick after a terminal route or unsafe arrival.
       pending.targetShoreTile = alternative;
       this.reserveApproach(playerId, pending.resourceId, alternative);
       hasArrived =
         this._playerTile.x === alternative.x &&
         this._playerTile.z === alternative.z;
       if (!hasArrived) {
-        this.moveToFishingApproach(
-          playerId,
-          resource,
-          alternative,
-          pending.runMode,
-        );
+        if (
+          !this.moveToFishingApproach(
+            playerId,
+            resource,
+            alternative,
+            pending.runMode,
+          )
+        ) {
+          this.pendingGathers.delete(playerId);
+          this.publishPendingGatherFailure(pending);
+        }
         return;
       }
     }
@@ -884,6 +995,7 @@ export class PendingGatherManager {
       this.startGathering(
         playerId,
         pending.resourceId,
+        pending.isFishing,
         pending.completionAttemptId,
       );
       // A valid completion-bound ResourceSystem request publishes its own exact
@@ -968,8 +1080,10 @@ export class PendingGatherManager {
   private startGathering(
     playerId: string,
     resourceId: string,
+    isFishing: boolean,
     completionAttemptId?: string,
   ): boolean {
+    if (this.destroyed) return false;
     const player = this.world.getPlayer?.(playerId);
     if (!player?.position) return false;
 
@@ -983,11 +1097,14 @@ export class PendingGatherManager {
       },
       completionAttemptId,
     };
-    if (completionAttemptId !== undefined) {
+    if (isFishing || completionAttemptId !== undefined) {
       const resourceSystem = this.world.getSystem("resource") as {
         requestGathering?: (data: typeof request) => boolean;
       } | null;
-      return resourceSystem?.requestGathering?.(request) === true;
+      if (resourceSystem?.requestGathering) {
+        return resourceSystem.requestGathering(request) === true;
+      }
+      if (completionAttemptId !== undefined) return false;
     }
 
     // Emit RESOURCE_GATHER event - ResourceSystem will handle the actual gathering

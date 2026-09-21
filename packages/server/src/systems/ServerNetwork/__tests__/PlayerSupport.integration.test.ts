@@ -25,6 +25,7 @@ import {
 } from "@hyperforge/shared";
 import type { BuildingLayoutInput } from "../../../../../shared/src/types/world/building-collision-types";
 import type { TerrainResourceSpawnPoint } from "../../../../../shared/src/types/world/terrain";
+import type { EventMap } from "../../../../../shared/src/types/events/event-payloads";
 import { EmbeddedHyperiaService } from "../../../eliza/EmbeddedHyperiaService";
 import { TileMovementManager } from "../tile-movement";
 import { CollisionMatrix } from "../../../../../shared/src/systems/shared/movement/CollisionMatrix";
@@ -224,6 +225,7 @@ async function fishingFixture(bakeForRelocation = false) {
   const movement = new TileMovementManager(world, send);
   routeOwnerReleases.push(() => movement.destroy());
   const pending = new PendingGatherManager(world, movement, send);
+  routeOwnerReleases.push(() => pending.destroy());
   const body = terrain
     .getWaterBodyRegistry()
     .getAllBodies()
@@ -502,6 +504,7 @@ async function allTierFishingFixture(withRouteOwners = false) {
   const movement = new TileMovementManager(world, send);
   routeOwnerReleases.push(() => movement.destroy());
   const pending = new PendingGatherManager(world, movement, send);
+  routeOwnerReleases.push(() => pending.destroy());
   const addAngler = async (
     id: string,
     resource: (typeof spots)[number],
@@ -961,6 +964,653 @@ describe.runIf(process.env.HYPERIA_FISHING_CAPACITY === "1")(
 describe.runIf(process.env.HYPERIA_POND_BANK_ROUTES === "1")(
   "actual candidate pond-to-bank circulation (CPU owners, not bank persistence)",
   () => {
+    const authoredShorelineFixture = async () => {
+      // Reproduce the recorded occupancy pocket through actual resource/player
+      // owners. These two explicit wet targets are not a synthetic relocation,
+      // a replacement random source, or proof of the body-bound capacity loop.
+      const f = await allTierFishingFixture();
+      const registerTarget = async (x: number, z: number) => {
+        expect(f.terrain.getWaterBodyRegistry().getBodyAt(x, z)?.id).toBe(
+          f.body.id,
+        );
+        expect(f.terrain.getResourceGroundHeight(x, z)).toBeLessThan(
+          f.body.surfaceY,
+        );
+        const existing = f.resources
+          .getAllResources()
+          .find(
+            (resource) =>
+              resource.position.x === x && resource.position.z === z,
+          );
+        if (existing) return existing;
+        await f.resources["registerTerrainResources"]({
+          isManifest: true,
+          spawnPoints: [
+            {
+              type: "fish",
+              subType: "net" as TerrainResourceSpawnPoint["subType"],
+              position: { x, y: f.body.surfaceY, z },
+            },
+          ],
+        });
+        const resource = f.resources
+          .getAllResources()
+          .find((entry) => entry.position.x === x && entry.position.z === z);
+        if (!resource)
+          throw new Error("Authored wet reproduction target rejected");
+        expect(f.world.entities.get(resource.id)).not.toBeNull();
+        return resource;
+      };
+      const innerResource = await registerTarget(392.5, 423.5);
+      const southernResource = await registerTarget(394.5, 426.5);
+      const arrive = async (
+        id: string,
+        resource: typeof innerResource,
+        start: { x: number; z: number },
+      ) => {
+        const { player } = await f.addAngler(id, resource, { tile: start });
+        const accepted = f.pending.queuePendingGather(
+          id,
+          resource.id,
+          f.world.currentTick,
+          true,
+        );
+        let ticks = 0;
+        for (; ticks < 20 && f.pending["pendingGathers"].has(id); ticks++) {
+          f.world.currentTick++;
+          f.movement.onTick(f.world.currentTick);
+          f.pending.processTick(f.world.currentTick);
+          expect(f.movement["_bfsIterationsThisTick"]).toBeLessThanOrEqual(
+            1000,
+          );
+        }
+        const gathering = f.resources.isPlayerGatheringResource(
+          id,
+          resource.id,
+        );
+        expect(gathering).toBe(accepted);
+        expect(f.pending["pendingGathers"].has(id)).toBe(false);
+        expect(
+          [...f.pending["approachReservations"].values()].some(
+            (entry) => entry.playerId === id,
+          ),
+        ).toBe(false);
+        expect(f.movement.hasMovementIntent(id)).toBe(false);
+        const tile = worldToTile(player.position.x, player.position.z);
+        expect(
+          f.terrain.getResourceGroundHeight(
+            player.position.x,
+            player.position.z,
+          ),
+        ).toBeGreaterThanOrEqual(f.body.surfaceY);
+        expect(f.movement.isTileAvailableForPlayer(id, tile)).toBe(true);
+        return {
+          player,
+          accepted,
+          ticks,
+          resourceId: resource.id,
+          tile,
+          gathering,
+        };
+      };
+      const edges = (player: PlayerEntity) => {
+        const from = worldToTile(player.position.x, player.position.z);
+        return [-1, 0, 1].flatMap((dx) =>
+          [-1, 0, 1]
+            .filter((dz) => dx !== 0 || dz !== 0)
+            .map((dz) => {
+              const tile = { x: from.x + dx, z: from.z + dz };
+              return {
+                ...tile,
+                flags: f.world.collision.getFlags(tile.x, tile.z),
+                available: f.movement.isTileAvailableForPlayer(player.id, tile),
+                legal: f.movement["isTileTraversableForPlayer"](
+                  player.id,
+                  tile,
+                  0,
+                  from,
+                ),
+              };
+            }),
+        );
+      };
+      const at = (player: PlayerEntity, tile: { x: number; z: number }) => {
+        const current = worldToTile(player.position.x, player.position.z);
+        return current.x === tile.x && current.z === tile.z;
+      };
+      const advanceMovement = (ticks: number) => {
+        for (let i = 0; i < ticks; i++) {
+          f.world.currentTick++;
+          f.movement.onTick(f.world.currentTick);
+          expect(f.movement["_bfsIterationsThisTick"]).toBeLessThanOrEqual(
+            1000,
+          );
+          expect(
+            f.movement["pathfinder"].getLastIterationsUsed(),
+          ).toBeLessThanOrEqual(250);
+        }
+      };
+      return {
+        ...f,
+        innerResource,
+        southernResource,
+        arrive,
+        edges,
+        at,
+        advanceMovement,
+      };
+    };
+
+    it("preserves an existing fisher's legal exit during authored shoreline admission", async () => {
+      const f = await authoredShorelineFixture();
+      const { innerResource, southernResource, arrive, edges } = f;
+      const inner = await arrive("egress-inner", innerResource, {
+        x: 389,
+        z: 426,
+      });
+      expect(inner.accepted).toBe(true);
+      expect(inner.tile).toEqual({ x: 391, z: 425 });
+      const initialEdges = edges(inner.player);
+      expect(initialEdges.filter((edge) => edge.legal).length).toBeGreaterThan(
+        0,
+      );
+      const southern = await arrive("egress-south", southernResource, {
+        x: 389,
+        z: 427,
+      });
+      expect(southern.accepted).toBe(true);
+      expect(southern.tile).toEqual({ x: 391, z: 426 });
+      const beforeFinalAdmission = edges(inner.player);
+      expect(beforeFinalAdmission.filter((edge) => edge.legal)).toEqual([
+        expect.objectContaining({ x: 390, z: 425 }),
+      ]);
+      const western = await arrive("egress-west", innerResource, {
+        x: 388,
+        z: 426,
+      });
+      const afterFinalAdmission = edges(inner.player);
+      const describeActor = (actor: typeof inner) => ({
+        id: actor.player.id,
+        accepted: actor.accepted,
+        ticks: actor.ticks,
+        resourceId: actor.resourceId,
+        tile: actor.tile,
+        gathering: actor.gathering,
+      });
+      console.log(
+        JSON.stringify({
+          phase: "authored-shoreline-egress-admission",
+          scope:
+            "real authored wet-target admission; no body-bound relocation or crowd-capacity claim",
+          targets: [innerResource, southernResource].map((resource) => ({
+            id: resource.id,
+            position: resource.position,
+            family: f.variant(resource),
+          })),
+          actors: [inner, southern, western].map(describeActor),
+          initialEdges,
+          beforeFinalAdmission,
+          afterFinalAdmission,
+        }),
+      );
+      expect
+        .soft(
+          afterFinalAdmission.some((edge) => edge.legal),
+          "Stationary admission closed the existing fisher's final legal departure edge",
+        )
+        .toBe(true);
+      // Use the real cancellation event before an ordinary departure intent;
+      // neither remaining fisher is vacated to manufacture a successful route.
+      f.world.emit(EventType.MOVEMENT_CLICK_TO_MOVE, {
+        playerId: inner.player.id,
+        targetPosition: tileToWorld({ x: 389, z: 427 }),
+      });
+      expect(
+        f.resources.isPlayerGatheringResource(
+          inner.player.id,
+          innerResource.id,
+        ),
+      ).toBe(false);
+      const departureAccepted = f.movement.movePlayerToward(
+        inner.player.id,
+        tileToWorld({ x: 389, z: 427 }),
+        true,
+      );
+      let departureTicks = 0;
+      const departed = () => {
+        const tile = worldToTile(
+          inner.player.position.x,
+          inner.player.position.z,
+        );
+        return tile.x === 389 && tile.z === 427;
+      };
+      for (
+        ;
+        departureTicks < 20 &&
+        !departed() &&
+        f.movement.hasMovementIntent(inner.player.id);
+        departureTicks++
+      ) {
+        f.world.currentTick++;
+        f.movement.onTick(f.world.currentTick);
+        expect(f.movement["_bfsIterationsThisTick"]).toBeLessThanOrEqual(1000);
+      }
+      console.log(
+        JSON.stringify({
+          phase: "authored-shoreline-egress-departure",
+          departureAccepted,
+          departureTicks,
+          departed: departed(),
+          position: inner.player.position.toArray(),
+          iterations: f.movement["pathfinder"].getLastIterationsUsed(),
+          failedExact: f.movement.hasFailedMovementTo(inner.player.id, {
+            x: 389,
+            z: 427,
+          }),
+        }),
+      );
+      expect.soft(departureAccepted).toBe(true);
+      expect.soft(departed()).toBe(true);
+    });
+
+    it("includes actual pending shore reservations when preserving an exit", async () => {
+      const f = await authoredShorelineFixture();
+      const inner = await f.arrive("reserved-inner", f.innerResource, {
+        x: 389,
+        z: 426,
+      });
+      expect(inner.accepted).toBe(true);
+      const southern = await f.addAngler("reserved-south", f.southernResource, {
+        tile: { x: 389, z: 430 },
+      });
+      expect(
+        f.pending.queuePendingGather(
+          southern.player.id,
+          f.southernResource.id,
+          f.world.currentTick,
+          false,
+        ),
+      ).toBe(true);
+      expect(
+        f.pending["pendingGathers"].get(southern.player.id)?.targetShoreTile,
+      ).toEqual({ x: 391, z: 426 });
+      expect(f.at(southern.player, { x: 391, z: 426 })).toBe(false);
+      expect(
+        f.world.entityOccupancy.getOccupant({ x: 391, z: 426 }),
+      ).toBeNull();
+      expect(f.pending["approachReservations"].get("391,426")?.playerId).toBe(
+        southern.player.id,
+      );
+      const western = await f.addAngler("reserved-west", f.innerResource, {
+        tile: { x: 388, z: 426 },
+      });
+      expect(
+        f.pending.isFishingStanceAvailable(western.player.id, {
+          x: 390,
+          z: 425,
+        }),
+      ).toBe(false);
+      const accepted = f.pending.queuePendingGather(
+        western.player.id,
+        f.innerResource.id,
+        f.world.currentTick,
+        false,
+      );
+      expect(
+        f.pending["approachReservations"].get("390,425")?.playerId,
+      ).not.toBe(western.player.id);
+      if (!accepted) {
+        expect(f.pending["pendingGathers"].has(western.player.id)).toBe(false);
+        expect(f.movement.hasMovementIntent(western.player.id)).toBe(false);
+      }
+      console.log(
+        JSON.stringify({
+          phase: "shore-egress-pending-reservation",
+          reservedSouth: f.pending["approachReservations"].get("391,426"),
+          southPosition: southern.player.position.toArray(),
+          westAccepted: accepted,
+          innerEdges: f.edges(inner.player),
+        }),
+      );
+    });
+
+    it("retains a stopped fisher's exit until the actual occupant departs", async () => {
+      const f = await authoredShorelineFixture();
+      const inner = await f.arrive("stopped-inner", f.innerResource, {
+        x: 389,
+        z: 426,
+      });
+      const southern = await f.arrive("stopped-south", f.southernResource, {
+        x: 389,
+        z: 427,
+      });
+      expect(inner.accepted && southern.accepted).toBe(true);
+      const western = await f.addAngler("stopped-west", f.innerResource, {
+        tile: { x: 388, z: 426 },
+      });
+      f.world.emit(EventType.MOVEMENT_CLICK_TO_MOVE, {
+        playerId: inner.player.id,
+        targetPosition: inner.player.position,
+      });
+      expect(
+        f.resources.isPlayerGatheringResource(
+          inner.player.id,
+          f.innerResource.id,
+        ),
+      ).toBe(false);
+      expect(f.movement.hasMovementIntent(inner.player.id)).toBe(false);
+      expect(
+        f.world.entityOccupancy.getOccupant({ x: 391, z: 425 })?.entityId,
+      ).toBe(inner.player.id);
+      expect(
+        f.pending.isFishingStanceAvailable(western.player.id, {
+          x: 390,
+          z: 425,
+        }),
+      ).toBe(false);
+      expect(
+        f.movement.movePlayerToward(
+          inner.player.id,
+          tileToWorld({ x: 389, z: 427 }),
+          false,
+        ),
+      ).toBe(true);
+      let ticks = 0;
+      while (ticks++ < 20 && !f.at(inner.player, { x: 389, z: 427 }))
+        f.advanceMovement(1);
+      expect(f.at(inner.player, { x: 389, z: 427 })).toBe(true);
+      expect(
+        f.world.entityOccupancy.getOccupant({ x: 391, z: 425 }),
+      ).toBeNull();
+      expect(
+        f.pending.isFishingStanceAvailable(western.player.id, {
+          x: 390,
+          z: 425,
+        }),
+      ).toBe(true);
+      expect(
+        f.pending.queuePendingGather(
+          western.player.id,
+          f.innerResource.id,
+          f.world.currentTick,
+          true,
+        ),
+      ).toBe(true);
+      for (
+        let tick = 0;
+        tick < 20 && f.pending["pendingGathers"].has(western.player.id);
+        tick++
+      ) {
+        f.advanceMovement(1);
+        f.pending.processTick(f.world.currentTick);
+      }
+      expect(
+        f.resources.isPlayerGatheringResource(
+          western.player.id,
+          f.innerResource.id,
+        ),
+      ).toBe(true);
+      expect(
+        f.resources.isPlayerGatheringResource(
+          southern.player.id,
+          f.southernResource.id,
+        ),
+      ).toBe(true);
+      console.log(
+        JSON.stringify({
+          phase: "shore-egress-stopped-until-departure",
+          departed: inner.player.position.toArray(),
+          newFisher: western.player.position.toArray(),
+          southernUnmoved: southern.player.position.toArray(),
+        }),
+      );
+    });
+
+    it("revalidates an unsafe real shore arrival before starting a session", async () => {
+      const f = await authoredShorelineFixture();
+      const inner = await f.arrive("arrival-inner", f.innerResource, {
+        x: 389,
+        z: 426,
+      });
+      expect(inner.accepted).toBe(true);
+      const western = await f.addAngler("arrival-west", f.innerResource, {
+        tile: { x: 388, z: 426 },
+      });
+      expect(
+        f.pending.queuePendingGather(
+          western.player.id,
+          f.innerResource.id,
+          f.world.currentTick,
+          false,
+        ),
+      ).toBe(true);
+      expect(
+        f.pending["pendingGathers"].get(western.player.id)?.targetShoreTile,
+      ).toEqual({ x: 390, z: 425 });
+      const ordinary = await f.addAngler(
+        "arrival-ordinary-walker",
+        f.southernResource,
+        { tile: { x: 391, z: 427 } },
+      );
+      expect(
+        f.movement.movePlayerToward(
+          ordinary.player.id,
+          tileToWorld({ x: 391, z: 426 }),
+          false,
+        ),
+      ).toBe(true);
+      // Let real movement finish before the delayed gather owner processes its
+      // arrival. Neither actor is repositioned and ordinary walking stays free.
+      let ticks = 0;
+      while (
+        ticks++ < 20 &&
+        (!f.at(western.player, { x: 390, z: 425 }) ||
+          !f.at(ordinary.player, { x: 391, z: 426 }))
+      )
+        f.advanceMovement(1);
+      expect(f.at(western.player, { x: 390, z: 425 })).toBe(true);
+      expect(f.at(ordinary.player, { x: 391, z: 426 })).toBe(true);
+      expect(f.pending["pendingGathers"].has(western.player.id)).toBe(true);
+      expect(
+        f.pending.isFishingStanceAvailable(western.player.id, {
+          x: 390,
+          z: 425,
+        }),
+      ).toBe(false);
+      f.pending.processTick(f.world.currentTick);
+      expect(
+        f.resources.isPlayerGatheringResource(
+          western.player.id,
+          f.innerResource.id,
+        ),
+      ).toBe(false);
+      expect(
+        f.pending["approachReservations"].get("390,425")?.playerId,
+      ).not.toBe(western.player.id);
+      expect(
+        f.resources.isPlayerGatheringResource(
+          inner.player.id,
+          f.innerResource.id,
+        ),
+      ).toBe(true);
+      expect(f.at(ordinary.player, { x: 391, z: 426 })).toBe(true);
+      console.log(
+        JSON.stringify({
+          phase: "shore-egress-final-arrival",
+          ticks,
+          arrived: western.player.position.toArray(),
+          ordinary: ordinary.player.position.toArray(),
+          gathering: f.resources.isPlayerGatheringResource(
+            western.player.id,
+            f.innerResource.id,
+          ),
+          pending: f.pending["pendingGathers"].get(western.player.id) ?? null,
+        }),
+      );
+    });
+
+    it("rejects direct resource admission at an unsafe occupied fishing stance", async () => {
+      const f = await authoredShorelineFixture();
+      const inner = await f.arrive("direct-inner", f.innerResource, {
+        x: 389,
+        z: 426,
+      });
+      const southern = await f.arrive("direct-south", f.southernResource, {
+        x: 389,
+        z: 427,
+      });
+      expect(inner.accepted && southern.accepted).toBe(true);
+      // Initial fixture placement represents an ordinary arrival that did not
+      // request a shore reservation. The resource owner must still reject it.
+      const western = await f.addAngler("direct-west", f.innerResource, {
+        tile: { x: 390, z: 425 },
+      });
+      expect(f.edges(inner.player).some((edge) => edge.legal)).toBe(false);
+      const before = [inner.player, southern.player, western.player].map(
+        (player) => player.position.toArray(),
+      );
+      const accepted = f.resources.requestGathering({
+        playerId: western.player.id,
+        resourceId: f.innerResource.id,
+        playerPosition: western.player.position,
+      });
+      expect(accepted).toBe(false);
+      expect(
+        f.resources.isPlayerGatheringResource(
+          western.player.id,
+          f.innerResource.id,
+        ),
+      ).toBe(false);
+      expect(
+        f.resources.isPlayerGatheringResource(
+          inner.player.id,
+          f.innerResource.id,
+        ),
+      ).toBe(true);
+      expect(
+        [inner.player, southern.player, western.player].map((player) =>
+          player.position.toArray(),
+        ),
+      ).toEqual(before);
+      console.log(
+        JSON.stringify({
+          phase: "shore-egress-direct-owner",
+          accepted,
+          positions: before,
+        }),
+      );
+    });
+
+    it("releases and rebinds the exclusive real resource stance validator safely", async () => {
+      const f = await authoredShorelineFixture();
+      const actualPolicy = (playerId: string, tile: { x: number; z: number }) =>
+        f.movement.hasGroundFloorExit(
+          playerId,
+          tile,
+          (step) => !f.movement.isTileAvailableForPlayer(playerId, step),
+        );
+      expect(() =>
+        f.resources.registerFishingPositionValidator(actualPolicy),
+      ).toThrow();
+      f.pending.destroy();
+      f.pending.destroy();
+      expect(
+        f.pending.isFishingStanceAvailable("retired-owner", { x: 390, z: 425 }),
+      ).toBe(false);
+      const completed: Array<EventMap[EventType.RESOURCE_GATHERING_COMPLETED]> =
+        [];
+      const onCompleted = (
+        event: EventMap[EventType.RESOURCE_GATHERING_COMPLETED],
+      ) => completed.push(event);
+      f.world.on(EventType.RESOURCE_GATHERING_COMPLETED, onCompleted);
+      routeOwnerReleases.push(() =>
+        f.world.off(EventType.RESOURCE_GATHERING_COMPLETED, onCompleted),
+      );
+      const gapActor = await f.addAngler(
+        "validator-gap-angler",
+        f.innerResource,
+        { tile: { x: 391, z: 425 } },
+      );
+      const gapAccepted = f.resources.requestGathering({
+        playerId: gapActor.player.id,
+        resourceId: f.innerResource.id,
+        playerPosition: gapActor.player.position,
+        completionAttemptId: "b631b234-dd0c-40b9-8e9e-c54a48135bb0",
+      });
+      expect(gapAccepted).toBe(false);
+      expect(completed).toEqual([
+        expect.objectContaining({
+          playerId: gapActor.player.id,
+          successful: false,
+          failureReason: "fishing_authority_unavailable",
+        }),
+      ]);
+      expect(
+        f.resources.isPlayerGatheringResource(
+          gapActor.player.id,
+          f.innerResource.id,
+        ),
+      ).toBe(false);
+      f.movement.cleanup(gapActor.player.id);
+      expect(f.world.entities.remove(gapActor.player.id)).toBe(true);
+      const oldRelease =
+        f.resources.registerFishingPositionValidator(actualPolicy);
+      expect(() =>
+        f.resources.registerFishingPositionValidator(actualPolicy),
+      ).toThrow();
+      oldRelease();
+      const replacement = new PendingGatherManager(
+        f.world,
+        f.movement,
+        (name, data) => f.packets.push({ name, data }),
+      );
+      routeOwnerReleases.push(() => replacement.destroy());
+      // A stale token must not detach the replacement's live validator.
+      oldRelease();
+      expect(() =>
+        f.resources.registerFishingPositionValidator(actualPolicy),
+      ).toThrow();
+      const actor = await f.addAngler("rebound-angler", f.innerResource, {
+        tile: { x: 389, z: 426 },
+      });
+      expect(
+        replacement.queuePendingGather(
+          actor.player.id,
+          f.innerResource.id,
+          f.world.currentTick,
+          true,
+        ),
+      ).toBe(true);
+      for (
+        let tick = 0;
+        tick < 20 && replacement["pendingGathers"].has(actor.player.id);
+        tick++
+      ) {
+        f.advanceMovement(1);
+        replacement.processTick(f.world.currentTick);
+      }
+      expect(
+        f.resources.isPlayerGatheringResource(
+          actor.player.id,
+          f.innerResource.id,
+        ),
+      ).toBe(true);
+      replacement.destroy();
+      replacement.destroy();
+      const releaseAfterReplacement =
+        f.resources.registerFishingPositionValidator(actualPolicy);
+      releaseAfterReplacement();
+      console.log(
+        JSON.stringify({
+          phase: "shore-egress-validator-lifecycle",
+          gapAccepted,
+          gapFailureReason: completed[0].failureReason,
+          reboundGathering: true,
+          staleReleaseKeptReplacement: true,
+        }),
+      );
+    });
+
     it.each(["static-lease", "player-occupancy"] as const)(
       "refreshes same-tick collision caches without a pending observer after %s changes",
       async (kind) => {
@@ -2458,6 +3108,7 @@ describe("real fishing approach admission (CPU, not basin crowd/reward acceptanc
     );
     expect(boundary).toBeDefined();
     const player = f.addAngler("boundary-angler", boundary!);
+    const nearerBlocked: Array<{ x: number; z: number }> = [];
     for (let dx = -4; dx <= 4; dx++)
       for (let dz = -4; dz <= 4; dz++) {
         const tile = { x: anchor.x + dx, z: anchor.z + dz };
@@ -2467,8 +3118,30 @@ describe("real fishing approach admission (CPU, not basin crowd/reward acceptanc
             GATHERING_CONSTANTS.FISHING_INTERACTION_RANGE &&
           f.movement.isTileAvailableForPlayer("boundary-blocker", tile)
         )
-          f.addAngler(`boundary-blocker-${dx}-${dz}`, tile);
+          nearerBlocked.push(tile);
       }
+    // Isolate interaction range with real static obstacles, not a crowd whose
+    // already-trapped members would correctly reject a new stationary stance.
+    const lease = f.world.collision.acquireStaticFootprint(nearerBlocked);
+    routeOwnerReleases.push(() => {
+      lease.release();
+    });
+    const outward = {
+      x: boundary!.x + Math.sign(boundary!.x - anchor.x),
+      z: boundary!.z + Math.sign(boundary!.z - anchor.z),
+    };
+    expect(
+      calculateDistance2D(tileToWorld(outward), f.resource.position),
+    ).toBeGreaterThan(GATHERING_CONSTANTS.FISHING_INTERACTION_RANGE);
+    expect(
+      f.movement["isTileTraversableForPlayer"](
+        player.id,
+        outward,
+        0,
+        boundary!,
+      ),
+    ).toBe(true);
+    expect(f.pending.isFishingStanceAvailable(player.id, boundary!)).toBe(true);
     expect(calculateDistance2D(player.position, f.resource.position)).toBe(
       GATHERING_CONSTANTS.FISHING_INTERACTION_RANGE,
     );
