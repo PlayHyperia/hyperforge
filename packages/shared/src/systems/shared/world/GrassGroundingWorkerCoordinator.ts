@@ -710,7 +710,8 @@ export class GrassGroundingWorkerCoordinator {
         layout.topologyOffsetCount > 0
           ? (Math.ceil(layout.indexCount / 24) + (layout.resolution - 1) ** 2) *
               96 +
-            layout.topologyOffsetCount * 12
+            layout.topologyOffsetCount * 12 +
+            (layout.resolution - 1) ** 2
           : 0;
       ensure(
         !cached ||

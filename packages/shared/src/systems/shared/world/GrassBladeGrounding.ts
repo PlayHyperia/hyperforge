@@ -780,9 +780,10 @@ export function* groundGrassBladeSteps(
   };
   const edgeError = function* (a: Point, b: Point) {
     // A convex face contains the entire segment when both endpoints are safely
-    // interior. Keep the original clipper for boundaries, noncanonical cells,
-    // multiple owners and poorly conditioned arithmetic. Thin refined faces
-    // can intersect a neighbour's clipping tolerance despite this margin.
+    // interior. Keep the original clipper for boundaries, multiple owners and
+    // poorly conditioned arithmetic. Refined faces require the separate
+    // whole-cell certificate: endpoint equality alone cannot exclude a thin
+    // neighbour's clipping tolerance.
     // An indexed owner may contain untouched canonical cells. Admit one only
     // when this exact query's bounds prove the old cursor visits that cell
     // alone, so a refined neighbour cannot contribute through its tolerance.
@@ -803,15 +804,24 @@ export function* groundGrassBladeSteps(
         canonicalBounds.minZ = Math.min(a.z, b.z) - owner.centerZ;
         canonicalBounds.maxZ = Math.max(a.z, b.z) - owner.centerZ;
       }
-      if (
-        owner.isRegularGrid
+      const canonicalInterior = owner.isRegularGrid
           ? owner.readTriangle(leftFace.faceIndex, triangle)
           : owner.readCanonicalTriangleInBounds(
               leftFace.faceIndex,
               canonicalBounds,
               triangle,
-            )
-      ) {
+            ),
+        refinedInterior =
+          !canonicalInterior &&
+          owner.readGroundingInteriorTriangle(
+            leftFace.faceIndex,
+            a.x,
+            a.z,
+            b.x,
+            b.z,
+            triangle,
+          );
+      if (canonicalInterior || refinedInterior) {
         const [ax, ay, az, bx, by, bz, cx, cy, cz] = triangle;
         const dx = b.x - a.x,
           dz = b.z - a.z,
@@ -825,10 +835,11 @@ export function* groundGrassBladeSteps(
         const spanX = Math.abs(cx - bx),
           spanZ = Math.abs(bz - az);
         if (
-          spanX > 0 &&
-          spanZ > 0 &&
-          spanX <= 2 * spanZ &&
-          spanZ <= 2 * spanX &&
+          (refinedInterior ||
+            (spanX > 0 &&
+              spanZ > 0 &&
+              spanX <= 2 * spanZ &&
+              spanZ <= 2 * spanX)) &&
           Number.isFinite(det) &&
           Math.abs(det) > determinantScale * Number.EPSILON * 64
         ) {

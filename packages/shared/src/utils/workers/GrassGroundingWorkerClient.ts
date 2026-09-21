@@ -284,11 +284,13 @@ function snapshot(value: unknown): Owner {
       "Invalid grounding topology offsets",
     );
     inputBytes += t.cellIndexOffsets.byteLength;
-    // Same conservative retained-index reservation as receiver admission. This
-    // excludes validation/fitting scratch and is not a complete JS/GPU heap cap.
+    // Same conservative retained-index reservation as receiver admission,
+    // including one qualification byte for every topology cell. This excludes
+    // validation/fitting scratch and is not a complete JS/GPU heap cap.
     derivedBytesReserved =
       (Math.ceil(s.indices.length / 24) + (s.resolution - 1) ** 2) * 96 +
-      t.cellIndexOffsets.length * 12;
+      t.cellIndexOffsets.length * 12 +
+      (s.resolution - 1) ** 2;
   }
   ensure(
     inputBytes === s.payloadBytes,

@@ -2497,6 +2497,228 @@ describe("retained grounding edge block traversal", () => {
     return { allFaces, candidates, blocks, actual };
   };
 
+  it.each([0, 1, 2, 3])(
+    "certifies refined interiors and qualified tails against the exhaustive clipper (splits=%i)",
+    (tailSplits) => {
+      const geometry = denseEdgeGeometry(false, tailSplits);
+      try {
+        for (const center of [0, 350, 2 ** 20 - 2, -(2 ** 20) + 2]) {
+          const surface = new RetainedTerrainSurface(
+              1,
+              "refined-interior",
+              center,
+              center,
+              2,
+              3,
+              geometry,
+            ),
+            triangle: TerrainGridTriangle = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            out: TerrainGridTriangle = [9, 8, 7, 6, 5, 4, 3, 2, 1, 0],
+            faceCount = geometry.getIndex()!.count / 3;
+          expect(surface.groundingEdgeIndexStats?.qualifiedCells).toBe(4);
+          for (let face = 0; face < faceCount; face++) {
+            expect(surface.readTriangle(face, triangle)).toBe(true);
+            const edge: Edge = [
+              center +
+                triangle[0] * 0.5 +
+                triangle[3] * 0.25 +
+                triangle[6] * 0.25,
+              center +
+                triangle[2] * 0.5 +
+                triangle[5] * 0.25 +
+                triangle[8] * 0.25,
+              center +
+                triangle[0] * 0.25 +
+                triangle[3] * 0.5 +
+                triangle[6] * 0.25,
+              center +
+                triangle[2] * 0.25 +
+                triangle[5] * 0.5 +
+                triangle[8] * 0.25,
+            ];
+            expect(
+              surface.readGroundingInteriorTriangle(face, ...edge, out),
+            ).toBe(true);
+            expect(out).toEqual(triangle);
+            const expected = clip(triangle, edge, center, center);
+            expect(expected?.slice(0, 3)).toEqual([face, 0, 1]);
+            expect(collect(surface, edge).actual).toEqual([expected]);
+            expect(
+              surface.readGroundingInteriorTriangle(
+                face,
+                edge[2],
+                edge[3],
+                edge[0],
+                edge[1],
+                out,
+              ),
+            ).toBe(true);
+          }
+        }
+      } finally {
+        geometry.dispose();
+      }
+    },
+  );
+
+  it("rejects inset boundaries, coarse-cell ties and unsupported domains without touching output", () => {
+    const geometry = denseEdgeGeometry();
+    try {
+      const surface = new RetainedTerrainSurface(
+          1,
+          "interior-boundaries",
+          0,
+          0,
+          2,
+          3,
+          geometry,
+        ),
+        initial: TerrainGridTriangle = [9, 8, 7, 6, 5, 4, 3, 2, 1, -1],
+        out: TerrainGridTriangle = [...initial],
+        envelope = 4 * (2 ** 17 * (1e-10 + 2 ** -48) + 2 ** -24) + 2 ** -27,
+        threshold = -1 + envelope + 2 ** -38 / 0.25;
+      for (const x of [
+        adjacentHeightQuery(threshold, -1),
+        threshold,
+        adjacentHeightQuery(threshold, 1),
+      ]) {
+        const admitted = 0.25 * (x + 1) > 0.25 * envelope + 2 ** -38;
+        expect(
+          surface.readGroundingInteriorTriangle(0, x, -0.875, x, -0.875, out),
+        ).toBe(admitted);
+        if (!admitted) expect(out).toEqual(initial);
+        else {
+          expect(
+            collect(surface, [x, -0.875, x, -0.875]).actual.map((row) =>
+              row.slice(0, 3),
+            ),
+          ).toEqual([[0, 0, 1]]);
+          out.splice(0, out.length, ...initial);
+        }
+      }
+      for (const edge of [
+        [-1, -0.9, -0.95, -0.9],
+        [-0.875, -0.875, -0.875, -0.875],
+        [-0.9, -1, -0.9, -0.95],
+        [0, -0.1, -0.1, -0.1],
+        [-0.9, -0.9, 2, -0.9],
+        [NaN, -0.9, -0.9, -0.9],
+        [Infinity, -0.9, -0.9, -0.9],
+        [2 ** 20 + 1, 0, 2 ** 20 + 1, 0],
+      ] as Edge[]) {
+        expect(surface.readGroundingInteriorTriangle(0, ...edge, out)).toBe(
+          false,
+        );
+        expect(out).toEqual(initial);
+      }
+      for (const face of [-1, 0.5, 128, Number.MAX_SAFE_INTEGER]) {
+        expect(
+          surface.readGroundingInteriorTriangle(
+            face,
+            -0.9,
+            -0.9,
+            -0.9,
+            -0.9,
+            out,
+          ),
+        ).toBe(false);
+        expect(out).toEqual(initial);
+      }
+    } finally {
+      geometry.dispose();
+    }
+  });
+
+  it("rejects a qualified face when a different parent in its cell is skinny", () => {
+    const geometry = denseEdgeGeometry(true);
+    try {
+      const surface = new RetainedTerrainSurface(
+          1,
+          "partial-cell",
+          0,
+          0,
+          2,
+          3,
+          geometry,
+        ),
+        triangle: TerrainGridTriangle = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        initial: TerrainGridTriangle = [9, 8, 7, 6, 5, 4, 3, 2, 1, -1],
+        out: TerrainGridTriangle = [...initial];
+      expect(surface.groundingEdgeIndexStats?.qualifiedCells).toBe(2);
+      expect(surface.readTriangle(28, triangle)).toBe(true);
+      const x = (triangle[0] + triangle[3] + triangle[6]) / 3,
+        z = (triangle[2] + triangle[5] + triangle[8]) / 3;
+      expect(
+        collect(surface, [x, z, x, z]).actual.map((row) => row.slice(0, 3)),
+      ).toEqual([[28, 0, 1]]);
+      expect(surface.readGroundingInteriorTriangle(28, x, z, x, z, out)).toBe(
+        false,
+      );
+      expect(out).toEqual(initial);
+    } finally {
+      geometry.dispose();
+    }
+  });
+
+  it.each([
+    "position",
+    "index",
+    "position-version",
+    "index-version",
+    "topology",
+    "descriptor",
+  ])(
+    "rejects stale refined-interior %s ownership before reading its certificate",
+    (mutation) => {
+      const geometry = denseEdgeGeometry();
+      try {
+        const surface = new RetainedTerrainSurface(
+            1,
+            "stale-interior",
+            0,
+            0,
+            2,
+            3,
+            geometry,
+          ),
+          initial: TerrainGridTriangle = [9, 8, 7, 6, 5, 4, 3, 2, 1, -1],
+          out: TerrainGridTriangle = [...initial];
+        if (mutation === "position")
+          geometry.setAttribute(
+            "position",
+            geometry.getAttribute("position").clone(),
+          );
+        else if (mutation === "index")
+          geometry.setIndex(geometry.getIndex()!.clone());
+        else if (mutation === "position-version")
+          geometry.getAttribute("position").needsUpdate = true;
+        else if (mutation === "index-version")
+          geometry.getIndex()!.needsUpdate = true;
+        else if (mutation === "topology")
+          geometry.userData.terrainCellTopology = Object.freeze({
+            ...geometry.userData.terrainCellTopology,
+          });
+        else
+          Object.defineProperty(geometry.userData, "terrainCellTopology", {
+            enumerable: false,
+          });
+        expect(() =>
+          surface.readGroundingInteriorTriangle(
+            0,
+            -0.9,
+            -0.9,
+            -0.91,
+            -0.9,
+            out,
+          ),
+        ).toThrow("changed during admission");
+        expect(out).toEqual(initial);
+      } finally {
+        geometry.dispose();
+      }
+    },
+  );
+
   it.each([false, true])(
     "preserves exact legacy clipping, order and height for dyadic and skinny blocks (skinny=%s)",
     (skinny) => {
@@ -2573,17 +2795,19 @@ describe("retained grounding edge block traversal", () => {
       expect(surface.groundingEdgeIndexStats).toEqual({
         blocks: 16,
         qualifiedBlocks: 16,
+        qualifiedCells: 4,
+        cellQualificationBytes: 4,
         childSlots: 32,
         qualifiedChildren: 32,
         childBytes: 16 * 8 * 8,
         childBoundFaceVisits: 128,
-        bytes: 16 * 12 * 8 + 5 * 4,
-        admissionSteps: 19,
+        bytes: 16 * 12 * 8 + 5 * 4 + 4,
+        admissionSteps: 20,
       });
       expect(
         phases.filter((phase) => phase.startsWith("grounding-edge-index-"))
           .length,
-      ).toBe(19);
+      ).toBe(20);
       const result = collect(surface, [-1, -1, 1, 1]);
       expect(result.allFaces).toEqual(
         Array.from({ length: 128 }, (_, index) => index),
@@ -2685,12 +2909,14 @@ describe("retained grounding edge block traversal", () => {
         expect(surface.groundingEdgeIndexStats).toEqual({
           blocks: 20,
           qualifiedBlocks: 20,
+          qualifiedCells: 4,
+          cellQualificationBytes: 4,
           childSlots: 40,
           qualifiedChildren: tailSplits === 3 ? 40 : 32,
           childBytes: 20 * 8 * 8,
           childBoundFaceVisits: tailSplits === 3 ? 152 : 128,
-          bytes: 20 * 12 * 8 + 5 * 4,
-          admissionSteps: 23,
+          bytes: 20 * 12 * 8 + 5 * 4 + 4,
+          admissionSteps: 24,
         });
         for (const edge of [
           [-1, -1, 1, 1],

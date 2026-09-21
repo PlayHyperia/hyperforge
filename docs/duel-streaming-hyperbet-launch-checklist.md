@@ -2300,6 +2300,68 @@ Reference checks: [ECMAScript arithmetic](https://tc39.es/ecma262/multipage/ecma
 [Three attribute-version contract](https://threejs.org/docs/pages/BufferAttribute.html#version).
 The numerical proof and actual tests, not references alone, establish parity.
 
+### Refined face fitting — exact geometry, startup reliability still open
+
+**World first; compact island only; one arena; SOL only.** This is a bounded
+CPU-work improvement, not a visual-quality or production-performance milestone.
+
+- [x] Retain native74's original startup failure: two LOD0 cells exhausted the
+  unchanged 250 ms fitting cap (262.6 / 250.5 ms elapsed synchronous-slice time).
+  No shadow comparison was reached. Add both exact cells to the actual-terrain
+  fixture, including startup LOD focus, owner order and dock exclusions.
+- [x] Qualify strictly interior refined-face edges conservatively at admission.
+  Preserve original endpoint arithmetic, boundary/skinny/multi-owner fallbacks
+  and lifetime checks. Charge one extra admission step and 16,129 metadata bytes
+  per resolution-128 owner in worker, client and coordinator; no cap increase.
+- [x] 601 unique tests pass: 203 surface/same-face, 390 grounding/worker/manager,
+  and eight actual pond cases. All 160 independent output-array hashes match.
+  Full shared plus explicit changed tests: 726 roots / 2,747 sources, zero
+  diagnostics; scoped lint/format pass. Cold reconstruction remains separate:
+  three candidate observations exhaust their original cap; no failed prefix
+  is compared to completed work or called a passing fit.
+- [x] Completed geometric work falls 19–25% in six dense shoreline cases, but
+  only 0.38% / 0.31% in the newest two cells. Those small reductions do NOT
+  establish that native74's intermittent failure is fixed. CPU timings vary.
+- [x] Build40/native75 passes the original startup (38.515 s, all 122 cells)
+  and four camera gates (6.006 / 2.648 / 1.772 / 2.645 s). Actual Chrome/Metal
+  WebGPU, unchanged camera/render settings, 65/90/71/86 chunks and
+  61,453/79,706/66,254/75,996 clumps match native73. Main maximum slice8.6ms;
+  admission maximum4.1ms. These are observations, not controlled speedups.
+- [ ] Overview exposure differs2.4912e-5 from native73, outside the original
+  1e-6 tolerance. No locked-image, frame-rate, sustained movement, cache/heap,
+  stream, reliability-tail or AAA acceptance. Root reviewed all four images:
+  shadow plaid, bare bank ribbon, sparse planting and pavilion arrival remain.
+- [ ] Compact-shadow native76 passes startup40.513s and the overview grass gate,
+  but its finite A/B stops at zero bias because the unchanged production render
+  profile correctly rejects that experimental setting. Baseline image retained;
+  no complete pair or source change. Bias/phase/camera/clock restored; browser
+  closed. Correct only the private diagnostic admission, then repeat the
+  five-view/three-phase comparison with original grass/convergence limits.
+- [ ] Native77 also passes startup37.762s and the overview grass gate, then
+  stops at a diagnostic frame-stamp mismatch after the baseline screenshot.
+  No zero-bias state is captured. The private check now compares the actual
+  main render-list and shadow stamps, with a strictly newer selection-frame
+  requirement; global animation ticks can advance without a render. Reviewed
+  against installed Three sources, but this diagnostic correction is not yet
+  runtime-qualified. All original failures remain retained.
+- [ ] User-requested deliverable: a polished60-second cinematic of the actual
+  current island at the highest clean native resolution, targeting4K. A
+  separate capture agent owns GPU work; this is a progress video, not a
+  gameplay, streaming, AAA or production-performance benchmark. No upscaling,
+  shadow overrides, changed world assets or promotional readiness claims.
+- [ ] NEXT: complete shadow qualification, then unequal shoreline plant/rock
+  masses and pavilion arrival while preserving all fishing and dry routes.
+  If exact-cell fitting failures recur, profile the whole-clump swept-envelope
+  loop in the actual worker before another optimization. No density/resolution
+  cuts, raised limits, default promotion, merge, deployment or installation.
+
+Evidence: service-layout-network01 `refined-edge-*`, `compact-shadow-native74/76`;
+inland pond `build40`, `native74–76`, isolated `runtime53/54`. Failed baseline01
+fixture/setup and original native failures are retained. Protected playable
+localhost:3333, canonical outputs, lock and unrelated changes remain untouched.
+Runtime53 is cleaned; runtime54 is temporarily owned for the requested world
+cinematic, not a replacement for the human playable session. Goal remains active.
+
 ### Inland fishing integration — candidate only
 
 The detached candidate now requests 14 real fishing entities, two for each of

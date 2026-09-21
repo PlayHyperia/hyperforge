@@ -469,9 +469,12 @@ type GroundingEdgeBlocks = {
   cellOffsets: Uint32Array;
   bounds: Float64Array;
   childBounds: Float64Array;
+  fullyQualifiedCells: Uint8Array;
   stats: Readonly<{
     blocks: number;
     qualifiedBlocks: number;
+    qualifiedCells: number;
+    cellQualificationBytes: number;
     childSlots: number;
     qualifiedChildren: number;
     childBytes: number;
@@ -494,6 +497,7 @@ function* buildGroundingEdgeBlocks(
     cellOffsets = new Uint32Array(offsets.length);
   let blocks = 0,
     qualifiedBlocks = 0,
+    qualifiedCells = 0,
     qualifiedChildren = 0,
     childBoundFaceVisits = 0,
     admissionSteps = 0;
@@ -520,7 +524,12 @@ function* buildGroundingEdgeBlocks(
   yield "grounding-edge-index-child-allocation";
   checkCurrent();
   const childBounds = new Float64Array(blocks * 8);
+  admissionSteps++;
+  yield "grounding-edge-index-cell-qualification-allocation";
+  checkCurrent();
+  const fullyQualifiedCells = new Uint8Array(offsets.length - 1);
   for (let cell = 0; cell < offsets.length - 1; cell++) {
+    let allQualified = cellOffsets[cell] < cellOffsets[cell + 1];
     for (
       let block = cellOffsets[cell];
       block < cellOffsets[cell + 1];
@@ -611,24 +620,35 @@ function* buildGroundingEdgeBlocks(
           }
         }
       } else {
+        allQualified = false;
         // Nonfinite sentinel means no broad-phase test, not infinite padding.
         bounds[k] = NaN;
       }
+    }
+    if (allQualified) {
+      fullyQualifiedCells[cell] = 1;
+      qualifiedCells++;
     }
   }
   return {
     cellOffsets,
     bounds,
     childBounds,
+    fullyQualifiedCells,
     stats: Object.freeze({
       blocks,
       qualifiedBlocks,
+      qualifiedCells,
+      cellQualificationBytes: fullyQualifiedCells.byteLength,
       childSlots: blocks * 2,
       qualifiedChildren,
       childBytes: childBounds.byteLength,
       childBoundFaceVisits,
       bytes:
-        cellOffsets.byteLength + bounds.byteLength + childBounds.byteLength,
+        cellOffsets.byteLength +
+        bounds.byteLength +
+        childBounds.byteLength +
+        fullyQualifiedCells.byteLength,
       admissionSteps,
     }),
   };
@@ -1424,6 +1444,113 @@ export class RetainedTerrainSurface {
       maxZ >= p[(a + r) * 3 + 2]
     )
       return false;
+    return this.readTriangle(faceIndex, out);
+  }
+
+  /** Certify one strictly interior refined face for the grounding clipper.
+   * All faces in the original cursor's sole cell must have its numerical
+   * qualification. Small, boundary, skinny or unsupported queries fall back;
+   * rejection never writes out and no geometry cache escapes this call. */
+  readGroundingInteriorTriangle(
+    faceIndex: number,
+    aWorldX: number,
+    aWorldZ: number,
+    bWorldX: number,
+    bWorldZ: number,
+    out: TerrainGridTriangle,
+  ): boolean {
+    const blocks = this.groundingEdgeBlocks;
+    if (!blocks || blocks.stats.qualifiedCells === 0) return false;
+    if (
+      !Number.isSafeInteger(faceIndex) ||
+      faceIndex < 0 ||
+      !Number.isFinite(aWorldX) ||
+      Math.abs(aWorldX) > 2 ** 20 ||
+      !Number.isFinite(aWorldZ) ||
+      Math.abs(aWorldZ) > 2 ** 20 ||
+      !Number.isFinite(bWorldX) ||
+      Math.abs(bWorldX) > 2 ** 20 ||
+      !Number.isFinite(bWorldZ) ||
+      Math.abs(bWorldZ) > 2 ** 20 ||
+      !Number.isFinite(this.centerX) ||
+      Math.abs(this.centerX) > 2 ** 20 ||
+      !Number.isFinite(this.centerZ) ||
+      Math.abs(this.centerZ) > 2 ** 20 ||
+      Math.abs(bWorldX - aWorldX) > 2 ||
+      Math.abs(bWorldZ - aWorldZ) > 2
+    )
+      return false;
+    const ax = aWorldX - this.centerX,
+      az = aWorldZ - this.centerZ,
+      bx = bWorldX - this.centerX,
+      bz = bWorldZ - this.centerZ,
+      minX = Math.min(aWorldX, bWorldX) - this.centerX,
+      maxX = Math.max(aWorldX, bWorldX) - this.centerX,
+      minZ = Math.min(aWorldZ, bWorldZ) - this.centerZ,
+      maxZ = Math.max(aWorldZ, bWorldZ) - this.centerZ,
+      half = this.size / 2;
+    if (
+      Math.abs(ax) > 64 ||
+      Math.abs(az) > 64 ||
+      Math.abs(bx) > 64 ||
+      Math.abs(bz) > 64 ||
+      maxX < -half ||
+      minX > half ||
+      maxZ < -half ||
+      minZ > half
+    )
+      return false;
+    this.checkGroundingEdgeCurrent();
+    const offsets = this.topology!.cellIndexOffsets,
+      faceOffset = faceIndex * 3;
+    if (faceOffset >= offsets[offsets.length - 1]) return false;
+    let lo = 0,
+      hi = offsets.length - 1;
+    while (lo + 1 < hi) {
+      const mid = (lo + hi) >>> 1;
+      if (offsets[mid] <= faceOffset) lo = mid;
+      else hi = mid;
+    }
+    if (blocks.fullyQualifiedCells[lo] !== 1) return false;
+    const p = this.positions,
+      r = this.resolution,
+      corner = (Math.floor(lo / (r - 1)) * r + (lo % (r - 1))) * 3;
+    // Identical extrema/subtraction order to createGroundingEdgeCursor.
+    // Strict bounds exclude all adjacent coarse cells, including ties.
+    if (
+      minX <= p[corner] ||
+      maxX >= p[corner + 3] ||
+      minZ <= p[corner + 2] ||
+      maxZ >= p[corner + r * 3 + 2]
+    )
+      return false;
+    const indices = this.refinedIndices!;
+    // The legacy envelope bounds distance to the convex hull, not only its
+    // AABB: accepted exact barycentrics sum to one and each is >= -beta.
+    // Normalize their positive parts; negative mass <=2*beta and spans <=2
+    // give an L-infinity displacement <=4*beta. The existing envelope also
+    // includes world/local trajectory rounding. Both endpoints' E-squares
+    // strictly inside this face keep that square inside along the segment;
+    // validated nonoverlapping topology then excludes every other face.
+    for (let edge = 0; edge < 3; edge++) {
+      const a = indices[faceOffset + edge] * 3,
+        b = indices[faceOffset + ((edge + 1) % 3)] * 3,
+        ex = p[b] - p[a],
+        ez = p[b + 2] - p[a + 2],
+        margin =
+          GROUNDING_EDGE_ENVELOPE * (Math.abs(ex) + Math.abs(ez)) + 2 ** -38;
+      // Direct numerator error is <2^-40 in this domain; 2^-38 also covers
+      // threshold rounding. Positive orientation is admission-proven.
+      if (
+        ez * (ax - p[a]) - ex * (az - p[a + 2]) <= margin ||
+        ez * (bx - p[a]) - ex * (bz - p[a + 2]) <= margin
+      )
+        return false;
+    }
+    // Each altitude in this L-infinity form is <=2, so the inset also gives
+    // exact barycentrics >E/2, above the <2^-24 affine evaluation error.
+    // The original own-face clip is therefore exactly [0,1]. The caller must
+    // retain its original u0/v0/du/dv and endpoint-height expression/order.
     return this.readTriangle(faceIndex, out);
   }
 

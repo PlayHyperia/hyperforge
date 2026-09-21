@@ -859,8 +859,11 @@ describe("bounded indexed edge cursor batches", () => {
           );
         expect(sync.result.status).toBe("ready");
         expect(sync.result.receipt.retainedClumps).toBeGreaterThan(0);
-        expect(sync.result.receipt.sameFaceEdges).toBe(0);
+        expect(sync.result.receipt.sameFaceEdges).toBeGreaterThan(0);
         expect(sync.result.receipt.triangleVisits).toBeGreaterThan(0);
+        expect(sync.result.receipt.triangleVisits).toBeLessThan(
+          legacy.result.receipt.triangleVisits,
+        );
         expect(sameFaceHash(sync.result)).toBe(sameFaceHash(legacy.result));
         const job = new GrassBladeGroundingJob(fixture.request, () =>
           fixture.owned.every(({ surface, geometry }) =>
@@ -907,7 +910,9 @@ describe("bounded indexed edge cursor batches", () => {
   )(
     "stops $mutation at indexed batch yield $batch without further work or publication",
     ({ mutation, batch }) => {
-      const fixture = createDenseIndexedBatchCase();
+      // The first cell is deliberately uncertified, retaining the exact
+      // indexed fallback suspension this lifetime test targets.
+      const fixture = createDenseIndexedBatchCase("skinny");
       try {
         const job = new GrassBladeGroundingJob(fixture.request, () =>
           fixture.owned.every(({ surface, geometry }) =>
@@ -950,7 +955,7 @@ describe("bounded indexed edge cursor batches", () => {
   );
 
   it("charges every indexed step at each position inside both first four-step batches", () => {
-    const fixture = createDenseIndexedBatchCase();
+    const fixture = createDenseIndexedBatchCase("skinny");
     try {
       const current = () =>
           fixture.owned.every(({ surface, geometry }) =>

@@ -873,6 +873,52 @@ describe("explicit actual-worker retained terrain preparation", () => {
   });
 
   it.each([
+    { name: "legacy", indexed: false, refined: false, reserved: 0 },
+    { name: "coarse topology", indexed: true, refined: false, reserved: 1281 },
+    { name: "fan topology", indexed: true, refined: true, reserved: 1473 },
+  ])(
+    "reserves exact derived bytes for $name, including topology cell qualification",
+    async ({ indexed, refined, reserved }) => {
+      // Nine real cells. Both topology fixtures have fewer than nine faces per
+      // cell, so their qualification arrays exist even with zero edge blocks.
+      // Legacy geometry has no topology index and reserves no derived bytes.
+      const grid = authoredGrid(4, indexed, refined);
+      try {
+        const worker = await actualWorker();
+        const snapshot = copySurface(grid.surface),
+          payloadBytes = snapshot.payloadBytes;
+        const response = await prepare(worker, {
+          type: "prepare_surface",
+          schemaVersion: 1,
+          jobId: 1,
+          generation: 1,
+          token: 1,
+          snapshot,
+          consumed: { operations: 0, activeMs: 0, maximumSliceMs: 0 },
+        });
+        expect(response.state.status).toBe("prepared");
+        expect(response.inputBytes).toBe(payloadBytes);
+        expect(response.derivedBytesReserved).toBe(reserved);
+        expect(response.cache).toEqual({
+          owners: 1,
+          inputBytes: payloadBytes,
+          derivedBytesReserved: reserved,
+        });
+        if (indexed) {
+          expect(grid.surface.groundingEdgeIndexStats).toMatchObject({
+            blocks: 0,
+            qualifiedBlocks: 0,
+            bytes: 49, // ten Uint32 offsets + nine Uint8 qualification flags
+          });
+        } else expect(grid.surface.groundingEdgeIndexStats).toBeNull();
+        expect(grid.surface.matchesGeometry(grid.geometry)).toBe(true);
+      } finally {
+        grid.dispose();
+      }
+    },
+  );
+
+  it.each([
     {
       target: "owners",
       resolution: 16,

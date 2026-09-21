@@ -321,6 +321,58 @@ const cases = [
         "Historical failed prefix, not completed input/retained counts or total fitting work.",
     },
   },
+  {
+    name: "native74 startup LOD0 western arena approach work budget",
+    test: "grounds the exact native74 western failed cell with unchanged fitting limits",
+    enabled: process.env.ASSETS_DIR?.endsWith(
+      "/inland-pond-integration01-UNQUALIFIED/assets-v9",
+    ),
+    label: "NATIVE74_LOD0_WEST_APPROACH",
+    // The original cell crosses z400 through its swept halo. Its own southern
+    // leaf is first, matching the actual startup focus and retained owner.
+    nodes: [
+      [350, 450],
+      [350, 350],
+    ],
+    focus: [335, 431],
+    lod: 0,
+    key: "gcell_v1_13_16",
+    bounds: { minX: 325, maxX: 350, minZ: 400, maxZ: 425 },
+    native74: {
+      source: "native74/process.json",
+      sourceSHA256:
+        "91ceeaecf76bb42a609ee88e7efb7686fc0e89d0899586154723adf42b12c375",
+      failedOperations: 104733,
+      failedActiveMs: 262.6000008583069,
+      scope:
+        "Historical remote-fitting failed prefix, not completed counts or actual CPU utilization.",
+    },
+  },
+  {
+    name: "native74 startup LOD0 eastern arena approach work budget",
+    test: "grounds the exact native74 eastern failed cell with unchanged fitting limits",
+    enabled: process.env.ASSETS_DIR?.endsWith(
+      "/inland-pond-integration01-UNQUALIFIED/assets-v9",
+    ),
+    label: "NATIVE74_LOD0_EAST_APPROACH",
+    nodes: [
+      [350, 450],
+      [350, 350],
+    ],
+    focus: [335, 431],
+    lod: 0,
+    key: "gcell_v1_14_16",
+    bounds: { minX: 350, maxX: 375, minZ: 400, maxZ: 425 },
+    native74: {
+      source: "native74/process.json",
+      sourceSHA256:
+        "91ceeaecf76bb42a609ee88e7efb7686fc0e89d0899586154723adf42b12c375",
+      failedOperations: 145218,
+      failedActiveMs: 250.50000047683716,
+      scope:
+        "Historical remote-fitting failed prefix, not completed counts or actual CPU utilization.",
+    },
+  },
 ] as const;
 
 let groundingWorkerSource: string;
@@ -336,7 +388,9 @@ describe.each(cases)("$name", (scenario) => {
     async () => {
       const lod = "lod" in scenario ? scenario.lod : 0;
       const usesNativeComposition =
-        "native52" in scenario || "native72" in scenario;
+        "native52" in scenario ||
+        "native72" in scenario ||
+        "native74" in scenario;
       await DataManager.getInstance().initialize();
       const world = new World();
       const terrain = world.register("terrain", TerrainSystem) as TerrainSystem;
@@ -539,7 +593,11 @@ describe.each(cases)("$name", (scenario) => {
           terrain["getCompactHabitatMaterial"]("haven-understory-v1"),
           usesNativeComposition ? "leaf-volume-v1" : undefined,
         );
-        manager.setPlayerPosition(scenario.focus[0], scenario.focus[1]);
+        if (usesNativeComposition) {
+          // Consume the focus through the real update boundary before queuing
+          // any work; setPlayerPosition alone does not update the LOD focus.
+          manager.update(scenario.focus[0], scenario.focus[1]);
+        } else manager.setPlayerPosition(scenario.focus[0], scenario.focus[1]);
         manager.onNodeNeedsGeometry(nodes[0]);
         const key = scenario.key;
         const work = manager["liveWorkUnits"].get(key)!;
@@ -639,6 +697,9 @@ describe.each(cases)("$name", (scenario) => {
               : {}),
             ...("native72" in scenario
               ? { native72HistoricalObservation: scenario.native72 }
+              : {}),
+            ...("native74" in scenario
+              ? { native74HistoricalObservation: scenario.native74 }
               : {}),
             ...(usesNativeComposition
               ? {

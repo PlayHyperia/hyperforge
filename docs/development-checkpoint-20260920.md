@@ -1,5 +1,35 @@
 # World graphics development checkpoint — 2026-09-20
 
+## Refined face fitting — 2026-09-21 (geometry verified; tails still open)
+
+Conservative interior-face certification preserves every tested geometry buffer
+while reducing work 19–25% in six dense shore cases. The newest failed LOD0
+cells improve less than1%; do not claim their intermittent failure is fixed.
+601 tests,160 exact array hashes,726-root/2,747-source noEmit,lint/format pass.
+Metadata adds16,129 bytes/owner at resolution128, exactly reserved; caps unchanged.
+
+Build40/native75 completes original startup38.515s and four camera gates
+6.006/2.648/1.772/2.645s with the same camera/render settings and populations
+as native73. Main slice max8.6ms/admission4.1ms and multi-second transitions
+remain unqualified. Overview exposure fails the unchanged1e-6 matching gate.
+All four images reviewed: no AAA or visual-improvement claim.
+
+Native74 startup failure remains retained. Native76 passes startup40.513s but
+the first zero-bias A/B state is rejected by the unchanged production profile.
+Only the private diagnostic admission is being corrected; no production shadow
+change or complete shadow pair. Original camera/clock/bias restored and browser
+closed. Next: five-view/three-phase shadow qualification, then shoreline massing
+and pavilion arrival. If fitting failures recur, profile the actual worker's
+whole-clump envelope before choosing another optimization.
+
+Native77 also stops after a baseline image on a diagnostic frame-stamp check;
+no zero-bias pair is captured. Exact last-render/selection-frame validation is
+reviewed but not runtime-qualified. Original failures remain retained.
+The requested60-second native4K-target island cinematic now has GPU priority.
+Runtime53 cleaned; isolated runtime54 remains owned for that progress video.
+Human localhost3333/DB, canonical outputs, lock and unrelated files protected.
+Eight mirrors updated. Compact island only, one arena, SOL only; goal active.
+
 ## Height-only sampling — 2026-09-21 (native recovery; still unqualified)
 
 The exact native72 cell is now an actual-terrain regression. Conservative reuse

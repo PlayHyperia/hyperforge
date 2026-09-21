@@ -180,11 +180,13 @@ function admitSurface(value: unknown) {
       "Invalid grounding topology offset payload",
     );
     inputBytes += topology.cellIndexOffsets.byteLength;
-    // Conservative edge-index bound: parent plus both child bounds. Packed
-    // offsets and unpacked numeric slots are separate; this is not JS heap size.
+    // Conservative edge-index bound: parent plus both child bounds and one
+    // qualification byte per topology cell, including unqualified/small cells.
+    // Packed offsets and unpacked numeric slots are separate, not JS heap size.
     derivedBytes =
       (Math.ceil(s.indices.length / 24) + (s.resolution - 1) ** 2) * 96 +
-      topology.cellIndexOffsets.length * 12;
+      topology.cellIndexOffsets.length * 12 +
+      (s.resolution - 1) ** 2;
   }
   requireValue(
     inputBytes === s.payloadBytes,
