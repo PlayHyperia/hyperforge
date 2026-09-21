@@ -1661,6 +1661,92 @@ failures stay in their original receipts. All LAYOUT-01–08 remain OPEN; no
 AAA, stream, gameplay-capacity, sustained performance, launch or default
 promotion is asserted.
 
+### Pond substrate trial rejected; cutbank coverage retained — 2026-09-21
+
+The remaining-soil-to-rock trial is NOT accepted and has been removed from
+production source. All four native57 views were inspected: the shoreline still
+reads as a continuous brown collar. The added mask really compiled into the
+native terrain shader, but visual improvement was insufficient to justify its
+extra arithmetic. The two production files and two existing material tests
+are restored exactly to the preceding checkpoint; the trial-only test and
+patch are preserved privately with build27/native57. No default was promoted.
+
+Useful regression work is retained: a real northwest-cutbank LOD1 cell with
+726 input/699 retained clumps, actual dock physics/exclusions, four retained
+terrain leaves, frozen exhaustive grounding checks, and separate hashes for
+every worker/projected/full-pipeline attribute and grounding/provenance array.
+Across five cells the trial preserved population, transforms, normals, grass
+tints, visibility, root corrections and grounding exactly; only cutbank ground
+colors changed. Runtime-specific owner UUIDs are not cross-owner equality
+claims. No independent geometry oracle or production budget was changed.
+
+The candidate native receipt resolves all seven real terrain texture owners
+to their actual native bind groups and compiled WGSL arguments. It records
+33 direct fragment texture-sampling call sites, zero vertex sites, the actual
+shader files and admitted asset digests. These are static call sites, not GPU
+execution counts or cost. The failed baseline never reached this receipt, and
+native54 did not capture terrain shaders, so native sampler parity is NOT proved.
+
+Native55/build26 passed startup in 86.355s but failed the original 30s overview
+transition. Its last valid observation still had two grounding jobs/two LOD
+swaps; frames and 277 scalar reads continued. The later snapshot had one job.
+This is incomplete work at deadline, not evidence of a sustained browser hang.
+Native56 failed a server-health preflight before any browser/startup gate because
+the new private runtime was not ready. That orchestration failure is retained.
+After explicit HTTP/database readiness, native57/build27 passed startup in
+89.756s and the four camera gates in 27.065/12.839/4.211/11.160s. Every completed
+view had fourteen fishing entities, two per family. No deadline, density,
+resolution, shadow or scheduler setting changed. These runs establish neither
+reliable loading nor a controlled performance improvement.
+
+Source and actual WGSL expose a plausible limiting mechanism: before final
+bank composition, the rock layer is itself blended with dirt by sea-relative
+coastal shading. The pond waterline's normalized elevation is about 0.708,
+inside that blend's transition. The blend fades out on steeper slopes, so it
+must not be blamed for every bank pixel. Pond wetness darkens rather than
+independently recoloring rock. The trial also affected only one feathered
+cutbank sector, leaving most of the perimeter unchanged. Next: inspect/reduce
+that nested soil contribution locally, coherently across all four PBR channels
+and the CPU palette; preserve ordinary coast behavior and grass/road contracts.
+The existing raw rock is also warm, so another visual trial remains necessary.
+
+After restoration, 174 material/macro tests pass and full shared plus retained
+tests typecheck with zero diagnostics. Concurrent material/type/pond checking
+exposed an unchanged southbank active-CPU-cap failure at 250.294ms; four other
+pond cases passed. A separately recorded serial pond run passed all five active
+cases (three historical-overlay cases skipped), with unchanged caps. The
+concurrent failure remains evidence of load sensitivity, not erased by the
+serial result. Earlier native49/native55 readiness failures remain unresolved.
+
+An execution-environment interruption ended old Node processes, including the
+human game, while leaving its persistent database intact. The normal player
+was recovered on localhost:3333 using the same saved character, database,
+asset overlay and canonical bundles. Diagnostic runtime36's orphaned temporary
+database was removed by exact identity. Runtime37/38 and their temporary
+databases are now closed/removed; native55/57 restored camera/clock, unmounted
+GameClient without observed destruction errors and closed their owned browsers.
+The recovered human processes remain running. No user database or source was
+deleted. All 145 protected compiled artifacts and six build inputs remain intact.
+
+- [x] Add actual cutbank and per-attribute grounding regression evidence.
+- [x] Reject/archive an ineffective visual trial instead of promoting it.
+- [ ] Resolve nested inland soil/rock composition and qualify the result visually.
+- [ ] Resolve startup/transition and CPU-budget reliability under realistic load.
+- [ ] Improve dock timber grain/board contrast with unchanged collider geometry;
+      the visible merged mesh is also the collider, so silhouette work is separate.
+- [ ] Keep all-tier catches, fourteen live anglers plus seven overflow, dry
+      access, natural habitat, bank/supplier journeys and LAYOUT-01–08 OPEN.
+
+Evidence: service-layout pond-substrate-material03, worker-baseline01,
+worker-candidate01, worker-accounting02, checkpoint01, restored-material01,
+restored-pond01, restored-pond-serial01 and restored-types01; inland pond
+build26/27, runtime36–38, native55–57, terrain-material-receipt.mjs and
+substrate-trial01-rejected.patch. The checkpoint accounting preceded intentional
+trial restoration. Final restoration01 reverified all 973 production inputs
+against build26 and all five cells' arrays, including restored ground colors;
+retained-lint01 and retained-format01 pass. No AAA, streaming, live fishing-capacity, sustained
+performance, launch or default acceptance is claimed.
+
 ### Inland fishing integration — candidate only
 
 The detached candidate now requests 14 real fishing entities, two for each of

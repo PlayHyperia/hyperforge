@@ -44,6 +44,31 @@ const attributes = [
 const evidence = (label: string, json: string) =>
   process.stdout.write(`${label} ${json}\n`);
 
+// Hash the actual view, not spare capacity in a shared/subarray backing buffer.
+// Separate color hashes let source A/B comparisons permit appearance changes
+// without concealing a change to population, transforms or grounding evidence.
+function bufferReceipt(array: Float32Array | Uint32Array) {
+  return {
+    type: array.constructor.name,
+    length: array.length,
+    bytes: array.byteLength,
+    sha256: createHash("sha256")
+      .update(Buffer.from(array.buffer, array.byteOffset, array.byteLength))
+      .digest("hex"),
+  };
+}
+
+function attributeReceipts(
+  data: Pick<GrassWorkerOutput, "count" | (typeof attributes)[number][0]>,
+) {
+  return {
+    count: data.count,
+    attributes: Object.fromEntries(
+      attributes.map(([key]) => [key, bufferReceipt(data[key])]),
+    ),
+  };
+}
+
 /** Offline observation of the actual generator, never an installation loop.
  * A complete scratch/merge×2/copy×2/edge×2 trace uniquely identifies the
  * existing two-interval sort. Keep the prospective pair-order label separate
@@ -214,6 +239,39 @@ const cases = [
     key: "gcell_v1_17_16",
     bounds: { minX: 425, maxX: 450, minZ: 400, maxZ: 425 },
     native52: { inputClumps: 994, retainedClumps: 948, operations: 170572 },
+  },
+  {
+    name: "native52 startup LOD1 northwest cutbank work budget",
+    test: "grounds the actual cutbank at the native52 startup focus and LOD1 within unchanged caps",
+    enabled: process.env.ASSETS_DIR?.endsWith(
+      "/inland-pond-integration01-UNQUALIFIED/assets-v9",
+    ),
+    label: "NATIVE52_LOD1_CUTBANK",
+    // This real work cell ends at x400 and starts at z400. Its unchanged
+    // swept halo needs all four adjacent retained 100m leaves.
+    nodes: [
+      [350, 450],
+      [450, 450],
+      [350, 350],
+      [450, 350],
+    ],
+    focus: [335, 431],
+    lod: 1,
+    key: "gcell_v1_15_16",
+    bounds: { minX: 375, maxX: 400, minZ: 400, maxZ: 425 },
+    native52: {
+      inputClumps: 726,
+      retainedClumps: 699,
+      operations: 169797,
+      jobId: 114,
+      source: "native52/startup-grass-budget-ledger.json",
+      sourceSHA256:
+        "f525d0334030277dd9af1703ce43149022fbe6c88df9a6cc397c2b57a5d39c04",
+      frameworkSHA256:
+        "6530f342ced7b0457afcfe047cba5b2a5bd34f7d2c4a55ded49ebc0df01b3151",
+      worldAreasSHA256:
+        "fdda05c65a178f3cf6dc9eec5187711c251f77b7ff2c0659f0ccce29fa254e7f",
+    },
   },
 ] as const;
 
@@ -802,6 +860,33 @@ describe.each(cases)("$name", (scenario) => {
         );
         expect(grounding.ecologicalNormals.buffer).not.toBe(
           projected.grounding.ecologicalNormals.buffer,
+        );
+        evidence(
+          `${scenario.label}_BUFFER_HASHES`,
+          JSON.stringify({
+            key,
+            lod,
+            focus: scenario.focus,
+            rawWorker: attributeReceipts(output),
+            projectedWorker: attributeReceipts(projected),
+            fullPipeline: {
+              ...attributeReceipts(pipeline.state.result.data),
+              sourceIndices: bufferReceipt(pipeline.state.result.sourceIndices),
+              rootDeltas: bufferReceipt(pipeline.state.result.rootDeltas),
+              bladeVisibility: bufferReceipt(
+                pipeline.state.result.bladeVisibility!,
+              ),
+              sweptBounds: pipeline.state.result.sweptBounds,
+              provenance: {
+                schemaVersion: grounding.schemaVersion,
+                surfaceRevision: grounding.surfaceRevision,
+                computedHeights: bufferReceipt(grounding.computedHeights),
+                ecologicalNormals: bufferReceipt(grounding.ecologicalNormals),
+              },
+            },
+            scope:
+              "Exact current-source CPU array-view hashes after full oracle/pipeline assertions. Source indices refer to projected worker rows. Compare each attribute independently across source A/B runs; only groundColors/grassTints may change in an appearance-only trial. No native buffer or GPU claim.",
+          }),
         );
       } catch (error) {
         failures.push(error);
