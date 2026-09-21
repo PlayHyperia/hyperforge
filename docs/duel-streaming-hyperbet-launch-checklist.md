@@ -1124,6 +1124,80 @@ Evidence: service-layout pond-vegetation-storage01–02 (final02), types01–02
 (final02), lint01/format01; inland pond build21/runtime24/native39–40,
 build22/runtime25/native41–42 and native41/SHADOW_BUFFER_REVIEW.md.
 
+### Indexed grass edge batching — faster exact work, full acceptance still open
+
+The indexed edge path now shares one generator suspension across four bounded
+cursor steps. Each step still checks its retained geometry and charges its
+individual geometric work; triangle order, clipping, roots and fallback behavior
+are unchanged. There is no new index/cache allocation or reduction in density,
+detail, resolution or shadows. The 1M geometric-work/resumption, 8192 slice-operation,
+2ms cooperative slice and 250ms cumulative-active limits remain unchanged.
+Clock checks are coarser: 64 resumptions can now span 256 indexed steps. This is
+not a hard 2ms preemption guarantee.
+
+The exact southern real-worker fixture retains 931/970 clumps, rejects 39 at
+water and preserves 347,209 triangle visits, 46,560 endpoint queries and 912,895
+work units. Resumptions fall from 709,023 to 361,585; full-cell CPU active time
+is 184.827ms before and 157.587/156.713ms in two candidate runs. Output hash stays
+af12d68c1875e5b95cf880f26df31fe48ca76452cfe4cb11c904cfaff00ed91d.
+Maximum CPU slices are 2.234/2.913ms versus baseline 2.421ms. These short samples
+are not a whole-game frame-time or GPU improvement claim. A four-face index trial
+was rejected for 81% more index bytes; shared clump ranges were rejected for
+higher work and slower execution. Neither rejected change remains in source.
+
+Verification: 405/405 across eleven grass/terrain suites, plus 103/103 same-face
+cases including 31 new dense-index/fallback/suspension/budget/invalidation cases.
+Both actual south-bank and original review52 assets pass the frozen exhaustive
+oracle, now including all semantic receipt fields. Full shared production plus
+all three changed files: 707 roots / 2,382 source files / zero diagnostics and
+stable pins. Scoped lint/format and independent read-only review pass.
+
+Build23 emits eight isolated bundles from 973 stable inputs. Native43 and44 use
+real Chrome/Metal WebGPU, unchanged 1280x720/DPR1/4-sample diagnostic rendering,
+no transition profiler and the original startup/camera gates. Both pass startup
+and the first three grass-settling gates with empty final queues and no observed
+grounding failures. Overview/landing/jetty elapsed times are 26.760/10.438/4.515s
+and 24.503/10.120/3.924s respectively. These multi-second transitions are NOT
+seamless gameplay acceptance. The southern job is observed running below its
+limit and then leaves the queue; 1Hz sampling does not capture its exact terminal
+active time. Global maximum slices of 18.7/11.4ms already exist before the cuts
+and do not increase during them; smooth pacing remains unqualified.
+
+Both native runs still have FAILED terminal status. Native43 detects the stream
+boot-timeout overlay before the third image. Native44's third image is saved,
+but its HUD-restoration identity check fails as the boot timeout changes the
+loading root. The fourth view does not run in either. Their no-money world
+fixture deliberately disables streaming duels and reports waiting_for_duel_data;
+the real stream screen requires that data and retains its 120s timeout.
+This is an incompatible capture/stream-readiness fixture boundary, not evidence
+of an established production stream regression. No timeout, health gate or
+production UI was weakened, and no fake stream state was injected.
+
+- [x] Reduce exact indexed grounding suspension overhead with output parity.
+- [x] Repeat the first three native grass-settling gates without the former failure.
+- [ ] Separate world-art capture from real stream admission, or provide real
+      no-money duel data; complete all four views with clean HUD restoration.
+- [ ] Qualify sustained frame pacing, shadow/backpressure cost and actual GPU
+      retirement/reload without lowering visual quality or raising budgets.
+- [ ] Improve natural shore shape/material transitions, bank habitats and both
+      dock designs; verify actual all-tier fishing, navigation and banking.
+
+The pond must retain room for seven fishing families/twelve fish, fourteen
+simultaneous anglers plus safe overflow, dry shore access at every tier and two
+distinct procedural docks. All fourteen fishing entities reach both native
+clients, but concurrent live fishing throughput is not yet proven. The inspected
+images still show an overly uniform shore collar, sparse banks and plain docks;
+this checkpoint does not approve the art. All LAYOUT-01–08 remain open.
+
+Both browsers and runtime26's disposable database are closed; protected human
+localhost/database and compiled/build inputs are unchanged. No default promotion,
+merge, deployment or AAA/performance/streaming approval.
+
+Evidence: service-layout pond-south-edge-before01, pond-south-batch01–02,
+pond-edge-batch-review52-01, pond-edge-batch-regression01,
+pond-edge-batch-sameface01, pond-edge-batch-types02,
+pond-edge-batch-lint02/format02; inland pond build23/runtime26/native43–44.
+
 ### Inland fishing integration — candidate only
 
 The detached candidate now requests 14 real fishing entities, two for each of

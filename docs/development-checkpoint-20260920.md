@@ -1,5 +1,46 @@
 # World graphics development checkpoint — 2026-09-20
 
+## Indexed grass edge batching and repeated native pond gates — 2026-09-21
+
+Four bounded indexed cursor steps now share a generator suspension. Geometry,
+triangle order, per-step work charges and owner checks are preserved; generic
+fallback is unchanged. No added cache or quality/budget reduction. Clock checks
+can span 256 indexed steps instead of 64; the 2ms slice remains cooperative.
+
+Real southern cell: 931/970 retained, 39 water rejects, 347,209 triangle visits,
+46,560 endpoint queries and 912,895 work units unchanged. Resumptions reduce
+709,023→361,585, full CPU active 184.827ms→157.587/156.713ms, output hash unchanged.
+The larger four-face index and slower shared-clump experiments were rejected.
+The real-asset oracle now checks complete semantic receipts as well as arrays.
+
+405/405 broad regression, 103/103 same-face tests with 31 new dense indexed cases;
+both actual pond fixtures pass. Types: 707 roots / 2,382 files / zero diagnostics,
+stable pins. Scoped lint/format and independent read-only review pass.
+Build23 emits eight private bundles from 973 stable inputs.
+
+Native43/44 pass original startup and the first three grass camera gates without
+observed grounding failures: overview 26.760/24.503s, landing 10.438/10.120s,
+jetty 4.515/3.924s. These are not seamless transitions or FPS acceptance.
+Existing startup maximum slices remain 18.7/11.4ms. Both terminal runs FAIL:
+native43 sees the 120s boot overlay; native44 catches HUD root identity changing
+during third-image restoration at that timeout. No fourth view in either run.
+The world fixture disables streaming duels, reports waiting_for_duel_data and
+cannot satisfy real stream admission. Preserve these failures; separate world
+capture from stream admission or use actual no-money duel data, never fake
+readiness or suppress the timeout. No production stream regression is established.
+
+All fourteen fish entities reach both clients. Keep seven families/twelve fish,
+fourteen anglers plus overflow, dry access at every tier and two distinct docks.
+Visuals still need a natural shore, richer bank habitats and characterful docks;
+actual fishing/banking/navigation, GPU retirement and sustained pacing remain open.
+Both browsers and runtime26's ephemeral database are closed. Human localhost,
+protected artifacts and build inputs remain unchanged; eight mirrors match.
+All LAYOUT-01–08 open. No default promotion, merge, deploy or AAA approval.
+
+Evidence: service-layout pond-south-edge-before01, pond-south-batch01–02,
+pond-edge-batch-review52-01/regression01/sameface01/types02/lint02/format02;
+inland pond build23/runtime26/native43–44.
+
 ## Primary vegetation storage and native shadow attribution — 2026-09-21
 
 Primary vegetation chunks now reuse the existing versioned storage matrix helper,

@@ -35,6 +35,9 @@ const NUMERIC_GUARD = 0.00001;
 // Bound cheap validation work without allocating an iterator result per float.
 // This is not the geometric work budget, which still charges every take().
 const INSTANCE_VALUE_BATCH_SIZE = 32;
+// Each indexed cursor step is bounded and validates the retained geometry.
+// Share one suspension across four steps without skipping any work charge.
+const INDEXED_EDGE_STEP_BATCH_SIZE = 4;
 // Fixed storage, independent of authored road lengths or world coordinates.
 const ROAD_GRID_AXIS = 8;
 const compactTerrainColorOperations = createCompactTerrainColorOperations();
@@ -897,6 +900,7 @@ export function* groundGrassBladeSteps(
             minZ: box.minZ - oz,
             maxZ: box.maxZ - oz,
           });
+      let indexedSteps = 0;
       while (true) {
         const step = edgeCursor
           ? edgeCursor.step(triangle)
@@ -904,7 +908,8 @@ export function* groundGrassBladeSteps(
             ? "triangle"
             : null;
         if (step === null) break;
-        yield "grounding_operation";
+        if (!edgeCursor || indexedSteps++ % INDEXED_EDGE_STEP_BATCH_SIZE === 0)
+          yield "grounding_operation";
         // Broadphase rejection is real work, not an uncharged scan hidden in
         // next(). Retained triangles keep their original order and clipper.
         take();

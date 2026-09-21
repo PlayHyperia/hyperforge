@@ -1,9 +1,17 @@
 import { describe, expect, it } from "vitest";
+import THREE from "../../../../extras/three/three";
 import {
   groundGrassBladeSteps,
   GrassBladeGroundingJob,
   GRASS_BLADE_GROUNDING_JOB_LIMITS,
 } from "../GrassBladeGrounding";
+import { getGrassBladeLayout } from "../GrassBladeLayout";
+import { projectGrassAnchors } from "../GrassTerrainProjection";
+import {
+  RetainedTerrainSurface,
+  type TerrainCellTopology,
+} from "../TerrainGridSurface";
+import { gridGeometry } from "./terrain-grid.fixture";
 import {
   createSameFaceCase,
   drainSameFaceSteps,
@@ -14,6 +22,117 @@ import {
   type SameFaceCase,
 } from "./fixtures/GrassBladeGroundingSameFaceCases";
 import { groundGrassBladeSteps as legacyGroundGrassBladeSteps } from "./fixtures/LegacyGrassBladeGroundingReference";
+
+/** The existing small indexed goldens have no qualified eight-face blocks.
+ * Use the real four-cell subdivision from TerrainGridSurface's edge tests:
+ * 32 faces/cell, shared vertex identities, and genuinely nonplanar heights. */
+function createDenseIndexedBatchCase(
+  variant: "nonplanar" | "skinny" | "translated" = "nonplanar",
+) {
+  const fixture = createSameFaceCase("fine-lod0"),
+    geometry = gridGeometry(2, 3, (x, z) => 20 + x * z),
+    values = Array.from(geometry.getAttribute("position").array),
+    ids = new Map<string, number>(),
+    indices: number[] = [],
+    offsets = [0];
+  fixture.geometries.push(geometry);
+  for (let id = 0; id < 9; id++)
+    ids.set(`${values[id * 3]},${values[id * 3 + 2]}`, id);
+  const vertex = (x: number, z: number) => {
+    const key = `${x},${z}`;
+    let id = ids.get(key);
+    if (id === undefined) {
+      id = values.length / 3;
+      ids.set(key, id);
+      values.push(x, 20 + x * z + Math.sin(x * 5 + z * 3) * 0.2, z);
+    }
+    return id;
+  };
+  for (let cellZ = 0; cellZ < 2; cellZ++)
+    for (let cellX = 0; cellX < 2; cellX++) {
+      for (let z = 0; z < 4; z++)
+        for (let x = 0; x < 4; x++) {
+          const x0 = -1 + cellX + x / 4,
+            z0 = -1 + cellZ + z / 4,
+            a = vertex(x0, z0),
+            b = vertex(x0 + 0.25, z0),
+            c = vertex(x0, z0 + 0.25),
+            d = vertex(x0 + 0.25, z0 + 0.25);
+          indices.push(a, c, b, b, c, d);
+        }
+      offsets.push(indices.length);
+    }
+  if (variant === "skinny")
+    for (let id = 9; id < values.length / 3; id++)
+      if (values[id * 3] === -0.75) values[id * 3] = Math.fround(-1 + 2 ** -24);
+  geometry.setAttribute(
+    "position",
+    new THREE.BufferAttribute(new Float32Array(values), 3),
+  );
+  geometry.setIndex(indices);
+  geometry.userData.terrainCellTopology = Object.freeze({
+    schemaVersion: 1,
+    resolution: 3,
+    cellIndexOffsets: Object.freeze(offsets),
+    surfaceVertexCount: values.length / 3,
+  } satisfies TerrainCellTopology);
+  const surface = new RetainedTerrainSurface(
+    101,
+    "same-face-numerical-v1",
+    variant === "translated" ? 350 : 0,
+    variant === "translated" ? -450 : 0,
+    2,
+    3,
+    geometry,
+  );
+  fixture.owned.splice(0, fixture.owned.length, { surface, geometry });
+  const { request } = fixture;
+  request.ownSurface = surface;
+  request.surfaces = [surface];
+  for (let i = 0; i < request.data.count; i++) {
+    request.data.offsets.set(
+      [i % 2 ? 0.5 : -0.5, 20, i < 2 ? -0.5 : 0.5],
+      i * 3,
+    );
+    request.data.rotScaleHash[i * 3 + 1] = 0.25;
+  }
+  request.data = projectGrassAnchors(
+    request.data,
+    surface,
+    () => -1000,
+    () => false,
+  );
+  request.wind = { x: 0.01, z: 0.005 };
+  return fixture;
+}
+
+/** Stop at the first indexed cursor yield without replacing any method.
+ * After staging: one clump, N base blades, one owner filter, two endpoints,
+ * one edge owner, then its first indexed step. All cells here are refined. */
+function advanceToIndexedYield(
+  job: GrassBladeGroundingJob,
+  fixture: ReturnType<typeof createDenseIndexedBatchCase>,
+) {
+  while (
+    job.state.status === "running" &&
+    job.lastPhase !== "bounded_staging_allocation"
+  )
+    job.advance(1);
+  expect(job.state.status).toBe("running");
+  expect(job.lastPhase).toBe("bounded_staging_allocation");
+  const blades = getGrassBladeLayout(
+    fixture.request.lod,
+    fixture.request.geometryLayout,
+  ).bladesPerClump;
+  for (let i = 0; i < blades + 6; i++) {
+    const operations = job.operations;
+    job.advance(1);
+    expect(job.state.status).toBe("running");
+    expect(job.operations).toBe(operations + 1);
+    expect(job.lastPhase).toBe("grounding_operation");
+  }
+  return { operations: job.operations, workBeforeFirstStep: blades * 2 + 5 };
+}
 
 /** Independent pre-shortcut oracle, not a helper which calls the current core.
  * Captured from native25's immutable 44,628-byte GrassBladeGrounding.ts:
@@ -572,6 +691,251 @@ describe("same-face shortcut versus independent native25 grounding goldens", () 
           operations = job.operations;
         expect(job.advance(1)).toBe(terminal);
         expect(job.operations).toBe(operations);
+      } finally {
+        fixture.dispose();
+      }
+    },
+  );
+});
+
+describe("bounded indexed edge cursor batches", () => {
+  it.each([1, 7, 64, 8192])(
+    "preserves the frozen indexed golden with %i-operation slices",
+    (slice) => {
+      const fixture = createSameFaceCase("indexed-canonical-interiors");
+      try {
+        const before = sameFaceInputHash(fixture),
+          sync = drainSameFaceSteps(groundGrassBladeSteps(fixture.request)),
+          job = new GrassBladeGroundingJob(fixture.request, () =>
+            fixture.owned.every(({ surface, geometry }) =>
+              surface.matchesGeometry(geometry),
+            ),
+          );
+        while (job.state.status === "running") {
+          job.advance(slice);
+          expect(job.lastSliceOperations).toBeLessThanOrEqual(slice);
+        }
+        expect(job.state.status).toBe("ready");
+        if (job.state.status !== "ready")
+          throw Error(JSON.stringify(job.state));
+        expect(sameFaceHash(job.state.result)).toBe(
+          NATIVE25["indexed-canonical-interiors"].hash,
+        );
+        expect(sameFaceHash(job.state.result)).toBe(sameFaceHash(sync.result));
+        expect({ ...job.state.result.receipt, elapsedMs: 0 }).toEqual({
+          ...sync.result.receipt,
+          elapsedMs: 0,
+        });
+        expect(job.operations).toBe(sync.operations);
+        expect(sameFaceInputHash(fixture)).toBe(before);
+      } finally {
+        fixture.dispose();
+      }
+    },
+  );
+
+  it.each(
+    (["nonplanar", "skinny", "translated"] as const).flatMap((variant) =>
+      [1, 7, 64, 8192].map((slice) => ({ variant, slice })),
+    ),
+  )(
+    "preserves dense $variant indexed output and exact work with $slice-operation slices",
+    ({ variant, slice }) => {
+      const fixture = createDenseIndexedBatchCase(variant);
+      try {
+        const before = sameFaceInputHash(fixture),
+          surface = fixture.request.ownSurface,
+          legacy = drainSameFaceSteps(
+            legacyGroundGrassBladeSteps(fixture.request),
+          ),
+          sync = drainSameFaceSteps(groundGrassBladeSteps(fixture.request));
+        expect(surface.isRegularGrid).toBe(false);
+        expect(surface.groundingEdgeIndexStats?.blocks).toBe(16);
+        expect(
+          surface.groundingEdgeIndexStats?.qualifiedBlocks,
+        ).toBeGreaterThan(0);
+        if (variant === "skinny")
+          expect(surface.groundingEdgeIndexStats?.qualifiedBlocks).toBeLessThan(
+            16,
+          );
+        expect(sync.result.status).toBe("ready");
+        expect(sync.result.receipt.retainedClumps).toBeGreaterThan(0);
+        expect(sync.result.receipt.sameFaceEdges).toBe(0);
+        expect(sync.result.receipt.triangleVisits).toBeGreaterThan(0);
+        expect(sameFaceHash(sync.result)).toBe(sameFaceHash(legacy.result));
+        const job = new GrassBladeGroundingJob(fixture.request, () =>
+          fixture.owned.every(({ surface, geometry }) =>
+            surface.matchesGeometry(geometry),
+          ),
+        );
+        while (job.state.status === "running") {
+          const operations = job.operations;
+          job.advance(slice);
+          expect(job.lastSliceOperations).toBeLessThanOrEqual(slice);
+          expect(job.operations - operations).toBe(job.lastSliceOperations);
+        }
+        expect(job.state.status).toBe("ready");
+        if (job.state.status !== "ready")
+          throw Error(JSON.stringify(job.state));
+        expect(sameFaceHash(job.state.result)).toBe(
+          sameFaceHash(legacy.result),
+        );
+        expect({ ...job.state.result.receipt, elapsedMs: 0 }).toEqual({
+          ...sync.result.receipt,
+          elapsedMs: 0,
+        });
+        expect(job.operations).toBe(sync.operations);
+        expect(sameFaceInputHash(fixture)).toBe(before);
+        const terminal = job.state;
+        expect(job.advance(slice)).toBe(terminal);
+        expect(job.operations).toBe(sync.operations);
+      } finally {
+        fixture.dispose();
+      }
+    },
+  );
+
+  it.each(
+    (
+      [
+        "position",
+        "index",
+        "position-version",
+        "index-version",
+        "cancel",
+      ] as const
+    ).flatMap((mutation) => [0, 1].map((batch) => ({ mutation, batch }))),
+  )(
+    "stops $mutation at indexed batch yield $batch without further work or publication",
+    ({ mutation, batch }) => {
+      const fixture = createDenseIndexedBatchCase();
+      try {
+        const job = new GrassBladeGroundingJob(fixture.request, () =>
+          fixture.owned.every(({ surface, geometry }) =>
+            surface.matchesGeometry(geometry),
+          ),
+        );
+        advanceToIndexedYield(job, fixture);
+        for (let i = 0; i < batch; i++) job.advance(1);
+        expect(job.state.status).toBe("running");
+        expect(job.lastPhase).toBe("grounding_operation");
+        const operations = job.operations,
+          { geometry } = fixture.owned[0];
+        if (mutation === "position")
+          geometry.setAttribute(
+            "position",
+            geometry.getAttribute("position").clone(),
+          );
+        else if (mutation === "index")
+          geometry.setIndex(geometry.getIndex()!.clone());
+        else if (mutation === "position-version")
+          geometry.getAttribute("position").needsUpdate = true;
+        else if (mutation === "index-version")
+          geometry.getIndex()!.needsUpdate = true;
+        else job.cancel();
+        expect(job.advance(1)).toEqual({
+          status: "cancelled",
+          reason: mutation === "cancel" ? "caller" : "invalidated",
+        });
+        expect(job.operations).toBe(operations);
+        if (mutation !== "cancel") expect(job.lastSliceOperations).toBe(0);
+        expect("result" in job.state).toBe(false);
+        const terminal = job.state;
+        expect(job.advance(8192)).toBe(terminal);
+        expect(job.cancel()).toBe(terminal);
+        expect(job.operations).toBe(operations);
+      } finally {
+        fixture.dispose();
+      }
+    },
+  );
+
+  it("charges every indexed step at each position inside both first four-step batches", () => {
+    const fixture = createDenseIndexedBatchCase();
+    try {
+      const current = () =>
+          fixture.owned.every(({ surface, geometry }) =>
+            surface.matchesGeometry(geometry),
+          ),
+        probe = new GrassBladeGroundingJob(fixture.request, current),
+        first = advanceToIndexedYield(probe, fixture);
+      probe.cancel();
+      for (let acceptedSteps = 0; acceptedSteps < 8; acceptedSteps++) {
+        const request = {
+            ...fixture.request,
+            workBudget: first.workBeforeFirstStep + acceptedSteps,
+          },
+          sync = drainSameFaceSteps(groundGrassBladeSteps(request));
+        expect(sync.result.status).toBe("defer");
+        if (sync.result.status !== "defer")
+          throw Error("Expected work exhaustion");
+        expect(sync.result.reason).toBe("work_budget");
+        expect(sync.result.receipt.workUnits).toBe(request.workBudget);
+        expect(sync.result.receipt.processedClumps).toBe(0);
+        // The charge is never rounded to a whole batch: budgets 0..3 after
+        // the prefix fail on one resumption; 4..7 fail on the following one.
+        expect(sync.operations).toBe(
+          first.operations + Math.floor(acceptedSteps / 4) + 1,
+        );
+        for (const slice of [1, 7, 64, 8192]) {
+          const job = new GrassBladeGroundingJob(request, current);
+          while (job.state.status === "running") job.advance(slice);
+          expect(job.state).toEqual({
+            status: "failed_budget",
+            reason: "grounding_work",
+          });
+          expect(job.operations).toBe(sync.operations);
+          expect("result" in job.state).toBe(false);
+          const terminal = job.state;
+          expect(job.advance(slice)).toBe(terminal);
+          expect(job.operations).toBe(sync.operations);
+        }
+      }
+    } finally {
+      fixture.dispose();
+    }
+  });
+
+  it.each([1, 7, 64, 8192])(
+    "requires the exact complete geometric-work budget with %i-operation slices",
+    (slice) => {
+      const fixture = createDenseIndexedBatchCase();
+      try {
+        const complete = drainSameFaceSteps(
+            groundGrassBladeSteps(fixture.request),
+          ).result,
+          needed = complete.receipt.workUnits;
+        expect(complete.status).toBe("ready");
+        for (const workBudget of [needed - 1, needed]) {
+          const request = { ...fixture.request, workBudget },
+            sync = drainSameFaceSteps(groundGrassBladeSteps(request)),
+            job = new GrassBladeGroundingJob(request, () =>
+              fixture.owned.every(({ surface, geometry }) =>
+                surface.matchesGeometry(geometry),
+              ),
+            );
+          while (job.state.status === "running") job.advance(slice);
+          expect(sync.result.receipt.workUnits).toBe(workBudget);
+          expect(job.operations).toBe(sync.operations);
+          if (workBudget < needed) {
+            expect(sync.result.status).toBe("defer");
+            expect(job.state).toEqual({
+              status: "failed_budget",
+              reason: "grounding_work",
+            });
+          } else {
+            expect(job.state.status).toBe("ready");
+            if (job.state.status !== "ready")
+              throw Error(JSON.stringify(job.state));
+            expect(sameFaceHash(job.state.result)).toBe(
+              sameFaceHash(sync.result),
+            );
+            expect({ ...job.state.result.receipt, elapsedMs: 0 }).toEqual({
+              ...sync.result.receipt,
+              elapsedMs: 0,
+            });
+          }
+        }
       } finally {
         fixture.dispose();
       }

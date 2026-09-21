@@ -357,6 +357,19 @@ describe.each(cases)("$name", (scenario) => {
         const expectedIndices: number[] = [];
         const expectedDeltas: number[] = [];
         const expectedVisibility: number[] = [];
+        const expectedRejections = {
+          terrain_edge: 0,
+          pad: 0,
+          road: 0,
+          water: 0,
+        };
+        let expectedEndpointQueries = 0;
+        let expectedMaxEndpointCorrection = 0;
+        let expectedMaxCorrectedBaseError = 0;
+        let expectedMaxAcceptedBaseError = 0;
+        let expectedRetainedBlades = 0;
+        let expectedPartialClumps = 0;
+        let expectedMaskedBlades = 0;
         const expectedDependencies = new Map<
           GrassBladeGroundingRequest["ownSurface"],
           Set<"endpoint" | "edge" | "envelope">
@@ -374,6 +387,28 @@ describe.each(cases)("$name", (scenario) => {
           const legacy = legacyGroundGrassBlades({ ...request, data: one });
           expect(legacy.status, `legacy oracle clump ${i}`).toBe("ready");
           if (legacy.status !== "ready") throw new Error(legacy.reason);
+          expectedEndpointQueries += legacy.receipt.endpointQueries;
+          expectedMaxEndpointCorrection = Math.max(
+            expectedMaxEndpointCorrection,
+            legacy.receipt.maxEndpointCorrection,
+          );
+          expectedMaxCorrectedBaseError = Math.max(
+            expectedMaxCorrectedBaseError,
+            legacy.receipt.maxCorrectedBaseError,
+          );
+          expectedMaxAcceptedBaseError = Math.max(
+            expectedMaxAcceptedBaseError,
+            legacy.receipt.maxAcceptedBaseError,
+          );
+          for (const reason of Object.keys(expectedRejections) as Array<
+            keyof typeof expectedRejections
+          >)
+            expectedRejections[reason] += legacy.receipt.rejected[reason];
+          expectedRetainedBlades +=
+            legacy.receipt.roadClearance!.retainedBlades;
+          expectedPartialClumps += legacy.receipt.roadClearance!.partialClumps;
+          expectedMaskedBlades +=
+            legacy.receipt.roadClearance!.maskedRetainedBlades;
           for (const dependency of legacy.dependencies) {
             let uses = expectedDependencies.get(dependency.surface);
             if (!uses) {
@@ -410,6 +445,27 @@ describe.each(cases)("$name", (scenario) => {
           new Uint32Array(expectedVisibility),
         );
         expect(result.sweptBounds).toEqual(expectedBounds);
+        expect(result.receipt.processedClumps).toBe(projected.count);
+        expect(result.receipt.retainedClumps).toBe(expectedIndices.length);
+        expect(result.receipt.endpointQueries).toBe(expectedEndpointQueries);
+        expect(result.receipt.maxEndpointCorrection).toBe(
+          expectedMaxEndpointCorrection,
+        );
+        expect(result.receipt.maxCorrectedBaseError).toBe(
+          expectedMaxCorrectedBaseError,
+        );
+        expect(result.receipt.maxAcceptedBaseError).toBe(
+          expectedMaxAcceptedBaseError,
+        );
+        expect(result.receipt.rejected).toEqual(expectedRejections);
+        expect(result.receipt.roadClearance).toEqual({
+          mode: "per-blade-v1",
+          retainedBlades: expectedRetainedBlades,
+          partialClumps: expectedPartialClumps,
+          maskedRetainedBlades: expectedMaskedBlades,
+          visibilityBytes:
+            expectedVisibility.length * Uint32Array.BYTES_PER_ELEMENT,
+        });
         expect(result.dependencies).toEqual(
           [...expectedDependencies].map(([surface, uses]) => ({
             surface,
