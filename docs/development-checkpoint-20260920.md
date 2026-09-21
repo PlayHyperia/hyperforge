@@ -25,8 +25,17 @@ whole-clump envelope before choosing another optimization.
 Native77 also stops after a baseline image on a diagnostic frame-stamp check;
 no zero-bias pair is captured. Exact last-render/selection-frame validation is
 reviewed but not runtime-qualified. Original failures remain retained.
-The requested60-second native4K-target island cinematic now has GPU priority.
-Runtime53 cleaned; isolated runtime54 remains owned for that progress video.
+Delivered60-second native4K/30fps island cinematic at the actual in-game2x
+setting, with1,800 unique rendered frames. Independent frame/clock/grass,
+18 PNG hashes and full decode pass. Normal Chrome playback completes60s:
+no corruption/media/page errors; four startup dropped frames, none afterward.
+This is offline environment progress, not live gameplay, streaming, startup,
+AAA or real-time performance proof. No world edits or quality reductions.
+Master: progress-videos/hyperia-island-progress-4k-60s-20260921.mp4.
+Capture evidence: progress-videos/island-cinematic-20260921-04/.
+All capture browsers/helpers and runtime53/54 disposable databases are closed.
+Next: water-tone seam (also visible before offline capture), dock shadows,
+shoreline massing and pavilion detail with performance qualification.
 Human localhost3333/DB, canonical outputs, lock and unrelated files protected.
 Eight mirrors updated. Compact island only, one arena, SOL only; goal active.
 

@@ -2427,11 +2427,24 @@ CPU-work improvement, not a visual-quality or production-performance milestone.
   requirement; global animation ticks can advance without a render. Reviewed
   against installed Three sources, but this diagnostic correction is not yet
   runtime-qualified. All original failures remain retained.
-- [ ] User-requested deliverable: a polished60-second cinematic of the actual
-  current island at the highest clean native resolution, targeting4K. A
-  separate capture agent owns GPU work; this is a progress video, not a
-  gameplay, streaming, AAA or production-performance benchmark. No upscaling,
-  shadow overrides, changed world assets or promotional readiness claims.
+- [x] Delivered60-second native4K island progress cinematic using the actual
+  in-game2x preference:1920x1080 CSS /3840x2160 backing,30fps and1,800
+  unique rendered frames. Root independently verifies all frame clocks,
+  zero grass queues,18 retained PNG hashes, six clips and complete MP4 decode.
+  Normal Chrome playback reaches60s with no media/page errors or corruption;
+  four startup dropped frames remain recorded, with none afterward.
+  Master: progress-videos/hyperia-island-progress-4k-60s-20260921.mp4 (498MB).
+  Evidence: progress-videos/island-cinematic-20260921-04/FINAL-AUDIT.json,
+  NATIVE-PLAYBACK.json and ROOT-REVIEW.json. All owned capture browsers and
+  helpers are closed. This is an offline environment presentation, not live
+  gameplay, streaming, startup, AAA or real-time-performance proof. No
+  upscaling, interpolated frames, world edits or quality reductions.
+  Earlier real-time/startup failures remain retained; production goal is open.
+- [ ] Native2x dock review exposes a sharp diagonal water-tone boundary toward
+  the far-right bank, visible in both the ordinary pre-capture frame and the
+  offline sequence. Investigate it alongside the existing dock-shadow plaid;
+  do not attribute it to offline capture or mark the water art approved.
+  Evidence: progress-videos/island-cinematic-20260921-04/shot02/.
 - [ ] NEXT: complete shadow qualification, then unequal shoreline plant/rock
   masses and pavilion arrival while preserving all fishing and dry routes.
   If exact-cell fitting failures recur, profile the whole-clump swept-envelope
@@ -2442,8 +2455,8 @@ Evidence: service-layout-network01 `refined-edge-*`, `compact-shadow-native74/76
 inland pond `build40`, `native74–76`, isolated `runtime53/54`. Failed baseline01
 fixture/setup and original native failures are retained. Protected playable
 localhost:3333, canonical outputs, lock and unrelated changes remain untouched.
-Runtime53 is cleaned; runtime54 is temporarily owned for the requested world
-cinematic, not a replacement for the human playable session. Goal remains active.
+Runtime53/54 and their disposable databases are cleaned; the human playable
+session remains untouched. Continue water/shadow and world-art work; goal active.
 
 ### Inland fishing integration — candidate only
 
