@@ -6,6 +6,8 @@ import { CollisionMatrix } from "../../movement/CollisionMatrix";
 import { worldToTile } from "../../movement/TileSystem";
 import { ResourceSystem } from "../ResourceSystem";
 import { readFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { basename, dirname, resolve } from "node:path";
 import { World } from "../../../../core/World";
 import { DataManager } from "../../../../data/DataManager";
 import { ALL_WORLD_AREAS } from "../../../../data/world-areas";
@@ -256,6 +258,63 @@ const basin = JSON.parse(
   flatZone: FlatZone;
   waterBody: Omit<ElevatedWaterBody, "radiusSq" | "sourceType">;
 };
+type SelectedFishingPond = {
+  area: WorldArea;
+  basin: typeof basin;
+  sourcePath: string;
+  sourceSha256: string;
+};
+const selectedAssetsDirectory = process.env.ASSETS_DIR;
+const selectedHeadlandEnabled =
+  selectedAssetsDirectory !== undefined &&
+  basename(dirname(resolve(selectedAssetsDirectory))) ===
+    "inland-pond-integration01-UNQUALIFIED" &&
+  ["assets-v7", "assets-v8"].includes(
+    basename(resolve(selectedAssetsDirectory)),
+  );
+function readSelectedFishingPond(): SelectedFishingPond {
+  const assetsDirectory = process.env.ASSETS_DIR;
+  if (assetsDirectory === undefined || assetsDirectory.trim().length === 0) {
+    throw new Error("Selected headland coverage requires explicit ASSETS_DIR");
+  }
+  const sourcePath = resolve(assetsDirectory, "manifests/world-areas.json");
+  const source = readFileSync(sourcePath, "utf8");
+  const manifest = JSON.parse(source) as Record<
+    string,
+    Record<string, WorldArea>
+  >;
+  const areas = Object.values(manifest).flatMap(Object.values);
+  const pondAreas = areas.filter((area) =>
+    area.flatZones?.some((zone) => zone.id === "haven_pond_floor"),
+  );
+  const flatZones = areas
+    .flatMap((area) => area.flatZones ?? [])
+    .filter((zone) => zone.id === "haven_pond_floor");
+  const waterBodies = areas
+    .flatMap((area) => area.waterBodies ?? [])
+    .filter((body) => body.id === "haven_pond_water");
+  if (
+    pondAreas.length !== 1 ||
+    flatZones.length !== 1 ||
+    waterBodies.length !== 1 ||
+    !pondAreas[0].waterBodies?.includes(waterBodies[0]) ||
+    typeof flatZones[0].height !== "number" ||
+    !Number.isFinite(flatZones[0].height)
+  ) {
+    throw new Error(
+      "Selected manifest requires one complete explicit pond area",
+    );
+  }
+  return {
+    area: pondAreas[0],
+    basin: {
+      flatZone: { ...flatZones[0], height: flatZones[0].height },
+      waterBody: waterBodies[0],
+    },
+    sourcePath,
+    sourceSha256: createHash("sha256").update(source).digest("hex"),
+  };
+}
 const families = [
   "net",
   "bait",
@@ -285,30 +344,34 @@ async function actualFixture({
   bake = true,
   manager = true,
   bodyCenter,
+  selected,
 }: {
   water?: boolean;
   bake?: boolean;
   manager?: boolean;
   bodyCenter?: { x: number; z: number };
+  selected?: SelectedFishingPond;
 } = {}) {
   await DataManager.getInstance().initialize();
   const pair = Object.entries(ALL_WORLD_AREAS).find(([, area]) =>
     area.flatZones?.some((zone) => zone.id === "haven_pond_floor"),
   )!;
   originals.set(pair[0], pair[1]);
-  const actualBasin = structuredClone(basin);
+  const actualBasin = structuredClone(selected?.basin ?? basin);
   if (bodyCenter) {
     actualBasin.flatZone.centerX = actualBasin.waterBody.centerX = bodyCenter.x;
     actualBasin.flatZone.centerZ = actualBasin.waterBody.centerZ = bodyCenter.z;
   }
   ALL_WORLD_AREAS[pair[0]] = {
-    ...structuredClone(pair[1]),
+    ...structuredClone(selected?.area ?? pair[1]),
     flatZones: [
-      ...pair[1].flatZones!.filter((zone) => zone.id !== "haven_pond_floor"),
+      ...(selected?.area ?? pair[1]).flatZones!.filter(
+        (zone) => zone.id !== "haven_pond_floor",
+      ),
       actualBasin.flatZone,
     ],
     waterBodies: [
-      ...(pair[1].waterBodies ?? []).filter(
+      ...((selected?.area ?? pair[1]).waterBodies ?? []).filter(
         (body) => body.id !== "haven_pond_water",
       ),
       actualBasin.waterBody,
@@ -335,19 +398,21 @@ async function actualFixture({
     : null;
   const system = world.register("resource", ResourceSystem) as ResourceSystem;
   await system.init();
-  const area: WorldArea = {
-    ...structuredClone(pair[1]),
-    id: "candidate_pond_fishing",
-    resources: [],
-    bounds: { minX: 383, maxX: 437, minZ: 388, maxZ: 442 },
-    fishing: {
-      enabled: true,
-      spotCount: 14,
-      spotTypes: [...families],
-      waterBodyId: basin.waterBody.id,
-    },
-  };
-  return { world, terrain, system, entities, area };
+  const area: WorldArea = selected
+    ? structuredClone(selected.area)
+    : {
+        ...structuredClone(pair[1]),
+        id: "candidate_pond_fishing",
+        resources: [],
+        bounds: { minX: 383, maxX: 437, minZ: 388, maxZ: 442 },
+        fishing: {
+          enabled: true,
+          spotCount: 14,
+          spotTypes: [...families],
+          waterBodyId: basin.waterBody.id,
+        },
+      };
+  return { world, terrain, system, entities, area, basin: actualBasin };
 }
 function assertRealCoverage(f: Awaited<ReturnType<typeof actualFixture>>) {
   const counts = new Map<string, number>();
@@ -378,8 +443,8 @@ function assertRealCoverage(f: Awaited<ReturnType<typeof actualFixture>>) {
         resource.position.x,
         resource.position.z,
       ),
-    ).toBeLessThan(basin.waterBody.surfaceY);
-    expect(resource.position.y).toBe(basin.waterBody.surfaceY);
+    ).toBeLessThan(f.basin.waterBody.surfaceY);
+    expect(resource.position.y).toBe(f.basin.waterBody.surfaceY);
     expect(f.world.entities.get(resource.id)).toBeInstanceOf(ResourceEntity);
     for (const floor of floors)
       expect(
@@ -393,6 +458,174 @@ function assertRealCoverage(f: Awaited<ReturnType<typeof actualFixture>>) {
   return resources;
 }
 describe("body-bound fishing coverage with actual terrain and resource ownership", () => {
+  it.skipIf(!selectedHeadlandEnabled)(
+    "admits selected ASSETS_DIR headland fishing with actual wet ownership, dry approaches, pending dedup and relocation (not live anglers)",
+    async () => {
+      // Explicit launch catalog, checked against gathering/fishing.json rather
+      // than inferred from the selected manifest or the resources under test.
+      const expectedFishByFamily = new Map<string, readonly string[]>([
+        ["fishing_spot_net", ["raw_anchovies", "raw_shrimp"]],
+        ["fishing_spot_bait", ["raw_pike", "raw_herring", "raw_sardine"]],
+        ["fishing_spot_fly", ["raw_salmon", "raw_trout"]],
+        ["fishing_spot_harpoon", ["raw_swordfish", "raw_tuna"]],
+        ["fishing_spot_cage", ["raw_lobster"]],
+        ["fishing_spot_monkfish", ["raw_monkfish"]],
+        ["fishing_spot_shark", ["raw_shark"]],
+      ]);
+      const selected = readSelectedFishingPond();
+      expect(selected.area.fishing).toMatchObject({
+        enabled: true,
+        waterBodyId: selected.basin.waterBody.id,
+        spotCount: 14,
+      });
+      expect(selected.area.fishing!.spotTypes).toHaveLength(7);
+      expect(new Set(selected.area.fishing!.spotTypes)).toEqual(
+        new Set(expectedFishByFamily.keys()),
+      );
+      const f = await actualFixture({ selected });
+      expect(f.area).toEqual(selected.area);
+      expect(f.basin).toEqual(selected.basin);
+      for (const [family, expectedFish] of expectedFishByFamily) {
+        expect(
+          getExternalResource(family)
+            ?.harvestYield.map((yieldEntry) => yieldEntry.itemId)
+            .sort(),
+        ).toEqual([...expectedFish].sort());
+      }
+      const body = f.terrain
+        .getWaterBodyRegistry()
+        .getAllBodies()
+        .find((entry) => entry.id === selected.basin.waterBody.id)!;
+      expect(body).toMatchObject({
+        ...selected.basin.waterBody,
+        sourceType: "explicit",
+      });
+      const floors = createDuelArenaFloorZones(
+        getDuelArenaConfig(),
+        getDuelArenaGradeHeight(),
+      );
+      const first = f.system["spawnDynamicFishingSpots"](f.area.id, f.area);
+      const duplicate = f.system["spawnDynamicFishingSpots"](f.area.id, f.area);
+      expect(duplicate).toBe(first);
+      expect(f.system["terrainResourceRegistrations"].size).toBe(14);
+      await Promise.all([first, duplicate]);
+      const coverage = () =>
+        assertRealCoverage(f).map((resource) => {
+          const family = f.system["resourceVariants"].get(
+            createResourceID(resource.id),
+          )!;
+          const expectedFish = expectedFishByFamily.get(family);
+          expect(expectedFish).toBeDefined();
+          const dropItemIds = resource.drops.map((drop) => drop.itemId).sort();
+          expect(dropItemIds).toEqual([...expectedFish!].sort());
+          expect(
+            f.system["isBoundFishingPoint"](resource.position, {
+              body,
+              bounds: f.area.bounds,
+            }),
+          ).toBe(true);
+          const tile = worldToTile(resource.position.x, resource.position.z);
+          const range = GATHERING_CONSTANTS.FISHING_INTERACTION_RANGE;
+          const approaches: { x: number; y: number; z: number }[] = [];
+          for (
+            let x = tile.x - Math.ceil(range);
+            x <= tile.x + Math.ceil(range);
+            x++
+          )
+            for (
+              let z = tile.z - Math.ceil(range);
+              z <= tile.z + Math.ceil(range);
+              z++
+            ) {
+              const point = { x: x + 0.5, z: z + 0.5 };
+              const y = f.terrain.getResourceGroundHeight(point.x, point.z);
+              if (
+                Math.hypot(
+                  point.x - resource.position.x,
+                  point.z - resource.position.z,
+                ) <= range &&
+                f.terrain.hasBakedWalkabilityAt(point.x, point.z) &&
+                f.world.collision.isWalkable(x, z) &&
+                !f.world.collision.hasFlags(
+                  x,
+                  z,
+                  CollisionFlag.WATER |
+                    CollisionFlag.DOCK |
+                    CollisionFlag.BRIDGE |
+                    CollisionFlag.BLOCKED,
+                ) &&
+                y >= body.surfaceY &&
+                floors.every(
+                  (floor) =>
+                    Math.abs(point.x - floor.centerX) > floor.width / 2 + 1 ||
+                    Math.abs(point.z - floor.centerZ) > floor.depth / 2 + 1,
+                )
+              )
+                approaches.push({ ...point, y });
+            }
+          expect(approaches.length).toBeGreaterThan(0);
+          const entity = f.world.entities.get(resource.id);
+          expect(entity).toBeInstanceOf(ResourceEntity);
+          expect(entity!.position.toArray()).toEqual([
+            resource.position.x,
+            resource.position.y,
+            resource.position.z,
+          ]);
+          return {
+            id: resource.id,
+            family,
+            dropItemIds,
+            position: { ...resource.position },
+            dryApproach: approaches[0],
+          };
+        });
+      const initial = coverage();
+      await f.system["spawnDynamicFishingSpots"](f.area.id, f.area);
+      expect(coverage()).toEqual(initial);
+      expect(f.system.getResourceEcologyStats().pendingFishingAreas).toBe(0);
+      let moves = 0;
+      for (let wave = 0; wave < 3; wave++) {
+        for (const [id, resource] of f.system["resources"]) {
+          const before = { ...resource.position };
+          f.system["relocateFishingSpot"](id, wave * 400);
+          const distance = Math.hypot(
+            resource.position.x - before.x,
+            resource.position.z - before.z,
+          );
+          if (distance > 0) {
+            moves++;
+            expect(distance).toBeGreaterThanOrEqual(
+              GATHERING_CONSTANTS.FISHING_SPOT_MOVE.relocateMinDistance,
+            );
+            expect(distance).toBeLessThanOrEqual(
+              GATHERING_CONSTANTS.FISHING_SPOT_MOVE.relocateRadius,
+            );
+          }
+        }
+        coverage();
+      }
+      expect(moves).toBeGreaterThan(0);
+      console.info(
+        "selected-headland-fishing-coverage",
+        JSON.stringify({
+          sourcePath: selected.sourcePath,
+          sourceSha256: selected.sourceSha256,
+          areaId: f.area.id,
+          bounds: f.area.bounds,
+          fishing: f.area.fishing,
+          expectedFishByFamily: Object.fromEntries(expectedFishByFamily),
+          basin: f.basin,
+          initial,
+          final: coverage(),
+          relocationWaves: 3,
+          moves,
+          pendingDeduplicated: first === duplicate,
+          liveAnglerAcceptance: false,
+        }),
+      );
+    },
+  );
+
   it("admits all seven families/twelve fish exactly twice, reserving pending registration and preserving repeated calls", async () => {
     const f = await actualFixture();
     const protectedCampus = { x: 397.5, y: basin.waterBody.surfaceY, z: 409.5 };

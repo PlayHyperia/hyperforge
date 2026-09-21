@@ -1,5 +1,9 @@
 import { Worker } from "node:worker_threads";
+import { readFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { basename, dirname, join, resolve } from "node:path";
 import { describe, expect, it } from "vitest";
+import type THREE from "../../../../extras/three/three";
 import { World } from "../../../../core/World";
 import { DataManager } from "../../../../data/DataManager";
 import {
@@ -13,6 +17,12 @@ import {
   assembleQuadChunkGeometry,
   type FullTerrainProvider,
 } from "../TerrainQuadChunkGenerator";
+import {
+  RetainedTerrainSurface,
+  type TerrainCellTopology,
+  type TerrainGridSample,
+} from "../TerrainGridSurface";
+import { validateRadialPondTerrainProfile } from "../RadialPondTerrainProfile";
 
 type TerrainInternals = {
   flatZones: Map<string, FlatZone>;
@@ -22,6 +32,7 @@ type TerrainInternals = {
   buildGrassWorkerSetup(): GrassWorkerSetup;
   buildChunkTerrainProvider(): FullTerrainProvider;
   loadFlatZonesFromManifest(): void;
+  loadWaterBodiesFromManifest(): void;
   getHeightAtComputed(x: number, z: number): number;
   getFlatZoneHeight(x: number, z: number): number | null;
 };
@@ -314,4 +325,435 @@ describe("actual compact TerrainSystem biome/shore/worker integration", () => {
       await worker.close();
     }
   }, 20000);
+
+  it.skipIf(
+    !process.env.ASSETS_DIR ||
+      basename(resolve(process.env.ASSETS_DIR)) !== "assets-v8" ||
+      basename(dirname(resolve(process.env.ASSETS_DIR))) !==
+        "inland-pond-integration01-UNQUALIFIED",
+  )(
+    "admits the real v8 southern headland through actual worker and retained terrain without moving protected v7 shore",
+    async () => {
+      // This explicitly selected, unpromoted asset fixture must never silently
+      // substitute the default manifests or reconstruct a synthetic pond.
+      const assets = resolve(process.env.ASSETS_DIR!);
+      const previousAssets = join(dirname(assets), "assets-v7");
+      type PondManifest = {
+        level1Areas: {
+          haven_pond: {
+            flatZones: FlatZone[];
+            waterBodies: Array<{
+              id: string;
+              centerX: number;
+              centerZ: number;
+              radius: number;
+              surfaceY: number;
+            }>;
+          };
+        };
+      };
+      const manifestFiles = [previousAssets, assets].map((directory) => {
+        const path = join(directory, "manifests/world-areas.json");
+        const bytes = readFileSync(path);
+        return {
+          path,
+          bytes: bytes.byteLength,
+          sha256: createHash("sha256").update(bytes).digest("hex"),
+          data: JSON.parse(bytes.toString("utf8")) as PondManifest,
+        };
+      });
+      const [beforeManifest, afterManifest] = manifestFiles.map(
+        (file) => file.data,
+      );
+      const pondZone = (manifest: PondManifest): FlatZone => {
+        const zone = manifest.level1Areas.haven_pond.flatZones.find(
+          (row) => row.id === "haven_pond_floor",
+        );
+        if (!zone?.radialPond?.bankSectors)
+          throw new Error("Real headland fixture has no radial pond sectors");
+        return zone;
+      };
+      const beforeZone = pondZone(beforeManifest);
+      const afterZone = pondZone(afterManifest);
+      expect(validateRadialPondTerrainProfile(beforeZone)).toBeNull();
+      expect(validateRadialPondTerrainProfile(afterZone)).toBeNull();
+      expect(beforeZone.radialPond!.bankSectors![2]).toEqual({
+        bearing: 1.4,
+        halfWidth: 0.6,
+        innerRadius: 18.5,
+        innerHeight: 25.1,
+        outerRadius: 26,
+        outerHeight: 25.8,
+      });
+      expect(afterZone.radialPond!.bankSectors![2]).toEqual({
+        bearing: 1.4,
+        halfWidth: 0.5,
+        innerRadius: 14.8,
+        innerHeight: 25.45,
+        outerRadius: 23.5,
+        outerHeight: 25.8,
+      });
+      const restored = structuredClone(afterManifest);
+      pondZone(restored).radialPond!.bankSectors![2] = structuredClone(
+        beforeZone.radialPond!.bankSectors![2],
+      );
+      expect(restored).toEqual(beforeManifest);
+      expect(readFileSync(join(assets, "manifests/world-config.json"))).toEqual(
+        readFileSync(join(previousAssets, "manifests/world-config.json")),
+      );
+      expect(DataManager.getInstance().isReady()).toBe(true);
+      expect(DataManager.getWorldConfig()?.compactPondDocks).toBeDefined();
+
+      const worlds = [new World(), new World()];
+      const terrains = worlds.map(
+        (world) => world.register("terrain", TerrainSystem) as TerrainSystem,
+      );
+      const geometries: THREE.BufferGeometry[] = [];
+      const worker = createActualWorker();
+      try {
+        // Both real owners admit the currently selected manifests first. The
+        // complete manifest comparison above proves that replacing this one
+        // real v7 zone reproduces its predecessor, without global mutation.
+        for (const terrain of terrains) {
+          const internal = terrain as unknown as TerrainInternals;
+          await terrain.init();
+          internal.loadWaterBodiesFromManifest();
+          internal.loadFlatZonesFromManifest();
+          expect(internal.flatZones.get(afterZone.id)).toMatchObject(afterZone);
+        }
+        const [before, after] = terrains;
+        before.registerFlatZone(beforeZone);
+        const providers = terrains.map((terrain) =>
+          (terrain as unknown as TerrainInternals).buildChunkTerrainProvider(),
+        );
+        const leases = terrains.map((terrain) =>
+          terrain.captureCanonicalGroundLease(),
+        );
+        const setups = terrains.map((terrain) =>
+          (terrain as unknown as TerrainInternals).buildGrassWorkerSetup(),
+        );
+        // Authored grades are applied by the assembler, not by this raw quad
+        // worker. Compare its complete input, excluding grass-only callbacks.
+        for (const key of [
+          "terrainConfig",
+          "seed",
+          "biomeCenters",
+          "biomes",
+          "tileSize",
+        ] as const)
+          expect(setups[0][key]).toEqual(setups[1][key]);
+        expect(providers[0].terrainProfileIdentity).toBe(
+          providers[1].terrainProfileIdentity,
+        );
+        const body = afterManifest.level1Areas.haven_pond.waterBodies.find(
+          (row) => row.id === "haven_pond_water",
+        )!;
+        expect(body).toEqual({
+          id: "haven_pond_water",
+          centerX: 410,
+          centerZ: 415,
+          radius: 27,
+          surfaceY: 24.6,
+        });
+        for (const terrain of terrains)
+          expect(
+            terrain
+              .getWaterBodyRegistry()
+              .getBodyAt(body.centerX, body.centerZ),
+          ).toMatchObject(body);
+
+        const rows: Array<{
+          centerX: number;
+          centerZ: number;
+          surfaces: RetainedTerrainSurface[];
+        }> = [];
+        const meshCensus: Array<Record<string, number>> = [];
+        for (const [centerX, centerZ] of [
+          [450, 450],
+          [350, 450],
+          [450, 350],
+          [350, 350],
+        ]) {
+          const setup = setups[0];
+          const output = await worker.run({
+            type: "generateQuadChunk",
+            centerX,
+            centerZ,
+            size: 100,
+            resolution: 128,
+            config: setup.terrainConfig,
+            seed: setup.seed,
+            biomeCenters: setup.biomeCenters,
+            biomes: setup.biomes,
+          });
+          expect(output.terrainProfileIdentity).toBe(
+            providers[0].terrainProfileIdentity,
+          );
+          const rawHeights = output.heightData.slice();
+          const surfaces = providers.map((provider, version) => {
+            // Keep the production refinement failure/caps intact. A candidate
+            // that cannot assemble is a failed geometry trial, not a skip.
+            const assembled = assembleQuadChunkGeometry(output, provider, 3);
+            geometries.push(assembled.geometry);
+            expect(output.heightData).toEqual(rawHeights);
+            const topology = assembled.geometry.userData
+              .terrainCellTopology as TerrainCellTopology;
+            const extraVertices = topology.surfaceVertexCount - 128 * 128;
+            expect(extraVertices).toBeLessThanOrEqual(65536);
+            let maxCellFaces = 0;
+            for (let cell = 1; cell < topology.cellIndexOffsets.length; cell++)
+              maxCellFaces = Math.max(
+                maxCellFaces,
+                (topology.cellIndexOffsets[cell] -
+                  topology.cellIndexOffsets[cell - 1]) /
+                  3,
+              );
+            expect(maxCellFaces).toBeLessThanOrEqual(512);
+            for (const name of ["position", "normal"] as const) {
+              const attribute = assembled.geometry.getAttribute(name);
+              for (let index = 0; index < attribute.count; index++)
+                expect(
+                  [
+                    attribute.getX(index),
+                    attribute.getY(index),
+                    attribute.getZ(index),
+                  ].every(Number.isFinite),
+                ).toBe(true);
+            }
+            const surface = new RetainedTerrainSurface(
+              version + 1,
+              provider.terrainProfileIdentity,
+              centerX,
+              centerZ,
+              100,
+              128,
+              assembled.geometry,
+            );
+            expect(surface.matchesGeometry(assembled.geometry)).toBe(true);
+            meshCensus.push({
+              version: version + 7,
+              centerX,
+              centerZ,
+              extraVertices,
+              maxCellFaces,
+              vertices: assembled.geometry.getAttribute("position").count,
+              triangles: assembled.geometry.index!.count / 3,
+            });
+            return surface;
+          });
+          rows.push({ centerX, centerZ, surfaces });
+        }
+        const out: TerrainGridSample = {
+          height: 0,
+          nx: 0,
+          ny: 1,
+          nz: 0,
+          faceIndex: 0,
+        };
+        const sampleMesh = (version: number, x: number, z: number) => {
+          const row = rows.find(
+            (entry) =>
+              Math.abs(x - entry.centerX) <= 50 &&
+              Math.abs(z - entry.centerZ) <= 50,
+          );
+          if (
+            !row ||
+            !row.surfaces[version].sample(x - row.centerX, z - row.centerZ, out)
+          )
+            throw new Error(`No actual retained pond surface at ${x},${z}`);
+          return out;
+        };
+        const maxima = providers.map(() => ({
+          heightError: 0,
+          normalDegrees: 0,
+          probes: 0,
+        }));
+        let unchangedOutsideSector = 0;
+        for (let degree = 0; degree < 360; degree++) {
+          const angle = ((degree + 0.317) * Math.PI) / 180;
+          const distance = Math.abs(
+            Math.atan2(Math.sin(angle - 1.4), Math.cos(angle - 1.4)),
+          );
+          for (let radial = 0; radial <= 470; radial++) {
+            const radius = 9.45 + radial * 0.05;
+            const x = 410 + radius * Math.cos(angle);
+            const z = 415 + radius * Math.sin(angle);
+            if (distance >= 0.601) {
+              expect(leases[0].sampleHeight(x, z)).toBe(
+                leases[1].sampleHeight(x, z),
+              );
+              unchangedOutsideSector++;
+            }
+            providers.forEach((provider, version) => {
+              const mesh = sampleMesh(version, x, z);
+              const height = provider.getHeightAtComputed(x, z);
+              const h = 0.03125;
+              const nx =
+                -(
+                  provider.getHeightAtComputed(x + h, z) -
+                  provider.getHeightAtComputed(x - h, z)
+                ) /
+                (2 * h);
+              const nz =
+                -(
+                  provider.getHeightAtComputed(x, z + h) -
+                  provider.getHeightAtComputed(x, z - h)
+                ) /
+                (2 * h);
+              const cosine =
+                (nx * mesh.nx + mesh.ny + nz * mesh.nz) / Math.hypot(nx, 1, nz);
+              const degrees =
+                (Math.acos(Math.max(-1, Math.min(1, cosine))) * 180) / Math.PI;
+              expect(
+                [height, nx, nz, mesh.height, degrees].every(Number.isFinite),
+              ).toBe(true);
+              maxima[version].heightError = Math.max(
+                maxima[version].heightError,
+                Math.abs(mesh.height - height),
+              );
+              maxima[version].normalDegrees = Math.max(
+                maxima[version].normalDegrees,
+                degrees,
+              );
+              maxima[version].probes++;
+            });
+          }
+        }
+        expect(unchangedOutsideSector).toBeGreaterThan(130000);
+        for (const maximum of maxima) {
+          expect(maximum.probes).toBe(169560);
+          expect(maximum.heightError).toBeLessThanOrEqual(0.02);
+          expect(maximum.normalDegrees).toBeLessThanOrEqual(6);
+        }
+
+        // One wet interval per radial spoke proves a connected sampled basin
+        // with no isolated dry island/wet pocket; this is not a navmesh claim.
+        const shoreRadii = providers.map((provider, version) => {
+          const radii: number[] = [];
+          for (let degree = 0; degree < 360; degree++) {
+            const angle = (degree * Math.PI) / 180;
+            let transitions = 0;
+            let wasWet = true;
+            for (let radial = 0; radial <= 270; radial++) {
+              const radius = radial / 10;
+              const x = 410 + radius * Math.cos(angle);
+              const z = 415 + radius * Math.sin(angle);
+              const wet = provider.getHeightAtComputed(x, z) < body.surfaceY;
+              if (wet !== wasWet) transitions++;
+              wasWet = wet;
+            }
+            expect(transitions, `v${version + 7} water spoke ${degree}`).toBe(
+              1,
+            );
+            expect(wasWet).toBe(false);
+            let low = 0,
+              high = 27;
+            for (let step = 0; step < 30; step++) {
+              const radius = (low + high) / 2;
+              if (
+                provider.getHeightAtComputed(
+                  410 + radius * Math.cos(angle),
+                  415 + radius * Math.sin(angle),
+                ) < body.surfaceY
+              )
+                low = radius;
+              else high = radius;
+            }
+            radii.push((low + high) / 2);
+          }
+          return radii;
+        });
+        const headlandDegree = Math.round((1.4 * 180) / Math.PI);
+        const recession =
+          shoreRadii[0][headlandDegree] - shoreRadii[1][headlandDegree];
+        expect(recession).toBeGreaterThan(2.5);
+        expect(recession).toBeLessThan(3.5);
+        // Same east cove, stronger asymmetry against the changed south shore.
+        expect(shoreRadii[0][0]).toBe(shoreRadii[1][0]);
+        expect(
+          shoreRadii[1][0] - shoreRadii[1][headlandDegree],
+        ).toBeGreaterThan(
+          shoreRadii[0][0] - shoreRadii[0][headlandDegree] + 2.5,
+        );
+        const headlandPoint = [
+          410 + 14.5 * Math.cos(1.4),
+          415 + 14.5 * Math.sin(1.4),
+        ] as const;
+        expect(before.getResourceGroundHeight(...headlandPoint)).toBeLessThan(
+          body.surfaceY,
+        );
+        expect(after.getResourceGroundHeight(...headlandPoint)).toBeGreaterThan(
+          body.surfaceY + 0.5,
+        );
+        expect(sampleMesh(0, ...headlandPoint).height).toBeLessThan(
+          body.surfaceY,
+        );
+        expect(sampleMesh(1, ...headlandPoint).height).toBeGreaterThan(
+          body.surfaceY + 0.5,
+        );
+
+        let protectedSamples = 0;
+        const unchanged = (x: number, z: number) => {
+          expect(leases[0].sampleHeight(x, z)).toBe(
+            leases[1].sampleHeight(x, z),
+          );
+          const oldSample = { ...sampleMesh(0, x, z) };
+          const nextSample = sampleMesh(1, x, z);
+          expect([
+            nextSample.height,
+            nextSample.nx,
+            nextSample.ny,
+            nextSample.nz,
+          ]).toEqual([
+            oldSample.height,
+            oldSample.nx,
+            oldSample.ny,
+            oldSample.nz,
+          ]);
+          protectedSamples++;
+        };
+        // Full deck/apron support rectangles for both real docks, not only
+        // their origins; exact render support equality is independent of PhysX.
+        for (const [minX, maxX, minZ, maxZ] of [
+          [388, 396, 423, 426],
+          [427, 435, 414, 417],
+          [370, 396, 405, 448],
+        ])
+          for (let x = minX; x <= maxX; x += 0.25)
+            for (let z = minZ; z <= maxZ; z += 0.25) unchanged(x, z);
+        // Beyond the radial support, every heading retains exact authority.
+        for (let degree = 0; degree < 360; degree++)
+          for (const radius of [33.1, 36, 39]) {
+            const angle = (degree * Math.PI) / 180;
+            const x = 410 + radius * Math.cos(angle);
+            const z = 415 + radius * Math.sin(angle);
+            expect(leases[0].sampleHeight(x, z)).toBe(
+              leases[1].sampleHeight(x, z),
+            );
+          }
+        for (const lease of leases) expect(lease.isCurrent()).toBe(true);
+        process.stdout.write(
+          `Actual v8 headland ${JSON.stringify({
+            manifestFiles: manifestFiles.map(({ path, bytes, sha256 }) => ({
+              path,
+              bytes,
+              sha256,
+            })),
+            meshCensus,
+            maxima,
+            unchangedOutsideSector,
+            protectedSamples,
+            waterSpokesPerVersion: 360,
+            headlandRecession: recession,
+            nativeOrNavigationOrPerformanceAcceptance: false,
+          })}\n`,
+        );
+      } finally {
+        await worker.close();
+        geometries.forEach((geometry) => geometry.dispose());
+        for (const world of worlds) await world.destroy();
+      }
+    },
+    30000,
+  );
 });

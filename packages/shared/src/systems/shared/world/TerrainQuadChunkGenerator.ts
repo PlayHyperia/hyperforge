@@ -1383,6 +1383,52 @@ function* refineSurfaceFeaturesSteps(
         }
         for (const id of boundary) normalVertices.add(id);
         if (boundary.length > polygon.length) {
+          // A rectangular adaptive patch with cuts on just one edge can fan
+          // from an opposite original corner. Every shared-edge vertex still
+          // participates, without a redundant interior vertex. Multi-edge
+          // junctions and historical small-bank topology keep the centre fan.
+          let boundaryFanOrigin = -1;
+          if (
+            polygon.length === 4 &&
+            activeCells
+              .get(cell)
+              ?.some((zone) => zone.kind === "annulus" && zone.broadAdaptive)
+          ) {
+            const [a, b, c, d] = polygon;
+            if (
+              p[a * 3] === p[b * 3] &&
+              p[b * 3 + 2] === p[c * 3 + 2] &&
+              p[c * 3] === p[d * 3] &&
+              p[d * 3 + 2] === p[a * 3 + 2]
+            ) {
+              const corners = polygon.map((id) => boundary.indexOf(id));
+              let splitEdge = -1,
+                splitCount = 0;
+              for (let edge = 0; edge < 4; edge++)
+                if (
+                  (corners[(edge + 1) % 4] - corners[edge] + boundary.length) %
+                    boundary.length >
+                  1
+                ) {
+                  splitEdge = edge;
+                  splitCount++;
+                }
+              // Keep the original a-to-c diagonal used by the error probes.
+              if (splitCount === 1)
+                boundaryFanOrigin =
+                  corners[splitEdge === 0 || splitEdge === 3 ? 2 : 0];
+            }
+          }
+          if (boundaryFanOrigin >= 0) {
+            for (let i = 1; i < boundary.length - 1; i++)
+              triangle(
+                boundary[boundaryFanOrigin],
+                boundary[(boundaryFanOrigin + i) % boundary.length],
+                boundary[(boundaryFanOrigin + i + 1) % boundary.length],
+              );
+            yield "collar_polygon_indices";
+            continue;
+          }
           // A centre fan retains every collinear boundary subdivision; a corner
           // fan would skip such vertices and create a new interior T junction.
           const center = vertex(

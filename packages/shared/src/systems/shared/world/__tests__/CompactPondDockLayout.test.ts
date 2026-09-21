@@ -1,5 +1,6 @@
 import { readFileSync } from "node:fs";
 import { createHash } from "node:crypto";
+import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import { World } from "../../../../core/World";
 import { DataManager } from "../../../../data/DataManager";
@@ -35,14 +36,49 @@ const placements: readonly CompactPondDockPlacement[] = Object.freeze([
   }),
 ]);
 
-const source = readFileSync(
-  new URL("../__fixtures__/inland-pond-basin-candidate.json", import.meta.url),
-  "utf8",
-);
-const candidate = JSON.parse(source) as {
+type PondFixture = {
   flatZone: FlatZone;
   waterBody: Omit<ElevatedWaterBody, "radiusSq" | "sourceType">;
 };
+const assetsDirectory = process.env.ASSETS_DIR;
+if (assetsDirectory !== undefined && assetsDirectory.trim().length === 0) {
+  throw new Error("Explicit ASSETS_DIR must not be empty");
+}
+const fixtureSource =
+  assetsDirectory === undefined
+    ? new URL(
+        "../__fixtures__/inland-pond-basin-candidate.json",
+        import.meta.url,
+      )
+    : resolve(assetsDirectory, "manifests/world-areas.json");
+const source = readFileSync(fixtureSource, "utf8");
+const candidate: PondFixture = (() => {
+  if (assetsDirectory === undefined) return JSON.parse(source) as PondFixture;
+  // Use the selected physical basin, never the historical candidate beneath it.
+  const manifest = JSON.parse(source) as Record<
+    string,
+    Record<
+      string,
+      {
+        flatZones?: PondFixture["flatZone"][];
+        waterBodies?: PondFixture["waterBody"][];
+      }
+    >
+  >;
+  const manifestAreas = Object.values(manifest).flatMap(Object.values);
+  const flatZones = manifestAreas
+    .flatMap((area) => area.flatZones ?? [])
+    .filter((zone) => zone.id === "haven_pond_floor");
+  const waterBodies = manifestAreas
+    .flatMap((area) => area.waterBodies ?? [])
+    .filter((body) => body.id === "haven_pond_water");
+  if (flatZones.length !== 1 || waterBodies.length !== 1) {
+    throw new Error(
+      "Selected ASSETS_DIR must contain exactly one haven_pond_floor and haven_pond_water",
+    );
+  }
+  return { flatZone: flatZones[0], waterBody: waterBodies[0] };
+})();
 
 async function fixture() {
   await DataManager.getInstance().initialize();
@@ -225,6 +261,7 @@ describe("canonical inland pond dock layout (CPU geometry, not native qualificat
           JSON.stringify({
             id: descriptor.id,
             descriptor,
+            fixtureSource: String(fixtureSource),
             fixtureSha256: createHash("sha256").update(source).digest("hex"),
             rays,
             vertices: 119,

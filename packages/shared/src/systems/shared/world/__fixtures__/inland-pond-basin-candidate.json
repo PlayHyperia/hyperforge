@@ -94,6 +94,28 @@
       }
     }
   },
+  "southernHeadlandStudy": {
+    "status": "DESIGN_CANDIDATE_UNQUALIFIED",
+    "artIntent": "Deepen the southern turf headland to separate the eastern shelf and southwest arrival bay. Preserve dock landings, the western bank approach, all other physical sectors and material composition. This is a physical basin change requiring independent terrain, water, fishing and native qualification; it is not a default override.",
+    "flatZoneId": "haven_pond_floor",
+    "sectorIndex": 2,
+    "before": {
+      "bearing": 1.4,
+      "halfWidth": 0.6,
+      "innerRadius": 18.5,
+      "innerHeight": 25.1,
+      "outerRadius": 26,
+      "outerHeight": 25.8
+    },
+    "after": {
+      "bearing": 1.4,
+      "halfWidth": 0.5,
+      "innerRadius": 14.8,
+      "innerHeight": 25.45,
+      "outerRadius": 23.5,
+      "outerHeight": 25.8
+    }
+  },
   "fishingCapacity": {
     "status": "TARGET_NOT_SPAWNED_OR_NAVIGATED",
     "minimumPositionsPerFamily": 2,

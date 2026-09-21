@@ -42,7 +42,7 @@ const attributes = [
 const evidence = (label: string, json: string) =>
   process.stdout.write(`${label} ${json}\n`);
 
-// Explicit real-asset regressions: neither overlay is a production default.
+// Explicit real-asset regressions: none of these overlays is a production default.
 // Each uses its actual worker output, authored constraints and retained mesh.
 const cases = [
   {
@@ -69,6 +69,21 @@ const cases = [
     label: "NATIVE35_SOUTHBANK",
     // The work cell touches the x400 leaf boundary. Its unmodified grounding
     // halo therefore leases both real 100m leaves, not a fabricated surface.
+    nodes: [
+      [450, 450],
+      [350, 450],
+    ],
+    focus: [435, 452],
+    key: "gcell_v1_16_17",
+    bounds: { minX: 400, maxX: 425, minZ: 425, maxZ: 450 },
+  },
+  {
+    name: "southern headland retained pond grass work budget",
+    test: "grounds the reshaped southbank against its actual retained terrain without increasing its work cap",
+    enabled: process.env.ASSETS_DIR?.endsWith(
+      "/inland-pond-integration01-UNQUALIFIED/assets-v8",
+    ),
+    label: "HEADLAND_SOUTHBANK",
     nodes: [
       [450, 450],
       [350, 450],

@@ -1253,6 +1253,94 @@ open. No default promotion, merge, deployment or AAA claim.
 Evidence: service-layout dock-chamfer-stock01/v7-03/types04/lint02/format03;
 inland pond build24, runtimes27–28 and natives45–47.
 
+### Asymmetric pond headland and retained fishing capacity — 2026-09-21
+
+The isolated assets-v8 study deepens one southern turf headland, separating the
+eastern shelf from the southwest bay. Its waterline recedes 3.063m locally;
+water datum, other bank sectors, dock landings, western bank approach, roads and
+material composition stay fixed. The additive southernHeadlandStudy recipe is
+tracked alongside, not over, the historical fixture. Byte-exact reproduction
+of the retained v8 manifest passes. This is not a canonical/default promotion.
+
+The first actual v8 terrain build correctly failed its 65,536-extra-vertex cap.
+A bounded topology correction now fans rectangular broad-adaptive patches with
+exactly one subdivided edge from an opposite original corner, retaining every
+boundary vertex and the original diagonal without an extra interior vertex.
+Multi-edge junctions and historical non-broad patches keep their center fan.
+No cap, error tolerance, finest lattice, grass density or quality setting rises.
+This changes interpolated geometry; byte-identical prior grounding is NOT claimed.
+
+Actual v7/v8 terrain-versus-worker checks cover 169,560 probes per version:
+maximum height error 10.988mm and normal error 3.987 degrees stay inside the
+existing 20mm/6-degree gates. 137,061 outside-sector authority samples and 19,023
+protected dock/west-bank height/normal samples agree between v7 and v8; 360 spokes
+per version retain one continuous wet interval. Seams pass. Maximum additional
+vertices are 63,519 and maximum faces/cell 366 under unchanged caps.
+
+Candidate dock/native-PhysX/layout tests pass 23/23. Actual v8 resource coverage
+verifies fourteen unique fishing entities (two per family, exact seven-family/
+twelve-fish catalog mappings), dry walkable approaches, pending-registration deduplication
+and three relocation waves. It does NOT catch every fish or prove live anglers.
+These are local supported dry-approach witnesses, not pairwise-disjoint occupied
+stances or connected routes with all dock/court/rock collision owners installed.
+Stock terrain/dock regression passes 85 cases; real stock fishing passes nine.
+The final dense surface repeat and combined selected authority/fishing repeat
+pass. Counts overlap and are not a unique aggregate. Earlier failures remain.
+The exact named catalog is checked against both loaded yields and actual resource
+drops before/after relocation. Its first broader invocation also ran a historical
+default-campus case under v8 and failed that incompatible fixture assertion;
+selected v8 and stock cases must run separately. No old assertion is weakened.
+
+Actual full-cell grass checks pass against frozen exhaustive per-clump oracles:
+v8 retains 966/1,009 clumps, 935,622 work units, 155.006ms cumulative CPU active;
+v7 retains 930/970, 887,617 units, 150.802ms. Both stay inside the unchanged 1M-work
+and 250ms-active gates. v7's prior geometry retained 931 clumps; the new topology
+rejects one additional water clump. This is bounded correctness, not output parity
+with the prior mesh or native FPS acceptance. Full shared plus six changed test/
+source files typecheck: 710 roots, 2,385 files, zero diagnostics, stable pins.
+Scoped lint, formatting and tracked study reconstruction pass.
+
+Build25 emits eight isolated bundles from 973 stable inputs. Native48 captures
+all four real headful Metal/WebGPU views, verifies the exact served framework and
+stable source/manifest pins, and reports no unexpected console/transport failure.
+The four held-camera grass gates finish in 22.621/9.384/3.609/9.836 seconds, with
+empty final queues and no observed failed jobs; maximum observed slices 3.5/3.5/
+5.0/5.0ms are not full-frame pacing. The Mac was on battery, so this is not a
+controlled performance comparison. All fourteen fishing entities remain visible
+to the client in each view. Known cow errors remain explicitly deferred; its
+invisible hitbox is still not a visible placeholder or full-asset acceptance.
+
+Four-view visual review confirms the two unequal bays and intact dock landings.
+The uniform brown collar, sparse shoreline planting, plain timber and bank
+pavilion circulation still need substantial art/gameplay work. Reference review
+favored deliberately authored habitat regions over indiscriminate noise, using
+[Guerrilla's placement breakdown](https://www.guerrilla-games.com/read/gpu-based-procedural-placement-in-horizon-zero-dawn)
+and the [official TSL terrain example](https://github.com/mrdoob/three.js/blob/dev/examples/webgpu_tsl_procedural_terrain.html)
+as principles, not imported code or assets.
+
+- [x] Capture the asymmetric physical-basin trial with real terrain, resources,
+      docks and four native views; preserve failed evidence and all original caps.
+- [ ] Prove fourteen simultaneous anglers plus seven additional overflow players,
+      all twelve catches, tier/tool/consumable rules and dry shore access at every
+      tier. Repeat occupied relocations, cancellation, departure and re-entry;
+      keep through-routes open with no overlapping required stances.
+- [ ] Verify both distinct docks, bank transactions and collision-free circulation
+      including supplier/bank journeys, concurrency, reconnect/restart and
+      sustained actual gameplay. Historical v4/v6 occupancy cannot qualify v8.
+- [ ] Refine shore habitats, natural transitions and dock/pavilion character;
+      qualify sustained frame/loading/memory budgets and real streaming separately.
+
+Native48 closes its owned browser; runtimes29/30 stop with temporary databases
+removed and protected human localhost/artifacts unchanged. Unmount without an
+observed error is not GPU reclamation proof. All LAYOUT-01–08 remain OPEN.
+No default promotion, merge, deployment, smooth-travel or AAA acceptance.
+
+Evidence: service-layout pond-headland-docks01/grass01–02/authority01–03,
+stock-regression01/fishing-stock01–02/fishing-catalog01–02/v7-grass-regression01/
+dense-final01/types01–02/root-lint03/root-format03/study-source01; inland pond
+assets-v8/build25/runtime29–30/native48. Failed grass01, authority01 and the
+mixed-fixture catalog01 invocation are retained.
+
 ### Inland fishing integration — candidate only
 
 The detached candidate now requests 14 real fishing entities, two for each of
@@ -1260,7 +1348,8 @@ seven families covering all 12 fish. The body-bound resource owner admits only
 wet targets with a dry approach within the existing interaction range, reserves
 pending positions, and keeps relocation inside the same water body. The focused
 28-test resource gate passes, including retries, concurrent reservations and
-actual dry-shore reachability. This is not a live multi-agent fishing proof.
+local supported dry approaches. This is not complete route-connectivity or live
+multi-agent fishing proof.
 
 Both dock decks now have closed 12cm-thick planks and directionally aligned,
 filtered timber grain, sharing one opaque rough material. Stock and art03 each
