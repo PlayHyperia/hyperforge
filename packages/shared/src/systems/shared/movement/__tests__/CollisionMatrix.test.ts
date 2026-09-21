@@ -16,12 +16,200 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import { CollisionMatrix, ZONE_SIZE } from "../CollisionMatrix";
 import { CollisionFlag } from "../CollisionFlags";
+import { EntityOccupancyMap } from "../EntityOccupancyMap";
+import { createEntityID } from "../../../../types/core/identifiers";
 
 describe("CollisionMatrix", () => {
   let matrix: CollisionMatrix;
 
   beforeEach(() => {
     matrix = new CollisionMatrix();
+  });
+
+  describe("effective collision change subscriptions", () => {
+    const record = (matrix: CollisionMatrix) => {
+      const changes: Array<[number | null, number | null, number]> = [];
+      const unsubscribe = matrix.onChange((x, z, flags) => {
+        changes.push([x, z, flags]);
+      });
+      return { changes, unsubscribe };
+    };
+
+    it("reports exact changed bits after writes, suppresses no-ops and unsubscribes", () => {
+      const { changes, unsubscribe } = record(matrix);
+      const observed: number[] = [];
+      matrix.onChange((x, z) => {
+        if (x !== null && z !== null) observed.push(matrix.getFlags(x, z));
+      });
+      matrix.setFlags(-9, 8, CollisionFlag.WATER);
+      matrix.setFlags(-9, 8, CollisionFlag.WATER);
+      matrix.addFlags(-9, 8, CollisionFlag.BLOCKED);
+      matrix.addFlags(-9, 8, CollisionFlag.BLOCKED);
+      matrix.removeFlags(-9, 8, CollisionFlag.WATER);
+      matrix.removeFlags(-9, 8, CollisionFlag.WATER);
+      matrix.removeFlags(100, 100, CollisionFlag.WATER);
+      matrix.setFlags(20, 20, 0);
+      expect(changes).toEqual([
+        [-9, 8, CollisionFlag.WATER],
+        [-9, 8, CollisionFlag.BLOCKED],
+        [-9, 8, CollisionFlag.WATER],
+      ]);
+      expect(observed).toEqual([
+        CollisionFlag.WATER,
+        CollisionFlag.WATER | CollisionFlag.BLOCKED,
+        CollisionFlag.BLOCKED,
+      ]);
+      unsubscribe();
+      unsubscribe();
+      matrix.setFlags(-9, 8, 0);
+      expect(changes).toHaveLength(3);
+      expect(observed.at(-1)).toBe(0);
+    });
+
+    it("reports only effective region changes, including negative zone boundaries", () => {
+      const deck = matrix.acquireWalkableDeck([{ x: -1, z: 7 }], []);
+      const { changes } = record(matrix);
+      const values = new Int32Array([
+        CollisionFlag.WATER,
+        CollisionFlag.WATER,
+        CollisionFlag.WATER,
+        0,
+      ]);
+      matrix.replaceFlagsInRegion(-1, 7, 2, 2, CollisionFlag.WATER, values);
+      expect(changes).toEqual([
+        [-1, 8, CollisionFlag.WATER],
+        [0, 7, CollisionFlag.WATER],
+      ]);
+      matrix.replaceFlagsInRegion(-1, 7, 2, 2, CollisionFlag.WATER, values);
+      expect(changes).toHaveLength(2);
+      deck.release();
+      expect(changes.at(-1)).toEqual([
+        -1,
+        7,
+        CollisionFlag.DOCK | CollisionFlag.WATER,
+      ]);
+    });
+
+    it("publishes committed static leases and suppresses masked or overlapping changes", () => {
+      matrix.setFlags(-1, -9, CollisionFlag.BLOCKED);
+      const { changes } = record(matrix);
+      const snapshots: number[][] = [];
+      matrix.onChange(() =>
+        snapshots.push([matrix.getFlags(-1, -9), matrix.getFlags(8, 9)]),
+      );
+      const first = matrix.acquireStaticFootprint([
+        { x: -1, z: -9 },
+        { x: 8, z: 9 },
+      ]);
+      expect(changes).toEqual([[8, 9, CollisionFlag.BLOCKED]]);
+      expect(snapshots).toEqual([
+        [CollisionFlag.BLOCKED, CollisionFlag.BLOCKED],
+      ]);
+      const second = matrix.acquireStaticFootprint([{ x: 8, z: 9 }]);
+      matrix.removeFlags(-1, -9, CollisionFlag.BLOCKED);
+      expect(changes).toHaveLength(1);
+      expect(first.release()).toBe(true);
+      expect(changes.at(-1)).toEqual([-1, -9, CollisionFlag.BLOCKED]);
+      expect(matrix.getFlags(8, 9)).toBe(CollisionFlag.BLOCKED);
+      expect(first.release()).toBe(false);
+      expect(changes).toHaveLength(2);
+      expect(second.release()).toBe(true);
+      expect(changes.at(-1)).toEqual([8, 9, CollisionFlag.BLOCKED]);
+      expect(snapshots.at(-1)).toEqual([0, 0]);
+    });
+
+    it("tracks deck masking and independently owned rails without stale release events", () => {
+      matrix.setFlags(-8, -1, CollisionFlag.WATER | CollisionFlag.STEEP_SLOPE);
+      const { changes } = record(matrix);
+      const tiles = [{ x: -8, z: -1 }];
+      const walls = [{ x: -9, z: -1, flags: CollisionFlag.WALL_EAST }];
+      const first = matrix.acquireWalkableDeck(tiles, walls);
+      expect(changes).toEqual([
+        [
+          -8,
+          -1,
+          CollisionFlag.WATER | CollisionFlag.STEEP_SLOPE | CollisionFlag.DOCK,
+        ],
+        [-9, -1, CollisionFlag.WALL_EAST],
+      ]);
+      const second = matrix.acquireWalkableDeck(tiles, walls);
+      matrix.setFlags(-8, -1, CollisionFlag.WATER);
+      expect(first.release()).toBe(true);
+      expect(first.release()).toBe(false);
+      expect(changes).toHaveLength(2);
+      expect(second.release()).toBe(true);
+      expect(changes.slice(2)).toEqual([
+        [-8, -1, CollisionFlag.WATER | CollisionFlag.DOCK],
+        [-9, -1, CollisionFlag.WALL_EAST],
+      ]);
+      expect(matrix.getFlags(-8, -1)).toBe(CollisionFlag.WATER);
+      expect(matrix.getFlags(-9, -1)).toBe(0);
+    });
+
+    it("covers zone replacement, deserialization and network batches without duplicate notifications", () => {
+      const { changes } = record(matrix);
+      const zone = new Int32Array(ZONE_SIZE * ZONE_SIZE);
+      zone[0] = CollisionFlag.WATER;
+      zone[63] = CollisionFlag.BLOCKED;
+      matrix.setZoneData(-1, -2, zone);
+      matrix.setZoneData(-1, -2, zone);
+      expect(changes).toEqual([
+        [-8, -16, CollisionFlag.WATER],
+        [-1, -9, CollisionFlag.BLOCKED],
+      ]);
+      const source = new CollisionMatrix();
+      source.setFlags(-8, -16, CollisionFlag.STEEP_SLOPE);
+      const serialized = source.serializeZone(-1, -2)!;
+      expect(matrix.deserializeZone(-1, -2, serialized)).toBe(true);
+      matrix.applyNetworkZones([
+        { zoneX: -1, zoneZ: -2, base64Data: serialized },
+      ]);
+      expect(changes.slice(2)).toEqual([
+        [-8, -16, CollisionFlag.WATER | CollisionFlag.STEEP_SLOPE],
+        [-1, -9, CollisionFlag.BLOCKED],
+      ]);
+      const lease = matrix.acquireStaticFootprint([{ x: -1, z: -9 }]);
+      const combined = matrix.getZoneData(-1, -2)!;
+      const count = changes.length;
+      matrix.setZoneData(-1, -2, combined);
+      expect(lease.release()).toBe(true);
+      expect(changes).toHaveLength(count);
+      expect(matrix.getFlags(-1, -9)).toBe(CollisionFlag.BLOCKED);
+    });
+
+    it("observes actual occupancy moves and vacates with occupancy-only flag differences", () => {
+      const occupancy = new EntityOccupancyMap();
+      occupancy.setCollisionMatrix(matrix);
+      const { changes } = record(matrix);
+      const playerId = createEntityID("collision-change-player");
+      occupancy.occupy(playerId, [{ x: 4, z: 5 }], 1, "player", false);
+      occupancy.move(playerId, [{ x: 5, z: 5 }], 1);
+      occupancy.vacate(playerId);
+      occupancy.vacate(playerId);
+      expect(changes).toEqual([
+        [4, 5, CollisionFlag.OCCUPIED_PLAYER],
+        [4, 5, CollisionFlag.OCCUPIED_PLAYER],
+        [5, 5, CollisionFlag.OCCUPIED_PLAYER],
+        [5, 5, CollisionFlag.OCCUPIED_PLAYER],
+      ]);
+      expect(matrix.getFlags(4, 5)).toBe(0);
+      expect(matrix.getFlags(5, 5)).toBe(0);
+    });
+
+    it("notifies a bulk reset once, retains subscribers and invalidates old leases", () => {
+      const { changes } = record(matrix);
+      const staticLease = matrix.acquireStaticFootprint([{ x: 0, z: 0 }]);
+      const deckLease = matrix.acquireWalkableDeck([{ x: 1, z: 1 }], []);
+      matrix.clear();
+      expect(changes.at(-1)).toEqual([null, null, 0]);
+      const count = changes.length;
+      matrix.clear();
+      expect(staticLease.release()).toBe(false);
+      expect(deckLease.release()).toBe(false);
+      expect(changes).toHaveLength(count);
+      matrix.addFlags(2, 2, CollisionFlag.WALL_NORTH);
+      expect(changes.at(-1)).toEqual([2, 2, CollisionFlag.WALL_NORTH]);
+    });
   });
 
   describe("zone allocation", () => {

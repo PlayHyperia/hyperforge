@@ -756,10 +756,11 @@ is boxed in by water and two occupied cardinal tiles after the fish moves to
 (391.5,418.5). The only dry diagonal cannot legally pass those occupied corners;
 movement rejects after one search iteration. Capacity needs safe circulation
 and coordinated yielding, not extra pathfinding budget or illegal corner cuts.
-Both failures remain blocking even if subsequent randomized runs pass.
+At that checkpoint both failures were blocking. The bounded-navigation result
+below supersedes the search failure; the independent crowd blocker remains open.
 
-- [ ] Preserve/resume bounded detour search correctly; distinguish unfinished
-      frontier from exhausted search without increasing per-search/tick budgets.
+- [x] Preserve/resume bounded ground-floor detour search; distinguish unfinished
+      frontier from exhaustion at unchanged budgets (CPU scope verified below).
 - [ ] Preserve escape/circulation space and prove coordinated yielding plus
       relocation recovery under crowd occupancy; retain repeat arrangements.
 - [ ] Compose an asymmetric worn arrival/connector, restrained planting and
@@ -784,6 +785,105 @@ bank-collar-before01/after01/stock-regression02/v6-actual-final01/
 singular52-final01/types-final01/eslint-final01;
 inland pond assets-v5/v6, build15/16, runtime16–19 and native30–32.
 Failed receipts are retained; the human localhost and its database are untouched.
+
+### Bounded pond navigation — CPU recovery, not whole-layout acceptance
+
+The two stranded pond returns are now deterministic regression cases, not
+randomized success claims. Before the fix both rejected valid destinations
+after 250 search iterations. Ground-floor non-combat movement now retains a
+stationary-start guided frontier when its slice yields without a useful path.
+Pending, found and exhausted are separate outcomes. Every heap pop, including
+stale entries, is charged; the 250-per-search-slice and 1,000-per-tick limits, search
+radius, legal diagonal corners and route deadlines are unchanged. Ordinary
+useful segments are still published immediately; this is not a replacement
+navigation framework or a larger search allowance.
+
+Each paused actor owns copied goals, heap, parents and costs. Repeated intent
+does not restart it; changed start/goal/arrival set/floor, relevant collision,
+cancellation, synchronization, cleanup and world teardown retire stale work.
+Collision owners publish effective changes from base flags, regions, leases
+and network updates. Unrelated distant changes do not restart a job. Static
+terrain caches survive occupancy-only changes, while affected directional
+entries are invalidated because they include occupants and diagonal supports.
+Same-tick cache failures were reproduced before this correction. At most 72
+nearby edge keys are invalidated per changed tile; there is no full graph scan.
+
+Retained work is limited to ground-floor owners with the change-notification
+contract. Upper-floor topology keeps its historical one-shot behavior. This
+does not claim arbitrary live terrain/profile editing, all building floors or
+third-party mutation of exported collision arrays. Authoritative movement
+still checks each actual step; no actor teleport or collision relaxation was
+introduced. A route longer than the existing 200-tile returned segment now
+keeps continuation metadata instead of prematurely appearing complete.
+
+[Detour's sliced search](https://github.com/recastnavigation/recastnavigation/blob/main/Detour/Source/DetourNavMeshQuery.cpp#L1208-L1414)
+and [shared-budget queue](https://github.com/recastnavigation/recastnavigation/blob/main/DetourCrowd/Source/DetourPathQueue.cpp#L72-L125)
+informed explicit in-progress state, retained frontier ownership and consumed
+work accounting. [Amit Patel's moving-obstacle guidance](https://theory.stanford.edu/~amitp/GameProgramming/MovingObstacles.html)
+informed local invalidation rather than discarding every route for unrelated
+world movement. These are technique references, not copied code or a new dependency.
+
+This checkpoint supersedes only the earlier incomplete-route result, not the
+crowd or visual rejection. Final actual-owner candidate02 passes 34 tests with
+the known capacity case skipped; canonical regressions pass 68 with 17 opt-in
+skips. The two deterministic stranded starts now arrive in 13 and 16 logical
+ticks. The complete fixture records 32/32 round trips (64 legs), sixteen paired
+comparisons from ten distinct physical starts. Town-bank trips total 1,623
+logical ticks versus 591 for the pond bank in this arrangement. These are
+sequential routes, not simultaneous throughput or wall-clock performance.
+
+All seven non-dock fishing-family witnesses pass actual gathering admission.
+Fourteen body-bound resources cover all twelve fish IDs, but this does not
+prove every reward caught, fourteen concurrent anglers plus overflow, fishing
+from both docks, physical simulation stepping, transport or restart behavior.
+The two distinct dock meshes have valid deck–bank–deck routes; final art and
+the full LAYOUT-07 acceptance remain open.
+
+Shared movement regressions pass 397/397. Shared test-inclusive typing covers
+707 roots / 2,382 sources, and server test-inclusive typing 3,954 sources, with
+zero diagnostics and stable pins. Same-tick static/occupancy cache changes,
+repeated intents, relevant/distant mutations, cancellation, synchronization,
+missing-entity look-ahead and manager destruction have actual-owner coverage.
+The five-player saturation case proves shared-budget deferral, not crowd
+arrival performance. Scoped lint, format and independent review pass. Earlier
+before-fix failures and test-fixture/type-harness corrections remain recorded.
+
+Build18 emits eight isolated bundles from 973 stable production inputs;
+build17 is superseded. Native33 uses build18/assets-v6 in actual Chrome/Metal
+WebGPU at unchanged 1280×720. The original 90-second startup gate passes in
+this run; outpost grass settling takes 10.88 seconds within the original
+30-second capture gate. Earlier startup/transition failures are not erased,
+and this diagnostic camera view is not native route gameplay, streaming,
+seamless transitions or sustained performance acceptance. The court still has
+excessive grass, no composed worn connector and a repeated bank silhouette;
+final art remains rejected. Streaming-state polling returns 503 in this
+isolated mode and the known unmodeled mob asset returns 404; neither is hidden
+as a clean runtime. Owned browser33/runtime20 are closed and its ephemeral
+database removed; human localhost/database and all 145 protected compiled
+artifacts remain unchanged.
+
+Evidence: service-layout pond-stranded-route-before01, pond-route-cache-before01,
+pond-route-cache-candidate02/regression02/types02/lint02/format04,
+guided-resume-tests02/shared-regression01/shared-types01;
+inland pond build17/18, isolated-build18-report.json, runtime20 and native33.
+No live/default candidate promotion, shader/density reduction or extra budget.
+
+- [x] Recover the two deterministic stationary-start pond detours with retained
+      bounded ground-floor search, precise invalidation and lifecycle tests.
+- [x] Complete the sequential 32-roundtrip candidate CPU route matrix.
+- [ ] Prove fourteen concurrent anglers plus overflow, every-tier dock/shore
+      gathering, all twelve rewards, crowded relocation, departure and re-entry.
+- [ ] Qualify native movement/gathering, authenticated banking/restart, repeated
+      startup, outpost/shore/dock art and whole-island sustained performance.
+
+The crowded relocation failure is separate and remains open: stationary
+anglers can close another fisher's last legal exit. Next preserve an egress
+option when admitting stationary fishing stances; any cooperative yield must
+be owned by eligible autonomous agents, honor duel/private-preparation/operator
+fences, and stop gathering through its real completion authority. Do not force
+human movement, introduce invisible corridors, cut occupied diagonal corners
+or increase the deadline. Preserve the fourteen-angler/all-tier/overflow
+requirement when proving the solution.
 
 ### Inland fishing integration — candidate only
 

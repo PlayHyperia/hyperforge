@@ -56,6 +56,128 @@ type GuidedPathNode = {
   order: number;
 };
 
+export type GuidedPathSearchResult = {
+  status: "pending" | "found" | "exhausted";
+  /** A copied, at-most-200-tile segment, as with the one-shot path APIs. */
+  path: TileCoord[];
+};
+
+type GuidedSearchState = {
+  start: Readonly<TileCoord>;
+  destinations: readonly Readonly<TileCoord>[];
+  destinationKeys: Set<number>;
+  heuristic(tile: TileCoord): number;
+  visited: Set<number>;
+  parent: Map<number, TileCoord>;
+  open: GuidedPathNode[];
+  bestCostByTile: Map<number, number>;
+  checkedTiles: Set<number>;
+  insertionOrder: number;
+  totalIterations: number;
+  closestTile: TileCoord;
+  closestHeuristic: number;
+  closestCost: number;
+  status: GuidedPathSearchResult["status"];
+  foundTile: TileCoord | null;
+};
+
+// A pending search owns these structures until its caller drops the job. They
+// must never be returned to bfsPool between slices or exposed for mutation.
+const guidedSearchStates = new WeakMap<GuidedPathSearch, GuidedSearchState>();
+
+/**
+ * One stationary-start search, bounded spatially by PATHFIND_RADIUS. The caller
+ * owns cancellation and graph invalidation: invalidate when a checked tile's
+ * collision/occupancy changes, or when other walkability inputs change. Passing
+ * a fresh callback alone cannot reopen a previously closed part of the graph.
+ */
+export class GuidedPathSearch {
+  readonly start: Readonly<TileCoord>;
+
+  constructor(start: TileCoord, destinations: readonly TileCoord[]) {
+    for (const tile of [start, ...destinations]) {
+      if (!tile || !Number.isFinite(tile.x) || !Number.isFinite(tile.z)) {
+        throw new Error("[BFSPathfinder] Guided search requires finite tiles");
+      }
+    }
+    this.start = Object.freeze({ x: start.x, z: start.z });
+    const copiedDestinations = destinations.map((tile) =>
+      Object.freeze({ x: tile.x, z: tile.z }),
+    );
+    const destinationKeys = new Set(copiedDestinations.map(tileKeyNumeric));
+    let minX = Infinity,
+      maxX = -Infinity,
+      minZ = Infinity,
+      maxZ = -Infinity;
+    for (const tile of copiedDestinations) {
+      minX = Math.min(minX, tile.x);
+      maxX = Math.max(maxX, tile.x);
+      minZ = Math.min(minZ, tile.z);
+      maxZ = Math.max(maxZ, tile.z);
+    }
+    const heuristic = (tile: TileCoord): number => {
+      if (copiedDestinations.length <= 32) {
+        let nearest = Infinity;
+        for (const destination of copiedDestinations) {
+          nearest = Math.min(
+            nearest,
+            Math.max(
+              Math.abs(tile.x - destination.x),
+              Math.abs(tile.z - destination.z),
+            ),
+          );
+        }
+        return nearest;
+      }
+      const dx = tile.x < minX ? minX - tile.x : Math.max(0, tile.x - maxX);
+      const dz = tile.z < minZ ? minZ - tile.z : Math.max(0, tile.z - maxZ);
+      return Math.max(dx, dz);
+    };
+    const startKey = tileKeyNumeric(this.start);
+    const startHeuristic = heuristic(this.start);
+    const atDestination = destinationKeys.has(startKey);
+    guidedSearchStates.set(this, {
+      start: this.start,
+      destinations: copiedDestinations,
+      destinationKeys,
+      heuristic,
+      visited: new Set(),
+      parent: new Map(),
+      open:
+        destinations.length && !atDestination
+          ? [{ tile: this.start, cost: 0, heuristic: startHeuristic, order: 0 }]
+          : [],
+      bestCostByTile: new Map([[startKey, 0]]),
+      // The caller may have checked the requested goals before beginning. Goal
+      // closure/opening must invalidate even before this search expands them.
+      checkedTiles: new Set([startKey, ...destinationKeys]),
+      insertionOrder: 1,
+      totalIterations: 0,
+      closestTile: this.start,
+      closestHeuristic: startHeuristic,
+      closestCost: 0,
+      status: atDestination
+        ? "found"
+        : destinations.length
+          ? "pending"
+          : "exhausted",
+      foundTile: atDestination ? this.start : null,
+    });
+  }
+
+  /** Every heap pop, including stale entries, across all advances. */
+  get totalIterations(): number {
+    return guidedSearchStates.get(this)!.totalIterations;
+  }
+
+  /** Includes blocked destinations, diagonal clearance tiles and from tiles. */
+  hasCheckedTile(x: number, z: number): boolean {
+    return guidedSearchStates
+      .get(this)!
+      .checkedTiles.has(tileKeyNumeric({ x, z }));
+  }
+}
+
 /**
  * BFS Pathfinder for tile-based movement
  */
@@ -429,150 +551,144 @@ export class BFSPathfinder {
     isWalkable: WalkabilityChecker,
     maxIterations?: number,
   ): TileCoord[] {
-    const iterLimit =
-      maxIterations !== undefined
-        ? Math.min(maxIterations, this.MAX_BFS_ITERATIONS)
-        : this.MAX_BFS_ITERATIONS;
-    if (iterLimit <= 0) {
-      this._lastPathWasPartial = true;
-      return [];
-    }
+    const adjustedDestination = this._lastPathWasPartial;
+    const requestedDestination = this._lastRequestedDestination;
+    const result = this.advanceGuidedSearch(
+      this.beginGuidedSearch(start, destinations),
+      isWalkable,
+      maxIterations ?? this.MAX_BFS_ITERATIONS,
+    );
+    this._lastPathWasPartial ||= adjustedDestination;
+    this._lastRequestedDestination = requestedDestination;
+    return result.path;
+  }
 
-    const destinationKeys = new Set<number>();
-    let destinationMinX = Number.POSITIVE_INFINITY;
-    let destinationMaxX = Number.NEGATIVE_INFINITY;
-    let destinationMinZ = Number.POSITIVE_INFINITY;
-    let destinationMaxZ = Number.NEGATIVE_INFINITY;
-    for (const destination of destinations) {
-      destinationKeys.add(tileKeyNumeric(destination));
-      destinationMinX = Math.min(destinationMinX, destination.x);
-      destinationMaxX = Math.max(destinationMaxX, destination.x);
-      destinationMinZ = Math.min(destinationMinZ, destination.z);
-      destinationMaxZ = Math.max(destinationMaxZ, destination.z);
+  /** No walkability work or implicit nearest-destination substitution. */
+  beginGuidedSearch(
+    start: TileCoord,
+    destinations: readonly TileCoord[],
+  ): GuidedPathSearch {
+    return new GuidedPathSearch(start, destinations);
+  }
+
+  /**
+   * Advance one caller-owned job, charging every heap pop (even stale entries).
+   * A slice ending with an open frontier is pending, never unreachable. Zero
+   * allowance leaves the job untouched and resets last-slice usage to zero.
+   * Inputs to walkability must remain stable until the caller discards the job.
+   */
+  advanceGuidedSearch(
+    search: GuidedPathSearch,
+    isWalkable: WalkabilityChecker,
+    maxIterations: number,
+  ): GuidedPathSearchResult {
+    const state = guidedSearchStates.get(search);
+    if (!state) throw new Error("[BFSPathfinder] Invalid guided search");
+    if (typeof isWalkable !== "function") {
+      throw new Error("[BFSPathfinder] isWalkable must be a function");
     }
-    const distanceToDestinationBounds = (tile: TileCoord): number => {
-      if (destinations.length <= 32) {
-        let nearest = Number.POSITIVE_INFINITY;
-        for (const destination of destinations) {
-          nearest = Math.min(
-            nearest,
-            Math.max(
-              Math.abs(tile.x - destination.x),
-              Math.abs(tile.z - destination.z),
-            ),
-          );
+    if (!Number.isFinite(maxIterations)) {
+      throw new Error(
+        "[BFSPathfinder] Guided slice requires a finite allowance",
+      );
+    }
+    const iterLimit = Math.max(
+      0,
+      Math.min(Math.floor(maxIterations), this.MAX_BFS_ITERATIONS),
+    );
+    this._lastIterationsUsed = 0;
+    this._lastRequestedDestination =
+      state.destinations.length === 1 ? { ...state.destinations[0] } : null;
+    const { start, visited, parent, open, bestCostByTile } = state;
+    const checkedWalkability: WalkabilityChecker = (tile, fromTile) => {
+      state.checkedTiles.add(tileKeyNumeric(tile));
+      if (fromTile) {
+        state.checkedTiles.add(tileKeyNumeric(fromTile));
+        // Directional collision checkers can inspect diagonal clearance before
+        // returning false, ahead of canMoveTo's own cardinal callbacks.
+        if (tile.x !== fromTile.x && tile.z !== fromTile.z) {
+          state.checkedTiles.add(tileKeyNumeric({ x: tile.x, z: fromTile.z }));
+          state.checkedTiles.add(tileKeyNumeric({ x: fromTile.x, z: tile.z }));
         }
-        return nearest;
       }
-      const dx =
-        tile.x < destinationMinX
-          ? destinationMinX - tile.x
-          : Math.max(0, tile.x - destinationMaxX);
-      const dz =
-        tile.z < destinationMinZ
-          ? destinationMinZ - tile.z
-          : Math.max(0, tile.z - destinationMaxZ);
-      return Math.max(dx, dz);
+      return isWalkable(tile, fromTile);
     };
 
-    const pooledData = bfsPool.acquire();
-    const { visited, parent } = pooledData;
-    const open: GuidedPathNode[] = [];
-    const bestCostByTile = new Map<number, number>();
-    const startTile = { x: start.x, z: start.z };
-    const startKey = tileKeyNumeric(startTile);
-    const startHeuristic = distanceToDestinationBounds(startTile);
-    let insertionOrder = 0;
-    let iterations = 0;
-    let closestTile = startTile;
-    let closestHeuristic = startHeuristic;
-    let closestCost = 0;
-
-    bestCostByTile.set(startKey, 0);
-    this.pushGuidedNode(open, {
-      tile: startTile,
-      cost: 0,
-      heuristic: startHeuristic,
-      order: insertionOrder++,
-    });
-
-    const minX = start.x - PATHFIND_RADIUS;
-    const maxX = start.x + PATHFIND_RADIUS;
-    const minZ = start.z - PATHFIND_RADIUS;
-    const maxZ = start.z + PATHFIND_RADIUS;
-
-    try {
-      while (open.length > 0) {
-        if (iterations >= iterLimit) {
-          this._lastPathWasPartial = true;
-          this._lastIterationsUsed = iterations;
-          return tilesEqual(closestTile, start)
-            ? []
-            : this.reconstructPath(start, closestTile, parent);
-        }
-
-        const current = this.popGuidedNode(open)!;
-        const currentKey = tileKeyNumeric(current.tile);
-        if (visited.has(currentKey)) continue;
-        if (bestCostByTile.get(currentKey) !== current.cost) continue;
-        visited.add(currentKey);
-        iterations++;
-
-        if (destinationKeys.has(currentKey)) {
-          this._lastIterationsUsed = iterations;
-          return this.reconstructPath(start, current.tile, parent);
-        }
-
-        if (
-          current.heuristic < closestHeuristic ||
-          (current.heuristic === closestHeuristic && current.cost < closestCost)
-        ) {
-          closestTile = current.tile;
-          closestHeuristic = current.heuristic;
-          closestCost = current.cost;
-        }
-
-        for (const dir of TILE_DIRECTIONS) {
-          const nx = current.tile.x + dir.x;
-          const nz = current.tile.z + dir.z;
-          if (nx < minX || nx > maxX || nz < minZ || nz > maxZ) continue;
-
-          const neighborKey =
-            ((nx + 1048576) | 0) * 2097152 + ((nz + 1048576) | 0);
-          if (visited.has(neighborKey)) continue;
-
-          this._scratchNeighbor.x = nx;
-          this._scratchNeighbor.z = nz;
-          if (
-            !this.canMoveTo(current.tile, this._scratchNeighbor, isWalkable)
-          ) {
-            continue;
-          }
-
-          const nextCost = current.cost + 1;
-          const previousCost = bestCostByTile.get(neighborKey);
-          if (previousCost !== undefined && previousCost <= nextCost) continue;
-
-          const neighbor = { x: nx, z: nz };
-          bestCostByTile.set(neighborKey, nextCost);
-          parent.set(neighborKey, current.tile);
-          this.pushGuidedNode(open, {
-            tile: neighbor,
-            cost: nextCost,
-            heuristic: distanceToDestinationBounds(neighbor),
-            order: insertionOrder++,
-          });
-        }
+    while (
+      state.status === "pending" &&
+      open.length > 0 &&
+      this._lastIterationsUsed < iterLimit
+    ) {
+      const current = this.popGuidedNode(open)!;
+      this._lastIterationsUsed++;
+      state.totalIterations++;
+      const currentKey = tileKeyNumeric(current.tile);
+      if (visited.has(currentKey)) continue;
+      if (bestCostByTile.get(currentKey) !== current.cost) continue;
+      visited.add(currentKey);
+      if (state.destinationKeys.has(currentKey)) {
+        state.foundTile = current.tile;
+        state.status = "found";
+        break;
       }
-
-      this._lastPathWasPartial = true;
-      this._lastIterationsUsed = iterations;
-      return tilesEqual(closestTile, start)
-        ? []
-        : this.reconstructPath(start, closestTile, parent);
-    } finally {
-      bfsPool.release(pooledData);
+      if (
+        current.heuristic < state.closestHeuristic ||
+        (current.heuristic === state.closestHeuristic &&
+          current.cost < state.closestCost)
+      ) {
+        state.closestTile = current.tile;
+        state.closestHeuristic = current.heuristic;
+        state.closestCost = current.cost;
+      }
+      for (const dir of TILE_DIRECTIONS) {
+        const nx = current.tile.x + dir.x;
+        const nz = current.tile.z + dir.z;
+        if (
+          nx < start.x - PATHFIND_RADIUS ||
+          nx > start.x + PATHFIND_RADIUS ||
+          nz < start.z - PATHFIND_RADIUS ||
+          nz > start.z + PATHFIND_RADIUS
+        )
+          continue;
+        const neighborKey =
+          ((nx + 1048576) | 0) * 2097152 + ((nz + 1048576) | 0);
+        if (visited.has(neighborKey)) continue;
+        this._scratchNeighbor.x = nx;
+        this._scratchNeighbor.z = nz;
+        if (
+          !this.canMoveTo(
+            current.tile,
+            this._scratchNeighbor,
+            checkedWalkability,
+          )
+        )
+          continue;
+        const nextCost = current.cost + 1;
+        const previousCost = bestCostByTile.get(neighborKey);
+        if (previousCost !== undefined && previousCost <= nextCost) continue;
+        const neighbor = { x: nx, z: nz };
+        bestCostByTile.set(neighborKey, nextCost);
+        parent.set(neighborKey, current.tile);
+        this.pushGuidedNode(open, {
+          tile: neighbor,
+          cost: nextCost,
+          heuristic: state.heuristic(neighbor),
+          order: state.insertionOrder++,
+        });
+      }
     }
+    if (state.status === "pending" && open.length === 0)
+      state.status = "exhausted";
+    const endpoint = state.foundTile ?? state.closestTile;
+    const path = tilesEqual(endpoint, start)
+      ? []
+      : this.reconstructPath(start, endpoint, parent);
+    // A found route can exceed the historical 200-tile returned segment. Keep
+    // continuation intent until the segment actually reaches the found goal.
+    this._lastPathWasPartial =
+      state.status !== "found" ||
+      (path.length > 0 && !tilesEqual(path[path.length - 1], endpoint));
+    return { status: state.status, path };
   }
 
   /**

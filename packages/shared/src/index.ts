@@ -1500,7 +1500,11 @@ export {
   getChasePathfinder,
   ChasePathfinder,
 } from "./systems/shared/movement/ChasePathfinding";
-export type { WalkabilityChecker } from "./systems/shared/movement/BFSPathfinder";
+export type {
+  WalkabilityChecker,
+  GuidedPathSearch,
+  GuidedPathSearchResult,
+} from "./systems/shared/movement/BFSPathfinder";
 export {
   getCachedTimestamp,
   updateCachedTimestamp,

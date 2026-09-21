@@ -45,6 +45,7 @@ import {
   type EntityID,
 } from "@hyperforge/shared";
 import type {
+  GuidedPathSearch,
   TileCoord,
   TileInteractionArrival,
   TileMovementState,
@@ -247,6 +248,7 @@ export class TileMovementManager {
     ) => void,
   ) {
     this.pathfinder = new BFSPathfinder();
+    this.observeCollisionCacheChanges();
   }
 
   /**
@@ -721,6 +723,7 @@ export class TileMovementManager {
 
     const payload = validation.payload!;
     this.failedExactRoutes.delete(playerId);
+    this.clearGuidedSearch(playerId);
     this._pendingObstructionReplans.delete(playerId);
     this._pendingNonCombatMoves.delete(playerId);
     this._precomputedPathSegments.delete(playerId);
@@ -996,6 +999,41 @@ export class TileMovementManager {
   private _directionalBlockCache = new Map<number, boolean>();
   /** Tick whose shared pathfinding caches and budget are currently serving. */
   private _movementCacheTick = -1;
+  private stopCollisionCacheObservation: (() => void) | null = null;
+
+  /** Keep same-tick caches current even before a retained search subscribes. */
+  private observeCollisionCacheChanges(): void {
+    // Older isolated fixtures may omit the real collision observer API.
+    this.stopCollisionCacheObservation =
+      this.world.collision?.onChange?.((x, z, changedFlags) => {
+        if (x === null || z === null) {
+          this._walkabilityCache.clear();
+          this._directionalBlockCache.clear();
+          return;
+        }
+
+        // The tile cache excludes occupancy; retain unrelated terrain work.
+        if ((changedFlags & ~CollisionMask.OCCUPIED) !== 0) {
+          const tileKey = ((x + 1048576) | 0) * 2097152 + ((z + 1048576) | 0);
+          this._walkabilityCache.delete(tileKey);
+        }
+
+        // Directional collision includes occupancy and diagonal supports.
+        // Any affected edge starts within one tile of the changed tile.
+        if (this._directionalBlockCache.size === 0) return;
+        for (let fromX = x - 1; fromX <= x + 1; fromX++) {
+          for (let fromZ = z - 1; fromZ <= z + 1; fromZ++) {
+            const edgeBase =
+              ((fromX + 1048576) | 0) * 18874368 + ((fromZ + 1048576) | 0) * 9;
+            for (let direction = 0; direction < 9; direction++) {
+              if (direction !== 4) {
+                this._directionalBlockCache.delete(edgeBase + direction);
+              }
+            }
+          }
+        }
+      }) ?? null;
+  }
   /**
    * Non-combat routes interrupted by a newly blocked step. Replanning is
    * deferred to the next authoritative tick so collision caches are fresh and
@@ -1036,6 +1074,43 @@ export class TileMovementManager {
   /** Actual pathfinding failure for the latest exact destination. Explicit
    * stops/new intents clear it; being idle alone never authorizes recovery. */
   private failedExactRoutes = new Map<string, TileCoord>();
+
+  /** Only searches that yielded without a useful segment remain live. Each
+   * actor owns its frontier; a new intent or relevant graph change retires it. */
+  private _pendingGuidedSearches = new Map<
+    string,
+    {
+      search: GuidedPathSearch;
+      destination: TileCoord;
+      destinationsKey: string;
+      currentFloor: number;
+      currentBuildingId: string | null;
+      dirty: boolean;
+      lastTick: number;
+    }
+  >();
+  private stopGuidedCollisionObservation: (() => void) | null = null;
+
+  private clearGuidedSearch(playerId: string): void {
+    this._pendingGuidedSearches.delete(playerId);
+    if (this._pendingGuidedSearches.size === 0) {
+      this.stopGuidedCollisionObservation?.();
+      this.stopGuidedCollisionObservation = null;
+    }
+  }
+
+  private observeGuidedCollisionChanges(): void {
+    if (this.stopGuidedCollisionObservation) return;
+    this.stopGuidedCollisionObservation = this.world.collision.onChange(
+      (x, z) => {
+        for (const job of this._pendingGuidedSearches.values()) {
+          if (x === null || z === null || job.search.hasCheckedTile(x, z)) {
+            job.dirty = true;
+          }
+        }
+      },
+    );
+  }
 
   /**
    * Short-lived destination reservations keep simultaneous embedded agents
@@ -1272,6 +1347,7 @@ export class TileMovementManager {
     playerId: string,
     state: TileMovementState,
   ): void {
+    this.clearGuidedSearch(playerId);
     const wasMoving = state.path.length > 0;
     const destination = state.requestedDestination;
     if (destination) {
@@ -1342,8 +1418,21 @@ export class TileMovementManager {
     isRunning: boolean,
     interactionArrival: TileInteractionArrival | null = null,
   ): void {
+    const guided = this._pendingGuidedSearches.get(playerId);
     if (this.isMoving(playerId)) {
       this.stopPlayer(playerId);
+    }
+    const currentTile = this.getCurrentTile(playerId);
+    // Stopping a replaced active path must not discard the newly computed
+    // frontier for this exact queued intent.
+    if (
+      guided &&
+      currentTile &&
+      tilesEqual(guided.destination, destination) &&
+      tilesEqual(guided.search.start, currentTile)
+    ) {
+      this._pendingGuidedSearches.set(playerId, guided);
+      this.observeGuidedCollisionChanges();
     }
     this._pendingNonCombatMoves.set(playerId, {
       destination: { x: destination.x, z: destination.z },
@@ -1368,6 +1457,7 @@ export class TileMovementManager {
       )
     ) {
       this._pendingNonCombatMoves.delete(playerId);
+      this.clearGuidedSearch(playerId);
       return;
     }
 
@@ -1460,9 +1550,7 @@ export class TileMovementManager {
 
       const entity = this.world.entities.get(playerId);
       if (!entity) {
-        this.getEntityOccupancy()?.vacate(playerId as EntityID);
-        this.playerStates.delete(playerId);
-        this.failedExactRoutes.delete(playerId);
+        this.cleanup(playerId);
         continue;
       }
 
@@ -1809,9 +1897,7 @@ export class TileMovementManager {
 
     const entity = this.world.entities.get(playerId);
     if (!entity) {
-      this.getEntityOccupancy()?.vacate(playerId as EntityID);
-      this.playerStates.delete(playerId);
-      this.failedExactRoutes.delete(playerId);
+      this.cleanup(playerId);
       return;
     }
 
@@ -2070,8 +2156,8 @@ export class TileMovementManager {
    * Called server-side only — skips rate-limiting and input validation because
    * the original move request was already fully validated.
    *
-   * If BFS returns an empty path the destination is definitively unreachable
-   * and movement stops (no infinite loop).
+   * A bounded search may yield without any closer segment. Preserve that
+   * frontier as deferred work; only actual exhaustion is a route failure.
    */
   private _continuePathToDestination(
     playerId: string,
@@ -2082,12 +2168,16 @@ export class TileMovementManager {
     this.failedExactRoutes.delete(playerId);
     const state = this.playerStates.get(playerId);
     const entity = this.world.entities.get(playerId);
-    if (!state || !entity) return "failed";
+    if (!state || !entity) {
+      this.clearGuidedSearch(playerId);
+      return "failed";
+    }
 
     // Respect the same guards as handleMoveRequest — don't continue moving if
     // the player died or became frozen mid-path (e.g. duel countdown started)
     const deathState = entity.data?.deathState as DeathState | undefined;
     if (deathState === DeathState.DYING || deathState === DeathState.DEAD) {
+      this.clearGuidedSearch(playerId);
       state.requestedDestination = null;
       state.requestedInteractionArrival = null;
       this._interactionApproachReservations.delete(playerId);
@@ -2099,6 +2189,7 @@ export class TileMovementManager {
       canMove?: (playerId: string) => boolean;
     } | null;
     if (duelSystem?.canMove && !duelSystem.canMove(playerId)) {
+      this.clearGuidedSearch(playerId);
       state.requestedDestination = null;
       state.requestedInteractionArrival = null;
       this._interactionApproachReservations.delete(playerId);
@@ -2136,6 +2227,7 @@ export class TileMovementManager {
       state.requestedDestination = null;
       state.requestedInteractionArrival = null;
       this._interactionApproachReservations.delete(playerId);
+      this.clearGuidedSearch(playerId);
       return "failed";
     }
 
@@ -2150,8 +2242,9 @@ export class TileMovementManager {
     );
     this._bfsIterationsThisTick += this.pathfinder.getLastIterationsUsed();
 
-    // Empty path means destination is unreachable — stop here
+    // Empty is not failure while an unfinished frontier still has work.
     if (path.length === 0) {
+      if (this._pendingGuidedSearches.has(playerId)) return "deferred";
       if (!interactionArrival)
         this.failedExactRoutes.set(playerId, { ...destination });
       return "failed";
@@ -2315,6 +2408,7 @@ export class TileMovementManager {
    */
   cleanup(playerId: string): void {
     this.failedExactRoutes.delete(playerId);
+    this.clearGuidedSearch(playerId);
     this.getEntityOccupancy()?.vacate(playerId as EntityID);
     this.playerStates.delete(playerId);
     this._pendingObstructionReplans.delete(playerId);
@@ -2324,9 +2418,40 @@ export class TileMovementManager {
     this.arrivalEmotes.delete(playerId);
     this.arrivalEmoteResolvers.delete(playerId);
     this.tilesTraveledForXP.delete(playerId);
+    this.tickStartTiles.delete(playerId);
+    this.duelMovementIntents.delete(playerId);
     this.antiCheat.cleanup(playerId);
     this.movementRateLimiter.reset(playerId);
     this.pathfindRateLimiter.reset(playerId);
+  }
+
+  /** Retire observers and all owned movement work before world reinitialization. */
+  destroy(): void {
+    this.stopCollisionCacheObservation?.();
+    this.stopCollisionCacheObservation = null;
+    this.stopGuidedCollisionObservation?.();
+    this.stopGuidedCollisionObservation = null;
+
+    const playerIds = new Set([
+      ...this.playerStates.keys(),
+      ...this._pendingGuidedSearches.keys(),
+      ...this._pendingObstructionReplans.keys(),
+      ...this._pendingNonCombatMoves.keys(),
+      ...this._precomputedPathSegments.keys(),
+      ...this._interactionApproachReservations.keys(),
+      ...this.failedExactRoutes.keys(),
+      ...this.arrivalEmotes.keys(),
+      ...this.arrivalEmoteResolvers.keys(),
+      ...this.tilesTraveledForXP.keys(),
+      ...this.tickStartTiles.keys(),
+      ...this.duelMovementIntents.keys(),
+    ]);
+    for (const playerId of playerIds) this.cleanup(playerId);
+    this._walkabilityCache.clear();
+    this._directionalBlockCache.clear();
+    this._networkPathBuffer.length = 0;
+    this._movementCacheTick = -1;
+    this._bfsIterationsThisTick = 0;
   }
 
   /**
@@ -2381,6 +2506,7 @@ export class TileMovementManager {
     position: { x: number; y: number; z: number },
   ): { x: number; y: number; z: number } {
     this.failedExactRoutes.delete(playerId);
+    this.clearGuidedSearch(playerId);
     let newTile = worldToTile(position.x, position.z);
     const occupancy = this.getEntityOccupancy();
     const entityId = playerId as EntityID;
@@ -2632,6 +2758,7 @@ export class TileMovementManager {
    */
   stopPlayer(playerId: string): void {
     this.failedExactRoutes.delete(playerId);
+    this.clearGuidedSearch(playerId);
     this._pendingObstructionReplans.delete(playerId);
     this._pendingNonCombatMoves.delete(playerId);
     this._precomputedPathSegments.delete(playerId);
@@ -2731,6 +2858,7 @@ export class TileMovementManager {
       this.isMoving(playerId) ||
       state?.requestedDestination != null ||
       this._pendingNonCombatMoves.has(playerId) ||
+      this._pendingGuidedSearches.has(playerId) ||
       this._pendingObstructionReplans.has(playerId) ||
       this._precomputedPathSegments.has(playerId)
     );
@@ -2834,10 +2962,25 @@ export class TileMovementManager {
         currentBuildingId,
       );
     if (!arrival) {
-      return this.pathfinder.findPathGuided(
+      if (!canTraverse(destination)) {
+        // Preserve the historical nearest-walkable fallback. Retained exact
+        // searches require a currently valid goal and cannot survive its loss.
+        this.clearGuidedSearch(playerId);
+        return this.pathfinder.findPathGuided(
+          start,
+          destination,
+          canTraverse,
+          guidedBudget,
+        );
+      }
+      return this.findGuidedNonCombatPath(
+        playerId,
         start,
         destination,
+        [destination],
         canTraverse,
+        currentFloor,
+        currentBuildingId,
         guidedBudget,
       );
     }
@@ -2889,10 +3032,14 @@ export class TileMovementManager {
         break;
       }
     }
-    const path = this.pathfinder.findPathToAnyGuided(
+    const path = this.findGuidedNonCombatPath(
+      playerId,
       start,
+      destination,
       validDestinations,
       canTraverse,
+      currentFloor,
+      currentBuildingId,
       guidedBudget,
     );
     if (path.length > 0 && !this.pathfinder.wasLastPathPartial()) {
@@ -2903,6 +3050,75 @@ export class TileMovementManager {
       });
     }
     return path;
+  }
+
+  private findGuidedNonCombatPath(
+    playerId: string,
+    start: TileCoord,
+    destination: TileCoord,
+    validDestinations: TileCoord[],
+    canTraverse: (tile: TileCoord, fromTile?: TileCoord) => boolean,
+    currentFloor: number,
+    currentBuildingId: string | null,
+    guidedBudget: number,
+  ): TileCoord[] {
+    // Ground-floor collision owners publish invalidations. Upper-floor
+    // topology has a separate owner: do not retain its graph across ticks
+    // until that owner provides the same contract.
+    if (currentFloor !== 0 || !this.world.collision.onChange) {
+      this.clearGuidedSearch(playerId);
+      return this.pathfinder.findPathToAnyGuided(
+        start,
+        validDestinations,
+        canTraverse,
+        guidedBudget,
+      );
+    }
+    const destinationsKey = validDestinations
+      .map((tile) => `${tile.x},${tile.z}`)
+      .join(";");
+    let job = this._pendingGuidedSearches.get(playerId);
+    if (
+      job &&
+      (job.dirty ||
+        !tilesEqual(job.search.start, start) ||
+        !tilesEqual(job.destination, destination) ||
+        job.destinationsKey !== destinationsKey ||
+        job.currentFloor !== currentFloor ||
+        job.currentBuildingId !== currentBuildingId)
+    ) {
+      this.clearGuidedSearch(playerId);
+      job = undefined;
+    }
+    if (!job) {
+      job = {
+        search: this.pathfinder.beginGuidedSearch(start, validDestinations),
+        destination: { ...destination },
+        destinationsKey,
+        currentFloor,
+        currentBuildingId,
+        dirty: false,
+        lastTick: Number.NaN,
+      };
+      this._pendingGuidedSearches.set(playerId, job);
+      this.observeGuidedCollisionChanges();
+    }
+    // Look-ahead and end-of-segment handling can both observe the same tick.
+    // Do not spend a second slice on that same unfinished frontier.
+    const allowance =
+      job.lastTick === this._movementCacheTick ? 0 : guidedBudget;
+    job.lastTick = this._movementCacheTick;
+    const result = this.pathfinder.advanceGuidedSearch(
+      job.search,
+      canTraverse,
+      allowance,
+    );
+    // A synchronous world owner can change collision while a terrain query
+    // initializes. Do not install even a complete result from a dirty graph.
+    if (job.dirty) return [];
+    if (result.status === "pending" && result.path.length === 0) return [];
+    this.clearGuidedSearch(playerId);
+    return result.path;
   }
 
   movePlayerToward(
@@ -2976,7 +3192,10 @@ export class TileMovementManager {
       attackRange === 0
         ? this.normalizeInteractionArrival(interactionArrival)
         : null;
-    const previousInteractionArrival = state.requestedInteractionArrival;
+    const queuedIntent = this._pendingNonCombatMoves.get(playerId);
+    const previousInteractionArrival = queuedIntent
+      ? queuedIntent.interactionArrival
+      : state.requestedInteractionArrival;
     const sameInteractionArrival =
       previousInteractionArrival === null
         ? normalizedInteractionArrival === null
@@ -2988,20 +3207,22 @@ export class TileMovementManager {
           previousInteractionArrival.footprintDepth ===
             normalizedInteractionArrival.footprintDepth;
 
-    // The behavior planner may restate the same destination while a segmented
-    // route is active. Preserve its server/client look-ahead segment so the
-    // planning cadence cannot introduce an avoidable stop at the boundary.
+    // Restating a live or deferred intent must not discard its look-ahead or
+    // restart an unfinished search from the same root on each planning turn.
+    const previousDestination =
+      queuedIntent?.destination ?? state.requestedDestination;
     if (
       attackRange === 0 &&
-      state.requestedDestination?.x === this._targetTile.x &&
-      state.requestedDestination.z === this._targetTile.z &&
+      previousDestination?.x === this._targetTile.x &&
+      previousDestination.z === this._targetTile.z &&
       sameInteractionArrival &&
-      state.isRunning === running &&
-      this.isMoving(playerId)
+      (queuedIntent?.isRunning ?? state.isRunning) === running &&
+      this.hasMovementIntent(playerId)
     ) {
       return true;
     }
 
+    this.clearGuidedSearch(playerId);
     this._pendingObstructionReplans.delete(playerId);
     this._pendingNonCombatMoves.delete(playerId);
     this._precomputedPathSegments.delete(playerId);
@@ -3199,7 +3420,10 @@ export class TileMovementManager {
     }
 
     if (path.length === 0) {
-      if (normalizedInteractionArrival) {
+      if (
+        normalizedInteractionArrival ||
+        (attackRange === 0 && this._pendingGuidedSearches.has(playerId))
+      ) {
         this.queueNonCombatMove(
           playerId,
           this._targetTile,

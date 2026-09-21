@@ -14,7 +14,9 @@
  */
 
 import { describe, it, expect, beforeEach } from "vitest";
-import { BFSPathfinder } from "../BFSPathfinder";
+import { BFSPathfinder, type GuidedPathSearchResult } from "../BFSPathfinder";
+import { CollisionMatrix } from "../CollisionMatrix";
+import { CollisionFlag, CollisionMask } from "../CollisionFlags";
 import { TileCoord, tilesEqual } from "../TileSystem";
 
 describe("BFSPathfinder", () => {
@@ -556,6 +558,233 @@ describe("BFSPathfinder", () => {
       expect(pathfinder.wasLastPathPartial()).toBe(false);
       expect(pathfinder.getLastIterationsUsed()).toBeLessThan(200);
       expect(destinations).toContainEqual(path[path.length - 1]);
+    });
+  });
+
+  describe("Resumable guided search on real collision data", () => {
+    const traversable =
+      (collision: CollisionMatrix) => (tile: TileCoord, from?: TileCoord) =>
+        from
+          ? !collision.isBlocked(from.x, from.z, tile.x, tile.z)
+          : (collision.getFlags(tile.x, tile.z) & CollisionMask.BLOCKS_WALK) ===
+            0;
+
+    const detourCollision = () => {
+      const collision = new CollisionMatrix();
+      for (let z = -20; z <= 20; z++)
+        collision.setFlags(1, z, CollisionFlag.BLOCKED);
+      return collision;
+    };
+
+    it("retains a 250-pop local-minimum frontier and eventually takes the same detour", () => {
+      const collision = detourCollision();
+      const check = traversable(collision);
+      const start = { x: 0, z: 0 },
+        end = { x: 2, z: 0 };
+      const search = pathfinder.beginGuidedSearch(start, [end]);
+      let result = pathfinder.advanceGuidedSearch(search, check, 250);
+      expect(result).toEqual({ status: "pending", path: [] });
+      expect(pathfinder.getLastIterationsUsed()).toBe(250);
+      expect(search.totalIterations).toBe(250);
+      let slices = 1;
+      let total = 250;
+      while (result.status === "pending" && slices++ < 100) {
+        result = pathfinder.advanceGuidedSearch(search, check, 250);
+        expect(pathfinder.getLastIterationsUsed()).toBeLessThanOrEqual(250);
+        total += pathfinder.getLastIterationsUsed();
+      }
+      expect(result.status).toBe("found");
+      expect(result.path.at(-1)).toEqual(end);
+      expect(isValidPath(result.path, start)).toBe(true);
+      expect(result.path.some((tile) => Math.abs(tile.z) > 20)).toBe(true);
+      const oneShot = new BFSPathfinder();
+      expect(result.path).toEqual(
+        oneShot.findPathGuided(start, end, check, 4000),
+      );
+      expect(total).toBe(oneShot.getLastIterationsUsed());
+      expect(search.totalIterations).toBe(total);
+      expect(pathfinder.wasLastPathPartial()).toBe(false);
+    });
+
+    it("distinguishes truly enclosed exhaustion and leaves terminal jobs unchanged", () => {
+      const collision = new CollisionMatrix();
+      for (let x = -1; x <= 1; x++)
+        for (let z = -1; z <= 1; z++) {
+          if (x || z) collision.setFlags(x, z, CollisionFlag.BLOCKED);
+        }
+      const search = pathfinder.beginGuidedSearch({ x: 0, z: 0 }, [
+        { x: 5, z: 5 },
+      ]);
+      expect(
+        pathfinder.advanceGuidedSearch(search, traversable(collision), 1),
+      ).toEqual({ status: "exhausted", path: [] });
+      expect(search.totalIterations).toBe(1);
+      for (const allowance of [0, 250]) {
+        expect(
+          pathfinder.advanceGuidedSearch(
+            search,
+            traversable(collision),
+            allowance,
+          ),
+        ).toEqual({ status: "exhausted", path: [] });
+        expect(pathfinder.getLastIterationsUsed()).toBe(0);
+        expect(search.totalIterations).toBe(1);
+      }
+    });
+
+    it("records blocked, diagonal and directional-from dependencies without corner cutting", () => {
+      const collision = new CollisionMatrix();
+      collision.setFlags(1, 0, CollisionFlag.BLOCKED);
+      const start = { x: 0, z: 0 },
+        end = { x: 1, z: 1 };
+      const search = pathfinder.beginGuidedSearch(start, [end]);
+      expect(search.hasCheckedTile(0, 0)).toBe(true);
+      expect(search.hasCheckedTile(1, 1)).toBe(true);
+      pathfinder.advanceGuidedSearch(search, traversable(collision), 1);
+      expect(search.hasCheckedTile(1, 0)).toBe(true);
+      expect(search.hasCheckedTile(0, 1)).toBe(true);
+      expect(search.hasCheckedTile(90, 90)).toBe(false);
+      const result = pathfinder.advanceGuidedSearch(
+        search,
+        traversable(collision),
+        250,
+      );
+      expect(result.status).toBe("found");
+      expect(result.path).toEqual([{ x: 0, z: 1 }, end]);
+      let previous = start;
+      for (const tile of result.path) {
+        expect(
+          pathfinder.canMoveTo(previous, tile, traversable(collision)),
+        ).toBe(true);
+        previous = tile;
+      }
+    });
+
+    it("owns copied inputs and progress paths across independent interleaved jobs", () => {
+      const check = traversable(detourCollision());
+      const start = { x: 0, z: 0 },
+        destination = { x: 2, z: 0 };
+      const destinations = [destination];
+      const first = pathfinder.beginGuidedSearch(start, destinations);
+      start.x = 90;
+      destination.x = 91;
+      destinations.push({ x: 0, z: 0 });
+      expect(first.start).toEqual({ x: 0, z: 0 });
+      expect(Object.isFrozen(first.start)).toBe(true);
+      const second = pathfinder.beginGuidedSearch({ x: 50, z: 50 }, [
+        { x: 55, z: 55 },
+      ]);
+      pathfinder.advanceGuidedSearch(first, check, 250);
+      const secondProgress = pathfinder.advanceGuidedSearch(second, check, 3);
+      secondProgress.path[0].x = -999;
+      expect(first.totalIterations).toBe(250);
+      expect(second.totalIterations).toBe(3);
+      // A pooled legacy search cannot clear or reuse either retained parent map.
+      pathfinder.findPath({ x: 50, z: 50 }, { x: 51, z: 51 }, check);
+      let result: GuidedPathSearchResult = { status: "pending", path: [] };
+      for (let i = 0; i < 100 && result.status === "pending"; i++) {
+        result = pathfinder.advanceGuidedSearch(first, check, 37);
+      }
+      expect(result.status).toBe("found");
+      expect(result.path.at(-1)).toEqual({ x: 2, z: 0 });
+      const secondResult = pathfinder.advanceGuidedSearch(second, check, 250);
+      expect(secondResult.status).toBe("found");
+      expect(secondResult.path).toHaveLength(5);
+      expect(isValidPath(secondResult.path, { x: 50, z: 50 })).toBe(true);
+      expect(second.totalIterations).toBe(6);
+    });
+
+    it("zero allowance preserves pending/found status and all counters", () => {
+      const check = traversable(new CollisionMatrix());
+      const search = pathfinder.beginGuidedSearch({ x: 0, z: 0 }, [
+        { x: 2, z: 0 },
+      ]);
+      expect(pathfinder.advanceGuidedSearch(search, check, 0)).toEqual({
+        status: "pending",
+        path: [],
+      });
+      expect(search.totalIterations).toBe(0);
+      const found = pathfinder.advanceGuidedSearch(search, check, 250);
+      expect(found.status).toBe("found");
+      const total = search.totalIterations;
+      expect(pathfinder.advanceGuidedSearch(search, check, 0)).toEqual(found);
+      expect(pathfinder.getLastIterationsUsed()).toBe(0);
+      expect(search.totalIterations).toBe(total);
+      expect(pathfinder.wasLastPathPartial()).toBe(false);
+      expect(() => pathfinder.advanceGuidedSearch(search, check, NaN)).toThrow(
+        /finite allowance/,
+      );
+    });
+
+    it("charges stale heap entries and preserves exact cumulative work across single-pop slices", () => {
+      const collision = new CollisionMatrix();
+      // A bounded obstacle field with alternate routes into the same frontier
+      // produces improved open-node costs. The destination stays walkable but
+      // enclosed, so exhaustion also drains every stale entry from the heap.
+      for (let x = -16; x <= 16; x++) {
+        for (let z = -16; z <= 16; z++) {
+          const boundary = Math.abs(x) === 16 || Math.abs(z) === 16;
+          const obstacle = ((x + 16) * 37 + (z + 16) * 71) % 13 < 3;
+          const goalWall = Math.max(Math.abs(x - 12), Math.abs(z - 12)) === 1;
+          if (boundary || obstacle || goalWall)
+            collision.setFlags(x, z, CollisionFlag.BLOCKED);
+        }
+      }
+      collision.setFlags(0, 0, 0);
+      collision.setFlags(12, 12, 0);
+      const check = traversable(collision);
+      const start = { x: 0, z: 0 },
+        end = { x: 12, z: 12 };
+      const expandedFrom = new Set<string>();
+      const search = pathfinder.beginGuidedSearch(start, [end]);
+      const recordCheck = (tile: TileCoord, from?: TileCoord) => {
+        if (from) expandedFrom.add(`${from.x},${from.z}`);
+        return check(tile, from);
+      };
+      let result: GuidedPathSearchResult = { status: "pending", path: [] };
+      let slices = 0;
+      while (result.status === "pending" && slices < 4000) {
+        result = pathfinder.advanceGuidedSearch(search, recordCheck, 1);
+        expect(pathfinder.getLastIterationsUsed()).toBe(1);
+        expect(search.totalIterations).toBe(++slices);
+      }
+      expect(result.status).toBe("exhausted");
+      // Every additional pop above expanded nodes is a real stale heap entry,
+      // not free work; no destination node was expanded in this enclosed case.
+      expect(slices).toBeGreaterThan(expandedFrom.size);
+      const oneShot = new BFSPathfinder();
+      expect(oneShot.findPathGuided(start, end, check, 4000)).toEqual(
+        result.path,
+      );
+      expect(oneShot.getLastIterationsUsed()).toBe(slices);
+    });
+
+    it("keeps found routes longer than 200 tiles as contiguous partial segments", () => {
+      const collision = new CollisionMatrix();
+      // A one-tile U corridor stays inside the original search radius but
+      // needs 220 cardinal steps; blocked surroundings prevent shortcuts.
+      for (let x = -1; x <= 101; x++)
+        for (let z = -1; z <= 21; z++) {
+          const open =
+            (z === 0 && x >= 0 && x <= 100) ||
+            (x === 100 && z >= 0 && z <= 20) ||
+            (z === 20 && x >= 0 && x <= 100);
+          if (!open) collision.setFlags(x, z, CollisionFlag.BLOCKED);
+        }
+      const check = traversable(collision);
+      const start = { x: 0, z: 0 },
+        end = { x: 0, z: 20 };
+      const search = pathfinder.beginGuidedSearch(start, [end]);
+      const result = pathfinder.advanceGuidedSearch(search, check, 4000);
+      expect(result.status).toBe("found");
+      expect(result.path).toHaveLength(200);
+      expect(result.path.at(-1)).toEqual({ x: 20, z: 20 });
+      expect(isValidPath(result.path, start)).toBe(true);
+      expect(pathfinder.wasLastPathPartial()).toBe(true);
+      expect(pathfinder.findPathGuided(start, end, check, 4000)).toEqual(
+        result.path,
+      );
+      expect(pathfinder.wasLastPathPartial()).toBe(true);
     });
   });
 

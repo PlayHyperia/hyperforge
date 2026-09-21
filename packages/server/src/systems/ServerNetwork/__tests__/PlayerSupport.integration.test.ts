@@ -27,6 +27,7 @@ import type { BuildingLayoutInput } from "../../../../../shared/src/types/world/
 import type { TerrainResourceSpawnPoint } from "../../../../../shared/src/types/world/terrain";
 import { EmbeddedHyperiaService } from "../../../eliza/EmbeddedHyperiaService";
 import { TileMovementManager } from "../tile-movement";
+import { CollisionMatrix } from "../../../../../shared/src/systems/shared/movement/CollisionMatrix";
 import { PendingGatherManager } from "../PendingGatherManager";
 import { EntityManager } from "../../../../../shared/src/systems/shared/entities/EntityManager";
 import { SkillsSystem } from "../../../../../shared/src/systems/shared/character/SkillsSystem";
@@ -143,6 +144,7 @@ async function fixture() {
   const movement = new TileMovementManager(world, (name, data) => {
     packets.push({ name, data });
   });
+  routeOwnerReleases.push(() => movement.destroy());
   return { world, terrain, buildings, movement, packets };
 }
 
@@ -220,6 +222,7 @@ async function fishingFixture(bakeForRelocation = false) {
   const send = (name: string, data: unknown) =>
     packets.push({ name, data: structuredClone(data) });
   const movement = new TileMovementManager(world, send);
+  routeOwnerReleases.push(() => movement.destroy());
   const pending = new PendingGatherManager(world, movement, send);
   const body = terrain
     .getWaterBodyRegistry()
@@ -497,6 +500,7 @@ async function allTierFishingFixture(withRouteOwners = false) {
   const send = (name: string, data: unknown) =>
     packets.push({ name, data: structuredClone(data) });
   const movement = new TileMovementManager(world, send);
+  routeOwnerReleases.push(() => movement.destroy());
   const pending = new PendingGatherManager(world, movement, send);
   const addAngler = async (
     id: string,
@@ -957,6 +961,739 @@ describe.runIf(process.env.HYPERIA_FISHING_CAPACITY === "1")(
 describe.runIf(process.env.HYPERIA_POND_BANK_ROUTES === "1")(
   "actual candidate pond-to-bank circulation (CPU owners, not bank persistence)",
   () => {
+    it.each(["static-lease", "player-occupancy"] as const)(
+      "refreshes same-tick collision caches without a pending observer after %s changes",
+      async (kind) => {
+        const f = await allTierFishingFixture(true);
+        const start = { x: 394, z: 408 },
+          watched = { x: 393, z: 408 };
+        const destination = { x: 418, z: 432 };
+        const point = tileToWorld(start);
+        const player = addPlayer(f.world, `uncached-pond-${kind}`, [
+          point.x,
+          resolvePlayerRootHeight(point.x, point.z, f.terrain)!,
+          point.z,
+        ]);
+        f.movement.syncPlayerPosition(player.id, player.position);
+        f.movement.onTick(f.world.currentTick);
+        expect(f.movement["_pendingGuidedSearches"].size).toBe(0);
+        expect(f.movement["stopGuidedCollisionObservation"]).toBeNull();
+        expect(f.movement.isTileAvailableForPlayer(player.id, watched)).toBe(
+          true,
+        );
+        const flagsBefore = f.world.collision.getFlags(watched.x, watched.z);
+        let blockedAvailable = true,
+          blockedEdge = true;
+        if (kind === "static-lease") {
+          const lease = f.world.collision.acquireStaticFootprint([watched]);
+          try {
+            blockedAvailable = f.movement.isTileAvailableForPlayer(
+              player.id,
+              watched,
+            );
+            blockedEdge = f.movement["isTileTraversableForPlayer"](
+              player.id,
+              watched,
+              0,
+              start,
+            );
+          } finally {
+            expect(lease.release()).toBe(true);
+          }
+        } else {
+          const at = tileToWorld(watched);
+          const blocker = addPlayer(f.world, "same-tick-real-blocker", [
+            at.x,
+            resolvePlayerRootHeight(at.x, at.z, f.terrain)!,
+            at.z,
+          ]);
+          try {
+            f.movement.syncPlayerPosition(blocker.id, blocker.position);
+            blockedAvailable = f.movement.isTileAvailableForPlayer(
+              player.id,
+              watched,
+            );
+            blockedEdge = f.movement["isTileTraversableForPlayer"](
+              player.id,
+              watched,
+              0,
+              start,
+            );
+          } finally {
+            f.movement.cleanup(blocker.id);
+            f.world.entities.remove(blocker.id);
+          }
+        }
+        expect(f.world.collision.getFlags(watched.x, watched.z)).toBe(
+          flagsBefore,
+        );
+        const reopenedAvailable = f.movement.isTileAvailableForPlayer(
+          player.id,
+          watched,
+        );
+        const reopenedEdge = f.movement["isTileTraversableForPlayer"](
+          player.id,
+          watched,
+          0,
+          start,
+        );
+        console.log(
+          JSON.stringify({
+            phase: "same-tick-pond-collision-cache",
+            kind,
+            start,
+            watched,
+            blockedAvailable,
+            blockedEdge,
+            reopenedAvailable,
+            reopenedEdge,
+            tick: f.world.currentTick,
+          }),
+        );
+        expect.soft(blockedAvailable).toBe(false);
+        expect.soft(blockedEdge).toBe(false);
+        expect.soft(reopenedAvailable).toBe(true);
+        expect.soft(reopenedEdge).toBe(true);
+        expect(
+          f.movement.movePlayerToward(
+            player.id,
+            tileToWorld(destination),
+            true,
+          ),
+        ).toBe(true);
+        let ticks = 0;
+        const arrived = () => {
+          const tile = worldToTile(player.position.x, player.position.z);
+          return tile.x === destination.x && tile.z === destination.z;
+        };
+        for (; ticks < 256 && !arrived(); ticks++) {
+          f.world.currentTick++;
+          f.movement.onTick(f.world.currentTick);
+          expect(f.movement["_bfsIterationsThisTick"]).toBeLessThanOrEqual(
+            1000,
+          );
+          expect(
+            f.movement["pathfinder"].getLastIterationsUsed(),
+          ).toBeLessThanOrEqual(250);
+          if (!f.movement.hasMovementIntent(player.id) && !arrived()) break;
+        }
+        expect(arrived()).toBe(true);
+        f.pending.onPlayerDisconnect(player.id);
+        f.movement.cleanup(player.id);
+        f.world.entities.remove(player.id);
+      },
+    );
+
+    it("preserves the actual pending frontier when the same movement intent is repeated", async () => {
+      const f = await allTierFishingFixture(true);
+      const position = tileToWorld({ x: 394, z: 408 });
+      const destination = { x: 418, z: 432 };
+      const player = addPlayer(f.world, "restated-pond-intent", [
+        position.x,
+        resolvePlayerRootHeight(position.x, position.z, f.terrain)!,
+        position.z,
+      ]);
+      f.movement.syncPlayerPosition(player.id, player.position);
+      const target = tileToWorld(destination);
+      expect(f.movement.movePlayerToward(player.id, target, true)).toBe(true);
+      const pending = f.movement["_pendingGuidedSearches"].get(player.id)!;
+      expect(pending).toBeDefined();
+      const initialIterations = pending.search.totalIterations;
+      const initialBudget = f.movement["_bfsIterationsThisTick"];
+      for (let repeat = 0; repeat < 10; repeat++) {
+        expect(f.movement.movePlayerToward(player.id, target, true)).toBe(true);
+        expect(f.movement["_pendingGuidedSearches"].get(player.id)).toBe(
+          pending,
+        );
+        expect(pending.search.totalIterations).toBe(initialIterations);
+        expect(f.movement["_bfsIterationsThisTick"]).toBe(initialBudget);
+      }
+      let ticks = 0;
+      const arrived = () => {
+        const tile = worldToTile(player.position.x, player.position.z);
+        return tile.x === destination.x && tile.z === destination.z;
+      };
+      for (; ticks < 256 && !arrived(); ticks++) {
+        f.world.currentTick++;
+        f.movement.onTick(f.world.currentTick);
+        expect(f.movement["_bfsIterationsThisTick"]).toBeLessThanOrEqual(1000);
+        expect(
+          f.movement["pathfinder"].getLastIterationsUsed(),
+        ).toBeLessThanOrEqual(250);
+      }
+      expect(arrived()).toBe(true);
+      expect(pending.search.totalIterations).toBeGreaterThan(initialIterations);
+      console.log(
+        JSON.stringify({
+          phase: "restated-pond-intent",
+          repeats: 10,
+          initialIterations,
+          retainedIterations: pending.search.totalIterations,
+          ticks,
+          reached: arrived(),
+        }),
+      );
+      f.movement.cleanup(player.id);
+      f.world.entities.remove(player.id);
+    });
+
+    it("destroys actual movement observers and jobs without retiring the reusable collision owner", async () => {
+      const f = await allTierFishingFixture(true);
+      const collision = f.world.collision;
+      if (!(collision instanceof CollisionMatrix))
+        throw new Error("Expected actual collision owner");
+      const listenersBeforePending = collision["changeListeners"].size;
+      expect(f.movement["stopCollisionCacheObservation"]).not.toBeNull();
+      const position = tileToWorld({ x: 394, z: 408 });
+      const player = addPlayer(f.world, "destroy-pending-pond-owner", [
+        position.x,
+        resolvePlayerRootHeight(position.x, position.z, f.terrain)!,
+        position.z,
+      ]);
+      f.movement.syncPlayerPosition(player.id, player.position);
+      expect(
+        f.movement.movePlayerToward(
+          player.id,
+          tileToWorld({ x: 418, z: 432 }),
+          true,
+        ),
+      ).toBe(true);
+      expect(f.movement["_pendingGuidedSearches"].has(player.id)).toBe(true);
+      expect(collision["changeListeners"].size).toBe(
+        listenersBeforePending + 1,
+      );
+      f.movement.destroy();
+      f.movement.destroy();
+      expect(f.movement["stopCollisionCacheObservation"]).toBeNull();
+      expect(f.movement["stopGuidedCollisionObservation"]).toBeNull();
+      expect(f.movement["_pendingGuidedSearches"].size).toBe(0);
+      expect(f.movement["playerStates"].size).toBe(0);
+      expect(f.movement.hasMovementIntent(player.id)).toBe(false);
+      expect(
+        f.world.entityOccupancy.getOccupant({ x: 394, z: 408 }),
+      ).toBeNull();
+      expect(collision["changeListeners"].size).toBe(
+        listenersBeforePending - 1,
+      );
+      const replacement = new TileMovementManager(f.world, (name, data) => {
+        f.packets.push({ name, data });
+      });
+      routeOwnerReleases.push(() => replacement.destroy());
+      expect(collision["changeListeners"].size).toBe(listenersBeforePending);
+      const tile = { x: 393, z: 408 };
+      const originalFlags = f.world.collision.getFlags(tile.x, tile.z);
+      expect(replacement.isTileAvailableForPlayer(player.id, tile)).toBe(true);
+      const lease = f.world.collision.acquireStaticFootprint([tile]);
+      try {
+        expect(replacement.isTileAvailableForPlayer(player.id, tile)).toBe(
+          false,
+        );
+      } finally {
+        expect(lease.release()).toBe(true);
+      }
+      expect(replacement.isTileAvailableForPlayer(player.id, tile)).toBe(true);
+      expect(f.world.collision.getFlags(tile.x, tile.z)).toBe(originalFlags);
+      expect(collision["changeListeners"].size).toBe(listenersBeforePending);
+      replacement.destroy();
+      expect(collision["changeListeners"].size).toBe(
+        listenersBeforePending - 1,
+      );
+      console.log(
+        JSON.stringify({
+          phase: "movement-owner-destroy",
+          listenersBeforePending,
+          listenersAfter: collision["changeListeners"].size,
+          pending: f.movement["_pendingGuidedSearches"].size,
+          collisionReusable: true,
+        }),
+      );
+      f.world.entities.remove(player.id);
+    });
+
+    it.each(["global", "per-player"] as const)(
+      "retires a real active lookahead after entity removal through %s ticks",
+      async (processor) => {
+        const f = await allTierFishingFixture(true);
+        const start = { x: 347, z: 318 };
+        const position = tileToWorld(start);
+        const player = addPlayer(f.world, `removed-lookahead-${processor}`, [
+          position.x,
+          resolvePlayerRootHeight(position.x, position.z, f.terrain)!,
+          position.z,
+        ]);
+        f.movement.syncPlayerPosition(player.id, player.position);
+        expect(
+          f.movement.movePlayerToward(
+            player.id,
+            tileToWorld({ x: 418, z: 432 }),
+            true,
+          ),
+        ).toBe(true);
+        let ticks = 0;
+        for (; ticks < 256; ticks++) {
+          if (
+            f.movement.isMoving(player.id) &&
+            f.movement["_pendingGuidedSearches"].has(player.id)
+          )
+            break;
+          f.world.currentTick++;
+          if (processor === "global") f.movement.onTick(f.world.currentTick);
+          else f.movement.processPlayerTick(player.id, f.world.currentTick);
+          expect(f.movement["_bfsIterationsThisTick"]).toBeLessThanOrEqual(
+            1000,
+          );
+          expect(
+            f.movement["pathfinder"].getLastIterationsUsed(),
+          ).toBeLessThanOrEqual(250);
+          if (!f.movement.hasMovementIntent(player.id)) break;
+        }
+        expect(f.movement.isMoving(player.id)).toBe(true);
+        expect(f.movement["_pendingGuidedSearches"].has(player.id)).toBe(true);
+        const before = f.movement.getPlayerMovementDebug(player.id);
+        const occupied = worldToTile(player.position.x, player.position.z);
+        f.world.entities.remove(player.id);
+        expect(f.world.entities.get(player.id)).toBeNull();
+        f.world.currentTick++;
+        if (processor === "global") f.movement.onTick(f.world.currentTick);
+        else f.movement.processPlayerTick(player.id, f.world.currentTick);
+        expect(f.movement["playerStates"].has(player.id)).toBe(false);
+        expect(f.movement["_pendingGuidedSearches"].size).toBe(0);
+        expect(f.movement["stopGuidedCollisionObservation"]).toBeNull();
+        expect(f.movement["stopCollisionCacheObservation"]).not.toBeNull();
+        expect(f.movement.hasMovementIntent(player.id)).toBe(false);
+        expect(f.world.entityOccupancy.getOccupant(occupied)).toBeNull();
+        console.log(
+          JSON.stringify({
+            phase: "missing-entity-active-lookahead",
+            processor,
+            ticks,
+            before,
+            occupied,
+          }),
+        );
+      },
+    );
+
+    it("shares the unchanged search budget across five real concurrent pond intents", async () => {
+      const f = await allTierFishingFixture(true);
+      const starts = [
+        { x: 394, z: 408 },
+        { x: 397, z: 405 },
+        { x: 393, z: 407 },
+        { x: 392, z: 406 },
+        { x: 396, z: 404 },
+      ];
+      const players = starts.map((tile, index) => {
+        expect(
+          f.movement.isTileAvailableForPlayer(`budget-pond-${index}`, tile),
+        ).toBe(true);
+        const point = tileToWorld(tile);
+        const player = addPlayer(f.world, `budget-pond-${index}`, [
+          point.x,
+          resolvePlayerRootHeight(point.x, point.z, f.terrain)!,
+          point.z,
+        ]);
+        f.movement.syncPlayerPosition(player.id, player.position);
+        return player;
+      });
+      const target = tileToWorld({ x: 418, z: 432 });
+      const admissions = players.map((player) => {
+        const accepted = f.movement.movePlayerToward(player.id, target, true);
+        expect(accepted).toBe(true);
+        expect(f.movement.hasMovementIntent(player.id)).toBe(true);
+        expect(f.movement["_bfsIterationsThisTick"]).toBeLessThanOrEqual(1000);
+        expect(
+          f.movement["pathfinder"].getLastIterationsUsed(),
+        ).toBeLessThanOrEqual(250);
+        return {
+          playerId: player.id,
+          accepted,
+          sharedIterations: f.movement["_bfsIterationsThisTick"],
+          pendingSearch: f.movement["_pendingGuidedSearches"].has(player.id),
+          queued: f.movement["_pendingNonCombatMoves"].has(player.id),
+        };
+      });
+      expect(f.movement["_bfsIterationsThisTick"]).toBe(1000);
+      expect(
+        admissions.some((entry) => entry.queued && !entry.pendingSearch),
+      ).toBe(true);
+      const slices = [];
+      for (let tick = 1; tick <= 6; tick++) {
+        f.world.currentTick = tick;
+        f.movement.onTick(tick);
+        const iterations = f.movement["_bfsIterationsThisTick"];
+        expect(iterations).toBeLessThanOrEqual(1000);
+        expect(
+          f.movement["pathfinder"].getLastIterationsUsed(),
+        ).toBeLessThanOrEqual(250);
+        slices.push({
+          tick,
+          iterations,
+          pending: f.movement["_pendingGuidedSearches"].size,
+        });
+      }
+      // This proves shared scheduling, not five actors occupying one endpoint.
+      for (const player of players) {
+        f.movement.stopPlayer(player.id);
+        f.movement.cleanup(player.id);
+        f.world.entities.remove(player.id);
+      }
+      expect(f.movement["_pendingGuidedSearches"].size).toBe(0);
+      expect(f.movement["stopGuidedCollisionObservation"]).toBeNull();
+      console.log(
+        JSON.stringify({
+          phase: "five-player-pond-search-budget",
+          admissions,
+          slices,
+        }),
+      );
+    });
+
+    it.each([
+      { start: { x: 394, z: 408 }, destination: { x: 418, z: 432 } },
+      { start: { x: 397, z: 405 }, destination: { x: 422, z: 430 } },
+    ])(
+      "continues deterministic stranded pond route $start.x,$start.z",
+      async ({ start, destination }) => {
+        const f = await allTierFishingFixture(true);
+        const startPosition = tileToWorld(start);
+        const target = tileToWorld(destination);
+        const player = addPlayer(
+          f.world,
+          `stranded-route-${start.x}-${start.z}`,
+          [
+            startPosition.x,
+            resolvePlayerRootHeight(
+              startPosition.x,
+              startPosition.z,
+              f.terrain,
+            )!,
+            startPosition.z,
+          ],
+        );
+        f.movement.syncPlayerPosition(player.id, player.position);
+        expect(
+          f.movement.isTileAvailableForPlayer(player.id, destination),
+        ).toBe(true);
+        const accepted = f.movement.movePlayerToward(player.id, target, true);
+        let maximumTickIterations = f.movement["_bfsIterationsThisTick"];
+        let maximumLastSearchIterations =
+          f.movement["pathfinder"].getLastIterationsUsed();
+        let resumedSlices = 0;
+        let maximumRetainedSearchAdvance = 0;
+        let ticks = 0;
+        const arrived = () => {
+          const tile = worldToTile(player.position.x, player.position.z);
+          return tile.x === destination.x && tile.z === destination.z;
+        };
+        for (; ticks < 256 && !arrived(); ticks++) {
+          const previousSearch = f.movement["_pendingGuidedSearches"].get(
+            player.id,
+          )?.search;
+          const previousIterations = previousSearch?.totalIterations ?? 0;
+          f.world.currentTick++;
+          f.movement.onTick(f.world.currentTick);
+          if (previousSearch) {
+            const advance = previousSearch.totalIterations - previousIterations;
+            expect(advance).toBeGreaterThanOrEqual(0);
+            expect(advance).toBeLessThanOrEqual(250);
+            maximumRetainedSearchAdvance = Math.max(
+              maximumRetainedSearchAdvance,
+              advance,
+            );
+            if (advance > 0) resumedSlices++;
+          }
+          maximumTickIterations = Math.max(
+            maximumTickIterations,
+            f.movement["_bfsIterationsThisTick"],
+          );
+          maximumLastSearchIterations = Math.max(
+            maximumLastSearchIterations,
+            f.movement["pathfinder"].getLastIterationsUsed(),
+          );
+          expect(f.movement["_bfsIterationsThisTick"]).toBeLessThanOrEqual(
+            1000,
+          );
+          expect(
+            f.movement["pathfinder"].getLastIterationsUsed(),
+          ).toBeLessThanOrEqual(250);
+          expect(player.position.y).toBeCloseTo(
+            resolvePlayerRootHeight(
+              player.position.x,
+              player.position.z,
+              f.terrain,
+            )!,
+            5,
+          );
+          if (!f.movement.hasMovementIntent(player.id) && !arrived()) break;
+        }
+        const receipt = {
+          phase: "deterministic-stranded-pond-route",
+          start,
+          destination,
+          accepted,
+          reached: arrived(),
+          ticks,
+          maximumTickIterations,
+          maximumLastSearchIterations,
+          maximumRetainedSearchAdvance,
+          resumedSlices,
+          movement: f.movement.getPlayerMovementDebug(player.id),
+          failedExact: f.movement.hasFailedMovementTo(player.id, destination),
+          position: player.position.toArray(),
+        };
+        console.log(JSON.stringify(receipt));
+        expect.soft(accepted, JSON.stringify(receipt)).toBe(true);
+        expect.soft(arrived(), JSON.stringify(receipt)).toBe(true);
+        expect(resumedSlices).toBeGreaterThan(0);
+        expect(f.movement["_pendingGuidedSearches"].size).toBe(0);
+        expect(f.movement["stopGuidedCollisionObservation"]).toBeNull();
+        f.pending.onPlayerDisconnect(player.id);
+        f.movement.cleanup(player.id);
+        f.world.entities.remove(player.id);
+      },
+    );
+
+    it.each(["stop", "new-target", "sync", "cleanup"] as const)(
+      "retires the actual pending pond search on %s without resurrecting it",
+      async (action) => {
+        const f = await allTierFishingFixture(true);
+        const start = { x: 394, z: 408 };
+        const destination = { x: 418, z: 432 };
+        const position = tileToWorld(start);
+        const player = addPlayer(f.world, `pending-pond-${action}`, [
+          position.x,
+          resolvePlayerRootHeight(position.x, position.z, f.terrain)!,
+          position.z,
+        ]);
+        f.movement.syncPlayerPosition(player.id, player.position);
+        expect(
+          f.movement.movePlayerToward(
+            player.id,
+            tileToWorld(destination),
+            true,
+          ),
+        ).toBe(true);
+        const search = f.movement["_pendingGuidedSearches"].get(player.id);
+        expect(search).toBeDefined();
+        expect(f.movement.hasMovementIntent(player.id)).toBe(true);
+        expect(
+          f.movement["pathfinder"].getLastIterationsUsed(),
+        ).toBeLessThanOrEqual(250);
+        expect(f.movement["_bfsIterationsThisTick"]).toBeLessThanOrEqual(1000);
+        const before = player.position.toArray();
+        let replacement: { x: number; z: number } | null = null;
+        if (action === "stop") f.movement.stopPlayer(player.id);
+        else if (action === "cleanup") f.movement.cleanup(player.id);
+        else if (action === "sync")
+          f.movement.syncPlayerPosition(player.id, player.position);
+        else {
+          replacement = f.movement.findClosestWalkableTile(
+            { x: position.x - 1, z: position.z },
+            2,
+            (tile) =>
+              (tile.x !== start.x || tile.z !== start.z) &&
+              f.movement.isTileAvailableForPlayer(player.id, tile),
+          );
+          expect(replacement).not.toBeNull();
+          expect(
+            f.movement.movePlayerToward(
+              player.id,
+              tileToWorld(replacement!),
+              true,
+            ),
+          ).toBe(true);
+        }
+        expect(
+          f.movement["_pendingGuidedSearches"].get(player.id)?.search,
+        ).not.toBe(search!.search);
+        for (let tick = 1; tick <= 8; tick++) {
+          f.world.currentTick = tick;
+          f.movement.onTick(tick);
+          expect(f.movement["_bfsIterationsThisTick"]).toBeLessThanOrEqual(
+            1000,
+          );
+          expect(
+            f.movement["pathfinder"].getLastIterationsUsed(),
+          ).toBeLessThanOrEqual(250);
+          expect(
+            f.movement["_pendingGuidedSearches"].get(player.id)?.search,
+          ).not.toBe(search!.search);
+        }
+        expect(f.movement.hasMovementIntent(player.id)).toBe(false);
+        expect(f.movement["_pendingGuidedSearches"].size).toBe(0);
+        expect(f.movement["stopGuidedCollisionObservation"]).toBeNull();
+        expect(f.movement.hasFailedMovementTo(player.id, destination)).toBe(
+          false,
+        );
+        if (replacement)
+          expect(worldToTile(player.position.x, player.position.z)).toEqual(
+            replacement,
+          );
+        else expect(player.position.toArray()).toEqual(before);
+        if (action === "cleanup")
+          expect(f.movement["playerStates"].has(player.id)).toBe(false);
+        console.log(
+          JSON.stringify({
+            phase: "pending-pond-search-retired",
+            action,
+            start,
+            destination,
+            replacement,
+            position: player.position.toArray(),
+          }),
+        );
+        f.pending.onPlayerDisconnect(player.id);
+        f.movement.cleanup(player.id);
+        f.world.entities.remove(player.id);
+      },
+    );
+
+    it.each(["static-lease", "player-occupancy"] as const)(
+      "invalidates an actual pending pond search across %s close and reopen",
+      async (kind) => {
+        const f = await allTierFishingFixture(true);
+        const start = { x: 394, z: 408 };
+        const destination = { x: 418, z: 432 };
+        const position = tileToWorld(start);
+        const player = addPlayer(f.world, "pending-pond-collision-change", [
+          position.x,
+          resolvePlayerRootHeight(position.x, position.z, f.terrain)!,
+          position.z,
+        ]);
+        f.movement.syncPlayerPosition(player.id, player.position);
+        expect(
+          f.movement.movePlayerToward(
+            player.id,
+            tileToWorld(destination),
+            true,
+          ),
+        ).toBe(true);
+        const pending = f.movement["_pendingGuidedSearches"].get(player.id);
+        expect(pending).toBeDefined();
+        const distant = { x: start.x + 80, z: start.z + 80 };
+        expect(pending!.search.hasCheckedTile(distant.x, distant.z)).toBe(
+          false,
+        );
+        const unrelated = f.world.collision.acquireStaticFootprint([distant]);
+        try {
+          expect(pending!.dirty).toBe(false);
+          expect(f.movement["_pendingGuidedSearches"].get(player.id)).toBe(
+            pending,
+          );
+        } finally {
+          expect(unrelated.release()).toBe(true);
+        }
+        expect(pending!.dirty).toBe(false);
+        const watched = [-1, 0, 1]
+          .flatMap((dx) =>
+            [-1, 0, 1].map((dz) => ({ x: start.x + dx, z: start.z + dz })),
+          )
+          .find(
+            (tile) =>
+              (tile.x !== start.x || tile.z !== start.z) &&
+              pending!.search.hasCheckedTile(tile.x, tile.z) &&
+              f.movement.isTileAvailableForPlayer(player.id, tile),
+          );
+        if (!watched)
+          throw new Error(
+            "Real pending search has no available checked neighbor",
+          );
+        const initialFlags = f.world.collision.getFlags(watched.x, watched.z);
+        if (kind === "static-lease") {
+          const obstacle = f.world.collision.acquireStaticFootprint([watched]);
+          try {
+            expect(
+              f.world.collision.hasFlags(
+                watched.x,
+                watched.z,
+                CollisionFlag.BLOCKED,
+              ),
+            ).toBe(true);
+            expect(
+              f.movement.isTileAvailableForPlayer(player.id, watched),
+            ).toBe(false);
+            expect(pending!.dirty).toBe(true);
+          } finally {
+            expect(obstacle.release()).toBe(true);
+          }
+        } else {
+          const point = tileToWorld(watched);
+          const blocker = addPlayer(f.world, "pending-search-real-occupant", [
+            point.x,
+            resolvePlayerRootHeight(point.x, point.z, f.terrain)!,
+            point.z,
+          ]);
+          try {
+            f.movement.syncPlayerPosition(blocker.id, blocker.position);
+            expect(f.world.entityOccupancy.getOccupant(watched)?.entityId).toBe(
+              blocker.id,
+            );
+            expect(
+              f.movement.isTileAvailableForPlayer(player.id, watched),
+            ).toBe(false);
+            expect(pending!.dirty).toBe(true);
+          } finally {
+            f.movement.cleanup(blocker.id);
+            f.world.entities.remove(blocker.id);
+          }
+          expect(f.world.entityOccupancy.getOccupant(watched)).toBeNull();
+        }
+        expect(f.world.collision.getFlags(watched.x, watched.z)).toBe(
+          initialFlags,
+        );
+        // Close/reopen before advancing isolates invalidation. It does not ask a
+        // completed unreachable route to retry forever after a future opening.
+        let ticks = 0;
+        const arrived = () => {
+          const tile = worldToTile(player.position.x, player.position.z);
+          return tile.x === destination.x && tile.z === destination.z;
+        };
+        for (; ticks < 256 && !arrived(); ticks++) {
+          f.world.currentTick++;
+          f.movement.onTick(f.world.currentTick);
+          expect(
+            f.movement["_pendingGuidedSearches"].get(player.id)?.search,
+          ).not.toBe(pending!.search);
+          expect(f.movement["_bfsIterationsThisTick"]).toBeLessThanOrEqual(
+            1000,
+          );
+          expect(
+            f.movement["pathfinder"].getLastIterationsUsed(),
+          ).toBeLessThanOrEqual(250);
+          expect(
+            f.world.collision.hasFlags(
+              Math.floor(player.position.x),
+              Math.floor(player.position.z),
+              CollisionFlag.BLOCKED |
+                CollisionFlag.WATER |
+                CollisionFlag.STEEP_SLOPE,
+            ),
+          ).toBe(false);
+          if (!f.movement.hasMovementIntent(player.id) && !arrived()) break;
+        }
+        console.log(
+          JSON.stringify({
+            phase: "pending-pond-search-collision-invalidation",
+            kind,
+            watched,
+            distant,
+            start,
+            destination,
+            ticks,
+            reached: arrived(),
+            movement: f.movement.getPlayerMovementDebug(player.id),
+          }),
+        );
+        expect(arrived()).toBe(true);
+        expect(f.movement["_pendingGuidedSearches"].size).toBe(0);
+        expect(f.movement["stopGuidedCollisionObservation"]).toBeNull();
+        f.pending.onPlayerDisconnect(player.id);
+        f.movement.cleanup(player.id);
+        f.world.entities.remove(player.id);
+      },
+    );
+
     it("keeps the authored corridor clear and walks both decks and every fishing family to the physical bank and back", async () => {
       const f = await allTierFishingFixture(true);
       const owners = f.routeOwners!;

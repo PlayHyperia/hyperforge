@@ -1,5 +1,63 @@
 # World graphics development checkpoint — 2026-09-20
 
+## Bounded pond-route recovery — tested source checkpoint
+
+The valid pond return routes no longer fail merely because one 250-iteration
+search slice ends without a useful segment. Explicit pending/found/exhausted
+results retain each stationary actor's private frontier between ticks, with
+unchanged 250/search-slice and 1,000/tick limits, radius and route deadlines. Useful
+segments still publish immediately. Relevant collision changes invalidate
+retained work; distant changes do not. Same-tick terrain/directional caches,
+repeated intents, cancellation, synchronization, missing entities and network
+teardown now have owner-safe cleanup and actual-class regression coverage.
+Upper-floor topology remains on its historical one-shot search path.
+
+This supersedes the earlier incomplete CPU route result below, not the
+separate crowd-trapping or art rejection. Two exact stranded cases arrive in
+13/16 logical ticks. Final candidate02 completes 32/32 roundtrips (64 legs),
+sixteen paired comparisons from ten distinct physical starts; town trips total
+1,623 ticks versus 591 for the pond bank in this arrangement. All seven
+non-dock family witnesses pass actual gathering admission. Dock roundtrips
+prove access, not fishing from each deck. Fourteen resources/twelve drop IDs
+do not prove fourteen simultaneous fishers or all twelve rewards caught.
+
+Verification on frozen production: shared movement 397/397; candidate server
+34 passed / one known capacity skip; canonical server 68 passed / seventeen
+opt-in skips. Shared test-inclusive typing covers 707 roots / 2,382 sources;
+server typing covers 3,954 sources, both zero diagnostics with stable pins.
+Scoped lint/format and independent review pass. Cache failures were reproduced
+before correction; superseded fixture/assertion/type-harness failures are
+retained. The five-player budget test proves saturation/defer behavior, not
+concurrent arrival or frame performance.
+
+Final isolated build18 emits eight bundles from 973 stable production inputs.
+Native33 boots actual Chrome/Metal WebGPU at unchanged 1280×720, passes the
+original 90-second startup gate and settles the outpost capture in 10.88s under
+the original 30-second transition limit. It is a diagnostic still, not native
+route/gathering or sustained performance proof; earlier failed startup and
+transition receipts remain open reliability evidence. Visual review still
+rejects excessive court grass, missing worn arrival/connector and repeated
+pavilion character. Streaming-state 503s and the known unmodeled mob 404 are
+recorded, not presented as a clean full-stream runtime.
+
+Private runtime20 and owned browser33 are closed; the ephemeral database is
+removed. Protected localhost/game database, all 145 compiled artifacts, six
+build inputs and the retained package lock are unchanged. No candidate default
+is promoted and no shader, density, resolution or quality budget is reduced.
+
+Next: preserve legal escape space throughout active fishing/departure, then
+prove fourteen anglers plus overflow and relocation without moving human
+players or relaxing collision. Follow with native gameplay, outpost/dock/shore
+art, bank authority/transport/restart and repeated startup/sustained performance.
+All LAYOUT-01–08 remain open.
+
+Evidence: service-layout pond-stranded-route-before01,
+pond-route-cache-before01/candidate02/regression02/types02/lint02/format04,
+guided-resume-tests02/shared-regression01/shared-types01;
+inland pond build17 (superseded), build18, runtime20 and native33. The mirrored
+launch checklist contains the full scope, primary technique references and
+acceptance boundaries.
+
 ## Secondary pond bank, bank discovery and retained-ground alignment
 
 The pond capacity requirement remains seven fishing families / twelve fish,
@@ -29,8 +87,8 @@ The witness drops to 0.000575mm; 6,561 bank-envelope probes stay within
 adds 1,144 vertices / 2,288 triangles / 91,520 geometry bytes. These are sampled
 geometry measurements, not sustained frame-performance approval.
 
-Real route evidence remains FAILED. V6-04 completes fourteen same-start bank
-comparisons: 457 total pond-bank ticks versus 1,473 town ticks. Two town returns
+At this earlier checkpoint, route evidence FAILED. V6-04 completes fourteen
+same-start bank comparisons: 457 total pond-bank ticks versus 1,473 town ticks. Two town returns
 fail and their pond comparisons are skipped. Final v6-05 records 28 journeys,
 24 complete and four failed town returns at the two known shore destinations;
 only twelve comparisons complete. A one-bank v4 control reproduces the bounded
