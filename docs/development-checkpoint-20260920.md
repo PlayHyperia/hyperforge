@@ -1,5 +1,29 @@
 # World graphics development checkpoint — 2026-09-20
 
+## Grass fitting handoff and native transport — 2026-09-21
+
+Source candidate only: bounded main projection/copy, single-slot worker client
+and held-owner/provenance publication are implemented and verified. **346 tests
+pass**, including all five actual pond jobs within the original cumulative
+250 ms / 1m budget and ten actual headful Chrome/Metal browser transport checks.
+Full shared + nine changed/test roots typecheck: 716 roots / 2,490 sources, zero
+diagnostics. All 100 baseline pond hashes remain exact. Detailed results and
+references are mirrored in the launch checklist/art/reference/asset ledgers.
+
+Near-south full fitting+transport+publication measured 218.667 ms; first native
+cold dispatch 2.935 / 5.175 ms exceeds the cooperative 2 ms target and stays OPEN.
+These are CPU/transport observations, not native world/startup/frame acceptance.
+Actual game-manager source-cache lifecycle, pre-copy aggregate reservations,
+worker bundle/watch integration, unchanged camera gates and full memory/perf
+qualification remain next. Native63 remains the last failed original camera
+gate; no default promotion or new visual/AAA/launch approval.
+
+Evidence: service-layout grounding-handoff-*; failed initial test-type checks are
+retained, corrected types05 is clean. Owned browser/worker/server resources close;
+human localhost:3333 and protected artifacts/build inputs/lock remain untouched.
+World first: after runtime integration, return to pond materials/planting, pavilion
+arrival/docks, island composition and other open art gates.
+
 ## Exact-fitting worker and bounded retained-terrain reuse — 2026-09-21
 
 **SOURCE CANDIDATE ONLY; not connected to gameplay or promoted.** The real

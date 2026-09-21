@@ -27,7 +27,19 @@ import {
   GrassGroundingContinuation,
   type GrassBladeGroundingRequest,
 } from "../GrassBladeGrounding";
-import { prepareGroundedGrassSteps } from "../GrassGroundingPipeline";
+import {
+  prepareGroundedGrassSteps,
+  finishGroundedGrassWorkerSteps,
+} from "../GrassGroundingPipeline";
+import {
+  GrassGroundingPreparationContinuation,
+  prepareGrassGroundingHandoffSteps,
+} from "../GrassGroundingHandoff";
+import {
+  GrassGroundingWorkerClient,
+  type GrassGroundingClientSettled,
+} from "../../../../utils/workers/GrassGroundingWorkerClient";
+import { ActualGrassGroundingClientPort } from "./fixtures/ActualGrassGroundingClientPort";
 import { RetainedTerrainSurface } from "../TerrainGridSurface";
 import { groundGrassBlades as legacyGroundGrassBlades } from "./fixtures/LegacyGrassBladeGroundingReference";
 import {
@@ -308,6 +320,14 @@ describe.each(cases)("$name", (scenario) => {
       let manager: GrassVisualManager | undefined;
       let worker: Worker | undefined;
       let groundingWorker: ActualGroundingWorker | undefined;
+      let clientPort: ActualGrassGroundingClientPort | undefined;
+      let groundingClient: GrassGroundingWorkerClient | undefined;
+      let publishedWorkerResult:
+        | Extract<
+            ReturnType<typeof legacyGroundGrassBlades>,
+            { status: "ready" }
+          >
+        | undefined;
       let docks: ProceduralDocks | undefined;
       const failures: unknown[] = [];
       try {
@@ -807,6 +827,167 @@ describe.each(cases)("$name", (scenario) => {
         await groundingWorker.close();
         groundingWorker = undefined;
 
+        // Exercise production handoff/client/publication against the actual
+        // full pond cell. The fixture still owns once-per-surface capture;
+        // manager cache lifecycle and native frame scheduling remain separate.
+        const handoffStarted = performance.now();
+        const handoffInputs = setup.prepareGroundingInputs!(bounds);
+        const isCurrent = () => region.isCurrent() && handoffInputs.isCurrent();
+        const handoff = new GrassGroundingPreparationContinuation(
+          prepareGrassGroundingHandoffSteps(
+            { ...request, data: output },
+            handoffInputs,
+            (x, z) => terrain.getWaterBodyRegistry().getWaterSurfaceAt(x, z),
+            (x, z) => terrain["isGrassExcludedAt"](x, z),
+          ),
+          isCurrent,
+        );
+        for (let i = 0; i < 10_000 && handoff.state.status === "running"; i++)
+          handoff.advance();
+        if (handoff.state.status !== "prepared")
+          throw new Error(
+            "Pond handoff did not prepare: " + JSON.stringify(handoff.state),
+          );
+        const transferred = handoff.state.prepared;
+        clientPort = new ActualGrassGroundingClientPort(groundingWorkerSource);
+        await clientPort.ready();
+        groundingClient = new GrassGroundingWorkerClient(clientPort);
+        const copyAt = performance.now();
+        const admittedSources =
+          createGrassGroundingWorkerRequest(request).surfaces;
+        const captureMs = performance.now() - copyAt;
+        const admissions: GrassGroundingClientSettled[] = [];
+        for (const owner of admittedSources) {
+          const jobId = groundingClient.submit({
+            type: "prepare_surface",
+            schemaVersion: 1,
+            generation: 1,
+            token: owner.token,
+            snapshot: owner.snapshot,
+            consumed: { operations: 0, activeMs: 0, maximumSliceMs: 0 },
+          });
+          await clientPort.waitFor("surface_prepared", jobId);
+          const settled = groundingClient.takeSettled();
+          if (
+            settled?.status !== "response" ||
+            settled.response.type !== "surface_prepared" ||
+            settled.response.state.status !== "prepared"
+          )
+            throw new Error(
+              "Pond client admission failed: " + JSON.stringify(settled),
+            );
+          admissions.push(settled);
+        }
+        const fitId = groundingClient.submit({
+          type: "start_cached",
+          schemaVersion: 1,
+          generation: 1,
+          ownSurfaceToken: region.surfaces.indexOf(ownSurface) + 1,
+          surfaceTokens: admittedSources.map((owner) => owner.token),
+          geometry: transferred.geometry,
+          data: transferred.data,
+          constraints: transferred.constraints,
+          settings: transferred.settings,
+          consumed: {
+            operations: handoff.operations,
+            activeMs: handoff.activeMs,
+            maximumSliceMs: handoff.maximumSliceMs,
+          },
+        });
+        await clientPort.waitFor("result", fitId);
+        const settled = groundingClient.takeSettled();
+        if (
+          settled?.status !== "response" ||
+          settled.response.type !== "result"
+        )
+          throw new Error(
+            "Pond client fitting transport failed: " + JSON.stringify(settled),
+          );
+        const fit = settled.response;
+        const transportMs = settled.dispatchCpuMs + settled.receiveCpuMs;
+        evidence(
+          `${scenario.label}_HANDOFF_WORKER`,
+          JSON.stringify({
+            key,
+            lod,
+            state: fit.state.status,
+            work: fit.work,
+            preparation: {
+              operations: handoff.operations,
+              activeMs: handoff.activeMs,
+              maximumSliceMs: handoff.maximumSliceMs,
+            },
+            dispatchCpuMs: settled.dispatchCpuMs,
+            postMessageCpuMs: settled.postMessageCpuMs,
+            receiveCpuMs: settled.receiveCpuMs,
+            transportMs,
+            captureMs,
+            admissions,
+            scope:
+              "Real pond inputs through production projection/copy, client and actual isolated worker; all fitting work and measured main transport cost must survive publication without a new budget. Fixture terrain capture/admission remains separately measured, not a game-manager cache qualification.",
+          }),
+        );
+        expect(fit.state.status).toBe("ready");
+        if (fit.state.status !== "ready")
+          throw new Error("Pond handoff fitting failed");
+        expect(fit.work.activeMs + transportMs).toBeLessThan(250);
+        const publication = new GrassGroundingContinuation(
+          finishGroundedGrassWorkerSteps(fit.state.result, {
+            ownSurface,
+            surfaces: region.surfaces.map((surface, index) => ({
+              token: index + 1,
+              surface,
+            })),
+            grounding: transferred.grounding,
+            lod,
+            geometryLayout: request.geometryLayout,
+            roadClearance: request.roadClearance,
+          }),
+          isCurrent,
+          {
+            operations: fit.work.operations,
+            activeMs: fit.work.activeMs + transportMs,
+            // Summed main callback cost is a conservative slice upper bound.
+            maximumSliceMs: Math.max(fit.work.maximumSliceMs, transportMs),
+          },
+        );
+        for (
+          let i = 0;
+          i < 10_000 && publication.state.status === "running";
+          i++
+        )
+          publication.advance();
+        evidence(
+          `${scenario.label}_HANDOFF_PUBLICATION`,
+          JSON.stringify({
+            key,
+            lod,
+            state: publication.state.status,
+            operations: publication.operations,
+            activeMs: publication.activeMs,
+            maximumSliceMs: publication.maximumSliceMs,
+            totalColdWallMs: performance.now() - handoffStarted,
+            scope:
+              "Full projection + fitting + main transport + numeric validation/provenance remap under the unchanged cumulative limits. One-time terrain capture and explicit admission are separately reported above. Node worker realm and real world inputs, not a native frame-rate claim.",
+          }),
+        );
+        if (publication.state.status !== "ready")
+          throw new Error(
+            "Pond worker publication failed: " +
+              JSON.stringify(publication.state),
+          );
+        publishedWorkerResult = publication.state.result;
+        const { grounding: retainedEvidence, ...numerical } =
+          publishedWorkerResult;
+        expect(retainedEvidence).toBeDefined();
+        expect(grassGroundingWorkerSemanticResult(numerical, request)).toEqual(
+          grassGroundingWorkerSemanticResult(result, request),
+        );
+        groundingClient.destroy();
+        groundingClient = undefined;
+        await clientPort.close();
+        clientPort = undefined;
+
         // The frozen exhaustive implementation cannot finish this whole cell
         // under its existing cap. One-clump evaluations provide ONLY an
         // independent numerical oracle; the candidate above and the complete
@@ -1031,6 +1212,9 @@ describe.each(cases)("$name", (scenario) => {
           computedHeights: expectedHeights,
           ecologicalNormals: expectedNormals,
         });
+        expect(publishedWorkerResult?.grounding).toEqual(
+          pipeline.state.result.grounding,
+        );
         const grounding = pipeline.state.result.grounding;
         if (!grounding) throw new Error("Missing full-pipeline provenance");
         expect(grounding.computedHeights.buffer).not.toBe(
@@ -1083,6 +1267,12 @@ describe.each(cases)("$name", (scenario) => {
         }
         try {
           await groundingWorker?.close();
+        } catch (error) {
+          failures.push(error);
+        }
+        release(() => groundingClient?.destroy());
+        try {
+          await clientPort?.close();
         } catch (error) {
           failures.push(error);
         }

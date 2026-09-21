@@ -1958,6 +1958,100 @@ all prefixed grounding-worker-. No browser or temporary database was launched
 for this CPU stage. Human localhost:3333 and protected artifacts stay unchanged.
 No native-performance, visual, AAA or production-launch approval.
 
+### Grass worker handoff and native transport — 2026-09-21
+
+**Progress, not game/visual acceptance.** Production preparation, transport and
+return-path components now compose against the real five pond cells. The game
+manager still uses the retained main-thread pipeline: no default/profile switch,
+canonical rebuild, live cache wiring or native startup requalification happened.
+
+- [x] Added a distinct bounded preparation continuation. It runs the existing
+  constraint lease and projection, copies nine exact-sized numerical buffers in
+  at most 1,024-element batches, guards blade/source revisions and keeps original
+  surface references and ecological provenance on main. It never fabricates a
+  ready grass result or transfers renderer-owned/provenance arrays.
+- [x] Added a single-slot actual-worker client with monotonic task IDs, bounded
+  acknowledged cache accounting, pre-transfer reservations, cancellation awaiting
+  acknowledgement, 10-second transport watchdog and permanent transport-error
+  termination. A parked result still occupies the slot until explicitly taken;
+  no queue, automatic retry or detached-buffer fallback was introduced.
+- [x] Added bounded return-path owner/token/revision reconciliation, numerical
+  output/visibility validation and existing provenance remapping. The unchanged
+  fitting allowance carries through projection, copy, worker fitting, measured
+  main transport and publication. Independent review found a missing-coordinate
+  bounds check; explicit six-coordinate validation and a regression now cover it.
+- [x] Current verification: **346 relevant tests passed** — preparation 33,
+  publication 28, client 31, worker/cache 49, actual pond 5, existing
+  manager/geometry regressions 190, native browser transport 10. The five pond
+  cases retain three historical overlay skips, not untested current cases.
+  Final unit run passed all 141 again. Tests use actual geometry/generators,
+  real worker realms and native Chrome transport, not response mocks.
+- [x] All 100 completed-pipeline pond buffer hashes still match
+  `pond-appearance-grounding01`; counts, transforms, roots, masks, bounds and
+  ecological evidence remain exact (allocation-specific owner UUIDs excepted).
+  Actual full worker-handoff output and provenance also match the original
+  complete pipeline in each case.
+- [x] Full shared production plus nine explicit changed/test roots: 716 root
+  files, 2,490 sources, zero type diagnostics (`grounding-handoff-types05`).
+  Earlier types02/types03 failures were test typing issues and remain recorded;
+  fixes did not change runtime bounds or bypass validation.
+- [x] Headful Chrome 153, ANGLE Metal, actual WebGPU adapter
+  `apple / metal-3`: ten native transport cases pass. Cold parity, explicit
+  preparation, initial fit plus two cached repeats, release and cancellation/
+  recovery all use actual browser Workers. One owned context/tab and ephemeral
+  loopback server were closed; every operation reports zero retained owned
+  workers/clients/cache after cleanup. This is not a rendered-world test.
+
+**Real pond full-fitting ledger** (Node worker realm; milliseconds of cumulative
+active slices, not a native frame-time result):
+
+| Actual cell | Projection/copy | Main dispatch + receipt | Full fitting/publication | Cold wall including explicit admission |
+| --- | ---: | ---: | ---: | ---: |
+| Near southbank | 2.906 | 0.415 | 218.667 | 372.504 |
+| Near eastbank | 0.871 | 0.268 | 168.263 | 303.327 |
+| LOD1 southbank | 1.505 | 0.214 | 146.618 | 318.715 |
+| LOD1 eastbank | 0.933 | 0.254 | 112.473 | 248.067 |
+| LOD1 cutbank | 0.867 | 0.413 | 125.998 | 311.211 |
+
+All five full jobs complete below the original 250 ms / 1,000,000-resumption
+limits. Terrain fixture capture and once-per-owner admission remain separately
+measured; no free per-job warmup is claimed. The near-south result is one
+observation, not evidence that the earlier 233.668 ms fitting tail disappeared.
+Main transport callback sums conservatively bound that phase's maximum slice.
+Native first cold dispatch measured **2.935 ms** and **5.175 ms** on the two
+verification runs (postMessage **2.105 / 3.670 ms**), above the cooperative
+2 ms target; it stays an open scheduling/
+allocation-tail concern. Native fitting also has non-preemptible slice overshoot.
+Do not turn passing functional checks into frame-time or whole-heap approval.
+
+- [ ] Next: wire an explicitly opt-in game-manager coordinator, single selected
+  prepared payload, held-object-to-token cache, source retirement/eviction and
+  aggregate reservations **before terrain copying**. Include original complete
+  region/constraint/LOD/ticket checks so new neighboring owners invalidate work.
+  Await cancellation acknowledgement or worker death before reclaiming capacity;
+  never let an old same-key response clear a replacement.
+- [ ] Keep one shared main preparation/remap deadline and one mesh upload/frame;
+  charge dispatch/receipt CPU and fail the original cumulative budget before
+  constructing publication if already exhausted. Do not raise caps or reduce
+  grass/geometry/shadows/resolution to pass.
+- [ ] Package/watch the dedicated worker correctly through flattened shared
+  output and Vite; qualify real cold startup, unchanged 30-second camera gates,
+  queue latency, allocation tails, aggregate transient/retained memory and
+  long-running movement/LOD/retirement in the isolated playable candidate.
+- [ ] Then resume matched pond material/shore planting/pavilion/dock review and
+  wider island art. Native63 remains the last **failed** original camera-gate
+  result; no new AAA, launch, production or visual approval is asserted.
+
+Evidence: service-layout `grounding-handoff-*` (core01, client01, pond01,
+manager01, browser01/02, final-unit01, compare01, types01–05, lint01–03 and
+protected01/02). Lint02's browser-global warning was corrected with explicit
+globalThis access; lint03 and format01 pass. Protected artifact/build-input/retained-lock checks pass and
+localhost:3333 still returns HTTP 200. No human server, DB/character, canonical
+artifact, unrelated duplicate/mode/lockfile, default or dependency was changed.
+Implementation follows native [worker ownership transfer](https://developer.mozilla.org/en-US/docs/Web/API/Worker/postMessage)
+and [termination semantics](https://developer.mozilla.org/en-US/docs/Web/API/Worker/terminate);
+these references do not substitute for the actual tests above.
+
 ### Inland fishing integration — candidate only
 
 The detached candidate now requests 14 real fishing entities, two for each of
