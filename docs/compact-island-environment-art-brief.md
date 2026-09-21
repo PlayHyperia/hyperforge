@@ -2208,6 +2208,62 @@ References: [Vite worker asset ownership](https://vite.dev/guide/features.html#w
 [termination](https://developer.mozilla.org/en-US/docs/Web/API/Worker/terminate).
 The actual tests, not those references, establish the limited results above.
 
+### Shore-family study — partial visual evidence; admission blocker retained
+
+**World first, compact island only, one arena, SOL only.** The shoreline is not
+visually accepted. Native67's overview shows only a subtle warmer turf margin;
+root and independent review still reject the continuous bare ribbon, sparse
+planting, uniform lawn and unfinished world composition as final art.
+
+- [x] Candidate material-family correction: dry-turf toes no longer inherit the
+  mineral grade. Cutbank and sheltered silt remain distinct. This changes composed
+  albedo/roughness/AO/normal together; it is NOT an albedo-only change. Coverage,
+  source maps, terrain, root support and wetness authority remain unchanged.
+- [x] 159 material/substrate tests pass; final formatted substrate repeats all
+  nine cases. Full shared plus explicit tests: 715 roots / 2,392 sources, zero
+  diagnostics; scoped lint/format pass. Initial tuple-typing failure was fixed.
+- [x] Actual archived/current factory comparison: 7,200 samples, 21,600 exact
+  coverage comparisons and 7,200 exact pond/wetness results. 612 appearance
+  masks differ. Four completed grass cases preserve 74/80 array hashes; only
+  six ground-color hashes change. No fifth-case completed-buffer claim.
+- [ ] Retained CPU regression failure: the LOD1 eastbank legacy full pipeline
+  exceeds its original 250 ms cap (250.111 ms, maximum slice 18.444 ms).
+  Its actual handoff-worker publication completed in 118.857 ms. Four cases
+  passed, one failed, three unrelated overlay cases skipped; no cap increase.
+- [ ] Native67/build34 is FAILED, not a four-view pass: startup takes 57.737 s;
+  overview settles in 19.033 s with 61,453 clumps, then landing transition fails
+  grass cache admission before fitting. First failed job gcell_v1_16_19 has
+  zero fitting work; later failures propagate to two further jobs. The precise
+  failed terrain owner and admission cost need better retained evidence.
+  Admission maximum jumps 6.2 to 144.3 ms while main grounding stays 4.7 ms.
+  Synchronous-slice elapsed time includes GC/descheduling; no cross-message
+  waiting charge was found. Add a bounded terminal owner/token/revision,
+  remote phase/work and transport receipt before one instrumented reproduction;
+  do not infer an optimization or exact owner from aggregate counters.
+- [x] Overview camera/phase and population match native66; exposure differs by
+  9.6e-9, other recorded lighting scalars match. Natural animation is not locked.
+  One usable overview does not qualify eye-level material, motion or performance.
+- [x] Runtime47 and its temporary database removed; owned browser closed.
+  Human localhost:3333/DB, all 145 canonical compiled outputs and lock retained.
+  No source/default promotion to the playable runtime, installs or quality cuts.
+- [ ] NEXT: diagnose and correct the bounded terrain-admission failure, preserving
+  full work accounting and limits. Do not retry captures merely to get a pass.
+- [ ] Then qualify compact single-sun shadow bias across docks, pavilion contact,
+  terrain and foliage at three sunlight phases. Existing native24/26/27 controls
+  attribute fine dock plaid to shadows, not timber UVs; avoid more grain tuning.
+- [ ] Next substantial art pass: regroup existing shoreline plants/rocks into
+  unequal connected masses with open fishing/navigation, rather than another
+  tiny color adjustment. Improve pavilion arrival and grass silhouette together
+  only after reliable captures and measured unchanged quality are available.
+
+Evidence: service-layout-network01 `shore-family-*`; inland pond
+`isolated-build34-report.json`, `native67`, `runtime47`.
+Reference re-check: [Three procedural terrain](https://github.com/mrdoob/three.js/blob/r186/examples/webgpu_tsl_procedural_terrain.html),
+[wood source](https://github.com/mrdoob/three.js/blob/r186/examples/jsm/materials/WoodNodeMaterial.js),
+[shadow source](https://github.com/mrdoob/three.js/blob/r186/src/nodes/lighting/ShadowNode.js).
+The references guide material/shape separation and a shadow investigation;
+neither source references nor numerical passes establish AAA acceptance.
+
 ### Inland fishing integration — candidate only
 
 The detached candidate now requests 14 real fishing entities, two for each of

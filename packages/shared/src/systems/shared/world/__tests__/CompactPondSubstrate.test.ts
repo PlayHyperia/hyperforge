@@ -207,11 +207,11 @@ function graph(root: Node) {
 }
 
 describe("opt-in cutbank substrate (actual CPU kernels and TSL graph, not GPU proof)", () => {
-  it("separates broad mineral cutbank, narrower turf toe and sheltered silt without changing support or coverage", () => {
+  it("separates mineral cutbank, ungraded turf toe and sheltered silt without changing support or coverage", () => {
     const cases = [
       { angle: -2.35, radius: 18, mineral: true, silt: false },
-      { angle: 1.4, radius: 18, mineral: true, silt: false },
-      { angle: 2.7, radius: 24, mineral: true, silt: false },
+      { angle: 1.4, radius: 18, mineral: false, silt: false },
+      { angle: 2.7, radius: 24, mineral: false, silt: false },
       { angle: 0, radius: 26, mineral: false, silt: true },
     ];
     for (const point of cases) {
@@ -265,6 +265,77 @@ describe("opt-in cutbank substrate (actual CPU kernels and TSL graph, not GPU pr
     );
     expect(steepSilt.siltAppearance).toBe(0);
   });
+
+  it.each([
+    { angle: 1.4, radius: 18 },
+    { angle: 2.7, radius: 24 },
+  ])(
+    "preserves exact ungraded albedo, support and coverage at isolated turf $angle / $radius",
+    ({ angle, radius }) => {
+      const palette = operations.getPalette();
+      const albedos = [
+        {
+          soil: [palette.dirt[0], palette.dirt[1], palette.dirt[2]],
+          rock: [palette.rock[0], palette.rock[1], palette.rock[2]],
+        },
+        {
+          soil: [0.19, 0.11, 0.04],
+          rock: [0.36, 0.27, 0.18],
+        },
+        {
+          soil: [0.03, 0.31, 0.72],
+          rock: [0.81, 0.06, 0.24],
+        },
+      ] as const;
+      for (const height of [-0.8, -0.1, 0, 0.04, 0.12, 0.35, 0.4, 1])
+        for (const noise of [0, 0.5, 1]) {
+          const input = inputAt(
+            admitted,
+            angle,
+            radius,
+            height,
+            0.04,
+            0,
+            noise,
+          );
+          const placement = operations.bankCompositionAt(input);
+          const appearance = operations.bankCompositionAt(input, true);
+          const { mineralAppearance, siltAppearance, ...unchanged } =
+            appearance;
+          expect(mineralAppearance).toBe(0);
+          expect(siltAppearance).toBe(0);
+          expect(unchanged).toEqual(placement);
+          // Exercise the shared production grade with actual palette means
+          // and nonuniform scan values; no replicated shader/color formula.
+          for (const { soil, rock } of albedos)
+            expect(
+              operations.bankAppearanceAlbedo(
+                soil,
+                rock,
+                appearance,
+                arithmetic,
+              ),
+            ).toEqual({ soil, rock });
+          for (const weights of [
+            [0.3, 0.4, 0.2, 0.1],
+            [0, 1, 0, 0],
+            [1, 0, 0, 0],
+          ] as const)
+            expect(
+              operations.bankCompositionWeights(
+                weights,
+                appearance,
+                arithmetic,
+              ),
+            ).toEqual(
+              operations.bankCompositionWeights(weights, placement, arithmetic),
+            );
+          expect(operations.grassSupport(input)).toBe(
+            supportWithoutSubstrate(input),
+          );
+        }
+    },
+  );
 
   it("feathers appearance with admitted sector overlap and existing noise, preserving exact neutral domains", () => {
     for (const input of [

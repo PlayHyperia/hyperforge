@@ -1,5 +1,30 @@
 # World graphics development checkpoint — 2026-09-20
 
+## Shore-family study — 2026-09-21 (unqualified; native admission failure)
+
+Dry-turf toes retain their original material family instead of receiving the
+cutbank mineral grade. This is a small candidate correction, not a meaningful
+shoreline-quality milestone. Native67's single usable overview is too subtle
+for visual approval; the bare rim, sparse planting and uniform lawn remain.
+
+159 material tests, final nine-case substrate run, full shared/test noEmit and
+lint pass. Archived/current factory comparison preserves coverage and wetness
+across 7,200 samples. Four completed grass cases retain 74 hashes and change
+only six ground-color hashes; the fifth legacy full pipeline fails its original
+250 ms CPU cap. No budget, quality or timeout is relaxed.
+
+Build34/native67 passes startup and overview, then FAILS landing grass-cache
+admission before fitting. First job gcell_v1_16_19; two further failures follow.
+Do not report four views, smoothness, streaming, AAA or production approval.
+Next priority: retain exact failing admission-owner/cost evidence and fix that
+bounded work; then whole-scene shadow-bias qualification and larger shoreline
+plant/rock massing. Dock plaid is an established shadow artifact, not a new
+wood-texture hypothesis. Reuse the recorded primary Three.js references.
+
+Runtime47 and its temporary database are removed; owned browser closed;
+localhost:3333/DB, canonical builds and unrelated work stay protected.
+Goal remains active. No default promotion, merge, deploy or dependency installs.
+
 ## Grass worker world ownership checkpoint — 2026-09-21
 
 The candidate is now connected to actual TerrainSystem/GrassVisualManager behind

@@ -312,7 +312,10 @@ export function createCompactTerrainColorOperations() {
     appearanceFadeEnd: 1.7,
     appearanceHeightNoise: 0.16,
     appearancePatchMinimum: 0.85,
-    turfMineralStrength: 0.78,
+    // Turf toes retain the soil scan; exposed cutbank/mineral sectors own the
+    // mineral grade. Giving every family that grade produced a pale pond rim.
+    // This changes material appearance only, never emergence or root support.
+    turfMineralStrength: 0,
     turfMineralFadeStart: 0.04,
     turfMineralFadeEnd: 0.35,
     siltStrength: 0.78,
