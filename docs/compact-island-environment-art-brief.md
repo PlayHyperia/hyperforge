@@ -2264,6 +2264,73 @@ Reference re-check: [Three procedural terrain](https://github.com/mrdoob/three.j
 The references guide material/shape separation and a shadow investigation;
 neither source references nor numerical passes establish AAA acceptance.
 
+### Bounded grass handoff and native audio — fitting budget remains open
+
+**World-first source checkpoint only; not AAA, smoothness or launch acceptance.**
+The worker route remains explicitly opt-in. No density, topology, resolution,
+shadow, fitting-operation/CPU cap or native readiness deadline is relaxed.
+
+- [x] Retain one bounded, immutable admission-failure diagnostic: exact owner,
+  token/revision, local/remote phase, consumed work and final merged ledger.
+  It holds no terrain/input buffers or unbounded history. Later job logs label
+  it last-observed context, not necessarily that job's cause. Fitting failure
+  with zero admission failure is not misreported as cache admission failure.
+- [x] Coalesce positive-progress local coordinator phases within the SAME
+  manager-wide 2 ms / 8,192-operation allowance. Pending remote work yields;
+  active-owner priority, accounted dispatch tails, one upload/frame and
+  cancellation/ownership guarantees remain. This is not a measured speed win.
+- [x] 157 coordinator/snapshot/manager/pacing regressions pass using actual
+  worker transport. Tests check whole-call operation accounting, dormant
+  isolation, parked remote work, reservations and per-call upload bounds.
+- [x] Repair the ordinary player audio unlock path: resume the real context on
+  an eligible gesture without depending on absent /tiny.mp4. Duplicate gestures
+  cannot double-drain; closed/destroyed owners clean up; retryable resume errors
+  retain listeners. Synchronous ready-callback errors remain handled separately
+  from native resume errors; historical abort-on-callback-error queue behavior
+  is retained, not claimed fixed. Remove the obsolete test error allowlist.
+- [x] Four actual headful Chrome/Metal audio lifecycle tests pass under normal
+  activation policy, using no-gesture CDP probes and genuine trusted input.
+  Includes a native invalid-stream callback error; no mocked AudioContext,
+  fake clocks or audio output. Audible quality, Safari and streaming remain open.
+- [x] Final source/test noEmit, scoped lint/format and nine isolated build bundles
+  pass. Final build38 adds only callback-error containment after world build37;
+  it is NOT a new full-world native run.
+- [ ] Native68 failed the new profiler's target selection; its partial capture
+  does not provide the required pair of accepted CPU profile windows.
+  Corrected native69 obtains main + actual grass-worker CPU profiles for both
+  original overview/landing cuts. Worker sampled idle share is 95.72%/87.29%;
+  profiles include setup, GC and scheduling, not exclusive CPU or GPU timing.
+  The earlier native67 144.3 ms admission spike did not recur; it remains open.
+- [ ] Unprofiled native70/build35 is the four-view pre-coalescing baseline:
+  startup 73.428 s; cuts 21.934/6.268/5.129/8.231 s. Native71/build36 fails before
+  views on the missing-video audio path despite passing startup in 42.681 s.
+  A failed run's shorter startup is NOT evidence of an overall performance win.
+- [ ] Native72/build37 fails the original 90 s startup gate, with ZERO views:
+  gcell_v1_15_17 LOD1 fitting uses 153,028 operations / 251.700 ms active time
+  against the unchanged 250 ms limit. 121 cells complete, 26 empty, one fails.
+  Maximum main slice 8.3 ms, admission 10 ms; lastAdmissionFailure is null.
+  This is fitting, not admission. No audio-unlock errors recur. These elapsed
+  synchronous-work measurements include GC/descheduling; do not waive the cap.
+- [x] Runtime48–51 and their temporary databases are removed, all five owned
+  native browsers closed, canonical outputs/lock and human localhost:3333/DB
+  remain unchanged. Source pins and the eight status mirrors are checked.
+- [ ] NEXT: preserve the exact failed cell as a real-terrain regression; prove
+  safe reuse of existing conservative face-block bounds for height-only root
+  sampling, with exhaustive fallback and exact historical output/work parity.
+  Measure paired actual-worker costs, then unchanged native gates and sustained
+  movement/cache retirement. Do not retry unchanged failures until one passes.
+- [ ] Then qualify compact-sun shadow bias and regroup shore planting/rocks into
+  larger unequal masses while protecting all fishing/dock/dry routes. The bare
+  bank ribbon, uniform lawn, pavilion arrival and broader composition remain
+  below the art target. No new art/default promotion, merge or deployment.
+
+Evidence: service-layout-network01 `admission-diag-*`, `admission-cadence-*`,
+`admission-audio-*`; inland pond build35–38, native68–72 and runtime48–51.
+References: [Chrome Web Audio activation](https://developer.chrome.com/blog/web-audio-autoplay),
+[HTML activation events](https://html.spec.whatwg.org/multipage/interaction.html#activation-triggering-input-event),
+[native AudioContext resume](https://webaudio.github.io/web-audio-api/#dom-audiocontext-resume).
+Actual tests establish only the limited outcomes stated above.
+
 ### Inland fishing integration — candidate only
 
 The detached candidate now requests 14 real fishing entities, two for each of

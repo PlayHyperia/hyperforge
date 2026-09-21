@@ -1828,6 +1828,15 @@ export class GrassVisualManager implements QuadTreeListener {
           // at its transition, even if later LOD/horizon retirement removes it.
           console.error("[GrassVisualManager] Grounding failed:", state, {
             ...captureGrassGroundingFailure(entry.job),
+            // A cached failure may outlive a different owner's admission
+            // failure. This is context, not a causal join to the current job.
+            workerAdmissionContext: this.groundingWorker
+              ? {
+                  association: "last-observed-not-necessarily-this-job",
+                  lastFailure:
+                    this.groundingWorker.receipt.lastAdmissionFailure,
+                }
+              : null,
             key: entry.ticket.key,
             nodeId: entry.ticket.node.id,
             ticketLod: entry.ticket.lodLevel,
@@ -1837,6 +1846,17 @@ export class GrassVisualManager implements QuadTreeListener {
         }
         if (state.status === "cancelled")
           this.groundingJobs.delete(entry.ticket.key);
+        // Local worker-handoff stages may share this existing frame allowance.
+        // Each advance has already charged its ledger before the next dispatch;
+        // never spin on a pending reply or a stage that made no operation progress.
+        if (
+          state.status === "running" &&
+          entry.job === this.groundingWorker?.activeJob &&
+          "phase" in entry.job &&
+          entry.job.phase !== "waiting_worker" &&
+          entry.job.lastSliceOperations > 0
+        )
+          continue;
         if (state.status !== "ready") return 0;
         const { ticket, region } = entry;
         const inputs = ticket.grounding?.inputs;

@@ -1,5 +1,39 @@
 # World graphics development checkpoint — 2026-09-20
 
+## Bounded grass handoff and native audio — 2026-09-21 (unqualified fitting)
+
+The worker candidate now retains bounded terminal admission evidence and groups
+positive-progress local handoff phases within the existing 2 ms / 8,192-operation
+manager allowance. No fitting limits, terrain/grass quality or default is changed.
+157 worker/manager regressions pass; no native speed improvement is established.
+
+Ordinary audio unlock no longer depends on missing /tiny.mp4. Four actual
+Chrome/Metal gesture/lifecycle tests pass, including duplicate inputs, closed or
+destroyed contexts, and a native callback error. Callback failure stays distinct
+from failed resume; old abort-on-callback-error queue behavior remains unchanged.
+Full shared/test noEmit, scoped lint/format and nine isolated build38 bundles pass.
+Build38 adds callback-error containment after world-tested build37, not a new
+full-world capture; audible content, Safari and stream qualification stay open.
+
+Native69 profiles two original cuts, but the earlier 144.3 ms admission spike
+does not recur and is not marked fixed. Native70/build35 is the four-view
+baseline (73.428 s startup, 21.934/6.268/5.129/8.231 s cuts). Native71 fails on
+the audio issue. Native72/build37 instead FAILS the original 90 s startup gate:
+gcell_v1_15_17 LOD1 fitting reaches 251.700 ms / 153,028 operations under the
+unchanged 250 ms cap. Zero views; no audio-unlock errors; admission failure is
+null. Neither shorter failed-run startup nor test passes qualify smoothness.
+
+Next: exact failed-cell regression and conservative height-sampling optimization
+with mathematical/output/work parity, then paired real-worker/native checks.
+After reliable capture, return to shadow-bias qualification, larger shoreline
+plant/rock masses, pavilion arrival and island composition. Current art remains
+below target; no density/resolution/shadow cuts or cap/deadline increases.
+
+Owned runtime48–51/databases and native68–72 browsers are closed. Canonical
+outputs, lock, human localhost:3333/DB and unrelated work remain protected.
+Eight checklist/status mirrors agree. Goal active; no default promotion,
+merge, deploy or dependency installation.
+
 ## Shore-family study — 2026-09-21 (unqualified; native admission failure)
 
 Dry-turf toes retain their original material family instead of receiving the

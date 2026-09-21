@@ -30,8 +30,52 @@ import {
 export type GrassGroundingWorkerJobPhase =
   "cache" | "preparing" | "waiting_worker" | "remapping" | "terminal";
 
+type AdmissionResponse = Readonly<{
+  status: string;
+  reason: string | null;
+  phase: string | null;
+  work: Readonly<GrassGroundingConsumedWork> | null;
+  workBeforeMerge: Readonly<GrassGroundingConsumedWork>;
+  jobId: number;
+  generation: number;
+  dispatchCpuMs: number;
+  chargedDispatchMs: number;
+  postMessageCpuMs: number;
+  receiveCpuMs: number;
+}>;
+
+/** One terminal admission diagnostic, not a retained geometry/job history.
+ * Work measures synchronous elapsed slices (including GC/preemption), not
+ * exclusive CPU time. No error graphs, input buffers or terrain owners escape. */
+export type GrassGroundingAdmissionFailure = Readonly<{
+  schemaVersion: 1;
+  generation: number;
+  mainPhase: string | null;
+  status: "failed_budget" | "failed_input";
+  reason:
+    | Extract<
+        GrassBladeGroundingJobState,
+        { status: "failed_budget" }
+      >["reason"]
+    | null;
+  owner: Readonly<{
+    token: number;
+    nodeId: number;
+    sourceRevision: string;
+    centerX: number;
+    centerZ: number;
+    size: number;
+    resolution: number;
+    inputBytes: number;
+    derivedBytesReserved: number;
+  }>;
+  submittedWork: Readonly<GrassGroundingConsumedWork> | null;
+  response: AdmissionResponse | null;
+  mergedWork: Readonly<GrassGroundingConsumedWork>;
+}>;
+
 /** Numerical payload and retained query-index reservations, NOT total JS/GPU
- * heap. Counters are bounded scalars; no job, input or receipt history is kept. */
+ * heap. Only bounded scalars and the last admission failure are retained. */
 export type GrassGroundingWorkerCoordinatorReceipt = Readonly<{
   cacheOwners: number;
   cacheInputBytes: number;
@@ -49,6 +93,7 @@ export type GrassGroundingWorkerCoordinatorReceipt = Readonly<{
   transportJobId: number | null;
   phase: GrassGroundingWorkerJobPhase | "idle" | "release";
   terminated: boolean;
+  lastAdmissionFailure: GrassGroundingAdmissionFailure | null;
 }>;
 
 type Owner = {
@@ -64,6 +109,8 @@ type Admission = {
   iterator: Generator<string, RetainedTerrainSurfaceSnapshot, void> | null;
   snapshot: RetainedTerrainSurfaceSnapshot | null;
   work: GrassGroundingConsumedWork;
+  submittedWork: Readonly<GrassGroundingConsumedWork> | null;
+  response: AdmissionResponse | null;
 };
 type Context = {
   job: GrassGroundingWorkerJob | null;
@@ -214,6 +261,7 @@ export class GrassGroundingWorkerCoordinator {
   private preparedOwners = 0;
   private cacheHits = 0;
   private releasedOwners = 0;
+  private lastAdmissionFailure: GrassGroundingAdmissionFailure | null = null;
 
   constructor(
     port: GrassGroundingWorkerPort,
@@ -273,6 +321,7 @@ export class GrassGroundingWorkerCoordinator {
           ? "release"
           : (this.active?.phase ?? "idle"),
       terminated: this.stopped || this.client.terminated,
+      lastAdmissionFailure: this.lastAdmissionFailure,
     });
   }
 
@@ -375,6 +424,8 @@ export class GrassGroundingWorkerCoordinator {
 
   private releaseContext(context: Context): void {
     if (context.admission) {
+      if (this.advancing !== context)
+        this.captureAdmissionFailure(context, context.admission);
       this.recordAdmission(context.admission.work);
       context.admission = null;
     }
@@ -393,6 +444,38 @@ export class GrassGroundingWorkerCoordinator {
       this.admissionMaximumSliceMs,
       work.maximumSliceMs,
     );
+  }
+
+  private captureAdmissionFailure(
+    context: Context,
+    admission: Admission,
+  ): void {
+    const state = context.state;
+    if (state.status !== "failed_budget" && state.status !== "failed_input")
+      return;
+    const owner = admission.owner;
+    const surface = owner.surface;
+    this.lastAdmissionFailure = Object.freeze({
+      schemaVersion: 1,
+      generation: context.generation,
+      mainPhase: context.lastPhase?.slice(0, 256) ?? null,
+      status: state.status,
+      reason: state.status === "failed_budget" ? state.reason : null,
+      owner: Object.freeze({
+        token: owner.token,
+        nodeId: surface.nodeId,
+        sourceRevision: surface.revision.slice(0, 256),
+        centerX: surface.centerX,
+        centerZ: surface.centerZ,
+        size: surface.size,
+        resolution: surface.resolution,
+        inputBytes: owner.inputBytes,
+        derivedBytesReserved: owner.derivedBytes,
+      }),
+      submittedWork: admission.submittedWork,
+      response: admission.response,
+      mergedWork: Object.freeze({ ...admission.work }),
+    });
   }
 
   /** @internal */
@@ -570,6 +653,8 @@ export class GrassGroundingWorkerCoordinator {
       seed: "consumed" in request ? { ...request.consumed } : zeroWork(),
       chargedDispatchMs: performance.now() - started,
     };
+    if (request.type === "prepare_surface" && context?.admission)
+      context.admission.submittedWork = Object.freeze({ ...request.consumed });
     if (context) context.phase = "waiting_worker";
   }
 
@@ -718,6 +803,8 @@ export class GrassGroundingWorkerCoordinator {
         iterator: owner.surface.copySnapshotSteps(owner.inputBytes),
         snapshot: null,
         work: zeroWork(),
+        submittedWork: null,
+        response: null,
       };
       context.phase = "preparing";
     } else {
@@ -881,6 +968,30 @@ export class GrassGroundingWorkerCoordinator {
     if (!settled) return false;
     this.pending = null;
     const context = pending.context;
+    if (pending.kind === "prepare_surface" && context?.admission) {
+      const response = settled.status === "response" ? settled.response : null;
+      const prepared = response?.type === "surface_prepared" ? response : null;
+      context.admission.response = Object.freeze({
+        status: prepared?.state.status ?? response?.type ?? settled.status,
+        reason:
+          prepared && "reason" in prepared.state
+            ? prepared.state.reason.slice(0, 256)
+            : response && "reason" in response
+              ? response.reason.slice(0, 256)
+              : settled.status === "failed_transport"
+                ? settled.reason
+                : null,
+        phase: prepared?.lastPhase?.slice(0, 256) ?? null,
+        work: prepared ? Object.freeze({ ...prepared.work }) : null,
+        workBeforeMerge: Object.freeze({ ...context.admission.work }),
+        jobId: settled.jobId,
+        generation: settled.generation,
+        dispatchCpuMs: settled.dispatchCpuMs,
+        chargedDispatchMs: pending.chargedDispatchMs,
+        postMessageCpuMs: settled.postMessageCpuMs,
+        receiveCpuMs: settled.receiveCpuMs,
+      });
+    }
     if (settled.status === "failed_transport") {
       this.failTransport(context, new Error(settled.error));
       return true;
@@ -950,6 +1061,7 @@ export class GrassGroundingWorkerCoordinator {
       this.recordAdmission(admission.work);
       context.admission = null;
       if (context.state.status !== "running") {
+        this.captureAdmissionFailure(context, admission);
         this.releaseContext(context);
         return true;
       }
@@ -962,6 +1074,7 @@ export class GrassGroundingWorkerCoordinator {
         ensure(terminal.status !== "prepared", "Invalid admission terminal");
         this.failedOwners.set(admission.owner.surface, terminal);
         this.close(context, terminal);
+        this.captureAdmissionFailure(context, admission);
       } else context.phase = "cache";
       return true;
     }
@@ -1155,6 +1268,10 @@ export class GrassGroundingWorkerCoordinator {
               this.cancelFlight(context);
               this.close(context, failure);
             }
+            // Failure-only diagnostics are retained after the original ledger
+            // includes this supervision tail. Cached failures have no admission
+            // and must not replace the original owner with zero fitting work.
+            this.captureAdmissionFailure(context, admission);
           } else
             this.recordAdmission({
               operations: context.lastSliceOperations,

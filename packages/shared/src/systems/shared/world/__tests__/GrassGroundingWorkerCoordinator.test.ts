@@ -16,6 +16,7 @@ import {
 import { RetainedTerrainSurface } from "../TerrainGridSurface";
 import {
   GrassGroundingWorkerCoordinator,
+  type GrassGroundingAdmissionFailure,
   type GrassGroundingWorkerJob,
 } from "../GrassGroundingWorkerCoordinator";
 import { gridGeometry } from "./terrain-grid.fixture";
@@ -142,6 +143,82 @@ function assertReservation(value: Session) {
   expect(receipt.cacheOwners).toBeLessThanOrEqual(
     GRASS_GROUNDING_WORKER_LIMITS.maximumCachedSurfaces,
   );
+}
+
+function assertAdmissionFailureShape(failure: GrassGroundingAdmissionFailure) {
+  const keys = (value: object, names: readonly string[]) =>
+    expect(Reflect.ownKeys(value).sort()).toEqual([...names].sort());
+  keys(failure, [
+    "schemaVersion",
+    "generation",
+    "mainPhase",
+    "status",
+    "reason",
+    "owner",
+    "submittedWork",
+    "response",
+    "mergedWork",
+  ]);
+  keys(failure.owner, [
+    "token",
+    "nodeId",
+    "sourceRevision",
+    "centerX",
+    "centerZ",
+    "size",
+    "resolution",
+    "inputBytes",
+    "derivedBytesReserved",
+  ]);
+  const workKeys = ["operations", "activeMs", "maximumSliceMs"];
+  keys(failure.mergedWork, workKeys);
+  if (failure.submittedWork) keys(failure.submittedWork, workKeys);
+  if (failure.response) {
+    keys(failure.response, [
+      "status",
+      "reason",
+      "phase",
+      "work",
+      "workBeforeMerge",
+      "jobId",
+      "generation",
+      "dispatchCpuMs",
+      "chargedDispatchMs",
+      "postMessageCpuMs",
+      "receiveCpuMs",
+    ]);
+    keys(failure.response.workBeforeMerge, workKeys);
+    if (failure.response.work) keys(failure.response.work, workKeys);
+  }
+  // Reject all retained classes, buffers, collections, arrays and accessors;
+  // the exact schema above bounds the graph, not only its serialized size.
+  let objects = 0;
+  const visit = (value: unknown): void => {
+    if (value === null) return;
+    if (typeof value === "string") {
+      expect(value.length).toBeLessThanOrEqual(256);
+      return;
+    }
+    if (typeof value === "number") {
+      expect(Number.isFinite(value)).toBe(true);
+      return;
+    }
+    expect(typeof value).toBe("object");
+    if (typeof value !== "object") throw new Error("Non-scalar diagnostic");
+    expect(++objects).toBeLessThanOrEqual(7);
+    expect(Object.getPrototypeOf(value)).toBe(Object.prototype);
+    expect(Object.isFrozen(value)).toBe(true);
+    for (const descriptor of Object.values(
+      Object.getOwnPropertyDescriptors(value),
+    )) {
+      expect("value" in descriptor).toBe(true);
+      expect(descriptor.enumerable).toBe(true);
+      expect(descriptor.writable).toBe(false);
+      expect(descriptor.configurable).toBe(false);
+      visit(descriptor.value);
+    }
+  };
+  visit(failure);
 }
 
 async function finish(value: Session, job: GrassGroundingWorkerJob) {
@@ -414,11 +491,13 @@ describe("actual retained-terrain grounding worker coordinator", () => {
       expect(result.status).toBe("cancelled");
       expect(value.port.postCalls).toBe(0);
       expect(value.coordinator.receipt.preparedOwners).toBe(0);
+      expect(value.coordinator.receipt.lastAdmissionFailure).toBeNull();
       const terminal = job.state,
         operations = job.operations;
       job.advance();
       expect(job.state).toBe(terminal);
       expect(job.operations).toBe(operations);
+      expect(value.coordinator.receipt.lastAdmissionFailure).toBeNull();
     },
   );
 
@@ -591,6 +670,115 @@ describe("actual retained-terrain grounding worker coordinator", () => {
     expect(job.operations).toBe(operations);
     expect(job.activeMs).toBe(activeMs);
     expect(value.port.postCalls).toBe(calls);
+  });
+
+  it("retains the exact real-worker admission failure through cached-owner propagation without input references", async () => {
+    const item = fixture(),
+      value = await session(),
+      { surface, geometry } = item.owned[0],
+      positions = geometry.getAttribute("position").array,
+      originalHeight = positions[1];
+    expect(value.coordinator.receipt.lastAdmissionFailure).toBeNull();
+    // Deliberately malformed unannounced source data is outside the live
+    // version lease guarantee. No methods or clocks are replaced: the actual
+    // worker must reject its actual copied geometry during strict re-admission.
+    positions[1] = NaN;
+    expect(surface.matchesGeometry(geometry)).toBe(true);
+    const { job } = start(value, item);
+    const state = await finish(value, job);
+    expect(state.status).toBe("failed_input");
+    expect(job.operations).toBe(0);
+    expect(job.activeMs).toBe(0);
+    const responses = [...value.terminal.values()];
+    expect(responses).toHaveLength(1);
+    const response = responses[0];
+    if (response.type !== "surface_prepared")
+      throw new Error("Malformed terrain never reached worker re-admission");
+    expect(response.state.status).toBe("failed_input");
+    expect(response.lastPhase).toBe("grid");
+    const failure = value.coordinator.receipt.lastAdmissionFailure;
+    if (!failure || !failure.response || !failure.submittedWork)
+      throw new Error("Missing terminal terrain-admission diagnostic");
+    assertAdmissionFailureShape(failure);
+    expect(failure.schemaVersion).toBe(1);
+    expect(failure.generation).toBe(response.generation);
+    expect(failure.mainPhase).toBe("worker_surface_dispatch");
+    expect(failure.status).toBe("failed_input");
+    expect(failure.reason).toBeNull();
+    expect(failure.owner).toEqual({
+      token: 1,
+      nodeId: surface.nodeId,
+      sourceRevision: surface.revision.slice(0, 256),
+      centerX: surface.centerX,
+      centerZ: surface.centerZ,
+      size: surface.size,
+      resolution: surface.resolution,
+      inputBytes: surface.snapshotByteLength(),
+      derivedBytesReserved: response.derivedBytesReserved,
+    });
+    expect(failure.owner).not.toBe(surface);
+    expect(failure.response.status).toBe(response.state.status);
+    expect(failure.response.reason).toBeNull();
+    expect(failure.response.phase).toBe(response.lastPhase);
+    expect(failure.response.jobId).toBe(response.jobId);
+    expect(failure.response.generation).toBe(response.generation);
+    expect(failure.response.work).toEqual(response.work);
+    expect(failure.response.work).not.toBe(response.work);
+    expect(failure.submittedWork.operations).toBeGreaterThan(0);
+    expect(response.work.operations).toBeGreaterThan(
+      failure.submittedWork.operations,
+    );
+    const before = failure.response.workBeforeMerge,
+      submitted = failure.submittedWork,
+      transport = failure.response;
+    expect(failure.mergedWork.operations).toBe(
+      response.work.operations +
+        (before.operations - submitted.operations) +
+        job.lastSliceOperations,
+    );
+    expect(failure.mergedWork.activeMs).toBe(
+      response.work.activeMs +
+        (before.activeMs - submitted.activeMs) +
+        Math.max(0, transport.dispatchCpuMs - transport.chargedDispatchMs) +
+        transport.receiveCpuMs +
+        job.lastSliceMs,
+    );
+    expect(failure.mergedWork.maximumSliceMs).toBe(
+      Math.max(
+        before.maximumSliceMs,
+        response.work.maximumSliceMs,
+        transport.dispatchCpuMs,
+        transport.receiveCpuMs,
+        job.lastSliceMs,
+      ),
+    );
+    expect(transport.dispatchCpuMs).toBeGreaterThanOrEqual(
+      transport.postMessageCpuMs,
+    );
+    expect(value.coordinator.receipt.cacheOwners).toBe(0);
+    expect(value.coordinator.receipt.reservedOwners).toBe(0);
+    expect(value.coordinator.receipt.preparedOwners).toBe(0);
+    expect(value.coordinator.receipt.terminated).toBe(false);
+    // Even after repairing the scalar, this exact failed owner must not retry
+    // or replace the original receipt with a zero-work cache-propagation row.
+    positions[1] = originalHeight;
+    const calls = value.port.postCalls,
+      serialized = JSON.stringify(failure),
+      replacement = start(value, item).job;
+    expect((await finish(value, replacement)).status).toBe("failed_input");
+    expect(replacement.lastPhase).toBe("worker_cache_admission");
+    expect(value.port.postCalls).toBe(calls);
+    expect(value.coordinator.receipt.lastAdmissionFailure).toBe(failure);
+    for (let i = 0; i < 5; i++) {
+      job.advance();
+      replacement.advance();
+      value.coordinator.advanceMaintenance();
+      expect(value.coordinator.receipt.lastAdmissionFailure).toBe(failure);
+    }
+    expect(JSON.stringify(failure)).toBe(serialized);
+    expect(value.terminal.size).toBe(1);
+    expect(value.port.postCalls).toBe(calls);
+    assertAdmissionFailureShape(failure);
   });
 
   it.each(["owners", "input-bytes"] as const)(

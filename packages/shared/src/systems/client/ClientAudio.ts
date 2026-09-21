@@ -265,7 +265,11 @@ export class ClientAudio extends System {
   }
 
   setupUnlockListener() {
+    if (this.unlockHandler || this.unlocked || this.ctx.state === "closed")
+      return;
+    let unlocking = false;
     const unlock = async () => {
+      if (this.unlockHandler !== unlock || unlocking) return;
       // Guard against closed or closing context
       if (this.ctx.state === "closed") {
         console.warn("AudioContext is closed, cannot resume");
@@ -273,34 +277,46 @@ export class ClientAudio extends System {
         return;
       }
 
+      // An ineligible resume may remain pending, blocking a later real gesture.
+      // Touch activation arrives at touchend, not touchstart.
+      if (
+        this.ctx.state !== "running" &&
+        navigator.userActivation?.hasBeenActive === false
+      )
+        return;
+      unlocking = true;
       try {
         await this.ctx.resume();
+        // Destruction or a different unlock owner invalidates this continuation.
+        if (this.unlockHandler !== unlock) return;
         if (this.ctx.state !== "running")
           throw new Error("Audio still suspended");
-        const video = document.createElement("video");
-        video.playsInline = true;
-        video.muted = true;
-        video.src = "/tiny.mp4";
-        await video.play();
-        video.pause();
-        video.remove();
+      } catch (error) {
+        if (this.unlockHandler !== unlock) return;
+        console.error("Failed to unlock audio context:", error);
+        // Keep genuine, retryable failures available to the next user gesture.
+        if (this.getContext().state === "closed") this.removeUnlockListeners();
+        return;
+      } finally {
+        unlocking = false;
+      }
+      try {
         this.completeUnlock();
       } catch (error) {
-        console.error("Failed to unlock audio context:", error);
-        this.removeUnlockListeners();
+        console.error("Audio unlocked, but a ready callback failed:", error);
       }
     };
 
     this.unlockHandler = unlock;
     document.addEventListener("click", unlock);
-    document.addEventListener("touchstart", unlock);
+    document.addEventListener("touchend", unlock);
     document.addEventListener("keydown", unlock);
   }
 
   private removeUnlockListeners() {
     if (this.unlockHandler) {
       document.removeEventListener("click", this.unlockHandler);
-      document.removeEventListener("touchstart", this.unlockHandler);
+      document.removeEventListener("touchend", this.unlockHandler);
       document.removeEventListener("keydown", this.unlockHandler);
       this.unlockHandler = null;
     }
@@ -382,7 +398,7 @@ export class ClientAudio extends System {
     this.captureDestination = null;
 
     // Close the audio context
-    this.ctx.close();
+    if (this.ctx.state !== "closed") this.ctx.close();
 
     // Clear the queue
     this.queue = [];

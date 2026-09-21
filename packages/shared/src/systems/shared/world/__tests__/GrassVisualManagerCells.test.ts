@@ -23,6 +23,7 @@ import {
   GRASS_BLADE_GROUNDING_JOB_LIMITS,
 } from "../GrassBladeGrounding";
 import { prepareGroundedGrassSteps } from "../GrassGroundingPipeline";
+import { GrassGroundingWorkerJob } from "../GrassGroundingWorkerCoordinator";
 import { gridGeometry } from "./terrain-grid.fixture";
 import {
   createCompactTerrainColorOperations,
@@ -337,6 +338,141 @@ describe("fine meadow cells borrow actual terrain owners without replacing them"
     }
   });
 
+  it("shares the original frame allowance across synchronous worker phases and stops while the actual reply is pending", async () => {
+    const port = new ActualGrassGroundingClientPort(
+      (await bundleGrassGroundingWorker()).source,
+    );
+    await port.ready();
+    const f = await fixture(undefined, undefined, 16, port);
+    try {
+      const second = f.owner["liveWorkUnits"].get("gcell_v1_14_14")!;
+      await f.queue();
+      await f.queue(0, false, second);
+      f.owner["processSettledWorkerResults"]();
+      f.owner["processSettledWorkerResults"]();
+      const entries = [...f.owner["groundingJobs"].values()],
+        coordinator = f.owner["groundingWorker"]!;
+      expect(entries).toHaveLength(2);
+      expect(
+        entries.every(({ job }) => job instanceof GrassGroundingWorkerJob),
+      ).toBe(true);
+      const operations = () =>
+        coordinator.receipt.admissionOperations +
+        entries.reduce((sum, { job }) => sum + job.operations, 0);
+      let uploads = 0;
+      const advanceFrame = () => {
+        // Read actual parked transport evidence, without consuming or replacing
+        // it. Remote work is cumulative and is not main-frame work allowance.
+        const pending = coordinator["pending"],
+          settled = coordinator["client"]["slot"]?.settled,
+          response = settled?.status === "response" ? settled.response : null,
+          remoteOperations =
+            pending &&
+            response &&
+            (response.type === "surface_prepared" || response.type === "result")
+              ? response.work.operations - pending.seed.operations
+              : 0,
+          selected =
+            coordinator.activeJob ??
+            entries.find(({ job }) => job.state.status === "running")?.job,
+          startsAtCache =
+            selected instanceof GrassGroundingWorkerJob &&
+            selected.phase === "cache",
+          before = operations(),
+          started = performance.now(),
+          uploaded = f.owner["advanceGroundingJob"](),
+          elapsed = performance.now() - started;
+        const consumedReply =
+          pending !== null && coordinator["pending"] !== pending;
+        const mainOperations =
+          operations() - before - (consumedReply ? remoteOperations : 0);
+        expect(mainOperations).toBeGreaterThanOrEqual(0);
+        expect(mainOperations).toBeLessThanOrEqual(
+          GRASS_BLADE_GROUNDING_JOB_LIMITS.maximumSliceOperations,
+        );
+        expect(uploaded).toBeLessThanOrEqual(1);
+        uploads += uploaded;
+        // A deadline is cooperative, not an elapsed-time promise. Conditional
+        // evidence avoids demanding a submillisecond win under native GC or
+        // preemption: a fast cache call must do more than cache setup alone.
+        if (
+          startsAtCache &&
+          elapsed < GRASS_BLADE_GROUNDING_JOB_LIMITS.targetSliceMs
+        )
+          expect(mainOperations).toBeGreaterThan(2);
+        const active = coordinator.activeJob;
+        if (
+          active?.state.status === "running" &&
+          active.phase !== "waiting_worker" &&
+          active.lastSliceOperations > 0 &&
+          mainOperations <
+            GRASS_BLADE_GROUNDING_JOB_LIMITS.maximumSliceOperations
+        )
+          expect(elapsed).toBeGreaterThanOrEqual(
+            GRASS_BLADE_GROUNDING_JOB_LIMITS.targetSliceMs,
+          );
+        return mainOperations;
+      };
+      const deadline = performance.now() + 10_000;
+      let pendingWaitChecked = false,
+        frames = 0;
+      while (f.owner["groundingJobs"].size && frames++ < 10_000) {
+        advanceFrame();
+        const pending = coordinator["pending"];
+        if (pending && !pendingWaitChecked) {
+          expect(coordinator["client"]["slot"]?.settled).toBeNull();
+          const held = coordinator.activeJob,
+            before = coordinator.receipt,
+            calls = port.postCalls,
+            beforeUploads = uploads;
+          // No event-loop yield: even if the real worker finishes in parallel,
+          // its actual reply cannot be delivered until this call stack exits.
+          // These are state/progress checks, not an unobservable poll-count claim.
+          for (let i = 0; i < 3; i++) {
+            expect(advanceFrame()).toBe(0);
+            expect(coordinator["pending"]).toBe(pending);
+            expect(coordinator.activeJob).toBe(held);
+            expect(coordinator.receipt.phase).toBe("waiting_worker");
+            expect(coordinator.receipt.reservedInputBytes).toBe(
+              before.reservedInputBytes,
+            );
+            expect(coordinator.receipt.reservedDerivedBytes).toBe(
+              before.reservedDerivedBytes,
+            );
+            expect(coordinator.receipt.preparedOwners).toBe(
+              before.preparedOwners,
+            );
+            expect(port.postCalls).toBe(calls);
+            expect(uploads).toBe(beforeUploads);
+            expect(entries[1].job.operations).toBe(0);
+            expect(entries[1].job.lastPhase).toBeNull();
+          }
+          pendingWaitChecked = true;
+        }
+        if (pending) {
+          if (pending.kind === "prepare_surface")
+            await port.waitFor("surface_prepared", pending.id);
+          else if (pending.kind === "start_cached")
+            await port.waitFor("result", pending.id);
+          else await port.waitFor("surfaces_released", pending.id);
+        }
+        if (performance.now() >= deadline)
+          throw new Error("Actual manager phase-chain deadline");
+      }
+      expect(frames).toBeLessThan(10_000);
+      expect(pendingWaitChecked).toBe(true);
+      expect(uploads).toBe(2);
+      expect(f.owner["chunks"].size).toBe(2);
+      expect(f.owner["completedGrounding"].size).toBe(2);
+      expect(f.owner.getProfileReceipt().grounding!.failedChunks).toBe(0);
+      expect(coordinator.activeJob).toBeNull();
+      expect(coordinator.receipt.lastAdmissionFailure).toBeNull();
+    } finally {
+      f.close();
+      await port.close();
+    }
+  });
+
   it("retires an actual in-flight worker job on terrain invalidation and never publishes its stale mesh", async () => {
     const port = new ActualGrassGroundingClientPort(
       (await bundleGrassGroundingWorker()).source,
@@ -379,6 +515,9 @@ describe("fine meadow cells borrow actual terrain owners without replacing them"
       expect(f.container.children).toHaveLength(0);
       expect(f.owner["completedGrounding"].size).toBe(0);
       expect(f.owner["groundingJobs"].size).toBe(0);
+      expect(
+        f.owner.getProfileReceipt().grounding!.worker!.lastAdmissionFailure,
+      ).toBeNull();
     } finally {
       f.close();
       await port.close();
