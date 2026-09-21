@@ -87,6 +87,8 @@ const DOCK_FENCE_CAP_HEIGHT = 0.05;
 const DOCK_FENCE_RAIL_HEIGHTS = [0.25, 0.6, 1.0];
 const DOCK_FENCE_RAIL_SIZE = 0.06;
 const DOCK_FENCE_POST_SPACING = 1.5;
+const COMPACT_DOCK_POST_CHAMFER = 0.008;
+const COMPACT_DOCK_RAIL_CHAMFER = 0.003;
 
 // ============================================================================
 // TSL Procedural Wood Functions (matching BridgeSystem quality)
@@ -956,6 +958,7 @@ export class ProceduralDocks extends System {
             rail.end.x,
             rail.end.z,
             deckY,
+            true,
           );
         }
       }
@@ -1123,9 +1126,12 @@ export class ProceduralDocks extends System {
     endX: number,
     endZ: number,
     deckY: number,
+    compact = false,
   ): void {
     const dx = endX - startX;
     const dz = endZ - startZ;
+    if (compact && dx !== 0 && dz !== 0)
+      throw new Error("Compact timber rails require a cardinal footprint");
     const sideLen = Math.sqrt(dx * dx + dz * dz);
     if (sideLen < 0.5) return;
 
@@ -1152,7 +1158,11 @@ export class ProceduralDocks extends System {
       );
       postGeo.translate(px, deckY + DOCK_FENCE_HEIGHT / 2, pz);
       postGeo.userData.dockVerticalTimber = true;
-      woodGeometries.push(postGeo);
+      woodGeometries.push(
+        compact
+          ? this.chamferCompactTimber(postGeo, COMPACT_DOCK_POST_CHAMFER)
+          : postGeo,
+      );
 
       const capSize = DOCK_FENCE_POST_SIZE + DOCK_FENCE_CAP_OVERHANG * 2;
       const capGeo = new THREE.BoxGeometry(
@@ -1165,7 +1175,11 @@ export class ProceduralDocks extends System {
         deckY + DOCK_FENCE_HEIGHT + DOCK_FENCE_CAP_HEIGHT / 2,
         pz,
       );
-      woodGeometries.push(capGeo);
+      woodGeometries.push(
+        compact
+          ? this.chamferCompactTimber(capGeo, COMPACT_DOCK_POST_CHAMFER)
+          : capGeo,
+      );
     }
 
     // Horizontal rails connecting posts
@@ -1178,21 +1192,139 @@ export class ProceduralDocks extends System {
       const pz1 = startZ + dz * t1;
 
       for (const railH of DOCK_FENCE_RAIL_HEIGHTS) {
+        const rail = this.buildOrientedRail(
+          px0,
+          pz0,
+          deckY + railH,
+          px1,
+          pz1,
+          deckY + railH,
+          DOCK_FENCE_RAIL_SIZE,
+          DOCK_FENCE_RAIL_SIZE,
+          spx,
+          spz,
+        );
         woodGeometries.push(
-          this.buildOrientedRail(
-            px0,
-            pz0,
-            deckY + railH,
-            px1,
-            pz1,
-            deckY + railH,
-            DOCK_FENCE_RAIL_SIZE,
-            DOCK_FENCE_RAIL_SIZE,
-            spx,
-            spz,
-          ),
+          compact
+            ? this.chamferCompactTimber(rail, COMPACT_DOCK_RAIL_CHAMFER)
+            : rail,
         );
       }
+    }
+  }
+
+  /** Single-cut chamfers for the cardinal compact rail assemblies only.
+   * Six broad faces, twelve edge faces and eight corner faces: 44 triangles,
+   * with flat normals per face. All points stay inside the original Float32
+   * box, retaining its exact extents and member identity. The fitted walking
+   * top, support posts and legacy generated docks never enter this path.
+   * Takes ownership of the original box, including on construction failure. */
+  private chamferCompactTimber(
+    original: THREE.BufferGeometry,
+    inset: number,
+  ): THREE.BufferGeometry {
+    try {
+      original.computeBoundingBox();
+      const box = original.boundingBox!;
+      const low = box.min.toArray();
+      const high = box.max.toArray();
+      if (
+        !Number.isFinite(inset) ||
+        inset <= 0 ||
+        low.some(
+          (value, axis) =>
+            !Number.isFinite(value) ||
+            !Number.isFinite(high[axis]) ||
+            high[axis] - value <= inset * 2,
+        )
+      )
+        throw new Error("Invalid compact timber chamfer bounds");
+      const center = box.getCenter(new THREE.Vector3());
+      const positions: number[] = [];
+      const normals: number[] = [];
+      const indices: number[] = [];
+      const point = (signs: number[], outerAxis: number) => {
+        const coordinates = signs.map((sign, axis) =>
+          Math.fround(
+            sign > 0
+              ? high[axis] - (axis === outerAxis ? 0 : inset)
+              : low[axis] + (axis === outerAxis ? 0 : inset),
+          ),
+        );
+        return new THREE.Vector3(
+          coordinates[0],
+          coordinates[1],
+          coordinates[2],
+        );
+      };
+      const face = (vertices: THREE.Vector3[]) => {
+        const normal = vertices[1]
+          .clone()
+          .sub(vertices[0])
+          .cross(vertices[2].clone().sub(vertices[0]));
+        if (normal.dot(vertices[0].clone().sub(center)) < 0) {
+          vertices.reverse();
+          normal.negate();
+        }
+        normal.normalize();
+        const start = positions.length / 3;
+        for (const vertex of vertices) {
+          positions.push(...vertex.toArray());
+          normals.push(...normal.toArray());
+        }
+        for (let i = 1; i < vertices.length - 1; i++)
+          indices.push(start, start + i, start + i + 1);
+      };
+      for (let axis = 0; axis < 3; axis++) {
+        const a = (axis + 1) % 3,
+          b = (axis + 2) % 3;
+        for (const side of [-1, 1]) {
+          face(
+            [
+              [-1, -1],
+              [1, -1],
+              [1, 1],
+              [-1, 1],
+            ].map(([sa, sb]) => {
+              const signs = [0, 0, 0];
+              signs[axis] = side;
+              signs[a] = sa;
+              signs[b] = sb;
+              return point(signs, axis);
+            }),
+          );
+        }
+        // Four chamfered edges parallel to this axis.
+        for (const sa of [-1, 1])
+          for (const sb of [-1, 1]) {
+            const signs = [0, 0, 0];
+            signs[a] = sa;
+            signs[b] = sb;
+            signs[axis] = -1;
+            const p0 = point(signs, a),
+              p1 = point(signs, b);
+            signs[axis] = 1;
+            face([p0, p1, point(signs, b), point(signs, a)]);
+          }
+      }
+      for (const x of [-1, 1])
+        for (const y of [-1, 1])
+          for (const z of [-1, 1])
+            face([0, 1, 2].map((axis) => point([x, y, z], axis)));
+      const result = new THREE.BufferGeometry();
+      result.setAttribute(
+        "position",
+        new THREE.Float32BufferAttribute(positions, 3),
+      );
+      result.setAttribute(
+        "normal",
+        new THREE.Float32BufferAttribute(normals, 3),
+      );
+      result.setIndex(indices);
+      result.userData = { ...original.userData };
+      return result;
+    } finally {
+      original.dispose();
     }
   }
 

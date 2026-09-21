@@ -1,5 +1,60 @@
 # World graphics development checkpoint — 2026-09-20
 
+## Pond world-art capture and bounded dock chamfers — 2026-09-21
+
+The private art fixture now mounts the real GameClient without StreamingMode.
+It retains real server admission, production render preferences, WebGPU and the
+original startup/grass-transition gates; it does not fabricate duel state or
+disable the real stream screen's timeout. No-money flags remain unchanged.
+
+Native46 (build23 baseline) and native47 (build24 candidate) capture all four
+matched views at 1280x720/DPR1/four samples with the same existing shadow profile.
+Native47 additionally asserts the exact served framework path and stable source
+pins, records bounded console/HTTP/transport evidence without overflow, and
+rechecks it through unmount before owned browser closure. Both statuses are
+WORLD_ART_CAPTURED_NO_STREAM_OR_PERFORMANCE_ACCEPTANCE, not launch acceptance.
+Native45's strict missing-cow failure is preserved. The user-deferred cow 404 and
+five corresponding errors remain explicit; its current invisible hitbox is NOT
+a visible placeholder. No other native47 resource/console/transport error occurs.
+
+Compact dock rail assemblies now use 44-triangle flat-face chamfered members.
+Walking tops, aprons, supporting timbers, original outer member bounds and
+legacy docks stay unchanged. Collision triangles change with the visible rails:
+actual native-PhysX tests verify barriers and intended openings, not byte parity.
+The two merged meshes retain one shared material; totals rise from 3,008 to
+4,928 triangles and 340,944 to 574,224 CPU geometry bytes. This is not a GPU
+allocation, frame-time or scalability approval. Matched eye-level review finds
+cleaner cap/post edges, but the improvement is modest; plain repetitive timber,
+the uniform brown shore collar and sparse bank composition remain art gaps.
+
+Stock and candidate dock/layout tests pass 23/23; final candidate repeat passes
+23/23. Full shared production plus both changed files: 706 roots, 2,381 source
+files, zero diagnostics and stable pins. Scoped lint/format pass. Earlier test
+typing/format failures are retained and corrected with concrete attribute checks.
+Build24 emits eight isolated bundles from 973 stable inputs.
+
+Native47's four grass gates finish in 23.407/9.998/3.991/9.286 seconds with empty
+final queues and no observed failed jobs. Its 5.3ms global maximum slice is not
+whole-frame pacing evidence. These are held-camera captures, not seamless travel.
+All fourteen fishing entities remain present: two per family. Browser art
+captures do not exercise player collision, bank transactions or concurrent fishing.
+
+- [x] Separate real world-art inspection from incompatible stream admission.
+- [x] Capture matched four-view baseline/candidate and test bounded timber edges.
+- [ ] Naturalize the basin outline and shore transitions; compose richer banks
+      and more characterful docks without obstructing fishing or circulation.
+- [ ] Prove seven families/twelve fish, fourteen simultaneous anglers plus safe
+      overflow, dry shore access at every tier, both docks and the bank route.
+- [ ] Complete live navigation, concurrent fishing/rewards, sustained native
+      performance, GPU retirement and real stream verification.
+
+Both owned browsers and runtimes27/28 are closed, their temporary databases
+removed, and protected human localhost/bundles unchanged. All LAYOUT-01–08 remain
+open. No default promotion, merge, deployment or AAA claim.
+
+Evidence: service-layout dock-chamfer-stock01/v7-03/types04/lint02/format03;
+inland pond build24, runtimes27–28 and natives45–47.
+
 ## Indexed grass edge batching and repeated native pond gates — 2026-09-21
 
 Four bounded indexed cursor steps now share a generator suspension. Geometry,

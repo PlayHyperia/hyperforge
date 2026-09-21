@@ -457,8 +457,8 @@ describe("actual procedural pond dock ownership and native collision (not render
       const position = mesh.geometry.getAttribute("position");
       const axis = mesh.geometry.getAttribute("dockTimberAxis");
       const index = mesh.geometry.getIndex()!;
-      expect(position.count).toBe([2703, 3063][recipeIndex]);
-      expect(index.count / 3).toBe([1432, 1576][recipeIndex]);
+      expect(position.count).toBe([4287, 5439][recipeIndex]);
+      expect(index.count / 3).toBe([2200, 2728][recipeIndex]);
       expect(
         Array.from(position.array.slice(0, entry.positions.length)),
       ).toEqual(Array.from(entry.positions));
@@ -547,11 +547,248 @@ describe("actual procedural pond dock ownership and native collision (not render
         recipes: 2,
         supports: checkedSupports,
         capAndShaftVertices: 768,
-        geometryCountDelta: 0,
+        supportGeometryCountDelta: 0,
         retainedTop: "exact position/index prefix",
         nativeVisualAcceptance: false,
       }),
     );
+  });
+
+  it("chamfers only compact exposed timber into closed flat-faced solids inside the exact original member bounds", async () => {
+    const { world, terrain, owner } = await fixture();
+    const entries = records(terrain!);
+    await owner.start();
+    let checkedMembers = 0;
+    const census: { vertices: number; triangles: number; bytes: number }[] = [];
+    for (const [recipeIndex, entry] of entries.entries()) {
+      const original: THREE.BufferGeometry[] = [];
+      const chamfered: THREE.BufferGeometry[] = [];
+      try {
+        for (const rail of entry.rails) {
+          const args = [
+            rail.start.x,
+            rail.start.z,
+            rail.end.x,
+            rail.end.z,
+            entry.deckY,
+          ] as const;
+          owner["buildFenceSide"](original, ...args);
+          owner["buildFenceSide"](chamfered, ...args, true);
+        }
+        expect(chamfered).toHaveLength([24, 36][recipeIndex]);
+        expect(original).toHaveLength(chamfered.length);
+        const installed = world.stage.scene.getObjectByName(
+          `PondDock_${entry.descriptor.id}`,
+        );
+        if (
+          !(installed instanceof THREE.Mesh) ||
+          !(installed.geometry instanceof THREE.BufferGeometry) ||
+          Array.isArray(installed.material)
+        )
+          throw new Error("Expected one actual compact dock mesh/material");
+        const installedPosition = installed.geometry.getAttribute("position");
+        const installedNormal = installed.geometry.getAttribute("normal");
+        const installedIndices = installed.geometry.getIndex()!;
+        // Deck, stringers, joists and support shafts/caps precede the rails.
+        let installedVertex = 1983;
+        for (const [memberIndex, geometry] of chamfered.entries()) {
+          const before = original[memberIndex];
+          before.computeBoundingBox();
+          geometry.computeBoundingBox();
+          expect(geometry.boundingBox).toEqual(before.boundingBox);
+          expect(geometry.userData).toEqual(before.userData);
+          const p = geometry.getAttribute("position");
+          const n = geometry.getAttribute("normal");
+          const ix = geometry.getIndex()!;
+          expect(p.count).toBe(96);
+          expect(ix.count / 3).toBe(44);
+          expect(Array.from(p.array).every(Number.isFinite)).toBe(true);
+          expect(Array.from(n.array).every(Number.isFinite)).toBe(true);
+          const center = geometry.boundingBox!.getCenter(new THREE.Vector3());
+          const edges = new Map<
+            string,
+            { count: number; orientation: number }
+          >();
+          let volume = 0;
+          for (let i = 0; i < p.count; i++) {
+            const vertex = new THREE.Vector3().fromBufferAttribute(p, i);
+            const normal = new THREE.Vector3().fromBufferAttribute(n, i);
+            expect(before.boundingBox!.containsPoint(vertex)).toBe(true);
+            expect(Math.abs(normal.length() - 1)).toBeLessThan(1e-7);
+            expect(
+              new THREE.Vector3().fromBufferAttribute(
+                installedPosition,
+                installedVertex + i,
+              ),
+            ).toEqual(vertex);
+            expect(
+              new THREE.Vector3().fromBufferAttribute(
+                installedNormal,
+                installedVertex + i,
+              ),
+            ).toEqual(normal);
+          }
+          for (let i = 0; i < ix.count; i += 3) {
+            const ids = [ix.getX(i), ix.getX(i + 1), ix.getX(i + 2)];
+            const vertices = ids.map((id) =>
+              new THREE.Vector3().fromBufferAttribute(p, id),
+            );
+            const cross = vertices[1]
+              .clone()
+              .sub(vertices[0])
+              .cross(vertices[2].clone().sub(vertices[0]));
+            expect(cross.lengthSq()).toBeGreaterThan(1e-12);
+            expect(cross.dot(vertices[0].clone().sub(center))).toBeGreaterThan(
+              0,
+            );
+            const normal = cross.clone().normalize();
+            for (const id of ids)
+              expect(
+                normal.dot(new THREE.Vector3().fromBufferAttribute(n, id)),
+              ).toBeGreaterThan(1 - 1e-7);
+            volume +=
+              vertices[0]
+                .clone()
+                .sub(center)
+                .dot(
+                  vertices[1]
+                    .clone()
+                    .sub(center)
+                    .cross(vertices[2].clone().sub(center)),
+                ) / 6;
+            const keys = vertices.map((v) => `${v.x},${v.y},${v.z}`);
+            for (let edge = 0; edge < 3; edge++) {
+              const a = keys[edge],
+                b = keys[(edge + 1) % 3];
+              const key = a < b ? `${a}|${b}` : `${b}|${a}`;
+              const value = edges.get(key) ?? { count: 0, orientation: 0 };
+              value.count++;
+              value.orientation += a < b ? 1 : -1;
+              edges.set(key, value);
+            }
+          }
+          expect(
+            [...edges.values()].every(
+              ({ count, orientation }) => count === 2 && orientation === 0,
+            ),
+          ).toBe(true);
+          const size = geometry.boundingBox!.getSize(new THREE.Vector3());
+          const boxVolume = size.x * size.y * size.z;
+          expect(volume).toBeGreaterThan(boxVolume * 0.9);
+          expect(volume).toBeLessThan(boxVolume);
+          installedVertex += p.count;
+          checkedMembers++;
+        }
+        expect(installedVertex).toBe(installedPosition.count);
+        expect(installed.geometry.groups).toHaveLength(0);
+        census.push({
+          vertices: installedPosition.count,
+          triangles: installedIndices.count / 3,
+          bytes:
+            Object.keys(installed.geometry.attributes).reduce((sum, name) => {
+              const attribute = installed.geometry.getAttribute(name);
+              if (!(attribute instanceof THREE.BufferAttribute)) {
+                throw new Error(`Unexpected compact dock attribute: ${name}`);
+              }
+              return sum + attribute.array.byteLength;
+            }, 0) + installedIndices.array.byteLength,
+        });
+      } finally {
+        for (const geometry of [...original, ...chamfered]) geometry.dispose();
+      }
+    }
+    expect(checkedMembers).toBe(60);
+    expect(census.map((row) => row.vertices)).toEqual([4287, 5439]);
+    expect(census.map((row) => row.triangles)).toEqual([2200, 2728]);
+    console.info(
+      "actual-pond-dock-chamfers",
+      JSON.stringify({
+        census,
+        exposedMembers: checkedMembers,
+        addedTriangles: 1920,
+        materialCount: 1,
+        meshCount: 2,
+        nativeVisualAcceptance: false,
+        collisionGeometryChanged: true,
+      }),
+    );
+  });
+
+  it("retains actual rendered/native rail barriers and the open landing end and jetty casting bay", async () => {
+    const { world, terrain, owner } = await fixture();
+    const entries = records(terrain!);
+    await owner.start();
+    let barrierRays = 0,
+      openRays = 0;
+    for (const entry of entries) {
+      const mesh = world.stage.scene.getObjectByName(
+        `PondDock_${entry.descriptor.id}`,
+      );
+      if (!(mesh instanceof THREE.Mesh)) throw new Error("Missing dock mesh");
+      mesh.updateMatrixWorld(true);
+      const direction = getCompactPondDockDirection(entry.descriptor.rotation);
+      for (const rail of entry.rails) {
+        const x = rail.start.x + (rail.end.x - rail.start.x) * 0.37;
+        const z = rail.start.z + (rail.end.z - rail.start.z) * 0.37;
+        const across =
+          (x - entry.descriptor.x) * -direction.z +
+          (z - entry.descriptor.z) * direction.x;
+        const outward = new THREE.Vector3(
+          -direction.z,
+          0,
+          direction.x,
+        ).multiplyScalar(Math.sign(across));
+        for (const height of [0.25, 0.6, 1]) {
+          const origin = new THREE.Vector3(
+            x,
+            entry.deckY + height,
+            z,
+          ).addScaledVector(outward, -0.5);
+          const hits = new THREE.Raycaster(
+            origin,
+            outward,
+            0,
+            1,
+          ).intersectObject(mesh, false);
+          expect(hits.length).toBeGreaterThan(0);
+          expect(Math.abs(hits[0].distance - 0.47)).toBeLessThan(1e-4);
+          const physical = world.physics.raycast(origin, outward, 1);
+          expect(physical).not.toBeNull();
+          expect(physical!.point.distanceTo(hits[0].point)).toBeLessThan(1e-4);
+          barrierRays++;
+        }
+      }
+      const probes = [
+        { forward: 5.5, across: 0, dx: direction.x, dz: direction.z },
+        {
+          forward: entry.descriptor.recipeId === "haven-reed-jetty-v1" ? 3 : 5,
+          across: 0.75,
+          dx: -direction.z,
+          dz: direction.x,
+        },
+      ];
+      for (const probe of probes) {
+        const p = point(entry, probe.forward, probe.across);
+        const direction = new THREE.Vector3(probe.dx, 0, probe.dz);
+        for (const height of [0.25, 0.6, 1]) {
+          const origin = new THREE.Vector3(p.x, entry.deckY + height, p.z);
+          expect(
+            new THREE.Raycaster(origin, direction, 0, 1).intersectObject(
+              mesh,
+              false,
+            ),
+          ).toHaveLength(0);
+          expect(world.physics.raycast(origin, direction, 1)).toBeNull();
+          openRays++;
+        }
+      }
+      for (const wall of entry.walls)
+        expect(world.collision.getFlags(wall.x, wall.z) & wall.flags).toBe(
+          wall.flags,
+        );
+    }
+    expect(barrierRays).toBe(15);
+    expect(openRays).toBe(12);
   });
 
   it("closes every fitted timber plank below the byte-exact retained top without changing its walking surface", async () => {
