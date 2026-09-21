@@ -59,6 +59,8 @@ export type CompactPondBankComposition<T> = Readonly<{
   soilToRock: T;
   /** Authored mineral substrate consumes soil after emergence, never grass. */
   mineralSoilToRock?: T;
+  /** Cutbank shoulder appearance consumes only the final remaining soil. */
+  substrateSoilToRock?: T;
   grassToSoil: T;
   grassToRock: T;
   grassShade: T;
@@ -292,6 +294,13 @@ export function createCompactTerrainColorOperations() {
     mineralPatchStart: 0.35,
     mineralPatchEnd: 0.65,
     mineralPatchMinimum: 0.35,
+    substrateMax: 0.72,
+    substratePatchMinimum: 0.65,
+    substrateRiseStart: -1.2,
+    substrateRiseEnd: -0.25,
+    substrateFadeStart: 0.65,
+    substrateFadeEnd: 1.7,
+    substrateHeightNoise: 0.08,
   });
   // One native-transect-calibrated trial; these are appearance thresholds in
   // slope=1-abs(normal.y), not collision or navigation slope limits.
@@ -1127,10 +1136,48 @@ export function createCompactTerrainColorOperations() {
           m.mul(turf, m.constant(c.turfShade)),
         ),
       );
+      // Keep the existing sheltered silt distinct from an exposed mineral
+      // shoulder. Reuse the admitted cutbank span and existing filtered noise;
+      // this is not a ring, another height solver, or a vegetation-support mask.
+      let substrateSoilToRock: T | undefined;
+      if (f.sectors.some((sector) => sector.surface === "cutbank")) {
+        const noise = m.clamp(input.distortNoise, 0, 1);
+        const height = m.sub(
+          m.sub(input.height, m.constant(f.pond.surfaceY)),
+          m.mul(
+            m.sub(noise, m.constant(0.5)),
+            m.constant(2 * c.substrateHeightNoise),
+          ),
+        );
+        const band = m.mul(
+          m.smoothstep(
+            m.constant(c.substrateRiseStart),
+            m.constant(c.substrateRiseEnd),
+            height,
+          ),
+          m.sub(
+            one,
+            m.smoothstep(
+              m.constant(c.substrateFadeStart),
+              m.constant(c.substrateFadeEnd),
+              height,
+            ),
+          ),
+        );
+        const variation = m.add(
+          m.constant(c.substratePatchMinimum),
+          m.mul(m.constant(1 - c.substratePatchMinimum), noise),
+        );
+        substrateSoilToRock = m.mul(
+          m.mul(m.mul(coverDomain, cut), band),
+          m.mul(m.constant(c.substrateMax), variation),
+        );
+      }
       return {
         soilToGrass: covered,
         soilToRock: soilRock,
         ...(mineralSoilToRock !== undefined ? { mineralSoilToRock } : {}),
+        ...(substrateSoilToRock !== undefined ? { substrateSoilToRock } : {}),
         grassToSoil: m.sub(exposed, rock),
         grassToRock: rock,
         grassShade: m.sub(one, shade),
@@ -1166,6 +1213,20 @@ export function createCompactTerrainColorOperations() {
       if (influence === 0) return capped;
       if (influence === 1) return selected;
       return capped + (selected - capped) * influence;
+    },
+    /** Exposed inland mineral substrate must not be diluted back into coastal
+     * soil inside the rock layer. Reuse the same local appearance mask; neither
+     * outer coverage weights nor wetness/vegetation ownership change here. */
+    bankRockSoil<T>(
+      soil: T,
+      field: CompactPondBankComposition<T> | undefined,
+      m: CompactCoastDistributionMath<T>,
+    ): T {
+      if (field?.substrateSoilToRock === undefined) return soil;
+      return m.mul(
+        soil,
+        m.sub(m.constant(1), m.clamp(field.substrateSoilToRock, 0, 1)),
+      );
     },
     bankCompositionWeights<T>(
       weights: readonly [T, T, T, T],
@@ -1208,18 +1269,33 @@ export function createCompactTerrainColorOperations() {
         m.add(m.add(weights[2], toRock), soilRock),
         weights[3],
       ];
-      if (field.mineralSoilToRock === undefined) return established;
       // Resolve emergence first. Otherwise overlapping mineral exposure would
       // reduce its grass/soil budget and silently change vegetation support.
-      const mineral = m.mul(
-        established[1],
-        m.clamp(field.mineralSoilToRock, 0, 1),
+      let result = established;
+      if (field.mineralSoilToRock !== undefined) {
+        const mineral = m.mul(
+          established[1],
+          m.clamp(field.mineralSoilToRock, 0, 1),
+        );
+        result = [
+          established[0],
+          m.sub(established[1], mineral),
+          m.add(established[2], mineral),
+          established[3],
+        ];
+      }
+      if (field.substrateSoilToRock === undefined) return result;
+      // Appearance follows every establishment/mineral transfer. Keeping the
+      // grass/coastal references exact also preserves CPU placement eligibility.
+      const substrate = m.mul(
+        result[1],
+        m.clamp(field.substrateSoilToRock, 0, 1),
       );
       return [
-        established[0],
-        m.sub(established[1], mineral),
-        m.add(established[2], mineral),
-        established[3],
+        result[0],
+        m.sub(result[1], substrate),
+        m.add(result[2], substrate),
+        result[3],
       ];
     },
     /** Boundary admission returns immutable canonical data, including after
@@ -2636,6 +2712,7 @@ export function createCompactTerrainColorOperations() {
             (bankComposition.soilToGrass !== 0 ||
               bankComposition.soilToRock !== 0 ||
               (bankComposition.mineralSoilToRock ?? 0) !== 0 ||
+              (bankComposition.substrateSoilToRock ?? 0) !== 0 ||
               bankComposition.grassToSoil !== 0 ||
               bankComposition.grassToRock !== 0 ||
               bankComposition.groundCoverWeight !== 0))
@@ -2691,9 +2768,14 @@ export function createCompactTerrainColorOperations() {
             );
         }
       }
+      const rockSoil = operations.bankRockSoil(
+        coast.soil,
+        bankComposition ?? undefined,
+        distributionMath,
+      );
       const result = palette.grass.map((grass, channel) => {
         const rock =
-          math.mix(palette.rock[channel], palette.dirt[channel], coast.soil) *
+          math.mix(palette.rock[channel], palette.dirt[channel], rockSoil) *
           math.mix(1, composition.coastWetAlbedo, coast.wetness);
         if (distributedWeights) {
           const grassDiffuse =

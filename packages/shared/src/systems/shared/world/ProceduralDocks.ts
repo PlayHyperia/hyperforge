@@ -170,18 +170,27 @@ const compactDockTimberField = Fn(() => {
   const sectionU = mix(coord.y, coord.y.sub(board.mul(0.5)).sub(0.25), plank);
   const broad = tslNoise2D(
     vec2(coord.x.mul(0.32), sectionU.mul(2.4)).add(vec2(seed.mul(7.3), seed)),
-  );
+  ).toVar("compactDockBroadWeathering");
   // Different cuts through the same kind of growth volume, not a regularly
   // tiled cross-grain pattern. The pith is below the plank; longitudinal warp
   // changes slowly, so growth lines remain aligned with the actual timber.
-  const radius = vec2(
-    sectionU.add(variation.sub(0.5).mul(0.7)),
-    coord.z.add(fract(variation.mul(7.13)).mul(0.25).add(0.12)),
-  )
+  // Reuse the broad field to drift an eccentric, elliptical section along the
+  // member. Warping before length changes the shape of the growth lines, not
+  // just their spacing; the long axis stays slower than the cross section.
+  const warp = broad.sub(0.5);
+  const section = vec2(
+    sectionU
+      .add(variation.sub(0.5).mul(0.7))
+      .add(warp.mul(0.07))
+      .mul(mix(0.88, 1.12, variation)),
+    coord.z
+      .add(fract(variation.mul(7.13)).mul(0.25).add(0.12))
+      .add(warp.mul(0.035))
+      .mul(mix(0.84, 1.18, fract(variation.mul(5.17)))),
+  ).toVar("compactDockGrowthSection");
+  const growthPhase = section
     .length()
-    .add(broad.sub(0.5).mul(0.012));
-  const growthPhase = radius
-    .mul(mix(330, 570, fract(variation.mul(3.71))))
+    .mul(mix(180, 310, fract(variation.mul(3.71))))
     .add(seed.mul(Math.PI * 2))
     .toVar("compactDockGrowthPhase");
   const growth = sin(growthPhase).mul(
@@ -196,9 +205,13 @@ const compactDockTimberField = Fn(() => {
       smoothstep(0.001, coord.y.fwidth().max(0.002).add(0.003), jointDistance),
     )
     .mul(plank);
-  const tone = float(0.89)
-    .add(variation.mul(0.16))
-    .add(broad.sub(0.5).mul(0.09))
+  // Board tint and tone multiply. Keep their combined range restrained so
+  // joints separate boards without turning the landing into alternating bands.
+  const boardTone = float(0.95)
+    .add(variation.mul(0.04))
+    .toVar("compactDockBoardTone");
+  const tone = boardTone
+    .add(warp.mul(0.07))
     .add(grain)
     .sub(end.mul(0.065))
     .sub(joint.mul(0.1));
@@ -1835,11 +1848,12 @@ export class ProceduralDocks extends System {
       // Dark gap between planks
       const gapColor = vec3(0.06, 0.04, 0.02);
       const historical = mix(gapColor, woodColor.mul(edgeDark), isPlank);
-      const compact = mix(
-        vec3(0.245, 0.187, 0.128),
-        vec3(0.28, 0.226, 0.163),
+      const palette = mix(
+        vec3(0.2565, 0.2005, 0.1405),
+        vec3(0.2685, 0.2125, 0.1505),
         timber.z,
-      ).mul(timber.x);
+      ).toVar("compactDockBoardPalette");
+      const compact = palette.mul(timber.x);
       return vec4(mix(historical, compact, timber.w), 1.0);
     })();
 

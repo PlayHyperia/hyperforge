@@ -77,6 +77,7 @@ import {
   createCompactPondRockContact,
   createCompactPondContactSoil,
   applyCompactPondWetness,
+  applyCompactPondRockSoil,
   applyCompactMeadowTint,
   applyCompactFineGrassSubstrateContrast,
   applyCompactGrassColorGrade,
@@ -1817,6 +1818,12 @@ export function createTerrainMaterial(
           macroField,
         )
       : null;
+  const coastRockSurface = coastSurface
+    ? {
+        ...coastSurface,
+        soil: applyCompactPondRockSoil(coastSurface.soil, pondBankComposition),
+      }
+    : null;
   const coastalGround =
     compactLayers && macroField?.coastalMeadow && coastSurface
       ? {
@@ -1837,11 +1844,11 @@ export function createTerrainMaterial(
           ),
         }
       : undefined;
-  if (compactLayers && coastSurface) {
+  if (compactLayers && coastRockSurface) {
     compactLayers.rock = applyCompactCoastRock(
       compactLayers.rock,
       compactLayers.dirt,
-      coastSurface,
+      coastRockSurface,
     );
   }
   const compactWeights = compactLayers
@@ -2212,7 +2219,7 @@ export function createTerrainMaterial(
       pondWetness: pondSurface.wetness,
       geometricCliff: compactWeights.geometricCliff,
       effectiveCliff: compactWeights.cliff,
-      coastSoil: coastSurface?.soil ?? float(0),
+      coastSoil: coastRockSurface?.soil ?? float(0),
     });
     return diagnosticOutputs;
   };

@@ -803,13 +803,30 @@ describe.each(cases)("$name", (scenario) => {
                 ? pipeline.state.result.receipt
                 : null,
             scope:
-              "Actual CPU full-cell continuation. Active time is cumulative slice elapsed time, not native browser qualification; failed jobs do not expose a processed-clump fraction.",
-            outputHash: createHash("sha256")
+              "Actual CPU full-cell continuation. Active time is cumulative slice elapsed time, not native browser qualification; failed jobs do not expose a processed-clump fraction. coreResultOutputHash refers to the earlier untimed core drain; completedPipelineOutputHash is null unless the timed pipeline is ready.",
+            coreResultOutputHash: createHash("sha256")
               .update(Buffer.from(result.sourceIndices.buffer))
               .update(Buffer.from(result.rootDeltas.buffer))
               .update(Buffer.from(result.bladeVisibility!.buffer))
               .update(JSON.stringify(result.sweptBounds))
               .digest("hex"),
+            completedPipelineOutputHash:
+              pipeline.state.status === "ready"
+                ? createHash("sha256")
+                    .update(
+                      Buffer.from(pipeline.state.result.sourceIndices.buffer),
+                    )
+                    .update(
+                      Buffer.from(pipeline.state.result.rootDeltas.buffer),
+                    )
+                    .update(
+                      Buffer.from(
+                        pipeline.state.result.bladeVisibility!.buffer,
+                      ),
+                    )
+                    .update(JSON.stringify(pipeline.state.result.sweptBounds))
+                    .digest("hex")
+                : null,
           }),
         );
         expect(pipeline.state.status).toBe("ready");

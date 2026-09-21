@@ -55,6 +55,7 @@ import {
   createCompactPondRockContact,
   applyCompactPondRockContactWeights,
   applyCompactPondWetness,
+  applyCompactPondRockSoil,
   applyCompactMeadowTint,
   applyCompactFineGrassSubstrateContrast,
   applyCompactGrassColorGrade,
@@ -1055,8 +1056,9 @@ describe("composition-v1 shared actual bank material graph", () => {
           "grassToSoil",
           "grassToRock",
           "grassShade",
+          "substrateSoilToRock",
         ] as const)
-          expect(vectorValue(actual[key])[0]).toBeCloseTo(expected[key], 12);
+          expect(vectorValue(actual[key]!)[0]).toBeCloseTo(expected[key]!, 12);
       }
     for (const p of [
       input(-2.2, 8, 27.8),
@@ -1075,6 +1077,105 @@ describe("composition-v1 shared actual bank material graph", () => {
           ),
         ),
       ).toEqual([0, 0, 0, 1]);
+    }
+  });
+  it("shares localized nested-soil retention between CPU and actual TSL without changing coastal wetness", () => {
+    const source = float(0.6);
+    expect(applyCompactPondRockSoil(source, undefined)).toBe(source);
+    expect(ops.bankRockSoil(0.6, undefined, numeric)).toBe(0.6);
+    const neutral = createCompactPondBankComposition({
+      ...nodeInput(input()),
+      field: null,
+    });
+    expect(applyCompactPondRockSoil(source, neutral)).toBe(source);
+    for (const angle of [-1.7, -2.2, 0.7])
+      for (const height of [26.4, 27.6, 27.8, 28.5, 29.6])
+        for (const road of [0, 0.4, 0.8, 1]) {
+          const p = input(angle, 8, height, 0.04, road);
+          const cpu = ops.bankComposition(p, numeric);
+          const nodes = createCompactPondBankComposition(nodeInput(p));
+          for (const soil of [0, 0.3, 1]) {
+            const expected =
+              soil *
+              (1 - Math.max(0, Math.min(1, cpu.substrateSoilToRock ?? 0)));
+            const actual = applyCompactPondRockSoil(float(soil), nodes);
+            expect(ops.bankRockSoil(soil, cpu, numeric)).toBe(expected);
+            expect(vectorValue(actual)[0]).toBeCloseTo(expected, 13);
+            expect(expected).toBeGreaterThanOrEqual(0);
+            expect(expected).toBeLessThanOrEqual(soil);
+            if (
+              road >= 0.8 ||
+              angle === 0.7 ||
+              height === 26.4 ||
+              height === 29.6
+            )
+              expect(expected).toBe(soil);
+          }
+        }
+  });
+  it("uses retained nested soil coherently for all four rock PBR channels before unchanged wetness", () => {
+    const rock: CompactTerrainLayer = {
+      albedo: vec3(0.3, 0.2, 0.12),
+      roughness: float(0.9),
+      ao: float(0.7),
+      worldNormal: vec3(0, 1, 0),
+    };
+    const soil: CompactTerrainLayer = {
+      albedo: vec3(0.2, 0.12, 0.05),
+      roughness: float(0.7),
+      ao: float(0.9),
+      worldNormal: vec3(0.6, 0.8, 0),
+    };
+    const p = input(-1.7, 8, 27.8, 0.04);
+    const field = createCompactPondBankComposition(nodeInput(p));
+    const mask = ops.bankComposition(p, numeric).substrateSoilToRock!;
+    expect(mask).toBeGreaterThan(0);
+    const retained = applyCompactPondRockSoil(float(0.6), field);
+    const fraction = 0.6 * (1 - mask);
+    for (const wet of [0, 0.5, 1]) {
+      const wetness = float(wet);
+      const layer = applyCompactCoastRock(rock, soil, {
+        soil: retained,
+        wetness,
+      });
+      const attenuation = 1 + (ops.getComposition().coastWetAlbedo - 1) * wet;
+      const albedo = [
+        0.3 + (0.2 - 0.3) * fraction,
+        0.2 + (0.12 - 0.2) * fraction,
+        0.12 + (0.05 - 0.12) * fraction,
+      ].map((v) => v * attenuation);
+      vectorValue(layer.albedo).forEach((value, i) =>
+        expect(value).toBeCloseTo(albedo[i], 13),
+      );
+      const dryRoughness = 0.9 + (0.7 - 0.9) * fraction;
+      expect(vectorValue(layer.roughness)[0]).toBeCloseTo(
+        dryRoughness +
+          (Math.min(dryRoughness, ops.getComposition().coastWetRoughness) -
+            dryRoughness) *
+            wet,
+        13,
+      );
+      expect(vectorValue(layer.ao)[0]).toBeCloseTo(0.7 + 0.2 * fraction, 13);
+      const normal = new THREE.Vector3(0.6 * fraction, 1 - 0.2 * fraction, 0)
+        .normalize()
+        .toArray();
+      vectorValue(layer.worldNormal).forEach((value, i) =>
+        expect(value).toBeCloseTo(normal[i], 13),
+      );
+      for (const node of [
+        layer.albedo,
+        layer.roughness,
+        layer.ao,
+        layer.worldNormal,
+      ]) {
+        expect(graph(node).has(retained)).toBe(true);
+        expect(
+          [...graph(node)].some(
+            (n) => Reflect.get(n, "isTextureNode") === true,
+          ),
+        ).toBe(false);
+      }
+      expect(graph(retained).has(wetness)).toBe(false);
     }
   });
   it("conserves original material budgets without negative layers or coast transfer including tiny budgets", () => {
@@ -1198,7 +1299,10 @@ describe("composition-v1 shared actual bank material graph", () => {
           const values = vectorValue(
             applyCompactPondBankCompositionWeights(vec4(...weights), actual),
           );
-          const transfer = weights[1] * expected.soilToRock;
+          const faceTransfer = weights[1] * expected.soilToRock;
+          const transfer =
+            faceTransfer +
+            (weights[1] - faceTransfer) * (expected.substrateSoilToRock ?? 0);
           expect(values[0]).toBe(weights[0]);
           expect(values[3]).toBe(weights[3]);
           expect(values[1]).toBeCloseTo(weights[1] - transfer, 15);

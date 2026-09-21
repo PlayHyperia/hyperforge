@@ -1747,6 +1747,65 @@ against build26 and all five cells' arrays, including restored ground colors;
 retained-lint01 and retained-format01 pass. No AAA, streaming, live fishing-capacity, sustained
 performance, launch or default acceptance is claimed.
 
+### Paired shore and timber candidate — loading gates still open — 2026-09-21
+
+A new source candidate pairs the earlier localized remaining-soil transfer with
+attenuation of dirt nested inside the rock layer. CPU ground color and all four
+PBR channels share the same bounded mask; original coastal-ground/wetness and
+grass support remain unchanged. This supersedes the archived transfer-only
+experiment, but is NOT visually accepted. Actual terrain sampling showed why
+the extra effect is limited: flatter flanks contain nested dirt, while the
+steeper central face already has none; the existing rock is itself warm brown.
+The native59 diagnostic overview still reads as a broad brown shoreline.
+Do not repeat small shader-strength adjustments as the next art strategy.
+
+Dock timber now reuses existing broad noise to vary member-local growth rings
+and narrows combined board-color contrast. Geometry, collision, draw/material
+counts and texture lookups are unchanged. This is an unqualified source
+candidate, not a claim that the docks now meet the art bar. References:
+[Three wood material source](https://raw.githubusercontent.com/mrdoob/three.js/r186/examples/jsm/materials/WoodNodeMaterial.js)
+and [Three procedural terrain](https://threejs.org/examples/webgpu_tsl_procedural_terrain.html).
+No package update or expensive reference shader was copied wholesale.
+
+Verification: 181 material/macro/substrate tests and 19 actual dock geometry,
+physics, routing and lifecycle tests pass; full shared plus all nine explicit
+changed source/test files typecheck with zero diagnostics. The first pond run
+passed three cases but failed southbank/cutbank at the unchanged 250ms active
+limit (250.442/256.198ms, cutbank maximum slice 80.027ms). These failures remain.
+A misleading aggregate hash label was corrected: the earlier core result and
+completed timed result are now separate; incomplete timed jobs have no output
+hash. A new run to validate that report passed five cases (three historical
+overlay skips), with identical operations and all geometry/support arrays;
+only raw/projected/final cutbank ground colors changed. This later pass is not
+proof of loading reliability and does not erase the earlier failures.
+
+Fresh fixed native pair: baseline native58/build26 failed the original 90s
+startup with 107/122 grass cells ready. Candidate native59/build28 loaded in
+88.449s, then failed the original 30s overview transition. Zero accepted review
+views were produced by this pair. The bounded post-failure receipt proves the
+candidate mask in actual WGSL and seven texture-role bindings/33 static fragment
+sample sites, not exact pond pixels, dynamic GPU cost or baseline sampler parity.
+Both failures show unfinished grass queues rather than failed-budget jobs.
+Substantial concurrent host activity was observed; causal attribution is open.
+Quality settings, deadlines, density, resolution and work limits are unchanged.
+
+- [x] Preserve exact CPU/TSL support contracts and distinguish failed-job evidence.
+- [ ] Resolve grass startup/transition reliability before more visual complexity.
+- [ ] Fully review the timber candidate at both dock eye-level views and in motion.
+- [ ] Recompose existing northwest bank plants into a visible asymmetric drift;
+      retain model/count/scale budgets and prove root, dock and fishing clearances.
+- [ ] Keep the whole-shore art review, all-tier catches, fourteen anglers plus
+      seven overflow slots, dry routes, bank and supplier journeys, and LAYOUT-01–08 OPEN.
+
+Evidence: service-layout pond-rock-treatment material01, pond01, receipts01,
+types02, checkpoint01, final-lint01/final-format01 and host-load01; dock-timber-
+polish-tests03; inland pond build28, native58/59 and runtime39/40. Both owned
+browsers closed, GameClient unmounted with zero observed destroy errors, and
+both temporary databases were removed. Human localhost:3333 and its persistent
+database remain unchanged; all 145 compiled artifacts/build inputs are intact.
+Source is retained only as a reviewable work-branch candidate: no default,
+streaming, sustained performance, AAA or launch acceptance.
+
 ### Inland fishing integration — candidate only
 
 The detached candidate now requests 14 real fishing entities, two for each of

@@ -1441,17 +1441,25 @@ describe("composition-v1 geometry-owned bank families", () => {
     );
     expect(left.soilToGrass).toBeCloseTo(right.soilToGrass, 6);
   });
-  it("preserves exact water/road/outer/unmapped domains and conserved nonnegative material budgets", () => {
+  it("preserves wet vegetation bounds, neutral road/outer domains and conserved nonnegative material budgets", () => {
     const field = ops.pondBankField(zone(), water)!;
     for (const p of [
       { ...point(), x: 343, z: 302 },
-      { ...point(), height: 27.8 },
       { ...point(), roadInfluence: 0.8 },
       point(-2.2, 10.5),
       point(-2.2, 11),
       point(0.7, 8),
     ])
-      expect(ops.bankComposition({ ...p, field }, bankMath)).toEqual(neutral);
+      expect(ops.bankComposition({ ...p, field }, bankMath)).toEqual({
+        ...neutral,
+        substrateSoilToRock: 0,
+      });
+    const { substrateSoilToRock, ...wetVegetation } = ops.bankComposition(
+      { ...point(), height: 27.8, field },
+      bankMath,
+    );
+    expect(wetVegetation).toEqual(neutral);
+    expect(substrateSoilToRock).toBeGreaterThan(0);
     for (const angle of [-2.2, -1.7, 3.05])
       for (const slope of [0, 0.04, 0.12, 0.25, 0.6]) {
         const composition = ops.bankComposition(
@@ -1565,7 +1573,7 @@ describe("composition-v1 geometry-owned bank families", () => {
           }
           expect(
             ops.bankComposition({ ...p, field, roadInfluence: 0.8 }, bankMath),
-          ).toEqual(neutral);
+          ).toEqual({ ...neutral, substrateSoilToRock: 0 });
         }
     const wet = point(-1.7, 8, 27.8, 0.32);
     const single = ops.bankComposition({ ...wet, field }, bankMath);
@@ -1581,7 +1589,7 @@ describe("composition-v1 geometry-owned bank families", () => {
     for (const angle of [-2.31, -1.09, 0.7])
       expect(
         ops.bankComposition({ ...point(angle, 8, 27.8, 0.6), field }, bankMath),
-      ).toEqual(neutral);
+      ).toEqual({ ...neutral, substrateSoilToRock: 0 });
   });
   it("moves only original soil remaining after cover, never newly exposed grass or coastal soil", () => {
     for (const soilToGrass of [0, 0.4, 1])

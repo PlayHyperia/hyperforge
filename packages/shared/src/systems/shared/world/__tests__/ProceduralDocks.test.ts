@@ -361,6 +361,26 @@ describe("actual procedural pond dock ownership and native collision (not render
     expect(roughNodes.has(named("compactDockTimber"))).toBe(true);
     const phase = named("compactDockGrowthPhase");
     expect(roughNodes.has(phase)).toBe(true);
+    const broad = named("compactDockBroadWeathering");
+    const section = named("compactDockGrowthSection");
+    const sectionNodes = timberNodes(section, builder);
+    expect(sectionNodes.has(broad)).toBe(true);
+    expect(roughNodes.has(broad)).toBe(true);
+    expect(timberNodes(phase, builder).has(section)).toBe(true);
+    // Filter the final warped phase, not the unwarped radius or an unrelated
+    // coordinate: the deformation participates in the actual screen footprint.
+    const derivatives = [...colorNodes].filter(
+      (node) => Reflect.get(node, "method") === "fwidth",
+    );
+    expect(
+      derivatives.filter((node) => Reflect.get(node, "aNode") === phase),
+    ).toHaveLength(1);
+    const compactNodes = timberNodes(named("compactDockTimber"), builder);
+    // Four corner hashes in the one broad value-noise field, one board hash,
+    // and one growth wave. No second octave or extra periodic cross-grain.
+    expect(
+      [...compactNodes].filter((node) => Reflect.get(node, "method") === "sin"),
+    ).toHaveLength(6);
     // Face normal may alter absorption/contrast, never select a different
     // growth volume. Stable board variation uses only row/mask and member seed.
     expect(timberNodes(phase, builder).has(normalWorld)).toBe(false);
@@ -392,6 +412,82 @@ describe("actual procedural pond dock ownership and native collision (not render
     expect(material.metalness).toBe(0);
     expect(material.transparent).toBe(false);
     expect(material.opacity).toBe(1);
+  });
+
+  it("bounds the combined real-graph board palette and tone without flattening their weathered mean", async () => {
+    const { owner } = await fixture({ native: false });
+    const material = owner["getOrCreateDockMaterial"]();
+    const builder: unknown = Reflect.construct(THREE.NodeBuilder, [null, null]);
+    if (
+      !(builder instanceof THREE.NodeBuilder) ||
+      !(material.colorNode instanceof THREE.Node)
+    )
+      throw new Error("Expected actual dock material graph");
+    const nodes = timberNodes(material.colorNode, builder);
+    const named = (name: string) => {
+      const matches = [...nodes].filter(
+        (node) => Reflect.get(node, "name") === name,
+      );
+      expect(matches).toHaveLength(1);
+      return matches[0];
+    };
+    const child = (node: Node, key: string): Node => {
+      const value: unknown = Reflect.get(node, key);
+      if (!(value instanceof THREE.Node))
+        throw new Error(`Expected actual node ${key}`);
+      // Installed TSL wraps chained operations/constants in anonymous intent
+      // variables. Preserve named identity; unwrap only these inert wrappers.
+      if (value.type === "VarNode" && Reflect.get(value, "name") === null)
+        return child(value, "node");
+      return value;
+    };
+    const scalar = (node: Node): number => {
+      const value: unknown = Reflect.get(node, "value");
+      if (node.type !== "ConstNode" || typeof value !== "number")
+        throw new Error("Expected actual constant scalar");
+      return value;
+    };
+    const rgb = (node: Node): number[] => {
+      const value: unknown = Reflect.get(node, "value");
+      if (node.type !== "ConstNode" || !(value instanceof THREE.Vector3))
+        throw new Error("Expected actual constant palette endpoint");
+      return value.toArray();
+    };
+    const tone = child(named("compactDockBoardTone"), "node");
+    expect(Reflect.get(tone, "op")).toBe("+");
+    const scale = child(tone, "bNode");
+    expect(Reflect.get(scale, "op")).toBe("*");
+    expect(child(scale, "aNode")).toBe(named("compactDockBoardVariation"));
+    const toneBase = scalar(child(tone, "aNode"));
+    const toneRange = scalar(child(scale, "bNode"));
+    const palette = child(named("compactDockBoardPalette"), "node");
+    expect(Reflect.get(palette, "method")).toBe("mix");
+    const paletteWeight = child(palette, "cNode");
+    expect(Reflect.get(paletteWeight, "components")).toBe("z");
+    expect(child(paletteWeight, "node")).toBe(named("compactDockTimber"));
+    const low = rgb(child(palette, "aNode"));
+    const high = rgb(child(palette, "bNode"));
+    // Evaluate only the proved affine palette/tone subgraph. Derivatives,
+    // noise, weathering, lighting and the resulting image remain native gates.
+    const colors = Array.from({ length: 33 }, (_, index) => {
+      const variation = index / 32;
+      return low.map(
+        (value, channel) =>
+          (value + (high[channel] - value) * variation) *
+          (toneBase + toneRange * variation),
+      );
+    });
+    const luminance = (color: number[]) =>
+      color[0] * 0.2126 + color[1] * 0.7152 + color[2] * 0.0722;
+    const contrast = luminance(colors[32]) / luminance(colors[0]);
+    expect(contrast).toBeGreaterThan(1.07);
+    expect(contrast).toBeLessThan(1.12);
+    const historicalMid = [0.2625, 0.2065, 0.1455].map((value) => value * 0.97);
+    expect(luminance(colors[16])).toBeCloseTo(luminance(historicalMid), 10);
+    for (let i = 1; i < colors.length; i++) {
+      expect(luminance(colors[i])).toBeGreaterThan(luminance(colors[i - 1]));
+      expect(colors[i].every((value) => value > 0 && value < 1)).toBe(true);
+    }
   });
 
   it("keeps non-compact generated geometry on the historical zero-mask wood path", async () => {

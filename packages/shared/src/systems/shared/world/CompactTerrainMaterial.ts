@@ -1145,6 +1145,17 @@ export function createCompactCoastWeights(
   };
 }
 
+/** The shared inland mask attenuates only nested soil, not coastal wetness. */
+export function applyCompactPondRockSoil(
+  soil: Node<"float">,
+  field: CompactPondBankComposition<Node<"float">> | undefined,
+): Node<"float"> {
+  if (field?.substrateSoilToRock === undefined) return soil;
+  return createCompactTerrainColorOperations()
+    .bankRockSoil(soil, field, compactCoastDistributionMath)
+    .toVar("compactPondRockNestedSoil");
+}
+
 /** Reuse soil/rock maps together; never tint grass or full path/pond overrides. */
 export function applyCompactCoastRock(
   rock: CompactTerrainLayer,
@@ -2148,6 +2159,13 @@ export function createCompactPondBankComposition(
       ? {
           mineralSoilToRock: result.mineralSoilToRock.toVar(
             "compactPondBankMineralSoilToRock",
+          ),
+        }
+      : {}),
+    ...(result.substrateSoilToRock !== undefined
+      ? {
+          substrateSoilToRock: result.substrateSoilToRock.toVar(
+            "compactPondBankSubstrateSoilToRock",
           ),
         }
       : {}),
