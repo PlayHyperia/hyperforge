@@ -464,6 +464,93 @@ describe("same-face shortcut versus independent native25 grounding goldens", () 
     },
   );
 
+  it.each([0, -0])(
+    "rereads mutable wind between swept-blade yields with initial wind %s",
+    (zero) => {
+      const fixture = createSameFaceCase("fine-lod0");
+      try {
+        const { request } = fixture,
+          data = request.data,
+          layout = getGrassBladeLayout(request.lod, request.geometryLayout);
+        // One clump safely inside one flat triangle gives an independently
+        // countable prefix: anchor, base blades, owner, two endpoints/blade.
+        request.data = projectGrassAnchors(
+          {
+            count: 1,
+            offsets: new Float32Array([-21, 20, -28]),
+            rotScaleHash: data.rotScaleHash.slice(0, 3),
+            groundColors: data.groundColors.slice(0, 3),
+            grassTints: data.grassTints.slice(0, 4),
+            groundNormals: data.groundNormals.slice(0, 3),
+          },
+          request.ownSurface,
+          () => -1000,
+          () => false,
+        );
+        const before = sameFaceInputHash(fixture),
+          secondSweptBladeYield = 3 * layout.bladesPerClump + 4;
+        const run = (ground: typeof groundGrassBladeSteps, mutate: boolean) => {
+          request.wind = { x: zero, z: zero };
+          let staged = false,
+            groundingYields = 0,
+            mutations = 0;
+          const steps = ground(request);
+          const result = drainSameFaceSteps(
+            (function* () {
+              for (;;) {
+                const step = steps.next();
+                if (step.done) return step.value;
+                if (step.value === "bounded_staging_allocation") staged = true;
+                if (staged && step.value === "grounding_operation") {
+                  groundingYields++;
+                  if (mutate && groundingYields === secondSweptBladeYield) {
+                    request.wind.x = 0.9;
+                    request.wind.z = 0.7;
+                    mutations++;
+                  }
+                }
+                yield step.value;
+              }
+            })(),
+          );
+          expect(result.result.receipt.sameFaceEdges).toBe(
+            layout.bladesPerClump,
+          );
+          expect(result.result.receipt.triangleVisits).toBe(
+            layout.bladesPerClump,
+          );
+          expect(mutations).toBe(mutate ? 1 : 0);
+          expect(sameFaceInputHash(fixture)).toBe(before);
+          return result;
+        };
+        const legacy = run(legacyGroundGrassBladeSteps, true),
+          current = run(groundGrassBladeSteps, true),
+          unchangedWind = run(groundGrassBladeSteps, false);
+        if (
+          legacy.result.status !== "ready" ||
+          current.result.status !== "ready" ||
+          unchangedWind.result.status !== "ready"
+        )
+          throw Error("Expected all swept-wind fixtures to remain grounded");
+        expect(current.result.data.count).toBe(1);
+        expect(sameFaceHash(current.result)).toBe(sameFaceHash(legacy.result));
+        expect(current.operations).toBe(legacy.operations);
+        expect(current.result.sweptBounds).not.toEqual(
+          unchangedWind.result.sweptBounds,
+        );
+        const position = request.geometry.getAttribute("position");
+        let zeroHeightVertices = 0;
+        for (let v = 0; v < position.count; v++)
+          if (position.getY(v) === 0) zeroHeightVertices++;
+        expect(current.result.receipt.workUnits).toBe(
+          legacy.result.receipt.workUnits - zeroHeightVertices,
+        );
+      } finally {
+        fixture.dispose();
+      }
+    },
+  );
+
   it.each(INDEXED_SAME_FACE_CASES)(
     "uses a genuinely indexed owner for %s, never the whole-grid shortcut",
     (id) => {

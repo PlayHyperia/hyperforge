@@ -1806,6 +1806,88 @@ database remain unchanged; all 145 compiled artifacts/build inputs are intact.
 Source is retained only as a reviewable work-branch candidate: no default,
 streaming, sustained performance, AAA or launch acceptance.
 
+### Finer terrain lookup and bank drift — native startup still open — 2026-09-21
+
+A reviewed source candidate keeps the existing eight-face terrain broad filter
+and adds separately charged four-face child tests only after a qualified parent
+hit. Numerical envelopes, exhaustive fallbacks, face order, ownership checks
+and clipping are unchanged. No deadline, work limit, density, resolution or
+shadow setting was relaxed. The earlier wind-product micro-optimization was
+rejected after alternating real-core A/B measurements showed no consistent
+benefit; production wind code is restored, with two useful regression tests kept.
+
+Five actual pond cells preserve all 100 worker/projected/completed-buffer hashes
+against pond-rock-treatment-receipts01 (only owner UUIDs differ). Triangle visits
+fall 36.6–40.1%, but charged resumptions fall only 2.4–4.5%; child tests are not
+free. Four unique pond owners add 2,131,648 bytes of metadata, from 1,323,904 to
+3,455,552 bytes. Each owner adds one preparation yield. These are exact CPU
+payload counts, not total game/GPU memory or a performance acceptance claim.
+
+| Pond cell | Prior active ms | Candidate active ms | Candidate max slice ms |
+| --- | ---: | ---: | ---: |
+| Near south | 222.992 | 153.499 | 2.328 |
+| Near east | 139.805 | 118.913 | 2.279 |
+| LOD1 south | 102.904 | 89.282 | 2.068 |
+| LOD1 east | 104.659 | 78.534 | 2.257 |
+| LOD1 cutbank | 89.535 | 78.608 | 2.384 |
+
+These are separate historical executions, not a controlled paired speedup.
+First southbank admission increases 68.317→89.474ms; the other four totals
+decrease. Admission maximum-step timing is absent from both receipts and the
+native pair. Query savings do not qualify preparation tails or live memory.
+
+The northwest planting recipe moves only seven existing plants across a 6.6m
+asymmetric drift. All 28 instances, models, scales, yaws, rocks and the other
+21 placement objects are preserved. Selected pond support/clearance, dock BFS
+and fishing dry-approach/ecology checks pass, but no candidate view completed:
+the drift's visual quality remains unverified.
+
+Final checks: 184 terrain/grounding/habitat tests pass; five actual pond tests
+pass (three historical-overlay skips); three selected dock BFS/publication and
+fishing ecology tests pass; one selected-assets habitat test passes. Full shared
+plus six explicit
+source/test roots typecheck with zero diagnostics (709 roots/2,384 source files);
+scoped lint/format pass. The first types run caught a missing-height narrowing
+in the test setup, now corrected without a cast/default. An incorrect selected
+test filter skipped everything; only the corrected selected-final02 run counts.
+
+Build29 pins 973 production inputs; only the terrain lookup, habitat owner and
+habitat JSON differ from build28. Baseline native60/build28 passed startup in
+77.047s and all four camera gates (27.933/11.701/4.528/10.558s).
+Candidate native61/build29 FAILED the unchanged 90s startup: 118/122 grass cells,
+29/29 terrain chunks and water ready; two observed remaining grounding jobs,
+one not yet started, with no failed-budget/waiting-support jobs. Zero candidate
+review views. Earlier native58/59 and CPU failures remain retained. Concurrent
+host activity is a confound, not established causation or an excuse to accept.
+
+Baseline visual review still finds a continuous brown pond collar, planting
+swallowed by meadow, and an unfinished grassy bank-pavilion arrival. The next
+art proposal is a pond-wide mineral/silt/turf composition using existing
+height/slope/sector fields and existing samples, with shared CPU/TSL treatment.
+Use [Three's terrain source](https://github.com/mrdoob/three.js/blob/r186/examples/webgpu_tsl_procedural_terrain.html)
+for broad height/slope material hierarchy; no wholesale shader replacement.
+This is not implemented or visually approved.
+
+- [x] Preserve exact terrain/grass results while reducing unnecessary triangle tests.
+- [x] Add placement-only drift and real selected support/route regression checks.
+- [ ] Qualify admission tails, live metadata cost and native startup/transitions;
+      the finer lookup is a branch candidate, NOT a proven loading fix.
+- [ ] Visually qualify the plant drift and both timber closeups/in motion.
+- [ ] Replace the uniform pond collar with legible mineral/silt/turf masses,
+      preserving geometry, wetness, all-tier access and sampler budgets.
+- [ ] Give the bank pavilion a readable maintained arrival and footing.
+- [ ] Keep all-tier catches, fourteen live anglers plus seven overflow, bank
+      and supplier journeys, and every LAYOUT-01–08 acceptance gate OPEN.
+
+Evidence: service-layout grass-wind-ab01/summary01, grass-mutable-wind01,
+grass-child-blocks-core01/pond01, grass-child-drift-finaltests01/types02/
+finallint01/finalformat01, pond-drift-route-gates01 and selected-final02;
+inland pond build29, native60/61 and runtime41/42. Both owned browsers closed,
+GameClient unmounted without observed destruction errors and both temporary
+databases removed. Protected human localhost:3333, its persistent database and
+canonical artifacts are unchanged. No default, streaming, sustained-performance,
+AAA or launch promotion; source remains an unqualified work-branch candidate.
+
 ### Inland fishing integration — candidate only
 
 The detached candidate now requests 14 real fishing entities, two for each of

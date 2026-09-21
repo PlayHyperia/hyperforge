@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import northernHabitat from "../../../../data/compact-pond-northern-habitat-v1.json";
+import inlandHabitat from "../../../../data/compact-pond-inland-habitat-v1.json";
 import THREE from "../../../../extras/three/three";
 import { World } from "../../../../core/World";
 import { DataManager } from "../../../../data/DataManager";
@@ -167,6 +168,33 @@ describe("bounded pond dressing", () => {
         surfaceY: number;
       };
     };
+    if (process.env.ASSETS_DIR !== undefined) {
+      expect(process.env.ASSETS_DIR.trim().length).toBeGreaterThan(0);
+      const selectedAreas = Object.values(
+        DataManager.getInstance().getAllWorldAreas(),
+      );
+      const zones = selectedAreas
+        .flatMap((area) => area.flatZones ?? [])
+        .filter((zone) => zone.id === "haven_pond_floor");
+      const bodies = selectedAreas
+        .flatMap((area) => area.waterBodies ?? [])
+        .filter((body) => body.id === "haven_pond_water");
+      expect(zones).toHaveLength(1);
+      expect(bodies).toHaveLength(1);
+      const selectedZone = zones[0];
+      if (
+        typeof selectedZone.height !== "number" ||
+        !Number.isFinite(selectedZone.height)
+      )
+        throw new Error(
+          "Selected pond floor requires a finite authored height",
+        );
+      candidate.flatZone = {
+        ...structuredClone(selectedZone),
+        height: selectedZone.height,
+      };
+      candidate.waterBody = structuredClone(bodies[0]);
+    }
     const docks: CompactPondDocksManifest = {
       schemaVersion: 1,
       layoutId: "compact-pond-docks-v1",
@@ -221,6 +249,92 @@ describe("bounded pond dressing", () => {
       expect(rows).toEqual(
         createCompactPondDressing(profile, areas, height, docks),
       );
+      // Captured before the drift: all rock/other-pocket positions and every
+      // model, scale, yaw and ordering remain exact. Only seven offsets vary.
+      const fixedRecipe = inlandHabitat.groups.map((group) => ({
+        id: group.id,
+        bearing: group.bearing,
+        placements: group.placements.map((row, index) =>
+          group.id === "northwest-cutbank" && index >= 3
+            ? [row[0], null, null, ...row.slice(3)]
+            : row,
+        ),
+      }));
+      expect(
+        createHash("sha256").update(JSON.stringify(fixedRecipe)).digest("hex"),
+      ).toBe(
+        "1ae7f001918b560a0751905b4ab49d338c1e27d1a7b9f58044cc59ee935cc68d",
+      );
+      const northwest = inlandHabitat.groups[0];
+      expect(northwest.id).toBe("northwest-cutbank");
+      const previousOffsets = [
+        [-1.7, 0.75],
+        [-0.55, 1.4],
+        [0.8, 0.95],
+        [0.1, 2.2],
+        [-0.9, 0.18],
+        [0.65, 0.24],
+        [-1, 2.3],
+      ];
+      const currentOffsets = northwest.placements
+        .slice(3)
+        .map((row) => [row[1], row[2]]);
+      let previousRows: readonly CompactPondPlacement[];
+      // Exercise both inputs through the real owner recipe. Restore the actual
+      // imported authoring data even on failure; this does not mock grounding.
+      try {
+        previousOffsets.forEach(([tangent, bankOffset], index) => {
+          northwest.placements[index + 3][1] = tangent;
+          northwest.placements[index + 3][2] = bankOffset;
+        });
+        previousRows = createCompactPondDressing(profile, areas, height, docks);
+      } finally {
+        currentOffsets.forEach(([tangent, bankOffset], index) => {
+          northwest.placements[index + 3][1] = tangent;
+          northwest.placements[index + 3][2] = bankOffset;
+        });
+      }
+      rows.forEach((row, index) => {
+        const previous = previousRows[index];
+        if (index < 3 || index >= 10) expect(row).toEqual(previous);
+        else {
+          const { x, z, ...metadata } = row;
+          const { x: oldX, z: oldZ, ...oldMetadata } = previous;
+          expect(metadata).toEqual(oldMetadata);
+          expect(Math.hypot(x - oldX, z - oldZ)).toBeGreaterThan(0.1);
+        }
+      });
+      const driftSpan = Math.hypot(
+        rows[7].x - rows[9].x,
+        rows[7].z - rows[9].z,
+      );
+      expect(driftSpan).toBeGreaterThan(6);
+      expect(driftSpan).toBeLessThan(8);
+      // Wider tangents are not admitted for rocks or unrelated bank pockets.
+      for (const row of [
+        northwest.placements[0],
+        inlandHabitat.groups[1].placements[2],
+      ]) {
+        const original = row[1];
+        try {
+          row[1] = -3;
+          expect(() =>
+            createCompactPondDressing(profile, areas, height, docks),
+          ).toThrow("placement");
+        } finally {
+          row[1] = original;
+        }
+      }
+      const drift = northwest.plantDrift!;
+      const originalSpan = drift.tangentMax;
+      try {
+        drift.tangentMax = originalSpan + 0.01;
+        expect(() =>
+          createCompactPondDressing(profile, areas, height, docks),
+        ).toThrow("plant drift");
+      } finally {
+        drift.tangentMax = originalSpan;
+      }
       const bounds = docks.docks.map(getCompactPondDockSupportBounds);
       const occupiedDegrees = new Set<number>();
       for (const row of rows) {

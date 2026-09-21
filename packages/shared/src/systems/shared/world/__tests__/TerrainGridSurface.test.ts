@@ -40,7 +40,7 @@ const sample = (): TerrainGridSample => ({
 
 /** A genuinely indexed, nonplanar 4x4 subdivision in each of four cells.
  * The original regular-grid prefix and shared edge identities are retained. */
-function denseEdgeGeometry(skinny = false) {
+function denseEdgeGeometry(skinny = false, tailSplits = 0) {
   const geometry = gridGeometry(2, 3, (x, z) => 20 + x * z),
     values = Array.from(geometry.getAttribute("position").array),
     ids = new Map<string, number>(),
@@ -70,6 +70,25 @@ function denseEdgeGeometry(skinny = false) {
             d = vertex(x0 + 0.25, z0 + 0.25);
           indices.push(a, c, b, b, c, d);
         }
+      // Dyadic interior splits retain complete cell coverage while producing
+      // final parent groups of two, four or six faces for cursor-tail tests.
+      if (tailSplits) {
+        const tail = indices.splice(indices.length - tailSplits * 3);
+        for (let face = 0; face < tail.length; face += 3) {
+          const a = tail[face],
+            b = tail[face + 1],
+            c = tail[face + 2],
+            middle = values.length / 3;
+          for (let axis = 0; axis < 3; axis++)
+            values.push(
+              (values[a * 3 + axis] +
+                values[b * 3 + axis] +
+                2 * values[c * 3 + axis]) /
+                4,
+            );
+          indices.push(a, b, middle, b, c, middle, c, a, middle);
+        }
+      }
       offsets.push(indices.length);
     }
   if (skinny)
@@ -2378,8 +2397,8 @@ describe("retained grounding edge block traversal", () => {
             expect(small.candidates.length + small.blocks).toBeLessThan(
               small.allFaces.length,
             );
-            expect(small.candidates.length).toBe(8);
-            expect(small.blocks).toBe(4);
+            expect(small.candidates.length).toBe(4);
+            expect(small.blocks).toBe(6);
           }
         }
       } finally {
@@ -2397,18 +2416,161 @@ describe("retained grounding edge block traversal", () => {
       expect(surface.groundingEdgeIndexStats).toEqual({
         blocks: 16,
         qualifiedBlocks: 16,
-        bytes: 16 * 4 * 8 + 5 * 4,
-        admissionSteps: 18,
+        childSlots: 32,
+        qualifiedChildren: 32,
+        childBytes: 16 * 8 * 8,
+        childBoundFaceVisits: 128,
+        bytes: 16 * 12 * 8 + 5 * 4,
+        admissionSteps: 19,
       });
       expect(
         phases.filter((phase) => phase.startsWith("grounding-edge-index-"))
           .length,
-      ).toBe(18);
+      ).toBe(19);
       const result = collect(surface, [-1, -1, 1, 1]);
       expect(result.allFaces).toEqual(
         Array.from({ length: 128 }, (_, index) => index),
       );
       expect(surface.matchesGeometry(geometry)).toBe(true);
+    } finally {
+      geometry.dispose();
+    }
+  });
+
+  it("charges parent and child tests separately without copying rejected faces", () => {
+    const geometry = denseEdgeGeometry();
+    try {
+      const surface = new RetainedTerrainSurface(
+          1,
+          "charged-children",
+          0,
+          0,
+          2,
+          3,
+          geometry,
+        ),
+        cursor = surface.createGroundingEdgeCursor(-0.92, -0.18, -0.84, -0.12)!,
+        out: TerrainGridTriangle = [91, 92, 93, 94, 95, 96, 97, 98, 99, 100];
+      // Three missed parents do not test their children. The fourth parent
+      // and its first child each consume one separate step before face24.
+      for (let step = 0; step < 5; step++) {
+        expect(cursor.step(out)).toBe("block");
+        expect(out).toEqual([91, 92, 93, 94, 95, 96, 97, 98, 99, 100]);
+      }
+      expect(cursor.step(out)).toBe("triangle");
+      expect(out[9]).toBe(24);
+      const result = collect(surface, [-0.92, -0.18, -0.84, -0.12]);
+      expect(result.candidates).toEqual([24, 25, 26, 27]);
+      expect(result.blocks).toBe(6);
+    } finally {
+      geometry.dispose();
+    }
+  });
+
+  it("skips both children of a hit parent while preserving interleaved face order", () => {
+    const geometry = denseEdgeGeometry();
+    try {
+      const old = Array.from(geometry.getIndex()!.array),
+        firstCellOrder = [
+          0,
+          1,
+          2,
+          3,
+          28,
+          29,
+          30,
+          31,
+          ...Array.from({ length: 24 }, (_, index) => index + 4),
+        ];
+      geometry.setIndex([
+        ...firstCellOrder.flatMap((face) => old.slice(face * 3, face * 3 + 3)),
+        ...old.slice(96),
+      ]);
+      const surface = new RetainedTerrainSurface(
+          1,
+          "disjoint-children",
+          0,
+          0,
+          2,
+          3,
+          geometry,
+        ),
+        edge: Edge = [-0.7, -0.6, -0.6, -0.55],
+        cursor = surface.createGroundingEdgeCursor(...edge)!,
+        out: TerrainGridTriangle = [91, 92, 93, 94, 95, 96, 97, 98, 99, 100];
+      // Parent0 spans the cell, but its two children occupy separated corners.
+      for (let step = 0; step < 3; step++) {
+        expect(cursor.step(out)).toBe("block");
+        expect(out).toEqual([91, 92, 93, 94, 95, 96, 97, 98, 99, 100]);
+      }
+      const result = collect(surface, edge);
+      expect(result.actual.length).toBeGreaterThan(0);
+      expect(result.candidates.every((face) => face >= 8)).toBe(true);
+    } finally {
+      geometry.dispose();
+    }
+  });
+
+  it.each([1, 2, 3])(
+    "preserves partial parents and row transitions after %i dyadic tail splits",
+    (tailSplits) => {
+      const geometry = denseEdgeGeometry(false, tailSplits);
+      try {
+        const surface = new RetainedTerrainSurface(
+          1,
+          "partial-children",
+          0,
+          0,
+          2,
+          3,
+          geometry,
+        );
+        expect(surface.groundingEdgeIndexStats).toEqual({
+          blocks: 20,
+          qualifiedBlocks: 20,
+          childSlots: 40,
+          qualifiedChildren: tailSplits === 3 ? 40 : 32,
+          childBytes: 20 * 8 * 8,
+          childBoundFaceVisits: tailSplits === 3 ? 152 : 128,
+          bytes: 20 * 12 * 8 + 5 * 4,
+          admissionSteps: 23,
+        });
+        for (const edge of [
+          [-1, -1, 1, 1],
+          [1, -1, -1, 1],
+          [-0.15, -0.15, -0.01, -0.01],
+          [-0.01, -0.01, 0.15, 0.15],
+          [0.99, 0.99, 1, 1],
+        ] as Edge[])
+          collect(surface, edge);
+      } finally {
+        geometry.dispose();
+      }
+    },
+  );
+
+  it("keeps an entire unqualified parent exhaustive, including its regular child", () => {
+    const geometry = denseEdgeGeometry(true);
+    try {
+      const surface = new RetainedTerrainSurface(
+          1,
+          "fallback-children",
+          0,
+          0,
+          2,
+          3,
+          geometry,
+        ),
+        cursor = surface.createGroundingEdgeCursor(-0.2, -0.9, -0.1, -0.8)!,
+        out: TerrainGridTriangle = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+      for (let face = 0; face < 8; face++) {
+        expect(cursor.step(out)).toBe("triangle");
+        expect(out[9]).toBe(face);
+      }
+      collect(surface, [-0.2, -0.9, -0.1, -0.8]);
+      expect(surface.groundingEdgeIndexStats!.qualifiedChildren).toBe(
+        surface.groundingEdgeIndexStats!.qualifiedBlocks * 2,
+      );
     } finally {
       geometry.dispose();
     }
@@ -2535,26 +2697,12 @@ describe("retained grounding edge block traversal", () => {
     }
   });
 
-  it("checks the original geometry owner at admission resumes and every cursor step", () => {
-    const geometry = denseEdgeGeometry();
-    try {
-      const iterator = RetainedTerrainSurface.prepare(
-        1,
-        "blocks",
-        0,
-        0,
-        2,
-        3,
-        geometry,
-      );
-      for (;;) {
-        const next = iterator.next();
-        expect(next.done).toBe(false);
-        if (next.value === "grounding-edge-index-block") break;
-      }
-      geometry.getAttribute("position").needsUpdate = true;
-      expect(() => iterator.next()).toThrow("changed during admission");
-      const surface = new RetainedTerrainSurface(
+  it.each([1, 2])(
+    "checks the original geometry owner after %i parent/child cursor steps",
+    (steps) => {
+      const geometry = denseEdgeGeometry();
+      try {
+        const iterator = RetainedTerrainSurface.prepare(
           1,
           "blocks",
           0,
@@ -2562,15 +2710,37 @@ describe("retained grounding edge block traversal", () => {
           2,
           3,
           geometry,
-        ),
-        cursor = surface.createGroundingEdgeCursor(-0.9, -0.9, -0.8, -0.8)!,
-        out: TerrainGridTriangle = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
-      expect(cursor.step(out)).toBe("block");
-      geometry.getIndex()!.needsUpdate = true;
-      expect(() => cursor.step(out)).toThrow("changed during admission");
-      expect(surface.matchesGeometry(geometry)).toBe(false);
-    } finally {
-      geometry.dispose();
-    }
-  });
+        );
+        const phase =
+          steps === 1
+            ? "grounding-edge-index-child-allocation"
+            : "grounding-edge-index-block";
+        for (;;) {
+          const next = iterator.next();
+          expect(next.done).toBe(false);
+          if (next.value === phase) break;
+        }
+        geometry.getAttribute("position").needsUpdate = true;
+        expect(() => iterator.next()).toThrow("changed during admission");
+        const surface = new RetainedTerrainSurface(
+            1,
+            "blocks",
+            0,
+            0,
+            2,
+            3,
+            geometry,
+          ),
+          cursor = surface.createGroundingEdgeCursor(-0.9, -0.9, -0.8, -0.8)!,
+          out: TerrainGridTriangle = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+        for (let step = 0; step < steps; step++)
+          expect(cursor.step(out)).toBe("block");
+        geometry.getIndex()!.needsUpdate = true;
+        expect(() => cursor.step(out)).toThrow("changed during admission");
+        expect(surface.matchesGeometry(geometry)).toBe(false);
+      } finally {
+        geometry.dispose();
+      }
+    },
+  );
 });

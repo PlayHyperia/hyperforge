@@ -398,6 +398,7 @@ export type TerrainGroundingEdgeCursor = {
 };
 
 const GROUNDING_EDGE_BLOCK_FACES = 8;
+const GROUNDING_EDGE_CHILD_FACES = 4;
 // This is an envelope for the existing grass edge clipper, not a geometric
 // epsilon. Qualification below makes all XZ edge products and det exact:
 // dyadic integer edges <= 2^25, products <= 2^50, det integer <= 2^51.
@@ -419,9 +420,14 @@ const GROUNDING_EDGE_ENVELOPE =
 type GroundingEdgeBlocks = {
   cellOffsets: Uint32Array;
   bounds: Float64Array;
+  childBounds: Float64Array;
   stats: Readonly<{
     blocks: number;
     qualifiedBlocks: number;
+    childSlots: number;
+    qualifiedChildren: number;
+    childBytes: number;
+    childBoundFaceVisits: number;
     bytes: number;
     admissionSteps: number;
   }>;
@@ -440,6 +446,8 @@ function* buildGroundingEdgeBlocks(
     cellOffsets = new Uint32Array(offsets.length);
   let blocks = 0,
     qualifiedBlocks = 0,
+    qualifiedChildren = 0,
+    childBoundFaceVisits = 0,
     admissionSteps = 0;
   for (let cell = 0; cell < offsets.length - 1; cell++) {
     if (cell % 128 === 0) {
@@ -458,6 +466,12 @@ function* buildGroundingEdgeBlocks(
   yield "grounding-edge-index-allocation";
   checkCurrent();
   const bounds = new Float64Array(blocks * 4);
+  // Two fixed child slots per parent, including unused/fallback slots. This
+  // adds exactly 64 bytes per parent under the existing topology limits.
+  admissionSteps++;
+  yield "grounding-edge-index-child-allocation";
+  checkCurrent();
+  const childBounds = new Float64Array(blocks * 8);
   for (let cell = 0; cell < offsets.length - 1; cell++) {
     for (
       let block = cellOffsets[cell];
@@ -473,7 +487,8 @@ function* buildGroundingEdgeBlocks(
         end = Math.min(
           start + GROUNDING_EDGE_BLOCK_FACES * 3,
           offsets[cell + 1],
-        );
+        ),
+        hasChildren = end - start > GROUNDING_EDGE_CHILD_FACES * 3;
       let minX = Infinity,
         maxX = -Infinity,
         minZ = Infinity,
@@ -512,6 +527,22 @@ function* buildGroundingEdgeBlocks(
         maxX = Math.max(maxX, ax, bx, cx);
         minZ = Math.min(minZ, az, bz, cz);
         maxZ = Math.max(maxZ, az, bz, cz);
+        if (hasChildren) {
+          // The same admitted eight-face pass builds both four-face boxes;
+          // no additional geometry scan or larger admission batch is hidden.
+          const child =
+            block * 8 +
+            Math.floor((face - start) / (GROUNDING_EDGE_CHILD_FACES * 3)) * 4;
+          if ((face - start) % (GROUNDING_EDGE_CHILD_FACES * 3) === 0) {
+            childBounds[child] = childBounds[child + 2] = Infinity;
+            childBounds[child + 1] = childBounds[child + 3] = -Infinity;
+          }
+          childBoundFaceVisits++;
+          childBounds[child] = Math.min(childBounds[child], ax, bx, cx);
+          childBounds[child + 1] = Math.max(childBounds[child + 1], ax, bx, cx);
+          childBounds[child + 2] = Math.min(childBounds[child + 2], az, bz, cz);
+          childBounds[child + 3] = Math.max(childBounds[child + 3], az, bz, cz);
+        }
       }
       const k = block * 4;
       if (qualified) {
@@ -520,6 +551,17 @@ function* buildGroundingEdgeBlocks(
         bounds[k + 1] = maxX + GROUNDING_EDGE_ENVELOPE;
         bounds[k + 2] = minZ - GROUNDING_EDGE_ENVELOPE;
         bounds[k + 3] = maxZ + GROUNDING_EDGE_ENVELOPE;
+        if (hasChildren) {
+          // Every child inherits its whole parent's numerical qualification.
+          // Use the identical clipper envelope, not a tighter geometric bound.
+          qualifiedChildren += 2;
+          for (let child = block * 8; child < block * 8 + 8; child += 4) {
+            childBounds[child] -= GROUNDING_EDGE_ENVELOPE;
+            childBounds[child + 1] += GROUNDING_EDGE_ENVELOPE;
+            childBounds[child + 2] -= GROUNDING_EDGE_ENVELOPE;
+            childBounds[child + 3] += GROUNDING_EDGE_ENVELOPE;
+          }
+        }
       } else {
         // Nonfinite sentinel means no broad-phase test, not infinite padding.
         bounds[k] = NaN;
@@ -529,10 +571,16 @@ function* buildGroundingEdgeBlocks(
   return {
     cellOffsets,
     bounds,
+    childBounds,
     stats: Object.freeze({
       blocks,
       qualifiedBlocks,
-      bytes: cellOffsets.byteLength + bounds.byteLength,
+      childSlots: blocks * 2,
+      qualifiedChildren,
+      childBytes: childBounds.byteLength,
+      childBoundFaceVisits,
+      bytes:
+        cellOffsets.byteLength + bounds.byteLength + childBounds.byteLength,
       admissionSteps,
     }),
   };
@@ -546,6 +594,8 @@ class RetainedTerrainTriangleCursor {
   private second = false;
   private indexOffset = 0;
   private edgeBlockEnd = 0;
+  private edgeChildEnd = 0;
+  private edgeChildOffset = 0;
 
   constructor(
     private readonly positions: Float32Array,
@@ -616,8 +666,21 @@ class RetainedTerrainTriangleCursor {
     return true;
   }
 
-  /** The caller charges every returned step. A rejected block is one bounded
-   * AABB test; accepted faces still use next()'s exact original copy/order. */
+  private skipIndexedRange(end: number, cell: number): void {
+    this.indexOffset = end;
+    if (end === this.cellOffsets![cell + 1]) {
+      if (++this.x > this.x1) {
+        this.x = this.x0;
+        this.z++;
+      }
+      if (this.hasNext())
+        this.indexOffset =
+          this.cellOffsets![this.z * (this.resolution - 1) + this.x];
+    }
+  }
+
+  /** Each parent/child AABB test returns its own charged block step. Missing
+   * parents skip children; accepted faces retain next()'s exact copy/order. */
   edgeStep(
     out: TerrainGridTriangle,
     blocks: GroundingEdgeBlocks,
@@ -629,8 +692,26 @@ class RetainedTerrainTriangleCursor {
     const cell = this.z * (this.resolution - 1) + this.x,
       firstBlock = blocks.cellOffsets[cell],
       lastBlock = blocks.cellOffsets[cell + 1];
-    if (firstBlock === lastBlock || this.indexOffset < this.edgeBlockEnd)
-      return this.next(out) ? "triangle" : null;
+    if (firstBlock === lastBlock) return this.next(out) ? "triangle" : null;
+    if (this.indexOffset < this.edgeBlockEnd) {
+      if (this.indexOffset < this.edgeChildEnd)
+        return this.next(out) ? "triangle" : null;
+      const child = this.edgeChildOffset,
+        end = Math.min(
+          this.indexOffset + GROUNDING_EDGE_CHILD_FACES * 3,
+          this.edgeBlockEnd,
+        );
+      this.edgeChildOffset += 4;
+      this.edgeChildEnd = end;
+      if (
+        bounds.maxX < blocks.childBounds[child] ||
+        bounds.minX > blocks.childBounds[child + 1] ||
+        bounds.maxZ < blocks.childBounds[child + 2] ||
+        bounds.minZ > blocks.childBounds[child + 3]
+      )
+        this.skipIndexedRange(end, cell);
+      return "block";
+    }
     const block =
         firstBlock +
         Math.floor(
@@ -643,6 +724,7 @@ class RetainedTerrainTriangleCursor {
         this.cellOffsets[cell + 1],
       );
     this.edgeBlockEnd = end;
+    this.edgeChildEnd = end;
     // A fallback block performs no AABB test and consumes only face steps.
     if (!Number.isFinite(blocks.bounds[k]))
       return this.next(out) ? "triangle" : null;
@@ -652,16 +734,10 @@ class RetainedTerrainTriangleCursor {
       bounds.maxZ < blocks.bounds[k + 2] ||
       bounds.minZ > blocks.bounds[k + 3]
     ) {
-      this.indexOffset = end;
-      if (end === this.cellOffsets[cell + 1]) {
-        if (++this.x > this.x1) {
-          this.x = this.x0;
-          this.z++;
-        }
-        if (this.hasNext())
-          this.indexOffset =
-            this.cellOffsets[this.z * (this.resolution - 1) + this.x];
-      }
+      this.skipIndexedRange(end, cell);
+    } else if (end - this.indexOffset > GROUNDING_EDGE_CHILD_FACES * 3) {
+      this.edgeChildOffset = block * 8;
+      this.edgeChildEnd = this.indexOffset;
     }
     return "block";
   }

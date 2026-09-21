@@ -393,8 +393,24 @@ function createInlandPondDressing(
       group.placements.length > 12
     )
       throw new Error("Invalid inland habitat group");
+    // This wider span belongs only to the seven plants in the named cutbank
+    // drift. Rocks and every other pocket retain the original two-metre cap.
+    const drift = group.plantDrift;
+    if (
+      drift !== undefined &&
+      (group.id !== "northwest-cutbank" ||
+        group.bearing !== 225 ||
+        group.placements.length !== 10 ||
+        drift.id !== "northwest-bank-drift-v1" ||
+        drift.tangentMin !== -3.4 ||
+        drift.tangentMax !== 3.2)
+    )
+      throw new Error("Invalid inland habitat plant drift");
     for (const [index, row] of group.placements.entries()) {
       const [modelValue, tangent, bankOffset, scale, rotation] = row;
+      const rock = modelValue === "boulder" || modelValue === "stone";
+      const driftPlant =
+        drift !== undefined && index >= 3 && index < 10 && !rock;
       if (
         row.length !== 5 ||
         typeof modelValue !== "string" ||
@@ -406,7 +422,8 @@ function createInlandPondDressing(
           (v) => typeof v === "number" && Number.isFinite(v),
         ) ||
         typeof tangent !== "number" ||
-        Math.abs(tangent) > 2 ||
+        tangent < (driftPlant ? drift.tangentMin : -2) ||
+        tangent > (driftPlant ? drift.tangentMax : 2) ||
         typeof bankOffset !== "number" ||
         bankOffset < -1.5 ||
         bankOffset > 3 ||
@@ -422,7 +439,6 @@ function createInlandPondDressing(
       const baseAngle = (group.bearing * Math.PI) / 180;
       const angle = baseAngle + Math.atan2(tangent, shorelineAt(baseAngle));
       const radius = COMPACT_POND_MODELS[model].radius * scale;
-      const rock = model === "boulder" || model === "stone";
       const distance = shorelineAt(angle) + bankOffset - (rock ? radius : 0);
       const x = pond.centerX + Math.cos(angle) * distance;
       const z = pond.centerZ + Math.sin(angle) * distance;
