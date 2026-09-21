@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import THREE from "../../../../extras/three/three";
 import {
   RetainedTerrainSurface,
+  type TerrainGridHeightSample,
   type TerrainGridSample,
   type TerrainGridTriangle,
   type TerrainGridBounds,
@@ -210,6 +211,133 @@ function isolatedRefinedGeometry(splitSide = -1, duplicateCorner = false) {
 }
 
 describe("retained locally indexed cell topology", () => {
+  it.each([
+    {
+      name: "regular",
+      create: () => gridGeometry(2, 3, (x, z) => 20 + x * z),
+      ties: [
+        [-0.5, -0.5, 0],
+        [0, 0, 6],
+      ],
+    },
+    {
+      name: "indexed with skirts",
+      create: () => refinedGeometry().geometry,
+      ties: [
+        [0, -0.5, 5],
+        [0, 0, 12],
+      ],
+    },
+    {
+      name: "dense indexed",
+      create: () => denseEdgeGeometry(),
+      ties: [[0, 0, 96]],
+    },
+    {
+      name: "Float32 skinny indexed",
+      create: () => denseEdgeGeometry(true),
+      ties: [[0, 0, 96]],
+    },
+  ])(
+    "samples height/face without normals on $name geometry",
+    ({ name, create, ties }) => {
+      const geometry = create(),
+        material = new THREE.MeshBasicMaterial(),
+        mesh = new THREE.Mesh(geometry, material),
+        ray = new THREE.Raycaster(),
+        origin = new THREE.Vector3(),
+        down = new THREE.Vector3(0, -1, 0);
+      mesh.updateMatrixWorld(true);
+      try {
+        const surface = new RetainedTerrainSurface(
+            1,
+            name,
+            0,
+            0,
+            2,
+            3,
+            geometry,
+          ),
+          full = sample(),
+          height: TerrainGridHeightSample = { height: -999, faceIndex: -999 },
+          p = geometry.getAttribute("position"),
+          indices = geometry.getIndex()!,
+          topology = geometry.userData.terrainCellTopology as
+            TerrainCellTopology | undefined,
+          indexCount = topology
+            ? topology.cellIndexOffsets[topology.cellIndexOffsets.length - 1]
+            : indices.count;
+        // An endpoint has no normal storage: even attempting to read/write it
+        // fails. Raycasting the real indexed mesh is the independent oracle.
+        for (const field of ["nx", "ny", "nz"])
+          Object.defineProperty(height, field, {
+            get: () => {
+              throw new Error("Height-only query read a normal");
+            },
+            set: () => {
+              throw new Error("Height-only query wrote a normal");
+            },
+          });
+        const check = (x: number, z: number, expectedFace?: number) => {
+          expect(surface.sampleHeight(x, z, height)).toBe(true);
+          expect(surface.sample(x, z, full)).toBe(true);
+          expect(height.height).toBe(full.height);
+          expect(height.faceIndex).toBe(full.faceIndex);
+          ray.set(origin.set(x, 100, z), down);
+          const hit = ray.intersectObject(mesh, false)[0];
+          expect(hit).toBeDefined();
+          expect(height.height).toBeCloseTo(hit.point.y, 8);
+          if (expectedFace !== undefined) {
+            expect(height.faceIndex).toBe(expectedFace);
+            expect(hit.faceIndex).toBe(expectedFace);
+          }
+        };
+        for (let i = 0; i < indexCount; i += 3) {
+          const a = indices.getX(i),
+            b = indices.getX(i + 1),
+            c = indices.getX(i + 2);
+          check(
+            p.getX(a) * 0.2 + p.getX(b) * 0.3 + p.getX(c) * 0.5,
+            p.getZ(a) * 0.2 + p.getZ(b) * 0.3 + p.getZ(c) * 0.5,
+            i / 3,
+          );
+        }
+        // Outer and shared edges keep deterministic first-face ownership. At a
+        // shared edge the ray may choose its other face, so compare height only.
+        for (let i = 0; i < (topology?.surfaceVertexCount ?? p.count); i++)
+          check(p.getX(i), p.getZ(i));
+        for (const [x, z] of [
+          [-0.5, -0.5],
+          [0.5, 0.5],
+          [0, -0.5],
+          [-1 + 2 ** -25, -0.9],
+        ])
+          check(x, z);
+        // These IDs follow the fixture's known cell/index order, independently
+        // pinning shared-edge ties instead of comparing two shared-core calls.
+        for (const [x, z, face] of ties) {
+          expect(surface.sampleHeight(x, z, height)).toBe(true);
+          expect(height.faceIndex).toBe(face);
+        }
+        const previous = { height: height.height, faceIndex: height.faceIndex };
+        for (const [x, z] of [
+          [NaN, 0],
+          [0, Infinity],
+          [-Infinity, 0],
+          [1 + Number.EPSILON, 0],
+          [0, -1 - Number.EPSILON],
+        ]) {
+          expect(surface.sampleHeight(x, z, height)).toBe(false);
+          expect(height.height).toBe(previous.height);
+          expect(height.faceIndex).toBe(previous.faceIndex);
+        }
+      } finally {
+        geometry.dispose();
+        material.dispose();
+      }
+    },
+  );
+
   it("samples exact outer boundaries of indexed Float32 grids without barycentric cancellation", () => {
     const resolution = 128,
       size = 100,
@@ -244,7 +372,8 @@ describe("retained locally indexed cell topology", () => {
           resolution,
           geometry,
         ),
-        out = sample();
+        out = sample(),
+        height: TerrainGridHeightSample = { height: 0, faceIndex: -1 };
       // Reproduce the four exact world-boundary misses from the real retained
       // island, then scan every side including corners at its 0.1 m spacing.
       const points: [number, number][] = [338.6, 338.7, 359.9, 361.1].map(
@@ -261,6 +390,9 @@ describe("retained locally indexed cell topology", () => {
       }
       for (const [x, z] of points) {
         expect(surface.sample(x, z, out), `indexed edge ${x},${z}`).toBe(true);
+        expect(surface.sampleHeight(x, z, height)).toBe(true);
+        expect(height.height).toBe(out.height);
+        expect(height.faceIndex).toBe(out.faceIndex);
         ray.set(origin.set(x, 100, z), down);
         const hits = ray.intersectObject(mesh, false);
         expect(hits.length, `ray edge ${x},${z}`).toBeGreaterThan(0);

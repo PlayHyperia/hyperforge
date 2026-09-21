@@ -1,5 +1,56 @@
 # World graphics development checkpoint — 2026-09-20
 
+## Pond grounding parity and shadow-cost attribution — 2026-09-21
+
+The exact southern pond cell now has a real-worker/retained-terrain regression.
+The height/face-only sampler skips unused endpoint normals while keeping full
+anchor normals and the original indexed sampling math. Before/after retain
+931 of 970 clumps, reject 39 at water, and preserve 912,895 geometric work units,
+709,023 continuation resumptions and the independent legacy output comparisons.
+The output hash stays af12d68c1875e5b95cf880f26df31fe48ca76452cfe4cb11c904cfaff00ed91d.
+CPU readings of 179.688ms before and 177.620/185.319ms after do not establish a
+repeatable overall speed gain.
+
+Final targeted suite: 59 passed / one alternate-overlay skip. Broad grass suite:
+419/419. Original review52 real-asset case also passes. Full shared source plus
+explicit changed tests: 707 roots / 2,382 sources, zero diagnostics, stable pins.
+Scoped lint/format pass. The initial fixture tuple-inference type error remains
+recorded and was fixed with an explicit readonly tuple annotation.
+
+Build21 emits eight isolated bundles from 973 stable inputs. Native37 passes
+startup but misses the unchanged thirty-second pond-overview camera gate:
+three LOD1 jobs remain running, two with zero work. The earlier per-cell CPU
+failure does not recur in that run, but this is still a failed readiness result.
+Native38's CPU-only trace settles in 29.352s, only 0.648s inside the limit.
+That instrumented result does not erase native37 or qualify reliable readiness.
+
+The 30.3497s profile contains 23,639 valid samples. Exact grounding ancestry
+accounts for 1.048078s (3.45%) of sampled deltas. Native writeBuffer accounts for
+15.969750s (52.62%), of which 15.226129s is in shadow uniform-buffer updates.
+Native getCurrentTexture accounts for 3.664026s. These may include native
+synchronization/backpressure; they are not GPU execution timings or proof
+of excessive uploaded bytes. The next bounded investigation is exact shadow
+uniform-buffer owners, write sizes/ranges/frequency and correlated GPU pass cost.
+Do not lower shadow quality, density or resolution, or raise time/work limits.
+
+All fourteen fishing entities reach the real client. All seven families/twelve
+fish, fourteen simultaneous anglers plus safe overflow, shore access at each
+tier and two distinct docks remain integrated acceptance requirements. Actual
+stills still show an overly uniform shore ring and insufficient bank character.
+Natural pond/dock/outpost art, native fishing/banking/restart and sustained
+whole-island performance remain open. No default promotion or AAA approval.
+
+Both test browsers, runtime23 and its ephemeral database are closed. Protected
+human localhost/database, 145 compiled artifacts, six build inputs and retained
+lock are unchanged. Eight common status mirrors match. No avatar, placement,
+fish, dock, material, wind or shadow setting changes. All LAYOUT-01–08 stay open.
+
+Evidence: service-layout pond-south-grounding-before01,
+pond-south-height-sampler01–02, pond-height-regression01,
+pond-height-review52-regression01–02, pond-height-types01–02 (final02),
+pond-height-lint01–02 / format01; inland pond build21/runtime23/native37–38
+and native38/CPU_PROFILE_REVIEW.md. Earlier failures are retained.
+
 ## Pond outpost art and full fishing scope — 2026-09-21
 
 The pond remains sized/planned for all seven fishing families, twelve fish,

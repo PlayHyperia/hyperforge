@@ -1039,6 +1039,90 @@ pond-bank-recipe-owner01 (old compiled alias failure), pond-outpost-types01–03
 build20, runtime22 and native35–36. Detached assets-v7 differs from assets-v6 in
 the single outpost recipe selection only; both are unqualified.
 
+### Pond south-bank grounding — exact output verified, transition performance open
+
+The assets-v7 southern pond cell now has a reproducible real-owner regression:
+gcell_v1_16_17, LOD0, x400..425/z425..450, focus 435/452. It uses the actual
+emitted worker and the retained 450/450 and 350/450 terrain leaves. The original
+review52 fixture remains separately selectable; neither overlay is a default.
+
+The height/face-only terrain sampler shares the original Float32 cell selection,
+indexed face order, edge determinants and height arithmetic. Only grass blade
+endpoint queries opt into it; anchor validation still computes full normals.
+This removes 46,560 unused endpoint normal evaluations in the selected cell
+without changing geometry, clump count, density, wind, materials or budgets.
+The output hash remains af12d68c1875e5b95cf880f26df31fe48ca76452cfe4cb11c904cfaff00ed91d.
+
+Before/after both project 970 clumps and retain 931, with 39 water rejections,
+347,209 triangle visits, 1,931 same-face edges, 912,895/1,000,000 geometric work
+units and 709,023 continuation resumptions. Independent frozen legacy per-clump
+checks agree on data, corrections, visibility, bounds and dependency ordering.
+Single-run CPU continuation readings 179.688ms before, 177.620ms and 185.319ms
+after show no established overall speed improvement. They do not overturn the
+native35 failure or qualify browser performance.
+
+Final targeted terrain/south-bank suite: 59 passed/one other-overlay skip; broad
+grass regression: 419/419; original review52 fixture passes separately. Tests
+include real raycast/indexed geometry, skinny faces, pinned shared-edge IDs,
+recorded Float32 outer-edge failures and untouched output on invalid queries.
+Full shared production and explicit changed tests: 707 roots / 2,382 source files,
+zero diagnostics and stable pins. Scoped lint/format pass. A readonly tuple
+inference error in the first test-inclusive typecheck was fixed explicitly;
+that failed receipt remains. Build21 emits eight bundles from 973 stable inputs.
+
+Native37 uses build21/assets-v7 in real Chrome/Metal at 1280x720. It passes the
+unchanged ninety-second startup gate and loads all fourteen fishing entities.
+The original southern-cell active CPU failure does not recur in this run, but
+the thirty-second pond-overview camera gate still FAILS. At the deadline,
+three LOD1 updates remain running, two with zero operations; no jobs are failed,
+cancelled or waiting on support. Its 29.714s observation interval advances the
+renderer frame counter by 618 and adds 1,157.4ms of grounding slice time.
+This is loading-time observation, not calibrated FPS, GPU attribution or proof
+that the sampler caused the difference. The last target-cell sample is
+691,904 operations / 218.0ms; no completed per-cell native receipt was captured.
+The failure still remains diagnostic only. Art review still rejects the
+continuous shore ring, sparse bank detail and overall landscape composition.
+
+Native38 is a separate CPU-only sampled diagnostic. Startup passes and the same
+camera settles in 29.352s with all queues zero, only 0.648s inside the original
+limit. It does not erase native37 or prove stable readiness. The profile is
+30.3497s long, with 23,639 valid samples and 30.349406s of sampled deltas;
+the first 0.945274s belongs to program/setup, not an application function.
+Exact grounding ancestry is 1.048078s (3.45%). Native writeBuffer accounts for
+15.969750s (52.62%), including 15.226129s in shadow uniform-buffer updates;
+getCurrentTexture adds 3.664026s. These are main-thread/native-call residency,
+not GPU execution time or proven upload volume. Synchronization/backpressure
+remains a possible cause. Do not assume a recurrence of the old matrix issue.
+
+Next priority: identify actual shadow uniform-buffer owners, write sizes/ranges
+and frequency, and correlate with per-pass GPU timestamps before changing
+rendering. Preserve shadows and all quality/readiness limits. The diagnostic
+approach follows the [Chrome runtime performance reference](https://developer.chrome.com/docs/devtools/performance/reference).
+The full attribution and caveats are in native38/CPU_PROFILE_REVIEW.md.
+Both test browsers and runtime23 are closed; its temporary database is removed.
+All 145 protected compiled artifacts, six build inputs, retained lock and human
+localhost remain unchanged. No avatar, pond placement, fish, dock, terrain,
+material, wind or shadow settings changed in this source checkpoint.
+
+- [x] Reproduce the southern-bank cell with actual worker/retained terrain and
+      independent exact-output comparisons.
+- [x] Remove unused endpoint-normal evaluation and retain full anchor normals.
+- [x] Capture pre-cut CPU attribution without draw/upload/GPU wrappers.
+- [ ] Qualify repeated startup/camera transitions with useful margin, then
+      seamless gameplay/streaming camera behavior and sustained performance.
+- [ ] Correlate shadow buffer traffic with GPU pass cost before selecting a fix.
+
+The seven fishing families/twelve fish, fourteen simultaneous anglers plus safe
+overflow, dry shore access for every tier and two distinct docks remain open
+integrated acceptance requirements. Natural shore composition, dock/outpost art,
+real native fishing/banking/restart and sustained world cost are not closed.
+All LAYOUT-01–08 remain open; no candidate default promotion or budget increase.
+
+Evidence: service-layout pond-south-grounding-before01,
+pond-south-height-sampler01–02, pond-height-regression01,
+pond-height-review52-regression01–02, pond-height-types01–02 (final02),
+pond-height-lint01–02 and pond-height-format01; inland pond build21/runtime23/native37–38 and native38/CPU_PROFILE_REVIEW.md.
+
 ### Inland fishing integration — candidate only
 
 The detached candidate now requests 14 real fishing entities, two for each of

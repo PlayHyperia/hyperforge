@@ -1,11 +1,14 @@
 import type THREE from "../../../extras/three/three";
 
-export type TerrainGridSample = {
+export type TerrainGridHeightSample = {
   height: number;
+  faceIndex: number;
+};
+
+export type TerrainGridSample = TerrainGridHeightSample & {
   nx: number;
   ny: number;
   nz: number;
-  faceIndex: number;
 };
 
 export type TerrainGridBounds = {
@@ -1380,6 +1383,25 @@ export class RetainedTerrainSurface {
 
   /** Local X/Z are the exact Float32 instance offsets used by the grass shader. */
   sample(localX: number, localZ: number, out: TerrainGridSample): boolean {
+    return this.sampleAt(localX, localZ, out, out);
+  }
+
+  /** Same indexed face and height as sample(), without evaluating an unused
+   * face normal. Caller-owned output is unchanged on a miss. */
+  sampleHeight(
+    localX: number,
+    localZ: number,
+    out: TerrainGridHeightSample,
+  ): boolean {
+    return this.sampleAt(localX, localZ, out);
+  }
+
+  private sampleAt(
+    localX: number,
+    localZ: number,
+    out: TerrainGridHeightSample,
+    normalOut?: TerrainGridSample,
+  ): boolean {
     const p = this.positions;
     const r = this.resolution;
     const last = r - 1;
@@ -1434,14 +1456,16 @@ export class RetainedTerrainSurface {
           p[a + 1] +
           (p[b + 1] - p[a + 1]) * (wb / area) +
           (p[c + 1] - p[a + 1]) * (wc / area);
-        const aby = p[b + 1] - p[a + 1],
-          acy = p[c + 1] - p[a + 1],
-          nx = aby * acz - abz * acy,
-          nz = abx * acy - aby * acx;
-        const length = Math.hypot(nx, area, nz);
-        out.nx = nx / length;
-        out.ny = area / length;
-        out.nz = nz / length;
+        if (normalOut) {
+          const aby = p[b + 1] - p[a + 1],
+            acy = p[c + 1] - p[a + 1],
+            nx = aby * acz - abz * acy,
+            nz = abx * acy - aby * acx;
+          const length = Math.hypot(nx, area, nz);
+          normalOut.nx = nx / length;
+          normalOut.ny = area / length;
+          normalOut.nz = nz / length;
+        }
         out.faceIndex = i / 3;
         return true;
       }
@@ -1459,12 +1483,18 @@ export class RetainedTerrainSurface {
     out.height = first
       ? (1 - u - v) * p[a + 1] + u * p[b + 1] + v * p[c + 1]
       : (1 - v) * p[b + 1] + (1 - u) * p[c + 1] + (u + v - 1) * p[d + 1];
-    const sx = first ? (p[b + 1] - p[a + 1]) / dx : (p[d + 1] - p[c + 1]) / dx;
-    const sz = first ? (p[c + 1] - p[a + 1]) / dz : (p[d + 1] - p[b + 1]) / dz;
-    const length = Math.hypot(sx, 1, sz);
-    out.nx = -sx / length;
-    out.ny = 1 / length;
-    out.nz = -sz / length;
+    if (normalOut) {
+      const sx = first
+        ? (p[b + 1] - p[a + 1]) / dx
+        : (p[d + 1] - p[c + 1]) / dx;
+      const sz = first
+        ? (p[c + 1] - p[a + 1]) / dz
+        : (p[d + 1] - p[b + 1]) / dz;
+      const length = Math.hypot(sx, 1, sz);
+      normalOut.nx = -sx / length;
+      normalOut.ny = 1 / length;
+      normalOut.nz = -sz / length;
+    }
     out.faceIndex = (z * last + x) * 2 + (first ? 0 : 1);
     return true;
   }

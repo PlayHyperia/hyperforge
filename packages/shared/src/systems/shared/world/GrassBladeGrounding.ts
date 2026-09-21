@@ -17,6 +17,7 @@ import {
 import {
   RetainedTerrainSurface,
   type TerrainGridBounds,
+  type TerrainGridHeightSample,
   type TerrainGridSample,
   type TerrainGridTriangle,
 } from "./TerrainGridSurface";
@@ -688,6 +689,7 @@ export function* groundGrassBladeSteps(
     nz: 0,
     faceIndex: 0,
   };
+  const endpointSample: TerrainGridHeightSample = { height: 0, faceIndex: 0 };
   const leftFace: EndpointFace = { surface: null, faceIndex: -1 },
     rightFace: EndpointFace = { surface: null, faceIndex: -1 };
   const sampleEndpoint = function* (point: Point, face: EndpointFace) {
@@ -718,17 +720,17 @@ export function* groundGrassBladeSteps(
     }
     if (
       !selected ||
-      !selected.surface.sample(
+      !selected.surface.sampleHeight(
         point.x - selected.surface.centerX,
         point.z - selected.surface.centerZ,
-        sample,
+        endpointSample,
       )
     )
       throw new DeferredGrounding("missing_surface");
     markSurface(selected.surface, "endpoint");
     face.surface = selected.surface;
-    face.faceIndex = sample.faceIndex;
-    return sample.height;
+    face.faceIndex = endpointSample.faceIndex;
+    return endpointSample.height;
   };
   const ensureCoverage = function* (box: TerrainGridBounds) {
     let covered = 0;
