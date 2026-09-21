@@ -5,6 +5,7 @@ import THREE, { float, vec3 } from "../../../../extras/three/three";
 import { World } from "../../../../core/World";
 import { ClientLoader } from "../../../client/ClientLoader";
 import { modelCache } from "../../../../utils/rendering/ModelCache";
+import { INSTANCE_MATRIX_STORAGE_ATTRIBUTE } from "../../../../utils/rendering/createStorageInstancedMesh";
 import { Environment } from "../Environment";
 import { TerrainSystem } from "../TerrainSystem";
 import { WaterSystem } from "../WaterSystem";
@@ -35,7 +36,11 @@ function box(segments = 1) {
 
 function fixture(
   ready = true,
-  options: { finalView?: boolean; screenSpaceLod?: boolean } = {},
+  options: {
+    finalView?: boolean;
+    screenSpaceLod?: boolean;
+    populate?: boolean;
+  } = {},
 ) {
   const world = new World();
   const terrain = world.register("terrain", TerrainSystem) as TerrainSystem;
@@ -75,6 +80,10 @@ function fixture(
     });
   }
   const material = createGPUVegetationMaterial({ vertexColors: true });
+  if (!(material instanceof THREE.MeshStandardNodeMaterial))
+    throw new Error(
+      "Vegetation fixture requires its actual standard node material",
+    );
   vegetation["sharedVegetationMaterial"] = material;
   const heroSource = box(2),
     lodSource = box();
@@ -115,7 +124,7 @@ function fixture(
   vegetation["assetData"].set(data.asset.id, data);
   vegetation["assetDefinitions"].set(data.asset.id, data.asset);
   let serial = 0;
-  const add = (z = 1, scale = 1) => {
+  const add = (z = 1, scale = 1, finalize = true) => {
     expect(
       vegetation["addInstanceToChunk"](
         {
@@ -130,9 +139,11 @@ function fixture(
         data,
       ),
     ).toBe(true);
-    vegetation["finalizeChunk"]("0_0_mushroom");
+    if (finalize) vegetation["finalizeChunk"]("0_0_mushroom");
   };
-  add();
+  if (options.populate === false)
+    vegetation["getOrCreateChunkedMesh"](20, 1, data.asset.id, data);
+  else add();
   const chunk = vegetation["chunkedMeshes"].get("0_0_mushroom")!;
   // Projection/ownership cases deliberately isolate the selector from the
   // separate distance/frustum owner. Final-view cases below never force this.
@@ -175,6 +186,83 @@ function fixture(
 }
 
 describe("isolated static vegetation LOD selector actual CPU ownership", () => {
+  it.each([false, true])(
+    "screen-space LOD=%s retains all 256 matrix slots and the primary owner's explicit dirty flush",
+    (screenSpaceLod) => {
+      const f = fixture(false, {
+        finalView: true,
+        screenSpaceLod,
+        populate: false,
+      });
+      const mesh = f.chunk.mesh;
+      const matrix = mesh.instanceMatrix;
+      const baseline = new THREE.InstancedMesh(f.heroSource, f.material, 256);
+      const matrixBytes = (owner: THREE.InstancedMesh) => {
+        const array = owner.instanceMatrix.array;
+        return new Uint8Array(array.buffer, array.byteOffset, array.byteLength);
+      };
+      try {
+        expect(matrix).toBeInstanceOf(THREE.StorageInstancedBufferAttribute);
+        expect(matrix).toBeInstanceOf(THREE.InstancedBufferAttribute);
+        expect(matrix.usage).toBe(THREE.StaticDrawUsage);
+        expect(matrix.count).toBe(256);
+        expect(matrix.itemSize).toBe(16);
+        expect(matrix.normalized).toBe(false);
+        expect(matrix.array.byteLength).toBe(16384);
+        expect(matrix.version).toBe(0);
+        expect(matrixBytes(mesh)).toEqual(matrixBytes(baseline));
+        expect(mesh.count).toBe(0);
+        expect(mesh.visible).toBe(false);
+        expect(mesh.material).toBe(f.material);
+        expect(mesh.castShadow).toBe(true);
+        expect(mesh.receiveShadow).toBe(false);
+        expect(mesh.frustumCulled).toBe(false);
+        expect(mesh.layers.mask).toBe(2);
+        expect(
+          mesh.geometry.getAttribute(INSTANCE_MATRIX_STORAGE_ATTRIBUTE),
+        ).toBe(matrix);
+        expect(
+          f.heroSource.hasAttribute(INSTANCE_MATRIX_STORAGE_ATTRIBUTE),
+        ).toBe(false);
+
+        f.add();
+        baseline.setMatrixAt(0, new THREE.Matrix4().makeTranslation(20, 30, 1));
+        expect(matrixBytes(mesh)).toEqual(matrixBytes(baseline));
+        expect(matrix.version).toBe(1);
+        expect(mesh.count).toBe(1);
+
+        // Actual population changes CPU bytes but publishes neither count nor
+        // dirty version until the existing finalizeChunk owner flushes them.
+        f.add(37, 1.25, false);
+        baseline.setMatrixAt(
+          1,
+          new THREE.Matrix4().compose(
+            new THREE.Vector3(20, 30, 37),
+            new THREE.Quaternion(),
+            new THREE.Vector3(1.25, 1.25, 1.25),
+          ),
+        );
+        expect(matrixBytes(mesh)).toEqual(matrixBytes(baseline));
+        expect(matrix.version).toBe(1);
+        expect(f.chunk.count).toBe(2);
+        expect(mesh.count).toBe(1);
+        f.vegetation["finalizeChunk"]("0_0_mushroom");
+        expect(matrix.version).toBe(2);
+        expect(mesh.count).toBe(2);
+        expect(mesh.instanceMatrix).toBe(matrix);
+        expect(mesh.visible).toBe(false);
+        expect(mesh.material).toBe(f.material);
+        expect(mesh.castShadow).toBe(true);
+        expect(mesh.receiveShadow).toBe(false);
+        expect(f.group.children).toEqual([mesh]);
+        expect(f.vegetation["lod1ChunkedMeshes"].size).toBe(0);
+        expect(f.vegetation["lod2ChunkedMeshes"].size).toBe(0);
+      } finally {
+        baseline.dispose();
+      }
+    },
+  );
+
   it("swaps only geometry on the original mesh, retaining material, matrices, instance attributes, count and hysteresis", () => {
     const f = fixture(),
       mesh = f.chunk.mesh;
@@ -196,12 +284,23 @@ describe("isolated static vegetation LOD selector actual CPU ownership", () => {
     expect(mesh.instanceMatrix).toBe(matrix);
     expect(matrix.array).toEqual(matrixBytes);
     expect(matrix.version).toBe(version);
+    expect(matrix).toBeInstanceOf(THREE.StorageInstancedBufferAttribute);
+    expect(matrix.usage).toBe(THREE.StaticDrawUsage);
     expect(attributes.map((a) => a.version)).toEqual(attributeVersions);
     for (const geometry of [f.state.heroGeometry, f.state.lodGeometry!]) {
       expect(geometry.getAttribute("instancePosition")).toBe(attributes[0]);
       expect(geometry.getAttribute("instanceScale")).toBe(attributes[1]);
       expect(geometry.getAttribute("instanceRotationY")).toBe(attributes[2]);
+      expect(geometry.getAttribute(INSTANCE_MATRIX_STORAGE_ATTRIBUTE)).toBe(
+        matrix,
+      );
     }
+    expect(f.heroSource.hasAttribute(INSTANCE_MATRIX_STORAGE_ATTRIBUTE)).toBe(
+      false,
+    );
+    expect(f.lodSource.hasAttribute(INSTANCE_MATRIX_STORAGE_ATTRIBUTE)).toBe(
+      false,
+    );
     expect(mesh.count).toBe(1);
     expect(mesh.castShadow).toBe(true);
     expect(mesh.receiveShadow).toBe(false);
@@ -384,42 +483,48 @@ describe("isolated static vegetation LOD selector actual CPU ownership", () => {
   });
 
   it.each(["tile", "world"])(
-    "%s retirement disposes both owned geometries and mesh buffers exactly once, never borrowed model sources",
+    "%s retirement emits CPU disposal once with LOD1 first selected, never disposing borrowed model sources",
     (owner) => {
       const f = fixture();
+      // No renderer is created: this covers registration/dispose events with
+      // LOD1 as the first selected view, not actual GPU allocation or release.
       expect(f.select(100)).toBe(1);
-      const objects = [
-        f.state.heroGeometry,
-        f.state.lodGeometry!,
-        f.chunk.mesh,
-        f.heroSource,
-        f.lodSource,
-        f.sourceMaterial,
-        f.material,
-      ];
-      const counts = objects.map(() => 0);
-      objects.forEach((object, i) =>
-        object.addEventListener("dispose", () => counts[i]++),
-      );
-      if (owner === "tile")
+      const matrix = f.chunk.mesh.instanceMatrix;
+      const version = matrix.version;
+      const matrixBytes = matrix.array.slice();
+      for (const geometry of [f.state.heroGeometry, f.state.lodGeometry!])
+        expect(geometry.getAttribute(INSTANCE_MATRIX_STORAGE_ATTRIBUTE)).toBe(
+          matrix,
+        );
+      const counts = Array<number>(7).fill(0);
+      f.state.heroGeometry.addEventListener("dispose", () => counts[0]++);
+      f.state.lodGeometry!.addEventListener("dispose", () => counts[1]++);
+      f.chunk.mesh.addEventListener("dispose", () => counts[2]++);
+      f.heroSource.addEventListener("dispose", () => counts[3]++);
+      f.lodSource.addEventListener("dispose", () => counts[4]++);
+      f.sourceMaterial.addEventListener("dispose", () => counts[5]++);
+      f.material.addEventListener("dispose", () => counts[6]++);
+      if (owner === "tile") {
         f.vegetation["removeTileChunkRelationships"]("fixture-tile");
-      else f.vegetation.destroy();
+        f.vegetation["removeTileChunkRelationships"]("fixture-tile");
+      } else f.vegetation.destroy();
       expect(counts).toEqual([1, 1, 1, 0, 0, 0, owner === "world" ? 1 : 0]);
       f.vegetation.destroy();
       expect(counts).toEqual([1, 1, 1, 0, 0, 0, 1]);
       expect(f.vegetation["screenSpaceChunks"].size).toBe(0);
       expect(f.vegetation["chunkedMeshes"].size).toBe(0);
+      expect(matrix.version).toBe(version);
+      expect(matrix.array).toEqual(matrixBytes);
     },
   );
 
   it("retires chunk ownership before synchronous geometry disposal can reenter world retirement", () => {
     const f = fixture();
     expect(f.select(100)).toBe(1);
-    const objects = [f.state.heroGeometry, f.state.lodGeometry!, f.chunk.mesh];
-    const counts = objects.map(() => 0);
-    objects.forEach((object, i) =>
-      object.addEventListener("dispose", () => counts[i]++),
-    );
+    const counts = Array<number>(3).fill(0);
+    f.state.heroGeometry.addEventListener("dispose", () => counts[0]++);
+    f.state.lodGeometry!.addEventListener("dispose", () => counts[1]++);
+    f.chunk.mesh.addEventListener("dispose", () => counts[2]++);
     let reentered = false;
     f.state.heroGeometry.addEventListener("dispose", () => {
       if (!reentered) {
@@ -747,6 +852,9 @@ describe("screen-space LOD deferred real HTTP publication", () => {
     "retired=%s admits or ignores the actual late model without replacing the instance owner",
     async (retired) => {
       const f = fixture(false);
+      const matrix = f.chunk.mesh.instanceMatrix;
+      const version = matrix.version;
+      const matrixBytes = matrix.array.slice();
       f.world.register("loader", ClientLoader);
       let response: ServerResponse | undefined;
       const server = createServer((_req, res) => {
@@ -783,6 +891,18 @@ describe("screen-space LOD deferred real HTTP publication", () => {
           expect(f.chunk.mesh.material).toBe(f.material);
           expect(f.chunk.mesh.count).toBe(1);
           expect(f.vegetation["lod1ChunkedMeshes"].size).toBe(0);
+          expect(f.chunk.mesh.instanceMatrix).toBe(matrix);
+          expect(matrix.version).toBe(version);
+          expect(matrix.array).toEqual(matrixBytes);
+          for (const geometry of [f.state.heroGeometry, f.state.lodGeometry!])
+            expect(
+              geometry.getAttribute(INSTANCE_MATRIX_STORAGE_ATTRIBUTE),
+            ).toBe(matrix);
+          expect(
+            f.data.lod1Geometry!.hasAttribute(
+              INSTANCE_MATRIX_STORAGE_ATTRIBUTE,
+            ),
+          ).toBe(false);
         }
       } finally {
         server.closeAllConnections();

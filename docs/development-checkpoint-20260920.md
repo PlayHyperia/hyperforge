@@ -1,5 +1,57 @@
 # World graphics development checkpoint — 2026-09-20
 
+## Primary vegetation storage and native shadow attribution — 2026-09-21
+
+Primary vegetation chunks now reuse the existing versioned storage matrix helper,
+including the same lifetime registration on hero/borrowed LOD geometries. Ordinary
+population/finalization remains unchanged; no geometry, density, transforms, wind,
+material, shadow, camera/LOD criterion or readiness budget is reduced. Separate
+legacy LOD1/LOD2 constructors are untouched.
+
+Final regression: 287/287 across seven suites. Full shared production plus explicit
+affected tests: 707 roots / 2,382 source files / zero diagnostics and stable pins.
+Scoped lint/format pass. The initial test-inclusive seven union-type errors are
+retained in types01 and fixed through actual material narrowing/concrete listeners,
+not casts or mocks. CPU dispose events are not actual GPU reclamation evidence.
+Build22 emits eight isolated bundles from 973 stable inputs.
+
+Native39's incomplete metadata receipt is retained (676 truncated uniform fields);
+native40's complete observation identifies 156 actual mushroom matrix BufferNode
+writes, 16,384 bytes each, in 13 sampled frames. Versions change during loading,
+so not all baseline writes are redundant. Native40 also reproduces the southern
+grass job active CPU failure at 250.400ms / 673,792 operations.
+
+Native41 observes zero mushroom matrix writes via binding or attribute routes in
+30 sampled frames, with complete same-frame/pass correlation and no GPU/observer
+errors. All 18 primary chunks have storage/geometry registration; eight existing
+GPU allocations are observed, six chunks visible at the final view. This is a
+bounded sampled result, not proof that future dirty updates never occur.
+
+Overall readiness is NOT fixed. Native41 misses the thirty-second gate with five
+LOD jobs still running. Dominant queue-call residency shifts to an ocean uniform:
+90 tiny writes / 720 total bytes / 733.800ms residence. Matched-frame medians:
+CPU render46.0ms, native GPU envelope92.209ms. Intervals overlap; no exclusive
+GPU-cost or throughput improvement is established. Native42 uninstrumented fails
+the same southern grass job at250.400ms /708,224 operations,18.323s after the cut.
+No time/work limit is raised; later views do not run. Startup passes in all four
+runs and all fourteen fishing entities reach each actual client.
+
+The actual scene still fails the art bar: oval pond, continuous shore collar,
+sparse bank detail and plain dock/outpost composition. Keep seven families/twelve
+fish, fourteen anglers plus overflow, dry shore access and two distinct docks.
+Next: reduce exact south-bank grounding work with output parity, distinguish
+render/backpressure cause from its blocking write site, then repeat native gates
+and complete shore/dock/fishing gameplay and actual GPU retirement checks.
+
+Owned native39–42 browsers and runtime24/25 temporary databases are closed.
+Protected human localhost/database,145 compiled artifacts,six build inputs and
+retained lock remain unchanged. Eight common mirrors match. All LAYOUT-01–08 open;
+no candidate default promotion, merge, deployment or AAA/performance approval.
+
+Evidence: service-layout pond-vegetation-storage01–02,types01–02,lint01,format01;
+inland pond build21/runtime24/native39–40,build22/runtime25/native41–42 and
+native41/SHADOW_BUFFER_REVIEW.md.
+
 ## Pond grounding parity and shadow-cost attribution — 2026-09-21
 
 The exact southern pond cell now has a real-worker/retained-terrain regression.

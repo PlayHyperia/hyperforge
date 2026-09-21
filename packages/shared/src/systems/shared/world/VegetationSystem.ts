@@ -40,6 +40,10 @@ import { EventType } from "../../../types/events";
 import { LoadPriority } from "../../../types";
 import { modelCache } from "../../../utils/rendering/ModelCache";
 import { ProjectedGeometryError } from "../../../utils/rendering/ProjectedGeometryError";
+import {
+  createStorageInstancedMesh,
+  INSTANCE_MATRIX_STORAGE_ATTRIBUTE,
+} from "../../../utils/rendering/createStorageInstancedMesh";
 import { NoiseGenerator } from "../../../utils/NoiseGenerator";
 import { FrustumQuadtree } from "../../../utils/spatial/FrustumQuadtree";
 import {
@@ -2205,13 +2209,13 @@ export class VegetationSystem extends System {
     geometry.setAttribute("instanceScale", scaleAttr);
     geometry.setAttribute("instanceRotationY", rotationAttr);
 
-    // Create instanced mesh with shared material
-    const mesh = new THREE.InstancedMesh(
+    // Preserve explicit dirty-version uploads across main/shadow passes. This
+    // chunk owns its geometry; the source asset and shared material are borrowed.
+    const mesh = createStorageInstancedMesh(
       geometry,
       assetDataRef.gpuMaterial,
       MAX_INSTANCES_PER_CHUNK,
     );
-    mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
     mesh.count = 0;
     // DISABLE Three.js frustum culling - we do manual frustum culling in updateChunkVisibility()
     // which sets mesh.visible = false. Manual culling is more efficient because:
@@ -2283,6 +2287,12 @@ export class VegetationSystem extends System {
     geometry.setAttribute("instancePosition", chunk.positionAttr);
     geometry.setAttribute("instanceScale", chunk.scaleAttr);
     geometry.setAttribute("instanceRotationY", chunk.rotationAttr);
+    // Either geometry can be the first one rendered. Register the same storage
+    // allocation with both lifetime owners; they retire together with the chunk.
+    geometry.setAttribute(
+      INSTANCE_MATRIX_STORAGE_ATTRIBUTE,
+      chunk.mesh.instanceMatrix,
+    );
     state.lodGeometry = geometry;
   }
 

@@ -1040,6 +1040,90 @@ pond-south-height-sampler01–02, pond-height-regression01,
 pond-height-review52-regression01–02, pond-height-types01–02 (final02),
 pond-height-lint01–02 and pond-height-format01; inland pond build21/runtime23/native37–38 and native38/CPU_PROFILE_REVIEW.md.
 
+### Vegetation matrix storage — upload waste removed, readiness still failing
+
+Native39–40 identify the shadow upload source before changing game code.
+The observer measures actual queue.writeBuffer arguments, not logical buffer
+capacity, and matches samples to native timestamp pairs by sample/frame/context/
+pass. CPU call residence is not GPU execution time. Native39's metadata limit
+truncated 13 groups of 84 uniforms at 32 (676 omitted entries); that incomplete
+receipt and its 30.003s transition failure remain recorded. The bounded metadata
+limit is now 128, not a change to game budgets or graphics quality.
+
+Native40 has a complete observer receipt: all 156 sampled mushroom matrix writes
+match both actual instanceMatrix.array and BufferNode.value. The six chunks
+upload their entire 256-slot/16,384-byte allocation in main and shadow passes.
+Their dirty versions also advance during loading, so not every write is proven
+redundant. Independently, the south-bank gcell_v1_16_17 fails its unchanged
+250ms cumulative active CPU gate at 250.400ms / 673,792 operations.
+
+The primary vegetation chunk constructor now reuses createStorageInstancedMesh.
+Its existing population/finalizeChunk dirty flush remains authoritative. Both
+hero and borrowed screen-space LOD geometries register the same storage matrix
+for lifetime cleanup, including first use at LOD1. Counts, matrix bytes, transforms,
+bounds, materials, wind, camera/LOD criteria and shadow flags are unchanged.
+Legacy separate LOD1/LOD2 constructors are deliberately outside this checkpoint.
+This follows the installed Three instance/storage/attribute ownership paths and
+its documented [dirty-version contract](https://threejs.org/docs/pages/BufferAttribute.html)
+and [WebGPU storage attributes](https://threejs.org/docs/pages/StorageInstancedBufferAttribute.html);
+generic uniform regrouping was not applied.
+
+Final CPU regression: 287/287 across seven suites, including actual registered
+World owners, real HTTP late LOD publication, matrix-byte/version comparisons,
+ray/bounds parity, grass ownership and tree lifetime. Full shared production plus
+explicit affected tests: 707 roots / 2,382 sources / zero diagnostics, stable pins.
+Scoped lint/format pass. The initial explicit test-inclusive typecheck exposed
+seven material/listener union errors; actual instanceof narrowing and concrete
+event-owner registration fix them without casts/mocks. The failed receipt remains.
+CPU disposal-event tests do not prove native GPU resource reclamation.
+
+Build22 emits eight isolated bundles from 973 stable inputs. Native41 uses
+real Chrome/Metal, 1280x720, unchanged rendering and readiness budgets. Its
+30 sampled buffer frames correlate to 151 native pass rows with no unassigned
+pass, errors or overflow (one additional timing-only cleanup-tail frame excluded).
+No mushroom matrix writes occur through either observed binding or attribute
+routes in those sampled frames. This is not a claim of no updates between samples.
+All 18 primary chunks retain 256-slot static storage and both geometry registrations;
+eight existing GPU allocations are observed, six chunks visible at the final view.
+
+Native41 still FAILS the thirty-second camera gate at 30.001s with five LOD jobs
+running, none failed. The dominant synchronous write residence moves to an ocean
+uniform: 90 calls totaling only 720 bytes, but 733.800ms. Matched-frame median CPU
+render time is 46.0ms; the native timestamp envelope median is 92.209ms. Native
+pass intervals can overlap and are not summed as exclusive GPU costs. This is
+consistent with synchronization/backpressure relocating, not a solved bottleneck
+or evidence that tiny water uniforms should be removed.
+
+Native42 is a separate uninstrumented build22 run. Startup passes; the first
+camera fails at 18.323s because the same southern-bank job exceeds its active CPU
+gate: 250.400ms / 708,224 operations. Later views do not run. No deadline, density,
+resolution, shadow or per-job budget was weakened. Both target performance gates
+remain open. All fourteen real fishing entities reach the client.
+
+The actual native41 failure-scene still was inspected after the HUD was reversibly
+hidden. It still shows an overly oval pond, continuous brown shore collar, sparse
+bank composition and insufficient dock/pavilion character. No new art approval.
+All four owned browsers, runtime24/25 and their temporary databases are closed;
+protected human localhost/database and compiled/build inputs remain unchanged.
+
+- [x] Attribute actual shadow matrix writes and correlate bounded native samples.
+- [x] Use versioned primary vegetation storage with exact CPU ownership regressions.
+- [x] Observe the targeted upload removal in the real renderer without lowering quality.
+- [ ] Remove the residual render/backpressure bottleneck; do not mistake a blocking
+      write call for its underlying cause.
+- [ ] Bring the exact south-bank grounding job below its existing active CPU budget
+      with margin, preserving output; repeat native startup/camera gates.
+- [ ] Verify actual GPU retirement/reload and sustained gameplay, not only CPU events.
+- [ ] Finish natural shore/dock/outpost art and all-tier native fishing/banking tests.
+
+Seven fishing families/twelve fish, fourteen simultaneous anglers plus safe
+overflow, shore access at every tier and two distinct docks remain required.
+All LAYOUT-01–08 remain open. No default promotion, merge, deployment or AAA claim.
+
+Evidence: service-layout pond-vegetation-storage01–02 (final02), types01–02
+(final02), lint01/format01; inland pond build21/runtime24/native39–40,
+build22/runtime25/native41–42 and native41/SHADOW_BUFFER_REVIEW.md.
+
 ### Inland fishing integration — candidate only
 
 The detached candidate now requests 14 real fishing entities, two for each of
