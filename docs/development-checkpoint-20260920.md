@@ -1,5 +1,81 @@
 # World graphics development checkpoint — 2026-09-20
 
+## Startup grass throughput traced on both pond candidates — 2026-09-21
+
+This is diagnostic progress, NOT a loading fix, new art acceptance or promotion.
+Native51 (assets-v8) and native52 (assets-v9) use identical build25, private real
+GameClient/server, Chrome/Metal WebGPU, render selectors and unchanged original
+90s startup/250ms polling. Power remained AC. No held camera/daylight, density,
+resolution, shadow, scheduler allowance or deadline change was applied.
+Native49's earlier failed loading gate remains unresolved and retained.
+
+The private observer now attaches inside that existing gate, as soon as the
+actual grass manager/renderer exist. It never advances jobs, calls isCurrent,
+changes readiness or writes GPU resources. Default post-startup review mode is
+preserved. Existing 2,400-frame/4,800-slice/512-job historical array caps remain;
+startup aggregates continue with explicitly disclosed first-N omissions. Live
+owner/scan/counter/phase-bucket loss invalidates the receipt. Neither run omitted
+samples or overflowed. Both attached with zero existing jobs; preattachment
+world/terrain work is not measured. All installed hooks restore exactly.
+
+Both original gates passed: 75.257s for v8, 67.118s for v9. These single
+instrumented observations are NOT a controlled speedup or performance approval.
+Both reach 122 completed cells (96 installed, 26 ready-empty), zero unfinished
+queues and no observed grounding failures. Fourteen distinct fishing entities,
+two per each of seven families, remain present. This is not fourteen live
+anglers, successful catches, unique standing places or route qualification.
+
+| Observed grounding | v8 / native51 | v9 / native52 |
+| --- | ---: | ---: |
+| Manager calls / actual advance calls | 2,260 / 1,876 | 2,060 / 1,749 |
+| Total resumptions / active-slice elapsed | 12,006,904 / 3,282.3ms | 11,804,730 / 2,924.9ms |
+| Still-running operation-bound exits | 746 | 905 |
+| Still-running below-cap deadline-observed exits | 965 | 687 |
+| Final 122 successful jobs' resumptions | 10,708,658 | 10,712,919 |
+| Waiting-support / cancelled jobs | 36 / 34 | 30 / 26 |
+| Nonpublishing resumptions / active time | 874,586 / 328.5ms | 770,256 / 179.9ms |
+
+A terminal status takes precedence; an exhausted explicit operation allowance
+takes precedence over a coincident observed deadline crossing. Counters count
+generator resumptions, not geometric work units. Slice elapsed time includes
+GC/preemption, not measured CPU utilization. Boundary phase pairs may contain
+other phases and cannot establish exclusive function costs. Inter-call gaps
+and renderer frame labels are not FPS or exclusive idle measurements.
+
+Nonpublishing work is 7.28%/6.52% of resumptions and 10.01%/6.15% of active time.
+Most cancellations never advanced (33 of 34 in v8, all 26 in v9). Waiting jobs
+were not repeatedly advanced. Seven/five earlier ready results were genuine
+temporary publications, not automatically waste. Each key ultimately completes;
+both runs retain a fixed focus and no LOD swaps. Final successful v9 work adds
+only 4,261 resumptions (+0.040%); the shelf material change is not established as
+the cause of the old timeout. Most cost remains successful-core grounding.
+Exact waiting reasons/invalidation causes are not captured by these receipts:
+the underlying defer reason lives in state.result.reason, not state.reason.
+
+Private capture finalization now verifies the served framework even after a
+startup failure, and browser-close failure cannot bypass final pin/report writes.
+Exact deferred cow identities can be collected before failed-startup unmount.
+Both native runs validate exact source/manifest pins, known-cow-only errors,
+unmount and owned-browser closure. Failure-path branches are source-reviewed,
+not newly exercised by these two successful runs. No GPU-reclamation claim.
+
+- [x] Collect and reconcile startup scheduling evidence on both candidates
+      without extending admission or reducing visual quality.
+- [ ] Optimize measured successful-core grounding under unchanged output,
+      ownership, geometric-work, resumption, slice and active-time contracts.
+      Compare actual retained meshes/exhaustive oracle before native rechecking;
+      do not merely repeat loading until a green run appears.
+- [ ] Keep natural habitats, characterful docks, all-tier catches, fourteen live
+      anglers plus seven overflow, and bank/supplier routes open for qualification.
+
+Evidence: inland pond runtime32/native51 and runtime33/native52, including
+startup-grass-budget-ledger.json and archived helper sources; service-layout
+pond-startup-build25-reuse01 and pond-startup-ledger-accounting01. All 973
+production inputs and 145 protected artifacts reverified before build reuse.
+Runtimes/browsers are terminal, both temporary databases removed, protected
+localhost:3333 preserved. No production source changed in this diagnostic.
+All LAYOUT-01–08 remain OPEN; no stream, AAA, launch or default acceptance.
+
 ## Eastern shelf groundcover trial and startup variability — 2026-09-21
 
 Assets-v9 changes only the mapped eastern shelf's groundCover emergence/full
