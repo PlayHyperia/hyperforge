@@ -25,6 +25,7 @@ import {
   COMPACT_SERVICE_COURT,
   COMPACT_SERVICE_COURT_LEGACY_FIXTURE,
   groundCompactServiceCourt,
+  getCompactServiceCourtRecipe,
   isCompactBankCourt,
 } from "../../shared/world/CompactServiceCourt";
 import {
@@ -70,6 +71,7 @@ async function fixture(
   startOwner = true,
   withPhysics = true,
   plural = false,
+  pondBank = false,
 ) {
   const config = structuredClone(saved.config!);
   delete config.compactPreparationLodge;
@@ -98,7 +100,11 @@ async function fixture(
         position: { x: Number(x), z: Number(z) },
         rotation: 0,
         recipeId:
-          i < 3 ? "open-timber-bank-haven-v2" : "open-timber-smithy-haven-v3",
+          pondBank && i === 1
+            ? "open-timber-pond-bank-haven-v1"
+            : i < 3
+              ? "open-timber-bank-haven-v2"
+              : "open-timber-smithy-haven-v3",
         stationIds:
           i < 3 ? [`${id}_station`] : [`${id}_anvil`, `${id}_furnace`],
         npcIds: i === 0 ? ["visual_primary_clerk"] : [],
@@ -176,6 +182,129 @@ async function fixture(
 }
 
 describe("compact service court client geometry and lifecycle (not rendered acceptance)", () => {
+  it("uses the explicit pond recipe for matching real physical and private visual owners without changing the town bank", async () => {
+    const { world, owner, visual } = await fixture(
+      false,
+      false,
+      true,
+      true,
+      true,
+      true,
+    );
+    visual.start();
+    const records = owner.getCourts(),
+      leases = visual["visuals"];
+    expect(records).toHaveLength(4);
+    expect(
+      records.map(({ descriptor }) => getCompactServiceCourtRecipe(descriptor)),
+    ).toEqual([
+      "bank-pavilion-v1",
+      "pond-bank-pavilion-v1",
+      "bank-pavilion-v1",
+      "smithy-v1",
+    ]);
+    expect(leases.map((lease) => lease.triangles)).toEqual([
+      1492, 1396, 1492, 1300,
+    ]);
+    expect(leases.map((lease) => lease.geometryBytes)).toEqual([
+      247200, 231888, 247200, 216576,
+    ]);
+    const ready = collectStreamingBankPavilionReadiness(
+      world,
+      records[1].descriptor,
+    );
+    expect(ready.ready).toBe(true);
+    expect(ready.descriptor?.recipeId).toBe("open-timber-pond-bank-haven-v1");
+    // Exact recipe identity must match actual geometry, not just the common
+    // three-mesh budget. Legacy singular admission cannot select the new roof.
+    expect(
+      collectStreamingBankPavilionReadiness(world, {
+        ...records[1].descriptor,
+        recipeId: "open-timber-bank-haven-v2",
+      }).reasons,
+    ).toContain("visual_recipe_mismatch");
+    expect(
+      collectStreamingBankPavilionReadiness(world, {
+        ...records[1].descriptor,
+        schemaVersion: 1,
+        layoutId: "compact-bank-pavilion-v1",
+      }).ready,
+    ).toBe(false);
+    expect(
+      collectStreamingBankPavilionReadiness(world, {
+        ...records[1].descriptor,
+        recipeId: "unadmitted-bank",
+      }).ready,
+    ).toBe(false);
+    const pond = leases[1],
+      town = leases[0],
+      record = records[1];
+    const physical = owner["resources"][1];
+    expect(physical.body!.actor).toBeTruthy();
+    expect(physical.colliders).toHaveLength(3);
+    expect(record.blockingTiles).toEqual(
+      BANK_PAVILION_POSTS.map((post) => ({
+        x: Math.floor(record.position.x + post.x),
+        z: Math.floor(record.position.z + post.z),
+      })),
+    );
+    const disposed = { geometry: 0, material: 0 };
+    for (const [i, role] of (
+      ["timber", "roof", "footings"] as const
+    ).entries()) {
+      const mesh = pond.root.children[i] as THREE.Mesh<
+        THREE.BufferGeometry,
+        THREE.MeshStandardNodeMaterial
+      >;
+      const townMesh = town.root.children[i] as THREE.Mesh<
+        THREE.BufferGeometry,
+        THREE.MeshStandardNodeMaterial
+      >;
+      expect(mesh.geometry).not.toBe(physical.geometry![role]);
+      expect(mesh.geometry.getAttribute("position").array).toEqual(
+        physical.geometry![role].getAttribute("position").array,
+      );
+      expect(mesh.geometry).not.toBe(townMesh.geometry);
+      expect(mesh.material).not.toBe(townMesh.material);
+      expect(mesh.castShadow).toBe(true);
+      expect(mesh.receiveShadow).toBe(true);
+      expect(mesh.material.map).toBeNull();
+      if (role !== "footings") {
+        expect(mesh.material.maskNode).not.toBe(townMesh.material.maskNode);
+        expect(mesh.material.maskShadowNode).not.toBeNull();
+      }
+      mesh.geometry.addEventListener("dispose", () => disposed.geometry++);
+      mesh.material.addEventListener("dispose", () => disposed.material++);
+    }
+    const camera = new THREE.PerspectiveCamera(52, 16 / 9, 0.1, 1000);
+    camera.position.set(
+      record.position.x,
+      record.position.y + 1.7,
+      record.position.z,
+    );
+    camera.lookAt(
+      record.position.x,
+      record.position.y + 1.7,
+      record.position.z - 10,
+    );
+    camera.updateMatrixWorld(true);
+    for (let frame = 0; frame <= 40; frame++)
+      for (const lease of leases) lease.cutaway.update(camera, frame * 16);
+    expect(leases.map((lease) => lease.cutaway.desired)).toEqual([
+      false,
+      true,
+      false,
+      false,
+    ]);
+    expect(pond.cutaway.value).toBe(1);
+    expect(world.stage.scene.children).toContain(pond.root);
+    visual.destroy();
+    visual.destroy();
+    expect(disposed).toEqual({ geometry: 3, material: 3 });
+    expect(pond.root.parent).toBeNull();
+    expect(physical.body!.actor).toBeTruthy();
+  });
+
   it("qualifies every actual bank with explicit primary ordering and rejects an outlier failure despite a ready primary", async () => {
     const { world, owner, visual } = await fixture(
       false,

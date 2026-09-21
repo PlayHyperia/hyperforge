@@ -16,7 +16,10 @@ import {
   COMPACT_PREPARATION_LODGE,
   getCompactPreparationLodgeFootprint,
 } from "./CompactPreparationLodge";
-import { validateCompactServiceCourtBindings } from "./CompactServiceCourt";
+import {
+  isCompactBankCourt,
+  validateCompactServiceCourtBindings,
+} from "./CompactServiceCourt";
 import {
   getCompactPondDockDirection,
   getCompactPondDockSupportBounds,
@@ -634,6 +637,84 @@ export function createCompactIslandPaths(
         ],
       },
     );
+  }
+  // The pond outpost is a distinct service destination, not a second town
+  // forecourt. Bind wear to its actual chest/clerk and the existing landward
+  // arrival. This changes only the shared terrain/grass field: no collision,
+  // grading, navigation restriction, shoreline or resource placement changes.
+  if (inlandPondApproach && serviceCourts) {
+    for (const court of serviceCourts.courts) {
+      if (
+        court.layoutId === serviceCourts.primaryBankId ||
+        !isCompactBankCourt(court)
+      )
+        continue;
+      const chest = pondArea.stations?.find(
+        (row) => row.id === court.stationIds[0],
+      );
+      if (!chest) continue;
+      const clerks = pondArea.npcs.filter((row) =>
+        court.npcIds.includes(row.id),
+      );
+      if (clerks.length !== 1 || court.npcIds.length !== 1)
+        throw new Error("Pond bank wear requires one local bound clerk");
+      const center = court.position;
+      const arrival = inlandPondApproach[0];
+      const distance = Math.hypot(arrival.x - center.x, arrival.z - center.z);
+      if (distance < 6)
+        throw new Error("Pond bank wear requires a separate landward arrival");
+      const toward = {
+        x: (arrival.x - center.x) / distance,
+        z: (arrival.z - center.z) / distance,
+      };
+      const approach = (along: number, across: number): Point => ({
+        x: center.x + toward.x * along - toward.z * across,
+        z: center.z + toward.z * along + toward.x * across,
+      });
+      const inset = (point: Point, amount: number): Point => ({
+        x: point.x + (center.x - point.x) * amount,
+        z: point.z + (center.z - point.z) * amount,
+      });
+      definitions.push(
+        {
+          id: court.layoutId + "-arrival",
+          fromId: "pond-shore",
+          toId: court.layoutId,
+          width: 0.8,
+          blendWidth: 0.65,
+          points: [arrival, approach(6, -0.45), approach(2, -0.2), center],
+        },
+        {
+          id: court.layoutId + "-service",
+          clearing: true,
+          fromId: chest.id,
+          toId: clerks[0].id,
+          width: 1.1,
+          blendWidth: 0.85,
+          points: [
+            inset(chest.position, 0.25),
+            approach(0.6, -0.35),
+            approach(-0.25, 0.35),
+            inset(clerks[0].position, 0.3),
+          ],
+        },
+        {
+          id: court.layoutId + "-activity",
+          wear: true,
+          fromId: chest.id,
+          toId: court.layoutId,
+          width: 0.9,
+          blendWidth: 1.1,
+          maxInfluence: 0.68,
+          points: [
+            inset(chest.position, 0.3),
+            approach(-0.4, -1.1),
+            approach(-1.25, -0.35),
+            approach(-0.6, 0.55),
+          ],
+        },
+      );
+    }
   }
   const buildPath = (definition: (typeof definitions)[number]) => {
     let points = definition.points;

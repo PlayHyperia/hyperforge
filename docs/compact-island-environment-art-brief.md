@@ -969,6 +969,76 @@ pond-egress-capacity-v6-01, pond-egress-resource-regression01/shared-types01/
 root-eslint01 and fishing-stance-pending-eslint02; inland pond build19,
 runtime21 and native34. Failed receipts remain; no live/default promotion.
 
+### Pond outpost composition — source checkpoint, visual qualification open
+
+The pond scope remains seven fishing families, twelve fish, fourteen simultaneous
+anglers plus safe additional arrivals, a dry shore option for every tier, and two
+distinct procedural docks. Current candidate assets-v7 retains the assets-v6
+basin, all fourteen fish placements, supplier, water level, terrain grades and
+two dock placements; only the outlying bank's explicit pavilion recipe changes.
+
+The outpost now has a bound landward connector, chest-to-clerk service wear and
+one unequal partial activity patch. These reuse the existing terrain/grass road
+field and add no floor, obstacle, navigation restriction, shader or material.
+Historical primary-bank path descriptors remain exact. The actual emitted grass
+worker and terrain field agree at 270 added-path/shoulder probes. The baseline pond test
+adds 51 segments (501 total, below the existing 600 bound) with a 256 mask.
+The independent filtered lattice found existing dock-apron bleed up to 0.178612;
+new wear does not increase it at sampled dock/wet locations. This is not a claim
+of a globally zero halo or verified grass-root density. The native meadow
+candidate has its own actual mask/domain and still needs separate qualification.
+
+The opt-in lake-facing pavilion uses a lower 22-degree open roof, asymmetric
+exposed beam ends and one north-facing key plaque. Actual geometry is 1,396
+triangles / 231,888 attribute bytes in three private material batches, versus
+unchanged town geometry at 1,492 / 247,200. Fixed post/foot positions, four open
+passages, roof cutaway ownership and collision-owner selection remain aligned.
+Strict readiness accepts only the exact matching recipe/count contract; a
+legacy singular descriptor cannot silently select the pond recipe.
+
+Native35 build20/assets-v7 passed the unchanged ninety-second startup gate and
+loaded all fourteen fish in real Chrome/Metal WebGPU at 1280x720. Its first
+pond-overview cut FAILED: cell gcell_v1_16_17 (x400..425, z425..450, LOD0)
+exceeded the unchanged 250ms active CPU grounding limit at 251.9ms / 646,144
+operations. Its failure image is diagnostic only, not art/performance approval.
+The scene still needs a less continuous shore collar, stronger asymmetric bank
+composition and complete dock/outpost art. Do not lower density/resolution or
+raise work/settling budgets to turn this into a pass.
+
+Reference use: the official [Three.js procedural terrain example source](https://raw.githubusercontent.com/mrdoob/three.js/dev/examples/webgpu_tsl_procedural_terrain.html)
+separates terrain-height/normal evaluation from slope/height material treatment.
+It is a technique reference, not evidence that this island meets an AAA or
+performance bar; existing shared authoritative terrain/grass ownership remains.
+
+Native36 is a separate close art diagnostic, not a retry that erases native35.
+It MISSED the same ninety-second startup gate; post-failure inspection then
+settled the outpost camera in 12.113s under the unchanged thirty-second camera
+gate. Matched native34/native36 images show the lower roof and exposed service
+wear, but grass still overwhelms the setting and the pavilion lacks sufficient
+landscape character. No AAA art approval or startup/performance approval.
+
+Final focused path/field/owner/PhysX/visual suite: 69/69. Procgen geometry suite:
+15/15. Existing client scene-diagnostics suite: 21/21. Full shared production
+plus explicit changed tests/readiness typing: 709 roots / 2,384 sources, zero
+diagnostics and stable pins. Scoped lint/format and independent source review
+pass. Build20 emits eight isolated bundles from 973 stable source inputs.
+Early fixture/type/alias failures are retained; final tests use the exact shared
+source identity instead of the deliberately protected older compiled runtime.
+
+Both owned browsers and runtime22 are closed; its temporary database is removed.
+All 145 protected compiled artifacts, six build inputs, retained package lock and
+human localhost remain unchanged; eight common status mirrors match. LAYOUT-01–08
+remain open and no candidate default is promoted. Next: profile the exact failed
+southern-bank cell, make a quality-preserving grounding improvement, repeat
+startup/camera transitions, then continue natural pond/dock/outpost composition
+and integrated fishing gameplay. Do not substitute a static still for those gates.
+
+Evidence: service-layout pond-outpost-wear01–05 (final05), pond-bank-recipe-tests01,
+pond-bank-recipe-owner01 (old compiled alias failure), pond-outpost-types01–03
+(final03), pond-outpost-client-regression01 and pond-outpost-lint01; inland pond
+build20, runtime22 and native35–36. Detached assets-v7 differs from assets-v6 in
+the single outpost recipe selection only; both are unqualified.
+
 ### Inland fishing integration — candidate only
 
 The detached candidate now requests 14 real fishing entities, two for each of

@@ -10,6 +10,7 @@ import {
 import {
   BANK_PAVILION_POSTS,
   BANK_PAVILION_RECIPE,
+  POND_BANK_PAVILION_RECIPE,
   createOpenWorkshop,
 } from "./OpenWorkshop";
 import { getRecipe } from "./recipes";
@@ -292,114 +293,267 @@ describe("opt-in Haven architectural geometry", () => {
     }
   });
 
-  it("creates the fixed bank pavilion with deterministic finite outward geometry, metric UVs and bounded three-batch cost", () => {
-    expect(BANK_PAVILION_RECIPE).toEqual({
-      id: "bank-pavilion-v1",
-      width: 8,
-      depth: 8,
-      eaveHeight: 3.2,
-      pitchDegrees: 30,
-      posts: [
-        { x: -3.5, z: -3.5 },
-        { x: 3.5, z: -3.5 },
-        { x: -3.5, z: 3.5 },
-        { x: 3.5, z: 3.5 },
-      ],
-    });
-    expect(Object.isFrozen(BANK_PAVILION_RECIPE)).toBe(true);
-    expect(Object.isFrozen(BANK_PAVILION_POSTS)).toBe(true);
-    expect(BANK_PAVILION_POSTS.every(Object.isFrozen)).toBe(true);
-    const feet = BANK_PAVILION_POSTS.map(() =>
-      Object.freeze({ bottom: -0.08, top: 0.22 }),
-    );
-    Object.freeze(feet);
-    const first = createOpenWorkshop(feet, {
-      recipe: "bank-pavilion-v1",
-      architecturalFinish: "haven-v1",
-    });
-    const repeated = createOpenWorkshop(feet, {
-      recipe: "bank-pavilion-v1",
-      architecturalFinish: "haven-v1",
-    });
-    try {
-      expect(Object.keys(first).sort()).toEqual([
-        "dispose",
-        "footings",
-        "roof",
-        "timber",
-      ]);
-      const bounds = new THREE.Box3();
-      let triangles = 0,
-        bytes = 0;
-      for (const role of ["timber", "roof", "footings"] as const) {
-        const geometry = first[role];
-        expect(geometry).not.toBe(repeated[role]);
-        expect(digest(geometry)).toBe(digest(repeated[role]));
-        bounds.union(geometry.boundingBox!);
-        const p = geometry.getAttribute("position"),
-          n = geometry.getAttribute("normal"),
-          uv = geometry.getAttribute("uv"),
-          index = geometry.index;
-        const count = index?.count ?? p.count;
-        triangles += count / 3;
-        for (const attribute of Object.values(geometry.attributes)) {
-          expect(attribute.count).toBe(p.count);
-          expect([...attribute.array].every(Number.isFinite)).toBe(true);
-          bytes += attribute.array.byteLength;
-        }
-        bytes += index?.array.byteLength ?? 0;
-        for (let corner = 0; corner < count; corner += 3) {
-          const ids = [0, 1, 2].map(
-            (offset) => index?.getX(corner + offset) ?? corner + offset,
-          );
-          const points = ids.map((id) =>
-            new THREE.Vector3().fromBufferAttribute(p, id),
-          );
-          const face = points[1]
-            .clone()
-            .sub(points[0])
-            .cross(points[2].clone().sub(points[0]));
-          expect(
-            face.lengthSq(),
-            `${role}/${corner} degenerate`,
-          ).toBeGreaterThan(1e-12);
-          face.normalize();
-          for (const id of ids) {
-            const normal = new THREE.Vector3().fromBufferAttribute(n, id);
-            expect(normal.length()).toBeCloseTo(1, 5);
-            expect(
-              normal.dot(face),
-              `${role}/${corner} winding`,
-            ).toBeGreaterThan(0.99999);
+  it.each([
+    {
+      recipe: "bank-pavilion-v1" as const,
+      triangles: 1492,
+      bytes: 247200,
+      minZ: -4.45,
+      maxZ: 4.45,
+      pitch: 30,
+    },
+    {
+      recipe: "pond-bank-pavilion-v1" as const,
+      triangles: 1396,
+      bytes: 231888,
+      minZ: -4.95,
+      maxZ: 4.1,
+      pitch: 22,
+    },
+  ])(
+    "creates $recipe with deterministic finite outward geometry, metric UVs and bounded three-batch cost",
+    ({
+      recipe,
+      triangles: expectedTriangles,
+      bytes: expectedBytes,
+      minZ,
+      maxZ,
+      pitch,
+    }) => {
+      expect(BANK_PAVILION_RECIPE).toEqual({
+        id: "bank-pavilion-v1",
+        width: 8,
+        depth: 8,
+        eaveHeight: 3.2,
+        pitchDegrees: 30,
+        posts: [
+          { x: -3.5, z: -3.5 },
+          { x: 3.5, z: -3.5 },
+          { x: -3.5, z: 3.5 },
+          { x: 3.5, z: 3.5 },
+        ],
+      });
+      expect(Object.isFrozen(BANK_PAVILION_RECIPE)).toBe(true);
+      expect(Object.isFrozen(BANK_PAVILION_POSTS)).toBe(true);
+      expect(BANK_PAVILION_POSTS.every(Object.isFrozen)).toBe(true);
+      const feet = BANK_PAVILION_POSTS.map(() =>
+        Object.freeze({ bottom: -0.08, top: 0.22 }),
+      );
+      Object.freeze(feet);
+      const first = createOpenWorkshop(feet, {
+        recipe,
+        architecturalFinish: "haven-v1",
+      });
+      const repeated = createOpenWorkshop(feet, {
+        recipe,
+        architecturalFinish: "haven-v1",
+      });
+      try {
+        expect(Object.keys(first).sort()).toEqual([
+          "dispose",
+          "footings",
+          "roof",
+          "timber",
+        ]);
+        const bounds = new THREE.Box3();
+        let triangles = 0,
+          bytes = 0;
+        for (const role of ["timber", "roof", "footings"] as const) {
+          const geometry = first[role];
+          expect(geometry).not.toBe(repeated[role]);
+          expect(digest(geometry)).toBe(digest(repeated[role]));
+          if (recipe === "bank-pavilion-v1") {
+            // Captured from HEAD264c320a4 before the pond recipe edit in
+            // service-layout-network01/pond-bank-recipe-before01.log.
+            expect(digest(geometry)).toBe(
+              {
+                timber:
+                  "aa7479306dd83425dc3f26a8a0a973dd504d656593981ca7d8d25613b40ef523",
+                roof: "31fc880a9f697975c179c39d30938f1f9a3192f4943ce3abc6ce3d929bdf62b9",
+                footings:
+                  "6e318e2971fbbf0161c74de1cc9200dbe20de7ff61da0cdc820a9981a7f4ecb3",
+              }[role],
+            );
           }
-          const tex = ids.map(
-            (id) => new THREE.Vector2(uv.getX(id), uv.getY(id)),
-          );
-          expect(
-            Math.abs(tex[1].sub(tex[0]).cross(tex[2].sub(tex[0]))),
-            `${role}/${corner} collapsed UV`,
-          ).toBeGreaterThan(1e-9);
+          bounds.union(geometry.boundingBox!);
+          const p = geometry.getAttribute("position"),
+            n = geometry.getAttribute("normal"),
+            uv = geometry.getAttribute("uv"),
+            index = geometry.index;
+          const count = index?.count ?? p.count;
+          triangles += count / 3;
+          for (const attribute of Object.values(geometry.attributes)) {
+            expect(attribute.count).toBe(p.count);
+            expect([...attribute.array].every(Number.isFinite)).toBe(true);
+            bytes += attribute.array.byteLength;
+          }
+          bytes += index?.array.byteLength ?? 0;
+          for (let corner = 0; corner < count; corner += 3) {
+            const ids = [0, 1, 2].map(
+              (offset) => index?.getX(corner + offset) ?? corner + offset,
+            );
+            const points = ids.map((id) =>
+              new THREE.Vector3().fromBufferAttribute(p, id),
+            );
+            const face = points[1]
+              .clone()
+              .sub(points[0])
+              .cross(points[2].clone().sub(points[0]));
+            expect(
+              face.lengthSq(),
+              `${role}/${corner} degenerate`,
+            ).toBeGreaterThan(1e-12);
+            face.normalize();
+            for (const id of ids) {
+              const normal = new THREE.Vector3().fromBufferAttribute(n, id);
+              expect(normal.length()).toBeCloseTo(1, 5);
+              expect(
+                normal.dot(face),
+                `${role}/${corner} winding`,
+              ).toBeGreaterThan(0.99999);
+            }
+            const tex = ids.map(
+              (id) => new THREE.Vector2(uv.getX(id), uv.getY(id)),
+            );
+            expect(
+              Math.abs(tex[1].sub(tex[0]).cross(tex[2].sub(tex[0]))),
+              `${role}/${corner} collapsed UV`,
+            ).toBeGreaterThan(1e-9);
+          }
+        }
+        expect(triangles).toBe(expectedTriangles);
+        expect(triangles).toBeLessThanOrEqual(1500);
+        expect(bytes).toBe(expectedBytes);
+        expect(bounds.min.x).toBeGreaterThanOrEqual(-4.5);
+        expect(bounds.max.x).toBeLessThanOrEqual(4.5);
+        expect(bounds.min.z).toBeCloseTo(minZ, 5);
+        expect(bounds.max.z).toBeCloseTo(maxZ, 5);
+        expect(bounds.min.y).toBeCloseTo(-0.08, 6);
+        expect(bounds.max.y).toBeCloseTo(
+          3.2 + 4 * Math.tan((pitch * Math.PI) / 180) + 0.18,
+          5,
+        );
+        process.stdout.write(
+          `${JSON.stringify({ bankPavilion: { recipe, triangles, bytes, min: bounds.min.toArray(), max: bounds.max.toArray(), hashes: Object.fromEntries((["timber", "roof", "footings"] as const).map((role) => [role, digest(first[role])])) } })}\n`,
+        );
+      } finally {
+        first.dispose();
+        repeated.dispose();
+      }
+    },
+  );
+
+  it("keeps pond feet exact, all passages and the lake gable open, and substitutes one outward north badge within its occupied tile", () => {
+    expect(Object.isFrozen(POND_BANK_PAVILION_RECIPE)).toBe(true);
+    expect(POND_BANK_PAVILION_RECIPE.posts).toBe(BANK_PAVILION_POSTS);
+    const feet = BANK_PAVILION_POSTS.map((_, i) => ({
+      bottom: -0.08 - i * 0.01,
+      top: 0.22 + i * 0.02,
+    }));
+    const pond = createOpenWorkshop(feet, {
+      recipe: "pond-bank-pavilion-v1",
+      architecturalFinish: "haven-v1",
+    });
+    const town = createOpenWorkshop(feet, {
+      recipe: "bank-pavilion-v1",
+      architecturalFinish: "haven-v1",
+    });
+    const material = new THREE.MeshBasicMaterial({ side: THREE.FrontSide });
+    const group = new THREE.Group();
+    for (const role of ["timber", "roof", "footings"] as const)
+      group.add(new THREE.Mesh(pond[role], material));
+    group.updateMatrixWorld(true);
+    const ray = new THREE.Raycaster();
+    const disposals = { timber: 0, roof: 0, footings: 0 };
+    for (const role of ["timber", "roof", "footings"] as const)
+      pond[role].addEventListener("dispose", () => disposals[role]++);
+    try {
+      expect(digest(cornersOf(pond.footings, 0, 112 * 3))).toBe(
+        digest(cornersOf(town.footings, 0, 112 * 3)),
+      );
+      for (const axis of ["x", "z"] as const)
+        for (const sign of [-1, 1])
+          for (let along = -3; along <= 3; along += 0.25)
+            for (let y = 0.25; y <= 2.35; y += 0.3) {
+              const origin = new THREE.Vector3(),
+                direction = new THREE.Vector3();
+              origin[axis] = sign * 5;
+              origin[axis === "x" ? "z" : "x"] = along;
+              origin.y = y;
+              direction[axis] = -sign;
+              ray.set(origin, direction);
+              ray.far = 10;
+              expect(
+                ray.intersectObject(group, true),
+                `${axis}/${sign}/${along}/${y}`,
+              ).toHaveLength(0);
+            }
+      for (const x of [-1.5, 1.5]) {
+        ray.set(new THREE.Vector3(x, 3.86, -5), new THREE.Vector3(0, 0, 1));
+        ray.far = 10;
+        expect(ray.intersectObject(group, true)).toHaveLength(0);
+      }
+      ray.set(new THREE.Vector3(0, 1, 0), new THREE.Vector3(0, -1, 0));
+      ray.far = 2;
+      expect(ray.intersectObject(group, true)).toHaveLength(0);
+      for (const [i, post] of BANK_PAVILION_POSTS.entries()) {
+        ray.set(
+          new THREE.Vector3(post.x, 1, post.z),
+          new THREE.Vector3(0, -1, 0),
+        );
+        expect(ray.intersectObject(group.children[2])[0].point.y).toBeCloseTo(
+          feet[i].top,
+          6,
+        );
+      }
+      const plaque = cornersOf(pond.timber, 1148 * 3, 28 * 3);
+      const bow = cornersOf(pond.footings, 112 * 3, 48 * 3);
+      const shaft = cornersOf(pond.footings, 160 * 3, 20 * 3);
+      for (const part of [plaque, bow, shaft]) {
+        assertSolid(part);
+        const p = part.getAttribute("position");
+        for (let i = 0; i < p.count; i++) {
+          expect(Math.floor(384 + p.getX(i))).toBe(380);
+          expect(Math.floor(438 + p.getZ(i))).toBe(434);
         }
       }
-      expect(triangles).toBe(1492);
-      expect(triangles).toBeLessThanOrEqual(1500);
-      expect(bytes).toBe(247200);
-      expect(bounds.min.x).toBeGreaterThanOrEqual(-4.5);
-      expect(bounds.max.x).toBeLessThanOrEqual(4.5);
-      expect(bounds.min.z).toBeCloseTo(-4.45, 5);
-      expect(bounds.max.z).toBeCloseTo(4.45, 5);
-      expect(bounds.min.y).toBeCloseTo(-0.08, 6);
-      expect(bounds.max.y).toBeCloseTo(
-        3.2 + 4 * Math.tan(Math.PI / 6) + 0.18,
-        5,
+      expect([...plaque.getAttribute("courtRoof").array]).toEqual(
+        Array(84).fill(0),
       );
-      process.stdout.write(
-        `${JSON.stringify({ bankPavilion: { triangles, bytes, min: bounds.min.toArray(), max: bounds.max.toArray(), hashes: Object.fromEntries((["timber", "roof", "footings"] as const).map((role) => [role, digest(first[role])])) } })}\n`,
+      const boardMesh = new THREE.Mesh(plaque, material),
+        key = new THREE.Group();
+      key.add(new THREE.Mesh(bow, material), new THREE.Mesh(shaft, material));
+      key.updateMatrixWorld(true);
+      boardMesh.updateMatrixWorld(true);
+      ray.set(new THREE.Vector3(-3.58, 1.9, -5), new THREE.Vector3(0, 0, 1));
+      ray.far = 2;
+      const keyHit = ray.intersectObject(key, true)[0],
+        boardHit = ray.intersectObject(boardMesh)[0];
+      expect(keyHit.point.z).toBeCloseTo(-3.716, 6);
+      expect(keyHit.distance).toBeLessThan(boardHit.distance);
+      const p = pond.timber.getAttribute("position"),
+        mask = pond.timber.getAttribute("courtRoof");
+      let permanent = 0;
+      for (let i = 0; i < p.count; i++) {
+        if (mask.getX(i) === 0) permanent++;
+        else expect(p.getY(i)).toBeGreaterThan(2.5);
+      }
+      expect(permanent / 3).toBe(112 + 28);
+      // Shifted roof retains its closed underside and negative-Y normals.
+      ray.set(new THREE.Vector3(1, 2, -4.6), new THREE.Vector3(0, 1, 0));
+      ray.far = 4;
+      const underside = ray.intersectObject(group.children[1])[0];
+      expect(underside.face!.normal.y).toBeLessThan(0);
+      expect(pond.roof.boundingBox!.max.y).toBeLessThan(
+        town.roof.boundingBox!.max.y - 0.65,
       );
     } finally {
-      first.dispose();
-      repeated.dispose();
+      pond.dispose();
+      pond.dispose();
+      town.dispose();
+      material.dispose();
     }
+    expect(disposals).toEqual({ timber: 1, roof: 1, footings: 1 });
   });
 
   it("changes only the eight bank brace labels against recorded pre-change physical buffers", () => {

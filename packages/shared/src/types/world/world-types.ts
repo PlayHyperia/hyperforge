@@ -1455,7 +1455,10 @@ export type CompactServiceCourtPlacement = Readonly<{
   terrainProfileId: "compact-duel-island-v6";
   position: Readonly<{ x: number; z: number }>;
   rotation: 0;
-  recipeId: "open-timber-smithy-haven-v3" | "open-timber-bank-haven-v2";
+  recipeId:
+    | "open-timber-smithy-haven-v3"
+    | "open-timber-bank-haven-v2"
+    | "open-timber-pond-bank-haven-v1";
   stationIds: readonly string[];
   npcIds: readonly string[];
 }>;

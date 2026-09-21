@@ -16,6 +16,7 @@ import { canonicalWorldJson } from "../../data/WorldContentIdentity";
 import { System } from "../shared/infrastructure/System";
 import {
   getCompactServiceCourtDescriptors,
+  getCompactServiceCourtRecipe,
   isCompactBankCourt,
   validateCompactServiceCourtBindings,
   type OwnedCompactServiceCourt,
@@ -39,7 +40,7 @@ export function createCompactServiceCourtVisual(
     bank || record.descriptor.recipeId === "open-timber-smithy-haven-v3";
   const prefix = bank ? "compact-bank" : "compact-smithy";
   const geometry = createOpenWorkshop(record.feet, {
-    ...(bank ? ({ recipe: "bank-pavilion-v1" } as const) : {}),
+    recipe: getCompactServiceCourtRecipe(record.descriptor),
     architecturalFinish: haven ? "haven-v1" : undefined,
   });
   const materials = new Set<THREE.Material>();

@@ -8,6 +8,7 @@ import type { StaticCollisionLease } from "../movement/CollisionMatrix";
 import {
   createCompactServiceCourtGrassExclusions,
   getCompactServiceCourtDescriptors,
+  getCompactServiceCourtRecipe,
   groundCompactServiceCourt,
   isCompactBankCourt,
   validateCompactServiceCourtBindings,
@@ -87,7 +88,7 @@ export class CompactServiceCourtSystem extends System {
         this.resources.push(owned);
         if (this.world.physics) {
           owned.geometry = createOpenWorkshop(record.feet, {
-            recipe: isBank ? "bank-pavilion-v1" : "smithy-v1",
+            recipe: getCompactServiceCourtRecipe(descriptor),
             architecturalFinish:
               isBank ||
               record.descriptor.recipeId === "open-timber-smithy-haven-v3"

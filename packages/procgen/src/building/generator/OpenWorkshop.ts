@@ -27,7 +27,22 @@ export const BANK_PAVILION_RECIPE = Object.freeze({
   pitchDegrees: 30,
   posts: BANK_PAVILION_POSTS,
 });
-export type OpenWorkshopRecipe = "smithy-v1" | "bank-pavilion-v1";
+/** Lakeward is local -Z. Fixed asymmetry fits the existing 10m court envelope. */
+export const POND_BANK_PAVILION_RECIPE = Object.freeze({
+  id: "pond-bank-pavilion-v1" as const,
+  width: 8,
+  depth: 8,
+  eaveHeight: 3.2,
+  pitchDegrees: 22,
+  roofOffsetZ: -0.35,
+  frontBeamZ: -4.75,
+  backBeamZ: 3.85,
+  frontPurlinZ: -4.95,
+  backPurlinZ: 3.95,
+  posts: BANK_PAVILION_POSTS,
+});
+export type OpenWorkshopRecipe =
+  "smithy-v1" | "bank-pavilion-v1" | "pond-bank-pavilion-v1";
 export type WorkshopFoot = Readonly<{ bottom: number; top: number }>;
 export type OpenWorkshopGeometry = Readonly<{
   timber: THREE.BufferGeometry;
@@ -107,7 +122,8 @@ export function createOpenWorkshop(
   if (
     (options.recipe !== undefined &&
       options.recipe !== "smithy-v1" &&
-      options.recipe !== BANK_PAVILION_RECIPE.id) ||
+      options.recipe !== BANK_PAVILION_RECIPE.id &&
+      options.recipe !== POND_BANK_PAVILION_RECIPE.id) ||
     (options.architecturalFinish !== undefined &&
       options.architecturalFinish !== "haven-v1") ||
     feet.length !== 4 ||
@@ -126,7 +142,8 @@ export function createOpenWorkshop(
       "Open workshop requires four bounded terrain-supported feet",
     );
   const owned = new Set<THREE.BufferGeometry>();
-  const bank = options.recipe === BANK_PAVILION_RECIPE.id;
+  const pondBank = options.recipe === POND_BANK_PAVILION_RECIPE.id;
+  const bank = pondBank || options.recipe === BANK_PAVILION_RECIPE.id;
   const posts = bank ? BANK_PAVILION_POSTS : OPEN_WORKSHOP_POSTS;
   let disposed = false;
   const dispose = () => {
@@ -162,7 +179,11 @@ export function createOpenWorkshop(
           bank,
         ),
       );
-    const pitchDegrees = bank ? BANK_PAVILION_RECIPE.pitchDegrees : 24;
+    const pitchDegrees = pondBank
+      ? POND_BANK_PAVILION_RECIPE.pitchDegrees
+      : bank
+        ? BANK_PAVILION_RECIPE.pitchDegrees
+        : 24;
     const slope = Math.tan((pitchDegrees * Math.PI) / 180);
     const roofHalfWidth = bank ? BANK_PAVILION_RECIPE.width / 2 : 5;
     const postHalfWidth = bank ? 3.5 : 5;
@@ -210,8 +231,20 @@ export function createOpenWorkshop(
     for (const x of [-postHalfWidth, postHalfWidth])
       frame.push(
         member(
-          [x, tieY, bank ? -4.1 : -3.1],
-          [x, tieY, bank ? 4.15 : 3.15],
+          [
+            x,
+            tieY,
+            pondBank
+              ? POND_BANK_PAVILION_RECIPE.frontBeamZ
+              : bank
+                ? -4.1
+                : -3.1,
+          ],
+          [
+            x,
+            tieY,
+            pondBank ? POND_BANK_PAVILION_RECIPE.backBeamZ : bank ? 4.15 : 3.15,
+          ],
           0.24,
           0.28,
         ),
@@ -239,18 +272,30 @@ export function createOpenWorkshop(
       },
     );
     for (const geometry of [...gable.roofs, ...gable.walls]) take(geometry);
+    if (pondBank) {
+      // Shift the closed roof and its trim together; supports stay on their
+      // exact canonical feet. Longer exposed lakeward beams carry this eave.
+      for (const geometry of [...gable.roofs, ...gable.walls])
+        geometry.translate(0, 0, POND_BANK_PAVILION_RECIPE.roofOffsetZ);
+    }
     frame.push(...gable.walls);
     // Three explicit trusses carry the ridge and longitudinal purlins. Their
     // lower tie/strut ends stay in the existing upper-cutaway/clearance band.
     const peak = 3.2 + roofHalfWidth * slope;
     const frameDepth = bank ? 4.2 : 3.2;
+    const frameFront = pondBank
+      ? POND_BANK_PAVILION_RECIPE.frontPurlinZ
+      : -frameDepth;
+    const frameBack = pondBank
+      ? POND_BANK_PAVILION_RECIPE.backPurlinZ
+      : frameDepth;
     const purlinX = bank ? 2 : 2.55;
     frame.push(
-      member([0, peak - 0.13, -frameDepth], [0, peak - 0.13, frameDepth], 0.18),
+      member([0, peak - 0.13, frameFront], [0, peak - 0.13, frameBack], 0.18),
     );
     for (const x of [-purlinX, purlinX]) {
       const y = peak - Math.abs(x) * slope - 0.16;
-      frame.push(member([x, y, -frameDepth], [x, y, frameDepth], 0.16, 0.2));
+      frame.push(member([x, y, frameFront], [x, y, frameBack], 0.16, 0.2));
     }
     const middleZ = bank ? 0 : 0.5;
     for (const z of [frontZ, middleZ, backZ]) {
@@ -283,14 +328,18 @@ export function createOpenWorkshop(
         );
     }
     if (bank) {
-      // South (+Z) approach: small bevelled timber plaques fixed directly to
-      // the two posts. Append to preserve every pre-existing primitive byte.
+      // Town: two south (+Z) plaques. Pond: one lakeward (-Z) plaque,
+      // replacing rather than accumulating ornament. Both retain the same
+      // bank-service key and use the existing post's blocked tile.
       // Both plaque and shallow stone key stay within the post's blocked tile;
       // neither becomes a gable-height orphan when the roof is cut away.
-      for (const { x, z } of posts.filter((post) => post.z > 0)) {
+      const sign = pondBank ? -1 : 1;
+      for (const { x, z } of posts.filter((post) =>
+        pondBank ? post.z < 0 && post.x < 0 : post.z > 0,
+      )) {
         const plaque = member(
-          [x, 1.75, z + 0.115],
-          [x, 1.75, z + 0.2],
+          [x, 1.75, z + sign * 0.115],
+          [x, 1.75, z + sign * 0.2],
           0.52,
           0.66,
         );
@@ -328,7 +377,8 @@ export function createOpenWorkshop(
           applyGeometryAttributes(relief, palette.trim, "generic", {
             applyUVs: false,
           });
-          relief.translate(x, 1.9, z + 0.198);
+          if (pondBank) relief.rotateY(Math.PI);
+          relief.translate(x, 1.9, z + sign * 0.198);
           bases.push(relief);
         }
       }

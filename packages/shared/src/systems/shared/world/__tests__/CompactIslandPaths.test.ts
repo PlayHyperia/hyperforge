@@ -30,8 +30,10 @@ import {
 } from "../WorldTerrainProfile";
 import type {
   CompactPondDocksManifest,
+  CompactServiceCourtPlacement,
   CompactServiceCourtsManifest,
   RoadTileSegment,
+  WorldArea,
 } from "../../../../types/world/world-types";
 import type { FlatZone } from "../../../../types/world/terrain";
 import { getCompactPondDockSupportBounds } from "../DockDefinition";
@@ -44,6 +46,7 @@ import THREE from "../../../../extras/three/three";
 import { DuelArenaVisualsSystem } from "../../../client/DuelArenaVisualsSystem";
 import {
   COMPACT_BANK_PAVILION,
+  COMPACT_SERVICE_COURT,
   validateCompactServiceCourts,
   validateCompactServiceCourtBindings,
 } from "../CompactServiceCourt";
@@ -135,204 +138,432 @@ async function withRoads(
 }
 
 describe("inland pond opt-in circulation with actual terrain and road owner", () => {
-  it("starts the moved basin and joins the landing, guide and bank without floor, dock or wet-ground paint", async () => {
-    const basin = JSON.parse(
-      readFileSync(
-        new URL(
-          "../__fixtures__/inland-pond-basin-candidate.json",
-          import.meta.url,
+  it.each([false, true])(
+    "starts the moved basin and joins the landing, guide and bank without floor, dock or wet-ground paint (outpost=%s)",
+    async (withOutpost) => {
+      const basin = JSON.parse(
+        readFileSync(
+          new URL(
+            "../__fixtures__/inland-pond-basin-candidate.json",
+            import.meta.url,
+          ),
+          "utf8",
         ),
-        "utf8",
-      ),
-    ) as {
-      flatZone: FlatZone;
-      waterBody: {
-        id: string;
-        centerX: number;
-        centerZ: number;
-        radius: number;
-        surfaceY: number;
+      ) as {
+        flatZone: FlatZone;
+        waterBody: {
+          id: string;
+          centerX: number;
+          centerZ: number;
+          radius: number;
+          surfaceY: number;
+        };
+        outlyingBankStudy: {
+          court: CompactServiceCourtPlacement;
+          station: NonNullable<WorldArea["stations"]>[number];
+          npc: WorldArea["npcs"][number];
+        };
       };
-    };
-    const docks: CompactPondDocksManifest = {
-      schemaVersion: 1,
-      layoutId: "compact-pond-docks-v1",
-      terrainProfileId: "compact-duel-island-v6",
-      waterBodyId: basin.waterBody.id,
-      docks: [
-        {
-          id: "haven-fishing-landing",
-          x: 390,
-          z: 424.5,
-          rotation: 90,
-          recipeId: "haven-fishing-landing-v1",
-        },
-        {
-          id: "haven-reed-jetty",
-          x: 433,
-          z: 415.5,
-          rotation: 270,
-          recipeId: "haven-reed-jetty-v1",
-        },
-      ],
-    };
-    const saved = {
-      config: DataManager["worldConfig"],
-      profile: DataManager["worldTerrainProfile"],
-      identity: DataManager["worldContentIdentity"],
-      pond: ALL_WORLD_AREAS.haven_pond,
-      haven: ALL_WORLD_AREAS.central_haven,
-    };
-    const world = new World();
-    try {
-      const config = structuredClone(saved.config!);
-      delete config.compactPreparationLodge;
-      delete config.compactServiceCourts;
-      config.compactBankPavilion = structuredClone(COMPACT_BANK_PAVILION);
-      config.compactPondDocks = docks;
-      const pete = Object.values(ALL_WORLD_AREAS)
-        .flatMap((area) => area.npcs)
-        .find((npc) => npc.id === "fisherman_pete")!;
-      ALL_WORLD_AREAS.central_haven = {
-        ...saved.haven,
-        npcs: saved.haven.npcs.filter((npc) => npc.id !== "fisherman_pete"),
+      const docks: CompactPondDocksManifest = {
+        schemaVersion: 1,
+        layoutId: "compact-pond-docks-v1",
+        terrainProfileId: "compact-duel-island-v6",
+        waterBodyId: basin.waterBody.id,
+        docks: [
+          {
+            id: "haven-fishing-landing",
+            x: 390,
+            z: 424.5,
+            rotation: 90,
+            recipeId: "haven-fishing-landing-v1",
+          },
+          {
+            id: "haven-reed-jetty",
+            x: 433,
+            z: 415.5,
+            rotation: 270,
+            recipeId: "haven-reed-jetty-v1",
+          },
+        ],
       };
-      ALL_WORLD_AREAS.haven_pond = {
-        ...structuredClone(saved.pond),
-        flatZones: [basin.flatZone],
-        waterBodies: [basin.waterBody],
-        npcs: [{ ...pete, position: { x: 387, y: 0, z: 419 } }],
+      const saved = {
+        config: DataManager["worldConfig"],
+        profile: DataManager["worldTerrainProfile"],
+        identity: DataManager["worldContentIdentity"],
+        pond: ALL_WORLD_AREAS.haven_pond,
+        haven: ALL_WORLD_AREAS.central_haven,
       };
-      DataManager["worldContentIdentity"] = null;
-      DataManager.setWorldConfig(config);
-      const terrain = world.register("terrain", TerrainSystem) as TerrainSystem;
-      const roads = world.register(
-        "roads",
-        RoadNetworkSystem,
-      ) as RoadNetworkSystem;
-      await terrain.init();
-      terrain["loadWaterBodiesFromManifest"]();
-      terrain["loadFlatZonesFromManifest"]();
-      await roads.init();
-      const height = (x: number, z: number) =>
-        terrain.getResourceGroundHeight(x, z);
-      // Reproduce the actual old startup fault: relocation alone cannot pass
-      // the existing complete-footprint lobby keep-out.
-      expect(() =>
-        createCompactIslandPaths(
+      const world = new World();
+      try {
+        const config = structuredClone(saved.config!);
+        delete config.compactPreparationLodge;
+        delete config.compactServiceCourts;
+        config.compactBankPavilion = structuredClone(COMPACT_BANK_PAVILION);
+        config.compactPondDocks = docks;
+        const pete = Object.values(ALL_WORLD_AREAS)
+          .flatMap((area) => area.npcs)
+          .find((npc) => npc.id === "fisherman_pete")!;
+        ALL_WORLD_AREAS.central_haven = {
+          ...saved.haven,
+          npcs: saved.haven.npcs
+            .filter((npc) => npc.id !== "fisherman_pete")
+            .map((npc) =>
+              npc.id === "bank_clerk"
+                ? { ...npc, position: { ...npc.position, x: 352, z: 322 } }
+                : npc,
+            ),
+        };
+        ALL_WORLD_AREAS.haven_pond = {
+          ...structuredClone(saved.pond),
+          flatZones: [basin.flatZone],
+          waterBodies: [basin.waterBody],
+          npcs: [{ ...pete, position: { x: 387, y: 0, z: 419 } }],
+        };
+        if (withOutpost) {
+          const study = basin.outlyingBankStudy;
+          const clerk = saved.haven.npcs.find(
+            (row) => row.id === "bank_clerk",
+          )!;
+          ALL_WORLD_AREAS.haven_pond.stations = [
+            structuredClone(study.station),
+          ];
+          ALL_WORLD_AREAS.haven_pond.npcs.push({
+            ...structuredClone(clerk),
+            ...structuredClone(study.npc),
+          });
+          config.compactServiceCourts = {
+            schemaVersion: 1,
+            layoutId: "compact-service-courts-v1",
+            terrainProfileId: "compact-duel-island-v6",
+            primaryBankId: COMPACT_BANK_PAVILION.layoutId,
+            courts: [
+              {
+                ...structuredClone(COMPACT_SERVICE_COURT),
+                schemaVersion: 2,
+                recipeId: "open-timber-smithy-haven-v3",
+                stationIds: ["furnace_spawn", "anvil_spawn"],
+                npcIds: [],
+              },
+              {
+                ...structuredClone(COMPACT_BANK_PAVILION),
+                schemaVersion: 2,
+                stationIds: ["bank_spawn"],
+                npcIds: ["bank_clerk"],
+              },
+              structuredClone(study.court),
+            ],
+          };
+          delete config.compactBankPavilion;
+          delete config.compactServiceCourt;
+        }
+        DataManager["worldContentIdentity"] = null;
+        DataManager.setWorldConfig(config);
+        const terrain = world.register(
+          "terrain",
+          TerrainSystem,
+        ) as TerrainSystem;
+        const roads = world.register(
+          "roads",
+          RoadNetworkSystem,
+        ) as RoadNetworkSystem;
+        await terrain.init();
+        terrain["loadWaterBodiesFromManifest"]();
+        terrain["loadFlatZonesFromManifest"]();
+        await roads.init();
+        const height = (x: number, z: number) =>
+          terrain.getResourceGroundHeight(x, z);
+        // Reproduce the actual old startup fault: relocation alone cannot pass
+        // the existing complete-footprint lobby keep-out.
+        expect(() =>
+          createCompactIslandPaths(
+            config.terrainProfile!,
+            ALL_WORLD_AREAS,
+            getDuelArenaConfig(),
+            height,
+            { compactBankPavilion: COMPACT_BANK_PAVILION },
+          ),
+        ).toThrow("Compact path would paint an authored floor: pond-bank");
+        await roads.start();
+        const paths = createCompactIslandPaths(
           config.terrainProfile!,
           ALL_WORLD_AREAS,
           getDuelArenaConfig(),
           height,
-          { compactBankPavilion: config.compactBankPavilion },
-        ),
-      ).toThrow("Compact path would paint an authored floor: pond-bank");
-      await roads.start();
-      const paths = createCompactIslandPaths(
-        config.terrainProfile!,
-        ALL_WORLD_AREAS,
-        getDuelArenaConfig(),
-        height,
-        config,
-      );
-      expect(roads.getRoads().map((road) => road.path)).toEqual(
-        paths.map((path) => path.path),
-      );
-      const route = paths.find((path) => path.id === "compact-path-pond-bank")!;
-      expect(route.path[0]).toMatchObject({ x: 386.5, z: 424.5 });
-      expect(route.path.at(-1)).toMatchObject({ x: 348, z: 321 });
-      expect(route.path.length).toBeLessThanOrEqual(256);
-      expect(
-        Math.min(
-          ...route.path
-            .slice(1)
-            .map((b, i) =>
-              compactPathSegmentDistance({ x: 387, z: 419 }, route.path[i], b),
-            ),
-        ),
-      ).toBeLessThan(3.5);
-      const floors = createDuelArenaFloorZones(
-        getDuelArenaConfig(),
-        getDuelArenaGradeHeight(),
-      );
-      const pondPaths = paths.filter((path) => path.id.includes("pond-bank"));
-      let dryBankChecks = 0;
-      for (const path of pondPaths) {
-        const radius =
-          path.width / 2 + (path.blendWidth ?? COMPACT_PATH_BLEND_WIDTH);
-        for (let i = 1; i < path.path.length; i++) {
-          const a = path.path[i - 1],
-            b = path.path[i];
-          for (const floor of floors)
-            expect(
-              compactPathIntersectsBounds(
-                a,
-                b,
-                {
-                  minX: floor.centerX - floor.width / 2,
-                  maxX: floor.centerX + floor.width / 2,
-                  minZ: floor.centerZ - floor.depth / 2,
-                  maxZ: floor.centerZ + floor.depth / 2,
-                },
-                radius,
+          config,
+        );
+        if (withOutpost) {
+          const before = createCompactIslandPaths(
+            config.terrainProfile!,
+            ALL_WORLD_AREAS,
+            getDuelArenaConfig(),
+            height,
+            {
+              compactBankPavilion: COMPACT_BANK_PAVILION,
+              compactPondDocks: docks,
+            },
+          );
+          const added = paths.filter((path) =>
+            path.id.includes("haven-pond-bank-v1"),
+          );
+          expect(added.map((path) => path.id)).toEqual([
+            "compact-path-haven-pond-bank-v1-arrival",
+            "compact-clearing-haven-pond-bank-v1-service",
+            "compact-wear-haven-pond-bank-v1-activity",
+          ]);
+          expect(paths.filter((path) => !added.includes(path))).toEqual(before);
+          expect(added[0].path[0]).toMatchObject({ x: 386.5, z: 424.5 });
+          expect(added[0].path.at(-1)).toMatchObject({ x: 384, z: 438 });
+          expect(added[1]).toMatchObject({
+            fromId: "bank_haven_pond",
+            toId: "pond_bank_clerk",
+          });
+          expect(added[2].maxInfluence).toBeLessThan(0.8);
+          expect(added.every((path) => path.path.length <= 256)).toBe(true);
+          // Existing paths remain exact; shared wear raises only this service
+          // area. It is a scalar paint field, never an authority for walkability.
+          expect(roads.getRoadInfluenceAt(384, 438)).toBe(1);
+          expect(roads.getRoadInfluenceAt(378, 438)).toBe(0);
+          const segments = roads.getRoadSegmentsForGPU();
+          expect(segments.length).toBeLessThanOrEqual(600);
+          const internal = terrain as unknown as TerrainInternals;
+          const grassSample = new Function(
+            "self",
+            `${GRASS_WORKER_CODE}\nreturn calculateRoadInfluence;`,
+          )({}) as (
+            x: number,
+            z: number,
+            candidates: typeof segments,
+            blend: number,
+          ) => number;
+          let fieldChecks = 0;
+          for (const path of added)
+            for (const point of path.path)
+              for (const offset of [-1.5, -0.5, 0, 0.5, 1.5]) {
+                const x = point.x + offset,
+                  z = point.z;
+                const expected = roads.getRoadInfluenceAt(x, z);
+                const candidates = internal.getWorldSpaceRoadSegmentsForRegion(
+                  x - 0.25,
+                  z - 0.25,
+                  x + 0.25,
+                  z + 0.25,
+                );
+                expect(grassSample(x, z, candidates, 0.5)).toBeCloseTo(
+                  expected,
+                  10,
+                );
+                expect(
+                  internal.calculateRoadInfluenceAtVertex(
+                    x,
+                    z,
+                    Math.floor(x / 100),
+                    Math.floor(z / 100),
+                  ),
+                ).toBeCloseTo(expected, 10);
+                fieldChecks++;
+              }
+          const bounds =
+            roads["calculateAuthoredRoadMaskBounds"](segments) ??
+            roads["calculateRoadMaskBounds"](segments);
+          const resolution = roads["calculateRoadMaskTextureSize"](
+            bounds.worldSize,
+          );
+          const mask = roads.generateRoadInfluenceTexture(
+            resolution,
+            bounds.worldSize,
+            0.5,
+            bounds.centerX,
+            bounds.centerZ,
+          )!;
+          const stored = roads.getRoads(),
+            current = stored.slice();
+          let previousMask: typeof mask;
+          try {
+            stored.splice(
+              0,
+              stored.length,
+              ...current.filter(
+                (row) => !row.id.includes("haven-pond-bank-v1"),
               ),
-            ).toBe(false);
-          for (const dock of docks.docks)
-            expect(
-              compactPathIntersectsBounds(
-                a,
-                b,
-                getCompactPondDockSupportBounds(dock),
-                radius,
-              ),
-            ).toBe(false);
-          // Independent denser polar samples around every segment, including
-          // end caps: complete paint support, not merely the centerline.
-          for (let t = 0; t <= 8; t++)
-            for (let angle = 0; angle < 32; angle++) {
-              const x =
-                a.x +
-                ((b.x - a.x) * t) / 8 +
-                Math.cos((angle * Math.PI) / 16) * radius;
-              const z =
-                a.z +
-                ((b.z - a.z) * t) / 8 +
-                Math.sin((angle * Math.PI) / 16) * radius;
-              if (
+            );
+            previousMask = roads.generateRoadInfluenceTexture(
+              resolution,
+              bounds.worldSize,
+              0.5,
+              bounds.centerX,
+              bounds.centerZ,
+            )!;
+          } finally {
+            stored.splice(0, stored.length, ...current);
+            roads["buildTileCache"]();
+            roads.generateRoadInfluenceTexture(
+              resolution,
+              bounds.worldSize,
+              0.5,
+              bounds.centerX,
+              bounds.centerZ,
+            );
+          }
+          // Check the actually filtered mask, not just the analytical capsules.
+          // The entire new footprint is dry; retain dock/apron exclusion on a
+          // dense independent lattice around the outpost and its connector.
+          let checked = 0,
+            historicalDockMaximum = 0;
+          for (let x = 378; x <= 390; x += 0.25)
+            for (let z = 423; z <= 444; z += 0.25) {
+              const value = sampleLinearMask(mask.data, bounds, x, z);
+              const wet =
                 Math.hypot(
                   x - basin.waterBody.centerX,
                   z - basin.waterBody.centerZ,
-                ) <= basin.waterBody.radius
-              ) {
-                expect(height(x, z)).toBeGreaterThan(basin.waterBody.surfaceY);
-                dryBankChecks++;
+                ) <= basin.waterBody.radius &&
+                height(x, z) <= basin.waterBody.surfaceY;
+              const dock = docks.docks.some((row) => {
+                const b = getCompactPondDockSupportBounds(row);
+                return x >= b.minX && x <= b.maxX && z >= b.minZ && z <= b.maxZ;
+              });
+              if (wet || dock) {
+                const previous = sampleLinearMask(
+                  previousMask.data,
+                  bounds,
+                  x,
+                  z,
+                );
+                expect(value, `new filtered paint at ${x},${z}`).toBe(previous);
+                if (wet) expect(value).toBe(0);
+                else
+                  historicalDockMaximum = Math.max(
+                    historicalDockMaximum,
+                    previous,
+                  );
+                checked++;
               }
             }
+          expect(checked).toBeGreaterThan(0);
+          process.stdout.write(
+            "Pond outpost wear " +
+              JSON.stringify({
+                addedSegments: added.reduce(
+                  (n, path) => n + path.path.length - 1,
+                  0,
+                ),
+                totalSegments: segments.length,
+                resolution,
+                checked,
+                historicalDockMaximum,
+                fieldChecks,
+                centerInfluence: roads.getRoadInfluenceAt(384, 438),
+              }) +
+              "\n",
+          );
         }
-      }
-      expect(dryBankChecks).toBeGreaterThan(0);
-      const terminal = route.path[0];
-      expect(() =>
-        createCompactIslandPaths(
-          config.terrainProfile!,
-          ALL_WORLD_AREAS,
+        expect(roads.getRoads().map((road) => road.path)).toEqual(
+          paths.map((path) => path.path),
+        );
+        const route = paths.find(
+          (path) => path.id === "compact-path-pond-bank",
+        )!;
+        expect(route.path[0]).toMatchObject({ x: 386.5, z: 424.5 });
+        expect(route.path.at(-1)).toMatchObject({ x: 348, z: 321 });
+        expect(route.path.length).toBeLessThanOrEqual(256);
+        expect(
+          Math.min(
+            ...route.path
+              .slice(1)
+              .map((b, i) =>
+                compactPathSegmentDistance(
+                  { x: 387, z: 419 },
+                  route.path[i],
+                  b,
+                ),
+              ),
+          ),
+        ).toBeLessThan(3.5);
+        const floors = createDuelArenaFloorZones(
           getDuelArenaConfig(),
-          (x, z) =>
-            Math.hypot(x - terminal.x, z - terminal.z) < 1.5
-              ? basin.waterBody.surfaceY - 0.1
-              : height(x, z),
-          config,
-        ),
-      ).toThrow("Compact path would paint water: pond-bank");
-    } finally {
-      world.destroy();
-      DataManager["worldConfig"] = saved.config;
-      DataManager["worldTerrainProfile"] = saved.profile;
-      DataManager["worldContentIdentity"] = saved.identity;
-      ALL_WORLD_AREAS.haven_pond = saved.pond;
-      ALL_WORLD_AREAS.central_haven = saved.haven;
-    }
-  });
+          getDuelArenaGradeHeight(),
+        );
+        const pondPaths = paths.filter((path) => path.id.includes("pond-bank"));
+        let dryBankChecks = 0;
+        for (const path of pondPaths) {
+          const radius =
+            path.width / 2 + (path.blendWidth ?? COMPACT_PATH_BLEND_WIDTH);
+          for (let i = 1; i < path.path.length; i++) {
+            const a = path.path[i - 1],
+              b = path.path[i];
+            for (const floor of floors)
+              expect(
+                compactPathIntersectsBounds(
+                  a,
+                  b,
+                  {
+                    minX: floor.centerX - floor.width / 2,
+                    maxX: floor.centerX + floor.width / 2,
+                    minZ: floor.centerZ - floor.depth / 2,
+                    maxZ: floor.centerZ + floor.depth / 2,
+                  },
+                  radius,
+                ),
+              ).toBe(false);
+            for (const dock of docks.docks)
+              expect(
+                compactPathIntersectsBounds(
+                  a,
+                  b,
+                  getCompactPondDockSupportBounds(dock),
+                  radius,
+                ),
+              ).toBe(false);
+            // Independent denser polar samples around every segment, including
+            // end caps: complete paint support, not merely the centerline.
+            for (let t = 0; t <= 8; t++)
+              for (let angle = 0; angle < 32; angle++) {
+                const x =
+                  a.x +
+                  ((b.x - a.x) * t) / 8 +
+                  Math.cos((angle * Math.PI) / 16) * radius;
+                const z =
+                  a.z +
+                  ((b.z - a.z) * t) / 8 +
+                  Math.sin((angle * Math.PI) / 16) * radius;
+                if (
+                  Math.hypot(
+                    x - basin.waterBody.centerX,
+                    z - basin.waterBody.centerZ,
+                  ) <= basin.waterBody.radius
+                ) {
+                  expect(height(x, z)).toBeGreaterThan(
+                    basin.waterBody.surfaceY,
+                  );
+                  dryBankChecks++;
+                }
+              }
+          }
+        }
+        expect(dryBankChecks).toBeGreaterThan(0);
+        const terminal = route.path[0];
+        expect(() =>
+          createCompactIslandPaths(
+            config.terrainProfile!,
+            ALL_WORLD_AREAS,
+            getDuelArenaConfig(),
+            (x, z) =>
+              Math.hypot(x - terminal.x, z - terminal.z) < 1.5
+                ? basin.waterBody.surfaceY - 0.1
+                : height(x, z),
+            config,
+          ),
+        ).toThrow("Compact path would paint water: pond-bank");
+      } finally {
+        world.destroy();
+        DataManager["worldConfig"] = saved.config;
+        DataManager["worldTerrainProfile"] = saved.profile;
+        DataManager["worldContentIdentity"] = saved.identity;
+        ALL_WORLD_AREAS.haven_pond = saved.pond;
+        ALL_WORLD_AREAS.central_haven = saved.haven;
+      }
+    },
+  );
 });
 
 // Actual detached world04 terrain/support recipe, with no live manifest edit.

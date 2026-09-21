@@ -14,7 +14,10 @@ import {
 } from "./CompactPondDressing";
 import type { WorldTerrainProfile } from "./WorldTerrainProfile";
 import type { CompactTerrainPlantingLobe } from "./CompactTerrainPalette";
-import type { WorkshopFoot } from "@hyperforge/procgen/building";
+import type {
+  OpenWorkshopRecipe,
+  WorkshopFoot,
+} from "@hyperforge/procgen/building";
 import type { GrassTerrainExclusionPolygon } from "../../../utils/workers/GrassTerrainSurfaceSnapshot";
 
 // Existing support stencil for the procgen recipe's 0.30m footing. Procgen does
@@ -30,7 +33,19 @@ export type CompactCourtDescriptor =
 export function isCompactBankCourt(
   descriptor: CompactCourtDescriptor,
 ): boolean {
-  return descriptor.recipeId === "open-timber-bank-haven-v2";
+  return (
+    descriptor.recipeId === "open-timber-bank-haven-v2" ||
+    descriptor.recipeId === "open-timber-pond-bank-haven-v1"
+  );
+}
+
+/** Shared by physical and visual owners; no independent recipe interpretation. */
+export function getCompactServiceCourtRecipe(
+  descriptor: CompactCourtDescriptor,
+): OpenWorkshopRecipe {
+  if (descriptor.recipeId === "open-timber-pond-bank-haven-v1")
+    return "pond-bank-pavilion-v1";
+  return isCompactBankCourt(descriptor) ? "bank-pavilion-v1" : "smithy-v1";
 }
 
 /** Conservative roof/trim half-extents, guarded against actual recipe vertices. */
@@ -118,9 +133,11 @@ export function validateCompactServiceCourts(
       ids.has(court.layoutId) ||
       court.terrainProfileId !== profile.id ||
       court.rotation !== 0 ||
-      !["open-timber-smithy-haven-v3", "open-timber-bank-haven-v2"].includes(
-        court.recipeId,
-      ) ||
+      ![
+        "open-timber-smithy-haven-v3",
+        "open-timber-bank-haven-v2",
+        "open-timber-pond-bank-haven-v1",
+      ].includes(court.recipeId) ||
       !court.position ||
       typeof court.position !== "object" ||
       Array.isArray(court.position) ||

@@ -1,5 +1,56 @@
 # World graphics development checkpoint — 2026-09-20
 
+## Pond outpost art and full fishing scope — 2026-09-21
+
+The pond remains sized/planned for all seven fishing families, twelve fish,
+fourteen simultaneous anglers with safe overflow, non-dock access at every tier
+and two distinct procedural docks. This checkpoint does not close that gameplay
+or art acceptance. No basin, resource, water level or terrain grade is moved.
+
+Implemented an explicitly bound outpost connector, chest/clerk service wear and
+unequal activity patch using the existing shared terrain/grass field. Historical
+primary paths remain exact. The baseline test adds 51 segments, 501 total,
+and proves 270 actual worker/terrain field agreements. Sampled filtered dock
+bleed is unchanged (historical maximum 0.178611); wet samples remain zero.
+This is not full native candidate halo or grass-root-density qualification.
+
+The separate pond pavilion has a lower 22-degree open roof, extended lakeward
+timber and one north-facing service plaque. It uses 1,396 triangles, 231,888
+attribute bytes and three private material batches. Town geometry remains
+1,492 triangles / 247,200 bytes. Physical/visual owners share one recipe mapping;
+fixed foot/post positions, open passages and per-court cutaway ownership remain.
+Streaming readiness validates exact recipe/counts, not just a generic budget.
+
+Tests: final path/worker/owner/native-PhysX/visual suite 69/69; procgen 15/15;
+existing client diagnostics 21/21. Full shared source plus explicit changed tests
+and readiness typing: 709 roots / 2,384 sources / zero diagnostics, stable pins.
+Scoped lint and formatting pass. Earlier fixture/type/compiled-alias failures
+remain retained. Build20 produces eight bundles from 973 stable source inputs.
+
+Native35 real Chrome/Metal at 1280x720 passes the ninety-second startup gate,
+then fails the first pond overview: grass cell gcell_v1_16_17, x400..425/z425..450,
+LOD0, exceeds the existing 250ms cumulative active CPU gate at251.9ms and646,144
+operations. This is not a thirty-second observation timeout. Native36's separate
+close art diagnostic misses ninety-second startup, then its post-failure camera
+settles in12.113s. Neither result is performance acceptance; no budget is raised,
+density/resolution reduced, or failure erased. Actual stills show modest roof/
+wear improvement but insufficient landscape character and a continuous shore
+collar. AAA art approval remains explicitly absent.
+
+Detached assets-v7 changes only haven-pond-bank-v1's recipe; assets-v6 and
+canonical manifests remain intact. Owned browser35/browser36/runtime22 and its
+ephemeral database are closed. All145 protected compiled artifacts, package
+inputs/retained lock and human localhost remain unchanged. Eight mirrors match.
+
+Next: instrument/profile the exact southern-bank grounding work and preserve
+output parity while reducing cost; repeat startup/transition gates, then improve
+natural bank/dock composition and integrated all-tier fishing gameplay.
+All LAYOUT-01–08 remain open; no default promotion, merge or deployment.
+
+Evidence: service-layout pond-outpost-wear05, pond-bank-recipe-tests01,
+pond-outpost-client-regression01, pond-outpost-types03, pond-outpost-lint01;
+inland pond build20/runtime22/native35/native36. Earlier failures retained.
+
 ## Fishing stance circulation — deterministic prevention, capacity sampled
 
 The recorded three-angler trap now has a failing-before/passing-after real-owner

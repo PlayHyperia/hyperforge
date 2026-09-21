@@ -245,7 +245,7 @@ type CompactBankPavilionDescriptor = Readonly<{
   terrainProfileId: "compact-duel-island-v6";
   position: Readonly<{ x: number; z: number }>;
   rotation: 0;
-  recipeId: "open-timber-bank-haven-v2";
+  recipeId: "open-timber-bank-haven-v2" | "open-timber-pond-bank-haven-v1";
 }>;
 
 type CompactBankPavilionOwnerDiagnostics = Readonly<{
@@ -300,6 +300,13 @@ const BANK_PAVILION_RUNTIME_CONTRACT = Object.freeze({
   materials: 3,
   triangles: 1492,
   geometryBytes: 247_200,
+});
+
+const POND_BANK_PAVILION_RUNTIME_CONTRACT = Object.freeze({
+  ...BANK_PAVILION_RUNTIME_CONTRACT,
+  recipeId: "open-timber-pond-bank-haven-v1",
+  triangles: 1396,
+  geometryBytes: 231_888,
 });
 
 function finiteVector(value: unknown): value is Vector3Like {
@@ -1015,7 +1022,8 @@ function parseBankPavilionDescriptor(
     !descriptor ||
     !(
       (descriptor.schemaVersion === 1 &&
-        descriptor.layoutId === BANK_PAVILION_RUNTIME_CONTRACT.layoutId) ||
+        descriptor.layoutId === BANK_PAVILION_RUNTIME_CONTRACT.layoutId &&
+        descriptor.recipeId === BANK_PAVILION_RUNTIME_CONTRACT.recipeId) ||
       (descriptor.schemaVersion === 2 &&
         typeof descriptor.layoutId === "string" &&
         /^[a-z][a-z0-9_-]{0,63}$/.test(descriptor.layoutId))
@@ -1023,7 +1031,8 @@ function parseBankPavilionDescriptor(
     descriptor.terrainProfileId !==
       BANK_PAVILION_RUNTIME_CONTRACT.terrainProfileId ||
     descriptor.rotation !== 0 ||
-    descriptor.recipeId !== BANK_PAVILION_RUNTIME_CONTRACT.recipeId ||
+    (descriptor.recipeId !== BANK_PAVILION_RUNTIME_CONTRACT.recipeId &&
+      descriptor.recipeId !== POND_BANK_PAVILION_RUNTIME_CONTRACT.recipeId) ||
     typeof position?.x !== "number" ||
     !Number.isFinite(position.x) ||
     typeof position.z !== "number" ||
@@ -1036,7 +1045,7 @@ function parseBankPavilionDescriptor(
     terrainProfileId: BANK_PAVILION_RUNTIME_CONTRACT.terrainProfileId,
     position: Object.freeze({ x: position.x, z: position.z }),
     rotation: 0,
-    recipeId: BANK_PAVILION_RUNTIME_CONTRACT.recipeId,
+    recipeId: descriptor.recipeId,
   });
 }
 
@@ -1256,15 +1265,19 @@ export function collectStreamingBankPavilionReadiness(
     visualCandidates.length === 1
       ? parseBankPavilionVisualDiagnostics(visualCandidates[0])
       : null;
+  const recipe =
+    descriptor?.recipeId === POND_BANK_PAVILION_RUNTIME_CONTRACT.recipeId
+      ? POND_BANK_PAVILION_RUNTIME_CONTRACT
+      : BANK_PAVILION_RUNTIME_CONTRACT;
   if (visualCandidates.length !== 1) reasons.push("visual_count_mismatch");
   else if (!visual) reasons.push("visual_diagnostics_invalid");
   else if (
     !descriptor ||
     visual.layoutId !== descriptor.layoutId ||
-    visual.meshes !== BANK_PAVILION_RUNTIME_CONTRACT.meshes ||
-    visual.materials !== BANK_PAVILION_RUNTIME_CONTRACT.materials ||
-    visual.triangles !== BANK_PAVILION_RUNTIME_CONTRACT.triangles ||
-    visual.geometryBytes !== BANK_PAVILION_RUNTIME_CONTRACT.geometryBytes
+    visual.meshes !== recipe.meshes ||
+    visual.materials !== recipe.materials ||
+    visual.triangles !== recipe.triangles ||
+    visual.geometryBytes !== recipe.geometryBytes
   )
     reasons.push("visual_recipe_mismatch");
 
