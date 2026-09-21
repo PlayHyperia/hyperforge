@@ -404,7 +404,7 @@ describe("same-face shortcut versus independent native25 grounding goldens", () 
     "fine-lod2",
     "fine-near4",
   ] as const)(
-    "preserves the frozen exhaustive output and resumptions for signed-zero fades: %s",
+    "preserves frozen signed-zero output with only the observed two-interval resumption savings: %s",
     (id) => {
       for (const zero of [0, -0])
         for (const wind of [
@@ -428,8 +428,17 @@ describe("same-face shortcut versus independent native25 grounding goldens", () 
             const legacy = drainSameFaceSteps(
               legacyGroundGrassBladeSteps(fixture.request),
             );
+            let pairOrders = 0;
+            const currentSteps = groundGrassBladeSteps(fixture.request);
             const current = drainSameFaceSteps(
-              groundGrassBladeSteps(fixture.request),
+              (function* () {
+                for (;;) {
+                  const step = currentSteps.next();
+                  if (step.done) return step.value;
+                  if (step.value === "interval_pair_order") pairOrders++;
+                  yield step.value;
+                }
+              })(),
             );
             expect(legacy.result.status).toBe("ready");
             expect(current.result.status).toBe("ready");
@@ -437,7 +446,10 @@ describe("same-face shortcut versus independent native25 grounding goldens", () 
               sameFaceHash(legacy.result),
             );
             expect(sameFaceInputHash(fixture)).toBe(before);
-            expect(current.operations).toBe(legacy.operations);
+            // Each actual pair replaces one allocation, two merge and two
+            // copy resumptions with one ordering resumption; no other saving
+            // is admitted by this independent historical comparison.
+            expect(current.operations).toBe(legacy.operations - 4 * pairOrders);
             expect(current.result.receipt.triangleVisits).toBe(
               legacy.result.receipt.triangleVisits,
             );

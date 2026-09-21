@@ -65,6 +65,8 @@ import {
   prepareGroundedGrassSteps,
   type GrassGroundingInputLease,
 } from "../GrassGroundingPipeline";
+import { groundGrassBladeSteps as legacyGroundGrassBladeSteps } from "./fixtures/LegacyGrassBladeGroundingReference";
+import { sameFaceHash } from "./fixtures/GrassBladeGroundingSameFaceCases";
 
 const emptySnapshot = (): GrassTerrainSurfaceSnapshot => ({
   schemaVersion: 1,
@@ -618,6 +620,185 @@ describe("grounding pipeline exact forwarding (real numerical children)", () => 
       f.close();
     }
   });
+});
+
+describe("two-interval ordering on actual retained terrain", () => {
+  const crossingRequest = (
+    owner: ReturnType<typeof analyticOwner>,
+    rotation: number,
+    dense = false,
+  ) => {
+    const surface = owner.makeSurface(
+      1,
+      0,
+      0,
+      dense ? 129 : 3,
+      () => 20,
+      dense ? 16 : 100,
+    );
+    const data = owner.dataAt(surface, [[0, 0, rotation]]);
+    if (dense) data.rotScaleHash[1] = 4;
+    const request = owner.request(surface, data, 1);
+    const left = transformedVertex(data, surface, request.geometry, 0, 0);
+    const right = transformedVertex(data, surface, request.geometry, 0, 1);
+    // One regular cell's interior diagonal for the pair case; a shared grid
+    // vertex for the dense case. Keep the generated blade vertices unchanged.
+    const center = dense ? 0 : -25;
+    data.offsets[0] = center - (left.x + right.x) / 2;
+    data.offsets[2] = center - (left.z + right.z) / 2;
+    return request;
+  };
+
+  it.each([0, Math.PI])(
+    "orders a real diagonal crossing at rotation %s with exact oracle and sliced results",
+    (rotation) => {
+      const owner = analyticOwner("fine");
+      try {
+        const request = crossingRequest(owner, rotation);
+        const before = structuredClone(request.data);
+        const faces = [0, 1].map((vertex) => {
+          const point = transformedVertex(
+            request.data,
+            request.ownSurface,
+            request.geometry,
+            0,
+            vertex,
+          );
+          const result = sample();
+          expect(request.ownSurface.sample(point.x, point.z, result)).toBe(
+            true,
+          );
+          return result.faceIndex;
+        });
+        // Both roots are in the same coarse cell, but on opposite faces.
+        // Therefore this real first edge crosses exactly two triangles.
+        expect([...faces].sort((a, b) => a - b)).toEqual([0, 1]);
+        const actual = drainPipeline(groundGrassBladeSteps(request));
+        const historical = drainPipeline(legacyGroundGrassBladeSteps(request));
+        const pairIndex = actual.trace.indexOf("interval_pair_order");
+        expect(pairIndex).toBeGreaterThanOrEqual(0);
+        expect(actual.trace.slice(pairIndex + 1, pairIndex + 3)).toEqual([
+          "edge_interval",
+          "edge_interval",
+        ]);
+        expect(actual.trace).not.toContain("interval_scratch_allocation");
+        expect(actual.trace).not.toContain("interval_merge");
+        expect(actual.trace).not.toContain("interval_copy");
+        expect(actual.result.status).toBe("ready");
+        expect(sameFaceHash(actual.result)).toBe(
+          sameFaceHash(historical.result),
+        );
+        const synchronous = groundGrassBlades(request);
+        expect(withoutGroundingElapsed(actual.result)).toEqual(
+          withoutGroundingElapsed(synchronous),
+        );
+        for (const sliceSize of [1, 7, 64]) {
+          const job = new GrassBladeGroundingJob(request, () =>
+            request.ownSurface.matchesGeometry(owner.geometries[0]),
+          );
+          while (job.state.status === "running") {
+            job.advance(sliceSize);
+            expect(job.lastSliceOperations).toBeLessThanOrEqual(sliceSize);
+          }
+          expect(job.state.status).toBe("ready");
+          if (job.state.status !== "ready") throw Error(job.state.status);
+          expect(withoutGroundingElapsed(job.state.result)).toEqual(
+            withoutGroundingElapsed(synchronous),
+          );
+        }
+        expect(request.data).toEqual(before);
+      } finally {
+        owner.close();
+      }
+    },
+  );
+
+  it("retains the general merge path for a real multi-cell root crossing", () => {
+    const owner = analyticOwner("fine");
+    try {
+      const request = crossingRequest(owner, 0, true);
+      // The full scaled clump, not just its first root, needs real support.
+      // Verify both fade endpoints independently before asking the core to fit.
+      const half = request.ownSurface.size / 2;
+      for (
+        let vertex = 0;
+        vertex < request.geometry.getAttribute("position").count;
+        vertex++
+      ) {
+        for (const fade of [0, 1]) {
+          const point = transformedVertex(
+            request.data,
+            request.ownSurface,
+            request.geometry,
+            0,
+            vertex,
+            fade,
+          );
+          expect(Math.abs(point.x)).toBeLessThan(half - 0.00001);
+          expect(Math.abs(point.z)).toBeLessThan(half - 0.00001);
+        }
+      }
+      const actual = drainPipeline(groundGrassBladeSteps(request));
+      const historical = drainPipeline(legacyGroundGrassBladeSteps(request));
+      expect(
+        actual.result.status,
+        actual.result.status === "defer" ? actual.result.reason : undefined,
+      ).toBe("ready");
+      expect(actual.trace).toContain("interval_scratch_allocation");
+      expect(actual.trace).toContain("interval_merge");
+      expect(actual.trace).toContain("interval_copy");
+      const firstMerge = actual.trace.indexOf("interval_scratch_allocation");
+      const firstCoverage = actual.trace.indexOf("edge_interval", firstMerge);
+      let coverageCount = 0;
+      for (
+        let i = firstCoverage;
+        i >= 0 && actual.trace[i] === "edge_interval";
+        i++
+      )
+        coverageCount++;
+      expect(coverageCount).toBeGreaterThan(2);
+      expect(sameFaceHash(actual.result)).toBe(sameFaceHash(historical.result));
+    } finally {
+      owner.close();
+    }
+  });
+
+  it.each(["caller", "invalidated"] as const)(
+    "retires %s work while the real two-interval ordering is suspended",
+    (reason) => {
+      const owner = analyticOwner("fine");
+      try {
+        const request = crossingRequest(owner, 0);
+        const geometry = owner.geometries[0];
+        const job = new GrassBladeGroundingJob(request, () =>
+          request.ownSurface.matchesGeometry(geometry),
+        );
+        while (
+          job.state.status === "running" &&
+          job.lastPhase !== "interval_pair_order"
+        )
+          job.advance(1);
+        expect(job.state.status).toBe("running");
+        expect(job.lastPhase).toBe("interval_pair_order");
+        const operations = job.operations;
+        if (reason === "invalidated") {
+          geometry.setAttribute(
+            "position",
+            geometry.getAttribute("position").clone(),
+          );
+          job.advance(1);
+        } else job.cancel();
+        expect(job.state).toEqual({ status: "cancelled", reason });
+        expect(job.operations).toBe(operations);
+        expect("result" in job.state).toBe(false);
+        const terminal = job.state;
+        expect(job.advance(64)).toBe(terminal);
+        expect(job.operations).toBe(operations);
+      } finally {
+        owner.close();
+      }
+    },
+  );
 });
 
 describe("CPU per-blade grounding prototype (no renderer/GPU)", () => {

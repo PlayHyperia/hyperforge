@@ -1570,6 +1570,97 @@ Runtimes/browsers are terminal, both temporary databases removed, protected
 localhost:3333 preserved. No production source changed in this diagnostic.
 All LAYOUT-01–08 remain OPEN; no stream, AAA, launch or default acceptance.
 
+### Exact two-interval grass ordering — 2026-09-21
+
+A bounded production optimization replaces the two-element merge/scratch/copy
+sequence with the identical stable comparison and at most two reference stores.
+The pair is job-local and cancellation remains before mutation. Larger lists
+retain the original resumable merge sort. No blade/instance/texture/terrain,
+density, LOD, render quality, geometry tolerance, work-unit cap, scheduler
+allowance or deadline changes. Independent frozen oracle code/goldens stay
+unchanged. This reduces actual generator work; it does not establish a CPU,
+loading-time or FPS improvement.
+
+Actual assets-v9 near and startup-LOD1 pond fixtures compare complete output
+arrays, dependencies, provenance, semantic receipts and frozen per-clump
+exhaustive numerical results. New startup cases use the real physics-backed
+ProceduralDocks owners and their exclusions, matching native52's 1,009/974
+south and 994/948 east input/retained clumps. Their historical native operation
+totals remain context, not a requirement that the offline lifecycle match.
+Original near cases retain their previous lifecycle.
+
+| Actual cell | Complete pipeline before → after | Resumptions saved | Output |
+| --- | ---: | ---: | --- |
+| Near south | 373,707 → 349,447 | 24,260 (6.49%) | identical |
+| Near east | 304,243 → 284,943 | 19,300 (6.34%) | identical |
+| Startup LOD1 south | 211,533 → 199,357 | 12,176 (5.76%) | identical |
+| Startup LOD1 east | 170,560 → 160,800 | 9,760 (5.72%) | identical |
+
+Every savings total is exactly four per observed interval pair. All other
+phase counts, triangle visits, geometric work units and all four full-output
+hashes are identical. Elapsed CPU samples are mixed, not a speedup claim.
+The numerical GPU/storage suite is not native GPU proof.
+
+Final verification: 241 generic cases pass; four actual pond cases pass with
+three historical-overlay cases intentionally skipped. Full shared plus changed
+regressions typecheck with zero diagnostics; scoped lint and format pass.
+The new five generic cases exercise ordering, tiny slices, cancellation,
+invalidation and the larger-interval fallback. The signed-zero cases retain
+their frozen geometry hashes and account only for observed pair savings.
+
+Failed test receipts are retained: the new dense fixture initially lacked
+surface coverage and was corrected with a larger real domain plus independent
+vertex-envelope checks; the pond fixture initially missed actual dock owners.
+A combined run incorrectly applied the pond-only asset overlay to a historical
+plaza fixture and failed its missing-zone setup. Final runs use each suite's
+required asset context; assertions were not relaxed. Cleanup attempts every
+owner, preserves original errors and aggregates secondary failures after finally.
+
+Native53's prior page-main-thread CPU sampling preserved the original startup
+gate and completed in 74.475s. It excludes worker/GPU costs. Sampled grounding
+ancestry is about 2.37s of the 79.71s profile; sortedIntervals self samples are
+only about 15ms. Thus sorting is not established as the dominant CPU bottleneck.
+Vite served-source offsets were not saved for line-level mapping; no raw local
+bundle line attribution is claimed.
+
+Native54 uses isolated build26/assets-v9 in real headful Chrome/ANGLE Metal,
+1280×720 at DPR1, 4 samples and the same rendering preferences. Original
+startup passed in 68.221s; the four original 30s grass camera gates completed
+in 23.513/10.322/4.325/11.162s (overview/landing/jetty/bank). All end with empty
+work queues and fourteen fishing entities, two per family. This single art
+capture is not a controlled timing comparison with earlier instrumented runs.
+The earlier startup failure is not declared fixed.
+
+All four PNGs were visually inspected. Grass coverage is intact; the uniform
+brown shoreline collar, broad homogeneous submerged toe, crosshatched/repetitive
+dock timber and sparse disconnected habitat still fall short of the art bar.
+The bank pavilion's grassy approach also still needs composed playable use-space.
+No new unadmitted console/network error occurred; the explicitly deferred cow
+still accounts for one missing request/five known events, not an accepted
+visible placeholder or full asset acceptance. Camera/clock restored, actual
+GameClient unmounted without observed destruction errors, test browser closed,
+runtime35 stopped and its temporary database removed. All 973 build inputs,
+145 protected artifacts, six build inputs and the retained lock were reverified;
+human localhost:3333 remains unchanged.
+
+- [x] Reduce exact two-interval ordering work and verify unchanged output,
+      cancellation, dependencies, provenance and original bounded contracts.
+- [ ] Qualify startup/frame-time reliability across repeated and moving scenes;
+      the earlier native49 timeout remains retained and unexplained.
+- [ ] Next visual slice: break the continuous brown shoreline collar using
+      pond-local substrate composition and existing soil/rock samples, without
+      changing terrain, water, grass eligibility, density, routes or capacity.
+- [ ] Keep characterful docks, habitat continuity, twelve fish types across
+      seven families, fourteen live anglers plus seven overflow, dry access,
+      live catches and bank/supplier routes open for actual qualification.
+
+Evidence: service-layout pond-interval-baseline03, optimized01, accounting01/02,
+final-generic01, final-pond01, types02, lint02, format02 and native-accounting01; inland pond
+build26/runtime35/native54 and native53 startup.cpuprofile. Test fixture-only
+failures stay in their original receipts. All LAYOUT-01–08 remain OPEN; no
+AAA, stream, gameplay-capacity, sustained performance, launch or default
+promotion is asserted.
+
 ### Inland fishing integration — candidate only
 
 The detached candidate now requests 14 real fishing entities, two for each of

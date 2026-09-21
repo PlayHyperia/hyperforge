@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 import THREE from "../../../../extras/three/three";
 import { World } from "../../../../core/World";
 import { DataManager } from "../../../../data/DataManager";
+import { loadPhysX } from "../../../../physics/PhysXManager";
 import {
   GRASS_WORKER_CODE,
   type GrassWorkerInput,
@@ -11,6 +12,7 @@ import {
 } from "../../../../utils/workers/GrassWorker";
 import { TerrainSystem } from "../TerrainSystem";
 import { RoadNetworkSystem } from "../RoadNetworkSystem";
+import { ProceduralDocks } from "../ProceduralDocks";
 import { TerrainVisualManager } from "../TerrainVisualManager";
 import {
   FINE_MEADOW_APPEARANCE,
@@ -21,7 +23,7 @@ import {
 import { createCompactTerrainColorOperations } from "../CompactTerrainPalette";
 import { projectGrassAnchors } from "../GrassTerrainProjection";
 import {
-  groundGrassBlades,
+  groundGrassBladeSteps,
   GrassGroundingContinuation,
   type GrassBladeGroundingRequest,
 } from "../GrassBladeGrounding";
@@ -41,6 +43,63 @@ const attributes = [
 // receipts. This never writes assets or changes any runtime owner.
 const evidence = (label: string, json: string) =>
   process.stdout.write(`${label} ${json}\n`);
+
+/** Offline observation of the actual generator, never an installation loop.
+ * A complete scratch/merge×2/copy×2/edge×2 trace uniquely identifies the
+ * existing two-interval sort. Keep the prospective pair-order label separate
+ * so the before/after evidence does not silently relabel historical work. */
+function drainGroundingWithPhaseAudit(request: GrassBladeGroundingRequest) {
+  const steps = groundGrassBladeSteps(request);
+  const phases: Record<string, number> = {};
+  let coreResumptions = 0;
+  let completeTwoIntervalMergeSorts = 0;
+  let mergeSortTrace = "";
+  const finishSort = () => {
+    if (mergeSortTrace === "smmccee") completeTwoIntervalMergeSorts++;
+    mergeSortTrace = "";
+  };
+  let step = steps.next();
+  coreResumptions++;
+  while (!step.done) {
+    const phase = step.value;
+    phases[phase] = (phases[phase] ?? 0) + 1;
+    if (phase === "interval_scratch_allocation") {
+      finishSort();
+      mergeSortTrace = "s";
+    } else if (
+      mergeSortTrace &&
+      (phase === "interval_merge" ||
+        phase === "interval_copy" ||
+        phase === "edge_interval")
+    ) {
+      // A longer trace cannot be the two-interval signature. Bound diagnostic
+      // storage rather than retaining a trace proportional to triangle count.
+      mergeSortTrace =
+        mergeSortTrace.length < 8
+          ? mergeSortTrace +
+            (phase === "interval_merge"
+              ? "m"
+              : phase === "interval_copy"
+                ? "c"
+                : "e")
+          : "not-pair";
+    } else finishSort();
+    step = steps.next();
+    coreResumptions++;
+  }
+  finishSort();
+  return {
+    result: step.value,
+    audit: {
+      coreResumptions,
+      phases,
+      completeTwoIntervalMergeSorts,
+      intervalPairOrders: phases.interval_pair_order ?? 0,
+      scope:
+        "One actual offline core drain; resumptions include the terminal next(). Sort signatures and phase counts are work observations, not CPU or GPU timing.",
+    },
+  };
+}
 
 // Explicit real-asset regressions: none of these overlays is a production default.
 // Each uses its actual worker output, authored constraints and retained mesh.
@@ -122,6 +181,40 @@ const cases = [
     key: "gcell_v1_17_16",
     bounds: { minX: 425, maxX: 450, minZ: 400, maxZ: 425 },
   },
+  {
+    name: "native52 startup LOD1 southbank work budget",
+    test: "grounds the actual shelf southbank at the native52 startup focus and LOD1 within unchanged caps",
+    enabled: process.env.ASSETS_DIR?.endsWith(
+      "/inland-pond-integration01-UNQUALIFIED/assets-v9",
+    ),
+    label: "NATIVE52_LOD1_SOUTHBANK",
+    nodes: [
+      [450, 450],
+      [350, 450],
+    ],
+    focus: [335, 431],
+    lod: 1,
+    key: "gcell_v1_16_17",
+    bounds: { minX: 400, maxX: 425, minZ: 425, maxZ: 450 },
+    native52: { inputClumps: 1009, retainedClumps: 974, operations: 210813 },
+  },
+  {
+    name: "native52 startup LOD1 eastbank work budget",
+    test: "grounds the actual shelf eastbank at the native52 startup focus and LOD1 within unchanged caps",
+    enabled: process.env.ASSETS_DIR?.endsWith(
+      "/inland-pond-integration01-UNQUALIFIED/assets-v9",
+    ),
+    label: "NATIVE52_LOD1_EASTBANK",
+    nodes: [
+      [450, 450],
+      [450, 350],
+    ],
+    focus: [335, 431],
+    lod: 1,
+    key: "gcell_v1_17_16",
+    bounds: { minX: 425, maxX: 450, minZ: 400, maxZ: 425 },
+    native52: { inputClumps: 994, retainedClumps: 948, operations: 170572 },
+  },
 ] as const;
 
 describe.each(cases)("$name", (scenario) => {
@@ -129,6 +222,7 @@ describe.each(cases)("$name", (scenario) => {
   test(
     scenario.test,
     async () => {
+      const lod = "lod" in scenario ? scenario.lod : 0;
       await DataManager.getInstance().initialize();
       const world = new World();
       const terrain = world.register("terrain", TerrainSystem) as TerrainSystem;
@@ -140,18 +234,85 @@ describe.each(cases)("$name", (scenario) => {
       let visual: TerrainVisualManager | undefined;
       let manager: GrassVisualManager | undefined;
       let worker: Worker | undefined;
+      let docks: ProceduralDocks | undefined;
+      const failures: unknown[] = [];
       try {
+        if ("native52" in scenario) {
+          // Match the existing actual dock fixture: native triangle collision
+          // must be installed before its owned grass exclusions are published.
+          const previousEnvironment = process.env.NODE_ENV;
+          process.env.NODE_ENV = "production";
+          try {
+            await loadPhysX();
+          } finally {
+            if (previousEnvironment === undefined) delete process.env.NODE_ENV;
+            else process.env.NODE_ENV = previousEnvironment;
+          }
+          await world.physics.init();
+          // Select the actual native52 terrain/worker composition on these new
+          // owners only. Historical near cases retain their original setup.
+          // Lighting/sky are not CPU grounding inputs and are not qualified here.
+          terrain["compactPondBlend"] = "composition-v1";
+          terrain["compactSurfaceBlend"] = "height-v1";
+          terrain["compactCoastBlend"] = null;
+          terrain["compactDirtProjection"] = "stochastic-v1";
+          terrain["compactRockProjection"] = "stochastic-v1";
+          terrain["compactGrassColorGrade"] = "fine-meadow-green-v1";
+        }
         await terrain.init();
-        terrain["loadWaterBodiesFromManifest"]();
-        terrain["loadFlatZonesFromManifest"]();
+        if ("native52" in scenario) {
+          // Composition binds and seals these real owners during init. Do not
+          // reload them after admission or bypass their restart-only contract.
+          expect(
+            terrain
+              .getWaterBodyRegistry()
+              .getAllBodies()
+              .filter((body) => body.id === "haven_pond_water"),
+          ).toHaveLength(1);
+          expect(terrain["flatZones"].has("haven_pond_floor")).toBe(true);
+        } else {
+          // Preserve the original lifecycle of every historical near case.
+          terrain["loadWaterBodiesFromManifest"]();
+          terrain["loadFlatZonesFromManifest"]();
+        }
         terrain["subscribeRoadNetworkEvents"]();
         await roads.init();
         await roads.start();
+        if ("native52" in scenario) {
+          docks = world.register("docks", ProceduralDocks) as ProceduralDocks;
+          await docks.init();
+          await docks.start();
+          const diagnostics = docks.getCompactDiagnostics();
+          expect(diagnostics.map((dock) => dock.id)).toEqual([
+            "haven-fishing-landing",
+            "haven-reed-jetty",
+          ]);
+          expect(
+            diagnostics.every(
+              (dock) =>
+                dock.physicsActor && dock.physicsShape && dock.tiles === 24,
+            ),
+          ).toBe(true);
+          expect(
+            terrain["landscapeGrassSurface"].exclusionPolygons
+              .filter((polygon) => polygon.id.startsWith("pond-dock-"))
+              .map((polygon) => polygon.id),
+          ).toEqual([
+            "pond-dock-haven-fishing-landing",
+            "pond-dock-haven-reed-jetty",
+          ]);
+        }
         const setup = {
           ...terrain["buildGrassWorkerSetup"](),
           compactGrassColorGrade:
             createCompactTerrainColorOperations().getGrassColorGrade().id,
         };
+        if ("native52" in scenario) {
+          expect(setup.compactPondBlend).toBe("composition-v1");
+          expect(setup.compactPondBankField?.id).toBe("composition-v1");
+          expect(setup.compactCoastBlend).toBeUndefined();
+          expect(setup.compactGrassColorGrade).toBe("fine-meadow-green-v1");
+        }
         visual = new TerrainVisualManager(
           { minSize: 100, maxDepth: 4, resolution: 128, rootChunkRadius: 0 },
           terrain["buildChunkTerrainProvider"](),
@@ -230,6 +391,7 @@ describe.each(cases)("$name", (scenario) => {
           (bounds) => retainedVisual.captureRetainedSurfaceRegion(bounds),
           "fine-meadow-v1",
           terrain["getCompactHabitatMaterial"]("haven-understory-v1"),
+          "native52" in scenario ? "leaf-volume-v1" : undefined,
         );
         manager.setPlayerPosition(scenario.focus[0], scenario.focus[1]);
         manager.onNodeNeedsGeometry(nodes[0]);
@@ -237,7 +399,15 @@ describe.each(cases)("$name", (scenario) => {
         const work = manager["liveWorkUnits"].get(key)!;
         expect(work.bounds).toEqual(scenario.bounds);
         expect(work.node).toBe(nodes[0]);
-        const input = manager["createWorkerInput"](work, key, 0);
+        if ("native52" in scenario)
+          expect(manager["getLodLevel"](work)).toBe(lod);
+        const input = manager["createWorkerInput"](work, key, lod);
+        if ("native52" in scenario && key === "gcell_v1_17_16")
+          expect(
+            input.terrainSurface.exclusionPolygons?.find(
+              (polygon) => polygon.id === "pond-dock-haven-reed-jetty",
+            ),
+          ).toMatchObject({ minX: 427, maxX: 435, minZ: 414, maxZ: 417 });
         expect(input.placementDistribution).toBe("fine-cell-stratified-v1");
         expect(input.clumpSpacing).toBe(0.7);
         worker = new Worker(
@@ -262,6 +432,8 @@ describe.each(cases)("$name", (scenario) => {
             actualWorker.postMessage(request);
           });
         const output = await execute(input);
+        if ("native52" in scenario)
+          expect(output.count).toBe(scenario.native52.inputClumps);
         const ownSurface = visual.getRetainedSurface(nodes[0])!;
         const projected = projectGrassAnchors(
           output,
@@ -285,8 +457,8 @@ describe.each(cases)("$name", (scenario) => {
         const bankVerge = manager["compactMacroField"]?.bankVerge;
         const request: GrassBladeGroundingRequest = {
           data: projected,
-          geometry: manager["lodGeometries"][0],
-          lod: 0,
+          geometry: manager["lodGeometries"][lod],
+          lod,
           geometryLayout: "fine-linear-sweep-3seg-v1",
           roadClearance: "per-blade-v1",
           ...(bankVerge ? { bankVerge } : {}),
@@ -305,12 +477,33 @@ describe.each(cases)("$name", (scenario) => {
           },
         };
         const inputBefore = attributes.map(([key]) => projected[key].slice());
-        const result = groundGrassBlades(request);
+        const { result, audit } = drainGroundingWithPhaseAudit(request);
         evidence(
           `${scenario.label}_GRASS`,
           JSON.stringify({
             key,
+            lod,
             focus: scenario.focus,
+            ...("native52" in scenario
+              ? {
+                  native52HistoricalObservation: scenario.native52,
+                  actualDockOwners: docks!.getCompactDiagnostics(),
+                  native52ComparisonScope:
+                    "Actual native52 input/retained counts are asserted; original live operations remain a historical comparator, not a timing or scheduling assertion.",
+                  cpuSelections: {
+                    pondBlend: setup.compactPondBlend,
+                    pondBankField: setup.compactPondBankField?.id,
+                    coastBlend: setup.compactCoastBlend ?? null,
+                    terrainBlend: terrain["compactSurfaceBlend"],
+                    dirtProjection: terrain["compactDirtProjection"],
+                    rockProjection: terrain["compactRockProjection"],
+                    grassAppearance: "fine-meadow-v1",
+                    grassRoadClearance: request.roadClearance,
+                    habitatComposition: "haven-understory-v1",
+                    grassLighting: "leaf-volume-v1",
+                  },
+                }
+              : {}),
             workBounds: work.bounds,
             groundingBounds: bounds,
             rawClumps: output.count,
@@ -336,6 +529,7 @@ describe.each(cases)("$name", (scenario) => {
             status: result.status,
             reason: result.status === "defer" ? result.reason : null,
             receipt: result.receipt,
+            phaseAudit: audit,
           }),
         );
         if (result.status === "defer") {
@@ -391,6 +585,8 @@ describe.each(cases)("$name", (scenario) => {
         expect(result.receipt.workBudget).toBe(1_000_000);
         expect(result.receipt.workUnits).toBeLessThanOrEqual(1_000_000);
         if (result.status !== "ready") throw new Error(result.reason);
+        if ("native52" in scenario)
+          expect(result.data.count).toBe(scenario.native52.retainedClumps);
 
         // The frozen exhaustive implementation cannot finish this whole cell
         // under its existing cap. One-clump evaluations provide ONLY an
@@ -569,13 +765,72 @@ describe.each(cases)("$name", (scenario) => {
           result.bladeVisibility,
         );
         expect(pipeline.state.result.sweptBounds).toEqual(result.sweptBounds);
+        expect(pipeline.state.result.data.count).toBe(result.data.count);
+        for (const [key] of attributes) {
+          expect(pipeline.state.result.data[key]).toEqual(result.data[key]);
+          expect(pipeline.state.result.data[key].buffer).not.toBe(
+            result.data[key].buffer,
+          );
+          expect(pipeline.state.result.data[key].buffer).not.toBe(
+            output[key].buffer,
+          );
+        }
+        expect(pipeline.state.result.dependencies).toEqual(result.dependencies);
+        expect({ ...pipeline.state.result.receipt, elapsedMs: 0 }).toEqual({
+          ...result.receipt,
+          elapsedMs: 0,
+        });
+        const expectedHeights = new Float32Array(result.data.count);
+        const expectedNormals = new Float32Array(result.data.count * 3);
+        for (let i = 0; i < result.sourceIndices.length; i++) {
+          const source = result.sourceIndices[i];
+          expectedHeights[i] = projected.grounding.computedHeights[source];
+          for (let axis = 0; axis < 3; axis++)
+            expectedNormals[i * 3 + axis] =
+              projected.grounding.ecologicalNormals[source * 3 + axis];
+        }
+        expect(pipeline.state.result.grounding).toEqual({
+          schemaVersion: projected.grounding.schemaVersion,
+          surfaceRevision: projected.grounding.surfaceRevision,
+          computedHeights: expectedHeights,
+          ecologicalNormals: expectedNormals,
+        });
+        const grounding = pipeline.state.result.grounding;
+        if (!grounding) throw new Error("Missing full-pipeline provenance");
+        expect(grounding.computedHeights.buffer).not.toBe(
+          projected.grounding.computedHeights.buffer,
+        );
+        expect(grounding.ecologicalNormals.buffer).not.toBe(
+          projected.grounding.ecologicalNormals.buffer,
+        );
+      } catch (error) {
+        failures.push(error);
       } finally {
-        await worker?.terminate();
-        manager?.destroy();
-        visual?.dispose();
-        material.dispose();
-        world.destroy();
+        const release = (cleanup: () => void) => {
+          try {
+            cleanup();
+          } catch (error) {
+            failures.push(error);
+          }
+        };
+        try {
+          await worker?.terminate();
+        } catch (error) {
+          failures.push(error);
+        }
+        release(() => manager?.destroy());
+        release(() => visual?.dispose());
+        release(() => material.dispose());
+        // Release native dock actors/exclusions before terrain or physics dies.
+        release(() => docks?.destroy());
+        release(() => world.destroy());
       }
+      if (failures.length === 1) throw failures[0];
+      if (failures.length > 1)
+        throw new AggregateError(
+          failures,
+          "Pond grass fixture and cleanup failed",
+        );
     },
     30_000,
   );

@@ -1741,13 +1741,25 @@ export class GrassBladeGroundingJob extends GrassGroundingContinuation {
     super(groundGrassBladeSteps(request), isCurrent);
   }
 }
-/** Stable, in-place, resumable bottom-up merge sort. Every comparison/copy
- * yields; a single bounded scratch allocation is explicit, not preemptible.
- * Only finite clipped edge intervals from the grounding core are admitted. */
+/** Stable, in-place interval ordering. A pair needs one comparison and at most
+ * two reference stores, not a scratch array and merge/copy passes. Larger lists
+ * retain the resumable bottom-up merge sort and explicit scratch allocation.
+ * Only clipped edge intervals from the grounding core are admitted. */
 function* sortedIntervals(
   values: [number, number][],
 ): Generator<string, void, void> {
   if (values.length < 2) return;
+  if (values.length === 2) {
+    yield "interval_pair_order";
+    // Match the merge's original comparison, including stable equal starts.
+    // These intervals are job-local; no borrowed geometry is cached or changed.
+    if (!(values[0][0] <= values[1][0])) {
+      const first = values[0];
+      values[0] = values[1];
+      values[1] = first;
+    }
+    return;
+  }
   yield "interval_scratch_allocation";
   const scratch = new Array<[number, number]>(values.length);
   for (let width = 1; width < values.length; width *= 2) {
