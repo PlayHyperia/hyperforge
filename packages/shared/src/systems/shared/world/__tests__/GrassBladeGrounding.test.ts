@@ -16,13 +16,16 @@ import {
   groundGrassBlades,
   groundGrassBladeSteps,
   GrassBladeGroundingJob,
+  GrassGroundingContinuation,
   GRASS_BLADE_GROUNDING_LIMITS,
   captureGrassBankVerge,
   captureGrassGroundingFailure,
+  validateGrassGroundingConsumedWork,
   GRASS_BLADE_GROUNDING_JOB_LIMITS,
   type GrassBladeGroundingRequest,
   type GrassBladeGroundingResult,
   type GrassGroundingRoadSegment,
+  type GrassGroundingConsumedWork,
 } from "../GrassBladeGrounding";
 import {
   GrassVisualManager,
@@ -1713,6 +1716,367 @@ describe("CPU per-blade grounding prototype (no renderer/GPU)", () => {
       );
       const terminal = first.state;
       expect(first.advance(7, expired)).toBe(terminal);
+    } finally {
+      f.close();
+    }
+  });
+
+  it("rejects malformed consumed-work snapshots without executing accessors or advancing the real core", () => {
+    const f = analyticOwner();
+    try {
+      const surface = f.makeSurface();
+      const valid = { operations: 4, activeMs: 1.25, maximumSliceMs: 0.75 };
+      let getterCalls = 0;
+      const accessor = { ...valid };
+      Object.defineProperty(accessor, "activeMs", {
+        enumerable: true,
+        get() {
+          getterCalls++;
+          return 0;
+        },
+      });
+      const hidden = { ...valid };
+      Object.defineProperty(hidden, "operations", {
+        value: 4,
+        enumerable: false,
+      });
+      const invalid: unknown[] = [
+        null,
+        false,
+        0,
+        "work",
+        [],
+        new Date(),
+        {},
+        { operations: 0, activeMs: 0 },
+        { ...valid, extra: 0 },
+        { ...valid, [Symbol("extra")]: 0 },
+        Object.create(valid),
+        accessor,
+        hidden,
+        { ...valid, operations: -1 },
+        { ...valid, operations: 0.5 },
+        { ...valid, operations: Number.MAX_SAFE_INTEGER + 1 },
+        {
+          ...valid,
+          operations: GRASS_BLADE_GROUNDING_JOB_LIMITS.maximumOperations + 1,
+        },
+        { ...valid, operations: "4" },
+        { ...valid, activeMs: -1 },
+        { ...valid, activeMs: "1" },
+        {
+          ...valid,
+          activeMs: GRASS_BLADE_GROUNDING_JOB_LIMITS.maximumActiveMs + 0.01,
+        },
+        { ...valid, maximumSliceMs: -1 },
+        { ...valid, maximumSliceMs: 1.5 },
+        ...[NaN, Infinity, -Infinity].flatMap((value) =>
+          ["operations", "activeMs", "maximumSliceMs"].map((key) => ({
+            ...valid,
+            [key]: value,
+          })),
+        ),
+      ];
+      expect(() => validateGrassGroundingConsumedWork(undefined)).toThrow(
+        "Invalid grass grounding consumed work",
+      );
+      for (const value of invalid) {
+        const steps = groundGrassBladeSteps(f.request(surface));
+        expect(() => validateGrassGroundingConsumedWork(value)).toThrow(
+          "Invalid grass grounding consumed work",
+        );
+        expect(
+          () =>
+            new GrassGroundingContinuation(
+              steps,
+              () => true,
+              value as GrassGroundingConsumedWork,
+            ),
+        ).toThrow("Invalid grass grounding consumed work");
+        expect(steps.next()).toEqual({ done: false, value: "request_bounds" });
+        steps.return(undefined as never);
+      }
+      expect(getterCalls).toBe(0);
+      for (const source of [valid, Object.assign(Object.create(null), valid)]) {
+        const captured = validateGrassGroundingConsumedWork(source);
+        expect(captured).toEqual(valid);
+        expect(captured).not.toBe(source);
+        expect(Object.isFrozen(captured)).toBe(true);
+      }
+    } finally {
+      f.close();
+    }
+  });
+
+  it("rejects cumulative counters at either exact cap before advancing the core and preserves terminal budget reasons", () => {
+    const f = analyticOwner();
+    try {
+      const surface = f.makeSurface();
+      for (const [consumed, reason] of [
+        [
+          {
+            operations: GRASS_BLADE_GROUNDING_JOB_LIMITS.maximumOperations,
+            activeMs: 0,
+            maximumSliceMs: 0,
+          },
+          "operations",
+        ],
+        [
+          {
+            operations: 9,
+            activeMs: GRASS_BLADE_GROUNDING_JOB_LIMITS.maximumActiveMs,
+            maximumSliceMs: 2,
+          },
+          "active_cpu",
+        ],
+        [
+          {
+            operations: GRASS_BLADE_GROUNDING_JOB_LIMITS.maximumOperations,
+            activeMs: GRASS_BLADE_GROUNDING_JOB_LIMITS.maximumActiveMs,
+            maximumSliceMs: 2,
+          },
+          "operations",
+        ],
+      ] as const) {
+        const steps = groundGrassBladeSteps(f.request(surface));
+        const job = new GrassGroundingContinuation(steps, () => true, consumed);
+        expect(job.state.status).toBe("running");
+        expect(job.operations).toBe(consumed.operations);
+        expect(job.activeMs).toBe(consumed.activeMs);
+        expect(job.maximumSliceMs).toBe(consumed.maximumSliceMs);
+        expect(job.advance(1)).toEqual({ status: "failed_budget", reason });
+        expect(job.operations).toBe(consumed.operations);
+        expect(job.lastSliceOperations).toBe(0);
+        expect(job.lastPhase).toBeNull();
+        expect(steps.next().done).toBe(true);
+        const terminal = job.state;
+        const failure = captureGrassGroundingFailure(job);
+        expect(failure?.reason).toBe(reason);
+        expect(failure?.activeMs).toBeGreaterThanOrEqual(consumed.activeMs);
+        expect(failure?.maximumSliceMs).toBeGreaterThanOrEqual(
+          consumed.maximumSliceMs,
+        );
+        expect(job.advance()).toBe(terminal);
+        expect(job.cancel()).toBe(terminal);
+        expect(captureGrassGroundingFailure(job)).toEqual(failure);
+      }
+    } finally {
+      f.close();
+    }
+  });
+
+  it("charges real post-handoff core resumptions against the remaining operation allowance", () => {
+    const f = analyticOwner();
+    try {
+      const surface = f.makeSurface();
+      const consumed = {
+        operations: GRASS_BLADE_GROUNDING_JOB_LIMITS.maximumOperations - 1,
+        activeMs: 2.5,
+        maximumSliceMs: 0.5,
+      };
+      const job = new GrassGroundingContinuation(
+        groundGrassBladeSteps(f.request(surface)),
+        () => true,
+        consumed,
+      );
+      expect(job.advance(1).status).toBe("running");
+      expect(job.operations).toBe(
+        GRASS_BLADE_GROUNDING_JOB_LIMITS.maximumOperations,
+      );
+      expect(job.lastPhase).toBe("request_bounds");
+      expect(job.lastSliceOperations).toBe(1);
+      expect(job.advance(1)).toEqual({
+        status: "failed_budget",
+        reason: "operations",
+      });
+      expect(job.lastSliceOperations).toBe(0);
+      expect(job.lastPhase).toBe("request_bounds");
+      expect(job.activeMs).toBeGreaterThanOrEqual(consumed.activeMs);
+    } finally {
+      f.close();
+    }
+  });
+
+  it("charges actual resumed work against consumed active time without resetting the hard cap", () => {
+    const f = analyticOwner();
+    try {
+      const surface = f.makeSurface();
+      const request = f.request(surface);
+      function* resumedCore(): Generator<
+        string,
+        GrassBladeGroundingResult,
+        void
+      > {
+        // Controlled real-clock workload around the actual core, solely to
+        // cross the budget boundary deterministically; not a performance test.
+        const until = performance.now() + 2;
+        while (performance.now() < until) {
+          /* No clock replacement. */
+        }
+        return yield* groundGrassBladeSteps(request);
+      }
+      const consumed = {
+        operations: 17,
+        activeMs: GRASS_BLADE_GROUNDING_JOB_LIMITS.maximumActiveMs - 0.5,
+        maximumSliceMs: 0.5,
+      };
+      const job = new GrassGroundingContinuation(
+        resumedCore(),
+        () => true,
+        consumed,
+      );
+      expect(job.advance(1)).toEqual({
+        status: "failed_budget",
+        reason: "active_cpu",
+      });
+      expect(job.operations).toBe(consumed.operations + 1);
+      expect(job.lastSliceOperations).toBe(1);
+      expect(job.lastPhase).toBe("request_bounds");
+      expect(job.activeMs).toBeGreaterThanOrEqual(
+        GRASS_BLADE_GROUNDING_JOB_LIMITS.maximumActiveMs,
+      );
+      expect(job.maximumSliceMs).toBe(
+        Math.max(consumed.maximumSliceMs, job.lastSliceMs),
+      );
+      const terminal = job.state;
+      expect(job.advance()).toBe(terminal);
+      expect(job.cancel()).toBe(terminal);
+    } finally {
+      f.close();
+    }
+  });
+
+  it.each(["ready", "waiting_support"] as const)(
+    "reports cumulative counters and elapsed receipt after real %s completion",
+    (status) => {
+      const f = analyticOwner();
+      try {
+        const surface = f.makeSurface();
+        const request =
+          status === "ready"
+            ? f.request(surface)
+            : f.request(surface, f.dataAt(surface, [[49.8, 0]]));
+        const expected = groundGrassBlades(request);
+        const consumed = {
+          operations: 27,
+          activeMs: 10.25,
+          maximumSliceMs: 3.5,
+        };
+        const job = new GrassGroundingContinuation(
+          groundGrassBladeSteps(request),
+          () => true,
+          consumed,
+        );
+        let operations = consumed.operations,
+          activeMs = consumed.activeMs,
+          maximumSliceMs = consumed.maximumSliceMs;
+        // The caller's wire object cannot later rewrite the admitted counters.
+        consumed.operations = 0;
+        consumed.activeMs = 0;
+        consumed.maximumSliceMs = 0;
+        while (job.state.status === "running") {
+          job.advance(17);
+          operations += job.lastSliceOperations;
+          activeMs += job.lastSliceMs;
+          maximumSliceMs = Math.max(maximumSliceMs, job.lastSliceMs);
+        }
+        expect(job.state.status).toBe(status);
+        if (
+          job.state.status !== "ready" &&
+          job.state.status !== "waiting_support"
+        )
+          throw new Error("Expected actual core completion");
+        expect(job.operations).toBe(operations);
+        expect(job.activeMs).toBe(activeMs);
+        expect(job.maximumSliceMs).toBe(maximumSliceMs);
+        expect(job.state.result.receipt.elapsedMs).toBe(activeMs);
+        const { elapsedMs: _expectedElapsed, ...expectedReceipt } =
+          expected.receipt;
+        const { elapsedMs: _elapsed, ...receipt } = job.state.result.receipt;
+        expect({ ...job.state.result, receipt }).toEqual({
+          ...expected,
+          receipt: expectedReceipt,
+        });
+        const terminal = job.state;
+        expect(job.advance()).toBe(terminal);
+        expect(job.operations).toBe(operations);
+        expect(job.activeMs).toBe(activeMs);
+      } finally {
+        f.close();
+      }
+    },
+  );
+
+  it("preserves consumed work through explicit cancellation and real owner invalidation", () => {
+    const f = analyticOwner();
+    try {
+      const surface = f.makeSurface(),
+        geometry = f.geometries[0];
+      const consumed = { operations: 19, activeMs: 4.5, maximumSliceMs: 1.5 };
+      const cancelled = new GrassGroundingContinuation(
+        groundGrassBladeSteps(f.request(surface)),
+        () => true,
+        consumed,
+      );
+      expect(cancelled.cancel()).toEqual({
+        status: "cancelled",
+        reason: "caller",
+      });
+      expect(cancelled.operations).toBe(consumed.operations);
+      expect(cancelled.activeMs).toBe(consumed.activeMs);
+      expect(cancelled.maximumSliceMs).toBe(consumed.maximumSliceMs);
+      expect(cancelled.lastPhase).toBeNull();
+      expect(cancelled.advance()).toBe(cancelled.state);
+      const invalidated = new GrassGroundingContinuation(
+        groundGrassBladeSteps(f.request(surface)),
+        () => surface.matchesGeometry(geometry),
+        consumed,
+      );
+      geometry.setAttribute(
+        "position",
+        geometry.getAttribute("position").clone(),
+      );
+      expect(invalidated.advance()).toEqual({
+        status: "cancelled",
+        reason: "invalidated",
+      });
+      expect(invalidated.operations).toBe(consumed.operations);
+      expect(invalidated.lastSliceOperations).toBe(0);
+      expect(invalidated.lastPhase).toBeNull();
+      expect(invalidated.activeMs).toBeGreaterThanOrEqual(consumed.activeMs);
+      expect(invalidated.maximumSliceMs).toBeGreaterThanOrEqual(
+        consumed.maximumSliceMs,
+      );
+    } finally {
+      f.close();
+    }
+  });
+
+  it("retains real grounding-work and input failures after seeded cumulative work", () => {
+    const f = analyticOwner();
+    try {
+      const surface = f.makeSurface();
+      for (const reason of ["grounding_work", "input"] as const) {
+        const request = f.request(surface);
+        if (reason === "grounding_work") request.workBudget = 1;
+        else request.data.offsets[0] = NaN;
+        const consumed = { operations: 31, activeMs: 5.5, maximumSliceMs: 1.5 };
+        const job = new GrassGroundingContinuation(
+          groundGrassBladeSteps(request),
+          () => true,
+          consumed,
+        );
+        while (job.state.status === "running") job.advance();
+        const state = job.state;
+        expect(captureGrassGroundingFailure(job)?.reason).toBe(reason);
+        expect(job.operations).toBeGreaterThan(consumed.operations);
+        expect(job.activeMs).toBeGreaterThanOrEqual(consumed.activeMs);
+        expect(job.maximumSliceMs).toBeGreaterThanOrEqual(
+          consumed.maximumSliceMs,
+        );
+        expect(job.advance()).toBe(state);
+        expect(job.cancel()).toBe(state);
+      }
     } finally {
       f.close();
     }

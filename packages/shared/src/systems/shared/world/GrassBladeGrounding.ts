@@ -1553,6 +1553,63 @@ export const GRASS_BLADE_GROUNDING_JOB_LIMITS = Object.freeze({
   maximumActiveMs: 250,
 });
 
+/** Cumulative work already spent before a continuation changes execution owner. */
+export type GrassGroundingConsumedWork = {
+  operations: number;
+  activeMs: number;
+  maximumSliceMs: number;
+};
+
+/** Admit a detached wire snapshot without invoking user-defined field accessors.
+ * Operation counts are integers; clock measurements retain fractional ms. */
+export function validateGrassGroundingConsumedWork(
+  value: unknown,
+): Readonly<GrassGroundingConsumedWork> {
+  const fail = (): never => {
+    throw new Error("Invalid grass grounding consumed work");
+  };
+  if (
+    !value ||
+    typeof value !== "object" ||
+    (Object.getPrototypeOf(value) !== Object.prototype &&
+      Object.getPrototypeOf(value) !== null)
+  )
+    fail();
+  const keys = ["operations", "activeMs", "maximumSliceMs"] as const;
+  const ownKeys = Reflect.ownKeys(value as object);
+  if (
+    ownKeys.length !== keys.length ||
+    ownKeys.some((key) => !keys.includes(key as (typeof keys)[number]))
+  )
+    fail();
+  const captured: GrassGroundingConsumedWork = {
+    operations: 0,
+    activeMs: 0,
+    maximumSliceMs: 0,
+  };
+  for (const key of keys) {
+    const property = Object.getOwnPropertyDescriptor(value, key);
+    if (
+      !property ||
+      !("value" in property) ||
+      !property.enumerable ||
+      typeof property.value !== "number" ||
+      !Number.isFinite(property.value) ||
+      property.value < 0
+    )
+      fail();
+    captured[key] = property!.value;
+  }
+  if (
+    !Number.isSafeInteger(captured.operations) ||
+    captured.operations > GRASS_BLADE_GROUNDING_JOB_LIMITS.maximumOperations ||
+    captured.activeMs > GRASS_BLADE_GROUNDING_JOB_LIMITS.maximumActiveMs ||
+    captured.maximumSliceMs > captured.activeMs
+  )
+    fail();
+  return Object.freeze(captured);
+}
+
 export type GrassBladeGroundingJobState =
   | { status: "running" }
   | {
@@ -1586,8 +1643,18 @@ export class GrassGroundingContinuation {
   constructor(
     steps: Generator<string, GrassBladeGroundingResult, void>,
     private readonly isCurrent: () => boolean,
+    consumedWork?: GrassGroundingConsumedWork,
   ) {
+    const consumed =
+      consumedWork === undefined
+        ? undefined
+        : validateGrassGroundingConsumedWork(consumedWork);
     this.iterator = steps;
+    if (consumed) {
+      this.operations = consumed.operations;
+      this.activeMs = consumed.activeMs;
+      this.maximumSliceMs = consumed.maximumSliceMs;
+    }
   }
 
   get state(): GrassBladeGroundingJobState {

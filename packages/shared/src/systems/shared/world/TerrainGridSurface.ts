@@ -28,6 +28,35 @@ export type TerrainCellTopology = Readonly<{
   surfaceVertexCount: number;
 }>;
 
+/** Detached copies of the admitted array views, not the live renderer buffers.
+ * Payload bytes include packed topology offsets, not JS wrappers, strings or
+ * any query metadata a receiving worker subsequently constructs. */
+export type RetainedTerrainSurfaceSnapshot = Readonly<{
+  schemaVersion: 1;
+  nodeId: number;
+  terrainProfileIdentity: string;
+  revision: string;
+  centerX: number;
+  centerZ: number;
+  size: number;
+  resolution: number;
+  positions: Float32Array;
+  indices: Uint16Array | Uint32Array;
+  topology: Readonly<{
+    schemaVersion: 1;
+    resolution: number;
+    surfaceVertexCount: number;
+    cellIndexOffsets: Uint32Array;
+  }> | null;
+  positionVersion: number;
+  indexVersion: number;
+  positionCount: number;
+  indexCount: number;
+  payloadBytes: number;
+}>;
+
+const SURFACE_SNAPSHOT_BATCH_ELEMENTS = 1024;
+
 function* readCellTopology(
   geometry: THREE.BufferGeometry,
   resolution: number,
@@ -1065,6 +1094,146 @@ export class RetainedTerrainSurface {
       // transferable proof behind if construction exits exceptionally.
       if (preparedAdmission === proof) preparedAdmission = null;
     }
+  }
+
+  /** O(1) reservation preflight. The caller owns aggregate in-flight memory;
+   * this owner never reserves, caches or transfers its live geometry. */
+  snapshotByteLength(): number {
+    this.checkGroundingEdgeCurrent();
+    if (
+      !(
+        this.indexArray instanceof Uint16Array ||
+        this.indexArray instanceof Uint32Array
+      ) ||
+      this.index.itemSize !== 1 ||
+      this.index.normalized ||
+      this.position.normalized
+    )
+      throw new Error("Unsupported retained terrain snapshot attribute layout");
+    const bytes =
+      this.positions.byteLength +
+      this.indexArray.byteLength +
+      (this.topology?.cellIndexOffsets.length ?? 0) *
+        Uint32Array.BYTES_PER_ELEMENT;
+    if (!Number.isSafeInteger(bytes) || bytes <= 0)
+      throw new Error("Invalid retained terrain snapshot byte length");
+    return bytes;
+  }
+
+  /** Copy under the original borrowed-owner guard at every suspension/batch.
+   * Like retained admission, this observes published attribute versions, not
+   * unannounced writes into otherwise unchanged source typed arrays. Native
+   * allocations cannot be preempted; copying is bounded to 1024 elements/step.
+   * Closing the iterator abandons only its private copies, never the source. */
+  *copySnapshotSteps(
+    maximumBytes: number,
+  ): Generator<string, RetainedTerrainSurfaceSnapshot, void> {
+    const payloadBytes = this.snapshotByteLength();
+    if (!Number.isSafeInteger(maximumBytes) || maximumBytes < 0)
+      throw new Error("Invalid retained terrain snapshot byte bound");
+    if (payloadBytes > maximumBytes)
+      throw new Error("Retained terrain snapshot exceeds byte bound");
+    const sourceIndices = this.indexArray;
+    if (!(
+      sourceIndices instanceof Uint16Array ||
+      sourceIndices instanceof Uint32Array
+    ))
+      throw new Error("Unsupported retained terrain snapshot index width");
+
+    yield "snapshot-position-allocation";
+    this.checkGroundingEdgeCurrent();
+    const positions = new Float32Array(this.positions.length);
+    this.checkGroundingEdgeCurrent();
+    for (
+      let start = 0;
+      start < positions.length;
+      start += SURFACE_SNAPSHOT_BATCH_ELEMENTS
+    ) {
+      yield "snapshot-position-copy";
+      this.checkGroundingEdgeCurrent();
+      positions.set(
+        this.positions.subarray(
+          start,
+          Math.min(start + SURFACE_SNAPSHOT_BATCH_ELEMENTS, positions.length),
+        ),
+        start,
+      );
+      this.checkGroundingEdgeCurrent();
+    }
+
+    yield "snapshot-index-allocation";
+    this.checkGroundingEdgeCurrent();
+    const indices =
+      sourceIndices instanceof Uint16Array
+        ? new Uint16Array(sourceIndices.length)
+        : new Uint32Array(sourceIndices.length);
+    this.checkGroundingEdgeCurrent();
+    for (
+      let start = 0;
+      start < indices.length;
+      start += SURFACE_SNAPSHOT_BATCH_ELEMENTS
+    ) {
+      yield "snapshot-index-copy";
+      this.checkGroundingEdgeCurrent();
+      indices.set(
+        sourceIndices.subarray(
+          start,
+          Math.min(start + SURFACE_SNAPSHOT_BATCH_ELEMENTS, indices.length),
+        ),
+        start,
+      );
+      this.checkGroundingEdgeCurrent();
+    }
+
+    let topology: RetainedTerrainSurfaceSnapshot["topology"] = null;
+    if (this.topology) {
+      yield "snapshot-topology-allocation";
+      this.checkGroundingEdgeCurrent();
+      const sourceOffsets = this.topology.cellIndexOffsets;
+      const cellIndexOffsets = new Uint32Array(sourceOffsets.length);
+      this.checkGroundingEdgeCurrent();
+      for (
+        let start = 0;
+        start < cellIndexOffsets.length;
+        start += SURFACE_SNAPSHOT_BATCH_ELEMENTS
+      ) {
+        yield "snapshot-topology-copy";
+        this.checkGroundingEdgeCurrent();
+        const end = Math.min(
+          start + SURFACE_SNAPSHOT_BATCH_ELEMENTS,
+          cellIndexOffsets.length,
+        );
+        for (let i = start; i < end; i++)
+          cellIndexOffsets[i] = sourceOffsets[i];
+        this.checkGroundingEdgeCurrent();
+      }
+      topology = Object.freeze({
+        schemaVersion: 1,
+        resolution: this.topology.resolution,
+        surfaceVertexCount: this.topology.surfaceVertexCount,
+        cellIndexOffsets,
+      });
+    }
+    yield "snapshot-finalize";
+    this.checkGroundingEdgeCurrent();
+    return Object.freeze({
+      schemaVersion: 1,
+      nodeId: this.nodeId,
+      terrainProfileIdentity: this.terrainProfileIdentity,
+      revision: this.revision,
+      centerX: this.centerX,
+      centerZ: this.centerZ,
+      size: this.size,
+      resolution: this.resolution,
+      positions,
+      indices,
+      topology,
+      positionVersion: this.positionVersion,
+      indexVersion: this.indexVersion,
+      positionCount: this.positionCount,
+      indexCount: this.indexCount,
+      payloadBytes,
+    });
   }
 
   matchesGeometry(geometry: THREE.BufferGeometry): boolean {

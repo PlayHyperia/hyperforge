@@ -1,6 +1,6 @@
 import { Worker } from "node:worker_threads";
 import { createHash } from "node:crypto";
-import { describe, expect, it } from "vitest";
+import { beforeAll, describe, expect, it } from "vitest";
 import THREE from "../../../../extras/three/three";
 import { World } from "../../../../core/World";
 import { DataManager } from "../../../../data/DataManager";
@@ -30,6 +30,15 @@ import {
 import { prepareGroundedGrassSteps } from "../GrassGroundingPipeline";
 import { RetainedTerrainSurface } from "../TerrainGridSurface";
 import { groundGrassBlades as legacyGroundGrassBlades } from "./fixtures/LegacyGrassBladeGroundingReference";
+import {
+  bundleGrassGroundingWorker,
+  createActualGroundingWorker,
+  createGrassGroundingWorkerRequest,
+  grassGroundingWorkerSemanticResult,
+  prepareCachedGrassGroundingWorkerRequest,
+  runGrassGroundingWorker,
+  type ActualGroundingWorker,
+} from "./fixtures/GrassGroundingWorkerHarness";
 
 const attributes = [
   ["offsets", 3],
@@ -275,6 +284,12 @@ const cases = [
   },
 ] as const;
 
+let groundingWorkerSource: string;
+beforeAll(async () => {
+  if (cases.some((scenario) => scenario.enabled))
+    groundingWorkerSource = (await bundleGrassGroundingWorker()).source;
+});
+
 describe.each(cases)("$name", (scenario) => {
   const test = it.skipIf(!scenario.enabled);
   test(
@@ -292,6 +307,7 @@ describe.each(cases)("$name", (scenario) => {
       let visual: TerrainVisualManager | undefined;
       let manager: GrassVisualManager | undefined;
       let worker: Worker | undefined;
+      let groundingWorker: ActualGroundingWorker | undefined;
       let docks: ProceduralDocks | undefined;
       const failures: unknown[] = [];
       try {
@@ -669,6 +685,128 @@ describe.each(cases)("$name", (scenario) => {
         if ("native52" in scenario)
           expect(result.data.count).toBe(scenario.native52.retainedClumps);
 
+        groundingWorker = await createActualGroundingWorker(
+          groundingWorkerSource,
+        );
+        const copyStarted = performance.now();
+        const packet = createGrassGroundingWorkerRequest(request);
+        const snapshotCopyMs = performance.now() - copyStarted;
+        const workerStarted = performance.now();
+        const workerResult = await runGrassGroundingWorker(
+          groundingWorker,
+          packet,
+        );
+        evidence(
+          `${scenario.label}_GROUNDING_WORKER`,
+          JSON.stringify({
+            key,
+            lod,
+            status: workerResult.state.status,
+            reason:
+              workerResult.state.status === "failed_budget"
+                ? workerResult.state.reason
+                : workerResult.state.status === "failed_input"
+                  ? workerResult.state.error
+                  : null,
+            work: workerResult.work,
+            lastPhase: workerResult.lastPhase,
+            terrainRebuildWork: workerResult.terrainRebuildWork,
+            inputBytes: workerResult.inputBytes,
+            derivedBytesReserved: workerResult.derivedBytesReserved,
+            resultBytes: workerResult.resultBytes,
+            snapshotCopyMs,
+            workerWallMs: performance.now() - workerStarted,
+            scope:
+              "Actual browser-target worker bundle in a Node worker realm. Original work/CPU limits include terrain reconstruction and full-cell fitting. Fixture snapshot copying is measured separately, not budgeted production handoff. Payload reservations are not total heap. This is numerical/transport evidence, not native browser or game scheduling qualification.",
+          }),
+        );
+        // Preserve the cold monolithic trial as a diagnostic. Its measured
+        // repeated admission exhausted the original fitting budget; the actual
+        // candidate below instead has an explicit once-per-owner lifecycle.
+        // Unexpected errors remain failures, and successful cold outputs still
+        // must be bitwise identical. No cold failure is relabeled as a pass.
+        if (workerResult.state.status === "ready")
+          expect(
+            grassGroundingWorkerSemanticResult(
+              workerResult.state.result,
+              request,
+            ),
+          ).toEqual(grassGroundingWorkerSemanticResult(result, request));
+        else
+          expect(workerResult.state).toEqual({
+            status: "failed_budget",
+            reason: "active_cpu",
+          });
+        await groundingWorker.close();
+        groundingWorker = undefined;
+
+        const cachedStarted = performance.now();
+        groundingWorker = await createActualGroundingWorker(
+          groundingWorkerSource,
+        );
+        const cachedCopyStarted = performance.now();
+        const cachedPacket = createGrassGroundingWorkerRequest(request);
+        const cachedCopyMs = performance.now() - cachedCopyStarted;
+        const prepared = await prepareCachedGrassGroundingWorkerRequest(
+          groundingWorker,
+          cachedPacket,
+        );
+        const fitStarted = performance.now();
+        const cachedResult = await runGrassGroundingWorker(
+          groundingWorker,
+          prepared.request,
+        );
+        const completedAt = performance.now();
+        evidence(
+          `${scenario.label}_CACHED_GROUNDING_WORKER`,
+          JSON.stringify({
+            key,
+            lod,
+            admissions: prepared.admissions,
+            status: cachedResult.state.status,
+            reason:
+              cachedResult.state.status === "failed_budget"
+                ? cachedResult.state.reason
+                : cachedResult.state.status === "failed_input"
+                  ? cachedResult.state.error
+                  : null,
+            work: cachedResult.work,
+            lastPhase: cachedResult.lastPhase,
+            inputBytes: cachedResult.inputBytes,
+            derivedBytesReserved: cachedResult.derivedBytesReserved,
+            resultBytes: cachedResult.resultBytes,
+            snapshotCopyMs: cachedCopyMs,
+            fittingWallMs: completedAt - fitStarted,
+            coldEndToEndWallMs: completedAt - cachedStarted,
+            totalActiveMs:
+              cachedResult.work.activeMs +
+              prepared.admissions.reduce(
+                (sum, admission) => sum + admission.work.activeMs,
+                0,
+              ),
+            scope:
+              "Explicit one-time per-owner terrain admission followed by a full-cell fit under the unchanged fitting cap. Every preparation retains its own bounded work receipt; total active and cold wall time include them. Fixture copying is measured, not production-scheduler qualified. Actual browser bundle runs in a Node worker realm, not gameplay or native browser qualification.",
+          }),
+        );
+        expect(cachedResult.state.status).toBe("ready");
+        if (cachedResult.state.status !== "ready")
+          throw new Error(
+            `Actual cached pond worker ${cachedResult.state.status}`,
+          );
+        expect(
+          grassGroundingWorkerSemanticResult(
+            cachedResult.state.result,
+            request,
+          ),
+        ).toEqual(grassGroundingWorkerSemanticResult(result, request));
+        // Copied input ownership has moved; the live renderer and projection
+        // arrays remain intact and the original region is still authoritative.
+        expect(region.isCurrent()).toBe(true);
+        for (const [index, [key]] of attributes.entries())
+          expect(projected[key]).toEqual(inputBefore[index]);
+        await groundingWorker.close();
+        groundingWorker = undefined;
+
         // The frozen exhaustive implementation cannot finish this whole cell
         // under its existing cap. One-clump evaluations provide ONLY an
         // independent numerical oracle; the candidate above and the complete
@@ -940,6 +1078,11 @@ describe.each(cases)("$name", (scenario) => {
         };
         try {
           await worker?.terminate();
+        } catch (error) {
+          failures.push(error);
+        }
+        try {
+          await groundingWorker?.close();
         } catch (error) {
           failures.push(error);
         }

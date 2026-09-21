@@ -1960,6 +1960,97 @@ runtime43/44 and build30. Both owned browsers closed and temporary databases
 were removed; protected human localhost:3333, database and canonical artifacts
 are unchanged. No default, stream, sustained-performance, AAA or launch approval.
 
+### Exact-fitting worker and bounded retained-terrain reuse — 2026-09-21
+
+**SOURCE CANDIDATE ONLY; not connected to gameplay or promoted.** The real
+GrassBladeGrounding/TerrainGridSurface modules now run in a self-contained
+browser-target bundle, tested through an actual Node worker transport.
+Borrowed geometry is copied in guarded 1,024-element batches, preserving its
+original identity, attribute versions, index width and topology. Live renderer
+buffers are never transferred. Consumed work can cross execution boundaries
+without resetting the existing 250ms / 1,000,000-operation fitting limits.
+
+The first monolithic pond trial FAILED four of five cases at the unchanged
+250ms limit. Bounded phase attribution measured 147.987ms spent reconstructing
+two southbank owners before fitting. The original game already admits retained
+terrain once before grass jobs; rebuilding it for every worker fit was redundant.
+The candidate now has explicit, separately measured prepare_surface,
+start_cached and release_surfaces lifecycles. Each immutable owner is admitted
+once under its own unchanged 2ms/8,192-operation slices and 250ms/1m total cap.
+There is one active task, no internal FIFO, lifetime-monotonic task/owner IDs,
+and at most sixteen cached owners. Preparation/cancellation/failure rolls back
+partial ownership; cached fits cannot dispose terrain held by the cache.
+Review caught and fixed release acknowledgement ordering before verification.
+
+Final CPU verification: **489 tests pass** across snapshot/core (245), existing
+manager/cells/pacing/same-face regressions (190), actual worker transport/cache
+(49), and the five real pond cases (three historical-overlay skips).
+Twelve numerical cases cover cold and repeated cached fits. Tests verify exact
+arrays/dependencies, transfer isolation, seeded limits, cancellation, stale IDs,
+malformed input, rollback, release/recovery and aggregate reservation rejection.
+All five pond fits equal the real core; full pipeline/oracle/provenance assertions
+remain in place. All 100 completed-pipeline buffer hashes match the prior
+pond-appearance-grounding01 receipt; only expected owner UUIDs differ.
+Full shared plus nine explicit source/test files typecheck with zero diagnostics
+(712 roots / 2,388 source files). Scoped lint and formatting pass. The first
+lint run found an undeclared global warning; explicit globalThis.MessageChannel
+fixes it. The final frozen worker/pond run passes all 54 cases again (three skips).
+The following measured timings are from cache-pond01, not a universal bound.
+
+| Actual pond case | One-time preparation active ms | Fitting active ms | Total active ms | Cold wall ms including worker boot/copy/preparation/fit |
+| --- | ---: | ---: | ---: | ---: |
+| Near south | 125.124 | 215.397 | 340.522 | 366.780 |
+| Near east | 108.842 | 162.719 | 271.561 | 297.008 |
+| LOD1 south | 125.114 | 131.148 | 256.262 | 281.744 |
+| LOD1 east | 110.317 | 110.171 | 220.488 | 246.464 |
+| LOD1 cutbank | 172.478 | 102.973 | 275.451 | 305.527 |
+
+These are individual Node-worker observations, NOT native frame/loading
+qualification or a controlled speedup. Preparation is not free or erased:
+total cold costs above include it. The monolithic cold diagnostic still fails
+four cases in the final run and is explicitly not an accepted execution mode.
+The original failed receipts are retained; attribution01 selected no tests and
+does not count. Corrected attribution02 measured the southbank failure.
+
+Cached fitting transfers 48,600–70,672 input bytes in these cases, versus the
+cold path's 4.3–7.2MB. The largest tested retained region has four owners,
+7,116,188 copied-input bytes and 11,518,272 reserved index/topology bytes.
+Aggregate cached+in-flight input and retained metadata reservations each cap
+at 16MiB; result payload caps at 2MiB. These are NOT total worker memory:
+validation/fitting scratch, JS metadata and whole-heap peak remain unqualified.
+The fixture measures copying but is not a production main-thread copy scheduler.
+The final near-south fit used 233.668ms, leaving only 16.332ms of the original
+cumulative fitting cap for main preparation/remapping. End-to-end headroom
+must be demonstrated during integration; a passing isolated fit is not enough.
+
+- [x] Prove exact isolated worker execution, guarded copies and cumulative accounting.
+- [x] Implement/test explicit bounded owner reuse, cancellation and release.
+- [x] Pass all five real pond fitting cases without geometry/density/cap changes.
+- [ ] Add bounded main-thread transport/preparation and explicit waiting state;
+      preserve projected provenance, complete input/region leases and byte ownership.
+- [ ] Map returned dependencies only to held owners; reject replacement, newly
+      arriving neighbors, stale constraints/LOD and late same-key responses.
+      Resume provenance remapping under the same cumulative fitting budget.
+- [ ] Integrate one-upload/frame publication and cancellation/teardown across all
+      manager exits. Qualify aggregate scratch/heap and copy/transfer tails.
+- [ ] Emit/watch the separate bundled worker correctly through flattened shared
+      output and Vite; verify real Chrome worker behavior before native gameplay.
+      Canonical build artifacts/configuration remain unchanged in this checkpoint.
+- [ ] Re-run unchanged native startup/camera gates, then resume pond composition,
+      planting, bank-pavilion arrival and both dock visual/motion reviews.
+      Every broader LAYOUT-01–08, all-tier fishing, streaming and launch gate stays open.
+
+References rechecked: [MDN transfer ownership](https://developer.mozilla.org/en-US/docs/Web/API/Web_Workers_API/Transferable_objects)
+and [Three BufferAttribute versions](https://threejs.org/docs/pages/BufferAttribute.html).
+They inform buffer custody/version guards, not acceptance of this implementation.
+Evidence: service-layout grounding-worker-core01, manager-regression01,
+transport01/02, pond01, pond-phase01, pond-attribution01/02,
+cache-transport01, cache-pond01, cache-buffer-compare01, cache-types02,
+final-tests01, final-types01, final-buffer-compare01, lint01/02 and format01;
+all prefixed grounding-worker-. No browser or temporary database was launched
+for this CPU stage. Human localhost:3333 and protected artifacts stay unchanged.
+No native-performance, visual, AAA or production-launch approval.
+
 ### Inland fishing integration — candidate only
 
 The detached candidate now requests 14 real fishing entities, two for each of
