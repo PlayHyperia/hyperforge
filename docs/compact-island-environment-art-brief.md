@@ -2145,6 +2145,69 @@ Implementation follows native [worker ownership transfer](https://developer.mozi
 and [termination semantics](https://developer.mozilla.org/en-US/docs/Web/API/Worker/terminate);
 these references do not substitute for the actual tests above.
 
+### Grass worker game integration and packaging — 2026-09-21
+
+**Opt-in source candidate; no default promotion or AAA/launch acceptance.**
+This supersedes the prior handoff section's next-step ownership/packaging tasks.
+
+- [x] Actual TerrainSystem/GrassVisualManager integration behind the explicit
+  `grassGrounding=worker-v1` + fine-meadow appearance/render-profile pair.
+  Absent selection preserves the existing path. Density, geometry, quality,
+  resolution, shadows and original 250 ms / 1m fitting limits are unchanged.
+- [x] One active copied handoff, immutable held-owner cache with sixteen owners,
+  pre-copy input/derived reservations, monotonic tokens, idle/stale/LRU release,
+  complete region/constraint/ticket/LOD checks and one mesh upload per frame.
+  Snapshot layout is O(1); renderer-owned buffers are never detached.
+  Input 16 MiB / retained metadata 16 MiB / result 2 MiB are numerical bounds, NOT
+  total JS/GPU heap limits. Terrain admission is separately bounded/measured;
+  no per-fit budget reset or detached-input fallback.
+- [x] Actual manager tests verify identical mesh attributes, cache reuse,
+  cancellation of dispatched fitting, retired-owner release, and teardown.
+  Review found and fixed the dormant-caller-after-worker-death reservation edge;
+  a real worker-death regression covers both active and dormant job cleanup.
+- [x] 747-case regression run passes; final focused ownership/client/worker/
+  handoff/publication run passes 205 cases (overlapping manager/coordinator cases).
+  Native Chrome/Metal factory+Vite packaging passes ten cases using the actual
+  emitted worker asset. Full shared + changed tests/Vite config typecheck:
+  720 roots / 2,738 source files, zero diagnostics.
+- [x] Dedicated fully bundled sibling worker emitted before flattened framework.
+  Development batching stages all outputs before publishing client JS last;
+  only that commit signals reload. Real esbuild/filesystem/Chokidar proof verifies
+  failed/stale batches preserve prior outputs and successful commit coherence.
+  This does not qualify the complete long-running dev-main/typecheck/HMR lifecycle.
+- [ ] Qualify sustained movement/LOD churn, cold/warm queue latency, whole-heap
+  peaks, upload/GPU/frame tails and full watch-mode failure/recovery. The 2 ms
+  slice target remains cooperative; individual preparation/transport tails exist.
+- [ ] Continue art review: broad continuous shore collar, weak shoreline
+  planting, uniform grass silhouette, plain dock timber, unfinished pavilion
+  arrival/grounding and wider island composition remain below the intended bar.
+  Passing ownership tests is not visual approval.
+
+Native outcome, cleanup, final source pins and scoped checkpoint details follow
+in the current development checkpoint. Evidence: service-layout
+`grounding-coordinator-*`, isolated pond build32/native64–65 and final build33/native66.
+Native64 reached 122/122 cells in 50.910 s and first cut 17.344 s, then FAILED because
+the old diagnostic reader called a nonexistent job predicate. Its record stays
+failed; the reader now reports unavailable predicates explicitly, never true.
+Native65 captured all four views with no errors: startup 51.066 s, cuts
+17.972/5.267/4.316/6.646 s. These pass readiness deadlines but are NOT smooth
+camera/gameplay/loading acceptance or a controlled speedup. Main grounding slice
+maximum 2.5 ms; admission maximum 16.7 ms includes separate remote work, not solely
+main-frame time. Older transport tails remain open. Final post-review build33/native66 also captured all four views with no errors:
+122/122 cells ready in 47.250 s; unchanged camera gates passed in
+16.824/5.274/4.296/6.825 s. Its main grounding slice maximum was 2.4 ms and the
+separately measured admission maximum 7.5 ms. These are individual observations,
+not a controlled speedup or seamless movement approval. Both owned diagnostic
+runtimes stopped, their temporary databases were removed, and all owned browser
+contexts closed. Canonical output hashes, human ports/DB and lock remain unchanged.
+The protected build-script source pin was explicitly advanced for worker emission;
+the five other build-input pins and all 145 compiled-artifact pins remain exact.
+
+References: [Vite worker asset ownership](https://vite.dev/guide/features.html#web-workers),
+[worker transfer](https://developer.mozilla.org/en-US/docs/Web/API/Worker/postMessage),
+[termination](https://developer.mozilla.org/en-US/docs/Web/API/Worker/terminate).
+The actual tests, not those references, establish the limited results above.
+
 ### Inland fishing integration — candidate only
 
 The detached candidate now requests 14 real fishing entities, two for each of

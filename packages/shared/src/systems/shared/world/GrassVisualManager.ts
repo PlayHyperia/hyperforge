@@ -72,6 +72,12 @@ import {
   prepareGroundedGrassSteps,
   type GrassGroundingInputLease,
 } from "./GrassGroundingPipeline";
+import type { GrassGroundingHandoffRequest } from "./GrassGroundingHandoff";
+import {
+  GrassGroundingWorkerCoordinator,
+  type GrassGroundingWorkerJob,
+} from "./GrassGroundingWorkerCoordinator";
+import type { GrassGroundingWorkerPort } from "../../../utils/workers/GrassGroundingWorkerClient";
 import {
   createGroundedGrassMaterial,
   groundedGrassWorldBox,
@@ -651,8 +657,15 @@ interface GrassWorkerTicket {
 interface GrassGroundingEntry {
   ticket: GrassWorkerTicket;
   region: RetainedTerrainRegion | null;
-  job: GrassGroundingContinuation;
+  job: GrassGroundingContinuation | GrassGroundingWorkerJob;
 }
+
+/** Explicit fine-meadow candidate; one worker is owned by this manager. */
+export type GrassGroundingWorkerSetup = {
+  mode: "worker-v1";
+  createPort: () => GrassGroundingWorkerPort;
+  isSurfaceCurrent: (surface: RetainedTerrainSurface) => boolean;
+};
 
 interface CompletedGrassGrounding {
   region: RetainedTerrainRegion;
@@ -878,6 +891,7 @@ export class GrassVisualManager implements QuadTreeListener {
   private completedSurfaces = new Map<string, RetainedTerrainSurface>();
   private completedLods = new Map<string, number>();
   private groundingJobs = new Map<string, GrassGroundingEntry>();
+  private readonly groundingWorker: GrassGroundingWorkerCoordinator | null;
   private completedGrounding = new Map<string, CompletedGrassGrounding>();
   private groundingHalo = 0;
   private maximumGroundingSliceMs = 0;
@@ -923,6 +937,7 @@ export class GrassVisualManager implements QuadTreeListener {
     appearanceCandidate?: GrassAppearanceCandidate,
     private readonly habitatComposition?: CompactHabitatField | null,
     private readonly lightingCandidate?: GrassLightingCandidate,
+    groundingWorkerSetup?: GrassGroundingWorkerSetup,
   ) {
     if (typeof terrainProfileIdentity !== "string" || !terrainProfileIdentity) {
       throw new Error("Grass visual terrain profile identity is required");
@@ -948,6 +963,16 @@ export class GrassVisualManager implements QuadTreeListener {
     }
     this.profileId = profile.id ?? "ordinary-v1";
     this.fineMeadow = this.profileId === FINE_MEADOW_GRASS_VISUAL_PROFILE.id;
+    if (
+      groundingWorkerSetup &&
+      (groundingWorkerSetup.mode !== "worker-v1" ||
+        !this.fineMeadow ||
+        appearanceCandidate !== "fine-meadow-v1" ||
+        !captureRenderedRegion)
+    )
+      throw new Error(
+        "Grass grounding worker requires the retained fine meadow",
+      );
     this.placementDistribution = this.fineMeadow
       ? "fine-cell-stratified-v1"
       : undefined;
@@ -1147,6 +1172,20 @@ export class GrassVisualManager implements QuadTreeListener {
       );
     });
     this.material = this.createMaterial();
+    // Construct only after all profile checks and material setup. A failed
+    // native Worker construction must not leak the already-owned GPU objects.
+    try {
+      this.groundingWorker = groundingWorkerSetup
+        ? new GrassGroundingWorkerCoordinator(
+            groundingWorkerSetup.createPort(),
+            groundingWorkerSetup.isSurfaceCurrent,
+          )
+        : null;
+    } catch (error) {
+      this.lodGeometries.forEach((geometry) => geometry.dispose());
+      this.material.dispose();
+      throw error;
+    }
     if (this.compactMeadow) {
       let radius = 0;
       for (let tier = this.minimumLodLevel; tier <= 1; tier++) {
@@ -1283,6 +1322,12 @@ export class GrassVisualManager implements QuadTreeListener {
                 : {}),
               activeSliceMs: this.groundingActiveMs,
               maximumSliceMs: this.maximumGroundingSliceMs,
+              ...(this.groundingWorker
+                ? {
+                    execution: "worker-v1" as const,
+                    worker: this.groundingWorker.receipt,
+                  }
+                : {}),
             },
           }
         : {}),
@@ -1642,67 +1687,76 @@ export class GrassVisualManager implements QuadTreeListener {
       error = reason;
     }
     const manager = this;
+    const request: GrassGroundingHandoffRequest | undefined =
+      !error &&
+      region &&
+      inputs &&
+      (ticket.lodLevel === 1 || (manager.fineMeadow && ticket.lodLevel === 0))
+        ? {
+            data,
+            ownSurface: ticket.surface,
+            surfaces: region.surfaces,
+            geometry: manager.lodGeometries[ticket.lodLevel],
+            lod: ticket.lodLevel,
+            ...(manager.geometryLayout === undefined
+              ? {}
+              : { geometryLayout: manager.geometryLayout }),
+            ...(manager.roadClearance
+              ? { roadClearance: manager.roadClearance }
+              : {}),
+            ...(manager.fineMeadow &&
+            manager.compactGrassColorGrade &&
+            manager.compactMacroField?.coastalMeadow &&
+            manager.compactMacroField.bankVerge
+              ? { bankVerge: manager.compactMacroField.bankVerge }
+              : {}),
+            oceanLevel: manager.waterThreshold,
+            wind: {
+              x:
+                GRASS_CONFIG.WIND_STRENGTH *
+                manager.meadowAppearance.BLADE_HEIGHT_MAX,
+              z:
+                GRASS_CONFIG.WIND_STRENGTH *
+                manager.meadowAppearance.BLADE_HEIGHT_MAX *
+                0.55,
+            },
+          }
+        : undefined;
     const steps = function* (): Generator<
       string,
       GrassBladeGroundingResult,
       void
     > {
       if (error) throw error;
-      if (
-        !region ||
-        !inputs ||
-        (ticket.lodLevel !== 1 &&
-          !(manager.fineMeadow && ticket.lodLevel === 0))
-      )
+      if (!request || !inputs)
         throw new Error("Incomplete compact grass grounding inputs");
       return yield* prepareGroundedGrassSteps(
-        {
-          data,
-          ownSurface: ticket.surface,
-          surfaces: region.surfaces,
-          geometry: manager.lodGeometries[ticket.lodLevel],
-          lod: ticket.lodLevel,
-          ...(manager.geometryLayout === undefined
-            ? {}
-            : { geometryLayout: manager.geometryLayout }),
-          ...(manager.roadClearance
-            ? { roadClearance: manager.roadClearance }
-            : {}),
-          ...(manager.fineMeadow &&
-          manager.compactGrassColorGrade &&
-          manager.compactMacroField?.coastalMeadow &&
-          manager.compactMacroField.bankVerge
-            ? { bankVerge: manager.compactMacroField.bankVerge }
-            : {}),
-          oceanLevel: manager.waterThreshold,
-          wind: {
-            x:
-              GRASS_CONFIG.WIND_STRENGTH *
-              manager.meadowAppearance.BLADE_HEIGHT_MAX,
-            z:
-              GRASS_CONFIG.WIND_STRENGTH *
-              manager.meadowAppearance.BLADE_HEIGHT_MAX *
-              0.55,
-          },
-        },
+        request,
         inputs,
         manager.getWaterSurfaceAt,
         manager.isInFlatZone,
       );
     };
+    const isCurrent = () =>
+      this.groundingJobs.get(ticket.key) === entry &&
+      this.isNodeInGrassHorizon(ticket.work) &&
+      this.isTicketLodCurrent(ticket) &&
+      this.getRenderedSurface(ticket.node) === ticket.surface &&
+      (!region || region.isCurrent()) &&
+      (!inputs || inputs.isCurrent());
     const entry: GrassGroundingEntry = {
       ticket,
       region,
-      job: new GrassGroundingContinuation(
-        steps(),
-        () =>
-          this.groundingJobs.get(ticket.key) === entry &&
-          this.isNodeInGrassHorizon(ticket.work) &&
-          this.isTicketLodCurrent(ticket) &&
-          this.getRenderedSurface(ticket.node) === ticket.surface &&
-          (!region || region.isCurrent()) &&
-          (!inputs || inputs.isCurrent()),
-      ),
+      job:
+        this.groundingWorker && request && inputs
+          ? this.groundingWorker.createJob(
+              request,
+              inputs,
+              this.getWaterSurfaceAt,
+              this.isInFlatZone,
+              isCurrent,
+            )
+          : new GrassGroundingContinuation(steps(), isCurrent),
     };
     this.groundingJobs.get(ticket.key)?.job.cancel();
     this.groundingJobs.set(ticket.key, entry);
@@ -1715,11 +1769,29 @@ export class GrassVisualManager implements QuadTreeListener {
       performance.now() + GRASS_BLADE_GROUNDING_JOB_LIMITS.targetSliceMs;
     let remainingOperations =
       GRASS_BLADE_GROUNDING_JOB_LIMITS.maximumSliceOperations;
+    if (this.groundingWorker) {
+      const maintenance = this.groundingWorker.advanceMaintenance(
+        remainingOperations,
+        deadline,
+      );
+      remainingOperations -= maintenance.operations;
+      this.groundingActiveMs += maintenance.activeMs;
+      this.maximumGroundingSliceMs = Math.max(
+        this.maximumGroundingSliceMs,
+        maintenance.activeMs,
+      );
+    }
     while (remainingOperations > 0 && performance.now() < deadline) {
       let selected: GrassGroundingEntry | undefined;
       let selectedDistance = Infinity;
       for (const entry of this.groundingJobs.values()) {
         if (entry.job.state.status !== "running") continue;
+        // Finish or cancel the sole active handoff before preparing any other
+        // payload, even if camera motion makes another cell nearer.
+        if (entry.job === this.groundingWorker?.activeJob) {
+          selected = entry;
+          break;
+        }
         if (!this.fineMeadow) {
           selected = entry;
           break;
@@ -1736,11 +1808,11 @@ export class GrassVisualManager implements QuadTreeListener {
       }
       if (selected) {
         const entry = selected;
-        const before = entry.job.activeMs;
-        const beforeOperations = entry.job.operations;
         const state = entry.job.advance(remainingOperations, deadline);
-        remainingOperations -= entry.job.operations - beforeOperations;
-        this.groundingActiveMs += entry.job.activeMs - before;
+        // Remote fitting consumes its own cumulative cap, not another frame's
+        // main-thread allowance. These metrics cover only this actual advance.
+        remainingOperations -= entry.job.lastSliceOperations;
+        this.groundingActiveMs += entry.job.lastSliceMs;
         // Historical metric: maximum individual continuation slice, not the
         // aggregate manager call when ready-empty work hands off. The shared
         // deadline is cooperative; allocations/GC remain non-preemptible.
@@ -2523,6 +2595,7 @@ export class GrassVisualManager implements QuadTreeListener {
     this.completedLods.clear();
     for (const entry of this.groundingJobs.values()) entry.job.cancel();
     this.groundingJobs.clear();
+    this.groundingWorker?.destroy();
     this.completedGrounding.clear();
     this.pendingLodSwap.clear();
     terminateGrassWorkerPool();

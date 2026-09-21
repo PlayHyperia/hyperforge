@@ -204,9 +204,11 @@ import {
   resolveGrassLightingCandidate,
   resolveGrassCoverageTrial,
   resolveGrassRoadClearance,
+  resolveGrassGroundingExecution,
   resolveHabitatCompositionCandidate,
   type GrassSurfaceEligibility,
 } from "../../../runtime/clientViewportMode";
+import { createGrassGroundingWorker } from "../../../utils/workers/createGrassGroundingWorker";
 import {
   hasActiveStreamingPreparationPresentation,
   resolveStreamingPreparationFocus,
@@ -451,6 +453,7 @@ export class TerrainSystem extends System {
         coverageTrial: ReturnType<typeof resolveGrassCoverageTrial>;
         roadClearance?: ReturnType<typeof resolveGrassRoadClearance>;
         lighting?: ReturnType<typeof resolveGrassLightingCandidate>;
+        groundingExecution?: ReturnType<typeof resolveGrassGroundingExecution>;
       }>
     | undefined;
   private compactPlantingMaterial:
@@ -847,6 +850,7 @@ export class TerrainSystem extends System {
       const coverageTrial = resolveGrassCoverageTrial();
       const roadClearance = resolveGrassRoadClearance();
       const lighting = resolveGrassLightingCandidate();
+      const groundingExecution = resolveGrassGroundingExecution();
       const fine = appearance === "fine-meadow-v1";
       if (
         fine !== (profile?.grassProfile === "fine-meadow-v1") ||
@@ -859,6 +863,7 @@ export class TerrainSystem extends System {
         coverageTrial,
         ...(roadClearance ? { roadClearance } : {}),
         ...(lighting ? { lighting } : {}),
+        ...(groundingExecution ? { groundingExecution } : {}),
       });
       this.compactGrassColorGrade = fine
         ? compactTerrainColorOperations.getGrassColorGrade().id
@@ -2965,6 +2970,14 @@ export class TerrainSystem extends System {
         grassSelection.appearance,
         this.getCompactHabitatMaterial(),
         grassSelection.lighting,
+        grassSelection.groundingExecution
+          ? {
+              mode: grassSelection.groundingExecution,
+              createPort: createGrassGroundingWorker,
+              isSurfaceCurrent: (surface) =>
+                this.quadTreeVisualManager!.isRetainedSurfaceCurrent(surface),
+            }
+          : undefined,
       );
 
       // Wire terrain, water, grass managers to the same quad-tree via composite

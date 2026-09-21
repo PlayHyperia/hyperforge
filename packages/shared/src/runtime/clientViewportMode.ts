@@ -282,6 +282,28 @@ export function resolveGrassRoadClearance(
   return "per-blade-v1";
 }
 
+/** Explicit execution trial only; no grass density, geometry or cap changes.
+ * Captured at owner creation, never toggled under in-flight transfers. */
+export function resolveGrassGroundingExecution(
+  win?: Window,
+): "worker-v1" | undefined {
+  const windowRef = getWindowRef(win);
+  if (!windowRef) return undefined;
+  const params = getSearchParams(windowRef);
+  const values = params?.getAll("grassGrounding") ?? [];
+  if (!values.length) return undefined;
+  if (values.length !== 1 || values[0] !== "worker-v1")
+    throw new Error("Unknown or duplicate grass grounding execution selector");
+  if (
+    resolveGrassAppearanceCandidate(windowRef) !== "fine-meadow-v1" ||
+    params?.get("streamRenderProfile") !== "island-fine-meadow-720p60-v1"
+  )
+    throw new Error(
+      "Grass grounding worker requires the explicit fine meadow pair",
+    );
+  return "worker-v1";
+}
+
 /** Explicit single-cell density trial, captured by its owner until restart. */
 export function resolveGrassCoverageTrial(
   win?: Window,
@@ -544,6 +566,9 @@ export type StreamingGrassProfileReceipt = {
     };
     activeSliceMs: number;
     maximumSliceMs: number;
+    execution?: "worker-v1";
+    /** Bounded worker-owned payload accounting, not total CPU/GPU heap. */
+    worker?: import("../systems/shared/world/GrassGroundingWorkerCoordinator").GrassGroundingWorkerCoordinator["receipt"];
   };
 };
 

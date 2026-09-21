@@ -341,6 +341,7 @@ describe("TerrainVisualManager actual cooperative preparation", () => {
       minZ: 360,
       maxZ: 440,
     });
+    expect(f.manager.isRetainedSurfaceCurrent(chunk.surface)).toBe(true);
     let disposals = 0;
     chunk.mesh.geometry.addEventListener("dispose", () => {
       disposals++;
@@ -349,6 +350,7 @@ describe("TerrainVisualManager actual cooperative preparation", () => {
     f.manager.updateBiomeData(data.biomeCenters, data.biomes);
     expect(disposals).toBe(1);
     expect(region.isCurrent()).toBe(false);
+    expect(f.manager.isRetainedSurfaceCurrent(chunk.surface)).toBe(false);
     expect(node.visualChunkKey).toBeNull();
     expect(f.container.children).toHaveLength(0);
     data.biomeCenters[0].x = -99999;
@@ -359,6 +361,10 @@ describe("TerrainVisualManager actual cooperative preparation", () => {
     f.manager.onNodeNeedsGeometry(node);
     drain(f.manager, () => node.visualChunkKey !== null);
     expect(f.manager.getRetainedSurface(node)).not.toBe(chunk.surface);
+    expect(f.manager.isRetainedSurfaceCurrent(chunk.surface)).toBe(false);
+    expect(
+      f.manager.isRetainedSurfaceCurrent(f.manager.getRetainedSurface(node)!),
+    ).toBe(true);
     expect(disposals).toBe(1);
   });
 

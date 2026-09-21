@@ -104,6 +104,12 @@ export class TerrainVisualManager implements QuadTreeListener {
   private container: THREE.Group;
   private material: THREE.Material;
   private chunks = new Map<string, TerrainVisualChunk>();
+  /** Weak reverse ownership keeps retired geometry out of worker caches without
+   * retaining every historical surface or scanning the installed chunk set. */
+  private retainedSurfaceNodes = new WeakMap<
+    RetainedTerrainSurface,
+    TerrainQuadNode
+  >();
   private releasedGeometry = new WeakSet<THREE.BufferGeometry>();
   private removedMeshes = new WeakSet<THREE.Mesh>();
   private disposed = false;
@@ -301,6 +307,14 @@ export class TerrainVisualManager implements QuadTreeListener {
         return null;
     }
     return chunk.surface;
+  }
+
+  /** Exact drawn owner, including geometry revisions and transition overlap.
+   * Region leases are still required to detect new neighboring surfaces. */
+  isRetainedSurfaceCurrent(surface: RetainedTerrainSurface): boolean {
+    if (this.disposed) return false;
+    const node = this.retainedSurfaceNodes.get(surface);
+    return !!node && this.getRetainedSurface(node) === surface;
   }
 
   /** Exact installed surface only; no parent/child overlap or stale geometry. */
@@ -1232,6 +1246,7 @@ export class TerrainVisualManager implements QuadTreeListener {
           "Terrain publication owner changed during scene attachment",
         );
       this.chunks.set(key, chunk);
+      this.retainedSurfaceNodes.set(chunk.surface, chunk.node);
       node.visualChunkKey = key;
       this.failedAttempts.delete(node.id);
       node.testReady();

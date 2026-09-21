@@ -38,7 +38,7 @@ async function runTypeCheck() {
   console.log('Running TypeScript type checking...')
   execSync(`"${process.execPath}" x --yes tsc --noEmit`, {
     stdio: 'inherit',
-    cwd: rootDir
+    cwd: rootDir,
   })
   console.log('Type checking passed ✓')
 }
@@ -48,6 +48,21 @@ async function runTypeCheck() {
  */
 async function buildLibrary() {
   console.log('Building library...')
+
+  // A real browser Worker must not inherit framework's external packages.
+  // Emit before the flattened client, whose literal URL resolves this sibling.
+  await esbuild.build({
+    entryPoints: ['src/utils/workers/GrassGroundingWorker.entry.ts'],
+    outfile: 'build/grass-grounding.worker.js',
+    platform: 'browser',
+    format: 'esm',
+    bundle: true,
+    treeShaking: true,
+    minify: true,
+    keepNames: true,
+    sourcemap: true,
+    target: 'es2022',
+  })
 
   // Build full library (server + client)
   console.log('Building framework.js (full)...')
@@ -136,7 +151,7 @@ async function buildLibrary() {
       'os',
       'fs',
       'path',
-      'url'
+      'url',
     ],
     plugins: [typescriptPlugin],
   })
@@ -163,10 +178,13 @@ async function generateDeclarations() {
   // dependencies (e.g. shared ↔ procgen) mean external package .d.ts
   // files may not exist yet during the build pipeline. Source declaration
   // errors remain fatal so downstream packages never consume partial types.
-  execSync(`"${process.execPath}" x --yes tsc --emitDeclarationOnly --outDir build --skipLibCheck`, {
-    stdio: 'inherit',
-    cwd: rootDir
-  })
+  execSync(
+    `"${process.execPath}" x --yes tsc --emitDeclarationOnly --outDir build --skipLibCheck`,
+    {
+      stdio: 'inherit',
+      cwd: rootDir,
+    },
+  )
   console.log('✓ Declaration files generated')
 
   // Copy index.d.ts to build root as framework.d.ts
@@ -186,7 +204,9 @@ async function generateDeclarations() {
  * Main Build Process
  */
 async function main() {
-  console.log(`Building @hyperforge/shared in ${dev ? 'development' : 'production'} mode...`)
+  console.log(
+    `Building @hyperforge/shared in ${dev ? 'development' : 'production'} mode...`,
+  )
 
   await buildLibrary()
 

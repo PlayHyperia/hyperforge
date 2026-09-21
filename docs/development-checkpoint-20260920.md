@@ -1,5 +1,44 @@
 # World graphics development checkpoint — 2026-09-20
 
+## Grass worker world ownership checkpoint — 2026-09-21
+
+The candidate is now connected to actual TerrainSystem/GrassVisualManager behind
+the explicit `grassGrounding=worker-v1` selector. Ordinary defaults and your
+playable localhost:3333 artifacts are unchanged. One copied handoff, bounded
+held-surface cache, original cumulative fitting limits, cancellation/version/
+region guards and one mesh upload/frame are preserved. Worker failure cleanup
+now releases the actual active owner even when a dormant job notices death first.
+
+747 regressions and 205 focused tests (overlap), ten actual factory/Vite/native
+Chrome-Metal cases, full shared/tests/Vite noEmit (720 roots/2,738 sources) and
+scoped lint pass. The actual staged-dev-batch function was exercised with real
+esbuild, disk and Chokidar: failed/stale compilation leaves prior outputs intact;
+successful final client commit sees matching worker/full outputs. Complete
+long-running development/HMR lifecycle remains unqualified.
+
+Isolated build32/native65 captured four pond views with all 122 grass cells ready,
+no errors, 51.066 s startup and 17.972/5.267/4.316/6.646 s camera settling. This is
+functional capture, not smoothness/performance/streaming/AAA approval.
+Native64's earlier diagnostic-method failure remains retained, not erased.
+Final exact post-review build33/native66 also captures all four views with no
+errors: startup 47.250 s / 122 cells; cuts 16.824/5.274/4.296/6.825 s, under the
+unchanged 90 s startup / 30 s cut limits. Main grounding slice maximum 2.4 ms;
+separate admission maximum 7.5 ms. This remains an unqualified smoothness result:
+camera settling still takes seconds. Native65's 16.7 ms admission tail remains
+recorded; remote/main costs must not be conflated or selectively discarded.
+
+Owned runtime45/46 stopped and temporary databases were removed; owned browsers
+closed. All 145 canonical output hashes, five unchanged build-input pins,
+retained lock and human localhost:3333/DB identities are protected. Only the
+build-script source pin was explicitly admitted for emitting the worker.
+All eight mirrored status sections agree. Source remains opt-in; no merge/deploy.
+
+Next: sustained movement/LOD/cache retirement, main/remote CPU attribution and
+whole-heap/frame/upload tails, then matched shoreline planting, less uniform
+grass, dock timber, pavilion arrival and island composition. Current images still
+do not meet the intended art bar. No density/resolution/shadow cuts, cap increases,
+default promotion, human DB changes, installs or dependency upgrades.
+
 ## Grass fitting handoff and native transport — 2026-09-21
 
 Source candidate only: bounded main projection/copy, single-slot worker client

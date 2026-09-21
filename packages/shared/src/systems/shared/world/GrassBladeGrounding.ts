@@ -1783,7 +1783,18 @@ export class GrassGroundingContinuation {
  * Active time is cumulative slice elapsed time, not measured CPU utilization.
  * The owner supplies ticket/frame identity; no input arrays or error graph are
  * retained, and observing never advances or changes the continuation. */
-export function captureGrassGroundingFailure(job: GrassGroundingContinuation) {
+export function captureGrassGroundingFailure(
+  job: Pick<
+    GrassGroundingContinuation,
+    | "state"
+    | "activeMs"
+    | "operations"
+    | "lastSliceOperations"
+    | "lastSliceMs"
+    | "maximumSliceMs"
+    | "lastPhase"
+  >,
+) {
   const state = job.state;
   if (state.status !== "failed_budget" && state.status !== "failed_input")
     return null;

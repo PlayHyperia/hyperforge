@@ -55,6 +55,18 @@ export type RetainedTerrainSurfaceSnapshot = Readonly<{
   payloadBytes: number;
 }>;
 
+/** Constant-sized pre-copy description of the admitted array views. Counts
+ * include source skirts; topology offsets describe only the main surface.
+ * Payload bytes include packed Uint32 offsets, never source-view padding or
+ * receiving-side query metadata. This snapshot is not a continuing lease. */
+export type RetainedTerrainSurfaceSnapshotLayout = Readonly<{
+  payloadBytes: number;
+  positionCount: number;
+  indexCount: number;
+  resolution: number;
+  topologyOffsetCount: number;
+}>;
+
 const SURFACE_SNAPSHOT_BATCH_ELEMENTS = 1024;
 
 function* readCellTopology(
@@ -1096,9 +1108,10 @@ export class RetainedTerrainSurface {
     }
   }
 
-  /** O(1) reservation preflight. The caller owns aggregate in-flight memory;
+  /** O(1), guarded reservation preflight without copying or scanning arrays.
+   * The caller owns aggregate reservations and receiving-side metadata costs;
    * this owner never reserves, caches or transfers its live geometry. */
-  snapshotByteLength(): number {
+  snapshotLayout(): RetainedTerrainSurfaceSnapshotLayout {
     this.checkGroundingEdgeCurrent();
     if (
       !(
@@ -1110,14 +1123,25 @@ export class RetainedTerrainSurface {
       this.position.normalized
     )
       throw new Error("Unsupported retained terrain snapshot attribute layout");
+    const topologyOffsetCount = this.topology?.cellIndexOffsets.length ?? 0;
     const bytes =
       this.positions.byteLength +
       this.indexArray.byteLength +
-      (this.topology?.cellIndexOffsets.length ?? 0) *
-        Uint32Array.BYTES_PER_ELEMENT;
+      topologyOffsetCount * Uint32Array.BYTES_PER_ELEMENT;
     if (!Number.isSafeInteger(bytes) || bytes <= 0)
       throw new Error("Invalid retained terrain snapshot byte length");
-    return bytes;
+    return Object.freeze({
+      payloadBytes: bytes,
+      positionCount: this.positionCount,
+      indexCount: this.indexCount,
+      resolution: this.resolution,
+      topologyOffsetCount,
+    });
+  }
+
+  /** Exact copied-view payload under the same current-owner/layout guard. */
+  snapshotByteLength(): number {
+    return this.snapshotLayout().payloadBytes;
   }
 
   /** Copy under the original borrowed-owner guard at every suspension/batch.

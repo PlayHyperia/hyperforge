@@ -1,7 +1,15 @@
 import { createServer, type Server } from "node:http";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { build } from "esbuild";
-import type { Browser, BrowserContext, Page } from "playwright";
+import type {
+  Browser,
+  BrowserContext,
+  Page,
+  Worker as BrowserWorker,
+} from "playwright";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type {
   GrassGroundingClientRequest,
@@ -22,13 +30,13 @@ import {
   type SameFaceCase,
 } from "./fixtures/GrassBladeGroundingSameFaceCases";
 import {
-  bundleGrassGroundingWorker,
   createGrassGroundingWorkerRequest,
   grassGroundingWorkerSemanticResult,
 } from "./fixtures/GrassGroundingWorkerHarness";
 
-// Explicitly opt-in: native browser transport proof, NOT integrated gameplay,
-// rendering, visual quality, startup performance or GPU memory acceptance.
+// Explicitly opt-in: actual factory/flattened-sidecar/Vite production packaging
+// and native browser transport proof. NOT the full game's build/configuration,
+// integrated gameplay, rendering, startup performance or GPU memory acceptance.
 const native =
   process.env.HYPERIA_NATIVE_GROUNDING_WORKER === "1"
     ? describe.sequential
@@ -146,7 +154,8 @@ const probeSource = String.raw`
     },
     async run(encodedRequests, cancelIndex = -1) {
       const totalStarted = performance.now();
-      const worker = new Worker("/worker.js");
+      const worker = api.createGrassGroundingWorker();
+      if (!(worker instanceof Worker)) throw new Error("Actual factory did not return a native Worker");
       workers.add(worker);
       let client;
       const rows = [], errors = [];
@@ -281,6 +290,7 @@ native(
       context: BrowserContext | undefined,
       page: Page | undefined,
       server: Server | undefined;
+    let temporaryRoot: string | undefined;
     let adapter: {
       available: boolean;
       secureContext: boolean;
@@ -289,6 +299,17 @@ native(
       architecture: string;
     };
     const browserErrors: string[] = [];
+    const workerUrls: string[] = [];
+    const activeWorkers = new Set<BrowserWorker>();
+    const servedWorkerPaths = new Set<string>();
+    const workerAssetPaths: string[] = [];
+    const sourceInputs: string[] = [];
+    const emittedAssets: { path: string; bytes: number }[] = [];
+    const viteChunks: {
+      path: string;
+      imports: string[];
+      dynamicImports: string[];
+    }[] = [];
 
     async function cleanup() {
       try {
@@ -305,14 +326,24 @@ native(
           try {
             await browser?.close();
           } finally {
-            if (server) {
-              const owned = server;
-              server = undefined;
-              if (owned.listening)
-                await new Promise<void>((resolve, reject) => {
-                  owned.close((error) => (error ? reject(error) : resolve()));
-                  owned.closeAllConnections();
-                });
+            try {
+              if (server) {
+                const owned = server;
+                server = undefined;
+                if (owned.listening)
+                  await new Promise<void>((resolve, reject) => {
+                    owned.close((error) => (error ? reject(error) : resolve()));
+                    owned.closeAllConnections();
+                  });
+              }
+            } finally {
+              if (temporaryRoot) {
+                // Only the unique directory returned by this fixture's mkdtemp;
+                // never a project path, shared cache or other test's artifact.
+                const owned = temporaryRoot;
+                temporaryRoot = undefined;
+                await rm(owned, { recursive: true, force: true });
+              }
             }
           }
         }
@@ -333,9 +364,21 @@ native(
             import.meta.url,
           ),
         );
+        const factoryPath = fileURLToPath(
+          new URL(
+            "../../../../utils/workers/createGrassGroundingWorker.ts",
+            import.meta.url,
+          ),
+        );
+        const workerPath = fileURLToPath(
+          new URL(
+            "../../../../utils/workers/GrassGroundingWorker.entry.ts",
+            import.meta.url,
+          ),
+        );
         const client = await build({
           stdin: {
-            contents: `export { GrassGroundingWorkerClient } from ${JSON.stringify(clientPath)}; export { grassGroundingWorkerInputTransfers } from ${JSON.stringify(wirePath)};`,
+            contents: `export { GrassGroundingWorkerClient } from ${JSON.stringify(clientPath)}; export { grassGroundingWorkerInputTransfers } from ${JSON.stringify(wirePath)}; export { createGrassGroundingWorker } from ${JSON.stringify(factoryPath)};`,
             loader: "ts",
             resolveDir: fileURLToPath(new URL(".", import.meta.url)),
           },
@@ -343,23 +386,37 @@ native(
           write: false,
           metafile: true,
           platform: "browser",
-          format: "iife",
-          globalName: "HyperiaGroundingTransport",
+          format: "esm",
+          target: "es2022",
+          minify: false,
+          keepNames: true,
+        });
+        const worker = await build({
+          entryPoints: [workerPath],
+          bundle: true,
+          write: false,
+          metafile: true,
+          platform: "browser",
+          format: "esm",
           target: "es2022",
           minify: true,
           keepNames: true,
         });
-        const worker = await bundleGrassGroundingWorker();
         expect(client.outputFiles).toHaveLength(1);
+        expect(worker.outputFiles).toHaveLength(1);
         const inputs = [
           ...Object.keys(client.metafile.inputs),
-          ...worker.inputs,
+          ...Object.keys(worker.metafile.inputs),
         ];
+        sourceInputs.push(...new Set(inputs));
         expect(
           inputs.some((path) => path.endsWith("GrassGroundingWorkerClient.ts")),
         ).toBe(true);
         expect(
           inputs.some((path) => path.endsWith("GrassGroundingWorker.entry.ts")),
+        ).toBe(true);
+        expect(
+          inputs.some((path) => path.endsWith("createGrassGroundingWorker.ts")),
         ).toBe(true);
         expect(
           inputs.filter((path) =>
@@ -368,32 +425,119 @@ native(
             ),
           ),
         ).toEqual([]);
+
+        // Reproduce the real shared library's flattened sibling contract using
+        // private generated inputs. Vite must resolve and emit that literal URL;
+        // no synthetic Worker constructor or manually chosen worker URL exists.
+        temporaryRoot = await mkdtemp(
+          join(tmpdir(), "hyperia-native-grounding-packaging-"),
+        );
+        const sharedBuild = join(temporaryRoot, "shared", "build");
+        await mkdir(sharedBuild, { recursive: true });
+        await writeFile(
+          join(sharedBuild, "framework.client.js"),
+          client.outputFiles[0].text,
+        );
+        await writeFile(
+          join(sharedBuild, "grass-grounding.worker.js"),
+          worker.outputFiles[0].text,
+        );
+        const entryPath = join(temporaryRoot, "entry.js");
+        await writeFile(
+          entryPath,
+          'import * as transport from "./shared/build/framework.client.js";\n' +
+            "globalThis.HyperiaGroundingTransport = transport;\n" +
+            probeSource,
+        );
+        const { build: buildVite } = await import("vite");
+        const built = await buildVite({
+          configFile: false,
+          envDir: false,
+          root: temporaryRoot,
+          mode: "production",
+          publicDir: false,
+          cacheDir: join(temporaryRoot, "vite-cache"),
+          logLevel: "warn",
+          build: {
+            write: false,
+            emptyOutDir: false,
+            copyPublicDir: false,
+            outDir: join(temporaryRoot, "vite-output"),
+            target: "es2022",
+            minify: false,
+            sourcemap: false,
+            rollupOptions: {
+              input: entryPath,
+              output: { entryFileNames: "client.js" },
+            },
+          },
+        });
+        const assets = new Map<string, string | Uint8Array>();
+        for (const bundle of Array.isArray(built) ? built : [built]) {
+          if (!("output" in bundle)) {
+            await bundle.close();
+            throw new Error("Unexpected watch-mode Vite packaging result");
+          }
+          for (const output of bundle.output) {
+            const path = "/" + output.fileName;
+            if (assets.has(path))
+              throw new Error(
+                "Duplicate emitted native packaging asset: " + path,
+              );
+            const source =
+              output.type === "chunk" ? output.code : output.source;
+            assets.set(path, source);
+            emittedAssets.push({
+              path,
+              bytes:
+                typeof source === "string"
+                  ? Buffer.byteLength(source)
+                  : source.byteLength,
+            });
+            if (output.type === "chunk")
+              viteChunks.push({
+                path,
+                imports: output.imports,
+                dynamicImports: output.dynamicImports,
+              });
+            if (/\/grass-grounding\.worker-[^/]+\.js$/.test(path))
+              workerAssetPaths.push(path);
+          }
+        }
+        process.stdout.write(
+          "Native grounding focused Vite packaging " +
+            JSON.stringify({
+              sourceInputs,
+              emittedAssets,
+              viteChunks,
+              workerAssetPaths,
+              factory: "createGrassGroundingWorker",
+              write: false,
+              configFile: false,
+              scope:
+                "Compilation receipt only; real factory URL, native transport and byte parity are asserted by the following browser cases. Not a full game build.",
+            }) +
+            "\n",
+        );
+        expect(assets.has("/client.js")).toBe(true);
+        expect(workerAssetPaths).toHaveLength(1);
         server = createServer((request, response) => {
-          const path = request.url;
+          const path = request.url?.split("?")[0];
           response.setHeader("Cache-Control", "no-store");
           response.setHeader("Cross-Origin-Opener-Policy", "same-origin");
           response.setHeader("Cross-Origin-Embedder-Policy", "require-corp");
           if (path === "/") {
             response.setHeader("Content-Type", "text/html; charset=utf-8");
             response.end(
-              '<!doctype html><meta charset="utf-8"><title>Hyperia native grounding transport qualification</title><p>Native Worker transport proof. No gameplay or rendering acceptance.</p><script src="/client.js"></script><script src="/probe.js"></script>',
+              '<!doctype html><meta charset="utf-8"><title>Hyperia native grounding transport qualification</title><p>Actual factory/Vite/native Worker proof. No gameplay or rendering acceptance.</p><script type="module" src="/client.js"></script>',
             );
-          } else if (
-            path === "/client.js" ||
-            path === "/worker.js" ||
-            path === "/probe.js"
-          ) {
+          } else if (path !== undefined && assets.has(path)) {
             response.setHeader(
               "Content-Type",
               "text/javascript; charset=utf-8",
             );
-            response.end(
-              path === "/client.js"
-                ? client.outputFiles[0].text
-                : path === "/worker.js"
-                  ? worker.source
-                  : probeSource,
-            );
+            if (workerAssetPaths.includes(path)) servedWorkerPaths.add(path);
+            response.end(assets.get(path));
           } else {
             response.statusCode = 404;
             response.end();
@@ -418,6 +562,11 @@ native(
         context = await browser.newContext();
         page = await context.newPage();
         page.on("pageerror", (error) => browserErrors.push(error.message));
+        page.on("worker", (worker) => {
+          workerUrls.push(worker.url());
+          activeWorkers.add(worker);
+          worker.once("close", () => activeWorkers.delete(worker));
+        });
         await page.goto(`http://127.0.0.1:${address.port}/`, {
           waitUntil: "load",
         });
@@ -453,6 +602,7 @@ native(
       cancelIndex = -1,
     ): Promise<RunReceipt> {
       if (!page) throw new Error("Native browser was not initialized");
+      const firstWorker = workerUrls.length;
       // Only strings cross Playwright's type-level serialization boundary;
       // typed bytes and special numbers remain protected by the explicit codec.
       const serialized = await page.evaluate(
@@ -470,6 +620,17 @@ native(
         JSON.stringify({ packets: requests.map(encode), cancelIndex }),
       );
       const receipt = decode(JSON.parse(serialized) as Encoded) as RunReceipt;
+      const actualWorkerUrls = workerUrls.slice(firstWorker);
+      expect(actualWorkerUrls).toHaveLength(1);
+      for (const url of actualWorkerUrls) {
+        const actual = new URL(url);
+        expect(actual.origin).toBe(new URL(page.url()).origin);
+        expect(actual.pathname).toBe(workerAssetPaths[0]);
+        expect(servedWorkerPaths.has(actual.pathname)).toBe(true);
+      }
+      // Native Playwright worker-close events independently confirm the
+      // fixture's own JS custody counters; no Worker prototype replacement.
+      await expect.poll(() => activeWorkers.size, { timeout: 3000 }).toBe(0);
       expect(receipt.errors).toEqual([]);
       expect(browserErrors).toEqual([]);
       expect(Number.isFinite(receipt.totalElapsedMs)).toBe(true);
@@ -507,6 +668,17 @@ native(
           JSON.stringify({
             label,
             adapter,
+            packaging: {
+              sourceInputs,
+              emittedAssets,
+              viteChunks,
+              workerAssetPaths,
+              actualWorkerUrls,
+              activeNativeWorkersAfter: activeWorkers.size,
+              actualFactory: "createGrassGroundingWorker",
+              focusedViteProductionBuild: true,
+              fullGameBuild: false,
+            },
             errors: receipt.errors,
             browserErrors,
             cleanup: receipt.cleanup,
@@ -553,7 +725,7 @@ native(
               };
             }),
             scope:
-              "Actual native Worker/client transport and byte parity only. Timings include browser scheduling; no integrated gameplay, rendering or performance acceptance.",
+              "Actual factory, flattened sibling, focused Vite production packaging, native Worker/client transport and byte parity only. Timings include browser scheduling; no full game build/configuration, integrated gameplay, rendering or performance acceptance.",
           }) +
           "\n",
       );

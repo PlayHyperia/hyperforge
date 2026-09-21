@@ -75,6 +75,30 @@ describe("bounded retained terrain worker snapshots", () => {
       const f = indexedFixture(wide);
       try {
         const expectedBytes = f.positions.byteLength + f.indices.byteLength + 8;
+        const layout = f.surface.snapshotLayout();
+        expect(layout).toEqual({
+          payloadBytes: expectedBytes,
+          positionCount: 7,
+          indexCount: 18,
+          resolution: 2,
+          topologyOffsetCount: 2,
+        });
+        expect(Object.isFrozen(layout)).toBe(true);
+        expect(
+          Object.values(layout).every((value) => typeof value === "number"),
+        ).toBe(true);
+        expect(Reflect.set(layout, "payloadBytes", 0)).toBe(false);
+        // The descriptor includes the two skirt vertices/six skirt indices,
+        // but excludes Float32/Uint16/Uint32 backing-view padding.
+        expect(layout.positionCount).toBeGreaterThan(
+          f.topology.surfaceVertexCount,
+        );
+        expect(layout.indexCount).toBeGreaterThan(
+          f.topology.cellIndexOffsets[1],
+        );
+        expect(layout.payloadBytes).toBeLessThan(
+          f.positions.buffer.byteLength + f.indices.buffer.byteLength + 8,
+        );
         expect(f.surface.snapshotByteLength()).toBe(expectedBytes);
         const { snapshot, phases } = finish(
           f.surface.copySnapshotSteps(expectedBytes),
@@ -114,6 +138,17 @@ describe("bounded retained terrain worker snapshots", () => {
           surfaceVertexCount: 5,
           cellIndexOffsets: new Uint32Array([0, 12]),
         });
+        expect(layout.payloadBytes).toBe(
+          snapshot.positions.byteLength +
+            snapshot.indices.byteLength +
+            snapshot.topology!.cellIndexOffsets.byteLength,
+        );
+        expect(layout.positionCount).toBe(snapshot.positions.length / 3);
+        expect(layout.indexCount).toBe(snapshot.indices.length);
+        expect(layout.topologyOffsetCount).toBe(
+          snapshot.topology!.cellIndexOffsets.length,
+        );
+        expect(layout.resolution).toBe(snapshot.resolution);
         expect(phases).toEqual([
           "snapshot-position-allocation",
           "snapshot-position-copy",
@@ -155,6 +190,7 @@ describe("bounded retained terrain worker snapshots", () => {
         ).toEqual(originalPositionBytes);
         expect(f.surface.matchesGeometry(f.geometry)).toBe(true);
         expect(f.surface.snapshotByteLength()).toBe(expectedBytes);
+        expect(f.surface.snapshotLayout()).toEqual(layout);
       } finally {
         f.geometry.dispose();
       }
@@ -173,9 +209,19 @@ describe("bounded retained terrain worker snapshots", () => {
         33,
         geometry,
       );
+      const layout = surface.snapshotLayout();
       const { snapshot, phases } = finish(
-        surface.copySnapshotSteps(surface.snapshotByteLength()),
+        surface.copySnapshotSteps(layout.payloadBytes),
       );
+      expect(layout).toEqual({
+        payloadBytes:
+          snapshot.positions.byteLength + snapshot.indices.byteLength,
+        positionCount: snapshot.positionCount,
+        indexCount: snapshot.indexCount,
+        resolution: snapshot.resolution,
+        topologyOffsetCount: 0,
+      });
+      expect(Object.isFrozen(layout)).toBe(true);
       expect(snapshot.topology).toBeNull();
       expect(snapshot.positions).toEqual(
         geometry.getAttribute("position").array,
@@ -240,10 +286,23 @@ describe("bounded retained terrain worker snapshots", () => {
         geometry,
       );
       const bytes = surface.snapshotByteLength();
+      const layout = surface.snapshotLayout();
       const first = finish(surface.copySnapshotSteps(bytes));
       const second = finish(surface.copySnapshotSteps(bytes));
       expect(first.snapshot.topology!.cellIndexOffsets).toEqual(
         new Uint32Array(offsets),
+      );
+      expect(layout).toEqual({
+        payloadBytes: bytes,
+        positionCount: first.snapshot.positions.length / 3,
+        indexCount: first.snapshot.indices.length,
+        resolution: 33,
+        topologyOffsetCount: offsets.length,
+      });
+      expect(layout.payloadBytes).toBe(
+        first.snapshot.positions.byteLength +
+          first.snapshot.indices.byteLength +
+          first.snapshot.topology!.cellIndexOffsets.byteLength,
       );
       expect(
         first.phases.filter((phase) => phase === "snapshot-topology-copy"),
@@ -347,6 +406,9 @@ describe("bounded retained terrain worker snapshots", () => {
           expect(() => f.surface.snapshotByteLength()).toThrow(
             /changed during admission/,
           );
+          expect(() => f.surface.snapshotLayout()).toThrow(
+            /changed during admission/,
+          );
           expect(steps.next().done).toBe(true);
         } finally {
           f.geometry.dispose();
@@ -405,6 +467,7 @@ describe("bounded retained terrain worker snapshots", () => {
         regular,
       );
       expect(() => surface.snapshotByteLength()).toThrow(/attribute layout/);
+      expect(() => surface.snapshotLayout()).toThrow(/attribute layout/);
       expect(() => surface.copySnapshotSteps(1000).next()).toThrow(
         /attribute layout/,
       );

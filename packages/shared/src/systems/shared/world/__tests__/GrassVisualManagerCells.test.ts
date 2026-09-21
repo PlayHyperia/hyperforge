@@ -44,6 +44,9 @@ import {
 } from "../GrassVisualManager";
 import { getGrassBladeLayout } from "../GrassBladeLayout";
 import type { GrassPlacementCoverageTrial } from "../../../../utils/workers/GrassPlacementCell";
+import type { GrassGroundingWorkerPort } from "../../../../utils/workers/GrassGroundingWorkerClient";
+import { ActualGrassGroundingClientPort } from "./fixtures/ActualGrassGroundingClientPort";
+import { bundleGrassGroundingWorker } from "./fixtures/GrassGroundingWorkerHarness";
 
 /** Actual World terrain, road constraints, retained geometry, placement and
  * grounding pipeline. Test orchestration does not replace manager methods. */
@@ -51,6 +54,7 @@ async function fixture(
   grade?: CompactGrassColorGrade,
   coverageTrial?: GrassPlacementCoverageTrial,
   resolution = 16,
+  groundingPort?: GrassGroundingWorkerPort,
 ) {
   const worker = new Worker(
     `const {parentPort}=require('node:worker_threads');
@@ -186,6 +190,16 @@ async function fixture(
     (x, z) => terrain.getWaterBodyRegistry().getWaterSurfaceAt(x, z),
     (bounds) => visual.captureRetainedSurfaceRegion(bounds),
     "fine-meadow-v1",
+    undefined,
+    undefined,
+    groundingPort
+      ? {
+          mode: "worker-v1",
+          createPort: () => groundingPort,
+          isSurfaceCurrent: (surface) =>
+            visual.isRetainedSurfaceCurrent(surface),
+        }
+      : undefined,
   );
   owner.setPlayerPosition(385, 374);
   owner["lodFocusX"] = 385;
@@ -235,6 +249,142 @@ async function fixture(
 }
 
 describe("fine meadow cells borrow actual terrain owners without replacing them", () => {
+  it("publishes through the actual grounding worker with identical mesh attributes and one upload per advance", async () => {
+    const port = new ActualGrassGroundingClientPort(
+      (await bundleGrassGroundingWorker()).source,
+    );
+    await port.ready();
+    const original = await fixture();
+    const candidate = await fixture(undefined, undefined, 16, port);
+    try {
+      await original.queue();
+      original.owner["processSettledWorkerResults"]();
+      expect(original.finish()).toBe(1);
+      await candidate.queue();
+      candidate.owner["processSettledWorkerResults"]();
+      let uploads = 0;
+      const deadline = performance.now() + 10_000;
+      while (
+        candidate.owner["groundingJobs"].get(candidate.work.key)?.job.state
+          .status === "running"
+      ) {
+        const result = candidate.owner["advanceGroundingJob"]();
+        expect(result).toBeLessThanOrEqual(1);
+        uploads += result;
+        if (performance.now() >= deadline)
+          throw new Error("Actual manager grounding worker deadline");
+        await new Promise<void>((resolve) => setImmediate(resolve));
+      }
+      expect(uploads).toBe(1);
+      const before = original.owner["chunks"].get(original.work.key)!.mesh;
+      const after = candidate.owner["chunks"].get(candidate.work.key)!.mesh;
+      expect(after.count).toBe(before.count);
+      expect(Object.keys(after.geometry.attributes).sort()).toEqual(
+        Object.keys(before.geometry.attributes).sort(),
+      );
+      for (const name of Object.keys(before.geometry.attributes)) {
+        expect(after.geometry.getAttribute(name).array, name).toEqual(
+          before.geometry.getAttribute(name).array,
+        );
+      }
+      expect(after.geometry.boundingBox).toEqual(before.geometry.boundingBox);
+      const receipt = candidate.owner.getProfileReceipt().grounding!;
+      expect(receipt.execution).toBe("worker-v1");
+      expect(receipt.completedChunks).toBe(1);
+      expect(receipt.failedChunks).toBe(0);
+      expect(receipt.worker!.preparedOwners).toBeGreaterThan(0);
+      expect(receipt.worker!.activeGeneration).toBeNull();
+      expect(
+        original.owner.getProfileReceipt().grounding!.execution,
+      ).toBeUndefined();
+      const retained = candidate.owner["completedGrounding"].get(
+        candidate.work.key,
+      )!;
+      expect(retained.region.isCurrent()).toBe(true);
+      expect(retained.inputs.isCurrent()).toBe(true);
+      const prepared = receipt.worker!.preparedOwners;
+      candidate.owner.rebuildAllChunks();
+      await candidate.queue();
+      candidate.owner["processSettledWorkerResults"]();
+      while (
+        candidate.owner["groundingJobs"].get(candidate.work.key)?.job.state
+          .status === "running"
+      ) {
+        candidate.owner["advanceGroundingJob"]();
+        if (performance.now() >= deadline)
+          throw new Error("Actual manager cached worker deadline");
+        await new Promise<void>((resolve) => setImmediate(resolve));
+      }
+      expect(
+        candidate.owner.getProfileReceipt().grounding!.worker!.preparedOwners,
+      ).toBe(prepared);
+      expect(
+        candidate.owner.getProfileReceipt().grounding!.worker!.cacheHits,
+      ).toBeGreaterThan(0);
+      expect(
+        candidate.owner["chunks"].get(candidate.work.key)!.mesh.count,
+      ).toBe(before.count);
+      candidate.owner.destroy();
+      expect(port.terminateCalls).toBe(1);
+      expect(port.listenerCount).toBe(0);
+      expect(
+        candidate.owner.getProfileReceipt().grounding!.worker!.cacheOwners,
+      ).toBe(0);
+    } finally {
+      original.close();
+      candidate.close();
+      await port.close();
+    }
+  });
+
+  it("retires an actual in-flight worker job on terrain invalidation and never publishes its stale mesh", async () => {
+    const port = new ActualGrassGroundingClientPort(
+      (await bundleGrassGroundingWorker()).source,
+    );
+    await port.ready();
+    const f = await fixture(undefined, undefined, 16, port);
+    try {
+      await f.queue();
+      f.owner["processSettledWorkerResults"]();
+      const entry = f.owner["groundingJobs"].get(f.work.key)!;
+      const deadline = performance.now() + 10_000;
+      while (entry.job.lastPhase !== "worker_fit_dispatch") {
+        f.owner["advanceGroundingJob"]();
+        expect(entry.job.state.status).toBe("running");
+        if (performance.now() >= deadline)
+          throw new Error("Actual manager worker dispatch deadline");
+        await new Promise<void>((resolve) => setImmediate(resolve));
+      }
+      const cachedOwners =
+        f.owner.getProfileReceipt().grounding!.worker!.cacheOwners;
+      expect(cachedOwners).toBeGreaterThan(0);
+      f.visual.onNodeDestroyGeometry(f.node);
+      f.owner.onNodeDestroyGeometry(f.node);
+      expect(f.visual.isRetainedSurfaceCurrent(entry.ticket.surface)).toBe(
+        false,
+      );
+      expect(entry.job.state.status).toBe("cancelled");
+      while (
+        f.owner.getProfileReceipt().grounding!.worker!.activeGeneration !==
+          null ||
+        f.owner.getProfileReceipt().grounding!.worker!.cacheOwners !==
+          cachedOwners - 1 ||
+        f.owner.getProfileReceipt().grounding!.worker!.phase !== "idle"
+      ) {
+        expect(f.owner["advanceGroundingJob"]()).toBe(0);
+        if (performance.now() >= deadline)
+          throw new Error("Actual manager worker cancellation deadline");
+        await new Promise<void>((resolve) => setImmediate(resolve));
+      }
+      expect(f.container.children).toHaveLength(0);
+      expect(f.owner["completedGrounding"].size).toBe(0);
+      expect(f.owner["groundingJobs"].size).toBe(0);
+    } finally {
+      f.close();
+      await port.close();
+    }
+  });
+
   it("measures bounded coverage choices against the unchanged actual retained-grounding work limit", async () => {
     const f = await fixture(undefined, undefined, 128);
     try {
