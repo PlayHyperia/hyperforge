@@ -1,5 +1,32 @@
 # World graphics development checkpoint — 2026-09-20
 
+## Height-only sampling — 2026-09-21 (native recovery; still unqualified)
+
+The exact native72 cell is now an actual-terrain regression. Conservative reuse
+of existing face bounds avoids impossible height-sampling candidates without
+changing triangle order, heights, grass coverage, work accounting or limits.
+578 focused tests and six real pond cases pass; all 120 A/B array hashes,
+provenance data, geometric-work/phase receipts and pipeline operations match.
+Final noEmit: 724 roots / 2,745 sources, zero diagnostics; lint/format pass.
+
+Build39/native73 completes startup (44.022 s, 122 grass cells) and all four
+original camera gates (6.133/3.244/2.090/3.176 s), with no errors and identical
+camera/render settings and populations to native70. This is functional recovery,
+not a controlled speedup: power/contention and prior handoff/audio source differ.
+Admission max28.2ms and multi-second settling remain open. Overview exposure
+differs2.8419e-5 and fails the original1e-6 photometric audit; no relaxed threshold.
+Prior native67/72 failures are retained, not erased. No smoothness/stream/AAA claim.
+
+All four images reviewed: dock shadow plaid, bare bank ribbon, sparse planting,
+uniform lawn and pavilion arrival remain below target. Next: matched compact-sun
+bias qualification at three phases, then larger shoreline planting/rock masses;
+continue sustained movement/cache and admission/frame/heap-tail qualification.
+No quality/budget reductions or increases, no playable default promotion.
+
+Runtime52/temp DB removed; owned browser closed. Canonical outputs, lock,
+localhost:3333/DB and unrelated work remain protected; eight mirrors agree.
+World first, compact island only, one arena, SOL only. Goal remains active.
+
 ## Bounded grass handoff and native audio — 2026-09-21 (unqualified fitting)
 
 The worker candidate now retains bounded terminal admission evidence and groups

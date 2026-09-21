@@ -108,6 +108,163 @@ function denseEdgeGeometry(skinny = false, tailSplits = 0) {
   return geometry;
 }
 
+/** Frozen pre-block-reuse indexed height scan. Own copies keep this oracle
+ * independent of production samplers, cursors, metadata and later mutations. */
+function originalIndexedHeightScan(
+  geometry: THREE.BufferGeometry,
+  size: number,
+) {
+  const p = new Float32Array(geometry.getAttribute("position").array),
+    indices = Array.from(geometry.getIndex()!.array),
+    topology = geometry.userData.terrainCellTopology as TerrainCellTopology,
+    offsets = [...topology.cellIndexOffsets],
+    r = topology.resolution,
+    last = r - 1;
+  return (localX: number, localZ: number, out: TerrainGridHeightSample) => {
+    if (
+      !Number.isFinite(localX) ||
+      !Number.isFinite(localZ) ||
+      localX < p[0] ||
+      localX > p[last * 3] ||
+      localZ < p[2] ||
+      localZ > p[last * r * 3 + 2]
+    )
+      return false;
+    let x = Math.min(last - 1, Math.floor(((localX + size / 2) * last) / size));
+    let z = Math.min(last - 1, Math.floor(((localZ + size / 2) * last) / size));
+    if (x > 0 && localX < p[x * 3]) x--;
+    else if (x < last - 1 && localX >= p[(x + 1) * 3]) x++;
+    if (z > 0 && localZ < p[z * r * 3 + 2]) z--;
+    else if (z < last - 1 && localZ >= p[(z + 1) * r * 3 + 2]) z++;
+    const cell = z * last + x;
+    for (let i = offsets[cell]; i < offsets[cell + 1]; i += 3) {
+      const a = indices[i] * 3,
+        b = indices[i + 1] * 3,
+        c = indices[i + 2] * 3,
+        abx = p[b] - p[a],
+        abz = p[b + 2] - p[a + 2],
+        acx = p[c] - p[a],
+        acz = p[c + 2] - p[a + 2],
+        area = abz * acx - abx * acz,
+        wa =
+          (p[c + 2] - p[b + 2]) * (localX - p[b]) -
+          (p[c] - p[b]) * (localZ - p[b + 2]),
+        wb =
+          (p[a + 2] - p[c + 2]) * (localX - p[c]) -
+          (p[a] - p[c]) * (localZ - p[c + 2]),
+        wc = abz * (localX - p[a]) - abx * (localZ - p[a + 2]);
+      if (wa < 0 || wb < 0 || wc < 0) continue;
+      out.height =
+        p[a + 1] +
+        (p[b + 1] - p[a + 1]) * (wb / area) +
+        (p[c + 1] - p[a + 1]) * (wc / area);
+      out.faceIndex = i / 3;
+      return true;
+    }
+    return false;
+  };
+}
+
+/** Adjacent binary64 query, not a geometric tolerance or rounded Float32. */
+function adjacentHeightQuery(value: number, direction: -1 | 1): number {
+  if (value === 0) return direction * Number.MIN_VALUE;
+  const bits = new DataView(new ArrayBuffer(8));
+  bits.setFloat64(0, value);
+  bits.setBigUint64(
+    0,
+    bits.getBigUint64(0) + (value > 0 === direction > 0 ? 1n : -1n),
+  );
+  return bits.getFloat64(0);
+}
+
+function checkHeightScan(
+  surface: RetainedTerrainSurface,
+  original: ReturnType<typeof originalIndexedHeightScan>,
+  x: number,
+  z: number,
+  pinnedFace?: number,
+) {
+  const expected: TerrainGridHeightSample = { height: -0, faceIndex: -789 },
+    height: TerrainGridHeightSample = { ...expected },
+    full: TerrainGridSample = { ...expected, nx: 13, ny: 17, nz: 19 },
+    hit = original(x, z, expected);
+  expect(surface.sampleHeight(x, z, height), `height ${x},${z}`).toBe(hit);
+  expect(surface.sample(x, z, full), `full ${x},${z}`).toBe(hit);
+  // toBe uses Object.is, including the sign of zero and unchanged miss outputs.
+  expect(height.height).toBe(expected.height);
+  expect(full.height).toBe(expected.height);
+  expect(height.faceIndex).toBe(expected.faceIndex);
+  expect(full.faceIndex).toBe(expected.faceIndex);
+  if (!hit)
+    expect(full).toEqual({
+      height: -0,
+      faceIndex: -789,
+      nx: 13,
+      ny: 17,
+      nz: 19,
+    });
+  if (pinnedFace !== undefined) {
+    expect(hit).toBe(true);
+    expect(height.faceIndex).toBe(pinnedFace);
+  }
+}
+
+function checkHeightGeometry(
+  surface: RetainedTerrainSurface,
+  geometry: THREE.BufferGeometry,
+) {
+  const original = originalIndexedHeightScan(geometry, surface.size),
+    p = geometry.getAttribute("position"),
+    indices = geometry.getIndex()!,
+    topology = geometry.userData.terrainCellTopology as TerrainCellTopology,
+    count = topology.cellIndexOffsets.at(-1)!,
+    boundaries = new Map<string, [number, number]>();
+  const boundary = (x: number, z: number) =>
+    boundaries.set(
+      `${Object.is(x, -0) ? "-0" : x},${Object.is(z, -0) ? "-0" : z}`,
+      [x, z],
+    );
+  for (let i = 0; i < count; i += 3) {
+    const a = indices.getX(i),
+      b = indices.getX(i + 1),
+      c = indices.getX(i + 2);
+    checkHeightScan(
+      surface,
+      original,
+      p.getX(a) * 0.2 + p.getX(b) * 0.3 + p.getX(c) * 0.5,
+      p.getZ(a) * 0.2 + p.getZ(b) * 0.3 + p.getZ(c) * 0.5,
+      i / 3,
+    );
+    for (const [v, w] of [
+      [a, b],
+      [b, c],
+      [c, a],
+    ]) {
+      boundary(p.getX(v), p.getZ(v));
+      boundary((p.getX(v) + p.getX(w)) / 2, (p.getZ(v) + p.getZ(w)) / 2);
+    }
+  }
+  for (const [x, z] of boundaries.values()) {
+    checkHeightScan(surface, original, x, z);
+    for (const direction of [-1, 1] as const) {
+      checkHeightScan(surface, original, adjacentHeightQuery(x, direction), z);
+      checkHeightScan(surface, original, x, adjacentHeightQuery(z, direction));
+    }
+  }
+  for (const x of [-0, 0, -Number.MIN_VALUE, Number.MIN_VALUE])
+    for (const z of [-0, 0, -Number.MIN_VALUE, Number.MIN_VALUE])
+      checkHeightScan(surface, original, x, z);
+  for (const [x, z] of [
+    [NaN, 0],
+    [0, Infinity],
+    [-Infinity, 0],
+    [surface.size, 0],
+    [0, -surface.size],
+  ])
+    checkHeightScan(surface, original, x, z);
+  return original;
+}
+
 function finishPreparation(
   iterator: Generator<string, RetainedTerrainSurface, void>,
 ) {
@@ -2743,4 +2900,403 @@ describe("retained grounding edge block traversal", () => {
       }
     },
   );
+});
+
+describe("height-only conservative face-block reuse", () => {
+  it.each([
+    ["qualified", false, 0, 1],
+    ["two-face tail", false, 1, 1],
+    ["four-face tail", false, 2, 1],
+    ["six-face tail", false, 3, 1],
+    ["mixed skinny fallback", true, 0, 1],
+    ["exact determinant threshold", false, 0, 1 / 16],
+    ["subthreshold fallback", false, 0, 1 / 32],
+    ["unsupported coordinate and edge domain", false, 0, 128],
+  ] as const)(
+    "matches frozen original scan exactly through every face and adjacent boundary: %s",
+    (name, skinny, tailSplits, scale) => {
+      const geometry = denseEdgeGeometry(skinny, tailSplits);
+      try {
+        const position = geometry.getAttribute("position");
+        for (let i = 0; i < position.count; i++) {
+          position.setX(i, position.getX(i) * scale);
+          position.setZ(i, position.getZ(i) * scale);
+        }
+        position.needsUpdate = true;
+        const surface = new RetainedTerrainSurface(
+            1,
+            name,
+            0,
+            0,
+            2 * scale,
+            3,
+            geometry,
+          ),
+          stats = surface.groundingEdgeIndexStats!;
+        if (scale === 1 / 32 || scale === 128)
+          expect(stats.qualifiedBlocks).toBe(0);
+        else if (skinny) {
+          expect(stats.qualifiedBlocks).toBeGreaterThan(0);
+          expect(stats.qualifiedBlocks).toBeLessThan(stats.blocks);
+        } else expect(stats.qualifiedBlocks).toBe(stats.blocks);
+        const original = checkHeightGeometry(surface, geometry);
+        // Fixed IDs pin cell-boundary ownership and original tail order.
+        checkHeightScan(surface, original, -scale, -scale, 0);
+        checkHeightScan(
+          surface,
+          original,
+          0,
+          0,
+          [96, 102, 108, 114][tailSplits],
+        );
+        if (!skinny && !tailSplits)
+          checkHeightScan(surface, original, scale, scale, 127);
+      } finally {
+        geometry.dispose();
+      }
+    },
+  );
+
+  it("preserves the first face after missing both children of a hit parent with interleaved order", () => {
+    const geometry = denseEdgeGeometry();
+    try {
+      const indices = Array.from(geometry.getIndex()!.array),
+        order = [
+          0,
+          1,
+          2,
+          3,
+          28,
+          29,
+          30,
+          31,
+          ...Array.from({ length: 24 }, (_, index) => index + 4),
+        ];
+      geometry.setIndex([
+        ...order.flatMap((face) => indices.slice(face * 3, face * 3 + 3)),
+        ...indices.slice(96),
+      ]);
+      const surface = new RetainedTerrainSurface(
+          1,
+          "interleaved-height",
+          0,
+          0,
+          2,
+          3,
+          geometry,
+        ),
+        original = checkHeightGeometry(surface, geometry);
+      // Parent0 spans the cell, but these middle queries miss both separated
+      // child boxes. Original face10 is now face14, including its diagonal tie.
+      checkHeightScan(surface, original, -0.625, -0.625, 14);
+      checkHeightScan(surface, original, -0.65, -0.65, 14);
+      checkHeightScan(surface, original, 0, 0, 96);
+    } finally {
+      geometry.dispose();
+    }
+  });
+
+  it("retains signed-zero height arithmetic and exhaustive small-cell sampling", () => {
+    const dense = denseEdgeGeometry(),
+      small = refinedGeometry(2, false).geometry;
+    try {
+      const position = dense.getAttribute("position");
+      for (let i = 0; i < position.count; i++) position.setY(i, i % 2 ? -0 : 0);
+      position.needsUpdate = true;
+      const denseSurface = new RetainedTerrainSurface(
+          1,
+          "signed-zero-height",
+          0,
+          0,
+          2,
+          3,
+          dense,
+        ),
+        smallSurface = new RetainedTerrainSurface(
+          2,
+          "small-height",
+          0,
+          0,
+          2,
+          3,
+          small,
+        );
+      checkHeightGeometry(denseSurface, dense);
+      expect(smallSurface.groundingEdgeIndexStats?.blocks).toBe(0);
+      const original = checkHeightGeometry(smallSurface, small);
+      small.getAttribute("position").needsUpdate = true;
+      expect(smallSurface.matchesGeometry(small)).toBe(false);
+      // No cached boxes are used here; do not widen the fast-path owner guard
+      // into a behavior change for the original exhaustive sampling API.
+      checkHeightScan(smallSurface, original, -0.5, -0.5, 0);
+    } finally {
+      dense.dispose();
+      small.dispose();
+    }
+  });
+
+  it("uses qualified small-span faces at ±64 and preserves just-outside-domain fallback", () => {
+    const geometry = denseEdgeGeometry();
+    try {
+      const position = geometry.getAttribute("position"),
+        expand = (value: number) =>
+          value === 0 ? 0 : Math.sign(value) * (63.25 + Math.abs(value));
+      for (let i = 0; i < position.count; i++) {
+        position.setX(i, expand(position.getX(i)));
+        position.setZ(i, expand(position.getZ(i)));
+      }
+      position.needsUpdate = true;
+      // Each cell's two middle quarter-unit strips form exactly eight small
+      // faces inside [-64,64]. Put those into one qualified parent. The outer
+      // mesh reaches ±64.25, so queries beyond the proof domain still hit it.
+      const originalIndices = Array.from(geometry.getIndex()!.array),
+        qualifiedFaces = [10, 11, 12, 13, 18, 19, 20, 21],
+        order = [
+          ...qualifiedFaces,
+          ...Array.from({ length: 32 }, (_, i) => i).filter(
+            (face) => !qualifiedFaces.includes(face),
+          ),
+        ];
+      geometry.setIndex(
+        Array.from({ length: 4 }, (_, cell) =>
+          order.flatMap((face) =>
+            originalIndices.slice(
+              (cell * 32 + face) * 3,
+              (cell * 32 + face + 1) * 3,
+            ),
+          ),
+        ).flat(),
+      );
+      const surface = new RetainedTerrainSurface(
+          1,
+          "height-domain-boundary",
+          0,
+          0,
+          128.5,
+          3,
+          geometry,
+        ),
+        stats = surface.groundingEdgeIndexStats!;
+      expect(stats.blocks).toBe(16);
+      expect(stats.qualifiedBlocks).toBe(4);
+      expect(stats.qualifiedChildren).toBe(8);
+      const original = checkHeightGeometry(surface, geometry);
+      // Pinned ties belong to the newly first, qualified parent in each cell,
+      // not an unqualified neighbor that happens to produce the same height.
+      for (const [x, z, face] of [
+        [-64, -64, 0],
+        [64, -64, 34],
+        [-64, 64, 68],
+        [64, 64, 103],
+      ])
+        checkHeightScan(surface, original, x, z, face);
+      for (const sign of [-1, 1] as const) {
+        const edge = sign * 64,
+          inside = adjacentHeightQuery(edge, sign === 1 ? -1 : 1),
+          outside = adjacentHeightQuery(edge, sign);
+        expect(Math.abs(inside)).toBeLessThan(64);
+        expect(Math.abs(outside)).toBeGreaterThan(64);
+        expect(Math.abs(outside)).toBeLessThan(64.25);
+        for (const coordinate of [inside, edge, outside]) {
+          checkHeightScan(surface, original, coordinate, sign * 63.625);
+          checkHeightScan(surface, original, sign * 63.625, coordinate);
+        }
+      }
+      position.needsUpdate = true;
+      const out: TerrainGridHeightSample = { height: -0, faceIndex: -789 };
+      for (const sign of [-1, 1] as const) {
+        expect(() =>
+          surface.sampleHeight(sign * 64, sign * 63.625, out),
+        ).toThrow("changed during admission");
+        expect(() =>
+          surface.sampleHeight(sign * 63.625, sign * 64, out),
+        ).toThrow("changed during admission");
+        expect(out).toEqual({ height: -0, faceIndex: -789 });
+        const outside = adjacentHeightQuery(sign * 64, sign);
+        for (const [x, z] of [
+          [outside, sign * 63.625],
+          [sign * 63.625, outside],
+        ]) {
+          const expected: TerrainGridHeightSample = {
+            height: 0,
+            faceIndex: -1,
+          };
+          expect(original(x, z, expected)).toBe(true);
+          // Unsupported points keep the original exhaustive API, even on an
+          // owner with qualified blocks. No current-geometry promise is made.
+          checkHeightScan(surface, original, x, z);
+        }
+      }
+    } finally {
+      geometry.dispose();
+    }
+  });
+
+  const invalidations: Array<
+    [string, (geometry: THREE.BufferGeometry) => void]
+  > = [
+    [
+      "position version",
+      (geometry) => {
+        geometry.getAttribute("position").needsUpdate = true;
+      },
+    ],
+    [
+      "index version",
+      (geometry) => {
+        geometry.getIndex()!.needsUpdate = true;
+      },
+    ],
+    [
+      "position attribute",
+      (geometry) => {
+        geometry.setAttribute(
+          "position",
+          geometry.getAttribute("position").clone(),
+        );
+      },
+    ],
+    [
+      "index attribute",
+      (geometry) => {
+        geometry.setIndex(geometry.getIndex()!.clone());
+      },
+    ],
+    [
+      "geometry revision",
+      (geometry) => {
+        geometry.uuid = "replaced-height-owner";
+      },
+    ],
+    [
+      "topology ownership",
+      (geometry) => {
+        geometry.userData.terrainCellTopology = Object.freeze({
+          ...geometry.userData.terrainCellTopology,
+        });
+      },
+    ],
+    [
+      "topology removal",
+      (geometry) => {
+        delete geometry.userData.terrainCellTopology;
+      },
+    ],
+    [
+      "topology descriptor",
+      (geometry) => {
+        Object.defineProperty(geometry.userData, "terrainCellTopology", {
+          enumerable: false,
+        });
+      },
+    ],
+  ];
+  it.each(invalidations)(
+    "rejects stale %s before using cached bounds without changing full-sample or miss behavior",
+    (_name, invalidate) => {
+      const geometry = denseEdgeGeometry();
+      try {
+        const surface = new RetainedTerrainSurface(
+            1,
+            "stale-height",
+            0,
+            0,
+            2,
+            3,
+            geometry,
+          ),
+          original = originalIndexedHeightScan(geometry, 2),
+          out: TerrainGridHeightSample = { height: -0, faceIndex: -789 };
+        invalidate(geometry);
+        expect(surface.matchesGeometry(geometry)).toBe(false);
+        expect(() => surface.sampleHeight(-0.9, -0.9, out)).toThrow(
+          "changed during admission",
+        );
+        expect(out).toEqual({ height: -0, faceIndex: -789 });
+        const expected: TerrainGridHeightSample = {
+            height: -0,
+            faceIndex: -789,
+          },
+          full = sample();
+        expect(original(-0.9, -0.9, expected)).toBe(true);
+        expect(surface.sample(-0.9, -0.9, full)).toBe(true);
+        expect(full.height).toBe(expected.height);
+        expect(full.faceIndex).toBe(expected.faceIndex);
+        for (const [x, z] of [
+          [NaN, 0],
+          [Infinity, 0],
+          [2, 0],
+        ]) {
+          expect(surface.sampleHeight(x, z, out)).toBe(false);
+          expect(out).toEqual({ height: -0, faceIndex: -789 });
+        }
+      } finally {
+        geometry.dispose();
+      }
+    },
+  );
+
+  it("does not add an owner guard to wholly unqualified large-coordinate queries", () => {
+    const geometry = denseEdgeGeometry();
+    try {
+      const position = geometry.getAttribute("position");
+      for (let i = 0; i < position.count; i++) {
+        position.setX(i, position.getX(i) * 128);
+        position.setZ(i, position.getZ(i) * 128);
+      }
+      const surface = new RetainedTerrainSurface(
+          1,
+          "large-height",
+          0,
+          0,
+          256,
+          3,
+          geometry,
+        ),
+        original = originalIndexedHeightScan(geometry, 256);
+      expect(surface.groundingEdgeIndexStats?.qualifiedBlocks).toBe(0);
+      position.needsUpdate = true;
+      for (const [x, z] of [
+        [65, 65],
+        [-65, -65],
+        [64, 64],
+        [-64, -64],
+        [0, 0],
+      ])
+        checkHeightScan(surface, original, x, z);
+    } finally {
+      geometry.dispose();
+    }
+  });
+
+  it("still guards an exhaustive skinny parent when its owner has other qualified blocks", () => {
+    const geometry = denseEdgeGeometry(true);
+    try {
+      const surface = new RetainedTerrainSurface(
+          1,
+          "mixed-stale-height",
+          0,
+          0,
+          2,
+          3,
+          geometry,
+        ),
+        stats = surface.groundingEdgeIndexStats!,
+        original = originalIndexedHeightScan(geometry, 2),
+        out: TerrainGridHeightSample = { height: -0, faceIndex: -789 };
+      expect(stats.qualifiedBlocks).toBeGreaterThan(0);
+      expect(stats.qualifiedBlocks).toBeLessThan(stats.blocks);
+      // The first parent contains the shrunken Float32 strip at the left edge.
+      const x = -1 + 2 ** -25,
+        z = -0.9;
+      checkHeightScan(surface, original, x, z);
+      geometry.getAttribute("position").needsUpdate = true;
+      expect(() => surface.sampleHeight(x, z, out)).toThrow(
+        "changed during admission",
+      );
+      expect(out).toEqual({ height: -0, faceIndex: -789 });
+    } finally {
+      geometry.dispose();
+    }
+  });
 });

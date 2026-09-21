@@ -457,6 +457,13 @@ const GROUNDING_EDGE_CHILD_FACES = 4;
 // outward box arithmetic, under the bounded world-coordinate admission.
 const GROUNDING_EDGE_ENVELOPE =
   4 * (2 ** 17 * (1e-10 + 2 ** -48) + 2 ** -24) + 2 ** -27;
+// Height-only point queries can reuse this padding for |local XZ| <=64.
+// Qualified edges/area are exact; direct edge-numerator roundoff is <2^-40
+// (query differences <=128, products <=256, final subtraction <=512).
+// Area >=2^-12 bounds every accepted exact barycentric below by -2^-28.
+// Their sum is one and triangle spans are <=2, so coordinate escape is at
+// most 4*2^-28=2^-26. Existing padding exceeds 2^-22; stored-bound rounding
+// is <2^-45. Strict rejection therefore cannot omit an accepted point face.
 
 type GroundingEdgeBlocks = {
   cellOffsets: Uint32Array;
@@ -1699,8 +1706,71 @@ export class RetainedTerrainSurface {
     if (this.topology && this.refinedIndices) {
       const cell = z * last + x,
         indices = this.refinedIndices,
-        offsets = this.topology.cellIndexOffsets;
-      for (let i = offsets[cell]; i < offsets[cell + 1]; i += 3) {
+        offsets = this.topology.cellIndexOffsets,
+        start = offsets[cell],
+        end = offsets[cell + 1],
+        candidateBlocks =
+          normalOut === undefined &&
+          Math.abs(localX) <= 64 &&
+          Math.abs(localZ) <= 64
+            ? this.groundingEdgeBlocks
+            : null,
+        blocks =
+          candidateBlocks &&
+          candidateBlocks.stats.qualifiedBlocks > 0 &&
+          candidateBlocks.cellOffsets[cell] <
+            candidateBlocks.cellOffsets[cell + 1]
+            ? candidateBlocks
+            : null;
+      // The full normal sampler stays exhaustive. Height queries only consume
+      // admission-owned bounds while their original geometry owner is current.
+      if (blocks) this.checkGroundingEdgeCurrent();
+      let block = blocks ? blocks.cellOffsets[cell] : 0,
+        blockEnd = start,
+        childEnd = end,
+        childOffset = 0;
+      for (let i = start; i < end; i += 3) {
+        if (blocks) {
+          if (i === blockEnd) {
+            const k = block * 4;
+            blockEnd = Math.min(i + GROUNDING_EDGE_BLOCK_FACES * 3, end);
+            childEnd = blockEnd;
+            // Unqualified parents stay exhaustive, including their children.
+            if (Number.isFinite(blocks.bounds[k])) {
+              if (
+                localX < blocks.bounds[k] ||
+                localX > blocks.bounds[k + 1] ||
+                localZ < blocks.bounds[k + 2] ||
+                localZ > blocks.bounds[k + 3]
+              ) {
+                block++;
+                i = blockEnd - 3;
+                continue;
+              }
+              // Short tails have no admitted child boxes. All other children
+              // inherit their parent's qualification and original face order.
+              if (blockEnd - i > GROUNDING_EDGE_CHILD_FACES * 3) {
+                childOffset = block * 8;
+                childEnd = i;
+              }
+            }
+            block++;
+          }
+          if (i === childEnd) {
+            const k = childOffset;
+            childOffset += 4;
+            childEnd = Math.min(i + GROUNDING_EDGE_CHILD_FACES * 3, blockEnd);
+            if (
+              localX < blocks.childBounds[k] ||
+              localX > blocks.childBounds[k + 1] ||
+              localZ < blocks.childBounds[k + 2] ||
+              localZ > blocks.childBounds[k + 3]
+            ) {
+              i = childEnd - 3;
+              continue;
+            }
+          }
+        }
         const a = indices[i] * 3,
           b = indices[i + 1] * 3,
           c = indices[i + 2] * 3;

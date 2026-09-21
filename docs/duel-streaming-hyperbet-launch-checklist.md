@@ -2248,6 +2248,58 @@ References: [Chrome Web Audio activation](https://developer.chrome.com/blog/web-
 [native AudioContext resume](https://webaudio.github.io/web-audio-api/#dom-audiocontext-resume).
 Actual tests establish only the limited outcomes stated above.
 
+### Height-only terrain sampling — native gate recovery, not smoothness approval
+
+**World first; compact island only; one arena; SOL only.** Source remains a
+candidate, and the playable localhost:3333 build is not promoted.
+
+- [x] Preserve the exact native72 failed cell (gcell_v1_15_17, LOD1) with real
+  terrain, owner order, physics-backed dock exclusions and authored constraints.
+  Completed baseline: 1,134 input / 1,091 retained clumps; 27,216 endpoint
+  queries. The old 153,028-operation / 251.7 ms receipt is a failed prefix only.
+- [x] Height-only sampling reuses existing qualified parent/child face bounds,
+  with a conservative floating-point proof and original-owner validation.
+  Face order, boundary ties, arithmetic, exhaustive fallback and full normal
+  sampling remain unchanged; no added spatial index or bound metadata.
+- [x] 578 focused sampler/grounding/snapshot/worker/manager tests plus six real
+  pond cases pass. New boundary coverage includes qualified ±64 coordinates,
+  neighboring doubles, signed zero, small/skinny tails and published-owner
+  invalidation. Final noEmit: 724 roots / 2,745 sources; lint/format pass.
+- [x] Baseline/candidate comparisons preserve all 120 array hashes, provenance
+  data, populations, bounds, dependencies, geometric-work receipts, generator
+  resumptions and full-pipeline operation totals across all six pond cases.
+  CPU observations are mixed, not a proven speedup; cold monolithic admission
+  failures remain separately recorded and are not relabeled as passing fits.
+- [x] Exact build39 native73 passes the original startup and four camera gates,
+  with no errors and all 122 initial grass cells ready. Startup 44.022 s;
+  cuts 6.133 / 3.244 / 2.090 / 3.176 s. Camera/render settings, queues and
+  populations match native70: 61,453 / 79,706 / 66,254 / 75,996 clumps.
+- [ ] Not a controlled performance comparison: native70 also predates handoff
+  coalescing/audio fixes, and host power/contention differs. Native73 retains
+  a 28.2 ms admission slice (main grounding max 2.2 ms). Original native67/72
+  failures and multi-second settling remain open; no frame-rate, sustained
+  movement, heap, streaming, reliability-tail or AAA acceptance is granted.
+- [ ] Strict photometric matching is incomplete: overview exposure differs by
+  2.8419e-5, failing the original 1e-6 comparison. Natural animation also runs.
+  Keep that failed audit; do not widen the tolerance or claim a locked image pair.
+- [x] Root reviewed all four images: no new visual-quality claim. Dock shadow
+  plaid, continuous bare bank rim, sparse planting, uniform lawn and pavilion
+  arrival still need art work. Reuse this functional baseline for the next pass.
+- [x] Runtime52/database removed, owned browser closed, 996 build-source pins,
+  145 protected outputs, retained lock and human localhost:3333/DB unchanged.
+- [ ] NEXT: qualify compact-sun bias across dock/pavilion/terrain/foliage and
+  three sunlight phases with converged lighting; then larger unequal shoreline
+  plant/rock masses and pavilion arrival, protecting fishing and dry routes.
+  Continue sustained movement/LOD/cache and admission/frame/heap tail checks
+  alongside art. No quality cuts, raised limits, default promotion or deployment.
+
+Evidence: service-layout-network01 `height-sample-*`; inland pond
+`build39`, `native73`, `runtime52`. The first fixture attempt selected no
+test and is retained as all-skipped; corrected baseline02/03 run the actual case.
+Reference checks: [ECMAScript arithmetic](https://tc39.es/ecma262/multipage/ecmascript-data-types-and-values.html#sec-numeric-types-number-multiply),
+[Three attribute-version contract](https://threejs.org/docs/pages/BufferAttribute.html#version).
+The numerical proof and actual tests, not references alone, establish parity.
+
 ### Inland fishing integration — candidate only
 
 The detached candidate now requests 14 real fishing entities, two for each of

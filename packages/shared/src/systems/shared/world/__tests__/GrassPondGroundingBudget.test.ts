@@ -294,6 +294,33 @@ const cases = [
         "fdda05c65a178f3cf6dc9eec5187711c251f77b7ff2c0659f0ccce29fa254e7f",
     },
   },
+  {
+    name: "native72 startup LOD1 southwest bank work budget",
+    test: "grounds the exact native72 failed cell with unchanged fitting limits",
+    enabled: process.env.ASSETS_DIR?.endsWith(
+      "/inland-pond-integration01-UNQUALIFIED/assets-v9",
+    ),
+    label: "NATIVE72_LOD1_SOUTHWEST_BANK",
+    // This is the x375..400 cell, not its x400..425 neighbor. Owner ordering
+    // must match the real cell; its unchanged halo crosses the x400 boundary.
+    nodes: [
+      [350, 450],
+      [450, 450],
+    ],
+    focus: [335, 431],
+    lod: 1,
+    key: "gcell_v1_15_17",
+    bounds: { minX: 375, maxX: 400, minZ: 425, maxZ: 450 },
+    native72: {
+      source: "native72/process.json",
+      sourceSHA256:
+        "68001f7328f46e0647eec51ec08ac528bdcd7b06cb2f1f43412a2695ba57f5df",
+      failedOperations: 153028,
+      failedActiveMs: 251.69999980926514,
+      scope:
+        "Historical failed prefix, not completed input/retained counts or total fitting work.",
+    },
+  },
 ] as const;
 
 let groundingWorkerSource: string;
@@ -308,6 +335,8 @@ describe.each(cases)("$name", (scenario) => {
     scenario.test,
     async () => {
       const lod = "lod" in scenario ? scenario.lod : 0;
+      const usesNativeComposition =
+        "native52" in scenario || "native72" in scenario;
       await DataManager.getInstance().initialize();
       const world = new World();
       const terrain = world.register("terrain", TerrainSystem) as TerrainSystem;
@@ -331,7 +360,7 @@ describe.each(cases)("$name", (scenario) => {
       let docks: ProceduralDocks | undefined;
       const failures: unknown[] = [];
       try {
-        if ("native52" in scenario) {
+        if (usesNativeComposition) {
           // Match the existing actual dock fixture: native triangle collision
           // must be installed before its owned grass exclusions are published.
           const previousEnvironment = process.env.NODE_ENV;
@@ -343,7 +372,7 @@ describe.each(cases)("$name", (scenario) => {
             else process.env.NODE_ENV = previousEnvironment;
           }
           await world.physics.init();
-          // Select the actual native52 terrain/worker composition on these new
+          // Select the actual native terrain/worker composition on these new
           // owners only. Historical near cases retain their original setup.
           // Lighting/sky are not CPU grounding inputs and are not qualified here.
           terrain["compactPondBlend"] = "composition-v1";
@@ -354,7 +383,7 @@ describe.each(cases)("$name", (scenario) => {
           terrain["compactGrassColorGrade"] = "fine-meadow-green-v1";
         }
         await terrain.init();
-        if ("native52" in scenario) {
+        if (usesNativeComposition) {
           // Composition binds and seals these real owners during init. Do not
           // reload them after admission or bypass their restart-only contract.
           expect(
@@ -372,7 +401,7 @@ describe.each(cases)("$name", (scenario) => {
         terrain["subscribeRoadNetworkEvents"]();
         await roads.init();
         await roads.start();
-        if ("native52" in scenario) {
+        if (usesNativeComposition) {
           docks = world.register("docks", ProceduralDocks) as ProceduralDocks;
           await docks.init();
           await docks.start();
@@ -401,7 +430,7 @@ describe.each(cases)("$name", (scenario) => {
           compactGrassColorGrade:
             createCompactTerrainColorOperations().getGrassColorGrade().id,
         };
-        if ("native52" in scenario) {
+        if (usesNativeComposition) {
           expect(setup.compactPondBlend).toBe("composition-v1");
           expect(setup.compactPondBankField?.id).toBe("composition-v1");
           expect(setup.compactCoastBlend).toBeUndefined();
@@ -508,7 +537,7 @@ describe.each(cases)("$name", (scenario) => {
           (bounds) => retainedVisual.captureRetainedSurfaceRegion(bounds),
           "fine-meadow-v1",
           terrain["getCompactHabitatMaterial"]("haven-understory-v1"),
-          "native52" in scenario ? "leaf-volume-v1" : undefined,
+          usesNativeComposition ? "leaf-volume-v1" : undefined,
         );
         manager.setPlayerPosition(scenario.focus[0], scenario.focus[1]);
         manager.onNodeNeedsGeometry(nodes[0]);
@@ -516,7 +545,7 @@ describe.each(cases)("$name", (scenario) => {
         const work = manager["liveWorkUnits"].get(key)!;
         expect(work.bounds).toEqual(scenario.bounds);
         expect(work.node).toBe(nodes[0]);
-        if ("native52" in scenario)
+        if (usesNativeComposition)
           expect(manager["getLodLevel"](work)).toBe(lod);
         const input = manager["createWorkerInput"](work, key, lod);
         if ("native52" in scenario && key === "gcell_v1_17_16")
@@ -604,9 +633,16 @@ describe.each(cases)("$name", (scenario) => {
             ...("native52" in scenario
               ? {
                   native52HistoricalObservation: scenario.native52,
-                  actualDockOwners: docks!.getCompactDiagnostics(),
                   native52ComparisonScope:
                     "Actual native52 input/retained counts are asserted; original live operations remain a historical comparator, not a timing or scheduling assertion.",
+                }
+              : {}),
+            ...("native72" in scenario
+              ? { native72HistoricalObservation: scenario.native72 }
+              : {}),
+            ...(usesNativeComposition
+              ? {
+                  actualDockOwners: docks!.getCompactDiagnostics(),
                   cpuSelections: {
                     pondBlend: setup.compactPondBlend,
                     pondBankField: setup.compactPondBankField?.id,
