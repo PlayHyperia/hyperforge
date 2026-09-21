@@ -19,6 +19,7 @@ import {
   getItem,
   ALL_WORLD_AREAS,
   EventType,
+  loadPhysX,
   type BuildingCollisionService,
   type EntityID,
 } from "@hyperforge/shared";
@@ -31,6 +32,20 @@ import { EntityManager } from "../../../../../shared/src/systems/shared/entities
 import { SkillsSystem } from "../../../../../shared/src/systems/shared/character/SkillsSystem";
 import { getExternalResource } from "../../../../../shared/src/utils/ExternalAssetUtils";
 import { DuelOrchestrator } from "../../StreamingDuelScheduler/managers/DuelOrchestrator";
+import { ArenaPoolManager } from "../../DuelSystem/ArenaPoolManager";
+import { validatePhysicalBankAccess } from "../../../shared/PhysicalBankAccess";
+import { RoadNetworkSystem } from "../../../../../shared/src/systems/shared/world/RoadNetworkSystem";
+import { ProceduralDocks } from "../../../../../shared/src/systems/shared/world/ProceduralDocks";
+import { CompactServiceCourtSystem } from "../../../../../shared/src/systems/shared/world/CompactServiceCourtSystem";
+import { CompactLandscapeRocksSystem } from "../../../../../shared/src/systems/shared/world/CompactLandscapeRocksSystem";
+import { StationSpawnerSystem } from "../../../../../shared/src/systems/shared/entities/StationSpawnerSystem";
+import { MobNPCSpawnerSystem } from "../../../../../shared/src/systems/shared/entities/MobNPCSpawnerSystem";
+import { compactPathIntersectsBounds } from "../../../../../shared/src/systems/shared/world/CompactIslandPaths";
+import { getCompactPondDockDirection } from "../../../../../shared/src/systems/shared/world/DockDefinition";
+import {
+  getDuelArenaProtectionBounds,
+  isPositionInsideDuelArenaZone,
+} from "../../../../../shared/src/data/duel-manifest";
 
 class CpuServerWorld extends World {
   override get isServer(): boolean {
@@ -38,11 +53,34 @@ class CpuServerWorld extends World {
   }
 }
 const worlds: World[] = [];
+const routeOwnerReleases: Array<() => void> = [];
 beforeAll(async () => {
   await DataManager.getInstance().initialize();
+  if (process.env.HYPERIA_POND_BANK_ROUTES === "1") {
+    const previous = process.env.NODE_ENV;
+    process.env.NODE_ENV = "production";
+    try {
+      await loadPhysX();
+    } finally {
+      if (previous === undefined) delete process.env.NODE_ENV;
+      else process.env.NODE_ENV = previous;
+    }
+  }
 });
 afterEach(() => {
-  for (const world of worlds.splice(0)) world.destroy();
+  const failures: unknown[] = [];
+  const attempt = (release: () => void) => {
+    try {
+      release();
+    } catch (error) {
+      failures.push(error);
+    }
+  };
+  for (const release of routeOwnerReleases.splice(0).reverse())
+    attempt(release);
+  for (const world of worlds.splice(0)) attempt(() => world.destroy());
+  if (failures.length)
+    throw new AggregateError(failures, "Player support fixture cleanup failed");
 });
 
 async function fixture() {
@@ -275,7 +313,7 @@ async function fishingFixture(bakeForRelocation = false) {
 // Opt-in real candidate admission lane: no substituted manifests, resource
 // placements, skill/tool predicates, movement, random source or reward result.
 // It does not run reward ticks or provide a database/transport acceptance proof.
-async function allTierFishingFixture() {
+async function allTierFishingFixture(withRouteOwners = false) {
   expect(process.env.ASSETS_DIR).toBeTruthy();
   const area = Object.values(ALL_WORLD_AREAS).find(
     (entry) => entry.fishing?.waterBodyId === "haven_pond_water",
@@ -284,6 +322,7 @@ async function allTierFishingFixture() {
   expect(area!.fishing!.spotTypes).toHaveLength(7);
   const world = new CpuServerWorld();
   worlds.push(world);
+  if (withRouteOwners) await world.physics.init();
   const terrain = world.register("terrain", TerrainSystem) as TerrainSystem;
   await terrain.init();
   terrain["loadWaterBodiesFromManifest"]();
@@ -293,26 +332,116 @@ async function allTierFishingFixture() {
     .getAllBodies()
     .find((entry) => entry.id === area!.fishing!.waterBodyId)!;
   expect(body).toBeDefined();
-  const size = terrain.getWorldTerrainProfile().terrainTileSize;
-  for (
-    let x = Math.floor((area!.bounds.minX + size / 2) / size);
-    x <= Math.floor((area!.bounds.maxX + size / 2) / size);
-    x++
-  )
-    for (
-      let z = Math.floor((area!.bounds.minZ + size / 2) / size);
-      z <= Math.floor((area!.bounds.maxZ + size / 2) / size);
-      z++
-    ) {
-      terrain["generateTile"](x, z, false);
-      terrain["bakeWalkabilityFlags"](x, z);
-    }
   world.register("entity-manager", EntityManager);
   const resources = world.register(
     "resource",
     ResourceSystem,
   ) as ResourceSystem;
   await resources.init();
+  const routeOwners = withRouteOwners
+    ? {
+        towns: world.register("towns", TownSystem) as TownSystem,
+        roads: world.register("roads", RoadNetworkSystem) as RoadNetworkSystem,
+        docks: world.register("docks", ProceduralDocks) as ProceduralDocks,
+        courts: world.register(
+          "compact-service-court",
+          CompactServiceCourtSystem,
+        ) as CompactServiceCourtSystem,
+        rocks: world.register(
+          "compact-landscape-rocks",
+          CompactLandscapeRocksSystem,
+        ) as CompactLandscapeRocksSystem,
+        stations: world.register(
+          "station-spawner",
+          StationSpawnerSystem,
+        ) as StationSpawnerSystem,
+        npcs: world.register(
+          "mob-npc-spawner",
+          MobNPCSpawnerSystem,
+        ) as MobNPCSpawnerSystem,
+      }
+    : null;
+  if (routeOwners) {
+    // Native CPU collision geometry is real; no renderer or physics stepping.
+    // Release these leases before World's built-in physics owner is retired.
+    for (const owner of [
+      routeOwners.docks,
+      routeOwners.courts,
+      routeOwners.rocks,
+    ])
+      routeOwnerReleases.push(() => owner.destroy());
+    await routeOwners.towns.init();
+    await routeOwners.towns.start();
+    await routeOwners.roads.init();
+    await routeOwners.roads.start();
+    await routeOwners.docks.init();
+    await routeOwners.courts.init();
+    await routeOwners.rocks.init();
+  }
+  const bankStations = Object.values(ALL_WORLD_AREAS).flatMap((entry) =>
+    (entry.stations ?? []).filter((station) => station.type === "bank"),
+  );
+  const coverage = withRouteOwners
+    ? {
+        minX: Math.min(
+          area!.bounds.minX,
+          ...bankStations.map((station) => station.position.x),
+        ),
+        maxX: Math.max(
+          area!.bounds.maxX,
+          ...bankStations.map((station) => station.position.x),
+        ),
+        minZ: Math.min(
+          area!.bounds.minZ,
+          ...bankStations.map((station) => station.position.z),
+        ),
+        maxZ: Math.max(
+          area!.bounds.maxZ,
+          ...bankStations.map((station) => station.position.z),
+        ),
+      }
+    : area!.bounds;
+  const size = terrain.getWorldTerrainProfile().terrainTileSize;
+  const generatedRouteTiles: Array<{
+    x: number;
+    z: number;
+    contentGenerated: boolean;
+    resources: number;
+  }> = [];
+  for (
+    let x = Math.floor((coverage.minX + size / 2) / size);
+    x <= Math.floor((coverage.maxX + size / 2) / size);
+    x++
+  )
+    for (
+      let z = Math.floor((coverage.minZ + size / 2) / size);
+      z <= Math.floor((coverage.maxZ + size / 2) / size);
+      z++
+    ) {
+      const tile = terrain["generateTile"](x, z, withRouteOwners);
+      if (withRouteOwners)
+        generatedRouteTiles.push({
+          x,
+          z,
+          contentGenerated: tile.contentGenerated === true,
+          resources: tile.resources.length,
+        });
+      terrain["bakeWalkabilityFlags"](x, z);
+    }
+  if (routeOwners) {
+    await Promise.all([...resources["terrainResourceTails"].values()]);
+    await routeOwners.courts.start();
+    await routeOwners.docks.start();
+    await routeOwners.rocks.start();
+    await routeOwners.stations.start();
+    await routeOwners.npcs.init();
+    // Use the production manifest spawn owner, excluding its unrelated test
+    // goblin/default mob and unticked dynamic mob simulation.
+    await routeOwners.npcs["spawnAllNPCsFromManifest"]();
+    new ArenaPoolManager().registerArenaWallCollision(world.collision);
+    await resources["initializeWorldAreaResources"]();
+    await Promise.all([...resources["terrainResourceTails"].values()]);
+  }
   const inventory = world.register(
     "inventory",
     InventorySystem,
@@ -320,7 +449,8 @@ async function allTierFishingFixture() {
   await inventory.init();
   const skills = world.register("skills", SkillsSystem) as SkillsSystem;
   await skills.init();
-  await resources["spawnDynamicFishingSpots"](area!.id, area!);
+  if (!routeOwners)
+    await resources["spawnDynamicFishingSpots"](area!.id, area!);
   const spots = resources
     .getAllResources()
     .filter((resource) => resource.type === "fishing_spot")
@@ -358,7 +488,11 @@ async function allTierFishingFixture() {
     resource: (typeof spots)[number],
     restored?: {
       tile: { x: number; z: number };
-      inventory: Array<{ itemId: string; slotIndex: number; quantity: number }>;
+      inventory?: Array<{
+        itemId: string;
+        slotIndex: number;
+        quantity: number;
+      }>;
     },
   ) => {
     const start =
@@ -429,6 +563,9 @@ async function allTierFishingFixture() {
     pending,
     packets,
     addAngler,
+    routeOwners,
+    bankStations,
+    generatedRouteTiles,
   };
 }
 
@@ -756,6 +893,429 @@ describe.runIf(process.env.HYPERIA_FISHING_CAPACITY === "1")(
       ).toBe(21);
       expect(f.pending["pendingGathers"].size).toBe(0);
       expect(f.pending["approachReservations"].size).toBe(0);
+    });
+  },
+);
+
+describe.runIf(process.env.HYPERIA_POND_BANK_ROUTES === "1")(
+  "actual candidate pond-to-bank circulation (CPU owners, not bank persistence)",
+  () => {
+    it("keeps the authored corridor clear and walks both decks and every fishing family to the physical bank and back", async () => {
+      const f = await allTierFishingFixture(true);
+      const owners = f.routeOwners!;
+      const config = DataManager.getWorldConfig()!;
+      expect(ALL_WORLD_AREAS.duel_arena.duelProtection).toBe(
+        "facility-floors-v1",
+      );
+      expect(config.compactPondDocks?.docks).toHaveLength(2);
+      expect(f.bankStations).toHaveLength(1);
+      expect(f.generatedRouteTiles).toHaveLength(4);
+      expect(f.generatedRouteTiles.every((tile) => tile.contentGenerated)).toBe(
+        true,
+      );
+      const station = f.bankStations[0];
+      const bankId = `station_${station.id}`;
+      const bank = f.world.entities.get(bankId)!;
+      expect(bank?.data.type).toBe("bank");
+      expect(bank.position.x).toBe(station.position.x);
+      expect(bank.position.z).toBe(station.position.z);
+      expect(owners.docks.getCompactDiagnostics()).toHaveLength(2);
+      for (const dock of owners.docks.getCompactDiagnostics()) {
+        expect(dock.tiles).toBe(24);
+        expect(dock.physicsActor && dock.physicsShape).toBe(true);
+      }
+      expect(owners.courts.getAllDiagnostics()).toHaveLength(2);
+      expect(
+        owners.courts.getAllDiagnostics().every((court) => court.physicsActor),
+      ).toBe(true);
+      expect(owners.rocks.getDiagnostics()?.physicsActors).toBeGreaterThan(0);
+      const manifestNpcs = Object.values(ALL_WORLD_AREAS).flatMap(
+        (area) => area.npcs ?? [],
+      );
+      for (const npc of manifestNpcs)
+        expect(
+          [...f.world.entities.values()].some(
+            (entity) =>
+              entity.id.startsWith(`npc_${npc.id}_`) &&
+              entity.position.x === npc.position.x &&
+              entity.position.z === npc.position.z,
+          ),
+          `Missing actual NPC ${npc.id}`,
+        ).toBe(true);
+      expect(
+        f.resources
+          .getAllResources()
+          .some((resource) => resource.type === "tree"),
+      ).toBe(true);
+
+      const protection = getDuelArenaProtectionBounds();
+      const pondPaths = owners.roads
+        .getRoads()
+        .filter((road) => road.id.includes("pond-bank"));
+      expect(pondPaths.length).toBeGreaterThan(0);
+      const paintedProtection: Array<{
+        path: string;
+        segment: number;
+        bounds: unknown;
+      }> = [];
+      const paintedWater: Array<{ path: string; x: number; z: number }> = [];
+      let widthSamples = 0;
+      for (const road of pondPaths) {
+        const radius = road.width / 2 + (road.blendWidth ?? 0);
+        for (let index = 1; index < road.path.length; index++) {
+          const a = road.path[index - 1],
+            b = road.path[index];
+          for (const bounds of protection)
+            if (compactPathIntersectsBounds(a, b, bounds, radius))
+              paintedProtection.push({ path: road.id, segment: index, bounds });
+          // Whole capsule perimeter at <=0.25m longitudinal intervals and 32
+          // bearings, not just path centers. Exact rectangle checks above cover
+          // protected aprons continuously; water checks remain sampled evidence.
+          const steps = Math.max(
+            1,
+            Math.ceil(Math.hypot(b.x - a.x, b.z - a.z) / 0.25),
+          );
+          for (let step = 0; step <= steps; step++)
+            for (let bearing = 0; bearing < 32; bearing++) {
+              const angle = (bearing * Math.PI) / 16;
+              const x =
+                a.x + ((b.x - a.x) * step) / steps + Math.cos(angle) * radius;
+              const z =
+                a.z + ((b.z - a.z) * step) / steps + Math.sin(angle) * radius;
+              widthSamples++;
+              if (
+                f.terrain.getWaterBodyRegistry().getBodyAt(x, z)?.id ===
+                  f.body.id &&
+                f.terrain.getResourceGroundHeight(x, z) <= f.body.surfaceY
+              )
+                paintedWater.push({ path: road.id, x, z });
+            }
+        }
+      }
+      expect
+        .soft(
+          paintedProtection,
+          "Paint width/blend enters a protected facility apron",
+        )
+        .toEqual([]);
+      expect
+        .soft(
+          paintedWater.slice(0, 10),
+          "Paint width/blend enters actual pond water",
+        )
+        .toEqual([]);
+
+      const journeys: Array<{
+        origin: string;
+        start: number[];
+        bank: number[];
+        end: number[];
+        legs: Array<{
+          label: string;
+          accepted: boolean;
+          reached: boolean;
+          ticks: number;
+          protectedTiles: string[];
+          blockedTiles: string[];
+        }>;
+        bankAccess: ReturnType<typeof validatePhysicalBankAccess>;
+      }> = [];
+      const walk = (
+        player: PlayerEntity,
+        target: { x: number; z: number },
+        label: string,
+      ) => {
+        const destination = worldToTile(target.x, target.z);
+        const accepted = f.movement.movePlayerToward(
+          player.id,
+          {
+            x: target.x,
+            y: resolvePlayerRootHeight(
+              target.x,
+              target.z,
+              f.terrain,
+              owners.towns.getCollisionService(),
+            )!,
+            z: target.z,
+          },
+          false,
+        );
+        let ticks = 0;
+        const protectedTiles = new Set<string>(),
+          blockedTiles = new Set<string>();
+        const arrived = () => {
+          const tile = worldToTile(player.position.x, player.position.z);
+          return tile.x === destination.x && tile.z === destination.z;
+        };
+        for (; ticks < 256 && !arrived(); ticks++) {
+          f.world.currentTick++;
+          f.movement.onTick(f.world.currentTick);
+          const tile = worldToTile(player.position.x, player.position.z);
+          if (
+            isPositionInsideDuelArenaZone(player.position.x, player.position.z)
+          )
+            protectedTiles.add(`${tile.x},${tile.z}`);
+          // The actor's own OCCUPIED_PLAYER bit is not an obstacle violation.
+          if (
+            f.world.collision.hasFlags(
+              tile.x,
+              tile.z,
+              CollisionFlag.BLOCKED |
+                CollisionFlag.WATER |
+                CollisionFlag.STEEP_SLOPE,
+            )
+          )
+            blockedTiles.add(`${tile.x},${tile.z}`);
+          expect(player.position.y).toBeCloseTo(
+            resolvePlayerRootHeight(
+              player.position.x,
+              player.position.z,
+              f.terrain,
+              owners.towns.getCollisionService(),
+            )!,
+            5,
+          );
+          if (!f.movement.hasMovementIntent(player.id) && !arrived()) break;
+        }
+        const result = {
+          label,
+          accepted,
+          reached: arrived(),
+          ticks,
+          protectedTiles: [...protectedTiles],
+          blockedTiles: [...blockedTiles],
+        };
+        expect
+          .soft(
+            result.reached,
+            JSON.stringify({
+              result,
+              movement: f.movement.getPlayerMovementDebug(player.id),
+            }),
+          )
+          .toBe(true);
+        // Ordinary navigation is not constrained to painted paths. Lobby and
+        // hospital transit is permitted; retain crossings as design evidence,
+        // not an invented collision wall or a protected-route qualification.
+        expect
+          .soft(result.blockedTiles, `${label} crossed a blocked tile`)
+          .toEqual([]);
+        return result;
+      };
+      const roundTrip = (origin: string, player: PlayerEntity) => {
+        const start = player.position.toArray();
+        expect(
+          isPositionInsideDuelArenaZone(start[0], start[2]),
+          `${origin} preparation origin`,
+        ).toBe(false);
+        const target = f.movement.findClosestWalkableTile(
+          bank.position,
+          2,
+          (tile) => {
+            const point = tileToWorld(tile);
+            return (
+              f.movement.isTileAvailableForPlayer(player.id, tile) &&
+              Math.max(
+                Math.abs(point.x - bank.position.x),
+                Math.abs(point.z - bank.position.z),
+              ) <= 2
+            );
+          },
+        );
+        expect(
+          target,
+          `No actual bank interaction tile from ${origin}`,
+        ).not.toBeNull();
+        const outbound = walk(player, tileToWorld(target!), `${origin}:bank`);
+        const bankPosition = player.position.toArray();
+        expect
+          .soft(
+            isPositionInsideDuelArenaZone(bankPosition[0], bankPosition[2]),
+            `${origin} bank destination`,
+          )
+          .toBe(false);
+        const bankAccess = validatePhysicalBankAccess(
+          f.world,
+          player.id,
+          bankId,
+        );
+        expect
+          .soft(bankAccess, `${origin} cannot access real bank entity`)
+          .toBeNull();
+        const inbound = walk(
+          player,
+          { x: start[0], z: start[2] },
+          `${origin}:return`,
+        );
+        journeys.push({
+          origin,
+          start,
+          bank: bankPosition,
+          end: player.position.toArray(),
+          legs: [outbound, inbound],
+          bankAccess,
+        });
+      };
+      const retire = (player: PlayerEntity) => {
+        f.pending.onPlayerDisconnect(player.id);
+        f.movement.cleanup(player.id);
+        f.world.entities.remove(player.id);
+      };
+      for (const dock of config.compactPondDocks!.docks) {
+        const direction = getCompactPondDockDirection(dock.rotation);
+        const tile = worldToTile(
+          dock.x + direction.x * 4.5,
+          dock.z + direction.z * 4.5,
+        );
+        const position = tileToWorld(tile);
+        expect(owners.docks.isDockTile(tile.x, tile.z)).toBe(true);
+        const player = addPlayer(f.world, `bank-route-${dock.id}`, [
+          position.x,
+          resolvePlayerRootHeight(position.x, position.z, f.terrain)!,
+          position.z,
+        ]);
+        f.movement.syncPlayerPosition(player.id, player.position);
+        roundTrip(dock.id, player);
+        retire(player);
+      }
+      const testedFamilies = new Set<string>();
+      for (const resource of f.spots) {
+        const family = f.variant(resource);
+        if (testedFamilies.has(family)) continue;
+        testedFamilies.add(family);
+        const { player } = await f.addAngler(`bank-route-${family}`, resource);
+        expect(
+          f.pending.queuePendingGather(
+            player.id,
+            resource.id,
+            f.world.currentTick,
+            true,
+          ),
+        ).toBe(true);
+        for (
+          let i = 0;
+          i < 20 && f.pending["pendingGathers"].has(player.id);
+          i++
+        ) {
+          f.world.currentTick++;
+          f.movement.onTick(f.world.currentTick);
+          f.pending.processTick(f.world.currentTick);
+        }
+        expect(
+          f.resources.isPlayerGatheringResource(player.id, resource.id),
+        ).toBe(true);
+        f.resources["stopGathering"]({ playerId: player.id });
+        roundTrip(family, player);
+        retire(player);
+      }
+      expect(testedFamilies.size).toBe(7);
+      expect(journeys).toHaveLength(9);
+      const nonDockWitnesses = [];
+      for (const family of testedFamilies) {
+        const id = `bank-route-nondock-${family}`;
+        const candidates = f.spots
+          .filter((spot) => f.variant(spot) === family)
+          .map((resource) => {
+            const anchor = worldToTile(
+              resource.position.x,
+              resource.position.z,
+            );
+            const dryTiles: Array<{ x: number; z: number }> = [];
+            const range = GATHERING_CONSTANTS.FISHING_INTERACTION_RANGE;
+            for (let dx = -Math.ceil(range); dx <= Math.ceil(range); dx++)
+              for (let dz = -Math.ceil(range); dz <= Math.ceil(range); dz++) {
+                const tile = { x: anchor.x + dx, z: anchor.z + dz },
+                  point = tileToWorld(tile);
+                if (
+                  !owners.docks.isDockTile(tile.x, tile.z) &&
+                  calculateDistance2D(point, resource.position) <= range &&
+                  f.terrain.getResourceGroundHeight(point.x, point.z) >=
+                    f.body.surfaceY &&
+                  f.movement.isTileAvailableForPlayer(id, tile)
+                )
+                  dryTiles.push(tile);
+              }
+            // The real owner always chooses its nearest available approach. Do
+            // not occupy a deck, replace availability or force a preferred shore.
+            const selected = f.pending["findFishingApproach"](
+              id,
+              resource.position,
+            );
+            return { resource, dryTiles, selected };
+          });
+        const witness = candidates.find(
+          ({ selected, dryTiles }) =>
+            selected &&
+            dryTiles.some(
+              (tile) => tile.x === selected.x && tile.z === selected.z,
+            ),
+        );
+        const receipt = {
+          family,
+          candidates: candidates.map(({ resource, dryTiles, selected }) => ({
+            resourceId: resource.id,
+            dryNonDockTiles: dryTiles.length,
+            selected,
+          })),
+          selectedResourceId: witness?.resource.id ?? null,
+          shore: witness?.selected ?? null,
+        };
+        nonDockWitnesses.push(receipt);
+        expect.soft(witness, JSON.stringify(receipt)).toBeDefined();
+        if (!witness?.selected) continue;
+        const { player } = await f.addAngler(id, witness.resource, {
+          tile: witness.selected,
+        });
+        expect(
+          f.pending.queuePendingGather(
+            id,
+            witness.resource.id,
+            f.world.currentTick,
+            true,
+          ),
+        ).toBe(true);
+        expect(
+          f.resources.isPlayerGatheringResource(id, witness.resource.id),
+        ).toBe(true);
+        expect(f.pending["pendingGathers"].has(id)).toBe(false);
+        expect(
+          owners.docks.isDockTile(
+            Math.floor(player.position.x),
+            Math.floor(player.position.z),
+          ),
+        ).toBe(false);
+        f.resources["stopGathering"]({ playerId: id });
+        roundTrip(`non-dock-${family}`, player);
+        retire(player);
+      }
+      expect
+        .soft(nonDockWitnesses.filter((witness) => witness.selectedResourceId))
+        .toHaveLength(7);
+      expect.soft(journeys).toHaveLength(16);
+      console.log(
+        JSON.stringify({
+          phase: "pond-bank-cpu-routes",
+          assetDirectory: process.env.ASSETS_DIR,
+          widthSamples,
+          paintedProtection,
+          paintedWaterCount: paintedWater.length,
+          docks: owners.docks.getCompactDiagnostics(),
+          courts: owners.courts.getAllDiagnostics(),
+          resourceCount: f.resources.getAllResources().length,
+          generatedRouteTiles: f.generatedRouteTiles,
+          manifestNpcCount: manifestNpcs.length,
+          journeys,
+          nonDockWitnesses,
+          excluded: [
+            "bank deposit/withdraw persistence",
+            "crowd throughput",
+            "native render",
+            "physics stepping",
+            "dynamic mobs",
+            "terrain resources outside the four route tiles",
+          ],
+        }),
+      );
     });
   },
 );

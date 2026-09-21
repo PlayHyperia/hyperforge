@@ -1,5 +1,59 @@
 # World graphics development checkpoint — 2026-09-20
 
+## Ground-item boundaries, PostgreSQL custody and pond-bank journeys
+
+Fixed a reproduced historical tile-snap boundary defect: a source requested
+outside protection at z=348.49 could be planned at protected z=348.5. Single,
+batch and direct-spawn paths now validate the final grounded position before
+returning a durable plan or performing persistence/merge/presentation. The
+actual compact protection geometry and all economic rules are unchanged.
+
+Four new actual World/Terrain/EntityManager source-planning cases cover 36
+facility-edge samples and the legacy snap witness; these plus 19 existing
+regressions pass. The canonical shared gate passes 162 cases with four
+intentional candidate-only skips. Shared source-aware typing passes 732 roots,
+zero diagnostics. Independent review found no remaining production blocker.
+
+The final real PostgreSQL run passes 15/15, joining actual grounded item/arrow
+source plans to fully migrated custody transactions at dry pond and ordinary
+grounds points. All three protected facilities reject source planning and
+recoverable ammunition with no debit/receipt/source. Fresh owners/pools replay
+exact quantities and coordinates without a second debit. The existing
+safe-death outage/recovery case passes too, but it is not a new pond
+death-handler, grave, socket, projectile-flight or caught-fish reward test.
+
+The candidate route test instantiates real terrain, generated/authored
+resources, all eleven manifest NPCs, stations, arena walls and native CPU
+PhysX dock/court/rock owners. Both decks, seven family approaches and seven
+verified non-dock approaches complete sixteen round trips / thirty-two legs;
+every bank arrival passes actual station_bank_spawn physical authorization.
+In the final candidate05 arrangement, legs take 39–64 logical ticks,
+not wall-clock or FPS measurements. All sampled end-step static flags and
+root support checks pass. The painted-width capsule avoids all protection
+aprons exactly; 34,432 perimeter samples find no pond water.
+
+Free movement crosses traversable lobby/hospital floors on 21/32 observed
+legs. That is design evidence, not justification for invisible walls,
+road-only movement or immunity exceptions. Only one bank exists in this
+candidate; a composed secondary bank and shorter preparation journeys remain
+LAYOUT-02 work. Bank transfers, simultaneous traffic, dynamic mobs, physical
+stepping, rendered crowds and all randomized arrangements are not qualified.
+
+Full candidate tests pass 20/20 through the checked-in server config's explicit
+route mode (actual source/PhysX resolution, unchanged normal test mode).
+Canonical server regressions pass 68 with two
+intentional candidate skips. Server source typing covers 3,954 transitive
+sources with zero diagnostics/stable pins; scoped lint/formatting pass.
+Build14 emits eight isolated bundles from 973 stable production inputs and
+preserves 145 protected artifacts. No default manifest, served build or
+graphics-quality setting is promoted. Human localhost/database remain intact.
+
+Evidence: service-layout shore-source-before02/after02/regression02/types02,
+facility-custody-pg01–04, pond-bank-routes-candidate-v4-01–05,
+pond-bank-routes-regression02/types01; inland pond isolated-build14-report.
+Failed setup receipts remain. All temporary PostgreSQL containers are removed,
+including a deliberate nonzero-child cleanup check. Keep LAYOUT-01–08 open.
+
 ## Facility protection and all-tier fishing capacity checkpoint
 
 Implemented an opt-in `facility-floors-v1` protection contract: actual ring,

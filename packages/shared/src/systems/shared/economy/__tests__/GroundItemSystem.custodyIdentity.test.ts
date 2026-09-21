@@ -1,9 +1,179 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import {
+  afterEach,
+  beforeAll,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  vi,
+} from "vitest";
 
+import { World } from "../../../../core/World";
+import { DataManager } from "../../../../data/DataManager";
+import {
+  getDuelArenaProtectionBounds,
+  isPositionInsideDuelArenaZone,
+} from "../../../../data/duel-manifest";
 import { ITEMS } from "../../../../data/items";
+import { ALL_WORLD_AREAS } from "../../../../data/world-areas";
 import type { Item } from "../../../../types/core/core";
+import { EntityManager } from "../../entities/EntityManager";
 import { EventBus } from "../../infrastructure/EventBus";
+import { tileToWorld, worldToTile } from "../../movement/TileSystem";
+import { TerrainSystem } from "../../world/TerrainSystem";
 import { GroundItemSystem } from "../GroundItemSystem";
+
+class SourcePlanningWorld extends World {
+  override get isServer(): boolean {
+    return true;
+  }
+}
+
+// Actual manifest, terrain and source-plan owners. No database, renderer or
+// economic mutation: persisted custody is qualified separately on PostgreSQL.
+describe.runIf(process.env.HYPERIA_FISHING_CAPACITY === "1")(
+  "real ground-source placement at admitted protection edges",
+  () => {
+    const worlds: World[] = [];
+    const options = { despawnTime: 120_000, droppedBy: "shore-planning" };
+    const inventory = [
+      {
+        id: "shore-bait",
+        itemId: "fishing_bait",
+        quantity: 1,
+        slot: 0,
+        metadata: null,
+      },
+    ];
+    beforeAll(async () => {
+      await DataManager.getInstance().initialize();
+      expect(ALL_WORLD_AREAS.duel_arena.duelProtection).toBe(
+        "facility-floors-v1",
+      );
+      expect(ITEMS.has(inventory[0].itemId)).toBe(true);
+    });
+    afterEach(() => {
+      for (const world of worlds.splice(0)) world.destroy();
+    });
+    async function owner() {
+      const world = new SourcePlanningWorld();
+      worlds.push(world);
+      const terrain = world.register("terrain", TerrainSystem) as TerrainSystem;
+      await terrain.init();
+      terrain["loadWaterBodiesFromManifest"]();
+      terrain["loadFlatZonesFromManifest"]();
+      world.register("entity-manager", EntityManager);
+      const ground = world.register(
+        "ground-items",
+        GroundItemSystem,
+      ) as GroundItemSystem;
+      await ground.init();
+      return ground;
+    }
+    async function atLegacyFractionalEdge(
+      run: (ground: GroundItemSystem) => Promise<void>,
+    ) {
+      const ground = await owner();
+      const admitted = ALL_WORLD_AREAS.duel_arena;
+      const legacy = { ...admitted };
+      delete legacy.duelProtection;
+      ALL_WORLD_AREAS.duel_arena = legacy;
+      try {
+        expect(legacy.bounds.minZ).toBe(348.5);
+        expect(isPositionInsideDuelArenaZone(400, 348.49)).toBe(false);
+        expect(isPositionInsideDuelArenaZone(400.5, 348.5)).toBe(true);
+        await run(ground);
+      } finally {
+        ALL_WORLD_AREAS.duel_arena = admitted;
+      }
+    }
+    it("checks requested and final positions on every real facility edge", async () => {
+      const ground = await owner();
+      let admitted = 0;
+      let rejected = 0;
+      for (const b of getDuelArenaProtectionBounds()) {
+        const cx = (b.minX + b.maxX) / 2,
+          cz = (b.minZ + b.maxZ) / 2;
+        const points = [-0.01, 0, 0.01].flatMap((delta) => [
+          { x: b.minX + delta, z: cz },
+          { x: b.maxX + delta, z: cz },
+          { x: cx, z: b.minZ + delta },
+          { x: cx, z: b.maxZ + delta },
+        ]);
+        for (const point of points) {
+          const final = tileToWorld(worldToTile(point.x, point.z));
+          const forbidden =
+            isPositionInsideDuelArenaZone(point.x, point.z) ||
+            isPositionInsideDuelArenaZone(final.x, final.z);
+          const position = { ...point, y: 0 };
+          const single = await ground.prepareDurableSourceRegistration(
+            inventory[0].itemId,
+            1,
+            position,
+            options,
+          );
+          const batch = await ground.prepareDurableSourceBatchRegistration(
+            inventory,
+            position,
+            options,
+          );
+          if (forbidden) {
+            expect(single).toBeNull();
+            expect(batch).toBeNull();
+            rejected++;
+          } else {
+            expect(single?.position).toMatchObject({ x: final.x, z: final.z });
+            expect(batch?.[0].position).toEqual(single?.position);
+            admitted++;
+          }
+        }
+      }
+      expect(admitted).toBe(12);
+      expect(rejected).toBe(24);
+      expect(ground.getGroundItemCustodyStats().trackedItems).toBe(0);
+    });
+    it("rejects a single source whose tile snap crosses the historical fractional edge", async () => {
+      await atLegacyFractionalEdge(async (ground) => {
+        await expect(
+          ground.prepareDurableSourceRegistration(
+            inventory[0].itemId,
+            1,
+            { x: 400, y: 0, z: 348.49 },
+            options,
+          ),
+        ).resolves.toBeNull();
+      });
+    });
+    it("rejects batch planning when a final tile center crosses that edge", async () => {
+      await atLegacyFractionalEdge(async (ground) => {
+        await expect(
+          ground.prepareDurableSourceBatchRegistration(
+            inventory,
+            { x: 400, y: 0, z: 348.49 },
+            options,
+          ),
+        ).resolves.toBeNull();
+      });
+    });
+    it("rejects direct spawning at the snapped protected tile before presentation", async () => {
+      await atLegacyFractionalEdge(async (ground) => {
+        await expect(
+          ground.spawnGroundItem(
+            inventory[0].itemId,
+            1,
+            { x: 400, y: 0, z: 348.49 },
+            options,
+          ),
+        ).resolves.toBe("");
+        expect(ground.getGroundItemCustodyStats()).toMatchObject({
+          trackedItems: 0,
+          durableSources: 0,
+          pendingPresentationHydrations: 0,
+        });
+      });
+    });
+  },
+);
 
 const ITEM_ID = "custody_identity_test_item";
 const SECOND_ITEM_ID = "custody_identity_test_unstackable_item";

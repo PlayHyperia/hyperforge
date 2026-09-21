@@ -270,13 +270,16 @@ disks lie inside that rectangle. A pond safe-zone flag cannot override the
 earlier arena no-loss shortcut, ground-item restrictions or lobby challenge test.
 
 - [ ] Finish integrated custody qualification of the explicit facility footprint.
-      The shared predicate, manifest admission, zone cache and lobby affordances
-      are implemented below, but actual death/drop/grave, final tile-centered
-      item admission, ammunition, opt-out evacuation and queued challenge
-      transactions still need real-system evidence. Preserve ordinary safe-area
-      custody outside facilities; never relax economic rules to fit the pond.
+      Shared admission, zone cache and lobby affordances are implemented.
+      Actual final-position source planning and PostgreSQL drop/ammunition
+      commit/replay are now qualified at the sampled candidate locations below.
+      Full death/grave dispatch, opt-out evacuation and queued challenge
+      transactions remain open. Preserve ordinary safe-area custody outside
+      facilities; never relax economic rules to fit the pond.
 - [ ] Validate the full walking width of the pond-to-bank corridor against that
-      footprint, not just the painted path centerline or physical floor bounds.
+      footprint and full world collision. The exact painted-width/apron check,
+      sampled dry-water separation and actual individual bank trips pass below;
+      crowd clearance, dynamic actors and whole-layout circulation stay open.
 - [ ] Complete native/persisted all-tier fishing capacity qualification.
       Actual CPU owners now admit fourteen anglers plus seven extra arrivals
       on distinct legal shores and cover cancellation, entity re-entry and
@@ -523,6 +526,87 @@ full-width bank routes, then whole-scene shadow qualification and stronger
 bank/planting/dock composition. The current shader bias and all quality settings
 remain unchanged. Evidence: service-layout arena-footprint-* and
 fishing-capacity-candidate-v4-01; inland pond assets-v4 and build13 report.
+
+### Final source placement and PostgreSQL custody — bounded qualification
+
+Actual GroundItemSystem planning reproduced a historical fractional-edge defect:
+an unprotected request at z=348.49 snapped to the protected tile center z=348.5.
+Single, batch and direct-spawn paths now recheck the final grounded position
+before returning a durable plan or performing persistence, merge or presentation.
+The compact integer-edged facility policy remains unchanged. Real manifest/World/Terrain/
+EntityManager cases cover 36 component-edge samples, the two fail-before
+planning cases and direct-spawn rejection. These four new actual-owner cases
+plus 19 existing regressions pass; older mocked cases are not actual-owner proof.
+
+Candidate PostgreSQL tests join actual grounded source planning to the real
+fully migrated database, not substituted receipts. All three facility centers
+reject source planning and recovered-arrow requests with no inventory/equipment
+debit, operation, source or contribution. Dry pond (383.5,410.5) and grounds
+(316.5,356.5) retain ordinary item-drop and ammunition custody. Fresh World/
+database owners and pools replay the same operations with exact quantities,
+source coordinates and one debit. All 15 PostgreSQL cases pass, including the
+existing safe-death outage/recovery transaction regression. That older case is
+not a new pond death-handler qualification. No projectile flight, authenticated
+transport, caught-fish reward, banking transfer or crash test is claimed here.
+
+The first candidate fixture incorrectly treated the entire water-body envelope
+as submerged; actual underwater classification corrected that setup without
+changing authored placement or weakening the dry-ground requirement. PG02's
+14 gameplay tests passed but its cleanup observation raced Docker auto-removal.
+The exact container was subsequently verified absent; PG03 and final PG04 record
+clean automatic removal with a bounded observation. Each database was private/tmpfs; human
+services and data were untouched.
+
+Source-aware shared typing passes 732 roots with zero diagnostics/stable pins;
+the candidate database file passes 3,165 transitive sources with zero
+diagnostics, scoped lint and formatting. Build14 emits eight isolated bundles
+from 973 stable inputs, preserving all 145 protected artifacts. No manifest,
+served build, visual default or graphics-quality setting is promoted. This is
+functional qualification, not native rendering or sustained performance
+acceptance. Evidence: service-layout shore-source-before02/after02/types02,
+facility-custody-pg01–04 and facility-custody-types04; inland pond build14.
+
+### Actual pond-to-bank routes — traversable, not final layout approval
+
+The opt-in actual-owner route lane loads four real terrain/content tiles,
+generated and authored resources (48 live in the final observation), all eleven
+manifest NPCs, the real bank station, arena collision walls and native CPU
+PhysX dock/court/rock collision owners. Both docks have 24 support tiles. No
+fake walkability, occupied-deck workaround, moved resource or substituted
+movement owner is used.
+
+The final candidate run completes sixteen round-trip cases / thirty-two legs: both
+docks, one actual approach for each of seven families, and a verified dry
+non-dock approach for each family. The non-dock cases reuse the seven family
+start coordinates; these are sixteen executions, not sixteen distinct origins.
+Every trip reaches the real
+station_bank_spawn authorization boundary and returns. No sampled end-step
+tile is statically blocked; root support matches the authoritative support
+resolver. The full painted corridor capsule has no exact intersection with
+the protected floor/apron rectangles; 34,432 perimeter samples find no pond
+water. This is sampled water evidence, not continuous swept-body proof.
+
+Observed candidate05 legs take 39–64 logical movement ticks (not wall time or FPS).
+Unconstrained movement crosses traversable lobby/hospital floors on 21/32
+legs; that is retained design evidence, not a forbidden-traversal regression.
+The painted path is not movement authority. No invisible wall, road-only
+movement rule, immunity exception or pathfinding budget change was introduced.
+Earlier route03 had a different actual randomized arrangement and timings.
+The final full-file run passes 20/20 using the checked-in server test config;
+the opt-in route mode resolves actual PhysX and dock/court source without any
+machine-local config or rebuilt dist. Source-aware server typing covers 3,954
+transitive sources with zero diagnostics and stable selected pins, and scoped
+lint/formatting pass.
+
+Only one bank exists in this candidate. Add a well-composed outlying bank as
+part of LAYOUT-02 and compare journey budgets rather than constraining free
+movement to the painted corridor. Whole-world route/custody design remains
+open, as do bank deposit/withdrawal, simultaneous traffic, dynamic mobs,
+rigid-body stepping, rendered crowd quality, repeat arrangements and long-run
+fishing rewards. No LAYOUT-01–08 closure or manifest promotion. Evidence:
+service-layout pond-bank-routes-candidate-v4-01–05 and
+pond-bank-routes-types01. Initial PhysX-loader/root and fixture occupancy/
+entity-removal failures are retained; they are not gameplay acceptance.
 
 ### Inland fishing integration — candidate only
 

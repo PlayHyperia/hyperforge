@@ -4,8 +4,15 @@ import path from "node:path";
 import { drizzle } from "drizzle-orm/node-postgres";
 import { migrate } from "drizzle-orm/node-postgres/migrator";
 import {
+  ALL_WORLD_AREAS,
+  DataManager,
+  GroundItemSystem,
   ITEMS,
+  TerrainSystem,
+  World,
   ammunitionShotIdentityFromRequest,
+  getDuelArenaProtectionBounds,
+  getItem,
   generateKillToken,
   getProcessingFireExtinguishOperationId,
   serializeGroundItemDeathCommitFingerprint,
@@ -14,6 +21,8 @@ import {
   serializeGroundItemSourceRegistrationFingerprint,
   serializeProcessingFireExtinguishFingerprint,
   serializeAmmunitionShotFingerprint,
+  isPositionInsideDuelArenaZone,
+  worldToTile,
 } from "@hyperforge/shared";
 import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -31,6 +40,8 @@ import type {
   ProcessingFireExtinguishCommitRequest,
 } from "../../../shared/types/index.js";
 import { DatabaseSystem } from "../index.js";
+import { ZoneDetectionSystem } from "../../../../../shared/src/systems/shared/death/ZoneDetectionSystem.js";
+import { EntityManager } from "../../../../../shared/src/systems/shared/entities/EntityManager.js";
 
 const baseDatabaseUrl =
   process.env.GROUND_ITEM_PICKUP_TEST_DATABASE_URL?.trim() ||
@@ -1732,3 +1743,457 @@ describeDatabase("ground-item pickup PostgreSQL custody", () => {
     });
   });
 });
+
+// Candidate-only real PostgreSQL transaction qualification. The ordinary suite
+// keeps its historical item fixtures; this independent lane loads the admitted
+// assets and registers actual World/terrain/zone/database owners. No death
+// handler, projectile flight, socket, renderer or crash-recovery claim is made.
+const describeCandidateDatabase =
+  baseDatabaseUrl && process.env.HYPERIA_FISHING_CAPACITY === "1"
+    ? describe.sequential
+    : describe.skip;
+
+class FacilityCustodyWorld extends World {
+  pgPool!: pg.Pool;
+  drizzleDb!: ReturnType<typeof drizzle<typeof schema>>;
+  override get isServer(): boolean {
+    return true;
+  }
+}
+
+describeCandidateDatabase(
+  "candidate facility and safe-ground PostgreSQL custody",
+  () => {
+    let admin: pg.Pool;
+    let databaseName: string;
+    let databaseUrl: string;
+    const owners: Array<{ world: FacilityCustodyWorld; pool: pg.Pool }> = [];
+    let owner: Awaited<ReturnType<typeof createOwner>>;
+    let safePoints: Array<{
+      areaId: string;
+      position: { x: number; y: number; z: number };
+    }>;
+    const accountId = "facility-custody-account";
+    const playerId = "facility-custody-player";
+
+    async function createOwner() {
+      const pool = new pg.Pool({
+        connectionString: databaseUrl,
+        max: 4,
+        connectionTimeoutMillis: 1_000,
+        statement_timeout: 3_000,
+        query_timeout: 4_000,
+      });
+      const world = new FacilityCustodyWorld();
+      owners.push({ world, pool });
+      world.pgPool = pool;
+      world.drizzleDb = drizzle(pool, { schema });
+      const database = world.register(
+        "database",
+        DatabaseSystem,
+      ) as DatabaseSystem;
+      const terrain = world.register("terrain", TerrainSystem) as TerrainSystem;
+      world.register("entity-manager", EntityManager);
+      const ground = world.register(
+        "ground-items",
+        GroundItemSystem,
+      ) as GroundItemSystem;
+      const zones = world.register(
+        "zone-detection",
+        ZoneDetectionSystem,
+      ) as ZoneDetectionSystem;
+      await database.init();
+      await terrain.init();
+      terrain["loadWaterBodiesFromManifest"]();
+      terrain["loadFlatZonesFromManifest"]();
+      await zones.init();
+      await ground.init();
+      return { world, pool, database, terrain, zones, ground };
+    }
+
+    beforeAll(async () => {
+      expect(process.env.ASSETS_DIR).toBeTruthy();
+      await DataManager.getInstance().initialize();
+      expect(ALL_WORLD_AREAS.duel_arena.duelProtection).toBe(
+        "facility-floors-v1",
+      );
+      expect(getDuelArenaProtectionBounds()).toHaveLength(3);
+      for (const id of ["air_rune", "bronze_arrow", "shortbow"])
+        expect(getItem(id), `Missing admitted item ${id}`).not.toBeNull();
+      databaseName = `hyperia_facility_custody_${process.pid}_${Date.now().toString(36)}`;
+      const url = new URL(baseDatabaseUrl);
+      url.pathname = "/postgres";
+      admin = new pg.Pool({ connectionString: url.toString(), max: 2 });
+      await admin.query(`CREATE DATABASE "${databaseName}"`);
+      url.pathname = `/${databaseName}`;
+      databaseUrl = url.toString();
+      const migrationPool = new pg.Pool({
+        connectionString: databaseUrl,
+        max: 1,
+      });
+      try {
+        const connection = await migrationPool.connect();
+        try {
+          await migrate(createPostgresClientDatabase(connection), {
+            migrationsFolder: path.resolve(
+              import.meta.dirname,
+              "../../../database/migrations",
+            ),
+          });
+        } finally {
+          connection.release();
+        }
+        const db = drizzle(migrationPool, { schema });
+        await db.insert(schema.users).values({
+          id: accountId,
+          name: "Facility Custody",
+          roles: "user",
+          createdAt: "2026-09-20T00:00:00.000Z",
+        });
+        await db.insert(schema.characters).values({
+          id: playerId,
+          accountId,
+          name: "Facility Custody",
+          isAgent: 1,
+        });
+      } finally {
+        await migrationPool.end();
+      }
+      owner = await createOwner();
+      const body = owner.terrain
+        .getWaterBodyRegistry()
+        .getAllBodies()
+        .find((entry) => entry.id === "haven_pond_water");
+      expect(body).toBeDefined();
+      safePoints = ["haven_pond", "arena_grounds"].map((areaId) => {
+        const area = ALL_WORLD_AREAS[areaId];
+        expect(area?.safeZone).toBe(true);
+        for (let x = Math.ceil(area.bounds.minX); x < area.bounds.maxX; x++) {
+          for (let z = Math.ceil(area.bounds.minZ); z < area.bounds.maxZ; z++) {
+            const point = { x: x + 0.5, z: z + 0.5 };
+            if (isPositionInsideDuelArenaZone(point.x, point.z)) continue;
+            if (
+              areaId === "haven_pond" &&
+              Math.hypot(point.x - body!.centerX, point.z - body!.centerZ) >
+                body!.radius
+            )
+              continue;
+            const y = owner.terrain.getResourceGroundHeight(point.x, point.z);
+            if (
+              y <= body!.surfaceY ||
+              owner.terrain
+                .getWaterBodyRegistry()
+                .isUnderwater(point.x, point.z, y)
+            )
+              continue;
+            const zone = owner.zones.getZoneProperties(point);
+            if (zone.id !== areaId || !zone.isSafe || zone.isPvPEnabled)
+              continue;
+            return { areaId, position: { ...point, y } };
+          }
+        }
+        throw new Error(`No actual dry ordinary safe point in ${areaId}`);
+      });
+      console.log(
+        JSON.stringify({
+          phase: "candidate-facility-custody-inputs",
+          assets: process.env.ASSETS_DIR,
+          facilities: getDuelArenaProtectionBounds(),
+          safePoints,
+        }),
+      );
+    }, 30_000);
+
+    afterAll(async () => {
+      for (const entry of owners.splice(0)) {
+        try {
+          entry.world.destroy();
+        } finally {
+          await entry.pool.end();
+        }
+      }
+      if (!admin) return;
+      try {
+        if (databaseName) {
+          await admin.query(
+            "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = $1",
+            [databaseName],
+          );
+          await admin.query(`DROP DATABASE IF EXISTS "${databaseName}"`);
+        }
+      } finally {
+        await admin.end();
+      }
+    }, 30_000);
+
+    function sourceAt(
+      itemId: string,
+      quantity: number,
+      position: { x: number; y: number; z: number },
+    ) {
+      const input: Omit<
+        GroundItemSourceRegistrationRequest,
+        "requestFingerprint"
+      > = {
+        contributionId: `ground-item-source:${randomUUID()}`,
+        preferredSourceId: `ground_item_${randomUUID()}`,
+        itemId,
+        quantity,
+        stackable: getItem(itemId)!.stackable === true,
+        position,
+        tile: worldToTile(position.x, position.z),
+        droppedBy: playerId,
+        lifetimeMs: 120_000,
+        lootProtectionMs: 0,
+        allowMerge: false,
+      };
+      return {
+        ...input,
+        requestFingerprint: createHash("sha256")
+          .update(
+            serializeGroundItemSourceRegistrationFingerprint(input),
+            "utf8",
+          )
+          .digest("hex"),
+      };
+    }
+
+    function shotAt(
+      source: GroundItemSourceRegistrationRequest,
+    ): AmmunitionShotCommitRequest {
+      const input = {
+        operationId: `ammunition-shot:${randomUUID().replaceAll("-", "").slice(0, 20)}`,
+        playerId,
+        itemId: "bronze_arrow",
+        quantity: 1 as const,
+        recoveryDisposition: "recovered" as const,
+        source,
+      };
+      return {
+        ...input,
+        requestFingerprint: createHash("sha256")
+          .update(
+            serializeAmmunitionShotFingerprint(
+              ammunitionShotIdentityFromRequest(input),
+            ),
+            "utf8",
+          )
+          .digest("hex"),
+      };
+    }
+
+    async function seedCustody() {
+      await owner.pool.query(`DELETE FROM inventory WHERE "playerId" = $1`, [
+        playerId,
+      ]);
+      await owner.pool.query(`DELETE FROM equipment WHERE "playerId" = $1`, [
+        playerId,
+      ]);
+      await owner.pool.query(
+        `INSERT INTO inventory ("playerId", "itemId", quantity, "slotIndex") VALUES ($1, 'air_rune', 5, 0)`,
+        [playerId],
+      );
+      await owner.pool.query(
+        `INSERT INTO equipment ("playerId", "slotType", "itemId", quantity) VALUES ($1, 'weapon', 'shortbow', 1), ($1, 'arrows', 'bronze_arrow', 3)`,
+        [playerId],
+      );
+    }
+
+    it("rejects recoverable ammunition at all three authored facilities without touching durable custody", async () => {
+      await seedCustody();
+      for (const bounds of getDuelArenaProtectionBounds()) {
+        const x = Math.floor((bounds.minX + bounds.maxX) / 2) + 0.5;
+        const z = Math.floor((bounds.minZ + bounds.maxZ) / 2) + 0.5;
+        const position = {
+          x,
+          y: owner.terrain.getResourceGroundHeight(x, z),
+          z,
+        };
+        expect(owner.zones.getZoneProperties(position).id).toBe("duel_arena");
+        for (const itemId of ["air_rune", "bronze_arrow"])
+          await expect(
+            owner.ground.prepareDurableSourceRegistration(itemId, 1, position, {
+              despawnTime: 120_000,
+              droppedBy: playerId,
+            }),
+          ).resolves.toBeNull();
+        const source = sourceAt("bronze_arrow", 1, position);
+        const request = shotAt(source);
+        await expect(
+          owner.database.commitAmmunitionShotOperationAsync(request),
+        ).rejects.toThrow("ammunition_shot_request_invalid");
+        const result = await owner.pool.query(
+          `SELECT
+        (SELECT quantity::int FROM inventory WHERE "playerId" = $1 AND "itemId" = 'air_rune') AS runes,
+        (SELECT quantity::int FROM equipment WHERE "playerId" = $1 AND "slotType" = 'weapon') AS bows,
+        (SELECT quantity::int FROM equipment WHERE "playerId" = $1 AND "slotType" = 'arrows') AS arrows,
+        (SELECT count(*)::int FROM operations_log WHERE id = $2) AS operations,
+        (SELECT count(*)::int FROM ground_item_sources WHERE source_id = $3) AS sources,
+        (SELECT count(*)::int FROM ground_item_source_contributions WHERE contribution_id = $4) AS contributions`,
+          [
+            playerId,
+            request.operationId,
+            source.preferredSourceId,
+            source.contributionId,
+          ],
+        );
+        expect(result.rows).toEqual([
+          {
+            runes: 5,
+            bows: 1,
+            arrows: 3,
+            operations: 0,
+            sources: 0,
+            contributions: 0,
+          },
+        ]);
+      }
+    });
+
+    it("co-commits ordinary pond/grounds drops and ammunition and replays through fresh owners without double debit", async () => {
+      for (const { areaId, position } of safePoints) {
+        await seedCustody();
+        expect(owner.zones.getZoneProperties(position)).toMatchObject({
+          id: areaId,
+          isSafe: true,
+          isPvPEnabled: false,
+        });
+        expect(isPositionInsideDuelArenaZone(position.x, position.z)).toBe(
+          false,
+        );
+        const plannedDrop = await owner.ground.prepareDurableSourceRegistration(
+          "air_rune",
+          2,
+          position,
+          {
+            despawnTime: 120_000,
+            droppedBy: playerId,
+          },
+        );
+        expect(plannedDrop).not.toBeNull();
+        const dropSource = plannedDrop!;
+        expect(dropSource.position).toMatchObject({
+          x: position.x,
+          z: position.z,
+        });
+        expect(dropSource.position.y).toBeGreaterThanOrEqual(position.y);
+        expect(
+          isPositionInsideDuelArenaZone(
+            dropSource.position.x,
+            dropSource.position.z,
+          ),
+        ).toBe(false);
+        const dropInput = {
+          operationId: `ground-item-drop:${randomUUID()}`,
+          playerId,
+          itemId: "air_rune",
+          quantity: 2,
+          slotIndex: 0,
+          source: dropSource,
+        };
+        const drop = {
+          ...dropInput,
+          requestFingerprint: createHash("sha256")
+            .update(serializeGroundItemDropCommitFingerprint(dropInput), "utf8")
+            .digest("hex"),
+        };
+        await expect(
+          owner.database.commitGroundItemDropOperationAsync(drop),
+        ).resolves.toMatchObject({
+          replayed: false,
+          committed: [{ itemId: "air_rune", quantity: 3 }],
+          source: { sourceId: dropSource.preferredSourceId, quantity: 2 },
+        });
+        const plannedShot = await owner.ground.prepareDurableSourceRegistration(
+          "bronze_arrow",
+          1,
+          position,
+          {
+            despawnTime: 120_000,
+            droppedBy: playerId,
+          },
+        );
+        expect(plannedShot).not.toBeNull();
+        const shotSource = plannedShot!;
+        expect(shotSource.position).toEqual(dropSource.position);
+        const shot = shotAt(shotSource);
+        await expect(
+          owner.database.commitAmmunitionShotOperationAsync(shot),
+        ).resolves.toMatchObject({
+          replayed: false,
+          status: "pending",
+          source: null,
+        });
+        await expect(
+          owner.database.completeAmmunitionShotOperationAsync({
+            operationId: shot.operationId,
+            playerId,
+            requestFingerprint: shot.requestFingerprint,
+          }),
+        ).resolves.toMatchObject({
+          replayed: false,
+          status: "fired",
+          source: { sourceId: shotSource.preferredSourceId, quantity: 1 },
+        });
+        const replacement = await createOwner();
+        await expect(
+          replacement.database.commitGroundItemDropOperationAsync(drop),
+        ).resolves.toMatchObject({
+          replayed: true,
+          committed: [{ itemId: "air_rune", quantity: 3 }],
+          source: { sourceId: dropSource.preferredSourceId, quantity: 2 },
+        });
+        await expect(
+          replacement.database.commitAmmunitionShotOperationAsync(shot),
+        ).resolves.toMatchObject({
+          replayed: true,
+          status: "fired",
+          source: { sourceId: shotSource.preferredSourceId, quantity: 1 },
+        });
+        await expect(
+          replacement.database.completeAmmunitionShotOperationAsync({
+            operationId: shot.operationId,
+            playerId,
+            requestFingerprint: shot.requestFingerprint,
+          }),
+        ).resolves.toMatchObject({ replayed: true, status: "fired" });
+        const result = await replacement.pool.query(
+          `SELECT
+        (SELECT quantity::int FROM inventory WHERE "playerId" = $1 AND "itemId" = 'air_rune') AS runes,
+        (SELECT quantity::int FROM equipment WHERE "playerId" = $1 AND "slotType" = 'arrows') AS arrows,
+        (SELECT count(*)::int FROM operations_log WHERE id = ANY($2::text[])) AS operations,
+        (SELECT count(*)::int FROM ground_item_sources WHERE source_id = ANY($3::text[])) AS sources,
+        (SELECT sum(quantity)::int FROM ground_item_sources WHERE source_id = ANY($3::text[])) AS ground_quantity,
+        (SELECT count(*)::int FROM ground_item_source_contributions WHERE contribution_id = ANY($4::text[])) AS contributions`,
+          [
+            playerId,
+            [drop.operationId, shot.operationId],
+            [dropSource.preferredSourceId, shotSource.preferredSourceId],
+            [dropSource.contributionId, shotSource.contributionId],
+          ],
+        );
+        expect(result.rows).toEqual([
+          {
+            runes: 3,
+            arrows: 2,
+            operations: 2,
+            sources: 2,
+            ground_quantity: 3,
+            contributions: 2,
+          },
+        ]);
+        const sources = await replacement.pool.query(
+          `SELECT "item_id" AS "itemId", quantity::int, position_x AS x,
+                  position_y AS y, position_z AS z
+             FROM ground_item_sources WHERE source_id = ANY($1::text[])
+             ORDER BY "item_id"`,
+          [[dropSource.preferredSourceId, shotSource.preferredSourceId]],
+        );
+        expect(sources.rows).toEqual([
+          { itemId: "air_rune", quantity: 2, ...dropSource.position },
+          { itemId: "bronze_arrow", quantity: 1, ...shotSource.position },
+        ]);
+      }
+    });
+  },
+);

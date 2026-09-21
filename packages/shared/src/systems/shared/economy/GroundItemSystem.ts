@@ -700,7 +700,13 @@ export class GroundItemSystem extends SystemBase {
       0.2,
       Infinity,
     );
-    if (!Object.values(groundedPosition).every(Number.isFinite)) return null;
+    // Tile snapping can cross a fractional protection edge. Validate the
+    // committed position too, before an upstream operation can debit custody.
+    if (
+      !Object.values(groundedPosition).every(Number.isFinite) ||
+      isPositionInsideDuelArenaZone(groundedPosition.x, groundedPosition.z)
+    )
+      return null;
 
     const droppedBy = options.droppedBy?.trim() || null;
     const hasLootProtection = lootProtectionTicks > 0;
@@ -880,6 +886,7 @@ export class GroundItemSystem extends SystemBase {
       const lifetimeMs = ticksToMs(despawnTicks);
       if (
         !Object.values(groundedPosition).every(Number.isFinite) ||
+        isPositionInsideDuelArenaZone(groundedPosition.x, groundedPosition.z) ||
         !Number.isSafeInteger(lifetimeMs) ||
         lifetimeMs <= 0 ||
         !Number.isSafeInteger(lootProtectionMs) ||
@@ -1109,6 +1116,12 @@ export class GroundItemSystem extends SystemBase {
       0.2,
       Infinity,
     );
+
+    if (
+      !Object.values(groundedPosition).every(Number.isFinite) ||
+      isPositionInsideDuelArenaZone(groundedPosition.x, groundedPosition.z)
+    )
+      return "";
 
     // Check for existing pile at this tile
     const existingPile = this.groundItemPiles.get(tileKey);
