@@ -1731,7 +1731,7 @@ describe("composition-v1 geometry-owned bank families", () => {
     };
     const worker = new Worker(
       `const {parentPort}=require("node:worker_threads");const vm=require("node:vm");const module={exports:{}};${bundled.outputFiles[0].text}
-      parentPort.on("message",message=>{try{const result=vm.runInNewContext("(()=>{const ops=("+module.exports.source+")();const input=JSON.parse("+JSON.stringify(JSON.stringify(message))+");const bank=ops.pondBankField(input.zone,input.pond);const field=ops.macroField(input.profile,undefined,'composition-v1',bank);return input.points.map(p=>{const q={noiseValue:.5,meadowNoise:.5,distortNoise:p.distortNoise,slope:p.slope,roadInfluence:p.roadInfluence,surface:{x:p.x,z:p.z,height:p.height,pond:input.pond,macroField:field}};return {field:ops.validatePondBankField(bank),color:ops.sample(q),support:ops.grassSupport(q),original:ops.grassSupportBeforeCoast(q)};});})()");parentPort.postMessage({result});}catch(error){parentPort.postMessage({error:String(error),stack:error.stack});}});`,
+      parentPort.on("message",message=>{try{const result=vm.runInNewContext("(()=>{const ops=("+module.exports.source+")();const input=JSON.parse("+JSON.stringify(JSON.stringify(message))+");const bank=ops.pondBankField(input.zone,input.pond);const field=ops.macroField(input.profile,undefined,'composition-v1',bank);return input.points.map(p=>{const q={noiseValue:.5,meadowNoise:.5,distortNoise:p.distortNoise,slope:p.slope,roadInfluence:p.roadInfluence,surface:{x:p.x,z:p.z,height:p.height,pond:input.pond,macroField:field}};return {field:ops.validatePondBankField(bank),appearance:ops.bankCompositionAt(q,true),color:ops.sample(q),support:ops.grassSupport(q),original:ops.grassSupportBeforeCoast(q)};});})()");parentPort.postMessage({result});}catch(error){parentPort.postMessage({error:String(error),stack:error.stack});}});`,
       { eval: true, env: {} },
     );
     try {
@@ -1768,6 +1768,7 @@ describe("composition-v1 geometry-owned bank families", () => {
           };
           return {
             field,
+            appearance: ops.bankCompositionAt(q, true),
             color: ops.sample(q),
             support: ops.grassSupport(q),
             original: ops.grassSupportBeforeCoast(q),

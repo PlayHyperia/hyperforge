@@ -1,5 +1,77 @@
 # World graphics development checkpoint — 2026-09-20
 
+## Pond material families and frame-coupled grass loading — 2026-09-21
+
+The pond now has a SOURCE CANDIDATE for lower-chroma mineral cutbanks/turf toes
+and darker sheltered silt, using existing sampled soil/rock detail and admitted
+sector/height fields. CPU ground colors and TSL share the same grade; normal,
+roughness and AO contributions follow the same material families. Coverage,
+grass eligibility, geometry, raw relief/cavity inputs, coastal soil and final
+wetness remain unchanged. The graph retains the same 33 sampled-node identities;
+that is NOT a measured GPU-cost guarantee.
+
+Final verification: **185 material/substrate/macro tests pass**, including a
+complete 18-case mean-color assembly comparison and isolated minified-worker
+execution. The first run caught an external keepNames helper captured by named
+arrows; internal object methods fix it, and the original failed receipt remains.
+Five actual pond grounding cases pass within unchanged caps (three historical
+overlay skips). Against grass-child-blocks-pond01, **91/100 attribute hashes are
+identical and only nine ground-color hashes change**; all non-color array values,
+counts, bounds and visibility match, apart from expected owner UUIDs.
+Full shared plus seven explicit roots typecheck with zero diagnostics
+(709 roots/2,386 files); scoped lint and format pass. New CPU admission timing
+includes first/terminal resumptions: maximum observed step 0.700ms and maximum
+edge-index step 0.430ms in these cases, not native or universal bounds.
+
+**Native acceptance remains FAILED.** Build30 pins 973 inputs and changes only
+the three material production files from build29. Native63 passes original
+startup in 71.229s, then fails the unchanged first 30s camera-transition gate
+with three grounding jobs still running; zero completed review views.
+Its failure image shows a clearer pale mineral face, but the pond still reads
+too much as a continuous collar, small planting is weak at overview scale, and
+the pavilion arrival remains unfinished. A post-failed-cut material receipt
+and failure image are diagnostic evidence only, not visual approval. Earlier
+native61/startup and other failures remain retained.
+
+Native62 is a separate read-only startup observation of build29, not a successful
+A/B performance trial: 57.660s startup, 11,353,977 grounding resumptions,
+2,696.8ms active work over 48.6075s between manager-call starts. Work advances
+once per game tick under the existing 2ms/8,192-resumption allowance; the
+configured profile is 60FPS and no frame-pacer defect was established.
+208 complete/restored terrain polls cost 32.0ms total (5.7ms maximum).
+Observed index payload peaks at 3,455,552 bytes across four indexed owners among
+55 retained surfaces. Hypothetical geometry/topology copy inputs total
+9,252,164 bytes; this is NOT actual worker/whole-heap/GPU allocation.
+The whole terrain preparation maximum step is 6.600ms at
+collar_cell_plan → collar_sliver_balance, not an admission-only maximum.
+
+- [x] Implement and verify coherent local material families without extra sampling.
+- [x] Measure bounded resident index payload and preparation maxima; preserve failed gates.
+- [ ] Implement a bounded exact-fitting worker, beginning with a private bundled
+      real-module entry and one retained-cell parity test, then all five pond cases.
+      Copy borrowed geometry; never transfer live renderer buffers. Preserve
+      source identity, dependency mapping and cumulative work/time accounting.
+- [ ] Add bounded reservations/cache ownership, cancellation/failure/stale-response
+      tests and actual copy/transfer costs; then integrate publication without
+      changing main-thread admission, lease checks or one-upload/frame policy.
+      Do not reuse the unbounded generic WorkerPool unchanged.
+- [ ] Re-run original startup/camera gates and closeup/motion art review after
+      that implementation; do not retry merely for green or raise limits.
+- [ ] Finish pond-wide composition, readable bank-pavilion arrival, planting
+      and both dock closeups. All seven fishing families, fourteen live anglers
+      plus seven overflow, dry routes, bank and supplier journeys, and every
+      LAYOUT-01–08 acceptance gate remain OPEN.
+
+Worker transport design follows [MDN's transfer semantics](https://developer.mozilla.org/en-US/docs/Web/API/Web_Workers_API/Transferable_objects):
+transferring an ArrayBuffer detaches its original owner, so renderer-owned
+storage must not be transferred. This does not itself prove our worker design.
+
+Evidence: service-layout pond-appearance-tests01/tests02/worker02/grounding01/
+buffer-compare01/types01/lint01/format01/build30; inland pond native62/63,
+runtime43/44 and build30. Both owned browsers closed and temporary databases
+were removed; protected human localhost:3333, database and canonical artifacts
+are unchanged. No default, stream, sustained-performance, AAA or launch approval.
+
 ## Finer terrain lookup and bank drift — native startup still open — 2026-09-21
 
 A reviewed source candidate keeps the existing eight-face terrain broad filter

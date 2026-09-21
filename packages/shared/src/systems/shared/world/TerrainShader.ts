@@ -78,6 +78,7 @@ import {
   createCompactPondContactSoil,
   applyCompactPondWetness,
   applyCompactPondRockSoil,
+  applyCompactPondBankMaterials,
   applyCompactMeadowTint,
   applyCompactFineGrassSubstrateContrast,
   applyCompactGrassColorGrade,
@@ -1844,6 +1845,15 @@ export function createTerrainMaterial(
           ),
         }
       : undefined;
+  if (compactLayers && pondBankComposition) {
+    const bankMaterials = applyCompactPondBankMaterials(
+      compactLayers.dirt,
+      compactLayers.rock,
+      pondBankComposition,
+    );
+    compactLayers.dirt = bankMaterials.soil;
+    compactLayers.rock = bankMaterials.rock;
+  }
   if (compactLayers && coastRockSurface) {
     compactLayers.rock = applyCompactCoastRock(
       compactLayers.rock,

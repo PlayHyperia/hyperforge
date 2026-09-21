@@ -207,6 +207,113 @@ function graph(root: Node) {
 }
 
 describe("opt-in cutbank substrate (actual CPU kernels and TSL graph, not GPU proof)", () => {
+  it("separates broad mineral cutbank, narrower turf toe and sheltered silt without changing support or coverage", () => {
+    const cases = [
+      { angle: -2.35, radius: 18, mineral: true, silt: false },
+      { angle: 1.4, radius: 18, mineral: true, silt: false },
+      { angle: 2.7, radius: 24, mineral: true, silt: false },
+      { angle: 0, radius: 26, mineral: false, silt: true },
+    ];
+    for (const point of cases) {
+      const input = inputAt(admitted, point.angle, point.radius);
+      const placement = operations.bankCompositionAt(input);
+      const appearance = operations.bankCompositionAt(input, true);
+      const { mineralAppearance, siltAppearance, ...unchanged } = appearance;
+      expect(unchanged).toEqual(placement);
+      expect(placement).not.toHaveProperty("mineralAppearance");
+      expect(placement).not.toHaveProperty("siltAppearance");
+      if (point.mineral) expect(mineralAppearance).toBeGreaterThan(0.6);
+      else expect(mineralAppearance).toBe(0);
+      if (point.silt) expect(siltAppearance).toBeGreaterThan(0.6);
+      else expect(siltAppearance).toBe(0);
+      for (const height of [-2, -0.8, -0.1, 0, 0.12, 0.4, 1, 2]) {
+        const input = inputAt(admitted, point.angle, point.radius, height);
+        const old = operations.bankCompositionAt(input);
+        const next = operations.bankCompositionAt(input, true);
+        for (const weights of [
+          [0.3, 0.4, 0.2, 0.1],
+          [0, 1, 0, 0],
+          [1, 0, 0, 0],
+        ] as const)
+          expect(
+            operations.bankCompositionWeights(weights, next, arithmetic),
+          ).toEqual(
+            operations.bankCompositionWeights(weights, old, arithmetic),
+          );
+        expect(operations.grassSupport(input)).toBe(
+          supportWithoutSubstrate(input),
+        );
+        if (height === -2 || height === 2) {
+          expect(next.mineralAppearance).toBe(0);
+          expect(next.siltAppearance).toBe(0);
+        }
+      }
+    }
+    const cut = operations.bankCompositionAt(
+      inputAt(admitted, -2.35, 18, 0.4),
+      true,
+    );
+    const turf = operations.bankCompositionAt(
+      inputAt(admitted, 1.4, 18, 0.4),
+      true,
+    );
+    expect(cut.mineralAppearance).toBeGreaterThan(0.8);
+    expect(turf.mineralAppearance).toBe(0);
+    const steepSilt = operations.bankCompositionAt(
+      inputAt(admitted, 0, 26, 0, 0.3),
+      true,
+    );
+    expect(steepSilt.siltAppearance).toBe(0);
+  });
+
+  it("feathers appearance with admitted sector overlap and existing noise, preserving exact neutral domains", () => {
+    for (const input of [
+      inputAt(null),
+      inputAt(admitted, -2.35, 0),
+      inputAt(admitted, -2.35, 100),
+      inputAt(admitted, -1.2, 18),
+      inputAt(admitted, -2.35, 18, 0, 0.04, 0.8),
+      inputAt(admitted, 0, 26, 0, 0.04, 1),
+    ]) {
+      const appearance = operations.bankCompositionAt(input, true);
+      expect(appearance.mineralAppearance ?? 0).toBe(0);
+      expect(appearance.siltAppearance ?? 0).toBe(0);
+      const source = operations.getPalette();
+      const colors = operations.bankAppearanceAlbedo(
+        [source.dirt[0], source.dirt[1], source.dirt[2]],
+        [source.rock[0], source.rock[1], source.rock[2]],
+        appearance,
+        arithmetic,
+      );
+      expect(colors).toEqual({ soil: source.dirt, rock: source.rock });
+    }
+    const overlap = overlapField();
+    for (const noise of [0, 0.5, 1]) {
+      const a = operations.bankCompositionAt(
+        inputAt(overlap, -Math.PI + 1e-8, 18, 0, 0.04, 0, noise),
+        true,
+      );
+      const b = operations.bankCompositionAt(
+        inputAt(overlap, Math.PI - 1e-8, 18, 0, 0.04, 0, noise),
+        true,
+      );
+      for (const key of ["mineralAppearance", "siltAppearance"] as const) {
+        expect(a[key]).toBeGreaterThan(0);
+        expect(a[key]).toBeLessThan(1);
+        expect(a[key]).toBeCloseTo(b[key]!, 7);
+      }
+    }
+    const feather = [-1.251, -1.25, -1.249].map(
+      (angle) =>
+        operations.bankCompositionAt(inputAt(admitted, angle), true)
+          .mineralAppearance!,
+    );
+    expect(feather[0]).toBeGreaterThan(0);
+    expect(feather[0]).toBeLessThan(0.00001);
+    expect(feather[1]).toBeCloseTo(0, 14);
+    expect(feather[2]).toBe(0);
+  });
+
   it("omits the new graph for unselected/null fields and roles without a cutbank", () => {
     for (const surface of [
       "sedge-shelf",
@@ -340,6 +447,9 @@ describe("opt-in cutbank substrate (actual CPU kernels and TSL graph, not GPU pr
           const composition = operations.bankCompositionAt(input);
           const serialized = structuredClone(input);
           expect(emitted.bankCompositionAt(serialized)).toEqual(composition);
+          expect(emitted.bankCompositionAt(serialized, true)).toEqual(
+            operations.bankCompositionAt(input, true),
+          );
           expect(emitted.grassSupport(serialized)).toBe(
             operations.grassSupport(input),
           );

@@ -56,6 +56,7 @@ import {
   applyCompactPondRockContactWeights,
   applyCompactPondWetness,
   applyCompactPondRockSoil,
+  applyCompactPondBankMaterials,
   applyCompactMeadowTint,
   applyCompactFineGrassSubstrateContrast,
   applyCompactGrassColorGrade,
@@ -1048,7 +1049,10 @@ describe("composition-v1 shared actual bank material graph", () => {
     ])
       for (const radius of [0, 5.5, 7, 8.8, 10, 10.5]) {
         const p = input(angle, radius),
-          expected = ops.bankComposition(p, numeric),
+          expected = ops.bankComposition(
+            { ...p, includeAppearance: true },
+            numeric,
+          ),
           actual = createCompactPondBankComposition(nodeInput(p));
         for (const key of [
           "soilToGrass",
@@ -1057,6 +1061,8 @@ describe("composition-v1 shared actual bank material graph", () => {
           "grassToRock",
           "grassShade",
           "substrateSoilToRock",
+          "mineralAppearance",
+          "siltAppearance",
         ] as const)
           expect(vectorValue(actual[key]!)[0]).toBeCloseTo(expected[key]!, 12);
       }
@@ -1079,6 +1085,375 @@ describe("composition-v1 shared actual bank material graph", () => {
       ).toEqual([0, 0, 0, 1]);
     }
   });
+  it("grades existing mineral and silt detail coherently without recoloring neutral soil, grass, relief or raw cavities", () => {
+    const source = ops.getPalette();
+    const soil: CompactTerrainLayer = {
+      albedo: vec3(...source.dirt),
+      roughness: float(0.9),
+      ao: float(0.85),
+      worldNormal: vec3(0.1, 0.994, 0),
+      height: float(0.4),
+    };
+    const rock: CompactTerrainLayer = {
+      albedo: vec3(...source.rock),
+      roughness: float(0.72),
+      ao: float(0.65),
+      worldNormal: vec3(0, 0.994, 0.1),
+      rawRockAo: float(0.55),
+    };
+    const unselected = applyCompactPondBankMaterials(soil, rock, undefined);
+    expect(unselected.soil).toBe(soil);
+    expect(unselected.rock).toBe(rock);
+    const recipe = ops.getPondBankRecipe();
+    const value = (rgb: readonly number[]) =>
+      rgb[0] * 0.2126 + rgb[1] * 0.7152 + rgb[2] * 0.0722;
+    const mix = (a: number, b: number, weight: number) => a + (b - a) * weight;
+    for (const angle of [-2.2, -1.7, 0.7, 3.05])
+      for (const height of [25.8, 27.5, 27.8, 28.1, 29.8])
+        for (const road of [0, 0.4, 0.8, 1]) {
+          const p = input(angle, 8, height, 0.04, road);
+          const cpu = ops.bankComposition(
+            { ...p, includeAppearance: true },
+            numeric,
+          );
+          const composition = createCompactPondBankComposition(nodeInput(p));
+          const material = applyCompactPondBankMaterials(
+            soil,
+            rock,
+            composition,
+          );
+          const graded = ops.bankAppearanceAlbedo(
+            [source.dirt[0], source.dirt[1], source.dirt[2]],
+            [source.rock[0], source.rock[1], source.rock[2]],
+            cpu,
+            numeric,
+          );
+          const mineral = cpu.mineralAppearance!,
+            silt = cpu.siltAppearance!;
+          for (const [family, original] of [
+            ["soil", source.dirt],
+            ["rock", source.rock],
+          ] as const) {
+            const expected = original.map((channel, index) => {
+              const mineralTarget = Math.min(
+                1,
+                Math.max(
+                  0,
+                  (source.rock[index] * recipe.mineralChroma +
+                    value(source.rock) *
+                      (1 - recipe.mineralChroma) *
+                      recipe.mineralTint[index]) *
+                    recipe.mineralValue,
+                ),
+              );
+              const siltTarget = Math.min(
+                1,
+                Math.max(
+                  0,
+                  (source.dirt[index] * recipe.siltChroma +
+                    value(source.dirt) *
+                      (1 - recipe.siltChroma) *
+                      recipe.siltTint[index]) *
+                    recipe.siltValue,
+                ),
+              );
+              return mix(
+                mix(channel, mineralTarget, mineral),
+                siltTarget,
+                silt,
+              );
+            });
+            vectorValue(material[family].albedo).forEach((channel, i) => {
+              expect(channel).toBeCloseTo(expected[i], 13);
+              expect(channel).toBeCloseTo(graded[family][i], 13);
+              expect(channel).toBeGreaterThanOrEqual(0);
+              expect(channel).toBeLessThanOrEqual(1);
+            });
+          }
+          expect(vectorValue(material.soil.roughness)[0]).toBeCloseTo(
+            mix(mix(0.9, 0.72, mineral), 0.9, silt),
+            13,
+          );
+          expect(vectorValue(material.rock.roughness)[0]).toBeCloseTo(
+            mix(0.72, 0.9, silt),
+            13,
+          );
+          expect(vectorValue(material.soil.ao)[0]).toBeCloseTo(
+            mix(mix(0.85, 0.65, mineral), 0.85, silt),
+            13,
+          );
+          expect(vectorValue(material.rock.ao)[0]).toBeCloseTo(
+            mix(0.65, 0.85, silt),
+            13,
+          );
+          expect(material.soil.height).toBe(soil.height);
+          expect(material.rock.rawRockAo).toBe(rock.rawRockAo);
+          const soilNormal = new THREE.Vector3(0.1, 0.994, 0);
+          const rockNormal = new THREE.Vector3(0, 0.994, 0.1);
+          const expectedSoilNormal = soilNormal.clone();
+          if (mineral > 0)
+            expectedSoilNormal.lerp(rockNormal, mineral).normalize();
+          if (silt > 0) expectedSoilNormal.lerp(soilNormal, silt).normalize();
+          const expectedRockNormal = rockNormal.clone();
+          if (silt > 0) expectedRockNormal.lerp(soilNormal, silt).normalize();
+          for (const [family, normal] of [
+            ["soil", expectedSoilNormal],
+            ["rock", expectedRockNormal],
+          ] as const)
+            vectorValue(material[family].worldNormal).forEach(
+              (channel, index) =>
+                expect(channel).toBeCloseTo(normal.toArray()[index], 13),
+            );
+          if (mineral === 0 && silt === 0)
+            for (const [family, original] of [
+              ["soil", soil],
+              ["rock", rock],
+            ] as const)
+              for (const key of [
+                "albedo",
+                "roughness",
+                "ao",
+                "worldNormal",
+              ] as const)
+                expect(vectorValue(material[family][key])).toEqual(
+                  vectorValue(original[key]),
+                );
+          const before = blend({ grass: soil, dirt: soil, rock }, composition);
+          const after = blend(
+            { grass: soil, dirt: material.soil, rock: material.rock },
+            composition,
+          );
+          expect(vectorValue(after.weights!)).toEqual(
+            vectorValue(before.weights!),
+          );
+        }
+  });
+  it("matches final selected-field mean color through appearance, nested coast soil, material blending, wetness and variation", () => {
+    const profile = validateWorldTerrainProfile({
+      ...SCULPTED_COMPACT_WORLD_TERRAIN_PROFILE,
+      southernMeadow: {
+        schemaVersion: 1,
+        minX: 304,
+        maxX: 500,
+        minZ: 345,
+        maxZ: 535,
+        featherX: 24,
+        featherZ: 24,
+        northHeight: 26.8,
+        southHeight: 25.3,
+        crossFall: 1,
+        rollAmplitude: 0.65,
+        rollWavelength: 100,
+      },
+    });
+    const palette = ops.getPalette();
+    const layer = (rgb: readonly number[]): CompactTerrainLayer => ({
+      albedo: vec3(rgb[0], rgb[1], rgb[2]),
+      roughness: float(0.9),
+      ao: float(0.9),
+      worldNormal: vec3(0, 1, 0),
+      // Equal source heights neutralize height competition. This qualifies
+      // the CPU mean-color contract, not texel relief or native GPU output.
+      height: float(0.5),
+    });
+    const sources = {
+      grass: layer(palette.grass),
+      dirt: layer(palette.dirt),
+      rock: layer(palette.rock),
+    };
+    const points = [
+      [-1.7, 8, 0, 0.04, 0], // Cutbank mineral.
+      [-2.2, 8, 0, 0.04, 0], // Sheltered silt.
+      [3.05, 8, 0.08, 0.04, 0], // Turf toe.
+      [-1.95, 8, 0.04, 0.1, 0], // Soft overlapping families.
+      [-1.7, 8, 0.4, 0.2, 0], // Emerged mineral/coastal coexistence.
+      [-1.7, 8, 0, 0.04, 1], // Full road priority.
+      [-1.7, 8, 0.15, 0.04, 0.4], // Partial road feather.
+      [0.7, 8, 0, 0.04, 0], // Unmapped sector.
+      [-1.7, 25, 0.4, 0.04, 0], // Outside the bank field.
+    ] as const;
+    let coastAndAppearance = 0;
+    let wetAndAppearance = 0;
+    // The second admitted pond is lower but has identical relative bank
+    // geometry; it exercises simultaneous coastal and inland material owners.
+    for (const lowerBy of [0, pond.surfaceY - profile.water.threshold - 2]) {
+      const selectedWater = { ...pond, surfaceY: pond.surfaceY - lowerBy };
+      const selectedZone = structuredClone(zone);
+      selectedZone.height -= lowerBy;
+      selectedZone.radialPond!.bankHeight -= lowerBy;
+      for (const sector of selectedZone.radialPond!.bankSectors!) {
+        sector.innerHeight -= lowerBy;
+        if (sector.outerHeight !== undefined) sector.outerHeight -= lowerBy;
+      }
+      const bank = ops.pondBankField(selectedZone, selectedWater)!;
+      const macroField = ops.macroField(
+        profile,
+        "distribution-v1",
+        "composition-v1",
+        bank,
+      )!;
+      for (const [
+        index,
+        [angle, radius, relative, slope, road],
+      ] of points.entries()) {
+        const x = selectedWater.centerX + radius * Math.cos(angle);
+        const z = selectedWater.centerZ + radius * Math.sin(angle);
+        const height = selectedWater.surfaceY + relative;
+        const noise = [0.2, 0.5, 0.8][index % 3];
+        const sample = {
+          noiseValue: noise,
+          meadowNoise: 0.6,
+          distortNoise: 0.4,
+          slope,
+          roadInfluence: road,
+          surface: { x, z, height, pond: selectedWater, macroField },
+        };
+        const world = vec3(x, height, z);
+        const macro = createCompactTerrainMacroWeights(
+          vec2(x, z),
+          float(noise),
+          macroField,
+        );
+        const composition = createCompactPondBankComposition({
+          x: float(x),
+          z: float(z),
+          height: float(height),
+          slope: float(slope),
+          roadInfluence: float(road),
+          distortNoise: float(0.4),
+          field: bank,
+        });
+        const pondSurface = createCompactPondSurfaceWeights(
+          world,
+          float(0.4),
+          vec4(
+            selectedWater.centerX,
+            selectedWater.centerZ,
+            selectedWater.radius,
+            selectedWater.surfaceY,
+          ),
+        );
+        const coast = createCompactCoastWeights(
+          world,
+          float(noise),
+          float(0.4),
+          macro.westRock,
+          float(slope),
+          macroField,
+        );
+        const coastalGround = {
+          coverage: createCompactCoastalGroundCover(
+            float(height),
+            float(noise),
+            float(0.4),
+            macroField,
+          ).mul(float(1).sub(pondSurface.soil)),
+          layer: applyCompactCoastRock(sources.dirt, sources.dirt, coast),
+        };
+        const appearance = applyCompactPondBankMaterials(
+          sources.dirt,
+          sources.rock,
+          composition,
+        );
+        const rock = applyCompactCoastRock(appearance.rock, appearance.soil, {
+          ...coast,
+          soil: applyCompactPondRockSoil(coast.soil, composition),
+        });
+        const grass = applyCompactPondBankGrass(
+          applyCompactMeadowTint(
+            sources.grass,
+            float(0.6),
+            macro.dry,
+            ops.getComposition().coastalMeadowTintStrength,
+          ),
+          composition,
+        );
+        const weights = createCompactTerrainLayerWeights(
+          float(noise),
+          float(slope),
+          float(road),
+          float(0.4),
+          pondSurface,
+          macro,
+        );
+        const worn = createCompactWornTurfWeights({
+          worldPosition: world,
+          meadowNoise: float(0.6),
+          distortNoise: float(0.4),
+          geometricSlope: float(slope),
+          rawRoadInfluence: float(road),
+          road: weights.road,
+          pondSoil: pondSurface.soil,
+          coastalCoverage: coastalGround.coverage,
+          field: macroField,
+        });
+        const distribution = createCompactCoastDistribution({
+          x: float(x),
+          z: float(z),
+          height: float(height),
+          slope: float(slope),
+          noiseValue: float(noise),
+          meadowNoise: float(0.6),
+          road: worn.road,
+          pond: {
+            centerX: float(selectedWater.centerX),
+            centerZ: float(selectedWater.centerZ),
+            radius: float(selectedWater.radius),
+          },
+          field: macroField,
+        });
+        const surface = blendCompactTerrainLayers(
+          { grass, dirt: appearance.soil, rock },
+          weights.dirt,
+          weights.cliff,
+          worn.road,
+          createCompactHavenGroundWeights(
+            vec2(x, z),
+            macroField.havenGround,
+            pondSurface.soil,
+            float(slope),
+          ),
+          undefined,
+          coastalGround,
+          worn.soil,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          distribution,
+          undefined,
+          composition,
+        );
+        const wet = applyCompactPondWetness(surface, pondSurface.wetness);
+        const actual = vectorValue(wet.albedo.mul(weights.variation));
+        const expected = ops.sample(sample);
+        [expected.r, expected.g, expected.b].forEach((channel, i) =>
+          expect(actual[i]).toBeCloseTo(channel, 12),
+        );
+        const local =
+          vectorValue(composition.mineralAppearance!)[0] +
+          vectorValue(composition.siltAppearance!)[0];
+        if (local > 0 && vectorValue(coastalGround.coverage)[0] > 0)
+          coastAndAppearance++;
+        if (local > 0 && vectorValue(pondSurface.wetness)[0] > 0)
+          wetAndAppearance++;
+        if (road === 1)
+          palette.dirt.forEach((value, channel) =>
+            expect(actual[channel]).toBeCloseTo(
+              value *
+                (1 +
+                  (ops.getComposition().pondWetAlbedo - 1) *
+                    vectorValue(pondSurface.wetness)[0]) *
+                vectorValue(weights.variation)[0],
+              13,
+            ),
+          );
+      }
+    }
+    expect(coastAndAppearance).toBeGreaterThan(0);
+    expect(wetAndAppearance).toBeGreaterThan(0);
+  });
+
   it("shares localized nested-soil retention between CPU and actual TSL without changing coastal wetness", () => {
     const source = float(0.6);
     expect(applyCompactPondRockSoil(source, undefined)).toBe(source);
@@ -1585,11 +1960,18 @@ describe("composition-v1 shared actual bank material graph", () => {
       const composition = createCompactPondBankComposition(
         nodeInput({ ...input(), field: ops.pondBankField(authored, pond)! }),
       );
+      const appearance = applyCompactPondBankMaterials(
+        layers.dirt,
+        layers.rock,
+        composition,
+      );
       const baseline = blend(layers),
         candidate = blend(
           {
             ...layers,
             grass: applyCompactPondBankGrass(layers.grass, composition),
+            dirt: appearance.soil,
+            rock: appearance.rock,
           },
           composition,
         );
@@ -1679,6 +2061,15 @@ describe("composition-v1 shared actual bank material graph", () => {
         );
         expect(matches).toHaveLength(1);
         shared.add(matches[0]);
+        for (const name of [
+          "compactPondBankMineralAppearance",
+          "compactPondBankSiltAppearance",
+        ])
+          expect(
+            [...graph(root)].filter(
+              (node) => Reflect.get(node, "name") === name,
+            ),
+          ).toHaveLength(1);
       }
       expect(shared.size).toBe(1);
       for (const m of [material, baseline]) {

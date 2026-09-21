@@ -1156,6 +1156,67 @@ export function applyCompactPondRockSoil(
     .toVar("compactPondRockNestedSoil");
 }
 
+/** Pond-local material art reuses the SAME sampled soil/rock layers. Coverage,
+ * relief heights, raw source cavities and final water wetness retain ownership. */
+export function applyCompactPondBankMaterials(
+  soil: CompactTerrainLayer,
+  rock: CompactTerrainLayer,
+  field: CompactPondBankComposition<Node<"float">> | undefined,
+): { soil: CompactTerrainLayer; rock: CompactTerrainLayer } {
+  if (
+    field?.mineralAppearance === undefined ||
+    field.siltAppearance === undefined
+  )
+    return { soil, rock };
+  const mineral = field.mineralAppearance.clamp(0, 1);
+  const silt = field.siltAppearance.clamp(0, 1);
+  const albedo = createCompactTerrainColorOperations().bankAppearanceAlbedo(
+    [soil.albedo.x, soil.albedo.y, soil.albedo.z],
+    [rock.albedo.x, rock.albedo.y, rock.albedo.z],
+    field,
+    compactCoastDistributionMath,
+  );
+  // Normalizing only the changed contribution keeps the original normal exact
+  // outside the field, including source normals with finite rounding error.
+  const mineralNormal = mineral
+    .greaterThan(0)
+    .select(
+      normalize(mix(soil.worldNormal, rock.worldNormal, mineral)),
+      soil.worldNormal,
+    );
+  const soilNormal = silt
+    .greaterThan(0)
+    .select(
+      normalize(mix(mineralNormal, soil.worldNormal, silt)),
+      mineralNormal,
+    );
+  return {
+    soil: {
+      ...soil,
+      albedo: vec3(...albedo.soil).toVar("compactPondBankSoilAlbedo"),
+      roughness: mix(
+        mix(soil.roughness, rock.roughness, mineral),
+        soil.roughness,
+        silt,
+      ),
+      ao: mix(mix(soil.ao, rock.ao, mineral), soil.ao, silt),
+      worldNormal: soilNormal,
+    },
+    rock: {
+      ...rock,
+      albedo: vec3(...albedo.rock).toVar("compactPondBankRockAlbedo"),
+      roughness: mix(rock.roughness, soil.roughness, silt),
+      ao: mix(rock.ao, soil.ao, silt),
+      worldNormal: silt
+        .greaterThan(0)
+        .select(
+          normalize(mix(rock.worldNormal, soil.worldNormal, silt)),
+          rock.worldNormal,
+        ),
+    },
+  };
+}
+
 /** Reuse soil/rock maps together; never tint grass or full path/pond overrides. */
 export function applyCompactCoastRock(
   rock: CompactTerrainLayer,
@@ -2149,7 +2210,7 @@ export function createCompactPondBankComposition(
   input: CompactPondBankCompositionInput<Node<"float">>,
 ): CompactPondBankComposition<Node<"float">> {
   const result = createCompactTerrainColorOperations().bankComposition(
-    input,
+    { ...input, includeAppearance: true },
     compactPondBankMath,
   );
   return {
@@ -2166,6 +2227,20 @@ export function createCompactPondBankComposition(
       ? {
           substrateSoilToRock: result.substrateSoilToRock.toVar(
             "compactPondBankSubstrateSoilToRock",
+          ),
+        }
+      : {}),
+    ...(result.mineralAppearance !== undefined
+      ? {
+          mineralAppearance: result.mineralAppearance.toVar(
+            "compactPondBankMineralAppearance",
+          ),
+        }
+      : {}),
+    ...(result.siltAppearance !== undefined
+      ? {
+          siltAppearance: result.siltAppearance.toVar(
+            "compactPondBankSiltAppearance",
           ),
         }
       : {}),

@@ -403,16 +403,35 @@ describe.each(cases)("$name", (scenario) => {
           let previous = "",
             steps = 0,
             indexSteps = 0,
-            indexMs = 0;
-          let step = admission.next();
+            indexMs = 0,
+            maxStepMs = 0,
+            maxStepPhase = "",
+            maxIndexStepMs = 0,
+            maxIndexStepPhase = "";
+          const resume = () => {
+            const resumeAt = performance.now();
+            const next = admission.next();
+            const elapsed = performance.now() - resumeAt;
+            if (elapsed > maxStepMs) {
+              maxStepMs = elapsed;
+              maxStepPhase = `${previous || "admission_start"} -> ${next.done ? "admission_complete" : next.value}`;
+            }
+            if (previous.startsWith("grounding-edge-index")) {
+              indexMs += elapsed;
+              if (elapsed > maxIndexStepMs) {
+                maxIndexStepMs = elapsed;
+                maxIndexStepPhase = `${previous} -> ${next.done ? "admission_complete" : next.value}`;
+              }
+            }
+            return next;
+          };
+          let step = resume();
           while (!step.done) {
             previous = step.value;
             steps++;
             const index = previous.startsWith("grounding-edge-index");
             if (index) indexSteps++;
-            const resumeAt = performance.now();
-            step = admission.next();
-            if (index) indexMs += performance.now() - resumeAt;
+            step = resume();
           }
           expect(step.value.groundingEdgeIndexStats?.admissionSteps).toBe(
             indexSteps,
@@ -424,9 +443,13 @@ describe.each(cases)("$name", (scenario) => {
             steps,
             indexMs,
             indexSteps,
+            maxStepMs,
+            maxStepPhase,
+            maxIndexStepMs,
+            maxIndexStepPhase,
             index: step.value.groundingEdgeIndexStats,
             scope:
-              "CPU re-admission of exact retained geometry, not native frame qualification",
+              "CPU re-admission of exact retained geometry, including the first/terminal step. Index timing is attributed to the preceding yielded phase. Observed elapsed time includes allocation/GC and is not native frame qualification.",
           };
         });
         manager = new GrassVisualManager(

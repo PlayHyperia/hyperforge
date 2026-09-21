@@ -53,6 +53,8 @@ export type CompactPondBankCompositionInput<T> = Readonly<{
   distortNoise: T;
   roadInfluence: T;
   field: CompactPondBankField | null;
+  /** Appearance is omitted from CPU placement/eligibility-only evaluations. */
+  includeAppearance?: true;
 }>;
 export type CompactPondBankComposition<T> = Readonly<{
   soilToGrass: T;
@@ -61,6 +63,9 @@ export type CompactPondBankComposition<T> = Readonly<{
   mineralSoilToRock?: T;
   /** Cutbank shoulder appearance consumes only the final remaining soil. */
   substrateSoilToRock?: T;
+  /** Material families only; never consumed by coverage or grass support. */
+  mineralAppearance?: T;
+  siltAppearance?: T;
   grassToSoil: T;
   grassToRock: T;
   grassShade: T;
@@ -301,6 +306,24 @@ export function createCompactTerrainColorOperations() {
     substrateFadeStart: 0.65,
     substrateFadeEnd: 1.7,
     substrateHeightNoise: 0.08,
+    appearanceRiseStart: -1.7,
+    appearanceRiseEnd: -0.7,
+    appearanceFadeStart: 0.65,
+    appearanceFadeEnd: 1.7,
+    appearanceHeightNoise: 0.16,
+    appearancePatchMinimum: 0.85,
+    turfMineralStrength: 0.78,
+    turfMineralFadeStart: 0.04,
+    turfMineralFadeEnd: 0.35,
+    siltStrength: 0.78,
+    siltFadeStart: 0.08,
+    siltFadeEnd: 0.5,
+    mineralChroma: 0.18,
+    mineralValue: 1.16,
+    mineralTint: Object.freeze([1.06, 1.03, 0.96] as const),
+    siltChroma: 0.3,
+    siltValue: 0.75,
+    siltTint: Object.freeze([1, 0.98, 0.88] as const),
   });
   // One native-transect-calibrated trial; these are appearance thresholds in
   // slope=1-abs(normal.y), not collision or navigation slope limits.
@@ -1173,11 +1196,73 @@ export function createCompactTerrainColorOperations() {
           m.mul(m.constant(c.substrateMax), variation),
         );
       }
+      let mineralAppearance: T | undefined, siltAppearance: T | undefined;
+      if (input.includeAppearance) {
+        const noise = m.clamp(input.distortNoise, 0, 1);
+        const height = m.sub(
+          m.sub(input.height, m.constant(f.pond.surfaceY)),
+          m.mul(
+            m.sub(noise, m.constant(0.5)),
+            m.constant(2 * c.appearanceHeightNoise),
+          ),
+        );
+        const rise = m.smoothstep(
+          m.constant(c.appearanceRiseStart),
+          m.constant(c.appearanceRiseEnd),
+          height,
+        );
+        const appearance = {
+          fade(start: number, end: number): T {
+            return m.sub(
+              one,
+              m.smoothstep(m.constant(start), m.constant(end), height),
+            );
+          },
+        };
+        const patch = m.add(
+          m.constant(c.appearancePatchMinimum),
+          m.mul(m.constant(1 - c.appearancePatchMinimum), noise),
+        );
+        const domain = m.mul(m.mul(coverDomain, rise), patch);
+        // Unequal, overlapping authored regions: broad cut-face mineral,
+        // a narrower turf toe, and flat sheltered silt. Existing radial/angular
+        // feathers and noise-shifted heights avoid a constant shoreline ring.
+        mineralAppearance = m.clamp(
+          m.mul(
+            m.mul(
+              domain,
+              appearance.fade(c.appearanceFadeStart, c.appearanceFadeEnd),
+            ),
+            m.add(
+              m.add(cut, m.div(mineral, denominator)),
+              m.mul(
+                m.mul(turf, m.constant(c.turfMineralStrength)),
+                appearance.fade(c.turfMineralFadeStart, c.turfMineralFadeEnd),
+              ),
+            ),
+          ),
+          0,
+          1,
+        );
+        siltAppearance = m.clamp(
+          m.mul(
+            m.mul(m.mul(domain, sedge), flat),
+            m.mul(
+              m.constant(c.siltStrength),
+              appearance.fade(c.siltFadeStart, c.siltFadeEnd),
+            ),
+          ),
+          0,
+          1,
+        );
+      }
       return {
         soilToGrass: covered,
         soilToRock: soilRock,
         ...(mineralSoilToRock !== undefined ? { mineralSoilToRock } : {}),
         ...(substrateSoilToRock !== undefined ? { substrateSoilToRock } : {}),
+        ...(mineralAppearance !== undefined ? { mineralAppearance } : {}),
+        ...(siltAppearance !== undefined ? { siltAppearance } : {}),
         grassToSoil: m.sub(exposed, rock),
         grassToRock: rock,
         grassShade: m.sub(one, shade),
@@ -1187,6 +1272,7 @@ export function createCompactTerrainColorOperations() {
     },
     bankCompositionAt(
       input: CompactGrassSupportInput,
+      includeAppearance = false,
     ): CompactPondBankComposition<number> {
       return operations.bankComposition(
         {
@@ -1197,6 +1283,7 @@ export function createCompactTerrainColorOperations() {
           distortNoise: input.distortNoise,
           roadInfluence: input.roadInfluence ?? 0,
           field: input.surface.macroField?.pondBankField ?? null,
+          ...(includeAppearance ? { includeAppearance: true as const } : {}),
         },
         bankMath,
       );
@@ -1227,6 +1314,85 @@ export function createCompactTerrainColorOperations() {
         soil,
         m.sub(m.constant(1), m.clamp(field.substrateSoilToRock, 0, 1)),
       );
+    },
+    /** Linear-space albedo grade, shared by TSL and CPU means.
+     * Luminance retains scan contrast; chroma/value define local material art,
+     * not baked illumination. Original source maps and coverage stay intact. */
+    bankAppearanceAlbedo<T>(
+      soil: readonly [T, T, T],
+      rock: readonly [T, T, T],
+      field: CompactPondBankComposition<T> | undefined,
+      m: CompactCoastDistributionMath<T>,
+    ): { soil: readonly [T, T, T]; rock: readonly [T, T, T] } {
+      if (
+        field?.mineralAppearance === undefined ||
+        field.siltAppearance === undefined
+      )
+        return { soil, rock };
+      const c = pondBankRecipe;
+      const mineral = m.clamp(field.mineralAppearance, 0, 1);
+      const silt = m.clamp(field.siltAppearance, 0, 1);
+      // Object methods remain self-contained when the factory is detached
+      // from a minified keepNames bundle for the real grass worker.
+      const grade = {
+        luminance(rgb: readonly [T, T, T]): T {
+          return m.add(
+            m.add(
+              m.mul(rgb[0], m.constant(0.2126)),
+              m.mul(rgb[1], m.constant(0.7152)),
+            ),
+            m.mul(rgb[2], m.constant(0.0722)),
+          );
+        },
+        mix(a: T, b: T, weight: T): T {
+          return m.add(a, m.mul(m.sub(b, a), weight));
+        },
+        channel(index: 0 | 1 | 2): readonly [T, T] {
+          const mineralAlbedo = m.mul(
+            m.add(
+              m.mul(rock[index], m.constant(c.mineralChroma)),
+              m.mul(
+                rockValue,
+                m.constant((1 - c.mineralChroma) * c.mineralTint[index]),
+              ),
+            ),
+            m.constant(c.mineralValue),
+          );
+          const siltAlbedo = m.mul(
+            m.add(
+              m.mul(soil[index], m.constant(c.siltChroma)),
+              m.mul(
+                soilValue,
+                m.constant((1 - c.siltChroma) * c.siltTint[index]),
+              ),
+            ),
+            m.constant(c.siltValue),
+          );
+          const mineralTarget = m.clamp(mineralAlbedo, 0, 1);
+          const siltTarget = m.clamp(siltAlbedo, 0, 1);
+          return [
+            grade.mix(
+              grade.mix(soil[index], mineralTarget, mineral),
+              siltTarget,
+              silt,
+            ),
+            grade.mix(
+              grade.mix(rock[index], mineralTarget, mineral),
+              siltTarget,
+              silt,
+            ),
+          ];
+        },
+      };
+      const rockValue = grade.luminance(rock),
+        soilValue = grade.luminance(soil);
+      const red = grade.channel(0),
+        green = grade.channel(1),
+        blue = grade.channel(2);
+      return {
+        soil: [red[0], green[0], blue[0]],
+        rock: [red[1], green[1], blue[1]],
+      };
     },
     bankCompositionWeights<T>(
       weights: readonly [T, T, T, T],
@@ -2588,7 +2754,10 @@ export function createCompactTerrainColorOperations() {
         ? operations.pondMarginAt({ ...input, surface: input.surface })
         : null;
       const bankComposition = input.surface?.macroField?.pondBankField
-        ? operations.bankCompositionAt({ ...input, surface: input.surface })
+        ? operations.bankCompositionAt(
+            { ...input, surface: input.surface },
+            true,
+          )
         : null;
       // Distortion noise wears path and pond margins, not meadow or cliff
       // classification. The same mean applies to both PBR projections.
@@ -2773,10 +2942,22 @@ export function createCompactTerrainColorOperations() {
         bankComposition ?? undefined,
         distributionMath,
       );
+      const bankAlbedo = bankComposition
+        ? operations.bankAppearanceAlbedo(
+            [palette.dirt[0], palette.dirt[1], palette.dirt[2]],
+            [palette.rock[0], palette.rock[1], palette.rock[2]],
+            bankComposition,
+            distributionMath,
+          )
+        : null;
       const result = palette.grass.map((grass, channel) => {
+        const soil = bankAlbedo?.soil[channel] ?? palette.dirt[channel];
         const rock =
-          math.mix(palette.rock[channel], palette.dirt[channel], rockSoil) *
-          math.mix(1, composition.coastWetAlbedo, coast.wetness);
+          math.mix(
+            bankAlbedo?.rock[channel] ?? palette.rock[channel],
+            soil,
+            rockSoil,
+          ) * math.mix(1, composition.coastWetAlbedo, coast.wetness);
         if (distributedWeights) {
           const grassDiffuse =
             grass *
@@ -2792,7 +2973,7 @@ export function createCompactTerrainColorOperations() {
             math.mix(1, composition.coastWetAlbedo, coast.wetness);
           return (
             (grassDiffuse * distributedWeights[0] +
-              palette.dirt[channel] * distributedWeights[1] +
+              soil * distributedWeights[1] +
               rock * distributedWeights[2] +
               coastalSoil * distributedWeights[3]) *
             variation *
@@ -2808,24 +2989,18 @@ export function createCompactTerrainColorOperations() {
             (bankGrassTint?.[channel] ?? 1) *
             (pondMargin?.shade ?? 1) *
             (bankComposition?.grassShade ?? 1),
-          palette.dirt[channel],
+          soil,
           dirt,
         );
-        if (wornTurf)
-          ground = math.mix(ground, palette.dirt[channel], wornTurf.soil);
-        if (bankWear > 0)
-          ground = math.mix(ground, palette.dirt[channel], bankWear);
+        if (wornTurf) ground = math.mix(ground, soil, wornTurf.soil);
+        if (bankWear > 0) ground = math.mix(ground, soil, bankWear);
         if (havenGround) {
           ground = math.mix(
             ground,
-            math.mix(
-              palette.dirt[channel],
-              rock,
-              composition.havenTalusRockFraction,
-            ),
+            math.mix(soil, rock, composition.havenTalusRockFraction),
             talus,
           );
-          ground = math.mix(ground, palette.dirt[channel], authored.wear);
+          ground = math.mix(ground, soil, authored.wear);
         }
         if (coastalGround > 0)
           ground = math.mix(
@@ -2837,7 +3012,7 @@ export function createCompactTerrainColorOperations() {
         return (
           math.mix(
             math.mix(ground, rock, cliff),
-            palette.dirt[channel],
+            soil,
             wornTurf?.road ?? road,
           ) *
           variation *
