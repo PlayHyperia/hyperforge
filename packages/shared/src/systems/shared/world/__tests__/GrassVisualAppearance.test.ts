@@ -39,6 +39,7 @@ import { createGroundedGrassMaterial } from "../GrassGroundingGpu";
 import {
   COMPACT_WORLD_TERRAIN_PROFILE,
   SCULPTED_COMPACT_WORLD_TERRAIN_PROFILE,
+  validateWorldTerrainProfile,
 } from "../WorldTerrainProfile";
 
 /** Real geometry/material construction; no renderer or GPU is simulated. */
@@ -670,7 +671,7 @@ describe("opt-in fine leaf volume (actual graph/geometry, not native rendering)"
         upperStart: 0.65,
         foldTangent: Math.tan((24 * Math.PI) / 180),
         foldTipStart: 0.75,
-        rootBrightness: 0.78,
+        rootBrightness: 0.55,
         tipBrightness: 1.12,
       });
       expect(Object.isFrozen(FINE_GRASS_LEAF_VOLUME_LIGHTING)).toBe(true);
@@ -1055,14 +1056,14 @@ describe("opt-in fine leaf volume (actual graph/geometry, not native rendering)"
             const expected = inputs.instanceGroundColor.map((c, i) =>
               Math.min(
                 1,
-                c * 0.78 + (tint[i] * tip - c * 0.78) * smooth(0, 1, t),
+                c * 0.55 + (tint[i] * tip - c * 0.55) * smooth(0, 1, t),
               ),
             );
             for (let i = 0; i < 3; i++)
               expect(after[i]).toBeCloseTo(expected[i], 13);
             if (t === 0)
               for (let i = 0; i < 3; i++)
-                expect(after[i] / before[i]).toBeCloseTo(0.78 / 0.98, 13);
+                expect(after[i] / before[i]).toBeCloseTo(0.55 / 0.98, 13);
             if (t === 1)
               for (let i = 0; i < 3; i++)
                 expect(after[i] / before[i]).toBeCloseTo(1.12 / 1.2, 13);
@@ -1088,6 +1089,146 @@ describe("opt-in fine leaf volume (actual graph/geometry, not native rendering)"
       }
     }
   });
+
+  it.each([0, 1, 2])(
+    "limits the historical .78 root change to its exact RGB contribution at LOD%i, including soil and bank tips",
+    (lod) => {
+      // The historical default sculpt fixture has no coastal meadow. Admit
+      // the current authored descriptor through the real terrain profile path;
+      // the manager must derive its bank macro field, not receive an injected one.
+      const terrain = validateWorldTerrainProfile({
+        ...SCULPTED_COMPACT_WORLD_TERRAIN_PROFILE,
+        southernMeadow: {
+          schemaVersion: 1,
+          minX: 304,
+          maxX: 500,
+          minZ: 345,
+          maxZ: 535,
+          featherX: 24,
+          featherZ: 24,
+          northHeight: 26.8,
+          southHeight: 25.3,
+          crossFall: 1,
+          rollAmplitude: 0.65,
+          rollWavelength: 100,
+        },
+      });
+      const field = validateCompactHabitatComposition(
+        habitatData.composition,
+        habitatData.bounds,
+      );
+      // Historical installed dirt mean, independently verified by the terrain
+      // material tests. Keep every channel distinct so a scalar tint shortcut fails.
+      const dirt = [
+        0.1258525186051025, 0.08567628015146961, 0.0490416307568836,
+      ];
+      for (const grade of [undefined, "fine-meadow-green-v1"] as const) {
+        for (const habitat of [undefined, field]) {
+          const owner = manager(
+            FINE_MEADOW_GRASS_VISUAL_PROFILE,
+            terrain,
+            true,
+            "fine-meadow-v1",
+            habitat,
+            "leaf-volume-v1",
+            grade,
+          );
+          try {
+            expect(owner["compactMacroField"]?.coastalMeadow).toBe(true);
+            expect(owner["compactMacroField"]?.bankVerge).toMatchObject({
+              minX: 340,
+              maxX: 357,
+              minZ: 310,
+              maxZ: 324,
+              feather: 2,
+              tipBrightness: 1.08,
+            });
+            const material = owner["material"];
+            if (!(material instanceof MeshSSSNodeMaterial))
+              throw new Error("Expected actual fine SSS material");
+            const inputs = inputsAt(owner["lodGeometries"][lod], 2);
+            // SSS wraps the albedo Fn beneath its clamp/VarNode. Expand the
+            // real nested construction-time Fn too; getChildren alone cannot
+            // expose the habitat/bank nodes captured by its JavaScript closure.
+            const nodes = new Set<Node>();
+            const visit = (node: Node): void => {
+              if (nodes.has(node)) return;
+              expect(nodes.size).toBeLessThan(4096);
+              nodes.add(node);
+              const expanded = expand(node);
+              if (expanded !== node) visit(expanded);
+              for (const child of node.getChildren()) visit(child);
+            };
+            visit(requireNode(material.colorNode));
+            const soilNode = [...nodes].find(
+              (node) =>
+                Reflect.get(node, "name") === "v_naturalGrassHabitatSoil",
+            );
+            const bankNode = [...nodes].find(
+              (node) =>
+                Reflect.get(node, "name") === "v_naturalGrassBankLocality",
+            );
+            expect(Boolean(soilNode)).toBe(Boolean(habitat));
+            expect(Boolean(bankNode)).toBe(Boolean(grade));
+            for (const [x, z, bankWeight] of [
+              [0, 0, 0],
+              [318.5, 312.5, 0], // Inside the real Haven soil pocket.
+              [340, 317, 0], // Exact current bank-verge boundary.
+              [341, 317, 0.5], // Halfway through its two-metre feather.
+              [346, 317, 1], // Current bank-verge interior.
+            ]) {
+              inputs.instanceOffset = [x, 28, z];
+              const locality = bankNode ? colorValue(bankNode, inputs)[0] : 0;
+              expect(locality).toBeCloseTo(grade ? bankWeight : 0, 13);
+              const soil = soilNode ? colorValue(soilNode, inputs)[0] : 0;
+              if (habitat && x === 318.5) expect(soil).toBeGreaterThan(0.1);
+              const rootGround = inputs.instanceGroundColor.map(
+                (value, i) => value + (dirt[i] - value) * soil,
+              );
+              const tinted = inputs.instanceGroundColor.map(
+                (value, i) =>
+                  value +
+                  (inputs.instanceGrassTint[i] - value) *
+                    inputs.instanceGrassTint[3],
+              );
+              const tip = 1.12 + (1.08 * (1.12 / 1.2) - 1.12) * locality;
+              for (const t of [0, 0.2, 0.5, 0.75, 1]) {
+                inputs.uv[1] = t;
+                const blend = smooth(0, 1, t);
+                const actual = colorValue(material.colorNode, inputs);
+                const historical = rootGround.map(
+                  (root, i) =>
+                    root * 0.78 + (tinted[i] * tip - root * 0.78) * blend,
+                );
+                for (let channel = 0; channel < 3; channel++) {
+                  // These real-color samples stay below the albedo clamp;
+                  // the exact difference therefore isolates this one coefficient.
+                  expect(historical[channel]).toBeGreaterThan(0);
+                  expect(historical[channel]).toBeLessThan(1);
+                  expect(actual[channel]).toBeGreaterThan(0);
+                  expect(actual[channel]).toBeLessThan(1);
+                  expect(actual[channel] - historical[channel]).toBeCloseTo(
+                    rootGround[channel] * (0.55 - 0.78) * (1 - blend),
+                    13,
+                  );
+                  if (t === 1)
+                    expect(actual[channel]).toBeCloseTo(
+                      tinted[channel] * tip,
+                      13,
+                    );
+                }
+                expect(colorValue(material.thicknessColorNode, inputs)).toEqual(
+                  actual.map((value) => value * smooth(0.05, 0.65, t)),
+                );
+              }
+            }
+          } finally {
+            owner.destroy();
+          }
+        }
+      }
+    },
+  );
 
   it("retains the new nodes and immutable receipt through real grounded owners", async () => {
     const owner = fine("leaf-volume-v1");

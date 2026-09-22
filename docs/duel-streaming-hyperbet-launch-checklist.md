@@ -1,5 +1,46 @@
 # Duel Arena, Streaming, and Hyperbet Launch Checklist
 
+## 2026-09-22 — grass root-contrast candidate; visual approval pending
+
+- [x] Isolate one opt-in leaf-volume color change: root brightness 0.78 → 0.55,
+  with tip brightness 1.12 unchanged. Existing geometry, density, placements,
+  normals, AO, thin-leaf model, wind, LOD and renderer settings are unchanged.
+  This is authored albedo contrast, not added physical self-occlusion.
+- [x] Verify 148/148 checks across appearance, wind, real-worker generation and
+  flower ownership. Full shared plus explicit retained-world typecheck passes:
+  751 roots / 2457 sources, zero diagnostics and stable input hashes. Scoped lint
+  passes. Evidence: grass-root-contrast-source04, types02 and lint01.
+- [x] Preserve source01/source02 failures (145 passed / 3 failed each). The new
+  test initially missed nested TSL function nodes, then used a terrain fixture
+  without its coastal meadow. Correct real-graph traversal and validated coastal
+  fixture now require actual soil and bank boundary/feather/interior coverage;
+  assertions were not removed. Appearance03 passes 52/52. The final suite and
+  typecheck ran serially; the first suite and initial typecheck briefly overlapped.
+- [x] Build65 contains nine isolated bundles and 1096 stable source pins; only
+  GrassVisualManager.ts differs from build64. Protected compiled outputs unchanged.
+  Native128 passes the original startup gate in 30.273 seconds with 122/122 grass
+  cells and eight nominal host samples, then FAILS before its first screenshot.
+  Its flower-program check rejected two generated storage-buffer identifier pairs;
+  retained WGSL has identical bindings/types/calculations and fragment bytes.
+  Zero completed views or wind clips; this is not a successful visual comparison.
+- [x] Prepare native129's bounded identifier-only comparison: verify original raw
+  shader hashes and lengths; allow bijective renaming of declared storage names
+  and paired struct names only. Preserve all other bytes, bindings, member types
+  and declaration order. Three valid controls pass; 16 behavioral/type/binding/
+  collision/other mutations fail. See flower-storage-alpha-guard01.json.
+- [x] Runtime98 and runtime99 stopped cleanly and their temporary databases were
+  removed. Native128's browser closed; native129 never opened one. Protected
+  localhost3333, its saved character/database and 145 compiled artifacts remain
+  unchanged. No owned capture, suite, build or diagnostic runtime remains running.
+- [ ] Native129 has not run: the next preflight found the actual display asleep.
+  Do not synthesize input, force frames, bypass the host guard or rerun native128
+  as though it passed. Compare the three native127 poses and held ordinary wind
+  after the display is awake. Candidate remains unqualified and opt-in only.
+- [ ] Visually decide whether the darker bases improve depth or merely muddy the
+  canopy. Broad angular leaf silhouettes, uniform meadow composition and sparse
+  flower accents remain open. No AAA, smooth traversal, frame-budget, streaming
+  or production-default acceptance; historical loading failures remain retained.
+
 ## 2026-09-22 — post-restart matched flowers; fuller heads, meadow art still open
 
 - [x] Recover normal localhost3333 after the Mac restarted. Reuse the exact

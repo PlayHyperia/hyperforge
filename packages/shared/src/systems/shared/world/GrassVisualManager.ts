@@ -302,7 +302,9 @@ export const FINE_GRASS_LEAF_VOLUME_LIGHTING = Object.freeze({
   upperStart: 0.65,
   foldTangent: Math.tan((24 * Math.PI) / 180),
   foldTipStart: 0.75,
-  rootBrightness: 0.78,
+  // Authored lower-leaf color contrast, not additional physical occlusion.
+  // Keep the tip endpoint and the existing AO/scattering response unchanged.
+  rootBrightness: 0.55,
   tipBrightness: 1.12,
 } as const);
 
