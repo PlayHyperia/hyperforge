@@ -1,5 +1,16 @@
 import THREE from "../../../extras/three/three";
-import { Fn, attribute, normalLocal, positionLocal, vec3 } from "three/tsl";
+import {
+  Fn,
+  attribute,
+  clamp,
+  float,
+  min,
+  normalLocal,
+  positionLocal,
+  sin,
+  vec2,
+  vec3,
+} from "three/tsl";
 import { INSTANCE_MATRIX_STORAGE_ATTRIBUTE } from "../../../utils/rendering/createStorageInstancedMesh";
 import {
   TREE_WIND_MAX_DISPLACEMENT,
@@ -9,8 +20,14 @@ import {
   type TreeWindInputs,
 } from "./TreeWind";
 
-/** Universal world-space XZ displacement cap; this is not a static mesh bound. */
-export const ROOTED_FLOWER_WIND_MAX_DISPLACEMENT = TREE_WIND_MAX_DISPLACEMENT;
+const PETAL_RADIUS_RATIO = 0.08;
+const PETAL_GAIN = 0.6;
+const PETAL_MAX_DISPLACEMENT = PETAL_GAIN * PETAL_RADIUS_RATIO ** 2;
+/** Universal combined world-space sphere expansion, including petal flutter. */
+export const ROOTED_FLOWER_WIND_MAX_DISPLACEMENT = Math.hypot(
+  TREE_WIND_MAX_DISPLACEMENT,
+  PETAL_MAX_DISPLACEMENT,
+);
 const MIN_HEIGHT = Math.fround(0.12);
 const MAX_HEIGHT = Math.fround(0.8);
 const IDENTITY = new THREE.Matrix4();
@@ -22,15 +39,23 @@ function validHeight(height: number): boolean {
   );
 }
 
-/** Add this world-space radius to static XZ bounds after instance scaling.
+export interface RootedFlowerWindBounds {
+  readonly x: number;
+  readonly y: number;
+  readonly z: number;
+  readonly sphere: number;
+}
+
+/** Combined additive world-space bounds AFTER transforming the static bounds.
  * Supply the stored flowerHeight.y and actual instance up-column length, as
  * used by the shader, rather than pre-quantization authoring values.
- * The shared equation clamps strength to 2 and direction length to at most 1.
- * It does not bound a future, independently animated petal deformation. */
-export function getRootedFlowerWindMaxDisplacement(
+ * Flutter changes Y only; the subsequent stem bend remains within its XZ cap
+ * even when evaluated at the fluttered height. The sphere uses their hypotenuse.
+ * These expansions cover both deformed vertices and rendered triangle interiors. */
+export function getRootedFlowerWindBounds(
   authoredHeight: number,
   instanceScale: number,
-): number {
+): RootedFlowerWindBounds {
   if (
     !validHeight(authoredHeight) ||
     !Number.isFinite(instanceScale) ||
@@ -39,7 +64,24 @@ export function getRootedFlowerWindMaxDisplacement(
   ) {
     throw new Error("Invalid rooted flower wind bounds input");
   }
-  return 2 * Math.min(authoredHeight * instanceScale * 0.018, 0.18);
+  const worldHeight = authoredHeight * instanceScale;
+  const horizontal = 2 * Math.min(worldHeight * 0.018, 0.18);
+  const vertical = PETAL_MAX_DISPLACEMENT * Math.min(worldHeight, 1);
+  return {
+    x: horizontal,
+    y: vertical,
+    z: horizontal,
+    sphere: Math.hypot(horizontal, vertical),
+  };
+}
+
+/** Combined sphere expansion, NOT the former stem-only XZ radius.
+ * Prefer getRootedFlowerWindBounds for explicit per-axis box expansion. */
+export function getRootedFlowerWindMaxDisplacement(
+  authoredHeight: number,
+  instanceScale: number,
+): number {
+  return getRootedFlowerWindBounds(authoredHeight, instanceScale).sphere;
 }
 
 function validateGeometry(geometry: THREE.BufferGeometry): void {
@@ -131,6 +173,79 @@ function validateGeometry(geometry: THREE.BufferGeometry): void {
   ) {
     throw new Error("Invalid rooted flower bounded triangle indices");
   }
+
+  // A fluttered lamina may meet non-petal triangles only at its exact shared
+  // zero-weight hinge. This is the C1 boundary of the quadratic shear: both
+  // displacement and derivative vanish there, including its shared normal.
+  const hingeKey = (vertex: number) =>
+    `${petal.getX(vertex)},${petal.getY(vertex)},${petal.getZ(vertex)}`;
+  const coincidentHinge = (vertex: number, reference: number) =>
+    position.getX(vertex) === petal.getX(reference) &&
+    position.getY(vertex) === petal.getY(reference) &&
+    position.getZ(vertex) === petal.getZ(reference);
+  const groups = new Map<string, { reference: number; attached: boolean }>();
+  const headSupport = new Set<number>();
+  for (let triangle = 0; triangle < index.count; triangle += 3) {
+    const ids = [
+      index.getX(triangle),
+      index.getX(triangle + 1),
+      index.getX(triangle + 2),
+    ];
+    if (ids.every((vertex) => petal.getW(vertex) === 0)) {
+      for (const vertex of ids) headSupport.add(vertex);
+    }
+  }
+  for (let vertex = 0; vertex < position.count; vertex++) {
+    if (petal.getW(vertex) === 0) continue;
+    if (
+      position.getY(vertex) === 0 ||
+      petal.getY(vertex) <= 0 ||
+      Math.hypot(
+        position.getX(vertex) - petal.getX(vertex),
+        position.getZ(vertex) - petal.getZ(vertex),
+      ) >
+        PETAL_RADIUS_RATIO * fullHeight
+    ) {
+      throw new Error("Invalid rooted flower petal hinge envelope");
+    }
+    const key = hingeKey(vertex);
+    if (!groups.has(key))
+      groups.set(key, { reference: vertex, attached: false });
+  }
+  if (groups.size === 0 || groups.size > 10) {
+    throw new Error("Invalid rooted flower petal groups");
+  }
+  for (let triangle = 0; triangle < index.count; triangle += 3) {
+    const ids = [
+      index.getX(triangle),
+      index.getX(triangle + 1),
+      index.getX(triangle + 2),
+    ];
+    const positive = ids.find((vertex) => petal.getW(vertex) > 0);
+    if (positive === undefined) continue;
+    const key = hingeKey(positive);
+    const group = groups.get(key);
+    if (!group) throw new Error("Missing rooted flower petal group");
+    for (const vertex of ids) {
+      if (petal.getW(vertex) > 0) {
+        if (hingeKey(vertex) !== key) {
+          throw new Error("Rooted flower triangle crosses petal groups");
+        }
+      } else {
+        if (
+          hingeKey(vertex) !== key ||
+          !coincidentHinge(vertex, group.reference) ||
+          !headSupport.has(vertex)
+        ) {
+          throw new Error("Rooted flower petal has no shared head hinge");
+        }
+        group.attached = true;
+      }
+    }
+  }
+  if ([...groups.values()].some((group) => !group.attached)) {
+    throw new Error("Rooted flower petal group is detached");
+  }
 }
 
 /** Explicit cold-path admission for a privately owned storage pool. The owner
@@ -172,7 +287,8 @@ export function assertRootedFlowerPool(
 /** INACTIVE foundation: no world registration, placement, LOD or live owner.
  * Borrow the caller's per-world wind nodes; never allocate a second instance
  * matrix buffer or use the renderer's global time. Main bending connects the
- * stem, leaves and head. Independent petal flutter remains OPEN.
+ * stem, leaves and head. A small per-petal quadratic shear is composed first;
+ * flowerPetal.w identifies the lamina, not a spatial derivative of authored t².
  * Native standard lighting/fog/shadows remain in charge of surface shading. */
 export function createRootedFlowerMaterial(
   wind: TreeWindInputs,
@@ -203,24 +319,70 @@ export function createRootedFlowerMaterial(
   material.positionNode = Fn((builder) => {
     assertRootedFlowerPool(builder.object);
     const frame = createTreeWindFrameNodes(builder.object);
+    const height = attribute("flowerHeight", "vec2");
+    const petal = attribute("flowerPetal", "vec4");
+    const offset = frame
+      .transformTangent(attribute("position", "vec3").sub(petal.xyz))
+      .toVar();
+    const worldHeight = height.y.mul(frame.scale).toVar();
+    // Per-petal phase is constant across its lamina, including the hinge.
+    // The same world time/strength/direction drives both flutter and stem wind.
+    const phase = frame.root.x
+      .mul(0.013)
+      .add(frame.root.z.mul(0.017))
+      .add(petal.x.mul(71).add(petal.z.mul(113)).div(height.y));
+    const amplitude = sin(borrowedWind.time.mul(2.1).add(phase))
+      .mul(clamp(borrowedWind.strength, 0, 2).mul(0.5))
+      .mul(min(borrowedWind.direction.length(), 1));
+    const coefficient = petal.w
+      .greaterThan(0)
+      .select(
+        amplitude
+          .mul(PETAL_GAIN)
+          .mul(min(worldHeight, 1))
+          .div(worldHeight.mul(worldHeight)),
+        float(0),
+      )
+      .toVar();
+    const radiusSquared = offset.x
+      .mul(offset.x)
+      .add(offset.z.mul(offset.z))
+      .toVar();
+    const radiusCap = worldHeight.mul(PETAL_RADIUS_RATIO).toVar();
+    const capSquared = radiusCap.mul(radiusCap);
+    // Defensive radial cap also covers tolerated instance-matrix roundoff.
+    // Actual admitted petals lie inside it; outside, the capped field has zero
+    // derivative. At the exact cap we use that zero one-sided convention.
+    const flutterY = coefficient.mul(min(radiusSquared, capSquared)).toVar();
+    const flutterSlope = radiusSquared
+      .lessThan(capSquared)
+      .select(coefficient.mul(2), float(0))
+      .toVar();
+    const flutterGradient = offset.xz.mul(flutterSlope).toVar();
     const bend = createTreeWindBendNodes(
-      attribute("flowerHeight", "vec2"),
+      vec2(height.x.add(flutterY.div(frame.scale)), height.y),
       frame,
       borrowedWind,
     );
     const derivative = bend.derivative.toVar();
     const normal = normalLocal.toVar();
+    // J_flutter^-T, then J_stem^-T evaluated at the fluttered height.
+    const flutterNormal = vec3(
+      normal.x.sub(flutterGradient.x.mul(normal.y)),
+      normal.y,
+      normal.z.sub(flutterGradient.y.mul(normal.y)),
+    ).toVar();
     normalLocal.assign(
       vec3(
-        normal.x,
-        normal.y
-          .sub(derivative.x.mul(normal.x))
-          .sub(derivative.y.mul(normal.z)),
-        normal.z,
+        flutterNormal.x,
+        flutterNormal.y
+          .sub(derivative.x.mul(flutterNormal.x))
+          .sub(derivative.y.mul(flutterNormal.z)),
+        flutterNormal.z,
       ).normalize(),
     );
     const displacement = bend.displacement.toVar();
-    return positionLocal.add(vec3(displacement.x, 0, displacement.y));
+    return positionLocal.add(vec3(displacement.x, flutterY, displacement.y));
   })();
   return material;
 }

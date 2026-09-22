@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { uniform } from "three/tsl";
+import { instanceIndex, normalLocal, positionLocal, uniform } from "three/tsl";
 import type { Node } from "three/webgpu";
 import THREE from "../../../../extras/three/three";
 import { createRootedFlowerGeometry } from "../../../../../../procgen/src/flowers/RootedFlowerGeometry";
@@ -7,15 +7,12 @@ import {
   INSTANCE_MATRIX_STORAGE_ATTRIBUTE,
   createStorageInstancedMesh,
 } from "../../../../utils/rendering/createStorageInstancedMesh";
-import {
-  TREE_WIND_ATTRIBUTE,
-  createTreeWindPositionNode,
-  evaluateTreeWindBend,
-} from "../TreeWind";
+import { evaluateTreeWindBend } from "../TreeWind";
 import {
   ROOTED_FLOWER_WIND_MAX_DISPLACEMENT,
   assertRootedFlowerPool,
   createRootedFlowerMaterial,
+  getRootedFlowerWindBounds,
   getRootedFlowerWindMaxDisplacement,
 } from "../RootedFlowerMaterial";
 
@@ -106,43 +103,215 @@ function nodes(roots: readonly Node[]): Set<Node> {
   return result;
 }
 
-// Compare against the existing connected-tree position/normal graph, changing
-// only its authored-height attribute name. No second arithmetic interpreter.
-function structure(roots: readonly Node[]): unknown {
-  const seen = new Map<Node, number>();
-  const visit = (current: Node): unknown => {
-    const previous = seen.get(current);
-    if (previous !== undefined) return { ref: previous };
-    if (seen.size >= 4096) throw new Error("Bounded graph exceeded");
-    seen.set(current, seen.size);
-    const value: unknown = Reflect.get(current, "value");
-    return {
-      type: current.type,
-      nodeType: current.nodeType,
-      fields: [
-        "op",
-        "method",
-        "components",
-        "name",
-        "snippet",
-        "_attributeName",
-      ]
-        .map((key) => Reflect.get(current, key))
-        .map((field) =>
-          field === TREE_WIND_ATTRIBUTE ? "flowerHeight" : field,
+// Bounded arithmetic traversal of the actual native graph, following the
+// existing TreeWind test convention. Not a renderer/device or GPU emulator.
+// Unknown operations fail; the graph reads the actual storage matrix array.
+function graphSample(
+  roots: readonly Node[],
+  f: ReturnType<typeof fixture>,
+  vertex: number,
+  authoredOverride?: THREE.Vector3,
+) {
+  const authored =
+    authoredOverride ??
+    new THREE.Vector3().fromBufferAttribute(
+      f.geometry.getAttribute("position"),
+      vertex,
+    );
+  const matrix = new THREE.Matrix4();
+  f.mesh.getMatrixAt(0, matrix);
+  const initialNormal = new THREE.Vector3()
+    .fromBufferAttribute(f.geometry.getAttribute("normal"), vertex)
+    .applyMatrix3(new THREE.Matrix3().getNormalMatrix(matrix));
+  const values = new Map<Node, number[]>([
+    [node(instanceIndex), [0]],
+    [node(positionLocal), authored.clone().applyMatrix4(matrix).toArray()],
+    [node(normalLocal), initialNormal.toArray()],
+  ]);
+  const cache = new Map<Node, number[]>();
+  const visit = (current: Node): number[] => {
+    const fixed = values.get(current) ?? cache.get(current);
+    if (fixed) return fixed;
+    if (cache.size >= 4096)
+      throw new Error("Bounded arithmetic graph exceeded");
+    const read = (name: string): unknown => Reflect.get(current, name);
+    const child = (name: string) => visit(node(read(name)));
+    const value = read("value");
+    const attributeName = read("_attributeName");
+    let result: number[];
+    if (read("isAssignNode")) {
+      const target = node(read("targetNode"));
+      result = child("sourceNode");
+      values.set(target, result);
+      cache.set(target, result);
+    } else if (typeof attributeName === "string") {
+      const attribute = f.geometry.getAttribute(attributeName);
+      result = Array.from(
+        attribute.array.slice(
+          vertex * attribute.itemSize,
+          (vertex + 1) * attribute.itemSize,
         ),
-      value:
-        typeof value === "number" || typeof value === "boolean"
-          ? value
-          : value instanceof THREE.Vector2 || value instanceof THREE.Vector3
-            ? value.toArray()
-            : value instanceof THREE.BufferAttribute
-              ? Array.from(value.array)
-              : undefined,
-      children: [...current.getChildren()].map(visit),
-    };
+      );
+      if (attributeName === "position") result = authored.toArray();
+      if (attributeName === "flowerHeight") result[0] = authored.y;
+    } else if (typeof value === "number" || typeof value === "boolean") {
+      result = [Number(value)];
+    } else if (
+      value instanceof THREE.Vector2 ||
+      value instanceof THREE.Vector3 ||
+      value instanceof THREE.Vector4
+    ) {
+      result = value.toArray();
+    } else if (value instanceof THREE.BufferAttribute) {
+      result = Array.from(value.array);
+    } else if (
+      current.type === "ArrayElementNode" ||
+      current.type === "StorageArrayElementNode"
+    ) {
+      const parent = node(read("node"));
+      const array = visit(parent);
+      const index = child("indexNode")[0];
+      const width = Reflect.get(parent, "isBufferNode") ? 16 : 4;
+      result = array.slice(index * width, (index + 1) * width);
+    } else if (
+      ["VarNode", "VaryingNode", "ConvertNode"].includes(current.type)
+    ) {
+      result = child("node");
+    } else if (current.type === "SplitNode") {
+      const source = child("node");
+      result = [...String(read("components"))].map(
+        (component) => source["xyzw".indexOf(component)],
+      );
+    } else if (current.type === "JoinNode") {
+      const children: unknown = read("nodes");
+      if (!Array.isArray(children)) throw new Error("Native joined nodes");
+      result = children.flatMap((item: unknown) => visit(node(item)));
+    } else if (current.type === "ConditionalNode") {
+      result = child("condNode")[0] ? child("ifNode") : child("elseNode");
+    } else {
+      const a = child("aNode");
+      const method = read("method");
+      if (method === "length") result = [Math.hypot(...a)];
+      else if (method === "normalize")
+        result = a.map((component) => component / Math.hypot(...a));
+      else if (method === "sin") result = a.map(Math.sin);
+      else {
+        const b = child("bNode");
+        if (read("op") === "*" && a.length === 16 && b.length === 4) {
+          result = new THREE.Vector4(b[0], b[1], b[2], b[3])
+            .applyMatrix4(new THREE.Matrix4().fromArray(a))
+            .toArray();
+        } else {
+          const c = read("cNode") instanceof THREE.Node ? child("cNode") : [0];
+          result = Array.from(
+            { length: Math.max(a.length, b.length, c.length) },
+            (_, index) => {
+              const x = a[a.length === 1 ? 0 : index];
+              const y = b[b.length === 1 ? 0 : index];
+              const z = c[c.length === 1 ? 0 : index];
+              switch (read("op")) {
+                case "+":
+                  return x + y;
+                case "-":
+                  return x - y;
+                case "*":
+                  return x * y;
+                case "/":
+                  return x / y;
+                case ">":
+                  return Number(x > y);
+                case "<":
+                  return Number(x < y);
+                case "&&":
+                  return Number(Boolean(x) && Boolean(y));
+              }
+              if (method === "min") return Math.min(x, y);
+              if (method === "max") return Math.max(x, y);
+              if (method === "clamp") return Math.min(z, Math.max(y, x));
+              throw new Error(
+                `Unknown native arithmetic ${current.type}/${String(method)}/${String(read("op"))}`,
+              );
+            },
+          );
+        }
+      }
+    }
+    if (result.some((component) => !Number.isFinite(component)))
+      throw new Error(`Nonfinite ${current.type}`);
+    cache.set(current, result);
+    return result;
   };
-  return roots.map(visit);
+  const result = roots.map(visit);
+  return {
+    position: new THREE.Vector3().fromArray(result[result.length - 1]),
+    normal: new THREE.Vector3().fromArray(visit(node(normalLocal))),
+  };
+}
+
+// Independent scalar statement of the documented composed equations. The
+// native graph is tested against this and differentiated directly below.
+function numericSample(
+  geometry: THREE.BufferGeometry,
+  matrix: THREE.Matrix4,
+  vertex: number,
+  time: number,
+  strength = 5,
+  direction = new THREE.Vector2(-3, 4),
+) {
+  const authored = new THREE.Vector3().fromBufferAttribute(
+    geometry.getAttribute("position"),
+    vertex,
+  );
+  const petal = geometry.getAttribute("flowerPetal");
+  const height = geometry.getAttribute("flowerHeight").getY(vertex);
+  const scale = new THREE.Vector3().setFromMatrixColumn(matrix, 1).length();
+  const root = new THREE.Vector3().setFromMatrixPosition(matrix);
+  const q = new THREE.Vector4(
+    authored.x - petal.getX(vertex),
+    authored.y - petal.getY(vertex),
+    authored.z - petal.getZ(vertex),
+    0,
+  ).applyMatrix4(matrix);
+  const worldHeight = height * scale;
+  const phase =
+    root.x * 0.013 +
+    root.z * 0.017 +
+    (71 * petal.getX(vertex) + 113 * petal.getZ(vertex)) / height;
+  const a =
+    ((Math.sin(time * 2.1 + phase) * Math.min(2, Math.max(0, strength))) / 2) *
+    Math.min(direction.length(), 1);
+  const k =
+    petal.getW(vertex) > 0
+      ? (0.6 * Math.min(worldHeight, 1) * a) / worldHeight ** 2
+      : 0;
+  const radiusSquared = q.x ** 2 + q.z ** 2;
+  const capSquared = (0.08 * worldHeight) ** 2;
+  const dy = k * Math.min(radiusSquared, capSquared);
+  const slope = radiusSquared < capSquared ? 2 * k : 0;
+  const gradient = new THREE.Vector2(slope * q.x, slope * q.z);
+  const input = {
+    heightAboveRoot: authored.y + dy / scale,
+    fullHeight: height,
+    scale,
+    rootX: root.x,
+    rootZ: root.z,
+    time,
+    strength,
+    directionX: direction.x,
+    directionZ: direction.y,
+  };
+  const bend = evaluateTreeWindBend(input);
+  const normal = new THREE.Vector3()
+    .fromBufferAttribute(geometry.getAttribute("normal"), vertex)
+    .applyMatrix3(new THREE.Matrix3().getNormalMatrix(matrix));
+  normal.x -= gradient.x * normal.y;
+  normal.z -= gradient.y * normal.y;
+  normal.y -= bend.derivative[0] * normal.x + bend.derivative[1] * normal.z;
+  const position = authored
+    .clone()
+    .applyMatrix4(matrix)
+    .add(new THREE.Vector3(bend.displacement[0], dy, bend.displacement[1]));
+  return { position, normal: normal.normalize(), dy, gradient, bend, input };
 }
 
 describe("inactive rooted flower material", () => {
@@ -200,7 +369,7 @@ describe("inactive rooted flower material", () => {
         graph.some(
           (item) => Reflect.get(item, "_attributeName") === "flowerPetal",
         ),
-      ).toBe(false); // Independent flutter is deliberately not implemented.
+      ).toBe(true);
       expect(graph.some((item) => Reflect.get(item, "isTextureNode"))).toBe(
         false,
       );
@@ -214,20 +383,40 @@ describe("inactive rooted flower material", () => {
     }
   });
 
-  it("retains the proven native position and inverse-transpose normal graph", () => {
+  it("composes flutter rather than claiming equality with the stem-only graph", () => {
     const f = fixture();
     try {
-      const flower = structure(expand(f.material.positionNode, f.mesh));
-      // A borrowed alias in this isolated fixture supplies the tree graph's
-      // exact same height values without cloning or allocating matrix storage.
-      f.geometry.setAttribute(
-        TREE_WIND_ATTRIBUTE,
-        f.geometry.getAttribute("flowerHeight"),
+      const graph = expand(f.material.positionNode, f.mesh);
+      const matrix = new THREE.Matrix4();
+      f.mesh.getMatrixAt(0, matrix);
+      const petal = f.geometry.getAttribute("flowerPetal");
+      const vertex = Array.from(
+        { length: petal.count },
+        (_, index) => index,
+      ).find((index) => petal.getW(index) === 1);
+      if (vertex === undefined) throw new Error("Actual petal tip missing");
+      const expected = numericSample(
+        f.geometry,
+        matrix,
+        vertex,
+        f.wind.time.value,
+        f.wind.strength.value,
+        f.wind.direction.value,
       );
-      expect(flower).toEqual(
-        structure(expand(createTreeWindPositionNode(f.wind), f.mesh)),
-      );
-      f.geometry.deleteAttribute(TREE_WIND_ATTRIBUTE);
+      const actual = graphSample(graph, f, vertex);
+      expect(Math.abs(expected.dy)).toBeGreaterThan(1e-7);
+      expect(actual.position.distanceTo(expected.position)).toBeLessThan(1e-12);
+      expect(actual.normal.distanceTo(expected.normal)).toBeLessThan(1e-12);
+      const oldBend = evaluateTreeWindBend({
+        ...expected.input,
+        heightAboveRoot: f.geometry.getAttribute("position").getY(vertex),
+      });
+      expect(
+        Math.hypot(
+          expected.bend.displacement[0] - oldBend.displacement[0],
+          expected.bend.displacement[1] - oldBend.displacement[1],
+        ),
+      ).toBeGreaterThan(1e-9);
     } finally {
       f.dispose();
     }
@@ -530,17 +719,207 @@ describe("inactive rooted flower material", () => {
 });
 
 describe("connected flower displacement contract", () => {
+  it.each([
+    { yaw: 0.6, scale: 0.8 },
+    { yaw: -1.2, scale: 3 },
+    { yaw: 1.7, scale: 0.1 },
+    { yaw: -0.4, scale: 10000 },
+  ])(
+    "matches the real native graph after yaw=$yaw scale=$scale and both wind stages",
+    ({ yaw, scale }) => {
+      const f = fixture();
+      f.mesh.setMatrixAt(
+        0,
+        new THREE.Matrix4().compose(
+          new THREE.Vector3(19, 3, -42),
+          new THREE.Quaternion().setFromAxisAngle(
+            new THREE.Vector3(0, 1, 0),
+            yaw,
+          ),
+          new THREE.Vector3().setScalar(scale),
+        ),
+      );
+      const matrix = new THREE.Matrix4();
+      f.mesh.getMatrixAt(0, matrix);
+      try {
+        const graph = expand(f.material.positionNode, f.mesh);
+        const petals = f.geometry.getAttribute("flowerPetal");
+        const selected = [0, 60, 70, 81, 82, 106, 107, 339, 340, 361];
+        for (const time of [0, 7.3, 100]) {
+          f.wind.time.value = time;
+          for (const vertex of selected) {
+            const expected = numericSample(
+              f.geometry,
+              matrix,
+              vertex,
+              time,
+              f.wind.strength.value,
+              f.wind.direction.value,
+            );
+            const actual = graphSample(graph, f, vertex);
+            expect(actual.position.distanceTo(expected.position)).toBeLessThan(
+              1e-10,
+            );
+            expect(actual.normal.distanceTo(expected.normal)).toBeLessThan(
+              1e-10,
+            );
+            expect(actual.normal.length()).toBeCloseTo(1, 12);
+            if (petals.getW(vertex) === 0)
+              expect(Math.abs(expected.dy)).toBe(0);
+          }
+        }
+        for (const zero of ["strength", "direction"] as const) {
+          f.wind.strength.value = zero === "strength" ? 0 : 1.3;
+          f.wind.direction.value.set(
+            zero === "direction" ? 0 : 0.6,
+            zero === "direction" ? 0 : 0.8,
+          );
+          for (const vertex of selected) {
+            const actual = graphSample(graph, f, vertex);
+            const original = new THREE.Vector3()
+              .fromBufferAttribute(f.geometry.getAttribute("position"), vertex)
+              .applyMatrix4(matrix);
+            expect(actual.position.toArray()).toEqual(original.toArray());
+          }
+        }
+      } finally {
+        f.dispose();
+      }
+    },
+  );
+
+  it.each([
+    { yaw: 0.6, scale: 0.8 },
+    { yaw: -1.2, scale: 3 },
+    { yaw: 1.7, scale: 0.1 },
+  ])(
+    "has the composed inverse-transpose normal by native graph finite differences: $yaw/$scale",
+    ({ yaw, scale }) => {
+      const f = fixture();
+      f.mesh.setMatrixAt(
+        0,
+        new THREE.Matrix4().compose(
+          new THREE.Vector3(19, 3, -42),
+          new THREE.Quaternion().setFromAxisAngle(
+            new THREE.Vector3(0, 1, 0),
+            yaw,
+          ),
+          new THREE.Vector3().setScalar(scale),
+        ),
+      );
+      const matrix = new THREE.Matrix4();
+      f.mesh.getMatrixAt(0, matrix);
+      const inverseLinear = new THREE.Matrix3().setFromMatrix4(matrix).invert();
+      try {
+        const graph = expand(f.material.positionNode, f.mesh);
+        for (const vertex of [87, 94, 105, 211]) {
+          const authored = new THREE.Vector3().fromBufferAttribute(
+            f.geometry.getAttribute("position"),
+            vertex,
+          );
+          const originalNormal = new THREE.Vector3()
+            .fromBufferAttribute(f.geometry.getAttribute("normal"), vertex)
+            .applyMatrix3(new THREE.Matrix3().getNormalMatrix(matrix))
+            .normalize();
+          const tangent = originalNormal
+            .clone()
+            .cross(new THREE.Vector3(1, 0, 0))
+            .normalize();
+          const bitangent = originalNormal.clone().cross(tangent).normalize();
+          const actual = graphSample(graph, f, vertex);
+          const epsilon =
+            f.geometry.getAttribute("flowerHeight").getY(vertex) * scale * 1e-4;
+          for (const direction of [tangent, bitangent]) {
+            const step = direction
+              .clone()
+              .multiplyScalar(epsilon)
+              .applyMatrix3(inverseLinear);
+            const plus = graphSample(
+              graph,
+              f,
+              vertex,
+              authored.clone().add(step),
+            ).position;
+            const minus = graphSample(
+              graph,
+              f,
+              vertex,
+              authored.clone().sub(step),
+            ).position;
+            const derivative = plus.sub(minus).multiplyScalar(0.5 / epsilon);
+            expect(Math.abs(actual.normal.dot(derivative))).toBeLessThan(2e-6);
+          }
+        }
+      } finally {
+        f.dispose();
+      }
+    },
+  );
+
+  it("has zero value and slope at the actual shared hinge and a bounded outer radial cap", () => {
+    const f = fixture();
+    try {
+      const graph = expand(f.material.positionNode, f.mesh);
+      const vertex = 82;
+      const petal = f.geometry.getAttribute("flowerPetal");
+      expect(petal.getW(vertex)).toBeGreaterThan(0);
+      const hinge = new THREE.Vector3(
+        petal.getX(vertex),
+        petal.getY(vertex),
+        petal.getZ(vertex),
+      );
+      const matrix = new THREE.Matrix4();
+      f.mesh.getMatrixAt(0, matrix);
+      const scale = new THREE.Vector3().setFromMatrixColumn(matrix, 1).length();
+      const height = f.geometry.getAttribute("flowerHeight").getY(vertex);
+      const atHinge = graphSample(graph, f, vertex, hinge);
+      const hingeWorld = hinge.clone().applyMatrix4(matrix);
+      expect(atHinge.position.y).toBe(hingeWorld.y);
+      const epsilon = height * 1e-4;
+      const plus = graphSample(
+        graph,
+        f,
+        vertex,
+        hinge.clone().add(new THREE.Vector3(epsilon, 0, 0)),
+      );
+      const minus = graphSample(
+        graph,
+        f,
+        vertex,
+        hinge.clone().sub(new THREE.Vector3(epsilon, 0, 0)),
+      );
+      expect(
+        Math.abs((plus.position.y - minus.position.y) / (2 * epsilon * scale)),
+      ).toBeLessThan(1e-10);
+      const bounds = getRootedFlowerWindBounds(height, scale);
+      const outside = hinge.clone().add(new THREE.Vector3(height * 0.09, 0, 0));
+      const farther = hinge.clone().add(new THREE.Vector3(height * 0.1, 0, 0));
+      const capped = graphSample(graph, f, vertex, outside);
+      const cappedFarther = graphSample(graph, f, vertex, farther);
+      expect(
+        Math.abs(capped.position.y - outside.clone().applyMatrix4(matrix).y),
+      ).toBeLessThanOrEqual(bounds.y + 1e-12);
+      expect(capped.position.y).toBe(cappedFarther.position.y);
+      expect(capped.normal.distanceTo(cappedFarther.normal)).toBeLessThan(
+        1e-12,
+      );
+    } finally {
+      f.dispose();
+    }
+  });
+
   it.each([0.12, 0.38, 0.8])(
     "keeps roots fixed and all scaled vertices inside expanded static bounds: %s",
     (height) => {
       const geometry = createRootedFlowerGeometry({ height });
       const authored = geometry.getAttribute("flowerHeight");
       const position = geometry.getAttribute("position");
+      const petals = geometry.getAttribute("flowerPetal");
       const fullHeight = authored.getY(0);
       try {
         for (const scale of [0.1, 1, 3, 10000]) {
-          const bound = getRootedFlowerWindMaxDisplacement(fullHeight, scale);
-          expect(bound).toBeLessThanOrEqual(
+          const bounds = getRootedFlowerWindBounds(fullHeight, scale);
+          expect(bounds.sphere).toBeLessThanOrEqual(
             ROOTED_FLOWER_WIND_MAX_DISPLACEMENT,
           );
           const matrix = new THREE.Matrix4().compose(
@@ -551,55 +930,82 @@ describe("connected flower displacement contract", () => {
             ),
             new THREE.Vector3().setScalar(scale),
           );
-          if (!geometry.boundingBox) throw new Error("Missing static bounds");
+          if (
+            !geometry.boundingBox ||
+            !geometry.boundingSphere ||
+            !geometry.index
+          )
+            throw new Error("Missing static bounds/index");
           const box = geometry.boundingBox
             .clone()
             .applyMatrix4(matrix)
-            .expandByVector(new THREE.Vector3(bound, 0, bound));
+            .expandByVector(new THREE.Vector3(bounds.x, bounds.y, bounds.z));
+          const sphere = geometry.boundingSphere.clone().applyMatrix4(matrix);
+          sphere.radius += bounds.sphere;
           for (const time of [0, 7.3, 100]) {
+            const deformed: THREE.Vector3[] = [];
             for (let index = 0; index < position.count; index++) {
-              const input = {
-                heightAboveRoot: authored.getX(index),
-                fullHeight,
-                scale,
-                rootX: 29,
-                rootZ: -81,
-                time,
-                strength: 5,
-                directionX: -3,
-                directionZ: 4,
-              };
-              const bend = evaluateTreeWindBend(input);
-              expect(Math.hypot(...bend.displacement)).toBeLessThanOrEqual(
-                bound + 1e-12,
-              );
-              if (input.heightAboveRoot === 0) {
-                expect(Math.hypot(...bend.displacement)).toBe(0);
-                expect(Math.hypot(...bend.derivative)).toBe(0);
-              }
-              const world = new THREE.Vector3()
+              const sample = numericSample(geometry, matrix, index, time);
+              const original = new THREE.Vector3()
                 .fromBufferAttribute(position, index)
                 .applyMatrix4(matrix);
-              const y = world.y;
-              world.x += bend.displacement[0];
-              world.z += bend.displacement[1];
-              expect(world.y).toBe(y);
-              expect(box.containsPoint(world)).toBe(true);
+              expect(Math.abs(sample.dy)).toBeLessThanOrEqual(bounds.y + 1e-12);
               expect(
-                Math.hypot(
-                  ...evaluateTreeWindBend({ ...input, strength: 0 })
-                    .displacement,
-                ),
-              ).toBe(0);
+                Math.hypot(...sample.bend.displacement),
+              ).toBeLessThanOrEqual(bounds.x + 1e-12);
+              expect(sample.position.distanceTo(original)).toBeLessThanOrEqual(
+                bounds.sphere + 1e-10,
+              );
+              if (authored.getX(index) === 0)
+                expect(sample.position.toArray()).toEqual(original.toArray());
+              if (petals.getW(index) === 0) {
+                expect(Math.abs(sample.dy)).toBe(0);
+                expect(sample.gradient.length()).toBe(0);
+              }
+              expect(box.containsPoint(sample.position)).toBe(true);
+              expect(sphere.containsPoint(sample.position)).toBe(true);
               expect(
-                Math.hypot(
-                  ...evaluateTreeWindBend({
-                    ...input,
-                    directionX: 0,
-                    directionZ: 0,
-                  }).displacement,
-                ),
-              ).toBe(0);
+                numericSample(
+                  geometry,
+                  matrix,
+                  index,
+                  time,
+                  0,
+                ).position.toArray(),
+              ).toEqual(original.toArray());
+              expect(
+                numericSample(
+                  geometry,
+                  matrix,
+                  index,
+                  time,
+                  5,
+                  new THREE.Vector2(),
+                ).position.toArray(),
+              ).toEqual(original.toArray());
+              deformed.push(sample.position);
+            }
+            // Rendered triangles are affine interpolations of these vertices.
+            // Convex expanded boxes/spheres contain their entire surfaces.
+            for (
+              let triangle = 0;
+              triangle < geometry.index.count;
+              triangle += 3
+            ) {
+              const [a, b, c] = [0, 1, 2].map(
+                (offset) =>
+                  deformed[geometry.index?.getX(triangle + offset) ?? 0],
+              );
+              const center = a
+                .clone()
+                .add(b)
+                .add(c)
+                .multiplyScalar(1 / 3);
+              expect(box.containsPoint(center)).toBe(true);
+              expect(sphere.containsPoint(center)).toBe(true);
+              expect(
+                b.clone().sub(a).cross(c.clone().sub(a)).lengthSq(),
+              ).toBeGreaterThan(1e-30);
             }
           }
         }
@@ -609,17 +1015,18 @@ describe("connected flower displacement contract", () => {
     },
   );
 
-  it("scales the flower-specific world bound before the shared amplitude cap", () => {
-    expect(getRootedFlowerWindMaxDisplacement(0.38, 1)).toBeCloseTo(
-      0.01368,
-      12,
-    );
-    expect(getRootedFlowerWindMaxDisplacement(0.38, 3)).toBeCloseTo(
-      0.04104,
-      12,
-    );
-    expect(getRootedFlowerWindMaxDisplacement(0.8, 10000)).toBe(0.36);
-    expect(ROOTED_FLOWER_WIND_MAX_DISPLACEMENT).toBe(0.36);
+  it("exports explicit combined XYZ and sphere bounds, never a stem-only full bound", () => {
+    const small = getRootedFlowerWindBounds(0.38, 1);
+    expect(small.x).toBeCloseTo(0.01368, 12);
+    expect(small.z).toBe(small.x);
+    expect(small.y).toBeCloseTo(0.00384 * 0.38, 12);
+    expect(small.sphere).toBe(Math.hypot(small.x, small.y));
+    expect(getRootedFlowerWindMaxDisplacement(0.38, 1)).toBe(small.sphere);
+    expect(getRootedFlowerWindBounds(0.38, 3).x).toBeCloseTo(0.04104, 12);
+    const capped = getRootedFlowerWindBounds(0.8, 10000);
+    expect(capped.x).toBe(0.36);
+    expect(capped.y).toBeCloseTo(0.00384, 12);
+    expect(capped.sphere).toBe(ROOTED_FLOWER_WIND_MAX_DISPLACEMENT);
   });
 
   it.each([
@@ -637,5 +1044,99 @@ describe("connected flower displacement contract", () => {
     expect(() => getRootedFlowerWindMaxDisplacement(height, scale)).toThrow(
       /bounds input/,
     );
+    expect(() => getRootedFlowerWindBounds(height, scale)).toThrow(
+      /bounds input/,
+    );
+  });
+});
+
+describe("petal attachment admission", () => {
+  const petalVertices = (f: ReturnType<typeof fixture>) => {
+    const petal = f.geometry.getAttribute("flowerPetal");
+    return Array.from({ length: petal.count }, (_, vertex) => vertex).filter(
+      (vertex) => petal.getW(vertex) > 0,
+    );
+  };
+
+  it.each([
+    [
+      "no petal groups",
+      (f: ReturnType<typeof fixture>) => {
+        for (const vertex of petalVertices(f))
+          f.geometry.getAttribute("flowerPetal").setW(vertex, 0);
+      },
+    ],
+    [
+      "inconsistent hinge in one triangle",
+      (f: ReturnType<typeof fixture>) => {
+        const vertex = petalVertices(f)[0];
+        const petal = f.geometry.getAttribute("flowerPetal");
+        petal.setX(vertex, petal.getX(vertex) + 0.0001);
+      },
+    ],
+    [
+      "missing exact shared hinge",
+      (f: ReturnType<typeof fixture>) => {
+        const petal = f.geometry.getAttribute("flowerPetal");
+        const reference = petalVertices(f)[0];
+        const key = [
+          petal.getX(reference),
+          petal.getY(reference),
+          petal.getZ(reference),
+        ];
+        for (const vertex of petalVertices(f)) {
+          if (
+            petal.getX(vertex) === key[0] &&
+            petal.getY(vertex) === key[1] &&
+            petal.getZ(vertex) === key[2]
+          )
+            petal.setY(vertex, key[1] + 0.0001);
+        }
+      },
+    ],
+    [
+      "stationary vertex inside a petal",
+      (f: ReturnType<typeof fixture>) => {
+        f.geometry.getAttribute("flowerPetal").setW(petalVertices(f)[0], 0);
+      },
+    ],
+    [
+      "radius outside declared envelope",
+      (f: ReturnType<typeof fixture>) => {
+        const vertex = petalVertices(f)[0];
+        const petal = f.geometry.getAttribute("flowerPetal");
+        f.geometry
+          .getAttribute("position")
+          .setX(
+            vertex,
+            petal.getX(vertex) +
+              0.081 * f.geometry.getAttribute("flowerHeight").getY(vertex),
+          );
+      },
+    ],
+    [
+      "root vertex marked as a petal",
+      (f: ReturnType<typeof fixture>) => {
+        f.geometry.getAttribute("flowerPetal").setXYZW(0, 0, 0, 0, 0.2);
+      },
+    ],
+  ] as const)("rejects %s without mutating geometry", (_label, mutate) => {
+    const f = fixture();
+    try {
+      mutate(f);
+      const before = Object.entries(f.geometry.attributes).map(
+        ([name, attribute]) => [name, Array.from(attribute.array)],
+      );
+      expect(() => assertRootedFlowerPool(f.mesh)).toThrow(/flower/);
+      expect(() => expand(f.material.positionNode, f.mesh)).toThrow(/flower/);
+      expect(
+        Object.entries(f.geometry.attributes).map(([name, attribute]) => [
+          name,
+          Array.from(attribute.array),
+        ]),
+      ).toEqual(before);
+    } finally {
+      f.dispose();
+    }
   });
 });

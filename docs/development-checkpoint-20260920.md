@@ -1,5 +1,56 @@
 # World graphics development checkpoint — 2026-09-20
 
+## 2026-09-22 checkpoint — bounded petal flutter and live resource clearance
+
+- [x] Rooted flower shader composes a small quadratic petal shear before stem
+  bending, using the borrowed per-world wind nodes and existing instance buffer.
+  Shared hinges have zero flutter value/slope; both stages correct normals.
+  Combined bounds now explicitly include X/Y/Z and sphere expansion.
+- [x] Serialized material/tree-wind regression: **105/105** cases pass
+  (`rooted-flower-material03`), including real native graph arithmetic,
+  finite-difference normals, scaled vertex/triangle bounds and malformed hinges.
+- [x] Native Apple/Metal WebGPU `rooted-flower-native04` and `05` PASS:
+  13 and 15 actual 768² captures respectively, including flower-head close-ups.
+  Both main and shadow passes consume petal metadata. Each retains two read-only
+  matrix declarations sharing one GPU allocation; seven submitted flower buffers
+  retire exactly once. No GPU/cleanup errors; source pins and input arrays stable.
+  These are isolated rendering diagnostics, not island/performance acceptance.
+- [x] Inactive `FlowerResourceClearance` reads actual client ResourceEntity actors,
+  including network-only trees/ore. It retains depleted/regrowth reservations,
+  conservatively encloses occupied/cardinal approach tiles plus flower reach,
+  and reserves the maximum supported footprint when client metadata is absent.
+  Detached snapshots re-scan membership, live transforms and actor identity before
+  publication; caps are 4,096 scanned entities / 512 obstacles and fail closed.
+  **29/29** actual World/ResourceEntity CPU tests pass (`flower-resource-clearance01`).
+- [x] Full shared + explicit source/test types: 746 roots / 2,429 source files,
+  zero diagnostics and stable pins (`living-world-foundations-types04`).
+  Scoped lint/format and independent read-only reviews pass.
+- [ ] **Visual quality still open:** macro casting-on/off comparison in native05
+  removes the harsh petal striping when casting is off (19,288 affected foreground
+  pixels). This identifies self-shadow contribution in the isolated light setup,
+  not an approved solution. Do not promote a no-shadow default or change global
+  island bias/map budgets from this fixture. Review silhouette, color, normals,
+  self-shadow policy and actual island-scale appearance together.
+- [ ] Integrate sparse deterministic patches with actual retained triangles and
+  fresh terrain/road/water/exclusion leases, full wind reach, bounded scheduling,
+  distance transitions and chunk retirement. Resource snapshots are not lifetime
+  subscriptions: later additions/relocations still require owner revalidation.
+  Existing disabled billboard flowers remain disabled; no new world default.
+- [ ] Falling leaves, integrated meadow visual/cost approval, and native grass
+  scalar-optimization verification remain open. The earlier native110 startup
+  failure is not resolved by these flower checks. Final performance needs a
+  quiet host window; concurrent gaming is acceptable for source work.
+- [x] Private preview runtimes04/05 stopped and their Chrome/HTTP owners closed.
+  Protected 145 compiled artifacts/retained lock remain unchanged; localhost3333
+  still returns HTTP200. No game server/DB restart, install, or canonical build.
+
+Applied official r186 contracts: shared visible/shadow deformation and native
+instance ordering ([NodeMaterial](https://raw.githubusercontent.com/mrdoob/three.js/r186/src/materials/nodes/NodeMaterial.js),
+[Renderer](https://raw.githubusercontent.com/mrdoob/three.js/r186/src/renderers/common/Renderer.js)),
+explicit animated bounds ([InstancedMesh](https://raw.githubusercontent.com/mrdoob/three.js/r186/src/objects/InstancedMesh.js)),
+and static matrix ownership instead of copying the per-frame uploads in the
+[official instancing example](https://threejs.org/examples/webgpu_instance_mesh.html).
+
 ## Regional meadow and grass census — 2026-09-22
 
 - [x] Repair the historical grass-shortcut census without changing geometry,
