@@ -1,5 +1,49 @@
 # Compact island environment art: next delivery slice
 
+## 2026-09-22 — compact flower groups: source verified, native art gate still open
+
+- [x] Change only candidate X/Z distribution: four keyed positions per 8 m cell
+  now share an irregular rotated group, with a pre-Float32 diameter at most 1.9 m.
+  Patch/acceptance/yaw/scale lanes, 484 attempts, 512 slots, 0.50 m owner height,
+  grass settings, cooperative yields and all terrain/resource exclusions remain.
+  Accepted populations may change because habitat and exclusions use the new roots.
+- [x] Verify deterministic matrices, common-cell stability, candidate key limits,
+  extreme-coordinate Float32 spacing, actual factory swept-envelope separation
+  and existing currentness/clearance behavior. Separation applies to supported
+  factory flowers, not every arbitrary geometry accepted by the generic placer.
+- [x] Source qualification: rooted-flower-cluster-source01 **833/833 tests in
+  15 suites**; types07 **750 roots / 2456 sources, zero diagnostics, stable pins**;
+  cluster-lint01 (11 files), scoped format and independent review pass.
+  Isolated build59 has nine bundles / 1096 inputs; only placement source differs
+  from build58. Protected canonical output and package installations unchanged.
+- [ ] Native118/build59/runtime88 **FAILED the original 90-second startup gate**;
+  no comparison views were reached. Grass was 86/122 ready, with a failed worker
+  surface admission: node49, resolution128, 1,728,164 input bytes; raw worker
+  270.4 ms / 2413 operations / 96 ms maximum interval, merged 273.8 ms against
+  the unchanged 250 ms limit. `topology-side` is the last yielded phase, not
+  proof that its sort caused the peak interval. Keep this failure as evidence.
+- [x] Flower owner at that failed startup was current, ready, 49 instances and
+  zero failed jobs. Raw maxima: update 3.4 ms, validation 0.9 ms, publication
+  1.1 ms; nine soft-slice overruns. This is diagnostic, not frame-budget approval.
+  All 19 host observations were nominal / AC / awake; another game was active.
+  Do not attribute the failure to that game without evidence.
+- [x] Owned browser closed, source pins unchanged, runtime88 and children stopped,
+  private temporary database removed. Protected 145 artifacts / retained lock /
+  playable localhost:3333 remain intact. No default visual profile promoted.
+- [ ] Next: measure worker surface-admission intervals and reduce verified work /
+  allocation cost without raising budgets, hiding time, skipping validation or
+  treating a retry as a fix. Then capture flower groups and coherent whole-tree
+  wind in actual island motion. Root contact, petal shadows, movement handoff,
+  falling leaves, quiet-host performance and overall art quality remain open.
+
+Reference: [official Three.js WebGPU instancing example](https://threejs.org/examples/webgpu_instance_mesh.html).
+Bounded shared instancing remains the rendering approach; the grouping layout is
+our art hypothesis, **not yet visually approved** and not a claim from that demo.
+Evidence: `inland-pond-integration01-UNQUALIFIED/native118/process.json`,
+`runtime88/process.json`, `isolated-build59-report.json`, and
+`service-layout-network01-UNQUALIFIED/rooted-flower-cluster-source01.json`.
+
+
 ## 2026-09-22 checkpoint — flower scale in the actual grass canopy
 
 - [x] Native116/build57 captures two close views of an EXISTING accepted island

@@ -7,6 +7,7 @@ import { createRootedFlowerGeometry } from "../../../../../../procgen/src/flower
 import type { GrassTerrainSurfaceSnapshot } from "../../../../utils/workers/GrassTerrainSurfaceSnapshot";
 import { createStorageInstancedMesh } from "../../../../utils/rendering/createStorageInstancedMesh";
 import { captureFlowerResourceClearance } from "../FlowerResourceClearance";
+import { getRootedFlowerWindBounds } from "../RootedFlowerMaterial";
 import type { GrassGroundingInputLease } from "../GrassGroundingPipeline";
 import type { GrassGroundingRoadSegment } from "../GrassBladeGrounding";
 import {
@@ -17,6 +18,7 @@ import type { RetainedTerrainRegion } from "../TerrainVisualManager";
 import {
   ROOTED_FLOWER_PLACEMENT_LIMITS,
   createRootedFlowerPlacementSteps,
+  getRootedFlowerCandidatePosition,
   getRootedFlowerPlacementBounds,
   type RootedFlowerPlacementRequest,
   type RootedFlowerPlacementResult,
@@ -114,6 +116,20 @@ function rows(result: RootedFlowerPlacementResult) {
   );
 }
 
+// Frozen pre-grouping hash arithmetic, independent of the production helper.
+// Lanes 100 (patch), ordinal*8+2/+3/+4 (acceptance/yaw/scale) must not change.
+function originalFlowerHash(seed: number, x: number, z: number, lane: number) {
+  let value =
+    (seed ^
+      Math.imul(x, 0x9e3779b1) ^
+      Math.imul(z, 0x85ebca77) ^
+      Math.imul(lane, 0xc2b2ae3d)) >>>
+    0;
+  value = Math.imul(value ^ (value >>> 16), 0x7feb352d);
+  value = Math.imul(value ^ (value >>> 15), 0x846ca68b);
+  return ((value ^ (value >>> 16)) >>> 0) / 0x100000000;
+}
+
 function addTree(world: World, x: number, z: number) {
   const entity = new ResourceEntity(world, {
     id: "flower-test-tree",
@@ -159,6 +175,176 @@ function addTree(world: World, x: number, z: number) {
 }
 
 describe("bounded rooted flower placement", () => {
+  it("rejects candidate keys outside the continuation's admitted cell domain", () => {
+    for (const [seed, cx, cz, ordinal] of [
+      [NaN, 0, 0, 0],
+      [-2147483649, 0, 0, 0],
+      [0x100000000, 0, 0, 0],
+      [0, 0.5, 0, 0],
+      [0, -(2 ** 17) - 6, 0, 0],
+      [0, 0, 2 ** 17 + 5, 0],
+      [0, 0, 0, -1],
+      [0, 0, 0, 4],
+    ]) {
+      expect(() =>
+        getRootedFlowerCandidatePosition(seed, cx, cz, ordinal),
+      ).toThrow(/bounded rooted flower candidate/);
+    }
+  });
+
+  it("keeps compact candidates separated for supported factory geometry even at extreme Float32 cells", () => {
+    let maximumFactoryReach = 0;
+    for (const requestedHeight of [0.12, 0.38, 0.5, 0.8]) {
+      const geometry = createRootedFlowerGeometry({ height: requestedHeight });
+      cleanups.push(() => geometry.dispose());
+      const position = geometry.getAttribute("position");
+      const height = geometry.getAttribute("flowerHeight").getY(0);
+      let radius = 0;
+      for (let vertex = 0; vertex < position.count; vertex++)
+        radius = Math.max(
+          radius,
+          Math.hypot(position.getX(vertex), position.getZ(vertex)),
+        );
+      const scale = Math.fround(ROOTED_FLOWER_PLACEMENT_LIMITS.maxScale);
+      const wind = getRootedFlowerWindBounds(height, scale);
+      const reach =
+        radius * scale * (1 + 2e-6) + Math.hypot(wind.x, wind.z) + 1e-5;
+      maximumFactoryReach = Math.max(maximumFactoryReach, reach);
+      expect(
+        getRootedFlowerPlacementBounds(geometry, { x: 4, z: 4 }).maxX - 48,
+      ).toBeCloseTo(reach, 12);
+    }
+    // All factory positions scale linearly with requested height. Below 0.8m,
+    // the uncapped wind envelope is monotone, so 0.8m bounds intermediate sizes.
+    // Generic admitted geometry can be wider: this is not a new placement gate.
+    const nominalMinimum = 2 * 0.65 * Math.sin((Math.PI / 2 - 0.24) / 2);
+    expect(nominalMinimum).toBeGreaterThan(0.8);
+    const pairRoundingAllowance = Math.SQRT2 / 8;
+    expect(nominalMinimum - pairRoundingAllowance).toBeGreaterThan(
+      2 * maximumFactoryReach,
+    );
+    // Distinct cells retain >=0.75m inset on both sides of their shared edge.
+    expect(1.5).toBeGreaterThan(2 * maximumFactoryReach);
+    const cells = [
+      [0, 0],
+      [-1, -1],
+      [55, 51],
+      [-(2 ** 17) - 5, -(2 ** 17) - 5],
+      [2 ** 17 + 4, 2 ** 17 + 4],
+      [-(2 ** 17) - 5, 2 ** 17 + 4],
+      [2 ** 17 + 4, -(2 ** 17) - 5],
+      [2 ** 17 - 1, 2 ** 17],
+    ] as const;
+    for (const seed of [-2147483648, -1, 0, 1, 1728, 0xffffffff])
+      for (const [cx, cz] of cells) {
+        const candidates = Array.from({ length: 4 }, (_, ordinal) =>
+          getRootedFlowerCandidatePosition(seed, cx, cz, ordinal),
+        );
+        for (const [ordinal, candidate] of candidates.entries()) {
+          const angle =
+            originalFlowerHash(seed, cx, cz, 1002) * Math.PI * 2 +
+            ordinal * (Math.PI / 2) +
+            (originalFlowerHash(seed, cx, cz, ordinal * 8) - 0.5) * 0.24;
+          const radius =
+            0.65 + originalFlowerHash(seed, cx, cz, ordinal * 8 + 1) * 0.3;
+          expect(candidate).toEqual({
+            x: Math.fround(
+              cx * 8 +
+                1.75 +
+                originalFlowerHash(seed, cx, cz, 1000) * 4.5 +
+                Math.cos(angle) * radius,
+            ),
+            z: Math.fround(
+              cz * 8 +
+                1.75 +
+                originalFlowerHash(seed, cx, cz, 1001) * 4.5 +
+                Math.sin(angle) * radius,
+            ),
+          });
+          expect(candidate.x).toBeGreaterThanOrEqual(cx * 8 + 0.75);
+          expect(candidate.x).toBeLessThanOrEqual(cx * 8 + 7.25);
+          expect(candidate.z).toBeGreaterThanOrEqual(cz * 8 + 0.75);
+          expect(candidate.z).toBeLessThanOrEqual(cz * 8 + 7.25);
+          for (const other of candidates.slice(ordinal + 1)) {
+            const distance = Math.hypot(
+              candidate.x - other.x,
+              candidate.z - other.z,
+            );
+            expect(distance).toBeGreaterThanOrEqual(
+              nominalMinimum - pairRoundingAllowance - 1e-12,
+            );
+            expect(distance).toBeLessThanOrEqual(
+              1.9 + pairRoundingAllowance + 1e-12,
+            );
+            expect(distance).toBeGreaterThan(2 * maximumFactoryReach);
+          }
+        }
+      }
+  });
+
+  it.each([1, 0.63])(
+    "preserves original patch, acceptance, yaw and scale lanes with habitat %s",
+    (habitat) => {
+      const f = fixture(() => 10);
+      const seed = 1728;
+      const actual = drain(f.request({ seed, grassPlacement: () => habitat }));
+      const expected: number[] = [];
+      let groupedCells = 0;
+      for (let cx = -5; cx <= 5; cx++)
+        for (let cz = -5; cz <= 5; cz++) {
+          const patch = originalFlowerHash(
+            seed,
+            Math.floor(cx / 3),
+            Math.floor(cz / 3),
+            100,
+          );
+          let acceptedInCell = 0;
+          for (let ordinal = 0; ordinal < 4; ordinal++) {
+            const { x, z } = getRootedFlowerCandidatePosition(
+              seed,
+              cx,
+              cz,
+              ordinal,
+            );
+            if (
+              Math.hypot(x - 4, z - 4) > 40 ||
+              patch > 0.42 ||
+              originalFlowerHash(seed, cx, cz, ordinal * 8 + 2) >=
+                habitat * (0.25 + 0.5 * (1 - patch / 0.42))
+            )
+              continue;
+            const yaw =
+              originalFlowerHash(seed, cx, cz, ordinal * 8 + 3) * Math.PI * 2;
+            const scale =
+              0.85 + originalFlowerHash(seed, cx, cz, ordinal * 8 + 4) * 0.3;
+            expected.push(
+              ...new THREE.Matrix4().compose(
+                new THREE.Vector3(x, 10, z),
+                new THREE.Quaternion().setFromAxisAngle(
+                  new THREE.Vector3(0, 1, 0),
+                  yaw,
+                ),
+                new THREE.Vector3(scale, scale, scale),
+              ).elements,
+            );
+            acceptedInCell++;
+          }
+          if (acceptedInCell >= 2) groupedCells++;
+        }
+      expect(groupedCells).toBeGreaterThan(0);
+      expect(actual.result.matrices).toEqual(new Float32Array(expected));
+      expect(actual.result.diagnostics.candidates).toBe(484);
+      expect(
+        actual.phases.filter((phase) => phase === "flower_candidate"),
+      ).toHaveLength(484);
+      expect(actual.result.count).toBe(expected.length / 16);
+      expect(ROOTED_FLOWER_PLACEMENT_LIMITS.candidatesPerCell).toBe(4);
+      expect(actual.result.count).toBeLessThanOrEqual(
+        ROOTED_FLOWER_PLACEMENT_LIMITS.maxCandidates,
+      );
+    },
+  );
+
   it("is deterministic, sparse, detached, and forwards each fresh input step once", () => {
     const f = fixture();
     const before = Array.from(f.geometry.getAttribute("position").array);

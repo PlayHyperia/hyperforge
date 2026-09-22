@@ -89,6 +89,46 @@ function hash(seed: number, x: number, z: number, ordinal: number): number {
   return ((value ^ (value >>> 16)) >>> 0) / 0x100000000;
 }
 
+/** Four compact candidates in an admitted world cell, independent of focus.
+ * Only XZ changes: the continuation retains its original patch, acceptance,
+ * yaw and scale lanes. Before Float32 rounding, diameter is <=1.9m and pair
+ * separation >0.8m. Extreme admitted coordinates require rounding allowance;
+ * factory-envelope separation is tested, not promised for arbitrary geometry.
+ */
+export function getRootedFlowerCandidatePosition(
+  seed: number,
+  cellX: number,
+  cellZ: number,
+  ordinal: number,
+): Readonly<{ x: number; z: number }> {
+  if (
+    !Number.isSafeInteger(seed) ||
+    seed < -2147483648 ||
+    seed > 0xffffffff ||
+    !Number.isSafeInteger(cellX) ||
+    !Number.isSafeInteger(cellZ) ||
+    cellX < -(2 ** 17) - 5 ||
+    cellX > 2 ** 17 + 4 ||
+    cellZ < -(2 ** 17) - 5 ||
+    cellZ > 2 ** 17 + 4 ||
+    !Number.isInteger(ordinal) ||
+    ordinal < 0 ||
+    ordinal >= 4
+  )
+    throw new Error("Invalid bounded rooted flower candidate");
+  const anchorX = cellX * 8 + 1.75 + hash(seed, cellX, cellZ, 1000) * 4.5;
+  const anchorZ = cellZ * 8 + 1.75 + hash(seed, cellX, cellZ, 1001) * 4.5;
+  const angle =
+    hash(seed, cellX, cellZ, 1002) * Math.PI * 2 +
+    ordinal * (Math.PI / 2) +
+    (hash(seed, cellX, cellZ, ordinal * 8) - 0.5) * 0.24;
+  const radius = 0.65 + hash(seed, cellX, cellZ, ordinal * 8 + 1) * 0.3;
+  return {
+    x: Math.fround(anchorX + Math.cos(angle) * radius),
+    z: Math.fround(anchorZ + Math.sin(angle) * radius),
+  };
+}
+
 function overlap(a: TerrainGridBounds, b: TerrainGridBounds): boolean {
   return (
     a.minX <= b.maxX && a.maxX >= b.minX && a.minZ <= b.maxZ && a.maxZ >= b.minZ
@@ -543,18 +583,18 @@ export function* createRootedFlowerPlacementSteps(
     centerZ = (origin.z - 4) / 8;
   for (let cx = centerX - 5; cx <= centerX + 5; cx++)
     for (let cz = centerZ - 5; cz <= centerZ + 5; cz++) {
-      // Sparse neighboring-cell clusters share a broad habitat gate; every draw
-      // still has its own keyed position/yaw/scale/acceptance stream.
+      // The broad habitat gate is unchanged. Four local candidates now share
+      // a compact cell anchor, with independent acceptance/yaw/scale as before.
       const patch = hash(seed, Math.floor(cx / 3), Math.floor(cz / 3), 100);
       for (let ordinal = 0; ordinal < 4; ordinal++) {
         yield "flower_candidate";
         check();
         diagnostics.candidates++;
-        const x = Math.fround(
-          cx * 8 + 0.75 + hash(seed, cx, cz, ordinal * 8) * 6.5,
-        );
-        const z = Math.fround(
-          cz * 8 + 0.75 + hash(seed, cx, cz, ordinal * 8 + 1) * 6.5,
+        const { x, z } = getRootedFlowerCandidatePosition(
+          seed,
+          cx,
+          cz,
+          ordinal,
         );
         if (Math.hypot(x - origin.x, z - origin.z) > 40) {
           diagnostics.rejected.horizon++;
