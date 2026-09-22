@@ -1,5 +1,59 @@
 # Duel Arena, Streaming, and Hyperbet Launch Checklist
 
+## 2026-09-22 — surface-admission diagnostics and grouped-flower review
+
+- [x] Add failure-only worker surface-preparation peak-slice and clock-interval
+  receipts. Reuse existing clock reads and two bounded records; do not change
+  yields, operation/time caps, elapsed-time accounting or failure caching.
+  Strict transport validation and frozen, detached coordinator receipts preserve
+  local-versus-seeded timing. Successful/cancelled responses omit timing.
+- [x] Source verification: surface-admission-timing-source02 passes 122/122 tests
+  across three test files; types09 checks 750 roots / 2456 sources with zero
+  diagnostics and stable pins; eight-file lint02 and scoped format pass.
+  The earlier types08 test-only library compatibility failure is retained and
+  corrected without changing the production timing behavior.
+- [x] Reconstruct the failed native118 surface at center (350,450), resolution128,
+  using the actual assets-v10 manifests and production retained-terrain path.
+  Pin position/index/topology bytes and source inputs. The selected real-worker
+  fixture passes: 1 selected test, 18 unrelated scenarios skipped. Preparation
+  uses 18,017 operations / 54.082 ms active / 2.939 ms maximum slice in this
+  Node diagnostic. This is NOT replay of the lost historical packet, browser
+  performance proof, or attribution of native118's 96 ms interval.
+- [x] Isolated build60 has nine bundles / 1096 pinned inputs; exactly four
+  production sources differ from build59, all in preparation timing/transport.
+  No geometry, placement, density, grass settings or visual defaults changed.
+- [x] Native119 on actual Chrome/Metal WebGPU captures the two original wide
+  views at 1280x720: startup 40.592 s, grass 122/122, zero capture errors,
+  unchanged 90 s startup / 30 s camera gates and 250 ms per-worker budget.
+  Twelve host samples are nominal / AC / awake; another game remains active.
+  Native118's failed startup remains an OPEN reliability issue, not erased by
+  this successful diagnostic run.
+- [x] Flower pools contain 55 / 51 instances, with 16 / 17 multi-flower cells
+  and at most four per cell; each captured view retains its complete placement
+  matrices. Camera settling takes 2.490 / 5.145 s. Raw owner maxima remain
+  update 5.3 ms / validation 0.4 ms / publication 1.4 ms, four soft overruns.
+  Projected heads are not visible-pixel counts; pools include offscreen/faded
+  instances. These numbers do not establish smooth traversal or frame budgets.
+- [ ] Primary and independent visual review: nearby pale heads are only subtly
+  grouped; grass still dominates, with no substantial meadow-quality improvement.
+  Stems/root contact, petal detail/shadows, bank approach readability, continuous
+  movement, connected whole-tree wind and falling leaves remain unqualified.
+- [x] Owned browser and runtime89 stopped; private temporary database removed;
+  protected 145 compiled artifacts, retained lock and playable localhost:3333
+  unchanged. No default promotion, streaming or quiet-host performance approval.
+- [ ] Next: profile the reconstructed preparation workload and reduce measured
+  validation/allocation cost while preserving every geometric check and yield.
+  Separately review an actual accepted flower group up close, then in motion.
+
+Reference: [official Three.js WebGPU instancing example](https://threejs.org/examples/webgpu_instance_mesh.html).
+Shared bounded instancing remains the architecture; the example is not evidence
+that our island passes performance or art acceptance.
+Evidence: inland-pond `native119/process.json`, `native119/visual-review.json`,
+`runtime89/process.json`, `isolated-build60-report.json`; service-layout
+`surface-admission-timing-source02.json`, `surface-admission-reconstruction01`,
+`surface-admission-timing-lint02.log`, `living-world-foundations-types09.log`.
+
+
 ## 2026-09-22 — compact flower groups: source verified, native art gate still open
 
 - [x] Change only candidate X/Z distribution: four keyed positions per 8 m cell

@@ -7,6 +7,8 @@ import {
   validateGrassGroundingConsumedWork,
   type GrassBladeGroundingResult,
   type GrassGroundingConsumedWork,
+  type GrassGroundingTiming,
+  type GrassGroundingTimingSpan,
 } from "../../systems/shared/world/GrassBladeGrounding";
 import { getGrassBladeLayout } from "../../systems/shared/world/GrassBladeLayout";
 import {
@@ -396,11 +398,40 @@ type PreparationState =
   | { status: "failed_input"; error: unknown }
   | { status: "cancelled"; reason: "caller" | "invalidated" };
 
+/** Same local span semantics as the fitting continuation. Only these two
+ * reusable records survive between slices; no phase history is retained. */
+class PreparationTimingSpan {
+  elapsedMs = -1;
+  startOperations = 0;
+  endOperations = 0;
+  startPhase: string | null = null;
+  endPhase: string | null = null;
+
+  capture(): GrassGroundingTimingSpan | null {
+    return this.elapsedMs < 0
+      ? null
+      : Object.freeze({
+          elapsedMs: this.elapsedMs,
+          startOperations: this.startOperations,
+          endOperations: this.endOperations,
+          startPhase: this.startPhase?.slice(0, 128) ?? null,
+          endPhase: this.endPhase?.slice(0, 128) ?? null,
+        });
+  }
+}
+
 /** Surface admission has its own real result type and ledger. It never pretends
  * to be ready grass. The fitting continuation and its caps remain unchanged. */
 class SurfacePreparationContinuation {
   private iterator: Generator<string, RetainedTerrainSurface, void> | null;
   private current: PreparationState = { status: "running" };
+  private readonly peakSlice = new PreparationTimingSpan();
+  private readonly peakClockInterval = new PreparationTimingSpan();
+  private clockMarkMs = 0;
+  private clockMarkOperations = 0;
+  private clockMarkPhase: string | null = null;
+  private sliceStartOperations = 0;
+  private sliceStartPhase: string | null = null;
   operations: number;
   activeMs: number;
   maximumSliceMs: number;
@@ -422,6 +453,30 @@ class SurfacePreparationContinuation {
     return this.current;
   }
 
+  captureTiming(): GrassGroundingTiming {
+    return Object.freeze({
+      timeBasis: "slice-elapsed-including-preemption",
+      scope: "local-continuation",
+      peakSlice: this.peakSlice.capture(),
+      peakClockInterval: this.peakClockInterval.capture(),
+    });
+  }
+
+  private recordClockInterval(now: number): void {
+    const elapsed = now - this.clockMarkMs;
+    const peak = this.peakClockInterval;
+    if (elapsed > peak.elapsedMs) {
+      peak.elapsedMs = elapsed;
+      peak.startOperations = this.clockMarkOperations;
+      peak.endOperations = this.operations;
+      peak.startPhase = this.clockMarkPhase;
+      peak.endPhase = this.lastPhase;
+    }
+    this.clockMarkMs = now;
+    this.clockMarkOperations = this.operations;
+    this.clockMarkPhase = this.lastPhase;
+  }
+
   private close(state: PreparationState): void {
     const iterator = this.iterator;
     this.iterator = null;
@@ -435,7 +490,16 @@ class SurfacePreparationContinuation {
   }
 
   private recordSlice(started: number): void {
-    const sliceMs = performance.now() - started;
+    const now = performance.now();
+    const sliceMs = now - started;
+    this.recordClockInterval(now);
+    if (sliceMs > this.peakSlice.elapsedMs) {
+      this.peakSlice.elapsedMs = sliceMs;
+      this.peakSlice.startOperations = this.sliceStartOperations;
+      this.peakSlice.endOperations = this.operations;
+      this.peakSlice.startPhase = this.sliceStartPhase;
+      this.peakSlice.endPhase = this.lastPhase;
+    }
     this.activeMs += sliceMs;
     this.maximumSliceMs = Math.max(this.maximumSliceMs, sliceMs);
     if (
@@ -449,6 +513,11 @@ class SurfacePreparationContinuation {
     if (this.state.status !== "running") return;
     const started = performance.now(),
       deadline = started + jobLimits.targetSliceMs;
+    this.clockMarkMs = started;
+    this.clockMarkOperations = this.operations;
+    this.clockMarkPhase = this.lastPhase;
+    this.sliceStartOperations = this.operations;
+    this.sliceStartPhase = this.lastPhase;
     let sliceOperations = 0;
     try {
       if (!this.isCurrent()) {
@@ -465,6 +534,7 @@ class SurfacePreparationContinuation {
         }
         if (sliceOperations % jobLimits.clockInterval === 0) {
           const now = performance.now();
+          this.recordClockInterval(now);
           if (this.activeMs + now - started >= jobLimits.maximumActiveMs) {
             this.close({ status: "failed_budget", reason: "active_cpu" });
             return;
@@ -759,6 +829,9 @@ function terminalPreparation(row: ActivePreparation): void {
     lastPhase: row.job.lastPhase,
     inputBytes: row.inputBytes,
     derivedBytesReserved: row.derivedBytes,
+    ...(output.status === "failed_budget" || output.status === "failed_input"
+      ? { timing: row.job.captureTiming() }
+      : {}),
     cache: cacheReceipt(),
   });
   try {

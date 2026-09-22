@@ -76,6 +76,8 @@ export type GrassGroundingAdmissionFailure = Readonly<{
   submittedWork: Readonly<GrassGroundingConsumedWork> | null;
   response: AdmissionResponse | null;
   mergedWork: Readonly<GrassGroundingConsumedWork>;
+  /** Worker-local spans only, captured on failed preparation responses. */
+  workerTiming?: GrassGroundingTiming;
 }>;
 
 /** Last failed fitting settlement, not all possible job failures. The merge
@@ -134,6 +136,7 @@ type Admission = {
   work: GrassGroundingConsumedWork;
   submittedWork: Readonly<GrassGroundingConsumedWork> | null;
   response: AdmissionResponse | null;
+  workerTiming?: GrassGroundingTiming;
 };
 type Context = {
   job: GrassGroundingWorkerJob | null;
@@ -173,6 +176,18 @@ type Pending = {
 
 function zeroWork(): GrassGroundingConsumedWork {
   return { operations: 0, activeMs: 0, maximumSliceMs: 0 };
+}
+
+function freezeWorkerTiming(
+  timing: GrassGroundingTiming,
+): GrassGroundingTiming {
+  return Object.freeze({
+    ...timing,
+    peakSlice: timing.peakSlice ? Object.freeze({ ...timing.peakSlice }) : null,
+    peakClockInterval: timing.peakClockInterval
+      ? Object.freeze({ ...timing.peakClockInterval })
+      : null,
+  });
 }
 function ensure(value: unknown, message: string): asserts value {
   if (!value) throw new Error(message);
@@ -508,6 +523,9 @@ export class GrassGroundingWorkerCoordinator {
       submittedWork: admission.submittedWork,
       response: admission.response,
       mergedWork: Object.freeze({ ...admission.work }),
+      ...(admission.workerTiming
+        ? { workerTiming: admission.workerTiming }
+        : {}),
     });
   }
 
@@ -532,15 +550,7 @@ export class GrassGroundingWorkerCoordinator {
       submittedWork: Object.freeze({ ...pending.seed }),
       ...(response.timing
         ? {
-            workerTiming: Object.freeze({
-              ...response.timing,
-              peakSlice: response.timing.peakSlice
-                ? Object.freeze({ ...response.timing.peakSlice })
-                : null,
-              peakClockInterval: response.timing.peakClockInterval
-                ? Object.freeze({ ...response.timing.peakClockInterval })
-                : null,
-            }),
+            workerTiming: freezeWorkerTiming(response.timing),
           }
         : {}),
       response: Object.freeze({
@@ -1061,6 +1071,8 @@ export class GrassGroundingWorkerCoordinator {
     if (pending.kind === "prepare_surface" && context?.admission) {
       const response = settled.status === "response" ? settled.response : null;
       const prepared = response?.type === "surface_prepared" ? response : null;
+      if (prepared?.timing)
+        context.admission.workerTiming = freezeWorkerTiming(prepared.timing);
       context.admission.response = Object.freeze({
         status: prepared?.state.status ?? response?.type ?? settled.status,
         reason:

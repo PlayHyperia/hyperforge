@@ -912,7 +912,7 @@ export class GrassGroundingWorkerClient {
       fields,
       type.value === "rejected"
         ? ["error"]
-        : type.value === "result"
+        : type.value === "result" || type.value === "surface_prepared"
           ? ["timing"]
           : [],
     );
@@ -980,7 +980,7 @@ export class GrassGroundingWorkerClient {
     const status: unknown = stateType.value;
     if (Object.getOwnPropertyDescriptor(r, "timing")) {
       ensure(
-        r.type === "result" &&
+        (r.type === "result" || r.type === "surface_prepared") &&
           (status === "failed_budget" || status === "failed_input"),
         "Grounding timing is failure-only",
       );

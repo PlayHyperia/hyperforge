@@ -47,6 +47,10 @@ import {
   GrassGroundingWorkerClient,
   type GrassGroundingClientSettled,
 } from "../../../../utils/workers/GrassGroundingWorkerClient";
+import {
+  GRASS_GROUNDING_WORKER_LIMITS,
+  type GrassGroundingWorkerResponse,
+} from "../../../../utils/workers/GrassGroundingWorkerWire";
 import { ActualGrassGroundingClientPort } from "./fixtures/ActualGrassGroundingClientPort";
 import { RetainedTerrainSurface } from "../TerrainGridSurface";
 import { groundGrassBlades as legacyGroundGrassBlades } from "./fixtures/LegacyGrassBladeGroundingReference";
@@ -139,7 +143,7 @@ function saveCachedProfile(receipt: GroundingWorkerCpuProfile) {
 // Hash the actual view, not spare capacity in a shared/subarray backing buffer.
 // Separate color hashes let source A/B comparisons permit appearance changes
 // without concealing a change to population, transforms or grounding evidence.
-function bufferReceipt(array: Float32Array | Uint32Array) {
+function bufferReceipt(array: Float32Array | Uint16Array | Uint32Array) {
   return {
     type: array.constructor.name,
     length: array.length,
@@ -253,6 +257,39 @@ const native95Observation = {
 // Explicit real-asset regressions: none of these overlays is a production default.
 // Each uses its actual worker output, authored constraints and retained mesh.
 const cases = [
+  {
+    name: "native118 startup retained surface admission",
+    test: "reconstructs the native118 failed surface using actual v10 terrain and original admission caps",
+    enabled: process.env.ASSETS_DIR?.endsWith(
+      "/inland-pond-integration01-UNQUALIFIED/assets-v10",
+    ),
+    label: "NATIVE118_SURFACE_ADMISSION",
+    nodes: [[350, 450]],
+    native118: {
+      source: "native118/process.json",
+      sourceSHA256:
+        "d25877937b6c7fad7b3cb4e481b89f60536e5bf2ac41b287e6e9ccf541f44ae7",
+      nodeId: 49,
+      centerX: 350,
+      centerZ: 450,
+      size: 100,
+      resolution: 128,
+      inputBytes: 1_728_164,
+      derivedBytesReserved: 2_861_401,
+      lastPhase: "topology-side",
+      workerWork: {
+        operations: 2413,
+        activeMs: 270.40000009536743,
+        maximumSliceMs: 96,
+      },
+      worldConfigSHA256:
+        "60f98f5e300db1eb58902723d4f9a5859db4b3a75fc78ec81e1b3673832ac254",
+      worldAreasSHA256:
+        "438cabb6f34e965b708f0276d050cb2cda222252bdc8412123ee0c7e50e210c3",
+      scope:
+        "Historical native118 failed surface admission, not a retained packet. Current-source reconstruction is not byte-exact historical input or native performance qualification; offline node IDs/revisions are newly allocated, and the zero work seed intentionally excludes historical main-thread preparation costs.",
+    },
+  },
   {
     name: "native108 startup LOD1 pond bank work budget",
     test: "reconstructs the native108 failed cell with actual retained neighbours and original caps",
@@ -659,6 +696,25 @@ const cases = [
 ] as const;
 
 let groundingWorkerSource: string;
+const surfaceReconstructionSourcePaths = [
+  fileURLToPath(import.meta.url),
+  ...[
+    "./fixtures/GrassGroundingWorkerHarness.ts",
+    "./fixtures/ActualGrassGroundingClientPort.ts",
+    "../TerrainSystem.ts",
+    "../TerrainVisualManager.ts",
+    "../TerrainQuadTree.ts",
+    "../TerrainQuadChunkGenerator.ts",
+    "../TerrainGridSurface.ts",
+    "../GrassBladeGrounding.ts",
+    "../CompactIslandDetail.ts",
+    "../../../../utils/workers/TerrainWorkerShared.ts",
+    "../../../../utils/workers/GrassGroundingWorker.entry.ts",
+    "../../../../utils/workers/GrassGroundingWorkerClient.ts",
+    "../../../../utils/workers/GrassGroundingWorkerWire.ts",
+    "../../../../data/DataManager.ts",
+  ].map((path) => fileURLToPath(new URL(path, import.meta.url))),
+].sort();
 beforeAll(async () => {
   if (cachedBaselinePath) {
     expect(cpuProfilePrefix).toBeUndefined();
@@ -724,13 +780,44 @@ describe.each(cases)("$name", (scenario) => {
         "native86" in scenario ||
         "native106" in scenario ||
         "native108" in scenario ||
+        "native118" in scenario ||
         "native95" in scenario;
       const usesNativeDetail =
         "native82" in scenario ||
         "native86" in scenario ||
         "native106" in scenario ||
         "native108" in scenario ||
+        "native118" in scenario ||
         "native95" in scenario;
+      const reconstructionAssets =
+        "native118" in scenario
+          ? [
+              {
+                path: resolve(
+                  process.env.ASSETS_DIR!,
+                  "manifests/world-config.json",
+                ),
+                expectedSHA256: scenario.native118.worldConfigSHA256,
+              },
+              {
+                path: resolve(
+                  process.env.ASSETS_DIR!,
+                  "manifests/world-areas.json",
+                ),
+                expectedSHA256: scenario.native118.worldAreasSHA256,
+              },
+            ].map((pin) => {
+              const bytes = readFileSync(pin.path);
+              return { ...pin, bytes: bytes.length, sha256: hashBytes(bytes) };
+            })
+          : [];
+      const reconstructionSources =
+        "native118" in scenario
+          ? surfaceReconstructionSourcePaths.map((path) => {
+              const bytes = readFileSync(path);
+              return { path, bytes: bytes.length, sha256: hashBytes(bytes) };
+            })
+          : [];
       await DataManager.getInstance().initialize();
       const world = new World();
       const terrain = world.register("terrain", TerrainSystem) as TerrainSystem;
@@ -753,7 +840,7 @@ describe.each(cases)("$name", (scenario) => {
         | undefined;
       let docks: ProceduralDocks | undefined;
       const failures: unknown[] = [];
-      try {
+      reconstruction: try {
         if (usesNativeComposition) {
           // Match the existing actual dock fixture: native triangle collision
           // must be installed before its owned grass exclusions are published.
@@ -925,7 +1012,8 @@ describe.each(cases)("$name", (scenario) => {
             ("native82" in scenario && node.centerX === 250) ||
             (("native95" in scenario ||
               "native106" in scenario ||
-              "native108" in scenario) &&
+              "native108" in scenario ||
+              "native118" in scenario) &&
               step.value.isRegularGrid)
           ) {
             // Historical pond fixtures all build refined 128-grid owners.
@@ -962,6 +1050,195 @@ describe.each(cases)("$name", (scenario) => {
               "CPU re-admission of exact retained geometry, including the first/terminal step. Index timing is attributed to the preceding yielded phase. Observed elapsed time includes allocation/GC and is not native frame qualification.",
           };
         });
+        if ("native118" in scenario) {
+          const node = nodes[0];
+          const surface = retainedVisual.getRetainedSurface(node);
+          if (!surface)
+            throw new Error("Missing reconstructed native118 retained owner");
+          const copies = surface.copySnapshotSteps(
+            GRASS_GROUNDING_WORKER_LIMITS.maximumInputBytes,
+          );
+          let step = copies.next();
+          let copyResumptions = 1;
+          try {
+            while (!step.done && copyResumptions < 10_000) {
+              step = copies.next();
+              copyResumptions++;
+            }
+            if (!step.done)
+              throw new Error("Native118 snapshot copy exceeded step bound");
+          } finally {
+            if (!step.done) copies.return(undefined as never);
+          }
+          const snapshot = step.value;
+          const snapshotReceipt = {
+            nodeId: snapshot.nodeId,
+            sourceRevision: snapshot.revision,
+            terrainProfileIdentity: snapshot.terrainProfileIdentity,
+            centerX: snapshot.centerX,
+            centerZ: snapshot.centerZ,
+            size: snapshot.size,
+            resolution: snapshot.resolution,
+            positionVersion: snapshot.positionVersion,
+            indexVersion: snapshot.indexVersion,
+            positions: bufferReceipt(snapshot.positions),
+            indices: bufferReceipt(snapshot.indices),
+            topology: snapshot.topology
+              ? {
+                  schemaVersion: snapshot.topology.schemaVersion,
+                  resolution: snapshot.topology.resolution,
+                  surfaceVertexCount: snapshot.topology.surfaceVertexCount,
+                  cellIndexOffsets: bufferReceipt(
+                    snapshot.topology.cellIndexOffsets,
+                  ),
+                }
+              : null,
+          };
+          const copiedBytes =
+            snapshot.positions.byteLength +
+            snapshot.indices.byteLength +
+            (snapshot.topology?.cellIndexOffsets.byteLength ?? 0);
+          const consumed = { operations: 0, activeMs: 0, maximumSliceMs: 0 };
+          let response: Extract<
+            GrassGroundingWorkerResponse,
+            { type: "surface_prepared" }
+          > | null = null;
+          let transportError: string | null = null;
+          let jobId: number | null = null;
+          const workerStartedAt = new Date().toISOString();
+          const workerStarted = performance.now();
+          try {
+            clientPort = new ActualGrassGroundingClientPort(
+              groundingWorkerSource,
+            );
+            await clientPort.ready();
+            groundingClient = new GrassGroundingWorkerClient(clientPort);
+            jobId = groundingClient.submit({
+              type: "prepare_surface",
+              schemaVersion: 1,
+              generation: 1,
+              token: 1,
+              snapshot,
+              consumed,
+            });
+            response = await clientPort.waitFor("surface_prepared", jobId);
+          } catch (error) {
+            transportError = String(error).slice(0, 2048);
+          }
+          const workerCompletedAt = new Date().toISOString();
+          const workerWallMs = performance.now() - workerStarted;
+          const settled = groundingClient?.takeSettled() ?? null;
+          const pinsBefore = [
+            ...reconstructionSources,
+            ...reconstructionAssets,
+          ];
+          const pinsAfter = pinsBefore.map((pin) => {
+            const bytes = readFileSync(pin.path);
+            return {
+              path: pin.path,
+              bytes: bytes.length,
+              sha256: hashBytes(bytes),
+            };
+          });
+          const sourcesUnchanged = pinsBefore.every(
+            (pin, i) =>
+              pin.bytes === pinsAfter[i].bytes &&
+              pin.sha256 === pinsAfter[i].sha256,
+          );
+          const copiedBuffersDetached =
+            snapshot.positions.byteLength === 0 &&
+            snapshot.indices.byteLength === 0 &&
+            (!snapshot.topology ||
+              snapshot.topology.cellIndexOffsets.byteLength === 0);
+          // Persist raw failures before success/identity assertions. The actual
+          // worker caps remain unchanged; no historical elapsed time is seeded.
+          evidence(
+            scenario.label,
+            JSON.stringify({
+              schemaVersion: 1,
+              nodeVersion: process.version,
+              historicalObservation: scenario.native118,
+              assets: reconstructionAssets,
+              sourcePins: reconstructionSources,
+              sourcePinScope:
+                "Named reconstruction, generator and admission owners plus the actual worker bundle hash; not a complete application dependency closure.",
+              sourcePinsAfter: pinsAfter,
+              sourcesUnchanged,
+              workerBundle: {
+                bytes: Buffer.byteLength(groundingWorkerSource),
+                sha256: hashBytes(groundingWorkerSource),
+              },
+              terrain: {
+                seed: setup.seed,
+                detailRegions: nativeDetailRegions,
+                snapshot: snapshotReceipt,
+                mainThreadReconstructedAdmission: admissionReceipts,
+                copyResumptions,
+                copiedBytes,
+                historicalInputBytesMatch:
+                  copiedBytes === scenario.native118.inputBytes,
+              },
+              worker: {
+                jobId,
+                generation: 1,
+                token: 1,
+                consumed,
+                startedAt: workerStartedAt,
+                completedAt: workerCompletedAt,
+                wallMsIncludingStartupAndTransport: workerWallMs,
+                copiedBuffersDetached,
+                rawResponse: response,
+                settled,
+                transportError,
+                historicalInputBytesMatch:
+                  response?.inputBytes === scenario.native118.inputBytes,
+                historicalDerivedBytesMatch:
+                  response?.derivedBytesReserved ===
+                  scenario.native118.derivedBytesReserved,
+              },
+              scope:
+                "Actual Node worker surface-only admission with zero consumed seed and original limits. Main-thread reconstructed admission, worker continuation slice-elapsed observations and host/transport wall time are separate; none locates or explains native118's historical 96ms slice. Fresh node IDs and revisions, no historical packet arrays/hash, no placement/fitting, no native startup or performance approval.",
+            }),
+          );
+          expect(
+            reconstructionAssets.every(
+              (pin) => pin.sha256 === pin.expectedSHA256,
+            ),
+          ).toBe(true);
+          expect(sourcesUnchanged).toBe(true);
+          expect(nodes).toHaveLength(1);
+          expect(snapshotReceipt).toMatchObject({
+            centerX: 350,
+            centerZ: 450,
+            size: 100,
+            resolution: 128,
+          });
+          expect(snapshotReceipt.topology).not.toBeNull();
+          expect(copiedBytes).toBe(scenario.native118.inputBytes);
+          expect(transportError).toBeNull();
+          expect(copiedBuffersDetached).toBe(true);
+          expect(settled?.status).toBe("response");
+          if (settled?.status === "response")
+            expect(settled.response).toBe(response);
+          if (!response)
+            throw new Error("Missing native118 surface admission response");
+          expect(response.inputBytes).toBe(scenario.native118.inputBytes);
+          expect(response.derivedBytesReserved).toBe(
+            scenario.native118.derivedBytesReserved,
+          );
+          expect(response.state).toEqual({
+            status: "prepared",
+            token: 1,
+            sourceRevision: snapshotReceipt.sourceRevision,
+          });
+          expect(response.work.operations).toBeGreaterThan(0);
+          expect(response.work.activeMs).toBeGreaterThan(0);
+          expect(response.work.maximumSliceMs).toBeGreaterThan(0);
+          expect(retainedVisual.isRetainedSurfaceCurrent(surface)).toBe(true);
+          // A labeled exit still reaches finally and its error aggregation;
+          // returning here would silently skip cleanup failures below.
+          break reconstruction;
+        }
         manager = new GrassVisualManager(
           setup.terrainConfig.TERRAIN_PROFILE_IDENTITY,
           new THREE.Group(),

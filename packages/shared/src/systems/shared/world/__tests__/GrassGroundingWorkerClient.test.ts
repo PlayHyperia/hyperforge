@@ -573,21 +573,77 @@ describe("actual grounding worker client", () => {
         );
         expect(client.terminated).toBe(false);
         expect(client.cacheReceipt.owners).toBe(0);
-        if (reply.type === "result") {
-          expect(reply.timing).toMatchObject({
-            timeBasis: "slice-elapsed-including-preemption",
-            scope: "local-continuation",
-          });
-        } else {
-          expect(
-            Object.getOwnPropertyDescriptor(reply, "timing"),
-          ).toBeUndefined();
-        }
+        expect(reply.timing).toMatchObject({
+          timeBasis: "slice-elapsed-including-preemption",
+          scope: "local-continuation",
+        });
       } finally {
         fixture.dispose();
       }
     },
   );
+
+  it("admits bounded preparation timing and rejects malformed spans at the actual surface slot", async () => {
+    const fixture = createSameFaceCase("ordinary-lod1");
+    try {
+      const { client, port } = await actualClient();
+      const packet = preparation(workerRequest(fixture.request));
+      packet.consumed.operations =
+        GRASS_BLADE_GROUNDING_JOB_LIMITS.maximumOperations - 1;
+      expect(client.submit(packet)).toBe(1);
+      const reply = await port.waitFor("surface_prepared", 1);
+      const slot: unknown = Reflect.get(client, "slot");
+      const validate: unknown = Reflect.get(client, "validateResponse");
+      if (!slot || typeof validate !== "function" || !reply.timing?.peakSlice)
+        throw new Error("Missing real surface timing/slot");
+      const check = (value: unknown) =>
+        Reflect.apply(validate, client, [value, slot]);
+      expect(check(reply)).toBe(reply);
+      expect(takeResponse(client).response).toBe(reply);
+      expect(reply.state).toEqual({
+        status: "failed_budget",
+        reason: "operations",
+      });
+      expect(reply.work.operations - packet.consumed.operations).toBe(1);
+      const timing = reply.timing;
+      const withoutTiming = { ...reply };
+      delete withoutTiming.timing;
+      expect(check(withoutTiming)).toBe(withoutTiming);
+      expect(() =>
+        check({
+          ...reply,
+          timing: {
+            ...timing,
+            peakSlice: {
+              ...timing.peakSlice,
+              startOperations: packet.consumed.operations - 1,
+            },
+          },
+        }),
+      ).toThrow("Invalid grounding timing span");
+      expect(() => check({ ...reply, state: { status: "prepared" } })).toThrow(
+        "failure-only",
+      );
+      expect(() =>
+        check({ ...reply, state: { status: "cancelled", reason: "caller" } }),
+      ).toThrow("failure-only");
+      let getters = 0;
+      const unsafe = { ...reply };
+      Object.defineProperty(unsafe, "timing", {
+        enumerable: true,
+        get() {
+          getters++;
+          return timing;
+        },
+      });
+      expect(() => check(unsafe)).toThrow();
+      expect(getters).toBe(0);
+      expect(client.transportFailure).toBeNull();
+      expect(client.cacheReceipt.owners).toBe(0);
+    } finally {
+      fixture.dispose();
+    }
+  });
 
   it("validates failure timing against a real admitted worker slot, with strict accessor-safe bounded spans", async () => {
     const fixture = createSameFaceCase("ordinary-lod1");

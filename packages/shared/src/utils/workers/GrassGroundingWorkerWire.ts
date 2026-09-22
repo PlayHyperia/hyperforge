@@ -163,6 +163,8 @@ export type GrassGroundingWorkerResponse =
         | { status: "failed_input"; error: string }
         | { status: "cancelled"; reason: "caller" | "invalidated" };
       work: GrassGroundingConsumedWork;
+      /** Failure-only local preparation observations; never inherited seed time. */
+      timing?: GrassGroundingTiming;
       lastPhase: string | null;
       inputBytes: number;
       derivedBytesReserved: number;

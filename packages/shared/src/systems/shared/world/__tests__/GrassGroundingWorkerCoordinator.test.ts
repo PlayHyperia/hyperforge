@@ -160,6 +160,7 @@ function assertAdmissionFailureShape(failure: GrassGroundingAdmissionFailure) {
     "submittedWork",
     "response",
     "mergedWork",
+    ...(failure.workerTiming ? ["workerTiming"] : []),
   ]);
   keys(failure.owner, [
     "token",
@@ -192,7 +193,27 @@ function assertAdmissionFailureShape(failure: GrassGroundingAdmissionFailure) {
     keys(failure.response.workBeforeMerge, workKeys);
     if (failure.response.work) keys(failure.response.work, workKeys);
   }
-  assertFrozenScalarDiagnostic(failure, 7);
+  if (failure.workerTiming) {
+    keys(failure.workerTiming, [
+      "timeBasis",
+      "scope",
+      "peakSlice",
+      "peakClockInterval",
+    ]);
+    for (const span of [
+      failure.workerTiming.peakSlice,
+      failure.workerTiming.peakClockInterval,
+    ])
+      if (span)
+        keys(span, [
+          "elapsedMs",
+          "startOperations",
+          "endOperations",
+          "startPhase",
+          "endPhase",
+        ]);
+  }
+  assertFrozenScalarDiagnostic(failure, failure.workerTiming ? 10 : 7);
 }
 
 function assertFittingFailureShape(failure: GrassGroundingFittingFailure) {
@@ -941,6 +962,17 @@ describe("actual retained-terrain grounding worker coordinator", () => {
     expect(failure.response.work).toEqual(response.work);
     expect(failure.response.work).not.toBe(response.work);
     expect(failure.submittedWork.operations).toBeGreaterThan(0);
+    expect(response.timing?.timeBasis).toBe(
+      "slice-elapsed-including-preemption",
+    );
+    expect(failure.workerTiming).toEqual(response.timing);
+    expect(failure.workerTiming).not.toBe(response.timing);
+    expect(failure.workerTiming?.peakSlice).not.toBe(
+      response.timing?.peakSlice,
+    );
+    expect(failure.workerTiming?.peakClockInterval).not.toBe(
+      response.timing?.peakClockInterval,
+    );
     expect(response.work.operations).toBeGreaterThan(
       failure.submittedWork.operations,
     );

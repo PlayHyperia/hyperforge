@@ -698,6 +698,9 @@ describe("explicit actual-worker retained terrain preparation", () => {
           ),
         ).toBe(sourceBytes);
         for (const admission of admissions) {
+          expect(
+            Object.getOwnPropertyDescriptor(admission, "timing"),
+          ).toBeUndefined();
           expect(admission.work.operations).toBeGreaterThan(0);
           expect(admission.work.operations).toBeLessThanOrEqual(
             GRASS_BLADE_GROUNDING_JOB_LIMITS.maximumOperations,
@@ -808,6 +811,25 @@ describe("explicit actual-worker retained terrain preparation", () => {
         expect(result.state).toEqual({ status: "failed_budget", reason });
         expect(result.work.operations).toBe(consumed.operations);
         expect(result.work.activeMs).toBeGreaterThanOrEqual(consumed.activeMs);
+        expect(result.timing?.timeBasis).toBe(
+          "slice-elapsed-including-preemption",
+        );
+        expect(result.timing?.scope).toBe("local-continuation");
+        for (const span of [
+          result.timing?.peakSlice,
+          result.timing?.peakClockInterval,
+        ]) {
+          expect(span).toMatchObject({
+            startOperations: consumed.operations,
+            endOperations: consumed.operations,
+            startPhase: null,
+            endPhase: null,
+          });
+          expect(span?.elapsedMs).toBeGreaterThanOrEqual(0);
+          expect(span?.elapsedMs).toBeLessThanOrEqual(
+            result.work.maximumSliceMs,
+          );
+        }
         expect(result.cache).toEqual({
           owners: 0,
           inputBytes: 0,
@@ -831,6 +853,126 @@ describe("explicit actual-worker retained terrain preparation", () => {
       }
     },
   );
+
+  it("attributes failed preparation spans to real indexed work without inheriting seed phases", async () => {
+    const grid = authoredGrid(8, true, true);
+    try {
+      const snapshot = copySurface(grid.surface);
+      const phases = ["worker_surface_rebuild"];
+      for (
+        let start = 0;
+        start < (snapshot.topology?.cellIndexOffsets.length ?? 0);
+        start += 256
+      )
+        phases.push("worker_topology_unpack");
+      // Use the real retained preparation trace, not a clock or iterator
+      // substitute. Worker rebuild adds only the two prefix phases above.
+      const trace = RetainedTerrainSurface.prepare(
+        snapshot.nodeId,
+        snapshot.terrainProfileIdentity,
+        snapshot.centerX,
+        snapshot.centerZ,
+        snapshot.size,
+        snapshot.resolution,
+        grid.geometry,
+      );
+      try {
+        for (;;) {
+          const step = trace.next();
+          if (step.done) break;
+          phases.push(step.value);
+          if (phases.length > 1024)
+            throw new Error("Indexed preparation trace exceeded fixture bound");
+        }
+      } finally {
+        trace.return(undefined as never);
+      }
+      const localOperations = 128;
+      expect(phases.length).toBeGreaterThan(localOperations);
+      expect(phases.slice(0, localOperations)).toContain("topology-side");
+      const consumed = {
+        operations:
+          GRASS_BLADE_GROUNDING_JOB_LIMITS.maximumOperations - localOperations,
+        activeMs: 12.5,
+        maximumSliceMs: 1.25,
+      };
+      const result = await prepare(await actualWorker(), {
+        type: "prepare_surface",
+        schemaVersion: 1,
+        jobId: 1,
+        generation: 1,
+        token: 1,
+        snapshot,
+        consumed,
+      });
+      expect(result.state).toEqual({
+        status: "failed_budget",
+        reason: "operations",
+      });
+      expect(result.work.operations).toBe(
+        consumed.operations + localOperations,
+      );
+      expect(result.work.activeMs).toBeGreaterThanOrEqual(consumed.activeMs);
+      expect(result.work.maximumSliceMs).toBeGreaterThanOrEqual(
+        consumed.maximumSliceMs,
+      );
+      expect(result.lastPhase).toBe(phases[localOperations - 1]);
+      expect(result.cache).toEqual({
+        owners: 0,
+        inputBytes: 0,
+        derivedBytesReserved: 0,
+      });
+      const timing = result.timing;
+      if (!timing?.peakSlice || !timing.peakClockInterval)
+        throw new Error("Expected local preparation timing spans");
+      expect(Object.keys(timing).sort()).toEqual([
+        "peakClockInterval",
+        "peakSlice",
+        "scope",
+        "timeBasis",
+      ]);
+      expect(timing.timeBasis).toBe("slice-elapsed-including-preemption");
+      expect(timing.scope).toBe("local-continuation");
+      for (const span of [timing.peakSlice, timing.peakClockInterval]) {
+        expect(Object.keys(span).sort()).toEqual([
+          "elapsedMs",
+          "endOperations",
+          "endPhase",
+          "startOperations",
+          "startPhase",
+        ]);
+        expect(Number.isFinite(span.elapsedMs)).toBe(true);
+        expect(span.elapsedMs).toBeGreaterThanOrEqual(0);
+        expect(span.elapsedMs).toBeLessThanOrEqual(result.work.maximumSliceMs);
+        expect(Number.isSafeInteger(span.startOperations)).toBe(true);
+        expect(Number.isSafeInteger(span.endOperations)).toBe(true);
+        expect(span.startOperations).toBeGreaterThanOrEqual(
+          consumed.operations,
+        );
+        expect(span.endOperations).toBeGreaterThanOrEqual(span.startOperations);
+        expect(span.endOperations).toBeLessThanOrEqual(result.work.operations);
+        for (const [operations, phase] of [
+          [span.startOperations, span.startPhase],
+          [span.endOperations, span.endPhase],
+        ] as const)
+          expect(phase).toBe(
+            operations === consumed.operations
+              ? null
+              : phases[operations - consumed.operations - 1],
+          );
+      }
+      expect(
+        timing.peakClockInterval.endOperations -
+          timing.peakClockInterval.startOperations,
+      ).toBeLessThanOrEqual(GRASS_BLADE_GROUNDING_JOB_LIMITS.clockInterval);
+      expect(timing.peakClockInterval.elapsedMs).toBeLessThanOrEqual(
+        timing.peakSlice.elapsedMs,
+      );
+      expect(grid.surface.matchesGeometry(grid.geometry)).toBe(true);
+    } finally {
+      grid.dispose();
+    }
+  });
 
   it("cancels real sliced preparation, rejects busy/stale messages and burns its accepted token", async () => {
     // 47² genuine fan cells each validate four separate sides: more than one
@@ -884,6 +1026,9 @@ describe("explicit actual-worker retained terrain preparation", () => {
         reason: "stale",
       });
       const cancelled = await reply(worker, "surface_prepared", 1);
+      expect(
+        Object.getOwnPropertyDescriptor(cancelled, "timing"),
+      ).toBeUndefined();
       expect(cancelled.state).toEqual({
         status: "cancelled",
         reason: "caller",
@@ -930,10 +1075,26 @@ describe("explicit actual-worker retained terrain preparation", () => {
         preparePacket(workerRequest(fixture.request), 1, 1),
       );
       expect(first.state.status).toBe("prepared");
+      expect(Object.getOwnPropertyDescriptor(first, "timing")).toBeUndefined();
       const bad = preparePacket(workerRequest(fixture.request), 2, 2);
       bad.snapshot.positions[0] += 1;
       const failed = await prepare(worker, bad);
       expect(failed.state.status).toBe("failed_input");
+      expect(failed.timing?.timeBasis).toBe(
+        "slice-elapsed-including-preemption",
+      );
+      expect(failed.timing?.scope).toBe("local-continuation");
+      // The peak can precede the throwing slice; it is not a fabricated
+      // terminal-phase duration, even if an earlier empty slice was preempted.
+      expect(failed.timing?.peakSlice?.startOperations).toBeGreaterThanOrEqual(
+        0,
+      );
+      expect(failed.timing?.peakSlice?.endOperations).toBeLessThanOrEqual(
+        failed.work.operations,
+      );
+      expect(failed.timing?.peakClockInterval?.elapsedMs).toBeLessThanOrEqual(
+        failed.timing?.peakSlice?.elapsedMs ?? -1,
+      );
       expect(failed.cache).toEqual(first.cache);
       const reused = preparePacket(workerRequest(fixture.request), 3, 2);
       worker.send(reused, grassGroundingWorkerInputTransfers(reused));
