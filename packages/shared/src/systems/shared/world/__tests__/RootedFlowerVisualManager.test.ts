@@ -290,6 +290,18 @@ describe("bounded actual rooted-flower owner (CPU lifecycle, not GPU/performance
     expect(
       f.mesh.geometry.getAttribute(INSTANCE_MATRIX_STORAGE_ATTRIBUTE),
     ).toBe(f.mesh.instanceMatrix);
+    const position = f.mesh.geometry.getAttribute("position");
+    const flowerHeight = f.mesh.geometry.getAttribute("flowerHeight");
+    expect(position.count).toBe(362);
+    expect(flowerHeight.count).toBe(position.count);
+    expect(f.mesh.geometry.index?.count).toBe(1752);
+    expect(f.mesh.geometry.index?.array).toBeInstanceOf(Uint32Array);
+    for (let vertex = 0; vertex < position.count; vertex++) {
+      expect(flowerHeight.getY(vertex)).toBe(0.5);
+      expect(flowerHeight.getX(vertex)).toBe(position.getY(vertex));
+    }
+    expect(f.mesh.geometry.boundingBox?.min.y).toBe(0);
+    expect(f.mesh.geometry.boundingBox?.max.y).toBe(0.5);
     expect(f.mesh.frustumCulled).toBe(true);
     expect(f.material.transparent).toBe(false);
     expect(f.material.opacity).toBe(1);

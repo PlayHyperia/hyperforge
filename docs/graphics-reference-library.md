@@ -1,5 +1,56 @@
 # Hyperia graphics reference library
 
+## 2026-09-22 checkpoint — flower scale in the actual grass canopy
+
+- [x] Native116/build57 captures two close views of an EXISTING accepted island
+  flower. Its stored root is identical to native115; the same matrix remains
+  unchanged across both close views. Actual retained terrain lies below each
+  camera with the original near plane. Low angle resolves a connected stem,
+  cream petals and yellow center; oblique grass conceals most of the head.
+  Concealed roots and these stills do not qualify contact, animation or shadows.
+- [x] Raise only the opt-in meadow owner's authored flower height from 0.38 to
+  0.50 m (instance variation gives about 0.425–0.575 m). Factory defaults,
+  material, grass, density, hash lanes, capacity and work allowances stay intact.
+  Actual geometry remains 362 vertices / 584 triangles with Uint32 indices;
+  full-height metadata and bounds are checked. Larger flowers still increase
+  swept clearance/raster coverage; unchanged topology is NOT equal GPU cost.
+- [x] Source regression: 829/829 tests in 15 suites, full shared/explicit typing
+  750 roots / 2,456 sources / zero diagnostics with stable pins; scoped 11-file
+  lint and two-file formatting pass. Build58 has nine bundles / 1,096 inputs;
+  its only changed compiled source versus build57 is RootedFlowerVisualManager.
+- [x] Native117/build58 captures the same two close poses plus the established
+  eastern meadow view on real Chrome/Metal WebGPU. Exact target root, rotation
+  and scale match native116. Target authored world height is 0.483287 m before
+  deformation; captured pool counts are 52 / 52 / 53. Original startup passes
+  in 44.637 s; flower cut-readiness takes 3.689 / 0.326 / 4.815 s within original
+  allowances. Zero capture errors, stable pins and 13 nominal AC/awake samples.
+  These settling times are not seamless movement or reliable-startup proof.
+- [x] Primary and independent art review retain 0.50 as an INCREMENTAL candidate:
+  plausible proportions and a higher head in the low view. Oblique occlusion
+  persists and the meadow still reads as isolated pale specks. Natural wind is
+  not phase-matched, so pixel differences are not isolated height attribution.
+  Visibility, root fitting, petal self-shadow and overall art are NOT solved.
+- Raw native117 owner lifetime maxima: update 11.500 ms, validation 0.500 ms,
+  publication 0.900 ms; 13 soft-slice overruns by the final view. These include
+  neither all observer costs nor isolated frame/GPU cost. No quiet-host or
+  performance approval; the user's other game may remain active.
+- [ ] Next high-value art change: compact irregular groups using the EXISTING
+  four attempts per 8 m cell. Current shared 24 m habitat gates still scatter
+  roots over 6.5 m squares. Change only keyed X/Z offsets, retaining acceptance,
+  yaw/scale hashes, caps and every terrain/road/water/resource check. Verify
+  cell/horizon invariance, group radius/separation and actual resulting counts;
+  do not blanket-increase density or clear grass around test flowers.
+- [x] Runtime86/87, owned browsers and temporary DBs stopped; protected 145
+  compiled artifacts, retained lock and playable localhost3333 unchanged.
+  No default promotion. Continuous movement, connected tree-wind acceptance,
+  falling leaves, sustained performance and whole-island AAA quality remain open.
+
+Evidence: inland-pond `native116/117/process.json`, PNG/view receipts and
+`visual-review.json`; `isolated-build58-report.json`; service-layout
+`rooted-flower-height-source01`, `rooted-flower-height-lint01`,
+`living-world-foundations-types06`. Official instancing, bounds and shared
+shadow-position references from the preceding checkpoints remain applicable.
+
 ## 2026-09-22 checkpoint — actual island flower integration, art still open
 
 - [x] Source-bind the flower owner in private build57 without rebuilding protected
