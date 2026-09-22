@@ -61,7 +61,360 @@ function createLakePlaneHarness() {
   return { water, reflection, frame, scene, addLake };
 }
 
+function nodeChild(node: Node, key: string): Node {
+  const child: unknown = Reflect.get(node, key);
+  if (!(child instanceof THREE.Node)) throw new Error(`Missing node ${key}`);
+  return child;
+}
+
+function unwrap(node: Node): Node {
+  while (Reflect.get(node, "isVarNode")) node = nodeChild(node, "node");
+  return node;
+}
+
+function inspectGraph(root: Node) {
+  const builder: unknown = Reflect.construct(THREE.NodeBuilder, [null, null]);
+  if (!(builder instanceof THREE.NodeBuilder))
+    throw new Error("Expected Three builder");
+  Object.assign(builder, { camera: new THREE.PerspectiveCamera() });
+  const nodes = new Set<Node>();
+  const visit = (node: Node) => {
+    if (nodes.has(node)) return;
+    nodes.add(node);
+    if (node === positionWorld || node === cameraPosition || node === output)
+      return;
+    const expand: unknown = Reflect.get(node, "getOutputNode");
+    if (typeof expand === "function") {
+      const result: unknown = Reflect.apply(expand, node, [builder]);
+      if (!(result instanceof THREE.Node))
+        throw new Error("Invalid TSL output");
+      visit(result);
+    } else for (const child of node.getChildren()) visit(child);
+  };
+  visit(root);
+  return {
+    nodes,
+    named(name: string) {
+      const matches = [...nodes].filter(
+        (node) => Reflect.get(node, "name") === name,
+      );
+      expect(matches).toHaveLength(1);
+      return matches[0];
+    },
+  };
+}
+
+// Bounded inspection of the ACTUAL material arithmetic. Only view/normal,
+// sampled radiance and body-color inputs are substituted; no duplicate shader
+// formula, fake renderer or claim of GPU evaluation. Unknown operations fail.
+function numeric(root: Node, inputs: Map<Node, number[]>): number[] {
+  const memo = new Map<Node, number[]>();
+  let visits = 0;
+  const visit = (node: Node): number[] => {
+    if (++visits > 10000) throw new Error("Numeric graph budget exceeded");
+    const supplied = inputs.get(node) ?? memo.get(node);
+    if (supplied) return supplied;
+    if (memo.size > 1000) throw new Error("Numeric graph budget exceeded");
+    const get = (key: string): unknown => Reflect.get(node, key);
+    const child = (key: string) => visit(nodeChild(node, key));
+    const zip = (
+      a: number[],
+      b: number[],
+      fn: (a: number, b: number) => number,
+    ) =>
+      Array.from({ length: Math.max(a.length, b.length) }, (_, i) =>
+        fn(a[i % a.length], b[i % b.length]),
+      );
+    const pair = (fn: (a: number, b: number) => number) =>
+      zip(child("aNode"), child("bNode"), fn);
+    const value = get("value"),
+      op = get("op"),
+      method = get("method");
+    let result: number[];
+    if (get("isVarNode") || node.type === "ConvertNode") result = child("node");
+    else if (typeof value === "number") result = [value];
+    else if (value instanceof THREE.Vector3) result = value.toArray();
+    else if (value instanceof THREE.Color) result = [value.r, value.g, value.b];
+    else if (node.type === "JoinNode")
+      result = (get("nodes") as Node[]).flatMap(visit);
+    else if (node.type === "SplitNode") {
+      const channels = get("components");
+      if (typeof channels !== "string" || !/^[xyzwrgba]{1,4}$/.test(channels))
+        throw new Error("Unknown swizzle");
+      const source = child("node");
+      result = [...channels].map(
+        (c) => source[("xyzw".includes(c) ? "xyzw" : "rgba").indexOf(c)],
+      );
+    } else if (node.type === "ConditionalNode")
+      result = child("condNode")[0] ? child("ifNode") : child("elseNode");
+    else if (op === "+") result = pair((a, b) => a + b);
+    else if (op === "-") result = pair((a, b) => a - b);
+    else if (op === "*") result = pair((a, b) => a * b);
+    else if (op === "/") result = pair((a, b) => a / b);
+    else if (op === ">") result = pair((a, b) => Number(a > b));
+    else if (method === "max") result = pair(Math.max);
+    else if (method === "pow") result = pair(Math.pow);
+    else if (method === "dot")
+      result = [pair((a, b) => a * b).reduce((a, b) => a + b, 0)];
+    else if (method === "normalize") {
+      const a = child("aNode"),
+        norm = Math.hypot(...a);
+      result = a.map((v) => v / norm);
+    } else if (method === "clamp")
+      result = zip(pair(Math.max), child("cNode"), Math.min);
+    else if (method === "mix") {
+      const a = child("aNode"),
+        b = child("bNode"),
+        t = child("cNode");
+      result = zip(
+        zip(a, t, (x, f) => x * (1 - f)),
+        zip(b, t, (y, f) => y * f),
+        (x, y) => x + y,
+      );
+    } else
+      throw new Error(
+        `Unsupported numeric node ${node.type}/${String(op ?? method)}`,
+      );
+    if (!result.length || !result.every(Number.isFinite))
+      throw new Error("Non-finite actual graph result");
+    memo.set(node, result);
+    return result;
+  };
+  return visit(root);
+}
+
+function pondLightingHarness() {
+  const harness = createLakePlaneHarness();
+  const material = harness.water.getMaterial("lake")!;
+  const graph = inspectGraph(material.outputNode!);
+  const dot = unwrap(graph.named("compactPondNdotV"));
+  const normal = nodeChild(dot, "aNode"),
+    view = nodeChild(dot, "bNode");
+  const uniforms = harness.water.waterUniforms!;
+  const inputs = new Map<Node, number[]>([
+    [normal, [0, 1, 0]],
+    [view, [0, 1, 0]],
+  ]);
+  uniforms.sunDirection.value.set(0, 1, 0);
+  uniforms.sunIntensity.value = 2;
+  uniforms.dayIntensity.value = 1;
+  uniforms.illumination.keyDirection.value.set(0, 1, 0);
+  uniforms.illumination.keyColor.value.setRGB(1, 1, 1);
+  return { ...harness, material, graph, normal, view, inputs, uniforms };
+}
+
 describe("WaterSystem material graph", () => {
+  it("keeps compact direct light independent of planar radiance and continuously gates horizon/night", () => {
+    const h = pondLightingHarness();
+    try {
+      const legacy = h.graph.named("compactPondLegacyDirectLight");
+      const world = h.graph.named("compactPondWorldDirectLight");
+      const both = () => [legacy, world].map((node) => numeric(node, h.inputs));
+      expect(both()).toEqual([
+        [5, 5, 5],
+        [5, 5, 5],
+      ]);
+      for (const enabled of [false, true]) {
+        h.water.setReflectionsEnabled(enabled);
+        for (const sample of [
+          [0, 0, 0],
+          [1, 0.2, 8],
+        ]) {
+          h.inputs.set(h.graph.named("compactPondReflectionSample"), sample);
+          expect(both()).toEqual([
+            [5, 5, 5],
+            [5, 5, 5],
+          ]);
+        }
+      }
+      // Mirrored view: the lobe is exactly aligned. Both paths contain ONE
+      // N.L, so a vanishing incident cosine cannot pop to full brightness.
+      for (const cosine of [1, 0.5, 1e-4, 1e-8, 0, -1e-8, -0.5]) {
+        const x = Math.sqrt(1 - cosine * cosine);
+        h.uniforms.sunDirection.value.set(x, cosine, 0);
+        h.uniforms.illumination.keyDirection.value.copy(
+          h.uniforms.sunDirection.value,
+        );
+        h.inputs.set(h.view, [-x, cosine, 0]);
+        for (const rgb of both())
+          for (const channel of rgb)
+            expect(channel).toBeCloseTo(5 * Math.max(cosine, 0), 10);
+      }
+      h.uniforms.sunDirection.value.set(0, 1, 0);
+      h.uniforms.illumination.keyDirection.value.set(0, 1, 0);
+      for (const degrees of [0, 5, 10, 45, 90, 120]) {
+        const angle = (degrees * Math.PI) / 180;
+        h.inputs.set(h.view, [Math.sin(angle), Math.cos(angle), 0]);
+        const expected = 5 * Math.pow(Math.max(Math.cos(angle), 0), 100);
+        for (const rgb of both())
+          for (const channel of rgb) expect(channel).toBeCloseTo(expected, 12);
+      }
+      h.inputs.set(h.view, [0, 1, 0]);
+      for (const day of [-1, 0, 1e-8, 0.5, 1, 2]) {
+        h.uniforms.dayIntensity.value = day;
+        for (const rgb of both())
+          for (const channel of rgb)
+            expect(channel).toBeCloseTo(5 * Math.min(1, Math.max(day, 0)), 12);
+      }
+      // Positive moon intensity is not permission for a full-night sun glint.
+      h.uniforms.dayIntensity.value = 0;
+      h.uniforms.sunIntensity.value = 0.2;
+      expect(both()).toEqual([
+        [0, 0, 0],
+        [0, 0, 0],
+      ]);
+      h.uniforms.dayIntensity.value = 1;
+      for (const intensity of [-1, 0, 1, 2, 3]) {
+        h.uniforms.sunIntensity.value = intensity;
+        expect(numeric(legacy, h.inputs)).toEqual(
+          Array(3).fill((5 * Math.min(2, Math.max(0, intensity))) / 2),
+        );
+        // keyColor already carries world irradiance: no second intensity scale.
+        expect(numeric(world, h.inputs)).toEqual([5, 5, 5]);
+      }
+      h.uniforms.illumination.keyColor.value.setRGB(0.2, 0.4, 0.8);
+      expect(numeric(world, h.inputs)).toEqual([1, 2, 4]);
+      h.uniforms.illumination.keyColor.value.setRGB(0, 0, 0);
+      expect(numeric(world, h.inputs)).toEqual([0, 0, 0]);
+    } finally {
+      h.water.destroy();
+    }
+  });
+
+  it("retains full reflection contribution without counting the pond highlight twice", () => {
+    const h = pondLightingHarness();
+    try {
+      h.water.getQuietPondUniform()!.value = 1;
+      for (const lane of ["Legacy", "World"]) {
+        const albedo = h.graph.named(`compactPond${lane}Albedo`);
+        const reflectionMix = unwrap(nodeChild(unwrap(albedo), "aNode"));
+        const selected = unwrap(h.graph.named(`lakeSelected${lane}Lighting`));
+        const pondColor = unwrap(nodeChild(selected, "ifNode"));
+        h.inputs.set(nodeChild(reflectionMix, "aNode"), [0, 0, 0]);
+        h.inputs.set(nodeChild(pondColor, "bNode"), [0, 0, 0]);
+        h.uniforms.illumination.fillColor.value.setRGB(
+          Math.PI,
+          Math.PI,
+          Math.PI,
+        );
+        for (const cosine of [1, 0.5]) {
+          const x = Math.sqrt(1 - cosine * cosine);
+          h.uniforms.sunDirection.value.set(x, cosine, 0);
+          h.uniforms.illumination.keyDirection.value.copy(
+            h.uniforms.sunDirection.value,
+          );
+          h.inputs.set(h.view, [-x, cosine, 0]);
+          const fresnel = 0.3 + 0.7 * (1 - cosine) ** 5;
+          for (const intensity of [0, 0.4])
+            for (const captured of [0, 1])
+              for (const sample of [0, 1]) {
+                h.uniforms.reflectionIntensity.value = intensity;
+                h.water["lakeReflectionPlaneUniform"]!.value = captured;
+                h.inputs.set(h.graph.named("compactPondReflectionSample"), [
+                  sample,
+                  sample,
+                  sample,
+                ]);
+                const expected =
+                  0.2 *
+                  fresnel *
+                  ((0.1 + 0.9 * sample) * intensity * captured + 5 * cosine);
+                for (const channel of numeric(
+                  h.graph.named(`lakeSelected${lane}Lighting`),
+                  h.inputs,
+                ))
+                  expect(channel).toBeCloseTo(expected, 12);
+              }
+        }
+        h.uniforms.sunDirection.value.set(0, 1, 0);
+        h.uniforms.illumination.keyDirection.value.set(0, 1, 0);
+        h.inputs.set(h.view, [0, 1, 0]);
+      }
+    } finally {
+      h.water.destroy();
+    }
+  });
+
+  it("owns pond lighting per draw without leaking into ordinary water, opacity, displacement or fog alpha", () => {
+    const h = pondLightingHarness();
+    try {
+      const quiet = h.water.getQuietPondUniform()!;
+      for (const lane of ["Legacy", "World"]) {
+        const direct = inspectGraph(
+          h.graph.named(`compactPond${lane}DirectLight`),
+        ).nodes;
+        expect(direct.has(h.reflection)).toBe(false);
+        expect(direct.has(h.uniforms.reflectionIntensity)).toBe(false);
+        expect(direct.has(h.water["lakeReflectionPlaneUniform"]!)).toBe(false);
+        const selected = unwrap(h.graph.named(`lakeSelected${lane}Lighting`));
+        const ordinary = inspectGraph(nodeChild(selected, "elseNode")).nodes;
+        expect(
+          ordinary.has(h.graph.named(`compactPond${lane}DirectLight`)),
+        ).toBe(false);
+        expect(ordinary.has(h.graph.named(`compactPond${lane}Albedo`))).toBe(
+          false,
+        );
+        const sentinel = [0.11, 0.22, 0.33];
+        h.inputs.set(nodeChild(selected, "elseNode"), sentinel);
+        quiet.value = 0;
+        expect(numeric(selected, h.inputs)).toEqual(sentinel);
+      }
+      const opacity: unknown = h.material.opacityNode;
+      const position: unknown = h.material.positionNode;
+      if (!(opacity instanceof THREE.Node) || !(position instanceof THREE.Node))
+        throw new Error("Expected actual lake opacity and displacement nodes");
+      expect(inspectGraph(opacity).nodes.has(quiet)).toBe(false);
+      expect(inspectGraph(position).nodes.has(quiet)).toBe(false);
+      expect(
+        [...h.graph.nodes].filter(
+          (n) =>
+            Reflect.get(n, "isTextureNode") &&
+            Reflect.get(n, "value") === h.water["normalTex"],
+        ),
+      ).toHaveLength(5);
+      const ocean = h.water["createOceanMaterial"]();
+      h.water["oceanMaterial"] = ocean;
+      expect(inspectGraph(ocean.outputNode!).nodes.has(quiet)).toBe(false);
+      expect([
+        h.material.transparent,
+        h.material.depthWrite,
+        h.material.side,
+        h.material.fog,
+      ]).toEqual([true, true, THREE.DoubleSide, false]);
+      // The final vec4 still fogs RGB and alpha with one shared factor. The
+      // pond contribution is upstream of that mix, never added after full fog.
+      const final = [...h.graph.nodes].find((n) => {
+        const children: unknown = Reflect.get(n, "nodes");
+        return (
+          n.type === "JoinNode" &&
+          Array.isArray(children) &&
+          children.length === 2 &&
+          children.every(
+            (c: Node) => Reflect.get(unwrap(c), "method") === "mix",
+          )
+        );
+      });
+      expect(final).toBeDefined();
+      const [rgb, alpha] = Reflect.get(final!, "nodes") as Node[];
+      const factor = nodeChild(unwrap(rgb), "cNode");
+      expect(nodeChild(unwrap(alpha), "cNode")).toBe(factor);
+      expect(
+        inspectGraph(nodeChild(unwrap(alpha), "aNode")).nodes.has(quiet),
+      ).toBe(false);
+      const fogInputs = new Map<Node, number[]>([
+        [nodeChild(unwrap(rgb), "aNode"), [10, 20, 30]],
+        [nodeChild(unwrap(rgb), "bNode"), [0.2, 0.3, 0.4]],
+        [nodeChild(unwrap(alpha), "aNode"), [0.37]],
+        [factor, [1]],
+      ]);
+      expect(numeric(final!, fogInputs)).toEqual([0.2, 0.3, 0.4, 1]);
+      fogInputs.set(factor, [0]);
+      expect(numeric(final!, fogInputs)).toEqual([10, 20, 30, 0.37]);
+    } finally {
+      h.water.destroy();
+    }
+  });
+
   it("calms only owned pond surface detail without new normal samples or changed depth and wave graphs", () => {
     const { water, frame, addLake } = createLakePlaneHarness();
     try {

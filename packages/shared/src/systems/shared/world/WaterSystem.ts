@@ -46,7 +46,7 @@ import THREE, {
   cameraFar,
 } from "../../../extras/three/three";
 import type { Node, NodeFrame, UniformNode } from "three/webgpu";
-import { NodeUpdateType } from "three/tsl";
+import { NodeUpdateType, select } from "three/tsl";
 import type { World } from "../../../types";
 import type { TerrainTile } from "../../../types/world/terrain";
 import type { Wind } from "./Wind";
@@ -1415,6 +1415,43 @@ export class WaterSystem {
       );
       let color: Node<"vec3"> = mix(albedo, waterColor, float(0.8));
 
+      // Compact pond only: a direct highlight must not disappear with the
+      // planar capture, or be multiplied by its sampled RGB. Keep the legacy
+      // Fresnel/body mix for this isolated Phong-shaped correction, not a PBR
+      // claim. The cosine makes the horizon limit continuous. Environment uses
+      // the same light for the moon, so intensity/nightDim alone is not a sun
+      // gate. Do not apply this daylight gate to the existing lake expression.
+      const pondNdotV = dot(surfaceNormal, V).toVar("compactPondNdotV");
+      const pondFront = select(pondNdotV.greaterThan(0), float(1), float(0));
+      const pondDay = clamp(uDayIntensity, float(0), float(1)).toVar(
+        "compactPondDaylight",
+      );
+      const pondDirect = specularLight
+        .mul(clamp(NdotL, float(0), float(1)))
+        .mul(pondDay)
+        .mul(div(clamp(uSunIntensity, float(0), float(2)), float(2)))
+        .mul(pondFront)
+        .toVar("compactPondLegacyDirectLight");
+      const pondReflectionSample = reflectionSample.toVar(
+        "compactPondReflectionSample",
+      );
+      const pondAlbedo = add(
+        mix(
+          diffusePart,
+          mul(
+            add(vec3(0.1, 0.1, 0.1), mul(pondReflectionSample, float(0.9))),
+            reflectionIntensity,
+          ),
+          reflectance,
+        ),
+        mul(pondDirect, reflectance),
+      ).toVar("compactPondLegacyAlbedo");
+      color = select(
+        quietPond.greaterThan(0),
+        mix(pondAlbedo, waterColor, float(0.8)),
+        color,
+      ).toVar("lakeSelectedLegacyLighting");
+
       // Foam
       color = mix(
         color,
@@ -1478,6 +1515,34 @@ export class WaterSystem {
         worldDiffuse,
         float(0.8),
       );
+      // worldSpecular already contains the actual key irradiance and N.L.
+      // Apply neither again: only the shared daylight/front-side gates remain.
+      const pondWorldDirect = worldSpecular
+        .mul(pondDay)
+        .mul(pondFront)
+        .toVar("compactPondWorldDirectLight");
+      const pondWorldAlbedo = add(
+        mix(
+          add(
+            mul(worldDiffuse, float(0.3 * WATER.DIFFUSE_STRENGTH)),
+            worldScatter,
+          ),
+          mul(
+            add(
+              mul(illumination.fillRadiance(), float(0.1)),
+              mul(pondReflectionSample, float(0.9)),
+            ),
+            reflectionIntensity,
+          ),
+          reflectance,
+        ),
+        mul(pondWorldDirect, reflectance),
+      ).toVar("compactPondWorldAlbedo");
+      worldColor = select(
+        quietPond.greaterThan(0),
+        mix(pondWorldAlbedo, worldDiffuse, float(0.8)),
+        worldColor,
+      ).toVar("lakeSelectedWorldLighting");
       worldColor = mix(
         worldColor,
         illumination.diffuse(

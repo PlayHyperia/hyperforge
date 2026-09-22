@@ -2423,6 +2423,56 @@ No water shader or material setting was changed on this evidence.
 Runtime55/56 and their disposable databases are removed. All owned native
 browsers are closed; the protected human playable database is unchanged.
 
+### Compact pond sunlight correction — 2026-09-22
+
+- [x] Separate compact-pond direct sunlight from planar reflection sampling.
+  The old expression multiplied the highlight by reflection RGB and intensity,
+  removing it when planar reflections were disabled. The compact branch now
+  adds it independently, with continuous light-angle attenuation, a front-side
+  gate and explicit daylight suppression because the environment reuses its
+  directional light for the moon. The opt-in illumination branch applies key
+  irradiance and light cosine once, not twice.
+- [x] Preserve ordinary lake/ocean expressions, existing five normal samples,
+  reflection enablement, opacity, depth, fog, geometry and wave displacement.
+  The existing RF0=.3 and .8 body mix remain deliberately unchanged for this
+  isolated comparison: this is a Phong-shaped correction, not calibrated PBR.
+  It follows the independent direct-highlight composition in the
+  [official Three r186 WaterMesh](https://github.com/mrdoob/three.js/blob/r186/examples/jsm/objects/WaterMesh.js)
+  without introducing its planar capture pass.
+- [x] Pass 90 retained-source water/lighting/ownership tests across seven files,
+  including actual TSL arithmetic/ownership tests for reflection off/on, sampled
+  RGB, night with positive moon intensity, continuous horizon behavior, fog and
+  pond/lake object alternation. Shared/current regressions no-emit check:
+  724 roots, 2,401 source files, zero diagnostics; scoped lint/format pass.
+  The first type run found three test-helper typing issues, now corrected;
+  its failure remains recorded. No production expression changed during that
+  test-only correction.
+- [ ] Complete native appearance and GPU-cost comparison. Build44 produces nine
+  isolated bundles with 996 input pins and all 145 protected outputs unchanged.
+  Native92 fails before any comparison view: macOS logs a 975-second sleep
+  labeled “Dark Wake Thermal Emergency” during the original 90-second startup
+  gate. Its failure snapshot has ready terrain, 50/122 ready grass chunks,
+  72 pending and zero failed grass jobs. This interrupted run establishes
+  neither a shader regression nor visual/startup/performance acceptance.
+  Keep its failed result; do not extend deadlines or override thermal safety.
+- [ ] Next ground-art slice: a separately bounded pond-bank apron derived from
+  the real service anchors. Existing .65/.35 bank-height values have zero
+  locality here: they target the town bank at (348,318), not pond bank
+  (384,438). Do not weaken or widen the old field. Pair three unequal local
+  wear lobes with matching CPU/GPU grass-height and wind envelopes, preserving
+  roots/counts, road/collision rules, four footings and free navigation.
+- [ ] Then design a separate irregular eastern-grove ground treatment.
+  The existing two-pocket habitat targets the western haven and changes
+  ground/root color only. Do not encode woodland floor as roads or circular
+  clearings around every tree; that would affect functional resource admission.
+
+Evidence: service-layout/pond-direct-light-final02 (90 passes) and
+pond-direct-light-types02; inland-pond/build44, native92/process.json and
+native92-host-suspension.md. The earlier native90/91 appearance comparison
+still describes build43, not this sunlight correction. The owned browser,
+runtime62 and temporary database are closed; human localhost:3333 and its
+database remain unchanged. Visual/default promotion stays unapproved.
+
 ### Pond surface, service clearing and woodland comparison — 2026-09-21
 
 - [x] Calm compact-pond surface detail: normal strength 1.5→0.65 and detail
