@@ -268,6 +268,8 @@ export function collectStreamingRenderProfileApplication(
           ],
           bias: sun.shadow.bias,
           normalBias: sun.shadow.normalBias,
+          terrainProfileIdentity:
+            environment?.getSunLightTerrainProfileIdentity() ?? null,
         }
       : null,
     water: water

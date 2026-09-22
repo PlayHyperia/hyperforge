@@ -160,6 +160,7 @@ describe("broadcast startup preference ownership", () => {
     await environment.init({});
     environment.buildSunLight();
     try {
+      const identity = environment.getSunLightTerrainProfileIdentity();
       const receipt = collectStreamingRenderProfileApplication(
         world,
         STREAMING_RENDER_PROFILES["shadows-720p60-v1"],
@@ -180,8 +181,39 @@ describe("broadcast startup preference ownership", () => {
         mapSize: [4096, 4096],
         allocatedMapSize: null,
         frustum: [-200, 200, 200, -200, 0.5, 600],
+        bias: environment.sunLight!.shadow.bias,
+        normalBias: 0.01,
+        terrainProfileIdentity: identity,
       });
       expect(environment.sunLight?.shadow.map).toBeNull();
+      // Observe the actual light rather than deriving bias from its profile.
+      // This CPU-only mutation must not turn an unrendered GPU into readiness.
+      environment.sunLight!.shadow.bias = 0.000123;
+      const changed = collectStreamingRenderProfileApplication(
+        world,
+        STREAMING_RENDER_PROFILES["shadows-720p60-v1"],
+        requested,
+      );
+      expect(changed.applied?.sunlight).toMatchObject({
+        bias: 0.000123,
+        terrainProfileIdentity: identity,
+      });
+      expect(changed.ready).toBe(false);
+      expect(changed.mismatchReason).toBe("renderer_not_rendered");
+      // A detached/replaced sun is no longer the provenance owner's light.
+      const light = environment.sunLight!;
+      light.removeFromParent();
+      try {
+        const detached = collectStreamingRenderProfileApplication(
+          world,
+          STREAMING_RENDER_PROFILES["shadows-720p60-v1"],
+          requested,
+        );
+        expect(detached.applied?.sunlight?.terrainProfileIdentity).toBeNull();
+        expect(detached.ready).toBe(false);
+      } finally {
+        world.stage.scene.add(light);
+      }
     } finally {
       environment.destroy();
       graphics.renderer.dispose();

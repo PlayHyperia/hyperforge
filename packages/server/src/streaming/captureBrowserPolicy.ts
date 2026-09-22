@@ -321,7 +321,12 @@ function isAppliedRenderState(
       typeof sun.bias === "number" &&
       Number.isFinite(sun.bias) &&
       typeof sun.normalBias === "number" &&
-      Number.isFinite(sun.normalBias))
+      Number.isFinite(sun.normalBias) &&
+      (sun.terrainProfileIdentity === undefined ||
+        sun.terrainProfileIdentity === null ||
+        (typeof sun.terrainProfileIdentity === "string" &&
+          sun.terrainProfileIdentity.length > 0 &&
+          sun.terrainProfileIdentity.length <= 16_384)))
   );
 }
 

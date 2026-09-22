@@ -11,7 +11,10 @@ import {
   resolveOutdoorCalibration,
 } from "./OutdoorEnvironment";
 import { DataManager } from "../../../data/DataManager";
-import { isCompactSculptProfile } from "./WorldTerrainProfile";
+import {
+  isCompactSculptProfile,
+  worldTerrainProfileIdentity,
+} from "./WorldTerrainProfile";
 import { setLamppostNightMix } from "./LamppostLightMask";
 import { FOG_NEAR, FOG_FAR } from "./FogConfig";
 import {
@@ -187,7 +190,23 @@ export class Environment extends System {
   private lastLightAnchor: THREE.Vector3 = new THREE.Vector3();
   private readonly compactLightAnchor = new THREE.Vector3();
   private useCompactLightAnchor = false;
+  private sunLightTerrainProfileIdentity: string | null = null;
+  private sunLightTerrainProfileOwner: THREE.DirectionalLight | null = null;
   private readonly LIGHT_DISTANCE = 400; // Distance from target to light
+
+  /** Admitted compact profile used to construct this exact scene-owned sun.
+   * This is construction provenance, not a claim about current GPU uniforms.
+   */
+  getSunLightTerrainProfileIdentity(): string | null {
+    const owner = this.sunLightTerrainProfileOwner;
+    const scene = this.world.stage?.scene;
+    return owner !== null &&
+      owner === this.sunLight &&
+      owner.parent === scene &&
+      owner.target.parent === scene
+      ? this.sunLightTerrainProfileIdentity
+      : null;
+  }
 
   private currentExposure: number = EXPOSURE.DAY;
 
@@ -474,6 +493,9 @@ export class Environment extends System {
   }
 
   override destroy(): void {
+    this.sunLightTerrainProfileOwner = null;
+    this.sunLightTerrainProfileIdentity = null;
+    this.useCompactLightAnchor = false;
     this.outdoorEnvironment?.dispose();
     this.outdoorEnvironment = undefined;
     if (this.skySystem) {
@@ -988,6 +1010,9 @@ export class Environment extends System {
    * When ENABLE_CSM=false: one map, fixed to admitted compact terrain when present.
    */
   buildSunLight(): void {
+    this.sunLightTerrainProfileOwner = null;
+    this.sunLightTerrainProfileIdentity = null;
+    this.useCompactLightAnchor = false;
     if (!this.isClientWithGraphics) return;
 
     const useWebGPU = this.world.graphics?.isWebGPU !== false;
@@ -1007,7 +1032,7 @@ export class Environment extends System {
 
     // Startup/quality-change only: no per-frame terrain sampling, scene traversal
     // or allocation. DataManager already admitted and froze this world profile.
-    this.useCompactLightAnchor = false;
+    let terrainProfileIdentity: string | null = null;
     if (!useCSM && csmConfig.enabled && DataManager.getWorldConfig()) {
       const profile = DataManager.getWorldTerrainProfile();
       if (isCompactSculptProfile(profile)) {
@@ -1017,6 +1042,7 @@ export class Environment extends System {
           profile.island.centerZ,
         );
         this.useCompactLightAnchor = true;
+        terrainProfileIdentity = worldTerrainProfileIdentity(profile);
       }
     }
 
@@ -1105,7 +1131,9 @@ export class Environment extends System {
       this.sunLight.name = "SunLight_Single";
       this.sunLight.shadow.mapSize.width = SINGLE_SHADOW_MAP_SIZE;
       this.sunLight.shadow.mapSize.height = SINGLE_SHADOW_MAP_SIZE;
-      this.sunLight.shadow.bias = 0.0002;
+      // The admitted compact single-map path keeps the normal offset without
+      // advancing receiver depth into its own shadow. Other paths are unchanged.
+      this.sunLight.shadow.bias = this.useCompactLightAnchor ? 0 : 0.0002;
       this.sunLight.shadow.normalBias = 0.01;
 
       const shadowCam = this.sunLight.shadow.camera;
@@ -1129,6 +1157,10 @@ export class Environment extends System {
     scene.add(this.sunLight);
     scene.add(this.sunLight.target);
     if (this.useCompactLightAnchor) this.updateSunLightPosition();
+    if (terrainProfileIdentity !== null) {
+      this.sunLightTerrainProfileIdentity = terrainProfileIdentity;
+      this.sunLightTerrainProfileOwner = this.sunLight;
+    }
   }
 
   /**

@@ -6,6 +6,11 @@ import type {
   CompactCoastBlend,
   CompactPondBlend,
 } from "../systems/shared/world/CompactTerrainMaterial";
+import {
+  deserializeWorldTerrainProfile,
+  isCompactSculptProfile,
+  worldTerrainProfileIdentity,
+} from "../systems/shared/world/WorldTerrainProfile";
 
 interface HyperiaViewportWindow extends Window {
   __HYPERIA_EMBEDDED__?: boolean;
@@ -595,6 +600,8 @@ export type StreamingRenderAppliedState = {
     frustum: readonly [number, number, number, number, number, number];
     bias: number;
     normalBias: number;
+    /** Canonical profile captured by the actual compact single-map light owner. */
+    terrainProfileIdentity?: string | null;
   } | null;
   water: { reflectionsEnabled: boolean; activeReflectionCount: number } | null;
   /** Required only for the opt-in island profile; older receipts stay valid. */
@@ -608,6 +615,33 @@ export type StreamingRenderProfileApplication = {
   requested: StreamingRenderPreferences;
   applied: StreamingRenderAppliedState | null;
 };
+
+// Readiness is sampled repeatedly. Retain just one bounded identity so a stable
+// light does not reparse/validate its complete terrain profile every sample.
+let lastShadowTerrainIdentity: string | null = null;
+let lastShadowTerrainIdentityValid = false;
+function isCanonicalCompactShadowIdentity(identity: string): boolean {
+  if (identity.length === 0 || identity.length > 16_384) return false;
+  if (identity === lastShadowTerrainIdentity)
+    return lastShadowTerrainIdentityValid;
+  const prefix = "hyperia-world-terrain-profile-v1\n";
+  let valid = false;
+  if (identity.startsWith(prefix)) {
+    try {
+      const profile = deserializeWorldTerrainProfile(
+        identity.slice(prefix.length),
+      );
+      valid =
+        isCompactSculptProfile(profile) &&
+        worldTerrainProfileIdentity(profile) === identity;
+    } catch {
+      // An invalid or noncanonical supplied identity must never enable bias 0.
+    }
+  }
+  lastShadowTerrainIdentity = identity;
+  lastShadowTerrainIdentityValid = valid;
+  return valid;
+}
 
 /** Fail closed on missing/unapplied settings; native rendering remains a separate gate. */
 export function evaluateStreamingRenderProfileApplication(
@@ -722,11 +756,22 @@ export function evaluateStreamingRenderProfileApplication(
     if (
       sun.castShadow ||
       sun.allocatedMapSize !== null ||
-      sun.name !== "SunLight_NoShadows"
+      sun.name !== "SunLight_NoShadows" ||
+      sun.terrainProfileIdentity != null
     ) {
       return finish("unexpected_sun_shadows");
     }
   } else {
+    const identity = sun.terrainProfileIdentity;
+    const compact =
+      typeof identity === "string" &&
+      isCanonicalCompactShadowIdentity(identity);
+    if (identity != null && !compact) return finish("sun_terrain_profile");
+    if (
+      profile.grassProfile !== "fixed-arena-v1" &&
+      (!compact || applied.grass?.terrainProfileIdentity !== identity)
+    )
+      return finish("sun_grass_terrain_profile");
     if (!sun.castShadow || sun.name !== "SunLight_Single")
       return finish("sun_shadows_disabled");
     if (
@@ -741,7 +786,7 @@ export function evaluateStreamingRenderProfileApplication(
     if (
       sun.frustum.length !== frustum.length ||
       sun.frustum.some((value, index) => value !== frustum[index]) ||
-      sun.bias !== 0.0002 ||
+      sun.bias !== (compact ? 0 : 0.0002) ||
       sun.normalBias !== 0.01
     )
       return finish("sun_shadow_projection");

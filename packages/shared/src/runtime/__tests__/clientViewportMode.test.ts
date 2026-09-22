@@ -7,7 +7,9 @@ import { TerrainSystem } from "../../systems/shared/world/TerrainSystem";
 import { createCompactTerrainColorOperations } from "../../systems/shared/world/CompactTerrainPalette";
 import {
   COMPACT_WORLD_TERRAIN_PROFILE,
+  SCULPTED_COMPACT_WORLD_TERRAIN_PROFILE,
   validateWorldTerrainProfile,
+  worldTerrainProfileIdentity,
 } from "../../systems/shared/world/WorldTerrainProfile";
 import {
   isEmbeddedSpectatorViewport,
@@ -2333,6 +2335,9 @@ describe("explicit atmosphere candidate selection", () => {
 
 describe("opt-in shadows render contract (CPU validation, not GPU execution)", () => {
   const profile = STREAMING_RENDER_PROFILES["shadows-720p60-v1"];
+  const compactIdentity = worldTerrainProfileIdentity(
+    SCULPTED_COMPACT_WORLD_TERRAIN_PROFILE,
+  );
   const requested = resolveStreamingRenderPreferences(1280, 720, profile);
   const observed = (): StreamingRenderAppliedState => ({
     preferences: { ...requested },
@@ -2448,6 +2453,42 @@ describe("opt-in shadows render contract (CPU validation, not GPU execution)", (
     ).toMatchObject({ schemaVersion: 1, ready: true, mismatchReason: null });
   });
 
+  it("requires exactly the bias belonging to the canonical light terrain identity", () => {
+    const state = observed();
+    const sun = state.sunlight!;
+    const evaluate = () =>
+      evaluateStreamingRenderProfileApplication(profile, requested, state);
+    sun.bias = 0;
+    expect(evaluate().mismatchReason).toBe("sun_shadow_projection");
+    sun.terrainProfileIdentity = compactIdentity;
+    expect(evaluate().ready).toBe(true);
+    // A repeated sample exercises the bounded canonical identity cache.
+    expect(evaluate().ready).toBe(true);
+    sun.bias = 0.0002;
+    expect(evaluate().mismatchReason).toBe("sun_shadow_projection");
+    sun.terrainProfileIdentity = null;
+    expect(evaluate().ready).toBe(true);
+    for (const identity of [
+      "",
+      "compact-duel-island-v6",
+      "x".repeat(16_385),
+      compactIdentity + "\n",
+      compactIdentity.replace('"schemaVersion":1', '"schemaVersion":2'),
+      compactIdentity.replace('{"schemaVersion"', '{ "schemaVersion"'),
+      "hyperia-world-terrain-profile-v1\n{}",
+      worldTerrainProfileIdentity(COMPACT_WORLD_TERRAIN_PROFILE),
+    ]) {
+      sun.terrainProfileIdentity = identity;
+      for (const bias of [0, 0.0002]) {
+        sun.bias = bias;
+        expect(evaluate().mismatchReason).toBe("sun_terrain_profile");
+      }
+    }
+    sun.terrainProfileIdentity = compactIdentity;
+    sun.bias = 0;
+    expect(evaluate().ready).toBe(true);
+  });
+
   it("keeps the island candidate explicit and changes only its grass profile", () => {
     const island = STREAMING_RENDER_PROFILES["island-720p60-v1"];
     expect({
@@ -2499,7 +2540,7 @@ describe("opt-in shadows render contract (CPU validation, not GPU execution)", (
         schemaVersion: 1,
         profileId: dense ? "compact-meadow-v2" : "compact-island-v1",
         eligibility: "compact-pbr-v1",
-        terrainProfileIdentity: "admitted-terrain",
+        terrainProfileIdentity: compactIdentity,
         minimumLodLevel: 1,
         clumpSpacingMultiplier: dense ? 2.5 : 4,
         clumpSpacing: dense ? 1.75 : 2.8,
@@ -2515,6 +2556,12 @@ describe("opt-in shadows render contract (CPU validation, not GPU execution)", (
         installedClumps: 0,
       };
       state.grass = grass;
+      expect(
+        evaluateStreamingRenderProfileApplication(island, requested, state)
+          .mismatchReason,
+      ).toBe("sun_grass_terrain_profile");
+      state.sunlight!.terrainProfileIdentity = compactIdentity;
+      state.sunlight!.bias = 0;
       expect(
         evaluateStreamingRenderProfileApplication(island, requested, state)
           .ready,
@@ -2533,6 +2580,11 @@ describe("opt-in shadows render contract (CPU validation, not GPU execution)", (
         { castShadow: true },
         { destroyed: true },
         { terrainProfileIdentity: "" },
+        {
+          terrainProfileIdentity: worldTerrainProfileIdentity(
+            COMPACT_WORLD_TERRAIN_PROFILE,
+          ),
+        },
         { installedClumps: NaN },
         { pendingChunks: -1 },
         { settledChunks: 0.5 },
@@ -2614,7 +2666,7 @@ describe("opt-in shadows render contract (CPU validation, not GPU execution)", (
       schemaVersion: 1,
       profileId: "fine-meadow-v1",
       eligibility: "compact-pbr-v1",
-      terrainProfileIdentity: "admitted-terrain",
+      terrainProfileIdentity: compactIdentity,
       minimumLodLevel: 0,
       clumpSpacingMultiplier: 1,
       clumpSpacing: 0.7,
@@ -2638,6 +2690,8 @@ describe("opt-in shadows render contract (CPU validation, not GPU execution)", (
     };
     const state = observed();
     state.grass = grass;
+    state.sunlight!.terrainProfileIdentity = compactIdentity;
+    state.sunlight!.bias = 0;
     expect(
       evaluateStreamingRenderProfileApplication(fine, requested, state).ready,
     ).toBe(true);

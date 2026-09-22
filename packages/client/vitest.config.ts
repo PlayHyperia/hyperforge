@@ -12,6 +12,11 @@ const sharedSource = path.resolve(__dirname, "../shared/src");
 const sourceDiagnosticsConsumers = new Set([
   path.resolve(__dirname, "src/lib/streamingSceneDiagnostics.ts"),
   path.resolve(__dirname, "tests/unit/lib/streamingSceneDiagnostics.test.ts"),
+  path.resolve(__dirname, "src/screens/StreamingMode.tsx"),
+  path.resolve(
+    __dirname,
+    "tests/unit/screens/StreamingRenderPreferences.test.ts",
+  ),
 ]);
 
 export default defineConfig({
@@ -22,7 +27,7 @@ export default defineConfig({
       enforce: "pre",
       resolveId(source, importer) {
         const owner = importer?.split("?")[0];
-        // Only this source collector/test graph needs the current admission
+        // These source collector/test graphs need the current admission
         // API. Other client tests retain the installed compiled-package alias.
         // The alias plugin resolves its replacement through this hook; never
         // patch/rebuild a shared bundle that a playable session may be serving.

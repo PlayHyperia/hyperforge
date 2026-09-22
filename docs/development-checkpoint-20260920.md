@@ -1,5 +1,63 @@
 # World graphics development checkpoint — 2026-09-20
 
+## Compact single-map shadow correction — 2026-09-21
+
+- [x] Correct compact-sun receiver bias without raising render cost: admitted
+  compact terrain uses bias 0 with the existing 0.01 normal bias, 4096 shadow
+  map and fixed frustum. Legacy single-map, CSM and shadowless paths retain
+  their previous settings. No geometry, density, texture, resolution or
+  shadow-map budget is changed.
+- [x] Carry canonical terrain provenance from the exact scene-owned light to
+  capture validation. Compact grass must match it; malformed, noncanonical,
+  missing/mismatched provenance and incorrect actual bias fail closed.
+  The identity is cached, not serialized/validated anew every readiness poll.
+- [x] Verify source with 567 focused tests (453 shared/environment, 13 client,
+  101 server policy), scoped lint/format and no-emit shared/server typing:
+  717 roots, 2,393 source files, zero diagnostics. The broader mixed client
+  program is NOT clean: baseline/current both have 286 diagnostics across
+  720 roots/6,790 sources, with zero added or removed diagnostic instances.
+  That delta is not a clean whole-project typecheck.
+- [x] Inspect real Chrome/Metal A/B evidence at phases .30/.49/.70.
+  Native79/build40 completed 24 images over overview, landing, jetty and bank
+  arrival before its natural-tree ownership helper failed. Native80/build41
+  completed 12 fresh-source images over natural trees and landing before its
+  separate water-depth probe failed. Both overall FAILED receipts remain
+  retained; completed pairs are not relabeled as complete run passes.
+- [x] Visual comparison finds substantially less dock/roof diagonal acne,
+  with rail shadows, roof courses, broad tree shadows and contact retained at
+  the reviewed views. Close-up GLB trunk/leaf ownership is proved in native80.
+  These held views do not certify every canopy, camera, time or target GPU.
+- [ ] Resolve the separate pond diagonal color/depth seam and dark bank ring.
+  Both persist with corrected shadow bias; no water improvement is claimed.
+- [ ] Finish shoreline plant/rock massing, pavilion arrival and cohesive island
+  composition, then qualify sustained movement, frame/heap tails, real stream
+  capture and target-hardware performance. No AAA or FPS acceptance is granted.
+
+Native78's near-zenith convergence failure is also retained. The private
+diagnostic now waits for the same exact light to converge more precisely; it
+does not snap matrices, alter the production clock or raise original startup
+or camera budgets. Native79/80 restore their original camera, clock and bias,
+and close their owned browsers. Build41 is isolated; the new client collector
+must be paired with the new shared bundle, not older compiled outputs.
+Human localhost:3333, database and canonical compiled artifacts are protected.
+World work remains compact-island-only, one arena and SOL-only.
+
+Evidence: `inland-pond-integration01-UNQUALIFIED/native78–80/` and
+`isolated-build41-report.json`; verification receipts in
+`service-layout-network01-UNQUALIFIED/compact-shadow-*`.
+The source checkpoint covers shadows/provenance only, not water acceptance.
+
+Native81/build41 completes the original startup (41.298 s) and landing cut
+(2.197 s), with no recorded errors, stable input pins and restored controls/
+closed browser. It independently reads both actual pond depth bindings:
+24 pixels × four samples, 768-byte result. The two GPU textures are distinct,
+but all 96 paired depth values agree exactly. Several samples across the
+visible seam change abruptly, so the next check is submitted opaque terrain/
+object geometry; the probe alone does not identify the responsible primitive.
+No water shader or material setting was changed on this evidence.
+Runtime55 is removed. Runtime56 remains isolated for the next water diagnostic;
+its disposable database is not the protected human playable database.
+
 ## Refined face fitting — 2026-09-21 (geometry verified; tails still open)
 
 Conservative interior-face certification preserves every tested geometry buffer
