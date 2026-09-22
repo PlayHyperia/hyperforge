@@ -101,9 +101,9 @@ export class RootedFlowerVisualManager {
     options.parent.updateWorldMatrix(true, false);
     if (!options.parent.matrixWorld.equals(this.identity))
       throw new Error("Rooted flower parent must remain at world identity");
-    // This meadow owner raises the flower head within the existing grass canopy;
+    // This taller meadow variety lifts blossoms through the existing grass canopy;
     // the factory default remains a separate, smaller flower recipe.
-    const geometry = FlowerGen.createRootedFlowerGeometry({ height: 0.5 });
+    const geometry = FlowerGen.createRootedFlowerGeometry({ height: 0.75 });
     const material = createRootedFlowerMaterial(this.windNodes, {
       focus: this.focus,
       fadeStart: 24,

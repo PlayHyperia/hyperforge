@@ -1,5 +1,69 @@
 # Duel Arena, Streaming, and Hyperbet Launch Checklist
 
+## 2026-09-22 — fuller meadow flowers; final native qualification remains open
+
+- [x] Respond to the requested abundance: remove the broad patch cutoff that
+  made the upper 58% of patch-noise values flowerless. Acceptance is habitat * (0.60 + 0.35 *
+  (1 - patch)); retain existing positions, acceptance/yaw/scale keys, four
+  candidates per cell, 484 attempts and the 512-slot / 32 KiB matrix allocation.
+  Every old accepted transform is retained at unchanged geometry/inputs.
+- [x] Native120/build61 density-only comparison: bank 55 -> 205 flowers and
+  meadow 51 -> 180, with every old matrix retained and each captured population
+  stable. Two actual Chrome/Metal WebGPU views, original startup 61.620 s,
+  19 nominal AC/awake host samples and zero undeferred capture errors.
+  Counts include offscreen/faded plants, not visible pixels. Both reviewers
+  see more heads, but still grass with pale flecks rather than a rich meadow.
+- [ ] Native120 exposes slow settling: bank 4.427 s, meadow 17.441 s; placement
+  31,889 / 161,923 steps. Raw update / validation / publication maxima are
+  9.8 / 1.6 / 7.4 ms, 16 soft overruns. These are NOT performance approval.
+- [x] Make the opt-in owner a taller 0.75 m variety, yielding approximately
+  0.638–0.863 m plants after scaling. Factory defaults remain unchanged.
+  Actual height metadata, spacing/swept bounds and owner lifecycle are checked.
+  Geometry stays 362 vertices / 584 triangles, but raster/shadow cost may rise.
+  Larger clearance envelopes can legitimately change accepted populations.
+- [x] Reduce redundant flower road checks: validate EVERY raw road first, then
+  retain only road AABBs expanded by width/blend that touch the complete swept
+  placement region. Exact per-flower capsule checks, retained order, all other
+  exclusions, raw 4096-road cap and owner work limits are unchanged.
+  Seven new cases verify all-road oracle parity, closed-boundary contact,
+  800 distant segments, malformed/oversized inputs and cancellation.
+- [x] Final source03: all 142 flower/material/clearance/owner tests pass;
+  types12 has 750 roots / 2456 sources / zero diagnostics and stable pins;
+  four-file lint03, scoped formatting and independent reviews pass.
+- [ ] Final broader source03 run is **837/840, not fully passing**: three grass
+  coverage/publication cases reach the active-time budget. Earlier source01/02
+  passed 833/833 before the road-filter change; retain all results. The failed
+  cases exercise grass fitting, not flower placement, and still need diagnosis.
+- [ ] Native121/build62 fails the original 90 s startup gate: 121/122 grass
+  cells, fitting 254.3 ms against 250 ms, zero comparison views. Worker peak
+  interval is 73.2 ms across 64 resumes (endpoint_owner -> grounding_operation),
+  including preemption, not proof of a cause. Flower owner is ready with 181
+  plants. This differs from native118's surface-preparation failure.
+- [ ] Native122/build63 stops when the live thermal guard observes state 1;
+  zero views and no final height/filter visual or performance approval.
+  Keep the abort and cascading closed-browser errors. Do not retry merely for
+  a green result, relax timeouts, discount time or blame another app.
+- [x] Builds61/62/63 each have nine bundles / 1096 input pins. Their changes
+  are isolated to placement acceptance, owner height, then road filtering.
+  Runtime90/91/92 and owned browsers are stopped; private temporary databases
+  removed; protected 145 artifacts, retained lock and localhost:3333 unchanged.
+  No visual default promotion or changes to the user's playable session.
+- [ ] Next: diagnose cumulative grass-fitting work from the three CPU failures;
+  after nominal host recovery, verify the taller denser flowers and actual
+  road-work savings at the same views, then continuous traversal. Root contact,
+  motion, petal detail/shadows, whole-tree wind and falling leaves remain open.
+
+Reference: [official Three.js instancing guidance](https://threejs.org/docs/pages/InstancedMesh.html).
+Shared geometry/material and bounded instancing avoid per-flower draw objects;
+they do not prove that the increased population meets our GPU budget.
+Evidence: inland-pond `native120/visual-review.json`, `native121/qualification-note.json`,
+`native122/process.json`, runtime90–92 and build61–63 reports; service-layout
+`rooted-flower-abundance-source01/02/03`, `living-world-foundations-types12`,
+`rooted-flower-abundance-lint03`. Metadata erratum: native119's stale
+"three-anchor" scope sentence described TWO actual views; its deferred absent
+cow 404 remains in raw evidence. "Zero capture errors" excluded that deferred item.
+
+
 ## 2026-09-22 — surface-admission diagnostics and grouped-flower review
 
 - [x] Add failure-only worker surface-preparation peak-slice and clock-interval

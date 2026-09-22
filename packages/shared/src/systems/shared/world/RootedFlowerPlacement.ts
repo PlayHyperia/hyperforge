@@ -497,6 +497,17 @@ export function* createRootedFlowerPlacementSteps(
         2 ** 21
     )
       throw new Error("Invalid rooted flower road capsule");
+    // Validate every supplied segment before this broad phase. The retained
+    // horizon already includes the maximum flower sweep; a strictly disjoint
+    // expanded road AABB cannot affect any candidate's exact capsule check.
+    const padding = road.width / 2 + blendWidth;
+    if (
+      Math.max(road.startX, road.endX) + padding < needed.minX ||
+      Math.min(road.startX, road.endX) - padding > needed.maxX ||
+      Math.max(road.startZ, road.endZ) + padding < needed.minZ ||
+      Math.min(road.startZ, road.endZ) - padding > needed.maxZ
+    )
+      continue;
     roads.push({
       startX: road.startX,
       startZ: road.startZ,
@@ -583,8 +594,9 @@ export function* createRootedFlowerPlacementSteps(
     centerZ = (origin.z - 4) / 8;
   for (let cx = centerX - 5; cx <= centerX + 5; cx++)
     for (let cz = centerZ - 5; cz <= centerZ + 5; cz++) {
-      // The broad habitat gate is unchanged. Four local candidates now share
-      // a compact cell anchor, with independent acceptance/yaw/scale as before.
+      // Keep a background population throughout suitable grass, with richer
+      // meadow patches. A hard patch cutoff left most broad cells flowerless.
+      // Candidate positions and acceptance/yaw/scale lanes remain stable.
       const patch = hash(seed, Math.floor(cx / 3), Math.floor(cz / 3), 100);
       for (let ordinal = 0; ordinal < 4; ordinal++) {
         yield "flower_candidate";
@@ -604,9 +616,8 @@ export function* createRootedFlowerPlacementSteps(
         if (!Number.isFinite(habitat) || habitat < 0 || habitat > 1)
           throw new Error("Invalid rooted flower habitat eligibility");
         if (
-          patch > 0.42 ||
           hash(seed, cx, cz, ordinal * 8 + 2) >=
-            habitat * (0.25 + 0.5 * (1 - patch / 0.42))
+          habitat * (0.6 + 0.35 * (1 - patch))
         ) {
           diagnostics.rejected.habitat++;
           continue;

@@ -116,8 +116,8 @@ function rows(result: RootedFlowerPlacementResult) {
   );
 }
 
-// Frozen pre-grouping hash arithmetic, independent of the production helper.
-// Lanes 100 (patch), ordinal*8+2/+3/+4 (acceptance/yaw/scale) must not change.
+// Frozen original hash arithmetic, independent of the production helper.
+// Population changes must not reshuffle position/acceptance/yaw/scale keys.
 function originalFlowerHash(seed: number, x: number, z: number, lane: number) {
   let value =
     (seed ^
@@ -194,7 +194,7 @@ describe("bounded rooted flower placement", () => {
 
   it("keeps compact candidates separated for supported factory geometry even at extreme Float32 cells", () => {
     let maximumFactoryReach = 0;
-    for (const requestedHeight of [0.12, 0.38, 0.5, 0.8]) {
+    for (const requestedHeight of [0.12, 0.38, 0.5, 0.75, 0.8]) {
       const geometry = createRootedFlowerGeometry({ height: requestedHeight });
       cleanups.push(() => geometry.dispose());
       const position = geometry.getAttribute("position");
@@ -283,13 +283,15 @@ describe("bounded rooted flower placement", () => {
   });
 
   it.each([1, 0.63])(
-    "preserves original patch, acceptance, yaw and scale lanes with habitat %s",
+    "fills sparse patches while preserving original accepted matrices with habitat %s",
     (habitat) => {
       const f = fixture(() => 10);
       const seed = 1728;
       const actual = drain(f.request({ seed, grassPlacement: () => habitat }));
       const expected: number[] = [];
+      const previous: number[][] = [];
       let groupedCells = 0;
+      let newlyPopulatedGroups = 0;
       for (let cx = -5; cx <= 5; cx++)
         for (let cz = -5; cz <= 5; cz++) {
           const patch = originalFlowerHash(
@@ -306,33 +308,50 @@ describe("bounded rooted flower placement", () => {
               cz,
               ordinal,
             );
-            if (
-              Math.hypot(x - 4, z - 4) > 40 ||
-              patch > 0.42 ||
-              originalFlowerHash(seed, cx, cz, ordinal * 8 + 2) >=
-                habitat * (0.25 + 0.5 * (1 - patch / 0.42))
-            )
-              continue;
+            if (Math.hypot(x - 4, z - 4) > 40) continue;
+            const acceptance = originalFlowerHash(
+              seed,
+              cx,
+              cz,
+              ordinal * 8 + 2,
+            );
+            const formerlyAccepted =
+              patch <= 0.42 &&
+              acceptance < habitat * (0.25 + 0.5 * (1 - patch / 0.42));
+            const accepted = acceptance < habitat * (0.6 + 0.35 * (1 - patch));
+            // Raising population must retain every existing transform.
+            if (formerlyAccepted) expect(accepted).toBe(true);
+            if (!accepted) continue;
             const yaw =
               originalFlowerHash(seed, cx, cz, ordinal * 8 + 3) * Math.PI * 2;
             const scale =
               0.85 + originalFlowerHash(seed, cx, cz, ordinal * 8 + 4) * 0.3;
-            expected.push(
-              ...new THREE.Matrix4().compose(
-                new THREE.Vector3(x, 10, z),
-                new THREE.Quaternion().setFromAxisAngle(
-                  new THREE.Vector3(0, 1, 0),
-                  yaw,
-                ),
-                new THREE.Vector3(scale, scale, scale),
-              ).elements,
-            );
+            const transform = new THREE.Matrix4().compose(
+              new THREE.Vector3(x, 10, z),
+              new THREE.Quaternion().setFromAxisAngle(
+                new THREE.Vector3(0, 1, 0),
+                yaw,
+              ),
+              new THREE.Vector3(scale, scale, scale),
+            ).elements;
+            expected.push(...transform);
+            if (formerlyAccepted)
+              previous.push(Array.from(new Float32Array(transform)));
             acceptedInCell++;
           }
           if (acceptedInCell >= 2) groupedCells++;
+          if (patch > 0.42 && acceptedInCell >= 2) newlyPopulatedGroups++;
         }
-      expect(groupedCells).toBeGreaterThan(0);
+      expect(groupedCells).toBeGreaterThan(20);
+      expect(newlyPopulatedGroups).toBeGreaterThan(10);
       expect(actual.result.matrices).toEqual(new Float32Array(expected));
+      expect(previous.length).toBeGreaterThan(0);
+      expect(actual.result.count).toBeGreaterThan(previous.length * 2);
+      const actualByRoot = new Map(
+        rows(actual.result).map((row) => [`${row[12]},${row[14]}`, row]),
+      );
+      for (const row of previous)
+        expect(actualByRoot.get(`${row[12]},${row[14]}`)).toEqual(row);
       expect(actual.result.diagnostics.candidates).toBe(484);
       expect(
         actual.phases.filter((phase) => phase === "flower_candidate"),
@@ -345,13 +364,12 @@ describe("bounded rooted flower placement", () => {
     },
   );
 
-  it("is deterministic, sparse, detached, and forwards each fresh input step once", () => {
+  it("is deterministic, broadly populated, detached, and forwards each fresh input step once", () => {
     const f = fixture();
     const before = Array.from(f.geometry.getAttribute("position").array);
     const a = drain(f.request()),
       b = drain(f.request());
-    expect(a.result.count).toBeGreaterThan(0);
-    expect(a.result.count).toBeLessThan(200);
+    expect(a.result.count).toBeGreaterThan(200);
     expect(a.result.diagnostics.candidates).toBe(484);
     expect(a.result.count).toBeLessThanOrEqual(484);
     expect(a.result.matrices.length).toBe(a.result.count * 16);
@@ -505,6 +523,304 @@ describe("bounded rooted flower placement", () => {
     expect(excluded.diagnostics.rejected.road).toBeGreaterThan(0);
     expect(excluded.diagnostics.deferredTerrain).toBe(0);
   });
+
+  it("validates every distant road once without repeating it for each flower", () => {
+    const f = fixture(() => 10);
+    const baseline = drain(f.request());
+    const distant = Array.from({ length: 800 }, (_, index) => {
+      const offset = 1000 + index;
+      const x = index % 2 === 0 ? offset : -offset;
+      const z = index % 4 < 2 ? offset : -offset;
+      return { startX: x, startZ: z, endX: x + 1, endZ: z + 1, width: 2 };
+    });
+    const before = distant.map((road) => ({ ...road }));
+    const actual = drain(f.request({ inputs: f.input(empty(), distant) }));
+    expect(actual.result.matrices).toEqual(baseline.result.matrices);
+    expect(actual.result.diagnostics.rejected).toEqual(
+      baseline.result.diagnostics.rejected,
+    );
+    expect(actual.result.diagnostics.inputSteps).toBe(
+      baseline.result.diagnostics.inputSteps,
+    );
+    expect(actual.result.diagnostics.steps).toBe(
+      baseline.result.diagnostics.steps + distant.length,
+    );
+    expect(
+      actual.phases.filter((phase) => phase === "flower_road_admission"),
+    ).toHaveLength(distant.length);
+    expect(actual.phases.filter((phase) => phase === "flower_road")).toEqual(
+      [],
+    );
+    expect(distant).toEqual(before);
+    expect(actual.result.isCurrent()).toBe(true);
+  });
+
+  it.each([0.5, 0.75])(
+    "matches an independent all-road distance oracle at flower height %s without reordering retained roads",
+    (height) => {
+      const f = fixture(() => 10);
+      const geometry = createRootedFlowerGeometry({ height });
+      cleanups.push(() => geometry.dispose());
+      const baseline = drain(f.request({ geometry })).result;
+      const candidates = rows(baseline);
+      expect(candidates.length).toBeGreaterThan(100);
+      const first = candidates[0];
+      const near: GrassGroundingRoadSegment[] = [
+        {
+          startX: -100,
+          startZ: -100,
+          endX: 100,
+          endZ: 100,
+          width: 0.2,
+          blendWidth: 0.2,
+        },
+        { startX: 100, startZ: 8, endX: -100, endZ: 8, width: 0.5 },
+        // A zero-length capsule at an actual accepted root.
+        {
+          startX: first[12],
+          startZ: first[14],
+          endX: first[12],
+          endZ: first[14],
+          width: 0,
+          blendWidth: 0,
+        },
+        // Neither centerline enters the horizon; width/blend still affect it.
+        {
+          startX: 100,
+          startZ: -100,
+          endX: 100,
+          endZ: 100,
+          width: 130,
+          blendWidth: 0,
+        },
+        {
+          startX: -100,
+          startZ: 4,
+          endX: -100,
+          endZ: 4,
+          width: 0,
+          blendWidth: 70,
+          maxInfluence: 0,
+        },
+      ];
+      const far: GrassGroundingRoadSegment = {
+        startX: 1000,
+        startZ: 1000,
+        endX: 2000,
+        endZ: 2000,
+        width: 20,
+      };
+      const position = geometry.getAttribute("position");
+      let radius = 0;
+      for (let i = 0; i < position.count; i++)
+        radius = Math.max(
+          radius,
+          Math.hypot(position.getX(i), position.getZ(i)),
+        );
+      // No production AABB/distance helper is used by this oracle. Start from
+      // the real no-road population and evaluate every original road capsule.
+      const blocked = (row: number[], road: GrassGroundingRoadSegment) => {
+        const dx = road.endX - road.startX;
+        const dz = road.endZ - road.startZ;
+        const lengthSquared = dx * dx + dz * dz;
+        const t =
+          lengthSquared === 0
+            ? 0
+            : Math.max(
+                0,
+                Math.min(
+                  1,
+                  ((row[12] - road.startX) * dx +
+                    (row[14] - road.startZ) * dz) /
+                    lengthSquared,
+                ),
+              );
+        const wind = getRootedFlowerWindBounds(
+          geometry.getAttribute("flowerHeight").getY(0),
+          row[5],
+        );
+        const horizontalScale = Math.max(
+          Math.hypot(row[0], row[2]),
+          Math.hypot(row[8], row[10]),
+        );
+        const reach =
+          radius * horizontalScale * (1 + 2e-6) +
+          Math.hypot(wind.x, wind.z) +
+          1e-5;
+        return (
+          Math.hypot(
+            row[12] - road.startX - t * dx,
+            row[14] - road.startZ - t * dz,
+          ) <=
+          road.width / 2 + (road.blendWidth ?? 0.5) + reach
+        );
+      };
+      const expected = candidates.filter(
+        (row) => ![far, ...near].some((road) => blocked(row, road)),
+      );
+      expect(expected.length).toBeGreaterThan(0);
+      expect(expected.length).toBeLessThan(candidates.length);
+      expect(expected).not.toContainEqual(first);
+      for (const ordered of [near, [...near].reverse()]) {
+        const supplied = [far, ...ordered, far];
+        const actual = drain(
+          f.request({ geometry, inputs: f.input(empty(), supplied) }),
+        );
+        let expectedRoadSteps = 0;
+        for (const row of candidates)
+          for (const road of ordered) {
+            expectedRoadSteps++;
+            if (blocked(row, road)) break;
+          }
+        expect(rows(actual.result)).toEqual(expected);
+        expect(actual.result.diagnostics.rejected.road).toBe(
+          candidates.length - expected.length,
+        );
+        expect(
+          actual.phases.filter((phase) => phase === "flower_road_admission"),
+        ).toHaveLength(supplied.length);
+        expect(
+          actual.phases.filter((phase) => phase === "flower_road"),
+        ).toHaveLength(expectedRoadSteps);
+      }
+    },
+  );
+
+  it("keeps closed AABB contact on every side and culls only strictly distant roads", () => {
+    const f = fixture(() => 10);
+    const baseline = drain(f.request()).result;
+    const needed = getRootedFlowerPlacementBounds(f.geometry, { x: 4, z: 4 });
+    const contact: GrassGroundingRoadSegment[] = [
+      {
+        startX: needed.minX,
+        startZ: 4,
+        endX: needed.minX,
+        endZ: 4,
+        width: 0,
+        blendWidth: 0,
+      },
+      {
+        startX: needed.maxX,
+        startZ: 4,
+        endX: needed.maxX,
+        endZ: 4,
+        width: 0,
+        blendWidth: 0,
+      },
+      {
+        startX: 4,
+        startZ: needed.minZ,
+        endX: 4,
+        endZ: needed.minZ,
+        width: 0,
+        blendWidth: 0,
+      },
+      {
+        startX: 4,
+        startZ: needed.maxZ,
+        endX: 4,
+        endZ: needed.maxZ,
+        width: 0,
+        blendWidth: 0,
+      },
+    ];
+    const outside = contact.map((road, index) => ({
+      ...road,
+      startX: road.startX + (index === 0 ? -1e-6 : index === 1 ? 1e-6 : 0),
+      endX: road.endX + (index === 0 ? -1e-6 : index === 1 ? 1e-6 : 0),
+      startZ: road.startZ + (index === 2 ? -1e-6 : index === 3 ? 1e-6 : 0),
+      endZ: road.endZ + (index === 2 ? -1e-6 : index === 3 ? 1e-6 : 0),
+    }));
+    const actual = drain(
+      f.request({ inputs: f.input(empty(), [...contact, ...outside]) }),
+    );
+    expect(actual.result.matrices).toEqual(baseline.matrices);
+    expect(
+      actual.phases.filter((phase) => phase === "flower_road_admission"),
+    ).toHaveLength(8);
+    expect(
+      actual.phases.filter((phase) => phase === "flower_road"),
+    ).toHaveLength(baseline.count * 4);
+  });
+
+  it("still validates distant roads and applies the raw input cap before culling", () => {
+    const f = fixture(() => 10);
+    const far = {
+      startX: 1000,
+      startZ: 1000,
+      endX: 1001,
+      endZ: 1001,
+      width: 1,
+    };
+    const roads = Array.from({ length: 4096 }, () => ({ ...far }));
+    const actual = drain(f.request({ inputs: f.input(empty(), roads) }));
+    expect(actual.result.count).toBeGreaterThan(0);
+    expect(
+      actual.phases.filter((phase) => phase === "flower_road_admission"),
+    ).toHaveLength(4096);
+    expect(actual.phases.filter((phase) => phase === "flower_road")).toEqual(
+      [],
+    );
+    expect(() =>
+      drain(f.request({ inputs: f.input(empty(), [...roads, far]) })),
+    ).toThrow(/constraint inputs/);
+    for (const invalid of [
+      { ...far, startX: NaN },
+      { ...far, endZ: Infinity },
+      { ...far, width: -1 },
+      { ...far, blendWidth: -1 },
+      { ...far, startX: 2 ** 21 + 1 },
+    ])
+      expect(() =>
+        drain(f.request({ inputs: f.input(empty(), [far, invalid]) })),
+      ).toThrow(/road capsule/);
+    expect(() =>
+      drain(
+        f.request({
+          inputs: f.input(empty(), [
+            ...roads.slice(0, -1),
+            { ...far, width: -1 },
+          ]),
+        }),
+      ),
+    ).toThrow(/road capsule/);
+  });
+
+  it.each(["cancel", "invalidate"] as const)(
+    "preserves %s semantics while distant-road admission is suspended",
+    (action) => {
+      const f = fixture();
+      const far = {
+        startX: 1000,
+        startZ: 1000,
+        endX: 1001,
+        endZ: 1001,
+        width: 1,
+      };
+      let disposals = 0;
+      f.geometry.addEventListener("dispose", () => disposals++);
+      f.terrain.addEventListener("dispose", () => disposals++);
+      const steps = createRootedFlowerPlacementSteps(
+        f.request({ inputs: f.input(empty(), [far, far]) }),
+      );
+      let admitted = 0;
+      for (let count = 0; count < 2000 && admitted < 2; count++) {
+        const step = steps.next();
+        if (step.done) throw new Error("Expected suspended road admission");
+        if (step.value === "flower_road_admission") admitted++;
+      }
+      expect(admitted).toBe(2);
+      expect(f.state.inputCloses).toBe(1);
+      if (action === "cancel") steps.return(undefined as never);
+      else {
+        f.state.inputs = false;
+        expect(() => steps.next()).toThrow(/Stale/);
+      }
+      expect(f.state.inputCloses).toBe(1);
+      expect(disposals).toBe(0);
+      expect(f.region.isCurrent()).toBe(true);
+    },
+  );
 
   it("clears full road blends and polygon/water envelopes beyond the root point", () => {
     const f = fixture();
