@@ -188,16 +188,30 @@ const compactDockTimberField = Fn(() => {
       .add(warp.mul(0.035))
       .mul(mix(0.84, 1.18, fract(variation.mul(5.17)))),
   ).toVar("compactDockGrowthSection");
+  const ringFrequency = mix(110, 190, fract(variation.mul(3.71))).toVar(
+    "compactDockRingFrequency",
+  );
   const growthPhase = section
     .length()
-    .mul(mix(180, 310, fract(variation.mul(3.71))))
+    .mul(ringFrequency)
     .add(seed.mul(Math.PI * 2))
     .toVar("compactDockGrowthPhase");
-  const growth = sin(growthPhase).mul(
-    float(1).sub(smoothstep(0.65, 2.8, growthPhase.fwidth())),
+  // Thin latewood lines sit within a wider earlywood field. This borrows the
+  // asymmetric ring response of Three's WoodNodeMaterial, not extra octaves.
+  // Subtract its analytical full-cycle mean before fading, so distant timber
+  // returns to the same weathered tone instead of becoming lighter or darker.
+  const latewood = smoothstep(0.28, 0.88, sin(growthPhase)).toVar(
+    "compactDockLatewood",
   );
+  const growthVisibility = float(1)
+    .sub(smoothstep(0.45, 1.6, growthPhase.fwidth()))
+    .toVar("compactDockGrowthVisibility");
+  const growth = float(0.29968370474824446)
+    .sub(latewood)
+    .mul(growthVisibility)
+    .toVar("compactDockGrowthContrast");
   const end = smoothstep(0.72, 0.96, abs(normalWorld.dot(frame.xyz)));
-  const grain = growth.mul(mix(0.025, 0.045, end));
+  const grain = growth.mul(mix(0.085, 0.1, end)).toVar("compactDockGrainTone");
   const rowLocal = fract(coord.y.mul(2));
   const jointDistance = tslMin(rowLocal, float(1).sub(rowLocal)).mul(0.5);
   const joint = float(1)
@@ -211,7 +225,7 @@ const compactDockTimberField = Fn(() => {
     .add(variation.mul(0.04))
     .toVar("compactDockBoardTone");
   const tone = boardTone
-    .add(warp.mul(0.07))
+    .add(warp.mul(0.1))
     .add(grain)
     .sub(end.mul(0.065))
     .sub(joint.mul(0.1));

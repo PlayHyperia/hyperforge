@@ -490,6 +490,127 @@ describe("actual procedural pond dock ownership and native collision (not render
     }
   });
 
+  it("uses restrained asymmetric latewood and fades its actual full-cycle mean without new periodic fields", async () => {
+    const { owner } = await fixture({ native: false });
+    const material = owner["getOrCreateDockMaterial"]();
+    const builder: unknown = Reflect.construct(THREE.NodeBuilder, [null, null]);
+    if (
+      !(builder instanceof THREE.NodeBuilder) ||
+      !(material.colorNode instanceof THREE.Node)
+    )
+      throw new Error("Expected actual timber graph");
+    const nodes = timberNodes(material.colorNode, builder);
+    const named = (name: string): Node => {
+      const matches = [...nodes].filter(
+        (node) => Reflect.get(node, "name") === name,
+      );
+      expect(matches).toHaveLength(1);
+      return matches[0];
+    };
+    const child = (node: Node, key: string): Node => {
+      const value: unknown = Reflect.get(node, key);
+      if (!(value instanceof THREE.Node))
+        throw new Error(`Expected actual node ${key}`);
+      if (value.type === "VarNode" && Reflect.get(value, "name") === null)
+        return child(value, "node");
+      return value;
+    };
+    const scalar = (node: Node): number => {
+      const value: unknown = Reflect.get(node, "value");
+      if (node.type !== "ConstNode" || typeof value !== "number")
+        throw new Error("Expected actual scalar constant");
+      return value;
+    };
+    const latewood = child(named("compactDockLatewood"), "node");
+    expect(Reflect.get(latewood, "method")).toBe("smoothstep");
+    const low = scalar(child(latewood, "aNode"));
+    const high = scalar(child(latewood, "bNode"));
+    expect([low, high]).toEqual([0.28, 0.88]);
+    const wave = child(latewood, "cNode");
+    expect(Reflect.get(wave, "method")).toBe("sin");
+    expect(child(wave, "aNode")).toBe(named("compactDockGrowthPhase"));
+    const frequency = child(named("compactDockRingFrequency"), "node");
+    expect(Reflect.get(frequency, "method")).toBe("mix");
+    expect([
+      scalar(child(frequency, "aNode")),
+      scalar(child(frequency, "bNode")),
+    ]).toEqual([110, 190]);
+    const contrast = child(named("compactDockGrowthContrast"), "node");
+    expect(Reflect.get(contrast, "op")).toBe("*");
+    expect(child(contrast, "bNode")).toBe(named("compactDockGrowthVisibility"));
+    const centered = child(contrast, "aNode");
+    expect(Reflect.get(centered, "op")).toBe("-");
+    expect(child(centered, "bNode")).toBe(named("compactDockLatewood"));
+    const mean = scalar(child(centered, "aNode"));
+    const visibility = child(named("compactDockGrowthVisibility"), "node");
+    expect(Reflect.get(visibility, "op")).toBe("-");
+    expect(scalar(child(visibility, "aNode"))).toBe(1);
+    const fade = child(visibility, "bNode");
+    expect(Reflect.get(fade, "method")).toBe("smoothstep");
+    expect([
+      scalar(child(fade, "aNode")),
+      scalar(child(fade, "bNode")),
+    ]).toEqual([0.45, 1.6]);
+    const derivative = child(fade, "cNode");
+    expect(Reflect.get(derivative, "method")).toBe("fwidth");
+    expect(child(derivative, "aNode")).toBe(named("compactDockGrowthPhase"));
+    const grain = child(named("compactDockGrainTone"), "node");
+    expect(Reflect.get(grain, "op")).toBe("*");
+    expect(child(grain, "aNode")).toBe(named("compactDockGrowthContrast"));
+    const strength = child(grain, "bNode");
+    expect(Reflect.get(strength, "method")).toBe("mix");
+    const amplitudes = [
+      scalar(child(strength, "aNode")),
+      scalar(child(strength, "bNode")),
+    ];
+    expect(amplitudes).toEqual([0.085, 0.1]);
+
+    // Analytical cycle average of smoothstep(low, high, sin(phase)). Integrate
+    // its cubic between the thresholds under the sine distribution, plus the
+    // fully dark arc. These inputs come from the real graph, not a parallel
+    // shader implementation. Spatial noise/derivatives/GPU pixels remain open.
+    const width = high - low;
+    const integral = (s: number) => {
+      const cosine = Math.sqrt(1 - s * s);
+      return (
+        (-2 * (-cosine + cosine ** 3 / 3) +
+          ((3 * width + 6 * low) * (Math.asin(s) - s * cosine)) / 2 +
+          (-6 * low * width - 6 * low * low) * -cosine +
+          (3 * width * low * low + 2 * low ** 3) * Math.asin(s)) /
+        width ** 3
+      );
+    };
+    const exactMean =
+      (integral(high) - integral(low) + Math.PI / 2 - Math.asin(high)) /
+      Math.PI;
+    expect(mean).toBeCloseTo(exactMean, 13);
+    expect(Math.abs(Math.fround(mean) - exactMean)).toBeLessThan(2e-8);
+    for (const amplitude of amplitudes)
+      for (const coverage of [0, 0.25, 0.5, 0.75, 1]) {
+        expect(
+          Math.abs((exactMean - mean) * amplitude * coverage),
+        ).toBeLessThan(1e-13);
+        const light = mean * amplitude * coverage;
+        const dark = (1 - mean) * amplitude * coverage;
+        expect(light).toBeLessThanOrEqual(0.03);
+        expect(dark).toBeLessThanOrEqual(0.071);
+        if (coverage > 0) expect(dark).toBeGreaterThan(light * 2);
+        else expect(light + dark).toBe(0);
+      }
+    const compact = timberNodes(named("compactDockTimber"), builder);
+    expect(
+      [...compact].filter((node) => Reflect.get(node, "method") === "sin"),
+    ).toHaveLength(6);
+    expect(
+      [...compact].filter(
+        (node) => Reflect.get(node, "isTextureNode") === true,
+      ),
+    ).toHaveLength(0);
+    expect(
+      [...compact].filter((node) => Reflect.get(node, "method") === "fwidth"),
+    ).toHaveLength(2);
+  });
+
   it("keeps non-compact generated geometry on the historical zero-mask wood path", async () => {
     const { owner } = await fixture({ configured: false });
     const recipe = {
@@ -828,6 +949,7 @@ describe("actual procedural pond dock ownership and native collision (not render
     expect(checkedMembers).toBe(60);
     expect(census.map((row) => row.vertices)).toEqual([4287, 5439]);
     expect(census.map((row) => row.triangles)).toEqual([2200, 2728]);
+    expect(census.map((row) => row.bytes)).toEqual([253272, 320952]);
     console.info(
       "actual-pond-dock-chamfers",
       JSON.stringify({

@@ -269,7 +269,7 @@ const selectedHeadlandEnabled =
   selectedAssetsDirectory !== undefined &&
   basename(dirname(resolve(selectedAssetsDirectory))) ===
     "inland-pond-integration01-UNQUALIFIED" &&
-  ["assets-v7", "assets-v8", "assets-v9"].includes(
+  ["assets-v7", "assets-v8", "assets-v9", "assets-v10"].includes(
     basename(resolve(selectedAssetsDirectory)),
   );
 function readSelectedFishingPond(): SelectedFishingPond {

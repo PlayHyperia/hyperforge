@@ -6,6 +6,14 @@ import inlandHabitat from "../../../../data/compact-pond-inland-habitat-v1.json"
 import THREE from "../../../../extras/three/three";
 import { World } from "../../../../core/World";
 import { DataManager } from "../../../../data/DataManager";
+import { getDuelArenaConfig } from "../../../../data/duel-manifest";
+import { GATHERING_CONSTANTS } from "../../../../constants/GatheringConstants";
+import { ResourceEntity } from "../../../../entities/world/ResourceEntity";
+import { createResourceID } from "../../../../utils/IdentifierUtils";
+import { EntityManager } from "../../entities/EntityManager";
+import { ResourceSystem } from "../../entities/ResourceSystem";
+import { CollisionFlag } from "../../movement/CollisionFlags";
+import { worldToTile } from "../../movement/TileSystem";
 import type { FlatZone } from "../../../../types/world/terrain";
 import type { CompactPondDocksManifest } from "../../../../types/world/world-types";
 import { getCompactPondDockSupportBounds } from "../DockDefinition";
@@ -27,6 +35,53 @@ import {
 import { CompactPondDressingVisuals } from "../CompactPondDressingVisuals";
 import { createCompactServicePlanting } from "../CompactServiceCourt";
 import { RetainedTerrainSurface } from "../TerrainGridSurface";
+import {
+  compactPathSegmentDistance,
+  createCompactIslandPaths,
+} from "../CompactIslandPaths";
+
+class PondDressingServerWorld extends World {
+  override get isServer(): boolean {
+    return true;
+  }
+}
+
+// Each tuple pins the old and candidate offsets. All remaining recipe fields
+// retain the historical hash below; the approved northwest drift is separate.
+const pocketMassing: readonly {
+  readonly group: "northern-quiet-pocket" | "southeast-sedge-pocket";
+  readonly offsets: readonly (readonly [
+    previousTangent: number,
+    previousBankOffset: number,
+    tangent: number,
+    bankOffset: number,
+  ])[];
+}[] = [
+  {
+    group: "northern-quiet-pocket",
+    offsets: [
+      [-1.5, 0.9, -1.45, 0.35],
+      [0.85, 1.25, 0.35, 0.7],
+      [-0.1, 2, -0.35, 1.05],
+      [-0.8, 0.18, -1.35, 0.18],
+      [0.1, 0.25, -0.25, 0.55],
+      [1, 0.15, 0.95, 0.25],
+    ],
+  },
+  {
+    group: "southeast-sedge-pocket",
+    offsets: [
+      [-1.7, 1.8, -1.65, 0.55],
+      [1.5, 2, 0.85, 0.9],
+      [0.1, 2.8, 0.2, 1.4],
+      [-1.25, 0.22, -1.65, 0.18],
+      [-0.35, 0.32, -0.6, 0.55],
+      [0.6, 0.18, 0.3, 0.95],
+      [1.6, 0.42, 1.55, 0.3],
+      [-0.6, 2.5, -1, 0.9],
+    ],
+  },
+] as const;
 
 // Historical fixtures remain the original five assets. The additive selected
 // habitat is exercised separately; it must not broaden default load ownership.
@@ -217,7 +272,7 @@ describe("bounded pond dressing", () => {
         },
       ],
     };
-    const world = new World();
+    const world = new PondDressingServerWorld();
     const terrain = world.register("terrain", TerrainSystem) as TerrainSystem;
     await terrain.init();
     terrain["loadFlatZonesFromManifest"]();
@@ -249,16 +304,19 @@ describe("bounded pond dressing", () => {
       expect(rows).toEqual(
         createCompactPondDressing(profile, areas, height, docks),
       );
-      // Captured before the drift: all rock/other-pocket positions and every
-      // model, scale, yaw and ordering remain exact. Only seven offsets vary.
+      // Reconstruct only the fourteen previous pocket offsets before checking
+      // the original recipe pin. No model/scale/yaw/order/rock change is hidden.
       const fixedRecipe = inlandHabitat.groups.map((group) => ({
         id: group.id,
         bearing: group.bearing,
-        placements: group.placements.map((row, index) =>
-          group.id === "northwest-cutbank" && index >= 3
-            ? [row[0], null, null, ...row.slice(3)]
-            : row,
-        ),
+        placements: group.placements.map((row, index) => {
+          if (group.id === "northwest-cutbank" && index >= 3)
+            return [row[0], null, null, ...row.slice(3)];
+          const offset = pocketMassing.find(
+            (pocket) => pocket.group === group.id,
+          )?.offsets[index - 2];
+          return offset ? [row[0], offset[0], offset[1], ...row.slice(3)] : row;
+        }),
       }));
       expect(
         createHash("sha256").update(JSON.stringify(fixedRecipe)).digest("hex"),
@@ -267,6 +325,75 @@ describe("bounded pond dressing", () => {
       );
       const northwest = inlandHabitat.groups[0];
       expect(northwest.id).toBe("northwest-cutbank");
+      expect(
+        northwest.placements.slice(3).map((row) => row.slice(1, 3)),
+      ).toEqual([
+        [-2.55, 0.65],
+        [-0.9, 0.9],
+        [1.8, 0.65],
+        [0.35, 1.15],
+        [-3.4, 0.2],
+        [2.6, 0.2],
+        [3.2, 0.85],
+      ]);
+      expect(
+        rows.filter((row) => row.model === "boulder" || row.model === "stone"),
+      ).toHaveLength(7);
+      expect(new Set(rows.map((row) => row.model)).size).toBe(6);
+      for (const pocket of pocketMassing) {
+        const group = inlandHabitat.groups.find(
+          (entry) => entry.id === pocket.group,
+        )!;
+        expect(group.placements.slice(2).map((row) => row.slice(1, 3))).toEqual(
+          pocket.offsets.map((offset) => offset.slice(2)),
+        );
+      }
+      let previousPocketRows: readonly CompactPondPlacement[];
+      try {
+        for (const pocket of pocketMassing) {
+          const group = inlandHabitat.groups.find(
+            (entry) => entry.id === pocket.group,
+          )!;
+          pocket.offsets.forEach(([tangent, bankOffset], index) => {
+            group.placements[index + 2][1] = tangent;
+            group.placements[index + 2][2] = bankOffset;
+          });
+        }
+        previousPocketRows = createCompactPondDressing(
+          profile,
+          areas,
+          height,
+          docks,
+        );
+      } finally {
+        for (const pocket of pocketMassing) {
+          const group = inlandHabitat.groups.find(
+            (entry) => entry.id === pocket.group,
+          )!;
+          pocket.offsets.forEach(([, , tangent, bankOffset], index) => {
+            group.placements[index + 2][1] = tangent;
+            group.placements[index + 2][2] = bankOffset;
+          });
+        }
+      }
+      let movedPlants = 0;
+      rows.forEach((row, index) => {
+        const before = previousPocketRows[index];
+        const moved = pocketMassing.some((pocket) =>
+          pocket.offsets.some(
+            (_, index) => row.id === `inland_pond_${pocket.group}_${index + 2}`,
+          ),
+        );
+        if (!moved) expect(row).toEqual(before);
+        else {
+          movedPlants++;
+          const { x, z, ...metadata } = row;
+          const { x: oldX, z: oldZ, ...oldMetadata } = before;
+          expect(metadata).toEqual(oldMetadata);
+          expect(Math.hypot(x - oldX, z - oldZ)).toBeGreaterThan(0.05);
+        }
+      });
+      expect(movedPlants).toBe(14);
       const previousOffsets = [
         [-1.7, 0.75],
         [-0.55, 1.4],
@@ -376,12 +503,11 @@ describe("bounded pond dressing", () => {
       // Three deliberate pockets leave the majority of shoreline unplanted;
       // this is not yet a claim of 14 live navigable fishing reservations.
       expect(occupiedDegrees.size).toBeLessThan(70);
-      expect(
-        rows.length +
-          createCompactServicePlanting(
-            DataManager.getWorldConfig()!.compactServicePlanting,
-          ).length,
-      ).toBeLessThanOrEqual(64);
+      const servicePlanting = createCompactServicePlanting(
+        DataManager.getWorldConfig()!.compactServicePlanting,
+      );
+      expect(servicePlanting).toHaveLength(24);
+      expect(rows.length + servicePlanting.length).toBe(52);
       owner = new CompactPondDressingVisuals(new THREE.Group(), rows);
       for (const model of Object.keys(
         COMPACT_POND_MODELS,
@@ -407,6 +533,210 @@ describe("bounded pond dressing", () => {
         visible: 28,
         instances: 28,
       });
+      const assetReceipt = owner.getReceipt().assets;
+      expect(assetReceipt).toHaveLength(6);
+      for (const row of rows) {
+        if (row.model === "boulder" || row.model === "stone") continue;
+        const support = assetReceipt.find(
+          (asset) => asset.model === row.model,
+        )!.support;
+        expect(support.mode).toBe("root-slice");
+        expect(support.selectedVertices).toBeGreaterThan(0);
+        expect(support.bounds).not.toBeNull();
+        const root = support.bounds!;
+        for (const x of [root.min[0], root.max[0]])
+          for (const z of [root.min[2], root.max[2]]) {
+            const worldX =
+              row.x +
+              (Math.cos(row.yaw) * x + Math.sin(row.yaw) * z) * row.scale;
+            const worldZ =
+              row.z +
+              (-Math.sin(row.yaw) * x + Math.cos(row.yaw) * z) * row.scale;
+            expect(
+              height(worldX, worldZ),
+              `${row.id} root footprint`,
+            ).toBeGreaterThan(candidate.waterBody.surfaceY);
+          }
+      }
+      // These checks use the selected manifest's actual route and resource
+      // owners. The historical no-docks fixture remains a geometry regression,
+      // not an implicit replacement for current fourteen-spot access evidence.
+      const config = DataManager.getWorldConfig()!;
+      if (process.env.ASSETS_DIR !== undefined && config.compactPondDocks) {
+        expect(config.compactPondDocks).toEqual(docks);
+        const paths = createCompactIslandPaths(
+          profile,
+          areas,
+          getDuelArenaConfig(),
+          height,
+          config,
+        );
+        const protectedIds = [
+          "compact-path-pond-bank",
+          "compact-clearing-bank-apron",
+          "compact-clearing-bank-clerk-approach",
+          "compact-clearing-bank-shopkeeper-approach",
+        ];
+        for (const id of protectedIds) {
+          const matches = paths.filter((path) => path.id === id);
+          expect(matches, id).toHaveLength(1);
+          const path = matches[0];
+          expect(path.path.length).toBeGreaterThan(1);
+          for (const row of rows)
+            for (let index = 1; index < path.path.length; index++)
+              expect(
+                compactPathSegmentDistance(
+                  row,
+                  path.path[index - 1],
+                  path.path[index],
+                ),
+                `${row.id} full canopy versus ${id}`,
+              ).toBeGreaterThan(
+                COMPACT_POND_MODELS[row.model].radius * row.scale +
+                  path.width / 2 +
+                  (path.blendWidth ?? 0.5),
+              );
+        }
+        const guides = areas.haven_pond.npcs.filter(
+          (npc) => npc.id === "fisherman_pete",
+        );
+        expect(guides).toHaveLength(1);
+        for (const row of rows)
+          expect(
+            Math.hypot(
+              row.x - guides[0].position.x,
+              row.z - guides[0].position.z,
+            ),
+          ).toBeGreaterThan(
+            COMPACT_POND_MODELS[row.model].radius * row.scale + 1.5,
+          );
+
+        terrain["loadWaterBodiesFromManifest"]();
+        terrain["generateTile"](4, 4, false);
+        terrain["bakeWalkabilityFlags"](4, 4);
+        world.register("entity-manager", EntityManager);
+        const resources = world.register(
+          "resource",
+          ResourceSystem,
+        ) as ResourceSystem;
+        await resources.init();
+        const pond = areas.haven_pond;
+        expect(pond.fishing).toMatchObject({
+          enabled: true,
+          waterBodyId: candidate.waterBody.id,
+          spotCount: 14,
+        });
+        await resources["spawnDynamicFishingSpots"](pond.id, pond);
+        const fish = [...resources["resources"].values()];
+        expect(fish).toHaveLength(14);
+        const families = fish.map((spot) =>
+          resources["resourceVariants"].get(createResourceID(spot.id)),
+        );
+        expect(new Set(families)).toEqual(
+          new Set([
+            "fishing_spot_net",
+            "fishing_spot_bait",
+            "fishing_spot_fly",
+            "fishing_spot_harpoon",
+            "fishing_spot_cage",
+            "fishing_spot_monkfish",
+            "fishing_spot_shark",
+          ]),
+        );
+        for (const family of new Set(families))
+          expect(families.filter((entry) => entry === family)).toHaveLength(2);
+        const approachEvidence: {
+          id: string;
+          x: number;
+          z: number;
+          dryApproaches: number;
+          clearApproaches: number;
+        }[] = [];
+        for (const spot of fish) {
+          expect(world.entities.get(spot.id)).toBeInstanceOf(ResourceEntity);
+          const tile = worldToTile(spot.position.x, spot.position.z);
+          expect(
+            world.collision.hasFlags(tile.x, tile.z, CollisionFlag.WATER),
+          ).toBe(true);
+          expect(height(spot.position.x, spot.position.z)).toBeLessThan(
+            candidate.waterBody.surfaceY,
+          );
+          expect(spot.position.y).toBe(candidate.waterBody.surfaceY);
+          const range = GATHERING_CONSTANTS.FISHING_INTERACTION_RANGE;
+          let dryApproaches = 0;
+          let clearApproaches = 0;
+          for (
+            let x = tile.x - Math.ceil(range);
+            x <= tile.x + Math.ceil(range);
+            x++
+          )
+            for (
+              let z = tile.z - Math.ceil(range);
+              z <= tile.z + Math.ceil(range);
+              z++
+            ) {
+              const point = { x: x + 0.5, z: z + 0.5 };
+              if (
+                Math.hypot(
+                  point.x - spot.position.x,
+                  point.z - spot.position.z,
+                ) > range ||
+                !terrain.hasBakedWalkabilityAt(point.x, point.z) ||
+                !world.collision.isWalkable(x, z) ||
+                world.collision.hasFlags(
+                  x,
+                  z,
+                  CollisionFlag.WATER |
+                    CollisionFlag.DOCK |
+                    CollisionFlag.BRIDGE |
+                    CollisionFlag.BLOCKED,
+                ) ||
+                height(point.x, point.z) < candidate.waterBody.surfaceY
+              )
+                continue;
+              dryApproaches++;
+              // The complete admitted GLB canopy circle, not just the root,
+              // must leave a 0.35 m standing footprint on a real dry tile.
+              if (
+                rows.every(
+                  (row) =>
+                    Math.hypot(point.x - row.x, point.z - row.z) >
+                    COMPACT_POND_MODELS[row.model].radius * row.scale + 0.35,
+                )
+              )
+                clearApproaches++;
+            }
+          expect(dryApproaches, `${spot.id} dry approach`).toBeGreaterThan(0);
+          expect(
+            clearApproaches,
+            `${spot.id} canopy-clear approach`,
+          ).toBeGreaterThan(0);
+          approachEvidence.push({
+            id: spot.id,
+            x: spot.position.x,
+            z: spot.position.z,
+            dryApproaches,
+            clearApproaches,
+          });
+        }
+        console.info(
+          "inland-plant-massing-clearances",
+          JSON.stringify({
+            movedPlants,
+            pondInstances: rows.length,
+            serviceInstances: servicePlanting.length,
+            models: assetReceipt.length,
+            docks: docks.docks.length,
+            dockClearance: 1.25,
+            guideClearance: 1.5,
+            standingRadius: 0.35,
+            protectedPaths: protectedIds,
+            fishing: approachEvidence,
+            scope:
+              "Actual CPU terrain/resource/canonical-GLB clearance; not live angler routing or native visual acceptance",
+          }),
+        );
+      }
       const versions = owner.group.children.map(
         (child) => (child as THREE.InstancedMesh).instanceMatrix.version,
       );

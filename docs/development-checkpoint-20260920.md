@@ -1,5 +1,71 @@
 # World graphics development checkpoint — 2026-09-20
 
+## Pond timber and gentler-bank study — 2026-09-21
+
+- [x] Refine compact dock timber with asymmetric growth lines, bounded
+  longitudinal weathering and a mean-neutral distance fade. The existing
+  single-noise field, six sine operations, two derivative operations, zero
+  texture fetches, two meshes/shared material and geometry bytes are retained.
+  The narrower ring response adds arithmetic; unchanged counts are not GPU
+  cost acceptance. This restrained study references the
+  [official Three r186 wood material](https://github.com/mrdoob/three.js/blob/r186/examples/jsm/materials/WoodNodeMaterial.js)
+  without importing its multi-octave/Voronoi work.
+- [x] Review the 14-plant pocket regrouping and timber in native87/build42/v9:
+  four real Chrome/Metal views pass the original startup and camera-cut gates.
+  Root and independent review find clearer foreground timber grain without
+  renewed crosshatching or unwanted gloss. Plant grouping is a modest gain;
+  distant roots are too small to certify individually. The shoreline is still
+  sparse and the pond-bank pavilion's service-ground/entry is obscured by grass.
+  No finished-art, shimmer, gameplay, streaming or sustained-performance claim.
+- [x] Build the isolated terrain-only v10 study: southern innerRadius 14.8→18.5,
+  all other manifest fields unchanged. It changes two bytes in one 17,379-byte
+  manifest; no models/textures are copied. Actual radial analysis predicts
+  45.44→29.84-degree peak slope and a 2.46 m receding waterline.
+  Eight selected CPU tests pass: four actual terrain leaves/169,560 probes,
+  existing 2 cm/6° limits and exact shared seams, both docks/3,250 rays,
+  fourteen fishing spots/seven families/twelve fish, 42 relocations and
+  canopy-clear dry approaches. These are not live-angler or visual acceptance.
+- [ ] Complete v10 native review after resolving loading reliability.
+  Native86 fails the unchanged 90 s startup gate with zero views:
+  cells 13_17 and 14_17 hit the 250 ms active-work cap (252.30/250.30 ms).
+  The baseline also has historical failures, so this does not by itself prove
+  a terrain regression. No changed cap, reduced density or repeated-until-green
+  approval. The gentler bank remains a private, unapproved candidate.
+- [x] Reject and remove the experimental grass envelope-math optimization.
+  Four predeclared mixed-cell samples show only a 2.7% median cached-worker
+  change with a worse maximum; several full-suite timings also regress.
+  Numerical/work/yield/240 paired-buffer comparisons and 232 tests pass, but
+  correctness alone does not justify complexity. The exact old source is
+  restored; patch, timings and failures remain recoverable in private evidence.
+- [ ] Profile the remaining grass fitting/publication cost and preserve all
+  work, validation, geometry and visual-quality contracts. Existing budget
+  failures are not resolved by this art checkpoint.
+- [ ] Clear the pond bank's service-ground/entry footprint through the
+  shared terrain/grass recipe, then improve planted grouping and island
+  landmarks without constraining open-world navigation.
+
+Native85 remains FAILED: macOS recorded a 711-second sleep labeled
+“Dark Wake Thermal Emergency” during its startup window. Native87 is a separate
+awake comparison, not relabeling that failure. The short process-scoped
+keep-awake used for native87/86 changes no permanent setting or thermal
+protection. Current macOS warning queries report no warning level, not an
+actual temperature or thermal certification.
+
+Retained-source checks: historical dressing/fishing 24 passes and one explicit
+selected-overlay skip; dock suite 20/20; v10 selected world tests 8/8 with
+73 unrelated cases filtered; shared plus current regressions/server policy
+no-emit typing 721 roots/2,397 source files, zero diagnostics. Build42 contains
+nine isolated bundles, with all 145 protected compiled artifacts unchanged.
+The earlier type run checked the subsequently rejected math candidate; only
+pond-polish-types02 describes the restored retained source.
+
+Evidence: inland-pond-integration01-UNQUALIFIED/native85–87, build42,
+HEADLAND_V10_QUALIFICATION.md and headland-v10-*.json; service-layout evidence
+pond-timber-latewood01, pond-polish-types02 and envelope-math-*.
+All owned browsers, runtime57/58 and their temporary databases are closed.
+Human localhost:3333, its database and canonical builds remain unchanged.
+The world goal stays active; no unqualified playable-default promotion.
+
 ## Pond-depth attribution and new art candidates — 2026-09-21
 
 Native82 and83 both FAIL the unchanged original 90 s startup gate. Three LOD0
