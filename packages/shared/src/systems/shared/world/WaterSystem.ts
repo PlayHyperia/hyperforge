@@ -46,7 +46,7 @@ import THREE, {
   cameraFar,
 } from "../../../extras/three/three";
 import type { Node, NodeFrame, UniformNode } from "three/webgpu";
-import { NodeUpdateType, select } from "three/tsl";
+import { NodeUpdateType, select, positionView, exp2 } from "three/tsl";
 import type { World } from "../../../types";
 import type { TerrainTile } from "../../../types/world/terrain";
 import type { Wind } from "./Wind";
@@ -100,10 +100,15 @@ const WATER = {
   NORMAL_STRENGTH: 1.5,
 
   // Sheltered freshwater detail, selected per draw by the existing pond owner.
-  // Retain the same normal samples, geometry, depth optics and wave bounds.
+  // Retain the same normal samples, geometry and wave bounds.
   QUIET_NORMAL_STRENGTH: 0.65,
   QUIET_SURFACE_SPEED: 0.55,
   QUIET_REFLECTION_DISTORTION: 0.006,
+
+  // Homogeneous neutral attenuation along the unrefracted viewing ray. These
+  // are art controls, not spectral absorption or a full scattering solution.
+  QUIET_HALF_TRANSMITTANCE_METRES: 3,
+  QUIET_DEEP_TINT: [0.02, 0.085, 0.095] as const,
 
   // Foam
   FOAM_SHORE_DISTANCE: 2.5,
@@ -1143,14 +1148,27 @@ export class WaterSystem {
       );
     })();
 
-    // Screen-space water depth
-    const gpuShoreDist = Fn(() => {
+    // Linear depth is camera-axis separation, not vertical water depth. Share
+    // the existing sample; ordinary water/foam keep their original clamp.
+    const axisDepthGap = Fn(() => {
       const sceneDepth = linearDepth(viewportDepthTexture());
       const waterDepth = linearDepth();
       const depthDiff = sub(sceneDepth, waterDepth);
-      const worldDist = mul(depthDiff, sub(cameraFar, cameraNear));
-      return clamp(worldDist, float(0), float(WATER.MAX_DEPTH));
-    })();
+      return mul(depthDiff, sub(cameraFar, cameraNear));
+    })().toVar("lakeAxisDepthGap");
+    const gpuShoreDist = clamp(axisDepthGap, float(0), float(WATER.MAX_DEPTH));
+    const pondRayLength = Fn((_, builder) => {
+      // Perspective depth belongs to a screen ray. Do not divide by N.V:
+      // surface tilt changes neither the pixel's ray nor its depth encoding.
+      const rayScale =
+        builder.camera instanceof THREE.PerspectiveCamera
+          ? length(positionView).div(positionView.z.negate().max(0.0001))
+          : float(1);
+      return axisDepthGap.max(0).mul(rayScale).clamp(0, WATER.MAX_DEPTH);
+    })().toVar("compactPondRayLength");
+    const pondTransmittance = exp2(
+      pondRayLength.div(-WATER.QUIET_HALF_TRANSMITTANCE_METRES),
+    ).toVar("compactPondTransmittance");
 
     const distToCam = length(sub(cameraPosition, positionWorld));
     const waterOpColorLerp = clamp(
@@ -1166,7 +1184,11 @@ export class WaterSystem {
         saturate(sub(float(1), div(shoreDist, float(WATER.OP_DEPTH_SCALE)))),
         float(WATER.OP_DEPTH_FALLOFF),
       );
-      return sub(float(1), opDepth);
+      return select(
+        quietPond.greaterThan(0),
+        float(1).sub(pondTransmittance),
+        sub(float(1), opDepth),
+      );
     })();
 
     // OUTPUT: Same pattern as tree shader — pbrOut = output, replace RGB, keep pbrOut.a
@@ -1230,7 +1252,18 @@ export class WaterSystem {
         float(0),
         float(1),
       );
-      const waterColor = vec3(cosR, cosG, cosB);
+      // A constant source tint lets the real bottom, through transmittance,
+      // supply shallow colour. Only the compact pond bypasses the historical
+      // camera-distance/cosine tint; all lighting and reflection terms below
+      // remain unchanged. Framebuffer alpha is neutral, not RGB absorption.
+      const pondBodyColor = vec3(...WATER.QUIET_DEEP_TINT).toVar(
+        "compactPondBodyColor",
+      );
+      const waterColor = select(
+        quietPond.greaterThan(0),
+        pondBodyColor,
+        vec3(cosR, cosG, cosB),
+      );
 
       // --- Flow-mapped 4-scroll normal noise (FlowUVW two-phase crossfade) ---
       const flowSampleUV = mul(wUV, float(WATER.FLOW_UV_SCALE));

@@ -8,7 +8,10 @@ import { NodeFrame, type Node } from "three/webgpu";
 import {
   NodeUpdateType,
   positionWorld,
+  positionView,
   cameraPosition,
+  cameraNear,
+  cameraFar,
   output,
 } from "three/tsl";
 
@@ -72,28 +75,41 @@ function unwrap(node: Node): Node {
   return node;
 }
 
-function inspectGraph(root: Node) {
+function inspectGraph(
+  root: Node | Node[],
+  camera:
+    | THREE.PerspectiveCamera
+    | THREE.OrthographicCamera = new THREE.PerspectiveCamera(),
+) {
   const builder: unknown = Reflect.construct(THREE.NodeBuilder, [null, null]);
   if (!(builder instanceof THREE.NodeBuilder))
     throw new Error("Expected Three builder");
-  Object.assign(builder, { camera: new THREE.PerspectiveCamera() });
+  Object.assign(builder, { camera });
   const nodes = new Set<Node>();
+  const expanded = new Map<Node, Node>();
   const visit = (node: Node) => {
     if (nodes.has(node)) return;
     nodes.add(node);
-    if (node === positionWorld || node === cameraPosition || node === output)
+    if (
+      node === positionWorld ||
+      node === positionView ||
+      node === cameraPosition ||
+      node === output
+    )
       return;
     const expand: unknown = Reflect.get(node, "getOutputNode");
     if (typeof expand === "function") {
       const result: unknown = Reflect.apply(expand, node, [builder]);
       if (!(result instanceof THREE.Node))
         throw new Error("Invalid TSL output");
+      expanded.set(node, result);
       visit(result);
     } else for (const child of node.getChildren()) visit(child);
   };
-  visit(root);
+  for (const node of Array.isArray(root) ? root : [root]) visit(node);
   return {
     nodes,
+    expanded,
     named(name: string) {
       const matches = [...nodes].filter(
         (node) => Reflect.get(node, "name") === name,
@@ -107,13 +123,19 @@ function inspectGraph(root: Node) {
 // Bounded inspection of the ACTUAL material arithmetic. Only view/normal,
 // sampled radiance and body-color inputs are substituted; no duplicate shader
 // formula, fake renderer or claim of GPU evaluation. Unknown operations fail.
-function numeric(root: Node, inputs: Map<Node, number[]>): number[] {
+function numeric(
+  root: Node,
+  inputs: Map<Node, number[]>,
+  expanded: ReadonlyMap<Node, Node> = new Map(),
+): number[] {
   const memo = new Map<Node, number[]>();
   let visits = 0;
   const visit = (node: Node): number[] => {
     if (++visits > 10000) throw new Error("Numeric graph budget exceeded");
     const supplied = inputs.get(node) ?? memo.get(node);
     if (supplied) return supplied;
+    const expansion = expanded.get(node);
+    if (expansion) return visit(expansion);
     if (memo.size > 1000) throw new Error("Numeric graph budget exceeded");
     const get = (key: string): unknown => Reflect.get(node, key);
     const child = (key: string) => visit(nodeChild(node, key));
@@ -131,7 +153,9 @@ function numeric(root: Node, inputs: Map<Node, number[]>): number[] {
       op = get("op"),
       method = get("method");
     let result: number[];
-    if (get("isVarNode") || node.type === "ConvertNode") result = child("node");
+    if (node.type === "StackNode") result = child("outputNode");
+    else if (get("isVarNode") || node.type === "ConvertNode")
+      result = child("node");
     else if (typeof value === "number") result = [value];
     else if (value instanceof THREE.Vector3) result = value.toArray();
     else if (value instanceof THREE.Color) result = [value.r, value.g, value.b];
@@ -154,6 +178,10 @@ function numeric(root: Node, inputs: Map<Node, number[]>): number[] {
     else if (op === ">") result = pair((a, b) => Number(a > b));
     else if (method === "max") result = pair(Math.max);
     else if (method === "pow") result = pair(Math.pow);
+    else if (method === "exp2") result = child("aNode").map((v) => 2 ** v);
+    else if (method === "negate") result = child("aNode").map((v) => -v);
+    else if (method === "length") result = [Math.hypot(...child("aNode"))];
+    else if (method === "cos") result = child("aNode").map(Math.cos);
     else if (method === "dot")
       result = [pair((a, b) => a * b).reduce((a, b) => a + b, 0)];
     else if (method === "normalize") {
@@ -204,6 +232,244 @@ function pondLightingHarness() {
 }
 
 describe("WaterSystem material graph", () => {
+  it.each(["perspective", "orthographic"] as const)(
+    "reconstructs compact pond screen-ray length with a real %s camera",
+    (kind) => {
+      const h = createLakePlaneHarness();
+      try {
+        const camera =
+          kind === "perspective"
+            ? new THREE.PerspectiveCamera(58, 16 / 9, 0.3, 500)
+            : new THREE.OrthographicCamera(-9, 9, 5, -5, 0.3, 500);
+        camera.position.set(387, 27, 426.5);
+        camera.lookAt(401, 25, 423);
+        camera.updateMatrixWorld(true);
+        const material = h.water.getMaterial("lake")!;
+        const opacityNode: unknown = material.opacityNode;
+        if (!(opacityNode instanceof THREE.Node))
+          throw new Error("Expected actual lake opacity node");
+        const graph = inspectGraph(opacityNode, camera);
+        const axis = graph.named("lakeAxisDepthGap");
+        const rayLength = graph.named("compactPondRayLength");
+        const transmittance = graph.named("compactPondTransmittance");
+        const depths = [...graph.nodes].filter(
+          (node) => Reflect.get(node, "scope") === "linearDepth",
+        );
+        expect(depths).toHaveLength(2);
+        const sceneDepth = depths.find(
+          (node) => Reflect.get(node, "valueNode") !== null,
+        )!;
+        const fragmentDepth = depths.find(
+          (node) => Reflect.get(node, "valueNode") === null,
+        )!;
+        expect(sceneDepth).toBeDefined();
+        expect(fragmentDepth).toBeDefined();
+        h.water.getQuietPondUniform()!.value = 1;
+        const raycaster = new THREE.Raycaster();
+        for (const ndc of [
+          new THREE.Vector2(0, 0),
+          new THREE.Vector2(-0.75, 0.5),
+          new THREE.Vector2(0.8, -0.5),
+        ]) {
+          raycaster.setFromCamera(ndc, camera);
+          const surface = raycaster.ray.at(20, new THREE.Vector3());
+          const surfaceView = surface
+            .clone()
+            .applyMatrix4(camera.matrixWorldInverse);
+          let previousOpacity = -1;
+          for (const distance of [-2, 0, 1e-6, 0.5, 3, 6, 30, 60]) {
+            const bottom = raycaster.ray.at(20 + distance, new THREE.Vector3());
+            const bottomView = bottom
+              .clone()
+              .applyMatrix4(camera.matrixWorldInverse);
+            // Supply only depth-attachment and camera-space inputs. The real
+            // Camera/Raycaster creates independent world-space segment lengths;
+            // evaluate the material's own axis conversion and attenuation DAG.
+            const toLinear = (z: number) =>
+              (-z - camera.near) / (camera.far - camera.near);
+            const inputs = new Map<Node, number[]>([
+              [sceneDepth, [toLinear(bottomView.z)]],
+              [fragmentDepth, [toLinear(surfaceView.z)]],
+              [positionView, surfaceView.toArray()],
+              [cameraNear, [camera.near]],
+              [cameraFar, [camera.far]],
+            ]);
+            expect(numeric(axis, inputs, graph.expanded)[0]).toBeCloseTo(
+              surfaceView.z - bottomView.z,
+              10,
+            );
+            const expectedLength = Math.min(30, Math.max(0, distance));
+            expect(numeric(rayLength, inputs, graph.expanded)[0]).toBeCloseTo(
+              expectedLength,
+              9,
+            );
+            const transmission = numeric(
+              transmittance,
+              inputs,
+              graph.expanded,
+            )[0];
+            expect(transmission).toBeCloseTo(2 ** (-expectedLength / 3), 10);
+            const opacity = numeric(opacityNode, inputs, graph.expanded)[0];
+            expect(opacity).toBeCloseTo(1 - transmission, 12);
+            expect(opacity).toBeGreaterThanOrEqual(previousOpacity);
+            previousOpacity = opacity;
+            if ([0, 3, 6].includes(distance))
+              expect(opacity).toBeCloseTo(
+                distance === 0 ? 0 : distance === 3 ? 0.5 : 0.75,
+                10,
+              );
+            // A tilted surface normal does not enter this geometry: dividing
+            // by N.V would incorrectly exaggerate an already camera-axis gap.
+            if (kind === "perspective" && ndc.lengthSq() > 0 && distance === 3)
+              expect(numeric(axis, inputs, graph.expanded)[0]).toBeLessThan(3);
+          }
+        }
+        const rayNodes = inspectGraph(rayLength, camera).nodes;
+        expect(rayNodes.has(positionView)).toBe(kind === "perspective");
+        expect(
+          [...rayNodes].some((node) => Reflect.get(node, "method") === "dot"),
+        ).toBe(false);
+        if (kind === "perspective") {
+          const boundaryInputs = new Map<Node, number[]>([
+            [axis, [1]],
+            [positionView, [1, 0, 0]],
+          ]);
+          expect(numeric(rayLength, boundaryInputs, graph.expanded)).toEqual([
+            30,
+          ]);
+          boundaryInputs.set(axis, [-1]);
+          expect(numeric(rayLength, boundaryInputs, graph.expanded)).toEqual([
+            0,
+          ]);
+        }
+      } finally {
+        h.water.destroy();
+      }
+    },
+  );
+
+  it("isolates fixed compact tint and exponential opacity from the exact ordinary lake expressions", () => {
+    const h = createLakePlaneHarness();
+    try {
+      const material = h.water.getMaterial("lake")!;
+      const quiet = h.water.getQuietPondUniform()!;
+      const opacity: unknown = material.opacityNode;
+      if (!(opacity instanceof THREE.Node))
+        throw new Error("Expected actual lake opacity node");
+      const colorGraph = inspectGraph(material.outputNode!);
+      const opacityGraph = inspectGraph(opacity);
+      const body = colorGraph.named("compactPondBodyColor");
+      expect(numeric(body, new Map(), colorGraph.expanded)).toEqual([
+        0.02, 0.085, 0.095,
+      ]);
+      const selections = [...colorGraph.nodes].filter(
+        (node) =>
+          node.type === "ConditionalNode" &&
+          unwrap(nodeChild(node, "ifNode")) === unwrap(body),
+      );
+      expect(selections).toHaveLength(1);
+      const selectedColor = selections[0];
+      const ordinaryColor = nodeChild(selectedColor, "elseNode");
+      expect(inspectGraph(ordinaryColor).nodes.has(body)).toBe(false);
+      expect(inspectGraph(ordinaryColor).nodes.has(quiet)).toBe(false);
+      const opacitySelections = [...opacityGraph.nodes].filter(
+        (node) => node.type === "ConditionalNode",
+      );
+      expect(opacitySelections).toHaveLength(1);
+      const ordinaryOpacity = nodeChild(opacitySelections[0], "elseNode");
+      expect(inspectGraph(ordinaryOpacity).nodes.has(quiet)).toBe(false);
+      expect(
+        inspectGraph(ordinaryOpacity).nodes.has(
+          opacityGraph.named("compactPondTransmittance"),
+        ),
+      ).toBe(false);
+      const axis = opacityGraph.named("lakeAxisDepthGap");
+      expect(colorGraph.named("lakeAxisDepthGap")).toBe(axis);
+      for (const gap of [-2, 0, 0.5, 3, 6, 15, 30, 60]) {
+        for (const distance of [0, 10, 200, 400]) {
+          const inputs = new Map<Node, number[]>([
+            [axis, [gap]],
+            [positionWorld, [0, 0, 0]],
+            [cameraPosition, [0, 0, distance]],
+          ]);
+          const depth = Math.min(30, Math.max(0, gap));
+          const colorLerp =
+            Math.max(0, Math.min(1, 1 - depth / 50)) ** 3 *
+            Math.min(1, Math.max(0.01, 1 - distance / 200));
+          const expectedColor = [
+            [-0.4569, 0.0311],
+            [-0.3095, 0.1374],
+            [-0.2654, 0.1692],
+          ].map(([offset, amplitude]) =>
+            Math.min(
+              1,
+              Math.max(
+                0,
+                offset +
+                  amplitude * 0.5 * Math.cos(Math.PI * colorLerp + Math.PI) +
+                  0.5,
+              ),
+            ),
+          );
+          quiet.value = 0;
+          const actualColor = numeric(
+            selectedColor,
+            inputs,
+            colorGraph.expanded,
+          );
+          actualColor.forEach((value, i) =>
+            expect(value).toBeCloseTo(expectedColor[i], 12),
+          );
+          expect(
+            numeric(opacity, inputs, opacityGraph.expanded)[0],
+          ).toBeCloseTo(1 - Math.max(0, Math.min(1, 1 - depth / 15)) ** 3, 12);
+          quiet.value = 1;
+          expect(numeric(selectedColor, inputs, colorGraph.expanded)).toEqual([
+            0.02, 0.085, 0.095,
+          ]);
+        }
+      }
+      // Both roots use one real builder, matching one material compilation;
+      // separate builders legitimately create separate lazy depth samples.
+      const combined = inspectGraph([material.outputNode!, opacity]).nodes;
+      expect(
+        [...combined].filter(
+          (node) => node.type === "ViewportDepthTextureNode",
+        ),
+      ).toHaveLength(1);
+      for (const [texture, samples] of [
+        [h.water["normalTex"], 5],
+        [h.water["flowTex"], 1],
+        [h.water["foamTex"], 1],
+      ] as const)
+        expect(
+          [...combined].filter(
+            (node) =>
+              Reflect.get(node, "isTextureNode") &&
+              Reflect.get(node, "value") === texture,
+          ),
+        ).toHaveLength(samples);
+      const ocean = h.water["createOceanMaterial"]();
+      h.water["oceanMaterial"] = ocean;
+      for (const node of [
+        ocean.outputNode,
+        ocean.opacityNode,
+        material.positionNode,
+      ]) {
+        if (!(node instanceof THREE.Node))
+          throw new Error("Expected actual ocean or lake displacement node");
+        const nodes = inspectGraph(node).nodes;
+        expect(nodes.has(quiet)).toBe(false);
+        expect(nodes.has(body)).toBe(false);
+        expect(nodes.has(opacityGraph.named("compactPondRayLength"))).toBe(
+          false,
+        );
+      }
+    } finally {
+      h.water.destroy();
+    }
+  });
+
   it("keeps compact direct light independent of planar radiance and continuously gates horizon/night", () => {
     const h = pondLightingHarness();
     try {
@@ -335,7 +601,7 @@ describe("WaterSystem material graph", () => {
     }
   });
 
-  it("owns pond lighting per draw without leaking into ordinary water, opacity, displacement or fog alpha", () => {
+  it("owns pond lighting per draw without leaking into ordinary water or displacement and retains fog alpha", () => {
     const h = pondLightingHarness();
     try {
       const quiet = h.water.getQuietPondUniform()!;
@@ -363,7 +629,7 @@ describe("WaterSystem material graph", () => {
       const position: unknown = h.material.positionNode;
       if (!(opacity instanceof THREE.Node) || !(position instanceof THREE.Node))
         throw new Error("Expected actual lake opacity and displacement nodes");
-      expect(inspectGraph(opacity).nodes.has(quiet)).toBe(false);
+      expect(inspectGraph(opacity).nodes.has(quiet)).toBe(true);
       expect(inspectGraph(position).nodes.has(quiet)).toBe(false);
       expect(
         [...h.graph.nodes].filter(
@@ -415,39 +681,12 @@ describe("WaterSystem material graph", () => {
     }
   });
 
-  it("calms only owned pond surface detail without new normal samples or changed depth and wave graphs", () => {
+  it("calms only owned pond surface detail without new normal samples or changed wave graphs", () => {
     const { water, frame, addLake } = createLakePlaneHarness();
     try {
       // Expand the actual lazy TSL functions using Three's builder. This checks
       // graph ownership and sampling cost, not rendered quality or GPU time.
-      const builder: unknown = Reflect.construct(THREE.NodeBuilder, [
-        null,
-        null,
-      ]);
-      if (!(builder instanceof THREE.NodeBuilder))
-        throw new Error("Expected Three builder");
-      const graph = (root: Node) => {
-        const nodes = new Set<Node>();
-        const visit = (node: Node) => {
-          if (nodes.has(node)) return;
-          nodes.add(node);
-          if (
-            node === positionWorld ||
-            node === cameraPosition ||
-            node === output
-          )
-            return;
-          const expand: unknown = Reflect.get(node, "getOutputNode");
-          if (typeof expand === "function") {
-            const expanded: unknown = Reflect.apply(expand, node, [builder]);
-            if (!(expanded instanceof THREE.Node))
-              throw new Error("Expected actual TSL output");
-            visit(expanded);
-          } else for (const child of node.getChildren()) visit(child);
-        };
-        visit(root);
-        return nodes;
-      };
+      const graph = (root: Node) => inspectGraph(root).nodes;
       const material = water.getMaterial("lake")!;
       const nodes = graph(material.outputNode!);
       const quiet = water.getQuietPondUniform()!;
@@ -501,7 +740,7 @@ describe("WaterSystem material graph", () => {
       const position: unknown = material.positionNode;
       if (!(opacity instanceof THREE.Node) || !(position instanceof THREE.Node))
         throw new Error("Expected actual lake opacity and displacement nodes");
-      expect(graph(opacity).has(quiet)).toBe(false);
+      expect(graph(opacity).has(quiet)).toBe(true);
       expect(graph(position).has(quiet)).toBe(false);
 
       const pond = addLake(27.8),

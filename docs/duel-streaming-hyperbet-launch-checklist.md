@@ -2592,16 +2592,57 @@ browsers are closed; the protected human playable database is unchanged.
   `docs/world-art-candidates/pond-southern-bank-v10.world-areas.json`, with
   its baseline hash, two-byte radius change and non-runtime scope documented.
   It contains earlier private layout work, not a one-field production patch.
-- [ ] Next water trial: use the existing compact-pond depth sample for bounded
-  unrefracted viewing-ray thickness and exponential attenuation, with a muted
-  deep tint. Keep ordinary/ocean water, geometry, flow, lighting, Fresnel,
-  reflection policy, texture/pass counts and fog unchanged for the comparison.
-  This is a proposed neutral-extinction approximation, not implemented spectral
-  absorption, Snell refraction or complete volumetric scattering. Qualify it
-  at all four v10 cameras, in motion and against measured native frame costs.
-- [ ] Next visible art work: grouped shoreline planting and regional meadow
-  variation; broader natural landforms/routes; readable dock timber joints
-  and pavilion silhouettes. Do not continue imperceptible micro-detail trials
+- [x] Implement and retain the compact-pond optical trial as the next private
+  art baseline. Convert the existing camera-axis depth gap to bounded
+  unrefracted viewing-ray length, use exponential neutral attenuation (3 m
+  half-transmittance), and use a muted constant deep tint. Perspective and
+  orthographic camera expressions are tested from the actual TSL graph.
+  Ordinary lake/ocean expressions, geometry, waves, flow, lighting, Fresnel,
+  reflection policy and fog stay unchanged; no new texture sample or pass.
+  This is not spectral absorption, Snell refraction or full volume scattering.
+- [x] Verify 17 material cases on v10, then 70 cases across five files on the
+  canonical manifest; full 734-root/2,413-file no-emit has zero diagnostics.
+  Scoped lint/format/diff checks pass. Retain initial types01's six narrowing
+  errors and their fixes. Core02 on v10 has 69 passes and one fixture failure:
+  the old test shrinks the 27 m pond to 12 m without shrinking its wet terrain.
+  The coverage gate correctly rejects that fabricated basin. Do not weaken
+  it, call core02 green, or infer full v10 integration from canonical tests.
+- [x] Build50 retains all 145 protected outputs and differs from build48 in
+  only the production WaterSystem input. Native101 passes the unchanged
+  startup and four camera/grass gates on v10. Two still-image reviews find a
+  clearer shallow/deep transition and less flat cyan water, without an obvious
+  new dock-contact or shoreline-seam regression. The overhead pond is darker
+  and less inviting; uniform muddy perimeter, sparse planting, bright lawn
+  and plain timber still fall short. Human localhost defaults are unchanged.
+- [x] Record a separate six-second, 1280x720 canvas yaw clip after a 12-second
+  held-camera timing window. The clip decodes to 133 frames, with uneven
+  timestamps; six sampled frames show no obvious abrupt optical discontinuity.
+  This is diagnostic evidence, not smooth-motion approval, a 60-second clip,
+  2x game resolution, streaming proof or the requested cinematic deliverable.
+  Timing hooks restore, owned query resources are destroyed, video tracks stop
+  and the camera is restored; the owned browser closes.
+- [ ] Complete matched performance and startup-reliability qualification.
+  Fresh baseline native100/build48 fails before any qualifying view, before
+  timing/recording hooks: cell (13,17), LOD0, 251.900 ms/33,741 resumptions,
+  cumulative fitting maximum 84 ms. All 21 sampled host states were nominal;
+  cause is not established. Do not blame heat, GC or preemption without proof,
+  retry until green, or raise caps. The missing bounded diagnostic is the
+  worker-versus-transport fitting-settlement accounting, not another profiler.
+  Candidate native101 has 12 native GPU-envelope samples, 46.53-59.05 ms,
+  and held RAF intervals p50 27.6/p95 37.3 ms. Pass timestamps overlap:
+  do not sum them or interpret them as exclusive shader costs or presented FPS.
+  This is not evidence of smooth performance or of the water change's cost
+  relative to baseline, since no fresh qualifying control was obtained.
+- [x] Stop runtime70/71 and remove only their ephemeral databases; verify human
+  services, database, lock and all 145 protected artifacts unchanged. Preserve
+  both failed baseline and successful candidate. The known unmodeled-cow 404
+  remains an explicitly deferred placeholder issue, not a newly hidden error.
+- [ ] Next visible art work: combine the retained v10 bank with only the
+  previously authored v11 three-tree eastern-backdrop regrouping, then recheck
+  routes, dock/fishing clearances, resource ownership and visible draw budgets.
+  Do not switch wholesale to v11's older bank geometry or add redundant trees.
+  Continue regional meadow variation, broader natural landforms/routes and
+  readable dock/pavilion silhouettes. Avoid imperceptible micro-detail trials
   while the wide scene remains uniformly grassy and sparsely composed.
 
 Evidence: service-layout `refined-census-*`, `regional-meadow-material01`,
@@ -2634,11 +2675,19 @@ Rejected dock experiment: service-layout `dock-joint-relief-core01/02`,
 `dock-joint-relief-types01`; inland-pond `isolated-build49-report.json`,
 `dock-joint-relief-build49-preflight01.json`, `native99/ART_VERDICT.md`,
 `native99/rejected-dock-joint-relief.patch`, `native99/process.json` and
-`runtime69/process.json`. Proposed water treatment follows the primary
+`runtime69/process.json`. The implemented neutral-extinction trial follows the primary
 [PBRT homogeneous transmittance reference](https://pbr-book.org/4ed/Volume_Scattering/Transmittance)
 and [Three r186 view-depth implementation](https://github.com/mrdoob/three.js/blob/r186/src/nodes/display/ViewportDepthNode.js);
 these references do not establish actual appearance or performance.
 
+
+Water follow-up: service-layout `pond-ray-extinction-core01/02/03` and
+`pond-ray-extinction-types01/02`; inland-pond `isolated-build50-report.json`,
+`pond-ray-extinction-preflight01.json`, `native100/process.json`,
+`native101/process.json`, `native101/ART_VERDICT.md`,
+`native101/landing-held-native-timing.json`,
+`native101/landing-optical-motion.webm`, `runtime70/process.json` and
+`runtime71/process.json`. The six-second clip and stills are diagnostic only.
 ### Pond-bank service ground — 2026-09-22
 
 - [x] Author a bounded three-ribbon service apron from the actual pond bank's
