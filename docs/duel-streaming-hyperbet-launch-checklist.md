@@ -1,5 +1,51 @@
 # Duel Arena, Streaming, and Hyperbet Launch Checklist
 
+## 2026-09-22 — post-restart matched flowers; fuller heads, meadow art still open
+
+- [x] Recover normal localhost3333 after the Mac restarted. Reuse the exact
+  persistent database/container/volume and character; preserve compiled bundles.
+  Recovery02 uses installed Bun1.3.6, skips migrations and refuses replacement
+  characters. The built server's existing idempotent schema assurance remains;
+  this is not a claim of zero database writes. No dependencies installed or canonical bundles rebuilt.
+- [x] Native126/build63 narrow baseline and native127/build64 wider-petal candidate
+  both complete the unchanged gates: startup29.804/30.426 seconds,122/122 grass
+  cells, three actual Chrome/Metal WebGPU views, ten nominal host samples each,
+  errors[] and owned browsers closed. Reboot is an observed host-state change,
+  not proof of the cause of native124 or a game-code loading fix.
+- [x] Match all three camera poses and complete flower instance pools exactly:
+ 205 at pond arrival,180 at meadow,191 at close-up. Selected root/matrix unchanged.
+  Each population remains stable through its still and the close wind recording.
+  Both geometries retain362 vertices/584 triangles,512-slot capacity and32KiB
+  matrix storage. Same placement/material source pins and shader receipts do not
+  imply equal raster/shadow cost or GPU performance.
+- [x] Record six seconds of ordinary shared wind at the close view for each run.
+  Baseline/candidate durations6.010/6.006 seconds,60/58 receipt observations;
+  camera, instance storage and population stay fixed, clocks advance normally,
+  errors[]/gpuErrors[]/no device loss, tracks/listeners cleaned up. Candidate
+  WebM decodes179 frames at1280x720. Three extracted temporal samples show
+  changing grass/plant poses without an obvious detached head; this is not a
+  frame-pacing, full-video motion, root-contact or long-duration acceptance.
+- [x] Root and independent visual comparison retain .018h petals as an incremental
+  opt-in improvement: the close head is fuller and less needle-like. Wide views
+  still show tiny isolated flecks; pointed, strongly cupped petals, largely
+  uniform grass shading and noisy exposed ground remain below the target.
+- [ ] Root bases and individual flower shadows remain obscured. Rich mixed meadow
+  composition, smooth traversal, frame/loading/memory budgets, historical grass
+  failures and full island/play/stream acceptance remain open. No default promotion.
+  Raw owner maximum update1.6ms in both runs; validation0.2ms and publication
+  0.9/0.6ms,4/1 soft overruns remain recorded rather than discounted.
+- [x] Inspect the user's [Grassworks reference](https://grassworks.techredux.co/demo)
+  live: Sunny/Wind blade views and the loaded billboard variant. Finer curved
+  silhouettes, stronger base-to-tip/depth variation and regional composition are
+  useful art references, not measured performance parity. Read its public
+  [appearance guidance](https://grassworks.techredux.co/docs/grass/appearance);
+  no paid source, purchase or asset extraction.
+- [x] Restore the exact tested wider-petal source after the baseline-only source
+  lease. Prior194 flower tests/types/lint evidence remains tied to that hash.
+  Build64 has1096 stable input pins/nine bundles. Runtime96/97 and their temporary
+  databases are stopped/removed; protected145 artifacts/lock/localhost checks pass.
+  Native124 and all earlier failed captures remain unchanged.
+
 ## 2026-09-22 — petal readability candidate; restart-safe checkpoint
 
 - [x] Widen the existing procedural petal lateral profile from 0.0125h to
