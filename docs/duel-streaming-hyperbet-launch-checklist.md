@@ -1,5 +1,44 @@
 # Duel Arena, Streaming, and Hyperbet Launch Checklist
 
+## 2026-09-22 — grass illumination measured; horizontal-twist trial rejected
+
+- [x] Add a diagnostic of the actual composed grass-normal graph and existing
+  thin-leaf lighting. Under hypothetical settled zenith light, interior-row
+  cross-width direct-incidence spread is only 0.00055–0.01198; at phase 0.56 it
+  is 0.01977–0.04794. These are CPU graph/algebra measurements, not captured
+  light uniforms, raster interpolation, pixel brightness or a visual-quality pass.
+- [x] Implement and test a bounded horizontal-row twist with derivative-correct
+  side normals: same roots, tips, topology and GPU inputs; all 288 focused
+  appearance, wind, real-worker generation and grounding tests pass. Types and
+  lint pass. Near template projected area changes by about -1.2%, not zero.
+- [x] Capture native133/build67 against native132/build66: three 1280x720 native
+  Chrome/Metal views, original startup gate 29.842s, 122 grass cells and ten
+  nominal host samples. Complete per-key grass counts match (75,947 / 59,416 /
+  57,061); complete flower pools match (205 / 180 / 191). Actual submitted
+  geometry buffers, native uploads and unchanged shader programs are verified.
+- [x] REJECT the twist as the active visual upgrade after two independent
+  before/after image reviews. Changed leaf angles do not materially improve
+  naturalness or volume; broad flat ribbons and noisy exposed ground remain.
+  Restore GrassVisualManager and the wind test byte-for-byte to checkpoint
+  505896c. Preserve the rejected source/test patch, isolated build and captures
+  under native133; keep the previously accepted two-head flowers.
+- [x] Retain only the useful illumination diagnostic: 53/53 tests, zero type
+  diagnostics across 751 roots / 2,457 sources, and lint pass after restoration.
+  Runtime104 and capture browser closed; owned temporary database removed.
+  Protected playable localhost3333, persistent database and compiled files remain.
+- [ ] Next: a coordinated grass-lighting/ground-integration improvement, judged
+  at close and gameplay views. Do not repeat the rejected twist, near4, pointed
+  taper or blanket-root-burial trials as fixes. Grassworks and the
+  [primary procedural-grass paper](https://jcgt.org/published/0004/01/02/paper-lowres.pdf)
+  remain shape/ground-integration references, not proof of this game's quality.
+  Existing Three thin-leaf scattering is view/light-dependent; adding that
+  feature again cannot fix missing visual contrast by itself.
+- [ ] AAA appearance, full motion/LOD traversal, target-hardware performance
+  and streaming acceptance remain open. The 6.0075s wind recording is retained
+  but not reviewed for continuous motion; its existence is not a smoothness pass.
+  Evidence: native133/visual-review.json and service-layout-network01-UNQUALIFIED/
+  grass-twist-* plus grass-illumination-retained* checks.
+
 ## 2026-09-22 — measured grass roots and reviewed two-head meadow sprig
 
 - [x] Native131/build65 completed the bounded root diagnostic: 12 actual-buffer

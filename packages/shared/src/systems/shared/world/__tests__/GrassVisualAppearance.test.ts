@@ -35,6 +35,7 @@ import {
   type GrassWorkerSetup,
 } from "../GrassVisualManager";
 import { getGrassBladeLayout } from "../GrassBladeLayout";
+import { sampleSkyCycle } from "../SkySystem";
 import { createGroundedGrassMaterial } from "../GrassGroundingGpu";
 import {
   COMPACT_WORLD_TERRAIN_PROFILE,
@@ -966,6 +967,201 @@ describe("opt-in fine leaf volume (actual graph/geometry, not native rendering)"
               }
       }
       expect(oppositeSides).toBeGreaterThan(0);
+    } finally {
+      owner.destroy();
+    }
+  });
+
+  it("reports actual leaf-normal illumination contrast without requiring today's appearance", () => {
+    const owner = fine("leaf-volume-v1");
+    try {
+      const material = owner["material"];
+      if (!(material instanceof MeshSSSNodeMaterial))
+        throw new Error("Expected the actual fine SSS material");
+      const geometry = owner["lodGeometries"][0];
+      const layout = getGrassBladeLayout(
+        0,
+        FINE_MEADOW_APPEARANCE.GEOMETRY_LAYOUT,
+      );
+      const range = (values: number[]) => [
+        Math.min(...values),
+        Math.max(...values),
+      ];
+      const spread = (values: number[]) =>
+        Math.max(...values) - Math.min(...values);
+      const saturate = (value: number) => Math.min(1, Math.max(0, value));
+      const measurements: Array<{
+        phase: number;
+        lightWorld: number[];
+        rowHeight: number;
+        front: boolean;
+        ndotlRange: number[];
+        crossWidthNdotlSpreadRange: number[];
+        crossWidthNormalYSpreadRange: number[];
+        edgeNormalDistanceRange: number[];
+        topDownSssRgbMaximum: number[];
+        grazingBacklitSssRgbMaximum: number[];
+      }> = [];
+
+      // sampleSkyCycle is production math. Environment.updateSunLightPosition
+      // places the settled daytime light at anchor + sun*400 + (0,100,0).
+      // Actual live lightDirection is lerped: these are NOT captured light
+      // vectors, and no water-uniform vector is substituted for the light.
+      for (const phase of [0.5, 0.56, 0.3]) {
+        const sun = new THREE.Vector3();
+        sampleSkyCycle(phase, sun);
+        const light = sun
+          .multiplyScalar(400)
+          .add(new THREE.Vector3(0, 100, 0))
+          .normalize();
+        const topDownView = new THREE.Vector3(0, 1, 0);
+        // A representative viewer above ground, opposite the light azimuth.
+        // It is intentionally not the native capture camera or a light change.
+        const grazingView = new THREE.Vector3(-light.x, 0, -light.z);
+        if (grazingView.lengthSq() < 1e-12) grazingView.set(0, 0, 1);
+        grazingView.normalize().setY(0.15).normalize();
+        for (let row = 0; row <= layout.bladeSegments; row++)
+          for (const front of [false, true]) {
+            const index = Math.min(row * 2, layout.verticesPerBlade - 1);
+            const allNdotl: number[] = [];
+            const ndotlSpreads: number[] = [];
+            const normalYSpreads: number[] = [];
+            const edgeNormalDistances: number[] = [];
+            const sssMax = [new THREE.Vector3(), new THREE.Vector3()];
+            // Real first-blade row attributes, flat retained support, near LOD,
+            // unfaded, wind time zero, four instance yaws. UV centers/edges
+            // query the actual composed graph; this is not raster interpolation.
+            for (const yaw of [0, Math.PI / 2, Math.PI, (3 * Math.PI) / 2]) {
+              const inputs = inputsAt(geometry, index);
+              inputs.instanceRotScaleHash[0] = yaw;
+              inputs._frontFacing[0] = front ? 1 : 0;
+              const viewMatrix = new THREE.Matrix4().fromArray(
+                inputs._cameraViewMatrix,
+              );
+              const inverseView = viewMatrix.clone().invert();
+              const normals: THREE.Vector3[] = [];
+              const ndotl: number[] = [];
+              for (const u of [0, 0.5, 1]) {
+                inputs.uv[0] = u;
+                const viewNormal = vector(
+                  colorValue(material.normalNode, inputs),
+                );
+                const normal = viewNormal
+                  .clone()
+                  .transformDirection(inverseView);
+                expect(normal.length()).toBeCloseTo(1, 12);
+                const incidence = saturate(normal.dot(light));
+                expect(incidence).toBeCloseTo(
+                  saturate(
+                    viewNormal.dot(
+                      light.clone().transformDirection(viewMatrix),
+                    ),
+                  ),
+                  12,
+                );
+                normals.push(normal);
+                ndotl.push(incidence);
+                allNdotl.push(incidence);
+
+                const thickness = vector(
+                  colorValue(material.thicknessColorNode, inputs),
+                );
+                const attenuation = colorValue(
+                  material.thicknessAttenuationNode,
+                  inputs,
+                )[0];
+                const scale = colorValue(
+                  material.thicknessScaleNode,
+                  inputs,
+                )[0];
+                const power = colorValue(
+                  material.thicknessPowerNode,
+                  inputs,
+                )[0];
+                const distortion = colorValue(
+                  material.thicknessDistortionNode,
+                  inputs,
+                )[0];
+                const ambient = colorValue(
+                  material.thicknessAmbientNode,
+                  inputs,
+                )[0];
+                // Installed Three MeshSSSNodeMaterial.direct algebra, unit white
+                // incident light: H=normalize(L+distortion*N), then
+                // RGB=(saturate(-V.H)^power*scale+ambient)*thickness*attenuation.
+                // This is source-backed CPU algebra, not native model execution;
+                // no IBL, shadows, Fresnel, tone mapping or exposure is simulated.
+                const half = light
+                  .clone()
+                  .addScaledVector(normal, distortion)
+                  .normalize();
+                for (const [viewIndex, view] of [
+                  topDownView,
+                  grazingView,
+                ].entries()) {
+                  const factor =
+                    (saturate(-view.dot(half)) ** power * scale + ambient) *
+                    attenuation;
+                  const added = thickness.clone().multiplyScalar(factor);
+                  added.toArray().forEach((value, channel) => {
+                    expect(Number.isFinite(value)).toBe(true);
+                    expect(value).toBeGreaterThanOrEqual(0);
+                    expect(value).toBeLessThanOrEqual(
+                      thickness.getComponent(channel) *
+                        (scale + ambient) *
+                        attenuation +
+                        1e-12,
+                    );
+                  });
+                  sssMax[viewIndex].max(added);
+                }
+              }
+              ndotlSpreads.push(spread(ndotl));
+              normalYSpreads.push(spread(normals.map((n) => n.y)));
+              edgeNormalDistances.push(normals[0].distanceTo(normals[2]));
+              // A different normal is not necessarily a different illumination.
+              // The clamp is 1-Lipschitz. Separate inclination and azimuth terms:
+              // at exact zenith, only delta-normal.y can change direct incidence.
+              for (let a = 0; a < normals.length; a++)
+                for (let b = a + 1; b < normals.length; b++) {
+                  const delta = normals[a].clone().sub(normals[b]);
+                  const bound =
+                    Math.abs(delta.y * light.y) +
+                    Math.hypot(delta.x, delta.z) * Math.hypot(light.x, light.z);
+                  expect(Math.abs(ndotl[a] - ndotl[b])).toBeLessThanOrEqual(
+                    bound + 1e-12,
+                  );
+                  expect(
+                    normals[a].dot(new THREE.Vector3(0, 1, 0)) -
+                      normals[b].dot(new THREE.Vector3(0, 1, 0)),
+                  ).toBeCloseTo(delta.y, 14);
+                }
+            }
+            measurements.push({
+              phase,
+              lightWorld: light.toArray(),
+              rowHeight: geometry.getAttribute("uv").getY(index),
+              front,
+              ndotlRange: range(allNdotl),
+              crossWidthNdotlSpreadRange: range(ndotlSpreads),
+              crossWidthNormalYSpreadRange: range(normalYSpreads),
+              edgeNormalDistanceRange: range(edgeNormalDistances),
+              topDownSssRgbMaximum: sssMax[0].toArray(),
+              grazingBacklitSssRgbMaximum: sssMax[1].toArray(),
+            });
+          }
+      }
+      expect(measurements).toHaveLength(3 * (layout.bladeSegments + 1) * 2);
+      // Diagnostic values intentionally are not snapshotted or constrained to
+      // remain weak: subsequent shape/material work may improve this contrast.
+      console.info(
+        "fineLeafDirectIlluminationDiagnostic",
+        JSON.stringify({
+          scope:
+            "CPU actual composed normals; hypothetical settled daylight; unit incident RGB; not a native capture or visual-quality approval",
+          measurements,
+        }),
+      );
     } finally {
       owner.destroy();
     }
