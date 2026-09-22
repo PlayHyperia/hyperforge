@@ -6,6 +6,7 @@ import {
   type ResourceFootprint,
 } from "../../../types/game/resource-processing-types";
 import { TILE_SIZE, worldToTile } from "../movement/TileSystem";
+import type { TerrainGridBounds } from "./TerrainGridSurface";
 
 export const FLOWER_RESOURCE_CLEARANCE_LIMITS = Object.freeze({
   maxScannedEntities: 4096,
@@ -39,14 +40,18 @@ export type FlowerResourceClearanceSnapshot = Readonly<{
     obstacleCount: number;
     conservativeFallbackCount: number;
     limits: FlowerResourceClearanceLimits;
+    region?: Readonly<TerrainGridBounds>;
   }>;
-  /** Reads only the detached snapshot. No entity scan or terrain query. */
+  /** Reads only the detached snapshot. No entity scan or terrain query.
+   * With a region, the entire flower reach must remain inside that region. */
   accepts(
     point: Readonly<{ x: number; z: number }>,
     maximumHorizontalFlowerReach: number,
   ): boolean;
   /** Synchronous full bounded re-scan, including additions and same-ID owners.
    * Call immediately before publishing a whole job, with no intervening await.
+   * Region-scoped currency preserves geometric regrowth reservations across
+   * depletion transitions; it is not equality of all captured audit metadata.
    * This is not an event subscription or a future-lifetime guarantee. */
   isCurrent(): boolean;
 }>;
@@ -77,7 +82,38 @@ function captureLimits(
   return Object.freeze({ maxScannedEntities, maxObstacles });
 }
 
-function scan(world: World, limits: FlowerResourceClearanceLimits) {
+function captureRegion(
+  requested: Readonly<TerrainGridBounds> | undefined,
+): Readonly<TerrainGridBounds> | undefined {
+  if (requested === undefined) return undefined;
+  if (!requested || typeof requested !== "object")
+    throw new Error("Invalid flower resource clearance region");
+  const read = (key: keyof TerrainGridBounds): number => {
+    const field = Object.getOwnPropertyDescriptor(requested, key);
+    const value: unknown = field && "value" in field ? field.value : undefined;
+    if (typeof value !== "number" || !Number.isFinite(value))
+      throw new Error("Invalid flower resource clearance region");
+    return value;
+  };
+  const minX = read("minX");
+  const maxX = read("maxX");
+  const minZ = read("minZ");
+  const maxZ = read("maxZ");
+  if (
+    minX > maxX ||
+    minZ > maxZ ||
+    !Number.isFinite(maxX - minX) ||
+    !Number.isFinite(maxZ - minZ)
+  )
+    throw new Error("Invalid flower resource clearance region");
+  return Object.freeze({ minX, maxX, minZ, maxZ });
+}
+
+function scan(
+  world: World,
+  limits: FlowerResourceClearanceLimits,
+  region?: Readonly<TerrainGridBounds>,
+) {
   const entities = world.entities;
   const obstacles: CapturedObstacle[] = [];
   const ids = new Set<string>();
@@ -93,9 +129,6 @@ function scan(world: World, limits: FlowerResourceClearanceLimits) {
       resourceType !== ResourceType.MINING_ROCK
     ) {
       continue;
-    }
-    if (obstacles.length >= limits.maxObstacles) {
-      throw new Error("Flower resource obstacle cap exceeded");
     }
     if (
       entity.world !== world ||
@@ -148,6 +181,20 @@ function scan(world: World, limits: FlowerResourceClearanceLimits) {
       z: (anchorTile.z + size.z / 2) * TILE_SIZE,
     });
     const radius = Math.hypot(size.x / 2 + 1, size.z / 2 + 1) * TILE_SIZE;
+    // Validate the complete bounded resource census before filtering: distant
+    // actors can enter this region on the next scan. Circle-vs-AABB overlap
+    // includes an outside actor whose conservative approach envelope crosses it.
+    if (
+      region &&
+      Math.hypot(
+        Math.max(region.minX - center.x, 0, center.x - region.maxX),
+        Math.max(region.minZ - center.z, 0, center.z - region.maxZ),
+      ) > radius
+    )
+      continue;
+    if (obstacles.length >= limits.maxObstacles) {
+      throw new Error("Flower resource obstacle cap exceeded");
+    }
     const row: FlowerResourceClearanceRow = Object.freeze({
       id: entity.id,
       nodeUuid: entity.node.uuid,
@@ -169,7 +216,11 @@ function scan(world: World, limits: FlowerResourceClearanceLimits) {
   return { entities, obstacles, scannedEntities };
 }
 
-function equalObstacle(a: CapturedObstacle, b: CapturedObstacle): boolean {
+function equalObstacle(
+  a: CapturedObstacle,
+  b: CapturedObstacle,
+  compareDepleted: boolean,
+): boolean {
   return (
     a.owner === b.owner &&
     a.row.id === b.row.id &&
@@ -178,7 +229,7 @@ function equalObstacle(a: CapturedObstacle, b: CapturedObstacle): boolean {
     a.row.position.x === b.row.position.x &&
     a.row.position.y === b.row.position.y &&
     a.row.position.z === b.row.position.z &&
-    a.row.depleted === b.row.depleted &&
+    (!compareDepleted || a.row.depleted === b.row.depleted) &&
     a.row.footprint === b.row.footprint &&
     a.row.footprintSource === b.row.footprintSource &&
     a.row.center.x === b.row.center.x &&
@@ -188,21 +239,27 @@ function equalObstacle(a: CapturedObstacle, b: CapturedObstacle): boolean {
 }
 
 /**
- * Inactive, resource-only placement adapter. Throws on invalid source/cap
+ * Resource-only placement adapter. Throws on invalid source/cap
  * admission; isCurrent and point admission fail closed. One snapshot is shared
  * by a bounded flower job, so candidates never trigger per-flower entity scans.
  *
  * Includes depleted actors, preserving their gathering/regrowth reservation.
+ * Optional region limits retained obstacle envelopes, not the complete bounded
+ * scan. Capture an expanded region if roots on a patch edge have nonzero reach.
+ * Scoped isCurrent ignores depletion transitions but still validates boolean
+ * state; rows/receipt remain immutable at-capture diagnostic observations.
  * Does not query ResourceSystem's incomplete client registry, alter grass RNG,
  * mutate actors, sample terrain, or establish path/station/water/mesh clearance.
- * The eventual owner must separately retire published flowers on world changes.
+ * The visual owner separately retires published flowers on world changes.
  */
 export function captureFlowerResourceClearance(
   world: World,
   requestedLimits: Partial<FlowerResourceClearanceLimits> = {},
+  requestedRegion?: Readonly<TerrainGridBounds>,
 ): FlowerResourceClearanceSnapshot {
   const limits = captureLimits(requestedLimits);
-  const captured = scan(world, limits);
+  const region = captureRegion(requestedRegion);
+  const captured = scan(world, limits, region);
   const rows = Object.freeze(captured.obstacles.map(({ row }) => row));
   const receipt = Object.freeze({
     schemaVersion: 1 as const,
@@ -213,6 +270,7 @@ export function captureFlowerResourceClearance(
       (row) => row.footprintSource === "conservative-max",
     ).length,
     limits,
+    ...(region ? { region } : {}),
   });
   return Object.freeze({
     rows,
@@ -226,7 +284,12 @@ export function captureFlowerResourceClearance(
         !Number.isFinite(point.x) ||
         !Number.isFinite(point.z) ||
         !Number.isFinite(maximumHorizontalFlowerReach) ||
-        maximumHorizontalFlowerReach < 0
+        maximumHorizontalFlowerReach < 0 ||
+        (region &&
+          (point.x - maximumHorizontalFlowerReach < region.minX ||
+            point.x + maximumHorizontalFlowerReach > region.maxX ||
+            point.z - maximumHorizontalFlowerReach < region.minZ ||
+            point.z + maximumHorizontalFlowerReach > region.maxZ))
       ) {
         return false;
       }
@@ -243,12 +306,16 @@ export function captureFlowerResourceClearance(
     },
     isCurrent() {
       try {
-        const current = scan(world, limits);
+        const current = scan(world, limits, region);
         return (
           current.entities === captured.entities &&
           current.obstacles.length === captured.obstacles.length &&
           current.obstacles.every((obstacle, index) =>
-            equalObstacle(obstacle, captured.obstacles[index]),
+            equalObstacle(
+              obstacle,
+              captured.obstacles[index],
+              region === undefined,
+            ),
           )
         );
       } catch {

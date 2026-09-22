@@ -26,6 +26,7 @@ import {
   resolveGrassAppearanceCandidate,
   resolveGrassLightingCandidate,
   resolveGrassPaletteCandidate,
+  resolveRootedFlowerCandidate,
   resolveTreeWindCandidate,
   resolveGrassCoverageTrial,
   resolveGrassRoadClearance,
@@ -41,11 +42,120 @@ import {
   type StreamingRenderAppliedState,
   type StreamingGrassProfileReceipt,
   type GrassPaletteCandidate,
+  type RootedFlowerCandidate,
 } from "../clientViewportMode";
 
 function makeWindow(pathname: string, search = ""): Window {
   return { location: { pathname, search } } as unknown as Window;
 }
+
+describe("explicit rooted flower selection", () => {
+  const fine =
+    "streamRenderProfile=island-fine-meadow-720p60-v1&grassAppearance=fine-meadow-v1";
+  const candidate: RootedFlowerCandidate = "rooted-v1";
+  const selected = `flowers=${candidate}`;
+
+  it("never enables flowers from omission, appearance or a profile alone", () => {
+    expect(resolveRootedFlowerCandidate()).toBeUndefined();
+    for (const path of ["/play", "/stream.html", "/"])
+      for (const profile of ["", ...Object.keys(STREAMING_RENDER_PROFILES)])
+        expect(
+          resolveRootedFlowerCandidate(
+            makeWindow(path, `?streamRenderProfile=${profile}`),
+          ),
+        ).toBeUndefined();
+    expect(
+      resolveRootedFlowerCandidate(makeWindow("/stream.html", `?${fine}`)),
+    ).toBeUndefined();
+  });
+
+  it("admits only the explicit fine pair without changing existing selectors or budgets", () => {
+    for (const [path, prefix] of [
+      ["/stream.html", ""],
+      ["/", "page=stream&"],
+      ["/stream.html", "embedded=false&streamFps=60&"],
+    ]) {
+      const baseline = makeWindow(path, `?${prefix}${fine}`);
+      const flower = makeWindow(
+        path,
+        `${baseline.location.search}&${selected}`,
+      );
+      const search = flower.location.search;
+      expect(resolveRootedFlowerCandidate(flower)).toBe(candidate);
+      expect(resolveRootedFlowerCandidate(flower)).toBe(candidate);
+      expect(flower.location.search).toBe(search);
+      expect(resolveGrassAppearanceCandidate(flower)).toBe("fine-meadow-v1");
+      expect(resolveExplicitStreamingRenderProfile(flower)).toBe(
+        resolveExplicitStreamingRenderProfile(baseline),
+      );
+      expect(resolveClientViewportRuntimeProfile(flower)).toEqual(
+        resolveClientViewportRuntimeProfile(baseline),
+      );
+      expect(resolveGrassPaletteCandidate(flower)).toBeUndefined();
+      expect(resolveGrassLightingCandidate(flower)).toBeUndefined();
+      expect(resolveGrassCoverageTrial(flower)).toBeUndefined();
+      expect(resolveGrassGroundingExecution(flower)).toBeUndefined();
+    }
+    const combined = makeWindow(
+      "/stream.html",
+      `?${fine}&${selected}&grassPalette=regional-v1&grassGrounding=worker-v1`,
+    );
+    expect(resolveRootedFlowerCandidate(combined)).toBe(candidate);
+    expect(resolveGrassPaletteCandidate(combined)).toBe("regional-v1");
+    expect(resolveGrassGroundingExecution(combined)).toBe("worker-v1");
+  });
+
+  it.each(["", "true", "rooted-v2", "ROOTED-V1", " rooted-v1", "rooted-v1 "])(
+    "rejects a noncanonical flower selector case %$",
+    (value) => {
+      expect(() =>
+        resolveRootedFlowerCandidate(
+          makeWindow(
+            "/stream.html",
+            `?${fine}&flowers=${encodeURIComponent(value)}`,
+          ),
+        ),
+      ).toThrow("Unknown or duplicate rooted flower candidate");
+    },
+  );
+
+  it("rejects missing prerequisites, duplicates, embedded and incompatible routes", () => {
+    for (const query of [
+      "",
+      "grassAppearance=fine-meadow-v1",
+      "streamRenderProfile=island-fine-meadow-720p60-v1",
+      "streamRenderProfile=island-meadow-720p60-v1&grassAppearance=natural-tuft-v1",
+      `${fine}&embedded=true`,
+      `${fine}&embedded=false&embedded=false`,
+      `${fine}&streamFps=30`,
+      `${fine}&grassAppearance=fine-meadow-v1`,
+      `${fine}&streamRenderProfile=island-fine-meadow-720p60-v1`,
+      `${fine}&page=stream&page=stream`,
+      `${fine}&${selected}`,
+      `${fine}&flowers=unknown`,
+      ...Object.keys(STREAMING_RENDER_PROFILES)
+        .filter((profile) => profile !== "island-fine-meadow-720p60-v1")
+        .map(
+          (profile) =>
+            `streamRenderProfile=${profile}&grassAppearance=fine-meadow-v1`,
+        ),
+    ])
+      expect(() =>
+        resolveRootedFlowerCandidate(
+          makeWindow("/stream.html", `?${query}&${selected}`),
+        ),
+      ).toThrow();
+    for (const path of ["/play", "/"])
+      expect(() =>
+        resolveRootedFlowerCandidate(makeWindow(path, `?${fine}&${selected}`)),
+      ).toThrow();
+    const embedded = makeWindow("/stream.html", `?${fine}&${selected}`);
+    Object.assign(embedded, { __HYPERIA_EMBEDDED__: true });
+    expect(() => resolveRootedFlowerCandidate(embedded)).toThrow(
+      "non-embedded",
+    );
+  });
+});
 
 describe("explicit connected tree wind selection", () => {
   it("keeps all existing routes and profiles unchanged when omitted", () => {
@@ -2267,7 +2377,7 @@ describe("explicit single-cell grass coverage URL policy (not native startup pro
       /if \(this\.compactGrassColorGrade === undefined\) \{[\s\S]*const coverageTrial = resolveGrassCoverageTrial\(\);/u,
     );
     expect(capture).toMatch(
-      /this\.grassVisualSelection = Object\.freeze\(\{\s*appearance,\s*profile,\s*coverageTrial,\s*\.\.\.\(roadClearance \? \{ roadClearance \} : \{\}\),\s*\.\.\.\(lighting \? \{ lighting \} : \{\}\),\s*\.\.\.\(palette \? \{ palette \} : \{\}\),\s*\.\.\.\(groundingExecution \? \{ groundingExecution \} : \{\}\),?\s*\}\)/u,
+      /this\.grassVisualSelection = Object\.freeze\(\{\s*appearance,\s*profile,\s*coverageTrial,\s*\.\.\.\(roadClearance \? \{ roadClearance \} : \{\}\),\s*\.\.\.\(lighting \? \{ lighting \} : \{\}\),\s*\.\.\.\(palette \? \{ palette \} : \{\}\),\s*\.\.\.\(groundingExecution \? \{ groundingExecution \} : \{\}\),\s*\.\.\.\(flowers \? \{ flowers \} : \{\}\),?\s*\}\)/u,
     );
     expect(source).toMatch(
       /grassSelection\.profile\?\.grassProfile === "fine-meadow-v1"\s*\? grassSelection\.coverageTrial \|\| grassSelection\.roadClearance\s*\? \{\s*\.\.\.FINE_MEADOW_GRASS_VISUAL_PROFILE,\s*\.\.\.\(grassSelection\.coverageTrial\s*\? \{ coverageTrial: grassSelection\.coverageTrial \}\s*: \{\}\),\s*\.\.\.\(grassSelection\.roadClearance\s*\? \{ roadClearance: grassSelection\.roadClearance \}\s*: \{\}\),?\s*\}\s*: FINE_MEADOW_GRASS_VISUAL_PROFILE/u,

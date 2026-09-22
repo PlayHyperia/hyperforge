@@ -14,18 +14,19 @@ import {
   createRootedFlowerMaterial,
   getRootedFlowerWindBounds,
   getRootedFlowerWindMaxDisplacement,
+  type RootedFlowerFadeOptions,
 } from "../RootedFlowerMaterial";
 
 // Real rooted geometry, native storage attributes and native NodeBuilder stacks.
 // These bounded CPU graph checks do not claim GPU or native visual approval.
-function fixture(height = 0.38, capacity = 2) {
+function fixture(height = 0.38, capacity = 2, fade?: RootedFlowerFadeOptions) {
   const geometry = createRootedFlowerGeometry({ height });
   const wind = {
     time: uniform(7.25),
     strength: uniform(1.3),
     direction: uniform(new THREE.Vector2(0.6, 0.8)),
   };
-  const material = createRootedFlowerMaterial(wind);
+  const material = createRootedFlowerMaterial(wind, fade);
   const mesh = createStorageInstancedMesh(geometry, material, capacity);
   mesh.count = Math.min(2, capacity);
   for (let index = 0; index < mesh.count; index++) {
@@ -59,7 +60,11 @@ function node(value: unknown): Node {
   return value;
 }
 
-function expand(root: unknown, mesh: THREE.Mesh): Node[] {
+function expand(
+  root: unknown,
+  mesh: THREE.Mesh,
+  camera: THREE.Camera = new THREE.PerspectiveCamera(50, 1, 0.1, 1000),
+): Node[] {
   let actual = node(root);
   while (Reflect.get(actual, "isVarNode"))
     actual = node(Reflect.get(actual, "node"));
@@ -70,7 +75,7 @@ function expand(root: unknown, mesh: THREE.Mesh): Node[] {
   ]);
   if (!(builder instanceof THREE.NodeBuilder))
     throw new Error("Native builder");
-  Reflect.set(builder, "camera", new THREE.PerspectiveCamera(50, 1, 0.1, 1000));
+  Reflect.set(builder, "camera", camera);
   Reflect.set(builder, "shaderStage", "vertex");
   const add: unknown = Reflect.get(builder, "addStack");
   const remove: unknown = Reflect.get(builder, "removeStack");
@@ -111,6 +116,7 @@ function graphSample(
   f: ReturnType<typeof fixture>,
   vertex: number,
   authoredOverride?: THREE.Vector3,
+  instance = 0,
 ) {
   const authored =
     authoredOverride ??
@@ -119,12 +125,12 @@ function graphSample(
       vertex,
     );
   const matrix = new THREE.Matrix4();
-  f.mesh.getMatrixAt(0, matrix);
+  f.mesh.getMatrixAt(instance, matrix);
   const initialNormal = new THREE.Vector3()
     .fromBufferAttribute(f.geometry.getAttribute("normal"), vertex)
     .applyMatrix3(new THREE.Matrix3().getNormalMatrix(matrix));
   const values = new Map<Node, number[]>([
-    [node(instanceIndex), [0]],
+    [node(instanceIndex), [instance]],
     [node(positionLocal), authored.clone().applyMatrix4(matrix).toArray()],
     [node(normalLocal), initialNormal.toArray()],
   ]);
@@ -228,6 +234,10 @@ function graphSample(
               if (method === "min") return Math.min(x, y);
               if (method === "max") return Math.max(x, y);
               if (method === "clamp") return Math.min(z, Math.max(y, x));
+              if (method === "smoothstep") {
+                const t = Math.max(0, Math.min(1, (z - x) / (y - x)));
+                return t * t * (3 - 2 * t);
+              }
               throw new Error(
                 `Unknown native arithmetic ${current.type}/${String(method)}/${String(read("op"))}`,
               );
@@ -1047,6 +1057,232 @@ describe("connected flower displacement contract", () => {
     expect(() => getRootedFlowerWindBounds(height, scale)).toThrow(
       /bounds input/,
     );
+  });
+});
+
+describe("optional owner-focused rooted flower fade", () => {
+  it("keeps the default graph unchanged and borrows one additional focus only when requested", () => {
+    const focus = uniform(new THREE.Vector2(19, -42));
+    const options: RootedFlowerFadeOptions = {
+      focus,
+      fadeStart: 24,
+      fadeEnd: 32,
+    };
+    const baseline = fixture();
+    const faded = fixture(0.38, 2, options);
+    try {
+      const originalGraph = [
+        ...nodes(expand(baseline.material.positionNode, baseline.mesh)),
+      ];
+      const graph = [...nodes(expand(faded.material.positionNode, faded.mesh))];
+      expect(
+        originalGraph.some(
+          (item) => Reflect.get(item, "method") === "smoothstep",
+        ),
+      ).toBe(false);
+      expect(
+        graph.filter((item) => Reflect.get(item, "method") === "smoothstep"),
+      ).toHaveLength(1);
+      const uniforms = graph.filter(
+        (item) =>
+          Reflect.get(item, "isUniformNode") &&
+          !Reflect.get(item, "isStorageBufferNode"),
+      );
+      expect(new Set(uniforms)).toEqual(
+        new Set([...Object.values(faded.wind), focus]),
+      );
+      expect(
+        graph.filter((item) => Reflect.get(item, "isStorageBufferNode")),
+      ).toHaveLength(1);
+      expect(graph.some((item) => Reflect.get(item, "isTextureNode"))).toBe(
+        false,
+      );
+      expect(faded.material).toMatchObject({
+        transparent: false,
+        opacity: 1,
+        opacityNode: null,
+        alphaTest: 0,
+        alphaToCoverage: false,
+        normalNode: null,
+        castShadowPositionNode: null,
+        roughness: baseline.material.roughness,
+        depthWrite: baseline.material.depthWrite,
+      });
+      // Capture the borrowed node itself, not a mutable caller options object.
+      Reflect.set(options, "focus", uniform(new THREE.Vector2(1000, 1000)));
+      Reflect.set(options, "fadeStart", 0);
+      expect([
+        ...nodes(expand(faded.material.positionNode, faded.mesh)),
+      ]).toContain(focus);
+      faded.material.dispose();
+      expect(focus.value.toArray()).toEqual([19, -42]);
+      expect(faded.mesh.instanceMatrix).toBe(
+        faded.geometry.getAttribute(INSTANCE_MATRIX_STORAGE_ATTRIBUTE),
+      );
+    } finally {
+      baseline.dispose();
+      faded.dispose();
+    }
+  });
+
+  it("shrinks the complete wind-deformed geometry uniformly about each root at the fixed endpoints", () => {
+    const focus = uniform(new THREE.Vector2());
+    const baseline = fixture();
+    const faded = fixture(0.38, 2, { focus, fadeStart: 24, fadeEnd: 32 });
+    try {
+      const originalGraph = expand(
+        baseline.material.positionNode,
+        baseline.mesh,
+      );
+      const graph = expand(faded.material.positionNode, faded.mesh);
+      const count = faded.geometry.getAttribute("position").count;
+      for (const instance of [0, 1]) {
+        const matrix = new THREE.Matrix4();
+        faded.mesh.getMatrixAt(instance, matrix);
+        const root = new THREE.Vector3().setFromMatrixPosition(matrix);
+        const scale = new THREE.Vector3()
+          .setFromMatrixColumn(matrix, 1)
+          .length();
+        const height = faded.geometry.getAttribute("flowerHeight").getY(0);
+        const windBounds = getRootedFlowerWindBounds(height, scale);
+        const box = faded.geometry.boundingBox
+          ?.clone()
+          .applyMatrix4(matrix)
+          .expandByVector(
+            new THREE.Vector3(windBounds.x, windBounds.y, windBounds.z),
+          );
+        const sphere = faded.geometry.boundingSphere
+          ?.clone()
+          .applyMatrix4(matrix);
+        if (!box || !sphere) throw new Error("Actual flower bounds missing");
+        sphere.radius += windBounds.sphere;
+        expect(box.containsPoint(root)).toBe(true);
+        expect(sphere.containsPoint(root)).toBe(true);
+        for (const [distance, retained] of [
+          [0, 1],
+          [24, 1],
+          [26, 0.84375],
+          [28, 0.5],
+          [30, 0.15625],
+          [32, 0],
+          [40, 0],
+        ]) {
+          // Non-axis-aligned focus proves the world-XZ radial distance.
+          focus.value.set(root.x + distance * 0.6, root.z + distance * 0.8);
+          for (let vertex = 0; vertex < count; vertex++) {
+            const full = graphSample(
+              originalGraph,
+              baseline,
+              vertex,
+              undefined,
+              instance,
+            );
+            const actual = graphSample(
+              graph,
+              faded,
+              vertex,
+              undefined,
+              instance,
+            );
+            const expected = full.position
+              .clone()
+              .sub(root)
+              .multiplyScalar(retained)
+              .add(root);
+            expect(actual.position.distanceTo(expected)).toBeLessThan(1e-12);
+            expect(actual.normal.toArray()).toEqual(full.normal.toArray());
+            expect(actual.normal.length()).toBeCloseTo(1, 12);
+            expect(box.containsPoint(actual.position)).toBe(true);
+            expect(sphere.containsPoint(actual.position)).toBe(true);
+            if (retained === 0)
+              expect(actual.position.toArray()).toEqual(root.toArray());
+          }
+          // Exact root anchor, not a promise that the stem ring keeps its width.
+          const anchor = graphSample(
+            graph,
+            faded,
+            0,
+            new THREE.Vector3(),
+            instance,
+          );
+          expect(anchor.position.toArray()).toEqual(root.toArray());
+        }
+      }
+    } finally {
+      baseline.dispose();
+      faded.dispose();
+    }
+  });
+
+  it("uses identical vertex fade for primary and shadow cameras and observes live owner focus", () => {
+    const focus = uniform(new THREE.Vector2(19 + 28, -42));
+    const f = fixture(0.38, 2, { focus, fadeStart: 24, fadeEnd: 32 });
+    const main = new THREE.PerspectiveCamera(52, 16 / 9, 0.1, 1000);
+    main.position.set(19, 5, -38);
+    main.updateMatrixWorld();
+    const shadow = new THREE.OrthographicCamera(-120, 120, 120, -120, 0.1, 600);
+    shadow.position.set(-200, 400, 500);
+    shadow.updateMatrixWorld();
+    try {
+      const mainGraph = expand(f.material.positionNode, f.mesh, main);
+      const shadowGraph = expand(f.material.positionNode, f.mesh, shadow);
+      for (const distance of [0, 28, 32]) {
+        focus.value.set(19 + distance, -42);
+        for (const vertex of [0, 81, 82, 106, 211, 361]) {
+          const a = graphSample(mainGraph, f, vertex);
+          const b = graphSample(shadowGraph, f, vertex);
+          expect(a.position.toArray()).toEqual(b.position.toArray());
+          expect(a.normal.toArray()).toEqual(b.normal.toArray());
+          if (distance === 32)
+            expect(a.position.toArray()).toEqual([19, 3, -42]);
+          else
+            expect(
+              a.position.distanceTo(new THREE.Vector3(19, 3, -42)),
+            ).toBeGreaterThan(0);
+        }
+      }
+    } finally {
+      f.dispose();
+    }
+  });
+
+  it("rejects malformed fade options and non-vec2 native nodes before graph use", () => {
+    const f = fixture();
+    const focus = uniform(new THREE.Vector2());
+    try {
+      for (const invalid of [
+        null,
+        {},
+        { focus },
+        { focus, fadeStart: 0, fadeEnd: 32 },
+        { focus, fadeStart: 24, fadeEnd: 33 },
+        { focus: new THREE.Vector2(), fadeStart: 24, fadeEnd: 32 },
+      ])
+        expect(() =>
+          Reflect.apply(createRootedFlowerMaterial, undefined, [
+            f.wind,
+            invalid,
+          ]),
+        ).toThrow(/fade/);
+      for (const invalidFocus of [uniform(1), uniform(new THREE.Vector3())]) {
+        const material: unknown = Reflect.apply(
+          createRootedFlowerMaterial,
+          undefined,
+          [f.wind, { focus: invalidFocus, fadeStart: 24, fadeEnd: 32 }],
+        );
+        if (!(material instanceof THREE.MeshStandardNodeMaterial))
+          throw new Error("Actual node material required");
+        try {
+          expect(() => expand(material.positionNode, f.mesh)).toThrow(
+            "fade focus must be vec2",
+          );
+        } finally {
+          material.dispose();
+        }
+      }
+    } finally {
+      f.dispose();
+    }
   });
 });
 

@@ -180,6 +180,7 @@ import {
   type VisualManagerTerrainProvider,
 } from "./TerrainVisualManager";
 import { WaterVisualManager } from "./WaterVisualManager";
+import { RootedFlowerVisualManager } from "./RootedFlowerVisualManager";
 import {
   GrassVisualManager,
   COMPACT_ISLAND_GRASS_VISUAL_PROFILE,
@@ -208,6 +209,7 @@ import {
   resolveGrassCoverageTrial,
   resolveGrassRoadClearance,
   resolveGrassGroundingExecution,
+  resolveRootedFlowerCandidate,
   resolveHabitatCompositionCandidate,
   type GrassSurfaceEligibility,
 } from "../../../runtime/clientViewportMode";
@@ -459,11 +461,13 @@ export class TerrainSystem extends System {
         lighting?: ReturnType<typeof resolveGrassLightingCandidate>;
         palette?: ReturnType<typeof resolveGrassPaletteCandidate>;
         groundingExecution?: ReturnType<typeof resolveGrassGroundingExecution>;
+        flowers?: ReturnType<typeof resolveRootedFlowerCandidate>;
       }>
     | undefined;
   private compactPlantingMaterial:
     readonly CompactTerrainPlantingLobe[] | undefined;
   private grassVisualManager: GrassVisualManager | null = null;
+  private rootedFlowerVisualManager: RootedFlowerVisualManager | null = null;
 
   // Unified terrain generator from @hyperforge/procgen
   // Provides deterministic height/biome calculation independent of rendering
@@ -874,6 +878,7 @@ export class TerrainSystem extends System {
       const lighting = resolveGrassLightingCandidate();
       const palette = resolveGrassPaletteCandidate();
       const groundingExecution = resolveGrassGroundingExecution();
+      const flowers = resolveRootedFlowerCandidate();
       const fine = appearance === "fine-meadow-v1";
       if (
         fine !== (profile?.grassProfile === "fine-meadow-v1") ||
@@ -888,6 +893,7 @@ export class TerrainSystem extends System {
         ...(lighting ? { lighting } : {}),
         ...(palette ? { palette } : {}),
         ...(groundingExecution ? { groundingExecution } : {}),
+        ...(flowers ? { flowers } : {}),
       });
       this.compactGrassColorGrade = fine
         ? compactTerrainColorOperations.getGrassColorGrade(
@@ -3006,6 +3012,30 @@ export class TerrainSystem extends System {
           : undefined,
       );
 
+      if (grassSelection.flowers) {
+        if (!grassWorkerSetup.prepareGroundingInputs)
+          throw new Error(
+            "Rooted flowers require retained terrain input leases",
+          );
+        this.rootedFlowerVisualManager = new RootedFlowerVisualManager({
+          world: this.world,
+          parent: containerParent,
+          seed: this.computeSeedFromWorldId(),
+          oceanLevel: this.CONFIG.WATER_THRESHOLD,
+          captureRegion: (bounds, maximumSurfaces) =>
+            this.quadTreeVisualManager!.captureRetainedSurfaceRegion(
+              bounds,
+              maximumSurfaces,
+            ),
+          // Every flower job gets a NEW input iterator. Grass keeps exclusive
+          // ownership of its own generator, scheduling allowance and RNG.
+          prepareInputs: (bounds) =>
+            grassWorkerSetup.prepareGroundingInputs!(bounds),
+          grassPlacement: (x, z) =>
+            this.getTerrainColorAt(x, z, true, "compact-pbr-v1").grassPlacement,
+        });
+      }
+
       // Wire terrain, water, grass managers to the same quad-tree via composite
       const composite = new CompositeQuadTreeListener();
       composite.add(this.quadTreeVisualManager);
@@ -3034,10 +3064,12 @@ export class TerrainSystem extends System {
       console.error("[TerrainSystem] Failed to refresh road influence", error);
     });
     this.grassVisualManager?.rebuildAllChunks();
+    this.rootedFlowerVisualManager?.invalidate();
   };
 
   private readonly onRoadMaskReady = (): void => {
     if (this.destroyed || !this.runtimeIsClient) return;
+    this.rootedFlowerVisualManager?.invalidate();
     // Read the registered producer rather than trusting an unrelated event payload.
     const roads = this.world.getSystem("roads") as
       RoadNetworkSystem | undefined;
@@ -7270,6 +7302,7 @@ export class TerrainSystem extends System {
         if (this.grassVisualManager) {
           this.grassVisualManager.update(pos.x, pos.z, this.world.camera);
         }
+        this.rootedFlowerVisualManager?.update(pos.x, pos.z);
       }
     }
 
@@ -9013,6 +9046,8 @@ export class TerrainSystem extends System {
     clearRoadInfluenceTexture(this);
     this.compactPondDressing?.destroy();
     this.compactPondDressing = null;
+    this.rootedFlowerVisualManager?.destroy();
+    this.rootedFlowerVisualManager = null;
     // Dispose quad-tree visual manager
     if (this.quadTreeVisualManager) {
       this.quadTreeVisualManager.dispose();
@@ -9741,6 +9776,7 @@ export class TerrainSystem extends System {
     waterTopology: ReturnType<
       WaterVisualManager["getConformingReadiness"]
     > | null;
+    flowers?: ReturnType<RootedFlowerVisualManager["getReceipt"]>;
   } {
     const terrain =
       this.quadTreeVisualManager?.getStreamingReadiness(criticalRadius) ?? null;
@@ -9754,12 +9790,14 @@ export class TerrainSystem extends System {
     const water = this.waterSystem?.getCoastalBathymetryReadiness() ?? null;
     const waterTopology =
       this.waterVisualManager?.getConformingReadiness() ?? null;
+    const flowers = this.rootedFlowerVisualManager?.getReceipt();
     return {
       ready: Boolean(
         terrain?.ready &&
         (!this.grassVisualManager || grass?.ready) &&
         (!water?.required || water.ready) &&
         (!waterTopology?.required || waterTopology.ready) &&
+        (!flowers || flowers.ready) &&
         (!this.compactPondDressing ||
           this.compactPondDressing.getReceipt().ready),
       ),
@@ -9767,6 +9805,7 @@ export class TerrainSystem extends System {
       grass,
       water,
       waterTopology,
+      ...(flowers ? { flowers } : {}),
     };
   }
 
@@ -9778,9 +9817,14 @@ export class TerrainSystem extends System {
     return this.grassVisualManager?.getProfileReceipt() ?? null;
   }
 
+  public getRootedFlowerReceipt() {
+    return this.rootedFlowerVisualManager?.getReceipt() ?? null;
+  }
+
   /** Primary render pose only; grass generation remains in the update budget. */
   public prepareGrassForRender(camera: THREE.Camera): void {
     this.grassVisualManager?.capturePrimaryView(camera);
+    this.rootedFlowerVisualManager?.prepareForRender(camera);
   }
 
   public getTileSize(): number {

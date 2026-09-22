@@ -134,6 +134,26 @@ export type SkyAtmosphereMode = "gradient-v1" | "scattering-v1";
 export type GrassAppearanceCandidate = "natural-tuft-v1" | "fine-meadow-v1";
 export type GrassLightingCandidate = "canopy-normal-v1" | "leaf-volume-v1";
 export type GrassPaletteCandidate = "regional-v1";
+export type RootedFlowerCandidate = "rooted-v1";
+
+/** Explicit rooted-flower population; omission never enables this owner. */
+export function resolveRootedFlowerCandidate(
+  win?: Window,
+): RootedFlowerCandidate | undefined {
+  const windowRef = getWindowRef(win);
+  if (!windowRef) return undefined;
+  const params = getSearchParams(windowRef);
+  const values = params?.getAll("flowers") ?? [];
+  if (!values.length) return undefined;
+  if (values.length !== 1 || values[0] !== "rooted-v1")
+    throw new Error("Unknown or duplicate rooted flower candidate");
+  if (
+    resolveGrassAppearanceCandidate(windowRef) !== "fine-meadow-v1" ||
+    params?.get("streamRenderProfile") !== "island-fine-meadow-720p60-v1"
+  )
+    throw new Error("Rooted flowers require the explicit fine meadow pair");
+  return "rooted-v1";
+}
 
 /** Explicit tree motion qualification; omission keeps the existing renderer.
  * Resolve once during world creation, never per frame or from material cache. */

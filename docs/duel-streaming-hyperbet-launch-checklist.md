@@ -1,5 +1,63 @@
 # Duel Arena, Streaming, and Hyperbet Launch Checklist
 
+## 2026-09-22 checkpoint — opt-in rooted flower placement and ownership
+
+- [x] Add an explicit `flowers=rooted-v1` candidate, admitted only with the
+  fine-meadow appearance/profile pair. Omission preserves the existing world;
+  no grass placement, RNG, geometry, worker allowance or default is changed.
+- [x] Wire one exclusive 512-slot storage pool into TerrainSystem. Deterministic
+  8 m cells produce at most 484 candidates around the primary view, with sparse
+  patch eligibility and separate bounded work. Roots sample actual retained
+  triangles, never procedural height. Shared-border owners must agree at the
+  stored Float32 height; cracks/overlaps/missing terrain cannot report ready.
+- [x] Require full swept horizontal clearance from roads, pads, exclusions,
+  water, and live tree/ore approach reservations. Region-scoped resource
+  snapshots keep depleted/regrowing clearance stable and ignore unrelated
+  far-away edits, but detect entrants and same-ID owner replacements.
+- [x] Retire stale publication before the main render; cancel old input iterators;
+  re-ground after terrain/water changes; retain only per-world wind uniforms;
+  recompute and expand instance bounds. Camera cuts cannot report readiness for
+  an old cell. Primary-focus 24–32 m shrink is root-preserving and shared by the
+  main/shadow graph; no transparency, separate shadow-camera fade or matrix churn.
+- [x] Serialized source regression `rooted-flower-placement-source03` passes
+  **829/829 tests in 15 suites**. Includes real generated terrain/World/resource
+  objects, independent ray intersections, cancellation, ownership, terrain
+  arrival, resource changes, graph deformation and existing grass/tree behavior.
+  These CPU checks are not a native game, visual or performance acceptance.
+- [x] Full no-emit shared/explicit type check: 750 roots / 2,456 source files,
+  zero diagnostics, stable pins (`living-world-foundations-types05`).
+  Scoped 11-file lint/format and independent lifecycle/bounds review pass.
+- [x] Native Apple/Metal WebGPU `rooted-flower-native07` passes nine matched
+  768² captures: near/partial flowers and receiver shadows remain visible; far
+  casting and noncasting frames match the empty background byte-for-byte.
+  Both passes bind the same owned primary-focus node and retain two read-only
+  matrix declarations sharing one allocation. Seven flower buffers retire once;
+  zero GPU/cleanup errors and stable source pins. This isolated shader check is
+  NOT native owner/island integration, performance or art acceptance.
+- [x] Retain failed native06: its expected camera projection was captured before
+  WebGPU initialization, although all nine rendered camera receipts agreed.
+  The fixture now initializes both owned cameras' WebGPU projection before the
+  unchanged exact comparison. No production shader, budget or shadow setting
+  was changed to obtain native07. Source01's two fixture failures also remain.
+- [x] Stop private preview06 and close owned Chrome/HTTP resources. Protected
+  145 compiled artifacts and retained lock are unchanged; localhost3333 HTTP200.
+  No game/DB restart, canonical build, dependency install or default promotion.
+- [ ] Qualify the actual island owner in a fresh isolated source-bound build,
+  including resource density, startup, moving-camera handoff and all steady-frame
+  costs. The 1 ms generation slice is soft and records overruns; it does NOT cover
+  synchronous resource/terrain validation or promise a total 1 ms owner cost.
+  Full resource rescans remain allocation-heavy and require measurement.
+  Root centers are fitted; upright root rings are not individually slope-fitted.
+- [ ] Resolve the previously observed petal self-shadow striping; review flowers
+  at real meadow scale and improve art if needed. Falling leaves, native grass
+  scalar-optimization verification, native110 startup failure, sustained
+  performance and the requested 2× cinematic remain open. No AAA/default approval.
+
+Implementation follows the [official WebGPU instancing example](https://threejs.org/examples/webgpu_instance_mesh.html)
+and [explicit instance-bound/update responsibilities](https://threejs.org/docs/pages/InstancedMesh.html).
+The [r186 renderer's shared shadow-position contract](https://raw.githubusercontent.com/mrdoob/three.js/r186/src/renderers/common/Renderer.js)
+is used instead of updating visibility from a shadow camera.
+
 ## 2026-09-22 checkpoint — bounded petal flutter and live resource clearance
 
 - [x] Rooted flower shader composes a small quadratic petal shear before stem

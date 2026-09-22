@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
+import THREE from "../../../../extras/three/three";
 import { World } from "../../../../core/World";
 import { ResourceEntity } from "../../../../entities/world/ResourceEntity";
 import { EntityType, ResourceType } from "../../../../types/entities";
@@ -11,6 +12,7 @@ import {
   FLOWER_RESOURCE_CLEARANCE_LIMITS,
   captureFlowerResourceClearance,
 } from "../FlowerResourceClearance";
+import type { TerrainGridBounds } from "../TerrainGridSurface";
 
 // Real client World/Entities/ResourceEntity construction. No renderer, transport,
 // asset loader or terrain job is started, and no production methods are replaced.
@@ -335,4 +337,236 @@ describe("bounded live flower resource clearance", () => {
       });
     }
   }
+});
+
+describe("region-scoped live flower resource reservations", () => {
+  const bounds: Readonly<TerrainGridBounds> = Object.freeze({
+    minX: 0,
+    maxX: 10,
+    minZ: 0,
+    maxZ: 10,
+  });
+
+  it("retains intersecting circle envelopes even when resource positions and circle centers are outside", () => {
+    const world = createWorld();
+    addResource(world, "near", { x: 5.25, z: 5.25, footprint: "standard" });
+    addResource(world, "crossing", {
+      x: 11.25,
+      z: 5.25,
+      footprint: "standard",
+    });
+    addResource(world, "corner", { x: 11.25, z: 11.25, footprint: "standard" });
+    addResource(world, "outside", {
+      x: 12.25,
+      z: 12.25,
+      footprint: "standard",
+    });
+    const snapshot = captureFlowerResourceClearance(
+      world,
+      { maxObstacles: 3 },
+      bounds,
+    );
+    expect(snapshot.rows.map((row) => row.id)).toEqual([
+      "corner",
+      "crossing",
+      "near",
+    ]);
+    expect(snapshot.rows[0].center).toEqual({ x: 11.5, z: 11.5 });
+    expect(snapshot.accepts({ x: 10, z: 10 }, 0)).toBe(false);
+    expect(snapshot.accepts({ x: 10, z: 5.5 }, 0)).toBe(false);
+    expect(snapshot.receipt.scannedEntities).toBe(4);
+    expect(snapshot.receipt.obstacleCount).toBe(3);
+    expect(snapshot.receipt.region).toEqual(bounds);
+    expect(snapshot.isCurrent()).toBe(true);
+    expect(() =>
+      captureFlowerResourceClearance(world, { maxObstacles: 3 }),
+    ).toThrow(/obstacle cap/);
+  });
+
+  it("ignores distant additions/removal but detects new nearby actors and far actors relocating into the region", () => {
+    const world = createWorld();
+    const near = addResource(world, "near", { x: 5.25, z: 5.25 });
+    const far = addResource(world, "far", { x: 50.25, z: 50.25 });
+    const snapshot = captureFlowerResourceClearance(world, {}, bounds);
+    const distantAddition = addResource(world, "distant-addition", {
+      x: 100,
+      z: 100,
+    });
+    expect(snapshot.isCurrent()).toBe(true);
+    world.entities.remove(distantAddition.id);
+    expect(snapshot.isCurrent()).toBe(true);
+    const nearAddition = addResource(world, "near-addition", {
+      x: 8.25,
+      z: 8.25,
+    });
+    expect(snapshot.isCurrent()).toBe(false);
+    world.entities.remove(nearAddition.id);
+    expect(snapshot.isCurrent()).toBe(true);
+    far.position.set(8.25, 3, 8.25);
+    expect(snapshot.isCurrent()).toBe(false);
+    far.position.set(50.25, 3, 50.25);
+    expect(snapshot.isCurrent()).toBe(true);
+    near.position.set(50, 3, 50);
+    expect(snapshot.isCurrent()).toBe(false);
+    near.position.set(5.25, 3, 5.25);
+    expect(snapshot.isCurrent()).toBe(true);
+    world.entities.remove(near.id);
+    expect(snapshot.isCurrent()).toBe(false);
+  });
+
+  it("preserves same-ID entity and actual node ownership for retained actors", () => {
+    const world = createWorld();
+    const near = addResource(world, "near", { x: 5.25, z: 5.25 });
+    addResource(world, "far", { x: 50.25, z: 50.25 });
+    const snapshot = captureFlowerResourceClearance(world, {}, bounds);
+    addResource(world, "far", { x: 50.25, z: 50.25 });
+    expect(snapshot.isCurrent()).toBe(true);
+    const originalNode = near.node;
+    near.node = new THREE.Object3D();
+    near.node.position.copy(originalNode.position);
+    near.node.quaternion.copy(originalNode.quaternion);
+    near.node.scale.copy(originalNode.scale);
+    expect(near.node.position.toArray()).toEqual(
+      originalNode.position.toArray(),
+    );
+    expect(snapshot.isCurrent()).toBe(false);
+    near.node = originalNode;
+    expect(snapshot.isCurrent()).toBe(true);
+    const replacement = addResource(world, "near", { x: 5.25, z: 5.25 });
+    expect(replacement.position.toArray()).toEqual(near.position.toArray());
+    expect(snapshot.isCurrent()).toBe(false);
+  });
+
+  it("keeps geometric regrowth reservations current across depletion while retaining at-capture audit state", () => {
+    const world = createWorld();
+    const near = addResource(world, "near", {
+      x: 5.25,
+      z: 5.25,
+      depleted: true,
+    });
+    const far = addResource(world, "far", { x: 50.25, z: 50.25 });
+    const scoped = captureFlowerResourceClearance(world, {}, bounds);
+    const unscoped = captureFlowerResourceClearance(world);
+    near.config.depleted = false;
+    far.config.depleted = true;
+    expect(scoped.isCurrent()).toBe(true);
+    expect(unscoped.isCurrent()).toBe(false);
+    expect(scoped.rows[0].depleted).toBe(true);
+    expect(scoped.accepts(near.position, 0)).toBe(false);
+    expect(
+      captureFlowerResourceClearance(world, {}, bounds).rows[0].depleted,
+    ).toBe(false);
+    near.config.depleted = true;
+    expect(scoped.isCurrent()).toBe(true);
+    Object.defineProperty(far.config, "depleted", {
+      value: "invalid",
+      configurable: true,
+    });
+    expect(scoped.isCurrent()).toBe(false);
+    expect(() => captureFlowerResourceClearance(world, {}, bounds)).toThrow(
+      /position\/state/,
+    );
+  });
+
+  it("still invalidates clearance-relevant type, position and footprint changes", () => {
+    const world = createWorld();
+    const near = addResource(world, "near", {
+      x: 5.25,
+      z: 5.25,
+      footprint: "standard",
+    });
+    const snapshot = captureFlowerResourceClearance(world, {}, bounds);
+    near.config.resourceType = ResourceType.MINING_ROCK;
+    expect(snapshot.isCurrent()).toBe(false);
+    near.config.resourceType = ResourceType.TREE;
+    expect(snapshot.isCurrent()).toBe(true);
+    near.config.footprint = "large";
+    expect(snapshot.isCurrent()).toBe(false);
+    near.config.footprint = "standard";
+    near.position.y += 0.1;
+    expect(snapshot.isCurrent()).toBe(false);
+  });
+
+  it("captures a detached frozen region and rejects candidate reach beyond it", () => {
+    const world = createWorld();
+    addResource(world, "just-outside", {
+      x: 13.25,
+      z: 5.25,
+      footprint: "standard",
+    });
+    const requested = { ...bounds };
+    const snapshot = captureFlowerResourceClearance(world, {}, requested);
+    expect(snapshot.rows).toEqual([]);
+    expect(snapshot.receipt.region).not.toBe(requested);
+    expect(Object.isFrozen(snapshot.receipt.region)).toBe(true);
+    requested.maxX = 100;
+    expect(snapshot.receipt.region).toEqual(bounds);
+    expect(snapshot.isCurrent()).toBe(true);
+    expect(snapshot.accepts({ x: 9, z: 5 }, 1)).toBe(true);
+    // This omitted obstacle could intersect a flower extending outside capture.
+    expect(snapshot.accepts({ x: 9, z: 5 }, 3)).toBe(false);
+    expect(snapshot.accepts({ x: -0.01, z: 5 }, 0)).toBe(false);
+    expect(snapshot.accepts({ x: 5, z: 5 }, 5)).toBe(true);
+    expect(snapshot.accepts({ x: 5, z: 5 }, 5.001)).toBe(false);
+    expect(captureFlowerResourceClearance(world).receipt).not.toHaveProperty(
+      "region",
+    );
+  });
+
+  it("caps all scanned actors but only relevant obstacles without returning a partial snapshot", () => {
+    const world = createWorld();
+    addResource(world, "near", { x: 5.25, z: 5.25 });
+    const far = addResource(world, "far", { x: 50.25, z: 50.25 });
+    addResource(world, "farther", { x: 100, z: 100 });
+    const limits = { maxScannedEntities: 3, maxObstacles: 1 };
+    const snapshot = captureFlowerResourceClearance(world, limits, bounds);
+    expect(snapshot.receipt.scannedEntities).toBe(3);
+    expect(snapshot.receipt.obstacleCount).toBe(1);
+    const extra = addResource(world, "extra-distant", { x: 200, z: 200 });
+    expect(snapshot.isCurrent()).toBe(false);
+    expect(() => captureFlowerResourceClearance(world, limits, bounds)).toThrow(
+      /scanned-entity cap/,
+    );
+    world.entities.remove(extra.id);
+    expect(snapshot.isCurrent()).toBe(true);
+    far.position.set(8.25, 3, 8.25);
+    expect(snapshot.isCurrent()).toBe(false);
+    expect(() => captureFlowerResourceClearance(world, limits, bounds)).toThrow(
+      /obstacle cap/,
+    );
+  });
+
+  it("rejects malformed, nonfinite, reversed and accessor regions without invoking getters", () => {
+    const world = createWorld();
+    for (const invalid of [
+      null,
+      {},
+      { ...bounds, minX: NaN },
+      { ...bounds, maxX: Infinity },
+      { ...bounds, minZ: -Infinity },
+      { ...bounds, maxZ: NaN },
+      { ...bounds, minX: 11 },
+      { ...bounds, minZ: 11 },
+      { ...bounds, minX: -Number.MAX_VALUE, maxX: Number.MAX_VALUE },
+    ])
+      expect(() =>
+        Reflect.apply(captureFlowerResourceClearance, undefined, [
+          world,
+          {},
+          invalid,
+        ]),
+      ).toThrow(/region/);
+    let reads = 0;
+    const accessor = { ...bounds };
+    Object.defineProperty(accessor, "maxX", {
+      get() {
+        reads++;
+        return 10;
+      },
+    });
+    expect(() => captureFlowerResourceClearance(world, {}, accessor)).toThrow(
+      /region/,
+    );
+    expect(reads).toBe(0);
+  });
 });

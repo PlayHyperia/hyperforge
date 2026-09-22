@@ -8,9 +8,11 @@ import {
   normalLocal,
   positionLocal,
   sin,
+  smoothstep,
   vec2,
   vec3,
 } from "three/tsl";
+import type { Node } from "three/webgpu";
 import { INSTANCE_MATRIX_STORAGE_ATTRIBUTE } from "../../../utils/rendering/createStorageInstancedMesh";
 import {
   TREE_WIND_MAX_DISPLACEMENT,
@@ -31,6 +33,14 @@ export const ROOTED_FLOWER_WIND_MAX_DISPLACEMENT = Math.hypot(
 const MIN_HEIGHT = Math.fround(0.12);
 const MAX_HEIGHT = Math.fround(0.8);
 const IDENTITY = new THREE.Matrix4();
+
+/** The owner updates this borrowed world-XZ focus from the primary view only.
+ * Fixed distances keep publication/culling independent of shadow cameras. */
+export type RootedFlowerFadeOptions = Readonly<{
+  focus: Node<"vec2">;
+  fadeStart: 24;
+  fadeEnd: 32;
+}>;
 
 function validHeight(height: number): boolean {
   // The authored endpoints are stored in Float32 flowerHeight attributes.
@@ -292,6 +302,7 @@ export function assertRootedFlowerPool(
  * Native standard lighting/fog/shadows remain in charge of surface shading. */
 export function createRootedFlowerMaterial(
   wind: TreeWindInputs,
+  fade?: RootedFlowerFadeOptions,
 ): THREE.MeshStandardNodeMaterial {
   if (
     !(wind?.time instanceof THREE.Node) ||
@@ -300,6 +311,17 @@ export function createRootedFlowerMaterial(
   ) {
     throw new Error("Rooted flowers require borrowed per-world wind nodes");
   }
+  if (
+    fade !== undefined &&
+    (!(fade?.focus instanceof THREE.Node) ||
+      fade.fadeStart !== 24 ||
+      fade.fadeEnd !== 32)
+  ) {
+    throw new Error(
+      "Rooted flower fade requires a focus node and fixed 24/32 bounds",
+    );
+  }
+  const borrowedFocus = fade?.focus;
   const borrowedWind: TreeWindInputs = {
     time: wind.time,
     strength: wind.strength,
@@ -318,6 +340,8 @@ export function createRootedFlowerMaterial(
   });
   material.positionNode = Fn((builder) => {
     assertRootedFlowerPool(builder.object);
+    if (borrowedFocus && borrowedFocus.getNodeType(builder) !== "vec2")
+      throw new Error("Rooted flower fade focus must be vec2");
     const frame = createTreeWindFrameNodes(builder.object);
     const height = attribute("flowerHeight", "vec2");
     const petal = attribute("flowerPetal", "vec4");
@@ -382,7 +406,17 @@ export function createRootedFlowerMaterial(
       ).normalize(),
     );
     const displacement = bend.displacement.toVar();
-    return positionLocal.add(vec3(displacement.x, flutterY, displacement.y));
+    const deformed = positionLocal.add(
+      vec3(displacement.x, flutterY, displacement.y),
+    );
+    if (!borrowedFocus) return deformed;
+    // One constant per instance, after both wind stages. No camera node, alpha
+    // change or extra normal division: isotropic shrink leaves normals intact,
+    // even when the far endpoint degenerates every triangle at the root anchor.
+    const retainedScale = float(1).sub(
+      smoothstep(24, 32, frame.root.xz.sub(borrowedFocus).length()),
+    );
+    return frame.root.add(deformed.sub(frame.root).mul(retainedScale));
   })();
   return material;
 }
