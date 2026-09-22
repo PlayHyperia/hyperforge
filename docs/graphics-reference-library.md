@@ -2420,8 +2420,81 @@ but all 96 paired depth values agree exactly. Several samples across the
 visible seam change abruptly, so the next check is submitted opaque terrain/
 object geometry; the probe alone does not identify the responsible primitive.
 No water shader or material setting was changed on this evidence.
-Runtime55 is removed. Runtime56 remains isolated for the next water diagnostic;
-its disposable database is not the protected human playable database.
+Runtime55/56 and their disposable databases are removed. All owned native
+browsers are closed; the protected human playable database is unchanged.
+
+### Pond-depth attribution and new art candidates — 2026-09-21
+
+Native82 and83 both FAIL the unchanged original 90 s startup gate. Three LOD0
+grass cells reach the unchanged 250 ms active-work cap: 12_17 (250.70 ms,
+112,014 operations), 14_16 (250.90 ms, 114,690), and 13_16 (250.20 ms, 138,474).
+These failures remain launch blockers; no further qualification retry or
+increased limit is used to claim reliable startup.
+
+Native84 is a separate owner-only diagnostic: full startup and grass-cut
+qualification gates are explicitly NOT RUN. Its scene has 42 pending grass
+chunks at the diagnostic snapshot. It reads the two real pond depth textures
+and six pixel-center rays against exact uploaded ordinary opaque geometry.
+The six winning terrain hits match the ranges of the four GPU depth samples
+at each pixel. Both sides of the sampled boundary hit SURFACE triangles of the
+same 128-resolution terrain leaf, not its skirts or a coarser overlapping
+ancestor. Excluded actors and unknown MSAA sample positions remain unqualified.
+
+Actual terrain interpolation agrees with the authored height function to
+within 1.13 mm at the six sampled hits (vertices within 0.000001 m, local normal
+difference 0.16–0.66 degrees). The nearer headland slopes 41–45 degrees and
+occludes the farther 19–21-degree bed. This is a steep authored bank, not proven
+texture corruption or mesh damage. Keep water shading unchanged for the next
+terrain-only comparison.
+
+- [ ] Test a gentler southern headland: innerRadius 14.8→18.5, all other sector/
+  material settings unchanged. Scalar prediction is 45.44→29.84-degree peak
+  slope and 2.46 m receding waterline, NOT a finished visual fix. Requalify
+  actual geometry, bank/grass continuity, all fishing approaches, dock/guide
+  clearances and held native views before any promotion.
+- [ ] Review the separate 14-plant pocket-massing candidate in game. It keeps
+  28 pond +24 service instances, six models, seven rocks, NW drift and every
+  model/scale/yaw/order. Selected-basin CPU access checks and 14/14 historical
+  dressing tests pass: 14 actual fishing spots retain at least three canopy-clear
+  dry approach tiles, with existing dock/guide/path/root-footprint clearances.
+  These candidate edits are not yet visually accepted or committed.
+- [x] Add a replay for failed cell 12_17 with actual retained owner resolutions:
+  pond 128 and western neighbor 64, not an incorrect all-128 workload.
+  Current-source CPU replay retains 1,209 clumps, zero rejections and exact
+  output/provenance hashes. Worker active time is 96.67 ms; publication-inclusive
+  handoff is 101.30 ms. This is NOT reproduction of native startup timing.
+- [ ] Optimize only after profiling the three failed cells. The exact swept
+  envelope also controls rejection and output bounds; do not replace it with
+  a looser envelope. Investigate repeated geometry arithmetic and output
+  packing allocations while preserving output, work accounting and limits.
+
+A combined private-fixture run completed all nine enabled grass cases, but
+four historical small-pond dressing cases rejected the incompatible inland
+pond dimensions. That failed invocation is retained; historical dressing and
+selected inland access use separate, correctly configured runs. No production
+admission is widened to make historical fixtures accept different geometry.
+
+The correctly scoped standalone grass replay subsequently records 8 passes,
+1 failure and 3 skips: the pre-existing eastern-shelf southbank case exceeds
+its active-work budget. The new mixed-resolution case passes, but the suite
+is NOT green and startup reliability is still open. Do not rerun until green
+or raise the cap. Next measure and reduce the fitting/packing cost itself.
+Source-only shared/server typing including both follow-up tests passes:
+719 roots, 2,395 source files, zero diagnostics. The new dressing test's initial
+readonly-tuple typing errors were corrected and both correctly configured
+dressing test runs repeated; failed receipts remain retained.
+
+Native81–84 diagnostics do not establish a shader speedup, final pond art,
+reliable startup, seamless movement, full streaming or sustained performance.
+Native82/83 failures, native84's incomplete-scene scope and all source/data pins
+remain retained. All browsers and runtime56/temp database are closed; human
+localhost:3333, database, compiled outputs and unrelated work remain protected.
+Evidence: `inland-pond-integration01-UNQUALIFIED/native81–84/`,
+`pond-headland-scalar-analysis.mjs/json`;
+`service-layout-network01-UNQUALIFIED/pond-plant-massing-*`,
+`native82-mixed-grounding-baseline02-receipt.json` and
+`pond-world-followup-tests01.json`.
+World goal remains active; compact island only, one arena and SOL only.
 
 ### Inland fishing integration — candidate only
 

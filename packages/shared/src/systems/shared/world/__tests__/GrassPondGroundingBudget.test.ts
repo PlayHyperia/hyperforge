@@ -10,7 +10,11 @@ import {
   type GrassWorkerInput,
   type GrassWorkerOutput,
 } from "../../../../utils/workers/GrassWorker";
-import { TerrainSystem } from "../TerrainSystem";
+import {
+  STREAMING_TERRAIN_QUADTREE_RESOLUTION,
+  TerrainSystem,
+} from "../TerrainSystem";
+import { createCompactPreparationDetailRegions } from "../CompactIslandDetail";
 import { RoadNetworkSystem } from "../RoadNetworkSystem";
 import { ProceduralDocks } from "../ProceduralDocks";
 import { TerrainVisualManager } from "../TerrainVisualManager";
@@ -373,6 +377,34 @@ const cases = [
         "Historical remote-fitting failed prefix, not completed counts or actual CPU utilization.",
     },
   },
+  {
+    name: "native82 startup LOD0 mixed-resolution western meadow work budget",
+    test: "grounds the exact native82 western failed cell using the admitted mixed-resolution terrain policy",
+    enabled: process.env.ASSETS_DIR?.endsWith(
+      "/inland-pond-integration01-UNQUALIFIED/assets-v9",
+    ),
+    label: "NATIVE82_LOD0_WESTERN_MEADOW",
+    // Unlike the historical all-128 fixtures, this cell's swept halo crosses
+    // x300 into the western 64-grid owner. Derive both resolutions from the
+    // actual native compact detail policy; never upgrade the neighbour here.
+    nodes: [
+      [350, 450],
+      [250, 450],
+    ],
+    focus: [335, 431],
+    lod: 0,
+    key: "gcell_v1_12_17",
+    bounds: { minX: 300, maxX: 325, minZ: 425, maxZ: 450 },
+    native82: {
+      source: "native82/process.json",
+      sourceSHA256:
+        "1424f7aedbe41d1709037e00979f19a6081cee85dd99b95e12e683a8b6ee5280",
+      failedOperations: 112014,
+      failedActiveMs: 250.69999933242798,
+      scope:
+        "Historical native failed prefix, not a completed work total. This CPU replay uses current production owners and the unchanged fitting limits; it does not qualify native startup.",
+    },
+  },
 ] as const;
 
 let groundingWorkerSource: string;
@@ -390,7 +422,8 @@ describe.each(cases)("$name", (scenario) => {
       const usesNativeComposition =
         "native52" in scenario ||
         "native72" in scenario ||
-        "native74" in scenario;
+        "native74" in scenario ||
+        "native82" in scenario;
       await DataManager.getInstance().initialize();
       const world = new World();
       const terrain = world.register("terrain", TerrainSystem) as TerrainSystem;
@@ -490,8 +523,26 @@ describe.each(cases)("$name", (scenario) => {
           expect(setup.compactCoastBlend).toBeUndefined();
           expect(setup.compactGrassColorGrade).toBe("fine-meadow-green-v1");
         }
+        const nativeDetailRegions =
+          "native82" in scenario
+            ? createCompactPreparationDetailRegions(
+                terrain.getWorldTerrainProfile(),
+                DataManager.getInstance().getAllWorldAreas(),
+                terrain["CONFIG"].QUADTREE_RESOLUTION,
+              )
+            : undefined;
         visual = new TerrainVisualManager(
-          { minSize: 100, maxDepth: 4, resolution: 128, rootChunkRadius: 0 },
+          {
+            minSize: 100,
+            maxDepth: 4,
+            resolution: nativeDetailRegions
+              ? STREAMING_TERRAIN_QUADTREE_RESOLUTION
+              : 128,
+            ...(nativeDetailRegions
+              ? { fineDetailRegions: nativeDetailRegions }
+              : {}),
+            rootChunkRadius: 0,
+          },
           terrain["buildChunkTerrainProvider"](),
           new THREE.Group(),
           material,
@@ -505,6 +556,12 @@ describe.each(cases)("$name", (scenario) => {
         const nodes = scenario.nodes.map(([x, z]: readonly [number, number]) =>
           tree.createNode(null, null, 100, x, z, 4),
         );
+        if ("native82" in scenario) {
+          expect(
+            DataManager.getInstance().getAllWorldAreas().haven_pond.bounds,
+          ).toEqual({ minX: 377, maxX: 443, minZ: 382, maxZ: 448 });
+          expect(nodes.map((node) => node.resolution)).toEqual([128, 64]);
+        }
         for (const node of nodes) visual["generateChunkSync"](node);
         const admissionReceipts = nodes.map((node) => {
           const geometry = retainedVisual["chunks"].get(node.visualChunkKey!)!
@@ -552,12 +609,27 @@ describe.each(cases)("$name", (scenario) => {
             if (index) indexSteps++;
             step = resume();
           }
-          expect(step.value.groundingEdgeIndexStats?.admissionSteps).toBe(
-            indexSteps,
-          );
+          if ("native82" in scenario && node.centerX === 250) {
+            // The historical fixtures all build refined 128-grid owners. The
+            // actual western neighbour instead needs no refined edge index.
+            expect(node.resolution).toBe(64);
+            expect(step.value.isRegularGrid).toBe(true);
+            expect(step.value.groundingEdgeIndexStats).toBeNull();
+            expect(indexSteps).toBe(0);
+          } else {
+            expect(step.value.groundingEdgeIndexStats?.admissionSteps).toBe(
+              indexSteps,
+            );
+          }
           return {
             centerX: node.centerX,
             centerZ: node.centerZ,
+            ...("native82" in scenario
+              ? {
+                  resolution: node.resolution,
+                  isRegularGrid: step.value.isRegularGrid,
+                }
+              : {}),
             elapsedMs: performance.now() - started,
             steps,
             indexMs,
@@ -655,6 +727,19 @@ describe.each(cases)("$name", (scenario) => {
         const region = visual.captureRetainedSurfaceRegion(bounds);
         expect(region.isCurrent()).toBe(true);
         expect(region.surfaces).toHaveLength(scenario.nodes.length);
+        if ("native82" in scenario) {
+          expect(
+            region.surfaces.map((surface) => ({
+              centerX: surface.centerX,
+              centerZ: surface.centerZ,
+              size: surface.size,
+              resolution: surface.resolution,
+            })),
+          ).toEqual([
+            { centerX: 350, centerZ: 450, size: 100, resolution: 128 },
+            { centerX: 250, centerZ: 450, size: 100, resolution: 64 },
+          ]);
+        }
         const lease = setup.prepareGroundingInputs!(bounds);
         let step = lease.steps.next();
         while (!step.done) step = lease.steps.next();
@@ -700,6 +785,22 @@ describe.each(cases)("$name", (scenario) => {
               : {}),
             ...("native74" in scenario
               ? { native74HistoricalObservation: scenario.native74 }
+              : {}),
+            ...("native82" in scenario
+              ? {
+                  native82HistoricalObservation: scenario.native82,
+                  terrainDetailPolicy: {
+                    baseResolution: STREAMING_TERRAIN_QUADTREE_RESOLUTION,
+                    gameplayResolution: terrain["CONFIG"].QUADTREE_RESOLUTION,
+                    fineDetailRegions: nativeDetailRegions,
+                    retainedRegion: region.surfaces.map((surface) => ({
+                      centerX: surface.centerX,
+                      centerZ: surface.centerZ,
+                      size: surface.size,
+                      resolution: surface.resolution,
+                    })),
+                  },
+                }
               : {}),
             ...(usesNativeComposition
               ? {
