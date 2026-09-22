@@ -4,6 +4,7 @@ import {
   groundGrassBladeSteps,
   GrassBladeGroundingJob,
   GRASS_BLADE_GROUNDING_JOB_LIMITS,
+  type GrassBladeGroundingResult,
 } from "../GrassBladeGrounding";
 import { getGrassBladeLayout } from "../GrassBladeLayout";
 import { projectGrassAnchors } from "../GrassTerrainProjection";
@@ -343,6 +344,126 @@ const NATIVE25: Record<
 };
 
 describe("same-face shortcut versus independent native25 grounding goldens", () => {
+  it.each([1, 7])(
+    "keeps repeated road and surface scratch private across interleaved %s-step jobs",
+    (batch) => {
+      const fixtures = [
+        createSameFaceCase("fine-lod0"),
+        createSameFaceCase("ordinary-lod1"),
+        createSameFaceCase("adjacent-reversed"),
+        createSameFaceCase("overlapping-owners"),
+      ];
+      try {
+        for (const [index, item] of fixtures.slice(0, 2).entries()) {
+          const { request } = item;
+          // Two separated road hits must both be tested, even though each uses
+          // the same road indices/grid cells. Intervening clumps remain clear.
+          for (let clump = 0; clump < request.data.count; clump++)
+            request.data.offsets.set(
+              [clump % 2 === 0 ? 0 : 8, 20, -12 + clump * 8],
+              clump * 3,
+            );
+          request.data = projectGrassAnchors(
+            request.data,
+            request.ownSurface,
+            () => -1000,
+            () => false,
+          );
+          request.roadSegments = [
+            { startX: 0, startZ: -40, endX: 0, endZ: 40, width: 4 },
+            { startX: 0, startZ: -40, endX: 0, endZ: 40, width: 4 },
+          ];
+          if (index === 1) request.roadClearance = "per-blade-v1";
+        }
+        const rows = fixtures.map((item) => {
+          const before = sameFaceInputHash(item);
+          const reference = drainSameFaceSteps(
+            legacyGroundGrassBladeSteps(item.request),
+          ).result;
+          const trace: string[] = [];
+          const serialSteps = groundGrassBladeSteps(item.request);
+          const serial = drainSameFaceSteps(
+            (function* () {
+              for (;;) {
+                const step = serialSteps.next();
+                if (step.done) return step.value;
+                trace.push(step.value);
+                yield step.value;
+              }
+            })(),
+          );
+          expect(sameFaceHash(serial.result)).toBe(sameFaceHash(reference));
+          const position = item.request.geometry.getAttribute("position");
+          let zeroHeightVertices = 0;
+          for (let vertex = 0; vertex < position.count; vertex++)
+            if (position.getY(vertex) === 0) zeroHeightVertices++;
+          // The overlapping-owner fixture defers after its first complete
+          // envelope but before processedClumps is incremented. Preserve all
+          // historical charges except the existing zero-height fade saving.
+          const envelopes =
+            serial.result.receipt.processedClumps +
+            Number(serial.result.status === "defer");
+          expect(serial.result.receipt.workUnits).toBe(
+            reference.receipt.workUnits - zeroHeightVertices * envelopes,
+          );
+          if (serial.result.status === "ready" && reference.status === "ready")
+            expect(serial.result.bladeVisibility).toEqual(
+              reference.bladeVisibility,
+            );
+          return {
+            item,
+            before,
+            serial,
+            trace,
+            steps: groundGrassBladeSteps(item.request),
+            observed: [] as string[],
+            result: null as GrassBladeGroundingResult | null,
+            resumptions: 0,
+          };
+        });
+        for (let round = 0; round < 100_000; round++) {
+          if (rows.every((row) => row.result !== null)) break;
+          for (const row of rows)
+            for (let stepIndex = 0; stepIndex < batch; stepIndex++) {
+              if (row.result !== null) break;
+              const step = row.steps.next();
+              row.resumptions++;
+              if (step.done) row.result = step.value;
+              else row.observed.push(step.value);
+            }
+        }
+        for (const row of rows) {
+          if (!row.result) throw Error("Interleaved grounding did not finish");
+          const { elapsedMs: _elapsed, ...receipt } = row.result.receipt;
+          const { elapsedMs: _serialElapsed, ...serialReceipt } =
+            row.serial.result.receipt;
+          expect({ ...row.result, receipt }).toEqual({
+            ...row.serial.result,
+            receipt: serialReceipt,
+          });
+          expect(row.observed).toEqual(row.trace);
+          expect(row.resumptions).toBe(row.serial.operations);
+          expect(sameFaceInputHash(row.item)).toBe(row.before);
+          for (const dependency of row.result.dependencies)
+            expect(row.item.request.surfaces).toContain(dependency.surface);
+        }
+        for (const row of rows.slice(0, 2)) {
+          expect(row.result?.receipt.processedClumps).toBe(4);
+          expect(row.result?.receipt.rejected.road).toBe(2);
+          expect(row.result?.receipt.retainedClumps).toBe(2);
+        }
+        expect(rows[2].result?.status).toBe("ready");
+        expect(rows[2].result?.receipt.processedClumps).toBe(3);
+        expect(rows[3].result).toMatchObject({
+          status: "defer",
+          reason: "overlapping_surface",
+        });
+      } finally {
+        for (const item of fixtures) item.dispose();
+      }
+    },
+  );
+
   it.each(SAME_FACE_CASES)(
     "preserves every semantic output byte for %s",
     (id) => {

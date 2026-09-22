@@ -1,5 +1,6 @@
 import { Worker } from "node:worker_threads";
 import { fileURLToPath } from "node:url";
+import type { Profiler } from "node:inspector";
 import { build } from "esbuild";
 import { expect } from "vitest";
 import {
@@ -24,7 +25,9 @@ const entry = fileURLToPath(
   ),
 );
 
-export async function bundleGrassGroundingWorker() {
+export async function bundleGrassGroundingWorker(options?: {
+  cpuProfileSourceMap?: boolean;
+}) {
   const bundled = await build({
     entryPoints: [entry],
     bundle: true,
@@ -35,17 +38,110 @@ export async function bundleGrassGroundingWorker() {
     target: "es2022",
     minify: true,
     keepNames: true,
+    ...(options?.cpuProfileSourceMap
+      ? {
+          sourcemap: "external" as const,
+          outfile: "grounding-profile-worker.js",
+        }
+      : {}),
   });
-  expect(bundled.outputFiles).toHaveLength(1);
+  expect(bundled.outputFiles).toHaveLength(
+    options?.cpuProfileSourceMap ? 2 : 1,
+  );
   return {
-    source: bundled.outputFiles[0].text,
+    source: bundled.outputFiles.find((file) => !file.path.endsWith(".map"))!
+      .text,
+    sourceMap: bundled.outputFiles.find((file) => file.path.endsWith(".map"))
+      ?.text,
     inputs: Object.keys(bundled.metafile.inputs),
   };
 }
 
+export interface GroundingWorkerCpuProfile {
+  testCpuProfile: true;
+  jobId: number;
+  generation: number;
+  samplingIntervalUs: 1000;
+  workerTimeOrigin: number;
+  startRequestedAtMs: number;
+  startAcknowledgedAtMs: number | null;
+  stopRequestedAtMs: number;
+  stopAcknowledgedAtMs: number;
+  terminal: {
+    type: string;
+    status: string | null;
+    work: unknown;
+  } | null;
+  error: string | null;
+  profile: Profiler.Profile | null;
+}
+
+// Explicit diagnostic opt-in only. This Session attaches to this worker's own
+// isolate, never a network inspector or the main thread. Admissions finish
+// before start_cached. Sampling includes request validation, fitting, packing
+// and task/GC/inspector overhead; it is not exclusive thread CPU measurement.
+const cachedFitProfiler = `
+const {Session} = require("node:inspector");
+let profileRow = null;
+let profileUsed = false;
+const inspectorPost = (session, method, params = {}) => new Promise((resolve, reject) =>
+  session.post(method, params, (error, result) => error ? reject(error) : resolve(result)));
+async function stopCachedProfile(terminal, error = null) {
+  const row = profileRow;
+  if (!row || row.stopping) return;
+  row.stopping = true;
+  const stopRequestedAtMs = performance.now();
+  let profile = null;
+  try {
+    if (row.started) profile = (await inspectorPost(row.session, "Profiler.stop")).profile;
+  } catch (stopError) {
+    error = error || stopError;
+  } finally {
+    row.session.disconnect();
+    profileRow = null;
+  }
+  parentPort.postMessage({testCpuProfile: true, jobId: row.jobId,
+    generation: row.generation, samplingIntervalUs: 1000,
+    workerTimeOrigin: performance.timeOrigin,
+    startRequestedAtMs: row.startRequestedAtMs,
+    startAcknowledgedAtMs: row.startAcknowledgedAtMs,
+    stopRequestedAtMs, stopAcknowledgedAtMs: performance.now(), terminal,
+    error: error ? String(error).slice(0, 2048) : null, profile});
+}
+function observeProfileTerminal(message) {
+  if (profileRow && message.jobId === profileRow.jobId &&
+      message.generation === profileRow.generation &&
+      (message.type === "result" || message.type === "rejected")) {
+    void stopCachedProfile({type: message.type,
+      status: message.state?.status ?? null, work: message.work ?? null});
+  }
+}
+async function deliverProfiledCachedRequest(data) {
+  if (profileUsed) throw new Error("Only one cached-fit profile is admitted per worker");
+  profileUsed = true;
+  const session = new Session();
+  profileRow = {session, jobId: data.jobId, generation: data.generation,
+    startRequestedAtMs: performance.now(), startAcknowledgedAtMs: null,
+    started: false, stopping: false};
+  try {
+    session.connect();
+    await inspectorPost(session, "Profiler.enable");
+    await inspectorPost(session, "Profiler.setSamplingInterval", {interval: 1000});
+    await inspectorPost(session, "Profiler.start");
+    profileRow.started = true;
+    profileRow.startAcknowledgedAtMs = performance.now();
+    self.onmessage({data});
+  } catch (error) {
+    await stopCachedProfile(null, error);
+    throw error;
+  }
+}
+`;
+
 /** Execute the actual browser bundle in an isolated worker realm. Only the
  * browser transport is adapted; MessageChannel is Node's real task scheduler. */
 export class ActualGroundingWorker {
+  readonly executionSource: string;
   private readonly worker: Worker;
   private readonly messages: unknown[] = [];
   private readonly pending: {
@@ -56,20 +152,28 @@ export class ActualGroundingWorker {
   }[] = [];
   private failure: Error | null = null;
 
-  constructor(source: string) {
-    this.worker = new Worker(
-      `const {parentPort, MessageChannel} = require("node:worker_threads");
+  constructor(source: string, options?: { profileCachedFit?: boolean }) {
+    this.executionSource = `const {parentPort, MessageChannel} = require("node:worker_threads");
 globalThis.MessageChannel = MessageChannel;
+${options?.profileCachedFit ? cachedFitProfiler : ""}
 globalThis.self = {postMessage: (message, transfers) => {
   parentPort.postMessage(message, transfers);
   if (transfers?.length) parentPort.postMessage({testResultTransfer: true, jobId: message.jobId,
     buffers: transfers.length, detached: transfers.every(buffer => buffer.byteLength === 0)});
+  ${options?.profileCachedFit ? "observeProfileTerminal(message);" : ""}
 }};
 ${source}
-parentPort.on("message", data => self.onmessage({data}));
-parentPort.postMessage({testTransportReady: true});`,
-      { eval: true, env: {} },
-    );
+parentPort.on("message", data => {
+  ${
+    options?.profileCachedFit
+      ? `if (data?.type === "start_cached") {
+    void deliverProfiledCachedRequest(data).catch(error => {setImmediate(() => {throw error;});});
+  } else self.onmessage({data});`
+      : "self.onmessage({data});"
+  }
+});
+parentPort.postMessage({testTransportReady: true});`;
+    this.worker = new Worker(this.executionSource, { eval: true, env: {} });
     this.worker.on("message", (message: unknown) => {
       const index = this.pending.findIndex((waiter) => waiter.matches(message));
       if (index >= 0) {
@@ -130,6 +234,20 @@ parentPort.postMessage({testTransportReady: true});`,
     );
   }
 
+  async takeCpuProfile(jobId: number, generation: number) {
+    return (await this.take(
+      (message) =>
+        typeof message === "object" &&
+        message !== null &&
+        "testCpuProfile" in message &&
+        message.testCpuProfile === true &&
+        "jobId" in message &&
+        message.jobId === jobId &&
+        "generation" in message &&
+        message.generation === generation,
+    )) as GroundingWorkerCpuProfile;
+  }
+
   send(message: unknown, transfers: ArrayBuffer[] = []) {
     this.worker.postMessage(message, transfers);
   }
@@ -140,8 +258,11 @@ parentPort.postMessage({testTransportReady: true});`,
   }
 }
 
-export async function createActualGroundingWorker(source: string) {
-  const worker = new ActualGroundingWorker(source);
+export async function createActualGroundingWorker(
+  source: string,
+  options?: { profileCachedFit?: boolean },
+) {
+  const worker = new ActualGroundingWorker(source, options);
   try {
     await worker.ready();
     return worker;

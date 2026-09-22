@@ -96,7 +96,7 @@ function actualRoadEnvelopeHelpers() {
   );
   const transform = between(
     "      const rotation = data.rotScaleHash[k],",
-    "      const baseBounds = {",
+    "      baseBounds.minX = baseBounds.minZ = Infinity;",
   );
   const guard = source.match(/^const NUMERIC_GUARD = ([0-9.]+);$/gm);
   expect(guard).toHaveLength(1);

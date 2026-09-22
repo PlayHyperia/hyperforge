@@ -81,6 +81,35 @@
   2,413 source files with zero diagnostics/stable pins. Seven-file lint,
   format and diff checks pass. Retain the first regular-grid fixture failure,
   frozen-oracle mismatch and readonly-tuple type diagnostic with their fixes.
+- [x] Profile one reconstructed native95 western cached fit in its actual
+  minified browser bundle / Node worker isolate. The opt-in inspector attaches
+  only to that isolate, closes before termination, and preserves original
+  result transfers and 250 ms / one-million-operation limits. Retain the raw
+  81-sample profile, source map and hashes: eight samples are GC; this is a
+  lead for allocation reduction, not exclusive CPU attribution or native cause.
+- [x] Reuse job-local base/envelope bounds, filtered surface entries and the
+  road-deduplication Set. Scratch never aliases retained owners or escapes into
+  output; complete generators reset it before reuse. Every numerical expression,
+  suspension, work charge and geometry/population input remains unchanged.
+  Set.clear may still allocate internal storage; allocation-free is not claimed.
+- [x] Compare the exact archived baseline with the candidate in four serial
+  AB/BA pairs of fresh workers, each admitting independent transferred copies.
+  All eight retain the same 959 clumps and exact attributes, roots, masks,
+  source indices, bounds, dependencies, non-timing receipts and input/result
+  bytes, with 280,384 operations. Twenty-four other bundle dependencies
+  are hash-identical.
+  Baseline active times are 105.829–114.658 ms, median 110.834; candidate
+  108.165–110.722 ms, median 110.047. Two pairs improve and two regress;
+  maximum slices reach 3.156 versus 3.785 ms. No meaningful timing gain,
+  lower GC cost, native loading fix or frame-rate improvement is established.
+- [x] Pass 427 core/actual-worker/coordinator/manager checks, including two
+  new repeated-road, mixed-owner and interleaved-scratch regressions against
+  frozen numerical results. The first run retained 424 passes and three
+  diagnostic-helper failures: move only the unique extraction end marker to
+  the reset statement, preserving the exact transform/helper source and tests.
+  Full no-emit passes 734 roots / 2,413 source files with stable hashes.
+  Selected v9/v10/historical pond runs pass 11/2/1 applicable cases: 441
+  applicable core and pond checks in total, excluding repeats and layout skips.
 - [ ] Native95 remains failed. Diagnose native contention/grounding under stable
   awake host conditions; no GPU retry, changed cap, scheduling, density,
   resolution, geometry, wind, visual default or AAA approval in this follow-up.
@@ -100,6 +129,13 @@ Follow-up service-layout receipts: `native95-grounding-replay02`,
 `grounding-diagnostics-core01`, `fitting-slice-coordinator-full01`,
 `grounding-diagnostics-final02`, `grounding-diagnostics-v10-01`,
 `grounding-diagnostics-review52-01`, and `grounding-diagnostics-types02`.
+Allocation follow-up: `native95-western-cached-profile01`,
+`native95-western-cached-cpu01*`, `grounding-scratch-ab01`,
+`grounding-scratch-core02`, `grounding-scratch-v9-01`,
+`grounding-scratch-v10-01`, `grounding-scratch-review52-01`,
+`grounding-scratch-types01`. The opt-in worker profiler follows the official
+[Node inspector CPU profiling API](https://nodejs.org/docs/latest-v22.x/api/inspector.html#cpu-profiler);
+no network inspector or main-thread attachment is used.
 The official [Three forest generator](https://github.com/mrdoob/three.js/blob/r186/examples/jsm/generators/ForestGenerator.js)
 and [terrain generator](https://github.com/mrdoob/three.js/blob/r186/examples/jsm/generators/TerrainGenerator.js)
 inform coherent regional color groups and placement-independent variation,

@@ -504,7 +504,20 @@ export function* groundGrassBladeSteps(
       maxZ: surface.centerZ + surface.size / 2,
     },
   }));
-  let baseEntries = entries;
+  // Distinct job-local scratch: never clear the full surface-owner list.
+  const baseEntries: SurfaceEntry[] = [];
+  const baseBounds: TerrainGridBounds = {
+    minX: Infinity,
+    maxX: -Infinity,
+    minZ: Infinity,
+    maxZ: -Infinity,
+  };
+  const box: TerrainGridBounds = {
+    minX: Infinity,
+    maxX: -Infinity,
+    minZ: Infinity,
+    maxZ: -Infinity,
+  };
   const used = new Map<RetainedTerrainSurface, Set<SurfaceUse>>();
   const receipt: GrassBladeGroundingReceipt = {
     elapsedMs: 0,
@@ -874,8 +887,10 @@ export function* groundGrassBladeSteps(
         ),
       ),
     );
+  // Only one road mode runs for a clump and is fully drained before reuse.
+  const seenRoads = new Set<number>();
   const roadsNear = function* (box: TerrainGridBounds) {
-    const seen = new Set<number>();
+    seenRoads.clear();
     for (
       let gx = roadCell(box.minX, ownSurface.centerX);
       gx <= roadCell(box.maxX, ownSurface.centerX);
@@ -891,8 +906,8 @@ export function* groundGrassBladeSteps(
         for (const index of roadCells[gx * ROAD_GRID_AXIS + gz]) {
           yield "grounding_operation";
           take();
-          if (seen.has(index)) continue;
-          seen.add(index);
+          if (seenRoads.has(index)) continue;
+          seenRoads.add(index);
           const road = request.roadSegments[index];
           const explicitFeather = explicitRoadFeathers.get(index);
           if (
@@ -988,7 +1003,7 @@ export function* groundGrassBladeSteps(
     if (!bladeBounds) throw new Error("Missing grass blade bounds scratch");
     let mask = allBlades,
       built = false;
-    const seen = new Set<number>();
+    seenRoads.clear();
     for (
       let gx = roadCell(box.minX, ownSurface.centerX);
       gx <= roadCell(box.maxX, ownSurface.centerX);
@@ -1004,8 +1019,8 @@ export function* groundGrassBladeSteps(
         for (const index of roadCells[gx * ROAD_GRID_AXIS + gz]) {
           yield "grounding_operation";
           take();
-          if (seen.has(index)) continue;
-          seen.add(index);
+          if (seenRoads.has(index)) continue;
+          seenRoads.add(index);
           const road = request.roadSegments[index];
           const explicitFeather = explicitRoadFeathers.get(index);
           if (explicitFeather === null) continue;
@@ -1173,12 +1188,8 @@ export function* groundGrassBladeSteps(
           ry = position.getY(v) * bankHeightScale * scale * fade;
         applyTransform(rx, ry, rz, target);
       };
-      const baseBounds = {
-        minX: Infinity,
-        maxX: -Infinity,
-        minZ: Infinity,
-        maxZ: -Infinity,
-      };
+      baseBounds.minX = baseBounds.minZ = Infinity;
+      baseBounds.maxX = baseBounds.maxZ = -Infinity;
       for (let blade = 0; blade < blades; blade++) {
         yield "grounding_operation";
         for (let side = 0; side < 2; side++) {
@@ -1190,7 +1201,7 @@ export function* groundGrassBladeSteps(
           baseBounds.maxZ = Math.max(baseBounds.maxZ, point.z);
         }
       }
-      baseEntries = [];
+      baseEntries.length = 0;
       for (const entry of entries) {
         yield "grounding_operation";
         take();
@@ -1227,12 +1238,8 @@ export function* groundGrassBladeSteps(
         receipt.maxCorrectedBaseError,
         baseError,
       );
-      const box = {
-        minX: Infinity,
-        maxX: -Infinity,
-        minZ: Infinity,
-        maxZ: -Infinity,
-      };
+      box.minX = box.minZ = Infinity;
+      box.maxX = box.maxZ = -Infinity;
       let minY = Infinity,
         maxY = -Infinity;
       for (let v = 0; v < position.count; v++) {

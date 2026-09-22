@@ -1,5 +1,8 @@
 import { Worker } from "node:worker_threads";
 import { createHash } from "node:crypto";
+import { readFileSync, writeFileSync } from "node:fs";
+import { isAbsolute, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { beforeAll, describe, expect, it } from "vitest";
 import THREE from "../../../../extras/three/three";
 import { World } from "../../../../core/World";
@@ -55,6 +58,7 @@ import {
   prepareCachedGrassGroundingWorkerRequest,
   runGrassGroundingWorker,
   type ActualGroundingWorker,
+  type GroundingWorkerCpuProfile,
 } from "./fixtures/GrassGroundingWorkerHarness";
 
 const attributes = [
@@ -69,6 +73,68 @@ const attributes = [
 // receipts. This never writes assets or changes any runtime owner.
 const evidence = (label: string, json: string) =>
   process.stdout.write(`${label} ${json}\n`);
+
+// One explicit diagnostic run, never enabled by ordinary regression commands.
+// The only admitted fit is the reconstructed native95 western cached request.
+const cpuProfilePrefix = process.env.HYPERIA_GRASS_CACHED_PROFILE_PREFIX;
+const cachedBaselinePath = process.env.HYPERIA_GRASS_CACHED_BASELINE_BUNDLE;
+let cachedBaselineSource: string | undefined;
+const hashBytes = (value: string | Uint8Array) =>
+  createHash("sha256").update(value).digest("hex");
+let profileSourcePins: { path: string; bytes: number; sha256: string }[] = [];
+function writeProfileEvidence(suffix: string, value: string) {
+  if (!cpuProfilePrefix) throw new Error("CPU profile evidence is not enabled");
+  const path = `${cpuProfilePrefix}${suffix}`;
+  writeFileSync(path, value, { flag: "wx" });
+  return { path, bytes: Buffer.byteLength(value), sha256: hashBytes(value) };
+}
+
+function saveCachedProfile(receipt: GroundingWorkerCpuProfile) {
+  // Preserve the raw observation, including profiler/production failures,
+  // before asserting qualification. Never turn a failed budget into a pass.
+  const raw = JSON.stringify(receipt.profile);
+  const profileFile = writeProfileEvidence(".cpuprofile", raw);
+  const { profile, ...metadata } = receipt;
+  const sourcesUnchanged = profileSourcePins.every(
+    (pin) => hashBytes(readFileSync(pin.path)) === pin.sha256,
+  );
+  const metadataFile = writeProfileEvidence(
+    "-receipt.json",
+    JSON.stringify(
+      {
+        ...metadata,
+        profileFile,
+        nodeCount: profile?.nodes.length ?? 0,
+        sampleCount: profile?.samples?.length ?? 0,
+        profileStartTimeUs: profile?.startTime ?? null,
+        profileEndTimeUs: profile?.endTime ?? null,
+        sourcesUnchanged,
+        scope:
+          "One sampled Node22 worker-isolate cached request: validation, fitting, result packing, task waits, GC and profiler overhead. Surface preparation and module startup excluded. Sample weights are not exclusive CPU time, native browser measurements, or performance acceptance. Node Inspector start/stop perturbs execution; original 250ms/1M caps remain enforced. Current-source native95 reconstruction is not a byte-exact historical packet.",
+      },
+      null,
+      2,
+    ),
+  );
+  evidence("NATIVE95_CACHED_CPU_PROFILE", JSON.stringify(metadataFile));
+  expect(receipt.error).toBeNull();
+  expect(receipt.samplingIntervalUs).toBe(1000);
+  expect(receipt.startAcknowledgedAtMs).not.toBeNull();
+  expect(receipt.stopRequestedAtMs).toBeGreaterThanOrEqual(
+    receipt.startAcknowledgedAtMs!,
+  );
+  expect(receipt.stopAcknowledgedAtMs).toBeGreaterThanOrEqual(
+    receipt.stopRequestedAtMs,
+  );
+  expect(sourcesUnchanged).toBe(true);
+  expect(profile).not.toBeNull();
+  expect(profile!.nodes.length).toBeGreaterThan(0);
+  expect(profile!.nodes.length).toBeLessThanOrEqual(100_000);
+  expect(profile!.samples!.length).toBeGreaterThan(0);
+  expect(profile!.samples!.length).toBeLessThanOrEqual(100_000);
+  expect(profile!.samples).toHaveLength(profile!.timeDeltas!.length);
+  expect(Buffer.byteLength(raw)).toBeLessThanOrEqual(16 * 1024 * 1024);
+}
 
 // Hash the actual view, not spare capacity in a shared/subarray backing buffer.
 // Separate color hashes let source A/B comparisons permit appearance changes
@@ -96,7 +162,10 @@ function attributeReceipts(
 }
 
 function groundedBufferReceipts(
-  result: Extract<GrassBladeGroundingResult, { status: "ready" }>,
+  result: Pick<
+    Extract<GrassBladeGroundingResult, { status: "ready" }>,
+    "data" | "sourceIndices" | "rootDeltas" | "bladeVisibility" | "sweptBounds"
+  >,
 ) {
   return {
     ...attributeReceipts(result.data),
@@ -537,8 +606,54 @@ const cases = [
 
 let groundingWorkerSource: string;
 beforeAll(async () => {
-  if (cases.some((scenario) => scenario.enabled))
-    groundingWorkerSource = (await bundleGrassGroundingWorker()).source;
+  if (cachedBaselinePath) {
+    expect(cpuProfilePrefix).toBeUndefined();
+    expect(isAbsolute(cachedBaselinePath)).toBe(true);
+    expect(process.env.ASSETS_DIR?.endsWith("/assets-v9")).toBe(true);
+    cachedBaselineSource = readFileSync(cachedBaselinePath, "utf8");
+    expect(hashBytes(cachedBaselineSource)).toBe(
+      process.env.HYPERIA_GRASS_CACHED_BASELINE_SHA256,
+    );
+  }
+  if (cpuProfilePrefix) {
+    expect(isAbsolute(cpuProfilePrefix)).toBe(true);
+    expect(process.env.ASSETS_DIR?.endsWith("/assets-v9")).toBe(true);
+  }
+  if (cases.some((scenario) => scenario.enabled)) {
+    const bundle = await bundleGrassGroundingWorker({
+      cpuProfileSourceMap: !!cpuProfilePrefix,
+    });
+    groundingWorkerSource = bundle.source;
+    if (cpuProfilePrefix) {
+      const paths = new Set([
+        ...bundle.inputs.map((path) => resolve(path)),
+        fileURLToPath(import.meta.url),
+        fileURLToPath(
+          new URL("./fixtures/GrassGroundingWorkerHarness.ts", import.meta.url),
+        ),
+      ]);
+      profileSourcePins = [...paths].sort().map((path) => {
+        const bytes = readFileSync(path);
+        return { path, bytes: bytes.length, sha256: hashBytes(bytes) };
+      });
+      writeProfileEvidence(
+        "-sources.json",
+        JSON.stringify(
+          {
+            node: process.version,
+            sourcePins: profileSourcePins,
+            bundle: writeProfileEvidence("-bundle.js", bundle.source),
+            sourceMap: writeProfileEvidence(
+              "-bundle.js.map",
+              bundle.sourceMap!,
+            ),
+          },
+          null,
+          2,
+        ),
+      );
+    }
+  }
 });
 
 describe.each(cases)("$name", (scenario) => {
@@ -1167,8 +1282,13 @@ describe.each(cases)("$name", (scenario) => {
         groundingWorker = undefined;
 
         const cachedStarted = performance.now();
+        const profileCachedFit =
+          !!cpuProfilePrefix &&
+          "native95" in scenario &&
+          scenario.key === "gcell_v1_11_16";
         groundingWorker = await createActualGroundingWorker(
           groundingWorkerSource,
+          { profileCachedFit },
         );
         const cachedCopyStarted = performance.now();
         const cachedPacket = createGrassGroundingWorkerRequest(request);
@@ -1177,12 +1297,68 @@ describe.each(cases)("$name", (scenario) => {
           groundingWorker,
           cachedPacket,
         );
+        if (profileCachedFit) {
+          const executionSource = groundingWorker.executionSource;
+          writeProfileEvidence("-worker-eval.js", executionSource);
+          writeProfileEvidence(
+            "-request.json",
+            JSON.stringify(
+              {
+                key,
+                lod,
+                jobId: prepared.request.jobId,
+                generation: prepared.request.generation,
+                settings: prepared.request.settings,
+                consumed: prepared.request.consumed,
+                projected: attributeReceipts(projected),
+                admissions: prepared.admissions,
+                bundleStartLineOneBased: executionSource
+                  .slice(0, executionSource.indexOf(groundingWorkerSource))
+                  .split("\n").length,
+              },
+              null,
+              2,
+            ),
+          );
+        }
         const fitStarted = performance.now();
-        const cachedResult = await runGrassGroundingWorker(
-          groundingWorker,
-          prepared.request,
-        );
-        const completedAt = performance.now();
+        let completedAt = fitStarted;
+        // Await BOTH the original result/transfer checks and profiler stop
+        // receipt before owned termination, even if either branch fails.
+        const [fitOutcome, profileOutcome] = await Promise.allSettled([
+          runGrassGroundingWorker(groundingWorker, prepared.request).then(
+            (result) => {
+              completedAt = performance.now();
+              return result;
+            },
+          ),
+          profileCachedFit
+            ? groundingWorker.takeCpuProfile(
+                prepared.request.jobId,
+                prepared.request.generation,
+              )
+            : Promise.resolve(null),
+        ]);
+        const profileFailures: unknown[] = [];
+        if (fitOutcome.status === "rejected")
+          profileFailures.push(fitOutcome.reason);
+        if (profileOutcome.status === "rejected")
+          profileFailures.push(profileOutcome.reason);
+        else if (profileOutcome.value) {
+          try {
+            saveCachedProfile(profileOutcome.value);
+          } catch (error) {
+            profileFailures.push(error);
+          }
+        }
+        if (profileFailures.length === 1) throw profileFailures[0];
+        if (profileFailures.length > 1)
+          throw new AggregateError(
+            profileFailures,
+            "Cached worker result and diagnostic profile failed",
+          );
+        if (fitOutcome.status !== "fulfilled") throw fitOutcome.reason;
+        const cachedResult = fitOutcome.value;
         evidence(
           `${scenario.label}_CACHED_GROUNDING_WORKER`,
           JSON.stringify({
@@ -1201,6 +1377,7 @@ describe.each(cases)("$name", (scenario) => {
             inputBytes: cachedResult.inputBytes,
             derivedBytesReserved: cachedResult.derivedBytesReserved,
             resultBytes: cachedResult.resultBytes,
+            cpuProfileEnabled: profileCachedFit,
             snapshotCopyMs: cachedCopyMs,
             fittingWallMs: completedAt - fitStarted,
             coldEndToEndWallMs: completedAt - cachedStarted,
@@ -1232,6 +1409,90 @@ describe.each(cases)("$name", (scenario) => {
           expect(projected[key]).toEqual(inputBefore[index]);
         await groundingWorker.close();
         groundingWorker = undefined;
+
+        // One declared diagnostic comparison, off in ordinary regressions.
+        // Fresh isolates and transferred copies for every AB/BA pair; never
+        // reuse detached buffers, warm an owner, relax caps or use a profiler.
+        if (
+          cachedBaselineSource &&
+          "native95" in scenario &&
+          scenario.key === "gcell_v1_11_16"
+        ) {
+          const expected = grassGroundingWorkerSemanticResult(result, request);
+          const order = [
+            "baseline",
+            "candidate",
+            "candidate",
+            "baseline",
+            "baseline",
+            "candidate",
+            "candidate",
+            "baseline",
+          ] as const;
+          for (const [index, variant] of order.entries()) {
+            const source =
+              variant === "baseline"
+                ? cachedBaselineSource
+                : groundingWorkerSource;
+            const coldStarted = performance.now();
+            groundingWorker = await createActualGroundingWorker(source);
+            const comparisonPacket = createGrassGroundingWorkerRequest(request);
+            const comparisonPrepared =
+              await prepareCachedGrassGroundingWorkerRequest(
+                groundingWorker,
+                comparisonPacket,
+              );
+            const started = performance.now();
+            const comparison = await runGrassGroundingWorker(
+              groundingWorker,
+              comparisonPrepared.request,
+            );
+            const finished = performance.now();
+            evidence(
+              "NATIVE95_CACHED_AB",
+              JSON.stringify({
+                index,
+                variant,
+                key,
+                lod,
+                bundleSHA256: hashBytes(source),
+                status: comparison.state.status,
+                work: comparison.work,
+                lastPhase: comparison.lastPhase,
+                inputBytes: comparison.inputBytes,
+                resultBytes: comparison.resultBytes,
+                admissions: comparisonPrepared.admissions,
+                fittingWallMs: finished - started,
+                coldEndToEndWallMs: finished - coldStarted,
+                buffers:
+                  comparison.state.status === "ready" &&
+                  comparison.state.result.status === "ready"
+                    ? groundedBufferReceipts(comparison.state.result)
+                    : null,
+                scope:
+                  "Four serial AB/BA pairs, fresh Node worker isolates, identical current-source cell and original caps. Includes scheduling and GC; no browser, frame-rate or exclusive CPU claim. Failed observations are retained before assertions.",
+              }),
+            );
+            expect(comparison.state.status).toBe("ready");
+            if (comparison.state.status !== "ready")
+              throw new Error(`Cached comparison failed: ${variant}`);
+            expect(
+              grassGroundingWorkerSemanticResult(
+                comparison.state.result,
+                request,
+              ),
+            ).toEqual(expected);
+            expect(comparison.work.operations).toBe(
+              cachedResult.work.operations,
+            );
+            expect(comparison.inputBytes).toBe(cachedResult.inputBytes);
+            expect(comparison.resultBytes).toBe(cachedResult.resultBytes);
+            for (const [inputIndex, [attribute]] of attributes.entries())
+              expect(projected[attribute]).toEqual(inputBefore[inputIndex]);
+            await groundingWorker.close();
+            groundingWorker = undefined;
+          }
+        }
 
         // Exercise production handoff/client/publication against the actual
         // full pond cell. The fixture still owns once-per-surface capture;
