@@ -175,6 +175,56 @@ function addTree(world: World, x: number, z: number) {
 }
 
 describe("bounded rooted flower placement", () => {
+  it("retains complete root transforms and clearance decisions for the two-head sprig at meadow height", () => {
+    const f = fixture();
+    const original = createRootedFlowerGeometry({ height: 0.75 });
+    const sprig = createRootedFlowerGeometry({
+      height: 0.75,
+      variant: "meadow-sprig-v1",
+    });
+    cleanups.push(() => {
+      original.dispose();
+      sprig.dispose();
+    });
+    const road: GrassGroundingRoadSegment = {
+      startX: -40,
+      startZ: 0,
+      endX: 40,
+      endZ: 0,
+      width: 3,
+      blendWidth: 1,
+    };
+    const run = (geometry: THREE.BufferGeometry) =>
+      drain(
+        f.request({
+          geometry,
+          inputs: f.input(empty(), [road]),
+        }),
+      ).result;
+    const baseline = run(original);
+    const candidate = run(sprig);
+    expect(baseline.count).toBeGreaterThan(0);
+    expect(baseline.diagnostics.rejected.road).toBeGreaterThan(0);
+    expect(getRootedFlowerPlacementBounds(sprig, { x: 4, z: 4 })).toEqual(
+      getRootedFlowerPlacementBounds(original, { x: 4, z: 4 }),
+    );
+    expect(candidate.count).toBe(baseline.count);
+    expect(candidate.matrices).toEqual(baseline.matrices);
+    expect(candidate.diagnostics.maximumHorizontalReach).toBe(
+      baseline.diagnostics.maximumHorizontalReach,
+    );
+    expect(candidate.diagnostics.maximumRootYRoundingError).toBe(
+      baseline.diagnostics.maximumRootYRoundingError,
+    );
+    expect(candidate.diagnostics.rejected).toEqual(
+      baseline.diagnostics.rejected,
+    );
+    expect(candidate.diagnostics.steps).toBeLessThanOrEqual(
+      baseline.diagnostics.steps,
+    );
+    expect(candidate.isCurrent()).toBe(true);
+  });
+
   it("rejects candidate keys outside the continuation's admitted cell domain", () => {
     for (const [seed, cx, cz, ordinal] of [
       [NaN, 0, 0, 0],

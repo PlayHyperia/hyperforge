@@ -11,6 +11,14 @@ const create = (height?: number) => {
   owned.push(geometry);
   return geometry;
 };
+const createSprig = (height: number) => {
+  const geometry = createRootedFlowerGeometry({
+    height,
+    variant: "meadow-sprig-v1",
+  });
+  owned.push(geometry);
+  return geometry;
+};
 afterEach(() => {
   for (const geometry of owned) geometry.dispose();
   owned.length = 0;
@@ -367,6 +375,312 @@ describe("rooted meadow flower geometry", () => {
   for (const height of [-Infinity, Infinity, NaN, -1, 0, 0.1199, 0.8001, 100]) {
     it(`rejects unsupported height ${height}`, () => {
       expect(() => createRootedFlowerGeometry({ height })).toThrow();
+    });
+  }
+});
+
+describe("opt-in two-headed meadow sprig geometry", () => {
+  // Actual authored buffers/topology only. Native appearance, wind, material
+  // admission and placement are checked by their real owner; these tests do
+  // not certify lighting, per-pixel contact or frame-time performance.
+  for (const [height] of widthInvariantBaselines) {
+    describe(`height ${height}m`, () => {
+      it("leaves explicit and implicit original variants byte-identical", () => {
+        const original = create(height);
+        const explicit = createRootedFlowerGeometry({
+          height,
+          variant: "single-head-v1",
+        });
+        owned.push(explicit);
+        expect(explicit.name).toBe(original.name);
+        expect(explicit.getIndex()!.array).toEqual(original.getIndex()!.array);
+        expect(Object.keys(explicit.attributes)).toEqual(
+          Object.keys(original.attributes),
+        );
+        for (const name of Object.keys(original.attributes))
+          expect(explicit.getAttribute(name).array).toEqual(
+            original.getAttribute(name).array,
+          );
+        expect(explicit.boundingBox).toEqual(original.boundingBox);
+        expect(explicit.boundingSphere).toEqual(original.boundingSphere);
+      });
+
+      it("stays inside the unchanged static envelope and exact full height", () => {
+        const original = create(height),
+          sprig = createSprig(height);
+        const base = original.getAttribute("position"),
+          position = sprig.getAttribute("position");
+        const metadata = sprig.getAttribute("flowerHeight"),
+          petal = sprig.getAttribute("flowerPetal");
+        let baseRadius = 0,
+          radius = 0,
+          highest = 0,
+          roots = 0;
+        for (let i = 0; i < base.count; i++)
+          baseRadius = Math.max(
+            baseRadius,
+            Math.hypot(base.getX(i), base.getZ(i)),
+          );
+        for (let i = 0; i < position.count; i++) {
+          const p = point(position, i);
+          expect(original.boundingBox!.containsPoint(p)).toBe(true);
+          expect(sprig.boundingBox!.containsPoint(p)).toBe(true);
+          expect(
+            p.distanceTo(sprig.boundingSphere!.center),
+          ).toBeLessThanOrEqual(sprig.boundingSphere!.radius + height * 1e-7);
+          expect(p.y).toBeGreaterThanOrEqual(0);
+          expect(metadata.getX(i)).toBe(p.y);
+          expect(metadata.getY(i)).toBe(Math.fround(height));
+          highest = Math.max(highest, p.y);
+          radius = Math.max(radius, Math.hypot(p.x, p.z));
+          if (p.y === 0) {
+            roots++;
+            expect(petal.getW(i)).toBe(0);
+            expect(point(petal, i).toArray()).toEqual([0, 0, 0]);
+          }
+        }
+        expect(roots).toBe(11); // One ten-sided ground ring plus its shared cap.
+        expect(highest).toBe(Math.fround(height));
+        expect(radius).toBe(baseRadius); // Existing leaves still own the extrema.
+        expect(sprig.boundingSphere!.radius).toBeLessThan(height);
+      });
+
+      it("uses 353 real vertices and 586 nondegenerate correctly wound triangles", () => {
+        const geometry = createSprig(height),
+          position = geometry.getAttribute("position");
+        const normal = geometry.getAttribute("normal"),
+          index = geometry.getIndex()!;
+        expect(geometry.name).toBe("RootedMeadowSprig");
+        expect(position.count).toBe(353);
+        expect(index.count).toBe(586 * 3);
+        expect(position.count).toBeLessThanOrEqual(700);
+        expect(index.count).toBeLessThanOrEqual(600 * 3);
+        expect(index.array).toBeInstanceOf(Uint32Array);
+        expect(geometry.groups).toEqual([]);
+        expect(geometry.morphAttributes).toEqual({});
+        expect(Object.keys(geometry.attributes).sort()).toEqual(
+          [
+            "position",
+            "normal",
+            "color",
+            "uv",
+            "flowerHeight",
+            "flowerPetal",
+          ].sort(),
+        );
+        for (const attribute of Object.values(geometry.attributes)) {
+          expect(attribute.array).toBeInstanceOf(Float32Array);
+          expect(attribute.count).toBe(position.count);
+          expect(attribute.normalized).toBe(false);
+          for (const value of attribute.array)
+            expect(Number.isFinite(value)).toBe(true);
+        }
+        const used = new Set<number>();
+        for (let i = 0; i < position.count; i++)
+          expect(point(normal, i).length()).toBeCloseTo(1, 5);
+        for (let i = 0; i < index.count; i += 3) {
+          const ids = [index.getX(i), index.getX(i + 1), index.getX(i + 2)];
+          for (const id of ids) {
+            expect(Number.isInteger(id)).toBe(true);
+            expect(id).toBeGreaterThanOrEqual(0);
+            expect(id).toBeLessThan(position.count);
+            used.add(id);
+          }
+          const [a, b, c] = ids.map((id) => point(position, id));
+          const face = b.clone().sub(a).cross(c.clone().sub(a));
+          expect(face.length()).toBeGreaterThan(height * height * 1e-9);
+          const average = ids.reduce(
+            (sum, id) => sum.add(point(normal, id)),
+            new THREE.Vector3(),
+          );
+          expect(face.normalize().dot(average.normalize())).toBeGreaterThan(
+            0.05,
+          );
+        }
+        expect(used.size).toBe(position.count);
+        for (const name of ["uv", "color"])
+          for (const value of geometry.getAttribute(name).array) {
+            expect(value).toBeGreaterThanOrEqual(0);
+            expect(value).toBeLessThanOrEqual(1);
+          }
+      });
+
+      it("welds both heads into one closed branched support without an internal stem wall", () => {
+        const geometry = createSprig(height),
+          position = geometry.getAttribute("position");
+        const index = geometry.getIndex()!,
+          petal = geometry.getAttribute("flowerPetal");
+        // Body is authored first: main stem/root, branch, then both heads.
+        const supportVertices = 123;
+        for (let i = 0; i < supportVertices; i++) expect(petal.getW(i)).toBe(0);
+        const supportEdges = new Map<
+          string,
+          { count: number; direction: number }
+        >();
+        const adjacency = Array.from(
+          { length: position.count },
+          () => new Set<number>(),
+        );
+        let supportFaces = 0;
+        for (let i = 0; i < index.count; i += 3) {
+          const ids = [index.getX(i), index.getX(i + 1), index.getX(i + 2)];
+          const support = ids.every((id) => id < supportVertices);
+          if (support) supportFaces++;
+          // The two old sidewall faces are removed, not hidden inside a tube.
+          expect(ids.slice().sort((a, b) => a - b)).not.toEqual([11, 12, 21]);
+          expect(ids.slice().sort((a, b) => a - b)).not.toEqual([12, 21, 22]);
+          for (let j = 0; j < 3; j++) {
+            const a = ids[j],
+              b = ids[(j + 1) % 3];
+            adjacency[a].add(b);
+            adjacency[b].add(a);
+            if (!support) continue;
+            const key = `${Math.min(a, b)},${Math.max(a, b)}`;
+            const edge = supportEdges.get(key) ?? { count: 0, direction: 0 };
+            edge.count++;
+            edge.direction += a < b ? 1 : -1;
+            supportEdges.set(key, edge);
+          }
+        }
+        expect(supportFaces).toBe(242);
+        expect(supportVertices - supportEdges.size + supportFaces).toBe(2);
+        for (const edge of supportEdges.values())
+          expect(edge).toEqual({ count: 2, direction: 0 });
+        const pending = [60],
+          visited = new Set<number>(); // Shared ground cap.
+        while (pending.length) {
+          const id = pending.pop()!;
+          if (visited.has(id)) continue;
+          visited.add(id);
+          for (const neighbor of adjacency[id])
+            if (!visited.has(neighbor)) pending.push(neighbor);
+        }
+        expect(visited.size).toBe(position.count);
+      });
+
+      it("keeps ten exact supported flutter hinges on two staggered five-petal heads", () => {
+        const geometry = createSprig(height),
+          position = geometry.getAttribute("position");
+        const petal = geometry.getAttribute("flowerPetal"),
+          uv = geometry.getAttribute("uv");
+        const fullHeight = geometry.getAttribute("flowerHeight").getY(0),
+          index = geometry.getIndex()!;
+        const groups = new Map<string, number[]>(),
+          support = new Set<number>();
+        const key = (i: number) => point(petal, i).toArray().join(",");
+        for (let i = 0; i < index.count; i += 3) {
+          const ids = [index.getX(i), index.getX(i + 1), index.getX(i + 2)];
+          if (ids.every((id) => petal.getW(id) === 0))
+            ids.forEach((id) => support.add(id));
+        }
+        for (let i = 0; i < position.count; i++) {
+          const weight = petal.getW(i);
+          expect(weight).toBeGreaterThanOrEqual(0);
+          expect(weight).toBeLessThanOrEqual(1);
+          if (point(petal, i).lengthSq() === 0) {
+            expect(weight).toBe(0);
+            continue;
+          }
+          const ids = groups.get(key(i)) ?? [];
+          ids.push(i);
+          groups.set(key(i), ids);
+          if (weight > 0) {
+            expect(position.getY(i)).toBeGreaterThan(0);
+            expect(
+              Math.hypot(
+                position.getX(i) - petal.getX(i),
+                position.getZ(i) - petal.getZ(i),
+              ),
+            ).toBeLessThanOrEqual(0.08 * fullHeight);
+          }
+        }
+        expect(groups.size).toBe(10);
+        const headHeights = new Map<number, number>();
+        for (const ids of groups.values()) {
+          expect(ids).toHaveLength(22); // Shared hinge, four five-wide rows, tip.
+          const hingeIds = ids.filter((id) => petal.getW(id) === 0);
+          expect(hingeIds).toHaveLength(1);
+          const hingeId = hingeIds[0],
+            hinge = point(petal, hingeId);
+          expect(point(position, hingeId).toArray()).toEqual(hinge.toArray());
+          expect(support.has(hingeId)).toBe(true);
+          headHeights.set(hinge.y, (headHeights.get(hinge.y) ?? 0) + 1);
+          const tips = ids.filter((id) => petal.getW(id) === 1);
+          expect(tips).toHaveLength(1);
+          const mid = ids.filter((id) => uv.getY(id) === Math.fround(0.46));
+          expect(mid).toHaveLength(5);
+          const length = Math.hypot(
+            position.getX(tips[0]) - hinge.x,
+            position.getZ(tips[0]) - hinge.z,
+          );
+          const width = point(position, mid[0]).distanceTo(
+            point(position, mid[4]),
+          );
+          expect(width / length).toBeGreaterThan(0.62);
+          expect(
+            (position.getY(mid[0]) + position.getY(mid[4])) / 2 -
+              position.getY(mid[2]),
+          ).toBeGreaterThan(height * 0.006);
+        }
+        expect(headHeights.size).toBe(2);
+        expect([...headHeights.values()]).toEqual([5, 5]);
+        const ys = [...headHeights.keys()];
+        expect(Math.abs(ys[0] - ys[1])).toBeGreaterThan(height * 0.12);
+        for (let i = 0; i < index.count; i += 3) {
+          const ids = [index.getX(i), index.getX(i + 1), index.getX(i + 2)];
+          const flexed = ids.find((id) => petal.getW(id) > 0);
+          if (flexed === undefined) continue;
+          for (const id of ids) {
+            expect(key(id)).toBe(key(flexed));
+            if (petal.getW(id) === 0) {
+              expect(point(position, id).toArray()).toEqual(
+                point(petal, flexed).toArray(),
+              );
+              expect(support.has(id)).toBe(true);
+            }
+          }
+        }
+      });
+    });
+  }
+
+  it("is deterministic, independently owned and proportional at the height limits", () => {
+    const first = createSprig(0.75),
+      second = createSprig(0.75);
+    for (const name of Object.keys(first.attributes)) {
+      expect(first.getAttribute(name).array).not.toBe(
+        second.getAttribute(name).array,
+      );
+      expect(first.getAttribute(name).array).toEqual(
+        second.getAttribute(name).array,
+      );
+    }
+    expect(first.getIndex()!.array).not.toBe(second.getIndex()!.array);
+    expect(first.getIndex()!.array).toEqual(second.getIndex()!.array);
+    const small = createSprig(0.12),
+      large = createSprig(0.8);
+    expect(small.getIndex()!.array).toEqual(large.getIndex()!.array);
+    for (const name of ["position", "flowerHeight", "flowerPetal"]) {
+      const a = small.getAttribute(name).array,
+        b = large.getAttribute(name).array;
+      expect(a.length).toBe(b.length);
+      for (let i = 0; i < a.length; i++)
+        expect(b[i]).toBeCloseTo(
+          a[i] * (name === "flowerPetal" && i % 4 === 3 ? 1 : 0.8 / 0.12),
+          6,
+        );
+    }
+    for (const name of ["uv", "color"])
+      expect(small.getAttribute(name).array).toEqual(
+        large.getAttribute(name).array,
+      );
+  });
+
+  for (const variant of ["", "other", null, 0]) {
+    it(`rejects unsupported variant ${String(variant)}`, () => {
+      expect(() =>
+        createRootedFlowerGeometry({ variant: variant as never }),
+      ).toThrow(/variant/);
     });
   }
 });

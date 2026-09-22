@@ -101,9 +101,12 @@ export class RootedFlowerVisualManager {
     options.parent.updateWorldMatrix(true, false);
     if (!options.parent.matrixWorld.equals(this.identity))
       throw new Error("Rooted flower parent must remain at world identity");
-    // This taller meadow variety lifts blossoms through the existing grass canopy;
-    // the factory default remains a separate, smaller flower recipe.
-    const geometry = FlowerGen.createRootedFlowerGeometry({ height: 0.75 });
+    // Two connected blossoms share one root and the existing pool/wind contract.
+    // The factory default remains the separate single-head recipe.
+    const geometry = FlowerGen.createRootedFlowerGeometry({
+      height: 0.75,
+      variant: "meadow-sprig-v1",
+    });
     const material = createRootedFlowerMaterial(this.windNodes, {
       focus: this.focus,
       fadeStart: 24,

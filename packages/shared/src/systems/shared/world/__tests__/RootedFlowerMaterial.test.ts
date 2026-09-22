@@ -2,7 +2,10 @@ import { describe, expect, it } from "vitest";
 import { instanceIndex, normalLocal, positionLocal, uniform } from "three/tsl";
 import type { Node } from "three/webgpu";
 import THREE from "../../../../extras/three/three";
-import { createRootedFlowerGeometry } from "../../../../../../procgen/src/flowers/RootedFlowerGeometry";
+import {
+  createRootedFlowerGeometry,
+  type RootedFlowerGeometryOptions,
+} from "../../../../../../procgen/src/flowers/RootedFlowerGeometry";
 import {
   INSTANCE_MATRIX_STORAGE_ATTRIBUTE,
   createStorageInstancedMesh,
@@ -19,8 +22,15 @@ import {
 
 // Real rooted geometry, native storage attributes and native NodeBuilder stacks.
 // These bounded CPU graph checks do not claim GPU or native visual approval.
-function fixture(height = 0.38, capacity = 2, fade?: RootedFlowerFadeOptions) {
-  const geometry = createRootedFlowerGeometry({ height });
+const flowerVariants = ["single-head-v1", "meadow-sprig-v1"] as const;
+
+function fixture(
+  height = 0.38,
+  capacity = 2,
+  fade?: RootedFlowerFadeOptions,
+  variant?: RootedFlowerGeometryOptions["variant"],
+) {
+  const geometry = createRootedFlowerGeometry({ height, variant });
   const wind = {
     time: uniform(7.25),
     strength: uniform(1.3),
@@ -489,10 +499,14 @@ describe("inactive rooted flower material", () => {
     expect(geometryDisposals).toBe(1);
   });
 
-  it.each([0.12, 0.38, 0.8])(
-    "admits actual Float32 metadata at height %s",
-    (height) => {
-      const f = fixture(height);
+  it.each(
+    flowerVariants.flatMap((variant) =>
+      [0.12, 0.38, 0.75, 0.8].map((height) => ({ variant, height })),
+    ),
+  )(
+    "admits actual Float32 metadata for $variant at height $height",
+    ({ height, variant }) => {
+      const f = fixture(height, 2, undefined, variant);
       try {
         expect(() => assertRootedFlowerPool(f.mesh)).not.toThrow();
         expect(() => expand(f.material.positionNode, f.mesh)).not.toThrow();
@@ -729,6 +743,111 @@ describe("inactive rooted flower material", () => {
 });
 
 describe("connected flower displacement contract", () => {
+  it("deforms both sprig heads and their connected support through the actual native graph", () => {
+    const f = fixture(0.75, 2, undefined, "meadow-sprig-v1");
+    try {
+      const graph = expand(f.material.positionNode, f.mesh);
+      const position = f.geometry.getAttribute("position");
+      const petal = f.geometry.getAttribute("flowerPetal");
+      const tips = new Map<string, number>();
+      for (let vertex = 0; vertex < position.count; vertex++) {
+        if (petal.getW(vertex) === 1)
+          tips.set(
+            [petal.getX(vertex), petal.getY(vertex), petal.getZ(vertex)].join(
+              ",",
+            ),
+            vertex,
+          );
+      }
+      expect(tips.size).toBe(10);
+      expect(
+        new Set([...tips.values()].map((vertex) => petal.getY(vertex))).size,
+      ).toBe(2);
+      for (const instance of [0, 1]) {
+        const matrix = new THREE.Matrix4();
+        f.mesh.getMatrixAt(instance, matrix);
+        const inverseLinear = new THREE.Matrix3()
+          .setFromMatrix4(matrix)
+          .invert();
+        for (const time of [0, 7.3, 100]) {
+          f.wind.time.value = time;
+          for (let vertex = 0; vertex < position.count; vertex++) {
+            const actual = graphSample(graph, f, vertex, undefined, instance);
+            const expected = numericSample(
+              f.geometry,
+              matrix,
+              vertex,
+              time,
+              f.wind.strength.value,
+              f.wind.direction.value,
+            );
+            expect(actual.position.distanceTo(expected.position)).toBeLessThan(
+              1e-10,
+            );
+            expect(actual.normal.distanceTo(expected.normal)).toBeLessThan(
+              1e-10,
+            );
+            expect(actual.normal.length()).toBeCloseTo(1, 12);
+            if (position.getY(vertex) === 0)
+              expect(actual.position.toArray()).toEqual(
+                new THREE.Vector3()
+                  .fromBufferAttribute(position, vertex)
+                  .applyMatrix4(matrix)
+                  .toArray(),
+              );
+          }
+          // Differentiate the composed graph at every petal tip of both heads.
+          for (const vertex of tips.values()) {
+            const authored = new THREE.Vector3().fromBufferAttribute(
+              position,
+              vertex,
+            );
+            const originalNormal = new THREE.Vector3()
+              .fromBufferAttribute(f.geometry.getAttribute("normal"), vertex)
+              .applyMatrix3(new THREE.Matrix3().getNormalMatrix(matrix))
+              .normalize();
+            const tangent = originalNormal
+              .clone()
+              .cross(new THREE.Vector3(1, 0, 0))
+              .normalize();
+            const bitangent = originalNormal.clone().cross(tangent).normalize();
+            const actual = graphSample(graph, f, vertex, undefined, instance);
+            const epsilon =
+              0.75 *
+              new THREE.Vector3().setFromMatrixColumn(matrix, 1).length() *
+              1e-4;
+            for (const direction of [tangent, bitangent]) {
+              const step = direction
+                .clone()
+                .multiplyScalar(epsilon)
+                .applyMatrix3(inverseLinear);
+              const plus = graphSample(
+                graph,
+                f,
+                vertex,
+                authored.clone().add(step),
+                instance,
+              ).position;
+              const minus = graphSample(
+                graph,
+                f,
+                vertex,
+                authored.clone().sub(step),
+                instance,
+              ).position;
+              const derivative = plus.sub(minus).multiplyScalar(0.5 / epsilon);
+              expect(Math.abs(actual.normal.dot(derivative))).toBeLessThan(
+                2e-6,
+              );
+            }
+          }
+        }
+      }
+    } finally {
+      f.dispose();
+    }
+  });
+
   it.each([
     { yaw: 0.6, scale: 0.8 },
     { yaw: -1.2, scale: 3 },
@@ -918,10 +1037,14 @@ describe("connected flower displacement contract", () => {
     }
   });
 
-  it.each([0.12, 0.38, 0.8])(
-    "keeps roots fixed and all scaled vertices inside expanded static bounds: %s",
-    (height) => {
-      const geometry = createRootedFlowerGeometry({ height });
+  it.each(
+    flowerVariants.flatMap((variant) =>
+      [0.12, 0.38, 0.75, 0.8].map((height) => ({ variant, height })),
+    ),
+  )(
+    "keeps $variant roots fixed and all scaled vertices inside expanded static bounds: $height",
+    ({ height, variant }) => {
+      const geometry = createRootedFlowerGeometry({ height, variant });
       const authored = geometry.getAttribute("flowerHeight");
       const position = geometry.getAttribute("position");
       const petals = geometry.getAttribute("flowerPetal");
@@ -1125,94 +1248,102 @@ describe("optional owner-focused rooted flower fade", () => {
     }
   });
 
-  it("shrinks the complete wind-deformed geometry uniformly about each root at the fixed endpoints", () => {
-    const focus = uniform(new THREE.Vector2());
-    const baseline = fixture();
-    const faded = fixture(0.38, 2, { focus, fadeStart: 24, fadeEnd: 32 });
-    try {
-      const originalGraph = expand(
-        baseline.material.positionNode,
-        baseline.mesh,
+  it.each(flowerVariants)(
+    "shrinks the complete %s wind-deformed geometry uniformly about each root at the fixed endpoints",
+    (variant) => {
+      const focus = uniform(new THREE.Vector2());
+      const baseline = fixture(0.38, 2, undefined, variant);
+      const faded = fixture(
+        0.38,
+        2,
+        { focus, fadeStart: 24, fadeEnd: 32 },
+        variant,
       );
-      const graph = expand(faded.material.positionNode, faded.mesh);
-      const count = faded.geometry.getAttribute("position").count;
-      for (const instance of [0, 1]) {
-        const matrix = new THREE.Matrix4();
-        faded.mesh.getMatrixAt(instance, matrix);
-        const root = new THREE.Vector3().setFromMatrixPosition(matrix);
-        const scale = new THREE.Vector3()
-          .setFromMatrixColumn(matrix, 1)
-          .length();
-        const height = faded.geometry.getAttribute("flowerHeight").getY(0);
-        const windBounds = getRootedFlowerWindBounds(height, scale);
-        const box = faded.geometry.boundingBox
-          ?.clone()
-          .applyMatrix4(matrix)
-          .expandByVector(
-            new THREE.Vector3(windBounds.x, windBounds.y, windBounds.z),
-          );
-        const sphere = faded.geometry.boundingSphere
-          ?.clone()
-          .applyMatrix4(matrix);
-        if (!box || !sphere) throw new Error("Actual flower bounds missing");
-        sphere.radius += windBounds.sphere;
-        expect(box.containsPoint(root)).toBe(true);
-        expect(sphere.containsPoint(root)).toBe(true);
-        for (const [distance, retained] of [
-          [0, 1],
-          [24, 1],
-          [26, 0.84375],
-          [28, 0.5],
-          [30, 0.15625],
-          [32, 0],
-          [40, 0],
-        ]) {
-          // Non-axis-aligned focus proves the world-XZ radial distance.
-          focus.value.set(root.x + distance * 0.6, root.z + distance * 0.8);
-          for (let vertex = 0; vertex < count; vertex++) {
-            const full = graphSample(
-              originalGraph,
-              baseline,
-              vertex,
-              undefined,
-              instance,
+      try {
+        const originalGraph = expand(
+          baseline.material.positionNode,
+          baseline.mesh,
+        );
+        const graph = expand(faded.material.positionNode, faded.mesh);
+        const count = faded.geometry.getAttribute("position").count;
+        for (const instance of [0, 1]) {
+          const matrix = new THREE.Matrix4();
+          faded.mesh.getMatrixAt(instance, matrix);
+          const root = new THREE.Vector3().setFromMatrixPosition(matrix);
+          const scale = new THREE.Vector3()
+            .setFromMatrixColumn(matrix, 1)
+            .length();
+          const height = faded.geometry.getAttribute("flowerHeight").getY(0);
+          const windBounds = getRootedFlowerWindBounds(height, scale);
+          const box = faded.geometry.boundingBox
+            ?.clone()
+            .applyMatrix4(matrix)
+            .expandByVector(
+              new THREE.Vector3(windBounds.x, windBounds.y, windBounds.z),
             );
-            const actual = graphSample(
+          const sphere = faded.geometry.boundingSphere
+            ?.clone()
+            .applyMatrix4(matrix);
+          if (!box || !sphere) throw new Error("Actual flower bounds missing");
+          sphere.radius += windBounds.sphere;
+          expect(box.containsPoint(root)).toBe(true);
+          expect(sphere.containsPoint(root)).toBe(true);
+          for (const [distance, retained] of [
+            [0, 1],
+            [24, 1],
+            [26, 0.84375],
+            [28, 0.5],
+            [30, 0.15625],
+            [32, 0],
+            [40, 0],
+          ]) {
+            // Non-axis-aligned focus proves the world-XZ radial distance.
+            focus.value.set(root.x + distance * 0.6, root.z + distance * 0.8);
+            for (let vertex = 0; vertex < count; vertex++) {
+              const full = graphSample(
+                originalGraph,
+                baseline,
+                vertex,
+                undefined,
+                instance,
+              );
+              const actual = graphSample(
+                graph,
+                faded,
+                vertex,
+                undefined,
+                instance,
+              );
+              const expected = full.position
+                .clone()
+                .sub(root)
+                .multiplyScalar(retained)
+                .add(root);
+              expect(actual.position.distanceTo(expected)).toBeLessThan(1e-12);
+              expect(actual.normal.toArray()).toEqual(full.normal.toArray());
+              expect(actual.normal.length()).toBeCloseTo(1, 12);
+              expect(box.containsPoint(actual.position)).toBe(true);
+              expect(sphere.containsPoint(actual.position)).toBe(true);
+              if (retained === 0)
+                expect(actual.position.toArray()).toEqual(root.toArray());
+            }
+            // Exact root anchor, not a promise that the stem ring keeps its width.
+            const anchor = graphSample(
               graph,
               faded,
-              vertex,
-              undefined,
+              0,
+              new THREE.Vector3(),
               instance,
             );
-            const expected = full.position
-              .clone()
-              .sub(root)
-              .multiplyScalar(retained)
-              .add(root);
-            expect(actual.position.distanceTo(expected)).toBeLessThan(1e-12);
-            expect(actual.normal.toArray()).toEqual(full.normal.toArray());
-            expect(actual.normal.length()).toBeCloseTo(1, 12);
-            expect(box.containsPoint(actual.position)).toBe(true);
-            expect(sphere.containsPoint(actual.position)).toBe(true);
-            if (retained === 0)
-              expect(actual.position.toArray()).toEqual(root.toArray());
+            expect(anchor.position.toArray()).toEqual(root.toArray());
           }
-          // Exact root anchor, not a promise that the stem ring keeps its width.
-          const anchor = graphSample(
-            graph,
-            faded,
-            0,
-            new THREE.Vector3(),
-            instance,
-          );
-          expect(anchor.position.toArray()).toEqual(root.toArray());
         }
+      } finally {
+        baseline.dispose();
+        faded.dispose();
       }
-    } finally {
-      baseline.dispose();
-      faded.dispose();
-    }
-  });
+    },
+  );
 
   it("uses identical vertex fade for primary and shadow cameras and observes live owner focus", () => {
     const focus = uniform(new THREE.Vector2(19 + 28, -42));

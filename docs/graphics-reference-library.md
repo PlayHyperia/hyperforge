@@ -1,5 +1,48 @@
 # Hyperia graphics reference library
 
+## 2026-09-22 — measured grass roots and reviewed two-head meadow sprig
+
+- [x] Native131/build65 completed the bounded root diagnostic: 12 actual-buffer
+  roots, 36 retained-triangle samples, maximum CPU height residual 3.91 micrometres.
+  Sampled depths 1.210–2.066m are beyond the 0.2m near plane. Only three of five
+  historical reference pixels match within the unchanged12px search tolerance.
+  This is not GPU/pixel/contact proof; collector/view frames differ. No blanket burial.
+- [x] Preserve native130's failed collector assertion. Stock matrix raw readWrite
+  metadata compiles to read-only vertex storage; exact compiled binding/ownership
+  now checked. Root-delta/visibility readOnly checks remain strict. No shader fix.
+- [x] Implement explicit meadow-sprig-v1: two staggered five-petal blossoms,
+  broader cupped petals, one welded branched stem/root and ten flutter hinges.
+  Measured353 vertices/586 triangles versus362/584: nine fewer vertices, two more
+  triangles, unchanged700/600 limits. Petal coverage can still increase fragment cost.
+- [x] Keep the single-head factory default byte-identical to committed8790558
+  across six heights, including normals, bounds and every attribute/index buffer.
+  Only the existing opt-in flower owner selects the new0.75m sprig. No default promotion.
+- [x] Pass serialized geometry87/87 and shared flower155/155 tests; full shared
+  plus retained-world type check751roots/2457sources has zero diagnostics and
+  stable pins. Six-file lint passes. Independent source review found no blocker.
+  Tests cover welded topology, normals, hinges, all-vertex composed wind,
+  both-head normal derivatives, roots, fade, bounds and exact placement transforms.
+- [x] Build66: nine isolated bundles/1096source pins; only factory and flower-owner
+  compile inputs differ from build65. Native132 succeeds with three1280x720
+  Chrome/Metal views, startup29.254s,122/122grass cells and ten nominal host samples.
+  All three poses, full205/180/191 flower populations, clearance reach, selected
+  transform and unchanged grass/flower shader programs match the pinned baseline.
+- [x] Inspect actual close/wide PNGs: retain fuller paired blossoms and rounder
+  petal silhouettes as an incremental opt-in art improvement. Grass remains flat,
+  broad and angular close up; flowers do not solve its ground/material integration.
+- [x] Capture6.014s ordinary wind/60observations; VP8 decodes180frames at1280x720.
+  Samples1/4/6 retain connected stems/heads. No recorded GPU errors/device loss;
+  full continuous playback, animated intersections and smoothness remain unapproved.
+  Raw flower-owner maximum slice2.3ms/validation2.1ms and two soft overruns retained.
+- [x] Runtime103 and capture browser closed; temporary DB removed.145protected
+  compiled artifacts and playable localhost3333/persistent database remain unchanged.
+  Evidence: native131/QUALIFICATION.md and native132/visual-review.json, plus
+  service-layout-network01-UNQUALIFIED/rooted-flower-sprig-* test receipts.
+- [ ] Next: coordinated grass blade/ground appearance at close and gameplay height.
+  Do not repeat rejected near4 or pointed-taper trials, bury supported roots, or
+  equate stronger color contrast with physical contact. Continue primary-source
+  reference review; full AAA/default/performance/streaming gates remain open.
+
 ## 2026-09-22 — grass root contrast visually reviewed; restart checkpoint
 
 - [x] Native129/build65 completes the original Chrome/Metal WebGPU gates:

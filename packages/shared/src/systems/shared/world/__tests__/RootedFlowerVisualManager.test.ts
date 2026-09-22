@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
 import THREE from "../../../../extras/three/three";
+import { createRootedFlowerGeometry } from "../../../../../../procgen/src/flowers/RootedFlowerGeometry";
 import { World } from "../../../../core/World";
 import { ResourceEntity } from "../../../../entities/world/ResourceEntity";
 import { EntityType, ResourceType } from "../../../../types/entities";
@@ -292,9 +293,9 @@ describe("bounded actual rooted-flower owner (CPU lifecycle, not GPU/performance
     ).toBe(f.mesh.instanceMatrix);
     const position = f.mesh.geometry.getAttribute("position");
     const flowerHeight = f.mesh.geometry.getAttribute("flowerHeight");
-    expect(position.count).toBe(362);
+    expect(position.count).toBe(353);
     expect(flowerHeight.count).toBe(position.count);
-    expect(f.mesh.geometry.index?.count).toBe(1752);
+    expect(f.mesh.geometry.index?.count).toBe(1758);
     expect(f.mesh.geometry.index?.array).toBeInstanceOf(Uint32Array);
     for (let vertex = 0; vertex < position.count; vertex++) {
       expect(flowerHeight.getY(vertex)).toBe(0.75);
@@ -302,6 +303,26 @@ describe("bounded actual rooted-flower owner (CPU lifecycle, not GPU/performance
     }
     expect(f.mesh.geometry.boundingBox?.min.y).toBe(0);
     expect(f.mesh.geometry.boundingBox?.max.y).toBe(0.75);
+    const sprig = createRootedFlowerGeometry({
+      height: 0.75,
+      variant: "meadow-sprig-v1",
+    });
+    try {
+      for (const name of [
+        "position",
+        "normal",
+        "color",
+        "uv",
+        "flowerHeight",
+        "flowerPetal",
+      ])
+        expect(f.mesh.geometry.getAttribute(name).array).toEqual(
+          sprig.getAttribute(name).array,
+        );
+      expect(f.mesh.geometry.index?.array).toEqual(sprig.index?.array);
+    } finally {
+      sprig.dispose();
+    }
     expect(f.mesh.frustumCulled).toBe(true);
     expect(f.material.transparent).toBe(false);
     expect(f.material.opacity).toBe(1);
