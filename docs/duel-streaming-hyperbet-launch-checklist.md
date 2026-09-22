@@ -2803,6 +2803,44 @@ lifetime integration and real-game costing. The
 [procedural terrain example](https://threejs.org/examples/webgpu_tsl_procedural_terrain.html)
 remains an art/TSL reference, not replacement authority for gameplay terrain.
 
+#### Connected tree-wind foundation — NOT active in the game
+
+- The actual resource GLB shader masks the whole sway by leaf color, leaving
+  bark stationary, and uses post-instance absolute Y. A standalone replacement
+  now derives shared full-LOD0 height metadata, anchors roots, and bends matching
+  wood/leaf coordinates together. Main displacement is capped at 0.36 m; finer
+  leaf flutter is not implemented yet.
+- It reuses native r186 batch matrix textures/storage matrices and preserves
+  borrowed geometry/collision ownership. Pool world identity and upright
+  yaw/positive uniform scale are explicit admission requirements. Ordinary
+  uniform-buffer instancing is deliberately unsupported.
+- Independent source review caught an authored-tangent coordinate defect that
+  the initial vertical-tangent cases missed. Corrected tests include zero-wind
+  and oblique normal/tangent pairs under yaw and scale; authored tangents are
+  forward-transformed before applying the bend Jacobian. Initial root01/types01
+  receipts remain historical, not final acceptance.
+- Final focused tests: 32/32; full shared plus explicit retained-world
+  no-emit: 736 roots, 2,415 sources, zero diagnostics, unchanged source pins.
+  Scoped lint/format and review pass. Actual r186 storage WGSL flow generation
+  uses an uninitialized real renderer, not a rendered/GPU acceptance test.
+- Read-only GLB header census of retained general01/03/05 found bark normal
+  textures but no authored tangent attributes. This is not all-model/all-LOD
+  coverage or a substitute for inspecting loader-baked geometry.
+- [ ] Integrate explicit material mode and owned metadata into both resource
+  pools; preserve per-variant descriptors across missing LODs and slot matching.
+- [ ] Qualify animated bounds, exact tree/resource lifetime, shadows and actual
+  headful WebGPU material/LOD variants. Compare naturally moving close-ups and
+  matched frame/memory cost before activation or visual approval.
+- [ ] Keep native105's grass-fitting failure open. Do not raise its work caps,
+  relabel elapsed timing as exclusive CPU, or equate later success with a fix.
+
+Private receipts: tree-wind-foundation-root02.json and
+tree-wind-foundation-types02.log/process.json in the retained service-layout
+evidence directory; tree-wind-retained-model-headers01.json; and
+inland-pond-integration01-UNQUALIFIED/TREE_WIND_NEXT.md.
+No runtime import, public asset/default promotion, or live localhost change
+is part of this foundation checkpoint.
+
 
 ### Pond-bank service ground — 2026-09-22
 
