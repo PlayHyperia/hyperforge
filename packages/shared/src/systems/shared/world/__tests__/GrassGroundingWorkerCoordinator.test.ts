@@ -5,6 +5,7 @@ import {
   type GrassGroundingWorkerResponse,
 } from "../../../../utils/workers/GrassGroundingWorkerWire";
 import {
+  captureGrassGroundingFailure,
   GRASS_BLADE_GROUNDING_JOB_LIMITS,
   type GrassBladeGroundingResult,
   type GrassGroundingRoadSegment,
@@ -659,9 +660,27 @@ describe("actual retained-terrain grounding worker coordinator", () => {
       status: "failed_budget",
       reason: "grounding_work",
     });
+    const surface = item.request.ownSurface;
+    const failure = captureGrassGroundingFailure(job, {
+      key: "actual-coordinator-failure",
+      nodeId: surface.nodeId,
+      lod: item.request.lod,
+      isLodSwap: false,
+      bounds: {
+        minX: surface.centerX - surface.size / 2,
+        maxX: surface.centerX + surface.size / 2,
+        minZ: surface.centerZ - surface.size / 2,
+        maxZ: surface.centerZ + surface.size / 2,
+      },
+    });
+    expect(failure?.observation?.cumulativeMaximumSliceMs).toBe(
+      job.cumulativeMaximumSliceMs,
+    );
+    expect(failure?.maximumSliceMs).toBe(job.maximumSliceMs);
     const calls = value.port.postCalls,
       operations = job.operations,
-      activeMs = job.activeMs;
+      activeMs = job.activeMs,
+      cumulativeMaximum = job.cumulativeMaximumSliceMs;
     for (let i = 0; i < 10; i++) {
       job.advance();
       value.coordinator.advanceMaintenance();
@@ -669,6 +688,7 @@ describe("actual retained-terrain grounding worker coordinator", () => {
     expect(job.state).toBe(state);
     expect(job.operations).toBe(operations);
     expect(job.activeMs).toBe(activeMs);
+    expect(job.cumulativeMaximumSliceMs).toBe(cumulativeMaximum);
     expect(value.port.postCalls).toBe(calls);
   });
 
@@ -835,6 +855,116 @@ describe("actual retained-terrain grounding worker coordinator", () => {
     expect(job.activeMs).toBeLessThan(
       GRASS_BLADE_GROUNDING_JOB_LIMITS.maximumActiveMs,
     );
+  });
+
+  it("passively exposes cumulative fitting slice maxima without replacing main-thread advance maxima", async () => {
+    const item = fixture("fine-near4"),
+      value = await session();
+    for (let pass = 0; pass < 2; pass++) {
+      const { job } = start(value, item);
+      const descriptor = Object.getOwnPropertyDescriptor(
+        Object.getPrototypeOf(job),
+        "cumulativeMaximumSliceMs",
+      );
+      expect(typeof descriptor?.get).toBe("function");
+      expect(descriptor?.set).toBeUndefined();
+      expect(job.cumulativeMaximumSliceMs).toBe(0);
+      expect(job.maximumSliceMs).toBe(0);
+      let mainMaximum = 0;
+      let workerMaximum: number | null = null;
+      let settledMaximum: number | null = null;
+      let remappingSlices = 0;
+      const observe = () => {
+        const before = {
+          state: job.state,
+          phase: job.phase,
+          lastPhase: job.lastPhase,
+          operations: job.operations,
+          activeMs: job.activeMs,
+          lastSliceOperations: job.lastSliceOperations,
+          lastSliceMs: job.lastSliceMs,
+          maximumSliceMs: job.maximumSliceMs,
+          transportJobId: job.transportJobId,
+        };
+        const receipt = value.coordinator.receipt;
+        const calls = value.port.postCalls;
+        const responses = value.terminal.size;
+        const maximum = job.cumulativeMaximumSliceMs;
+        for (let read = 0; read < 16; read++)
+          expect(job.cumulativeMaximumSliceMs).toBe(maximum);
+        expect(job.state).toBe(before.state);
+        expect({
+          state: job.state,
+          phase: job.phase,
+          lastPhase: job.lastPhase,
+          operations: job.operations,
+          activeMs: job.activeMs,
+          lastSliceOperations: job.lastSliceOperations,
+          lastSliceMs: job.lastSliceMs,
+          maximumSliceMs: job.maximumSliceMs,
+          transportJobId: job.transportJobId,
+        }).toEqual(before);
+        expect(value.coordinator.receipt).toEqual(receipt);
+        expect(value.port.postCalls).toBe(calls);
+        expect(value.terminal.size).toBe(responses);
+      };
+      observe();
+      for (let advance = 0; advance < 100_000; advance++) {
+        if (job.state.status !== "running") break;
+        const beforePhase = job.phase;
+        const beforeMaximum = job.cumulativeMaximumSliceMs;
+        job.advance(1);
+        mainMaximum = Math.max(mainMaximum, job.lastSliceMs);
+        expect(job.maximumSliceMs).toBe(mainMaximum);
+        expect(job.cumulativeMaximumSliceMs).toBeGreaterThanOrEqual(
+          beforeMaximum,
+        );
+        if (beforePhase === "remapping") {
+          remappingSlices++;
+          // No remote work remains: publication's nested slice lies inside
+          // this actual main advance and is charged only once by its owner.
+          expect(job.cumulativeMaximumSliceMs).toBe(
+            Math.max(beforeMaximum, job.lastSliceMs),
+          );
+        }
+        if (job.phase === "remapping" && settledMaximum === null) {
+          if (workerMaximum === null)
+            throw new Error("Remapping began without an actual worker receipt");
+          settledMaximum = job.cumulativeMaximumSliceMs;
+          expect(settledMaximum).toBeGreaterThanOrEqual(workerMaximum);
+          expect(settledMaximum).toBeGreaterThanOrEqual(job.lastSliceMs);
+        }
+        if (job.phase !== beforePhase) observe();
+        const remoteId = job.transportJobId;
+        if (remoteId !== null) {
+          const beforeReceiveMaximum = job.cumulativeMaximumSliceMs;
+          await value.wait(remoteId);
+          const response = value.terminal.get(remoteId);
+          if (!response) throw new Error("Missing actual worker response");
+          if (response.type === "result")
+            workerMaximum = response.work.maximumSliceMs;
+          // Receiving does not advance this job or merge a pending ledger.
+          expect(job.cumulativeMaximumSliceMs).toBe(beforeReceiveMaximum);
+          expect(job.maximumSliceMs).toBe(mainMaximum);
+          observe();
+        }
+      }
+      expect(job.state.status).toBe("ready");
+      if (workerMaximum === null)
+        throw new Error("Actual fitting maximum was never observed");
+      expect(settledMaximum).not.toBeNull();
+      expect(remappingSlices).toBeGreaterThan(0);
+      expect(job.cumulativeMaximumSliceMs).toBeGreaterThanOrEqual(
+        workerMaximum,
+      );
+      expect(job.cumulativeMaximumSliceMs).toBeLessThanOrEqual(job.activeMs);
+      expect(job.maximumSliceMs).toBe(mainMaximum);
+      observe();
+      if (pass === 1)
+        expect(value.coordinator.receipt.cacheHits).toBeGreaterThanOrEqual(
+          item.request.surfaces.length,
+        );
+    }
   });
 
   it("fails closed after actual worker death without relaunching or retrying", async () => {

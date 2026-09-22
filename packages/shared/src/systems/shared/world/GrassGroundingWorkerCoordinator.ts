@@ -206,6 +206,12 @@ export class GrassGroundingWorkerJob {
   get maximumSliceMs(): number {
     return this.context.maximumSliceMs;
   }
+  /** Fitting-ledger maximum across main preparation/publication and merged
+   * worker/transport slices; excludes separately budgeted terrain admission.
+   * Like activeMs, elapsed slices include GC/preemption, not exclusive CPU. */
+  get cumulativeMaximumSliceMs(): number {
+    return this.context.fit.maximumSliceMs;
+  }
   get lastPhase(): string | null {
     return this.context.lastPhase;
   }

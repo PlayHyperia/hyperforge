@@ -1843,8 +1843,16 @@ export class GrassVisualManager implements QuadTreeListener {
         ) {
           // A failed job is no longer selected above: retain one bounded record
           // at its transition, even if later LOD/horizon retirement removes it.
-          console.error("[GrassVisualManager] Grounding failed:", state, {
-            ...captureGrassGroundingFailure(entry.job),
+          // A serialized scalar snapshot survives truncated console object
+          // previews. This failure-only observation does not change work caps.
+          const failure = {
+            ...captureGrassGroundingFailure(entry.job, {
+              key: entry.ticket.key,
+              nodeId: entry.ticket.node.id,
+              lod: entry.ticket.lodLevel,
+              isLodSwap: entry.ticket.isLodSwap,
+              bounds: entry.ticket.work.bounds,
+            }),
             // A cached failure may outlive a different owner's admission
             // failure. This is context, not a causal join to the current job.
             workerAdmissionContext: this.groundingWorker
@@ -1854,12 +1862,10 @@ export class GrassVisualManager implements QuadTreeListener {
                     this.groundingWorker.receipt.lastAdmissionFailure,
                 }
               : null,
-            key: entry.ticket.key,
-            nodeId: entry.ticket.node.id,
-            ticketLod: entry.ticket.lodLevel,
-            isLodSwap: entry.ticket.isLodSwap,
-            observedAtMs: performance.now(),
-          });
+          };
+          console.error(
+            "[GrassVisualManager] Grounding failed: " + JSON.stringify(failure),
+          );
         }
         if (state.status === "cancelled")
           this.groundingJobs.delete(entry.ticket.key);

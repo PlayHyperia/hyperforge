@@ -2486,9 +2486,40 @@ browsers are closed; the protected human playable database is unchanged.
 - [x] Identify both failed cells and their executed-build timing semantics.
   The terminal one-operation slice is coordinator settlement, not proof of a
   worker failing on one expensive operation. Cause remains unestablished.
-- [ ] After host stabilization, replay both exact retained-input cells with
-  unchanged caps and per-phase/max-slice diagnostics; timestamp future native
-  terminal events. Then complete matched overview/arrival/shore captures.
+- [x] Reconstruct both reported native95 cells with production mixed-detail
+  policy, actual v9 placement and retained terrain, without changing caps.
+  The native receipt lacks arrays/packet hashes: this is current-source CPU
+  reconstruction, not byte-exact historical input or native timing recovery.
+  Selected replay02 retains 959/959 and 1,269/1,269 clumps; cached fits take
+  approximately 107/73 ms and full handoff/publication 111/88 ms in that single
+  observation. These are not performance distributions or browser measurements.
+- [x] Carry the actual pond-service wear through replay requests and detached
+  worker settings. The broader run exposed a frozen-oracle mismatch: the old
+  reference has no service-wear deformation. Keep every current full-cell
+  worker/pipeline check, and compare all frozen numerical outputs to a separate
+  full-cell no-service-wear control under the original caps. The southwest
+  case changes 11 source-aligned masks with zero clump additions/removals.
+  Independent analytic deformation/wind/road tests remain necessary; agreement
+  between worker and pipeline alone is not independent shape validation.
+- [x] Serialize failure diagnostics as bounded JSON rather than console object
+  previews; capture detached cell bounds, browser observation clocks and the
+  cumulative fitting-slice maximum. Keep the existing main-thread-only maximum
+  unchanged. Input-error messages are bounded and do not invoke getters.
+  Private capture code adds Node receipt clocks and explicit text-truncation
+  metadata; syntax checked, not executed in a new native browser attempt.
+- [x] Pass 396 core/worker/handoff/manager tests and 29 coordinator tests;
+  final core/coordinator repeat passes 152 after diagnostic hardening.
+  Current v9 passes 11 applicable cases, v10 two, historical review52 one;
+  fixture-layout skips remain skips. Final no-emit covers 734 roots and
+  2,413 source files with zero diagnostics/stable pins. Seven-file lint,
+  format and diff checks pass. Retain the first regular-grid fixture failure,
+  frozen-oracle mismatch and readonly-tuple type diagnostic with their fixes.
+- [ ] Native95 remains failed. Diagnose native contention/grounding under stable
+  awake host conditions; no GPU retry, changed cap, scheduling, density,
+  resolution, geometry, wind, visual default or AAA approval in this follow-up.
+  Then complete matched overview/arrival/shore comparisons, including the
+  regional palette and existing gentler southern pond headland candidate.
+  The sharp triangular depth boundary in native94 remains an art defect.
   Continue broader landscape structure, vegetation grouping, natural routes
   and bank composition; palette changes alone do not finish the island.
 
@@ -2497,6 +2528,11 @@ Evidence: service-layout `refined-census-*`, `regional-meadow-material01`,
 `regional-meadow-final02`, `regional-meadow-types02`; inland-pond
 `isolated-build47-report.json`, `native95/process.json`,
 `native95-host-suspension.md`, and `runtime65/process.json`.
+Follow-up service-layout receipts: `native95-grounding-replay02`,
+`native95-oracle-native72-01`, `native95-grounding-v9-full02`,
+`grounding-diagnostics-core01`, `fitting-slice-coordinator-full01`,
+`grounding-diagnostics-final02`, `grounding-diagnostics-v10-01`,
+`grounding-diagnostics-review52-01`, and `grounding-diagnostics-types02`.
 The official [Three forest generator](https://github.com/mrdoob/three.js/blob/r186/examples/jsm/generators/ForestGenerator.js)
 and [terrain generator](https://github.com/mrdoob/three.js/blob/r186/examples/jsm/generators/TerrainGenerator.js)
 inform coherent regional color groups and placement-independent variation,

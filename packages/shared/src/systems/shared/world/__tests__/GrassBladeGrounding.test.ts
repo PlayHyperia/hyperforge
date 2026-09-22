@@ -1585,6 +1585,108 @@ describe("CPU per-blade grounding prototype (no renderer/GPU)", () => {
     }
   });
 
+  it("serializes complete failure identity and observation clocks without retaining owners", () => {
+    const f = analyticOwner();
+    try {
+      const surface = f.makeSurface();
+      const request = f.request(surface);
+      request.workBudget = 1;
+      const job = new GrassBladeGroundingJob(request, () => true);
+      const bounds = { minX: 275, maxX: 300, minZ: 400, maxZ: 425 };
+      const owner = {
+        key: "gcell_v1_11_16",
+        nodeId: surface.nodeId,
+        lod: 0 as const,
+        isLodSwap: false,
+        bounds,
+        // Extra caller data must not escape into a retained diagnostic.
+        inputBuffers: request.data,
+      };
+      expect(captureGrassGroundingFailure(job, owner)).toBeNull();
+      while (job.state.status === "running") job.advance(7);
+      const beforeMs = performance.now();
+      const beforeUnixMs = Date.now();
+      const snapshot = captureGrassGroundingFailure(job, owner)!;
+      const afterMs = performance.now();
+      const afterUnixMs = Date.now();
+      const observation = snapshot.observation!;
+      expect(observation.observedAtMs).toBeGreaterThanOrEqual(beforeMs);
+      expect(observation.observedAtMs).toBeLessThanOrEqual(afterMs);
+      expect(observation.observedAtUnixMs).toBeGreaterThanOrEqual(beforeUnixMs);
+      expect(observation.observedAtUnixMs).toBeLessThanOrEqual(afterUnixMs);
+      expect(observation.timeOriginUnixMs).toBe(performance.timeOrigin);
+      expect(observation.cumulativeMaximumSliceMs).toBe(job.maximumSliceMs);
+      expect(observation.inputError).toBeNull();
+      expect(observation).toMatchObject({
+        key: "gcell_v1_11_16",
+        keyTruncated: false,
+        nodeId: surface.nodeId,
+        lod: 0,
+        isLodSwap: false,
+        bounds,
+      });
+      expect(Object.isFrozen(observation)).toBe(true);
+      expect(Object.isFrozen(observation.bounds)).toBe(true);
+      expect(observation.bounds).not.toBe(bounds);
+      const json = JSON.stringify(snapshot);
+      expect(JSON.parse(json)).toEqual(snapshot);
+      expect(json).not.toContain("inputBuffers");
+      expect(json.length).toBeLessThan(2000);
+      const terminal = job.state;
+      const work = job.operations;
+      bounds.minX = -100;
+      owner.key = "x".repeat(256);
+      const bounded = captureGrassGroundingFailure(job, owner)!;
+      expect(bounded.observation?.key).toHaveLength(128);
+      expect(bounded.observation?.keyTruncated).toBe(true);
+      expect(snapshot.observation?.key).toBe("gcell_v1_11_16");
+      expect(snapshot.observation?.bounds.minX).toBe(275);
+      expect(job.state).toBe(terminal);
+      expect(job.operations).toBe(work);
+      expect(job.advance()).toBe(terminal);
+      const invalidRequest = f.request(surface);
+      invalidRequest.data.offsets[0] = NaN;
+      const invalid = new GrassBladeGroundingJob(invalidRequest, () => true);
+      while (invalid.state.status === "running") invalid.advance(7);
+      expect(invalid.state.status).toBe("failed_input");
+      const invalidSnapshot = captureGrassGroundingFailure(invalid, owner)!;
+      expect(invalidSnapshot.observation?.inputError).toBeTruthy();
+      expect(
+        invalidSnapshot.observation!.inputError!.length,
+      ).toBeLessThanOrEqual(256);
+      expect(JSON.parse(JSON.stringify(invalidSnapshot))).toEqual(
+        invalidSnapshot,
+      );
+      let getterReads = 0;
+      const accessorError = Object.defineProperty({}, "message", {
+        get() {
+          getterReads++;
+          throw new Error("Diagnostic must not call this getter");
+        },
+      });
+      for (const error of [new Error("x".repeat(512)), accessorError]) {
+        const throwing = new GrassGroundingContinuation(
+          (function* (): Generator<string, GrassBladeGroundingResult, void> {
+            yield "actual_input_failure";
+            throw error;
+          })(),
+          () => true,
+        );
+        while (throwing.state.status === "running") throwing.advance(7);
+        const message = captureGrassGroundingFailure(throwing, owner)!
+          .observation!.inputError;
+        expect(message).toBe(
+          error === accessorError
+            ? "Non-string grounding input failure"
+            : "x".repeat(256),
+        );
+      }
+      expect(getterReads).toBe(0);
+    } finally {
+      f.close();
+    }
+  });
+
   it.each([0, 1, 2] as const)(
     "resumes the LOD%s production core at different slice boundaries without changing arrays",
     (lod) => {

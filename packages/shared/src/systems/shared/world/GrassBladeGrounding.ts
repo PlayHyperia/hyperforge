@@ -1661,10 +1661,20 @@ export class GrassGroundingContinuation {
   }
 }
 
+export type GrassGroundingFailureOwner = Readonly<{
+  key: string;
+  nodeId: number;
+  lod: 0 | 1 | 2;
+  isLodSwap: boolean;
+  bounds: Readonly<TerrainGridBounds>;
+}>;
+
 /** Bounded terminal snapshot for the owner's existing one-shot failure log.
  * Active time is cumulative slice elapsed time, not measured CPU utilization.
  * The owner supplies ticket/frame identity; no input arrays or error graph are
- * retained, and observing never advances or changes the continuation. */
+ * retained, and observing never advances or changes the continuation.
+ * Optional clocks mark observation on this agent, not remote worker execution.
+ * Wall time can jump; the monotonic origin does not prove sleep-clock behavior. */
 export function captureGrassGroundingFailure(
   job: Pick<
     GrassGroundingContinuation,
@@ -1675,11 +1685,28 @@ export function captureGrassGroundingFailure(
     | "lastSliceMs"
     | "maximumSliceMs"
     | "lastPhase"
-  >,
+  > & { readonly cumulativeMaximumSliceMs?: number },
+  owner?: GrassGroundingFailureOwner,
 ) {
   const state = job.state;
   if (state.status !== "failed_budget" && state.status !== "failed_input")
     return null;
+  let inputError: string | null = null;
+  if (owner && state.status === "failed_input") {
+    inputError = "Non-string grounding input failure";
+    if (typeof state.error === "string") inputError = state.error;
+    else if (state.error !== null && typeof state.error === "object") {
+      // Diagnostics must not invoke an error object's accessor or toString.
+      try {
+        const message = Object.getOwnPropertyDescriptor(state.error, "message");
+        if (message && "value" in message && typeof message.value === "string")
+          inputError = message.value;
+      } catch {
+        inputError = "Unreadable grounding input failure";
+      }
+    }
+    inputError = inputError.slice(0, 256);
+  }
   return Object.freeze({
     status: state.status,
     reason: state.status === "failed_budget" ? state.reason : "input",
@@ -1691,6 +1718,31 @@ export function captureGrassGroundingFailure(
     lastPhase: job.lastPhase,
     activeLimitMs: GRASS_BLADE_GROUNDING_JOB_LIMITS.maximumActiveMs,
     targetSliceMs: GRASS_BLADE_GROUNDING_JOB_LIMITS.targetSliceMs,
+    ...(owner
+      ? {
+          observation: Object.freeze({
+            observedAtMs: performance.now(),
+            observedAtUnixMs: Date.now(),
+            timeOriginUnixMs: performance.timeOrigin,
+            // Coordinator maximumSliceMs covers only main-thread advances;
+            // its cumulative diagnostic also includes remote fitting slices.
+            cumulativeMaximumSliceMs:
+              job.cumulativeMaximumSliceMs ?? job.maximumSliceMs,
+            inputError,
+            key: owner.key.slice(0, 128),
+            keyTruncated: owner.key.length > 128,
+            nodeId: owner.nodeId,
+            lod: owner.lod,
+            isLodSwap: owner.isLodSwap,
+            bounds: Object.freeze({
+              minX: owner.bounds.minX,
+              maxX: owner.bounds.maxX,
+              minZ: owner.bounds.minZ,
+              maxZ: owner.bounds.maxZ,
+            }),
+          }),
+        }
+      : {}),
   });
 }
 
