@@ -48,6 +48,9 @@ export {
 } from "./types.js";
 
 // Geometry
+export type { RootedFlowerGeometryOptions } from "./RootedFlowerGeometry.js";
+export { createRootedFlowerGeometry } from "./RootedFlowerGeometry.js";
+
 export type {
   FlowerInstanceData,
   FlowerPatchResult,

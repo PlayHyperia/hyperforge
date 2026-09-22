@@ -3009,6 +3009,80 @@ Evidence: service-layout `grounding-generator-f50-baseline01.*`,
 `native110/process.json`, `native110/failure.png`, `runtime80/process.json`.
 
 
+- Follow-up native112/runtime82 reused build54/v10 with a bounded worker-only
+  startup profiler (1ms sampling; one exact worker; no page-main profiling).
+  Review added a start-acknowledgement-before-gate-settlement assertion so an
+  entirely late profile cannot count as startup evidence. Private helper syntax
+  and all43 host-state tests pass;998 source pins and9 bundle pins match.
+- Native112 stopped BEFORE browser launch: the first actual host sample was
+  thermalState1, despite an earlier nominal preflight. No worker profile,
+  readiness run, screenshot or timing comparison was produced. The additional
+  missing-framework receipt follows from no navigation, not a game defect.
+  Preserve native112/process.json as a host-preflight failure, not a new
+  reproduction of native110. Runtime82 is STOPPED; temporary DB removed;
+  protected145 artifacts, retained lock and localhost services remain unchanged.
+- [x] Resume the startup-worker recording with fresh native113/runtime83 IDs
+  after nominal host readings; original guard/budgets retained. See below.
+  Other substantial host load was observed; its causal contribution is unknown.
+
+
+#### Rooted meadow flowers and actual worker profiling — 2026-09-22
+
+- [x] Add an inactive, separately exported rooted meadow-daisy geometry factory.
+  It produces one indexed 362-vertex / 584-triangle mesh (28,120 bytes of final
+  attributes and indices), with a curved tapered stem, two attached lance
+  leaves, pollen head and ten cupped petals. No textures, per-flower objects,
+  materials or runtime registration are added by this factory.
+- Actual shared stem/head/leaf/petal attachment vertices, exact ground-plane
+  roots, authored-height metadata and per-petal hinge/flex metadata are present.
+  Thin leaves/petals require the future material's DoubleSide handling. Bounds
+  are STATIC ONLY: animated bounds and normal deformation remain unimplemented.
+- Geometry01 passes35 topology/metadata/ownership tests across0.12–0.8m plus
+  four existing real TSL material-construction tests (39/39 total). Full procgen
+  plus explicit new tests typecheck:133 roots/756 sources/zero diagnostics and
+  stable source pins. Scoped lint/format and independent source review pass.
+  No native flower image, lighting, wind, animation or GPU-cost approval exists.
+- [ ] Implement the per-world Wind-driven material and corrected deformed
+  normals, with root-fixed stem bending and bounded petal motion. Reuse the
+  coordinate-frame lessons from the official r186 forest/NodeMaterial sources;
+  do not use the old sprite material's disconnected time/wind controls.
+- [ ] Integrate sparse irregular patches at retained terrain publication, with
+  separate deterministic selection and bounded shared instances. Revalidate
+  terrain/exclusion leases and retire through the existing chunk/LOD lifecycle.
+  Add flower-only resource/interaction-approach clearance from actual admitted
+  entities; current grass snapshots do not include every live tree/ore anchor.
+  Do not alter grass RNG/budgets or re-enable disabled heightmap-based flowers.
+- Native113/runtime83 reused immutable build54/v10 (NOT the new flower source).
+  The worker-only instrumented run passed the original90-second startup gate
+  in44.496s:29/29 terrain and122/122 grass cells, water ready, zero failed grass
+  cells. All11 host samples were nominal/AC/awake. Original native110 failure
+  remains unresolved; this is not proof that startup is reliable or faster.
+- Actual profile is complete: one worker,30,707 samples/168nodes,42.737392s
+  sampled interval, proper stop/disable/detach and zero pending commands.
+  The actual transformed served script and inline map are retained, not assumed
+  identical to the minified build. User's other game remained active at reduced
+  settings: diagnostic evidence only, NOT uncontended performance acceptance.
+- Weighted sampled intervals:38.295922s idle and161.334ms attributed to92 GC
+  samples. groundGrassBladeSteps is the dominant JavaScript function
+  (1.724674s self /3.017347s inclusive). These are sampling aggregates, not
+  exclusive CPU or GC pauses. A103.793ms delta lands on validateAdmission after
+  idle and cannot be assigned wholly to that function.
+- Its actual generated-line position ticks identify the swept-bounds setup
+  and fade/transform/extrema blocks (source1287–1315):221 of1141 function-line
+  ticks. This motivates inspecting repeated scalar/attribute work there, but
+  does not locate or explain native110's historical86.2ms interval.
+- Owned browser closed; runtime83STOPPED; temporary DB removed. Native input
+  pins, protected145 compiled artifacts/lock and playable localhost unchanged.
+  Connected tree-wind native comparison, flowers, falling leaves, cinematic,
+  sustained frame-time/memory testing and full visual acceptance remain OPEN.
+
+Evidence: service-layout `rooted-flower-geometry01.{json,log}`,
+`rooted-flower-types01.{json,log}`; inland-pond `native113/process.json`,
+`native113/startup.worker-1.cpuprofile`, `native113/startup.worker-served.js`,
+`native113/startup.worker.js.map`, `runtime83/process.json`.
+
+
+
 
 ### Pond-bank service ground — 2026-09-22
 
