@@ -2632,6 +2632,16 @@ browsers are closed; the protected human playable database is unchanged.
   Then complete matched overview/arrival/shore comparisons, including the
   regional palette and existing gentler southern pond headland candidate.
   The sharp triangular depth boundary in native94 remains an art defect.
+  Source review also distinguishes camera-axis depth from physical water-path
+  thickness: the existing material and submitted sample-0 MSAA depth can
+  accentuate real depth silhouettes; this does not establish a second cause.
+  Keep the next comparison terrain-only; qualify optical contrast and moving
+  edges separately before adding another shader/art variant.
+  Native work is BLOCKED pending confirmation that the Mac is awake, lid open,
+  plugged in and well ventilated after repeated host-suspension incidents.
+  The same host gate persisted through diagnostics, scratch verification and
+  this shoreline review. AC/no recorded warnings alone did not prevent the
+  prior interruption. No capture, shader change or default promotion is made.
   Continue broader landscape structure, vegetation grouping, natural routes
   and bank composition; palette changes alone do not finish the island.
 
