@@ -33,7 +33,10 @@ import {
   computeTerrainColorCPU,
   sampleNoiseCPU,
 } from "../TerrainShader";
-import { createCompactTerrainColorOperations } from "../CompactTerrainPalette";
+import {
+  createCompactTerrainColorOperations,
+  type CompactTerrainBankVerge,
+} from "../CompactTerrainPalette";
 import { createAuthoredTerrainSurfaceOperations } from "../AuthoredTerrainSurface";
 import { adjustShorelineHeight } from "../TerrainHeightParams";
 import { createTerrainWorkerConfig } from "../../../../utils/workers/TerrainWorkerShared";
@@ -280,18 +283,8 @@ function beforeCoastalFilteringWorker() {
  * and extract the self-contained factory in a disposable real worker, just as
  * the existing terrain-snapshot minification regression does. All other
  * generation, ecology, RNG, terrain and message-transport code stays current. */
-async function native16PaletteWorker() {
-  const path = new URL(
-    "./fixtures/Native16CompactTerrainPalette.ts.txt",
-    import.meta.url,
-  );
-  const source = readFileSync(path);
-  expect(statSync(path).size).toBe(31462);
-  expect(source.byteLength).toBe(31462);
-  expect(createHash("sha256").update(source).digest("hex")).toBe(
-    "ee3eedaa0f7cda6712f376025e080327b6055b5666c3e90897b47ebb92233afe",
-  );
-  const compiled = transformSync(source.toString("utf8"), {
+async function extractMinifiedPaletteFactory(source: string): Promise<string> {
+  const compiled = transformSync(source, {
     loader: "ts",
     format: "cjs",
     target: "es2022",
@@ -309,7 +302,7 @@ async function native16PaletteWorker() {
   try {
     factory = await new Promise<string>((resolve, reject) => {
       const timeout = setTimeout(
-        () => reject(new Error("Archived palette extraction timed out")),
+        () => reject(new Error("Palette extraction timed out")),
         5000,
       );
       extractor.once("error", (error) => {
@@ -319,18 +312,44 @@ async function native16PaletteWorker() {
       extractor.once("message", (value: unknown) => {
         clearTimeout(timeout);
         if (typeof value !== "string" || !value.startsWith("function"))
-          reject(new Error("Invalid archived palette factory"));
+          reject(new Error("Invalid extracted palette factory"));
         else resolve(value);
       });
     });
   } finally {
     await extractor.terminate();
   }
+  return factory;
+}
+
+async function native16PaletteWorker() {
+  const path = new URL(
+    "./fixtures/Native16CompactTerrainPalette.ts.txt",
+    import.meta.url,
+  );
+  const source = readFileSync(path);
+  expect(statSync(path).size).toBe(31462);
+  expect(source.byteLength).toBe(31462);
+  expect(createHash("sha256").update(source).digest("hex")).toBe(
+    "ee3eedaa0f7cda6712f376025e080327b6055b5666c3e90897b47ebb92233afe",
+  );
+  const factory = await extractMinifiedPaletteFactory(source.toString("utf8"));
   const current = `var compactTerrainColorOperations = (${createCompactTerrainColorOperations.toString()})();`;
   expect(GRASS_WORKER_CODE.split(current)).toHaveLength(2);
   const archived = `var compactTerrainColorOperations = (${factory})();`;
-  const code = GRASS_WORKER_CODE.replace(current, archived);
+  let code = GRASS_WORKER_CODE.replace(current, archived);
   expect(code.replace(archived, current)).toBe(GRASS_WORKER_CODE);
+  // The archived palette predates service-ground capture. Its comparison is
+  // expressly no-service: reject new inputs, rather than silently dropping
+  // them or replacing the historical palette with current implementations.
+  const serviceCapture =
+    'var pondServiceGround = compactTerrainColorOperations.captureGroundVerge(input, "pondServiceGround");';
+  expect(code.split(serviceCapture)).toHaveLength(2);
+  code = code.replace(
+    serviceCapture,
+    `var pondServiceGround;
+  if ("pondServiceGround" in input) throw new Error("Archived palette excludes pond service ground");`,
+  );
   return actualWorker(code);
 }
 
@@ -616,6 +635,394 @@ function assertExactInstanceBytes(a: GrassWorkerOutput, b: GrassWorkerOutput) {
 }
 
 describe("actual authored-surface grass worker", () => {
+  const serviceGroundFixture = (): CompactTerrainBankVerge => ({
+    minX: 379,
+    maxX: 392,
+    minZ: 432,
+    maxZ: 445,
+    feather: 0.75,
+    wearStart: 0.1,
+    wearEnd: 0.8,
+    minimumScale: 1,
+    heightScale: 1,
+    wornHeightScale: 0.35,
+    tipBrightness: 1,
+    grassTint: [1, 1, 1],
+    wear: [
+      {
+        startX: 383.5,
+        startZ: 437.5,
+        endX: 384,
+        endZ: 438,
+        coreRadius: 0.9,
+        outerRadius: 2.6,
+        strength: 0.92,
+      },
+      {
+        startX: 384,
+        startZ: 438,
+        endX: 386,
+        endZ: 440,
+        coreRadius: 0.7,
+        outerRadius: 2.2,
+        strength: 0.86,
+      },
+      {
+        startX: 384,
+        startZ: 438,
+        endX: 384.5,
+        endZ: 435,
+        coreRadius: 0.7,
+        outerRadius: 2.1,
+        strength: 0.78,
+      },
+    ],
+  });
+
+  it("keeps pond service ground placement roots, RNG and scales exact while actual worker colors match the shared palette", async () => {
+    await withTerrain(async (terrain, internals, worker) => {
+      internals.loadWaterBodiesFromManifest();
+      internals.loadFlatZonesFromManifest();
+      const service = serviceGroundFixture();
+      const colors = createCompactTerrainColorOperations();
+      const field = colors.macroField(
+        terrain.getWorldTerrainProfile(),
+        undefined,
+        undefined,
+        undefined,
+        service,
+      );
+      let changedColors = 0,
+        checkedColors = 0;
+      for (const [x, z, size, spacingMul] of [
+        [384, 438, 12, 1],
+        [384, 438, 12, 2],
+        [350, 320, 12, 1],
+        [430, 470, 6, 1],
+      ]) {
+        const base: GrassWorkerInput = {
+          ...request(terrain, internals, x, z, size),
+          grassEligibility: "compact-pbr-v1",
+          compactGrassColorGrade: "fine-meadow-green-v1",
+          spacingMul,
+        };
+        const selected = prepareGrassWorkerRequest({
+          ...base,
+          pondServiceGround: service,
+        });
+        const before = await worker.run(prepareGrassWorkerRequest(base));
+        const after = await worker.run(selected);
+        const repeat = await worker.run(selected);
+        expect(after.count).toBe(before.count);
+        expect(after.grassEligibility).toBe(before.grassEligibility);
+        expect(after.terrainProfileIdentity).toBe(
+          before.terrainProfileIdentity,
+        );
+        for (const name of [
+          "offsets",
+          "rotScaleHash",
+          "grassTints",
+          "groundNormals",
+        ] as const) {
+          expect(
+            Buffer.from(
+              after[name].buffer,
+              after[name].byteOffset,
+              after[name].byteLength,
+            ).equals(
+              Buffer.from(
+                before[name].buffer,
+                before[name].byteOffset,
+                before[name].byteLength,
+              ),
+            ),
+            name,
+          ).toBe(true);
+        }
+        assertExactInstanceBytes(after, repeat);
+        expect(after.pondServiceGround).toEqual(selected.pondServiceGround);
+        expect(after.pondServiceGround).not.toBe(selected.pondServiceGround);
+        expect(
+          admitGrassWorkerPlacementResult(after, selected).pondServiceGround,
+        ).toEqual(service);
+        if (x !== 384) assertExactInstanceBytes(after, before);
+        else expect(after.count).toBeGreaterThan(0);
+        assertSurfaceParity(selected, after, internals);
+        for (const point of points(selected, after)) {
+          const main = terrain.getTerrainColorAt(point.x, point.z, true);
+          const expected = colors.sample({
+            grassColorGrade: selected.compactGrassColorGrade,
+            noiseValue: sampleNoiseCPU(
+              point.x,
+              point.z,
+              TERRAIN_SHADER_CONSTANTS.NOISE_SCALE,
+            ),
+            meadowNoise: sampleNoiseCPU(
+              point.x,
+              point.z,
+              colors.getComposition().meadowNoiseScale,
+            ),
+            distortNoise: sampleNoiseCPU(
+              point.x,
+              point.z,
+              TERRAIN_SHADER_CONSTANTS.DISTORT_NOISE_SCALE,
+            ),
+            slope: 1 - main.ny,
+            roadInfluence: 0,
+            surface: {
+              x: point.x,
+              z: point.z,
+              height: internals.getHeightAtComputed(point.x, point.z),
+              pond:
+                selected.terrainSurface.waterBodies.find(
+                  (body) => body.id === "haven_pond_water",
+                ) ?? null,
+              macroField: field,
+            },
+          });
+          for (const [axis, channel] of (["r", "g", "b"] as const).entries())
+            expect(
+              Math.abs(
+                after.groundColors[point.index * 3 + axis] - expected[channel],
+              ),
+            ).toBeLessThan(colorParityTolerance);
+          if (
+            [0, 1, 2].some(
+              (channel) =>
+                after.groundColors[point.index * 3 + channel] !==
+                before.groundColors[point.index * 3 + channel],
+            )
+          )
+            changedColors++;
+          checkedColors++;
+        }
+      }
+      expect(checkedColors).toBeGreaterThan(0);
+      expect(changedColors).toBeGreaterThan(0);
+    }, true);
+  });
+
+  it("captures pond service ground across real placement transport including empty results and rejects malformed or stale markers", async () => {
+    await withTerrain(async (terrain, internals, worker) => {
+      internals.loadWaterBodiesFromManifest();
+      internals.loadFlatZonesFromManifest();
+      const input: GrassWorkerInput = {
+        ...request(terrain, internals, 384, 438, 8),
+        grassEligibility: "compact-pbr-v1",
+        compactGrassColorGrade: "fine-meadow-green-v1",
+      };
+      const source: GrassWorkerInput = {
+        ...input,
+        pondServiceGround: serviceGroundFixture(),
+      };
+      const queued = prepareGrassWorkerRequest(source);
+      expect(queued.pondServiceGround).not.toBe(source.pondServiceGround);
+      expect(queued.pondServiceGround!.wear).not.toBe(
+        source.pondServiceGround!.wear,
+      );
+      expect(Object.isFrozen(queued.pondServiceGround)).toBe(true);
+      expect(Object.isFrozen(queued.pondServiceGround!.wear)).toBe(true);
+      expect(Object.isFrozen(queued.pondServiceGround!.wear[0])).toBe(true);
+      expect(Object.isFrozen(queued.pondServiceGround!.grassTint)).toBe(true);
+      Reflect.set(source.pondServiceGround!.wear[0], "strength", 0);
+      Reflect.set(source.pondServiceGround!, "wornHeightScale", 1);
+      const active = await worker.run(queued);
+      expect(active.count).toBeGreaterThan(0);
+      expect(active.pondServiceGround).toEqual(serviceGroundFixture());
+      const emptyInput: GrassWorkerInput = {
+        ...queued,
+        grassConfigs: Object.fromEntries(
+          Object.entries(queued.grassConfigs).map(([key, value]) => [
+            key,
+            { ...value, density: 0 },
+          ]),
+        ),
+      };
+      const empty = await worker.run(emptyInput);
+      expect(empty.count).toBe(0);
+      expect(empty.pondServiceGround).toEqual(queued.pondServiceGround);
+      for (const [result, requestInput] of [
+        [active, queued],
+        [empty, emptyInput],
+      ] as const) {
+        const admitted = admitGrassWorkerPlacementResult(result, requestInput);
+        expect(admitted.pondServiceGround).not.toBe(result.pondServiceGround);
+        expect(Object.isFrozen(admitted.pondServiceGround)).toBe(true);
+        for (const name of Object.keys(
+          attributes,
+        ) as (keyof typeof attributes)[])
+          expect(admitted[name]).toBe(result[name]);
+        const original = structuredClone(result.pondServiceGround);
+        Reflect.set(result.pondServiceGround!.wear[0], "strength", 0);
+        expect(admitted.pondServiceGround).toEqual(original);
+        result.pondServiceGround = original;
+        const missing = { ...result };
+        delete missing.pondServiceGround;
+        expect(() =>
+          admitGrassWorkerPlacementResult(missing, requestInput),
+        ).toThrow(/service ground mismatch/i);
+        expect(() => admitGrassWorkerPlacementResult(result, input)).toThrow(
+          /service ground mismatch/i,
+        );
+        expect(() =>
+          admitGrassWorkerPlacementResult(
+            {
+              ...result,
+              pondServiceGround: {
+                ...result.pondServiceGround!,
+                wornHeightScale: 0.5,
+              },
+            },
+            requestInput,
+          ),
+        ).toThrow(/service ground mismatch/i);
+      }
+      for (const descriptor of [
+        { ...serviceGroundFixture(), minimumScale: 0.5 },
+        { ...serviceGroundFixture(), heightScale: 0.65 },
+        {
+          ...serviceGroundFixture(),
+          wear: serviceGroundFixture().wear.slice(0, 2),
+        },
+        { ...serviceGroundFixture(), maxX: 450 },
+        { ...serviceGroundFixture(), tipBrightness: 1.1 },
+      ]) {
+        const malformed = { ...input, pondServiceGround: descriptor };
+        expect(() => prepareGrassWorkerRequest(malformed)).toThrow(
+          /bank-verge descriptor/i,
+        );
+        await expect(worker.run(malformed)).rejects.toThrow(
+          /bank-verge descriptor/i,
+        );
+        expect(() =>
+          admitGrassWorkerPlacementResult(
+            { ...active, pondServiceGround: descriptor },
+            queued,
+          ),
+        ).toThrow(/bank-verge descriptor/i);
+      }
+      let getterCalls = 0;
+      const accessor = { ...input };
+      Object.defineProperty(accessor, "pondServiceGround", {
+        enumerable: true,
+        get() {
+          getterCalls++;
+          return serviceGroundFixture();
+        },
+      });
+      expect(() => prepareGrassWorkerRequest(accessor)).toThrow(
+        /bank-verge descriptor/i,
+      );
+      const getterResult = { ...active };
+      Object.defineProperty(getterResult, "pondServiceGround", {
+        enumerable: true,
+        get() {
+          getterCalls++;
+          return serviceGroundFixture();
+        },
+      });
+      expect(() =>
+        admitGrassWorkerPlacementResult(getterResult, queued),
+      ).toThrow(/bank-verge descriptor/i);
+      const inherited = { ...input };
+      Object.setPrototypeOf(inherited, {
+        pondServiceGround: serviceGroundFixture(),
+      });
+      expect(() => prepareGrassWorkerRequest(inherited)).toThrow(
+        /bank-verge descriptor/i,
+      );
+      for (const [field, marker] of [
+        ["placementCoverage", "halved-v1"],
+        ["compactPondBlend", "shore-contact-v1"],
+        ["compactCoastBlend", "distribution-v1"],
+      ] as const) {
+        const inheritedMarker = { ...active };
+        Object.setPrototypeOf(inheritedMarker, { [field]: marker });
+        expect(() =>
+          admitGrassWorkerPlacementResult(inheritedMarker, queued),
+        ).toThrow();
+        const accessorMarker = { ...active };
+        Object.defineProperty(accessorMarker, field, {
+          enumerable: true,
+          get() {
+            getterCalls++;
+            return marker;
+          },
+        });
+        expect(() =>
+          admitGrassWorkerPlacementResult(accessorMarker, queued),
+        ).toThrow();
+      }
+      expect(getterCalls).toBe(0);
+      const ungraded = { ...queued };
+      delete ungraded.compactGrassColorGrade;
+      expect(() => prepareGrassWorkerRequest(ungraded)).toThrow(
+        /graded compact meadow/i,
+      );
+      await expect(worker.run(ungraded)).rejects.toThrow(
+        /graded compact meadow/i,
+      );
+      assertExactInstanceBytes(await worker.run(queued), active);
+    }, true);
+  });
+
+  it("executes pond service ground through the freshly minified keepNames palette in an isolated real placement worker", async () => {
+    const source = readFileSync(
+      new URL("../CompactTerrainPalette.ts", import.meta.url),
+      "utf8",
+    );
+    const factory = await extractMinifiedPaletteFactory(source);
+    const current = `var compactTerrainColorOperations = (${createCompactTerrainColorOperations.toString()})();`;
+    expect(GRASS_WORKER_CODE.split(current)).toHaveLength(2);
+    // Only the exact production factory serialization changes. No naming-helper
+    // shim, imported JSON, VM global or synthetic output repairs the child.
+    const worker = actualWorker(
+      GRASS_WORKER_CODE.replace(
+        current,
+        `var compactTerrainColorOperations = (${factory})();`,
+      ),
+    );
+    try {
+      await withTerrain(async (terrain, internals, reference) => {
+        internals.loadWaterBodiesFromManifest();
+        internals.loadFlatZonesFromManifest();
+        const input: GrassWorkerInput = {
+          ...request(terrain, internals, 384, 438, 6),
+          grassEligibility: "compact-pbr-v1",
+          compactGrassColorGrade: "fine-meadow-green-v1",
+        };
+        const selected = prepareGrassWorkerRequest({
+          ...input,
+          pondServiceGround: serviceGroundFixture(),
+        });
+        const expected = await reference.run(selected);
+        expect(expected.count).toBeGreaterThan(0);
+        const actual = await worker.run(selected);
+        assertExactInstanceBytes(actual, expected);
+        expect(actual.pondServiceGround).toEqual(selected.pondServiceGround);
+        expect(
+          admitGrassWorkerPlacementResult(actual, selected).pondServiceGround,
+        ).toEqual(selected.pondServiceGround);
+        const ordinary = await worker.run(input);
+        assertExactInstanceBytes(ordinary, await reference.run(input));
+        expect(ordinary).not.toHaveProperty("pondServiceGround");
+        const malformed = {
+          ...selected,
+          pondServiceGround: {
+            ...selected.pondServiceGround!,
+            heightScale: 0.5,
+          },
+        };
+        await expect(worker.run(malformed)).rejects.toThrow(
+          /bank-verge descriptor/i,
+        );
+        assertExactInstanceBytes(await worker.run(selected), expected);
+      }, true);
+    } finally {
+      await worker.close();
+    }
+  });
+
   it("keeps native16 placement, seeded poses and retained grounding exact while candidate worn turf changes only RGB", async () => {
     const previous = await native16PaletteWorker();
     const current = actualWorker();

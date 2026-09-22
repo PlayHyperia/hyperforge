@@ -282,6 +282,7 @@ function admit(value: unknown, cached: boolean) {
       "geometryLayout",
       "roadClearance",
       "bankVerge",
+      "pondServiceGround",
       "maximumBaseError",
       "workBudget",
     ],

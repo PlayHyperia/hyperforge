@@ -228,6 +228,8 @@ export type CompactTerrainMacroField = Readonly<{
   pondBankField?: CompactPondBankField | null;
   havenGround?: CompactTerrainHavenGround;
   bankVerge?: CompactTerrainBankVerge;
+  /** Separately bound service wear, neutral for roots and clump population. */
+  pondServiceGround?: CompactTerrainBankVerge;
   /** Candidate dry contact substrate; never pond wetness or grass support. */
   pondContactGround?: readonly CompactTerrainGroundRibbon[];
 }>;
@@ -662,6 +664,180 @@ export function createCompactTerrainColorOperations() {
   };
   const admittedBankFields = new WeakSet<object>();
   const operations = {
+    /** Bounded own-data capture shared by queued jobs and stringified workers. */
+    captureGroundVerge(
+      request: object,
+      fieldName: "bankVerge" | "pondServiceGround" = "bankVerge",
+    ): CompactTerrainBankVerge | undefined {
+      const property = Object.getOwnPropertyDescriptor(request, fieldName);
+      if (fieldName in request && (!property || !("value" in property)))
+        throw new Error("Invalid grass bank-verge descriptor");
+      const value = property?.value;
+      if (value === undefined) return undefined;
+      if (
+        !value ||
+        typeof value !== "object" ||
+        (Object.getPrototypeOf(value) !== Object.prototype &&
+          Object.getPrototypeOf(value) !== null)
+      )
+        throw new Error("Invalid grass bank-verge descriptor");
+      const scalarKeys = [
+        "minX",
+        "maxX",
+        "minZ",
+        "maxZ",
+        "feather",
+        "wearStart",
+        "wearEnd",
+        "minimumScale",
+        "heightScale",
+        "wornHeightScale",
+        "tipBrightness",
+      ] as const;
+      const keys = Reflect.ownKeys(value);
+      if (
+        keys.length !== scalarKeys.length + 2 ||
+        keys.some(
+          (key) =>
+            key !== "grassTint" &&
+            key !== "wear" &&
+            !scalarKeys.includes(key as never),
+        )
+      )
+        throw new Error("Invalid grass bank-verge descriptor");
+      const copy = {} as Record<(typeof scalarKeys)[number], number>;
+      for (const key of scalarKeys) {
+        const field = Object.getOwnPropertyDescriptor(value, key);
+        if (!field || !("value" in field) || !Number.isFinite(field.value))
+          throw new Error("Invalid grass bank-verge descriptor");
+        copy[key] = field!.value;
+      }
+      const tintField = Object.getOwnPropertyDescriptor(value, "grassTint");
+      if (!tintField || !("value" in tintField))
+        throw new Error("Invalid grass bank-verge descriptor");
+      const tint = tintField!.value;
+      if (
+        !Array.isArray(tint) ||
+        tint.length !== 3 ||
+        Reflect.ownKeys(tint).length !== 4
+      )
+        throw new Error("Invalid grass bank-verge descriptor");
+      const tintCopy = [0, 0, 0] as [number, number, number];
+      for (let i = 0; i < 3; i++) {
+        const field = Object.getOwnPropertyDescriptor(tint, String(i));
+        if (
+          !field ||
+          !("value" in field) ||
+          !Number.isFinite(field.value) ||
+          field.value < 0 ||
+          field.value > 2
+        )
+          throw new Error("Invalid grass bank-verge descriptor");
+        tintCopy[i] = field!.value;
+      }
+      const wearField = Object.getOwnPropertyDescriptor(value, "wear");
+      if (!wearField || !("value" in wearField))
+        throw new Error("Invalid grass bank-verge descriptor");
+      const wear = wearField!.value;
+      if (
+        !Array.isArray(wear) ||
+        wear.length > 3 ||
+        Reflect.ownKeys(wear).length !== wear.length + 1
+      )
+        throw new Error("Invalid grass bank-verge descriptor");
+      const ribbonKeys = [
+        "startX",
+        "startZ",
+        "endX",
+        "endZ",
+        "coreRadius",
+        "outerRadius",
+        "strength",
+      ] as const;
+      const wearCopy: CompactTerrainGroundRibbon[] = [];
+      for (let i = 0; i < wear.length; i++) {
+        const item = Object.getOwnPropertyDescriptor(wear, String(i));
+        if (!item || !("value" in item))
+          throw new Error("Invalid grass bank-verge descriptor");
+        const ribbon = item!.value;
+        if (
+          !ribbon ||
+          typeof ribbon !== "object" ||
+          (Object.getPrototypeOf(ribbon) !== Object.prototype &&
+            Object.getPrototypeOf(ribbon) !== null) ||
+          Reflect.ownKeys(ribbon).length !== ribbonKeys.length ||
+          Reflect.ownKeys(ribbon).some(
+            (key) => !ribbonKeys.includes(key as never),
+          )
+        )
+          throw new Error("Invalid grass bank-verge descriptor");
+        const captured = {} as Record<(typeof ribbonKeys)[number], number>;
+        for (const key of ribbonKeys) {
+          const field = Object.getOwnPropertyDescriptor(ribbon, key);
+          if (!field || !("value" in field) || !Number.isFinite(field.value))
+            throw new Error("Invalid grass bank-verge descriptor");
+          captured[key] = field!.value;
+        }
+        const dx = captured.endX - captured.startX;
+        const dz = captured.endZ - captured.startZ;
+        if (
+          ![
+            captured.startX,
+            captured.startZ,
+            captured.endX,
+            captured.endZ,
+          ].every((n) => Math.abs(n) <= 1e6) ||
+          dx * dx + dz * dz <= 0 ||
+          captured.coreRadius < 0 ||
+          captured.outerRadius <= captured.coreRadius ||
+          captured.outerRadius * captured.outerRadius <=
+            captured.coreRadius * captured.coreRadius ||
+          captured.outerRadius > 1e6 ||
+          captured.strength < 0 ||
+          captured.strength > 1
+        )
+          throw new Error("Invalid grass bank-verge descriptor");
+        wearCopy.push(Object.freeze(captured));
+      }
+      if (
+        ![copy.minX, copy.maxX, copy.minZ, copy.maxZ].every(
+          (n) => Math.abs(n) <= 1e6,
+        ) ||
+        copy.minX >= copy.maxX ||
+        copy.minZ >= copy.maxZ ||
+        copy.feather <= 0 ||
+        copy.feather * 2 >
+          Math.min(copy.maxX - copy.minX, copy.maxZ - copy.minZ) ||
+        copy.wearStart < 0 ||
+        copy.wearStart >= copy.wearEnd ||
+        copy.wearEnd > 1 ||
+        copy.minimumScale <= 0 ||
+        copy.minimumScale > 1 ||
+        copy.heightScale <= 0 ||
+        copy.heightScale > 1 ||
+        copy.wornHeightScale <= 0 ||
+        copy.wornHeightScale > copy.heightScale ||
+        copy.tipBrightness <= 0 ||
+        copy.tipBrightness > 2
+      )
+        throw new Error("Invalid grass bank-verge descriptor");
+      if (
+        fieldName === "pondServiceGround" &&
+        (wearCopy.length !== 3 ||
+          copy.minimumScale !== 1 ||
+          copy.heightScale !== 1 ||
+          copy.tipBrightness !== 1 ||
+          tintCopy.some((channel) => channel !== 1) ||
+          copy.maxX - copy.minX > 20 ||
+          copy.maxZ - copy.minZ > 20)
+      )
+        throw new Error("Invalid grass bank-verge descriptor");
+      return Object.freeze({
+        ...copy,
+        grassTint: Object.freeze(tintCopy),
+        wear: Object.freeze(wearCopy),
+      });
+    },
     pondBlend(value: unknown): CompactPondBlend | undefined {
       if (
         value === undefined ||
@@ -1930,7 +2106,21 @@ export function createCompactTerrainColorOperations() {
       blend?: CompactCoastBlend,
       pondBlend?: CompactPondBlend,
       bankField?: CompactPondBankField | null,
+      pondServiceGround?: CompactTerrainBankVerge,
     ): CompactTerrainMacroField | null {
+      const serviceGround = operations.captureGroundVerge(
+        { pondServiceGround },
+        "pondServiceGround",
+      );
+      if (
+        serviceGround &&
+        (profile.id !== "compact-duel-island-v6" ||
+          profile.algorithm !== "compact-island-sculpt-v5" ||
+          !profile.southernMeadow)
+      )
+        throw new Error(
+          "Pond service ground requires the admitted compact meadow",
+        );
       const selected = operations.coastBlend(blend);
       const selectedPond = operations.pondBlend(pondBlend);
       if (selectedPond === "composition-v1" && bankField === undefined)
@@ -2032,7 +2222,13 @@ export function createCompactTerrainColorOperations() {
               ? { pondBankField: admittedBankField }
               : {}),
             ...(profile.id === "compact-duel-island-v6"
-              ? { bankVerge, pondContactGround: contactGround }
+              ? {
+                  bankVerge,
+                  pondContactGround: contactGround,
+                  ...(serviceGround
+                    ? { pondServiceGround: serviceGround }
+                    : {}),
+                }
               : {}),
           }
         : {};
@@ -2476,15 +2672,11 @@ export function createCompactTerrainColorOperations() {
       };
     },
     /** Missing coordinates deliberately mean no local edit, not (0,0). */
-    bankVergeLocality(
+    groundVergeLocality(
       x: number | undefined,
       z: number | undefined,
-      field: Pick<
-        CompactTerrainMacroField,
-        "coastalMeadow" | "bankVerge"
-      > | null,
+      verge: CompactTerrainBankVerge | undefined,
     ): number {
-      const verge = field?.coastalMeadow ? field.bankVerge : undefined;
       if (!verge || x === undefined || z === undefined) return 0;
       if (
         x <= verge.minX ||
@@ -2498,6 +2690,20 @@ export function createCompactTerrainColorOperations() {
         (1 - math.smooth(verge.maxX - verge.feather, verge.maxX, x)) *
         math.smooth(verge.minZ, verge.minZ + verge.feather, z) *
         (1 - math.smooth(verge.maxZ - verge.feather, verge.maxZ, z))
+      );
+    },
+    bankVergeLocality(
+      x: number | undefined,
+      z: number | undefined,
+      field: Pick<
+        CompactTerrainMacroField,
+        "coastalMeadow" | "bankVerge"
+      > | null,
+    ): number {
+      return operations.groundVergeLocality(
+        x,
+        z,
+        field?.coastalMeadow ? field.bankVerge : undefined,
       );
     },
     /** Post-acceptance clump scale. No density, random draw or exclusion edits. */
@@ -2518,38 +2724,65 @@ export function createCompactTerrainColorOperations() {
       );
     },
     /** Same connected wear for the soil surface and existing clump appearance. */
+    groundVergeWear(
+      x: number | undefined,
+      z: number | undefined,
+      verge: CompactTerrainBankVerge | undefined,
+    ): number {
+      const locality = operations.groundVergeLocality(x, z, verge);
+      if (locality === 0) return 0;
+      let wear = 0;
+      for (const ribbon of verge!.wear)
+        wear = Math.max(wear, math.ribbon(x!, z!, ribbon));
+      return locality * wear;
+    },
     bankVergeWear(
       x: number | undefined,
       z: number | undefined,
       field: Pick<
         CompactTerrainMacroField,
-        "coastalMeadow" | "bankVerge"
+        "coastalMeadow" | "bankVerge" | "pondServiceGround"
       > | null,
     ): number {
-      const locality = operations.bankVergeLocality(x, z, field);
-      if (locality === 0) return 0;
-      let wear = 0;
-      for (const ribbon of field!.bankVerge!.wear)
-        wear = Math.max(wear, math.ribbon(x!, z!, ribbon));
-      return locality * wear;
+      if (!field?.coastalMeadow) return 0;
+      const primary = operations.groundVergeWear(x, z, field.bankVerge);
+      return field.pondServiceGround
+        ? Math.max(
+            primary,
+            operations.groundVergeWear(x, z, field.pondServiceGround),
+          )
+        : primary;
     },
     /** Vertical appearance only; physical eligibility and root scale stay separate. */
+    groundVergeHeightScale(
+      x: number | undefined,
+      z: number | undefined,
+      verge: CompactTerrainBankVerge | undefined,
+    ): number {
+      const locality = operations.groundVergeLocality(x, z, verge);
+      if (locality === 0) return 1;
+      return (
+        math.mix(1, verge!.heightScale, locality) +
+        operations.groundVergeWear(x, z, verge) *
+          (verge!.wornHeightScale - verge!.heightScale)
+      );
+    },
     bankVergeHeightScale(
       x: number | undefined,
       z: number | undefined,
       field: Pick<
         CompactTerrainMacroField,
-        "coastalMeadow" | "bankVerge"
+        "coastalMeadow" | "bankVerge" | "pondServiceGround"
       > | null,
     ): number {
-      const locality = operations.bankVergeLocality(x, z, field);
-      if (locality === 0) return 1;
-      const verge = field!.bankVerge!;
-      return (
-        math.mix(1, verge.heightScale, locality) +
-        operations.bankVergeWear(x, z, field) *
-          (verge.wornHeightScale - verge.heightScale)
-      );
+      if (!field?.coastalMeadow) return 1;
+      const primary = operations.groundVergeHeightScale(x, z, field.bankVerge);
+      return field.pondServiceGround
+        ? Math.min(
+            primary,
+            operations.groundVergeHeightScale(x, z, field.pondServiceGround),
+          )
+        : primary;
     },
     /** Same grass-only reflectance multiplier used by the local GPU surface. */
     bankVergeGrassTint(

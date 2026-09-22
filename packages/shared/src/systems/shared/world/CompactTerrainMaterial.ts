@@ -9,6 +9,7 @@ import THREE, {
   vec3,
   vec4,
   mix,
+  min,
   max,
   normalize,
   smoothstep,
@@ -22,6 +23,7 @@ import {
   type CompactTerrainMacroField,
   type CompactTerrainPlantingLobe,
   type CompactTerrainGroundRibbon,
+  type CompactTerrainBankVerge,
   type CompactTerrainHavenGround,
   type CompactCoastDistribution,
   type CompactCoastDistributionInput,
@@ -559,11 +561,11 @@ export function applyCompactGrassColorGrade(
 }
 
 /** Shared authored locality; no new texture, geometry or placement mask. */
-export function createCompactBankVergeLocality(
+function createCompactGroundVergeLocality(
   world: Node<"vec3">,
-  field: CompactTerrainMacroField | null,
+  verge: CompactTerrainBankVerge | undefined,
+  role: "Bank" | "PondService" = "Bank",
 ): Node<"float"> {
-  const verge = field?.coastalMeadow ? field.bankVerge : undefined;
   if (!verge) return float(0);
   return smoothstep(
     float(verge.minX),
@@ -591,41 +593,101 @@ export function createCompactBankVergeLocality(
         ),
       ),
     )
-    .toVar("compactBankVergeLocality");
+    .toVar(`compact${role}VergeLocality`);
+}
+
+export function createCompactBankVergeLocality(
+  world: Node<"vec3">,
+  field: CompactTerrainMacroField | null,
+): Node<"float"> {
+  return createCompactGroundVergeLocality(
+    world,
+    field?.coastalMeadow ? field.bankVerge : undefined,
+  );
 }
 
 /** Authored wear is shared by ground and blades, never road/root admission. */
-export function createCompactBankVergeWear(
+function createCompactGroundVergeWear(
   world: Node<"vec3">,
-  field: CompactTerrainMacroField | null,
+  verge: CompactTerrainBankVerge | undefined,
   locality?: Node<"float">,
+  role: "Bank" | "PondService" = "Bank",
 ): Node<"float"> {
-  const verge = field?.coastalMeadow ? field.bankVerge : undefined;
   if (!verge) return float(0);
   let wear: Node<"float"> = float(0);
   for (const ribbon of verge.wear)
     wear = max(wear, createCompactGroundRibbonWeight(world.xz, ribbon));
   return wear
-    .mul(locality ?? createCompactBankVergeLocality(world, field))
-    .toVar("compactBankVergeWear");
+    .mul(locality ?? createCompactGroundVergeLocality(world, verge, role))
+    .toVar(`compact${role}VergeWear`);
+}
+
+export function createCompactBankVergeWear(
+  world: Node<"vec3">,
+  field: CompactTerrainMacroField | null,
+  locality?: Node<"float">,
+): Node<"float"> {
+  if (!field?.coastalMeadow) return float(0);
+  const primary = createCompactGroundVergeWear(
+    world,
+    field.bankVerge,
+    locality,
+  );
+  return field.pondServiceGround
+    ? max(
+        primary,
+        createCompactGroundVergeWear(
+          world,
+          field.pondServiceGround,
+          undefined,
+          "PondService",
+        ),
+      )
+    : primary;
 }
 
 /** Same clump-constant vertical/wind scale as the CPU grounding envelope. */
+function createCompactGroundVergeHeightScale(
+  world: Node<"vec3">,
+  verge: CompactTerrainBankVerge | undefined,
+  locality?: Node<"float">,
+  role: "Bank" | "PondService" = "Bank",
+): Node<"float"> {
+  if (!verge) return float(1);
+  const local =
+    locality ?? createCompactGroundVergeLocality(world, verge, role);
+  return mix(float(1), float(verge.heightScale), local)
+    .add(
+      createCompactGroundVergeWear(world, verge, local, role).mul(
+        verge.wornHeightScale - verge.heightScale,
+      ),
+    )
+    .toVar(`naturalGrass${role}HeightScale`);
+}
+
+/** One deformation path for each of the two bounded, independently bound verges. */
 export function createCompactBankVergeHeightScale(
   world: Node<"vec3">,
   field: CompactTerrainMacroField | null,
   locality?: Node<"float">,
 ): Node<"float"> {
-  const verge = field?.coastalMeadow ? field.bankVerge : undefined;
-  if (!verge) return float(1);
-  const local = locality ?? createCompactBankVergeLocality(world, field);
-  return mix(float(1), float(verge.heightScale), local)
-    .add(
-      createCompactBankVergeWear(world, field, local).mul(
-        verge.wornHeightScale - verge.heightScale,
-      ),
-    )
-    .toVar("naturalGrassBankHeightScale");
+  if (!field?.coastalMeadow) return float(1);
+  const primary = createCompactGroundVergeHeightScale(
+    world,
+    field.bankVerge,
+    locality,
+  );
+  return field.pondServiceGround
+    ? min(
+        primary,
+        createCompactGroundVergeHeightScale(
+          world,
+          field.pondServiceGround,
+          undefined,
+          "PondService",
+        ),
+      ).toVar("naturalGrassAuthoredHeightScale")
+    : primary;
 }
 
 /** Local grass reflectance, mirrored by the CPU root palette before layering. */

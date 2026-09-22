@@ -46,6 +46,7 @@ export type GrassGroundingWorkerRequest = {
     | "geometryLayout"
     | "roadClearance"
     | "bankVerge"
+    | "pondServiceGround"
     | "oceanLevel"
     | "wind"
     | "maximumBaseError"

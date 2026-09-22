@@ -39,6 +39,7 @@ import {
   type CompactTerrainPlantingLobe,
   type CompactGrassColorGrade,
   type CompactPondBankField,
+  type CompactTerrainBankVerge,
 } from "../../systems/shared/world/CompactTerrainPalette";
 import {
   createGrassTerrainSurfaceOperations,
@@ -86,6 +87,8 @@ export interface BiomeGrassConfigWorker {
 }
 
 export interface GrassWorkerInput {
+  /** Admitted appearance only; never a placement probability or root scale. */
+  pondServiceGround?: CompactTerrainBankVerge;
   /** Restart-owned pond support; appearance-only pond modes are omitted. */
   compactPondBlend?: "shore-contact-v1" | "composition-v1";
   /** Restart-owned coastal ecology; detail-only material selection is omitted. */
@@ -150,6 +153,8 @@ export interface GrassWorkerInput {
 }
 
 export interface GrassWorkerOutput {
+  /** Exact detached appearance descriptor, also for empty results. */
+  pondServiceGround?: CompactTerrainBankVerge;
   /** Exact selected request marker, including empty regional results. */
   compactPondBlend?: "shore-contact-v1" | "composition-v1";
   /** Exact selected request marker, including empty results. */
@@ -508,11 +513,16 @@ function generateGrassInstances(input) {
     throw new Error("Grass placement distribution requires compact grass eligibility");
   var surface = terrainSurfaceOperations.validateSnapshot(input.terrainSurface);
   var compactPondBankField = pondBlendOperations.bankField(compactPondBlend, surface, compactTerrainColorOperations);
+  var pondServiceGround = compactTerrainColorOperations.captureGroundVerge(input, "pondServiceGround");
+  if (pondServiceGround && !compactGrassColorGrade)
+    throw new Error("Pond service ground requires the graded compact meadow");
   var compactMacroField = compactTerrainColorOperations.macroField(input.config.TERRAIN_PROFILE);
   if (compactPondBlend === "composition-v1")
     compactMacroField = compactTerrainColorOperations.macroField(input.config.TERRAIN_PROFILE, compactCoastBlend, compactPondBlend, compactPondBankField);
   else if (compactCoastBlend || compactPondBlend)
     compactMacroField = compactTerrainColorOperations.macroField(input.config.TERRAIN_PROFILE, compactCoastBlend, compactPondBlend);
+  if (pondServiceGround)
+    compactMacroField = compactTerrainColorOperations.macroField(input.config.TERRAIN_PROFILE, compactCoastBlend, compactPondBlend, compactPondBankField, pondServiceGround);
   coastBlendOperations.assertScope(compactCoastBlend, grassEligibility, compactMacroField);
   pondBlendOperations.assertScope(compactPondBlend, grassEligibility, compactMacroField);
   var compactPlantingLobes = compactTerrainColorOperations.validatePlantingLobes(input.compactPlantingLobes);
@@ -749,6 +759,7 @@ function generateGrassInstances(input) {
 
   if (count === 0) {
     return {
+      ...(pondServiceGround ? { pondServiceGround: pondServiceGround } : {}),
       ...(compactPondBlend ? { compactPondBlend: compactPondBlend } : {}),
       ...(compactCoastBlend ? { compactCoastBlend: compactCoastBlend } : {}),
       ...(compactGrassColorGrade ? { compactGrassColorGrade: compactGrassColorGrade } : {}),
@@ -769,6 +780,7 @@ function generateGrassInstances(input) {
   }
 
   return {
+    ...(pondServiceGround ? { pondServiceGround: pondServiceGround } : {}),
     ...(compactPondBlend ? { compactPondBlend: compactPondBlend } : {}),
     ...(compactCoastBlend ? { compactCoastBlend: compactCoastBlend } : {}),
     ...(compactGrassColorGrade ? { compactGrassColorGrade: compactGrassColorGrade } : {}),
@@ -837,6 +849,12 @@ export function prepareGrassWorkerRequest(
     input.config.TERRAIN_PROFILE.algorithm,
   );
   const grade = colorOperations.grassColorGrade(input.compactGrassColorGrade);
+  const pondServiceGround = colorOperations.captureGroundVerge(
+    input,
+    "pondServiceGround",
+  );
+  if (pondServiceGround && !grade)
+    throw new Error("Pond service ground requires the graded compact meadow");
   const coastBlend = coastBlendOperations.validate(input);
   const pondBlend = pondBlendOperations.validate(input);
   const terrainSurface = surfaceOperations.cloneSnapshot(input.terrainSurface);
@@ -865,12 +883,21 @@ export function prepareGrassWorkerRequest(
   if (grade && eligibility !== "compact-pbr-v1")
     throw new Error("Grass color grade requires compact grass eligibility");
   const domain = placementCellOperations.resolveDomain(input);
+  if (pondServiceGround)
+    colorOperations.macroField(
+      input.config.TERRAIN_PROFILE,
+      coastBlend,
+      pondBlend,
+      pondBankField,
+      pondServiceGround,
+    );
   if (domain.placementDistribution && eligibility !== "compact-pbr-v1")
     throw new Error(
       "Grass placement distribution requires compact grass eligibility",
     );
   return {
     ...input,
+    ...(pondServiceGround ? { pondServiceGround } : {}),
     ...(pondBlend ? { compactPondBlend: pondBlend } : {}),
     ...(coastBlend ? { compactCoastBlend: coastBlend } : {}),
     ...(domain.placementCell ? { placementCell: domain.placementCell } : {}),
@@ -889,6 +916,16 @@ export function admitGrassWorkerPlacementResult(
   result: GrassWorkerOutput,
   request: GrassWorkerInput,
 ): GrassWorkerOutput {
+  const expectedService = colorOperations.captureGroundVerge(
+    request,
+    "pondServiceGround",
+  );
+  const receivedService = colorOperations.captureGroundVerge(
+    result,
+    "pondServiceGround",
+  );
+  if (JSON.stringify(expectedService) !== JSON.stringify(receivedService))
+    throw new Error("Grass worker pond service ground mismatch");
   const expectedPondBlend = pondBlendOperations.validate(request);
   const receivedPondBlend = pondBlendOperations.validate(result);
   if (receivedPondBlend !== expectedPondBlend)
@@ -955,12 +992,20 @@ export function admitGrassWorkerPlacementResult(
   if (!expected) {
     if (Object.prototype.hasOwnProperty.call(result, "placementCell"))
       throw new Error("Unexpected grass worker placement cell");
-    return result;
+    // Validate original markers before copying: a spread must not normalize
+    // inherited fields or invoke their getters ahead of their own admission.
+    return receivedService
+      ? { ...result, pondServiceGround: receivedService }
+      : result;
   }
   const cell = placementCellOperations.validateCell(result.placementCell);
   if (cell.indexX !== expected.indexX || cell.indexZ !== expected.indexZ)
     throw new Error("Grass worker placement cell mismatch");
-  return { ...result, placementCell: cell };
+  return {
+    ...result,
+    placementCell: cell,
+    ...(receivedService ? { pondServiceGround: receivedService } : {}),
+  };
 }
 
 export function isGrassWorkerAvailable(): boolean {

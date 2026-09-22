@@ -8,7 +8,6 @@ import { roadInfluenceOperations } from "./RoadInfluence";
 import {
   createCompactTerrainColorOperations,
   type CompactTerrainBankVerge,
-  type CompactTerrainGroundRibbon,
 } from "./CompactTerrainPalette";
 import {
   getGrassBladeLayout,
@@ -65,6 +64,8 @@ export type GrassBladeGroundingRequest = {
   roadClearance?: "per-blade-v1";
   /** Explicit fine-meadow vertical deformation; never changes root sampling. */
   bankVerge?: CompactTerrainBankVerge;
+  /** Bounded service wear; root admission is unchanged. */
+  pondServiceGround?: CompactTerrainBankVerge;
   ownSurface: RetainedTerrainSurface;
   /** Exact currently drawn own/neighbour surfaces, with no parent overlap. */
   surfaces: readonly RetainedTerrainSurface[];
@@ -80,159 +81,23 @@ export type GrassBladeGroundingRequest = {
 /** Snapshot the optional art descriptor before a resumable job borrows it.
  * Reject inherited/accessor fields instead of executing mutable input code. */
 export function captureGrassBankVerge(
-  request: Pick<GrassBladeGroundingRequest, "bankVerge" | "geometryLayout">,
+  request: Pick<
+    GrassBladeGroundingRequest,
+    "bankVerge" | "pondServiceGround" | "geometryLayout"
+  >,
+  fieldName: "bankVerge" | "pondServiceGround" = "bankVerge",
 ): CompactTerrainBankVerge | undefined {
-  const property = Object.getOwnPropertyDescriptor(request, "bankVerge");
-  const fail = (): never => {
+  const captured = compactTerrainColorOperations.captureGroundVerge(
+    request,
+    fieldName,
+  );
+  if (
+    captured &&
+    request.geometryLayout !== "fine-linear-sweep-3seg-v1" &&
+    request.geometryLayout !== "fine-linear-sweep-near4-v1"
+  )
     throw new Error("Invalid grass bank-verge descriptor");
-  };
-  if ("bankVerge" in request && (!property || !("value" in property))) fail();
-  const value = property?.value;
-  if (value === undefined) return undefined;
-  if (
-    (request.geometryLayout !== "fine-linear-sweep-3seg-v1" &&
-      request.geometryLayout !== "fine-linear-sweep-near4-v1") ||
-    !value ||
-    typeof value !== "object" ||
-    (Object.getPrototypeOf(value) !== Object.prototype &&
-      Object.getPrototypeOf(value) !== null)
-  )
-    fail();
-  const scalarKeys = [
-    "minX",
-    "maxX",
-    "minZ",
-    "maxZ",
-    "feather",
-    "wearStart",
-    "wearEnd",
-    "minimumScale",
-    "heightScale",
-    "wornHeightScale",
-    "tipBrightness",
-  ] as const;
-  const keys = Reflect.ownKeys(value);
-  if (
-    keys.length !== scalarKeys.length + 2 ||
-    keys.some(
-      (key) =>
-        key !== "grassTint" &&
-        key !== "wear" &&
-        !scalarKeys.includes(key as never),
-    )
-  )
-    fail();
-  const copy = {} as Record<(typeof scalarKeys)[number], number>;
-  for (const key of scalarKeys) {
-    const field = Object.getOwnPropertyDescriptor(value, key);
-    if (!field || !("value" in field) || !Number.isFinite(field.value)) fail();
-    copy[key] = field!.value;
-  }
-  const tintField = Object.getOwnPropertyDescriptor(value, "grassTint");
-  if (!tintField || !("value" in tintField)) fail();
-  const tint = tintField!.value;
-  if (
-    !Array.isArray(tint) ||
-    tint.length !== 3 ||
-    Reflect.ownKeys(tint).length !== 4
-  )
-    fail();
-  const tintCopy = [0, 0, 0] as [number, number, number];
-  for (let i = 0; i < 3; i++) {
-    const field = Object.getOwnPropertyDescriptor(tint, String(i));
-    if (
-      !field ||
-      !("value" in field) ||
-      !Number.isFinite(field.value) ||
-      field.value < 0 ||
-      field.value > 2
-    )
-      fail();
-    tintCopy[i] = field!.value;
-  }
-  const wearField = Object.getOwnPropertyDescriptor(value, "wear");
-  if (!wearField || !("value" in wearField)) fail();
-  const wear = wearField!.value;
-  if (
-    !Array.isArray(wear) ||
-    wear.length > 3 ||
-    Reflect.ownKeys(wear).length !== wear.length + 1
-  )
-    fail();
-  const ribbonKeys = [
-    "startX",
-    "startZ",
-    "endX",
-    "endZ",
-    "coreRadius",
-    "outerRadius",
-    "strength",
-  ] as const;
-  const wearCopy: CompactTerrainGroundRibbon[] = [];
-  for (let i = 0; i < wear.length; i++) {
-    const item = Object.getOwnPropertyDescriptor(wear, String(i));
-    if (!item || !("value" in item)) fail();
-    const ribbon = item!.value;
-    if (
-      !ribbon ||
-      typeof ribbon !== "object" ||
-      (Object.getPrototypeOf(ribbon) !== Object.prototype &&
-        Object.getPrototypeOf(ribbon) !== null) ||
-      Reflect.ownKeys(ribbon).length !== ribbonKeys.length ||
-      Reflect.ownKeys(ribbon).some((key) => !ribbonKeys.includes(key as never))
-    )
-      fail();
-    const captured = {} as Record<(typeof ribbonKeys)[number], number>;
-    for (const key of ribbonKeys) {
-      const field = Object.getOwnPropertyDescriptor(ribbon, key);
-      if (!field || !("value" in field) || !Number.isFinite(field.value))
-        fail();
-      captured[key] = field!.value;
-    }
-    const dx = captured.endX - captured.startX;
-    const dz = captured.endZ - captured.startZ;
-    if (
-      ![captured.startX, captured.startZ, captured.endX, captured.endZ].every(
-        (n) => Math.abs(n) <= 1e6,
-      ) ||
-      dx * dx + dz * dz <= 0 ||
-      captured.coreRadius < 0 ||
-      captured.outerRadius <= captured.coreRadius ||
-      captured.outerRadius * captured.outerRadius <=
-        captured.coreRadius * captured.coreRadius ||
-      captured.outerRadius > 1e6 ||
-      captured.strength < 0 ||
-      captured.strength > 1
-    )
-      fail();
-    wearCopy.push(Object.freeze(captured));
-  }
-  if (
-    ![copy.minX, copy.maxX, copy.minZ, copy.maxZ].every(
-      (n) => Math.abs(n) <= 1e6,
-    ) ||
-    copy.minX >= copy.maxX ||
-    copy.minZ >= copy.maxZ ||
-    copy.feather <= 0 ||
-    copy.feather * 2 > Math.min(copy.maxX - copy.minX, copy.maxZ - copy.minZ) ||
-    copy.wearStart < 0 ||
-    copy.wearStart >= copy.wearEnd ||
-    copy.wearEnd > 1 ||
-    copy.minimumScale <= 0 ||
-    copy.minimumScale > 1 ||
-    copy.heightScale <= 0 ||
-    copy.heightScale > 1 ||
-    copy.wornHeightScale <= 0 ||
-    copy.wornHeightScale > copy.heightScale ||
-    copy.tipBrightness <= 0 ||
-    copy.tipBrightness > 2
-  )
-    fail();
-  return Object.freeze({
-    ...copy,
-    grassTint: Object.freeze(tintCopy),
-    wear: Object.freeze(wearCopy),
-  });
+  return captured;
 }
 
 type DeferredReason = "missing_surface" | "overlapping_surface" | "work_budget";
@@ -493,9 +358,11 @@ export function* groundGrassBladeSteps(
   const started = performance.now();
   const { data, ownSurface, geometry, lod, wind, geometryLayout } = request;
   const bankVerge = captureGrassBankVerge(request);
-  const bankField = bankVerge
-    ? { coastalMeadow: true as const, bankVerge }
-    : null;
+  const pondServiceGround = captureGrassBankVerge(request, "pondServiceGround");
+  const bankField =
+    bankVerge || pondServiceGround
+      ? { coastalMeadow: true as const, bankVerge, pondServiceGround }
+      : null;
   const clearanceProperty = Object.getOwnPropertyDescriptor(
     request,
     "roadClearance",

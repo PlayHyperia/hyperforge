@@ -2516,6 +2516,74 @@ No water shader or material setting was changed on this evidence.
 Runtime55/56 and their disposable databases are removed. All owned native
 browsers are closed; the protected human playable database is unchanged.
 
+### Pond-bank service ground — 2026-09-22
+
+- [x] Author a bounded three-ribbon service apron from the actual pond bank's
+  chest standing tile, court, clerk and dock arrival. The JSON recipe shortens
+  grass and shares worn-soil coverage; it does not add a floor, road, navigation
+  restriction, terrain grade or resource exclusion. The retained recipe reaches
+  six metres toward the landing, with graduated shoulders inside an
+  11.6 × 15.4997 m support. Outside the ribbons, height is neutral; the original
+  town-bank treatment is unchanged.
+- [x] Keep seeded placement, random draws and root scale unchanged. Shorter
+  swept envelopes legitimately retain more blades beside existing roads:
+  the 83-probe fixture changes near4 LOD0 from 38 clumps/535 blades to 39/553,
+  and LOD1 from 40/285 to 41/292. Actual chest, four pavilion footings and 1,312
+  standing samples remain clear with real tile navigation. The selected v9
+  and v10 cases both pass. This is not unchanged fitted masks or zero work.
+- [x] Share detached, frozen descriptors through actual terrain, grass,
+  placement-worker and cold/cached grounding-worker paths. The combined source
+  gate passes 532 tests across nine files; a 110-test repeat covers the three
+  files adjusted for typing, and four selected-layout configuration cases pass.
+  Full shared/explicit-regression no-emit: 730 roots, 2,408 source files, zero
+  diagnostics. Initial test-only type failures are retained; no production
+  expression changed for them. The first expanded-recipe assertion ran before
+  the JSON edit and correctly failed against the narrow recipe; it is retained.
+- [x] Catch and correct a real minified-factory failure: a local named arrow
+  introduced an unavailable name-preservation helper into serialized code.
+  Actual minified workers now execute selected, omitted and malformed
+  descriptors without a shim. Result metadata is validated before copying,
+  preserving inherited/accessor rejection and transferred array identities.
+- [x] Build nine isolated bundles from 997 inputs in both build45 and build46;
+  only the apron JSON differs between their source inventories. All 145
+  protected compiled outputs remain unchanged. These are private candidates,
+  not a playable-default promotion. Retained CPU evidence uses the
+  `pond-service-ground-` prefix in service-layout evidence, including
+  `final01`, `posttypes01`, `types04`, `selected-v9-04`,
+  `selected-v10-01`, and `manager-final02`.
+- [x] Review actual native93→94 Chrome/Metal WebGPU captures from the same two
+  camera poses and v9 assets. Original 90-second startup and 30-second camera
+  gates pass; observed startup is approximately 33 seconds in each. No retained
+  runtime errors; the explicitly deferred cow-model failure remains admitted,
+  not silently repaired. Native pipeline evidence includes the bound pond
+  service wear. Natural wind is not phase-locked; these 1280×720 diagnostic
+  stills are neither the separate 2× cinematic nor a performance comparison.
+  Root and independent visual review retain native94 as a modest local gain:
+  clearer muted soil/short turf around chest/clerk and a small rear approach.
+  Landing composition is effectively unchanged; no obvious new regression.
+- [x] Close both owned browsers and stop runtime63/64. Their ephemeral test
+  databases are removed; protected listeners, persistent playable database,
+  compiled artifacts and localhost3333 remain unchanged. Current lid-open/AC
+  observations permitted bounded captures; native92's thermal-protection
+  suspension remains failed, not retroactively passed.
+- [ ] Correct two pre-existing historical manager counter assertions separately.
+  Failures reproduce with all 13 changed production modules supplied read-only
+  from committed `4a5ba06cb`: 18,063 versus 16,954 and 18,436 versus 17,306.
+  Current totals include refined-face shortcuts; the frozen oracle counts
+  canonical-face shortcuts only. Add explicit refined attribution and use the
+  frozen census in historical savings formulas; retain semantic hashes, array
+  equality, original caps and work-reduction assertions. The broader manager
+  suite is not green; no assertion was relaxed for this apron.
+- [ ] Qualify added shader cost, sustained performance, streaming and motion.
+  Three extra ribbon evaluations are real work despite unchanged texture
+  samples/draw calls. No thermal, frame-budget or AAA approval is inferred.
+- [ ] Move beyond small apron adjustments: improve broad grass distribution,
+  readable arrival routes, shoreline composition and material/light response.
+  The clearing still sits largely in roof shadow behind a tall grass rim.
+  The official [Three forest generator](https://github.com/mrdoob/three.js/blob/r186/examples/jsm/generators/ForestGenerator.js)
+  informs regional clearing/patch composition, not copied demo populations
+  or replacement of authoritative harvestable trees.
+
 ### Compact pond sunlight correction — 2026-09-22
 
 - [x] Separate compact-pond direct sunlight from planar reflection sampling.

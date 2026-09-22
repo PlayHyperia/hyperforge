@@ -38,6 +38,7 @@ import { createCompactPondDressing } from "./CompactPondDressing";
 import {
   createCompactServicePlanting,
   createCompactServiceSoil,
+  createCompactPondServiceGround,
   isCompactBankCourt,
 } from "./CompactServiceCourt";
 import { createCompactLandscapeRockFootprints } from "./CompactLandscapeRockFootprints";
@@ -114,6 +115,7 @@ import {
   type CompactTerrainPond,
   type CompactPondBankField,
   type CompactTerrainMacroField,
+  type CompactTerrainBankVerge,
   type CompactTerrainPlantingLobe,
   type CompactGrassColorGrade,
 } from "./CompactTerrainPalette";
@@ -430,6 +432,7 @@ export class TerrainSystem extends System {
   }[] = [];
   private grassSurfaceOperations = createGrassTerrainSurfaceOperations();
   private compactMacroMaterial: CompactTerrainMacroField | null | undefined;
+  private pondServiceGround: CompactTerrainBankVerge | null | undefined;
   private compactHabitatMaterial: CompactHabitatField | null | undefined;
   /** Restart-owned visual selection; never part of authoritative terrain identity. */
   private compactGrassColorGrade: CompactGrassColorGrade | null | undefined;
@@ -640,6 +643,9 @@ export class TerrainSystem extends System {
       compactProfile: profile,
       compactHabitat: this.getCompactHabitatMaterial(),
       compactGrassColorGrade: this.getCompactGrassColorGrade(),
+      ...(this.getPondServiceGround()
+        ? { pondServiceGround: this.getPondServiceGround()! }
+        : {}),
     });
     // The generator initializes before this client-only material exists. Apply
     // profile-owned options here so the actual published material is configured
@@ -682,8 +688,22 @@ export class TerrainSystem extends System {
         this.getCompactPondBlend() === "composition-v1"
           ? this.bindCompactPondBankField()
           : undefined,
+        this.getPondServiceGround() ?? undefined,
       );
     return this.compactMacroMaterial;
+  }
+
+  /** Restart-owned appearance; authoritative service/landing owners admit it. */
+  private getPondServiceGround(): CompactTerrainBankVerge | null {
+    if (this.pondServiceGround === undefined)
+      this.pondServiceGround = this.getCompactGrassColorGrade()
+        ? createCompactPondServiceGround(
+            this.getWorldTerrainProfile(),
+            DataManager.getWorldConfig(),
+            ALL_WORLD_AREAS,
+          )
+        : null;
+    return this.pondServiceGround;
   }
 
   /** Bind only registered, canonical geometry. Preview edits require restart:
@@ -3102,6 +3122,9 @@ export class TerrainSystem extends System {
 
     return {
       terrainConfig: workerConfig,
+      ...(this.getPondServiceGround()
+        ? { pondServiceGround: this.getPondServiceGround()! }
+        : {}),
       ...(this.getCompactGrassColorGrade()
         ? { compactGrassColorGrade: this.getCompactGrassColorGrade() }
         : {}),

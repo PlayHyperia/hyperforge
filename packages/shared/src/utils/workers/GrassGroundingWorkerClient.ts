@@ -705,6 +705,7 @@ export class GrassGroundingWorkerClient {
           "geometryLayout",
           "roadClearance",
           "bankVerge",
+          "pondServiceGround",
           "maximumBaseError",
           "workBudget",
         ],

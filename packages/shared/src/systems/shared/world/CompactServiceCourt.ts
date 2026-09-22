@@ -13,7 +13,17 @@ import {
   type CompactPondPlacement,
 } from "./CompactPondDressing";
 import type { WorldTerrainProfile } from "./WorldTerrainProfile";
-import type { CompactTerrainPlantingLobe } from "./CompactTerrainPalette";
+import {
+  createCompactTerrainColorOperations,
+  type CompactTerrainBankVerge,
+  type CompactTerrainPlantingLobe,
+} from "./CompactTerrainPalette";
+import pondServiceGroundRecipe from "../../../data/compact-pond-service-ground-v1.json";
+import {
+  getCompactPondDockDirection,
+  validateCompactPondDockBindings,
+  validateCompactPondDocks,
+} from "./DockDefinition";
 import type {
   OpenWorkshopRecipe,
   WorkshopFoot,
@@ -23,6 +33,155 @@ import type { GrassTerrainExclusionPolygon } from "../../../utils/workers/GrassT
 // Existing support stencil for the procgen recipe's 0.30m footing. Procgen does
 // not export this dimension; actual footing-vertex tests guard their alignment.
 const FOOTING_HALF_EXTENT = 0.15;
+
+/** Appearance-only service apron from actual, mutually bound owners. Never a
+ * road, exclusion polygon, terrain grade, collision tile or resource rule. */
+export function createCompactPondServiceGround(
+  profile: WorldTerrainProfile,
+  config:
+    | Pick<WorldConfigManifest, "compactServiceCourts" | "compactPondDocks">
+    | null
+    | undefined,
+  areas: Readonly<Record<string, WorldArea>>,
+): CompactTerrainBankVerge | null {
+  const recipe = pondServiceGroundRecipe;
+  const layout = config?.compactServiceCourts;
+  if (!layout) return null;
+  const admitted = validateCompactServiceCourts(layout, profile)!;
+  const courts = admitted.courts.filter(
+    (court) => court.recipeId === recipe.courtRecipeId,
+  );
+  if (courts.length === 0) return null;
+  validateCompactServiceCourtBindings(admitted, areas);
+  const docks = validateCompactPondDocks(config?.compactPondDocks, profile);
+  const water = validateCompactPondDockBindings(docks, areas);
+  if (
+    recipe.schemaVersion !== 1 ||
+    recipe.terrainProfileId !== profile.id ||
+    courts.length !== 1 ||
+    courts[0].layoutId === admitted.primaryBankId ||
+    !docks ||
+    !water ||
+    recipe.lobes.length !== 3
+  )
+    throw new Error("Pond service ground requires its bound court and landing");
+  const court = courts[0];
+  const pondArea = areas.haven_pond;
+  const chests =
+    pondArea?.stations?.filter((row) => court.stationIds.includes(row.id)) ??
+    [];
+  const clerks =
+    pondArea?.npcs?.filter((row) => court.npcIds.includes(row.id)) ?? [];
+  const landings = docks.docks.filter(
+    (dock) => dock.recipeId === recipe.landingRecipeId,
+  );
+  if (
+    chests.length !== 1 ||
+    chests[0].type !== "bank" ||
+    clerks.length !== 1 ||
+    clerks[0].type !== "bank" ||
+    court.npcIds.length !== 1 ||
+    landings.length !== 1 ||
+    !pondArea.waterBodies?.some((body) => body.id === water.id)
+  )
+    throw new Error(
+      "Pond service ground has missing or ambiguous local anchors",
+    );
+  const center = court.position,
+    chest = chests[0].position;
+  const landing = landings[0],
+    direction = getCompactPondDockDirection(landing.rotation);
+  // Match the existing landward apron; its station route remains unmodified.
+  const arrival = {
+    x: landing.x - direction.x * recipe.landwardApronDistance,
+    z: landing.z - direction.z * recipe.landwardApronDistance,
+  };
+  const distance = Math.hypot(arrival.x - center.x, arrival.z - center.z);
+  if (
+    !Number.isFinite(distance) ||
+    distance < 6 ||
+    !Number.isFinite(recipe.entryDistance) ||
+    recipe.entryDistance <= 0 ||
+    !Number.isFinite(recipe.landwardApronDistance) ||
+    recipe.landwardApronDistance <= 0 ||
+    recipe.entryDistance >= distance
+  )
+    throw new Error("Pond service ground requires a separate landward arrival");
+  const anchors: Readonly<Record<string, Readonly<{ x: number; z: number }>>> =
+    {
+      center,
+      standing: {
+        x: Math.floor(chest.x) + Math.sign(center.x - chest.x) + 0.5,
+        z: Math.floor(chest.z) + Math.sign(center.z - chest.z) + 0.5,
+      },
+      clerk: clerks[0].position,
+      entry: {
+        x:
+          center.x + ((arrival.x - center.x) / distance) * recipe.entryDistance,
+        z:
+          center.z + ((arrival.z - center.z) / distance) * recipe.entryDistance,
+      },
+    };
+  const wear = recipe.lobes.map((lobe) => {
+    const start = anchors[lobe.from],
+      end = anchors[lobe.to];
+    if (!start || !end)
+      throw new Error("Unknown pond service ground anchor role");
+    return {
+      startX: start.x,
+      startZ: start.z,
+      endX: end.x,
+      endZ: end.z,
+      coreRadius: lobe.coreRadius,
+      outerRadius: lobe.outerRadius,
+      strength: lobe.strength,
+    };
+  });
+  const candidate = {
+    minX:
+      Math.min(...wear.map((r) => Math.min(r.startX, r.endX) - r.outerRadius)) -
+      recipe.feather,
+    maxX:
+      Math.max(...wear.map((r) => Math.max(r.startX, r.endX) + r.outerRadius)) +
+      recipe.feather,
+    minZ:
+      Math.min(...wear.map((r) => Math.min(r.startZ, r.endZ) - r.outerRadius)) -
+      recipe.feather,
+    maxZ:
+      Math.max(...wear.map((r) => Math.max(r.startZ, r.endZ) + r.outerRadius)) +
+      recipe.feather,
+    feather: recipe.feather,
+    wearStart: 0.1,
+    wearEnd: 0.8,
+    minimumScale: 1,
+    heightScale: 1,
+    wornHeightScale: recipe.wornHeightScale,
+    tipBrightness: 1,
+    grassTint: [1, 1, 1],
+    wear,
+  };
+  if (
+    candidate.minX < profile.bounds.minX ||
+    candidate.maxX > profile.bounds.maxX ||
+    candidate.minZ < profile.bounds.minZ ||
+    candidate.maxZ > profile.bounds.maxZ
+  )
+    throw new Error("Pond service ground exceeds its admitted terrain");
+  const colors = createCompactTerrainColorOperations();
+  const primary = colors.macroField(profile)?.bankVerge;
+  if (
+    primary &&
+    candidate.minX < primary.maxX &&
+    candidate.maxX > primary.minX &&
+    candidate.minZ < primary.maxZ &&
+    candidate.maxZ > primary.minZ
+  )
+    throw new Error("Pond service ground overlaps the primary bank treatment");
+  return colors.captureGroundVerge(
+    { pondServiceGround: candidate },
+    "pondServiceGround",
+  )!;
+}
 
 export const MAX_COMPACT_SERVICE_COURTS = 8;
 export type CompactCourtDescriptor =

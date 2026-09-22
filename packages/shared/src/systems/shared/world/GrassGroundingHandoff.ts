@@ -142,6 +142,7 @@ export function* prepareGrassGroundingHandoffSteps(
   maximumInputBytes = GRASS_GROUNDING_WORKER_LIMITS.maximumInputBytes,
 ): Generator<string, GrassGroundingPreparedInput, void> {
   const bankVerge = captureGrassBankVerge(request);
+  const pondServiceGround = captureGrassBankVerge(request, "pondServiceGround");
   const layout = getGrassBladeLayout(request.lod, request.geometryLayout);
   const geometry = request.geometry,
     revision = geometry.uuid;
@@ -245,6 +246,7 @@ export function* prepareGrassGroundingHandoffSteps(
       ? {}
       : { roadClearance: "per-blade-v1" as const }),
     ...(bankVerge === undefined ? {} : { bankVerge }),
+    ...(pondServiceGround === undefined ? {} : { pondServiceGround }),
     ...(request.maximumBaseError === undefined
       ? {}
       : { maximumBaseError: request.maximumBaseError }),

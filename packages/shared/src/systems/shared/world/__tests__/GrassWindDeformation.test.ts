@@ -30,12 +30,60 @@ import {
   GRASS_ROOT_STORAGE_ATTRIBUTE,
 } from "../GrassGroundingGpu";
 import { getGrassBladeLayout } from "../GrassBladeLayout";
+import type { CompactTerrainBankVerge } from "../CompactTerrainPalette";
+
+// Independent valid appearance fixture. Canonical court/actor binding is
+// covered by CompactIslandPaths; this isolates three unequal height ribbons.
+const pondServiceGround: CompactTerrainBankVerge = {
+  minX: 378,
+  maxX: 390,
+  minZ: 432,
+  maxZ: 446,
+  feather: 1,
+  wearStart: 0.1,
+  wearEnd: 0.9,
+  minimumScale: 1,
+  heightScale: 1,
+  wornHeightScale: 0.35,
+  tipBrightness: 1,
+  grassTint: [1, 1, 1],
+  wear: [
+    {
+      startX: 382,
+      startZ: 436,
+      endX: 386,
+      endZ: 436,
+      coreRadius: 0.5,
+      outerRadius: 1,
+      strength: 0.8,
+    },
+    {
+      startX: 386,
+      startZ: 436,
+      endX: 386,
+      endZ: 440,
+      coreRadius: 0.4,
+      outerRadius: 0.9,
+      strength: 0.62,
+    },
+    {
+      startX: 382,
+      startZ: 436,
+      endX: 382,
+      endZ: 440,
+      coreRadius: 0.3,
+      outerRadius: 0.8,
+      strength: 0.55,
+    },
+  ],
+};
 
 function createOwner(
   candidate: boolean | "fine" = true,
   withWorkerSetup = true,
   profile?: GrassVisualProfile,
   gradedBank = false,
+  serviceGround?: CompactTerrainBankVerge,
 ) {
   const terrain = gradedBank
     ? validateWorldTerrainProfile({
@@ -58,6 +106,7 @@ function createOwner(
     : SCULPTED_COMPACT_WORLD_TERRAIN_PROFILE;
   const config = createTerrainWorkerConfig(terrain, 16);
   const setup: GrassWorkerSetup = {
+    ...(serviceGround ? { pondServiceGround: serviceGround } : {}),
     ...(gradedBank
       ? { compactGrassColorGrade: "fine-meadow-green-v1" as const }
       : {}),
@@ -115,7 +164,11 @@ function deformationFixture(
     | "bank-wear-apron"
     | "bank-wear-clerk"
     | "bank-wear-shopkeeper"
-    | "bank-wear-feather",
+    | "bank-wear-feather"
+    | "pond-service-wear"
+    | "pond-service-near4"
+    | "pond-service-supplier"
+    | "pond-service-outside",
 ) {
   const isFine = variant !== "natural";
   // Independent authored expectations, not a call back into the CPU/GPU
@@ -141,6 +194,11 @@ function deformationFixture(
         featherLocality * (0.65 - 1) +
         featherLocality * featherWear * (0.35 - 0.65),
     ],
+    "pond-service-wear": [384, 436, 1 + 0.8 * (0.35 - 1)],
+    "pond-service-near4": [386, 439, 1 + 0.62 * (0.35 - 1)],
+    "pond-service-supplier": [382, 439, 1 + 0.55 * (0.35 - 1)],
+    // Inside the locality rectangle but outside every ribbon: no base haircut.
+    "pond-service-outside": [388, 444, 1],
   } as const;
   const bankLocation =
     variant in locations
@@ -151,17 +209,18 @@ function deformationFixture(
     true,
     undefined,
     !!bankLocation,
+    variant.startsWith("pond-service-") ? pondServiceGround : undefined,
   );
   const appearance = isFine ? FINE_MEADOW_APPEARANCE : NATURAL_TUFT_APPEARANCE;
   const geometryLayout = !isFine
     ? undefined
-    : variant === "isolated-fine-near4"
+    : variant === "isolated-fine-near4" || variant === "pond-service-near4"
       ? "fine-linear-sweep-near4-v1"
       : FINE_MEADOW_APPEARANCE.GEOMETRY_LAYOUT;
   // The shader has no segment-dependent branch. These are independent real
   // four-segment templates, not a claim that the current manager selects four.
   const geometries =
-    variant === "isolated-fine-near4"
+    variant === "isolated-fine-near4" || variant === "pond-service-near4"
       ? [0, 1, 2].map((lod) => {
           const layout = getGrassBladeLayout(lod, geometryLayout);
           return createClumpGeometry(
@@ -179,7 +238,7 @@ function deformationFixture(
     isFine,
     bankLocation,
     close() {
-      if (variant === "isolated-fine-near4")
+      if (variant === "isolated-fine-near4" || variant === "pond-service-near4")
         geometries.forEach((geometry) => geometry.dispose());
       owner.destroy();
     },
@@ -913,6 +972,100 @@ describe("fine meadow constant normal blend (actual CPU node arithmetic)", () =>
 });
 
 describe("natural tuft actual shader deformation (CPU node arithmetic only)", () => {
+  it("owns unique pond-service shader names and preserves town/outside deformation exactly", () => {
+    const baseline = createOwner("fine", true, undefined, true);
+    const candidate = createOwner(
+      "fine",
+      true,
+      undefined,
+      true,
+      pondServiceGround,
+    );
+    try {
+      const material = candidate["material"];
+      if (!(material instanceof MeshSSSNodeMaterial) || !material.colorNode)
+        throw new Error(
+          "Actual fine thin-leaf material and color node required",
+        );
+      const colorNode: unknown = material.colorNode;
+      const isNode = (value: unknown): value is Node =>
+        typeof value === "object" &&
+        value !== null &&
+        Reflect.get(value, "isNode") === true;
+      if (!isNode(colorNode))
+        throw new Error("Actual Three color node required");
+      const nodes = new Set<Node>();
+      for (const root of [
+        material.positionNode!,
+        material.normalNode!,
+        // Expand only the actual material color factory. Camera/matrix
+        // accessors elsewhere in the DAG are builder-dependent, not material
+        // construction callbacks that can be invoked without a renderer.
+        colorGraph(colorNode),
+      ]) {
+        for (const node of graph(root)) nodes.add(node);
+      }
+      expect(nodes.size).toBeLessThan(4096);
+      const names = new Map<string, Node>();
+      for (const node of nodes) {
+        const name: unknown = Reflect.get(node, "name");
+        if (
+          !Reflect.get(node, "isVarNode") ||
+          typeof name !== "string" ||
+          !/(?:Verge|(?:Bank|PondService|Authored)HeightScale)/.test(name)
+        )
+          continue;
+        const prior = names.get(name);
+        expect(
+          prior === undefined || prior === node,
+          `Distinct actual shader variables alias ${name}`,
+        ).toBe(true);
+        names.set(name, node);
+      }
+      expect(names.has("naturalGrassBankHeightScale")).toBe(true);
+      expect(names.has("naturalGrassPondServiceHeightScale")).toBe(true);
+      expect(names.has("naturalGrassAuthoredHeightScale")).toBe(true);
+      expect(
+        [...names.keys()].some((name) => /(?:Pond|Service)/.test(name)),
+      ).toBe(true);
+      const geometry = candidate["lodGeometries"][0];
+      for (const [x, z] of [
+        [350, 319.5],
+        [341.75, 322.5],
+        [388, 444],
+        [400, 440],
+      ])
+        for (const seconds of [0, 3.7])
+          for (const distance of [0, 126, 140])
+            for (const index of [
+              0,
+              2,
+              geometry.attributes.position.count - 1,
+            ]) {
+              const inputs = inputFor(geometry, index);
+              inputs.model.identity();
+              inputs.time = seconds;
+              inputs.attributes.instanceOffset = [x, 28, z];
+              inputs.attributes.instanceGroundNormal = new THREE.Vector3(
+                0.3,
+                0.8,
+                -0.2,
+              )
+                .normalize()
+                .toArray();
+              for (const owner of [baseline, candidate])
+                owner["playerPosUniform"]!.value.set(x + distance, 0, z);
+              for (const field of ["positionNode", "normalNode"] as const)
+                expect(evaluate(candidate["material"][field], inputs)).toEqual(
+                  evaluate(baseline["material"][field], inputs),
+                );
+            }
+    } finally {
+      candidate.destroy();
+      baseline.destroy();
+    }
+  });
+
   it("keeps actual fragment normals finite after zero or near-zero raster interpolation", () => {
     const owner = createOwner();
     try {
@@ -1124,6 +1277,10 @@ describe("natural tuft actual shader deformation (CPU node arithmetic only)", ()
     "bank-wear-clerk",
     "bank-wear-shopkeeper",
     "bank-wear-feather",
+    "pond-service-wear",
+    "pond-service-near4",
+    "pond-service-supplier",
+    "pond-service-outside",
   ] as const)(
     "matches %s deformed smooth normals to independent tangent crosses through wind, fade, yaw and slope",
     (variant) => {
@@ -1181,7 +1338,11 @@ describe("natural tuft actual shader deformation (CPU node arithmetic only)", ()
                 new THREE.Vector3(0.4, 0.8, -0.3).normalize(),
                 new THREE.Vector3(-0.6, 0.7, 0.2).normalize(),
               ])
-                for (const scale of [0.14, 1.1, 4])
+                // Keep all historical combinations; the additive pond cases
+                // reuse one clump scale while retaining all slopes/fades/rows.
+                for (const scale of variant.startsWith("pond-service-")
+                  ? [1.1]
+                  : [0.14, 1.1, 4])
                   for (const fadeDistance of [0, 126, 140])
                     for (const seconds of [0, 3.7]) {
                       const inputs = inputFor(geometry, index);
@@ -1353,10 +1514,21 @@ describe("natural tuft actual shader deformation (CPU node arithmetic only)", ()
           }
         }
         expect(cases).toBe(
-          variant === "isolated-fine-near4" ? 1836 : isFine ? 1620 : 972,
+          variant === "pond-service-near4"
+            ? 612
+            : variant.startsWith("pond-service-")
+              ? 540
+              : variant === "isolated-fine-near4"
+                ? 1836
+                : isFine
+                  ? 1620
+                  : 972,
         );
         expect(maximumError).toBeLessThan(2e-6);
-        if (bankLocation) expect(finiteDifferenceCases).toBeGreaterThan(500);
+        if (bankLocation)
+          expect(finiteDifferenceCases).toBeGreaterThan(
+            variant.startsWith("pond-service-") ? 150 : 500,
+          );
       } finally {
         fixture.close();
       }
@@ -1374,6 +1546,10 @@ describe("natural tuft actual shader deformation (CPU node arithmetic only)", ()
     "bank-wear-clerk",
     "bank-wear-shopkeeper",
     "bank-wear-feather",
+    "pond-service-wear",
+    "pond-service-near4",
+    "pond-service-supplier",
+    "pond-service-outside",
   ] as const)(
     "keeps both %s roots anchored over time and all vertex wind inside existing swept bounds",
     (variant) => {

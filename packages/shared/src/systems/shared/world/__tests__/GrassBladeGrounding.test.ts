@@ -2971,6 +2971,261 @@ function currentBankVergeWear() {
   )!.bankVerge!;
 }
 
+// Analytical descriptor, deliberately independent of the admitted-world
+// factory (whose real anchor/clearance contract lives in CompactIslandPaths).
+const POND_SERVICE_GROUND_TRIAL = {
+  minX: 376,
+  maxX: 394,
+  minZ: 427,
+  maxZ: 443,
+  feather: 0.75,
+  wearStart: 0.1,
+  wearEnd: 0.8,
+  minimumScale: 1,
+  heightScale: 1,
+  wornHeightScale: 0.35,
+  tipBrightness: 1,
+  grassTint: [1, 1, 1] as const,
+  wear: [
+    {
+      startX: 381,
+      startZ: 434,
+      endX: 384,
+      endZ: 434,
+      coreRadius: 0.9,
+      outerRadius: 2.6,
+      strength: 0.92,
+    },
+    {
+      startX: 384,
+      startZ: 434,
+      endX: 389,
+      endZ: 438,
+      coreRadius: 0.7,
+      outerRadius: 2.2,
+      strength: 0.86,
+    },
+    {
+      startX: 384,
+      startZ: 434,
+      endX: 384,
+      endZ: 430,
+      coreRadius: 0.7,
+      outerRadius: 2.1,
+      strength: 0.78,
+    },
+  ],
+};
+
+describe("independent pond service ground deformation", () => {
+  it("captures the second descriptor strictly even when the town descriptor is absent", () => {
+    let getterReads = 0;
+    const mutable = structuredClone(POND_SERVICE_GROUND_TRIAL);
+    const base = { geometryLayout: "fine-linear-sweep-near4-v1" as const };
+    const capture = (value: object) =>
+      captureGrassBankVerge(value, "pondServiceGround");
+    const valid = capture({ ...base, pondServiceGround: mutable })!;
+    expect(valid).toEqual(mutable);
+    expect(valid).not.toBe(mutable);
+    expect(Object.isFrozen(valid)).toBe(true);
+    expect(Object.isFrozen(valid.grassTint)).toBe(true);
+    expect(Object.isFrozen(valid.wear)).toBe(true);
+    valid.wear.forEach((row) => expect(Object.isFrozen(row)).toBe(true));
+    mutable.wear[0].endX += 1;
+    expect(valid.wear[0].endX).toBe(384);
+    const badGetter = Object.defineProperty(
+      { ...POND_SERVICE_GROUND_TRIAL },
+      "heightScale",
+      {
+        get() {
+          getterReads++;
+          return 1;
+        },
+      },
+    );
+    const sparseWear = Array.from(POND_SERVICE_GROUND_TRIAL.wear);
+    delete sparseWear[1];
+    for (const town of [undefined, currentBankVergeWear()]) {
+      for (const bad of [
+        null,
+        {},
+        Object.create(POND_SERVICE_GROUND_TRIAL),
+        badGetter,
+        { ...POND_SERVICE_GROUND_TRIAL, minimumScale: 0.9 },
+        { ...POND_SERVICE_GROUND_TRIAL, heightScale: 0.8 },
+        { ...POND_SERVICE_GROUND_TRIAL, tipBrightness: 1.1 },
+        { ...POND_SERVICE_GROUND_TRIAL, grassTint: [1, 0.9, 1] },
+        { ...POND_SERVICE_GROUND_TRIAL, wear: sparseWear },
+        {
+          ...POND_SERVICE_GROUND_TRIAL,
+          wear: POND_SERVICE_GROUND_TRIAL.wear.slice(0, 2),
+        },
+        {
+          ...POND_SERVICE_GROUND_TRIAL,
+          wear: [
+            ...POND_SERVICE_GROUND_TRIAL.wear,
+            POND_SERVICE_GROUND_TRIAL.wear[0],
+          ],
+        },
+        { ...POND_SERVICE_GROUND_TRIAL, maxX: 400 },
+        { ...POND_SERVICE_GROUND_TRIAL, wornHeightScale: Infinity },
+      ])
+        expect(() =>
+          capture({ ...base, bankVerge: town, pondServiceGround: bad }),
+        ).toThrow();
+      expect(() =>
+        capture(
+          Object.assign(
+            Object.create({ pondServiceGround: POND_SERVICE_GROUND_TRIAL }),
+            { ...base, bankVerge: town },
+          ),
+        ),
+      ).toThrow();
+      expect(() =>
+        capture(
+          Object.defineProperty(
+            { ...base, bankVerge: town },
+            "pondServiceGround",
+            {
+              get() {
+                getterReads++;
+                return POND_SERVICE_GROUND_TRIAL;
+              },
+            },
+          ),
+        ),
+      ).toThrow();
+    }
+    expect(() =>
+      capture({ pondServiceGround: POND_SERVICE_GROUND_TRIAL }),
+    ).toThrow();
+    expect(getterReads).toBe(0);
+  });
+
+  it.each([
+    ["isolated-fine-near4", 0],
+    ["fine", 0],
+    ["fine", 1],
+    ["fine", 2],
+  ] as const)(
+    "matches independent %s LOD%s bounds without moving roots or changing eligibility",
+    (appearance, lod) => {
+      const f = analyticOwner(appearance);
+      try {
+        const surface = f.makeSurface(
+          1,
+          384,
+          434,
+          64,
+          (x, z) => 20 + 0.15 * (x - 384) - 0.09 * (z - 434),
+        );
+        // Separated ribbon cores and two neutral locations; exact hand-derived
+        // scales are 1 + strength * (0.35 - 1), never a production math call.
+        for (const [x, z, h] of [
+          [381, 434, 0.402],
+          [389, 438, 0.441],
+          [384, 430, 0.493],
+          [378, 441, 1],
+          [395, 434, 1],
+        ]) {
+          const request = {
+            ...f.request(
+              surface,
+              f.dataAt(surface, [[x - 384, z - 434, 0.83]]),
+              lod,
+            ),
+            wind: { x: 0.3, z: 0.165 },
+          };
+          const original = groundGrassBlades(request);
+          const actual = groundGrassBlades({
+            ...request,
+            pondServiceGround: POND_SERVICE_GROUND_TRIAL,
+          });
+          if (
+            original.status !== "ready" ||
+            actual.status !== "ready" ||
+            !actual.sweptBounds
+          )
+            throw Error("Expected complete analytical pond-service ground");
+          expect(actual.data).toEqual(original.data);
+          expect(actual.rootDeltas).toEqual(original.rootDeltas);
+          expect(actual.sourceIndices).toEqual(original.sourceIndices);
+          const tier = getGrassBladeLayout(lod, request.geometryLayout);
+          const uv = request.geometry.getAttribute("uv"),
+            box = new THREE.Box3();
+          for (let v = 0; v < uv.count; v++) {
+            const d = Math.floor(v / tier.verticesPerBlade) * 2;
+            for (const fade of [0, 0.5, 1])
+              for (const sx of [-1, 1])
+                for (const sz of [-1, 1]) {
+                  const point = transformedVertex(
+                    actual.data,
+                    surface,
+                    request.geometry,
+                    0,
+                    v,
+                    fade * h,
+                  );
+                  if (uv.getY(v) === 0)
+                    expect(point).toEqual(
+                      transformedVertex(
+                        original.data,
+                        surface,
+                        request.geometry,
+                        0,
+                        v,
+                        fade,
+                      ),
+                    );
+                  point.y +=
+                    actual.rootDeltas[d] * (1 - uv.getX(v)) +
+                    actual.rootDeltas[d + 1] * uv.getX(v);
+                  point.x += sx * request.wind.x * h * uv.getY(v) ** 1.8;
+                  point.z += sz * request.wind.z * h * uv.getY(v) ** 1.8;
+                  box.expandByPoint(point);
+                }
+          }
+          box.expandByScalar(1e-5);
+          for (const [value, expected] of [
+            [actual.sweptBounds.minX, box.min.x],
+            [actual.sweptBounds.maxX, box.max.x],
+            [actual.sweptBounds.minY, box.min.y],
+            [actual.sweptBounds.maxY, box.max.y],
+            [actual.sweptBounds.minZ, box.min.z],
+            [actual.sweptBounds.maxZ, box.max.z],
+          ])
+            expect(Math.abs(value - expected)).toBeLessThan(1e-6);
+          if (h === 1)
+            expect(withoutGroundingElapsed(actual)).toEqual(
+              withoutGroundingElapsed(original),
+            );
+        }
+        // The new local owner cannot change the original town bank branch.
+        const townSurface = f.makeSurface(2, 350, 318);
+        const town = {
+          ...f.request(
+            townSurface,
+            f.dataAt(townSurface, [[-2, 1.25, 0.83]]),
+            lod,
+          ),
+          bankVerge: currentBankVergeWear(),
+          wind: { x: 0.3, z: 0.165 },
+        };
+        expect(
+          withoutGroundingElapsed(
+            groundGrassBlades({
+              ...town,
+              pondServiceGround: POND_SERVICE_GROUND_TRIAL,
+            }),
+          ),
+        ).toEqual(withoutGroundingElapsed(groundGrassBlades(town)));
+      } finally {
+        f.close();
+      }
+    },
+  );
+});
+
 describe("opt-in bank-verge grounding deformation (actual generated blades)", () => {
   it("rejects malformed, inherited, accessor and non-fine descriptors without invoking getters", () => {
     let reads = 0;

@@ -87,6 +87,7 @@ import {
 import {
   createCompactTerrainColorOperations,
   type CompactTerrainPlantingLobe,
+  type CompactTerrainBankVerge,
   type CompactTerrainGroundRibbon,
   type CompactGrassColorGrade,
   type CompactPondMarginInput,
@@ -10103,6 +10104,305 @@ describe("candidate coastal mineral-to-meadow ground", () => {
     } finally {
       material.dispose();
     }
+  });
+
+  describe("pond-service terrain wear (actual TSL arithmetic, not rendered pixels)", () => {
+    // Independent valid appearance fixture, matching the grass graph tests.
+    // Actual court/chest/clerk/dock binding is covered in CompactIslandPaths.
+    const service: CompactTerrainBankVerge = {
+      minX: 378,
+      maxX: 390,
+      minZ: 432,
+      maxZ: 446,
+      feather: 1,
+      wearStart: 0.1,
+      wearEnd: 0.9,
+      minimumScale: 1,
+      heightScale: 1,
+      wornHeightScale: 0.35,
+      tipBrightness: 1,
+      grassTint: [1, 1, 1],
+      wear: [
+        {
+          startX: 382,
+          startZ: 436,
+          endX: 386,
+          endZ: 436,
+          coreRadius: 0.5,
+          outerRadius: 1,
+          strength: 0.8,
+        },
+        {
+          startX: 386,
+          startZ: 436,
+          endX: 386,
+          endZ: 440,
+          coreRadius: 0.4,
+          outerRadius: 0.9,
+          strength: 0.62,
+        },
+        {
+          startX: 382,
+          startZ: 436,
+          endX: 382,
+          endZ: 440,
+          coreRadius: 0.3,
+          outerRadius: 0.8,
+          strength: 0.55,
+        },
+      ],
+    };
+    const points = [
+      [384, 436],
+      [386, 439],
+      [382, 439], // Three unequal ribbon cores.
+      [386, 436], // Overlap must use max, not addition.
+      [384, 436.75],
+      [386.65, 439],
+      [382.55, 439], // Capsule shoulders.
+      [388, 444],
+      [378, 432],
+      [390, 446],
+      [410, 455], // Unworn/outer controls.
+      [348, 319.25],
+      [341, 314],
+      [339, 314], // Existing town and feather.
+    ] as const;
+    const expectedServiceWear = (x: number, z: number) => {
+      const smooth = THREE.MathUtils.smoothstep;
+      const locality =
+        smooth(x, service.minX, service.minX + service.feather) *
+        (1 - smooth(x, service.maxX - service.feather, service.maxX)) *
+        smooth(z, service.minZ, service.minZ + service.feather) *
+        (1 - smooth(z, service.maxZ - service.feather, service.maxZ));
+      const point = new THREE.Vector3(x, 0, z);
+      return (
+        locality *
+        Math.max(
+          0,
+          ...service.wear.map((ribbon) => {
+            const closest = new THREE.Line3(
+              new THREE.Vector3(ribbon.startX, 0, ribbon.startZ),
+              new THREE.Vector3(ribbon.endX, 0, ribbon.endZ),
+            ).closestPointToPoint(point, true, new THREE.Vector3());
+            return (
+              ribbon.strength *
+              (1 -
+                smooth(
+                  closest.distanceToSquared(point),
+                  ribbon.coreRadius ** 2,
+                  ribbon.outerRadius ** 2,
+                ))
+            );
+          }),
+        )
+      );
+    };
+
+    it("matches independent pond capsules and CPU wear with exact town/outside palette and support parity", () => {
+      const ops = createCompactTerrainColorOperations();
+      const profile = candidateProfile();
+      const previous = ops.macroField(profile)!;
+      const combined = ops.macroField(
+        profile,
+        undefined,
+        undefined,
+        undefined,
+        service,
+      )!;
+      expect(combined.bankVerge).toEqual(previous.bankVerge);
+      expect(combined.pondServiceGround).toEqual(service);
+      const wearNode = createCompactBankVergeWear(positionWorld, combined);
+      expect([
+        expectedServiceWear(384, 436),
+        expectedServiceWear(386, 439),
+        expectedServiceWear(382, 439),
+      ]).toEqual([0.8, 0.62, 0.55]);
+      let changed = 0;
+      for (const [x, z] of points) {
+        const serviceWear = expectedServiceWear(x, z);
+        const expected = Math.max(
+          ops.bankVergeWear(x, z, previous),
+          serviceWear,
+        );
+        expect(ops.bankVergeWear(x, z, combined)).toBeCloseTo(expected, 13);
+        expect(
+          vectorValue(wearNode, new Map([[positionWorld, [x, 28.4, z]]]))[0],
+        ).toBeCloseTo(expected, 13);
+        const base = {
+          noiseValue: 0.5,
+          meadowNoise: 0.5,
+          distortNoise: 0.5,
+          slope: 0,
+          roadInfluence: 0,
+          surface: { x, z, height: 28.4, pond: null, macroField: previous },
+        };
+        const candidate = {
+          ...base,
+          surface: { ...base.surface, macroField: combined },
+        };
+        expect(ops.sample(candidate)).toEqual(ops.sample(base));
+        expect(ops.grassSupport(candidate)).toBe(ops.grassSupport(base));
+        expect(ops.bankVergeClumpScale(x, z, 0.6, combined)).toBe(
+          ops.bankVergeClumpScale(x, z, 0.6, previous),
+        );
+        expect(ops.bankVergeGrassTint(x, z, combined)).toEqual(
+          ops.bankVergeGrassTint(x, z, previous),
+        );
+        const before = ops.sample({
+          ...base,
+          grassColorGrade: "fine-meadow-green-v1",
+        });
+        const after = ops.sample({
+          ...candidate,
+          grassColorGrade: "fine-meadow-green-v1",
+        });
+        if (serviceWear === 0) expect(after).toEqual(before);
+        else {
+          changed++;
+          expect(after).not.toEqual(before);
+          for (const [i, channel] of (["r", "g", "b"] as const).entries())
+            expect(after[channel]).toBeCloseTo(
+              THREE.MathUtils.lerp(
+                before[channel],
+                ops.getPalette().dirt[i],
+                serviceWear,
+              ),
+              13,
+            );
+        }
+        expect(
+          ops.sample({
+            ...candidate,
+            roadInfluence: 1,
+            grassColorGrade: "fine-meadow-green-v1",
+          }),
+        ).toEqual(
+          ops.sample({
+            ...base,
+            roadInfluence: 1,
+            grassColorGrade: "fine-meadow-green-v1",
+          }),
+        );
+      }
+      expect(changed).toBe(7);
+    });
+
+    it("shares one combined soil node across all four real terrain channels without duplicate role names", () => {
+      const options = {
+        compactPbr: true,
+        compactProfile: candidateProfile(),
+        compactGrassColorGrade: "fine-meadow-green-v1" as const,
+        compactSurfaceBlend: "height-v1" as const,
+      };
+      const previous = createTerrainMaterial(undefined, options);
+      const candidate = createTerrainMaterial(undefined, {
+        ...options,
+        pondServiceGround: service,
+      });
+      const findSoil = (material: typeof candidate) => {
+        const nodes = new Set<Node>();
+        let soil: Node | undefined;
+        for (const root of [
+          material.colorNode,
+          material.roughnessNode,
+          material.aoNode,
+          material.normalNode,
+        ]) {
+          const channel = graph(root);
+          const matching = [...channel].filter(
+            (node) => Reflect.get(node, "name") === "compactTurfAndBankSoil",
+          );
+          expect(matching).toHaveLength(1);
+          if (soil) expect(matching[0]).toBe(soil);
+          soil = matching[0];
+          channel.forEach((node) => nodes.add(node));
+        }
+        if (!soil) throw new Error("Missing actual terrain soil node");
+        // r186's nodeProxyIntent wraps MathNode in its own unnamed VarNode;
+        // the explicit soil variable owns that wrapper, not MathNode directly.
+        const intent = Reflect.get(soil, "node") as Node;
+        expect(intent.type).toBe("VarNode");
+        expect(Reflect.get(intent, "name")).toBeNull();
+        expect(Reflect.get(intent, "intent")).toBe(true);
+        const mixNode = Reflect.get(intent, "node") as Node;
+        expect(mixNode).toBeInstanceOf(THREE.Node);
+        expect(Reflect.get(mixNode, "method")).toBe("mix");
+        const baseSoil = Reflect.get(mixNode, "aNode") as Node;
+        const wear = Reflect.get(mixNode, "cNode") as Node;
+        expect(baseSoil).toBeInstanceOf(THREE.Node);
+        expect(wear).toBeInstanceOf(THREE.Node);
+        return { nodes, soil, baseSoil, wear };
+      };
+      try {
+        const before = findSoil(previous),
+          after = findSoil(candidate);
+        const names = [...after.nodes]
+          .filter((node) => node.type === "VarNode")
+          .map((node) => Reflect.get(node, "name") as unknown)
+          .filter(
+            (name): name is string =>
+              typeof name === "string" &&
+              /^compact(?:BankVerge|PondServiceVerge|TurfAndBankSoil)/.test(
+                name,
+              ),
+          );
+        expect(names.slice().sort()).toEqual(
+          [
+            "compactBankVergeLocality",
+            "compactBankVergeWear",
+            "compactPondServiceVergeLocality",
+            "compactPondServiceVergeWear",
+            "compactTurfAndBankSoil",
+          ].sort(),
+        );
+        expect(new Set(names).size).toBe(names.length);
+        const ops = createCompactTerrainColorOperations();
+        const field = ops.macroField(
+          options.compactProfile,
+          undefined,
+          undefined,
+          undefined,
+          service,
+        )!;
+        for (const [x, z] of points) {
+          const position: readonly number[] = [x, 28.4, z];
+          const wear = ops.bankVergeWear(x, z, field);
+          expect(
+            vectorValue(after.wear, new Map([[positionWorld, position]]))[0],
+          ).toBeCloseTo(wear, 13);
+          // Parameterize only the incoming worn-turf soil scalar. Evaluate the
+          // actual factory's connected mix; do not fake texture/GPU sampling.
+          for (const base of [0, 0.23, 1]) {
+            const value = vectorValue(
+              after.soil,
+              new Map([
+                [positionWorld, position],
+                [after.baseSoil, [base]],
+              ]),
+            )[0];
+            expect(value).toBeCloseTo(THREE.MathUtils.lerp(base, 1, wear), 13);
+            if (expectedServiceWear(x, z) === 0)
+              expect(value).toBe(
+                vectorValue(
+                  before.soil,
+                  new Map([
+                    [positionWorld, position],
+                    [before.baseSoil, [base]],
+                  ]),
+                )[0],
+              );
+          }
+        }
+        expect(candidate.positionNode).toBeNull();
+        expect(candidate.displacementMap).toBeNull();
+        expect(candidate.transparent).toBe(previous.transparent);
+        expect(candidate.depthWrite).toBe(previous.depthWrite);
+      } finally {
+        candidate.dispose();
+        previous.dispose();
+      }
+    });
   });
 
   it("removes only the bank's second road-edge remap with exact CPU/TSL locality and unchanged soil support", () => {

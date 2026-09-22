@@ -52,7 +52,12 @@ import {
   validateCompactServiceCourtBindings,
   createCompactServiceCourtGrassExclusions,
   groundCompactServiceCourt,
+  createCompactPondServiceGround,
 } from "../CompactServiceCourt";
+import {
+  createCompactTerrainColorOperations,
+  type CompactTerrainBankVerge,
+} from "../CompactTerrainPalette";
 import { TownSystem } from "../TownSystem";
 import { modelBounds } from "./fixtures/StaticGlbBounds";
 import { getExternalResource } from "../../../../utils/ExternalAssetUtils";
@@ -260,11 +265,52 @@ function expectPondBankServiceField(
   };
 }
 
+// Independent squared-distance capsule oracle. The service recipe is neutral
+// outside its three ribbons; it is not a rectangular grass-height replacement.
+function independentServiceHeight(
+  x: number,
+  z: number,
+  descriptor?: CompactTerrainBankVerge,
+) {
+  if (!descriptor) return 1;
+  const smooth = (low: number, high: number, value: number) => {
+    const t = Math.max(0, Math.min(1, (value - low) / (high - low)));
+    return t * t * (3 - 2 * t);
+  };
+  let wear = 0;
+  for (const row of descriptor.wear) {
+    const dx = row.endX - row.startX,
+      dz = row.endZ - row.startZ;
+    const t = Math.max(
+      0,
+      Math.min(
+        1,
+        ((x - row.startX) * dx + (z - row.startZ) * dz) / (dx * dx + dz * dz),
+      ),
+    );
+    const distanceSquared =
+      (x - row.startX - t * dx) ** 2 + (z - row.startZ - t * dz) ** 2;
+    wear = Math.max(
+      wear,
+      row.strength *
+        (1 -
+          smooth(row.coreRadius ** 2, row.outerRadius ** 2, distanceSquared)),
+    );
+  }
+  const locality =
+    smooth(descriptor.minX, descriptor.minX + descriptor.feather, x) *
+    (1 - smooth(descriptor.maxX - descriptor.feather, descriptor.maxX, x)) *
+    smooth(descriptor.minZ, descriptor.minZ + descriptor.feather, z) *
+    (1 - smooth(descriptor.maxZ - descriptor.feather, descriptor.maxZ, z));
+  return 1 + wear * locality * (descriptor.wornHeightScale - 1);
+}
+
 function expectPondBankServiceClearance(
   world: World,
   terrain: TerrainSystem,
   roads: RoadNetworkSystem,
   court: CompactServiceCourtPlacement,
+  pondServiceGround?: CompactTerrainBankVerge,
 ) {
   const {
     chest,
@@ -476,6 +522,7 @@ function expectPondBankServiceClearance(
             454,
           ),
           roadSegments: roads.getRoadSegmentsForGPU(),
+          ...(pondServiceGround ? { pondServiceGround } : {}),
         };
         const result = groundGrassBlades(request);
         const withoutRoads = groundGrassBlades({
@@ -498,6 +545,11 @@ function expectPondBankServiceClearance(
             uv = geometry.getAttribute("uv");
           for (let instance = 0; instance < output.data.count; instance++) {
             const k = instance * 3;
+            const heightScale = independentServiceHeight(
+              surface.centerX + output.data.offsets[k],
+              surface.centerZ + output.data.offsets[k + 2],
+              pondServiceGround,
+            );
             const tilt = new THREE.Quaternion().setFromUnitVectors(
               new THREE.Vector3(0, 1, 0),
               new THREE.Vector3().fromArray(output.data.groundNormals, k),
@@ -514,7 +566,7 @@ function expectPondBankServiceClearance(
                 for (const fade of [0, 1]) {
                   const point = new THREE.Vector3(
                     position.getX(vertex),
-                    position.getY(vertex) * fade,
+                    position.getY(vertex) * fade * heightScale,
                     position.getZ(vertex),
                   )
                     .multiplyScalar(output.data.rotScaleHash[k + 1])
@@ -532,14 +584,14 @@ function expectPondBankServiceClearance(
                     );
                   box.expandByPoint(
                     new THREE.Vector2(
-                      point.x - wind.x * reach,
-                      point.z - wind.z * reach,
+                      point.x - wind.x * reach * heightScale,
+                      point.z - wind.z * reach * heightScale,
                     ),
                   );
                   box.expandByPoint(
                     new THREE.Vector2(
-                      point.x + wind.x * reach,
-                      point.z + wind.z * reach,
+                      point.x + wind.x * reach * heightScale,
+                      point.z + wind.z * reach * heightScale,
                     ),
                   );
                 }
@@ -1034,6 +1086,184 @@ describe("inland pond opt-in circulation with actual terrain and road owner", ()
             )!;
           expect(court.recipeId).toBe("open-timber-pond-bank-haven-v1");
           expectPondBankServiceClearance(world, terrain, roads, court);
+        },
+        undefined,
+        new PondBankServiceWorld(),
+      );
+    },
+  );
+
+  it.runIf(
+    /\/inland-pond-integration01-UNQUALIFIED\/assets-v(?:9|10)$/.test(
+      process.env.ASSETS_DIR ?? "",
+    ),
+  )(
+    "binds the pond service ground to actual owners while preserving open-ground navigation and swept clearance",
+    async () => {
+      await withRoads(
+        (roads, terrain, world) => {
+          const config = DataManager.getWorldConfig()!;
+          const profile = DataManager.getWorldTerrainProfile();
+          const court = config.compactServiceCourts!.courts.find(
+            (row) => row.layoutId === "haven-pond-bank-v1",
+          )!;
+          const ownersBefore = JSON.stringify([
+            config,
+            ALL_WORLD_AREAS,
+            roads.getRoads(),
+          ]);
+          const { chestStanding, clerk, arrival } = expectPondBankServiceField(
+            roads,
+            court,
+          );
+          const descriptor = createCompactPondServiceGround(
+            profile,
+            config,
+            ALL_WORLD_AREAS,
+          )!;
+          expect(descriptor).not.toBeNull();
+          expect(Object.isFrozen(descriptor)).toBe(true);
+          expect(Object.isFrozen(descriptor.wear)).toBe(true);
+          descriptor.wear.forEach((row) =>
+            expect(Object.isFrozen(row)).toBe(true),
+          );
+          const direction = new THREE.Vector2(
+            arrival.path[0].x - court.position.x,
+            arrival.path[0].z - court.position.z,
+          ).normalize();
+          // Recipe expectations declared independently of the JSON/factory.
+          expect(descriptor.wear).toEqual([
+            {
+              startX: chestStanding.x,
+              startZ: chestStanding.z,
+              endX: court.position.x,
+              endZ: court.position.z,
+              coreRadius: 1.5,
+              outerRadius: 4.2,
+              strength: 0.92,
+            },
+            {
+              startX: court.position.x,
+              startZ: court.position.z,
+              endX: clerk.position.x,
+              endZ: clerk.position.z,
+              coreRadius: 1.2,
+              outerRadius: 3.4,
+              strength: 0.86,
+            },
+            {
+              startX: court.position.x,
+              startZ: court.position.z,
+              endX: court.position.x + direction.x * 6,
+              endZ: court.position.z + direction.y * 6,
+              coreRadius: 0.85,
+              outerRadius: 2.7,
+              strength: 0.78,
+            },
+          ]);
+          const colors = createCompactTerrainColorOperations();
+          const before = colors.macroField(profile)!;
+          const after = colors.macroField(
+            profile,
+            undefined,
+            undefined,
+            undefined,
+            descriptor,
+          )!;
+          expect(after.bankVerge).toEqual(before.bankVerge);
+          expect(after.pondServiceGround).toEqual(descriptor);
+          let shorter = 0,
+            neutralInside = 0;
+          for (let ix = 0; ix <= 24; ix++)
+            for (let iz = 0; iz <= 24; iz++) {
+              const x = THREE.MathUtils.lerp(
+                descriptor.minX,
+                descriptor.maxX,
+                ix / 24,
+              );
+              const z = THREE.MathUtils.lerp(
+                descriptor.minZ,
+                descriptor.maxZ,
+                iz / 24,
+              );
+              const expected = independentServiceHeight(x, z, descriptor);
+              expect(colors.bankVergeHeightScale(x, z, after)).toBeCloseTo(
+                expected,
+                12,
+              );
+              expect(colors.bankVergeClumpScale(x, z, 1, after)).toBe(1);
+              if (expected < 1) shorter++;
+              else if (ix > 0 && ix < 24 && iz > 0 && iz < 24) neutralInside++;
+            }
+          expect(shorter).toBeGreaterThan(100);
+          expect(neutralInside).toBeGreaterThan(10);
+          for (const [x, z] of [
+            [350, 318],
+            [348, 319.25],
+            [320, 300],
+            [descriptor.minX - 0.01, court.position.z],
+            [descriptor.maxX + 0.01, court.position.z],
+          ]) {
+            expect(colors.bankVergeHeightScale(x, z, after)).toBe(
+              colors.bankVergeHeightScale(x, z, before),
+            );
+            expect(colors.bankVergeWear(x, z, after)).toBe(
+              colors.bankVergeWear(x, z, before),
+            );
+          }
+          expect(
+            createCompactPondServiceGround(profile, undefined, ALL_WORLD_AREAS),
+          ).toBeNull();
+          const noOwner = {
+            ...structuredClone(config),
+            compactServiceCourts: {
+              ...config.compactServiceCourts!,
+              courts: config.compactServiceCourts!.courts.filter(
+                (row) => row.layoutId !== court.layoutId,
+              ),
+            },
+          };
+          expect(
+            createCompactPondServiceGround(profile, noOwner, ALL_WORLD_AREAS),
+          ).toBeNull();
+          const noDock = structuredClone(config);
+          delete noDock.compactPondDocks;
+          expect(() =>
+            createCompactPondServiceGround(profile, noDock, ALL_WORLD_AREAS),
+          ).toThrow();
+          const noClerk = structuredClone(ALL_WORLD_AREAS);
+          noClerk.haven_pond.npcs = noClerk.haven_pond.npcs.filter(
+            (row) => row.id !== clerk.id,
+          );
+          expect(() =>
+            createCompactPondServiceGround(profile, config, noClerk),
+          ).toThrow();
+          const duplicate = {
+            ...structuredClone(config),
+            compactServiceCourts: {
+              ...config.compactServiceCourts!,
+              courts: [
+                ...config.compactServiceCourts!.courts,
+                { ...court, layoutId: "duplicate-pond-owner" },
+              ],
+            },
+          };
+          expect(() =>
+            createCompactPondServiceGround(profile, duplicate, ALL_WORLD_AREAS),
+          ).toThrow();
+          expect(
+            JSON.stringify([config, ALL_WORLD_AREAS, roads.getRoads()]),
+          ).toBe(ownersBefore);
+          expectPondBankServiceClearance(
+            world,
+            terrain,
+            roads,
+            court,
+            descriptor,
+          );
+          expect(
+            JSON.stringify([config, ALL_WORLD_AREAS, roads.getRoads()]),
+          ).toBe(ownersBefore);
         },
         undefined,
         new PondBankServiceWorld(),

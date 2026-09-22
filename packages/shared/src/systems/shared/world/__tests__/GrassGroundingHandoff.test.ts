@@ -547,4 +547,112 @@ describe("real main-thread grass grounding handoff preparation", () => {
       fixture.dispose();
     }
   });
+
+  it.each([false, true])(
+    "captures detached pond-service settings before yielding with town present=%s",
+    (withTown) => {
+      const fixture = createSameFaceCase("fine-near4");
+      try {
+        const service = {
+          minX: -6,
+          maxX: 6,
+          minZ: -6,
+          maxZ: 6,
+          feather: 1,
+          wearStart: 0.1,
+          wearEnd: 0.9,
+          minimumScale: 1,
+          heightScale: 1,
+          wornHeightScale: 0.35,
+          tipBrightness: 1,
+          grassTint: [1, 1, 1] as [number, number, number],
+          wear: [
+            {
+              startX: -4,
+              startZ: 0,
+              endX: 4,
+              endZ: 0,
+              coreRadius: 0.5,
+              outerRadius: 1,
+              strength: 0.8,
+            },
+            {
+              startX: 4,
+              startZ: 0,
+              endX: 4,
+              endZ: 4,
+              coreRadius: 0.4,
+              outerRadius: 0.9,
+              strength: 0.62,
+            },
+            {
+              startX: -4,
+              startZ: 0,
+              endX: -4,
+              endZ: 4,
+              coreRadius: 0.3,
+              outerRadius: 0.8,
+              strength: 0.55,
+            },
+          ],
+        } satisfies NonNullable<
+          GrassGroundingHandoffRequest["pondServiceGround"]
+        >;
+        const town = {
+          ...structuredClone(service),
+          minX: -30,
+          maxX: -18,
+          heightScale: 0.7,
+          minimumScale: 0.5,
+        };
+        for (const ribbon of town.wear) {
+          ribbon.startX -= 24;
+          ribbon.endX -= 24;
+        }
+        fixture.request.pondServiceGround = service;
+        if (withTown) fixture.request.bankVerge = town;
+        const expected = captureGrassBankVerge(
+          fixture.request,
+          "pondServiceGround",
+        );
+        const expectedTown = captureGrassBankVerge(fixture.request);
+        const { job } = createJob(fixture);
+        job.advance(1);
+        service.wear[0].startX = 999;
+        service.wear[1].strength = 0;
+        service.grassTint[0] = 0.3;
+        service.heightScale = 0.2;
+        town.wear[2].strength = 0;
+        fixture.request.pondServiceGround = undefined;
+        const value = prepared(job);
+        expect(value.settings.pondServiceGround).toEqual(expected);
+        expect(value.settings.bankVerge).toEqual(expectedTown);
+        expect(value.settings.pondServiceGround).not.toBe(service);
+        expect(value.settings.pondServiceGround?.wear).not.toBe(service.wear);
+        expect(value.settings.pondServiceGround?.grassTint).not.toBe(
+          service.grassTint,
+        );
+        expect(Object.isFrozen(value.settings.pondServiceGround)).toBe(true);
+        expect(Object.isFrozen(value.settings.pondServiceGround?.wear)).toBe(
+          true,
+        );
+        for (const [
+          index,
+          ribbon,
+        ] of value.settings.pondServiceGround!.wear.entries()) {
+          expect(ribbon).not.toBe(service.wear[index]);
+          expect(Object.isFrozen(ribbon)).toBe(true);
+        }
+        expect(structuredClone(value.settings).pondServiceGround).toEqual(
+          expected,
+        );
+        if (!withTown)
+          expect(
+            Object.prototype.hasOwnProperty.call(value.settings, "bankVerge"),
+          ).toBe(false);
+      } finally {
+        fixture.dispose();
+      }
+    },
+  );
 });

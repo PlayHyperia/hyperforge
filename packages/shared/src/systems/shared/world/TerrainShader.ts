@@ -98,6 +98,7 @@ import {
   COMPACT_TERRAIN_COMPOSITION,
   type CompactTerrainPond,
   type CompactPondBankField,
+  type CompactTerrainBankVerge,
   type CompactTerrainPlantingLobe,
   type CompactTerrainHavenGround,
   type CompactGrassColorGrade,
@@ -1191,6 +1192,7 @@ export function createTerrainMaterial(
     compactCoastBlend?: CompactCoastBlend;
     compactPond?: CompactTerrainPond | null;
     compactPondBankField?: CompactPondBankField;
+    pondServiceGround?: CompactTerrainBankVerge;
     compactPlantingLobes?: readonly CompactTerrainPlantingLobe[];
     compactProfile?: WorldTerrainProfile;
     compactHabitat?: CompactHabitatField | null;
@@ -1250,6 +1252,10 @@ export function createTerrainMaterial(
         options.compactPlantingLobes,
       )
     : [];
+  const pondServiceGround = grassColorOperations.captureGroundVerge(
+    options,
+    "pondServiceGround",
+  );
   const macroField =
     options.compactPbr && options.compactProfile
       ? createCompactTerrainColorOperations().macroField(
@@ -1257,8 +1263,13 @@ export function createTerrainMaterial(
           options.compactCoastBlend,
           options.compactPondBlend,
           options.compactPondBankField,
+          pondServiceGround,
         )
       : null;
+  if (pondServiceGround && (!macroField || !grassColorGrade))
+    throw new Error(
+      "Pond service ground requires the graded compact terrain material",
+    );
   if (options.compactCoastBlend !== undefined && !macroField?.coastalMeadow)
     throw new Error("Coast blending requires an admitted coastal macro domain");
   if (
@@ -1917,7 +1928,9 @@ export function createTerrainMaterial(
               ).toVar("compactHabitatSoil")
             : undefined,
           coastalGround,
-          grassColorGrade && macroField?.coastalMeadow && macroField.bankVerge
+          grassColorGrade &&
+            macroField?.coastalMeadow &&
+            (macroField.bankVerge || macroField.pondServiceGround)
             ? mix(
                 wornTurf?.soil ?? float(0),
                 float(1),

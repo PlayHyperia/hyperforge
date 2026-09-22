@@ -78,6 +78,7 @@ class GroundedGrassPipeline implements Generator<
   > | null = null;
   private running = false;
   private bankVerge: ReturnType<typeof captureGrassBankVerge>;
+  private pondServiceGround: ReturnType<typeof captureGrassBankVerge>;
 
   constructor(private context: PipelineContext | null) {}
 
@@ -92,6 +93,7 @@ class GroundedGrassPipeline implements Generator<
     this.projected = null;
     this.result = null;
     this.bankVerge = undefined;
+    this.pondServiceGround = undefined;
     this.context = null;
   }
 
@@ -130,6 +132,10 @@ class GroundedGrassPipeline implements Generator<
           // Snapshot nested optional wear before even the admission yield;
           // caller edits cannot change deformation during any suspension.
           this.bankVerge = captureGrassBankVerge(this.context!.request);
+          this.pondServiceGround = captureGrassBankVerge(
+            this.context!.request,
+            "pondServiceGround",
+          );
           this.phase = "admission";
           return { done: false, value: "pipeline_admission" };
         }
@@ -177,6 +183,7 @@ class GroundedGrassPipeline implements Generator<
               ...this.constraints!,
               data: this.projected,
               bankVerge: this.bankVerge,
+              pondServiceGround: this.pondServiceGround,
             });
             break;
           case "blades": {

@@ -174,6 +174,143 @@ afterEach(async () => {
 });
 
 describe("actual isolated grass grounding worker", () => {
+  it.each([
+    ["fine-lod0", false],
+    ["fine-lod0", true],
+    ["fine-lod1", false],
+    ["fine-lod1", true],
+    ["fine-near4", false],
+    ["fine-near4", true],
+  ] as const)(
+    "transports pond-service appearance through cold and cached %s with town=%s",
+    async (id, withTown) => {
+      const fixture = createSameFaceCase(id);
+      try {
+        // Four real projected flat-grid roots in the first ribbon. This makes
+        // the changed swept envelope non-vacuous without adding exclusions.
+        for (let i = 0; i < fixture.request.data.count; i++) {
+          fixture.request.data.offsets[i * 3] = -3 + 2 * i;
+          fixture.request.data.offsets[i * 3 + 2] = 0;
+        }
+        const before = groundGrassBlades(fixture.request);
+        const service = {
+          minX: -6,
+          maxX: 6,
+          minZ: -6,
+          maxZ: 6,
+          feather: 1,
+          wearStart: 0.1,
+          wearEnd: 0.9,
+          minimumScale: 1,
+          heightScale: 1,
+          wornHeightScale: 0.35,
+          tipBrightness: 1,
+          grassTint: [1, 1, 1] as [number, number, number],
+          wear: [
+            {
+              startX: -4,
+              startZ: 0,
+              endX: 4,
+              endZ: 0,
+              coreRadius: 0.5,
+              outerRadius: 1,
+              strength: 0.8,
+            },
+            {
+              startX: 4,
+              startZ: 0,
+              endX: 4,
+              endZ: 4,
+              coreRadius: 0.4,
+              outerRadius: 0.9,
+              strength: 0.62,
+            },
+            {
+              startX: -4,
+              startZ: 0,
+              endX: -4,
+              endZ: 4,
+              coreRadius: 0.3,
+              outerRadius: 0.8,
+              strength: 0.55,
+            },
+          ],
+        } satisfies NonNullable<
+          GrassGroundingWorkerRequest["settings"]["pondServiceGround"]
+        >;
+        fixture.request.pondServiceGround = service;
+        if (withTown)
+          fixture.request.bankVerge = {
+            ...structuredClone(service),
+            minX: -40,
+            maxX: -20,
+            heightScale: 0.7,
+            minimumScale: 0.5,
+            wear: service.wear.map((ribbon) => ({
+              ...ribbon,
+              startX: ribbon.startX - 30,
+              endX: ribbon.endX - 30,
+            })),
+          };
+        const original = sameFaceInputHash(fixture);
+        const expected = groundGrassBlades(fixture.request);
+        expect(before.status).toBe("ready");
+        expect(expected.status).toBe("ready");
+        if (
+          before.status !== "ready" ||
+          expected.status !== "ready" ||
+          !before.sweptBounds ||
+          !expected.sweptBounds
+        )
+          throw new Error("Expected real nonempty grounded envelopes");
+        expect(expected.sweptBounds.maxY).toBeLessThan(before.sweptBounds.maxY);
+        // Equality is specific to these fully supported flat roots, not a claim
+        // that smaller envelopes retain identical blades near real obstacles.
+        for (const key of [
+          "count",
+          "offsets",
+          "rotScaleHash",
+          "groundColors",
+          "grassTints",
+          "groundNormals",
+        ] as const)
+          expect(expected.data[key]).toEqual(before.data[key]);
+        for (const cached of [false, true]) {
+          const cold = workerRequest(fixture.request);
+          // The inherited packet helper predates this optional field. Add an
+          // explicit detached own-data descriptor, then use the actual wire,
+          // browser worker entry and native structured-clone/transfer protocol.
+          cold.settings.pondServiceGround = structuredClone(service);
+          expect(cold.settings.pondServiceGround).not.toBe(service);
+          expect(cold.settings.pondServiceGround.wear).not.toBe(service.wear);
+          expect(cold.settings.bankVerge).toEqual(fixture.request.bankVerge);
+          if (withTown)
+            expect(cold.settings.bankVerge).not.toBe(fixture.request.bankVerge);
+          const worker = await actualWorker();
+          const packet = cached
+            ? (await prepareCachedGrassGroundingWorkerRequest(worker, cold))
+                .request
+            : cold;
+          expect(packet.settings.pondServiceGround).toEqual(service);
+          const response = await run(worker, packet);
+          expect(response.state.status).toBe("ready");
+          if (response.state.status !== "ready")
+            throw new Error("Real pond-service grounding worker failed");
+          expect(
+            semanticResult(response.state.result, fixture.request),
+          ).toEqual(semanticResult(expected, fixture.request));
+          if (cached) expect(response.terrainRebuildWork).toBeNull();
+        }
+        expect(sameFaceInputHash(fixture)).toBe(original);
+        expect(fixture.request.pondServiceGround).toBe(service);
+        for (const owner of fixture.owned)
+          expect(owner.surface.matchesGeometry(owner.geometry)).toBe(true);
+      } finally {
+        fixture.dispose();
+      }
+    },
+  );
+
   it("bundles the production CPU core without renderer or server modules", async () => {
     expect(
       bundledInputs.some((path) => path.endsWith("GrassBladeGrounding.ts")),

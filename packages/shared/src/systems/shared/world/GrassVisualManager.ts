@@ -106,6 +106,7 @@ import type {
   CompactTerrainPlantingLobe,
   CompactGrassColorGrade,
   CompactTerrainMacroField,
+  CompactTerrainBankVerge,
   CompactPondBankField,
 } from "./CompactTerrainPalette";
 import type { BiomeGrassConfigWorker } from "../../../utils/workers/GrassWorker";
@@ -757,6 +758,7 @@ export interface GrassVisualReadiness {
 
 /** Config data for the grass worker, passed from TerrainSystem at construction. */
 export interface GrassWorkerSetup {
+  pondServiceGround?: CompactTerrainBankVerge;
   compactPondBlend?: "shore-contact-v1" | "composition-v1";
   compactPondBankField?: CompactPondBankField;
   compactCoastBlend?: "distribution-v1";
@@ -1128,8 +1130,17 @@ export class GrassVisualManager implements QuadTreeListener {
           this.compactCoastBlend,
           this.compactPondBlend,
           bankField && "value" in bankField ? bankField.value : undefined,
+          this.compactTerrainColorOperations.captureGroundVerge(
+            workerSetup,
+            "pondServiceGround",
+          ),
         )
       : null;
+    if (
+      this.compactMacroField?.pondServiceGround &&
+      (!this.fineMeadow || !this.compactGrassColorGrade)
+    )
+      throw new Error("Pond service ground requires the graded fine meadow");
     createGrassCoastBlendOperations().assertScope(
       this.compactCoastBlend,
       this.grassEligibility,
@@ -1710,6 +1721,12 @@ export class GrassVisualManager implements QuadTreeListener {
             manager.compactMacroField.bankVerge
               ? { bankVerge: manager.compactMacroField.bankVerge }
               : {}),
+            ...(manager.compactMacroField?.pondServiceGround
+              ? {
+                  pondServiceGround:
+                    manager.compactMacroField.pondServiceGround,
+                }
+              : {}),
             oceanLevel: manager.waterThreshold,
             wind: {
               x:
@@ -1885,6 +1902,12 @@ export class GrassVisualManager implements QuadTreeListener {
               {
                 ...result.data,
                 type: "grassInstanceResult",
+                ...(this.compactMacroField?.pondServiceGround
+                  ? {
+                      pondServiceGround:
+                        this.compactMacroField.pondServiceGround,
+                    }
+                  : {}),
                 chunkKey: ticket.key,
                 terrainProfileIdentity: this.terrainProfileIdentity,
                 grassEligibility: this.grassEligibility,
@@ -2083,6 +2106,9 @@ export class GrassVisualManager implements QuadTreeListener {
         : {}),
       type: "generateGrassInstances",
       compactPlantingLobes: ws.compactPlantingLobes,
+      ...(this.compactMacroField?.pondServiceGround
+        ? { pondServiceGround: this.compactMacroField.pondServiceGround }
+        : {}),
       chunkKey: key,
       centerX: node.centerX,
       centerZ: node.centerZ,
@@ -2260,6 +2286,16 @@ export class GrassVisualManager implements QuadTreeListener {
   }
 
   private assertWorkerProfileIdentity(data: GrassWorkerOutput): void {
+    const receivedService =
+      this.compactTerrainColorOperations.captureGroundVerge(
+        data,
+        "pondServiceGround",
+      );
+    if (
+      JSON.stringify(receivedService) !==
+      JSON.stringify(this.compactMacroField?.pondServiceGround)
+    )
+      throw new Error("Grass visual result pond service ground mismatch");
     if (
       createGrassPondBlendOperations().validate(data) !== this.compactPondBlend
     )
@@ -2749,6 +2785,9 @@ export class GrassVisualManager implements QuadTreeListener {
         groundNormals: new Float32Array(0),
         ...instanceData,
         type: "grassInstanceResult",
+        ...(this.compactMacroField?.pondServiceGround
+          ? { pondServiceGround: this.compactMacroField.pondServiceGround }
+          : {}),
         chunkKey: key,
         terrainProfileIdentity: this.terrainProfileIdentity,
         grassEligibility: this.grassEligibility,
@@ -2775,6 +2814,9 @@ export class GrassVisualManager implements QuadTreeListener {
         {
           ...instanceData,
           type: "grassInstanceResult" as const,
+          ...(this.compactMacroField?.pondServiceGround
+            ? { pondServiceGround: this.compactMacroField.pondServiceGround }
+            : {}),
           chunkKey: key,
           terrainProfileIdentity: this.terrainProfileIdentity,
           grassEligibility: this.grassEligibility,
@@ -3241,13 +3283,14 @@ export class GrassVisualManager implements QuadTreeListener {
       const vergeLocality = bankVerge
         ? createCompactBankVergeLocality(worldBase.xyz, this.compactMacroField)
         : float(0);
-      const bankHeightScale = bankVerge
-        ? createCompactBankVergeHeightScale(
-            worldBase.xyz,
-            this.compactMacroField,
-            vergeLocality,
-          )
-        : float(1);
+      const bankHeightScale =
+        bankVerge || this.compactMacroField?.pondServiceGround
+          ? createCompactBankVergeHeightScale(
+              worldBase.xyz,
+              this.compactMacroField,
+              vergeLocality,
+            )
+          : float(1);
       if (bankVerge)
         bankLocality = vergeLocality.toVarying("v_naturalGrassBankLocality");
       if (this.habitatComposition)
