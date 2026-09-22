@@ -3136,6 +3136,49 @@ Evidence: service-layout `grass-swept-scalars-core01/02/03`,
 
 
 
+#### Native rooted-flower rendering checkpoint — 2026-09-22
+
+- [x] Render the actual production geometry/material in headed Chrome on Apple
+  Metal: three storage instances, two views, zero/two wind states, ten 768-square
+  readbacks with direct-wind and cast-shadow controls. Native03 passes compiled
+  main/shadow pipelines, immutable arrays/matrices/bounds/material state and
+  exactly-once retirement of six actual GPU buffers; zero GPU errors.
+- Native01 exposed an incorrect test assumption: counted r186 storage nodes
+  produce two vertex-only/read-only declarations (native instancing plus wind),
+  both backed by ONE 192-byte instance-matrix allocation. Native02/03 verify
+  actual identities/layouts. This costs two binding slots, not two allocations;
+  it also applies to connected storage-instanced trees. No cost approval follows.
+- Native02 caught r186 replacing the Uint16 index array during first upload.
+  The factory now authors Uint32 indices directly, avoiding that conversion.
+  Topology remains 362 vertices / 584 triangles; owned geometry is now 31,624
+  bytes (the earlier 28,120-byte source count preceded native index widening).
+  Native03's ten RGBA images match Native02 byte-for-byte; all original
+  immutability assertions pass. Both earlier failed receipts remain retained.
+- Geometry index02 passes35 tests; material02 passes91; full shared types03
+  passes744 roots/2,427 sources/zero diagnostics/stable hashes; scoped lint and
+  formatting pass. Actual native geometry, not a visual proxy, was rendered.
+- Preview-only capture corrections use a verified rgba8unorm-srgb attachment
+  and native top-left row order. Do not read old linear/raw flipped material
+  fixture PNGs as color/orientation approval. Normal browser world screenshots
+  are a different capture path and were not changed by this correction.
+- Visual review shows slender connected stems/leaves, cream petal silhouettes
+  and cast shadows from front/back. This no-antialiasing isolation scene is
+  NOT finished meadow art: close-up petal shape/material review, independent
+  flutter, placement/clearance/LOD, falling leaves and world performance remain
+  OPEN. CPU root/bounds checks are not GPU vertex/normal numerical readbacks.
+- Native03 finished in about2.35 seconds under the unchanged nominal/AC/awake
+  guard. User's other game activity makes this unsuitable for uncontended
+  performance acceptance. Every owned browser/HTML/Vite preview is closed;
+  protected145 compiled artifacts/lock and playable localhost remain unchanged.
+
+Local evidence: inland-pond `rooted-flower-native01/02/03/report.json`, native03
+PNG/RGBA/WGSL captures, `rooted-flower-preview-runtime01/02/03/process.json`
+and `rooted-flower-native.mjs`; these local diagnostic assets are not GitHub-
+backed runtime content. CPU evidence: service-layout `rooted-flower-index02`,
+`rooted-flower-material02`, `living-world-foundations-types03`.
+
+
+
 
 
 ### Pond-bank service ground — 2026-09-22

@@ -299,7 +299,9 @@ export function createRootedFlowerGeometry(
     "flowerPetal",
     new THREE.Float32BufferAttribute(petals, 4),
   );
-  geometry.setIndex(new THREE.BufferAttribute(new Uint16Array(indices), 1));
+  // Native r186 WebGPU widens unnormalized Uint16 indices on first upload,
+  // replacing the owned array. Author its actual GPU representation directly.
+  geometry.setIndex(new THREE.BufferAttribute(new Uint32Array(indices), 1));
   geometry.computeVertexNormals();
   geometry.computeBoundingBox();
   geometry.computeBoundingSphere();

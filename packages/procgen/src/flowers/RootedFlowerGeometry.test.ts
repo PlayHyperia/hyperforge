@@ -33,8 +33,15 @@ describe("rooted meadow flower geometry", () => {
         expect(position.count).toBeGreaterThan(50);
         expect(position.count).toBeLessThanOrEqual(700);
         expect(index).not.toBeNull();
+        expect(index!.array).toBeInstanceOf(Uint32Array);
         expect(index!.count % 3).toBe(0);
         expect(index!.count).toBeLessThanOrEqual(1800);
+        expect(
+          Object.values(geometry.attributes).reduce(
+            (bytes, attribute) => bytes + attribute.array.byteLength,
+            index!.array.byteLength,
+          ),
+        ).toBe(31_624);
         expect(geometry.groups.length).toBeLessThanOrEqual(1);
         expect(geometry.morphAttributes).toEqual({});
         const used = new Set<number>();
