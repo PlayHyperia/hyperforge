@@ -659,6 +659,60 @@ Evidence: service-layout `rooted-flower-geometry01.{json,log}`,
 `native113/startup.worker.js.map`, `runtime83/process.json`.
 
 
+#### Swept-bounds scalar reuse and rooted flower material — 2026-09-22
+
+- [x] Reuse vertex-local grass UV/position reads, wind-envelope products and
+  corrected height in the profiled swept-bounds loop. Nothing is cached across
+  its blade yield; multiplication/addition order, fades, operation charges,
+  density, grounding and published output contracts stay unchanged.
+- Full grass regression passes 652/652 cases, including 12 new late-mutation
+  and invalidated-job cases. The exact-output/work/phase goldens remain intact.
+  Independent review found no blocker. This establishes native owned-data
+  numerical parity, not arbitrary accessor side effects or a measured speedup.
+  Native110's startup failure remains unresolved; no new runtime was launched.
+- [x] Add an INACTIVE rooted flower material borrowing the world's wind nodes
+  and the pool's existing storage buffer. Stem, leaves and head share a fixed-
+  root bend and inverse-transpose normal correction. Opaque, double-sided,
+  matte vertex colors use native standard lighting, fog and shadow integration.
+- Explicit admission bounds the storage pool, geometry and supported upright
+  transforms without mutating source arrays/bounds/uniforms. A world-space
+  displacement helper matches the shared capped wind equation; future owners
+  must apply it to culling bounds and revalidate mutations. Independent petal
+  flutter is NOT included in either this deformation or its displacement bound.
+- Material01 passes 51 new real geometry/storage/NodeBuilder cases plus 40
+  existing tree-wind cases (91/91 across three files). The attempted procgen
+  path was not selected by that shared-root run; previous 35 geometry tests
+  remain the geometry evidence, not an additional run in this receipt.
+- Full shared plus explicit source/test typing passes: 744 roots, 2,427 sources,
+  zero diagnostics and stable hashes. Scoped lint/format and independent source
+  review pass. The first typing invocation named a nonexistent test directory
+  and stopped before checking; corrected types02 is the passing receipt.
+  The initial scalar test fixture was too small to alter the aggregate bounds;
+  its three failures remain retained, and the strengthened fixture now proves
+  a real late-mutation effect. No production threshold was relaxed.
+- [ ] Render actual flowers under native WebGPU to review silhouettes, lighting,
+  roots, shadows, wind, disposal and draw/storage costs. CPU graph construction
+  is not shader compilation or visual approval.
+- [ ] Add bounded petal flutter, sparse deterministic retained-ground placement,
+  live resource/interaction clearance and chunk/LOD retirement. Falling leaves,
+  connected tree-wind visual acceptance and whole-island quality remain OPEN.
+- Protected 145 compiled artifacts and retained lock remain unchanged;
+  localhost3333 responds HTTP200. No defaults, runtime assets, quality settings
+  or protected user services were changed. Other game activity is permitted
+  during source work; uncontended performance qualification remains separate.
+
+Reference: native lit shading follows
+[Three.js MeshStandardNodeMaterial](https://threejs.org/docs/pages/MeshStandardNodeMaterial.html).
+The [official r186 compute-particle source](https://github.com/mrdoob/three.js/blob/r186/examples/webgpu_compute_particles.html)
+is a useful GPU-state pattern for future falling leaves, not evidence for an
+island particle budget or a reason to copy its disabled frustum culling.
+
+Evidence: service-layout `grass-swept-scalars-core01/02/03`,
+`grass-swept-scalars-regression01`, `rooted-flower-material01`,
+`living-world-foundations-types01/02` logs and process receipts.
+
+
+
 
 
 ## Pond-bank service ground — 2026-09-22

@@ -767,6 +767,167 @@ describe("allocation-only grounding continuation contract", () => {
   );
 });
 
+describe("swept vertex scalar reuse boundaries", () => {
+  it.each(
+    (["ordinary-lod1", "fine-lod0", "fine-near4"] as const).flatMap((id) =>
+      (["position", "uv"] as const).map((mutation) => ({ id, mutation })),
+    ),
+  )(
+    "rereads $mutation at the second swept blade for $id",
+    ({ id, mutation }) => {
+      const run = (
+        ground:
+          typeof groundGrassBladeSteps | typeof legacyGroundGrassBladeSteps,
+        mutate: boolean,
+      ) => {
+        const fixture = createSameFaceCase(id);
+        try {
+          const { request } = fixture;
+          const source = request.data;
+          request.data = projectGrassAnchors(
+            {
+              count: 1,
+              offsets: new Float32Array([-21, 20, -28]),
+              rotScaleHash: source.rotScaleHash.slice(0, 3),
+              groundColors: source.groundColors.slice(0, 3),
+              grassTints: source.grassTints.slice(0, 4),
+              groundNormals: source.groundNormals.slice(0, 3),
+            },
+            request.ownSurface,
+            () => -1000,
+            () => false,
+          );
+          const before = structuredClone(request.data);
+          const layout = getGrassBladeLayout(
+            request.lod,
+            request.geometryLayout,
+          );
+          const position = request.geometry.getAttribute("position");
+          const uv = request.geometry.getAttribute("uv");
+          const first = layout.verticesPerBlade;
+          const tip = first + layout.verticesPerBlade - 1;
+          // Make this blade's tip the unique vertical extreme. Unequal root
+          // corrections below make UV-X mutation observably change its envelope.
+          position.setY(tip, 3);
+          const current = ground === groundGrassBladeSteps;
+          const target = current ? 2 : 3 * layout.bladesPerClump + 4;
+          let staged = false,
+            swept = 0,
+            mutations = 0;
+          const steps = ground(request);
+          const output = drainSameFaceSteps(
+            (function* () {
+              for (;;) {
+                const step = steps.next();
+                if (step.done) return step.value;
+                if (step.value === "bounded_staging_allocation") {
+                  staged = true;
+                  // The bare numerical oracle intentionally allows borrowed
+                  // changes after validation. Actual jobs must reject this lease.
+                  position.setY(first, 0.5);
+                  position.needsUpdate = true;
+                }
+                if (
+                  staged &&
+                  step.value ===
+                    (current ? "blade_swept_bounds" : "grounding_operation")
+                ) {
+                  swept++;
+                  if (mutate && swept === target) {
+                    if (mutation === "uv") {
+                      uv.setX(tip, 0.2);
+                      uv.needsUpdate = true;
+                    } else {
+                      // Cross the other blades' envelope, not merely move a
+                      // vertex that remains hidden inside unchanged extrema.
+                      position.setX(tip, position.getX(tip) + 4);
+                      position.setZ(tip, position.getZ(tip) - 3);
+                      position.needsUpdate = true;
+                    }
+                    mutations++;
+                  }
+                }
+                yield step.value;
+              }
+            })(),
+          );
+          expect(mutations).toBe(mutate ? 1 : 0);
+          expect(request.data).toEqual(before);
+          expect(output.result.status).toBe("ready");
+          if (output.result.status !== "ready")
+            throw Error(output.result.reason);
+          expect(output.result.data.count).toBe(1);
+          expect(output.result.rootDeltas[2]).not.toBe(
+            output.result.rootDeltas[3],
+          );
+          return output.result;
+        } finally {
+          fixture.dispose();
+        }
+      };
+      const expected = run(legacyGroundGrassBladeSteps, true);
+      const actual = run(groundGrassBladeSteps, true);
+      const untouched = run(groundGrassBladeSteps, false);
+      expect(sameFaceHash(actual)).toBe(sameFaceHash(expected));
+      expect(actual.sweptBounds).not.toEqual(untouched.sweptBounds);
+    },
+  );
+
+  it.each(
+    (["ordinary-lod1", "fine-lod0", "fine-near4"] as const).flatMap((id) =>
+      (["position", "uv"] as const).map((attribute) => ({ id, attribute })),
+    ),
+  )(
+    "cancels a changed $attribute lease before resuming the swept batch for $id",
+    ({ id, attribute }) => {
+      const fixture = createSameFaceCase(id);
+      try {
+        const { request } = fixture;
+        const position = request.geometry.getAttribute("position");
+        const uv = request.geometry.getAttribute("uv");
+        if (
+          !(position instanceof THREE.BufferAttribute) ||
+          !(uv instanceof THREE.BufferAttribute)
+        )
+          throw Error("Expected real native buffer attributes");
+        const positionVersion = position.version,
+          uvVersion = uv.version;
+        const job = new GrassBladeGroundingJob(
+          request,
+          () =>
+            request.geometry.getAttribute("position") === position &&
+            request.geometry.getAttribute("uv") === uv &&
+            position.version === positionVersion &&
+            uv.version === uvVersion,
+        );
+        let boundaries = 0;
+        while (job.state.status === "running" && boundaries < 2) {
+          const operations = job.operations;
+          job.advance(1);
+          if (
+            job.operations > operations &&
+            job.lastPhase === "blade_swept_bounds"
+          )
+            boundaries++;
+        }
+        expect(boundaries).toBe(2);
+        expect(job.state.status).toBe("running");
+        (attribute === "position" ? position : uv).needsUpdate = true;
+        const operations = job.operations;
+        expect(job.advance(1)).toEqual({
+          status: "cancelled",
+          reason: "invalidated",
+        });
+        expect(job.operations).toBe(operations);
+        expect(job.lastSliceOperations).toBe(0);
+        expect("result" in job.state).toBe(false);
+      } finally {
+        fixture.dispose();
+      }
+    },
+  );
+});
+
 describe("same-face shortcut versus independent native25 grounding goldens", () => {
   it.each([1, 7])(
     "keeps repeated road and surface scratch private across interleaved %s-step jobs",

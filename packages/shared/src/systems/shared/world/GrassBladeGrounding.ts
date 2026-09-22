@@ -1286,33 +1286,28 @@ export function* groundGrassBladeSteps(
         if (v % verticesPerBlade === 0) yield "blade_swept_bounds";
         const blade = Math.floor(v / verticesPerBlade),
           d = (i * blades + blade) * 2;
-        const correction =
-          deltas[d] * (1 - uv.getX(v)) + deltas[d + 1] * uv.getX(v);
+        // Cache only within this uninterrupted vertex. Nothing crosses the
+        // next blade suspension; borrowed attributes are reread on resumption.
+        const u = uv.getX(v),
+          px = position.getX(v),
+          pz = position.getZ(v);
+        const correction = deltas[d] * (1 - u) + deltas[d + 1] * u;
         const windFactor = uv.getY(v) ** 1.8;
-        const rx = (position.getX(v) * cos - position.getZ(v) * sin) * scale,
-          rz = (position.getX(v) * sin + position.getZ(v) * cos) * scale,
+        const windX = wind.x * bankHeightScale * windFactor,
+          windZ = wind.z * bankHeightScale * windFactor;
+        const rx = (px * cos - pz * sin) * scale,
+          rz = (px * sin + pz * cos) * scale,
           scaledY = position.getY(v) * bankHeightScale * scale;
         for (let fade = 0; fade < (scaledY === 0 ? 1 : 2); fade++) {
           take();
           applyTransform(rx, scaledY * fade, rz, point);
-          box.minX = Math.min(
-            box.minX,
-            point.x - wind.x * bankHeightScale * windFactor - NUMERIC_GUARD,
-          );
-          box.maxX = Math.max(
-            box.maxX,
-            point.x + wind.x * bankHeightScale * windFactor + NUMERIC_GUARD,
-          );
-          box.minZ = Math.min(
-            box.minZ,
-            point.z - wind.z * bankHeightScale * windFactor - NUMERIC_GUARD,
-          );
-          box.maxZ = Math.max(
-            box.maxZ,
-            point.z + wind.z * bankHeightScale * windFactor + NUMERIC_GUARD,
-          );
-          minY = Math.min(minY, point.y + correction - NUMERIC_GUARD);
-          maxY = Math.max(maxY, point.y + correction + NUMERIC_GUARD);
+          box.minX = Math.min(box.minX, point.x - windX - NUMERIC_GUARD);
+          box.maxX = Math.max(box.maxX, point.x + windX + NUMERIC_GUARD);
+          box.minZ = Math.min(box.minZ, point.z - windZ - NUMERIC_GUARD);
+          box.maxZ = Math.max(box.maxZ, point.z + windZ + NUMERIC_GUARD);
+          const correctedY = point.y + correction;
+          minY = Math.min(minY, correctedY - NUMERIC_GUARD);
+          maxY = Math.max(maxY, correctedY + NUMERIC_GUARD);
         }
       }
       if (
