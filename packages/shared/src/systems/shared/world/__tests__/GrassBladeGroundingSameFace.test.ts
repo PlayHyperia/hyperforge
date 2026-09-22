@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import THREE from "../../../../extras/three/three";
 import {
@@ -350,6 +351,421 @@ const NATIVE25: Record<
     triangleVisits: 192,
   },
 };
+
+const ALLOCATION_BASELINE_CASES = [
+  "ordinary-lod0",
+  "ordinary-lod1",
+  "ordinary-lod2",
+  "fine-lod0",
+  "fine-lod1",
+  "fine-lod2",
+  "fine-near4",
+  "fine-dense-plane",
+  "regular-diagonal-boundaries",
+  "indexed-canonical-interiors",
+  "indexed-shifted-canonical",
+  "refined-interiors",
+  "refined-skinny-neighbor",
+  "adjacent-reversed",
+  "overlapping-owners",
+  "missing-neighbor",
+  "mixed-exclusions",
+  "empty",
+  "budget-one",
+] as const satisfies readonly SameFaceCase[];
+type AllocationBaselineCase = (typeof ALLOCATION_BASELINE_CASES)[number];
+type AllocationBaseline = {
+  traceHash: string;
+  operations: number;
+  workUnits: number;
+  triangleVisits: number;
+  sameFaceEdges: number;
+  refinedSameFaceEdges: number;
+};
+
+/** Captured before allocation-only changes from f50b8d985 under Node/V8.
+ * Ordered phase hashes include every yield, not merely a phase census. All
+ * charges and shortcut counts remain exact; semantic bytes retain NATIVE25's
+ * independent goldens above. No wall-clock value enters either expectation. */
+const F50_ALLOCATION_BASELINE: Record<
+  AllocationBaselineCase,
+  AllocationBaseline
+> = {
+  "ordinary-lod0": {
+    traceHash:
+      "575b82c042b373a548fdb6cde24857ef372a0ec98a78dff3b09f2c953ef53dc6",
+    operations: 1972,
+    workUnits: 1658,
+    triangleVisits: 102,
+    sameFaceEdges: 94,
+    refinedSameFaceEdges: 0,
+  },
+  "ordinary-lod1": {
+    traceHash:
+      "f1846e5e969c1d063787dba3de667a479a46f121a501bb87e7a74e721f11adbf",
+    operations: 780,
+    workUnits: 642,
+    triangleVisits: 48,
+    sameFaceEdges: 48,
+    refinedSameFaceEdges: 0,
+  },
+  "ordinary-lod2": {
+    traceHash:
+      "fc763373e71a4f7a44c5c4a176b867e15c2095affd233cd8cb26e96faa699279",
+    operations: 212,
+    workUnits: 162,
+    triangleVisits: 16,
+    sameFaceEdges: 16,
+    refinedSameFaceEdges: 0,
+  },
+  "fine-lod0": {
+    traceHash:
+      "27110eb6081545b9ee688bf5af0647740940d00455bd573cd93a152255cf7648",
+    operations: 1973,
+    workUnits: 1659,
+    triangleVisits: 102,
+    sameFaceEdges: 94,
+    refinedSameFaceEdges: 0,
+  },
+  "fine-lod1": {
+    traceHash:
+      "00e65d935bfcd5db5437f7c0c3683c92cb137c778198ff3aba433abca4d8697f",
+    operations: 781,
+    workUnits: 643,
+    triangleVisits: 48,
+    sameFaceEdges: 48,
+    refinedSameFaceEdges: 0,
+  },
+  "fine-lod2": {
+    traceHash:
+      "13f398bbeee6f567b269cff46a21eec9b83b099246e46681de4ea28231a544f3",
+    operations: 213,
+    workUnits: 163,
+    triangleVisits: 16,
+    sameFaceEdges: 16,
+    refinedSameFaceEdges: 0,
+  },
+  "fine-near4": {
+    traceHash:
+      "976ea969b1c57a5cd3b6942e8ab45feb8a00731077d64b3982d27aee0a590d00",
+    operations: 2405,
+    workUnits: 2043,
+    triangleVisits: 102,
+    sameFaceEdges: 94,
+    refinedSameFaceEdges: 0,
+  },
+  "fine-dense-plane": {
+    traceHash:
+      "d4a1bb9574ce428d1233ad7c329b7a4fd201f2b46b9a9f7b09177e7917536baa",
+    operations: 8253,
+    workUnits: 26448,
+    triangleVisits: 1580,
+    sameFaceEdges: 1518,
+    refinedSameFaceEdges: 0,
+  },
+  "regular-diagonal-boundaries": {
+    traceHash:
+      "02ad601a64375042ada19723bfe0e01600d755470b86edd0dba02118bd02d216",
+    operations: 1978,
+    workUnits: 1664,
+    triangleVisits: 98,
+    sameFaceEdges: 94,
+    refinedSameFaceEdges: 0,
+  },
+  "indexed-canonical-interiors": {
+    traceHash:
+      "cf9d9832b4db164f7359eff3759ce2f38e2d55041e0e699f7432a2ae7533964b",
+    operations: 4821,
+    workUnits: 13184,
+    triangleVisits: 768,
+    sameFaceEdges: 768,
+    refinedSameFaceEdges: 0,
+  },
+  "indexed-shifted-canonical": {
+    traceHash:
+      "179da22339d8e3fa151c63b4f984c0b9097472964f1ac7b33486b29e5e8dfe8c",
+    operations: 2158,
+    workUnits: 2472,
+    triangleVisits: 144,
+    sameFaceEdges: 144,
+    refinedSameFaceEdges: 0,
+  },
+  "refined-interiors": {
+    traceHash:
+      "62bdcbe7a37f92d6494fb15a4f94aee79394d1fb693812df3d7c52e97497b942",
+    operations: 2564,
+    workUnits: 2424,
+    triangleVisits: 408,
+    sameFaceEdges: 48,
+    refinedSameFaceEdges: 0,
+  },
+  "refined-skinny-neighbor": {
+    traceHash:
+      "3ef5574a68efb5330d6f48f0de0c2aba9c41cf787ff1769f91ae37fbee4faecc",
+    operations: 2365,
+    workUnits: 1605,
+    triangleVisits: 360,
+    sameFaceEdges: 0,
+    refinedSameFaceEdges: 0,
+  },
+  "adjacent-reversed": {
+    traceHash:
+      "10d0df3f7b92a4b615b018ef478e8d1b49fa5e0ce3bea78c0e5c64936f7b2a4a",
+    operations: 2329,
+    workUnits: 1561,
+    triangleVisits: 148,
+    sameFaceEdges: 0,
+    refinedSameFaceEdges: 0,
+  },
+  "overlapping-owners": {
+    traceHash:
+      "d160def5cc7530994ef8a4e70d3a15230d789b5747fb9c1eca0f6e6806181f51",
+    operations: 1950,
+    workUnits: 579,
+    triangleVisits: 98,
+    sameFaceEdges: 0,
+    refinedSameFaceEdges: 0,
+  },
+  "missing-neighbor": {
+    traceHash:
+      "e8604195d5f7509685f230e39302ae583e85fbc07424b09ae7cf04822eae6b21",
+    operations: 1575,
+    workUnits: 51,
+    triangleVisits: 0,
+    sameFaceEdges: 0,
+    refinedSameFaceEdges: 0,
+  },
+  "mixed-exclusions": {
+    traceHash:
+      "79c0b4d7ada8c6294769bb1608c92c72757f315759f37b8da763f2a5eec305d9",
+    operations: 2095,
+    workUnits: 2090,
+    triangleVisits: 126,
+    sameFaceEdges: 118,
+    refinedSameFaceEdges: 0,
+  },
+  empty: {
+    traceHash:
+      "db5b5f41c8f5261ee8b2b7084e3273cc676f97ebc05332d5292f161750015b1d",
+    operations: 1541,
+    workUnits: 0,
+    triangleVisits: 0,
+    sameFaceEdges: 0,
+    refinedSameFaceEdges: 0,
+  },
+  "budget-one": {
+    traceHash:
+      "8bc0f15d514cc278eddd14e8299935c4f8db00c3b37c023be7d1dfad384a36d7",
+    operations: 1551,
+    workUnits: 1,
+    triangleVisits: 0,
+    sameFaceEdges: 0,
+    refinedSameFaceEdges: 0,
+  },
+};
+
+describe("allocation-only grounding continuation contract", () => {
+  it.each(ALLOCATION_BASELINE_CASES)(
+    "preserves frozen f50 phase trace, charges and semantic bytes: %s",
+    (id) => {
+      const fixture = createSameFaceCase(id);
+      try {
+        const before = sameFaceInputHash(fixture);
+        const trace: string[] = [];
+        const steps = groundGrassBladeSteps(fixture.request);
+        const { result, operations } = drainSameFaceSteps(
+          (function* () {
+            for (;;) {
+              const step = steps.next();
+              if (step.done) return step.value;
+              trace.push(step.value);
+              yield step.value;
+            }
+          })(),
+        );
+        const actual: AllocationBaseline = {
+          traceHash: createHash("sha256")
+            .update(JSON.stringify(trace))
+            .digest("hex"),
+          operations,
+          workUnits: result.receipt.workUnits,
+          triangleVisits: result.receipt.triangleVisits,
+          sameFaceEdges: result.receipt.sameFaceEdges,
+          refinedSameFaceEdges: result.receipt.refinedSameFaceEdges,
+        };
+        expect(actual).toEqual(F50_ALLOCATION_BASELINE[id]);
+        expect(trace.length + 1).toBe(operations);
+        expect(sameFaceHash(result)).toBe(NATIVE25[id].hash);
+        expect(sameFaceInputHash(fixture)).toBe(before);
+        for (const dependency of result.dependencies)
+          expect(fixture.request.surfaces).toContain(dependency.surface);
+      } finally {
+        fixture.dispose();
+      }
+    },
+  );
+
+  it.each(
+    (["ordinary-lod1", "fine-lod0", "fine-near4"] as const).flatMap((id) =>
+      [1, 2].map((endpoint) => ({ id, endpoint })),
+    ),
+  )(
+    "keeps pre-yield root transforms and rereads later borrowed geometry at endpoint $endpoint for $id",
+    ({ id, endpoint }) => {
+      const run = (
+        ground:
+          typeof groundGrassBladeSteps | typeof legacyGroundGrassBladeSteps,
+        mutate: boolean,
+      ) => {
+        const fixture = createSameFaceCase(id);
+        try {
+          const { request } = fixture;
+          const source = request.data;
+          request.data = {
+            count: 1,
+            offsets: source.offsets.slice(0, 3),
+            rotScaleHash: source.rotScaleHash.slice(0, 3),
+            groundColors: source.groundColors.slice(0, 3),
+            grassTints: source.grassTints.slice(0, 4),
+            groundNormals: source.groundNormals.slice(0, 3),
+          };
+          const before = structuredClone(request.data);
+          const layout = getGrassBladeLayout(
+            request.lod,
+            request.geometryLayout,
+          );
+          const position = request.geometry.getAttribute("position");
+          const current = ground === groundGrassBladeSteps;
+          const targetYield = current
+            ? endpoint
+            : layout.bladesPerClump + 2 + endpoint;
+          let staged = false,
+            yields = 0,
+            mutations = 0;
+          const steps = ground(request);
+          const output = drainSameFaceSteps(
+            (function* () {
+              for (;;) {
+                const step = steps.next();
+                if (step.done) return step.value;
+                if (step.value === "bounded_staging_allocation") staged = true;
+                if (
+                  staged &&
+                  step.value ===
+                    (current ? "endpoint_owner" : "grounding_operation")
+                ) {
+                  yields++;
+                  if (mutate && yields === targetYield) {
+                    // The bare numerical generator borrows these arrays. Both
+                    // roots of this blade were already transformed before the
+                    // first endpoint yield; later blades/envelopes reread them.
+                    // Separate lease tests below prevent publishing stale data.
+                    expect(position.getY(1)).toBe(0);
+                    expect(position.getY(layout.verticesPerBlade)).toBe(0);
+                    position.setY(1, 0.75);
+                    position.setY(layout.verticesPerBlade, 0.25);
+                    position.needsUpdate = true;
+                    mutations++;
+                  }
+                }
+                yield step.value;
+              }
+            })(),
+          );
+          expect(mutations).toBe(mutate ? 1 : 0);
+          expect(request.data).toEqual(before);
+          expect(output.result.status).toBe("ready");
+          if (output.result.status !== "ready")
+            throw Error(output.result.reason);
+          expect(output.result.data.count).toBe(1);
+          expect(Array.from(output.result.rootDeltas.subarray(0, 4))).toEqual(
+            mutate ? [0, 0, -0.25, 0] : [0, 0, 0, 0],
+          );
+          return output.result;
+        } finally {
+          fixture.dispose();
+        }
+      };
+      const expected = run(legacyGroundGrassBladeSteps, true);
+      const actual = run(groundGrassBladeSteps, true);
+      const unchanged = run(groundGrassBladeSteps, false);
+      expect(sameFaceHash(actual)).toBe(sameFaceHash(expected));
+      expect(sameFaceHash(actual)).not.toBe(sameFaceHash(unchanged));
+    },
+  );
+
+  it.each([
+    ["surface-position", 1, "fine-lod0"],
+    ["surface-index", 2, "fine-lod0"],
+    ["surface-version", 2, "indexed-shifted-canonical"],
+    ["blade-position", 1, "ordinary-lod1"],
+    ["blade-version", 2, "fine-near4"],
+    ["region", 3, "indexed-canonical-interiors"],
+  ] as const)(
+    "retires the %s lease at endpoint %s for %s before any further charge or publication",
+    (mutation, endpoint, id) => {
+      const fixture = createSameFaceCase(id);
+      try {
+        const { request } = fixture;
+        const before = structuredClone(request.data);
+        const bladePosition = request.geometry.getAttribute("position");
+        if (!(bladePosition instanceof THREE.BufferAttribute))
+          throw Error("Expected the fixture's ordinary blade attribute");
+        const bladeVersion = bladePosition.version;
+        let regionCurrent = true;
+        const job = new GrassBladeGroundingJob(
+          request,
+          () =>
+            regionCurrent &&
+            request.geometry.getAttribute("position") === bladePosition &&
+            bladePosition.version === bladeVersion &&
+            fixture.owned.every(({ surface, geometry }) =>
+              surface.matchesGeometry(geometry),
+            ),
+        );
+        let endpoints = 0;
+        while (job.state.status === "running" && endpoints < endpoint) {
+          const operations = job.operations;
+          job.advance(1);
+          expect(job.lastSliceOperations).toBeLessThanOrEqual(1);
+          if (job.operations > operations && job.lastPhase === "endpoint_owner")
+            endpoints++;
+        }
+        expect(endpoints).toBe(endpoint);
+        expect(job.state.status).toBe("running");
+        expect(job.lastPhase).toBe("endpoint_owner");
+        const geometry = fixture.owned[0].geometry;
+        if (mutation === "surface-position")
+          geometry.setAttribute(
+            "position",
+            geometry.getAttribute("position").clone(),
+          );
+        else if (mutation === "surface-index")
+          geometry.setIndex(geometry.getIndex()!.clone());
+        else if (mutation === "surface-version")
+          geometry.getAttribute("position").needsUpdate = true;
+        else if (mutation === "blade-position")
+          request.geometry.setAttribute("position", bladePosition.clone());
+        else if (mutation === "blade-version") bladePosition.needsUpdate = true;
+        else regionCurrent = false;
+        const operations = job.operations;
+        expect(job.advance(1)).toEqual({
+          status: "cancelled",
+          reason: "invalidated",
+        });
+        expect(job.operations).toBe(operations);
+        expect(job.lastSliceOperations).toBe(0);
+        expect("result" in job.state).toBe(false);
+        expect(request.data).toEqual(before);
+        const terminal = job.state;
+        expect(job.advance(64)).toBe(terminal);
+        expect(job.operations).toBe(operations);
+      } finally {
+        fixture.dispose();
+      }
+    },
+  );
+});
 
 describe("same-face shortcut versus independent native25 grounding goldens", () => {
   it.each([1, 7])(

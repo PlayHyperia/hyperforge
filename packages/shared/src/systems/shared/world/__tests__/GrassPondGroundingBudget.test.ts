@@ -254,6 +254,32 @@ const native95Observation = {
 // Each uses its actual worker output, authored constraints and retained mesh.
 const cases = [
   {
+    name: "native108 startup LOD1 pond bank work budget",
+    test: "reconstructs the native108 failed cell with actual retained neighbours and original caps",
+    enabled: process.env.ASSETS_DIR?.endsWith(
+      "/inland-pond-integration01-UNQUALIFIED/assets-v10",
+    ),
+    label: "NATIVE108_LOD1_POND_BANK",
+    nodes: [
+      [350, 450],
+      [450, 450],
+    ],
+    focus: [335, 431],
+    lod: 1,
+    key: "gcell_v1_15_17",
+    bounds: { minX: 375, maxX: 400, minZ: 425, maxZ: 450 },
+    native108: {
+      source: "native108/process.json",
+      sourceSHA256:
+        "13305732a00eb269c8c9719fd9f5ec9d8aef7db706d508ac17709923400a4deb",
+      workerOperations: 148346,
+      workerSliceElapsedMs: 250.00000143051147,
+      workerMaximumSliceMs: 13.900000095367432,
+      scope:
+        "Historical worker-terminal failed prefix with nominal host, not complete work or exclusive CPU. Current-source reconstruction uses actual v10 terrain, original focus/cell/LOD and production detail. Native108 did not retain its exact packet; this is not byte-exact historical replay or native startup qualification.",
+    },
+  },
+  {
     name: "native106 startup LOD0 western meadow work budget",
     test: "reconstructs the native106 failed cell using actual v10 owners and unchanged fitting caps",
     enabled: process.env.ASSETS_DIR?.endsWith(
@@ -697,11 +723,13 @@ describe.each(cases)("$name", (scenario) => {
         "native82" in scenario ||
         "native86" in scenario ||
         "native106" in scenario ||
+        "native108" in scenario ||
         "native95" in scenario;
       const usesNativeDetail =
         "native82" in scenario ||
         "native86" in scenario ||
         "native106" in scenario ||
+        "native108" in scenario ||
         "native95" in scenario;
       await DataManager.getInstance().initialize();
       const world = new World();
@@ -895,7 +923,9 @@ describe.each(cases)("$name", (scenario) => {
           }
           if (
             ("native82" in scenario && node.centerX === 250) ||
-            (("native95" in scenario || "native106" in scenario) &&
+            (("native95" in scenario ||
+              "native106" in scenario ||
+              "native108" in scenario) &&
               step.value.isRegularGrid)
           ) {
             // Historical pond fixtures all build refined 128-grid owners.
@@ -1133,6 +1163,9 @@ describe.each(cases)("$name", (scenario) => {
               : {}),
             ...("native106" in scenario
               ? { native106HistoricalObservation: scenario.native106 }
+              : {}),
+            ...("native108" in scenario
+              ? { native108HistoricalObservation: scenario.native108 }
               : {}),
             ...("native95" in scenario
               ? { native95HistoricalObservation: scenario.native95 }

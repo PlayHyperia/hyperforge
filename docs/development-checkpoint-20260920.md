@@ -531,6 +531,60 @@ inland-pond `isolated-build53-report.json`,
 The official Three.js reference library remains the implementation guide;
 these correctness/diagnostic results do not replace visual or performance proof.
 
+#### Grass generator allocation reduction — exact contract retained
+
+- Inline endpoint sampling in the existing continuation and run the certified
+  same-face proof synchronously before creating the fallback clipping generator.
+  Completed jobs avoid endpointQueries + sameFaceEdges generator invocations
+  (56,350 in the reconstructed western meadow). This is a source/count fact,
+  not a measured V8 heap-allocation or GC saving.
+- All 19 pre-edit f50b8d985 phase/operation/work goldens match; independent
+  numerical output goldens remain byte exact. Six borrowed-geometry mutation
+  and six actual attribute/region invalidation checks cover endpoint suspension
+  boundaries. No work-cap, yield, density, quality or deadline reduction.
+- Full regression01 passes 640/640; full types01 covers 739 roots / 2,418
+  sources / zero diagnostics with stable pins; scoped ESLint/format pass.
+  Independent source and test review found no concrete semantic blocker.
+- New native108 reconstruction uses actual v10 owners, LOD1, original focus
+  and failed cell bounds. Its f50 before01 passed. After01 retains mixed
+  results: native106 full test passes (including its previously failing
+  no-service-wear control at153.450ms), native108 cached fit exceeds250ms.
+  Thermal1 was observed after the latter run; no reliable speed comparison or
+  explanation of that failure is established, and it is not discarded.
+- Private build54: nine bundles / 998 inputs; only GrassBladeGrounding.ts
+  differs from build53; 145 protected compiled artifacts unchanged.
+- Native110/runtime80/build54/v10 (legacy wind) still fails the unchanged
+  90-second startup gate: 120/122 grass cells ready, two failed cells
+  gcell_v1_13_17 and gcell_v1_12_17 (both LOD0). This is not loading success.
+  The last worker failure (generation29/job21) records250.300ms/133,964
+  operations; its peak slice88.100ms includes an86.200ms clock interval over
+  only64resumptions (grounding_operation to endpoint_owner). Main merge reaches
+  251.600ms, supervision251.700ms. The earlier cell's final main receipt is
+  251.400ms/162,445operations with cumulative maximum24.600ms. Twenty actual
+  host samples were nominal/AC/awake; no matched view or wind video was reached.
+- [ ] Capture the actual browser grounding-worker CPU/GC profile around the
+  long interval before selecting another optimization. Phase endpoints and
+  removed generator calls do not identify GC, exclusive CPU, scheduling or JIT
+  cost. Reuse the existing bounded CDP observer; preserve the original startup
+  budget and retain instrumentation overhead as an explicit limitation.
+  [Chrome's memory guidance](https://developer.chrome.com/docs/devtools/memory-problems)
+  and official [Profiler](https://chromedevtools.github.io/devtools-protocol/tot/Profiler/)
+  / [Tracing](https://chromedevtools.github.io/devtools-protocol/tot/Tracing/)
+  interfaces inform that diagnostic, not an assumed cause.
+- Native111/runtime81 were NOT launched after the failed control. Native110's
+  browser is closed, runtime80 STOPPED and temporary database removed; protected
+  localhost services/data/compiled artifacts remain unchanged. Failure image
+  inspected: no new visual approval, grass/whole-world readiness still OPEN.
+  Connected tree-wind comparison, flowers/leaves and full cinematic remain OPEN.
+
+Evidence: service-layout `grounding-generator-f50-baseline01.*`,
+`grounding-generator-core01.*`, `grounding-generator-sameface01.*`,
+`grounding-generator-regression01.*`, `grounding-generator-types01.*`,
+`grounding-generator-native108-before01.*`,
+`grounding-generator-native-cells-after01.*`; inland-pond
+`isolated-build54-report.json`, `grounding-generator-build54-preflight01.json`,
+`native110/process.json`, `native110/failure.png`, `runtime80/process.json`.
+
 
 
 ## Pond-bank service ground — 2026-09-22

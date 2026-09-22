@@ -578,46 +578,6 @@ export function* groundGrassBladeSteps(
   const endpointSample: TerrainGridHeightSample = { height: 0, faceIndex: 0 };
   const leftFace: EndpointFace = { surface: null, faceIndex: -1 },
     rightFace: EndpointFace = { surface: null, faceIndex: -1 };
-  const sampleEndpoint = function* (point: Point, face: EndpointFace) {
-    receipt.endpointQueries++;
-    // Half-open ownership matches TerrainVisualManager; allow a sole outer edge.
-    let selected: SurfaceEntry | undefined;
-    for (const entry of baseEntries) {
-      yield "endpoint_owner";
-      take();
-      const b = entry.box;
-      if (
-        point.x >= b.minX &&
-        point.x < b.maxX &&
-        point.z >= b.minZ &&
-        point.z < b.maxZ
-      ) {
-        selected = entry;
-        break;
-      }
-      if (
-        !selected &&
-        point.x >= b.minX &&
-        point.x <= b.maxX &&
-        point.z >= b.minZ &&
-        point.z <= b.maxZ
-      )
-        selected = entry;
-    }
-    if (
-      !selected ||
-      !selected.surface.sampleHeight(
-        point.x - selected.surface.centerX,
-        point.z - selected.surface.centerZ,
-        endpointSample,
-      )
-    )
-      throw new DeferredGrounding("missing_surface");
-    markSurface(selected.surface, "endpoint");
-    face.surface = selected.surface;
-    face.faceIndex = endpointSample.faceIndex;
-    return endpointSample.height;
-  };
   let disjointSurfaceBoxes: boolean | undefined;
   const ensureCoverage = function* (box: TerrainGridBounds) {
     if (disjointSurfaceBoxes === undefined) {
@@ -685,7 +645,7 @@ export function* groundGrassBladeSteps(
     minZ: 0,
     maxZ: 0,
   };
-  const edgeError = function* (a: Point, b: Point) {
+  const sameFaceEdgeError = (a: Point, b: Point): number | null => {
     // A convex face contains the entire segment when both endpoints are safely
     // interior. Keep the original clipper for boundaries, multiple owners and
     // poorly conditioned arithmetic. Refined faces require the separate
@@ -793,6 +753,11 @@ export function* groundGrassBladeSteps(
         }
       }
     }
+    return null;
+  };
+  // The common certified-face path does not suspend. Only allocate a delegated
+  // generator for an edge that actually needs the original clipping traversal.
+  const edgeError = function* (a: Point, b: Point) {
     const dx = b.x - a.x,
       dz = b.z - a.z,
       intervals: [number, number][] = [];
@@ -1238,12 +1203,54 @@ export function* groundGrassBladeSteps(
       for (let blade = 0; blade < blades; blade++) {
         transform(blade * verticesPerBlade, 1, left);
         transform(blade * verticesPerBlade + 1, 1, right);
-        const deltaLeft = Math.fround(
-            (yield* sampleEndpoint(left, leftFace)) - left.y,
-          ),
-          deltaRight = Math.fround(
-            (yield* sampleEndpoint(right, rightFace)) - right.y,
-          );
+        let deltaLeft = 0,
+          deltaRight = 0;
+        // Keep endpoint order, suspension points and charges in this existing
+        // continuation instead of allocating two inner generators per blade.
+        for (let side = 0; side < 2; side++) {
+          const endpoint = side === 0 ? left : right,
+            face = side === 0 ? leftFace : rightFace;
+          receipt.endpointQueries++;
+          // Half-open ownership; retain a sole outer edge as the fallback.
+          let selected: SurfaceEntry | undefined;
+          for (const entry of baseEntries) {
+            yield "endpoint_owner";
+            take();
+            const b = entry.box;
+            if (
+              endpoint.x >= b.minX &&
+              endpoint.x < b.maxX &&
+              endpoint.z >= b.minZ &&
+              endpoint.z < b.maxZ
+            ) {
+              selected = entry;
+              break;
+            }
+            if (
+              !selected &&
+              endpoint.x >= b.minX &&
+              endpoint.x <= b.maxX &&
+              endpoint.z >= b.minZ &&
+              endpoint.z <= b.maxZ
+            )
+              selected = entry;
+          }
+          if (
+            !selected ||
+            !selected.surface.sampleHeight(
+              endpoint.x - selected.surface.centerX,
+              endpoint.z - selected.surface.centerZ,
+              endpointSample,
+            )
+          )
+            throw new DeferredGrounding("missing_surface");
+          markSurface(selected.surface, "endpoint");
+          face.surface = selected.surface;
+          face.faceIndex = endpointSample.faceIndex;
+          const delta = Math.fround(endpointSample.height - endpoint.y);
+          if (side === 0) deltaLeft = delta;
+          else deltaRight = delta;
+        }
         if (!Number.isFinite(deltaLeft) || !Number.isFinite(deltaRight))
           throw new Error("Nonfinite grass grounding correction");
         const d = (i * blades + blade) * 2;
@@ -1256,7 +1263,10 @@ export function* groundGrassBladeSteps(
         );
         left.y += deltaLeft;
         right.y += deltaRight;
-        baseError = Math.max(baseError, yield* edgeError(left, right));
+        baseError = Math.max(
+          baseError,
+          sameFaceEdgeError(left, right) ?? (yield* edgeError(left, right)),
+        );
       }
       receipt.maxCorrectedBaseError = Math.max(
         receipt.maxCorrectedBaseError,
