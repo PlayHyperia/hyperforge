@@ -1,5 +1,47 @@
 # Hyperia graphics reference library
 
+## 2026-09-22 — grass root contrast visually reviewed; restart checkpoint
+
+- [x] Native129/build65 completes the original Chrome/Metal WebGPU gates:
+  startup 30.567 seconds, 122/122 grass cells, three saved views and ten nominal
+  host samples. The three camera poses and complete flower pools match native127:
+  205, 180 and 191 plants. Source/harness pins remain stable; no renderer,
+  resolution, density, geometry, placement or loading-budget reduction.
+- [x] Review the actual wide/close images independently. Retain root brightness
+  0.55 as a modest opt-in improvement: better lower/upper separation without an
+  obvious muddy-shadow regression in these stills. Grass remains broad, flat and
+  angular close up; conspicuous blunt lower ends also existed in native127.
+  This is not AAA, production-default, root-contact or performance acceptance.
+- [x] Save six seconds of ordinary wind: 6.002 seconds, 59 observations, no
+  recorded GPU errors or device loss, fixed camera and cleaned recorder/tracks.
+  The 1280x720 VP8 clip decodes 179 frames. Extracted samples 1/4/6 retain attached
+  heads/stems; full-video smoothness, shadows and root contact remain unapproved.
+  Raw flower-owner maximum update is 2ms with two soft overruns; do not discount it.
+- [x] Preserve native128's failed comparison and all historical startup failures.
+  Native129's strict shader check allows only the two declared storage-name pairs;
+  other bytes/bindings/types remain identical. The deferred cow-model 404 remains
+  recorded, not silently treated as full asset acceptance. Review: native129/visual-review.json.
+- [ ] Diagnose several actual grass roots at the close camera using bound geometry,
+  instance transforms, Float32 corrections, visibility, terrain residuals and
+  projected pixels. Source has finite-width root edges and a 2cm fitting tolerance;
+  current receipts do not prove a gap, clipping or satisfactory visible contact.
+  Do not sink all grass or change camera clipping without this evidence.
+- [ ] Improve meadow composition after that check. A two-blossom sprig with five
+  broader petals per head is a proposal, not implemented: retain ten flutter
+  groups, existing population/bounds and at most 584 triangles, then verify actual
+  topology, grounding, material wind and matched native views. Petal area can
+  increase fragment cost even at identical triangle counts.
+- [x] Runtime100 stopped, its temporary database removed and owned browser closed.
+  No owned build/test/capture remains running. Protected 145 compiled artifacts,
+  retained lock and localhost3333 checks pass; saved playable database/volume
+  remain intact. Source checkpoint 755e68b retains 148 passing checks, zero type
+  diagnostics and scoped lint; no production source changed in this follow-up.
+- [x] The late restart reply refers to pre-reboot conditions. Fresh host check at
+  18:26 EDT shows about 85 minutes uptime and about 9MB filesystem-service RSS,
+  not 40 days/6GB. Another reboot is not required by that old observation. If the
+  user restarts again, revalidate service/DB identity before recovery; automatic
+  localhost recovery is not promised. Goal and outstanding quality gates stay open.
+
 ## 2026-09-22 — grass root-contrast candidate; visual approval pending
 
 - [x] Isolate one opt-in leaf-volume color change: root brightness 0.78 → 0.55,
