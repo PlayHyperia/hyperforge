@@ -1,5 +1,64 @@
 # Hyperia graphics reference library
 
+## 2026-09-22 — Grassworks vegetation reference added
+
+- [x] Review the user-supplied [Grassworks demo](https://grassworks.techredux.co/demo)
+  and its public documentation as reference material. Page/docs inspection only;
+  live motion/GPU comparison is pending nominal host conditions. No purchase,
+  paid-source access, bundled-code extraction or performance claim.
+- [ ] Compare broad coherent gusts, resting blade curvature, matte base/tip
+  variation and clearly readable mixed grass/flower silhouettes in matched views.
+  Keep the existing shared wind, root anchoring and conservative deformation bounds.
+- [ ] Consider an authored meadow coverage/height layer while keeping exact
+  retained terrain and road/water/resource exclusions authoritative. Do not
+  replace them with an approximate height texture solely because a demo uses one.
+- [ ] Assess near-versus-far geometry detail separately from plant population;
+  do not hide regressions by cutting density/resolution. The reference's
+  documented flower atlas uses billboards, not our modeled stem/petal geometry.
+  See the graphics reference library for primary documentation and licensing links.
+
+
+### Grassworks: specific research targets, not copied implementation
+
+Reviewed public docs on 2026-09-22. The docs identify a Three.js 0.185.0 WebGPU
+integration; that is not a reason by itself to upgrade our pinned runtime.
+[Documentation overview](https://grassworks.techredux.co/docs).
+
+1. **Motion and silhouette:** the reference exposes direction, spatial coherence,
+   strength and temporal speed separately, plus resting blade curvature. Our
+   follow-up is a matched held-motion review using the existing world wind:
+   broad gusts shared by grass/stems/wood, smaller local petal movement, anchored
+   roots and deformation-correct shadows. This is our proposed art test, not
+   proof that these concepts are absent or that the vendor implementation is faster.
+   [Wind](https://grassworks.techredux.co/docs/grass/wind-and-simulation),
+   [blade shape](https://grassworks.techredux.co/docs/grass/blade).
+2. **Readable mixed vegetation:** its atlas documentation describes flower images
+   mixed with grass images in billboard geometry. Treat variety and silhouette
+   as the lesson; keep our rooted near-camera flowers until any distance
+   representation proves continuity, shadow fit and frame cost. More submitted
+   instances alone did not make native120 a convincing meadow.
+   [Atlas](https://grassworks.techredux.co/docs/grass/atlas),
+   [variation](https://grassworks.techredux.co/docs/grass/variation),
+   [appearance](https://grassworks.techredux.co/docs/grass/appearance).
+3. **Art direction and scalability:** an authored coverage/height field could
+   enrich or quiet different meadow areas without replacing deterministic keys
+   or exclusion authority. The reference's terrain placement uses an overhead
+   single-height capture; our retained triangle contract differs. Review both
+   density and geometry detail across distance while preserving gameplay camera
+   coverage, rather than blindly copying its distances or terrain mechanism.
+   [Grass maps](https://grassworks.techredux.co/docs/terrain/grass-maps),
+   [terrain capture](https://grassworks.techredux.co/docs/terrain/setup-and-capture),
+   [LOD](https://grassworks.techredux.co/docs/performance/lod),
+   [tiling](https://grassworks.techredux.co/docs/performance/tiling-and-culling).
+
+**Access boundary:** this is a commercial product, not an open-source code donor.
+Its supplied source, redistribution and AI-assisted use have license terms.
+No purchase, installation or source copying was performed. Any proposed direct
+integration needs an explicit licensing/access decision first.
+[Product](https://grassworks.techredux.co/),
+[vendor license](https://grassworks.techredux.co/license).
+
+
 ## 2026-09-22 — fuller meadow flowers; final native qualification remains open
 
 - [x] Respond to the requested abundance: remove the broad patch cutoff that

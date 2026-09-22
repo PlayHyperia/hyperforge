@@ -1,5 +1,23 @@
 # Compact island environment art: next delivery slice
 
+## 2026-09-22 — Grassworks vegetation reference added
+
+- [x] Review the user-supplied [Grassworks demo](https://grassworks.techredux.co/demo)
+  and its public documentation as reference material. Page/docs inspection only;
+  live motion/GPU comparison is pending nominal host conditions. No purchase,
+  paid-source access, bundled-code extraction or performance claim.
+- [ ] Compare broad coherent gusts, resting blade curvature, matte base/tip
+  variation and clearly readable mixed grass/flower silhouettes in matched views.
+  Keep the existing shared wind, root anchoring and conservative deformation bounds.
+- [ ] Consider an authored meadow coverage/height layer while keeping exact
+  retained terrain and road/water/resource exclusions authoritative. Do not
+  replace them with an approximate height texture solely because a demo uses one.
+- [ ] Assess near-versus-far geometry detail separately from plant population;
+  do not hide regressions by cutting density/resolution. The reference's
+  documented flower atlas uses billboards, not our modeled stem/petal geometry.
+  See the graphics reference library for primary documentation and licensing links.
+
+
 ## 2026-09-22 — fuller meadow flowers; final native qualification remains open
 
 - [x] Respond to the requested abundance: remove the broad patch cutoff that
