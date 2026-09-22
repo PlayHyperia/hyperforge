@@ -408,6 +408,62 @@ inland-pond-integration01-UNQUALIFIED/TREE_WIND_NEXT.md.
 No runtime import, public asset/default promotion, or live localhost change
 is part of this foundation checkpoint.
 
+#### Connected tree-wind integration — opt-in; native approval still OPEN
+
+- [x] Connected `TreeWind` to the real resource-tree materials and BOTH loader
+  paths behind explicit `treeWind=connected-v1`; omission retains legacy leaf
+  sway. The option is captured once per client world and passed to both pools.
+  Unknown/duplicate selectors fail closed. No public default is promoted.
+- [x] Derive one immutable full-LOD0 descriptor per actual baked variant, share
+  it across wood/leaves and all LODs, preserve original variant indices through
+  missing LODs/material-slot reordering, and retain borrowed collision geometry.
+  The batched path now uses per-variant all-LOD bounds plus the bounded bend;
+  static interaction bounds are not advertised as animated collisions.
+- [x] Own/dispose added geometry, materials and partially created pools; guard
+  live/pending world or mode replacement; validate candidate transforms before
+  removing an old instance; preserve that instance when a destination is full.
+  Real HTTP GLB/ClientLoader/ModelCache integration tests cover both pools,
+  missing LODs, deplete/respawn, stale loads and failed replacement.
+- Verification: integration-regression02 passes **540/540** across six files;
+  integration-types02 covers **739 roots / 2,418 sources / zero diagnostics**
+  with stable source pins. Scoped nine-file ESLint/Prettier and diff checks pass.
+  Initial three type diagnostics were corrected before these final receipts.
+- Private **build52** completes nine bundles with 998 pinned inputs and all
+  145 protected artifacts unchanged. Against build51, exactly five production
+  inputs changed and TreeWind was added. Preflight includes 43 host-guard tests,
+  real AC/awake display/nominal thermal state, source and helper hashes.
+- Actual headful Chrome/Metal control **native106/runtime76/build52/assets-v10**
+  fails the unchanged 90-second startup gate before any of the five review
+  views. It uses LEGACY wind, not the connected candidate. At the deadline,
+  121/122 grass cells are ready and one failed; terrain and water are ready.
+  The raw worker fitting receipt for generation20/job23 already exceeds the
+  250 ms limit: 250.9 ms / 146,048 operations / maximum slice 89.3 ms. The
+  main merge is 251.1 ms and the final supervision tail brings it to 251.4 ms.
+  Therefore this is not merely an over-budget main-thread tail. These elapsed
+  slices include scheduling/GC; exclusive CPU or the cause is not established.
+  All 21 host samples were nominal/AC/awake, with no host-guard error.
+- No control close-up, held wind video or native connected-wind shader proof
+  was obtained. **native107/runtime77 were not launched** after the failed
+  control. Retain the failure screenshot/receipt; do not retry to manufacture
+  a green comparison, increase work caps, or claim tree-wind visual/perf success.
+- [ ] Diagnose the long worker fitting slice and retain exact phase/work evidence;
+  resolve grass readiness before a fresh matched native comparison.
+- [ ] Visually verify coherent wood/canopy motion, anchored roots, normals,
+  shadows, culling/LOD transitions and actual frame/memory cost in both pools.
+  Fine leaf flutter, habitat flowers and bounded falling leaves remain open.
+- Owned control browser is closed; runtime76 is STOPPED, its temporary test
+  database was removed, and protected localhost:3333 services/data/bundles are
+  unchanged. No change to graphics quality/resolution or the human game.
+
+Evidence: retained service-layout `tree-wind-integration-regression02.*`,
+`tree-wind-integration-types02.*`, `tree-wind-build52*` and
+`tree-wind-native106*`; inland-pond `isolated-build52-report.json`,
+`tree-wind-build52-preflight01.json`, `native106/process.json`,
+`native106/failure.png` and `runtime76/process.json`.
+Official Three.js references above remain implementation references, not
+automatic proof of AAA art quality, a completed cinematic or launch readiness.
+
+
 
 ## Pond-bank service ground — 2026-09-22
 

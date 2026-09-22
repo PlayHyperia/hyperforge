@@ -136,7 +136,10 @@ import { Particles } from "../systems/shared";
 import { Wind } from "../systems/shared";
 import { ClientTeleportEffectsSystem } from "../systems/client/ClientTeleportEffectsSystem";
 import type { SystemConstructor } from "../systems/shared/infrastructure/System";
-import { resolveClientViewportRuntimeProfile } from "./clientViewportMode";
+import {
+  resolveClientViewportRuntimeProfile,
+  resolveTreeWindCandidate,
+} from "./clientViewportMode";
 
 /**
  * Window extension for browser testing and debugging.
@@ -191,6 +194,7 @@ function replaceSystem(
 export function createClientWorld() {
   const world = new World();
   const viewportProfile = resolveClientViewportRuntimeProfile();
+  const treeWindOptions = { windMode: resolveTreeWindCandidate() };
   // ============================================================================
   // FRAME BUDGET MANAGER
   // ============================================================================
@@ -410,10 +414,15 @@ export function createClientWorld() {
         "Client stage must exist before resource pool initialization",
       );
     stageSystem.THREE = THREE as unknown as StageSystem["THREE"];
-    initGLBTreeInstancer(stageSystem.scene as unknown as THREE.Scene, world);
+    initGLBTreeInstancer(
+      stageSystem.scene as unknown as THREE.Scene,
+      world,
+      treeWindOptions,
+    );
     initGLBTreeBatchedInstancer(
       stageSystem.scene as unknown as THREE.Scene,
       world,
+      treeWindOptions,
     );
     initPlaceholderInstancer(stageSystem.scene as unknown as THREE.Scene);
     initGLBResourceInstancer(

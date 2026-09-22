@@ -70,6 +70,7 @@ import {
   isCompactSculptProfile,
   type WorldTerrainProfile,
 } from "./WorldTerrainProfile";
+import { createTreeWindPositionNode, type TreeWindMode } from "./TreeWind";
 
 // ============================================================================
 // CONFIGURATION
@@ -992,6 +993,8 @@ export function applyRimHighlight(
  * Options for creating tree dissolve materials.
  */
 export type TreeMaterialOptions = DissolveMaterialOptions & {
+  /** Explicit pool-owned selection; connected geometry metadata is required. */
+  treeWind?: TreeWindMode;
   /** Per-world art direction; never inferred from shared material/cache state. */
   treePalette?: {
     terrainProfile: WorldTerrainProfile;
@@ -1035,6 +1038,7 @@ class CompactTreePBRMaterial extends MeshStandardNodeMaterial {
  * - Per-instance rim highlight
  */
 export type TreeDissolveMaterial = DissolveMaterial & {
+  readonly treeWind: Readonly<{ mode: TreeWindMode }>;
   readonly treeLighting: Readonly<{
     mode: "scene-pbr-mask-safe-v1" | "legacy-custom-rgb";
     sourceMaterialName: string;
@@ -1075,6 +1079,10 @@ export function createTreeDissolveMaterial(
   source: THREE.MeshStandardMaterial | THREE.Material,
   options: TreeMaterialOptions = {},
 ): TreeDissolveMaterial {
+  const treeWindMode = options.treeWind ?? "legacy-leaf-v1";
+  if (treeWindMode !== "legacy-leaf-v1" && treeWindMode !== "connected-v1") {
+    throw new Error("Unsupported tree wind mode");
+  }
   const palette = options.treePalette;
   const compact =
     palette?.terrainProfile.kind === "compact-candidate" &&
@@ -1160,27 +1168,37 @@ export function createTreeDissolveMaterial(
   const ENABLE_TREE_SSS = true;
 
   // --- Wind vertex displacement ---
-  // Modulated by leafMask from vertex color R so bark stays still.
-  // Displacement proportional to local Y auto-scales to any model coord system.
-  material.positionNode = Fn(() => {
-    const pos = positionLocal;
-    const vc = hasVertexColors
-      ? attribute<"vec3">("color", "vec3")
-      : vec3(0, 1, 0);
-    const leafMask = vc.x;
+  if (treeWindMode === "connected-v1") {
+    material.positionNode = createTreeWindPositionNode({
+      time: uWindTime,
+      strength: uWindStrength,
+      direction: uWindDir,
+    });
+  } else {
+    // Legacy expression intentionally unchanged: leafMask keeps bark still.
+    // Displacement proportional to local Y auto-scales to any model coord system.
+    material.positionNode = Fn(() => {
+      const pos = positionLocal;
+      const vc = hasVertexColors
+        ? attribute<"vec3">("color", "vec3")
+        : vec3(0, 1, 0);
+      const leafMask = vc.x;
 
-    const phase = add(mul(pos.x, float(0.013)), mul(pos.z, float(0.017)));
-    const wave1 = sin(add(mul(uWindTime, float(1.8)), phase));
-    const wave2 = sin(add(mul(uWindTime, float(3.2)), mul(phase, float(0.6))));
-    const combined = add(mul(wave1, float(0.65)), mul(wave2, float(0.35)));
-    const amplitude = mul(abs(pos.y), float(0.006));
-    const disp = mul(combined, mul(uWindStrength, mul(amplitude, leafMask)));
-    return vec3(
-      add(pos.x, mul(disp, uWindDir.x)),
-      pos.y,
-      add(pos.z, mul(disp, uWindDir.y)),
-    );
-  })();
+      const phase = add(mul(pos.x, float(0.013)), mul(pos.z, float(0.017)));
+      const wave1 = sin(add(mul(uWindTime, float(1.8)), phase));
+      const wave2 = sin(
+        add(mul(uWindTime, float(3.2)), mul(phase, float(0.6))),
+      );
+      const combined = add(mul(wave1, float(0.65)), mul(wave2, float(0.35)));
+      const amplitude = mul(abs(pos.y), float(0.006));
+      const disp = mul(combined, mul(uWindStrength, mul(amplitude, leafMask)));
+      return vec3(
+        add(pos.x, mul(disp, uWindDir.x)),
+        pos.y,
+        add(pos.z, mul(disp, uWindDir.y)),
+      );
+    })();
+  }
 
   // --- Alpha cutout sharpening ---
   // Applied to any material with a texture map (leaf textures have alpha).
@@ -1426,6 +1444,10 @@ export function createTreeDissolveMaterial(
   material.needsUpdate = true;
 
   const treeMat = baseDm as TreeDissolveMaterial;
+  Object.defineProperty(treeMat, "treeWind", {
+    value: Object.freeze({ mode: treeWindMode }),
+    enumerable: true,
+  });
   Object.defineProperty(treeMat, "treeLighting", {
     value: Object.freeze({
       mode: compactMaterial ? "scene-pbr-mask-safe-v1" : "legacy-custom-rgb",

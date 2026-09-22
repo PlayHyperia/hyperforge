@@ -28,6 +28,10 @@ import {
  * Instance transforms must remain upright yaw + positive uniform scale. */
 export const TREE_WIND_ATTRIBUTE = "treeWindHeight";
 export const TREE_WIND_MAX_DISPLACEMENT = 0.36;
+export type TreeWindMode = "legacy-leaf-v1" | "connected-v1";
+export interface TreeWindPoolOptions {
+  readonly windMode?: TreeWindMode;
+}
 const MAX_VERTICES = 2_000_000;
 const IDENTITY = new THREE.Matrix4();
 

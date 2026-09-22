@@ -26,6 +26,7 @@ import {
   resolveGrassAppearanceCandidate,
   resolveGrassLightingCandidate,
   resolveGrassPaletteCandidate,
+  resolveTreeWindCandidate,
   resolveGrassCoverageTrial,
   resolveGrassRoadClearance,
   resolveGrassGroundingExecution,
@@ -45,6 +46,49 @@ import {
 function makeWindow(pathname: string, search = ""): Window {
   return { location: { pathname, search } } as unknown as Window;
 }
+
+describe("explicit connected tree wind selection", () => {
+  it("keeps all existing routes and profiles unchanged when omitted", () => {
+    expect(resolveTreeWindCandidate()).toBeUndefined();
+    for (const path of ["/play", "/stream.html", "/"]) {
+      expect(resolveTreeWindCandidate(makeWindow(path))).toBeUndefined();
+      expect(
+        resolveTreeWindCandidate(makeWindow(path, "?treeWind=connected-v1")),
+      ).toBe("connected-v1");
+    }
+  });
+
+  it("rejects unknown, empty and duplicate selectors", () => {
+    for (const search of [
+      "?treeWind=",
+      "?treeWind=legacy-leaf-v1",
+      "?treeWind=true",
+      "?treeWind=connected-v1&treeWind=connected-v1",
+    ])
+      expect(() =>
+        resolveTreeWindCandidate(makeWindow("/play", search)),
+      ).toThrow("Unknown or duplicate tree wind candidate");
+  });
+
+  it("resolves once and supplies the same selection to both actual resource pools", () => {
+    const source = readFileSync(
+      new URL("../createClientWorld.ts", import.meta.url),
+      "utf8",
+    );
+    expect(source.match(/resolveTreeWindCandidate\(\)/gu)).toHaveLength(1);
+    for (const init of [
+      "initGLBTreeInstancer",
+      "initGLBTreeBatchedInstancer",
+    ]) {
+      expect(source).toMatch(
+        new RegExp(
+          init +
+            "\\(\\s*stageSystem\\.scene[\\s\\S]*?world,\\s*treeWindOptions,\\s*\\)",
+        ),
+      );
+    }
+  });
+});
 
 describe("explicit regional grass palette selection", () => {
   const fine =

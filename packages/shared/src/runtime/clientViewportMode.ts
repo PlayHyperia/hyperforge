@@ -135,6 +135,20 @@ export type GrassAppearanceCandidate = "natural-tuft-v1" | "fine-meadow-v1";
 export type GrassLightingCandidate = "canopy-normal-v1" | "leaf-volume-v1";
 export type GrassPaletteCandidate = "regional-v1";
 
+/** Explicit tree motion qualification; omission keeps the existing renderer.
+ * Resolve once during world creation, never per frame or from material cache. */
+export function resolveTreeWindCandidate(
+  win?: Window,
+): "connected-v1" | undefined {
+  const windowRef = getWindowRef(win);
+  if (!windowRef) return undefined;
+  const values = getSearchParams(windowRef)?.getAll("treeWind") ?? [];
+  if (values.length === 0) return undefined;
+  if (values.length !== 1 || values[0] !== "connected-v1")
+    throw new Error("Unknown or duplicate tree wind candidate");
+  return "connected-v1";
+}
+
 /** Explicit fine-meadow reflectance trial; captured once by the terrain owner.
  * No profile, placement, density, geometry, or lighting selection is changed. */
 export function resolveGrassPaletteCandidate(
