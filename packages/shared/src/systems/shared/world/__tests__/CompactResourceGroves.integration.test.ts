@@ -227,7 +227,9 @@ const GROVE_MOVES = [
   },
 ] as const;
 const compositionStage = process.env.HYPERIA_GROVE_COMPOSITION_STAGE;
-function compositionSelection(expected: "assets-v9" | "assets-v11") {
+function compositionSelection(
+  expected: "assets-v9" | "assets-v11" | "assets-v12",
+) {
   const directory = process.env.ASSETS_DIR;
   if (!directory) throw new Error("Selected grove assets are required");
   expect(basename(directory)).toBe(expected);
@@ -287,11 +289,25 @@ describe("selected eastern woodland composition", () => {
     },
   );
 
-  it.skipIf(compositionStage !== "qualify")(
-    "qualifies selected v11 three-ID delta, exact models, collision routes, replay and owner lifecycle",
+  it.skipIf(
+    compositionStage !== "qualify" && compositionStage !== "qualify-v12",
+  )(
+    "qualifies selected three-ID delta, exact models, collision routes, replay and owner lifecycle",
     async () => {
-      const selected = compositionSelection("assets-v11");
-      const baseline = resolve(selected.directory, "../assets-v9");
+      const combinedBank = compositionStage === "qualify-v12";
+      const selected = compositionSelection(
+        combinedBank ? "assets-v12" : "assets-v11",
+      );
+      const baseline = resolve(
+        selected.directory,
+        combinedBank ? "../assets-v10" : "../assets-v9",
+      );
+      // The combined candidate must preserve the retained bank byte-for-byte;
+      // reusing v11 wholesale would silently restore its older terrain.
+      if (combinedBank)
+        expect(
+          readFileSync(join(selected.directory, "manifests/world-areas.json")),
+        ).toEqual(readFileSync(join(baseline, "manifests/world-areas.json")));
       const baseConfig = JSON.parse(
         readFileSync(join(baseline, "manifests/world-config.json"), "utf8"),
       ) as WorldConfigManifest;
@@ -393,6 +409,11 @@ describe("selected eastern woodland composition", () => {
       const docks = selected.config.compactPondDocks!.docks.map(
         getCompactPondDockSupportBounds,
       );
+      const ponds = Object.values(ALL_WORLD_AREAS)
+        .flatMap((area) => area.waterBodies ?? [])
+        .filter((body) => body.id === "haven_pond_water");
+      expect(ponds).toHaveLength(1);
+      const pond = ponds[0];
       const proof = GROVE_MOVES.map((move) => {
         const entity = f.manager.getEntity(move.after) as ResourceEntity;
         const hash = (
@@ -440,6 +461,15 @@ describe("selected eastern woodland composition", () => {
         );
         expect(roadMargin, move.after).toBeGreaterThan(0);
         expect(dockMargin, move.after).toBeGreaterThan(0);
+        // The entire declared source canopy stays beyond a five-metre shore
+        // approach band, not just outside the tree's one-tile collision cell.
+        // This is LOD0 static geometry clearance, not wind/LOD silhouette proof
+        // or a replacement for actual fishing/traversal qualification.
+        const pondMargin =
+          Math.hypot(move.x - pond.centerX, move.z - pond.centerZ) -
+          pond.radius -
+          bounds.radius;
+        expect(pondMargin, move.after).toBeGreaterThan(5);
         return {
           id: move.after,
           position: accepted.position,
@@ -450,6 +480,7 @@ describe("selected eastern woodland composition", () => {
           radius: bounds.radius,
           roadMargin,
           dockMargin,
+          pondMargin,
         };
       });
       expect(proof.reduce((sum, r) => sum + r.triangles, 0)).toBe(16101);

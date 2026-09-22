@@ -18,6 +18,7 @@ import { RetainedTerrainSurface } from "../TerrainGridSurface";
 import {
   GrassGroundingWorkerCoordinator,
   type GrassGroundingAdmissionFailure,
+  type GrassGroundingFittingFailure,
   type GrassGroundingWorkerJob,
 } from "../GrassGroundingWorkerCoordinator";
 import { gridGeometry } from "./terrain-grid.fixture";
@@ -191,6 +192,45 @@ function assertAdmissionFailureShape(failure: GrassGroundingAdmissionFailure) {
     keys(failure.response.workBeforeMerge, workKeys);
     if (failure.response.work) keys(failure.response.work, workKeys);
   }
+  assertFrozenScalarDiagnostic(failure, 7);
+}
+
+function assertFittingFailureShape(failure: GrassGroundingFittingFailure) {
+  const keys = (value: object, names: readonly string[]) =>
+    expect(Reflect.ownKeys(value).sort()).toEqual([...names].sort());
+  keys(failure, [
+    "schemaVersion",
+    "scope",
+    "generation",
+    "status",
+    "reason",
+    "submittedWork",
+    "response",
+    "mergedWork",
+  ]);
+  keys(failure.response, [
+    "status",
+    "reason",
+    "phase",
+    "work",
+    "workBeforeMerge",
+    "jobId",
+    "generation",
+    "dispatchCpuMs",
+    "chargedDispatchMs",
+    "postMessageCpuMs",
+    "receiveCpuMs",
+  ]);
+  const workKeys = ["operations", "activeMs", "maximumSliceMs"];
+  keys(failure.submittedWork, workKeys);
+  keys(failure.mergedWork, workKeys);
+  keys(failure.response.workBeforeMerge, workKeys);
+  if (!failure.response.work) throw new Error("Missing real fitting work");
+  keys(failure.response.work, workKeys);
+  assertFrozenScalarDiagnostic(failure, 6);
+}
+
+function assertFrozenScalarDiagnostic(failure: object, maximumObjects: number) {
   // Reject all retained classes, buffers, collections, arrays and accessors;
   // the exact schema above bounds the graph, not only its serialized size.
   let objects = 0;
@@ -206,7 +246,7 @@ function assertAdmissionFailureShape(failure: GrassGroundingAdmissionFailure) {
     }
     expect(typeof value).toBe("object");
     if (typeof value !== "object") throw new Error("Non-scalar diagnostic");
-    expect(++objects).toBeLessThanOrEqual(7);
+    expect(++objects).toBeLessThanOrEqual(maximumObjects);
     expect(Object.getPrototypeOf(value)).toBe(Object.prototype);
     expect(Object.isFrozen(value)).toBe(true);
     for (const descriptor of Object.values(
@@ -431,6 +471,9 @@ describe("actual retained-terrain grounding worker coordinator", () => {
           expect(fit.generation).toBeGreaterThan(previousGeneration);
         previousGeneration = fit.generation;
         const receipt = value.coordinator.receipt;
+        expect(
+          Object.prototype.hasOwnProperty.call(receipt, "lastFittingFailure"),
+        ).toBe(false);
         expect(receipt.preparedOwners).toBe(item.request.surfaces.length);
         expect(
           [...value.terminal.values()].filter(
@@ -569,6 +612,7 @@ describe("actual retained-terrain grounding worker coordinator", () => {
     item.owned[0].geometry.getAttribute("position").needsUpdate = true;
     job.advance(1);
     expect(job.state.status).toBe("cancelled");
+    expect(value.coordinator.receipt.lastFittingFailure).toBeUndefined();
     const terminal = job.state;
     value.coordinator.advanceMaintenance();
     job.advance();
@@ -692,6 +736,125 @@ describe("actual retained-terrain grounding worker coordinator", () => {
     expect(value.port.postCalls).toBe(calls);
   });
 
+  it("captures only the actual failed fitting settlement with exact elapsed-work decomposition", async () => {
+    const item = fixture(),
+      value = await session(),
+      originalBudget = item.request.workBudget;
+    expect(
+      Object.prototype.hasOwnProperty.call(
+        value.coordinator.receipt,
+        "lastFittingFailure",
+      ),
+    ).toBe(false);
+    // The actual worker exhausts its real geometric-work allowance. No clock,
+    // response, cap constant or transport is replaced to manufacture a failure.
+    item.request.workBudget = 1;
+    const { job } = start(value, item);
+    await atLabel(value, job, "worker_fit_dispatch");
+    const id = job.transportJobId;
+    if (id === null) throw new Error("Missing actual fitting dispatch");
+    await value.wait(id);
+    const response = value.terminal.get(id);
+    if (!response || response.type !== "result")
+      throw new Error("Missing actual worker result");
+    expect(response.state).toEqual({
+      status: "failed_budget",
+      reason: "grounding_work",
+    });
+    // Receiving alone does not settle the coordinator or invent a diagnostic.
+    expect(value.coordinator.receipt.lastFittingFailure).toBeUndefined();
+    const before = {
+      operations: job.operations,
+      activeMs: job.activeMs,
+      maximumSliceMs: job.cumulativeMaximumSliceMs,
+    };
+    const state = job.advance();
+    expect(state).toEqual(response.state);
+    const failure = value.coordinator.receipt.lastFittingFailure;
+    if (!failure) throw new Error("Missing failed fitting settlement");
+    assertFittingFailureShape(failure);
+    expect(failure.schemaVersion).toBe(1);
+    expect(failure.scope).toBe("settlement_before_main_supervision_tail");
+    expect(failure.generation).toBe(response.generation);
+    expect(failure.status).toBe("failed_budget");
+    expect(failure.reason).toBe("grounding_work");
+    expect(failure.response.status).toBe(response.state.status);
+    expect(failure.response.reason).toBe("grounding_work");
+    expect(failure.response.phase).toBe(response.lastPhase);
+    expect(failure.response.jobId).toBe(id);
+    expect(failure.response.generation).toBe(response.generation);
+    expect(failure.response.work).toEqual(response.work);
+    expect(failure.response.work).not.toBe(response.work);
+    expect(failure.response.workBeforeMerge).toEqual(before);
+    const submitted = failure.submittedWork,
+      transport = failure.response;
+    expect(submitted.operations).toBeGreaterThan(0);
+    expect(response.work.operations).toBeGreaterThan(submitted.operations);
+    expect(submitted.activeMs).toBeLessThanOrEqual(before.activeMs);
+    expect(failure.mergedWork.operations).toBe(
+      response.work.operations + (before.operations - submitted.operations),
+    );
+    expect(failure.mergedWork.activeMs).toBe(
+      response.work.activeMs +
+        (before.activeMs - submitted.activeMs) +
+        Math.max(0, transport.dispatchCpuMs - transport.chargedDispatchMs) +
+        transport.receiveCpuMs,
+    );
+    expect(failure.mergedWork.maximumSliceMs).toBe(
+      Math.max(
+        before.maximumSliceMs,
+        response.work.maximumSliceMs,
+        transport.dispatchCpuMs,
+        transport.receiveCpuMs,
+      ),
+    );
+    expect(transport.dispatchCpuMs).toBeGreaterThanOrEqual(
+      transport.postMessageCpuMs,
+    );
+    for (const cost of [
+      transport.dispatchCpuMs,
+      transport.chargedDispatchMs,
+      transport.postMessageCpuMs,
+      transport.receiveCpuMs,
+    ])
+      expect(cost).toBeGreaterThanOrEqual(0);
+    // The failed settlement snapshot intentionally precedes the real outer
+    // advance's final accounting; it must not masquerade as the final total.
+    expect(job.operations).toBe(
+      failure.mergedWork.operations + job.lastSliceOperations,
+    );
+    expect(job.activeMs).toBe(failure.mergedWork.activeMs + job.lastSliceMs);
+    expect(job.cumulativeMaximumSliceMs).toBe(
+      Math.max(failure.mergedWork.maximumSliceMs, job.lastSliceMs),
+    );
+    expect(value.coordinator.receipt.lastAdmissionFailure).toBeNull();
+    const calls = value.port.postCalls,
+      serialized = JSON.stringify(failure),
+      finalWork = [job.operations, job.activeMs, job.cumulativeMaximumSliceMs];
+    for (let i = 0; i < 5; i++) {
+      job.advance();
+      value.coordinator.advanceMaintenance();
+    }
+    expect(job.state).toBe(state);
+    expect(value.port.postCalls).toBe(calls);
+    expect([
+      job.operations,
+      job.activeMs,
+      job.cumulativeMaximumSliceMs,
+    ]).toEqual(finalWork);
+    // A distinct, explicitly submitted successful job cannot clear or replace
+    // historical failure evidence. It is not an automatic retry of the failure.
+    if (originalBudget === undefined) delete item.request.workBudget;
+    else item.request.workBudget = originalBudget;
+    expect((await finish(value, start(value, item).job)).status).toBe("ready");
+    expect(value.coordinator.receipt.lastFittingFailure).toBe(failure);
+    value.coordinator.destroy();
+    expect(value.coordinator.receipt.reservedInputBytes).toBe(0);
+    expect(value.coordinator.receipt.lastFittingFailure).toBe(failure);
+    expect(JSON.stringify(failure)).toBe(serialized);
+    assertFittingFailureShape(failure);
+  });
+
   it("retains the exact real-worker admission failure through cached-owner propagation without input references", async () => {
     const item = fixture(),
       value = await session(),
@@ -707,6 +870,7 @@ describe("actual retained-terrain grounding worker coordinator", () => {
     const { job } = start(value, item);
     const state = await finish(value, job);
     expect(state.status).toBe("failed_input");
+    expect(value.coordinator.receipt.lastFittingFailure).toBeUndefined();
     expect(job.operations).toBe(0);
     expect(job.activeMs).toBe(0);
     const responses = [...value.terminal.values()];
@@ -975,6 +1139,7 @@ describe("actual retained-terrain grounding worker coordinator", () => {
     await value.port.terminateUnexpectedly();
     job.advance(1);
     expect(job.state.status).toBe("failed_input");
+    expect(value.coordinator.receipt.lastFittingFailure).toBeUndefined();
     expect(value.coordinator.receipt.terminated).toBe(true);
     const state = job.state,
       calls = value.port.postCalls;

@@ -2688,6 +2688,122 @@ Water follow-up: service-layout `pond-ray-extinction-core01/02/03` and
 `native101/landing-held-native-timing.json`,
 `native101/landing-optical-motion.webm`, `runtime70/process.json` and
 `runtime71/process.json`. The six-second clip and stills are diagnostic only.
+
+### Living vegetation follow-up — 2026-09-22
+
+User direction: make wind-connected trees, flowers in the grass, moving flower
+stems/petals and occasional falling leaves part of the compact island art pass.
+These are open launch tasks, not delivered visual features.
+
+- [x] Trace the actual resource-tree path: manifest variants use
+  GLBTreeBatchedInstancer; single models use GLBTreeInstancer. Both use
+  GPUMaterials.createTreeDissolveMaterial. Its current leaf mask explicitly
+  suppresses bark wind; r186 applies instance transforms before positionNode,
+  so the current absolute-Y amplitude also includes terrain elevation.
+- [ ] Implement connected, root-anchored wood/leaf motion from shared per-tree
+  wind, stable across species, position, yaw, uniform scale, LOD, shadows,
+  depletion/respawn and streaming. Keep roots stationary, the trunk restrained
+  and finer foliage motion subordinate; correct deformed normals and bound
+  animated culling extents. Verify real WebGPU motion and measured added cost,
+  not just stills or CPU shader graphs.
+- [ ] Add restrained, irregular flower patches using the current terrain-owned
+  grass/surface lifecycle, actual retained ground, local water and exclusions.
+  Keep paths, station working space, resource access and combat readable.
+  Roots must stay fixed while stems bend and petals respond more delicately.
+- [ ] Add occasional, species-appropriate falling leaves from live nearby
+  canopies, with wind drift, tumble and bounded lifetime. Use one pooled visual
+  owner, not a particle draw call/physics object per tree or persistent litter.
+  Depletion, unload, teardown, respawn and late loads must not leak or duplicate
+  emitters. Test pause/resume, large delta, teleports and repeated streaming.
+- [ ] Establish and measure flower/leaf/emitter/work/allocation/upload caps,
+  animated culling and LOD/fade behavior, depth/fog/lighting and overdraw.
+  Compare matched cold/warm and moving WebGPU views, frame-time tails and
+  memory; do not silently reduce quality/resolution to meet performance.
+- [x] Inspect existing flower code before reuse. ProceduralFlowerSystem is
+  disabled for a spawn investigation and depends on the disabled older grass
+  heightmap, with a five-second wait and camera/player-Y fallback. Do not
+  simply re-enable it. Existing flower billboards are reference code, not
+  qualified rooted stems/petals; no current falling-leaf pool was found.
+
+Primary references: [GPU tree wind hierarchy](https://developer.nvidia.com/gpugems/gpugems3/part-i-geometry/chapter-6-gpu-generated-procedural-wind-animations-trees)
+and [separate main/detail vegetation bending](https://developer.nvidia.com/gpugems/gpugems3/part-iii-rendering/chapter-16-vegetation-procedural-animation-and-shading-crysis).
+These motivate shared, bounded GPU deformation; they do not prove this
+implementation, art direction or performance acceptable.
+
+### Fitting diagnostics and combined-layout qualification — 2026-09-22
+
+- [x] Add a failure-only, frozen scalar worker fitting receipt. It retains the
+  submitted work, actual response, transport/pre-merge and merged work without
+  snapshots/buffers, successful-result allocation, retries or budget changes.
+  It explicitly ends before the enclosing main supervision tail. Actual worker
+  failure, exact merge arithmetic, absence on success/cancel/admission failure,
+  historical retention and teardown are covered.
+- [x] Canonical worker/client/coordinator/generation suites pass 163/163.
+  The selected v10 run retained 144 passes and 19 historical generation-fixture
+  failures; these are not suppressed. Their old road-count, station-margin,
+  pond-profile/partition and failed-fixture-cleanup assumptions are documented
+  in fitting-settlement-core02-qualification.md. Canonical core03 briefly
+  overlapped type checking: functional proof only, not a CPU performance result.
+- [x] Prepare v12 as the retained v10 bank plus the previous v11 three-tree
+  regrouping. All other fields and 39 asset links stay unchanged; 41 manifest
+  pins hold. The selected actual-geometry/lifecycle test passes, including
+  48 completed resource-to-bank routes and source-canopy road/dock/pond margins.
+  Five selected dock/terrain tests and the historical v11 selected test pass.
+  Skipped unselected fixtures are not passes. Static LOD0 margins do not prove
+  animated canopy clearance, all LODs or fishing gameplay.
+- [x] Full relevant strict type check: 734 roots / 2413 files, zero diagnostics,
+  stable source pins; three changed TypeScript files pass lint/format checks.
+  Isolated build51 produces nine bundles, preserves 145 protected artifacts
+  and changes only fitting diagnostics in its 997 production inputs.
+- [x] Native102/v10 and fresh native104/v10 pass the five original camera/grass
+  gates. Native103/v12 stops before browser creation because the old guard
+  incorrectly required recent HID input despite an awake display. Correct the
+  private guard to actual CoreGraphics active/awake state plus powerd,
+  retaining AC/lid/thermal/gap/duration checks: 43 parser/policy tests and one
+  actual read pass. No synthetic input, wake API or power-setting changes.
+- [ ] Resolve intermittent startup fitting-budget failure. Fresh native105/v12
+  fails the original 90-second startup gate with zero views. Its new receipt
+  establishes a raw worker failure: 139739 operations / 250.500 ms against
+  the unchanged 250 ms limit, maximum elapsed slice 54.300 ms; merged work
+  251.200 ms and final supervision total 252.100 ms. All 20 sampled host states
+  are nominal/AC/awake. Elapsed spans are not exclusive CPU, and this does not
+  identify the underlying scheduler/GC/geometric cost or blame tree placement.
+- [ ] Visually qualify combined v12; no candidate comparison images exist.
+  Preserve native103/105 failures; do not claim v12 art acceptance, promote
+  defaults, raise fitting caps or retry until green. Native104's five reviewed
+  baseline stills retain the dark overhead pond, uniform mud/lawn, plain timber
+  and sparse layering as open art issues. The 60-second actual 2x cinematic
+  remains outstanding; six-second diagnostic yaw clips are not that delivery.
+- [x] Postflight verifies all 997 build inputs, nine outputs and 145 protected
+  artifacts unchanged. Runtime72–75 are stopped, their owned temporary DBs
+  removed, and capture browsers closed. Human localhost3333 stays HTTP200
+  with its original processes, database, character and compiled artifacts.
+
+Evidence: service-layout fitting-settlement-core01/02/03,
+woodland-v12-core01/02, woodland-v11-regression01, woodland-v12-docks01 and
+woodland-combined-types01; inland-pond candidate-manifest-assets-v12-report.json,
+isolated-build51-report.json, woodland-build51-preflight01/02.json,
+woodland-build51-postflight01.json, host-readiness-guard-display01-receipt.json,
+native102–105/process.json, native104/ART_VERDICT.md and
+native105/FAILURE_QUALIFICATION.md. Helpers/receipts stay private; v12 is not a
+new runtime manifest.
+
+Three.js source references for the next living-vegetation slice:
+[ForestGenerator r186](https://github.com/mrdoob/three.js/blob/r186/examples/jsm/generators/ForestGenerator.js)
+for seeded patches/clearings, instancing and near-only detail;
+[instance uniforms](https://threejs.org/examples/webgpu_instance_uniform.html)
+for variation within shared rendering;
+[GPU snow source](https://github.com/mrdoob/three.js/blob/r186/examples/webgpu_compute_particles_snow.html)
+for a shared GPU particle pool; and
+[soft particles](https://github.com/mrdoob/three.js/blob/r186/examples/webgpu_particles_soft.html)
+for depth-intersection treatment. Reuse principles selectively: not the snow
+demo's 100k population, persistent deposition, frame-dependent fall step or
+extra collision render pass. Flowers/leaves still need terrain/resource
+lifetime integration and real-game costing. The
+[procedural terrain example](https://threejs.org/examples/webgpu_tsl_procedural_terrain.html)
+remains an art/TSL reference, not replacement authority for gameplay terrain.
+
+
 ### Pond-bank service ground — 2026-09-22
 
 - [x] Author a bounded three-ribbon service apron from the actual pond bank's

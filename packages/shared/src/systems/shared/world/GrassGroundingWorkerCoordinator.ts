@@ -4,7 +4,10 @@ import {
   type GrassGroundingClientSettled,
   type GrassGroundingWorkerPort,
 } from "../../../utils/workers/GrassGroundingWorkerClient";
-import { GRASS_GROUNDING_WORKER_LIMITS as payloadLimits } from "../../../utils/workers/GrassGroundingWorkerWire";
+import {
+  GRASS_GROUNDING_WORKER_LIMITS as payloadLimits,
+  type GrassGroundingWorkerResponse,
+} from "../../../utils/workers/GrassGroundingWorkerWire";
 import {
   GRASS_BLADE_GROUNDING_JOB_LIMITS as limits,
   GRASS_BLADE_GROUNDING_LIMITS,
@@ -74,8 +77,23 @@ export type GrassGroundingAdmissionFailure = Readonly<{
   mergedWork: Readonly<GrassGroundingConsumedWork>;
 }>;
 
+/** Last failed fitting settlement, not all possible job failures. The merge
+ * excludes the enclosing main-thread advance's still-running supervision tail.
+ * No snapshots are allocated for successful or cancelled result settlements.
+ * Timings are elapsed synchronous spans, not exclusive CPU measurements. */
+export type GrassGroundingFittingFailure = Readonly<{
+  schemaVersion: 1;
+  scope: "settlement_before_main_supervision_tail";
+  generation: number;
+  status: "failed_budget" | "failed_input";
+  reason: GrassGroundingAdmissionFailure["reason"];
+  submittedWork: Readonly<GrassGroundingConsumedWork>;
+  response: AdmissionResponse;
+  mergedWork: Readonly<GrassGroundingConsumedWork>;
+}>;
+
 /** Numerical payload and retained query-index reservations, NOT total JS/GPU
- * heap. Only bounded scalars and the last admission failure are retained. */
+ * heap. Only bounded scalars and the last admission/fitting failures survive. */
 export type GrassGroundingWorkerCoordinatorReceipt = Readonly<{
   cacheOwners: number;
   cacheInputBytes: number;
@@ -94,6 +112,8 @@ export type GrassGroundingWorkerCoordinatorReceipt = Readonly<{
   phase: GrassGroundingWorkerJobPhase | "idle" | "release";
   terminated: boolean;
   lastAdmissionFailure: GrassGroundingAdmissionFailure | null;
+  /** Absent until an actual fitting settlement fails; not a current-job join. */
+  lastFittingFailure?: GrassGroundingFittingFailure;
 }>;
 
 type Owner = {
@@ -268,6 +288,7 @@ export class GrassGroundingWorkerCoordinator {
   private cacheHits = 0;
   private releasedOwners = 0;
   private lastAdmissionFailure: GrassGroundingAdmissionFailure | null = null;
+  private lastFittingFailure: GrassGroundingFittingFailure | null = null;
 
   constructor(
     port: GrassGroundingWorkerPort,
@@ -328,6 +349,9 @@ export class GrassGroundingWorkerCoordinator {
           : (this.active?.phase ?? "idle"),
       terminated: this.stopped || this.client.terminated,
       lastAdmissionFailure: this.lastAdmissionFailure,
+      ...(this.lastFittingFailure
+        ? { lastFittingFailure: this.lastFittingFailure }
+        : {}),
     });
   }
 
@@ -481,6 +505,49 @@ export class GrassGroundingWorkerCoordinator {
       submittedWork: admission.submittedWork,
       response: admission.response,
       mergedWork: Object.freeze({ ...admission.work }),
+    });
+  }
+
+  private captureFittingFailure(
+    context: Context,
+    response: Extract<GrassGroundingWorkerResponse, { type: "result" }>,
+    pending: Pending,
+    settled: GrassGroundingClientSettled,
+    beforeOperations: number,
+    beforeActiveMs: number,
+    beforeMaximumSliceMs: number,
+  ): void {
+    const state = context.state;
+    if (state.status !== "failed_budget" && state.status !== "failed_input")
+      return;
+    this.lastFittingFailure = Object.freeze({
+      schemaVersion: 1,
+      scope: "settlement_before_main_supervision_tail",
+      generation: context.generation,
+      status: state.status,
+      reason: state.status === "failed_budget" ? state.reason : null,
+      submittedWork: Object.freeze({ ...pending.seed }),
+      response: Object.freeze({
+        status: response.state.status,
+        reason:
+          response.state.status === "failed_budget"
+            ? response.state.reason
+            : null,
+        phase: response.lastPhase?.slice(0, 256) ?? null,
+        work: Object.freeze({ ...response.work }),
+        workBeforeMerge: Object.freeze({
+          operations: beforeOperations,
+          activeMs: beforeActiveMs,
+          maximumSliceMs: beforeMaximumSliceMs,
+        }),
+        jobId: settled.jobId,
+        generation: settled.generation,
+        dispatchCpuMs: settled.dispatchCpuMs,
+        chargedDispatchMs: pending.chargedDispatchMs,
+        postMessageCpuMs: settled.postMessageCpuMs,
+        receiveCpuMs: settled.receiveCpuMs,
+      }),
+      mergedWork: Object.freeze({ ...context.fit }),
     });
   }
 
@@ -1086,6 +1153,11 @@ export class GrassGroundingWorkerCoordinator {
       return true;
     }
     ensure(response.type === "result", "Invalid coordinator terminal response");
+    // Scalars only on the success path. Materialize a detached diagnostic only
+    // if this actual result settlement fails; never retain its geometry/result.
+    const beforeOperations = context.fit.operations,
+      beforeActiveMs = context.fit.activeMs,
+      beforeMaximumSliceMs = context.fit.maximumSliceMs;
     this.mergeWork(context.fit, response.work, pending, settled);
     context.lastPhase = response.lastPhase;
     if (context.state.status !== "running") {
@@ -1103,11 +1175,29 @@ export class GrassGroundingWorkerCoordinator {
       state.status === "cancelled"
     ) {
       this.close(context, state);
+      this.captureFittingFailure(
+        context,
+        response,
+        pending,
+        settled,
+        beforeOperations,
+        beforeActiveMs,
+        beforeMaximumSliceMs,
+      );
       return true;
     }
     const failure = budget(context.fit);
     if (failure) {
       this.close(context, failure);
+      this.captureFittingFailure(
+        context,
+        response,
+        pending,
+        settled,
+        beforeOperations,
+        beforeActiveMs,
+        beforeMaximumSliceMs,
+      );
       return true;
     }
     const prepared = context.prepared;
