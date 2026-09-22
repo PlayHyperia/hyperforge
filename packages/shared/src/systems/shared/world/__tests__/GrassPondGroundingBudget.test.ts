@@ -405,6 +405,55 @@ const cases = [
         "Historical native failed prefix, not a completed work total. This CPU replay uses current production owners and the unchanged fitting limits; it does not qualify native startup.",
     },
   },
+  ...(
+    [
+      [
+        "WEST",
+        "gcell_v1_13_17",
+        325,
+        350,
+        173197,
+        252.3,
+        "grounding_operation",
+      ],
+      [
+        "EAST",
+        "gcell_v1_14_17",
+        350,
+        375,
+        180895,
+        250.3,
+        "worker_publication_values",
+      ],
+    ] as const
+  ).map(
+    ([side, key, minX, maxX, failedOperations, failedActiveMs, lastPhase]) => ({
+      name: `native86 startup LOD0 ${side.toLowerCase()} meadow work budget`,
+      test: `grounds the exact native86 ${side.toLowerCase()} failed cell using the admitted v10 terrain policy`,
+      enabled: process.env.ASSETS_DIR?.endsWith(
+        "/inland-pond-integration01-UNQUALIFIED/assets-v10",
+      ),
+      label: `NATIVE86_LOD0_${side}_MEADOW`,
+      // Both exact cells and their current swept halos are inside this owner.
+      // Its resolution is selected by the same production detail policy as the
+      // native82 case, not an unconditional upgraded 128-grid fixture.
+      nodes: [[350, 450]] as const,
+      focus: [335, 431] as const,
+      lod: 0 as const,
+      key,
+      bounds: { minX, maxX, minZ: 425, maxZ: 450 },
+      native86: {
+        source: "native86/process.json",
+        sourceSHA256:
+          "efb2e6310099fb24c3304dab0bd05494dcbe932885eac1bc3b688048e2292221",
+        failedOperations,
+        failedActiveMs,
+        lastPhase,
+        scope:
+          "Historical failed prefix, rounded active time and last phase. This current-source CPU replay uses the actual v10 assets and production retained-detail policy, not a native startup qualification.",
+      },
+    }),
+  ),
 ] as const;
 
 let groundingWorkerSource: string;
@@ -423,7 +472,8 @@ describe.each(cases)("$name", (scenario) => {
         "native52" in scenario ||
         "native72" in scenario ||
         "native74" in scenario ||
-        "native82" in scenario;
+        "native82" in scenario ||
+        "native86" in scenario;
       await DataManager.getInstance().initialize();
       const world = new World();
       const terrain = world.register("terrain", TerrainSystem) as TerrainSystem;
@@ -524,7 +574,7 @@ describe.each(cases)("$name", (scenario) => {
           expect(setup.compactGrassColorGrade).toBe("fine-meadow-green-v1");
         }
         const nativeDetailRegions =
-          "native82" in scenario
+          "native82" in scenario || "native86" in scenario
             ? createCompactPreparationDetailRegions(
                 terrain.getWorldTerrainProfile(),
                 DataManager.getInstance().getAllWorldAreas(),
@@ -562,6 +612,8 @@ describe.each(cases)("$name", (scenario) => {
           ).toEqual({ minX: 377, maxX: 443, minZ: 382, maxZ: 448 });
           expect(nodes.map((node) => node.resolution)).toEqual([128, 64]);
         }
+        if ("native86" in scenario)
+          expect(nodes.map((node) => node.resolution)).toEqual([128]);
         for (const node of nodes) visual["generateChunkSync"](node);
         const admissionReceipts = nodes.map((node) => {
           const geometry = retainedVisual["chunks"].get(node.visualChunkKey!)!
@@ -624,7 +676,7 @@ describe.each(cases)("$name", (scenario) => {
           return {
             centerX: node.centerX,
             centerZ: node.centerZ,
-            ...("native82" in scenario
+            ...("native82" in scenario || "native86" in scenario
               ? {
                   resolution: node.resolution,
                   isRegularGrid: step.value.isRegularGrid,
@@ -786,9 +838,14 @@ describe.each(cases)("$name", (scenario) => {
             ...("native74" in scenario
               ? { native74HistoricalObservation: scenario.native74 }
               : {}),
-            ...("native82" in scenario
+            ...("native86" in scenario
+              ? { native86HistoricalObservation: scenario.native86 }
+              : {}),
+            ...("native82" in scenario || "native86" in scenario
               ? {
-                  native82HistoricalObservation: scenario.native82,
+                  ...("native82" in scenario
+                    ? { native82HistoricalObservation: scenario.native82 }
+                    : {}),
                   terrainDetailPolicy: {
                     baseResolution: STREAMING_TERRAIN_QUADTREE_RESOLUTION,
                     gameplayResolution: terrain["CONFIG"].QUADTREE_RESOLUTION,

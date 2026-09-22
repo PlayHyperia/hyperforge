@@ -2516,6 +2516,74 @@ No water shader or material setting was changed on this evidence.
 Runtime55/56 and their disposable databases are removed. All owned native
 browsers are closed; the protected human playable database is unchanged.
 
+### Pond surface, service clearing and woodland comparison — 2026-09-21
+
+- [x] Calm compact-pond surface detail: normal strength 1.5→0.65 and detail
+  clock 1→0.55, using the existing per-object selector and five normal samples.
+  Reflection distortion 0.015→0.006 is also scoped to the pond, but reflections
+  are disabled in this capture profile: do not credit that inactive change.
+  Ordinary lakes, ocean, geometry, displacement, depth alpha and fog are
+  unchanged. Native review finds a modest reduction in busy water streaks,
+  not finished water lighting, motion or sustained-performance acceptance.
+- [x] Extend the shared service clearing to the exact chest and clerk anchors.
+  Actual chest bounds, standing disks, collision routes, four pavilion footing
+  leases and swept-wind near/LOD grass checks pass for the selected layouts.
+  This outpost has no physical floor; this is not a floor-clipping repair.
+  The bank arrival still looks overgrown. Functional clearance is not approval
+  of the entry's ground composition.
+- [x] Compare the private v11 three-tree regrouping against v9 on the same
+  build43. Both native90/v11 and native91/v9 complete the original startup
+  and all five camera gates in headful Chrome/Metal WebGPU. The dock-facing
+  treeline is more layered and asymmetric; the broad clearing remains open.
+  Keep v11 as a modest private composition candidate, not a playable-default
+  promotion. All asset counts/models are unchanged, which does not establish
+  equal visibility, overdraw, shadow cost or frame time.
+- [x] Exercise all 48 resource routes with bounded repeated partial-BFS
+  replanning, twelve cardinal approaches, depletion replay and owner reload
+  against the selected v11 manifest. These are CPU integration checks, not
+  one-call pathfinding or live agent navigation proof. Three coordinate-derived
+  resource IDs change; production promotion still requires persistence review.
+- [x] Preserve native88 as FAILED: the new woodland view passed its grass gate
+  but a pond-only capture assertion wrongly required a visible dock. Repair
+  only that view's subject assertion using actual submitted trees and current
+  resource ownership. Native90/91 are corrected comparisons, not relabeling88.
+- [x] Reject the second grass optimization (worker delegation adapter).
+  Four cached mixed-cell samples regress from 96.59 to 102.85 ms median;
+  a concurrent road-source change also confounds that comparison. Exact
+  native86-cell samples move in opposite directions. Restore the original
+  worker and retain both timings and patch; no speedup or startup fix claimed.
+- [ ] Improve water surface-lighting composition: the reflection switch also
+  suppresses direct solar highlights and the final tint flattens the result.
+  Use the [official Three r186 water source](https://github.com/mrdoob/three.js/blob/r186/examples/jsm/objects/WaterMesh.js)
+  and [dielectric optics reference](https://www.pbr-book.org/4ed/Reflection_Models/Specular_Reflection_and_Transmission)
+  for a bounded no-new-pass correction, preserving depth/contact behavior.
+- [ ] Design readable bank-entry ground and a woodland-floor transition.
+  Tall uniform grass and coarse leaf-card shading remain obvious weaknesses.
+  Hidden branch intersections, animated shimmer and a moving-camera review
+  remain unqualified; do not label these static views finished world art.
+- [ ] Resolve historical grass startup budget failures and the steep headland
+  depth boundary; v10 gentler-bank visual approval remains blocked. No higher
+  work/time caps, reduced-quality bypass or repeated-until-green acceptance.
+
+Retained final-source verification: 73 passing tests across canonical,
+selected v9/v10/v11 and exact failed-cell configurations; explicit opt-in skips
+remain recorded. Shared/current regression no-emit typing checks 724 roots and
+2,401 source files with zero diagnostics. Scoped formatting and lint pass.
+This is not a whole-repository type/test acceptance. Isolated build43 has nine
+bundles and 996 source-input pins; all 145 protected compiled files remain
+unchanged. Native90/91 each supply five 1280×720 native views (DPR1, MSAA4,
+held daylight, live wind); neither is a 2× cinematic, stream or FPS test.
+Both owned browsers, runtime59/61 and their temporary databases are closed.
+Human localhost:3333 and its database remain unchanged.
+
+Evidence: inland-pond-integration01-UNQUALIFIED/native88, native90, native91,
+build43, assets-v11 and grove-v11-*; service-layout evidence
+pond-service-canonical03, pond-surface-material04, pond-service-selected-v9-03,
+pond-service-selected-v10-03, pond-service-retained-grass01,
+grove-v11-selected03, pond-service-types02 and worker-delegation-rejected01.
+The initial graph-wrapper/type/fixture test failures and all-skipped selected02
+run remain recorded; only the corrected final-source passes count above.
+
 ### Pond timber and gentler-bank study — 2026-09-21
 
 - [x] Refine compact dock timber with asymmetric growth lines, bounded

@@ -1,5 +1,5 @@
 /**
- * WaterSystem - AAA Lake Water Shader (WebGPU TSL)
+ * WaterSystem - Lake Water Shader (WebGPU TSL)
  *
  * Features: Gerstner waves (5-wave), Phong specular, cosine-gradient depth
  * colour, flow-mapped 4-scroll detail normals (two-phase crossfade via
@@ -98,6 +98,12 @@ const WATER = {
 
   // Normal noise strength (xz multiplier for surface normal)
   NORMAL_STRENGTH: 1.5,
+
+  // Sheltered freshwater detail, selected per draw by the existing pond owner.
+  // Retain the same normal samples, geometry, depth optics and wave bounds.
+  QUIET_NORMAL_STRENGTH: 0.65,
+  QUIET_SURFACE_SPEED: 0.55,
+  QUIET_REFLECTION_DISTORTION: 0.006,
 
   // Foam
   FOAM_SHORE_DISTANCE: 2.5,
@@ -1074,11 +1080,27 @@ export class WaterSystem {
     const fTex = this.flowTex!;
     const foamTex = this.foamTex!;
 
+    const surfaceTime = uTime
+      .mul(mix(float(1), float(WATER.QUIET_SURFACE_SPEED), quietPond))
+      .toVar("lakeSurfaceDetailTime");
+    const normalStrength = mix(
+      float(WATER.NORMAL_STRENGTH),
+      float(WATER.QUIET_NORMAL_STRENGTH),
+      quietPond,
+    ).toVar("lakeSurfaceNormalStrength");
+    const reflectionDistortion = mix(
+      float(0.015),
+      float(WATER.QUIET_REFLECTION_DISTORTION),
+      quietPond,
+    ).toVar("lakeSurfaceReflectionDistortion");
+
     const reflNode = this.reflection!;
     const worldUV0 = vec2(positionWorld.x, positionWorld.z);
     const normalOffset = texture(nTex, mul(worldUV0, float(0.02))).xy;
     const normalDistortion = sub(mul(normalOffset, float(2)), float(1));
-    reflNode.uvNode = reflNode.uvNode!.add(mul(normalDistortion, float(0.015)));
+    reflNode.uvNode = reflNode.uvNode!.add(
+      mul(normalDistortion, reflectionDistortion),
+    );
     const reflectionNode = reflNode;
 
     // Wind affects amplitude only — phase speed is purely from dispersion relation
@@ -1217,7 +1239,10 @@ export class WaterSystem {
         sub(mul(flowSample.rg, float(2)), float(1)),
         float(WATER.FLOW_STRENGTH),
       );
-      const flowTime = add(mul(uTime, float(WATER.FLOW_SPEED)), flowSample.a);
+      const flowTime = add(
+        mul(surfaceTime, float(WATER.FLOW_SPEED)),
+        flowSample.a,
+      );
 
       const progressA = fract(flowTime);
       const progressB = fract(add(flowTime, float(0.5)));
@@ -1258,20 +1283,26 @@ export class WaterSystem {
       // Phase A: scroll layers 0 + 2 (large + ultra-fine scale)
       const nUV0 = add(
         div(baseA, float(103)),
-        vec2(div(uTime, float(17)), div(uTime, float(29))),
+        vec2(div(surfaceTime, float(17)), div(surfaceTime, float(29))),
       );
       const nUV2 = add(
         vec2(div(baseA.x, float(8907)), div(baseA.y, float(9803))),
-        vec2(div(uTime, float(101)), div(uTime, float(97))),
+        vec2(div(surfaceTime, float(101)), div(surfaceTime, float(97))),
       );
       // Phase B: scroll layers 1 + 3 (large + medium-fine scale)
       const nUV1 = add(
         div(baseB, float(107)),
-        vec2(div(uTime, float(19)), mul(div(uTime, float(31)), float(-1))),
+        vec2(
+          div(surfaceTime, float(19)),
+          mul(div(surfaceTime, float(31)), float(-1)),
+        ),
       );
       const nUV3 = add(
         vec2(div(baseB.x, float(1091)), div(baseB.y, float(1027))),
-        vec2(mul(div(uTime, float(109)), float(-1)), div(uTime, float(113))),
+        vec2(
+          mul(div(surfaceTime, float(109)), float(-1)),
+          div(surfaceTime, float(113)),
+        ),
       );
 
       const noiseSum = mul(
@@ -1284,9 +1315,9 @@ export class WaterSystem {
       const noise = sub(mul(noiseSum, float(0.5)), float(1));
       const surfaceNormal = normalize(
         vec3(
-          mul(noise.x, float(WATER.NORMAL_STRENGTH)),
+          mul(noise.x, normalStrength),
           noise.z,
-          mul(noise.y, float(WATER.NORMAL_STRENGTH)),
+          mul(noise.y, normalStrength),
         ),
       );
 

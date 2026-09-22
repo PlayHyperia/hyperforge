@@ -692,10 +692,14 @@ export function createCompactIslandPaths(
           width: 1.1,
           blendWidth: 0.85,
           points: [
-            inset(chest.position, 0.25),
+            // Keep the full-width end caps on the bound service anchors. An
+            // inset cap leaves the clerk outside the grass exclusion core;
+            // the soft activity shoulder cannot clear a standing footprint.
+            // These are worn capsules, not a rectangular pavilion floor.
+            chest.position,
             approach(0.6, -0.35),
             approach(-0.25, 0.35),
-            inset(clerks[0].position, 0.3),
+            clerks[0].position,
           ],
         },
         {

@@ -1,4 +1,7 @@
 import { afterEach, describe, expect, it } from "vitest";
+import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
+import { basename, join, resolve } from "node:path";
 import { World } from "../../../../core/World";
 import { DataManager } from "../../../../data/DataManager";
 import { ResourceEntity } from "../../../../entities/world/ResourceEntity";
@@ -7,14 +10,36 @@ import type {
   TerrainTile,
   TerrainResourceSpawnBatch,
 } from "../../../../types/world/terrain";
-import type { CompactResourceGrovesManifest } from "../../../../types/world/world-types";
+import type {
+  CompactResourceGrovesManifest,
+  WorldConfigManifest,
+} from "../../../../types/world/world-types";
 import { EntityManager } from "../../entities/EntityManager";
 import { ResourceSystem } from "../../entities/ResourceSystem";
 import { TerrainSystem } from "../TerrainSystem";
 import { RoadNetworkSystem } from "../RoadNetworkSystem";
 import { createCompactResourceGroveNodes } from "../CompactResourceGroves";
-import type { TreeGenerationSource } from "../BiomeResourceGenerator";
-import { isPositionInsideDuelArenaZone } from "../../../../data/duel-manifest";
+import {
+  validateTreeAnchor,
+  type TreeGenerationSource,
+} from "../BiomeResourceGenerator";
+import {
+  getDuelArenaConfig,
+  isPositionInsideDuelArenaZone,
+} from "../../../../data/duel-manifest";
+import { ALL_WORLD_AREAS } from "../../../../data/world-areas";
+import {
+  WORLD_IDENTITY_MANIFESTS,
+  WorldManifestIdentityBuilder,
+} from "../../../../data/WorldContentIdentity";
+import { WorldContentAdmission } from "../../../../runtime/WorldContentAdmission";
+import {
+  COMPACT_PATH_BLEND_WIDTH,
+  compactPathSegmentDistance,
+  createCompactIslandPaths,
+} from "../CompactIslandPaths";
+import { getCompactPondDockSupportBounds } from "../DockDefinition";
+import { modelBounds } from "./fixtures/StaticGlbBounds";
 import { CollisionFlag } from "../../movement/CollisionFlags";
 import layouts from "./fixtures/CompactResourceGroves.layouts.json";
 import { BFSPathfinder } from "../../movement/BFSPathfinder";
@@ -175,6 +200,388 @@ type ResourceInternals = {
 const worlds: World[] = [];
 afterEach(() => {
   for (const world of worlds.splice(0)) world.destroy();
+});
+
+// Explicit private overlay admission; historical layout tests remain unchanged.
+const GROVE_MOVES = [
+  {
+    before: "tree_459_383",
+    after: "tree_453_392",
+    x: 452.5,
+    z: 391.5,
+    model: "general_03.glb",
+  },
+  {
+    before: "tree_471_406",
+    after: "tree_467_401",
+    x: 466.5,
+    z: 400.5,
+    model: "general_05.glb",
+  },
+  {
+    before: "tree_460_365",
+    after: "tree_464_385",
+    x: 463.5,
+    z: 384.5,
+    model: "general_01.glb",
+  },
+] as const;
+const compositionStage = process.env.HYPERIA_GROVE_COMPOSITION_STAGE;
+function compositionSelection(expected: "assets-v9" | "assets-v11") {
+  const directory = process.env.ASSETS_DIR;
+  if (!directory) throw new Error("Selected grove assets are required");
+  expect(basename(directory)).toBe(expected);
+  const sourcePath = join(directory, "manifests/world-config.json");
+  const bytes = readFileSync(sourcePath);
+  const config = JSON.parse(bytes.toString()) as WorldConfigManifest;
+  expect(DataManager.getWorldConfig()!.compactResourceGroves).toEqual(
+    config.compactResourceGroves,
+  );
+  return {
+    directory,
+    sourcePath,
+    sourceSha256: createHash("sha256").update(bytes).digest("hex"),
+    config,
+  };
+}
+
+describe("selected eastern woodland composition", () => {
+  it.skipIf(compositionStage !== "sample")(
+    "samples three proposed grove anchors through actual v9 terrain admission",
+    async () => {
+      const selected = compositionSelection("assets-v9");
+      const f = await fixture();
+      const source = f.t.createTreeGenerationSource(5, 4);
+      const anchors = selected.config.compactResourceGroves!.regions.flatMap(
+        (r) => r.anchors,
+      );
+      const positions = GROVE_MOVES.map((move) => {
+        const original = anchors.find((a) => a.id === move.before)!;
+        expect(original.subType).toBe("general");
+        expect(original.scale).toBe(1);
+        const admitted = validateTreeAnchor(
+          source,
+          move.x,
+          move.z,
+          isPositionInsideDuelArenaZone,
+        );
+        expect(admitted.rejection, move.after).toBeNull();
+        expect(admitted.position.y).toBe(
+          f.terrain.getResourceGroundHeight(move.x, move.z),
+        );
+        return {
+          ...move,
+          previousPosition: original.position,
+          position: admitted.position,
+          rejection: admitted.rejection,
+        };
+      });
+      console.info(
+        "grove-composition-authoritative-heights",
+        JSON.stringify({
+          sourcePath: selected.sourcePath,
+          sourceSha256: selected.sourceSha256,
+          positions,
+        }),
+      );
+    },
+  );
+
+  it.skipIf(compositionStage !== "qualify")(
+    "qualifies selected v11 three-ID delta, exact models, collision routes, replay and owner lifecycle",
+    async () => {
+      const selected = compositionSelection("assets-v11");
+      const baseline = resolve(selected.directory, "../assets-v9");
+      const baseConfig = JSON.parse(
+        readFileSync(join(baseline, "manifests/world-config.json"), "utf8"),
+      ) as WorldConfigManifest;
+      const previous = baseConfig.compactResourceGroves!.regions.flatMap(
+        (r) => r.anchors,
+      );
+      const current = selected.config.compactResourceGroves!.regions.flatMap(
+        (r) => r.anchors,
+      );
+      expect(current).toHaveLength(35);
+      const expectedConfig = structuredClone(baseConfig);
+      for (const move of GROVE_MOVES) {
+        const destination = current.find((a) => a.id === move.after)!;
+        expect(destination.position.x).toBe(move.x);
+        expect(destination.position.z).toBe(move.z);
+        const old = expectedConfig
+          .compactResourceGroves!.regions.flatMap((r) => r.anchors)
+          .find((a) => a.id === move.before)!;
+        Object.assign(old, { id: move.after, position: destination.position });
+      }
+      expect(selected.config).toEqual(expectedConfig);
+      const identities: string[] = [];
+      for (const directory of [baseline, selected.directory]) {
+        const builder = new WorldManifestIdentityBuilder();
+        for (const name of WORLD_IDENTITY_MANIFESTS)
+          builder.record(
+            name,
+            JSON.parse(
+              readFileSync(join(directory, "manifests", name), "utf8"),
+            ),
+          );
+        identities.push(
+          await builder.build(DataManager.getWorldTerrainProfile()),
+        );
+      }
+      expect(identities[0]).not.toBe(identities[1]);
+      expect(DataManager.getWorldContentIdentity()).toBe(identities[1]);
+      const admission = new WorldContentAdmission(() => identities[1]);
+      admission.beginConnection();
+      expect(admission.admitSnapshot(identities[0])).toBeNull();
+      expect(admission.rejected).toBe(true);
+      admission.beginConnection();
+      expect(admission.admitSnapshot(identities[1])).not.toBeNull();
+
+      const f = await fixture();
+      await f.terrain.start();
+      await f.settle();
+      await f.r.initializeWorldAreaResources();
+      await f.settle();
+      const rows = () =>
+        f.resources
+          .getAllResources()
+          .filter((r) => r.type === "tree")
+          .sort((a, b) => a.id.localeCompare(b.id));
+      const expectedRows = [
+        ...EXISTING,
+        ...current.map((a) => ({
+          id: a.id,
+          subType: a.subType,
+          ...a.position,
+          scale: a.scale,
+        })),
+      ];
+      expect(rows().map((r) => r.id)).toEqual(
+        expectedRows.map((r) => r.id).sort(),
+      );
+      expect(rows()).toHaveLength(48);
+      const beforeIds = new Set([
+        ...EXISTING.map((r) => r.id),
+        ...previous.map((a) => a.id),
+      ]);
+      const afterIds = new Set(rows().map((r) => r.id));
+      expect([...beforeIds].filter((id) => !afterIds.has(id)).sort()).toEqual(
+        GROVE_MOVES.map((m) => m.before).sort(),
+      );
+      expect([...afterIds].filter((id) => !beforeIds.has(id)).sort()).toEqual(
+        GROVE_MOVES.map((m) => m.after).sort(),
+      );
+      for (const expected of expectedRows) {
+        const entity = f.manager.getEntity(expected.id);
+        expect(entity).toBeInstanceOf(ResourceEntity);
+        if (!(entity instanceof ResourceEntity))
+          throw new Error("Actual grove actor missing");
+        expect(entity.config.resourceId).toBe(`tree_${expected.subType}`);
+        expect(entity.position).toMatchObject({
+          x: expected.x,
+          y: expected.y,
+          z: expected.z,
+        });
+        expect(entity.config.modelScale).toBe(expected.scale);
+      }
+      const paths = createCompactIslandPaths(
+        DataManager.getWorldTerrainProfile(),
+        ALL_WORLD_AREAS,
+        getDuelArenaConfig(),
+        f.terrain.getResourceGroundHeight.bind(f.terrain),
+        selected.config,
+      );
+      const docks = selected.config.compactPondDocks!.docks.map(
+        getCompactPondDockSupportBounds,
+      );
+      const proof = GROVE_MOVES.map((move) => {
+        const entity = f.manager.getEntity(move.after) as ResourceEntity;
+        const hash = (
+          entity as unknown as { hashString(s: string): number }
+        ).hashString.bind(entity);
+        const variants = entity.config.modelVariants!;
+        const model = variants[(hash(move.after) >>> 0) % variants.length];
+        expect(model).toContain(move.model);
+        expect(variants[(hash(move.before) >>> 0) % variants.length]).toBe(
+          model,
+        );
+        const bounds = modelBounds(model, entity.config.modelScale);
+        const source = f.t.createTreeGenerationSource(5, 4);
+        const accepted = validateTreeAnchor(
+          source,
+          move.x,
+          move.z,
+          isPositionInsideDuelArenaZone,
+        );
+        expect(accepted.rejection, move.after).toBeNull();
+        expect(accepted.position).toEqual(
+          current.find((a) => a.id === move.after)!.position,
+        );
+        const roadMargin = Math.min(
+          ...paths.flatMap((path) =>
+            path.path
+              .slice(1)
+              .map(
+                (end, i) =>
+                  compactPathSegmentDistance(move, path.path[i], end) -
+                  path.width / 2 -
+                  (path.blendWidth ?? COMPACT_PATH_BLEND_WIDTH) -
+                  bounds.radius,
+              ),
+          ),
+        );
+        const dockMargin = Math.min(
+          ...docks.map(
+            (b) =>
+              Math.hypot(
+                Math.max(b.minX - move.x, 0, move.x - b.maxX),
+                Math.max(b.minZ - move.z, 0, move.z - b.maxZ),
+              ) - bounds.radius,
+          ),
+        );
+        expect(roadMargin, move.after).toBeGreaterThan(0);
+        expect(dockMargin, move.after).toBeGreaterThan(0);
+        return {
+          id: move.after,
+          position: accepted.position,
+          model,
+          scale: entity.config.modelScale,
+          triangles: bounds.triangles,
+          primitives: bounds.primitives,
+          radius: bounds.radius,
+          roadMargin,
+          dockMargin,
+        };
+      });
+      expect(proof.reduce((sum, r) => sum + r.triangles, 0)).toBe(16101);
+      const walkable = (p: TileCoord, from?: TileCoord) =>
+        p.x >= 250 &&
+        p.x < 550 &&
+        p.z >= 250 &&
+        p.z < 550 &&
+        !isPositionInsideDuelArenaZone(p.x + 0.5, p.z + 0.5) &&
+        f.world.collision.isWalkable(p.x, p.z) &&
+        (!from || !f.world.collision.isBlocked(from.x, from.z, p.x, p.z));
+      let completedRoutes = 0;
+      for (const row of rows()) {
+        const anchor = worldToTile(row.position.x, row.position.z);
+        const adjacent = getCardinalAdjacentTiles(anchor, 1, 1).filter((p) =>
+          walkable(p),
+        );
+        if (GROVE_MOVES.some((m) => m.after === row.id)) {
+          expect(
+            f.world.collision.hasFlags(
+              anchor.x,
+              anchor.z,
+              CollisionFlag.BLOCKED,
+            ),
+          ).toBe(true);
+          expect(adjacent, row.id).toHaveLength(4);
+        }
+        expect(adjacent.length, row.id).toBeGreaterThan(0);
+        const target = adjacent.sort(
+          (a, b) =>
+            Math.abs(a.x - 348) +
+            Math.abs(a.z - 322) -
+            Math.abs(b.x - 348) -
+            Math.abs(b.z - 322),
+        )[0];
+        const bfs = new BFSPathfinder(),
+          seen = new Set<string>();
+        let cursor = { x: 348, z: 322 };
+        for (
+          let i = 0;
+          i < 12 && (cursor.x !== target.x || cursor.z !== target.z);
+          i++
+        ) {
+          const segment = bfs.findPath(cursor, target, walkable);
+          expect(segment.length, row.id).toBeGreaterThan(0);
+          for (const next of segment) {
+            expect(walkable(next, cursor), row.id).toBe(true);
+            cursor = next;
+          }
+          const key = `${cursor.x},${cursor.z}`;
+          expect(seen.has(key)).toBe(false);
+          seen.add(key);
+        }
+        expect(cursor, row.id).toEqual(target);
+        completedRoutes++;
+      }
+      const tile = f.terrain.getTiles().get("5_4")!;
+      expect(tile).toBeDefined();
+      const batch = f.batches.find(
+        (b) => b.owner?.tileX === 5 && b.owner.tileZ === 4,
+      )!;
+      expect(batch).toBeDefined();
+      const moved = GROVE_MOVES.map((move) => {
+        const entity = f.manager.getEntity(move.after) as ResourceEntity;
+        const resource = f.r.resources.get(move.after)!;
+        resource.isAvailable = false;
+        resource.lastDepleted = 123456;
+        f.r.respawnAtTick.set(move.after, 4321);
+        entity.deplete();
+        return { id: move.after, entity, resource };
+      });
+      await Promise.all([
+        f.r.registerTerrainResources(batch),
+        f.r.registerTerrainResources(batch),
+      ]);
+      await f.settle();
+      for (const row of moved) {
+        expect(f.manager.getEntity(row.id)).toBe(row.entity);
+        expect(f.r.resources.get(row.id)).toBe(row.resource);
+        expect(row.resource.isAvailable).toBe(false);
+        expect(row.resource.lastDepleted).toBe(123456);
+        expect(row.entity.config.depleted).toBe(true);
+        expect(f.r.respawnAtTick.get(row.id)).toBe(4321);
+      }
+      const neighbor = f.manager.getEntity("tree_443_383"),
+        authored = f.manager.getEntity("tree_373_313");
+      f.t.unloadTile(tile);
+      await f.settle();
+      for (const row of moved) {
+        expect(f.manager.getEntity(row.id)).toBeUndefined();
+        expect(row.entity.destroyed).toBe(true);
+        expect(row.entity.node.parent).toBeNull();
+        expect(f.world.entities["hot"].has(row.entity)).toBe(false);
+      }
+      expect(f.manager.getEntity("tree_443_383")).toBe(neighbor);
+      expect(f.manager.getEntity("tree_373_313")).toBe(authored);
+      f.t.generateTile(5, 4, true);
+      await f.settle();
+      for (const row of moved) {
+        const entity = f.manager.getEntity(row.id);
+        expect(entity).toBeInstanceOf(ResourceEntity);
+        expect(entity).not.toBe(row.entity);
+        expect(entity!.position).toMatchObject(
+          current.find((a) => a.id === row.id)!.position,
+        );
+      }
+      expect(rows().map((r) => r.id)).toEqual(
+        expectedRows.map((r) => r.id).sort(),
+      );
+      console.info(
+        "grove-composition-selected-proof",
+        JSON.stringify({
+          sourcePath: selected.sourcePath,
+          sourceSha256: selected.sourceSha256,
+          baselineIdentity: identities[0],
+          selectedIdentity: identities[1],
+          treeCount: rows().length,
+          curatedCount: current.length,
+          removedIds: GROVE_MOVES.map((m) => m.before),
+          addedIds: GROVE_MOVES.map((m) => m.after),
+          owner: { x: 5, z: 4 },
+          proof,
+          completedRoutes,
+          cardinalApproaches: 12,
+          replayPreserved: true,
+          ownerRetiredAndReloaded: true,
+          scope:
+            "Real server-side resources/collisions and source GLB bounds; no native GPU, wind/branch overlap, visual or performance acceptance.",
+        }),
+      );
+    },
+  );
 });
 async function fixture() {
   const world = new CpuServerWorld();
@@ -465,7 +872,7 @@ describe("actual compact functional grove tile pipeline", () => {
       expect(f.manager.getEntity(id)).not.toBe(old[i]);
       expect(old[i]!.destroyed).toBe(true);
       expect(old[i]!.node.parent).toBeNull();
-      expect(f.world.entities.hot.has(old[i]!)).toBe(false);
+      expect(f.world.entities["hot"].has(old[i]!)).toBe(false);
     });
     expect(
       f.resources.getAllResources().filter((r) => r.type === "tree"),

@@ -4,8 +4,13 @@ import type { World } from "../../../../types";
 import THREE from "../../../../extras/three/three";
 import { WaterSystem, type WaterUniforms } from "../WaterSystem";
 import { World as RealWorld } from "../../../../core/World";
-import { NodeFrame } from "three/webgpu";
-import { NodeUpdateType } from "three/tsl";
+import { NodeFrame, type Node } from "three/webgpu";
+import {
+  NodeUpdateType,
+  positionWorld,
+  cameraPosition,
+  output,
+} from "three/tsl";
 
 type WaterMaterialHarness = {
   normalTex?: THREE.Texture;
@@ -57,6 +62,113 @@ function createLakePlaneHarness() {
 }
 
 describe("WaterSystem material graph", () => {
+  it("calms only owned pond surface detail without new normal samples or changed depth and wave graphs", () => {
+    const { water, frame, addLake } = createLakePlaneHarness();
+    try {
+      // Expand the actual lazy TSL functions using Three's builder. This checks
+      // graph ownership and sampling cost, not rendered quality or GPU time.
+      const builder: unknown = Reflect.construct(THREE.NodeBuilder, [
+        null,
+        null,
+      ]);
+      if (!(builder instanceof THREE.NodeBuilder))
+        throw new Error("Expected Three builder");
+      const graph = (root: Node) => {
+        const nodes = new Set<Node>();
+        const visit = (node: Node) => {
+          if (nodes.has(node)) return;
+          nodes.add(node);
+          if (
+            node === positionWorld ||
+            node === cameraPosition ||
+            node === output
+          )
+            return;
+          const expand: unknown = Reflect.get(node, "getOutputNode");
+          if (typeof expand === "function") {
+            const expanded: unknown = Reflect.apply(expand, node, [builder]);
+            if (!(expanded instanceof THREE.Node))
+              throw new Error("Expected actual TSL output");
+            visit(expanded);
+          } else for (const child of node.getChildren()) visit(child);
+        };
+        visit(root);
+        return nodes;
+      };
+      const material = water.getMaterial("lake")!;
+      const nodes = graph(material.outputNode!);
+      const quiet = water.getQuietPondUniform()!;
+      const child = (node: Node, field: string): Node => {
+        const value: unknown = Reflect.get(node, field);
+        if (!(value instanceof THREE.Node)) throw new Error(`Missing ${field}`);
+        return value;
+      };
+      const named = (name: string) => {
+        const matches = [...nodes].filter(
+          (node) => Reflect.get(node, "name") === name,
+        );
+        expect(matches).toHaveLength(1);
+        return matches[0];
+      };
+      // r186 wraps operations authored outside Fn in anonymous variable
+      // intents. Follow those real wrappers; do not substitute shader math.
+      const operation = (node: Node): Node =>
+        node.type === "VarNode" && Reflect.get(node, "name") === null
+          ? operation(child(node, "node"))
+          : node;
+      const expectMix = (input: Node, legacy: number, pond: number) => {
+        const node = operation(input);
+        expect(Reflect.get(node, "method")).toBe("mix");
+        expect(
+          Reflect.get(operation(child(node, "aNode")), "value"),
+        ).toBeCloseTo(legacy, 7);
+        expect(
+          Reflect.get(operation(child(node, "bNode")), "value"),
+        ).toBeCloseTo(pond, 7);
+        expect(operation(child(node, "cNode"))).toBe(quiet);
+      };
+      expectMix(child(named("lakeSurfaceNormalStrength"), "node"), 1.5, 0.65);
+      expectMix(
+        child(named("lakeSurfaceReflectionDistortion"), "node"),
+        0.015,
+        0.006,
+      );
+      const clock = operation(child(named("lakeSurfaceDetailTime"), "node"));
+      expect(Reflect.get(clock, "op")).toBe("*");
+      expect(operation(child(clock, "aNode"))).toBe(water["uniforms"]!.time);
+      expectMix(child(clock, "bNode"), 1, 0.55);
+      expect(
+        [...nodes].filter(
+          (node) =>
+            Reflect.get(node, "isTextureNode") === true &&
+            Reflect.get(node, "value") === water["normalTex"],
+        ),
+      ).toHaveLength(5);
+      const opacity: unknown = material.opacityNode;
+      const position: unknown = material.positionNode;
+      if (!(opacity instanceof THREE.Node) || !(position instanceof THREE.Node))
+        throw new Error("Expected actual lake opacity and displacement nodes");
+      expect(graph(opacity).has(quiet)).toBe(false);
+      expect(graph(position).has(quiet)).toBe(false);
+
+      const pond = addLake(27.8),
+        lake = addLake(16);
+      pond.userData.compactQuietPond = true;
+      for (const [object, expected] of [
+        [pond, 1],
+        [lake, 0],
+        [pond, 1],
+        [lake, 0],
+      ] as const) {
+        frame.object = object;
+        frame.updateNode(quiet);
+        expect(quiet.value).toBe(expected);
+      }
+    } finally {
+      water.destroy();
+    }
+  });
+
   it("does not consume native render admission for non-lake precompile objects", () => {
     const { water, reflection, frame, scene } = createLakePlaneHarness();
     const unregistered = new THREE.Mesh(

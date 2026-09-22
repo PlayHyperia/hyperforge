@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
+import { BANK_PAVILION_POSTS } from "@hyperforge/procgen/building";
 import { World } from "../../../../core/World";
 import { DataManager } from "../../../../data/DataManager";
 import { stationDataProvider } from "../../../../data/StationDataProvider";
@@ -49,11 +50,32 @@ import {
   COMPACT_SERVICE_COURT,
   validateCompactServiceCourts,
   validateCompactServiceCourtBindings,
+  createCompactServiceCourtGrassExclusions,
+  groundCompactServiceCourt,
 } from "../CompactServiceCourt";
 import { TownSystem } from "../TownSystem";
 import { modelBounds } from "./fixtures/StaticGlbBounds";
 import { getExternalResource } from "../../../../utils/ExternalAssetUtils";
 import { generateCenteredTrees } from "../BiomeResourceGenerator";
+import { BFSPathfinder } from "../../movement/BFSPathfinder";
+import {
+  groundGrassBlades,
+  type GrassBladeGroundingRequest,
+} from "../GrassBladeGrounding";
+import { getGrassBladeLayout } from "../GrassBladeLayout";
+import {
+  createClumpGeometry,
+  FINE_MEADOW_APPEARANCE,
+  GRASS_CONFIG,
+} from "../GrassVisualManager";
+import {
+  projectGrassAnchors,
+  type GrassAnchorData,
+} from "../GrassTerrainProjection";
+import { RetainedTerrainSurface } from "../TerrainGridSurface";
+import { gridGeometry } from "./terrain-grid.fixture";
+import { BankEntity } from "../../../../entities/world/BankEntity";
+import { EntityType, InteractionType } from "../../../../types/entities";
 
 // Independently declared surface recipe; centerlines and outer support remain
 // those of the previously captured fourteen-path world, not a wider network.
@@ -113,15 +135,22 @@ type RoadInternals = {
   ): { worldSize: number; centerX: number; centerZ: number };
 };
 
+class PondBankServiceWorld extends World {
+  override get isServer(): boolean {
+    return true;
+  }
+}
+
 async function withRoads(
   run: (
     roads: RoadNetworkSystem,
     terrain: TerrainSystem,
+    world: World,
   ) => void | Promise<void>,
   beforeStart?: (roads: RoadNetworkSystem, terrain: TerrainSystem) => void,
+  world = new World(),
 ) {
-  const world = new World(),
-    terrain = world.register("terrain", TerrainSystem) as TerrainSystem;
+  const terrain = world.register("terrain", TerrainSystem) as TerrainSystem;
   const roads = world.register("roads", RoadNetworkSystem) as RoadNetworkSystem;
   try {
     await terrain.init();
@@ -131,9 +160,431 @@ async function withRoads(
     await roads.init();
     beforeStart?.(roads, terrain);
     await roads.start();
-    await run(roads, terrain);
+    await run(roads, terrain, world);
   } finally {
     world.destroy();
+  }
+}
+
+function expectPondBankServiceField(
+  roads: RoadNetworkSystem,
+  court: CompactServiceCourtPlacement,
+) {
+  const area = ALL_WORLD_AREAS.haven_pond;
+  const chest = area.stations!.find((row) => row.id === court.stationIds[0])!;
+  const clerk = area.npcs.find((row) => row.id === court.npcIds[0])!;
+  const service = roads
+    .getRoads()
+    .find((row) => row.id === `compact-clearing-${court.layoutId}-service`)!;
+  const arrival = roads
+    .getRoads()
+    .find((row) => row.id === `compact-path-${court.layoutId}-arrival`)!;
+  expect(service.path[0]).toMatchObject({
+    x: chest.position.x,
+    z: chest.position.z,
+  });
+  expect(service.path.at(-1)).toMatchObject({
+    x: clerk.position.x,
+    z: clerk.position.z,
+  });
+  expect(service.width).toBe(1.1);
+  expect(service.blendWidth).toBe(0.85);
+  const station = stationDataProvider.getStationData("bank")!;
+  if (!station.model) throw new Error("Actual bank chest model required");
+  const chestBounds = modelBounds(station.model, station.modelScale);
+  chestBounds.box.translate(
+    new THREE.Vector3(chest.position.x, 0, chest.position.z),
+  );
+  const standingRadius = 0.35;
+  // A court-facing adjacent tile, not just a point outside the visual mesh
+  // which could still lie inside the bank's occupied gameplay tile. The real
+  // BankEntity below must confirm this is actually reachable and unblocked.
+  const chestStanding = {
+    x:
+      Math.floor(chest.position.x) +
+      Math.sign(court.position.x - chest.position.x) +
+      0.5,
+    z:
+      Math.floor(chest.position.z) +
+      Math.sign(court.position.z - chest.position.z) +
+      0.5,
+  };
+  const chestCanopy = new THREE.Box2(
+    new THREE.Vector2(chestBounds.box.min.x, chestBounds.box.min.z),
+    new THREE.Vector2(chestBounds.box.max.x, chestBounds.box.max.z),
+  );
+  expect(
+    chestCanopy.distanceToPoint(
+      new THREE.Vector2(chestStanding.x, chestStanding.z),
+    ),
+  ).toBeGreaterThan(standingRadius);
+  const standing = [chestStanding, clerk.position, court.position];
+  let standingSamples = 0;
+  for (const point of [...standing, ...service.path, ...arrival.path])
+    for (let a = 0; a < 32; a++) {
+      const x = point.x + Math.cos((a * Math.PI) / 16) * standingRadius;
+      const z = point.z + Math.sin((a * Math.PI) / 16) * standingRadius;
+      expect(
+        roads.getRoadInfluenceAt(x, z),
+        `standing ${x},${z}`,
+      ).toBeGreaterThan(0.8);
+      standingSamples++;
+    }
+  for (let ix = 0; ix <= 8; ix++)
+    for (let iz = 0; iz <= 8; iz++) {
+      const x = THREE.MathUtils.lerp(
+        chestBounds.box.min.x,
+        chestBounds.box.max.x,
+        ix / 8,
+      );
+      const z = THREE.MathUtils.lerp(
+        chestBounds.box.min.z,
+        chestBounds.box.max.z,
+        iz / 8,
+      );
+      expect(
+        roads.getRoadInfluenceAt(x, z),
+        `chest canopy ${x},${z}`,
+      ).toBeGreaterThan(0.8);
+    }
+  return {
+    chest,
+    clerk,
+    arrival,
+    station,
+    chestBounds,
+    standingRadius,
+    chestStanding,
+    standing,
+    standingSamples,
+  };
+}
+
+function expectPondBankServiceClearance(
+  world: World,
+  terrain: TerrainSystem,
+  roads: RoadNetworkSystem,
+  court: CompactServiceCourtPlacement,
+) {
+  const {
+    chest,
+    clerk,
+    arrival,
+    station,
+    chestBounds,
+    standingRadius,
+    chestStanding,
+    standing,
+    standingSamples,
+  } = expectPondBankServiceField(roads, court);
+  const height = (x: number, z: number) =>
+    terrain.getResourceGroundHeight(x, z);
+  const grounded = groundCompactServiceCourt(
+    court,
+    BANK_PAVILION_POSTS,
+    height,
+  );
+  const polygons = createCompactServiceCourtGrassExclusions(
+    grounded,
+    BANK_PAVILION_POSTS,
+  );
+  expect(polygons).toHaveLength(4);
+  expect(grounded.blockingTiles).toHaveLength(4);
+  const collision = world.collision.acquireStaticFootprint(
+    grounded.blockingTiles,
+  );
+  const vegetation = terrain.acquireGrassExclusionPolygons(polygons);
+  const support = gridGeometry(32, 33, (x, z) =>
+    height(x + court.position.x, z + court.position.z),
+  );
+  expect(world.isServer).toBe(true);
+  const bank = new BankEntity(world, {
+    id: chest.id,
+    name: "Pond service access proof",
+    type: EntityType.BANK,
+    position: {
+      ...chest.position,
+      y: height(chest.position.x, chest.position.z),
+    },
+    rotation: { x: 0, y: 0, z: 0, w: 1 },
+    scale: { x: 1, y: 1, z: 1 },
+    visible: true,
+    interactable: true,
+    interactionType: InteractionType.BANK,
+    interactionDistance: 3,
+    description: "Actual bank collision and access.",
+    model: station.model,
+    properties: {
+      bankId: chest.id,
+      movementComponent: null,
+      combatComponent: null,
+      healthComponent: null,
+      visualComponent: null,
+      health: { current: 1, max: 1 },
+      level: 1,
+    },
+  });
+  try {
+    expect(
+      world.collision.isWalkable(
+        Math.floor(chest.position.x),
+        Math.floor(chest.position.z),
+      ),
+    ).toBe(false);
+    expect(
+      world.collision.isWalkable(
+        Math.floor(chestStanding.x),
+        Math.floor(chestStanding.z),
+      ),
+    ).toBe(true);
+    const flags = () =>
+      Array.from({ length: 19 * 23 }, (_, index) =>
+        world.collision.getFlags(
+          375 + (index % 19),
+          423 + Math.floor(index / 19),
+        ),
+      );
+    const beforeFlags = flags();
+    const pathsBefore = roads
+      .getRoads()
+      .map((row) => structuredClone(row.path));
+    createCompactIslandPaths(
+      DataManager.getWorldTerrainProfile()!,
+      ALL_WORLD_AREAS,
+      getDuelArenaConfig(),
+      height,
+      DataManager.getWorldConfig()!,
+    );
+    expect(flags()).toEqual(beforeFlags);
+    expect(roads.getRoads().map((row) => row.path)).toEqual(pathsBefore);
+    const pathfinder = new BFSPathfinder();
+    // Real bank, footing collision leases and pathfinder; painted capsules are
+    // deliberately not walkability inputs. Retain unpainted meadow access too.
+    for (const [from, to] of [
+      [arrival.path[0], chestStanding],
+      [arrival.path[0], clerk.position],
+      [
+        { x: 378, z: 438 },
+        { x: 390, z: 438 },
+      ],
+      [{ x: 384, z: 445 }, court.position],
+    ]) {
+      const start = { x: Math.floor(from.x), z: Math.floor(from.z) };
+      const end = { x: Math.floor(to.x), z: Math.floor(to.z) };
+      const path = pathfinder.findPath(start, end, (tile) =>
+        world.collision.isWalkable(tile.x, tile.z),
+      );
+      expect(path.at(-1)).toEqual(end);
+      expect(pathfinder.wasLastPathPartial()).toBe(false);
+    }
+    const surface = new RetainedTerrainSurface(
+      1,
+      DataManager.getWorldTerrainProfile()!.id,
+      court.position.x,
+      court.position.z,
+      32,
+      33,
+      support,
+    );
+    // Authored numerical probes on actual height samples, not a population or
+    // native-render claim. Include inner, shoulder and untouched meadow roots.
+    const probes = standing.flatMap((center) =>
+      [0, 0.35, 0.8, 1.4, 2.4].flatMap((radius) =>
+        Array.from({ length: radius === 0 ? 1 : 8 }, (_, a) => ({
+          x: center.x + Math.cos((a * Math.PI) / 4) * radius,
+          z: center.z + Math.sin((a * Math.PI) / 4) * radius,
+        })),
+      ),
+    );
+    const input: GrassAnchorData = {
+      count: probes.length,
+      offsets: new Float32Array(probes.length * 3),
+      rotScaleHash: new Float32Array(probes.length * 3),
+      groundColors: new Float32Array(probes.length * 3),
+      grassTints: new Float32Array(probes.length * 4),
+      groundNormals: new Float32Array(probes.length * 3),
+    };
+    probes.forEach((point, i) => {
+      input.offsets.set(
+        [
+          point.x - surface.centerX,
+          height(point.x, point.z),
+          point.z - surface.centerZ,
+        ],
+        i * 3,
+      );
+      input.rotScaleHash.set(
+        [((i % 8) * Math.PI) / 4, GRASS_CONFIG.SCALE_MAX, 0.4],
+        i * 3,
+      );
+      input.groundColors.set([0.2, 0.3, 0.1], i * 3);
+      input.grassTints.set([1, 1, 1, 0.2], i * 4);
+      input.groundNormals.set([0, 1, 0], i * 3);
+    });
+    const data = projectGrassAnchors(
+      input,
+      surface,
+      (x, z) => terrain.getWaterBodyRegistry().getWaterSurfaceAt(x, z),
+      (x, z) => terrain["isGrassExcludedAt"](x, z),
+    );
+    expect(data.count).toBeGreaterThan(0);
+    const dataBefore = structuredClone(data);
+    const receipts: {
+      geometryLayout: NonNullable<GrassBladeGroundingRequest["geometryLayout"]>;
+      lod: GrassBladeGroundingRequest["lod"];
+      input: number;
+      retained: number;
+      retainedBlades: number;
+      work: number;
+      standingSamples: number;
+      scope: string;
+    }[] = [];
+    for (const [geometryLayout, lod] of [
+      ["fine-linear-sweep-near4-v1", 0],
+      ["fine-linear-sweep-3seg-v1", 1],
+    ] as const) {
+      const layout = getGrassBladeLayout(lod, geometryLayout);
+      const geometry = createClumpGeometry(
+        layout.bladesPerClump,
+        layout.bladeSegments,
+        FINE_MEADOW_APPEARANCE,
+      );
+      try {
+        const wind = {
+          x:
+            GRASS_CONFIG.WIND_STRENGTH *
+            FINE_MEADOW_APPEARANCE.BLADE_HEIGHT_MAX,
+          z:
+            GRASS_CONFIG.WIND_STRENGTH *
+            FINE_MEADOW_APPEARANCE.BLADE_HEIGHT_MAX *
+            0.55,
+        };
+        const request: GrassBladeGroundingRequest = {
+          data,
+          geometry,
+          lod,
+          geometryLayout,
+          roadClearance: "per-blade-v1",
+          ownSurface: surface,
+          surfaces: [surface],
+          wind,
+          oceanLevel: 0,
+          terrainSurface: terrain["getTerrainSurfaceForRegion"](
+            368,
+            422,
+            400,
+            454,
+          ),
+          roadSegments: roads.getRoadSegmentsForGPU(),
+        };
+        const result = groundGrassBlades(request);
+        const withoutRoads = groundGrassBlades({
+          ...request,
+          roadSegments: [],
+        });
+        expect(result.status).toBe("ready");
+        expect(withoutRoads.status).toBe("ready");
+        if (result.status !== "ready" || withoutRoads.status !== "ready")
+          throw new Error(
+            "Service grounding did not complete within the existing cap",
+          );
+        expect(result.data.count).toBeGreaterThan(0);
+        expect(result.receipt.roadClearance!.retainedBlades).toBeLessThan(
+          withoutRoads.receipt.roadClearance!.retainedBlades,
+        );
+        const overlapsService = (output: typeof result) => {
+          let overlaps = 0;
+          const position = geometry.getAttribute("position"),
+            uv = geometry.getAttribute("uv");
+          for (let instance = 0; instance < output.data.count; instance++) {
+            const k = instance * 3;
+            const tilt = new THREE.Quaternion().setFromUnitVectors(
+              new THREE.Vector3(0, 1, 0),
+              new THREE.Vector3().fromArray(output.data.groundNormals, k),
+            );
+            for (let blade = 0; blade < layout.bladesPerClump; blade++) {
+              if (!(output.bladeVisibility![instance] & (1 << blade))) continue;
+              const box = new THREE.Box2();
+              for (
+                let vertex = blade * layout.verticesPerBlade;
+                vertex < (blade + 1) * layout.verticesPerBlade;
+                vertex++
+              ) {
+                const reach = uv.getY(vertex) ** 1.8;
+                for (const fade of [0, 1]) {
+                  const point = new THREE.Vector3(
+                    position.getX(vertex),
+                    position.getY(vertex) * fade,
+                    position.getZ(vertex),
+                  )
+                    .multiplyScalar(output.data.rotScaleHash[k + 1])
+                    .applyAxisAngle(
+                      new THREE.Vector3(0, 1, 0),
+                      -output.data.rotScaleHash[k],
+                    )
+                    .applyQuaternion(tilt)
+                    .add(
+                      new THREE.Vector3(
+                        surface.centerX + output.data.offsets[k],
+                        output.data.offsets[k + 1],
+                        surface.centerZ + output.data.offsets[k + 2],
+                      ),
+                    );
+                  box.expandByPoint(
+                    new THREE.Vector2(
+                      point.x - wind.x * reach,
+                      point.z - wind.z * reach,
+                    ),
+                  );
+                  box.expandByPoint(
+                    new THREE.Vector2(
+                      point.x + wind.x * reach,
+                      point.z + wind.z * reach,
+                    ),
+                  );
+                }
+              }
+              const inStanding = standing.some(
+                (point) =>
+                  box.distanceToPoint(new THREE.Vector2(point.x, point.z)) <=
+                  standingRadius,
+              );
+              const inChest =
+                box.max.x >= chestBounds.box.min.x &&
+                box.min.x <= chestBounds.box.max.x &&
+                box.max.y >= chestBounds.box.min.z &&
+                box.min.y <= chestBounds.box.max.z;
+              if (inStanding || inChest) overlaps++;
+            }
+          }
+          return overlaps;
+        };
+        expect(overlapsService(withoutRoads)).toBeGreaterThan(0);
+        expect(overlapsService(result)).toBe(0);
+        expect(data).toEqual(dataBefore);
+        receipts.push({
+          geometryLayout,
+          lod,
+          input: data.count,
+          retained: result.data.count,
+          retainedBlades: result.receipt.roadClearance!.retainedBlades,
+          work: result.receipt.workUnits,
+          standingSamples,
+          scope:
+            "Actual core on numerical terrain samples; swept wind/fade canopy clearance and real tile navigation, not native visual acceptance.",
+        });
+      } finally {
+        geometry.dispose();
+      }
+    }
+    process.stdout.write(
+      "Pond bank service clearance " + JSON.stringify(receipts) + "\n",
+    );
+  } finally {
+    bank.destroy();
+    support.dispose();
+    vegetation.release();
+    collision.release();
   }
 }
 
@@ -319,6 +770,9 @@ describe("inland pond opt-in circulation with actual terrain and road owner", ()
           });
           expect(added[2].maxInfluence).toBeLessThan(0.8);
           expect(added.every((path) => path.path.length <= 256)).toBe(true);
+          // This historical basin pins the paint field, not the later
+          // pavilion's support. Native-owner checks use admitted v9/v10 below.
+          expectPondBankServiceField(roads, basin.outlyingBankStudy.court);
           // Existing paths remain exact; shared wear raises only this service
           // area. It is a scalar paint field, never an authority for walkability.
           expect(roads.getRoadInfluenceAt(384, 438)).toBe(1);
@@ -562,6 +1016,28 @@ describe("inland pond opt-in circulation with actual terrain and road owner", ()
         ALL_WORLD_AREAS.haven_pond = saved.pond;
         ALL_WORLD_AREAS.central_haven = saved.haven;
       }
+    },
+  );
+
+  it.runIf(
+    /\/inland-pond-integration01-UNQUALIFIED\/assets-v(?:9|10)$/.test(
+      process.env.ASSETS_DIR ?? "",
+    ),
+  )(
+    "clears the admitted pond bank service anchors and swept grass without restricting its open ground",
+    async () => {
+      await withRoads(
+        (roads, terrain, world) => {
+          const court =
+            DataManager.getWorldConfig()!.compactServiceCourts!.courts.find(
+              (row) => row.layoutId === "haven-pond-bank-v1",
+            )!;
+          expect(court.recipeId).toBe("open-timber-pond-bank-haven-v1");
+          expectPondBankServiceClearance(world, terrain, roads, court);
+        },
+        undefined,
+        new PondBankServiceWorld(),
+      );
     },
   );
 });
