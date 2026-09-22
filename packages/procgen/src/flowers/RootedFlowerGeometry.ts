@@ -223,7 +223,7 @@ export function createRootedFlowerGeometry(
     const radialX = Math.cos(angle),
       radialZ = Math.sin(angle);
     const length = height * 0.069 * (1 + 0.055 * Math.sin(petal * 2.3));
-    const width = height * 0.0125 * (1 + 0.04 * Math.cos(petal * 1.7));
+    const width = height * 0.018 * (1 + 0.04 * Math.cos(petal * 1.7));
     const curl = Math.sin(petal * 1.9) * height * 0.003;
     lamina(
       attachments[petal],

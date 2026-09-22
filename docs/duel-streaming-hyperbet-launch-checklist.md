@@ -1,5 +1,41 @@
 # Duel Arena, Streaming, and Hyperbet Launch Checklist
 
+## 2026-09-22 — petal readability candidate; restart-safe checkpoint
+
+- [x] Widen the existing procedural petal lateral profile from 0.0125h to
+  0.018h. Keep flower height, placement, population, 362 vertices / 584 triangles,
+  materials and the 0.08h flutter envelope unchanged. This is an opt-in art
+  candidate, not a visual or performance approval; wider raster coverage may cost more.
+- [x] Verify six supported heights against captured width-independent buffer
+  fingerprints and analytic petal positions: 52/52 geometry cases pass.
+  Placement, material, owner and resource-clearance suites pass 142/142.
+  Full shared plus explicit retained-world typecheck: 750 roots, 2456 sources,
+  zero diagnostics, stable inputs. Scoped two-file lint and diff checks pass.
+  Evidence: `rooted-flower-petalwidth01`, `rooted-flower-petalwidth-source01`,
+  `living-world-foundations-types14`, `rooted-flower-petalwidth-lint01`.
+- [ ] Native124, using unchanged baseline build63, FAILS the original 90-second
+  startup gate: 120/122 grass cells ready, two fitting failures, zero captured views.
+  The first emitted failure is `gcell_v1_13_17`, 253.1 ms / 58957 operations
+  against the unchanged 250 ms cap. The latest worker receipt records 250.0 ms
+  and an 83.4 ms peak slice; do not conflate different jobs or discount their times.
+  All 20 host-guard samples were nominal; historical failures remain retained.
+  No successful close-up or six-second wind clip exists from this attempt.
+- [x] Prepare matched two-wide/one-close views and a bounded six-second natural
+  wind recorder in the private harness, without forced frames or time. Candidate
+  build64/native125 has NOT run; its required baseline close/motion evidence is absent.
+- [ ] Point-in-time host inspection found 40 days of uptime, filesystem event
+  service near one CPU core and about 6 GiB RSS, and about 18 GiB swap use.
+  These observations do not prove the loading failures are host-only. The user
+  will restart after this checkpoint; no system service or other application was stopped.
+- [x] Close the owned test browser, stop runtime94 and remove its temporary
+  database. Protected 145 artifacts, retained lock and playable localhost3333
+  checks pass. Unrelated working changes are preserved.
+- [ ] After restart, establish a fresh, source-pinned narrow-petal baseline before
+  the matched candidate. Preserve failed native124 without overwriting or retrying
+  it under the same ID. Review actual head shape, roots, shadows and wind before
+  accepting the candidate; continuous traversal/performance and richer meadow
+  composition remain open.
+
 ## 2026-09-22 — exact shoreline fitting reconstruction; arithmetic trial rejected
 
 - [x] Reconstruct native121's cell `gcell_v1_13_16` at LOD0/focus335,431 using

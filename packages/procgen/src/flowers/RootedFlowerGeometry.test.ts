@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { afterEach, describe, expect, it } from "vitest";
 import * as THREE from "three";
 import { createRootedFlowerGeometry } from "./RootedFlowerGeometry.js";
@@ -20,11 +21,122 @@ const point = (
   index: number,
 ) => new THREE.Vector3().fromBufferAttribute(attribute, index);
 
+// Actual .0125h-width factory fingerprints, captured before the .018h trial
+// with Node22 + real Three (factory SHA256
+// 493606fa734f82d3938a7ea869d36306b9922dd698494a9b39a76b668af537f7).
+// Freeze only width-independent data, not normals: shared head hinges acquire
+// legitimate new averaged normals when their neighboring petal faces widen.
+const widthInvariantBaselines = [
+  [0.12, "2693b876ab2c3c1e1938300e2acfe3fe364394ff78315ac7e68280476c3f172f"],
+  [0.25, "390c1ecd0aefb877f5200c33de385f344241f7decd761ec7e876a8392a11685a"],
+  [0.38, "65499dbc35b42deff5b5a17425636a0b8e19097f59b84871d9ca777d3f395987"],
+  [0.53, "ec7309ac7d8d75a47bbdee9ca2c79634fa4b1c5b28e566080d41bfcf0dc09207"],
+  [0.75, "8eb940ce8cea6310ecc4a2d205aaea8f586de42c4229f3d52c83005b74895c12"],
+  [0.8, "6cc23d6a3203b7e7f99ae24fb79320232a504f90185bdad58380872e7f9ee117"],
+] as const;
+
 describe("rooted meadow flower geometry", () => {
   // Real Three geometry only. These are topology/asset contracts, not native
   // lighting, wind, placement or GPU-performance approval.
-  for (const height of [0.12, 0.25, 0.38, 0.53, 0.8]) {
+  for (const [height, invariantHash] of widthInvariantBaselines) {
     describe(`height ${height}m`, () => {
+      it("preserves the narrow-petal topology and all width-independent buffers", () => {
+        const geometry = create(height);
+        const position = geometry.getAttribute("position");
+        const petal = geometry.getAttribute("flowerPetal");
+        expect(position.count).toBe(362);
+        expect(geometry.getIndex()!.count).toBe(584 * 3);
+        const hash = createHash("sha256");
+        const add = (name: string, array: THREE.TypedArray) => {
+          hash.update(`${name}\0`);
+          hash.update(
+            Buffer.from(array.buffer, array.byteOffset, array.byteLength),
+          );
+        };
+        add("index", geometry.getIndex()!.array);
+        for (const name of ["uv", "color", "flowerHeight", "flowerPetal"])
+          add(name, geometry.getAttribute(name).array);
+        const stationary: number[] = [];
+        for (let i = 0; i < position.count; i++) {
+          // Includes the ten zero-flex shared head/petal attachment vertices.
+          if (petal.getW(i) === 0)
+            stationary.push(
+              position.getX(i),
+              position.getY(i),
+              position.getZ(i),
+            );
+        }
+        expect(stationary).toHaveLength(102 * 3);
+        add("nonPetalPosition", new Float32Array(stationary));
+        expect(hash.digest("hex")).toBe(invariantHash);
+      });
+
+      it("widens only the petal lateral profile while retaining the .08h flutter envelope", () => {
+        const geometry = create(height);
+        const position = geometry.getAttribute("position");
+        const petal = geometry.getAttribute("flowerPetal");
+        const fullHeight = geometry.getAttribute("flowerHeight").getY(0);
+        const rows = [0.16, 0.36, 0.59, 0.81, 0.95];
+        const columns = [-1, -0.5, 0, 0.5, 1];
+        let changedVertices = 0;
+        // Small analytic lamina reference, not a second flower generator.
+        // Stem/head/leaves/index/UV/color/height/hinges use the frozen hashes.
+        for (let lobe = 0; lobe < 10; lobe++) {
+          const angle = (lobe / 10) * Math.PI * 2;
+          const radialX = Math.cos(angle),
+            radialZ = Math.sin(angle);
+          const hinge = [
+            height * (0.02 + 0.023 * Math.sin(Math.PI)) +
+              radialX * 0.022 * height,
+            0.985 * height,
+            height * (-0.015 + 0.011 * Math.sin(Math.PI * 2)) +
+              radialZ * 0.022 * height,
+          ] as const;
+          const length = height * 0.069 * (1 + 0.055 * Math.sin(lobe * 2.3));
+          const sample = (t: number, across: number, widthRatio: number) => {
+            const arch = Math.sin(Math.PI * t);
+            const width =
+              height * widthRatio * (1 + 0.04 * Math.cos(lobe * 1.7));
+            const curl = Math.sin(lobe * 1.9) * height * 0.003;
+            const lateral =
+              across * width * arch ** 0.7 * (0.8 + 0.2 * t) + curl * arch;
+            return [
+              hinge[0] + radialX * length * t - radialZ * lateral,
+              hinge[1] -
+                height * (0.034 * arch * (1 - 0.2 * t) + 0.006 * t) +
+                height * 0.009 * arch * across * across +
+                height * 0.0015 * Math.sin(lobe * 1.3) * across * arch,
+              hinge[2] + radialZ * length * t + radialX * lateral,
+            ].map(Math.fround);
+          };
+          // 82 stem/head vertices precede ten 25-vertex grids + one tip each.
+          for (let local = 0; local < 26; local++) {
+            const vertex = 82 + lobe * 26 + local;
+            const t = local === 25 ? 1 : rows[Math.floor(local / 5)];
+            const across = local === 25 ? 0 : columns[local % 5];
+            const expected = sample(t, across, 0.018);
+            const narrow = sample(t, across, 0.0125);
+            expect(point(position, vertex).toArray()).toEqual(expected);
+            expect(expected[1]).toBe(narrow[1]);
+            if (across === 0) expect(expected).toEqual(narrow);
+            else if (expected[0] !== narrow[0] || expected[2] !== narrow[2])
+              changedVertices++;
+            expect(point(petal, vertex).toArray()).toEqual(
+              hinge.map(Math.fround),
+            );
+            expect(petal.getW(vertex)).toBe(Math.fround(t * t));
+            // Match the material's actual Float32 hinge/full-height contract.
+            expect(
+              Math.hypot(
+                position.getX(vertex) - petal.getX(vertex),
+                position.getZ(vertex) - petal.getZ(vertex),
+              ),
+            ).toBeLessThanOrEqual(0.08 * fullHeight);
+          }
+        }
+        expect(changedVertices).toBe(200);
+      });
+
       it("is finite, indexed and bounded, with a single material surface", () => {
         const geometry = create(height);
         const position = geometry.getAttribute("position");
