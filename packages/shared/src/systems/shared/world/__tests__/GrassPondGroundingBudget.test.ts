@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { readFileSync, writeFileSync } from "node:fs";
 import { isAbsolute, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { serialize } from "node:v8";
 import { beforeAll, describe, expect, it } from "vitest";
 import THREE from "../../../../extras/three/three";
 import { World } from "../../../../core/World";
@@ -79,12 +80,24 @@ const evidence = (label: string, json: string) =>
   process.stdout.write(`${label} ${json}\n`);
 
 // One explicit diagnostic run, never enabled by ordinary regression commands.
-// The only admitted fit is the reconstructed native95 western cached request.
+// Only the native95 western or native121 reconstructed cached request is admitted.
 const cpuProfilePrefix = process.env.HYPERIA_GRASS_CACHED_PROFILE_PREFIX;
 const cachedBaselinePath = process.env.HYPERIA_GRASS_CACHED_BASELINE_BUNDLE;
 let cachedBaselineSource: string | undefined;
 const hashBytes = (value: string | Uint8Array) =>
   createHash("sha256").update(value).digest("hex");
+// v8 preserves native Sets, typed arrays and non-finite numeric sentinels.
+// These are exact serialized inputs for this Node version, not portable
+// cross-engine canonical hashes or historical browser packet hashes.
+function serializedInputReceipt(value: unknown) {
+  const bytes = serialize(value);
+  return {
+    format: "node-v8",
+    nodeVersion: process.version,
+    bytes: bytes.length,
+    sha256: hashBytes(bytes),
+  };
+}
 let profileSourcePins: { path: string; bytes: number; sha256: string }[] = [];
 function writeProfileEvidence(suffix: string, value: string) {
   if (!cpuProfilePrefix) throw new Error("CPU profile evidence is not enabled");
@@ -93,7 +106,15 @@ function writeProfileEvidence(suffix: string, value: string) {
   return { path, bytes: Buffer.byteLength(value), sha256: hashBytes(value) };
 }
 
-function saveCachedProfile(receipt: GroundingWorkerCpuProfile) {
+function saveCachedProfile(
+  receipt: GroundingWorkerCpuProfile,
+  reconstruction: {
+    label: string;
+    key: string;
+    historicalSource: string;
+    historicalSourceSHA256: string;
+  },
+) {
   // Preserve the raw observation, including profiler/production failures,
   // before asserting qualification. Never turn a failed budget into a pass.
   const raw = JSON.stringify(receipt.profile);
@@ -107,6 +128,7 @@ function saveCachedProfile(receipt: GroundingWorkerCpuProfile) {
     JSON.stringify(
       {
         ...metadata,
+        reconstruction,
         profileFile,
         nodeCount: profile?.nodes.length ?? 0,
         sampleCount: profile?.samples?.length ?? 0,
@@ -114,13 +136,16 @@ function saveCachedProfile(receipt: GroundingWorkerCpuProfile) {
         profileEndTimeUs: profile?.endTime ?? null,
         sourcesUnchanged,
         scope:
-          "One sampled Node22 worker-isolate cached request: validation, fitting, result packing, task waits, GC and profiler overhead. Surface preparation and module startup excluded. Sample weights are not exclusive CPU time, native browser measurements, or performance acceptance. Node Inspector start/stop perturbs execution; original 250ms/1M caps remain enforced. Current-source native95 reconstruction is not a byte-exact historical packet.",
+          "One sampled Node22 worker-isolate cached request: validation, fitting, result packing, task waits, GC and profiler overhead. Surface preparation and module startup excluded. Sample weights are not exclusive CPU time, native browser measurements, or performance acceptance. Node Inspector start/stop perturbs execution; original 250ms/1M caps remain enforced. The identified current-source reconstruction is not a byte-exact historical packet; this separately prepared cached fit has a zero consumed seed, not the later measured production handoff seed.",
       },
       null,
       2,
     ),
   );
-  evidence("NATIVE95_CACHED_CPU_PROFILE", JSON.stringify(metadataFile));
+  evidence(
+    `${reconstruction.label}_CACHED_CPU_PROFILE`,
+    JSON.stringify(metadataFile),
+  );
   expect(receipt.error).toBeNull();
   expect(receipt.samplingIntervalUs).toBe(1000);
   expect(receipt.startAcknowledgedAtMs).not.toBeNull();
@@ -257,6 +282,59 @@ const native95Observation = {
 // Explicit real-asset regressions: none of these overlays is a production default.
 // Each uses its actual worker output, authored constraints and retained mesh.
 const cases = [
+  {
+    name: "native121 startup LOD0 western pond work budget",
+    test: "reconstructs the native121 failed cell using actual v10 owners and unchanged fitting caps",
+    enabled: process.env.ASSETS_DIR?.endsWith(
+      "/inland-pond-integration01-UNQUALIFIED/assets-v10",
+    ),
+    label: "NATIVE121_LOD0_WESTERN_POND",
+    // The swept halo crosses z400. Both retained owners are generated with
+    // production detail policy; neither resolution nor geometry is fabricated.
+    nodes: [
+      [350, 450],
+      [350, 350],
+    ],
+    focus: [335, 431],
+    lod: 0,
+    key: "gcell_v1_13_16",
+    bounds: { minX: 325, maxX: 350, minZ: 400, maxZ: 425 },
+    native121: {
+      source: "native121/process.json",
+      sourceSHA256:
+        "977bd7479aab493974a6ac2fb46a806e1106f769b7c7d060a7c3754abca32f62",
+      frameworkSHA256:
+        "5cbdd06f132e21cb305baa7a50602e83df9a1340a65de083473aff72de97bb7d",
+      workerSHA256:
+        "a8444e4226d69bdc642bea32c84b7a68f63071d6462570b8048e6e22dcbf00f7",
+      worldConfigSHA256:
+        "60f98f5e300db1eb58902723d4f9a5859db4b3a75fc78ec81e1b3673832ac254",
+      worldAreasSHA256:
+        "438cabb6f34e965b708f0276d050cb2cda222252bdc8412123ee0c7e50e210c3",
+      nodeId: 49,
+      generation: 47,
+      jobId: 43,
+      phase: "grounding_operation",
+      submittedWork: {
+        operations: 1755,
+        activeMs: 1.5999999046325684,
+        maximumSliceMs: 1.5999999046325684,
+      },
+      rawWorkerWork: {
+        operations: 100251,
+        activeMs: 252.90000009536743,
+        maximumSliceMs: 73.59999990463257,
+      },
+      mainObservedWork: {
+        operations: 100253,
+        activeMs: 254.30000019073486,
+        maximumSliceMs: 1.5999999046325684,
+        cumulativeMaximumSliceMs: 73.59999990463257,
+      },
+      scope:
+        "Historical native121 failed fitting prefix, not a retained packet. Current-source v10 reconstruction uses its cell/focus/LOD and actual retained owners. IDs/revisions, input arrays and scheduling are newly produced. The historical submitted ledger is recorded only; the production handoff below generates a fresh measured seed. No byte-exact historical replay, exclusive CPU attribution or native startup qualification.",
+    },
+  },
   {
     name: "native118 startup retained surface admission",
     test: "reconstructs the native118 failed surface using actual v10 terrain and original admission caps",
@@ -696,6 +774,11 @@ const cases = [
 ] as const;
 
 let groundingWorkerSource: string;
+let groundingWorkerSourcePins: {
+  path: string;
+  bytes: number;
+  sha256: string;
+}[] = [];
 const surfaceReconstructionSourcePaths = [
   fileURLToPath(import.meta.url),
   ...[
@@ -715,11 +798,29 @@ const surfaceReconstructionSourcePaths = [
     "../../../../data/DataManager.ts",
   ].map((path) => fileURLToPath(new URL(path, import.meta.url))),
 ].sort();
+const fittingReconstructionSourcePaths = [
+  ...surfaceReconstructionSourcePaths,
+  ...[
+    "../GrassVisualManager.ts",
+    "../GrassTerrainProjection.ts",
+    "../GrassGroundingHandoff.ts",
+    "../GrassGroundingPipeline.ts",
+    "../CompactTerrainPalette.ts",
+    "../RoadNetworkSystem.ts",
+    "../ProceduralDocks.ts",
+    "../../../../utils/workers/GrassWorker.ts",
+  ].map((path) => fileURLToPath(new URL(path, import.meta.url))),
+].sort();
 beforeAll(async () => {
   if (cachedBaselinePath) {
     expect(cpuProfilePrefix).toBeUndefined();
     expect(isAbsolute(cachedBaselinePath)).toBe(true);
-    expect(process.env.ASSETS_DIR?.endsWith("/assets-v9")).toBe(true);
+    expect(
+      process.env.ASSETS_DIR?.endsWith("/assets-v9") ||
+        process.env.ASSETS_DIR?.endsWith(
+          "/inland-pond-integration01-UNQUALIFIED/assets-v10",
+        ),
+    ).toBe(true);
     cachedBaselineSource = readFileSync(cachedBaselinePath, "utf8");
     expect(hashBytes(cachedBaselineSource)).toBe(
       process.env.HYPERIA_GRASS_CACHED_BASELINE_SHA256,
@@ -727,13 +828,23 @@ beforeAll(async () => {
   }
   if (cpuProfilePrefix) {
     expect(isAbsolute(cpuProfilePrefix)).toBe(true);
-    expect(process.env.ASSETS_DIR?.endsWith("/assets-v9")).toBe(true);
+    expect(
+      process.env.ASSETS_DIR?.endsWith("/assets-v9") ||
+        process.env.ASSETS_DIR?.endsWith(
+          "/inland-pond-integration01-UNQUALIFIED/assets-v10",
+        ),
+    ).toBe(true);
   }
   if (cases.some((scenario) => scenario.enabled)) {
     const bundle = await bundleGrassGroundingWorker({
       cpuProfileSourceMap: !!cpuProfilePrefix,
     });
     groundingWorkerSource = bundle.source;
+    groundingWorkerSourcePins = bundle.inputs.map((path) => {
+      const absolute = resolve(path);
+      const bytes = readFileSync(absolute);
+      return { path: absolute, bytes: bytes.length, sha256: hashBytes(bytes) };
+    });
     if (cpuProfilePrefix) {
       const paths = new Set([
         ...bundle.inputs.map((path) => resolve(path)),
@@ -781,6 +892,7 @@ describe.each(cases)("$name", (scenario) => {
         "native106" in scenario ||
         "native108" in scenario ||
         "native118" in scenario ||
+        "native121" in scenario ||
         "native95" in scenario;
       const usesNativeDetail =
         "native82" in scenario ||
@@ -788,36 +900,52 @@ describe.each(cases)("$name", (scenario) => {
         "native106" in scenario ||
         "native108" in scenario ||
         "native118" in scenario ||
+        "native121" in scenario ||
         "native95" in scenario;
-      const reconstructionAssets =
-        "native118" in scenario
-          ? [
-              {
-                path: resolve(
-                  process.env.ASSETS_DIR!,
-                  "manifests/world-config.json",
-                ),
-                expectedSHA256: scenario.native118.worldConfigSHA256,
-              },
-              {
-                path: resolve(
-                  process.env.ASSETS_DIR!,
-                  "manifests/world-areas.json",
-                ),
-                expectedSHA256: scenario.native118.worldAreasSHA256,
-              },
-            ].map((pin) => {
-              const bytes = readFileSync(pin.path);
-              return { ...pin, bytes: bytes.length, sha256: hashBytes(bytes) };
-            })
-          : [];
-      const reconstructionSources =
-        "native118" in scenario
-          ? surfaceReconstructionSourcePaths.map((path) => {
+      const reconstructionObservation =
+        "native121" in scenario
+          ? scenario.native121
+          : "native118" in scenario
+            ? scenario.native118
+            : null;
+      const reconstructionAssets = reconstructionObservation
+        ? [
+            {
+              path: resolve(
+                process.env.ASSETS_DIR!,
+                "manifests/world-config.json",
+              ),
+              expectedSHA256: reconstructionObservation.worldConfigSHA256,
+            },
+            {
+              path: resolve(
+                process.env.ASSETS_DIR!,
+                "manifests/world-areas.json",
+              ),
+              expectedSHA256: reconstructionObservation.worldAreasSHA256,
+            },
+          ].map((pin) => {
+            const bytes = readFileSync(pin.path);
+            return { ...pin, bytes: bytes.length, sha256: hashBytes(bytes) };
+          })
+        : [];
+      const reconstructionSources = reconstructionObservation
+        ? [
+            ...new Set(
+              "native121" in scenario
+                ? [
+                    ...fittingReconstructionSourcePaths,
+                    ...groundingWorkerSourcePins.map((pin) => pin.path),
+                  ]
+                : surfaceReconstructionSourcePaths,
+            ),
+          ]
+            .sort()
+            .map((path) => {
               const bytes = readFileSync(path);
               return { path, bytes: bytes.length, sha256: hashBytes(bytes) };
             })
-          : [];
+        : [];
       await DataManager.getInstance().initialize();
       const world = new World();
       const terrain = world.register("terrain", TerrainSystem) as TerrainSystem;
@@ -841,6 +969,28 @@ describe.each(cases)("$name", (scenario) => {
       let docks: ProceduralDocks | undefined;
       const failures: unknown[] = [];
       reconstruction: try {
+        if ("native121" in scenario) {
+          evidence(
+            `${scenario.label}_SOURCE_INPUT_PINS`,
+            JSON.stringify({
+              historicalObservation: scenario.native121,
+              nodeVersion: process.version,
+              assets: reconstructionAssets,
+              sourcePins: reconstructionSources,
+              workerBundle: {
+                bytes: Buffer.byteLength(groundingWorkerSource),
+                sha256: hashBytes(groundingWorkerSource),
+              },
+              scope:
+                "Named reconstruction/placement/handoff owners plus all actual grounding-worker bundle inputs; not a complete application closure. Historical artifact hashes are provenance references, not current-source equality assertions.",
+            }),
+          );
+          expect(
+            reconstructionAssets.every(
+              (pin) => pin.sha256 === pin.expectedSHA256,
+            ),
+          ).toBe(true);
+        }
         if (usesNativeComposition) {
           // Match the existing actual dock fixture: native triangle collision
           // must be installed before its owned grass exclusions are published.
@@ -1013,7 +1163,8 @@ describe.each(cases)("$name", (scenario) => {
             (("native95" in scenario ||
               "native106" in scenario ||
               "native108" in scenario ||
-              "native118" in scenario) &&
+              "native118" in scenario ||
+              "native121" in scenario) &&
               step.value.isRegularGrid)
           ) {
             // Historical pond fixtures all build refined 128-grid owners.
@@ -1383,6 +1534,86 @@ describe.each(cases)("$name", (scenario) => {
               0.55,
           },
         };
+        // Keep this exact detached copy for the subsequent cold-worker trial;
+        // hashing does not copy live renderer inputs or alter fitting ledgers.
+        const reconstructionCopyStarted = performance.now();
+        const reconstructionPacket =
+          "native121" in scenario
+            ? createGrassGroundingWorkerRequest(request)
+            : null;
+        const reconstructionCopyMs =
+          performance.now() - reconstructionCopyStarted;
+        if ("native121" in scenario && reconstructionPacket) {
+          evidence(
+            `${scenario.label}_RECONSTRUCTED_INPUT`,
+            JSON.stringify({
+              key,
+              lod,
+              focus: scenario.focus,
+              historicalObservation: scenario.native121,
+              terrainSeed: setup.seed,
+              terrainProfileIdentity:
+                setup.terrainConfig.TERRAIN_PROFILE_IDENTITY,
+              detailRegions: nativeDetailRegions,
+              workBounds: work.bounds,
+              groundingBounds: bounds,
+              placementInput: serializedInputReceipt(input),
+              rawWorker: attributeReceipts(output),
+              projectedWorker: attributeReceipts(projected),
+              packet: serializedInputReceipt(reconstructionPacket),
+              constraints: serializedInputReceipt(
+                reconstructionPacket.constraints,
+              ),
+              settings: reconstructionPacket.settings,
+              consumed: reconstructionPacket.consumed,
+              geometry: {
+                position: bufferReceipt(reconstructionPacket.geometry.position),
+                normal: bufferReceipt(reconstructionPacket.geometry.normal),
+                uv: bufferReceipt(reconstructionPacket.geometry.uv),
+                index: bufferReceipt(reconstructionPacket.geometry.index),
+                drawCount: reconstructionPacket.geometry.drawCount,
+              },
+              retainedOwners: reconstructionPacket.surfaces.map(
+                ({ token, snapshot }) => ({
+                  token,
+                  nodeId: snapshot.nodeId,
+                  sourceRevision: snapshot.revision,
+                  centerX: snapshot.centerX,
+                  centerZ: snapshot.centerZ,
+                  size: snapshot.size,
+                  resolution: snapshot.resolution,
+                  terrainProfileIdentity: snapshot.terrainProfileIdentity,
+                  positions: bufferReceipt(snapshot.positions),
+                  indices: bufferReceipt(snapshot.indices),
+                  topology: snapshot.topology
+                    ? {
+                        schemaVersion: snapshot.topology.schemaVersion,
+                        resolution: snapshot.topology.resolution,
+                        surfaceVertexCount:
+                          snapshot.topology.surfaceVertexCount,
+                        cellIndexOffsets: bufferReceipt(
+                          snapshot.topology.cellIndexOffsets,
+                        ),
+                      }
+                    : null,
+                }),
+              ),
+              mainThreadReconstructedAdmission: admissionReceipts,
+              fixtureCopyMs: reconstructionCopyMs,
+              scope:
+                "Source-bound reconstruction before fitting. Exact current input/geometry views are pinned, including actual production neighbors; historical arrays were not retained. Fixture capture/hash costs are outside the worker cap and reported separately from the later measured production handoff, not native performance evidence.",
+            }),
+          );
+          expect(
+            region.surfaces.map((surface) => [
+              surface.centerX,
+              surface.centerZ,
+              surface.size,
+            ]),
+          ).toEqual(scenario.nodes.map(([x, z]) => [x, z, 100]));
+          expect(ownSurface.resolution).toBe(128);
+          expect(pondServiceGround).toEqual(setup.pondServiceGround);
+        }
         if ("native95" in scenario) {
           expect(pondServiceGround).toBeDefined();
           expect(pondServiceGround).toEqual(setup.pondServiceGround);
@@ -1443,6 +1674,9 @@ describe.each(cases)("$name", (scenario) => {
               : {}),
             ...("native108" in scenario
               ? { native108HistoricalObservation: scenario.native108 }
+              : {}),
+            ...("native121" in scenario
+              ? { native121HistoricalObservation: scenario.native121 }
               : {}),
             ...("native95" in scenario
               ? { native95HistoricalObservation: scenario.native95 }
@@ -1571,11 +1805,14 @@ describe.each(cases)("$name", (scenario) => {
           groundingWorkerSource,
         );
         const copyStarted = performance.now();
-        const packet = createGrassGroundingWorkerRequest(request);
+        const packet =
+          reconstructionPacket ?? createGrassGroundingWorkerRequest(request);
         expect(packet.settings.pondServiceGround).toEqual(pondServiceGround);
         if (pondServiceGround)
           expect(packet.settings.pondServiceGround).not.toBe(pondServiceGround);
-        const snapshotCopyMs = performance.now() - copyStarted;
+        const snapshotCopyMs = reconstructionPacket
+          ? reconstructionCopyMs
+          : performance.now() - copyStarted;
         const workerStarted = performance.now();
         const workerResult = await runGrassGroundingWorker(
           groundingWorker,
@@ -1594,6 +1831,9 @@ describe.each(cases)("$name", (scenario) => {
                   ? workerResult.state.error
                   : null,
             work: workerResult.work,
+            ...("native121" in scenario
+              ? { timing: workerResult.timing ?? null }
+              : {}),
             lastPhase: workerResult.lastPhase,
             terrainRebuildWork: workerResult.terrainRebuildWork,
             inputBytes: workerResult.inputBytes,
@@ -1628,8 +1868,8 @@ describe.each(cases)("$name", (scenario) => {
         const cachedStarted = performance.now();
         const profileCachedFit =
           !!cpuProfilePrefix &&
-          "native95" in scenario &&
-          scenario.key === "gcell_v1_11_16";
+          (("native95" in scenario && scenario.key === "gcell_v1_11_16") ||
+            ("native121" in scenario && scenario.key === "gcell_v1_13_16"));
         groundingWorker = await createActualGroundingWorker(
           groundingWorkerSource,
           { profileCachedFit },
@@ -1637,6 +1877,8 @@ describe.each(cases)("$name", (scenario) => {
         const cachedCopyStarted = performance.now();
         const cachedPacket = createGrassGroundingWorkerRequest(request);
         const cachedCopyMs = performance.now() - cachedCopyStarted;
+        const cachedInput =
+          "native121" in scenario ? serializedInputReceipt(cachedPacket) : null;
         const prepared = await prepareCachedGrassGroundingWorkerRequest(
           groundingWorker,
           cachedPacket,
@@ -1654,6 +1896,13 @@ describe.each(cases)("$name", (scenario) => {
                 generation: prepared.request.generation,
                 settings: prepared.request.settings,
                 consumed: prepared.request.consumed,
+                ...("native121" in scenario
+                  ? {
+                      historicalObservation: scenario.native121,
+                      scope:
+                        "Current-source reconstructed native121 cached fit with zero seed. Separately measured production handoff follows; not historical byte-exact replay.",
+                    }
+                  : {}),
                 projected: attributeReceipts(projected),
                 admissions: prepared.admissions,
                 bundleStartLineOneBased: executionSource
@@ -1684,13 +1933,44 @@ describe.each(cases)("$name", (scenario) => {
             : Promise.resolve(null),
         ]);
         const profileFailures: unknown[] = [];
+        if ("native121" in scenario && fitOutcome.status === "fulfilled") {
+          const raw = fitOutcome.value;
+          evidence(
+            `${scenario.label}_RAW_CACHED_FIT`,
+            JSON.stringify({
+              jobId: raw.jobId,
+              generation: raw.generation,
+              state:
+                raw.state.status === "ready" ? { status: "ready" } : raw.state,
+              work: raw.work,
+              timing: raw.timing ?? null,
+              lastPhase: raw.lastPhase,
+              inputBytes: raw.inputBytes,
+              derivedBytesReserved: raw.derivedBytesReserved,
+              resultBytes: raw.resultBytes,
+            }),
+          );
+        }
         if (fitOutcome.status === "rejected")
           profileFailures.push(fitOutcome.reason);
         if (profileOutcome.status === "rejected")
           profileFailures.push(profileOutcome.reason);
         else if (profileOutcome.value) {
           try {
-            saveCachedProfile(profileOutcome.value);
+            const historical =
+              "native121" in scenario
+                ? scenario.native121
+                : "native95" in scenario
+                  ? scenario.native95
+                  : null;
+            if (!historical)
+              throw new Error("Unadmitted cached-fit profile scenario");
+            saveCachedProfile(profileOutcome.value, {
+              label: "native121" in scenario ? scenario.label : "NATIVE95",
+              key,
+              historicalSource: historical.source,
+              historicalSourceSHA256: historical.sourceSHA256,
+            });
           } catch (error) {
             profileFailures.push(error);
           }
@@ -1708,6 +1988,7 @@ describe.each(cases)("$name", (scenario) => {
           JSON.stringify({
             key,
             lod,
+            ...(cachedInput ? { reconstructedInput: cachedInput } : {}),
             admissions: prepared.admissions,
             status: cachedResult.state.status,
             reason:
@@ -1760,8 +2041,8 @@ describe.each(cases)("$name", (scenario) => {
         // reuse detached buffers, warm an owner, relax caps or use a profiler.
         if (
           cachedBaselineSource &&
-          "native95" in scenario &&
-          scenario.key === "gcell_v1_11_16"
+          (("native95" in scenario && scenario.key === "gcell_v1_11_16") ||
+            ("native121" in scenario && scenario.key === "gcell_v1_13_16"))
         ) {
           const expected = grassGroundingWorkerSemanticResult(result, request);
           const order = [
@@ -1782,6 +2063,10 @@ describe.each(cases)("$name", (scenario) => {
             const coldStarted = performance.now();
             groundingWorker = await createActualGroundingWorker(source);
             const comparisonPacket = createGrassGroundingWorkerRequest(request);
+            const comparisonInput =
+              "native121" in scenario
+                ? serializedInputReceipt(comparisonPacket)
+                : null;
             const comparisonPrepared =
               await prepareCachedGrassGroundingWorkerRequest(
                 groundingWorker,
@@ -1794,14 +2079,31 @@ describe.each(cases)("$name", (scenario) => {
             );
             const finished = performance.now();
             evidence(
-              "NATIVE95_CACHED_AB",
+              "native121" in scenario
+                ? `${scenario.label}_CACHED_AB`
+                : "NATIVE95_CACHED_AB",
               JSON.stringify({
                 index,
                 variant,
                 key,
                 lod,
+                ...("native121" in scenario
+                  ? { historicalObservation: scenario.native121 }
+                  : {}),
+                ...(comparisonInput
+                  ? { reconstructedInput: comparisonInput }
+                  : {}),
                 bundleSHA256: hashBytes(source),
                 status: comparison.state.status,
+                ...("native121" in scenario
+                  ? {
+                      failure:
+                        comparison.state.status === "ready"
+                          ? null
+                          : comparison.state,
+                      timing: comparison.timing ?? null,
+                    }
+                  : {}),
                 work: comparison.work,
                 lastPhase: comparison.lastPhase,
                 inputBytes: comparison.inputBytes,
@@ -1819,6 +2121,7 @@ describe.each(cases)("$name", (scenario) => {
               }),
             );
             expect(comparison.state.status).toBe("ready");
+            if (comparisonInput) expect(comparisonInput).toEqual(cachedInput);
             if (comparison.state.status !== "ready")
               throw new Error(`Cached comparison failed: ${variant}`);
             expect(
@@ -1856,6 +2159,27 @@ describe.each(cases)("$name", (scenario) => {
         );
         for (let i = 0; i < 10_000 && handoff.state.status === "running"; i++)
           handoff.advance();
+        if ("native121" in scenario) {
+          evidence(
+            `${scenario.label}_HANDOFF_PREPARATION`,
+            JSON.stringify({
+              key,
+              lod,
+              state:
+                handoff.state.status === "prepared"
+                  ? { status: "prepared" }
+                  : handoff.state,
+              submittedWork: {
+                operations: handoff.operations,
+                activeMs: handoff.activeMs,
+                maximumSliceMs: handoff.maximumSliceMs,
+              },
+              historicalSubmittedWork: scenario.native121.submittedWork,
+              scope:
+                "Fresh measured production projection/copy/constraint handoff seed; historical elapsed time and work are not injected or subtracted.",
+            }),
+          );
+        }
         if (handoff.state.status !== "prepared")
           throw new Error(
             "Pond handoff did not prepare: " + JSON.stringify(handoff.state),
@@ -1906,8 +2230,29 @@ describe.each(cases)("$name", (scenario) => {
             maximumSliceMs: handoff.maximumSliceMs,
           },
         });
-        await clientPort.waitFor("result", fitId);
+        const rawFit = await clientPort.waitFor("result", fitId);
         const settled = groundingClient.takeSettled();
+        if ("native121" in scenario) {
+          evidence(
+            `${scenario.label}_HANDOFF_RAW_RESPONSE`,
+            JSON.stringify({
+              key,
+              lod,
+              jobId: rawFit.jobId,
+              generation: rawFit.generation,
+              state:
+                rawFit.state.status === "ready"
+                  ? { status: "ready" }
+                  : rawFit.state,
+              work: rawFit.work,
+              timing: rawFit.timing ?? null,
+              lastPhase: rawFit.lastPhase,
+              inputBytes: rawFit.inputBytes,
+              resultBytes: rawFit.resultBytes,
+              settlementStatus: settled?.status ?? null,
+            }),
+          );
+        }
         if (
           settled?.status !== "response" ||
           settled.response.type !== "result"
@@ -1916,6 +2261,7 @@ describe.each(cases)("$name", (scenario) => {
             "Pond client fitting transport failed: " + JSON.stringify(settled),
           );
         const fit = settled.response;
+        if ("native121" in scenario) expect(fit).toBe(rawFit);
         const transportMs = settled.dispatchCpuMs + settled.receiveCpuMs;
         evidence(
           `${scenario.label}_HANDOFF_WORKER`,
@@ -1924,6 +2270,14 @@ describe.each(cases)("$name", (scenario) => {
             lod,
             state: fit.state.status,
             work: fit.work,
+            ...("native121" in scenario
+              ? {
+                  failure: fit.state.status === "ready" ? null : fit.state,
+                  timing: fit.timing ?? null,
+                  lastPhase: fit.lastPhase,
+                  historicalSubmittedWork: scenario.native121.submittedWork,
+                }
+              : {}),
             preparation: {
               operations: handoff.operations,
               activeMs: handoff.activeMs,
@@ -1978,6 +2332,16 @@ describe.each(cases)("$name", (scenario) => {
             operations: publication.operations,
             activeMs: publication.activeMs,
             maximumSliceMs: publication.maximumSliceMs,
+            ...("native121" in scenario
+              ? {
+                  failure:
+                    publication.state.status === "ready"
+                      ? null
+                      : publication.state,
+                  timing: publication.captureTiming(),
+                  lastPhase: publication.lastPhase,
+                }
+              : {}),
             totalColdWallMs: performance.now() - handoffStarted,
             scope:
               "Full projection + fitting + main transport + numeric validation/provenance remap under the unchanged cumulative limits. One-time terrain capture and explicit admission are separately reported above. Node worker realm and real world inputs, not a native frame-rate claim.",
@@ -2420,6 +2784,37 @@ describe.each(cases)("$name", (scenario) => {
         // Release native dock actors/exclusions before terrain or physics dies.
         release(() => docks?.destroy());
         release(() => world.destroy());
+        if ("native121" in scenario)
+          release(() => {
+            const pinsBefore = [
+              ...reconstructionSources,
+              ...reconstructionAssets,
+            ];
+            const pinsAfter = pinsBefore.map(({ path }) => {
+              const bytes = readFileSync(path);
+              return { path, bytes: bytes.length, sha256: hashBytes(bytes) };
+            });
+            const sourcesUnchanged = pinsBefore.every(
+              (pin, i) =>
+                pin.bytes === pinsAfter[i].bytes &&
+                pin.sha256 === pinsAfter[i].sha256,
+            );
+            evidence(
+              `${scenario.label}_SOURCE_INPUT_POSTFLIGHT`,
+              JSON.stringify({
+                sourcePinsAfter: pinsAfter,
+                sourcesUnchanged,
+                failures: failures.map((error) =>
+                  error instanceof Error
+                    ? `${error.name}: ${error.message}`
+                    : String(error),
+                ),
+                scope:
+                  "Recorded after owned cleanup even when any unchanged fitting/publication budget or assertion failed. No failed observation is retried or relabeled as a passing native replay.",
+              }),
+            );
+            expect(sourcesUnchanged).toBe(true);
+          });
       }
       if (failures.length === 1) throw failures[0];
       if (failures.length > 1)

@@ -1,5 +1,38 @@
 # Hyperia graphics reference library
 
+## 2026-09-22 — exact shoreline fitting reconstruction; arithmetic trial rejected
+
+- [x] Reconstruct native121's cell `gcell_v1_13_16` at LOD0/focus335,431 using
+  the actual assets-v10 retained owners at350,450 and350,350, both resolution128.
+  Pin current inputs, geometry, sources and newly measured handoff work; historical
+  packet bytes were not retained, so this is not an exact historical replay.
+- [x] `native121-cached-profile01`: one selected scenario passes (19 skipped),
+  processing847/retaining780 clumps. Cached fitting135870 operations/107.515ms;
+  measured handoff/publication completes under unchanged250ms/1M caps. The
+  93-sample Node profile cannot explain the historical browser budget failure.
+- [x] Reject the fade-transform arithmetic reuse trial. Four fresh A/B pairs
+  preserve exact inputs, outputs,135870 operations and reservations, but candidate
+  median120.597ms is slower than baseline95.312ms. All observations are retained
+  in `native121-swept-ab01`; only our production edit was undone, restoring SHA
+  `a4d235f47332a6c67c87aba1f4c8662a15e058f345b46e76e3e5bb8d45dba5fd`.
+  No cap increase, timing discount, retry-until-green or performance-win claim.
+- [x] Keep12 exact scalar/LOD/slope/scale/signed-zero/borrowed-mutation regression
+  cases plus the real-cell diagnostic:582/582 tests in8 suites, typecheck750
+  roots/2456 sources with zero diagnostics, and scoped lint pass.
+- [x] Native123 reuses unchanged build63 after nominal-host recovery:41.624s
+  startup,122/122 grass cells, two original views,12 nominal AC/awake host samples.
+  Flowers205/180 with each placed population unchanged across its still; original
+  camera-cut settling3.765/2.511s. Raw owner maximum update12.8ms, validation1.1ms,
+  publication1.3ms and11 soft slice overruns remain visible; no performance approval.
+- [ ] Root and independent visual review: somewhat easier-to-read heads, still
+  sparse white flecks in dominant grass. Roots, shadows, motion, continuous
+  traversal and historical three-budget/native121 failures remain open. Native122
+  thermal interruption is retained. Next isolated art candidate: petal width
+  0.0125h -> 0.018h with unchanged height/count/topology, verified swept bounds,
+  matched wide/close views and six seconds of actual wind; not yet implemented.
+- [x] Runtime93 and its owned browser/database are closed; protected145 artifacts,
+  retained lock and localhost3333 remain unchanged. No source/default promotion.
+
 ## 2026-09-22 — Grassworks vegetation reference added
 
 - [x] Review the user-supplied [Grassworks demo](https://grassworks.techredux.co/demo)

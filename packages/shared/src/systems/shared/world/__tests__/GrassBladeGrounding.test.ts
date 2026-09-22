@@ -259,6 +259,77 @@ function transformedVertex(
     );
 }
 
+type ScalarSweepBounds = NonNullable<
+  Extract<GrassBladeGroundingResult, { status: "ready" }>["sweptBounds"]
+>;
+const emptyScalarSweepBounds = (): ScalarSweepBounds => ({
+  minX: Infinity,
+  maxX: -Infinity,
+  minY: Infinity,
+  maxY: -Infinity,
+  minZ: Infinity,
+  maxZ: -Infinity,
+});
+
+/** Frozen pre-reuse scalar expression/order, not quaternion tolerance or the
+ * proposed fade-independent factorization. Supplied root corrections are a
+ * separate, unchanged fitting result; this oracle tests swept arithmetic. */
+function appendOriginalScalarSweep(
+  request: GrassBladeGroundingRequest,
+  rootDeltas: Float32Array,
+  instance: number,
+  firstVertex: number,
+  endVertex: number,
+  heightScale: number,
+  bounds: ScalarSweepBounds,
+) {
+  const { data, ownSurface, geometry, wind } = request;
+  const k = instance * 3;
+  const x = ownSurface.centerX + data.offsets[k];
+  const y = data.offsets[k + 1];
+  const z = ownSurface.centerZ + data.offsets[k + 2];
+  const cos = Math.cos(data.rotScaleHash[k]);
+  const sin = Math.sin(data.rotScaleHash[k]);
+  const scale = data.rotScaleHash[k + 1];
+  const nx = data.groundNormals[k];
+  const ny = data.groundNormals[k + 1];
+  const nz = data.groundNormals[k + 2];
+  const q = 1 / (1 + ny);
+  const cross = -nx * nz * q;
+  const tiltX = ny + nz * nz * q;
+  const tiltZ = ny + nx * nx * q;
+  const position = geometry.getAttribute("position");
+  const uv = geometry.getAttribute("uv");
+  const layout = getGrassBladeLayout(request.lod, request.geometryLayout);
+  for (let v = firstVertex; v < endVertex; v++) {
+    const d =
+      (instance * layout.bladesPerClump +
+        Math.floor(v / layout.verticesPerBlade)) *
+      2;
+    const u = uv.getX(v);
+    const correction = rootDeltas[d] * (1 - u) + rootDeltas[d + 1] * u;
+    const windFactor = uv.getY(v) ** 1.8;
+    const windX = wind.x * heightScale * windFactor;
+    const windZ = wind.z * heightScale * windFactor;
+    const rx = (position.getX(v) * cos - position.getZ(v) * sin) * scale;
+    const rz = (position.getX(v) * sin + position.getZ(v) * cos) * scale;
+    const scaledY = position.getY(v) * heightScale * scale;
+    for (let fade = 0; fade < (scaledY === 0 ? 1 : 2); fade++) {
+      const ry = scaledY * fade;
+      const px = x + rx * tiltX + ry * nx + rz * cross;
+      const py = y - rx * nx + ry * ny - rz * nz;
+      const pz = z + rx * cross + ry * nz + rz * tiltZ;
+      bounds.minX = Math.min(bounds.minX, px - windX - 0.00001);
+      bounds.maxX = Math.max(bounds.maxX, px + windX + 0.00001);
+      bounds.minZ = Math.min(bounds.minZ, pz - windZ - 0.00001);
+      bounds.maxZ = Math.max(bounds.maxZ, pz + windZ + 0.00001);
+      const correctedY = py + correction;
+      bounds.minY = Math.min(bounds.minY, correctedY - 0.00001);
+      bounds.maxY = Math.max(bounds.maxY, correctedY + 0.00001);
+    }
+  }
+}
+
 function one(data: GrassAnchorData, index: number): GrassAnchorData {
   return {
     count: 1,
@@ -1820,6 +1891,201 @@ describe("CPU per-blade grounding prototype (no renderer/GPU)", () => {
       }
     },
   );
+
+  it.each([
+    ["ordinary", 0],
+    ["ordinary", 1],
+    ["ordinary", 2],
+    ["fine", 0],
+    ["fine", 1],
+    ["fine", 2],
+    ["isolated-fine-near4", 0],
+    ["isolated-fine-near4", 1],
+    ["isolated-fine-near4", 2],
+  ] as const)(
+    "matches the exact original swept scalar expression for %s LOD%s on rotated scaled slopes",
+    (appearance, lod) => {
+      const f = analyticOwner(appearance);
+      try {
+        const surface = f.makeSurface(
+          1,
+          350,
+          318,
+          64,
+          (x, z) => 20 + 0.2 * (x - 350) - 0.13 * (z - 318),
+        );
+        const data = f.dataAt(surface, [
+          [0, 0, 0.8],
+          [-9, 0, 2.4],
+          [-11, 0, 5.1],
+        ]);
+        data.rotScaleHash[1] = 0.2;
+        data.rotScaleHash[4] = 4;
+        data.rotScaleHash[7] = 1.7;
+        const request: GrassBladeGroundingRequest = {
+          ...f.request(surface, data, lod),
+          wind: { x: 0.3, z: 0.165 },
+          ...(appearance === "ordinary"
+            ? {}
+            : { bankVerge: BANK_VERGE_HEIGHT_TRIAL }),
+        };
+        const actual = drainPipeline(groundGrassBladeSteps(request));
+        if (actual.result.status !== "ready" || !actual.result.sweptBounds)
+          throw new Error("Expected complete scalar sweep fixture");
+        expect(Array.from(actual.result.sourceIndices)).toEqual([0, 1, 2]);
+        const expected = emptyScalarSweepBounds();
+        const colors = createCompactTerrainColorOperations();
+        for (let i = 0; i < data.count; i++) {
+          // Capture the real, separately tested bank input; only the transform
+          // arithmetic is independently frozen by this exact oracle.
+          const heightScale = colors.bankVergeHeightScale(
+            surface.centerX + data.offsets[i * 3],
+            surface.centerZ + data.offsets[i * 3 + 2],
+            request.bankVerge
+              ? { coastalMeadow: true, bankVerge: request.bankVerge }
+              : null,
+          );
+          if (appearance === "ordinary" || i === 2) expect(heightScale).toBe(1);
+          else {
+            expect(heightScale).toBeLessThan(1);
+            expect(heightScale).toBeGreaterThanOrEqual(
+              BANK_VERGE_HEIGHT_TRIAL.heightScale,
+            );
+          }
+          appendOriginalScalarSweep(
+            request,
+            actual.result.rootDeltas,
+            i,
+            0,
+            request.geometry.getAttribute("position").count,
+            heightScale,
+            expected,
+          );
+        }
+        expect(actual.result.sweptBounds).toEqual(expected);
+      } finally {
+        f.close();
+      }
+    },
+  );
+
+  it.each([0, -0])(
+    "keeps exact scalar swept bounds for signed-zero roots, rotation and wind (%s)",
+    (zero) => {
+      const f = analyticOwner("fine");
+      try {
+        const surface = f.makeSurface();
+        const data = f.dataAt(surface, [[0, 0, zero]]);
+        data.groundNormals.set([zero, 1, zero]);
+        const request = {
+          ...f.request(surface, data, 0),
+          wind: { x: zero, z: zero },
+        };
+        const position = request.geometry.getAttribute("position");
+        const uv = request.geometry.getAttribute("uv");
+        let roots = 0;
+        for (let v = 0; v < position.count; v++)
+          if (uv.getY(v) === 0) {
+            position.setY(v, zero);
+            uv.setY(v, zero);
+            expect(Object.is(position.getY(v), zero)).toBe(true);
+            roots++;
+          }
+        expect(roots).toBe(
+          getGrassBladeLayout(0, request.geometryLayout).bladesPerClump * 2,
+        );
+        expect(Object.is(data.rotScaleHash[0], zero)).toBe(true);
+        const actual = groundGrassBlades(request);
+        if (actual.status !== "ready" || !actual.sweptBounds)
+          throw new Error("Expected signed-zero scalar sweep fixture");
+        expect(actual.data.count).toBe(1);
+        const expected = emptyScalarSweepBounds();
+        appendOriginalScalarSweep(
+          request,
+          actual.rootDeltas,
+          0,
+          0,
+          position.count,
+          1,
+          expected,
+        );
+        expect(actual.sweptBounds).toEqual(expected);
+      } finally {
+        f.close();
+      }
+    },
+  );
+
+  it("rereads real position and wind after a swept-blade yield without changing phases or work", () => {
+    const f = analyticOwner("fine");
+    try {
+      const surface = f.makeSurface(
+        1,
+        0,
+        0,
+        64,
+        (x, z) => 20 + x * 0.12 - z * 0.08,
+      );
+      const request = {
+        ...f.request(surface, f.dataAt(surface, [[0, 0, 0.7]]), 0),
+        wind: { x: 0, z: 0 },
+      };
+      const before = drainPipeline(groundGrassBladeSteps(request));
+      if (before.result.status !== "ready" || !before.result.sweptBounds)
+        throw new Error("Expected unmodified borrowed-input sweep");
+      const original = before.result;
+      const position = request.geometry.getAttribute("position");
+      const layout = getGrassBladeLayout(0, request.geometryLayout);
+      const expected = emptyScalarSweepBounds();
+      const steps = groundGrassBladeSteps(request);
+      let sweptBlades = 0;
+      const actual = drainPipeline(
+        (function* () {
+          for (;;) {
+            const step = steps.next();
+            if (step.done) return step.value;
+            if (step.value === "blade_swept_bounds") {
+              if (sweptBlades === 1) {
+                request.wind.x = 0.9;
+                request.wind.z = 0.7;
+                // Only future upper vertices change. Root fitting has finished;
+                // all original root vertices and their corrections remain valid.
+                for (let v = layout.verticesPerBlade; v < position.count; v++)
+                  if (v % layout.verticesPerBlade >= 2) {
+                    position.setX(v, position.getX(v) + 0.75);
+                    position.setY(v, position.getY(v) * 1.35);
+                    position.setZ(v, position.getZ(v) - 0.5);
+                  }
+                position.needsUpdate = true;
+              }
+              appendOriginalScalarSweep(
+                request,
+                original.rootDeltas,
+                0,
+                sweptBlades * layout.verticesPerBlade,
+                (sweptBlades + 1) * layout.verticesPerBlade,
+                1,
+                expected,
+              );
+              sweptBlades++;
+            }
+            yield step.value;
+          }
+        })(),
+      );
+      expect(sweptBlades).toBe(layout.bladesPerClump);
+      if (actual.result.status !== "ready")
+        throw new Error("Expected live borrowed-input sweep");
+      expect(actual.trace).toEqual(before.trace);
+      expect(actual.result.receipt.workUnits).toBe(original.receipt.workUnits);
+      expect(actual.result.data).toEqual(original.data);
+      expect(actual.result.rootDeltas).toEqual(original.rootDeltas);
+      expect(actual.result.sweptBounds).toEqual(expected);
+      expect(actual.result.sweptBounds).not.toEqual(original.sweptBounds);
+    } finally {
+      f.close();
+    }
+  });
 
   it("does not include rejected clumps in culling bounds and gives empty output no box", () => {
     const f = analyticOwner();
