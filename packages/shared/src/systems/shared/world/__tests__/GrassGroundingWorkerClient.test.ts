@@ -15,6 +15,7 @@ import {
   groundGrassBlades,
   GRASS_BLADE_GROUNDING_LIMITS,
   GRASS_BLADE_GROUNDING_JOB_LIMITS,
+  type GrassGroundingTiming,
 } from "../GrassBladeGrounding";
 import { RetainedTerrainSurface } from "../TerrainGridSurface";
 import { gridGeometry } from "./terrain-grid.fixture";
@@ -572,11 +573,296 @@ describe("actual grounding worker client", () => {
         );
         expect(client.terminated).toBe(false);
         expect(client.cacheReceipt.owners).toBe(0);
+        if (reply.type === "result") {
+          expect(reply.timing).toMatchObject({
+            timeBasis: "slice-elapsed-including-preemption",
+            scope: "local-continuation",
+          });
+        } else {
+          expect(
+            Object.getOwnPropertyDescriptor(reply, "timing"),
+          ).toBeUndefined();
+        }
       } finally {
         fixture.dispose();
       }
     },
   );
+
+  it("validates failure timing against a real admitted worker slot, with strict accessor-safe bounded spans", async () => {
+    const fixture = createSameFaceCase("ordinary-lod1");
+    try {
+      const { client, port } = await actualClient();
+      const packet = maximumClumpPacket(workerRequest(fixture.request));
+      const start = GRASS_BLADE_GROUNDING_JOB_LIMITS.maximumOperations - 10000;
+      packet.consumed = { operations: start, activeMs: 1, maximumSliceMs: 1 };
+      expect(client.submit(withoutId(packet))).toBe(1);
+      const reply = await port.waitFor("result", 1);
+      // This is the actual terminal response and its actual admitted slot, not
+      // a fake Worker, clock, accounting ledger or manufactured successful job.
+      // Adversarial packets below test the real private boundary validator only;
+      // they are deliberately NOT described as messages emitted by the worker.
+      const slot: unknown = Reflect.get(client, "slot");
+      const validate: unknown = Reflect.get(client, "validateResponse");
+      if (!slot || typeof validate !== "function")
+        throw new Error("Missing actual client validator/slot");
+      const check = (value: unknown) =>
+        Reflect.apply(validate, client, [value, slot]);
+      expect(takeResponse(client).response).toBe(reply);
+      expect(reply.state.status).toBe("failed_budget");
+      expect(reply.work.operations - start).toBeGreaterThanOrEqual(8192);
+      expect(reply.timing).toMatchObject({
+        timeBasis: "slice-elapsed-including-preemption",
+        scope: "local-continuation",
+      });
+      expect(check(reply)).toBe(reply);
+
+      const localActiveMs = reply.work.activeMs - packet.consumed.activeMs;
+      const spanElapsedMs = Math.min(
+        1,
+        reply.work.maximumSliceMs,
+        localActiveMs,
+      );
+      expect(spanElapsedMs).toBeGreaterThan(0);
+      const timing = (): GrassGroundingTiming => ({
+        timeBasis: "slice-elapsed-including-preemption",
+        scope: "local-continuation",
+        peakSlice: {
+          elapsedMs: spanElapsedMs,
+          startOperations: start,
+          endOperations: start + 8192,
+          startPhase: null,
+          endPhase: "x".repeat(128),
+        },
+        peakClockInterval: {
+          elapsedMs: spanElapsedMs,
+          startOperations: start,
+          endOperations: start + 64,
+          startPhase: "",
+          endPhase: null,
+        },
+      });
+      const withTiming = (value: unknown) => ({ ...reply, timing: value });
+      const withoutTiming = { ...reply };
+      delete withoutTiming.timing;
+      expect(check(withoutTiming)).toBe(withoutTiming);
+      for (const value of [
+        timing(),
+        { ...timing(), peakSlice: null, peakClockInterval: null },
+        { ...timing(), peakClockInterval: null },
+        {
+          ...timing(),
+          peakSlice: {
+            ...timing().peakSlice,
+            elapsedMs: 0,
+            endOperations: start,
+          },
+          peakClockInterval: {
+            ...timing().peakClockInterval,
+            elapsedMs: 0,
+            endOperations: start,
+          },
+        },
+        {
+          ...timing(),
+          peakSlice: {
+            ...timing().peakSlice,
+            elapsedMs: Math.min(reply.work.maximumSliceMs, localActiveMs),
+            endOperations: reply.work.operations,
+            startOperations: reply.work.operations - 8192,
+          },
+        },
+        Object.assign(Object.create(null), timing()),
+      ])
+        expect(() => check(withTiming(value))).not.toThrow();
+
+      // Mutate only this real response at its real admitted-slot boundary.
+      // Neither cumulative maxima nor pre-seed time can become a local peak.
+      const boundedTiming = (elapsedMs: number): GrassGroundingTiming => ({
+        ...timing(),
+        peakSlice: {
+          elapsedMs,
+          startOperations: start,
+          endOperations: start,
+          startPhase: null,
+          endPhase: null,
+        },
+        peakClockInterval: {
+          elapsedMs,
+          startOperations: start,
+          endOperations: start,
+          startPhase: null,
+          endPhase: null,
+        },
+      });
+      const timingBoundary = (activeMs: number, elapsedMs: number) => ({
+        ...reply,
+        work: { ...reply.work, activeMs, maximumSliceMs: 1 },
+        timing: boundedTiming(elapsedMs),
+      });
+      expect(() => check(timingBoundary(3, 1))).not.toThrow();
+      expect(() => check(timingBoundary(3, 1.5))).toThrow(
+        "Invalid grounding timing span",
+      );
+      expect(() => check(timingBoundary(1.25, 0.25))).not.toThrow();
+      expect(() => check(timingBoundary(1.25, 0.5))).toThrow(
+        "Invalid grounding timing span",
+      );
+      // A positive measured increment can round away when added to the seed.
+      // This is a numerical receipt mutation, not a replaced clock or an
+      // assertion that the real worker emitted these synthetic durations.
+      const lostIncrement = Number.EPSILON / 4;
+      expect(packet.consumed.activeMs + lostIncrement).toBe(
+        packet.consumed.activeMs,
+      );
+      expect(() =>
+        check(timingBoundary(packet.consumed.activeMs, lostIncrement)),
+      ).not.toThrow();
+      expect(() =>
+        check(timingBoundary(packet.consumed.activeMs, 1e-6)),
+      ).toThrow("Invalid grounding timing span");
+
+      const malformed: Array<[string, unknown]> = [
+        ["undefined", undefined],
+        ["null", null],
+        ["array", []],
+        ["class", new Date()],
+        ["time basis", { ...timing(), timeBasis: "exclusive-cpu" }],
+        ["scope", { ...timing(), scope: "whole-job" }],
+        ["extra key", { ...timing(), extra: 1 }],
+        [
+          "missing key",
+          {
+            timeBasis: timing().timeBasis,
+            scope: timing().scope,
+            peakSlice: null,
+          },
+        ],
+        ["interval without slice", { ...timing(), peakSlice: null }],
+        [
+          "interval exceeds slice",
+          { ...timing(), peakSlice: { ...timing().peakSlice, elapsedMs: 0 } },
+        ],
+      ];
+      for (const key of ["peakSlice", "peakClockInterval"] as const) {
+        const span = timing()[key];
+        for (const value of [undefined, [], new Date()])
+          malformed.push([
+            key + ": non-record span",
+            { ...timing(), [key]: value },
+          ]);
+        for (const [name, patch] of [
+          ["negative elapsed", { elapsedMs: -1 }],
+          ["NaN elapsed", { elapsedMs: NaN }],
+          ["infinite elapsed", { elapsedMs: Infinity }],
+          ["elapsed beyond work", { elapsedMs: reply.work.activeMs + 1 }],
+          ["before seed", { startOperations: start - 1 }],
+          ["fractional start", { startOperations: start + 0.5 }],
+          ["fractional end", { endOperations: start + 0.5 }],
+          [
+            "reversed",
+            { startOperations: start + 2, endOperations: start + 1 },
+          ],
+          [
+            "end beyond work",
+            {
+              startOperations: reply.work.operations,
+              endOperations: reply.work.operations + 1,
+            },
+          ],
+          ["start beyond work", { startOperations: reply.work.operations + 1 }],
+          [
+            "delta overflow",
+            { endOperations: start + (key === "peakSlice" ? 8193 : 65) },
+          ],
+          ["start phase length", { startPhase: "x".repeat(129) }],
+          ["end phase length", { endPhase: "x".repeat(129) }],
+          ["start phase type", { startPhase: 1 }],
+          ["end phase type", { endPhase: {} }],
+          ["extra span key", { extra: true }],
+        ] as const)
+          malformed.push([
+            key + ": " + name,
+            { ...timing(), [key]: { ...span, ...patch } },
+          ]);
+        malformed.push([
+          key + ": missing field",
+          {
+            ...timing(),
+            [key]: {
+              elapsedMs: 0,
+              startOperations: start,
+              endOperations: start,
+              startPhase: null,
+            },
+          },
+        ]);
+      }
+      for (const [label, value] of malformed)
+        expect(() => check(withTiming(value)), label).toThrow();
+
+      let getters = 0;
+      const getter = () => {
+        getters++;
+        throw new Error("Timing accessor must never run");
+      };
+      const top = { ...reply };
+      Object.defineProperty(top, "timing", { enumerable: true, get: getter });
+      expect(() => check(top)).toThrow();
+      for (const key of [
+        "timeBasis",
+        "scope",
+        "peakSlice",
+        "peakClockInterval",
+      ] as const) {
+        const value = timing();
+        Object.defineProperty(value, key, { enumerable: true, get: getter });
+        expect(() => check(withTiming(value))).toThrow();
+      }
+      for (const owner of ["peakSlice", "peakClockInterval"] as const) {
+        for (const key of [
+          "elapsedMs",
+          "startOperations",
+          "endOperations",
+          "startPhase",
+          "endPhase",
+        ]) {
+          const value = timing();
+          const span = value[owner];
+          if (span === null) throw new Error("Missing test timing span");
+          Object.defineProperty(span, key, { enumerable: true, get: getter });
+          expect(() => check(withTiming(value))).toThrow();
+        }
+      }
+      const hidden = timing();
+      Object.defineProperty(hidden, "scope", {
+        value: "local-continuation",
+        enumerable: false,
+      });
+      expect(() => check(withTiming(hidden))).toThrow();
+      const symbol = timing();
+      Reflect.set(symbol, Symbol("extra"), 1);
+      expect(() => check(withTiming(symbol))).toThrow();
+      expect(getters).toBe(0);
+      for (const status of ["ready", "waiting_support", "cancelled"])
+        expect(() =>
+          check({ ...reply, state: { status }, timing: timing() }),
+        ).toThrow("failure-only");
+      // Both failure states admit the same bounded optional diagnostics. The
+      // real cached input-failure test below additionally exercises transport.
+      expect(() =>
+        check({
+          ...reply,
+          state: { status: "failed_input", error: "boundary qualification" },
+          timing: timing(),
+        }),
+      ).not.toThrow();
+      expect(client.terminated).toBe(false);
+      expect(client.transportFailure).toBeNull();
+    } finally {
+      fixture.dispose();
+    }
+  });
 
   it("keeps strict-admission and cached-core input failures recoverable without leaking or losing cache owners", async () => {
     const fixture = createSameFaceCase("ordinary-lod1");
@@ -603,9 +889,12 @@ describe("actual grounding worker client", () => {
       badFit.ownSurfaceToken = 2;
       badFit.data.offsets[0] = NaN;
       expect(client.submit(badFit)).toBe(3);
-      expect(
-        (await settledResponse(client, port, "result", 3)).state.status,
-      ).toBe("failed_input");
+      const failed = await settledResponse(client, port, "result", 3);
+      expect(failed.state.status).toBe("failed_input");
+      expect(failed.timing).toMatchObject({
+        timeBasis: "slice-elapsed-including-preemption",
+        scope: "local-continuation",
+      });
       expect(client.cacheReceipt).toEqual(cache);
       expect(client.transportFailure).toBeNull();
       const next = cachedPacket(workerRequest(fixture.request));

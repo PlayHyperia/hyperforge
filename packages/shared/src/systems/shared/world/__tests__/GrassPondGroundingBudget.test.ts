@@ -254,6 +254,34 @@ const native95Observation = {
 // Each uses its actual worker output, authored constraints and retained mesh.
 const cases = [
   {
+    name: "native106 startup LOD0 western meadow work budget",
+    test: "reconstructs the native106 failed cell using actual v10 owners and unchanged fitting caps",
+    enabled: process.env.ASSETS_DIR?.endsWith(
+      "/inland-pond-integration01-UNQUALIFIED/assets-v10",
+    ),
+    label: "NATIVE106_LOD0_WESTERN_MEADOW",
+    // The cell's original halo crosses z400; detail comes from production
+    // preparation regions, not a hardcoded all-fine retained terrain fixture.
+    nodes: [
+      [350, 450],
+      [350, 350],
+    ],
+    focus: [335, 431],
+    lod: 0,
+    key: "gcell_v1_14_16",
+    bounds: { minX: 350, maxX: 375, minZ: 400, maxZ: 425 },
+    native106: {
+      source: "native106/process.json",
+      sourceSHA256:
+        "40e09ffd6a0bb40e1c3f0119ddea64ddb5c3e331138c783915d6dfa77f1d71d7",
+      workerOperations: 146048,
+      workerSliceElapsedMs: 250.90000009536743,
+      workerMaximumSliceMs: 89.2999997138977,
+      scope:
+        "Historical worker-terminal failed prefix with nominal host, not complete work or exclusive CPU. Current-source reconstruction uses actual v10 terrain, original focus/cell/LOD and production detail. Native106 did not retain the exact input packet; this is not byte-exact historical replay or native startup qualification.",
+    },
+  },
+  {
     name: "review52 retained pond grass work budget",
     test: "grounds the full native-failing northwest cell at near LOD without increasing its work cap",
     enabled: process.env.ASSETS_DIR?.includes(
@@ -668,10 +696,12 @@ describe.each(cases)("$name", (scenario) => {
         "native74" in scenario ||
         "native82" in scenario ||
         "native86" in scenario ||
+        "native106" in scenario ||
         "native95" in scenario;
       const usesNativeDetail =
         "native82" in scenario ||
         "native86" in scenario ||
+        "native106" in scenario ||
         "native95" in scenario;
       await DataManager.getInstance().initialize();
       const world = new World();
@@ -865,10 +895,11 @@ describe.each(cases)("$name", (scenario) => {
           }
           if (
             ("native82" in scenario && node.centerX === 250) ||
-            ("native95" in scenario && step.value.isRegularGrid)
+            (("native95" in scenario || "native106" in scenario) &&
+              step.value.isRegularGrid)
           ) {
             // Historical pond fixtures all build refined 128-grid owners.
-            // Native95 also leases a regular 128-grid Haven-shoulder neighbour;
+            // Startup/shoulder reconstruction may also lease regular owners;
             // resolution alone does not imply annular refinement or an index.
             if ("native82" in scenario) expect(node.resolution).toBe(64);
             expect(step.value.isRegularGrid).toBe(true);
@@ -1099,6 +1130,9 @@ describe.each(cases)("$name", (scenario) => {
               : {}),
             ...("native86" in scenario
               ? { native86HistoricalObservation: scenario.native86 }
+              : {}),
+            ...("native106" in scenario
+              ? { native106HistoricalObservation: scenario.native106 }
               : {}),
             ...("native95" in scenario
               ? { native95HistoricalObservation: scenario.native95 }
@@ -1373,6 +1407,7 @@ describe.each(cases)("$name", (scenario) => {
                   ? cachedResult.state.error
                   : null,
             work: cachedResult.work,
+            timing: cachedResult.timing ?? null,
             lastPhase: cachedResult.lastPhase,
             inputBytes: cachedResult.inputBytes,
             derivedBytesReserved: cachedResult.derivedBytesReserved,

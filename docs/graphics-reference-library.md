@@ -2886,6 +2886,74 @@ Evidence: retained service-layout `tree-wind-integration-regression02.*`,
 Official Three.js references above remain implementation references, not
 automatic proof of AAA art quality, a completed cinematic or launch readiness.
 
+#### Grass fitting cost and local timing — checkpoint; readiness still OPEN
+
+- [x] Prove disjoint terrain-owner bounds once per fitting job, then omit
+  redundant per-clump owner-pair checks. Touching edges are safe; any positive
+  overlap preserves the original overlap/dependency path. Exact-output oracle,
+  gaps, tiny overlaps, cancellation and interleaved-job tests retain the
+  original geometry and work caps. This is a small work reduction, not a
+  measured game-speed or loading-success claim.
+- [x] Add bounded worker-local peak-slice and peak-clock-interval observations
+  using existing clock reads, two reusable scalar records and meaningful
+  grounding phase labels. Failure-only wire snapshots are detached/validated,
+  bounded by the cumulative maximum and local added work with derived
+  floating-point tolerance. No extra clocks, unbounded histories, excluded
+  stalls, reset budgets or increased limits.
+- Final validation is **NOT all green**: regression03 passed 609/609 before the
+  final client-only diagnostic validation tightening; regression04 passes
+  **608/609**, with the existing synchronous pond-support publication case
+  failing at 250.116 ms / 138,240 resumptions. Earlier regression01/02 failures
+  were exact phase/work-count expectations corrected without relaxing output
+  checks. Full types01 passes 739 roots / 2,418 sources / zero diagnostics
+  with stable pins; scoped eleven-file ESLint and format/diff checks pass.
+- The new actual-v10 native106-cell reconstruction is retained and explicitly
+  asset-gated. Reconstruction01 overlapped the tail of regression03 and failed
+  cached fitting; its timing is not uncontended evidence. Serialized
+  reconstruction02 completes cached fitting at 128.500 ms and full production
+  handoff/publication at 131.593 ms under unchanged limits, but its separate
+  no-service-wear numerical control fails at 250.122 ms / 141,824 operations.
+  Thus the test still FAILS; do not summarize the partial success as a pass.
+  This is actual current terrain/worker reconstruction, not a byte-exact replay
+  of native106's unretained packet or browser-performance qualification.
+- Private build53 completes nine bundles / 998 inputs with exactly five changed
+  production inputs against build52, no added production input, and 145
+  protected artifacts unchanged. The diagnostic preflight explicitly records
+  the known test failures; it is NOT a successful qualification gate.
+- **native108/runtime78/build53/assets-v10** (legacy-wind control) fails the
+  unchanged 90-second startup gate with 121/122 grass cells ready. The failed
+  cell is now LOD1 gcell_v1_15_17 (x375..400/z425..450), not native106's LOD0
+  western meadow. Raw generation56/job60 fitting consumes 250.000001 ms /
+  148,346 operations; main merge reaches 251.000002 ms and supervision
+  251.300002 ms. Peak local slice: 13.900 ms, operations 47,354..48,634,
+  anchor_surface to grounding_operation. Peak observed clock interval:
+  12.800 ms, operations 48,570..48,634, interval_merge to grounding_operation.
+  These are elapsed spans including possible scheduling/GC, not exclusive CPU
+  or proof that either endpoint phase caused the delay. All 19 host samples
+  were nominal/AC/awake. No matched views or held tree-wind video were reached.
+- [ ] Remove measured inner-loop allocation opportunities while preserving
+  exact suspension/work/ownership behavior: this reconstructed cell creates
+  39,360 endpoint generators and 19,680 edge generators, with 16,990 edges
+  completing through the zero-yield same-face path. Avoiding those short-lived
+  objects is a candidate for measurement, not an established timing cause.
+- [ ] Resolve both synchronous/worker budget failures and repeat a fresh native
+  comparison before accepting connected wind, flowers, falling leaves or the
+  requested 2x cinematic. No quality, density, resolution or deadline reduction.
+- native109/runtime79 were NOT launched. Native108's owned browser is closed;
+  runtime78 is STOPPED, its temporary database removed and protected human
+  runtime/bundles/retained lock unchanged. The failure image was inspected:
+  broad plain grass fields, hard path/arena forms and pond/art composition
+  still need work; this is not AAA visual acceptance.
+
+Evidence: service-layout `grounding-local-slices-regression01..04.*`,
+`grounding-local-slices-sameface03.*`, `grounding-local-slices-types01.*`,
+`grounding-local-slices-native106-reconstruction01..02.*`;
+inland-pond `isolated-build53-report.json`,
+`grounding-local-slices-build53-preflight01.json`,
+`native108/process.json`, `native108/failure.png`, `runtime78/process.json`.
+The official Three.js reference library remains the implementation guide;
+these correctness/diagnostic results do not replace visual or performance proof.
+
 
 
 ### Pond-bank service ground — 2026-09-22

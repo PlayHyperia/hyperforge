@@ -401,6 +401,16 @@ describe("actual isolated grass grounding worker", () => {
         reason: "grounding_work",
       });
       expect(response.resultBytes).toBe(0);
+      expect(response.timing?.timeBasis).toBe(
+        "slice-elapsed-including-preemption",
+      );
+      expect(response.timing?.scope).toBe("local-continuation");
+      expect(response.timing?.peakSlice?.endOperations).toBeLessThanOrEqual(
+        response.work.operations,
+      );
+      expect(response.timing?.peakClockInterval?.elapsedMs).toBeLessThanOrEqual(
+        response.timing?.peakSlice?.elapsedMs ?? -1,
+      );
     } finally {
       fixture.dispose();
     }

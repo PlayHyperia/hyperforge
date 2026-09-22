@@ -802,6 +802,280 @@ describe("two-interval ordering on actual retained terrain", () => {
   );
 });
 
+describe("job-local disjoint-owner coverage preflight", () => {
+  const remoteOwnersRequest = (
+    owner: ReturnType<typeof analyticOwner>,
+    surfaceCount: number,
+    clumps = 32,
+  ): GrassBladeGroundingRequest => {
+    const surface = owner.makeSurface();
+    const points: [number, number, number][] = Array.from(
+      { length: clumps },
+      (_, i) => [-20 + i, 10, i * 0.13],
+    );
+    return {
+      ...owner.request(surface, owner.dataAt(surface, points), 2),
+      surfaces: [
+        surface,
+        ...Array.from({ length: surfaceCount - 1 }, (_, i) =>
+          owner.makeSurface(i + 2, 1000 + i * 100, 0, 2),
+        ),
+      ],
+    };
+  };
+  const withoutCoverageWork = (result: GrassBladeGroundingResult) => {
+    const {
+      elapsedMs: _elapsed,
+      workUnits: _work,
+      ...receipt
+    } = result.receipt;
+    return { ...result, receipt };
+  };
+
+  it.each([4, GRASS_BLADE_GROUNDING_LIMITS.maxSurfaces])(
+    "certifies %s owners once and removes only repeated overlap operations",
+    (surfaceCount) => {
+      const owner = analyticOwner("fine");
+      try {
+        const request = remoteOwnersRequest(owner, surfaceCount);
+        const before = structuredClone(request.data);
+        const actual = drainPipeline(groundGrassBladeSteps(request));
+        const historical = drainPipeline(legacyGroundGrassBladeSteps(request));
+        expect(actual.result.status).toBe("ready");
+        if (actual.result.status !== "ready") throw Error(actual.result.reason);
+        expect(actual.result.data.count).toBe(request.data.count);
+        expect(sameFaceHash(actual.result)).toBe(
+          sameFaceHash(historical.result),
+        );
+        const pairs = (surfaceCount * (surfaceCount - 1)) / 2;
+        expect(
+          actual.trace.filter((phase) => phase === "coverage_owner_pair"),
+        ).toHaveLength(pairs);
+
+        // Only the final, distant owner pair overlaps in this control. It
+        // consumes the same preflight but forces the original inner loop for
+        // every clump, without touching any clump or changing dependencies.
+        const last = request.surfaces[surfaceCount - 1];
+        const overlappingLast = owner.makeSurface(
+          last.nodeId,
+          last.centerX - 50,
+          last.centerZ,
+          2,
+        );
+        const fallbackRequest = {
+          ...request,
+          surfaces: [...request.surfaces.slice(0, -1), overlappingLast],
+        };
+        const fallback = drainPipeline(groundGrassBladeSteps(fallbackRequest));
+        expect(withoutCoverageWork(fallback.result)).toEqual(
+          withoutCoverageWork(actual.result),
+        );
+        expect(sameFaceHash(fallback.result)).toBe(
+          sameFaceHash(
+            drainPipeline(legacyGroundGrassBladeSteps(fallbackRequest)).result,
+          ),
+        );
+        expect(
+          fallback.trace.filter((phase) => phase === "coverage_owner_pair"),
+        ).toHaveLength(pairs);
+        const removedChecks = request.data.count * (surfaceCount - 1);
+        expect(fallback.trace.length - actual.trace.length).toBe(removedChecks);
+        expect(
+          fallback.result.receipt.workUnits - actual.result.receipt.workUnits,
+        ).toBe(removedChecks);
+        expect(
+          fallback.trace.filter((phase) => phase === "coverage_overlap"),
+        ).toHaveLength(removedChecks);
+        expect(actual.trace).not.toContain("coverage_overlap");
+        expect(
+          actual.trace.filter((phase) => phase === "coverage_owner"),
+        ).toHaveLength(request.data.count * surfaceCount);
+        expect(
+          fallback.trace.filter((phase) => phase === "coverage_owner"),
+        ).toHaveLength(request.data.count * surfaceCount);
+        expect(fallback.result.receipt.workBudget).toBe(
+          actual.result.receipt.workBudget,
+        );
+        // Compared with the old per-clump loop, the one-time proof saves 90
+        // operations for four owners or 360 at the unchanged sixteen-owner cap.
+        expect(removedChecks - pairs).toBe(surfaceCount === 4 ? 90 : 360);
+        expect(request.data).toEqual(before);
+      } finally {
+        owner.close();
+      }
+    },
+  );
+
+  it("adds no pair work for one owner or an empty job", () => {
+    const owner = analyticOwner("fine");
+    try {
+      for (const [surfaceCount, clumps] of [
+        [1, 1],
+        [4, 0],
+      ]) {
+        const request = remoteOwnersRequest(owner, surfaceCount, clumps);
+        const actual = drainPipeline(groundGrassBladeSteps(request));
+        expect(actual.result.status).toBe("ready");
+        expect(actual.trace).not.toContain("coverage_owner_pair");
+        expect(sameFaceHash(actual.result)).toBe(
+          sameFaceHash(
+            drainPipeline(legacyGroundGrassBladeSteps(request)).result,
+          ),
+        );
+      }
+    } finally {
+      owner.close();
+    }
+  });
+
+  it("retains exact output while the full sixteen-owner proof crosses slices", () => {
+    const owner = analyticOwner("fine");
+    try {
+      const request = remoteOwnersRequest(
+        owner,
+        GRASS_BLADE_GROUNDING_LIMITS.maxSurfaces,
+        1,
+      );
+      const expected = groundGrassBlades(request);
+      expect(expected.status).toBe("ready");
+      for (const size of [1, 7, 64]) {
+        const job = new GrassBladeGroundingJob(request, () => true);
+        while (job.state.status === "running") {
+          job.advance(size);
+          expect(job.lastSliceOperations).toBeLessThanOrEqual(size);
+        }
+        expect(job.state.status).toBe("ready");
+        if (job.state.status !== "ready") throw Error(job.state.status);
+        expect(withoutGroundingElapsed(job.state.result)).toEqual(
+          withoutGroundingElapsed(expected),
+        );
+      }
+    } finally {
+      owner.close();
+    }
+  });
+
+  it.each([
+    ["touching", 100, "ready"],
+    ["gap", 101, "missing_surface"],
+    ["overlap", 99, "overlapping_surface"],
+    ["sub-tolerance overlap", 100 - 1e-10, "ready"],
+  ] as const)(
+    "preserves the original union, dependency order and tolerance for %s owners",
+    (_kind, centerX, expected) => {
+      const owner = analyticOwner("fine");
+      try {
+        const surface = owner.makeSurface();
+        const adjacent = owner.makeSurface(2, centerX, 0);
+        const request = {
+          ...owner.request(surface, owner.dataAt(surface, [[47, 0]]), 1),
+          surfaces: [surface, adjacent],
+          wind: { x: 4, z: 0 },
+        };
+        const actual = drainPipeline(groundGrassBladeSteps(request));
+        const historical = drainPipeline(legacyGroundGrassBladeSteps(request));
+        expect(actual.trace).toContain("coverage_owner_pair");
+        expect(actual.result).toMatchObject(
+          expected === "ready"
+            ? { status: "ready", data: { count: 1 } }
+            : { status: "defer", reason: expected },
+        );
+        expect(sameFaceHash(actual.result)).toBe(
+          sameFaceHash(historical.result),
+        );
+        expect(actual.result.dependencies).toEqual(
+          historical.result.dependencies,
+        );
+        expect(actual.result.dependencies).toEqual([
+          { surface, uses: ["endpoint", "edge", "envelope"] },
+          { surface: adjacent, uses: ["envelope"] },
+        ]);
+      } finally {
+        owner.close();
+      }
+    },
+  );
+
+  it("charges each preflight pair against the unchanged geometric cap", () => {
+    const owner = analyticOwner("fine");
+    try {
+      const request = remoteOwnersRequest(owner, 4, 1);
+      const full = drainPipeline(groundGrassBladeSteps(request));
+      expect(full.result.status).toBe("ready");
+      const firstPair = full.trace.indexOf("coverage_owner_pair");
+      expect(firstPair).toBeGreaterThan(0);
+      // This single clump has no constraints: after its envelope, every
+      // remaining geometric charge is one coverage pair/owner or road cell.
+      const remainingCharges = full.trace
+        .slice(firstPair)
+        .filter(
+          (phase) =>
+            phase === "coverage_owner_pair" ||
+            phase === "coverage_owner" ||
+            phase === "grounding_operation",
+        ).length;
+      const workBeforePairs = full.result.receipt.workUnits - remainingCharges;
+      const budget = workBeforePairs + 1;
+      const exhausted = drainPipeline(
+        groundGrassBladeSteps({ ...request, workBudget: budget }),
+      );
+      expect(exhausted.trace).toEqual(full.trace.slice(0, firstPair + 2));
+      expect(exhausted.result).toMatchObject({
+        status: "defer",
+        reason: "work_budget",
+        receipt: { workUnits: budget, workBudget: budget, processedClumps: 0 },
+        dependencies: [
+          { surface: request.ownSurface, uses: ["endpoint", "edge"] },
+        ],
+      });
+      expect("data" in exhausted.result).toBe(false);
+      expect("rootDeltas" in exhausted.result).toBe(false);
+    } finally {
+      owner.close();
+    }
+  });
+
+  it.each(["caller", "invalidated"] as const)(
+    "retires %s work while a single owner pair is suspended",
+    (reason) => {
+      const owner = analyticOwner("fine");
+      try {
+        const request = remoteOwnersRequest(owner, 4, 1);
+        const before = structuredClone(request.data);
+        const job = new GrassBladeGroundingJob(request, () =>
+          request.surfaces.every((surface, i) =>
+            surface.matchesGeometry(owner.geometries[i]),
+          ),
+        );
+        while (
+          job.state.status === "running" &&
+          job.lastPhase !== "coverage_owner_pair"
+        ) {
+          job.advance(1);
+          expect(job.lastSliceOperations).toBeLessThanOrEqual(1);
+        }
+        expect(job.state.status).toBe("running");
+        expect(job.lastPhase).toBe("coverage_owner_pair");
+        const operations = job.operations;
+        if (reason === "invalidated") {
+          const geometry = owner.geometries[3];
+          geometry.setAttribute(
+            "position",
+            geometry.getAttribute("position").clone(),
+          );
+          job.advance(1);
+        } else job.cancel();
+        expect(job.state).toEqual({ status: "cancelled", reason });
+        expect(job.operations).toBe(operations);
+        expect("result" in job.state).toBe(false);
+        expect(request.data).toEqual(before);
+      } finally {
+        owner.close();
+      }
+    },
+  );
+});
+
 describe("CPU per-blade grounding prototype (no renderer/GPU)", () => {
   it("requires an explicit near-four layout and retains two corrections per blade", () => {
     const fine = analyticOwner("isolated-fine-near4"),
@@ -4838,5 +5112,142 @@ describe("actual v4 production-worker contact regressions and per-install CPU re
     expect(a.data.rotScaleHash).toEqual(b.data.rotScaleHash);
     expect(a.data.groundNormals).toEqual(b.data.groundNormals);
     expect(a.dependencies).toEqual(b.dependencies);
+  });
+});
+
+describe("grounding local timing attribution", () => {
+  it("captures frozen bounded local spans using real clocks without resetting seeded work", () => {
+    const f = analyticOwner();
+    try {
+      const request = f.request(f.makeSurface());
+      function* measuredSteps(): Generator<
+        string,
+        GrassBladeGroundingResult,
+        void
+      > {
+        const until = performance.now() + 4;
+        while (performance.now() < until) {
+          /* Actual elapsed work, no clock mock. */
+        }
+        yield "measured_phase_" + "x".repeat(160);
+        return yield* groundGrassBladeSteps(request);
+      }
+      const seed = { operations: 17, activeMs: 5, maximumSliceMs: 4 };
+      const job = new GrassGroundingContinuation(
+        measuredSteps(),
+        () => true,
+        seed,
+      );
+      expect(job.captureTiming()).toEqual({
+        timeBasis: "slice-elapsed-including-preemption",
+        scope: "local-continuation",
+        peakSlice: null,
+        peakClockInterval: null,
+      });
+      job.advance(1);
+      const snapshot = job.captureTiming(),
+        slice = snapshot.peakSlice,
+        interval = snapshot.peakClockInterval;
+      if (!slice || !interval)
+        throw new Error("Missing local clock observations");
+      expect(Object.isFrozen(snapshot)).toBe(true);
+      expect(Object.isFrozen(slice)).toBe(true);
+      expect(Object.isFrozen(interval)).toBe(true);
+      expect(slice.startOperations).toBe(17);
+      expect(slice.endOperations).toBe(18);
+      expect(slice.startPhase).toBeNull();
+      expect(slice.endPhase).toBe(
+        ("measured_phase_" + "x".repeat(160)).slice(0, 128),
+      );
+      expect(slice.elapsedMs).toBe(job.lastSliceMs);
+      expect(slice.elapsedMs).toBeGreaterThanOrEqual(4);
+      expect(job.activeMs).toBe(seed.activeMs + slice.elapsedMs);
+      expect(interval.elapsedMs).toBeLessThanOrEqual(slice.elapsedMs);
+      expect(interval.startOperations).toBeGreaterThanOrEqual(seed.operations);
+      expect(interval.endOperations).toBeLessThanOrEqual(job.operations);
+      expect(
+        interval.endOperations - interval.startOperations,
+      ).toBeLessThanOrEqual(64);
+      const saved = JSON.stringify(snapshot);
+      job.advance(1);
+      expect(JSON.stringify(snapshot)).toBe(saved);
+      const terminal = job.cancel(),
+        finalTiming = job.captureTiming(),
+        finalWork = [job.operations, job.activeMs];
+      expect(job.advance()).toBe(terminal);
+      expect(job.captureTiming()).toEqual(finalTiming);
+      expect([job.operations, job.activeMs]).toEqual(finalWork);
+    } finally {
+      f.close();
+    }
+  });
+
+  it("retains zero-operation guard time and does not invent phase evidence for seed-only maxima", () => {
+    const f = analyticOwner();
+    try {
+      const seed = { operations: 21, activeMs: 250, maximumSliceMs: 200 };
+      const job = new GrassGroundingContinuation(
+        groundGrassBladeSteps(f.request(f.makeSurface())),
+        () => true,
+        seed,
+      );
+      expect(job.advance()).toEqual({
+        status: "failed_budget",
+        reason: "active_cpu",
+      });
+      const timing = job.captureTiming();
+      expect(timing.scope).toBe("local-continuation");
+      expect(timing.peakSlice).toMatchObject({
+        startOperations: 21,
+        endOperations: 21,
+        startPhase: null,
+        endPhase: null,
+      });
+      expect(timing.peakSlice?.elapsedMs).toBe(job.lastSliceMs);
+      expect(timing.peakClockInterval?.endOperations).toBe(21);
+      expect(job.operations).toBe(21);
+      expect(job.activeMs).toBe(seed.activeMs + job.lastSliceMs);
+      expect(job.maximumSliceMs).toBe(
+        Math.max(seed.maximumSliceMs, job.lastSliceMs),
+      );
+    } finally {
+      f.close();
+    }
+  });
+
+  it("bounds clock intervals to 64 resumptions without advancing the core during observation", () => {
+    const f = analyticOwner();
+    try {
+      let yielded = 0;
+      function* countedSteps(): Generator<
+        string,
+        GrassBladeGroundingResult,
+        void
+      > {
+        for (let i = 0; i < 130; i++) {
+          yielded++;
+          yield "counted_" + i;
+        }
+        return yield* groundGrassBladeSteps(f.request(f.makeSurface()));
+      }
+      const job = new GrassGroundingContinuation(countedSteps(), () => true);
+      job.advance(64);
+      const timing = job.captureTiming();
+      expect(job.operations).toBe(yielded);
+      expect(job.operations).toBeLessThanOrEqual(64);
+      expect(timing.peakSlice?.endOperations).toBe(job.operations);
+      expect(timing.peakClockInterval?.endOperations).toBeLessThanOrEqual(
+        job.operations,
+      );
+      expect(timing.peakClockInterval?.elapsedMs).toBeLessThanOrEqual(
+        timing.peakSlice?.elapsedMs ?? -1,
+      );
+      const savedOperations = yielded;
+      job.captureTiming();
+      expect(yielded).toBe(savedOperations);
+      job.cancel();
+    } finally {
+      f.close();
+    }
   });
 });

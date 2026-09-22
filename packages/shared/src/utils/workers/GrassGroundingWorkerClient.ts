@@ -346,6 +346,69 @@ function boundedError(error: unknown): string {
   return String(error instanceof Error ? error.message : error).slice(0, 1024);
 }
 
+function validateTiming(
+  value: unknown,
+  seed: Readonly<GrassGroundingConsumedWork>,
+  consumed: Readonly<GrassGroundingConsumedWork>,
+): void {
+  const timing = record(value, [
+    "timeBasis",
+    "scope",
+    "peakSlice",
+    "peakClockInterval",
+  ]);
+  ensure(
+    timing.timeBasis === "slice-elapsed-including-preemption" &&
+      timing.scope === "local-continuation",
+    "Invalid grounding timing provenance",
+  );
+  // Worker advances have no shared deadline. Each progressing slice consumes
+  // at least one operation; a zero-progress nonterminal slice consumes at
+  // least targetSliceMs. The active cap therefore bounds those extra additions,
+  // plus one terminal slice. Include subtraction/comparison rounding as well.
+  // gamma(n) = n*eps/(1-n*eps) conservatively bounds nonnegative accumulation
+  // error (eps is twice IEEE-754 unit roundoff), without a millisecond epsilon.
+  const roundingSteps =
+    consumed.operations -
+    seed.operations +
+    Math.ceil(jobLimits.maximumActiveMs / jobLimits.targetSliceMs) +
+    3;
+  const relativeRoundoff = roundingSteps * Number.EPSILON;
+  const localRoundoff =
+    consumed.activeMs * (relativeRoundoff / (1 - relativeRoundoff));
+  const localActiveMs = consumed.activeMs - seed.activeMs;
+  const span = (value: unknown, maximumOperations: number): number | null => {
+    if (value === null) return null;
+    const row = record(value, [
+      "elapsedMs",
+      "startOperations",
+      "endOperations",
+      "startPhase",
+      "endPhase",
+    ]);
+    ensure(
+      finite(row.elapsedMs) &&
+        row.elapsedMs <= consumed.activeMs &&
+        row.elapsedMs <= consumed.maximumSliceMs &&
+        row.elapsedMs <= localActiveMs + localRoundoff &&
+        integer(row.startOperations, consumed.operations, seed.operations) &&
+        integer(row.endOperations, consumed.operations, row.startOperations) &&
+        row.endOperations - row.startOperations <= maximumOperations &&
+        (row.startPhase === null || text(row.startPhase, 128)) &&
+        (row.endPhase === null || text(row.endPhase, 128)),
+      "Invalid grounding timing span",
+    );
+    return row.elapsedMs;
+  };
+  const sliceElapsed = span(timing.peakSlice, jobLimits.maximumSliceOperations);
+  const clockElapsed = span(timing.peakClockInterval, jobLimits.clockInterval);
+  ensure(
+    clockElapsed === null ||
+      (sliceElapsed !== null && clockElapsed <= sliceElapsed),
+    "Invalid grounding timing peak relation",
+  );
+}
+
 /** Single-flight transport only. Owner identity, terrain leases, scheduling and
  * numerical/visual qualification remain the caller's responsibility. */
 export class GrassGroundingWorkerClient {
@@ -844,7 +907,15 @@ export class GrassGroundingWorkerClient {
                 ? ["type", "jobId", "generation", "surfaceTokens", "cache"]
                 : null;
     ensure(fields, "Unknown grounding response type");
-    const r = record(value, fields, type.value === "rejected" ? ["error"] : []);
+    const r = record(
+      value,
+      fields,
+      type.value === "rejected"
+        ? ["error"]
+        : type.value === "result"
+          ? ["timing"]
+          : [],
+    );
     ensure(
       r.jobId === slot.jobId && r.generation === slot.generation,
       "Grounding response generation mismatch",
@@ -907,6 +978,14 @@ export class GrassGroundingWorkerClient {
       "Invalid grounding terminal state",
     );
     const status: unknown = stateType.value;
+    if (Object.getOwnPropertyDescriptor(r, "timing")) {
+      ensure(
+        r.type === "result" &&
+          (status === "failed_budget" || status === "failed_input"),
+        "Grounding timing is failure-only",
+      );
+      validateTiming(r.timing, slot.consumed, consumed);
+    }
     if (status === "prepared") {
       const state = record(r.state, ["status", "token", "sourceRevision"]);
       ensure(

@@ -3,6 +3,7 @@ import type {
   GrassBladeGroundingRequest,
   GrassBladeGroundingResult,
   GrassGroundingConsumedWork,
+  GrassGroundingTiming,
 } from "../../systems/shared/world/GrassBladeGrounding";
 import type { RetainedTerrainSurfaceSnapshot } from "../../systems/shared/world/TerrainGridSurface";
 
@@ -140,6 +141,8 @@ export type GrassGroundingWorkerResponse =
         | { status: "failed_input"; error: string }
         | { status: "cancelled"; reason: "caller" | "invalidated" };
       work: GrassGroundingConsumedWork;
+      /** Optional failure-only local continuation observations; not exclusive CPU. */
+      timing?: GrassGroundingTiming;
       /** Terminal progress only; never retains input arrays or error graphs. */
       lastPhase: string | null;
       /** Cumulative counter snapshot at the rebuild/fitting boundary, or null

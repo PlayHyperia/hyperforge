@@ -624,6 +624,7 @@ function failureResponse(row: ActiveFit, error: unknown): ResultResponse {
     },
     lastPhase: row.job.lastPhase,
     terrainRebuildWork: row.terrainRebuildWork,
+    timing: row.job.captureTiming(),
     inputBytes: row.inputBytes,
     derivedBytesReserved: row.derivedBytes,
     resultBytes: 0,
@@ -707,6 +708,9 @@ function packResult(row: ActiveFit): {
     inputBytes: row.inputBytes,
     derivedBytesReserved: row.derivedBytes,
     resultBytes: transfers.length ? resultBytes : 0,
+    ...(output.status === "failed_budget" || output.status === "failed_input"
+      ? { timing: row.job.captureTiming() }
+      : {}),
     cache: cacheReceipt(),
   };
   return { response, transfers };

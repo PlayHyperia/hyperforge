@@ -14,6 +14,7 @@ import {
   GrassGroundingContinuation,
   type GrassBladeGroundingJobState,
   type GrassGroundingConsumedWork,
+  type GrassGroundingTiming,
 } from "./GrassBladeGrounding";
 import {
   GrassGroundingPreparationContinuation,
@@ -90,6 +91,8 @@ export type GrassGroundingFittingFailure = Readonly<{
   submittedWork: Readonly<GrassGroundingConsumedWork>;
   response: AdmissionResponse;
   mergedWork: Readonly<GrassGroundingConsumedWork>;
+  /** Only actual worker-local timing; not the main merge/supervision span. */
+  workerTiming?: GrassGroundingTiming;
 }>;
 
 /** Numerical payload and retained query-index reservations, NOT total JS/GPU
@@ -527,6 +530,19 @@ export class GrassGroundingWorkerCoordinator {
       status: state.status,
       reason: state.status === "failed_budget" ? state.reason : null,
       submittedWork: Object.freeze({ ...pending.seed }),
+      ...(response.timing
+        ? {
+            workerTiming: Object.freeze({
+              ...response.timing,
+              peakSlice: response.timing.peakSlice
+                ? Object.freeze({ ...response.timing.peakSlice })
+                : null,
+              peakClockInterval: response.timing.peakClockInterval
+                ? Object.freeze({ ...response.timing.peakClockInterval })
+                : null,
+            }),
+          }
+        : {}),
       response: Object.freeze({
         status: response.state.status,
         reason:

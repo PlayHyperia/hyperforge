@@ -583,7 +583,7 @@ export function* groundGrassBladeSteps(
     // Half-open ownership matches TerrainVisualManager; allow a sole outer edge.
     let selected: SurfaceEntry | undefined;
     for (const entry of baseEntries) {
-      yield "grounding_operation";
+      yield "endpoint_owner";
       take();
       const b = entry.box;
       if (
@@ -618,18 +618,42 @@ export function* groundGrassBladeSteps(
     face.faceIndex = endpointSample.faceIndex;
     return endpointSample.height;
   };
+  let disjointSurfaceBoxes: boolean | undefined;
   const ensureCoverage = function* (box: TerrainGridBounds) {
+    if (disjointSurfaceBoxes === undefined) {
+      // Owner boxes are fixed job-local snapshots. Certify their disjointness
+      // once; touching boundaries are safe, but any positive overlap retains
+      // the original per-clump overlap/dependency checks below.
+      let disjoint = true;
+      ownerPairs: for (let i = 0; i < entries.length; i++) {
+        const a = entries[i].box;
+        for (let j = i + 1; j < entries.length; j++) {
+          yield "coverage_owner_pair";
+          take();
+          const b = entries[j].box;
+          if (
+            Math.max(a.minX, b.minX) < Math.min(a.maxX, b.maxX) &&
+            Math.max(a.minZ, b.minZ) < Math.min(a.maxZ, b.maxZ)
+          ) {
+            disjoint = false;
+            break ownerPairs;
+          }
+        }
+      }
+      disjointSurfaceBoxes = disjoint;
+    }
     let covered = 0;
     for (let i = 0; i < entries.length; i++) {
       const a = entries[i];
-      yield "grounding_operation";
+      yield "coverage_owner";
       take();
       const area = overlapArea(box, a.box);
       if (!area) continue;
       markSurface(a.surface, "envelope");
       covered += area;
+      if (disjointSurfaceBoxes) continue;
       for (let j = i + 1; j < entries.length; j++) {
-        yield "grounding_operation";
+        yield "coverage_overlap";
         take();
         const b = entries[j];
         const intersection = {
@@ -780,7 +804,7 @@ export function* groundGrassBladeSteps(
       maxZ: Math.max(a.z, b.z),
     };
     for (const entry of baseEntries) {
-      yield "grounding_operation";
+      yield "edge_owner";
       take();
       if (!overlaps(box, entry.box)) continue;
       const surface = entry.surface,
@@ -804,7 +828,7 @@ export function* groundGrassBladeSteps(
             : null;
         if (step === null) break;
         if (!edgeCursor || indexedSteps++ % INDEXED_EDGE_STEP_BATCH_SIZE === 0)
-          yield "grounding_operation";
+          yield "edge_triangle_batch";
         // Broadphase rejection is real work, not an uncharged scan hidden in
         // next(). Retained triangles keep their original order and clipper.
         take();
@@ -1145,7 +1169,7 @@ export function* groundGrassBladeSteps(
         x = ownSurface.centerX + data.offsets[k],
         y = data.offsets[k + 1],
         z = ownSurface.centerZ + data.offsets[k + 2];
-      yield "grounding_operation";
+      yield "anchor_surface";
       take();
       if (
         !ownSurface.sample(data.offsets[k], data.offsets[k + 2], sample) ||
@@ -1191,7 +1215,7 @@ export function* groundGrassBladeSteps(
       baseBounds.minX = baseBounds.minZ = Infinity;
       baseBounds.maxX = baseBounds.maxZ = -Infinity;
       for (let blade = 0; blade < blades; blade++) {
-        yield "grounding_operation";
+        yield "blade_base_bounds";
         for (let side = 0; side < 2; side++) {
           take();
           transform(blade * verticesPerBlade + side, 1, point);
@@ -1203,7 +1227,7 @@ export function* groundGrassBladeSteps(
       }
       baseEntries.length = 0;
       for (const entry of entries) {
-        yield "grounding_operation";
+        yield "blade_base_owner";
         take();
         if (overlaps(baseBounds, entry.box)) baseEntries.push(entry);
       }
@@ -1249,7 +1273,7 @@ export function* groundGrassBladeSteps(
         // evaluate its one distinct point once rather than charging/computing
         // duplicate transforms and idempotent extrema. This does not omit any
         // actual swept vertex or cache geometry across a yielded slice.
-        if (v % verticesPerBlade === 0) yield "grounding_operation";
+        if (v % verticesPerBlade === 0) yield "blade_swept_bounds";
         const blade = Math.floor(v / verticesPerBlade),
           d = (i * blades + blade) * 2;
         const correction =
@@ -1449,6 +1473,44 @@ export type GrassGroundingConsumedWork = {
   maximumSliceMs: number;
 };
 
+export type GrassGroundingTimingSpan = Readonly<{
+  elapsedMs: number;
+  startOperations: number;
+  endOperations: number;
+  startPhase: string | null;
+  endPhase: string | null;
+}>;
+
+/** Local observations only: a handed-off maximum has no local phase evidence.
+ * Existing clock reads bound the samples. They cannot identify GC or off-CPU
+ * time, and never subtract apparent stalls from the real budget. */
+export type GrassGroundingTiming = Readonly<{
+  timeBasis: "slice-elapsed-including-preemption";
+  scope: "local-continuation";
+  peakSlice: GrassGroundingTimingSpan | null;
+  peakClockInterval: GrassGroundingTimingSpan | null;
+}>;
+
+class GroundingTimingSpan {
+  elapsedMs = -1;
+  startOperations = 0;
+  endOperations = 0;
+  startPhase: string | null = null;
+  endPhase: string | null = null;
+
+  capture(): GrassGroundingTimingSpan | null {
+    return this.elapsedMs < 0
+      ? null
+      : Object.freeze({
+          elapsedMs: this.elapsedMs,
+          startOperations: this.startOperations,
+          endOperations: this.endOperations,
+          startPhase: this.startPhase?.slice(0, 128) ?? null,
+          endPhase: this.endPhase?.slice(0, 128) ?? null,
+        });
+  }
+}
+
 /** Admit a detached wire snapshot without invoking user-defined field accessors.
  * Operation counts are integers; clock measurements retain fractional ms. */
 export function validateGrassGroundingConsumedWork(
@@ -1519,6 +1581,13 @@ export type GrassBladeGroundingJobState =
 export class GrassGroundingContinuation {
   private iterator: ReturnType<typeof groundGrassBladeSteps> | null;
   private current: GrassBladeGroundingJobState = { status: "running" };
+  private readonly peakSlice = new GroundingTimingSpan();
+  private readonly peakClockInterval = new GroundingTimingSpan();
+  private clockMarkMs = 0;
+  private clockMarkOperations = 0;
+  private clockMarkPhase: string | null = null;
+  private sliceStartOperations = 0;
+  private sliceStartPhase: string | null = null;
   /** Generator resumptions, not receipt.workUnits (geometric work charges). */
   operations = 0;
   activeMs = 0;
@@ -1550,6 +1619,32 @@ export class GrassGroundingContinuation {
     return this.current;
   }
 
+  /** Snapshot only on demand; two reusable spans, no history or per-tick
+   * allocation. Recording uses the continuation's existing clock reads. */
+  captureTiming(): GrassGroundingTiming {
+    return Object.freeze({
+      timeBasis: "slice-elapsed-including-preemption",
+      scope: "local-continuation",
+      peakSlice: this.peakSlice.capture(),
+      peakClockInterval: this.peakClockInterval.capture(),
+    });
+  }
+
+  private recordClockInterval(now: number): void {
+    const elapsed = now - this.clockMarkMs;
+    const peak = this.peakClockInterval;
+    if (elapsed > peak.elapsedMs) {
+      peak.elapsedMs = elapsed;
+      peak.startOperations = this.clockMarkOperations;
+      peak.endOperations = this.operations;
+      peak.startPhase = this.clockMarkPhase;
+      peak.endPhase = this.lastPhase;
+    }
+    this.clockMarkMs = now;
+    this.clockMarkOperations = this.operations;
+    this.clockMarkPhase = this.lastPhase;
+  }
+
   private close(
     state: GrassBladeGroundingJobState,
   ): GrassBladeGroundingJobState {
@@ -1574,7 +1669,16 @@ export class GrassGroundingContinuation {
   }
 
   private recordSlice(started: number): void {
-    this.lastSliceMs = performance.now() - started;
+    const now = performance.now();
+    this.lastSliceMs = now - started;
+    this.recordClockInterval(now);
+    if (this.lastSliceMs > this.peakSlice.elapsedMs) {
+      this.peakSlice.elapsedMs = this.lastSliceMs;
+      this.peakSlice.startOperations = this.sliceStartOperations;
+      this.peakSlice.endOperations = this.operations;
+      this.peakSlice.startPhase = this.sliceStartPhase;
+      this.peakSlice.endPhase = this.lastPhase;
+    }
     this.activeMs += this.lastSliceMs;
     this.maximumSliceMs = Math.max(this.maximumSliceMs, this.lastSliceMs);
     // Core wall time includes suspension; record only active-slice elapsed time.
@@ -1607,6 +1711,11 @@ export class GrassGroundingContinuation {
       throw new Error("Invalid grounding shared deadline");
     if (this.current.status !== "running") return this.current;
     const started = performance.now();
+    this.clockMarkMs = started;
+    this.clockMarkOperations = this.operations;
+    this.clockMarkPhase = this.lastPhase;
+    this.sliceStartOperations = this.operations;
+    this.sliceStartPhase = this.lastPhase;
     // An owner may hand off only what remains of one shared slice. A later
     // caller deadline can never extend this continuation's standalone limit.
     const deadline = Math.min(
@@ -1631,6 +1740,7 @@ export class GrassGroundingContinuation {
           0
         ) {
           const now = performance.now();
+          this.recordClockInterval(now);
           const elapsed = now - started;
           if (
             this.activeMs + elapsed >=

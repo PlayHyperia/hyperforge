@@ -207,6 +207,7 @@ function assertFittingFailureShape(failure: GrassGroundingFittingFailure) {
     "submittedWork",
     "response",
     "mergedWork",
+    ...(failure.workerTiming ? ["workerTiming"] : []),
   ]);
   keys(failure.response, [
     "status",
@@ -227,7 +228,27 @@ function assertFittingFailureShape(failure: GrassGroundingFittingFailure) {
   keys(failure.response.workBeforeMerge, workKeys);
   if (!failure.response.work) throw new Error("Missing real fitting work");
   keys(failure.response.work, workKeys);
-  assertFrozenScalarDiagnostic(failure, 6);
+  if (failure.workerTiming) {
+    keys(failure.workerTiming, [
+      "timeBasis",
+      "scope",
+      "peakSlice",
+      "peakClockInterval",
+    ]);
+    for (const span of [
+      failure.workerTiming.peakSlice,
+      failure.workerTiming.peakClockInterval,
+    ])
+      if (span)
+        keys(span, [
+          "elapsedMs",
+          "startOperations",
+          "endOperations",
+          "startPhase",
+          "endPhase",
+        ]);
+  }
+  assertFrozenScalarDiagnostic(failure, failure.workerTiming ? 9 : 6);
 }
 
 function assertFrozenScalarDiagnostic(failure: object, maximumObjects: number) {
@@ -781,6 +802,17 @@ describe("actual retained-terrain grounding worker coordinator", () => {
     expect(failure.response.status).toBe(response.state.status);
     expect(failure.response.reason).toBe("grounding_work");
     expect(failure.response.phase).toBe(response.lastPhase);
+    expect(response.timing?.timeBasis).toBe(
+      "slice-elapsed-including-preemption",
+    );
+    expect(failure.workerTiming).toEqual(response.timing);
+    expect(failure.workerTiming).not.toBe(response.timing);
+    expect(failure.workerTiming?.peakSlice).not.toBe(
+      response.timing?.peakSlice,
+    );
+    expect(failure.workerTiming?.peakClockInterval).not.toBe(
+      response.timing?.peakClockInterval,
+    );
     expect(failure.response.jobId).toBe(id);
     expect(failure.response.generation).toBe(response.generation);
     expect(failure.response.work).toEqual(response.work);

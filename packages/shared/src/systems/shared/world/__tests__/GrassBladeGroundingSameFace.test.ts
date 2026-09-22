@@ -125,12 +125,20 @@ function advanceToIndexedYield(
     fixture.request.lod,
     fixture.request.geometryLayout,
   ).bladesPerClump;
-  for (let i = 0; i < blades + 6; i++) {
+  for (const phase of [
+    "anchor_surface",
+    ...Array.from({ length: blades }, () => "blade_base_bounds"),
+    "blade_base_owner",
+    "endpoint_owner",
+    "endpoint_owner",
+    "edge_owner",
+    "edge_triangle_batch",
+  ]) {
     const operations = job.operations;
     job.advance(1);
     expect(job.state.status).toBe("running");
     expect(job.operations).toBe(operations + 1);
-    expect(job.lastPhase).toBe("grounding_operation");
+    expect(job.lastPhase).toBe(phase);
   }
   return { operations: job.operations, workBeforeFirstStep: blades * 2 + 5 };
 }
@@ -375,7 +383,7 @@ describe("same-face shortcut versus independent native25 grounding goldens", () 
           ];
           if (index === 1) request.roadClearance = "per-blade-v1";
         }
-        const rows = fixtures.map((item) => {
+        const rows = fixtures.map((item, fixtureIndex) => {
           const before = sameFaceInputHash(item);
           const reference = drainSameFaceSteps(
             legacyGroundGrassBladeSteps(item.request),
@@ -399,12 +407,25 @@ describe("same-face shortcut versus independent native25 grounding goldens", () 
             if (position.getY(vertex) === 0) zeroHeightVertices++;
           // The overlapping-owner fixture defers after its first complete
           // envelope but before processedClumps is incremented. Preserve all
-          // historical charges except the existing zero-height fade saving.
+          // historical charges except zero-height fade work and the new
+          // coverage proof. The reversed two-owner case skips one pair per
+          // envelope after one proof. The three-owner overlapping case checks
+          // the touching pair, then finds the overlap on its second proof pair
+          // and deliberately keeps the original rejection path.
           const envelopes =
             serial.result.receipt.processedClumps +
             Number(serial.result.status === "defer");
+          const proofPairs =
+            fixtureIndex === 3 ? 2 : fixtureIndex === 2 ? 1 : 0;
+          expect(
+            trace.filter((phase) => phase === "coverage_owner_pair"),
+          ).toHaveLength(proofPairs);
+          const skippedOverlapChecks = fixtureIndex === 2 ? envelopes : 0;
           expect(serial.result.receipt.workUnits).toBe(
-            reference.receipt.workUnits - zeroHeightVertices * envelopes,
+            reference.receipt.workUnits -
+              zeroHeightVertices * envelopes +
+              proofPairs -
+              skippedOverlapChecks,
           );
           if (serial.result.status === "ready" && reference.status === "ready")
             expect(serial.result.bladeVisibility).toEqual(
@@ -626,9 +647,17 @@ describe("same-face shortcut versus independent native25 grounding goldens", () 
                 const step = steps.next();
                 if (step.done) return step.value;
                 if (step.value === "bounded_staging_allocation") staged = true;
-                if (staged && step.value === "grounding_operation") {
+                const isCurrent = ground === groundGrassBladeSteps;
+                if (
+                  staged &&
+                  step.value ===
+                    (isCurrent ? "blade_swept_bounds" : "grounding_operation")
+                ) {
                   groundingYields++;
-                  if (mutate && groundingYields === secondSweptBladeYield) {
+                  if (
+                    mutate &&
+                    groundingYields === (isCurrent ? 2 : secondSweptBladeYield)
+                  ) {
                     request.wind.x = 0.9;
                     request.wind.z = 0.7;
                     mutations++;
@@ -1053,7 +1082,7 @@ describe("bounded indexed edge cursor batches", () => {
         advanceToIndexedYield(job, fixture);
         for (let i = 0; i < batch; i++) job.advance(1);
         expect(job.state.status).toBe("running");
-        expect(job.lastPhase).toBe("grounding_operation");
+        expect(job.lastPhase).toBe("edge_triangle_batch");
         const operations = job.operations,
           { geometry } = fixture.owned[0];
         if (mutation === "position")
