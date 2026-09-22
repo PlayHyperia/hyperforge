@@ -1,0 +1,739 @@
+{
+  "starterTowns": {
+    "central_haven": {
+      "id": "central_haven",
+      "name": "Central Haven",
+      "description": "The central hub of Hyperia, a peaceful sanctuary protected by ancient wards.",
+      "difficultyLevel": 0,
+      "bounds": {
+        "minX": 332,
+        "maxX": 368,
+        "minZ": 302,
+        "maxZ": 338
+      },
+      "biomeType": "starter_town",
+      "safeZone": true,
+      "npcs": [
+        {
+          "id": "bank_clerk",
+          "type": "bank",
+          "position": {
+            "x": 352,
+            "y": 0,
+            "z": 322
+          }
+        },
+        {
+          "id": "shopkeeper",
+          "type": "general_store",
+          "storeId": "general_store",
+          "position": {
+            "x": 344,
+            "y": 0,
+            "z": 324
+          }
+        },
+        {
+          "id": "captain_rowan",
+          "type": "quest_giver",
+          "position": {
+            "x": 362,
+            "y": 0,
+            "z": 332
+          }
+        },
+        {
+          "id": "forester_wilma",
+          "type": "quest_giver",
+          "position": {
+            "x": 364,
+            "y": 0,
+            "z": 312
+          }
+        },
+        {
+          "id": "torvin",
+          "type": "quest_giver",
+          "storeId": "sword_store",
+          "position": {
+            "x": 336,
+            "y": 0,
+            "z": 334
+          }
+        },
+        {
+          "id": "tanner",
+          "type": "tanner",
+          "position": {
+            "x": 340,
+            "y": 0,
+            "z": 334
+          }
+        },
+        {
+          "id": "wizard_zamorin",
+          "type": "magic_store",
+          "storeId": "magic_store",
+          "position": {
+            "x": 340,
+            "y": 0,
+            "z": 310
+          }
+        },
+        {
+          "id": "bowyer",
+          "type": "range_store",
+          "storeId": "range_store",
+          "position": {
+            "x": 335,
+            "y": 0,
+            "z": 325
+          }
+        },
+        {
+          "id": "armorer",
+          "type": "armor_store",
+          "storeId": "armor_store",
+          "position": {
+            "x": 339,
+            "y": 0,
+            "z": 325
+          }
+        },
+        {
+          "id": "crafting_supplier",
+          "type": "crafting_store",
+          "storeId": "crafting_store",
+          "position": {
+            "x": 338,
+            "y": 0,
+            "z": 331
+          }
+        }
+      ],
+      "resources": [
+        {
+          "type": "tree",
+          "position": {
+            "x": 366.5,
+            "y": 0,
+            "z": 322.5
+          },
+          "instanceId": "tree_367_311",
+          "resourceId": "tree_general"
+        }
+      ],
+      "mobSpawns": [],
+      "stations": [
+        {
+          "id": "bank_spawn",
+          "type": "bank",
+          "position": {
+            "x": 348,
+            "y": 0,
+            "z": 318
+          },
+          "bankId": "spawn_bank"
+        },
+        {
+          "id": "furnace_spawn",
+          "type": "furnace",
+          "position": {
+            "x": 335,
+            "y": 0,
+            "z": 336
+          }
+        },
+        {
+          "id": "anvil_spawn",
+          "type": "anvil",
+          "position": {
+            "x": 338,
+            "y": 0,
+            "z": 336
+          }
+        },
+        {
+          "id": "altar_spawn",
+          "type": "altar",
+          "position": {
+            "x": 354,
+            "y": 0,
+            "z": 308
+          }
+        },
+        {
+          "id": "range_spawn",
+          "type": "range",
+          "position": {
+            "x": 336,
+            "y": 0,
+            "z": 317
+          }
+        }
+      ],
+      "flatZones": [
+        {
+          "id": "central_haven_plaza",
+          "excludeGrass": false,
+          "centerX": 350,
+          "centerZ": 320,
+          "width": 36,
+          "depth": 36,
+          "height": 28.419301523097687,
+          "blendRadius": 6
+        }
+      ]
+    }
+  },
+  "level1Areas": {
+    "haven_pond": {
+      "id": "haven_pond",
+      "name": "Haven Pond",
+      "description": "An inland fishing basin with varied sheltered banks, timber landings and fishing for every skill tier.",
+      "difficultyLevel": 0,
+      "bounds": {
+        "minX": 377,
+        "maxX": 443,
+        "minZ": 382,
+        "maxZ": 448
+      },
+      "biomeType": "forest",
+      "safeZone": true,
+      "npcs": [
+        {
+          "id": "fisherman_pete",
+          "type": "quest_giver",
+          "storeId": "fishing_store",
+          "position": {
+            "x": 387,
+            "y": 0,
+            "z": 419
+          }
+        },
+        {
+          "id": "pond_bank_clerk",
+          "name": "Pond Bank Clerk",
+          "type": "bank",
+          "position": {
+            "x": 386,
+            "y": 0,
+            "z": 440
+          }
+        }
+      ],
+      "resources": [],
+      "mobSpawns": [],
+      "fishing": {
+        "enabled": true,
+        "waterBodyId": "haven_pond_water",
+        "spotCount": 14,
+        "spotTypes": [
+          "fishing_spot_net",
+          "fishing_spot_bait",
+          "fishing_spot_fly",
+          "fishing_spot_harpoon",
+          "fishing_spot_cage",
+          "fishing_spot_monkfish",
+          "fishing_spot_shark"
+        ]
+      },
+      "flatZones": [
+        {
+          "id": "haven_pond_floor",
+          "excludeGrass": false,
+          "centerX": 410,
+          "centerZ": 415,
+          "width": 66,
+          "depth": 66,
+          "height": 22.2,
+          "blendRadius": 6,
+          "radialPond": {
+            "bedRadius": 10,
+            "bankInnerRadius": 23,
+            "bankOuterRadius": 27,
+            "bankHeight": 25.7,
+            "shorelineAmplitude": 0.55,
+            "bankSectors": [
+              {
+                "bearing": -2.35,
+                "halfWidth": 1.1,
+                "innerRadius": 14.5,
+                "innerHeight": 25.35,
+                "outerRadius": 20.5,
+                "outerHeight": 26.1
+              },
+              {
+                "bearing": 0,
+                "halfWidth": 1.15,
+                "innerRadius": 24.2,
+                "innerHeight": 24.72,
+                "outerRadius": 28,
+                "outerHeight": 25.8
+              },
+              {
+                "bearing": 1.4,
+                "halfWidth": 0.5,
+                "innerRadius": 18.5,
+                "innerHeight": 25.45,
+                "outerRadius": 23.5,
+                "outerHeight": 25.8
+              },
+              {
+                "bearing": 2.7,
+                "halfWidth": 0.85,
+                "innerRadius": 22.7,
+                "innerHeight": 24.85,
+                "outerRadius": 28.5,
+                "outerHeight": 25.85
+              }
+            ],
+            "bankComposition": {
+              "schemaVersion": 1,
+              "sectors": [
+                {
+                  "sectorIndex": 0,
+                  "surface": "cutbank"
+                },
+                {
+                  "sectorIndex": 1,
+                  "surface": "sedge-shelf",
+                  "groundCover": {
+                    "emergenceHeight": 0.04,
+                    "fullHeight": 0.12
+                  }
+                },
+                {
+                  "sectorIndex": 2,
+                  "surface": "dry-turf",
+                  "groundCover": {
+                    "emergenceHeight": 0.04,
+                    "fullHeight": 0.12
+                  }
+                },
+                {
+                  "sectorIndex": 3,
+                  "surface": "dry-turf",
+                  "groundCover": {
+                    "emergenceHeight": 0.06,
+                    "fullHeight": 0.16
+                  }
+                }
+              ]
+            }
+          }
+        }
+      ],
+      "waterBodies": [
+        {
+          "id": "haven_pond_water",
+          "centerX": 410,
+          "centerZ": 415,
+          "radius": 27,
+          "surfaceY": 24.6
+        }
+      ],
+      "stations": [
+        {
+          "id": "bank_haven_pond",
+          "type": "bank",
+          "position": {
+            "x": 382,
+            "y": 0,
+            "z": 436
+          },
+          "bankId": "haven_pond_bank"
+        }
+      ]
+    },
+    "preparation_training_grounds": {
+      "id": "preparation_training_grounds",
+      "name": "Haven Training Grounds",
+      "description": "A compact preparation ring for gathering resources, training combat, and practicing specialized production skills.",
+      "difficultyLevel": 1,
+      "bounds": {
+        "minX": 314,
+        "maxX": 386,
+        "minZ": 284,
+        "maxZ": 356
+      },
+      "biomeType": "plains",
+      "safeZone": false,
+      "pvpEnabled": false,
+      "agentPreparationArea": true,
+      "deathCustodyPolicy": {
+        "version": 1,
+        "mode": "private_grave",
+        "approvalStatus": "diagnostic_only",
+        "keptItemCount": 3,
+        "ownerProtectionTicks": null,
+        "publicTransitionTicks": null,
+        "terminalExpirationTicks": null,
+        "spectatorCopyKey": "death_custody.preparation_private_grave"
+      },
+      "npcs": [],
+      "resources": [
+        {
+          "type": "tree",
+          "position": {
+            "x": 318.5,
+            "y": 0,
+            "z": 312.5
+          },
+          "instanceId": "tree_373_313",
+          "resourceId": "tree_oak"
+        },
+        {
+          "type": "tree",
+          "position": {
+            "x": 323.5,
+            "y": 0,
+            "z": 288.5
+          },
+          "instanceId": "tree_379_311",
+          "resourceId": "tree_maple"
+        },
+        {
+          "type": "tree",
+          "position": {
+            "x": 381.5,
+            "y": 0,
+            "z": 329.5
+          },
+          "instanceId": "tree_379_304",
+          "resourceId": "tree_mahogany"
+        },
+        {
+          "type": "tree",
+          "position": {
+            "x": 318.5,
+            "y": 0,
+            "z": 344.5
+          },
+          "instanceId": "tree_375_299",
+          "resourceId": "tree_magic"
+        },
+        {
+          "type": "ore",
+          "position": {
+            "x": 336,
+            "y": 0,
+            "z": 344
+          },
+          "resourceId": "ore_copper"
+        },
+        {
+          "type": "ore",
+          "position": {
+            "x": 340,
+            "y": 0,
+            "z": 347
+          },
+          "resourceId": "ore_tin"
+        },
+        {
+          "type": "ore",
+          "position": {
+            "x": 344,
+            "y": 0,
+            "z": 344
+          },
+          "resourceId": "ore_iron"
+        },
+        {
+          "type": "ore",
+          "position": {
+            "x": 352,
+            "y": 0,
+            "z": 346
+          },
+          "resourceId": "ore_coal"
+        },
+        {
+          "type": "ore",
+          "position": {
+            "x": 356,
+            "y": 0,
+            "z": 344
+          },
+          "resourceId": "ore_mithril"
+        },
+        {
+          "type": "ore",
+          "position": {
+            "x": 360,
+            "y": 0,
+            "z": 347
+          },
+          "resourceId": "ore_adamant"
+        },
+        {
+          "type": "ore",
+          "position": {
+            "x": 364,
+            "y": 0,
+            "z": 344
+          },
+          "resourceId": "ore_runite"
+        },
+        {
+          "type": "ore",
+          "position": {
+            "x": 366,
+            "y": 0,
+            "z": 296
+          },
+          "resourceId": "ore_essence"
+        },
+        {
+          "type": "ore",
+          "position": {
+            "x": 370,
+            "y": 0,
+            "z": 297
+          },
+          "resourceId": "ore_essence"
+        },
+        {
+          "type": "ore",
+          "position": {
+            "x": 374,
+            "y": 0,
+            "z": 296
+          },
+          "resourceId": "ore_essence"
+        }
+      ],
+      "mobSpawns": [
+        {
+          "mobId": "goblin",
+          "position": {
+            "x": 378,
+            "y": 0,
+            "z": 336
+          },
+          "spawnRadius": 3,
+          "maxCount": 3
+        },
+        {
+          "mobId": "cow",
+          "position": {
+            "x": 322,
+            "y": 0,
+            "z": 338
+          },
+          "spawnRadius": 3,
+          "maxCount": 3
+        },
+        {
+          "mobId": "dark_wizard",
+          "position": {
+            "x": 378,
+            "y": 0,
+            "z": 296
+          },
+          "spawnRadius": 3,
+          "maxCount": 2
+        },
+        {
+          "mobId": "dark_ranger",
+          "position": {
+            "x": 366,
+            "y": 0,
+            "z": 291
+          },
+          "spawnRadius": 3,
+          "maxCount": 2
+        },
+        {
+          "mobId": "guard",
+          "position": {
+            "x": 350,
+            "y": 0,
+            "z": 349
+          },
+          "spawnRadius": 3,
+          "maxCount": 2
+        },
+        {
+          "mobId": "bandit",
+          "position": {
+            "x": 324,
+            "y": 0,
+            "z": 346
+          },
+          "spawnRadius": 3,
+          "maxCount": 3
+        },
+        {
+          "mobId": "barbarian",
+          "position": {
+            "x": 321,
+            "y": 0,
+            "z": 328
+          },
+          "spawnRadius": 3,
+          "maxCount": 3
+        }
+      ],
+      "stations": [
+        {
+          "id": "air_altar_spawn",
+          "type": "runecrafting_altar",
+          "runeType": "air",
+          "position": {
+            "x": 368,
+            "y": 0,
+            "z": 296
+          }
+        },
+        {
+          "id": "mind_altar_spawn",
+          "type": "runecrafting_altar",
+          "runeType": "mind",
+          "position": {
+            "x": 372,
+            "y": 0,
+            "z": 296
+          }
+        },
+        {
+          "id": "water_altar_spawn",
+          "type": "runecrafting_altar",
+          "runeType": "water",
+          "position": {
+            "x": 379,
+            "y": 0,
+            "z": 298
+          }
+        },
+        {
+          "id": "earth_altar_spawn",
+          "type": "runecrafting_altar",
+          "runeType": "earth",
+          "position": {
+            "x": 379,
+            "y": 0,
+            "z": 305
+          }
+        },
+        {
+          "id": "fire_altar_spawn",
+          "type": "runecrafting_altar",
+          "runeType": "fire",
+          "position": {
+            "x": 373,
+            "y": 0,
+            "z": 308
+          }
+        },
+        {
+          "id": "chaos_altar_spawn",
+          "type": "runecrafting_altar",
+          "runeType": "chaos",
+          "position": {
+            "x": 369,
+            "y": 0,
+            "z": 301
+          }
+        }
+      ],
+      "flatZones": [
+        {
+          "id": "preparation_campus_grade",
+          "excludeGrass": false,
+          "centerX": 350,
+          "centerZ": 320,
+          "width": 72,
+          "depth": 72,
+          "height": 28.419301523097687,
+          "blendRadius": 12
+        }
+      ]
+    }
+  },
+  "level2Areas": {},
+  "level3Areas": {},
+  "specialAreas": {
+    "duel_arena": {
+      "id": "duel_arena",
+      "name": "Duel Arena",
+      "description": "A grand arena where warriors settle disputes through honorable combat. Challenge other players to duels with agreed-upon rules and stakes.",
+      "difficultyLevel": 0,
+      "bounds": {
+        "minX": 316,
+        "maxX": 420,
+        "minZ": 348.5,
+        "maxZ": 433
+      },
+      "biomeType": "desert",
+      "safeZone": true,
+      "pvpEnabled": false,
+      "npcs": [],
+      "resources": [],
+      "mobSpawns": [],
+      "stations": [],
+      "flatZones": [
+        {
+          "id": "southern-meadow-arena-backing",
+          "centerX": 350,
+          "centerZ": 406,
+          "width": 22,
+          "depth": 26,
+          "height": 28.419301523097687,
+          "blendRadius": 24,
+          "blendShape": "rounded",
+          "blendComposition": "smooth-union",
+          "excludeGrass": false
+        },
+        {
+          "id": "southern-meadow-lobby-backing",
+          "centerX": 385,
+          "centerZ": 376,
+          "width": 20,
+          "depth": 18,
+          "height": 28.419301523097687,
+          "blendRadius": 24,
+          "blendShape": "rounded",
+          "blendComposition": "smooth-union",
+          "excludeGrass": false
+        },
+        {
+          "id": "southern-meadow-hospital-backing",
+          "centerX": 345,
+          "centerZ": 376,
+          "width": 14,
+          "depth": 14,
+          "height": 28.419301523097687,
+          "blendRadius": 24,
+          "blendShape": "rounded",
+          "blendComposition": "smooth-union",
+          "excludeGrass": false
+        }
+      ],
+      "arenaFloorDatum": {
+        "height": 28.419301523097687
+      },
+      "duelProtection": "facility-floors-v1"
+    },
+    "arena_grounds": {
+      "id": "arena_grounds",
+      "name": "Arena Grounds",
+      "description": "Safe walking grounds between the arrival court, recovery court and combat ring.",
+      "difficultyLevel": 0,
+      "bounds": {
+        "minX": 315.5,
+        "maxX": 420,
+        "minZ": 348,
+        "maxZ": 433
+      },
+      "biomeType": "desert",
+      "safeZone": true,
+      "pvpEnabled": false,
+      "npcs": [],
+      "resources": [],
+      "mobSpawns": [],
+      "stations": []
+    }
+  }
+}

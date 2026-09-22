@@ -110,24 +110,66 @@
   Full no-emit passes 734 roots / 2,413 source files with stable hashes.
   Selected v9/v10/historical pond runs pass 11/2/1 applicable cases: 441
   applicable core and pond checks in total, excluding repeats and layout skips.
-- [ ] Native95 remains failed. Diagnose native contention/grounding under stable
-  awake host conditions; no GPU retry, changed cap, scheduling, density,
-  resolution, geometry, wind, visual default or AAA approval in this follow-up.
-  Then complete matched overview/arrival/shore comparisons, including the
-  regional palette and existing gentler southern pond headland candidate.
-  The sharp triangular depth boundary in native94 remains an art defect.
-  Source review also distinguishes camera-axis depth from physical water-path
-  thickness: the existing material and submitted sample-0 MSAA depth can
-  accentuate real depth silhouettes; this does not establish a second cause.
-  Keep the next comparison terrain-only; qualify optical contrast and moving
-  edges separately before adding another shader/art variant.
-  Native work is BLOCKED pending confirmation that the Mac is awake, lid open,
-  plugged in and well ventilated after repeated host-suspension incidents.
-  The same host gate persisted through diagnostics, scratch verification and
-  this shoreline review. AC/no recorded warnings alone did not prevent the
-  prior interruption. No capture, shader change or default promotion is made.
-  Continue broader landscape structure, vegetation grouping, natural routes
-  and bank composition; palette changes alone do not finish the island.
+- [x] Resume bounded native terrain-only comparison on the now awake/open-lid,
+  AC-powered host with nominal OS thermal state. Build48 contains nine fresh
+  bundles from 997 pinned inputs, preserving all 145 compiled artifacts.
+  Native97/v9 and native98/v10 each pass the unchanged 90-second startup and
+  four 30-second camera/grass gates on actual Chrome/Metal WebGPU. Both keep
+  the original palette, 1280×720 backing, density, lighting and draw policy;
+  only the southern bank manifest differs. All eight qualifying PNGs and
+  per-view receipts are retained; both captures finish without reported errors.
+- [x] Retain the gentler v10 bank as the next private art baseline. In the
+  matched landing view it removes the conspicuous sharp diagonal water-depth
+  wedge. The overview also becomes rounder and loses some headland character:
+  this is a local shoreline gain, not final pond-shape or whole-island approval.
+  Opposite-dock and pavilion views show no obvious static contact regression.
+  Wind, particles and moving actors are not phase-locked; dynamic edge quality,
+  complete traversal/fishing and sustained performance remain unqualified.
+- [x] Add a bounded private capture host guard: sample OS thermal/AC/lid/display
+  state every five seconds; close only the owned browser on an observed unsafe
+  state, sampling error or excessive interruption. Both runs retain nominal
+  samples and close normally. This is not continuous temperature monitoring,
+  physical ventilation confirmation or proof that every brief sleep/thermal
+  excursion would be detected. No sleep/power/thermal setting was changed.
+  Runtime67/68 stop cleanly, remove their own ephemeral databases and verify
+  the original localhost3333 services/database unchanged.
+- [ ] Native95 remains failed and its cause remains unestablished. Later
+  successful captures do not erase that failure or prove the scratch reuse
+  fixed it. Complete the independent regional-palette comparison, optical
+  water contrast/moving-edge checks and actual performance distributions.
+  Camera-axis depth is not physical water-path thickness; submitted sample-0
+  MSAA depth may accentuate real silhouettes, not proof of another root cause.
+  The previous manual host-confirmation hold is superseded by fresh live
+  readiness and bounded automatic stopping, not by an assumed user reply.
+  Continue broader landform structure, vegetation grouping, natural routes,
+  pavilion/dock finish and shoreline composition. Flat timber and large uniform
+  grass areas remain visibly below the target; no AAA, stream or 2× cinematic
+  acceptance is claimed. The protected playable scene is not silently replaced.
+
+- [x] Test and reject the compact deck-joint normal experiment. Native99/build49
+  passes all four original v10 views, but two reviewers find no worthwhile
+  improvement at the intended camera distance. Restore both source/test files
+  exactly to HEAD; retain the rejected patch, immutable build, PNGs and verdict.
+  The trial passed 22 dock tests, full 734-root/2,413-file no-emit, lint and
+  format checks. Its first run retained one test-helper identity failure.
+  No moving-surface or GPU-cost acceptance was obtained or implied.
+  Runtime69/browser and its ephemeral database are closed/removed; protected
+  human state remains unchanged. Technical success did not justify keeping it.
+- [x] Preserve the exact retained v10 world-area snapshot under versioned
+  `docs/world-art-candidates/pond-southern-bank-v10.world-areas.json`, with
+  its baseline hash, two-byte radius change and non-runtime scope documented.
+  It contains earlier private layout work, not a one-field production patch.
+- [ ] Next water trial: use the existing compact-pond depth sample for bounded
+  unrefracted viewing-ray thickness and exponential attenuation, with a muted
+  deep tint. Keep ordinary/ocean water, geometry, flow, lighting, Fresnel,
+  reflection policy, texture/pass counts and fog unchanged for the comparison.
+  This is a proposed neutral-extinction approximation, not implemented spectral
+  absorption, Snell refraction or complete volumetric scattering. Qualify it
+  at all four v10 cameras, in motion and against measured native frame costs.
+- [ ] Next visible art work: grouped shoreline planting and regional meadow
+  variation; broader natural landforms/routes; readable dock timber joints
+  and pavilion silhouettes. Do not continue imperceptible micro-detail trials
+  while the wide scene remains uniformly grassy and sparsely composed.
 
 Evidence: service-layout `refined-census-*`, `regional-meadow-material01`,
 `regional-meadow-placement-full01`, `regional-meadow-resolver-final01`,
@@ -150,6 +192,19 @@ The official [Three forest generator](https://github.com/mrdoob/three.js/blob/r1
 and [terrain generator](https://github.com/mrdoob/three.js/blob/r186/examples/jsm/generators/TerrainGenerator.js)
 inform coherent regional color groups and placement-independent variation,
 not copied demo populations, replacement resource trees or new noise samples.
+
+Native terrain follow-up: inland-pond `isolated-build48-report.json`,
+`headland-build48-preflight04.json`, `native97/process.json`,
+`native98/process.json`, `runtime67/process.json`, `runtime68/process.json`.
+
+Rejected dock experiment: service-layout `dock-joint-relief-core01/02`,
+`dock-joint-relief-types01`; inland-pond `isolated-build49-report.json`,
+`dock-joint-relief-build49-preflight01.json`, `native99/ART_VERDICT.md`,
+`native99/rejected-dock-joint-relief.patch`, `native99/process.json` and
+`runtime69/process.json`. Proposed water treatment follows the primary
+[PBRT homogeneous transmittance reference](https://pbr-book.org/4ed/Volume_Scattering/Transmittance)
+and [Three r186 view-depth implementation](https://github.com/mrdoob/three.js/blob/r186/src/nodes/display/ViewportDepthNode.js);
+these references do not establish actual appearance or performance.
 
 ## Pond-bank service ground — 2026-09-22
 
